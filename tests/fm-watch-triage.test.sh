@@ -242,6 +242,14 @@ test_decision_fold_correlation_parser() {
     || fail "needs-decision without a space changed the verb"
   [ "$(status_line_verb "merged")" = merged ] \
     || fail "legacy free-text merged line changed the verb"
+  [ "$(status_line_verb "done with setup")" = "done with setup" ] \
+    || fail "legacy colonless multiword line was truncated"
+  [ "$(status_line_verb "working on merged #76")" = "working on merged #76" ] \
+    || fail "legacy colonless working line was truncated"
+  status_is_terminal_verb "done with setup" \
+    && fail "legacy colonless prose became a terminal verb"
+  status_is_captain_relevant "working on merged #76" \
+    || fail "legacy colonless merged prose lost captain relevance"
 
   printf 'needs-decision: choose\nresolved [corr=abc]: decided\n' > "$statusf"
   [ -z "$(status_open_decisions "$statusf")" ] \
@@ -250,6 +258,12 @@ test_decision_fold_correlation_parser() {
     || fail "keyless correlation-only resolution left a scanned open decision"
   [ -z "$(status_open_activities "$statusf")" ] \
     || fail "keyless correlation-only resolution left an open phase"
+
+  printf 'blocked: cannot proceed\nresolved [corr=abc]: unblocked\n' > "$statusf"
+  [ -z "$(status_open_decisions "$statusf")" ] \
+    || fail "correlation-only resolution left a direct blocked decision open"
+  [ -z "$(scan_open_decisions "$state")" ] \
+    || fail "correlation-only resolution left a scanned blocked decision open"
 
   printf 'needs-decision [key=route]: choose\nresolved [corr=abc] [key=route]: decided\n' > "$statusf"
   [ -z "$(status_open_decisions "$statusf")" ] \
