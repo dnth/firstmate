@@ -13,11 +13,16 @@
 #                                        config/secondmate-harness, or empty when absent.
 #        fm-harness.sh secondmate-effort   print the optional EFFORT token from
 #                                        config/secondmate-harness, or empty when absent.
-# config/secondmate-harness format: a single line "<harness> [<model>] [<effort>]",
-# whitespace-separated. A bare "<harness>" (today's format) behaves exactly as before:
-# harness only, no model/effort. Only the first non-empty, non-comment line is parsed.
-# Model/effort come ONLY from this file - config/crew-harness stays a bare adapter
-# name and is never parsed for a model.
+#        fm-harness.sh secondmate-fallback-harness
+#                                        print the configured fallback harness,
+#                                        or empty when absent/default.
+#        fm-harness.sh secondmate-fallback-model
+#                                        print the fallback MODEL token, or empty.
+#        fm-harness.sh secondmate-fallback-effort
+#                                        print the fallback EFFORT token, or empty.
+# config/secondmate-harness and config/secondmate-harness-fallback each use the
+# same single-line "<harness> [<model>] [<effort>]" parser, while the fallback
+# accessors read only the fallback file.
 # Detection layers: verified environment markers first, then process ancestry.
 # Record each newly verified env marker here.
 set -u
@@ -159,12 +164,12 @@ resolve_crew() {
   if [ -z "$crew" ] || [ "$crew" = "default" ]; then detect_own; else echo "$crew"; fi
 }
 
-# Print the first non-empty, non-comment line of config/secondmate-harness
-# (leading/trailing whitespace trimmed), or nothing when the file is absent or
-# holds only blank/comment lines.
-secondmate_line() {
-  local line
-  [ -f "$CONFIG/secondmate-harness" ] || return 0
+# Print the first non-empty, non-comment line of a configured profile file,
+# trimming leading/trailing whitespace. An absent file or one holding only
+# blank/comment lines produces no output.
+configured_profile_line() {
+  local file=$1 line
+  [ -f "$file" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line#"${line%%[![:space:]]*}"}"
     line="${line%"${line##*[![:space:]]}"}"
@@ -174,14 +179,24 @@ secondmate_line() {
     esac
     printf '%s\n' "$line"
     return 0
-  done < "$CONFIG/secondmate-harness"
+  done < "$file"
 }
 
-# Print the 1-based whitespace-separated token (1=harness, 2=model, 3=effort) of
-# the resolved secondmate_line, or nothing if the line or that field is absent.
-secondmate_field() {
-  local idx=$1 line
-  line=$(secondmate_line)
+# Print the first non-empty, non-comment line of config/secondmate-harness.
+secondmate_line() {
+  configured_profile_line "$CONFIG/secondmate-harness"
+}
+
+# Print the first non-empty, non-comment line of
+# config/secondmate-harness-fallback.
+secondmate_fallback_line() {
+  configured_profile_line "$CONFIG/secondmate-harness-fallback"
+}
+
+# Print the 1-based whitespace-separated token (1=harness, 2=model, 3=effort)
+# from a configured profile line, or nothing when that field is absent.
+configured_profile_field() {
+  local line=$1 idx=$2
   [ -n "$line" ] || return 0
   # shellcheck disable=SC2086  # deliberate word-splitting: tokenizing the line into fields
   set -- $line
@@ -192,12 +207,40 @@ secondmate_field() {
   esac
 }
 
+# Print the 1-based whitespace-separated token (1=harness, 2=model, 3=effort)
+# of the resolved secondmate_line, or nothing if the line or that field is absent.
+secondmate_field() {
+  configured_profile_field "$(secondmate_line)" "$1"
+}
+
+# Print the 1-based whitespace-separated token from the fallback profile only.
+secondmate_fallback_field() {
+  configured_profile_field "$(secondmate_fallback_line)" "$1"
+}
+
+secondmate_fallback_harness() {
+  local sm
+  sm=$(secondmate_fallback_field 1)
+  [ -n "$sm" ] && [ "$sm" != "default" ] || return 0
+  printf '%s\n' "$sm"
+}
+
+secondmate_fallback_model() {
+  local sm
+  sm=$(secondmate_fallback_field 1)
+  [ -n "$sm" ] && [ "$sm" != "default" ] || return 0
+  secondmate_fallback_field 2
+}
+
+secondmate_fallback_effort() {
+  local sm
+  sm=$(secondmate_fallback_field 1)
+  [ -n "$sm" ] && [ "$sm" != "default" ] || return 0
+  secondmate_fallback_field 3
+}
+
 # Resolve the harness the PRIMARY uses to launch SECONDMATE agents: a fallback
-# chain config/secondmate-harness -> config/crew-harness -> own. An absent or
-# "default" secondmate-harness token defers to the crew resolution, so an unset
-# secondmate-harness behaves exactly as before this knob existed (a secondmate
-# launched on the crew harness). config/secondmate-harness is the PRIMARY's own
-# setting and is never inherited downstream - secondmates do not spawn secondmates.
+# chain config/secondmate-harness -> config/crew-harness -> own.
 resolve_secondmate() {
   local sm
   sm=$(secondmate_field 1)
@@ -205,8 +248,7 @@ resolve_secondmate() {
 }
 
 # Print the optional model token (2nd field) from config/secondmate-harness, or
-# empty when the harness token is absent/"default" (harness-only file, same as
-# today) or when no model token is present.
+# empty when the harness token is absent/"default" or no model token is present.
 resolve_secondmate_model() {
   local sm
   sm=$(secondmate_field 1)
@@ -214,8 +256,7 @@ resolve_secondmate_model() {
   secondmate_field 2
 }
 
-# Print the optional effort token (3rd field) from config/secondmate-harness,
-# the same way.
+# Print the optional effort token (3rd field) from config/secondmate-harness.
 resolve_secondmate_effort() {
   local sm
   sm=$(secondmate_field 1)
@@ -228,5 +269,8 @@ case "${1:-}" in
   secondmate) resolve_secondmate ;;
   secondmate-model) resolve_secondmate_model ;;
   secondmate-effort) resolve_secondmate_effort ;;
+  secondmate-fallback-harness) secondmate_fallback_harness ;;
+  secondmate-fallback-model) secondmate_fallback_model ;;
+  secondmate-fallback-effort) secondmate_fallback_effort ;;
   *) detect_own ;;
 esac

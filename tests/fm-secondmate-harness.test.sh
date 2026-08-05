@@ -137,6 +137,35 @@ ROWS
   pass "C1 fm-harness.sh secondmate-model/secondmate-effort resolve the optional tokens; bare harness stays empty (backward-compat)"
 }
 
+test_secondmate_fallback_accessors() {
+  local case_dir cfg got_h got_m got_e
+  case_dir="$TMP_ROOT/fallback-accessors"
+  cfg="$case_dir/config"
+  mkdir -p "$cfg"
+
+  got_h=$(FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-fallback-harness)
+  got_m=$(FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-fallback-model)
+  got_e=$(FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-fallback-effort)
+  [ -z "$got_h" ] && [ -z "$got_m" ] && [ -z "$got_e" ] \
+    || fail "fallback accessors should be empty when the file is absent"
+
+  printf 'default\n' > "$cfg/secondmate-harness-fallback"
+  got_h=$(FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-fallback-harness)
+  got_m=$(FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-fallback-model)
+  got_e=$(FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-fallback-effort)
+  [ -z "$got_h" ] && [ -z "$got_m" ] && [ -z "$got_e" ] \
+    || fail "fallback accessors should be empty for the default token"
+
+  printf '# comment\n\nomp openai-codex/gpt-5.6-sol medium\n' > "$cfg/secondmate-harness-fallback"
+  got_h=$(FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-fallback-harness)
+  got_m=$(FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-fallback-model)
+  got_e=$(FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-fallback-effort)
+  [ "$got_h" = omp ] || fail "fallback accessor returned harness '$got_h', expected omp"
+  [ "$got_m" = openai-codex/gpt-5.6-sol ] || fail "fallback accessor returned model '$got_m'"
+  [ "$got_e" = medium ] || fail "fallback accessor returned effort '$got_e', expected medium"
+  pass "C1b fm-harness.sh fallback accessors handle absent, default, and configured profiles"
+}
+
 # ===========================================================================
 # A/C) pi-signed process identity and shared Pi marker behavior
 # ===========================================================================
@@ -606,6 +635,18 @@ SH
   printf '%s\n' "$fakebin"
 }
 
+make_quota_axi() {
+  local fakebin=$1
+  cat > "$fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = "--provider" ] && [ "${3:-}" = "--json" ]; then
+  printf '%s\n' "${FM_TEST_QUOTA_JSON:-}"
+fi
+SH
+  chmod +x "$fakebin/quota-axi"
+}
+
 # spawn_secondmate_capture <world> <id> <home> <launchlog> [extra fm-spawn.sh args...]
 # Same shape as spawn_secondmate but captures the launch command into <launchlog>
 # and does not discard stderr, so callers can assert on both.
@@ -621,6 +662,96 @@ spawn_secondmate_capture() {
     FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$home" "$@" --secondmate
+}
+
+spawn_secondmate_quota_capture() {
+  local world=$1 id=$2 home=$3 launchlog=$4 quota_json=$5 fakebin
+  mkdir -p "$world/home/state" "$world/home/data"
+  fakebin=$(make_launch_capturing_tmux "$world/tmux-$id")
+  make_quota_axi "$fakebin"
+  : > "$launchlog"
+  FM_TEST_QUOTA_JSON=$quota_json \
+    PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$world/home" \
+    FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
+    FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$home" --secondmate
+}
+
+test_secondmate_quota_fallback_selection() {
+  local label quota_json expected_harness expected_model expected_source expected_reason
+  local w sm meta launchlog out status
+  while IFS='^' read -r label quota_json expected_harness expected_model expected_source expected_reason; do
+    [ -n "$label" ] || continue
+    w="$TMP_ROOT/quota-$label"
+    sm="$w/sm"
+    launchlog="$w/launch.log"
+    mkdir -p "$w/home/config"
+    printf 'claude anthropic/claude-opus-4-8 medium\n' > "$w/home/config/secondmate-harness"
+    printf 'codex openai-codex/gpt-5.6-sol medium\n' > "$w/home/config/secondmate-harness-fallback"
+    make_seeded_home "$sm" sm
+    out=$(spawn_secondmate_quota_capture "$w" sm "$sm" "$launchlog" "$quota_json" 2>&1); status=$?
+    expect_code 0 "$status" "$label: spawn failed"$'\n'"$out"
+    meta="$w/home/state/sm.meta"
+    [ "$(meta_field "$meta" harness)" = "$expected_harness" ] \
+      || fail "$label: launched harness '$(meta_field "$meta" harness)', expected '$expected_harness'"
+    [ "$(meta_field "$meta" model)" = "$expected_model" ] \
+      || fail "$label: launched model '$(meta_field "$meta" model)', expected '$expected_model'"
+    [ "$(meta_field "$meta" secondmate_model_source)" = "$expected_source" ] \
+      || fail "$label: model source '$(meta_field "$meta" secondmate_model_source)', expected '$expected_source'"
+    if [ -n "$expected_reason" ]; then
+      [ "$(meta_field "$meta" secondmate_fallback_reason)" = "$expected_reason" ] \
+        || fail "$label: fallback reason '$(meta_field "$meta" secondmate_fallback_reason)', expected '$expected_reason'"
+    else
+      assert_no_grep '^secondmate_fallback_reason=' "$meta" \
+        "$label: primary selection unexpectedly recorded a fallback reason"
+    fi
+  done <<'ROWS'
+usable-runway^{"providers":[{"provider":"claude","state":{"status":"fresh"},"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","effectivePercentRemaining":42}]}}]}^claude^anthropic/claude-opus-4-8^primary^
+provider-unavailable^{"providers":[{"provider":"claude","state":{"status":"auth_required"},"quotaSemantics":{"effectiveAvailability":[]}}]}^codex^openai-codex/gpt-5.6-sol^fallback^provider_unavailable
+quota-exhausted^{"providers":[{"provider":"claude","state":{"status":"fresh"},"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","effectivePercentRemaining":0}]}}]}^codex^openai-codex/gpt-5.6-sol^fallback^quota_exhausted
+model-scope-exhausted^{"providers":[{"provider":"claude","state":{"status":"fresh"},"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","effectivePercentRemaining":42},{"scope":"model:claude-opus-4-8","effectivePercentRemaining":0}]}}]}^codex^openai-codex/gpt-5.6-sol^fallback^quota_exhausted
+unmeasurable-but-usable^{"providers":[{"provider":"claude","state":{"status":"fresh"},"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","effectivePercentRemaining":null}]}}]}^claude^anthropic/claude-opus-4-8^primary^
+ROWS
+
+  w="$TMP_ROOT/quota-backward-compat"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'claude anthropic/claude-opus-4-8 medium\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+  out=$(spawn_secondmate_quota_capture "$w" sm "$sm" "$launchlog" \
+    '{"providers":[{"provider":"claude","state":{"status":"auth_required"}}]}' 2>&1); status=$?
+  expect_code 0 "$status" "backward-compat spawn failed"$'\n'"$out"
+  meta="$w/home/state/sm.meta"
+  [ "$(meta_field "$meta" harness)" = claude ] \
+    || fail "backward-compat: absent fallback file changed the primary harness"
+  [ "$(meta_field "$meta" model)" = anthropic/claude-opus-4-8 ] \
+    || fail "backward-compat: absent fallback file changed the primary model"
+  assert_no_grep '^secondmate_model_source=' "$meta" \
+    "backward-compat: absent fallback file added fallback metadata"
+  pass "C9 secondmate quota fallback stays primary for runway and uncertainty, falls back only for proven triggers, and preserves absent-file behavior"
+}
+
+test_secondmate_quota_does_not_mask_launch_failure() {
+  local w sm launchlog out status
+  w="$TMP_ROOT/quota-launch-failure"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'bogus anthropic/claude-opus-4-8 medium\n' > "$w/home/config/secondmate-harness"
+  printf 'codex openai-codex/gpt-5.6-sol medium\n' > "$w/home/config/secondmate-harness-fallback"
+  make_seeded_home "$sm" sm
+
+  out=$(spawn_secondmate_quota_capture "$w" sm "$sm" "$launchlog" \
+    '{"providers":[{"provider":"claude","state":{"status":"fresh"},"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","effectivePercentRemaining":42}]}}]}' 2>&1); status=$?
+  expect_code 1 "$status" "non-quota launch failure was silently accepted"$'\n'"$out"
+  assert_contains "$out" "no launch template for harness 'bogus'" \
+    "non-quota launch failure did not surface the selected primary"
+  [ ! -s "$launchlog" ] \
+    || fail "non-quota launch failure unexpectedly launched the fallback"
+  pass "C10 secondmate quota fallback does not mask non-quota launch failures"
 }
 
 test_spawn_backend_precedence_over_inherited_config() {
@@ -2453,6 +2584,7 @@ SH
 
 test_harness_resolution
 test_secondmate_model_effort_tokens
+test_secondmate_fallback_accessors
 test_pi_signed_detection_and_session_lock_identity
 test_dash_leading_process_names_are_basename_operands
 test_propagate_lib
@@ -2460,6 +2592,8 @@ test_spawn_split_and_inherit
 test_spawn_backward_compat_crew_fallback
 test_spawn_bare_backward_compat
 test_spawn_explicit_harness_wins
+test_secondmate_quota_fallback_selection
+test_secondmate_quota_does_not_mask_launch_failure
 test_spawn_unverified_secondmate_harness_refused
 test_spawn_backend_precedence_over_inherited_config
 test_spawn_explicit_backend_precedence_over_env_and_inherited_config

@@ -87,13 +87,26 @@ It also writes the required `.fm-secondmate-home` identity marker, which is giti
 
 `config/secondmate-harness` may also pin a concrete model and effort for the secondmate agent, in the SAME file rather than a new one: the format is a single whitespace-separated line `<harness> [<model>] [<effort>]`, with only the first non-empty, non-comment line parsed.
 A bare `<harness>` (today's format, e.g. `claude`) behaves exactly as before - harness only, no model/effort flag - so this is fully backward-compatible.
-`bin/fm-harness.sh secondmate-model` and `bin/fm-harness.sh secondmate-effort` print the optional 2nd/3rd tokens (empty when absent, or when the file is absent/`default`/harness-only); they read only `config/secondmate-harness`, never `config/crew-harness`, which stays a bare adapter name.
+`bin/fm-harness.sh secondmate-model` and `bin/fm-harness.sh secondmate-effort` print the optional 2nd/3rd tokens (empty when absent, or when the file is absent/`default`/harness-only); they read only `config/secondmate-harness`, never `config/crew-harness`.
 For a `--secondmate` spawn, `bin/fm-spawn.sh` populates `MODEL`/`EFFORT` from those tokens only when the harness itself came from the secondmate config path for that spawn.
 For a local route, an explicit per-spawn `--harness` flag, positional harness arg, or raw launch command starts clean on model and effort too, unless the caller also passes explicit `--model` or `--effort`.
-A remote route accepts only a verified harness adapter and refuses a raw launch command at the host boundary.
+A remote route accepts only a verified harness adapter and refuses a raw launch command.
 When the file's tokens do apply, an explicit per-spawn `--model` or `--effort` flag always wins over the file's token for that axis.
 Because this resolves from the file on every spawn, the pin is durable across every respawn (recovery, `/updatefirstmate`, restart) exactly like the harness axis itself - e.g. `config/secondmate-harness` containing `claude opus` keeps a secondmate pinned to Opus even if the primary's own default model later changes.
-This is secondmate-only: crewmate/scout model resolution is untouched by this file.
+
+`config/secondmate-harness-fallback` is an optional local, gitignored profile parsed by the same shared first-line parser.
+Its accessors read only that file and return no value for an absent, empty, comment-only, or `default` profile.
+When no fallback profile is configured, `fm-spawn.sh` performs no quota read and the existing single-profile secondmate resolution remains byte-identical.
+When a fallback profile is configured, the primary profile is resolved first and its model's provider prefix is mapped to the quota-axi provider family before `quota-axi --provider <provider> --json` is read.
+The fallback is selected only when the provider reports `auth_required`, `unavailable`, `error`, or `expired`, or when effective headroom is at or below the single exhaustion floor of zero across the applicable model or account scope.
+Missing, malformed, unresolved, or otherwise unmeasurable quota with usable authentication keeps the primary selected, and any measurable positive runway keeps the primary selected.
+An explicit harness or raw launch command remains authoritative and does not enter this configured primary-to-fallback substitution.
+Selection is predictive only: a later primary launch failure is never retried on the fallback, so non-quota launch failures retain the existing error behavior.
+The selected profile is never written back to either config file, so each spawn and every recovery or liveness relaunch re-evaluates the primary and automatically returns to it when eligible.
+When the fallback is selected, metadata records `secondmate_model_source=fallback` and `secondmate_fallback_reason=provider_unavailable|quota_exhausted`; when the configured fallback is not selected it records `secondmate_model_source=primary`.
+The `harness=`, `model=`, and `effort=` metadata fields always describe the profile actually launched.
+
+This is secondmate-only: crewmate/scout model resolution is untouched by these files.
 
 This section is the single owner of the secondmate sync and inherited-local-material propagation contract; `AGENTS.md` sections 3 and 4 point here.
 Before a local launch, `fm-spawn.sh --secondmate` locally fast-forwards the home to the primary firstmate checkout's current default-branch commit when it is safe; dirty, diverged, or in-flight homes launch unchanged with a warning.

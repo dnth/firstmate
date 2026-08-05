@@ -54,3 +54,79 @@ fm_quota_axi_compatible() {
   [ "$minor" -eq "$min_minor" ] || return 1
   [ "$patch" -ge "$min_patch" ]
 }
+
+# The automatic secondmate fallback triggers only at this exhaustion floor.
+# Keep it at zero unless the captain explicitly changes the contract.
+FM_QUOTA_SECONDMATE_EXHAUSTION_FLOOR=${FM_QUOTA_SECONDMATE_EXHAUSTION_FLOOR:-0}
+
+# Map a model identifier's provider prefix to quota-axi's provider family.
+# Unknown or unscoped identifiers produce no provider so uncertainty keeps the
+# configured primary eligible.
+fm_quota_provider_for_model() {
+  local model=$1 prefix
+  case "$model" in
+    */*) prefix=${model%%/*} ;;
+    *) return 0 ;;
+  esac
+  case "$prefix" in
+    anthropic|claude) printf '%s\n' claude ;;
+    openai|openai-codex|codex) printf '%s\n' codex ;;
+    grok|xai) printf '%s\n' grok ;;
+    kimi|moonshot) printf '%s\n' kimi ;;
+    *) printf '%s\n' "$prefix" ;;
+  esac
+}
+
+# Print the predictive secondmate fallback reason for <model>, or nothing when
+# quota data is missing, unresolved, usable, or otherwise cannot prove a trigger.
+fm_quota_secondmate_fallback_reason() {
+  local model=$1 provider json
+  [ -n "$model" ] || return 0
+  provider=$(fm_quota_provider_for_model "$model")
+  [ -n "$provider" ] || return 0
+  command -v quota-axi >/dev/null 2>&1 || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  json=$(quota-axi --provider "$provider" --json 2>/dev/null) || return 0
+  printf '%s\n' "$json" | jq -r \
+    --arg provider "$provider" \
+    --arg model "$model" \
+    --argjson floor "$FM_QUOTA_SECONDMATE_EXHAUSTION_FLOOR" '
+      def unusable:
+        . == "auth_required" or
+        . == "unavailable" or
+        . == "error" or
+        . == "expired";
+      def numeric:
+        if type == "number" then .
+        elif type == "string" then (tonumber? // empty)
+        else empty
+        end;
+      .providers[]?
+      | select(.provider == $provider)
+      | if ([
+          .status?,
+          .authStatus?,
+          .state.status?,
+          .state.authStatus?,
+          .auth.status?
+        ] | any(.[]; unusable)) then
+          "provider_unavailable"
+        else
+          (.quotaSemantics.effectiveAvailability // .effectiveAvailability // []) as $effective
+          | ([ $effective[]?
+                | select(.scope == ("model:" + $model)
+                         or .scope == ("model:" + ($model | split("/")[-1])))
+              ]) as $model_scope
+          | (if ($model_scope | length) > 0
+             then $model_scope
+             else [ $effective[]? | select(.scope == "all_models") ]
+             end) as $scope
+          | [ $scope[]?.effectivePercentRemaining? | numeric ] as $headroom
+          | if any($headroom[]; . <= $floor) then
+              "quota_exhausted"
+            else
+              empty
+            end
+        end
+    ' 2>/dev/null
+}
