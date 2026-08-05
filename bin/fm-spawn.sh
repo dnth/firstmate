@@ -212,9 +212,9 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
-# shellcheck source=bin/fm-backend.sh
 # shellcheck source=bin/fm-quota-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
+# shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-omp-process-lib.sh
 . "$SCRIPT_DIR/fm-omp-process-lib.sh"
