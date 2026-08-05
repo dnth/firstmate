@@ -234,7 +234,9 @@ An explicit `--model` or `--effort` overrides the matching token from `config/se
 Remote secondmate routes accept verified harness adapters only and reject raw launch commands.
 `config/secondmate-harness-fallback` is an optional local, gitignored file with the same first-line `<harness> [<model>] [<effort>]` format, and its accessors read only that file.
 When the fallback file is absent, empty, or `default`, secondmate resolution remains unchanged and does not read quota.
-When it is present, `fm-spawn.sh` checks the configured primary model's provider through `quota-axi` and selects the fallback only for an unusable provider or exhausted effective headroom; unresolved but usable quota keeps the primary.
+When it is present, `fm-spawn.sh` resolves the configured primary harness/model provider and credential surface through `quota-axi` and selects the fallback only for proven source or provider unavailability or effective headroom exhausted at the fixed zero boundary; unresolved but usable quota keeps the primary.
+Explicit harness and model overrides bypass substitution, while an explicit effort remains authoritative across a configured fallback selection.
+Remote routes evaluate the two configured profiles on the launch host and return the actual complete profile for parent metadata.
 The fallback is evaluated anew on every spawn and is never written into either config file.
 The fallback-resolution contract, including metadata fields and recovery behavior, is owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
 When `config/crew-dispatch.json` exists, crewmate and scout spawns require an explicit resolved harness instead of automatically falling back to `config/crew-harness`.

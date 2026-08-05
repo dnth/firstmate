@@ -2,7 +2,7 @@
 # Host-local lifecycle control for the remote secondmate home selected by fm-on.
 #
 # Usage:
-#   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> herdr [traceparent]
+#   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> herdr <fallback-harness|-> <fallback-model|-> <fallback-effort|-> [traceparent]
 #   fm-remote-secondmate-control.sh state <id>
 #   fm-remote-secondmate-control.sh route <id>
 #   fm-remote-secondmate-control.sh send <id> <message>
@@ -46,6 +46,8 @@ REMOTE_HERDR_SESSION=fm-remote
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-quota-axi-lib.sh
+. "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -109,15 +111,23 @@ state_value() { # <id>; prints recovery-grade state
 }
 
 print_route() { # <id>
-  local id=$1 harness traceparent
+  local id=$1 harness model effort model_source fallback_reason traceparent
   remote_endpoint_require "$id"
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
+  model=$(fm_meta_get "$REMOTE_ENDPOINT_META" model)
+  effort=$(fm_meta_get "$REMOTE_ENDPOINT_META" effort)
+  model_source=$(fm_meta_get "$REMOTE_ENDPOINT_META" secondmate_model_source)
+  fallback_reason=$(fm_meta_get "$REMOTE_ENDPOINT_META" secondmate_fallback_reason)
   traceparent=$(fm_meta_get "$REMOTE_ENDPOINT_META" traceparent)
   printf 'schema=fm-remote-secondmate-control.v1\n'
   printf 'backend=%s\n' "$REMOTE_ENDPOINT_BACKEND"
   printf 'target=%s\n' "$REMOTE_ENDPOINT_TARGET"
   printf 'herdr_session=%s\n' "$REMOTE_HERDR_SESSION"
   printf 'harness=%s\n' "$harness"
+  printf 'model=%s\n' "$model"
+  printf 'effort=%s\n' "$effort"
+  [ -z "$model_source" ] || printf 'secondmate_model_source=%s\n' "$model_source"
+  [ -z "$fallback_reason" ] || printf 'secondmate_fallback_reason=%s\n' "$fallback_reason"
   [ -z "$traceparent" ] || printf 'traceparent=%s\n' "$traceparent"
 }
 
@@ -133,13 +143,16 @@ cmd_route() {
 }
 
 cmd_launch() {
-  local id=$1 harness=$2 model=$3 effort=$4 selected_backend=$5 traceparent=${6:-}
-  local current meta out herdr_session
+  local id=$1 harness=$2 model=$3 effort=$4 selected_backend=$5
+  local fallback_harness=$6 fallback_model=$7 fallback_effort=$8 traceparent=${9:-}
+  local current meta out herdr_session reason model_source tmp
 
   validate_id "$id"
   validate_home "$id"
   case "$harness" in claude|codex|opencode|pi|pi-signed|grok|kimi) ;; *) die "unverified remote secondmate harness: $harness" ;; esac
   case "$effort" in -|low|medium|high|xhigh|max) ;; *) die "invalid remote secondmate effort: $effort" ;; esac
+  case "$fallback_harness" in -|claude|codex|opencode|pi|pi-signed|grok|kimi) ;; *) die "unverified remote secondmate fallback harness: $fallback_harness" ;; esac
+  case "$fallback_effort" in -|low|medium|high|xhigh|max) ;; *) die "invalid remote secondmate fallback effort: $fallback_effort" ;; esac
   # Herdr is required on this host, not merely preferred: its server belongs to
   # the GUI login session, so the endpoint survives every SSH disconnection that
   # a remote route depends on. bin/fm-remote-doctor.sh is the readiness owner.
@@ -162,6 +175,21 @@ cmd_launch() {
       *) die "remote endpoint state is $current; refusing duplicate launch" ;;
     esac
   fi
+  model_source=
+  reason=
+  if [ "$fallback_harness" != - ]; then
+    model_source=primary
+    reason=$(fm_quota_secondmate_fallback_reason "$harness" "${model#-}" || true)
+    case "$reason" in
+      provider_unavailable|quota_exhausted)
+        harness=$fallback_harness
+        model=$fallback_model
+        effort=$fallback_effort
+        model_source=fallback
+        ;;
+      *) reason= ;;
+    esac
+  fi
   ARGS=("$id" "$TARGET_HOME" --secondmate --harness "$harness" --backend "$selected_backend")
   [ "$model" = - ] || ARGS+=(--model "$model")
   [ "$effort" = - ] || ARGS+=(--effort "$effort")
@@ -177,6 +205,13 @@ cmd_launch() {
   herdr_session=$(fm_meta_get "$meta" herdr_session)
   [ "$herdr_session" = "$REMOTE_HERDR_SESSION" ] \
     || die "remote launch recorded Herdr session '${herdr_session:-missing}', expected '$REMOTE_HERDR_SESSION'"
+  if [ -n "$model_source" ]; then
+    tmp="$meta.tmp.$$"
+    awk '$0 !~ /^secondmate_model_source=/ && $0 !~ /^secondmate_fallback_reason=/' "$meta" > "$tmp"
+    printf 'secondmate_model_source=%s\n' "$model_source" >> "$tmp"
+    [ "$model_source" != fallback ] || printf 'secondmate_fallback_reason=%s\n' "$reason" >> "$tmp"
+    mv -f -- "$tmp" "$meta"
+  fi
   print_route "$id"
 }
 
@@ -287,7 +322,7 @@ cmd_retire() {
 }
 
 case "${1:-}" in
-  launch) shift; [ "$#" -ge 5 ] && [ "$#" -le 6 ] || usage; cmd_launch "$@" ;;
+  launch) shift; [ "$#" -ge 8 ] && [ "$#" -le 9 ] || usage; cmd_launch "$@" ;;
   state) shift; [ "$#" -eq 1 ] || usage; validate_id "$1"; validate_home "$1"; state_value "$1" ;;
   route) shift; [ "$#" -eq 1 ] || usage; cmd_route "$1" ;;
   send) shift; [ "$#" -eq 2 ] || usage; cmd_send "$@" ;;

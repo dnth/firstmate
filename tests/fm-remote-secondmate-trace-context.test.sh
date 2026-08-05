@@ -90,6 +90,22 @@ esac
 exit 0
 SH
 chmod +x "$REMOTE_ROOT/bin/tmux"
+cat > "$REMOTE_ROOT/bin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+root=$(CDPATH='' cd "$(dirname "$0")/.." && pwd -P)
+mode=$(cat "$root/.test-quota-mode" 2>/dev/null || printf 'primary\n')
+if [ "${1:-}" = auth ] && [ "${2:-}" = --json ]; then
+  printf '%s\n' '{"auth":[{"provider":"claude","sources":[{"source":"oauth-file","status":"available"}]}]}'
+elif [ "${1:-}" = --provider ] && [ "${3:-}" = --json ]; then
+  if [ "$mode" = fallback ]; then
+    printf '%s\n' '{"providers":[{"provider":"claude","state":{"status":"auth_required"}}]}'
+  else
+    printf '%s\n' '{"providers":[{"provider":"claude","state":{"status":"fresh"},"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","effectivePercentRemaining":42}]}}]}'
+  fi
+fi
+SH
+chmod +x "$REMOTE_ROOT/bin/quota-axi"
 install_remote_herdr_fixture "$REMOTE_ROOT" "$HERDR_STATE" "$HERDR_LOG" \
   "$TMP_ROOT/herdr-send-fail" "$TMP_ROOT/herdr.sock"
 git -C "$REMOTE_ROOT" init -q -b main
@@ -252,6 +268,31 @@ fm_trace_context_valid "$SECOND_TP" \
 [ "$(remote_injected_traceparent)" = "$SECOND_TP" ] \
   || fail "the second remote route's pane must receive its own recorded carrier"
 pass "boundary: each remote-routed second mate roots its own trace and never adopts the spawning environment's carrier"
+
+# --- quota selection belongs to the launch host and route echoes reality ----
+printf 'claude opus medium\n' > "$PARENT/config/secondmate-harness"
+printf 'codex gpt-5.6-sol high\n' > "$PARENT/config/secondmate-harness-fallback"
+printf 'fallback\n' > "$REMOTE_ROOT/.test-quota-mode"
+reset_remote_herdr_fixture "$HERDR_STATE"
+remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null 2>&1 \
+  || fail "remote quota fallback spawn failed"
+[ "$(sed -n 's/^harness=//p' "$PARENT/state/ios.meta")" = codex ] \
+  || fail "parent quota state overrode the remote launch host's fallback decision"
+[ "$(sed -n 's/^model=//p' "$PARENT/state/ios.meta")" = gpt-5.6-sol ] \
+  || fail "parent did not record the model selected on the remote launch host"
+[ "$(sed -n 's/^secondmate_fallback_reason=//p' "$PARENT/state/ios.meta")" = provider_unavailable ] \
+  || fail "parent did not record the remote launch host's fallback reason"
+
+printf 'primary\n' > "$REMOTE_ROOT/.test-quota-mode"
+remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null 2>&1 \
+  || fail "remote live-endpoint reuse failed"
+[ "$(sed -n 's/^harness=//p' "$PARENT/state/ios.meta")" = codex ] \
+  || fail "live remote reuse misreported the requested harness instead of the running harness"
+[ "$(sed -n 's/^model=//p' "$PARENT/state/ios.meta")" = gpt-5.6-sol ] \
+  || fail "live remote reuse misreported the requested model instead of the running model"
+[ "$(sed -n 's/^secondmate_model_source=//p' "$PARENT/state/ios.meta")" = fallback ] \
+  || fail "live remote reuse lost the running endpoint's selection source"
+pass "remote fallback uses launch-host quota and reuses only the reported running profile"
 
 # --- the enablement flag is one allowlist, shared by both remote ends --------
 # config/trace-context reaches the remote home only because the sender and the

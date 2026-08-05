@@ -642,6 +642,8 @@ make_quota_axi() {
 set -u
 if [ "${1:-}" = "--provider" ] && [ "${3:-}" = "--json" ]; then
   printf '%s\n' "${FM_TEST_QUOTA_JSON:-}"
+elif [ "${1:-}" = "auth" ] && [ "${2:-}" = "--json" ]; then
+  printf '%s\n' "${FM_TEST_QUOTA_AUTH_JSON:-}"
 fi
 SH
   chmod +x "$fakebin/quota-axi"
@@ -671,12 +673,13 @@ spawn_secondmate_quota_capture() {
   make_quota_axi "$fakebin"
   : > "$launchlog"
   FM_TEST_QUOTA_JSON=$quota_json \
+    FM_TEST_QUOTA_AUTH_JSON=${FM_TEST_QUOTA_AUTH_JSON:-} \
     PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$world/home" \
     FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
     FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$home" --secondmate
+    "$ROOT/bin/fm-spawn.sh" "$id" "$home" "${@:6}" --secondmate
 }
 
 test_secondmate_quota_fallback_selection() {
@@ -732,6 +735,82 @@ ROWS
   assert_no_grep '^secondmate_model_source=' "$meta" \
     "backward-compat: absent fallback file added fallback metadata"
   pass "C9 secondmate quota fallback stays primary for runway and uncertainty, falls back only for proven triggers, and preserves absent-file behavior"
+}
+
+test_secondmate_quota_profile_and_override_boundaries() {
+  local w sm meta launchlog out status quota auth
+
+  quota='{"providers":[{"provider":"claude","state":{"status":"auth_required"}}]}'
+  w="$TMP_ROOT/quota-alias"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'claude opus medium\n' > "$w/home/config/secondmate-harness"
+  printf 'codex gpt-5.6-sol medium\n' > "$w/home/config/secondmate-harness-fallback"
+  make_seeded_home "$sm" sm
+  out=$(spawn_secondmate_quota_capture "$w" sm "$sm" "$launchlog" "$quota" 2>&1); status=$?
+  expect_code 0 "$status" "alias profile spawn failed"$'\n'"$out"
+  meta="$w/home/state/sm.meta"
+  [ "$(meta_field "$meta" harness)" = codex ] || fail "Claude alias did not resolve through its harness provider"
+
+  w="$TMP_ROOT/quota-auth-source"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'kimi kimi-for-coding medium\n' > "$w/home/config/secondmate-harness"
+  printf 'codex gpt-5.6-sol medium\n' > "$w/home/config/secondmate-harness-fallback"
+  make_seeded_home "$sm" sm
+  quota='{"providers":[{"provider":"kimi","state":{"status":"fresh"},"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","effectivePercentRemaining":42}]}}]}'
+  auth='{"auth":[{"provider":"kimi","sources":[{"source":"pi:kimi-coding","status":"available"},{"source":"kimi-code-cli","status":"expired"}]}]}'
+  out=$(FM_TEST_QUOTA_AUTH_JSON="$auth" spawn_secondmate_quota_capture "$w" sm "$sm" "$launchlog" "$quota" 2>&1); status=$?
+  expect_code 0 "$status" "credential-source spawn failed"$'\n'"$out"
+  meta="$w/home/state/sm.meta"
+  [ "$(meta_field "$meta" harness)" = codex ] || fail "standalone Kimi ignored its expired CLI credential"
+  [ "$(meta_field "$meta" secondmate_fallback_reason)" = provider_unavailable ] \
+    || fail "standalone Kimi credential failure recorded the wrong reason"
+
+  w="$TMP_ROOT/quota-fixed-floor"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'claude opus medium\n' > "$w/home/config/secondmate-harness"
+  printf 'codex gpt-5.6-sol medium\n' > "$w/home/config/secondmate-harness-fallback"
+  make_seeded_home "$sm" sm
+  quota='{"providers":[{"provider":"claude","state":{"status":"fresh"},"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","effectivePercentRemaining":42}]}}]}'
+  out=$(FM_QUOTA_SECONDMATE_EXHAUSTION_FLOOR=50 \
+    spawn_secondmate_quota_capture "$w" sm "$sm" "$launchlog" "$quota" 2>&1); status=$?
+  expect_code 0 "$status" "fixed-floor spawn failed"$'\n'"$out"
+  meta="$w/home/state/sm.meta"
+  [ "$(meta_field "$meta" harness)" = claude ] || fail "ambient exhaustion floor changed the fixed zero boundary"
+
+  w="$TMP_ROOT/quota-explicit-model"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'claude opus medium\n' > "$w/home/config/secondmate-harness"
+  printf 'codex gpt-5.6-sol medium\n' > "$w/home/config/secondmate-harness-fallback"
+  make_seeded_home "$sm" sm
+  quota='{"providers":[{"provider":"claude","state":{"status":"auth_required"}}]}'
+  out=$(spawn_secondmate_quota_capture "$w" sm "$sm" "$launchlog" "$quota" --model sonnet 2>&1); status=$?
+  expect_code 0 "$status" "explicit-model spawn failed"$'\n'"$out"
+  meta="$w/home/state/sm.meta"
+  [ "$(meta_field "$meta" harness)" = claude ] || fail "explicit model crossed onto the fallback harness"
+  [ "$(meta_field "$meta" model)" = sonnet ] || fail "explicit model was not preserved"
+  assert_no_grep '^secondmate_fallback_reason=' "$meta" "explicit model unexpectedly entered fallback substitution"
+
+  w="$TMP_ROOT/quota-explicit-effort"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'claude opus medium\n' > "$w/home/config/secondmate-harness"
+  printf 'codex gpt-5.6-sol low\n' > "$w/home/config/secondmate-harness-fallback"
+  make_seeded_home "$sm" sm
+  out=$(spawn_secondmate_quota_capture "$w" sm "$sm" "$launchlog" "$quota" --effort xhigh 2>&1); status=$?
+  expect_code 0 "$status" "explicit-effort fallback spawn failed"$'\n'"$out"
+  meta="$w/home/state/sm.meta"
+  [ "$(meta_field "$meta" harness)" = codex ] || fail "explicit effort prevented configured fallback selection"
+  [ "$(meta_field "$meta" effort)" = xhigh ] || fail "fallback selection replaced the explicit effort"
+  pass "C9b secondmate fallback resolves aliases and credential surfaces while preserving explicit models and the zero floor"
 }
 
 test_secondmate_quota_does_not_mask_launch_failure() {
@@ -2593,6 +2672,7 @@ test_spawn_backward_compat_crew_fallback
 test_spawn_bare_backward_compat
 test_spawn_explicit_harness_wins
 test_secondmate_quota_fallback_selection
+test_secondmate_quota_profile_and_override_boundaries
 test_secondmate_quota_does_not_mask_launch_failure
 test_spawn_unverified_secondmate_harness_refused
 test_spawn_backend_precedence_over_inherited_config

@@ -356,8 +356,9 @@ fi
 
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
-  local model_source fallback_reason fallback_harness fallback_model fallback_effort reason
-  local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
+  local fallback_harness fallback_model fallback_effort
+  local remote_backend remote_target remote_harness remote_model remote_effort remote_model_source remote_fallback_reason
+  local remote_herdr_session registry_lock remote_lock remote_generation
   local remote_traceparent remote_recorded_traceparent
   local -a launch_args
   id=${POS[0]:-}
@@ -409,36 +410,40 @@ spawn_remote_secondmate() {
       [ -n "$effort" ] || effort=-
     fi
   fi
-  model_source=
-  fallback_reason=
   fallback_harness=
   if [ -z "$HARNESS_ARG" ] && [ -z "$positional" ]; then
     fallback_harness=$("$SCRIPT_DIR/fm-harness.sh" secondmate-fallback-harness)
-    if [ -n "$fallback_harness" ]; then
-      model_source=primary
-      reason=$(fm_quota_secondmate_fallback_reason "${model#-}" || true)
-      case "$reason" in
-        provider_unavailable|quota_exhausted)
-          fallback_model=$("$SCRIPT_DIR/fm-harness.sh" secondmate-fallback-model)
-          fallback_effort=$("$SCRIPT_DIR/fm-harness.sh" secondmate-fallback-effort)
-          harness=$fallback_harness
-          model_source=fallback
-          fallback_reason=$reason
-          if [ "$MODEL_SET" -eq 0 ]; then
-            if [ -n "$fallback_model" ]; then model=$fallback_model; else model=-; fi
-          fi
-          if [ "$EFFORT_SET" -eq 0 ]; then
-            effort=-
-            if [ -n "$fallback_effort" ]; then
-              case "$fallback_effort" in
-                low|medium|high|xhigh|max) effort=$fallback_effort ;;
-                *) echo "warning: config/secondmate-harness-fallback effort token '$fallback_effort' is not one of low, medium, high, xhigh, max; ignoring" >&2 ;;
-              esac
-            fi
-          fi
-          ;;
-      esac
+    [ "$MODEL_SET" -eq 0 ] || fallback_harness=
+  fi
+  fallback_model=-
+  fallback_effort=-
+  if [ -n "$fallback_harness" ]; then
+    case "$fallback_harness" in
+      claude|codex|opencode|pi|pi-signed|grok|kimi) ;;
+      *)
+        fm_lock_release "$registry_lock" || true
+        fm_lock_release "$SPAWN_TASK_LOCK" || true
+        echo "error: remote secondmate fallback requires a verified harness adapter, not: $fallback_harness" >&2
+        return 1
+        ;;
+    esac
+    fallback_model=$("$SCRIPT_DIR/fm-harness.sh" secondmate-fallback-model)
+    [ -n "$fallback_model" ] || fallback_model=-
+    if [ "$EFFORT_SET" -eq 1 ]; then
+      fallback_effort=$effort
+    else
+      fallback_effort=$("$SCRIPT_DIR/fm-harness.sh" secondmate-fallback-effort)
+      [ -n "$fallback_effort" ] || fallback_effort=-
     fi
+    case "$fallback_effort" in
+      -|low|medium|high|xhigh|max) ;;
+      *)
+        echo "warning: config/secondmate-harness-fallback effort token '$fallback_effort' is not one of low, medium, high, xhigh, max; ignoring" >&2
+        fallback_effort=-
+        ;;
+    esac
+  else
+    fallback_harness=-
   fi
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi) ;;
@@ -545,7 +550,8 @@ spawn_remote_secondmate() {
   if [ "$(fm_trace_context_session_effective "$STATE/.trace-context-effective")" = on ]; then
     remote_traceparent=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CONFIG" "$meta" || true)
   fi
-  launch_args=("$id" "$harness" "$model" "$effort" "$backend")
+  launch_args=("$id" "$harness" "$model" "$effort" "$backend" \
+    "$fallback_harness" "$fallback_model" "$fallback_effort")
   [ -z "$remote_traceparent" ] || launch_args+=("$remote_traceparent")
   if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh launch \
     "${launch_args[@]}" < /dev/null 2>&1); then
@@ -566,6 +572,10 @@ spawn_remote_secondmate() {
   remote_backend=$(printf '%s\n' "$out" | sed -n 's/^backend=//p' | tail -1)
   remote_target=$(printf '%s\n' "$out" | sed -n 's/^target=//p' | tail -1)
   remote_harness=$(printf '%s\n' "$out" | sed -n 's/^harness=//p' | tail -1)
+  remote_model=$(printf '%s\n' "$out" | sed -n 's/^model=//p' | tail -1)
+  remote_effort=$(printf '%s\n' "$out" | sed -n 's/^effort=//p' | tail -1)
+  remote_model_source=$(printf '%s\n' "$out" | sed -n 's/^secondmate_model_source=//p' | tail -1)
+  remote_fallback_reason=$(printf '%s\n' "$out" | sed -n 's/^secondmate_fallback_reason=//p' | tail -1)
   remote_herdr_session=$(printf '%s\n' "$out" | sed -n 's/^herdr_session=//p' | tail -1)
   if [ "$remote_backend" != herdr ]; then
     fm_lock_release "$remote_lock" || true
@@ -574,7 +584,15 @@ spawn_remote_secondmate() {
     echo "error: remote launch returned backend '${remote_backend:-missing}', expected herdr; preserving the remote route for reconciliation" >&2
     return 1
   fi
-  [ -n "$remote_target" ] && [ "$remote_harness" = "$harness" ] || {
+  case "$remote_harness" in claude|codex|opencode|pi|pi-signed|grok|kimi) ;; *) remote_harness= ;; esac
+  case "$remote_effort" in default|low|medium|high|xhigh|max) ;; *) remote_effort= ;; esac
+  case "$remote_model_source:$remote_fallback_reason" in
+    :|primary:) ;;
+    fallback:provider_unavailable|fallback:quota_exhausted) ;;
+    *) remote_model_source=invalid ;;
+  esac
+  [ -n "$remote_target" ] && [ -n "$remote_harness" ] && [ -n "$remote_model" ] \
+    && [ -n "$remote_effort" ] && [ "$remote_model_source" != invalid ] || {
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -602,15 +620,15 @@ spawn_remote_secondmate() {
     echo "endpoint_task_id=$id"
     echo "worktree=$home"
     echo "project=$root"
-    echo "harness=$harness"
+    echo "harness=$remote_harness"
     echo "kind=secondmate"
     echo "mode=secondmate"
     echo "yolo=off"
     echo "tasktmp="
-    echo "model=${model#-}"
-    echo "effort=${effort#-}"
-    [ -z "$model_source" ] || echo "secondmate_model_source=$model_source"
-    [ "$model_source" != fallback ] || echo "secondmate_fallback_reason=$fallback_reason"
+    echo "model=$remote_model"
+    echo "effort=$remote_effort"
+    [ -z "$remote_model_source" ] || echo "secondmate_model_source=$remote_model_source"
+    [ "$remote_model_source" != fallback ] || echo "secondmate_fallback_reason=$remote_fallback_reason"
     echo "home=$home"
     echo "projects=$(secondmate_registry_field "$DATA/secondmates.md" "$id" projects)"
     echo "remote_host=$host"
@@ -628,7 +646,7 @@ spawn_remote_secondmate() {
     echo "error: remote secondmate $id launched, but its reply source could not be armed; endpoint metadata is preserved" >&2
     return 1
   fi
-  echo "spawned $id harness=$harness kind=secondmate mode=secondmate yolo=off window=remote:$id worktree=$home remote=$host backend=$remote_backend"
+  echo "spawned $id harness=$remote_harness kind=secondmate mode=secondmate yolo=off window=remote:$id worktree=$home remote=$host backend=$remote_backend"
   return 0
 }
 
@@ -1042,7 +1060,11 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
     SM_FALLBACK_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" secondmate-fallback-harness)
     if [ -n "$SM_FALLBACK_HARNESS" ]; then
       SECONDMATE_MODEL_SOURCE=primary
-      SM_FALLBACK_REASON=$(fm_quota_secondmate_fallback_reason "$MODEL" || true)
+      if [ "$MODEL_SET" -eq 0 ]; then
+        SM_FALLBACK_REASON=$(fm_quota_secondmate_fallback_reason "$HARNESS" "$MODEL" || true)
+      else
+        SM_FALLBACK_REASON=
+      fi
       case "$SM_FALLBACK_REASON" in
         provider_unavailable|quota_exhausted)
           SM_FALLBACK_MODEL=$("$SCRIPT_DIR/fm-harness.sh" secondmate-fallback-model)
