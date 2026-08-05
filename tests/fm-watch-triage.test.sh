@@ -224,6 +224,75 @@ EOF
   pass "classifier primitives: keyed decisions and activity phases, captain relevance, window-to-task, and overrides"
 }
 
+test_decision_fold_correlation_parser() {
+  local dir state statusf open activity
+  dir=$(make_case classify-correlation); state="$dir/state"; statusf="$state/correlation.status"
+
+  [ "$(status_line_verb "resolved [corr=abc]: decided")" = resolved ] \
+    || fail "correlation-only token changed the resolved verb"
+  [ "$(status_line_verb "resolved [key=route]: decided")" = resolved ] \
+    || fail "key-only token changed the resolved verb"
+  [ "$(status_line_verb "resolved [key=route] [corr=abc]: decided")" = resolved ] \
+    || fail "key-then-correlation tokens changed the resolved verb"
+  [ "$(status_line_verb "resolved [corr=abc] [key=route]: decided")" = resolved ] \
+    || fail "correlation-then-key tokens changed the resolved verb"
+  [ "$(status_line_verb "resolved: decided")" = resolved ] \
+    || fail "token-free resolved line changed the verb"
+  [ "$(status_line_verb "  needs-decision: choose")" = needs-decision ] \
+    || fail "needs-decision without a space changed the verb"
+  [ "$(status_line_verb "merged")" = merged ] \
+    || fail "legacy free-text merged line changed the verb"
+  [ "$(status_line_verb "done with setup")" = "done with setup" ] \
+    || fail "legacy colonless multiword line was truncated"
+  [ "$(status_line_verb "working on merged #76")" = "working on merged #76" ] \
+    || fail "legacy colonless working line was truncated"
+  status_is_terminal_verb "done with setup" \
+    && fail "legacy colonless prose became a terminal verb"
+  status_is_captain_relevant "working on merged #76" \
+    || fail "legacy colonless merged prose lost captain relevance"
+  [ "$(status_line_verb "working on merged https://x/pull/76")" = "working on merged https" ] \
+    || fail "legacy pre-colon URL prose was reclassified"
+  [ "$(status_line_verb "done with setup https://x")" = "done with setup https" ] \
+    || fail "legacy terminal-looking URL prose was reclassified"
+  status_is_captain_relevant "working on merged https://x/pull/76" \
+    || fail "legacy merged URL prose lost captain relevance"
+  status_is_terminal_verb "done with setup https://x" \
+    && fail "legacy done URL prose became a terminal verb"
+
+  printf 'needs-decision: choose\nresolved [corr=abc]: decided\n' > "$statusf"
+  [ -z "$(status_open_decisions "$statusf")" ] \
+    || fail "keyless correlation-only resolution left a direct open decision"
+  [ -z "$(scan_open_decisions "$state")" ] \
+    || fail "keyless correlation-only resolution left a scanned open decision"
+  [ -z "$(status_open_activities "$statusf")" ] \
+    || fail "keyless correlation-only resolution left an open phase"
+
+  printf 'blocked: cannot proceed\nresolved [corr=abc]: unblocked\n' > "$statusf"
+  [ -z "$(status_open_decisions "$statusf")" ] \
+    || fail "correlation-only resolution left a direct blocked decision open"
+  [ -z "$(scan_open_decisions "$state")" ] \
+    || fail "correlation-only resolution left a scanned blocked decision open"
+
+  printf 'needs-decision [key=route]: choose\nresolved [corr=abc] [key=route]: decided\n' > "$statusf"
+  [ -z "$(status_open_decisions "$statusf")" ] \
+    || fail "keyed correlation-only resolution left an open decision"
+
+  printf 'needs-decision [key=route]: choose\ndone [key=other]: unrelated\n' > "$statusf"
+  open=$(status_open_decisions "$statusf")
+  printf '%s\n' "$open" | grep -F $'route\tneeds-decision\t' >/dev/null \
+    || fail "an unrelated keyed terminal event closed the open decision"
+  printf '%s\n' "$open" | grep -F $'other\t' >/dev/null \
+    && fail "an unrelated keyed terminal event became an open decision"
+  open=$(scan_open_decisions "$state")
+  printf '%s\n' "$open" | grep -F $'correlation\troute\tneeds-decision\t' >/dev/null \
+    || fail "directory scan lost the still-open keyed decision"
+
+  printf 'working: phase\nresolved [corr=abc]: phase complete\n' > "$statusf"
+  activity=$(status_open_activities "$statusf")
+  [ -z "$activity" ] || fail "phase fold did not close on correlation-only resolution"
+  pass "correlation-only resolution closes keyless and keyed decisions across both folds"
+}
+
 # crew_is_provably_working: the absorb-only-when-provably-working predicate. It is
 # benign (absorb) ONLY when fm-crew-state.sh reports the crew as working from an
 # actively-running pipeline step (source run-step) or a busy pane (source pane);
@@ -1837,6 +1906,7 @@ test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives
+test_decision_fold_correlation_parser
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
