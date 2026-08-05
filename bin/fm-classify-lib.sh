@@ -160,7 +160,7 @@ status_is_paused_or_captain_held() {  # <status-line>
 # The three parsers are pure reads of a single line. A prefix is structured
 # only when every token after its first word is a space-delimited [key=...] or
 # [corr=...] token; otherwise trimmed pre-colon text retains legacy semantics.
-status_line_verb() {  # <status-line> -> leading verb word
+status_line_verb() {  # <status-line> -> structured verb or legacy pre-colon text
   local v=$1 prefix first rest token structured=0
   prefix=${v%%:*}
   prefix=${prefix#"${prefix%%[![:space:]]*}"}
