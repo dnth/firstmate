@@ -96,16 +96,16 @@ Because this resolves from the file on every spawn, the pin is durable across ev
 
 `config/secondmate-harness-fallback` is an optional local, gitignored profile parsed by the same shared first-line parser.
 Its accessors read only that file and return no value for an absent, empty, comment-only, or `default` profile.
-When no fallback profile is configured, `fm-spawn.sh` performs no quota read and the existing single-profile secondmate resolution remains byte-identical.
+When no fallback profile is configured, `fm-spawn.sh` performs no quota read and the existing single-profile secondmate behavior remains unchanged.
 When a fallback profile is configured, the complete primary harness/model profile resolves its quota-axi provider family, including standalone-harness model aliases such as `claude opus` and qualified models on multi-provider harnesses.
 Known standalone and Pi credential surfaces are then checked through `quota-axi auth --json`, so an unusable selected source is not masked by another healthy source in the same provider family.
 An absent or indeterminate source mapping is uncertainty rather than proof of unavailability.
-The fallback is selected only when the selected credential surface or provider reports `auth_required`, `unavailable`, `error`, `expired`, or `missing`, or when applicable model or account effective headroom is at or below the fixed exhaustion boundary of zero.
-Missing, malformed, unresolved, or otherwise unmeasurable quota with usable authentication keeps the primary selected, and any measurable positive runway keeps the primary selected.
+The fallback is selected only when the selected credential surface reports `auth_required`, `unavailable`, `error`, `expired`, or `missing`, when the provider reports one of those states other than `missing`, or when applicable effective headroom is at or below the fixed exhaustion boundary of zero.
+Missing, malformed, unresolved, or otherwise unmeasurable quota with usable authentication keeps the primary selected, and any measurable positive effective headroom keeps the primary selected.
 An explicit harness, model, or raw launch command remains authoritative and does not enter configured primary-to-fallback substitution; an explicit effort remains unchanged if fallback selection replaces the configured harness/model pair.
 Selection is predictive only: a later primary launch failure is never retried on the fallback, so non-quota launch failures retain the existing error behavior.
 The selected profile is never written back to either config file, so each spawn and every recovery or liveness relaunch re-evaluates the primary and automatically returns to it when eligible.
-When the fallback is selected, metadata records `secondmate_model_source=fallback` and `secondmate_fallback_reason=provider_unavailable|quota_exhausted`; when the configured fallback is not selected it records `secondmate_model_source=primary`.
+When configured primary-to-fallback selection runs and chooses the fallback, metadata records `secondmate_model_source=fallback` and `secondmate_fallback_reason=provider_unavailable|quota_exhausted`; when that selection runs and keeps the primary it records `secondmate_model_source=primary`.
 The `harness=`, `model=`, and `effort=` metadata fields always describe the profile actually launched.
 A remote route sends both configured profiles to the launch host, makes the quota and authentication decision there, and returns the complete actual profile plus selection metadata for the parent record.
 If an already-live remote endpoint is reused, its stored complete profile is returned unchanged instead of relabeling it as the newly requested profile.
