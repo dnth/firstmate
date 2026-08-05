@@ -158,9 +158,9 @@ status_is_paused_or_captain_held() {  # <status-line>
 # A line with no token uses the key "default", preserving the historical
 # one-open-decision-per-task behavior (a bare "resolved:" closes "default").
 # The three parsers are pure reads of a single line; for structured lines the
-# verb parser takes the first whitespace-delimited token before the colon so
-# optional tokens cannot alter the leading verb. Colonless legacy lines retain
-# their historical trim-only behavior.
+# verb parser takes the first whitespace-delimited token before the colon, so
+# optional [corr=...] and [key=...] tokens in either order cannot alter the
+# leading verb. Colonless legacy lines retain their historical trim-only behavior.
 status_line_verb() {  # <status-line> -> leading verb word
   local v=$1
   case "$v" in
