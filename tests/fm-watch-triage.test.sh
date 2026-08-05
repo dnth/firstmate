@@ -250,6 +250,14 @@ test_decision_fold_correlation_parser() {
     && fail "legacy colonless prose became a terminal verb"
   status_is_captain_relevant "working on merged #76" \
     || fail "legacy colonless merged prose lost captain relevance"
+  [ "$(status_line_verb "working on merged https://x/pull/76")" = "working on merged https" ] \
+    || fail "legacy pre-colon URL prose was reclassified"
+  [ "$(status_line_verb "done with setup https://x")" = "done with setup https" ] \
+    || fail "legacy terminal-looking URL prose was reclassified"
+  status_is_captain_relevant "working on merged https://x/pull/76" \
+    || fail "legacy merged URL prose lost captain relevance"
+  status_is_terminal_verb "done with setup https://x" \
+    && fail "legacy done URL prose became a terminal verb"
 
   printf 'needs-decision: choose\nresolved [corr=abc]: decided\n' > "$statusf"
   [ -z "$(status_open_decisions "$statusf")" ] \
