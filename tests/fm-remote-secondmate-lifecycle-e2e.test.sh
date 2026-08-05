@@ -212,6 +212,8 @@ case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
     printf 'backend=tmux\n'
     printf 'target=firstmate:fm-ios\n'
     printf 'harness=codex\n'
+    printf 'model=default\n'
+    printf 'effort=default\n'
     exit 0
     ;;
   launch-default-session-route:fm-remote-secondmate-control.sh:*)
@@ -221,6 +223,8 @@ case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
     printf 'target=default:w1:p2\n'
     printf 'herdr_session=default\n'
     printf 'harness=codex\n'
+    printf 'model=default\n'
+    printf 'effort=default\n'
     exit 0
     ;;
   provision-block-fail:fm-remote-home-provision.sh:*)
@@ -543,7 +547,7 @@ if remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios
   || remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh capture ios >/dev/null 2>&1 \
   || remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh observe ios >/dev/null 2>&1 \
   || remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh retire ios --force >/dev/null 2>&1 \
-  || remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios codex - - herdr >/dev/null 2>&1; then
+  || remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios codex - - herdr - - - >/dev/null 2>&1; then
   fail "legacy default-session metadata remained operational"
 fi
 cmp -s "$TMP_ROOT/herdr-before-default-session.log" "$HERDR_LOG" \
@@ -601,7 +605,7 @@ EOF
 cp "$remote_route_meta" "$TMP_ROOT/remote-ios-legacy-before-refusal.meta"
 printf 'fm-ios|%s\n' "$REMOTE_HOME" > "$TMUX_STATE"
 set +e
-remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios codex - - herdr \
+remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios codex - - herdr - - - \
   > "$TMP_ROOT/legacy-alive-refusal.out" 2>&1
 legacy_alive_rc=$?
 set -e

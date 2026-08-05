@@ -54,3 +54,129 @@ fm_quota_axi_compatible() {
   [ "$minor" -eq "$min_minor" ] || return 1
   [ "$patch" -ge "$min_patch" ]
 }
+
+# Map a provider identifier to quota-axi's provider family.
+fm_quota_provider_family() {
+  local prefix=$1
+  case "$prefix" in
+    anthropic|claude) printf '%s\n' claude ;;
+    openai|openai-codex|codex) printf '%s\n' codex ;;
+    grok|xai) printf '%s\n' grok ;;
+    kimi|kimi-coding|moonshot) printf '%s\n' kimi ;;
+    *) printf '%s\n' "$prefix" ;;
+  esac
+}
+
+# Resolve the provider family from the complete launch profile. Standalone
+# harnesses own their aliases; multi-provider harnesses require a qualified
+# model and otherwise remain unresolved.
+fm_quota_provider_for_profile() {
+  local harness=$1 model=$2 prefix
+  case "$harness" in
+    claude) printf '%s\n' claude; return 0 ;;
+    codex) printf '%s\n' codex; return 0 ;;
+    grok) printf '%s\n' grok; return 0 ;;
+    kimi) printf '%s\n' kimi; return 0 ;;
+  esac
+  case "$model" in
+    */*) prefix=${model%%/*} ;;
+    *) return 0 ;;
+  esac
+  fm_quota_provider_family "$prefix"
+}
+
+# Print the quota-axi authentication sources used by a profile when that
+# credential surface is known. No output means source-level status is unresolved.
+fm_quota_auth_sources_for_profile() {
+  local harness=$1 model=$2 provider
+  provider=$(fm_quota_provider_for_profile "$harness" "$model")
+  case "$harness:$provider" in
+    claude:claude) printf '%s\n' oauth-file keychain ;;
+    codex:codex) printf '%s\n' auth-json cli-rpc ;;
+    grok:grok) printf '%s\n' auth-json ;;
+    kimi:kimi) printf '%s\n' kimi-code-cli ;;
+    pi:grok|pi-signed:grok) printf '%s\n' pi:xai ;;
+    pi:kimi|pi-signed:kimi) printf '%s\n' pi:kimi-coding ;;
+    pi:codex|pi-signed:codex) printf '%s\n' auth-json cli-rpc ;;
+  esac
+}
+
+# Print the predictive secondmate fallback reason for <harness> <model>, or nothing when
+# quota data is missing, unresolved, usable, or otherwise cannot prove a trigger.
+fm_quota_secondmate_fallback_reason() {
+  local harness=$1 model=$2 provider sources auth_json auth_reason json
+  provider=$(fm_quota_provider_for_profile "$harness" "$model")
+  [ -n "$provider" ] || return 0
+  command -v quota-axi >/dev/null 2>&1 || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  sources=$(fm_quota_auth_sources_for_profile "$harness" "$model")
+  if [ -n "$sources" ]; then
+    auth_json=$(quota-axi auth --json 2>/dev/null || true)
+    auth_reason=$(printf '%s\n' "$auth_json" | jq -r \
+      --arg provider "$provider" \
+      --arg sources "$sources" '
+        def unusable:
+          . == "auth_required" or
+          . == "unavailable" or
+          . == "error" or
+          . == "expired" or
+          . == "missing";
+        (if type == "array" then . else (.auth // []) end)
+        | map(select(.provider == $provider))
+        | [.[].sources[]? | select(.source as $source | ($sources | split("\n") | index($source)) != null)] as $matched
+        | if ($matched | length) == 0 or any($matched[]; .status == "available") then
+            empty
+          elif all($matched[]; (.status | unusable)) then
+            "provider_unavailable"
+          else
+            empty
+          end
+      ' 2>/dev/null || true)
+    [ "$auth_reason" != provider_unavailable ] || {
+      printf '%s\n' "$auth_reason"
+      return 0
+    }
+  fi
+  json=$(quota-axi --provider "$provider" --json 2>/dev/null) || return 0
+  printf '%s\n' "$json" | jq -r \
+    --arg provider "$provider" \
+    --arg model "$model" '
+      def unusable:
+        . == "auth_required" or
+        . == "unavailable" or
+        . == "error" or
+        . == "expired";
+      def numeric:
+        if type == "number" then .
+        elif type == "string" then (tonumber? // empty)
+        else empty
+        end;
+      .providers[]?
+      | select(.provider == $provider)
+      | if ([
+          .status?,
+          .authStatus?,
+          .state.status?,
+          .state.authStatus?,
+          .auth.status?
+        ] | any(.[]; unusable)) then
+          "provider_unavailable"
+        else
+          (.quotaSemantics.effectiveAvailability // .effectiveAvailability // []) as $effective
+          | ([ $effective[]?
+                | select(.scope == ("model:" + $model)
+                         or .scope == ("model:" + ($model | split("/")[-1])))
+              ]) as $model_scope
+          | (if ($model_scope | length) > 0
+             then $model_scope
+             else [ $effective[]? | select(.scope == "all_models") ]
+             end) as $scope
+          | [ $scope[]?.effectivePercentRemaining? | numeric ] as $headroom
+          | if any($headroom[]; . <= 0) then
+              "quota_exhausted"
+            else
+              empty
+            end
+        end
+    ' 2>/dev/null
+}

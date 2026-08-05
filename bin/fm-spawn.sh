@@ -99,6 +99,12 @@
 #   the file governs the spawn, its model/effort tokens are re-resolved on every
 #   respawn exactly like the harness axis, and explicit --model/--effort flags
 #   still win over the file's tokens.
+#   When config/secondmate-harness-fallback is present, the primary model's
+#   provider quota is checked before launch and the fallback profile is selected
+#   only for an unusable provider or effective headroom at the named zero floor.
+#   Unresolved but usable quota stays primary, and launch failures are never
+#   retried on the fallback; source/reason fields are recorded only for a
+#   configured fallback decision.
 #   A --secondmate spawn also propagates the primary's declared inherited local
 #   material, so the secondmate's OWN crewmates inherit primary config and the
 #   secondmate receives the primary's read-only shared captain-preference file
@@ -206,6 +212,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
+# shellcheck source=bin/fm-quota-axi-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-omp-process-lib.sh
@@ -232,6 +240,8 @@ KIND=ship
 HARNESS_ARG=
 MODEL=
 EFFORT=
+SECONDMATE_MODEL_SOURCE=
+SECONDMATE_FALLBACK_REASON=
 BACKEND_ARG=
 MODE=
 YOLO=
@@ -346,7 +356,9 @@ fi
 
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
-  local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
+  local fallback_harness fallback_model fallback_effort
+  local remote_backend remote_target remote_harness remote_model remote_effort remote_model_source remote_fallback_reason
+  local remote_herdr_session registry_lock remote_lock remote_generation
   local remote_traceparent remote_recorded_traceparent
   local -a launch_args
   id=${POS[0]:-}
@@ -386,15 +398,6 @@ spawn_remote_secondmate() {
   else
     harness=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
   fi
-  case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi) ;;
-    *)
-      fm_lock_release "$registry_lock" || true
-      fm_lock_release "$SPAWN_TASK_LOCK" || true
-      echo "error: remote secondmate spawn requires a verified harness adapter, not a raw launch command: $harness" >&2
-      return 1
-      ;;
-  esac
   model=${MODEL:--}
   effort=${EFFORT:--}
   if [ -z "$HARNESS_ARG" ] && [ -z "$positional" ]; then
@@ -407,6 +410,50 @@ spawn_remote_secondmate() {
       [ -n "$effort" ] || effort=-
     fi
   fi
+  fallback_harness=
+  if [ -z "$HARNESS_ARG" ] && [ -z "$positional" ]; then
+    fallback_harness=$("$SCRIPT_DIR/fm-harness.sh" secondmate-fallback-harness)
+    [ "$MODEL_SET" -eq 0 ] || fallback_harness=
+  fi
+  fallback_model=-
+  fallback_effort=-
+  if [ -n "$fallback_harness" ]; then
+    case "$fallback_harness" in
+      claude|codex|opencode|pi|pi-signed|grok|kimi) ;;
+      *)
+        fm_lock_release "$registry_lock" || true
+        fm_lock_release "$SPAWN_TASK_LOCK" || true
+        echo "error: remote secondmate fallback requires a verified harness adapter, not: $fallback_harness" >&2
+        return 1
+        ;;
+    esac
+    fallback_model=$("$SCRIPT_DIR/fm-harness.sh" secondmate-fallback-model)
+    [ -n "$fallback_model" ] || fallback_model=-
+    if [ "$EFFORT_SET" -eq 1 ]; then
+      fallback_effort=$effort
+    else
+      fallback_effort=$("$SCRIPT_DIR/fm-harness.sh" secondmate-fallback-effort)
+      [ -n "$fallback_effort" ] || fallback_effort=-
+    fi
+    case "$fallback_effort" in
+      -|low|medium|high|xhigh|max) ;;
+      *)
+        echo "warning: config/secondmate-harness-fallback effort token '$fallback_effort' is not one of low, medium, high, xhigh, max; ignoring" >&2
+        fallback_effort=-
+        ;;
+    esac
+  else
+    fallback_harness=-
+  fi
+  case "$harness" in
+    claude|codex|opencode|pi|pi-signed|grok|kimi) ;;
+    *)
+      fm_lock_release "$registry_lock" || true
+      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      echo "error: remote secondmate spawn requires a verified harness adapter, not a raw launch command: $harness" >&2
+      return 1
+      ;;
+  esac
   # A remote second mate always runs on Herdr: its server belongs to the host's
   # own GUI login session, so the endpoint outlives every SSH connection that
   # supervises it. bin/fm-remote-doctor.sh gates that host on the same
@@ -503,7 +550,8 @@ spawn_remote_secondmate() {
   if [ "$(fm_trace_context_session_effective "$STATE/.trace-context-effective")" = on ]; then
     remote_traceparent=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CONFIG" "$meta" || true)
   fi
-  launch_args=("$id" "$harness" "$model" "$effort" "$backend")
+  launch_args=("$id" "$harness" "$model" "$effort" "$backend" \
+    "$fallback_harness" "$fallback_model" "$fallback_effort")
   [ -z "$remote_traceparent" ] || launch_args+=("$remote_traceparent")
   if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh launch \
     "${launch_args[@]}" < /dev/null 2>&1); then
@@ -524,6 +572,10 @@ spawn_remote_secondmate() {
   remote_backend=$(printf '%s\n' "$out" | sed -n 's/^backend=//p' | tail -1)
   remote_target=$(printf '%s\n' "$out" | sed -n 's/^target=//p' | tail -1)
   remote_harness=$(printf '%s\n' "$out" | sed -n 's/^harness=//p' | tail -1)
+  remote_model=$(printf '%s\n' "$out" | sed -n 's/^model=//p' | tail -1)
+  remote_effort=$(printf '%s\n' "$out" | sed -n 's/^effort=//p' | tail -1)
+  remote_model_source=$(printf '%s\n' "$out" | sed -n 's/^secondmate_model_source=//p' | tail -1)
+  remote_fallback_reason=$(printf '%s\n' "$out" | sed -n 's/^secondmate_fallback_reason=//p' | tail -1)
   remote_herdr_session=$(printf '%s\n' "$out" | sed -n 's/^herdr_session=//p' | tail -1)
   if [ "$remote_backend" != herdr ]; then
     fm_lock_release "$remote_lock" || true
@@ -532,7 +584,15 @@ spawn_remote_secondmate() {
     echo "error: remote launch returned backend '${remote_backend:-missing}', expected herdr; preserving the remote route for reconciliation" >&2
     return 1
   fi
-  [ -n "$remote_target" ] && [ "$remote_harness" = "$harness" ] || {
+  case "$remote_harness" in claude|codex|opencode|pi|pi-signed|grok|kimi) ;; *) remote_harness= ;; esac
+  case "$remote_effort" in default|low|medium|high|xhigh|max) ;; *) remote_effort= ;; esac
+  case "$remote_model_source:$remote_fallback_reason" in
+    :|primary:) ;;
+    fallback:provider_unavailable|fallback:quota_exhausted) ;;
+    *) remote_model_source=invalid ;;
+  esac
+  [ -n "$remote_target" ] && [ -n "$remote_harness" ] && [ -n "$remote_model" ] \
+    && [ -n "$remote_effort" ] && [ "$remote_model_source" != invalid ] || {
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -560,13 +620,15 @@ spawn_remote_secondmate() {
     echo "endpoint_task_id=$id"
     echo "worktree=$home"
     echo "project=$root"
-    echo "harness=$harness"
+    echo "harness=$remote_harness"
     echo "kind=secondmate"
     echo "mode=secondmate"
     echo "yolo=off"
     echo "tasktmp="
-    echo "model=${model#-}"
-    echo "effort=${effort#-}"
+    echo "model=$remote_model"
+    echo "effort=$remote_effort"
+    [ -z "$remote_model_source" ] || echo "secondmate_model_source=$remote_model_source"
+    [ "$remote_model_source" != fallback ] || echo "secondmate_fallback_reason=$remote_fallback_reason"
     echo "home=$home"
     echo "projects=$(secondmate_registry_field "$DATA/secondmates.md" "$id" projects)"
     echo "remote_host=$host"
@@ -584,7 +646,7 @@ spawn_remote_secondmate() {
     echo "error: remote secondmate $id launched, but its reply source could not be armed; endpoint metadata is preserved" >&2
     return 1
   fi
-  echo "spawned $id harness=$harness kind=secondmate mode=secondmate yolo=off window=remote:$id worktree=$home remote=$host backend=$remote_backend"
+  echo "spawned $id harness=$remote_harness kind=secondmate mode=secondmate yolo=off window=remote:$id worktree=$home remote=$host backend=$remote_backend"
   return 0
 }
 
@@ -962,13 +1024,76 @@ case "$ARG3" in
       HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
       harness_src='config/crew-harness'
     fi
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    if [ "$KIND" != secondmate ]; then
+      LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    fi
     ;;
   *)
     HARNESS=$ARG3
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
 esac
+
+# config/secondmate-harness may carry optional model/effort tokens alongside the
+# harness ("<harness> [<model>] [<effort>]"). They apply only when this is a
+# --secondmate spawn and no explicit per-spawn harness/raw launch was supplied, so
+# the harness itself came from the secondmate config fallback chain. Resolving
+# here on every spawn makes the pin durable across respawns. Precedence: explicit
+# --model/--effort flags still win over the file's tokens.
+if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
+  if [ "$MODEL_SET" -eq 0 ]; then
+    SM_MODEL=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model)
+    [ -z "$SM_MODEL" ] || MODEL=$SM_MODEL
+  fi
+  if [ "$EFFORT_SET" -eq 0 ]; then
+    SM_EFFORT=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort)
+    if [ -n "$SM_EFFORT" ]; then
+      case "$SM_EFFORT" in
+        low|medium|high|xhigh|max) EFFORT=$SM_EFFORT ;;
+        *) echo "warning: config/secondmate-harness effort token '$SM_EFFORT' is not one of low, medium, high, xhigh, max; ignoring" >&2 ;;
+      esac
+    fi
+  fi
+  SECONDMATE_MODEL_SOURCE=
+  SECONDMATE_FALLBACK_REASON=
+  if [ "$KIND" = secondmate ]; then
+    SM_FALLBACK_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" secondmate-fallback-harness)
+    if [ -n "$SM_FALLBACK_HARNESS" ]; then
+      SECONDMATE_MODEL_SOURCE=primary
+      if [ "$MODEL_SET" -eq 0 ]; then
+        SM_FALLBACK_REASON=$(fm_quota_secondmate_fallback_reason "$HARNESS" "$MODEL" || true)
+      else
+        SM_FALLBACK_REASON=
+      fi
+      case "$SM_FALLBACK_REASON" in
+        provider_unavailable|quota_exhausted)
+          SM_FALLBACK_MODEL=$("$SCRIPT_DIR/fm-harness.sh" secondmate-fallback-model)
+          SM_FALLBACK_EFFORT=$("$SCRIPT_DIR/fm-harness.sh" secondmate-fallback-effort)
+          HARNESS=$SM_FALLBACK_HARNESS
+          harness_src='config/secondmate-harness-fallback'
+          SECONDMATE_MODEL_SOURCE=fallback
+          SECONDMATE_FALLBACK_REASON=$SM_FALLBACK_REASON
+          if [ "$MODEL_SET" -eq 0 ]; then
+            if [ -n "$SM_FALLBACK_MODEL" ]; then MODEL=$SM_FALLBACK_MODEL; else MODEL=; fi
+          fi
+          if [ "$EFFORT_SET" -eq 0 ]; then
+            EFFORT=
+            if [ -n "$SM_FALLBACK_EFFORT" ]; then
+              case "$SM_FALLBACK_EFFORT" in
+                low|medium|high|xhigh|max) EFFORT=$SM_FALLBACK_EFFORT ;;
+                *) echo "warning: config/secondmate-harness-fallback effort token '$SM_FALLBACK_EFFORT' is not one of low, medium, high, xhigh, max; ignoring" >&2 ;;
+              esac
+            fi
+          fi
+          ;;
+      esac
+    fi
+    LAUNCH=$(launch_template "$HARNESS" "$KIND") || {
+      echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2
+      exit 1
+    }
+  fi
+fi
 
 case "$HARNESS" in
   pi|pi-signed) LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH" ;;
@@ -1079,28 +1204,6 @@ if [ "$HARNESS" = omp ]; then
         exit 1
       fi
     done
-  fi
-fi
-
-# config/secondmate-harness may carry optional model/effort tokens alongside the
-# harness ("<harness> [<model>] [<effort>]"). They apply only when this is a
-# --secondmate spawn and no explicit per-spawn harness/raw launch was supplied, so
-# the harness itself came from the secondmate config fallback chain. Resolving
-# here on every spawn makes the pin durable across respawns. Precedence: explicit
-# --model/--effort flags still win over the file's tokens.
-if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
-  if [ "$MODEL_SET" -eq 0 ]; then
-    SM_MODEL=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model)
-    [ -z "$SM_MODEL" ] || MODEL=$SM_MODEL
-  fi
-  if [ "$EFFORT_SET" -eq 0 ]; then
-    SM_EFFORT=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort)
-    if [ -n "$SM_EFFORT" ]; then
-      case "$SM_EFFORT" in
-        low|medium|high|xhigh|max) EFFORT=$SM_EFFORT ;;
-        *) echo "warning: config/secondmate-harness effort token '$SM_EFFORT' is not one of low, medium, high, xhigh, max; ignoring" >&2 ;;
-      esac
-    fi
   fi
 fi
 
@@ -2364,6 +2467,10 @@ META_WINDOW=$T
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  if [ "$KIND" = secondmate ] && [ -n "$SECONDMATE_MODEL_SOURCE" ]; then
+    echo "secondmate_model_source=$SECONDMATE_MODEL_SOURCE"
+    [ "$SECONDMATE_MODEL_SOURCE" != fallback ] || echo "secondmate_fallback_reason=$SECONDMATE_FALLBACK_REASON"
+  fi
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   if [ "$HARNESS" = omp ]; then
     echo "omp_bin=$OMP_BIN_CANON"
