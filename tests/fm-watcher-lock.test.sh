@@ -456,11 +456,12 @@ test_watch_restart_rejects_reused_pid() {
 }
 
 test_watch_restart_attaches_to_healthy_peer() (
-  local dir state fakebin out peer='' identity armpid='' status i lock_pid
+  local dir state fakebin out peer_ready peer='' identity armpid='' status i lock_pid
   dir=$(make_case restart-healthy-peer)
   state="$dir/state"
   fakebin="$dir/fakebin"
   out="$dir/restart.out"
+  peer_ready="$dir/peer.ready"
   # shellcheck disable=SC2329  # invoked indirectly by the EXIT trap below
   cleanup_restart_healthy_peer() {
     lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
@@ -477,8 +478,18 @@ test_watch_restart_attaches_to_healthy_peer() (
   }
   trap cleanup_restart_healthy_peer EXIT
   mark_pr_check_migration_complete "$state"
-  node -e 'process.on("SIGTERM", () => {}); setTimeout(() => {}, 300000)' &
+  node -e 'const fs = require("node:fs"); process.on("SIGTERM", () => {}); fs.writeFileSync(process.argv[1], "ready\n"); setTimeout(() => {}, 300000)' "$peer_ready" &
   peer=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -s "$peer_ready" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ ! -s "$peer_ready" ]; then
+    kill -KILL "$peer" 2>/dev/null || true
+    wait "$peer" 2>/dev/null || true
+    fail "TERM-resistant peer did not become ready"
+  fi
   identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify peer pid"
   mkdir "$state/.watch.lock"
   printf '%s\n' "$peer" > "$state/.watch.lock/pid"
