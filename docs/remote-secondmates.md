@@ -32,6 +32,8 @@ The entrypoint authorizes that bootstrap with normal git tracking when git resol
 After setup, every other command verifies Firstmate's account-owned remote job worker, stages the encoded argv and stdin bytes, waits for its result, and relays stdout, stderr, and the exit status separately.
 On macOS the worker is `dev.firstmate.remote-job`, an Aqua-scoped LaunchAgent at `~/Library/LaunchAgents/dev.firstmate.remote-job.plist` with logs under `~/Library/Logs/`.
 After that bootstrap every non-doctor `fm-on.sh` target runs through that worker in the remote account's GUI session, never in the SSH process or a Herdr pane.
+The worker runs one staged job at a time and preempts a running reply long-poll as soon as any command other than another reply long-poll is queued, so interactive commands and startup checks are never serialized behind a poll window.
+`bin/fm-remote-job-lib.sh` owns that preemption contract, and a preempted poll is indistinguishable from one whose wait window closed with no data, so the re-armed poll loses nothing.
 Linux uses the same queue and worker protocol without the Aqua-session requirement.
 The remote account must provide the required toolchain, the selected worker runtime, the selected session backend, and credentials that work on that host.
 Project origin URLs recorded by the primary must be reachable from the remote account because projects are cloned on that host rather than copied from the primary.
@@ -123,6 +125,9 @@ Readiness starts with a read-only check; when that check reports a gap, it runs 
 A host that stays red prints the doctor's remaining gaps and their operator steps, restores the registry, and creates nothing on the remote host.
 It does not copy project trees or the primary process environment.
 A known provisioning failure rolls back the new route, while SSH exit 255 preserves it because remote completion is unknown and must be reconciled on the same host.
+
+Seeding also writes a durable `.fm-secondmate-parent` record next to the home's `.fm-secondmate-home` identity marker, naming this home's route to its parent as `local` or `remote`.
+The promised-public-reply subsystem is same-filesystem by construction, so a remote route can never carry a delegated public-reply promise; `bin/fm-teardown.sh`'s cleanup gate reads this record to treat a remote parent as out of scope rather than an unresolved binding.
 
 Local secondmates keep the existing route form and need no migration.
 A fleet may contain local and remote routes together.

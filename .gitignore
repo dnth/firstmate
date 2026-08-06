@@ -5,6 +5,7 @@ data/
 .lavish/
 .omc/
 .fm-secondmate-home
+.fm-secondmate-parent
 .DS_Store
 __pycache__/
 *.pyc
