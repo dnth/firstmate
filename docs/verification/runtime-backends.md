@@ -142,6 +142,7 @@ ok - real isolated tmux OMP secondmate launch, idle health, marked replies, exit
 The runs retained exact `harness=omp`, forwarded the selected model and thinking level, delivered each initial instruction once, and used `/skill:<name>` for the real skill turn.
 Normal `/exit` stopped each OMP process without killing the private tmux server, exact session resume restored prior context, and cleanup removed every generated extension, session, task temp root, worktree, and socket-owned endpoint.
 The guarded primary, worker/scout, and secondmate owners reran on 2026-08-01 at head `491bc809a38a84f5ea651fd051b509cb511149a1` and returned four green results.
+The OMP 17.2.10 watcher-input regression passed on 2026-08-07 with the editable draft intact; the exact command and bounded output are recorded in [`supervision.md`](supervision.md#native-session-start-delivery).
 The Herdr role matrix required each expected turn-end or routed-reply notification to reach the durable queue or the primary follow-up transcript before the fixture drained it.
 
 The full OMP contract and both live backend matrices passed together in one clean-environment runner invocation on 2026-08-01 at head `491bc809a38a84f5ea651fd051b509cb511149a1`:
@@ -202,7 +203,7 @@ FM_TEST_SUMMARY_FAMILY family=watcher-wake-lock count=2 duration_ms=97033 failed
 Every listed script ran at that head with no gate skip.
 The isolated Herdr role matrix emitted no queued-wake warning.
 The final run retained the fresh-beacon, pending-notification, queue-drain, and bounded-delivery assertions in the Herdr fixture.
-The focused OMP adapter contract also rejected explicit watcher-delivery options, pinning OMP's idle-turn start and streaming steer behavior without weakening the shared watcher continuity owner.
+The focused OMP adapter contract now delivers watcher wakes as a custom steer with `triggerTurn`, preserving the editable draft while retaining idle wake and streaming delivery.
 The tmux role fixtures emitted their expected task-copy worktree and missing-fixture-watcher notices.
 The Herdr exit fixture refused an unlocked presentation close after proving normal process exit, then completed its named guarded teardown.
 

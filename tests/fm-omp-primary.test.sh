@@ -385,14 +385,14 @@ const handlers = new Map();
 const commands = new Map();
 const tools = new Map();
 const customMessages = [];
-const userMessages = [];
+const watcherMessages = [];
 const api = {
   zod: { object: () => ({}) },
   on(name, handler) { handlers.set(name, handler); },
   registerCommand(name, value) { commands.set(name, value); },
   registerTool(value) { tools.set(value.name, value); },
-  sendMessage(message) { customMessages.push(message); },
-  sendUserMessage(content, options) { userMessages.push({ content, options }); },
+  sendMessage(message, options) { watcherMessages.push({ message, options }); },
+  sendUserMessage(content, options) { customMessages.push({ content, options }); },
 };
 process.argv[1] = process.env.EXTENSION;
 const extension = await import(`${pathToFileURL(process.env.EXTENSION).href}?test=${Date.now()}`);
@@ -491,27 +491,32 @@ if (!toolResult.details.ok || !toolResult.content[0].text.includes("OMP extensio
   throw new Error(`OMP watcher tool did not route through the shared core: ${JSON.stringify(toolResult)}`);
 }
 writeFileSync(`${process.env.FM_STATE_OVERRIDE}/watch-trigger`, "go\n");
-for (let i = 0; i < 100 && userMessages.length === 0; i += 1) {
+for (let i = 0; i < 100 && watcherMessages.length === 0; i += 1) {
   await new Promise(resolve => setTimeout(resolve, 20));
 }
-if (userMessages.length !== 1 || !userMessages[0].content.includes("signal: omp-actionable")) {
-  throw new Error(`OMP actionable watcher close was not delivered once: ${JSON.stringify(userMessages)}`);
+if (watcherMessages.length !== 1 || !watcherMessages[0].message.content.includes("signal: omp-actionable")) {
+  throw new Error(`OMP actionable watcher close was not delivered once: ${JSON.stringify(watcherMessages)}`);
 }
-if (userMessages[0].options !== undefined) {
-  throw new Error(`OMP watcher notification passed explicit delivery options: ${JSON.stringify(userMessages[0].options)}`);
+if (
+  watcherMessages[0].message.customType !== "firstmate-watcher-wake" ||
+  watcherMessages[0].options?.deliverAs !== "steer" ||
+  watcherMessages[0].options?.triggerTurn !== true
+) {
+  throw new Error(`OMP watcher notification did not preserve the editable draft delivery mode: ${JSON.stringify(watcherMessages[0])}`);
 }
 if (!existsSync(`${process.env.FM_STATE_OVERRIDE}/watch-successor-ready`)) {
   throw new Error("OMP actionable notification arrived before successor readiness");
 }
 await handlers.get("session_shutdown")({ type: "session_shutdown" }, {});
 await new Promise(resolve => setTimeout(resolve, 80));
-console.log(JSON.stringify({ startupMessages: 3, guarded: true, tools: tools.size, userMessages: userMessages.length, customMessages: customMessages.length }));
+console.log(JSON.stringify({ startupMessages: 3, guarded: true, tools: tools.size, watcherMessages: watcherMessages.length, customMessages: customMessages.length }));
 JS
 )
   status=$?
   expect_code 0 "$status" "OMP native primary extension contract"
   assert_contains "$out" '"startupMessages":3' "OMP primary runtime result lost once-only startup delivery across start, new, and resume"
   assert_contains "$out" '"guarded":true' "OMP primary runtime result lost stop guard evidence"
+  assert_contains "$out" '"watcherMessages":1' "OMP watcher wake was not delivered exactly once"
 
   local contended_fakebin contended
   contended_fakebin=$(make_process_fakebin "$TMP_ROOT/contended-process")

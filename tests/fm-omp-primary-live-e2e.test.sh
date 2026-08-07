@@ -12,10 +12,14 @@ fi
 # shellcheck source=bin/fm-primary-watch-version-lib.sh
 . "$ROOT/bin/fm-primary-watch-version-lib.sh"
 
-command -v omp >/dev/null 2>&1 || fail "omp not found"
-command -v tmux >/dev/null 2>&1 || fail "tmux not found"
+command -v omp >/dev/null 2>&1 || fail "OMP (version unavailable) binary not found"
 OMP_BIN=$("$ROOT/bin/fm-omp-capabilities.sh" --print-binary) || fail "OMP capability check failed"
+OMP_VERSION=$("$OMP_BIN" --version 2>&1 | head -1) || fail "OMP version probe failed for $OMP_BIN"
+[ -n "$OMP_VERSION" ] || fail "OMP version probe returned no version"
+command -v tmux >/dev/null 2>&1 || fail "OMP $OMP_VERSION primary E2E requires tmux"
 REAL_TMUX=$(command -v tmux)
+export FM_POLL=${FM_POLL:-0.2}
+export FM_SIGNAL_GRACE=${FM_SIGNAL_GRACE:-0.2}
 LAB=$(fm_test_tmproot fm-omp-primary-live)
 SOCKET="fm-omp-primary-live-$$"
 PROJECT="$LAB/project"
@@ -52,6 +56,68 @@ PATH="$WRAPPER_BIN:$PATH" tmux new-session -d -s primary -n omp -c "$PROJECT" \
 
 capture() {
   PATH="$WRAPPER_BIN:$PATH" tmux capture-pane -p -t "$TARGET" -S -260 2>/dev/null || true
+}
+
+composer_state() {
+  PATH="$WRAPPER_BIN:$PATH" bash -c \
+    '. "$1/bin/fm-backend.sh"; fm_backend_composer_state tmux "$2" omp "$3"' \
+    _ "$PROJECT" "$TARGET" "$(sed -n '3p' "$MARKER")"
+}
+
+composer_text() {
+  local cursor pane row text
+  cursor=$(PATH="$WRAPPER_BIN:$PATH" tmux display-message -p -t "$TARGET" '#{cursor_y}') || return 1
+  case "$cursor" in ''|*[!0-9]*) return 1 ;; esac
+  pane=$(PATH="$WRAPPER_BIN:$PATH" tmux capture-pane -p -t "$TARGET" -S 0 -E -) || return 1
+  row=$(printf '%s\n' "$pane" | sed -n "$((cursor + 1))p")
+  row="${row#"${row%%[![:space:]]*}"}"
+  row="${row%"${row##*[![:space:]]}"}"
+  case "$row" in '╰─'*'─╯') ;; *) return 1 ;; esac
+  text=${row#╰─}
+  text=${text%─╯}
+  text="${text#"${text%%[![:space:]]*}"}"
+  text="${text%"${text##*[![:space:]]}"}"
+  printf '%s' "$text"
+}
+
+wait_idle() {
+  local attempts=${1:-240} i=0
+  while [ "$i" -lt "$attempts" ]; do
+    if ! PATH="$WRAPPER_BIN:$PATH" bash -c \
+      '. "$1/bin/fm-tmux-lib.sh"; fm_pane_is_busy "$2" omp' _ "$PROJECT" "$TARGET" \
+      && [ "$(composer_state)" = empty ]; then
+      return 0
+    fi
+    sleep 0.25
+    i=$((i + 1))
+  done
+  capture >&2
+  return 1
+}
+
+session_has_terminal_assistant_after() {
+  local file=$1 offset=$2 marker=$3
+  tail -c "+$((offset + 1))" "$file" | node -e '
+    const marker = process.argv[1];
+    let input = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", chunk => { input += chunk; });
+    process.stdin.on("end", () => {
+      let seen = false;
+      for (const line of input.trimEnd().split("\n")) {
+        if (!line) continue;
+        let entry;
+        try { entry = JSON.parse(line); } catch { continue; }
+        const message = entry.message;
+        const text = Array.isArray(message?.content)
+          ? message.content.filter(part => part?.type === "text").map(part => part.text).join("\n")
+          : "";
+        if (message?.role === "user" && text.includes(marker)) seen = true;
+        if (seen && message?.role === "assistant" && message.stopReason === "stop") process.exit(0);
+      }
+      process.exit(1);
+    });
+  ' "$marker"
 }
 
 wait_file_nonempty() {
@@ -219,6 +285,7 @@ resume_watch_pid=$(wait_pid_change "$WATCH_LOCK" "$second_watch_pid") \
 kill -0 "$resume_watch_pid" 2>/dev/null || fail "OMP resume watcher is not live"
 
 touch "$HOME_DIR/state/.afk"
+away_offset=$(wc -c < "$session_file" | tr -d '[:space:]')
 PATH="$WRAPPER_BIN:$PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$PROJECT" \
   FM_STATE_OVERRIDE="$HOME_DIR/state" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
   FM_SUPERVISOR_TARGET="$TARGET" FM_SUPERVISOR_BACKEND=tmux \
@@ -228,13 +295,40 @@ PATH="$WRAPPER_BIN:$PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$PROJECT" \
     _ "$PROJECT" "$HOME_DIR/state" \
   || fail "OMP idle composer did not accept an away-mode notification"
 for _ in $(seq 1 120); do
-  grep -R -F 'OMP_AWAY_DELIVERY' "$SESSION_DIR"/*.jsonl >/dev/null 2>&1 && break
+  session_has_terminal_assistant_after "$session_file" "$away_offset" OMP_AWAY_DELIVERY && break
   sleep 0.25
 done
+session_has_terminal_assistant_after "$session_file" "$away_offset" OMP_AWAY_DELIVERY \
+  || fail "OMP $OMP_VERSION away-mode turn did not reach a terminal assistant record"
 grep -R -F 'OMP_AWAY_DELIVERY' "$SESSION_DIR"/*.jsonl >/dev/null 2>&1 \
   || fail "OMP away-mode notification was acknowledged but not persisted"
 grep -R -F 'away-supervisor' "$SESSION_DIR"/*.jsonl >/dev/null 2>&1 \
   || fail "OMP away-mode notification lost its operational-input kind"
-
+wait_idle || fail "OMP $OMP_VERSION did not reach an idle boundary after away-mode delivery"
 printf 'ok - OMP %s primary E2E proved fresh no-state and ordinary native discovery, exact ownership, once-only startup, guarded watcher startup, /new continuity, shutdown, resume, and away-mode delivery\n' \
-  "$("$OMP_BIN" --version 2>/dev/null | head -1)"
+  "$OMP_VERSION"
+draft="human-draft-survives-omp-watcher-wake"
+PATH="$WRAPPER_BIN:$PATH" tmux send-keys -t "$TARGET" -l "$draft"
+[ "$(composer_state)" = pending ] && [ "$(composer_text)" = "$draft" ] \
+  || { capture >&2; fail "OMP $OMP_VERSION did not render the exact editable draft before the watcher wake"; }
+wake_status="$HOME_DIR/state/omp-wake-preserve-$$.status"
+wake_offset=$(wc -c < "$session_file" | tr -d '[:space:]')
+printf 'done: omp watcher draft preservation probe\n' > "$wake_status"
+wake_seen=0
+for _ in $(seq 1 240); do
+  if tail -c "+$((wake_offset + 1))" "$session_file" \
+    | grep -F '"customType":"firstmate-watcher-wake"' \
+    | grep -F 'FIRSTMATE_OP: v1 watcher:' \
+    | grep -F -- "$wake_status" >/dev/null 2>&1; then
+    wake_seen=1
+    break
+  fi
+  sleep 0.25
+done
+[ "$wake_seen" -eq 1 ] || fail "OMP $OMP_VERSION watcher wake was not delivered to the session"
+[ "$(composer_state)" = pending ] && [ "$(composer_text)" = "$draft" ] \
+  || { capture >&2; fail "OMP $OMP_VERSION watcher wake changed the exact editable draft"; }
+
+printf 'ok - OMP %s primary E2E proved watcher delivery with an intact editable draft\n' "$OMP_VERSION"
+PATH="$WRAPPER_BIN:$PATH" tmux send-keys -t "$TARGET" Escape
+submit_omp /exit || fail "OMP $OMP_VERSION did not accept cleanup after draft preservation"

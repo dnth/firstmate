@@ -190,9 +190,17 @@ export default function (omp: ExtensionAPI) {
     repairToolName: "fm_watch_arm_omp",
     encodeOperationalInput,
     sendFollowUp: async (content) => {
-      // No explicit deliverAs: OMP starts a turn when idle and steers while
-      // streaming. An explicit deliverAs would queue the notification instead.
-      omp.sendUserMessage(content);
+      // Deliver a custom steer so OMP wakes idle sessions without touching the editable draft.
+      omp.sendMessage(
+        {
+          customType: "firstmate-watcher-wake",
+          content,
+          display: false,
+          attribution: "agent",
+          details: { kind: "watcher", runtime: "omp" },
+        },
+        { deliverAs: "steer", triggerTurn: true },
+      );
     },
   });
 
