@@ -12,10 +12,14 @@ fi
 # shellcheck source=bin/fm-primary-watch-version-lib.sh
 . "$ROOT/bin/fm-primary-watch-version-lib.sh"
 
-command -v omp >/dev/null 2>&1 || fail "omp not found"
-command -v tmux >/dev/null 2>&1 || fail "tmux not found"
+command -v omp >/dev/null 2>&1 || fail "OMP (version unavailable) binary not found"
 OMP_BIN=$("$ROOT/bin/fm-omp-capabilities.sh" --print-binary) || fail "OMP capability check failed"
+OMP_VERSION=$("$OMP_BIN" --version 2>&1 | head -1) || fail "OMP version probe failed for $OMP_BIN"
+[ -n "$OMP_VERSION" ] || fail "OMP version probe returned no version"
+command -v tmux >/dev/null 2>&1 || fail "OMP $OMP_VERSION primary E2E requires tmux"
 REAL_TMUX=$(command -v tmux)
+export FM_POLL=${FM_POLL:-0.2}
+export FM_SIGNAL_GRACE=${FM_SIGNAL_GRACE:-0.2}
 LAB=$(fm_test_tmproot fm-omp-primary-live)
 SOCKET="fm-omp-primary-live-$$"
 PROJECT="$LAB/project"
@@ -235,6 +239,27 @@ grep -R -F 'OMP_AWAY_DELIVERY' "$SESSION_DIR"/*.jsonl >/dev/null 2>&1 \
   || fail "OMP away-mode notification was acknowledged but not persisted"
 grep -R -F 'away-supervisor' "$SESSION_DIR"/*.jsonl >/dev/null 2>&1 \
   || fail "OMP away-mode notification lost its operational-input kind"
-
 printf 'ok - OMP %s primary E2E proved fresh no-state and ordinary native discovery, exact ownership, once-only startup, guarded watcher startup, /new continuity, shutdown, resume, and away-mode delivery\n' \
-  "$("$OMP_BIN" --version 2>/dev/null | head -1)"
+  "$OMP_VERSION"
+draft="human-draft-survives-omp-watcher-wake"
+PATH="$WRAPPER_BIN:$PATH" tmux send-keys -t "$TARGET" -l "$draft"
+wake_status="$HOME_DIR/state/omp-wake-preserve.status"
+printf 'done: omp watcher draft preservation probe\n' > "$wake_status"
+wake_seen=0
+for _ in $(seq 1 240); do
+  if grep -R -F 'FIRSTMATE_OP: v1 watcher:' "$SESSION_DIR"/*.jsonl >/dev/null 2>&1; then
+    wake_seen=1
+    break
+  fi
+  sleep 0.25
+done
+[ "$wake_seen" -eq 1 ] || fail "OMP $OMP_VERSION watcher wake was not delivered to the session"
+pane=$(capture)
+printf '%s\n' "$pane" | grep -F -- "$draft" >/dev/null 2>&1 \
+  || { capture >&2; fail "OMP $OMP_VERSION watcher wake clobbered the editable draft"; }
+
+printf 'ok - OMP %s primary E2E proved watcher delivery with an intact editable draft\n' "$OMP_VERSION"
+PATH="$WRAPPER_BIN:$PATH" tmux send-keys -t "$TARGET" Escape
+submit_omp /exit || fail "OMP $OMP_VERSION did not accept cleanup after draft preservation"
+
+

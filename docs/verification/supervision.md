@@ -102,6 +102,18 @@ ok - OMP omp/17.1.8 primary E2E proved fresh no-state and ordinary native discov
 The OMP run used isolated projects, homes, session directories, and private tmux sockets.
 Plain `omp` discovered `.omp/extensions/fm-primary-omp.ts` both before a fresh checkout had a `state/` directory and during an ordinary primary lifecycle.
 Both paths published the exact four-line adapter, process, Bun, and OMP identity marker without an explicit `-e` fallback.
+The OMP 17.2.10 watcher-input regression ran on 2026-08-07 with a human draft left in the TUI composer before a live watcher wake.
+
+```sh
+env -u FM_OMP_HARNESS FM_OMP_PRIMARY_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh
+```
+
+```text
+ok - OMP omp/17.2.10 primary E2E proved fresh no-state and ordinary native discovery, exact ownership, once-only startup, guarded watcher startup, /new continuity, shutdown, resume, and away-mode delivery
+ok - OMP omp/17.2.10 primary E2E proved watcher delivery with an intact editable draft
+```
+
+The live guard observed the watcher wake in the OMP session and found the exact draft unchanged after delivery.
 
 Current deterministic and live entry points:
 
