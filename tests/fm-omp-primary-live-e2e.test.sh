@@ -95,6 +95,31 @@ wait_idle() {
   return 1
 }
 
+session_has_terminal_assistant_after() {
+  local file=$1 offset=$2 marker=$3
+  tail -c "+$((offset + 1))" "$file" | node -e '
+    const marker = process.argv[1];
+    let input = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", chunk => { input += chunk; });
+    process.stdin.on("end", () => {
+      let seen = false;
+      for (const line of input.trimEnd().split("\n")) {
+        if (!line) continue;
+        let entry;
+        try { entry = JSON.parse(line); } catch { continue; }
+        const message = entry.message;
+        const text = Array.isArray(message?.content)
+          ? message.content.filter(part => part?.type === "text").map(part => part.text).join("\n")
+          : "";
+        if (message?.role === "user" && text.includes(marker)) seen = true;
+        if (seen && message?.role === "assistant" && message.stopReason === "stop") process.exit(0);
+      }
+      process.exit(1);
+    });
+  ' "$marker"
+}
+
 wait_file_nonempty() {
   local file=$1 attempts=${2:-600} i=0
   while [ "$i" -lt "$attempts" ]; do
@@ -260,6 +285,7 @@ resume_watch_pid=$(wait_pid_change "$WATCH_LOCK" "$second_watch_pid") \
 kill -0 "$resume_watch_pid" 2>/dev/null || fail "OMP resume watcher is not live"
 
 touch "$HOME_DIR/state/.afk"
+away_offset=$(wc -c < "$session_file" | tr -d '[:space:]')
 PATH="$WRAPPER_BIN:$PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$PROJECT" \
   FM_STATE_OVERRIDE="$HOME_DIR/state" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
   FM_SUPERVISOR_TARGET="$TARGET" FM_SUPERVISOR_BACKEND=tmux \
@@ -269,9 +295,11 @@ PATH="$WRAPPER_BIN:$PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$PROJECT" \
     _ "$PROJECT" "$HOME_DIR/state" \
   || fail "OMP idle composer did not accept an away-mode notification"
 for _ in $(seq 1 120); do
-  grep -R -F 'OMP_AWAY_DELIVERY' "$SESSION_DIR"/*.jsonl >/dev/null 2>&1 && break
+  session_has_terminal_assistant_after "$session_file" "$away_offset" OMP_AWAY_DELIVERY && break
   sleep 0.25
 done
+session_has_terminal_assistant_after "$session_file" "$away_offset" OMP_AWAY_DELIVERY \
+  || fail "OMP $OMP_VERSION away-mode turn did not reach a terminal assistant record"
 grep -R -F 'OMP_AWAY_DELIVERY' "$SESSION_DIR"/*.jsonl >/dev/null 2>&1 \
   || fail "OMP away-mode notification was acknowledged but not persisted"
 grep -R -F 'away-supervisor' "$SESSION_DIR"/*.jsonl >/dev/null 2>&1 \
@@ -304,4 +332,3 @@ done
 printf 'ok - OMP %s primary E2E proved watcher delivery with an intact editable draft\n' "$OMP_VERSION"
 PATH="$WRAPPER_BIN:$PATH" tmux send-keys -t "$TARGET" Escape
 submit_omp /exit || fail "OMP $OMP_VERSION did not accept cleanup after draft preservation"
-
