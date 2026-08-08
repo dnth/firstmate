@@ -2496,7 +2496,8 @@ FM_BACKEND_HERDR_OMP_COMPOSER_MIN_WIDTH=${FM_BACKEND_HERDR_OMP_COMPOSER_MIN_WIDT
 # copy cannot become the live composer.
 fm_backend_herdr_omp_composer_find() {  # <ansi-capture> [canonical-omp-bun]
   local cap=$1 bun=${2:-${FM_OMP_BUN:-}} line plain trimmed row=0 open=0 lines=0 max min_width
-  local candidate="" bottom_inner bottom_width top_width=0 last_nonempty=0
+  local candidate="" bottom_inner bottom_width top_width=0 last_nonempty=0 previous_nonempty=0
+  local steering_row=0 steering_last=0
   max=$FM_BACKEND_HERDR_OMP_COMPOSER_MAX_LINES
   min_width=$FM_BACKEND_HERDR_OMP_COMPOSER_MIN_WIDTH
   case "$max" in ''|*[!0-9]*|0) max=8 ;; esac
@@ -2506,12 +2507,22 @@ fm_backend_herdr_omp_composer_find() {  # <ansi-capture> [canonical-omp-bun]
   FM_BACKEND_HERDR_OMP_VALID=0
   FM_BACKEND_HERDR_OMP_BOTTOM_LINE=0
   FM_BACKEND_HERDR_OMP_CONTENT=""
+  FM_BACKEND_HERDR_OMP_STEERING_QUEUED=0
   while IFS= read -r line; do
     row=$((row + 1))
     plain=$(fm_backend_herdr_strip_ansi "$line")
     trimmed="${plain#"${plain%%[![:space:]]*}"}"
     trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
-    [ -z "$trimmed" ] || last_nonempty=$row
+    if [ -n "$trimmed" ]; then
+      previous_nonempty=$last_nonempty
+      last_nonempty=$row
+      if printf '%s\n' "$trimmed" | fm_composer_omp_steering_queued; then
+        steering_row=$row
+        steering_last=1
+      else
+        steering_last=0
+      fi
+    fi
     case "$trimmed" in
       '╭── '*' ▶'*'──╮')
         FM_BACKEND_HERDR_OMP_SIGNAL=1
@@ -2551,6 +2562,10 @@ fm_backend_herdr_omp_composer_find() {  # <ansi-capture> [canonical-omp-bun]
   done <<EOF
 $cap
 EOF
+  if [ "$steering_last" -eq 1 ] && [ "$steering_row" -eq "$last_nonempty" ]; then
+    FM_BACKEND_HERDR_OMP_STEERING_QUEUED=1
+    last_nonempty=$previous_nonempty
+  fi
   if [ "$FM_BACKEND_HERDR_OMP_FOUND" -eq 1 ] \
      && [ "$FM_BACKEND_HERDR_OMP_BOTTOM_LINE" -ne "$last_nonempty" ]; then
     FM_BACKEND_HERDR_OMP_VALID=0
@@ -2645,14 +2660,22 @@ fm_backend_herdr_composer_state() {  # <target> [harness] [canonical-omp-bun] ->
 $identity
 EOF
     case "$agent:$agent_status" in
-      omp:idle|omp:done)
-        if [ "$FM_BACKEND_HERDR_OMP_FOUND" -eq 1 ] \
+      omp:working|omp:blocked|omp:idle|omp:done)
+        if [ "$FM_BACKEND_HERDR_OMP_STEERING_QUEUED" -eq 1 ] \
+           && [ "$FM_BACKEND_HERDR_OMP_FOUND" -eq 1 ] \
            && [ "$FM_BACKEND_HERDR_OMP_VALID" -eq 1 ]; then
-          stripped=$(printf '%s\n' "$FM_BACKEND_HERDR_OMP_CONTENT" | fm_composer_strip_ghost)
-          stripped="${stripped#"${stripped%%[![:space:]]*}"}"
-          stripped="${stripped%"${stripped##*[![:space:]]}"}"
-          fm_composer_classify_content 1 "$stripped" "$FM_BACKEND_HERDR_IDLE_RE"
+          printf 'empty'
           return 0
+        fi
+        if [ "$agent_status" = idle ] || [ "$agent_status" = "done" ]; then
+          if [ "$FM_BACKEND_HERDR_OMP_FOUND" -eq 1 ] \
+             && [ "$FM_BACKEND_HERDR_OMP_VALID" -eq 1 ]; then
+            stripped=$(printf '%s\n' "$FM_BACKEND_HERDR_OMP_CONTENT" | fm_composer_strip_ghost)
+            stripped="${stripped#"${stripped%%[![:space:]]*}"}"
+            stripped="${stripped%"${stripped##*[![:space:]]}"}"
+            fm_composer_classify_content 1 "$stripped" "$FM_BACKEND_HERDR_IDLE_RE"
+            return 0
+          fi
         fi
         ;;
     esac
@@ -2752,6 +2775,18 @@ EOF
   # is '^(❯|›)'), so a bare shell prompt never reaches here - it stays 'unknown'
   # via the no-composer-row path above, exactly as before.
   fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE"
+}
+
+fm_backend_herdr_omp_steering_queued() {  # <target> [canonical-omp-bun]
+  local target=$1 bun=${2:-${FM_OMP_BUN:-}} cap
+  fm_backend_herdr_parse_target "$target" || return 1
+  cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES" 2>/dev/null \
+    || fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES") || return 1
+  fm_backend_herdr_omp_composer_find "$cap" "$bun"
+  [ "$FM_BACKEND_HERDR_OMP_SIGNAL" -eq 1 ] \
+    && [ "$FM_BACKEND_HERDR_OMP_FOUND" -eq 1 ] \
+    && [ "$FM_BACKEND_HERDR_OMP_VALID" -eq 1 ] \
+    && [ "$FM_BACKEND_HERDR_OMP_STEERING_QUEUED" -eq 1 ]
 }
 
 # fm_backend_herdr_send_text_submit: type <text> into <target> once (raw,
@@ -3003,6 +3038,8 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
       fi
       if fm_backend_herdr_wait_omp_session_event "$omp_event" "$omp_session" "$omp_offset" \
         "$omp_confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS" "$text"; then
+        printf 'empty'
+      elif fm_backend_herdr_omp_steering_queued "$target" "$bun"; then
         printf 'empty'
       else
         printf 'unknown'

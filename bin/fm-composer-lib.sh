@@ -175,6 +175,22 @@ fm_composer_strip_ghost() {
   '
 }
 
+# fm_composer_omp_steering_queued: recognize OMP's current queued-steering
+# indicator in a captured pane. The indicator is positive proof only when it is
+# the last non-empty row and its count is a positive integer, so arbitrary
+# transcript text cannot turn an editable composer into a submitted one.
+fm_composer_omp_steering_queued() {
+  local line plain trimmed last=
+  while IFS= read -r line; do
+    plain=$(printf '%s' "$line" | fm_composer_strip_ansi)
+    trimmed="${plain#"${plain%%[![:space:]]*}"}"
+    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+    [ -n "$trimmed" ] || continue
+    last=$trimmed
+  done
+  printf '%s\n' "$last" | grep -Eq '^Steering[[:space:]]+·[[:space:]]+[1-9][0-9]*[[:space:]]*$'
+}
+
 # fm_composer_classify_content: the single shared composer-content verdict.
 #   <bordered> 1 when <content> came from a genuine agent-composer container (a
 #              bordered composer box, or a structurally-identified bare AGENT

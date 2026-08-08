@@ -217,6 +217,20 @@ test_omp_composer_and_submission_use_verified_two_row_structure() {
   printf '╰─%-*s─╯\n' "$((width - 4))" ' steer after current turn' >> "$composer"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" fm_tmux_composer_state omp omp "$bun" > "$vfile" 2>/dev/null
   [ "$(cat "$vfile")" = pending ] || fail "verified OMP composer text should be pending, got '$(cat "$vfile")'"
+  printf '%s\n' "$top" > "$composer"
+  printf '╰─%-*s─╯\n' "$((width - 4))" ' steer after current turn' >> "$composer"
+  printf 'Steering · 1\n' >> "$composer"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_CURSOR_Y=1 \
+    fm_tmux_composer_state omp omp "$bun" > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = empty ] || fail "a queued OMP composer should confirm delivery, got '$(cat "$vfile")'"
+  : > "$sent"
+  touch "$dir/.swallow"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_PANE_BUSY=1 \
+    fm_tmux_submit_core omp queued 1 0.01 0 omp "$bun" > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = empty ] || fail "tmux submit should confirm the queued OMP composer, got '$(cat "$vfile")'"
+  : > "$sent"
+  rm -f "$dir/.swallow"
 
   printf 'transcript row\n%s\n' "$top" > "$composer"
   printf '╰─%-*s─╯\n' "$((width - 4))" ' stale transcript text' >> "$composer"

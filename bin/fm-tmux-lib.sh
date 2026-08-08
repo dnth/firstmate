@@ -356,6 +356,13 @@ fm_tmux_composer_state() {  # <target> [harness] [canonical-omp-bun] -> empty|pe
   case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
   pane=$(tmux capture-pane -e -p -t "$target" -S 0 -E - 2>/dev/null) || { printf 'unknown'; return 0; }
   plain=$(printf '%s\n' "$pane" | fm_composer_strip_ansi)
+  if [ "$harness" = omp ] && fm_composer_omp_steering_queued <<EOF
+$plain
+EOF
+  then
+    printf 'empty'
+    return 0
+  fi
   # The OMP structural contract applies only to a pane whose harness identity is
   # OMP. Tmux has no native agent identity, so the caller-supplied harness is the
   # gate; another harness that happens to render an OMP-shaped row keeps the
