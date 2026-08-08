@@ -2497,7 +2497,7 @@ FM_BACKEND_HERDR_OMP_COMPOSER_MIN_WIDTH=${FM_BACKEND_HERDR_OMP_COMPOSER_MIN_WIDT
 fm_backend_herdr_omp_composer_find() {  # <ansi-capture> [canonical-omp-bun]
   local cap=$1 bun=${2:-${FM_OMP_BUN:-}} line plain trimmed row=0 open=0 lines=0 max min_width
   local candidate="" bottom_inner bottom_width top_width=0 last_nonempty=0 previous_nonempty=0
-  local steering_row=0 steering_last=0
+  local steering_row=0 steering_last=0 steering_count=
   max=$FM_BACKEND_HERDR_OMP_COMPOSER_MAX_LINES
   min_width=$FM_BACKEND_HERDR_OMP_COMPOSER_MIN_WIDTH
   case "$max" in ''|*[!0-9]*|0) max=8 ;; esac
@@ -2508,6 +2508,7 @@ fm_backend_herdr_omp_composer_find() {  # <ansi-capture> [canonical-omp-bun]
   FM_BACKEND_HERDR_OMP_BOTTOM_LINE=0
   FM_BACKEND_HERDR_OMP_CONTENT=""
   FM_BACKEND_HERDR_OMP_STEERING_QUEUED=0
+  FM_BACKEND_HERDR_OMP_STEERING_COUNT=0
   while IFS= read -r line; do
     row=$((row + 1))
     plain=$(fm_backend_herdr_strip_ansi "$line")
@@ -2516,7 +2517,7 @@ fm_backend_herdr_omp_composer_find() {  # <ansi-capture> [canonical-omp-bun]
     if [ -n "$trimmed" ]; then
       previous_nonempty=$last_nonempty
       last_nonempty=$row
-      if printf '%s\n' "$trimmed" | fm_composer_omp_steering_queued; then
+      if steering_count=$(printf '%s\n' "$trimmed" | fm_composer_omp_steering_count); then
         steering_row=$row
         steering_last=1
       else
@@ -2564,6 +2565,7 @@ $cap
 EOF
   if [ "$steering_last" -eq 1 ] && [ "$steering_row" -eq "$last_nonempty" ]; then
     FM_BACKEND_HERDR_OMP_STEERING_QUEUED=1
+    FM_BACKEND_HERDR_OMP_STEERING_COUNT=$steering_count
     last_nonempty=$previous_nonempty
   fi
   if [ "$FM_BACKEND_HERDR_OMP_FOUND" -eq 1 ] \
@@ -2661,12 +2663,6 @@ $identity
 EOF
     case "$agent:$agent_status" in
       omp:working|omp:blocked|omp:idle|omp:done)
-        if [ "$FM_BACKEND_HERDR_OMP_STEERING_QUEUED" -eq 1 ] \
-           && [ "$FM_BACKEND_HERDR_OMP_FOUND" -eq 1 ] \
-           && [ "$FM_BACKEND_HERDR_OMP_VALID" -eq 1 ]; then
-          printf 'empty'
-          return 0
-        fi
         if [ "$agent_status" = idle ] || [ "$agent_status" = "done" ]; then
           if [ "$FM_BACKEND_HERDR_OMP_FOUND" -eq 1 ] \
              && [ "$FM_BACKEND_HERDR_OMP_VALID" -eq 1 ]; then
@@ -2777,7 +2773,7 @@ EOF
   fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE"
 }
 
-fm_backend_herdr_omp_steering_queued() {  # <target> [canonical-omp-bun]
+fm_backend_herdr_omp_steering_count() {  # <target> [canonical-omp-bun] -> nonnegative count
   local target=$1 bun=${2:-${FM_OMP_BUN:-}} cap
   fm_backend_herdr_parse_target "$target" || return 1
   cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES" 2>/dev/null \
@@ -2785,8 +2781,8 @@ fm_backend_herdr_omp_steering_queued() {  # <target> [canonical-omp-bun]
   fm_backend_herdr_omp_composer_find "$cap" "$bun"
   [ "$FM_BACKEND_HERDR_OMP_SIGNAL" -eq 1 ] \
     && [ "$FM_BACKEND_HERDR_OMP_FOUND" -eq 1 ] \
-    && [ "$FM_BACKEND_HERDR_OMP_VALID" -eq 1 ] \
-    && [ "$FM_BACKEND_HERDR_OMP_STEERING_QUEUED" -eq 1 ]
+    && [ "$FM_BACKEND_HERDR_OMP_VALID" -eq 1 ] || return 1
+  printf '%s' "$FM_BACKEND_HERDR_OMP_STEERING_COUNT"
 }
 
 # fm_backend_herdr_send_text_submit: type <text> into <target> once (raw,
@@ -2848,10 +2844,9 @@ fm_backend_herdr_omp_steering_queued() {  # <target> [canonical-omp-bun]
 #     retry).
 # OMP's busy steering path is the one native exception to the generic
 # preexisting-working fallback. Before typing, it binds the exact native OMP
-# session path and byte offset. After one Enter, only a matching user-message
-# event appended after that offset confirms delivery. This avoids both false
-# failure from OMP remaining `working` and duplicate steering from retrying an
-# Enter whose queued message was already accepted.
+# session path and byte offset. After one Enter, a matching native session event
+# confirms delivery. If that event is delayed, a task-bound valid composer whose
+# `Steering · N` count increased from its pre-Enter snapshot is the only fallback.
 fm_backend_herdr_omp_submit_snapshot() {  # <session> <pane_id>
   local session=$1 pane_id=$2 out
   FM_BACKEND_HERDR_OMP_SUBMIT_STATUS=
@@ -2994,6 +2989,7 @@ fm_backend_herdr_wait_omp_session_exit() {  # <session-file> <byte-offset> <budg
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [harness] [canonical-omp-bun]
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${7:-} bun=${8:-}
   local i=0 verdict baseline confirm_sleep omp_confirm_sleep omp_session='' omp_offset='' omp_status='' omp_event
+  local omp_queue_baseline='' omp_queue_count=''
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   if [ "$harness" = omp ]; then
     fm_backend_herdr_omp_submit_snapshot "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
@@ -3008,6 +3004,9 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   if [ "$harness" != omp ]; then
     baseline=$(fm_backend_herdr_classify_submit_agent_status \
       "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")")
+  fi
+  if [ "$harness" = omp ] && [ "$omp_status" = working ] && [ "$text" != /exit ]; then
+    omp_queue_baseline=$(fm_backend_herdr_omp_steering_count "$target" "$bun" 2>/dev/null || true)
   fi
   confirm_sleep=$(fm_backend_herdr_submit_confirm_budget "$sleep_s")
   while :; do
@@ -3039,7 +3038,9 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
       if fm_backend_herdr_wait_omp_session_event "$omp_event" "$omp_session" "$omp_offset" \
         "$omp_confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS" "$text"; then
         printf 'empty'
-      elif fm_backend_herdr_omp_steering_queued "$target" "$bun"; then
+      elif [ -n "$omp_queue_baseline" ] \
+        && omp_queue_count=$(fm_backend_herdr_omp_steering_count "$target" "$bun") \
+        && [ "$omp_queue_count" -gt "$omp_queue_baseline" ]; then
         printf 'empty'
       else
         printf 'unknown'

@@ -2865,7 +2865,7 @@ test_composer_state_omp_structure_classifies_empty_pending_and_multiline() {
     out=$( PATH="$fb:$PATH" FM_OMP_BUN="$bun" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
       bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2 omp "$FM_OMP_BUN"' "$ROOT" )
     case "$case_id:$out" in
-      empty:empty|pending:pending|queued:empty|multiline:pending) ;;
+      empty:empty|pending:pending|queued:pending|multiline:pending) ;;
       *) fail "OMP Herdr composer case '$case_id' classified '$out'" ;;
     esac
   done
@@ -3447,8 +3447,8 @@ test_send_text_submit_omp_busy_steer_requires_matching_new_session_event() {
   [ "$enter_count" -eq 1 ] || fail "a matching OMP steer event should require exactly one Enter, got $enter_count"
   [ "$(grep -c $'\x1f''pane'$'\x1f''send-text'$'\x1f''w1:p2'$'\x1f' "$log")" -eq 1 ] \
     || fail "OMP busy acknowledgement retyped the message"
-  [ "$(grep -c $'\x1f''pane'$'\x1f''read' "$log")" -eq 0 ] \
-    || fail "OMP busy acknowledgement borrowed a raw pane-change proof"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''read' "$log")" -eq 1 ] \
+    || fail "OMP busy acknowledgement did not take exactly one pre-Enter queue snapshot"
   pass "fm_backend_herdr_send_text_submit: a busy OMP steer confirms only from the exact matching post-offset session event"
 }
 
@@ -3469,8 +3469,12 @@ test_send_text_submit_omp_busy_steer_accepts_queued_composer() {
   {
     printf '%s\n' "$top"
     printf '╰─%-*s─╯\n' "$((width - 4))" ' steer after current turn'
+  } > "$resp/3.out"
+  {
+    printf '%s\n' "$top"
+    printf '╰─%-*s─╯\n' "$((width - 4))" ' steer after current turn'
     printf 'Steering · 1\n'
-  } > "$resp/4.out"
+  } > "$resp/5.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0 \
@@ -3481,7 +3485,36 @@ test_send_text_submit_omp_busy_steer_accepts_queued_composer() {
   send_count=$(grep -c $'\x1f''pane'$'\x1f''send-text'$'\x1f''w1:p2'$'\x1f' "$log")
   [ "$enter_count" -eq 1 ] && [ "$send_count" -eq 1 ] \
     || fail "queued OMP composer confirmation retried delivery (send-text=$send_count enter=$enter_count)"
-  pass "fm_backend_herdr_send_text_submit: a captured Steering · 1 queue confirms a busy steer without redelivery"
+  pass "fm_backend_herdr_send_text_submit: an increased Steering queue confirms a busy steer without redelivery"
+}
+
+test_send_text_submit_omp_busy_rejects_unchanged_queue() {
+  local dir log resp fb out session text top width bun
+  if ! command -v bun >/dev/null 2>&1; then
+    pass "OMP Herdr unchanged-queue submit subtest skipped: bun not found"
+    return
+  fi
+  dir="$TMP_ROOT/submit-omp-busy-unchanged-queue"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  session="$dir/omp-session.jsonl"
+  text='Do not confirm this swallowed OMP steer.'
+  printf '%s\n' '{"type":"session","version":3}' > "$session"
+  printf '{"result":{"agent":{"agent":"omp","agent_status":"working","agent_session":{"kind":"path","value":"%s"}}}}\n' "$session" > "$resp/1.out"
+  top='╭── ⬢ GPT-5.6-Sol++ · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
+  bun=$(command -v bun)
+  width=$(fm_composer_terminal_width "$top" "$bun") || fail "could not measure unchanged OMP Herdr fixture"
+  {
+    printf '%s\n' "$top"
+    printf '╰─%-*s─╯\n' "$((width - 4))" ' steer after current turn'
+    printf 'Steering · 1\n'
+  } > "$resp/3.out"
+  cp "$resp/3.out" "$resp/5.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0 \
+    FM_BACKEND_HERDR_OMP_EVENT_CONFIRM_SLEEP=0 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0 "" omp "$2"' "$ROOT" "$text" "$bun" )
+  [ "$out" = unknown ] || fail "an unchanged OMP queue must remain unknown, got '$out'"
+  pass "fm_backend_herdr_send_text_submit: an unchanged Steering queue cannot confirm a busy steer"
 }
 
 test_send_text_submit_omp_busy_rejects_identical_ordinary_user_event() {
@@ -4546,6 +4579,7 @@ test_send_text_submit_omp_exit_requires_normal_session_event_and_closes_endpoint
 test_send_text_submit_omp_exit_without_normal_event_never_falls_back_to_steering_ack
 test_send_text_submit_omp_busy_steer_requires_matching_new_session_event
 test_send_text_submit_omp_busy_steer_accepts_queued_composer
+test_send_text_submit_omp_busy_rejects_unchanged_queue
 test_send_text_submit_omp_busy_rejects_identical_ordinary_user_event
 test_send_text_submit_omp_busy_default_event_budget_is_bounded_and_long_enough
 test_send_text_submit_omp_busy_without_new_event_refuses_without_retry

@@ -50,6 +50,8 @@ case "${1:-}" in
     done
     if [ "$literal" = 1 ]; then
       printf '%s' "${1:-}" >> "$FM_SEND_LOG"
+    elif [ "${1:-}" = Enter ] && [ -n "${FM_SEND_ENTERED:-}" ]; then
+      : > "$FM_SEND_ENTERED"
     fi
     exit 0 ;;
   display-message)
@@ -67,7 +69,11 @@ case "${1:-}" in
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
     if [ "${FM_SEND_QUEUED:-0}" = 1 ]; then
-      printf 'Steering · 1\n'
+      if [ -f "${FM_SEND_ENTERED:-/nonexistent}" ]; then
+        cat "$FM_SEND_OMP_AFTER"
+      else
+        cat "$FM_SEND_OMP_BEFORE"
+      fi
     else
       printf '╭────╮\n│    │\n╰────╯\n'
     fi
@@ -99,6 +105,8 @@ run_send() {
   env PATH="$fb:$PATH" \
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
     FM_SEND_QUEUED="${FM_SEND_QUEUED:-0}" FM_SEND_OMP="${FM_SEND_OMP:-0}" \
+    FM_SEND_ENTERED="${FM_SEND_ENTERED:-}" FM_SEND_OMP_BEFORE="${FM_SEND_OMP_BEFORE:-}" \
+    FM_SEND_OMP_AFTER="${FM_SEND_OMP_AFTER:-}" \
     "$SEND" "$@" 2>/dev/null
 }
 
@@ -135,7 +143,7 @@ test_secondmate_target_is_marked() {
   pass "fm-send: a kind=secondmate target gets the from-firstmate marker and corr prepended"
 }
 test_queued_secondmate_target_confirms_delivery() {
-  local dir fb log home rc got corr rec actual_bun omp
+  local dir fb log home rc got corr rec actual_bun omp top width
   if ! command -v bun >/dev/null 2>&1; then
     pass "fm-send: queued OMP secondmate confirmation skipped because bun is unavailable"
     return
@@ -148,6 +156,12 @@ test_queued_secondmate_target_confirms_delivery() {
   printf '#!/usr/bin/env bash\nexit 0\n' > "$omp"
   chmod +x "$omp"
   omp=$(fm_test_realpath "$omp")
+  top='╭── ⬢ GPT-5.6-Sol++ · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
+  width=$(fm_composer_terminal_width "$top" "$actual_bun") || fail "could not measure queued secondmate fixture"
+  printf '%s\n' "$top" > "$dir/before"
+  printf '╰─%-*s─╯\n' "$((width - 4))" ' queue the steer' >> "$dir/before"
+  cp "$dir/before" "$dir/after"
+  printf 'Steering · 1\n' >> "$dir/after"
   cat > "$fb/ps" <<SH
 #!/usr/bin/env bash
 case "\$*" in
@@ -162,7 +176,9 @@ SH
   chmod +x "$fb/ps" "$fb/lsof"
   fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:fm-domain" alpha omp
   printf 'omp_bin=%s\nomp_bun=%s\n' "$omp" "$actual_bun" >> "$home/state/domain.meta"
-  FM_SEND_QUEUED=1 FM_SEND_OMP=1 run_send "$fb" "$home" "$log" "domain" "queue the steer"; rc=$?
+  FM_SEND_QUEUED=1 FM_SEND_OMP=1 FM_SEND_ENTERED="$dir/entered" \
+    FM_SEND_OMP_BEFORE="$dir/before" FM_SEND_OMP_AFTER="$dir/after" \
+    run_send "$fb" "$home" "$log" "domain" "queue the steer"; rc=$?
   expect_code 0 "$rc" "a queued OMP secondmate steer should succeed"
   got=$(cat "$log")
   # shellcheck source=/dev/null

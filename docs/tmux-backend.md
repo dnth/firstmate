@@ -97,10 +97,10 @@ After the normal retry budget, only structurally proven pending text in a provab
 Ambiguous pending text never receives the busy-queue conversion.
 
 OMP has one narrower exception, scoped to `harness=omp` alone.
-Its composer disappears while a turn runs, so the accepted Enter reads `unknown` rather than empty.
-Only when the pane showed no OMP busy signature before typing and shows one after the Enter is that `unknown` converted to `empty`; otherwise the retries continue and the verdict stays `unknown`.
+For a busy worker, the submit core snapshots the count from a task-bound, geometrically valid OMP composer before Enter and accepts the queued delivery only when the same structure later ends in a strictly larger `Steering · N` count.
+Malformed or composer-less captures, an unchanged count, and pending text without the marker all fail closed; OMP never receives the generic rendered-busy conversion.
 Every other harness keeps the original behavior of returning `unknown` immediately without further Enter retries.
-`tests/fm-tmux-submit-busy.test.sh` covers busy and idle panes with proven, ambiguous, and cleared composers, plus the OMP baseline-busy and non-OMP unknown cases.
+`tests/fm-tmux-submit-busy.test.sh` covers busy and idle panes with proven, ambiguous, and cleared composers, plus OMP queue transitions, unchanged and malformed captures, and the non-OMP unknown case.
 
 ## Limits and regression entry points
 

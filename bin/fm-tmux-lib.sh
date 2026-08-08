@@ -32,19 +32,18 @@
 # benefits, and the herdr adapter routes through the same owner (task
 # afk-herdr-false-pending), so the two backends cannot drift.
 #
-# Busy-queued Enter (opencode 1.18.4, on the tmux backend only for now): when
+# Busy-queued Enter: when
 # the agent is mid-turn, opencode accepts Enter as a "send when the turn ends"
 # keystroke but does NOT clear the composer until then, so the composer keeps
 # showing the typed text the whole time. The plain "empty iff composer cleared"
 # acknowledgement above false-positives on a swallowed Enter for every steer
 # sent to a busy opencode pane, and `fm-send` exits non-zero on a normal
-# captain instruction. The submit core now falls back to `fm_pane_is_busy` once
+# captain instruction. The submit core falls back to `fm_pane_is_busy` once
 # the Enter-retry budget is spent: a busy pane means the harness accepted and
 # queued the Enter (report `empty` so the caller does not re-send), while an
-# idle pane keeps the `pending` verdict (a genuine swallow). The herdr backend
-# observes the same opencode behavior but needs a separate fix; it is recorded
-# as a known gap in `docs/herdr-backend.md` rather than patched here, so the
-# tmux adapter does not paper over a herdr-specific shape.
+# idle pane keeps the `pending` verdict (a genuine swallow). OMP never uses that
+# inference: a task-bound valid composer and a positive `Steering · N` count
+# increase from before Enter are required on both tmux and Herdr.
 #
 # Overrides: FM_COMPOSER_IDLE_RE matches an empty composer after ghost and
 # structural border stripping. FM_BUSY_REGEX overrides the rendered busy-footer
@@ -348,6 +347,24 @@ fm_tmux_omp_composer_state() {  # <cursor-y> <plain-visible-pane> [canonical-bun
   fm_composer_classify_content 1 "$content" "${FM_COMPOSER_IDLE_RE:-}" insensitive "$bottom"
 }
 
+fm_tmux_omp_steering_count() {  # <target> [canonical-bun] -> nonnegative count; 1 without valid live structure
+  local target=$1 bun=${2:-${FM_OMP_BUN:-}} cy pane plain state trailing count
+  cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || return 1
+  case "$cy" in ''|*[!0-9]*|0) return 1 ;; esac
+  pane=$(tmux capture-pane -e -p -t "$target" -S 0 -E - 2>/dev/null) || return 1
+  plain=$(printf '%s\n' "$pane" | fm_composer_strip_ansi)
+  state=$(fm_tmux_omp_composer_state "$cy" "$plain" "$bun") || return 1
+  [ "$state" != unknown ] || return 1
+  trailing=$(printf '%s\n' "$plain" | sed -n "$((cy + 2)),\$p" | sed '/^[[:space:]]*$/d')
+  if [ -z "$trailing" ]; then
+    printf '0'
+    return 0
+  fi
+  [ "$(printf '%s\n' "$trailing" | wc -l | tr -d '[:space:]')" -eq 1 ] || return 1
+  count=$(printf '%s\n' "$trailing" | fm_composer_omp_steering_count) || return 1
+  printf '%s' "$count"
+}
+
 fm_tmux_composer_state() {  # <target> [harness] [canonical-omp-bun] -> empty|pending|pending-unproven|unknown
   local target=$1 harness=${2:-} bun=${3:-${FM_OMP_BUN:-}}
   local cy raw pane plain box box_status top bottom geometry_ambiguous omp_state
@@ -356,13 +373,6 @@ fm_tmux_composer_state() {  # <target> [harness] [canonical-omp-bun] -> empty|pe
   case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
   pane=$(tmux capture-pane -e -p -t "$target" -S 0 -E - 2>/dev/null) || { printf 'unknown'; return 0; }
   plain=$(printf '%s\n' "$pane" | fm_composer_strip_ansi)
-  if [ "$harness" = omp ] && fm_composer_omp_steering_queued <<EOF
-$plain
-EOF
-  then
-    printf 'empty'
-    return 0
-  fi
   # The OMP structural contract applies only to a pane whose harness identity is
   # OMP. Tmux has no native agent identity, so the caller-supplied harness is the
   # gate; another harness that happens to render an OMP-shaped row keeps the
@@ -442,22 +452,23 @@ fm_pane_is_busy() {  # <target> [harness]
 # `fm_pane_is_busy`: a busy pane means the Enter was accepted and queued (report
 # `empty` so the caller does not re-send), while an idle pane keeps `pending` as
 # a genuine swallow. Pending-unproven receives the same Enter retry budget but
-# never reaches this exception.
-fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [harness] [baseline-busy] [canonical-omp-bun]
-  local target=$1 retries=$2 sleep_s=$3 harness=${4:-} baseline_busy=${5:-0} bun=${6:-} i=0 state
+# never reaches this exception. OMP instead requires a positive queue-count
+# transition from a structurally valid pre-Enter snapshot.
+fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [harness] [omp-queue-baseline] [canonical-omp-bun]
+  local target=$1 retries=$2 sleep_s=$3 harness=${4:-} queue_baseline=${5:-} bun=${6:-} i=0 state queue_count
   while :; do
     tmux send-keys -t "$target" Enter 2>/dev/null || true
     sleep "$sleep_s"
     state=$(fm_tmux_composer_state "$target" "$harness" "$bun")
+    if [ "$harness" = omp ] && [ -n "$queue_baseline" ] \
+       && queue_count=$(fm_tmux_omp_steering_count "$target" "$bun") \
+       && [ "$queue_count" -gt "$queue_baseline" ]; then
+      printf 'empty'
+      return 0
+    fi
     case "$state" in
       pending|pending-unproven) ;;
-      unknown)
-        [ "$harness" = omp ] || { printf '%s' "$state"; return 0; }
-        if [ "$baseline_busy" -eq 0 ] && fm_pane_is_busy "$target" omp; then
-          printf 'empty'
-          return 0
-        fi
-        ;;
+      unknown) [ "$harness" = omp ] || { printf '%s' "$state"; return 0; } ;;
       *) printf '%s' "$state"; return 0 ;;
     esac
     i=$((i + 1))
@@ -472,7 +483,7 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [harness] [bas
   # and queued the message for processing when the current turn ends.
   # Treat it as submitted so the caller does not re-send.
   # On an idle pane, keep reporting pending - a genuine swallow.
-  if fm_pane_is_busy "$target" "$harness"; then
+  if [ "$harness" != omp ] && fm_pane_is_busy "$target" "$harness"; then
     printf 'empty'
   else
     printf 'pending'
@@ -480,11 +491,11 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [harness] [bas
 }
 
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle> [harness] [canonical-omp-bun]
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${6:-} bun=${7:-} baseline_busy=0
-  if [ "$harness" = omp ] && fm_pane_is_busy "$target" omp; then
-    baseline_busy=1
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${6:-} bun=${7:-} queue_baseline=
+  if [ "$harness" = omp ]; then
+    queue_baseline=$(fm_tmux_omp_steering_count "$target" "$bun" 2>/dev/null || true)
   fi
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
   sleep "$settle"
-  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$harness" "$baseline_busy" "$bun"
+  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$harness" "$queue_baseline" "$bun"
 }

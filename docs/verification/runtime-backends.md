@@ -145,6 +145,21 @@ The guarded primary, worker/scout, and secondmate owners reran on 2026-08-01 at 
 The OMP 17.2.10 watcher-input regression passed on 2026-08-07 with the editable draft intact; the exact command and bounded output are recorded in [`supervision.md`](supervision.md#native-session-start-delivery).
 The Herdr role matrix required each expected turn-end or routed-reply notification to reach the durable queue or the primary follow-up transcript before the fixture drained it.
 
+The deterministic tmux and Herdr composer fixtures reran on 2026-08-08 and proved that only a structurally valid post-Enter `Steering · N` count increase confirms queued delivery, while unchanged counts and rendered busy state alone fail closed:
+
+```sh
+bash -o pipefail -c '{ tests/fm-tmux-submit-busy.test.sh; tests/fm-backend-herdr.test.sh; tests/fm-send-secondmate-marker.test.sh; } | grep -E "^(ok - OMP submit confirmation refuses|ok - fm_backend_herdr_send_text_submit: (an increased|an unchanged)|ok - fm-send: a queued OMP secondmate)"'
+```
+
+Observed bounded output:
+
+```text
+ok - OMP submit confirmation refuses busy inference without a queue transition
+ok - fm_backend_herdr_send_text_submit: an increased Steering queue confirms a busy steer without redelivery
+ok - fm_backend_herdr_send_text_submit: an unchanged Steering queue cannot confirm a busy steer
+ok - fm-send: a queued OMP secondmate steer confirms delivery without discarding the pending-reply expectation
+```
+
 The full OMP contract and both live backend matrices passed together in one clean-environment runner invocation on 2026-08-01 at head `491bc809a38a84f5ea651fd051b509cb511149a1`:
 
 ```sh
