@@ -32,10 +32,13 @@ case "${1:-}" in
     exit 0 ;;
   capture-pane) cat "$COMPOSER" 2>/dev/null; exit 0 ;;
   send-keys)
-    shift; is_enter=0
+    shift; is_enter=0; is_literal=0
     while [ "$#" -gt 0 ]; do
-      case "$1" in -t) shift ;; -l) ;; Enter) is_enter=1 ;; esac; shift
+      case "$1" in -t) shift ;; -l) is_literal=1 ;; Enter) is_enter=1 ;; esac; shift
     done
+    if [ "$is_literal" = 1 ] && [ -n "${FM_FAKE_AFTER_LITERAL_COMPOSER:-}" ]; then
+      cp "$FM_FAKE_AFTER_LITERAL_COMPOSER" "$COMPOSER"
+    fi
     if [ "$is_enter" = 1 ]; then
       [ -z "${FM_FAKE_SENT:-}" ] || printf 'Enter\n' >> "$FM_FAKE_SENT"
       [ -z "${FM_FAKE_BUSY_AFTER_ENTER:-}" ] || : > "$FM_FAKE_BUSY_AFTER_ENTER"
@@ -192,7 +195,7 @@ test_unrecognized_state_skips_busy_conversion() {
 }
 
 test_omp_composer_and_submission_use_verified_two_row_structure() {
-  local dir fakebin composer after sent vfile top width bun
+  local dir fakebin composer after concurrent sent vfile top width bun
   if ! command -v bun >/dev/null 2>&1; then
     pass "OMP tmux composer subtest skipped: bun not found"
     return
@@ -202,6 +205,7 @@ test_omp_composer_and_submission_use_verified_two_row_structure() {
   fakebin=$(make_submit_mock "$dir")
   composer="$dir/composer"
   after="$dir/after"
+  concurrent="$dir/concurrent"
   sent="$dir/sent.log"
   vfile="$dir/verdict"
   : > "$sent"
@@ -243,6 +247,17 @@ test_omp_composer_and_submission_use_verified_two_row_structure() {
     fm_tmux_submit_core omp unchanged 1 0.01 0 omp "$bun" > "$vfile" 2>/dev/null
   [ "$(cat "$vfile")" = pending ] \
     || fail "an unchanged OMP queue count must remain pending, got '$(cat "$vfile")'"
+  printf '%s\n' "$top" > "$composer"
+  printf '╰─%-*s─╯\n' "$((width - 4))" ' steer after current turn' >> "$composer"
+  cp "$composer" "$concurrent"
+  printf 'Steering · 1\n' >> "$concurrent"
+  touch "$dir/.swallow"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_AFTER_LITERAL_COMPOSER="$concurrent" FM_FAKE_SWALLOW="$dir/.swallow" \
+    FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_PANE_BUSY=1 \
+    fm_tmux_submit_core omp concurrent 1 0.01 0 omp "$bun" > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = pending ] \
+    || fail "a queue increase before the pre-Enter snapshot must remain pending, got '$(cat "$vfile")'"
   printf 'Steering · 2\n' > "$composer"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
     FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_PANE_BUSY=1 \
@@ -282,13 +297,13 @@ test_omp_composer_and_submission_use_verified_two_row_structure() {
   touch "$dir/.swallow"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
     FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PANE_BUSY=0 \
-    fm_tmux_submit_enter_core omp 3 0.01 omp 0 "$bun" > "$vfile" 2>/dev/null
+    fm_tmux_submit_enter_core omp 3 0.01 omp 0 "" "$bun" > "$vfile" 2>/dev/null
   [ "$(cat "$vfile")" = empty ] || fail "OMP skill submission should retry the autocomplete swallow, got '$(cat "$vfile")'"
   [ "$(grep -c '^Enter$' "$sent")" -eq 2 ] || fail "OMP skill submission should require one verified Enter retry"
   pass "OMP tmux composer distinguishes empty, pending, stale, malformed, and autocomplete submission states"
 }
 
-test_omp_busy_inference_fails_closed_without_queue_transition() {
+test_omp_idle_to_busy_preserved_and_busy_without_queue_fails_closed() {
   local dir fakebin composer busy_marker vfile
   dir="$TMP_ROOT/omp-idle-to-busy"
   fakebin=$(make_submit_mock "$dir")
@@ -304,8 +319,8 @@ test_omp_busy_inference_fails_closed_without_queue_transition() {
       FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 \
       fm_tmux_submit_core win message 1 0.01 0 omp > "$vfile" 2>/dev/null
   ) || fail "OMP idle-to-busy submit check failed"
-  [ "$(cat "$vfile")" = unknown ] \
-    || fail "OMP busy onset without queue proof must remain unknown, got '$(cat "$vfile")'"
+  [ "$(cat "$vfile")" = empty ] \
+    || fail "an initially idle OMP pane should confirm its busy onset, got '$(cat "$vfile")'"
 
   : > "$busy_marker"
   (
@@ -317,7 +332,7 @@ test_omp_busy_inference_fails_closed_without_queue_transition() {
   ) || fail "OMP already-busy submit check failed"
   [ "$(cat "$vfile")" = unknown ] \
     || fail "an already-busy OMP pane must not prove a new submission, got '$(cat "$vfile")'"
-  pass "OMP submit confirmation refuses busy inference without a queue transition"
+  pass "OMP submit preserves idle-to-busy proof and requires queue proof when already busy"
 }
 
 test_omp_busy_signature_is_exact_and_scoped() {
@@ -428,6 +443,6 @@ test_busy_pane_unknown_stays_unknown
 test_busy_pane_ambiguous_pending_retries_without_conversion
 test_unrecognized_state_skips_busy_conversion
 test_omp_composer_and_submission_use_verified_two_row_structure
-test_omp_busy_inference_fails_closed_without_queue_transition
+test_omp_idle_to_busy_preserved_and_busy_without_queue_fails_closed
 test_omp_busy_signature_is_exact_and_scoped
 test_claude_busy_signature_uses_real_capture_shapes

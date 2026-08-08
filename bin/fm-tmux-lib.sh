@@ -41,9 +41,11 @@
 # captain instruction. The submit core falls back to `fm_pane_is_busy` once
 # the Enter-retry budget is spent: a busy pane means the harness accepted and
 # queued the Enter (report `empty` so the caller does not re-send), while an
-# idle pane keeps the `pending` verdict (a genuine swallow). OMP never uses that
-# inference: a task-bound valid composer and a positive `Steering · N` count
-# increase from before Enter are required on both tmux and Herdr.
+# idle pane keeps the `pending` verdict (a genuine swallow). An already-busy OMP
+# pane never uses that inference: a task-bound valid composer and a positive
+# `Steering · N` count increase from the immediate pre-Enter snapshot are
+# required on both tmux and Herdr. An initially idle tmux OMP pane retains its
+# separate busy-onset proof.
 #
 # Overrides: FM_COMPOSER_IDLE_RE matches an empty composer after ghost and
 # structural border stripping. FM_BUSY_REGEX overrides the rendered busy-footer
@@ -452,15 +454,16 @@ fm_pane_is_busy() {  # <target> [harness]
 # `fm_pane_is_busy`: a busy pane means the Enter was accepted and queued (report
 # `empty` so the caller does not re-send), while an idle pane keeps `pending` as
 # a genuine swallow. Pending-unproven receives the same Enter retry budget but
-# never reaches this exception. OMP instead requires a positive queue-count
-# transition from a structurally valid pre-Enter snapshot.
-fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [harness] [omp-queue-baseline] [canonical-omp-bun]
-  local target=$1 retries=$2 sleep_s=$3 harness=${4:-} queue_baseline=${5:-} bun=${6:-} i=0 state queue_count
+# never reaches this exception. An already-busy OMP pane instead requires a
+# positive queue-count transition from a structurally valid pre-Enter snapshot.
+fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [harness] [baseline-busy] [omp-queue-baseline] [canonical-omp-bun]
+  local target=$1 retries=$2 sleep_s=$3 harness=${4:-} baseline_busy=${5:-0} queue_baseline=${6:-} bun=${7:-}
+  local i=0 state queue_count
   while :; do
     tmux send-keys -t "$target" Enter 2>/dev/null || true
     sleep "$sleep_s"
     state=$(fm_tmux_composer_state "$target" "$harness" "$bun")
-    if [ "$harness" = omp ] && [ -n "$queue_baseline" ] \
+    if [ "$harness" = omp ] && [ "$baseline_busy" -eq 1 ] && [ -n "$queue_baseline" ] \
        && queue_count=$(fm_tmux_omp_steering_count "$target" "$bun") \
        && [ "$queue_count" -gt "$queue_baseline" ]; then
       printf 'empty'
@@ -468,7 +471,13 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [harness] [omp
     fi
     case "$state" in
       pending|pending-unproven) ;;
-      unknown) [ "$harness" = omp ] || { printf '%s' "$state"; return 0; } ;;
+      unknown)
+        [ "$harness" = omp ] || { printf '%s' "$state"; return 0; }
+        if [ "$baseline_busy" -eq 0 ] && fm_pane_is_busy "$target" omp; then
+          printf 'empty'
+          return 0
+        fi
+        ;;
       *) printf '%s' "$state"; return 0 ;;
     esac
     i=$((i + 1))
@@ -491,11 +500,16 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [harness] [omp
 }
 
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle> [harness] [canonical-omp-bun]
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${6:-} bun=${7:-} queue_baseline=
-  if [ "$harness" = omp ]; then
-    queue_baseline=$(fm_tmux_omp_steering_count "$target" "$bun" 2>/dev/null || true)
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${6:-} bun=${7:-}
+  local baseline_busy=0 queue_baseline=
+  if [ "$harness" = omp ] && fm_pane_is_busy "$target" omp; then
+    baseline_busy=1
   fi
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
   sleep "$settle"
-  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$harness" "$queue_baseline" "$bun"
+  if [ "$harness" = omp ] && [ "$baseline_busy" -eq 1 ]; then
+    queue_baseline=$(fm_tmux_omp_steering_count "$target" "$bun" 2>/dev/null || true)
+  fi
+  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$harness" \
+    "$baseline_busy" "$queue_baseline" "$bun"
 }

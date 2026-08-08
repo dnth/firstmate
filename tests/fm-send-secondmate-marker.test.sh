@@ -57,7 +57,9 @@ case "${1:-}" in
   display-message)
     for a in "$@"; do
       case "$a" in
-        *cursor_y*) printf '1\n'; exit 0 ;;
+        *cursor_y*)
+          if [ "${FM_SEND_QUEUED:-0}" = 1 ]; then printf '2\n'; else printf '1\n'; fi
+          exit 0 ;;
         *pane_current_command*)
           if [ "${FM_SEND_OMP:-0}" = 1 ]; then printf 'bun\n'; else printf 'fakepane\n'; fi
           exit 0 ;;
@@ -158,7 +160,7 @@ test_queued_secondmate_target_confirms_delivery() {
   omp=$(fm_test_realpath "$omp")
   top='╭── ⬢ GPT-5.6-Sol++ · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
   width=$(fm_composer_terminal_width "$top" "$actual_bun") || fail "could not measure queued secondmate fixture"
-  printf '%s\n' "$top" > "$dir/before"
+  printf 'Working… ⟦esc⟧\n%s\n' "$top" > "$dir/before"
   printf '╰─%-*s─╯\n' "$((width - 4))" ' queue the steer' >> "$dir/before"
   cp "$dir/before" "$dir/after"
   printf 'Steering · 1\n' >> "$dir/after"
