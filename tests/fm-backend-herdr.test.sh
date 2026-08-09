@@ -3526,6 +3526,28 @@ test_send_text_submit_omp_busy_without_new_event_refuses_without_retry() {
   pass "fm_backend_herdr_send_text_submit: an unacknowledged busy OMP steer stays queued-unconfirmed without redelivery"
 }
 
+test_send_text_submit_omp_busy_enter_transport_failure_returns_send_failed() {
+  local dir log resp fb out session text
+  dir="$TMP_ROOT/submit-omp-busy-enter-fail"
+  mkdir -p "$dir/responses"
+  log="$dir/log"
+  resp="$dir/responses"
+  : > "$log"
+  session="$dir/omp-session.jsonl"
+  text='Queue this after the current turn.'
+  printf '%s\n' '{"type":"session","version":3}' > "$session"
+  printf '{"result":{"agent":{"agent":"omp","agent_status":"working","agent_session":{"kind":"path","value":"%s"}}}}\n' "$session" > "$resp/1.out"
+  printf '1\n' > "$resp/3.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0 \
+    FM_BACKEND_HERDR_OMP_EVENT_CONFIRM_SLEEP=0 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0 0 "" omp' "$ROOT" "$text" )
+  [ "$out" = send-failed ] \
+    || fail "a failed busy OMP Enter transport must return send-failed, got '$out'"
+  pass "fm_backend_herdr_send_text_submit: busy OMP Enter transport failure returns send-failed"
+}
+
 # --- blocked OMP ask answers ------------------------------------------------
 # A blocked OMP agent is parked on an open ask, so the answer it receives is
 # recorded as its own ask tool result, never as a steering user record. These
@@ -4530,6 +4552,7 @@ test_send_text_submit_omp_busy_steer_requires_matching_new_session_event
 test_send_text_submit_omp_busy_steer_accepts_queued_composer
 test_send_text_submit_omp_busy_default_event_budget_is_bounded_and_long_enough
 test_send_text_submit_omp_busy_without_new_event_refuses_without_retry
+test_send_text_submit_omp_busy_enter_transport_failure_returns_send_failed
 test_send_text_submit_omp_blocked_confirms_from_structured_ask_result
 test_send_text_submit_omp_blocked_rejects_steering_record_as_ask_answer
 test_send_text_submit_omp_blocked_rejects_failed_ask_result

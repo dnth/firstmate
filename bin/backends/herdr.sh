@@ -2979,7 +2979,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   fi
   confirm_sleep=$(fm_backend_herdr_submit_confirm_budget "$sleep_s")
   while :; do
-    fm_backend_herdr_send_key "$target" Enter || true
+    fm_backend_herdr_send_key "$target" Enter || { printf 'send-failed'; return 0; }
     if [ "$harness" = omp ] && [ "$text" = /exit ]; then
       omp_confirm_sleep=$(fm_backend_herdr_submit_confirm_budget "$FM_BACKEND_HERDR_OMP_EVENT_CONFIRM_SLEEP")
       if fm_backend_herdr_wait_omp_session_exit "$omp_session" "$omp_offset" \

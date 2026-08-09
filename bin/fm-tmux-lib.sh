@@ -436,7 +436,11 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [harness] [bas
   local target=$1 retries=$2 sleep_s=$3 harness=${4:-} baseline_busy=${5:-0} bun=${6:-}
   local i=0 state
   while :; do
-    tmux send-keys -t "$target" Enter 2>/dev/null || true
+    if ! tmux send-keys -t "$target" Enter 2>/dev/null; then
+      i=$((i + 1))
+      [ "$i" -lt "$retries" ] || { printf 'send-failed'; return 0; }
+      continue
+    fi
     sleep "$sleep_s"
     state=$(fm_tmux_composer_state "$target" "$harness" "$bun")
     case "$state" in

@@ -145,25 +145,21 @@ The guarded primary, worker/scout, and secondmate owners reran on 2026-08-01 at 
 The OMP 17.2.10 watcher-input regression passed on 2026-08-07 with the editable draft intact; the exact command and bounded output are recorded in [`supervision.md`](supervision.md#native-session-start-delivery).
 The Herdr role matrix required each expected turn-end or routed-reply notification to reach the durable queue or the primary follow-up transcript before the fixture drained it.
 
-The deterministic tmux and Herdr composer fixtures reran on 2026-08-09 and proved that arbitrary complete numbered queue blocks, including a 5-to-6 transition, remain detectable without a proximity cutoff and that only one structurally valid post-Enter snapshot containing both an empty composer and a count increase from the immediate pre-Enter snapshot confirms an already-busy queued delivery, while pending input, incomplete blocks, an empty composer alone, unchanged or earlier count changes fail closed and an initially idle tmux target retains its separate busy-onset proof.
+The deterministic tmux and Herdr fixtures reran on 2026-08-09 and proved that an already-busy OMP send returns `queued-unconfirmed` only after Enter transport succeeds, without reading a rendered steering count, while Enter transport failure returns `send-failed` and initially idle editable input remains pending and fails closed.
 This is revision-bound source-fixture evidence for the source under review, using Bun 1.3.14 only for terminal-cell measurement; it does not invoke OMP or make an OMP runtime-version claim.
 
 ```sh
 bun --version
-bash -o pipefail -c '{ tests/fm-tmux-submit-busy.test.sh; tests/fm-backend-herdr.test.sh; } | grep -E "^(ok - OMP (tmux composer|submit preserves)|ok - fm_backend_herdr_send_text_submit: (an increased|queue growth|an unchanged))"'
+bash -o pipefail -c '{ tests/fm-tmux-submit-busy.test.sh; tests/fm-backend-herdr.test.sh; } | grep -E "busy OMP (Enter transport failure|without proof|queued submit)"'
 ```
 
 Observed bounded output:
 
 ```text
 1.3.14
-ok - OMP tmux composer confirms a complete 5-to-6 queue transition
-ok - OMP tmux composer queue growth cannot confirm editable input
-ok - OMP tmux composer distinguishes empty, pending, stale, malformed, and autocomplete submission states
-ok - OMP submit preserves idle-to-busy proof and requires queue proof when already busy
-ok - fm_backend_herdr_send_text_submit: an increased 5-to-6 Steering queue confirms without redelivery
-ok - fm_backend_herdr_send_text_submit: queue growth cannot confirm editable OMP input
-ok - fm_backend_herdr_send_text_submit: an unchanged Steering queue cannot confirm a busy steer
+ok - fm_tmux_submit_enter_core: busy OMP Enter transport failure returns send-failed
+ok - fm_backend_herdr_send_text_submit: busy OMP without proof is queued-unconfirmed
+ok - fm_backend_herdr_send_text_submit: busy OMP Enter transport failure returns send-failed
 ```
 
 The full OMP contract and both live backend matrices passed together in one clean-environment runner invocation on 2026-08-01 at head `491bc809a38a84f5ea651fd051b509cb511149a1`:

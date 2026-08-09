@@ -36,6 +36,9 @@ case "${1:-}" in
     while [ "$#" -gt 0 ]; do
       case "$1" in -t) shift ;; -l) is_literal=1 ;; Enter) is_enter=1 ;; esac; shift
     done
+    if [ "$is_enter" = 1 ] && [ "${FM_FAKE_ENTER_FAIL:-0}" = 1 ]; then
+      exit 1
+    fi
     if [ "$is_literal" = 1 ] && [ -n "${FM_FAKE_AFTER_LITERAL_COMPOSER:-}" ]; then
       cp "$FM_FAKE_AFTER_LITERAL_COMPOSER" "$COMPOSER"
     fi
@@ -96,6 +99,21 @@ test_idle_pane_pending_returns_pending() {
     fm_tmux_submit_enter_core "win" 3 0.05 > "$vfile" 2>/dev/null
   [ "$(cat "$vfile")" = pending ] || fail "idle-pane pending should return pending, got '$(cat "$vfile")'"
   pass "fm_tmux_submit_enter_core: idle pane + pending composer stays pending (genuine swallow preserved)"
+}
+
+test_busy_omp_enter_transport_failure_returns_send_failed() {
+  local dir fakebin composer vfile
+  dir="$TMP_ROOT/omp-enter-fail"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  vfile="$dir/verdict"
+  printf '╭────────────╮\n│ > queued   │\n╰────────────╯\n' > "$composer"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_ENTER_FAIL=1 \
+    FM_FAKE_PANE_BUSY=1 fm_tmux_submit_enter_core "win" 1 0 omp 1 \
+    > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = send-failed ] \
+    || fail "a failed busy OMP Enter transport must return send-failed, got '$(cat "$vfile")'"
+  pass "fm_tmux_submit_enter_core: busy OMP Enter transport failure returns send-failed"
 }
 
 test_busy_pane_composer_clears_first_try() {
@@ -385,6 +403,7 @@ test_claude_busy_signature_uses_real_capture_shapes() {
 
 test_busy_pane_pending_returns_empty
 test_idle_pane_pending_returns_pending
+test_busy_omp_enter_transport_failure_returns_send_failed
 test_busy_pane_composer_clears_first_try
 test_idle_pane_composer_clears_first_try
 test_busy_pane_unknown_stays_unknown
