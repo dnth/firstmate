@@ -195,7 +195,7 @@ test_unrecognized_state_skips_busy_conversion() {
 }
 
 test_omp_composer_and_submission_use_verified_two_row_structure() {
-  local dir fakebin composer after after_pending concurrent sent vfile top width bun
+  local dir fakebin composer after after_many after_pending concurrent sent vfile top width bun n
   if ! command -v bun >/dev/null 2>&1; then
     pass "OMP tmux composer subtest skipped: bun not found"
     return
@@ -205,6 +205,7 @@ test_omp_composer_and_submission_use_verified_two_row_structure() {
   fakebin=$(make_submit_mock "$dir")
   composer="$dir/composer"
   after="$dir/after"
+  after_many="$dir/after-many"
   after_pending="$dir/after-pending"
   concurrent="$dir/concurrent"
   sent="$dir/sent.log"
@@ -258,6 +259,43 @@ test_omp_composer_and_submission_use_verified_two_row_structure() {
     FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_PANE_BUSY=1 FM_FAKE_CURSOR_Y=5 \
     fm_tmux_submit_core omp queued 1 0.01 0 omp "$bun" > "$vfile" 2>/dev/null
   [ "$(cat "$vfile")" = empty ] || fail "tmux submit should confirm an increased OMP queue count, got '$(cat "$vfile")'"
+  {
+    printf 'transcript row\n'
+    printf 'Steering · 5\n'
+    for n in 1 2 3 4 5; do printf '  %s. queued steer %s\n' "$n" "$n"; done
+    printf '  └ Alt+Up/Shift+Up to edit\n'
+    printf '⠴ Running requested sleep ⟦esc⟧\n'
+    printf '%s\n' "$top"
+    printf '╰─%-*s─╯\n' "$((width - 4))" ' sixth steer'
+  } > "$composer"
+  {
+    printf 'Steering · 6\n'
+    for n in 1 2 3 4 5 6; do printf '  %s. queued steer %s\n' "$n" "$n"; done
+    printf '  └ Alt+Up/Shift+Up to edit\n'
+    printf '⠴ Running requested sleep ⟦esc⟧\n'
+    printf '%s\n' "$top"
+    printf '╰─%-*s─╯\n' "$((width - 4))" ''
+  } > "$after_many"
+  touch "$dir/.swallow"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_AFTER_ENTER_COMPOSER="$after_many" FM_FAKE_SWALLOW="$dir/.swallow" \
+    FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_PANE_BUSY=1 FM_FAKE_CURSOR_Y=10 \
+    fm_tmux_submit_core omp queued-sixth 1 0.01 0 omp "$bun" > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = empty ] \
+    || fail "tmux submit should confirm a complete 5-to-6 OMP queue transition, got '$(cat "$vfile")'"
+  pass "OMP tmux composer confirms a complete 5-to-6 queue transition"
+  {
+    printf 'Steering · 6\n'
+    for n in 1 2 3 4 5; do printf '  %s. queued steer %s\n' "$n" "$n"; done
+    printf '  └ Alt+Up/Shift+Up to edit\n'
+    printf '⠴ Running requested sleep ⟦esc⟧\n'
+    printf '%s\n' "$top"
+    printf '╰─%-*s─╯\n' "$((width - 4))" ''
+  } > "$composer"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_CURSOR_Y=9 \
+    fm_tmux_omp_steering_count omp "$bun" empty > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = 0 ] \
+    || fail "an incomplete six-item OMP queue block must not yield a count, got '$(cat "$vfile")'"
   {
     printf 'Steering · 1\n'
     printf '  1. unrelated concurrent steer\n'

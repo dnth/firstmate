@@ -350,8 +350,7 @@ fm_tmux_omp_composer_state() {  # <cursor-y> <plain-visible-pane> [canonical-bun
 }
 
 fm_tmux_omp_steering_count() {  # <target> [canonical-bun] [required-state] -> nonnegative count; 1 without required live structure
-  local target=$1 bun=${2:-${FM_OMP_BUN:-}} required_state=${3:-} cy pane plain state max_rows=8
-  local row=0 line trimmed candidate count=
+  local target=$1 bun=${2:-${FM_OMP_BUN:-}} required_state=${3:-} cy pane plain state count=
   cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || return 1
   case "$cy" in ''|*[!0-9]*|0) return 1 ;; esac
   pane=$(tmux capture-pane -e -p -t "$target" -S 0 -E - 2>/dev/null) || return 1
@@ -359,22 +358,9 @@ fm_tmux_omp_steering_count() {  # <target> [canonical-bun] [required-state] -> n
   state=$(fm_tmux_omp_composer_state "$cy" "$plain" "$bun") || return 1
   [ "$state" != unknown ] || return 1
   [ -z "$required_state" ] || [ "$state" = "$required_state" ] || return 1
-  while IFS= read -r line; do
-    row=$((row + 1))
-    [ "$row" -lt "$cy" ] || break
-    [ "$((cy - row))" -le "$max_rows" ] || continue
-    trimmed="${line#"${line%%[![:space:]]*}"}"
-    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
-    candidate=$(printf '%s\n' "$trimmed" | fm_composer_omp_steering_count) || continue
-    count=$candidate
-  done <<EOF
-$plain
-EOF
-  if [ -n "$count" ]; then
-    printf '%s' "$count"
-  else
-    printf '0'
-  fi
+  count=$(printf '%s\n' "$plain" | fm_composer_omp_steering_block_count "$cy" 2>/dev/null) \
+    || { printf '0'; return 0; }
+  printf '%s' "$count"
 }
 
 fm_tmux_composer_state() {  # <target> [harness] [canonical-omp-bun] -> empty|pending|pending-unproven|unknown

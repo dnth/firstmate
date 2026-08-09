@@ -2497,7 +2497,7 @@ FM_BACKEND_HERDR_OMP_COMPOSER_MIN_WIDTH=${FM_BACKEND_HERDR_OMP_COMPOSER_MIN_WIDT
 fm_backend_herdr_omp_composer_find() {  # <ansi-capture> [canonical-omp-bun]
   local cap=$1 bun=${2:-${FM_OMP_BUN:-}} line plain trimmed row=0 open=0 lines=0 max min_width
   local candidate="" bottom_inner bottom_width top_width=0 top_row=0 last_nonempty=0
-  local steering_row=0 steering_count='' steering_candidate=''
+  local steering_count=''
   max=$FM_BACKEND_HERDR_OMP_COMPOSER_MAX_LINES
   min_width=$FM_BACKEND_HERDR_OMP_COMPOSER_MIN_WIDTH
   case "$max" in ''|*[!0-9]*|0) max=8 ;; esac
@@ -2516,10 +2516,6 @@ fm_backend_herdr_omp_composer_find() {  # <ansi-capture> [canonical-omp-bun]
     trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
     if [ -n "$trimmed" ]; then
       last_nonempty=$row
-      if steering_candidate=$(printf '%s\n' "$trimmed" | fm_composer_omp_steering_count); then
-        steering_row=$row
-        steering_count=$steering_candidate
-      fi
     fi
     case "$trimmed" in
       '╭── '*' ▶'*'──╮')
@@ -2562,9 +2558,8 @@ fm_backend_herdr_omp_composer_find() {  # <ansi-capture> [canonical-omp-bun]
 $cap
 EOF
   if [ "$FM_BACKEND_HERDR_OMP_FOUND" -eq 1 ] \
-     && [ "$steering_row" -gt 0 ] \
-     && [ "$top_row" -gt "$steering_row" ] \
-     && [ "$((top_row - steering_row))" -le "$max" ]; then
+     && steering_count=$(printf '%s\n' "$cap" \
+       | fm_composer_omp_steering_block_count "$top_row" 2>/dev/null); then
     FM_BACKEND_HERDR_OMP_STEERING_QUEUED=1
     FM_BACKEND_HERDR_OMP_STEERING_COUNT=$steering_count
   fi

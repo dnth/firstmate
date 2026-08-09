@@ -98,7 +98,7 @@ Ambiguous pending text never receives the busy-queue conversion.
 
 OMP has one narrower exception, scoped to `harness=omp` alone.
 The submit core records whether the pane is busy before typing.
-For an already-busy worker, it snapshots the count from a task-bound, geometrically valid OMP composer after typing and settling, immediately before Enter, and accepts the queued delivery only when one later snapshot of the same structure proves both an empty composer and a strictly larger `Steering · N` count.
+For an already-busy worker, it snapshots the count from a complete numbered queue block above a task-bound, geometrically valid OMP composer after typing and settling, immediately before Enter, and accepts the queued delivery only when one later snapshot of the same structure proves both an empty composer and a strictly larger `Steering · N` count.
 Malformed or composer-less captures, an unchanged count, a count increase before that snapshot, and pending text without the marker all fail closed.
 For an initially idle OMP pane, an `unknown` composer followed by the exact OMP busy signature remains positive proof that the ordinary turn started.
 Every other harness keeps the original behavior of returning `unknown` immediately without further Enter retries.

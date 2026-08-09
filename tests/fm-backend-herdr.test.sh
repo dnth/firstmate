@@ -2832,7 +2832,7 @@ test_composer_state_unknown_when_no_composer_row_found() {
 # composer and not the generic side-bordered or bare-prompt shapes above.
 # Herdr's native exact OMP identity is therefore part of the proof.
 test_composer_state_omp_structure_classifies_empty_pending_and_multiline() {
-  local dir log resp fb out top width case_id content bottom_content middle bun
+  local dir log resp fb out top width case_id content bottom_content middle bun count
   if ! command -v bun >/dev/null 2>&1; then
     pass "OMP Herdr composer structure subtest skipped: bun not found"
     return
@@ -2840,7 +2840,7 @@ test_composer_state_omp_structure_classifies_empty_pending_and_multiline() {
   bun=$(command -v bun)
   top='╭── ⬢ GPT-5.6-Sol++ · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
   width=$(fm_composer_terminal_width "$top" "$bun") || fail "could not measure OMP Herdr fixture width"
-  for case_id in empty pending queued multiline; do
+  for case_id in empty pending queued incomplete-queued multiline; do
     width=$(fm_composer_terminal_width "$top" "$bun") \
       || fail "could not measure OMP Herdr fixture width"
     dir="$TMP_ROOT/composer-omp-$case_id"
@@ -2851,13 +2851,17 @@ test_composer_state_omp_structure_classifies_empty_pending_and_multiline() {
     case "$case_id" in
       empty) content=''; bottom_content='' ;;
       pending) content=' steer after current turn'; bottom_content="$content" ;;
-      queued) content=''; bottom_content='' ;;
+      queued|incomplete-queued) content=''; bottom_content='' ;;
       multiline) content='first line
 second line'; bottom_content='' ;;
     esac
     {
-      if [ "$case_id" = queued ]; then
-        printf 'Steering · 1\n'
+      if [ "$case_id" = queued ] || [ "$case_id" = incomplete-queued ]; then
+        if [ "$case_id" = queued ]; then
+          printf 'Steering · 1\n'
+        else
+          printf 'Steering · 2\n'
+        fi
         printf '  1. steer after current turn\n'
         printf '  └ Alt+Up/Shift+Up to edit\n'
         printf '⠴ Running requested sleep ⟦esc⟧\n'
@@ -2872,7 +2876,7 @@ second line'; bottom_content='' ;;
       printf '╰─%-*s─╯\n' "$((width - 4))" "$bottom_content"
     } > "$resp/1.out"
     printf '%s\n' '{"result":{"agent":{"agent":"omp","agent_status":"idle"}}}' > "$resp/2.out"
-    if [ "$case_id" = queued ]; then
+    if [ "$case_id" = queued ] || [ "$case_id" = incomplete-queued ]; then
       printf '%s\n' "$(<"$resp/1.out")" > "$resp/3.out"
     fi
     fb=$(make_herdr_fakebin "$dir")
@@ -2887,11 +2891,17 @@ second line'; bottom_content='' ;;
           bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_omp_steering_count default:w1:p2 "$1"' "$ROOT" "$bun" )
         [ "$count" = 1 ] || fail "OMP queued composer count was '$count'"
         ;;
+      incomplete-queued)
+        [ "$out" = empty ] || fail "OMP incomplete queued composer classified '$out'"
+        count=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+          bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_omp_steering_count default:w1:p2 "$1"' "$ROOT" "$bun" )
+        [ "$count" = 0 ] || fail "OMP incomplete queued composer count was '$count'"
+        ;;
       multiline) [ "$out" = pending ] || fail "OMP multiline composer classified '$out'" ;;
     esac
     rm -rf "$dir"
   done
-  pass "fm_backend_herdr_composer_state: OMP structure distinguishes empty, pending, queued, and multiline input"
+  pass "fm_backend_herdr_composer_state: OMP structure rejects incomplete queues and distinguishes input states"
 }
 
 test_composer_state_omp_malformed_short_stale_working_and_unreadable_are_unknown() {
@@ -3475,7 +3485,7 @@ test_send_text_submit_omp_busy_steer_requires_matching_new_session_event() {
 }
 
 test_send_text_submit_omp_busy_steer_accepts_queued_composer() {
-  local dir log resp fb out enter_count send_count session text top width bun
+  local dir log resp fb out enter_count send_count session text top width bun n
   if ! command -v bun >/dev/null 2>&1; then
     pass "OMP Herdr queued-composer submit subtest skipped: bun not found"
     return
@@ -3489,13 +3499,17 @@ test_send_text_submit_omp_busy_steer_accepts_queued_composer() {
   bun=$(command -v bun)
   width=$(fm_composer_terminal_width "$top" "$bun") || fail "could not measure queued OMP Herdr fixture"
   {
+    printf 'Steering · 5\n'
+    for n in 1 2 3 4 5; do printf '  %s. queued steer %s\n' "$n" "$n"; done
+    printf '  └ Alt+Up/Shift+Up to edit\n'
     printf '⠴ Running requested sleep ⟦esc⟧\n'
     printf '%s\n' "$top"
     printf '╰─%-*s─╯\n' "$((width - 4))" ' steer after current turn'
   } > "$resp/3.out"
   {
-    printf 'Steering · 1\n'
-    printf '  1. After the current tool finishes, report OMP_BUSY_QUEUED.\n'
+    printf 'Steering · 6\n'
+    for n in 1 2 3 4 5; do printf '  %s. queued steer %s\n' "$n" "$n"; done
+    printf '  6. After the current tool finishes, report OMP_BUSY_QUEUED.\n'
     printf '  └ Alt+Up/Shift+Up to edit\n'
     printf '⠴ Running requested sleep ⟦esc⟧\n'
     printf '%s\n' "$top"
@@ -3511,7 +3525,7 @@ test_send_text_submit_omp_busy_steer_accepts_queued_composer() {
   send_count=$(grep -c $'\x1f''pane'$'\x1f''send-text'$'\x1f''w1:p2'$'\x1f' "$log")
   [ "$enter_count" -eq 1 ] && [ "$send_count" -eq 1 ] \
     || fail "queued OMP composer confirmation retried delivery (send-text=$send_count enter=$enter_count)"
-  pass "fm_backend_herdr_send_text_submit: an increased Steering queue confirms a busy steer without redelivery"
+  pass "fm_backend_herdr_send_text_submit: an increased 5-to-6 Steering queue confirms without redelivery"
 }
 
 test_send_text_submit_omp_busy_rejects_queue_transition_with_pending_input() {
