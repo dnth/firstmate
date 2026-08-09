@@ -15,6 +15,9 @@
 # submit or reports an inconclusive send. If a swallowed Enter is positively
 # confirmed, fm-send exits NON-ZERO so the caller knows the steer did not land
 # instead of silently leaving an unsubmitted instruction.
+# An already-busy OMP pane has one narrow exception: a successfully transported
+# Enter may return `queued-unconfirmed`, which fm-send accepts as queued delivery
+# while preserving failures for transport errors and non-busy pending input.
 # Submission dispatches through the target's recorded backend; the tmux adapter
 # shares its composer/submit core with the away-mode daemon via bin/fm-tmux-lib.sh.
 # Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).
@@ -330,7 +333,7 @@ else
   retries=${FM_SEND_RETRIES:-3}
   sleep_s=${FM_SEND_SLEEP:-0.4}
   # Type once, submit, verify. Exact empty confirms delivery; queued-unconfirmed
-  # preserves an unresolved busy-OMP expectation without native confirmation.
+  # permits only the narrow already-busy OMP queue decision.
   send_rc=0
   if [ "$TARGET_BACKEND" = remote ]; then
     if "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send "$TARGET_REMOTE_ID" "$MESSAGE" < /dev/null >/dev/null; then
@@ -365,7 +368,7 @@ else
     empty)
       ;;
     queued-unconfirmed)
-      # The busy OMP harness accepted the Enter without a native proof event.
+      # The backend transported Enter to busy OMP without a native proof event.
       # Continue through the common delivery-confirmation path.
       ;;
     send-failed)
@@ -398,8 +401,8 @@ else
       exit 1
     fi
   fi
-  # Submit landed with exact empty. Confirmation only proves the text was
-  # accepted; the harness still needs a beat to spin up the
+  # The submit was confirmed or accepted through the narrow busy-OMP queue
+  # verdict. The harness still needs a beat to spin up the
   # turn before its busy footer shows. Pause so an immediate peek catches the
   # crewmate actually working instead of the stale idle pane. FM_SEND_SETTLE=0
   # disables it. Scoped to this path only, never the shared submit core.

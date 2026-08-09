@@ -86,10 +86,10 @@ The submit acknowledgement and away-mode supervisor-pane busy guard below still 
 The supervisor guard selects only the detected primary harness's signature rather than a global union of vendor patterns.
 
 `bin/fm-tmux-lib.sh` owns exact type-and-submit mechanics.
-It types a message once and retries Enter only until the composer clears.
-Only a proven empty composer is a positive delivery acknowledgement.
+It types a message once and retries Enter only while the backend still permits another safe submission attempt.
+A proven empty composer is the ordinary positive delivery acknowledgement.
 Text left in established structure remains `pending`, text in ambiguous structure remains unproven, and unreadable or unsafe state remains unknown.
-`fm-send.sh` reports every unconfirmed verdict as a failure instead of retyping or assuming delivery.
+`fm-send.sh` reports every unconfirmed verdict as a failure except the narrow already-busy OMP queue verdict below.
 
 OpenCode 1.18.4 has one busy-queue exception.
 While OpenCode is mid-turn, Enter queues the message but leaves its text visible until the turn completes.
