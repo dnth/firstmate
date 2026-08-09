@@ -86,10 +86,10 @@ The submit acknowledgement and away-mode supervisor-pane busy guard below still 
 The supervisor guard selects only the detected primary harness's signature rather than a global union of vendor patterns.
 
 `bin/fm-tmux-lib.sh` owns exact type-and-submit mechanics.
-It types a message once and retries Enter only until the composer clears.
-Only a proven empty composer is a positive delivery acknowledgement.
+It types a message once and retries Enter only while the backend still permits another safe submission attempt.
+A proven empty composer is the ordinary positive delivery acknowledgement.
 Text left in established structure remains `pending`, text in ambiguous structure remains unproven, and unreadable or unsafe state remains unknown.
-`fm-send.sh` reports every unconfirmed verdict as a failure instead of retyping or assuming delivery.
+`fm-send.sh` reports every unconfirmed verdict as a failure except the narrow already-busy OMP queue verdict below.
 
 OpenCode 1.18.4 has one busy-queue exception.
 While OpenCode is mid-turn, Enter queues the message but leaves its text visible until the turn completes.
@@ -97,10 +97,12 @@ After the normal retry budget, only structurally proven pending text in a provab
 Ambiguous pending text never receives the busy-queue conversion.
 
 OMP has one narrower exception, scoped to `harness=omp` alone.
-Its composer disappears while a turn runs, so the accepted Enter reads `unknown` rather than empty.
-Only when the pane showed no OMP busy signature before typing and shows one after the Enter is that `unknown` converted to `empty`; otherwise the retries continue and the verdict stays `unknown`.
+The submit core records whether the pane is busy before typing.
+For an already-busy worker, one successfully transported Enter followed by structurally proven pending or empty OMP input returns `queued-unconfirmed` without scraping the rendered steering queue; `fm-send` accepts only that narrow verdict as queued delivery.
+An Enter transport failure returns `send-failed`, while an initially idle pane with editable input left pending still fails closed.
+For an initially idle OMP pane, an `unknown` composer followed by the exact OMP busy signature remains positive proof that the ordinary turn started.
 Every other harness keeps the original behavior of returning `unknown` immediately without further Enter retries.
-`tests/fm-tmux-submit-busy.test.sh` covers busy and idle panes with proven, ambiguous, and cleared composers, plus the OMP baseline-busy and non-OMP unknown cases.
+`tests/fm-tmux-submit-busy.test.sh` covers busy and idle panes with proven, ambiguous, and cleared composers, plus queued OMP delivery, Enter transport failure, malformed captures, and the non-OMP unknown case.
 
 ## Limits and regression entry points
 

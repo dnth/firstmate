@@ -145,6 +145,45 @@ The guarded primary, worker/scout, and secondmate owners reran on 2026-08-01 at 
 The OMP 17.2.10 watcher-input regression passed on 2026-08-07 with the editable draft intact; the exact command and bounded output are recorded in [`supervision.md`](supervision.md#native-session-start-delivery).
 The Herdr role matrix required each expected turn-end or routed-reply notification to reach the durable queue or the primary follow-up transcript before the fixture drained it.
 
+The deterministic tmux and Herdr fixtures reran on 2026-08-09 and proved that an already-busy OMP send returns `queued-unconfirmed` only after Enter transport succeeds, without reading a rendered steering count, while Enter transport failure returns `send-failed` and initially idle editable input remains pending and fails closed.
+This is revision-bound source-fixture evidence for the source under review, using Bun 1.3.14 only for terminal-cell measurement; it does not invoke OMP or make an OMP runtime-version claim.
+
+```sh
+bash -c '
+set -e
+evidence_dir=$(mktemp -d)
+trap "rm -rf \"$evidence_dir\"" EXIT
+command -v bun >/dev/null
+bun --version > "$evidence_dir/actual.out"
+tests/fm-tmux-submit-busy.test.sh > "$evidence_dir/tmux.out"
+tests/fm-backend-herdr.test.sh > "$evidence_dir/herdr.out"
+grep -hE "^(ok - (fm_tmux_submit_enter_core: idle pane \\+ pending composer stays pending|fm_tmux_submit_enter_core: busy OMP Enter transport failure|busy OMP mixed Enter transport retains queued delivery|OMP tmux composer keeps queued busy submits|fm_backend_herdr_send_text_submit: busy OMP without proof|fm_backend_herdr_send_text_submit: busy OMP Enter transport failure))" "$evidence_dir/tmux.out" "$evidence_dir/herdr.out" >> "$evidence_dir/actual.out"
+cat > "$evidence_dir/expected.out" <<EOF
+1.3.14
+ok - fm_tmux_submit_enter_core: idle pane + pending composer stays pending (genuine swallow preserved)
+ok - fm_tmux_submit_enter_core: busy OMP Enter transport failure returns send-failed
+ok - busy OMP mixed Enter transport retains queued delivery
+ok - OMP tmux composer keeps queued busy submits separate from unsubmitted input
+ok - fm_backend_herdr_send_text_submit: busy OMP without proof is queued-unconfirmed
+ok - fm_backend_herdr_send_text_submit: busy OMP Enter transport failure returns send-failed
+EOF
+diff -u "$evidence_dir/expected.out" "$evidence_dir/actual.out"
+cat "$evidence_dir/actual.out"
+'
+```
+
+Observed bounded output:
+
+```text
+1.3.14
+ok - fm_tmux_submit_enter_core: idle pane + pending composer stays pending (genuine swallow preserved)
+ok - fm_tmux_submit_enter_core: busy OMP Enter transport failure returns send-failed
+ok - busy OMP mixed Enter transport retains queued delivery
+ok - OMP tmux composer keeps queued busy submits separate from unsubmitted input
+ok - fm_backend_herdr_send_text_submit: busy OMP without proof is queued-unconfirmed
+ok - fm_backend_herdr_send_text_submit: busy OMP Enter transport failure returns send-failed
+```
+
 The full OMP contract and both live backend matrices passed together in one clean-environment runner invocation on 2026-08-01 at head `491bc809a38a84f5ea651fd051b509cb511149a1`:
 
 ```sh

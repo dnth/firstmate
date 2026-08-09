@@ -26,11 +26,12 @@ SEND="$ROOT/bin/fm-send.sh"
 TMP_ROOT=$(fm_test_tmproot fm-send-marker)
 
 # A fake tmux that (a) records the literal text of every `send-keys -l` to
-# FM_SEND_LOG and (b) lets fm-send's submit path reach a clean "empty" verdict.
-# display-message yields a numeric cursor_y; capture-pane returns an empty
-# bordered composer so fm_tmux_composer_state reads "empty" (submit landed) on the
-# first Enter. Only the literal (-l) text is logged; Enter retries and --key sends
-# are not, so the log holds exactly what was typed into the composer.
+# FM_SEND_LOG and (b) renders a captured busy OMP layout whose editable
+# composer remains visible after Enter. The submit path therefore exercises the
+# busy OMP queued-unconfirmed verdict without scraping a Steering list.
+# display-message yields a numeric cursor_y; the non-OMP path returns an empty
+# bordered composer so fm_tmux_composer_state reads "empty" on the first Enter.
+# Only the literal (-l) text is logged; Enter retries and --key sends are not.
 make_stubs() {  # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -50,13 +51,39 @@ case "${1:-}" in
     done
     if [ "$literal" = 1 ]; then
       printf '%s' "${1:-}" >> "$FM_SEND_LOG"
+    elif [ "${1:-}" = Enter ] && [ -n "${FM_SEND_ENTERED:-}" ]; then
+      : > "$FM_SEND_ENTERED"
     fi
     exit 0 ;;
   display-message)
-    for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
+    for a in "$@"; do
+      case "$a" in
+        *cursor_y*)
+          if [ "${FM_SEND_OMP_BUSY:-0}" = 1 ]; then printf '5\n'; else printf '1\n'; fi
+          exit 0 ;;
+        *pane_current_command*)
+          if [ "${FM_SEND_OMP:-0}" = 1 ]; then printf 'bun\n'; else printf 'fakepane\n'; fi
+          exit 0 ;;
+        *pane_pid*)
+          if [ "${FM_SEND_OMP:-0}" = 1 ]; then printf '4242\n'; else printf 'fakepane\n'; fi
+          exit 0 ;;
+      esac
+    done
     printf 'fakepane\n'; exit 0 ;;
-  capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
-  list-windows) exit 0 ;;
+  capture-pane)
+    if [ "${FM_SEND_OMP_BUSY:-0}" = 1 ]; then
+      if [ -f "${FM_SEND_ENTERED:-/nonexistent}" ]; then
+        cat "$FM_SEND_OMP_AFTER"
+      else
+        cat "$FM_SEND_OMP_BEFORE"
+      fi
+    else
+      printf '╭────╮\n│    │\n╰────╯\n'
+    fi
+    exit 0 ;;
+  list-windows)
+    if [ "${FM_SEND_OMP:-0}" = 1 ]; then printf 'fm-domain\n'; fi
+    exit 0 ;;
 esac
 exit 0
 SH
@@ -80,6 +107,9 @@ run_send() {
   : > "$log"
   env PATH="$fb:$PATH" \
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_SEND_OMP_BUSY="${FM_SEND_OMP_BUSY:-0}" FM_SEND_OMP="${FM_SEND_OMP:-0}" \
+    FM_SEND_ENTERED="${FM_SEND_ENTERED:-}" FM_SEND_OMP_BEFORE="${FM_SEND_OMP_BEFORE:-}" \
+    FM_SEND_OMP_AFTER="${FM_SEND_OMP_AFTER:-}" \
     "$SEND" "$@" 2>/dev/null
 }
 
@@ -106,6 +136,7 @@ test_secondmate_target_is_marked() {
   case "$got" in
     *audit\ the\ build) : ;;
     *) fail "secondmate send lost the request body"$'\n'"$got" ;;
+
   esac
   # shellcheck source=/dev/null
   . "$ROOT/bin/fm-pending-reply-lib.sh"
@@ -113,6 +144,59 @@ test_secondmate_target_is_marked() {
   [ -f "$(fm_pending_reply_path "$home/state" "$corr")" ] \
     || fail "marked secondmate send should create a parent pending-reply record"
   pass "fm-send: a kind=secondmate target gets the from-firstmate marker and corr prepended"
+}
+test_queued_secondmate_target_confirms_delivery() {
+  local dir fb log home rc got corr rec actual_bun omp top width
+  if ! command -v bun >/dev/null 2>&1; then
+    pass "fm-send: queued OMP secondmate confirmation skipped because bun is unavailable"
+    return
+  fi
+  dir="$TMP_ROOT/sm-queued"
+  mkdir -p "$dir"
+  fb=$(make_stubs "$dir")
+  log="$dir/send.log"
+  home=$(setup_home sm-queued)
+  actual_bun=$(fm_test_realpath "$(command -v bun)")
+  omp="$dir/omp"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$omp"
+  chmod +x "$omp"
+  omp=$(fm_test_realpath "$omp")
+  top='╭── ⬢ GPT-5.6-Sol++ · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
+  width=$(fm_composer_terminal_width "$top" "$actual_bun") \
+    || fail "could not measure queued secondmate fixture"
+  {
+    printf 'transcript row\ntranscript row\ntranscript row\nWorking… ⟦esc⟧\n%s\n' "$top"
+    printf '╰─%-*s─╯\n' "$((width - 4))" ' queue the steer'
+  } > "$dir/before"
+  cp "$dir/before" "$dir/after"
+  cat > "$fb/ps" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *tpgid=*) printf '4242\n' ;;
+  *args=*) printf '%s %s --auto-approve\n' '$actual_bun' '$omp' ;;
+esac
+SH
+  cat > "$fb/lsof" <<SH
+#!/usr/bin/env bash
+printf 'n%s\n' '$actual_bun'
+SH
+  chmod +x "$fb/ps" "$fb/lsof"
+  fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:fm-domain" alpha omp
+  printf 'omp_bin=%s\nomp_bun=%s\n' "$omp" "$actual_bun" >> "$home/state/domain.meta"
+  FM_SEND_OMP_BUSY=1 FM_SEND_OMP=1 FM_SEND_ENTERED="$dir/entered" \
+    FM_SEND_OMP_BEFORE="$dir/before" FM_SEND_OMP_AFTER="$dir/after" \
+    run_send "$fb" "$home" "$log" "domain" "queue the steer"; rc=$?
+  expect_code 0 "$rc" "a queued OMP secondmate steer should succeed"
+  got=$(cat "$log")
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-pending-reply-lib.sh"
+  corr=$(fm_pending_reply_extract_corr "$got")
+  rec=$(fm_pending_reply_path "$home/state" "$corr")
+  [ -n "$(fm_pending_reply_get "$rec" delivered_epoch)" ] \
+    || fail "a queued secondmate steer should confirm delivery in its pending-reply record"
+  [ "$(fm_pending_reply_get "$rec" phase)" = awaiting_report ] \
+    || fail "delivery confirmation must leave the queued secondmate expectation awaiting its correlated report"
+  pass "fm-send: a queued OMP secondmate steer confirms delivery without discarding the pending-reply expectation"
 }
 
 test_exact_secondmate_task_id_is_marked() {
@@ -254,6 +338,7 @@ test_marked_send_preserves_trailing_newlines() {
 }
 
 test_secondmate_target_is_marked
+test_queued_secondmate_target_confirms_delivery
 test_exact_secondmate_task_id_is_marked
 test_crewmate_target_is_not_marked
 test_explicit_window_is_not_marked

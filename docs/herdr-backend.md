@@ -204,7 +204,9 @@ On an idle or done native baseline, ordinary submit confirmation waits for `work
 On an already active or unreadable baseline, ordinary harnesses fall back to conservative composer clearance.
 OMP is stricter: the adapter binds the exact native OMP session path and pre-send byte offset before typing.
 That offset is always the end of a complete newline-terminated session record; when a partial record is still being appended the adapter waits a bounded time and then refuses rather than rewinding, because a mid-record offset would poison every later read and an earlier boundary could false-confirm an already-appended record.
-A busy OMP steer sends one Enter and succeeds only after an appended exact-text user message carries native `steering:true`; an identical ordinary user message is not acknowledgement, and missing proof returns unknown without redelivery.
+A busy OMP steer sends one Enter and normally succeeds after an appended exact-text user message carries native `steering:true`; an identical ordinary user message is not acknowledgement.
+If the Enter transport succeeds but that native event is not observed within the bounded window, the already-busy generating path returns `queued-unconfirmed` without retrying or scraping rendered queue counts; `fm-send` accepts that narrow verdict as delivered so OMP can consume the steer on its next turn.
+An Enter transport failure returns `send-failed`, and every non-busy editable composer remains subject to the ordinary pending or unknown fail-closed behavior.
 A `blocked` OMP agent is parked on an open ask rather than generating, so its proof is instead a successful post-offset `ask` tool result whose structured `selectedOptions` is exactly the sent text; a steering user record is never accepted there, and an errored answer is a rejection, not delivery.
 OMP `/exit` succeeds only after a post-offset normal `session_exit` event, then closes the exact owned Herdr pane and verifies it is absent; it never falls back to a steering acknowledgement.
 A fully unreadable target stops retrying and reports unknown.
@@ -222,9 +224,9 @@ A human-blocked permission dialog has no busy banner and still surfaces.
 
 Herdr has no direct cursor-row primitive.
 The adapter locates the bottom-most recognized bordered row, Claude `❯` row, Codex `›` row, or a Pi separator region admitted only when native identity is exactly Pi and state is idle, done, or blocked.
-OMP uses an independent native shape: one status top row and a final input row, with at most eight bounded content rows between them, admitted only when native identity is exactly `omp` and state is idle or done.
+OMP uses an independent native shape: one status top row and a final input row, with at most eight bounded content rows between them, admitted only when native identity is exactly `omp`; working and blocked state remain ineligible for injection.
 OMP applies the shared terminal-cell geometry contract owned by [the tmux backend guide](tmux-backend.md#current-behavior-and-safety); Herdr additionally enforces the bounded row count above.
-Empty, pending, and multi-line OMP input classify from that structure; a short, stale, malformed, working, blocked, unreadable, or inexact-identity candidate is unknown and cannot authorize injection.
+Empty, pending, and multi-line OMP input classify from that structure only on idle or done state; a short, stale, malformed, working, blocked, unreadable, or inexact-identity candidate is unknown and cannot authorize injection.
 A working Pi, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains pending or unknown.
 
 ANSI capture preserves de-emphasized placeholder style.

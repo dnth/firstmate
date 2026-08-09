@@ -32,19 +32,14 @@
 # benefits, and the herdr adapter routes through the same owner (task
 # afk-herdr-false-pending), so the two backends cannot drift.
 #
-# Busy-queued Enter (opencode 1.18.4, on the tmux backend only for now): when
+# Busy-queued Enter: when
 # the agent is mid-turn, opencode accepts Enter as a "send when the turn ends"
 # keystroke but does NOT clear the composer until then, so the composer keeps
-# showing the typed text the whole time. The plain "empty iff composer cleared"
-# acknowledgement above false-positives on a swallowed Enter for every steer
-# sent to a busy opencode pane, and `fm-send` exits non-zero on a normal
-# captain instruction. The submit core now falls back to `fm_pane_is_busy` once
-# the Enter-retry budget is spent: a busy pane means the harness accepted and
-# queued the Enter (report `empty` so the caller does not re-send), while an
-# idle pane keeps the `pending` verdict (a genuine swallow). The herdr backend
-# observes the same opencode behavior but needs a separate fix; it is recorded
-# as a known gap in `docs/herdr-backend.md` rather than patched here, so the
-# tmux adapter does not paper over a herdr-specific shape.
+# showing the typed text the whole time. The submit core falls back to
+# fm_pane_is_busy once the Enter-retry budget is spent: a busy non-OMP pane
+# reports empty because that harness's queue behavior is established, while an
+# already-busy OMP pane reports queued-unconfirmed unless its native delivery
+# path provides positive proof. Idle panes keep the pending verdict.
 #
 # Overrides: FM_COMPOSER_IDLE_RE matches an empty composer after ghost and
 # structural border stripping. FM_BUSY_REGEX overrides the rendered busy-footer
@@ -424,7 +419,7 @@ fm_pane_is_busy() {  # <target> [harness]
 }
 
 # fm_tmux_submit_core: type <text> into <target> ONCE, then submit with Enter,
-# verifying the composer cleared. Retries Enter ONLY — never retypes, because a
+# verifying the composer cleared. Retries Enter ONLY - never retypes, because a
 # swallowed Enter leaves our text in the composer and retyping would duplicate
 # it. Echoes the final proof-carrying verdict on stdout so callers can require
 # exact `empty` before treating submission as confirmed.
@@ -432,18 +427,36 @@ fm_pane_is_busy() {  # <target> [harness]
 # and queues it for after the current turn, but keeps the typed text visible in
 # the composer. Once the Enter-retry budget is spent and a structurally proven
 # composer still reads "pending", the submit core falls back to
-# `fm_pane_is_busy`: a busy pane means the Enter was accepted and queued (report
-# `empty` so the caller does not re-send), while an idle pane keeps `pending` as
-# a genuine swallow. Pending-unproven receives the same Enter retry budget but
-# never reaches this exception.
+# `fm_pane_is_busy`: a busy non-OMP pane reports empty because that harness's
+# queue behavior is established, while an already-busy OMP pane reports
+# queued-unconfirmed because no reliable delivery proof was observed. Idle panes
+# keep the pending verdict. Pending-unproven receives the same Enter retry
+# budget but never reaches either conversion.
 fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [harness] [baseline-busy] [canonical-omp-bun]
-  local target=$1 retries=$2 sleep_s=$3 harness=${4:-} baseline_busy=${5:-0} bun=${6:-} i=0 state
+  local target=$1 retries=$2 sleep_s=$3 harness=${4:-} baseline_busy=${5:-0} bun=${6:-}
+  local i=0 state enter_sent=0
   while :; do
-    tmux send-keys -t "$target" Enter 2>/dev/null || true
+    if ! tmux send-keys -t "$target" Enter 2>/dev/null; then
+      i=$((i + 1))
+      if [ "$i" -ge "$retries" ]; then
+        [ "$enter_sent" -eq 1 ] || { printf 'send-failed'; return 0; }
+        break
+      fi
+      continue
+    fi
+    enter_sent=1
     sleep "$sleep_s"
     state=$(fm_tmux_composer_state "$target" "$harness" "$bun")
     case "$state" in
       pending|pending-unproven) ;;
+      empty)
+        if [ "$harness" = omp ] && [ "$baseline_busy" -eq 1 ]; then
+          printf 'queued-unconfirmed'
+        else
+          printf 'empty'
+        fi
+        return 0
+        ;;
       unknown)
         [ "$harness" = omp ] || { printf '%s' "$state"; return 0; }
         if [ "$baseline_busy" -eq 0 ] && fm_pane_is_busy "$target" omp; then
@@ -456,16 +469,11 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [harness] [bas
     i=$((i + 1))
     [ "$i" -lt "$retries" ] || break
   done
-  if [ "$state" != pending ]; then
+  if [ "$harness" = omp ] && [ "$baseline_busy" -eq 1 ] && [ "$state" = pending ]; then
+    printf 'queued-unconfirmed'
+  elif [ "$state" != pending ]; then
     printf '%s' "$state"
-    return 0
-  fi
-  # Retries exhausted, composer still shows proven pending.
-  # If the pane is busy (agent mid-turn), the harness accepted the Enter
-  # and queued the message for processing when the current turn ends.
-  # Treat it as submitted so the caller does not re-send.
-  # On an idle pane, keep reporting pending - a genuine swallow.
-  if fm_pane_is_busy "$target" "$harness"; then
+  elif [ "$harness" != omp ] && fm_pane_is_busy "$target" "$harness"; then
     printf 'empty'
   else
     printf 'pending'
@@ -473,11 +481,13 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [harness] [bas
 }
 
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle> [harness] [canonical-omp-bun]
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${6:-} bun=${7:-} baseline_busy=0
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${6:-} bun=${7:-}
+  local baseline_busy=0
   if [ "$harness" = omp ] && fm_pane_is_busy "$target" omp; then
     baseline_busy=1
   fi
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
   sleep "$settle"
-  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$harness" "$baseline_busy" "$bun"
+  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$harness" \
+    "$baseline_busy" "$bun"
 }

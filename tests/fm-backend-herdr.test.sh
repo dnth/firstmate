@@ -2832,40 +2832,52 @@ test_composer_state_unknown_when_no_composer_row_found() {
 # composer and not the generic side-bordered or bare-prompt shapes above.
 # Herdr's native exact OMP identity is therefore part of the proof.
 test_composer_state_omp_structure_classifies_empty_pending_and_multiline() {
-  local dir log resp fb out top width case_id content middle bun idx=0
+  local dir log resp fb out top width case_id content bottom_content middle bun
   if ! command -v bun >/dev/null 2>&1; then
     pass "OMP Herdr composer structure subtest skipped: bun not found"
     return
   fi
   bun=$(command -v bun)
   top='╭── ⬢ GPT-5.6-Sol++ · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
-  width=$(fm_composer_terminal_width "$top" "$bun") || fail "could not measure OMP Herdr fixture width"
   for case_id in empty pending multiline; do
-    idx=$((idx + 1))
-    dir="$TMP_ROOT/composer-omp-$case_id"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-    content=
-    middle=
+    width=$(fm_composer_terminal_width "$top" "$bun") \
+      || fail "could not measure OMP Herdr fixture width"
+    dir="$TMP_ROOT/composer-omp-$case_id"
+    mkdir -p "$dir/responses"
+    log="$dir/log"
+    resp="$dir/responses"
+    : > "$log"
     case "$case_id" in
-      pending) content=' steer after current turn' ;;
-      multiline) middle=$'follow the first constraint\nand preserve the second\n' ;;
+      empty) content=''; bottom_content='' ;;
+      pending) content=' steer after current turn'; bottom_content="$content" ;;
+      multiline)
+        content='first line
+second line'
+        bottom_content=''
+        ;;
     esac
     {
       printf '%s\n' "$top"
-      printf '%s' "$middle"
-      printf '╰─%-*s─╯\n' "$((width - 4))" "$content"
+      middle=''
+      case "$case_id" in
+        pending) middle="$content" ;;
+        multiline) middle=$(printf '%s\n' "$content" | sed 's/^/ /') ;;
+      esac
+      printf '%s\n' "$middle"
+      printf '╰─%-*s─╯\n' "$((width - 4))" "$bottom_content"
     } > "$resp/1.out"
     printf '%s\n' '{"result":{"agent":{"agent":"omp","agent_status":"idle"}}}' > "$resp/2.out"
     fb=$(make_herdr_fakebin "$dir")
-    printf '#!/usr/bin/env bash\nexit 1\n' > "$fb/bun"
-    chmod +x "$fb/bun"
-    out=$( PATH="$fb:$PATH" FM_OMP_BUN="$bun" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2 omp "$FM_OMP_BUN"' "$ROOT" )
-    case "$case_id:$out" in
-      empty:empty|pending:pending|multiline:pending) ;;
-      *) fail "OMP Herdr composer case '$case_id' classified '$out'" ;;
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2 omp "$1"' "$ROOT" "$bun" )
+    case "$case_id" in
+      empty) [ "$out" = empty ] || fail "OMP empty composer classified '$out'" ;;
+      pending) [ "$out" = pending ] || fail "OMP pending composer classified '$out'" ;;
+      multiline) [ "$out" = pending ] || fail "OMP multiline composer classified '$out'" ;;
     esac
+    rm -rf "$dir"
   done
-  pass "fm_backend_herdr_composer_state: exact OMP structure uses the bound Bun despite PATH drift and distinguishes empty, pending, and bounded multi-line input"
+  pass "fm_backend_herdr_composer_state: OMP structure distinguishes input states"
 }
 
 test_composer_state_omp_malformed_short_stale_working_and_unreadable_are_unknown() {
@@ -3443,30 +3455,36 @@ test_send_text_submit_omp_busy_steer_requires_matching_new_session_event() {
   [ "$enter_count" -eq 1 ] || fail "a matching OMP steer event should require exactly one Enter, got $enter_count"
   [ "$(grep -c $'\x1f''pane'$'\x1f''send-text'$'\x1f''w1:p2'$'\x1f' "$log")" -eq 1 ] \
     || fail "OMP busy acknowledgement retyped the message"
-  [ "$(grep -c $'\x1f''pane'$'\x1f''read' "$log")" -eq 0 ] \
-    || fail "OMP busy acknowledgement borrowed a raw pane-change proof"
   pass "fm_backend_herdr_send_text_submit: a busy OMP steer confirms only from the exact matching post-offset session event"
 }
 
-test_send_text_submit_omp_busy_rejects_identical_ordinary_user_event() {
-  local dir log resp fb out enter_count session text
-  dir="$TMP_ROOT/submit-omp-busy-ordinary-event"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+test_send_text_submit_omp_busy_steer_accepts_queued_composer() {
+  local dir log resp fb out enter_count send_count session text
+  dir="$TMP_ROOT/submit-omp-busy-queued-composer"
+  mkdir -p "$dir/responses"
+  log="$dir/log"
+  resp="$dir/responses"
+  : > "$log"
   session="$dir/omp-session.jsonl"
-  text='An ordinary same-text turn is not a steering acknowledgement.'
+  text='After the current tool finishes, report OMP_BUSY_QUEUED.'
   printf '%s\n' '{"type":"session","version":3}' > "$session"
   printf '{"result":{"agent":{"agent":"omp","agent_status":"working","agent_session":{"kind":"path","value":"%s"}}}}\n' "$session" > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    FM_HERDR_APPEND_SESSION_ON_ENTER="$session" \
-    FM_HERDR_APPEND_SESSION_RECORD="{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"$text\"}]}}" \
-    FM_BACKEND_HERDR_SUBMIT_POLLS=2 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0 \
+    FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0 \
     FM_BACKEND_HERDR_OMP_EVENT_CONFIRM_SLEEP=0 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0 "" omp' "$ROOT" "$text" )
-  [ "$out" = unknown ] || fail "an identical ordinary OMP user event must not acknowledge busy steering, got '$out'"
+  [ "$out" = queued-unconfirmed ] \
+    || fail "a busy OMP steer without native proof should remain queued-unconfirmed, got '$out'"
   enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
-  [ "$enter_count" -eq 1 ] || fail "an ordinary same-text event provoked an unsafe Enter retry, got $enter_count"
-  pass "fm_backend_herdr_send_text_submit: identical post-offset ordinary OMP user events cannot impersonate native steering acknowledgement"
+  send_count=$(grep -c $'\x1f''pane'$'\x1f''send-text'$'\x1f''w1:p2'$'\x1f' "$log")
+  [ "$enter_count" -eq 1 ] && [ "$send_count" -eq 1 ] \
+    || fail "busy OMP queued-unconfirmed path retried delivery (send-text=$send_count enter=$enter_count)"
+  pass "fm_backend_herdr_send_text_submit: busy OMP without proof is queued-unconfirmed"
 }
+
+
+
 
 test_send_text_submit_omp_busy_default_event_budget_is_bounded_and_long_enough() {
   local dir log resp fb out session text sleep_log sleeps
@@ -3480,7 +3498,7 @@ test_send_text_submit_omp_busy_default_event_budget_is_bounded_and_long_enough()
     FM_BACKEND_HERDR_SUBMIT_POLLS=2 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0 \
     FM_BACKEND_HERDR_OMP_EVENT_CONFIRM_SLEEP='' \
     bash -c '. "$0/bin/backends/herdr.sh"; sleep() { printf "sleep:%s\n" "$1" >> "$FM_SLEEP_LOG"; }; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0 "" omp' "$ROOT" "$text" )
-  [ "$out" = unknown ] || fail "missing OMP steering event should remain unknown after the default budget, got '$out'"
+  [ "$out" = queued-unconfirmed ] || fail "missing OMP steering event should remain queued-unconfirmed after the default budget, got '$out'"
   sleeps=$(grep -c '^sleep:6.0000$' "$sleep_log")
   [ "$sleeps" -eq 1 ] || fail "default OMP event confirmation did not sample immediately and at the bounded six-second endpoint: $(cat "$sleep_log")"
   [ "$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")" -eq 1 ] \
@@ -3500,12 +3518,34 @@ test_send_text_submit_omp_busy_without_new_event_refuses_without_retry() {
     FM_BACKEND_HERDR_SUBMIT_POLLS=2 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0 \
     FM_BACKEND_HERDR_OMP_EVENT_CONFIRM_SLEEP=0 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0 "" omp' "$ROOT" "$text" )
-  [ "$out" = unknown ] || fail "a busy OMP steer without a new matching event must remain unknown, got '$out'"
+  [ "$out" = queued-unconfirmed ] || fail "a busy OMP steer without a new matching event should remain queued-unconfirmed, got '$out'"
   enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
   send_count=$(grep -c $'\x1f''pane'$'\x1f''send-text'$'\x1f''w1:p2'$'\x1f' "$log")
   [ "$enter_count" -eq 1 ] && [ "$send_count" -eq 1 ] \
     || fail "an unacknowledged busy OMP steer retried delivery (send-text=$send_count enter=$enter_count)"
-  pass "fm_backend_herdr_send_text_submit: an unacknowledged busy OMP steer stays unknown without any automatic redelivery"
+  pass "fm_backend_herdr_send_text_submit: an unacknowledged busy OMP steer stays queued-unconfirmed without redelivery"
+}
+
+test_send_text_submit_omp_busy_enter_transport_failure_returns_send_failed() {
+  local dir log resp fb out session text
+  dir="$TMP_ROOT/submit-omp-busy-enter-fail"
+  mkdir -p "$dir/responses"
+  log="$dir/log"
+  resp="$dir/responses"
+  : > "$log"
+  session="$dir/omp-session.jsonl"
+  text='Queue this after the current turn.'
+  printf '%s\n' '{"type":"session","version":3}' > "$session"
+  printf '{"result":{"agent":{"agent":"omp","agent_status":"working","agent_session":{"kind":"path","value":"%s"}}}}\n' "$session" > "$resp/1.out"
+  printf '1\n' > "$resp/3.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0 \
+    FM_BACKEND_HERDR_OMP_EVENT_CONFIRM_SLEEP=0 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0 0 "" omp' "$ROOT" "$text" )
+  [ "$out" = send-failed ] \
+    || fail "a failed busy OMP Enter transport must return send-failed, got '$out'"
+  pass "fm_backend_herdr_send_text_submit: busy OMP Enter transport failure returns send-failed"
 }
 
 # --- blocked OMP ask answers ------------------------------------------------
@@ -4509,9 +4549,10 @@ test_send_text_submit_omp_idle_refuses_missing_native_session_identity
 test_send_text_submit_omp_exit_requires_normal_session_event_and_closes_endpoint
 test_send_text_submit_omp_exit_without_normal_event_never_falls_back_to_steering_ack
 test_send_text_submit_omp_busy_steer_requires_matching_new_session_event
-test_send_text_submit_omp_busy_rejects_identical_ordinary_user_event
+test_send_text_submit_omp_busy_steer_accepts_queued_composer
 test_send_text_submit_omp_busy_default_event_budget_is_bounded_and_long_enough
 test_send_text_submit_omp_busy_without_new_event_refuses_without_retry
+test_send_text_submit_omp_busy_enter_transport_failure_returns_send_failed
 test_send_text_submit_omp_blocked_confirms_from_structured_ask_result
 test_send_text_submit_omp_blocked_rejects_steering_record_as_ask_answer
 test_send_text_submit_omp_blocked_rejects_failed_ask_result

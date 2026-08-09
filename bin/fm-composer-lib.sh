@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: source bin/fm-composer-lib.sh, then call its composer classification and width helpers.
+# Usage: source bin/fm-composer-lib.sh, then call its composer classification or width helpers.
 # bin/fm-composer-lib.sh - the ONE fleet-wide owner of composer-content
 # classification, shared by every session-provider adapter: the tmux path
 # through bin/fm-tmux-lib.sh, and bin/backends/{herdr,orca,cmux}.sh directly.
@@ -174,7 +174,6 @@ fm_composer_strip_ghost() {
     }
   '
 }
-
 # fm_composer_classify_content: the single shared composer-content verdict.
 #   <bordered> 1 when <content> came from a genuine agent-composer container (a
 #              bordered composer box, or a structurally-identified bare AGENT

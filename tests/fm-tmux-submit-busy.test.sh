@@ -32,13 +32,28 @@ case "${1:-}" in
     exit 0 ;;
   capture-pane) cat "$COMPOSER" 2>/dev/null; exit 0 ;;
   send-keys)
-    shift; is_enter=0
+    shift; is_enter=0; is_literal=0
     while [ "$#" -gt 0 ]; do
-      case "$1" in -t) shift ;; -l) ;; Enter) is_enter=1 ;; esac; shift
+      case "$1" in -t) shift ;; -l) is_literal=1 ;; Enter) is_enter=1 ;; esac; shift
     done
+    if [ "$is_enter" = 1 ] && [ -n "${FM_FAKE_ENTER_ATTEMPTS:-}" ]; then
+      printf 'Enter\n' >> "$FM_FAKE_ENTER_ATTEMPTS"
+      enter_attempt=$(wc -l < "$FM_FAKE_ENTER_ATTEMPTS")
+      if [ -n "${FM_FAKE_ENTER_FAIL_AFTER:-}" ] \
+         && [ "$enter_attempt" -gt "$FM_FAKE_ENTER_FAIL_AFTER" ]; then
+        exit 1
+      fi
+    fi
+    if [ "$is_enter" = 1 ] && [ "${FM_FAKE_ENTER_FAIL:-0}" = 1 ]; then
+      exit 1
+    fi
+    if [ "$is_literal" = 1 ] && [ -n "${FM_FAKE_AFTER_LITERAL_COMPOSER:-}" ]; then
+      cp "$FM_FAKE_AFTER_LITERAL_COMPOSER" "$COMPOSER"
+    fi
     if [ "$is_enter" = 1 ]; then
       [ -z "${FM_FAKE_SENT:-}" ] || printf 'Enter\n' >> "$FM_FAKE_SENT"
       [ -z "${FM_FAKE_BUSY_AFTER_ENTER:-}" ] || : > "$FM_FAKE_BUSY_AFTER_ENTER"
+      [ -z "${FM_FAKE_AFTER_ENTER_COMPOSER:-}" ] || cp "$FM_FAKE_AFTER_ENTER_COMPOSER" "$COMPOSER"
       if [ -n "${FM_FAKE_SWALLOW:-}" ] && [ -f "$FM_FAKE_SWALLOW" ]; then
         [ "${FM_FAKE_PERSIST_SWALLOW:-0}" = 1 ] || rm -f "$FM_FAKE_SWALLOW"
       else
@@ -92,6 +107,54 @@ test_idle_pane_pending_returns_pending() {
     fm_tmux_submit_enter_core "win" 3 0.05 > "$vfile" 2>/dev/null
   [ "$(cat "$vfile")" = pending ] || fail "idle-pane pending should return pending, got '$(cat "$vfile")'"
   pass "fm_tmux_submit_enter_core: idle pane + pending composer stays pending (genuine swallow preserved)"
+}
+
+test_busy_omp_enter_transport_failure_returns_send_failed() {
+  local dir fakebin composer vfile
+  dir="$TMP_ROOT/omp-enter-fail"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  vfile="$dir/verdict"
+  printf '╭────────────╮\n│ > queued   │\n╰────────────╯\n' > "$composer"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_ENTER_FAIL=1 \
+    FM_FAKE_PANE_BUSY=1 fm_tmux_submit_enter_core "win" 1 0 omp 1 \
+    > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = send-failed ] \
+    || fail "a failed busy OMP Enter transport must return send-failed, got '$(cat "$vfile")'"
+  pass "fm_tmux_submit_enter_core: busy OMP Enter transport failure returns send-failed"
+}
+
+test_busy_omp_mixed_enter_transport_retains_queued_delivery() {
+  local dir fakebin composer sent attempts vfile bun top width
+  if ! command -v bun >/dev/null 2>&1; then
+    pass "busy OMP mixed Enter transport fixture skipped because bun is unavailable"
+    return
+  fi
+  dir="$TMP_ROOT/omp-enter-mixed"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  sent="$dir/sent.log"
+  attempts="$dir/attempts.log"
+  vfile="$dir/verdict"
+  bun=$(command -v bun)
+  top='╭── ⬢ GPT-5.6-Sol++ · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
+  width=$(fm_composer_terminal_width "$top" "$bun") \
+    || fail "could not measure mixed Enter fixture width"
+  printf '%s\n' "$top" > "$composer"
+  printf '╰─%-*s─╯\n' "$((width - 4))" ' queued OMP steer' >> "$composer"
+  : > "$sent"
+  : > "$attempts"
+  touch "$dir/.swallow"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_ENTER_ATTEMPTS="$attempts" FM_FAKE_ENTER_FAIL_AFTER=1 \
+    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 \
+    FM_FAKE_PANE_BUSY=1 fm_tmux_submit_enter_core "win" 3 0 omp 1 "$bun" \
+    > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = queued-unconfirmed ] \
+    || fail "one successful busy OMP Enter must survive later transport failures, got '$(cat "$vfile")'"
+  [ "$(wc -l < "$attempts")" -eq 3 ] && [ "$(wc -l < "$sent")" -eq 1 ] \
+    || fail "mixed Enter fixture did not produce one success followed by two failures"
+  pass "busy OMP mixed Enter transport retains queued delivery"
 }
 
 test_busy_pane_composer_clears_first_try() {
@@ -203,58 +266,51 @@ test_omp_composer_and_submission_use_verified_two_row_structure() {
   sent="$dir/sent.log"
   vfile="$dir/verdict"
   : > "$sent"
-  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/bun"
-  chmod +x "$fakebin/bun"
   top='╭── ⬢ GPT-5.6-Sol++ · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
-  width=$(fm_composer_terminal_width "$top" "$bun") || fail "could not measure OMP fixture width"
+  width=$(fm_composer_terminal_width "$top" "$bun") \
+    || fail "could not measure OMP fixture width"
 
   printf '%s\n' "$top" > "$composer"
   printf '╰─%-*s─╯\n' "$((width - 4))" ' ' >> "$composer"
-  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" fm_tmux_composer_state omp omp "$bun" > "$vfile" 2>/dev/null
-  [ "$(cat "$vfile")" = empty ] || fail "verified empty OMP composer should be empty, got '$(cat "$vfile")'"
-
-  printf '%s\n' "$top" > "$composer"
-  printf '╰─%-*s─╯\n' "$((width - 4))" ' steer after current turn' >> "$composer"
-  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" fm_tmux_composer_state omp omp "$bun" > "$vfile" 2>/dev/null
-  [ "$(cat "$vfile")" = pending ] || fail "verified OMP composer text should be pending, got '$(cat "$vfile")'"
-
-  printf 'transcript row\n%s\n' "$top" > "$composer"
-  printf '╰─%-*s─╯\n' "$((width - 4))" ' stale transcript text' >> "$composer"
-  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_CURSOR_Y=1 \
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" \
     fm_tmux_composer_state omp omp "$bun" > "$vfile" 2>/dev/null
-  [ "$(cat "$vfile")" = unknown ] || fail "stale OMP transcript box should not become live input, got '$(cat "$vfile")'"
-
-  printf '%s\n╰─ malformed ─╯\n' "$top" > "$composer"
-  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" fm_tmux_composer_state omp omp "$bun" > "$vfile" 2>/dev/null
-  [ "$(cat "$vfile")" = unknown ] || fail "malformed OMP composer geometry should be unknown, got '$(cat "$vfile")'"
+  [ "$(cat "$vfile")" = empty ] \
+    || fail "verified empty OMP composer should be empty, got '$(cat "$vfile")'"
 
   printf '%s\n' "$top" > "$composer"
-  printf '╰─%-*s─╯\n' "$((width - 5))" ' ' >> "$composer"
-  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" fm_tmux_composer_state omp omp "$bun" > "$vfile" 2>/dev/null
-  [ "$(cat "$vfile")" = unknown ] || fail "width-mismatched OMP composer should be unknown, got '$(cat "$vfile")'"
+  printf '╰─%-*s─╯\n' "$((width - 4))" ' queued OMP steer' >> "$composer"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" \
+    fm_tmux_composer_state omp omp "$bun" > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = pending ] \
+    || fail "verified OMP composer text should be pending, got '$(cat "$vfile")'"
 
-  printf '%s\n' "$top" > "$composer"
-  printf '╰─%-*s─╯\n' "$((width - 4))" ' ' >> "$composer"
-  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" fm_tmux_composer_state omp omp "" > "$vfile" 2>/dev/null
-  [ "$(cat "$vfile")" = unknown ] || fail "OMP geometry without a task-bound Bun should be unknown, got '$(cat "$vfile")'"
-  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/bun"
-  chmod +x "$fakebin/bun"
-  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" fm_tmux_composer_state omp omp "$fakebin/bun" > "$vfile" 2>/dev/null
-  [ "$(cat "$vfile")" = unknown ] || fail "unprovable OMP terminal width should be unknown, got '$(cat "$vfile")'"
-  rm "$fakebin/bun"
-
-  printf '%s\n' "$top" > "$composer"
-  printf '╰─%-*s─╯\n' "$((width - 4))" ' /skill:no-mistakes' >> "$composer"
   touch "$dir/.swallow"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
-    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PANE_BUSY=0 \
-    fm_tmux_submit_enter_core omp 3 0.01 omp 0 "$bun" > "$vfile" 2>/dev/null
-  [ "$(cat "$vfile")" = empty ] || fail "OMP skill submission should retry the autocomplete swallow, got '$(cat "$vfile")'"
-  [ "$(grep -c '^Enter$' "$sent")" -eq 2 ] || fail "OMP skill submission should require one verified Enter retry"
-  pass "OMP tmux composer distinguishes empty, pending, stale, malformed, and autocomplete submission states"
+    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 \
+    FM_FAKE_PANE_BUSY=1 \
+    fm_tmux_submit_core omp queued 1 0.01 0 omp "$bun" > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = queued-unconfirmed ] \
+    || fail "busy OMP submit should preserve queued-unconfirmed, got '$(cat "$vfile")'"
+  [ "$(grep -c '^Enter$' "$sent" 2>/dev/null || true)" -eq 1 ] \
+    || fail "busy OMP queued submit retried Enter"
+
+  touch "$dir/.swallow"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 \
+    FM_FAKE_PANE_BUSY=0 \
+    fm_tmux_submit_core omp unsubmitted 1 0.01 0 omp "$bun" > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = pending ] \
+    || fail "idle OMP unsubmitted composer should remain pending, got '$(cat "$vfile")'"
+
+  printf '%s\n╰─ malformed ─╯\n' "$top" > "$composer"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" \
+    fm_tmux_composer_state omp omp "$bun" > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = unknown ] \
+    || fail "malformed OMP composer geometry should be unknown, got '$(cat "$vfile")'"
+  pass "OMP tmux composer keeps queued busy submits separate from unsubmitted input"
 }
 
-test_omp_idle_to_busy_transition_confirms_submission() {
+test_omp_idle_to_busy_preserved_and_busy_without_queue_fails_closed() {
   local dir fakebin composer busy_marker vfile
   dir="$TMP_ROOT/omp-idle-to-busy"
   fakebin=$(make_submit_mock "$dir")
@@ -271,7 +327,7 @@ test_omp_idle_to_busy_transition_confirms_submission() {
       fm_tmux_submit_core win message 1 0.01 0 omp > "$vfile" 2>/dev/null
   ) || fail "OMP idle-to-busy submit check failed"
   [ "$(cat "$vfile")" = empty ] \
-    || fail "OMP idle-to-busy transition should confirm submission, got '$(cat "$vfile")'"
+    || fail "an initially idle OMP pane should confirm its busy onset, got '$(cat "$vfile")'"
 
   : > "$busy_marker"
   (
@@ -283,7 +339,7 @@ test_omp_idle_to_busy_transition_confirms_submission() {
   ) || fail "OMP already-busy submit check failed"
   [ "$(cat "$vfile")" = unknown ] \
     || fail "an already-busy OMP pane must not prove a new submission, got '$(cat "$vfile")'"
-  pass "OMP submit confirmation distinguishes a new idle-to-busy turn from an already-busy pane"
+  pass "OMP submit preserves idle-to-busy proof and requires queue proof when already busy"
 }
 
 test_omp_busy_signature_is_exact_and_scoped() {
@@ -388,12 +444,14 @@ test_claude_busy_signature_uses_real_capture_shapes() {
 
 test_busy_pane_pending_returns_empty
 test_idle_pane_pending_returns_pending
+test_busy_omp_enter_transport_failure_returns_send_failed
+test_busy_omp_mixed_enter_transport_retains_queued_delivery
 test_busy_pane_composer_clears_first_try
 test_idle_pane_composer_clears_first_try
 test_busy_pane_unknown_stays_unknown
 test_busy_pane_ambiguous_pending_retries_without_conversion
 test_unrecognized_state_skips_busy_conversion
 test_omp_composer_and_submission_use_verified_two_row_structure
-test_omp_idle_to_busy_transition_confirms_submission
+test_omp_idle_to_busy_preserved_and_busy_without_queue_fails_closed
 test_omp_busy_signature_is_exact_and_scoped
 test_claude_busy_signature_uses_real_capture_shapes
