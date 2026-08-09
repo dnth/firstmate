@@ -330,7 +330,7 @@ else
   retries=${FM_SEND_RETRIES:-3}
   sleep_s=${FM_SEND_SLEEP:-0.4}
   # Type once, submit, verify. Exact empty confirms delivery; queued-unconfirmed
-  # preserves an unresolved busy-OMP expectation without claiming delivery.
+  # preserves an unresolved busy-OMP expectation without native confirmation.
   send_rc=0
   if [ "$TARGET_BACKEND" = remote ]; then
     if "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send "$TARGET_REMOTE_ID" "$MESSAGE" < /dev/null >/dev/null; then

@@ -434,13 +434,17 @@ fm_pane_is_busy() {  # <target> [harness]
 # budget but never reaches either conversion.
 fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [harness] [baseline-busy] [canonical-omp-bun]
   local target=$1 retries=$2 sleep_s=$3 harness=${4:-} baseline_busy=${5:-0} bun=${6:-}
-  local i=0 state
+  local i=0 state enter_sent=0
   while :; do
     if ! tmux send-keys -t "$target" Enter 2>/dev/null; then
       i=$((i + 1))
-      [ "$i" -lt "$retries" ] || { printf 'send-failed'; return 0; }
+      if [ "$i" -ge "$retries" ]; then
+        [ "$enter_sent" -eq 1 ] || { printf 'send-failed'; return 0; }
+        break
+      fi
       continue
     fi
+    enter_sent=1
     sleep "$sleep_s"
     state=$(fm_tmux_composer_state "$target" "$harness" "$bun")
     case "$state" in

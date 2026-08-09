@@ -36,6 +36,14 @@ case "${1:-}" in
     while [ "$#" -gt 0 ]; do
       case "$1" in -t) shift ;; -l) is_literal=1 ;; Enter) is_enter=1 ;; esac; shift
     done
+    if [ "$is_enter" = 1 ] && [ -n "${FM_FAKE_ENTER_ATTEMPTS:-}" ]; then
+      printf 'Enter\n' >> "$FM_FAKE_ENTER_ATTEMPTS"
+      enter_attempt=$(wc -l < "$FM_FAKE_ENTER_ATTEMPTS")
+      if [ -n "${FM_FAKE_ENTER_FAIL_AFTER:-}" ] \
+         && [ "$enter_attempt" -gt "$FM_FAKE_ENTER_FAIL_AFTER" ]; then
+        exit 1
+      fi
+    fi
     if [ "$is_enter" = 1 ] && [ "${FM_FAKE_ENTER_FAIL:-0}" = 1 ]; then
       exit 1
     fi
@@ -114,6 +122,39 @@ test_busy_omp_enter_transport_failure_returns_send_failed() {
   [ "$(cat "$vfile")" = send-failed ] \
     || fail "a failed busy OMP Enter transport must return send-failed, got '$(cat "$vfile")'"
   pass "fm_tmux_submit_enter_core: busy OMP Enter transport failure returns send-failed"
+}
+
+test_busy_omp_mixed_enter_transport_retains_queued_delivery() {
+  local dir fakebin composer sent attempts vfile bun top width
+  if ! command -v bun >/dev/null 2>&1; then
+    pass "busy OMP mixed Enter transport fixture skipped because bun is unavailable"
+    return
+  fi
+  dir="$TMP_ROOT/omp-enter-mixed"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  sent="$dir/sent.log"
+  attempts="$dir/attempts.log"
+  vfile="$dir/verdict"
+  bun=$(command -v bun)
+  top='╭── ⬢ GPT-5.6-Sol++ · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
+  width=$(fm_composer_terminal_width "$top" "$bun") \
+    || fail "could not measure mixed Enter fixture width"
+  printf '%s\n' "$top" > "$composer"
+  printf '╰─%-*s─╯\n' "$((width - 4))" ' queued OMP steer' >> "$composer"
+  : > "$sent"
+  : > "$attempts"
+  touch "$dir/.swallow"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_ENTER_ATTEMPTS="$attempts" FM_FAKE_ENTER_FAIL_AFTER=1 \
+    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 \
+    FM_FAKE_PANE_BUSY=1 fm_tmux_submit_enter_core "win" 3 0 omp 1 "$bun" \
+    > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = queued-unconfirmed ] \
+    || fail "one successful busy OMP Enter must survive later transport failures, got '$(cat "$vfile")'"
+  [ "$(wc -l < "$attempts")" -eq 3 ] && [ "$(wc -l < "$sent")" -eq 1 ] \
+    || fail "mixed Enter fixture did not produce one success followed by two failures"
+  pass "busy OMP mixed Enter transport retains queued delivery"
 }
 
 test_busy_pane_composer_clears_first_try() {
@@ -404,6 +445,7 @@ test_claude_busy_signature_uses_real_capture_shapes() {
 test_busy_pane_pending_returns_empty
 test_idle_pane_pending_returns_pending
 test_busy_omp_enter_transport_failure_returns_send_failed
+test_busy_omp_mixed_enter_transport_retains_queued_delivery
 test_busy_pane_composer_clears_first_try
 test_idle_pane_composer_clears_first_try
 test_busy_pane_unknown_stays_unknown

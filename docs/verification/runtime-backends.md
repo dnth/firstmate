@@ -150,14 +150,24 @@ This is revision-bound source-fixture evidence for the source under review, usin
 
 ```sh
 bun --version
-bash -o pipefail -c '{ tests/fm-tmux-submit-busy.test.sh; tests/fm-backend-herdr.test.sh; } | grep -E "busy OMP (Enter transport failure|without proof|queued submit)"'
+bash -c '
+set -e
+evidence_dir=$(mktemp -d)
+trap "rm -rf \"$evidence_dir\"" EXIT
+tests/fm-tmux-submit-busy.test.sh > "$evidence_dir/tmux.out"
+tests/fm-backend-herdr.test.sh > "$evidence_dir/herdr.out"
+grep -hE "^(ok - (fm_tmux_submit_enter_core: idle pane \\+ pending composer stays pending|fm_tmux_submit_enter_core: busy OMP Enter transport failure|busy OMP mixed Enter transport retains queued delivery|OMP tmux composer keeps queued busy submits|fm_backend_herdr_send_text_submit: busy OMP without proof|fm_backend_herdr_send_text_submit: busy OMP Enter transport failure))" "$evidence_dir/tmux.out" "$evidence_dir/herdr.out"
+'
 ```
 
 Observed bounded output:
 
 ```text
 1.3.14
+ok - fm_tmux_submit_enter_core: idle pane + pending composer stays pending (genuine swallow preserved)
 ok - fm_tmux_submit_enter_core: busy OMP Enter transport failure returns send-failed
+ok - busy OMP mixed Enter transport retains queued delivery
+ok - OMP tmux composer keeps queued busy submits separate from unsubmitted input
 ok - fm_backend_herdr_send_text_submit: busy OMP without proof is queued-unconfirmed
 ok - fm_backend_herdr_send_text_submit: busy OMP Enter transport failure returns send-failed
 ```
