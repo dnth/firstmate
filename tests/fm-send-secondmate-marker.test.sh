@@ -26,11 +26,12 @@ SEND="$ROOT/bin/fm-send.sh"
 TMP_ROOT=$(fm_test_tmproot fm-send-marker)
 
 # A fake tmux that (a) records the literal text of every `send-keys -l` to
-# FM_SEND_LOG and (b) lets fm-send's submit path reach a clean "empty" verdict.
-# display-message yields a numeric cursor_y; capture-pane returns an empty
-# bordered composer so fm_tmux_composer_state reads "empty" (submit landed) on the
-# first Enter. Only the literal (-l) text is logged; Enter retries and --key sends
-# are not, so the log holds exactly what was typed into the composer.
+# FM_SEND_LOG and (b) renders a captured busy OMP layout whose editable
+# composer remains visible after Enter. The submit path therefore exercises the
+# busy OMP queued-unconfirmed verdict without scraping a Steering list.
+# display-message yields a numeric cursor_y; the non-OMP path returns an empty
+# bordered composer so fm_tmux_composer_state reads "empty" on the first Enter.
+# Only the literal (-l) text is logged; Enter retries and --key sends are not.
 make_stubs() {  # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -58,7 +59,7 @@ case "${1:-}" in
     for a in "$@"; do
       case "$a" in
         *cursor_y*)
-          if [ "${FM_SEND_QUEUED:-0}" = 1 ]; then printf '5\n'; else printf '1\n'; fi
+          if [ "${FM_SEND_OMP_BUSY:-0}" = 1 ]; then printf '5\n'; else printf '1\n'; fi
           exit 0 ;;
         *pane_current_command*)
           if [ "${FM_SEND_OMP:-0}" = 1 ]; then printf 'bun\n'; else printf 'fakepane\n'; fi
@@ -70,7 +71,7 @@ case "${1:-}" in
     done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
-    if [ "${FM_SEND_QUEUED:-0}" = 1 ]; then
+    if [ "${FM_SEND_OMP_BUSY:-0}" = 1 ]; then
       if [ -f "${FM_SEND_ENTERED:-/nonexistent}" ]; then
         cat "$FM_SEND_OMP_AFTER"
       else
@@ -106,7 +107,7 @@ run_send() {
   : > "$log"
   env PATH="$fb:$PATH" \
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
-    FM_SEND_QUEUED="${FM_SEND_QUEUED:-0}" FM_SEND_OMP="${FM_SEND_OMP:-0}" \
+    FM_SEND_OMP_BUSY="${FM_SEND_OMP_BUSY:-0}" FM_SEND_OMP="${FM_SEND_OMP:-0}" \
     FM_SEND_ENTERED="${FM_SEND_ENTERED:-}" FM_SEND_OMP_BEFORE="${FM_SEND_OMP_BEFORE:-}" \
     FM_SEND_OMP_AFTER="${FM_SEND_OMP_AFTER:-}" \
     "$SEND" "$@" 2>/dev/null
@@ -150,8 +151,10 @@ test_queued_secondmate_target_confirms_delivery() {
     pass "fm-send: queued OMP secondmate confirmation skipped because bun is unavailable"
     return
   fi
-  dir="$TMP_ROOT/sm-queued"; mkdir -p "$dir"
-  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  dir="$TMP_ROOT/sm-queued"
+  mkdir -p "$dir"
+  fb=$(make_stubs "$dir")
+  log="$dir/send.log"
   home=$(setup_home sm-queued)
   actual_bun=$(fm_test_realpath "$(command -v bun)")
   omp="$dir/omp"
@@ -159,17 +162,13 @@ test_queued_secondmate_target_confirms_delivery() {
   chmod +x "$omp"
   omp=$(fm_test_realpath "$omp")
   top='╭── ⬢ GPT-5.6-Sol++ · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
-  width=$(fm_composer_terminal_width "$top" "$actual_bun") || fail "could not measure queued secondmate fixture"
-  printf 'transcript row\ntranscript row\ntranscript row\nWorking… ⟦esc⟧\n%s\n' "$top" > "$dir/before"
-  printf '╰─%-*s─╯\n' "$((width - 4))" ' queue the steer' >> "$dir/before"
+  width=$(fm_composer_terminal_width "$top" "$actual_bun") \
+    || fail "could not measure queued secondmate fixture"
   {
-    printf 'Steering · 1\n'
-    printf '  1. queue the steer\n'
-    printf '  └ Alt+Up/Shift+Up to edit\n'
-    printf 'Working… ⟦esc⟧\n'
-    printf '%s\n' "$top"
-    printf '╰─%-*s─╯\n' "$((width - 4))" ''
-  } > "$dir/after"
+    printf 'transcript row\ntranscript row\ntranscript row\nWorking… ⟦esc⟧\n%s\n' "$top"
+    printf '╰─%-*s─╯\n' "$((width - 4))" ' queue the steer'
+  } > "$dir/before"
+  cp "$dir/before" "$dir/after"
   cat > "$fb/ps" <<SH
 #!/usr/bin/env bash
 case "\$*" in
@@ -184,7 +183,7 @@ SH
   chmod +x "$fb/ps" "$fb/lsof"
   fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:fm-domain" alpha omp
   printf 'omp_bin=%s\nomp_bun=%s\n' "$omp" "$actual_bun" >> "$home/state/domain.meta"
-  FM_SEND_QUEUED=1 FM_SEND_OMP=1 FM_SEND_ENTERED="$dir/entered" \
+  FM_SEND_OMP_BUSY=1 FM_SEND_OMP=1 FM_SEND_ENTERED="$dir/entered" \
     FM_SEND_OMP_BEFORE="$dir/before" FM_SEND_OMP_AFTER="$dir/after" \
     run_send "$fb" "$home" "$log" "domain" "queue the steer"; rc=$?
   expect_code 0 "$rc" "a queued OMP secondmate steer should succeed"

@@ -35,17 +35,11 @@
 # Busy-queued Enter: when
 # the agent is mid-turn, opencode accepts Enter as a "send when the turn ends"
 # keystroke but does NOT clear the composer until then, so the composer keeps
-# showing the typed text the whole time. The plain "empty iff composer cleared"
-# acknowledgement above false-positives on a swallowed Enter for every steer
-# sent to a busy opencode pane, and `fm-send` exits non-zero on a normal
-# captain instruction. The submit core falls back to `fm_pane_is_busy` once
-# the Enter-retry budget is spent: a busy pane means the harness accepted and
-# queued the Enter (report `empty` so the caller does not re-send), while an
-# idle pane keeps the `pending` verdict (a genuine swallow). An already-busy OMP
-# pane never uses that inference: one task-bound valid post-Enter snapshot must
-# prove both an empty composer and a positive `Steering · N` count increase from
-# the immediate pre-Enter snapshot on both tmux and Herdr. An initially idle
-# tmux OMP pane retains its separate busy-onset proof.
+# showing the typed text the whole time. The submit core falls back to
+# fm_pane_is_busy once the Enter-retry budget is spent: a busy non-OMP pane
+# reports empty because that harness's queue behavior is established, while an
+# already-busy OMP pane reports queued-unconfirmed unless its native delivery
+# path provides positive proof. Idle panes keep the pending verdict.
 #
 # Overrides: FM_COMPOSER_IDLE_RE matches an empty composer after ghost and
 # structural border stripping. FM_BUSY_REGEX overrides the rendered busy-footer
@@ -349,20 +343,6 @@ fm_tmux_omp_composer_state() {  # <cursor-y> <plain-visible-pane> [canonical-bun
   fm_composer_classify_content 1 "$content" "${FM_COMPOSER_IDLE_RE:-}" insensitive "$bottom"
 }
 
-fm_tmux_omp_steering_count() {  # <target> [canonical-bun] [required-state] -> nonnegative count; 1 without required live structure
-  local target=$1 bun=${2:-${FM_OMP_BUN:-}} required_state=${3:-} cy pane plain state count=
-  cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || return 1
-  case "$cy" in ''|*[!0-9]*|0) return 1 ;; esac
-  pane=$(tmux capture-pane -e -p -t "$target" -S 0 -E - 2>/dev/null) || return 1
-  plain=$(printf '%s\n' "$pane" | fm_composer_strip_ansi)
-  state=$(fm_tmux_omp_composer_state "$cy" "$plain" "$bun") || return 1
-  [ "$state" != unknown ] || return 1
-  [ -z "$required_state" ] || [ "$state" = "$required_state" ] || return 1
-  count=$(printf '%s\n' "$plain" | fm_composer_omp_steering_block_count "$cy" 2>/dev/null) \
-    || { printf '0'; return 0; }
-  printf '%s' "$count"
-}
-
 fm_tmux_composer_state() {  # <target> [harness] [canonical-omp-bun] -> empty|pending|pending-unproven|unknown
   local target=$1 harness=${2:-} bun=${3:-${FM_OMP_BUN:-}}
   local cy raw pane plain box box_status top bottom geometry_ambiguous omp_state
@@ -439,7 +419,7 @@ fm_pane_is_busy() {  # <target> [harness]
 }
 
 # fm_tmux_submit_core: type <text> into <target> ONCE, then submit with Enter,
-# verifying the composer cleared. Retries Enter ONLY — never retypes, because a
+# verifying the composer cleared. Retries Enter ONLY - never retypes, because a
 # swallowed Enter leaves our text in the composer and retyping would duplicate
 # it. Echoes the final proof-carrying verdict on stdout so callers can require
 # exact `empty` before treating submission as confirmed.
@@ -447,30 +427,23 @@ fm_pane_is_busy() {  # <target> [harness]
 # and queues it for after the current turn, but keeps the typed text visible in
 # the composer. Once the Enter-retry budget is spent and a structurally proven
 # composer still reads "pending", the submit core falls back to
-# `fm_pane_is_busy`: a busy pane means the Enter was accepted and queued (report
-# `empty` so the caller does not re-send), while an idle pane keeps `pending` as
-# a genuine swallow. Pending-unproven receives the same Enter retry budget but
-# never reaches this exception. An already-busy OMP pane instead requires one
-# structurally valid empty post-Enter composer with a positive queue-count
-# transition from the pre-Enter snapshot.
-fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [harness] [baseline-busy] [omp-queue-baseline] [canonical-omp-bun]
-  local target=$1 retries=$2 sleep_s=$3 harness=${4:-} baseline_busy=${5:-0} queue_baseline=${6:-} bun=${7:-}
-  local i=0 state queue_count
+# `fm_pane_is_busy`: a busy non-OMP pane reports empty because that harness's
+# queue behavior is established, while an already-busy OMP pane reports
+# queued-unconfirmed because no reliable delivery proof was observed. Idle panes
+# keep the pending verdict. Pending-unproven receives the same Enter retry
+# budget but never reaches either conversion.
+fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [harness] [baseline-busy] [canonical-omp-bun]
+  local target=$1 retries=$2 sleep_s=$3 harness=${4:-} baseline_busy=${5:-0} bun=${6:-}
+  local i=0 state
   while :; do
     tmux send-keys -t "$target" Enter 2>/dev/null || true
     sleep "$sleep_s"
     state=$(fm_tmux_composer_state "$target" "$harness" "$bun")
-    if [ "$harness" = omp ] && [ "$baseline_busy" -eq 1 ] && [ -n "$queue_baseline" ] \
-       && queue_count=$(fm_tmux_omp_steering_count "$target" "$bun" empty) \
-       && [ "$queue_count" -gt "$queue_baseline" ]; then
-      printf 'empty'
-      return 0
-    fi
     case "$state" in
       pending|pending-unproven) ;;
       empty)
         if [ "$harness" = omp ] && [ "$baseline_busy" -eq 1 ]; then
-          printf 'unknown'
+          printf 'queued-unconfirmed'
         else
           printf 'empty'
         fi
@@ -488,16 +461,11 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [harness] [bas
     i=$((i + 1))
     [ "$i" -lt "$retries" ] || break
   done
-  if [ "$state" != pending ]; then
+  if [ "$harness" = omp ] && [ "$baseline_busy" -eq 1 ] && [ "$state" = pending ]; then
+    printf 'queued-unconfirmed'
+  elif [ "$state" != pending ]; then
     printf '%s' "$state"
-    return 0
-  fi
-  # Retries exhausted, composer still shows proven pending.
-  # If the pane is busy (agent mid-turn), the harness accepted the Enter
-  # and queued the message for processing when the current turn ends.
-  # Treat it as submitted so the caller does not re-send.
-  # On an idle pane, keep reporting pending - a genuine swallow.
-  if [ "$harness" != omp ] && fm_pane_is_busy "$target" "$harness"; then
+  elif [ "$harness" != omp ] && fm_pane_is_busy "$target" "$harness"; then
     printf 'empty'
   else
     printf 'pending'
@@ -506,15 +474,12 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [harness] [bas
 
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle> [harness] [canonical-omp-bun]
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${6:-} bun=${7:-}
-  local baseline_busy=0 queue_baseline=
+  local baseline_busy=0
   if [ "$harness" = omp ] && fm_pane_is_busy "$target" omp; then
     baseline_busy=1
   fi
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
   sleep "$settle"
-  if [ "$harness" = omp ] && [ "$baseline_busy" -eq 1 ]; then
-    queue_baseline=$(fm_tmux_omp_steering_count "$target" "$bun" 2>/dev/null || true)
-  fi
   fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$harness" \
-    "$baseline_busy" "$queue_baseline" "$bun"
+    "$baseline_busy" "$bun"
 }

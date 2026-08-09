@@ -329,8 +329,8 @@ else
   esac
   retries=${FM_SEND_RETRIES:-3}
   sleep_s=${FM_SEND_SLEEP:-0.4}
-  # Type once, submit, verify. Only exact empty confirms delivery; every other
-  # verdict preserves the loud refusal boundary.
+  # Type once, submit, verify. Exact empty confirms delivery; queued-unconfirmed
+  # preserves an unresolved busy-OMP expectation without claiming delivery.
   send_rc=0
   if [ "$TARGET_BACKEND" = remote ]; then
     if "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send "$TARGET_REMOTE_ID" "$MESSAGE" < /dev/null >/dev/null; then
@@ -363,6 +363,10 @@ else
   fi
   case "$verdict" in
     empty)
+      ;;
+    queued-unconfirmed)
+      # The busy OMP harness accepted the Enter without a native proof event.
+      # Continue through the common delivery-confirmation path.
       ;;
     send-failed)
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then

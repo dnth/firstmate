@@ -2496,8 +2496,7 @@ FM_BACKEND_HERDR_OMP_COMPOSER_MIN_WIDTH=${FM_BACKEND_HERDR_OMP_COMPOSER_MIN_WIDT
 # copy cannot become the live composer.
 fm_backend_herdr_omp_composer_find() {  # <ansi-capture> [canonical-omp-bun]
   local cap=$1 bun=${2:-${FM_OMP_BUN:-}} line plain trimmed row=0 open=0 lines=0 max min_width
-  local candidate="" bottom_inner bottom_width top_width=0 top_row=0 last_nonempty=0
-  local steering_count=''
+  local candidate="" bottom_inner bottom_width top_width=0 last_nonempty=0
   max=$FM_BACKEND_HERDR_OMP_COMPOSER_MAX_LINES
   min_width=$FM_BACKEND_HERDR_OMP_COMPOSER_MIN_WIDTH
   case "$max" in ''|*[!0-9]*|0) max=8 ;; esac
@@ -2507,8 +2506,6 @@ fm_backend_herdr_omp_composer_find() {  # <ansi-capture> [canonical-omp-bun]
   FM_BACKEND_HERDR_OMP_VALID=0
   FM_BACKEND_HERDR_OMP_BOTTOM_LINE=0
   FM_BACKEND_HERDR_OMP_CONTENT=""
-  FM_BACKEND_HERDR_OMP_STEERING_QUEUED=0
-  FM_BACKEND_HERDR_OMP_STEERING_COUNT=0
   while IFS= read -r line; do
     row=$((row + 1))
     plain=$(fm_backend_herdr_strip_ansi "$line")
@@ -2520,7 +2517,6 @@ fm_backend_herdr_omp_composer_find() {  # <ansi-capture> [canonical-omp-bun]
     case "$trimmed" in
       '╭── '*' ▶'*'──╮')
         FM_BACKEND_HERDR_OMP_SIGNAL=1
-        top_row=$row
         open=1
         top_width=$(fm_composer_terminal_width "$trimmed" "$bun" 2>/dev/null || printf '0')
         lines=0
@@ -2557,12 +2553,6 @@ fm_backend_herdr_omp_composer_find() {  # <ansi-capture> [canonical-omp-bun]
   done <<EOF
 $cap
 EOF
-  if [ "$FM_BACKEND_HERDR_OMP_FOUND" -eq 1 ] \
-     && steering_count=$(printf '%s\n' "$cap" \
-       | fm_composer_omp_steering_block_count "$top_row" 2>/dev/null); then
-    FM_BACKEND_HERDR_OMP_STEERING_QUEUED=1
-    FM_BACKEND_HERDR_OMP_STEERING_COUNT=$steering_count
-  fi
   if [ "$FM_BACKEND_HERDR_OMP_FOUND" -eq 1 ] \
      && [ "$FM_BACKEND_HERDR_OMP_BOTTOM_LINE" -ne "$last_nonempty" ]; then
     FM_BACKEND_HERDR_OMP_VALID=0
@@ -2768,26 +2758,7 @@ EOF
   fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE"
 }
 
-fm_backend_herdr_omp_steering_count() {  # <target> [canonical-omp-bun] [required-state] -> nonnegative count
-  local target=$1 bun=${2:-${FM_OMP_BUN:-}} required_state=${3:-} cap stripped state
-  fm_backend_herdr_parse_target "$target" || return 1
-  cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES" 2>/dev/null \
-    || fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES") || return 1
-  fm_backend_herdr_omp_composer_find "$cap" "$bun"
-  [ "$FM_BACKEND_HERDR_OMP_SIGNAL" -eq 1 ] \
-    && [ "$FM_BACKEND_HERDR_OMP_FOUND" -eq 1 ] \
-    && [ "$FM_BACKEND_HERDR_OMP_VALID" -eq 1 ] || return 1
-  if [ -n "$required_state" ]; then
-    stripped=$(printf '%s\n' "$FM_BACKEND_HERDR_OMP_CONTENT" | fm_composer_strip_ghost)
-    stripped="${stripped#"${stripped%%[![:space:]]*}"}"
-    stripped="${stripped%"${stripped##*[![:space:]]}"}"
-    state=$(fm_composer_classify_content 1 "$stripped" "$FM_BACKEND_HERDR_IDLE_RE")
-    [ "$state" = "$required_state" ] || return 1
-  fi
-  [ "$FM_BACKEND_HERDR_OMP_STEERING_QUEUED" -eq 1 ] \
-    || FM_BACKEND_HERDR_OMP_STEERING_COUNT=0
-  printf '%s' "$FM_BACKEND_HERDR_OMP_STEERING_COUNT"
-}
+
 
 # fm_backend_herdr_send_text_submit: type <text> into <target> once (raw,
 # unsubmitted, via send_literal), then submit with a named Enter key, retried
@@ -2849,9 +2820,8 @@ fm_backend_herdr_omp_steering_count() {  # <target> [canonical-omp-bun] [require
 # OMP's busy steering path is the one native exception to the generic
 # preexisting-working fallback. Before typing, it binds the exact native OMP
 # session path and byte offset. After one Enter, a matching native session event
-# confirms delivery. If that event is delayed, one task-bound valid post-Enter
-# snapshot must prove both an empty composer and a `Steering · N` count increase
-# from its pre-Enter snapshot.
+# confirms delivery. If that event is not observed, the result remains an
+# honest busy-queued-unconfirmed verdict rather than a scraped terminal guess.
 fm_backend_herdr_omp_submit_snapshot() {  # <session> <pane_id>
   local session=$1 pane_id=$2 out
   FM_BACKEND_HERDR_OMP_SUBMIT_STATUS=
@@ -2988,13 +2958,10 @@ fm_backend_herdr_wait_omp_session_exit() {  # <session-file> <byte-offset> <budg
 }
 
 # Echoes empty|pending|unknown|send-failed, a subset of the proof-carrying
-# submit vocabulary. Empty means confirmed submitted for every backend; how
-# each backend confirms it is an internal decision, and herdr's is no longer
-# literally "the composer read empty".
+# submit vocabulary. Empty means confirmed submitted for every backend.
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [harness] [canonical-omp-bun]
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${7:-} bun=${8:-}
   local i=0 verdict baseline confirm_sleep omp_confirm_sleep omp_session='' omp_offset='' omp_status='' omp_event
-  local omp_queue_baseline='' omp_queue_count=''
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   if [ "$harness" = omp ]; then
     fm_backend_herdr_omp_submit_snapshot "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
@@ -3009,9 +2976,6 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   if [ "$harness" != omp ]; then
     baseline=$(fm_backend_herdr_classify_submit_agent_status \
       "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")")
-  fi
-  if [ "$harness" = omp ] && [ "$omp_status" = working ] && [ "$text" != /exit ]; then
-    omp_queue_baseline=$(fm_backend_herdr_omp_steering_count "$target" "$bun" 2>/dev/null || true)
   fi
   confirm_sleep=$(fm_backend_herdr_submit_confirm_budget "$sleep_s")
   while :; do
@@ -3033,8 +2997,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
     fi
     if [ "$harness" = omp ] && [ "$baseline" = busy ]; then
       omp_confirm_sleep=$(fm_backend_herdr_submit_confirm_budget "$FM_BACKEND_HERDR_OMP_EVENT_CONFIRM_SLEEP")
-      # A blocked agent records the delivery as its own ask answer, so the
-      # steering predicate alone would report a landed send unconfirmed.
+      # A blocked agent records the delivery as its own ask answer.
       if [ "$omp_status" = blocked ]; then
         omp_event=answer
       else
@@ -3043,12 +3006,10 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
       if fm_backend_herdr_wait_omp_session_event "$omp_event" "$omp_session" "$omp_offset" \
         "$omp_confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS" "$text"; then
         printf 'empty'
-      elif [ -n "$omp_queue_baseline" ] \
-        && omp_queue_count=$(fm_backend_herdr_omp_steering_count "$target" "$bun" empty) \
-        && [ "$omp_queue_count" -gt "$omp_queue_baseline" ]; then
-        printf 'empty'
-      else
+      elif [ "$omp_status" = blocked ]; then
         printf 'unknown'
+      else
+        printf 'queued-unconfirmed'
       fi
       return 0
     elif [ "$baseline" = idle ]; then
