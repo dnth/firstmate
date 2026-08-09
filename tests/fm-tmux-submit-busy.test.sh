@@ -195,7 +195,7 @@ test_unrecognized_state_skips_busy_conversion() {
 }
 
 test_omp_composer_and_submission_use_verified_two_row_structure() {
-  local dir fakebin composer after concurrent sent vfile top width bun
+  local dir fakebin composer after after_pending concurrent sent vfile top width bun
   if ! command -v bun >/dev/null 2>&1; then
     pass "OMP tmux composer subtest skipped: bun not found"
     return
@@ -205,6 +205,7 @@ test_omp_composer_and_submission_use_verified_two_row_structure() {
   fakebin=$(make_submit_mock "$dir")
   composer="$dir/composer"
   after="$dir/after"
+  after_pending="$dir/after-pending"
   concurrent="$dir/concurrent"
   sent="$dir/sent.log"
   vfile="$dir/verdict"
@@ -257,6 +258,27 @@ test_omp_composer_and_submission_use_verified_two_row_structure() {
     FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_PANE_BUSY=1 FM_FAKE_CURSOR_Y=5 \
     fm_tmux_submit_core omp queued 1 0.01 0 omp "$bun" > "$vfile" 2>/dev/null
   [ "$(cat "$vfile")" = empty ] || fail "tmux submit should confirm an increased OMP queue count, got '$(cat "$vfile")'"
+  {
+    printf 'Steering · 1\n'
+    printf '  1. unrelated concurrent steer\n'
+    printf '  └ Alt+Up/Shift+Up to edit\n'
+    printf '⠴ Running requested sleep ⟦esc⟧\n'
+    printf '%s\n' "$top"
+    printf '╰─%-*s─╯\n' "$((width - 4))" ' unsubmitted editable draft'
+  } > "$after_pending"
+  {
+    printf 'transcript row\ntranscript row\ntranscript row\ntranscript row\n'
+    printf '%s\n' "$top"
+    printf '╰─%-*s─╯\n' "$((width - 4))" ' unsubmitted editable draft'
+  } > "$composer"
+  touch "$dir/.swallow"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_AFTER_ENTER_COMPOSER="$after_pending" FM_FAKE_SWALLOW="$dir/.swallow" \
+    FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_PANE_BUSY=1 FM_FAKE_CURSOR_Y=5 \
+    fm_tmux_submit_core omp pending-transition 1 0.01 0 omp "$bun" > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = pending ] \
+    || fail "a queue increase with editable OMP input must remain pending, got '$(cat "$vfile")'"
+  pass "OMP tmux composer queue growth cannot confirm editable input"
   {
     printf 'Steering · 1\n'
     printf '  1. preexisting steer\n'

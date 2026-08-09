@@ -2773,8 +2773,8 @@ EOF
   fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE"
 }
 
-fm_backend_herdr_omp_steering_count() {  # <target> [canonical-omp-bun] -> nonnegative count
-  local target=$1 bun=${2:-${FM_OMP_BUN:-}} cap
+fm_backend_herdr_omp_steering_count() {  # <target> [canonical-omp-bun] [required-state] -> nonnegative count
+  local target=$1 bun=${2:-${FM_OMP_BUN:-}} required_state=${3:-} cap stripped state
   fm_backend_herdr_parse_target "$target" || return 1
   cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES" 2>/dev/null \
     || fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES") || return 1
@@ -2782,6 +2782,13 @@ fm_backend_herdr_omp_steering_count() {  # <target> [canonical-omp-bun] -> nonne
   [ "$FM_BACKEND_HERDR_OMP_SIGNAL" -eq 1 ] \
     && [ "$FM_BACKEND_HERDR_OMP_FOUND" -eq 1 ] \
     && [ "$FM_BACKEND_HERDR_OMP_VALID" -eq 1 ] || return 1
+  if [ -n "$required_state" ]; then
+    stripped=$(printf '%s\n' "$FM_BACKEND_HERDR_OMP_CONTENT" | fm_composer_strip_ghost)
+    stripped="${stripped#"${stripped%%[![:space:]]*}"}"
+    stripped="${stripped%"${stripped##*[![:space:]]}"}"
+    state=$(fm_composer_classify_content 1 "$stripped" "$FM_BACKEND_HERDR_IDLE_RE")
+    [ "$state" = "$required_state" ] || return 1
+  fi
   [ "$FM_BACKEND_HERDR_OMP_STEERING_QUEUED" -eq 1 ] \
     || FM_BACKEND_HERDR_OMP_STEERING_COUNT=0
   printf '%s' "$FM_BACKEND_HERDR_OMP_STEERING_COUNT"
@@ -2847,8 +2854,9 @@ fm_backend_herdr_omp_steering_count() {  # <target> [canonical-omp-bun] -> nonne
 # OMP's busy steering path is the one native exception to the generic
 # preexisting-working fallback. Before typing, it binds the exact native OMP
 # session path and byte offset. After one Enter, a matching native session event
-# confirms delivery. If that event is delayed, a task-bound valid composer whose
-# `Steering · N` count increased from its pre-Enter snapshot is the only fallback.
+# confirms delivery. If that event is delayed, one task-bound valid post-Enter
+# snapshot must prove both an empty composer and a `Steering · N` count increase
+# from its pre-Enter snapshot.
 fm_backend_herdr_omp_submit_snapshot() {  # <session> <pane_id>
   local session=$1 pane_id=$2 out
   FM_BACKEND_HERDR_OMP_SUBMIT_STATUS=
@@ -3041,7 +3049,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
         "$omp_confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS" "$text"; then
         printf 'empty'
       elif [ -n "$omp_queue_baseline" ] \
-        && omp_queue_count=$(fm_backend_herdr_omp_steering_count "$target" "$bun") \
+        && omp_queue_count=$(fm_backend_herdr_omp_steering_count "$target" "$bun" empty) \
         && [ "$omp_queue_count" -gt "$omp_queue_baseline" ]; then
         printf 'empty'
       else

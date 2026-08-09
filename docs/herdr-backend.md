@@ -205,7 +205,7 @@ On an already active or unreadable baseline, ordinary harnesses fall back to con
 OMP is stricter: the adapter binds the exact native OMP session path and pre-send byte offset before typing.
 That offset is always the end of a complete newline-terminated session record; when a partial record is still being appended the adapter waits a bounded time and then refuses rather than rewinding, because a mid-record offset would poison every later read and an earlier boundary could false-confirm an already-appended record.
 A busy OMP steer sends one Enter and normally succeeds after an appended exact-text user message carries native `steering:true`; an identical ordinary user message is not acknowledgement.
-If that native event is delayed, the only fallback is a strictly increased `Steering · N` count between pre-Enter and post-Enter captures of the same task-bound, geometrically valid OMP composer.
+If that native event is delayed, the only fallback is a strictly increased `Steering · N` count between pre-Enter and post-Enter captures where the same post-Enter task-bound, geometrically valid OMP snapshot also proves the composer empty.
 Malformed or composer-less captures, an unchanged count, and genuinely pending input return unknown without redelivery.
 A `blocked` OMP agent is parked on an open ask rather than generating, so its proof is instead a successful post-offset `ask` tool result whose structured `selectedOptions` is exactly the sent text; a steering user record is never accepted there, and an errored answer is a rejection, not delivery.
 OMP `/exit` succeeds only after a post-offset normal `session_exit` event, then closes the exact owned Herdr pane and verifies it is absent; it never falls back to a steering acknowledgement.
@@ -227,7 +227,7 @@ The adapter locates the bottom-most recognized bordered row, Claude `❯` row, C
 OMP uses an independent native shape: one status top row and a final input row, with at most eight bounded content rows between them, admitted only when native identity is exactly `omp`; working and blocked state remain ineligible for injection.
 OMP applies the shared terminal-cell geometry contract owned by [the tmux backend guide](tmux-backend.md#current-behavior-and-safety); Herdr additionally enforces the bounded row count above.
 Empty, pending, and multi-line OMP input classify from that structure only on idle or done state; a short, stale, malformed, working, blocked, unreadable, or inexact-identity candidate is unknown and cannot authorize injection.
-The busy-submit path may read the same structure only to compare a pre-Enter and post-Enter queue count, never to authorize injection or erase editable text.
+The busy-submit path may read the same structure only to compare a pre-Enter and post-Enter queue count and require post-Enter emptiness, never to authorize injection or erase editable text.
 A working Pi, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains pending or unknown.
 
 ANSI capture preserves de-emphasized placeholder style.

@@ -3514,6 +3514,47 @@ test_send_text_submit_omp_busy_steer_accepts_queued_composer() {
   pass "fm_backend_herdr_send_text_submit: an increased Steering queue confirms a busy steer without redelivery"
 }
 
+test_send_text_submit_omp_busy_rejects_queue_transition_with_pending_input() {
+  local dir log resp fb out session text top width bun
+  if ! command -v bun >/dev/null 2>&1; then
+    pass "OMP Herdr queue-transition pending-input subtest skipped: bun not found"
+    return
+  fi
+  dir="$TMP_ROOT/submit-omp-busy-queue-transition-pending"
+  mkdir -p "$dir/responses"
+  log="$dir/log"
+  resp="$dir/responses"
+  : > "$log"
+  session="$dir/omp-session.jsonl"
+  text='Do not confirm this unsubmitted OMP steer.'
+  printf '%s\n' '{"type":"session","version":3}' > "$session"
+  printf '{"result":{"agent":{"agent":"omp","agent_status":"working","agent_session":{"kind":"path","value":"%s"}}}}\n' "$session" > "$resp/1.out"
+  top='╭── ⬢ GPT-5.6-Sol++ · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
+  bun=$(command -v bun)
+  width=$(fm_composer_terminal_width "$top" "$bun") || fail "could not measure pending OMP Herdr fixture"
+  {
+    printf '⠴ Running requested sleep ⟦esc⟧\n'
+    printf '%s\n' "$top"
+    printf '╰─%-*s─╯\n' "$((width - 4))" ' unsubmitted editable draft'
+  } > "$resp/3.out"
+  {
+    printf 'Steering · 1\n'
+    printf '  1. unrelated concurrent steer\n'
+    printf '  └ Alt+Up/Shift+Up to edit\n'
+    printf '⠴ Running requested sleep ⟦esc⟧\n'
+    printf '%s\n' "$top"
+    printf '╰─%-*s─╯\n' "$((width - 4))" ' unsubmitted editable draft'
+  } > "$resp/5.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0 \
+    FM_BACKEND_HERDR_OMP_EVENT_CONFIRM_SLEEP=0 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0 "" omp "$2"' "$ROOT" "$text" "$bun" )
+  [ "$out" = unknown ] \
+    || fail "an increased OMP queue with editable input must remain unknown, got '$out'"
+  pass "fm_backend_herdr_send_text_submit: queue growth cannot confirm editable OMP input"
+}
+
 test_send_text_submit_omp_busy_rejects_unchanged_queue() {
   local dir log resp fb out session text top width bun
   if ! command -v bun >/dev/null 2>&1; then
@@ -4605,6 +4646,7 @@ test_send_text_submit_omp_exit_requires_normal_session_event_and_closes_endpoint
 test_send_text_submit_omp_exit_without_normal_event_never_falls_back_to_steering_ack
 test_send_text_submit_omp_busy_steer_requires_matching_new_session_event
 test_send_text_submit_omp_busy_steer_accepts_queued_composer
+test_send_text_submit_omp_busy_rejects_queue_transition_with_pending_input
 test_send_text_submit_omp_busy_rejects_unchanged_queue
 test_send_text_submit_omp_busy_rejects_identical_ordinary_user_event
 test_send_text_submit_omp_busy_default_event_budget_is_bounded_and_long_enough

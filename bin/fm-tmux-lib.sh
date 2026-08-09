@@ -42,10 +42,10 @@
 # the Enter-retry budget is spent: a busy pane means the harness accepted and
 # queued the Enter (report `empty` so the caller does not re-send), while an
 # idle pane keeps the `pending` verdict (a genuine swallow). An already-busy OMP
-# pane never uses that inference: a task-bound valid composer and a positive
-# `Steering · N` count increase from the immediate pre-Enter snapshot are
-# required on both tmux and Herdr. An initially idle tmux OMP pane retains its
-# separate busy-onset proof.
+# pane never uses that inference: one task-bound valid post-Enter snapshot must
+# prove both an empty composer and a positive `Steering · N` count increase from
+# the immediate pre-Enter snapshot on both tmux and Herdr. An initially idle
+# tmux OMP pane retains its separate busy-onset proof.
 #
 # Overrides: FM_COMPOSER_IDLE_RE matches an empty composer after ghost and
 # structural border stripping. FM_BUSY_REGEX overrides the rendered busy-footer
@@ -349,8 +349,8 @@ fm_tmux_omp_composer_state() {  # <cursor-y> <plain-visible-pane> [canonical-bun
   fm_composer_classify_content 1 "$content" "${FM_COMPOSER_IDLE_RE:-}" insensitive "$bottom"
 }
 
-fm_tmux_omp_steering_count() {  # <target> [canonical-bun] -> nonnegative count; 1 without valid live structure
-  local target=$1 bun=${2:-${FM_OMP_BUN:-}} cy pane plain state max_rows=8
+fm_tmux_omp_steering_count() {  # <target> [canonical-bun] [required-state] -> nonnegative count; 1 without required live structure
+  local target=$1 bun=${2:-${FM_OMP_BUN:-}} required_state=${3:-} cy pane plain state max_rows=8
   local row=0 line trimmed candidate count=
   cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || return 1
   case "$cy" in ''|*[!0-9]*|0) return 1 ;; esac
@@ -358,6 +358,7 @@ fm_tmux_omp_steering_count() {  # <target> [canonical-bun] -> nonnegative count;
   plain=$(printf '%s\n' "$pane" | fm_composer_strip_ansi)
   state=$(fm_tmux_omp_composer_state "$cy" "$plain" "$bun") || return 1
   [ "$state" != unknown ] || return 1
+  [ -z "$required_state" ] || [ "$state" = "$required_state" ] || return 1
   while IFS= read -r line; do
     row=$((row + 1))
     [ "$row" -lt "$cy" ] || break
@@ -463,8 +464,9 @@ fm_pane_is_busy() {  # <target> [harness]
 # `fm_pane_is_busy`: a busy pane means the Enter was accepted and queued (report
 # `empty` so the caller does not re-send), while an idle pane keeps `pending` as
 # a genuine swallow. Pending-unproven receives the same Enter retry budget but
-# never reaches this exception. An already-busy OMP pane instead requires a
-# positive queue-count transition from a structurally valid pre-Enter snapshot.
+# never reaches this exception. An already-busy OMP pane instead requires one
+# structurally valid empty post-Enter composer with a positive queue-count
+# transition from the pre-Enter snapshot.
 fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [harness] [baseline-busy] [omp-queue-baseline] [canonical-omp-bun]
   local target=$1 retries=$2 sleep_s=$3 harness=${4:-} baseline_busy=${5:-0} queue_baseline=${6:-} bun=${7:-}
   local i=0 state queue_count
@@ -473,7 +475,7 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [harness] [bas
     sleep "$sleep_s"
     state=$(fm_tmux_composer_state "$target" "$harness" "$bun")
     if [ "$harness" = omp ] && [ "$baseline_busy" -eq 1 ] && [ -n "$queue_baseline" ] \
-       && queue_count=$(fm_tmux_omp_steering_count "$target" "$bun") \
+       && queue_count=$(fm_tmux_omp_steering_count "$target" "$bun" empty) \
        && [ "$queue_count" -gt "$queue_baseline" ]; then
       printf 'empty'
       return 0
