@@ -2782,6 +2782,8 @@ fm_backend_herdr_omp_steering_count() {  # <target> [canonical-omp-bun] -> nonne
   [ "$FM_BACKEND_HERDR_OMP_SIGNAL" -eq 1 ] \
     && [ "$FM_BACKEND_HERDR_OMP_FOUND" -eq 1 ] \
     && [ "$FM_BACKEND_HERDR_OMP_VALID" -eq 1 ] || return 1
+  [ "$FM_BACKEND_HERDR_OMP_STEERING_QUEUED" -eq 1 ] \
+    || FM_BACKEND_HERDR_OMP_STEERING_COUNT=0
   printf '%s' "$FM_BACKEND_HERDR_OMP_STEERING_COUNT"
 }
 
