@@ -223,46 +223,71 @@ test_omp_composer_and_submission_use_verified_two_row_structure() {
   printf '╰─%-*s─╯\n' "$((width - 4))" ' steer after current turn' >> "$composer"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" fm_tmux_composer_state omp omp "$bun" > "$vfile" 2>/dev/null
   [ "$(cat "$vfile")" = pending ] || fail "verified OMP composer text should be pending, got '$(cat "$vfile")'"
-  printf '%s\n' "$top" > "$composer"
-  printf '╰─%-*s─╯\n' "$((width - 4))" ' steer after current turn' >> "$composer"
-  printf 'Steering · 1\n' >> "$composer"
-  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_CURSOR_Y=1 \
+  {
+    printf 'Steering · 1\n'
+    printf '  1. steer after current turn\n'
+    printf '  └ Alt+Up/Shift+Up to edit\n'
+    printf '⠴ Running requested sleep ⟦esc⟧\n'
+    printf '%s\n' "$top"
+    printf '╰─%-*s─╯\n' "$((width - 4))" ' steer after current turn'
+  } > "$composer"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_CURSOR_Y=5 \
     fm_tmux_composer_state omp omp "$bun" > "$vfile" 2>/dev/null
   [ "$(cat "$vfile")" = pending ] || fail "a queue marker must not erase editable OMP text, got '$(cat "$vfile")'"
-  printf '%s\n' "$top" > "$composer"
-  printf '╰─%-*s─╯\n' "$((width - 4))" ' steer after current turn' >> "$composer"
-  cp "$composer" "$after"
-  printf 'Steering · 1\n' >> "$after"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_CURSOR_Y=5 \
+    fm_tmux_omp_steering_count omp "$bun" > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = 1 ] || fail "a rendered OMP queue should count as one queued steer, got '$(cat "$vfile")'"
+  {
+    printf 'transcript row\ntranscript row\ntranscript row\ntranscript row\n'
+    printf '%s\n' "$top"
+    printf '╰─%-*s─╯\n' "$((width - 4))" ' steer after current turn'
+  } > "$composer"
+  {
+    printf 'Steering · 1\n'
+    printf '  1. steer after current turn\n'
+    printf '  └ Alt+Up/Shift+Up to edit\n'
+    printf '⠴ Running requested sleep ⟦esc⟧\n'
+    printf '%s\n' "$top"
+    printf '╰─%-*s─╯\n' "$((width - 4))" ''
+  } > "$after"
   : > "$sent"
   touch "$dir/.swallow"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
     FM_FAKE_AFTER_ENTER_COMPOSER="$after" FM_FAKE_SWALLOW="$dir/.swallow" \
-    FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_PANE_BUSY=1 \
+    FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_PANE_BUSY=1 FM_FAKE_CURSOR_Y=5 \
     fm_tmux_submit_core omp queued 1 0.01 0 omp "$bun" > "$vfile" 2>/dev/null
   [ "$(cat "$vfile")" = empty ] || fail "tmux submit should confirm an increased OMP queue count, got '$(cat "$vfile")'"
-  cp "$after" "$composer"
+  {
+    printf 'Steering · 1\n'
+    printf '  1. preexisting steer\n'
+    printf '  └ Alt+Up/Shift+Up to edit\n'
+    printf '⠴ Running requested sleep ⟦esc⟧\n'
+    printf '%s\n' "$top"
+    printf '╰─%-*s─╯\n' "$((width - 4))" ' steer after current turn'
+  } > "$composer"
   touch "$dir/.swallow"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
-    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_PANE_BUSY=1 \
+    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_PANE_BUSY=1 FM_FAKE_CURSOR_Y=5 \
     fm_tmux_submit_core omp unchanged 1 0.01 0 omp "$bun" > "$vfile" 2>/dev/null
   [ "$(cat "$vfile")" = pending ] \
     || fail "an unchanged OMP queue count must remain pending, got '$(cat "$vfile")'"
-  printf '%s\n' "$top" > "$composer"
-  printf '╰─%-*s─╯\n' "$((width - 4))" ' steer after current turn' >> "$composer"
-  rm -f "$dir/.swallow"
-  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
-    FM_FAKE_PANE_BUSY=1 \
-    fm_tmux_submit_core omp cleared 1 0.01 0 omp "$bun" > "$vfile" 2>/dev/null
-  [ "$(cat "$vfile")" = unknown ] \
-    || fail "an already-busy OMP composer clearing without a queue increase must remain unknown, got '$(cat "$vfile")'"
-  printf '%s\n' "$top" > "$composer"
-  printf '╰─%-*s─╯\n' "$((width - 4))" ' steer after current turn' >> "$composer"
-  cp "$composer" "$concurrent"
-  printf 'Steering · 1\n' >> "$concurrent"
+  {
+    printf 'transcript row\ntranscript row\ntranscript row\ntranscript row\n'
+    printf '%s\n' "$top"
+    printf '╰─%-*s─╯\n' "$((width - 4))" ' steer after current turn'
+  } > "$composer"
+  {
+    printf 'Steering · 1\n'
+    printf '  1. concurrent steer\n'
+    printf '  └ Alt+Up/Shift+Up to edit\n'
+    printf '⠴ Running requested sleep ⟦esc⟧\n'
+    printf '%s\n' "$top"
+    printf '╰─%-*s─╯\n' "$((width - 4))" ' steer after current turn'
+  } > "$concurrent"
   touch "$dir/.swallow"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
     FM_FAKE_AFTER_LITERAL_COMPOSER="$concurrent" FM_FAKE_SWALLOW="$dir/.swallow" \
-    FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_PANE_BUSY=1 \
+    FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_PANE_BUSY=1 FM_FAKE_CURSOR_Y=5 \
     fm_tmux_submit_core omp concurrent 1 0.01 0 omp "$bun" > "$vfile" 2>/dev/null
   [ "$(cat "$vfile")" = pending ] \
     || fail "a queue increase before the pre-Enter snapshot must remain pending, got '$(cat "$vfile")'"

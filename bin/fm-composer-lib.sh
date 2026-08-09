@@ -176,18 +176,19 @@ fm_composer_strip_ghost() {
 }
 
 # fm_composer_omp_steering_count: print OMP's current positive queued-steering
-# count when the last non-empty input row is its exact indicator.
+# count when any captured row is its exact indicator.
 fm_composer_omp_steering_count() {
-  local line plain trimmed last count=
+  local line plain trimmed count='' candidate=''
   while IFS= read -r line; do
     plain=$(printf '%s' "$line" | fm_composer_strip_ansi)
     trimmed="${plain#"${plain%%[![:space:]]*}"}"
     trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
     [ -n "$trimmed" ] || continue
-    last=$trimmed
+    candidate=$(printf '%s\n' "$trimmed" \
+      | sed -nE 's/^Steering[[:space:]]+·[[:space:]]+([1-9][0-9]*)[[:space:]]*$/\1/p')
+    [ -n "$candidate" ] || continue
+    count=$candidate
   done
-  count=$(printf '%s\n' "$last" \
-    | sed -nE 's/^Steering[[:space:]]+·[[:space:]]+([1-9][0-9]*)[[:space:]]*$/\1/p')
   [ -n "$count" ] || return 1
   printf '%s' "$count"
 }

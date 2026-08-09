@@ -2496,8 +2496,8 @@ FM_BACKEND_HERDR_OMP_COMPOSER_MIN_WIDTH=${FM_BACKEND_HERDR_OMP_COMPOSER_MIN_WIDT
 # copy cannot become the live composer.
 fm_backend_herdr_omp_composer_find() {  # <ansi-capture> [canonical-omp-bun]
   local cap=$1 bun=${2:-${FM_OMP_BUN:-}} line plain trimmed row=0 open=0 lines=0 max min_width
-  local candidate="" bottom_inner bottom_width top_width=0 last_nonempty=0 previous_nonempty=0
-  local steering_row=0 steering_last=0 steering_count=
+  local candidate="" bottom_inner bottom_width top_width=0 top_row=0 last_nonempty=0
+  local steering_row=0 steering_count='' steering_candidate=''
   max=$FM_BACKEND_HERDR_OMP_COMPOSER_MAX_LINES
   min_width=$FM_BACKEND_HERDR_OMP_COMPOSER_MIN_WIDTH
   case "$max" in ''|*[!0-9]*|0) max=8 ;; esac
@@ -2515,18 +2515,16 @@ fm_backend_herdr_omp_composer_find() {  # <ansi-capture> [canonical-omp-bun]
     trimmed="${plain#"${plain%%[![:space:]]*}"}"
     trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
     if [ -n "$trimmed" ]; then
-      previous_nonempty=$last_nonempty
       last_nonempty=$row
-      if steering_count=$(printf '%s\n' "$trimmed" | fm_composer_omp_steering_count); then
+      if steering_candidate=$(printf '%s\n' "$trimmed" | fm_composer_omp_steering_count); then
         steering_row=$row
-        steering_last=1
-      else
-        steering_last=0
+        steering_count=$steering_candidate
       fi
     fi
     case "$trimmed" in
       '╭── '*' ▶'*'──╮')
         FM_BACKEND_HERDR_OMP_SIGNAL=1
+        top_row=$row
         open=1
         top_width=$(fm_composer_terminal_width "$trimmed" "$bun" 2>/dev/null || printf '0')
         lines=0
@@ -2563,10 +2561,12 @@ fm_backend_herdr_omp_composer_find() {  # <ansi-capture> [canonical-omp-bun]
   done <<EOF
 $cap
 EOF
-  if [ "$steering_last" -eq 1 ] && [ "$steering_row" -eq "$last_nonempty" ]; then
+  if [ "$FM_BACKEND_HERDR_OMP_FOUND" -eq 1 ] \
+     && [ "$steering_row" -gt 0 ] \
+     && [ "$top_row" -gt "$steering_row" ] \
+     && [ "$((top_row - steering_row))" -le "$max" ]; then
     FM_BACKEND_HERDR_OMP_STEERING_QUEUED=1
     FM_BACKEND_HERDR_OMP_STEERING_COUNT=$steering_count
-    last_nonempty=$previous_nonempty
   fi
   if [ "$FM_BACKEND_HERDR_OMP_FOUND" -eq 1 ] \
      && [ "$FM_BACKEND_HERDR_OMP_BOTTOM_LINE" -ne "$last_nonempty" ]; then
