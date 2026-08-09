@@ -249,6 +249,14 @@ test_omp_composer_and_submission_use_verified_two_row_structure() {
     || fail "an unchanged OMP queue count must remain pending, got '$(cat "$vfile")'"
   printf '%s\n' "$top" > "$composer"
   printf '╰─%-*s─╯\n' "$((width - 4))" ' steer after current turn' >> "$composer"
+  rm -f "$dir/.swallow"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_PANE_BUSY=1 \
+    fm_tmux_submit_core omp cleared 1 0.01 0 omp "$bun" > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = unknown ] \
+    || fail "an already-busy OMP composer clearing without a queue increase must remain unknown, got '$(cat "$vfile")'"
+  printf '%s\n' "$top" > "$composer"
+  printf '╰─%-*s─╯\n' "$((width - 4))" ' steer after current turn' >> "$composer"
   cp "$composer" "$concurrent"
   printf 'Steering · 1\n' >> "$concurrent"
   touch "$dir/.swallow"

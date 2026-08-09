@@ -145,15 +145,18 @@ The guarded primary, worker/scout, and secondmate owners reran on 2026-08-01 at 
 The OMP 17.2.10 watcher-input regression passed on 2026-08-07 with the editable draft intact; the exact command and bounded output are recorded in [`supervision.md`](supervision.md#native-session-start-delivery).
 The Herdr role matrix required each expected turn-end or routed-reply notification to reach the durable queue or the primary follow-up transcript before the fixture drained it.
 
-The deterministic tmux and Herdr composer fixtures reran on 2026-08-09 and proved that only a structurally valid post-Enter `Steering · N` count increase from the immediate pre-Enter snapshot confirms an already-busy queued delivery, while unchanged or earlier count changes fail closed and an initially idle tmux target retains its separate busy-onset proof:
+The deterministic tmux and Herdr composer fixtures reran on 2026-08-09 and proved that only a structurally valid post-Enter `Steering · N` count increase from the immediate pre-Enter snapshot confirms an already-busy queued delivery, while an empty composer, unchanged or earlier count changes fail closed and an initially idle tmux target retains its separate busy-onset proof.
+This is revision-bound source-fixture evidence for the source under review, using Bun 1.3.14 only for terminal-cell measurement; it does not invoke OMP or make an OMP runtime-version claim.
 
 ```sh
+bun --version
 bash -o pipefail -c '{ tests/fm-tmux-submit-busy.test.sh; tests/fm-backend-herdr.test.sh; tests/fm-send-secondmate-marker.test.sh; } | grep -E "^(ok - OMP submit preserves|ok - fm_backend_herdr_send_text_submit: (an increased|an unchanged)|ok - fm-send: a queued OMP secondmate)"'
 ```
 
 Observed bounded output:
 
 ```text
+1.3.14
 ok - OMP submit preserves idle-to-busy proof and requires queue proof when already busy
 ok - fm_backend_herdr_send_text_submit: an increased Steering queue confirms a busy steer without redelivery
 ok - fm_backend_herdr_send_text_submit: an unchanged Steering queue cannot confirm a busy steer

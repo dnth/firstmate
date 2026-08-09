@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: source bin/fm-composer-lib.sh, then call its composer classification and width helpers.
+# Usage: source bin/fm-composer-lib.sh, then call its composer classification, width, or OMP queued-steering helpers.
 # bin/fm-composer-lib.sh - the ONE fleet-wide owner of composer-content
 # classification, shared by every session-provider adapter: the tmux path
 # through bin/fm-tmux-lib.sh, and bin/backends/{herdr,orca,cmux}.sh directly.
