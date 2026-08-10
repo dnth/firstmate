@@ -37,14 +37,21 @@ case "${1:-}" in
       if [ -n "${FM_FAKE_APPEND_FAILURE_STATUS:-}" ]; then
         chmod 444 "$FM_FAKE_APPEND_FAILURE_STATUS"
       fi
+      if [ -n "${FM_FAKE_PENDING_FAILURE_DIR:-}" ]; then
+        chmod 500 "$FM_FAKE_PENDING_FAILURE_DIR"
+      fi
     fi
     exit 0
     ;;
   display-message)
     for a in "$@"; do
       case "$a" in
-        *cursor_y*) printf '1\n'; exit 0 ;;
-        *pane_current_command*) printf 'fakepane\n'; exit 0 ;;
+        *cursor_y*)
+          if [ "${FM_FAKE_TMUX_QUEUED_UNCONFIRMED:-0}" = 1 ]; then printf '2\n'; else printf '1\n'; fi
+          exit 0 ;;
+        *pane_current_command*)
+          if [ "${FM_FAKE_TMUX_OMP_IDENTITY:-0}" = 1 ]; then printf 'bun\n'; else printf 'fakepane\n'; fi
+          exit 0 ;;
         *pane_pid*) printf '4242\n'; exit 0 ;;
       esac
     done
@@ -52,18 +59,35 @@ case "${1:-}" in
     exit 0
     ;;
   capture-pane)
-    if [ "${FM_FAKE_TMUX_UNCONFIRMED:-0}" = 1 ]; then
+    if [ "${FM_FAKE_TMUX_QUEUED_UNCONFIRMED:-0}" = 1 ]; then
+      printf 'Working… ⟦esc⟧\n╭────────╮\n│ answer │\n╰────────╯\n'
+    elif [ "${FM_FAKE_TMUX_UNCONFIRMED:-0}" = 1 ]; then
       printf '╭────╮\n│ answer still here │\n╰────╯\n'
     else
       printf '╭────╮\n│    │\n╰────╯\n'
     fi
     exit 0
     ;;
-  list-windows) exit 0 ;;
+  list-windows)
+    if [ -n "${FM_FAKE_TMUX_WINDOW:-}" ]; then printf '%s\n' "$FM_FAKE_TMUX_WINDOW"; fi
+    exit 0 ;;
 esac
 exit 0
 SH
   chmod +x "$fb/tmux"
+  cat > "$fb/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *tpgid=*) printf '4242\n' ;;
+  *args=*) printf '%s %s --auto-approve\n' "$FM_FAKE_OMP_BUN" "$FM_FAKE_OMP_BIN" ;;
+esac
+SH
+  chmod +x "$fb/ps"
+  cat > "$fb/lsof" <<'SH'
+#!/usr/bin/env bash
+printf 'n%s\n' "$FM_FAKE_OMP_BUN"
+SH
+  chmod +x "$fb/lsof"
   cat > "$fb/sleep" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -83,12 +107,20 @@ run_send() {
   local fb=$1 home=$2 log=$3
   shift 3
   : > "$log"
+  if [ -n "${FM_SEND_ERR:-}" ]; then
+    : > "$FM_SEND_ERR"
+  fi
   env PATH="$fb:$PATH" \
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
     FM_FAKE_TMUX_SEND_FAIL="${FM_FAKE_TMUX_SEND_FAIL:-0}" \
     FM_FAKE_TMUX_UNCONFIRMED="${FM_FAKE_TMUX_UNCONFIRMED:-0}" \
+    FM_FAKE_TMUX_QUEUED_UNCONFIRMED="${FM_FAKE_TMUX_QUEUED_UNCONFIRMED:-0}" \
     FM_FAKE_APPEND_FAILURE_STATUS="${FM_FAKE_APPEND_FAILURE_STATUS:-}" \
-    "$SEND" "$@" 2>/dev/null
+    FM_FAKE_PENDING_FAILURE_DIR="${FM_FAKE_PENDING_FAILURE_DIR:-}" \
+    FM_FAKE_TMUX_OMP_IDENTITY="${FM_FAKE_TMUX_OMP_IDENTITY:-0}" \
+    FM_FAKE_TMUX_WINDOW="${FM_FAKE_TMUX_WINDOW:-}" \
+    FM_FAKE_OMP_BUN="${FM_FAKE_OMP_BUN:-}" FM_FAKE_OMP_BIN="${FM_FAKE_OMP_BIN:-}" \
+    "$SEND" "$@" 2>"${FM_SEND_ERR:-/dev/null}"
 }
 
 setup_home() {  # <name> -> echoes a fresh home dir
@@ -245,6 +277,43 @@ test_unconfirmed_send_does_not_close() {
   pass "an unconfirmed send never closes the decision"
 }
 
+test_busy_omp_queued_unconfirmed_does_not_close() {
+  local dir fb log err home project worktree omp bun rc out
+  dir="$TMP_ROOT/queued-unconfirmed"
+  mkdir -p "$dir"
+  fb=$(make_stubs "$dir")
+  log="$dir/send.log"
+  err="$dir/send.err"
+  home=$(setup_home queued-unconfirmed)
+  project="$dir/project"
+  worktree="$dir/worktree"
+  mkdir -p "$project" "$worktree"
+  bun=$(fm_test_realpath "$(command -v bun)")
+  omp="$dir/omp"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$omp"
+  chmod +x "$omp"
+  omp=$(fm_test_realpath "$omp")
+  fm_write_meta "$home/state/tq.meta" "window=sess:fm-tq" "endpoint_task_id=tq" \
+    "worktree=$worktree" "project=$project" "kind=ship" "harness=omp" \
+    "omp_bin=$omp" "omp_bun=$bun"
+  printf 'needs-decision [key=queue-proof]: verify the queued answer\n' > "$home/state/tq.status"
+
+  FM_FAKE_TMUX_QUEUED_UNCONFIRMED=1 FM_FAKE_TMUX_OMP_IDENTITY=1 \
+    FM_FAKE_TMUX_WINDOW=fm-tq FM_FAKE_OMP_BUN="$bun" FM_FAKE_OMP_BIN="$omp" \
+    FM_SEND_ERR="$err" \
+    run_send "$fb" "$home" "$log" \
+    tq --resolve-key queue-proof "answer may only be queued"
+  rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "the existing busy OMP queued steer path should still succeed: $(cat "$err")"
+  assert_no_grep 'resolved' "$home/state/tq.status" \
+    "a queued-unconfirmed OMP send closed the decision"
+  out=$(drain_out "$home")
+  printf '%s' "$out" | grep -F '[key=queue-proof]' >/dev/null \
+    || fail "the decision vanished after a queued-unconfirmed OMP send"
+  pass "a busy OMP queued-unconfirmed send leaves the decision open"
+}
+
 test_multiple_keys_close_together() {
   local dir fb log home rc out
   dir="$TMP_ROOT/multi"
@@ -365,29 +434,72 @@ test_remote_transport_failure_does_not_close() {
   pass "a failed remote transport never closes the decision"
 }
 
-test_append_failure_reports_manual_close() {
-  local dir fb log home err rc out
+test_append_failure_reports_every_safe_manual_close() {
+  local dir fb log home err commands rc out
   dir="$TMP_ROOT/append-failure"
   mkdir -p "$dir"
   fb=$(make_stubs "$dir")
   log="$dir/send.log"
   err="$dir/send.err"
-  home=$(setup_home append-failure)
+  home="$TMP_ROOT/append failure; safe-$RANDOM"
+  mkdir -p "$home/state"
   fm_write_meta "$home/state/t8.meta" "window=sess:fm-t8" "kind=ship"
-  printf 'needs-decision [key=manual]: choose the release window\n' > "$home/state/t8.status"
+  {
+    printf 'needs-decision [key=manual-one]: choose the release window\n'
+    printf 'blocked [key=manual-two]: choose the fallback window\n'
+  } > "$home/state/t8.status"
 
   env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
     FM_FAKE_APPEND_FAILURE_STATUS="$home/state/t8.status" \
-    "$SEND" t8 --resolve-key manual "ship Friday" >/dev/null 2>"$err"
+    "$SEND" t8 --resolve-key manual-one --resolve-key manual-two "ship Friday" >/dev/null 2>"$err"
   rc=$?
   chmod 644 "$home/state/t8.status"
   [ "$rc" -ne 0 ] || fail "an append failure after delivery should exit nonzero"
-  assert_grep 'Close it manually with:' "$err" "append failure omitted the manual close command"
+  [ "$(grep -c '^manual close:' "$err")" -eq 2 ] \
+    || fail "append failure did not report one command for every open key: $(cat "$err")"
   assert_no_grep 'resolved' "$home/state/t8.status" "append failure silently closed the decision"
+  commands="$dir/manual-commands"
+  sed -n 's/^manual close: //p' "$err" > "$commands"
+  bash "$commands" || fail "the reported manual close commands were not shell-safe"
+  assert_grep 'resolved [key=manual-one]: answered: ship Friday' "$home/state/t8.status" \
+    "the first manual close command did not close its key"
+  assert_grep 'resolved [key=manual-two]: answered: ship Friday' "$home/state/t8.status" \
+    "the second manual close command did not close its key"
   out=$(drain_out "$home")
-  printf '%s' "$out" | grep -F '[key=manual]' >/dev/null \
-    || fail "the decision did not re-surface after an append failure"
-  pass "an append failure reports a manual close command and leaves the decision open"
+  if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then
+    fail "a key remained open after running the reported manual close commands: $out"
+  fi
+  pass "append failure reports every shell-safe manual close command"
+}
+
+test_secondmate_closes_before_pending_reply_commit_failure() {
+  local dir fb log home pending_dir err rc out
+  dir="$TMP_ROOT/pending-failure"
+  mkdir -p "$dir"
+  fb=$(make_stubs "$dir")
+  log="$dir/send.log"
+  err="$dir/send.err"
+  home=$(setup_home pending-failure)
+  pending_dir="$home/state/pending-replies"
+  fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:fm-domain"
+  printf 'needs-decision [key=commit-order]: answer before ancillary commit\n' > "$home/state/domain.status"
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_FAKE_PENDING_FAILURE_DIR="$pending_dir" \
+    "$SEND" domain --resolve-key commit-order "use the confirmed answer" >/dev/null 2>"$err"
+  rc=$?
+  chmod 700 "$pending_dir"
+  [ "$rc" -ne 0 ] || fail "a pending-reply commit failure should still exit nonzero"
+  assert_grep 'pending-reply delivery commit' "$err" \
+    "the fixture did not reach the pending-reply commit failure"
+  assert_grep 'resolved [key=commit-order]: answered: use the confirmed answer' \
+    "$home/state/domain.status" \
+    "confirmed delivery did not close before ancillary pending-reply bookkeeping failed"
+  out=$(drain_out "$home")
+  if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then
+    fail "the confirmed secondmate answer remained open after pending-reply commit failure"
+  fi
+  pass "confirmed secondmate delivery closes before pending-reply bookkeeping"
 }
 
 test_answer_send_closes_open_decision
@@ -396,8 +508,10 @@ test_send_without_flag_and_progress_never_closes
 test_not_open_key_refuses_before_send
 test_failed_send_does_not_close
 test_unconfirmed_send_does_not_close
+test_busy_omp_queued_unconfirmed_does_not_close
 test_multiple_keys_close_together
 test_local_secondmate_answer_is_marked_and_closed
 test_remote_secondmate_answer_closes_locally
 test_remote_transport_failure_does_not_close
-test_append_failure_reports_manual_close
+test_append_failure_reports_every_safe_manual_close
+test_secondmate_closes_before_pending_reply_commit_failure

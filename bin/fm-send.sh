@@ -370,16 +370,23 @@ fi
 # fully confirmed. An append failure exits nonzero with the manual close
 # command; the decision then stays open and re-surfaces, never silently lost.
 fm_send_close_resolved_keys() {  # <answer-text>
-  local note=$1 k line
+  local note=$1 k line quoted_line quoted_status failed=0
   note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
   for k in $RESOLVE_KEYS; do
     line="resolved [key=$k]: answered: $note"
     fm_send_cap_resolved_line "$line"
     if ! printf '%s\n' "$FM_SEND_RESOLVED_LINE" >> "$RESOLVE_STATUS_FILE"; then
-      echo "error: the answer was delivered to $T, but decision key '$k' could not be closed in $RESOLVE_STATUS_FILE. Close it manually with: echo 'resolved [key=$k]: <how it was answered>' >> $RESOLVE_STATUS_FILE - do not resend the answer." >&2
-      return 1
+      printf -v quoted_line '%q' "$FM_SEND_RESOLVED_LINE"
+      printf -v quoted_status '%q' "$RESOLVE_STATUS_FILE"
+      echo "error: the answer was delivered to $T, but decision key '$k' could not be closed in $RESOLVE_STATUS_FILE." >&2
+      echo "manual close: printf '%s\\n' $quoted_line >> $quoted_status" >&2
+      failed=1
     fi
   done
+  if [ "$failed" -ne 0 ]; then
+    echo "error: close every listed key manually; do not resend the answer." >&2
+    return 1
+  fi
 }
 
 
@@ -492,6 +499,9 @@ else
   fi
   case "$verdict" in
     empty)
+      if [ -n "$RESOLVE_KEYS" ]; then
+        fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
+      fi
       ;;
     queued-unconfirmed)
       # The backend transported Enter to busy OMP without a native proof event.
@@ -512,8 +522,8 @@ else
       exit 1
       ;;
   esac
-  # Delivery confirmed. Mark the pending expectation delivered without resolving
-  # it: only a correlated parent report acknowledges the request.
+  # Mark the pending expectation delivered without resolving it: only a
+  # correlated parent report acknowledges the request.
   if [ -n "$PENDING_REPLY_CORR" ]; then
     if fm_pending_reply_confirm_delivery "$STATE" "$PENDING_REPLY_CORR"; then
       :
@@ -526,11 +536,6 @@ else
       fi
       exit 1
     fi
-  fi
-  # Delivery is fully confirmed: close each answered decision in this home's
-  # ledger (answerer-closes; see the header contract).
-  if [ -n "$RESOLVE_KEYS" ]; then
-    fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
   fi
   # The submit was confirmed or accepted through the narrow busy-OMP queue
   # verdict. The harness still needs a beat to spin up the
