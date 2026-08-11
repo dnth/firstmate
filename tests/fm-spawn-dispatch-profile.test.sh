@@ -149,11 +149,12 @@ SH
 #!/usr/bin/env bun
 case "${1:-}" in
   --help)
-    printf '%s\n' '--model=<value>' '--thinking=<value>' '--auto-approve' '--session-dir=<value>' '-e, --extension=<value>' '-r, --resume=<value>' '--prewalk native-switch' '--prewalk-into=<value>' '--no-prewalk'
+    printf '%s\n' '--model=<value>' '--thinking=<value>' '--auto-approve' '--session-dir=<value>' '-e, --extension=<value>' '-r, --resume=<value>' '--prewalk native-switch' '--prewalk-into=<value>'
+    [ "${FM_FAKE_OMP_NO_PREWALK:-1}" != 1 ] || printf '%s\n' '--no-prewalk'
     ;;
   --version) printf 'omp/17.2.11\n' ;;
   models)
-    if [ -f .omp-project-colon-model ]; then
+    if [ -n "${FM_FAKE_OMP_CATALOG_DIR:-}" ] && [ "$PWD" = "$FM_FAKE_OMP_CATALOG_DIR" ]; then
       printf '%s\n' '{"models":[{"provider":"ollama","id":"gemma3:12b","selector":"ollama/gemma3:12b","thinking":[]}]}'
     else
       printf '%s\n' '{"models":[{"provider":"openai-codex","id":"gpt-5.6-sol","selector":"openai-codex/gpt-5.6-sol","thinking":["low","medium","high","xhigh","max"]},{"provider":"openai-codex","id":"gpt-5.6-luna","selector":"openai-codex/gpt-5.6-luna","thinking":["low","medium","high","xhigh","max"]}]}'
@@ -231,6 +232,8 @@ run_spawn() {
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_ENDPOINT_LOG="$endpointlog" \
     FM_FAKE_TREEHOUSE_LOG="$treehouselog" FM_FAKE_OMP_ACK="${FM_TEST_OMP_ACK:-}" \
+    FM_FAKE_OMP_NO_PREWALK="${FM_TEST_OMP_NO_PREWALK:-1}" \
+    FM_FAKE_OMP_CATALOG_DIR="${FM_TEST_OMP_CATALOG_DIR:-}" \
     FM_FAKE_HERDR_PANE_FLAG="$herdrpaneflag" \
     FM_FAKE_HERDR_REFUSE_CLOSE="${FM_TEST_HERDR_REFUSE_CLOSE:-0}" \
     FM_FAKE_OMP_META_TAMPER="${FM_TEST_OMP_META_TAMPER:-}" \
@@ -798,26 +801,50 @@ test_omp_unusable_prewalk_target_keeps_full_starting_model_trajectory() {
   pass "unusable OMP Prewalk targets warn and keep the full starting-model trajectory"
 }
 
-test_omp_prewalk_accepts_colon_selector_from_launch_project_catalog() {
+test_omp_prewalk_accepts_colon_selector_from_launch_worktree_catalog() {
   local rec id out status launch target
   id=$(profile_id profile-omp-prewalk-colon-z8ot)
   rec=$(make_spawn_case profile-omp-prewalk-colon omp "$id")
   read_case_record "$rec"
-  touch "$PROJ_DIR/.omp-project-colon-model"
   export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
+  export FM_TEST_OMP_CATALOG_DIR="$WT_DIR"
   target=ollama/gemma3:12b
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
     --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
   status=$?
-  expect_code 0 "$status" "a colon-bearing selector from the launch project catalog should succeed"
+  expect_code 0 "$status" "a colon-bearing selector from the launch worktree catalog should succeed"
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "--prewalk --prewalk-into='$target'" \
     "OMP split a native colon-bearing selector as an effort suffix"
   assert_grep "prewalk_into=$target" "$HOME_DIR/state/$id.meta" \
-    "OMP did not record the project-scoped colon-bearing selector"
-  unset FM_TEST_OMP_ACK
-  pass "OMP validates native colon selectors in the launch project catalog"
+    "OMP did not record the worktree-scoped colon-bearing selector"
+  unset FM_TEST_OMP_CATALOG_DIR FM_TEST_OMP_ACK
+  pass "OMP validates native colon selectors in the launch worktree catalog"
+}
+
+test_omp_prewalk_fallback_omits_unsupported_disable_flag() {
+  local rec id out status launch target
+  id=$(profile_id profile-omp-prewalk-no-disable-z8ou)
+  rec=$(make_spawn_case profile-omp-prewalk-no-disable omp "$id")
+  read_case_record "$rec"
+  export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
+  export FM_TEST_OMP_NO_PREWALK=0
+  target=openai-codex/gpt-5.6-luna:xhigh
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+  status=$?
+  expect_code 0 "$status" "fallback should not emit an unsupported native disable flag"
+  assert_contains "$out" "does not expose native --prewalk, --prewalk-into, and --no-prewalk flags" \
+    "missing native disable support did not produce a clear fallback warning"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "--prewalk" \
+    "fallback emitted a Prewalk flag that the selected OMP executable does not support"
+  assert_no_grep '^prewalk_into=' "$HOME_DIR/state/$id.meta" \
+    "unsupported native flags were recorded as an enabled Prewalk target"
+  unset FM_TEST_OMP_NO_PREWALK FM_TEST_OMP_ACK
+  pass "OMP fallback omits unsupported native disable flags"
 }
 
 test_non_omp_prewalk_refuses_without_changing_normal_claude_launch() {
@@ -1221,7 +1248,8 @@ test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_omp_threads_exact_identity_model_and_every_thinking_level
 test_omp_prewalk_threads_native_target_and_metadata
 test_omp_unusable_prewalk_target_keeps_full_starting_model_trajectory
-test_omp_prewalk_accepts_colon_selector_from_launch_project_catalog
+test_omp_prewalk_accepts_colon_selector_from_launch_worktree_catalog
+test_omp_prewalk_fallback_omits_unsupported_disable_flag
 test_non_omp_prewalk_refuses_without_changing_normal_claude_launch
 test_omp_herdr_worker_and_scout_launch_with_exact_identity_and_ack
 test_omp_refuses_unverified_backends_before_endpoint_creation

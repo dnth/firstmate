@@ -251,6 +251,7 @@ MODEL=
 EFFORT=
 PREWALK_INTO=
 PREWALK_DISABLED=0
+PREWALK_DISABLE_SUPPORTED=0
 SECONDMATE_MODEL_SOURCE=
 SECONDMATE_FALLBACK_REASON=
 BACKEND_ARG=
@@ -1157,26 +1158,31 @@ if [ "$HARNESS" = pi-signed ] && ! command -v pi-signed >/dev/null 2>&1; then
 fi
 omp_prewalk_target_problem() {
   local binary=$1 target=$2 launch_dir=$3 selector=$2 effort='' suffix help catalog
-  command -v jq >/dev/null 2>&1 || {
-    printf '%s\n' "jq is unavailable, so the OMP model catalog cannot be checked"
-    return
-  }
+  OMP_PREWALK_PROBLEM=
+  PREWALK_DISABLE_SUPPORTED=0
   if ! help=$("$binary" --help 2>&1); then
-    printf '%s\n' "the selected OMP executable could not report its launch flags"
+    OMP_PREWALK_PROBLEM="the selected OMP executable could not report its launch flags"
     return
+  fi
+  if printf '%s\n' "$help" | grep -F -- '--no-prewalk' >/dev/null 2>&1; then
+    PREWALK_DISABLE_SUPPORTED=1
   fi
   if ! printf '%s\n' "$help" | grep -F -- '--prewalk ' >/dev/null 2>&1 \
     || ! printf '%s\n' "$help" | grep -F -- '--prewalk-into=' >/dev/null 2>&1 \
-    || ! printf '%s\n' "$help" | grep -F -- '--no-prewalk' >/dev/null 2>&1; then
-    printf '%s\n' "the selected OMP executable does not expose native --prewalk, --prewalk-into, and --no-prewalk flags"
+    || [ "$PREWALK_DISABLE_SUPPORTED" != 1 ]; then
+    OMP_PREWALK_PROBLEM="the selected OMP executable does not expose native --prewalk, --prewalk-into, and --no-prewalk flags"
     return
   fi
+  command -v jq >/dev/null 2>&1 || {
+    OMP_PREWALK_PROBLEM="jq is unavailable, so the OMP model catalog cannot be checked"
+    return
+  }
   if ! catalog=$(cd "$launch_dir" && "$binary" models --json 2>/dev/null); then
-    printf '%s\n' "the OMP model catalog could not be read"
+    OMP_PREWALK_PROBLEM="the OMP model catalog could not be read"
     return
   fi
   if ! printf '%s\n' "$catalog" | jq -e '.models | type == "array"' >/dev/null 2>&1; then
-    printf '%s\n' "the OMP model catalog has no usable models array"
+    OMP_PREWALK_PROBLEM="the OMP model catalog has no usable models array"
     return
   fi
   if printf '%s\n' "$catalog" | jq -e --arg selector "$target" \
@@ -1195,13 +1201,13 @@ omp_prewalk_target_problem() {
       ;;
   esac
   [ -n "$selector" ] || {
-    printf '%s\n' "the model selector is empty"
+    OMP_PREWALK_PROBLEM="the model selector is empty"
     return
   }
   if ! printf '%s\n' "$catalog" | jq -e --arg selector "$selector" '
       any(.models[]; .selector == $selector)
     ' >/dev/null 2>&1; then
-    printf '%s\n' "model '$selector' is not listed by OMP"
+    OMP_PREWALK_PROBLEM="model '$selector' is not listed by OMP"
     return
   fi
   if [ -n "$effort" ] && ! printf '%s\n' "$catalog" | jq -e \
@@ -1210,7 +1216,18 @@ omp_prewalk_target_problem() {
       | select(.selector == $selector)
       | ((.thinking // []) | index($effort)) != null
     ' >/dev/null 2>&1; then
-    printf '%s\n' "model '$selector' does not list effort '$effort'"
+    OMP_PREWALK_PROBLEM="model '$selector' does not list effort '$effort'"
+  fi
+}
+
+validate_omp_prewalk_for_launch_dir() {
+  local launch_dir=$1
+  [ -n "$PREWALK_INTO" ] || return 0
+  omp_prewalk_target_problem "$OMP_BIN_CANON" "$PREWALK_INTO" "$launch_dir"
+  if [ -n "$OMP_PREWALK_PROBLEM" ]; then
+    echo "warning: OMP prewalk target '$PREWALK_INTO' will not be used: $OMP_PREWALK_PROBLEM; continuing the full trajectory on starting model '${MODEL:-default}' without prewalk" >&2
+    PREWALK_INTO=
+    PREWALK_DISABLED=1
   fi
 }
 OMP_BIN=
@@ -1398,9 +1415,9 @@ effort_flag_for_harness() {
   esac
 }
 prewalk_flag_for_harness() {
-  local harness=$1 target=$2 disabled=$3
+  local harness=$1 target=$2 disabled=$3 disable_supported=$4
   [ "$harness" = omp ] || return 0
-  if [ "$disabled" = 1 ]; then
+  if [ "$disabled" = 1 ] && [ "$disable_supported" = 1 ]; then
     printf '%s' '--no-prewalk '
     return
   fi
@@ -1719,13 +1736,8 @@ else
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
-if [ "$HARNESS" = omp ] && [ -n "$PREWALK_INTO" ]; then
-  OMP_PREWALK_PROBLEM=$(omp_prewalk_target_problem "$OMP_BIN_CANON" "$PREWALK_INTO" "$PROJ_ABS")
-  if [ -n "$OMP_PREWALK_PROBLEM" ]; then
-    echo "warning: OMP prewalk target '$PREWALK_INTO' will not be used: $OMP_PREWALK_PROBLEM; continuing the full trajectory on starting model '${MODEL:-default}' without prewalk" >&2
-    PREWALK_INTO=
-    PREWALK_DISABLED=1
-  fi
+if [ "$HARNESS" = omp ] && [ "$KIND" = secondmate ]; then
+  validate_omp_prewalk_for_launch_dir "$PROJ_ABS"
 fi
 
 delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
@@ -2327,6 +2339,9 @@ fi
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
+if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
+  validate_omp_prewalk_for_launch_dir "$WT"
+fi
 
 if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
   OMP_ABORT_INITIAL_HEAD=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || {
@@ -2712,7 +2727,7 @@ sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
-PREWALKFLAG=$(prewalk_flag_for_harness "$HARNESS" "$PREWALK_INTO" "$PREWALK_DISABLED")
+PREWALKFLAG=$(prewalk_flag_for_harness "$HARNESS" "$PREWALK_INTO" "$PREWALK_DISABLED" "$PREWALK_DISABLE_SUPPORTED")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__PREWALKFLAG__/$PREWALKFLAG}
