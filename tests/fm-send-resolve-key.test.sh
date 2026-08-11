@@ -197,8 +197,8 @@ test_send_without_flag_and_progress_never_closes() {
   run_send "$fb" "$home" "$log" t3 "unrelated nudge, keep going --resolve-key is documentation"
   rc=$?
   expect_code 0 "$rc" "a routine steer should still succeed"
-  printf 'working: resumed\n' >> "$home/state/t3.status"
-  printf 'done: unrelated milestone\n' >> "$home/state/t3.status"
+  printf 'working [key=schema]: resumed\n' >> "$home/state/t3.status"
+  printf 'done [key=schema]: unrelated milestone\n' >> "$home/state/t3.status"
 
   assert_no_grep 'resolved' "$home/state/t3.status" \
     "a send without --resolve-key wrote a resolved line"
