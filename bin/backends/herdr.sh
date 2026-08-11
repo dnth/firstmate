@@ -1886,6 +1886,7 @@ fm_backend_herdr_projection_create_task() {  # <cwd> <workspace-label> <task-lab
     echo "error: herdr presentation workspace create could not capture exact active workspace and tab; refusing a focus-unsafe projection" >&2
     return 1
   }
+  # shellcheck disable=SC2034  # caller consumes the same-process mutation gate
   FM_BACKEND_HERDR_PROJECTION_MUTATION_STARTED=1
   if out=$(fm_backend_herdr_cli "$session" workspace create --cwd "$cwd" --label "$workspace_label" --no-focus 2>/dev/null); then
     :
@@ -2142,6 +2143,7 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
     echo "warning: herdr presentation reclaim for $id would replace the active tab; spawning flat" >&2
     return 2
   fi
+  # shellcheck disable=SC2034  # caller consumes the same-process reclaim gate
   FM_BACKEND_HERDR_PROJECTION_RECLAIM_AMBIGUOUS=1
   if ! out=$(fm_backend_herdr_cli "$session" tab create \
     --workspace "$meta_workspace" --cwd "$cwd" --label "$task_label" --no-focus 2>/dev/null); then
