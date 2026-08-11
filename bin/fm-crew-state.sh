@@ -4,10 +4,11 @@
 # Why this exists: state/<id>.status is an append-only, best-effort EVENT LOG.
 # Crews append only wake-worthy transitions (done/needs-decision/blocked/paused/failed)
 # and nothing when they silently resume, so `tail -1` of that log reports the
-# last EVENT, not the current STATE. After firstmate resolves a needs-decision
-# or blocked and the crew resumes (responds to the gate, the pipeline fixes, it
-# re-validates), the log's last line stays stale. This helper never infers the
-# current state from a tail of the log: it reads the authoritative source (a
+# last EVENT, not the current STATE. After firstmate answers a keyed decision
+# or blocker, fm-send appends a resolved event at answer time, but that event
+# still does not describe the crew's current state as it resumes, fixes, or
+# re-validates. This helper never infers the current state from a tail of the log:
+# it reads the authoritative source (a
 # no-mistakes run-step attributed to this crew's branch and current code
 # identity, else the pane busy-signature) and reconciles the possibly-stale log
 # against it.

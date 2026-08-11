@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Send one line of literal text to a crewmate endpoint, then Enter.
-# Usage: fm-send.sh <target> <text...>
+# Usage: fm-send.sh <target> [--resolve-key <key>]... <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
@@ -31,6 +31,27 @@
 # stranding it in chat the main firstmate never reads. A crewmate/scout target,
 # an explicit backend-target escape-hatch target, and the --key path are never
 # marked - their behavior is unchanged.
+# Decision closure (answerer-closes): pass --resolve-key <key> (repeatable,
+# before the message) when this send answers an open keyed needs-decision: or
+# blocked: record in the target task's state/<id>.status. After the submit is
+# confirmed, fm-send itself appends the closing
+# "resolved [key=<key>]: answered: <capped excerpt>" line to that status file,
+# so the captain-facing OPEN DECISIONS record closes at answer time and never
+# depends on the busy worker writing a matching resolved line. The close is a
+# LOCAL append for every target kind - crewmate, scout, local secondmate, and
+# remote secondmate alike - because the open-decision ledger fm-wake-drain
+# folds lives in this home's own state dir (a remote mate's escalations reach
+# it through the parent-replies ingest); only the answer message crosses the
+# backend or remote transport. Each named key must currently be open in that
+# ledger per status_open_decisions (bin/fm-classify-lib.sh) or fm-send refuses
+# before sending, so a mistyped key cannot deliver an answer while silently
+# orphaning the decision. A failed or unconfirmed send never closes a key; a
+# delivered answer whose closing append fails exits nonzero with the exact
+# manual close command, leaving the decision open to re-surface (the safe
+# direction). A send without the flag never closes anything: a routine steer,
+# working:, or done: event still cannot clear a captain decision. The flag is
+# refused with --key, with an explicit backend target (no task ledger in this
+# home), and with an empty message.
 #
 # Parent-owned pending-reply expectation: every newly marked secondmate request
 # also receives a privacy-safe correlation id and a durable parent record under
@@ -76,8 +97,26 @@ fi
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-marker-lib.sh
 . "$SCRIPT_DIR/fm-marker-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# Answer notes use the same bounded status-line shape as the OPEN DECISIONS
+# renderer without adding a second shared helper to this fork.
+fm_send_resolved_line() {  # <key> <note>
+  local key=$1 note=$2 prefix suffix=' [truncated]' max=220 keep
+  prefix="resolved [key=$key]: answered: "
+  keep=$((max - ${#prefix}))
+  [ "$keep" -ge 0 ] || keep=0
+  if [ "${#note}" -gt "$keep" ]; then
+    if [ "$keep" -ge "${#suffix}" ]; then
+      note="${note:0:$((keep - ${#suffix}))}$suffix"
+    else
+      note=
+    fi
+  fi
+  FM_SEND_RESOLVED_LINE="$prefix$note"
+}
 
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
 
@@ -197,6 +236,7 @@ fm_send_resolve_target() {  # <raw-target>
       return 1
     fi
     RESOLVED_TARGET=$target
+
     TARGET_BACKEND=$(fm_backend_of_meta "$meta")
     TARGET_META=$meta
     TARGET_HARNESS=$(fm_meta_get "$meta" harness)
@@ -231,6 +271,40 @@ RAW_TARGET=$1
 fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
 shift
+# Collect --resolve-key flags (answerer-closes; see the header contract). They
+# must precede --key or the message text; everything after the last flag is the
+# message exactly as before, so ordinary sends are byte-identical.
+RESOLVE_KEYS=
+fm_send_add_resolve_key() {  # <key>
+  local k=$1
+  case "$k" in
+    ''|*[!A-Za-z0-9._-]*)
+      echo "error: --resolve-key '$k' is not a valid decision key (allowed: A-Z a-z 0-9 . _ -)" >&2
+      return 1
+      ;;
+  esac
+  case " $RESOLVE_KEYS " in
+    *" $k "*)
+      echo "error: duplicate --resolve-key '$k'" >&2
+      return 1
+      ;;
+  esac
+  RESOLVE_KEYS="${RESOLVE_KEYS}${RESOLVE_KEYS:+ }$k"
+}
+while :; do
+  case "${1:-}" in
+    --resolve-key)
+      [ $# -ge 2 ] || { echo "error: --resolve-key requires a key" >&2; exit 1; }
+      fm_send_add_resolve_key "$2" || exit 1
+      shift 2
+      ;;
+    --resolve-key=*)
+      fm_send_add_resolve_key "${1#--resolve-key=}" || exit 1
+      shift
+      ;;
+    *) break ;;
+  esac
+done
 
 if [ "$TARGET_BACKEND" != remote ]; then
   fm_backend_validate "$TARGET_BACKEND" || exit 1
@@ -264,6 +338,62 @@ if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] && [ "$(fm_meta_get "$TARG
   MARK_FROM_FIRSTMATE=1
   TARGET_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
 fi
+# Validate the answerer-closes request before any durable mutation or send: the
+# target must have a task ledger in THIS home, the send must carry an answer
+# message, and every named key must be open right now in that ledger per the
+# ONE authoritative fold (status_open_decisions). Refusing here, before the
+# send, is what keeps a mistyped key loud instead of delivering an answer that
+# silently leaves its decision open.
+RESOLVE_STATUS_FILE=
+if [ -n "$RESOLVE_KEYS" ]; then
+  if [ -z "$TARGET_SELECTOR" ] || [ -z "$TARGET_META" ]; then
+    echo "error: --resolve-key needs a task selector resolved through this home's metadata; an explicit backend target has no decision ledger here" >&2
+    exit 1
+  fi
+  if [ "${1:-}" = "--key" ]; then
+    echo "error: --resolve-key cannot accompany --key; answering a decision requires a text answer" >&2
+    exit 1
+  fi
+  if [ -z "$*" ]; then
+    echo "error: --resolve-key requires a nonempty answer message" >&2
+    exit 1
+  fi
+  RESOLVE_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
+  RESOLVE_STATUS_FILE="$STATE/$RESOLVE_TASK_ID.status"
+  resolve_open_set=$(status_open_decisions "$RESOLVE_STATUS_FILE")
+  for k in $RESOLVE_KEYS; do
+    case "$resolve_open_set" in
+      "$k"$'\t'*|*$'\n'"$k"$'\t'*) ;;
+      *)
+        echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE (already closed, mistyped, or transferred). Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
+        exit 1
+        ;;
+    esac
+  done
+fi
+# Close each answered decision in this home's ledger, only after delivery is
+# fully confirmed. An append failure exits nonzero with the manual close
+# command; the decision then stays open and re-surfaces, never silently lost.
+fm_send_close_resolved_keys() {  # <answer-text>
+  local note=$1 k quoted_line quoted_status failed=0
+  note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
+  for k in $RESOLVE_KEYS; do
+    fm_send_resolved_line "$k" "$note"
+    if ! printf '%s\n' "$FM_SEND_RESOLVED_LINE" >> "$RESOLVE_STATUS_FILE"; then
+      printf -v quoted_line '%q' "$FM_SEND_RESOLVED_LINE"
+      printf -v quoted_status '%q' "$RESOLVE_STATUS_FILE"
+      echo "error: the answer was delivered to $T, but decision key '$k' could not be closed in $RESOLVE_STATUS_FILE." >&2
+      printf '%s\n' "manual close: printf '%s\\n' $quoted_line >> $quoted_status" >&2
+      failed=1
+    fi
+  done
+  if [ "$failed" -ne 0 ]; then
+    echo "error: close every listed key manually; do not resend the answer." >&2
+    return 1
+  fi
+}
+
+
 
 # Resolve the target's harness from its meta (recorded by fm-spawn), used only to
 # scope the codex `$<skill>` popup-settle below. A task selector carries
@@ -278,6 +408,12 @@ fi
 # error with the attempted resolution attached.
 
 if [ "${1:-}" = "--key" ]; then
+  case "$*" in
+    *--resolve-key*)
+      echo "error: --resolve-key cannot accompany --key; answering a decision requires a text answer" >&2
+      exit 1
+      ;;
+  esac
   if [ "$TARGET_BACKEND" = remote ]; then
     if ! "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh key "$TARGET_REMOTE_ID" "$2" < /dev/null; then
       echo "error: key '$2' not sent to remote secondmate $TARGET_REMOTE_ID; completion may be unknown" >&2
@@ -290,6 +426,7 @@ if [ "${1:-}" = "--key" ]; then
   fm_send_record_interrupt "$2" || exit 1
 else
   MESSAGE=$*
+  RESOLVE_ANSWER_TEXT=$MESSAGE
   if [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
     # Reuse an existing correlation id for recovery resends; otherwise create a
     # durable parent expectation before delivery. Transport success never
@@ -364,8 +501,12 @@ else
      && [ "$(fm_backend_agent_state "$TARGET_BACKEND" "$T" "$TARGET_META" 2>/dev/null)" = dead ]; then
     verdict=empty
   fi
+  post_delivery_failed=0
   case "$verdict" in
     empty)
+      if [ -n "$RESOLVE_KEYS" ]; then
+        fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || post_delivery_failed=1
+      fi
       ;;
     queued-unconfirmed)
       # The backend transported Enter to busy OMP without a native proof event.
@@ -386,8 +527,8 @@ else
       exit 1
       ;;
   esac
-  # Delivery confirmed. Mark the pending expectation delivered without resolving
-  # it: only a correlated parent report acknowledges the request.
+  # Mark the pending expectation delivered without resolving it: only a
+  # correlated parent report acknowledges the request.
   if [ -n "$PENDING_REPLY_CORR" ]; then
     if fm_pending_reply_confirm_delivery "$STATE" "$PENDING_REPLY_CORR"; then
       :
@@ -398,9 +539,10 @@ else
       else
         echo "error: text was delivered to $T, but its pending-reply delivery commit and recovery marker both failed. Do not resend; inspect $STATE manually." >&2
       fi
-      exit 1
+      post_delivery_failed=1
     fi
   fi
+  [ "$post_delivery_failed" -eq 0 ] || exit 1
   # The submit was confirmed or accepted through the narrow busy-OMP queue
   # verdict. The harness still needs a beat to spin up the
   # turn before its busy footer shows. Pause so an immediate peek catches the

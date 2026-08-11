@@ -39,7 +39,7 @@ If the worktree or ownership cannot be reconciled safely, leave all state intact
 Escalate in order:
 
 1. Peek the pane.
-2. If the crewmate is waiting on a question its brief already answers, answer in one line via `FM_HOME=<this-firstmate-home> bin/fm-send.sh` from an active firstmate session unless `FM_HOME` is already set to the active firstmate home.
+2. If the crewmate is waiting on a question its brief already answers, answer in one line via `FM_HOME=<this-firstmate-home> bin/fm-send.sh` from an active firstmate session unless `FM_HOME` is already set to the active firstmate home; when that question is an open keyed decision or blocker, pass its key through `--resolve-key` as required by `bin/fm-send.sh`'s header contract.
 3. If the crewmate is confused or looping, interrupt with the adapter's interrupt key, then redirect with one corrective line.
    For example, for a single-Escape adapter: `FM_HOME=<this-firstmate-home> bin/fm-send.sh <window> --key Escape`.
 4. If the crewmate is genuinely wedged after redirection, exit the agent with the adapter's exit command and relaunch with the same brief plus a `progress so far` note appended to it.
