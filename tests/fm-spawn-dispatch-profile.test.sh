@@ -62,6 +62,10 @@ case "${1:-}" in
         *Enter*)
           if grep -Fq 'FM_OMP_HARNESS=omp' "$FM_FAKE_LAUNCH_LOG" 2>/dev/null; then
             [ -z "${FM_FAKE_OMP_ACK:-}" ] || : > "$FM_FAKE_OMP_ACK"
+            if [ "${FM_FAKE_OMP_DYNAMIC_ACK:-0}" = 1 ]; then
+              ack=$(tail -n 1 "$FM_FAKE_LAUNCH_LOG" | sed -n "s/.* -e '\([^']*\)\.omp-ext\.ts'.*/\1.omp-started/p")
+              [ -z "$ack" ] || : > "$ack"
+            fi
             if [ -n "${FM_FAKE_OMP_META_TAMPER:-}" ]; then
               cp "$FM_FAKE_OMP_META_TAMPER" "$FM_FAKE_OMP_META_TAMPER.test-owner"
               printf 'window=unrelated:retry\n' > "$FM_FAKE_OMP_META_TAMPER"
@@ -89,14 +93,53 @@ case "$cmd $sub" in
     printf '%s\n' '{"sessions":[{"name":"default","running":true,"socket_path":"/tmp/fm-profile-herdr.sock"}]}'
     ;;
   "workspace list")
-    printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"}]}}'
+    if [ "${FM_FAKE_HERDR_PARTIAL_PROJECTION:-0}" = 1 ]; then
+      printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","active_tab_id":"w1:t1","focused":true}]}}'
+    elif [ "${FM_FAKE_HERDR_AMBIGUOUS_RECLAIM:-0}" = 1 ]; then
+      printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","active_tab_id":"w1:t1","focused":true},{"workspace_id":"w2","label":"%s","active_tab_id":"w2:t2","focused":false}]}}\n' \
+        "$FM_FAKE_HERDR_RECLAIM_WORKSPACE_LABEL"
+    else
+      printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"}]}}'
+    fi
     ;;
   "tab list")
-    printf '%s\n' '{"result":{"tabs":[]}}'
+    if [ "${FM_FAKE_HERDR_PARTIAL_PROJECTION:-0}" = 1 ]; then
+      printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","workspace_id":"w1","label":"1","focused":true}]}}'
+    elif [ "${FM_FAKE_HERDR_AMBIGUOUS_RECLAIM:-0}" = 1 ]; then
+      case "$*" in
+        *"--workspace w2"*)
+          printf '{"result":{"tabs":[{"tab_id":"w2:t2","workspace_id":"w2","label":"%s","focused":false}]}}\n' \
+            "$FM_FAKE_HERDR_RECLAIM_TASK_LABEL"
+          ;;
+        *)
+          printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","workspace_id":"w1","label":"1","focused":true}]}}'
+          ;;
+      esac
+    else
+      printf '%s\n' '{"result":{"tabs":[]}}'
+    fi
+    ;;
+  "pane list")
+    printf '%s\n' '{"result":{"panes":[{"pane_id":"w2:p2","tab_id":"w2:t2"}]}}'
+    ;;
+  "workspace create")
+    [ -z "${FM_FAKE_ENDPOINT_LOG:-}" ] || printf 'workspace create\n' >> "$FM_FAKE_ENDPOINT_LOG"
+    printf '%s\n' '{"result":{"workspace":{"workspace_id":"w2"}}}'
     ;;
   "tab create")
     [ -z "${FM_FAKE_ENDPOINT_LOG:-}" ] || printf 'tab create\n' >> "$FM_FAKE_ENDPOINT_LOG"
-    printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2"}}}'
+    if [ "${FM_FAKE_HERDR_AMBIGUOUS_RECLAIM:-0}" = 1 ] \
+       && [ "$(grep -c '^tab create$' "$FM_FAKE_ENDPOINT_LOG")" = 1 ]; then
+      printf '%s\n' '{"result":{"tab":{"tab_id":"w2:t3"}}}'
+    elif [ "${FM_FAKE_HERDR_PARTIAL_CREATE:-0}" != 0 ]; then
+      if [ "$FM_FAKE_HERDR_PARTIAL_CREATE" = pane-only ]; then
+        printf '%s\n' '{"result":{"root_pane":{"pane_id":"w1:p2"}}}'
+      else
+        printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t2"}}}'
+      fi
+    else
+      printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2"}}}'
+    fi
     ;;
   "pane get")
     if [ -n "${FM_FAKE_HERDR_PANE_FLAG:-}" ] && [ ! -f "$FM_FAKE_HERDR_PANE_FLAG" ]; then
@@ -128,6 +171,10 @@ case "$cmd $sub" in
     [ -z "${FM_FAKE_HERDR_PANE_FLAG:-}" ] || rm -f "$FM_FAKE_HERDR_PANE_FLAG"
     ;;
   "agent get")
+    if [ "${FM_FAKE_HERDR_AMBIGUOUS_RECLAIM:-0}" = 1 ]; then
+      printf '%s\n' '{"error":{"code":"agent_not_found"}}' >&2
+      exit 1
+    fi
     if [ -n "${FM_FAKE_HERDR_PANE_FLAG:-}" ] && [ ! -f "$FM_FAKE_HERDR_PANE_FLAG" ]; then
       printf '%s\n' '{"error":{"code":"agent_not_found"}}' >&2
       exit 1
@@ -140,18 +187,43 @@ SH
   chmod +x "$fakebin/herdr"
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
-[ -z "${FM_FAKE_TREEHOUSE_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
+[ -z "${FM_FAKE_TREEHOUSE_LOG:-}" ] || printf '%s|%s\n' "$PWD" "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
+if [ "${1:-}" = get ] && [ "${2:-}" = --lease ]; then
+  printf '%s\n' "$FM_FAKE_PANE_PATH"
+fi
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
+  cat > "$fakebin/mkdir" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ -n "${FM_FAKE_MKDIR_FAIL_PATH:-}" ] && [ "$arg" = "$FM_FAKE_MKDIR_FAIL_PATH" ]; then
+    printf 'injected mkdir failure for %s\n' "$arg" >&2
+    exit 1
+  fi
+done
+exec /bin/mkdir "$@"
+SH
+  chmod +x "$fakebin/mkdir"
   fm_fake_exit0 "$fakebin" pi-signed
   cat > "$fakebin/omp" <<'SH'
 #!/usr/bin/env bun
 case "${1:-}" in
   --help)
-    printf '%s\n' '--model=<value>' '--thinking=<value>' '--auto-approve' '--session-dir=<value>' '-e, --extension=<value>' '-r, --resume=<value>'
+    printf '%s\n' '--model=<value>' '--thinking=<value>' '--auto-approve' '--session-dir=<value>' '-e, --extension=<value>' '-r, --resume=<value>' '--prewalk native-switch' '--prewalk-into=<value>' '--config=<value>'
+    [ "${FM_FAKE_OMP_NO_PREWALK:-1}" != 1 ] || printf '%s\n' '--no-prewalk'
     ;;
-  --version) printf 'omp/17.1.8\n' ;;
+  --version) printf 'omp/17.2.11\n' ;;
+  config)
+    printf '{"key":"prewalk.enabled","value":%s,"type":"boolean"}\n' "${FM_FAKE_OMP_PREWALK_ENABLED:-false}"
+    ;;
+  models)
+    if [ -n "${FM_FAKE_OMP_CATALOG_DIR:-}" ] && [ "$PWD" = "$FM_FAKE_OMP_CATALOG_DIR" ]; then
+      printf '%s\n' '{"models":[{"provider":"ollama","id":"gemma3:12b","selector":"ollama/gemma3:12b","thinking":[]}]}'
+    else
+      printf '%s\n' '{"models":[{"provider":"openai-codex","id":"gpt-5.6-sol","selector":"openai-codex/gpt-5.6-sol","thinking":["low","medium","high","xhigh","max"]},{"provider":"openai-codex","id":"gpt-5.6-luna","selector":"openai-codex/gpt-5.6-luna","thinking":["low","medium","high","xhigh","max"]}]}'
+    fi
+    ;;
   *) exit 0 ;;
 esac
 SH
@@ -224,6 +296,16 @@ run_spawn() {
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_ENDPOINT_LOG="$endpointlog" \
     FM_FAKE_TREEHOUSE_LOG="$treehouselog" FM_FAKE_OMP_ACK="${FM_TEST_OMP_ACK:-}" \
+    FM_FAKE_OMP_DYNAMIC_ACK="${FM_TEST_OMP_DYNAMIC_ACK:-0}" \
+    FM_FAKE_OMP_NO_PREWALK="${FM_TEST_OMP_NO_PREWALK:-1}" \
+    FM_FAKE_OMP_PREWALK_ENABLED="${FM_TEST_OMP_PREWALK_ENABLED:-false}" \
+    FM_FAKE_OMP_CATALOG_DIR="${FM_TEST_OMP_CATALOG_DIR:-}" \
+    FM_FAKE_MKDIR_FAIL_PATH="${FM_TEST_MKDIR_FAIL_PATH:-}" \
+    FM_FAKE_HERDR_PARTIAL_CREATE="${FM_TEST_HERDR_PARTIAL_CREATE:-0}" \
+    FM_FAKE_HERDR_PARTIAL_PROJECTION="${FM_TEST_HERDR_PARTIAL_PROJECTION:-0}" \
+    FM_FAKE_HERDR_AMBIGUOUS_RECLAIM="${FM_TEST_HERDR_AMBIGUOUS_RECLAIM:-0}" \
+    FM_FAKE_HERDR_RECLAIM_WORKSPACE_LABEL="${FM_TEST_HERDR_RECLAIM_WORKSPACE_LABEL:-}" \
+    FM_FAKE_HERDR_RECLAIM_TASK_LABEL="${FM_TEST_HERDR_RECLAIM_TASK_LABEL:-}" \
     FM_FAKE_HERDR_PANE_FLAG="$herdrpaneflag" \
     FM_FAKE_HERDR_REFUSE_CLOSE="${FM_TEST_HERDR_REFUSE_CLOSE:-0}" \
     FM_FAKE_OMP_META_TAMPER="${FM_TEST_OMP_META_TAMPER:-}" \
@@ -729,6 +811,9 @@ test_omp_threads_exact_identity_model_and_every_thinking_level() {
       "OMP launch did not execute the canonical Bun/OMP pair with unattended mode, model, thinking, and extension"
     assert_grep "omp_bun=$expected_bun" "$HOME_DIR/state/$id.meta" \
       "OMP launch metadata did not bind the same Bun executable used by the literal pane command"
+    assert_not_contains "$launch" "--prewalk" "ordinary OMP launch must not enable Prewalk without explicit opt-in"
+    assert_no_grep '^prewalk_into=' "$HOME_DIR/state/$id.meta" \
+      "ordinary OMP metadata must not add a prewalk target"
     [ "$(grep -Fo "encode launch-brief" "$LAUNCH_LOG" | wc -l | tr -d ' ')" = 1 ] \
       || fail "OMP launch did not deliver exactly one positional launch brief"
     assert_present "$HOME_DIR/state/$id.omp-ext.ts" "OMP launch did not create the external turn extension"
@@ -737,18 +822,388 @@ test_omp_threads_exact_identity_model_and_every_thinking_level() {
   pass "OMP launches through its metadata-bound canonical Bun/OMP pair and forwards every supported thinking level"
 }
 
+test_omp_prewalk_threads_native_target_and_metadata() {
+  local rec id out status launch target
+  id=$(profile_id profile-omp-prewalk-z8op)
+  rec=$(make_spawn_case profile-omp-prewalk omp "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
+  target=openai-codex/gpt-5.6-luna:xhigh
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness omp --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+  status=$?
+  expect_code 0 "$status" "OMP spawn with a valid native Prewalk target should succeed"
+  assert_contains "$out" "spawned $id harness=omp kind=ship" \
+    "OMP Prewalk spawn did not preserve exact OMP identity"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--model 'openai-codex/gpt-5.6-sol' --thinking 'xhigh' --prewalk --prewalk-into='$target' -e" \
+    "OMP launch did not thread the native Prewalk flags after its starting model and thinking level"
+  assert_grep "prewalk_into=$target" "$HOME_DIR/state/$id.meta" \
+    "OMP Prewalk metadata did not record the exact effort-qualified target"
+  unset FM_TEST_OMP_ACK
+  pass "OMP profiles opt into native Prewalk with an effort-qualified target"
+}
+
+test_omp_unusable_prewalk_target_keeps_full_starting_model_trajectory() {
+  local rec id out status launch target
+  id=$(profile_id profile-omp-prewalk-invalid-z8oq)
+  rec=$(make_spawn_case profile-omp-prewalk-invalid omp "$id")
+  read_case_record "$rec"
+  export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
+  target=openai-codex/not-listed:xhigh
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+  status=$?
+  expect_code 0 "$status" "an unusable Prewalk target should keep the full starting-model launch"
+  assert_contains "$out" "warning: OMP prewalk target '$target' will not be used" \
+    "unusable OMP Prewalk target did not produce a clear warning"
+  assert_contains "$out" "continuing the full trajectory on starting model 'openai-codex/gpt-5.6-sol' without prewalk" \
+    "unusable OMP Prewalk target did not explain the safe full-trajectory fallback"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--model 'openai-codex/gpt-5.6-sol' --thinking 'xhigh' --no-prewalk -e" \
+    "unusable Prewalk target did not preserve the frontier starting model"
+  assert_not_contains "$launch" "--prewalk --prewalk-into" \
+    "unusable OMP target still enabled native Prewalk"
+  assert_no_grep '^prewalk_into=' "$HOME_DIR/state/$id.meta" \
+    "unusable OMP target was recorded as an enabled Prewalk target"
+  unset FM_TEST_OMP_ACK
+  pass "unusable OMP Prewalk targets warn and keep the full starting-model trajectory"
+}
+
+test_omp_prewalk_accepts_colon_selector_from_launch_worktree_catalog() {
+  local rec id out status launch target
+  id=$(profile_id profile-omp-prewalk-colon-z8ot)
+  rec=$(make_spawn_case profile-omp-prewalk-colon omp "$id")
+  read_case_record "$rec"
+  export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
+  export FM_TEST_OMP_CATALOG_DIR="$WT_DIR"
+  target=ollama/gemma3:12b
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+  status=$?
+  expect_code 0 "$status" "a colon-bearing selector from the launch worktree catalog should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--prewalk --prewalk-into='$target'" \
+    "OMP split a native colon-bearing selector as an effort suffix"
+  assert_grep "prewalk_into=$target" "$HOME_DIR/state/$id.meta" \
+    "OMP did not record the worktree-scoped colon-bearing selector"
+  unset FM_TEST_OMP_CATALOG_DIR FM_TEST_OMP_ACK
+  pass "OMP validates native colon selectors in the launch worktree catalog"
+}
+
+test_omp_prewalk_fallback_omits_unsupported_disable_flag() {
+  local rec id out status launch target
+  id=$(profile_id profile-omp-prewalk-no-disable-z8ou)
+  rec=$(make_spawn_case profile-omp-prewalk-no-disable omp "$id")
+  read_case_record "$rec"
+  export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
+  export FM_TEST_OMP_NO_PREWALK=0
+  target=openai-codex/not-listed:xhigh
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+  status=$?
+  expect_code 0 "$status" "fallback should not emit an unsupported native disable flag"
+  assert_contains "$out" "model 'openai-codex/not-listed' is not listed by OMP" \
+    "invalid target did not produce a clear fallback warning"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "--prewalk" \
+    "fallback emitted a Prewalk flag that the selected OMP executable does not support"
+  assert_no_grep '^prewalk_into=' "$HOME_DIR/state/$id.meta" \
+    "unsupported native flags were recorded as an enabled Prewalk target"
+  unset FM_TEST_OMP_NO_PREWALK FM_TEST_OMP_ACK
+  pass "OMP fallback omits unsupported native disable flags"
+}
+
+test_omp_valid_prewalk_does_not_require_disable_flag() {
+  local rec id out status launch target
+  id=$(profile_id profile-omp-prewalk-enable-only-z8ov)
+  rec=$(make_spawn_case profile-omp-prewalk-enable-only omp "$id")
+  read_case_record "$rec"
+  export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
+  export FM_TEST_OMP_NO_PREWALK=0
+  export FM_TEST_OMP_PREWALK_ENABLED=true
+  target=openai-codex/gpt-5.6-luna:xhigh
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+  status=$?
+  expect_code 0 "$status" "valid native Prewalk should not require --no-prewalk support"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--prewalk --prewalk-into='$target'" \
+    "valid native Prewalk was suppressed because --no-prewalk was unavailable"
+  unset FM_TEST_OMP_PREWALK_ENABLED FM_TEST_OMP_NO_PREWALK FM_TEST_OMP_ACK
+  pass "valid OMP Prewalk does not require its disable flag"
+}
+
+test_omp_unsafe_fallback_refuses_before_endpoint() {
+  local rec id out status endpoint_log treehouse_log target
+  id=$(profile_id profile-omp-prewalk-unsafe-z8ow)
+  rec=$(make_spawn_case profile-omp-prewalk-unsafe omp "$id")
+  read_case_record "$rec"
+  endpoint_log="$CASE_DIR/endpoint.log"
+  treehouse_log="$CASE_DIR/treehouse.log"
+  export FM_TEST_OMP_NO_PREWALK=0
+  export FM_TEST_OMP_PREWALK_ENABLED=true
+  export FM_TEST_OMP_CATALOG_DIR="$WT_DIR"
+  target=openai-codex/gpt-5.6-luna:xhigh
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+  status=$?
+  expect_code 1 "$status" "unsafe fallback should refuse before endpoint creation"
+  assert_contains "$out" "use an OMP build with --no-prewalk or set prewalk.enabled=false" \
+    "unsafe fallback refusal was not actionable"
+  [ ! -s "$endpoint_log" ] || fail "unsafe fallback created an endpoint before refusing"
+  assert_grep "get --lease --lease-holder fm-$id" "$treehouse_log" \
+    "unsafe fallback did not validate from the authoritative leased worktree"
+  assert_grep "$PROJ_DIR|return $WT_DIR" "$treehouse_log" \
+    "unsafe fallback did not return its pre-endpoint worktree lease"
+  unset FM_TEST_OMP_CATALOG_DIR FM_TEST_OMP_PREWALK_ENABLED FM_TEST_OMP_NO_PREWALK
+  pass "unsafe OMP fallback refuses before endpoint creation"
+}
+
+test_omp_prewalk_premetadata_failure_cleans_endpoint_and_lease() {
+  local rec id out status endpoint_log treehouse_log target tasktmp
+  id=$(profile_id profile-omp-prewalk-premeta-z8ox)
+  rec=$(make_spawn_case profile-omp-prewalk-premeta omp "$id")
+  read_case_record "$rec"
+  endpoint_log="$CASE_DIR/endpoint.log"
+  treehouse_log="$CASE_DIR/treehouse.log"
+  target=openai-codex/gpt-5.6-luna:xhigh
+  tasktmp="/tmp/fm-$id"
+  export FM_TEST_MKDIR_FAIL_PATH="$tasktmp/gotmp"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+  status=$?
+  unset FM_TEST_MKDIR_FAIL_PATH
+  expect_code 1 "$status" "a post-endpoint Prewalk setup failure should abort"
+  assert_contains "$out" "injected mkdir failure for $tasktmp/gotmp" \
+    "post-endpoint Prewalk setup did not reach the expected refusal"
+  assert_grep 'kill-window' "$endpoint_log" \
+    "post-endpoint Prewalk failure left its owned endpoint alive"
+  assert_grep "$PROJ_DIR|return --force $WT_DIR" "$treehouse_log" \
+    "post-endpoint Prewalk failure did not return its unchanged worktree lease"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "post-endpoint Prewalk failure published durable metadata"
+  assert_absent "$tasktmp" \
+    "post-endpoint Prewalk failure left its rejected task temp root"
+  pass "Prewalk setup failures clean their endpoint and worktree lease"
+}
+
+test_omp_prewalk_ambiguous_herdr_creation_preserves_lease() {
+  local rec id out status endpoint_log treehouse_log target
+  id=$(profile_id profile-omp-prewalk-herdr-partial-z8oy)
+  rec=$(make_spawn_case profile-omp-prewalk-herdr-partial omp "$id")
+  read_case_record "$rec"
+  endpoint_log="$CASE_DIR/endpoint.log"
+  treehouse_log="$CASE_DIR/treehouse.log"
+  target=openai-codex/gpt-5.6-luna:xhigh
+  export FM_TEST_HERDR_PARTIAL_CREATE=1
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --backend herdr --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+  status=$?
+  unset FM_TEST_HERDR_PARTIAL_CREATE
+  expect_code 1 "$status" "ambiguous Herdr endpoint creation should abort"
+  assert_contains "$out" "could not parse tab/pane id from herdr tab create output" \
+    "ambiguous Herdr creation did not report its malformed ownership response"
+  assert_contains "$out" "preserving its leased worktree because backend endpoint creation was ambiguous" \
+    "ambiguous Herdr creation did not explain why its worktree lease was preserved"
+  assert_grep 'tab create' "$endpoint_log" \
+    "ambiguous Herdr fixture did not reach endpoint creation"
+  assert_no_grep 'return' "$treehouse_log" \
+    "ambiguous Herdr creation returned a worktree that may still have a live endpoint"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "ambiguous Herdr creation published durable task metadata"
+  pass "ambiguous Herdr creation preserves its Prewalk lease"
+}
+
+test_ordinary_herdr_partial_create_preserves_response_known_pane() {
+  local rec id out status endpoint_log
+  id=$(profile_id profile-ordinary-herdr-partial-z8oyb)
+  rec=$(make_spawn_case profile-ordinary-herdr-partial claude "$id")
+  read_case_record "$rec"
+  endpoint_log="$CASE_DIR/endpoint.log"
+  export FM_TEST_HERDR_PARTIAL_CREATE=pane-only
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --backend herdr)
+  status=$?
+  unset FM_TEST_HERDR_PARTIAL_CREATE
+  expect_code 1 "$status" "ordinary Herdr partial creation should retain its prior failure"
+  assert_contains "$out" "could not parse tab/pane id from herdr tab create output" \
+    "ordinary Herdr partial creation did not report its malformed response"
+  assert_no_grep 'pane close w1:p2' "$endpoint_log" \
+    "ordinary Herdr partial creation transactionally removed its response-known pane"
+  pass "ordinary Herdr partial creation preserves its response-known pane"
+}
+
+test_omp_prewalk_partial_create_cleans_response_known_pane() {
+  local rec id out status endpoint_log treehouse_log target
+  id=$(profile_id profile-prewalk-herdr-known-pane-z8oyc)
+  rec=$(make_spawn_case profile-prewalk-herdr-known-pane omp "$id")
+  read_case_record "$rec"
+  endpoint_log="$CASE_DIR/endpoint.log"
+  treehouse_log="$CASE_DIR/treehouse.log"
+  target=openai-codex/gpt-5.6-luna:xhigh
+  export FM_TEST_HERDR_PARTIAL_CREATE=pane-only
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --backend herdr --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+  status=$?
+  unset FM_TEST_HERDR_PARTIAL_CREATE
+  expect_code 1 "$status" "Prewalk Herdr partial creation should abort after cleanup"
+  assert_contains "$out" "could not parse tab/pane id from herdr tab create output" \
+    "Prewalk Herdr partial creation did not report its malformed response"
+  assert_grep 'pane close w1:p2' "$endpoint_log" \
+    "Prewalk Herdr partial creation did not remove its response-known pane"
+  assert_grep "$PROJ_DIR|return $WT_DIR" "$treehouse_log" \
+    "Prewalk Herdr partial creation did not return its lease after confirmed endpoint cleanup"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "Prewalk Herdr partial creation published durable metadata"
+  pass "Prewalk Herdr partial creation cleans its response-known pane"
+}
+
+test_omp_prewalk_ambiguous_herdr_projection_preserves_lease() {
+  local rec id out status endpoint_log treehouse_log target
+  id=$(profile_id profile-omp-prewalk-herdr-projection-z8oz)
+  rec=$(make_spawn_case profile-omp-prewalk-herdr-projection omp "$id")
+  read_case_record "$rec"
+  endpoint_log="$CASE_DIR/endpoint.log"
+  treehouse_log="$CASE_DIR/treehouse.log"
+  target=openai-codex/gpt-5.6-luna:xhigh
+  printf 'on\n' > "$HOME_DIR/config/herdr-presentation-spaces"
+  export FM_TEST_HERDR_PARTIAL_PROJECTION=1
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --backend herdr --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+  status=$?
+  unset FM_TEST_HERDR_PARTIAL_PROJECTION
+  expect_code 1 "$status" "ambiguous Herdr projection creation should abort"
+  assert_contains "$out" "workspace create returned incomplete IDs" \
+    "ambiguous Herdr projection did not report its malformed ownership response"
+  assert_contains "$out" "preserving its leased worktree because backend endpoint creation was ambiguous" \
+    "ambiguous Herdr projection did not explain why its worktree lease was preserved"
+  assert_grep 'workspace create' "$endpoint_log" \
+    "ambiguous Herdr projection fixture did not reach endpoint creation"
+  assert_no_grep 'return' "$treehouse_log" \
+    "ambiguous Herdr projection returned a worktree that may still have a live endpoint"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "ambiguous Herdr projection published durable task metadata"
+  pass "ambiguous Herdr projection preserves its Prewalk lease"
+}
+
+write_ambiguous_reclaim_fixture() {
+  local home=$1 id=$2 token=$3 workspace_label=$4 task_label=$5
+  printf 'on\n' > "$home/config/herdr-presentation-spaces"
+  {
+    printf 'version=2\n'
+    printf 'task_id=%s\n' "$id"
+    printf 'projection_id=%s\n' "$token"
+    printf 'home=%s\n' "$home"
+    printf 'session=default\n'
+    printf 'workspace_id=w2\n'
+    printf 'tab_id=w2:t2\n'
+    printf 'pane_id=w2:p2\n'
+    printf 'parent_workspace_id=w1\n'
+    printf 'parent_label=firstmate\n'
+    printf 'workspace_label=%s\n' "$workspace_label"
+    printf 'task_label=%s\n' "$task_label"
+  } > "$home/state/$id.herdr-presentation"
+  {
+    printf 'window=default:w2:p2\n'
+    printf 'backend=herdr\n'
+    printf 'herdr_session=default\n'
+    printf 'herdr_workspace_id=w2\n'
+    printf 'herdr_tab_id=w2:t2\n'
+    printf 'herdr_pane_id=w2:p2\n'
+  } > "$home/state/$id.meta"
+}
+
+test_ordinary_herdr_ambiguous_reclaim_keeps_flat_fallback() {
+  local rec id out status endpoint_log token workspace_label task_label
+  id=$(profile_id profile-ordinary-herdr-reclaim-z8pa)
+  rec=$(make_spawn_case profile-ordinary-herdr-reclaim claude "$id")
+  read_case_record "$rec"
+  endpoint_log="$CASE_DIR/endpoint.log"
+  token=0123456789abcdefghijkl
+  workspace_label="└ $id · p:$token"
+  task_label="fm-$id"
+  write_ambiguous_reclaim_fixture "$HOME_DIR" "$id" "$token" "$workspace_label" "$task_label"
+  export FM_TEST_HERDR_AMBIGUOUS_RECLAIM=1
+  export FM_TEST_HERDR_RECLAIM_WORKSPACE_LABEL="$workspace_label"
+  export FM_TEST_HERDR_RECLAIM_TASK_LABEL="$task_label"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --backend herdr)
+  status=$?
+  unset FM_TEST_HERDR_AMBIGUOUS_RECLAIM
+  unset FM_TEST_HERDR_RECLAIM_WORKSPACE_LABEL
+  unset FM_TEST_HERDR_RECLAIM_TASK_LABEL
+  expect_code 0 "$status" "ordinary ambiguous Herdr reclaim should retain flat fallback"
+  assert_contains "$out" "spawned $id harness=claude" \
+    "ordinary ambiguous Herdr reclaim did not continue into a normal launch"
+  [ "$(grep -c '^tab create$' "$endpoint_log")" = 2 ] \
+    || fail "ordinary ambiguous Herdr reclaim did not attempt replacement then flat spawn"
+  assert_grep 'herdr_workspace_id=w1' "$HOME_DIR/state/$id.meta" \
+    "ordinary ambiguous Herdr reclaim did not land in the flat home workspace"
+  assert_no_grep 'prewalk_into=' "$HOME_DIR/state/$id.meta" \
+    "ordinary ambiguous Herdr reclaim unexpectedly enabled Prewalk"
+  pass "ordinary ambiguous Herdr reclaim retains flat fallback"
+}
+
+test_non_omp_prewalk_refuses_without_changing_normal_claude_launch() {
+  local rec bad_id normal_id out status launch endpoint_log target
+  bad_id=$(profile_id profile-claude-prewalk-bad-z8or)
+  normal_id=$(profile_id profile-claude-prewalk-normal-z8os)
+  rec=$(make_spawn_case profile-claude-prewalk claude "$bad_id" "$normal_id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  endpoint_log="$CASE_DIR/endpoint.log"
+  target=openai-codex/gpt-5.6-luna:xhigh
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$bad_id" "$PROJ_DIR" --harness claude --model sonnet --effort high --prewalk-into "$target")
+  status=$?
+  expect_code 1 "$status" "non-OMP harness with --prewalk-into should refuse"
+  assert_contains "$out" "--prewalk-into is supported only with harness=omp (resolved harness=claude)" \
+    "non-OMP refusal did not name the OMP-only contract"
+  assert_absent "$HOME_DIR/state/$bad_id.meta" "non-OMP Prewalk refusal wrote task metadata"
+  [ ! -s "$endpoint_log" ] || fail "non-OMP Prewalk refusal created a backend endpoint"
+  [ ! -s "$LAUNCH_LOG" ] || fail "non-OMP Prewalk refusal typed a launch command"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$normal_id" "$PROJ_DIR" --harness claude --model sonnet --effort high)
+  status=$?
+  expect_code 0 "$status" "ordinary Claude launch should remain unaffected"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "claude --dangerously-skip-permissions --model 'sonnet' --effort 'high'" \
+    "ordinary Claude launch changed after adding the OMP-only profile axis"
+  assert_not_contains "$launch" "--prewalk" "ordinary Claude launch received OMP Prewalk flags"
+  assert_no_grep '^prewalk_into=' "$HOME_DIR/state/$normal_id.meta" \
+    "ordinary Claude metadata gained an OMP-only Prewalk field"
+  pass "non-OMP Prewalk refuses while ordinary Claude profile launches remain unchanged"
+}
+
 test_omp_herdr_worker_and_scout_launch_with_exact_identity_and_ack() {
-  local kind rec id out status launch flag
+  local kind rec id out status launch
+  local -a dispatch_args
   for kind in worker scout; do
     id=$(profile_id "profile-omp-herdr-$kind-z8ph")
     rec=$(make_spawn_case "profile-omp-herdr-$kind" omp "$id")
     read_case_record "$rec"
     export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
-    flag='--mode no-mistakes --yolo off'
-    [ "$kind" != scout ] || flag=--scout
+    dispatch_args=(--mode no-mistakes --yolo off)
+    [ "$kind" != scout ] || dispatch_args=(--scout)
 
     out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-      --backend herdr --model openai-codex/gpt-5.6-sol --effort low $flag)
+      --backend herdr --model openai-codex/gpt-5.6-sol --effort low "${dispatch_args[@]}")
     status=$?
     expect_code 0 "$status" "OMP Herdr $kind launch should succeed after turn-start acknowledgement"
     assert_contains "$out" "spawned $id harness=omp" "OMP Herdr $kind launch lost exact runtime identity"
@@ -1014,6 +1469,32 @@ test_batch_forwards_shared_profile_flags() {
   pass "batch dispatch forwards shared --harness, --model, and --effort to every pair"
 }
 
+test_batch_forwards_omp_prewalk_target() {
+  local rec id1 id2 out status target
+  id1=$(profile_id profile-batch-prewalk-a-z11)
+  id2=$(profile_id profile-batch-prewalk-b-z12)
+  rec=$(make_spawn_case profile-batch-prewalk omp "$id1" "$id2")
+  read_case_record "$rec"
+  target=openai-codex/gpt-5.6-luna:xhigh
+  export FM_TEST_OMP_DYNAMIC_ACK=1
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness omp \
+    --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+  status=$?
+  unset FM_TEST_OMP_DYNAMIC_ACK
+  expect_code 0 "$status" "batch OMP spawn with a shared Prewalk target should succeed"
+  assert_contains "$out" "spawned $id1 harness=omp" "first batch task did not use OMP"
+  assert_contains "$out" "spawned $id2 harness=omp" "second batch task did not use OMP"
+  assert_grep "prewalk_into=$target" "$HOME_DIR/state/$id1.meta" \
+    "first batch task did not record the shared Prewalk target"
+  assert_grep "prewalk_into=$target" "$HOME_DIR/state/$id2.meta" \
+    "second batch task did not record the shared Prewalk target"
+  [ "$(grep -Fc -- "--prewalk --prewalk-into='$target'" "$LAUNCH_LOG")" = 2 ] \
+    || fail "batch OMP launch did not forward the native Prewalk target exactly twice"
+  pass "batch dispatch forwards the shared OMP Prewalk target to every pair"
+}
+
 test_claude_forwards_firstmate_config_dir_when_set() {
   local rec id out status launch
   id=$(profile_id profile-claude-cfgdir-z17)
@@ -1102,6 +1583,19 @@ test_pi_threads_model_and_max_effort
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_omp_threads_exact_identity_model_and_every_thinking_level
+test_omp_prewalk_threads_native_target_and_metadata
+test_omp_unusable_prewalk_target_keeps_full_starting_model_trajectory
+test_omp_prewalk_accepts_colon_selector_from_launch_worktree_catalog
+test_omp_prewalk_fallback_omits_unsupported_disable_flag
+test_omp_valid_prewalk_does_not_require_disable_flag
+test_omp_unsafe_fallback_refuses_before_endpoint
+test_omp_prewalk_premetadata_failure_cleans_endpoint_and_lease
+test_omp_prewalk_ambiguous_herdr_creation_preserves_lease
+test_ordinary_herdr_partial_create_preserves_response_known_pane
+test_omp_prewalk_partial_create_cleans_response_known_pane
+test_omp_prewalk_ambiguous_herdr_projection_preserves_lease
+test_ordinary_herdr_ambiguous_reclaim_keeps_flat_fallback
+test_non_omp_prewalk_refuses_without_changing_normal_claude_launch
 test_omp_herdr_worker_and_scout_launch_with_exact_identity_and_ack
 test_omp_refuses_unverified_backends_before_endpoint_creation
 test_omp_scout_uses_external_turn_extension
@@ -1113,6 +1607,7 @@ test_omp_herdr_refused_close_preserves_worktree_and_artifacts
 test_omp_ack_cleanup_preserves_artifacts_when_ownership_changes
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags
+test_batch_forwards_omp_prewalk_target
 test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir

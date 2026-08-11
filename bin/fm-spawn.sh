@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -22,6 +22,14 @@
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
+#   --prewalk-into <model-spec> opts an OMP profile into native Prewalk and records
+#   the effective target in task metadata. An unusable target falls back with
+#   --no-prewalk when supported. Without that flag, fallback proceeds with no
+#   Prewalk flags only when the launch home's effective prewalk.enabled is false;
+#   true or unreadable settings refuse. Omitting this option adds no Prewalk flags
+#   and preserves ordinary OMP-configured behavior. Every non-OMP harness refuses it.
+#   Local OMP secondmate relaunches recover the recorded target when the caller does
+#   not repeat the flag, so exact-session recovery keeps the same launch profile.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -124,7 +132,7 @@
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
-#   source of truth; shared --scout/--harness/--model/--effort/--backend/--mode/--yolo
+#   source of truth; shared --scout/--harness/--model/--effort/--prewalk-into/--backend/--mode/--yolo
 #   applies to every pair. A ship batch therefore carries one delivery contract, and each
 #   pair still checks it against its own brief; a batch spanning modes is two invocations.
 #   If config/crew-dispatch.json exists, shared --harness is required for crewmate
@@ -244,6 +252,11 @@ KIND=ship
 HARNESS_ARG=
 MODEL=
 EFFORT=
+PREWALK_INTO=
+PREWALK_DISABLED=0
+PREWALK_ENABLE_SUPPORTED=0
+PREWALK_DISABLE_SUPPORTED=0
+OMP_PREWALK_FLAG_PROBLEM=
 SECONDMATE_MODEL_SOURCE=
 SECONDMATE_FALLBACK_REASON=
 BACKEND_ARG=
@@ -253,6 +266,7 @@ TRACEPARENT_ARG=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
+PREWALK_INTO_SET=0
 BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
@@ -268,6 +282,7 @@ for a in "$@"; do
       harness) HARNESS_ARG=$a; HARNESS_SET=1 ;;
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
+      prewalk-into) PREWALK_INTO=$a; PREWALK_INTO_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
@@ -286,6 +301,8 @@ for a in "$@"; do
     --model=*) MODEL=${a#--model=}; MODEL_SET=1 ;;
     --effort) want_value=effort ;;
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
+    --prewalk-into) want_value=prewalk-into ;;
+    --prewalk-into=*) PREWALK_INTO=${a#--prewalk-into=}; PREWALK_INTO_SET=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
     --mode) want_value=mode ;;
@@ -301,6 +318,7 @@ done
 [ "$HARNESS_SET" -eq 0 ] || [ -n "$HARNESS_ARG" ] || { echo "error: --harness requires a non-empty value" >&2; exit 1; }
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
+[ "$PREWALK_INTO_SET" -eq 0 ] || [ -n "$PREWALK_INTO" ] || { echo "error: --prewalk-into requires a non-empty value" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
@@ -384,6 +402,12 @@ spawn_remote_secondmate() {
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     return 3
+  fi
+  if [ "$PREWALK_INTO_SET" -eq 1 ]; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: --prewalk-into is unavailable for remote secondmates because their verified harness set does not include omp" >&2
+    return 1
   fi
   host=$(secondmate_registry_field "$DATA/secondmates.md" "$id" host)
   root=$(secondmate_registry_field "$DATA/secondmates.md" "$id" root)
@@ -690,6 +714,8 @@ ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
 OMP_ABORT_CLEANUP=0
 OMP_ABORT_INITIAL_HEAD=
+PREWALK_WORKTREE_READY=0
+PREWALK_ABORT_PHASE=none
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
@@ -740,8 +766,8 @@ spawn_omp_abort_ownership_proven() {  # <meta>
 # with no classifier at all - clears the caller's destructive branch; present,
 # agent-less, ambiguous, and unreadable states all preserve everything, exactly
 # like the dead-secondmate recovery check below.
-spawn_omp_abort_endpoint_stopped() {  # <meta>
-  local meta=$1 state
+spawn_omp_abort_endpoint_stopped() {  # [meta]
+  local meta=${1:-} state
   fm_backend_kill "$BACKEND" "$T" || return 1
   state=$(fm_backend_agent_state "$BACKEND" "$T" "$meta" 2>/dev/null) || state=unreadable
   case "$state" in
@@ -750,8 +776,44 @@ spawn_omp_abort_endpoint_stopped() {  # <meta>
   esac
 }
 
+spawn_omp_abort_clean_unchanged_worktree() {  # <context>
+  local context=$1 current_head dirty
+  sleep 0.1
+  current_head=$(git -C "$WT" rev-parse HEAD 2>/dev/null || true)
+  dirty=$(git -C "$WT" status --porcelain 2>/dev/null || printf 'unreadable\n')
+  if [ -z "$OMP_ABORT_INITIAL_HEAD" ] || [ "$current_head" != "$OMP_ABORT_INITIAL_HEAD" ] || [ -n "$dirty" ]; then
+    echo "warning: $context found work to preserve in $WT" >&2
+  elif (cd "$PROJ_ABS" && treehouse return --force "$WT" >/dev/null 2>&1); then
+    [ -z "${TASK_TMP:-}" ] || rm -rf "$TASK_TMP"
+    rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
+      "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" "$STATE/$ID.omp-started"
+  else
+    echo "warning: $context could not return the unchanged worktree $WT" >&2
+  fi
+}
+
 spawn_abort_cleanup() {
-  local status=$? meta current_head dirty
+  local status=$? meta
+  case "$PREWALK_ABORT_PHASE" in
+    lease)
+      PREWALK_ABORT_PHASE=none
+      if ! (cd "$PROJ_ABS" && treehouse return "$WT" >/dev/null 2>&1); then
+        echo "warning: OMP Prewalk preflight could not return its leased worktree $WT" >&2
+      fi
+      ;;
+    endpoint)
+      PREWALK_ABORT_PHASE=none
+      if ! spawn_omp_abort_endpoint_stopped; then
+        echo "warning: OMP Prewalk spawn cleanup could not confirm its owned endpoint stopped; preserving its worktree and task artifacts" >&2
+      else
+        spawn_omp_abort_clean_unchanged_worktree "OMP Prewalk spawn cleanup"
+      fi
+      ;;
+    ambiguous)
+      PREWALK_ABORT_PHASE=none
+      echo "warning: OMP Prewalk spawn cleanup is preserving its leased worktree because backend endpoint creation was ambiguous" >&2
+      ;;
+  esac
   if [ "$OMP_ABORT_CLEANUP" = 1 ]; then
     OMP_ABORT_CLEANUP=0
     meta="${STATE:-}/${ID:-}.meta"
@@ -768,18 +830,7 @@ spawn_abort_cleanup() {
     elif ! spawn_omp_abort_endpoint_stopped "$meta"; then
       echo "warning: OMP spawn cleanup could not confirm its owned endpoint stopped; preserving its worktree and task artifacts" >&2
     else
-      sleep 0.1
-      current_head=$(git -C "$WT" rev-parse HEAD 2>/dev/null || true)
-      dirty=$(git -C "$WT" status --porcelain 2>/dev/null || printf 'unreadable\n')
-      if [ -z "$OMP_ABORT_INITIAL_HEAD" ] || [ "$current_head" != "$OMP_ABORT_INITIAL_HEAD" ] || [ -n "$dirty" ]; then
-        echo "warning: OMP spawn cleanup stopped its endpoint but found work to preserve in $WT" >&2
-      elif treehouse return --force "$WT" >/dev/null 2>&1; then
-        rm -rf "${TASK_TMP:-}"
-        rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
-          "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" "$STATE/$ID.omp-started"
-      else
-        echo "warning: OMP spawn cleanup stopped its endpoint but could not return the unchanged worktree $WT" >&2
-      fi
+      spawn_omp_abort_clean_unchanged_worktree "OMP spawn cleanup stopped its endpoint but"
     fi
   fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
@@ -884,6 +935,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
+  [ -z "$PREWALK_INTO" ] || shared_args+=(--prewalk-into "$PREWALK_INTO")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
   # One delivery contract applies to every pair in a batch, exactly like the shared
   # harness. Each pair still re-validates it against its own brief, so a batch
@@ -978,9 +1030,9 @@ launch_template() {
       if [ "$kind" = secondmate ]; then
         # The explicit path is the exact same tracked file native project discovery sees.
         # OMP 17.1.8's discoverExtensionPaths path-resolves and deduplicates before loading, so this guarantees the integration without registering it twice.
-        printf '%s' '__OMPBUN__ __OMPBIN__ --session-dir __OMPSESSIONDIR__ __OMPRESUMEFLAG__--auto-approve __MODELFLAG____EFFORTFLAG__-e __OMPPRIMARY__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' '__OMPBUN__ __OMPBIN__ --session-dir __OMPSESSIONDIR__ __OMPRESUMEFLAG__--auto-approve __MODELFLAG____EFFORTFLAG____PREWALKFLAG__-e __OMPPRIMARY__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' '__OMPBUN__ __OMPBIN__ --session-dir __OMPSESSIONDIR__ --auto-approve __MODELFLAG____EFFORTFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' '__OMPBUN__ __OMPBIN__ --session-dir __OMPSESSIONDIR__ --auto-approve __MODELFLAG____EFFORTFLAG____PREWALKFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
@@ -1099,6 +1151,31 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
   fi
 fi
 
+if [ "$KIND" = secondmate ] && [ "$PREWALK_INTO_SET" -eq 0 ]; then
+  PRIOR_PREWALK_META="$STATE/$ID.meta"
+  if [ -f "$PRIOR_PREWALK_META" ] && [ ! -L "$PRIOR_PREWALK_META" ]; then
+    PRIOR_PREWALK_INTO=$(fm_meta_get "$PRIOR_PREWALK_META" prewalk_into)
+    if [ -n "$PRIOR_PREWALK_INTO" ]; then
+      PREWALK_INTO=$PRIOR_PREWALK_INTO
+      PREWALK_INTO_SET=1
+    fi
+  fi
+fi
+
+if [ "$PREWALK_INTO_SET" -eq 1 ]; then
+  if [ "$HARNESS" != omp ]; then
+    echo "error: --prewalk-into is supported only with harness=omp (resolved harness=$HARNESS)" >&2
+    exit 1
+  fi
+  case "$LAUNCH" in
+    *__PREWALKFLAG__*) ;;
+    *)
+      echo "error: --prewalk-into requires the verified OMP launch template and cannot be combined with a raw launch command" >&2
+      exit 1
+      ;;
+  esac
+fi
+
 case "$HARNESS" in
   pi|pi-signed) LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH" ;;
   omp) LAUNCH="FM_OMP_HARNESS=omp $LAUNCH" ;;
@@ -1111,6 +1188,119 @@ if [ "$HARNESS" = pi-signed ] && ! command -v pi-signed >/dev/null 2>&1; then
   echo "error: pi-signed executable not found on PATH; install the signed Pi wrapper or select a different verified harness" >&2
   exit 1
 fi
+omp_prewalk_probe_flags() {
+  local binary=$1 help
+  OMP_PREWALK_FLAG_PROBLEM=
+  PREWALK_ENABLE_SUPPORTED=0
+  PREWALK_DISABLE_SUPPORTED=0
+  if ! help=$("$binary" --help 2>&1); then
+    OMP_PREWALK_FLAG_PROBLEM="the selected OMP executable could not report its launch flags"
+    return
+  fi
+  if printf '%s\n' "$help" | grep -F -- '--no-prewalk' >/dev/null 2>&1; then
+    PREWALK_DISABLE_SUPPORTED=1
+  fi
+  if printf '%s\n' "$help" | grep -F -- '--prewalk ' >/dev/null 2>&1 \
+    && printf '%s\n' "$help" | grep -F -- '--prewalk-into=' >/dev/null 2>&1; then
+    PREWALK_ENABLE_SUPPORTED=1
+  else
+    OMP_PREWALK_FLAG_PROBLEM="the selected OMP executable does not expose native --prewalk and --prewalk-into flags"
+  fi
+}
+
+omp_prewalk_target_problem() {
+  local binary=$1 target=$2 launch_dir=$3 selector=$2 effort='' suffix catalog
+  OMP_PREWALK_PROBLEM=$OMP_PREWALK_FLAG_PROBLEM
+  [ "$PREWALK_ENABLE_SUPPORTED" = 1 ] || return
+  command -v jq >/dev/null 2>&1 || {
+    OMP_PREWALK_PROBLEM="jq is unavailable, so the OMP model catalog cannot be checked"
+    return
+  }
+  if ! catalog=$(cd "$launch_dir" && "$binary" models --json 2>/dev/null); then
+    OMP_PREWALK_PROBLEM="the OMP model catalog could not be read"
+    return
+  fi
+  if ! printf '%s\n' "$catalog" | jq -e '.models | type == "array"' >/dev/null 2>&1; then
+    OMP_PREWALK_PROBLEM="the OMP model catalog has no usable models array"
+    return
+  fi
+  if printf '%s\n' "$catalog" | jq -e --arg selector "$target" \
+    'any(.models[]; .selector == $selector)' >/dev/null 2>&1; then
+    return
+  fi
+  case "$target" in
+    *:*)
+      suffix=${target##*:}
+      case "$suffix" in
+        off|minimal|low|medium|high|xhigh|max|auto)
+          selector=${target%:*}
+          effort=$suffix
+          ;;
+      esac
+      ;;
+  esac
+  [ -n "$selector" ] || {
+    OMP_PREWALK_PROBLEM="the model selector is empty"
+    return
+  }
+  if ! printf '%s\n' "$catalog" | jq -e --arg selector "$selector" '
+      any(.models[]; .selector == $selector)
+    ' >/dev/null 2>&1; then
+    OMP_PREWALK_PROBLEM="model '$selector' is not listed by OMP"
+    return
+  fi
+  if [ -n "$effort" ] && ! printf '%s\n' "$catalog" | jq -e \
+    --arg selector "$selector" --arg effort "$effort" '
+      .models[]
+      | select(.selector == $selector)
+      | ((.thinking // []) | index($effort)) != null
+    ' >/dev/null 2>&1; then
+    OMP_PREWALK_PROBLEM="model '$selector' does not list effort '$effort'"
+  fi
+}
+
+omp_prewalk_setting_state() {
+  local binary=$1 launch_dir=$2 output value
+  if ! output=$(cd "$launch_dir" && "$binary" config get prewalk.enabled --json 2>/dev/null); then
+    printf '%s\n' unknown
+    return
+  fi
+  value=$(printf '%s\n' "$output" | jq -r '
+    if .key == "prewalk.enabled" and (.value | type) == "boolean"
+    then (.value | tostring)
+    else "unknown"
+    end
+  ' 2>/dev/null || printf '%s\n' unknown)
+  case "$value" in true|false) printf '%s\n' "$value" ;; *) printf '%s\n' unknown ;; esac
+}
+
+validate_omp_prewalk_for_launch_dir() {
+  local launch_dir=$1 setting_state
+  [ -n "$PREWALK_INTO" ] || return 0
+  omp_prewalk_target_problem "$OMP_BIN_CANON" "$PREWALK_INTO" "$launch_dir"
+  if [ -n "$OMP_PREWALK_PROBLEM" ]; then
+    echo "warning: OMP prewalk target '$PREWALK_INTO' will not be used: $OMP_PREWALK_PROBLEM" >&2
+    if [ "$PREWALK_DISABLE_SUPPORTED" = 1 ]; then
+      PREWALK_DISABLED=1
+    else
+      setting_state=$(omp_prewalk_setting_state "$OMP_BIN_CANON" "$launch_dir")
+      case "$setting_state" in
+        false) PREWALK_DISABLED=0 ;;
+        true)
+          echo "error: OMP prewalk.enabled=true in $launch_dir, but the selected OMP executable lacks --no-prewalk; use an OMP build with --no-prewalk or set prewalk.enabled=false before retrying" >&2
+          exit 1
+          ;;
+        *)
+          echo "error: OMP prewalk.enabled could not be read from $launch_dir and the selected OMP executable lacks --no-prewalk; use an OMP build with --no-prewalk or set prewalk.enabled=false before retrying" >&2
+          exit 1
+          ;;
+      esac
+    fi
+    echo "warning: continuing the full trajectory on starting model '${MODEL:-default}' without prewalk" >&2
+    PREWALK_INTO=
+  fi
+}
+
 OMP_BIN=
 OMP_BIN_CANON=
 OMP_BUN_CANON=
@@ -1146,6 +1336,9 @@ if [ "$HARNESS" = omp ]; then
      || ! fm_omp_process_identity_path_valid "$OMP_BUN_CANON"; then
     echo "error: selected OMP and Bun identities must be canonical executable paths without whitespace" >&2
     exit 1
+  fi
+  if [ -n "$PREWALK_INTO" ]; then
+    omp_prewalk_probe_flags "$OMP_BIN_CANON"
   fi
   if [ "$KIND" = secondmate ]; then
     OMP_PRIOR_META="$STATE/$ID.meta"
@@ -1295,6 +1488,17 @@ effort_flag_for_harness() {
     # task metadata but never reaches the launch command.
   esac
 }
+prewalk_flag_for_harness() {
+  local harness=$1 target=$2 disabled=$3 disable_supported=$4
+  [ "$harness" = omp ] || return 0
+  if [ "$disabled" = 1 ] && [ "$disable_supported" = 1 ]; then
+    printf '%s' '--no-prewalk '
+    return
+  fi
+  [ -n "$target" ] || return 0
+  printf -- '--prewalk --prewalk-into=%s ' "$(shell_quote "$target")"
+}
+
 
 case "$LAUNCH" in
   *__KIMIBIN__*)
@@ -1606,6 +1810,10 @@ else
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
+if [ "$HARNESS" = omp ] && [ "$KIND" = secondmate ]; then
+  validate_omp_prewalk_for_launch_dir "$PROJ_ABS"
+fi
+
 delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
   case "$1" in
     no-mistakes) echo 3 ;;
@@ -1828,6 +2036,23 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 }
 
 W="fm-$ID"
+SPAWN_START_DIR=$PROJ_ABS
+if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ] && [ -n "$PREWALK_INTO" ]; then
+  WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$W") || {
+    echo "error: OMP Prewalk could not lease an authoritative pooled worktree before endpoint creation" >&2
+    exit 1
+  }
+  PREWALK_WORKTREE_READY=1
+  PREWALK_ABORT_PHASE=lease
+  validate_spawn_worktree "treehouse lease" "$W"
+  freshen_spawn_worktree_base "$WT" || exit 1
+  validate_omp_prewalk_for_launch_dir "$WT"
+  OMP_ABORT_INITIAL_HEAD=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || {
+    echo "error: OMP spawn could not bind cleanup to the initial worktree HEAD" >&2
+    exit 1
+  }
+  SPAWN_START_DIR=$WT
+fi
 case "$BACKEND" in
   tmux)
     SES=$(fm_backend_tmux_container_ensure)
@@ -1838,7 +2063,7 @@ case "$BACKEND" in
     # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
     # rename-critical worktree-detection steps below; the persisted window= handle
     # stays $T (the name form), which is safe now that rename is disabled.
-    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$SPAWN_START_DIR") || exit 1
     WT_TARGET="$WID"
     ;;
   herdr)
@@ -1890,7 +2115,7 @@ case "$BACKEND" in
           FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_reclaim_task \
             "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_LABEL_HOME" \
             "$HERDR_RECOVERY_WORKSPACE_ID" "$HERDR_RECOVERY_TAB_ID" "$HERDR_RECOVERY_PANE_ID" \
-            "$HERDR_PARENT_LABEL" "$W" "$PROJ_ABS"
+            "$HERDR_PARENT_LABEL" "$W" "$SPAWN_START_DIR"
           HERDR_RECLAIM_STATUS=$?
           set -e
           case "$HERDR_RECLAIM_STATUS" in
@@ -1906,9 +2131,19 @@ case "$BACKEND" in
               HERDR_PROJECTION_ABORT_SEEDED_PANE=""
               ;;
             2)
+              if [ "${FM_BACKEND_HERDR_PROJECTION_RECLAIM_AMBIGUOUS:-0}" = 1 ] \
+                 && [ "$PREWALK_ABORT_PHASE" = lease ]; then
+                PREWALK_ABORT_PHASE=ambiguous
+                exit 1
+              fi
               spawn_herdr_presentation_order_lock_release
               ;;
-            *) exit 1 ;;
+            *)
+              if [ "${FM_BACKEND_HERDR_PROJECTION_RECLAIM_AMBIGUOUS:-0}" = 1 ]; then
+                [ "$PREWALK_ABORT_PHASE" != lease ] || PREWALK_ABORT_PHASE=ambiguous
+              fi
+              exit 1
+              ;;
           esac
         else
           spawn_herdr_presentation_order_lock_release
@@ -1941,7 +2176,10 @@ case "$BACKEND" in
             HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
             HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
             if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
-              "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
+              "$SPAWN_START_DIR" "$HERDR_PROJECTION_LABEL" "$W"; then
+              if [ "${FM_BACKEND_HERDR_PROJECTION_MUTATION_STARTED:-0}" = 1 ]; then
+                [ "$PREWALK_ABORT_PHASE" != lease ] || PREWALK_ABORT_PHASE=ambiguous
+              fi
               if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
                 HERDR_PROJECTION_ABORT_CLEANUP=1
                 HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
@@ -1994,7 +2232,19 @@ case "$BACKEND" in
       HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
       HERDR_SES=${CONTAINER%%:*}
       HERDR_WORKSPACE_ID=${CONTAINER#*:}
-      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      HERDR_PARTIAL_CREATE_POLICY=preserve
+      [ "$PREWALK_ABORT_PHASE" != lease ] || HERDR_PARTIAL_CREATE_POLICY=prewalk-transactional
+      set +e
+      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task \
+        "$CONTAINER" "$W" "$SPAWN_START_DIR" "$HERDR_SEEDED_DEFAULT_TAB_ID" "$HERDR_PARTIAL_CREATE_POLICY")
+      HERDR_TASK_CREATE_STATUS=$?
+      set -e
+      if [ "$HERDR_TASK_CREATE_STATUS" -ne 0 ]; then
+        if [ "$HERDR_TASK_CREATE_STATUS" -eq 2 ] && [ "$PREWALK_ABORT_PHASE" = lease ]; then
+          PREWALK_ABORT_PHASE=ambiguous
+        fi
+        exit 1
+      fi
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
@@ -2055,6 +2305,7 @@ EOF
     T="$ORCA_TERMINAL"
     ;;
 esac
+[ "$PREWALK_ABORT_PHASE" != lease ] || PREWALK_ABORT_PHASE=endpoint
 if [ "$KIND" = secondmate ]; then
   FM_INHERITABLE_CONFIG=trace-context \
     propagate_inheritable_config "$CONFIG" "$PROJ_ABS/config" \
@@ -2153,7 +2404,8 @@ kimi_spawn_fail() {  # <detail>
   echo "error: $1; inspect window $T" >&2
 }
 
-if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
+  && [ "$PREWALK_WORKTREE_READY" != 1 ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -2202,8 +2454,13 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 
   validate_spawn_worktree "treehouse get" "$T"
 fi
-if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
+  && [ "$PREWALK_WORKTREE_READY" != 1 ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
+fi
+if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ] \
+  && [ "$PREWALK_WORKTREE_READY" != 1 ]; then
+  validate_omp_prewalk_for_launch_dir "$WT"
 fi
 
 if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
@@ -2536,6 +2793,7 @@ META_WINDOW=$T
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  [ -z "$PREWALK_INTO" ] || echo "prewalk_into=$PREWALK_INTO"
   if [ "$KIND" = secondmate ] && [ -n "$SECONDMATE_MODEL_SOURCE" ]; then
     echo "secondmate_model_source=$SECONDMATE_MODEL_SOURCE"
     [ "$SECONDMATE_MODEL_SOURCE" != fallback ] || echo "secondmate_fallback_reason=$SECONDMATE_FALLBACK_REASON"
@@ -2575,7 +2833,10 @@ META_WINDOW=$T
   fi
 } > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
-[ "$HARNESS" != omp ] || OMP_ABORT_CLEANUP=1
+if [ "$HARNESS" = omp ]; then
+  OMP_ABORT_CLEANUP=1
+  PREWALK_ABORT_PHASE=none
+fi
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
@@ -2589,8 +2850,10 @@ sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+PREWALKFLAG=$(prewalk_flag_for_harness "$HARNESS" "$PREWALK_INTO" "$PREWALK_DISABLED" "$PREWALK_DISABLE_SUPPORTED")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+LAUNCH=${LAUNCH//__PREWALKFLAG__/$PREWALKFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}

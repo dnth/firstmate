@@ -2428,6 +2428,47 @@ test_projection_reclaim_refusal_matrix_is_non_mutating() {
   pass "herdr presentation reclaim: legacy, cross-home, ambiguous, live/unknown, and focus-unknown cases refuse without mutation"
 }
 
+test_projection_reclaim_marks_ambiguous_replacement() {
+  local dir home out
+  dir="$TMP_ROOT/projection-reclaim-ambiguous"; home="$dir/home"
+  mkdir -p "$home"
+  out=$(FM_TEST_HOME="$home" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_journal_snapshot() {
+      FM_BACKEND_HERDR_JOURNAL_VERSION=2
+      FM_BACKEND_HERDR_JOURNAL_HOME=$FM_TEST_HOME
+      FM_BACKEND_HERDR_JOURNAL_SESSION=fmtest
+      FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID=w2
+      FM_BACKEND_HERDR_JOURNAL_TAB_ID=w2:t2
+      FM_BACKEND_HERDR_JOURNAL_PANE_ID=w2:p2
+      FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID=w1
+      FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL=firstmate
+      FM_BACKEND_HERDR_JOURNAL_TASK_LABEL=fm-task-r1
+      FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL=child
+      FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID=token
+    }
+    fm_backend_herdr_projection_home_identity() { printf "%s" "$1"; }
+    fm_backend_herdr_projection_live_binding_matches() { return 0; }
+    fm_backend_herdr_pane_agent_state() { printf no-agent; }
+    fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }
+    fm_backend_herdr_projection_focus_restore() { return 0; }
+    fm_backend_herdr_cli() {
+      if [ "$2 $3" = "tab create" ]; then
+        printf "%s\n" "{\"result\":{\"tab\":{\"tab_id\":\"w2:t3\"}}}"
+      fi
+    }
+    set +e
+    fm_backend_herdr_projection_reclaim_task \
+      fmtest ignored task-r1 "$1" w2 w2:t2 w2:p2 firstmate fm-task-r1 /tmp/work \
+      >/dev/null 2>&1
+    rc=$?
+    printf "%s|%s\n" "$rc" "$FM_BACKEND_HERDR_PROJECTION_RECLAIM_AMBIGUOUS"
+  ' "$ROOT" "$home")
+  [ "$out" = "2|1" ] \
+    || fail "ambiguous projection replacement did not expose unsafe mutation ownership: $out"
+  pass "herdr presentation reclaim: ambiguous replacement preserves ownership"
+}
+
 test_projection_reclaim_replaces_only_exact_husk_and_advances_binding() {
   local dir state home home_real log resp fb journal token label out calls create_line close_line agent_line boundary_mutations
   dir="$TMP_ROOT/projection-reclaim-exact"; state="$dir/state"; home="$dir/home"
@@ -4497,6 +4538,7 @@ test_presentation_session_lock_path_is_shared_across_homes
 test_presentation_session_lock_path_rejects_malformed_socket
 test_projection_order_rejects_malformed_socket
 test_projection_reclaim_refusal_matrix_is_non_mutating
+test_projection_reclaim_marks_ambiguous_replacement
 test_projection_reclaim_replaces_only_exact_husk_and_advances_binding
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk
 test_workspace_find_matches_only_this_homes_own_label
