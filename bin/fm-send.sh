@@ -103,14 +103,19 @@ fi
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # Answer notes use the same bounded status-line shape as the OPEN DECISIONS
 # renderer without adding a second shared helper to this fork.
-fm_send_cap_resolved_line() {  # <line>
-  local line=$1 suffix=' [truncated]' max=220 keep
-  if [ "${#line}" -gt "$max" ]; then
-    keep=$((max - ${#suffix}))
-    [ "$keep" -ge 0 ] || keep=0
-    line="${line:0:$keep}$suffix"
+fm_send_resolved_line() {  # <key> <note>
+  local key=$1 note=$2 prefix suffix=' [truncated]' max=220 keep
+  prefix="resolved [key=$key]: answered: "
+  keep=$((max - ${#prefix}))
+  [ "$keep" -ge 0 ] || keep=0
+  if [ "${#note}" -gt "$keep" ]; then
+    if [ "$keep" -ge "${#suffix}" ]; then
+      note="${note:0:$((keep - ${#suffix}))}$suffix"
+    else
+      note=
+    fi
   fi
-  FM_SEND_RESOLVED_LINE=$line
+  FM_SEND_RESOLVED_LINE="$prefix$note"
 }
 
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
@@ -370,11 +375,10 @@ fi
 # fully confirmed. An append failure exits nonzero with the manual close
 # command; the decision then stays open and re-surfaces, never silently lost.
 fm_send_close_resolved_keys() {  # <answer-text>
-  local note=$1 k line quoted_line quoted_status failed=0
+  local note=$1 k quoted_line quoted_status failed=0
   note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
   for k in $RESOLVE_KEYS; do
-    line="resolved [key=$k]: answered: $note"
-    fm_send_cap_resolved_line "$line"
+    fm_send_resolved_line "$k" "$note"
     if ! printf '%s\n' "$FM_SEND_RESOLVED_LINE" >> "$RESOLVE_STATUS_FILE"; then
       printf -v quoted_line '%q' "$FM_SEND_RESOLVED_LINE"
       printf -v quoted_status '%q' "$RESOLVE_STATUS_FILE"
@@ -497,10 +501,11 @@ else
      && [ "$(fm_backend_agent_state "$TARGET_BACKEND" "$T" "$TARGET_META" 2>/dev/null)" = dead ]; then
     verdict=empty
   fi
+  post_delivery_failed=0
   case "$verdict" in
     empty)
       if [ -n "$RESOLVE_KEYS" ]; then
-        fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
+        fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || post_delivery_failed=1
       fi
       ;;
     queued-unconfirmed)
@@ -534,9 +539,10 @@ else
       else
         echo "error: text was delivered to $T, but its pending-reply delivery commit and recovery marker both failed. Do not resend; inspect $STATE manually." >&2
       fi
-      exit 1
+      post_delivery_failed=1
     fi
   fi
+  [ "$post_delivery_failed" -eq 0 ] || exit 1
   # The submit was confirmed or accepted through the narrow busy-OMP queue
   # verdict. The harness still needs a beat to spin up the
   # turn before its busy footer shows. Pause so an immediate peek catches the

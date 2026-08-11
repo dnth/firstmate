@@ -278,7 +278,7 @@ test_unconfirmed_send_does_not_close() {
 }
 
 test_busy_omp_queued_unconfirmed_does_not_close() {
-  local dir fb log err home project worktree omp bun rc out
+  local dir fb log err home project worktree omp runtime rc out
   dir="$TMP_ROOT/queued-unconfirmed"
   mkdir -p "$dir"
   fb=$(make_stubs "$dir")
@@ -288,18 +288,18 @@ test_busy_omp_queued_unconfirmed_does_not_close() {
   project="$dir/project"
   worktree="$dir/worktree"
   mkdir -p "$project" "$worktree"
-  bun=$(fm_test_realpath "$(command -v bun)")
+  runtime=$(fm_test_realpath "$(command -v sh)")
   omp="$dir/omp"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$omp"
   chmod +x "$omp"
   omp=$(fm_test_realpath "$omp")
   fm_write_meta "$home/state/tq.meta" "window=sess:fm-tq" "endpoint_task_id=tq" \
     "worktree=$worktree" "project=$project" "kind=ship" "harness=omp" \
-    "omp_bin=$omp" "omp_bun=$bun"
+    "omp_bin=$omp" "omp_bun=$runtime"
   printf 'needs-decision [key=queue-proof]: verify the queued answer\n' > "$home/state/tq.status"
 
   FM_FAKE_TMUX_QUEUED_UNCONFIRMED=1 FM_FAKE_TMUX_OMP_IDENTITY=1 \
-    FM_FAKE_TMUX_WINDOW=fm-tq FM_FAKE_OMP_BUN="$bun" FM_FAKE_OMP_BIN="$omp" \
+    FM_FAKE_TMUX_WINDOW=fm-tq FM_FAKE_OMP_BUN="$runtime" FM_FAKE_OMP_BIN="$omp" \
     FM_SEND_ERR="$err" \
     run_send "$fb" "$home" "$log" \
     tq --resolve-key queue-proof "answer may only be queued"
@@ -339,6 +339,29 @@ test_multiple_keys_close_together() {
     fail "an answered key is still open after a multi-key answer"
   fi
   pass "one answer closes each named key and only those keys"
+}
+
+test_long_key_preserves_resolved_prefix() {
+  local dir fb log home key rc out
+  dir="$TMP_ROOT/long-key"
+  mkdir -p "$dir"
+  fb=$(make_stubs "$dir")
+  log="$dir/send.log"
+  home=$(setup_home long-key)
+  key=$(printf 'k%.0s' {1..240})
+  fm_write_meta "$home/state/tlong.meta" "window=sess:fm-tlong" "kind=ship"
+  printf 'needs-decision [key=%s]: choose\n' "$key" > "$home/state/tlong.status"
+
+  run_send "$fb" "$home" "$log" tlong --resolve-key "$key" "confirmed answer"
+  rc=$?
+  expect_code 0 "$rc" "an answer for a long valid key should succeed"
+  assert_grep "resolved [key=$key]: answered:" "$home/state/tlong.status" \
+    "the resolved line truncated its structured key prefix"
+  out=$(drain_out "$home")
+  if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then
+    fail "the long key remained open after a confirmed answer: $out"
+  fi
+  pass "a long key keeps its complete structured resolved prefix"
 }
 
 test_local_secondmate_answer_is_marked_and_closed() {
@@ -435,7 +458,7 @@ test_remote_transport_failure_does_not_close() {
 }
 
 test_append_failure_reports_every_safe_manual_close() {
-  local dir fb log home err commands rc out
+  local dir fb log home err commands pending_dir rec rc out
   dir="$TMP_ROOT/append-failure"
   mkdir -p "$dir"
   fb=$(make_stubs "$dir")
@@ -443,7 +466,8 @@ test_append_failure_reports_every_safe_manual_close() {
   err="$dir/send.err"
   home="$TMP_ROOT/append failure; safe-$RANDOM"
   mkdir -p "$home/state"
-  fm_write_meta "$home/state/t8.meta" "window=sess:fm-t8" "kind=ship"
+  pending_dir="$home/state/pending-replies"
+  fm_write_secondmate_meta "$home/state/t8.meta" "$home" "sess:fm-t8"
   {
     printf 'needs-decision [key=manual-one]: choose the release window\n'
     printf 'blocked [key=manual-two]: choose the fallback window\n'
@@ -458,6 +482,11 @@ test_append_failure_reports_every_safe_manual_close() {
   [ "$(grep -c '^manual close:' "$err")" -eq 2 ] \
     || fail "append failure did not report one command for every open key: $(cat "$err")"
   assert_no_grep 'resolved' "$home/state/t8.status" "append failure silently closed the decision"
+  rec=$(find "$pending_dir" -maxdepth 1 -type f ! -name '.*' -print)
+  [ -n "$rec" ] && [ "$(printf '%s\n' "$rec" | wc -l | tr -d ' ')" -eq 1 ] \
+    || fail "the secondmate append failure did not retain one pending-reply record"
+  grep -Eq '^delivered_epoch=[0-9]+$' "$rec" \
+    || fail "the confirmed secondmate delivery remained uncommitted after a status append failure"
   commands="$dir/manual-commands"
   sed -n 's/^manual close: //p' "$err" > "$commands"
   bash "$commands" || fail "the reported manual close commands were not shell-safe"
@@ -510,6 +539,7 @@ test_failed_send_does_not_close
 test_unconfirmed_send_does_not_close
 test_busy_omp_queued_unconfirmed_does_not_close
 test_multiple_keys_close_together
+test_long_key_preserves_resolved_prefix
 test_local_secondmate_answer_is_marked_and_closed
 test_remote_secondmate_answer_closes_locally
 test_remote_transport_failure_does_not_close
