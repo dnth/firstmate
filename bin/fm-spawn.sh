@@ -23,8 +23,11 @@
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
 #   --prewalk-into <model-spec> opts an OMP profile into native Prewalk and records
-#   the effective target in task metadata. A target unavailable from `omp models`
-#   leaves the full trajectory on the starting model; every non-OMP harness refuses it.
+#   the effective target in task metadata. An unusable target falls back with
+#   --no-prewalk when supported. Without that flag, fallback proceeds with no
+#   Prewalk flags only when the launch home's effective prewalk.enabled is false;
+#   true or unreadable settings refuse. Omitting this option adds no Prewalk flags
+#   and preserves ordinary OMP-configured behavior. Every non-OMP harness refuses it.
 #   Local OMP secondmate relaunches recover the recorded target when the caller does
 #   not repeat the flag, so exact-session recovery keeps the same launch profile.
 #   --backend <name> is the explicit runtime session-provider backend for this
@@ -711,6 +714,8 @@ ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
 OMP_ABORT_CLEANUP=0
 OMP_ABORT_INITIAL_HEAD=
+PREWALK_WORKTREE_READY=0
+PREWALK_LEASE_CLEANUP=0
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
@@ -773,6 +778,12 @@ spawn_omp_abort_endpoint_stopped() {  # <meta>
 
 spawn_abort_cleanup() {
   local status=$? meta current_head dirty
+  if [ "$PREWALK_LEASE_CLEANUP" = 1 ]; then
+    PREWALK_LEASE_CLEANUP=0
+    if ! treehouse return "$WT" >/dev/null 2>&1; then
+      echo "warning: OMP Prewalk preflight could not return its leased worktree $WT" >&2
+    fi
+  fi
   if [ "$OMP_ABORT_CLEANUP" = 1 ]; then
     OMP_ABORT_CLEANUP=0
     meta="${STATE:-}/${ID:-}.meta"
@@ -1271,24 +1282,6 @@ validate_omp_prewalk_for_launch_dir() {
   fi
 }
 
-preflight_omp_prewalk_without_disable() {
-  local launch_dir=$1 setting_state
-  omp_prewalk_target_problem "$OMP_BIN_CANON" "$PREWALK_INTO" "$launch_dir"
-  [ -n "$OMP_PREWALK_PROBLEM" ] || return 0
-  setting_state=$(omp_prewalk_setting_state "$OMP_BIN_CANON" "$launch_dir")
-  case "$setting_state" in
-    false) return 0 ;;
-    true)
-      echo "warning: OMP prewalk target '$PREWALK_INTO' will not be used: $OMP_PREWALK_PROBLEM" >&2
-      echo "error: OMP prewalk.enabled=true in $launch_dir, but the selected OMP executable lacks --no-prewalk; use an OMP build with --no-prewalk or set prewalk.enabled=false before retrying" >&2
-      exit 1
-      ;;
-    *)
-      echo "error: OMP prewalk.enabled could not be read from $launch_dir after Prewalk validation failed and the selected OMP executable lacks --no-prewalk; use an OMP build with --no-prewalk or set prewalk.enabled=false before retrying" >&2
-      exit 1
-      ;;
-  esac
-}
 OMP_BIN=
 OMP_BIN_CANON=
 OMP_BUN_CANON=
@@ -1800,9 +1793,6 @@ fi
 
 if [ "$HARNESS" = omp ] && [ "$KIND" = secondmate ]; then
   validate_omp_prewalk_for_launch_dir "$PROJ_ABS"
-elif [ "$HARNESS" = omp ] && [ -n "$PREWALK_INTO" ] \
-  && [ "$PREWALK_DISABLE_SUPPORTED" != 1 ]; then
-  preflight_omp_prewalk_without_disable "$PROJ_ABS"
 fi
 
 delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
@@ -2027,6 +2017,23 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 }
 
 W="fm-$ID"
+SPAWN_START_DIR=$PROJ_ABS
+if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ] && [ -n "$PREWALK_INTO" ]; then
+  WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$W") || {
+    echo "error: OMP Prewalk could not lease an authoritative pooled worktree before endpoint creation" >&2
+    exit 1
+  }
+  PREWALK_WORKTREE_READY=1
+  PREWALK_LEASE_CLEANUP=1
+  validate_spawn_worktree "treehouse lease" "$W"
+  freshen_spawn_worktree_base "$WT" || exit 1
+  validate_omp_prewalk_for_launch_dir "$WT"
+  OMP_ABORT_INITIAL_HEAD=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || {
+    echo "error: OMP spawn could not bind cleanup to the initial worktree HEAD" >&2
+    exit 1
+  }
+  SPAWN_START_DIR=$WT
+fi
 case "$BACKEND" in
   tmux)
     SES=$(fm_backend_tmux_container_ensure)
@@ -2037,7 +2044,7 @@ case "$BACKEND" in
     # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
     # rename-critical worktree-detection steps below; the persisted window= handle
     # stays $T (the name form), which is safe now that rename is disabled.
-    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$SPAWN_START_DIR") || exit 1
     WT_TARGET="$WID"
     ;;
   herdr)
@@ -2089,7 +2096,7 @@ case "$BACKEND" in
           FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_reclaim_task \
             "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_LABEL_HOME" \
             "$HERDR_RECOVERY_WORKSPACE_ID" "$HERDR_RECOVERY_TAB_ID" "$HERDR_RECOVERY_PANE_ID" \
-            "$HERDR_PARENT_LABEL" "$W" "$PROJ_ABS"
+            "$HERDR_PARENT_LABEL" "$W" "$SPAWN_START_DIR"
           HERDR_RECLAIM_STATUS=$?
           set -e
           case "$HERDR_RECLAIM_STATUS" in
@@ -2140,7 +2147,7 @@ case "$BACKEND" in
             HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
             HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
             if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
-              "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
+              "$SPAWN_START_DIR" "$HERDR_PROJECTION_LABEL" "$W"; then
               if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
                 HERDR_PROJECTION_ABORT_CLEANUP=1
                 HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
@@ -2193,7 +2200,7 @@ case "$BACKEND" in
       HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
       HERDR_SES=${CONTAINER%%:*}
       HERDR_WORKSPACE_ID=${CONTAINER#*:}
-      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$SPAWN_START_DIR" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
@@ -2254,6 +2261,7 @@ EOF
     T="$ORCA_TERMINAL"
     ;;
 esac
+PREWALK_LEASE_CLEANUP=0
 if [ "$KIND" = secondmate ]; then
   FM_INHERITABLE_CONFIG=trace-context \
     propagate_inheritable_config "$CONFIG" "$PROJ_ABS/config" \
@@ -2352,7 +2360,8 @@ kimi_spawn_fail() {  # <detail>
   echo "error: $1; inspect window $T" >&2
 }
 
-if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
+  && [ "$PREWALK_WORKTREE_READY" != 1 ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -2401,10 +2410,12 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 
   validate_spawn_worktree "treehouse get" "$T"
 fi
-if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
+  && [ "$PREWALK_WORKTREE_READY" != 1 ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
-if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
+if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ] \
+  && [ "$PREWALK_WORKTREE_READY" != 1 ]; then
   validate_omp_prewalk_for_launch_dir "$WT"
 fi
 

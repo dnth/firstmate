@@ -283,11 +283,13 @@ Both `use` and the optional top-level `default` accept either one profile object
 The single-object form stays fully backward-compatible, and every profile needs `harness`.
 Profile `model`, `effort`, and `prewalk_into` fields and rule `why` are optional.
 An omitted model or effort means the selected harness uses its own default for that axis.
-An omitted `prewalk_into` preserves the harness's ordinary full-trajectory launch with no Prewalk flags.
+An omitted `prewalk_into` makes `fm-spawn.sh` add no Prewalk flags and preserves ordinary OMP-configured behavior byte-for-byte.
 `prewalk_into` is opt-in and valid only when the same profile selects `harness: "omp"`.
 Its value is an OMP model spec and may carry an OMP effort suffix such as `:xhigh`.
 Firstmate passes the value unchanged to `fm-spawn.sh`, which uses OMP's native `--prewalk --prewalk-into=<model-spec>` path so the same trajectory switches at the first edit or write after the plan todo list exists.
-If `omp models` does not list the target model or its requested effort, `fm-spawn.sh` warns, omits Prewalk, and keeps the full trajectory on the profile's starting model.
+If the target, effort, catalog, or native enable flags are unusable, `fm-spawn.sh` warns and keeps the full trajectory on the profile's starting model.
+The fallback emits `--no-prewalk` when OMP supports it.
+Without that flag, fallback proceeds with no Prewalk flags only when the authoritative launch home's effective `prewalk.enabled` is false or default; a true or unreadable setting refuses before endpoint creation with corrective guidance.
 
 For example, this profile starts on GPT-5.6 Sol and uses native Prewalk to finish the same well-defined implementation trajectory on GPT-5.6 Luna at xhigh effort:
 

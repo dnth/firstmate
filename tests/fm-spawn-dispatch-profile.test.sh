@@ -141,6 +141,9 @@ SH
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 [ -z "${FM_FAKE_TREEHOUSE_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
+if [ "${1:-}" = get ] && [ "${2:-}" = --lease ]; then
+  printf '%s\n' "$FM_FAKE_PANE_PATH"
+fi
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
@@ -873,14 +876,16 @@ test_omp_valid_prewalk_does_not_require_disable_flag() {
 }
 
 test_omp_unsafe_fallback_refuses_before_endpoint() {
-  local rec id out status endpoint_log target
+  local rec id out status endpoint_log treehouse_log target
   id=$(profile_id profile-omp-prewalk-unsafe-z8ow)
   rec=$(make_spawn_case profile-omp-prewalk-unsafe omp "$id")
   read_case_record "$rec"
   endpoint_log="$CASE_DIR/endpoint.log"
+  treehouse_log="$CASE_DIR/treehouse.log"
   export FM_TEST_OMP_NO_PREWALK=0
   export FM_TEST_OMP_PREWALK_ENABLED=true
-  target=openai-codex/not-listed:xhigh
+  export FM_TEST_OMP_CATALOG_DIR="$WT_DIR"
+  target=openai-codex/gpt-5.6-luna:xhigh
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
     --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
@@ -889,7 +894,11 @@ test_omp_unsafe_fallback_refuses_before_endpoint() {
   assert_contains "$out" "use an OMP build with --no-prewalk or set prewalk.enabled=false" \
     "unsafe fallback refusal was not actionable"
   [ ! -s "$endpoint_log" ] || fail "unsafe fallback created an endpoint before refusing"
-  unset FM_TEST_OMP_PREWALK_ENABLED FM_TEST_OMP_NO_PREWALK
+  assert_grep "get --lease --lease-holder fm-$id" "$treehouse_log" \
+    "unsafe fallback did not validate from the authoritative leased worktree"
+  assert_grep "return $WT_DIR" "$treehouse_log" \
+    "unsafe fallback did not return its pre-endpoint worktree lease"
+  unset FM_TEST_OMP_CATALOG_DIR FM_TEST_OMP_PREWALK_ENABLED FM_TEST_OMP_NO_PREWALK
   pass "unsafe OMP fallback refuses before endpoint creation"
 }
 
