@@ -91,6 +91,9 @@ case "$cmd $sub" in
   "workspace list")
     if [ "${FM_FAKE_HERDR_PARTIAL_PROJECTION:-0}" = 1 ]; then
       printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","active_tab_id":"w1:t1","focused":true}]}}'
+    elif [ "${FM_FAKE_HERDR_AMBIGUOUS_RECLAIM:-0}" = 1 ]; then
+      printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","active_tab_id":"w1:t1","focused":true},{"workspace_id":"w2","label":"%s","active_tab_id":"w2:t2","focused":false}]}}\n' \
+        "$FM_FAKE_HERDR_RECLAIM_WORKSPACE_LABEL"
     else
       printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"}]}}'
     fi
@@ -98,9 +101,22 @@ case "$cmd $sub" in
   "tab list")
     if [ "${FM_FAKE_HERDR_PARTIAL_PROJECTION:-0}" = 1 ]; then
       printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","workspace_id":"w1","label":"1","focused":true}]}}'
+    elif [ "${FM_FAKE_HERDR_AMBIGUOUS_RECLAIM:-0}" = 1 ]; then
+      case "$*" in
+        *"--workspace w2"*)
+          printf '{"result":{"tabs":[{"tab_id":"w2:t2","workspace_id":"w2","label":"%s","focused":false}]}}\n' \
+            "$FM_FAKE_HERDR_RECLAIM_TASK_LABEL"
+          ;;
+        *)
+          printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","workspace_id":"w1","label":"1","focused":true}]}}'
+          ;;
+      esac
     else
       printf '%s\n' '{"result":{"tabs":[]}}'
     fi
+    ;;
+  "pane list")
+    printf '%s\n' '{"result":{"panes":[{"pane_id":"w2:p2","tab_id":"w2:t2"}]}}'
     ;;
   "workspace create")
     [ -z "${FM_FAKE_ENDPOINT_LOG:-}" ] || printf 'workspace create\n' >> "$FM_FAKE_ENDPOINT_LOG"
@@ -108,7 +124,10 @@ case "$cmd $sub" in
     ;;
   "tab create")
     [ -z "${FM_FAKE_ENDPOINT_LOG:-}" ] || printf 'tab create\n' >> "$FM_FAKE_ENDPOINT_LOG"
-    if [ "${FM_FAKE_HERDR_PARTIAL_CREATE:-0}" = 1 ]; then
+    if [ "${FM_FAKE_HERDR_AMBIGUOUS_RECLAIM:-0}" = 1 ] \
+       && [ "$(grep -c '^tab create$' "$FM_FAKE_ENDPOINT_LOG")" = 1 ]; then
+      printf '%s\n' '{"result":{"tab":{"tab_id":"w2:t3"}}}'
+    elif [ "${FM_FAKE_HERDR_PARTIAL_CREATE:-0}" = 1 ]; then
       printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t2"}}}'
     else
       printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2"}}}'
@@ -144,6 +163,10 @@ case "$cmd $sub" in
     [ -z "${FM_FAKE_HERDR_PANE_FLAG:-}" ] || rm -f "$FM_FAKE_HERDR_PANE_FLAG"
     ;;
   "agent get")
+    if [ "${FM_FAKE_HERDR_AMBIGUOUS_RECLAIM:-0}" = 1 ]; then
+      printf '%s\n' '{"error":{"code":"agent_not_found"}}' >&2
+      exit 1
+    fi
     if [ -n "${FM_FAKE_HERDR_PANE_FLAG:-}" ] && [ ! -f "$FM_FAKE_HERDR_PANE_FLAG" ]; then
       printf '%s\n' '{"error":{"code":"agent_not_found"}}' >&2
       exit 1
@@ -271,6 +294,9 @@ run_spawn() {
     FM_FAKE_MKDIR_FAIL_PATH="${FM_TEST_MKDIR_FAIL_PATH:-}" \
     FM_FAKE_HERDR_PARTIAL_CREATE="${FM_TEST_HERDR_PARTIAL_CREATE:-0}" \
     FM_FAKE_HERDR_PARTIAL_PROJECTION="${FM_TEST_HERDR_PARTIAL_PROJECTION:-0}" \
+    FM_FAKE_HERDR_AMBIGUOUS_RECLAIM="${FM_TEST_HERDR_AMBIGUOUS_RECLAIM:-0}" \
+    FM_FAKE_HERDR_RECLAIM_WORKSPACE_LABEL="${FM_TEST_HERDR_RECLAIM_WORKSPACE_LABEL:-}" \
+    FM_FAKE_HERDR_RECLAIM_TASK_LABEL="${FM_TEST_HERDR_RECLAIM_TASK_LABEL:-}" \
     FM_FAKE_HERDR_PANE_FLAG="$herdrpaneflag" \
     FM_FAKE_HERDR_REFUSE_CLOSE="${FM_TEST_HERDR_REFUSE_CLOSE:-0}" \
     FM_FAKE_OMP_META_TAMPER="${FM_TEST_OMP_META_TAMPER:-}" \
@@ -1018,6 +1044,65 @@ test_omp_prewalk_ambiguous_herdr_projection_preserves_lease() {
   pass "ambiguous Herdr projection preserves its Prewalk lease"
 }
 
+write_ambiguous_reclaim_fixture() {
+  local home=$1 id=$2 token=$3 workspace_label=$4 task_label=$5
+  printf 'on\n' > "$home/config/herdr-presentation-spaces"
+  {
+    printf 'version=2\n'
+    printf 'task_id=%s\n' "$id"
+    printf 'projection_id=%s\n' "$token"
+    printf 'home=%s\n' "$home"
+    printf 'session=default\n'
+    printf 'workspace_id=w2\n'
+    printf 'tab_id=w2:t2\n'
+    printf 'pane_id=w2:p2\n'
+    printf 'parent_workspace_id=w1\n'
+    printf 'parent_label=firstmate\n'
+    printf 'workspace_label=%s\n' "$workspace_label"
+    printf 'task_label=%s\n' "$task_label"
+  } > "$home/state/$id.herdr-presentation"
+  {
+    printf 'window=default:w2:p2\n'
+    printf 'backend=herdr\n'
+    printf 'herdr_session=default\n'
+    printf 'herdr_workspace_id=w2\n'
+    printf 'herdr_tab_id=w2:t2\n'
+    printf 'herdr_pane_id=w2:p2\n'
+  } > "$home/state/$id.meta"
+}
+
+test_ordinary_herdr_ambiguous_reclaim_keeps_flat_fallback() {
+  local rec id out status endpoint_log token workspace_label task_label
+  id=$(profile_id profile-ordinary-herdr-reclaim-z8pa)
+  rec=$(make_spawn_case profile-ordinary-herdr-reclaim claude "$id")
+  read_case_record "$rec"
+  endpoint_log="$CASE_DIR/endpoint.log"
+  token=0123456789abcdefghijkl
+  workspace_label="└ $id · p:$token"
+  task_label="fm-$id"
+  write_ambiguous_reclaim_fixture "$HOME_DIR" "$id" "$token" "$workspace_label" "$task_label"
+  export FM_TEST_HERDR_AMBIGUOUS_RECLAIM=1
+  export FM_TEST_HERDR_RECLAIM_WORKSPACE_LABEL="$workspace_label"
+  export FM_TEST_HERDR_RECLAIM_TASK_LABEL="$task_label"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --backend herdr)
+  status=$?
+  unset FM_TEST_HERDR_AMBIGUOUS_RECLAIM
+  unset FM_TEST_HERDR_RECLAIM_WORKSPACE_LABEL
+  unset FM_TEST_HERDR_RECLAIM_TASK_LABEL
+  expect_code 0 "$status" "ordinary ambiguous Herdr reclaim should retain flat fallback"
+  assert_contains "$out" "spawned $id harness=claude" \
+    "ordinary ambiguous Herdr reclaim did not continue into a normal launch"
+  [ "$(grep -c '^tab create$' "$endpoint_log")" = 2 ] \
+    || fail "ordinary ambiguous Herdr reclaim did not attempt replacement then flat spawn"
+  assert_grep 'herdr_workspace_id=w1' "$HOME_DIR/state/$id.meta" \
+    "ordinary ambiguous Herdr reclaim did not land in the flat home workspace"
+  assert_no_grep 'prewalk_into=' "$HOME_DIR/state/$id.meta" \
+    "ordinary ambiguous Herdr reclaim unexpectedly enabled Prewalk"
+  pass "ordinary ambiguous Herdr reclaim retains flat fallback"
+}
+
 test_non_omp_prewalk_refuses_without_changing_normal_claude_launch() {
   local rec bad_id normal_id out status launch endpoint_log target
   bad_id=$(profile_id profile-claude-prewalk-bad-z8or)
@@ -1426,6 +1511,7 @@ test_omp_unsafe_fallback_refuses_before_endpoint
 test_omp_prewalk_premetadata_failure_cleans_endpoint_and_lease
 test_omp_prewalk_ambiguous_herdr_creation_preserves_lease
 test_omp_prewalk_ambiguous_herdr_projection_preserves_lease
+test_ordinary_herdr_ambiguous_reclaim_keeps_flat_fallback
 test_non_omp_prewalk_refuses_without_changing_normal_claude_launch
 test_omp_herdr_worker_and_scout_launch_with_exact_identity_and_ack
 test_omp_refuses_unverified_backends_before_endpoint_creation

@@ -1856,9 +1856,10 @@ EOF
 #   FM_BACKEND_HERDR_PROJECTION_TAB_ID
 #   FM_BACKEND_HERDR_PROJECTION_PANE_ID
 #   FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE
+#   FM_BACKEND_HERDR_PROJECTION_MUTATION_STARTED
 # CLEANUP_SAFE becomes 1 only after both creates returned complete exact IDs.
-# A missing, failed, or malformed create response stays ambiguous and grants no
-# cleanup authority.
+# MUTATION_STARTED becomes 1 immediately before the first create request.
+# A failed or malformed response after that point stays ambiguous and grants no cleanup authority.
 fm_backend_herdr_projection_create_task() {  # <cwd> <workspace-label> <task-label>
   local cwd=$1 workspace_label=$2 task_label=$3 session out tabs panes tab_count pane_count focus_before
   FM_BACKEND_HERDR_PROJECTION_SESSION=""
@@ -2075,9 +2076,10 @@ fm_backend_herdr_projection_reclaim_rollback_new() {  # <session> <new-pane>
 # restored projection husk inside its original workspace.
 # The caller holds the session presentation lock and has already established
 # that flat fallback is safe across every token match.
-# Return 0 means exact reclaim, 2 means non-mutating or exactly rolled-back
-# refusal with flat fallback permitted, and 1 means a live/unknown or
-# post-mutation uncertainty that must refuse the launch.
+# Return 0 means exact reclaim.
+# Return 2 with RECLAIM_AMBIGUOUS=0 permits flat fallback because the refusal was non-mutating or exactly rolled back.
+# Return 2 with RECLAIM_AMBIGUOUS=1 means replacement creation may have mutated without yielding exact cleanup authority.
+# Return 1 means a live/unknown endpoint or another uncertainty must refuse the launch; RECLAIM_AMBIGUOUS reports whether replacement creation may also have mutated.
 fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <home> <meta-workspace> <meta-tab> <meta-pane> <parent-label> <task-label> <cwd>
   local session=$1 journal=$2 id=$3 home=$4 meta_workspace=$5 meta_tab=$6 meta_pane=$7
   local parent_label=$8 task_label=$9 cwd=${10} canonical_home state focus_before active_tab out new_tab new_pane info close_status

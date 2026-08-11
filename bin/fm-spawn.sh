@@ -2131,8 +2131,9 @@ case "$BACKEND" in
               HERDR_PROJECTION_ABORT_SEEDED_PANE=""
               ;;
             2)
-              if [ "${FM_BACKEND_HERDR_PROJECTION_RECLAIM_AMBIGUOUS:-0}" = 1 ]; then
-                [ "$PREWALK_ABORT_PHASE" != lease ] || PREWALK_ABORT_PHASE=ambiguous
+              if [ "${FM_BACKEND_HERDR_PROJECTION_RECLAIM_AMBIGUOUS:-0}" = 1 ] \
+                 && [ "$PREWALK_ABORT_PHASE" = lease ]; then
+                PREWALK_ABORT_PHASE=ambiguous
                 exit 1
               fi
               spawn_herdr_presentation_order_lock_release
