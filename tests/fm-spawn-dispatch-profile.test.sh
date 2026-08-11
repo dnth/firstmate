@@ -177,6 +177,7 @@ make_spawn_case() {
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
   printf '%s\n' "$harness" > "$home/config/crew-harness"
+  printf 'off\n' > "$home/config/herdr-presentation-spaces"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   touch "$home/state/.last-watcher-beat"
   for id in "$@"; do
@@ -715,7 +716,7 @@ test_omp_threads_exact_identity_model_and_every_thinking_level() {
     read_case_record "$rec"
     export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
 
-    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
       --model openai-codex/gpt-5.6-sol --effort "$effort")
     status=$?
     expect_code 0 "$status" "OMP spawn with $effort thinking should succeed"
@@ -743,7 +744,7 @@ test_omp_herdr_worker_and_scout_launch_with_exact_identity_and_ack() {
     rec=$(make_spawn_case "profile-omp-herdr-$kind" omp "$id")
     read_case_record "$rec"
     export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
-    flag=
+    flag='--mode no-mistakes --yolo off'
     [ "$kind" != scout ] || flag=--scout
 
     out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
@@ -774,7 +775,7 @@ test_omp_refuses_unverified_backends_before_endpoint_creation() {
     : > "$endpoint_log"
 
     out=$(FM_FAKE_ENDPOINT_LOG="$endpoint_log" \
-      run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --backend "$backend")
+      run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --backend "$backend")
     status=$?
     expect_code 1 "$status" "OMP should refuse unverified backend $backend"
     assert_contains "$out" "verified only on backend=tmux or backend=herdr" \
@@ -834,7 +835,7 @@ test_omp_whitespace_identity_paths_refuse_before_endpoint() {
     chmod +x "$spaced/$mode"
     path="$spaced:$FAKEBIN_DIR"
 
-    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$path" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$path" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
     status=$?
     expect_code 1 "$status" "OMP should refuse a whitespace-bearing $mode identity"
     assert_contains "$out" 'canonical executable paths without whitespace' \
@@ -866,7 +867,7 @@ test_omp_missing_binary_or_capability_refuses_before_endpoint_and_metadata() {
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
       FM_FAKE_ENDPOINT_LOG="$endpoint_log" FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
       PATH="$FAKEBIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin" \
-      "$SPAWN" "$id" "$PROJ_DIR" 2>&1)
+      "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
     status=$?
     expect_code 1 "$status" "OMP $mode should refuse before launch"
     assert_contains "$out" "omp" "OMP preflight refusal did not name the selected runtime"
@@ -884,7 +885,7 @@ test_omp_launch_requires_observable_turn_start_acknowledgement() {
   read_case_record "$rec"
 
   out=$(FM_OMP_LAUNCH_ACK_POLLS=2 FM_OMP_LAUNCH_ACK_INTERVAL=0.01 \
-    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "unacknowledged OMP launch should fail"
   assert_contains "$out" "initial instruction was not acknowledged" \
@@ -906,7 +907,7 @@ test_omp_herdr_unacked_launch_cleans_owned_endpoint_worktree_and_artifacts() {
   read_case_record "$rec"
 
   out=$(FM_OMP_LAUNCH_ACK_POLLS=2 FM_OMP_LAUNCH_ACK_INTERVAL=0.01 \
-    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --backend herdr)
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --backend herdr)
   status=$?
   expect_code 1 "$status" "unacknowledged OMP Herdr launch should fail"
   assert_contains "$out" "initial instruction was not acknowledged" \
@@ -929,7 +930,7 @@ test_omp_herdr_refused_close_preserves_worktree_and_artifacts() {
 
   out=$(FM_OMP_LAUNCH_ACK_POLLS=2 FM_OMP_LAUNCH_ACK_INTERVAL=0.01 \
     FM_TEST_HERDR_REFUSE_CLOSE=1 \
-    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --backend herdr)
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --backend herdr)
   status=$?
   expect_code 1 "$status" "unacknowledged OMP Herdr launch should fail"
   assert_contains "$out" "could not confirm its owned endpoint stopped" \
@@ -953,7 +954,7 @@ test_omp_ack_cleanup_preserves_artifacts_when_ownership_changes() {
 
   out=$(FM_OMP_LAUNCH_ACK_POLLS=2 FM_OMP_LAUNCH_ACK_INTERVAL=0.01 \
     FM_TEST_OMP_META_TAMPER="$HOME_DIR/state/$id.meta" \
-    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "ownership-changed OMP launch should fail"
   assert_contains "$out" "could not prove ownership" \
