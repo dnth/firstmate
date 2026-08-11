@@ -149,7 +149,7 @@ SH
 #!/usr/bin/env bun
 case "${1:-}" in
   --help)
-    printf '%s\n' '--model=<value>' '--thinking=<value>' '--auto-approve' '--session-dir=<value>' '-e, --extension=<value>' '-r, --resume=<value>' '--prewalk native-switch' '--prewalk-into=<value>'
+    printf '%s\n' '--model=<value>' '--thinking=<value>' '--auto-approve' '--session-dir=<value>' '-e, --extension=<value>' '-r, --resume=<value>' '--prewalk native-switch' '--prewalk-into=<value>' '--config=<value>'
     [ "${FM_FAKE_OMP_NO_PREWALK:-1}" != 1 ] || printf '%s\n' '--no-prewalk'
     ;;
   --version) printf 'omp/17.2.11\n' ;;
@@ -839,6 +839,8 @@ test_omp_prewalk_fallback_omits_unsupported_disable_flag() {
   assert_contains "$out" "does not expose native --prewalk, --prewalk-into, and --no-prewalk flags" \
     "missing native disable support did not produce a clear fallback warning"
   launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--config '/tmp/fm-$id/omp-no-prewalk.yml'" \
+    "fallback did not explicitly disable configured Prewalk through OMP's supported config overlay"
   assert_not_contains "$launch" "--prewalk" \
     "fallback emitted a Prewalk flag that the selected OMP executable does not support"
   assert_no_grep '^prewalk_into=' "$HOME_DIR/state/$id.meta" \

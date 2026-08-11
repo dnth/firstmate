@@ -252,6 +252,8 @@ EFFORT=
 PREWALK_INTO=
 PREWALK_DISABLED=0
 PREWALK_DISABLE_SUPPORTED=0
+PREWALK_CONFIG_SUPPORTED=0
+PREWALK_DISABLE_CONFIG=
 SECONDMATE_MODEL_SOURCE=
 SECONDMATE_FALLBACK_REASON=
 BACKEND_ARG=
@@ -1160,12 +1162,16 @@ omp_prewalk_target_problem() {
   local binary=$1 target=$2 launch_dir=$3 selector=$2 effort='' suffix help catalog
   OMP_PREWALK_PROBLEM=
   PREWALK_DISABLE_SUPPORTED=0
+  PREWALK_CONFIG_SUPPORTED=0
   if ! help=$("$binary" --help 2>&1); then
     OMP_PREWALK_PROBLEM="the selected OMP executable could not report its launch flags"
     return
   fi
   if printf '%s\n' "$help" | grep -F -- '--no-prewalk' >/dev/null 2>&1; then
     PREWALK_DISABLE_SUPPORTED=1
+  fi
+  if printf '%s\n' "$help" | grep -F -- '--config=' >/dev/null 2>&1; then
+    PREWALK_CONFIG_SUPPORTED=1
   fi
   if ! printf '%s\n' "$help" | grep -F -- '--prewalk ' >/dev/null 2>&1 \
     || ! printf '%s\n' "$help" | grep -F -- '--prewalk-into=' >/dev/null 2>&1 \
@@ -1225,6 +1231,10 @@ validate_omp_prewalk_for_launch_dir() {
   [ -n "$PREWALK_INTO" ] || return 0
   omp_prewalk_target_problem "$OMP_BIN_CANON" "$PREWALK_INTO" "$launch_dir"
   if [ -n "$OMP_PREWALK_PROBLEM" ]; then
+    if [ "$PREWALK_DISABLE_SUPPORTED" != 1 ] && [ "$PREWALK_CONFIG_SUPPORTED" != 1 ]; then
+      echo "error: OMP prewalk target '$PREWALK_INTO' is unusable and the selected OMP executable exposes neither --no-prewalk nor --config, so the full starting-model trajectory cannot be guaranteed" >&2
+      exit 1
+    fi
     echo "warning: OMP prewalk target '$PREWALK_INTO' will not be used: $OMP_PREWALK_PROBLEM; continuing the full trajectory on starting model '${MODEL:-default}' without prewalk" >&2
     PREWALK_INTO=
     PREWALK_DISABLED=1
@@ -1415,10 +1425,14 @@ effort_flag_for_harness() {
   esac
 }
 prewalk_flag_for_harness() {
-  local harness=$1 target=$2 disabled=$3 disable_supported=$4
+  local harness=$1 target=$2 disabled=$3 disable_supported=$4 disable_config=$5
   [ "$harness" = omp ] || return 0
   if [ "$disabled" = 1 ] && [ "$disable_supported" = 1 ]; then
     printf '%s' '--no-prewalk '
+    return
+  fi
+  if [ "$disabled" = 1 ] && [ -n "$disable_config" ]; then
+    printf -- '--config %s ' "$(shell_quote "$disable_config")"
     return
   fi
   [ -n "$target" ] || return 0
@@ -2361,6 +2375,11 @@ if [ -L "$TASK_TMP" ]; then
   exit 1
 fi
 mkdir -p "$TASK_TMP/gotmp"
+if [ "$HARNESS" = omp ] && [ "$PREWALK_DISABLED" = 1 ] \
+  && [ "$PREWALK_DISABLE_SUPPORTED" != 1 ]; then
+  PREWALK_DISABLE_CONFIG="$TASK_TMP/omp-no-prewalk.yml"
+  printf 'prewalk:\n  enabled: false\n' > "$PREWALK_DISABLE_CONFIG"
+fi
 if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
   OMP_SESSION_DIR="$TASK_TMP/omp-sessions"
   mkdir -p "$OMP_SESSION_DIR"
@@ -2727,7 +2746,7 @@ sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
-PREWALKFLAG=$(prewalk_flag_for_harness "$HARNESS" "$PREWALK_INTO" "$PREWALK_DISABLED" "$PREWALK_DISABLE_SUPPORTED")
+PREWALKFLAG=$(prewalk_flag_for_harness "$HARNESS" "$PREWALK_INTO" "$PREWALK_DISABLED" "$PREWALK_DISABLE_SUPPORTED" "$PREWALK_DISABLE_CONFIG")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__PREWALKFLAG__/$PREWALKFLAG}
