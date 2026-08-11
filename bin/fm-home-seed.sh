@@ -47,6 +47,9 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 # shellcheck source=bin/fm-secondmate-charter-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-charter-lib.sh"
+# shellcheck source=bin/fm-omp-process-lib.sh
+. "$SCRIPT_DIR/fm-omp-process-lib.sh"
+
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
@@ -398,6 +401,7 @@ acquire_treehouse_home() {
     return 1
   }
   [ -n "$home" ] || { echo "error: treehouse get --lease did not report a firstmate home" >&2; return 1; }
+  fm_omp_clear_stale_runtime_markers "$home" || return 1
   printf '%s\n' "$home"
 }
 

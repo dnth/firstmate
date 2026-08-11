@@ -122,6 +122,9 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-pool-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-pool-lib.sh"
+
 
 fleet_sync_origin_backed_project_count() {
   local count proj
@@ -173,6 +176,35 @@ fleet_sync_relay_all_output() {
   done < "$tmp"
 }
 
+# Run <cmd...> as a bounded background job with output captured in <tmp>.
+# The advisory pool audit uses this to drop a wedged provider without delaying
+# session start or mutating any pool state.
+
+bootstrap_run_bounded() {  # <tmp> <timeout-seconds> <poll-seconds> <cmd...>
+  local tmp=$1 timeout=$2 poll=$3
+  shift 3
+  local monitor_was_on=0 pid start elapsed
+  case $- in *m*) monitor_was_on=1 ;; esac
+  set -m 2>/dev/null || true
+  "$@" >"$tmp" 2>/dev/null &
+  pid=$!
+
+  start=$SECONDS
+  while jobs -r -p | grep -qx "$pid"; do
+    elapsed=$((SECONDS - start))
+    if [ "$elapsed" -ge "$timeout" ]; then
+      kill -TERM "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
+      return 1
+    fi
+    sleep "$poll" 2>/dev/null || sleep 1
+  done
+  wait "$pid" 2>/dev/null || true
+  [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
+  return 0
+}
+
 fleet_sync() {
   [ -x "$FM_ROOT/bin/fm-fleet-sync.sh" ] || return 0
   [ -d "$PROJECTS" ] || return 0
@@ -204,6 +236,93 @@ fleet_sync() {
 
   fleet_sync_relay_filtered_output "$tmp"
   rm -f "$tmp"
+}
+
+TREEHOUSE_AUDIT_SEEN_SLOTS=""
+
+# Emit one raw record per dirty idle slot: "<slot>|<path>|<trailing detail>".
+# Each pool is scanned inside its own bounded background job, so this function
+# reports what it saw without owning cross-pool deduplication.
+# shellcheck disable=SC2329 # Invoked indirectly through bootstrap_run_bounded.
+treehouse_pool_dirty_idle_scan() {  # <repo>
+  local repo=$1 out line slot state path rest
+  out=$( (cd "$repo" 2>/dev/null && treehouse status) 2>/dev/null ) || return 0
+  while IFS= read -r line; do
+    read -r slot state path rest <<EOF_SLOT
+$line
+EOF_SLOT
+    case "$slot:$state" in
+      [0-9]*:dirty)
+        [ -n "$path" ] || path=unknown
+        printf '%s|%s|%s\n' "$slot" "$path" "$rest"
+        ;;
+    esac
+  done <<EOF
+$out
+EOF
+}
+
+treehouse_audit_report_slots() {  # <tmp>
+  local tmp=$1 line slot path rest
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    slot=${line%%|*}
+    rest=${line#*|}
+    path=${rest%%|*}
+    rest=${rest#*|}
+    [ -z "$rest" ] || rest=" $rest"
+    case " $TREEHOUSE_AUDIT_SEEN_SLOTS " in
+      *" $path "*) continue ;;
+    esac
+    TREEHOUSE_AUDIT_SEEN_SLOTS="$TREEHOUSE_AUDIT_SEEN_SLOTS $path"
+    echo "TREEHOUSE_POOL: dirty idle slot $slot at $path$rest - inspect before cleanup; no changes made"
+  done < "$tmp"
+}
+
+treehouse_audit_scan_pools() {  # <per-pool-seconds> <sweep-deadline-in-SECONDS>
+  local per_pool=$1 deadline=$2 repo repo_real seen="" tmp budget
+  TREEHOUSE_AUDIT_SEEN_SLOTS=""
+  for repo in "$FM_ROOT" "$PROJECTS"/*; do
+    budget=$((deadline - SECONDS))
+    [ "$budget" -gt 0 ] || return 0
+    [ "$budget" -le "$per_pool" ] || budget=$per_pool
+    [ -d "$repo" ] || continue
+    [ "$repo" = "$FM_ROOT" ] || git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || continue
+    repo_real=$(cd "$repo" 2>/dev/null && pwd -P) || continue
+    case " $seen " in
+      *" $repo_real "*) continue ;;
+    esac
+    seen="$seen $repo_real"
+    tmp=$(mktemp "${TMPDIR:-/tmp}/fm-treehouse-audit.XXXXXX" 2>/dev/null) || return 0
+    bootstrap_run_bounded "$tmp" "$budget" 0.2 treehouse_pool_dirty_idle_scan "$repo_real" || true
+    treehouse_audit_report_slots "$tmp"
+    rm -f "$tmp"
+  done
+}
+
+treehouse_audit_pool_timeout() {
+  case "${FM_TREEHOUSE_AUDIT_POOL_TIMEOUT:-}" in
+    ''|*[!0-9]*) echo 15 ;;
+    *) echo "$FM_TREEHOUSE_AUDIT_POOL_TIMEOUT" ;;
+  esac
+}
+
+treehouse_audit_timeout() {
+  case "${FM_TREEHOUSE_AUDIT_TIMEOUT:-}" in
+    ''|*[!0-9]*) echo 30 ;;
+    *) echo "$FM_TREEHOUSE_AUDIT_TIMEOUT" ;;
+    esac
+}
+
+treehouse_dirty_idle_slot_audit() {
+  fm_backend_list_contains "$TOOLS" treehouse || return 0
+  command -v treehouse >/dev/null 2>&1 || return 0
+  local per_pool timeout
+  per_pool=$(treehouse_audit_pool_timeout)
+  timeout=$(treehouse_audit_timeout)
+  [ "$timeout" -gt 0 ] || return 0
+  [ "$per_pool" -gt 0 ] || return 0
+  treehouse_audit_scan_pools "$per_pool" "$((SECONDS + timeout))"
 }
 
 secondmate_sync() {
@@ -1043,6 +1162,7 @@ if fm_backend_list_contains "$TOOLS" treehouse \
   && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
   echo "MISSING: treehouse (install: $(install_cmd treehouse))"
 fi
+treehouse_dirty_idle_slot_audit
 if command -v no-mistakes >/dev/null 2>&1 && ! tool_version_at_least no-mistakes "$NO_MISTAKES_MIN"; then
   echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
 fi

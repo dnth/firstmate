@@ -238,6 +238,9 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-omp-process-lib.sh
 . "$SCRIPT_DIR/fm-omp-process-lib.sh"
+# shellcheck source=bin/fm-pool-lib.sh
+. "$SCRIPT_DIR/fm-pool-lib.sh"
+
 # shellcheck source=bin/fm-primary-watch-version-lib.sh
 . "$SCRIPT_DIR/fm-primary-watch-version-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
@@ -2095,9 +2098,48 @@ validate_spawn_worktree() {  # <source> <inspect-target>
     exit 1
   fi
 }
+refuse_spawn_pool_lease() { # <reason> <inspect-target>
+  local reason=$1 inspect_target=$2
+  echo "error: refusing pooled worktree lease: $reason; inspect target $inspect_target before retrying" >&2
+  return 1
+}
+
+validate_spawn_pool_lease() { # <source> <inspect-target>
+  local source=$1 inspect_target=$2 default target expected
+  if ! fm_pool_worktree_clean "$WT"; then
+    local dirty
+    dirty=$(fm_pool_first_real_porcelain_line "$WT" 2>/dev/null || printf 'unreadable status')
+    refuse_spawn_pool_lease "$source yielded a dirty pool worktree ($dirty; allowed only a lone untracked treehouse.toml)" "$inspect_target"
+    return 1
+  fi
+  if ! git -C "$WT" fetch --quiet origin; then
+    refuse_spawn_pool_lease "$source could not fetch origin; refusing to launch from a potentially stale pool base" "$inspect_target"
+    return 1
+  fi
+  if ! git -C "$WT" remote set-head origin --auto >/dev/null 2>&1; then
+    refuse_spawn_pool_lease "$source could not resolve origin's current default branch" "$inspect_target"
+    return 1
+  fi
+  default=$(default_branch "$WT" 2>/dev/null || true)
+  [ -n "$default" ] || {
+    refuse_spawn_pool_lease "$source could not resolve the origin default branch" "$inspect_target"
+    return 1
+  }
+  target="origin/$default"
+  expected=$(git -C "$WT" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null || true)
+  [ -n "$expected" ] || {
+    refuse_spawn_pool_lease "$source has no readable $target base" "$inspect_target"
+    return 1
+  }
+  if ! git -C "$WT" merge-base --is-ancestor HEAD "$target" 2>/dev/null; then
+    refuse_spawn_pool_lease "$source HEAD is not an ancestor of $target (not fast-forwardable); refusing to discard local commits" "$inspect_target"
+    return 1
+  fi
+}
+
 
 freshen_spawn_worktree_base() {  # <worktree>
-  local worktree=$1 default target expected actual status current
+  local worktree=$1 default target expected actual current
   if ! git -C "$worktree" fetch --quiet origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
@@ -2119,12 +2161,8 @@ freshen_spawn_worktree_base() {  # <worktree>
     echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   }
-  status=$(git -C "$worktree" status --porcelain) || {
-    echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
-    return 1
-  }
-  if [ -n "$status" ]; then
-    echo "error: pooled worktree '$worktree' is not clean; refusing to discard uncommitted work while refreshing its base" >&2
+  if ! fm_pool_worktree_clean "$worktree"; then
+    echo "error: pooled worktree '$worktree' is not clean before refreshing its base (or its status is unreadable)" >&2
     return 1
   fi
   current=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null) || {
@@ -2142,12 +2180,8 @@ freshen_spawn_worktree_base() {  # <worktree>
     echo "error: could not fast-forward pooled worktree '$worktree' to '$target'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
-  status=$(git -C "$worktree" status --porcelain) || {
-    echo "error: could not inspect pooled worktree '$worktree' after refreshing its base" >&2
-    return 1
-  }
-  if [ -n "$status" ]; then
-    echo "error: pooled worktree '$worktree' is not clean after refreshing its base; refusing to launch" >&2
+  if ! fm_pool_worktree_clean "$worktree"; then
+    echo "error: pooled worktree '$worktree' is not clean after refreshing its base (or its status is unreadable); refusing to launch" >&2
     return 1
   fi
   actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
@@ -2243,6 +2277,8 @@ if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
   PREWALK_WORKTREE_READY=1
   PREWALK_ABORT_PHASE=lease
   validate_spawn_worktree "treehouse lease" "$W"
+  validate_spawn_pool_lease "treehouse lease" "$W" || exit 1
+  fm_omp_clear_stale_runtime_markers "$WT" || exit 1
   freshen_spawn_worktree_base "$WT" || exit 1
   validate_omp_prewalk_for_launch_dir "$WT"
   omp_project_extension_preflight "$WT" || exit 1
@@ -2652,6 +2688,10 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+  validate_spawn_pool_lease "treehouse get" "$T" || exit 1
+  if [ "$HARNESS" = omp ]; then
+    fm_omp_clear_stale_runtime_markers "$WT" || exit 1
+  fi
 fi
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
   && [ "$PREWALK_WORKTREE_READY" != 1 ]; then

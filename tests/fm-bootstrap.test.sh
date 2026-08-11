@@ -69,6 +69,10 @@ if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
   fi
   exit 0
 fi
+if [ "${1:-}" = status ]; then
+  printf '%s\n' "${FM_FAKE_TREEHOUSE_STATUS:-}"
+  exit 0
+fi
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
@@ -689,6 +693,29 @@ cmux
 ROWS
   pass "bootstrap: JSON-emitting backends require jq (their genuine dep), never tmux"
 }
+
+test_treehouse_dirty_idle_audit_is_read_only() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/treehouse-dirty-idle-audit"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/projects" "$case_dir/home/state"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf 'keep this sentinel\n' > "$case_dir/home/state/sentinel"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(PATH="$fakebin:$BASE_PATH" \
+    FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_FAKE_TREEHOUSE_STATUS='7 dirty /tmp/treehouse-slot (ownerless)' \
+    FM_TREEHOUSE_AUDIT_POOL_TIMEOUT=2 FM_TREEHOUSE_AUDIT_TIMEOUT=4 \
+    "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" \
+    "TREEHOUSE_POOL: dirty idle slot 7 at /tmp/treehouse-slot (ownerless) - inspect before cleanup; no changes made" \
+    "bootstrap did not report a dirty ownerless idle pool slot"
+  assert_grep 'keep this sentinel' "$case_dir/home/state/sentinel" \
+    "read-only pool audit changed unrelated home state"
+  pass "bootstrap reports dirty ownerless pool slots without mutating them"
+}
+
+test_treehouse_dirty_idle_audit_is_read_only
 
 test_treehouse_lease_check_follows_resolved_backend() {
   local case_dir fakebin out

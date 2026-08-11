@@ -134,3 +134,89 @@ EOF
     [ "$process_exe" = "$expected_bun" ] || return 1
   fi
 }
+
+# Remove OMP runtime markers from a recycled home only after proving that the
+# previous session lock and primary marker owners are absent.
+fm_omp_clear_stale_runtime_markers() { # <home>
+  local home=$1 state lock_pid marker marker_pid session_dir session
+  state="$home/state"
+  [ -e "$state" ] || return 0
+  [ -d "$state" ] && [ ! -L "$state" ] || {
+    printf 'error: OMP runtime state is not an ordinary directory: %s\n' "$state" >&2
+    return 1
+  }
+
+  if [ -e "$state/.lock" ] || [ -L "$state/.lock" ]; then
+    [ -f "$state/.lock" ] && [ ! -L "$state/.lock" ] || {
+      printf 'error: cannot verify the previous OMP session lock at %s\n' "$state/.lock" >&2
+      return 1
+    }
+    lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
+    case "$lock_pid" in
+      ''|*[!0-9]*|0*|1)
+        printf 'error: previous OMP session lock at %s has an unverifiable PID\n' "$state/.lock" >&2
+        return 1
+        ;;
+      *)
+        if kill -0 "$lock_pid" 2>/dev/null; then
+          printf 'error: previous OMP session is still live (PID %s); preserving runtime markers in %s\n' "$lock_pid" "$state" >&2
+          return 1
+        fi
+        ;;
+    esac
+  fi
+
+  marker="$state/.omp-primary-extension-loaded"
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    [ -f "$marker" ] && [ ! -L "$marker" ] || {
+      printf 'error: cannot verify the previous OMP primary marker at %s\n' "$marker" >&2
+      return 1
+    }
+    marker_pid=$(sed -n '2p' "$marker" 2>/dev/null || true)
+    case "$marker_pid" in
+      ''|*[!0-9]*|0*|1)
+        printf 'error: previous OMP primary marker at %s has an unverifiable PID\n' "$marker" >&2
+        return 1
+        ;;
+      *)
+        if kill -0 "$marker_pid" 2>/dev/null; then
+          printf 'error: previous OMP primary marker owner is still live (PID %s); preserving runtime markers in %s\n' "$marker_pid" "$state" >&2
+          return 1
+        fi
+        ;;
+    esac
+  fi
+
+  for marker in "$state"/.omp-*; do
+    [ -e "$marker" ] || [ -L "$marker" ] || continue
+    [ -f "$marker" ] && [ ! -L "$marker" ] || {
+      printf 'error: refusing to remove non-file OMP runtime marker %s\n' "$marker" >&2
+      return 1
+    }
+  done
+  session_dir="$state/omp-sessions"
+  if [ -e "$session_dir" ] || [ -L "$session_dir" ]; then
+    [ -d "$session_dir" ] && [ ! -L "$session_dir" ] || {
+      printf 'error: OMP session directory is not an ordinary directory: %s\n' "$session_dir" >&2
+      return 1
+    }
+    for session in "$session_dir"/*.jsonl; do
+      [ -e "$session" ] || continue
+      [ -f "$session" ] && [ ! -L "$session" ] || {
+        printf 'error: refusing to remove non-file OMP session %s\n' "$session" >&2
+        return 1
+      }
+    done
+  fi
+
+  rm -f "$state"/.omp-* || {
+    printf 'error: could not clear stale OMP runtime markers in %s\n' "$state" >&2
+    return 1
+  }
+  if [ -d "$session_dir" ] && [ ! -L "$session_dir" ]; then
+    rm -f "$session_dir"/*.jsonl || {
+      printf 'error: could not clear stale OMP sessions in %s\n' "$session_dir" >&2
+      return 1
+    }
+  fi
+}

@@ -56,7 +56,7 @@ make_case() {
   git -C "$project" remote add origin "file://$origin"
   initial=$(git -C "$project" rev-parse HEAD)
   git -C "$project" worktree add --quiet --detach "$pool" "$initial"
-
+  printf 'pool-local-config\n' > "$pool/treehouse.toml"
   git clone --quiet "file://$origin" "$publisher"
   printf 'must survive a newly spawned branch\n' > "$publisher/advanced-main.txt"
   git -C "$publisher" add advanced-main.txt
@@ -195,7 +195,7 @@ test_dirty_pool_refuses_without_discarding_work() {
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn succeeded despite a dirty pooled worktree"
-  assert_contains "$out" "is not clean" "spawn did not clearly refuse a dirty pooled worktree"
+  assert_contains "$out" "dirty pool worktree" "spawn did not clearly refuse a dirty pooled worktree"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
     || fail "spawn moved HEAD while refusing a dirty pooled worktree"
   assert_grep 'keep this local work' "$POOL_DIR/uncommitted.txt" \
@@ -270,6 +270,22 @@ test_unresolved_remote_default_refuses_pool() {
   pass "an unresolved remote default branch refuses the pooled worktree"
 }
 
+test_pool_cleanliness_predicate() {
+  local rec extra
+  rec=$(make_case pool-predicate pool-predicate-r0)
+  read_case_record "$rec"
+  # The pool-local treehouse config is the one allowed untracked root entry.
+  . "$ROOT/bin/fm-pool-lib.sh"
+  fm_pool_worktree_clean "$POOL_DIR" || fail "lone root treehouse.toml should count as clean"
+  extra="$POOL_DIR/real-dirt.txt"
+  printf 'real dirt\n' > "$extra"
+  if fm_pool_worktree_clean "$POOL_DIR"; then
+    fail "an additional untracked file should make the pool dirty"
+  fi
+  pass "pool cleanliness allows only the lone root treehouse.toml"
+}
+
+test_pool_cleanliness_predicate
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
