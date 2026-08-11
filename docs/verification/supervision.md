@@ -362,3 +362,29 @@ Observed output:
 ```
 
 The safe command-channel contract is covered without a notification by `tests/fm-daemon.test.sh`: the summary reaches both `$1` and stdin, every channel is process-group bounded, and a failed channel falls through.
+
+
+## Secondmate supervision beacon
+
+The secondmate idle supervision poll observed on 2026-08-12 was 360 seconds, while `FM_STALE_ESCALATE_SECS` defaults to 240 seconds.
+The watcher loop's own liveness beacon is refreshed every 15-second `FM_POLL` cycle.
+The parent watcher now accepts a secondmate only when its recorded home beacon is younger than the 240-second stale bound.
+The same stale path remains active when that beacon is missing or older than the bound.
+
+Deterministic verification on 2026-08-12:
+
+```sh
+shellcheck -x bin/fm-watch.sh tests/fm-watch-triage.test.sh tests/fm-supervision-instructions.test.sh
+bash tests/fm-supervision-instructions.test.sh
+bash tests/fm-watch-triage.test.sh
+bash tests/fm-secondmate-safety.test.sh
+```
+
+Observed results:
+
+```text
+ok - OMP supervision snippet renders its native integration path and distinct tool
+ok - a fresh secondmate-home watcher beacon suppresses an idle secondmate pane
+ok - a stale secondmate-home watcher beacon still reaches genuine wedge escalation
+ok - idle kind=secondmate pane is healthy and not stale
+```

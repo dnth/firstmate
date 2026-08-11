@@ -2488,8 +2488,9 @@ EOF
 test_secondmate_idle_pane_is_not_stale() {
   local home fakebin out pid window
   home="$TMP_ROOT/watch-home"
-  mkdir -p "$home/state"
+  mkdir -p "$home/state" "$TMP_ROOT/watch-subhome/state"
   window="firstmate:fm-domain"
+  : > "$TMP_ROOT/watch-subhome/state/.last-watcher-beat"
   cat > "$home/state/domain.meta" <<EOF
 window=$window
 worktree=$TMP_ROOT/watch-subhome

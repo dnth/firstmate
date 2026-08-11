@@ -919,12 +919,14 @@ test_secondmate_paused_resurfaces_in_normal_mode() {
 }
 
 test_secondmate_nonpaused_stale_remains_suppressed() {
-  local dir state fakebin out capture_file statusf window key pane_hash sig pid
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid home
   dir=$(make_case secondmate-stale-suppressed); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/secondmate-working.status"
+  home="$dir/secondmate-home"; mkdir -p "$home/state"
   window="test:fm-secondmate-working"
   printf 'idle while the parent supervises\n' > "$capture_file"
-  printf 'window=%s\nkind=secondmate\n' "$window" > "$state/secondmate-working.meta"
+  printf 'window=%s\nkind=secondmate\nhome=%s\n' "$window" "$home" > "$state/secondmate-working.meta"
+  : > "$home/state/.last-watcher-beat"
   printf 'working: the parent supervises this secondmate\n' > "$statusf"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-secondmate-working_status"
   key=$(printf '%s' "$window" | tr '.:/' '___')
@@ -939,7 +941,48 @@ test_secondmate_nonpaused_stale_remains_suppressed() {
   fi
   [ ! -s "$out" ] || { reap "$pid"; fail "ordinary secondmate stale pane printed a wake reason: $(cat "$out")"; }
   reap "$pid"
-  pass "a non-paused secondmate retains normal stale suppression"
+  pass "a fresh secondmate-home watcher beacon suppresses an idle secondmate pane"
+}
+
+test_secondmate_stale_supervisor_beacon_escalates() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid home back
+  dir=$(make_case secondmate-stale-beacon); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/secondmate-working.status"
+  home="$dir/secondmate-home"; mkdir -p "$home/state"
+  window="test:fm-secondmate-stale-beacon"
+  printf 'idle while the parent supervises\n' > "$capture_file"
+  printf 'window=%s\nkind=secondmate\nhome=%s\n' "$window" "$home" > "$state/secondmate-working.meta"
+  : > "$home/state/.last-watcher-beat"
+  back=$(( $(date +%s) - 500 ))
+  set_mtime "$back" "$home/state/.last-watcher-beat"
+  printf 'working: the parent supervises this secondmate\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-secondmate-working_status"
+  key=$(printf '%s' "$window" | tr '.:/' '___')
+  pane_hash=$(hash_text "idle while the parent supervises")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · supervising a live child'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_numeric_file "$state/.stale-since-$key" 30 || {
+    reap "$pid"; fail "a stale secondmate supervisor beacon did not start wedge tracking"
+  }
+  reap "$pid"
+
+  printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a stale secondmate supervisor beacon did not wedge-escalate"
+  grep -F "stale: $window" "$out" >/dev/null || fail "stale secondmate supervisor beacon omitted stale wake"
+  grep -F "possible wedge" "$out" >/dev/null || fail "stale secondmate supervisor beacon omitted possible-wedge escalation"
+  unset FM_FAKE_CREW_STATE
+  pass "a stale secondmate-home watcher beacon still reaches genuine wedge escalation"
 }
 
 test_secondmate_unpause_clears_pause_tracking() {
@@ -1933,6 +1976,7 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
+test_secondmate_stale_supervisor_beacon_escalates
 test_secondmate_unpause_clears_pause_tracking
 test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
 test_nonterminal_paused_rechecks_authoritative_state

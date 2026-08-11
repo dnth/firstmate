@@ -442,6 +442,25 @@ surface_nonterminal_stale() {  # <window> <hash>
 # Check and heartbeat cadence must survive actionable exits and restarts: the
 # watcher may be relaunched before in-memory counters reach their threshold on a
 # busy fleet. Persist the schedule as file mtimes instead.
+# A fresh secondmate-home watcher beacon is positive evidence that the parent
+# supervisor is still alive, even when its own pane is idle between child polls.
+# The beacon is written by this same watcher process at the top of every cycle,
+# and the parent uses the wedge threshold as its maximum acceptable age. A
+# missing or stale beacon deliberately falls through to the ordinary stale path,
+# preserving wedge detection for an unresponsive supervisor.
+secondmate_supervision_is_alive() {  # <window>
+  local win=$1 meta home beat
+  meta=$(fm_backend_meta_for_window "$win" "$STATE" 2>/dev/null || true)
+  [ -n "$meta" ] || return 1
+  # Remote homes are not readable from the parent; their own remote watcher and
+  # liveness sweep own endpoint health, so preserve the remote stale exemption.
+  grep -q '^remote_host=' "$meta" && return 0
+  home=$(grep '^home=' "$meta" | cut -d= -f2- || true)
+  [ -n "$home" ] || return 1
+  beat="$home/state/.last-watcher-beat"
+  [ "$(age_of "$beat")" -lt "$STALE_ESCALATE_SECS" ]
+}
+
 age_of() {  # seconds since file mtime; "due immediately" if missing
   local f=$1 m
   m=$(stat_mtime "$f") || { echo 999999; return; }
@@ -943,7 +962,7 @@ EOF
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$w"
     fi
-    if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
+    if [ "$kind" = secondmate ] && secondmate_supervision_is_alive "$w"; then
       continue
     fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
@@ -968,12 +987,7 @@ EOF
       if [ "$n" -ge 2 ] && [ "$busy_now" -ne 0 ]; then
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
-        if [ "$kind" = secondmate ]; then
-          case "$(pause_state_class "$w" "$task")" in
-            paused) handle_paused_stale "$w" "$task" "$h" ;;
-            *)      clear_pause_tracking "$w" ;;
-          esac
-        elif afk_present; then
+        if afk_present; then
           # Daemon owns triage: one-shot per distinct stale hash, as before.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             fm_wake_append stale "$w" "stale: $w" || exit 1
