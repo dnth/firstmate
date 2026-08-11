@@ -2131,9 +2131,18 @@ case "$BACKEND" in
               HERDR_PROJECTION_ABORT_SEEDED_PANE=""
               ;;
             2)
+              if [ "${FM_BACKEND_HERDR_PROJECTION_RECLAIM_AMBIGUOUS:-0}" = 1 ]; then
+                [ "$PREWALK_ABORT_PHASE" != lease ] || PREWALK_ABORT_PHASE=ambiguous
+                exit 1
+              fi
               spawn_herdr_presentation_order_lock_release
               ;;
-            *) exit 1 ;;
+            *)
+              if [ "${FM_BACKEND_HERDR_PROJECTION_RECLAIM_AMBIGUOUS:-0}" = 1 ]; then
+                [ "$PREWALK_ABORT_PHASE" != lease ] || PREWALK_ABORT_PHASE=ambiguous
+              fi
+              exit 1
+              ;;
           esac
         else
           spawn_herdr_presentation_order_lock_release
@@ -2167,6 +2176,9 @@ case "$BACKEND" in
             HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
             if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
               "$SPAWN_START_DIR" "$HERDR_PROJECTION_LABEL" "$W"; then
+              if [ "${FM_BACKEND_HERDR_PROJECTION_MUTATION_STARTED:-0}" = 1 ]; then
+                [ "$PREWALK_ABORT_PHASE" != lease ] || PREWALK_ABORT_PHASE=ambiguous
+              fi
               if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
                 HERDR_PROJECTION_ABORT_CLEANUP=1
                 HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION

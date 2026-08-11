@@ -89,10 +89,22 @@ case "$cmd $sub" in
     printf '%s\n' '{"sessions":[{"name":"default","running":true,"socket_path":"/tmp/fm-profile-herdr.sock"}]}'
     ;;
   "workspace list")
-    printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"}]}}'
+    if [ "${FM_FAKE_HERDR_PARTIAL_PROJECTION:-0}" = 1 ]; then
+      printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","active_tab_id":"w1:t1","focused":true}]}}'
+    else
+      printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"}]}}'
+    fi
     ;;
   "tab list")
-    printf '%s\n' '{"result":{"tabs":[]}}'
+    if [ "${FM_FAKE_HERDR_PARTIAL_PROJECTION:-0}" = 1 ]; then
+      printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","workspace_id":"w1","label":"1","focused":true}]}}'
+    else
+      printf '%s\n' '{"result":{"tabs":[]}}'
+    fi
+    ;;
+  "workspace create")
+    [ -z "${FM_FAKE_ENDPOINT_LOG:-}" ] || printf 'workspace create\n' >> "$FM_FAKE_ENDPOINT_LOG"
+    printf '%s\n' '{"result":{"workspace":{"workspace_id":"w2"}}}'
     ;;
   "tab create")
     [ -z "${FM_FAKE_ENDPOINT_LOG:-}" ] || printf 'tab create\n' >> "$FM_FAKE_ENDPOINT_LOG"
@@ -258,6 +270,7 @@ run_spawn() {
     FM_FAKE_OMP_CATALOG_DIR="${FM_TEST_OMP_CATALOG_DIR:-}" \
     FM_FAKE_MKDIR_FAIL_PATH="${FM_TEST_MKDIR_FAIL_PATH:-}" \
     FM_FAKE_HERDR_PARTIAL_CREATE="${FM_TEST_HERDR_PARTIAL_CREATE:-0}" \
+    FM_FAKE_HERDR_PARTIAL_PROJECTION="${FM_TEST_HERDR_PARTIAL_PROJECTION:-0}" \
     FM_FAKE_HERDR_PANE_FLAG="$herdrpaneflag" \
     FM_FAKE_HERDR_REFUSE_CLOSE="${FM_TEST_HERDR_REFUSE_CLOSE:-0}" \
     FM_FAKE_OMP_META_TAMPER="${FM_TEST_OMP_META_TAMPER:-}" \
@@ -976,6 +989,35 @@ test_omp_prewalk_ambiguous_herdr_creation_preserves_lease() {
   pass "ambiguous Herdr creation preserves its Prewalk lease"
 }
 
+test_omp_prewalk_ambiguous_herdr_projection_preserves_lease() {
+  local rec id out status endpoint_log treehouse_log target
+  id=$(profile_id profile-omp-prewalk-herdr-projection-z8oz)
+  rec=$(make_spawn_case profile-omp-prewalk-herdr-projection omp "$id")
+  read_case_record "$rec"
+  endpoint_log="$CASE_DIR/endpoint.log"
+  treehouse_log="$CASE_DIR/treehouse.log"
+  target=openai-codex/gpt-5.6-luna:xhigh
+  printf 'on\n' > "$HOME_DIR/config/herdr-presentation-spaces"
+  export FM_TEST_HERDR_PARTIAL_PROJECTION=1
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --backend herdr --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+  status=$?
+  unset FM_TEST_HERDR_PARTIAL_PROJECTION
+  expect_code 1 "$status" "ambiguous Herdr projection creation should abort"
+  assert_contains "$out" "workspace create returned incomplete IDs" \
+    "ambiguous Herdr projection did not report its malformed ownership response"
+  assert_contains "$out" "preserving its leased worktree because backend endpoint creation was ambiguous" \
+    "ambiguous Herdr projection did not explain why its worktree lease was preserved"
+  assert_grep 'workspace create' "$endpoint_log" \
+    "ambiguous Herdr projection fixture did not reach endpoint creation"
+  assert_no_grep 'return' "$treehouse_log" \
+    "ambiguous Herdr projection returned a worktree that may still have a live endpoint"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "ambiguous Herdr projection published durable task metadata"
+  pass "ambiguous Herdr projection preserves its Prewalk lease"
+}
+
 test_non_omp_prewalk_refuses_without_changing_normal_claude_launch() {
   local rec bad_id normal_id out status launch endpoint_log target
   bad_id=$(profile_id profile-claude-prewalk-bad-z8or)
@@ -1383,6 +1425,7 @@ test_omp_valid_prewalk_does_not_require_disable_flag
 test_omp_unsafe_fallback_refuses_before_endpoint
 test_omp_prewalk_premetadata_failure_cleans_endpoint_and_lease
 test_omp_prewalk_ambiguous_herdr_creation_preserves_lease
+test_omp_prewalk_ambiguous_herdr_projection_preserves_lease
 test_non_omp_prewalk_refuses_without_changing_normal_claude_launch
 test_omp_herdr_worker_and_scout_launch_with_exact_identity_and_ack
 test_omp_refuses_unverified_backends_before_endpoint_creation
