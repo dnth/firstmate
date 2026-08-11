@@ -96,7 +96,11 @@ case "$cmd $sub" in
     ;;
   "tab create")
     [ -z "${FM_FAKE_ENDPOINT_LOG:-}" ] || printf 'tab create\n' >> "$FM_FAKE_ENDPOINT_LOG"
-    printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2"}}}'
+    if [ "${FM_FAKE_HERDR_PARTIAL_CREATE:-0}" = 1 ]; then
+      printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t2"}}}'
+    else
+      printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2"}}}'
+    fi
     ;;
   "pane get")
     if [ -n "${FM_FAKE_HERDR_PANE_FLAG:-}" ] && [ ! -f "$FM_FAKE_HERDR_PANE_FLAG" ]; then
@@ -253,6 +257,7 @@ run_spawn() {
     FM_FAKE_OMP_PREWALK_ENABLED="${FM_TEST_OMP_PREWALK_ENABLED:-false}" \
     FM_FAKE_OMP_CATALOG_DIR="${FM_TEST_OMP_CATALOG_DIR:-}" \
     FM_FAKE_MKDIR_FAIL_PATH="${FM_TEST_MKDIR_FAIL_PATH:-}" \
+    FM_FAKE_HERDR_PARTIAL_CREATE="${FM_TEST_HERDR_PARTIAL_CREATE:-0}" \
     FM_FAKE_HERDR_PANE_FLAG="$herdrpaneflag" \
     FM_FAKE_HERDR_REFUSE_CLOSE="${FM_TEST_HERDR_REFUSE_CLOSE:-0}" \
     FM_FAKE_OMP_META_TAMPER="${FM_TEST_OMP_META_TAMPER:-}" \
@@ -943,6 +948,34 @@ test_omp_prewalk_premetadata_failure_cleans_endpoint_and_lease() {
   pass "Prewalk setup failures clean their endpoint and worktree lease"
 }
 
+test_omp_prewalk_ambiguous_herdr_creation_preserves_lease() {
+  local rec id out status endpoint_log treehouse_log target
+  id=$(profile_id profile-omp-prewalk-herdr-partial-z8oy)
+  rec=$(make_spawn_case profile-omp-prewalk-herdr-partial omp "$id")
+  read_case_record "$rec"
+  endpoint_log="$CASE_DIR/endpoint.log"
+  treehouse_log="$CASE_DIR/treehouse.log"
+  target=openai-codex/gpt-5.6-luna:xhigh
+  export FM_TEST_HERDR_PARTIAL_CREATE=1
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --backend herdr --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+  status=$?
+  unset FM_TEST_HERDR_PARTIAL_CREATE
+  expect_code 1 "$status" "ambiguous Herdr endpoint creation should abort"
+  assert_contains "$out" "could not parse tab/pane id from herdr tab create output" \
+    "ambiguous Herdr creation did not report its malformed ownership response"
+  assert_contains "$out" "preserving its leased worktree because backend endpoint creation was ambiguous" \
+    "ambiguous Herdr creation did not explain why its worktree lease was preserved"
+  assert_grep 'tab create' "$endpoint_log" \
+    "ambiguous Herdr fixture did not reach endpoint creation"
+  assert_no_grep 'return' "$treehouse_log" \
+    "ambiguous Herdr creation returned a worktree that may still have a live endpoint"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "ambiguous Herdr creation published durable task metadata"
+  pass "ambiguous Herdr creation preserves its Prewalk lease"
+}
+
 test_non_omp_prewalk_refuses_without_changing_normal_claude_launch() {
   local rec bad_id normal_id out status launch endpoint_log target
   bad_id=$(profile_id profile-claude-prewalk-bad-z8or)
@@ -1349,6 +1382,7 @@ test_omp_prewalk_fallback_omits_unsupported_disable_flag
 test_omp_valid_prewalk_does_not_require_disable_flag
 test_omp_unsafe_fallback_refuses_before_endpoint
 test_omp_prewalk_premetadata_failure_cleans_endpoint_and_lease
+test_omp_prewalk_ambiguous_herdr_creation_preserves_lease
 test_non_omp_prewalk_refuses_without_changing_normal_claude_launch
 test_omp_herdr_worker_and_scout_launch_with_exact_identity_and_ack
 test_omp_refuses_unverified_backends_before_endpoint_creation

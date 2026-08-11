@@ -809,6 +809,10 @@ spawn_abort_cleanup() {
         spawn_omp_abort_clean_unchanged_worktree "OMP Prewalk spawn cleanup"
       fi
       ;;
+    ambiguous)
+      PREWALK_ABORT_PHASE=none
+      echo "warning: OMP Prewalk spawn cleanup is preserving its leased worktree because backend endpoint creation was ambiguous" >&2
+      ;;
   esac
   if [ "$OMP_ABORT_CLEANUP" = 1 ]; then
     OMP_ABORT_CLEANUP=0
@@ -2215,7 +2219,16 @@ case "$BACKEND" in
       HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
       HERDR_SES=${CONTAINER%%:*}
       HERDR_WORKSPACE_ID=${CONTAINER#*:}
-      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$SPAWN_START_DIR" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      set +e
+      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$SPAWN_START_DIR" "$HERDR_SEEDED_DEFAULT_TAB_ID")
+      HERDR_TASK_CREATE_STATUS=$?
+      set -e
+      if [ "$HERDR_TASK_CREATE_STATUS" -ne 0 ]; then
+        if [ "$HERDR_TASK_CREATE_STATUS" -eq 2 ] && [ "$PREWALK_ABORT_PHASE" = lease ]; then
+          PREWALK_ABORT_PHASE=ambiguous
+        fi
+        exit 1
+      fi
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF

@@ -1803,12 +1803,19 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_ta
 $dup_tabs
 EOF
   fi
-  out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || return 1
+  out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || {
+    echo "error: herdr task tab creation failed ambiguously in workspace $wsid (session $session)" >&2
+    return 2
+  }
   tab_id=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
   pane_id=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
   if [ -z "$tab_id" ] || [ -z "$pane_id" ]; then
     echo "error: could not parse tab/pane id from herdr tab create output" >&2
-    return 1
+    if [ -n "$pane_id" ] && fm_backend_herdr_explicit_close_pane_confirmed "$session" "$pane_id"; then
+      return 1
+    fi
+    echo "warning: herdr task creation may have left an endpoint whose exact pane could not be removed" >&2
+    return 2
   fi
   [ -z "$seeded_tab_id" ] || fm_backend_herdr_workspace_prune_seeded_default_tab "$session" "$wsid" "$seeded_tab_id"
   if [ -n "$dup_tab_ids" ]; then
@@ -1820,18 +1827,18 @@ $dup_tab_ids
 EOF
     list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || {
       echo "error: could not verify herdr husk removal for tab '$label' in workspace $wsid (session $session)" >&2
-      return 1
+      return 2
     }
     if ! printf '%s' "$list" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1; then
       echo "error: could not parse herdr tab list output for workspace $wsid (session $session)" >&2
-      return 1
+      return 2
     fi
     remaining_dup_tabs=$(printf '%s' "$list" | jq -r --arg want "$label" --arg replacement "$tab_id" \
       '.result.tabs[]? | select(.label == $want and .tab_id != $replacement) | .tab_id' 2>/dev/null)
     remaining_dup_tabs=${remaining_dup_tabs//$'\n'/ }
     if [ -n "$remaining_dup_tabs" ]; then
       echo "error: failed to remove preexisting herdr tab(s) $remaining_dup_tabs for label '$label' in workspace $wsid (session $session)" >&2
-      return 1
+      return 2
     fi
   fi
   printf '%s %s' "$tab_id" "$pane_id"
