@@ -140,13 +140,24 @@ SH
   chmod +x "$fakebin/herdr"
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
-[ -z "${FM_FAKE_TREEHOUSE_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
+[ -z "${FM_FAKE_TREEHOUSE_LOG:-}" ] || printf '%s|%s\n' "$PWD" "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
 if [ "${1:-}" = get ] && [ "${2:-}" = --lease ]; then
   printf '%s\n' "$FM_FAKE_PANE_PATH"
 fi
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
+  cat > "$fakebin/mkdir" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ -n "${FM_FAKE_MKDIR_FAIL_PATH:-}" ] && [ "$arg" = "$FM_FAKE_MKDIR_FAIL_PATH" ]; then
+    printf 'injected mkdir failure for %s\n' "$arg" >&2
+    exit 1
+  fi
+done
+exec /bin/mkdir "$@"
+SH
+  chmod +x "$fakebin/mkdir"
   fm_fake_exit0 "$fakebin" pi-signed
   cat > "$fakebin/omp" <<'SH'
 #!/usr/bin/env bun
@@ -241,6 +252,7 @@ run_spawn() {
     FM_FAKE_OMP_NO_PREWALK="${FM_TEST_OMP_NO_PREWALK:-1}" \
     FM_FAKE_OMP_PREWALK_ENABLED="${FM_TEST_OMP_PREWALK_ENABLED:-false}" \
     FM_FAKE_OMP_CATALOG_DIR="${FM_TEST_OMP_CATALOG_DIR:-}" \
+    FM_FAKE_MKDIR_FAIL_PATH="${FM_TEST_MKDIR_FAIL_PATH:-}" \
     FM_FAKE_HERDR_PANE_FLAG="$herdrpaneflag" \
     FM_FAKE_HERDR_REFUSE_CLOSE="${FM_TEST_HERDR_REFUSE_CLOSE:-0}" \
     FM_FAKE_OMP_META_TAMPER="${FM_TEST_OMP_META_TAMPER:-}" \
@@ -896,10 +908,39 @@ test_omp_unsafe_fallback_refuses_before_endpoint() {
   [ ! -s "$endpoint_log" ] || fail "unsafe fallback created an endpoint before refusing"
   assert_grep "get --lease --lease-holder fm-$id" "$treehouse_log" \
     "unsafe fallback did not validate from the authoritative leased worktree"
-  assert_grep "return $WT_DIR" "$treehouse_log" \
+  assert_grep "$PROJ_DIR|return $WT_DIR" "$treehouse_log" \
     "unsafe fallback did not return its pre-endpoint worktree lease"
   unset FM_TEST_OMP_CATALOG_DIR FM_TEST_OMP_PREWALK_ENABLED FM_TEST_OMP_NO_PREWALK
   pass "unsafe OMP fallback refuses before endpoint creation"
+}
+
+test_omp_prewalk_premetadata_failure_cleans_endpoint_and_lease() {
+  local rec id out status endpoint_log treehouse_log target tasktmp
+  id=$(profile_id profile-omp-prewalk-premeta-z8ox)
+  rec=$(make_spawn_case profile-omp-prewalk-premeta omp "$id")
+  read_case_record "$rec"
+  endpoint_log="$CASE_DIR/endpoint.log"
+  treehouse_log="$CASE_DIR/treehouse.log"
+  target=openai-codex/gpt-5.6-luna:xhigh
+  tasktmp="/tmp/fm-$id"
+  export FM_TEST_MKDIR_FAIL_PATH="$tasktmp/gotmp"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+  status=$?
+  unset FM_TEST_MKDIR_FAIL_PATH
+  expect_code 1 "$status" "a post-endpoint Prewalk setup failure should abort"
+  assert_contains "$out" "injected mkdir failure for $tasktmp/gotmp" \
+    "post-endpoint Prewalk setup did not reach the expected refusal"
+  assert_grep 'kill-window' "$endpoint_log" \
+    "post-endpoint Prewalk failure left its owned endpoint alive"
+  assert_grep "$PROJ_DIR|return --force $WT_DIR" "$treehouse_log" \
+    "post-endpoint Prewalk failure did not return its unchanged worktree lease"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "post-endpoint Prewalk failure published durable metadata"
+  assert_absent "$tasktmp" \
+    "post-endpoint Prewalk failure left its rejected task temp root"
+  pass "Prewalk setup failures clean their endpoint and worktree lease"
 }
 
 test_non_omp_prewalk_refuses_without_changing_normal_claude_launch() {
@@ -1307,6 +1348,7 @@ test_omp_prewalk_accepts_colon_selector_from_launch_worktree_catalog
 test_omp_prewalk_fallback_omits_unsupported_disable_flag
 test_omp_valid_prewalk_does_not_require_disable_flag
 test_omp_unsafe_fallback_refuses_before_endpoint
+test_omp_prewalk_premetadata_failure_cleans_endpoint_and_lease
 test_non_omp_prewalk_refuses_without_changing_normal_claude_launch
 test_omp_herdr_worker_and_scout_launch_with_exact_identity_and_ack
 test_omp_refuses_unverified_backends_before_endpoint_creation

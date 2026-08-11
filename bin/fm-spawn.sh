@@ -715,7 +715,7 @@ ORCA_TERMINAL=
 OMP_ABORT_CLEANUP=0
 OMP_ABORT_INITIAL_HEAD=
 PREWALK_WORKTREE_READY=0
-PREWALK_LEASE_CLEANUP=0
+PREWALK_ABORT_PHASE=none
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
@@ -766,8 +766,8 @@ spawn_omp_abort_ownership_proven() {  # <meta>
 # with no classifier at all - clears the caller's destructive branch; present,
 # agent-less, ambiguous, and unreadable states all preserve everything, exactly
 # like the dead-secondmate recovery check below.
-spawn_omp_abort_endpoint_stopped() {  # <meta>
-  local meta=$1 state
+spawn_omp_abort_endpoint_stopped() {  # [meta]
+  local meta=${1:-} state
   fm_backend_kill "$BACKEND" "$T" || return 1
   state=$(fm_backend_agent_state "$BACKEND" "$T" "$meta" 2>/dev/null) || state=unreadable
   case "$state" in
@@ -776,14 +776,40 @@ spawn_omp_abort_endpoint_stopped() {  # <meta>
   esac
 }
 
-spawn_abort_cleanup() {
-  local status=$? meta current_head dirty
-  if [ "$PREWALK_LEASE_CLEANUP" = 1 ]; then
-    PREWALK_LEASE_CLEANUP=0
-    if ! treehouse return "$WT" >/dev/null 2>&1; then
-      echo "warning: OMP Prewalk preflight could not return its leased worktree $WT" >&2
-    fi
+spawn_omp_abort_clean_unchanged_worktree() {  # <context>
+  local context=$1 current_head dirty
+  sleep 0.1
+  current_head=$(git -C "$WT" rev-parse HEAD 2>/dev/null || true)
+  dirty=$(git -C "$WT" status --porcelain 2>/dev/null || printf 'unreadable\n')
+  if [ -z "$OMP_ABORT_INITIAL_HEAD" ] || [ "$current_head" != "$OMP_ABORT_INITIAL_HEAD" ] || [ -n "$dirty" ]; then
+    echo "warning: $context found work to preserve in $WT" >&2
+  elif (cd "$PROJ_ABS" && treehouse return --force "$WT" >/dev/null 2>&1); then
+    [ -z "${TASK_TMP:-}" ] || rm -rf "$TASK_TMP"
+    rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
+      "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" "$STATE/$ID.omp-started"
+  else
+    echo "warning: $context could not return the unchanged worktree $WT" >&2
   fi
+}
+
+spawn_abort_cleanup() {
+  local status=$? meta
+  case "$PREWALK_ABORT_PHASE" in
+    lease)
+      PREWALK_ABORT_PHASE=none
+      if ! (cd "$PROJ_ABS" && treehouse return "$WT" >/dev/null 2>&1); then
+        echo "warning: OMP Prewalk preflight could not return its leased worktree $WT" >&2
+      fi
+      ;;
+    endpoint)
+      PREWALK_ABORT_PHASE=none
+      if ! spawn_omp_abort_endpoint_stopped; then
+        echo "warning: OMP Prewalk spawn cleanup could not confirm its owned endpoint stopped; preserving its worktree and task artifacts" >&2
+      else
+        spawn_omp_abort_clean_unchanged_worktree "OMP Prewalk spawn cleanup"
+      fi
+      ;;
+  esac
   if [ "$OMP_ABORT_CLEANUP" = 1 ]; then
     OMP_ABORT_CLEANUP=0
     meta="${STATE:-}/${ID:-}.meta"
@@ -800,18 +826,7 @@ spawn_abort_cleanup() {
     elif ! spawn_omp_abort_endpoint_stopped "$meta"; then
       echo "warning: OMP spawn cleanup could not confirm its owned endpoint stopped; preserving its worktree and task artifacts" >&2
     else
-      sleep 0.1
-      current_head=$(git -C "$WT" rev-parse HEAD 2>/dev/null || true)
-      dirty=$(git -C "$WT" status --porcelain 2>/dev/null || printf 'unreadable\n')
-      if [ -z "$OMP_ABORT_INITIAL_HEAD" ] || [ "$current_head" != "$OMP_ABORT_INITIAL_HEAD" ] || [ -n "$dirty" ]; then
-        echo "warning: OMP spawn cleanup stopped its endpoint but found work to preserve in $WT" >&2
-      elif treehouse return --force "$WT" >/dev/null 2>&1; then
-        rm -rf "${TASK_TMP:-}"
-        rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
-          "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" "$STATE/$ID.omp-started"
-      else
-        echo "warning: OMP spawn cleanup stopped its endpoint but could not return the unchanged worktree $WT" >&2
-      fi
+      spawn_omp_abort_clean_unchanged_worktree "OMP spawn cleanup stopped its endpoint but"
     fi
   fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
@@ -2024,7 +2039,7 @@ if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ] && [ -n "$PREWALK_INTO" ]; 
     exit 1
   }
   PREWALK_WORKTREE_READY=1
-  PREWALK_LEASE_CLEANUP=1
+  PREWALK_ABORT_PHASE=lease
   validate_spawn_worktree "treehouse lease" "$W"
   freshen_spawn_worktree_base "$WT" || exit 1
   validate_omp_prewalk_for_launch_dir "$WT"
@@ -2261,7 +2276,7 @@ EOF
     T="$ORCA_TERMINAL"
     ;;
 esac
-PREWALK_LEASE_CLEANUP=0
+[ "$PREWALK_ABORT_PHASE" != lease ] || PREWALK_ABORT_PHASE=endpoint
 if [ "$KIND" = secondmate ]; then
   FM_INHERITABLE_CONFIG=trace-context \
     propagate_inheritable_config "$CONFIG" "$PROJ_ABS/config" \
@@ -2789,7 +2804,10 @@ META_WINDOW=$T
   fi
 } > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
-[ "$HARNESS" != omp ] || OMP_ABORT_CLEANUP=1
+if [ "$HARNESS" = omp ]; then
+  OMP_ABORT_CLEANUP=1
+  PREWALK_ABORT_PHASE=none
+fi
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
