@@ -383,7 +383,7 @@ fm_send_close_resolved_keys() {  # <answer-text>
       printf -v quoted_line '%q' "$FM_SEND_RESOLVED_LINE"
       printf -v quoted_status '%q' "$RESOLVE_STATUS_FILE"
       echo "error: the answer was delivered to $T, but decision key '$k' could not be closed in $RESOLVE_STATUS_FILE." >&2
-      echo "manual close: printf '%s\\n' $quoted_line >> $quoted_status" >&2
+      printf '%s\n' "manual close: printf '%s\\n' $quoted_line >> $quoted_status" >&2
       failed=1
     fi
   done
