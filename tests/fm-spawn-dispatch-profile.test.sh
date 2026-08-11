@@ -149,11 +149,15 @@ SH
 #!/usr/bin/env bun
 case "${1:-}" in
   --help)
-    printf '%s\n' '--model=<value>' '--thinking=<value>' '--auto-approve' '--session-dir=<value>' '-e, --extension=<value>' '-r, --resume=<value>' '--prewalk native-switch' '--prewalk-into=<value>'
+    printf '%s\n' '--model=<value>' '--thinking=<value>' '--auto-approve' '--session-dir=<value>' '-e, --extension=<value>' '-r, --resume=<value>' '--prewalk native-switch' '--prewalk-into=<value>' '--no-prewalk'
     ;;
   --version) printf 'omp/17.2.11\n' ;;
   models)
-    printf '%s\n' '{"models":[{"provider":"openai-codex","id":"gpt-5.6-sol","selector":"openai-codex/gpt-5.6-sol","thinking":["low","medium","high","xhigh","max"]},{"provider":"openai-codex","id":"gpt-5.6-luna","selector":"openai-codex/gpt-5.6-luna","thinking":["low","medium","high","xhigh","max"]}]}'
+    if [ -f .omp-project-colon-model ]; then
+      printf '%s\n' '{"models":[{"provider":"ollama","id":"gemma3:12b","selector":"ollama/gemma3:12b","thinking":[]}]}'
+    else
+      printf '%s\n' '{"models":[{"provider":"openai-codex","id":"gpt-5.6-sol","selector":"openai-codex/gpt-5.6-sol","thinking":["low","medium","high","xhigh","max"]},{"provider":"openai-codex","id":"gpt-5.6-luna","selector":"openai-codex/gpt-5.6-luna","thinking":["low","medium","high","xhigh","max"]}]}'
+    fi
     ;;
   *) exit 0 ;;
 esac
@@ -784,14 +788,36 @@ test_omp_unusable_prewalk_target_keeps_full_starting_model_trajectory() {
   assert_contains "$out" "continuing the full trajectory on starting model 'openai-codex/gpt-5.6-sol' without prewalk" \
     "unusable OMP Prewalk target did not explain the safe full-trajectory fallback"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--model 'openai-codex/gpt-5.6-sol' --thinking 'xhigh' -e" \
+  assert_contains "$launch" "--model 'openai-codex/gpt-5.6-sol' --thinking 'xhigh' --no-prewalk -e" \
     "unusable Prewalk target did not preserve the frontier starting model"
-  assert_not_contains "$launch" "--prewalk" \
-    "unusable OMP target still enabled Prewalk"
+  assert_not_contains "$launch" "--prewalk --prewalk-into" \
+    "unusable OMP target still enabled native Prewalk"
   assert_no_grep '^prewalk_into=' "$HOME_DIR/state/$id.meta" \
     "unusable OMP target was recorded as an enabled Prewalk target"
   unset FM_TEST_OMP_ACK
   pass "unusable OMP Prewalk targets warn and keep the full starting-model trajectory"
+}
+
+test_omp_prewalk_accepts_colon_selector_from_launch_project_catalog() {
+  local rec id out status launch target
+  id=$(profile_id profile-omp-prewalk-colon-z8ot)
+  rec=$(make_spawn_case profile-omp-prewalk-colon omp "$id")
+  read_case_record "$rec"
+  touch "$PROJ_DIR/.omp-project-colon-model"
+  export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
+  target=ollama/gemma3:12b
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+  status=$?
+  expect_code 0 "$status" "a colon-bearing selector from the launch project catalog should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--prewalk --prewalk-into='$target'" \
+    "OMP split a native colon-bearing selector as an effort suffix"
+  assert_grep "prewalk_into=$target" "$HOME_DIR/state/$id.meta" \
+    "OMP did not record the project-scoped colon-bearing selector"
+  unset FM_TEST_OMP_ACK
+  pass "OMP validates native colon selectors in the launch project catalog"
 }
 
 test_non_omp_prewalk_refuses_without_changing_normal_claude_launch() {
@@ -1195,6 +1221,7 @@ test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_omp_threads_exact_identity_model_and_every_thinking_level
 test_omp_prewalk_threads_native_target_and_metadata
 test_omp_unusable_prewalk_target_keeps_full_starting_model_trajectory
+test_omp_prewalk_accepts_colon_selector_from_launch_project_catalog
 test_non_omp_prewalk_refuses_without_changing_normal_claude_launch
 test_omp_herdr_worker_and_scout_launch_with_exact_identity_and_ack
 test_omp_refuses_unverified_backends_before_endpoint_creation

@@ -70,7 +70,8 @@ if (process.argv.includes("--hold")) {
 --session-dir=path
 --resume=path
 --prewalk native switch
---prewalk-into=<value>`);
+--prewalk-into=<value>
+--no-prewalk`);
 JS
   chmod +x "$FAKEBIN/omp"
   TEST_OMP_BIN=$(fm_test_realpath "$FAKEBIN/omp")

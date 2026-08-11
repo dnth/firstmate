@@ -250,6 +250,7 @@ HARNESS_ARG=
 MODEL=
 EFFORT=
 PREWALK_INTO=
+PREWALK_DISABLED=0
 SECONDMATE_MODEL_SOURCE=
 SECONDMATE_FALLBACK_REASON=
 BACKEND_ARG=
@@ -1155,24 +1156,7 @@ if [ "$HARNESS" = pi-signed ] && ! command -v pi-signed >/dev/null 2>&1; then
   exit 1
 fi
 omp_prewalk_target_problem() {
-  local binary=$1 target=$2 selector=$2 effort='' help catalog
-  case "$target" in
-    *:*)
-      selector=${target%:*}
-      effort=${target##*:}
-      ;;
-  esac
-  [ -n "$selector" ] || {
-    printf '%s\n' "the model selector is empty"
-    return
-  }
-  case "$effort" in
-    ''|off|minimal|low|medium|high|xhigh|max|auto) ;;
-    *)
-      printf '%s\n' "effort suffix '$effort' is not recognized by OMP"
-      return
-      ;;
-  esac
+  local binary=$1 target=$2 launch_dir=$3 selector=$2 effort='' suffix help catalog
   command -v jq >/dev/null 2>&1 || {
     printf '%s\n' "jq is unavailable, so the OMP model catalog cannot be checked"
     return
@@ -1182,18 +1166,40 @@ omp_prewalk_target_problem() {
     return
   fi
   if ! printf '%s\n' "$help" | grep -F -- '--prewalk ' >/dev/null 2>&1 \
-    || ! printf '%s\n' "$help" | grep -F -- '--prewalk-into=' >/dev/null 2>&1; then
-    printf '%s\n' "the selected OMP executable does not expose native --prewalk and --prewalk-into flags"
+    || ! printf '%s\n' "$help" | grep -F -- '--prewalk-into=' >/dev/null 2>&1 \
+    || ! printf '%s\n' "$help" | grep -F -- '--no-prewalk' >/dev/null 2>&1; then
+    printf '%s\n' "the selected OMP executable does not expose native --prewalk, --prewalk-into, and --no-prewalk flags"
     return
   fi
-  if ! catalog=$("$binary" models --json 2>/dev/null); then
+  if ! catalog=$(cd "$launch_dir" && "$binary" models --json 2>/dev/null); then
     printf '%s\n' "the OMP model catalog could not be read"
     return
   fi
+  if ! printf '%s\n' "$catalog" | jq -e '.models | type == "array"' >/dev/null 2>&1; then
+    printf '%s\n' "the OMP model catalog has no usable models array"
+    return
+  fi
+  if printf '%s\n' "$catalog" | jq -e --arg selector "$target" \
+    'any(.models[]; .selector == $selector)' >/dev/null 2>&1; then
+    return
+  fi
+  case "$target" in
+    *:*)
+      suffix=${target##*:}
+      case "$suffix" in
+        off|minimal|low|medium|high|xhigh|max|auto)
+          selector=${target%:*}
+          effort=$suffix
+          ;;
+      esac
+      ;;
+  esac
+  [ -n "$selector" ] || {
+    printf '%s\n' "the model selector is empty"
+    return
+  }
   if ! printf '%s\n' "$catalog" | jq -e --arg selector "$selector" '
-      .models as $models
-      | ($models | type) == "array"
-        and any($models[]; .selector == $selector)
+      any(.models[]; .selector == $selector)
     ' >/dev/null 2>&1; then
     printf '%s\n' "model '$selector' is not listed by OMP"
     return
@@ -1242,13 +1248,6 @@ if [ "$HARNESS" = omp ]; then
      || ! fm_omp_process_identity_path_valid "$OMP_BUN_CANON"; then
     echo "error: selected OMP and Bun identities must be canonical executable paths without whitespace" >&2
     exit 1
-  fi
-  if [ -n "$PREWALK_INTO" ]; then
-    OMP_PREWALK_PROBLEM=$(omp_prewalk_target_problem "$OMP_BIN_CANON" "$PREWALK_INTO")
-    if [ -n "$OMP_PREWALK_PROBLEM" ]; then
-      echo "warning: OMP prewalk target '$PREWALK_INTO' will not be used: $OMP_PREWALK_PROBLEM; continuing the full trajectory on starting model '${MODEL:-default}' without prewalk" >&2
-      PREWALK_INTO=
-    fi
   fi
   if [ "$KIND" = secondmate ]; then
     OMP_PRIOR_META="$STATE/$ID.meta"
@@ -1399,9 +1398,13 @@ effort_flag_for_harness() {
   esac
 }
 prewalk_flag_for_harness() {
-  local harness=$1 target=$2
-  [ -n "$target" ] || return 0
+  local harness=$1 target=$2 disabled=$3
   [ "$harness" = omp ] || return 0
+  if [ "$disabled" = 1 ]; then
+    printf '%s' '--no-prewalk '
+    return
+  fi
+  [ -n "$target" ] || return 0
   printf -- '--prewalk --prewalk-into=%s ' "$(shell_quote "$target")"
 }
 
@@ -1715,6 +1718,15 @@ else
   BRIEF="$DATA/$ID/brief.md"
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
+
+if [ "$HARNESS" = omp ] && [ -n "$PREWALK_INTO" ]; then
+  OMP_PREWALK_PROBLEM=$(omp_prewalk_target_problem "$OMP_BIN_CANON" "$PREWALK_INTO" "$PROJ_ABS")
+  if [ -n "$OMP_PREWALK_PROBLEM" ]; then
+    echo "warning: OMP prewalk target '$PREWALK_INTO' will not be used: $OMP_PREWALK_PROBLEM; continuing the full trajectory on starting model '${MODEL:-default}' without prewalk" >&2
+    PREWALK_INTO=
+    PREWALK_DISABLED=1
+  fi
+fi
 
 delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
   case "$1" in
@@ -2700,7 +2712,7 @@ sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
-PREWALKFLAG=$(prewalk_flag_for_harness "$HARNESS" "$PREWALK_INTO")
+PREWALKFLAG=$(prewalk_flag_for_harness "$HARNESS" "$PREWALK_INTO" "$PREWALK_DISABLED")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__PREWALKFLAG__/$PREWALKFLAG}
