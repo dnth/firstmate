@@ -251,6 +251,16 @@ Its `remove` action excises only the marker-delimited Firstmate region and remov
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 For OMP secondmate launches, it explicitly loads that home's `.omp/extensions/fm-primary-omp.ts`, keeps exact resume state under `state/omp-sessions`, and publishes `state/.omp-session` only after the adapter binds the selected conversation.
 
+## OMP project extensions
+
+OMP discovers native project extensions from the launch cwd's `.omp/extensions` directory, separately from its profile-scoped home extensions.
+The installed OMP 17.2.11 discovery surface loads top-level `.ts` and `.js` files, one-level `index.ts` and `index.js` entries, and extension manifests that declare `omp.extensions` or `pi.extensions`.
+Those project files execute before the worker reasons about its brief, and Firstmate launches OMP with `--auto-approve`.
+`fm-spawn.sh` therefore refuses an OMP crewmate or secondmate launch when the final project worktree contains git-tracked auto-executed `.omp/extensions` entries.
+The successful OMP task metadata records `allow_project_omp_extensions=1` whenever that override is passed.
+The exact tracked Firstmate primary extension at `.omp/extensions/fm-primary-omp.ts` is excluded only when its contents match Firstmate's own copy, so the home-root integration injected with `-e` remains unaffected.
+Other harnesses do not run this preflight because they do not auto-execute OMP project extensions.
+
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.

@@ -163,6 +163,35 @@ openai-codex/gpt-5.6-luna	low,medium,high,xhigh,max
 
 The zero-exit help parse confirms that the CLI accepts the `:xhigh` effort suffix on the Prewalk target, while the model catalog independently confirms that GPT-5.6 Luna supports xhigh.
 This evidence covers launch parsing and catalog validation only; it does not claim a live model handoff.
+### OMP project-extension discovery
+
+The project-extension launch surface was verified on 2026-08-12 against OMP 17.2.11.
+The CLI identifies `--extension` as an explicit extension-file load and separately enables extension discovery unless `--no-extensions` is passed.
+The installed source resolves project extension directories from the launch cwd and loads the supported top-level files, one-level index entries, and declared extension manifests before the session starts.
+The source also resolves profile-scoped extensions from the OMP home, which is a separate surface from the project worktree.
+
+```sh
+omp --version
+omp --help
+tests/fm-spawn-dispatch-profile.test.sh
+tests/fm-omp-secondmate.test.sh
+```
+
+Observed bounded output:
+
+```text
+omp/17.2.11
+--extension=<value>             Load an extension file (can be used multiple times)
+--no-extensions                 Disable extension discovery (explicit -e paths still work)
+ok - OMP refuses tracked project extensions without explicit opt-in
+ok - OMP allows tracked project extensions only with an auditable opt-in
+ok - OMP projects without tracked extensions launch unchanged
+ok - OMP secondmate launch and recovery use the isolated adapter and an exact home-owned session pointer
+```
+
+The deterministic spawn checks prove that an OMP launch refuses a git-tracked project extension without the explicit override, records the override when passed, and leaves projects without tracked extensions unchanged.
+The secondmate integration checks prove that the exact Firstmate primary extension remains loadable from the persistent home without being treated as untrusted project code.
+
 The Herdr role matrix required each expected turn-end or routed-reply notification to reach the durable queue or the primary follow-up transcript before the fixture drained it.
 
 The deterministic tmux and Herdr fixtures reran on 2026-08-09 and proved that an already-busy OMP send returns `queued-unconfirmed` only after Enter transport succeeds, without reading a rendered steering count, while Enter transport failure returns `send-failed` and initially idle editable input remains pending and fails closed.

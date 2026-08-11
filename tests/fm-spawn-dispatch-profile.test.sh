@@ -274,6 +274,22 @@ make_seeded_secondmate_home() {
   printf '%s\n' "$id" > "$home/.fm-secondmate-home"
   printf 'charter for %s\n' "$id" > "$home/data/charter.md"
 }
+commit_project_omp_extension() {
+  local proj=$1 wt=$2 source=${3:-} branch
+  mkdir -p "$proj/.omp/extensions"
+  if [ -n "$source" ]; then
+    cp "$source" "$proj/.omp/extensions/fm-primary-omp.ts"
+  else
+    printf '%s\n' 'throw new Error("project extension executed");' > "$proj/.omp/extensions/project.ts"
+  fi
+  git -C "$proj" add .omp/extensions
+  git -C "$proj" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'add omp extension'
+  branch=$(git -C "$proj" branch --show-current)
+  git -C "$proj" push -q origin "$branch"
+  git -C "$wt" fetch -q origin
+  git -C "$wt" merge --ff-only "origin/$branch" >/dev/null
+}
 
 run_spawn() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4 endpointlog treehouselog herdrpaneflag rc meta tasktmp
@@ -1427,6 +1443,77 @@ test_omp_ack_cleanup_preserves_artifacts_when_ownership_changes() {
   rm -rf "/tmp/fm-$id"
   pass "OMP spawn abort preserves endpoint, worktree, and artifacts unless ownership is proven"
 }
+test_omp_refuses_tracked_project_extensions_without_opt_in() {
+  local rec id out status
+  id=$(profile_id profile-omp-project-ext-refuse-z20)
+  rec=$(make_spawn_case profile-omp-project-ext-refuse omp "$id")
+  read_case_record "$rec"
+  commit_project_omp_extension "$PROJ_DIR" "$WT_DIR"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "OMP spawn with tracked project extension should refuse without opt-in"
+  assert_contains "$out" ".omp/extensions/project.ts" \
+    "OMP refusal did not name the tracked project extension"
+  assert_contains "$out" "--allow-project-omp-extensions" \
+    "OMP refusal did not explain the explicit opt-in"
+  assert_no_grep 'new-window|new-session' "$CASE_DIR/endpoint.log" \
+    "OMP project-extension refusal created an endpoint"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] \
+    || fail "OMP project-extension refusal published task metadata"
+  pass "OMP refuses tracked project extensions without explicit opt-in"
+}
+
+test_omp_allows_tracked_project_extensions_with_audited_opt_in() {
+  local rec id out status
+  id=$(profile_id profile-omp-project-ext-allow-z21)
+  rec=$(make_spawn_case profile-omp-project-ext-allow omp "$id")
+  read_case_record "$rec"
+  commit_project_omp_extension "$PROJ_DIR" "$WT_DIR"
+
+  out=$(FM_TEST_OMP_DYNAMIC_ACK=1 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+      --allow-project-omp-extensions)
+  status=$?
+  expect_code 0 "$status" "OMP spawn with explicit project-extension opt-in should succeed"
+  assert_contains "$out" "spawned $id harness=omp" \
+    "OMP opt-in spawn did not launch the worker"
+  assert_grep 'allow_project_omp_extensions=1' "$HOME_DIR/state/$id.meta" \
+    "OMP opt-in was not recorded in task metadata"
+  pass "OMP allows tracked project extensions only with an auditable opt-in"
+}
+
+test_omp_project_without_tracked_extensions_is_unchanged() {
+  local rec id out status
+  id=$(profile_id profile-omp-project-ext-clean-z22)
+  rec=$(make_spawn_case profile-omp-project-ext-clean omp "$id")
+  read_case_record "$rec"
+
+  out=$(FM_TEST_OMP_DYNAMIC_ACK=1 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "OMP spawn without project extensions should remain unchanged"
+  assert_contains "$out" "spawned $id harness=omp" \
+    "OMP spawn without project extensions did not launch the worker"
+  assert_no_grep 'allow_project_omp_extensions=' "$HOME_DIR/state/$id.meta" \
+    "clean OMP spawn recorded an opt-in that was not passed"
+  pass "OMP projects without tracked extensions launch unchanged"
+}
+
+test_non_omp_ignores_tracked_project_extensions() {
+  local rec id out status
+  id=$(profile_id profile-claude-project-ext-z24)
+  rec=$(make_spawn_case profile-claude-project-ext claude "$id")
+  read_case_record "$rec"
+  commit_project_omp_extension "$PROJ_DIR" "$WT_DIR"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "non-OMP spawn should ignore tracked OMP project extensions"
+  assert_contains "$out" "spawned $id harness=claude" \
+    "non-OMP spawn did not launch with a tracked OMP project extension"
+  pass "non-OMP harnesses ignore tracked OMP project extensions"
+}
 
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   local rec id sm out status launch
@@ -1605,6 +1692,10 @@ test_omp_launch_requires_observable_turn_start_acknowledgement
 test_omp_herdr_unacked_launch_cleans_owned_endpoint_worktree_and_artifacts
 test_omp_herdr_refused_close_preserves_worktree_and_artifacts
 test_omp_ack_cleanup_preserves_artifacts_when_ownership_changes
+test_omp_refuses_tracked_project_extensions_without_opt_in
+test_omp_allows_tracked_project_extensions_with_audited_opt_in
+test_omp_project_without_tracked_extensions_is_unchanged
+test_non_omp_ignores_tracked_project_extensions
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags
 test_batch_forwards_omp_prewalk_target
