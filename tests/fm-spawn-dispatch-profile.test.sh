@@ -62,6 +62,10 @@ case "${1:-}" in
         *Enter*)
           if grep -Fq 'FM_OMP_HARNESS=omp' "$FM_FAKE_LAUNCH_LOG" 2>/dev/null; then
             [ -z "${FM_FAKE_OMP_ACK:-}" ] || : > "$FM_FAKE_OMP_ACK"
+            if [ "${FM_FAKE_OMP_DYNAMIC_ACK:-0}" = 1 ]; then
+              ack=$(tail -n 1 "$FM_FAKE_LAUNCH_LOG" | sed -n "s/.* -e '\([^']*\)\.omp-ext\.ts'.*/\1.omp-started/p")
+              [ -z "$ack" ] || : > "$ack"
+            fi
             if [ -n "${FM_FAKE_OMP_META_TAMPER:-}" ]; then
               cp "$FM_FAKE_OMP_META_TAMPER" "$FM_FAKE_OMP_META_TAMPER.test-owner"
               printf 'window=unrelated:retry\n' > "$FM_FAKE_OMP_META_TAMPER"
@@ -292,6 +296,7 @@ run_spawn() {
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_ENDPOINT_LOG="$endpointlog" \
     FM_FAKE_TREEHOUSE_LOG="$treehouselog" FM_FAKE_OMP_ACK="${FM_TEST_OMP_ACK:-}" \
+    FM_FAKE_OMP_DYNAMIC_ACK="${FM_TEST_OMP_DYNAMIC_ACK:-0}" \
     FM_FAKE_OMP_NO_PREWALK="${FM_TEST_OMP_NO_PREWALK:-1}" \
     FM_FAKE_OMP_PREWALK_ENABLED="${FM_TEST_OMP_PREWALK_ENABLED:-false}" \
     FM_FAKE_OMP_CATALOG_DIR="${FM_TEST_OMP_CATALOG_DIR:-}" \
@@ -1464,6 +1469,32 @@ test_batch_forwards_shared_profile_flags() {
   pass "batch dispatch forwards shared --harness, --model, and --effort to every pair"
 }
 
+test_batch_forwards_omp_prewalk_target() {
+  local rec id1 id2 out status target
+  id1=$(profile_id profile-batch-prewalk-a-z11)
+  id2=$(profile_id profile-batch-prewalk-b-z12)
+  rec=$(make_spawn_case profile-batch-prewalk omp "$id1" "$id2")
+  read_case_record "$rec"
+  target=openai-codex/gpt-5.6-luna:xhigh
+  export FM_TEST_OMP_DYNAMIC_ACK=1
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness omp \
+    --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+  status=$?
+  unset FM_TEST_OMP_DYNAMIC_ACK
+  expect_code 0 "$status" "batch OMP spawn with a shared Prewalk target should succeed"
+  assert_contains "$out" "spawned $id1 harness=omp" "first batch task did not use OMP"
+  assert_contains "$out" "spawned $id2 harness=omp" "second batch task did not use OMP"
+  assert_grep "prewalk_into=$target" "$HOME_DIR/state/$id1.meta" \
+    "first batch task did not record the shared Prewalk target"
+  assert_grep "prewalk_into=$target" "$HOME_DIR/state/$id2.meta" \
+    "second batch task did not record the shared Prewalk target"
+  [ "$(grep -Fc -- "--prewalk --prewalk-into='$target'" "$LAUNCH_LOG")" = 2 ] \
+    || fail "batch OMP launch did not forward the native Prewalk target exactly twice"
+  pass "batch dispatch forwards the shared OMP Prewalk target to every pair"
+}
+
 test_claude_forwards_firstmate_config_dir_when_set() {
   local rec id out status launch
   id=$(profile_id profile-claude-cfgdir-z17)
@@ -1576,6 +1607,7 @@ test_omp_herdr_refused_close_preserves_worktree_and_artifacts
 test_omp_ack_cleanup_preserves_artifacts_when_ownership_changes
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags
+test_batch_forwards_omp_prewalk_target
 test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir
