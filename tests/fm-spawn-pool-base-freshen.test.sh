@@ -207,6 +207,26 @@ test_dirty_pool_refuses_without_discarding_work() {
   pass "a dirty pooled worktree is refused without discarding its local work"
 }
 
+test_post_merge_hook_dirtiness_refuses_launch() {
+  local rec id out status hook
+  id='pool-post-merge-dirty-r4'
+  rec=$(make_case post-merge-dirty "$id")
+  read_case_record "$rec"
+  hook=$(git -C "$POOL_DIR" rev-parse --git-path hooks/post-merge)
+  mkdir -p "$(dirname "$hook")"
+  printf '#!/usr/bin/env bash\nprintf "created after merge\\n" > post-merge-dirty.txt\n' > "$hook"
+  chmod +x "$hook"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded after its fast-forward left the pooled worktree dirty"
+  assert_contains "$out" "is not clean after refreshing its base" \
+    "spawn did not clearly refuse post-fast-forward dirtiness"
+  assert_grep 'created after merge' "$POOL_DIR/post-merge-dirty.txt" \
+    "fixture did not prove the post-merge hook dirtied the pooled worktree"
+  pass "post-fast-forward dirtiness refuses launch"
+}
+
 test_diverged_pool_refuses_without_discarding_commits() {
   local rec id out status before
   id='pool-diverged-refusal-r5'
@@ -254,6 +274,7 @@ test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
+test_post_merge_hook_dirtiness_refuses_launch
 test_diverged_pool_refuses_without_discarding_commits
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base

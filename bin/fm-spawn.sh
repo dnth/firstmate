@@ -113,6 +113,8 @@
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
+#   Before a secondmate launch, the home is locally fast-forwarded to the primary
+#   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and fast-forwards to its tip.
 #   An unreachable origin, unresolved default branch, dirty worktree, or
@@ -1734,6 +1736,14 @@ freshen_spawn_worktree_base() {  # <worktree>
     echo "error: could not fast-forward pooled worktree '$worktree' to '$target'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
+  status=$(git -C "$worktree" status --porcelain) || {
+    echo "error: could not inspect pooled worktree '$worktree' after refreshing its base" >&2
+    return 1
+  }
+  if [ -n "$status" ]; then
+    echo "error: pooled worktree '$worktree' is not clean after refreshing its base; refusing to launch" >&2
+    return 1
+  fi
   actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
   if [ "$actual" != "$expected" ]; then
     echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current '$target' ('$expected'); refusing to launch" >&2
@@ -2192,7 +2202,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 
   validate_spawn_worktree "treehouse get" "$T"
 fi
-if [ "$KIND" != secondmate ]; then
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 
