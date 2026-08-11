@@ -251,9 +251,9 @@ MODEL=
 EFFORT=
 PREWALK_INTO=
 PREWALK_DISABLED=0
+PREWALK_ENABLE_SUPPORTED=0
 PREWALK_DISABLE_SUPPORTED=0
-PREWALK_CONFIG_SUPPORTED=0
-PREWALK_DISABLE_CONFIG=
+OMP_PREWALK_FLAG_PROBLEM=
 SECONDMATE_MODEL_SOURCE=
 SECONDMATE_FALLBACK_REASON=
 BACKEND_ARG=
@@ -1158,27 +1158,30 @@ if [ "$HARNESS" = pi-signed ] && ! command -v pi-signed >/dev/null 2>&1; then
   echo "error: pi-signed executable not found on PATH; install the signed Pi wrapper or select a different verified harness" >&2
   exit 1
 fi
-omp_prewalk_target_problem() {
-  local binary=$1 target=$2 launch_dir=$3 selector=$2 effort='' suffix help catalog
-  OMP_PREWALK_PROBLEM=
+omp_prewalk_probe_flags() {
+  local binary=$1 help
+  OMP_PREWALK_FLAG_PROBLEM=
+  PREWALK_ENABLE_SUPPORTED=0
   PREWALK_DISABLE_SUPPORTED=0
-  PREWALK_CONFIG_SUPPORTED=0
   if ! help=$("$binary" --help 2>&1); then
-    OMP_PREWALK_PROBLEM="the selected OMP executable could not report its launch flags"
+    OMP_PREWALK_FLAG_PROBLEM="the selected OMP executable could not report its launch flags"
     return
   fi
   if printf '%s\n' "$help" | grep -F -- '--no-prewalk' >/dev/null 2>&1; then
     PREWALK_DISABLE_SUPPORTED=1
   fi
-  if printf '%s\n' "$help" | grep -F -- '--config=' >/dev/null 2>&1; then
-    PREWALK_CONFIG_SUPPORTED=1
+  if printf '%s\n' "$help" | grep -F -- '--prewalk ' >/dev/null 2>&1 \
+    && printf '%s\n' "$help" | grep -F -- '--prewalk-into=' >/dev/null 2>&1; then
+    PREWALK_ENABLE_SUPPORTED=1
+  else
+    OMP_PREWALK_FLAG_PROBLEM="the selected OMP executable does not expose native --prewalk and --prewalk-into flags"
   fi
-  if ! printf '%s\n' "$help" | grep -F -- '--prewalk ' >/dev/null 2>&1 \
-    || ! printf '%s\n' "$help" | grep -F -- '--prewalk-into=' >/dev/null 2>&1 \
-    || [ "$PREWALK_DISABLE_SUPPORTED" != 1 ]; then
-    OMP_PREWALK_PROBLEM="the selected OMP executable does not expose native --prewalk, --prewalk-into, and --no-prewalk flags"
-    return
-  fi
+}
+
+omp_prewalk_target_problem() {
+  local binary=$1 target=$2 launch_dir=$3 selector=$2 effort='' suffix catalog
+  OMP_PREWALK_PROBLEM=$OMP_PREWALK_FLAG_PROBLEM
+  [ "$PREWALK_ENABLE_SUPPORTED" = 1 ] || return
   command -v jq >/dev/null 2>&1 || {
     OMP_PREWALK_PROBLEM="jq is unavailable, so the OMP model catalog cannot be checked"
     return
@@ -1226,19 +1229,65 @@ omp_prewalk_target_problem() {
   fi
 }
 
+omp_prewalk_setting_state() {
+  local binary=$1 launch_dir=$2 output value
+  if ! output=$(cd "$launch_dir" && "$binary" config get prewalk.enabled --json 2>/dev/null); then
+    printf '%s\n' unknown
+    return
+  fi
+  value=$(printf '%s\n' "$output" | jq -r '
+    if .key == "prewalk.enabled" and (.value | type) == "boolean"
+    then (.value | tostring)
+    else "unknown"
+    end
+  ' 2>/dev/null || printf '%s\n' unknown)
+  case "$value" in true|false) printf '%s\n' "$value" ;; *) printf '%s\n' unknown ;; esac
+}
+
 validate_omp_prewalk_for_launch_dir() {
-  local launch_dir=$1
+  local launch_dir=$1 setting_state
   [ -n "$PREWALK_INTO" ] || return 0
   omp_prewalk_target_problem "$OMP_BIN_CANON" "$PREWALK_INTO" "$launch_dir"
   if [ -n "$OMP_PREWALK_PROBLEM" ]; then
-    if [ "$PREWALK_DISABLE_SUPPORTED" != 1 ] && [ "$PREWALK_CONFIG_SUPPORTED" != 1 ]; then
-      echo "error: OMP prewalk target '$PREWALK_INTO' is unusable and the selected OMP executable exposes neither --no-prewalk nor --config, so the full starting-model trajectory cannot be guaranteed" >&2
-      exit 1
+    echo "warning: OMP prewalk target '$PREWALK_INTO' will not be used: $OMP_PREWALK_PROBLEM" >&2
+    if [ "$PREWALK_DISABLE_SUPPORTED" = 1 ]; then
+      PREWALK_DISABLED=1
+    else
+      setting_state=$(omp_prewalk_setting_state "$OMP_BIN_CANON" "$launch_dir")
+      case "$setting_state" in
+        false) PREWALK_DISABLED=0 ;;
+        true)
+          echo "error: OMP prewalk.enabled=true in $launch_dir, but the selected OMP executable lacks --no-prewalk; use an OMP build with --no-prewalk or set prewalk.enabled=false before retrying" >&2
+          exit 1
+          ;;
+        *)
+          echo "error: OMP prewalk.enabled could not be read from $launch_dir and the selected OMP executable lacks --no-prewalk; use an OMP build with --no-prewalk or set prewalk.enabled=false before retrying" >&2
+          exit 1
+          ;;
+      esac
     fi
-    echo "warning: OMP prewalk target '$PREWALK_INTO' will not be used: $OMP_PREWALK_PROBLEM; continuing the full trajectory on starting model '${MODEL:-default}' without prewalk" >&2
+    echo "warning: continuing the full trajectory on starting model '${MODEL:-default}' without prewalk" >&2
     PREWALK_INTO=
-    PREWALK_DISABLED=1
   fi
+}
+
+preflight_omp_prewalk_without_disable() {
+  local launch_dir=$1 setting_state
+  omp_prewalk_target_problem "$OMP_BIN_CANON" "$PREWALK_INTO" "$launch_dir"
+  [ -n "$OMP_PREWALK_PROBLEM" ] || return 0
+  setting_state=$(omp_prewalk_setting_state "$OMP_BIN_CANON" "$launch_dir")
+  case "$setting_state" in
+    false) return 0 ;;
+    true)
+      echo "warning: OMP prewalk target '$PREWALK_INTO' will not be used: $OMP_PREWALK_PROBLEM" >&2
+      echo "error: OMP prewalk.enabled=true in $launch_dir, but the selected OMP executable lacks --no-prewalk; use an OMP build with --no-prewalk or set prewalk.enabled=false before retrying" >&2
+      exit 1
+      ;;
+    *)
+      echo "error: OMP prewalk.enabled could not be read from $launch_dir after Prewalk validation failed and the selected OMP executable lacks --no-prewalk; use an OMP build with --no-prewalk or set prewalk.enabled=false before retrying" >&2
+      exit 1
+      ;;
+  esac
 }
 OMP_BIN=
 OMP_BIN_CANON=
@@ -1275,6 +1324,9 @@ if [ "$HARNESS" = omp ]; then
      || ! fm_omp_process_identity_path_valid "$OMP_BUN_CANON"; then
     echo "error: selected OMP and Bun identities must be canonical executable paths without whitespace" >&2
     exit 1
+  fi
+  if [ -n "$PREWALK_INTO" ]; then
+    omp_prewalk_probe_flags "$OMP_BIN_CANON"
   fi
   if [ "$KIND" = secondmate ]; then
     OMP_PRIOR_META="$STATE/$ID.meta"
@@ -1425,14 +1477,10 @@ effort_flag_for_harness() {
   esac
 }
 prewalk_flag_for_harness() {
-  local harness=$1 target=$2 disabled=$3 disable_supported=$4 disable_config=$5
+  local harness=$1 target=$2 disabled=$3 disable_supported=$4
   [ "$harness" = omp ] || return 0
   if [ "$disabled" = 1 ] && [ "$disable_supported" = 1 ]; then
     printf '%s' '--no-prewalk '
-    return
-  fi
-  if [ "$disabled" = 1 ] && [ -n "$disable_config" ]; then
-    printf -- '--config %s ' "$(shell_quote "$disable_config")"
     return
   fi
   [ -n "$target" ] || return 0
@@ -1752,6 +1800,9 @@ fi
 
 if [ "$HARNESS" = omp ] && [ "$KIND" = secondmate ]; then
   validate_omp_prewalk_for_launch_dir "$PROJ_ABS"
+elif [ "$HARNESS" = omp ] && [ -n "$PREWALK_INTO" ] \
+  && [ "$PREWALK_DISABLE_SUPPORTED" != 1 ]; then
+  preflight_omp_prewalk_without_disable "$PROJ_ABS"
 fi
 
 delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
@@ -2375,11 +2426,6 @@ if [ -L "$TASK_TMP" ]; then
   exit 1
 fi
 mkdir -p "$TASK_TMP/gotmp"
-if [ "$HARNESS" = omp ] && [ "$PREWALK_DISABLED" = 1 ] \
-  && [ "$PREWALK_DISABLE_SUPPORTED" != 1 ]; then
-  PREWALK_DISABLE_CONFIG="$TASK_TMP/omp-no-prewalk.yml"
-  printf 'prewalk:\n  enabled: false\n' > "$PREWALK_DISABLE_CONFIG"
-fi
 if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
   OMP_SESSION_DIR="$TASK_TMP/omp-sessions"
   mkdir -p "$OMP_SESSION_DIR"
@@ -2746,7 +2792,7 @@ sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
-PREWALKFLAG=$(prewalk_flag_for_harness "$HARNESS" "$PREWALK_INTO" "$PREWALK_DISABLED" "$PREWALK_DISABLE_SUPPORTED" "$PREWALK_DISABLE_CONFIG")
+PREWALKFLAG=$(prewalk_flag_for_harness "$HARNESS" "$PREWALK_INTO" "$PREWALK_DISABLED" "$PREWALK_DISABLE_SUPPORTED")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__PREWALKFLAG__/$PREWALKFLAG}

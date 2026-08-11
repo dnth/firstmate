@@ -153,6 +153,9 @@ case "${1:-}" in
     [ "${FM_FAKE_OMP_NO_PREWALK:-1}" != 1 ] || printf '%s\n' '--no-prewalk'
     ;;
   --version) printf 'omp/17.2.11\n' ;;
+  config)
+    printf '{"key":"prewalk.enabled","value":%s,"type":"boolean"}\n' "${FM_FAKE_OMP_PREWALK_ENABLED:-false}"
+    ;;
   models)
     if [ -n "${FM_FAKE_OMP_CATALOG_DIR:-}" ] && [ "$PWD" = "$FM_FAKE_OMP_CATALOG_DIR" ]; then
       printf '%s\n' '{"models":[{"provider":"ollama","id":"gemma3:12b","selector":"ollama/gemma3:12b","thinking":[]}]}'
@@ -233,6 +236,7 @@ run_spawn() {
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_ENDPOINT_LOG="$endpointlog" \
     FM_FAKE_TREEHOUSE_LOG="$treehouselog" FM_FAKE_OMP_ACK="${FM_TEST_OMP_ACK:-}" \
     FM_FAKE_OMP_NO_PREWALK="${FM_TEST_OMP_NO_PREWALK:-1}" \
+    FM_FAKE_OMP_PREWALK_ENABLED="${FM_TEST_OMP_PREWALK_ENABLED:-false}" \
     FM_FAKE_OMP_CATALOG_DIR="${FM_TEST_OMP_CATALOG_DIR:-}" \
     FM_FAKE_HERDR_PANE_FLAG="$herdrpaneflag" \
     FM_FAKE_HERDR_REFUSE_CLOSE="${FM_TEST_HERDR_REFUSE_CLOSE:-0}" \
@@ -830,23 +834,63 @@ test_omp_prewalk_fallback_omits_unsupported_disable_flag() {
   read_case_record "$rec"
   export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
   export FM_TEST_OMP_NO_PREWALK=0
-  target=openai-codex/gpt-5.6-luna:xhigh
+  target=openai-codex/not-listed:xhigh
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
     --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
   status=$?
   expect_code 0 "$status" "fallback should not emit an unsupported native disable flag"
-  assert_contains "$out" "does not expose native --prewalk, --prewalk-into, and --no-prewalk flags" \
-    "missing native disable support did not produce a clear fallback warning"
+  assert_contains "$out" "model 'openai-codex/not-listed' is not listed by OMP" \
+    "invalid target did not produce a clear fallback warning"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--config '/tmp/fm-$id/omp-no-prewalk.yml'" \
-    "fallback did not explicitly disable configured Prewalk through OMP's supported config overlay"
   assert_not_contains "$launch" "--prewalk" \
     "fallback emitted a Prewalk flag that the selected OMP executable does not support"
   assert_no_grep '^prewalk_into=' "$HOME_DIR/state/$id.meta" \
     "unsupported native flags were recorded as an enabled Prewalk target"
   unset FM_TEST_OMP_NO_PREWALK FM_TEST_OMP_ACK
   pass "OMP fallback omits unsupported native disable flags"
+}
+
+test_omp_valid_prewalk_does_not_require_disable_flag() {
+  local rec id out status launch target
+  id=$(profile_id profile-omp-prewalk-enable-only-z8ov)
+  rec=$(make_spawn_case profile-omp-prewalk-enable-only omp "$id")
+  read_case_record "$rec"
+  export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
+  export FM_TEST_OMP_NO_PREWALK=0
+  export FM_TEST_OMP_PREWALK_ENABLED=true
+  target=openai-codex/gpt-5.6-luna:xhigh
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+  status=$?
+  expect_code 0 "$status" "valid native Prewalk should not require --no-prewalk support"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--prewalk --prewalk-into='$target'" \
+    "valid native Prewalk was suppressed because --no-prewalk was unavailable"
+  unset FM_TEST_OMP_PREWALK_ENABLED FM_TEST_OMP_NO_PREWALK FM_TEST_OMP_ACK
+  pass "valid OMP Prewalk does not require its disable flag"
+}
+
+test_omp_unsafe_fallback_refuses_before_endpoint() {
+  local rec id out status endpoint_log target
+  id=$(profile_id profile-omp-prewalk-unsafe-z8ow)
+  rec=$(make_spawn_case profile-omp-prewalk-unsafe omp "$id")
+  read_case_record "$rec"
+  endpoint_log="$CASE_DIR/endpoint.log"
+  export FM_TEST_OMP_NO_PREWALK=0
+  export FM_TEST_OMP_PREWALK_ENABLED=true
+  target=openai-codex/not-listed:xhigh
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+  status=$?
+  expect_code 1 "$status" "unsafe fallback should refuse before endpoint creation"
+  assert_contains "$out" "use an OMP build with --no-prewalk or set prewalk.enabled=false" \
+    "unsafe fallback refusal was not actionable"
+  [ ! -s "$endpoint_log" ] || fail "unsafe fallback created an endpoint before refusing"
+  unset FM_TEST_OMP_PREWALK_ENABLED FM_TEST_OMP_NO_PREWALK
+  pass "unsafe OMP fallback refuses before endpoint creation"
 }
 
 test_non_omp_prewalk_refuses_without_changing_normal_claude_launch() {
@@ -1252,6 +1296,8 @@ test_omp_prewalk_threads_native_target_and_metadata
 test_omp_unusable_prewalk_target_keeps_full_starting_model_trajectory
 test_omp_prewalk_accepts_colon_selector_from_launch_worktree_catalog
 test_omp_prewalk_fallback_omits_unsupported_disable_flag
+test_omp_valid_prewalk_does_not_require_disable_flag
+test_omp_unsafe_fallback_refuses_before_endpoint
 test_non_omp_prewalk_refuses_without_changing_normal_claude_launch
 test_omp_herdr_worker_and_scout_launch_with_exact_identity_and_ack
 test_omp_refuses_unverified_backends_before_endpoint_creation
