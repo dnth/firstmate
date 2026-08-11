@@ -149,9 +149,12 @@ SH
 #!/usr/bin/env bun
 case "${1:-}" in
   --help)
-    printf '%s\n' '--model=<value>' '--thinking=<value>' '--auto-approve' '--session-dir=<value>' '-e, --extension=<value>' '-r, --resume=<value>'
+    printf '%s\n' '--model=<value>' '--thinking=<value>' '--auto-approve' '--session-dir=<value>' '-e, --extension=<value>' '-r, --resume=<value>' '--prewalk native-switch' '--prewalk-into=<value>'
     ;;
-  --version) printf 'omp/17.1.8\n' ;;
+  --version) printf 'omp/17.2.11\n' ;;
+  models)
+    printf '%s\n' '{"models":[{"provider":"openai-codex","id":"gpt-5.6-sol","selector":"openai-codex/gpt-5.6-sol","thinking":["low","medium","high","xhigh","max"]},{"provider":"openai-codex","id":"gpt-5.6-luna","selector":"openai-codex/gpt-5.6-luna","thinking":["low","medium","high","xhigh","max"]}]}'
+    ;;
   *) exit 0 ;;
 esac
 SH
@@ -729,6 +732,9 @@ test_omp_threads_exact_identity_model_and_every_thinking_level() {
       "OMP launch did not execute the canonical Bun/OMP pair with unattended mode, model, thinking, and extension"
     assert_grep "omp_bun=$expected_bun" "$HOME_DIR/state/$id.meta" \
       "OMP launch metadata did not bind the same Bun executable used by the literal pane command"
+    assert_not_contains "$launch" "--prewalk" "ordinary OMP launch must not enable Prewalk without explicit opt-in"
+    assert_no_grep '^prewalk_into=' "$HOME_DIR/state/$id.meta" \
+      "ordinary OMP metadata must not add a prewalk target"
     [ "$(grep -Fo "encode launch-brief" "$LAUNCH_LOG" | wc -l | tr -d ' ')" = 1 ] \
       || fail "OMP launch did not deliver exactly one positional launch brief"
     assert_present "$HOME_DIR/state/$id.omp-ext.ts" "OMP launch did not create the external turn extension"
@@ -737,18 +743,103 @@ test_omp_threads_exact_identity_model_and_every_thinking_level() {
   pass "OMP launches through its metadata-bound canonical Bun/OMP pair and forwards every supported thinking level"
 }
 
+test_omp_prewalk_threads_native_target_and_metadata() {
+  local rec id out status launch target
+  id=$(profile_id profile-omp-prewalk-z8op)
+  rec=$(make_spawn_case profile-omp-prewalk omp "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
+  target=openai-codex/gpt-5.6-luna:xhigh
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness omp --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+  status=$?
+  expect_code 0 "$status" "OMP spawn with a valid native Prewalk target should succeed"
+  assert_contains "$out" "spawned $id harness=omp kind=ship" \
+    "OMP Prewalk spawn did not preserve exact OMP identity"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--model 'openai-codex/gpt-5.6-sol' --thinking 'xhigh' --prewalk --prewalk-into='$target' -e" \
+    "OMP launch did not thread the native Prewalk flags after its starting model and thinking level"
+  assert_grep "prewalk_into=$target" "$HOME_DIR/state/$id.meta" \
+    "OMP Prewalk metadata did not record the exact effort-qualified target"
+  unset FM_TEST_OMP_ACK
+  pass "OMP profiles opt into native Prewalk with an effort-qualified target"
+}
+
+test_omp_unusable_prewalk_target_keeps_full_starting_model_trajectory() {
+  local rec id out status launch target
+  id=$(profile_id profile-omp-prewalk-invalid-z8oq)
+  rec=$(make_spawn_case profile-omp-prewalk-invalid omp "$id")
+  read_case_record "$rec"
+  export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
+  target=openai-codex/not-listed:xhigh
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+  status=$?
+  expect_code 0 "$status" "an unusable Prewalk target should keep the full starting-model launch"
+  assert_contains "$out" "warning: OMP prewalk target '$target' will not be used" \
+    "unusable OMP Prewalk target did not produce a clear warning"
+  assert_contains "$out" "continuing the full trajectory on starting model 'openai-codex/gpt-5.6-sol' without prewalk" \
+    "unusable OMP Prewalk target did not explain the safe full-trajectory fallback"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--model 'openai-codex/gpt-5.6-sol' --thinking 'xhigh' -e" \
+    "unusable Prewalk target did not preserve the frontier starting model"
+  assert_not_contains "$launch" "--prewalk" \
+    "unusable OMP target still enabled Prewalk"
+  assert_no_grep '^prewalk_into=' "$HOME_DIR/state/$id.meta" \
+    "unusable OMP target was recorded as an enabled Prewalk target"
+  unset FM_TEST_OMP_ACK
+  pass "unusable OMP Prewalk targets warn and keep the full starting-model trajectory"
+}
+
+test_non_omp_prewalk_refuses_without_changing_normal_claude_launch() {
+  local rec bad_id normal_id out status launch endpoint_log target
+  bad_id=$(profile_id profile-claude-prewalk-bad-z8or)
+  normal_id=$(profile_id profile-claude-prewalk-normal-z8os)
+  rec=$(make_spawn_case profile-claude-prewalk claude "$bad_id" "$normal_id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  endpoint_log="$CASE_DIR/endpoint.log"
+  target=openai-codex/gpt-5.6-luna:xhigh
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$bad_id" "$PROJ_DIR" --harness claude --model sonnet --effort high --prewalk-into "$target")
+  status=$?
+  expect_code 1 "$status" "non-OMP harness with --prewalk-into should refuse"
+  assert_contains "$out" "--prewalk-into is supported only with harness=omp (resolved harness=claude)" \
+    "non-OMP refusal did not name the OMP-only contract"
+  assert_absent "$HOME_DIR/state/$bad_id.meta" "non-OMP Prewalk refusal wrote task metadata"
+  [ ! -s "$endpoint_log" ] || fail "non-OMP Prewalk refusal created a backend endpoint"
+  [ ! -s "$LAUNCH_LOG" ] || fail "non-OMP Prewalk refusal typed a launch command"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$normal_id" "$PROJ_DIR" --harness claude --model sonnet --effort high)
+  status=$?
+  expect_code 0 "$status" "ordinary Claude launch should remain unaffected"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "claude --dangerously-skip-permissions --model 'sonnet' --effort 'high'" \
+    "ordinary Claude launch changed after adding the OMP-only profile axis"
+  assert_not_contains "$launch" "--prewalk" "ordinary Claude launch received OMP Prewalk flags"
+  assert_no_grep '^prewalk_into=' "$HOME_DIR/state/$normal_id.meta" \
+    "ordinary Claude metadata gained an OMP-only Prewalk field"
+  pass "non-OMP Prewalk refuses while ordinary Claude profile launches remain unchanged"
+}
+
 test_omp_herdr_worker_and_scout_launch_with_exact_identity_and_ack() {
-  local kind rec id out status launch flag
+  local kind rec id out status launch
+  local -a dispatch_args
   for kind in worker scout; do
     id=$(profile_id "profile-omp-herdr-$kind-z8ph")
     rec=$(make_spawn_case "profile-omp-herdr-$kind" omp "$id")
     read_case_record "$rec"
     export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
-    flag='--mode no-mistakes --yolo off'
-    [ "$kind" != scout ] || flag=--scout
+    dispatch_args=(--mode no-mistakes --yolo off)
+    [ "$kind" != scout ] || dispatch_args=(--scout)
 
     out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-      --backend herdr --model openai-codex/gpt-5.6-sol --effort low $flag)
+      --backend herdr --model openai-codex/gpt-5.6-sol --effort low "${dispatch_args[@]}")
     status=$?
     expect_code 0 "$status" "OMP Herdr $kind launch should succeed after turn-start acknowledgement"
     assert_contains "$out" "spawned $id harness=omp" "OMP Herdr $kind launch lost exact runtime identity"
@@ -1102,6 +1193,9 @@ test_pi_threads_model_and_max_effort
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_omp_threads_exact_identity_model_and_every_thinking_level
+test_omp_prewalk_threads_native_target_and_metadata
+test_omp_unusable_prewalk_target_keeps_full_starting_model_trajectory
+test_non_omp_prewalk_refuses_without_changing_normal_claude_launch
 test_omp_herdr_worker_and_scout_launch_with_exact_identity_and_ack
 test_omp_refuses_unverified_backends_before_endpoint_creation
 test_omp_scout_uses_external_turn_extension

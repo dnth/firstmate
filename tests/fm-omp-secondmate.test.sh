@@ -56,14 +56,21 @@ setup_case() { # <name>
 #!/usr/bin/env bun
 if (process.argv.includes("--hold")) {
   setInterval(() => {}, 60_000);
-} else console.log(`OMP 17.1.8
+} else if (process.argv[2] === "models" && process.argv.includes("--json")) {
+  console.log(JSON.stringify({models: [
+    {selector: "test/model", thinking: ["low", "medium", "high", "xhigh"]},
+    {selector: "test/finish", thinking: ["low", "medium", "high", "xhigh"]}
+  ]}));
+} else console.log(`OMP 17.2.11
 --model=provider/id
 --thinking=level
 --auto-approve
 --approval-mode=mode
 --extension=path
 --session-dir=path
---resume=path`);
+--resume=path
+--prewalk native switch
+--prewalk-into=<value>`);
 JS
   chmod +x "$FAKEBIN/omp"
   TEST_OMP_BIN=$(fm_test_realpath "$FAKEBIN/omp")
@@ -235,7 +242,16 @@ SH
   : > "$CASE/treehouse.log"
 }
 
-run_spawn() { # [extra env NAME=VALUE ...]
+run_spawn() { # [extra env NAME=VALUE ...] [-- <extra spawn args>]
+  local -a env_args=() spawn_args=()
+  while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
+    env_args+=("$1")
+    shift
+  done
+  if [ "${1:-}" = -- ]; then
+    shift
+    spawn_args=("$@")
+  fi
   env \
     PATH="$FAKEBIN:$BASE_PATH" \
     TMPDIR="$CASE/tmp" \
@@ -259,8 +275,8 @@ run_spawn() { # [extra env NAME=VALUE ...]
     FM_TEST_SKIP_ACK="${FM_TEST_SKIP_ACK:-0}" \
     FM_OMP_SECONDMATE_ACK_POLLS=3 \
     FM_OMP_LAUNCH_ACK_INTERVAL=0.01 \
-    "$@" \
-    "$ROOT/bin/fm-spawn.sh" "$TASK_ID" "$HOME_DIR" --secondmate
+    "${env_args[@]}" \
+    "$ROOT/bin/fm-spawn.sh" "$TASK_ID" "$HOME_DIR" --secondmate "${spawn_args[@]}"
 }
 
 run_spawn_herdr() { # [extra env NAME=VALUE ...]
@@ -403,15 +419,19 @@ test_launch_and_exact_resume() {
   local out selected nested before after
   setup_case launch
 
-  out=$(run_spawn 2>&1) || fail "fresh OMP secondmate spawn failed: $out"
+  out=$(run_spawn -- --prewalk-into 'test/finish:xhigh' 2>&1) || fail "fresh OMP secondmate spawn failed: $out"
   assert_contains "$(cat "$LAUNCH_LOG")" "FM_OMP_SESSION_POINTER='$HOME_DIR/state/.omp-session'" "OMP launch did not bind the home-owned session pointer"
   assert_contains "$(cat "$LAUNCH_LOG")" "'$TEST_OMP_BUN' '$TEST_OMP_BIN'" \
     "OMP launch did not use the capability-checked canonical Bun/OMP pair"
-  assert_contains "$(cat "$LAUNCH_LOG")" "--session-dir '$HOME_DIR/state/omp-sessions' --auto-approve --model 'test/model' --thinking 'low' -e '$HOME_DIR/.omp/extensions/fm-primary-omp.ts'" "OMP launch did not preserve exact pins, adapter, and durable session directory"
+  assert_contains "$(cat "$LAUNCH_LOG")" "--session-dir '$HOME_DIR/state/omp-sessions' --auto-approve --model 'test/model' --thinking 'low'" "OMP launch did not preserve exact pins and durable session directory"
+  assert_contains "$(cat "$LAUNCH_LOG")" "-e '$HOME_DIR/.omp/extensions/fm-primary-omp.ts'" "OMP launch did not preserve its exact adapter"
   assert_not_contains "$(cat "$LAUNCH_LOG")" '__OMP' "OMP launch retained an unsubstituted template placeholder"
   assert_contains "$(cat "$MAIN_STATE/$TASK_ID.meta")" 'harness=omp' "OMP identity was not recorded exactly"
   assert_contains "$(cat "$MAIN_STATE/$TASK_ID.meta")" 'model=test/model' "OMP model pin was not recorded"
   assert_contains "$(cat "$MAIN_STATE/$TASK_ID.meta")" 'effort=low' "OMP thinking pin was not recorded"
+  assert_contains "$(cat "$MAIN_STATE/$TASK_ID.meta")" 'prewalk_into=test/finish:xhigh' "OMP Prewalk target was not recorded"
+  assert_contains "$(cat "$LAUNCH_LOG")" "--prewalk --prewalk-into='test/finish:xhigh'" \
+    "OMP secondmate launch did not enable its exact native Prewalk target"
   [ -d "$HOME_DIR/state/omp-sessions" ] || fail "durable OMP session directory was not created in the secondmate home"
 
   selected="$HOME_DIR/state/omp-sessions/selected.jsonl"
@@ -422,6 +442,8 @@ test_launch_and_exact_resume() {
   : > "$LAUNCH_LOG"
   out=$(run_spawn 2>&1) || fail "OMP secondmate exact resume failed: $out"
   assert_contains "$(cat "$LAUNCH_LOG")" "--resume '$selected'" "OMP recovery did not resume the manifest-bound exact session"
+  assert_contains "$(cat "$LAUNCH_LOG")" "--prewalk --prewalk-into='test/finish:xhigh'" \
+    "OMP secondmate recovery did not restore its recorded native Prewalk target"
   assert_not_contains "$(cat "$LAUNCH_LOG")" 'zzz-later.jsonl' "OMP recovery selected a lexically last session instead of the exact pointer"
 
   rm -f "$WINDOW_FLAG" "$HOME_DIR/state/.omp-primary-extension-loaded" "$HOME_DIR/state/.lock"

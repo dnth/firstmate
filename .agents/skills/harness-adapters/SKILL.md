@@ -11,7 +11,7 @@ metadata:
 Use this reference before any harness-specific firstmate operation: spawn, recovery, trust-dialog handling, skill invocation, interrupt, exit, resume, or adapter verification.
 
 Crewmates default to the same harness firstmate is running on unless `config/crew-harness` records an adapter name.
-Optional dispatch profiles in `config/crew-dispatch.json` can override that static default for one crewmate or scout dispatch by selecting concrete harness, model, and effort axes at intake.
+Optional dispatch profiles in `config/crew-dispatch.json` can override that static default for one crewmate or scout dispatch by selecting concrete harness, model, effort, and optional OMP Prewalk target axes at intake.
 When a matched rule or default is a profile array, load `quota-array-dispatch` for the completion-aware candidate choice after this skill establishes harness and model/provider facts.
 The captain may override that file at session start or later; a per-task instruction such as "run this one on codex" overrides it for that dispatch only.
 `default` means mirror firstmate's own harness.
@@ -111,7 +111,8 @@ When changing any primary watcher adapter, update `docs/supervision-protocols/`,
 
 ## Launch profile axes
 
-`bin/fm-spawn.sh` accepts concrete `--harness`, `--model`, and `--effort` values chosen by firstmate at intake.
+`bin/fm-spawn.sh` accepts concrete `--harness`, `--model`, and `--effort` values chosen by firstmate at intake, plus `--prewalk-into` when an OMP profile explicitly carries `prewalk_into`.
+Pass that OMP target unchanged; [`docs/configuration.md`](../../../docs/configuration.md#crew-dispatch-profiles-configcrew-dispatchjson) owns the schema and fallback semantics.
 Do not make the shell scripts parse or match natural-language dispatch rules.
 
 Effort precedence is an explicit per-task captain instruction first, then any applicable standing dispatch profile or secondmate pin, then the generic fallback below.
@@ -130,7 +131,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | codex | `--model <model>` | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'` | Verified on codex-cli 0.142.1. The installed binary schema contains `model_reasoning_effort`, the active config uses it, and the bundled model catalog advertises only low/medium/high/xhigh. `max` is omitted. |
 | grok | `--model <model>` | `--reasoning-effort <low\|medium\|high>` | Verified on grok 0.2.99 (2026-07-13). `--effort` is an alias, but firstmate's profile axis is reasoning effort. As of 0.2.99 the ceiling is `high`; both `xhigh` and `max` are rejected with `use one of: high, medium, low`, so firstmate omits them. |
 | pi / pi-signed | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-27 on Pi and pi-signed 0.82.0. Both expose the same accepted thinking levels and completed the same model-qualified max-thinking smoke. |
-| omp | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-30 on OMP 17.1.8 through exact worker launches for every thinking level. |
+| omp | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Native `--prewalk --prewalk-into=<model-spec>` and an effort-qualified target parse were verified 2026-08-11 on OMP 17.2.11, extending the 2026-07-30 exact-worker evidence for all thinking levels on OMP 17.1.8; `docs/verification/runtime-backends.md` records the commands and bounded output. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
 

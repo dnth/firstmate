@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -22,6 +22,11 @@
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
+#   --prewalk-into <model-spec> opts an OMP profile into native Prewalk and records
+#   the effective target in task metadata. A target unavailable from `omp models`
+#   leaves the full trajectory on the starting model; every non-OMP harness refuses it.
+#   Local OMP secondmate relaunches recover the recorded target when the caller does
+#   not repeat the flag, so exact-session recovery keeps the same launch profile.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -124,7 +129,7 @@
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
-#   source of truth; shared --scout/--harness/--model/--effort/--backend/--mode/--yolo
+#   source of truth; shared --scout/--harness/--model/--effort/--prewalk-into/--backend/--mode/--yolo
 #   applies to every pair. A ship batch therefore carries one delivery contract, and each
 #   pair still checks it against its own brief; a batch spanning modes is two invocations.
 #   If config/crew-dispatch.json exists, shared --harness is required for crewmate
@@ -244,6 +249,7 @@ KIND=ship
 HARNESS_ARG=
 MODEL=
 EFFORT=
+PREWALK_INTO=
 SECONDMATE_MODEL_SOURCE=
 SECONDMATE_FALLBACK_REASON=
 BACKEND_ARG=
@@ -253,6 +259,7 @@ TRACEPARENT_ARG=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
+PREWALK_INTO_SET=0
 BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
@@ -268,6 +275,7 @@ for a in "$@"; do
       harness) HARNESS_ARG=$a; HARNESS_SET=1 ;;
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
+      prewalk-into) PREWALK_INTO=$a; PREWALK_INTO_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
@@ -286,6 +294,8 @@ for a in "$@"; do
     --model=*) MODEL=${a#--model=}; MODEL_SET=1 ;;
     --effort) want_value=effort ;;
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
+    --prewalk-into) want_value=prewalk-into ;;
+    --prewalk-into=*) PREWALK_INTO=${a#--prewalk-into=}; PREWALK_INTO_SET=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
     --mode) want_value=mode ;;
@@ -301,6 +311,7 @@ done
 [ "$HARNESS_SET" -eq 0 ] || [ -n "$HARNESS_ARG" ] || { echo "error: --harness requires a non-empty value" >&2; exit 1; }
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
+[ "$PREWALK_INTO_SET" -eq 0 ] || [ -n "$PREWALK_INTO" ] || { echo "error: --prewalk-into requires a non-empty value" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
@@ -384,6 +395,12 @@ spawn_remote_secondmate() {
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     return 3
+  fi
+  if [ "$PREWALK_INTO_SET" -eq 1 ]; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: --prewalk-into is unavailable for remote secondmates because their verified harness set does not include omp" >&2
+    return 1
   fi
   host=$(secondmate_registry_field "$DATA/secondmates.md" "$id" host)
   root=$(secondmate_registry_field "$DATA/secondmates.md" "$id" root)
@@ -884,6 +901,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
+  [ -z "$PREWALK_INTO" ] || shared_args+=(--prewalk-into "$PREWALK_INTO")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
   # One delivery contract applies to every pair in a batch, exactly like the shared
   # harness. Each pair still re-validates it against its own brief, so a batch
@@ -978,9 +996,9 @@ launch_template() {
       if [ "$kind" = secondmate ]; then
         # The explicit path is the exact same tracked file native project discovery sees.
         # OMP 17.1.8's discoverExtensionPaths path-resolves and deduplicates before loading, so this guarantees the integration without registering it twice.
-        printf '%s' '__OMPBUN__ __OMPBIN__ --session-dir __OMPSESSIONDIR__ __OMPRESUMEFLAG__--auto-approve __MODELFLAG____EFFORTFLAG__-e __OMPPRIMARY__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' '__OMPBUN__ __OMPBIN__ --session-dir __OMPSESSIONDIR__ __OMPRESUMEFLAG__--auto-approve __MODELFLAG____EFFORTFLAG____PREWALKFLAG__-e __OMPPRIMARY__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' '__OMPBUN__ __OMPBIN__ --session-dir __OMPSESSIONDIR__ --auto-approve __MODELFLAG____EFFORTFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' '__OMPBUN__ __OMPBIN__ --session-dir __OMPSESSIONDIR__ --auto-approve __MODELFLAG____EFFORTFLAG____PREWALKFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
@@ -1099,6 +1117,31 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
   fi
 fi
 
+if [ "$KIND" = secondmate ] && [ "$PREWALK_INTO_SET" -eq 0 ]; then
+  PRIOR_PREWALK_META="$STATE/$ID.meta"
+  if [ -f "$PRIOR_PREWALK_META" ] && [ ! -L "$PRIOR_PREWALK_META" ]; then
+    PRIOR_PREWALK_INTO=$(fm_meta_get "$PRIOR_PREWALK_META" prewalk_into)
+    if [ -n "$PRIOR_PREWALK_INTO" ]; then
+      PREWALK_INTO=$PRIOR_PREWALK_INTO
+      PREWALK_INTO_SET=1
+    fi
+  fi
+fi
+
+if [ "$PREWALK_INTO_SET" -eq 1 ]; then
+  if [ "$HARNESS" != omp ]; then
+    echo "error: --prewalk-into is supported only with harness=omp (resolved harness=$HARNESS)" >&2
+    exit 1
+  fi
+  case "$LAUNCH" in
+    *__PREWALKFLAG__*) ;;
+    *)
+      echo "error: --prewalk-into requires the verified OMP launch template and cannot be combined with a raw launch command" >&2
+      exit 1
+      ;;
+  esac
+fi
+
 case "$HARNESS" in
   pi|pi-signed) LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH" ;;
   omp) LAUNCH="FM_OMP_HARNESS=omp $LAUNCH" ;;
@@ -1111,6 +1154,59 @@ if [ "$HARNESS" = pi-signed ] && ! command -v pi-signed >/dev/null 2>&1; then
   echo "error: pi-signed executable not found on PATH; install the signed Pi wrapper or select a different verified harness" >&2
   exit 1
 fi
+omp_prewalk_target_problem() {
+  local binary=$1 target=$2 selector=$2 effort='' help catalog
+  case "$target" in
+    *:*)
+      selector=${target%:*}
+      effort=${target##*:}
+      ;;
+  esac
+  [ -n "$selector" ] || {
+    printf '%s\n' "the model selector is empty"
+    return
+  }
+  case "$effort" in
+    ''|off|minimal|low|medium|high|xhigh|max|auto) ;;
+    *)
+      printf '%s\n' "effort suffix '$effort' is not recognized by OMP"
+      return
+      ;;
+  esac
+  command -v jq >/dev/null 2>&1 || {
+    printf '%s\n' "jq is unavailable, so the OMP model catalog cannot be checked"
+    return
+  }
+  if ! help=$("$binary" --help 2>&1); then
+    printf '%s\n' "the selected OMP executable could not report its launch flags"
+    return
+  fi
+  if ! printf '%s\n' "$help" | grep -F -- '--prewalk ' >/dev/null 2>&1 \
+    || ! printf '%s\n' "$help" | grep -F -- '--prewalk-into=' >/dev/null 2>&1; then
+    printf '%s\n' "the selected OMP executable does not expose native --prewalk and --prewalk-into flags"
+    return
+  fi
+  if ! catalog=$("$binary" models --json 2>/dev/null); then
+    printf '%s\n' "the OMP model catalog could not be read"
+    return
+  fi
+  if ! printf '%s\n' "$catalog" | jq -e --arg selector "$selector" '
+      .models as $models
+      | ($models | type) == "array"
+        and any($models[]; .selector == $selector)
+    ' >/dev/null 2>&1; then
+    printf '%s\n' "model '$selector' is not listed by OMP"
+    return
+  fi
+  if [ -n "$effort" ] && ! printf '%s\n' "$catalog" | jq -e \
+    --arg selector "$selector" --arg effort "$effort" '
+      .models[]
+      | select(.selector == $selector)
+      | ((.thinking // []) | index($effort)) != null
+    ' >/dev/null 2>&1; then
+    printf '%s\n' "model '$selector' does not list effort '$effort'"
+  fi
+}
 OMP_BIN=
 OMP_BIN_CANON=
 OMP_BUN_CANON=
@@ -1146,6 +1242,13 @@ if [ "$HARNESS" = omp ]; then
      || ! fm_omp_process_identity_path_valid "$OMP_BUN_CANON"; then
     echo "error: selected OMP and Bun identities must be canonical executable paths without whitespace" >&2
     exit 1
+  fi
+  if [ -n "$PREWALK_INTO" ]; then
+    OMP_PREWALK_PROBLEM=$(omp_prewalk_target_problem "$OMP_BIN_CANON" "$PREWALK_INTO")
+    if [ -n "$OMP_PREWALK_PROBLEM" ]; then
+      echo "warning: OMP prewalk target '$PREWALK_INTO' will not be used: $OMP_PREWALK_PROBLEM; continuing the full trajectory on starting model '${MODEL:-default}' without prewalk" >&2
+      PREWALK_INTO=
+    fi
   fi
   if [ "$KIND" = secondmate ]; then
     OMP_PRIOR_META="$STATE/$ID.meta"
@@ -1295,6 +1398,13 @@ effort_flag_for_harness() {
     # task metadata but never reaches the launch command.
   esac
 }
+prewalk_flag_for_harness() {
+  local harness=$1 target=$2
+  [ -n "$target" ] || return 0
+  [ "$harness" = omp ] || return 0
+  printf -- '--prewalk --prewalk-into=%s ' "$(shell_quote "$target")"
+}
+
 
 case "$LAUNCH" in
   *__KIMIBIN__*)
@@ -2536,6 +2646,7 @@ META_WINDOW=$T
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  [ -z "$PREWALK_INTO" ] || echo "prewalk_into=$PREWALK_INTO"
   if [ "$KIND" = secondmate ] && [ -n "$SECONDMATE_MODEL_SOURCE" ]; then
     echo "secondmate_model_source=$SECONDMATE_MODEL_SOURCE"
     [ "$SECONDMATE_MODEL_SOURCE" != fallback ] || echo "secondmate_fallback_reason=$SECONDMATE_FALLBACK_REASON"
@@ -2589,8 +2700,10 @@ sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+PREWALKFLAG=$(prewalk_flag_for_harness "$HARNESS" "$PREWALK_INTO")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+LAUNCH=${LAUNCH//__PREWALKFLAG__/$PREWALKFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}

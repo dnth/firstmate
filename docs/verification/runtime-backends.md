@@ -143,6 +143,26 @@ The runs retained exact `harness=omp`, forwarded the selected model and thinking
 Normal `/exit` stopped each OMP process without killing the private tmux server, exact session resume restored prior context, and cleanup removed every generated extension, session, task temp root, worktree, and socket-owned endpoint.
 The guarded primary, worker/scout, and secondmate owners reran on 2026-08-01 at head `491bc809a38a84f5ea651fd051b509cb511149a1` and returned four green results.
 The OMP 17.2.10 watcher-input regression passed on 2026-08-07 with the editable draft intact; the exact command and bounded output are recorded in [`supervision.md`](supervision.md#native-session-start-delivery).
+
+The native Prewalk launch surface was checked on 2026-08-11 against OMP 17.2.11 without starting a model call:
+
+```sh
+omp --version
+omp --prewalk --prewalk-into=openai-codex/gpt-5.6-luna:xhigh --help
+omp models openai-codex --json | jq -r '.models[] | select(.selector == "openai-codex/gpt-5.6-luna") | [.selector, (.thinking | join(","))] | @tsv'
+```
+
+Observed relevant output:
+
+```text
+omp/17.2.11
+      --prewalk                       Switch from the active model to a fast/cheap model at the first edit/write after the plan's todo list exists (default off; see prewalk.enabled)
+      --prewalk-into=<value>          Target model for prewalk (default the "smol" role)
+openai-codex/gpt-5.6-luna	low,medium,high,xhigh,max
+```
+
+The zero-exit help parse confirms that the CLI accepts the `:xhigh` effort suffix on the Prewalk target, while the model catalog independently confirms that GPT-5.6 Luna supports xhigh.
+This evidence covers launch parsing and catalog validation only; it does not claim a live model handoff.
 The Herdr role matrix required each expected turn-end or routed-reply notification to reach the durable queue or the primary follow-up transcript before the fixture drained it.
 
 The deterministic tmux and Herdr fixtures reran on 2026-08-09 and proved that an already-busy OMP send returns `queued-unconfirmed` only after Enter transport succeeds, without reading a rendered steering count, while Enter transport failure returns `send-failed` and initially idle editable input remains pending and fails closed.
