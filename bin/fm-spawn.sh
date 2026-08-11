@@ -115,8 +115,8 @@
 #   provisioned firstmate home; the default is kind=ship.
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
-#   Before a fresh ship or scout worker starts, its clean task worktree fetches
-#   origin, resolves the current remote default branch, and fast-forwards to its tip.
+#   Before a ship or scout starts in a pooled Treehouse worktree, that clean task
+#   worktree fetches origin, resolves the current remote default branch, and fast-forwards to its tip.
 #   An unreachable origin, unresolved default branch, dirty worktree, or
 #   non-fast-forwardable base refuses the spawn rather than risking stale history.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
