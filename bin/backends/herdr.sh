@@ -1780,8 +1780,10 @@ fm_backend_herdr_agent_alive() {  # <target>
 # the safety argument). An ADOPTED workspace's caller always passes an empty
 # 4th arg, so this function never even queries for a prune candidate in that
 # case. Echoes "<tab_id> <pane_id>" on success.
-fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_tab_id>
-  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} session wsid list dup_tabs dup dup_pane dup_tab_ids out tab_id pane_id remaining_dup_tabs
+# <partial-policy> is preserve by default; prewalk-transactional enables confirmed cleanup and distinguishes unresolved creation with status 2.
+fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_tab_id> [<partial-policy>]
+  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} partial_policy=${5:-preserve}
+  local session wsid list dup_tabs dup dup_pane dup_tab_ids out tab_id pane_id remaining_dup_tabs
   session=${container%%:*}
   wsid=${container#*:}
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
@@ -1803,19 +1805,25 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_ta
 $dup_tabs
 EOF
   fi
-  out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || {
-    echo "error: herdr task tab creation failed ambiguously in workspace $wsid (session $session)" >&2
-    return 2
-  }
+  if ! out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" --cwd "$cwd" --label "$label" --no-focus 2>/dev/null); then
+    if [ "$partial_policy" = prewalk-transactional ]; then
+      echo "error: herdr task tab creation failed ambiguously in workspace $wsid (session $session)" >&2
+      return 2
+    fi
+    return 1
+  fi
   tab_id=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
   pane_id=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
   if [ -z "$tab_id" ] || [ -z "$pane_id" ]; then
     echo "error: could not parse tab/pane id from herdr tab create output" >&2
-    if [ -n "$pane_id" ] && fm_backend_herdr_explicit_close_pane_confirmed "$session" "$pane_id"; then
-      return 1
+    if [ "$partial_policy" = prewalk-transactional ]; then
+      if [ -n "$pane_id" ] && fm_backend_herdr_explicit_close_pane_confirmed "$session" "$pane_id"; then
+        return 1
+      fi
+      echo "warning: herdr task creation may have left an endpoint whose exact pane could not be removed" >&2
+      return 2
     fi
-    echo "warning: herdr task creation may have left an endpoint whose exact pane could not be removed" >&2
-    return 2
+    return 1
   fi
   [ -z "$seeded_tab_id" ] || fm_backend_herdr_workspace_prune_seeded_default_tab "$session" "$wsid" "$seeded_tab_id"
   if [ -n "$dup_tab_ids" ]; then

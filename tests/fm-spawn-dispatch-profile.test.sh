@@ -127,8 +127,12 @@ case "$cmd $sub" in
     if [ "${FM_FAKE_HERDR_AMBIGUOUS_RECLAIM:-0}" = 1 ] \
        && [ "$(grep -c '^tab create$' "$FM_FAKE_ENDPOINT_LOG")" = 1 ]; then
       printf '%s\n' '{"result":{"tab":{"tab_id":"w2:t3"}}}'
-    elif [ "${FM_FAKE_HERDR_PARTIAL_CREATE:-0}" = 1 ]; then
-      printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t2"}}}'
+    elif [ "${FM_FAKE_HERDR_PARTIAL_CREATE:-0}" != 0 ]; then
+      if [ "$FM_FAKE_HERDR_PARTIAL_CREATE" = pane-only ]; then
+        printf '%s\n' '{"result":{"root_pane":{"pane_id":"w1:p2"}}}'
+      else
+        printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t2"}}}'
+      fi
     else
       printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2"}}}'
     fi
@@ -1015,6 +1019,52 @@ test_omp_prewalk_ambiguous_herdr_creation_preserves_lease() {
   pass "ambiguous Herdr creation preserves its Prewalk lease"
 }
 
+test_ordinary_herdr_partial_create_preserves_response_known_pane() {
+  local rec id out status endpoint_log
+  id=$(profile_id profile-ordinary-herdr-partial-z8oyb)
+  rec=$(make_spawn_case profile-ordinary-herdr-partial claude "$id")
+  read_case_record "$rec"
+  endpoint_log="$CASE_DIR/endpoint.log"
+  export FM_TEST_HERDR_PARTIAL_CREATE=pane-only
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --backend herdr)
+  status=$?
+  unset FM_TEST_HERDR_PARTIAL_CREATE
+  expect_code 1 "$status" "ordinary Herdr partial creation should retain its prior failure"
+  assert_contains "$out" "could not parse tab/pane id from herdr tab create output" \
+    "ordinary Herdr partial creation did not report its malformed response"
+  assert_no_grep 'pane close w1:p2' "$endpoint_log" \
+    "ordinary Herdr partial creation transactionally removed its response-known pane"
+  pass "ordinary Herdr partial creation preserves its response-known pane"
+}
+
+test_omp_prewalk_partial_create_cleans_response_known_pane() {
+  local rec id out status endpoint_log treehouse_log target
+  id=$(profile_id profile-prewalk-herdr-known-pane-z8oyc)
+  rec=$(make_spawn_case profile-prewalk-herdr-known-pane omp "$id")
+  read_case_record "$rec"
+  endpoint_log="$CASE_DIR/endpoint.log"
+  treehouse_log="$CASE_DIR/treehouse.log"
+  target=openai-codex/gpt-5.6-luna:xhigh
+  export FM_TEST_HERDR_PARTIAL_CREATE=pane-only
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --backend herdr --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+  status=$?
+  unset FM_TEST_HERDR_PARTIAL_CREATE
+  expect_code 1 "$status" "Prewalk Herdr partial creation should abort after cleanup"
+  assert_contains "$out" "could not parse tab/pane id from herdr tab create output" \
+    "Prewalk Herdr partial creation did not report its malformed response"
+  assert_grep 'pane close w1:p2' "$endpoint_log" \
+    "Prewalk Herdr partial creation did not remove its response-known pane"
+  assert_grep "$PROJ_DIR|return $WT_DIR" "$treehouse_log" \
+    "Prewalk Herdr partial creation did not return its lease after confirmed endpoint cleanup"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "Prewalk Herdr partial creation published durable metadata"
+  pass "Prewalk Herdr partial creation cleans its response-known pane"
+}
+
 test_omp_prewalk_ambiguous_herdr_projection_preserves_lease() {
   local rec id out status endpoint_log treehouse_log target
   id=$(profile_id profile-omp-prewalk-herdr-projection-z8oz)
@@ -1510,6 +1560,8 @@ test_omp_valid_prewalk_does_not_require_disable_flag
 test_omp_unsafe_fallback_refuses_before_endpoint
 test_omp_prewalk_premetadata_failure_cleans_endpoint_and_lease
 test_omp_prewalk_ambiguous_herdr_creation_preserves_lease
+test_ordinary_herdr_partial_create_preserves_response_known_pane
+test_omp_prewalk_partial_create_cleans_response_known_pane
 test_omp_prewalk_ambiguous_herdr_projection_preserves_lease
 test_ordinary_herdr_ambiguous_reclaim_keeps_flat_fallback
 test_non_omp_prewalk_refuses_without_changing_normal_claude_launch

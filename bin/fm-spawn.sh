@@ -2232,8 +2232,11 @@ case "$BACKEND" in
       HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
       HERDR_SES=${CONTAINER%%:*}
       HERDR_WORKSPACE_ID=${CONTAINER#*:}
+      HERDR_PARTIAL_CREATE_POLICY=preserve
+      [ "$PREWALK_ABORT_PHASE" != lease ] || HERDR_PARTIAL_CREATE_POLICY=prewalk-transactional
       set +e
-      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$SPAWN_START_DIR" "$HERDR_SEEDED_DEFAULT_TAB_ID")
+      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task \
+        "$CONTAINER" "$W" "$SPAWN_START_DIR" "$HERDR_SEEDED_DEFAULT_TAB_ID" "$HERDR_PARTIAL_CREATE_POLICY")
       HERDR_TASK_CREATE_STATUS=$?
       set -e
       if [ "$HERDR_TASK_CREATE_STATUS" -ne 0 ]; then
