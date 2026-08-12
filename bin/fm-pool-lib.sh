@@ -19,7 +19,7 @@ fm_pool_ignorable_porcelain_filter() {  # porcelain lines on stdin
 
 fm_pool_real_porcelain() {  # <repo>
   local repo=$1 out
-  out=$(git -C "$repo" status --porcelain 2>/dev/null) || return 1
+  out=$(git -C "$repo" status --porcelain --untracked-files=all 2>/dev/null) || return 1
   [ -n "$out" ] || return 0
   printf '%s\n' "$out" | fm_pool_ignorable_porcelain_filter
 }

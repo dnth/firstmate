@@ -5,6 +5,8 @@ REAL_GIT=${FM_TREEHOUSE_REAL_GIT:?}
 ERROR_FILE=${FM_TREEHOUSE_GUARD_ERROR_FILE:?}
 SAFE_FILE=${FM_TREEHOUSE_GUARD_SAFE_FILE:?}
 COMPLETE_FILE=${FM_TREEHOUSE_GUARD_COMPLETE_FILE:?}
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+. "$SCRIPT_DIR/../fm-pool-lib.sh"
 
 if [ -f "$COMPLETE_FILE" ]; then
   exec "$REAL_GIT" "$@"
@@ -15,7 +17,7 @@ if [ "${1:-}" = status ] && [ "${2:-}" = --porcelain ] \
   out=$("$REAL_GIT" "$@")
   status=$?
   [ "$status" -eq 0 ] || exit "$status"
-  [ -z "$out" ] || printf '%s\n' "$out" | grep -vFx '?? treehouse.toml' || true
+  [ -z "$out" ] || printf '%s\n' "$out" | fm_pool_ignorable_porcelain_filter
   exit 0
 fi
 

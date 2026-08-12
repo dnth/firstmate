@@ -245,19 +245,16 @@ TREEHOUSE_AUDIT_SEEN_SLOTS=""
 # reports what it saw without owning cross-pool deduplication.
 # shellcheck disable=SC2329 # Invoked indirectly through bootstrap_run_bounded.
 treehouse_pool_dirty_idle_scan() {  # <repo>
-  local repo=$1 out
-  out=$("$SCRIPT_DIR/fm-treehouse-status-read-only.sh" "$repo" 2>/dev/null) || return 0
-  [ -z "$out" ] || printf '%s\n' "$out" \
-    | jq -c '.[] | select(.status == "dirty") | {slot: .name, path: .path}' 2>/dev/null
+  "$SCRIPT_DIR/fm-treehouse-status-read-only.sh" "$1" 2>/dev/null || true
 }
 
 treehouse_audit_report_slots() {  # <tmp>
   local tmp=$1 line slot path path_key
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    slot=$(printf '%s\n' "$line" | jq -r '.slot') || continue
-    path=$(printf '%s\n' "$line" | jq -r '.path') || continue
-    path_key=$(printf '%s\n' "$line" | jq -c '.path') || continue
+    slot=$(node -e 'process.stdout.write(String(JSON.parse(process.argv[1]).slot))' "$line" 2>/dev/null) || continue
+    path=$(node -e 'process.stdout.write(String(JSON.parse(process.argv[1]).path))' "$line" 2>/dev/null) || continue
+    path_key=$line
     case $'\n'"$TREEHOUSE_AUDIT_SEEN_SLOTS"$'\n' in
       *$'\n'"$path_key"$'\n'*) continue ;;
     esac
@@ -303,10 +300,6 @@ treehouse_audit_timeout() {
 
 treehouse_dirty_idle_slot_audit() {
   command -v treehouse >/dev/null 2>&1 || return 0
-  if ! treehouse_supports_json_status; then
-    echo "TREEHOUSE_POOL: audit unavailable - installed treehouse lacks JSON status support"
-    return 0
-  fi
   local per_pool timeout
   per_pool=$(treehouse_audit_pool_timeout)
   timeout=$(treehouse_audit_timeout)
@@ -813,10 +806,6 @@ treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
 }
 
-treehouse_supports_json_status() {
-  treehouse status --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--json([^[:alnum:]_-]|$)'
-}
-
 # Shared semantic-version floor for the tool gates below. A version string that
 # cannot be parsed into exactly one major.minor.patch triple is incompatible,
 # never assumed current, so a development or vendored build cannot pass a floor
@@ -1153,8 +1142,7 @@ done
 # backend actually requires treehouse (every backend except orca, which owns its
 # own worktrees); an orca home must not be told to upgrade a provider it never uses.
 if fm_backend_list_contains "$TOOLS" treehouse \
-  && command -v treehouse >/dev/null 2>&1 \
-  && { ! treehouse_supports_lease || ! treehouse_supports_json_status; }; then
+  && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
   echo "MISSING: treehouse (install: $(install_cmd treehouse))"
 fi
 treehouse_dirty_idle_slot_audit
