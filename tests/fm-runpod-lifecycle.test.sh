@@ -270,6 +270,18 @@ assert_contains "$out" "already has a cpu pod" "the refusal must name the confli
 [ "$(runpod_pod_count "$API_STATE")" = 1 ] || fail "a refused GPU wake must not create a pod"
 pass "one second mate cannot hold a CPU and a GPU pod at the same time"
 
+# --- container disk stays inside the provider's hard limit -------------------
+#
+# A real pilot pod creation was refused with HTTP 500 "Container Disk must be
+# less than or equal to 40" because the create body asked for 50, which the
+# earlier double accepted. The double now enforces that limit, so these cases
+# fail if either pod body regresses past it.
+
+disk=$(jq -r '[.pods[] | .containerDiskInGb // 40] | max // 40' "$API_STATE" 2>/dev/null)
+[ -n "$disk" ] || disk=40
+[ "$disk" -le 40 ] || fail "a created pod asked for ${disk}GB of container disk, above the provider's 40GB limit"
+pass "created pods stay inside the provider's container-disk limit"
+
 # --- GPU selection ----------------------------------------------------------
 
 rp sleep ios >/dev/null 2>&1 || fail "could not suspend before the GPU cases"

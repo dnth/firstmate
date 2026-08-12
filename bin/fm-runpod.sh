@@ -628,6 +628,11 @@ cmd_provision() {
 
 # --- wake -------------------------------------------------------------------
 
+# RunPod caps a pod's container disk at 40 GB and refuses creation outright
+# above it ("Container Disk must be less than or equal to 40", HTTP 500), so the
+# pod bodies below use that ceiling. Durable state lives on the network volume
+# rather than the container disk, so the cap costs this provider nothing.
+
 # GPU candidates for --min-vram, ascending by memory. This is a convenience
 # filter over RunPod's own published GPU type ids, not an authority on what is
 # available: the created pod still passes gpuTypePriority=availability, so
@@ -701,7 +706,7 @@ pod_create_body() {  # <id> <compute> <gpu-type> <min-vram>
          name: $name, imageName: $image, computeType: "GPU", cloudType: "SECURE",
          gpuCount: 1, gpuTypeIds: $gpus, gpuTypePriority: "availability",
          dataCenterIds: [$dc], networkVolumeId: $vol, volumeMountPath: "/workspace",
-         containerDiskInGb: 50, ports: ["22/tcp"], supportPublicIp: true,
+         containerDiskInGb: 40, ports: ["22/tcp"], supportPublicIp: true,
          env: {FM_POD_BOOT_B64: $boot, FM_POD_MIN_VRAM_GB: $vram,
                FM_REMOTE_ORIGIN: $origin, FM_POD_HARNESS_NPM: $harness},
          dockerStartCmd: ["/bin/bash","-c","printf %s \"$FM_POD_BOOT_B64\" | base64 --decode > /tmp/fm-pod-boot.sh 2>/dev/null || printf %s \"$FM_POD_BOOT_B64\" | base64 -D > /tmp/fm-pod-boot.sh; exec /bin/bash /tmp/fm-pod-boot.sh"]
@@ -715,7 +720,7 @@ pod_create_body() {  # <id> <compute> <gpu-type> <min-vram>
          name: $name, imageName: $image, computeType: "CPU", cloudType: "SECURE",
          cpuFlavorIds: ["cpu3c"], vcpuCount: 4,
          dataCenterIds: [$dc], networkVolumeId: $vol, volumeMountPath: "/workspace",
-         containerDiskInGb: 50, ports: ["22/tcp"], supportPublicIp: true,
+         containerDiskInGb: 40, ports: ["22/tcp"], supportPublicIp: true,
          env: {FM_POD_BOOT_B64: $boot,
                FM_REMOTE_ORIGIN: $origin, FM_POD_HARNESS_NPM: $harness},
          dockerStartCmd: ["/bin/bash","-c","printf %s \"$FM_POD_BOOT_B64\" | base64 --decode > /tmp/fm-pod-boot.sh 2>/dev/null || printf %s \"$FM_POD_BOOT_B64\" | base64 -D > /tmp/fm-pod-boot.sh; exec /bin/bash /tmp/fm-pod-boot.sh"]

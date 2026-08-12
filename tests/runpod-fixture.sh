@@ -125,6 +125,14 @@ case "$method $path" in
     compute=$(printf '%s' "$body" | jq -r '.computeType // "CPU"')
     name=$(printf '%s' "$body" | jq -r '.name // ""')
     boot=$(printf '%s' "$body" | jq -r '.env.FM_POD_BOOT_B64 // ""')
+    # RunPod caps the container disk at 40 GB and refuses creation above it with
+    # this exact message. A real pilot hit that refusal where the earlier double
+    # accepted any value, so the double now enforces the same limit and the
+    # provider cannot regress past it unnoticed.
+    disk=$(printf '%s' "$body" | jq -r '.containerDiskInGb // 0')
+    if [ "$disk" -gt 40 ] 2>/dev/null; then
+      emit '{"error":"create pod: Container Disk must be less than or equal to 40"}' 500
+    fi
     if [ -n "$vol" ] && [ "$(jq -r --arg v "$vol" '[.volumes[] | select(.id == $v)] | length' "$state")" = 0 ]; then
       emit '{"error":"no such network volume"}' 400
     fi
@@ -143,9 +151,9 @@ case "$method $path" in
     gpus=$(printf '%s' "$body" | jq -c '.gpuTypeIds // []')
     pod=$(jq -nc --arg id "pod-$seq" --arg n "$name" --arg c "$compute" --arg b "$boot" \
       --argjson cost "$cost" --argjson polls "$init_polls" --argjson seq "$seq" \
-      --argjson gpus "$gpus" \
+      --argjson gpus "$gpus" --argjson disk "${disk:-40}" \
       --argjson v "$(jq -c --arg v "$vol" '[.volumes[] | select(.id == $v)][0] // null' "$state")" \
-      '{id:$id,name:$n,computeType:$c,desiredStatus:"RUNNING",costPerHr:$cost,
+      '{id:$id,name:$n,computeType:$c,desiredStatus:"RUNNING",costPerHr:$cost,containerDiskInGb:$disk,
         lastStartedAt:"2026-08-12T00:00:00.000Z",bootScript:$b,requestedGpuTypeIds:$gpus,
         remainingInitPolls:$polls,seq:$seq,networkVolume:$v,
         publicIp:null,portMappings:null}')
