@@ -17,7 +17,7 @@ When this session owns supervision and away mode is not active:
 11. Missing, failed, or unhealthy cycle only: drain queued notifications, inspect the failure, call `fm_watch_arm_omp`, and restart with the explicit `-e` fallback if the integration is missing or stale.
 12. Never use shell `&` for watcher supervision.
 For a persistent secondmate, the watcher in that secondmate home touches `state/.last-watcher-beat` at the start of every cycle.
-The parent watcher treats a fresh, non-future secondmate-home beacon as positive liveness evidence when the non-paused secondmate pane is idle between child polls, reading remote beacon age through a short bounded call on the configured host route.
+The parent watcher treats a fresh, non-future secondmate-home beacon as positive liveness evidence when the non-paused secondmate pane is idle between child polls, reading remote beacon age through a short bounded call with a one-second forced-kill grace on the configured host route.
 The parent watcher uses `FM_STALE_ESCALATE_SECS` (default 240 seconds) as the beacon-age bound, so a missing or stale beacon still enters normal stale and wedge detection.
 Remote timeout or read failure is missing evidence and drives the same stale timer without depending on a local capture of the remote pane.
 

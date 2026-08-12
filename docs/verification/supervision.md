@@ -368,7 +368,7 @@ The safe command-channel contract is covered without a notification by `tests/fm
 
 The secondmate idle supervision poll observed on 2026-08-12 was 360 seconds, while `FM_STALE_ESCALATE_SECS` defaults to 240 seconds.
 The watcher loop's own liveness beacon is refreshed every 15-second `FM_POLL` cycle.
-The parent watcher now accepts a non-paused secondmate only when its recorded home beacon has a non-negative age younger than the 240-second stale bound, with remote age read through a default-five-second-bounded `fm-on.sh` call to the host-local secondmate control command.
+The parent watcher now accepts a non-paused secondmate only when its recorded home beacon has a non-negative age younger than the 240-second stale bound, with remote age read through a default-five-second-bounded `fm-on.sh` call and a one-second forced-kill grace to the host-local secondmate control command.
 The same stale path remains active when that beacon is missing or older than the bound.
 Remote timeout and read failure use stable remote-evidence stale tracking rather than a local capture of the virtual remote target.
 Fresh evidence clears the prior stale suppressor, wedge timer, and consecutive-escalation count before the parent resumes waiting.
@@ -380,7 +380,7 @@ bash --version | sed -n '1p'
 shellcheck --version | sed -n '1,2p'
 shellcheck -x bin/fm-watch.sh bin/fm-remote-secondmate-control.sh tests/fm-watch-triage.test.sh
 set -o pipefail
-bash tests/fm-watch-triage.test.sh | grep -E '^ok - (a fresh secondmate-home watcher beacon suppresses an idle secondmate pane|remote beacon timeout is bounded and still reaches wedge escalation|a stale secondmate-home watcher beacon still reaches genuine wedge escalation|a future-dated secondmate-home beacon cannot prove liveness)$'
+bash tests/fm-watch-triage.test.sh | grep -E '^ok - (a fresh secondmate-home watcher beacon suppresses an idle secondmate pane|a TERM-ignoring remote beacon probe is force-bounded and still reaches wedge escalation|a stale secondmate-home watcher beacon still reaches genuine wedge escalation|a future-dated secondmate-home beacon cannot prove liveness)$'
 ```
 
 ShellCheck produced no output and exited zero.
@@ -391,7 +391,7 @@ GNU bash, version 5.1.16(1)-release (x86_64-pc-linux-gnu)
 ShellCheck - shell script analysis tool
 version: 0.11.0
 ok - a fresh secondmate-home watcher beacon suppresses an idle secondmate pane
-ok - remote beacon timeout is bounded and still reaches wedge escalation
+ok - a TERM-ignoring remote beacon probe is force-bounded and still reaches wedge escalation
 ok - a stale secondmate-home watcher beacon still reaches genuine wedge escalation
 ok - a future-dated secondmate-home beacon cannot prove liveness
 ```

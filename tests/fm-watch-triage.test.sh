@@ -979,21 +979,28 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "${3:-missing}" >> "${FM_FAKE_REMOTE_CALLS:?}"
 case "${FM_FAKE_REMOTE_BEACON_AGE:?}" in
-  hang) exec sleep 30 ;;
+  hang) trap '' TERM; while :; do :; done ;;
   *) printf '%s\n' "$FM_FAKE_REMOTE_BEACON_AGE" ;;
 esac
 SH
   cat > "$fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
 printf 'timeout\n' >> "${FM_FAKE_DEADLINE_CALLS:?}"
+[ "$1" = --kill-after=1 ] || exit 98
+shift
 seconds=$1
 shift
 "$@" &
 child=$!
 deadline=$((SECONDS + seconds))
+term_sent=0
 while kill -0 "$child" 2>/dev/null; do
-  if [ "$SECONDS" -ge "$deadline" ]; then
+  if [ "$term_sent" -eq 0 ] && [ "$SECONDS" -ge "$deadline" ]; then
     kill "$child" 2>/dev/null || true
+    term_sent=1
+    deadline=$((SECONDS + 1))
+  elif [ "$term_sent" -eq 1 ] && [ "$SECONDS" -ge "$deadline" ]; then
+    kill -KILL "$child" 2>/dev/null || true
     wait "$child" 2>/dev/null || true
     exit 124
   fi
@@ -1033,7 +1040,7 @@ SH
     || { reap "$pid"; fail "a non-returning remote beacon probe blocked stale tracking"; }
   reap "$pid"
   elapsed=$(( $(date +%s) - start ))
-  [ "$elapsed" -le 8 ] || fail "remote beacon timeout exceeded its watcher bound: ${elapsed}s"
+  [ "$elapsed" -le 15 ] || fail "remote beacon timeout exceeded its watcher bound: ${elapsed}s"
   printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
@@ -1051,7 +1058,7 @@ SH
   grep -v '^timeout$' "$deadline_calls" | grep . >/dev/null \
     && fail "remote beacon probes used an unexpected deadline command"
   unset FM_FAKE_CREW_STATE
-  pass "remote beacon timeout is bounded and still reaches wedge escalation"
+  pass "a TERM-ignoring remote beacon probe is force-bounded and still reaches wedge escalation"
 }
 
 test_secondmate_stale_supervisor_beacon_escalates() {

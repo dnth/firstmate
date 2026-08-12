@@ -59,7 +59,8 @@
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
 # FM_WATCH_REMOTE_TIMEOUT bounds each remote beacon probe in seconds, accepts
-# integers from 1 through 15, defaults to 5, and falls back to 5 when invalid.
+# integers from 1 through 15, defaults to 5, and falls back to 5 when invalid;
+# timeout tools force-kill after one additional second when TERM is ignored.
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -375,21 +376,18 @@ clear_pause_state() {  # <window>
   rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
 }
 
-clear_pause_tracking() {  # <window>
-  local win=$1 key
-  key=${win//:/_}
-  key=${key//\//_}
-  key=${key//./_}
-  clear_pause_state "$win"
-  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
-}
-
 clear_stale_tracking() {  # <window>
   local win=$1 key
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
   rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+}
+
+clear_pause_tracking() {  # <window>
+  local win=$1
+  clear_pause_state "$win"
+  clear_stale_tracking "$win"
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
@@ -472,9 +470,9 @@ run_with_deadline() {
   local seconds=$1
   shift
   if command -v timeout >/dev/null 2>&1; then
-    timeout "$seconds" "$@"
+    timeout --kill-after=1 "$seconds" "$@"
   elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "$seconds" "$@"
+    gtimeout --kill-after=1 "$seconds" "$@"
   elif command -v perl >/dev/null 2>&1; then
     # shellcheck disable=SC2016
     perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; waitpid $pid, 0; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$seconds" "$@"
