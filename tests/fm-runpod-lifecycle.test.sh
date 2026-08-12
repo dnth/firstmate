@@ -17,6 +17,16 @@ install_fake_runpod "$FAKEBIN"
 
 PARENT="$TMP_ROOT/parent"
 mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects"
+REAL_MV=$(command -v mv)
+cat > "$FAKEBIN/mv" <<SH
+#!/usr/bin/env bash
+if [ "\${FM_FAKE_RUNPOD_RECORD_FAIL:-}" = suspending ] \
+   && [ "\${*: -1}" = "$PARENT/data/runpod/ios.meta" ]; then
+  exit 1
+fi
+exec "$REAL_MV" "\$@"
+SH
+chmod +x "$FAKEBIN/mv"
 printf 'RUNPOD_API_KEY=rp_fixture_key\n' > "$PARENT/config/runpod.env"
 chmod 600 "$PARENT/config/runpod.env"
 
@@ -53,6 +63,15 @@ fragment() {  # <alias>
 
 # --- credentials fail closed ------------------------------------------------
 
+chmod 644 "$PARENT/config/runpod.env"
+out=$(rp provision ios --datacenter EU-RO-1 2>&1) && fail "provision succeeded with a public API key file"
+assert_contains "$out" "config/runpod.env" "an unsafe credential mode must name the credential path"
+assert_contains "$out" "RUNPOD_API_KEY" "an unsafe credential mode must name the required key"
+assert_contains "$out" "mode 600" "an unsafe credential mode must give the exact remediation"
+[ ! -s "$API_LOG" ] || fail "an unsafe credential mode must refuse before any request is made"
+chmod 600 "$PARENT/config/runpod.env"
+pass "a group- or world-readable API key file is refused"
+
 mv "$PARENT/config/runpod.env" "$TMP_ROOT/api-key.hidden"
 out=$(rp provision ios --datacenter EU-RO-1 2>&1) && fail "provision succeeded with no API key"
 assert_contains "$out" "config/runpod.env" "missing credentials must name the exact file to create"
@@ -64,6 +83,7 @@ out=$(rp provision ios --datacenter EU-RO-1 2>&1) && fail "provision succeeded w
 assert_contains "$out" "RUNPOD_API_KEY" "a file without the key must be refused the same way"
 [ ! -s "$API_LOG" ] || fail "a keyless credential file must refuse before any request is made: $(cat "$API_LOG")"
 mv "$TMP_ROOT/api-key.hidden" "$PARENT/config/runpod.env"
+chmod 600 "$PARENT/config/runpod.env"
 pass "a missing or keyless credential file refuses before any request, naming the exact path and key"
 
 # --- provision --------------------------------------------------------------
@@ -88,6 +108,12 @@ out=$(rp provision web --volume-name fm-sm-ios-runpod 2>&1) \
 assert_contains "$out" "already owned by secondmate ios" "cross-record ownership must be refused at provision"
 assert_absent "$PARENT/data/runpod/web.meta" "a refused shared-volume provision must create no ownership record"
 pass "provision rejects a volume owned by another second mate"
+
+out=$(rp provision web --alias fm-sm-ios-runpod --datacenter EU-RO-1 2>&1) \
+  && fail "provision must reject an SSH alias already owned by another second mate"
+assert_contains "$out" "already owned by secondmate ios" "cross-record alias ownership must be refused at provision"
+assert_absent "$PARENT/data/runpod/web.meta" "a refused shared-alias provision must create no ownership record"
+pass "provision rejects an SSH alias owned by another second mate"
 
 # --- wake -------------------------------------------------------------------
 
@@ -197,7 +223,29 @@ sed -i.bak "s/^volume_id=.*/volume_id=/" "$PARENT/data/runpod/web.meta"
 rm -f "$PARENT/data/runpod/web.meta.bak"
 rm -f "$PARENT/data/runpod/web.meta"
 out=$(rp provision web --datacenter EU-RO-1 --size 50 2>&1) || fail "web reprovision failed: $out"
-out=$(rp wake web 2>&1) || fail "web wake failed: $out"
+sed -i.bak 's/^ssh_alias=.*/ssh_alias=fm-sm-ios-runpod/' "$PARENT/data/runpod/web.meta"
+rm -f "$PARENT/data/runpod/web.meta.bak"
+sed -i.bak '/^- web / s/host: fm-sm-web-runpod/host: fm-sm-ios-runpod/' "$PARENT/data/secondmates.md"
+rm -f "$PARENT/data/secondmates.md.bak"
+out=$(rp wake web 2>&1) && fail "wake must reject an SSH alias owned by another second mate"
+assert_contains "$out" "already owned by secondmate ios" "wake must recheck alias ownership before activation"
+sed -i.bak 's/^ssh_alias=.*/ssh_alias=fm-sm-web-runpod/' "$PARENT/data/runpod/web.meta"
+rm -f "$PARENT/data/runpod/web.meta.bak"
+sed -i.bak '/^- web / s/host: fm-sm-ios-runpod/host: fm-sm-web-runpod/' "$PARENT/data/secondmates.md"
+rm -f "$PARENT/data/secondmates.md.bak"
+rp sleep ios >/dev/null 2>&1 || fail "could not suspend ios before concurrent distinct wakes"
+awk '$1 != "fm-sm-ios-runpod"' "$PARENT/config/runpod/known_hosts" > "$PARENT/config/runpod/known_hosts.next"
+mv -f "$PARENT/config/runpod/known_hosts.next" "$PARENT/config/runpod/known_hosts"
+KEYSCAN_BARRIER="$TMP_ROOT/keyscan-barrier"
+mkdir -p "$KEYSCAN_BARRIER"
+FM_FAKE_KEYSCAN_BARRIER_DIR="$KEYSCAN_BARRIER" rp wake ios > "$TMP_ROOT/wake-ios.out" 2>&1 &
+wake_ios=$!
+FM_FAKE_KEYSCAN_BARRIER_DIR="$KEYSCAN_BARRIER" rp wake web > "$TMP_ROOT/wake-web.out" 2>&1 &
+wake_web=$!
+wait "$wake_ios" || fail "concurrent ios wake failed: $(cat "$TMP_ROOT/wake-ios.out")"
+wait "$wake_web" || fail "concurrent web wake failed: $(cat "$TMP_ROOT/wake-web.out")"
+assert_grep 'fm-sm-ios-runpod ' "$PARENT/config/runpod/known_hosts" "concurrent pinning must retain the ios alias"
+assert_grep 'fm-sm-web-runpod ' "$PARENT/config/runpod/known_hosts" "concurrent pinning must retain the web alias"
 [ "$(runpod_pod_count "$API_STATE")" = 2 ] || fail "two distinct second mates must hold two pods"
 [ "$(record_field ios pod_id)" != "$(record_field web pod_id)" ] || fail "two second mates must not share a pod"
 [ "$(record_field ios volume_id)" != "$(record_field web volume_id)" ] || fail "two second mates must not share a volume"
@@ -250,6 +298,14 @@ assert_present "$PARENT/state/procevent/$SID.source" \
   "a quiesce refusal must re-arm the reply source"
 rm -f "$PARENT/state/procevent-inbox/$SID.99.result" "$PARENT/state/procevent-inbox/$SID.99.adapter"
 pass "a refused quiesce restores ready state and re-arms replies"
+
+out=$(FM_FAKE_RUNPOD_RECORD_FAIL=suspending rp sleep ios 2>&1) \
+  && fail "sleep must refuse when the suspending lifecycle cannot be recorded"
+assert_contains "$out" "could not record its suspending lifecycle" "the transition failure must remain actionable"
+[ "$(record_field ios lifecycle)" = ready ] || fail "a failed suspending transition must preserve ready lifecycle"
+assert_present "$PARENT/state/procevent/$SID.source" \
+  "a failed suspending transition must re-arm the reply source"
+pass "a failed suspending transition restores ready state and replies"
 
 # --- sleep ------------------------------------------------------------------
 
@@ -308,12 +364,18 @@ assert_contains "$out" "fm-teardown.sh ios" "retirement, not suspension, is what
 # Retirement is bin/fm-teardown.sh's job; this stands in for its registry effect.
 grep -v '^- ios ' "$PARENT/data/secondmates.md" > "$PARENT/data/secondmates.next"
 mv -f "$PARENT/data/secondmates.next" "$PARENT/data/secondmates.md"
+sed -i.bak 's/^ssh_alias=.*/ssh_alias=fm-sm-ios-runpod/' "$PARENT/data/runpod/web.meta"
+rm -f "$PARENT/data/runpod/web.meta.bak"
+out=$(rp destroy ios --yes 2>&1) && fail "destroy must reject an SSH alias owned by another record"
+assert_contains "$out" "already owned by secondmate web" "destroy must recheck alias ownership before cleanup"
+sed -i.bak 's/^ssh_alias=.*/ssh_alias=fm-sm-web-runpod/' "$PARENT/data/runpod/web.meta"
+rm -f "$PARENT/data/runpod/web.meta.bak"
 out=$(rp destroy ios --yes 2>&1) || fail "destroy failed: $out"
 [ "$(jq -r --arg v "$IOS_VOLUME" '[.volumes[] | select(.id == $v)] | length' "$API_STATE")" = 0 ] \
   || fail "destroy must delete the network volume"
 assert_absent "$PARENT/data/runpod/ios.meta" "destroy must remove the local record"
 assert_absent "$(fragment fm-sm-ios-runpod)" "destroy must remove the generated SSH fragment"
-assert_no_grep '^fm-sm-ios-runpod ' "$PARENT/config/runpod/known_hosts" \
+assert_no_grep 'fm-sm-ios-runpod ' "$PARENT/config/runpod/known_hosts" \
   "destroy must remove the alias's exact pinned host-key entries"
 pass "destroy is a separate, explicitly authorized path that runs only after suspension and retirement"
 

@@ -117,6 +117,8 @@ VOLUME_LOCK=
 VOLUME_LOCK_HELD=0
 DELIVERY_LOCK=
 DELIVERY_LOCK_HELD=0
+KNOWN_HOSTS_LOCK=
+KNOWN_HOSTS_LOCK_HELD=0
 REPLY_LOCK=
 REPLY_LOCK_HELD=0
 cleanup() {
@@ -124,6 +126,10 @@ cleanup() {
   if [ "$REPLY_LOCK_HELD" -eq 1 ]; then
     fm_lock_release "$REPLY_LOCK" || true
     REPLY_LOCK_HELD=0
+  fi
+  if [ "$KNOWN_HOSTS_LOCK_HELD" -eq 1 ]; then
+    fm_lock_release "$KNOWN_HOSTS_LOCK" || true
+    KNOWN_HOSTS_LOCK_HELD=0
   fi
   if [ "$VOLUME_LOCK_HELD" -eq 1 ]; then
     fm_lock_release "$VOLUME_LOCK" || true
@@ -179,6 +185,18 @@ delivery_lock_acquire() {  # <id>
   DELIVERY_LOCK=$(secondmate_handoff_lock_path "$STATE" "$1")
   fm_lock_acquire_wait "$DELIVERY_LOCK" || die "cannot lock delivery for secondmate $1"
   DELIVERY_LOCK_HELD=1
+}
+
+known_hosts_lock_acquire() {
+  KNOWN_HOSTS_LOCK="$STATE/.runpod-known-hosts.lock"
+  fm_lock_acquire_wait "$KNOWN_HOSTS_LOCK" || die "cannot lock RunPod SSH host identities"
+  KNOWN_HOSTS_LOCK_HELD=1
+}
+
+known_hosts_lock_release() {
+  [ "$KNOWN_HOSTS_LOCK_HELD" -eq 1 ] || return 0
+  fm_lock_release "$KNOWN_HOSTS_LOCK"
+  KNOWN_HOSTS_LOCK_HELD=0
 }
 
 # --- record -----------------------------------------------------------------
@@ -249,6 +267,24 @@ assert_volume_owner() {  # <id> <volume-id>
   done
 }
 
+assert_alias_owner() {  # <id> <ssh-alias>
+  local id=$1 alias=$2 path owner count claimed
+  [ -d "$DATA/runpod" ] || return 0
+  for path in "$DATA/runpod"/*.meta; do
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    [ -f "$path" ] && [ ! -L "$path" ] || die "RunPod record is unsafe: $path"
+    owner=$(basename "$path" .meta)
+    fm_runpod_id_safe "$owner" || die "RunPod record has an unsafe secondmate id: $path"
+    [ "$owner" != "$id" ] || continue
+    count=$(grep -c '^ssh_alias=' "$path" 2>/dev/null || true)
+    [ "$count" -le 1 ] || die "RunPod record has ambiguous SSH alias ownership: $path"
+    [ "$count" -eq 1 ] || continue
+    claimed=$(sed -n 's/^ssh_alias=//p' "$path")
+    [ "$claimed" != "$alias" ] \
+      || die "SSH alias $alias is already owned by secondmate $owner; one RunPod alias cannot be shared across secondmates"
+  done
+}
+
 # --- RunPod API boundary ----------------------------------------------------
 #
 # Every RunPod call goes through here, so the whole provider has exactly one
@@ -262,8 +298,14 @@ assert_volume_owner() {  # <id> <volume-id>
 # RUNPOD_API_KEY assignment wins, an optional `export ` prefix is accepted, and
 # surrounding single or double quotes are stripped.
 api_key_read() {
-  local line key
+  local line key mode
   [ -f "$API_KEY_FILE" ] && [ ! -L "$API_KEY_FILE" ] || return 1
+  if [ "$(uname)" = Darwin ]; then
+    mode=$(stat -f %Lp "$API_KEY_FILE" 2>/dev/null) || return 1
+  else
+    mode=$(stat -c %a "$API_KEY_FILE" 2>/dev/null) || return 1
+  fi
+  [ "$mode" = 600 ] || return 1
   line=$(sed -n "s/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}${API_KEY_NAME}[[:space:]]*=//p" \
     "$API_KEY_FILE" 2>/dev/null | head -1) || true
   key=$(printf '%s' "$line" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
@@ -380,12 +422,13 @@ known_hosts_has_alias() {  # <alias>
 # pinned entry keeps verifying and a mismatch is a real failure, not a rotation.
 known_hosts_pin() {  # <alias> <host> <port>
   local alias=$1 host=$2 port=$3 scanned tmp
-  known_hosts_has_alias "$alias" && return 0
   mkdir -p "$SSH_DIR" || die "cannot create the SSH state directory"
   chmod 700 "$SSH_DIR" 2>/dev/null || true
-  [ ! -L "$KNOWN_HOSTS" ] || die "known_hosts is a symlink: $KNOWN_HOSTS"
   scanned=$("$KEYSCAN_BIN" -T 20 -p "$port" "$host" 2>/dev/null | grep -v '^#' | head -20) || true
   [ -n "$scanned" ] || die "could not read the pod's SSH host key at $host:$port; the pod may still be booting"
+  known_hosts_lock_acquire
+  known_hosts_has_alias "$alias" && { known_hosts_lock_release; return 0; }
+  [ ! -L "$KNOWN_HOSTS" ] || die "known_hosts is a symlink: $KNOWN_HOSTS"
   stage
   tmp="$TMP/known_hosts.new"
   [ ! -f "$KNOWN_HOSTS" ] || cat "$KNOWN_HOSTS" > "$tmp"
@@ -395,18 +438,24 @@ known_hosts_pin() {  # <alias> <host> <port>
   done
   chmod 600 "$tmp" || die "cannot secure the pinned host key"
   mv -f -- "$tmp" "$KNOWN_HOSTS" || die "cannot commit the pinned host key"
+  known_hosts_lock_release
   note "pinned: first-wake host key for $alias (persisted on the volume for every later pod)"
 }
 
 known_hosts_remove_alias() {  # <alias>
   local alias=$1 tmp
-  [ -e "$KNOWN_HOSTS" ] || [ -L "$KNOWN_HOSTS" ] || return 0
+  known_hosts_lock_acquire
+  if [ ! -e "$KNOWN_HOSTS" ] && [ ! -L "$KNOWN_HOSTS" ]; then
+    known_hosts_lock_release
+    return 0
+  fi
   [ -f "$KNOWN_HOSTS" ] && [ ! -L "$KNOWN_HOSTS" ] || die "known_hosts is unsafe: $KNOWN_HOSTS"
   tmp="$KNOWN_HOSTS.tmp.$$"
   awk -v alias="$alias" '$1 != alias' "$KNOWN_HOSTS" > "$tmp" \
     || { rm -f -- "$tmp"; die "cannot remove the pinned host key for $alias"; }
   chmod 600 "$tmp" || { rm -f -- "$tmp"; die "cannot secure the updated known_hosts"; }
   mv -f -- "$tmp" "$KNOWN_HOSTS" || { rm -f -- "$tmp"; die "cannot commit the updated known_hosts"; }
+  known_hosts_lock_release
 }
 
 # The probe reads the generated fragment directly, so wake readiness never
@@ -478,6 +527,7 @@ cmd_provision() {
 
   lifecycle_lock_acquire "$id"
   volume_lock_acquire
+  assert_alias_owner "$id" "$alias"
 
   local existing_volume existing_dc volumes match
   existing_volume=$(record_get "$id" volume_id)
@@ -676,6 +726,7 @@ cmd_wake() {
   [ -n "$volume_id" ] || die "secondmate $id has no recorded network volume; re-run provision"
   volume_lock_acquire
   assert_volume_owner "$id" "$volume_id"
+  assert_alias_owner "$id" "$alias"
   volume_lock_release
 
   # Confirm the volume still exists before creating anything that would attach it.
@@ -812,7 +863,7 @@ sleep_guards() {  # <id>
 # awake, with its reply source armed again.
 sleep_abort() {  # <id> <message>
   "$SCRIPT_DIR/fm-procevent-remote-reply.sh" arm-locked "$1" >/dev/null 2>&1 || true
-  record_set_lifecycle "$1" ready
+  [ "$(fm_runpod_lifecycle "$DATA" "$1")" = ready ] || record_set_lifecycle "$1" ready
   die "$2"
 }
 
@@ -847,7 +898,9 @@ cmd_sleep() {
     sleep_abort "$id" "secondmate $id still has an unhandled captured reply; handle it before suspending"
   fi
 
-  record_set_lifecycle "$id" suspending
+  if ! (record_set_lifecycle "$id" suspending); then
+    sleep_abort "$id" "secondmate $id could not record its suspending lifecycle; it is left running"
+  fi
   pod_id=$(record_get "$id" pod_id)
   if [ -n "$pod_id" ]; then
     raw=$(runpod_api DELETE "/pods/$pod_id" '') || rc=$?
@@ -993,6 +1046,10 @@ cmd_destroy() {
   [ -z "$(record_get "$id" pod_id)" ] \
     || die "secondmate $id still has pod $(record_get "$id" pod_id); run 'fm-runpod.sh sleep $id' first"
   volume_id=$(record_get "$id" volume_id)
+  alias=$(record_get "$id" ssh_alias)
+  volume_lock_acquire
+  [ -z "$volume_id" ] || assert_volume_owner "$id" "$volume_id"
+  [ -z "$alias" ] || assert_alias_owner "$id" "$alias"
   if [ -n "$volume_id" ]; then
     raw=$(runpod_api DELETE "/networkvolumes/$volume_id" '') || rc=$?
     [ "$rc" -eq 0 ] || die "the RunPod API could not be reached while deleting volume $volume_id"
@@ -1006,7 +1063,6 @@ cmd_destroy() {
   fi
   # Read the alias before the record goes away, or the generated fragment would
   # be orphaned with a stale endpoint in it.
-  alias=$(record_get "$id" ssh_alias)
   path=$(record_path "$id")
   [ -z "$alias" ] || known_hosts_remove_alias "$alias"
   rm -f -- "$path"

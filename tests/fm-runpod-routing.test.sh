@@ -29,6 +29,7 @@ new_world() {
   install_fake_runpod "$fakebin"
   fm_fake_exit0 "$fakebin" node chrome-devtools-axi pi-signed gh gh-axi tmux herdr
   printf 'RUNPOD_API_KEY=rp_fixture_key\n' > "$w/home/config/runpod.env"
+  chmod 600 "$w/home/config/runpod.env"
   runpod_fixture_init "$w/runpod.json"
   : > "$w/calls.log"
   printf '%s\n' "$w"
@@ -195,6 +196,36 @@ first_doctor=$(grep -n 'fm-remote-doctor.sh' "$w/calls.log" | head -1 | cut -d: 
 [ "$first_pod" -lt "$first_doctor" ] \
   || fail "the wake must happen before the readiness gate, not after it reports the host unreachable"
 pass "a launch wakes a suspended route before the readiness gate runs"
+
+w=$(new_world launchsleep)
+runpod_seed_remote_route "$w/home" ios fm-sm-ios-runpod /srv/firstmate /srv/sm-ios
+suspend_route "$w" ios
+doctor_ready="$w/doctor.ready"
+doctor_release="$w/doctor.release"
+FM_FAKE_DOCTOR_READY="$doctor_ready" FM_FAKE_DOCTOR_RELEASE="$doctor_release" \
+  FM_FAKE_REMOTE_LAUNCH_SUCCESS=1 \
+  world_env "$w" "$ROOT/bin/fm-spawn.sh" ios --secondmate > "$w/spawn.out" 2>&1 &
+spawn_pid=$!
+for _ in $(seq 1 500); do
+  [ -e "$doctor_ready" ] && break
+  kill -0 "$spawn_pid" 2>/dev/null || fail "spawn exited before reaching readiness: $(cat "$w/spawn.out")"
+  sleep 0.01
+done
+assert_present "$doctor_ready" "the spawn fixture must reach its readiness barrier"
+world_env "$w" "$ROOT/bin/fm-runpod.sh" sleep ios > "$w/sleep.out" 2>&1 &
+sleep_pid=$!
+sleep 0.2
+kill -0 "$sleep_pid" 2>/dev/null || fail "sleep escaped the active RunPod spawn boundary"
+[ "$(grep -c 'DELETE /pods/' "$w/calls.log" || true)" = 0 ] \
+  || fail "sleep terminated the pod while readiness was still active"
+: > "$doctor_release"
+wait "$spawn_pid" || fail "spawn failed after readiness resumed: $(cat "$w/spawn.out")"
+wait "$sleep_pid" || fail "sleep failed after spawn completed: $(cat "$w/sleep.out")"
+launch_line=$(grep -n 'fm-remote-secondmate-control.sh launch' "$w/calls.log" | head -1 | cut -d: -f1)
+delete_line=$(grep -n 'DELETE /pods/' "$w/calls.log" | head -1 | cut -d: -f1)
+[ -n "$launch_line" ] && [ -n "$delete_line" ] && [ "$launch_line" -lt "$delete_line" ] \
+  || fail "sleep must terminate compute only after the remote launch completes"
+pass "sleep waits for the whole RunPod remote spawn operation"
 
 # A brand-new pod has no Herdr fm-remote server running yet. The readiness gate
 # is what brings it back, and it runs on every launch, so each fresh pod is

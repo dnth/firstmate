@@ -391,6 +391,14 @@ else
   }
 fi
 
+REMOTE_RUNPOD_DELIVERY_LOCK=
+remote_runpod_delivery_cleanup() {
+  [ -n "$REMOTE_RUNPOD_DELIVERY_LOCK" ] || return 0
+  fm_lock_release "$REMOTE_RUNPOD_DELIVERY_LOCK" || true
+  REMOTE_RUNPOD_DELIVERY_LOCK=
+}
+trap remote_runpod_delivery_cleanup EXIT
+
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
   local fallback_harness fallback_model fallback_effort
@@ -529,6 +537,16 @@ spawn_remote_secondmate() {
       fm_lock_release "$registry_lock" || true
       fm_lock_release "$SPAWN_TASK_LOCK" || true
       echo "error: existing metadata for $id does not identify this remote secondmate route" >&2
+      return 1
+    fi
+  fi
+  if fm_runpod_is_managed "$DATA" "$id"; then
+    REMOTE_RUNPOD_DELIVERY_LOCK=$(secondmate_handoff_lock_path "$STATE" "$id")
+    if ! fm_lock_acquire_wait "$REMOTE_RUNPOD_DELIVERY_LOCK"; then
+      REMOTE_RUNPOD_DELIVERY_LOCK=
+      fm_lock_release "$registry_lock" || true
+      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      echo "error: remote secondmate $id delivery lifecycle could not be locked" >&2
       return 1
     fi
   fi

@@ -192,6 +192,13 @@ while [ "$#" -gt 0 ]; do
   shift || break
 done
 state=${FM_FAKE_RUNPOD_STATE:?}
+if [ -n "${FM_FAKE_KEYSCAN_BARRIER_DIR:-}" ]; then
+  mkdir -p "$FM_FAKE_KEYSCAN_BARRIER_DIR"
+  : > "$FM_FAKE_KEYSCAN_BARRIER_DIR/$host"
+  while [ "$(find "$FM_FAKE_KEYSCAN_BARRIER_DIR" -type f | wc -l | tr -d ' ')" -lt 2 ]; do
+    sleep 0.01
+  done
+fi
 key=$(jq -r --arg h "$host" --argjson p "${port:-0}" \
   '(.pods[] | select(.publicIp == $h and (.portMappings["22"] == $p)) | .networkVolume.id) as $v
    | .hostkeys[$v] // ""' "$state" 2>/dev/null | head -1)
@@ -266,10 +273,20 @@ case "$command_name" in
         printf 'schema=fm-remote-secondmate-control.v1\nbackend=herdr\ntarget=fm-remote:w1:p1\nherdr_session=fm-remote\nharness=codex\nmodel=default\neffort=default\n'
         exit 0
         ;;
+      launch)
+        if [ "${FM_FAKE_REMOTE_LAUNCH_SUCCESS:-}" = 1 ]; then
+          printf 'backend=herdr\ntarget=fm-remote:w1:p1\nherdr_session=fm-remote\nharness=codex\nmodel=default\neffort=default\n'
+        fi
+        exit 0
+        ;;
     esac
     exit 0
     ;;
   fm-remote-doctor.sh)
+    if [ -n "${FM_FAKE_DOCTOR_READY:-}" ]; then
+      : > "$FM_FAKE_DOCTOR_READY"
+      while [ ! -e "${FM_FAKE_DOCTOR_RELEASE:?}" ]; do sleep 0.01; done
+    fi
     # fresh-pod models what a brand-new container really looks like to the
     # readiness gate: the headless Herdr fm-remote server is not running yet,
     # the read-only run tags it fixable, and --fix starts it. The doctor's own
