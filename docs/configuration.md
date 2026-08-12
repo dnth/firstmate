@@ -253,8 +253,8 @@ For OMP secondmate launches, it explicitly loads that home's `.omp/extensions/fm
 
 ## OMP project extensions
 
-OMP discovers native project extensions from the launch cwd's `.omp/extensions` directory and from extension roots declared by `.omp/settings.json`, separately from its profile-scoped home extensions.
-The installed OMP 17.2.11 discovery surface loads top-level `.ts` and `.js` files, one-level `index.ts` and `index.js` entries, and extension manifests that declare `omp.extensions` or `pi.extensions`.
+OMP discovers native project extensions from the launch cwd's `.omp/extensions` directory and from non-empty string extension roots declared by `.omp/settings.json`, separately from its profile-scoped home extensions.
+The installed OMP 17.2.11 discovery surface loads non-hidden top-level `.ts` and `.js` files, one-level `index.ts` and `index.js` entries, and extension manifests that declare `omp.extensions` or `pi.extensions`.
 Those project files execute before the worker reasons about its brief, and Firstmate launches OMP with `--auto-approve`.
 `fm-spawn.sh` therefore refuses an OMP crewmate or secondmate launch when the final project worktree contains git-tracked auto-executed `.omp/extensions` entries or a tracked project settings extension selector.
 The successful OMP task metadata records `allow_project_omp_extensions=1` whenever that override is passed.

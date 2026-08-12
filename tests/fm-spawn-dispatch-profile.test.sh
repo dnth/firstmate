@@ -1561,6 +1561,89 @@ test_omp_refuses_tracked_extension_directory_symlinks() {
   pass "OMP refuses tracked extension-directory symlinks"
 }
 
+test_omp_root_symlink_uses_shared_opt_in_boundary() {
+  local rec id out status
+  id=$(profile_id profile-omp-root-symlink-z30)
+  rec=$(make_spawn_case profile-omp-root-symlink omp "$id")
+  read_case_record "$rec"
+  mkdir -p "$PROJ_DIR/omp-root/extensions"
+  printf '%s\n' 'export default function () {}' > "$PROJ_DIR/omp-root/extensions/project.ts"
+  ln -s omp-root "$PROJ_DIR/.omp"
+  git -C "$PROJ_DIR" add .omp omp-root
+  sync_project_commit "$PROJ_DIR" "$WT_DIR" 'add linked omp root'
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "OMP spawn with a tracked root symlink should refuse without opt-in"
+  assert_contains "$out" "  .omp" "OMP root-symlink refusal did not name the exact offender"
+  assert_contains "$out" "--allow-project-omp-extensions" \
+    "OMP root-symlink refusal omitted the shared opt-in guidance"
+  assert_no_grep 'new-window|new-session' "$CASE_DIR/endpoint.log" \
+    "OMP root-symlink refusal created an endpoint"
+
+  out=$(FM_TEST_OMP_DYNAMIC_ACK=1 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+      --allow-project-omp-extensions)
+  status=$?
+  expect_code 0 "$status" "OMP root symlink should launch with explicit opt-in"
+  assert_grep 'allow_project_omp_extensions=1' "$HOME_DIR/state/$id.meta" \
+    "OMP root-symlink opt-in was not recorded in task metadata"
+  pass "OMP root symlinks use the shared opt-in boundary"
+}
+
+test_omp_ignores_hidden_direct_extension_files() {
+  local rec id out status
+  id=$(profile_id profile-omp-hidden-ext-z31)
+  rec=$(make_spawn_case profile-omp-hidden-ext omp "$id")
+  read_case_record "$rec"
+  mkdir -p "$PROJ_DIR/.omp/extensions"
+  printf '%s\n' 'export default function () {}' > "$PROJ_DIR/.omp/extensions/.disabled.ts"
+  git -C "$PROJ_DIR" add .omp/extensions/.disabled.ts
+  sync_project_commit "$PROJ_DIR" "$WT_DIR" 'add hidden inactive omp extension'
+
+  out=$(FM_TEST_OMP_DYNAMIC_ACK=1 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "hidden direct OMP extension files should remain undiscovered"
+  assert_contains "$out" "spawned $id harness=omp" \
+    "hidden direct OMP extension file changed clean-project launch behavior"
+  pass "OMP ignores hidden direct extension files"
+}
+
+test_omp_ignores_unusable_settings_extension_entries() {
+  local rec id out status
+  id=$(profile_id profile-omp-settings-object-z32)
+  rec=$(make_spawn_case profile-omp-settings-object omp "$id")
+  read_case_record "$rec"
+  mkdir -p "$PROJ_DIR/.omp"
+  printf '%s\n' '{"extensions":{"path":"project.ts"}}' > "$PROJ_DIR/.omp/settings.json"
+  git -C "$PROJ_DIR" add .omp/settings.json
+  sync_project_commit "$PROJ_DIR" "$WT_DIR" 'add non-array omp extensions setting'
+
+  out=$(FM_TEST_OMP_DYNAMIC_ACK=1 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "non-array OMP extensions settings should be ignored"
+  assert_contains "$out" "spawned $id harness=omp" \
+    "non-array OMP extensions setting changed clean-project launch behavior"
+
+  id=$(profile_id profile-omp-settings-filtered-z33)
+  rec=$(make_spawn_case profile-omp-settings-filtered omp "$id")
+  read_case_record "$rec"
+  mkdir -p "$PROJ_DIR/.omp"
+  printf '%s\n' '{"extensions":[null,""]}' > "$PROJ_DIR/.omp/settings.json"
+  git -C "$PROJ_DIR" add .omp/settings.json
+  sync_project_commit "$PROJ_DIR" "$WT_DIR" 'add unusable omp extension entries'
+
+  out=$(FM_TEST_OMP_DYNAMIC_ACK=1 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "unusable OMP extension entries should be filtered"
+  assert_contains "$out" "spawned $id harness=omp" \
+    "unusable OMP extension entries changed clean-project launch behavior"
+  pass "OMP ignores unusable settings extension entries"
+}
+
 test_omp_ignores_unsupported_root_extension_manifest() {
   local rec id out status
   id=$(profile_id profile-omp-root-manifest-z27)
@@ -1806,6 +1889,9 @@ test_omp_project_without_tracked_extensions_is_unchanged
 test_non_omp_ignores_tracked_project_extensions
 test_omp_refuses_tracked_settings_extension_roots
 test_omp_refuses_tracked_extension_directory_symlinks
+test_omp_root_symlink_uses_shared_opt_in_boundary
+test_omp_ignores_hidden_direct_extension_files
+test_omp_ignores_unusable_settings_extension_entries
 test_omp_ignores_unsupported_root_extension_manifest
 test_omp_does_not_trust_copied_primary_adapter_in_projects
 test_omp_secondmate_inspects_staged_live_extensions

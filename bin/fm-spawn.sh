@@ -1544,6 +1544,7 @@ resolve_project_dir_arg() {
 omp_project_extension_preflight() {
   local project=$1 record metadata stage path relative offenders manifest_state trusted
   local settings_path settings_state scan_source tracked_count index_status head_status seen duplicate
+  local omp_root_offender=0 extensions_root_offender=0
   local -a seen_paths
   [ "$HARNESS" = omp ] || return 0
   offenders=
@@ -1593,6 +1594,11 @@ omp_project_extension_preflight() {
     if { [ "$path" = .omp ] || [ "$path" = .omp/extensions ]; } \
       && { [ -L "$project/$path" ] || [ -d "$project/$path" ]; }; then
       offenders="${offenders}${offenders:+$'\n'}$path"
+      if [ "$path" = .omp ]; then
+        omp_root_offender=1
+      else
+        extensions_root_offender=1
+      fi
       continue
     fi
     if [ "$path" = .omp/settings.json ]; then
@@ -1601,9 +1607,15 @@ omp_project_extension_preflight() {
     fi
     relative=${path#".omp/extensions/"}
     if [[ "$relative" != */* ]] && [ -d "$project/$path" ]; then
+      case "$relative" in
+        .*) [ -L "$project/$path" ] || continue ;;
+      esac
       offenders="${offenders}${offenders:+$'\n'}$path"
       continue
     fi
+    case "$relative" in
+      .*|*/.*) continue ;;
+    esac
     case "$relative" in
       *.ts|*.js)
         [ -f "$project/$path" ] || continue
@@ -1661,10 +1673,13 @@ omp_project_extension_preflight() {
     echo "error: could not inspect git-tracked OMP extensions in project '$project'; refusing the OMP launch" >&2
     return 1
   fi
-  if { [ -L "$project/.omp" ] || [ -L "$project/.omp/extensions" ]; } \
-    && [ "$tracked_count" -gt 0 ]; then
-    echo "error: a tracked OMP discovery root resolves through a worktree symlink; refusing the OMP launch" >&2
-    return 1
+  if [ "$tracked_count" -gt 0 ]; then
+    if [ -L "$project/.omp" ] && [ "$omp_root_offender" -eq 0 ]; then
+      offenders="${offenders}${offenders:+$'\n'}.omp"
+    fi
+    if [ -L "$project/.omp/extensions" ] && [ "$extensions_root_offender" -eq 0 ]; then
+      offenders="${offenders}${offenders:+$'\n'}.omp/extensions"
+    fi
   fi
 
   if [ -n "$settings_path" ] && [ -f "$project/$settings_path" ]; then
@@ -1673,20 +1688,14 @@ omp_project_extension_preflight() {
       return 1
     }
     settings_state=$(jq -er '
-      if .extensions == null then "none"
-      elif (.extensions | type) != "array" then "invalid"
-      elif any(.extensions[]; type != "string") then "invalid"
-      elif any(.extensions[]; type == "string") then "declared"
+      if (.extensions | type) != "array" then "none"
+      elif any(.extensions[]; type == "string" and length > 0) then "declared"
       else "none"
       end
     ' "$project/$settings_path" 2>/dev/null) || {
       echo "error: could not read tracked OMP project settings '$settings_path'; refusing the OMP launch" >&2
       return 1
     }
-    if [ "$settings_state" = invalid ]; then
-      echo "error: tracked OMP project settings '$settings_path' has an invalid extensions field; refusing the OMP launch" >&2
-      return 1
-    fi
     if [ "$settings_state" = declared ]; then
       offenders="${offenders}${offenders:+$'\n'}$settings_path#extensions"
     fi
