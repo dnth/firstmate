@@ -48,8 +48,8 @@ rp() {  # run the provider with the fixture wired in
   FM_FAKE_RUNPOD_STATE="$API_STATE" \
   FM_FAKE_RUNPOD_LOG="$API_LOG" \
   FM_FAKE_REMOTE_LOG="$REMOTE_LOG" \
-  FM_RUNPOD_POLL_INTERVAL=0 \
-  FM_RUNPOD_WAKE_TIMEOUT=10 \
+  FM_RUNPOD_POLL_INTERVAL="${FM_TEST_RUNPOD_POLL_INTERVAL:-0}" \
+  FM_RUNPOD_WAKE_TIMEOUT="${FM_TEST_RUNPOD_WAKE_TIMEOUT:-10}" \
   "$ROOT/bin/fm-runpod.sh" "$@"
 }
 
@@ -123,6 +123,12 @@ assert_absent "$PARENT/data/runpod/web.meta" "a refused shared-alias provision m
 pass "provision rejects an SSH alias owned by another second mate"
 
 # --- wake -------------------------------------------------------------------
+
+out=$(FM_FAKE_BOOT_INCOMPLETE=1 FM_TEST_RUNPOD_POLL_INTERVAL=1 FM_TEST_RUNPOD_WAKE_TIMEOUT=1 \
+  rp wake ios 2>&1) && fail "wake must refuse while first-boot provisioning is incomplete"
+assert_contains "$out" "SSH bootstrap did not complete" "an incomplete bootstrap must fail at the wake readiness boundary"
+[ "$(record_field ios lifecycle)" != ready ] || fail "an incompletely provisioned pod must never be recorded ready"
+pass "wake refuses a pod whose first-boot provisioning did not complete"
 
 out=$(rp wake ios 2>&1) || fail "wake failed: $out"
 assert_contains "$out" "ready: secondmate ios" "wake must report readiness"

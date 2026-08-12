@@ -466,11 +466,12 @@ known_hosts_remove_alias() {  # <alias>
   known_hosts_lock_release
 }
 
-# The probe reads the generated fragment directly, so wake readiness never
-# depends on the operator having wired the Include line into ~/.ssh/config yet.
+# The probe reads the generated fragment directly and requires the boot marker
+# written only after the doctor-owned readiness handoff succeeds.
 ssh_probe() {  # <alias>
   "$SSH_BIN" -o BatchMode=yes -o ConnectTimeout=10 \
-    -F "$(ssh_fragment_path "$1")" "$1" true >/dev/null 2>&1
+    -F "$(ssh_fragment_path "$1")" "$1" \
+    test -f /workspace/persistent-runtime/boot.ready >/dev/null 2>&1
 }
 
 # --- route binding ----------------------------------------------------------
@@ -822,7 +823,7 @@ cmd_wake() {
 
   while ! ssh_probe "$alias"; do
     [ "$waited" -lt "$WAKE_TIMEOUT" ] \
-      || die "pod $pod_id published $host:$port but SSH did not answer within ${WAKE_TIMEOUT}s; it is preserved for inspection"
+      || die "pod $pod_id published $host:$port but its SSH bootstrap did not complete within ${WAKE_TIMEOUT}s; it is preserved for inspection"
     sleep "$POLL_INTERVAL"
     waited=$((waited + POLL_INTERVAL))
   done

@@ -14,14 +14,15 @@
 #      and persist one on the volume's first boot. This is what keeps strict
 #      host-key verification working across pod replacement: the pod's identity
 #      lives on the volume, not on the machine.
-#   2. Install and start sshd, authorizing the account's configured public key.
-#   3. Link the fixed fm-remote-entrypoint.sh when the volume already carries a
-#      Firstmate code root, so the very first fm-on.sh call resolves.
-#   4. Hand readiness to bin/fm-remote-doctor.sh --fix when that code root
-#      exists. The doctor is the single owner of what "ready for a remote second
-#      mate" means, and on Linux it starts the remote job worker and the
-#      headless Herdr fm-remote server itself - no GUI or Aqua session is
-#      involved on this platform. Nothing here duplicates those checks.
+#   2. Provision the required toolchain and link the fixed remote entrypoint.
+#   3. Start sshd with the account's configured public key, then hand readiness
+#      to bin/fm-remote-doctor.sh --fix. The doctor is the single owner of what
+#      "ready for a remote second mate" means, and on Linux it starts the remote
+#      job worker and the headless Herdr fm-remote server itself - no GUI or
+#      Aqua session is involved on this platform. Nothing here duplicates those
+#      checks.
+#   4. Record boot success only after the doctor's handoff succeeds. SSH stays
+#      available while human-only gaps remain, but wake never reports ready.
 #
 # On a volume's first boot the toolchain provisioning step clones the code root
 # from FM_REMOTE_ORIGIN and installs the tools bin/fm-remote-doctor.sh requires,
@@ -59,7 +60,10 @@ FM_BOOT_LOG=${FM_BOOT_LOG:-$FM_PERSIST/boot.log}
 # re-provision exactly once instead of silently keeping an older toolchain.
 FM_TOOLCHAIN_CONTRACT=1
 FM_TOOLCHAIN_MARKER="$FM_PERSIST/toolchain.provisioned"
+FM_BOOT_READY="$FM_PERSIST/boot.ready"
 FM_LOCAL_BIN=${FM_LOCAL_BIN:-$HOME/.local/bin}
+PATH="$FM_LOCAL_BIN:$PATH"
+export PATH
 # The git URL the code root is cloned from on a volume's first boot.
 FM_REMOTE_ORIGIN=${FM_REMOTE_ORIGIN:-}
 # Optional npm package providing a worker harness. Left unset the pod installs
@@ -125,9 +129,22 @@ ensure_base_packages() {
   done
   [ -n "$missing" ] || return 0
   log "installing base packages:$missing"
-  apt-get update -qq >/dev/null 2>&1 || true
+  apt-get update -qq >/dev/null 2>&1 || {
+    log "the base-package index could not be updated"
+    return 1
+  }
   # shellcheck disable=SC2086 # deliberate word splitting of the package list.
-  apt_install $missing || log "some base packages could not be installed:$missing"
+  apt_install $missing || {
+    log "some base packages could not be installed:$missing"
+    return 1
+  }
+  for pkg in $FM_APT_PACKAGES; do
+    case "$pkg" in
+      openssh-server) have sshd || [ -x /usr/sbin/sshd ] || return 1 ;;
+      ca-certificates) [ -e /etc/ssl/certs/ca-certificates.crt ] || return 1 ;;
+      *) have "$pkg" || return 1 ;;
+    esac
+  done
 }
 
 # Node provides the npm-distributed tools the doctor requires. The distro
@@ -183,10 +200,6 @@ ensure_pinned_tools() {
   local rc=0 installer
   mkdir -p "$FM_LOCAL_BIN" || return 1
   for installer in fm-install-herdr.sh fm-install-treehouse.sh; do
-    case "$installer" in
-      fm-install-herdr.sh) have herdr && continue ;;
-      fm-install-treehouse.sh) have treehouse && continue ;;
-    esac
     if [ ! -x "$FM_REMOTE_ROOT/bin/$installer" ]; then
       log "$installer is missing from the code root"
       rc=1
@@ -204,10 +217,8 @@ ensure_pinned_tools() {
 ensure_npm_tools() {
   local rc=0
   have npm || { log "npm is unavailable, so npm-distributed tools cannot be installed"; return 1; }
-  if ! have tasks-axi; then
-    log "installing tasks-axi"
-    npm install -g tasks-axi >> "$FM_BOOT_LOG" 2>&1 || { log "tasks-axi installation failed"; rc=1; }
-  fi
+  log "installing tasks-axi"
+  npm install -g tasks-axi >> "$FM_BOOT_LOG" 2>&1 || { log "tasks-axi installation failed"; rc=1; }
   if [ -n "$FM_POD_HARNESS_NPM" ]; then
     log "installing the configured harness package"
     npm install -g "$FM_POD_HARNESS_NPM" >> "$FM_BOOT_LOG" 2>&1 \
@@ -230,18 +241,21 @@ provision_toolchain() {
     return 0
   fi
   log "provisioning toolchain contract $FM_TOOLCHAIN_CONTRACT"
-  ensure_base_packages
+  ensure_base_packages || rc=1
   ensure_node || rc=1
   ensure_code_root || return 1
   ensure_pinned_tools || rc=1
   ensure_npm_tools || rc=1
   if [ "$rc" -eq 0 ]; then
-    printf '%s\n' "$FM_TOOLCHAIN_CONTRACT" > "$FM_TOOLCHAIN_MARKER" 2>/dev/null || true
+    printf '%s\n' "$FM_TOOLCHAIN_CONTRACT" > "$FM_TOOLCHAIN_MARKER" 2>/dev/null || {
+      log "the satisfied toolchain contract could not be recorded"
+      return 1
+    }
     log "toolchain provisioning complete"
-  else
-    log "toolchain provisioning finished with gaps; the doctor reports what remains"
+    return 0
   fi
-  return 0
+  log "toolchain provisioning finished with gaps; the doctor reports what remains"
+  return 1
 }
 
 install_sshd() {
@@ -311,16 +325,16 @@ start_sshd() {
 
 link_entrypoint() {
   local want="$FM_REMOTE_ROOT/bin/fm-remote-entrypoint.sh"
-  [ -x "$want" ] || return 0
-  mkdir -p "$HOME/.local/bin" || return 0
-  if [ -L "$HOME/.local/bin/fm-remote-entrypoint.sh" ]; then
-    [ "$(readlink "$HOME/.local/bin/fm-remote-entrypoint.sh")" = "$want" ] && return 0
-    rm -f -- "$HOME/.local/bin/fm-remote-entrypoint.sh"
-  elif [ -e "$HOME/.local/bin/fm-remote-entrypoint.sh" ]; then
+  [ -x "$want" ] || { log "the fixed remote entrypoint is missing from the code root"; return 1; }
+  mkdir -p "$FM_LOCAL_BIN" || return 1
+  if [ -L "$FM_LOCAL_BIN/fm-remote-entrypoint.sh" ]; then
+    [ "$(readlink "$FM_LOCAL_BIN/fm-remote-entrypoint.sh")" = "$want" ] && return 0
+    rm -f -- "$FM_LOCAL_BIN/fm-remote-entrypoint.sh" || return 1
+  elif [ -e "$FM_LOCAL_BIN/fm-remote-entrypoint.sh" ]; then
     log "an existing non-symlink file holds the entrypoint path; leaving it for the operator"
-    return 0
+    return 1
   fi
-  ln -s "$want" "$HOME/.local/bin/fm-remote-entrypoint.sh" || return 0
+  ln -s "$want" "$FM_LOCAL_BIN/fm-remote-entrypoint.sh" || return 1
   log "linked the fixed remote entrypoint"
 }
 
@@ -330,13 +344,21 @@ link_entrypoint() {
 hand_over_to_doctor() {
   local doctor="$FM_REMOTE_ROOT/bin/fm-remote-doctor.sh"
   if [ ! -x "$doctor" ]; then
-    log "no Firstmate code root on the volume yet; run bin/fm-remote-home-seed.sh from the primary"
-    return 0
+    log "the remote doctor is missing from the code root"
+    return 1
   fi
   log "running the remote readiness repair"
   FM_ROOT_OVERRIDE="$FM_REMOTE_ROOT" FM_HOME="$FM_REMOTE_HOME" \
-    "$doctor" --fix >> "$FM_BOOT_LOG" 2>&1 || \
-    log "the readiness repair reported remaining gaps; see $FM_BOOT_LOG"
+    "$doctor" --fix >> "$FM_BOOT_LOG" 2>&1 || {
+      log "the readiness repair reported remaining gaps; see $FM_BOOT_LOG"
+      return 1
+    }
+}
+
+hold_pod() {
+  while :; do
+    sleep 3600
+  done
 }
 
 main() {
@@ -345,17 +367,26 @@ main() {
     exit 0
   fi
   require_volume || exit 1
-  install_sshd || log "openssh-server is unavailable; SSH will not come up"
+  rm -f -- "$FM_BOOT_READY" || exit 1
+  if ! provision_toolchain; then
+    log "FATAL: toolchain provisioning could not complete; SSH will not come up"
+    hold_pod
+  fi
+  install_sshd || { log "FATAL: openssh-server is unavailable; SSH will not come up"; hold_pod; }
   restore_host_keys || log "the persisted host key could not be restored"
   authorize_key || log "the authorized key could not be written"
+  link_entrypoint || { log "FATAL: the remote entrypoint could not be linked; SSH will not come up"; hold_pod; }
   start_sshd || exit 1
-  provision_toolchain || log "toolchain provisioning could not complete"
-  link_entrypoint
-  hand_over_to_doctor
-  log "boot complete; holding the pod open"
-  while :; do
-    sleep 3600
+  until hand_over_to_doctor; do
+    log "remote readiness is incomplete; SSH is available for the required human steps"
+    sleep 5
   done
+  printf '%s\n' "$FM_TOOLCHAIN_CONTRACT" > "$FM_BOOT_READY" || {
+    log "FATAL: boot readiness could not be recorded"
+    hold_pod
+  }
+  log "boot complete; holding the pod open"
+  hold_pod
 }
 
 main "$@"

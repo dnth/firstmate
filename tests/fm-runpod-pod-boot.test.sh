@@ -64,11 +64,16 @@ new_world() {  # <name> -> world dir
   cat > "$fakebin/apt-get" <<'SH'
 #!/usr/bin/env bash
 printf 'apt-get %s\n' "$*" >> "$FM_FAKE_CALLS"
+[ "${FM_FAKE_APT_FAIL:-0}" != 1 ] || exit 1
 exit 0
 SH
   cat > "$fakebin/npm" <<'SH'
 #!/usr/bin/env bash
 printf 'npm %s\n' "$*" >> "$FM_FAKE_CALLS"
+if [ "${1:-}" = install ] && [ "${2:-}" = -g ] && [ "${3:-}" = tasks-axi ]; then
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$FM_LOCAL_BIN/tasks-axi"
+  chmod +x "$FM_LOCAL_BIN/tasks-axi"
+fi
 exit 0
 SH
   cat > "$fakebin/node" <<'SH'
@@ -83,11 +88,14 @@ if [ "${1:-}" = clone ]; then
   dest=${!#}
   mkdir -p "$dest/.git" "$dest/bin"
   for i in fm-install-herdr.sh fm-install-treehouse.sh; do
-    printf '#!/usr/bin/env bash\nprintf "%s %%s\\n" "$*" >> "$FM_FAKE_CALLS"\nexit 0\n' "$i" > "$dest/bin/$i"
+    tool=${i#fm-install-}
+    tool=${tool%.sh}
+    printf '#!/usr/bin/env bash\nprintf "%s %%s\\n" "$*" >> "$FM_FAKE_CALLS"\nprintf '\''#!/usr/bin/env bash\\nexit 0\\n'\'' > "$1/%s"\nchmod +x "$1/%s"\n' "$i" "$tool" "$tool" > "$dest/bin/$i"
     chmod +x "$dest/bin/$i"
   done
-  printf '#!/usr/bin/env bash\nprintf "doctor %%s\\n" "$*" >> "$FM_FAKE_CALLS"\nexit 0\n' > "$dest/bin/fm-remote-doctor.sh"
-  chmod +x "$dest/bin/fm-remote-doctor.sh"
+  printf '#!/usr/bin/env bash\ncommand -v herdr >> "$FM_FAKE_CALLS" || exit 1\ncommand -v treehouse >> "$FM_FAKE_CALLS" || exit 1\nprintf "doctor %%s\\n" "$*" >> "$FM_FAKE_CALLS"\nexit 0\n' > "$dest/bin/fm-remote-doctor.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$dest/bin/fm-remote-entrypoint.sh"
+  chmod +x "$dest/bin/fm-remote-doctor.sh" "$dest/bin/fm-remote-entrypoint.sh"
 fi
 exit 0
 SH
@@ -99,13 +107,11 @@ SH
 }
 
 # The boot script is a PID 1 payload that never returns, so provisioning is
-# exercised through a bounded subshell that stops once the marker appears.
-# Waits until the recorded contract CHANGES rather than until the marker merely
-# exists, so a stale-contract re-provisioning run is not killed before it starts.
+# exercised through a bounded subshell that stops once the whole boot completes.
 provision_only() {  # <world>
-  local w=$1 marker before now
-  marker="$w/volume/persistent-runtime/toolchain.provisioned"
-  before=$(cat "$marker" 2>/dev/null || true)
+  local w=$1
+  mkdir -p "$w/volume/persistent-runtime"
+  : > "$w/volume/persistent-runtime/boot.log"
   (
     PATH="$w/fakebin:/usr/bin:/bin" \
     HOME="$w/home" \
@@ -116,8 +122,7 @@ provision_only() {  # <world>
     timeout 60 bash "$BOOT" >/dev/null 2>&1 &
     boot_pid=$!
     for _ in $(seq 1 300); do
-      now=$(cat "$marker" 2>/dev/null || true)
-      [ -n "$now" ] && [ "$now" != "$before" ] && break
+      grep -q 'boot complete' "$w/volume/persistent-runtime/boot.log" 2>/dev/null && break
       kill -0 "$boot_pid" 2>/dev/null || break
       sleep 0.1
     done
@@ -153,6 +158,7 @@ assert_contains "$calls" "git clone" "first boot must clone the code root"
 assert_contains "$calls" "fm-install-herdr.sh" "herdr must come from the repository's pinned installer"
 assert_contains "$calls" "fm-install-treehouse.sh" "treehouse must come from the repository's pinned installer"
 assert_contains "$calls" "npm install -g tasks-axi" "tasks-axi must be installed"
+assert_contains "$calls" "$w/home/.local/bin/herdr" "the doctor must see pinned tools through the local-bin PATH"
 assert_present "$w/volume/persistent-runtime/toolchain.provisioned" "a completed provisioning run must record its marker"
 pass "first boot clones the code root and installs the required toolchain through the pinned installers"
 
@@ -167,6 +173,19 @@ second=$(cat "$w/calls.log")
 assert_not_contains "$second" "git clone" "a second boot must not re-clone the code root"
 assert_not_contains "$second" "npm install -g tasks-axi" "a second boot must not reinstall the toolchain"
 pass "provisioning is idempotent across boots on the same volume"
+
+# --- pre-existing tools cannot bypass the repository pins -------------------
+
+printf '#!/usr/bin/env bash\nexit 0\n' > "$w/home/.local/bin/herdr"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$w/home/.local/bin/treehouse"
+chmod +x "$w/home/.local/bin/herdr" "$w/home/.local/bin/treehouse"
+printf '0\n' > "$w/volume/persistent-runtime/toolchain.provisioned"
+: > "$w/calls.log"
+provision_only "$w"
+pinned=$(cat "$w/calls.log")
+assert_contains "$pinned" "fm-install-herdr.sh" "a stale contract must replace a pre-existing herdr through the pinned installer"
+assert_contains "$pinned" "fm-install-treehouse.sh" "a stale contract must replace a pre-existing treehouse through the pinned installer"
+pass "a contract bump cannot be satisfied by pre-existing unverified tools"
 
 # --- a raised contract re-provisions exactly once ----------------------------
 
@@ -201,6 +220,22 @@ assert_contains "$(cat "$w2/calls.log")" "npm install -g @example/harness" \
   "a configured harness package must be installed"
 pass "a configured harness package is installed on first boot"
 
+# --- base-package failures cannot satisfy the contract ----------------------
+
+w4=$(new_world packages)
+rm -f "$w4/fakebin/sshd"
+out=$(
+  PATH="$w4/fakebin:/usr/bin:/bin" HOME="$w4/home" FM_VOLUME="$w4/volume" \
+  FM_REMOTE_ORIGIN="$w4/origin" FM_FAKE_CALLS="$w4/calls.log" \
+  FM_LOCAL_BIN="$w4/home/.local/bin" FM_FAKE_APT_FAIL=1 \
+  timeout 3 bash "$BOOT" 2>&1 || true
+)
+assert_contains "$out" "base-package index could not be updated" "a package-manager failure must be reported"
+assert_absent "$w4/volume/persistent-runtime/toolchain.provisioned" \
+  "a package-manager failure must not record a satisfied contract"
+assert_not_contains "$out" "boot complete" "a failed package contract must never report boot completion"
+pass "base-package failure propagates and leaves the pod unready"
+
 # --- no origin and no clone is a loud refusal, not a silent partial boot -----
 
 w3=$(new_world noorigin)
@@ -217,4 +252,5 @@ out=$(
 assert_contains "$out" "no code root" "a pod with no clone and no origin must say so plainly"
 assert_absent "$w3/volume/persistent-runtime/toolchain.provisioned" \
   "a failed provisioning run must not record a satisfied marker"
+assert_not_contains "$out" "boot complete" "a failed clone contract must never report boot completion"
 pass "a pod that cannot obtain a code root refuses loudly and records no marker"

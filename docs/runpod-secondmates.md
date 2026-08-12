@@ -108,15 +108,7 @@ bin/fm-runpod.sh wake <id> --gpu
 bin/fm-runpod.sh wake <id> --min-vram 24
 ```
 
-On the volume's first wake, populate the separate Firstmate code root from an origin the pod can reach, then replace the pod so the tracked boot contract can link the fixed entrypoint and run the doctor:
-
-```sh
-bin/fm-runpod.sh ssh <id> git clone <firstmate-origin-url> /workspace/firstmate
-bin/fm-runpod.sh sleep <id>
-bin/fm-runpod.sh wake <id>
-```
-
-Then seed the persistent home exactly as for any other remote route, using the alias `provision` reported:
+Seed the persistent home exactly as for any other remote route, using the alias `provision` reported:
 
 ```sh
 bin/fm-remote-home-seed.sh <id> fm-sm-<id>-runpod /workspace/firstmate /workspace/secondmate-home <project>...
@@ -205,6 +197,7 @@ On a volume's first boot it provisions the whole remote toolchain, so a fresh po
 It also restores the persisted SSH host key from the volume, starts sshd with the account's authorized key, links the fixed remote entrypoint, and then hands readiness to `bin/fm-remote-doctor.sh --fix`.
 The doctor is the single owner of what "ready for a remote second mate" means, and on Linux it starts the remote job worker and the headless Herdr `fm-remote` server itself, with no GUI or Aqua session involved.
 Nothing in the boot script re-states the doctor's verdict; it installs toward that set and lets the doctor decide.
+Wake requires the boot-success marker written after that handoff, so SSH alone can never make an unfinished or failed bootstrap report ready.
 
 Provisioning is idempotent and volume-scoped.
 A marker on the volume records the contract version it satisfied, so later boots skip the work and a raised contract version re-provisions exactly once.

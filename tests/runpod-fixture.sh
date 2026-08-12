@@ -223,7 +223,7 @@ while [ "$i" -lt "${#args[@]}" ]; do
 done
 
 if [ "$transport" -eq 0 ]; then
-  # Readiness probe: ssh -o BatchMode=yes -o ConnectTimeout=N -F <conf> <alias> true
+  # Readiness probe: SSH plus the boot script's successful handoff marker.
   conf=
   alias=
   i=0
@@ -231,12 +231,13 @@ if [ "$transport" -eq 0 ]; then
     case "${args[$i]}" in
       -o) i=$((i + 2)); continue ;;
       -F) i=$((i + 1)); conf=${args[$i]} ;;
-      true) ;;
+      test|-f|/workspace/persistent-runtime/boot.ready) ;;
       *) [ -n "$alias" ] || alias=${args[$i]} ;;
     esac
     i=$((i + 1))
   done
   [ -n "$conf" ] && [ -f "$conf" ] || exit 255
+  [ "${FM_FAKE_BOOT_INCOMPLETE:-0}" != 1 ] || exit 255
   host=$(sed -n 's/^ *HostName *//p' "$conf" | head -1)
   port=$(sed -n 's/^ *Port *//p' "$conf" | head -1)
   state=${FM_FAKE_RUNPOD_STATE:?}
