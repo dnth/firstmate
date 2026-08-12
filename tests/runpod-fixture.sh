@@ -48,9 +48,23 @@ method=$(sed -n 's/^request = "\(.*\)"$/\1/p' "$cfg" | head -1)
 url=$(sed -n 's/^url = "\(.*\)"$/\1/p' "$cfg" | head -1)
 bodyfile=$(sed -n 's/^data-binary = "@\(.*\)"$/\1/p' "$cfg" | head -1)
 auth=$(sed -n 's/^header = "Authorization: Bearer \(.*\)"$/\1/p' "$cfg" | head -1)
+connect_timeout=$(sed -n 's/^connect-timeout = "\{0,1\}\([^" ]*\)"\{0,1\}$/\1/p' "$cfg" | head -1)
+total_timeout=$(sed -n 's/^max-time = "\{0,1\}\([^" ]*\)"\{0,1\}$/\1/p' "$cfg" | head -1)
 path=${url#https://rest.runpod.io/v1}
 printf '%s %s\n' "$method" "$path" >> "${FM_FAKE_RUNPOD_LOG:-/dev/null}"
 
+if [ "${FM_FAKE_ENDPOINT_API_BLOCK:-0}" = 1 ]; then
+  case "$method $path" in
+    "GET /pods/"*)
+      if [ -z "$connect_timeout" ] || [ -z "$total_timeout" ]; then
+        sleep 10
+        exit 28
+      fi
+      sleep "$total_timeout"
+      exit 28
+      ;;
+  esac
+fi
 # An unreachable API is a curl transport failure, not an HTTP status.
 [ -z "${FM_FAKE_RUNPOD_UNREACHABLE:-}" ] || { printf 'fake curl: could not resolve host\n' >&2; exit 6; }
 

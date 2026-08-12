@@ -95,7 +95,7 @@ assert_absent "$PARENT/data/runpod/.hidden.meta" "a hidden ownership record must
 [ ! -s "$API_LOG" ] || fail "an invalid hidden id must refuse before any request is made"
 pass "leading-dot ids cannot create hidden ownership records"
 
-out=$(rp provision ios --datacenter EU-RO-1 --size 100 2>&1) || fail "provision failed: $out"
+out=$(rp provision ios --datacenter EU-RO-1 --size 100 --harness-npm @example/harness 2>&1) || fail "provision failed: $out"
 assert_contains "$out" "provisioned: secondmate ios" "provision must report what it created"
 [ "$(runpod_volume_count "$API_STATE")" = 1 ] || fail "provision must create exactly one network volume"
 [ "$(runpod_pod_count "$API_STATE")" = 0 ] || fail "provision must not create a pod"
@@ -104,7 +104,7 @@ assert_contains "$out" "provisioned: secondmate ios" "provision must report what
 [ "$(record_field ios ssh_alias)" = fm-sm-ios-runpod ] || fail "provision must bind the route's SSH alias"
 pass "provision creates one volume, records placement, and creates no pod"
 
-out=$(rp provision ios --datacenter EU-RO-1 --size 100 2>&1) || fail "second provision failed: $out"
+out=$(rp provision ios --datacenter EU-RO-1 --size 100 --harness-npm @example/harness 2>&1) || fail "second provision failed: $out"
 assert_contains "$out" "reused: volume" "a repeated provision must reuse the recorded volume"
 [ "$(runpod_volume_count "$API_STATE")" = 1 ] || fail "a repeated provision must not create a second volume"
 [ "$(runpod_api_calls "$API_LOG" "POST /networkvolumes")" = 1 ] || fail "a repeated provision must not POST a second volume"
@@ -123,6 +123,17 @@ assert_absent "$PARENT/data/runpod/web.meta" "a refused shared-alias provision m
 pass "provision rejects an SSH alias owned by another second mate"
 
 # --- wake -------------------------------------------------------------------
+
+started=$(date +%s)
+out=$(FM_FAKE_ENDPOINT_API_BLOCK=1 FM_TEST_RUNPOD_POLL_INTERVAL=1 \
+  FM_TEST_RUNPOD_WAKE_TIMEOUT=2 rp wake ios 2>&1) \
+  && fail "wake must stop at its wall-clock deadline when endpoint discovery blocks"
+elapsed=$(($(date +%s) - started))
+assert_contains "$out" "RunPod API could not be reached while waiting for pod" \
+  "a blocked endpoint status request must report the bounded wake failure"
+[ "$elapsed" -le 4 ] || fail "the 2s wake deadline took ${elapsed}s during endpoint discovery"
+[ "$(record_field ios lifecycle)" != ready ] || fail "an endpoint timeout must never record the pod ready"
+pass "endpoint discovery shares the one wall-clock wake deadline"
 
 started=$(date +%s)
 out=$(FM_FAKE_KEYSCAN_BLOCK=1 FM_TEST_RUNPOD_POLL_INTERVAL=1 \
@@ -178,7 +189,15 @@ FIRST_KEY=$(grep '^fm-sm-ios-runpod ' "$PARENT/config/runpod/known_hosts")
 assert_contains "$FIRST_KEY" "fm-sm-ios-runpod ssh-ed25519" "the host key must be pinned under the alias, not the IP"
 pass "wake creates one pod, discovers its endpoint, and pins a verified host key"
 
-out=$(rp provision ios --alias fm-sm-ios-new --datacenter EU-RO-1 2>&1) \
+stored_harness=$(record_field ios harness_npm)
+out=$(rp provision ios --datacenter EU-RO-1 --size 100 2>&1) \
+  && fail "reprovision must reject a live configured-to-unset harness change"
+assert_contains "$out" "sleep" "a live boot-contract refusal must name the required lifecycle step"
+[ "$(record_field ios harness_npm)" = "$stored_harness" ] \
+  || fail "a refused live harness change must preserve the recorded contract"
+pass "live pods reject configured-to-unset boot-contract changes"
+
+out=$(rp provision ios --alias fm-sm-ios-new --datacenter EU-RO-1 --harness-npm @example/harness 2>&1) \
   && fail "reprovision must reject reassignment of an existing SSH alias"
 assert_contains "$out" "already owns SSH alias fm-sm-ios-runpod" "the refusal must name the existing alias"
 [ "$(record_field ios ssh_alias)" = fm-sm-ios-runpod ] || fail "a refused alias reassignment must preserve the record"

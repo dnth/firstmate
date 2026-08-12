@@ -332,8 +332,8 @@ require_api_key() {
     || die "no usable $API_KEY_NAME in $API_KEY_FILE; add a '$API_KEY_NAME=<key>' line there (mode 600) and retry"
 }
 
-runpod_api() {  # <method> <path> [json-body] -> "<body>\n<http-status>"
-  local method=$1 path=$2 body=${3:-} key cfg out rc=0 bodyfile
+runpod_api() {  # <method> <path> [json-body] [timeout] -> "<body>\n<http-status>"
+  local method=$1 path=$2 body=${3:-} timeout=${4:-} key cfg out rc=0 bodyfile
   stage
   key=$(api_key_read) || return 1
   cfg="$TMP/curl.cfg"
@@ -348,6 +348,10 @@ runpod_api() {  # <method> <path> [json-body] -> "<body>\n<http-status>"
       printf 'request = "%s"\n' "$method"
       printf 'url = "%s%s"\n' "$API_BASE" "$path"
       printf 'write-out = "\\n%%{http_code}"\n'
+      if [ -n "$timeout" ]; then
+        printf 'connect-timeout = "%s"\n' "$timeout"
+        printf 'max-time = "%s"\n' "$timeout"
+      fi
       if [ -n "$body" ]; then
         printf '%s' "$body" > "$bodyfile"
         printf 'data-binary = "@%s"\n' "$bodyfile"
@@ -372,9 +376,9 @@ api_ok() {  # <status>
   return 1
 }
 
-api_call_or_die() {  # <method> <path> [body] <what>
-  local method=$1 path=$2 body=$3 what=$4 raw status
-  raw=$(runpod_api "$method" "$path" "$body") \
+api_call_or_die() {  # <method> <path> [body] <what> [timeout]
+  local method=$1 path=$2 body=$3 what=$4 timeout=${5:-} raw status
+  raw=$(runpod_api "$method" "$path" "$body" "$timeout") \
     || die "the RunPod API could not be reached while $what"
   status=$(api_status "$raw")
   if ! api_ok "$status"; then
@@ -539,7 +543,7 @@ cmd_provision() {
   lifecycle_lock_acquire "$id"
   volume_lock_acquire
 
-  local existing_volume existing_alias existing_dc volumes match
+  local existing_volume existing_alias existing_dc volumes match existing_pod existing_origin existing_harness
   existing_volume=$(record_get "$id" volume_id)
   existing_alias=$(record_get "$id" ssh_alias)
   if [ -n "$existing_volume" ] && [ -n "$existing_alias" ] && [ "$existing_alias" != "$alias" ]; then
@@ -552,6 +556,13 @@ cmd_provision() {
     match=$(printf '%s' "$volumes" | jq -r --arg id "$existing_volume" \
       '(if type == "array" then . else (.data // []) end) | map(select(.id == $id)) | .[0] // empty' 2>/dev/null || true)
     if [ -n "$match" ]; then
+      existing_pod=$(record_get "$id" pod_id)
+      existing_origin=$(record_get "$id" code_origin)
+      existing_harness=$(record_get "$id" harness_npm)
+      if [ -n "$existing_pod" ] \
+        && { [ "$existing_origin" != "$code_origin" ] || [ "$existing_harness" != "$harness_npm" ]; }; then
+        die "secondmate $id has live pod $existing_pod; run 'fm-runpod.sh sleep $id' before changing --code-origin or --harness-npm"
+      fi
       existing_dc=$(json_field "$match" '.dataCenterId')
       record_set "$id" "ssh_alias=$alias" "ssh_user=$user" "ssh_identity=$identity" "image=$image" \
         "code_origin=$code_origin" "harness_npm=$harness_npm"
@@ -712,9 +723,9 @@ pod_create_body() {  # <id> <compute> <gpu-type> <min-vram>
   fi
 }
 
-pod_get() {  # <pod-id> -> body, or empty when the pod is gone
+pod_get() {  # <pod-id> [timeout] -> body, or empty when the pod is gone
   local raw status
-  raw=$(runpod_api GET "/pods/$1" '') || return 1
+  raw=$(runpod_api GET "/pods/$1" '' "${2:-}") || return 1
   status=$(api_status "$raw")
   case "$status" in
     404) printf '' ; return 0 ;;
@@ -744,6 +755,7 @@ cmd_wake() {
   lifecycle_lock_acquire "$id"
 
   local compute alias volume_id host port pod_id pod body status recorded_compute deadline remaining delay
+  deadline=$((SECONDS + WAKE_TIMEOUT))
   compute=cpu
   [ "$want_gpu" -eq 0 ] || compute=gpu
   alias=$(alias_for "$id")
@@ -756,7 +768,9 @@ cmd_wake() {
 
   # Confirm the volume still exists before creating anything that would attach it.
   local volumes match
-  volumes=$(api_call_or_die GET /networkvolumes '' "verifying the network volume for $id")
+  remaining=$((deadline - SECONDS))
+  [ "$remaining" -gt 0 ] || die "wake for secondmate $id exceeded ${WAKE_TIMEOUT}s before volume verification"
+  volumes=$(api_call_or_die GET /networkvolumes '' "verifying the network volume for $id" "$remaining")
   match=$(printf '%s' "$volumes" | jq -r --arg v "$volume_id" \
     '(if type == "array" then . else (.data // []) end) | map(select(.id == $v)) | .[0] // empty' 2>/dev/null || true)
   [ -n "$match" ] || die "network volume $volume_id for secondmate $id no longer exists on RunPod; refusing to wake"
@@ -764,7 +778,9 @@ cmd_wake() {
   pod_id=$(record_get "$id" pod_id)
   recorded_compute=$(record_get "$id" compute)
   if [ -n "$pod_id" ]; then
-    pod=$(pod_get "$pod_id") || die "the RunPod API could not be reached while reading pod $pod_id"
+    remaining=$((deadline - SECONDS))
+    [ "$remaining" -gt 0 ] || die "wake for secondmate $id exceeded ${WAKE_TIMEOUT}s before reading pod $pod_id"
+    pod=$(pod_get "$pod_id" "$remaining") || die "the RunPod API could not be reached while reading pod $pod_id"
     if [ -n "$pod" ]; then
       status=$(json_field "$pod" '.desiredStatus')
       if [ "$status" != TERMINATED ]; then
@@ -774,7 +790,9 @@ cmd_wake() {
           die "secondmate $id already has a $recorded_compute pod ($pod_id); run 'fm-runpod.sh sleep $id' before waking it as $compute"
         fi
         if [ "$status" = EXITED ]; then
-          api_call_or_die POST "/pods/$pod_id/start" '' "starting pod $pod_id" >/dev/null
+          remaining=$((deadline - SECONDS))
+          [ "$remaining" -gt 0 ] || die "wake for secondmate $id exceeded ${WAKE_TIMEOUT}s before starting pod $pod_id"
+          api_call_or_die POST "/pods/$pod_id/start" '' "starting pod $pod_id" "$remaining" >/dev/null
           note "started: existing pod $pod_id for secondmate $id"
         fi
       else
@@ -788,7 +806,9 @@ cmd_wake() {
   if [ -z "$pod_id" ]; then
     record_set "$id" "lifecycle=waking" "compute=$compute" "gpu_type=$gpu_type" "min_vram_gb=$min_vram"
     body=$(pod_create_body "$id" "$compute" "$gpu_type" "$min_vram")
-    pod=$(api_call_or_die POST /pods "$body" "creating a $compute pod for secondmate $id")
+    remaining=$((deadline - SECONDS))
+    [ "$remaining" -gt 0 ] || die "wake for secondmate $id exceeded ${WAKE_TIMEOUT}s before pod creation"
+    pod=$(api_call_or_die POST /pods "$body" "creating a $compute pod for secondmate $id" "$remaining")
     pod_id=$(json_field "$pod" '.id')
     [ -n "$pod_id" ] || die "RunPod returned a pod with no id"
     record_set "$id" "pod_id=$pod_id"
@@ -797,19 +817,19 @@ cmd_wake() {
     record_set "$id" "lifecycle=waking" "compute=$compute"
   fi
 
-  deadline=$((SECONDS + WAKE_TIMEOUT))
   # Bounded wait for the endpoint. The pod reports no public IP or port mapping
   # while it is still initializing.
   host=
   port=
   while :; do
-    pod=$(pod_get "$pod_id") || die "the RunPod API could not be reached while waiting for pod $pod_id"
+    remaining=$((deadline - SECONDS))
+    [ "$remaining" -gt 0 ] \
+      || die "pod $pod_id did not publish an SSH endpoint within ${WAKE_TIMEOUT}s; it is preserved for inspection"
+    pod=$(pod_get "$pod_id" "$remaining") || die "the RunPod API could not be reached while waiting for pod $pod_id"
     [ -n "$pod" ] || die "pod $pod_id disappeared while waking secondmate $id"
     host=$(json_field "$pod" '.publicIp')
     port=$(json_field "$pod" '.portMappings."22"')
     [ -z "$host" ] || [ -z "$port" ] || break
-    [ "$SECONDS" -lt "$deadline" ] \
-      || die "pod $pod_id did not publish an SSH endpoint within ${WAKE_TIMEOUT}s; it is preserved for inspection"
     remaining=$((deadline - SECONDS))
     delay=$POLL_INTERVAL
     [ "$delay" -le "$remaining" ] || delay=$remaining
