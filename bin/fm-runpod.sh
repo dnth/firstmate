@@ -4,7 +4,7 @@
 # Usage:
 #   fm-runpod.sh provision <id> [--size <gb>] [--datacenter <id>] [--alias <ssh-alias>]
 #                               [--volume-name <name>] [--user <account>] [--identity <key-path>]
-#                               [--image <tag>]
+#                               [--image <tag>] [--code-origin <git-url>] [--harness-npm <pkg>]
 #   fm-runpod.sh wake <id> [--gpu] [--min-vram <gb>] [--gpu-type <id>]
 #   fm-runpod.sh sleep <id>
 #   fm-runpod.sh status [<id>]
@@ -29,7 +29,8 @@
 #   lifecycle=provisioned|waking|ready|suspending|suspended
 #   volume_id= volume_name= volume_size_gb= datacenter=
 #   pod_id= endpoint_host= endpoint_port= compute=cpu|gpu gpu_type= min_vram_gb=
-#   image= ssh_alias= ssh_user= ssh_identity= cost_per_hr= pod_started_at= updated=
+#   image= code_origin= harness_npm= ssh_alias= ssh_user= ssh_identity=
+#   cost_per_hr= pod_started_at= updated=
 #
 # Credentials: the RunPod API key is read from <FM_HOME>/config/runpod.env, a
 # local gitignored mode-600 file in ordinary KEY=value form, from its
@@ -39,6 +40,12 @@
 # printed. Every command that needs the API refuses with that path and key name
 # before it makes any request, so a missing key can never become a confusing
 # 401 from an unauthenticated call.
+#
+# First-boot toolchain: the pod boot script clones the code root from
+# --code-origin and installs the tools bin/fm-remote-doctor.sh requires, so a
+# fresh pod reaches readiness with no manual clone. --harness-npm names an
+# optional npm package providing a worker harness; the harness's own login
+# stays a human step either way. bin/fm-runpod-pod-boot.sh owns that contract.
 #
 # SSH: wake regenerates <FM_HOME>/config/runpod/ssh.d/<alias>.conf with the
 # pod's current HostName and Port plus a stable HostKeyAlias, and pins the pod's
@@ -494,7 +501,7 @@ alias_for() {  # <id>
 
 cmd_provision() {
   local id=${1:-} size=$DEFAULT_SIZE_GB image=$DEFAULT_IMAGE user=root
-  local datacenter='' alias='' volume_name='' identity=''
+  local datacenter='' alias='' volume_name='' identity='' code_origin='' harness_npm=''
   shift || true
   require_id "$id"
   while [ "$#" -gt 0 ]; do
@@ -506,6 +513,8 @@ cmd_provision() {
       --user) [ "$#" -ge 2 ] || usage; user=$2; shift 2 ;;
       --identity) [ "$#" -ge 2 ] || usage; identity=$2; shift 2 ;;
       --image) [ "$#" -ge 2 ] || usage; image=$2; shift 2 ;;
+      --code-origin) [ "$#" -ge 2 ] || usage; code_origin=$2; shift 2 ;;
+      --harness-npm) [ "$#" -ge 2 ] || usage; harness_npm=$2; shift 2 ;;
       *) usage ;;
     esac
   done
@@ -543,7 +552,8 @@ cmd_provision() {
       '(if type == "array" then . else (.data // []) end) | map(select(.id == $id)) | .[0] // empty' 2>/dev/null || true)
     if [ -n "$match" ]; then
       existing_dc=$(json_field "$match" '.dataCenterId')
-      record_set "$id" "ssh_alias=$alias" "ssh_user=$user" "ssh_identity=$identity" "image=$image"
+      record_set "$id" "ssh_alias=$alias" "ssh_user=$user" "ssh_identity=$identity" "image=$image" \
+        "code_origin=$code_origin" "harness_npm=$harness_npm"
       note "reused: volume $existing_volume in ${existing_dc:-unknown} for secondmate $id"
       note "alias=$alias"
       return 0
@@ -592,6 +602,8 @@ cmd_provision() {
     "gpu_type=" \
     "min_vram_gb=" \
     "image=$image" \
+    "code_origin=$code_origin" \
+    "harness_npm=$harness_npm" \
     "ssh_alias=$alias" \
     "ssh_user=$user" \
     "ssh_identity=$identity" \
@@ -651,6 +663,9 @@ pod_boot_env() {
 
 pod_create_body() {  # <id> <compute> <gpu-type> <min-vram>
   local id=$1 compute=$2 gpu_type=$3 min_vram=$4 volume_id datacenter image boot candidates
+  local code_origin harness_npm
+  code_origin=$(record_get "$id" code_origin)
+  harness_npm=$(record_get "$id" harness_npm)
   volume_id=$(record_get "$id" volume_id)
   datacenter=$(record_get "$id" datacenter)
   image=$(record_get "$id" image)
@@ -669,24 +684,28 @@ pod_create_body() {  # <id> <compute> <gpu-type> <min-vram>
     jq -nc \
       --arg name "fm-sm-$id" --arg image "$image" --arg vol "$volume_id" --arg dc "$datacenter" \
       --arg boot "$boot" --argjson gpus "$candidates" --arg vram "${min_vram:-}" \
+      --arg origin "$code_origin" --arg harness "$harness_npm" \
       '{
          name: $name, imageName: $image, computeType: "GPU", cloudType: "SECURE",
          gpuCount: 1, gpuTypeIds: $gpus, gpuTypePriority: "availability",
          dataCenterIds: [$dc], networkVolumeId: $vol, volumeMountPath: "/workspace",
          containerDiskInGb: 50, ports: ["22/tcp"], supportPublicIp: true,
-         env: {FM_POD_BOOT_B64: $boot, FM_POD_MIN_VRAM_GB: $vram},
+         env: {FM_POD_BOOT_B64: $boot, FM_POD_MIN_VRAM_GB: $vram,
+               FM_REMOTE_ORIGIN: $origin, FM_POD_HARNESS_NPM: $harness},
          dockerStartCmd: ["/bin/bash","-c","printf %s \"$FM_POD_BOOT_B64\" | base64 --decode > /tmp/fm-pod-boot.sh 2>/dev/null || printf %s \"$FM_POD_BOOT_B64\" | base64 -D > /tmp/fm-pod-boot.sh; exec /bin/bash /tmp/fm-pod-boot.sh"]
        }'
   else
     jq -nc \
       --arg name "fm-sm-$id" --arg image "$image" --arg vol "$volume_id" --arg dc "$datacenter" \
       --arg boot "$boot" \
+      --arg origin "$code_origin" --arg harness "$harness_npm" \
       '{
          name: $name, imageName: $image, computeType: "CPU", cloudType: "SECURE",
          cpuFlavorIds: ["cpu3c"], vcpuCount: 4,
          dataCenterIds: [$dc], networkVolumeId: $vol, volumeMountPath: "/workspace",
          containerDiskInGb: 50, ports: ["22/tcp"], supportPublicIp: true,
-         env: {FM_POD_BOOT_B64: $boot},
+         env: {FM_POD_BOOT_B64: $boot,
+               FM_REMOTE_ORIGIN: $origin, FM_POD_HARNESS_NPM: $harness},
          dockerStartCmd: ["/bin/bash","-c","printf %s \"$FM_POD_BOOT_B64\" | base64 --decode > /tmp/fm-pod-boot.sh 2>/dev/null || printf %s \"$FM_POD_BOOT_B64\" | base64 -D > /tmp/fm-pod-boot.sh; exec /bin/bash /tmp/fm-pod-boot.sh"]
        }'
   fi

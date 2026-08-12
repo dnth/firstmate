@@ -88,8 +88,12 @@ Create the volume and record the placement.
 No pod is created, so this costs storage only:
 
 ```sh
-bin/fm-runpod.sh provision <id> --datacenter EU-RO-1 --size 100
+bin/fm-runpod.sh provision <id> --datacenter EU-RO-1 --size 100 \
+  --code-origin https://github.com/<owner>/firstmate.git
 ```
+
+`--code-origin` is the git URL the pod clones its Firstmate code root from on first boot.
+Add `--harness-npm <package>` when a worker harness should be installed with it.
 
 Bring the host up with the CPU default:
 
@@ -118,6 +122,8 @@ Then seed the persistent home exactly as for any other remote route, using the a
 bin/fm-remote-home-seed.sh <id> fm-sm-<id>-runpod /workspace/firstmate /workspace/secondmate-home <project>...
 bin/fm-spawn.sh <id> --secondmate
 ```
+
+The first wake provisions the toolchain before this step, so the code root and required tools are already in place.
 
 From here it is an ordinary remote second mate.
 Route work to it, steer it, and hand it backlog with the normal commands.
@@ -188,15 +194,24 @@ Treat it exactly like any other irreversible action.
 `bin/fm-runpod-pod-boot.sh` is the tracked boot script, sent to every pod base64-encoded in one environment variable and run as its start command.
 The container image needs nothing from this repo preinstalled, and the boot contract is versioned with the code that creates the pod.
 
-It restores the persisted SSH host key from the volume, starts sshd with the account's authorized key, links the fixed remote entrypoint, and then hands readiness to `bin/fm-remote-doctor.sh --fix`.
+On a volume's first boot it provisions the whole remote toolchain, so a fresh pod reaches readiness with no manual step:
+
+1. Install base packages: `git`, `jq`, `curl`, `ca-certificates`, `unzip`, and `openssh-server`.
+2. Install a current Node LTS, which the npm-distributed tools require.
+3. Clone the Firstmate code root from `--code-origin` when the volume has none.
+4. Install `herdr` and `treehouse` through this repository's own pinned, checksum-verified installers, `bin/fm-install-herdr.sh` and `bin/fm-install-treehouse.sh`, so a pod runs the exact builds CI verifies rather than a floating latest.
+5. Install `tasks-axi`, and the optional `--harness-npm` package when one is configured.
+
+It also restores the persisted SSH host key from the volume, starts sshd with the account's authorized key, links the fixed remote entrypoint, and then hands readiness to `bin/fm-remote-doctor.sh --fix`.
 The doctor is the single owner of what "ready for a remote second mate" means, and on Linux it starts the remote job worker and the headless Herdr `fm-remote` server itself, with no GUI or Aqua session involved.
-That is why a fresh pod recovers a working `fm-remote` server on every wake without anything RunPod-specific in the readiness path: the doctor already owns the whole Linux case, and `bin/fm-spawn.sh <id> --secondmate` passes through that same gate.
+Nothing in the boot script re-states the doctor's verdict; it installs toward that set and lets the doctor decide.
 
-The boot script attempts to install `openssh-server` when it is absent but does not install the doctor's required toolchain.
-The selected image must already provide the required tools listed in [`remote-secondmates.md`](remote-secondmates.md#readiness-repair-and-the-human-steps), and the real-pod smoke test must confirm them.
+Provisioning is idempotent and volume-scoped.
+A marker on the volume records the contract version it satisfied, so later boots skip the work and a raised contract version re-provisions exactly once.
+`bin/fm-runpod-pod-boot.sh --check` prints the plan as one `ensure=<item>` line per step and touches nothing, which is how the contract is tested with no pod.
 
-On a volume's very first boot there is no code root yet, so the pod stops after sshd and waits for the operator to clone the code root as shown above.
-`bin/fm-remote-home-seed.sh` requires that code root and fixed entrypoint to exist, then clones the separate persistent `FM_HOME` from it.
+A worker harness still needs its own interactive login, which the doctor already classifies as a human step.
+Leaving `--harness-npm` unset installs no harness and lets the doctor report that gap rather than pretending it is closed.
 
 ## Verification
 
@@ -205,6 +220,7 @@ The portable tests drive the real provider against a stateful mocked RunPod REST
 ```sh
 bin/fm-test-run.sh tests/fm-runpod-lifecycle.test.sh
 bin/fm-test-run.sh tests/fm-runpod-routing.test.sh
+bin/fm-test-run.sh tests/fm-runpod-pod-boot.test.sh
 ```
 
 The lifecycle suite covers idempotent provision and wake, exactly one pod under concurrent wakes, CPU and GPU exclusivity, endpoint refresh with a stable pinned host identity, every sleep guard, volume retention, and the guarded destroy path.

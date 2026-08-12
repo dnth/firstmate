@@ -23,10 +23,21 @@
 #      headless Herdr fm-remote server itself - no GUI or Aqua session is
 #      involved on this platform. Nothing here duplicates those checks.
 #
-# On a volume's first boot there is no code root yet, so this script stops after
-# step 2. The operator clones the code root onto the volume, then replaces the
-# pod so the next boot links its entrypoint and reaches step 4 before running
-# bin/fm-remote-home-seed.sh. docs/runpod-secondmates.md owns that sequence.
+# On a volume's first boot the toolchain provisioning step clones the code root
+# from FM_REMOTE_ORIGIN and installs the tools bin/fm-remote-doctor.sh requires,
+# so a fresh pod reaches readiness without a manual clone.
+# docs/runpod-secondmates.md owns the operator sequence.
+#
+# Toolchain provisioning is idempotent and volume-scoped: a marker on the volume
+# records the contract version it satisfied, so later boots skip the work and a
+# raised contract version re-provisions exactly once.
+#
+# bin/fm-remote-doctor.sh remains the single owner of what "ready" means. This
+# script installs toward that set and never re-states the verdict; the doctor
+# still decides, and tests assert this script covers what the doctor requires.
+#
+# --check prints the provisioning plan as one `ensure=<item>` line per step and
+# exits without touching the system, so the contract is testable with no pod.
 #
 # The volume is mounted at /workspace. Durable remote state lives under it:
 #   /workspace/firstmate            the remote Firstmate code root
@@ -44,6 +55,19 @@ FM_PERSIST=${FM_PERSIST:-$FM_VOLUME/persistent-runtime}
 FM_HOST_KEY_DIR="$FM_PERSIST/ssh"
 FM_BOOT_LOG=${FM_BOOT_LOG:-$FM_PERSIST/boot.log}
 
+# Raise this when the provisioning contract changes so existing volumes
+# re-provision exactly once instead of silently keeping an older toolchain.
+FM_TOOLCHAIN_CONTRACT=1
+FM_TOOLCHAIN_MARKER="$FM_PERSIST/toolchain.provisioned"
+FM_LOCAL_BIN=${FM_LOCAL_BIN:-$HOME/.local/bin}
+# The git URL the code root is cloned from on a volume's first boot.
+FM_REMOTE_ORIGIN=${FM_REMOTE_ORIGIN:-}
+# Optional npm package providing a worker harness. Left unset the pod installs
+# no harness and the doctor reports that gap, because every harness needs an
+# interactive login the doctor already classifies as a human step.
+FM_POD_HARNESS_NPM=${FM_POD_HARNESS_NPM:-}
+FM_APT_PACKAGES="git jq curl ca-certificates unzip openssh-server"
+
 log() {
   printf '[fm-pod-boot] %s\n' "$1"
   mkdir -p "$(dirname "$FM_BOOT_LOG")" 2>/dev/null || return 0
@@ -57,6 +81,167 @@ require_volume() {
   fi
   mkdir -p "$FM_PERSIST" "$FM_HOST_KEY_DIR" || return 1
   chmod 700 "$FM_HOST_KEY_DIR" 2>/dev/null || true
+}
+
+# --- toolchain provisioning ---------------------------------------------------
+#
+# Every step is announced through plan_step so --check can print the exact plan
+# without touching the system, and so the plan and the work can never drift.
+
+plan_step() {  # <item>
+  printf 'ensure=%s\n' "$1"
+}
+
+toolchain_plan() {
+  local pkg
+  for pkg in $FM_APT_PACKAGES; do
+    plan_step "apt:$pkg"
+  done
+  plan_step node
+  plan_step npm
+  plan_step code-root
+  plan_step git
+  plan_step jq
+  plan_step herdr
+  plan_step treehouse
+  plan_step tasks-axi
+  [ -z "$FM_POD_HARNESS_NPM" ] || plan_step "harness:$FM_POD_HARNESS_NPM"
+}
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+apt_install() {  # <package>...
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@" >/dev/null 2>&1
+}
+
+ensure_base_packages() {
+  local missing="" pkg
+  for pkg in $FM_APT_PACKAGES; do
+    case "$pkg" in
+      openssh-server) have sshd || [ -x /usr/sbin/sshd ] || missing="$missing $pkg" ;;
+      ca-certificates) [ -e /etc/ssl/certs/ca-certificates.crt ] || missing="$missing $pkg" ;;
+      *) have "$pkg" || missing="$missing $pkg" ;;
+    esac
+  done
+  [ -n "$missing" ] || return 0
+  log "installing base packages:$missing"
+  apt-get update -qq >/dev/null 2>&1 || true
+  # shellcheck disable=SC2086 # deliberate word splitting of the package list.
+  apt_install $missing || log "some base packages could not be installed:$missing"
+}
+
+# Node provides the npm-distributed tools the doctor requires. The distro
+# package is used when it is new enough, and NodeSource supplies a current LTS
+# otherwise, because an ancient distro Node cannot run the required CLIs.
+ensure_node() {
+  local major=0
+  if have node; then
+    major=$(node -v 2>/dev/null | sed -e 's/^v//' -e 's/\..*$//')
+    case "$major" in ''|*[!0-9]*) major=0 ;; esac
+    [ "$major" -lt 20 ] || return 0
+    log "node $major is older than the required 20; installing a current LTS"
+  fi
+  if ! have curl; then
+    log "curl is unavailable, so Node cannot be installed"
+    return 1
+  fi
+  curl -fsSL https://deb.nodesource.com/setup_lts.x 2>/dev/null | bash - >/dev/null 2>&1 \
+    || log "the NodeSource setup script did not complete; falling back to the distro package"
+  apt_install nodejs || true
+  have node || { log "node is still unavailable after installation"; return 1; }
+  have npm || { log "npm is still unavailable after installation"; return 1; }
+}
+
+# The code root is what every later step runs from, including the pinned
+# installers and the doctor itself, so a volume with no clone gets one here
+# rather than requiring an operator to create it by hand.
+ensure_code_root() {
+  if [ -d "$FM_REMOTE_ROOT/.git" ]; then
+    return 0
+  fi
+  if [ -z "$FM_REMOTE_ORIGIN" ]; then
+    log "FATAL: no code root at $FM_REMOTE_ROOT and no FM_REMOTE_ORIGIN to clone from"
+    return 1
+  fi
+  if ! have git; then
+    log "FATAL: git is unavailable, so the code root cannot be cloned"
+    return 1
+  fi
+  log "cloning the code root from FM_REMOTE_ORIGIN"
+  mkdir -p "$(dirname "$FM_REMOTE_ROOT")" || return 1
+  git clone --quiet "$FM_REMOTE_ORIGIN" "$FM_REMOTE_ROOT" || {
+    log "FATAL: the code root clone failed"
+    return 1
+  }
+}
+
+# herdr and treehouse come from the repository's own pinned, checksum-verified
+# installers rather than a floating package-manager latest, so a pod runs the
+# exact builds CI verifies. bin/fm-install-herdr.sh and
+# bin/fm-install-treehouse.sh own those pins.
+ensure_pinned_tools() {
+  local rc=0 installer
+  mkdir -p "$FM_LOCAL_BIN" || return 1
+  for installer in fm-install-herdr.sh fm-install-treehouse.sh; do
+    case "$installer" in
+      fm-install-herdr.sh) have herdr && continue ;;
+      fm-install-treehouse.sh) have treehouse && continue ;;
+    esac
+    if [ ! -x "$FM_REMOTE_ROOT/bin/$installer" ]; then
+      log "$installer is missing from the code root"
+      rc=1
+      continue
+    fi
+    log "running $installer"
+    "$FM_REMOTE_ROOT/bin/$installer" "$FM_LOCAL_BIN" >> "$FM_BOOT_LOG" 2>&1 || {
+      log "$installer failed; see $FM_BOOT_LOG"
+      rc=1
+    }
+  done
+  return "$rc"
+}
+
+ensure_npm_tools() {
+  local rc=0
+  have npm || { log "npm is unavailable, so npm-distributed tools cannot be installed"; return 1; }
+  if ! have tasks-axi; then
+    log "installing tasks-axi"
+    npm install -g tasks-axi >> "$FM_BOOT_LOG" 2>&1 || { log "tasks-axi installation failed"; rc=1; }
+  fi
+  if [ -n "$FM_POD_HARNESS_NPM" ]; then
+    log "installing the configured harness package"
+    npm install -g "$FM_POD_HARNESS_NPM" >> "$FM_BOOT_LOG" 2>&1 \
+      || { log "the harness package installation failed"; rc=1; }
+  else
+    log "no FM_POD_HARNESS_NPM configured; the doctor will report the harness gap"
+  fi
+  return "$rc"
+}
+
+toolchain_marker_current() {
+  [ -f "$FM_TOOLCHAIN_MARKER" ] || return 1
+  [ "$(cat "$FM_TOOLCHAIN_MARKER" 2>/dev/null)" = "$FM_TOOLCHAIN_CONTRACT" ]
+}
+
+provision_toolchain() {
+  local rc=0
+  if toolchain_marker_current; then
+    log "toolchain contract $FM_TOOLCHAIN_CONTRACT already satisfied on this volume"
+    return 0
+  fi
+  log "provisioning toolchain contract $FM_TOOLCHAIN_CONTRACT"
+  ensure_base_packages
+  ensure_node || rc=1
+  ensure_code_root || return 1
+  ensure_pinned_tools || rc=1
+  ensure_npm_tools || rc=1
+  if [ "$rc" -eq 0 ]; then
+    printf '%s\n' "$FM_TOOLCHAIN_CONTRACT" > "$FM_TOOLCHAIN_MARKER" 2>/dev/null || true
+    log "toolchain provisioning complete"
+  else
+    log "toolchain provisioning finished with gaps; the doctor reports what remains"
+  fi
+  return 0
 }
 
 install_sshd() {
@@ -155,11 +340,16 @@ hand_over_to_doctor() {
 }
 
 main() {
+  if [ "${1:-}" = --check ]; then
+    toolchain_plan
+    exit 0
+  fi
   require_volume || exit 1
   install_sshd || log "openssh-server is unavailable; SSH will not come up"
   restore_host_keys || log "the persisted host key could not be restored"
   authorize_key || log "the authorized key could not be written"
   start_sshd || exit 1
+  provision_toolchain || log "toolchain provisioning could not complete"
   link_entrypoint
   hand_over_to_doctor
   log "boot complete; holding the pod open"
