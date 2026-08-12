@@ -104,6 +104,18 @@ fi
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-runpod-lib.sh
 . "$SCRIPT_DIR/fm-runpod-lib.sh"
+# shellcheck source=bin/fm-secondmate-registry-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+
+RUNPOD_DELIVERY_LOCK=
+release_runpod_delivery_lock() {
+  [ -n "$RUNPOD_DELIVERY_LOCK" ] || return 0
+  fm_lock_release "$RUNPOD_DELIVERY_LOCK"
+  RUNPOD_DELIVERY_LOCK=
+}
+trap release_runpod_delivery_lock EXIT
 # Answer notes use the same bounded status-line shape as the OPEN DECISIONS
 # renderer without adding a second shared helper to this fork.
 fm_send_resolved_line() {  # <key> <note>
@@ -311,6 +323,12 @@ done
 
 if [ "$TARGET_BACKEND" != remote ]; then
   fm_backend_validate "$TARGET_BACKEND" || exit 1
+fi
+
+if [ "$TARGET_BACKEND" = remote ] && fm_runpod_is_managed "$DATA" "$TARGET_REMOTE_ID"; then
+  RUNPOD_DELIVERY_LOCK=$(secondmate_handoff_lock_path "$STATE" "$TARGET_REMOTE_ID")
+  fm_lock_acquire_wait "$RUNPOD_DELIVERY_LOCK" \
+    || { echo "error: cannot lock delivery to RunPod secondmate $TARGET_REMOTE_ID" >&2; exit 1; }
 fi
 
 # Wake-before-deliver: a scale-to-zero compute route has no host until its

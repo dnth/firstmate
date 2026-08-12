@@ -247,6 +247,11 @@ mapfile -t decoded < <(decode_b64 "$argv_b64" | tr '\0' '\n')
 command_name=${decoded[0]:-}
 action=${decoded[1]:-}
 printf '%s %s %s\n' "$target_host" "$command_name" "$action" >> "${FM_FAKE_REMOTE_LOG:-/dev/null}"
+if [ "$command_name" = fm-remote-secondmate-control.sh ] \
+   && [ "$action" = send ] \
+   && [ "${FM_FAKE_SSH_MODE:-normal}" = post-delivery-255 ]; then
+  exit 255
+fi
 case "$command_name" in
   fm-remote-secondmate-control.sh)
     case "$action" in

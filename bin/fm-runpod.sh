@@ -113,6 +113,10 @@ note() { printf '%s\n' "$1"; }
 TMP=
 LIFECYCLE_LOCK=
 LIFECYCLE_LOCK_HELD=0
+VOLUME_LOCK=
+VOLUME_LOCK_HELD=0
+DELIVERY_LOCK=
+DELIVERY_LOCK_HELD=0
 REPLY_LOCK=
 REPLY_LOCK_HELD=0
 cleanup() {
@@ -121,9 +125,17 @@ cleanup() {
     fm_lock_release "$REPLY_LOCK" || true
     REPLY_LOCK_HELD=0
   fi
+  if [ "$VOLUME_LOCK_HELD" -eq 1 ]; then
+    fm_lock_release "$VOLUME_LOCK" || true
+    VOLUME_LOCK_HELD=0
+  fi
   if [ "$LIFECYCLE_LOCK_HELD" -eq 1 ]; then
     fm_lock_release "$LIFECYCLE_LOCK" || true
     LIFECYCLE_LOCK_HELD=0
+  fi
+  if [ "$DELIVERY_LOCK_HELD" -eq 1 ]; then
+    fm_lock_release "$DELIVERY_LOCK" || true
+    DELIVERY_LOCK_HELD=0
   fi
 }
 trap cleanup EXIT
@@ -148,6 +160,25 @@ lifecycle_lock_acquire() {  # <id>
   fm_lock_acquire_wait "$LIFECYCLE_LOCK" \
     || die "cannot lock the RunPod lifecycle for $1"
   LIFECYCLE_LOCK_HELD=1
+}
+
+volume_lock_acquire() {
+  mkdir -p "$STATE" || die "cannot create the state directory: $STATE"
+  VOLUME_LOCK="$STATE/.runpod-volume-ownership.lock"
+  fm_lock_acquire_wait "$VOLUME_LOCK" || die "cannot lock RunPod volume ownership"
+  VOLUME_LOCK_HELD=1
+}
+
+volume_lock_release() {
+  [ "$VOLUME_LOCK_HELD" -eq 1 ] || return 0
+  fm_lock_release "$VOLUME_LOCK"
+  VOLUME_LOCK_HELD=0
+}
+
+delivery_lock_acquire() {  # <id>
+  DELIVERY_LOCK=$(secondmate_handoff_lock_path "$STATE" "$1")
+  fm_lock_acquire_wait "$DELIVERY_LOCK" || die "cannot lock delivery for secondmate $1"
+  DELIVERY_LOCK_HELD=1
 }
 
 # --- record -----------------------------------------------------------------
@@ -198,6 +229,24 @@ record_set() {  # <id> <key=value>...
 
 record_set_lifecycle() {  # <id> <lifecycle>
   record_set "$1" "lifecycle=$2"
+}
+
+assert_volume_owner() {  # <id> <volume-id>
+  local id=$1 volume_id=$2 path owner count claimed
+  [ -d "$DATA/runpod" ] || return 0
+  for path in "$DATA/runpod"/*.meta; do
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    [ -f "$path" ] && [ ! -L "$path" ] || die "RunPod record is unsafe: $path"
+    owner=$(basename "$path" .meta)
+    fm_runpod_id_safe "$owner" || die "RunPod record has an unsafe secondmate id: $path"
+    [ "$owner" != "$id" ] || continue
+    count=$(grep -c '^volume_id=' "$path" 2>/dev/null || true)
+    [ "$count" -le 1 ] || die "RunPod record has ambiguous volume ownership: $path"
+    [ "$count" -eq 1 ] || continue
+    claimed=$(sed -n 's/^volume_id=//p' "$path")
+    [ "$claimed" != "$volume_id" ] \
+      || die "network volume $volume_id is already owned by secondmate $owner; one RunPod volume cannot be shared across secondmates"
+  done
 }
 
 # --- RunPod API boundary ----------------------------------------------------
@@ -349,6 +398,17 @@ known_hosts_pin() {  # <alias> <host> <port>
   note "pinned: first-wake host key for $alias (persisted on the volume for every later pod)"
 }
 
+known_hosts_remove_alias() {  # <alias>
+  local alias=$1 tmp
+  [ -e "$KNOWN_HOSTS" ] || [ -L "$KNOWN_HOSTS" ] || return 0
+  [ -f "$KNOWN_HOSTS" ] && [ ! -L "$KNOWN_HOSTS" ] || die "known_hosts is unsafe: $KNOWN_HOSTS"
+  tmp="$KNOWN_HOSTS.tmp.$$"
+  awk -v alias="$alias" '$1 != alias' "$KNOWN_HOSTS" > "$tmp" \
+    || { rm -f -- "$tmp"; die "cannot remove the pinned host key for $alias"; }
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; die "cannot secure the updated known_hosts"; }
+  mv -f -- "$tmp" "$KNOWN_HOSTS" || { rm -f -- "$tmp"; die "cannot commit the updated known_hosts"; }
+}
+
 # The probe reads the generated fragment directly, so wake readiness never
 # depends on the operator having wired the Include line into ~/.ssh/config yet.
 ssh_probe() {  # <alias>
@@ -417,10 +477,12 @@ cmd_provision() {
   case "$volume_name" in *[!A-Za-z0-9._-]*) die "invalid volume name: $volume_name" ;; esac
 
   lifecycle_lock_acquire "$id"
+  volume_lock_acquire
 
   local existing_volume existing_dc volumes match
   existing_volume=$(record_get "$id" volume_id)
   if [ -n "$existing_volume" ]; then
+    assert_volume_owner "$id" "$existing_volume"
     volumes=$(api_call_or_die GET /networkvolumes '' "listing network volumes")
     match=$(printf '%s' "$volumes" | jq -r --arg id "$existing_volume" \
       '(if type == "array" then . else (.data // []) end) | map(select(.id == $id)) | .[0] // empty' 2>/dev/null || true)
@@ -455,6 +517,7 @@ cmd_provision() {
   volume_dc=$(json_field "$match" '.dataCenterId')
   volume_size=$(json_field "$match" '.size')
   [ -n "$volume_id" ] || die "RunPod returned a network volume with no id"
+  assert_volume_owner "$id" "$volume_id"
   [ -n "$volume_dc" ] || volume_dc=$datacenter
   [ -n "$volume_size" ] || volume_size=$size
 
@@ -611,6 +674,9 @@ cmd_wake() {
   alias=$(alias_for "$id")
   volume_id=$(record_get "$id" volume_id)
   [ -n "$volume_id" ] || die "secondmate $id has no recorded network volume; re-run provision"
+  volume_lock_acquire
+  assert_volume_owner "$id" "$volume_id"
+  volume_lock_release
 
   # Confirm the volume still exists before creating anything that would attach it.
   local volumes match
@@ -758,13 +824,14 @@ cmd_sleep() {
   require_jq
   require_api_key
   record_require "$id"
+  delivery_lock_acquire "$id"
+  lifecycle_lock_acquire "$id"
   case "$(fm_runpod_lifecycle "$DATA" "$id")" in
     suspended)
       note "already-suspended: secondmate $id"
       return 0
       ;;
   esac
-  lifecycle_lock_acquire "$id"
 
   # The reply source polls the host over SSH, so it must be quiesced under the
   # same lock teardown uses before the pod can go away. The cursor is kept, so
@@ -777,7 +844,7 @@ cmd_sleep() {
 
   if route_is_remote "$id" \
      && ! "$SCRIPT_DIR/fm-procevent-remote-reply.sh" retire-quiesce-locked "$id" >/dev/null 2>&1; then
-    die "secondmate $id still has an unhandled captured reply; handle it before suspending"
+    sleep_abort "$id" "secondmate $id still has an unhandled captured reply; handle it before suspending"
   fi
 
   record_set_lifecycle "$id" suspending
@@ -941,6 +1008,7 @@ cmd_destroy() {
   # be orphaned with a stale endpoint in it.
   alias=$(record_get "$id" ssh_alias)
   path=$(record_path "$id")
+  [ -z "$alias" ] || known_hosts_remove_alias "$alias"
   rm -f -- "$path"
   [ -z "$alias" ] || rm -f -- "$(ssh_fragment_path "$alias")"
   note "destroyed: secondmate $id volume $volume_id and its local RunPod record"

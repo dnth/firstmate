@@ -29,6 +29,7 @@ SECONDMATE_REGISTRY_MATCH_REMOTE=0
 SECONDMATE_REGISTRY_ERROR=
 
 secondmate_registry_lock_path() { printf '%s/.secondmate-registry.lock\n' "$1"; }
+secondmate_handoff_lock_path() { printf '%s/.backlog-handoff-%s.lock\n' "$1" "$2"; }
 secondmate_reply_lifecycle_lock_path() { printf '%s/.remote-reply-lifecycle-%s.lock\n' "$1" "$2"; }
 
 secondmate_registry_parse_line() {

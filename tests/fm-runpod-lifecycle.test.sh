@@ -83,6 +83,12 @@ assert_contains "$out" "reused: volume" "a repeated provision must reuse the rec
 [ "$(runpod_api_calls "$API_LOG" "POST /networkvolumes")" = 1 ] || fail "a repeated provision must not POST a second volume"
 pass "provision is idempotent and never accumulates volumes"
 
+out=$(rp provision web --volume-name fm-sm-ios-runpod 2>&1) \
+  && fail "provision must reject a volume already owned by another second mate"
+assert_contains "$out" "already owned by secondmate ios" "cross-record ownership must be refused at provision"
+assert_absent "$PARENT/data/runpod/web.meta" "a refused shared-volume provision must create no ownership record"
+pass "provision rejects a volume owned by another second mate"
+
 # --- wake -------------------------------------------------------------------
 
 out=$(rp wake ios 2>&1) || fail "wake failed: $out"
@@ -182,8 +188,8 @@ IOS_VOLUME=$(record_field ios volume_id)
 sed -i.bak "s/^volume_id=.*/volume_id=$IOS_VOLUME/" "$PARENT/data/runpod/web.meta"
 rm -f "$PARENT/data/runpod/web.meta.bak"
 out=$(rp wake web 2>&1) && fail "activating a volume that already backs a live pod must be refused"
-assert_contains "$out" "RunPod refused" "the refusal must come from the provider, not a silent success"
-pass "the same network volume cannot back two live pods"
+assert_contains "$out" "already owned by secondmate ios" "wake must recheck local volume ownership before activation"
+pass "wake rejects a volume record owned by another second mate"
 
 # --- multiple distinct second mates -----------------------------------------
 
@@ -231,6 +237,19 @@ assert_contains "$out" "unreachable" "an unknown remote state must be reported a
 [ "$(record_field ios lifecycle)" = ready ] || fail "an unknown-completion sleep must leave the route untouched"
 [ "$(runpod_pod_count "$API_STATE")" = 2 ] || fail "an unknown-completion sleep must not terminate the pod"
 pass "unknown remote completion blocks sleep and preserves everything"
+
+SID=$(PATH="$FAKEBIN:$PATH" FM_HOME="$PARENT" \
+  "$ROOT/bin/fm-procevent-remote-reply.sh" source-id ios)
+mkdir -p "$PARENT/state/procevent-inbox"
+printf 'captured reply\n' > "$PARENT/state/procevent-inbox/$SID.99.result"
+printf 'remote-reply\n' > "$PARENT/state/procevent-inbox/$SID.99.adapter"
+out=$(rp sleep ios 2>&1) && fail "sleep must refuse an unhandled captured reply"
+assert_contains "$out" "unhandled captured reply" "the quiesce refusal must remain actionable"
+[ "$(record_field ios lifecycle)" = ready ] || fail "a quiesce refusal must restore ready lifecycle"
+assert_present "$PARENT/state/procevent/$SID.source" \
+  "a quiesce refusal must re-arm the reply source"
+rm -f "$PARENT/state/procevent-inbox/$SID.99.result" "$PARENT/state/procevent-inbox/$SID.99.adapter"
+pass "a refused quiesce restores ready state and re-arms replies"
 
 # --- sleep ------------------------------------------------------------------
 
@@ -294,6 +313,8 @@ out=$(rp destroy ios --yes 2>&1) || fail "destroy failed: $out"
   || fail "destroy must delete the network volume"
 assert_absent "$PARENT/data/runpod/ios.meta" "destroy must remove the local record"
 assert_absent "$(fragment fm-sm-ios-runpod)" "destroy must remove the generated SSH fragment"
+assert_no_grep '^fm-sm-ios-runpod ' "$PARENT/config/runpod/known_hosts" \
+  "destroy must remove the alias's exact pinned host-key entries"
 pass "destroy is a separate, explicitly authorized path that runs only after suspension and retirement"
 
 # A retired route has no remote home left to supervise anything, so suspending

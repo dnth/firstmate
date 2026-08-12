@@ -165,6 +165,21 @@ out=$(world_env "$w" "$ROOT/bin/fm-send.sh" fm-ios 'urgent work' 2>&1) \
   || fail "the retry must deliver the request exactly once"
 pass "a compute failure before delivery loses nothing and never duplicates the request"
 
+w=$(new_world delivery255)
+runpod_seed_remote_route "$w/home" ios fm-sm-ios-runpod /srv/firstmate /srv/sm-ios
+suspend_route "$w" ios
+
+out=$(FM_FAKE_SSH_MODE=post-delivery-255 world_env "$w" \
+  "$ROOT/bin/fm-send.sh" fm-ios 'may have landed' 2>&1) \
+  && fail "an SSH-255 send must report unknown completion"
+assert_contains "$out" "do not resend" "an unknown delivery must preserve the no-retry instruction"
+[ "$(grep -c 'fm-remote-secondmate-control.sh send' "$w/calls.log" || true)" = 1 ] \
+  || fail "an SSH-255 delivery must make exactly one remote send attempt with no retry or failover"
+unknown_record=$(grep -l '^phase=delivery_unknown$' "$w/home/state/pending-replies"/* 2>/dev/null | head -1 || true)
+[ -n "$unknown_record" ] \
+  || fail "an SSH-255 delivery must leave a durable unknown-completion record"
+pass "a post-delivery SSH-255 makes one attempt and preserves unknown completion"
+
 # --- launch wakes before the readiness gate ---------------------------------
 
 w=$(new_world launch)
