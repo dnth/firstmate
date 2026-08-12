@@ -481,11 +481,9 @@ run_with_deadline() {
   fi
 }
 
-secondmate_supervision_is_alive() {  # <window>
-  local win=$1 meta home beat remote_host task age
-  meta=$(fm_backend_meta_for_window "$win" "$STATE" 2>/dev/null || true)
+secondmate_supervision_is_alive() {  # <window> <meta> <remote-host>
+  local win=$1 meta=$2 remote_host=$3 home beat task age
   [ -n "$meta" ] || return 1
-  remote_host=$(grep '^remote_host=' "$meta" | cut -d= -f2- || true)
   if [ -n "$remote_host" ]; then
     task=$(window_to_task "$win" "$STATE")
     age=$(run_with_deadline "$REMOTE_TIMEOUT" "$ON_BIN" "$task" \
@@ -997,8 +995,6 @@ EOF
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
-    meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
-    remote_host=$(grep '^remote_host=' "$meta" | cut -d= -f2- || true)
     key=${w//:/_}
     key=${key//\//_}
     key=${key//./_}
@@ -1006,17 +1002,25 @@ EOF
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$w"
     fi
-    if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last" \
-      && secondmate_supervision_is_alive "$w"; then
-      clear_stale_tracking "$w"
-      continue
+    secondmate_stale=0
+    remote_host=
+    if [ "$kind" = secondmate ]; then
+      meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
+      remote_host=$(grep '^remote_host=' "$meta" | cut -d= -f2- || true)
+      if ! status_is_paused_or_captain_held "$last" \
+        && secondmate_supervision_is_alive "$w" "$meta" "$remote_host"; then
+        clear_stale_tracking "$w"
+        continue
+      fi
+      secondmate_stale=1
     fi
-    remote_stale=0
-    if [ "$kind" = secondmate ] && [ -n "$remote_host" ]; then
+    if [ "$secondmate_stale" -eq 1 ] && [ -n "$remote_host" ]; then
       tail40="remote secondmate watcher beacon missing or stale: $w"
-      remote_stale=1
     else
-      tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+      if ! tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null); then
+        [ "$secondmate_stale" -eq 1 ] || continue
+        tail40="secondmate watcher beacon missing or stale and pane capture unavailable: $w"
+      fi
     fi
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
@@ -1032,7 +1036,7 @@ EOF
     # harness renders its busy indicator) so busy-looking strings in displayed
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
-    if [ "$remote_stale" -eq 0 ] && window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    if [ "$secondmate_stale" -eq 0 ] && window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"

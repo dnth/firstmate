@@ -953,7 +953,7 @@ test_secondmate_nonpaused_stale_remains_suppressed() {
 }
 
 test_remote_secondmate_beacon_is_bounded() {
-  local dir state fakebin out statusf window key sig pid on_bin control_home back age calls start elapsed deadline_calls
+  local dir state fakebin out statusf window key pane_hash sig pid on_bin control_home back age calls start elapsed deadline_calls
   dir=$(make_case remote-secondmate-beacon); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; statusf="$state/remote.status"
   window="remote:ios"; on_bin="$dir/fm-on.sh"; calls="$dir/remote-calls"; deadline_calls="$dir/deadline-calls"
@@ -1028,6 +1028,9 @@ SH
   wait_live "$pid" 30 || { reap "$pid"; fail "fresh remote beacon did not suppress the idle pane"; }
   reap "$pid"
 
+  pane_hash=$(hash_text "remote secondmate watcher beacon missing or stale: $window")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
   start=$(date +%s)
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_ON_BIN="$on_bin" \
@@ -1100,6 +1103,52 @@ test_secondmate_stale_supervisor_beacon_escalates() {
   grep -F "possible wedge" "$out" >/dev/null || fail "stale secondmate supervisor beacon omitted possible-wedge escalation"
   unset FM_FAKE_CREW_STATE
   pass "a stale secondmate-home watcher beacon still reaches genuine wedge escalation"
+}
+
+test_secondmate_capture_failure_escalates() {
+  local dir state fakebin out statusf window key sig pid home back
+  dir=$(make_case secondmate-capture-failure); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; statusf="$state/secondmate-working.status"
+  home="$dir/secondmate-home"; mkdir -p "$home/state"
+  window="test:fm-secondmate-capture-failure"
+  printf 'window=%s\nkind=secondmate\nhome=%s\n' "$window" "$home" > "$state/secondmate-working.meta"
+  : > "$home/state/.last-watcher-beat"
+  back=$(( $(date +%s) - 500 ))
+  set_mtime "$back" "$home/state/.last-watcher-beat"
+  printf 'working: the parent supervises this secondmate\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-secondmate-working_status"
+  key=$(printf '%s' "$window" | tr '.:/' '___')
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-windows) printf '%s\n' "${FM_FAKE_TMUX_WINDOW#*:}"; exit 0 ;;
+  capture-pane) exit 97 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · supervising a live child'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_numeric_file "$state/.stale-since-$key" 40 || {
+    reap "$pid"; fail "a local secondmate capture failure did not start wedge tracking"
+  }
+  reap "$pid"
+
+  printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a local secondmate capture failure did not wedge-escalate"
+  grep -F "stale: $window" "$out" >/dev/null || fail "local capture failure omitted stale wake"
+  grep -F "possible wedge" "$out" >/dev/null || fail "local capture failure omitted possible-wedge escalation"
+  unset FM_FAKE_CREW_STATE
+  pass "a local secondmate capture failure still reaches genuine wedge escalation"
 }
 
 test_secondmate_future_supervisor_beacon_escalates() {
@@ -2124,6 +2173,7 @@ test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_remote_secondmate_beacon_is_bounded
 test_secondmate_stale_supervisor_beacon_escalates
+test_secondmate_capture_failure_escalates
 test_secondmate_future_supervisor_beacon_escalates
 test_secondmate_unpause_clears_pause_tracking
 test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
