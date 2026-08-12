@@ -33,6 +33,7 @@ One network volume per RunPod second mate, named `fm-sm-<id>-runpod`, holds ever
 ```
 
 Project clones and worktrees live under the second mate's own home, as on any other remote host.
+Each pod also has a disposable 40 GB container disk, the maximum RunPod accepts; reducing or replacing that disk loses no Firstmate state because everything durable lives on the network volume.
 Local second mates never get a volume.
 [`configuration.md`](configuration.md#runpod-compute-lifecycle-configrunpodenv-configrunpod-datarunpod) owns the local control-plane paths, record contents, credential contract, and generated SSH state.
 
@@ -203,7 +204,7 @@ bin/fm-test-run.sh tests/fm-runpod-routing.test.sh
 bin/fm-test-run.sh tests/fm-runpod-pod-boot.test.sh
 ```
 
-The lifecycle suite covers idempotent provision and wake, exactly one pod under concurrent wakes, CPU and GPU exclusivity, endpoint refresh with a stable pinned host identity, every sleep guard, volume retention, and the guarded destroy path.
+The lifecycle suite covers idempotent provision and wake, exactly one pod under concurrent wakes, CPU and GPU exclusivity, RunPod's 40 GB container-disk limit, endpoint refresh with a stable pinned host identity, every sleep guard, volume retention, and the guarded destroy path.
 The routing suite covers the supervision, convergence, and delivery wiring, including that an ordinary remote route and a local second mate are unaffected.
 
-Real provisioning against a RunPod account, and the first end-to-end pilot on a genuine pod, remain an operator-run smoke test and are not claimed by the repository tests.
+Real provisioning against a RunPod account remains an operator-run smoke test and is not claimed by the repository tests.
