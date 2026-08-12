@@ -51,21 +51,15 @@ for arg in "$@"; do
   [ "$arg" != --lease ] || lease_mode=1
 done
 
-if [ "$lease_mode" -eq 1 ]; then
-  FM_TREEHOUSE_REAL_GIT=$REAL_GIT \
-  FM_TREEHOUSE_GUARD_ERROR_FILE="$GUARD_DIR/error" \
-  FM_TREEHOUSE_GUARD_SAFE_FILE="$GUARD_DIR/safe" \
-  FM_TREEHOUSE_GUARD_COMPLETE_FILE="$GUARD_DIR/complete" \
-  PATH="$SCRIPT_DIR/treehouse-git-guard:$PATH" \
-    treehouse get "$@" > "$GUARD_DIR/stdout"
-else
-  FM_TREEHOUSE_REAL_GIT=$REAL_GIT \
-  FM_TREEHOUSE_GUARD_ERROR_FILE="$GUARD_DIR/error" \
-  FM_TREEHOUSE_GUARD_SAFE_FILE="$GUARD_DIR/safe" \
-  FM_TREEHOUSE_GUARD_COMPLETE_FILE="$GUARD_DIR/complete" \
-  PATH="$SCRIPT_DIR/treehouse-git-guard:$PATH" \
-    treehouse get "$@"
-fi
+treehouse_args=("$@")
+interactive_holder="fm-interactive-${BASHPID:-$$}"
+[ "$lease_mode" -eq 1 ] || treehouse_args+=(--lease --lease-holder "$interactive_holder")
+FM_TREEHOUSE_REAL_GIT=$REAL_GIT \
+FM_TREEHOUSE_GUARD_ERROR_FILE="$GUARD_DIR/error" \
+FM_TREEHOUSE_GUARD_SAFE_FILE="$GUARD_DIR/safe" \
+FM_TREEHOUSE_GUARD_COMPLETE_FILE="$GUARD_DIR/complete" \
+PATH="$SCRIPT_DIR/treehouse-git-guard:$PATH" \
+  treehouse get "${treehouse_args[@]}" > "$GUARD_DIR/stdout"
 status=$?
 if [ "$status" -ne 0 ] && [ -s "$GUARD_DIR/error" ]; then
   sed -n '1p' "$GUARD_DIR/error" >&2
@@ -116,5 +110,23 @@ if [ "$status" -eq 0 ] && [ ! -f "$GUARD_DIR/complete" ]; then
   echo "error: refusing pooled worktree acquisition because Treehouse did not complete the guarded reset path" >&2
   exit 1
 fi
-[ "$lease_mode" -eq 0 ] || cat "$GUARD_DIR/stdout"
-exit "$status"
+[ "$status" -eq 0 ] || exit "$status"
+acquired=$(sed -n '1p' "$GUARD_DIR/stdout")
+[ -n "$acquired" ] || {
+  echo "error: refusing pooled worktree acquisition because Treehouse reported no acquired path" >&2
+  exit 1
+}
+if [ "$lease_mode" -eq 1 ]; then
+  printf '%s\n' "$acquired"
+  exit 0
+fi
+
+repo=$PWD
+shell=${SHELL:-/bin/sh}
+( cd "$acquired" && TREEHOUSE_DIR="$acquired" "$shell" )
+shell_status=$?
+if ! ( cd "$repo" && treehouse return --if-lease-holder "$interactive_holder" "$acquired" ); then
+  echo "warning: guarded Treehouse shell exited but its lease at $acquired could not be returned" >&2
+  exit 1
+fi
+exit "$shell_status"

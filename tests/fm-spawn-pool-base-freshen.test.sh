@@ -256,7 +256,7 @@ test_diverged_pool_refuses_without_discarding_commits() {
 }
 
 test_acquisition_guards_before_treehouse_reset() {
-  local rec id out status before fake_treehouse invoked healthy state
+  local rec id out status before fake_treehouse invoked healthy state shell_marker
   id='pool-acquisition-guard-r7'
   rec=$(make_case acquisition-guard "$id")
   read_case_record "$rec"
@@ -271,9 +271,10 @@ test_acquisition_guards_before_treehouse_reset() {
 #!/usr/bin/env bash
 set -e
 cd "$FM_FAKE_POOL"
-git switch --force --detach origin/main
-git reset origin/main --hard
-git clean -df
+git switch --force --detach origin/main >/dev/null
+git reset origin/main --hard >/dev/null
+git clean -df >/dev/null
+printf '%s\n' "$FM_FAKE_POOL"
 SH
   chmod +x "$fake_treehouse"
   out=$(cd "$PROJECT_DIR" && FM_FAKE_POOL="$POOL_DIR" PATH="$FAKEBIN_DIR:$PATH" "$ROOT/bin/fm-treehouse-get.sh" --lease 2>&1)
@@ -307,11 +308,11 @@ SH
 #!/usr/bin/env bash
 set -e
 cd "$FM_FAKE_POOL"
-git checkout --detach --force origin/main || true
+git checkout --detach --force origin/main >/dev/null || true
 cd "$FM_FAKE_HEALTHY_POOL"
-git checkout --detach --force origin/main
-git reset --hard origin/main
-git clean -fd
+git checkout --detach --force origin/main >/dev/null
+git reset --hard origin/main >/dev/null
+git clean -fd >/dev/null
 printf '%s\n' "$FM_FAKE_HEALTHY_POOL"
 SH
   chmod +x "$fake_treehouse"
@@ -328,12 +329,14 @@ SH
 #!/usr/bin/env bash
 set -e
 : > "$FM_FAKE_PROVIDER_INVOKED"
+printf '%s\n' "$*" > "$FM_FAKE_PROVIDER_ARGS"
 cd "$FM_FAKE_POOL"
 "$FM_TREEHOUSE_REAL_GIT" reset --hard origin/main
 printf '%s\n' "$FM_FAKE_POOL"
 SH
   chmod +x "$fake_treehouse"
   out=$(cd "$PROJECT_DIR" && FM_FAKE_POOL="$POOL_DIR" FM_FAKE_PROVIDER_INVOKED="$invoked" \
+    FM_FAKE_PROVIDER_ARGS="$CASE_DIR/provider-args" \
     PATH="$FAKEBIN_DIR:$PATH" "$ROOT/bin/fm-treehouse-get.sh" --lease 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "guarded Treehouse acquisition reset a non-ancestor pool slot"
@@ -345,6 +348,25 @@ SH
   if printf '%s\n' "$out" | grep -Fx "$POOL_DIR" >/dev/null; then
     fail "post-reset containment exposed the refused acquired path on stdout"
   fi
+
+  git -C "$POOL_DIR" checkout --detach --force "$before" >/dev/null
+  shell_marker="$CASE_DIR/interactive-shell-entered"
+  cat > "$FAKEBIN_DIR/interactive-shell" <<'SH'
+#!/usr/bin/env bash
+: > "$FM_FAKE_SHELL_MARKER"
+SH
+  chmod +x "$FAKEBIN_DIR/interactive-shell"
+  out=$(cd "$PROJECT_DIR" && FM_FAKE_POOL="$POOL_DIR" FM_FAKE_PROVIDER_INVOKED="$invoked" \
+    FM_FAKE_PROVIDER_ARGS="$CASE_DIR/provider-args" \
+    FM_FAKE_SHELL_MARKER="$shell_marker" SHELL="$FAKEBIN_DIR/interactive-shell" \
+    PATH="$FAKEBIN_DIR:$PATH" "$ROOT/bin/fm-treehouse-get.sh" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "ordinary acquisition accepted an unsafe provider reset"
+  assert_grep '--lease' "$CASE_DIR/provider-args" \
+    "ordinary acquisition did not use the withheld non-interactive lease path"
+  [ ! -e "$shell_marker" ] || fail "ordinary acquisition entered the worker shell before containment passed"
+  assert_contains "$out" 'detected an unsafe post-reset condition' \
+    "ordinary acquisition did not contain the provider bypass before shell entry"
   pass "spawn guards Treehouse reset before non-ancestor acquisition"
 }
 
