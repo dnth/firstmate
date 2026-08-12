@@ -376,13 +376,20 @@ Fresh evidence clears the prior stale suppressor, wedge timer, and consecutive-e
 Deterministic verification on 2026-08-12:
 
 ```sh
+bash --version | sed -n '1p'
+shellcheck --version | sed -n '1,2p'
 shellcheck -x bin/fm-watch.sh bin/fm-remote-secondmate-control.sh tests/fm-watch-triage.test.sh
-bash tests/fm-watch-triage.test.sh
+set -o pipefail
+bash tests/fm-watch-triage.test.sh | grep -E '^ok - (a fresh secondmate-home watcher beacon suppresses an idle secondmate pane|remote beacon timeout is bounded and still reaches wedge escalation|a stale secondmate-home watcher beacon still reaches genuine wedge escalation|a future-dated secondmate-home beacon cannot prove liveness)$'
 ```
 
-Observed results:
+ShellCheck produced no output and exited zero.
+The other commands produced this exact standard output; intentional crash-boundary fixtures may also print expected diagnostics on standard error:
 
 ```text
+GNU bash, version 5.1.16(1)-release (x86_64-pc-linux-gnu)
+ShellCheck - shell script analysis tool
+version: 0.11.0
 ok - a fresh secondmate-home watcher beacon suppresses an idle secondmate pane
 ok - remote beacon timeout is bounded and still reaches wedge escalation
 ok - a stale secondmate-home watcher beacon still reaches genuine wedge escalation

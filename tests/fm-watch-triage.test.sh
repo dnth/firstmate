@@ -953,10 +953,10 @@ test_secondmate_nonpaused_stale_remains_suppressed() {
 }
 
 test_remote_secondmate_beacon_is_bounded() {
-  local dir state fakebin out statusf window key sig pid on_bin control_home back age calls start elapsed
+  local dir state fakebin out statusf window key sig pid on_bin control_home back age calls start elapsed deadline_calls
   dir=$(make_case remote-secondmate-beacon); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; statusf="$state/remote.status"
-  window="remote:ios"; on_bin="$dir/fm-on.sh"; calls="$dir/remote-calls"
+  window="remote:ios"; on_bin="$dir/fm-on.sh"; calls="$dir/remote-calls"; deadline_calls="$dir/deadline-calls"
   control_home="$dir/control-home"
   mkdir -p "$control_home/state" "$control_home/bin"
   printf 'ios\n' > "$control_home/.fm-secondmate-home"
@@ -983,13 +983,38 @@ case "${FM_FAKE_REMOTE_BEACON_AGE:?}" in
   *) printf '%s\n' "$FM_FAKE_REMOTE_BEACON_AGE" ;;
 esac
 SH
+  cat > "$fakebin/timeout" <<'SH'
+#!/usr/bin/env bash
+printf 'timeout\n' >> "${FM_FAKE_DEADLINE_CALLS:?}"
+seconds=$1
+shift
+"$@" &
+child=$!
+deadline=$((SECONDS + seconds))
+while kill -0 "$child" 2>/dev/null; do
+  if [ "$SECONDS" -ge "$deadline" ]; then
+    kill "$child" 2>/dev/null || true
+    wait "$child" 2>/dev/null || true
+    exit 124
+  fi
+  sleep 0.05
+done
+wait "$child"
+rc=$?
+exit "$rc"
+SH
+  cat > "$fakebin/perl" <<'SH'
+#!/usr/bin/env bash
+exit 99
+SH
   chmod +x "$fakebin/tmux"
   chmod +x "$on_bin"
+  chmod +x "$fakebin/timeout" "$fakebin/perl"
   export FM_FAKE_CREW_STATE='state: working · source: run-step · supervising remote crew'
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_ON_BIN="$on_bin" \
-    FM_FAKE_REMOTE_CALLS="$calls" FM_FAKE_REMOTE_BEACON_AGE=0 \
+    FM_FAKE_REMOTE_CALLS="$calls" FM_FAKE_DEADLINE_CALLS="$deadline_calls" FM_FAKE_REMOTE_BEACON_AGE=0 \
     FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -999,7 +1024,8 @@ SH
   start=$(date +%s)
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_ON_BIN="$on_bin" \
-    FM_FAKE_REMOTE_CALLS="$calls" FM_FAKE_REMOTE_BEACON_AGE=hang FM_WATCH_REMOTE_TIMEOUT=1 \
+    FM_FAKE_REMOTE_CALLS="$calls" FM_FAKE_DEADLINE_CALLS="$deadline_calls" \
+    FM_FAKE_REMOTE_BEACON_AGE=hang FM_WATCH_REMOTE_TIMEOUT=1 \
     FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -1012,7 +1038,7 @@ SH
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_ON_BIN="$on_bin" \
-    FM_FAKE_REMOTE_CALLS="$calls" FM_FAKE_REMOTE_BEACON_AGE=500 \
+    FM_FAKE_REMOTE_CALLS="$calls" FM_FAKE_DEADLINE_CALLS="$deadline_calls" FM_FAKE_REMOTE_BEACON_AGE=500 \
     FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -1021,6 +1047,9 @@ SH
   if grep -v '^beacon-age$' "$calls" | grep . >/dev/null; then
     fail "remote stale handling used an unsupported remote call: $(tr '\n' ' ' < "$calls")"
   fi
+  [ -s "$deadline_calls" ] || fail "remote beacon probes did not use the available timeout command"
+  grep -v '^timeout$' "$deadline_calls" | grep . >/dev/null \
+    && fail "remote beacon probes used an unexpected deadline command"
   unset FM_FAKE_CREW_STATE
   pass "remote beacon timeout is bounded and still reaches wedge escalation"
 }
