@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 set -u
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 REAL_GIT=$(command -v git 2>/dev/null) || {
   echo "error: git is required for guarded Treehouse acquisition" >&2
   exit 1
 }
 GUARD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-treehouse-get.XXXXXX") || exit 1
 trap 'rm -rf "$GUARD_DIR"' EXIT
+# shellcheck source=bin/fm-pool-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-pool-lib.sh"
 
 lease_mode=0
@@ -19,6 +20,7 @@ interactive_holder="fm-interactive-${BASHPID:-$$}"
 synthetic_acquired=
 synthetic_verified=0
 
+# shellcheck disable=SC2329 # Invoked indirectly by the signal trap handlers below.
 return_interrupted_synthetic_lease() {
   local path=$synthetic_acquired
   [ "$lease_mode" -eq 0 ] || return 0
@@ -43,6 +45,7 @@ return_interrupted_synthetic_lease() {
   fi
 }
 
+# shellcheck disable=SC2329 # Invoked indirectly by the signal traps below.
 handle_signal() {
   local signal=$1 status=1
   trap - HUP INT TERM

@@ -9,6 +9,7 @@ fi
 repo=${1:?usage: fm-treehouse-status-read-only.sh [--candidates] <repo>}
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-treehouse-status.XXXXXX") || exit 1
 trap 'rm -rf "$tmp"' EXIT
+# shellcheck source=bin/fm-pool-lib.sh disable=SC1091
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-pool-lib.sh"
 candidates="$tmp/candidates"
 cwd_snapshot="$tmp/cwds"
