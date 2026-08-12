@@ -58,7 +58,7 @@ count=0
 [ ! -f "$CURL_COUNT" ] || count=$(cat "$CURL_COUNT")
 count=$((count + 1))
 printf '%s\n' "$count" > "$CURL_COUNT"
-[ "$count" -gt 1 ] || exit 35
+[ "$count" -gt 3 ] || exit 35
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "-o" ]; then
     : > "$2"
@@ -96,7 +96,7 @@ SH
 
   out=$(CURL_COUNT="$tmp/curl-count" PATH="$fakebin:$PATH" "$INSTALLER" "$destination" 2>&1) \
     || fail "installer did not recover from a transient download failure"$'\n'"$out"
-  [ "$(cat "$tmp/curl-count")" -eq 2 ] || fail "installer did not retry exactly once after recovery"
+  [ "$(cat "$tmp/curl-count")" -eq 4 ] || fail "installer did not survive three consecutive transient failures"
   assert_contains "$out" "download attempt 1 failed; retrying" "installer did not disclose its retry"
   [ -x "$destination/shellcheck" ] || fail "installer did not install ShellCheck after retrying"
   pass "ShellCheck installer retries a transient download failure"

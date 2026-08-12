@@ -55,6 +55,7 @@ FM_REMOTE_HOME=${FM_REMOTE_HOME:-$FM_VOLUME/secondmate-home}
 FM_PERSIST=${FM_PERSIST:-$FM_VOLUME/persistent-runtime}
 FM_HOST_KEY_DIR="$FM_PERSIST/ssh"
 FM_SYSTEM_SSH_DIR=${FM_SYSTEM_SSH_DIR:-/etc/ssh}
+FM_SSHD_FALLBACK=${FM_SSHD_FALLBACK:-/usr/sbin/sshd}
 FM_BOOT_LOG=${FM_BOOT_LOG:-$FM_PERSIST/boot.log}
 
 # Raise this when the provisioning contract changes so existing volumes
@@ -128,7 +129,7 @@ ensure_base_packages() {
   local missing="" pkg
   for pkg in $FM_APT_PACKAGES; do
     case "$pkg" in
-      openssh-server) have sshd || [ -x /usr/sbin/sshd ] || missing="$missing $pkg" ;;
+      openssh-server) have sshd || [ -x "$FM_SSHD_FALLBACK" ] || missing="$missing $pkg" ;;
       ca-certificates) [ -e /etc/ssl/certs/ca-certificates.crt ] || missing="$missing $pkg" ;;
       *) have "$pkg" || missing="$missing $pkg" ;;
     esac
@@ -146,7 +147,7 @@ ensure_base_packages() {
   }
   for pkg in $FM_APT_PACKAGES; do
     case "$pkg" in
-      openssh-server) have sshd || [ -x /usr/sbin/sshd ] || return 1 ;;
+      openssh-server) have sshd || [ -x "$FM_SSHD_FALLBACK" ] || return 1 ;;
       ca-certificates) [ -e /etc/ssl/certs/ca-certificates.crt ] || return 1 ;;
       *) have "$pkg" || return 1 ;;
     esac
@@ -297,12 +298,12 @@ provision_toolchain() {
 
 install_sshd() {
   command -v sshd >/dev/null 2>&1 && return 0
-  command -v /usr/sbin/sshd >/dev/null 2>&1 && return 0
+  [ -x "$FM_SSHD_FALLBACK" ] && return 0
   log "installing openssh-server"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq >/dev/null 2>&1 || true
   apt-get install -y -qq openssh-server >/dev/null 2>&1 || true
-  command -v sshd >/dev/null 2>&1 || [ -x /usr/sbin/sshd ]
+  command -v sshd >/dev/null 2>&1 || [ -x "$FM_SSHD_FALLBACK" ]
 }
 
 # The pod's SSH identity is a property of the VOLUME, not of the machine, so a
@@ -353,7 +354,7 @@ authorize_key() {
 start_sshd() {
   local bin
   bin=$(command -v sshd 2>/dev/null || true)
-  [ -n "$bin" ] || bin=/usr/sbin/sshd
+  [ -n "$bin" ] || bin=$FM_SSHD_FALLBACK
   [ -x "$bin" ] || { log "FATAL: no sshd executable is available"; return 1; }
   mkdir -p /run/sshd /var/run/sshd 2>/dev/null || true
   if pgrep -x sshd >/dev/null 2>&1; then

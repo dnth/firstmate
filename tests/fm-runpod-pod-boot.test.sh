@@ -55,11 +55,18 @@ pass "--check is a pure dry run"
 # Each records its calls so the test can assert order, idempotence, and that the
 # repository's own pinned installers are the ones used.
 new_world() {  # <name> -> world dir
-  local name=$1 w fakebin
+  local name=$1 w fakebin tool
   w="$TMP_ROOT/$name"
-  mkdir -p "$w/volume" "$w/home" "$w/origin" "$w/templates" "$w/system-ssh"
+  mkdir -p "$w/volume" "$w/home" "$w/origin" "$w/templates" "$w/system-ssh" "$w/basebin"
   fakebin=$(fm_fakebin "$w")
   : > "$w/calls.log"
+
+  # Keep the exercised boot independent of tools installed on the host runner.
+  # These are only the neutral utilities the boot needs; provisioned tools live
+  # in fakebin and disappear for real when a replacement pod is simulated.
+  for tool in awk bash cat chmod cp date dirname env grep ln mkdir mktemp mv readlink rm sleep timeout uname; do
+    ln -s "$(command -v "$tool")" "$w/basebin/$tool"
+  done
 
   cat > "$w/templates/npm" <<'SH'
 #!/usr/bin/env bash
@@ -194,7 +201,7 @@ provision_only() {  # <world> [harness]
   mkdir -p "$w/volume/persistent-runtime"
   : > "$w/volume/persistent-runtime/boot.log"
   (
-    PATH="$w/fakebin:/usr/bin:/bin" \
+    PATH="$w/fakebin:$w/basebin" \
     HOME="$w/home" \
     FM_VOLUME="$w/volume" \
     FM_REMOTE_ORIGIN="$w/origin" \
@@ -202,6 +209,7 @@ provision_only() {  # <world> [harness]
     FM_FAKE_EPHEMERAL_BIN="$w/fakebin" \
     FM_FAKE_NPM_TEMPLATE="$w/templates/npm" \
     FM_SYSTEM_SSH_DIR="$w/system-ssh" \
+    FM_SSHD_FALLBACK="$w/fakebin/sshd" \
     FM_POD_HARNESS_NPM="$harness" \
     timeout 60 bash "$BOOT" >/dev/null 2>&1 &
     boot_pid=$!
@@ -221,7 +229,7 @@ provision_only() {  # <world> [harness]
 provision_idempotent() {  # <world> [harness]
   local w=$1 harness=${2:-}
   (
-    PATH="$w/fakebin:/usr/bin:/bin" \
+    PATH="$w/fakebin:$w/basebin" \
     HOME="$w/home" \
     FM_VOLUME="$w/volume" \
     FM_REMOTE_ORIGIN="$w/origin" \
@@ -229,6 +237,7 @@ provision_idempotent() {  # <world> [harness]
     FM_FAKE_EPHEMERAL_BIN="$w/fakebin" \
     FM_FAKE_NPM_TEMPLATE="$w/templates/npm" \
     FM_SYSTEM_SSH_DIR="$w/system-ssh" \
+    FM_SSHD_FALLBACK="$w/fakebin/sshd" \
     FM_POD_HARNESS_NPM="$harness" \
     timeout 30 bash "$BOOT" >/dev/null 2>&1 &
     boot_pid=$!
@@ -353,10 +362,11 @@ pass "the durable marker reconciles harness configuration in both directions"
 w4=$(new_world packages)
 rm -f "$w4/fakebin/sshd"
 out=$(
-  PATH="$w4/fakebin:/usr/bin:/bin" HOME="$w4/home" FM_VOLUME="$w4/volume" \
+  PATH="$w4/fakebin:$w4/basebin" HOME="$w4/home" FM_VOLUME="$w4/volume" \
   FM_REMOTE_ORIGIN="$w4/origin" FM_FAKE_CALLS="$w4/calls.log" \
   FM_FAKE_EPHEMERAL_BIN="$w4/fakebin" FM_FAKE_NPM_TEMPLATE="$w4/templates/npm" \
   FM_SYSTEM_SSH_DIR="$w4/system-ssh" \
+  FM_SSHD_FALLBACK="$w4/fakebin/sshd" \
   FM_FAKE_APT_FAIL=1 \
   timeout 3 bash "$BOOT" 2>&1 || true
 )
@@ -392,10 +402,11 @@ exec "$real_cp" "\$@"
 SH
 chmod +x "$w6/fakebin/cp"
 out=$(
-  PATH="$w6/fakebin:/usr/bin:/bin" HOME="$w6/home" FM_VOLUME="$w6/volume" \
+  PATH="$w6/fakebin:$w6/basebin" HOME="$w6/home" FM_VOLUME="$w6/volume" \
   FM_REMOTE_ORIGIN="$w6/origin" FM_FAKE_CALLS="$w6/calls.log" \
   FM_FAKE_EPHEMERAL_BIN="$w6/fakebin" FM_FAKE_NPM_TEMPLATE="$w6/templates/npm" \
   FM_SYSTEM_SSH_DIR="$w6/system-ssh" \
+  FM_SSHD_FALLBACK="$w6/fakebin/sshd" \
   timeout 4 bash "$BOOT" 2>&1 || true
 )
 assert_contains "$out" "volume-backed host key could not be restored or persisted" \
@@ -410,10 +421,11 @@ pass "host-key persistence failures fail closed before sshd"
 
 w3=$(new_world noorigin)
 out=$(
-  PATH="$w3/fakebin:/usr/bin:/bin" HOME="$w3/home" FM_VOLUME="$w3/volume" \
+  PATH="$w3/fakebin:$w3/basebin" HOME="$w3/home" FM_VOLUME="$w3/volume" \
   FM_REMOTE_ORIGIN="" FM_FAKE_CALLS="$w3/calls.log" \
   FM_FAKE_EPHEMERAL_BIN="$w3/fakebin" FM_FAKE_NPM_TEMPLATE="$w3/templates/npm" \
   FM_SYSTEM_SSH_DIR="$w3/system-ssh" \
+  FM_SSHD_FALLBACK="$w3/fakebin/sshd" \
   timeout 20 bash "$BOOT" 2>&1 &
   boot_pid=$!
   sleep 3
