@@ -180,6 +180,8 @@ test_omp_snippet_uses_effective_extension_path() {
   assert_contains "$out" "Mode: OMP native extension background wake." "OMP snippet did not render the native-extension mode"
   assert_contains "$out" "omp -e $extension" "OMP snippet did not render the explicit extension launch fallback"
   assert_contains "$out" "lives at \`$extension\`" "OMP snippet did not render the effective extension path"
+  assert_contains "$out" ".last-watcher-beat" "OMP snippet omitted the secondmate-home liveness beacon contract"
+  assert_contains "$out" "FM_STALE_ESCALATE_SECS" "OMP snippet omitted the bounded secondmate beacon age"
   assert_not_contains "$out" "__FM_OMP_PRIMARY_EXT__" "renderer leaked the OMP primary extension placeholder"
   assert_not_contains "$out" "fm_watch_arm_pi" "OMP snippet borrowed the Pi watcher tool"
   pass "OMP supervision snippet renders its native integration path and distinct tool"

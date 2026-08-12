@@ -7,8 +7,8 @@
 # secondmate agent that has exited leaves its backend endpoint alive as a bare
 # shell. fm_backend_target_exists only checks pane PRESENCE, so it reports
 # that shell "alive"; recovery only respawns endpoints reported dead, and the
-# watcher deliberately exempts secondmates from stale-pane detection (an idle
-# secondmate pane is healthy by design). A dead-shell secondmate was therefore
+# watcher then exempted secondmates from stale-pane detection because an idle
+# secondmate pane was healthy by design. A dead-shell secondmate was therefore
 # invisible to every existing check and sat dead indefinitely.
 #
 # The guarantees under test:

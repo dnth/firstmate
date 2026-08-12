@@ -41,6 +41,11 @@
 #                          count, and demand-deep-inspection marker, for human
 #                          inspection only - never an automatic interrupt,
 #                          signal, or restart of the worker or its tool process.
+#                          An idle secondmate that is neither paused nor captain-held
+#                          is also absorbed while its home watcher beacon is fresh
+#                          within the wedge threshold; missing, stale, future-dated,
+#                          or timed-out evidence follows the ordinary stale and
+#                          possible-wedge path.
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
@@ -54,6 +59,12 @@
 #                          running a check or removing poll artifacts
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
+# FM_WATCH_REMOTE_TIMEOUT bounds each remote beacon probe in seconds, accepts
+# integers from 1 through 15, defaults to 5, and falls back to 5 when invalid;
+# probes prefer timeout, then gtimeout, then a Perl fallback. The timeout tools
+# force-kill after one additional second when TERM is ignored. Perl starts the
+# probe in its own process group, sends TERM at the bound, and sends KILL after
+# a 0.2-second grace. With none of those tools, the probe returns missing evidence.
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -86,6 +97,12 @@ mkdir -p "$STATE"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
+ON_BIN=${FM_ON_BIN:-$SCRIPT_DIR/fm-on.sh}
+REMOTE_TIMEOUT=${FM_WATCH_REMOTE_TIMEOUT:-5}
+case "$REMOTE_TIMEOUT" in
+  ''|*[!0-9]*|0) REMOTE_TIMEOUT=5 ;;
+  *) [ "$REMOTE_TIMEOUT" -le 15 ] || REMOTE_TIMEOUT=5 ;;
+esac
 WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
 # The singleton-lock acquisition, EXIT trap, and the blocking supervision loop
 # all live below the source guard at the very bottom of this file (see "Main
@@ -363,13 +380,18 @@ clear_pause_state() {  # <window>
   rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
 }
 
-clear_pause_tracking() {  # <window>
+clear_stale_tracking() {  # <window>
   local win=$1 key
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
-  clear_pause_state "$win"
   rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+}
+
+clear_pause_tracking() {  # <window>
+  local win=$1
+  clear_pause_state "$win"
+  clear_stale_tracking "$win"
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
@@ -442,6 +464,47 @@ surface_nonterminal_stale() {  # <window> <hash>
 # Check and heartbeat cadence must survive actionable exits and restarts: the
 # watcher may be relaunched before in-memory counters reach their threshold on a
 # busy fleet. Persist the schedule as file mtimes instead.
+# A fresh secondmate-home watcher beacon is positive evidence that the secondmate
+# supervisor is still alive, even when its own pane is idle between child polls.
+# The beacon is written by this same watcher process at the top of every cycle,
+# and the parent uses the wedge threshold as its maximum acceptable age. A
+# missing or stale beacon deliberately falls through to the ordinary stale path,
+# preserving wedge detection for an unresponsive supervisor.
+run_with_deadline() {
+  local seconds=$1
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout --kill-after=1 "$seconds" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout --kill-after=1 "$seconds" "$@"
+  elif command -v perl >/dev/null 2>&1; then
+    # shellcheck disable=SC2016
+    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; waitpid $pid, 0; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$seconds" "$@"
+  else
+    return 124
+  fi
+}
+
+secondmate_supervision_is_alive() {  # <window> <meta> <remote-host>
+  local win=$1 meta=$2 remote_host=$3 home beat task age
+  [ -n "$meta" ] || return 1
+  if [ -n "$remote_host" ]; then
+    task=$(window_to_task "$win" "$STATE")
+    age=$(run_with_deadline "$REMOTE_TIMEOUT" "$ON_BIN" "$task" \
+      fm-remote-secondmate-control.sh beacon-age "$task" </dev/null 2>/dev/null) || return 1
+    case "$age" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$age" -ge 0 ] && [ "$age" -lt "$STALE_ESCALATE_SECS" ]
+    return
+  fi
+  home=$(grep '^home=' "$meta" | cut -d= -f2- || true)
+  [ -n "$home" ] || return 1
+  beat="$home/state/.last-watcher-beat"
+  [ -f "$beat" ] && [ ! -L "$beat" ] || return 1
+  age=$(age_of "$beat")
+  case "$age" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$age" -ge 0 ] && [ "$age" -lt "$STALE_ESCALATE_SECS" ]
+}
+
 age_of() {  # seconds since file mtime; "due immediately" if missing
   local f=$1 m
   m=$(stat_mtime "$f") || { echo 999999; return; }
@@ -943,11 +1006,30 @@ EOF
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$w"
     fi
-    if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
-      continue
+    secondmate_stale=0
+    remote_host=
+    if [ "$kind" = secondmate ]; then
+      meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
+      remote_host=$(grep '^remote_host=' "$meta" | cut -d= -f2- || true)
+      if ! status_is_paused_or_captain_held "$last" \
+        && secondmate_supervision_is_alive "$w" "$meta" "$remote_host"; then
+        clear_stale_tracking "$w"
+        continue
+      fi
+      secondmate_stale=1
     fi
-    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
-    h=$(printf '%s' "$tail40" | hash_pane)
+    if [ "$secondmate_stale" -eq 1 ]; then
+      if [ -n "$remote_host" ]; then
+        tail40="remote secondmate watcher beacon missing or stale: $w"
+      else
+        tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) \
+          || tail40="secondmate pane capture unavailable: $w"
+      fi
+      h=$(printf 'secondmate watcher beacon missing or stale: %s' "$w" | hash_pane)
+    else
+      tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+      h=$(printf '%s' "$tail40" | hash_pane)
+    fi
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
@@ -961,19 +1043,14 @@ EOF
     # harness renders its busy indicator) so busy-looking strings in displayed
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
-    if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    if [ "$secondmate_stale" -eq 0 ] && window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
       if [ "$n" -ge 2 ] && [ "$busy_now" -ne 0 ]; then
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
-        if [ "$kind" = secondmate ]; then
-          case "$(pause_state_class "$w" "$task")" in
-            paused) handle_paused_stale "$w" "$task" "$h" ;;
-            *)      clear_pause_tracking "$w" ;;
-          esac
-        elif afk_present; then
+        if afk_present; then
           # Daemon owns triage: one-shot per distinct stale hash, as before.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             fm_wake_append stale "$w" "stale: $w" || exit 1
