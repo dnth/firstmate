@@ -1061,59 +1061,47 @@ SH
   pass "a TERM-ignoring remote beacon probe is force-bounded and still reaches wedge escalation"
 }
 
-test_remote_deadline_gtimeout_fallback() {
-  local dir state marker hang
-  dir=$(make_case remote-gtimeout-fallback); state="$dir/state"
-  marker="$dir/gtimeout-called"; hang="$dir/ignore-term"
-  cat > "$hang" <<'SH'
-#!/usr/bin/env bash
-trap '' TERM
-while :; do sleep 1; done
-SH
-  chmod +x "$hang"
-  FM_STATE_OVERRIDE="$state" FM_TEST_MARKER="$marker" bash -c '
-    . "$1"
-    command() {
-      if [ "${1:-}" = -v ]; then
-        case "${2:-}" in timeout) return 1 ;; gtimeout) return 0 ;; esac
-      fi
-      builtin command "$@"
-    }
-    gtimeout() {
-      [ "$1" = --kill-after=1 ] || return 98
-      shift
-      seconds=$1
-      shift
-      : > "$FM_TEST_MARKER"
-      "$@" & child=$!
-      sleep "$seconds"
-      kill "$child" 2>/dev/null || true
-      sleep 1
-      kill -KILL "$child" 2>/dev/null || true
-      wait "$child" 2>/dev/null || true
-      return 124
-    }
-    run_with_deadline 1 "$2"
-    [ "$?" -eq 124 ]
-  ' _ "$WATCH" "$hang" || fail "gtimeout fallback did not force-bound a TERM-ignoring probe"
-  [ -e "$marker" ] || fail "gtimeout fallback was not selected"
-  pass "the gtimeout fallback force-bounds a TERM-ignoring remote probe"
+make_path_without_deadline_tools() {  # <destination>
+  local destination=$1 path_dir path name old_ifs
+  old_ifs=$IFS
+  IFS=:
+  for path_dir in $PATH; do
+    [ -d "$path_dir" ] || continue
+    for path in "$path_dir"/*; do
+      [ -f "$path" ] && [ -x "$path" ] || continue
+      name=${path##*/}
+      case "$name" in timeout|gtimeout) continue ;; esac
+      [ -e "$destination/$name" ] || ln -s "$path" "$destination/$name"
+    done
+  done
+  IFS=$old_ifs
 }
 
-test_remote_deadline_perl_process_group_fallback() {
-  local dir state hang sentinel started elapsed
-  dir=$(make_case remote-perl-fallback); state="$dir/state"
-  hang="$dir/ignore-term-tree"; sentinel="$dir/descendant-survived"
-  cat > "$hang" <<'PL'
+test_remote_deadline_fallback() {  # <gtimeout|perl>
+  local mode=$1 dir state fakebin runtimebin out statusf window key sig pid on_bin sentinel
+  local calls fallback_marker started elapsed real_timeout
+  dir=$(make_case "remote-$mode-fallback"); state="$dir/state"; fakebin="$dir/fakebin"
+  runtimebin="$dir/runtimebin"; mkdir -p "$runtimebin"
+  out="$dir/watch.out"; statusf="$state/remote.status"; window="remote:$mode"
+  on_bin="$dir/fm-on.pl"; sentinel="$dir/descendant-survived"; calls="$dir/remote-calls"
+  fallback_marker="$dir/$mode-called"
+  printf 'window=%s\nkind=secondmate\nremote_host=remote-mac\nhome=/remote/home\n' "$window" > "$state/remote.meta"
+  printf 'working: supervising remote crew\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-remote_status"
+  key=$(printf '%s' "$window" | tr '.:/' '___')
+  cat > "$on_bin" <<'PL'
 #!/usr/bin/env perl
 use strict;
 use warnings;
+open my $calls, '>>', $ENV{FM_FAKE_REMOTE_CALLS} or die $!;
+print {$calls} (($ARGV[2] // 'missing') . "\n");
+close $calls;
 $SIG{TERM} = 'IGNORE';
 my $pid = fork();
 die "fork failed" unless defined $pid;
 if (!$pid) {
   $SIG{TERM} = 'IGNORE';
-  sleep 3;
+  sleep 4;
   open my $fh, '>', $ENV{FM_TEST_SENTINEL} or die $!;
   print {$fh} "survived\n";
   close $fh;
@@ -1121,24 +1109,61 @@ if (!$pid) {
 }
 sleep 30;
 PL
-  chmod +x "$hang"
+  chmod +x "$on_bin"
+  make_path_without_deadline_tools "$runtimebin"
+  ln -sf "$fakebin/tmux" "$runtimebin/tmux"
+  if [ "$mode" = gtimeout ]; then
+    real_timeout=$(command -v timeout) || fail "gtimeout fallback test requires timeout to back its shim"
+    cat > "$runtimebin/gtimeout" <<'SH'
+#!/usr/bin/env bash
+: > "${FM_FAKE_FALLBACK_MARKER:?}"
+exec "${FM_FAKE_REAL_TIMEOUT:?}" "$@"
+SH
+    chmod +x "$runtimebin/gtimeout"
+  fi
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · supervising remote crew'
   started=$(date +%s)
-  FM_STATE_OVERRIDE="$state" FM_TEST_SENTINEL="$sentinel" bash -c '
-    . "$1"
-    command() {
-      if [ "${1:-}" = -v ]; then
-        case "${2:-}" in timeout|gtimeout) return 1 ;; esac
-      fi
-      builtin command "$@"
-    }
-    run_with_deadline 1 "$2"
-    [ "$?" -eq 124 ]
-  ' _ "$WATCH" "$hang" || fail "Perl fallback did not force-bound a TERM-ignoring process group"
+  PATH="$runtimebin" FM_FAKE_TMUX_WINDOW="$window" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_ON_BIN="$on_bin" \
+    FM_FAKE_REMOTE_CALLS="$calls" FM_TEST_SENTINEL="$sentinel" \
+    FM_FAKE_FALLBACK_MARKER="$fallback_marker" FM_FAKE_REAL_TIMEOUT="${real_timeout:-}" \
+    FM_WATCH_REMOTE_TIMEOUT=1 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_numeric_file "$state/.stale-since-$key" 180 \
+    || { reap "$pid"; fail "$mode fallback did not route a bounded probe failure into stale tracking"; }
+  reap "$pid"
   elapsed=$(( $(date +%s) - started ))
-  [ "$elapsed" -le 3 ] || fail "Perl fallback exceeded its deadline: ${elapsed}s"
-  sleep 3
-  [ ! -e "$sentinel" ] || fail "Perl fallback left a TERM-ignoring descendant alive"
-  pass "the Perl fallback force-bounds the remote probe process group"
+  [ "$elapsed" -le 18 ] || fail "$mode fallback exceeded its watcher bound: ${elapsed}s"
+  sleep 5
+  [ ! -e "$sentinel" ] || fail "$mode fallback left a TERM-ignoring descendant alive"
+  if [ "$mode" = gtimeout ]; then
+    [ -e "$fallback_marker" ] || fail "gtimeout fallback was not selected"
+  fi
+  printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$runtimebin" FM_FAKE_TMUX_WINDOW="$window" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_ON_BIN="$on_bin" \
+    FM_FAKE_REMOTE_CALLS="$calls" FM_TEST_SENTINEL="$sentinel" \
+    FM_FAKE_FALLBACK_MARKER="$fallback_marker" FM_FAKE_REAL_TIMEOUT="${real_timeout:-}" \
+    FM_WATCH_REMOTE_TIMEOUT=1 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 60 || fail "$mode fallback did not reach wedge escalation"
+  grep -F "possible wedge" "$out" >/dev/null || fail "$mode fallback omitted possible-wedge escalation"
+  sleep 5
+  [ ! -e "$sentinel" ] || fail "$mode fallback wedge poll left a TERM-ignoring descendant alive"
+  unset FM_FAKE_CREW_STATE
+}
+
+test_remote_deadline_gtimeout_fallback() {
+  test_remote_deadline_fallback gtimeout
+  pass "the gtimeout fallback bounds remote stale and wedge detection"
+}
+
+test_remote_deadline_perl_process_group_fallback() {
+  test_remote_deadline_fallback perl
+  pass "the Perl fallback bounds remote stale and wedge detection"
 }
 
 test_secondmate_stale_supervisor_beacon_escalates() {

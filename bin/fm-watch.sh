@@ -60,7 +60,10 @@
 #                          status, unless afk is active
 # FM_WATCH_REMOTE_TIMEOUT bounds each remote beacon probe in seconds, accepts
 # integers from 1 through 15, defaults to 5, and falls back to 5 when invalid;
-# timeout tools force-kill after one additional second when TERM is ignored.
+# probes prefer timeout, then gtimeout, then a Perl fallback. The timeout tools
+# force-kill after one additional second when TERM is ignored. Perl starts the
+# probe in its own process group, sends TERM at the bound, and sends KILL after
+# a 0.2-second grace. With none of those tools, the probe returns missing evidence.
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
