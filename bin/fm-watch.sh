@@ -1014,15 +1014,18 @@ EOF
       fi
       secondmate_stale=1
     fi
-    if [ "$secondmate_stale" -eq 1 ] && [ -n "$remote_host" ]; then
-      tail40="remote secondmate watcher beacon missing or stale: $w"
-    else
-      if ! tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null); then
-        [ "$secondmate_stale" -eq 1 ] || continue
-        tail40="secondmate watcher beacon missing or stale and pane capture unavailable: $w"
+    if [ "$secondmate_stale" -eq 1 ]; then
+      if [ -n "$remote_host" ]; then
+        tail40="remote secondmate watcher beacon missing or stale: $w"
+      else
+        tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) \
+          || tail40="secondmate pane capture unavailable: $w"
       fi
+      h=$(printf 'secondmate watcher beacon missing or stale: %s' "$w" | hash_pane)
+    else
+      tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+      h=$(printf '%s' "$tail40" | hash_pane)
     fi
-    h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"

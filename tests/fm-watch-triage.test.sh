@@ -953,7 +953,7 @@ test_secondmate_nonpaused_stale_remains_suppressed() {
 }
 
 test_remote_secondmate_beacon_is_bounded() {
-  local dir state fakebin out statusf window key pane_hash sig pid on_bin control_home back age calls start elapsed deadline_calls
+  local dir state fakebin out statusf window key sig pid on_bin control_home back age calls start elapsed deadline_calls
   dir=$(make_case remote-secondmate-beacon); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; statusf="$state/remote.status"
   window="remote:ios"; on_bin="$dir/fm-on.sh"; calls="$dir/remote-calls"; deadline_calls="$dir/deadline-calls"
@@ -1028,9 +1028,6 @@ SH
   wait_live "$pid" 30 || { reap "$pid"; fail "fresh remote beacon did not suppress the idle pane"; }
   reap "$pid"
 
-  pane_hash=$(hash_text "remote secondmate watcher beacon missing or stale: $window")
-  printf '%s' "$pane_hash" > "$state/.hash-$key"
-  printf '1\n' > "$state/.count-$key"
   start=$(date +%s)
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_ON_BIN="$on_bin" \
@@ -1039,7 +1036,7 @@ SH
     FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_numeric_file "$state/.stale-since-$key" 80 \
+  wait_numeric_file "$state/.stale-since-$key" 150 \
     || { reap "$pid"; fail "a non-returning remote beacon probe blocked stale tracking"; }
   reap "$pid"
   elapsed=$(( $(date +%s) - start ))
@@ -1062,6 +1059,86 @@ SH
     && fail "remote beacon probes used an unexpected deadline command"
   unset FM_FAKE_CREW_STATE
   pass "a TERM-ignoring remote beacon probe is force-bounded and still reaches wedge escalation"
+}
+
+test_remote_deadline_gtimeout_fallback() {
+  local dir state marker hang
+  dir=$(make_case remote-gtimeout-fallback); state="$dir/state"
+  marker="$dir/gtimeout-called"; hang="$dir/ignore-term"
+  cat > "$hang" <<'SH'
+#!/usr/bin/env bash
+trap '' TERM
+while :; do sleep 1; done
+SH
+  chmod +x "$hang"
+  FM_STATE_OVERRIDE="$state" FM_TEST_MARKER="$marker" bash -c '
+    . "$1"
+    command() {
+      if [ "${1:-}" = -v ]; then
+        case "${2:-}" in timeout) return 1 ;; gtimeout) return 0 ;; esac
+      fi
+      builtin command "$@"
+    }
+    gtimeout() {
+      [ "$1" = --kill-after=1 ] || return 98
+      shift
+      seconds=$1
+      shift
+      : > "$FM_TEST_MARKER"
+      "$@" & child=$!
+      sleep "$seconds"
+      kill "$child" 2>/dev/null || true
+      sleep 1
+      kill -KILL "$child" 2>/dev/null || true
+      wait "$child" 2>/dev/null || true
+      return 124
+    }
+    run_with_deadline 1 "$2"
+    [ "$?" -eq 124 ]
+  ' _ "$WATCH" "$hang" || fail "gtimeout fallback did not force-bound a TERM-ignoring probe"
+  [ -e "$marker" ] || fail "gtimeout fallback was not selected"
+  pass "the gtimeout fallback force-bounds a TERM-ignoring remote probe"
+}
+
+test_remote_deadline_perl_process_group_fallback() {
+  local dir state hang sentinel started elapsed
+  dir=$(make_case remote-perl-fallback); state="$dir/state"
+  hang="$dir/ignore-term-tree"; sentinel="$dir/descendant-survived"
+  cat > "$hang" <<'PL'
+#!/usr/bin/env perl
+use strict;
+use warnings;
+$SIG{TERM} = 'IGNORE';
+my $pid = fork();
+die "fork failed" unless defined $pid;
+if (!$pid) {
+  $SIG{TERM} = 'IGNORE';
+  sleep 3;
+  open my $fh, '>', $ENV{FM_TEST_SENTINEL} or die $!;
+  print {$fh} "survived\n";
+  close $fh;
+  exit 0;
+}
+sleep 30;
+PL
+  chmod +x "$hang"
+  started=$(date +%s)
+  FM_STATE_OVERRIDE="$state" FM_TEST_SENTINEL="$sentinel" bash -c '
+    . "$1"
+    command() {
+      if [ "${1:-}" = -v ]; then
+        case "${2:-}" in timeout|gtimeout) return 1 ;; esac
+      fi
+      builtin command "$@"
+    }
+    run_with_deadline 1 "$2"
+    [ "$?" -eq 124 ]
+  ' _ "$WATCH" "$hang" || fail "Perl fallback did not force-bound a TERM-ignoring process group"
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -le 3 ] || fail "Perl fallback exceeded its deadline: ${elapsed}s"
+  sleep 3
+  [ ! -e "$sentinel" ] || fail "Perl fallback left a TERM-ignoring descendant alive"
+  pass "the Perl fallback force-bounds the remote probe process group"
 }
 
 test_secondmate_stale_supervisor_beacon_escalates() {
@@ -1149,6 +1226,59 @@ SH
   grep -F "possible wedge" "$out" >/dev/null || fail "local capture failure omitted possible-wedge escalation"
   unset FM_FAKE_CREW_STATE
   pass "a local secondmate capture failure still reaches genuine wedge escalation"
+}
+
+test_secondmate_changing_capture_escalates() {
+  local dir state fakebin out statusf window key sig pid home back capture_count
+  dir=$(make_case secondmate-changing-capture); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; statusf="$state/secondmate-working.status"; capture_count="$dir/capture-count"
+  home="$dir/secondmate-home"; mkdir -p "$home/state"
+  window="test:fm-secondmate-changing-capture"
+  printf 'window=%s\nkind=secondmate\nhome=%s\n' "$window" "$home" > "$state/secondmate-working.meta"
+  : > "$home/state/.last-watcher-beat"
+  back=$(( $(date +%s) - 500 ))
+  set_mtime "$back" "$home/state/.last-watcher-beat"
+  printf 'working: the parent supervises this secondmate\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-secondmate-working_status"
+  key=$(printf '%s' "$window" | tr '.:/' '___')
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-windows) printf '%s\n' "${FM_FAKE_TMUX_WINDOW#*:}"; exit 0 ;;
+  capture-pane)
+    count=$(cat "${FM_FAKE_CAPTURE_COUNT:?}" 2>/dev/null || echo 0)
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$FM_FAKE_CAPTURE_COUNT"
+    printf 'idle secondmate footer tick %s\n' "$count"
+    exit 0
+    ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · supervising a live child'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_CAPTURE_COUNT="$capture_count" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_numeric_file "$state/.stale-since-$key" 50 || {
+    reap "$pid"; fail "a changing local secondmate capture prevented wedge tracking"
+  }
+  reap "$pid"
+  [ "$(cat "$capture_count" 2>/dev/null || echo 0)" -ge 3 ] \
+    || fail "changing-capture fixture did not produce multiple distinct captures"
+
+  printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_CAPTURE_COUNT="$capture_count" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a changing local secondmate capture did not wedge-escalate"
+  grep -F "possible wedge" "$out" >/dev/null || fail "changing local capture omitted possible-wedge escalation"
+  unset FM_FAKE_CREW_STATE
+  pass "a changing local secondmate capture still reaches genuine wedge escalation"
 }
 
 test_secondmate_future_supervisor_beacon_escalates() {
@@ -2172,8 +2302,11 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_remote_secondmate_beacon_is_bounded
+test_remote_deadline_gtimeout_fallback
+test_remote_deadline_perl_process_group_fallback
 test_secondmate_stale_supervisor_beacon_escalates
 test_secondmate_capture_failure_escalates
+test_secondmate_changing_capture_escalates
 test_secondmate_future_supervisor_beacon_escalates
 test_secondmate_unpause_clears_pause_tracking
 test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
