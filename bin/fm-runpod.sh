@@ -433,7 +433,7 @@ known_hosts_pin() {  # <alias> <host> <port>
   mkdir -p "$SSH_DIR" || die "cannot create the SSH state directory"
   chmod 700 "$SSH_DIR" 2>/dev/null || true
   scanned=$("$KEYSCAN_BIN" -T 20 -p "$port" "$host" 2>/dev/null | grep -v '^#' | head -20) || true
-  [ -n "$scanned" ] || die "could not read the pod's SSH host key at $host:$port; the pod may still be booting"
+  [ -n "$scanned" ] || return 1
   known_hosts_lock_acquire
   known_hosts_has_alias "$alias" && { known_hosts_lock_release; return 0; }
   [ ! -L "$KNOWN_HOSTS" ] || die "known_hosts is a symlink: $KNOWN_HOSTS"
@@ -814,7 +814,12 @@ cmd_wake() {
     waited=$((waited + POLL_INTERVAL))
   done
 
-  known_hosts_pin "$alias" "$host" "$port"
+  while ! known_hosts_pin "$alias" "$host" "$port"; do
+    [ "$waited" -lt "$WAKE_TIMEOUT" ] \
+      || die "could not read the pod's SSH host key at $host:$port within ${WAKE_TIMEOUT}s; it is preserved for inspection"
+    sleep "$POLL_INTERVAL"
+    waited=$((waited + POLL_INTERVAL))
+  done
   ssh_fragment_write "$alias" "$host" "$port" \
     "$(record_get "$id" ssh_user)" "$(record_get "$id" ssh_identity)"
   record_set "$id" "endpoint_host=$host" "endpoint_port=$port" \
@@ -978,14 +983,16 @@ cmd_status() {
 }
 
 cmd_ssh() {
-  local id=${1:-} alias
+  local id=${1:-} alias fragment
   shift || true
   require_id "$id"
   record_require "$id"
-  [ "$(fm_runpod_lifecycle "$DATA" "$id")" = ready ] \
-    || die "secondmate $id is not awake; run 'fm-runpod.sh wake $id' first"
   alias=$(alias_for "$id")
-  exec "$SSH_BIN" -F "$(ssh_fragment_path "$alias")" "$alias" "$@"
+  fragment=$(ssh_fragment_path "$alias")
+  [ -n "$(record_get "$id" endpoint_host)" ] && [ -n "$(record_get "$id" endpoint_port)" ] \
+    && [ -f "$fragment" ] \
+    || die "secondmate $id has no reachable SSH endpoint; run 'fm-runpod.sh wake $id' first"
+  exec "$SSH_BIN" -F "$fragment" "$alias" "$@"
 }
 
 cmd_doctor() {

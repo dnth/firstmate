@@ -124,11 +124,19 @@ pass "provision rejects an SSH alias owned by another second mate"
 
 # --- wake -------------------------------------------------------------------
 
-out=$(FM_FAKE_BOOT_INCOMPLETE=1 FM_TEST_RUNPOD_POLL_INTERVAL=1 FM_TEST_RUNPOD_WAKE_TIMEOUT=1 \
+KEYSCAN_ATTEMPTS="$TMP_ROOT/keyscan-attempts"
+out=$(FM_FAKE_BOOT_INCOMPLETE=1 FM_FAKE_KEYSCAN_ATTEMPTS="$KEYSCAN_ATTEMPTS" \
+  FM_FAKE_KEYSCAN_FAILS=1 FM_TEST_RUNPOD_POLL_INTERVAL=1 FM_TEST_RUNPOD_WAKE_TIMEOUT=2 \
   rp wake ios 2>&1) && fail "wake must refuse while first-boot provisioning is incomplete"
 assert_contains "$out" "SSH bootstrap did not complete" "an incomplete bootstrap must fail at the wake readiness boundary"
+[ "$(cat "$KEYSCAN_ATTEMPTS")" -ge 2 ] || fail "wake must retry host-key scanning while sshd is still starting"
 [ "$(record_field ios lifecycle)" != ready ] || fail "an incompletely provisioned pod must never be recorded ready"
-pass "wake refuses a pod whose first-boot provisioning did not complete"
+pass "wake retries host-key scanning and refuses an incomplete bootstrap"
+
+out=$(FM_FAKE_BOOT_INCOMPLETE=1 rp ssh ios 2>&1) \
+  || fail "SSH remediation must remain reachable before readiness: $out"
+[ "$(record_field ios lifecycle)" != ready ] || fail "interactive SSH must not mark an incomplete pod ready"
+pass "interactive SSH remains available for pre-ready human steps"
 
 out=$(rp wake ios 2>&1) || fail "wake failed: $out"
 assert_contains "$out" "ready: secondmate ios" "wake must report readiness"

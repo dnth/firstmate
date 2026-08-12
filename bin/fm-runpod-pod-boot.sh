@@ -29,9 +29,9 @@
 # so a fresh pod reaches readiness without a manual clone.
 # docs/runpod-secondmates.md owns the operator sequence.
 #
-# Toolchain provisioning is idempotent and volume-scoped: a marker on the volume
-# records the contract version it satisfied, so later boots skip the work and a
-# raised contract version re-provisions exactly once.
+# Durable toolchain provisioning is idempotent and volume-scoped: a marker on
+# the volume records the contract version it satisfied, so later boots reuse
+# that work while each replacement pod re-ensures its system packages.
 #
 # bin/fm-remote-doctor.sh remains the single owner of what "ready" means. This
 # script installs toward that set and never re-states the verdict; the doctor
@@ -58,12 +58,15 @@ FM_BOOT_LOG=${FM_BOOT_LOG:-$FM_PERSIST/boot.log}
 
 # Raise this when the provisioning contract changes so existing volumes
 # re-provision exactly once instead of silently keeping an older toolchain.
-FM_TOOLCHAIN_CONTRACT=1
+FM_TOOLCHAIN_CONTRACT=2
 FM_TOOLCHAIN_MARKER="$FM_PERSIST/toolchain.provisioned"
 FM_BOOT_READY="$FM_PERSIST/boot.ready"
-FM_LOCAL_BIN=${FM_LOCAL_BIN:-$HOME/.local/bin}
-PATH="$FM_LOCAL_BIN:$PATH"
+FM_LOCAL_BIN=${FM_LOCAL_BIN:-$FM_PERSIST/bin}
+FM_NPM_PREFIX=${FM_NPM_PREFIX:-$FM_PERSIST/npm}
+PATH="$FM_LOCAL_BIN:$FM_NPM_PREFIX/bin:$PATH"
 export PATH
+npm_config_prefix="$FM_NPM_PREFIX"
+export npm_config_prefix
 # The git URL the code root is cloned from on a volume's first boot.
 FM_REMOTE_ORIGIN=${FM_REMOTE_ORIGIN:-}
 # Optional npm package providing a worker harness. Left unset the pod installs
@@ -167,6 +170,12 @@ ensure_node() {
   apt_install nodejs || true
   have node || { log "node is still unavailable after installation"; return 1; }
   have npm || { log "npm is still unavailable after installation"; return 1; }
+  major=$(node -v 2>/dev/null | sed -e 's/^v//' -e 's/\..*$//')
+  case "$major" in ''|*[!0-9]*) major=0 ;; esac
+  [ "$major" -ge 20 ] || {
+    log "node ${major:-unknown} is still older than the required 20 after installation"
+    return 1
+  }
 }
 
 # The code root is what every later step runs from, including the pinned
@@ -217,6 +226,7 @@ ensure_pinned_tools() {
 ensure_npm_tools() {
   local rc=0
   have npm || { log "npm is unavailable, so npm-distributed tools cannot be installed"; return 1; }
+  mkdir -p "$FM_NPM_PREFIX" || return 1
   log "installing tasks-axi"
   npm install -g tasks-axi >> "$FM_BOOT_LOG" 2>&1 || { log "tasks-axi installation failed"; rc=1; }
   if [ -n "$FM_POD_HARNESS_NPM" ]; then
@@ -236,13 +246,13 @@ toolchain_marker_current() {
 
 provision_toolchain() {
   local rc=0
+  ensure_base_packages || return 1
+  ensure_node || return 1
   if toolchain_marker_current; then
-    log "toolchain contract $FM_TOOLCHAIN_CONTRACT already satisfied on this volume"
+    log "durable toolchain contract $FM_TOOLCHAIN_CONTRACT already satisfied on this volume"
     return 0
   fi
-  log "provisioning toolchain contract $FM_TOOLCHAIN_CONTRACT"
-  ensure_base_packages || rc=1
-  ensure_node || rc=1
+  log "provisioning durable toolchain contract $FM_TOOLCHAIN_CONTRACT"
   ensure_code_root || return 1
   ensure_pinned_tools || rc=1
   ensure_npm_tools || rc=1
@@ -251,10 +261,10 @@ provision_toolchain() {
       log "the satisfied toolchain contract could not be recorded"
       return 1
     }
-    log "toolchain provisioning complete"
+    log "durable toolchain provisioning complete"
     return 0
   fi
-  log "toolchain provisioning finished with gaps; the doctor reports what remains"
+  log "durable toolchain provisioning finished with gaps; the doctor reports what remains"
   return 1
 }
 
@@ -325,17 +335,35 @@ start_sshd() {
 
 link_entrypoint() {
   local want="$FM_REMOTE_ROOT/bin/fm-remote-entrypoint.sh"
+  local entrypoint_dir="$HOME/.local/bin"
   [ -x "$want" ] || { log "the fixed remote entrypoint is missing from the code root"; return 1; }
-  mkdir -p "$FM_LOCAL_BIN" || return 1
-  if [ -L "$FM_LOCAL_BIN/fm-remote-entrypoint.sh" ]; then
-    [ "$(readlink "$FM_LOCAL_BIN/fm-remote-entrypoint.sh")" = "$want" ] && return 0
-    rm -f -- "$FM_LOCAL_BIN/fm-remote-entrypoint.sh" || return 1
-  elif [ -e "$FM_LOCAL_BIN/fm-remote-entrypoint.sh" ]; then
+  mkdir -p "$entrypoint_dir" || return 1
+  if [ -L "$entrypoint_dir/fm-remote-entrypoint.sh" ]; then
+    [ "$(readlink "$entrypoint_dir/fm-remote-entrypoint.sh")" = "$want" ] && return 0
+    rm -f -- "$entrypoint_dir/fm-remote-entrypoint.sh" || return 1
+  elif [ -e "$entrypoint_dir/fm-remote-entrypoint.sh" ]; then
     log "an existing non-symlink file holds the entrypoint path; leaving it for the operator"
     return 1
   fi
-  ln -s "$want" "$FM_LOCAL_BIN/fm-remote-entrypoint.sh" || return 1
+  ln -s "$want" "$entrypoint_dir/fm-remote-entrypoint.sh" || return 1
   log "linked the fixed remote entrypoint"
+}
+
+link_durable_bins() {
+  local source target bin_dir="$HOME/.local/bin"
+  mkdir -p "$bin_dir" || return 1
+  for source in "$FM_LOCAL_BIN"/* "$FM_NPM_PREFIX/bin"/*; do
+    [ -f "$source" ] && [ -x "$source" ] || continue
+    target="$bin_dir/${source##*/}"
+    if [ -L "$target" ]; then
+      [ "$(readlink "$target")" = "$source" ] && continue
+      rm -f -- "$target" || return 1
+    elif [ -e "$target" ]; then
+      log "an existing non-symlink file holds $target; leaving it for the operator"
+      return 1
+    fi
+    ln -s "$source" "$target" || return 1
+  done
 }
 
 # The doctor owns readiness. On Linux it starts the remote job worker and the
@@ -375,6 +403,7 @@ main() {
   install_sshd || { log "FATAL: openssh-server is unavailable; SSH will not come up"; hold_pod; }
   restore_host_keys || log "the persisted host key could not be restored"
   authorize_key || log "the authorized key could not be written"
+  link_durable_bins || { log "FATAL: durable tools could not be linked; SSH will not come up"; hold_pod; }
   link_entrypoint || { log "FATAL: the remote entrypoint could not be linked; SSH will not come up"; hold_pod; }
   start_sshd || exit 1
   until hand_over_to_doctor; do

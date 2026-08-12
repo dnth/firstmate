@@ -192,6 +192,12 @@ while [ "$#" -gt 0 ]; do
   shift || break
 done
 state=${FM_FAKE_RUNPOD_STATE:?}
+if [ -n "${FM_FAKE_KEYSCAN_ATTEMPTS:-}" ]; then
+  attempts=$(cat "$FM_FAKE_KEYSCAN_ATTEMPTS" 2>/dev/null || printf '0')
+  attempts=$((attempts + 1))
+  printf '%s\n' "$attempts" > "$FM_FAKE_KEYSCAN_ATTEMPTS"
+  [ "$attempts" -gt "${FM_FAKE_KEYSCAN_FAILS:-0}" ] || exit 1
+fi
 if [ -n "${FM_FAKE_KEYSCAN_BARRIER_DIR:-}" ]; then
   mkdir -p "$FM_FAKE_KEYSCAN_BARRIER_DIR"
   : > "$FM_FAKE_KEYSCAN_BARRIER_DIR/$host"
@@ -226,18 +232,20 @@ if [ "$transport" -eq 0 ]; then
   # Readiness probe: SSH plus the boot script's successful handoff marker.
   conf=
   alias=
+  readiness=0
   i=0
   while [ "$i" -lt "${#args[@]}" ]; do
     case "${args[$i]}" in
       -o) i=$((i + 2)); continue ;;
       -F) i=$((i + 1)); conf=${args[$i]} ;;
-      test|-f|/workspace/persistent-runtime/boot.ready) ;;
+      test|-f) ;;
+      /workspace/persistent-runtime/boot.ready) readiness=1 ;;
       *) [ -n "$alias" ] || alias=${args[$i]} ;;
     esac
     i=$((i + 1))
   done
   [ -n "$conf" ] && [ -f "$conf" ] || exit 255
-  [ "${FM_FAKE_BOOT_INCOMPLETE:-0}" != 1 ] || exit 255
+  [ "$readiness" -eq 0 ] || [ "${FM_FAKE_BOOT_INCOMPLETE:-0}" != 1 ] || exit 255
   host=$(sed -n 's/^ *HostName *//p' "$conf" | head -1)
   port=$(sed -n 's/^ *Port *//p' "$conf" | head -1)
   state=${FM_FAKE_RUNPOD_STATE:?}

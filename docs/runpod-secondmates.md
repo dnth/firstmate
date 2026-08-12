@@ -22,35 +22,19 @@ A 100 GB volume therefore idles at about $7/month with no compute running at all
 
 Automatic idle sleep is deliberately not implemented yet: suspension is an explicit operator or firstmate decision, so a second mate is never taken away mid-thought.
 
-## What lives where
+## Durable pod storage
 
 One network volume per RunPod second mate, named `fm-sm-<id>-runpod`, holds every durable thing on that host:
 
 ```
 /workspace/firstmate            the remote Firstmate code root
 /workspace/secondmate-home      the persistent FM_HOME, deliberately separate from the code root
-/workspace/persistent-runtime   SSH host keys, boot log, selected caches
+/workspace/persistent-runtime   SSH host keys, boot state, and durable tools
 ```
 
 Project clones and worktrees live under the second mate's own home, as on any other remote host.
 Local second mates never get a volume.
-
-The authoritative control plane is local, private, and gitignored:
-
-| Path | Holds |
-| ---- | ----- |
-| `<FM_HOME>/data/runpod/<id>.meta` | provider, volume id, datacenter, current pod id, current endpoint, compute type, lifecycle state |
-| `<FM_HOME>/config/runpod.env` | `RUNPOD_API_KEY=<key>` in ordinary KEY=value form, mode 600 |
-| `<FM_HOME>/config/runpod/ssh.d/<alias>.conf` | the generated SSH config fragment for that route |
-| `<FM_HOME>/config/runpod/known_hosts` | the pinned host key for each alias |
-| `<FM_HOME>/state/.runpod-lifecycle-<id>.lock` | the per-second mate provider lifecycle lock |
-
-Firstmate's local record is what decides which pod and volume belong to a second mate.
-RunPod is asked to confirm or create what that record names; it is never scanned to discover routes this home did not create.
-
-The credential file is parsed, never sourced, so nothing in it can execute.
-The key is passed to `curl` through a mode-600 config file, so it never appears in a process listing, in the record, or in any error message.
-Every command that needs the API refuses with that exact path and key name before it makes any request, so a missing key never turns into a confusing authorization error from an unauthenticated call.
+[`configuration.md`](configuration.md#runpod-compute-lifecycle-configrunpodenv-configrunpod-datarunpod) owns the local control-plane paths, record contents, credential contract, and generated SSH state.
 
 ## SSH identity across pod replacement
 
@@ -107,6 +91,8 @@ Alternatively, request GPU compute, optionally with a minimum VRAM floor:
 bin/fm-runpod.sh wake <id> --gpu
 bin/fm-runpod.sh wake <id> --min-vram 24
 ```
+
+If the doctor leaves an interactive harness-login step, use `bin/fm-runpod.sh ssh <id>` from another terminal while wake is still waiting, then retry wake after login.
 
 Seed the persistent home exactly as for any other remote route, using the alias `provision` reported:
 
@@ -199,8 +185,9 @@ The doctor is the single owner of what "ready for a remote second mate" means, a
 Nothing in the boot script re-states the doctor's verdict; it installs toward that set and lets the doctor decide.
 Wake requires the boot-success marker written after that handoff, so SSH alone can never make an unfinished or failed bootstrap report ready.
 
-Provisioning is idempotent and volume-scoped.
-A marker on the volume records the contract version it satisfied, so later boots skip the work and a raised contract version re-provisions exactly once.
+Durable provisioning is idempotent and volume-scoped.
+A marker records only the volume-resident contract, while every replacement pod re-ensures its container-local system packages before trusting it.
+A raised contract version re-provisions the durable tools exactly once.
 `bin/fm-runpod-pod-boot.sh --check` prints the plan as one `ensure=<item>` line per step and touches nothing, which is how the contract is tested with no pod.
 
 A worker harness still needs its own interactive login, which the doctor already classifies as a human step.

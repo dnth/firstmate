@@ -57,30 +57,61 @@ pass "--check is a pure dry run"
 new_world() {  # <name> -> world dir
   local name=$1 w fakebin
   w="$TMP_ROOT/$name"
-  mkdir -p "$w/volume" "$w/home/.local/bin" "$w/origin"
+  mkdir -p "$w/volume" "$w/home" "$w/origin" "$w/templates"
   fakebin=$(fm_fakebin "$w")
   : > "$w/calls.log"
+
+  cat > "$w/templates/npm" <<'SH'
+#!/usr/bin/env bash
+printf 'npm %s\n' "$*" >> "$FM_FAKE_CALLS"
+if [ "${1:-}" = install ] && [ "${2:-}" = -g ]; then
+  mkdir -p "$npm_config_prefix/bin"
+  case "${3:-}" in
+    tasks-axi) tool=tasks-axi ;;
+    *) tool=harness ;;
+  esac
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$npm_config_prefix/bin/$tool"
+  chmod +x "$npm_config_prefix/bin/$tool"
+fi
+exit 0
+SH
+  cat > "$w/templates/node" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" != -v ] || { printf 'v22.11.0\n'; exit 0; }
+exit 0
+SH
+  chmod +x "$w/templates/npm" "$w/templates/node"
 
   cat > "$fakebin/apt-get" <<'SH'
 #!/usr/bin/env bash
 printf 'apt-get %s\n' "$*" >> "$FM_FAKE_CALLS"
 [ "${FM_FAKE_APT_FAIL:-0}" != 1 ] || exit 1
+case " $* " in
+  *" install "*)
+    for pkg in "$@"; do
+      case "$pkg" in
+        git|jq|curl|unzip)
+          printf '#!/usr/bin/env bash\nexit 0\n' > "$FM_FAKE_EPHEMERAL_BIN/$pkg"
+          chmod +x "$FM_FAKE_EPHEMERAL_BIN/$pkg"
+          ;;
+        openssh-server)
+          printf '#!/usr/bin/env bash\nexit 0\n' > "$FM_FAKE_EPHEMERAL_BIN/sshd"
+          chmod +x "$FM_FAKE_EPHEMERAL_BIN/sshd"
+          ;;
+        nodejs)
+          if [ "${FM_FAKE_KEEP_OLD_NODE:-0}" != 1 ]; then
+            cp "$FM_FAKE_NODE_TEMPLATE" "$FM_FAKE_EPHEMERAL_BIN/node"
+            cp "$FM_FAKE_NPM_TEMPLATE" "$FM_FAKE_EPHEMERAL_BIN/npm"
+          fi
+          ;;
+      esac
+    done
+    ;;
+esac
 exit 0
 SH
-  cat > "$fakebin/npm" <<'SH'
-#!/usr/bin/env bash
-printf 'npm %s\n' "$*" >> "$FM_FAKE_CALLS"
-if [ "${1:-}" = install ] && [ "${2:-}" = -g ] && [ "${3:-}" = tasks-axi ]; then
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$FM_LOCAL_BIN/tasks-axi"
-  chmod +x "$FM_LOCAL_BIN/tasks-axi"
-fi
-exit 0
-SH
-  cat > "$fakebin/node" <<'SH'
-#!/usr/bin/env bash
-[ "${1:-}" != -v ] || { printf 'v22.11.0\n'; exit 0; }
-exit 0
-SH
+  cp "$w/templates/npm" "$fakebin/npm"
+  cp "$w/templates/node" "$fakebin/node"
   cat > "$fakebin/git" <<'SH'
 #!/usr/bin/env bash
 printf 'git %s\n' "$*" >> "$FM_FAKE_CALLS"
@@ -93,7 +124,7 @@ if [ "${1:-}" = clone ]; then
     printf '#!/usr/bin/env bash\nprintf "%s %%s\\n" "$*" >> "$FM_FAKE_CALLS"\nprintf '\''#!/usr/bin/env bash\\nexit 0\\n'\'' > "$1/%s"\nchmod +x "$1/%s"\n' "$i" "$tool" "$tool" > "$dest/bin/$i"
     chmod +x "$dest/bin/$i"
   done
-  printf '#!/usr/bin/env bash\ncommand -v herdr >> "$FM_FAKE_CALLS" || exit 1\ncommand -v treehouse >> "$FM_FAKE_CALLS" || exit 1\nprintf "doctor %%s\\n" "$*" >> "$FM_FAKE_CALLS"\nexit 0\n' > "$dest/bin/fm-remote-doctor.sh"
+  printf '#!/usr/bin/env bash\ncommand -v herdr >> "$FM_FAKE_CALLS" || exit 1\ncommand -v treehouse >> "$FM_FAKE_CALLS" || exit 1\ncommand -v tasks-axi >> "$FM_FAKE_CALLS" || exit 1\nprintf "doctor %%s\\n" "$*" >> "$FM_FAKE_CALLS"\nexit 0\n' > "$dest/bin/fm-remote-doctor.sh"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$dest/bin/fm-remote-entrypoint.sh"
   chmod +x "$dest/bin/fm-remote-doctor.sh" "$dest/bin/fm-remote-entrypoint.sh"
 fi
@@ -118,7 +149,9 @@ provision_only() {  # <world>
     FM_VOLUME="$w/volume" \
     FM_REMOTE_ORIGIN="$w/origin" \
     FM_FAKE_CALLS="$w/calls.log" \
-    FM_LOCAL_BIN="$w/home/.local/bin" \
+    FM_FAKE_EPHEMERAL_BIN="$w/fakebin" \
+    FM_FAKE_NPM_TEMPLATE="$w/templates/npm" \
+    FM_FAKE_NODE_TEMPLATE="$w/templates/node" \
     timeout 60 bash "$BOOT" >/dev/null 2>&1 &
     boot_pid=$!
     for _ in $(seq 1 300); do
@@ -141,7 +174,9 @@ provision_idempotent() {  # <world>
     FM_VOLUME="$w/volume" \
     FM_REMOTE_ORIGIN="$w/origin" \
     FM_FAKE_CALLS="$w/calls.log" \
-    FM_LOCAL_BIN="$w/home/.local/bin" \
+    FM_FAKE_EPHEMERAL_BIN="$w/fakebin" \
+    FM_FAKE_NPM_TEMPLATE="$w/templates/npm" \
+    FM_FAKE_NODE_TEMPLATE="$w/templates/node" \
     timeout 30 bash "$BOOT" >/dev/null 2>&1 &
     boot_pid=$!
     sleep 3
@@ -158,7 +193,12 @@ assert_contains "$calls" "git clone" "first boot must clone the code root"
 assert_contains "$calls" "fm-install-herdr.sh" "herdr must come from the repository's pinned installer"
 assert_contains "$calls" "fm-install-treehouse.sh" "treehouse must come from the repository's pinned installer"
 assert_contains "$calls" "npm install -g tasks-axi" "tasks-axi must be installed"
-assert_contains "$calls" "$w/home/.local/bin/herdr" "the doctor must see pinned tools through the local-bin PATH"
+assert_present "$w/volume/persistent-runtime/bin/herdr" "the pinned herdr binary must live on the volume"
+assert_present "$w/volume/persistent-runtime/npm/bin/tasks-axi" "the global npm prefix must live on the volume"
+assert_contains "$calls" "$w/volume/persistent-runtime/bin/herdr" "the doctor must see pinned tools through the durable PATH"
+assert_contains "$calls" "$w/volume/persistent-runtime/npm/bin/tasks-axi" "the doctor must see npm tools through the durable PATH"
+assert_present "$w/home/.local/bin/herdr" "later SSH jobs must receive a per-pod link to durable tools"
+assert_present "$w/home/.local/bin/tasks-axi" "later SSH jobs must receive a per-pod link to durable npm tools"
 assert_present "$w/volume/persistent-runtime/toolchain.provisioned" "a completed provisioning run must record its marker"
 pass "first boot clones the code root and installs the required toolchain through the pinned installers"
 
@@ -174,11 +214,28 @@ assert_not_contains "$second" "git clone" "a second boot must not re-clone the c
 assert_not_contains "$second" "npm install -g tasks-axi" "a second boot must not reinstall the toolchain"
 pass "provisioning is idempotent across boots on the same volume"
 
+rm -rf "${w:?}/home"
+mkdir -p "$w/home"
+rm -f "$w/fakebin/git" "$w/fakebin/jq" "$w/fakebin/curl" "$w/fakebin/unzip" \
+  "$w/fakebin/sshd" "$w/fakebin/node" "$w/fakebin/npm"
+: > "$w/calls.log"
+provision_only "$w"
+replacement=$(cat "$w/calls.log")
+assert_contains "$replacement" "apt-get install" "a replacement pod must restore its ephemeral system prerequisites"
+assert_contains "$replacement" "apt-get install -y -qq nodejs" "a replacement pod must restore its ephemeral Node runtime"
+assert_not_contains "$replacement" "git clone" "a replacement pod must reuse the durable code root"
+assert_not_contains "$replacement" "fm-install-herdr.sh" "a replacement pod must reuse durable pinned tools"
+assert_not_contains "$replacement" "npm install -g tasks-axi" "a replacement pod must reuse its durable npm prefix"
+assert_contains "$replacement" "$w/volume/persistent-runtime/bin/herdr" "a replacement doctor handoff must see durable tools"
+assert_present "$w/home/.local/bin/herdr" "a replacement pod must recreate its SSH-visible durable-tool links"
+assert_present "$w/volume/persistent-runtime/boot.ready" "a replacement pod must reach readiness from the retained volume"
+pass "replacement pods restore ephemeral prerequisites and reuse durable tools"
+
 # --- pre-existing tools cannot bypass the repository pins -------------------
 
-printf '#!/usr/bin/env bash\nexit 0\n' > "$w/home/.local/bin/herdr"
-printf '#!/usr/bin/env bash\nexit 0\n' > "$w/home/.local/bin/treehouse"
-chmod +x "$w/home/.local/bin/herdr" "$w/home/.local/bin/treehouse"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$w/volume/persistent-runtime/bin/herdr"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$w/volume/persistent-runtime/bin/treehouse"
+chmod +x "$w/volume/persistent-runtime/bin/herdr" "$w/volume/persistent-runtime/bin/treehouse"
 printf '0\n' > "$w/volume/persistent-runtime/toolchain.provisioned"
 : > "$w/calls.log"
 provision_only "$w"
@@ -205,7 +262,8 @@ w2=$(new_world harness)
   export FM_POD_HARNESS_NPM="@example/harness"
   PATH="$w2/fakebin:/usr/bin:/bin" HOME="$w2/home" FM_VOLUME="$w2/volume" \
   FM_REMOTE_ORIGIN="$w2/origin" FM_FAKE_CALLS="$w2/calls.log" \
-  FM_LOCAL_BIN="$w2/home/.local/bin" \
+  FM_FAKE_EPHEMERAL_BIN="$w2/fakebin" FM_FAKE_NPM_TEMPLATE="$w2/templates/npm" \
+  FM_FAKE_NODE_TEMPLATE="$w2/templates/node" \
   timeout 60 bash "$BOOT" >/dev/null 2>&1 &
   boot_pid=$!
   for _ in $(seq 1 300); do
@@ -227,7 +285,8 @@ rm -f "$w4/fakebin/sshd"
 out=$(
   PATH="$w4/fakebin:/usr/bin:/bin" HOME="$w4/home" FM_VOLUME="$w4/volume" \
   FM_REMOTE_ORIGIN="$w4/origin" FM_FAKE_CALLS="$w4/calls.log" \
-  FM_LOCAL_BIN="$w4/home/.local/bin" FM_FAKE_APT_FAIL=1 \
+  FM_FAKE_EPHEMERAL_BIN="$w4/fakebin" FM_FAKE_NPM_TEMPLATE="$w4/templates/npm" \
+  FM_FAKE_NODE_TEMPLATE="$w4/templates/node" FM_FAKE_APT_FAIL=1 \
   timeout 3 bash "$BOOT" 2>&1 || true
 )
 assert_contains "$out" "base-package index could not be updated" "a package-manager failure must be reported"
@@ -236,13 +295,33 @@ assert_absent "$w4/volume/persistent-runtime/toolchain.provisioned" \
 assert_not_contains "$out" "boot complete" "a failed package contract must never report boot completion"
 pass "base-package failure propagates and leaves the pod unready"
 
+w5=$(new_world oldnode)
+cat > "$w5/fakebin/node" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" != -v ] || { printf 'v18.20.0\n'; exit 0; }
+exit 0
+SH
+chmod +x "$w5/fakebin/node"
+out=$(
+  PATH="$w5/fakebin:/usr/bin:/bin" HOME="$w5/home" FM_VOLUME="$w5/volume" \
+  FM_REMOTE_ORIGIN="$w5/origin" FM_FAKE_CALLS="$w5/calls.log" \
+  FM_FAKE_EPHEMERAL_BIN="$w5/fakebin" FM_FAKE_NPM_TEMPLATE="$w5/templates/npm" \
+  FM_FAKE_NODE_TEMPLATE="$w5/templates/node" FM_FAKE_KEEP_OLD_NODE=1 \
+  timeout 3 bash "$BOOT" 2>&1 || true
+)
+assert_contains "$out" "still older than the required 20" "Node must be rechecked after installation"
+assert_absent "$w5/volume/persistent-runtime/toolchain.provisioned" \
+  "an unsupported Node must not record the durable contract"
+pass "an unsupported Node remains a loud provisioning failure"
+
 # --- no origin and no clone is a loud refusal, not a silent partial boot -----
 
 w3=$(new_world noorigin)
 out=$(
   PATH="$w3/fakebin:/usr/bin:/bin" HOME="$w3/home" FM_VOLUME="$w3/volume" \
   FM_REMOTE_ORIGIN="" FM_FAKE_CALLS="$w3/calls.log" \
-  FM_LOCAL_BIN="$w3/home/.local/bin" \
+  FM_FAKE_EPHEMERAL_BIN="$w3/fakebin" FM_FAKE_NPM_TEMPLATE="$w3/templates/npm" \
+  FM_FAKE_NODE_TEMPLATE="$w3/templates/node" \
   timeout 20 bash "$BOOT" 2>&1 &
   boot_pid=$!
   sleep 3
