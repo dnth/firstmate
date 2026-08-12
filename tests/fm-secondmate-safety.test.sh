@@ -324,7 +324,7 @@ test_home_seed_returns_treehouse_acquired_home_on_assignment_failure() {
   pass "home seeding returns rejected acquired homes through treehouse"
 }
 
-test_home_seed_returns_treehouse_acquired_home_on_runtime_refusal() {
+test_home_seed_preserves_treehouse_acquired_home_on_runtime_refusal() {
   local home acquired fakebin log err lease
   home="$TMP_ROOT/dash-runtime-refusal-home"
   acquired="$TMP_ROOT/dash-runtime-refusal-acquired-home"
@@ -345,10 +345,11 @@ test_home_seed_returns_treehouse_acquired_home_on_runtime_refusal() {
   fi
   grep -F 'previous OMP session is still live' "$err" >/dev/null \
     || fail "seed did not preserve the live OMP runtime refusal"
-  grep -F "treehouse return --force --if-lease-holder dash $acquired" "$log" >/dev/null \
-    || fail "runtime-marker refusal stranded the acquired Treehouse lease"
-  [ ! -e "$lease" ] || fail "runtime-marker refusal left the acquired lease active"
-  pass "home seed returns a lease after runtime-marker refusal"
+  assert_no_grep 'treehouse return' "$log" \
+    "runtime-marker refusal destructively returned a live occupant's Treehouse lease"
+  [ -e "$lease" ] || fail "runtime-marker refusal did not preserve the acquired lease"
+  [ -e "$acquired/state/.lock" ] || fail "runtime-marker refusal removed the live occupant marker"
+  pass "home seed preserves a lease after runtime-marker refusal"
 }
 
 test_home_seed_warns_when_acquired_home_return_fails() {
@@ -2701,7 +2702,7 @@ test_home_seed_validate_rejects_duplicate_ids
 test_home_seed_validate_rejects_nested_homes
 test_home_seed_uses_treehouse_acquired_home
 test_home_seed_returns_treehouse_acquired_home_on_assignment_failure
-test_home_seed_returns_treehouse_acquired_home_on_runtime_refusal
+test_home_seed_preserves_treehouse_acquired_home_on_runtime_refusal
 test_home_seed_warns_when_acquired_home_return_fails
 test_home_seed_does_not_return_unsafe_acquired_home
 test_home_seed_rolls_back_failed_clone

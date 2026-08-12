@@ -402,8 +402,7 @@ acquire_treehouse_home() {
   }
   [ -n "$home" ] || { echo "error: treehouse get --lease did not report a firstmate home" >&2; return 1; }
   if ! fm_omp_clear_stale_runtime_markers "$home"; then
-    ( cd "$FM_ROOT" && treehouse return --force --if-lease-holder "$id" "$home" >/dev/null ) || \
-      echo "error: failed to return Treehouse lease at $home after runtime-marker refusal" >&2
+    echo "error: preserving Treehouse lease at $home because prior occupant liveness was not disproven; inspect it manually" >&2
     return 1
   fi
   printf '%s\n' "$home"

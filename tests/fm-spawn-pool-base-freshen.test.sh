@@ -256,7 +256,7 @@ test_diverged_pool_refuses_without_discarding_commits() {
 }
 
 test_acquisition_guards_before_treehouse_reset() {
-  local rec id out status before fake_treehouse invoked
+  local rec id out status before fake_treehouse invoked healthy state
   id='pool-acquisition-guard-r7'
   rec=$(make_case acquisition-guard "$id")
   read_case_record "$rec"
@@ -290,13 +290,39 @@ SH
   out=$(cd "$PROJECT_DIR" && FM_FAKE_POOL="$POOL_DIR" PATH="$FAKEBIN_DIR:$PATH" "$ROOT/bin/fm-treehouse-get.sh" --lease 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "guarded Treehouse acquisition accepted an unverified provider path"
-  assert_contains "$out" 'did not complete the verified pre-reset boundary' \
+  assert_contains "$out" 'did not complete the guarded reset path' \
     "guarded acquisition did not require its completion marker"
 
   printf 'unique local commit\n' > "$POOL_DIR/local.txt"
   git -C "$POOL_DIR" add local.txt
   git -C "$POOL_DIR" -c user.name=Test -c user.email=test@example.invalid commit -qm unique
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  healthy="$CASE_DIR/treehouse-pool/2/project"
+  git -C "$PROJECT_DIR" worktree add --quiet --detach "$healthy" origin/main
+  printf 'pool-local-config\n' > "$healthy/treehouse.toml"
+  state="$CASE_DIR/treehouse-pool/treehouse-state.json"
+  node -e 'const fs=require("fs"); const state=JSON.parse(fs.readFileSync(process.argv[1])); state.worktrees.push({name:"2",path:process.argv[2]}); fs.writeFileSync(process.argv[1],JSON.stringify(state))' \
+    "$state" "$healthy"
+  cat > "$fake_treehouse" <<'SH'
+#!/usr/bin/env bash
+set -e
+cd "$FM_FAKE_POOL"
+git checkout --detach --force origin/main || true
+cd "$FM_FAKE_HEALTHY_POOL"
+git checkout --detach --force origin/main
+git reset --hard origin/main
+git clean -fd
+printf '%s\n' "$FM_FAKE_HEALTHY_POOL"
+SH
+  chmod +x "$fake_treehouse"
+  out=$(cd "$PROJECT_DIR" && FM_FAKE_POOL="$POOL_DIR" FM_FAKE_HEALTHY_POOL="$healthy" \
+    PATH="$FAKEBIN_DIR:$PATH" "$ROOT/bin/fm-treehouse-get.sh" --lease 2>&1)
+  status=$?
+  expect_code 0 "$status" "an unsafe candidate should not block a healthy pooled slot"
+  assert_contains "$out" "$healthy" "guarded acquisition did not continue to the healthy pooled slot"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "guarded acquisition changed the skipped non-ancestor slot"
+
   invoked="$CASE_DIR/provider-invoked"
   cat > "$fake_treehouse" <<'SH'
 #!/usr/bin/env bash
@@ -304,17 +330,21 @@ set -e
 : > "$FM_FAKE_PROVIDER_INVOKED"
 cd "$FM_FAKE_POOL"
 "$FM_TREEHOUSE_REAL_GIT" reset --hard origin/main
+printf '%s\n' "$FM_FAKE_POOL"
 SH
   chmod +x "$fake_treehouse"
   out=$(cd "$PROJECT_DIR" && FM_FAKE_POOL="$POOL_DIR" FM_FAKE_PROVIDER_INVOKED="$invoked" \
     PATH="$FAKEBIN_DIR:$PATH" "$ROOT/bin/fm-treehouse-get.sh" --lease 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "guarded Treehouse acquisition reset a non-ancestor pool slot"
-  assert_contains "$out" 'refusing pooled worktree acquisition' \
-    "guarded acquisition did not report a clear fail-closed error"
-  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
-    || fail "guarded acquisition changed HEAD before ancestry validation"
-  [ ! -e "$invoked" ] || fail "guarded acquisition invoked a provider capable of bypassing the Git shim"
+  assert_contains "$out" 'detected an unsafe post-reset condition' \
+    "guarded acquisition did not contain a provider bypass after reset"
+  [ -e "$invoked" ] || fail "post-reset containment fixture did not bypass the Git shim"
+  git -C "$POOL_DIR" cat-file -e "$before^{commit}" \
+    || fail "post-reset containment lost the discarded commit object"
+  if printf '%s\n' "$out" | grep -Fx "$POOL_DIR" >/dev/null; then
+    fail "post-reset containment exposed the refused acquired path on stdout"
+  fi
   pass "spawn guards Treehouse reset before non-ancestor acquisition"
 }
 

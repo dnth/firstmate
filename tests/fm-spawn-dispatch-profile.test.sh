@@ -189,6 +189,13 @@ SH
 #!/usr/bin/env bash
 [ -z "${FM_FAKE_TREEHOUSE_LOG:-}" ] || printf '%s|%s\n' "$PWD" "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
 if [ "${1:-}" = get ] && printf '%s\n' "$*" | grep -Eq '(^| )--lease( |$)'; then
+  if [ -n "${FM_TREEHOUSE_GUARD_COMPLETE_FILE:-}" ]; then
+    ( cd "$FM_FAKE_PANE_PATH" \
+      && git status --porcelain --untracked-files=all >/dev/null \
+      && git checkout --detach --force HEAD >/dev/null \
+      && git reset --hard HEAD >/dev/null \
+      && git clean -fd >/dev/null ) || exit $?
+  fi
   printf '%s\n' "$FM_FAKE_PANE_PATH"
 fi
 exit 0
@@ -985,6 +992,30 @@ test_omp_unsafe_fallback_refuses_before_endpoint() {
     "unsafe fallback did not return its pre-endpoint worktree lease"
   unset FM_TEST_OMP_CATALOG_DIR FM_TEST_OMP_PREWALK_ENABLED FM_TEST_OMP_NO_PREWALK
   pass "unsafe OMP fallback refuses before endpoint creation"
+}
+
+test_omp_prewalk_live_runtime_refusal_preserves_lease() {
+  local rec id out status treehouse_log target exclude
+  id=$(profile_id profile-omp-prewalk-live-runtime-z8owb)
+  rec=$(make_spawn_case profile-omp-prewalk-live-runtime omp "$id")
+  read_case_record "$rec"
+  treehouse_log="$CASE_DIR/treehouse.log"
+  target=openai-codex/gpt-5.6-luna:xhigh
+  exclude=$(git -C "$WT_DIR" rev-parse --git-path info/exclude)
+  printf '/state/\n' >> "$exclude"
+  mkdir -p "$WT_DIR/state"
+  printf '%s\n' "$$" > "$WT_DIR/state/.lock"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+  status=$?
+  expect_code 1 "$status" "live OMP runtime ownership should refuse Prewalk reuse"
+  assert_contains "$out" 'previous OMP session is still live' \
+    "Prewalk reuse did not report the live prior occupant"
+  assert_no_grep 'return' "$treehouse_log" \
+    "Prewalk runtime refusal returned a lease with a live occupant"
+  assert_present "$WT_DIR/state/.lock" "Prewalk runtime refusal removed the live occupant marker"
+  pass "Prewalk preserves a lease when prior occupant liveness remains"
 }
 
 test_omp_prewalk_premetadata_failure_cleans_endpoint_and_lease() {
@@ -1870,6 +1901,7 @@ test_omp_prewalk_accepts_colon_selector_from_launch_worktree_catalog
 test_omp_prewalk_fallback_omits_unsupported_disable_flag
 test_omp_valid_prewalk_does_not_require_disable_flag
 test_omp_unsafe_fallback_refuses_before_endpoint
+test_omp_prewalk_live_runtime_refusal_preserves_lease
 test_omp_prewalk_premetadata_failure_cleans_endpoint_and_lease
 test_omp_prewalk_ambiguous_herdr_creation_preserves_lease
 test_ordinary_herdr_partial_create_preserves_response_known_pane

@@ -19,30 +19,102 @@ if [ -z "$default_ref" ]; then
   default_branch=$(git -C "$PWD" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
   [ -z "$default_branch" ] || default_ref="refs/heads/$default_branch"
 fi
-while IFS= read -r -d '' slot && IFS= read -r -d '' worktree; do
-  fm_pool_worktree_clean "$worktree" || continue
-  if [ -z "$default_ref" ] || ! git -C "$worktree" rev-parse --verify "$default_ref^{commit}" >/dev/null 2>&1; then
-    echo "error: refusing pooled worktree acquisition: could not resolve the default branch before inspecting slot $slot at $worktree" >&2
-    exit 1
-  fi
-  if ! git -C "$worktree" merge-base --is-ancestor HEAD "$default_ref" 2>/dev/null; then
-    echo "error: refusing pooled worktree acquisition at $worktree: HEAD is not an ancestor of $default_ref; local commits were preserved" >&2
-    exit 1
-  fi
-done < "$GUARD_DIR/candidates"
+if ! node - "$GUARD_DIR/candidates" "$GUARD_DIR/reflogs.json" "$default_ref" "$REAL_GIT" <<'NODE'
+const fs = require("fs");
+const { spawnSync } = require("child_process");
+const [candidatesPath, snapshotPath, defaultRef, git] = process.argv.slice(2);
+const fields = fs.readFileSync(candidatesPath).toString("utf8").split("\0");
+const snapshots = [];
+for (let index = 0; index + 1 < fields.length; index += 2) {
+  const worktree = fields[index + 1];
+  if (!worktree) continue;
+  const result = spawnSync(git, ["-C", worktree, "rev-parse", "--path-format=absolute", "--git-path", "logs/HEAD"], {encoding:"utf8"});
+  if (result.status !== 0) continue;
+  const log = result.stdout.trim();
+  let prefix = "";
+  try {
+    prefix = fs.readFileSync(log).toString("base64");
+  } catch (error) {
+    if (error.code !== "ENOENT") process.exit(1);
+  }
+  snapshots.push({worktree, defaultRef, log, prefix});
+}
+fs.writeFileSync(snapshotPath, JSON.stringify(snapshots));
+NODE
+then
+  echo "error: could not snapshot Treehouse candidate reflogs before acquisition" >&2
+  exit 1
+fi
 
-FM_TREEHOUSE_REAL_GIT=$REAL_GIT \
-FM_TREEHOUSE_GUARD_ERROR_FILE="$GUARD_DIR/error" \
-FM_TREEHOUSE_GUARD_SAFE_FILE="$GUARD_DIR/safe" \
-FM_TREEHOUSE_GUARD_COMPLETE_FILE="$GUARD_DIR/complete" \
-PATH="$SCRIPT_DIR/treehouse-git-guard:$PATH" \
-  treehouse get "$@"
+lease_mode=0
+for arg in "$@"; do
+  [ "$arg" != --lease ] || lease_mode=1
+done
+
+if [ "$lease_mode" -eq 1 ]; then
+  FM_TREEHOUSE_REAL_GIT=$REAL_GIT \
+  FM_TREEHOUSE_GUARD_ERROR_FILE="$GUARD_DIR/error" \
+  FM_TREEHOUSE_GUARD_SAFE_FILE="$GUARD_DIR/safe" \
+  FM_TREEHOUSE_GUARD_COMPLETE_FILE="$GUARD_DIR/complete" \
+  PATH="$SCRIPT_DIR/treehouse-git-guard:$PATH" \
+    treehouse get "$@" > "$GUARD_DIR/stdout"
+else
+  FM_TREEHOUSE_REAL_GIT=$REAL_GIT \
+  FM_TREEHOUSE_GUARD_ERROR_FILE="$GUARD_DIR/error" \
+  FM_TREEHOUSE_GUARD_SAFE_FILE="$GUARD_DIR/safe" \
+  FM_TREEHOUSE_GUARD_COMPLETE_FILE="$GUARD_DIR/complete" \
+  PATH="$SCRIPT_DIR/treehouse-git-guard:$PATH" \
+    treehouse get "$@"
+fi
 status=$?
 if [ "$status" -ne 0 ] && [ -s "$GUARD_DIR/error" ]; then
   sed -n '1p' "$GUARD_DIR/error" >&2
 fi
-if [ "$status" -eq 0 ] && [ ! -f "$GUARD_DIR/complete" ]; then
-  echo "error: refusing pooled worktree acquisition because Treehouse did not complete the verified pre-reset boundary" >&2
+if ! node - "$GUARD_DIR/reflogs.json" "$REAL_GIT" <<'NODE'
+const fs = require("fs");
+const { spawnSync } = require("child_process");
+const [snapshotPath, git] = process.argv.slice(2);
+for (const snapshot of JSON.parse(fs.readFileSync(snapshotPath, "utf8"))) {
+  let current;
+  try {
+    current = fs.readFileSync(snapshot.log);
+  } catch {
+    process.stderr.write(`error: refusing pooled worktree acquisition at ${snapshot.worktree}: could not verify its post-acquisition reflog\n`);
+    process.exit(42);
+  }
+  const prefix = Buffer.from(snapshot.prefix, "base64");
+  if (current.length < prefix.length || !current.subarray(0, prefix.length).equals(prefix)) {
+    process.stderr.write(`error: refusing pooled worktree acquisition at ${snapshot.worktree}: its reflog changed outside the append-only containment boundary\n`);
+    process.exit(42);
+  }
+  const appended = current.subarray(prefix.length).toString("utf8").split("\n");
+  for (const line of appended) {
+    if (!line) continue;
+    const [oldCommit, newCommit] = line.split(" ", 2);
+    if (!snapshot.defaultRef || !/^[0-9a-f]{40,64}$/.test(oldCommit) || !/^[0-9a-f]{40,64}$/.test(newCommit)) {
+      process.stderr.write(`error: refusing pooled worktree acquisition at ${snapshot.worktree}: could not verify a post-acquisition reflog transition\n`);
+      process.exit(42);
+    }
+    if (/^0+$/.test(oldCommit)) continue;
+    const oldAncestor = spawnSync(git, ["-C", snapshot.worktree, "merge-base", "--is-ancestor", oldCommit, snapshot.defaultRef]);
+    const newAncestor = spawnSync(git, ["-C", snapshot.worktree, "merge-base", "--is-ancestor", newCommit, snapshot.defaultRef]);
+    if (oldAncestor.status === 1 && newAncestor.status === 0) {
+      process.stderr.write(`error: refusing pooled worktree acquisition at ${snapshot.worktree}: detected an unsafe post-reset condition that discarded ${oldCommit}\n`);
+      process.exit(42);
+    }
+    if (![0, 1].includes(oldAncestor.status) || ![0, 1].includes(newAncestor.status)) {
+      process.stderr.write(`error: refusing pooled worktree acquisition at ${snapshot.worktree}: could not verify post-acquisition ancestry\n`);
+      process.exit(42);
+    }
+  }
+}
+NODE
+then
   exit 1
 fi
+if [ "$status" -eq 0 ] && [ ! -f "$GUARD_DIR/complete" ]; then
+  echo "error: refusing pooled worktree acquisition because Treehouse did not complete the guarded reset path" >&2
+  exit 1
+fi
+[ "$lease_mode" -eq 0 ] || cat "$GUARD_DIR/stdout"
 exit "$status"

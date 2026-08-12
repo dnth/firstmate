@@ -13,15 +13,17 @@ trap 'rm -rf "$tmp"' EXIT
 candidates="$tmp/candidates"
 cwd_snapshot="$tmp/cwds"
 
-node - "$repo" > "$candidates" <<'NODE'
+node - "$repo" "$mode" > "$candidates" <<'NODE'
 const fs = require("fs");
 const path = require("path");
 const { spawnSync } = require("child_process");
 const repo = process.argv[2];
+const mode = process.argv[3];
+const procRoot = process.env.FM_PROC_ROOT_OVERRIDE || "/proc";
 function processStartedAt(pid) {
   if (process.platform === "linux") {
     try {
-      const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+      const stat = fs.readFileSync(path.join(procRoot, String(pid), "stat"), "utf8");
       const fields = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
       const ticks = Number(fields[19]);
       const boot = fs.readFileSync("/proc/stat", "utf8").match(/^btime (\d+)$/m);
@@ -64,15 +66,18 @@ function worktreeInUse(worktree) {
   }
   let processes;
   try {
-    processes = fs.readdirSync("/proc").filter(name => /^\d+$/.test(name));
+    processes = fs.readdirSync(procRoot).filter(name => /^\d+$/.test(name));
   } catch {
     return true;
   }
   for (const pid of processes) {
     try {
-      const cwd = fs.realpathSync(`/proc/${pid}/cwd`);
+      const cwd = fs.realpathSync(path.join(procRoot, pid, "cwd"));
       if (cwd === root || cwd.startsWith(root + path.sep)) return true;
-    } catch {}
+    } catch (error) {
+      if (error.code === "ENOENT" || error.code === "ESRCH") continue;
+      return true;
+    }
   }
   return false;
 }
@@ -91,6 +96,10 @@ for (const field of result.stdout.toString("utf8").split("\n")) {
   }
   const entry = (state.worktrees || []).find(item => item.path === worktree);
   if (!entry || entry.leased || entry.destroying) continue;
+  if (mode === "candidates") {
+    process.stdout.write(String(entry.name || "unknown") + "\0" + worktree + "\0");
+    continue;
+  }
   if (ownerMatches(entry)) continue;
   if (worktreeInUse(worktree)) continue;
   process.stdout.write(String(entry.name || "unknown") + "\0" + worktree + "\0");
@@ -107,11 +116,11 @@ fi
 export FM_POOL_LSOF_CWD_FILE="$cwd_snapshot"
 
 while IFS= read -r -d '' slot && IFS= read -r -d '' worktree; do
-  fm_pool_worktree_idle "$worktree" || continue
   if [ "$mode" = candidates ]; then
     printf '%s\0%s\0' "$slot" "$worktree"
     continue
   fi
+  fm_pool_worktree_idle "$worktree" || continue
   fm_pool_worktree_clean "$worktree" && continue
   node -e 'process.stdout.write(JSON.stringify({slot:process.argv[1],path:process.argv[2]}) + "\n")' \
     "$slot" "$worktree"

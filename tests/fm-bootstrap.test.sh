@@ -701,7 +701,7 @@ ROWS
 }
 
 test_treehouse_dirty_idle_audit_is_read_only() {
-  local case_dir fakebin out repo pool wt_one wt_two wt_clean wt_reused wt_live state before after live_pid
+  local case_dir fakebin out unreadable_out repo pool wt_one wt_two wt_clean wt_reused wt_live state before after proc_root
   case_dir="$TMP_ROOT/treehouse-dirty-idle-audit"
   repo="$case_dir/audit-repo"
   pool="$case_dir/My Pools/audit-pool"
@@ -729,8 +729,11 @@ test_treehouse_dirty_idle_audit_is_read_only() {
   printf 'live cwd dirt\n' > "$wt_live/dirty.txt"
   node -e 'const fs=require("fs"); fs.writeFileSync(process.argv[1], JSON.stringify({worktrees:[{name:"7",path:process.argv[2]},{name:"8",path:process.argv[3]},{name:"9",path:process.argv[4]},{name:"10",path:process.argv[5],owner_pid:Number(process.argv[7]),owner_started_at:1},{name:"11",path:process.argv[6]}]}))' \
     "$state" "$wt_one" "$wt_two" "$wt_clean" "$wt_reused" "$wt_live" "$$"
-  ( cd "$wt_live" && sleep 30 ) &
-  live_pid=$!
+  proc_root="$case_dir/readable-proc"
+  mkdir -p "$proc_root/111" "$proc_root/$$"
+  cp "/proc/$$/stat" "$proc_root/$$/stat"
+  printf 'Name:\ttest\nUid:\t%s\t%s\t%s\t%s\n' "$(id -u)" "$(id -u)" "$(id -u)" "$(id -u)" > "$proc_root/111/status"
+  ln -s "$wt_live" "$proc_root/111/cwd"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   printf 'keep this sentinel\n' > "$case_dir/home/state/sentinel"
   fakebin=$(make_fake_toolchain "$case_dir")
@@ -741,13 +744,11 @@ exit 127
 SH
   chmod +x "$fakebin/jq"
   before=$(shasum -a 256 "$state")
-  out=$(PATH="$fakebin:$BASE_PATH" \
+  out=$(PATH="$fakebin:$BASE_PATH" FM_PROC_ROOT_OVERRIDE="$proc_root" \
     FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$repo" \
     FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
     FM_TREEHOUSE_AUDIT_POOL_TIMEOUT=2 FM_TREEHOUSE_AUDIT_TIMEOUT=4 \
     "$ROOT/bin/fm-bootstrap.sh")
-  kill "$live_pid" 2>/dev/null || true
-  wait "$live_pid" 2>/dev/null || true
   assert_contains "$out" \
     "TREEHOUSE_POOL: dirty idle slot 7 at $wt_one - inspect before cleanup; no changes made" \
     "bootstrap did not report a dirty ownerless idle pool slot"
@@ -759,6 +760,17 @@ SH
     "bootstrap mistook a reused PID for the persisted owner identity"
   assert_not_contains "$out" "TREEHOUSE_POOL: dirty idle slot 11 at $wt_live" \
     "bootstrap reported a slot still held by a live worktree process"
+  proc_root="$case_dir/unreadable-proc"
+  mkdir -p "$proc_root/123"
+  printf 'Name:\ttest\nUid:\t%s\t%s\t%s\t%s\n' "$(id -u)" "$(id -u)" "$(id -u)" "$(id -u)" > "$proc_root/123/status"
+  ln -s "$proc_root/123/cwd" "$proc_root/123/cwd"
+  unreadable_out=$(PATH="$fakebin:$BASE_PATH" FM_PROC_ROOT_OVERRIDE="$proc_root" \
+    FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$repo" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_TREEHOUSE_AUDIT_POOL_TIMEOUT=2 FM_TREEHOUSE_AUDIT_TIMEOUT=4 \
+    "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$unreadable_out" "TREEHOUSE_POOL:" \
+    "bootstrap reported an idle slot when a process cwd was unreadable"
   assert_grep 'keep this sentinel' "$case_dir/home/state/sentinel" \
     "read-only pool audit changed unrelated home state"
   after=$(shasum -a 256 "$state")
@@ -767,7 +779,7 @@ SH
 }
 
 test_treehouse_audit_runs_under_orca() {
-  local case_dir fakebin out repo pool wt state
+  local case_dir fakebin out repo pool wt state proc_root
   case_dir="$TMP_ROOT/treehouse-audit-orca"
   repo="$case_dir/orca-repo"
   pool="$case_dir/pool/orca-pool"
@@ -789,7 +801,9 @@ test_treehouse_audit_runs_under_orca() {
   add_real_node "$fakebin"
   fm_fake_exit0 "$fakebin" orca
   add_real_jq "$fakebin"
-  out=$(PATH="$fakebin:$BASE_PATH" \
+  proc_root="$case_dir/readable-proc"
+  mkdir -p "$proc_root"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_PROC_ROOT_OVERRIDE="$proc_root" \
     FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$repo" \
     FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
     FM_TREEHOUSE_AUDIT_POOL_TIMEOUT=2 FM_TREEHOUSE_AUDIT_TIMEOUT=4 \

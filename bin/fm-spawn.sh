@@ -826,6 +826,10 @@ spawn_abort_cleanup() {
       PREWALK_ABORT_PHASE=none
       echo "warning: OMP spawn cleanup is preserving its leased worktree because backend endpoint creation was ambiguous" >&2
       ;;
+    occupant)
+      PREWALK_ABORT_PHASE=none
+      echo "warning: OMP Prewalk spawn cleanup is preserving its leased worktree because prior occupant liveness was not disproven" >&2
+      ;;
   esac
   if [ "$OMP_ABORT_CLEANUP" = 1 ]; then
     OMP_ABORT_CLEANUP=0
@@ -2278,7 +2282,10 @@ if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
   PREWALK_ABORT_PHASE=lease
   validate_spawn_worktree "treehouse lease" "$W"
   validate_spawn_pool_lease "treehouse lease" "$W" || exit 1
-  fm_omp_clear_stale_runtime_markers "$WT" || exit 1
+  if ! fm_omp_clear_stale_runtime_markers "$WT"; then
+    PREWALK_ABORT_PHASE=occupant
+    exit 1
+  fi
   freshen_spawn_worktree_base "$WT" || exit 1
   validate_omp_prewalk_for_launch_dir "$WT"
   omp_project_extension_preflight "$WT" || exit 1
