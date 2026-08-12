@@ -790,11 +790,11 @@ spawn_omp_abort_endpoint_stopped() {  # [meta]
 }
 
 spawn_omp_abort_clean_unchanged_worktree() {  # <context>
-  local context=$1 current_head dirty
+  local context=$1 current_head
   sleep 0.1
   current_head=$(git -C "$WT" rev-parse HEAD 2>/dev/null || true)
-  dirty=$(git -C "$WT" status --porcelain 2>/dev/null || printf 'unreadable\n')
-  if [ -z "$OMP_ABORT_INITIAL_HEAD" ] || [ "$current_head" != "$OMP_ABORT_INITIAL_HEAD" ] || [ -n "$dirty" ]; then
+  if [ -z "$OMP_ABORT_INITIAL_HEAD" ] || [ "$current_head" != "$OMP_ABORT_INITIAL_HEAD" ] \
+    || ! fm_pool_worktree_clean "$WT"; then
     echo "warning: $context found work to preserve in $WT" >&2
   elif (cd "$PROJ_ABS" && treehouse return --force "$WT" >/dev/null 2>&1); then
     [ -z "${TASK_TMP:-}" ] || rm -rf "$TASK_TMP"
@@ -2270,7 +2270,7 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 W="fm-$ID"
 SPAWN_START_DIR=$PROJ_ABS
 if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
-  WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$W") || {
+  WT=$(cd "$PROJ_ABS" && treehouse get --require-ancestor-of-default --lease --lease-holder "$W") || {
     echo "error: OMP could not lease an authoritative pooled worktree before endpoint creation" >&2
     exit 1
   }
@@ -2641,7 +2641,7 @@ kimi_spawn_fail() {  # <detail>
 
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
   && [ "$PREWALK_WORKTREE_READY" != 1 ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  spawn_send_text_line "$WT_TARGET" 'treehouse get --require-ancestor-of-default'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an

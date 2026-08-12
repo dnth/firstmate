@@ -246,7 +246,7 @@ TREEHOUSE_AUDIT_SEEN_SLOTS=""
 # shellcheck disable=SC2329 # Invoked indirectly through bootstrap_run_bounded.
 treehouse_pool_dirty_idle_scan() {  # <repo>
   local repo=$1 out line slot state path rest
-  out=$( (cd "$repo" 2>/dev/null && treehouse status) 2>/dev/null ) || return 0
+  out=$( (cd "$repo" 2>/dev/null && treehouse status --read-only) 2>/dev/null ) || return 0
   while IFS= read -r line; do
     read -r slot state path rest <<EOF_SLOT
 $line
@@ -315,8 +315,11 @@ treehouse_audit_timeout() {
 }
 
 treehouse_dirty_idle_slot_audit() {
-  fm_backend_list_contains "$TOOLS" treehouse || return 0
   command -v treehouse >/dev/null 2>&1 || return 0
+  if ! treehouse_supports_read_only_status; then
+    echo "TREEHOUSE_POOL: audit unavailable - installed treehouse lacks read-only status support"
+    return 0
+  fi
   local per_pool timeout
   per_pool=$(treehouse_audit_pool_timeout)
   timeout=$(treehouse_audit_timeout)
@@ -823,6 +826,14 @@ treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
 }
 
+treehouse_supports_safe_acquire() {
+  treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--require-ancestor-of-default([^[:alnum:]_-]|$)'
+}
+
+treehouse_supports_read_only_status() {
+  treehouse status --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--read-only([^[:alnum:]_-]|$)'
+}
+
 # Shared semantic-version floor for the tool gates below. A version string that
 # cannot be parsed into exactly one major.minor.patch triple is incompatible,
 # never assumed current, so a development or vendored build cannot pass a floor
@@ -1159,7 +1170,8 @@ done
 # backend actually requires treehouse (every backend except orca, which owns its
 # own worktrees); an orca home must not be told to upgrade a provider it never uses.
 if fm_backend_list_contains "$TOOLS" treehouse \
-  && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
+  && command -v treehouse >/dev/null 2>&1 \
+  && { ! treehouse_supports_lease || ! treehouse_supports_safe_acquire; }; then
   echo "MISSING: treehouse (install: $(install_cmd treehouse))"
 fi
 treehouse_dirty_idle_slot_audit

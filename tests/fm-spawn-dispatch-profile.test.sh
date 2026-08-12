@@ -188,7 +188,7 @@ SH
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 [ -z "${FM_FAKE_TREEHOUSE_LOG:-}" ] || printf '%s|%s\n' "$PWD" "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
-if [ "${1:-}" = get ] && [ "${2:-}" = --lease ]; then
+if [ "${1:-}" = get ] && printf '%s\n' "$*" | grep -Eq '(^| )--lease( |$)'; then
   printf '%s\n' "$FM_FAKE_PANE_PATH"
 fi
 exit 0
@@ -979,7 +979,7 @@ test_omp_unsafe_fallback_refuses_before_endpoint() {
   assert_contains "$out" "use an OMP build with --no-prewalk or set prewalk.enabled=false" \
     "unsafe fallback refusal was not actionable"
   [ ! -s "$endpoint_log" ] || fail "unsafe fallback created an endpoint before refusing"
-  assert_grep "get --lease --lease-holder fm-$id" "$treehouse_log" \
+  assert_grep "get --require-ancestor-of-default --lease --lease-holder fm-$id" "$treehouse_log" \
     "unsafe fallback did not validate from the authoritative leased worktree"
   assert_grep "$PROJ_DIR|return $WT_DIR" "$treehouse_log" \
     "unsafe fallback did not return its pre-endpoint worktree lease"
@@ -1358,6 +1358,7 @@ test_omp_launch_requires_observable_turn_start_acknowledgement() {
   id=$(profile_id profile-omp-unacked-z8r)
   rec=$(make_spawn_case profile-omp-unacked omp "$id")
   read_case_record "$rec"
+  printf 'pool-local-config\n' > "$WT_DIR/treehouse.toml"
 
   out=$(FM_OMP_LAUNCH_ACK_POLLS=2 FM_OMP_LAUNCH_ACK_INTERVAL=0.01 \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
@@ -1372,7 +1373,7 @@ test_omp_launch_requires_observable_turn_start_acknowledgement() {
   assert_absent "$HOME_DIR/state/$id.meta" "OMP unacknowledged launch left owned metadata"
   assert_absent "$HOME_DIR/state/$id.omp-ext.ts" "OMP unacknowledged launch left its extension"
   assert_absent "/tmp/fm-$id" "OMP unacknowledged launch left its task temp root"
-  pass "OMP spawn requires the initial turn-start acknowledgement and cleans its unchanged launch"
+  pass "OMP spawn requires acknowledgement and returns a predicate-clean launch"
 }
 
 test_omp_herdr_unacked_launch_cleans_owned_endpoint_worktree_and_artifacts() {

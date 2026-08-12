@@ -63,13 +63,18 @@ SH
 #!/usr/bin/env bash
 if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
   if [ "${FM_FAKE_TREEHOUSE_LEASE_HELP:-}" = 1 ]; then
-    printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>]'
+    printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>] [--require-ancestor-of-default]'
   else
     printf '%s\n' 'Usage: treehouse get'
   fi
   exit 0
 fi
-if [ "${1:-}" = status ]; then
+if [ "${1:-}" = status ] && [ "${2:-}" = --help ]; then
+  [ "${FM_FAKE_TREEHOUSE_READ_ONLY_STATUS_HELP:-1}" = 1 ] && printf '%s\n' 'Usage: treehouse status [--read-only]'
+  exit 0
+fi
+if [ "${1:-}" = status ] && [ "${2:-}" = --read-only ]; then
+  [ -z "${FM_FAKE_TREEHOUSE_STATUS_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TREEHOUSE_STATUS_LOG"
   printf '%s\n' "${FM_FAKE_TREEHOUSE_STATUS:-}"
   exit 0
 fi
@@ -695,16 +700,18 @@ ROWS
 }
 
 test_treehouse_dirty_idle_audit_is_read_only() {
-  local case_dir fakebin out
+  local case_dir fakebin out status_log
   case_dir="$TMP_ROOT/treehouse-dirty-idle-audit"
   mkdir -p "$case_dir/home/config" "$case_dir/home/projects" "$case_dir/home/state"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   printf 'keep this sentinel\n' > "$case_dir/home/state/sentinel"
   fakebin=$(make_fake_toolchain "$case_dir")
+  status_log="$case_dir/status.log"
   out=$(PATH="$fakebin:$BASE_PATH" \
     FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
     FM_FAKE_TREEHOUSE_STATUS='7 dirty /tmp/treehouse-slot (ownerless)' \
+    FM_FAKE_TREEHOUSE_STATUS_LOG="$status_log" \
     FM_TREEHOUSE_AUDIT_POOL_TIMEOUT=2 FM_TREEHOUSE_AUDIT_TIMEOUT=4 \
     "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$out" \
@@ -712,10 +719,32 @@ test_treehouse_dirty_idle_audit_is_read_only() {
     "bootstrap did not report a dirty ownerless idle pool slot"
   assert_grep 'keep this sentinel' "$case_dir/home/state/sentinel" \
     "read-only pool audit changed unrelated home state"
+  assert_grep 'status --read-only' "$status_log" \
+    "pool audit did not use treehouse's non-mutating status boundary"
   pass "bootstrap reports dirty ownerless pool slots without mutating them"
 }
 
+test_treehouse_audit_runs_under_orca() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/treehouse-audit-orca"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/projects" "$case_dir/home/state"
+  printf '%s\n' orca > "$case_dir/home/config/backend"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  fm_fake_exit0 "$fakebin" orca jq
+  out=$(PATH="$fakebin:$BASE_PATH" \
+    FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_FAKE_TREEHOUSE_STATUS='3 dirty /tmp/orca-leftover (ownerless)' \
+    FM_TREEHOUSE_AUDIT_POOL_TIMEOUT=2 FM_TREEHOUSE_AUDIT_TIMEOUT=4 \
+    "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "TREEHOUSE_POOL: dirty idle slot 3 at /tmp/orca-leftover" \
+    "Orca backend selection suppressed the available Treehouse pool audit"
+  pass "bootstrap audits available Treehouse pools under Orca"
+}
+
 test_treehouse_dirty_idle_audit_is_read_only
+test_treehouse_audit_runs_under_orca
 
 test_treehouse_lease_check_follows_resolved_backend() {
   local case_dir fakebin out

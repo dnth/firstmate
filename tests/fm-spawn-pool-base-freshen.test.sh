@@ -24,7 +24,11 @@ case "$*" in
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows|has-session|new-session|new-window|kill-window|send-keys) exit 0 ;;
+  send-keys)
+    [ -z "${FM_FAKE_SEND_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_SEND_LOG"
+    exit 0
+    ;;
+  list-windows|has-session|new-session|new-window|kill-window) exit 0 ;;
 esac
 exit 0
 SH
@@ -79,7 +83,7 @@ run_spawn() {
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$POOL_DIR" \
-    PATH="$FAKEBIN_DIR:$PATH" \
+    FM_FAKE_SEND_LOG="$CASE_DIR/send.log" PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJECT_DIR" "$@" 2>&1
 }
 
@@ -249,6 +253,19 @@ test_diverged_pool_refuses_without_discarding_commits() {
   pass "a pooled worktree with unique commits is refused without discarding them"
 }
 
+test_acquisition_guards_before_treehouse_reset() {
+  local rec id out status
+  id='pool-acquisition-guard-r7'
+  rec=$(make_case acquisition-guard "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "guarded pooled acquisition should preserve healthy spawn behavior"
+  assert_grep 'treehouse get --require-ancestor-of-default' "$CASE_DIR/send.log" \
+    "spawn did not place ancestry validation at Treehouse's pre-reset acquisition boundary"
+  pass "spawn asks Treehouse to reject non-ancestor slots before reset"
+}
+
 test_unresolved_remote_default_refuses_pool() {
   local rec id out status before
   id='pool-unresolved-default-r6'
@@ -286,6 +303,7 @@ test_pool_cleanliness_predicate() {
 }
 
 test_pool_cleanliness_predicate
+test_acquisition_guards_before_treehouse_reset
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
