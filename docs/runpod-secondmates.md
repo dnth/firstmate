@@ -76,7 +76,7 @@ bin/fm-runpod.sh provision <id> --datacenter EU-RO-1 --size 100 \
   --code-origin https://github.com/<owner>/firstmate.git
 ```
 
-`--code-origin` is the git URL the pod clones its Firstmate code root from on first boot.
+`--code-origin` is required for a fresh volume and names the git URL the pod clones its Firstmate code root from on first boot; without it or an existing clone, wake refuses and records no satisfied toolchain marker.
 Add `--harness-npm <package>` when a worker harness should be installed with it.
 
 Bring the host up with the CPU default:
