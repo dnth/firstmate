@@ -890,12 +890,14 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
 }
 
 test_secondmate_paused_resurfaces_in_normal_mode() {
-  local dir state fakebin out capture_file statusf window key pane_hash sig pid back
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid back home
   dir=$(make_case secondmate-paused-resurface); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/secondmate-held.status"
+  home="$dir/secondmate-home"; mkdir -p "$home/state"
   window="test:fm-secondmate-held"
   printf 'idle awaiting external\n' > "$capture_file"
-  printf 'window=%s\nkind=secondmate\n' "$window" > "$state/secondmate-held.meta"
+  printf 'window=%s\nkind=secondmate\nhome=%s\n' "$window" "$home" > "$state/secondmate-held.meta"
+  : > "$home/state/.last-watcher-beat"
   printf 'paused: awaiting the upstream release\n' > "$statusf"
   back=$(( $(date +%s) - 500 ))
   if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
@@ -905,6 +907,9 @@ test_secondmate_paused_resurfaces_in_normal_mode() {
   pane_hash=$(hash_text "idle awaiting external")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.stale-since-$key"
+  printf '2\n' > "$state/.wedge-escalations-$key"
   export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream release'
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
@@ -940,8 +945,66 @@ test_secondmate_nonpaused_stale_remains_suppressed() {
     reap "$pid"; fail "watcher surfaced an ordinary secondmate stale pane: $(cat "$out")"
   fi
   [ ! -s "$out" ] || { reap "$pid"; fail "ordinary secondmate stale pane printed a wake reason: $(cat "$out")"; }
+  [ ! -e "$state/.stale-$key" ] || { reap "$pid"; fail "fresh secondmate beacon retained the stale suppressor"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "fresh secondmate beacon retained the wedge timer"; }
+  [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "fresh secondmate beacon retained the escalation count"; }
   reap "$pid"
   pass "a fresh secondmate-home watcher beacon suppresses an idle secondmate pane"
+}
+
+test_remote_secondmate_beacon_is_bounded() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid on_bin control_home back age
+  dir=$(make_case remote-secondmate-beacon); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/remote.status"
+  window="remote:ios"; on_bin="$dir/fm-on.sh"
+  control_home="$dir/control-home"
+  mkdir -p "$control_home/state" "$control_home/bin"
+  printf 'ios\n' > "$control_home/.fm-secondmate-home"
+  : > "$control_home/AGENTS.md"
+  back=$(( $(date +%s) - 30 ))
+  : > "$control_home/state/.last-watcher-beat"
+  set_mtime "$back" "$control_home/state/.last-watcher-beat"
+  age=$(FM_HOME="$control_home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-remote-secondmate-control.sh" beacon-age ios)
+  [ "$age" -ge 29 ] && [ "$age" -le 35 ] || fail "host-local beacon age was not measured on the remote clock: $age"
+  printf 'idle while supervising remote crew\n' > "$capture_file"
+  printf 'window=%s\nkind=secondmate\nremote_host=remote-mac\nhome=/remote/home\n' "$window" > "$state/remote.meta"
+  printf 'working: supervising remote crew\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-remote_status"
+  key=$(printf '%s' "$window" | tr '.:/' '___')
+  pane_hash=$(hash_text "idle while supervising remote crew")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s\n' '#!/usr/bin/env bash' "printf '%s\\n' \"\${FM_FAKE_REMOTE_BEACON_AGE:?}\"" > "$on_bin"
+  chmod +x "$on_bin"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · supervising remote crew'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_ON_BIN="$on_bin" \
+    FM_FAKE_REMOTE_BEACON_AGE=0 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 30 || { reap "$pid"; fail "fresh remote beacon did not suppress the idle pane"; }
+  reap "$pid"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_ON_BIN="$on_bin" \
+    FM_FAKE_REMOTE_BEACON_AGE=500 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_numeric_file "$state/.stale-since-$key" 30 || { reap "$pid"; fail "stale remote beacon did not enter wedge tracking"; }
+  reap "$pid"
+  printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_ON_BIN="$on_bin" \
+    FM_FAKE_REMOTE_BEACON_AGE=500 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "stale remote beacon did not wedge-escalate"
+  grep -F "possible wedge" "$out" >/dev/null || fail "stale remote beacon omitted possible-wedge escalation"
+  unset FM_FAKE_CREW_STATE
+  pass "remote secondmate beacon evidence is bounded by the stale threshold"
 }
 
 test_secondmate_stale_supervisor_beacon_escalates() {
@@ -1976,6 +2039,7 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
+test_remote_secondmate_beacon_is_bounded
 test_secondmate_stale_supervisor_beacon_escalates
 test_secondmate_unpause_clears_pause_tracking
 test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash

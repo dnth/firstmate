@@ -41,6 +41,10 @@
 #                          count, and demand-deep-inspection marker, for human
 #                          inspection only - never an automatic interrupt,
 #                          signal, or restart of the worker or its tool process.
+#                          An idle non-paused secondmate is also absorbed while
+#                          its home watcher beacon is fresh within the wedge
+#                          threshold; missing or stale evidence follows the
+#                          ordinary stale and possible-wedge path.
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
@@ -86,6 +90,7 @@ mkdir -p "$STATE"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
+ON_BIN=${FM_ON_BIN:-$SCRIPT_DIR/fm-on.sh}
 WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
 # The singleton-lock acquisition, EXIT trap, and the blocking supervision loop
 # all live below the source guard at the very bottom of this file (see "Main
@@ -372,6 +377,14 @@ clear_pause_tracking() {  # <window>
   rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
 }
 
+clear_stale_tracking() {  # <window>
+  local win=$1 key
+  key=${win//:/_}
+  key=${key//\//_}
+  key=${key//./_}
+  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+}
+
 # Reconcile a declared pause or captain-held status with authoritative crew state.
 # Only a confidently dead ordinary crew may recover paused classification after
 # fm-crew-state has fallen back to stopped or unknown.
@@ -449,12 +462,17 @@ surface_nonterminal_stale() {  # <window> <hash>
 # missing or stale beacon deliberately falls through to the ordinary stale path,
 # preserving wedge detection for an unresponsive supervisor.
 secondmate_supervision_is_alive() {  # <window>
-  local win=$1 meta home beat
+  local win=$1 meta home beat remote_host task age
   meta=$(fm_backend_meta_for_window "$win" "$STATE" 2>/dev/null || true)
   [ -n "$meta" ] || return 1
-  # Remote homes are not readable from the parent; their own remote watcher and
-  # liveness sweep own endpoint health, so preserve the remote stale exemption.
-  grep -q '^remote_host=' "$meta" && return 0
+  remote_host=$(grep '^remote_host=' "$meta" | cut -d= -f2- || true)
+  if [ -n "$remote_host" ]; then
+    task=$(window_to_task "$win" "$STATE")
+    age=$("$ON_BIN" "$task" fm-remote-secondmate-control.sh beacon-age "$task" </dev/null 2>/dev/null) || return 1
+    case "$age" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$age" -lt "$STALE_ESCALATE_SECS" ]
+    return
+  fi
   home=$(grep '^home=' "$meta" | cut -d= -f2- || true)
   [ -n "$home" ] || return 1
   beat="$home/state/.last-watcher-beat"
@@ -962,7 +980,9 @@ EOF
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$w"
     fi
-    if [ "$kind" = secondmate ] && secondmate_supervision_is_alive "$w"; then
+    if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last" \
+      && secondmate_supervision_is_alive "$w"; then
+      clear_stale_tracking "$w"
       continue
     fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue

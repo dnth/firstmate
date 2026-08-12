@@ -4,6 +4,7 @@
 # Usage:
 #   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> herdr <fallback-harness|-> <fallback-model|-> <fallback-effort|-> [traceparent]
 #   fm-remote-secondmate-control.sh state <id>
+#   fm-remote-secondmate-control.sh beacon-age <id>
 #   fm-remote-secondmate-control.sh route <id>
 #   fm-remote-secondmate-control.sh send <id> <message>
 #   fm-remote-secondmate-control.sh key <id> <key>
@@ -108,6 +109,23 @@ state_value() { # <id>; prints recovery-grade state
     return 0
   fi
   fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null || printf 'unreadable\n'
+}
+
+beacon_age() {
+  local id=$1 beat mtime now
+  validate_id "$id"
+  validate_home "$id"
+  beat="$TARGET_HOME/state/.last-watcher-beat"
+  [ -f "$beat" ] && [ ! -L "$beat" ] || return 1
+  if [ "$(uname)" = Darwin ]; then
+    mtime=$(stat -f %m "$beat" 2>/dev/null) || return 1
+  else
+    mtime=$(stat -c %Y "$beat" 2>/dev/null) || return 1
+  fi
+  now=$(date +%s)
+  case "$mtime" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$mtime" -le "$now" ] || return 1
+  printf '%s\n' "$((now - mtime))"
 }
 
 print_route() { # <id>
@@ -324,6 +342,7 @@ cmd_retire() {
 case "${1:-}" in
   launch) shift; [ "$#" -ge 8 ] && [ "$#" -le 9 ] || usage; cmd_launch "$@" ;;
   state) shift; [ "$#" -eq 1 ] || usage; validate_id "$1"; validate_home "$1"; state_value "$1" ;;
+  beacon-age) shift; [ "$#" -eq 1 ] || usage; beacon_age "$1" ;;
   route) shift; [ "$#" -eq 1 ] || usage; cmd_route "$1" ;;
   send) shift; [ "$#" -eq 2 ] || usage; cmd_send "$@" ;;
   key) shift; [ "$#" -eq 2 ] || usage; cmd_key "$@" ;;
