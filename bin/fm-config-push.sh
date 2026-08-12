@@ -124,9 +124,10 @@ while IFS='|' read -r id home _window meta; do
   remote_host=$(fm_meta_get "$meta" remote_host)
   if [ -n "$remote_host" ]; then
     printf 'secondmate %s (%s:%s):\n' "$id" "$remote_host" "$home"
-    # A suspended scale-to-zero route has no host to push to, and pushing is
-    # never a reason to create compute. Its pending nudge marker survives, so
-    # the next deliberate wake converges it (bin/fm-runpod-lib.sh).
+    # A scale-to-zero route in a recognized no-host lifecycle state has nothing
+    # to push to, and pushing is never a reason to create compute. Its pending
+    # nudge marker survives, so the next deliberate wake converges it
+    # (bin/fm-runpod-lib.sh).
     if fm_runpod_is_dormant "$DATA" "$id"; then
       echo "  config-reread: skipped - suspended; converges on its next wake"
       continue

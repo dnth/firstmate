@@ -22,8 +22,8 @@
 #   suspending  - a locked sleep is quiescing and terminating the pod.
 #   suspended   - the pod is terminated on purpose and the volume is retained.
 #
-# fm_runpod_is_dormant is true for every state except ready, because none of the
-# others has a host that can be reached right now. Probing one would report a
+# fm_runpod_is_dormant is true for each recognized no-host state, because none
+# has a host that can be reached right now. Probing one would report a
 # broken route rather than the deliberate scale-to-zero state it actually is,
 # and the correct response to needing that host is a wake, which serializes on
 # the same lifecycle lock - so a route caught mid-wake, or left in waking by an

@@ -173,9 +173,10 @@ cmd_arm_locked() {
   local id=${1:-} sid
   validate_id "$id"
   remote_route_exists "$id"
-  # The source long-polls the remote log over SSH, so a suspended scale-to-zero
-  # route has nothing to poll and must never be woken just to arm it. The cursor
-  # is untouched, so the next wake re-arms from exactly this offset.
+  # The source long-polls the remote log over SSH, so a scale-to-zero route in a
+  # recognized no-host lifecycle state has nothing to poll and must never be
+  # woken just to arm it. The cursor is untouched, so the next wake re-arms from
+  # exactly this offset.
   if fm_runpod_is_dormant "$DATA" "$id"; then
     printf 'skipped: %s suspended\n' "$(source_id "$id")"
     return 0

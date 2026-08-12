@@ -210,7 +210,7 @@ Firstmate's skills live in two separate places with different audiences:
 - [docs/architecture.md](docs/architecture.md) - maintainer architecture for the crew, supervision, worktrees, secondmates, and project modes.
 - [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, runtime backend selection, optional X mode, the files you set, and harness support.
 - [docs/remote-secondmates.md](docs/remote-secondmates.md) - current setup, routing, transfer, recovery, and safety behavior for whole-home remote second mates.
-- [docs/runpod-secondmates.md](docs/runpod-secondmates.md) - optional RunPod compute lifecycle beneath a remote second mate, so an idle domain scales to zero and costs storage alone.
+- [docs/runpod-secondmates.md](docs/runpod-secondmates.md) - optional RunPod compute lifecycle beneath a remote second mate, so an idle domain can scale to zero and cost storage alone.
 - [docs/calm.md](docs/calm.md) - current Pi `/calm` behavior and supported presentation limits.
 - [docs/wedge-alarm.md](docs/wedge-alarm.md) - configure the active alert for an away-mode escalation delivery that gets stuck.
 - [docs/tmux-backend.md](docs/tmux-backend.md) - current setup and limits for the tmux reference backend.

@@ -24,9 +24,9 @@
 #      involved on this platform. Nothing here duplicates those checks.
 #
 # On a volume's first boot there is no code root yet, so this script stops after
-# step 2 and the operator runs bin/fm-remote-home-seed.sh from the primary; that
-# seeding path clones the code root onto the volume and every later wake reaches
-# step 4. docs/runpod-secondmates.md owns the operator sequence.
+# step 2. The operator clones the code root onto the volume, then replaces the
+# pod so the next boot links its entrypoint and reaches step 4 before running
+# bin/fm-remote-home-seed.sh. docs/runpod-secondmates.md owns that sequence.
 #
 # The volume is mounted at /workspace. Durable remote state lives under it:
 #   /workspace/firstmate            the remote Firstmate code root

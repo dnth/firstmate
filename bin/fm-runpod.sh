@@ -16,7 +16,7 @@
 # This is a compute lifecycle provider BENEATH the existing remote second-mate
 # mechanism, never a session backend. A RunPod second mate is an ordinary remote
 # second mate (docs/remote-secondmates.md) whose SSH host happens to be an
-# ephemeral pod that scales to zero when idle; Herdr remains its backend, the
+# ephemeral pod that can scale to zero when idle; Herdr remains its backend, the
 # primary still owns routing and supervision, and every command that reaches it
 # still goes through fm-on.sh, fm-spawn.sh, fm-send.sh, and fm-teardown.sh.
 #
@@ -49,9 +49,9 @@
 # StrictHostKeyChecking is never disabled, and a later mismatch fails the
 # connection rather than being re-pinned.
 #
-# Idempotence and locking: provision, wake, and sleep each take the per-second
-# mate lifecycle lock in <FM_HOME>/state, so two concurrent wakes can never
-# create two pods for one second mate and a sleep can never race a wake.
+# Idempotence and locking: provision, wake, sleep, and destroy each take the
+# per-second mate lifecycle lock in <FM_HOME>/state, so two concurrent wakes can
+# never create two pods for one second mate and lifecycle mutations cannot race.
 #
 # Sleep is guarded by the same conditions bin/fm-teardown.sh refuses a remote
 # retirement for - remote child work, an unfinished backlog outbox, an

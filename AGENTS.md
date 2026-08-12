@@ -118,7 +118,7 @@ state/               volatile runtime signals; gitignored
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .omp-primary-extension-loaded  this home's OMP primary adapter identity marker; published by the adapter, validated by fm-session-start.sh, never hand-edited (docs/configuration.md "Harness support")
   .<id>.open-decisions-cursor  per-task byte cursor and folded open-decision set bounding the OPEN DECISIONS scan's cost to new status-log appends; written only by fm-classify-lib.sh's status_open_decisions_incremental, removed by teardown, safe to delete (forces one full re-fold)
-  .runpod-lifecycle-<id>.lock  per-secondmate RunPod provision, wake, and sleep lock; never touch
+  .runpod-lifecycle-<id>.lock  per-secondmate RunPod provider lifecycle lock; never touch
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
   .claude-autoarm.lock .claude-autoarm-epoch .claude-autoarm-failure-notified .claude-autoarm-failure-alarmed .turnend-claude-blocks .turnend-claude-blocks.lock   Claude Stop auto-arm single-flight, epoch, failure-episode, attended-alarm, guard-budget, and budget-lock records; never touch
@@ -394,7 +394,7 @@ When X-linked work reaches a milestone or terminal state, load `fmx-respond`; be
 
 For a quiet persistent secondmate endpoint, rely on fresh home-watcher liveness rather than quietness or routed status; missing evidence enters ordinary stale handling.
 A secondmate's idle endpoint is healthy, and parent supervision relies on its routed status rather than treating a quiet pane as stale.
-A secondmate placed on scale-to-zero compute is suspended by design when no host is running, delivery wakes it automatically, and `docs/runpod-secondmates.md` owns that lifecycle; never escalate a suspended route as a failure.
+A secondmate placed on scale-to-zero compute can have a deliberate no-host lifecycle state, delivery wakes it automatically, and `docs/runpod-secondmates.md` owns that lifecycle; never escalate such a route as a failure.
 Waiting on a healthy supervision cycle is silent; empty polls, elapsed time, and no-change updates are not captain-facing progress.
 Never broadly kill watchers, especially never `pkill -f bin/fm-watch.sh`, because that can kill sibling firstmate homes.
 A forced repair must use the home-scoped owner path emitted by supervision instructions.

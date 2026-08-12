@@ -332,6 +332,7 @@ secondmate_sync() {
       [ -f "$meta" ] || continue
       grep -q '^kind=secondmate' "$meta" 2>/dev/null || continue
       id=$(basename "$meta" .meta)
+      fm_runpod_is_dormant "$DATA" "$id" && continue
       echo "SECONDMATE_SYNC: secondmate $id: skipped: primary default-branch commit cannot be resolved"
     done
     return 0
@@ -538,8 +539,9 @@ secondmate_sync() {
   while IFS='|' read -r id _home _window meta; do
     remote_host=$(fm_meta_get "$meta" remote_host)
     [ -n "$remote_host" ] || continue
-    # Startup convergence never wakes suspended compute. The route keeps its
-    # pending nudge marker, and the next deliberate wake converges it.
+    # Startup convergence never wakes a recognized no-host lifecycle state.
+    # The route keeps its pending nudge marker, and the next deliberate wake
+    # converges it.
     if fm_runpod_is_dormant "$DATA" "$id"; then
       [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] \
         || echo "BOOTSTRAP_INFO: secondmate $id is suspended; convergence deferred to its next wake"
@@ -624,11 +626,10 @@ secondmate_liveness_sweep() {
     harness=$(fm_meta_get "$meta" harness)
     remote_host=$(fm_meta_get "$meta" remote_host)
     if [ -n "$remote_host" ]; then
-      # A scale-to-zero compute route with no pod right now is not a broken
-      # endpoint: it is the deliberate suspended state its own provider owns
-      # (bin/fm-runpod-lib.sh). Probing or relaunching it would create compute
-      # nobody asked for, so it is skipped silently rather than reported as a
-      # liveness gap. Every non-suspended route keeps the existing path below.
+      # A scale-to-zero route in a recognized no-host lifecycle state is not a
+      # broken endpoint (bin/fm-runpod-lib.sh). Probing or relaunching it would
+      # create compute nobody asked for, so it is skipped silently rather than
+      # reported as a liveness gap. Every other route keeps the existing path.
       if fm_runpod_is_dormant "$DATA" "$id"; then
         [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] \
           || echo "BOOTSTRAP_INFO: secondmate $id is suspended on its compute provider; no probe attempted"

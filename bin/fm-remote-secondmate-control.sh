@@ -173,8 +173,9 @@ cmd_launch() {
   case "$fallback_harness" in -|claude|codex|opencode|pi|pi-signed|grok|kimi) ;; *) die "unverified remote secondmate fallback harness: $fallback_harness" ;; esac
   case "$fallback_effort" in -|low|medium|high|xhigh|max) ;; *) die "invalid remote secondmate fallback effort: $fallback_effort" ;; esac
   # Herdr is required on this host, not merely preferred: its server belongs to
-  # the GUI login session, so the endpoint survives every SSH disconnection that
-  # a remote route depends on. bin/fm-remote-doctor.sh is the readiness owner.
+  # the Aqua login session on macOS or runs headlessly in the account runtime on
+  # Linux, so the endpoint survives every SSH disconnection that a remote route
+  # depends on. bin/fm-remote-doctor.sh is the readiness owner.
   case "$selected_backend" in herdr) ;; *) die "a remote secondmate runs only on the herdr backend, not '$selected_backend'" ;; esac
   mkdir -p "$CONTROL_STATE" "$CONTROL_DATA"
   meta=$(meta_path "$id")

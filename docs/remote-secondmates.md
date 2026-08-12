@@ -7,9 +7,10 @@ Firstmate does not support placing an individual worker remotely or failing a re
 The remote second-mate agent itself always runs on the [Herdr backend](herdr-backend.md) in the shared `fm-remote` session, and every path that provisions or launches one refuses a host that is not ready for it.
 `fm-remote` is reserved for remote fleet work and must not be used for personal work.
 The user's interactive Herdr session remains `default` and is not a remote-secondmate prerequisite.
-Herdr's remote-session server belongs to the host's own GUI login session rather than to the SSH connection, so the agent's endpoint survives every disconnection the primary's supervision depends on.
+On macOS, Herdr's remote-session server belongs to the host's own GUI login session rather than to the SSH connection; on Linux, the doctor starts the server headlessly in the account runtime.
+In both cases, the agent's endpoint survives every disconnection the primary's supervision depends on.
 Local second mates are unaffected and keep their ordinary backend and session selection, as do the workers a remote second mate supervises inside its own home.
-A remote host may optionally be an ephemeral rented pod rather than a permanent machine; [`runpod-secondmates.md`](runpod-secondmates.md) owns that compute lifecycle, and everything on this page applies to such a route unchanged.
+A remote host may optionally be an ephemeral rented pod rather than a permanent machine; [`runpod-secondmates.md`](runpod-secondmates.md) owns its host-specific bootstrap and compute lifecycle, while this page's routing and safety contracts apply unchanged.
 
 ## Prerequisites
 
@@ -32,7 +33,7 @@ The readiness-owning doctor runs over this plain SSH bootstrap so read-only mode
 The entrypoint authorizes that bootstrap with normal git tracking when git resolves and with its pinned doctor digest when doctor must report that git itself is missing.
 After setup, every other command verifies Firstmate's account-owned remote job worker, stages the encoded argv and stdin bytes, waits for its result, and relays stdout, stderr, and the exit status separately.
 On macOS the worker is `dev.firstmate.remote-job`, an Aqua-scoped LaunchAgent at `~/Library/LaunchAgents/dev.firstmate.remote-job.plist` with logs under `~/Library/Logs/`.
-After that bootstrap every non-doctor `fm-on.sh` target runs through that worker in the remote account's GUI session, never in the SSH process or a Herdr pane.
+After that bootstrap every non-doctor `fm-on.sh` target runs through that worker in the remote account's Aqua session on macOS or directly in the account runtime on Linux, never in the SSH process or a Herdr pane.
 The worker runs one staged job at a time and preempts a running reply long-poll as soon as any command other than another reply long-poll is queued, so interactive commands and startup checks are never serialized behind a poll window.
 `bin/fm-remote-job-lib.sh` owns that preemption contract, and a preempted poll is indistinguishable from one whose wait window closed with no data, so the re-armed poll loses nothing.
 Linux uses the same queue and worker protocol without the Aqua-session requirement.

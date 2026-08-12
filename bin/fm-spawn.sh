@@ -506,9 +506,10 @@ spawn_remote_secondmate() {
       ;;
   esac
   # A remote second mate always runs on Herdr: its server belongs to the host's
-  # own GUI login session, so the endpoint outlives every SSH connection that
-  # supervises it. bin/fm-remote-doctor.sh gates that host on the same
-  # requirement, and the remote home's config/backend never overrides it.
+  # Aqua login session on macOS or runs headlessly in the account runtime on
+  # Linux, so the endpoint outlives every supervising SSH connection.
+  # bin/fm-remote-doctor.sh gates that host on the platform-specific requirement,
+  # and the remote home's config/backend never overrides it.
   case "${BACKEND_ARG:--}" in
     -|herdr) backend=herdr ;;
     *)
@@ -552,7 +553,7 @@ spawn_remote_secondmate() {
   fi
   # Wake-before-deliver: a scale-to-zero compute route has no host until its
   # provider brings one back, so the pod is restored BEFORE the readiness gate
-  # rather than letting the gate report a suspended route as unreachable. The
+  # rather than letting the gate report a dormant route as unreachable. The
   # wake is idempotent and takes its own per-secondmate lifecycle lock, so a
   # concurrent launch and liveness relaunch still produce exactly one pod. This
   # is lifecycle work, before delivery, so retrying it is safe; everything after
