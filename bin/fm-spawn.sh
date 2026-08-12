@@ -31,10 +31,11 @@
 #   Local OMP secondmate relaunches recover the recorded target when the caller does
 #   not repeat the flag, so exact-session recovery keeps the same launch profile.
 #   --allow-project-omp-extensions bypasses omp's fail-closed check for tracked
-#   project `.omp/extensions` code. Use it only after explicit captain approval:
+#   project `.omp/extensions` code and `.omp/settings.json#extensions` roots.
+#   Use it only after explicit captain approval:
 #   omp auto-executes those files before the model reasons about the task, and
 #   firstmate launches omp with --auto-approve. Firstmate's exact tracked primary
-#   extension is allowlisted for firstmate home launches.
+#   extension is allowlisted only for validated secondmate-home launches.
 #   This flag has no effect on other harnesses. Successful OMP spawns record
 #   allow_project_omp_extensions=1 in task metadata for auditability.
 #   --backend <name> is the explicit runtime session-provider backend for this
@@ -807,20 +808,20 @@ spawn_abort_cleanup() {
     lease)
       PREWALK_ABORT_PHASE=none
       if ! (cd "$PROJ_ABS" && treehouse return "$WT" >/dev/null 2>&1); then
-        echo "warning: OMP Prewalk preflight could not return its leased worktree $WT" >&2
+        echo "warning: OMP preflight could not return its leased worktree $WT" >&2
       fi
       ;;
     endpoint)
       PREWALK_ABORT_PHASE=none
       if ! spawn_omp_abort_endpoint_stopped; then
-        echo "warning: OMP Prewalk spawn cleanup could not confirm its owned endpoint stopped; preserving its worktree and task artifacts" >&2
+        echo "warning: OMP spawn cleanup could not confirm its owned endpoint stopped; preserving its worktree and task artifacts" >&2
       else
-        spawn_omp_abort_clean_unchanged_worktree "OMP Prewalk spawn cleanup"
+        spawn_omp_abort_clean_unchanged_worktree "OMP spawn cleanup"
       fi
       ;;
     ambiguous)
       PREWALK_ABORT_PHASE=none
-      echo "warning: OMP Prewalk spawn cleanup is preserving its leased worktree because backend endpoint creation was ambiguous" >&2
+      echo "warning: OMP spawn cleanup is preserving its leased worktree because backend endpoint creation was ambiguous" >&2
       ;;
   esac
   if [ "$OMP_ABORT_CLEANUP" = 1 ]; then
@@ -1541,19 +1542,71 @@ resolve_project_dir_arg() {
   esac
 }
 omp_project_extension_preflight() {
-  local project=$1 tracked path relative offenders manifest_json manifest_state trusted
+  local project=$1 record metadata stage path relative offenders manifest_state trusted
+  local settings_path settings_state scan_source tracked_count index_status head_status seen duplicate
+  local -a seen_paths
   [ "$HARNESS" = omp ] || return 0
-  if ! tracked=$(git -C "$project" ls-tree -r --name-only HEAD -- .omp/extensions 2>/dev/null); then
-    echo "error: could not inspect git-tracked OMP extensions in project '$project'; refusing the OMP launch" >&2
-    return 1
-  fi
-  [ -n "$tracked" ] || return 0
   offenders=
-  while IFS= read -r path; do
-    [ -n "$path" ] || continue
+  settings_path=
+  scan_source=index
+  tracked_count=0
+  index_status=
+  head_status=
+  while IFS= read -r -d '' record; do
+    case "$record" in
+      __FM_OMP_INDEX_STATUS__=*)
+        index_status=${record#*=}
+        scan_source=head
+        continue
+        ;;
+      __FM_OMP_HEAD_STATUS__=*)
+        head_status=${record#*=}
+        continue
+        ;;
+    esac
+    [ -n "$record" ] || continue
+    metadata=${record%%$'\t'*}
+    path=${record#*$'\t'}
+    if [ "$scan_source" = index ]; then
+      stage=${metadata##* }
+    else
+      stage=0
+    fi
+    if [ "$stage" != 0 ]; then
+      echo "error: git-tracked OMP extension path '$path' is unmerged; refusing the OMP launch" >&2
+      return 1
+    fi
+    case "$path" in
+      .omp|.omp/extensions|.omp/settings.json|.omp/extensions/*) ;;
+      *) continue ;;
+    esac
+    duplicate=0
+    for seen in "${seen_paths[@]}"; do
+      if [ "$path" = "$seen" ]; then
+        duplicate=1
+        break
+      fi
+    done
+    [ "$duplicate" -eq 0 ] || continue
+    seen_paths+=("$path")
+    tracked_count=$((tracked_count + 1))
+    if { [ "$path" = .omp ] || [ "$path" = .omp/extensions ]; } \
+      && { [ -L "$project/$path" ] || [ -d "$project/$path" ]; }; then
+      offenders="${offenders}${offenders:+$'\n'}$path"
+      continue
+    fi
+    if [ "$path" = .omp/settings.json ]; then
+      settings_path=$path
+      continue
+    fi
     relative=${path#".omp/extensions/"}
+    if [[ "$relative" != */* ]] && [ -d "$project/$path" ]; then
+      offenders="${offenders}${offenders:+$'\n'}$path"
+      continue
+    fi
     case "$relative" in
       *.ts|*.js)
+        [ -f "$project/$path" ] || continue
         case "$relative" in
           */*)
             case "$relative" in
@@ -1568,26 +1621,23 @@ omp_project_extension_preflight() {
             ;;
         esac
         ;;
-      package.json|*/package.json)
+      */package.json)
         case "$relative" in
           */*/*) continue ;;
         esac
+        [ -f "$project/$path" ] || continue
         command -v jq >/dev/null 2>&1 || {
           echo "error: jq is required to inspect tracked OMP extension manifests in project '$project'; refusing the OMP launch" >&2
           return 1
         }
-        manifest_json=$(git -C "$project" show "HEAD:$path" 2>/dev/null) || {
-          echo "error: could not read tracked OMP extension manifest '$path'; refusing the OMP launch" >&2
-          return 1
-        }
-        manifest_state=$(printf '%s\n' "$manifest_json" | jq -er '
+        manifest_state=$(jq -er '
           if ((.omp // .pi).extensions? // null) == null then "none"
           elif ((.omp // .pi).extensions | type) != "array" then "invalid"
           elif ((.omp // .pi).extensions | length) > 0 then "declared"
           else "none"
           end
-        ' 2>/dev/null) || {
-          echo "error: tracked OMP extension manifest '$path' is not valid JSON; refusing the OMP launch" >&2
+        ' "$project/$path" 2>/dev/null) || {
+          echo "error: could not read tracked OMP extension manifest '$path'; refusing the OMP launch" >&2
           return 1
         }
         case "$manifest_state" in
@@ -1601,15 +1651,56 @@ omp_project_extension_preflight() {
         esac
         ;;
     esac
-  done <<< "$tracked"
+  done < <(
+    git -C "$project" ls-files --stage -z -- .omp 2>/dev/null
+    printf '__FM_OMP_INDEX_STATUS__=%s\0' "$?"
+    git -C "$project" ls-tree -rz HEAD -- .omp 2>/dev/null
+    printf '__FM_OMP_HEAD_STATUS__=%s\0' "$?"
+  )
+  if [ "$index_status" != 0 ] || [ "$head_status" != 0 ]; then
+    echo "error: could not inspect git-tracked OMP extensions in project '$project'; refusing the OMP launch" >&2
+    return 1
+  fi
+  if { [ -L "$project/.omp" ] || [ -L "$project/.omp/extensions" ]; } \
+    && [ "$tracked_count" -gt 0 ]; then
+    echo "error: a tracked OMP discovery root resolves through a worktree symlink; refusing the OMP launch" >&2
+    return 1
+  fi
+
+  if [ -n "$settings_path" ] && [ -f "$project/$settings_path" ]; then
+    command -v jq >/dev/null 2>&1 || {
+      echo "error: jq is required to inspect tracked OMP project settings in '$project'; refusing the OMP launch" >&2
+      return 1
+    }
+    settings_state=$(jq -er '
+      if .extensions == null then "none"
+      elif (.extensions | type) != "array" then "invalid"
+      elif any(.extensions[]; type != "string") then "invalid"
+      elif any(.extensions[]; type == "string") then "declared"
+      else "none"
+      end
+    ' "$project/$settings_path" 2>/dev/null) || {
+      echo "error: could not read tracked OMP project settings '$settings_path'; refusing the OMP launch" >&2
+      return 1
+    }
+    if [ "$settings_state" = invalid ]; then
+      echo "error: tracked OMP project settings '$settings_path' has an invalid extensions field; refusing the OMP launch" >&2
+      return 1
+    fi
+    if [ "$settings_state" = declared ]; then
+      offenders="${offenders}${offenders:+$'\n'}$settings_path#extensions"
+    fi
+  fi
 
   trusted="$FM_ROOT/.omp/extensions/fm-primary-omp.ts"
   if [ -n "$offenders" ]; then
     filtered=
     while IFS= read -r path; do
-      if [ "$path" = ".omp/extensions/fm-primary-omp.ts" ] \
+      if [ "$KIND" = secondmate ] \
+        && [ "$path" = ".omp/extensions/fm-primary-omp.ts" ] \
         && [ -f "$trusted" ] && [ ! -L "$trusted" ] \
-        && git -C "$project" show "HEAD:$path" 2>/dev/null | cmp -s - "$trusted"; then
+        && [ -f "$project/$path" ] && [ ! -L "$project/$path" ] \
+        && cmp -s "$project/$path" "$trusted"; then
         continue
       fi
       filtered="${filtered}${filtered:+$'\n'}$path"
@@ -1622,7 +1713,7 @@ omp_project_extension_preflight() {
     printf '%s\n' "$offenders" | sed 's/^/  /' >&2
     return 0
   fi
-  echo "error: refusing omp launch because the project tracks auto-executed .omp/extensions code:" >&2
+  echo "error: refusing omp launch because the project tracks auto-executed OMP extension code:" >&2
   printf '%s\n' "$offenders" | sed 's/^/  /' >&2
   echo "omp runs tracked extensions before the model reasons about the task and firstmate passes --auto-approve. Select another verified harness, or pass --allow-project-omp-extensions only after explicit captain approval." >&2
   return 1
@@ -2135,9 +2226,9 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 
 W="fm-$ID"
 SPAWN_START_DIR=$PROJ_ABS
-if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ] && [ -n "$PREWALK_INTO" ]; then
+if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
   WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$W") || {
-    echo "error: OMP Prewalk could not lease an authoritative pooled worktree before endpoint creation" >&2
+    echo "error: OMP could not lease an authoritative pooled worktree before endpoint creation" >&2
     exit 1
   }
   PREWALK_WORKTREE_READY=1

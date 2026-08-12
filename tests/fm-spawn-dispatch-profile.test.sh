@@ -275,7 +275,7 @@ make_seeded_secondmate_home() {
   printf 'charter for %s\n' "$id" > "$home/data/charter.md"
 }
 commit_project_omp_extension() {
-  local proj=$1 wt=$2 source=${3:-} branch
+  local proj=$1 wt=$2 source=${3:-}
   mkdir -p "$proj/.omp/extensions"
   if [ -n "$source" ]; then
     cp "$source" "$proj/.omp/extensions/fm-primary-omp.ts"
@@ -283,8 +283,12 @@ commit_project_omp_extension() {
     printf '%s\n' 'throw new Error("project extension executed");' > "$proj/.omp/extensions/project.ts"
   fi
   git -C "$proj" add .omp/extensions
+  sync_project_commit "$proj" "$wt" 'add omp extension'
+}
+sync_project_commit() {
+  local proj=$1 wt=$2 message=$3 branch
   git -C "$proj" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
-    commit -qm 'add omp extension'
+    commit -qm "$message"
   branch=$(git -C "$proj" branch --show-current)
   git -C "$proj" push -q origin "$branch"
   git -C "$wt" fetch -q origin
@@ -1515,6 +1519,110 @@ test_non_omp_ignores_tracked_project_extensions() {
   pass "non-OMP harnesses ignore tracked OMP project extensions"
 }
 
+test_omp_refuses_tracked_settings_extension_roots() {
+  local rec id out status
+  id=$(profile_id profile-omp-settings-ext-z25)
+  rec=$(make_spawn_case profile-omp-settings-ext omp "$id")
+  read_case_record "$rec"
+  mkdir -p "$PROJ_DIR/.omp"
+  printf '%s\n' 'export default function () {}' > "$PROJ_DIR/project-extension.ts"
+  printf '%s\n' '{"extensions":["project-extension.ts"]}' > "$PROJ_DIR/.omp/settings.json"
+  git -C "$PROJ_DIR" add .omp/settings.json project-extension.ts
+  sync_project_commit "$PROJ_DIR" "$WT_DIR" 'add configured omp extension'
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "OMP spawn with a tracked settings extension should refuse"
+  assert_contains "$out" ".omp/settings.json#extensions" \
+    "OMP refusal did not name the tracked settings extension selector"
+  assert_no_grep 'new-window|new-session' "$CASE_DIR/endpoint.log" \
+    "OMP settings-extension refusal created an endpoint"
+  pass "OMP refuses tracked settings extension roots"
+}
+
+test_omp_refuses_tracked_extension_directory_symlinks() {
+  local rec id out status
+  id=$(profile_id profile-omp-symlink-ext-z26)
+  rec=$(make_spawn_case profile-omp-symlink-ext omp "$id")
+  read_case_record "$rec"
+  mkdir -p "$PROJ_DIR/.omp/extensions" "$PROJ_DIR/.omp/linked-extension"
+  printf '%s\n' 'export default function () {}' > "$PROJ_DIR/.omp/linked-extension/index.ts"
+  ln -s ../linked-extension "$PROJ_DIR/.omp/extensions/linked"
+  git -C "$PROJ_DIR" add .omp
+  sync_project_commit "$PROJ_DIR" "$WT_DIR" 'add linked omp extension'
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "OMP spawn with a tracked extension-directory symlink should refuse"
+  assert_contains "$out" ".omp/extensions/linked" \
+    "OMP refusal did not name the tracked extension-directory symlink"
+  assert_no_grep 'new-window|new-session' "$CASE_DIR/endpoint.log" \
+    "OMP linked-extension refusal created an endpoint"
+  pass "OMP refuses tracked extension-directory symlinks"
+}
+
+test_omp_ignores_unsupported_root_extension_manifest() {
+  local rec id out status
+  id=$(profile_id profile-omp-root-manifest-z27)
+  rec=$(make_spawn_case profile-omp-root-manifest omp "$id")
+  read_case_record "$rec"
+  mkdir -p "$PROJ_DIR/.omp/extensions"
+  printf '%s\n' 'export default function () {}' > "$PROJ_DIR/.omp/project.ts"
+  printf '%s\n' '{"omp":{"extensions":["../project.ts"]}}' > "$PROJ_DIR/.omp/extensions/package.json"
+  git -C "$PROJ_DIR" add .omp
+  sync_project_commit "$PROJ_DIR" "$WT_DIR" 'add unsupported root omp manifest'
+
+  out=$(FM_TEST_OMP_DYNAMIC_ACK=1 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "OMP root extension manifest should not be treated as executable"
+  assert_contains "$out" "spawned $id harness=omp" \
+    "OMP launch with only an unsupported root manifest did not remain unchanged"
+  pass "OMP ignores unsupported root extension manifests"
+}
+
+test_omp_does_not_trust_copied_primary_adapter_in_projects() {
+  local rec id out status
+  id=$(profile_id profile-omp-copied-primary-z28)
+  rec=$(make_spawn_case profile-omp-copied-primary omp "$id")
+  read_case_record "$rec"
+  commit_project_omp_extension "$PROJ_DIR" "$WT_DIR" "$ROOT/.omp/extensions/fm-primary-omp.ts"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "ordinary OMP projects must not inherit the secondmate adapter exemption"
+  assert_contains "$out" ".omp/extensions/fm-primary-omp.ts" \
+    "OMP refusal did not name the copied primary adapter"
+  pass "OMP restricts the primary adapter exemption to secondmate homes"
+}
+
+test_omp_secondmate_inspects_staged_live_extensions() {
+  local rec id sm out status
+  id=$(profile_id profile-omp-secondmate-staged-z29)
+  rec=$(make_spawn_case profile-omp-secondmate-staged omp "$id")
+  read_case_record "$rec"
+  printf '%s\n' omp > "$HOME_DIR/config/secondmate-harness"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  mkdir -p "$sm/.omp/extensions" "$sm/state" "$sm/config" "$sm/projects"
+  cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$sm/.omp/extensions/fm-primary-omp.ts"
+  git -C "$sm" init -q
+  git -C "$sm" add .
+  git -C "$sm" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'seed secondmate home'
+  printf '%s\n' 'export default function () {}' > "$sm/.omp/extensions/staged.ts"
+  git -C "$sm" add .omp/extensions/staged.ts
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 1 "$status" "OMP secondmate should inspect staged live extension content"
+  assert_contains "$out" ".omp/extensions/staged.ts" \
+    "OMP secondmate refusal inspected committed content instead of the live index and worktree"
+  assert_no_grep 'new-window|new-session' "$CASE_DIR/endpoint.log" \
+    "OMP staged secondmate-extension refusal created an endpoint"
+  pass "OMP secondmates inspect staged live extensions"
+}
+
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   local rec id sm out status launch
   id=$(profile_id profile-pi-signed-secondmate-z8d)
@@ -1696,6 +1804,11 @@ test_omp_refuses_tracked_project_extensions_without_opt_in
 test_omp_allows_tracked_project_extensions_with_audited_opt_in
 test_omp_project_without_tracked_extensions_is_unchanged
 test_non_omp_ignores_tracked_project_extensions
+test_omp_refuses_tracked_settings_extension_roots
+test_omp_refuses_tracked_extension_directory_symlinks
+test_omp_ignores_unsupported_root_extension_manifest
+test_omp_does_not_trust_copied_primary_adapter_in_projects
+test_omp_secondmate_inspects_staged_live_extensions
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags
 test_batch_forwards_omp_prewalk_target

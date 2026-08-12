@@ -167,12 +167,15 @@ This evidence covers launch parsing and catalog validation only; it does not cla
 
 The project-extension launch surface was verified on 2026-08-12 against OMP 17.2.11.
 The CLI identifies `--extension` as an explicit extension-file load and separately enables extension discovery unless `--no-extensions` is passed.
-The installed source resolves project extension directories from the launch cwd and loads the supported top-level files, one-level index entries, and declared extension manifests before the session starts.
+The installed source resolves project extension directories and tracked project settings roots from the launch cwd, follows top-level extension-directory symlinks, and loads the supported top-level files, one-level index entries, and declared extension manifests before the session starts.
 The source also resolves profile-scoped extensions from the OMP home, which is a separate surface from the project worktree.
 
 ```sh
 omp --version
 omp --help
+OMP_PACKAGE=$(cd "$(dirname "$(readlink -f "$(command -v omp)")")/.." && pwd -P)
+rg -n 'Direct files:|Subdirectory with index:|Subdirectory with package.json:|symlinked extension' "$OMP_PACKAGE/src/discovery/helpers.ts"
+rg -n 'Project `<cwd>/.omp/settings.json#extensions`|readSettingsExtensions' "$OMP_PACKAGE/src/discovery/omp-extension-roots.ts"
 tests/fm-spawn-dispatch-profile.test.sh
 tests/fm-omp-secondmate.test.sh
 ```
@@ -183,9 +186,20 @@ Observed bounded output:
 omp/17.2.11
 --extension=<value>             Load an extension file (can be used multiple times)
 --no-extensions                 Disable extension discovery (explicit -e paths still work)
+625: * 1. Direct files: `extensions/*.ts` or `*.js` → load
+626: * 2. Subdirectory with index: `extensions/<ext>/index.ts` or `index.js` → load
+627: * 3. Subdirectory with package.json: `extensions/<ext>/package.json` with "omp"/"pi" field → load declared paths
+640: // Detect top-level symlinked directories and synthesize the equivalent subdir matches
+176: * 2. Project `<cwd>/.omp/settings.json#extensions`
+187:export async function listOmpExtensionRoots(ctx: LoadContext): Promise<OmpExtensionRoot[]> {
 ok - OMP refuses tracked project extensions without explicit opt-in
 ok - OMP allows tracked project extensions only with an auditable opt-in
 ok - OMP projects without tracked extensions launch unchanged
+ok - OMP refuses tracked settings extension roots
+ok - OMP refuses tracked extension-directory symlinks
+ok - OMP ignores unsupported root extension manifests
+ok - OMP restricts the primary adapter exemption to secondmate homes
+ok - OMP secondmates inspect staged live extensions
 ok - OMP secondmate launch and recovery use the isolated adapter and an exact home-owned session pointer
 ```
 
