@@ -1,0 +1,318 @@
+#!/usr/bin/env bash
+# RunPod compute lifecycle for a whole-home remote second mate, over the
+# deterministic mocked RunPod boundary. No account, key, or paid resource.
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/runpod-fixture.sh
+. "$(dirname "${BASH_SOURCE[0]}")/runpod-fixture.sh"
+
+command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
+
+TMP_ROOT=$(fm_test_tmproot fm-runpod-lifecycle)
+TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
+FAKEBIN=$(fm_fakebin "$TMP_ROOT/fake")
+install_fake_runpod "$FAKEBIN"
+
+PARENT="$TMP_ROOT/parent"
+mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects"
+printf 'RUNPOD_API_KEY=rp_fixture_key\n' > "$PARENT/config/runpod.env"
+chmod 600 "$PARENT/config/runpod.env"
+
+API_STATE="$TMP_ROOT/runpod.json"
+API_LOG="$TMP_ROOT/api.log"
+REMOTE_LOG="$TMP_ROOT/remote.log"
+runpod_fixture_init "$API_STATE"
+: > "$API_LOG"
+: > "$REMOTE_LOG"
+
+runpod_seed_remote_route "$PARENT" ios fm-sm-ios-runpod /srv/firstmate /srv/sm-ios
+runpod_seed_remote_route "$PARENT" web fm-sm-web-runpod /srv/firstmate /srv/sm-web
+
+rp() {  # run the provider with the fixture wired in
+  PATH="$FAKEBIN:$PATH" \
+  FM_HOME="$PARENT" \
+  FM_SSH_BIN="$FAKEBIN/ssh" \
+  FM_PROCEVENT_CLAIM_ROOT="$TMP_ROOT/claims" \
+  FM_FAKE_RUNPOD_STATE="$API_STATE" \
+  FM_FAKE_RUNPOD_LOG="$API_LOG" \
+  FM_FAKE_REMOTE_LOG="$REMOTE_LOG" \
+  FM_RUNPOD_POLL_INTERVAL=0 \
+  FM_RUNPOD_WAKE_TIMEOUT=10 \
+  "$ROOT/bin/fm-runpod.sh" "$@"
+}
+
+record_field() {  # <id> <key>
+  sed -n "s/^$2=//p" "$PARENT/data/runpod/$1.meta"
+}
+
+fragment() {  # <alias>
+  printf '%s' "$PARENT/config/runpod/ssh.d/$1.conf"
+}
+
+# --- credentials fail closed ------------------------------------------------
+
+mv "$PARENT/config/runpod.env" "$TMP_ROOT/api-key.hidden"
+out=$(rp provision ios --datacenter EU-RO-1 2>&1) && fail "provision succeeded with no API key"
+assert_contains "$out" "config/runpod.env" "missing credentials must name the exact file to create"
+assert_contains "$out" "RUNPOD_API_KEY=" "missing credentials must name the exact key to set"
+assert_not_contains "$out" rp_fixture_key "a credential error must never echo a key"
+[ ! -s "$API_LOG" ] || fail "a missing key must refuse before any request is made: $(cat "$API_LOG")"
+printf '# runpod credentials\nOTHER_KEY=nope\n' > "$PARENT/config/runpod.env"
+out=$(rp provision ios --datacenter EU-RO-1 2>&1) && fail "provision succeeded with no RUNPOD_API_KEY assignment"
+assert_contains "$out" "RUNPOD_API_KEY" "a file without the key must be refused the same way"
+[ ! -s "$API_LOG" ] || fail "a keyless credential file must refuse before any request is made: $(cat "$API_LOG")"
+mv "$TMP_ROOT/api-key.hidden" "$PARENT/config/runpod.env"
+pass "a missing or keyless credential file refuses before any request, naming the exact path and key"
+
+# --- provision --------------------------------------------------------------
+
+out=$(rp provision ios --datacenter EU-RO-1 --size 100 2>&1) || fail "provision failed: $out"
+assert_contains "$out" "provisioned: secondmate ios" "provision must report what it created"
+[ "$(runpod_volume_count "$API_STATE")" = 1 ] || fail "provision must create exactly one network volume"
+[ "$(runpod_pod_count "$API_STATE")" = 0 ] || fail "provision must not create a pod"
+[ "$(record_field ios lifecycle)" = provisioned ] || fail "provision must record the provisioned lifecycle"
+[ "$(record_field ios volume_name)" = fm-sm-ios-runpod ] || fail "provision must use the fm-sm-<domain>-runpod volume name"
+[ "$(record_field ios ssh_alias)" = fm-sm-ios-runpod ] || fail "provision must bind the route's SSH alias"
+pass "provision creates one volume, records placement, and creates no pod"
+
+out=$(rp provision ios --datacenter EU-RO-1 --size 100 2>&1) || fail "second provision failed: $out"
+assert_contains "$out" "reused: volume" "a repeated provision must reuse the recorded volume"
+[ "$(runpod_volume_count "$API_STATE")" = 1 ] || fail "a repeated provision must not create a second volume"
+[ "$(runpod_api_calls "$API_LOG" "POST /networkvolumes")" = 1 ] || fail "a repeated provision must not POST a second volume"
+pass "provision is idempotent and never accumulates volumes"
+
+# --- wake -------------------------------------------------------------------
+
+out=$(rp wake ios 2>&1) || fail "wake failed: $out"
+assert_contains "$out" "ready: secondmate ios" "wake must report readiness"
+[ "$(runpod_pod_count "$API_STATE")" = 1 ] || fail "wake must create exactly one pod"
+[ "$(record_field ios lifecycle)" = ready ] || fail "wake must record the ready lifecycle"
+[ "$(record_field ios compute)" = cpu ] || fail "wake must default to CPU compute"
+FIRST_POD=$(record_field ios pod_id)
+FIRST_HOST=$(record_field ios endpoint_host)
+FIRST_PORT=$(record_field ios endpoint_port)
+[ -n "$FIRST_HOST" ] && [ -n "$FIRST_PORT" ] || fail "wake must record the discovered endpoint"
+assert_grep "HostName $FIRST_HOST" "$(fragment fm-sm-ios-runpod)" "the fragment must carry the pod HostName"
+assert_grep "Port $FIRST_PORT" "$(fragment fm-sm-ios-runpod)" "the fragment must carry the pod Port"
+assert_grep "HostKeyAlias fm-sm-ios-runpod" "$(fragment fm-sm-ios-runpod)" "the fragment must pin a stable HostKeyAlias"
+assert_grep "StrictHostKeyChecking yes" "$(fragment fm-sm-ios-runpod)" "strict host-key checking must stay on"
+assert_no_grep "StrictHostKeyChecking no" "$(fragment fm-sm-ios-runpod)" "host-key checking must never be disabled"
+FIRST_KEY=$(grep '^fm-sm-ios-runpod ' "$PARENT/config/runpod/known_hosts")
+assert_contains "$FIRST_KEY" "fm-sm-ios-runpod ssh-ed25519" "the host key must be pinned under the alias, not the IP"
+pass "wake creates one pod, discovers its endpoint, and pins a verified host key"
+
+before=$(runpod_api_calls "$API_LOG" "POST /pods")
+out=$(rp wake ios 2>&1) || fail "second wake failed: $out"
+[ "$(runpod_api_calls "$API_LOG" "POST /pods")" = "$before" ] || fail "a repeated wake must not create a second pod"
+[ "$(record_field ios pod_id)" = "$FIRST_POD" ] || fail "a repeated wake must keep the same pod"
+pass "wake is idempotent for an already-running pod"
+
+# --- concurrent wake --------------------------------------------------------
+
+rp sleep ios >/dev/null 2>&1 || fail "could not suspend before the concurrency case"
+before=$(runpod_api_calls "$API_LOG" "POST /pods")
+rp wake ios >"$TMP_ROOT/wake.a" 2>&1 &
+wake_a=$!
+rp wake ios >"$TMP_ROOT/wake.b" 2>&1 &
+wake_b=$!
+wait "$wake_a" || fail "concurrent wake A failed: $(cat "$TMP_ROOT/wake.a")"
+wait "$wake_b" || fail "concurrent wake B failed: $(cat "$TMP_ROOT/wake.b")"
+created=$(( $(runpod_api_calls "$API_LOG" "POST /pods") - before ))
+[ "$created" = 1 ] || fail "two concurrent wakes created $created pods; the lifecycle lock must admit exactly one"
+[ "$(runpod_pod_count "$API_STATE")" = 1 ] || fail "two concurrent wakes must leave exactly one live pod"
+pass "two concurrent wakes create exactly one pod"
+
+# --- initialization polling -------------------------------------------------
+
+rp sleep ios >/dev/null 2>&1 || fail "could not suspend before the initialization case"
+out=$(FM_FAKE_RUNPOD_INIT_POLLS=3 rp wake ios 2>&1) || fail "wake through initialization failed: $out"
+[ "$(record_field ios lifecycle)" = ready ] || fail "wake must wait out pod initialization"
+[ -n "$(record_field ios endpoint_host)" ] || fail "wake must record the endpoint published after initialization"
+pass "wake waits for a pod that publishes its endpoint late"
+
+# --- endpoint refresh and stable SSH identity -------------------------------
+
+SECOND_POD=$(record_field ios pod_id)
+[ "$SECOND_POD" != "$FIRST_POD" ] || fail "the fixture must have replaced the pod"
+SECOND_HOST=$(record_field ios endpoint_host)
+[ "$SECOND_HOST" != "$FIRST_HOST" ] || fail "the fixture must have moved the endpoint"
+assert_grep "HostName $SECOND_HOST" "$(fragment fm-sm-ios-runpod)" "wake must refresh the fragment HostName"
+assert_no_grep "HostName $FIRST_HOST" "$(fragment fm-sm-ios-runpod)" "the stale HostName must be gone"
+[ "$(grep '^fm-sm-ios-runpod ' "$PARENT/config/runpod/known_hosts")" = "$FIRST_KEY" ] \
+  || fail "the pinned host key must survive pod replacement unchanged"
+pass "a replaced pod refreshes the alias endpoint and keeps the same verified host identity"
+
+# --- CPU/GPU exclusivity ----------------------------------------------------
+
+out=$(rp wake ios --gpu 2>&1) && fail "waking a live CPU second mate as GPU must be refused"
+assert_contains "$out" "already has a cpu pod" "the refusal must name the conflicting compute type"
+[ "$(runpod_pod_count "$API_STATE")" = 1 ] || fail "a refused GPU wake must not create a pod"
+pass "one second mate cannot hold a CPU and a GPU pod at the same time"
+
+# --- GPU selection ----------------------------------------------------------
+
+rp sleep ios >/dev/null 2>&1 || fail "could not suspend before the GPU cases"
+out=$(rp wake ios --gpu --min-vram 500 2>&1) && fail "an unsatisfiable VRAM floor must be refused"
+assert_contains "$out" "--gpu-type" "the refusal must name the exact way to place it anyway"
+[ "$(runpod_pod_count "$API_STATE")" = 0 ] || fail "an unsatisfiable VRAM floor must not rent anything"
+
+out=$(rp wake ios --gpu --min-vram 80 2>&1) || fail "GPU wake failed: $out"
+[ "$(record_field ios compute)" = gpu ] || fail "a GPU wake must record GPU compute"
+requested=$(jq -r '[.pods[] | select(.computeType == "GPU")][0].requestedGpuTypeIds | join(",")' "$API_STATE")
+assert_contains "$requested" "NVIDIA H100" "an 80GB floor must offer the 80GB class"
+assert_not_contains "$requested" "NVIDIA L4," "an 80GB floor must not offer a 24GB card"
+assert_not_contains "$requested" "Tesla T4" "an 80GB floor must not offer a 16GB card"
+pass "a VRAM floor narrows GPU candidates and fails closed rather than renting something smaller"
+
+rp sleep ios >/dev/null 2>&1 || fail "could not suspend before the explicit GPU case"
+out=$(rp wake ios --gpu --gpu-type 'NVIDIA L4' 2>&1) || fail "explicit GPU wake failed: $out"
+requested=$(jq -r '[.pods[] | select(.computeType == "GPU")][0].requestedGpuTypeIds | join(",")' "$API_STATE")
+[ "$requested" = "NVIDIA L4" ] || fail "an explicit --gpu-type must be the only candidate, got: $requested"
+pass "an explicit GPU type overrides the VRAM filter entirely"
+
+rp sleep ios >/dev/null 2>&1 || fail "could not suspend after the GPU cases"
+rp wake ios >/dev/null 2>&1 || fail "could not return to CPU after the GPU cases"
+
+# --- one volume backs at most one live pod ----------------------------------
+
+out=$(rp provision web --datacenter EU-RO-1 --size 50 2>&1) || fail "web provision failed: $out"
+IOS_VOLUME=$(record_field ios volume_id)
+sed -i.bak "s/^volume_id=.*/volume_id=$IOS_VOLUME/" "$PARENT/data/runpod/web.meta"
+rm -f "$PARENT/data/runpod/web.meta.bak"
+out=$(rp wake web 2>&1) && fail "activating a volume that already backs a live pod must be refused"
+assert_contains "$out" "RunPod refused" "the refusal must come from the provider, not a silent success"
+pass "the same network volume cannot back two live pods"
+
+# --- multiple distinct second mates -----------------------------------------
+
+sed -i.bak "s/^volume_id=.*/volume_id=/" "$PARENT/data/runpod/web.meta"
+rm -f "$PARENT/data/runpod/web.meta.bak"
+rm -f "$PARENT/data/runpod/web.meta"
+out=$(rp provision web --datacenter EU-RO-1 --size 50 2>&1) || fail "web reprovision failed: $out"
+out=$(rp wake web 2>&1) || fail "web wake failed: $out"
+[ "$(runpod_pod_count "$API_STATE")" = 2 ] || fail "two distinct second mates must hold two pods"
+[ "$(record_field ios pod_id)" != "$(record_field web pod_id)" ] || fail "two second mates must not share a pod"
+[ "$(record_field ios volume_id)" != "$(record_field web volume_id)" ] || fail "two second mates must not share a volume"
+[ "$(record_field ios ssh_alias)" != "$(record_field web ssh_alias)" ] || fail "two second mates must not share an SSH alias"
+pass "several RunPod second mates run concurrently with separate pods, volumes, and aliases"
+
+# --- sleep guards -----------------------------------------------------------
+
+out=$(FM_FAKE_REMOTE_CHILDREN=3 rp sleep ios 2>&1) && fail "sleep must refuse while the host supervises work"
+assert_contains "$out" "still supervises 3 worker(s)" "the refusal must name the outstanding remote work"
+[ "$(record_field ios lifecycle)" = ready ] || fail "a refused sleep must leave the second mate awake"
+[ "$(runpod_pod_count "$API_STATE")" = 2 ] || fail "a refused sleep must not terminate the pod"
+pass "a pending crewmate on the remote host blocks sleep"
+
+mkdir -p "$PARENT/state/pending-replies"
+printf 'task_id=ios\nphase=delivered\ncorr=00112233445566aa\n' > "$PARENT/state/pending-replies/00112233445566aa"
+out=$(rp sleep ios 2>&1) && fail "sleep must refuse while a routed reply is unresolved"
+assert_contains "$out" "unresolved routed reply" "the refusal must name the outstanding reply"
+printf 'task_id=ios\nphase=resolved\ncorr=00112233445566aa\n' > "$PARENT/state/pending-replies/00112233445566aa"
+pass "an unresolved routed reply blocks sleep"
+
+printf 'needs-decision [key=ios-storage]: pick the storage tier\n' >> "$PARENT/state/ios.status"
+out=$(rp sleep ios 2>&1) && fail "sleep must refuse while a decision is open"
+assert_contains "$out" "unresolved decisions" "the refusal must name the open decision"
+printf 'resolved [key=ios-storage]: standard tier\n' >> "$PARENT/state/ios.status"
+pass "an unresolved decision blocks sleep"
+
+mkdir -p "$PARENT/data/handoff"
+printf -- '- [ ] ios-1 - queued work\n' > "$PARENT/data/handoff/ios.outbox.md"
+out=$(rp sleep ios 2>&1) && fail "sleep must refuse while a backlog handoff is undelivered"
+assert_contains "$out" "undelivered backlog handoff" "the refusal must name the outbox"
+rm -f "$PARENT/data/handoff/ios.outbox.md"
+pass "an unfinished backlog outbox blocks sleep"
+
+out=$(FM_FAKE_CHILDREN_MODE=unreachable rp sleep ios 2>&1) && fail "sleep must refuse on unknown remote completion"
+assert_contains "$out" "unreachable" "an unknown remote state must be reported as unknown, not assumed idle"
+[ "$(record_field ios lifecycle)" = ready ] || fail "an unknown-completion sleep must leave the route untouched"
+[ "$(runpod_pod_count "$API_STATE")" = 2 ] || fail "an unknown-completion sleep must not terminate the pod"
+pass "unknown remote completion blocks sleep and preserves everything"
+
+# --- sleep ------------------------------------------------------------------
+
+IOS_VOLUME=$(record_field ios volume_id)
+out=$(rp sleep ios 2>&1) || fail "sleep failed: $out"
+assert_contains "$out" "suspended: secondmate ios" "sleep must report the suspension"
+[ "$(record_field ios lifecycle)" = suspended ] || fail "sleep must record the suspended lifecycle"
+[ -z "$(record_field ios pod_id)" ] || fail "sleep must clear the terminated pod"
+[ -z "$(record_field ios endpoint_host)" ] || fail "sleep must clear the stale endpoint"
+[ "$(record_field ios volume_id)" = "$IOS_VOLUME" ] || fail "sleep must retain the network volume"
+[ "$(jq -r --arg v "$IOS_VOLUME" '[.volumes[] | select(.id == $v)] | length' "$API_STATE")" = 1 ] \
+  || fail "sleep must not delete the network volume"
+assert_grep "- ios - " "$PARENT/data/secondmates.md" "sleep must preserve the secondmate route"
+assert_present "$PARENT/state/ios.meta" "sleep must preserve the secondmate task record"
+pass "sleep terminates the pod, retains the volume, and never retires the second mate"
+
+out=$(rp sleep ios 2>&1) || fail "a repeated sleep failed: $out"
+assert_contains "$out" "already-suspended" "a repeated sleep must be a clean no-op"
+pass "sleep is idempotent"
+
+# --- wake restores ----------------------------------------------------------
+
+out=$(rp wake ios 2>&1) || fail "wake after sleep failed: $out"
+[ "$(record_field ios lifecycle)" = ready ] || fail "wake must restore the second mate"
+[ -n "$(record_field ios pod_id)" ] || fail "wake must record the restored pod"
+[ "$(record_field ios volume_id)" = "$IOS_VOLUME" ] || fail "wake must reattach the retained volume"
+[ "$(grep '^fm-sm-ios-runpod ' "$PARENT/config/runpod/known_hosts")" = "$FIRST_KEY" ] \
+  || fail "the restored second mate must keep its pinned host identity"
+pass "wake restores a suspended second mate onto its retained volume"
+
+# --- status and cost --------------------------------------------------------
+
+out=$(rp status 2>&1) || fail "status failed: $out"
+assert_contains "$out" "ios lifecycle=ready" "status must report each managed second mate"
+assert_contains "$out" "web lifecycle=ready" "status must report every managed second mate"
+out=$(rp cost ios 2>&1) || fail "cost failed: $out"
+assert_contains "$out" "volume_usd_per_month=7.00" "cost must price 100 GB of standard storage at 0.07/GB/month"
+assert_contains "$out" "idle_usd_per_month=7.00" "cost must state the scale-to-zero idle cost"
+assert_contains "$out" "compute_usd_per_hour=" "cost must report the live pod's hourly rate"
+assert_contains "$out" "pod_uptime_hours=" "cost must report pod uptime"
+pass "status and cost report the placement, the idle storage cost, and the live compute rate"
+
+# --- destroy ----------------------------------------------------------------
+
+out=$(rp destroy ios 2>&1) && fail "destroy without --yes must be refused"
+assert_contains "$out" "captain's explicit word" "destroy must require explicit authority"
+out=$(rp destroy ios --yes 2>&1) && fail "destroy must refuse while the route is registered"
+assert_contains "$out" "fm-teardown.sh ios" "destroy must point at the guarded retirement path first"
+[ "$(jq -r --arg v "$IOS_VOLUME" '[.volumes[] | select(.id == $v)] | length' "$API_STATE")" = 1 ] \
+  || fail "a refused destroy must not delete the volume"
+
+rp sleep ios >/dev/null 2>&1 || fail "could not suspend before retirement"
+out=$(rp destroy ios --yes 2>&1) && fail "destroy must still refuse a registered route once suspended"
+assert_contains "$out" "fm-teardown.sh ios" "retirement, not suspension, is what releases a route for destroy"
+
+# Retirement is bin/fm-teardown.sh's job; this stands in for its registry effect.
+grep -v '^- ios ' "$PARENT/data/secondmates.md" > "$PARENT/data/secondmates.next"
+mv -f "$PARENT/data/secondmates.next" "$PARENT/data/secondmates.md"
+out=$(rp destroy ios --yes 2>&1) || fail "destroy failed: $out"
+[ "$(jq -r --arg v "$IOS_VOLUME" '[.volumes[] | select(.id == $v)] | length' "$API_STATE")" = 0 ] \
+  || fail "destroy must delete the network volume"
+assert_absent "$PARENT/data/runpod/ios.meta" "destroy must remove the local record"
+assert_absent "$(fragment fm-sm-ios-runpod)" "destroy must remove the generated SSH fragment"
+pass "destroy is a separate, explicitly authorized path that runs only after suspension and retirement"
+
+# A retired route has no remote home left to supervise anything, so suspending
+# it needs no host probe - but a live pod still blocks destroy.
+grep -v '^- web ' "$PARENT/data/secondmates.md" > "$PARENT/data/secondmates.next"
+mv -f "$PARENT/data/secondmates.next" "$PARENT/data/secondmates.md"
+WEB_VOLUME=$(record_field web volume_id)
+out=$(rp destroy web --yes 2>&1) && fail "destroy must refuse while a pod is still running"
+assert_contains "$out" "fm-runpod.sh sleep web" "destroy must require suspension first"
+[ "$(jq -r --arg v "$WEB_VOLUME" '[.volumes[] | select(.id == $v)] | length' "$API_STATE")" = 1 ] \
+  || fail "a destroy refused for a live pod must not delete the volume"
+out=$(rp sleep web 2>&1) || fail "suspending a retired route failed: $out"
+out=$(rp destroy web --yes 2>&1) || fail "destroy of a retired, suspended second mate failed: $out"
+[ "$(runpod_pod_count "$API_STATE")" = 0 ] || fail "no pod may survive the last destroy"
+[ "$(runpod_volume_count "$API_STATE")" = 0 ] || fail "no volume may survive the last destroy"
+pass "a live pod blocks destroy, and a retired second mate suspends without probing a host it no longer has"
+
+# --- the API boundary is the only RunPod dependency -------------------------
+
+[ "$(runpod_api_calls "$API_LOG" "POST /pods")" -gt 0 ] || fail "the fixture never observed a pod creation"
+assert_no_grep rp_fixture_key "$API_LOG" "the API key must never reach the request log"
+pass "every RunPod interaction went through the one mocked boundary"
