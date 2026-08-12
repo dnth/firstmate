@@ -428,11 +428,11 @@ known_hosts_has_alias() {  # <alias>
 # Pin the pod's host key under the stable alias, once. A volume that already
 # carries a persisted host key restores the SAME key on every later pod, so the
 # pinned entry keeps verifying and a mismatch is a real failure, not a rotation.
-known_hosts_pin() {  # <alias> <host> <port>
-  local alias=$1 host=$2 port=$3 scanned tmp
+known_hosts_pin() {  # <alias> <host> <port> <timeout>
+  local alias=$1 host=$2 port=$3 scan_timeout=$4 scanned tmp
   mkdir -p "$SSH_DIR" || die "cannot create the SSH state directory"
   chmod 700 "$SSH_DIR" 2>/dev/null || true
-  scanned=$("$KEYSCAN_BIN" -T 20 -p "$port" "$host" 2>/dev/null | grep -v '^#' | head -20) || true
+  scanned=$("$KEYSCAN_BIN" -T "$scan_timeout" -p "$port" "$host" 2>/dev/null | grep -v '^#' | head -20) || true
   [ -n "$scanned" ] || return 1
   known_hosts_lock_acquire
   known_hosts_has_alias "$alias" && { known_hosts_lock_release; return 0; }
@@ -743,7 +743,7 @@ cmd_wake() {
   record_require "$id"
   lifecycle_lock_acquire "$id"
 
-  local compute alias volume_id host port pod_id pod body status recorded_compute
+  local compute alias volume_id host port pod_id pod body status recorded_compute deadline remaining delay
   compute=cpu
   [ "$want_gpu" -eq 0 ] || compute=gpu
   alias=$(alias_for "$id")
@@ -797,9 +797,9 @@ cmd_wake() {
     record_set "$id" "lifecycle=waking" "compute=$compute"
   fi
 
+  deadline=$((SECONDS + WAKE_TIMEOUT))
   # Bounded wait for the endpoint. The pod reports no public IP or port mapping
   # while it is still initializing.
-  local waited=0
   host=
   port=
   while :; do
@@ -808,17 +808,23 @@ cmd_wake() {
     host=$(json_field "$pod" '.publicIp')
     port=$(json_field "$pod" '.portMappings."22"')
     [ -z "$host" ] || [ -z "$port" ] || break
-    [ "$waited" -lt "$WAKE_TIMEOUT" ] \
+    [ "$SECONDS" -lt "$deadline" ] \
       || die "pod $pod_id did not publish an SSH endpoint within ${WAKE_TIMEOUT}s; it is preserved for inspection"
-    sleep "$POLL_INTERVAL"
-    waited=$((waited + POLL_INTERVAL))
+    remaining=$((deadline - SECONDS))
+    delay=$POLL_INTERVAL
+    [ "$delay" -le "$remaining" ] || delay=$remaining
+    [ "$delay" -le 0 ] || sleep "$delay"
   done
 
-  while ! known_hosts_pin "$alias" "$host" "$port"; do
-    [ "$waited" -lt "$WAKE_TIMEOUT" ] \
+  while :; do
+    remaining=$((deadline - SECONDS))
+    [ "$remaining" -gt 0 ] \
       || die "could not read the pod's SSH host key at $host:$port within ${WAKE_TIMEOUT}s; it is preserved for inspection"
-    sleep "$POLL_INTERVAL"
-    waited=$((waited + POLL_INTERVAL))
+    known_hosts_pin "$alias" "$host" "$port" "$remaining" && break
+    remaining=$((deadline - SECONDS))
+    delay=$POLL_INTERVAL
+    [ "$delay" -le "$remaining" ] || delay=$remaining
+    [ "$delay" -le 0 ] || sleep "$delay"
   done
   ssh_fragment_write "$alias" "$host" "$port" \
     "$(record_get "$id" ssh_user)" "$(record_get "$id" ssh_identity)"
@@ -827,10 +833,12 @@ cmd_wake() {
     "pod_started_at=$(json_field "$pod" '.lastStartedAt')"
 
   while ! ssh_probe "$alias"; do
-    [ "$waited" -lt "$WAKE_TIMEOUT" ] \
+    [ "$SECONDS" -lt "$deadline" ] \
       || die "pod $pod_id published $host:$port but its SSH bootstrap did not complete within ${WAKE_TIMEOUT}s; it is preserved for inspection"
-    sleep "$POLL_INTERVAL"
-    waited=$((waited + POLL_INTERVAL))
+    remaining=$((deadline - SECONDS))
+    delay=$POLL_INTERVAL
+    [ "$delay" -le "$remaining" ] || delay=$remaining
+    [ "$delay" -le 0 ] || sleep "$delay"
   done
 
   record_set_lifecycle "$id" ready

@@ -181,17 +181,22 @@ SH
 # The scanned key is the ATTACHED VOLUME's key, so a replaced pod scans the same
 # bytes and the pinned HostKeyAlias entry keeps verifying.
 set -u
+scan_timeout=20
 port=
 host=
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    -T) shift ;;
+    -T) shift; scan_timeout=${1:-20} ;;
     -p) shift; port=${1:-} ;;
     *) host=$1 ;;
   esac
   shift || break
 done
 state=${FM_FAKE_RUNPOD_STATE:?}
+if [ "${FM_FAKE_KEYSCAN_BLOCK:-0}" = 1 ]; then
+  sleep "$scan_timeout"
+  exit 1
+fi
 if [ -n "${FM_FAKE_KEYSCAN_ATTEMPTS:-}" ]; then
   attempts=$(cat "$FM_FAKE_KEYSCAN_ATTEMPTS" 2>/dev/null || printf '0')
   attempts=$((attempts + 1))

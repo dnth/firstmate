@@ -124,9 +124,20 @@ pass "provision rejects an SSH alias owned by another second mate"
 
 # --- wake -------------------------------------------------------------------
 
+started=$(date +%s)
+out=$(FM_FAKE_KEYSCAN_BLOCK=1 FM_TEST_RUNPOD_POLL_INTERVAL=1 \
+  FM_TEST_RUNPOD_WAKE_TIMEOUT=2 rp wake ios 2>&1) \
+  && fail "wake must stop at its wall-clock deadline when keyscan blocks"
+elapsed=$(($(date +%s) - started))
+assert_contains "$out" "could not read the pod's SSH host key" \
+  "a blocked host-key scan must report the bounded wake failure"
+[ "$elapsed" -le 4 ] || fail "the 2s wake deadline took ${elapsed}s while host-key scanning"
+[ "$(record_field ios lifecycle)" != ready ] || fail "a keyscan timeout must never record the pod ready"
+pass "endpoint discovery and host-key scanning share one wall-clock deadline"
+
 KEYSCAN_ATTEMPTS="$TMP_ROOT/keyscan-attempts"
 out=$(FM_FAKE_BOOT_INCOMPLETE=1 FM_FAKE_KEYSCAN_ATTEMPTS="$KEYSCAN_ATTEMPTS" \
-  FM_FAKE_KEYSCAN_FAILS=1 FM_TEST_RUNPOD_POLL_INTERVAL=1 FM_TEST_RUNPOD_WAKE_TIMEOUT=2 \
+  FM_FAKE_KEYSCAN_FAILS=1 FM_TEST_RUNPOD_POLL_INTERVAL=1 FM_TEST_RUNPOD_WAKE_TIMEOUT=4 \
   rp wake ios 2>&1) && fail "wake must refuse while first-boot provisioning is incomplete"
 assert_contains "$out" "SSH bootstrap did not complete" "an incomplete bootstrap must fail at the wake readiness boundary"
 [ "$(cat "$KEYSCAN_ATTEMPTS")" -ge 2 ] || fail "wake must retry host-key scanning while sshd is still starting"

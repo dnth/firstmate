@@ -57,7 +57,7 @@ pass "--check is a pure dry run"
 new_world() {  # <name> -> world dir
   local name=$1 w fakebin
   w="$TMP_ROOT/$name"
-  mkdir -p "$w/volume" "$w/home" "$w/origin" "$w/templates"
+  mkdir -p "$w/volume" "$w/home" "$w/origin" "$w/templates" "$w/system-ssh"
   fakebin=$(fm_fakebin "$w")
   : > "$w/calls.log"
 
@@ -77,7 +77,8 @@ exit 0
 SH
   cat > "$w/templates/node" <<'SH'
 #!/usr/bin/env bash
-[ "${1:-}" != -v ] || { printf 'v22.11.0\n'; exit 0; }
+printf 'node %s %s\n' "$0" "$*" >> "$FM_FAKE_CALLS"
+[ "${1:-}" != -v ] || { printf 'v22.14.0\n'; exit 0; }
 exit 0
 SH
   chmod +x "$w/templates/npm" "$w/templates/node"
@@ -98,20 +99,53 @@ case " $* " in
           printf '#!/usr/bin/env bash\nexit 0\n' > "$FM_FAKE_EPHEMERAL_BIN/sshd"
           chmod +x "$FM_FAKE_EPHEMERAL_BIN/sshd"
           ;;
-        nodejs)
-          if [ "${FM_FAKE_KEEP_OLD_NODE:-0}" != 1 ]; then
-            cp "$FM_FAKE_NODE_TEMPLATE" "$FM_FAKE_EPHEMERAL_BIN/node"
-            cp "$FM_FAKE_NPM_TEMPLATE" "$FM_FAKE_EPHEMERAL_BIN/npm"
-          fi
-          ;;
       esac
     done
     ;;
 esac
 exit 0
 SH
-  cp "$w/templates/npm" "$fakebin/npm"
-  cp "$w/templates/node" "$fakebin/node"
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+printf 'curl %s\n' "$*" >> "$FM_FAKE_CALLS"
+out=
+while [ "$#" -gt 0 ]; do
+  case "$1" in -o) shift; out=${1:-} ;; esac
+  shift || break
+done
+[ -n "$out" ] || exit 1
+: > "$out"
+SH
+  cat > "$fakebin/sha256sum" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  *node-v22.14.0-linux-x64.tar.gz)
+    printf '9d942932535988091034dc94cc5f42b6dc8784d6366df3a36c4c9ccb3996f0c2  %s\n' "$1"
+    ;;
+  *node-v22.14.0-linux-arm64.tar.gz)
+    printf '8cf30ff7250f9463b53c18f89c6c606dfda70378215b2c905d0a9a8b08bd45e0  %s\n' "$1"
+    ;;
+  *) exec /usr/bin/sha256sum "$@" ;;
+esac
+SH
+  cat > "$fakebin/tar" <<'SH'
+#!/usr/bin/env bash
+archive=
+dest=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -xzf) shift; archive=${1:-} ;;
+    -C) shift; dest=${1:-} ;;
+  esac
+  shift || break
+done
+root=${archive##*/}
+root=${root%.tar.gz}
+mkdir -p "$dest/$root/bin"
+cp "$FM_FAKE_NODE_TEMPLATE" "$dest/$root/bin/node"
+cp "$FM_FAKE_NPM_TEMPLATE" "$dest/$root/bin/npm"
+chmod +x "$dest/$root/bin/node" "$dest/$root/bin/npm"
+SH
   cat > "$fakebin/git" <<'SH'
 #!/usr/bin/env bash
 printf 'git %s\n' "$*" >> "$FM_FAKE_CALLS"
@@ -130,7 +164,23 @@ if [ "${1:-}" = clone ]; then
 fi
 exit 0
 SH
-  for t in jq curl unzip sshd ssh-keygen pgrep; do
+  cat > "$fakebin/ssh-keygen" <<'SH'
+#!/usr/bin/env bash
+key=
+while [ "$#" -gt 0 ]; do
+  case "$1" in -f) shift; key=${1:-} ;; esac
+  shift || break
+done
+[ -n "$key" ] || exit 1
+printf 'private\n' > "$key"
+printf 'public\n' > "$key.pub"
+SH
+  cat > "$fakebin/sshd" <<'SH'
+#!/usr/bin/env bash
+printf 'sshd start\n' >> "$FM_FAKE_CALLS"
+exit 0
+SH
+  for t in jq unzip pgrep; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/$t"
   done
   chmod +x "$fakebin"/*
@@ -139,8 +189,8 @@ SH
 
 # The boot script is a PID 1 payload that never returns, so provisioning is
 # exercised through a bounded subshell that stops once the whole boot completes.
-provision_only() {  # <world>
-  local w=$1
+provision_only() {  # <world> [harness]
+  local w=$1 harness=${2:-}
   mkdir -p "$w/volume/persistent-runtime"
   : > "$w/volume/persistent-runtime/boot.log"
   (
@@ -152,6 +202,8 @@ provision_only() {  # <world>
     FM_FAKE_EPHEMERAL_BIN="$w/fakebin" \
     FM_FAKE_NPM_TEMPLATE="$w/templates/npm" \
     FM_FAKE_NODE_TEMPLATE="$w/templates/node" \
+    FM_SYSTEM_SSH_DIR="$w/system-ssh" \
+    FM_POD_HARNESS_NPM="$harness" \
     timeout 60 bash "$BOOT" >/dev/null 2>&1 &
     boot_pid=$!
     for _ in $(seq 1 300); do
@@ -166,8 +218,8 @@ provision_only() {  # <world>
 
 # A boot that changes nothing has no marker transition to wait for, so it is
 # given a fixed settle window instead.
-provision_idempotent() {  # <world>
-  local w=$1
+provision_idempotent() {  # <world> [harness]
+  local w=$1 harness=${2:-}
   (
     PATH="$w/fakebin:/usr/bin:/bin" \
     HOME="$w/home" \
@@ -177,6 +229,8 @@ provision_idempotent() {  # <world>
     FM_FAKE_EPHEMERAL_BIN="$w/fakebin" \
     FM_FAKE_NPM_TEMPLATE="$w/templates/npm" \
     FM_FAKE_NODE_TEMPLATE="$w/templates/node" \
+    FM_SYSTEM_SSH_DIR="$w/system-ssh" \
+    FM_POD_HARNESS_NPM="$harness" \
     timeout 30 bash "$BOOT" >/dev/null 2>&1 &
     boot_pid=$!
     sleep 3
@@ -195,9 +249,11 @@ assert_contains "$calls" "fm-install-treehouse.sh" "treehouse must come from the
 assert_contains "$calls" "npm install -g tasks-axi" "tasks-axi must be installed"
 assert_present "$w/volume/persistent-runtime/bin/herdr" "the pinned herdr binary must live on the volume"
 assert_present "$w/volume/persistent-runtime/npm/bin/tasks-axi" "the global npm prefix must live on the volume"
+assert_present "$w/volume/persistent-runtime/node/bin/node" "the pinned Node runtime must live on the volume"
 assert_contains "$calls" "$w/volume/persistent-runtime/bin/herdr" "the doctor must see pinned tools through the durable PATH"
 assert_contains "$calls" "$w/volume/persistent-runtime/npm/bin/tasks-axi" "the doctor must see npm tools through the durable PATH"
 assert_present "$w/home/.local/bin/herdr" "later SSH jobs must receive a per-pod link to durable tools"
+assert_present "$w/home/.local/bin/node" "later SSH jobs must receive a per-pod link to durable Node"
 assert_present "$w/home/.local/bin/tasks-axi" "later SSH jobs must receive a per-pod link to durable npm tools"
 assert_present "$w/volume/persistent-runtime/toolchain.provisioned" "a completed provisioning run must record its marker"
 pass "first boot clones the code root and installs the required toolchain through the pinned installers"
@@ -215,21 +271,25 @@ assert_not_contains "$second" "npm install -g tasks-axi" "a second boot must not
 pass "provisioning is idempotent across boots on the same volume"
 
 rm -rf "${w:?}/home"
-mkdir -p "$w/home"
+rm -rf "${w:?}/system-ssh"
+mkdir -p "$w/home" "$w/system-ssh"
 rm -f "$w/fakebin/git" "$w/fakebin/jq" "$w/fakebin/curl" "$w/fakebin/unzip" \
-  "$w/fakebin/sshd" "$w/fakebin/node" "$w/fakebin/npm"
+  "$w/fakebin/sshd"
 : > "$w/calls.log"
 provision_only "$w"
 replacement=$(cat "$w/calls.log")
 assert_contains "$replacement" "apt-get install" "a replacement pod must restore its ephemeral system prerequisites"
-assert_contains "$replacement" "apt-get install -y -qq nodejs" "a replacement pod must restore its ephemeral Node runtime"
+assert_not_contains "$replacement" "node-v22.14.0" "a replacement pod must not reinstall its durable Node runtime"
+assert_contains "$replacement" "$w/volume/persistent-runtime/node/bin/node" \
+  "a replacement doctor handoff must use Node from the retained volume"
 assert_not_contains "$replacement" "git clone" "a replacement pod must reuse the durable code root"
 assert_not_contains "$replacement" "fm-install-herdr.sh" "a replacement pod must reuse durable pinned tools"
 assert_not_contains "$replacement" "npm install -g tasks-axi" "a replacement pod must reuse its durable npm prefix"
 assert_contains "$replacement" "$w/volume/persistent-runtime/bin/herdr" "a replacement doctor handoff must see durable tools"
 assert_present "$w/home/.local/bin/herdr" "a replacement pod must recreate its SSH-visible durable-tool links"
+assert_present "$w/home/.local/bin/node" "a replacement pod must recreate its SSH-visible durable Node link"
 assert_present "$w/volume/persistent-runtime/boot.ready" "a replacement pod must reach readiness from the retained volume"
-pass "replacement pods restore ephemeral prerequisites and reuse durable tools"
+pass "replacement pods restore ephemeral prerequisites and reuse the durable toolchain"
 
 # --- pre-existing tools cannot bypass the repository pins -------------------
 
@@ -255,28 +315,19 @@ assert_contains "$raised" "npm install -g tasks-axi" "a stale contract version m
   || fail "re-provisioning must record the current contract version"
 pass "a raised toolchain contract re-provisions exactly once"
 
-# --- a configured harness is installed ---------------------------------------
+# --- the marker follows the configured harness -------------------------------
 
 w2=$(new_world harness)
-(
-  export FM_POD_HARNESS_NPM="@example/harness"
-  PATH="$w2/fakebin:/usr/bin:/bin" HOME="$w2/home" FM_VOLUME="$w2/volume" \
-  FM_REMOTE_ORIGIN="$w2/origin" FM_FAKE_CALLS="$w2/calls.log" \
-  FM_FAKE_EPHEMERAL_BIN="$w2/fakebin" FM_FAKE_NPM_TEMPLATE="$w2/templates/npm" \
-  FM_FAKE_NODE_TEMPLATE="$w2/templates/node" \
-  timeout 60 bash "$BOOT" >/dev/null 2>&1 &
-  boot_pid=$!
-  for _ in $(seq 1 300); do
-    [ -f "$w2/volume/persistent-runtime/toolchain.provisioned" ] && break
-    kill -0 "$boot_pid" 2>/dev/null || break
-    sleep 0.1
-  done
-  kill "$boot_pid" 2>/dev/null || true
-  wait "$boot_pid" 2>/dev/null || true
-)
+provision_only "$w2"
+: > "$w2/calls.log"
+provision_only "$w2" "@example/harness"
 assert_contains "$(cat "$w2/calls.log")" "npm install -g @example/harness" \
-  "a configured harness package must be installed"
-pass "a configured harness package is installed on first boot"
+  "changing the configured harness must invalidate the durable marker and install it"
+: > "$w2/calls.log"
+provision_idempotent "$w2" "@example/harness"
+assert_not_contains "$(cat "$w2/calls.log")" "npm install -g @example/harness" \
+  "the marker bound to the configured harness must make its next boot idempotent"
+pass "the durable marker tracks harness configuration changes"
 
 # --- base-package failures cannot satisfy the contract ----------------------
 
@@ -286,7 +337,8 @@ out=$(
   PATH="$w4/fakebin:/usr/bin:/bin" HOME="$w4/home" FM_VOLUME="$w4/volume" \
   FM_REMOTE_ORIGIN="$w4/origin" FM_FAKE_CALLS="$w4/calls.log" \
   FM_FAKE_EPHEMERAL_BIN="$w4/fakebin" FM_FAKE_NPM_TEMPLATE="$w4/templates/npm" \
-  FM_FAKE_NODE_TEMPLATE="$w4/templates/node" FM_FAKE_APT_FAIL=1 \
+  FM_FAKE_NODE_TEMPLATE="$w4/templates/node" FM_SYSTEM_SSH_DIR="$w4/system-ssh" \
+  FM_FAKE_APT_FAIL=1 \
   timeout 3 bash "$BOOT" 2>&1 || true
 )
 assert_contains "$out" "base-package index could not be updated" "a package-manager failure must be reported"
@@ -296,23 +348,44 @@ assert_not_contains "$out" "boot complete" "a failed package contract must never
 pass "base-package failure propagates and leaves the pod unready"
 
 w5=$(new_world oldnode)
-cat > "$w5/fakebin/node" <<'SH'
+mkdir -p "$w5/volume/persistent-runtime/node/bin"
+cat > "$w5/volume/persistent-runtime/node/bin/node" <<'SH'
 #!/usr/bin/env bash
 [ "${1:-}" != -v ] || { printf 'v18.20.0\n'; exit 0; }
 exit 0
 SH
-chmod +x "$w5/fakebin/node"
+chmod +x "$w5/volume/persistent-runtime/node/bin/node"
+provision_only "$w5"
+assert_contains "$(cat "$w5/calls.log")" "node-v22.14.0" \
+  "an unsupported durable Node must be replaced by the pinned volume runtime"
+assert_present "$w5/volume/persistent-runtime/toolchain.provisioned" \
+  "the corrected durable Node must permit the contract marker"
+pass "an unsupported durable Node is replaced before the contract is recorded"
+
+w6=$(new_world hostkeyfail)
+real_cp=$(command -v cp)
+cat > "$w6/fakebin/cp" <<SH
+#!/usr/bin/env bash
+case "\${*: -1}" in
+  "$w6/volume/persistent-runtime/ssh/"*) exit 1 ;;
+esac
+exec "$real_cp" "\$@"
+SH
+chmod +x "$w6/fakebin/cp"
 out=$(
-  PATH="$w5/fakebin:/usr/bin:/bin" HOME="$w5/home" FM_VOLUME="$w5/volume" \
-  FM_REMOTE_ORIGIN="$w5/origin" FM_FAKE_CALLS="$w5/calls.log" \
-  FM_FAKE_EPHEMERAL_BIN="$w5/fakebin" FM_FAKE_NPM_TEMPLATE="$w5/templates/npm" \
-  FM_FAKE_NODE_TEMPLATE="$w5/templates/node" FM_FAKE_KEEP_OLD_NODE=1 \
-  timeout 3 bash "$BOOT" 2>&1 || true
+  PATH="$w6/fakebin:/usr/bin:/bin" HOME="$w6/home" FM_VOLUME="$w6/volume" \
+  FM_REMOTE_ORIGIN="$w6/origin" FM_FAKE_CALLS="$w6/calls.log" \
+  FM_FAKE_EPHEMERAL_BIN="$w6/fakebin" FM_FAKE_NPM_TEMPLATE="$w6/templates/npm" \
+  FM_FAKE_NODE_TEMPLATE="$w6/templates/node" FM_SYSTEM_SSH_DIR="$w6/system-ssh" \
+  timeout 4 bash "$BOOT" 2>&1 || true
 )
-assert_contains "$out" "still older than the required 20" "Node must be rechecked after installation"
-assert_absent "$w5/volume/persistent-runtime/toolchain.provisioned" \
-  "an unsupported Node must not record the durable contract"
-pass "an unsupported Node remains a loud provisioning failure"
+assert_contains "$out" "volume-backed host key could not be restored or persisted" \
+  "a host-key persistence failure must refuse before SSH starts"
+assert_not_contains "$(cat "$w6/calls.log")" "sshd start" \
+  "sshd must not start with a container-local host identity"
+assert_absent "$w6/volume/persistent-runtime/boot.ready" \
+  "a host-key persistence failure must never record readiness"
+pass "host-key persistence failures fail closed before sshd"
 
 # --- no origin and no clone is a loud refusal, not a silent partial boot -----
 
@@ -321,7 +394,7 @@ out=$(
   PATH="$w3/fakebin:/usr/bin:/bin" HOME="$w3/home" FM_VOLUME="$w3/volume" \
   FM_REMOTE_ORIGIN="" FM_FAKE_CALLS="$w3/calls.log" \
   FM_FAKE_EPHEMERAL_BIN="$w3/fakebin" FM_FAKE_NPM_TEMPLATE="$w3/templates/npm" \
-  FM_FAKE_NODE_TEMPLATE="$w3/templates/node" \
+  FM_FAKE_NODE_TEMPLATE="$w3/templates/node" FM_SYSTEM_SSH_DIR="$w3/system-ssh" \
   timeout 20 bash "$BOOT" 2>&1 &
   boot_pid=$!
   sleep 3

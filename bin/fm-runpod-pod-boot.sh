@@ -54,16 +54,18 @@ FM_REMOTE_ROOT=${FM_REMOTE_ROOT:-$FM_VOLUME/firstmate}
 FM_REMOTE_HOME=${FM_REMOTE_HOME:-$FM_VOLUME/secondmate-home}
 FM_PERSIST=${FM_PERSIST:-$FM_VOLUME/persistent-runtime}
 FM_HOST_KEY_DIR="$FM_PERSIST/ssh"
+FM_SYSTEM_SSH_DIR=${FM_SYSTEM_SSH_DIR:-/etc/ssh}
 FM_BOOT_LOG=${FM_BOOT_LOG:-$FM_PERSIST/boot.log}
 
 # Raise this when the provisioning contract changes so existing volumes
 # re-provision exactly once instead of silently keeping an older toolchain.
-FM_TOOLCHAIN_CONTRACT=2
+FM_TOOLCHAIN_CONTRACT=3
 FM_TOOLCHAIN_MARKER="$FM_PERSIST/toolchain.provisioned"
 FM_BOOT_READY="$FM_PERSIST/boot.ready"
 FM_LOCAL_BIN=${FM_LOCAL_BIN:-$FM_PERSIST/bin}
 FM_NPM_PREFIX=${FM_NPM_PREFIX:-$FM_PERSIST/npm}
-PATH="$FM_LOCAL_BIN:$FM_NPM_PREFIX/bin:$PATH"
+FM_NODE_ROOT=${FM_NODE_ROOT:-$FM_PERSIST/node}
+PATH="$FM_NODE_ROOT/bin:$FM_LOCAL_BIN:$FM_NPM_PREFIX/bin:$PATH"
 export PATH
 npm_config_prefix="$FM_NPM_PREFIX"
 export npm_config_prefix
@@ -74,6 +76,7 @@ FM_REMOTE_ORIGIN=${FM_REMOTE_ORIGIN:-}
 # interactive login the doctor already classifies as a human step.
 FM_POD_HARNESS_NPM=${FM_POD_HARNESS_NPM:-}
 FM_APT_PACKAGES="git jq curl ca-certificates unzip openssh-server"
+FM_NODE_VERSION=22.14.0
 
 log() {
   printf '[fm-pod-boot] %s\n' "$1"
@@ -150,32 +153,48 @@ ensure_base_packages() {
   done
 }
 
-# Node provides the npm-distributed tools the doctor requires. The distro
-# package is used when it is new enough, and NodeSource supplies a current LTS
-# otherwise, because an ancient distro Node cannot run the required CLIs.
 ensure_node() {
-  local major=0
-  if have node; then
-    major=$(node -v 2>/dev/null | sed -e 's/^v//' -e 's/\..*$//')
-    case "$major" in ''|*[!0-9]*) major=0 ;; esac
-    [ "$major" -lt 20 ] || return 0
-    log "node $major is older than the required 20; installing a current LTS"
-  fi
-  if ! have curl; then
-    log "curl is unavailable, so Node cannot be installed"
+  local arch archive checksum url tmp actual
+  [ "$("$FM_NODE_ROOT"/bin/node -v 2>/dev/null || true)" != "v$FM_NODE_VERSION" ] || return 0
+  have curl || { log "curl is unavailable, so Node cannot be installed"; return 1; }
+  have tar || { log "tar is unavailable, so Node cannot be installed"; return 1; }
+  case "$(uname -m)" in
+    x86_64) arch=x64; checksum=9d942932535988091034dc94cc5f42b6dc8784d6366df3a36c4c9ccb3996f0c2 ;;
+    aarch64|arm64) arch=arm64; checksum=8cf30ff7250f9463b53c18f89c6c606dfda70378215b2c905d0a9a8b08bd45e0 ;;
+    *) log "Node has no pinned build for $(uname -m)"; return 1 ;;
+  esac
+  archive="node-v$FM_NODE_VERSION-linux-$arch.tar.gz"
+  url="https://nodejs.org/dist/v$FM_NODE_VERSION/$archive"
+  tmp=$(mktemp -d "$FM_PERSIST/.node.XXXXXX") || return 1
+  log "installing durable Node $FM_NODE_VERSION"
+  if ! curl -fsSL --max-filesize 60000000 "$url" -o "$tmp/$archive"; then
+    rm -rf -- "$tmp"
+    log "the pinned Node download failed"
     return 1
   fi
-  curl -fsSL https://deb.nodesource.com/setup_lts.x 2>/dev/null | bash - >/dev/null 2>&1 \
-    || log "the NodeSource setup script did not complete; falling back to the distro package"
-  apt_install nodejs || true
-  have node || { log "node is still unavailable after installation"; return 1; }
-  have npm || { log "npm is still unavailable after installation"; return 1; }
-  major=$(node -v 2>/dev/null | sed -e 's/^v//' -e 's/\..*$//')
-  case "$major" in ''|*[!0-9]*) major=0 ;; esac
-  [ "$major" -ge 20 ] || {
-    log "node ${major:-unknown} is still older than the required 20 after installation"
+  if have sha256sum; then
+    actual=$(sha256sum "$tmp/$archive" | awk '{print $1}')
+  elif have shasum; then
+    actual=$(shasum -a 256 "$tmp/$archive" | awk '{print $1}')
+  else
+    rm -rf -- "$tmp"
+    log "no SHA-256 tool is available to verify Node"
     return 1
-  }
+  fi
+  if [ "$actual" != "$checksum" ]; then
+    rm -rf -- "$tmp"
+    log "the pinned Node checksum did not match"
+    return 1
+  fi
+  tar -xzf "$tmp/$archive" -C "$tmp" || { rm -rf -- "$tmp"; return 1; }
+  rm -rf -- "$FM_NODE_ROOT.next"
+  mv "$tmp/node-v$FM_NODE_VERSION-linux-$arch" "$FM_NODE_ROOT.next" || { rm -rf -- "$tmp"; return 1; }
+  rm -rf -- "$FM_NODE_ROOT"
+  mv "$FM_NODE_ROOT.next" "$FM_NODE_ROOT" || { rm -rf -- "$tmp"; return 1; }
+  rm -rf -- "$tmp"
+  [ "$("$FM_NODE_ROOT"/bin/node -v 2>/dev/null || true)" = "v$FM_NODE_VERSION" ] \
+    || { log "durable Node did not report the pinned version"; return 1; }
+  [ -x "$FM_NODE_ROOT/bin/npm" ] || { log "durable npm is unavailable after Node installation"; return 1; }
 }
 
 # The code root is what every later step runs from, including the pinned
@@ -240,8 +259,18 @@ ensure_npm_tools() {
 }
 
 toolchain_marker_current() {
+  local expected actual harness_hash
   [ -f "$FM_TOOLCHAIN_MARKER" ] || return 1
-  [ "$(cat "$FM_TOOLCHAIN_MARKER" 2>/dev/null)" = "$FM_TOOLCHAIN_CONTRACT" ]
+  harness_hash=$(printf '%s' "$FM_POD_HARNESS_NPM" | sha256sum | awk '{print $1}') || return 1
+  expected=$(printf 'contract=%s\nharness=%s' "$FM_TOOLCHAIN_CONTRACT" "$harness_hash")
+  actual=$(cat "$FM_TOOLCHAIN_MARKER" 2>/dev/null) || return 1
+  [ "$actual" = "$expected" ]
+}
+
+toolchain_marker_write() {
+  local harness_hash
+  harness_hash=$(printf '%s' "$FM_POD_HARNESS_NPM" | sha256sum | awk '{print $1}') || return 1
+  printf 'contract=%s\nharness=%s\n' "$FM_TOOLCHAIN_CONTRACT" "$harness_hash" > "$FM_TOOLCHAIN_MARKER"
 }
 
 provision_toolchain() {
@@ -257,7 +286,7 @@ provision_toolchain() {
   ensure_pinned_tools || rc=1
   ensure_npm_tools || rc=1
   if [ "$rc" -eq 0 ]; then
-    printf '%s\n' "$FM_TOOLCHAIN_CONTRACT" > "$FM_TOOLCHAIN_MARKER" 2>/dev/null || {
+    toolchain_marker_write 2>/dev/null || {
       log "the satisfied toolchain contract could not be recorded"
       return 1
     }
@@ -282,27 +311,31 @@ install_sshd() {
 # replaced pod presents the key the primary already pinned under its HostKeyAlias.
 restore_host_keys() {
   local type key
-  mkdir -p /etc/ssh || return 1
+  mkdir -p "$FM_SYSTEM_SSH_DIR" || return 1
   for type in ed25519 rsa ecdsa; do
     key="$FM_HOST_KEY_DIR/ssh_host_${type}_key"
     if [ -f "$key" ]; then
-      cp -f "$key" "/etc/ssh/ssh_host_${type}_key" || return 1
-      [ ! -f "$key.pub" ] || cp -f "$key.pub" "/etc/ssh/ssh_host_${type}_key.pub"
-      chmod 600 "/etc/ssh/ssh_host_${type}_key"
+      cp -f "$key" "$FM_SYSTEM_SSH_DIR/ssh_host_${type}_key" || return 1
+      if [ -f "$key.pub" ]; then
+        cp -f "$key.pub" "$FM_SYSTEM_SSH_DIR/ssh_host_${type}_key.pub" || return 1
+      fi
+      chmod 600 "$FM_SYSTEM_SSH_DIR/ssh_host_${type}_key" || return 1
       log "restored the persisted $type host key from the volume"
     fi
   done
-  if [ ! -f /etc/ssh/ssh_host_ed25519_key ]; then
+  if [ ! -f "$FM_SYSTEM_SSH_DIR/ssh_host_ed25519_key" ]; then
     log "no persisted host key on the volume; generating this volume's permanent identity"
-    ssh-keygen -q -t ed25519 -N '' -f /etc/ssh/ssh_host_ed25519_key </dev/null || return 1
+    ssh-keygen -q -t ed25519 -N '' -f "$FM_SYSTEM_SSH_DIR/ssh_host_ed25519_key" </dev/null || return 1
   fi
   for type in ed25519 rsa ecdsa; do
-    key="/etc/ssh/ssh_host_${type}_key"
+    key="$FM_SYSTEM_SSH_DIR/ssh_host_${type}_key"
     [ -f "$key" ] || continue
     if [ ! -f "$FM_HOST_KEY_DIR/ssh_host_${type}_key" ]; then
       cp -f "$key" "$FM_HOST_KEY_DIR/ssh_host_${type}_key" || return 1
-      [ ! -f "$key.pub" ] || cp -f "$key.pub" "$FM_HOST_KEY_DIR/ssh_host_${type}_key.pub"
-      chmod 600 "$FM_HOST_KEY_DIR/ssh_host_${type}_key"
+      if [ -f "$key.pub" ]; then
+        cp -f "$key.pub" "$FM_HOST_KEY_DIR/ssh_host_${type}_key.pub" || return 1
+      fi
+      chmod 600 "$FM_HOST_KEY_DIR/ssh_host_${type}_key" || return 1
       log "persisted the $type host key onto the volume"
     fi
   done
@@ -352,7 +385,7 @@ link_entrypoint() {
 link_durable_bins() {
   local source target bin_dir="$HOME/.local/bin"
   mkdir -p "$bin_dir" || return 1
-  for source in "$FM_LOCAL_BIN"/* "$FM_NPM_PREFIX/bin"/*; do
+  for source in "$FM_NODE_ROOT/bin"/* "$FM_LOCAL_BIN"/* "$FM_NPM_PREFIX/bin"/*; do
     [ -f "$source" ] && [ -x "$source" ] || continue
     target="$bin_dir/${source##*/}"
     if [ -L "$target" ]; then
@@ -401,7 +434,7 @@ main() {
     hold_pod
   fi
   install_sshd || { log "FATAL: openssh-server is unavailable; SSH will not come up"; hold_pod; }
-  restore_host_keys || log "the persisted host key could not be restored"
+  restore_host_keys || { log "FATAL: the volume-backed host key could not be restored or persisted; SSH will not come up"; hold_pod; }
   authorize_key || log "the authorized key could not be written"
   link_durable_bins || { log "FATAL: durable tools could not be linked; SSH will not come up"; hold_pod; }
   link_entrypoint || { log "FATAL: the remote entrypoint could not be linked; SSH will not come up"; hold_pod; }
