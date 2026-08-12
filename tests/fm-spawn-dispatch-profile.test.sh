@@ -1701,6 +1701,8 @@ test_omp_secondmate_inspects_staged_live_extensions() {
   expect_code 1 "$status" "OMP secondmate should inspect staged live extension content"
   assert_contains "$out" ".omp/extensions/staged.ts" \
     "OMP secondmate refusal inspected committed content instead of the live index and worktree"
+  assert_not_contains "$out" ".omp/extensions/fm-primary-omp.ts" \
+    "OMP secondmate refusal incorrectly flagged Firstmate's exact tracked primary extension"
   assert_no_grep 'new-window|new-session' "$CASE_DIR/endpoint.log" \
     "OMP staged secondmate-extension refusal created an endpoint"
   pass "OMP secondmates inspect staged live extensions"

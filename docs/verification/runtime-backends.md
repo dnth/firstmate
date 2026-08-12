@@ -198,6 +198,7 @@ omp/17.2.11
 ok - OMP refuses tracked project extensions without explicit opt-in
 ok - OMP allows tracked project extensions only with an auditable opt-in
 ok - OMP projects without tracked extensions launch unchanged
+ok - non-OMP harnesses ignore tracked OMP project extensions
 ok - OMP refuses tracked settings extension roots
 ok - OMP refuses tracked extension-directory symlinks
 ok - OMP root symlinks use the shared opt-in boundary
