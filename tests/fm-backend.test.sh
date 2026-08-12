@@ -143,8 +143,8 @@ resolve_permissive_tmux_kill_ref() {
 # when this branch changes tmux dispatch semantics.
 OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tasks-axi-lib.sh fm-pr-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-supervision-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-nm-run-lib.sh fm-decision-hold.sh fm-backend.sh fm-operational-input.sh fm-public-followup-lib.sh fm-secondmate-registry-lib.sh fm-secondmate-parent-lib.sh fm-x-lib.sh"
 # A pull-request merge may add a new main-only dependency that the branch's older baseline does not have yet.
-# The current dispatcher sources this feature-only library even for old entrypoint fixtures.
-OLD_BIN_OPTIONAL_SIBLINGS="fm-pending-reply-lib.sh fm-omp-process-lib.sh"
+# Current entrypoints may source these feature-only libraries even in old fixtures.
+OLD_BIN_OPTIONAL_SIBLINGS="fm-pending-reply-lib.sh fm-omp-process-lib.sh fm-pool-lib.sh"
 OLD_BIN_REFACTORED="fm-send.sh fm-peek.sh fm-watch.sh fm-spawn.sh fm-teardown.sh fm-marker-lib.sh"
 
 build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry point)

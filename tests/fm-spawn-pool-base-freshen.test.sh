@@ -24,7 +24,11 @@ case "$*" in
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows|has-session|new-session|new-window|kill-window|send-keys) exit 0 ;;
+  send-keys)
+    [ -z "${FM_FAKE_SEND_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_SEND_LOG"
+    exit 0
+    ;;
+  list-windows|has-session|new-session|new-window|kill-window) exit 0 ;;
 esac
 exit 0
 SH
@@ -39,7 +43,7 @@ make_case() {
   home="$case_dir/home"
   project="$case_dir/project"
   origin="$case_dir/origin.git"
-  pool="$case_dir/pool"
+  pool="$case_dir/treehouse-pool/1/project"
   publisher="$case_dir/publisher"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
 
@@ -56,7 +60,9 @@ make_case() {
   git -C "$project" remote add origin "file://$origin"
   initial=$(git -C "$project" rev-parse HEAD)
   git -C "$project" worktree add --quiet --detach "$pool" "$initial"
-
+  printf 'pool-local-config\n' > "$pool/treehouse.toml"
+  node -e 'require("fs").writeFileSync(process.argv[1], JSON.stringify({worktrees:[{name:"1",path:process.argv[2]}]}))' \
+    "$case_dir/treehouse-pool/treehouse-state.json" "$pool"
   git clone --quiet "file://$origin" "$publisher"
   printf 'must survive a newly spawned branch\n' > "$publisher/advanced-main.txt"
   git -C "$publisher" add advanced-main.txt
@@ -79,7 +85,7 @@ run_spawn() {
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$POOL_DIR" \
-    PATH="$FAKEBIN_DIR:$PATH" \
+    FM_FAKE_SEND_LOG="$CASE_DIR/send.log" PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJECT_DIR" "$@" 2>&1
 }
 
@@ -195,7 +201,7 @@ test_dirty_pool_refuses_without_discarding_work() {
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn succeeded despite a dirty pooled worktree"
-  assert_contains "$out" "is not clean" "spawn did not clearly refuse a dirty pooled worktree"
+  assert_contains "$out" "dirty pool worktree" "spawn did not clearly refuse a dirty pooled worktree"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
     || fail "spawn moved HEAD while refusing a dirty pooled worktree"
   assert_grep 'keep this local work' "$POOL_DIR/uncommitted.txt" \
@@ -249,6 +255,201 @@ test_diverged_pool_refuses_without_discarding_commits() {
   pass "a pooled worktree with unique commits is refused without discarding them"
 }
 
+test_acquisition_guards_before_treehouse_reset() {
+  local rec id out status before fake_treehouse invoked healthy state shell_marker local_ahead return_log idle_file
+  id='pool-acquisition-guard-r7'
+  rec=$(make_case acquisition-guard "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "guarded pooled acquisition should preserve healthy spawn behavior"
+  fake_treehouse="$FAKEBIN_DIR/treehouse"
+  cat > "$fake_treehouse" <<'SH'
+#!/usr/bin/env bash
+set -e
+cd "$FM_FAKE_POOL"
+git switch --force --detach origin/main >/dev/null
+git reset origin/main --hard >/dev/null
+git clean -df >/dev/null
+printf '%s\n' "$FM_FAKE_POOL"
+SH
+  chmod +x "$fake_treehouse"
+  out=$(cd "$PROJECT_DIR" && FM_FAKE_POOL="$POOL_DIR" PATH="$FAKEBIN_DIR:$PATH" "$ROOT/bin/fm-treehouse-get.sh" --lease 2>&1)
+  status=$?
+  expect_code 0 "$status" "guarded Treehouse acquisition should accept reordered switch/reset flags"
+  assert_grep 'pool-local-config' "$POOL_DIR/treehouse.toml" \
+    "guarded acquisition discarded the allowed pool-local config"
+
+  cat > "$fake_treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fake_treehouse"
+  out=$(cd "$PROJECT_DIR" && FM_FAKE_POOL="$POOL_DIR" PATH="$FAKEBIN_DIR:$PATH" "$ROOT/bin/fm-treehouse-get.sh" --lease 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "guarded Treehouse acquisition accepted an unverified provider path"
+  assert_contains "$out" 'did not complete the guarded reset path' \
+    "guarded acquisition did not require its completion marker"
+
+  printf 'unique local commit\n' > "$POOL_DIR/local.txt"
+  git -C "$POOL_DIR" add local.txt
+  git -C "$POOL_DIR" -c user.name=Test -c user.email=test@example.invalid commit -qm unique
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  healthy="$CASE_DIR/treehouse-pool/2/project"
+  git -C "$PROJECT_DIR" worktree add --quiet --detach "$healthy" origin/main
+  printf 'pool-local-config\n' > "$healthy/treehouse.toml"
+  state="$CASE_DIR/treehouse-pool/treehouse-state.json"
+  node -e 'const fs=require("fs"); const state=JSON.parse(fs.readFileSync(process.argv[1])); state.worktrees.push({name:"2",path:process.argv[2]}); fs.writeFileSync(process.argv[1],JSON.stringify(state))' \
+    "$state" "$healthy"
+  cat > "$fake_treehouse" <<'SH'
+#!/usr/bin/env bash
+set -e
+cd "$FM_FAKE_POOL"
+git checkout --detach --force origin/main >/dev/null || true
+cd "$FM_FAKE_HEALTHY_POOL"
+git checkout --detach --force origin/main >/dev/null
+git reset --hard origin/main >/dev/null
+git clean -fd >/dev/null
+printf '%s\n' "$FM_FAKE_HEALTHY_POOL"
+SH
+  chmod +x "$fake_treehouse"
+  out=$(cd "$PROJECT_DIR" && FM_FAKE_POOL="$POOL_DIR" FM_FAKE_HEALTHY_POOL="$healthy" \
+    PATH="$FAKEBIN_DIR:$PATH" "$ROOT/bin/fm-treehouse-get.sh" --lease 2>&1)
+  status=$?
+  expect_code 0 "$status" "an unsafe candidate should not block a healthy pooled slot"
+  assert_contains "$out" "$healthy" "guarded acquisition did not continue to the healthy pooled slot"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "guarded acquisition changed the skipped non-ancestor slot"
+
+  invoked="$CASE_DIR/provider-invoked"
+  cat > "$fake_treehouse" <<'SH'
+#!/usr/bin/env bash
+set -e
+: > "$FM_FAKE_PROVIDER_INVOKED"
+printf '%s\n' "$*" > "$FM_FAKE_PROVIDER_ARGS"
+cd "$FM_FAKE_POOL"
+"$FM_TREEHOUSE_REAL_GIT" reset --hard origin/main
+printf '%s\n' "$FM_FAKE_POOL"
+SH
+  chmod +x "$fake_treehouse"
+  out=$(cd "$PROJECT_DIR" && FM_FAKE_POOL="$POOL_DIR" FM_FAKE_PROVIDER_INVOKED="$invoked" \
+    FM_FAKE_PROVIDER_ARGS="$CASE_DIR/provider-args" \
+    PATH="$FAKEBIN_DIR:$PATH" "$ROOT/bin/fm-treehouse-get.sh" --lease 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "guarded Treehouse acquisition reset a non-ancestor pool slot"
+  assert_contains "$out" 'detected an unsafe post-reset condition' \
+    "guarded acquisition did not contain a provider bypass after reset"
+  [ -e "$invoked" ] || fail "post-reset containment fixture did not bypass the Git shim"
+  git -C "$POOL_DIR" cat-file -e "$before^{commit}" \
+    || fail "post-reset containment lost the discarded commit object"
+  if printf '%s\n' "$out" | grep -Fx "$POOL_DIR" >/dev/null; then
+    fail "post-reset containment exposed the refused acquired path on stdout"
+  fi
+
+  git -C "$POOL_DIR" checkout --detach --force "$before" >/dev/null
+  printf 'local default ahead\n' > "$PROJECT_DIR/local-default.txt"
+  git -C "$PROJECT_DIR" add local-default.txt
+  git -C "$PROJECT_DIR" -c user.name=Test -c user.email=test@example.invalid commit -qm local-default-ahead
+  local_ahead=$(git -C "$PROJECT_DIR" rev-parse HEAD)
+  cat > "$fake_treehouse" <<'SH'
+#!/usr/bin/env bash
+set -e
+cd "$FM_FAKE_POOL"
+"$FM_TREEHOUSE_REAL_GIT" reset --hard "$FM_FAKE_LOCAL_DEFAULT"
+printf '%s\n' "$FM_FAKE_POOL"
+SH
+  chmod +x "$fake_treehouse"
+  out=$(cd "$PROJECT_DIR" && FM_FAKE_POOL="$POOL_DIR" FM_FAKE_LOCAL_DEFAULT="$local_ahead" \
+    PATH="$FAKEBIN_DIR:$PATH" "$ROOT/bin/fm-treehouse-get.sh" --lease 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "guarded acquisition accepted a reset to a non-ancestor local default"
+  assert_contains "$out" 'detected an unsafe post-reset condition' \
+    "guarded acquisition did not contain a local-default-ahead reset"
+
+  git -C "$POOL_DIR" checkout --detach --force "$before" >/dev/null
+  cat > "$fake_treehouse" <<'SH'
+#!/usr/bin/env bash
+set -e
+: > "$FM_FAKE_PROVIDER_INVOKED"
+printf '%s\n' "$*" > "$FM_FAKE_PROVIDER_ARGS"
+cd "$FM_FAKE_POOL"
+"$FM_TREEHOUSE_REAL_GIT" reset --hard origin/main
+printf '%s\n' "$FM_FAKE_POOL"
+SH
+  chmod +x "$fake_treehouse"
+  shell_marker="$CASE_DIR/interactive-shell-entered"
+  cat > "$FAKEBIN_DIR/interactive-shell" <<'SH'
+#!/usr/bin/env bash
+: > "$FM_FAKE_SHELL_MARKER"
+SH
+  chmod +x "$FAKEBIN_DIR/interactive-shell"
+  out=$(cd "$PROJECT_DIR" && FM_FAKE_POOL="$POOL_DIR" FM_FAKE_PROVIDER_INVOKED="$invoked" \
+    FM_FAKE_PROVIDER_ARGS="$CASE_DIR/provider-args" \
+    FM_FAKE_SHELL_MARKER="$shell_marker" SHELL="$FAKEBIN_DIR/interactive-shell" \
+    PATH="$FAKEBIN_DIR:$PATH" "$ROOT/bin/fm-treehouse-get.sh" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "ordinary acquisition accepted an unsafe provider reset"
+  assert_grep '--lease' "$CASE_DIR/provider-args" \
+    "ordinary acquisition did not use the withheld non-interactive lease path"
+  [ ! -e "$shell_marker" ] || fail "ordinary acquisition entered the worker shell before containment passed"
+  assert_contains "$out" 'detected an unsafe post-reset condition' \
+    "ordinary acquisition did not contain the provider bypass before shell entry"
+
+  git -C "$POOL_DIR" reset --hard origin/main >/dev/null
+  git -C "$POOL_DIR" clean -fd >/dev/null
+  return_log="$CASE_DIR/signal-return"
+  idle_file="$CASE_DIR/idle-cwds"
+  : > "$idle_file"
+  cat > "$fake_treehouse" <<'SH'
+#!/usr/bin/env bash
+set -e
+case "${1:-}" in
+  get)
+    cd "$FM_FAKE_POOL"
+    git switch --force --detach origin/main >/dev/null
+    git reset --hard origin/main >/dev/null
+    git clean -df >/dev/null
+    printf '%s\n' "$FM_FAKE_POOL"
+    ;;
+  return)
+    printf '%s\n' "$*" > "$FM_FAKE_RETURN_LOG"
+    ;;
+esac
+SH
+  chmod +x "$fake_treehouse"
+  cat > "$FAKEBIN_DIR/interactive-shell" <<'SH'
+#!/usr/bin/env bash
+kill -TERM "$FM_TREEHOUSE_WRAPPER_PID"
+sleep 1
+SH
+  chmod +x "$FAKEBIN_DIR/interactive-shell"
+  out=$(cd "$PROJECT_DIR" && FM_FAKE_POOL="$POOL_DIR" FM_FAKE_RETURN_LOG="$return_log" \
+    FM_POOL_LSOF_CWD_FILE="$idle_file" SHELL="$FAKEBIN_DIR/interactive-shell" \
+    PATH="$FAKEBIN_DIR:$PATH" "$ROOT/bin/fm-treehouse-get.sh" 2>&1)
+  status=$?
+  expect_code 143 "$status" "interrupted ordinary acquisition should retain signal status"
+  assert_grep 'return --if-lease-holder' "$return_log" \
+    "interrupted ordinary acquisition stranded its verified clean synthetic lease"
+
+  rm -f "$return_log"
+  cat > "$FAKEBIN_DIR/interactive-shell" <<'SH'
+#!/usr/bin/env bash
+printf 'interrupted work\n' > "$TREEHOUSE_DIR/interrupted.txt"
+kill -TERM "$FM_TREEHOUSE_WRAPPER_PID"
+sleep 1
+SH
+  chmod +x "$FAKEBIN_DIR/interactive-shell"
+  out=$(cd "$PROJECT_DIR" && FM_FAKE_POOL="$POOL_DIR" FM_FAKE_RETURN_LOG="$return_log" \
+    FM_POOL_LSOF_CWD_FILE="$idle_file" SHELL="$FAKEBIN_DIR/interactive-shell" \
+    PATH="$FAKEBIN_DIR:$PATH" "$ROOT/bin/fm-treehouse-get.sh" 2>&1)
+  status=$?
+  expect_code 143 "$status" "interrupted dirty acquisition should retain signal status"
+  [ ! -e "$return_log" ] || fail "interrupted ordinary acquisition returned a dirty synthetic lease"
+  assert_contains "$out" 'preserved the dirty, live, or unverifiable lease' \
+    "interrupted ordinary acquisition did not report its preserved dirty lease"
+  pass "spawn guards Treehouse reset before non-ancestor acquisition"
+}
+
 test_unresolved_remote_default_refuses_pool() {
   local rec id out status before
   id='pool-unresolved-default-r6'
@@ -270,6 +471,23 @@ test_unresolved_remote_default_refuses_pool() {
   pass "an unresolved remote default branch refuses the pooled worktree"
 }
 
+test_pool_cleanliness_predicate() {
+  local rec extra
+  rec=$(make_case pool-predicate pool-predicate-r0)
+  read_case_record "$rec"
+  # The pool-local treehouse config is the one allowed untracked root entry.
+  . "$ROOT/bin/fm-pool-lib.sh"
+  fm_pool_worktree_clean "$POOL_DIR" || fail "lone root treehouse.toml should count as clean"
+  extra="$POOL_DIR/real-dirt.txt"
+  printf 'real dirt\n' > "$extra"
+  if fm_pool_worktree_clean "$POOL_DIR"; then
+    fail "an additional untracked file should make the pool dirty"
+  fi
+  pass "pool cleanliness allows only the lone root treehouse.toml"
+}
+
+test_pool_cleanliness_predicate
+test_acquisition_guards_before_treehouse_reset
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch

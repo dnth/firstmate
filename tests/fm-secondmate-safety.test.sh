@@ -324,6 +324,34 @@ test_home_seed_returns_treehouse_acquired_home_on_assignment_failure() {
   pass "home seeding returns rejected acquired homes through treehouse"
 }
 
+test_home_seed_preserves_treehouse_acquired_home_on_runtime_refusal() {
+  local home acquired fakebin log err lease
+  home="$TMP_ROOT/dash-runtime-refusal-home"
+  acquired="$TMP_ROOT/dash-runtime-refusal-acquired-home"
+  err="$TMP_ROOT/dash-runtime-refusal.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  git clone --quiet "$ROOT" "$acquired"
+  mkdir -p "$acquired/state"
+  printf '%s\n' "$$" > "$acquired/state/.lock"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/dash-runtime-refusal-fake")
+  log="$TMP_ROOT/dash-runtime-refusal-fake/tmux.log"
+  lease="$TMP_ROOT/dash-runtime-refusal-fake/lease"
+
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$acquired" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TREEHOUSE_LEASE_FILE="$lease" FM_SECONDMATE_CHARTER='runtime refusal scope' \
+    FM_SECONDMATE_SCOPE='runtime refusal scope' \
+    "$ROOT/bin/fm-home-seed.sh" dash - --no-projects >/dev/null 2>"$err"; then
+    fail "seed accepted an acquired home with a live OMP runtime owner"
+  fi
+  grep -F 'previous OMP session is still live' "$err" >/dev/null \
+    || fail "seed did not preserve the live OMP runtime refusal"
+  assert_no_grep 'treehouse return' "$log" \
+    "runtime-marker refusal destructively returned a live occupant's Treehouse lease"
+  [ -e "$lease" ] || fail "runtime-marker refusal did not preserve the acquired lease"
+  [ -e "$acquired/state/.lock" ] || fail "runtime-marker refusal removed the live occupant marker"
+  pass "home seed preserves a lease after runtime-marker refusal"
+}
+
 test_home_seed_warns_when_acquired_home_return_fails() {
   local home acquired acquired_abs fakebin log err lease
   home="$TMP_ROOT/dash-return-fail-home"
@@ -360,6 +388,7 @@ test_home_seed_does_not_return_unsafe_acquired_home() {
   home="$TMP_ROOT/dash-active-home"
   descendant="$home/data/dash-descendant-home"
   err="$TMP_ROOT/dash-active.err"
+  git clone --quiet "$ROOT" "$home"
   mkdir -p "$home/projects" "$home/data" "$home/state"
   fm_git_init_commit "$home/projects/alpha"
   fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/dash-active-alpha.git"
@@ -378,6 +407,7 @@ test_home_seed_does_not_return_unsafe_acquired_home() {
   [ -d "$home/projects/alpha" ] || fail "unsafe acquired-home rollback removed the active home"
 
   : > "$log"
+  git clone --quiet "$ROOT" "$descendant"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$descendant" FM_FAKE_TMUX_LOG="$log" \
     "$ROOT/bin/fm-home-seed.sh" dash - alpha >/dev/null 2>"$err"; then
     fail "seed accepted an acquired home inside the active firstmate home"
@@ -2672,6 +2702,7 @@ test_home_seed_validate_rejects_duplicate_ids
 test_home_seed_validate_rejects_nested_homes
 test_home_seed_uses_treehouse_acquired_home
 test_home_seed_returns_treehouse_acquired_home_on_assignment_failure
+test_home_seed_preserves_treehouse_acquired_home_on_runtime_refusal
 test_home_seed_warns_when_acquired_home_return_fails
 test_home_seed_does_not_return_unsafe_acquired_home
 test_home_seed_rolls_back_failed_clone

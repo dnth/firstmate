@@ -540,6 +540,37 @@ test_post_meta_abort_preserves_home() {
   pass "post-metadata OMP acknowledgement failure stops only the owned endpoint and preserves home, metadata, and sessions"
 }
 
+test_stale_omp_runtime_cleanup() {
+  local version out stale_session
+  setup_case stale-runtime-cleanup
+  version=$(fm_primary_watch_version "$HOME_DIR/.omp/extensions/fm-primary-omp.ts" "$HOME_DIR")
+  stale_session="$HOME_DIR/state/omp-sessions/old.jsonl"
+  mkdir -p "$HOME_DIR/state/omp-sessions"
+  printf '{"stale":true}\n' > "$stale_session"
+  printf '%s\n' "$stale_session" > "$HOME_DIR/state/.omp-session"
+  printf '%s\n%s\n%s\n%s\n' "$version" 99999999 "$TEST_OMP_BUN" "$TEST_OMP_BIN" \
+    > "$HOME_DIR/state/.omp-primary-extension-loaded"
+  printf '99999999\n' > "$HOME_DIR/state/.lock"
+  out=$(bash -c '. "$1/bin/fm-omp-process-lib.sh"; fm_omp_clear_stale_runtime_markers "$2"' _ "$ROOT" "$HOME_DIR" 2>&1) \
+    || fail "stale OMP runtime cleanup refused a dead prior occupant: $out"
+  assert_absent "$HOME_DIR/state/.omp-session" "stale OMP session pointer was not cleared"
+  assert_absent "$HOME_DIR/state/.omp-primary-extension-loaded" "stale OMP primary marker was not cleared"
+  assert_absent "$stale_session" "stale OMP session file was not cleared"
+
+  setup_case live-runtime-preserve
+  version=$(fm_primary_watch_version "$HOME_DIR/.omp/extensions/fm-primary-omp.ts" "$HOME_DIR")
+  printf '%s\n%s\n%s\n%s\n' "$version" "$AGENT_PID" "$TEST_OMP_BUN" "$TEST_OMP_BIN" \
+    > "$HOME_DIR/state/.omp-primary-extension-loaded"
+  printf '%s\n' "$AGENT_PID" > "$HOME_DIR/state/.lock"
+  out=$(bash -c '. "$1/bin/fm-omp-process-lib.sh"; fm_omp_clear_stale_runtime_markers "$2"' _ "$ROOT" "$HOME_DIR" 2>&1) \
+    && fail "OMP runtime cleanup removed markers owned by a live prior occupant"
+  assert_contains "$out" 'still live' "live OMP runtime cleanup refusal was not actionable"
+  assert_present "$HOME_DIR/state/.omp-primary-extension-loaded" "live OMP primary marker was removed"
+  assert_present "$HOME_DIR/state/.lock" "live OMP session lock was removed"
+  pass "OMP runtime cleanup clears dead occupants and preserves live occupants"
+}
+
+test_stale_omp_runtime_cleanup
 test_herdr_launch_exact_resume_recovery_and_abort
 test_launch_and_exact_resume
 test_duplicate_recovery_states

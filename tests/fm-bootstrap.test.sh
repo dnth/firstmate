@@ -136,6 +136,16 @@ SH
   chmod +x "$fakebin/jq"
 }
 
+add_real_node() {
+  local fakebin=$1 real_node
+  real_node=$(command -v node 2>/dev/null) || fail "node is required for pool audit tests"
+  cat > "$fakebin/node" <<SH
+#!/usr/bin/env bash
+exec '$real_node' "\$@"
+SH
+  chmod +x "$fakebin/node"
+}
+
 make_fake_fleet_sync_root() {
   local dir=$1 fake_root
   fake_root="$dir/fake-root"
@@ -689,6 +699,122 @@ cmux
 ROWS
   pass "bootstrap: JSON-emitting backends require jq (their genuine dep), never tmux"
 }
+
+test_treehouse_dirty_idle_audit_is_read_only() {
+  local case_dir fakebin out unreadable_out repo pool wt_one wt_two wt_clean wt_reused wt_live state before after proc_root
+  case_dir="$TMP_ROOT/treehouse-dirty-idle-audit"
+  repo="$case_dir/audit-repo"
+  pool="$case_dir/My Pools/audit-pool"
+  wt_one="$pool/7/audit-repo"
+  wt_two="$pool/8/audit-repo"
+  wt_clean="$pool/9/audit-repo"
+  wt_reused="$pool/10/audit-repo"
+  wt_live="$pool/11/audit-repo"
+  state="$pool/treehouse-state.json"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/projects" "$case_dir/home/state" "$pool"
+  git init --quiet -b main "$repo"
+  printf 'base\n' > "$repo/README.md"
+  git -C "$repo" add README.md
+  git -C "$repo" -c user.name=Test -c user.email=test@example.invalid commit -qm base
+  git -C "$repo" remote add origin https://example.invalid/audit.git
+  git -C "$repo" worktree add --quiet --detach "$wt_one" HEAD
+  git -C "$repo" worktree add --quiet --detach "$wt_two" HEAD
+  git -C "$repo" worktree add --quiet --detach "$wt_clean" HEAD
+  git -C "$repo" worktree add --quiet --detach "$wt_reused" HEAD
+  git -C "$repo" worktree add --quiet --detach "$wt_live" HEAD
+  printf 'dirty one\n' > "$wt_one/dirty.txt"
+  printf 'dirty two\n' > "$wt_two/dirty.txt"
+  printf 'pool config\n' > "$wt_clean/treehouse.toml"
+  printf 'reused pid dirt\n' > "$wt_reused/dirty.txt"
+  printf 'live cwd dirt\n' > "$wt_live/dirty.txt"
+  node -e 'const fs=require("fs"); fs.writeFileSync(process.argv[1], JSON.stringify({worktrees:[{name:"7",path:process.argv[2]},{name:"8",path:process.argv[3]},{name:"9",path:process.argv[4]},{name:"10",path:process.argv[5],owner_pid:Number(process.argv[7]),owner_started_at:1},{name:"11",path:process.argv[6]}]}))' \
+    "$state" "$wt_one" "$wt_two" "$wt_clean" "$wt_reused" "$wt_live" "$$"
+  proc_root="$case_dir/readable-proc"
+  mkdir -p "$proc_root/111" "$proc_root/$$"
+  cp "/proc/$$/stat" "$proc_root/$$/stat"
+  printf 'Name:\ttest\nUid:\t%s\t%s\t%s\t%s\n' "$(id -u)" "$(id -u)" "$(id -u)" "$(id -u)" > "$proc_root/111/status"
+  ln -s "$wt_live" "$proc_root/111/cwd"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf 'keep this sentinel\n' > "$case_dir/home/state/sentinel"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_node "$fakebin"
+  cat > "$fakebin/jq" <<'SH'
+#!/usr/bin/env bash
+exit 127
+SH
+  chmod +x "$fakebin/jq"
+  before=$(shasum -a 256 "$state")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_PROC_ROOT_OVERRIDE="$proc_root" \
+    FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$repo" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_TREEHOUSE_AUDIT_POOL_TIMEOUT=2 FM_TREEHOUSE_AUDIT_TIMEOUT=4 \
+    "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" \
+    "TREEHOUSE_POOL: dirty idle slot 7 at $wt_one - inspect before cleanup; no changes made" \
+    "bootstrap did not report a dirty ownerless idle pool slot"
+  assert_contains "$out" "TREEHOUSE_POOL: dirty idle slot 8 at $wt_two" \
+    "bootstrap collapsed distinct dirty slots whose complete paths contain spaces"
+  assert_not_contains "$out" "TREEHOUSE_POOL: dirty idle slot 9 at $wt_clean" \
+    "bootstrap reported a slot containing only treehouse.toml as dirty"
+  assert_contains "$out" "TREEHOUSE_POOL: dirty idle slot 10 at $wt_reused" \
+    "bootstrap mistook a reused PID for the persisted owner identity"
+  assert_not_contains "$out" "TREEHOUSE_POOL: dirty idle slot 11 at $wt_live" \
+    "bootstrap reported a slot still held by a live worktree process"
+  proc_root="$case_dir/unreadable-proc"
+  mkdir -p "$proc_root/123"
+  printf 'Name:\ttest\nUid:\t%s\t%s\t%s\t%s\n' "$(id -u)" "$(id -u)" "$(id -u)" "$(id -u)" > "$proc_root/123/status"
+  ln -s "$proc_root/123/cwd" "$proc_root/123/cwd"
+  unreadable_out=$(PATH="$fakebin:$BASE_PATH" FM_PROC_ROOT_OVERRIDE="$proc_root" \
+    FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$repo" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_TREEHOUSE_AUDIT_POOL_TIMEOUT=2 FM_TREEHOUSE_AUDIT_TIMEOUT=4 \
+    "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$unreadable_out" "TREEHOUSE_POOL:" \
+    "bootstrap reported an idle slot when a process cwd was unreadable"
+  assert_grep 'keep this sentinel' "$case_dir/home/state/sentinel" \
+    "read-only pool audit changed unrelated home state"
+  after=$(shasum -a 256 "$state")
+  [ "$before" = "$after" ] || fail "read-only pool audit rewrote original Treehouse state"
+  pass "bootstrap reports dirty ownerless pool slots without mutating them"
+}
+
+test_treehouse_audit_runs_under_orca() {
+  local case_dir fakebin out repo pool wt state proc_root
+  case_dir="$TMP_ROOT/treehouse-audit-orca"
+  repo="$case_dir/orca-repo"
+  pool="$case_dir/pool/orca-pool"
+  wt="$pool/3/orca-repo"
+  state="$pool/treehouse-state.json"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/projects" "$case_dir/home/state" "$pool"
+  git init --quiet -b main "$repo"
+  printf 'base\n' > "$repo/README.md"
+  git -C "$repo" add README.md
+  git -C "$repo" -c user.name=Test -c user.email=test@example.invalid commit -qm base
+  git -C "$repo" remote add origin https://example.invalid/orca.git
+  git -C "$repo" worktree add --quiet --detach "$wt" HEAD
+  node -e 'const fs=require("fs"); fs.writeFileSync(process.argv[1], JSON.stringify({worktrees:[{name:"3",path:process.argv[2]}]}))' \
+    "$state" "$wt"
+  printf 'dirty\n' > "$wt/dirty.txt"
+  printf '%s\n' orca > "$case_dir/home/config/backend"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_node "$fakebin"
+  fm_fake_exit0 "$fakebin" orca
+  add_real_jq "$fakebin"
+  proc_root="$case_dir/readable-proc"
+  mkdir -p "$proc_root"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_PROC_ROOT_OVERRIDE="$proc_root" \
+    FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$repo" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_TREEHOUSE_AUDIT_POOL_TIMEOUT=2 FM_TREEHOUSE_AUDIT_TIMEOUT=4 \
+    "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "TREEHOUSE_POOL: dirty idle slot 3 at $wt" \
+    "Orca backend selection suppressed the available Treehouse pool audit"
+  pass "bootstrap audits available Treehouse pools under Orca"
+}
+
+test_treehouse_dirty_idle_audit_is_read_only
+test_treehouse_audit_runs_under_orca
 
 test_treehouse_lease_check_follows_resolved_backend() {
   local case_dir fakebin out

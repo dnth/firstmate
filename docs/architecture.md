@@ -152,7 +152,10 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
 `fm-spawn.sh` also owns the base-freshness boundary for every ship and scout in a pooled Treehouse worktree: no worker starts from that worktree until it matches the fetched tip of origin's resolved default branch, and any unsafe or unverifiable base stops the spawn.
-Its header owns the exact refusal mechanics, while [`tests/fm-spawn-pool-base-freshen.test.sh`](../tests/fm-spawn-pool-base-freshen.test.sh) owns the portable regression coverage.
+Treehouse exposes no pre-reset hook, so Firstmate rejects non-ancestor slots through its guarded Git path and independently inspects append-only reflog transitions after non-interactive acquisition; every caller is withheld from the acquired path until that check passes, while a bypass is contained by preserving the lease for manual inspection.
+The headers in `bin/fm-treehouse-get.sh`, `bin/treehouse-git-guard/git`, and `bin/fm-pool-lib.sh` own the exact acquisition, ancestry, and shared clean-slot contracts.
+`fm-spawn.sh` then revalidates that the acquired slot is clean and fast-forwardable before launch, and [`tests/fm-spawn-pool-base-freshen.test.sh`](../tests/fm-spawn-pool-base-freshen.test.sh) owns the portable regression coverage.
+Before OMP reuses a pooled task worktree, `bin/fm-omp-process-lib.sh` clears prior runtime markers only after both recorded owners are proven absent; live or unverifiable ownership preserves the lease and stops the spawn.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.

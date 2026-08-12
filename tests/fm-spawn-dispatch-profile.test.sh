@@ -188,7 +188,14 @@ SH
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 [ -z "${FM_FAKE_TREEHOUSE_LOG:-}" ] || printf '%s|%s\n' "$PWD" "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
-if [ "${1:-}" = get ] && [ "${2:-}" = --lease ]; then
+if [ "${1:-}" = get ] && printf '%s\n' "$*" | grep -Eq '(^| )--lease( |$)'; then
+  if [ -n "${FM_TREEHOUSE_GUARD_COMPLETE_FILE:-}" ]; then
+    ( cd "$FM_FAKE_PANE_PATH" \
+      && git status --porcelain --untracked-files=all >/dev/null \
+      && git checkout --detach --force HEAD >/dev/null \
+      && git reset --hard HEAD >/dev/null \
+      && git clean -fd >/dev/null ) || exit $?
+  fi
   printf '%s\n' "$FM_FAKE_PANE_PATH"
 fi
 exit 0
@@ -987,6 +994,30 @@ test_omp_unsafe_fallback_refuses_before_endpoint() {
   pass "unsafe OMP fallback refuses before endpoint creation"
 }
 
+test_omp_prewalk_live_runtime_refusal_preserves_lease() {
+  local rec id out status treehouse_log target exclude
+  id=$(profile_id profile-omp-prewalk-live-runtime-z8owb)
+  rec=$(make_spawn_case profile-omp-prewalk-live-runtime omp "$id")
+  read_case_record "$rec"
+  treehouse_log="$CASE_DIR/treehouse.log"
+  target=openai-codex/gpt-5.6-luna:xhigh
+  exclude=$(git -C "$WT_DIR" rev-parse --git-path info/exclude)
+  printf '/state/\n' >> "$exclude"
+  mkdir -p "$WT_DIR/state"
+  printf '%s\n' "$$" > "$WT_DIR/state/.lock"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+  status=$?
+  expect_code 1 "$status" "live OMP runtime ownership should refuse Prewalk reuse"
+  assert_contains "$out" 'previous OMP session is still live' \
+    "Prewalk reuse did not report the live prior occupant"
+  assert_no_grep 'return' "$treehouse_log" \
+    "Prewalk runtime refusal returned a lease with a live occupant"
+  assert_present "$WT_DIR/state/.lock" "Prewalk runtime refusal removed the live occupant marker"
+  pass "Prewalk preserves a lease when prior occupant liveness remains"
+}
+
 test_omp_prewalk_premetadata_failure_cleans_endpoint_and_lease() {
   local rec id out status endpoint_log treehouse_log target tasktmp
   id=$(profile_id profile-omp-prewalk-premeta-z8ox)
@@ -1358,6 +1389,7 @@ test_omp_launch_requires_observable_turn_start_acknowledgement() {
   id=$(profile_id profile-omp-unacked-z8r)
   rec=$(make_spawn_case profile-omp-unacked omp "$id")
   read_case_record "$rec"
+  printf 'pool-local-config\n' > "$WT_DIR/treehouse.toml"
 
   out=$(FM_OMP_LAUNCH_ACK_POLLS=2 FM_OMP_LAUNCH_ACK_INTERVAL=0.01 \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
@@ -1372,7 +1404,7 @@ test_omp_launch_requires_observable_turn_start_acknowledgement() {
   assert_absent "$HOME_DIR/state/$id.meta" "OMP unacknowledged launch left owned metadata"
   assert_absent "$HOME_DIR/state/$id.omp-ext.ts" "OMP unacknowledged launch left its extension"
   assert_absent "/tmp/fm-$id" "OMP unacknowledged launch left its task temp root"
-  pass "OMP spawn requires the initial turn-start acknowledgement and cleans its unchanged launch"
+  pass "OMP spawn requires acknowledgement and returns a predicate-clean launch"
 }
 
 test_omp_herdr_unacked_launch_cleans_owned_endpoint_worktree_and_artifacts() {
@@ -1869,6 +1901,7 @@ test_omp_prewalk_accepts_colon_selector_from_launch_worktree_catalog
 test_omp_prewalk_fallback_omits_unsupported_disable_flag
 test_omp_valid_prewalk_does_not_require_disable_flag
 test_omp_unsafe_fallback_refuses_before_endpoint
+test_omp_prewalk_live_runtime_refusal_preserves_lease
 test_omp_prewalk_premetadata_failure_cleans_endpoint_and_lease
 test_omp_prewalk_ambiguous_herdr_creation_preserves_lease
 test_ordinary_herdr_partial_create_preserves_response_known_pane
