@@ -321,6 +321,28 @@ Tmux needs the exact `pi-launcher`, `pi-signed`, `pi`, and `Pi` process identiti
 Herdr uses native registered-agent state and needs no process-name branch.
 Zellij has no verified recovery-grade agent process probe, while Orca and cmux do not support secondmate spawns, so those three retain their existing generic ordinary-launch semantics without a new liveness matcher.
 
+### Guarded Treehouse entry
+
+The Treehouse-backed ordinary acquisition integration was inspected on 2026-08-12 against the pinned Treehouse v2.1.1 contract.
+Tmux, Herdr, Zellij, and cmux all submit the shared guarded acquisition command, then resolve the acquired worktree through their existing current-path adapter only after the wrapper enters its verified lease.
+Orca is not applicable because it owns task worktrees and never invokes Treehouse.
+
+```sh
+for backend in tmux herdr zellij cmux; do grep -q "fm_backend_${backend}_current_path" "bin/backends/$backend.sh" && printf '%s current-path adapter present\n' "$backend"; done
+bash tests/fm-spawn-pool-base-freshen.test.sh
+```
+
+Bounded output:
+
+```text
+tmux current-path adapter present
+herdr current-path adapter present
+zellij current-path adapter present
+cmux current-path adapter present
+ok - spawn guards Treehouse reset before non-ancestor acquisition
+# all fm-spawn-pool-base-freshen tests passed
+```
+
 The structural multi-row composer reader, Kimi pointer-delivery path, and OpenCode 1.18.4 busy-queue behavior are pinned by:
 
 ```sh

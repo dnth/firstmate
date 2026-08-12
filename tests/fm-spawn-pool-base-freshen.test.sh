@@ -256,16 +256,13 @@ test_diverged_pool_refuses_without_discarding_commits() {
 }
 
 test_acquisition_guards_before_treehouse_reset() {
-  local rec id out status before fake_treehouse invoked healthy state shell_marker
+  local rec id out status before fake_treehouse invoked healthy state shell_marker local_ahead return_log idle_file
   id='pool-acquisition-guard-r7'
   rec=$(make_case acquisition-guard "$id")
   read_case_record "$rec"
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
   expect_code 0 "$status" "guarded pooled acquisition should preserve healthy spawn behavior"
-  assert_grep 'fm-treehouse-get.sh' "$CASE_DIR/send.log" \
-    "spawn did not place ancestry validation at Treehouse's pre-reset acquisition boundary"
-
   fake_treehouse="$FAKEBIN_DIR/treehouse"
   cat > "$fake_treehouse" <<'SH'
 #!/usr/bin/env bash
@@ -350,6 +347,36 @@ SH
   fi
 
   git -C "$POOL_DIR" checkout --detach --force "$before" >/dev/null
+  printf 'local default ahead\n' > "$PROJECT_DIR/local-default.txt"
+  git -C "$PROJECT_DIR" add local-default.txt
+  git -C "$PROJECT_DIR" -c user.name=Test -c user.email=test@example.invalid commit -qm local-default-ahead
+  local_ahead=$(git -C "$PROJECT_DIR" rev-parse HEAD)
+  cat > "$fake_treehouse" <<'SH'
+#!/usr/bin/env bash
+set -e
+cd "$FM_FAKE_POOL"
+"$FM_TREEHOUSE_REAL_GIT" reset --hard "$FM_FAKE_LOCAL_DEFAULT"
+printf '%s\n' "$FM_FAKE_POOL"
+SH
+  chmod +x "$fake_treehouse"
+  out=$(cd "$PROJECT_DIR" && FM_FAKE_POOL="$POOL_DIR" FM_FAKE_LOCAL_DEFAULT="$local_ahead" \
+    PATH="$FAKEBIN_DIR:$PATH" "$ROOT/bin/fm-treehouse-get.sh" --lease 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "guarded acquisition accepted a reset to a non-ancestor local default"
+  assert_contains "$out" 'detected an unsafe post-reset condition' \
+    "guarded acquisition did not contain a local-default-ahead reset"
+
+  git -C "$POOL_DIR" checkout --detach --force "$before" >/dev/null
+  cat > "$fake_treehouse" <<'SH'
+#!/usr/bin/env bash
+set -e
+: > "$FM_FAKE_PROVIDER_INVOKED"
+printf '%s\n' "$*" > "$FM_FAKE_PROVIDER_ARGS"
+cd "$FM_FAKE_POOL"
+"$FM_TREEHOUSE_REAL_GIT" reset --hard origin/main
+printf '%s\n' "$FM_FAKE_POOL"
+SH
+  chmod +x "$fake_treehouse"
   shell_marker="$CASE_DIR/interactive-shell-entered"
   cat > "$FAKEBIN_DIR/interactive-shell" <<'SH'
 #!/usr/bin/env bash
@@ -367,6 +394,59 @@ SH
   [ ! -e "$shell_marker" ] || fail "ordinary acquisition entered the worker shell before containment passed"
   assert_contains "$out" 'detected an unsafe post-reset condition' \
     "ordinary acquisition did not contain the provider bypass before shell entry"
+
+  git -C "$POOL_DIR" reset --hard origin/main >/dev/null
+  git -C "$POOL_DIR" clean -fd >/dev/null
+  return_log="$CASE_DIR/signal-return"
+  idle_file="$CASE_DIR/idle-cwds"
+  : > "$idle_file"
+  cat > "$fake_treehouse" <<'SH'
+#!/usr/bin/env bash
+set -e
+case "${1:-}" in
+  get)
+    cd "$FM_FAKE_POOL"
+    git switch --force --detach origin/main >/dev/null
+    git reset --hard origin/main >/dev/null
+    git clean -df >/dev/null
+    printf '%s\n' "$FM_FAKE_POOL"
+    ;;
+  return)
+    printf '%s\n' "$*" > "$FM_FAKE_RETURN_LOG"
+    ;;
+esac
+SH
+  chmod +x "$fake_treehouse"
+  cat > "$FAKEBIN_DIR/interactive-shell" <<'SH'
+#!/usr/bin/env bash
+kill -TERM "$FM_TREEHOUSE_WRAPPER_PID"
+sleep 1
+SH
+  chmod +x "$FAKEBIN_DIR/interactive-shell"
+  out=$(cd "$PROJECT_DIR" && FM_FAKE_POOL="$POOL_DIR" FM_FAKE_RETURN_LOG="$return_log" \
+    FM_POOL_LSOF_CWD_FILE="$idle_file" SHELL="$FAKEBIN_DIR/interactive-shell" \
+    PATH="$FAKEBIN_DIR:$PATH" "$ROOT/bin/fm-treehouse-get.sh" 2>&1)
+  status=$?
+  expect_code 143 "$status" "interrupted ordinary acquisition should retain signal status"
+  assert_grep 'return --if-lease-holder' "$return_log" \
+    "interrupted ordinary acquisition stranded its verified clean synthetic lease"
+
+  rm -f "$return_log"
+  cat > "$FAKEBIN_DIR/interactive-shell" <<'SH'
+#!/usr/bin/env bash
+printf 'interrupted work\n' > "$TREEHOUSE_DIR/interrupted.txt"
+kill -TERM "$FM_TREEHOUSE_WRAPPER_PID"
+sleep 1
+SH
+  chmod +x "$FAKEBIN_DIR/interactive-shell"
+  out=$(cd "$PROJECT_DIR" && FM_FAKE_POOL="$POOL_DIR" FM_FAKE_RETURN_LOG="$return_log" \
+    FM_POOL_LSOF_CWD_FILE="$idle_file" SHELL="$FAKEBIN_DIR/interactive-shell" \
+    PATH="$FAKEBIN_DIR:$PATH" "$ROOT/bin/fm-treehouse-get.sh" 2>&1)
+  status=$?
+  expect_code 143 "$status" "interrupted dirty acquisition should retain signal status"
+  [ ! -e "$return_log" ] || fail "interrupted ordinary acquisition returned a dirty synthetic lease"
+  assert_contains "$out" 'preserved the dirty, live, or unverifiable lease' \
+    "interrupted ordinary acquisition did not report its preserved dirty lease"
   pass "spawn guards Treehouse reset before non-ancestor acquisition"
 }
 

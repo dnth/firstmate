@@ -10,6 +10,54 @@ GUARD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-treehouse-get.XXXXXX") || exit 1
 trap 'rm -rf "$GUARD_DIR"' EXIT
 . "$SCRIPT_DIR/fm-pool-lib.sh"
 
+lease_mode=0
+for arg in "$@"; do
+  [ "$arg" != --lease ] || lease_mode=1
+done
+repo=$PWD
+interactive_holder="fm-interactive-${BASHPID:-$$}"
+synthetic_acquired=
+synthetic_verified=0
+
+return_interrupted_synthetic_lease() {
+  local path=$synthetic_acquired
+  [ "$lease_mode" -eq 0 ] || return 0
+  if [ -z "$path" ] && [ -s "$GUARD_DIR/stdout" ]; then
+    path=$(sed -n '1p' "$GUARD_DIR/stdout")
+  fi
+  if [ -z "$path" ]; then
+    echo "warning: interrupted guarded Treehouse acquisition preserved the unverified lease held by $interactive_holder" >&2
+    return 1
+  fi
+  if [ "$synthetic_verified" -ne 1 ]; then
+    echo "warning: interrupted guarded Treehouse acquisition preserved the unverified lease at $path" >&2
+    return 1
+  fi
+  if ! fm_pool_worktree_clean "$path" || ! fm_pool_worktree_idle "$path"; then
+    echo "warning: interrupted guarded Treehouse shell preserved the dirty, live, or unverifiable lease at $path" >&2
+    return 1
+  fi
+  if ! ( cd "$repo" && treehouse return --if-lease-holder "$interactive_holder" "$path" ); then
+    echo "warning: interrupted guarded Treehouse shell could not return its verified clean lease at $path" >&2
+    return 1
+  fi
+}
+
+handle_signal() {
+  local signal=$1 status=1
+  trap - HUP INT TERM
+  return_interrupted_synthetic_lease || true
+  case "$signal" in
+    HUP) status=129 ;;
+    INT) status=130 ;;
+    TERM) status=143 ;;
+  esac
+  exit "$status"
+}
+trap 'handle_signal HUP' HUP
+trap 'handle_signal INT' INT
+trap 'handle_signal TERM' TERM
+
 if ! "$SCRIPT_DIR/fm-treehouse-status-read-only.sh" --candidates "$PWD" > "$GUARD_DIR/candidates"; then
   echo "error: could not establish a safe Treehouse acquisition boundary" >&2
   exit 1
@@ -46,13 +94,7 @@ then
   exit 1
 fi
 
-lease_mode=0
-for arg in "$@"; do
-  [ "$arg" != --lease ] || lease_mode=1
-done
-
 treehouse_args=("$@")
-interactive_holder="fm-interactive-${BASHPID:-$$}"
 [ "$lease_mode" -eq 1 ] || treehouse_args+=(--lease --lease-holder "$interactive_holder")
 FM_TREEHOUSE_REAL_GIT=$REAL_GIT \
 FM_TREEHOUSE_GUARD_ERROR_FILE="$GUARD_DIR/error" \
@@ -61,6 +103,9 @@ FM_TREEHOUSE_GUARD_COMPLETE_FILE="$GUARD_DIR/complete" \
 PATH="$SCRIPT_DIR/treehouse-git-guard:$PATH" \
   treehouse get "${treehouse_args[@]}" > "$GUARD_DIR/stdout"
 status=$?
+if [ "$lease_mode" -eq 0 ] && [ "$status" -eq 0 ]; then
+  synthetic_acquired=$(sed -n '1p' "$GUARD_DIR/stdout")
+fi
 if [ "$status" -ne 0 ] && [ -s "$GUARD_DIR/error" ]; then
   sed -n '1p' "$GUARD_DIR/error" >&2
 fi
@@ -91,11 +136,11 @@ for (const snapshot of JSON.parse(fs.readFileSync(snapshotPath, "utf8"))) {
     }
     if (/^0+$/.test(oldCommit)) continue;
     const oldAncestor = spawnSync(git, ["-C", snapshot.worktree, "merge-base", "--is-ancestor", oldCommit, snapshot.defaultRef]);
-    const newAncestor = spawnSync(git, ["-C", snapshot.worktree, "merge-base", "--is-ancestor", newCommit, snapshot.defaultRef]);
-    if (oldAncestor.status === 1 && newAncestor.status === 0) {
+    if (oldAncestor.status === 1) {
       process.stderr.write(`error: refusing pooled worktree acquisition at ${snapshot.worktree}: detected an unsafe post-reset condition that discarded ${oldCommit}\n`);
       process.exit(42);
     }
+    const newAncestor = spawnSync(git, ["-C", snapshot.worktree, "merge-base", "--is-ancestor", newCommit, snapshot.defaultRef]);
     if (![0, 1].includes(oldAncestor.status) || ![0, 1].includes(newAncestor.status)) {
       process.stderr.write(`error: refusing pooled worktree acquisition at ${snapshot.worktree}: could not verify post-acquisition ancestry\n`);
       process.exit(42);
@@ -116,14 +161,14 @@ acquired=$(sed -n '1p' "$GUARD_DIR/stdout")
   echo "error: refusing pooled worktree acquisition because Treehouse reported no acquired path" >&2
   exit 1
 }
+synthetic_verified=1
 if [ "$lease_mode" -eq 1 ]; then
   printf '%s\n' "$acquired"
   exit 0
 fi
 
-repo=$PWD
 shell=${SHELL:-/bin/sh}
-( cd "$acquired" && TREEHOUSE_DIR="$acquired" "$shell" )
+( cd "$acquired" && TREEHOUSE_DIR="$acquired" FM_TREEHOUSE_WRAPPER_PID=$$ "$shell" )
 shell_status=$?
 if ! ( cd "$repo" && treehouse return --if-lease-holder "$interactive_holder" "$acquired" ); then
   echo "warning: guarded Treehouse shell exited but its lease at $acquired could not be returned" >&2
