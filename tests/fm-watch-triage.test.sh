@@ -953,10 +953,10 @@ test_secondmate_nonpaused_stale_remains_suppressed() {
 }
 
 test_remote_secondmate_beacon_is_bounded() {
-  local dir state fakebin out capture_file statusf window key pane_hash sig pid on_bin control_home back age
+  local dir state fakebin out statusf window key sig pid on_bin control_home back age calls start elapsed
   dir=$(make_case remote-secondmate-beacon); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/remote.status"
-  window="remote:ios"; on_bin="$dir/fm-on.sh"
+  out="$dir/watch.out"; statusf="$state/remote.status"
+  window="remote:ios"; on_bin="$dir/fm-on.sh"; calls="$dir/remote-calls"
   control_home="$dir/control-home"
   mkdir -p "$control_home/state" "$control_home/bin"
   printf 'ios\n' > "$control_home/.fm-secondmate-home"
@@ -967,44 +967,62 @@ test_remote_secondmate_beacon_is_bounded() {
   age=$(FM_HOME="$control_home" FM_ROOT_OVERRIDE="$ROOT" \
     "$ROOT/bin/fm-remote-secondmate-control.sh" beacon-age ios)
   [ "$age" -ge 29 ] && [ "$age" -le 35 ] || fail "host-local beacon age was not measured on the remote clock: $age"
-  printf 'idle while supervising remote crew\n' > "$capture_file"
   printf 'window=%s\nkind=secondmate\nremote_host=remote-mac\nhome=/remote/home\n' "$window" > "$state/remote.meta"
   printf 'working: supervising remote crew\n' > "$statusf"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-remote_status"
   key=$(printf '%s' "$window" | tr '.:/' '___')
-  pane_hash=$(hash_text "idle while supervising remote crew")
-  printf '%s' "$pane_hash" > "$state/.hash-$key"
-  printf '1\n' > "$state/.count-$key"
-  printf '%s\n' '#!/usr/bin/env bash' "printf '%s\\n' \"\${FM_FAKE_REMOTE_BEACON_AGE:?}\"" > "$on_bin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 97
+SH
+  cat > "$on_bin" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${3:-missing}" >> "${FM_FAKE_REMOTE_CALLS:?}"
+case "${FM_FAKE_REMOTE_BEACON_AGE:?}" in
+  hang) exec sleep 30 ;;
+  *) printf '%s\n' "$FM_FAKE_REMOTE_BEACON_AGE" ;;
+esac
+SH
+  chmod +x "$fakebin/tmux"
   chmod +x "$on_bin"
   export FM_FAKE_CREW_STATE='state: working · source: run-step · supervising remote crew'
 
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_ON_BIN="$on_bin" \
-    FM_FAKE_REMOTE_BEACON_AGE=0 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_FAKE_REMOTE_CALLS="$calls" FM_FAKE_REMOTE_BEACON_AGE=0 \
+    FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_live "$pid" 30 || { reap "$pid"; fail "fresh remote beacon did not suppress the idle pane"; }
   reap "$pid"
 
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+  start=$(date +%s)
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_ON_BIN="$on_bin" \
-    FM_FAKE_REMOTE_BEACON_AGE=500 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_FAKE_REMOTE_CALLS="$calls" FM_FAKE_REMOTE_BEACON_AGE=hang FM_WATCH_REMOTE_TIMEOUT=1 \
+    FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_numeric_file "$state/.stale-since-$key" 30 || { reap "$pid"; fail "stale remote beacon did not enter wedge tracking"; }
+  wait_numeric_file "$state/.stale-since-$key" 80 \
+    || { reap "$pid"; fail "a non-returning remote beacon probe blocked stale tracking"; }
   reap "$pid"
+  elapsed=$(( $(date +%s) - start ))
+  [ "$elapsed" -le 8 ] || fail "remote beacon timeout exceeded its watcher bound: ${elapsed}s"
   printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   : > "$out"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_ON_BIN="$on_bin" \
-    FM_FAKE_REMOTE_BEACON_AGE=500 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_FAKE_REMOTE_CALLS="$calls" FM_FAKE_REMOTE_BEACON_AGE=500 \
+    FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 40 || fail "stale remote beacon did not wedge-escalate"
   grep -F "possible wedge" "$out" >/dev/null || fail "stale remote beacon omitted possible-wedge escalation"
+  if grep -v '^beacon-age$' "$calls" | grep . >/dev/null; then
+    fail "remote stale handling used an unsupported remote call: $(tr '\n' ' ' < "$calls")"
+  fi
   unset FM_FAKE_CREW_STATE
-  pass "remote secondmate beacon evidence is bounded by the stale threshold"
+  pass "remote beacon timeout is bounded and still reaches wedge escalation"
 }
 
 test_secondmate_stale_supervisor_beacon_escalates() {
@@ -1046,6 +1064,35 @@ test_secondmate_stale_supervisor_beacon_escalates() {
   grep -F "possible wedge" "$out" >/dev/null || fail "stale secondmate supervisor beacon omitted possible-wedge escalation"
   unset FM_FAKE_CREW_STATE
   pass "a stale secondmate-home watcher beacon still reaches genuine wedge escalation"
+}
+
+test_secondmate_future_supervisor_beacon_escalates() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid home ahead
+  dir=$(make_case secondmate-future-beacon); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/secondmate-working.status"
+  home="$dir/secondmate-home"; mkdir -p "$home/state"
+  window="test:fm-secondmate-future-beacon"
+  printf 'idle while the parent supervises\n' > "$capture_file"
+  printf 'window=%s\nkind=secondmate\nhome=%s\n' "$window" "$home" > "$state/secondmate-working.meta"
+  : > "$home/state/.last-watcher-beat"
+  ahead=$(( $(date +%s) + 500 ))
+  set_mtime "$ahead" "$home/state/.last-watcher-beat"
+  printf 'working: the parent supervises this secondmate\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-secondmate-working_status"
+  key=$(printf '%s' "$window" | tr '.:/' '___')
+  pane_hash=$(hash_text "idle while the parent supervises")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · supervising a live child'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_numeric_file "$state/.stale-since-$key" 30 \
+    || { reap "$pid"; fail "a future-dated secondmate beacon suppressed wedge tracking"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a future-dated secondmate-home beacon cannot prove liveness"
 }
 
 test_secondmate_unpause_clears_pause_tracking() {
@@ -2041,6 +2088,7 @@ test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_remote_secondmate_beacon_is_bounded
 test_secondmate_stale_supervisor_beacon_escalates
+test_secondmate_future_supervisor_beacon_escalates
 test_secondmate_unpause_clears_pause_tracking
 test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
 test_nonterminal_paused_rechecks_authoritative_state

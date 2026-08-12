@@ -43,8 +43,8 @@
 #                          signal, or restart of the worker or its tool process.
 #                          An idle non-paused secondmate is also absorbed while
 #                          its home watcher beacon is fresh within the wedge
-#                          threshold; missing or stale evidence follows the
-#                          ordinary stale and possible-wedge path.
+#                          threshold; missing, stale, future-dated, or timed-out
+#                          evidence follows the ordinary stale and possible-wedge path.
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
@@ -91,6 +91,11 @@ mkdir -p "$STATE"
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
 ON_BIN=${FM_ON_BIN:-$SCRIPT_DIR/fm-on.sh}
+REMOTE_TIMEOUT=${FM_WATCH_REMOTE_TIMEOUT:-5}
+case "$REMOTE_TIMEOUT" in
+  ''|*[!0-9]*|0) REMOTE_TIMEOUT=5 ;;
+  *) [ "$REMOTE_TIMEOUT" -le 15 ] || REMOTE_TIMEOUT=5 ;;
+esac
 WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
 # The singleton-lock acquisition, EXIT trap, and the blocking supervision loop
 # all live below the source guard at the very bottom of this file (see "Main
@@ -461,6 +466,14 @@ surface_nonterminal_stale() {  # <window> <hash>
 # and the parent uses the wedge threshold as its maximum acceptable age. A
 # missing or stale beacon deliberately falls through to the ordinary stale path,
 # preserving wedge detection for an unresponsive supervisor.
+run_with_deadline() {
+  local seconds=$1
+  shift
+  command -v perl >/dev/null 2>&1 || return 124
+  # shellcheck disable=SC2016
+  perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; waitpid $pid, 0; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$seconds" "$@"
+}
+
 secondmate_supervision_is_alive() {  # <window>
   local win=$1 meta home beat remote_host task age
   meta=$(fm_backend_meta_for_window "$win" "$STATE" 2>/dev/null || true)
@@ -468,15 +481,19 @@ secondmate_supervision_is_alive() {  # <window>
   remote_host=$(grep '^remote_host=' "$meta" | cut -d= -f2- || true)
   if [ -n "$remote_host" ]; then
     task=$(window_to_task "$win" "$STATE")
-    age=$("$ON_BIN" "$task" fm-remote-secondmate-control.sh beacon-age "$task" </dev/null 2>/dev/null) || return 1
+    age=$(run_with_deadline "$REMOTE_TIMEOUT" "$ON_BIN" "$task" \
+      fm-remote-secondmate-control.sh beacon-age "$task" </dev/null 2>/dev/null) || return 1
     case "$age" in ''|*[!0-9]*) return 1 ;; esac
-    [ "$age" -lt "$STALE_ESCALATE_SECS" ]
+    [ "$age" -ge 0 ] && [ "$age" -lt "$STALE_ESCALATE_SECS" ]
     return
   fi
   home=$(grep '^home=' "$meta" | cut -d= -f2- || true)
   [ -n "$home" ] || return 1
   beat="$home/state/.last-watcher-beat"
-  [ "$(age_of "$beat")" -lt "$STALE_ESCALATE_SECS" ]
+  [ -f "$beat" ] && [ ! -L "$beat" ] || return 1
+  age=$(age_of "$beat")
+  case "$age" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$age" -ge 0 ] && [ "$age" -lt "$STALE_ESCALATE_SECS" ]
 }
 
 age_of() {  # seconds since file mtime; "due immediately" if missing
@@ -973,6 +990,8 @@ EOF
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
+    meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
+    remote_host=$(grep '^remote_host=' "$meta" | cut -d= -f2- || true)
     key=${w//:/_}
     key=${key//\//_}
     key=${key//./_}
@@ -985,7 +1004,13 @@ EOF
       clear_stale_tracking "$w"
       continue
     fi
-    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    remote_stale=0
+    if [ "$kind" = secondmate ] && [ -n "$remote_host" ]; then
+      tail40="remote secondmate watcher beacon missing or stale: $w"
+      remote_stale=1
+    else
+      tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    fi
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"
@@ -1000,7 +1025,7 @@ EOF
     # harness renders its busy indicator) so busy-looking strings in displayed
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
-    if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    if [ "$remote_stale" -eq 0 ] && window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
