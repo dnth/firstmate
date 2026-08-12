@@ -172,7 +172,7 @@ Treat it exactly like any other irreversible action.
 `bin/fm-runpod-pod-boot.sh` is the tracked boot script, sent to every pod base64-encoded in one environment variable and run as its start command.
 The container image needs nothing from this repo preinstalled, and the boot contract is versioned with the code that creates the pod.
 
-On a volume's first boot it provisions the whole remote toolchain, so a fresh pod reaches readiness with no manual step:
+On a volume's first boot it automates the noninteractive prerequisites - base packages, the durable toolchain, and the code root clone:
 
 1. Install base packages: `git`, `jq`, `curl`, `ca-certificates`, `unzip`, and `openssh-server`.
 2. Install a current Node LTS, which the npm-distributed tools require.
@@ -190,7 +190,7 @@ A marker records only the volume-resident contract, while every replacement pod 
 A raised contract version re-provisions the durable tools exactly once.
 `bin/fm-runpod-pod-boot.sh --check` prints the plan as one `ensure=<item>` line per step and touches nothing, which is how the contract is tested with no pod.
 
-A worker harness still needs its own interactive login, which the doctor already classifies as a human step.
+A worker harness still needs its own interactive login before `bin/fm-remote-doctor.sh` reports the host ready, and the doctor classifies that login as a human step.
 Leaving `--harness-npm` unset installs no harness and lets the doctor report that gap rather than pretending it is closed.
 
 ## Verification
