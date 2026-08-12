@@ -239,9 +239,15 @@ if [ "$transport" -eq 0 ]; then
   alias=
   readiness=0
   i=0
+  connect_timeout=10
   while [ "$i" -lt "${#args[@]}" ]; do
     case "${args[$i]}" in
-      -o) i=$((i + 2)); continue ;;
+      -o)
+        i=$((i + 1))
+        case "${args[$i]}" in ConnectTimeout=*) connect_timeout=${args[$i]#*=} ;; esac
+        i=$((i + 1))
+        continue
+        ;;
       -F) i=$((i + 1)); conf=${args[$i]} ;;
       test|-f) ;;
       /workspace/persistent-runtime/boot.ready) readiness=1 ;;
@@ -250,6 +256,10 @@ if [ "$transport" -eq 0 ]; then
     i=$((i + 1))
   done
   [ -n "$conf" ] && [ -f "$conf" ] || exit 255
+  if [ "${FM_FAKE_SSH_PROBE_BLOCK:-0}" = 1 ]; then
+    sleep "$connect_timeout"
+    exit 255
+  fi
   [ "$readiness" -eq 0 ] || [ "${FM_FAKE_BOOT_INCOMPLETE:-0}" != 1 ] || exit 255
   host=$(sed -n 's/^ *HostName *//p' "$conf" | head -1)
   port=$(sed -n 's/^ *Port *//p' "$conf" | head -1)

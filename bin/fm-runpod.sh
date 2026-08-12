@@ -468,8 +468,8 @@ known_hosts_remove_alias() {  # <alias>
 
 # The probe reads the generated fragment directly and requires the boot marker
 # written only after the doctor-owned readiness handoff succeeds.
-ssh_probe() {  # <alias>
-  "$SSH_BIN" -o BatchMode=yes -o ConnectTimeout=10 \
+ssh_probe() {  # <alias> <timeout>
+  "$SSH_BIN" -o BatchMode=yes -o "ConnectTimeout=$2" \
     -F "$(ssh_fragment_path "$1")" "$1" \
     test -f /workspace/persistent-runtime/boot.ready >/dev/null 2>&1
 }
@@ -832,9 +832,11 @@ cmd_wake() {
     "cost_per_hr=$(json_field "$pod" '.costPerHr')" \
     "pod_started_at=$(json_field "$pod" '.lastStartedAt')"
 
-  while ! ssh_probe "$alias"; do
-    [ "$SECONDS" -lt "$deadline" ] \
+  while :; do
+    remaining=$((deadline - SECONDS))
+    [ "$remaining" -gt 0 ] \
       || die "pod $pod_id published $host:$port but its SSH bootstrap did not complete within ${WAKE_TIMEOUT}s; it is preserved for inspection"
+    ssh_probe "$alias" "$remaining" && break
     remaining=$((deadline - SECONDS))
     delay=$POLL_INTERVAL
     [ "$delay" -le "$remaining" ] || delay=$remaining

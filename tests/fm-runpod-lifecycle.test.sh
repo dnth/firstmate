@@ -135,6 +135,17 @@ assert_contains "$out" "could not read the pod's SSH host key" \
 [ "$(record_field ios lifecycle)" != ready ] || fail "a keyscan timeout must never record the pod ready"
 pass "endpoint discovery and host-key scanning share one wall-clock deadline"
 
+started=$(date +%s)
+out=$(FM_FAKE_SSH_PROBE_BLOCK=1 FM_TEST_RUNPOD_POLL_INTERVAL=1 \
+  FM_TEST_RUNPOD_WAKE_TIMEOUT=2 rp wake ios 2>&1) \
+  && fail "wake must stop at its wall-clock deadline when readiness probing blocks"
+elapsed=$(($(date +%s) - started))
+assert_contains "$out" "SSH bootstrap did not complete" \
+  "a blocked readiness probe must report the bounded wake failure"
+[ "$elapsed" -le 4 ] || fail "the 2s wake deadline took ${elapsed}s during readiness probing"
+[ "$(record_field ios lifecycle)" != ready ] || fail "a readiness timeout must never record the pod ready"
+pass "readiness probing shares the one wall-clock wake deadline"
+
 KEYSCAN_ATTEMPTS="$TMP_ROOT/keyscan-attempts"
 out=$(FM_FAKE_BOOT_INCOMPLETE=1 FM_FAKE_KEYSCAN_ATTEMPTS="$KEYSCAN_ATTEMPTS" \
   FM_FAKE_KEYSCAN_FAILS=1 FM_TEST_RUNPOD_POLL_INTERVAL=1 FM_TEST_RUNPOD_WAKE_TIMEOUT=4 \

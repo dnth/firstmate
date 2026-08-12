@@ -75,13 +75,7 @@ if [ "${1:-}" = install ] && [ "${2:-}" = -g ]; then
 fi
 exit 0
 SH
-  cat > "$w/templates/node" <<'SH'
-#!/usr/bin/env bash
-printf 'node %s %s\n' "$0" "$*" >> "$FM_FAKE_CALLS"
-[ "${1:-}" != -v ] || { printf 'v22.14.0\n'; exit 0; }
-exit 0
-SH
-  chmod +x "$w/templates/npm" "$w/templates/node"
+  chmod +x "$w/templates/npm"
 
   cat > "$fakebin/apt-get" <<'SH'
 #!/usr/bin/env bash
@@ -119,11 +113,11 @@ SH
   cat > "$fakebin/sha256sum" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
-  *node-v22.14.0-linux-x64.tar.gz)
-    printf '9d942932535988091034dc94cc5f42b6dc8784d6366df3a36c4c9ccb3996f0c2  %s\n' "$1"
+  *node-v24.19.0-linux-x64.tar.gz)
+    printf 'f625d97cd707df4ff96254916fbc5ff014f09c09effe5a1e0ca8f6d41a8789d4  %s\n' "$1"
     ;;
-  *node-v22.14.0-linux-arm64.tar.gz)
-    printf '8cf30ff7250f9463b53c18f89c6c606dfda70378215b2c905d0a9a8b08bd45e0  %s\n' "$1"
+  *node-v24.19.0-linux-arm64.tar.gz)
+    printf 'd28c8a5bf0a808f0ed434a1dce8c54ae98f0371c0bd86ac58abc613f73e6643f  %s\n' "$1"
     ;;
   *) exec /usr/bin/sha256sum "$@" ;;
 esac
@@ -142,7 +136,13 @@ done
 root=${archive##*/}
 root=${root%.tar.gz}
 mkdir -p "$dest/$root/bin"
-cp "$FM_FAKE_NODE_TEMPLATE" "$dest/$root/bin/node"
+version=${root#node-v}
+version=${version%%-linux-*}
+cat > "$dest/$root/bin/node" <<SH2
+#!/usr/bin/env bash
+[ "\${1:-}" != -v ] || { printf 'v$version\\n'; exit 0; }
+exit 0
+SH2
 cp "$FM_FAKE_NPM_TEMPLATE" "$dest/$root/bin/npm"
 chmod +x "$dest/$root/bin/node" "$dest/$root/bin/npm"
 SH
@@ -158,7 +158,7 @@ if [ "${1:-}" = clone ]; then
     printf '#!/usr/bin/env bash\nprintf "%s %%s\\n" "$*" >> "$FM_FAKE_CALLS"\nprintf '\''#!/usr/bin/env bash\\nexit 0\\n'\'' > "$1/%s"\nchmod +x "$1/%s"\n' "$i" "$tool" "$tool" > "$dest/bin/$i"
     chmod +x "$dest/bin/$i"
   done
-  printf '#!/usr/bin/env bash\ncommand -v herdr >> "$FM_FAKE_CALLS" || exit 1\ncommand -v treehouse >> "$FM_FAKE_CALLS" || exit 1\ncommand -v tasks-axi >> "$FM_FAKE_CALLS" || exit 1\nprintf "doctor %%s\\n" "$*" >> "$FM_FAKE_CALLS"\nexit 0\n' > "$dest/bin/fm-remote-doctor.sh"
+  printf '#!/usr/bin/env bash\ncommand -v herdr >> "$FM_FAKE_CALLS" || exit 1\ncommand -v treehouse >> "$FM_FAKE_CALLS" || exit 1\ncommand -v tasks-axi >> "$FM_FAKE_CALLS" || exit 1\ncommand -v harness >> "$FM_FAKE_CALLS" || exit 1\nprintf "doctor %%s\\n" "$*" >> "$FM_FAKE_CALLS"\nexit 0\n' > "$dest/bin/fm-remote-doctor.sh"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$dest/bin/fm-remote-entrypoint.sh"
   chmod +x "$dest/bin/fm-remote-doctor.sh" "$dest/bin/fm-remote-entrypoint.sh"
 fi
@@ -201,16 +201,16 @@ provision_only() {  # <world> [harness]
     FM_FAKE_CALLS="$w/calls.log" \
     FM_FAKE_EPHEMERAL_BIN="$w/fakebin" \
     FM_FAKE_NPM_TEMPLATE="$w/templates/npm" \
-    FM_FAKE_NODE_TEMPLATE="$w/templates/node" \
     FM_SYSTEM_SSH_DIR="$w/system-ssh" \
     FM_POD_HARNESS_NPM="$harness" \
     timeout 60 bash "$BOOT" >/dev/null 2>&1 &
     boot_pid=$!
     for _ in $(seq 1 300); do
-      grep -q 'boot complete' "$w/volume/persistent-runtime/boot.log" 2>/dev/null && break
+      grep -qxF "harness=$harness" "$w/volume/persistent-runtime/toolchain.provisioned" 2>/dev/null && break
       kill -0 "$boot_pid" 2>/dev/null || break
       sleep 0.1
     done
+    sleep 1
     kill "$boot_pid" 2>/dev/null || true
     wait "$boot_pid" 2>/dev/null || true
   )
@@ -228,7 +228,6 @@ provision_idempotent() {  # <world> [harness]
     FM_FAKE_CALLS="$w/calls.log" \
     FM_FAKE_EPHEMERAL_BIN="$w/fakebin" \
     FM_FAKE_NPM_TEMPLATE="$w/templates/npm" \
-    FM_FAKE_NODE_TEMPLATE="$w/templates/node" \
     FM_SYSTEM_SSH_DIR="$w/system-ssh" \
     FM_POD_HARNESS_NPM="$harness" \
     timeout 30 bash "$BOOT" >/dev/null 2>&1 &
@@ -259,12 +258,20 @@ assert_present "$w/volume/persistent-runtime/toolchain.provisioned" "a completed
 pass "first boot clones the code root and installs the required toolchain through the pinned installers"
 
 assert_not_contains "$calls" "npm install -g @" "no harness package may be installed unless one is configured"
+assert_absent "$w/volume/persistent-runtime/boot.ready" \
+  "an unset harness must leave readiness to the doctor's human-step refusal"
 pass "no harness is installed when none is configured, leaving that gap to the doctor"
+
+provision_only "$w" "@example/harness"
+assert_contains "$(cat "$w/calls.log")" "npm install -g @example/harness" \
+  "changing the configured harness must invalidate the durable marker and install it"
+assert_present "$w/volume/persistent-runtime/boot.ready" \
+  "a configured durable harness must permit the doctor-owned readiness handoff"
 
 # --- idempotence -------------------------------------------------------------
 
 : > "$w/calls.log"
-provision_idempotent "$w"
+provision_idempotent "$w" "@example/harness"
 second=$(cat "$w/calls.log")
 assert_not_contains "$second" "git clone" "a second boot must not re-clone the code root"
 assert_not_contains "$second" "npm install -g tasks-axi" "a second boot must not reinstall the toolchain"
@@ -276,18 +283,18 @@ mkdir -p "$w/home" "$w/system-ssh"
 rm -f "$w/fakebin/git" "$w/fakebin/jq" "$w/fakebin/curl" "$w/fakebin/unzip" \
   "$w/fakebin/sshd"
 : > "$w/calls.log"
-provision_only "$w"
+provision_only "$w" "@example/harness"
 replacement=$(cat "$w/calls.log")
 assert_contains "$replacement" "apt-get install" "a replacement pod must restore its ephemeral system prerequisites"
-assert_not_contains "$replacement" "node-v22.14.0" "a replacement pod must not reinstall its durable Node runtime"
-assert_contains "$replacement" "$w/volume/persistent-runtime/node/bin/node" \
-  "a replacement doctor handoff must use Node from the retained volume"
+assert_not_contains "$replacement" "curl -fsSL" "a replacement pod must not reinstall its durable Node runtime"
 assert_not_contains "$replacement" "git clone" "a replacement pod must reuse the durable code root"
 assert_not_contains "$replacement" "fm-install-herdr.sh" "a replacement pod must reuse durable pinned tools"
 assert_not_contains "$replacement" "npm install -g tasks-axi" "a replacement pod must reuse its durable npm prefix"
 assert_contains "$replacement" "$w/volume/persistent-runtime/bin/herdr" "a replacement doctor handoff must see durable tools"
 assert_present "$w/home/.local/bin/herdr" "a replacement pod must recreate its SSH-visible durable-tool links"
 assert_present "$w/home/.local/bin/node" "a replacement pod must recreate its SSH-visible durable Node link"
+[ "$(readlink "$w/home/.local/bin/node")" = "$w/volume/persistent-runtime/node/bin/node" ] \
+  || fail "a replacement pod must serve Node from the retained volume"
 assert_present "$w/volume/persistent-runtime/boot.ready" "a replacement pod must reach readiness from the retained volume"
 pass "replacement pods restore ephemeral prerequisites and reuse the durable toolchain"
 
@@ -298,7 +305,7 @@ printf '#!/usr/bin/env bash\nexit 0\n' > "$w/volume/persistent-runtime/bin/treeh
 chmod +x "$w/volume/persistent-runtime/bin/herdr" "$w/volume/persistent-runtime/bin/treehouse"
 printf '0\n' > "$w/volume/persistent-runtime/toolchain.provisioned"
 : > "$w/calls.log"
-provision_only "$w"
+provision_only "$w" "@example/harness"
 pinned=$(cat "$w/calls.log")
 assert_contains "$pinned" "fm-install-herdr.sh" "a stale contract must replace a pre-existing herdr through the pinned installer"
 assert_contains "$pinned" "fm-install-treehouse.sh" "a stale contract must replace a pre-existing treehouse through the pinned installer"
@@ -308,12 +315,16 @@ pass "a contract bump cannot be satisfied by pre-existing unverified tools"
 
 printf '0\n' > "$w/volume/persistent-runtime/toolchain.provisioned"
 : > "$w/calls.log"
-provision_only "$w"
+provision_only "$w" "@example/harness"
 raised=$(cat "$w/calls.log")
 assert_contains "$raised" "npm install -g tasks-axi" "a stale contract version must re-provision"
 [ "$(cat "$w/volume/persistent-runtime/toolchain.provisioned")" != 0 ] \
   || fail "re-provisioning must record the current contract version"
 pass "a raised toolchain contract re-provisions exactly once"
+
+[ "$("$w/volume/persistent-runtime/node/bin/node" -v)" = v24.19.0 ] \
+  || fail "new volumes must pin the current Node 24.19.0 LTS runtime"
+pass "new volumes install the current pinned Node LTS"
 
 # --- the marker follows the configured harness -------------------------------
 
@@ -327,7 +338,15 @@ assert_contains "$(cat "$w2/calls.log")" "npm install -g @example/harness" \
 provision_idempotent "$w2" "@example/harness"
 assert_not_contains "$(cat "$w2/calls.log")" "npm install -g @example/harness" \
   "the marker bound to the configured harness must make its next boot idempotent"
-pass "the durable marker tracks harness configuration changes"
+: > "$w2/calls.log"
+provision_only "$w2"
+assert_absent "$w2/volume/persistent-runtime/npm/bin/harness" \
+  "unsetting the harness must remove its durable executable"
+assert_absent "$w2/home/.local/bin/harness" \
+  "unsetting the harness must remove its SSH-visible executable"
+assert_absent "$w2/volume/persistent-runtime/boot.ready" \
+  "an unset harness must not leave a stale readiness marker"
+pass "the durable marker reconciles harness configuration in both directions"
 
 # --- base-package failures cannot satisfy the contract ----------------------
 
@@ -337,7 +356,7 @@ out=$(
   PATH="$w4/fakebin:/usr/bin:/bin" HOME="$w4/home" FM_VOLUME="$w4/volume" \
   FM_REMOTE_ORIGIN="$w4/origin" FM_FAKE_CALLS="$w4/calls.log" \
   FM_FAKE_EPHEMERAL_BIN="$w4/fakebin" FM_FAKE_NPM_TEMPLATE="$w4/templates/npm" \
-  FM_FAKE_NODE_TEMPLATE="$w4/templates/node" FM_SYSTEM_SSH_DIR="$w4/system-ssh" \
+  FM_SYSTEM_SSH_DIR="$w4/system-ssh" \
   FM_FAKE_APT_FAIL=1 \
   timeout 3 bash "$BOOT" 2>&1 || true
 )
@@ -356,7 +375,7 @@ exit 0
 SH
 chmod +x "$w5/volume/persistent-runtime/node/bin/node"
 provision_only "$w5"
-assert_contains "$(cat "$w5/calls.log")" "node-v22.14.0" \
+assert_contains "$(cat "$w5/calls.log")" "node-v24.19.0" \
   "an unsupported durable Node must be replaced by the pinned volume runtime"
 assert_present "$w5/volume/persistent-runtime/toolchain.provisioned" \
   "the corrected durable Node must permit the contract marker"
@@ -376,7 +395,7 @@ out=$(
   PATH="$w6/fakebin:/usr/bin:/bin" HOME="$w6/home" FM_VOLUME="$w6/volume" \
   FM_REMOTE_ORIGIN="$w6/origin" FM_FAKE_CALLS="$w6/calls.log" \
   FM_FAKE_EPHEMERAL_BIN="$w6/fakebin" FM_FAKE_NPM_TEMPLATE="$w6/templates/npm" \
-  FM_FAKE_NODE_TEMPLATE="$w6/templates/node" FM_SYSTEM_SSH_DIR="$w6/system-ssh" \
+  FM_SYSTEM_SSH_DIR="$w6/system-ssh" \
   timeout 4 bash "$BOOT" 2>&1 || true
 )
 assert_contains "$out" "volume-backed host key could not be restored or persisted" \
@@ -394,7 +413,7 @@ out=$(
   PATH="$w3/fakebin:/usr/bin:/bin" HOME="$w3/home" FM_VOLUME="$w3/volume" \
   FM_REMOTE_ORIGIN="" FM_FAKE_CALLS="$w3/calls.log" \
   FM_FAKE_EPHEMERAL_BIN="$w3/fakebin" FM_FAKE_NPM_TEMPLATE="$w3/templates/npm" \
-  FM_FAKE_NODE_TEMPLATE="$w3/templates/node" FM_SYSTEM_SSH_DIR="$w3/system-ssh" \
+  FM_SYSTEM_SSH_DIR="$w3/system-ssh" \
   timeout 20 bash "$BOOT" 2>&1 &
   boot_pid=$!
   sleep 3

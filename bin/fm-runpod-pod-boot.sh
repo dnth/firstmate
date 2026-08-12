@@ -59,7 +59,7 @@ FM_BOOT_LOG=${FM_BOOT_LOG:-$FM_PERSIST/boot.log}
 
 # Raise this when the provisioning contract changes so existing volumes
 # re-provision exactly once instead of silently keeping an older toolchain.
-FM_TOOLCHAIN_CONTRACT=3
+FM_TOOLCHAIN_CONTRACT=4
 FM_TOOLCHAIN_MARKER="$FM_PERSIST/toolchain.provisioned"
 FM_BOOT_READY="$FM_PERSIST/boot.ready"
 FM_LOCAL_BIN=${FM_LOCAL_BIN:-$FM_PERSIST/bin}
@@ -76,7 +76,7 @@ FM_REMOTE_ORIGIN=${FM_REMOTE_ORIGIN:-}
 # interactive login the doctor already classifies as a human step.
 FM_POD_HARNESS_NPM=${FM_POD_HARNESS_NPM:-}
 FM_APT_PACKAGES="git jq curl ca-certificates unzip openssh-server"
-FM_NODE_VERSION=22.14.0
+FM_NODE_VERSION=24.19.0
 
 log() {
   printf '[fm-pod-boot] %s\n' "$1"
@@ -159,8 +159,8 @@ ensure_node() {
   have curl || { log "curl is unavailable, so Node cannot be installed"; return 1; }
   have tar || { log "tar is unavailable, so Node cannot be installed"; return 1; }
   case "$(uname -m)" in
-    x86_64) arch=x64; checksum=9d942932535988091034dc94cc5f42b6dc8784d6366df3a36c4c9ccb3996f0c2 ;;
-    aarch64|arm64) arch=arm64; checksum=8cf30ff7250f9463b53c18f89c6c606dfda70378215b2c905d0a9a8b08bd45e0 ;;
+    x86_64) arch=x64; checksum=f625d97cd707df4ff96254916fbc5ff014f09c09effe5a1e0ca8f6d41a8789d4 ;;
+    aarch64|arm64) arch=arm64; checksum=d28c8a5bf0a808f0ed434a1dce8c54ae98f0371c0bd86ac58abc613f73e6643f ;;
     *) log "Node has no pinned build for $(uname -m)"; return 1 ;;
   esac
   archive="node-v$FM_NODE_VERSION-linux-$arch.tar.gz"
@@ -259,18 +259,15 @@ ensure_npm_tools() {
 }
 
 toolchain_marker_current() {
-  local expected actual harness_hash
+  local expected actual
   [ -f "$FM_TOOLCHAIN_MARKER" ] || return 1
-  harness_hash=$(printf '%s' "$FM_POD_HARNESS_NPM" | sha256sum | awk '{print $1}') || return 1
-  expected=$(printf 'contract=%s\nharness=%s' "$FM_TOOLCHAIN_CONTRACT" "$harness_hash")
+  expected=$(printf 'contract=%s\nharness=%s' "$FM_TOOLCHAIN_CONTRACT" "$FM_POD_HARNESS_NPM")
   actual=$(cat "$FM_TOOLCHAIN_MARKER" 2>/dev/null) || return 1
   [ "$actual" = "$expected" ]
 }
 
 toolchain_marker_write() {
-  local harness_hash
-  harness_hash=$(printf '%s' "$FM_POD_HARNESS_NPM" | sha256sum | awk '{print $1}') || return 1
-  printf 'contract=%s\nharness=%s\n' "$FM_TOOLCHAIN_CONTRACT" "$harness_hash" > "$FM_TOOLCHAIN_MARKER"
+  printf 'contract=%s\nharness=%s\n' "$FM_TOOLCHAIN_CONTRACT" "$FM_POD_HARNESS_NPM" > "$FM_TOOLCHAIN_MARKER"
 }
 
 provision_toolchain() {
@@ -284,6 +281,7 @@ provision_toolchain() {
   log "provisioning durable toolchain contract $FM_TOOLCHAIN_CONTRACT"
   ensure_code_root || return 1
   ensure_pinned_tools || rc=1
+  rm -rf -- "$FM_NPM_PREFIX" || return 1
   ensure_npm_tools || rc=1
   if [ "$rc" -eq 0 ]; then
     toolchain_marker_write 2>/dev/null || {
@@ -385,6 +383,15 @@ link_entrypoint() {
 link_durable_bins() {
   local source target bin_dir="$HOME/.local/bin"
   mkdir -p "$bin_dir" || return 1
+  for target in "$bin_dir"/*; do
+    [ -L "$target" ] || continue
+    source=$(readlink "$target")
+    case "$source" in
+      "$FM_NODE_ROOT/bin/"*|"$FM_LOCAL_BIN/"*|"$FM_NPM_PREFIX/bin/"*)
+        [ -e "$source" ] || rm -f -- "$target" || return 1
+        ;;
+    esac
+  done
   for source in "$FM_NODE_ROOT/bin"/* "$FM_LOCAL_BIN"/* "$FM_NPM_PREFIX/bin"/*; do
     [ -f "$source" ] && [ -x "$source" ] || continue
     target="$bin_dir/${source##*/}"
