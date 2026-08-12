@@ -1557,7 +1557,7 @@ omp_project_extension_preflight() {
     case "$record" in
       __FM_OMP_INDEX_STATUS__=*)
         index_status=${record#*=}
-        scan_source=head
+        scan_source='head'
         continue
         ;;
       __FM_OMP_HEAD_STATUS__=*)
