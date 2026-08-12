@@ -414,7 +414,8 @@ ssh_fragment_write() {  # <alias> <host> <port> <user> <identity>
 
 known_hosts_has_alias() {  # <alias>
   [ -f "$KNOWN_HOSTS" ] || return 1
-  grep -q "^$1 " "$KNOWN_HOSTS" 2>/dev/null
+  awk -v alias="$1" '$1 == alias { found = 1; exit } END { exit !found }' \
+    "$KNOWN_HOSTS" 2>/dev/null
 }
 
 # Pin the pod's host key under the stable alias, once. A volume that already
@@ -527,10 +528,14 @@ cmd_provision() {
 
   lifecycle_lock_acquire "$id"
   volume_lock_acquire
-  assert_alias_owner "$id" "$alias"
 
-  local existing_volume existing_dc volumes match
+  local existing_volume existing_alias existing_dc volumes match
   existing_volume=$(record_get "$id" volume_id)
+  existing_alias=$(record_get "$id" ssh_alias)
+  if [ -n "$existing_volume" ] && [ -n "$existing_alias" ] && [ "$existing_alias" != "$alias" ]; then
+    die "secondmate $id already owns SSH alias $existing_alias; destroy and reprovision it before assigning a different alias"
+  fi
+  assert_alias_owner "$id" "$alias"
   if [ -n "$existing_volume" ]; then
     assert_volume_owner "$id" "$existing_volume"
     volumes=$(api_call_or_die GET /networkvolumes '' "listing network volumes")
@@ -862,8 +867,8 @@ sleep_guards() {  # <id>
 # A sleep that cannot finish must leave the second mate exactly as it found it:
 # awake, with its reply source armed again.
 sleep_abort() {  # <id> <message>
-  "$SCRIPT_DIR/fm-procevent-remote-reply.sh" arm-locked "$1" >/dev/null 2>&1 || true
   [ "$(fm_runpod_lifecycle "$DATA" "$1")" = ready ] || record_set_lifecycle "$1" ready
+  "$SCRIPT_DIR/fm-procevent-remote-reply.sh" arm-locked "$1" >/dev/null 2>&1 || true
   die "$2"
 }
 

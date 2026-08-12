@@ -88,6 +88,13 @@ pass "a missing or keyless credential file refuses before any request, naming th
 
 # --- provision --------------------------------------------------------------
 
+out=$(rp provision .hidden --datacenter EU-RO-1 2>&1) \
+  && fail "provision must reject a leading-dot secondmate id"
+assert_contains "$out" "invalid secondmate id" "the refusal must identify the invalid secondmate id"
+assert_absent "$PARENT/data/runpod/.hidden.meta" "a hidden ownership record must never be created"
+[ ! -s "$API_LOG" ] || fail "an invalid hidden id must refuse before any request is made"
+pass "leading-dot ids cannot create hidden ownership records"
+
 out=$(rp provision ios --datacenter EU-RO-1 --size 100 2>&1) || fail "provision failed: $out"
 assert_contains "$out" "provisioned: secondmate ios" "provision must report what it created"
 [ "$(runpod_volume_count "$API_STATE")" = 1 ] || fail "provision must create exactly one network volume"
@@ -134,6 +141,31 @@ assert_no_grep "StrictHostKeyChecking no" "$(fragment fm-sm-ios-runpod)" "host-k
 FIRST_KEY=$(grep '^fm-sm-ios-runpod ' "$PARENT/config/runpod/known_hosts")
 assert_contains "$FIRST_KEY" "fm-sm-ios-runpod ssh-ed25519" "the host key must be pinned under the alias, not the IP"
 pass "wake creates one pod, discovers its endpoint, and pins a verified host key"
+
+out=$(rp provision ios --alias fm-sm-ios-new --datacenter EU-RO-1 2>&1) \
+  && fail "reprovision must reject reassignment of an existing SSH alias"
+assert_contains "$out" "already owns SSH alias fm-sm-ios-runpod" "the refusal must name the existing alias"
+[ "$(record_field ios ssh_alias)" = fm-sm-ios-runpod ] || fail "a refused alias reassignment must preserve the record"
+assert_present "$(fragment fm-sm-ios-runpod)" "a refused alias reassignment must preserve the old SSH fragment"
+assert_absent "$(fragment fm-sm-ios-new)" "a refused alias reassignment must not create a new SSH fragment"
+[ "$(grep '^fm-sm-ios-runpod ' "$PARENT/config/runpod/known_hosts")" = "$FIRST_KEY" ] \
+  || fail "a refused alias reassignment must preserve the pinned host identity"
+pass "reprovision cannot leave stale identity by reassigning an alias"
+
+runpod_seed_remote_route "$PARENT" dot fm.ios /srv/firstmate /srv/sm-dot
+printf 'fmXios ssh-ed25519 AAAAconfusing\n' >> "$PARENT/config/runpod/known_hosts"
+out=$(rp provision dot --datacenter EU-RO-1 --size 20 2>&1) || fail "dot-alias provision failed: $out"
+out=$(rp wake dot 2>&1) || fail "dot-alias wake failed: $out"
+[ "$(awk '$1 == "fm.ios" { count++ } END { print count + 0 }' "$PARENT/config/runpod/known_hosts")" = 1 ] \
+  || fail "a regex-like alias must be pinned despite a similar literal entry"
+rp sleep dot >/dev/null 2>&1 || fail "could not suspend the dot-alias second mate"
+grep -v '^- dot ' "$PARENT/data/secondmates.md" > "$PARENT/data/secondmates.next"
+mv -f "$PARENT/data/secondmates.next" "$PARENT/data/secondmates.md"
+rp destroy dot --yes >/dev/null 2>&1 || fail "could not destroy the dot-alias second mate"
+assert_grep 'fmXios ' "$PARENT/config/runpod/known_hosts" "literal alias cleanup must preserve a similar entry"
+[ "$(awk '$1 == "fm.ios" { count++ } END { print count + 0 }' "$PARENT/config/runpod/known_hosts")" = 0 ] \
+  || fail "literal alias cleanup must remove the exact entry"
+pass "known_hosts aliases are matched and removed literally"
 
 before=$(runpod_api_calls "$API_LOG" "POST /pods")
 out=$(rp wake ios 2>&1) || fail "second wake failed: $out"
@@ -306,6 +338,16 @@ assert_contains "$out" "could not record its suspending lifecycle" "the transiti
 assert_present "$PARENT/state/procevent/$SID.source" \
   "a failed suspending transition must re-arm the reply source"
 pass "a failed suspending transition restores ready state and replies"
+
+IOS_POD=$(record_field ios pod_id)
+out=$(FM_FAKE_RUNPOD_FAIL="DELETE /pods/$IOS_POD" rp sleep ios 2>&1) \
+  && fail "sleep must report a refused pod termination"
+assert_contains "$out" "terminate pod $IOS_POD" "the termination failure must remain actionable"
+[ "$(record_field ios lifecycle)" = ready ] || fail "a failed pod termination must restore ready before re-arming"
+assert_present "$PARENT/state/procevent/$SID.source" \
+  "a failed pod termination must re-arm the reply source after restoring ready"
+[ "$(record_field ios pod_id)" = "$IOS_POD" ] || fail "a failed pod termination must retain the live pod record"
+pass "a failed pod termination restores ready state before replies"
 
 # --- sleep ------------------------------------------------------------------
 
