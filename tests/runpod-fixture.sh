@@ -307,6 +307,10 @@ case "$command_name" in
         exit 1
       fi
     fi
+    if [ "${FM_FAKE_DOCTOR_MODE:-normal}" = unready ]; then
+      printf 'error: injected readiness refusal\n' >&2
+      exit 1
+    fi
     printf 'check herdr=ok: /usr/bin/herdr\nok: remote second-mate readiness confirmed on this host\n'
     exit 0
     ;;

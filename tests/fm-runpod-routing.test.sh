@@ -187,7 +187,9 @@ w=$(new_world launch)
 runpod_seed_remote_route "$w/home" ios fm-sm-ios-runpod /srv/firstmate /srv/sm-ios
 suspend_route "$w" ios
 
-world_env "$w" "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null 2>&1 || true
+out=$(FM_FAKE_DOCTOR_MODE=unready \
+  world_env "$w" "$ROOT/bin/fm-spawn.sh" ios --secondmate 2>&1) \
+  && fail "the injected readiness refusal did not stop the launch"
 [ "$(lifecycle_of "$w" ios)" = ready ] || fail "a launch must wake a suspended route"
 first_pod=$(grep -n 'POST /pods' "$w/calls.log" | head -1 | cut -d: -f1)
 first_doctor=$(grep -n 'fm-remote-doctor.sh' "$w/calls.log" | head -1 | cut -d: -f1)
