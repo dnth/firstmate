@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -u
+
+REAL_GIT=${FM_TREEHOUSE_REAL_GIT:?}
+ERROR_FILE=${FM_TREEHOUSE_GUARD_ERROR_FILE:?}
+SAFE_FILE=${FM_TREEHOUSE_GUARD_SAFE_FILE:?}
+COMPLETE_FILE=${FM_TREEHOUSE_GUARD_COMPLETE_FILE:?}
+
+if [ -f "$COMPLETE_FILE" ]; then
+  exec "$REAL_GIT" "$@"
+fi
+
+if [ "${1:-}" = status ] && [ "${2:-}" = --porcelain ] \
+  && [ "${3:-}" = --untracked-files=all ]; then
+  out=$("$REAL_GIT" "$@")
+  status=$?
+  [ "$status" -eq 0 ] || exit "$status"
+  [ -z "$out" ] || printf '%s\n' "$out" | grep -vFx '?? treehouse.toml' || true
+  exit 0
+fi
+
+if [ "${1:-}" = checkout ] && [ "${2:-}" = --detach ] \
+  && [ "${3:-}" = --force ] && [ -n "${4:-}" ]; then
+  if ! "$REAL_GIT" merge-base --is-ancestor HEAD "$4" 2>/dev/null; then
+    printf "error: refusing pooled worktree acquisition at %s: HEAD is not an ancestor of %s; local commits were preserved\n" \
+      "$PWD" "$4" >> "$ERROR_FILE"
+    exit 42
+  fi
+  "$REAL_GIT" "$@" || exit $?
+  : > "$SAFE_FILE"
+  exit 0
+fi
+
+if [ "${1:-}" = clean ] && [ "${2:-}" = -fd ] && [ -f "$SAFE_FILE" ]; then
+  "$REAL_GIT" clean -fd -e treehouse.toml || exit $?
+  : > "$COMPLETE_FILE"
+  exit 0
+fi
+
+if [ "${1:-}" = worktree ] && [ "${2:-}" = add ]; then
+  "$REAL_GIT" "$@" || exit $?
+  : > "$COMPLETE_FILE"
+  exit 0
+fi
+
+exec "$REAL_GIT" "$@"

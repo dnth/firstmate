@@ -63,19 +63,19 @@ SH
 #!/usr/bin/env bash
 if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
   if [ "${FM_FAKE_TREEHOUSE_LEASE_HELP:-}" = 1 ]; then
-    printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>] [--require-ancestor-of-default]'
+    printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>]'
   else
     printf '%s\n' 'Usage: treehouse get'
   fi
   exit 0
 fi
 if [ "${1:-}" = status ] && [ "${2:-}" = --help ]; then
-  [ "${FM_FAKE_TREEHOUSE_READ_ONLY_STATUS_HELP:-1}" = 1 ] && printf '%s\n' 'Usage: treehouse status [--read-only]'
+  printf '%s\n' 'Usage: treehouse status [--json]'
   exit 0
 fi
-if [ "${1:-}" = status ] && [ "${2:-}" = --read-only ]; then
+if [ "${1:-}" = status ] && [ "${2:-}" = --json ]; then
   [ -z "${FM_FAKE_TREEHOUSE_STATUS_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TREEHOUSE_STATUS_LOG"
-  printf '%s\n' "${FM_FAKE_TREEHOUSE_STATUS:-}"
+  printf '%s\n' "${FM_FAKE_TREEHOUSE_STATUS_JSON:-[]}"
   exit 0
 fi
 exit 0
@@ -700,45 +700,79 @@ ROWS
 }
 
 test_treehouse_dirty_idle_audit_is_read_only() {
-  local case_dir fakebin out status_log
+  local case_dir fakebin out status_log repo pool wt_one wt_two state before after
   case_dir="$TMP_ROOT/treehouse-dirty-idle-audit"
-  mkdir -p "$case_dir/home/config" "$case_dir/home/projects" "$case_dir/home/state"
+  repo="$case_dir/audit-repo"
+  pool="$case_dir/My Pools/audit-pool"
+  wt_one="$pool/7/audit-repo"
+  wt_two="$pool/8/audit-repo"
+  state="$pool/treehouse-state.json"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/projects" "$case_dir/home/state" "$pool"
+  git init --quiet -b main "$repo"
+  printf 'base\n' > "$repo/README.md"
+  git -C "$repo" add README.md
+  git -C "$repo" -c user.name=Test -c user.email=test@example.invalid commit -qm base
+  git -C "$repo" remote add origin https://example.invalid/audit.git
+  git -C "$repo" worktree add --quiet --detach "$wt_one" HEAD
+  git -C "$repo" worktree add --quiet --detach "$wt_two" HEAD
+  printf 'dirty one\n' > "$wt_one/dirty.txt"
+  printf 'dirty two\n' > "$wt_two/dirty.txt"
+  jq -n --arg one "$wt_one" --arg two "$wt_two" \
+    '{worktrees:[{name:"7",path:$one},{name:"8",path:$two}]}' > "$state"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   printf 'keep this sentinel\n' > "$case_dir/home/state/sentinel"
   fakebin=$(make_fake_toolchain "$case_dir")
   status_log="$case_dir/status.log"
+  before=$(shasum -a 256 "$state")
   out=$(PATH="$fakebin:$BASE_PATH" \
-    FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$repo" \
     FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
-    FM_FAKE_TREEHOUSE_STATUS='7 dirty /tmp/treehouse-slot (ownerless)' \
+    FM_FAKE_TREEHOUSE_STATUS_JSON="$(jq -n --arg one "$wt_one" --arg two "$wt_two" \
+      '[{name:"7",path:$one,status:"dirty"},{name:"8",path:$two,status:"dirty"}]')" \
     FM_FAKE_TREEHOUSE_STATUS_LOG="$status_log" \
     FM_TREEHOUSE_AUDIT_POOL_TIMEOUT=2 FM_TREEHOUSE_AUDIT_TIMEOUT=4 \
     "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$out" \
-    "TREEHOUSE_POOL: dirty idle slot 7 at /tmp/treehouse-slot (ownerless) - inspect before cleanup; no changes made" \
+    "TREEHOUSE_POOL: dirty idle slot 7 at $wt_one - inspect before cleanup; no changes made" \
     "bootstrap did not report a dirty ownerless idle pool slot"
+  assert_contains "$out" "TREEHOUSE_POOL: dirty idle slot 8 at $wt_two" \
+    "bootstrap collapsed distinct dirty slots whose complete paths contain spaces"
   assert_grep 'keep this sentinel' "$case_dir/home/state/sentinel" \
     "read-only pool audit changed unrelated home state"
-  assert_grep 'status --read-only' "$status_log" \
+  after=$(shasum -a 256 "$state")
+  [ "$before" = "$after" ] || fail "read-only pool audit rewrote original Treehouse state"
+  assert_grep 'status --json' "$status_log" \
     "pool audit did not use treehouse's non-mutating status boundary"
   pass "bootstrap reports dirty ownerless pool slots without mutating them"
 }
 
 test_treehouse_audit_runs_under_orca() {
-  local case_dir fakebin out
+  local case_dir fakebin out repo pool wt state
   case_dir="$TMP_ROOT/treehouse-audit-orca"
-  mkdir -p "$case_dir/home/config" "$case_dir/home/projects" "$case_dir/home/state"
+  repo="$case_dir/orca-repo"
+  pool="$case_dir/pool/orca-pool"
+  wt="$pool/3/orca-repo"
+  state="$pool/treehouse-state.json"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/projects" "$case_dir/home/state" "$pool"
+  git init --quiet -b main "$repo"
+  printf 'base\n' > "$repo/README.md"
+  git -C "$repo" add README.md
+  git -C "$repo" -c user.name=Test -c user.email=test@example.invalid commit -qm base
+  git -C "$repo" remote add origin https://example.invalid/orca.git
+  git -C "$repo" worktree add --quiet --detach "$wt" HEAD
+  jq -n --arg wt "$wt" '{worktrees:[{name:"3",path:$wt}]}' > "$state"
   printf '%s\n' orca > "$case_dir/home/config/backend"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   fakebin=$(make_fake_toolchain "$case_dir")
-  fm_fake_exit0 "$fakebin" orca jq
+  fm_fake_exit0 "$fakebin" orca
+  add_real_jq "$fakebin"
   out=$(PATH="$fakebin:$BASE_PATH" \
-    FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$repo" \
     FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
-    FM_FAKE_TREEHOUSE_STATUS='3 dirty /tmp/orca-leftover (ownerless)' \
+    FM_FAKE_TREEHOUSE_STATUS_JSON="$(jq -n --arg wt "$wt" '[{name:"3",path:$wt,status:"dirty"}]')" \
     FM_TREEHOUSE_AUDIT_POOL_TIMEOUT=2 FM_TREEHOUSE_AUDIT_TIMEOUT=4 \
     "$ROOT/bin/fm-bootstrap.sh")
-  assert_contains "$out" "TREEHOUSE_POOL: dirty idle slot 3 at /tmp/orca-leftover" \
+  assert_contains "$out" "TREEHOUSE_POOL: dirty idle slot 3 at $wt" \
     "Orca backend selection suppressed the available Treehouse pool audit"
   pass "bootstrap audits available Treehouse pools under Orca"
 }

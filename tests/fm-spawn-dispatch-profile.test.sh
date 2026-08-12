@@ -979,7 +979,7 @@ test_omp_unsafe_fallback_refuses_before_endpoint() {
   assert_contains "$out" "use an OMP build with --no-prewalk or set prewalk.enabled=false" \
     "unsafe fallback refusal was not actionable"
   [ ! -s "$endpoint_log" ] || fail "unsafe fallback created an endpoint before refusing"
-  assert_grep "get --require-ancestor-of-default --lease --lease-holder fm-$id" "$treehouse_log" \
+  assert_grep "get --lease --lease-holder fm-$id" "$treehouse_log" \
     "unsafe fallback did not validate from the authoritative leased worktree"
   assert_grep "$PROJ_DIR|return $WT_DIR" "$treehouse_log" \
     "unsafe fallback did not return its pre-endpoint worktree lease"

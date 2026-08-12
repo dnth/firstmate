@@ -254,16 +254,43 @@ test_diverged_pool_refuses_without_discarding_commits() {
 }
 
 test_acquisition_guards_before_treehouse_reset() {
-  local rec id out status
+  local rec id out status before fake_treehouse
   id='pool-acquisition-guard-r7'
   rec=$(make_case acquisition-guard "$id")
   read_case_record "$rec"
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
   expect_code 0 "$status" "guarded pooled acquisition should preserve healthy spawn behavior"
-  assert_grep 'treehouse get --require-ancestor-of-default' "$CASE_DIR/send.log" \
+  assert_grep 'fm-treehouse-get.sh' "$CASE_DIR/send.log" \
     "spawn did not place ancestry validation at Treehouse's pre-reset acquisition boundary"
-  pass "spawn asks Treehouse to reject non-ancestor slots before reset"
+
+  fake_treehouse="$FAKEBIN_DIR/treehouse"
+  cat > "$fake_treehouse" <<'SH'
+#!/usr/bin/env bash
+set -e
+git checkout --detach --force origin/main
+git reset --hard origin/main
+git clean -fd
+SH
+  chmod +x "$fake_treehouse"
+  out=$(cd "$POOL_DIR" && PATH="$FAKEBIN_DIR:$PATH" "$ROOT/bin/fm-treehouse-get.sh" --lease 2>&1)
+  status=$?
+  expect_code 0 "$status" "guarded Treehouse acquisition should accept an ancestor slot"
+  assert_grep 'pool-local-config' "$POOL_DIR/treehouse.toml" \
+    "guarded acquisition discarded the allowed pool-local config"
+
+  printf 'unique local commit\n' > "$POOL_DIR/local.txt"
+  git -C "$POOL_DIR" add local.txt
+  git -C "$POOL_DIR" -c user.name=Test -c user.email=test@example.invalid commit -qm unique
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  out=$(cd "$POOL_DIR" && PATH="$FAKEBIN_DIR:$PATH" "$ROOT/bin/fm-treehouse-get.sh" --lease 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "guarded Treehouse acquisition reset a non-ancestor pool slot"
+  assert_contains "$out" 'refusing pooled worktree acquisition' \
+    "guarded acquisition did not report a clear fail-closed error"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "guarded acquisition changed HEAD before ancestry validation"
+  pass "spawn guards Treehouse reset before non-ancestor acquisition"
 }
 
 test_unresolved_remote_default_refuses_pool() {

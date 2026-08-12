@@ -240,42 +240,29 @@ fleet_sync() {
 
 TREEHOUSE_AUDIT_SEEN_SLOTS=""
 
-# Emit one raw record per dirty idle slot: "<slot>|<path>|<trailing detail>".
+# Emit one JSON record per dirty idle slot.
 # Each pool is scanned inside its own bounded background job, so this function
 # reports what it saw without owning cross-pool deduplication.
 # shellcheck disable=SC2329 # Invoked indirectly through bootstrap_run_bounded.
 treehouse_pool_dirty_idle_scan() {  # <repo>
-  local repo=$1 out line slot state path rest
-  out=$( (cd "$repo" 2>/dev/null && treehouse status --read-only) 2>/dev/null ) || return 0
-  while IFS= read -r line; do
-    read -r slot state path rest <<EOF_SLOT
-$line
-EOF_SLOT
-    case "$slot:$state" in
-      [0-9]*:dirty)
-        [ -n "$path" ] || path=unknown
-        printf '%s|%s|%s\n' "$slot" "$path" "$rest"
-        ;;
-    esac
-  done <<EOF
-$out
-EOF
+  local repo=$1 out
+  out=$("$SCRIPT_DIR/fm-treehouse-status-read-only.sh" "$repo" 2>/dev/null) || return 0
+  [ -z "$out" ] || printf '%s\n' "$out" \
+    | jq -c '.[] | select(.status == "dirty") | {slot: .name, path: .path}' 2>/dev/null
 }
 
 treehouse_audit_report_slots() {  # <tmp>
-  local tmp=$1 line slot path rest
+  local tmp=$1 line slot path path_key
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    slot=${line%%|*}
-    rest=${line#*|}
-    path=${rest%%|*}
-    rest=${rest#*|}
-    [ -z "$rest" ] || rest=" $rest"
-    case " $TREEHOUSE_AUDIT_SEEN_SLOTS " in
-      *" $path "*) continue ;;
+    slot=$(printf '%s\n' "$line" | jq -r '.slot') || continue
+    path=$(printf '%s\n' "$line" | jq -r '.path') || continue
+    path_key=$(printf '%s\n' "$line" | jq -c '.path') || continue
+    case $'\n'"$TREEHOUSE_AUDIT_SEEN_SLOTS"$'\n' in
+      *$'\n'"$path_key"$'\n'*) continue ;;
     esac
-    TREEHOUSE_AUDIT_SEEN_SLOTS="$TREEHOUSE_AUDIT_SEEN_SLOTS $path"
-    echo "TREEHOUSE_POOL: dirty idle slot $slot at $path$rest - inspect before cleanup; no changes made"
+    TREEHOUSE_AUDIT_SEEN_SLOTS="${TREEHOUSE_AUDIT_SEEN_SLOTS}${TREEHOUSE_AUDIT_SEEN_SLOTS:+$'\n'}$path_key"
+    echo "TREEHOUSE_POOL: dirty idle slot $slot at $path - inspect before cleanup; no changes made"
   done < "$tmp"
 }
 
@@ -316,8 +303,8 @@ treehouse_audit_timeout() {
 
 treehouse_dirty_idle_slot_audit() {
   command -v treehouse >/dev/null 2>&1 || return 0
-  if ! treehouse_supports_read_only_status; then
-    echo "TREEHOUSE_POOL: audit unavailable - installed treehouse lacks read-only status support"
+  if ! treehouse_supports_json_status; then
+    echo "TREEHOUSE_POOL: audit unavailable - installed treehouse lacks JSON status support"
     return 0
   fi
   local per_pool timeout
@@ -826,12 +813,8 @@ treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
 }
 
-treehouse_supports_safe_acquire() {
-  treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--require-ancestor-of-default([^[:alnum:]_-]|$)'
-}
-
-treehouse_supports_read_only_status() {
-  treehouse status --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--read-only([^[:alnum:]_-]|$)'
+treehouse_supports_json_status() {
+  treehouse status --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--json([^[:alnum:]_-]|$)'
 }
 
 # Shared semantic-version floor for the tool gates below. A version string that
@@ -1171,7 +1154,7 @@ done
 # own worktrees); an orca home must not be told to upgrade a provider it never uses.
 if fm_backend_list_contains "$TOOLS" treehouse \
   && command -v treehouse >/dev/null 2>&1 \
-  && { ! treehouse_supports_lease || ! treehouse_supports_safe_acquire; }; then
+  && { ! treehouse_supports_lease || ! treehouse_supports_json_status; }; then
   echo "MISSING: treehouse (install: $(install_cmd treehouse))"
 fi
 treehouse_dirty_idle_slot_audit

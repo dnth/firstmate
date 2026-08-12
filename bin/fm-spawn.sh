@@ -2270,7 +2270,7 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 W="fm-$ID"
 SPAWN_START_DIR=$PROJ_ABS
 if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
-  WT=$(cd "$PROJ_ABS" && treehouse get --require-ancestor-of-default --lease --lease-holder "$W") || {
+  WT=$(cd "$PROJ_ABS" && "$SCRIPT_DIR/fm-treehouse-get.sh" --lease --lease-holder "$W") || {
     echo "error: OMP could not lease an authoritative pooled worktree before endpoint creation" >&2
     exit 1
   }
@@ -2641,7 +2641,8 @@ kimi_spawn_fail() {  # <detail>
 
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
   && [ "$PREWALK_WORKTREE_READY" != 1 ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get --require-ancestor-of-default'
+  printf -v treehouse_get_command '%q' "$SCRIPT_DIR/fm-treehouse-get.sh"
+  spawn_send_text_line "$WT_TARGET" "$treehouse_get_command"
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
