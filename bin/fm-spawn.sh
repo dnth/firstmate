@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>] --secondmate
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>] [--allow-project-omp-extensions]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>] [--allow-project-omp-extensions]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>] [--allow-project-omp-extensions] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -30,6 +30,14 @@
 #   and preserves ordinary OMP-configured behavior. Every non-OMP harness refuses it.
 #   Local OMP secondmate relaunches recover the recorded target when the caller does
 #   not repeat the flag, so exact-session recovery keeps the same launch profile.
+#   --allow-project-omp-extensions bypasses omp's fail-closed check for tracked
+#   project `.omp/extensions` code and `.omp/settings.json#extensions` roots.
+#   Use it only after explicit captain approval:
+#   omp auto-executes those files before the model reasons about the task, and
+#   firstmate launches omp with --auto-approve. Firstmate's exact tracked primary
+#   extension is allowlisted only for validated secondmate-home launches.
+#   This flag has no effect on other harnesses. Successful OMP spawns record
+#   allow_project_omp_extensions=1 in task metadata for auditability.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -268,6 +276,7 @@ MODEL_SET=0
 EFFORT_SET=0
 PREWALK_INTO_SET=0
 BACKEND_SET=0
+ALLOW_PROJECT_OMP_EXTENSIONS=0
 MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
@@ -305,6 +314,7 @@ for a in "$@"; do
     --prewalk-into=*) PREWALK_INTO=${a#--prewalk-into=}; PREWALK_INTO_SET=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
+    --allow-project-omp-extensions) ALLOW_PROJECT_OMP_EXTENSIONS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     --yolo) want_value=yolo ;;
@@ -798,20 +808,20 @@ spawn_abort_cleanup() {
     lease)
       PREWALK_ABORT_PHASE=none
       if ! (cd "$PROJ_ABS" && treehouse return "$WT" >/dev/null 2>&1); then
-        echo "warning: OMP Prewalk preflight could not return its leased worktree $WT" >&2
+        echo "warning: OMP preflight could not return its leased worktree $WT" >&2
       fi
       ;;
     endpoint)
       PREWALK_ABORT_PHASE=none
       if ! spawn_omp_abort_endpoint_stopped; then
-        echo "warning: OMP Prewalk spawn cleanup could not confirm its owned endpoint stopped; preserving its worktree and task artifacts" >&2
+        echo "warning: OMP spawn cleanup could not confirm its owned endpoint stopped; preserving its worktree and task artifacts" >&2
       else
-        spawn_omp_abort_clean_unchanged_worktree "OMP Prewalk spawn cleanup"
+        spawn_omp_abort_clean_unchanged_worktree "OMP spawn cleanup"
       fi
       ;;
     ambiguous)
       PREWALK_ABORT_PHASE=none
-      echo "warning: OMP Prewalk spawn cleanup is preserving its leased worktree because backend endpoint creation was ambiguous" >&2
+      echo "warning: OMP spawn cleanup is preserving its leased worktree because backend endpoint creation was ambiguous" >&2
       ;;
   esac
   if [ "$OMP_ABORT_CLEANUP" = 1 ]; then
@@ -937,6 +947,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ -z "$PREWALK_INTO" ] || shared_args+=(--prewalk-into "$PREWALK_INTO")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
+  [ "$ALLOW_PROJECT_OMP_EXTENSIONS" -eq 0 ] || shared_args+=(--allow-project-omp-extensions)
   # One delivery contract applies to every pair in a batch, exactly like the shared
   # harness. Each pair still re-validates it against its own brief, so a batch
   # spanning several modes is two invocations rather than a silent mixed dispatch.
@@ -1530,6 +1541,192 @@ resolve_project_dir_arg() {
     *) printf '%s\n' "$path" ;;
   esac
 }
+omp_project_extension_preflight() {
+  local project=$1 record metadata stage path relative offenders manifest_state trusted
+  local settings_path settings_state scan_source tracked_count index_status head_status seen duplicate
+  local omp_root_offender=0 extensions_root_offender=0
+  local -a seen_paths
+  [ "$HARNESS" = omp ] || return 0
+  offenders=
+  settings_path=
+  scan_source=index
+  tracked_count=0
+  index_status=
+  head_status=
+  while IFS= read -r -d '' record; do
+    case "$record" in
+      __FM_OMP_INDEX_STATUS__=*)
+        index_status=${record#*=}
+        scan_source='head'
+        continue
+        ;;
+      __FM_OMP_HEAD_STATUS__=*)
+        head_status=${record#*=}
+        continue
+        ;;
+    esac
+    [ -n "$record" ] || continue
+    metadata=${record%%$'\t'*}
+    path=${record#*$'\t'}
+    if [ "$scan_source" = index ]; then
+      stage=${metadata##* }
+    else
+      stage=0
+    fi
+    if [ "$stage" != 0 ]; then
+      echo "error: git-tracked OMP extension path '$path' is unmerged; refusing the OMP launch" >&2
+      return 1
+    fi
+    case "$path" in
+      .omp|.omp/extensions|.omp/settings.json|.omp/extensions/*) ;;
+      *) continue ;;
+    esac
+    duplicate=0
+    for seen in "${seen_paths[@]}"; do
+      if [ "$path" = "$seen" ]; then
+        duplicate=1
+        break
+      fi
+    done
+    [ "$duplicate" -eq 0 ] || continue
+    seen_paths+=("$path")
+    tracked_count=$((tracked_count + 1))
+    if { [ "$path" = .omp ] || [ "$path" = .omp/extensions ]; } \
+      && { [ -L "$project/$path" ] || [ -d "$project/$path" ]; }; then
+      offenders="${offenders}${offenders:+$'\n'}$path"
+      if [ "$path" = .omp ]; then
+        omp_root_offender=1
+      else
+        extensions_root_offender=1
+      fi
+      continue
+    fi
+    if [ "$path" = .omp/settings.json ]; then
+      settings_path=$path
+      continue
+    fi
+    relative=${path#".omp/extensions/"}
+    if [[ "$relative" != */* ]] && [ -d "$project/$path" ]; then
+      case "$relative" in
+        .*) [ -L "$project/$path" ] || continue ;;
+      esac
+      offenders="${offenders}${offenders:+$'\n'}$path"
+      continue
+    fi
+    case "$relative" in
+      .*|*/.*) continue ;;
+    esac
+    case "$relative" in
+      *.ts|*.js)
+        [ -f "$project/$path" ] || continue
+        case "$relative" in
+          */*)
+            case "$relative" in
+              */*/*) ;;
+              */index.ts|*/index.js)
+                offenders="${offenders}${offenders:+$'\n'}$path"
+                ;;
+            esac
+            ;;
+          *)
+            offenders="${offenders}${offenders:+$'\n'}$path"
+            ;;
+        esac
+        ;;
+      */package.json)
+        case "$relative" in
+          */*/*) continue ;;
+        esac
+        [ -f "$project/$path" ] || continue
+        command -v jq >/dev/null 2>&1 || {
+          echo "error: jq is required to inspect tracked OMP extension manifests in project '$project'; refusing the OMP launch" >&2
+          return 1
+        }
+        manifest_state=$(jq -er '
+          if ((.omp // .pi).extensions? // null) == null then "none"
+          elif ((.omp // .pi).extensions | type) != "array" then "invalid"
+          elif ((.omp // .pi).extensions | length) > 0 then "declared"
+          else "none"
+          end
+        ' "$project/$path" 2>/dev/null) || {
+          echo "error: could not read tracked OMP extension manifest '$path'; refusing the OMP launch" >&2
+          return 1
+        }
+        case "$manifest_state" in
+          declared)
+            offenders="${offenders}${offenders:+$'\n'}$path"
+            ;;
+          invalid)
+            echo "error: tracked OMP extension manifest '$path' has a non-array extensions field; refusing the OMP launch" >&2
+            return 1
+            ;;
+        esac
+        ;;
+    esac
+  done < <(
+    git -C "$project" ls-files --stage -z -- .omp 2>/dev/null
+    printf '__FM_OMP_INDEX_STATUS__=%s\0' "$?"
+    git -C "$project" ls-tree -rz HEAD -- .omp 2>/dev/null
+    printf '__FM_OMP_HEAD_STATUS__=%s\0' "$?"
+  )
+  if [ "$index_status" != 0 ] || [ "$head_status" != 0 ]; then
+    echo "error: could not inspect git-tracked OMP extensions in project '$project'; refusing the OMP launch" >&2
+    return 1
+  fi
+  if [ "$tracked_count" -gt 0 ]; then
+    if [ -L "$project/.omp" ] && [ "$omp_root_offender" -eq 0 ]; then
+      offenders="${offenders}${offenders:+$'\n'}.omp"
+    fi
+    if [ -L "$project/.omp/extensions" ] && [ "$extensions_root_offender" -eq 0 ]; then
+      offenders="${offenders}${offenders:+$'\n'}.omp/extensions"
+    fi
+  fi
+
+  if [ -n "$settings_path" ] && [ -f "$project/$settings_path" ]; then
+    command -v jq >/dev/null 2>&1 || {
+      echo "error: jq is required to inspect tracked OMP project settings in '$project'; refusing the OMP launch" >&2
+      return 1
+    }
+    settings_state=$(jq -er '
+      if (.extensions | type) != "array" then "none"
+      elif any(.extensions[]; type == "string" and length > 0) then "declared"
+      else "none"
+      end
+    ' "$project/$settings_path" 2>/dev/null) || {
+      echo "error: could not read tracked OMP project settings '$settings_path'; refusing the OMP launch" >&2
+      return 1
+    }
+    if [ "$settings_state" = declared ]; then
+      offenders="${offenders}${offenders:+$'\n'}$settings_path#extensions"
+    fi
+  fi
+
+  trusted="$FM_ROOT/.omp/extensions/fm-primary-omp.ts"
+  if [ -n "$offenders" ]; then
+    filtered=
+    while IFS= read -r path; do
+      if [ "$KIND" = secondmate ] \
+        && [ "$path" = ".omp/extensions/fm-primary-omp.ts" ] \
+        && [ -f "$trusted" ] && [ ! -L "$trusted" ] \
+        && [ -f "$project/$path" ] && [ ! -L "$project/$path" ] \
+        && cmp -s "$project/$path" "$trusted"; then
+        continue
+      fi
+      filtered="${filtered}${filtered:+$'\n'}$path"
+    done <<< "$offenders"
+    offenders=$filtered
+  fi
+  [ -n "$offenders" ] || return 0
+  if [ "$ALLOW_PROJECT_OMP_EXTENSIONS" -eq 1 ]; then
+    echo "warning: launching omp with explicitly approved tracked project extensions:" >&2
+    printf '%s\n' "$offenders" | sed 's/^/  /' >&2
+    return 0
+  fi
+  echo "error: refusing omp launch because the project tracks auto-executed OMP extension code:" >&2
+  printf '%s\n' "$offenders" | sed 's/^/  /' >&2
+  echo "omp runs tracked extensions before the model reasons about the task and firstmate passes --auto-approve. Select another verified harness, or pass --allow-project-omp-extensions only after explicit captain approval." >&2
+  return 1
+}
 
 path_is_ancestor_of() {
   local ancestor=$1 path=$2
@@ -1812,6 +2009,7 @@ fi
 
 if [ "$HARNESS" = omp ] && [ "$KIND" = secondmate ]; then
   validate_omp_prewalk_for_launch_dir "$PROJ_ABS"
+  omp_project_extension_preflight "$PROJ_ABS" || exit 1
 fi
 
 delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
@@ -2037,9 +2235,9 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 
 W="fm-$ID"
 SPAWN_START_DIR=$PROJ_ABS
-if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ] && [ -n "$PREWALK_INTO" ]; then
+if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
   WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$W") || {
-    echo "error: OMP Prewalk could not lease an authoritative pooled worktree before endpoint creation" >&2
+    echo "error: OMP could not lease an authoritative pooled worktree before endpoint creation" >&2
     exit 1
   }
   PREWALK_WORKTREE_READY=1
@@ -2047,6 +2245,7 @@ if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ] && [ -n "$PREWALK_INTO" ]; 
   validate_spawn_worktree "treehouse lease" "$W"
   freshen_spawn_worktree_base "$WT" || exit 1
   validate_omp_prewalk_for_launch_dir "$WT"
+  omp_project_extension_preflight "$WT" || exit 1
   OMP_ABORT_INITIAL_HEAD=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || {
     echo "error: OMP spawn could not bind cleanup to the initial worktree HEAD" >&2
     exit 1
@@ -2461,6 +2660,7 @@ fi
 if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ] \
   && [ "$PREWALK_WORKTREE_READY" != 1 ]; then
   validate_omp_prewalk_for_launch_dir "$WT"
+  omp_project_extension_preflight "$WT" || exit 1
 fi
 
 if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
@@ -2793,6 +2993,9 @@ META_WINDOW=$T
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  if [ "$HARNESS" = omp ] && [ "$ALLOW_PROJECT_OMP_EXTENSIONS" -eq 1 ]; then
+    echo "allow_project_omp_extensions=1"
+  fi
   [ -z "$PREWALK_INTO" ] || echo "prewalk_into=$PREWALK_INTO"
   if [ "$KIND" = secondmate ] && [ -n "$SECONDMATE_MODEL_SOURCE" ]; then
     echo "secondmate_model_source=$SECONDMATE_MODEL_SOURCE"

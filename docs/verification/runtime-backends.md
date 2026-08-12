@@ -163,6 +163,56 @@ openai-codex/gpt-5.6-luna	low,medium,high,xhigh,max
 
 The zero-exit help parse confirms that the CLI accepts the `:xhigh` effort suffix on the Prewalk target, while the model catalog independently confirms that GPT-5.6 Luna supports xhigh.
 This evidence covers launch parsing and catalog validation only; it does not claim a live model handoff.
+### OMP project-extension discovery
+
+The project-extension launch surface was verified on 2026-08-12 against OMP 17.2.11.
+The CLI identifies `--extension` as an explicit extension-file load and separately enables extension discovery unless `--no-extensions` is passed.
+The installed source resolves project extension directories and project settings roots from the launch cwd, follows top-level extension-directory symlinks, and discovers supported non-hidden top-level files, one-level index entries, and declared extension manifests.
+The source also resolves profile-scoped extensions from the OMP home, which is a separate surface from the project worktree.
+
+```sh
+omp --version
+omp --help
+OMP_PACKAGE=$(cd "$(dirname "$(readlink -f "$(command -v omp)")")/.." && pwd -P)
+rg -n 'Direct files:|Subdirectory with index:|Subdirectory with package.json:|symlinked extension' "$OMP_PACKAGE/src/discovery/helpers.ts"
+rg -n 'const result = await glob.*hidden: false' "$OMP_PACKAGE/src/discovery/helpers.ts"
+rg -n 'Project `<cwd>/.omp/settings.json#extensions`|if \(!Array.isArray\(raw\)\)|return raw.filter' "$OMP_PACKAGE/src/discovery/omp-extension-roots.ts"
+tests/fm-spawn-dispatch-profile.test.sh
+tests/fm-omp-secondmate.test.sh
+```
+
+Observed bounded output:
+
+```text
+omp/17.2.11
+--extension=<value>             Load an extension file (can be used multiple times)
+--no-extensions                 Disable extension discovery (explicit -e paths still work)
+625: * 1. Direct files: `extensions/*.ts` or `*.js` → load
+626: * 2. Subdirectory with index: `extensions/<ext>/index.ts` or `index.js` → load
+627: * 3. Subdirectory with package.json: `extensions/<ext>/package.json` with "omp"/"pi" field → load declared paths
+640: // Detect top-level symlinked directories and synthesize the equivalent subdir matches
+333:		const result = await glob({ pattern, path: dir, gitignore: true, hidden: false, fileType, recursive });
+144:	if (!Array.isArray(raw)) return [];
+145:	return raw.filter((entry): entry is string => typeof entry === "string" && entry.length > 0);
+176: * 2. Project `<cwd>/.omp/settings.json#extensions`
+ok - OMP refuses tracked project extensions without explicit opt-in
+ok - OMP allows tracked project extensions only with an auditable opt-in
+ok - OMP projects without tracked extensions launch unchanged
+ok - non-OMP harnesses ignore tracked OMP project extensions
+ok - OMP refuses tracked settings extension roots
+ok - OMP refuses tracked extension-directory symlinks
+ok - OMP root symlinks use the shared opt-in boundary
+ok - OMP ignores hidden direct extension files
+ok - OMP ignores unusable settings extension entries
+ok - OMP ignores unsupported root extension manifests
+ok - OMP restricts the primary adapter exemption to secondmate homes
+ok - OMP secondmates inspect staged live extensions
+ok - OMP secondmate launch and recovery use the isolated adapter and an exact home-owned session pointer
+```
+
+The deterministic spawn checks prove that an OMP launch refuses a git-tracked project extension without the explicit override, records the override when passed, and leaves projects without tracked extensions unchanged.
+The secondmate integration checks prove that the exact Firstmate primary extension remains loadable from the persistent home without being treated as untrusted project code.
+
 The Herdr role matrix required each expected turn-end or routed-reply notification to reach the durable queue or the primary follow-up transcript before the fixture drained it.
 
 The deterministic tmux and Herdr fixtures reran on 2026-08-09 and proved that an already-busy OMP send returns `queued-unconfirmed` only after Enter transport succeeds, without reading a rendered steering count, while Enter transport failure returns `send-failed` and initially idle editable input remains pending and fails closed.
