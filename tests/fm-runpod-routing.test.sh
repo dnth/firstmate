@@ -28,6 +28,7 @@ new_world() {
   fakebin=$(fm_fakebin "$w")
   install_fake_runpod "$fakebin"
   fm_fake_exit0 "$fakebin" node chrome-devtools-axi pi-signed gh gh-axi tmux herdr
+  printf 'codex\n' > "$w/home/config/secondmate-harness"
   printf 'RUNPOD_API_KEY=rp_fixture_key\n' > "$w/home/config/runpod.env"
   chmod 600 "$w/home/config/runpod.env"
   runpod_fixture_init "$w/runpod.json"
