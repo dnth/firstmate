@@ -4,8 +4,10 @@
 # Usage:
 #   fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}
 #       Provision <home> as an isolated firstmate home. If <home> is "-", acquire
-#       a fresh firstmate worktree via "treehouse get --lease", which durably
-#       leases the worktree under the secondmate <id> so the home survives with
+#       a guarded pooled firstmate worktree and durably lease it under the
+#       secondmate <id>. Before assignment, stale OMP runtime state is removed
+#       only after its recorded owners are proven absent; live or unverifiable
+#       ownership preserves the lease and stops seeding. The home survives with
 #       no live process and is never recycled until the lease is released with
 #       "treehouse return". Projects are cloned
 #       from the active home into the secondmate home's projects/ directory.

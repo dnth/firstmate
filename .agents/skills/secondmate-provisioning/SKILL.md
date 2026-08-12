@@ -76,7 +76,8 @@ The remote command transfers a bounded charter and project-origin manifest, then
 It never copies a project tree or the primary process environment.
 Pass `--no-projects` in the project position to seed the project-less home described above; the same mutual-exclusion and fail-loud-on-omission rules apply.
 It may only seed a home with no project clones or project-registry entries, and refuses conversion of populated homes without changing them.
-`-` durably leases a fresh firstmate worktree via `treehouse get --lease` under the secondmate id.
+`-` durably acquires a guarded Firstmate pool worktree under the secondmate id.
+Before assigning a recycled home, seeding clears stale OMP runtime markers only after proving their prior owners absent; live or unverifiable ownership leaves the lease and markers intact and stops for manual inspection.
 The lease survives with no live process and is never recycled by later `treehouse get` or `prune`.
 The slot stays reserved across restarts until the lease is released.
 Release happens only on explicit retirement or seed rollback, never on routine restart or recovery.

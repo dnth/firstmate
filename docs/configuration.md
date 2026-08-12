@@ -346,6 +346,10 @@ An absent or incompatible `lavish-axi` reports `MISSING: lavish-axi (install: np
 An absent or too-old `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)`; firstmate cannot resolve a profile array without a compatible binary.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
+When Treehouse is available, bootstrap also performs a bounded read-only audit of the Firstmate and registered project pools.
+It emits `TREEHOUSE_POOL: dirty idle slot <slot> at <path> - inspect before cleanup; no changes made` only for a dirty ownerless slot that has no observed process working inside it, and it never prunes, returns, resets, or cleans a slot.
+The audit is best effort and fail-silent when pool state or liveness cannot be established, so an absent diagnostic is not proof that every pool is clean.
+`FM_TREEHOUSE_AUDIT_POOL_TIMEOUT` bounds each pool scan and `FM_TREEHOUSE_AUDIT_TIMEOUT` bounds the whole audit; either value set to `0` disables the audit.
 The locked session-start bootstrap step also runs a best-effort project clone refresh through `fm-fleet-sync.sh`.
 It emits `FLEET_SYNC:` for skipped refreshes that may matter, recovered self-heals, and `STUCK:` alarms.
 Normal completed runs keep local-only and no-origin skips silent.
@@ -596,6 +600,8 @@ FM_PAUSE_RESURFACE_SECS=3600       # seconds before an idle declared external wa
 FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalations on the same unchanged pane before demand-deep-inspection is added
 FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wake debug log
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=     # optional seconds allowed for bootstrap's best-effort clone refresh; unset/blank defaults to max(20, 5 + 3 * origin-backed-project-count)
+FM_TREEHOUSE_AUDIT_POOL_TIMEOUT=15   # seconds allowed for each read-only Treehouse pool audit; 0 disables the audit
+FM_TREEHOUSE_AUDIT_TIMEOUT=30        # aggregate seconds allowed for the read-only Treehouse pool audit; 0 disables the audit
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
 FM_STALE_WORKTREE_LOCK_AGE_SECS=30       # min mtime age before fm-teardown.sh treats a leftover worktree git index.lock as provably stale
 FM_TREEHOUSE_RETURN_LOCK_RETRIES=3        # retries after a treehouse return fails on the transient git index.lock signature
