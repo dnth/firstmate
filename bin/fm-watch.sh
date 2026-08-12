@@ -41,10 +41,11 @@
 #                          count, and demand-deep-inspection marker, for human
 #                          inspection only - never an automatic interrupt,
 #                          signal, or restart of the worker or its tool process.
-#                          An idle non-paused secondmate is also absorbed while
-#                          its home watcher beacon is fresh within the wedge
-#                          threshold; missing, stale, future-dated, or timed-out
-#                          evidence follows the ordinary stale and possible-wedge path.
+#                          An idle secondmate that is neither paused nor captain-held
+#                          is also absorbed while its home watcher beacon is fresh
+#                          within the wedge threshold; missing, stale, future-dated,
+#                          or timed-out evidence follows the ordinary stale and
+#                          possible-wedge path.
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
@@ -463,7 +464,7 @@ surface_nonterminal_stale() {  # <window> <hash>
 # Check and heartbeat cadence must survive actionable exits and restarts: the
 # watcher may be relaunched before in-memory counters reach their threshold on a
 # busy fleet. Persist the schedule as file mtimes instead.
-# A fresh secondmate-home watcher beacon is positive evidence that the parent
+# A fresh secondmate-home watcher beacon is positive evidence that the secondmate
 # supervisor is still alive, even when its own pane is idle between child polls.
 # The beacon is written by this same watcher process at the top of every cycle,
 # and the parent uses the wedge threshold as its maximum acceptable age. A

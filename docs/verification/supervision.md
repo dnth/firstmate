@@ -363,7 +363,6 @@ Observed output:
 
 The safe command-channel contract is covered without a notification by `tests/fm-daemon.test.sh`: the summary reaches both `$1` and stdin, every channel is process-group bounded, and a failed channel falls through.
 
-
 ## Secondmate supervision beacon
 
 The secondmate idle supervision poll observed on 2026-08-12 was 360 seconds, while `FM_STALE_ESCALATE_SECS` defaults to 240 seconds.
