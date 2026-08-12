@@ -43,7 +43,7 @@ make_case() {
   home="$case_dir/home"
   project="$case_dir/project"
   origin="$case_dir/origin.git"
-  pool="$case_dir/pool"
+  pool="$case_dir/treehouse-pool/1/project"
   publisher="$case_dir/publisher"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
 
@@ -61,6 +61,8 @@ make_case() {
   initial=$(git -C "$project" rev-parse HEAD)
   git -C "$project" worktree add --quiet --detach "$pool" "$initial"
   printf 'pool-local-config\n' > "$pool/treehouse.toml"
+  node -e 'require("fs").writeFileSync(process.argv[1], JSON.stringify({worktrees:[{name:"1",path:process.argv[2]}]}))' \
+    "$case_dir/treehouse-pool/treehouse-state.json" "$pool"
   git clone --quiet "file://$origin" "$publisher"
   printf 'must survive a newly spawned branch\n' > "$publisher/advanced-main.txt"
   git -C "$publisher" add advanced-main.txt
@@ -254,7 +256,7 @@ test_diverged_pool_refuses_without_discarding_commits() {
 }
 
 test_acquisition_guards_before_treehouse_reset() {
-  local rec id out status before fake_treehouse
+  local rec id out status before fake_treehouse invoked
   id='pool-acquisition-guard-r7'
   rec=$(make_case acquisition-guard "$id")
   read_case_record "$rec"
@@ -268,28 +270,51 @@ test_acquisition_guards_before_treehouse_reset() {
   cat > "$fake_treehouse" <<'SH'
 #!/usr/bin/env bash
 set -e
-git checkout --detach --force origin/main
-git reset --hard origin/main
-git clean -fd
+cd "$FM_FAKE_POOL"
+git switch --force --detach origin/main
+git reset origin/main --hard
+git clean -df
 SH
   chmod +x "$fake_treehouse"
-  out=$(cd "$POOL_DIR" && PATH="$FAKEBIN_DIR:$PATH" "$ROOT/bin/fm-treehouse-get.sh" --lease 2>&1)
+  out=$(cd "$PROJECT_DIR" && FM_FAKE_POOL="$POOL_DIR" PATH="$FAKEBIN_DIR:$PATH" "$ROOT/bin/fm-treehouse-get.sh" --lease 2>&1)
   status=$?
-  expect_code 0 "$status" "guarded Treehouse acquisition should accept an ancestor slot"
+  expect_code 0 "$status" "guarded Treehouse acquisition should accept reordered switch/reset flags"
   assert_grep 'pool-local-config' "$POOL_DIR/treehouse.toml" \
     "guarded acquisition discarded the allowed pool-local config"
+
+  cat > "$fake_treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fake_treehouse"
+  out=$(cd "$PROJECT_DIR" && FM_FAKE_POOL="$POOL_DIR" PATH="$FAKEBIN_DIR:$PATH" "$ROOT/bin/fm-treehouse-get.sh" --lease 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "guarded Treehouse acquisition accepted an unverified provider path"
+  assert_contains "$out" 'did not complete the verified pre-reset boundary' \
+    "guarded acquisition did not require its completion marker"
 
   printf 'unique local commit\n' > "$POOL_DIR/local.txt"
   git -C "$POOL_DIR" add local.txt
   git -C "$POOL_DIR" -c user.name=Test -c user.email=test@example.invalid commit -qm unique
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
-  out=$(cd "$POOL_DIR" && PATH="$FAKEBIN_DIR:$PATH" "$ROOT/bin/fm-treehouse-get.sh" --lease 2>&1)
+  invoked="$CASE_DIR/provider-invoked"
+  cat > "$fake_treehouse" <<'SH'
+#!/usr/bin/env bash
+set -e
+: > "$FM_FAKE_PROVIDER_INVOKED"
+cd "$FM_FAKE_POOL"
+"$FM_TREEHOUSE_REAL_GIT" reset --hard origin/main
+SH
+  chmod +x "$fake_treehouse"
+  out=$(cd "$PROJECT_DIR" && FM_FAKE_POOL="$POOL_DIR" FM_FAKE_PROVIDER_INVOKED="$invoked" \
+    PATH="$FAKEBIN_DIR:$PATH" "$ROOT/bin/fm-treehouse-get.sh" --lease 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "guarded Treehouse acquisition reset a non-ancestor pool slot"
   assert_contains "$out" 'refusing pooled worktree acquisition' \
     "guarded acquisition did not report a clear fail-closed error"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
     || fail "guarded acquisition changed HEAD before ancestry validation"
+  [ ! -e "$invoked" ] || fail "guarded acquisition invoked a provider capable of bypassing the Git shim"
   pass "spawn guards Treehouse reset before non-ancestor acquisition"
 }
 

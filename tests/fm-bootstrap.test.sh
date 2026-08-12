@@ -701,13 +701,15 @@ ROWS
 }
 
 test_treehouse_dirty_idle_audit_is_read_only() {
-  local case_dir fakebin out repo pool wt_one wt_two wt_clean state before after
+  local case_dir fakebin out repo pool wt_one wt_two wt_clean wt_reused wt_live state before after live_pid
   case_dir="$TMP_ROOT/treehouse-dirty-idle-audit"
   repo="$case_dir/audit-repo"
   pool="$case_dir/My Pools/audit-pool"
   wt_one="$pool/7/audit-repo"
   wt_two="$pool/8/audit-repo"
   wt_clean="$pool/9/audit-repo"
+  wt_reused="$pool/10/audit-repo"
+  wt_live="$pool/11/audit-repo"
   state="$pool/treehouse-state.json"
   mkdir -p "$case_dir/home/config" "$case_dir/home/projects" "$case_dir/home/state" "$pool"
   git init --quiet -b main "$repo"
@@ -718,11 +720,17 @@ test_treehouse_dirty_idle_audit_is_read_only() {
   git -C "$repo" worktree add --quiet --detach "$wt_one" HEAD
   git -C "$repo" worktree add --quiet --detach "$wt_two" HEAD
   git -C "$repo" worktree add --quiet --detach "$wt_clean" HEAD
+  git -C "$repo" worktree add --quiet --detach "$wt_reused" HEAD
+  git -C "$repo" worktree add --quiet --detach "$wt_live" HEAD
   printf 'dirty one\n' > "$wt_one/dirty.txt"
   printf 'dirty two\n' > "$wt_two/dirty.txt"
   printf 'pool config\n' > "$wt_clean/treehouse.toml"
-  node -e 'const fs=require("fs"); fs.writeFileSync(process.argv[1], JSON.stringify({worktrees:[{name:"7",path:process.argv[2]},{name:"8",path:process.argv[3]},{name:"9",path:process.argv[4]}]}))' \
-    "$state" "$wt_one" "$wt_two" "$wt_clean"
+  printf 'reused pid dirt\n' > "$wt_reused/dirty.txt"
+  printf 'live cwd dirt\n' > "$wt_live/dirty.txt"
+  node -e 'const fs=require("fs"); fs.writeFileSync(process.argv[1], JSON.stringify({worktrees:[{name:"7",path:process.argv[2]},{name:"8",path:process.argv[3]},{name:"9",path:process.argv[4]},{name:"10",path:process.argv[5],owner_pid:Number(process.argv[7]),owner_started_at:1},{name:"11",path:process.argv[6]}]}))' \
+    "$state" "$wt_one" "$wt_two" "$wt_clean" "$wt_reused" "$wt_live" "$$"
+  ( cd "$wt_live" && sleep 30 ) &
+  live_pid=$!
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   printf 'keep this sentinel\n' > "$case_dir/home/state/sentinel"
   fakebin=$(make_fake_toolchain "$case_dir")
@@ -738,6 +746,8 @@ SH
     FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
     FM_TREEHOUSE_AUDIT_POOL_TIMEOUT=2 FM_TREEHOUSE_AUDIT_TIMEOUT=4 \
     "$ROOT/bin/fm-bootstrap.sh")
+  kill "$live_pid" 2>/dev/null || true
+  wait "$live_pid" 2>/dev/null || true
   assert_contains "$out" \
     "TREEHOUSE_POOL: dirty idle slot 7 at $wt_one - inspect before cleanup; no changes made" \
     "bootstrap did not report a dirty ownerless idle pool slot"
@@ -745,6 +755,10 @@ SH
     "bootstrap collapsed distinct dirty slots whose complete paths contain spaces"
   assert_not_contains "$out" "TREEHOUSE_POOL: dirty idle slot 9 at $wt_clean" \
     "bootstrap reported a slot containing only treehouse.toml as dirty"
+  assert_contains "$out" "TREEHOUSE_POOL: dirty idle slot 10 at $wt_reused" \
+    "bootstrap mistook a reused PID for the persisted owner identity"
+  assert_not_contains "$out" "TREEHOUSE_POOL: dirty idle slot 11 at $wt_live" \
+    "bootstrap reported a slot still held by a live worktree process"
   assert_grep 'keep this sentinel' "$case_dir/home/state/sentinel" \
     "read-only pool audit changed unrelated home state"
   after=$(shasum -a 256 "$state")

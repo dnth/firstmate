@@ -69,6 +69,13 @@ case "${1:-}" in
     done
     if [ -n "${FM_FAKE_TREEHOUSE_HOME:-}" ]; then
       mkdir -p "$FM_FAKE_TREEHOUSE_HOME"
+      if [ -n "${FM_TREEHOUSE_GUARD_COMPLETE_FILE:-}" ] && git -C "$FM_FAKE_TREEHOUSE_HOME" rev-parse HEAD >/dev/null 2>&1; then
+        ( cd "$FM_FAKE_TREEHOUSE_HOME" \
+          && git status --porcelain --untracked-files=all >/dev/null \
+          && git checkout --detach --force HEAD >/dev/null \
+          && git reset --hard HEAD >/dev/null \
+          && git clean -fd >/dev/null ) || exit $?
+      fi
       [ -n "${FM_FAKE_TREEHOUSE_LEASE_FILE:-}" ] && printf '%s\n' "$holder" > "$FM_FAKE_TREEHOUSE_LEASE_FILE"
       printf 'leased worktree for %s\n' "${holder:-unknown}" >&2
       printf '%s\n' "$FM_FAKE_TREEHOUSE_HOME"

@@ -12,29 +12,58 @@ if [ -f "$COMPLETE_FILE" ]; then
   exec "$REAL_GIT" "$@"
 fi
 
-if [ "${1:-}" = status ] && [ "${2:-}" = --porcelain ] \
-  && [ "${3:-}" = --untracked-files=all ]; then
+if [ "${1:-}" = status ]; then
   out=$("$REAL_GIT" "$@")
   status=$?
   [ "$status" -eq 0 ] || exit "$status"
-  [ -z "$out" ] || printf '%s\n' "$out" | fm_pool_ignorable_porcelain_filter
+  case " $* " in
+    *' --porcelain '*|*' --porcelain='*)
+      [ -z "$out" ] || printf '%s\n' "$out" | fm_pool_ignorable_porcelain_filter
+      ;;
+    *) [ -z "$out" ] || printf '%s\n' "$out" ;;
+  esac
   exit 0
 fi
 
-if [ "${1:-}" = checkout ] && [ "${2:-}" = --detach ] \
-  && [ "${3:-}" = --force ] && [ -n "${4:-}" ]; then
-  if ! "$REAL_GIT" merge-base --is-ancestor HEAD "$4" 2>/dev/null; then
+case "${1:-}" in
+checkout|switch|reset)
+  ref=
+  for arg in "${@:2}"; do
+    case "$arg" in
+      -*) ;;
+      *) ref=$arg; break ;;
+    esac
+  done
+  case "$ref" in
+    ''|-*)
+      printf "error: refusing pooled worktree acquisition at %s: Treehouse did not supply a verifiable reset target\n" \
+        "$PWD" >> "$ERROR_FILE"
+      exit 42
+      ;;
+  esac
+  if ! "$REAL_GIT" merge-base --is-ancestor HEAD "$ref" 2>/dev/null; then
     printf "error: refusing pooled worktree acquisition at %s: HEAD is not an ancestor of %s; local commits were preserved\n" \
-      "$PWD" "$4" >> "$ERROR_FILE"
+      "$PWD" "$ref" >> "$ERROR_FILE"
     exit 42
   fi
   "$REAL_GIT" "$@" || exit $?
   : > "$SAFE_FILE"
   exit 0
-fi
+  ;;
+restore)
+  printf "error: refusing pooled worktree acquisition at %s: unverified git restore boundary\n" \
+    "$PWD" >> "$ERROR_FILE"
+  exit 42
+  ;;
+esac
 
-if [ "${1:-}" = clean ] && [ "${2:-}" = -fd ] && [ -f "$SAFE_FILE" ]; then
-  "$REAL_GIT" clean -fd -e treehouse.toml || exit $?
+if [ "${1:-}" = clean ]; then
+  [ -f "$SAFE_FILE" ] || {
+    printf "error: refusing pooled worktree acquisition at %s: git clean preceded ancestry validation\n" \
+      "$PWD" >> "$ERROR_FILE"
+    exit 42
+  }
+  "$REAL_GIT" "$@" -e treehouse.toml || exit $?
   : > "$COMPLETE_FILE"
   exit 0
 fi

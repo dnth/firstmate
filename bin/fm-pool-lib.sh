@@ -36,3 +36,30 @@ fm_pool_first_real_porcelain_line() {  # <repo>
   [ -n "$real" ] || return 1
   printf '%s\n' "${real%%$'\n'*}"
 }
+
+fm_pool_worktree_idle() {  # <repo>
+  local repo=$1 root out pid path line
+  root=$(cd "$repo" 2>/dev/null && pwd -P) || return 2
+  if [ -n "${FM_POOL_LSOF_CWD_FILE:-}" ]; then
+    out=$(cat "$FM_POOL_LSOF_CWD_FILE" 2>/dev/null) || return 2
+  else
+    command -v lsof >/dev/null 2>&1 || return 2
+    out=$(lsof -a -d cwd -Fpn 2>/dev/null) || return 2
+  fi
+  pid=
+  while IFS= read -r line; do
+    case "$line" in
+      p*) pid=${line#p} ;;
+      fcwd) ;;
+      n*)
+        path=${line#n}
+        case "$path" in
+          "$root"|"$root"/*) [ "$pid" = "${BASHPID:-$$}" ] || return 1 ;;
+        esac
+        ;;
+    esac
+  done <<EOF
+$out
+EOF
+  return 0
+}
