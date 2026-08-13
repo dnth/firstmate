@@ -629,7 +629,7 @@ sed -i.bak 's/^code_origin=.*/code_origin=/' "$PARENT/data/runpod/resilient.meta
 rm -f "$PARENT/data/runpod/resilient.meta.bak"
 out=$(rp sleep resilient 2>&1) || fail "interrupted-wake fixture did not suspend: $out"
 out=$(FM_FAKE_SSH_PROBE_BLOCK=1 FM_TEST_RUNPOD_POLL_INTERVAL=1 \
-  FM_TEST_RUNPOD_WAKE_TIMEOUT=2 rp wake resilient 2>&1) \
+  FM_TEST_RUNPOD_WAKE_TIMEOUT=4 rp wake resilient 2>&1) \
   && fail "replacement wake unexpectedly reached readiness"
 assert_contains "$out" "SSH bootstrap did not complete" \
   "the replacement wake fixture must fail before readiness"

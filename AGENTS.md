@@ -393,7 +393,6 @@ When any wake reports a merged PR for a project cloned in this home, refresh tha
 When X-linked work reaches a milestone or terminal state, load `fmx-respond`; before terminal teardown, use its promised-final reconciliation when a typed public commitment exists, otherwise post the final completion follow-up so the link clears even if earlier follow-ups were spent.
 
 For a quiet persistent secondmate endpoint, rely on fresh home-watcher liveness rather than quietness or routed status; missing evidence enters ordinary stale handling.
-A secondmate's idle endpoint is healthy, and parent supervision relies on its routed status rather than treating a quiet pane as stale.
 A secondmate placed on scale-to-zero compute can have a deliberate no-host lifecycle state, delivery wakes it automatically, and `docs/runpod-secondmates.md` owns that lifecycle; never escalate such a route as a failure.
 Waiting on a healthy supervision cycle is silent; empty polls, elapsed time, and no-change updates are not captain-facing progress.
 Never broadly kill watchers, especially never `pkill -f bin/fm-watch.sh`, because that can kill sibling firstmate homes.

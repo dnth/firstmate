@@ -101,7 +101,8 @@ It never installs packages or overwrites a non-Firstmate file at a reserved wrap
 The dedicated Herdr launch agent owns only the remote-secondmate `fm-remote` server and does not inspect, rewrite, start, stop, or require the user's interactive `default` session or its `dev.firstmate.herdr` launch agent.
 It re-derives every check from the host afterwards, so what it prints is the state after the repair rather than the intent of one.
 
-These steps are never automated and are always reported rather than silently attempted, because SSH cannot create a GUI session from nothing:
+These steps are never automated because SSH cannot create a GUI session from nothing and readiness does not inspect vendor credential stores.
+The doctor reports host gaps it can prove, while each runtime's vendor login remains an explicit operator step.
 
 - The first console login on that Mac, and automatic login in System Settings > Users & Groups when the machine runs headless and must come back on its own after a reboot.
 - FileVault, which holds a reboot at pre-boot authentication before any login session exists.
