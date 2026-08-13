@@ -703,34 +703,28 @@ pod_create_body() {  # <id> <compute> <gpu-type> <min-vram>
     else
       candidates='[]'
     fi
-    jq -nc \
-      --arg name "fm-sm-$id" --arg image "$image" --arg vol "$volume_id" --arg dc "$datacenter" \
-      --arg boot "$boot" --argjson gpus "$candidates" --arg vram "${min_vram:-}" \
-      --arg origin "$code_origin" --arg harness "$harness_npm" \
-      '{
-         name: $name, imageName: $image, computeType: "GPU", cloudType: "SECURE",
-         gpuCount: 1, gpuTypeIds: $gpus, gpuTypePriority: "availability",
-         dataCenterIds: [$dc], networkVolumeId: $vol, volumeMountPath: "/workspace",
-         containerDiskInGb: 40, ports: ["22/tcp"], supportPublicIp: true,
-         env: {FM_POD_BOOT_B64: $boot, FM_POD_MIN_VRAM_GB: $vram,
-               FM_REMOTE_ORIGIN: $origin, FM_POD_HARNESS_NPM: $harness},
-         dockerStartCmd: ["/bin/bash","-c","printf %s \"$FM_POD_BOOT_B64\" | base64 --decode > /tmp/fm-pod-boot.sh 2>/dev/null || printf %s \"$FM_POD_BOOT_B64\" | base64 -D > /tmp/fm-pod-boot.sh; exec /bin/bash /tmp/fm-pod-boot.sh"]
-       }'
   else
-    jq -nc \
-      --arg name "fm-sm-$id" --arg image "$image" --arg vol "$volume_id" --arg dc "$datacenter" \
-      --arg boot "$boot" \
-      --arg origin "$code_origin" --arg harness "$harness_npm" \
-      '{
-         name: $name, imageName: $image, computeType: "CPU", cloudType: "SECURE",
-         cpuFlavorIds: ["cpu3c"], vcpuCount: 4,
-         dataCenterIds: [$dc], networkVolumeId: $vol, volumeMountPath: "/workspace",
-         containerDiskInGb: 40, ports: ["22/tcp"], supportPublicIp: true,
-         env: {FM_POD_BOOT_B64: $boot,
-               FM_REMOTE_ORIGIN: $origin, FM_POD_HARNESS_NPM: $harness},
-         dockerStartCmd: ["/bin/bash","-c","printf %s \"$FM_POD_BOOT_B64\" | base64 --decode > /tmp/fm-pod-boot.sh 2>/dev/null || printf %s \"$FM_POD_BOOT_B64\" | base64 -D > /tmp/fm-pod-boot.sh; exec /bin/bash /tmp/fm-pod-boot.sh"]
-       }'
+    candidates='[]'
   fi
+  jq -nc \
+    --arg name "fm-sm-$id" --arg image "$image" --arg vol "$volume_id" --arg dc "$datacenter" \
+    --arg boot "$boot" --arg compute "$compute" --argjson gpus "$candidates" --arg vram "${min_vram:-}" \
+    --arg origin "$code_origin" --arg harness "$harness_npm" \
+    '(if $compute == "gpu" then
+        {computeType: "GPU", gpuCount: 1, gpuTypeIds: $gpus, gpuTypePriority: "availability",
+         env: {FM_POD_MIN_VRAM_GB: $vram}}
+      else
+        {computeType: "CPU", cpuFlavorIds: ["cpu3c"], vcpuCount: 4, env: {}}
+      end) as $compute_fields
+     | {name: $name, imageName: $image, computeType: $compute_fields.computeType, cloudType: "SECURE"}
+       + ($compute_fields | del(.computeType, .env))
+       + {
+           dataCenterIds: [$dc], networkVolumeId: $vol, volumeMountPath: "/workspace",
+           containerDiskInGb: 40, ports: ["22/tcp"], supportPublicIp: true,
+           env: ({FM_POD_BOOT_B64: $boot} + $compute_fields.env
+                 + {FM_REMOTE_ORIGIN: $origin, FM_POD_HARNESS_NPM: $harness}),
+           dockerStartCmd: ["/bin/bash","-c","printf %s \"$FM_POD_BOOT_B64\" | base64 --decode > /tmp/fm-pod-boot.sh 2>/dev/null || printf %s \"$FM_POD_BOOT_B64\" | base64 -D > /tmp/fm-pod-boot.sh; exec /bin/bash /tmp/fm-pod-boot.sh"]
+         }'
 }
 
 pod_get() {  # <pod-id> [timeout] -> body, or empty when the pod is gone
