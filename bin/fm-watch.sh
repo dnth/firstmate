@@ -45,7 +45,9 @@
 #                          is also absorbed while its home watcher beacon is fresh
 #                          within the wedge threshold; missing, stale, future-dated,
 #                          or timed-out evidence follows the ordinary stale and
-#                          possible-wedge path.
+#                          possible-wedge path. A RunPod route in a recognized
+#                          no-host lifecycle is dormant instead and uses the long
+#                          pause cadence without probing its absent endpoint.
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
@@ -74,6 +76,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 mkdir -p "$STATE"
 
 # The native event fast-path and only its true dependencies have one narrow
@@ -94,6 +97,8 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-runpod-lib.sh
+. "$SCRIPT_DIR/fm-runpod-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -370,6 +375,34 @@ handle_paused_stale() {  # <window> <task> <hash>
     wake "$reason"
   fi
   triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
+}
+
+# A RunPod route with a recognized no-host lifecycle is deliberately dormant,
+# not an unresponsive agent.
+# Anchor its bounded recheck cadence on the provider lifecycle record rather
+# than a status line, because sleep and provision are lifecycle operations and
+# do not fabricate a crewmate pause event.
+handle_runpod_dormant_stale() {  # <window> <task>
+  local win=$1 task=$2 key record lifecycle h mtime age rf rf_age reason
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  record=$(fm_runpod_meta_path "$DATA" "$task") || return 1
+  lifecycle=$(fm_runpod_lifecycle "$DATA" "$task")
+  h=$(printf 'runpod dormant: %s:%s' "$task" "$lifecycle" | hash_pane)
+  printf '%s' "$h" > "$STATE/.stale-$key"
+  : > "$STATE/.paused-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  mtime=$(stat_mtime "$record")
+  case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
+  age=$(( $(date +%s) - mtime ))
+  rf="$STATE/.paused-resurfaced-$key"
+  rf_age=$(age_of "$rf")
+  if [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$rf_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
+    reason="stale: $win (RunPod lifecycle=$lifecycle dormant ${age}s, rechecked on a long cadence not a wedge; confirm scale-to-zero should continue)"
+    fm_wake_append stale "$win" "$reason" || exit 1
+    date +%s > "$rf"
+    wake "$reason"
+  fi
+  triage_log "absorbed stale (RunPod lifecycle=$lifecycle, dormant age ${age}s): $win"
 }
 
 clear_pause_state() {  # <window>
@@ -1003,14 +1036,21 @@ EOF
     key=${key//\//_}
     key=${key//./_}
     last=$(last_status_line "$STATE/$task.status")
-    if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
-      clear_pause_tracking "$w"
-    fi
-    secondmate_stale=0
+    meta=
     remote_host=
     if [ "$kind" = secondmate ]; then
       meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
       remote_host=$(grep '^remote_host=' "$meta" | cut -d= -f2- || true)
+      if [ -n "$remote_host" ] && fm_runpod_is_dormant "$DATA" "$task"; then
+        handle_runpod_dormant_stale "$w" "$task"
+        continue
+      fi
+    fi
+    if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
+      clear_pause_tracking "$w"
+    fi
+    secondmate_stale=0
+    if [ "$kind" = secondmate ]; then
       if ! status_is_paused_or_captain_held "$last" \
         && secondmate_supervision_is_alive "$w" "$meta" "$remote_host"; then
         clear_stale_tracking "$w"

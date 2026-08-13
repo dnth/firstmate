@@ -33,6 +33,7 @@
 #   platform=darwin|linux|<uname -s>|unknown
 #   required <tool>=<path>|MISSING
 #   parity <tool>=<path>|MISSING            (--parity only)
+#   note <topic>=<operator information>      (applicable hosts only)
 #   optional <tool>=<path>|absent
 #   fix <check>=applied: <what changed>       (--fix only)
 #   fix <check>=failed: <why the repair did not land>   (--fix only)
@@ -877,6 +878,9 @@ else
 fi
 if [ "$PARITY" -eq 1 ]; then
   printf '%s\n' ${PARITY_LINES[@]+"${PARITY_LINES[@]}"}
+  if [ "${IS_SANDBOX:-}" = 1 ]; then
+    printf '%s\n' 'note omp-oauth=RunPod root-sandbox callback login is known to fail with EADDRINUSE; use Codex or Claude subscription auth, or OPENCODE_API_KEY with an opencode-go/deepseek model; exact Bun/OMP root cause needs a live-pod operator repro'
+  fi
 fi
 for tool in "${OPTIONAL_TOOLS[@]}"; do
   if resolved=$(command -v "$tool" 2>/dev/null); then

@@ -15,7 +15,7 @@
 #   1. Ensure the base packages, restore the persisted SSH host identity from
 #      the network volume, authorize the configured public key, and start sshd.
 #   2. Provision the required toolchain, then link the durable bins, the browser,
-#      and the fixed remote entrypoint.
+#      and the fixed remote entrypoint, and seed Claude's unattended root state.
 #   3. Hand readiness to bin/fm-remote-doctor.sh --fix --parity. The doctor is the single
 #      owner of what "ready for a remote second mate" means, and on Linux it
 #      starts the remote job worker and the headless Herdr fm-remote server
@@ -78,6 +78,8 @@ FM_BOOT_LOG=${FM_BOOT_LOG:-$FM_PERSIST/boot.log}
 # every boot. bin/fm-remote-doctor.sh reads the durable-root declaration.
 FM_PASSWD_FILE=${FM_PASSWD_FILE:-/etc/passwd}
 FM_DURABLE_ROOT_FILE=${FM_DURABLE_ROOT_FILE:-/etc/firstmate/durable-root}
+IS_SANDBOX=1
+export IS_SANDBOX
 
 # Raise this when the provisioning contract changes so existing volumes
 # re-provision exactly once instead of silently keeping an older toolchain.
@@ -161,6 +163,7 @@ toolchain_plan() {
     plan_step "apt:$pkg"
   done
   plan_step account-home
+  plan_step account-shell
   plan_step node
   plan_step npm
   plan_step code-root
@@ -182,6 +185,7 @@ toolchain_plan() {
   done
   plan_step codegraph
   plan_step google-chrome
+  plan_step claude-headless
   [ -z "$FM_POD_HARNESS_NPM" ] || plan_step "harness:$FM_POD_HARNESS_NPM"
 }
 
@@ -204,6 +208,42 @@ ensure_account_home() {
   # The doctor reads this to check that the account home is inside the part of
   # the filesystem that survives replacement.
   printf '%s\n' "$FM_VOLUME" > "$FM_DURABLE_ROOT_FILE" || return 1
+}
+
+FM_SHELL_RC_BEGIN='# Firstmate RunPod environment begin'
+FM_SHELL_RC_END='# Firstmate RunPod environment end'
+
+write_account_shell_rc() {  # <path>
+  local path=$1 tmp
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    [ -f "$path" ] && [ ! -L "$path" ] || {
+      log "refusing unsafe account shell startup path: $path"
+      return 1
+    }
+  fi
+  tmp=$(mktemp "$FM_ACCOUNT_HOME/.fm-shell-rc.XXXXXX") || return 1
+  {
+    printf '%s\n' "$FM_SHELL_RC_BEGIN"
+    # shellcheck disable=SC2016 # HOME and PATH expand when the generated startup file is sourced.
+    printf '%s\n' 'export PATH="$HOME/.local/bin:$PATH"'
+    printf '%s\n' 'export IS_SANDBOX=1'
+    printf '%s\n' "$FM_SHELL_RC_END"
+    if [ -f "$path" ]; then
+      awk -v begin="$FM_SHELL_RC_BEGIN" -v end="$FM_SHELL_RC_END" '
+        $0 == begin { managed = 1; next }
+        $0 == end { managed = 0; next }
+        !managed { print }
+      ' "$path"
+    fi
+  } > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$path" || { rm -f -- "$tmp"; return 1; }
+}
+
+ensure_account_shell() {
+  write_account_shell_rc "$FM_ACCOUNT_HOME/.profile" || return 1
+  write_account_shell_rc "$FM_ACCOUNT_HOME/.bashrc" || return 1
+  log "login shells now inherit the durable account PATH and IS_SANDBOX=1"
 }
 
 # sshd resolves the login's home from the passwd database, not from this
@@ -722,6 +762,13 @@ link_durable_bins() {
   done
 }
 
+ensure_claude_headless() {
+  local helper="$FM_REMOTE_ROOT/bin/fm-claude-headless-setup.sh"
+  [ -x "$helper" ] || { log "the Claude headless setup helper is missing from the code root"; return 1; }
+  "$helper" || { log "Claude's unattended root state could not be prepared"; return 1; }
+  log "prepared Claude's unattended root state and disabled its git attribution"
+}
+
 # The doctor owns readiness. On Linux it starts the remote job worker and the
 # headless Herdr fm-remote server directly, with no GUI login session involved,
 # so this is the whole of "bring the worker and Herdr back on a fresh pod".
@@ -756,6 +803,7 @@ main() {
   # Before anything writes under a home: everything below, including the
   # authorized key and every later login, must land on the volume.
   ensure_account_home || exit 1
+  ensure_account_shell || exit 1
   rm -f -- "$FM_BOOT_READY" || exit 1
 
   # SSH comes up FIRST, deliberately independent of provisioning. RunPod exposes
@@ -791,6 +839,7 @@ main() {
   link_browser || { log "FATAL: the browser is not usable on this pod; connect over SSH and read $FM_BOOT_LOG"; hold_pod; }
   link_durable_bins || { log "FATAL: durable tools could not be linked; connect over SSH and read $FM_BOOT_LOG"; hold_pod; }
   link_entrypoint || { log "FATAL: the remote entrypoint could not be linked; connect over SSH and read $FM_BOOT_LOG"; hold_pod; }
+  ensure_claude_headless || { log "FATAL: Claude headless setup failed; connect over SSH and read $FM_BOOT_LOG"; hold_pod; }
   until hand_over_to_doctor; do
     log "remote readiness is incomplete; SSH is available for the required human steps"
     sleep 5

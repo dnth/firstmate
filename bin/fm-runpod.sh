@@ -7,6 +7,7 @@
 #                               [--image <tag>] [--code-origin <git-url>] [--harness-npm <pkg>]
 #   fm-runpod.sh wake <id> [--gpu] [--min-vram <gb>] [--gpu-type <id>]
 #   fm-runpod.sh sleep <id>
+#   fm-runpod.sh recover-stuck <id> --yes
 #   fm-runpod.sh status [<id>]
 #   fm-runpod.sh ssh <id> [<ssh-arg>...]
 #   fm-runpod.sh doctor <id> [--fix]
@@ -78,7 +79,7 @@
 #   FM_RUNPOD_CURL_BIN      curl executable, default curl
 #   FM_RUNPOD_SSH_BIN       ssh executable, default $FM_SSH_BIN or ssh
 #   FM_RUNPOD_KEYSCAN_BIN   ssh-keyscan executable, default ssh-keyscan
-#   FM_RUNPOD_WAKE_TIMEOUT  seconds to wait for endpoint and SSH, default 300
+#   FM_RUNPOD_WAKE_TIMEOUT  seconds to wait for endpoint and SSH, default 1200
 #   FM_RUNPOD_POLL_INTERVAL seconds between wake polls, default 5
 set -eu
 
@@ -94,7 +95,7 @@ API_BASE=${FM_RUNPOD_API_BASE:-https://rest.runpod.io/v1}
 CURL_BIN=${FM_RUNPOD_CURL_BIN:-curl}
 SSH_BIN=${FM_RUNPOD_SSH_BIN:-${FM_SSH_BIN:-ssh}}
 KEYSCAN_BIN=${FM_RUNPOD_KEYSCAN_BIN:-ssh-keyscan}
-WAKE_TIMEOUT=${FM_RUNPOD_WAKE_TIMEOUT:-300}
+WAKE_TIMEOUT=${FM_RUNPOD_WAKE_TIMEOUT:-1200}
 POLL_INTERVAL=${FM_RUNPOD_POLL_INTERVAL:-5}
 API_KEY_FILE="$CONFIG/runpod.env"
 API_KEY_NAME=RUNPOD_API_KEY
@@ -777,6 +778,13 @@ pod_get() {  # <pod-id> [timeout] -> body, or empty when the pod is gone
   return 1
 }
 
+pod_provider_state() {  # <pod-json>
+  local pod=$1 desired actual
+  desired=$(json_field "$pod" '.desiredStatus')
+  actual=$(json_field "$pod" '.status')
+  printf 'desiredStatus=%s status=%s' "${desired:-unknown}" "${actual:-unknown}"
+}
+
 cmd_wake() {
   local id=${1:-} want_gpu=0
   local min_vram='' gpu_type=''
@@ -869,8 +877,9 @@ cmd_wake() {
   port=
   while :; do
     remaining=$((deadline - SECONDS))
-    [ "$remaining" -gt 0 ] \
-      || die "pod $pod_id did not publish an SSH endpoint within ${WAKE_TIMEOUT}s; it is preserved for inspection"
+    if [ "$remaining" -le 0 ]; then
+      die "pod $pod_id did not publish an SSH endpoint within ${WAKE_TIMEOUT}s; RunPod reports $(pod_provider_state "$pod"); it is preserved for inspection; if this volume has never reached ready, stop billing with 'fm-runpod.sh recover-stuck $id --yes'"
+    fi
     pod=$(pod_get "$pod_id" "$remaining") || die "the RunPod API could not be reached while waiting for pod $pod_id"
     [ -n "$pod" ] || die "pod $pod_id disappeared while waking secondmate $id"
     host=$(json_field "$pod" '.publicIp')
@@ -918,6 +927,59 @@ cmd_wake() {
       || note "warning: secondmate $id is awake but its reply source could not be re-armed; run 'bin/fm-spawn.sh $id --secondmate' to reconcile"
   fi
   note "ready: secondmate $id pod=$pod_id compute=$compute endpoint=$host:$port alias=$alias"
+}
+
+# Terminate only the narrow failure mode where the provider created billable
+# compute but never produced a usable endpoint and this volume has never reached
+# ready.
+# Once ready provenance exists, remote completion is unknown whenever SSH is
+# unavailable, so only the ordinary guarded sleep path may terminate the pod.
+cmd_recover_stuck() {
+  local id=${1:-} confirmed=0 pod_id pod raw rc=0 provider_state lifecycle
+  shift || true
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --yes) confirmed=1; shift ;;
+      *) usage ;;
+    esac
+  done
+  require_id "$id"
+  require_jq
+  require_api_key
+  record_require "$id"
+  [ "$confirmed" -eq 1 ] \
+    || die "recover-stuck terminates never-ready billable compute for secondmate $id; pass --yes after confirming the provider stall"
+  lifecycle_lock_acquire "$id"
+  if record_has_ever_reached_ready "$id"; then
+    die "secondmate $id has reached ready before, so remote completion may be unknown; use the ordinary guarded sleep path after reconciling work"
+  fi
+  lifecycle=$(fm_runpod_lifecycle "$DATA" "$id")
+  case "$lifecycle" in
+    provisioned|waking) ;;
+    *) die "secondmate $id lifecycle is ${lifecycle:-unknown}, which is not safe never-ready recovery evidence; investigate the record before terminating compute" ;;
+  esac
+  pod_id=$(record_get "$id" pod_id)
+  [ -n "$pod_id" ] || die "secondmate $id has no recorded pod to recover"
+  pod=$(pod_get "$pod_id") || die "the RunPod API could not be reached while inspecting stuck pod $pod_id"
+  if [ -n "$pod" ]; then
+    provider_state=$(pod_provider_state "$pod")
+    raw=$(runpod_api DELETE "/pods/$pod_id" '') || rc=$?
+    [ "$rc" -eq 0 ] \
+      || die "the RunPod API could not be reached while terminating never-ready pod $pod_id; it may still be billing"
+    case "$(api_status "$raw")" in
+      2??|404) ;;
+      *)
+        api_body "$raw" >&2
+        die "RunPod refused to terminate never-ready pod $pod_id (HTTP $(api_status "$raw")); it may still be billing"
+        ;;
+    esac
+  else
+    provider_state='desiredStatus=absent status=absent'
+  fi
+  rm -f -- "$(ssh_fragment_path "$(alias_for "$id")")"
+  record_set "$id" "lifecycle=provisioned" "pod_id=" "endpoint_host=" "endpoint_port=" \
+    "cost_per_hr=" "pod_started_at="
+  note "recovered-stuck: secondmate $id pod $pod_id terminated ($provider_state), volume $(record_get "$id" volume_id) retained"
 }
 
 # --- sleep ------------------------------------------------------------------
@@ -1195,6 +1257,7 @@ case "${1:-}" in
   provision) shift; [ "$#" -ge 1 ] || usage; cmd_provision "$@" ;;
   wake) shift; [ "$#" -ge 1 ] || usage; cmd_wake "$@" ;;
   sleep) shift; [ "$#" -ge 1 ] || usage; cmd_sleep "$@" ;;
+  recover-stuck) shift; [ "$#" -ge 1 ] || usage; cmd_recover_stuck "$@" ;;
   status) shift; [ "$#" -le 1 ] || usage; cmd_status "${1:-}" ;;
   ssh) shift; [ "$#" -ge 1 ] || usage; cmd_ssh "$@" ;;
   doctor) shift; [ "$#" -ge 1 ] || usage; cmd_doctor "$@" ;;

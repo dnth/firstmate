@@ -69,6 +69,26 @@ lifecycle_of() {  # <world> <id>
   sed -n 's/^lifecycle=//p' "$1/home/data/runpod/$2.meta"
 }
 
+# --- provider-owned crew routing -------------------------------------------
+
+w=$(new_world crew-routing)
+remote_home="$w/remote-home"
+mkdir -p "$remote_home/bin" "$remote_home/data" "$remote_home/state" "$remote_home/config"
+printf '# Firstmate\n' > "$remote_home/AGENTS.md"
+printf 'ios\n' > "$remote_home/.fm-secondmate-home"
+FM_HOME="$remote_home" "$ROOT/bin/fm-remote-secondmate-control.sh" runpod-crews ios >/dev/null \
+  || fail "RunPod crew routing could not be installed in a seeded remote home"
+[ "$(cat "$remote_home/config/crew-harness")" = codex ] \
+  || fail "RunPod crew routing did not set codex as the static default"
+jq -e '
+  .rules == []
+  and .default == [{"harness":"codex"},{"harness":"claude"}]
+' "$remote_home/config/crew-dispatch.json" >/dev/null \
+  || fail "RunPod crew routing did not publish codex with a Claude fallback"
+FM_HOME="$remote_home" "$ROOT/bin/fm-remote-secondmate-control.sh" runpod-crews ios >/dev/null \
+  || fail "RunPod crew routing was not idempotent"
+pass "RunPod remote homes route crews through codex with a Claude fallback"
+
 # --- health polling never wakes a suspended route ---------------------------
 
 w=$(new_world liveness)
@@ -87,9 +107,35 @@ assert_no_grep "fm-sm-ios-runpod" "$w/calls.log" \
   || fail "health polling must leave the suspended lifecycle alone"
 pass "startup health polling skips a suspended route without probing, warning, or relaunching it"
 
+# The always-on watcher also owns a stale-pane loop that is separate from
+# bootstrap liveness. A suspended route must enter the long pause cadence there
+# without an SSH beacon probe or possible-wedge escalation.
+w=$(new_world watcher-dormant)
+runpod_seed_remote_route "$w/home" ios fm-sm-ios-runpod /srv/firstmate /srv/sm-ios
+runpod_seed_remote_route "$w/home" alpha plain-host /srv/firstmate /srv/sm-plain
+suspend_route "$w" ios
+: > "$w/calls.log"
+watch_out="$w/watch.out"
+touch "$w/home/state/.last-check" "$w/home/state/.last-heartbeat"
+FM_POLL=0.1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+  FM_PAUSE_RESURFACE_SECS=0 FM_WATCH_REMOTE_TIMEOUT=1 \
+  world_env "$w" timeout 2 "$ROOT/bin/fm-watch.sh" > "$watch_out" 2>&1
+watch_rc=$?
+case "$watch_rc" in
+  0|124) ;;
+  *) fail "the dormant watcher fixture exited unexpectedly: $(cat "$watch_out")" ;;
+esac
+assert_not_contains "$(cat "$watch_out")" "possible wedge" \
+  "the watcher escalated a deliberately suspended route as wedged"
+assert_no_grep '^fm-sm-ios-runpod fm-remote-secondmate-control.sh beacon-age$' "$w/calls.log" \
+  "the watcher probed a suspended route's absent remote beacon"
+[ ! -f "$w/home/state/.wedge-escalations-remote_ios" ] \
+  || fail "the watcher started a wedge escalation counter for a suspended route"
+pass "the watcher absorbs suspended RunPod routes on the long dormant cadence"
+
 # The same sweep still reaches an ordinary remote route with no compute
 # provider behind it, exactly as before this feature existed.
-assert_grep "plain-host fm-remote-doctor.sh" "$w/calls.log" \
+assert_grep 'fm-remote-secondmate-control.sh beacon-age' "$w/calls.log" \
   "an ordinary remote route must still be probed by the same sweep"
 pass "an ordinary remote route keeps its existing liveness probe unchanged"
 
@@ -225,6 +271,9 @@ kill -0 "$sleep_pid" 2>/dev/null || fail "sleep escaped the active RunPod spawn 
 : > "$doctor_release"
 wait "$spawn_pid" || fail "spawn failed after readiness resumed: $(cat "$w/spawn.out")"
 wait "$sleep_pid" || fail "sleep failed after spawn completed: $(cat "$w/sleep.out")"
+assert_grep "fm-remote-secondmate-control.sh runpod-crews" "$w/calls.log" \
+  "remote launch inheritance did not reapply the provider-owned crew route"
+pass "every RunPod remote launch converges its provider-owned crew routing after inheritance"
 launch_line=$(grep -n 'fm-remote-secondmate-control.sh launch' "$w/calls.log" | head -1 | cut -d: -f1)
 delete_line=$(grep -n 'DELETE /pods/' "$w/calls.log" | head -1 | cut -d: -f1)
 [ -n "$launch_line" ] && [ -n "$delete_line" ] && [ "$launch_line" -lt "$delete_line" ] \

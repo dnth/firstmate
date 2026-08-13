@@ -154,7 +154,7 @@ case "$method $path" in
       --argjson cost "$cost" --argjson polls "$init_polls" --argjson seq "$seq" \
       --argjson gpus "$gpus" --argjson disk "${disk:-40}" \
       --argjson v "$(jq -c --arg v "$vol" '[.volumes[] | select(.id == $v)][0] // null' "$state")" \
-      '{id:$id,name:$n,imageName:$i,computeType:$c,desiredStatus:"RUNNING",costPerHr:$cost,containerDiskInGb:$disk,
+      '{id:$id,name:$n,imageName:$i,computeType:$c,desiredStatus:"RUNNING",status:"INITIALIZING",costPerHr:$cost,containerDiskInGb:$disk,
         lastStartedAt:"2026-08-12T00:00:00.000Z",bootScript:$b,requestedGpuTypeIds:$gpus,
         remainingInitPolls:$polls,seq:$seq,networkVolume:$v,
         publicIp:null,portMappings:null}')
@@ -170,7 +170,8 @@ case "$method $path" in
     # number of polls, exactly as a real pod publishes no IP while booting.
     apply '(.pods[] | select(.id == $p) | .remainingInitPolls) |= (if . > 0 then . - 1 else 0 end)
            | (.pods[] | select(.id == $p)) |= (if .remainingInitPolls == 0
-                then .publicIp = ("10.0.0." + (.seq | tostring))
+                then .status = "RUNNING"
+                   | .publicIp = ("10.0.0." + (.seq | tostring))
                    | .portMappings = {"22": (20000 + .seq)}
                 else . end)' --arg p "$pid" || exit 7
     emit "$(jq -c --arg p "$pid" '[.pods[] | select(.id == $p)][0]' "$state")" 200

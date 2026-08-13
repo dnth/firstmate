@@ -55,8 +55,12 @@ pass "the first-boot plan covers every tool the doctor reports as required for p
 assert_contains "$plan" "ensure=code-root" "the plan must clone the code root so first boot needs no manual clone"
 assert_contains "$plan" "ensure=account-home" \
   "the plan must move the account home onto the volume so logins survive pod replacement"
+assert_contains "$plan" "ensure=account-shell" \
+  "the plan must publish the durable account bin and root-sandbox marker to login shells"
+assert_contains "$plan" "ensure=claude-headless" \
+  "the plan must prepare Claude's unattended root-sandbox state"
 assert_contains "$plan" "ensure=bun" "omp runs on bun, so the plan must provision the bun runtime"
-pass "the plan clones the code root and makes the account home durable on first boot"
+pass "the plan clones the code root, makes the account home durable, and prepares unattended shells"
 
 # --- --check touches nothing -------------------------------------------------
 
@@ -259,6 +263,8 @@ if [ "${1:-}" = clone ]; then
   # somewhere the doctor cannot see fails the handoff instead of passing.
   cat > "$dest/bin/fm-remote-doctor.sh" <<'DOCTOR'
 #!/usr/bin/env bash
+printf 'sandbox=%s\n' "${IS_SANDBOX:-unset}" >> "$FM_FAKE_CALLS"
+[ "${IS_SANDBOX:-}" = 1 ] || exit 1
 for tool in herdr treehouse tasks-axi omp; do
   command -v "$tool" >> "$FM_FAKE_CALLS" || exit 1
 done
@@ -277,8 +283,10 @@ esac
 printf 'doctor %s\n' "$*" >> "$FM_FAKE_CALLS"
 exit 0
 DOCTOR
+  cp "$FM_FAKE_CLAUDE_SETUP" "$dest/bin/fm-claude-headless-setup.sh"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$dest/bin/fm-remote-entrypoint.sh"
-  chmod +x "$dest/bin/fm-remote-doctor.sh" "$dest/bin/fm-remote-entrypoint.sh"
+  chmod +x "$dest/bin/fm-remote-doctor.sh" "$dest/bin/fm-remote-entrypoint.sh" \
+    "$dest/bin/fm-claude-headless-setup.sh"
 fi
 exit 0
 SH
@@ -324,6 +332,7 @@ world_env() {  # <world> [harness]; exports into the calling subshell
   export FM_FAKE_NPM_TEMPLATE="$w/templates/npm"
   export FM_FAKE_NPX_TEMPLATE="$w/templates/npx"
   export FM_FAKE_BUN_TEMPLATE="$w/templates/bun"
+  export FM_FAKE_CLAUDE_SETUP="$ROOT/bin/fm-claude-headless-setup.sh"
   export FM_SYSTEM_SSH_DIR="$w/system-ssh"
   export FM_SSHD_FALLBACK="$w/fakebin/sshd"
   export FM_PASSWD_FILE="$w/etc/passwd"
@@ -392,6 +401,32 @@ assert_present "$HOMEDIR/.local/bin/tasks-axi" "later SSH jobs must receive a pe
 assert_present "$w/volume/persistent-runtime/toolchain.provisioned" "a completed provisioning run must record its marker"
 pass "first boot clones the code root and installs the required toolchain through the pinned installers"
 
+# Bare SSH login shells and interactive shells do not inherit the boot process's
+# PATH, so both account startup files must independently recover the durable bin.
+profile_probe=$(HOME="$HOMEDIR" PATH=/usr/bin:/bin /bin/bash -c '. "$HOME/.profile"; printf "%s|%s\n" "$(command -v codex)" "${IS_SANDBOX:-}"')
+[ "$profile_probe" = "$HOMEDIR/.local/bin/codex|1" ] \
+  || fail "the login-shell profile did not restore the durable tool PATH and IS_SANDBOX=1: $profile_probe"
+bashrc_probe=$(HOME="$HOMEDIR" PATH=/usr/bin:/bin /bin/bash -c '. "$HOME/.bashrc"; printf "%s|%s\n" "$(command -v claude)" "${IS_SANDBOX:-}"')
+[ "$bashrc_probe" = "$HOMEDIR/.local/bin/claude|1" ] \
+  || fail "the interactive-shell rc did not restore the durable tool PATH and IS_SANDBOX=1: $bashrc_probe"
+assert_contains "$calls" "sandbox=1" \
+  "the non-interactive readiness handoff did not inherit IS_SANDBOX=1"
+pass "login, interactive, and non-interactive pod processes inherit the durable tool PATH and sandbox marker"
+
+jq -e '
+  .hasCompletedOnboarding == true
+  and .theme == "dark"
+' "$HOMEDIR/.claude.json" >/dev/null \
+  || fail "Claude's durable state did not preseed onboarding and theme"
+jq -e '
+  .skipDangerousModePermissionPrompt == true
+  and .attribution.commit == ""
+  and .attribution.pr == ""
+  and .attribution.sessionUrl == false
+' "$HOMEDIR/.claude/settings.json" >/dev/null \
+  || fail "Claude's durable settings did not preseed unattended bypass and disabled attribution"
+pass "Claude onboarding, bypass confirmation, and git attribution are preseeded on the volume"
+
 # --- the account home is on the volume, so a login is once-per-volume --------
 #
 # Every worker login, gh credential, and runtime config lands under the account
@@ -456,6 +491,10 @@ pass "provisioning is idempotent across boots on the same volume"
 mkdir -p "$HOMEDIR/.claude" "$HOMEDIR/.config/gh"
 printf 'subscription-login\n' > "$HOMEDIR/.claude/.credentials.json"
 printf 'github.com:\n  oauth_token: login\n' > "$HOMEDIR/.config/gh/hosts.yml"
+jq '.operatorState = "keep"' "$HOMEDIR/.claude.json" > "$HOMEDIR/.claude.json.next" \
+  && mv "$HOMEDIR/.claude.json.next" "$HOMEDIR/.claude.json"
+jq '.operatorSetting = "keep"' "$HOMEDIR/.claude/settings.json" > "$HOMEDIR/.claude/settings.json.next" \
+  && mv "$HOMEDIR/.claude/settings.json.next" "$HOMEDIR/.claude/settings.json"
 
 rm -rf "${w:?}/home"
 rm -rf "${w:?}/system-ssh"
@@ -484,6 +523,10 @@ assert_grep ":$HOMEDIR:" "$w/etc/passwd" "a replacement pod must point sshd back
   || fail "a replacement pod lost the harness login that was completed on the volume"
 assert_grep 'oauth_token: login' "$HOMEDIR/.config/gh/hosts.yml" \
   "a replacement pod lost the GitHub login that was completed on the volume"
+jq -e '.operatorState == "keep" and .hasCompletedOnboarding == true' "$HOMEDIR/.claude.json" >/dev/null \
+  || fail "a replacement pod clobbered existing Claude state while reconciling headless defaults"
+jq -e '.operatorSetting == "keep" and .attribution.sessionUrl == false' "$HOMEDIR/.claude/settings.json" >/dev/null \
+  || fail "a replacement pod clobbered existing Claude settings while enforcing attribution"
 assert_present "$w/volume/persistent-runtime/boot.ready" "a replacement pod must reach readiness from the retained volume"
 pass "replacement pods restore ephemeral prerequisites and reuse the durable toolchain"
 pass "a login completed once on the volume survives pod replacement"

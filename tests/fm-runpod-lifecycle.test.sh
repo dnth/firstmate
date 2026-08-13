@@ -205,6 +205,37 @@ assert_contains "$out" "SSH bootstrap did not complete" "an incomplete bootstrap
 [ "$(record_field ios lifecycle)" != ready ] || fail "an incompletely provisioned pod must never be recorded ready"
 pass "wake retries host-key scanning and refuses an incomplete bootstrap"
 
+# A provider can leave a paid pod RUNNING without ever publishing an endpoint.
+# The failure must identify that provisioning state, and a never-ready record is
+# the one safe provenance that permits provider-only termination without SSH.
+out=$(rp provision stalled --datacenter EU-RO-1 --size 50 \
+  --code-origin https://example.test/firstmate.git 2>&1) \
+  || fail "stalled-pod fixture provision failed: $out"
+out=$(FM_FAKE_RUNPOD_INIT_POLLS=999 FM_TEST_RUNPOD_POLL_INTERVAL=1 \
+  FM_TEST_RUNPOD_WAKE_TIMEOUT=2 rp wake stalled 2>&1) \
+  && fail "the stalled endpoint fixture unexpectedly reached ready"
+assert_contains "$out" "did not publish an SSH endpoint" \
+  "a provisioning stall must retain the endpoint timeout diagnosis"
+assert_contains "$out" "desiredStatus=RUNNING" \
+  "a provisioning stall must report the provider desiredStatus"
+assert_contains "$out" "status=INITIALIZING" \
+  "a provisioning stall must report the provider status"
+STALLED_POD=$(record_field stalled pod_id)
+STALLED_VOLUME=$(record_field stalled volume_id)
+[ -n "$STALLED_POD" ] || fail "the stalled pod id was not preserved for recovery"
+out=$(rp recover-stuck stalled --yes 2>&1) || fail "never-ready stuck recovery failed: $out"
+assert_contains "$out" "recovered-stuck: secondmate stalled" \
+  "stuck recovery must report the exact pod it terminated"
+[ -z "$(record_field stalled pod_id)" ] || fail "stuck recovery left the terminated pod recorded"
+[ "$(record_field stalled lifecycle)" = provisioned ] \
+  || fail "stuck recovery did not return a never-ready volume to provisioned"
+[ "$(jq -r --arg p "$STALLED_POD" '[.pods[] | select(.id == $p)] | length' "$API_STATE")" = 0 ] \
+  || fail "stuck recovery left the never-ready billing pod alive"
+[ "$(jq -r --arg v "$STALLED_VOLUME" '[.volumes[] | select(.id == $v)] | length' "$API_STATE")" = 1 ] \
+  || fail "stuck recovery deleted the retained network volume"
+pass "endpoint stalls report provider state and never-ready pods have a guarded recovery path"
+rp destroy stalled --yes >/dev/null 2>&1 || fail "the isolated stalled-pod fixture volume could not be cleaned up"
+
 out=$(FM_FAKE_BOOT_INCOMPLETE=1 rp ssh ios 2>&1) \
   || fail "SSH remediation must remain reachable before readiness: $out"
 [ "$(record_field ios lifecycle)" != ready ] || fail "interactive SSH must not mark an incomplete pod ready"
@@ -229,6 +260,16 @@ assert_no_grep "StrictHostKeyChecking no" "$(fragment fm-sm-ios-runpod)" "host-k
 FIRST_KEY=$(grep '^fm-sm-ios-runpod ' "$PARENT/config/runpod/known_hosts")
 assert_contains "$FIRST_KEY" "fm-sm-ios-runpod ssh-ed25519" "the host key must be pinned under the alias, not the IP"
 pass "wake creates one pod on the glibc-compatible default image, discovers its endpoint, and pins a verified host key"
+
+out=$(rp recover-stuck ios --yes 2>&1) \
+  && fail "stuck recovery terminated a pod whose volume had already reached ready"
+assert_contains "$out" "has reached ready before" \
+  "the ready-provenance refusal must explain why unknown completion still applies"
+[ "$(record_field ios pod_id)" = "$FIRST_POD" ] \
+  || fail "a refused ready-provenance recovery changed the recorded pod"
+[ "$(jq -r --arg p "$FIRST_POD" '[.pods[] | select(.id == $p)] | length' "$API_STATE")" = 1 ] \
+  || fail "a refused ready-provenance recovery terminated live compute"
+pass "stuck recovery never weakens unknown-completion safety after readiness"
 
 stored_harness=$(record_field ios harness_npm)
 out=$(rp provision ios --datacenter EU-RO-1 --size 100 --code-origin https://example.test/firstmate.git 2>&1) \

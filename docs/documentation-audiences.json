@@ -346,6 +346,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/runpod-secondmates.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/stow-memory.md",
       "audience": "maintainer-verification"
     },

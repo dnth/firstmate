@@ -125,6 +125,7 @@ A host declares that durable root in `/etc/firstmate/durable-root`; where the fi
 The tier is opt-in because this command owns readiness for every remote second mate, and a minimal remote host is complete at the required minimum.
 Without `--parity` the report and the verdict are unchanged.
 `--parity` reports gaps and never installs, exactly like the required tier; [`runpod-secondmates.md`](runpod-secondmates.md) covers the host that provisions that set for itself.
+When `IS_SANDBOX=1` identifies that RunPod root environment, the parity report also emits an informational `note omp-oauth=` line for its observed OMP callback-login limitation without changing the readiness verdict.
 
 Firstmate never writes an auto-login password, never changes FileVault, and never stores an account password.
 A file at `~/.local/bin/fm-remote-entrypoint.sh` that is not Firstmate's own symlink is reported for the operator to inspect and is never overwritten.
@@ -161,6 +162,7 @@ bin/fm-spawn.sh <id> --secondmate
 ```
 
 The primary resolves both configured secondmate profiles, runs the same readiness gate the seed runs, transfers the inherited-material allowlist, and asks the remote host to select from current host-local quota and launch on Herdr in `fm-remote`.
+For a RunPod route only, provider convergence then restores Codex-first crew dispatch with a Claude fallback after that inherited transfer, while the second-mate agent's own selected harness remains unchanged.
 The remote response supplies the actually launched harness, model, effort, and fallback metadata for the primary record; reusing an already-live endpoint preserves that stored profile instead of relabeling it from a new request.
 All remote secondmates on one host share `fm-remote` and retain separate `2ndmate-<id>` workspaces inside it.
 An explicit request for any other backend is refused rather than honored, and the remote host refuses one too.

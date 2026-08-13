@@ -2755,6 +2755,17 @@ if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
   }
 fi
 
+# RunPod's root account is explicitly marked IS_SANDBOX=1 by pod boot.
+# Prepare Claude's durable onboarding and project trust after the isolated
+# worktree is authoritative, then carry the marker into the long-lived backend
+# pane because its daemon may predate this SSH process's environment.
+if [ "$HARNESS" = claude ] && [ "${IS_SANDBOX:-}" = 1 ]; then
+  "$SCRIPT_DIR/fm-claude-headless-setup.sh" --project "$WT" || {
+    echo "error: Claude's unattended root-sandbox state could not be prepared for $WT" >&2
+    exit 1
+  }
+fi
+
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
@@ -3163,6 +3174,9 @@ LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 # an unset value is the single-store default and needs no prefix.
 if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+fi
+if [ "$HARNESS" = claude ] && [ "${IS_SANDBOX:-}" = 1 ]; then
+  LAUNCH="IS_SANDBOX=1 $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
