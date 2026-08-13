@@ -124,14 +124,6 @@ while IFS='|' read -r id home _window meta; do
   remote_host=$(fm_meta_get "$meta" remote_host)
   if [ -n "$remote_host" ]; then
     printf 'secondmate %s (%s:%s):\n' "$id" "$remote_host" "$home"
-    # A scale-to-zero route in a recognized no-host lifecycle state has nothing
-    # to push to, and pushing is never a reason to create compute. Its pending
-    # nudge marker survives, so the next deliberate wake converges it
-    # (bin/fm-runpod-lib.sh).
-    if fm_runpod_is_dormant "$DATA" "$id"; then
-      echo "  config-reread: skipped - suspended; converges on its next wake"
-      continue
-    fi
     remote_lock=$(fm_remote_inherit_transaction_lock_path "$STATE" "$id" 2>/dev/null || true)
     if [ -z "$remote_lock" ] || ! fm_lock_acquire_wait "$remote_lock"; then
       echo "  config-reread: transaction lock failed"
@@ -155,6 +147,15 @@ while IFS='|' read -r id home _window meta; do
       fm_lock_release "$remote_lock" || true
       continue
     fi
+    # A scale-to-zero route in a recognized no-host lifecycle state has nothing
+    # to push to, and pushing is never a reason to create compute. The durable
+    # marker and generation above make the shared wake-before-delivery boundary
+    # perform this exact convergence before any later work reaches the host.
+    if fm_runpod_is_dormant "$DATA" "$id"; then
+      echo "  config-reread: skipped - suspended; converges on its next wake"
+      fm_lock_release "$remote_lock" || true
+      continue
+    fi
     if remote_out=$(FM_CONFIG_INHERIT_LIVE=1 \
       "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" 2>&1); then
       printf '%s\n' "$remote_out" | sed 's/^/  /'
@@ -163,6 +164,7 @@ while IFS='|' read -r id home _window meta; do
       [ "$remote_pending" -eq 0 ] || remote_nudge=1
       if [ "$remote_nudge" -eq 1 ]; then
         if FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
+          FM_CONFIG_INHERIT_ALREADY_CONVERGED=1 \
           "$SCRIPT_DIR/fm-send.sh" "fm-$id" "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" >/dev/null 2>&1; then
           rm -f -- "$remote_marker"
           echo "  config-reread: sent"

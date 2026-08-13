@@ -104,13 +104,22 @@ fi
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-runpod-lib.sh
 . "$SCRIPT_DIR/fm-runpod-lib.sh"
+# shellcheck source=bin/fm-secondmate-nudge-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
 RUNPOD_DELIVERY_LOCK=
+RUNPOD_INHERIT_LOCK=
+RUNPOD_PENDING_NUDGE_MARKER=
+RUNPOD_PENDING_NUDGE_MESSAGE=
 release_runpod_delivery_lock() {
+  if [ -n "$RUNPOD_INHERIT_LOCK" ]; then
+    fm_lock_release "$RUNPOD_INHERIT_LOCK" || true
+    RUNPOD_INHERIT_LOCK=
+  fi
   [ -n "$RUNPOD_DELIVERY_LOCK" ] || return 0
   fm_lock_release "$RUNPOD_DELIVERY_LOCK"
   RUNPOD_DELIVERY_LOCK=
@@ -345,6 +354,31 @@ if [ "$TARGET_BACKEND" = remote ] && fm_runpod_is_dormant "$DATA" "$TARGET_REMOT
   fi
 fi
 
+if [ "$TARGET_BACKEND" = remote ] \
+  && fm_runpod_is_managed "$DATA" "$TARGET_REMOTE_ID" \
+  && [ "${FM_CONFIG_INHERIT_ALREADY_CONVERGED:-0}" != 1 ] \
+  && [ "${1:-}" != --key ]; then
+  RUNPOD_PENDING_NUDGE_MARKER=$(fm_secondmate_nudge_marker_path "$STATE" "$TARGET_REMOTE_ID" 2>/dev/null || true)
+  if [ -n "$RUNPOD_PENDING_NUDGE_MARKER" ] \
+    && [ -f "$RUNPOD_PENDING_NUDGE_MARKER" ] \
+    && [ ! -L "$RUNPOD_PENDING_NUDGE_MARKER" ] \
+    && [ "$(fm_meta_get "$RUNPOD_PENDING_NUDGE_MARKER" remote)" = 1 ]; then
+    RUNPOD_INHERIT_LOCK=$(fm_remote_inherit_transaction_lock_path "$STATE" "$TARGET_REMOTE_ID" 2>/dev/null || true)
+    [ -n "$RUNPOD_INHERIT_LOCK" ] && fm_lock_acquire_wait "$RUNPOD_INHERIT_LOCK" \
+      || { echo "error: cannot lock pending inherited configuration for RunPod secondmate $TARGET_REMOTE_ID; nothing was delivered" >&2; exit 1; }
+    runpod_generation=$(fm_remote_inherit_generation_next "$STATE" "$TARGET_REMOTE_ID" 2>/dev/null || true)
+    [ -n "$runpod_generation" ] \
+      || { echo "error: cannot publish pending inherited configuration generation for RunPod secondmate $TARGET_REMOTE_ID; nothing was delivered" >&2; exit 1; }
+    if ! FM_CONFIG_INHERIT_LIVE=1 \
+      "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$TARGET_REMOTE_ID" "$runpod_generation" >/dev/null; then
+      echo "error: pending inherited configuration did not converge on RunPod secondmate $TARGET_REMOTE_ID; nothing was delivered" >&2
+      exit 1
+    fi
+    RUNPOD_PENDING_NUDGE_MESSAGE=$(fm_meta_get "$RUNPOD_PENDING_NUDGE_MARKER" message)
+    [ -n "$RUNPOD_PENDING_NUDGE_MESSAGE" ] || RUNPOD_PENDING_NUDGE_MESSAGE=$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE
+  fi
+fi
+
 TARGET_OMP_BUN=
 if [ "$TARGET_HARNESS" = omp ]; then
   if [ -z "$TARGET_META" ] \
@@ -462,6 +496,10 @@ if [ "${1:-}" = "--key" ]; then
 else
   MESSAGE=$*
   RESOLVE_ANSWER_TEXT=$MESSAGE
+  if [ -n "$RUNPOD_PENDING_NUDGE_MESSAGE" ]; then
+    MESSAGE="$RUNPOD_PENDING_NUDGE_MESSAGE
+$MESSAGE"
+  fi
   if [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
     # Reuse an existing correlation id for recovery resends; otherwise create a
     # durable parent expectation before delivery. Transport success never
@@ -578,6 +616,11 @@ else
     fi
   fi
   [ "$post_delivery_failed" -eq 0 ] || exit 1
+  if [ -n "$RUNPOD_PENDING_NUDGE_MESSAGE" ]; then
+    rm -f -- "$RUNPOD_PENDING_NUDGE_MARKER"
+    fm_lock_release "$RUNPOD_INHERIT_LOCK" || true
+    RUNPOD_INHERIT_LOCK=
+  fi
   # The submit was confirmed or accepted through the narrow busy-OMP queue
   # verdict. The harness still needs a beat to spin up the
   # turn before its busy footer shows. Pause so an immediate peek catches the

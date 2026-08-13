@@ -95,7 +95,7 @@ assert_absent "$PARENT/data/runpod/.hidden.meta" "a hidden ownership record must
 [ ! -s "$API_LOG" ] || fail "an invalid hidden id must refuse before any request is made"
 pass "leading-dot ids cannot create hidden ownership records"
 
-out=$(rp provision ios --datacenter EU-RO-1 --size 100 --harness-npm @example/harness 2>&1) || fail "provision failed: $out"
+out=$(rp provision ios --datacenter EU-RO-1 --size 100 --code-origin https://example.test/firstmate.git --harness-npm @example/harness 2>&1) || fail "provision failed: $out"
 assert_contains "$out" "provisioned: secondmate ios" "provision must report what it created"
 [ "$(runpod_volume_count "$API_STATE")" = 1 ] || fail "provision must create exactly one network volume"
 [ "$(runpod_pod_count "$API_STATE")" = 0 ] || fail "provision must not create a pod"
@@ -104,11 +104,37 @@ assert_contains "$out" "provisioned: secondmate ios" "provision must report what
 [ "$(record_field ios ssh_alias)" = fm-sm-ios-runpod ] || fail "provision must bind the route's SSH alias"
 pass "provision creates one volume, records placement, and creates no pod"
 
-out=$(rp provision ios --datacenter EU-RO-1 --size 100 --harness-npm @example/harness 2>&1) || fail "second provision failed: $out"
+out=$(rp provision ios --datacenter EU-RO-1 --size 100 --code-origin https://example.test/firstmate.git --harness-npm @example/harness 2>&1) || fail "second provision failed: $out"
 assert_contains "$out" "reused: volume" "a repeated provision must reuse the recorded volume"
 [ "$(runpod_volume_count "$API_STATE")" = 1 ] || fail "a repeated provision must not create a second volume"
 [ "$(runpod_api_calls "$API_LOG" "POST /networkvolumes")" = 1 ] || fail "a repeated provision must not POST a second volume"
 pass "provision is idempotent and never accumulates volumes"
+
+out=$(rp provision nonroot --user ubuntu --datacenter EU-RO-1 --code-origin https://example.test/firstmate.git 2>&1) \
+  && fail "provision accepted an SSH account the pod does not prepare"
+assert_contains "$out" "only the root account is supported" "the account refusal must explain the pod contract"
+assert_absent "$PARENT/data/runpod/nonroot.meta" "a refused account must create no ownership record"
+pass "the SSH login cannot diverge from the account prepared by pod boot"
+
+before_posts=$(runpod_api_calls "$API_LOG" "POST /networkvolumes")
+out=$(rp provision fresh --datacenter EU-RO-1 2>&1) \
+  && fail "provision created a fresh clone-free volume without --code-origin"
+assert_contains "$out" "--code-origin is required" "the fresh-volume refusal must name the missing source"
+[ "$(runpod_api_calls "$API_LOG" "POST /networkvolumes")" = "$before_posts" ] \
+  || fail "a missing code origin must refuse before creating paid storage"
+assert_absent "$PARENT/data/runpod/fresh.meta" "a refused clone-free volume must have no local ownership record"
+pass "fresh volumes require a code origin before paid storage is created"
+
+jq '.volumes += [{"id":"vol-unowned","name":"fm-sm-collision-runpod","size":50,"dataCenterId":"EU-RO-1"}]' \
+  "$API_STATE" > "$API_STATE.next" && mv "$API_STATE.next" "$API_STATE"
+out=$(rp provision collision --volume-name fm-sm-collision-runpod --code-origin https://example.test/firstmate.git 2>&1) \
+  && fail "provision adopted an unrecorded same-name volume"
+assert_contains "$out" "unowned name collision" "the collision refusal must distinguish missing local provenance"
+assert_contains "$out" "fm-sm-collision-runpod" "the collision refusal must name the provider volume"
+assert_absent "$PARENT/data/runpod/collision.meta" "an unowned collision must not create local ownership evidence"
+pass "provider volumes without local ownership evidence are never adopted"
+jq 'del(.volumes[] | select(.id == "vol-unowned"))' "$API_STATE" > "$API_STATE.next" \
+  && mv "$API_STATE.next" "$API_STATE"
 
 out=$(rp provision web --volume-name fm-sm-ios-runpod 2>&1) \
   && fail "provision must reject a volume already owned by another second mate"
@@ -192,14 +218,14 @@ assert_contains "$FIRST_KEY" "fm-sm-ios-runpod ssh-ed25519" "the host key must b
 pass "wake creates one pod on the glibc-compatible default image, discovers its endpoint, and pins a verified host key"
 
 stored_harness=$(record_field ios harness_npm)
-out=$(rp provision ios --datacenter EU-RO-1 --size 100 2>&1) \
+out=$(rp provision ios --datacenter EU-RO-1 --size 100 --code-origin https://example.test/firstmate.git 2>&1) \
   && fail "reprovision must reject a live configured-to-unset harness change"
 assert_contains "$out" "sleep" "a live boot-contract refusal must name the required lifecycle step"
 [ "$(record_field ios harness_npm)" = "$stored_harness" ] \
   || fail "a refused live harness change must preserve the recorded contract"
 pass "live pods reject configured-to-unset boot-contract changes"
 
-out=$(rp provision ios --alias fm-sm-ios-new --datacenter EU-RO-1 --harness-npm @example/harness 2>&1) \
+out=$(rp provision ios --alias fm-sm-ios-new --datacenter EU-RO-1 --code-origin https://example.test/firstmate.git --harness-npm @example/harness 2>&1) \
   && fail "reprovision must reject reassignment of an existing SSH alias"
 assert_contains "$out" "already owns SSH alias fm-sm-ios-runpod" "the refusal must name the existing alias"
 [ "$(record_field ios ssh_alias)" = fm-sm-ios-runpod ] || fail "a refused alias reassignment must preserve the record"
@@ -211,7 +237,7 @@ pass "reprovision cannot leave stale identity by reassigning an alias"
 
 runpod_seed_remote_route "$PARENT" dot fm.ios /srv/firstmate /srv/sm-dot
 printf 'fmXios ssh-ed25519 AAAAconfusing\n' >> "$PARENT/config/runpod/known_hosts"
-out=$(rp provision dot --datacenter EU-RO-1 --size 20 2>&1) || fail "dot-alias provision failed: $out"
+out=$(rp provision dot --datacenter EU-RO-1 --size 20 --code-origin https://example.test/firstmate.git 2>&1) || fail "dot-alias provision failed: $out"
 out=$(rp wake dot 2>&1) || fail "dot-alias wake failed: $out"
 [ "$(awk '$1 == "fm.ios" { count++ } END { print count + 0 }' "$PARENT/config/runpod/known_hosts")" = 1 ] \
   || fail "a regex-like alias must be pinned despite a similar literal entry"
@@ -328,8 +354,9 @@ rp wake ios >/dev/null 2>&1 || fail "could not return to CPU after the GPU cases
 
 # --- one volume backs at most one live pod ----------------------------------
 
-out=$(rp provision web --datacenter EU-RO-1 --size 50 2>&1) || fail "web provision failed: $out"
+out=$(rp provision web --datacenter EU-RO-1 --size 50 --code-origin https://example.test/firstmate.git 2>&1) || fail "web provision failed: $out"
 IOS_VOLUME=$(record_field ios volume_id)
+WEB_VOLUME=$(record_field web volume_id)
 sed -i.bak "s/^volume_id=.*/volume_id=$IOS_VOLUME/" "$PARENT/data/runpod/web.meta"
 rm -f "$PARENT/data/runpod/web.meta.bak"
 out=$(rp wake web 2>&1) && fail "activating a volume that already backs a live pod must be refused"
@@ -341,7 +368,9 @@ pass "wake rejects a volume record owned by another second mate"
 sed -i.bak "s/^volume_id=.*/volume_id=/" "$PARENT/data/runpod/web.meta"
 rm -f "$PARENT/data/runpod/web.meta.bak"
 rm -f "$PARENT/data/runpod/web.meta"
-out=$(rp provision web --datacenter EU-RO-1 --size 50 2>&1) || fail "web reprovision failed: $out"
+jq 'del(.volumes[] | select(.id == $v))' --arg v "$WEB_VOLUME" "$API_STATE" > "$API_STATE.next" \
+  && mv "$API_STATE.next" "$API_STATE"
+out=$(rp provision web --datacenter EU-RO-1 --size 50 --code-origin https://example.test/firstmate.git 2>&1) || fail "web reprovision failed: $out"
 sed -i.bak 's/^ssh_alias=.*/ssh_alias=fm-sm-ios-runpod/' "$PARENT/data/runpod/web.meta"
 rm -f "$PARENT/data/runpod/web.meta.bak"
 sed -i.bak '/^- web / s/host: fm-sm-web-runpod/host: fm-sm-ios-runpod/' "$PARENT/data/secondmates.md"

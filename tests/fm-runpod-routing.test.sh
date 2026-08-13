@@ -55,7 +55,8 @@ world_env() {  # <world> -- <command...>
 # observes only what it triggered.
 suspend_route() {  # <world> <id>
   local w=$1 id=$2
-  world_env "$w" "$ROOT/bin/fm-runpod.sh" provision "$id" --datacenter EU-RO-1 --size 50 >/dev/null \
+  world_env "$w" "$ROOT/bin/fm-runpod.sh" provision "$id" --datacenter EU-RO-1 --size 50 \
+    --code-origin https://example.test/firstmate.git >/dev/null \
     || fail "provision failed for $id"
   world_env "$w" "$ROOT/bin/fm-runpod.sh" wake "$id" >/dev/null \
     || fail "wake failed for $id"
@@ -113,6 +114,8 @@ assert_contains "$out" "suspended" "config push must say why the suspended route
 [ "$(grep -c 'POST /pods' "$w/calls.log" || true)" = 0 ] \
   || fail "config push must never create compute"
 [ "$(lifecycle_of "$w" ios)" = suspended ] || fail "config push must leave the route suspended"
+pending_marker="$w/home/state/.secondmate-nudge-pending/ios.pending"
+assert_present "$pending_marker" "a suspended route must retain a durable pending convergence marker"
 pass "pushing inherited material skips a suspended route rather than waking it"
 
 : > "$w/calls.log"
@@ -128,6 +131,10 @@ pass "the reply source is not armed against a suspended host"
 w=$(new_world deliver)
 runpod_seed_remote_route "$w/home" ios fm-sm-ios-runpod /srv/firstmate /srv/sm-ios
 suspend_route "$w" ios
+world_env "$w" "$ROOT/bin/fm-config-push.sh" >/dev/null \
+  || fail "config push did not record pending convergence for the delivery case"
+pending_marker="$w/home/state/.secondmate-nudge-pending/ios.pending"
+: > "$w/calls.log"
 
 out=$(world_env "$w" "$ROOT/bin/fm-send.sh" fm-ios 'status please' 2>&1) \
   || fail "sending to a suspended second mate failed: $out"
@@ -136,8 +143,12 @@ out=$(world_env "$w" "$ROOT/bin/fm-send.sh" fm-ios 'status please' 2>&1) \
   || fail "delivery must create exactly one pod"
 first_pod=$(grep -n 'POST /pods' "$w/calls.log" | head -1 | cut -d: -f1)
 first_send=$(grep -n 'fm-remote-secondmate-control.sh send' "$w/calls.log" | head -1 | cut -d: -f1)
+first_inherit=$(grep -n 'fm-remote-inherit.sh' "$w/calls.log" | head -1 | cut -d: -f1)
 [ -n "$first_send" ] || fail "the request must actually be delivered after the wake"
+[ -n "$first_inherit" ] || fail "the wake boundary must consume pending inherited configuration"
 [ "$first_pod" -lt "$first_send" ] || fail "the wake must happen strictly before delivery"
+[ "$first_inherit" -lt "$first_send" ] || fail "inherited configuration must converge before work is delivered"
+assert_absent "$pending_marker" "successful wake-before-delivery convergence must consume its pending marker"
 pass "an explicit request wakes a suspended second mate and then delivers through the normal path"
 
 : > "$w/calls.log"

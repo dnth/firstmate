@@ -40,6 +40,7 @@ new_case() {
   unset CASE_REMOTE_JOB_ACTIVE
   unset CASE_PLATFORM_OVERRIDE
   unset CASE_DURABLE_ROOT_FILE
+  unset CASE_ACCOUNT_HOME
   CASE_N=$((CASE_N + 1))
   CASE_DIR="$TMP_ROOT/case$CASE_N"
   CASE_BIN="$CASE_DIR/bin"
@@ -61,6 +62,12 @@ new_case() {
   cat > "$CASE_BIN/uname" <<SH
 #!/usr/bin/env bash
 printf '%s\n' '$platform'
+SH
+
+  cat > "$CASE_BIN/getent" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = passwd ] || exit 2
+printf '%s:x:1000:1000:test:%s:/bin/bash\n' "${2:-test}" "${FM_FAKE_ACCOUNT_HOME:-$HOME}"
 SH
 
   cat > "$CASE_BIN/launchctl" <<'SH'
@@ -205,7 +212,7 @@ SH
 #!/usr/bin/env bash
 exit 0
 SH
-  chmod +x "$CASE_BIN/uname" "$CASE_BIN/launchctl" "$CASE_BIN/tasks-axi" "$CASE_BIN/treehouse" "$CASE_BIN/claude"
+  chmod +x "$CASE_BIN/uname" "$CASE_BIN/getent" "$CASE_BIN/launchctl" "$CASE_BIN/tasks-axi" "$CASE_BIN/treehouse" "$CASE_BIN/claude"
   cat > "$CASE_BIN/sleep" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -233,6 +240,7 @@ doctor() {
     FM_REMOTE_JOB_PLATFORM_OVERRIDE="${CASE_PLATFORM_OVERRIDE-}" \
     FM_REMOTE_JOB_ACTIVE="${CASE_REMOTE_JOB_ACTIVE-1}" \
     FM_DURABLE_ROOT_FILE="${CASE_DURABLE_ROOT_FILE-}" \
+    FM_FAKE_ACCOUNT_HOME="${CASE_ACCOUNT_HOME-$CASE_HOME}" \
     "$ROOT/bin/fm-remote-doctor.sh" "$@" 2>&1
   )
   DOCTOR_RC=$?
@@ -655,6 +663,8 @@ expect_code 0 "$DOCTOR_RC" "the base readiness contract stopped passing on a min
 DEFAULT_OUT=$DOCTOR_OUT
 assert_not_contains "$DEFAULT_OUT" 'parity ' "a default run reported parity facts it was not asked for"
 assert_not_contains "$DEFAULT_OUT" 'check parity' "a default run recorded a parity check it was not asked for"
+assert_contains "$DEFAULT_OUT" 'optional no-mistakes=absent' "the default report lost the optional no-mistakes fact"
+assert_contains "$DEFAULT_OUT" 'optional gh=absent' "the default report lost the optional gh fact"
 pass "a default run is unchanged by the parity tier"
 
 doctor --fix --parity
@@ -705,6 +715,15 @@ expect_code 0 "$DOCTOR_RC" "a home under the declared durable root was reported 
 assert_contains "$DOCTOR_OUT" 'check parity-durable-home=ok:' \
   "a home under the declared durable root was not confirmed durable"
 pass "a home under the declared durable root is confirmed durable"
+
+printf '%s\n' "$CASE_HOME" > "$CASE_DURABLE_ROOT_FILE"
+CASE_ACCOUNT_HOME="$CASE_DIR/disposable-home"
+doctor --fix --parity
+expect_code 1 "$DOCTOR_RC" "an inherited durable HOME masked the login account's disposable home"
+assert_contains "$DOCTOR_OUT" "account home $CASE_ACCOUNT_HOME is outside" \
+  "the durable-home verdict did not use the login account database"
+pass "the parity verdict resolves the login account home from the account database"
+unset CASE_ACCOUNT_HOME
 
 printf '%s\n' "$CASE_DIR/elsewhere" > "$CASE_DURABLE_ROOT_FILE"
 doctor --fix --parity

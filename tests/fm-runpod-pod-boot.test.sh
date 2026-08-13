@@ -262,6 +262,10 @@ if [ "${1:-}" = clone ]; then
 for tool in herdr treehouse tasks-axi omp; do
   command -v "$tool" >> "$FM_FAKE_CALLS" || exit 1
 done
+account=$(id -un) || exit 1
+account_home=$(awk -F: -v user="$account" '$1 == user { print $6; exit }' "$FM_PASSWD_FILE")
+durable_root=$(cat "$FM_DURABLE_ROOT_FILE")
+case "$account_home" in "$durable_root"|"$durable_root"/*) ;; *) exit 1 ;; esac
 case " $* " in
   *" --parity "*)
     for tool in claude codex no-mistakes gh gh-axi chrome-devtools-axi \
@@ -483,6 +487,25 @@ assert_grep 'oauth_token: login' "$HOMEDIR/.config/gh/hosts.yml" \
 assert_present "$w/volume/persistent-runtime/boot.ready" "a replacement pod must reach readiness from the retained volume"
 pass "replacement pods restore ephemeral prerequisites and reuse the durable toolchain"
 pass "a login completed once on the volume survives pod replacement"
+
+# --- a failed passwd rewrite cannot be masked by the boot process HOME ------
+
+wlogin=$(new_world passwd-rewrite-failure)
+mv "$wlogin/etc/passwd" "$wlogin/etc/passwd-disposable"
+ln -s "$wlogin/etc/passwd-disposable" "$wlogin/etc/passwd"
+(
+  world_env "$wlogin"
+  timeout 20 bash "$BOOT" >/dev/null 2>&1 &
+  bp=$!
+  sleep 6
+  kill "$bp" 2>/dev/null || true
+  wait "$bp" 2>/dev/null || true
+)
+assert_present "$wlogin/volume/persistent-runtime/toolchain.provisioned" \
+  "the failed account rewrite case did not finish toolchain provisioning"
+assert_absent "$wlogin/volume/persistent-runtime/boot.ready" \
+  "the boot process HOME masked a login account that still lands on disposable storage"
+pass "a failed passwd rewrite keeps the pod below readiness"
 
 # --- pre-existing tools cannot bypass the repository pins -------------------
 

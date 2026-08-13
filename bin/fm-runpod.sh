@@ -3,7 +3,7 @@
 #
 # Usage:
 #   fm-runpod.sh provision <id> [--size <gb>] [--datacenter <id>] [--alias <ssh-alias>]
-#                               [--volume-name <name>] [--user <account>] [--identity <key-path>]
+#                               [--volume-name <name>] [--user root] [--identity <key-path>]
 #                               [--image <tag>] [--code-origin <git-url>] [--harness-npm <pkg>]
 #   fm-runpod.sh wake <id> [--gpu] [--min-vram <gb>] [--gpu-type <id>]
 #   fm-runpod.sh sleep <id>
@@ -531,6 +531,7 @@ cmd_provision() {
   case "$size" in ''|*[!0-9]*) die "--size must be a whole number of gigabytes" ;; esac
   [ "$size" -ge 1 ] && [ "$size" -le 4000 ] || die "--size must be between 1 and 4000 GB"
   case "$user" in ''|*[!A-Za-z0-9._-]*) die "--user must be a plain account name" ;; esac
+  [ "$user" = root ] || die "only the root account is supported because pod boot prepares root for durable SSH login"
   if [ -n "$identity" ]; then
     case "$identity" in /*) ;; *) die "--identity must be an absolute path" ;; esac
   fi
@@ -548,7 +549,7 @@ cmd_provision() {
   lifecycle_lock_acquire "$id"
   volume_lock_acquire
 
-  local existing_volume existing_alias existing_dc volumes match existing_pod existing_origin existing_harness
+  local existing_volume existing_alias existing_dc volumes match existing_pod existing_origin existing_harness collision_volume_id
   existing_volume=$(record_get "$id" volume_id)
   existing_alias=$(record_get "$id" ssh_alias)
   if [ -n "$existing_volume" ] && [ -n "$existing_alias" ] && [ "$existing_alias" != "$alias" ]; then
@@ -584,6 +585,8 @@ cmd_provision() {
   match=$(printf '%s' "$volumes" | jq -r --arg n "$volume_name" \
     '(if type == "array" then . else (.data // []) end) | map(select(.name == $n)) | .[0] // empty' 2>/dev/null || true)
   if [ -z "$match" ]; then
+    [ -n "$code_origin" ] \
+      || die "--code-origin is required before creating fresh network volume $volume_name"
     [ -n "$datacenter" ] || die "--datacenter is required to create a new network volume (for example EU-RO-1)"
     case "$datacenter" in ''|*[!A-Za-z0-9-]*) die "invalid datacenter id: $datacenter" ;; esac
     match=$(api_call_or_die POST /networkvolumes \
@@ -592,7 +595,10 @@ cmd_provision() {
       "creating network volume $volume_name")
     note "created: network volume $volume_name"
   else
-    note "reused: existing network volume named $volume_name"
+    collision_volume_id=$(json_field "$match" '.id')
+    [ -n "$collision_volume_id" ] || die "RunPod returned a same-name network volume with no id"
+    assert_volume_owner "$id" "$collision_volume_id"
+    die "unowned name collision: RunPod already has network volume $volume_name, but this home has no local ownership record for it; choose a different --volume-name or investigate the existing volume"
   fi
   local volume_id volume_dc volume_size
   volume_id=$(json_field "$match" '.id')

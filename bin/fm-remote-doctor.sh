@@ -68,7 +68,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)}"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 REQUIRED_TOOLS=(git jq herdr tasks-axi treehouse)
 HARNESS_TOOLS=(omp claude codex opencode pi pi-signed grok kimi)
-OPTIONAL_TOOLS=(tmux)
+OPTIONAL_TOOLS=(no-mistakes gh tmux)
 # The --parity tier. Every worker harness this fleet's crew dispatch can select,
 # plus the universal toolchain owned by docs/configuration.md "Toolchain", plus
 # the code-intelligence CLI and the browser a local second mate uses. Presence
@@ -636,6 +636,25 @@ check_parity_toolchain() {
     "install each one on that host where it resolves on the path reported above; this command never installs packages"
 }
 
+login_account_home() {
+  local account entry
+  account=$(id -un 2>/dev/null || true)
+  [ -n "$account" ] || return 1
+  if command -v getent >/dev/null 2>&1; then
+    entry=$(getent passwd "$account" 2>/dev/null || true)
+    [ -n "$entry" ] || return 1
+    printf '%s\n' "$entry" | awk -F: 'NR == 1 { print $6 }'
+    return 0
+  fi
+  if [ "$PLATFORM" = darwin ] && command -v dscl >/dev/null 2>&1; then
+    dscl . -read "/Users/$account" NFSHomeDirectory 2>/dev/null \
+      | awk 'NR == 1 { sub(/^[^:]*:[[:space:]]*/, ""); print; exit }'
+    return 0
+  fi
+  [ -r /etc/passwd ] || return 1
+  awk -F: -v account="$account" '$1 == account { print $6; found = 1; exit } END { exit !found }' /etc/passwd
+}
+
 # A login is only once-per-host if the account home outlives the host's own
 # replacement. Where a host declares that only part of its filesystem is
 # durable, HOME must be inside that part or every completed login is lost with
@@ -652,7 +671,7 @@ check_parity_durable_home() {
       "write the durable filesystem root into $DURABLE_ROOT_FILE on that host, or remove the file if the whole host persists"
     return 0
   fi
-  account_home=${HOME:-}
+  account_home=$(login_account_home 2>/dev/null || true)
   case "$account_home" in
     "$declared"|"$declared"/*)
       record parity-durable-home "ok: the account home $account_home is under the declared durable root $declared"
