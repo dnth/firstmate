@@ -587,10 +587,11 @@ secondmate_sync() {
     fi
     [ "$remote_pending" -eq 0 ] || nudge_needed=1
     if [ "$converged" -eq 1 ] && [ "$nudge_needed" -eq 1 ]; then
+      fm_lock_release "$remote_lock" || true
+      remote_lock=
       if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
-        FM_CONFIG_INHERIT_ALREADY_CONVERGED=1 \
         "$SCRIPT_DIR/fm-send.sh" "fm-$id" "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
-        rm -f "$remote_marker"
+        fm_runpod_is_managed "$DATA" "$id" || rm -f "$remote_marker"
         [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] || echo "BOOTSTRAP_INFO: nudged remote fm-$id after convergence"
       else
         echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
@@ -598,7 +599,7 @@ secondmate_sync() {
     elif [ "$converged" -eq 1 ]; then
       rm -f "$remote_marker"
     fi
-    fm_lock_release "$remote_lock" || true
+    [ -z "$remote_lock" ] || fm_lock_release "$remote_lock" || true
   done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
   return 0
 }

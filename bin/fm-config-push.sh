@@ -163,10 +163,11 @@ while IFS='|' read -r id home _window meta; do
       if printf '%s\n' "$remote_out" | grep -Eq '^(pushed|removed):'; then remote_nudge=1; fi
       [ "$remote_pending" -eq 0 ] || remote_nudge=1
       if [ "$remote_nudge" -eq 1 ]; then
+        fm_lock_release "$remote_lock" || true
+        remote_lock=
         if FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
-          FM_CONFIG_INHERIT_ALREADY_CONVERGED=1 \
           "$SCRIPT_DIR/fm-send.sh" "fm-$id" "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" >/dev/null 2>&1; then
-          rm -f -- "$remote_marker"
+          fm_runpod_is_managed "$DATA" "$id" || rm -f -- "$remote_marker"
           echo "  config-reread: sent"
         else
           echo "  config-reread: send failed; retry retained"
@@ -179,7 +180,7 @@ while IFS='|' read -r id home _window meta; do
       [ -z "$remote_out" ] || printf '%s\n' "$remote_out" | sed 's/^/  /'
       errors=1
     fi
-    fm_lock_release "$remote_lock" || true
+    [ -z "$remote_lock" ] || fm_lock_release "$remote_lock" || true
     continue
   fi
   if ! validate_secondmate_home "$id" "$home"; then

@@ -511,7 +511,7 @@ alias_for() {  # <id>
 
 cmd_provision() {
   local id=${1:-} size=$DEFAULT_SIZE_GB image=$DEFAULT_IMAGE user=root
-  local datacenter='' alias='' volume_name='' identity='' code_origin='' harness_npm=''
+  local datacenter='' alias='' volume_name='' identity='' code_origin='' code_origin_set=0 harness_npm=''
   shift || true
   require_id "$id"
   while [ "$#" -gt 0 ]; do
@@ -523,7 +523,7 @@ cmd_provision() {
       --user) [ "$#" -ge 2 ] || usage; user=$2; shift 2 ;;
       --identity) [ "$#" -ge 2 ] || usage; identity=$2; shift 2 ;;
       --image) [ "$#" -ge 2 ] || usage; image=$2; shift 2 ;;
-      --code-origin) [ "$#" -ge 2 ] || usage; code_origin=$2; shift 2 ;;
+      --code-origin) [ "$#" -ge 2 ] || usage; code_origin=$2; code_origin_set=1; shift 2 ;;
       --harness-npm) [ "$#" -ge 2 ] || usage; harness_npm=$2; shift 2 ;;
       *) usage ;;
     esac
@@ -532,6 +532,7 @@ cmd_provision() {
   [ "$size" -ge 1 ] && [ "$size" -le 4000 ] || die "--size must be between 1 and 4000 GB"
   case "$user" in ''|*[!A-Za-z0-9._-]*) die "--user must be a plain account name" ;; esac
   [ "$user" = root ] || die "only the root account is supported because pod boot prepares root for durable SSH login"
+  [ "$code_origin_set" -eq 0 ] || [ -n "$code_origin" ] || die "--code-origin cannot be empty"
   if [ -n "$identity" ]; then
     case "$identity" in /*) ;; *) die "--identity must be an absolute path" ;; esac
   fi
@@ -565,6 +566,11 @@ cmd_provision() {
       existing_pod=$(record_get "$id" pod_id)
       existing_origin=$(record_get "$id" code_origin)
       existing_harness=$(record_get "$id" harness_npm)
+      if [ "$code_origin_set" -eq 0 ]; then
+        [ -n "$existing_origin" ] \
+          || die "secondmate $id has no recorded code origin; rerun provision with --code-origin before wake"
+        code_origin=$existing_origin
+      fi
       if [ -n "$existing_pod" ] \
         && { [ "$existing_origin" != "$code_origin" ] || [ "$existing_harness" != "$harness_npm" ]; }; then
         die "secondmate $id has live pod $existing_pod; run 'fm-runpod.sh sleep $id' before changing --code-origin or --harness-npm"

@@ -110,6 +110,19 @@ assert_contains "$out" "reused: volume" "a repeated provision must reuse the rec
 [ "$(runpod_api_calls "$API_LOG" "POST /networkvolumes")" = 1 ] || fail "a repeated provision must not POST a second volume"
 pass "provision is idempotent and never accumulates volumes"
 
+out=$(rp provision ios --datacenter EU-RO-1 --size 100 --harness-npm @example/harness 2>&1) \
+  || fail "reprovision without --code-origin failed: $out"
+[ "$(record_field ios code_origin)" = https://example.test/firstmate.git ] \
+  || fail "omitting --code-origin on reprovision must preserve the recorded clone source"
+pass "reprovision preserves the recorded code origin when the flag is omitted"
+
+out=$(rp provision ios --datacenter EU-RO-1 --size 100 --code-origin '' --harness-npm @example/harness 2>&1) \
+  && fail "reprovision accepted an explicitly empty code origin"
+assert_contains "$out" "--code-origin cannot be empty" "the empty-origin refusal must name the invalid flag"
+[ "$(record_field ios code_origin)" = https://example.test/firstmate.git ] \
+  || fail "a refused empty origin must preserve the recorded clone source"
+pass "an explicit empty code origin cannot create a clone-free wake contract"
+
 out=$(rp provision nonroot --user ubuntu --datacenter EU-RO-1 --code-origin https://example.test/firstmate.git 2>&1) \
   && fail "provision accepted an SSH account the pod does not prepare"
 assert_contains "$out" "only the root account is supported" "the account refusal must explain the pod contract"
@@ -174,12 +187,12 @@ pass "endpoint discovery and host-key scanning share one wall-clock deadline"
 
 started=$(date +%s)
 out=$(FM_FAKE_SSH_PROBE_BLOCK=1 FM_TEST_RUNPOD_POLL_INTERVAL=1 \
-  FM_TEST_RUNPOD_WAKE_TIMEOUT=2 rp wake ios 2>&1) \
+  FM_TEST_RUNPOD_WAKE_TIMEOUT=4 rp wake ios 2>&1) \
   && fail "wake must stop at its wall-clock deadline when readiness probing blocks"
 elapsed=$(($(date +%s) - started))
 assert_contains "$out" "SSH bootstrap did not complete" \
   "a blocked readiness probe must report the bounded wake failure"
-[ "$elapsed" -le 4 ] || fail "the 2s wake deadline took ${elapsed}s during readiness probing"
+[ "$elapsed" -le 6 ] || fail "the 4s wake deadline took ${elapsed}s during readiness probing"
 [ "$(record_field ios lifecycle)" != ready ] || fail "a readiness timeout must never record the pod ready"
 pass "readiness probing shares the one wall-clock wake deadline"
 

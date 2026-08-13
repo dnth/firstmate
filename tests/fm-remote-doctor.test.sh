@@ -665,6 +665,11 @@ assert_not_contains "$DEFAULT_OUT" 'parity ' "a default run reported parity fact
 assert_not_contains "$DEFAULT_OUT" 'check parity' "a default run recorded a parity check it was not asked for"
 assert_contains "$DEFAULT_OUT" 'optional no-mistakes=absent' "the default report lost the optional no-mistakes fact"
 assert_contains "$DEFAULT_OUT" 'optional gh=absent' "the default report lost the optional gh fact"
+tmux_line=$(printf '%s\n' "$DEFAULT_OUT" | grep -n '^optional tmux=' | cut -d: -f1)
+no_mistakes_line=$(printf '%s\n' "$DEFAULT_OUT" | grep -n '^optional no-mistakes=' | cut -d: -f1)
+gh_line=$(printf '%s\n' "$DEFAULT_OUT" | grep -n '^optional gh=' | cut -d: -f1)
+[ "$tmux_line" -lt "$no_mistakes_line" ] && [ "$no_mistakes_line" -lt "$gh_line" ] \
+  || fail "the default optional facts must remain ordered tmux, no-mistakes, gh"
 pass "a default run is unchanged by the parity tier"
 
 doctor --fix --parity

@@ -33,6 +33,7 @@ new_world() {
   chmod 600 "$w/home/config/runpod.env"
   runpod_fixture_init "$w/runpod.json"
   : > "$w/calls.log"
+  : > "$w/messages.log"
   printf '%s\n' "$w"
 }
 
@@ -46,8 +47,10 @@ world_env() {  # <world> -- <command...>
   FM_FAKE_RUNPOD_STATE="$w/runpod.json" \
   FM_FAKE_RUNPOD_LOG="$w/calls.log" \
   FM_FAKE_REMOTE_LOG="$w/calls.log" \
+  FM_FAKE_REMOTE_MESSAGE_LOG="$w/messages.log" \
   FM_RUNPOD_POLL_INTERVAL=0 \
   FM_RUNPOD_WAKE_TIMEOUT=10 \
+  FM_SEND_SETTLE=0 \
   "$@"
 }
 
@@ -71,6 +74,7 @@ lifecycle_of() {  # <world> <id>
 
 # --- health polling never wakes a suspended route ---------------------------
 
+if [ "${FM_TEST_RUNPOD_ROUTING_FOCUS:-}" != review ]; then
 w=$(new_world liveness)
 runpod_seed_remote_route "$w/home" ios fm-sm-ios-runpod /srv/firstmate /srv/sm-ios
 runpod_seed_remote_route "$w/home" plain plain-host /srv/firstmate /srv/sm-plain
@@ -150,6 +154,95 @@ first_inherit=$(grep -n 'fm-remote-inherit.sh' "$w/calls.log" | head -1 | cut -d
 [ "$first_inherit" -lt "$first_send" ] || fail "inherited configuration must converge before work is delivered"
 assert_absent "$pending_marker" "successful wake-before-delivery convergence must consume its pending marker"
 pass "an explicit request wakes a suspended second mate and then delivers through the normal path"
+deliver_w=$w
+fi
+
+# --- pending convergence applies before keys and preserves control text -----
+
+w=$(new_world controls)
+runpod_seed_remote_route "$w/home" ios fm-sm-ios-runpod /srv/firstmate /srv/sm-ios
+suspend_route "$w" ios
+world_env "$w" "$ROOT/bin/fm-config-push.sh" >/dev/null \
+  || fail "config push did not record pending convergence for the key case"
+: > "$w/calls.log"
+: > "$w/messages.log"
+out=$(world_env "$w" "$ROOT/bin/fm-send.sh" fm-ios --key Enter 2>&1) \
+  || fail "sending Enter through pending convergence failed: $out"
+first_inherit=$(grep -n 'fm-remote-inherit.sh' "$w/calls.log" | head -1 | cut -d: -f1)
+first_key=$(grep -n 'fm-remote-secondmate-control.sh key' "$w/calls.log" | head -1 | cut -d: -f1)
+[ -n "$first_inherit" ] && [ -n "$first_key" ] && [ "$first_inherit" -lt "$first_key" ] \
+  || fail "pending inherited configuration must converge before Enter is delivered"
+pass "key delivery honors the same convergence boundary as text delivery"
+
+world_env "$w" "$ROOT/bin/fm-runpod.sh" sleep ios >/dev/null \
+  || fail "could not suspend before the control-message case"
+world_env "$w" "$ROOT/bin/fm-config-push.sh" >/dev/null \
+  || fail "config push did not record pending convergence for the control-message case"
+: > "$w/calls.log"
+: > "$w/messages.log"
+out=$(world_env "$w" "$ROOT/bin/fm-send.sh" fm-ios /exit 2>&1) \
+  || fail "/exit through pending convergence failed: $out"
+[ "$(sed -n '1p' "$w/messages.log")" = "Firstmate instructions or inherited config changed on this host. Re-read AGENTS.md and the inherited config files before further work." ] \
+  || fail "pending convergence must deliver its reread nudge as a separate first message"
+second_message=$(sed -n '2p' "$w/messages.log")
+case "$second_message" in *' /exit') ;; *) fail "/exit must remain the caller message after its established routing carrier" ;; esac
+case "$second_message" in *'Firstmate instructions or inherited config changed'*) fail "the reread nudge must not be prepended to /exit" ;; esac
+[ "$(wc -l < "$w/messages.log" | tr -d ' ')" = 2 ] \
+  || fail "the nudge path must deliver exactly the nudge and the caller's control message"
+pass "pending convergence preserves exact control-message semantics"
+
+# --- a tracked-sync failure remains pending until ordinary delivery retries --
+
+w=$(new_world trackedsync)
+runpod_seed_remote_route "$w/home" ios fm-sm-ios-runpod /srv/firstmate /srv/sm-ios
+suspend_route "$w" ios
+world_env "$w" "$ROOT/bin/fm-config-push.sh" >/dev/null \
+  || fail "config push did not record pending convergence for the tracked-sync case"
+world_env "$w" "$ROOT/bin/fm-runpod.sh" wake ios >/dev/null \
+  || fail "could not wake the tracked-sync case"
+pending_marker="$w/home/state/.secondmate-nudge-pending/ios.pending"
+out=$(FM_FAKE_SYNC_FAIL=1 world_env "$w" "$ROOT/bin/fm-send.sh" fm-ios 'blocked by tracked sync' 2>&1) \
+  && fail "delivery proceeded after tracked-file sync failed"
+assert_contains "$out" "pending tracked files did not converge" "delivery must surface the tracked sync failure"
+assert_present "$pending_marker" "a tracked sync failure must retain pending convergence"
+: > "$w/calls.log"
+out=$(world_env "$w" "$ROOT/bin/fm-send.sh" fm-ios 'after tracked retry' 2>&1) \
+  || fail "ordinary delivery did not retry tracked convergence: $out"
+first_sync=$(grep -n 'fm-remote-secondmate-control.sh sync' "$w/calls.log" | head -1 | cut -d: -f1)
+first_send=$(grep -n 'fm-remote-secondmate-control.sh send' "$w/calls.log" | tail -1 | cut -d: -f1)
+[ -n "$first_sync" ] && [ -n "$first_send" ] && [ "$first_sync" -lt "$first_send" ] \
+  || fail "tracked files must sync before work is delivered"
+assert_absent "$pending_marker" "the marker may clear only after tracked and inherited convergence succeed"
+pass "ordinary delivery retries tracked files before clearing pending convergence"
+
+# --- config push and ordinary delivery cannot invert their lock order --------
+
+w=$(new_world lockorder)
+runpod_seed_remote_route "$w/home" ios fm-sm-ios-runpod /srv/firstmate /srv/sm-ios
+suspend_route "$w" ios
+world_env "$w" "$ROOT/bin/fm-runpod.sh" wake ios >/dev/null \
+  || fail "could not wake the lock-order case"
+barrier="$w/inherit-barrier"
+FM_FAKE_INHERIT_BARRIER_DIR="$barrier" world_env "$w" timeout 8 \
+  "$ROOT/bin/fm-config-push.sh" > "$w/config-push.out" 2>&1 &
+push_pid=$!
+for _ in $(seq 1 500); do
+  [ -e "$barrier/reached" ] && break
+  kill -0 "$push_pid" 2>/dev/null || fail "config push exited before reaching its inheritance barrier"
+  sleep 0.01
+done
+assert_present "$barrier/reached" "the lock-order fixture did not reach inherited configuration"
+world_env "$w" timeout 8 "$ROOT/bin/fm-send.sh" fm-ios 'concurrent delivery' \
+  > "$w/concurrent-send.out" 2>&1 &
+send_pid=$!
+sleep 0.2
+: > "$barrier/release"
+wait "$push_pid" || fail "config push deadlocked while handing convergence to delivery: $(cat "$w/config-push.out")"
+wait "$send_pid" || fail "ordinary delivery deadlocked against config push: $(cat "$w/concurrent-send.out")"
+pass "config push follows delivery-before-inheritance lock ordering"
+
+[ "${FM_TEST_RUNPOD_ROUTING_FOCUS:-}" != review ] || exit 0
+w=$deliver_w
 
 : > "$w/calls.log"
 out=$(world_env "$w" "$ROOT/bin/fm-send.sh" fm-ios 'second request' 2>&1) \
