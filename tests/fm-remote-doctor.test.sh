@@ -664,7 +664,12 @@ DEFAULT_OUT=$DOCTOR_OUT
 assert_not_contains "$DEFAULT_OUT" 'parity ' "a default run reported parity facts it was not asked for"
 assert_not_contains "$DEFAULT_OUT" 'check parity' "a default run recorded a parity check it was not asked for"
 assert_contains "$DEFAULT_OUT" 'optional no-mistakes=absent' "the default report lost the optional no-mistakes fact"
-assert_contains "$DEFAULT_OUT" 'optional gh=absent' "the default report lost the optional gh fact"
+default_gh=$(PATH="$CASE_HOME/.local/bin:$CASE_BIN:$TOOLS:/usr/bin:/bin:/usr/sbin:/sbin" command -v gh 2>/dev/null || true)
+if [ -n "$default_gh" ]; then
+  assert_contains "$DEFAULT_OUT" "optional gh=$default_gh" "the default report lost the resolved optional gh fact"
+else
+  assert_contains "$DEFAULT_OUT" 'optional gh=absent' "the default report lost the absent optional gh fact"
+fi
 tmux_line=$(printf '%s\n' "$DEFAULT_OUT" | grep -n '^optional tmux=' | cut -d: -f1)
 no_mistakes_line=$(printf '%s\n' "$DEFAULT_OUT" | grep -n '^optional no-mistakes=' | cut -d: -f1)
 gh_line=$(printf '%s\n' "$DEFAULT_OUT" | grep -n '^optional gh=' | cut -d: -f1)
