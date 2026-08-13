@@ -10,19 +10,23 @@
 # It does the smallest thing that makes the pod an ordinary SSH-reachable remote
 # second-mate host, then hands over:
 #
-#   1. Restore the persisted SSH HOST key from the network volume, or generate
-#      and persist one on the volume's first boot. This is what keeps strict
-#      host-key verification working across pod replacement: the pod's identity
-#      lives on the volume, not on the machine.
-#   2. Provision the required toolchain and link the fixed remote entrypoint.
-#   3. Start sshd with the account's configured public key, then hand readiness
-#      to bin/fm-remote-doctor.sh --fix. The doctor is the single owner of what
-#      "ready for a remote second mate" means, and on Linux it starts the remote
-#      job worker and the headless Herdr fm-remote server itself - no GUI or
-#      Aqua session is involved on this platform. Nothing here duplicates those
-#      checks.
-#   4. Record boot success only after the doctor's handoff succeeds. SSH stays
-#      available while human-only gaps remain, but wake never reports ready.
+#   1. Ensure the base packages, restore the persisted SSH host identity from
+#      the network volume, authorize the configured public key, and start sshd.
+#   2. Provision the required toolchain, then link the durable bins and fixed
+#      remote entrypoint.
+#   3. Hand readiness to bin/fm-remote-doctor.sh --fix. The doctor is the single
+#      owner of what "ready for a remote second mate" means, and on Linux it
+#      starts the remote job worker and the headless Herdr fm-remote server
+#      itself - no GUI or Aqua session is involved on this platform. Nothing
+#      here duplicates those checks.
+#   4. Publish the separate boot.ready sentinel only after the doctor's handoff
+#      succeeds. SSH stays available while human-only gaps remain, but wake
+#      never reports ready before the sentinel exists.
+#
+# RunPod exposes no log or console API, so SSH is the only diagnostic channel
+# and must exist before toolchain provisioning or any later step that can hang.
+# Starting sshd never implies readiness because wake remains gated on the
+# separate boot.ready sentinel.
 #
 # On a volume's first boot the toolchain provisioning step clones the code root
 # from FM_REMOTE_ORIGIN and installs the tools bin/fm-remote-doctor.sh requires,
