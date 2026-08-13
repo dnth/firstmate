@@ -417,6 +417,41 @@ assert_absent "$w6/volume/persistent-runtime/boot.ready" \
   "a host-key persistence failure must never record readiness"
 pass "host-key persistence failures fail closed before sshd"
 
+# --- sshd is the diagnostic channel and survives failed provisioning ---------
+#
+# RunPod exposes no log or console API, so a pod whose provisioning fails must
+# still be reachable over SSH or the failure cannot be inspected at all. A live
+# pilot lost 25 minutes to exactly this: sshd was gated behind provisioning, the
+# port stayed refused, and nothing could be diagnosed. These assert the ordering
+# that makes the failure observable, and that readiness stays separate from it.
+
+w4=$(new_world sshd_first)
+rm -rf "$w4/origin"        # provisioning cannot obtain a code root, so it MUST fail
+(
+  PATH="$w4/fakebin:$w4/basebin" HOME="$w4/home" FM_VOLUME="$w4/volume" \
+  FM_REMOTE_ORIGIN="" FM_FAKE_CALLS="$w4/calls.log" FM_LOCAL_BIN="$w4/home/.local/bin" \
+  FM_FAKE_EPHEMERAL_BIN="$w4/fakebin" FM_FAKE_NPM_TEMPLATE="$w4/templates/npm" \
+  FM_SYSTEM_SSH_DIR="$w4/system-ssh" FM_SSHD_FALLBACK="$w4/fakebin/sshd" \
+  timeout 25 bash "$BOOT" >/dev/null 2>&1 &
+  bp=$!
+  sleep 4
+  kill "$bp" 2>/dev/null || true
+  wait "$bp" 2>/dev/null || true
+)
+boot_log="$w4/volume/persistent-runtime/boot.log"
+assert_present "$boot_log" "a failing boot must still leave its log on the volume"
+log_text=$(cat "$boot_log" 2>/dev/null)
+assert_contains "$log_text" "sshd is up" "sshd must come up BEFORE provisioning so a failure is diagnosable"
+sshd_line=$(grep -n "sshd is up" "$boot_log" | head -1 | cut -d: -f1)
+fail_line=$(grep -n "provisioning could not complete" "$boot_log" | head -1 | cut -d: -f1)
+[ -n "$fail_line" ] || fail "the provisioning failure was not recorded in the boot log"
+[ "$sshd_line" -lt "$fail_line" ] \
+  || fail "sshd came up after the provisioning failure; the pod would be unreachable"
+assert_absent "$w4/volume/persistent-runtime/boot.ready" \
+  "a failed provisioning must NOT publish the readiness sentinel"
+pass "sshd comes up before provisioning, so a failed provision stays diagnosable"
+pass "readiness stays gated on the sentinel, not on sshd being up"
+
 # --- no origin and no clone is a loud refusal, not a silent partial boot -----
 
 w3=$(new_world noorigin)

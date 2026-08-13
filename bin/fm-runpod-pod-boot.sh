@@ -437,16 +437,34 @@ main() {
   fi
   require_volume || exit 1
   rm -f -- "$FM_BOOT_READY" || exit 1
-  if ! provision_toolchain; then
-    log "FATAL: toolchain provisioning could not complete; SSH will not come up"
-    hold_pod
-  fi
+
+  # SSH comes up FIRST, deliberately independent of provisioning. RunPod exposes
+  # no log or console API, so this connection IS the only diagnostic channel: a
+  # pod whose provisioning is slow or broken must still be reachable, or the
+  # failure cannot be inspected at all. Readiness is NOT implied by sshd being
+  # up - it is the separate FM_BOOT_READY sentinel written only after
+  # provisioning succeeds, so wake still never reports ready on an incomplete
+  # pod. Only the host-identity guarantees gate sshd, because a pod that cannot
+  # present its volume-backed key must never expose a different one.
+  # The base packages carry openssh-server itself, so they are ensured here
+  # rather than inside provisioning: without them there is no sshd and therefore
+  # no diagnostic channel at all. The call is idempotent, so provisioning's own
+  # later invocation is a no-op once these are present.
+  ensure_base_packages || { log "FATAL: base packages are unavailable; SSH will not come up"; hold_pod; }
   install_sshd || { log "FATAL: openssh-server is unavailable; SSH will not come up"; hold_pod; }
   restore_host_keys || { log "FATAL: the volume-backed host key could not be restored or persisted; SSH will not come up"; hold_pod; }
   authorize_key || log "the authorized key could not be written"
-  link_durable_bins || { log "FATAL: durable tools could not be linked; SSH will not come up"; hold_pod; }
-  link_entrypoint || { log "FATAL: the remote entrypoint could not be linked; SSH will not come up"; hold_pod; }
-  start_sshd || exit 1
+  start_sshd || { log "FATAL: sshd did not start; this pod has no diagnostic channel"; hold_pod; }
+  log "sshd is up; diagnostic access is available before provisioning starts"
+
+  # Everything below can fail without taking SSH away. Each failure logs and
+  # holds the pod open so the operator can connect and read this same log.
+  if ! provision_toolchain; then
+    log "FATAL: toolchain provisioning could not complete; connect over SSH and read $FM_BOOT_LOG"
+    hold_pod
+  fi
+  link_durable_bins || { log "FATAL: durable tools could not be linked; connect over SSH and read $FM_BOOT_LOG"; hold_pod; }
+  link_entrypoint || { log "FATAL: the remote entrypoint could not be linked; connect over SSH and read $FM_BOOT_LOG"; hold_pod; }
   until hand_over_to_doctor; do
     log "remote readiness is incomplete; SSH is available for the required human steps"
     sleep 5
