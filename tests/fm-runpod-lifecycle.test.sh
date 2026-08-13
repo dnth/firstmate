@@ -570,3 +570,37 @@ pass "a live pod blocks destroy, and a retired second mate suspends without prob
 [ "$(runpod_api_calls "$API_LOG" "POST /pods")" -gt 0 ] || fail "the fixture never observed a pod creation"
 assert_no_grep rp_fixture_key "$API_LOG" "the API key must never reach the request log"
 pass "every RunPod interaction went through the one mocked boundary"
+
+# --- legacy empty-origin wake admission ------------------------------------
+
+runpod_seed_remote_route "$PARENT" legacy fm-sm-legacy-runpod /srv/firstmate /srv/sm-legacy
+out=$(rp provision legacy --datacenter EU-RO-1 --code-origin https://example.test/firstmate.git 2>&1) \
+  || fail "legacy fixture provision failed: $out"
+sed -i.bak 's/^code_origin=.*/code_origin=/' "$PARENT/data/runpod/legacy.meta"
+rm -f "$PARENT/data/runpod/legacy.meta.bak"
+: > "$API_LOG"
+out=$(rp wake legacy 2>&1) && fail "a never-ready volume woke without a recorded code origin"
+assert_contains "$out" "secondmate legacy" "the wake refusal must name the affected second mate"
+assert_contains "$out" "fm-runpod.sh provision legacy --code-origin <git-url>" \
+  "the wake refusal must give the exact repair command"
+[ ! -s "$API_LOG" ] || fail "a never-ready empty-origin volume must refuse before every provider call"
+pass "never-ready empty-origin volumes refuse before provider access"
+
+sed -i.bak 's/^lifecycle=.*/lifecycle=suspended/' "$PARENT/data/runpod/legacy.meta"
+rm -f "$PARENT/data/runpod/legacy.meta.bak"
+: > "$API_LOG"
+out=$(rp wake legacy 2>&1) || fail "a previously-ready legacy volume with an empty origin did not wake: $out"
+assert_contains "$out" "ready: secondmate legacy" "a prior-ready legacy route must continue through normal wake"
+[ "$(runpod_api_calls "$API_LOG" "POST /pods")" = 1 ] \
+  || fail "a prior-ready legacy route must be allowed to rent its replacement pod"
+pass "previously-ready empty-origin volumes remain wakeable"
+
+runpod_seed_remote_route "$PARENT" sourced fm-sm-sourced-runpod /srv/firstmate /srv/sm-sourced
+out=$(rp provision sourced --datacenter EU-RO-1 --code-origin https://example.test/firstmate.git 2>&1) \
+  || fail "recorded-origin fixture provision failed: $out"
+: > "$API_LOG"
+out=$(rp wake sourced 2>&1) || fail "a never-ready volume with a recorded origin did not wake: $out"
+assert_contains "$out" "ready: secondmate sourced" "a recorded origin must permit wake regardless of lifecycle history"
+[ "$(runpod_api_calls "$API_LOG" "POST /pods")" = 1 ] \
+  || fail "a recorded-origin route must create its pod normally"
+pass "recorded origins wake regardless of readiness history"

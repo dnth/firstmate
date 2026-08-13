@@ -770,7 +770,15 @@ cmd_wake() {
   record_require "$id"
   lifecycle_lock_acquire "$id"
 
-  local compute alias volume_id host port pod_id pod body status recorded_compute deadline remaining delay
+  local compute alias volume_id host port pod_id pod body status recorded_compute deadline remaining delay lifecycle code_origin
+  lifecycle=$(fm_runpod_lifecycle "$DATA" "$id")
+  code_origin=$(record_get "$id" code_origin)
+  if [ -z "$code_origin" ]; then
+    case "$lifecycle" in
+      ready|suspended) ;;
+      *) die "secondmate $id has no recorded code origin and its volume has never reached ready; run: fm-runpod.sh provision $id --code-origin <git-url>" ;;
+    esac
+  fi
   deadline=$((SECONDS + WAKE_TIMEOUT))
   compute=cpu
   [ "$want_gpu" -eq 0 ] || compute=gpu
