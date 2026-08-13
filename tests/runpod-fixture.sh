@@ -300,15 +300,7 @@ decode_b64() { printf '%s' "$1" | base64 --decode 2>/dev/null || printf '%s' "$1
 mapfile -t decoded < <(decode_b64 "$argv_b64" | tr '\0' '\n')
 command_name=${decoded[0]:-}
 action=${decoded[1]:-}
-if [ "$command_name" = fm-remote-inherit.sh ] && [ -n "${FM_FAKE_INHERIT_BARRIER_DIR:-}" ]; then
-  mkdir -p "$FM_FAKE_INHERIT_BARRIER_DIR"
-  : > "$FM_FAKE_INHERIT_BARRIER_DIR/reached"
-  while [ ! -e "$FM_FAKE_INHERIT_BARRIER_DIR/release" ]; do sleep 0.01; done
-fi
 printf '%s %s %s\n' "$target_host" "$command_name" "$action" >> "${FM_FAKE_REMOTE_LOG:-/dev/null}"
-if [ "$command_name" = fm-remote-secondmate-control.sh ] && [ "$action" = send ]; then
-  printf '%s\n' "${decoded[3]:-}" >> "${FM_FAKE_REMOTE_MESSAGE_LOG:-/dev/null}"
-fi
 if [ "$command_name" = fm-remote-secondmate-control.sh ] \
    && [ "$action" = send ] \
    && [ "${FM_FAKE_SSH_MODE:-normal}" = post-delivery-255 ]; then
@@ -324,11 +316,6 @@ case "$command_name" in
         exit 0
         ;;
       state) printf 'alive\n'; exit 0 ;;
-      sync)
-        [ "${FM_FAKE_SYNC_FAIL:-0}" != 1 ] || { printf 'error: injected tracked sync failure\n' >&2; exit 1; }
-        printf 'synced: tracked files current\n'
-        exit 0
-        ;;
       route)
         printf 'schema=fm-remote-secondmate-control.v1\nbackend=herdr\ntarget=fm-remote:w1:p1\nherdr_session=fm-remote\nharness=codex\nmodel=default\neffort=default\n'
         exit 0

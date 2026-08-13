@@ -539,14 +539,6 @@ secondmate_sync() {
   while IFS='|' read -r id _home _window meta; do
     remote_host=$(fm_meta_get "$meta" remote_host)
     [ -n "$remote_host" ] || continue
-    remote_marker=$(secondmate_nudge_marker_path "$id" 2>/dev/null || true)
-    remote_pending=0
-    if [ -f "$remote_marker" ] && [ "$(fm_meta_get "$remote_marker" remote)" = 1 ]; then remote_pending=1; fi
-    if ! secondmate_write_nudge_marker "$id" "$_home" "" remote \
-      "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1; then
-      echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record remote retry marker"
-      continue
-    fi
     # Startup convergence never wakes a recognized no-host lifecycle state.
     # The route keeps its pending nudge marker, and the next deliberate wake
     # converges it.
@@ -569,6 +561,15 @@ secondmate_sync() {
       fm_lock_release "$remote_lock" || true
       continue
     fi
+    remote_marker=$(secondmate_nudge_marker_path "$id" 2>/dev/null || true)
+    remote_pending=0
+    if [ -f "$remote_marker" ] && [ "$(fm_meta_get "$remote_marker" remote)" = 1 ]; then remote_pending=1; fi
+    if ! secondmate_write_nudge_marker "$id" "$_home" "" remote \
+      "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1; then
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record remote retry marker"
+      fm_lock_release "$remote_lock" || true
+      continue
+    fi
     nudge_needed=0
     converged=1
     if sync_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh sync "$id" < /dev/null 2>&1); then
@@ -586,11 +587,9 @@ secondmate_sync() {
     fi
     [ "$remote_pending" -eq 0 ] || nudge_needed=1
     if [ "$converged" -eq 1 ] && [ "$nudge_needed" -eq 1 ]; then
-      fm_lock_release "$remote_lock" || true
-      remote_lock=
       if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
         "$SCRIPT_DIR/fm-send.sh" "fm-$id" "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
-        fm_runpod_is_managed "$DATA" "$id" || rm -f "$remote_marker"
+        rm -f "$remote_marker"
         [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] || echo "BOOTSTRAP_INFO: nudged remote fm-$id after convergence"
       else
         echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
@@ -598,7 +597,7 @@ secondmate_sync() {
     elif [ "$converged" -eq 1 ]; then
       rm -f "$remote_marker"
     fi
-    [ -z "$remote_lock" ] || fm_lock_release "$remote_lock" || true
+    fm_lock_release "$remote_lock" || true
   done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
   return 0
 }

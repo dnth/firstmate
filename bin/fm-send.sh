@@ -104,24 +104,13 @@ fi
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-runpod-lib.sh
 . "$SCRIPT_DIR/fm-runpod-lib.sh"
-# shellcheck source=bin/fm-secondmate-nudge-lib.sh
-. "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
 RUNPOD_DELIVERY_LOCK=
-RUNPOD_INHERIT_LOCK=
-RUNPOD_PENDING_NUDGE_MARKER=
-RUNPOD_PENDING_NUDGE_MESSAGE=
-RUNPOD_PENDING_NUDGE_HANDLED=0
-RUNPOD_PENDING_NUDGE_PRESENT=0
 release_runpod_delivery_lock() {
-  if [ -n "$RUNPOD_INHERIT_LOCK" ]; then
-    fm_lock_release "$RUNPOD_INHERIT_LOCK" || true
-    RUNPOD_INHERIT_LOCK=
-  fi
   [ -n "$RUNPOD_DELIVERY_LOCK" ] || return 0
   fm_lock_release "$RUNPOD_DELIVERY_LOCK"
   RUNPOD_DELIVERY_LOCK=
@@ -332,6 +321,50 @@ while :; do
   esac
 done
 
+if [ "$TARGET_BACKEND" != remote ]; then
+  fm_backend_validate "$TARGET_BACKEND" || exit 1
+fi
+
+if [ "$TARGET_BACKEND" = remote ] && fm_runpod_is_managed "$DATA" "$TARGET_REMOTE_ID"; then
+  RUNPOD_DELIVERY_LOCK=$(secondmate_handoff_lock_path "$STATE" "$TARGET_REMOTE_ID")
+  fm_lock_acquire_wait "$RUNPOD_DELIVERY_LOCK" \
+    || { echo "error: cannot lock delivery to RunPod secondmate $TARGET_REMOTE_ID" >&2; exit 1; }
+fi
+
+# Wake-before-deliver: a scale-to-zero compute route has no host until its
+# provider brings one back. The wake is idempotent, takes its own
+# per-secondmate lifecycle lock, and happens strictly BEFORE anything is
+# delivered, so retrying it can never duplicate a request. Once delivery starts,
+# the existing unknown-completion contract below is untouched: an SSH status of
+# 255 still means unknown completion with no retry and no failover.
+if [ "$TARGET_BACKEND" = remote ] && fm_runpod_is_dormant "$DATA" "$TARGET_REMOTE_ID"; then
+  if ! wake_out=$("$SCRIPT_DIR/fm-runpod.sh" wake "$TARGET_REMOTE_ID" 2>&1); then
+    [ -z "$wake_out" ] || printf '%s\n' "$wake_out" >&2
+    echo "error: remote secondmate $TARGET_REMOTE_ID could not be woken on its compute provider; nothing was delivered" >&2
+    exit 1
+  fi
+fi
+
+TARGET_OMP_BUN=
+if [ "$TARGET_HARNESS" = omp ]; then
+  if [ -z "$TARGET_META" ] \
+     || ! fm_backend_agent_record_identity "$TARGET_BACKEND" "$T" "$TARGET_META"; then
+    echo "error: OMP target '$RAW_TARGET' lacks a valid task-bound Bun/OMP identity; refusing composer inspection and delivery" >&2
+    exit 1
+  fi
+  TARGET_OMP_STATE=$(fm_backend_agent_state "$TARGET_BACKEND" "$T" "$TARGET_META" 2>/dev/null)
+  if [ "$TARGET_OMP_STATE" != alive ]; then
+    echo "error: OMP target '$RAW_TARGET' does not match a live task-bound Bun/OMP process (state=${TARGET_OMP_STATE:-unreadable}); refusing delivery" >&2
+    exit 1
+  fi
+  TARGET_OMP_BUN=$FM_BACKEND_AGENT_OMP_BUN
+fi
+
+# Classify a from-firstmate -> secondmate request. Only a task selector resolved
+# through this home's meta whose authoritative kind is secondmate is marked: the
+# secondmate then routes its reply via the status path (see fm-marker-lib.sh).
+# An explicit backend target (the escape hatch for endpoints outside this home)
+# and any crewmate/scout target are left unmarked, and so is the --key path.
 MARK_FROM_FIRSTMATE=0
 PENDING_REPLY_CORR=
 PENDING_REPLY_CREATED=0
@@ -340,7 +373,12 @@ if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] && [ "$(fm_meta_get "$TARG
   MARK_FROM_FIRSTMATE=1
   TARGET_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
 fi
-
+# Validate the answerer-closes request before any durable mutation or send: the
+# target must have a task ledger in THIS home, the send must carry an answer
+# message, and every named key must be open right now in that ledger per the
+# ONE authoritative fold (status_open_decisions). Refusing here, before the
+# send, is what keeps a mistyped key loud instead of delivering an answer that
+# silently leaves its decision open.
 RESOLVE_STATUS_FILE=
 if [ -n "$RESOLVE_KEYS" ]; then
   if [ -z "$TARGET_SELECTOR" ] || [ -z "$TARGET_META" ]; then
@@ -368,7 +406,9 @@ if [ -n "$RESOLVE_KEYS" ]; then
     esac
   done
 fi
-
+# Close each answered decision in this home's ledger, only after delivery is
+# fully confirmed. An append failure exits nonzero with the manual close
+# command; the decision then stays open and re-surfaces, never silently lost.
 fm_send_close_resolved_keys() {  # <answer-text>
   local note=$1 k quoted_line quoted_status failed=0
   note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
@@ -388,135 +428,7 @@ fm_send_close_resolved_keys() {  # <answer-text>
   fi
 }
 
-fm_send_remote_correlated_message() {  # <message>
-  local raw=$1 corr outbound rc confirm_rc
-  [ "$MARK_FROM_FIRSTMATE" = 1 ] && [ -n "$TARGET_TASK_ID" ] || return 1
-  corr=$(fm_pending_reply_create "$FM_HOME" "$STATE" "$TARGET_TASK_ID" "$raw") || return 1
-  fm_pending_reply_embed_corr "$raw" "$corr" outbound
-  if ! fm_pending_reply_prepare_delivery "$STATE" "$corr"; then
-    fm_pending_reply_discard_undelivered "$STATE" "$corr" || true
-    return 1
-  fi
-  if "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send \
-    "$TARGET_REMOTE_ID" "$outbound" < /dev/null >/dev/null; then
-    if fm_pending_reply_confirm_delivery "$STATE" "$corr"; then
-      return 0
-    else
-      confirm_rc=$?
-    fi
-    [ "$confirm_rc" -eq 2 ] && return 70
-    return 71
-  else
-    rc=$?
-  fi
-  if [ "$rc" -eq 255 ]; then
-    fm_pending_reply_mark_delivery_unknown "$STATE" "$corr" || true
-  else
-    fm_pending_reply_discard_undelivered "$STATE" "$corr" || true
-  fi
-  return "$rc"
-}
 
-if [ "$TARGET_BACKEND" != remote ]; then
-  fm_backend_validate "$TARGET_BACKEND" || exit 1
-fi
-
-if [ "$TARGET_BACKEND" = remote ] && fm_runpod_is_managed "$DATA" "$TARGET_REMOTE_ID"; then
-  RUNPOD_DELIVERY_LOCK=$(secondmate_handoff_lock_path "$STATE" "$TARGET_REMOTE_ID")
-  fm_lock_acquire_wait "$RUNPOD_DELIVERY_LOCK" \
-    || { echo "error: cannot lock delivery to RunPod secondmate $TARGET_REMOTE_ID" >&2; exit 1; }
-  RUNPOD_PENDING_NUDGE_MARKER=$(fm_secondmate_nudge_marker_path "$STATE" "$TARGET_REMOTE_ID" 2>/dev/null || true)
-  if [ -n "$RUNPOD_PENDING_NUDGE_MARKER" ] \
-    && { [ -e "$RUNPOD_PENDING_NUDGE_MARKER" ] || [ -L "$RUNPOD_PENDING_NUDGE_MARKER" ]; }; then
-    RUNPOD_PENDING_NUDGE_PARENT=${RUNPOD_PENDING_NUDGE_MARKER%/*}
-    if [ ! -f "$RUNPOD_PENDING_NUDGE_MARKER" ] \
-      || [ -L "$RUNPOD_PENDING_NUDGE_MARKER" ] \
-      || [ ! -d "$RUNPOD_PENDING_NUDGE_PARENT" ] \
-      || [ -L "$RUNPOD_PENDING_NUDGE_PARENT" ] \
-      || [ "$(fm_meta_get "$RUNPOD_PENDING_NUDGE_MARKER" remote)" != 1 ] \
-      || [ "$(fm_meta_get "$RUNPOD_PENDING_NUDGE_MARKER" id)" != "$TARGET_REMOTE_ID" ] \
-      || [ "$(fm_meta_get "$RUNPOD_PENDING_NUDGE_MARKER" selector)" != "fm-$TARGET_REMOTE_ID" ] \
-      || [ "$(fm_meta_get "$RUNPOD_PENDING_NUDGE_MARKER" message)" != "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" ]; then
-      echo "error: unsafe pending convergence marker for RunPod secondmate $TARGET_REMOTE_ID; repair or remove $RUNPOD_PENDING_NUDGE_MARKER before delivery" >&2
-      exit 1
-    fi
-    RUNPOD_PENDING_NUDGE_PRESENT=1
-  fi
-fi
-
-# Wake-before-deliver: a scale-to-zero compute route has no host until its
-# provider brings one back. The wake is idempotent, takes its own
-# per-secondmate lifecycle lock, and happens strictly BEFORE anything is
-# delivered, so retrying it can never duplicate a request. Once delivery starts,
-# the existing unknown-completion contract below is untouched: an SSH status of
-# 255 still means unknown completion with no retry and no failover.
-if [ "$TARGET_BACKEND" = remote ] && fm_runpod_is_dormant "$DATA" "$TARGET_REMOTE_ID"; then
-  if ! wake_out=$("$SCRIPT_DIR/fm-runpod.sh" wake "$TARGET_REMOTE_ID" 2>&1); then
-    [ -z "$wake_out" ] || printf '%s\n' "$wake_out" >&2
-    echo "error: remote secondmate $TARGET_REMOTE_ID could not be woken on its compute provider; nothing was delivered" >&2
-    exit 1
-  fi
-fi
-
-if [ "$RUNPOD_PENDING_NUDGE_PRESENT" -eq 1 ]; then
-    RUNPOD_INHERIT_LOCK=$(fm_remote_inherit_transaction_lock_path "$STATE" "$TARGET_REMOTE_ID" 2>/dev/null || true)
-    [ -n "$RUNPOD_INHERIT_LOCK" ] && fm_lock_acquire_wait "$RUNPOD_INHERIT_LOCK" \
-      || { echo "error: cannot lock pending inherited configuration for RunPod secondmate $TARGET_REMOTE_ID; nothing was delivered" >&2; exit 1; }
-    if ! "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" \
-      fm-remote-secondmate-control.sh sync "$TARGET_REMOTE_ID" < /dev/null >/dev/null; then
-      echo "error: pending tracked files did not converge on RunPod secondmate $TARGET_REMOTE_ID; nothing was delivered" >&2
-      exit 1
-    fi
-    runpod_generation=$(fm_remote_inherit_generation_next "$STATE" "$TARGET_REMOTE_ID" 2>/dev/null || true)
-    [ -n "$runpod_generation" ] \
-      || { echo "error: cannot publish pending inherited configuration generation for RunPod secondmate $TARGET_REMOTE_ID; nothing was delivered" >&2; exit 1; }
-    if ! FM_CONFIG_INHERIT_LIVE=1 \
-      "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$TARGET_REMOTE_ID" "$runpod_generation" >/dev/null; then
-      echo "error: pending inherited configuration did not converge on RunPod secondmate $TARGET_REMOTE_ID; nothing was delivered" >&2
-      exit 1
-    fi
-    RUNPOD_PENDING_NUDGE_MESSAGE=$(fm_meta_get "$RUNPOD_PENDING_NUDGE_MARKER" message)
-    [ -n "$RUNPOD_PENDING_NUDGE_MESSAGE" ] || RUNPOD_PENDING_NUDGE_MESSAGE=$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE
-    if fm_send_remote_correlated_message "$RUNPOD_PENDING_NUDGE_MESSAGE"; then
-      :
-    else
-      nudge_rc=$?
-      if [ "$nudge_rc" -eq 255 ]; then
-        echo "error: pending convergence nudge delivery to RunPod secondmate $TARGET_REMOTE_ID is unknown; nothing else was delivered" >&2
-      elif [ "$nudge_rc" -eq 70 ] || [ "$nudge_rc" -eq 71 ]; then
-        echo "error: pending convergence nudge reached RunPod secondmate $TARGET_REMOTE_ID, but its reply correlation could not be committed; do not resend" >&2
-      else
-        echo "error: pending convergence nudge was not delivered to RunPod secondmate $TARGET_REMOTE_ID; nothing else was delivered" >&2
-      fi
-      exit 1
-    fi
-    rm -f -- "$RUNPOD_PENDING_NUDGE_MARKER"
-    RUNPOD_PENDING_NUDGE_HANDLED=1
-    fm_lock_release "$RUNPOD_INHERIT_LOCK" || true
-    RUNPOD_INHERIT_LOCK=
-fi
-
-if [ "$RUNPOD_PENDING_NUDGE_HANDLED" -eq 1 ] \
-  && [ -z "$RESOLVE_KEYS" ] \
-  && [ "${1:-}" != --key ] \
-  && [ "$*" = "$RUNPOD_PENDING_NUDGE_MESSAGE" ]; then
-  exit 0
-fi
-
-TARGET_OMP_BUN=
-if [ "$TARGET_HARNESS" = omp ]; then
-  if [ -z "$TARGET_META" ] \
-     || ! fm_backend_agent_record_identity "$TARGET_BACKEND" "$T" "$TARGET_META"; then
-    echo "error: OMP target '$RAW_TARGET' lacks a valid task-bound Bun/OMP identity; refusing composer inspection and delivery" >&2
-    exit 1
-  fi
-  TARGET_OMP_STATE=$(fm_backend_agent_state "$TARGET_BACKEND" "$T" "$TARGET_META" 2>/dev/null)
-  if [ "$TARGET_OMP_STATE" != alive ]; then
-    echo "error: OMP target '$RAW_TARGET' does not match a live task-bound Bun/OMP process (state=${TARGET_OMP_STATE:-unreadable}); refusing delivery" >&2
-    exit 1
-  fi
-  TARGET_OMP_BUN=$FM_BACKEND_AGENT_OMP_BUN
-fi
 
 # Resolve the target's harness from its meta (recorded by fm-spawn), used only to
 # scope the codex `$<skill>` popup-settle below. A task selector carries
