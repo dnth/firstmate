@@ -176,6 +176,8 @@ assert_contains "$out" "ready: secondmate ios" "wake must report readiness"
 [ "$(runpod_pod_count "$API_STATE")" = 1 ] || fail "wake must create exactly one pod"
 [ "$(record_field ios lifecycle)" = ready ] || fail "wake must record the ready lifecycle"
 [ "$(record_field ios compute)" = cpu ] || fail "wake must default to CPU compute"
+[ "$(jq -r '.pods[0].imageName' "$API_STATE")" = runpod/base:1.0.7-dev-nix-ubuntu2204 ] \
+  || fail "wake must request the pinned Ubuntu 22.04 image that satisfies the toolchain glibc floor"
 FIRST_POD=$(record_field ios pod_id)
 FIRST_HOST=$(record_field ios endpoint_host)
 FIRST_PORT=$(record_field ios endpoint_port)
@@ -187,7 +189,7 @@ assert_grep "StrictHostKeyChecking yes" "$(fragment fm-sm-ios-runpod)" "strict h
 assert_no_grep "StrictHostKeyChecking no" "$(fragment fm-sm-ios-runpod)" "host-key checking must never be disabled"
 FIRST_KEY=$(grep '^fm-sm-ios-runpod ' "$PARENT/config/runpod/known_hosts")
 assert_contains "$FIRST_KEY" "fm-sm-ios-runpod ssh-ed25519" "the host key must be pinned under the alias, not the IP"
-pass "wake creates one pod, discovers its endpoint, and pins a verified host key"
+pass "wake creates one pod on the glibc-compatible default image, discovers its endpoint, and pins a verified host key"
 
 stored_harness=$(record_field ios harness_npm)
 out=$(rp provision ios --datacenter EU-RO-1 --size 100 2>&1) \

@@ -124,6 +124,7 @@ case "$method $path" in
     vol=$(printf '%s' "$body" | jq -r '.networkVolumeId // ""')
     compute=$(printf '%s' "$body" | jq -r '.computeType // "CPU"')
     name=$(printf '%s' "$body" | jq -r '.name // ""')
+    image=$(printf '%s' "$body" | jq -r '.imageName // ""')
     boot=$(printf '%s' "$body" | jq -r '.env.FM_POD_BOOT_B64 // ""')
     # RunPod caps the container disk at 40 GB and refuses creation above it with
     # this exact message. A real pilot hit that refusal where the earlier double
@@ -149,11 +150,11 @@ case "$method $path" in
     cost=0.04
     [ "$compute" != GPU ] || cost=0.79
     gpus=$(printf '%s' "$body" | jq -c '.gpuTypeIds // []')
-    pod=$(jq -nc --arg id "pod-$seq" --arg n "$name" --arg c "$compute" --arg b "$boot" \
+    pod=$(jq -nc --arg id "pod-$seq" --arg n "$name" --arg c "$compute" --arg i "$image" --arg b "$boot" \
       --argjson cost "$cost" --argjson polls "$init_polls" --argjson seq "$seq" \
       --argjson gpus "$gpus" --argjson disk "${disk:-40}" \
       --argjson v "$(jq -c --arg v "$vol" '[.volumes[] | select(.id == $v)][0] // null' "$state")" \
-      '{id:$id,name:$n,computeType:$c,desiredStatus:"RUNNING",costPerHr:$cost,containerDiskInGb:$disk,
+      '{id:$id,name:$n,imageName:$i,computeType:$c,desiredStatus:"RUNNING",costPerHr:$cost,containerDiskInGb:$disk,
         lastStartedAt:"2026-08-12T00:00:00.000Z",bootScript:$b,requestedGpuTypeIds:$gpus,
         remainingInitPolls:$polls,seq:$seq,networkVolume:$v,
         publicIp:null,portMappings:null}')
