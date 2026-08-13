@@ -72,6 +72,14 @@ lifecycle_of() {  # <world> <id>
   sed -n 's/^lifecycle=//p' "$1/home/data/runpod/$2.meta"
 }
 
+seed_bootstrap_primary() {  # <world>
+  local w=$1
+  git init -q -b main "$w/primary"
+  printf 'primary\n' > "$w/primary/README.md"
+  git -C "$w/primary" add README.md
+  git -C "$w/primary" -c user.name=Fixture -c user.email=fixture@example.test commit -qm primary
+}
+
 # --- health polling never wakes a suspended route ---------------------------
 
 if [ "${FM_TEST_RUNPOD_ROUTING_FOCUS:-}" != review ]; then
@@ -102,14 +110,17 @@ pass "an ordinary remote route keeps its existing liveness probe unchanged"
 w=$(new_world converge)
 runpod_seed_remote_route "$w/home" ios fm-sm-ios-runpod /srv/firstmate /srv/sm-ios
 suspend_route "$w" ios
+seed_bootstrap_primary "$w"
 
-out=$(world_env "$w" "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+out=$(FM_ROOT_OVERRIDE="$w/primary" world_env "$w" "$ROOT/bin/fm-bootstrap.sh" 2>&1)
 assert_not_contains "$out" "SECONDMATE_SYNC: secondmate ios" \
   "convergence must not report a suspended route as a sync failure"
 [ "$(grep -c 'fm-remote-secondmate-control.sh sync' "$w/calls.log" || true)" = 0 ] \
   || fail "startup convergence must not reach a suspended host"
 [ "$(grep -c 'POST /pods' "$w/calls.log" || true)" = 0 ] \
   || fail "startup convergence must never create compute"
+pending_marker="$w/home/state/.secondmate-nudge-pending/ios.pending"
+assert_present "$pending_marker" "startup convergence must record deferred work before skipping a suspended route"
 pass "startup convergence defers a suspended route instead of waking it"
 
 : > "$w/calls.log"
@@ -157,6 +168,18 @@ pass "an explicit request wakes a suspended second mate and then delivers throug
 deliver_w=$w
 fi
 
+if [ "${FM_TEST_RUNPOD_ROUTING_FOCUS:-}" = review ]; then
+  w=$(new_world bootstrap-pending)
+  runpod_seed_remote_route "$w/home" ios fm-sm-ios-runpod /srv/firstmate /srv/sm-ios
+  suspend_route "$w" ios
+  seed_bootstrap_primary "$w"
+  out=$(FM_ROOT_OVERRIDE="$w/primary" world_env "$w" "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+  pending_marker="$w/home/state/.secondmate-nudge-pending/ios.pending"
+  assert_present "$pending_marker" "startup convergence must record deferred work before skipping a suspended route"
+  [ "$(grep -c 'POST /pods' "$w/calls.log" || true)" = 0 ] \
+    || fail "startup convergence must record pending work without waking compute"
+fi
+
 # --- pending convergence applies before keys and preserves control text -----
 
 w=$(new_world controls)
@@ -174,22 +197,80 @@ first_key=$(grep -n 'fm-remote-secondmate-control.sh key' "$w/calls.log" | head 
   || fail "pending inherited configuration must converge before Enter is delivered"
 pass "key delivery honors the same convergence boundary as text delivery"
 
-world_env "$w" "$ROOT/bin/fm-runpod.sh" sleep ios >/dev/null \
-  || fail "could not suspend before the control-message case"
+w=$(new_world control-message)
+runpod_seed_remote_route "$w/home" ios fm-sm-ios-runpod /srv/firstmate /srv/sm-ios
+suspend_route "$w" ios
 world_env "$w" "$ROOT/bin/fm-config-push.sh" >/dev/null \
   || fail "config push did not record pending convergence for the control-message case"
+pending_before=$(find "$w/home/state/pending-replies" -type f 2>/dev/null | wc -l | tr -d ' ')
 : > "$w/calls.log"
 : > "$w/messages.log"
 out=$(world_env "$w" "$ROOT/bin/fm-send.sh" fm-ios /exit 2>&1) \
   || fail "/exit through pending convergence failed: $out"
-[ "$(sed -n '1p' "$w/messages.log")" = "Firstmate instructions or inherited config changed on this host. Re-read AGENTS.md and the inherited config files before further work." ] \
-  || fail "pending convergence must deliver its reread nudge as a separate first message"
+first_message=$(sed -n '1p' "$w/messages.log")
+case "$first_message" in
+  *'corr='*'Firstmate instructions or inherited config changed on this host. Re-read AGENTS.md and the inherited config files before further work.') ;;
+  *) fail "pending convergence must deliver its reread nudge through the correlated firstmate carrier" ;;
+esac
 second_message=$(sed -n '2p' "$w/messages.log")
 case "$second_message" in *' /exit') ;; *) fail "/exit must remain the caller message after its established routing carrier" ;; esac
 case "$second_message" in *'Firstmate instructions or inherited config changed'*) fail "the reread nudge must not be prepended to /exit" ;; esac
 [ "$(wc -l < "$w/messages.log" | tr -d ' ')" = 2 ] \
   || fail "the nudge path must deliver exactly the nudge and the caller's control message"
+pending_after=$(find "$w/home/state/pending-replies" -type f 2>/dev/null | wc -l | tr -d ' ')
+[ $((pending_after - pending_before)) = 2 ] \
+  || fail "the nudge and caller message must each retain parent reply correlation (added $((pending_after - pending_before)) records)"
 pass "pending convergence preserves exact control-message semantics"
+
+w=$(new_world invaliddecision)
+runpod_seed_remote_route "$w/home" ios fm-sm-ios-runpod /srv/firstmate /srv/sm-ios
+suspend_route "$w" ios
+world_env "$w" "$ROOT/bin/fm-config-push.sh" >/dev/null \
+  || fail "config push did not record pending convergence for decision validation"
+printf 'needs-decision [key=real-key]: choose a path\n' > "$w/home/state/ios.status"
+status_before=$(cat "$w/home/state/ios.status")
+: > "$w/calls.log"
+: > "$w/messages.log"
+out=$(world_env "$w" "$ROOT/bin/fm-send.sh" fm-ios --resolve-key missing-key 'take option one' 2>&1) \
+  && fail "an invalid decision key passed through pending convergence"
+assert_contains "$out" "no open decision" "invalid decision validation must remain loud"
+[ "$(cat "$w/home/state/ios.status")" = "$status_before" ] \
+  || fail "invalid decision validation must not mutate the decision ledger"
+[ ! -s "$w/messages.log" ] || fail "invalid decision validation must send no convergence nudge or answer"
+[ "$(grep -c 'POST /pods' "$w/calls.log" || true)" = 0 ] \
+  || fail "invalid decision validation must not wake a suspended route"
+pass "decision validation precedes every convergence mutation and send"
+
+for unsafe_shape in symlink directory invalid-remote; do
+  w=$(new_world "unsafe-$unsafe_shape")
+  runpod_seed_remote_route "$w/home" ios fm-sm-ios-runpod /srv/firstmate /srv/sm-ios
+  suspend_route "$w" ios
+  world_env "$w" "$ROOT/bin/fm-config-push.sh" >/dev/null \
+    || fail "config push did not record pending convergence for $unsafe_shape validation"
+  pending_marker="$w/home/state/.secondmate-nudge-pending/ios.pending"
+  case "$unsafe_shape" in
+    symlink)
+      mv "$pending_marker" "$w/unsafe-marker-target"
+      ln -s "$w/unsafe-marker-target" "$pending_marker"
+      ;;
+    directory)
+      rm -f "$pending_marker"
+      mkdir "$pending_marker"
+      ;;
+    invalid-remote)
+      sed -i 's/^remote=1$/remote=0/' "$pending_marker"
+      ;;
+  esac
+  : > "$w/calls.log"
+  : > "$w/messages.log"
+  out=$(world_env "$w" "$ROOT/bin/fm-send.sh" fm-ios 'must stay blocked' 2>&1) \
+    && fail "$unsafe_shape pending convergence marker did not block delivery"
+  assert_contains "$out" "unsafe pending convergence marker" "$unsafe_shape marker failure must be actionable"
+  [ ! -s "$w/messages.log" ] || fail "$unsafe_shape marker must permit no remote send"
+  [ "$(grep -c 'POST /pods' "$w/calls.log" || true)" = 0 ] \
+    || fail "$unsafe_shape marker must block before waking compute"
+done
+pass "unsafe pending convergence markers fail closed before wake or delivery"
 
 # --- a tracked-sync failure remains pending until ordinary delivery retries --
 

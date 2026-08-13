@@ -539,6 +539,14 @@ secondmate_sync() {
   while IFS='|' read -r id _home _window meta; do
     remote_host=$(fm_meta_get "$meta" remote_host)
     [ -n "$remote_host" ] || continue
+    remote_marker=$(secondmate_nudge_marker_path "$id" 2>/dev/null || true)
+    remote_pending=0
+    if [ -f "$remote_marker" ] && [ "$(fm_meta_get "$remote_marker" remote)" = 1 ]; then remote_pending=1; fi
+    if ! secondmate_write_nudge_marker "$id" "$_home" "" remote \
+      "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1; then
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record remote retry marker"
+      continue
+    fi
     # Startup convergence never wakes a recognized no-host lifecycle state.
     # The route keeps its pending nudge marker, and the next deliberate wake
     # converges it.
@@ -558,15 +566,6 @@ secondmate_sync() {
     remote_generation=$(fm_remote_inherit_generation_next "$STATE" "$id" 2>/dev/null || true)
     if [ -z "$remote_generation" ]; then
       echo "SECONDMATE_SYNC: secondmate $id: skipped: remote inheritance generation could not be published"
-      fm_lock_release "$remote_lock" || true
-      continue
-    fi
-    remote_marker=$(secondmate_nudge_marker_path "$id" 2>/dev/null || true)
-    remote_pending=0
-    if [ -f "$remote_marker" ] && [ "$(fm_meta_get "$remote_marker" remote)" = 1 ]; then remote_pending=1; fi
-    if ! secondmate_write_nudge_marker "$id" "$_home" "" remote \
-      "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1; then
-      echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record remote retry marker"
       fm_lock_release "$remote_lock" || true
       continue
     fi
