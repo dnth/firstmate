@@ -200,6 +200,10 @@ A marker records only the volume-resident contract, while every replacement pod 
 A raised contract version re-provisions the durable tools exactly once.
 `bin/fm-runpod-pod-boot.sh --check` prints the plan as one `ensure=<item>` line per step and touches nothing, which is how the contract is tested with no pod.
 
+The pod image must provide glibc 2.34 or newer.
+The pinned default is an official RunPod Ubuntu 22.04 base for that reason: the pinned treehouse build requires GLIBC_2.34, so an Ubuntu 20.04 image downloads it successfully and then cannot execute it, which fails first-boot provisioning.
+Override the image only with one that meets that floor.
+
 A worker harness still needs its own interactive login before `bin/fm-remote-doctor.sh` reports the host ready, and the doctor classifies that login as a human step.
 Leaving `--harness-npm` unset installs no harness and lets the doctor report that gap rather than pretending it is closed.
 

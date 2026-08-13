@@ -100,7 +100,12 @@ API_KEY_NAME=RUNPOD_API_KEY
 SSH_DIR="$CONFIG/runpod"
 SSH_FRAGMENT_DIR="$SSH_DIR/ssh.d"
 KNOWN_HOSTS="$SSH_DIR/known_hosts"
-DEFAULT_IMAGE=${FM_RUNPOD_DEFAULT_IMAGE:-runpod/base:0.6.2-cpu}
+# Ubuntu 22.04 (glibc 2.35) is required, not merely preferred: the pinned
+# treehouse build needs GLIBC_2.34, so the older Ubuntu 20.04 base (glibc 2.31)
+# downloaded it successfully and then could not execute it, which failed a live
+# pilot's first-boot provisioning. This tag is an official RunPod base with no
+# GPU stack, and is smaller than the 20.04 image it replaces.
+DEFAULT_IMAGE=${FM_RUNPOD_DEFAULT_IMAGE:-runpod/base:1.0.7-dev-nix-ubuntu2204}
 DEFAULT_SIZE_GB=100
 
 # shellcheck source=bin/fm-runpod-lib.sh
