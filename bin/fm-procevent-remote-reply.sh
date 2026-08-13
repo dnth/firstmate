@@ -39,6 +39,8 @@ MAX_DOC_BYTES=${FM_REMOTE_REPLY_MAX_DOC_BYTES:-262144}
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-runpod-lib.sh
+. "$SCRIPT_DIR/fm-runpod-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -171,6 +173,14 @@ cmd_arm_locked() {
   local id=${1:-} sid
   validate_id "$id"
   remote_route_exists "$id"
+  # The source long-polls the remote log over SSH, so a scale-to-zero route in a
+  # recognized no-host lifecycle state has nothing to poll and must never be
+  # woken just to arm it. The cursor is untouched, so the next wake re-arms from
+  # exactly this offset.
+  if fm_runpod_is_dormant "$DATA" "$id"; then
+    printf 'skipped: %s suspended\n' "$(source_id "$id")"
+    return 0
+  fi
   read_cursor "$id"
   sid=$(source_id "$id")
   "$SCRIPT_DIR/fm-procevent.sh" register remote-reply "$sid" -- \

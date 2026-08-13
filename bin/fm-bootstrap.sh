@@ -125,7 +125,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-pool-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-pool-lib.sh"
-
+# shellcheck source=bin/fm-runpod-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-runpod-lib.sh"
 
 fleet_sync_origin_backed_project_count() {
   local count proj
@@ -331,6 +332,7 @@ secondmate_sync() {
       [ -f "$meta" ] || continue
       grep -q '^kind=secondmate' "$meta" 2>/dev/null || continue
       id=$(basename "$meta" .meta)
+      fm_runpod_is_dormant "$DATA" "$id" && continue
       echo "SECONDMATE_SYNC: secondmate $id: skipped: primary default-branch commit cannot be resolved"
     done
     return 0
@@ -537,6 +539,14 @@ secondmate_sync() {
   while IFS='|' read -r id _home _window meta; do
     remote_host=$(fm_meta_get "$meta" remote_host)
     [ -n "$remote_host" ] || continue
+    # Startup convergence never wakes a recognized no-host lifecycle state.
+    # The route keeps its pending nudge marker, and the next deliberate wake
+    # converges it.
+    if fm_runpod_is_dormant "$DATA" "$id"; then
+      [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] \
+        || echo "BOOTSTRAP_INFO: secondmate $id is suspended; convergence deferred to its next wake"
+      continue
+    fi
     remote_lock=$(fm_remote_inherit_transaction_lock_path "$STATE" "$id" 2>/dev/null || true)
     if [ -z "$remote_lock" ] || ! fm_lock_acquire_wait "$remote_lock"; then
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot lock remote inheritance transaction"
@@ -616,6 +626,15 @@ secondmate_liveness_sweep() {
     harness=$(fm_meta_get "$meta" harness)
     remote_host=$(fm_meta_get "$meta" remote_host)
     if [ -n "$remote_host" ]; then
+      # A scale-to-zero route in a recognized no-host lifecycle state is not a
+      # broken endpoint (bin/fm-runpod-lib.sh). Probing or relaunching it would
+      # create compute nobody asked for, so it is skipped silently rather than
+      # reported as a liveness gap. Every other route keeps the existing path.
+      if fm_runpod_is_dormant "$DATA" "$id"; then
+        [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] \
+          || echo "BOOTSTRAP_INFO: secondmate $id is suspended on its compute provider; no probe attempted"
+        continue
+      fi
       remote_rc=0
       fm_remote_readiness_ensure "$SCRIPT_DIR" "$id" || remote_rc=$?
       if [ "$remote_rc" -eq 255 ]; then

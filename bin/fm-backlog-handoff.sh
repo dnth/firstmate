@@ -423,7 +423,7 @@ with_remote_route_locks() { # <secondmate-id> <function> <args...>
     release_remote_locks
     return 1
   fi
-  ACTIVE_HANDOFF_LOCK="$STATE/.backlog-handoff-$id.lock"
+  ACTIVE_HANDOFF_LOCK=$(secondmate_handoff_lock_path "$STATE" "$id")
   fm_lock_acquire_wait "$ACTIVE_HANDOFF_LOCK"
   if "$operation" "$@"; then rc=0; else rc=$?; fi
   release_remote_locks
@@ -461,7 +461,7 @@ ACTIVE_REGISTRY_LOCK=$(secondmate_registry_lock_path "$STATE")
 fm_lock_acquire_wait "$ACTIVE_REGISTRY_LOCK"
 REMOTE=$(secondmate_registry_field "$REG" "$ID" remote 2>/dev/null || true)
 if [ "$REMOTE" = 1 ]; then
-  ACTIVE_HANDOFF_LOCK="$STATE/.backlog-handoff-$ID.lock"
+  ACTIVE_HANDOFF_LOCK=$(secondmate_handoff_lock_path "$STATE" "$ID")
   fm_lock_acquire_wait "$ACTIVE_HANDOFF_LOCK"
   if remote_handoff "$ID" "$@"; then rc=0; else rc=$?; fi
   release_remote_locks

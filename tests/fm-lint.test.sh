@@ -58,7 +58,7 @@ count=0
 [ ! -f "$CURL_COUNT" ] || count=$(cat "$CURL_COUNT")
 count=$((count + 1))
 printf '%s\n' "$count" > "$CURL_COUNT"
-[ "$count" -gt 1 ] || exit 35
+[ "$count" -gt 3 ] || exit 35
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "-o" ]; then
     : > "$2"
@@ -96,10 +96,63 @@ SH
 
   out=$(CURL_COUNT="$tmp/curl-count" PATH="$fakebin:$PATH" "$INSTALLER" "$destination" 2>&1) \
     || fail "installer did not recover from a transient download failure"$'\n'"$out"
-  [ "$(cat "$tmp/curl-count")" -eq 2 ] || fail "installer did not retry exactly once after recovery"
+  [ "$(cat "$tmp/curl-count")" -eq 4 ] || fail "installer did not survive three consecutive transient failures"
   assert_contains "$out" "download attempt 1 failed; retrying" "installer did not disclose its retry"
   [ -x "$destination/shellcheck" ] || fail "installer did not install ShellCheck after retrying"
   pass "ShellCheck installer retries a transient download failure"
+}
+
+test_installer_falls_back_after_release_download_failure() {
+  local tmp fakebin destination out
+  tmp=$(fm_test_tmproot fm-shellcheck-fallback)
+  fakebin=$(fm_fakebin "$tmp")
+  destination="$tmp/bin"
+
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    printf 'partial download\n' > "$2"
+    break
+  fi
+  shift
+done
+exit 35
+SH
+  cat > "$fakebin/docker" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  create)
+    [ "$2" = "--platform" ] && [ "$3" = "linux/amd64" ] || exit 2
+    [ "$4" = "koalaman/shellcheck@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d" ] || exit 2
+    printf 'shellcheck-container\n'
+    ;;
+  cp)
+    [ "$2" = "shellcheck-container:/bin/shellcheck" ] || exit 2
+    cat > "$3" <<'EOF'
+#!/usr/bin/env bash
+printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
+EOF
+    ;;
+  rm)
+    [ "$2" = "shellcheck-container" ] || [ "$3" = "shellcheck-container" ] || exit 2
+    ;;
+  *) exit 2 ;;
+esac
+SH
+  cat > "$fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/curl" "$fakebin/docker" "$fakebin/sleep"
+
+  out=$(PATH="$fakebin:$PATH" "$INSTALLER" "$destination" 2>&1) \
+    || fail "installer did not fall back after the release download failed"$'\n'"$out"
+  assert_contains "$out" "trying pinned Docker image" "installer did not disclose its fallback"
+  [ -x "$destination/shellcheck" ] || fail "fallback did not install ShellCheck"
+  [ "$("$destination/shellcheck" --version | awk '/^version:/ {print $2; exit}')" = "$REQUIRED" ] \
+    || fail "fallback did not install the required ShellCheck version"
+  pass "ShellCheck installer falls back to the pinned official image"
 }
 
 test_rejects_wrong_shellcheck_version() {
@@ -429,6 +482,7 @@ SH
 test_list_files_reports_the_shell_inventory
 test_pins_an_explicit_version
 test_installer_retries_transient_download_failure
+test_installer_falls_back_after_release_download_failure
 test_rejects_wrong_shellcheck_version
 test_catches_a_real_lint_defect
 test_ignores_ambient_shellcheck_opts

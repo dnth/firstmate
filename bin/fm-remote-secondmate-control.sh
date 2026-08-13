@@ -10,6 +10,7 @@
 #   fm-remote-secondmate-control.sh key <id> <key>
 #   fm-remote-secondmate-control.sh capture <id> [lines]
 #   fm-remote-secondmate-control.sh observe <id>
+#   fm-remote-secondmate-control.sh children <id>
 #   fm-remote-secondmate-control.sh sync <id>
 #   fm-remote-secondmate-control.sh update <id>
 #   fm-remote-secondmate-control.sh retire <id> [--force]
@@ -51,7 +52,7 @@ REMOTE_HERDR_SESSION=fm-remote
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 validate_id() { case "$1" in ''|*[!A-Za-z0-9._-]*) die "invalid secondmate id: $1" ;; esac; }
 
 validate_home() { # <id> [allow-absent]
@@ -172,8 +173,9 @@ cmd_launch() {
   case "$fallback_harness" in -|claude|codex|opencode|pi|pi-signed|grok|kimi) ;; *) die "unverified remote secondmate fallback harness: $fallback_harness" ;; esac
   case "$fallback_effort" in -|low|medium|high|xhigh|max) ;; *) die "invalid remote secondmate fallback effort: $fallback_effort" ;; esac
   # Herdr is required on this host, not merely preferred: its server belongs to
-  # the GUI login session, so the endpoint survives every SSH disconnection that
-  # a remote route depends on. bin/fm-remote-doctor.sh is the readiness owner.
+  # the Aqua login session on macOS or runs headlessly in the account runtime on
+  # Linux, so the endpoint survives every SSH disconnection that a remote route
+  # depends on. bin/fm-remote-doctor.sh is the readiness owner.
   case "$selected_backend" in herdr) ;; *) die "a remote secondmate runs only on the herdr backend, not '$selected_backend'" ;; esac
   mkdir -p "$CONTROL_STATE" "$CONTROL_DATA"
   meta=$(meta_path "$id")
@@ -271,6 +273,22 @@ cmd_observe() {
   printf '\n'
 }
 
+# Read-only count of the work this home supervises, so a caller can ask whether
+# the host is idle without retiring anything. It counts exactly what teardown's
+# child sweep walks: the home's own state/*.meta records. The secondmate agent's
+# own endpoint record lives under state/parent-route/ and is deliberately not
+# one of them.
+cmd_children() {
+  local id=$1 meta count=0
+  validate_id "$id"
+  validate_home "$id"
+  for meta in "$TARGET_HOME/state"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    count=$((count + 1))
+  done
+  printf 'children=%s\n' "$count"
+}
+
 cmd_sync() {
   local id=$1 target dirty head current
   validate_id "$id"
@@ -348,6 +366,7 @@ case "${1:-}" in
   key) shift; [ "$#" -eq 2 ] || usage; cmd_key "$@" ;;
   capture) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_capture "$@" ;;
   observe) shift; [ "$#" -eq 1 ] || usage; cmd_observe "$@" ;;
+  children) shift; [ "$#" -eq 1 ] || usage; cmd_children "$@" ;;
   sync) shift; [ "$#" -eq 1 ] || usage; cmd_sync "$@" ;;
   update) shift; [ "$#" -eq 1 ] || usage; cmd_update "$@" ;;
   retire) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_retire "$@" ;;

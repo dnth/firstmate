@@ -352,7 +352,7 @@ remote_secondmate_teardown_locked() {
   [ -n "$(fm_meta_get "$META" remote_host)" ] || return 3
   REMOTE_REGISTRY_LOCK=$(secondmate_registry_lock_path "$STATE")
   fm_lock_acquire_wait "$REMOTE_REGISTRY_LOCK" || return 1
-  REMOTE_HANDOFF_LOCK="$STATE/.backlog-handoff-$ID.lock"
+  REMOTE_HANDOFF_LOCK=$(secondmate_handoff_lock_path "$STATE" "$ID")
   fm_lock_acquire_wait "$REMOTE_HANDOFF_LOCK" || {
     remote_teardown_locks_release
     return 1

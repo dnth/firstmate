@@ -84,6 +84,7 @@ if [ -z "${FM_HOME+x}" ] || [ -z "${FM_HOME:-}" ]; then
 fi
 
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 if [ ! -d "$FM_HOME" ]; then
   echo "error: FM_HOME '$FM_HOME' is not a directory; fm-send cannot resolve this home's state" >&2
   exit 1
@@ -101,6 +102,20 @@ fi
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-runpod-lib.sh
+. "$SCRIPT_DIR/fm-runpod-lib.sh"
+# shellcheck source=bin/fm-secondmate-registry-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+
+RUNPOD_DELIVERY_LOCK=
+release_runpod_delivery_lock() {
+  [ -n "$RUNPOD_DELIVERY_LOCK" ] || return 0
+  fm_lock_release "$RUNPOD_DELIVERY_LOCK"
+  RUNPOD_DELIVERY_LOCK=
+}
+trap release_runpod_delivery_lock EXIT
 # Answer notes use the same bounded status-line shape as the OPEN DECISIONS
 # renderer without adding a second shared helper to this fork.
 fm_send_resolved_line() {  # <key> <note>
@@ -308,6 +323,26 @@ done
 
 if [ "$TARGET_BACKEND" != remote ]; then
   fm_backend_validate "$TARGET_BACKEND" || exit 1
+fi
+
+if [ "$TARGET_BACKEND" = remote ] && fm_runpod_is_managed "$DATA" "$TARGET_REMOTE_ID"; then
+  RUNPOD_DELIVERY_LOCK=$(secondmate_handoff_lock_path "$STATE" "$TARGET_REMOTE_ID")
+  fm_lock_acquire_wait "$RUNPOD_DELIVERY_LOCK" \
+    || { echo "error: cannot lock delivery to RunPod secondmate $TARGET_REMOTE_ID" >&2; exit 1; }
+fi
+
+# Wake-before-deliver: a scale-to-zero compute route has no host until its
+# provider brings one back. The wake is idempotent, takes its own
+# per-secondmate lifecycle lock, and happens strictly BEFORE anything is
+# delivered, so retrying it can never duplicate a request. Once delivery starts,
+# the existing unknown-completion contract below is untouched: an SSH status of
+# 255 still means unknown completion with no retry and no failover.
+if [ "$TARGET_BACKEND" = remote ] && fm_runpod_is_dormant "$DATA" "$TARGET_REMOTE_ID"; then
+  if ! wake_out=$("$SCRIPT_DIR/fm-runpod.sh" wake "$TARGET_REMOTE_ID" 2>&1); then
+    [ -z "$wake_out" ] || printf '%s\n' "$wake_out" >&2
+    echo "error: remote secondmate $TARGET_REMOTE_ID could not be woken on its compute provider; nothing was delivered" >&2
+    exit 1
+  fi
 fi
 
 TARGET_OMP_BUN=

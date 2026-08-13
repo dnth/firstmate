@@ -7,8 +7,10 @@ Firstmate does not support placing an individual worker remotely or failing a re
 The remote second-mate agent itself always runs on the [Herdr backend](herdr-backend.md) in the shared `fm-remote` session, and every path that provisions or launches one refuses a host that is not ready for it.
 `fm-remote` is reserved for remote fleet work and must not be used for personal work.
 The user's interactive Herdr session remains `default` and is not a remote-secondmate prerequisite.
-Herdr's remote-session server belongs to the host's own GUI login session rather than to the SSH connection, so the agent's endpoint survives every disconnection the primary's supervision depends on.
+On macOS, Herdr's remote-session server belongs to the host's own GUI login session rather than to the SSH connection; on Linux, the doctor starts the server headlessly in the account runtime.
+In both cases, the agent's endpoint survives every disconnection the primary's supervision depends on.
 Local second mates are unaffected and keep their ordinary backend and session selection, as do the workers a remote second mate supervises inside its own home.
+A remote host may optionally be an ephemeral rented pod rather than a permanent machine; [`runpod-secondmates.md`](runpod-secondmates.md) owns its host-specific bootstrap and compute lifecycle, while this page's routing and safety contracts apply unchanged.
 
 ## Prerequisites
 
@@ -31,7 +33,7 @@ The readiness-owning doctor runs over this plain SSH bootstrap so read-only mode
 The entrypoint authorizes that bootstrap with normal git tracking when git resolves and with its pinned doctor digest when doctor must report that git itself is missing.
 After setup, every other command verifies Firstmate's account-owned remote job worker, stages the encoded argv and stdin bytes, waits for its result, and relays stdout, stderr, and the exit status separately.
 On macOS the worker is `dev.firstmate.remote-job`, an Aqua-scoped LaunchAgent at `~/Library/LaunchAgents/dev.firstmate.remote-job.plist` with logs under `~/Library/Logs/`.
-After that bootstrap every non-doctor `fm-on.sh` target runs through that worker in the remote account's GUI session, never in the SSH process or a Herdr pane.
+After that bootstrap every non-doctor `fm-on.sh` target runs through that worker in the remote account's Aqua session on macOS or directly in the account runtime on Linux, never in the SSH process or a Herdr pane.
 The worker runs one staged job at a time and preempts a running reply long-poll as soon as any command other than another reply long-poll is queued, so interactive commands and startup checks are never serialized behind a poll window.
 `bin/fm-remote-job-lib.sh` owns that preemption contract, and a preempted poll is indistinguishable from one whose wait window closed with no data, so the re-armed poll loses nothing.
 Linux uses the same queue and worker protocol without the Aqua-session requirement.
@@ -99,13 +101,30 @@ It never installs packages or overwrites a non-Firstmate file at a reserved wrap
 The dedicated Herdr launch agent owns only the remote-secondmate `fm-remote` server and does not inspect, rewrite, start, stop, or require the user's interactive `default` session or its `dev.firstmate.herdr` launch agent.
 It re-derives every check from the host afterwards, so what it prints is the state after the repair rather than the intent of one.
 
-These steps are never automated and are always reported rather than silently attempted, because SSH cannot create a GUI session from nothing:
+These steps are never automated because SSH cannot create a GUI session from nothing and readiness does not inspect vendor credential stores.
+The doctor reports host gaps it can prove, while each runtime's vendor login remains an explicit operator step.
 
 - The first console login on that Mac, and automatic login in System Settings > Users & Groups when the machine runs headless and must come back on its own after a reboot.
 - FileVault, which holds a reboot at pre-boot authentication before any login session exists.
 - Installing any missing required tool that no safe wrapper can resolve.
-- The required remote tool set is `git`, `jq`, `herdr`, compatible `tasks-axi`, `treehouse`, and at least one of `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, or `kimi`.
+- The required remote tool set is `git`, `jq`, `herdr`, compatible `tasks-axi`, `treehouse`, and at least one of `omp`, `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, or `kimi`.
 - Each worker runtime's own `/login`, and any keychain password prompt that login needs.
+
+### The parity tier
+
+That required set is the minimum a remote second mate needs to run at all.
+A host expected to do everything a local second mate and its crews do needs more, and `--parity` is the opt-in second tier that checks it:
+
+```sh
+bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh --parity
+```
+
+It reports one `parity <tool>=<path>|MISSING` line per parity tool, records a `parity-toolchain` check, and records a `parity-durable-home` check that a host declaring only part of its filesystem durable keeps its account home inside that part, because otherwise every completed login is lost the next time the host is replaced.
+A host declares that durable root in `/etc/firstmate/durable-root`; where the file is absent the whole host persists and the check is skipped.
+
+The tier is opt-in because this command owns readiness for every remote second mate, and a minimal remote host is complete at the required minimum.
+Without `--parity` the report and the verdict are unchanged.
+`--parity` reports gaps and never installs, exactly like the required tier; [`runpod-secondmates.md`](runpod-secondmates.md) covers the host that provisions that set for itself.
 
 Firstmate never writes an auto-login password, never changes FileVault, and never stores an account password.
 A file at `~/.local/bin/fm-remote-entrypoint.sh` that is not Firstmate's own symlink is reported for the operator to inspect and is never overwritten.

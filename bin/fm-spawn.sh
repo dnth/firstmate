@@ -253,6 +253,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-runpod-lib.sh
+. "$SCRIPT_DIR/fm-runpod-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -389,6 +391,14 @@ else
   }
 fi
 
+REMOTE_RUNPOD_DELIVERY_LOCK=
+remote_runpod_delivery_cleanup() {
+  [ -n "$REMOTE_RUNPOD_DELIVERY_LOCK" ] || return 0
+  fm_lock_release "$REMOTE_RUNPOD_DELIVERY_LOCK" || true
+  REMOTE_RUNPOD_DELIVERY_LOCK=
+}
+trap remote_runpod_delivery_cleanup EXIT
+
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
   local fallback_harness fallback_model fallback_effort
@@ -496,9 +506,10 @@ spawn_remote_secondmate() {
       ;;
   esac
   # A remote second mate always runs on Herdr: its server belongs to the host's
-  # own GUI login session, so the endpoint outlives every SSH connection that
-  # supervises it. bin/fm-remote-doctor.sh gates that host on the same
-  # requirement, and the remote home's config/backend never overrides it.
+  # Aqua login session on macOS or runs headlessly in the account runtime on
+  # Linux, so the endpoint outlives every supervising SSH connection.
+  # bin/fm-remote-doctor.sh gates that host on the platform-specific requirement,
+  # and the remote home's config/backend never overrides it.
   case "${BACKEND_ARG:--}" in
     -|herdr) backend=herdr ;;
     *)
@@ -527,6 +538,32 @@ spawn_remote_secondmate() {
       fm_lock_release "$registry_lock" || true
       fm_lock_release "$SPAWN_TASK_LOCK" || true
       echo "error: existing metadata for $id does not identify this remote secondmate route" >&2
+      return 1
+    fi
+  fi
+  if fm_runpod_is_managed "$DATA" "$id"; then
+    REMOTE_RUNPOD_DELIVERY_LOCK=$(secondmate_handoff_lock_path "$STATE" "$id")
+    if ! fm_lock_acquire_wait "$REMOTE_RUNPOD_DELIVERY_LOCK"; then
+      REMOTE_RUNPOD_DELIVERY_LOCK=
+      fm_lock_release "$registry_lock" || true
+      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      echo "error: remote secondmate $id delivery lifecycle could not be locked" >&2
+      return 1
+    fi
+  fi
+  # Wake-before-deliver: a scale-to-zero compute route has no host until its
+  # provider brings one back, so the pod is restored BEFORE the readiness gate
+  # rather than letting the gate report a dormant route as unreachable. The
+  # wake is idempotent and takes its own per-secondmate lifecycle lock, so a
+  # concurrent launch and liveness relaunch still produce exactly one pod. This
+  # is lifecycle work, before delivery, so retrying it is safe; everything after
+  # it keeps the existing unknown-completion and no-failover semantics.
+  if fm_runpod_is_dormant "$DATA" "$id"; then
+    if ! out=$("$SCRIPT_DIR/fm-runpod.sh" wake "$id" 2>&1); then
+      fm_lock_release "$registry_lock" || true
+      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      [ -z "$out" ] || printf '%s\n' "$out" >&2
+      echo "error: remote secondmate $id could not be woken on its compute provider; launch refused" >&2
       return 1
     fi
   fi

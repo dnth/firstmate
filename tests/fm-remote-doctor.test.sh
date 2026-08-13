@@ -39,6 +39,8 @@ new_case() {
   local platform=$1 want_herdr=${2:-with-herdr} want_gui=${3:-gui}
   unset CASE_REMOTE_JOB_ACTIVE
   unset CASE_PLATFORM_OVERRIDE
+  unset CASE_DURABLE_ROOT_FILE
+  unset CASE_ACCOUNT_HOME
   CASE_N=$((CASE_N + 1))
   CASE_DIR="$TMP_ROOT/case$CASE_N"
   CASE_BIN="$CASE_DIR/bin"
@@ -60,6 +62,12 @@ new_case() {
   cat > "$CASE_BIN/uname" <<SH
 #!/usr/bin/env bash
 printf '%s\n' '$platform'
+SH
+
+  cat > "$CASE_BIN/getent" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = passwd ] || exit 2
+printf '%s:x:1000:1000:test:%s:/bin/bash\n' "${2:-test}" "${FM_FAKE_ACCOUNT_HOME:-$HOME}"
 SH
 
   cat > "$CASE_BIN/launchctl" <<'SH'
@@ -204,7 +212,7 @@ SH
 #!/usr/bin/env bash
 exit 0
 SH
-  chmod +x "$CASE_BIN/uname" "$CASE_BIN/launchctl" "$CASE_BIN/tasks-axi" "$CASE_BIN/treehouse" "$CASE_BIN/claude"
+  chmod +x "$CASE_BIN/uname" "$CASE_BIN/getent" "$CASE_BIN/launchctl" "$CASE_BIN/tasks-axi" "$CASE_BIN/treehouse" "$CASE_BIN/claude"
   cat > "$CASE_BIN/sleep" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -231,6 +239,8 @@ doctor() {
     FM_FAKE_LAUNCH_AGENT_LOG="$CASE_HOME/Library/Logs/$LABEL.log" \
     FM_REMOTE_JOB_PLATFORM_OVERRIDE="${CASE_PLATFORM_OVERRIDE-}" \
     FM_REMOTE_JOB_ACTIVE="${CASE_REMOTE_JOB_ACTIVE-1}" \
+    FM_DURABLE_ROOT_FILE="${CASE_DURABLE_ROOT_FILE-}" \
+    FM_FAKE_ACCOUNT_HOME="${CASE_ACCOUNT_HOME-$CASE_HOME}" \
     "$ROOT/bin/fm-remote-doctor.sh" "$@" 2>&1
   )
   DOCTOR_RC=$?
@@ -623,3 +633,113 @@ assert_contains "$DOCTOR_OUT" 'check entrypoint-link=human:' "an operator-owned 
   || fail "--fix overwrote a file it did not create"
 unset FM_ROOT_OVERRIDE
 pass "the entrypoint symlink is recreated when absent and never overwritten when operator-owned"
+
+# --- omp is an accepted worker harness ---------------------------------------
+#
+# The fleet's own crew dispatch runs omp as both the second-mate runtime and the
+# default crew runtime, so a host carrying only omp satisfies the harness
+# requirement exactly as one carrying claude does.
+
+new_case Linux with-herdr no-gui
+rm -f "$CASE_BIN/claude"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$CASE_BIN/omp"
+chmod +x "$CASE_BIN/omp"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "a host whose only harness is omp was reported unready"
+assert_contains "$DOCTOR_OUT" "required harness=omp:$CASE_BIN/omp" "omp was not accepted as a worker harness"
+assert_not_contains "$DOCTOR_OUT" 'required harness=MISSING' "omp did not satisfy the harness requirement"
+pass "omp satisfies the harness requirement on its own"
+
+# --- the parity tier is opt-in and adds nothing to a default run -------------
+#
+# This doctor governs every remote second mate, not only the RunPod hosts that
+# need full local parity. The guarantee under test is that a minimal remote host
+# sees the identical verdict and the identical report it saw before the tier
+# existed: parity facts appear only when --parity asks for them.
+
+new_case Linux with-herdr no-gui
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "the base readiness contract stopped passing on a minimal host"
+DEFAULT_OUT=$DOCTOR_OUT
+assert_not_contains "$DEFAULT_OUT" 'parity ' "a default run reported parity facts it was not asked for"
+assert_not_contains "$DEFAULT_OUT" 'check parity' "a default run recorded a parity check it was not asked for"
+assert_contains "$DEFAULT_OUT" 'optional no-mistakes=absent' "the default report lost the optional no-mistakes fact"
+default_gh=$(PATH="$CASE_HOME/.local/bin:$CASE_BIN:$TOOLS:/usr/bin:/bin:/usr/sbin:/sbin" command -v gh 2>/dev/null || true)
+if [ -n "$default_gh" ]; then
+  assert_contains "$DEFAULT_OUT" "optional gh=$default_gh" "the default report lost the resolved optional gh fact"
+else
+  assert_contains "$DEFAULT_OUT" 'optional gh=absent' "the default report lost the absent optional gh fact"
+fi
+tmux_line=$(printf '%s\n' "$DEFAULT_OUT" | grep -n '^optional tmux=' | cut -d: -f1)
+no_mistakes_line=$(printf '%s\n' "$DEFAULT_OUT" | grep -n '^optional no-mistakes=' | cut -d: -f1)
+gh_line=$(printf '%s\n' "$DEFAULT_OUT" | grep -n '^optional gh=' | cut -d: -f1)
+[ "$tmux_line" -lt "$no_mistakes_line" ] && [ "$no_mistakes_line" -lt "$gh_line" ] \
+  || fail "the default optional facts must remain ordered tmux, no-mistakes, gh"
+pass "a default run is unchanged by the parity tier"
+
+doctor --fix --parity
+expect_code 1 "$DOCTOR_RC" "a host missing the whole parity toolchain was reported parity-ready"
+assert_contains "$DOCTOR_OUT" 'parity codegraph=MISSING' "the parity tier did not report the missing code-intelligence CLI"
+assert_contains "$DOCTOR_OUT" 'parity no-mistakes=MISSING' "the parity tier did not report the missing validation pipeline"
+assert_contains "$DOCTOR_OUT" 'check parity-toolchain=human:' "an incomplete parity toolchain was not tagged human"
+assert_contains "$DOCTOR_OUT" 'action: parity-toolchain:' "the parity gap came with no operator action"
+assert_not_contains "$DOCTOR_OUT" 'fix parity-toolchain=applied' "--fix claimed to have installed the parity toolchain"
+pass "--parity reports the missing parity toolchain and never claims to install it"
+
+# --- a complete parity host passes the tier ----------------------------------
+
+install_parity_tools() { # <bin-dir>
+  local dir=$1 tool
+  for tool in omp claude codex no-mistakes gh gh-axi chrome-devtools-axi \
+    lavish-axi quota-axi codegraph google-chrome; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/$tool"
+    chmod +x "$dir/$tool"
+  done
+}
+
+new_case Linux with-herdr no-gui
+install_parity_tools "$CASE_BIN"
+doctor --fix --parity
+expect_code 0 "$DOCTOR_RC" "a complete parity host was reported unready"
+assert_contains "$DOCTOR_OUT" "parity omp=$CASE_BIN/omp" "a resolved parity harness was not reported with its path"
+assert_contains "$DOCTOR_OUT" 'check parity-toolchain=ok:' "a complete parity toolchain was not confirmed"
+assert_not_contains "$DOCTOR_OUT" 'parity gh=MISSING' "a resolved parity tool was reported missing"
+pass "a host carrying the whole parity toolchain passes the parity tier"
+
+# --- the durable-home check is what makes a login survive pod replacement ----
+#
+# A RunPod pod keeps only its network volume. Every login lands under the
+# account HOME, so the one structural guarantee that a completed login is
+# once-per-volume rather than once-per-pod is that HOME itself resolves under
+# the durable root the host declares. A host that declares no separate durable
+# root already persists its home and is exempt.
+
+assert_contains "$DOCTOR_OUT" 'check parity-durable-home=skip:' \
+  "a host declaring no durable root was not exempted from the durable-home check"
+pass "a host with no declared durable root is exempt from the durable-home check"
+
+CASE_DURABLE_ROOT_FILE="$CASE_DIR/durable-root"
+printf '%s\n' "$CASE_DIR" > "$CASE_DURABLE_ROOT_FILE"
+doctor --fix --parity
+expect_code 0 "$DOCTOR_RC" "a home under the declared durable root was reported unready"
+assert_contains "$DOCTOR_OUT" 'check parity-durable-home=ok:' \
+  "a home under the declared durable root was not confirmed durable"
+pass "a home under the declared durable root is confirmed durable"
+
+printf '%s\n' "$CASE_HOME" > "$CASE_DURABLE_ROOT_FILE"
+CASE_ACCOUNT_HOME="$CASE_DIR/disposable-home"
+doctor --fix --parity
+expect_code 1 "$DOCTOR_RC" "an inherited durable HOME masked the login account's disposable home"
+assert_contains "$DOCTOR_OUT" "account home $CASE_ACCOUNT_HOME is outside" \
+  "the durable-home verdict did not use the login account database"
+pass "the parity verdict resolves the login account home from the account database"
+unset CASE_ACCOUNT_HOME
+
+printf '%s\n' "$CASE_DIR/elsewhere" > "$CASE_DURABLE_ROOT_FILE"
+doctor --fix --parity
+expect_code 1 "$DOCTOR_RC" "a home outside the declared durable root was reported ready"
+assert_contains "$DOCTOR_OUT" 'check parity-durable-home=human:' \
+  "a home outside the declared durable root was not tagged human"
+assert_contains "$DOCTOR_OUT" "$CASE_DIR/elsewhere" "the durable-home gap did not name the declared durable root"
+assert_contains "$DOCTOR_OUT" 'action: parity-durable-home:' "the durable-home gap came with no operator action"
+pass "a home outside the declared durable root fails the parity tier loudly"

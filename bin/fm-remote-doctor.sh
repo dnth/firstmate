@@ -2,7 +2,7 @@
 # Check, and optionally repair, one remote account's second-mate readiness.
 #
 # Usage:
-#   bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh [--fix]
+#   bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh [--fix] [--parity]
 #
 # Run it through fm-on.sh so the fixed entrypoint invokes this readiness owner
 # over its plain SSH bootstrap. The command reports the same filesystem-composed
@@ -10,12 +10,21 @@
 # worker itself.
 #
 # A remote second mate always runs on the Herdr backend in the dedicated
-# fm-remote session. Its account therefore needs the Firstmate-owned Aqua Herdr
-# agent plus the sibling dev.firstmate.remote-job worker that runs normal fm-on
-# commands through the Aqua or Linux job-worker path. Doctor remains invokable
-# over the plain-SSH bootstrap path to inspect and repair that worker. SSH cannot
-# create an Aqua session, so a host with no GUI login is a human gap rather than
-# something --fix attempts to bypass.
+# fm-remote session. On macOS its account therefore needs the Firstmate-owned
+# Aqua Herdr agent plus the sibling dev.firstmate.remote-job worker; on Linux
+# doctor starts the Herdr server and job worker directly in the account runtime.
+# Doctor remains invokable over the plain-SSH bootstrap path to inspect and
+# repair that worker. SSH cannot create a macOS Aqua session, so a Mac with no
+# GUI login is a human gap rather than something --fix attempts to bypass.
+#
+# --parity adds a second verification tier on top of that minimum, for a host
+# expected to do everything a local second mate and its crews do: every
+# dispatchable worker harness, the validation pipeline, the axi family, the
+# code-intelligence CLI, and a browser. It is opt-in because this command owns
+# readiness for EVERY remote second mate, and a minimal remote host is complete
+# at the required minimum above. Without --parity nothing below changes: no
+# parity fact is printed and no parity check is recorded. The tier reports gaps
+# and never installs; the host's own provisioning owns installation.
 #
 # Line protocol, one fact per line, stable for script consumers:
 #   mode=check|fix
@@ -23,6 +32,7 @@
 #   entrypoint=yes|no
 #   platform=darwin|linux|<uname -s>|unknown
 #   required <tool>=<path>|MISSING
+#   parity <tool>=<path>|MISSING            (--parity only)
 #   optional <tool>=<path>|absent
 #   fix <check>=applied: <what changed>       (--fix only)
 #   fix <check>=failed: <why the repair did not land>   (--fix only)
@@ -57,8 +67,19 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)}"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 REQUIRED_TOOLS=(git jq herdr tasks-axi treehouse)
-HARNESS_TOOLS=(claude codex opencode pi pi-signed grok kimi)
+HARNESS_TOOLS=(omp claude codex opencode pi pi-signed grok kimi)
 OPTIONAL_TOOLS=(tmux no-mistakes gh)
+# The --parity tier. Every worker harness this fleet's crew dispatch can select,
+# plus the universal toolchain owned by docs/configuration.md "Toolchain", plus
+# the code-intelligence CLI and the browser a local second mate uses. Presence
+# only: a completed login is a human step, and the durable-home check below is
+# what makes that login survive the host's own replacement.
+PARITY_TOOLS=(omp claude codex no-mistakes gh gh-axi chrome-devtools-axi
+  lavish-axi quota-axi codegraph google-chrome)
+# A host that keeps only part of its filesystem across replacement declares the
+# durable part here. Absent means the whole host persists, which is true of an
+# ordinary remote machine and false of a container with a network volume.
+DURABLE_ROOT_FILE=${FM_DURABLE_ROOT_FILE:-/etc/firstmate/durable-root}
 LAUNCH_AGENT_LABEL=dev.firstmate.herdr.fm-remote
 # The dedicated remote-secondmate session. The user's interactive Herdr work
 # remains in the separate default session, which this readiness check never
@@ -73,17 +94,22 @@ ENTRYPOINT_LINK="${HOME:-}/.local/bin/fm-remote-entrypoint.sh"
 usage() { sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 MODE=check
+PARITY=0
 case "${1:-}" in
-  '') ;;
-  --fix) MODE=fix; shift ;;
   --worker-tool-probe)
     [ "${FM_REMOTE_JOB_ACTIVE:-}" = 1 ] || { printf 'error: worker tool probe requires the remote job worker\n' >&2; exit 64; }
     MODE='worker-tool-probe'
     shift
     ;;
-  *) usage ;;
 esac
-[ "$#" -eq 0 ] || usage
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --fix) [ "$MODE" = check ] || usage; MODE=fix; shift ;;
+    --parity) [ "$PARITY" -eq 0 ] || usage; PARITY=1; shift ;;
+    *) usage ;;
+  esac
+done
+[ "$MODE" != 'worker-tool-probe' ] || [ "$PARITY" -eq 0 ] || usage
 
 PLATFORM=$(fm_remote_job_platform)
 UID_NUM=$(id -u 2>/dev/null) || UID_NUM=
@@ -574,6 +600,88 @@ check_entrypoint_link() {
     "rerun this command with --fix to create it"
 }
 
+# --- parity tier -------------------------------------------------------------
+#
+# Resolved from this command's own runtime PATH, the same source the optional
+# tier uses. That PATH is the one the fixed entrypoint composes, which is also
+# what the job worker runs with, so a parity tool the worker could not reach is
+# not reachable here either.
+
+parity_report_lines() {
+  local tool resolved
+  PARITY_LINES=()
+  PARITY_MISSING=()
+  for tool in "${PARITY_TOOLS[@]}"; do
+    resolved=$(command -v "$tool" 2>/dev/null || true)
+    if [ -z "$resolved" ] && [ "$tool" = google-chrome ] && [ "$PLATFORM" = darwin ]; then
+      resolved='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+      [ -x "$resolved" ] || resolved=
+    fi
+    if [ -n "$resolved" ] && [ -x "$resolved" ]; then
+      PARITY_LINES+=("parity $tool=$resolved")
+    else
+      PARITY_LINES+=("parity $tool=MISSING")
+      PARITY_MISSING+=("$tool")
+    fi
+  done
+}
+
+check_parity_toolchain() {
+  parity_report_lines
+  if [ "${#PARITY_MISSING[@]}" -eq 0 ]; then
+    record parity-toolchain "ok: every parity tool resolves on the remote runtime PATH"
+    return 0
+  fi
+  record parity-toolchain "human: ${#PARITY_MISSING[@]} parity tools do not resolve on the remote runtime PATH: ${PARITY_MISSING[*]}" \
+    "install each one on that host where it resolves on the path reported above; this command never installs packages"
+}
+
+login_account_home() {
+  local account entry
+  account=$(id -un 2>/dev/null || true)
+  [ -n "$account" ] || return 1
+  if command -v getent >/dev/null 2>&1; then
+    entry=$(getent passwd "$account" 2>/dev/null || true)
+    [ -n "$entry" ] || return 1
+    printf '%s\n' "$entry" | awk -F: 'NR == 1 { print $6 }'
+    return 0
+  fi
+  if [ "$PLATFORM" = darwin ] && command -v dscl >/dev/null 2>&1; then
+    dscl . -read "/Users/$account" NFSHomeDirectory 2>/dev/null \
+      | awk 'NR == 1 { sub(/^[^:]*:[[:space:]]*/, ""); print; exit }'
+    return 0
+  fi
+  [ -r /etc/passwd ] || return 1
+  awk -F: -v account="$account" '$1 == account { print $6; found = 1; exit } END { exit !found }' /etc/passwd
+}
+
+# A login is only once-per-host if the account home outlives the host's own
+# replacement. Where a host declares that only part of its filesystem is
+# durable, HOME must be inside that part or every completed login is lost with
+# the next replacement.
+check_parity_durable_home() {
+  local declared account_home
+  if [ ! -f "$DURABLE_ROOT_FILE" ] || [ -L "$DURABLE_ROOT_FILE" ]; then
+    record parity-durable-home "skip: this host declares no separate durable root, so its account home already persists"
+    return 0
+  fi
+  IFS= read -r declared < "$DURABLE_ROOT_FILE" || declared=
+  if [ -z "$declared" ]; then
+    record parity-durable-home "human: $DURABLE_ROOT_FILE declares no durable root" \
+      "write the durable filesystem root into $DURABLE_ROOT_FILE on that host, or remove the file if the whole host persists"
+    return 0
+  fi
+  account_home=$(login_account_home 2>/dev/null || true)
+  case "$account_home" in
+    "$declared"|"$declared"/*)
+      record parity-durable-home "ok: the account home $account_home is under the declared durable root $declared"
+      return 0
+      ;;
+  esac
+  record parity-durable-home "human: the account home ${account_home:-<unset>} is outside the declared durable root $declared, so every completed login is lost when this host is replaced" \
+    "move that account's home under $declared on the host itself; this command never rewrites an account home"
+}
+
 run_checks() {
   CHECK_NAMES=()
   CHECK_VALUES=()
@@ -584,6 +692,10 @@ run_checks() {
   check_launch_agent
   check_herdr_server
   check_entrypoint_link
+  if [ "$PARITY" -eq 1 ]; then
+    check_parity_toolchain
+    check_parity_durable_home
+  fi
 }
 
 # --- repairs ----------------------------------------------------------------
@@ -762,6 +874,9 @@ if [ "${FM_REMOTE_JOB_ACTIVE:-}" = 1 ] || ! remote_job_identity_ok; then
   report_required_tools
 else
   report_required_tools_from_worker
+fi
+if [ "$PARITY" -eq 1 ]; then
+  printf '%s\n' ${PARITY_LINES[@]+"${PARITY_LINES[@]}"}
 fi
 for tool in "${OPTIONAL_TOOLS[@]}"; do
   if resolved=$(command -v "$tool" 2>/dev/null); then
