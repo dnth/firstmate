@@ -29,8 +29,14 @@ One network volume per RunPod second mate, named `fm-sm-<id>-runpod`, holds ever
 ```
 /workspace/firstmate            the remote Firstmate code root
 /workspace/secondmate-home      the persistent FM_HOME, deliberately separate from the code root
-/workspace/persistent-runtime   SSH host keys, boot state, and durable tools
+/workspace/persistent-runtime   SSH host keys, boot state, and the durable toolchain
+/workspace/home                 the account home: every completed login and runtime config
 ```
+
+The account home is on the volume on purpose.
+Every worker runtime and `gh` writes its credential under the account home, so on a container-local home each login would die with the pod and setup would be once per pod.
+Boot rewrites the account's entry in the pod's own `/etc/passwd` so an SSH login lands there, and writes the volume path to `/etc/firstmate/durable-root` so `bin/fm-remote-doctor.sh --parity` can verify it.
+That single move covers every runtime at once instead of one credential-directory variable per tool.
 
 Project clones and worktrees live under the second mate's own home, as on any other remote host.
 Each pod also has a disposable 40 GB container disk, the maximum RunPod accepts; reducing or replacing that disk loses no Firstmate state because everything durable lives on the network volume.
@@ -78,7 +84,7 @@ bin/fm-runpod.sh provision <id> --datacenter EU-RO-1 --size 100 \
 ```
 
 `--code-origin` is required for a fresh volume and names the git URL the pod clones its Firstmate code root from on first boot; without it or an existing clone, wake refuses and records no satisfied toolchain marker.
-Add `--harness-npm <package>` when a worker harness should be installed with it.
+Add `--harness-npm <package>` only for an extra harness beyond the parity set the pod installs anyway.
 
 Bring the host up with the CPU default:
 
@@ -93,8 +99,9 @@ bin/fm-runpod.sh wake <id> --gpu
 bin/fm-runpod.sh wake <id> --min-vram 24
 ```
 
-If the doctor leaves an interactive harness-login step, use `bin/fm-runpod.sh ssh <id>` from another terminal while wake is still waiting, then retry wake after login.
+On a volume's first wake, log each runtime in once: use `bin/fm-runpod.sh ssh <id>` from another terminal while wake is still waiting, run each harness's own login and `gh auth login`, then retry wake.
 SSH becomes available before toolchain provisioning finishes.
+Those logins land on the volume, so later wakes and replacement pods need none of it again.
 If provisioning or a later boot step fails, the pod stays running and wake remains unready; connect from another terminal with `bin/fm-runpod.sh ssh <id>` and inspect `/workspace/persistent-runtime/boot.log`.
 RunPod's REST API has no log or console endpoint, so that SSH session and volume-backed log are the diagnostic path for failures after sshd starts.
 
@@ -184,12 +191,19 @@ Boot first establishes the diagnostic SSH channel:
 
 Only after sshd starts does first boot provision the remaining noninteractive prerequisites:
 
-1. Install a current Node LTS, which the npm-distributed tools require.
+1. Install a current Node LTS and `bun`, the runtimes the rest of the toolchain needs.
 2. Clone the Firstmate code root from `--code-origin` when the volume has none.
 3. Install `herdr` and `treehouse` through this repository's own pinned, checksum-verified installers, `bin/fm-install-herdr.sh` and `bin/fm-install-treehouse.sh`, so a pod runs the exact builds CI verifies rather than a floating latest.
-4. Install `tasks-axi`, and the optional `--harness-npm` package when one is configured.
+4. Install the parity toolchain below.
 
-It then links the durable tools and fixed remote entrypoint and hands readiness to `bin/fm-remote-doctor.sh --fix`.
+A RunPod second mate is contracted to reach full parity with a local one, so the pod installs everything a local second mate and the crews it spawns use: the `omp`, `claude`, and `codex` worker harnesses, the universal toolchain owned by [`configuration.md`](configuration.md#toolchain) (`no-mistakes`, `gh`, `gh-axi`, `chrome-devtools-axi`, `lavish-axi`, `quota-axi`, `tasks-axi`), the CodeGraph CLI, and a headless Chrome for browser work.
+All of it installs under the volume, so the cost is paid once per volume rather than once per pod.
+`bin/fm-remote-doctor.sh --parity` is the single owner of what that set is; the boot script installs toward it and the tests check the two lists against each other.
+
+The browser's shared libraries are the exception: they are container-local system packages, re-ensured on every boot and deliberately kept out of the set that gates sshd, so a browser dependency can never cost the pod its only diagnostic channel.
+Boot links the durable browser at `/usr/bin/google-chrome` and then runs it, because a browser that exists but cannot start is a failure that belongs at provisioning time rather than in the middle of a worker's page.
+
+It then links the durable tools and fixed remote entrypoint and hands readiness to `bin/fm-remote-doctor.sh --fix --parity`.
 The doctor is the single owner of what "ready for a remote second mate" means, and on Linux it starts the remote job worker and the headless Herdr `fm-remote` server itself, with no GUI or Aqua session involved.
 Nothing in the boot script re-states the doctor's verdict; it installs toward that set and lets the doctor decide.
 Every failure after sshd starts is written to the volume-backed boot log and leaves the pod open for inspection.
@@ -204,8 +218,12 @@ The pod image must provide glibc 2.34 or newer.
 The pinned default is an official RunPod Ubuntu 22.04 base for that reason: the pinned treehouse build requires GLIBC_2.34, so an Ubuntu 20.04 image downloads it successfully and then cannot execute it, which fails first-boot provisioning.
 Override the image only with one that meets that floor.
 
-A worker harness still needs its own interactive login before `bin/fm-remote-doctor.sh` reports the host ready, and the doctor classifies that login as a human step.
-Leaving `--harness-npm` unset installs no harness and lets the doctor report that gap rather than pretending it is closed.
+Every worker harness, and `gh`, still needs its own interactive login, which the doctor classifies as a human step.
+Credentials are never copied from the primary, never injected as pod environment variables, and never API keys: each runtime is logged in once over `bin/fm-runpod.sh ssh <id>`, and the durable account home is what keeps that login across pod replacement.
+The doctor checks that the account home is under the declared durable root, which is the structural guarantee that a completed login is once per volume.
+It deliberately does not try to read whether a given harness is logged in: that verdict would come from vendor-specific credential files this repository cannot prove against the real harnesses, and a check that cannot be proven is worse than an honest human step.
+
+`--harness-npm` remains available for an optional extra npm harness beyond the parity set; the parity set is installed either way, so leaving it unset is the normal case.
 
 ## Verification
 

@@ -230,6 +230,24 @@ out=$(rp wake ios 2>&1) || fail "second wake failed: $out"
 [ "$(record_field ios pod_id)" = "$FIRST_POD" ] || fail "a repeated wake must keep the same pod"
 pass "wake is idempotent for an already-running pod"
 
+# --- the readiness check defaults to the parity verdict ---------------------
+#
+# Every RunPod host is provisioned for full local-second-mate parity, so its own
+# readiness check must report against that contract rather than the minimum
+# every remote host shares.
+
+: > "$REMOTE_LOG"
+rp doctor ios >/dev/null 2>&1 || fail "the readiness check failed on a live pod"
+assert_grep 'fm-remote-doctor.sh --parity' "$REMOTE_LOG" \
+  "the RunPod readiness check did not default to the parity verdict"
+: > "$REMOTE_LOG"
+rp doctor ios --fix >/dev/null 2>&1 || fail "the readiness repair failed on a live pod"
+assert_grep 'fm-remote-doctor.sh --fix' "$REMOTE_LOG" \
+  "an explicit readiness argument was not passed through"
+assert_no_grep '--parity' "$REMOTE_LOG" \
+  "an explicit readiness argument was silently extended with the parity tier"
+pass "the RunPod readiness check defaults to parity and passes explicit arguments through"
+
 # --- concurrent wake --------------------------------------------------------
 
 rp sleep ios >/dev/null 2>&1 || fail "could not suspend before the concurrency case"

@@ -25,6 +25,7 @@ plan=$(bash "$BOOT" --check 2>&1) || fail "--check failed: $plan"
 # of names it requires - read through its output, never from its source.
 mkdir -p "$TMP_ROOT/empty-bin"
 doctor_out=$(PATH="$TMP_ROOT/empty-bin" /bin/bash "$ROOT/bin/fm-remote-doctor.sh" 2>&1 || true)
+doctor_out_parity=$(PATH="$TMP_ROOT/empty-bin" /bin/bash "$ROOT/bin/fm-remote-doctor.sh" --parity 2>&1 || true)
 required=$(printf '%s\n' "$doctor_out" | sed -n 's/^required \([a-z-]*\)=.*/\1/p' | sort -u)
 [ -n "$required" ] || fail "could not read the doctor's required-tool list from its output"
 
@@ -37,8 +38,25 @@ for tool in $required; do
 done
 pass "the first-boot plan covers every tool the doctor reports as required"
 
+# A RunPod second mate must reach FULL local parity, so the same drift guard
+# applies to the doctor's parity tier: every tool it names there is read from its
+# own --parity output and must appear in the plan. Adding a parity tool to the
+# doctor without provisioning it here fails right here.
+parity=$(printf '%s\n' "$doctor_out_parity" | sed -n 's/^parity \([a-z0-9-]*\)=.*/\1/p' | sort -u)
+[ -n "$parity" ] || fail "could not read the doctor's parity-tool list from its --parity output"
+for tool in $parity; do
+  case "$plan" in
+    *"ensure=$tool"*) ;;
+    *) fail "the boot plan does not provision '$tool', which the doctor requires for parity"$'\n'"plan:"$'\n'"$plan" ;;
+  esac
+done
+pass "the first-boot plan covers every tool the doctor reports as required for parity"
+
 assert_contains "$plan" "ensure=code-root" "the plan must clone the code root so first boot needs no manual clone"
-pass "the plan clones the code root on first boot"
+assert_contains "$plan" "ensure=account-home" \
+  "the plan must move the account home onto the volume so logins survive pod replacement"
+assert_contains "$plan" "ensure=bun" "omp runs on bun, so the plan must provision the bun runtime"
+pass "the plan clones the code root and makes the account home durable on first boot"
 
 # --- --check touches nothing -------------------------------------------------
 
@@ -57,14 +75,19 @@ pass "--check is a pure dry run"
 new_world() {  # <name> -> world dir
   local name=$1 w fakebin tool
   w="$TMP_ROOT/$name"
-  mkdir -p "$w/volume" "$w/home" "$w/origin" "$w/templates" "$w/system-ssh" "$w/basebin"
+  mkdir -p "$w/volume" "$w/home" "$w/origin" "$w/templates" "$w/system-ssh" "$w/basebin" "$w/etc"
   fakebin=$(fm_fakebin "$w")
   : > "$w/calls.log"
+  # Stands in for the container's /etc/passwd. sshd reads the account home from
+  # it, so the boot must rewrite it for a login to land on the volume.
+  printf '%s:x:%s:%s:%s:/root:/bin/bash\nnobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n' \
+    "$(id -un)" "$(id -u)" "$(id -g)" "$(id -un)" > "$w/etc/passwd"
 
   # Keep the exercised boot independent of tools installed on the host runner.
   # These are only the neutral utilities the boot needs; provisioned tools live
   # in fakebin and disappear for real when a replacement pod is simulated.
-  for tool in awk bash cat chmod cp date dirname env grep ln mkdir mktemp mv readlink rm sleep timeout uname; do
+  for tool in awk bash cat chmod cp date dirname env grep head id ln mkdir mktemp mv \
+    readlink rm sed seq sleep timeout uname; do
     ln -s "$(command -v "$tool")" "$w/basebin/$tool"
   done
 
@@ -74,7 +97,9 @@ printf 'npm %s\n' "$*" >> "$FM_FAKE_CALLS"
 if [ "${1:-}" = install ] && [ "${2:-}" = -g ]; then
   mkdir -p "$npm_config_prefix/bin"
   case "${3:-}" in
-    tasks-axi) tool=tasks-axi ;;
+    tasks-axi|gh-axi|chrome-devtools-axi|lavish-axi|quota-axi) tool=${3:-} ;;
+    @openai/codex) tool=codex ;;
+    @colbymchenry/codegraph) tool=codegraph ;;
     *) tool=harness ;;
   esac
   printf '#!/usr/bin/env bash\nexit 0\n' > "$npm_config_prefix/bin/$tool"
@@ -82,7 +107,37 @@ if [ "${1:-}" = install ] && [ "${2:-}" = -g ]; then
 fi
 exit 0
 SH
-  chmod +x "$w/templates/npm"
+  # The browser is fetched through the published @puppeteer/browsers CLI, which
+  # unpacks a versioned Chrome for Testing tree under --path.
+  cat > "$w/templates/npx" <<'SH'
+#!/usr/bin/env bash
+printf 'npx %s\n' "$*" >> "$FM_FAKE_CALLS"
+path=
+while [ "$#" -gt 0 ]; do
+  case "$1" in --path) shift; path=${1:-} ;; esac
+  shift || break
+done
+[ -n "$path" ] || exit 0
+mkdir -p "$path/chrome/linux64-140.0.7339.80/chrome-linux64"
+# Echoes its argv so a caller can assert what the published browser launches with.
+printf '#!/usr/bin/env bash\nprintf "chrome %%s\\n" "$*"\nexit 0\n' \
+  > "$path/chrome/linux64-140.0.7339.80/chrome-linux64/chrome"
+chmod +x "$path/chrome/linux64-140.0.7339.80/chrome-linux64/chrome"
+exit 0
+SH
+  # bun installs itself into BUN_INSTALL, and its global installs land in the
+  # same durable prefix, so omp survives pod replacement with the volume.
+  cat > "$w/templates/bun" <<'SH'
+#!/usr/bin/env bash
+printf 'bun %s\n' "$*" >> "$FM_FAKE_CALLS"
+if [ "${1:-}" = install ] && [ "${2:-}" = -g ]; then
+  mkdir -p "$BUN_INSTALL/bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$BUN_INSTALL/bin/omp"
+  chmod +x "$BUN_INSTALL/bin/omp"
+fi
+exit 0
+SH
+  chmod +x "$w/templates/npm" "$w/templates/npx" "$w/templates/bun"
 
   cat > "$fakebin/apt-get" <<'SH'
 #!/usr/bin/env bash
@@ -106,16 +161,42 @@ case " $* " in
 esac
 exit 0
 SH
+  # Downloads land in a file with -o; the vendor install scripts are piped to a
+  # shell instead, so with no -o this prints the script those pipelines run.
   cat > "$fakebin/curl" <<'SH'
 #!/usr/bin/env bash
 printf 'curl %s\n' "$*" >> "$FM_FAKE_CALLS"
-out=
+out= url=
 while [ "$#" -gt 0 ]; do
-  case "$1" in -o) shift; out=${1:-} ;; esac
+  case "$1" in
+    -o) shift; out=${1:-} ;;
+    http://*|https://*) url=$1 ;;
+  esac
   shift || break
 done
-[ -n "$out" ] || exit 1
-: > "$out"
+if [ -n "$out" ]; then : > "$out"; exit 0; fi
+case "$url" in
+  *api.github.com/repos/cli/cli/releases/latest*)
+    printf '{"tag_name": "v2.99.0", "name": "GitHub CLI 2.99.0"}\n'
+    ;;
+  *bun.sh/install*)
+    printf 'mkdir -p "$BUN_INSTALL/bin"\n'
+    printf 'cp "$FM_FAKE_BUN_TEMPLATE" "$BUN_INSTALL/bin/bun"\n'
+    printf 'chmod +x "$BUN_INSTALL/bin/bun"\n'
+    ;;
+  *claude.ai/install.sh*)
+    printf 'mkdir -p "$HOME/.local/bin"\n'
+    printf 'printf "#!/usr/bin/env bash\\nexit 0\\n" > "$HOME/.local/bin/claude"\n'
+    printf 'chmod +x "$HOME/.local/bin/claude"\n'
+    ;;
+  *no-mistakes*install.sh*)
+    printf 'mkdir -p "$HOME/.local/bin"\n'
+    printf 'printf "#!/usr/bin/env bash\\nexit 0\\n" > "$HOME/.local/bin/no-mistakes"\n'
+    printf 'chmod +x "$HOME/.local/bin/no-mistakes"\n'
+    ;;
+  *) exit 1 ;;
+esac
+exit 0
 SH
   cat > "$fakebin/sha256sum" <<'SH'
 #!/usr/bin/env bash
@@ -143,6 +224,13 @@ done
 root=${archive##*/}
 root=${root%.tar.gz}
 mkdir -p "$dest/$root/bin"
+case "$root" in
+  gh_*)
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$dest/$root/bin/gh"
+    chmod +x "$dest/$root/bin/gh"
+    exit 0
+    ;;
+esac
 version=${root#node-v}
 version=${version%%-linux-*}
 cat > "$dest/$root/bin/node" <<SH2
@@ -151,7 +239,8 @@ cat > "$dest/$root/bin/node" <<SH2
 exit 0
 SH2
 cp "$FM_FAKE_NPM_TEMPLATE" "$dest/$root/bin/npm"
-chmod +x "$dest/$root/bin/node" "$dest/$root/bin/npm"
+cp "$FM_FAKE_NPX_TEMPLATE" "$dest/$root/bin/npx"
+chmod +x "$dest/$root/bin/node" "$dest/$root/bin/npm" "$dest/$root/bin/npx"
 SH
   cat > "$fakebin/git" <<'SH'
 #!/usr/bin/env bash
@@ -165,7 +254,25 @@ if [ "${1:-}" = clone ]; then
     printf '#!/usr/bin/env bash\nprintf "%s %%s\\n" "$*" >> "$FM_FAKE_CALLS"\nprintf '\''#!/usr/bin/env bash\\nexit 0\\n'\'' > "$1/%s"\nchmod +x "$1/%s"\n' "$i" "$tool" "$tool" > "$dest/bin/$i"
     chmod +x "$dest/bin/$i"
   done
-  printf '#!/usr/bin/env bash\ncommand -v herdr >> "$FM_FAKE_CALLS" || exit 1\ncommand -v treehouse >> "$FM_FAKE_CALLS" || exit 1\ncommand -v tasks-axi >> "$FM_FAKE_CALLS" || exit 1\ncommand -v harness >> "$FM_FAKE_CALLS" || exit 1\nprintf "doctor %%s\\n" "$*" >> "$FM_FAKE_CALLS"\nexit 0\n' > "$dest/bin/fm-remote-doctor.sh"
+  # Stands in for the readiness owner: it resolves every tool it is contracted
+  # to require through the PATH the boot handed it, so a tool the boot installed
+  # somewhere the doctor cannot see fails the handoff instead of passing.
+  cat > "$dest/bin/fm-remote-doctor.sh" <<'DOCTOR'
+#!/usr/bin/env bash
+for tool in herdr treehouse tasks-axi omp; do
+  command -v "$tool" >> "$FM_FAKE_CALLS" || exit 1
+done
+case " $* " in
+  *" --parity "*)
+    for tool in claude codex no-mistakes gh gh-axi chrome-devtools-axi \
+      lavish-axi quota-axi codegraph google-chrome; do
+      command -v "$tool" >> "$FM_FAKE_CALLS" || exit 1
+    done
+    ;;
+esac
+printf 'doctor %s\n' "$*" >> "$FM_FAKE_CALLS"
+exit 0
+DOCTOR
   printf '#!/usr/bin/env bash\nexit 0\n' > "$dest/bin/fm-remote-entrypoint.sh"
   chmod +x "$dest/bin/fm-remote-doctor.sh" "$dest/bin/fm-remote-entrypoint.sh"
 fi
@@ -200,6 +307,27 @@ SH
   printf '%s\n' "$w"
 }
 
+# One owner for the pod environment every case boots under, so a new contract
+# variable is added in a single place instead of six.
+world_env() {  # <world> [harness]; exports into the calling subshell
+  local w=$1 harness=${2:-}
+  export PATH="$w/fakebin:$w/basebin"
+  export HOME="$w/home"
+  export FM_VOLUME="$w/volume"
+  export FM_REMOTE_ORIGIN="$w/origin"
+  export FM_FAKE_CALLS="$w/calls.log"
+  export FM_FAKE_EPHEMERAL_BIN="$w/fakebin"
+  export FM_FAKE_NPM_TEMPLATE="$w/templates/npm"
+  export FM_FAKE_NPX_TEMPLATE="$w/templates/npx"
+  export FM_FAKE_BUN_TEMPLATE="$w/templates/bun"
+  export FM_SYSTEM_SSH_DIR="$w/system-ssh"
+  export FM_SSHD_FALLBACK="$w/fakebin/sshd"
+  export FM_PASSWD_FILE="$w/etc/passwd"
+  export FM_DURABLE_ROOT_FILE="$w/etc/durable-root"
+  export FM_CHROME_LINK="$w/fakebin/google-chrome"
+  export FM_POD_HARNESS_NPM="$harness"
+}
+
 # The boot script is a PID 1 payload that never returns, so provisioning is
 # exercised through a bounded subshell that stops once the whole boot completes.
 provision_only() {  # <world> [harness]
@@ -207,16 +335,7 @@ provision_only() {  # <world> [harness]
   mkdir -p "$w/volume/persistent-runtime"
   : > "$w/volume/persistent-runtime/boot.log"
   (
-    PATH="$w/fakebin:$w/basebin" \
-    HOME="$w/home" \
-    FM_VOLUME="$w/volume" \
-    FM_REMOTE_ORIGIN="$w/origin" \
-    FM_FAKE_CALLS="$w/calls.log" \
-    FM_FAKE_EPHEMERAL_BIN="$w/fakebin" \
-    FM_FAKE_NPM_TEMPLATE="$w/templates/npm" \
-    FM_SYSTEM_SSH_DIR="$w/system-ssh" \
-    FM_SSHD_FALLBACK="$w/fakebin/sshd" \
-    FM_POD_HARNESS_NPM="$harness" \
+    world_env "$w" "$harness"
     timeout 60 bash "$BOOT" >/dev/null 2>&1 &
     boot_pid=$!
     for _ in $(seq 1 300); do
@@ -235,16 +354,7 @@ provision_only() {  # <world> [harness]
 provision_idempotent() {  # <world> [harness]
   local w=$1 harness=${2:-}
   (
-    PATH="$w/fakebin:$w/basebin" \
-    HOME="$w/home" \
-    FM_VOLUME="$w/volume" \
-    FM_REMOTE_ORIGIN="$w/origin" \
-    FM_FAKE_CALLS="$w/calls.log" \
-    FM_FAKE_EPHEMERAL_BIN="$w/fakebin" \
-    FM_FAKE_NPM_TEMPLATE="$w/templates/npm" \
-    FM_SYSTEM_SSH_DIR="$w/system-ssh" \
-    FM_SSHD_FALLBACK="$w/fakebin/sshd" \
-    FM_POD_HARNESS_NPM="$harness" \
+    world_env "$w" "$harness"
     timeout 30 bash "$BOOT" >/dev/null 2>&1 &
     boot_pid=$!
     sleep 3
@@ -264,24 +374,69 @@ assert_contains "$calls" "npm install -g tasks-axi" "tasks-axi must be installed
 assert_present "$w/volume/persistent-runtime/bin/herdr" "the pinned herdr binary must live on the volume"
 assert_present "$w/volume/persistent-runtime/npm/bin/tasks-axi" "the global npm prefix must live on the volume"
 assert_present "$w/volume/persistent-runtime/node/bin/node" "the pinned Node runtime must live on the volume"
-assert_contains "$calls" "$w/volume/persistent-runtime/bin/herdr" "the doctor must see pinned tools through the durable PATH"
-assert_contains "$calls" "$w/volume/persistent-runtime/npm/bin/tasks-axi" "the doctor must see npm tools through the durable PATH"
-assert_present "$w/home/.local/bin/herdr" "later SSH jobs must receive a per-pod link to durable tools"
-assert_present "$w/home/.local/bin/node" "later SSH jobs must receive a per-pod link to durable Node"
-assert_present "$w/home/.local/bin/tasks-axi" "later SSH jobs must receive a per-pod link to durable npm tools"
+HOMEDIR="$w/volume/home"
+# The doctor resolves tools through the account bin directory, which is what the
+# fixed remote entrypoint puts first when it composes a later job's PATH, and
+# every entry there is a link into the volume.
+assert_contains "$calls" "$HOMEDIR/.local/bin/herdr" "the doctor must see pinned tools through the account PATH"
+assert_contains "$calls" "$HOMEDIR/.local/bin/tasks-axi" "the doctor must see npm tools through the account PATH"
+[ "$(readlink "$HOMEDIR/.local/bin/herdr")" = "$w/volume/persistent-runtime/bin/herdr" ] \
+  || fail "the account PATH must resolve the pinned herdr on the volume"
+assert_present "$HOMEDIR/.local/bin/herdr" "later SSH jobs must receive a per-pod link to durable tools"
+assert_present "$HOMEDIR/.local/bin/node" "later SSH jobs must receive a per-pod link to durable Node"
+assert_present "$HOMEDIR/.local/bin/tasks-axi" "later SSH jobs must receive a per-pod link to durable npm tools"
 assert_present "$w/volume/persistent-runtime/toolchain.provisioned" "a completed provisioning run must record its marker"
 pass "first boot clones the code root and installs the required toolchain through the pinned installers"
 
-assert_not_contains "$calls" "npm install -g @" "no harness package may be installed unless one is configured"
-assert_absent "$w/volume/persistent-runtime/boot.ready" \
-  "an unset harness must leave readiness to the doctor's human-step refusal"
-pass "no harness is installed when none is configured, leaving that gap to the doctor"
+# --- the account home is on the volume, so a login is once-per-volume --------
+#
+# Every worker login, gh credential, and runtime config lands under the account
+# home. On a container-local home they die with the pod, which is the whole gap
+# this closes: the home moves onto the volume and sshd is told where it is.
 
+assert_present "$HOMEDIR" "the durable account home was not created on the volume"
+assert_absent "$w/home/.local/bin/herdr" \
+  "durable tools were linked into the container-local home, which dies with the pod"
+assert_grep ":$HOMEDIR:" "$w/etc/passwd" \
+  "the account passwd entry still points sshd at the container-local home"
+assert_no_grep ':/root:' "$w/etc/passwd" "the container-local home survived in the passwd entry"
+assert_grep ':/nonexistent:' "$w/etc/passwd" "the rewrite touched an account other than this one"
+[ "$(cat "$w/etc/durable-root" 2>/dev/null)" = "$w/volume" ] \
+  || fail "the boot did not declare the volume as this host's durable root"
+pass "the account home moves onto the volume and the host declares its durable root"
+
+# --- the whole parity toolchain is installed on the volume -------------------
+
+assert_contains "$calls" "bun install -g @oh-my-pi/pi-coding-agent" "omp must be installed through bun"
+assert_contains "$calls" "npm install -g @openai/codex" "codex must be installed"
+assert_contains "$calls" "npm install -g @colbymchenry/codegraph" "the code-intelligence CLI must be installed"
+assert_contains "$calls" "npm install -g gh-axi" "gh-axi must be installed"
+assert_contains "$calls" "npm install -g quota-axi" "quota-axi must be installed"
+assert_contains "$calls" "claude.ai/install.sh" "the claude harness must come from its vendor installer"
+assert_contains "$calls" "no-mistakes" "the validation pipeline must be installed"
+assert_contains "$calls" "@puppeteer/browsers" "a headless browser must be installed for browser work"
+assert_present "$w/volume/persistent-runtime/bun/bin/omp" "omp must live on the volume"
+assert_present "$w/volume/persistent-runtime/npm/bin/codex" "codex must live on the volume"
+assert_present "$w/volume/persistent-runtime/npm/bin/codegraph" "the code-intelligence CLI must live on the volume"
+assert_present "$HOMEDIR/.local/bin/claude" "the claude harness must install into the durable account home"
+assert_present "$HOMEDIR/.local/bin/no-mistakes" "the validation pipeline must install into the durable account home"
+assert_present "$HOMEDIR/.local/bin/omp" "later SSH jobs must receive a link to the durable omp"
+assert_present "$HOMEDIR/.local/bin/gh" "later SSH jobs must receive a link to the durable gh"
+assert_present "$w/fakebin/google-chrome" "the browser must be reachable at its standard system path"
+pass "first boot installs the whole parity toolchain onto the volume"
+
+assert_present "$w/volume/persistent-runtime/boot.ready" \
+  "the parity toolchain must satisfy the doctor-owned readiness handoff with no extra harness configured"
+assert_not_contains "$calls" "npm install -g @example/harness" \
+  "no optional extra harness package may be installed unless one is configured"
+pass "the parity toolchain alone reaches readiness; an extra harness stays optional"
+
+: > "$w/calls.log"
 provision_only "$w" "@example/harness"
 assert_contains "$(cat "$w/calls.log")" "npm install -g @example/harness" \
-  "changing the configured harness must invalidate the durable marker and install it"
+  "changing the configured extra harness must invalidate the durable marker and install it"
 assert_present "$w/volume/persistent-runtime/boot.ready" \
-  "a configured durable harness must permit the doctor-owned readiness handoff"
+  "a configured extra harness must still permit the doctor-owned readiness handoff"
 
 # --- idempotence -------------------------------------------------------------
 
@@ -292,11 +447,18 @@ assert_not_contains "$second" "git clone" "a second boot must not re-clone the c
 assert_not_contains "$second" "npm install -g tasks-axi" "a second boot must not reinstall the toolchain"
 pass "provisioning is idempotent across boots on the same volume"
 
+# A completed interactive login is the thing that must survive pod replacement,
+# so the case plants one on the volume before the replacement pod boots.
+mkdir -p "$HOMEDIR/.claude" "$HOMEDIR/.config/gh"
+printf 'subscription-login\n' > "$HOMEDIR/.claude/.credentials.json"
+printf 'github.com:\n  oauth_token: login\n' > "$HOMEDIR/.config/gh/hosts.yml"
+
 rm -rf "${w:?}/home"
 rm -rf "${w:?}/system-ssh"
 mkdir -p "$w/home" "$w/system-ssh"
 rm -f "$w/fakebin/git" "$w/fakebin/jq" "$w/fakebin/curl" "$w/fakebin/unzip" \
-  "$w/fakebin/sshd"
+  "$w/fakebin/sshd" "$w/fakebin/google-chrome"
+printf '%s:x:%s:%s:%s:/root:/bin/bash\n' "$(id -un)" "$(id -u)" "$(id -g)" "$(id -un)" > "$w/etc/passwd"
 : > "$w/calls.log"
 provision_only "$w" "@example/harness"
 replacement=$(cat "$w/calls.log")
@@ -305,13 +467,22 @@ assert_not_contains "$replacement" "curl -fsSL" "a replacement pod must not rein
 assert_not_contains "$replacement" "git clone" "a replacement pod must reuse the durable code root"
 assert_not_contains "$replacement" "fm-install-herdr.sh" "a replacement pod must reuse durable pinned tools"
 assert_not_contains "$replacement" "npm install -g tasks-axi" "a replacement pod must reuse its durable npm prefix"
-assert_contains "$replacement" "$w/volume/persistent-runtime/bin/herdr" "a replacement doctor handoff must see durable tools"
-assert_present "$w/home/.local/bin/herdr" "a replacement pod must recreate its SSH-visible durable-tool links"
-assert_present "$w/home/.local/bin/node" "a replacement pod must recreate its SSH-visible durable Node link"
-[ "$(readlink "$w/home/.local/bin/node")" = "$w/volume/persistent-runtime/node/bin/node" ] \
+assert_not_contains "$replacement" "bun install -g" "a replacement pod must reuse its durable bun harness"
+assert_not_contains "$replacement" "@puppeteer/browsers" "a replacement pod must reuse its durable browser"
+assert_contains "$replacement" "$HOMEDIR/.local/bin/herdr" "a replacement doctor handoff must see durable tools"
+assert_present "$HOMEDIR/.local/bin/herdr" "a replacement pod must recreate its SSH-visible durable-tool links"
+assert_present "$HOMEDIR/.local/bin/node" "a replacement pod must recreate its SSH-visible durable Node link"
+[ "$(readlink "$HOMEDIR/.local/bin/node")" = "$w/volume/persistent-runtime/node/bin/node" ] \
   || fail "a replacement pod must serve Node from the retained volume"
+assert_present "$w/fakebin/google-chrome" "a replacement pod must relink the browser at its standard system path"
+assert_grep ":$HOMEDIR:" "$w/etc/passwd" "a replacement pod must point sshd back at the durable account home"
+[ "$(cat "$HOMEDIR/.claude/.credentials.json")" = 'subscription-login' ] \
+  || fail "a replacement pod lost the harness login that was completed on the volume"
+assert_grep 'oauth_token: login' "$HOMEDIR/.config/gh/hosts.yml" \
+  "a replacement pod lost the GitHub login that was completed on the volume"
 assert_present "$w/volume/persistent-runtime/boot.ready" "a replacement pod must reach readiness from the retained volume"
 pass "replacement pods restore ephemeral prerequisites and reuse the durable toolchain"
+pass "a login completed once on the volume survives pod replacement"
 
 # --- pre-existing tools cannot bypass the repository pins -------------------
 
@@ -356,25 +527,20 @@ assert_not_contains "$(cat "$w2/calls.log")" "npm install -g @example/harness" \
 : > "$w2/calls.log"
 provision_only "$w2"
 assert_absent "$w2/volume/persistent-runtime/npm/bin/harness" \
-  "unsetting the harness must remove its durable executable"
-assert_absent "$w2/home/.local/bin/harness" \
-  "unsetting the harness must remove its SSH-visible executable"
-assert_absent "$w2/volume/persistent-runtime/boot.ready" \
-  "an unset harness must not leave a stale readiness marker"
-pass "the durable marker reconciles harness configuration in both directions"
+  "unsetting the extra harness must remove its durable executable"
+assert_absent "$w2/volume/home/.local/bin/harness" \
+  "unsetting the extra harness must remove its SSH-visible executable"
+assert_present "$w2/volume/persistent-runtime/boot.ready" \
+  "the parity toolchain must keep the volume ready after the extra harness is unset"
+pass "the durable marker reconciles extra-harness configuration in both directions"
 
 # --- base-package failures cannot satisfy the contract ----------------------
 
 w4=$(new_world packages)
 rm -f "$w4/fakebin/sshd"
 out=$(
-  PATH="$w4/fakebin:$w4/basebin" HOME="$w4/home" FM_VOLUME="$w4/volume" \
-  FM_REMOTE_ORIGIN="$w4/origin" FM_FAKE_CALLS="$w4/calls.log" \
-  FM_FAKE_EPHEMERAL_BIN="$w4/fakebin" FM_FAKE_NPM_TEMPLATE="$w4/templates/npm" \
-  FM_SYSTEM_SSH_DIR="$w4/system-ssh" \
-  FM_SSHD_FALLBACK="$w4/fakebin/sshd" \
-  FM_FAKE_APT_FAIL=1 \
-  timeout 3 bash "$BOOT" 2>&1 || true
+  world_env "$w4"
+  FM_FAKE_APT_FAIL=1 timeout 3 bash "$BOOT" 2>&1 || true
 )
 assert_contains "$out" "base-package index could not be updated" "a package-manager failure must be reported"
 assert_absent "$w4/volume/persistent-runtime/toolchain.provisioned" \
@@ -408,11 +574,7 @@ exec "$real_cp" "\$@"
 SH
 chmod +x "$w6/fakebin/cp"
 out=$(
-  PATH="$w6/fakebin:$w6/basebin" HOME="$w6/home" FM_VOLUME="$w6/volume" \
-  FM_REMOTE_ORIGIN="$w6/origin" FM_FAKE_CALLS="$w6/calls.log" \
-  FM_FAKE_EPHEMERAL_BIN="$w6/fakebin" FM_FAKE_NPM_TEMPLATE="$w6/templates/npm" \
-  FM_SYSTEM_SSH_DIR="$w6/system-ssh" \
-  FM_SSHD_FALLBACK="$w6/fakebin/sshd" \
+  world_env "$w6"
   timeout 4 bash "$BOOT" 2>&1 || true
 )
 assert_contains "$out" "volume-backed host key could not be restored or persisted" \
@@ -434,10 +596,8 @@ pass "host-key persistence failures fail closed before sshd"
 w4=$(new_world sshd_first)
 rm -rf "$w4/origin"        # provisioning cannot obtain a code root, so it MUST fail
 (
-  PATH="$w4/fakebin:$w4/basebin" HOME="$w4/home" FM_VOLUME="$w4/volume" \
-  FM_REMOTE_ORIGIN="" FM_FAKE_CALLS="$w4/calls.log" FM_LOCAL_BIN="$w4/home/.local/bin" \
-  FM_FAKE_EPHEMERAL_BIN="$w4/fakebin" FM_FAKE_NPM_TEMPLATE="$w4/templates/npm" \
-  FM_SYSTEM_SSH_DIR="$w4/system-ssh" FM_SSHD_FALLBACK="$w4/fakebin/sshd" \
+  world_env "$w4"
+  FM_REMOTE_ORIGIN="" FM_LOCAL_BIN="$w4/volume/home/.local/bin" \
   timeout 25 bash "$BOOT" >/dev/null 2>&1 &
   bp=$!
   sleep 4
@@ -465,12 +625,8 @@ pass "readiness stays gated on the sentinel, not on sshd being up"
 
 w3=$(new_world noorigin)
 out=$(
-  PATH="$w3/fakebin:$w3/basebin" HOME="$w3/home" FM_VOLUME="$w3/volume" \
-  FM_REMOTE_ORIGIN="" FM_FAKE_CALLS="$w3/calls.log" \
-  FM_FAKE_EPHEMERAL_BIN="$w3/fakebin" FM_FAKE_NPM_TEMPLATE="$w3/templates/npm" \
-  FM_SYSTEM_SSH_DIR="$w3/system-ssh" \
-  FM_SSHD_FALLBACK="$w3/fakebin/sshd" \
-  timeout 20 bash "$BOOT" 2>&1 &
+  world_env "$w3"
+  FM_REMOTE_ORIGIN="" timeout 20 bash "$BOOT" 2>&1 &
   boot_pid=$!
   sleep 3
   kill "$boot_pid" 2>/dev/null || true
@@ -481,3 +637,73 @@ assert_absent "$w3/volume/persistent-runtime/toolchain.provisioned" \
   "a failed provisioning run must not record a satisfied marker"
 assert_not_contains "$out" "boot complete" "a failed clone contract must never report boot completion"
 pass "a pod that cannot obtain a code root refuses loudly and records no marker"
+
+# --- a parity install that fails leaves the pod unready ----------------------
+#
+# Parity is the contract, not a best effort: a pod whose browser or harness did
+# not install must not publish readiness, because work routed to it would then
+# fail in the middle of a task instead of at provisioning time.
+
+w7=$(new_world parityfail)
+cat > "$w7/templates/bun" <<'SH'
+#!/usr/bin/env bash
+printf 'bun %s\n' "$*" >> "$FM_FAKE_CALLS"
+[ "${1:-}" != install ] || exit 1
+exit 0
+SH
+chmod +x "$w7/templates/bun"
+(
+  world_env "$w7"
+  timeout 25 bash "$BOOT" >/dev/null 2>&1 &
+  bp=$!
+  sleep 6
+  kill "$bp" 2>/dev/null || true
+  wait "$bp" 2>/dev/null || true
+)
+parityfail=$(cat "$w7/volume/persistent-runtime/boot.log" 2>/dev/null)
+assert_contains "$parityfail" "started sshd on port 22" \
+  "a failed parity install must still leave the pod reachable for diagnosis"
+assert_absent "$w7/volume/persistent-runtime/toolchain.provisioned" \
+  "a failed parity install must not record a satisfied contract"
+assert_absent "$w7/volume/persistent-runtime/boot.ready" \
+  "a failed parity install must never publish the readiness sentinel"
+pass "a parity install failure leaves the pod diagnosable and unready"
+
+# --- the browser is launchable by the account that actually runs it ----------
+#
+# The pod is root by construction, and Chrome refuses to start as root without
+# --no-sandbox. The published browser must therefore be launchable as-is by the
+# tools that call it, with no flag threaded through their environments.
+
+w8=$(new_world browserroot)
+provision_only "$w8"
+assert_present "$w8/fakebin/google-chrome" "the browser was not published at its standard system path"
+browser_probe="$w8/probe-browser"
+mkdir -p "$browser_probe"
+cat > "$browser_probe/id" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" != -u ] || { printf '0\n'; exit 0; }
+exec /usr/bin/id "$@"
+SH
+chmod +x "$browser_probe/id"
+launched=$(PATH="$browser_probe:$w8/basebin" "$w8/fakebin/google-chrome" --headless about:blank 2>&1)
+assert_contains "$launched" "--no-sandbox" \
+  "a browser launched by the pod's root account was not given the flag it needs to start"
+assert_contains "$launched" "about:blank" "the published browser dropped its caller's own arguments"
+
+cat > "$browser_probe/id" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" != -u ] || { printf '1000\n'; exit 0; }
+exec /usr/bin/id "$@"
+SH
+unprivileged=$(PATH="$browser_probe:$w8/basebin" "$w8/fakebin/google-chrome" --headless about:blank 2>&1)
+assert_not_contains "$unprivileged" "--no-sandbox" \
+  "an unprivileged account was given a sandbox-dropping flag it does not need"
+pass "the published browser drops its sandbox only for the root account that requires it"
+
+printf 'operator browser\n' > "$w8/fakebin/google-chrome"
+: > "$w8/calls.log"
+provision_idempotent "$w8"
+[ "$(cat "$w8/fakebin/google-chrome")" = 'operator browser' ] \
+  || fail "the boot overwrote a browser file it did not write"
+pass "a browser file Firstmate did not write is left for the operator"

@@ -106,8 +106,24 @@ These steps are never automated and are always reported rather than silently att
 - The first console login on that Mac, and automatic login in System Settings > Users & Groups when the machine runs headless and must come back on its own after a reboot.
 - FileVault, which holds a reboot at pre-boot authentication before any login session exists.
 - Installing any missing required tool that no safe wrapper can resolve.
-- The required remote tool set is `git`, `jq`, `herdr`, compatible `tasks-axi`, `treehouse`, and at least one of `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, or `kimi`.
+- The required remote tool set is `git`, `jq`, `herdr`, compatible `tasks-axi`, `treehouse`, and at least one of `omp`, `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, or `kimi`.
 - Each worker runtime's own `/login`, and any keychain password prompt that login needs.
+
+### The parity tier
+
+That required set is the minimum a remote second mate needs to run at all.
+A host expected to do everything a local second mate and its crews do needs more, and `--parity` is the opt-in second tier that checks it:
+
+```sh
+bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh --parity
+```
+
+It reports one `parity <tool>=<path>|MISSING` line per parity tool, records a `parity-toolchain` check, and records a `parity-durable-home` check that a host declaring only part of its filesystem durable keeps its account home inside that part, because otherwise every completed login is lost the next time the host is replaced.
+A host declares that durable root in `/etc/firstmate/durable-root`; where the file is absent the whole host persists and the check is skipped.
+
+The tier is opt-in because this command owns readiness for every remote second mate, and a minimal remote host is complete at the required minimum.
+Without `--parity` the report and the verdict are unchanged.
+`--parity` reports gaps and never installs, exactly like the required tier; [`runpod-secondmates.md`](runpod-secondmates.md) covers the host that provisions that set for itself.
 
 Firstmate never writes an auto-login password, never changes FileVault, and never stores an account password.
 A file at `~/.local/bin/fm-remote-entrypoint.sh` that is not Firstmate's own symlink is reported for the operator to inspect and is never overwritten.

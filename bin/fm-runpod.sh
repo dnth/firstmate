@@ -42,10 +42,10 @@
 # 401 from an unauthenticated call.
 #
 # First-boot toolchain: the pod boot script clones the code root from
-# --code-origin and installs the tools bin/fm-remote-doctor.sh requires, so a
+# --code-origin and installs the full parity toolchain onto the volume, so a
 # fresh pod reaches readiness with no manual clone. --harness-npm names an
-# optional npm package providing a worker harness; the harness's own login
-# stays a human step either way. bin/fm-runpod-pod-boot.sh owns that contract.
+# OPTIONAL EXTRA npm harness beyond that set; each runtime's own login stays a
+# human step either way. bin/fm-runpod-pod-boot.sh owns that contract.
 #
 # SSH: wake regenerates <FM_HOME>/config/runpod/ssh.d/<alias>.conf with the
 # pod's current HostName and Port plus a stable HostKeyAlias, and pins the pod's
@@ -1039,6 +1039,10 @@ cmd_doctor() {
   if fm_runpod_is_dormant "$DATA" "$id"; then
     "$0" wake "$id" >&2
   fi
+  # Every RunPod host is provisioned for full local-second-mate parity, so the
+  # parity tier is this route's default verdict rather than an opt-in. An
+  # explicit argument still passes through, including a plain base-tier run.
+  [ "$#" -gt 0 ] || set -- --parity
   exec "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-doctor.sh "$@"
 }
 
