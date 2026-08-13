@@ -604,15 +604,46 @@ runpod_seed_remote_route "$PARENT" legacy fm-sm-legacy-runpod /srv/firstmate /sr
 out=$(rp provision legacy --datacenter EU-RO-1 --code-origin https://example.test/firstmate.git 2>&1) \
   || fail "legacy fixture provision failed: $out"
 out=$(rp wake legacy 2>&1) || fail "legacy fixture did not genuinely reach ready: $out"
-out=$(rp sleep legacy 2>&1) || fail "legacy fixture did not suspend after readiness: $out"
+[ "$(record_field legacy ever_ready)" = 1 ] \
+  || fail "a genuinely ready volume must latch its readiness provenance"
+sed -i.bak '/^ever_ready=/d' "$PARENT/data/runpod/legacy.meta"
+rm -f "$PARENT/data/runpod/legacy.meta.bak"
 sed -i.bak 's/^code_origin=.*/code_origin=/' "$PARENT/data/runpod/legacy.meta"
 rm -f "$PARENT/data/runpod/legacy.meta.bak"
+out=$(rp wake legacy 2>&1) || fail "a pre-latch ready record with an empty origin did not wake: $out"
+[ "$(record_field legacy ever_ready)" = 1 ] \
+  || fail "a pre-existing ready record must migrate its durable readiness evidence"
+out=$(rp sleep legacy 2>&1) || fail "legacy fixture did not suspend after readiness: $out"
 : > "$API_LOG"
 out=$(rp wake legacy 2>&1) || fail "a previously-ready legacy volume with an empty origin did not wake: $out"
 assert_contains "$out" "ready: secondmate legacy" "a prior-ready legacy route must continue through normal wake"
 [ "$(runpod_api_calls "$API_LOG" "POST /pods")" = 1 ] \
   || fail "a prior-ready legacy route must be allowed to rent its replacement pod"
 pass "previously-ready empty-origin volumes remain wakeable"
+
+runpod_seed_remote_route "$PARENT" resilient fm-sm-resilient-runpod /srv/firstmate /srv/sm-resilient
+out=$(rp provision resilient --datacenter EU-RO-1 --code-origin https://example.test/firstmate.git 2>&1) \
+  || fail "interrupted-wake fixture provision failed: $out"
+out=$(rp wake resilient 2>&1) || fail "interrupted-wake fixture did not genuinely reach ready: $out"
+sed -i.bak 's/^code_origin=.*/code_origin=/' "$PARENT/data/runpod/resilient.meta"
+rm -f "$PARENT/data/runpod/resilient.meta.bak"
+out=$(rp sleep resilient 2>&1) || fail "interrupted-wake fixture did not suspend: $out"
+out=$(FM_FAKE_SSH_PROBE_BLOCK=1 FM_TEST_RUNPOD_POLL_INTERVAL=1 \
+  FM_TEST_RUNPOD_WAKE_TIMEOUT=2 rp wake resilient 2>&1) \
+  && fail "replacement wake unexpectedly reached readiness"
+assert_contains "$out" "SSH bootstrap did not complete" \
+  "the replacement wake fixture must fail before readiness"
+out=$(rp sleep resilient 2>&1) || fail "sleep after the interrupted replacement wake failed: $out"
+[ "$(record_field resilient ever_ready)" = 1 ] \
+  || fail "sleep after an interrupted wake must preserve readiness provenance"
+: > "$API_LOG"
+out=$(rp wake resilient 2>&1) \
+  || fail "a prior-ready empty-origin volume did not recover after an interrupted replacement wake: $out"
+assert_contains "$out" "ready: secondmate resilient" \
+  "the readiness latch must admit a later replacement wake"
+[ "$(runpod_api_calls "$API_LOG" "POST /pods")" = 1 ] \
+  || fail "the recovered route must create exactly one replacement pod"
+pass "readiness provenance survives interrupted replacement wakes"
 
 runpod_seed_remote_route "$PARENT" sourced fm-sm-sourced-runpod /srv/firstmate /srv/sm-sourced
 out=$(rp provision sourced --datacenter EU-RO-1 --code-origin https://example.test/firstmate.git 2>&1) \

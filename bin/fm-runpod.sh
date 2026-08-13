@@ -27,6 +27,7 @@
 # Record fields (bin/fm-runpod-lib.sh owns the lifecycle vocabulary):
 #   schema=fm-runpod-secondmate.v1  provider=runpod  secondmate=<id>
 #   lifecycle=provisioned|waking|ready|suspending|suspended
+#   ever_ready=0|1
 #   volume_id= volume_name= volume_size_gb= datacenter=
 #   pod_id= endpoint_host= endpoint_port= compute=cpu|gpu gpu_type= min_vram_gb=
 #   image= code_origin= harness_npm= ssh_alias= ssh_user= ssh_identity=
@@ -259,6 +260,30 @@ record_set() {  # <id> <key=value>...
 
 record_set_lifecycle() {  # <id> <lifecycle>
   record_set "$1" "lifecycle=$2"
+}
+
+record_has_ever_reached_ready() {  # <id>
+  local id=$1 ever_ready lifecycle
+  ever_ready=$(record_get "$id" ever_ready)
+  case "$ever_ready" in
+    1) return 0 ;;
+    0) return 1 ;;
+    '')
+      lifecycle=$(fm_runpod_lifecycle "$DATA" "$id")
+      [ "$lifecycle" = ready ] || return 1
+      record_set "$id" "ever_ready=1"
+      return 0
+      ;;
+    *) die "secondmate $id has invalid ready provenance in $(record_path "$id"); investigate before wake" ;;
+  esac
+}
+
+record_mark_ready() {  # <id>
+  if [ "$(record_get "$1" ever_ready)" = 1 ]; then
+    record_set_lifecycle "$1" ready
+  else
+    record_set "$1" "lifecycle=ready" "ever_ready=1"
+  fi
 }
 
 assert_volume_owner() {  # <id> <volume-id>
@@ -620,6 +645,7 @@ cmd_provision() {
     "provider=runpod" \
     "secondmate=$id" \
     "lifecycle=provisioned" \
+    "ever_ready=0" \
     "volume_id=$volume_id" \
     "volume_name=$volume_name" \
     "volume_size_gb=$volume_size" \
@@ -770,10 +796,10 @@ cmd_wake() {
   record_require "$id"
   lifecycle_lock_acquire "$id"
 
-  local compute alias volume_id host port pod_id pod body status recorded_compute deadline remaining delay lifecycle code_origin
-  lifecycle=$(fm_runpod_lifecycle "$DATA" "$id")
+  local compute alias volume_id host port pod_id pod body status recorded_compute deadline remaining delay code_origin has_reached_ready=0
   code_origin=$(record_get "$id" code_origin)
-  [ -n "$code_origin" ] || [ "$lifecycle" = ready ] || [ "$lifecycle" = suspended ] \
+  record_has_ever_reached_ready "$id" && has_reached_ready=1
+  [ -n "$code_origin" ] || [ "$has_reached_ready" -eq 1 ] \
     || die "secondmate $id has no recorded code origin and its volume has never reached ready; run: fm-runpod.sh provision $id --code-origin <git-url>"
   deadline=$((SECONDS + WAKE_TIMEOUT))
   compute=cpu
@@ -883,7 +909,7 @@ cmd_wake() {
     [ "$delay" -le 0 ] || sleep "$delay"
   done
 
-  record_set_lifecycle "$id" ready
+  record_mark_ready "$id"
   # Sleep quiesced the reply source; the host is back, so re-arm it from the
   # cursor sleep preserved. A route that has not been seeded yet has nothing to
   # arm, which is why this is best effort rather than a wake failure.
@@ -965,7 +991,9 @@ cmd_sleep() {
       ;;
   esac
   lifecycle_after=provisioned
-  [ "$lifecycle_before" != ready ] || lifecycle_after=suspended
+  if record_has_ever_reached_ready "$id"; then
+    lifecycle_after=suspended
+  fi
 
   # The reply source polls the host over SSH, so it must be quiesced under the
   # same lock teardown uses before the pod can go away. The cursor is kept, so
