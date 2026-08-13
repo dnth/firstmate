@@ -521,7 +521,9 @@ write_browser_wrapper() {  # <resolved-browser>
     printf '%s\n' '#!/usr/bin/env bash'
     printf '%s\n' "$FM_CHROME_WRAPPER_MARK"
     printf '%s\n' 'args=()'
+    # shellcheck disable=SC2016 # deliberate literal for the generated browser wrapper.
     printf '%s\n' '[ "$(id -u)" -ne 0 ] || args=(--no-sandbox --disable-dev-shm-usage)'
+    # shellcheck disable=SC2016 # deliberate literals for the generated browser wrapper.
     printf 'exec %s ${args[@]+"${args[@]}"} "$@"\n' "$resolved"
   } > "$tmp" || { rm -f -- "$tmp"; return 1; }
   chmod 0755 "$tmp" || { rm -f -- "$tmp"; return 1; }
