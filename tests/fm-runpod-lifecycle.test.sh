@@ -573,20 +573,39 @@ pass "every RunPod interaction went through the one mocked boundary"
 
 # --- legacy empty-origin wake admission ------------------------------------
 
-runpod_seed_remote_route "$PARENT" legacy fm-sm-legacy-runpod /srv/firstmate /srv/sm-legacy
-out=$(rp provision legacy --datacenter EU-RO-1 --code-origin https://example.test/firstmate.git 2>&1) \
-  || fail "legacy fixture provision failed: $out"
-sed -i.bak 's/^code_origin=.*/code_origin=/' "$PARENT/data/runpod/legacy.meta"
-rm -f "$PARENT/data/runpod/legacy.meta.bak"
+runpod_seed_remote_route "$PARENT" never fm-sm-never-runpod /srv/firstmate /srv/sm-never
+out=$(rp provision never --datacenter EU-RO-1 --code-origin https://example.test/firstmate.git 2>&1) \
+  || fail "never-ready fixture provision failed: $out"
+sed -i.bak 's/^code_origin=.*/code_origin=/' "$PARENT/data/runpod/never.meta"
+rm -f "$PARENT/data/runpod/never.meta.bak"
 : > "$API_LOG"
-out=$(rp wake legacy 2>&1) && fail "a never-ready volume woke without a recorded code origin"
-assert_contains "$out" "secondmate legacy" "the wake refusal must name the affected second mate"
-assert_contains "$out" "fm-runpod.sh provision legacy --code-origin <git-url>" \
+out=$(rp wake never 2>&1) && fail "a never-ready volume woke without a recorded code origin"
+assert_contains "$out" "secondmate never" "the wake refusal must name the affected second mate"
+assert_contains "$out" "fm-runpod.sh provision never --code-origin <git-url>" \
   "the wake refusal must give the exact repair command"
 [ ! -s "$API_LOG" ] || fail "a never-ready empty-origin volume must refuse before every provider call"
 pass "never-ready empty-origin volumes refuse before provider access"
 
-sed -i.bak 's/^lifecycle=.*/lifecycle=suspended/' "$PARENT/data/runpod/legacy.meta"
+out=$(rp provision slept --datacenter EU-RO-1 --code-origin https://example.test/firstmate.git 2>&1) \
+  || fail "pre-ready sleep fixture provision failed: $out"
+sed -i.bak 's/^code_origin=.*/code_origin=/' "$PARENT/data/runpod/slept.meta"
+rm -f "$PARENT/data/runpod/slept.meta.bak"
+out=$(rp sleep slept 2>&1) || fail "sleeping a never-woken route failed: $out"
+[ "$(record_field slept lifecycle)" = provisioned ] \
+  || fail "sleep must preserve the never-ready lifecycle distinction"
+: > "$API_LOG"
+out=$(rp wake slept 2>&1) && fail "a slept-but-never-ready empty-origin volume woke"
+assert_contains "$out" "fm-runpod.sh provision slept --code-origin <git-url>" \
+  "the slept never-ready refusal must retain the repair command"
+[ ! -s "$API_LOG" ] || fail "a slept never-ready empty-origin volume must refuse before every provider call"
+pass "sleep preserves never-ready empty-origin wake refusal"
+
+runpod_seed_remote_route "$PARENT" legacy fm-sm-legacy-runpod /srv/firstmate /srv/sm-legacy
+out=$(rp provision legacy --datacenter EU-RO-1 --code-origin https://example.test/firstmate.git 2>&1) \
+  || fail "legacy fixture provision failed: $out"
+out=$(rp wake legacy 2>&1) || fail "legacy fixture did not genuinely reach ready: $out"
+out=$(rp sleep legacy 2>&1) || fail "legacy fixture did not suspend after readiness: $out"
+sed -i.bak 's/^code_origin=.*/code_origin=/' "$PARENT/data/runpod/legacy.meta"
 rm -f "$PARENT/data/runpod/legacy.meta.bak"
 : > "$API_LOG"
 out=$(rp wake legacy 2>&1) || fail "a previously-ready legacy volume with an empty origin did not wake: $out"

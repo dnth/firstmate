@@ -773,12 +773,8 @@ cmd_wake() {
   local compute alias volume_id host port pod_id pod body status recorded_compute deadline remaining delay lifecycle code_origin
   lifecycle=$(fm_runpod_lifecycle "$DATA" "$id")
   code_origin=$(record_get "$id" code_origin)
-  if [ -z "$code_origin" ]; then
-    case "$lifecycle" in
-      ready|suspended) ;;
-      *) die "secondmate $id has no recorded code origin and its volume has never reached ready; run: fm-runpod.sh provision $id --code-origin <git-url>" ;;
-    esac
-  fi
+  [ -n "$code_origin" ] || [ "$lifecycle" = ready ] || [ "$lifecycle" = suspended ] \
+    || die "secondmate $id has no recorded code origin and its volume has never reached ready; run: fm-runpod.sh provision $id --code-origin <git-url>"
   deadline=$((SECONDS + WAKE_TIMEOUT))
   compute=cpu
   [ "$want_gpu" -eq 0 ] || compute=gpu
@@ -945,14 +941,14 @@ sleep_guards() {  # <id>
 
 # A sleep that cannot finish must leave the second mate exactly as it found it:
 # awake, with its reply source armed again.
-sleep_abort() {  # <id> <message>
-  [ "$(fm_runpod_lifecycle "$DATA" "$1")" = ready ] || record_set_lifecycle "$1" ready
+sleep_abort() {  # <id> <lifecycle> <message>
+  [ "$(fm_runpod_lifecycle "$DATA" "$1")" = "$2" ] || record_set_lifecycle "$1" "$2"
   "$SCRIPT_DIR/fm-procevent-remote-reply.sh" arm-locked "$1" >/dev/null 2>&1 || true
-  die "$2"
+  die "$3"
 }
 
 cmd_sleep() {
-  local id=${1:-} pod_id raw rc=0
+  local id=${1:-} pod_id raw rc=0 lifecycle_before lifecycle_after
   shift || true
   [ "$#" -eq 0 ] || usage
   require_id "$id"
@@ -961,12 +957,15 @@ cmd_sleep() {
   record_require "$id"
   delivery_lock_acquire "$id"
   lifecycle_lock_acquire "$id"
-  case "$(fm_runpod_lifecycle "$DATA" "$id")" in
+  lifecycle_before=$(fm_runpod_lifecycle "$DATA" "$id")
+  case "$lifecycle_before" in
     suspended)
       note "already-suspended: secondmate $id"
       return 0
       ;;
   esac
+  lifecycle_after=provisioned
+  [ "$lifecycle_before" != ready ] || lifecycle_after=suspended
 
   # The reply source polls the host over SSH, so it must be quiesced under the
   # same lock teardown uses before the pod can go away. The cursor is kept, so
@@ -979,29 +978,33 @@ cmd_sleep() {
 
   if route_is_remote "$id" \
      && ! "$SCRIPT_DIR/fm-procevent-remote-reply.sh" retire-quiesce-locked "$id" >/dev/null 2>&1; then
-    sleep_abort "$id" "secondmate $id still has an unhandled captured reply; handle it before suspending"
+    sleep_abort "$id" "$lifecycle_before" "secondmate $id still has an unhandled captured reply; handle it before suspending"
   fi
 
   if ! (record_set_lifecycle "$id" suspending); then
-    sleep_abort "$id" "secondmate $id could not record its suspending lifecycle; it is left running"
+    sleep_abort "$id" "$lifecycle_before" "secondmate $id could not record its suspending lifecycle; it is left running"
   fi
   pod_id=$(record_get "$id" pod_id)
   if [ -n "$pod_id" ]; then
     raw=$(runpod_api DELETE "/pods/$pod_id" '') || rc=$?
     if [ "$rc" -ne 0 ]; then
-      sleep_abort "$id" "the RunPod API could not be reached while terminating pod $pod_id; secondmate $id is left running"
+      sleep_abort "$id" "$lifecycle_before" "the RunPod API could not be reached while terminating pod $pod_id; secondmate $id is left running"
     fi
     case "$(api_status "$raw")" in
       2??|404) ;;
       *)
         api_body "$raw" >&2
-        sleep_abort "$id" "RunPod refused to terminate pod $pod_id (HTTP $(api_status "$raw")); secondmate $id is left running"
+        sleep_abort "$id" "$lifecycle_before" "RunPod refused to terminate pod $pod_id (HTTP $(api_status "$raw")); secondmate $id is left running"
         ;;
     esac
   fi
-  record_set "$id" "lifecycle=suspended" "pod_id=" "endpoint_host=" "endpoint_port=" \
+  record_set "$id" "lifecycle=$lifecycle_after" "pod_id=" "endpoint_host=" "endpoint_port=" \
     "cost_per_hr=" "pod_started_at="
-  note "suspended: secondmate $id pod terminated, volume $(record_get "$id" volume_id) retained, route preserved"
+  if [ "$lifecycle_after" = suspended ]; then
+    note "suspended: secondmate $id pod terminated, volume $(record_get "$id" volume_id) retained, route preserved"
+  else
+    note "stopped-before-ready: secondmate $id pod terminated, volume $(record_get "$id" volume_id) retained, lifecycle provisioned"
+  fi
 }
 
 # --- status, ssh, doctor, cost, destroy -------------------------------------
