@@ -187,9 +187,15 @@ SH
 printf 'sshd start\n' >> "$FM_FAKE_CALLS"
 exit 0
 SH
-  for t in jq unzip pgrep; do
+  for t in jq unzip; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/$t"
   done
+  cat > "$fakebin/pgrep" <<'SH'
+#!/usr/bin/env bash
+# No daemon is running in a fresh test world. Returning not-found forces the
+# real boot path to invoke the fake sshd instead of accepting a false positive.
+exit 1
+SH
   chmod +x "$fakebin"/*
   printf '%s\n' "$w"
 }
@@ -441,8 +447,11 @@ rm -rf "$w4/origin"        # provisioning cannot obtain a code root, so it MUST 
 boot_log="$w4/volume/persistent-runtime/boot.log"
 assert_present "$boot_log" "a failing boot must still leave its log on the volume"
 log_text=$(cat "$boot_log" 2>/dev/null)
-assert_contains "$log_text" "sshd is up" "sshd must come up BEFORE provisioning so a failure is diagnosable"
-sshd_line=$(grep -n "sshd is up" "$boot_log" | head -1 | cut -d: -f1)
+assert_contains "$(cat "$w4/calls.log")" "sshd start" \
+  "the failing boot must actually invoke sshd before provisioning"
+assert_contains "$log_text" "started sshd on port 22" \
+  "sshd must come up BEFORE provisioning so a failure is diagnosable"
+sshd_line=$(grep -n "started sshd on port 22" "$boot_log" | head -1 | cut -d: -f1)
 fail_line=$(grep -n "provisioning could not complete" "$boot_log" | head -1 | cut -d: -f1)
 [ -n "$fail_line" ] || fail "the provisioning failure was not recorded in the boot log"
 [ "$sshd_line" -lt "$fail_line" ] \

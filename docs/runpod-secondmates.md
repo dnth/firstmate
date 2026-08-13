@@ -94,6 +94,9 @@ bin/fm-runpod.sh wake <id> --min-vram 24
 ```
 
 If the doctor leaves an interactive harness-login step, use `bin/fm-runpod.sh ssh <id>` from another terminal while wake is still waiting, then retry wake after login.
+SSH becomes available before toolchain provisioning finishes.
+If provisioning or a later boot step fails, the pod stays running and wake remains unready; connect from another terminal with `bin/fm-runpod.sh ssh <id>` and inspect `/workspace/persistent-runtime/boot.log`.
+RunPod's REST API has no log or console endpoint, so that SSH session and volume-backed log are the diagnostic path for failures after sshd starts.
 
 Seed the persistent home exactly as for any other remote route, using the alias `provision` reported:
 
@@ -129,7 +132,7 @@ bin/fm-runpod.sh ssh <id>         # an interactive shell on the pod
 The primary wakes a dormant route itself when it actually needs the host: `bin/fm-send.sh` wakes before it delivers, and `bin/fm-spawn.sh <id> --secondmate` wakes before the readiness gate.
 Both wakes happen strictly before anything is delivered, so a compute failure loses nothing and can be retried; once delivery starts, the existing unknown-completion contract in [`remote-secondmates.md`](remote-secondmates.md) applies unchanged.
 
-The provider treats `provisioned`, `waking`, `suspending`, and `suspended` as dormant because none has a host that can be reached safely at that moment.
+The provider treats `provisioned`, `waking`, `suspending`, and `suspended` as dormant because none is ready for ordinary remote work; a waking pod may expose SSH only for bootstrap diagnostics.
 Startup health polling, startup convergence, `bin/fm-config-push.sh`, and reply-source arming all skip a dormant route instead.
 None of them creates compute, and none of them reports the deliberate no-host state as a fault.
 An unrecognized lifecycle value is not dormant, so corrupt metadata surfaces as an ordinary route failure instead of repeatedly creating compute.
@@ -173,18 +176,24 @@ Treat it exactly like any other irreversible action.
 `bin/fm-runpod-pod-boot.sh` is the tracked boot script, sent to every pod base64-encoded in one environment variable and run as its start command.
 The container image needs nothing from this repo preinstalled, and the boot contract is versioned with the code that creates the pod.
 
-On a volume's first boot it automates the noninteractive prerequisites - base packages, the durable toolchain, and the code root clone:
+Boot first establishes the diagnostic SSH channel:
 
 1. Install base packages: `git`, `jq`, `curl`, `ca-certificates`, `unzip`, and `openssh-server`.
-2. Install a current Node LTS, which the npm-distributed tools require.
-3. Clone the Firstmate code root from `--code-origin` when the volume has none.
-4. Install `herdr` and `treehouse` through this repository's own pinned, checksum-verified installers, `bin/fm-install-herdr.sh` and `bin/fm-install-treehouse.sh`, so a pod runs the exact builds CI verifies rather than a floating latest.
-5. Install `tasks-axi`, and the optional `--harness-npm` package when one is configured.
+2. Restore or create the volume-backed SSH host key, refusing to expose a container-local replacement if that identity cannot be persisted.
+3. Authorize the configured account key and start sshd.
 
-It also restores the persisted SSH host key from the volume, starts sshd with the account's authorized key, links the fixed remote entrypoint, and then hands readiness to `bin/fm-remote-doctor.sh --fix`.
+Only after sshd starts does first boot provision the remaining noninteractive prerequisites:
+
+1. Install a current Node LTS, which the npm-distributed tools require.
+2. Clone the Firstmate code root from `--code-origin` when the volume has none.
+3. Install `herdr` and `treehouse` through this repository's own pinned, checksum-verified installers, `bin/fm-install-herdr.sh` and `bin/fm-install-treehouse.sh`, so a pod runs the exact builds CI verifies rather than a floating latest.
+4. Install `tasks-axi`, and the optional `--harness-npm` package when one is configured.
+
+It then links the durable tools and fixed remote entrypoint and hands readiness to `bin/fm-remote-doctor.sh --fix`.
 The doctor is the single owner of what "ready for a remote second mate" means, and on Linux it starts the remote job worker and the headless Herdr `fm-remote` server itself, with no GUI or Aqua session involved.
 Nothing in the boot script re-states the doctor's verdict; it installs toward that set and lets the doctor decide.
-Wake requires the boot-success marker written after that handoff, so SSH alone can never make an unfinished or failed bootstrap report ready.
+Every failure after sshd starts is written to the volume-backed boot log and leaves the pod open for inspection.
+Wake still requires the separate `boot.ready` sentinel written only after provisioning and the doctor handoff succeed, so SSH alone can never make an unfinished or failed bootstrap report ready.
 
 Durable provisioning is idempotent and volume-scoped.
 A marker records only the volume-resident contract, while every replacement pod re-ensures its container-local system packages before trusting it.
