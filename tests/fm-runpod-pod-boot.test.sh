@@ -414,9 +414,10 @@ pass "the pre-SSH Treehouse setup retains recursive missing-parent creation"
 w_pre_ssh=$(new_world pre-ssh-treehouse-refusal)
 pre_ssh_out=$(
   world_env "$w_pre_ssh"
-  FM_TREEHOUSE_LOCAL_ROOT=relative-treehouse bash "$BOOT" 2>&1
+  FM_TREEHOUSE_LOCAL_ROOT=relative-treehouse timeout 5 bash "$BOOT" 2>&1
 )
 pre_ssh_status=$?
+[ "$pre_ssh_status" -ne 124 ] || fail "boot did not reject a relative Treehouse root before timing out"
 [ "$pre_ssh_status" -ne 0 ] || fail "boot accepted a relative Treehouse root"
 assert_contains "$pre_ssh_out" "Treehouse pool root must be absolute" \
   "the original relative-root refusal changed"
