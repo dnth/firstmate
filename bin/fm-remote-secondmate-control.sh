@@ -297,7 +297,7 @@ cmd_children() {
 # so the secondmate agent remains on its separately selected harness but
 # every crew dispatch has a working GPT route by default.
 cmd_runpod_crews() {
-  local id=$1 config harness_tmp dispatch_tmp path
+  local id=$1 config harness_tmp fallback_tmp path
   validate_id "$id"
   validate_home "$id"
   config="$TARGET_HOME/config"
@@ -306,36 +306,36 @@ cmd_runpod_crews() {
   else
     mkdir -p "$config" || die "remote config directory could not be created"
   fi
-  for path in "$config/crew-harness" "$config/crew-dispatch.json"; do
+  for path in "$config/crew-harness" "$config/crew-harness-fallback" "$config/crew-dispatch.json"; do
     if [ -e "$path" ] || [ -L "$path" ]; then
       [ -f "$path" ] && [ ! -L "$path" ] || die "refusing unsafe RunPod crew-routing path: $path"
     fi
   done
   harness_tmp=$(mktemp "$config/.crew-harness.runpod.XXXXXX") \
     || die "RunPod crew harness could not be staged"
-  dispatch_tmp=$(mktemp "$config/.crew-dispatch.runpod.XXXXXX") \
+  fallback_tmp=$(mktemp "$config/.crew-harness-fallback.runpod.XXXXXX") \
     || { rm -f -- "$harness_tmp"; die "RunPod crew dispatch could not be staged"; }
   printf 'codex\n' > "$harness_tmp" || {
-    rm -f -- "$harness_tmp" "$dispatch_tmp"
+    rm -f -- "$harness_tmp" "$fallback_tmp"
     die "RunPod crew harness could not be written"
   }
-  printf '%s\n' '{"rules":[],"default":[{"harness":"codex"},{"harness":"claude"}]}' \
-    > "$dispatch_tmp" || {
-      rm -f -- "$harness_tmp" "$dispatch_tmp"
-      die "RunPod crew dispatch could not be written"
+  printf 'claude\n' > "$fallback_tmp" || {
+      rm -f -- "$harness_tmp" "$fallback_tmp"
+      die "RunPod crew fallback could not be written"
     }
-  chmod 600 "$harness_tmp" "$dispatch_tmp" || {
-    rm -f -- "$harness_tmp" "$dispatch_tmp"
+  chmod 600 "$harness_tmp" "$fallback_tmp" || {
+    rm -f -- "$harness_tmp" "$fallback_tmp"
     die "RunPod crew routing could not be secured"
   }
   mv -f -- "$harness_tmp" "$config/crew-harness" || {
-    rm -f -- "$harness_tmp" "$dispatch_tmp"
+    rm -f -- "$harness_tmp" "$fallback_tmp"
     die "RunPod crew harness could not be published"
   }
-  mv -f -- "$dispatch_tmp" "$config/crew-dispatch.json" || {
-    rm -f -- "$dispatch_tmp"
-    die "RunPod crew dispatch could not be published"
+  mv -f -- "$fallback_tmp" "$config/crew-harness-fallback" || {
+    rm -f -- "$fallback_tmp"
+    die "RunPod crew fallback could not be published"
   }
+  rm -f -- "$config/crew-dispatch.json" || die "RunPod crew dispatch override could not be retired"
   printf 'runpod-crews: codex default with claude fallback\n'
 }
 

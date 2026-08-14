@@ -223,6 +223,15 @@ assert_contains "$out" "status=INITIALIZING" \
 STALLED_POD=$(record_field stalled pod_id)
 STALLED_VOLUME=$(record_field stalled volume_id)
 [ -n "$STALLED_POD" ] || fail "the stalled pod id was not preserved for recovery"
+posts_before_failed_retry=$(runpod_api_calls "$API_LOG" "POST /pods")
+jq '(.pods[] | select(.id == $p) | .desiredStatus) = "TERMINATED"' --arg p "$STALLED_POD" \
+  "$API_STATE" > "$API_STATE.next" && mv "$API_STATE.next" "$API_STATE"
+out=$(rp wake stalled 2>&1) && fail "ordinary wake replaced a failed never-ready paid attempt"
+assert_contains "$out" "recover-stuck stalled --yes" \
+  "the paid-attempt refusal did not name the explicit acknowledgement path"
+[ "$(runpod_api_calls "$API_LOG" "POST /pods")" = "$posts_before_failed_retry" ] \
+  || fail "ordinary wake created a second pod before explicit recovery acknowledgement"
+pass "ordinary wake cannot replace a failed never-ready paid attempt without acknowledgement"
 out=$(rp recover-stuck stalled --yes 2>&1) || fail "never-ready stuck recovery failed: $out"
 assert_contains "$out" "recovered-stuck: secondmate stalled" \
   "stuck recovery must report the exact pod it terminated"
@@ -240,6 +249,27 @@ out=$(FM_FAKE_BOOT_INCOMPLETE=1 rp ssh ios 2>&1) \
   || fail "SSH remediation must remain reachable before readiness: $out"
 [ "$(record_field ios lifecycle)" != ready ] || fail "interactive SSH must not mark an incomplete pod ready"
 pass "interactive SSH remains available for pre-ready human steps"
+
+out=$(rp provision reachable --datacenter EU-RO-1 --size 50 \
+  --code-origin https://example.test/firstmate.git 2>&1) \
+  || fail "reachable-recovery fixture provision failed: $out"
+out=$(FM_FAKE_RUNPOD_INIT_POLLS=999 FM_TEST_RUNPOD_POLL_INTERVAL=1 \
+  FM_TEST_RUNPOD_WAKE_TIMEOUT=2 rp wake reachable 2>&1) \
+  && fail "reachable-recovery fixture unexpectedly reached ready"
+REACHABLE_POD=$(record_field reachable pod_id)
+jq '(.pods[] | select(.id == $p)) |= (.remainingInitPolls = 0 | .status = "RUNNING" | .publicIp = "10.0.0.99" | .portMappings = {"22":20999})' \
+  --arg p "$REACHABLE_POD" "$API_STATE" > "$API_STATE.next" && mv "$API_STATE.next" "$API_STATE"
+out=$(rp recover-stuck reachable --yes 2>&1) \
+  && fail "recover-stuck terminated a pod that became SSH-reachable"
+assert_contains "$out" "now SSH-reachable" \
+  "reachable recovery refusal did not identify the renewed SSH proof"
+[ "$(jq -r --arg p "$REACHABLE_POD" '[.pods[] | select(.id == $p)] | length' "$API_STATE")" = 1 ] \
+  || fail "reachable recovery refusal deleted compute"
+jq '(.pods[] | select(.id == $p)) |= (.remainingInitPolls = 999 | .status = "INITIALIZING" | .publicIp = null | .portMappings = null)' \
+  --arg p "$REACHABLE_POD" "$API_STATE" > "$API_STATE.next" && mv "$API_STATE.next" "$API_STATE"
+rp recover-stuck reachable --yes >/dev/null 2>&1 || fail "reachable fixture cleanup recovery failed"
+rp destroy reachable --yes >/dev/null 2>&1 || fail "reachable fixture volume cleanup failed"
+pass "recover-stuck re-reads endpoint state and refuses SSH-reachable compute"
 
 out=$(rp wake ios 2>&1) || fail "wake failed: $out"
 assert_contains "$out" "ready: secondmate ios" "wake must report readiness"

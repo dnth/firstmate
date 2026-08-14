@@ -80,14 +80,13 @@ FM_HOME="$remote_home" "$ROOT/bin/fm-remote-secondmate-control.sh" runpod-crews 
   || fail "RunPod crew routing could not be installed in a seeded remote home"
 [ "$(cat "$remote_home/config/crew-harness")" = codex ] \
   || fail "RunPod crew routing did not set codex as the static default"
-jq -e '
-  .rules == []
-  and .default == [{"harness":"codex"},{"harness":"claude"}]
-' "$remote_home/config/crew-dispatch.json" >/dev/null \
-  || fail "RunPod crew routing did not publish codex with a Claude fallback"
+[ "$(cat "$remote_home/config/crew-harness-fallback")" = claude ] \
+  || fail "RunPod crew routing did not publish Claude as the configured fallback"
+[ ! -e "$remote_home/config/crew-dispatch.json" ] \
+  || fail "RunPod crew routing left a quota-array dispatch override ahead of the configured primary"
 FM_HOME="$remote_home" "$ROOT/bin/fm-remote-secondmate-control.sh" runpod-crews ios >/dev/null \
   || fail "RunPod crew routing was not idempotent"
-pass "RunPod remote homes route crews through codex with a Claude fallback"
+pass "RunPod remote homes route crews through a Codex primary and predictive Claude fallback"
 
 # --- health polling never wakes a suspended route ---------------------------
 

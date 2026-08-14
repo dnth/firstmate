@@ -86,6 +86,7 @@ export IS_SANDBOX
 FM_TOOLCHAIN_CONTRACT=5
 FM_TOOLCHAIN_MARKER="$FM_PERSIST/toolchain.provisioned"
 FM_BOOT_READY="$FM_PERSIST/boot.ready"
+FM_RUNPOD_SANDBOX_MARKER="$FM_PERSIST/runpod-root-sandbox"
 FM_LOCAL_BIN=${FM_LOCAL_BIN:-$FM_PERSIST/bin}
 FM_NPM_PREFIX=${FM_NPM_PREFIX:-$FM_PERSIST/npm}
 FM_NODE_ROOT=${FM_NODE_ROOT:-$FM_PERSIST/node}
@@ -164,6 +165,7 @@ toolchain_plan() {
   done
   plan_step account-home
   plan_step account-shell
+  plan_step root-sandbox-marker
   plan_step node
   plan_step npm
   plan_step code-root
@@ -243,7 +245,20 @@ write_account_shell_rc() {  # <path>
 ensure_account_shell() {
   write_account_shell_rc "$FM_ACCOUNT_HOME/.profile" || return 1
   write_account_shell_rc "$FM_ACCOUNT_HOME/.bashrc" || return 1
+  if [ -e "$FM_ACCOUNT_HOME/.bash_profile" ] || [ -L "$FM_ACCOUNT_HOME/.bash_profile" ]; then
+    write_account_shell_rc "$FM_ACCOUNT_HOME/.bash_profile" || return 1
+  fi
+  if [ -e "$FM_ACCOUNT_HOME/.bash_login" ] || [ -L "$FM_ACCOUNT_HOME/.bash_login" ]; then
+    write_account_shell_rc "$FM_ACCOUNT_HOME/.bash_login" || return 1
+  fi
   log "login shells now inherit the durable account PATH and IS_SANDBOX=1"
+}
+
+ensure_runpod_sandbox_marker() {
+  local tmp="$FM_RUNPOD_SANDBOX_MARKER.tmp.$$"
+  printf '%s\n' runpod-root-sandbox-v1 > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$FM_RUNPOD_SANDBOX_MARKER" || { rm -f -- "$tmp"; return 1; }
 }
 
 # sshd resolves the login's home from the passwd database, not from this
@@ -364,6 +379,21 @@ ensure_node() {
 # rather than requiring an operator to create it by hand.
 ensure_code_root() {
   if [ -d "$FM_REMOTE_ROOT/.git" ]; then
+    if [ ! -x "$FM_REMOTE_ROOT/bin/fm-claude-headless-setup.sh" ]; then
+      [ -z "$(git -C "$FM_REMOTE_ROOT" status --porcelain 2>/dev/null)" ] || {
+        log "the retained code root is dirty and lacks fm-claude-headless-setup.sh"
+        return 1
+      }
+      log "fast-forwarding the retained code root to obtain the Claude headless helper"
+      git -C "$FM_REMOTE_ROOT" pull --ff-only --quiet >> "$FM_BOOT_LOG" 2>&1 || {
+        log "the retained code root could not be fast-forwarded"
+        return 1
+      }
+      [ -x "$FM_REMOTE_ROOT/bin/fm-claude-headless-setup.sh" ] || {
+        log "fm-claude-headless-setup.sh is still missing after the retained code root update"
+        return 1
+      }
+    fi
     return 0
   fi
   if [ -z "$FM_REMOTE_ORIGIN" ]; then
@@ -613,12 +643,12 @@ provision_toolchain() {
   local rc=0
   ensure_base_packages || return 1
   ensure_node || return 1
+  ensure_code_root || return 1
   if toolchain_marker_current; then
     log "durable toolchain contract $FM_TOOLCHAIN_CONTRACT already satisfied on this volume"
     return 0
   fi
   log "provisioning durable toolchain contract $FM_TOOLCHAIN_CONTRACT"
-  ensure_code_root || return 1
   ensure_pinned_tools || rc=1
   rm -rf -- "$FM_NPM_PREFIX" || return 1
   ensure_npm_tools || rc=1
@@ -800,6 +830,7 @@ main() {
     exit 0
   fi
   require_volume || exit 1
+  ensure_runpod_sandbox_marker || exit 1
   # Before anything writes under a home: everything below, including the
   # authorized key and every later login, must land on the volume.
   ensure_account_home || exit 1

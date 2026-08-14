@@ -151,7 +151,13 @@ case " $* " in
   *" install "*)
     for pkg in "$@"; do
       case "$pkg" in
-        git|jq|curl|unzip)
+        git)
+          if [ ! -x "$FM_FAKE_EPHEMERAL_BIN/$pkg" ]; then
+            printf '#!/usr/bin/env bash\nexit 0\n' > "$FM_FAKE_EPHEMERAL_BIN/$pkg"
+            chmod +x "$FM_FAKE_EPHEMERAL_BIN/$pkg"
+          fi
+          ;;
+        jq|curl|unzip)
           printf '#!/usr/bin/env bash\nexit 0\n' > "$FM_FAKE_EPHEMERAL_BIN/$pkg"
           chmod +x "$FM_FAKE_EPHEMERAL_BIN/$pkg"
           ;;
@@ -288,6 +294,10 @@ DOCTOR
   chmod +x "$dest/bin/fm-remote-doctor.sh" "$dest/bin/fm-remote-entrypoint.sh" \
     "$dest/bin/fm-claude-headless-setup.sh"
 fi
+if [ "${1:-}" = -C ] && [ "${3:-}" = pull ]; then
+  cp "$FM_FAKE_CLAUDE_SETUP" "$2/bin/fm-claude-headless-setup.sh"
+  chmod +x "$2/bin/fm-claude-headless-setup.sh"
+fi
 exit 0
 SH
   cat > "$fakebin/ssh-keygen" <<'SH'
@@ -399,6 +409,8 @@ assert_present "$HOMEDIR/.local/bin/herdr" "later SSH jobs must receive a per-po
 assert_present "$HOMEDIR/.local/bin/node" "later SSH jobs must receive a per-pod link to durable Node"
 assert_present "$HOMEDIR/.local/bin/tasks-axi" "later SSH jobs must receive a per-pod link to durable npm tools"
 assert_present "$w/volume/persistent-runtime/toolchain.provisioned" "a completed provisioning run must record its marker"
+assert_grep 'runpod-root-sandbox-v1' "$w/volume/persistent-runtime/runpod-root-sandbox" \
+  "boot did not publish the provider-owned root-sandbox marker"
 pass "first boot clones the code root and installs the required toolchain through the pinned installers"
 
 # Bare SSH login shells and interactive shells do not inherit the boot process's
@@ -495,11 +507,15 @@ jq '.operatorState = "keep"' "$HOMEDIR/.claude.json" > "$HOMEDIR/.claude.json.ne
   && mv "$HOMEDIR/.claude.json.next" "$HOMEDIR/.claude.json"
 jq '.operatorSetting = "keep"' "$HOMEDIR/.claude/settings.json" > "$HOMEDIR/.claude/settings.json.next" \
   && mv "$HOMEDIR/.claude/settings.json.next" "$HOMEDIR/.claude/settings.json"
+printf '# operator bash profile\n' > "$HOMEDIR/.bash_profile"
+printf '# operator bash login\n' > "$HOMEDIR/.bash_login"
+rm -f "$w/volume/firstmate/bin/fm-claude-headless-setup.sh"
+: > "$w/calls.log"
 
 rm -rf "${w:?}/home"
 rm -rf "${w:?}/system-ssh"
 mkdir -p "$w/home" "$w/system-ssh"
-rm -f "$w/fakebin/git" "$w/fakebin/jq" "$w/fakebin/curl" "$w/fakebin/unzip" \
+rm -f "$w/fakebin/jq" "$w/fakebin/curl" "$w/fakebin/unzip" \
   "$w/fakebin/sshd" "$w/fakebin/google-chrome"
 printf '%s:x:%s:%s:%s:/root:/bin/bash\n' "$(id -un)" "$(id -u)" "$(id -g)" "$(id -un)" > "$w/etc/passwd"
 : > "$w/calls.log"
@@ -527,6 +543,16 @@ jq -e '.operatorState == "keep" and .hasCompletedOnboarding == true' "$HOMEDIR/.
   || fail "a replacement pod clobbered existing Claude state while reconciling headless defaults"
 jq -e '.operatorSetting == "keep" and .attribution.sessionUrl == false' "$HOMEDIR/.claude/settings.json" >/dev/null \
   || fail "a replacement pod clobbered existing Claude settings while enforcing attribution"
+profile_precedence_probe=$(HOME="$HOMEDIR" PATH=/usr/bin:/bin /bin/bash -c '. "$HOME/.bash_profile"; printf "%s|%s\n" "$(command -v codex)" "${IS_SANDBOX:-}"')
+[ "$profile_precedence_probe" = "$HOMEDIR/.local/bin/codex|1" ] \
+  || fail "a retained .bash_profile bypassed the managed RunPod environment: $profile_precedence_probe"
+bash_login_probe=$(HOME="$HOMEDIR" PATH=/usr/bin:/bin /bin/bash -c '. "$HOME/.bash_login"; printf "%s|%s\n" "$(command -v claude)" "${IS_SANDBOX:-}"')
+[ "$bash_login_probe" = "$HOMEDIR/.local/bin/claude|1" ] \
+  || fail "a retained .bash_login bypassed the managed RunPod environment: $bash_login_probe"
+assert_contains "$(cat "$w/calls.log")" "pull --ff-only --quiet" \
+  "a contract-5 replacement did not reconcile the tracked helper from its retained checkout"
+assert_present "$w/volume/firstmate/bin/fm-claude-headless-setup.sh" \
+  "a contract-5 replacement could not recover the tracked Claude helper"
 assert_present "$w/volume/persistent-runtime/boot.ready" "a replacement pod must reach readiness from the retained volume"
 pass "replacement pods restore ephemeral prerequisites and reuse the durable toolchain"
 pass "a login completed once on the volume survives pod replacement"

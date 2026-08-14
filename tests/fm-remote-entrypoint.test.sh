@@ -55,5 +55,48 @@ test_direct_invocation_still_works() {
   pass "fm-remote-entrypoint.sh invoked directly still resolves SCRIPT_DIR correctly"
 }
 
+test_runpod_marker_reaches_doctor_bootstrap() {
+  local home marker root_b64 home_b64 argv_b64 out err code
+  home="$TMP_ROOT/remote-home"
+  marker="$TMP_ROOT/runpod-root-sandbox"
+  mkdir -p "$home"
+  printf 'fixture\n' > "$TMP_ROOT/real-root/AGENTS.md"
+  cat > "$REAL_BIN/fm-remote-doctor.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'sandbox=%s\n' "${IS_SANDBOX:-}"
+SH
+  chmod +x "$REAL_BIN/fm-remote-doctor.sh"
+  git -C "$TMP_ROOT/real-root" init -q -b main
+  git -C "$TMP_ROOT/real-root" -c user.name=Test -c user.email=test@example.invalid \
+    add AGENTS.md bin
+  git -C "$TMP_ROOT/real-root" -c user.name=Test -c user.email=test@example.invalid \
+    commit -qm fixture
+  printf 'runpod-root-sandbox-v1\n' > "$marker"
+  root_b64=$(printf '%s' "$TMP_ROOT/real-root" | base64 | tr -d '\n')
+  home_b64=$(printf '%s' "$home" | base64 | tr -d '\n')
+  argv_b64=$(printf 'fm-remote-doctor.sh\0--parity\0' | base64 | tr -d '\n')
+  out="$TMP_ROOT/doctor.stdout"
+  err="$TMP_ROOT/doctor.stderr"
+  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+    FM_REMOTE_JOB_SANDBOX_MARKER_OVERRIDE="$marker" \
+    "$REAL_BIN/fm-remote-entrypoint.sh" 1 "$root_b64" "$home_b64" "$argv_b64" \
+    > "$out" 2> "$err"
+  code=$?
+  expect_code 0 "$code" "RunPod doctor bootstrap exit code: $(cat "$err")"
+  assert_grep 'sandbox=1' "$out" \
+    "the provider-owned RunPod marker did not cross the doctor env -i boundary"
+  rm -f "$marker"
+  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+    FM_REMOTE_JOB_SANDBOX_MARKER_OVERRIDE="$marker" \
+    "$REAL_BIN/fm-remote-entrypoint.sh" 1 "$root_b64" "$home_b64" "$argv_b64" \
+    > "$out" 2> "$err"
+  code=$?
+  expect_code 0 "$code" "ordinary doctor bootstrap exit code: $(cat "$err")"
+  [ "$(cat "$out")" = 'sandbox=' ] \
+    || fail "an ordinary remote doctor received the RunPod sandbox marker: $(cat "$out")"
+  pass "provider-owned RunPod markers cross doctor bootstrap without changing ordinary hosts"
+}
+
 test_symlink_invocation_resolves_sibling_lib
 test_direct_invocation_still_works
+test_runpod_marker_reaches_doctor_bootstrap

@@ -123,6 +123,9 @@ if [ "$COMMAND" = fm-remote-doctor.sh ]; then
     "FM_ROOT_OVERRIDE=$ROOT"
     FM_REMOTE_DOCTOR_BOOTSTRAP=1
   )
+  if fm_remote_job_runpod_sandbox_active "$ROOT"; then
+    DOCTOR_ENV+=(IS_SANDBOX=1)
+  fi
   if [ -n "${FM_REMOTE_JOB_PLATFORM_OVERRIDE:-}" ]; then
     DOCTOR_ENV+=("FM_REMOTE_JOB_PLATFORM_OVERRIDE=$FM_REMOTE_JOB_PLATFORM_OVERRIDE")
   fi

@@ -850,9 +850,13 @@ cmd_wake() {
           note "started: existing pod $pod_id for secondmate $id"
         fi
       else
+        [ "$has_reached_ready" -eq 1 ] \
+          || die "never-ready pod $pod_id is TERMINATED; run 'fm-runpod.sh recover-stuck $id --yes' to acknowledge and clear the failed paid attempt before replacement"
         pod_id=
       fi
     else
+      [ "$has_reached_ready" -eq 1 ] \
+        || die "never-ready pod $pod_id is absent; run 'fm-runpod.sh recover-stuck $id --yes' to acknowledge and clear the failed paid attempt before replacement"
       pod_id=
     fi
   fi
@@ -935,7 +939,7 @@ cmd_wake() {
 # Once ready provenance exists, remote completion is unknown whenever SSH is
 # unavailable, so only the ordinary guarded sleep path may terminate the pod.
 cmd_recover_stuck() {
-  local id=${1:-} confirmed=0 pod_id pod raw rc=0 provider_state lifecycle
+  local id=${1:-} confirmed=0 pod_id pod raw rc=0 provider_state lifecycle host port alias remaining
   shift || true
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -960,9 +964,33 @@ cmd_recover_stuck() {
   esac
   pod_id=$(record_get "$id" pod_id)
   [ -n "$pod_id" ] || die "secondmate $id has no recorded pod to recover"
+  alias=
+  remaining=$WAKE_TIMEOUT
+  [ "$remaining" -le 15 ] || remaining=15
   pod=$(pod_get "$pod_id") || die "the RunPod API could not be reached while inspecting stuck pod $pod_id"
   if [ -n "$pod" ]; then
     provider_state=$(pod_provider_state "$pod")
+  fi
+  if [ -n "$pod" ]; then
+    pod=$(pod_get "$pod_id" "$remaining") \
+      || die "the RunPod API could not be reached while re-reading stuck pod $pod_id immediately before termination"
+    if [ -n "$pod" ]; then
+      host=$(json_field "$pod" '.publicIp')
+      port=$(json_field "$pod" '.portMappings."22"')
+      if [ -n "$host" ] || [ -n "$port" ]; then
+        [ -n "$host" ] && [ -n "$port" ] \
+          || die "stuck pod $pod_id now reports an incomplete SSH endpoint; refusing termination because reachability cannot be excluded"
+        alias=$(alias_for "$id")
+        if known_hosts_pin "$alias" "$host" "$port" "$remaining"; then
+          ssh_fragment_write "$alias" "$host" "$port" \
+            "$(record_get "$id" ssh_user)" "$(record_get "$id" ssh_identity)"
+          die "stuck pod $pod_id is now SSH-reachable at $host:$port; refusing termination and requiring normal reconciliation"
+        fi
+      fi
+    fi
+    [ -z "$pod" ] || provider_state=$(pod_provider_state "$pod")
+  fi
+  if [ -n "$pod" ]; then
     raw=$(runpod_api DELETE "/pods/$pod_id" '') || rc=$?
     [ "$rc" -eq 0 ] \
       || die "the RunPod API could not be reached while terminating never-ready pod $pod_id; it may still be billing"

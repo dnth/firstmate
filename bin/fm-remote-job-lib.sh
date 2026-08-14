@@ -56,6 +56,32 @@ FM_REMOTE_JOB_EXIT=
 FM_REMOTE_JOB_ERROR=
 FM_REMOTE_JOB_REPAIRED=0
 
+fm_remote_job_runpod_sandbox_marker() { # <remote-root>
+  if [ -n "${FM_REMOTE_JOB_SANDBOX_MARKER_OVERRIDE:-}" ] \
+    && [ -n "${FM_REMOTE_JOB_PLATFORM_OVERRIDE:-}" ]; then
+    printf '%s\n' "$FM_REMOTE_JOB_SANDBOX_MARKER_OVERRIDE"
+  else
+    printf '%s/persistent-runtime/runpod-root-sandbox\n' "$(dirname "$1")"
+  fi
+}
+
+fm_remote_job_runpod_sandbox_active() { # <remote-root>
+  local marker owner
+  marker=$(fm_remote_job_runpod_sandbox_marker "$1") || return 1
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  [ "$(fm_remote_job_read_single_line "$marker" 64 2>/dev/null || true)" = runpod-root-sandbox-v1 ] \
+    || return 1
+  if [ -z "${FM_REMOTE_JOB_SANDBOX_MARKER_OVERRIDE:-}" ]; then
+    [ "$(id -u 2>/dev/null || true)" = 0 ] || return 1
+    if [ "$(uname -s 2>/dev/null || true)" = Darwin ]; then
+      owner=$(stat -f %u "$marker" 2>/dev/null) || return 1
+    else
+      owner=$(stat -c %u "$marker" 2>/dev/null) || return 1
+    fi
+    [ "$owner" = 0 ] || return 1
+  fi
+}
+
 fm_remote_job_die() {
   printf 'error: %s\n' "$1" >&2
   return 1

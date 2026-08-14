@@ -101,7 +101,7 @@ bin/fm-runpod.sh wake <id> --min-vram 24
 
 After a volume's first wake reaches ready, log each runtime in once: use `bin/fm-runpod.sh ssh <id>`, run each harness's own login, and run `gh auth login`.
 SSH also becomes available before toolchain provisioning finishes, so it can be used from another terminal to diagnose a wake that is still waiting.
-Boot places `$HOME/.local/bin` first in both the durable account's `.profile` and `.bashrc`, so bare SSH login and interactive shells resolve the same installed harnesses as the fixed remote entrypoint.
+Boot places `$HOME/.local/bin` first in the durable account's `.profile` and `.bashrc`, and reconciles retained `.bash_profile` or `.bash_login` files that take precedence for Bash login shells, so bare SSH login and interactive shells resolve the same installed harnesses as the fixed remote entrypoint.
 Readiness verifies executable presence and the durable account home, but deliberately neither detects nor gates vendor login state.
 Those logins land on the volume, so later wakes and replacement pods need none of it again.
 If provisioning or a later boot step fails, the pod stays running and wake remains unready; connect from another terminal with `bin/fm-runpod.sh ssh <id>` and inspect `/workspace/persistent-runtime/boot.log`.
@@ -116,7 +116,7 @@ bin/fm-spawn.sh <id> --secondmate
 
 The first wake provisions the toolchain before this step, so the code root and required tools are already in place.
 Every RunPod home converges its crew dispatch after inherited configuration lands.
-Its `config/crew-harness` selects `codex`, and its `config/crew-dispatch.json` supplies Codex as the default candidate with Claude as the fallback.
+Its `config/crew-harness` selects Codex as the genuine primary, and `config/crew-harness-fallback` selects Claude only when the supported predictive fallback trigger proves Codex unavailable or at zero effective headroom.
 That provider-owned layer affects crews only; the remote second-mate agent stays on the separately configured secondmate harness, which should remain Claude on this host.
 
 From here it is an ordinary remote second mate.
@@ -162,10 +162,12 @@ If that volume has never reached ready, terminate the stuck billable pod while r
 bin/fm-runpod.sh recover-stuck <id> --yes
 ```
 
-The command requires `ever_ready=0`, deletes only the recorded pod, clears its stale endpoint, and returns the retained volume to `provisioned`.
+The command requires `ever_ready=0`, re-reads provider endpoint state immediately before deletion, and either proves the endpoint remains absent or performs a bounded SSH host-key handshake against the newly published endpoint.
+It refuses when the pod has become reachable or when reachability cannot be classified safely, and only then deletes the recorded pod, clears its stale endpoint, and returns the retained volume to `provisioned`.
 It refuses once the volume has ever reached ready because an unreachable ready host may contain running or completed work whose outcome is unknown.
 Use the ordinary `sleep` path only after reconciling that work on the same host.
-Wake does not automatically create a replacement after an endpoint stall because the failed paid resource and its provider state remain the operator's evidence, and an automatic replacement could start a second provisioning attempt before that evidence is reviewed.
+Wake does not automatically create a replacement after an endpoint stall, even when the failed never-ready pod later becomes `TERMINATED` or absent, because the failed paid resource and its provider state remain the operator's evidence.
+Run `recover-stuck --yes` to acknowledge and clear that attempt before another ordinary wake can create replacement compute.
 
 ## Suspending safely
 
@@ -212,7 +214,7 @@ Boot first establishes the diagnostic SSH channel:
 2. Restore or create the volume-backed SSH host key, refusing to expose a container-local replacement if that identity cannot be persisted.
 3. Authorize the configured account key and start sshd.
 
-Boot also writes the durable login-shell PATH and `IS_SANDBOX=1` marker before readiness checks run.
+Boot also writes the durable login-shell PATH, the `IS_SANDBOX=1` shell environment, and a root-owned provider marker that the empty-environment doctor and remote-job boundaries validate before propagating `IS_SANDBOX=1`.
 
 Only after sshd starts does first boot provision the remaining noninteractive prerequisites:
 
@@ -239,6 +241,7 @@ Wake still requires the separate `boot.ready` sentinel written only after provis
 
 Durable provisioning is idempotent and volume-scoped.
 A marker records only the volume-resident contract, while every replacement pod re-ensures its container-local system packages before trusting it.
+A contract-current retained checkout that predates a newly required tracked boot helper is cleanly fast-forwarded to obtain that helper without changing the installed-tool contract.
 A raised contract version re-provisions the durable tools exactly once.
 `bin/fm-runpod-pod-boot.sh --check` prints the plan as one `ensure=<item>` line per step and touches nothing, which is how the contract is tested with no pod.
 

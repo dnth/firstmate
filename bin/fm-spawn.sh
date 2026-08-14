@@ -272,6 +272,8 @@ PREWALK_DISABLE_SUPPORTED=0
 OMP_PREWALK_FLAG_PROBLEM=
 SECONDMATE_MODEL_SOURCE=
 SECONDMATE_FALLBACK_REASON=
+CREW_MODEL_SOURCE=
+CREW_FALLBACK_REASON=
 BACKEND_ARG=
 MODE=
 YOLO=
@@ -1134,6 +1136,35 @@ case "$ARG3" in
       fi
       HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
       harness_src='config/crew-harness'
+      CREW_MODEL_SOURCE=
+      CREW_FALLBACK_REASON=
+      CREW_FALLBACK_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" crew-fallback-harness)
+      if [ -n "$CREW_FALLBACK_HARNESS" ]; then
+        case "$CREW_FALLBACK_HARNESS" in
+          claude|codex|opencode|pi|pi-signed|omp|grok|kimi) ;;
+          *) echo "error: config/crew-harness-fallback names an unverified harness: $CREW_FALLBACK_HARNESS" >&2; exit 1 ;;
+        esac
+        CREW_MODEL_SOURCE=primary
+        if [ "$MODEL_SET" -eq 0 ]; then
+          CREW_FALLBACK_REASON=$(fm_quota_profile_fallback_reason "$HARNESS" "$MODEL" || true)
+        fi
+        case "$CREW_FALLBACK_REASON" in
+          provider_unavailable|quota_exhausted)
+            CREW_FALLBACK_MODEL=$("$SCRIPT_DIR/fm-harness.sh" crew-fallback-model)
+            CREW_FALLBACK_EFFORT=$("$SCRIPT_DIR/fm-harness.sh" crew-fallback-effort)
+            HARNESS=$CREW_FALLBACK_HARNESS
+            harness_src='config/crew-harness-fallback'
+            CREW_MODEL_SOURCE=fallback
+            [ -z "$CREW_FALLBACK_MODEL" ] || MODEL=$CREW_FALLBACK_MODEL
+            if [ "$EFFORT_SET" -eq 0 ] && [ -n "$CREW_FALLBACK_EFFORT" ]; then
+              case "$CREW_FALLBACK_EFFORT" in
+                low|medium|high|xhigh|max) EFFORT=$CREW_FALLBACK_EFFORT ;;
+                *) echo "warning: config/crew-harness-fallback effort token '$CREW_FALLBACK_EFFORT' is invalid; ignoring" >&2 ;;
+              esac
+            fi
+            ;;
+        esac
+      fi
     fi
     if [ "$KIND" != secondmate ]; then
       LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
@@ -3096,6 +3127,10 @@ META_WINDOW=$T
   if [ "$KIND" = secondmate ] && [ -n "$SECONDMATE_MODEL_SOURCE" ]; then
     echo "secondmate_model_source=$SECONDMATE_MODEL_SOURCE"
     [ "$SECONDMATE_MODEL_SOURCE" != fallback ] || echo "secondmate_fallback_reason=$SECONDMATE_FALLBACK_REASON"
+  fi
+  if [ "$KIND" != secondmate ] && [ -n "$CREW_MODEL_SOURCE" ]; then
+    echo "crew_model_source=$CREW_MODEL_SOURCE"
+    [ "$CREW_MODEL_SOURCE" != fallback ] || echo "crew_fallback_reason=$CREW_FALLBACK_REASON"
   fi
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   if [ "$HARNESS" = omp ]; then

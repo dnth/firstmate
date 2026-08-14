@@ -162,7 +162,7 @@ bin/fm-spawn.sh <id> --secondmate
 ```
 
 The primary resolves both configured secondmate profiles, runs the same readiness gate the seed runs, transfers the inherited-material allowlist, and asks the remote host to select from current host-local quota and launch on Herdr in `fm-remote`.
-For a RunPod route only, provider convergence then restores Codex-first crew dispatch with a Claude fallback after that inherited transfer, while the second-mate agent's own selected harness remains unchanged.
+For a RunPod route only, provider convergence then restores the configured Codex primary with a Claude predictive fallback after that inherited transfer, while the second-mate agent's own selected harness remains unchanged.
 The remote response supplies the actually launched harness, model, effort, and fallback metadata for the primary record; reusing an already-live endpoint preserves that stored profile instead of relabeling it from a new request.
 All remote secondmates on one host share `fm-remote` and retain separate `2ndmate-<id>` workspaces inside it.
 An explicit request for any other backend is refused rather than honored, and the remote host refuses one too.

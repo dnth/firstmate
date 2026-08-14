@@ -1126,6 +1126,42 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
   pass "C9 spawn: the harness fallback chain still resolves with no tokens; crew/scout launches are unaffected by this feature"
 }
 
+test_crew_primary_fallback_selection() {
+  local w home proj wt fakebin launchlog id meta out status
+  w="$TMP_ROOT/crew-primary-fallback"
+  home="$w/home"
+  proj="$w/project"
+  wt="$w/wt"
+  launchlog="$w/launch.log"
+  id=crew-fallback-z2
+  mkdir -p "$home/config" "$home/data/$id" "$home/projects" "$home/state"
+  printf 'codex\n' > "$home/config/crew-harness"
+  printf 'claude\n' > "$home/config/crew-harness-fallback"
+  printf 'brief\n' > "$home/data/$id/brief.md"
+  fm_git_worktree "$proj" "$wt" crew-primary-fallback
+  fakebin=$(make_launch_capturing_tmux "$w/tmux")
+  make_quota_axi "$fakebin"
+  : > "$launchlog"
+  out=$(FM_TEST_QUOTA_JSON='{"providers":[{"provider":"codex","state":{"status":"auth_required"}}]}' \
+    FM_TEST_QUOTA_AUTH_JSON='{"auth":[{"provider":"codex","sources":[{"source":"auth-json","status":"expired"},{"source":"cli-rpc","status":"expired"}]}]}' \
+    PATH="$fakebin:$BASE_PATH" TMUX="fake,1,0" CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_LAUNCH_LOG="$launchlog" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "configured crew fallback spawn failed: $out"
+  meta="$home/state/$id.meta"
+  [ "$(meta_field "$meta" harness)" = claude ] \
+    || fail "proven Codex unavailability did not select the configured Claude fallback"
+  [ "$(meta_field "$meta" crew_model_source)" = fallback ] \
+    || fail "crew fallback metadata did not record fallback selection"
+  [ "$(meta_field "$meta" crew_fallback_reason)" = provider_unavailable ] \
+    || fail "crew fallback metadata recorded the wrong supported trigger"
+  pass "C11 crew routing uses the configured fallback only for a supported trigger"
+}
+
 # ===========================================================================
 # B integration: spawn, bootstrap, and config push propagate inherited local
 # material and keep it converged on the primary (independent of tracked-file ff
@@ -2687,6 +2723,7 @@ test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens
 test_spawn_explicit_harness_uses_explicit_profile_axes
 test_spawned_secondmate_uses_its_harness_supervision_model
 test_spawn_fallback_chain_and_crew_scout_unaffected
+test_crew_primary_fallback_selection
 test_bootstrap_sweep_propagates_and_reconverges
 test_bootstrap_sweep_propagates_when_tracked_current
 test_bootstrap_sweep_defers_dispatch_on_stale_unignored_home

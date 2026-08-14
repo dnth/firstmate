@@ -27,7 +27,7 @@ printf 'fixture\n' > "$REMOTE_ROOT/AGENTS.md"
 cat > "$REMOTE_ROOT/bin/fm-probe-job.sh" <<'SH'
 #!/bin/bash
 set -u
-printf 'home=%s\nroot=%s\nactive=%s\npath=%s\n' "$FM_HOME" "$FM_ROOT_OVERRIDE" "${FM_REMOTE_JOB_ACTIVE:-}" "$PATH"
+printf 'home=%s\nroot=%s\nactive=%s\nsandbox=%s\npath=%s\n' "$FM_HOME" "$FM_ROOT_OVERRIDE" "${FM_REMOTE_JOB_ACTIVE:-}" "${IS_SANDBOX:-}" "$PATH"
 printf 'args:'
 printf ' <%s>' "$@"
 printf '\n'
@@ -103,6 +103,8 @@ export FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux
 export FM_REMOTE_JOB_QUEUE_TIMEOUT=5
 # shellcheck disable=SC2031 # The sourced defaults above were confined to DEFAULT_BOUNDS.
 export FM_REMOTE_JOB_TIMEOUT=5
+SANDBOX_MARKER="$TMP_ROOT/runpod-root-sandbox"
+export FM_REMOTE_JOB_SANDBOX_MARKER_OVERRIDE="$SANDBOX_MARKER"
 # shellcheck source=bin/fm-remote-job-lib.sh
 . "$ROOT/bin/fm-remote-job-lib.sh"
 
@@ -189,11 +191,21 @@ assert_contains "$OUT" 'args: <two words> <$(not executed)>' "the worker changed
 assert_contains "$OUT" 'stdin=first line' "the worker lost staged stdin"
 assert_contains "$OUT" 'stdin=second line' "the worker lost staged stdin"
 assert_contains "$OUT" 'secret=absent' "ambient environment crossed into the worker child"
+assert_contains "$OUT" 'sandbox=' "an ordinary remote worker received a RunPod sandbox marker"
 case "$OUT" in *"$REMOTE_ROOT/bin:$ACCOUNT_HOME/.local/bin:"*) : ;; *) fail "worker PATH omitted its fixed root and account head" ;; esac
 fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the completed job could not be reaped"
 assert_absent "$JOB_DIR" "reap retained a completed job record"
 assert_absent "$FAKE_PERL_LOG" "the worker invoked an unavailable Perl runtime"
 pass "the worker preserves bounded argv and stdin in an empty environment"
+
+printf 'runpod-root-sandbox-v1\n' > "$SANDBOX_MARKER"
+fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-probe-job.sh </dev/null >/dev/null
+JOB_ID=$FM_REMOTE_JOB_ID
+fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
+OUT=$(<"$FM_REMOTE_JOB_STDOUT")
+assert_contains "$OUT" 'sandbox=1' "the provider-owned marker did not cross the worker child env -i boundary"
+fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the sandbox marker job could not be reaped"
+pass "the provider-owned RunPod marker crosses the worker child environment"
 
 ACTIVE_SIDE_EFFECT="$TMP_ROOT/active-side-effect"
 FM_REMOTE_JOB_TIMEOUT=10
