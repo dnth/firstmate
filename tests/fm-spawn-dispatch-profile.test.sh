@@ -201,6 +201,15 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
+  cat > "$fakebin/codex" <<'SH'
+#!/usr/bin/env bash
+if [ -n "${FM_FAKE_DESCENDANT_SPAWN:-}" ]; then
+  "$FM_FAKE_DESCENDANT_SPAWN" "$FM_FAKE_DESCENDANT_ID" "$FM_FAKE_DESCENDANT_PROJECT" \
+    --harness omp --backend tmux --model openai-codex/gpt-5.6-sol --effort high \
+    --mode no-mistakes --yolo off
+fi
+SH
+  chmod +x "$fakebin/codex"
   cat > "$fakebin/mkdir" <<'SH'
 #!/usr/bin/env bash
 for arg in "$@"; do
@@ -322,6 +331,8 @@ run_spawn() {
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     HOME="${FM_TEST_HOME_OVERRIDE:-$HOME}" IS_SANDBOX="${FM_TEST_IS_SANDBOX:-}" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
+    FM_OMP_AUTH_BROKER_URL="${FM_TEST_OMP_AUTH_BROKER_URL:-}" \
+    FM_OMP_AUTH_BROKER_TOKEN_FILE="${FM_TEST_OMP_AUTH_BROKER_TOKEN_FILE:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_ENDPOINT_LOG="$endpointlog" \
     FM_FAKE_TREEHOUSE_LOG="$treehouselog" FM_FAKE_OMP_ACK="${FM_TEST_OMP_ACK:-}" \
     FM_FAKE_OMP_DYNAMIC_ACK="${FM_TEST_OMP_DYNAMIC_ACK:-0}" \
@@ -848,6 +859,104 @@ test_omp_threads_exact_identity_model_and_every_thinking_level() {
     unset FM_TEST_OMP_ACK
   done
   pass "OMP launches through its metadata-bound canonical Bun/OMP pair and forwards every supported thinking level"
+}
+
+test_omp_broker_env_uses_mode_600_file_without_exposing_bearer() {
+  local rec id out status launch token_file
+  id=$(profile_id profile-omp-broker-z8ob)
+  rec=$(make_spawn_case profile-omp-broker omp "$id")
+  read_case_record "$rec"
+  token_file="$CASE_DIR/omp-auth-broker.token"
+  printf '%s' 'dummy_broker_token_123' > "$token_file"
+  chmod 600 "$token_file"
+  export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
+  export FM_TEST_OMP_AUTH_BROKER_URL=http://127.0.0.1:8765
+  export FM_TEST_OMP_AUTH_BROKER_TOKEN_FILE="$token_file"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model openai-codex/gpt-5.6-sol --effort high)
+  status=$?
+  expect_code 0 "$status" "OMP spawn with a mode-600 broker token file should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "OMP_AUTH_BROKER_URL='http://127.0.0.1:8765'" \
+    "OMP launch did not receive the pod-loopback broker URL"
+  assert_contains "$launch" "OMP_AUTH_BROKER_TOKEN=\"\$(cat '$token_file')\"" \
+    "OMP launch did not defer bearer-file expansion to the pane shell"
+  assert_contains "$launch" "FM_OMP_AUTH_BROKER_TOKEN_FILE='$token_file'" \
+    "OMP launch did not retain the safe bearer-file path for descendant OMP crews"
+  assert_not_contains "$launch" 'dummy_broker_token_123' \
+    "OMP bearer bytes leaked into the literal backend launch command"
+
+  id=$(profile_id profile-omp-broker-mode-z8obm)
+  mkdir -p "$HOME_DIR/data/$id"
+  printf 'brief for %s\n' "$id" > "$HOME_DIR/data/$id/brief.md"
+  chmod 644 "$token_file"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model openai-codex/gpt-5.6-sol --effort high)
+  status=$?
+  expect_code 1 "$status" "OMP spawn must refuse a broker token file broader than mode 0600"
+  assert_contains "$out" 'OMP auth-broker token file must have mode 0600' \
+    "unsafe OMP broker token refusal did not name the required mode"
+  [ ! -s "$LAUNCH_LOG" ] || fail "unsafe OMP broker token mode typed a backend launch command"
+
+  unset FM_TEST_OMP_ACK FM_TEST_OMP_AUTH_BROKER_URL FM_TEST_OMP_AUTH_BROKER_TOKEN_FILE
+  pass "OMP broker launch env reads a mode-600 file inside the pane and never exposes bearer bytes"
+}
+
+test_secondmate_descendant_omp_inherits_complete_broker_pair() {
+  local rec id child sm out status launch token_file tasktmp
+  id=$(profile_id profile-codex-secondmate-broker-z8obs)
+  child=$(profile_id profile-omp-descendant-broker-z8obd)
+  rec=$(make_spawn_case profile-secondmate-descendant-broker codex "$id")
+  read_case_record "$rec"
+  printf '%s\n' codex > "$HOME_DIR/config/secondmate-harness"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  mkdir -p "$sm/config" "$sm/data/$child" "$sm/projects" "$sm/state"
+  printf 'brief for %s\n' "$child" > "$sm/data/$child/brief.md"
+  printf 'off\n' > "$sm/config/herdr-presentation-spaces"
+  touch "$sm/state/.last-watcher-beat"
+  token_file="$CASE_DIR/omp-auth-broker.token"
+  printf '%s' 'dummy_descendant_broker_token_456' > "$token_file"
+  chmod 600 "$token_file"
+  export FM_TEST_OMP_AUTH_BROKER_URL=http://127.0.0.1:8765
+  export FM_TEST_OMP_AUTH_BROKER_TOKEN_FILE="$token_file"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "Codex secondmate spawn with the safe broker pair should succeed"
+  launch=$(tail -n 1 "$LAUNCH_LOG")
+  assert_contains "$launch" "FM_OMP_AUTH_BROKER_URL='http://127.0.0.1:8765'" \
+    "non-OMP secondmate did not inherit the broker URL"
+  assert_contains "$launch" "FM_OMP_AUTH_BROKER_TOKEN_FILE='$token_file'" \
+    "non-OMP secondmate did not inherit the broker token-file path"
+  assert_not_contains "$launch" 'dummy_descendant_broker_token_456' \
+    "secondmate launch exposed broker bearer bytes"
+
+  FM_FAKE_DESCENDANT_SPAWN="$SPAWN" FM_FAKE_DESCENDANT_ID="$child" \
+    FM_FAKE_DESCENDANT_PROJECT="$PROJ_DIR" FM_SPAWN_NO_GUARD=1 \
+    FM_FAKE_PANE_PATH="$WT_DIR" TMUX='fake,1,0' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
+    FM_FAKE_ENDPOINT_LOG="$CASE_DIR/endpoint.log" FM_FAKE_TREEHOUSE_LOG="$CASE_DIR/treehouse.log" \
+    FM_FAKE_OMP_ACK="$sm/state/$child.omp-started" FM_FAKE_OMP_NO_PREWALK=1 \
+    HOME="$HOME" PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch" >/dev/null
+  status=$?
+  expect_code 0 "$status" "secondmate should launch its OMP descendant with broker auth"
+  launch=$(tail -n 1 "$LAUNCH_LOG")
+  assert_contains "$launch" "OMP_AUTH_BROKER_URL='http://127.0.0.1:8765'" \
+    "descendant OMP launch did not receive the broker client URL"
+  assert_contains "$launch" "OMP_AUTH_BROKER_TOKEN=\"\$(cat '$token_file')\"" \
+    "descendant OMP launch did not defer bearer expansion to its pane shell"
+  assert_contains "$launch" "FM_OMP_AUTH_BROKER_URL='http://127.0.0.1:8765'" \
+    "descendant OMP launch did not retain the broker URL for deeper descendants"
+  assert_contains "$launch" "FM_OMP_AUTH_BROKER_TOKEN_FILE='$token_file'" \
+    "descendant OMP launch did not retain the broker token-file path"
+  assert_not_contains "$launch" 'dummy_descendant_broker_token_456' \
+    "descendant OMP launch exposed broker bearer bytes"
+
+  tasktmp=$(sed -n 's/^tasktmp=//p' "$sm/state/$child.meta")
+  case "$tasktmp" in /tmp/fm-profile-*) rm -rf "$tasktmp" ;; esac
+  unset FM_TEST_OMP_AUTH_BROKER_URL FM_TEST_OMP_AUTH_BROKER_TOKEN_FILE
+  pass "secondmate-launched OMP descendants inherit the complete broker pair without bearer exposure"
 }
 
 test_omp_prewalk_threads_native_target_and_metadata() {
@@ -1928,6 +2037,8 @@ test_pi_threads_model_and_max_effort
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_omp_threads_exact_identity_model_and_every_thinking_level
+test_omp_broker_env_uses_mode_600_file_without_exposing_bearer
+test_secondmate_descendant_omp_inherits_complete_broker_pair
 test_omp_prewalk_threads_native_target_and_metadata
 test_omp_unusable_prewalk_target_keeps_full_starting_model_trajectory
 test_omp_prewalk_accepts_colon_selector_from_launch_worktree_catalog

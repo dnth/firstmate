@@ -26,16 +26,26 @@ TMUX_STATE="$TMP_ROOT/remote-tmux.state"
 CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects" "$REMOTE_ROOT" "$CLAIMS"
 cleanup() {
-  local worker_pid='' wait_attempt=0
+  local worker_pid='' supervisor_pid='' supervisor_command='' wait_attempt=0
   touch "$TMP_ROOT/provision.release" "$TMP_ROOT/seed.release" "$TMP_ROOT/handoff.release" \
     "$TMP_ROOT/inherit.release" "$TMP_ROOT/launch.release" 2>/dev/null || true
   FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" \
     "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
   if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then
     worker_pid=$(cat "$TMP_ROOT/remote-jobs/worker.pid")
-    kill "$worker_pid" 2>/dev/null || true
-    while kill -0 "$worker_pid" 2>/dev/null && [ "$wait_attempt" -lt 100 ]; do
+    supervisor_pid=$(ps -p "$worker_pid" -o ppid= 2>/dev/null | tr -d '[:space:]')
+    case "$supervisor_pid" in
+      ''|*[!0-9]*|0|1) supervisor_pid='' ;;
+      *) supervisor_command=$(ps -p "$supervisor_pid" -o command= 2>/dev/null || true) ;;
+    esac
+    case "$supervisor_command" in
+      *"$REMOTE_ROOT/bin/fm-remote-job-worker.sh"*) kill "$supervisor_pid" 2>/dev/null || true ;;
+      *) supervisor_pid=''; kill "$worker_pid" 2>/dev/null || true ;;
+    esac
+    while { [ -n "$supervisor_pid" ] && kill -0 "$supervisor_pid" 2>/dev/null; } \
+      || kill -0 "$worker_pid" 2>/dev/null; do
       wait_attempt=$((wait_attempt + 1))
+      [ "$wait_attempt" -lt 100 ] || break
       sleep 0.05
     done
   fi

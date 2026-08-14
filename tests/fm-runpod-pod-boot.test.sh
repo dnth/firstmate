@@ -92,7 +92,7 @@ new_world() {  # <name> -> world dir
   # These are only the neutral utilities the boot needs; provisioned tools live
   # in fakebin and disappear for real when a replacement pod is simulated.
   for tool in awk bash cat chmod cp date dirname env grep head id ln mkdir mktemp mv \
-    readlink rm sed seq sleep timeout uname; do
+    readlink rm sed seq sleep stat timeout uname; do
     ln -s "$(command -v "$tool")" "$w/basebin/$tool"
   done
   ln -s "$REAL_JQ" "$w/basebin/jq"
@@ -178,16 +178,23 @@ SH
   cat > "$fakebin/curl" <<'SH'
 #!/usr/bin/env bash
 printf 'curl %s\n' "$*" >> "$FM_FAKE_CALLS"
-out= url=
+out= url= cfg=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -o) shift; out=${1:-} ;;
+    --config) shift; cfg=${1:-} ;;
     http://*|https://*) url=$1 ;;
   esac
   shift || break
 done
+if [ -n "$cfg" ]; then
+  url=$(sed -n 's/^url = "\(.*\)"$/\1/p' "$cfg" | head -1)
+fi
 if [ -n "$out" ]; then : > "$out"; exit 0; fi
 case "$url" in
+  http://127.0.0.1:8765/v1/snapshot)
+    printf '%s\n' '{"generation":1,"credentials":[]}'
+    ;;
   *api.github.com/repos/cli/cli/releases/latest*)
     printf '{"tag_name": "v2.99.0", "name": "GitHub CLI 2.99.0"}\n'
     ;;
@@ -315,7 +322,7 @@ printf 'public\n' > "$key.pub"
 SH
   cat > "$fakebin/sshd" <<'SH'
 #!/usr/bin/env bash
-printf 'sshd start\n' >> "$FM_FAKE_CALLS"
+printf 'sshd %s\n' "$*" >> "$FM_FAKE_CALLS"
 exit 0
 SH
   printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/unzip"
@@ -344,6 +351,8 @@ world_env() {  # <world> [harness]; exports into the calling subshell
   export FM_FAKE_BUN_TEMPLATE="$w/templates/bun"
   export FM_FAKE_CLAUDE_SETUP="$ROOT/bin/fm-claude-headless-setup.sh"
   export FM_SYSTEM_SSH_DIR="$w/system-ssh"
+  export FM_OMP_AUTH_BROKER_TOKEN_FILE="$w/volume/persistent-runtime/omp-auth-broker.token"
+  export OMP_AUTH_BROKER_URL=http://127.0.0.1:8765
   export FM_SSHD_FALLBACK="$w/fakebin/sshd"
   export FM_PASSWD_FILE="$w/etc/passwd"
   export FM_DURABLE_ROOT_FILE="$w/etc/durable-root"
@@ -356,6 +365,8 @@ world_env() {  # <world> [harness]; exports into the calling subshell
 provision_only() {  # <world> [harness]
   local w=$1 harness=${2:-}
   mkdir -p "$w/volume/persistent-runtime"
+  printf '%s' 'dummy_boot_broker_token_123' > "$w/volume/persistent-runtime/omp-auth-broker.token"
+  chmod 600 "$w/volume/persistent-runtime/omp-auth-broker.token"
   : > "$w/volume/persistent-runtime/boot.log"
   rm -f "$w/volume/persistent-runtime/boot.ready"
   (
@@ -368,6 +379,9 @@ provision_only() {  # <world> [harness]
       kill -0 "$boot_pid" 2>/dev/null || break
       sleep 0.1
     done
+    if ! grep -qF 'boot complete; holding the pod open' "$w/volume/persistent-runtime/boot.log" 2>/dev/null; then
+      cat "$w/volume/persistent-runtime/boot.log" >&2
+    fi
     kill "$boot_pid" 2>/dev/null || true
     wait "$boot_pid" 2>/dev/null || true
   )
@@ -413,6 +427,14 @@ assert_present "$w/volume/persistent-runtime/toolchain.provisioned" "a completed
 assert_grep 'runpod-root-sandbox-v1' "$w/volume/persistent-runtime/runpod-root-sandbox" \
   "boot did not publish the provider-owned root-sandbox marker"
 pass "first boot clones the code root and installs the required toolchain through the pinned installers"
+
+assert_contains "$calls" \
+  "sshd -t -o AllowTcpForwarding=remote -o GatewayPorts=no -o PermitListen=127.0.0.1:8765" \
+  "pod boot did not validate the scoped remote-forward-only sshd policy"
+assert_contains "$calls" \
+  "sshd -o AllowTcpForwarding=remote -o GatewayPorts=no -o PermitListen=127.0.0.1:8765" \
+  "pod boot did not start sshd with the scoped remote-forward-only policy"
+pass "pod sshd validates and starts with only the broker loopback reverse-forward permitted"
 
 # Bare SSH login shells and interactive shells do not inherit the boot process's
 # PATH, so both account startup files must independently recover the durable bin.
@@ -700,7 +722,7 @@ out=$(
 )
 assert_contains "$out" "volume-backed host key could not be restored or persisted" \
   "a host-key persistence failure must refuse before SSH starts"
-assert_not_contains "$(cat "$w6/calls.log")" "sshd start" \
+assert_not_contains "$(cat "$w6/calls.log")" "sshd -o AllowTcpForwarding=remote" \
   "sshd must not start with a container-local host identity"
 assert_absent "$w6/volume/persistent-runtime/boot.ready" \
   "a host-key persistence failure must never record readiness"
@@ -728,7 +750,7 @@ rm -rf "$w4/origin"        # provisioning cannot obtain a code root, so it MUST 
 boot_log="$w4/volume/persistent-runtime/boot.log"
 assert_present "$boot_log" "a failing boot must still leave its log on the volume"
 log_text=$(cat "$boot_log" 2>/dev/null)
-assert_contains "$(cat "$w4/calls.log")" "sshd start" \
+assert_contains "$(cat "$w4/calls.log")" "sshd -o AllowTcpForwarding=remote" \
   "the failing boot must actually invoke sshd before provisioning"
 assert_contains "$log_text" "started sshd on port 22" \
   "sshd must come up BEFORE provisioning so a failure is diagnosable"

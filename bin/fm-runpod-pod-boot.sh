@@ -46,12 +46,21 @@
 # --check prints the provisioning plan as one `ensure=<item>` line per step and
 # exits without touching the system, so the contract is testable with no pod.
 #
+# Usage:
+#   fm-runpod-pod-boot.sh
+#   fm-runpod-pod-boot.sh --check
+#   fm-runpod-pod-boot.sh --install-omp-auth-broker-token < token-file
+#   fm-runpod-pod-boot.sh --check-omp-auth-broker-client
+#   fm-runpod-pod-boot.sh --help
+#
 # The pod is contracted to reach FULL parity with a local second mate: every
 # worker harness its crew dispatch can select, the universal toolchain, the
 # code-intelligence CLI, and a browser. Every one of them installs UNDER THE
 # VOLUME, so the setup cost is paid once per volume rather than once per pod.
-# Credentials are never copied or injected here: each runtime is logged in
-# interactively once, and the durable account home is what keeps that login.
+# Codex, Claude, and gh credentials still use the durable account home.
+# OMP is the deliberate exception: its subscription credentials stay in the
+# workstation auth broker, and this pod receives only a mode-600 bearer plus a
+# loopback endpoint reached through the workstation-owned reverse tunnel.
 #
 # The volume is mounted at /workspace. Durable remote state lives under it:
 #   /workspace/firstmate            the remote Firstmate code root
@@ -83,10 +92,14 @@ export IS_SANDBOX
 
 # Raise this when the provisioning contract changes so existing volumes
 # re-provision exactly once instead of silently keeping an older toolchain.
-FM_TOOLCHAIN_CONTRACT=5
+FM_TOOLCHAIN_CONTRACT=6
 FM_TOOLCHAIN_MARKER="$FM_PERSIST/toolchain.provisioned"
 FM_BOOT_READY="$FM_PERSIST/boot.ready"
 FM_RUNPOD_SANDBOX_MARKER="$FM_PERSIST/runpod-root-sandbox"
+FM_BOOT_CONTROL="$FM_PERSIST/fm-runpod-pod-boot.sh"
+FM_OMP_AUTH_BROKER_TOKEN_FILE=${FM_OMP_AUTH_BROKER_TOKEN_FILE:-$FM_PERSIST/omp-auth-broker.token}
+OMP_AUTH_BROKER_URL=${OMP_AUTH_BROKER_URL:-http://127.0.0.1:8765}
+FM_OMP_AUTH_BROKER_REMOTE_BIND=${FM_OMP_AUTH_BROKER_REMOTE_BIND:-127.0.0.1:8765}
 FM_LOCAL_BIN=${FM_LOCAL_BIN:-$FM_PERSIST/bin}
 FM_NPM_PREFIX=${FM_NPM_PREFIX:-$FM_PERSIST/npm}
 FM_NODE_ROOT=${FM_NODE_ROOT:-$FM_PERSIST/node}
@@ -188,6 +201,8 @@ toolchain_plan() {
   plan_step codegraph
   plan_step google-chrome
   plan_step claude-headless
+  plan_step sshd-remote-forwarding
+  plan_step omp-auth-broker-client
   [ -z "$FM_POD_HARNESS_NPM" ] || plan_step "harness:$FM_POD_HARNESS_NPM"
 }
 
@@ -276,6 +291,93 @@ ensure_runpod_sandbox_marker() {
   printf '%s\n' runpod-root-sandbox-v1 > "$tmp" || { rm -f -- "$tmp"; return 1; }
   chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
   mv -f -- "$tmp" "$FM_RUNPOD_SANDBOX_MARKER" || { rm -f -- "$tmp"; return 1; }
+}
+
+# Published before sshd starts so the workstation has one fixed, versioned
+# bootstrap interface for installing the broker bearer while the rest of the
+# durable toolchain is still provisioning.
+install_boot_control() {
+  local source source_dir target tmp
+  source_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P) || return 1
+  source=$source_dir/${BASH_SOURCE[0]##*/}
+  target=$FM_BOOT_CONTROL
+  if [ "$source" = "$target" ]; then
+    chmod 700 "$target" || return 1
+    return 0
+  fi
+  tmp="$target.tmp.$$"
+  cp -f -- "$source" "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 700 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$target" || { rm -f -- "$tmp"; return 1; }
+}
+
+mode_600() {
+  if [ "$(uname)" = Darwin ]; then
+    [ "$(stat -f %Lp "$1" 2>/dev/null || true)" = 600 ]
+  else
+    [ "$(stat -c %a "$1" 2>/dev/null || true)" = 600 ]
+  fi
+}
+
+omp_auth_broker_token_valid() {  # <token>
+  [ -n "$1" ] && [ "${#1}" -le 512 ] || return 1
+  case "$1" in *[!A-Za-z0-9_-]*) return 1 ;; esac
+}
+
+install_omp_auth_broker_token() {
+  local token tmp
+  require_volume || return 1
+  token=$(LC_ALL=C head -c 513)
+  omp_auth_broker_token_valid "$token" || {
+    log "refusing an empty, oversized, or malformed omp auth-broker bearer"
+    return 1
+  }
+  tmp="$FM_OMP_AUTH_BROKER_TOKEN_FILE.tmp.$$"
+  if ! (umask 077; printf '%s' "$token" > "$tmp"); then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$FM_OMP_AUTH_BROKER_TOKEN_FILE" || { rm -f -- "$tmp"; return 1; }
+  printf 'installed=omp-auth-broker-token\n'
+}
+
+omp_auth_broker_client_configure() {
+  local token port
+  case "$OMP_AUTH_BROKER_URL" in http://127.0.0.1:[0-9]*|http://localhost:[0-9]*) ;;
+    *) return 1 ;;
+  esac
+  port=${OMP_AUTH_BROKER_URL##*:}
+  case "$port" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || return 1
+  [ -f "$FM_OMP_AUTH_BROKER_TOKEN_FILE" ] && [ ! -L "$FM_OMP_AUTH_BROKER_TOKEN_FILE" ] \
+    && mode_600 "$FM_OMP_AUTH_BROKER_TOKEN_FILE" || return 1
+  token=$(cat "$FM_OMP_AUTH_BROKER_TOKEN_FILE") || return 1
+  omp_auth_broker_token_valid "$token" || return 1
+  OMP_AUTH_BROKER_TOKEN=$token
+  export OMP_AUTH_BROKER_URL OMP_AUTH_BROKER_TOKEN FM_OMP_AUTH_BROKER_TOKEN_FILE
+}
+
+check_omp_auth_broker_client() {
+  omp_auth_broker_client_configure || return 1
+  have curl || return 1
+  {
+    printf 'silent\n'
+    printf 'show-error\n'
+    printf 'fail\n'
+    printf 'max-time = "2"\n'
+    printf 'url = "%s/v1/snapshot"\n' "$OMP_AUTH_BROKER_URL"
+    printf 'header = "Authorization: Bearer %s"\n' "$OMP_AUTH_BROKER_TOKEN"
+  } | curl --config - >/dev/null 2>&1 || return 1
+  printf 'auth-broker=ready mode=credential-read-only\n'
+}
+
+wait_for_omp_auth_broker_client() {
+  log "waiting for the workstation omp auth broker and reverse tunnel"
+  until check_omp_auth_broker_client >/dev/null 2>&1; do
+    sleep 2
+  done
+  log "configured omp to read subscription auth through the workstation broker"
 }
 
 # sshd resolves the login's home from the passwd database, not from this
@@ -754,17 +856,30 @@ authorize_key() {
 }
 
 start_sshd() {
-  local bin
+  local bin effective
   bin=$(command -v sshd 2>/dev/null || true)
   [ -n "$bin" ] || bin=$FM_SSHD_FALLBACK
   [ -x "$bin" ] || { log "FATAL: no sshd executable is available"; return 1; }
   mkdir -p /run/sshd /var/run/sshd 2>/dev/null || true
   if pgrep -x sshd >/dev/null 2>&1; then
-    log "sshd is already running"
+    effective=$("$bin" -T 2>/dev/null || true)
+    if ! printf '%s\n' "$effective" | grep -Eq '^allowtcpforwarding (remote|yes)$' \
+       || ! printf '%s\n' "$effective" | grep -q '^gatewayports no$' \
+       || ! printf '%s\n' "$effective" | grep -q "^permitlisten $FM_OMP_AUTH_BROKER_REMOTE_BIND$"; then
+      log "FATAL: the pre-existing sshd does not prove the scoped omp broker reverse-forward policy"
+      return 1
+    fi
+    log "sshd is already running with the scoped omp broker reverse-forward policy"
     return 0
   fi
-  "$bin" || return 1
-  log "started sshd on port 22"
+  "$bin" -t -o AllowTcpForwarding=remote -o GatewayPorts=no \
+    -o "PermitListen=$FM_OMP_AUTH_BROKER_REMOTE_BIND" || {
+      log "FATAL: sshd does not accept the scoped omp broker reverse-forward policy"
+      return 1
+    }
+  "$bin" -o AllowTcpForwarding=remote -o GatewayPorts=no \
+    -o "PermitListen=$FM_OMP_AUTH_BROKER_REMOTE_BIND" || return 1
+  log "started sshd on port 22 with one loopback-only remote-forward listener"
 }
 
 link_entrypoint() {
@@ -841,13 +956,43 @@ hold_pod() {
   done
 }
 
+usage() {
+  printf '%s\n' \
+    'Usage:' \
+    '  fm-runpod-pod-boot.sh' \
+    '  fm-runpod-pod-boot.sh --check' \
+    '  fm-runpod-pod-boot.sh --install-omp-auth-broker-token < token-file' \
+    '  fm-runpod-pod-boot.sh --check-omp-auth-broker-client' \
+    '  fm-runpod-pod-boot.sh --help'
+}
+
 main() {
-  if [ "${1:-}" = --check ]; then
-    toolchain_plan
-    exit 0
-  fi
+  case "${1:-}" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --check)
+      toolchain_plan
+      exit 0
+      ;;
+    --install-omp-auth-broker-token)
+      install_omp_auth_broker_token
+      exit $?
+      ;;
+    --check-omp-auth-broker-client)
+      check_omp_auth_broker_client
+      exit $?
+      ;;
+    '') ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
   require_volume || exit 1
   ensure_runpod_sandbox_marker || exit 1
+  install_boot_control || exit 1
   # Before anything writes under a home: everything below, including the
   # authorized key and every later login, must land on the volume.
   ensure_account_home || exit 1
@@ -888,6 +1033,11 @@ main() {
   link_durable_bins || { log "FATAL: durable tools could not be linked; connect over SSH and read $FM_BOOT_LOG"; hold_pod; }
   link_entrypoint || { log "FATAL: the remote entrypoint could not be linked; connect over SSH and read $FM_BOOT_LOG"; hold_pod; }
   ensure_claude_headless || { log "FATAL: Claude headless setup failed; connect over SSH and read $FM_BOOT_LOG"; hold_pod; }
+  # The workstation installs the bearer through the fixed boot-control path as
+  # soon as sshd is reachable, then starts the loopback-only reverse tunnel.
+  # Do not start the long-lived Herdr server before these exports exist: every
+  # OMP secondmate and OMP crew pane must inherit the broker client path.
+  wait_for_omp_auth_broker_client
   until hand_over_to_doctor; do
     log "remote readiness is incomplete; SSH is available for the required human steps"
     sleep 5

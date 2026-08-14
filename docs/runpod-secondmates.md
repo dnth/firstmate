@@ -34,7 +34,8 @@ One network volume per RunPod second mate, named `fm-sm-<id>-runpod`, holds ever
 ```
 
 The account home is on the volume on purpose.
-Every worker runtime and `gh` writes its credential under the account home, so on a container-local home each login would die with the pod and setup would be once per pod.
+Claude, Codex, other pod-local worker runtimes, and `gh` write their credentials under the account home, so on a container-local home each login would die with the pod and setup would be once per pod.
+OMP is the deliberate exception because its subscription credentials remain in the workstation auth broker described below.
 Boot rewrites the account's entry in the pod's own `/etc/passwd` so an SSH login lands there, and writes the volume path to `/etc/firstmate/durable-root` so `bin/fm-remote-doctor.sh --parity` can verify it.
 That single move covers every runtime at once instead of one credential-directory variable per tool.
 
@@ -92,6 +93,10 @@ Bring the host up with the CPU default:
 bin/fm-runpod.sh wake <id>
 ```
 
+Wake obtains the workstation's existing `omp auth-broker token` without rotating it, starts or reuses the loopback broker, starts the credential-read-only facade, installs a mode-600 bearer on the pod, and starts the supervised SSH reverse tunnel.
+It does not place the bearer in the RunPod environment or any command argument.
+The pod does not reach readiness until it can read a broker snapshot through that tunnel.
+
 Alternatively, request GPU compute, optionally with a minimum VRAM floor:
 
 ```sh
@@ -99,7 +104,9 @@ bin/fm-runpod.sh wake <id> --gpu
 bin/fm-runpod.sh wake <id> --min-vram 24
 ```
 
-After a volume's first wake reaches ready, log each runtime in once: use `bin/fm-runpod.sh ssh <id>`, run each harness's own login, and run `gh auth login`.
+After a volume's first wake reaches ready, log each pod-local runtime in once: use `bin/fm-runpod.sh ssh <id>`, run the Claude and Codex login flows, run any other selected harness's login, and run `gh auth login`.
+Do not run OMP login, logout, import, or migrate on the pod.
+OMP reads the workstation's existing Claude and GPT subscription credentials through the broker instead.
 SSH also becomes available before toolchain provisioning finishes, so it can be used from another terminal to diagnose a wake that is still waiting.
 Boot places `$HOME/.local/bin` first in the durable account's `.profile` and `.bashrc`, and reconciles retained `.bash_profile` or `.bash_login` files that take precedence for Bash login shells, so bare SSH login and interactive shells resolve the same installed harnesses as the fixed remote entrypoint.
 Conventional startup-file symlinks whose resolved regular-file targets remain inside the durable account home are preserved and reconciled at their targets; broken links, non-regular targets, and links escaping that home are refused.
@@ -118,7 +125,7 @@ bin/fm-spawn.sh <id> --secondmate
 The first wake provisions the toolchain before this step, so the code root and required tools are already in place.
 Every RunPod home converges its crew dispatch after inherited configuration lands.
 Its `config/crew-harness` selects Codex as the genuine primary, and `config/crew-harness-fallback` selects Claude only when the supported predictive fallback trigger proves Codex unavailable or at zero effective headroom.
-That provider-owned layer affects crews only; the remote second-mate agent stays on the separately configured secondmate harness, which should remain Claude on this host.
+That provider-owned layer affects crews only; the remote second-mate agent stays on the separately configured secondmate harness and may now use OMP on this host.
 
 From here it is an ordinary remote second mate.
 Route work to it, steer it, and hand it backlog with the normal commands.
@@ -253,31 +260,76 @@ The pod image must provide glibc 2.34 or newer.
 The pinned default is an official RunPod Ubuntu 22.04 base for that reason: the pinned treehouse build requires GLIBC_2.34, so an Ubuntu 20.04 image downloads it successfully and then cannot execute it, which fails first-boot provisioning.
 Override the image only with one that meets that floor.
 
-Every worker harness, and `gh`, still needs its own interactive login as a human step.
-Credentials are never copied from the primary, never injected as pod environment variables, and never API keys: each runtime is logged in once over `bin/fm-runpod.sh ssh <id>`, and the durable account home is what keeps that login across pod replacement.
+Every pod-local worker harness other than OMP, and `gh`, still needs its own interactive login as a human step.
+Those credentials are never copied from the primary or injected as pod environment variables: each runtime is logged in once over `bin/fm-runpod.sh ssh <id>`, and the durable account home is what keeps that login across pod replacement.
 The doctor checks that the account home is under the declared durable root, which is the structural guarantee that a completed login is once per volume.
 It deliberately does not try to read or report whether a given harness is logged in: that verdict would come from vendor-specific credential files this repository cannot prove against the real harnesses, and a check that cannot be proven is worse than an honest human step.
 
-OMP's OAuth callback login is a known exception on the current RunPod image.
-The live pilot observed `omp auth-broker login <provider>` and its `--via` form fail with `EADDRINUSE` while binding the localhost callback, even though a plain Node process could bind loopback on the same pod.
-The precise cause has not been established, so double binding, dual-stack behavior, and the Bun or OMP version remain hypotheses for a future operator session on a live pod.
-Use the default Codex subscription route, its Claude subscription fallback, or `OPENCODE_API_KEY` with an `opencode-go/deepseek` model instead.
-On a RunPod parity check, `bin/fm-remote-doctor.sh` prints this limitation as an informational `note omp-oauth=` line without changing readiness.
+OMP's interactive OAuth callback remains unusable on the current headless pod image, so OMP is configured as a remote broker client instead of being logged in on the pod.
+The live pilot's `EADDRINUSE` observation remains evidence about the rejected pod-local login path, not a dependency of the broker design.
+
+## OMP subscription auth through the workstation
+
+The workstation is the only credential writer and runs `omp auth-broker serve` against its already logged-in Claude and GPT subscription credentials.
+`bin/fm-runpod-omp-auth.sh` supervises that broker, a credential-read-only loopback facade, and one `ssh -R` tunnel per awake pod.
+The reverse tunnel publishes `http://127.0.0.1:8765` only on the pod and forwards it to the workstation facade, not directly to the unrestricted broker port.
+The SSH client uses `ExitOnForwardFailure=yes`, `ServerAliveInterval=15`, and `ServerAliveCountMax=3`, and its supervisor restarts the connection after every drop.
+Pod sshd accepts remote forwarding only, keeps `GatewayPorts` off, and permits only the broker loopback listener.
+
+The workstation bearer copy is `<FM_HOME>/config/runpod/omp-auth-broker.token` and the pod copy is `/workspace/persistent-runtime/omp-auth-broker.token`.
+Both are regular mode-600 files.
+The bearer never appears in RunPod pod environment fields, SSH arguments, generated SSH fragments, endpoint metadata, logs, or tracked files.
+The pod's OMP launch receives `OMP_AUTH_BROKER_URL` and expands `OMP_AUTH_BROKER_TOKEN` from the mode-600 file inside the backend pane, after the literal command has crossed the terminal transport.
+Descendant OMP crews retain the safe token-file path and repeat the same launch-time expansion.
+
+Installed OMP exposes remote credential-write hooks in addition to the local synchronous methods that throw on a `RemoteAuthCredentialStore`.
+The facade therefore enforces the required operational read-only boundary rather than relying on a client convention.
+It permits snapshot and usage reads plus `POST /v1/credential/<id>/refresh`, because refresh executes on the workstation broker and the refresh token never leaves that process.
+It rejects credential upload, replacement, disable, login, logout, import, and migrate requests before they reach the canonical broker.
+This leaves one OAuth refresh writer on the workstation and avoids the dual-writer rotation lockout.
+
+This design has a hard workstation-online dependency.
+If the workstation sleeps, shuts down, loses its network path, stops the broker, or loses the tunnel, the pod's OMP loses Claude and GPT auth until that path returns.
+An in-process tunnel supervisor reconnects automatically after an ordinary SSH or network drop.
+After a workstation reboot, run `bin/fm-runpod.sh wake <id>` again to recreate the workstation supervisors and tunnel for an already-running pod.
+The pod remains billable while boot waits for this dependency, so do not leave a first wake unattended with the workstation about to go offline.
+Claude and Codex pod-local logins are independent of this dependency and continue to use the durable account home.
+
+Inspect the workstation side without revealing the bearer:
+
+```sh
+bin/fm-runpod-omp-auth.sh status <id>
+```
+
+The expected state is `broker=running`, `proxy=running`, and `tunnel-<id>=running`.
+
+### Live end-to-end verification at the next pod-awake window
+
+The portable suite does not wake a pod or spend RunPod compute.
+Use this runbook during the next approved awake window:
+
+1. On the workstation, run `curl -fsS --max-time 2 http://127.0.0.1:8765/v1/healthz >/dev/null`; reuse that single canonical writer when the command succeeds, or run `omp auth-broker serve --bind=127.0.0.1:8765` in a dedicated terminal and leave it running for the verification window when the command fails.
+2. In another workstation terminal, run `bin/fm-runpod.sh wake <id>` and wait for the `ready:` line.
+3. Run `bin/fm-runpod-omp-auth.sh status <id>` and confirm the broker, facade, and named tunnel all report `running`.
+4. Connect with `bin/fm-runpod.sh ssh <id>` and run `/workspace/persistent-runtime/fm-runpod-pod-boot.sh --check-omp-auth-broker-client`.
+5. In that pod shell, run `OMP_AUTH_BROKER_URL=http://127.0.0.1:8765 OMP_AUTH_BROKER_TOKEN="$(cat /workspace/persistent-runtime/omp-auth-broker.token)" omp auth-broker status --json` and confirm the JSON reports usable Claude and GPT subscription credentials without printing the token.
+6. Configure the primary home's `config/secondmate-harness` for OMP, launch with `bin/fm-spawn.sh <id> --secondmate`, and send the second mate this bounded request:
+
+```text
+Spawn exactly two crews through the ordinary guarded lifecycle.
+Launch the first with harness `omp`, model `anthropic/claude-opus-4-8`, and effort `low`; ask it to reply exactly `claude-broker-ok` and then stop.
+Launch the second with harness `omp`, model `openai-codex/gpt-5.6-sol`, and effort `low`; ask it to reply exactly `gpt-broker-ok` and then stop.
+Report both task ids and responses without launching any native Claude or Codex crew.
+```
+
+7. Confirm the two OMP task records retain their explicit model selectors and both crews reach their first turn with the requested response.
+8. Land or tear down both crews through the normal guarded lifecycle before running `bin/fm-runpod.sh sleep <id>`.
+
+The runbook is intentionally operator-run because the pod is suspended and waking it solely for validation would incur cost.
 
 `--harness-npm` remains available for an optional extra npm harness beyond the parity set; the parity set is installed either way, so leaving it unset is the normal case.
 
 ## Verification
 
 [`verification/runpod-secondmates.md`](verification/runpod-secondmates.md) records the dated portable evidence and its no-live-pod boundary.
-The portable tests drive the real provider against a stateful mocked RunPod REST double and a faked SSH boundary, so no account, key, or paid resource is involved:
-
-```sh
-bin/fm-test-run.sh tests/fm-runpod-lifecycle.test.sh
-bin/fm-test-run.sh tests/fm-runpod-routing.test.sh
-bin/fm-test-run.sh tests/fm-runpod-pod-boot.test.sh
-```
-
-The lifecycle suite covers idempotent provision and wake, exactly one pod under concurrent wakes, CPU and GPU exclusivity, RunPod's 40 GB container-disk limit, endpoint refresh with a stable pinned host identity, provider-state stall diagnosis, never-ready recovery, every sleep guard, volume retention, and the guarded destroy path.
-The routing suite covers provider-owned crew dispatch, dormant watcher handling, supervision, convergence, and delivery wiring, including that an ordinary remote route and a local second mate are unaffected.
-
-Real provisioning against a RunPod account remains an operator-run smoke test and is not claimed by the repository tests.
+That record owns the exact commands, coverage, and operator-only verification boundary so this operator guide does not duplicate evidence that changes with the suite.

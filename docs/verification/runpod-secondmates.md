@@ -3,7 +3,7 @@
 Audience: maintainer verification.
 
 This record supports the current deterministic guarantees in [`runpod-secondmates.md`](../runpod-secondmates.md).
-It records the portable provider and SSH boundary only.
+It records the portable provider and SSH boundary plus the installed OMP broker surface that the authentication design depends on.
 Real provisioning, vendor authentication, and Claude or OMP prompt behavior on a paid pod remain operator smoke tests.
 
 ## Portable lifecycle and routing matrix
@@ -14,11 +14,12 @@ Verified 2026-08-14 against the stateful RunPod REST double in `tests/runpod-fix
 bin/fm-test-run.sh tests/fm-runpod-lifecycle.test.sh
 bin/fm-test-run.sh tests/fm-runpod-routing.test.sh
 bin/fm-test-run.sh tests/fm-runpod-pod-boot.test.sh
+bin/fm-test-run.sh tests/fm-runpod-omp-auth.test.sh
+bin/fm-test-run.sh tests/fm-spawn-dispatch-profile.test.sh
 bin/fm-test-run.sh tests/fm-remote-doctor.test.sh
 bin/fm-test-run.sh tests/fm-remote-job.test.sh
 bin/fm-test-run.sh tests/fm-remote-entrypoint.test.sh
 bin/fm-test-run.sh tests/fm-secondmate-harness.test.sh
-bin/fm-test-run.sh tests/fm-spawn-dispatch-profile.test.sh
 ```
 
 The recorded lifecycle results are:
@@ -62,3 +63,81 @@ The provider double returns independently modeled `desiredStatus` and `status` f
 The SSH double separates boot readiness, host-key scanning, and remote command delivery, so a successful provider response cannot stand in for successful SSH bootstrap.
 No command above reads a real RunPod key, creates a real pod, or exercises a paid resource.
 The precise OMP `EADDRINUSE` root cause remains unverified and requires a future operator reproduction on a live pod.
+
+## OMP broker surface and read-only boundary
+
+Verified 2026-08-14 against installed `omp/17.2.11` at `/home/dnth/.bun/bin/omp`.
+
+```sh
+omp --version
+omp auth-broker --help
+omp auth-broker serve --help
+omp auth-broker token --help
+nl -ba /home/dnth/.bun/install/global/node_modules/@oh-my-pi/pi-ai/src/auth-broker/discover.ts \
+  | sed -n '199p;200p;217p;218p;219p;220p;222p;226p;289p;290p;291p;295p;299p;300p'
+nl -ba /home/dnth/.bun/install/global/node_modules/@oh-my-pi/pi-ai/src/auth-broker/remote-store.ts \
+  | sed -n '647p;648p;649p;653p;654p;655p;659p;660p;661p;672p;673p;684p;691p;704p;716p;720p'
+```
+
+The bounded help output was:
+
+```text
+omp/17.2.11
+USAGE
+  $ omp auth-broker [ACTION] [SOURCE] [FLAGS]
+ARGUMENTS
+  ACTION   Sub-command (serve|token|login|logout|import|migrate|status|list)
+FLAGS
+  -b, --bind=<value>      Bind address for `serve` (host:port)
+EXAMPLES
+    omp auth-broker serve
+    omp auth-broker serve --bind=127.0.0.1:9000
+    omp auth-broker token
+```
+
+The bounded discovery output was:
+
+```text
+199     const envUrl = process.env.OMP_AUTH_BROKER_URL;
+200     const envToken = process.env.OMP_AUTH_BROKER_TOKEN;
+217     const token =
+218             (envToken && envToken.length > 0 ? envToken : undefined) ?? configToken ?? (await readTokenFile()) ?? undefined;
+219     if (!token) {
+220             throw new AIError.MissingApiKeyError(
+222                     `OMP_AUTH_BROKER_URL is set (${url}) but no bearer token is available. ` +
+226     return { url, token };
+289     const store = new RemoteAuthCredentialStore({
+290             client,
+291             initialSnapshot,
+295     const storage = new AuthStorage(store, {
+299     await storage.reload();
+300     return storage;
+```
+
+The bounded mutation-boundary output was:
+
+```text
+647     replaceAuthCredentialsForProvider(_provider: string, _credentials: AuthCredential[]): StoredAuthCredential[] {
+648             throw new AIError.AuthBrokerError(
+649                     "RemoteAuthCredentialStore is read-only on the client. Use `omp auth-broker login <provider>` to mutate credentials.",
+653     upsertAuthCredentialForProvider(_provider: string, _credential: AuthCredential): StoredAuthCredential[] {
+654             throw new AIError.AuthBrokerError(
+655                     "RemoteAuthCredentialStore is read-only on the client. Use `omp auth-broker login <provider>` to mutate credentials.",
+659     deleteAuthCredentialsForProvider(_provider: string, _disabledCause: string): void {
+660             throw new AIError.AuthBrokerError(
+661                     "RemoteAuthCredentialStore is read-only on the client. Use `omp auth-broker logout <provider>` to mutate credentials.",
+672     async upsertAuthCredentialRemote(provider: string, credential: AuthCredential): Promise<StoredAuthCredential[]> {
+673             const { entries } = await this.#client.uploadCredential(provider, credential);
+684     async replaceAuthCredentialsRemote(
+691                     await this.#client.disableCredential(entry.id, "replaced by newer credential");
+704             const { entries } = await this.#client.uploadCredential(provider, credential);
+716     async deleteAuthCredentialsRemote(provider: string, disabledCause: string): Promise<void> {
+720                     await this.#client.disableCredential(entry.id, disabledCause);
+```
+
+The installed broker uses one bearer allow-list for both reads and writes, so the token itself has no credential-read-only scope.
+That evidence is why the RunPod tunnel terminates at `bin/fm-omp-auth-broker-readonly-proxy.mjs` instead of the unrestricted broker port.
+
+The mocked regression suite proves the active boundary without a live pod or network account.
+It installs the pod bearer through the boot script's public interface and checks mode 0600, exercises the public remote launch path and OMP pane-launch construction, verifies that credential upload and disable never reach the fake canonical broker, permits broker-side refresh, and forces two SSH drops before confirming a third tunnel attempt with the required keepalive flags.
+The live pod end-to-end runbook remains documented in [`runpod-secondmates.md`](../runpod-secondmates.md#live-end-to-end-verification-at-the-next-pod-awake-window) and was not executed because the pod was suspended and waking it solely for validation would incur cost.

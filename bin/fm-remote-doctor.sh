@@ -879,7 +879,7 @@ fi
 if [ "$PARITY" -eq 1 ]; then
   printf '%s\n' ${PARITY_LINES[@]+"${PARITY_LINES[@]}"}
   if [ "${IS_SANDBOX:-}" = 1 ]; then
-    printf '%s\n' 'note omp-oauth=RunPod root-sandbox callback login is known to fail with EADDRINUSE; use Codex or Claude subscription auth, or OPENCODE_API_KEY with an opencode-go/deepseek model; exact Bun/OMP root cause needs a live-pod operator repro'
+    printf '%s\n' 'note omp-oauth=RunPod pod-local callback login remains known to fail with EADDRINUSE; configure OMP through the workstation auth broker and read-only SSH tunnel owned by docs/runpod-secondmates.md'
   fi
 fi
 for tool in "${OPTIONAL_TOOLS[@]}"; do

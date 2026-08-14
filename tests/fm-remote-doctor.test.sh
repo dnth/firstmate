@@ -714,6 +714,8 @@ assert_contains "$DOCTOR_OUT" 'note omp-oauth=' \
   "a RunPod parity report omitted the known OMP OAuth callback limitation"
 assert_contains "$DOCTOR_OUT" 'EADDRINUSE' \
   "the RunPod OMP OAuth note omitted the observed failure signature"
+assert_contains "$DOCTOR_OUT" 'workstation auth broker' \
+  "the RunPod OMP OAuth note did not route operators to the supported broker path"
 unset CASE_IS_SANDBOX
 pass "RunPod parity reports the observed OMP OAuth limitation without failing readiness"
 

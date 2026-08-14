@@ -3216,11 +3216,56 @@ fi
 if [ "$HARNESS" = claude ] && [ "${IS_SANDBOX:-}" = 1 ]; then
   LAUNCH="IS_SANDBOX=1 $LAUNCH"
 fi
+# A RunPod secondmate carries the safe broker coordinates to its descendants,
+# and each OMP launch receives the workstation broker through a loopback-only
+# reverse tunnel.
+# The bearer stays in its mode-600 pod file until the pane shell expands this
+# command substitution, so it never enters fm-spawn argv, metadata, output, or
+# the literal launch text sent through the backend.
+if [ -n "${FM_OMP_AUTH_BROKER_URL:-}" ] || [ -n "${FM_OMP_AUTH_BROKER_TOKEN_FILE:-}" ]; then
+  [ -n "${FM_OMP_AUTH_BROKER_URL:-}" ] && [ -n "${FM_OMP_AUTH_BROKER_TOKEN_FILE:-}" ] \
+    || { echo "error: OMP auth-broker URL and token file must be supplied together" >&2; exit 1; }
+  case "$FM_OMP_AUTH_BROKER_URL" in
+    http://127.0.0.1:[0-9]*|http://localhost:[0-9]*) ;;
+    *) echo "error: OMP auth-broker URL must be a loopback HTTP endpoint" >&2; exit 1 ;;
+  esac
+  OMP_AUTH_BROKER_PORT=${FM_OMP_AUTH_BROKER_URL##*:}
+  case "$OMP_AUTH_BROKER_PORT" in
+    ''|*[!0-9]*) echo "error: OMP auth-broker URL has an invalid port" >&2; exit 1 ;;
+  esac
+  [ "$OMP_AUTH_BROKER_PORT" -ge 1 ] && [ "$OMP_AUTH_BROKER_PORT" -le 65535 ] \
+    || { echo "error: OMP auth-broker URL has an invalid port" >&2; exit 1; }
+  [ -f "$FM_OMP_AUTH_BROKER_TOKEN_FILE" ] && [ ! -L "$FM_OMP_AUTH_BROKER_TOKEN_FILE" ] \
+    || { echo "error: OMP auth-broker token file is missing or unsafe" >&2; exit 1; }
+  if [ "$(uname)" = Darwin ]; then
+    OMP_AUTH_TOKEN_MODE=$(stat -f %Lp "$FM_OMP_AUTH_BROKER_TOKEN_FILE" 2>/dev/null || true)
+  else
+    OMP_AUTH_TOKEN_MODE=$(stat -c %a "$FM_OMP_AUTH_BROKER_TOKEN_FILE" 2>/dev/null || true)
+  fi
+  [ "$OMP_AUTH_TOKEN_MODE" = 600 ] \
+    || { echo "error: OMP auth-broker token file must have mode 0600" >&2; exit 1; }
+  OMP_AUTH_TOKEN_CHECK=$(cat "$FM_OMP_AUTH_BROKER_TOKEN_FILE") \
+    || { echo "error: OMP auth-broker token file is unreadable" >&2; exit 1; }
+  [ -n "$OMP_AUTH_TOKEN_CHECK" ] && [ "${#OMP_AUTH_TOKEN_CHECK}" -le 512 ] \
+    || { echo "error: OMP auth-broker token is invalid" >&2; exit 1; }
+  case "$OMP_AUTH_TOKEN_CHECK" in
+    *[!A-Za-z0-9_-]*) echo "error: OMP auth-broker token is invalid" >&2; exit 1 ;;
+  esac
+  unset OMP_AUTH_BROKER_PORT OMP_AUTH_TOKEN_CHECK OMP_AUTH_TOKEN_MODE
+  sq_omp_auth_url=$(shell_quote "$FM_OMP_AUTH_BROKER_URL")
+  sq_omp_auth_token_file=$(shell_quote "$FM_OMP_AUTH_BROKER_TOKEN_FILE")
+  if [ "$HARNESS" = omp ]; then
+    LAUNCH="OMP_AUTH_BROKER_URL=$sq_omp_auth_url OMP_AUTH_BROKER_TOKEN=\"\$(cat $sq_omp_auth_token_file)\" FM_OMP_AUTH_BROKER_URL=$sq_omp_auth_url FM_OMP_AUTH_BROKER_TOKEN_FILE=$sq_omp_auth_token_file $LAUNCH"
+  fi
+fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")
   if [ "$HARNESS" = omp ]; then
     LAUNCH="FM_OMP_SESSION_POINTER=$(shell_quote "$OMP_SESSION_POINTER") $LAUNCH"
+  fi
+  if [ -n "${FM_OMP_AUTH_BROKER_URL:-}" ] && [ "$HARNESS" != omp ]; then
+    LAUNCH="FM_OMP_AUTH_BROKER_URL=$sq_omp_auth_url FM_OMP_AUTH_BROKER_TOKEN_FILE=$sq_omp_auth_token_file $LAUNCH"
   fi
   case "$HARNESS" in
     claude) supervision_model=autoarm ;;

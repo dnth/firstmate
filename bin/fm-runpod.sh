@@ -48,6 +48,11 @@
 # fresh pod reaches readiness with no manual clone. --harness-npm names an
 # OPTIONAL EXTRA npm harness beyond that set; each runtime's own login stays a
 # human step either way. bin/fm-runpod-pod-boot.sh owns that contract.
+# OMP subscription auth is the exception to the pod-local login rule.
+# Wake starts the workstation broker, its credential-read-only facade, and a
+# loopback-only SSH reverse tunnel through bin/fm-runpod-omp-auth.sh before it
+# waits for boot readiness.
+# Sleep retires the named pod's tunnel after provider termination succeeds.
 #
 # SSH: wake regenerates <FM_HOME>/config/runpod/ssh.d/<alias>.conf with the
 # pod's current HostName and Port plus a stable HostKeyAlias, and pins the pod's
@@ -82,6 +87,7 @@
 #   FM_RUNPOD_KEYSCAN_BIN   ssh-keyscan executable, default ssh-keyscan
 #   FM_RUNPOD_WAKE_TIMEOUT  seconds to wait for endpoint and SSH, default 1200
 #   FM_RUNPOD_POLL_INTERVAL seconds between wake polls, default 5
+#   FM_RUNPOD_OMP_AUTH_BIN  omp broker/tunnel helper, default tracked helper
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -98,6 +104,7 @@ SSH_BIN=${FM_RUNPOD_SSH_BIN:-${FM_SSH_BIN:-ssh}}
 KEYSCAN_BIN=${FM_RUNPOD_KEYSCAN_BIN:-ssh-keyscan}
 WAKE_TIMEOUT=${FM_RUNPOD_WAKE_TIMEOUT:-1200}
 POLL_INTERVAL=${FM_RUNPOD_POLL_INTERVAL:-5}
+OMP_AUTH_BIN=${FM_RUNPOD_OMP_AUTH_BIN:-$SCRIPT_DIR/fm-runpod-omp-auth.sh}
 API_KEY_FILE="$CONFIG/runpod.env"
 API_KEY_NAME=RUNPOD_API_KEY
 SSH_DIR="$CONFIG/runpod"
@@ -508,6 +515,17 @@ ssh_probe() {  # <alias> <timeout>
   "$SSH_BIN" -o BatchMode=yes -o "ConnectTimeout=$2" \
     -F "$(ssh_fragment_path "$1")" "$1" \
     test -f /workspace/persistent-runtime/boot.ready >/dev/null 2>&1
+}
+
+omp_auth_start() {  # <id> <alias> <timeout>
+  [ -x "$OMP_AUTH_BIN" ] || die "RunPod OMP auth helper is unavailable: $OMP_AUTH_BIN"
+  FM_RUNPOD_OMP_START_TIMEOUT="$3" FM_RUNPOD_OMP_SSH_BIN="$SSH_BIN" \
+    "$OMP_AUTH_BIN" start "$1" "$2" "$(ssh_fragment_path "$2")"
+}
+
+omp_auth_stop() {  # <id>
+  [ -x "$OMP_AUTH_BIN" ] || return 0
+  FM_RUNPOD_OMP_SSH_BIN="$SSH_BIN" "$OMP_AUTH_BIN" stop "$1" >/dev/null
 }
 
 recover_endpoint_probe() {  # <alias> <host> <port> <user> <identity> <timeout>
@@ -953,6 +971,12 @@ cmd_wake() {
     "cost_per_hr=$(json_field "$pod" '.costPerHr')" \
     "pod_started_at=$(json_field "$pod" '.lastStartedAt')"
 
+  remaining=$((deadline - SECONDS))
+  [ "$remaining" -gt 0 ] \
+    || die "pod $pod_id published SSH but wake exceeded ${WAKE_TIMEOUT}s before omp broker setup"
+  omp_auth_start "$id" "$alias" "$remaining" \
+    || die "the workstation omp auth broker or its pod reverse tunnel could not be established"
+
   while :; do
     remaining=$((deadline - SECONDS))
     [ "$remaining" -gt 0 ] \
@@ -1066,6 +1090,7 @@ cmd_recover_stuck() {
   else
     provider_state='desiredStatus=absent status=absent'
   fi
+  omp_auth_stop "$id" || note "warning: stuck pod $id was removed but its workstation auth-tunnel supervisor needs manual retirement"
   rm -f -- "$(ssh_fragment_path "$(alias_for "$id")")"
   record_set "$id" "lifecycle=provisioned" "pod_id=" "endpoint_host=" "endpoint_port=" \
     "cost_per_hr=" "pod_started_at="
@@ -1178,6 +1203,7 @@ cmd_sleep() {
         ;;
     esac
   fi
+  omp_auth_stop "$id" || note "warning: pod $id stopped but its workstation auth-tunnel supervisor needs manual retirement"
   record_set "$id" "lifecycle=$lifecycle_after" "pod_id=" "endpoint_host=" "endpoint_port=" \
     "cost_per_hr=" "pod_started_at="
   if [ "$lifecycle_after" = suspended ]; then
@@ -1337,6 +1363,7 @@ cmd_destroy() {
   # Read the alias before the record goes away, or the generated fragment would
   # be orphaned with a stale endpoint in it.
   path=$(record_path "$id")
+  omp_auth_stop "$id" || note "warning: RunPod record is being destroyed but its auth-tunnel supervisor needs manual retirement"
   [ -z "$alias" ] || known_hosts_remove_alias "$alias"
   rm -f -- "$path"
   [ -z "$alias" ] || rm -f -- "$(ssh_fragment_path "$alias")"
