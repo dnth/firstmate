@@ -92,15 +92,12 @@ function writeJson(response, status, body) {
 
 const server = createServer(async (request, response) => {
   const requestUrl = new URL(request.url ?? "/", "http://127.0.0.1");
-  if (request.method === "GET" && requestUrl.pathname === "/v1/healthz") {
-    writeJson(response, 200, { ok: true, mode: "credential-read-only" });
-    return;
-  }
-  if (!authorized(request)) {
+  const isHealthz = request.method === "GET" && requestUrl.pathname === "/v1/healthz";
+  if (!isHealthz && !authorized(request)) {
     writeJson(response, 401, { error: "unauthorized" });
     return;
   }
-  if (!allowed(request.method ?? "", requestUrl.pathname)) {
+  if (!isHealthz && !allowed(request.method ?? "", requestUrl.pathname)) {
     writeJson(response, 403, { error: "credential mutation is disabled for remote clients" });
     return;
   }
@@ -123,6 +120,8 @@ const server = createServer(async (request, response) => {
     for (const [name, value] of upstreamResponse.headers) {
       if (!hopByHopHeaders.has(name.toLowerCase())) responseHeaders[name] = value;
     }
+    // OMP validates the canonical health body strictly, so facade identity belongs only in a response header.
+    if (isHealthz) responseHeaders["x-fm-auth-broker-facade"] = "credential-read-only";
     response.writeHead(upstreamResponse.status, responseHeaders);
     if (upstreamResponse.body) Readable.fromWeb(upstreamResponse.body).pipe(response);
     else response.end();

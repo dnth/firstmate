@@ -169,13 +169,18 @@ cat > "$UPSTREAM_SCRIPT" <<'JS'
 import { createServer } from "node:http";
 import { appendFileSync, writeFileSync } from "node:fs";
 const server = createServer((request, response) => {
-  appendFileSync(process.env.UPSTREAM_LOG, `${request.method} ${new URL(request.url, "http://x").pathname}\n`);
+  const requestUrl = new URL(request.url, "http://x");
+  appendFileSync(process.env.UPSTREAM_LOG, `${request.method} ${requestUrl.pathname}\n`);
   request.resume();
   request.on("end", () => {
     response.writeHead(200, { "content-type": "application/json" });
-    response.end(request.url.includes("refresh")
-      ? '{"entry":{"id":1,"provider":"anthropic","credential":{"type":"oauth","access":"redacted"}}}'
-      : '{"generation":1,"credentials":[]}');
+    if (requestUrl.pathname === "/v1/healthz") {
+      response.end('{"ok":true,"version":"17.3.4"}');
+    } else if (requestUrl.pathname.includes("refresh")) {
+      response.end('{"entry":{"id":1,"provider":"anthropic","credential":{"type":"oauth","access":"redacted"}}}');
+    } else {
+      response.end('{"generation":1,"credentials":[]}');
+    }
   });
 });
 server.listen(Number(process.env.UPSTREAM_PORT), "127.0.0.1", () => writeFileSync(process.env.UPSTREAM_READY, "ready\n"));
@@ -197,12 +202,30 @@ for _ in $(seq 1 100); do
 done
 kill -0 "$PROXY_PID" 2>/dev/null || fail "the read-only broker facade exited during startup"
 
+RAW_HEALTHZ_HEADERS="$TMP_ROOT/raw-healthz.headers"
+PROXY_HEALTHZ_HEADERS="$TMP_ROOT/proxy-healthz.headers"
+raw_healthz=$(curl -fsS -D "$RAW_HEALTHZ_HEADERS" "http://127.0.0.1:$UPSTREAM_PORT/v1/healthz")
+proxy_healthz=$(curl -fsS -D "$PROXY_HEALTHZ_HEADERS" "http://127.0.0.1:$PROXY_PORT/v1/healthz")
+[ "$proxy_healthz" = "$raw_healthz" ] \
+  || fail "the facade reshaped the canonical broker health response"
+assert_contains "$proxy_healthz" '"version":"17.3.4"' \
+  "the facade health response omitted the version required by the OMP client schema"
+assert_not_contains "$proxy_healthz" '"mode"' \
+  "the facade added a field rejected by the strict OMP health schema"
+grep -qi '^x-fm-auth-broker-facade: credential-read-only' "$PROXY_HEALTHZ_HEADERS" \
+  || fail "the facade health response omitted its readiness identity header"
+! grep -qi '^x-fm-auth-broker-facade:' "$RAW_HEALTHZ_HEADERS" \
+  || fail "the raw broker false-matched the facade readiness identity"
+
 CURL_CFG="$TMP_ROOT/proxy-curl.cfg"
 {
   printf 'silent\nshow-error\n'
   printf 'header = "Authorization: Bearer dummy_proxy_token_456"\n'
 } > "$CURL_CFG"
 chmod 600 "$CURL_CFG"
+unauthorized_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+  "http://127.0.0.1:$PROXY_PORT/v1/snapshot")
+[ "$unauthorized_code" = 401 ] || fail "unauthenticated snapshot returned HTTP $unauthorized_code, expected 401"
 curl --config "$CURL_CFG" -fsS "http://127.0.0.1:$PROXY_PORT/v1/snapshot" >/dev/null \
   || fail "the read-only facade rejected a broker snapshot read"
 mutation_code=$(curl --config "$CURL_CFG" -sS -o /dev/null -w '%{http_code}' \
@@ -221,7 +244,7 @@ assert_grep 'POST /v1/credential/1/refresh' "$UPSTREAM_LOG" \
   || fail "the pod credential-upload mutation reached the canonical broker"
 assert_no_grep 'POST /v1/credential/1/disable' "$UPSTREAM_LOG" \
   "the pod credential-disable mutation reached the canonical broker"
-pass "the pod-facing facade permits reads and workstation refresh while credential mutations never reach the broker"
+pass "the pod-facing facade preserves schema-compatible health, identifies readiness, authenticates reads, permits refresh, and blocks mutations"
 
 kill -TERM "$PROXY_PID" "$UPSTREAM_PID" 2>/dev/null || true
 wait "$PROXY_PID" 2>/dev/null || true
@@ -239,7 +262,15 @@ mkdir -p "$TUNNEL_HOME/state" "$TUNNEL_HOME/config" "$TUNNEL_BIN"
 printf 'Host pod-alias\n' > "$TMP_ROOT/pod.conf"
 cat > "$TUNNEL_BIN/curl" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' '{"ok":true,"mode":"credential-read-only"}'
+case "${FM_FAKE_PROXY_READY:-facade}" in
+  facade) printf 'HTTP/1.1 200 OK\r\nx-fm-auth-broker-facade: credential-read-only\r\n\r\n' ;;
+  raw) printf 'HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n' ;;
+  unhealthy)
+    printf 'HTTP/1.1 503 Service Unavailable\r\nx-fm-auth-broker-facade: credential-read-only\r\n\r\n'
+    exit 22
+    ;;
+  *) exit 1 ;;
+esac
 SH
 cat > "$TUNNEL_BIN/ssh" <<'SH'
 #!/usr/bin/env bash
@@ -256,7 +287,33 @@ chmod +x "$TUNNEL_BIN/curl" "$TUNNEL_BIN/ssh"
 FM_HOME="$TUNNEL_HOME" FM_STATE_OVERRIDE="$TUNNEL_HOME/state" \
   FM_RUNPOD_OMP_CURL_BIN="$TUNNEL_BIN/curl" FM_RUNPOD_OMP_SSH_BIN="$TUNNEL_BIN/ssh" \
   FM_RUNPOD_OMP_PROXY_BIND=127.0.0.1:18766 FM_RUNPOD_OMP_REMOTE_BIND=127.0.0.1:8765 \
-  FM_RUNPOD_OMP_RESTART_DELAY=0.05 FM_FAKE_TUNNEL_COUNT="$TUNNEL_COUNT" \
+  FM_RUNPOD_OMP_RESTART_DELAY=0.05 FM_FAKE_PROXY_READY=raw FM_FAKE_TUNNEL_COUNT="$TUNNEL_COUNT" \
+  FM_FAKE_TUNNEL_LOG="$TUNNEL_LOG" \
+  "$AUTH" tunnel-run podmate pod-alias "$TMP_ROOT/pod.conf" >/dev/null 2>&1 &
+TUNNEL_PID=$!
+sleep 0.2
+kill -TERM "$TUNNEL_PID" 2>/dev/null || true
+wait "$TUNNEL_PID" 2>/dev/null || true
+TUNNEL_PID=
+assert_absent "$TUNNEL_COUNT" "the facade readiness probe false-matched a raw broker health response"
+
+FM_HOME="$TUNNEL_HOME" FM_STATE_OVERRIDE="$TUNNEL_HOME/state" \
+  FM_RUNPOD_OMP_CURL_BIN="$TUNNEL_BIN/curl" FM_RUNPOD_OMP_SSH_BIN="$TUNNEL_BIN/ssh" \
+  FM_RUNPOD_OMP_PROXY_BIND=127.0.0.1:18766 FM_RUNPOD_OMP_REMOTE_BIND=127.0.0.1:8765 \
+  FM_RUNPOD_OMP_RESTART_DELAY=0.05 FM_FAKE_PROXY_READY=unhealthy FM_FAKE_TUNNEL_COUNT="$TUNNEL_COUNT" \
+  FM_FAKE_TUNNEL_LOG="$TUNNEL_LOG" \
+  "$AUTH" tunnel-run podmate pod-alias "$TMP_ROOT/pod.conf" >/dev/null 2>&1 &
+TUNNEL_PID=$!
+sleep 0.2
+kill -TERM "$TUNNEL_PID" 2>/dev/null || true
+wait "$TUNNEL_PID" 2>/dev/null || true
+TUNNEL_PID=
+assert_absent "$TUNNEL_COUNT" "the facade readiness probe accepted an unhealthy response"
+
+FM_HOME="$TUNNEL_HOME" FM_STATE_OVERRIDE="$TUNNEL_HOME/state" \
+  FM_RUNPOD_OMP_CURL_BIN="$TUNNEL_BIN/curl" FM_RUNPOD_OMP_SSH_BIN="$TUNNEL_BIN/ssh" \
+  FM_RUNPOD_OMP_PROXY_BIND=127.0.0.1:18766 FM_RUNPOD_OMP_REMOTE_BIND=127.0.0.1:8765 \
+  FM_RUNPOD_OMP_RESTART_DELAY=0.05 FM_FAKE_PROXY_READY=facade FM_FAKE_TUNNEL_COUNT="$TUNNEL_COUNT" \
   FM_FAKE_TUNNEL_LOG="$TUNNEL_LOG" \
   "$AUTH" tunnel-run podmate pod-alias "$TMP_ROOT/pod.conf" >/dev/null 2>&1 &
 TUNNEL_PID=$!

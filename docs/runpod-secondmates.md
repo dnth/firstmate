@@ -307,7 +307,7 @@ bin/fm-runpod-omp-auth.sh status <id>
 
 The expected state is `broker=running`, `proxy=running`, and `tunnel-<id>=running`.
 
-### Live end-to-end verification at the next pod-awake window
+### Live end-to-end verification
 
 The portable suite does not wake a pod or spend RunPod compute.
 Use this runbook during the next approved awake window:
@@ -329,11 +329,11 @@ Report both task ids and responses without launching any native Claude or Codex 
 7. Confirm the two OMP task records retain their explicit model selectors and both crews reach their first turn with the requested response.
 8. Land or tear down both crews through the normal guarded lifecycle before running `bin/fm-runpod.sh sleep <id>`.
 
-The runbook is intentionally operator-run because the pod is suspended and waking it solely for validation would incur cost.
+The runbook is intentionally operator-run during an approved awake window because waking a pod solely for validation incurs cost.
 
 `--harness-npm` remains available for an optional extra npm harness beyond the parity set; the parity set is installed either way, so leaving it unset is the normal case.
 
 ## Verification
 
-[`verification/runpod-secondmates.md`](verification/runpod-secondmates.md) records the dated portable evidence and its no-live-pod boundary.
-That record owns the exact commands, coverage, and operator-only verification boundary so this operator guide does not duplicate evidence that changes with the suite.
+[`verification/runpod-secondmates.md`](verification/runpod-secondmates.md) records the dated portable and approved live evidence plus the validation boundary.
+That record owns the exact results and coverage; this operator guide owns the reusable live runbook.
