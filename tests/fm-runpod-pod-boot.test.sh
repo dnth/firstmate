@@ -13,6 +13,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 BOOT="$ROOT/bin/fm-runpod-pod-boot.sh"
+REAL_JQ=$(command -v jq) || fail "jq is required to exercise Claude JSON setup"
 TMP_ROOT=$(fm_test_tmproot fm-runpod-pod-boot)
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
 
@@ -94,6 +95,7 @@ new_world() {  # <name> -> world dir
     readlink rm sed seq sleep timeout uname; do
     ln -s "$(command -v "$tool")" "$w/basebin/$tool"
   done
+  ln -s "$REAL_JQ" "$w/basebin/jq"
 
   cat > "$w/templates/npm" <<'SH'
 #!/usr/bin/env bash
@@ -316,7 +318,7 @@ SH
 printf 'sshd start\n' >> "$FM_FAKE_CALLS"
 exit 0
 SH
-  for t in jq unzip; do
+  for t in unzip; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/$t"
   done
   cat > "$fakebin/pgrep" <<'SH'
