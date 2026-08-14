@@ -308,11 +308,11 @@ The expected state is `broker=running`, `proxy=running`, and `tunnel-<id>=runnin
 The portable suite does not wake a pod or spend RunPod compute.
 Use this runbook during the next approved awake window:
 
-1. On the workstation, confirm OMP already has both subscription providers and start the canonical writer with `omp auth-broker serve --bind=127.0.0.1:8765` if an external supervisor does not already own it.
+1. On the workstation, run `curl -fsS --max-time 2 http://127.0.0.1:8765/v1/healthz >/dev/null`; reuse that single canonical writer when the command succeeds, or run `omp auth-broker serve --bind=127.0.0.1:8765` in a dedicated terminal and leave it running for the verification window when the command fails.
 2. In another workstation terminal, run `bin/fm-runpod.sh wake <id>` and wait for the `ready:` line.
 3. Run `bin/fm-runpod-omp-auth.sh status <id>` and confirm the broker, facade, and named tunnel all report `running`.
 4. Connect with `bin/fm-runpod.sh ssh <id>` and run `/workspace/persistent-runtime/fm-runpod-pod-boot.sh --check-omp-auth-broker-client`.
-5. In that pod shell, run `OMP_AUTH_BROKER_URL=http://127.0.0.1:8765 OMP_AUTH_BROKER_TOKEN="$(cat /workspace/persistent-runtime/omp-auth-broker.token)" omp auth-broker status --json` and confirm broker health without printing the token.
+5. In that pod shell, run `OMP_AUTH_BROKER_URL=http://127.0.0.1:8765 OMP_AUTH_BROKER_TOKEN="$(cat /workspace/persistent-runtime/omp-auth-broker.token)" omp auth-broker status --json` and confirm the JSON reports usable Claude and GPT subscription credentials without printing the token.
 6. Configure the primary home's `config/secondmate-harness` for OMP, launch with `bin/fm-spawn.sh <id> --secondmate`, and send the second mate this bounded request:
 
 ```text
@@ -332,15 +332,4 @@ The runbook is intentionally operator-run because the pod is suspended and wakin
 ## Verification
 
 [`verification/runpod-secondmates.md`](verification/runpod-secondmates.md) records the dated portable evidence and its no-live-pod boundary.
-The portable tests drive the real provider against a stateful mocked RunPod REST double and a faked SSH boundary, so no account, key, or paid resource is involved:
-
-```sh
-bin/fm-test-run.sh tests/fm-runpod-lifecycle.test.sh
-bin/fm-test-run.sh tests/fm-runpod-routing.test.sh
-bin/fm-test-run.sh tests/fm-runpod-pod-boot.test.sh
-```
-
-The lifecycle suite covers idempotent provision and wake, exactly one pod under concurrent wakes, CPU and GPU exclusivity, RunPod's 40 GB container-disk limit, endpoint refresh with a stable pinned host identity, provider-state stall diagnosis, never-ready recovery, every sleep guard, volume retention, and the guarded destroy path.
-The routing suite covers provider-owned crew dispatch, dormant watcher handling, supervision, convergence, and delivery wiring, including that an ordinary remote route and a local second mate are unaffected.
-
-Real provisioning against a RunPod account remains an operator-run smoke test and is not claimed by the repository tests.
+That record owns the exact commands, coverage, and operator-only verification boundary so this operator guide does not duplicate evidence that changes with the suite.

@@ -322,7 +322,7 @@ printf 'public\n' > "$key.pub"
 SH
   cat > "$fakebin/sshd" <<'SH'
 #!/usr/bin/env bash
-printf 'sshd start\n' >> "$FM_FAKE_CALLS"
+printf 'sshd %s\n' "$*" >> "$FM_FAKE_CALLS"
 exit 0
 SH
   printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/unzip"
@@ -427,6 +427,14 @@ assert_present "$w/volume/persistent-runtime/toolchain.provisioned" "a completed
 assert_grep 'runpod-root-sandbox-v1' "$w/volume/persistent-runtime/runpod-root-sandbox" \
   "boot did not publish the provider-owned root-sandbox marker"
 pass "first boot clones the code root and installs the required toolchain through the pinned installers"
+
+assert_contains "$calls" \
+  "sshd -t -o AllowTcpForwarding=remote -o GatewayPorts=no -o PermitListen=127.0.0.1:8765" \
+  "pod boot did not validate the scoped remote-forward-only sshd policy"
+assert_contains "$calls" \
+  "sshd -o AllowTcpForwarding=remote -o GatewayPorts=no -o PermitListen=127.0.0.1:8765" \
+  "pod boot did not start sshd with the scoped remote-forward-only policy"
+pass "pod sshd validates and starts with only the broker loopback reverse-forward permitted"
 
 # Bare SSH login shells and interactive shells do not inherit the boot process's
 # PATH, so both account startup files must independently recover the durable bin.
@@ -714,7 +722,7 @@ out=$(
 )
 assert_contains "$out" "volume-backed host key could not be restored or persisted" \
   "a host-key persistence failure must refuse before SSH starts"
-assert_not_contains "$(cat "$w6/calls.log")" "sshd start" \
+assert_not_contains "$(cat "$w6/calls.log")" "sshd -o AllowTcpForwarding=remote" \
   "sshd must not start with a container-local host identity"
 assert_absent "$w6/volume/persistent-runtime/boot.ready" \
   "a host-key persistence failure must never record readiness"
@@ -742,7 +750,7 @@ rm -rf "$w4/origin"        # provisioning cannot obtain a code root, so it MUST 
 boot_log="$w4/volume/persistent-runtime/boot.log"
 assert_present "$boot_log" "a failing boot must still leave its log on the volume"
 log_text=$(cat "$boot_log" 2>/dev/null)
-assert_contains "$(cat "$w4/calls.log")" "sshd start" \
+assert_contains "$(cat "$w4/calls.log")" "sshd -o AllowTcpForwarding=remote" \
   "the failing boot must actually invoke sshd before provisioning"
 assert_contains "$log_text" "started sshd on port 22" \
   "sshd must come up BEFORE provisioning so a failure is diagnosable"

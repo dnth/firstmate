@@ -3,7 +3,7 @@
 Audience: maintainer verification.
 
 This record supports the current deterministic guarantees in [`runpod-secondmates.md`](../runpod-secondmates.md).
-It records the portable provider and SSH boundary only.
+It records the portable provider and SSH boundary plus the installed OMP broker surface that the authentication design depends on.
 Real provisioning, vendor authentication, and Claude or OMP prompt behavior on a paid pod remain operator smoke tests.
 
 ## Portable lifecycle and routing matrix
@@ -20,7 +20,6 @@ bin/fm-test-run.sh tests/fm-remote-doctor.test.sh
 bin/fm-test-run.sh tests/fm-remote-job.test.sh
 bin/fm-test-run.sh tests/fm-remote-entrypoint.test.sh
 bin/fm-test-run.sh tests/fm-secondmate-harness.test.sh
-bin/fm-test-run.sh tests/fm-spawn-dispatch-profile.test.sh
 ```
 
 The recorded lifecycle results are:
