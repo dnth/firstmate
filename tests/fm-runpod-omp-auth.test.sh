@@ -39,6 +39,14 @@ wait_for_file() {  # <path> <label>
   done
 }
 
+help=$(FM_VOLUME="$TMP_ROOT/help-volume" FM_PERSIST="$TMP_ROOT/help-persist" bash "$BOOT" --help)
+assert_contains "$help" 'fm-runpod-pod-boot.sh --install-omp-auth-broker-token < token-file' \
+  "pod boot help omitted the bearer installation control"
+assert_contains "$help" 'fm-runpod-pod-boot.sh --check-omp-auth-broker-client' \
+  "pod boot help omitted the broker client readiness control"
+assert_absent "$TMP_ROOT/help-persist" "pod boot help mutated the persistent runtime"
+pass "pod boot help documents both OMP broker controls without touching pod state"
+
 # --- pod boot installs and exports the bearer without exposing it ------------
 
 POD="$TMP_ROOT/pod"

@@ -46,6 +46,13 @@
 # --check prints the provisioning plan as one `ensure=<item>` line per step and
 # exits without touching the system, so the contract is testable with no pod.
 #
+# Usage:
+#   fm-runpod-pod-boot.sh
+#   fm-runpod-pod-boot.sh --check
+#   fm-runpod-pod-boot.sh --install-omp-auth-broker-token < token-file
+#   fm-runpod-pod-boot.sh --check-omp-auth-broker-client
+#   fm-runpod-pod-boot.sh --help
+#
 # The pod is contracted to reach FULL parity with a local second mate: every
 # worker harness its crew dispatch can select, the universal toolchain, the
 # code-intelligence CLI, and a browser. Every one of them installs UNDER THE
@@ -949,8 +956,22 @@ hold_pod() {
   done
 }
 
+usage() {
+  printf '%s\n' \
+    'Usage:' \
+    '  fm-runpod-pod-boot.sh' \
+    '  fm-runpod-pod-boot.sh --check' \
+    '  fm-runpod-pod-boot.sh --install-omp-auth-broker-token < token-file' \
+    '  fm-runpod-pod-boot.sh --check-omp-auth-broker-client' \
+    '  fm-runpod-pod-boot.sh --help'
+}
+
 main() {
   case "${1:-}" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
     --check)
       toolchain_plan
       exit 0
@@ -962,6 +983,11 @@ main() {
     --check-omp-auth-broker-client)
       check_omp_auth_broker_client
       exit $?
+      ;;
+    '') ;;
+    *)
+      usage >&2
+      exit 2
       ;;
   esac
   require_volume || exit 1

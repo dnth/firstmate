@@ -74,15 +74,68 @@ omp --version
 omp auth-broker --help
 omp auth-broker serve --help
 omp auth-broker token --help
-rg -n 'OMP_AUTH_BROKER_(URL|TOKEN)|RemoteAuthCredentialStore' \
-  /home/dnth/.bun/install/global/node_modules/@oh-my-pi/pi-coding-agent \
-  /home/dnth/.bun/install/global/node_modules/@oh-my-pi/pi-ai
+nl -ba /home/dnth/.bun/install/global/node_modules/@oh-my-pi/pi-ai/src/auth-broker/discover.ts \
+  | sed -n '199p;200p;217p;218p;219p;220p;222p;226p;289p;290p;291p;295p;299p;300p'
+nl -ba /home/dnth/.bun/install/global/node_modules/@oh-my-pi/pi-ai/src/auth-broker/remote-store.ts \
+  | sed -n '647p;648p;649p;653p;654p;655p;659p;660p;661p;672p;673p;684p;691p;704p;716p;720p'
 ```
 
-The version command printed `omp/17.2.11`.
-The help output listed `auth-broker` and its `serve` and `token` actions, including `omp auth-broker serve`, `omp auth-broker serve --bind=127.0.0.1:9000`, and `omp auth-broker token` examples.
-The installed `discover.ts` resolves `OMP_AUTH_BROKER_URL` and `OMP_AUTH_BROKER_TOKEN`, constructs `AuthBrokerClient`, and wraps its snapshot in `RemoteAuthCredentialStore`.
-The installed `remote-store.ts` synchronous replace, upsert, and delete methods throw the read-only-client error, while its async remote hooks can upload, replace, and disable credentials through broker HTTP endpoints.
+The bounded help output was:
+
+```text
+omp/17.2.11
+USAGE
+  $ omp auth-broker [ACTION] [SOURCE] [FLAGS]
+ARGUMENTS
+  ACTION   Sub-command (serve|token|login|logout|import|migrate|status|list)
+FLAGS
+  -b, --bind=<value>      Bind address for `serve` (host:port)
+EXAMPLES
+    omp auth-broker serve
+    omp auth-broker serve --bind=127.0.0.1:9000
+    omp auth-broker token
+```
+
+The bounded discovery output was:
+
+```text
+199     const envUrl = process.env.OMP_AUTH_BROKER_URL;
+200     const envToken = process.env.OMP_AUTH_BROKER_TOKEN;
+217     const token =
+218             (envToken && envToken.length > 0 ? envToken : undefined) ?? configToken ?? (await readTokenFile()) ?? undefined;
+219     if (!token) {
+220             throw new AIError.MissingApiKeyError(
+222                     `OMP_AUTH_BROKER_URL is set (${url}) but no bearer token is available. ` +
+226     return { url, token };
+289     const store = new RemoteAuthCredentialStore({
+290             client,
+291             initialSnapshot,
+295     const storage = new AuthStorage(store, {
+299     await storage.reload();
+300     return storage;
+```
+
+The bounded mutation-boundary output was:
+
+```text
+647     replaceAuthCredentialsForProvider(_provider: string, _credentials: AuthCredential[]): StoredAuthCredential[] {
+648             throw new AIError.AuthBrokerError(
+649                     "RemoteAuthCredentialStore is read-only on the client. Use `omp auth-broker login <provider>` to mutate credentials.",
+653     upsertAuthCredentialForProvider(_provider: string, _credential: AuthCredential): StoredAuthCredential[] {
+654             throw new AIError.AuthBrokerError(
+655                     "RemoteAuthCredentialStore is read-only on the client. Use `omp auth-broker login <provider>` to mutate credentials.",
+659     deleteAuthCredentialsForProvider(_provider: string, _disabledCause: string): void {
+660             throw new AIError.AuthBrokerError(
+661                     "RemoteAuthCredentialStore is read-only on the client. Use `omp auth-broker logout <provider>` to mutate credentials.",
+672     async upsertAuthCredentialRemote(provider: string, credential: AuthCredential): Promise<StoredAuthCredential[]> {
+673             const { entries } = await this.#client.uploadCredential(provider, credential);
+684     async replaceAuthCredentialsRemote(
+691                     await this.#client.disableCredential(entry.id, "replaced by newer credential");
+704             const { entries } = await this.#client.uploadCredential(provider, credential);
+716     async deleteAuthCredentialsRemote(provider: string, disabledCause: string): Promise<void> {
+720                     await this.#client.disableCredential(entry.id, disabledCause);
+```
+
 The installed broker uses one bearer allow-list for both reads and writes, so the token itself has no credential-read-only scope.
 That evidence is why the RunPod tunnel terminates at `bin/fm-omp-auth-broker-readonly-proxy.mjs` instead of the unrestricted broker port.
 
