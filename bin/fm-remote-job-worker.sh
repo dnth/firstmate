@@ -8,7 +8,8 @@
 # tracked non-symlink fm-*.sh under this worker's configured FM_ROOT/bin.
 #
 # Each child runs under env -i with the shared filesystem-composed PATH, HOME,
-# FM_HOME, FM_ROOT_OVERRIDE, and FM_REMOTE_JOB_ACTIVE=1. Commands receive their
+# FM_HOME, FM_ROOT_OVERRIDE, and FM_REMOTE_JOB_ACTIVE=1. RunPod commands also
+# receive the validated FM_TREEHOUSE_LOCAL_ROOT. Commands receive their
 # captured stdin and have a 360-second default timeout. Their stdout and stderr
 # are independently constrained to the job library's 1048576-byte bound. A
 # record is marked done only after its bounded outputs and numeric exit status
@@ -21,6 +22,8 @@ FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)}
 
 # shellcheck source=bin/fm-remote-job-lib.sh
 . "$SCRIPT_DIR/fm-remote-job-lib.sh"
+# shellcheck source=bin/fm-pool-lib.sh
+. "$SCRIPT_DIR/fm-pool-lib.sh"
 
 WORKER_ACTIVE_JOB=
 WORKER_LOCK=
@@ -484,8 +487,20 @@ worker_capture_output() { # <fifo> <destination>
   } < "$fifo" > "$destination"
 }
 
+worker_runpod_treehouse_root() { # <account-home>
+  local account_home=$1 config root roots
+  config="$account_home/.config/treehouse/config.toml"
+  [ -f "$config" ] && [ ! -L "$config" ] || return 1
+  roots=$(sed -n 's/^[[:space:]]*root[[:space:]]*=[[:space:]]*"\([^"\\]*\)"[[:space:]]*$/\1/p' "$config") \
+    || return 1
+  case "$roots" in ''|*$'\n'*) return 1 ;; esac
+  root=$roots
+  fm_treehouse_local_pool_validate "$root" || return 1
+  printf '%s\n' "$root"
+}
+
 worker_run_job() { # <account-home> <job-dir>
-  local account_home=$1 job=$2 root home command command_path git_bin rc deadline remaining
+  local account_home=$1 job=$2 root home command command_path git_bin rc deadline remaining treehouse_root
   local stdout_pipe stderr_pipe stdout_reader stderr_reader preemptible=0
   local -a argv child_env
   root=$(worker_read_text "$job" root 8192) || { worker_publish_result "$job" 126; return; }
@@ -557,7 +572,12 @@ worker_run_job() { # <account-home> <job-dir>
     FM_REMOTE_JOB_ACTIVE=1
   )
   if fm_remote_job_runpod_sandbox_active "$root"; then
-    child_env+=(IS_SANDBOX=1)
+    treehouse_root=$(worker_runpod_treehouse_root "$account_home") || {
+      worker_cleanup_output_capture "$job" "$stdout_reader" "$stderr_reader"
+      worker_publish_result "$job" 126
+      return
+    }
+    child_env+=(IS_SANDBOX=1 "FM_TREEHOUSE_LOCAL_ROOT=$treehouse_root")
   fi
   if [ -n "${FM_REMOTE_JOB_PLATFORM_OVERRIDE:-}" ]; then
     child_env+=("FM_REMOTE_JOB_PLATFORM_OVERRIDE=$FM_REMOTE_JOB_PLATFORM_OVERRIDE")

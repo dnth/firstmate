@@ -222,6 +222,10 @@ ensure_treehouse_local_pool() {
     return 1
   }
   local_root=$(cd "$FM_TREEHOUSE_LOCAL_ROOT" && pwd -P) || return 1
+  [ "$local_root" = "$FM_TREEHOUSE_LOCAL_ROOT" ] || {
+    log "FATAL: the Treehouse pool root has symlinked ancestors"
+    return 1
+  }
   volume_root=$(cd "$FM_VOLUME" && pwd -P) || return 1
   case "$local_root" in
     "$volume_root"|"$volume_root"/*)
@@ -229,6 +233,17 @@ ensure_treehouse_local_pool() {
       return 1
       ;;
   esac
+  local child
+  for child in .treehouse .firstmate-config; do
+    if [ ! -e "$FM_TREEHOUSE_LOCAL_ROOT/$child" ] && [ ! -L "$FM_TREEHOUSE_LOCAL_ROOT/$child" ]; then
+      mkdir -- "$FM_TREEHOUSE_LOCAL_ROOT/$child" || return 1
+    fi
+    [ -d "$FM_TREEHOUSE_LOCAL_ROOT/$child" ] && [ ! -L "$FM_TREEHOUSE_LOCAL_ROOT/$child" ] \
+      && [ "$(cd "$FM_TREEHOUSE_LOCAL_ROOT/$child" && pwd -P)" = "$FM_TREEHOUSE_LOCAL_ROOT/$child" ] || {
+      log "FATAL: the Treehouse pool contains an unsafe managed directory"
+      return 1
+    }
+  done
   config="$config_dir/config.toml"
   [ ! -L "$config" ] || {
     log "FATAL: the Treehouse user config is a symlink"
@@ -237,7 +252,7 @@ ensure_treehouse_local_pool() {
   tmp=$(mktemp "$config_dir/.config.toml.XXXXXX") || return 1
   {
     printf 'root = "%s"\n' "$FM_TREEHOUSE_LOCAL_ROOT"
-    [ ! -f "$config" ] || awk '$0 !~ /^[[:space:]]*root[[:space:]]*=/' "$config"
+    [ ! -f "$config" ] || awk '$0 !~ /^[[:space:]]*(root|"root"|\047root\047)[[:space:]]*=/' "$config"
   } > "$tmp" || { rm -f -- "$tmp"; return 1; }
   chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
   mv -f -- "$tmp" "$config" || { rm -f -- "$tmp"; return 1; }

@@ -65,7 +65,7 @@ fi
 network_pool="$TMP_ROOT/network-volume/treehouse"
 local_pool="$TMP_ROOT/local-treehouse"
 mkdir -p "$network_pool" "$local_pool"
-printf 'max_trees = 1\nroot = "%s"\n' "$network_pool" > "$REPO/treehouse.toml"
+printf 'max_trees = 1\n"root" = "%s"\n' "$network_pool" > "$REPO/treehouse.toml"
 repo_config=$(cat "$REPO/treehouse.toml")
 local_acquired=$(cd "$REPO" && IS_SANDBOX=1 FM_TREEHOUSE_LOCAL_ROOT="$local_pool" \
   "$ROOT/bin/fm-treehouse-get.sh" --lease --lease-holder local-first) \
@@ -82,6 +82,20 @@ if (cd "$REPO" && IS_SANDBOX=1 FM_TREEHOUSE_LOCAL_ROOT="$local_pool" \
 fi
 [ ! -d "$network_pool/.treehouse" ] \
   || fail "the repository Treehouse root created a pool on network storage"
+
+for unsafe_child in .treehouse .firstmate-config; do
+  unsafe_pool="$TMP_ROOT/unsafe-${unsafe_child#.}"
+  escaped="$TMP_ROOT/escaped-${unsafe_child#.}"
+  mkdir -p "$unsafe_pool" "$escaped"
+  printf 'sentinel\n' > "$escaped/sentinel"
+  ln -s "$escaped" "$unsafe_pool/$unsafe_child"
+  if (cd "$REPO" && IS_SANDBOX=1 FM_TREEHOUSE_LOCAL_ROOT="$unsafe_pool" \
+    "$ROOT/bin/fm-treehouse-get.sh" --lease --lease-holder unsafe) >/dev/null 2>&1; then
+    fail "the routed acquisition followed a symlinked $unsafe_child directory"
+  fi
+  [ "$(find "$escaped" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the routed acquisition wrote through a symlinked $unsafe_child directory"
+done
 
 rm -rf -- "$local_pool"
 mkdir -p "$local_pool"

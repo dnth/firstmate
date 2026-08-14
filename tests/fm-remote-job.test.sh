@@ -21,13 +21,13 @@ RECOVERY_WORKER_PID=
 mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 trap 'if [ -n "$OTHER_PID" ]; then kill "$OTHER_PID" 2>/dev/null || true; fi; if [ -n "$RECOVERY_WORKER_PID" ]; then kill "$RECOVERY_WORKER_PID" 2>/dev/null || true; fi; if [ -f "$STATE_ROOT/worker.pid" ]; then kill "$(cat "$STATE_ROOT/worker.pid")" 2>/dev/null || true; fi; rm -rf -- "$TMP_ROOT"' EXIT
 
-cp "$ROOT/bin/fm-remote-job-lib.sh" "$ROOT/bin/fm-remote-job-worker.sh" \
+cp "$ROOT/bin/fm-remote-job-lib.sh" "$ROOT/bin/fm-remote-job-worker.sh" "$ROOT/bin/fm-pool-lib.sh" \
   "$ROOT/bin/fm-remote-delta-read.sh" "$REMOTE_ROOT/bin/"
 printf 'fixture\n' > "$REMOTE_ROOT/AGENTS.md"
 cat > "$REMOTE_ROOT/bin/fm-probe-job.sh" <<'SH'
 #!/bin/bash
 set -u
-printf 'home=%s\nroot=%s\nactive=%s\nsandbox=%s\npath=%s\n' "$FM_HOME" "$FM_ROOT_OVERRIDE" "${FM_REMOTE_JOB_ACTIVE:-}" "${IS_SANDBOX:-}" "$PATH"
+printf 'home=%s\nroot=%s\nactive=%s\nsandbox=%s\ntreehouse_root=%s\npath=%s\n' "$FM_HOME" "$FM_ROOT_OVERRIDE" "${FM_REMOTE_JOB_ACTIVE:-}" "${IS_SANDBOX:-}" "${FM_TREEHOUSE_LOCAL_ROOT:-}" "$PATH"
 printf 'args:'
 printf ' <%s>' "$@"
 printf '\n'
@@ -199,11 +199,16 @@ assert_absent "$FAKE_PERL_LOG" "the worker invoked an unavailable Perl runtime"
 pass "the worker preserves bounded argv and stdin in an empty environment"
 
 printf 'runpod-root-sandbox-v1\n' > "$SANDBOX_MARKER"
+RUNPOD_TREEHOUSE_ROOT="$TMP_ROOT/runpod-treehouse"
+mkdir -p "$RUNPOD_TREEHOUSE_ROOT/.treehouse" "$RUNPOD_TREEHOUSE_ROOT/.firstmate-config" \
+  "$ACCOUNT_HOME/.config/treehouse"
+printf 'root = "%s"\n' "$RUNPOD_TREEHOUSE_ROOT" > "$ACCOUNT_HOME/.config/treehouse/config.toml"
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-probe-job.sh </dev/null >/dev/null
 JOB_ID=$FM_REMOTE_JOB_ID
 fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
 OUT=$(<"$FM_REMOTE_JOB_STDOUT")
 assert_contains "$OUT" 'sandbox=1' "the provider-owned marker did not cross the worker child env -i boundary"
+assert_contains "$OUT" "treehouse_root=$RUNPOD_TREEHOUSE_ROOT" "the validated local Treehouse root did not cross the worker child env -i boundary"
 fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the sandbox marker job could not be reaped"
 pass "the provider-owned RunPod marker crosses the worker child environment"
 
