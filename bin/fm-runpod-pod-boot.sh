@@ -68,6 +68,7 @@ FM_REMOTE_ROOT=${FM_REMOTE_ROOT:-$FM_VOLUME/firstmate}
 FM_REMOTE_HOME=${FM_REMOTE_HOME:-$FM_VOLUME/secondmate-home}
 FM_PERSIST=${FM_PERSIST:-$FM_VOLUME/persistent-runtime}
 FM_ACCOUNT_HOME=${FM_ACCOUNT_HOME:-$FM_VOLUME/home}
+FM_TREEHOUSE_LOCAL_ROOT=${FM_TREEHOUSE_LOCAL_ROOT:-/tmp/firstmate-treehouse}
 FM_ORIGINAL_HOME=${HOME:-}
 FM_HOST_KEY_DIR="$FM_PERSIST/ssh"
 FM_SYSTEM_SSH_DIR=${FM_SYSTEM_SSH_DIR:-/etc/ssh}
@@ -83,7 +84,7 @@ export IS_SANDBOX
 
 # Raise this when the provisioning contract changes so existing volumes
 # re-provision exactly once instead of silently keeping an older toolchain.
-FM_TOOLCHAIN_CONTRACT=5
+FM_TOOLCHAIN_CONTRACT=6
 FM_TOOLCHAIN_MARKER="$FM_PERSIST/toolchain.provisioned"
 FM_BOOT_READY="$FM_PERSIST/boot.ready"
 FM_RUNPOD_SANDBOX_MARKER="$FM_PERSIST/runpod-root-sandbox"
@@ -165,6 +166,7 @@ toolchain_plan() {
   done
   plan_step account-home
   plan_step account-shell
+  plan_step treehouse-local-pool
   plan_step root-sandbox-marker
   plan_step node
   plan_step npm
@@ -189,6 +191,44 @@ toolchain_plan() {
   plan_step google-chrome
   plan_step claude-headless
   [ -z "$FM_POD_HARNESS_NPM" ] || plan_step "harness:$FM_POD_HARNESS_NPM"
+}
+
+ensure_treehouse_local_pool() {
+  local config_dir="$FM_ACCOUNT_HOME/.config/treehouse" config tmp
+  case "$FM_TREEHOUSE_LOCAL_ROOT" in
+    /*) ;;
+    *) log "FATAL: the Treehouse pool root must be absolute"; return 1 ;;
+  esac
+  case "$FM_TREEHOUSE_LOCAL_ROOT" in
+    "$FM_VOLUME"|"$FM_VOLUME"/*)
+      log "FATAL: the Treehouse pool root must stay off the network volume"
+      return 1
+      ;;
+  esac
+  case "$FM_TREEHOUSE_LOCAL_ROOT" in
+    *[\"\\]*)
+      log "FATAL: the Treehouse pool root contains unsupported characters"
+      return 1
+      ;;
+  esac
+  if printf '%s' "$FM_TREEHOUSE_LOCAL_ROOT" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+    log "FATAL: the Treehouse pool root contains unsupported characters"
+    return 1
+  fi
+  mkdir -p "$config_dir" "$FM_TREEHOUSE_LOCAL_ROOT" || return 1
+  config="$config_dir/config.toml"
+  [ ! -L "$config" ] || {
+    log "FATAL: the Treehouse user config is a symlink"
+    return 1
+  }
+  tmp=$(mktemp "$config_dir/.config.toml.XXXXXX") || return 1
+  {
+    printf 'root = "%s"\n' "$FM_TREEHOUSE_LOCAL_ROOT"
+    [ ! -f "$config" ] || awk '$0 !~ /^[[:space:]]*root[[:space:]]*=/' "$config"
+  } > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$config" || { rm -f -- "$tmp"; return 1; }
+  log "configured Treehouse worktrees on local container storage"
 }
 
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -852,6 +892,7 @@ main() {
   # authorized key and every later login, must land on the volume.
   ensure_account_home || exit 1
   ensure_account_shell || exit 1
+  ensure_treehouse_local_pool || exit 1
   rm -f -- "$FM_BOOT_READY" || exit 1
 
   # SSH comes up FIRST, deliberately independent of provisioning. RunPod exposes

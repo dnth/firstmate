@@ -778,6 +778,7 @@ SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+TREEHOUSE_READY_DIR=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -942,6 +943,10 @@ spawn_abort_cleanup() {
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
+  fi
+  if [ -n "$TREEHOUSE_READY_DIR" ]; then
+    rm -rf -- "$TREEHOUSE_READY_DIR"
+    TREEHOUSE_READY_DIR=
   fi
   return "$status"
 }
@@ -2720,8 +2725,28 @@ kimi_spawn_fail() {  # <detail>
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
   && [ "$PREWALK_WORKTREE_READY" != 1 ]; then
   printf -v treehouse_get_command '%q' "$SCRIPT_DIR/fm-treehouse-get.sh"
+  if [ "${IS_SANDBOX:-}" = 1 ]; then
+    TREEHOUSE_READY_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-treehouse-ready.${ID}.XXXXXX") || {
+      echo "error: could not create the guarded Treehouse ready directory" >&2
+      exit 1
+    }
+    treehouse_ready_file="$TREEHOUSE_READY_DIR/acquired"
+    printf -v treehouse_ready_quoted '%q' "$treehouse_ready_file"
+    treehouse_get_command="$treehouse_get_command --ready-file $treehouse_ready_quoted"
+  fi
   spawn_send_text_line "$WT_TARGET" "$treehouse_get_command"
 
+  if [ "${IS_SANDBOX:-}" = 1 ]; then
+    for _ in $(seq 1 60); do
+      [ -s "$treehouse_ready_file" ] && break
+      sleep 1
+    done
+    if [ ! -s "$treehouse_ready_file" ]; then
+      echo "error: treehouse get did not publish its acquired worktree within 60s; inspect window $T" >&2
+      exit 1
+    fi
+    WT=$(sed -n '1p' "$treehouse_ready_file")
+  else
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
   # automatic-rename slips through), display-message -t <bad-name> falls back to the
@@ -2764,6 +2789,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
   if [ -z "$WT" ]; then
     echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
     exit 1
+  fi
   fi
 
   validate_spawn_worktree "treehouse get" "$T"

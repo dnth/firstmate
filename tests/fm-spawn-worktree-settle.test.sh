@@ -49,7 +49,21 @@ case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
-  send-keys) exit 0 ;;
+  send-keys)
+    if [ -n "${FM_FAKE_READY_PATH:-}" ]; then
+      for arg in "$@"; do
+        case "$arg" in
+          *'--ready-file '*)
+            ready_file=${arg##*--ready-file }
+            ready_file=${ready_file%% *}
+            printf '%s\n' "$FM_FAKE_READY_PATH" > "$ready_file"
+            break
+            ;;
+        esac
+      done
+    fi
+    exit 0
+    ;;
 esac
 exit 0
 SH
@@ -96,8 +110,28 @@ run_settle_spawn() {
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
+    FM_FAKE_READY_PATH="${FM_FAKE_READY_PATH_VALUE:-}" IS_SANDBOX="${IS_SANDBOX_VALUE:-}" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
+}
+
+# A relaunched RunPod pane can still expose the prior launch's isolated cwd
+# while the new network-volume copy is arriving. The fresh launch's ready file
+# is authoritative because only that invocation can publish it.
+test_sandbox_relaunch_records_fresh_ready_path() {
+  local rec id out status
+  id=settle-sandbox-relaunch-z3
+  rec=$(make_settle_case settle-sandbox-relaunch "$id" 999)
+  read_settle_record "$rec"
+
+  IS_SANDBOX_VALUE=1 FM_FAKE_READY_PATH_VALUE="$WT_DIR" out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "sandbox relaunch should accept its fresh acquisition marker"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "sandbox relaunch did not record the fresh isolated copy"
+  assert_no_grep "worktree=$STALE_DIR" "$HOME_DIR/state/$id.meta" \
+    "sandbox relaunch recorded the prior launch's stale isolated copy"
+  pass "a sandbox relaunch records the isolated copy published by its own acquisition"
 }
 
 # A single stale first read (the exact incident) must not be accepted: the
@@ -143,5 +177,6 @@ test_already_settled_pane_costs_one_confirm_sleep() {
 
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
+test_sandbox_relaunch_records_fresh_ready_path
 
 echo "# all fm-spawn-worktree-settle tests passed"
