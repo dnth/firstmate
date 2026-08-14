@@ -363,7 +363,8 @@ provision_only() {  # <world> [harness]
     timeout 60 bash "$BOOT" >/dev/null 2>&1 &
     boot_pid=$!
     for _ in $(seq 1 300); do
-      [ -s "$w/volume/persistent-runtime/boot.ready" ] && break
+      grep -qF 'boot complete; holding the pod open' \
+        "$w/volume/persistent-runtime/boot.log" 2>/dev/null && break
       kill -0 "$boot_pid" 2>/dev/null || break
       sleep 0.1
     done
