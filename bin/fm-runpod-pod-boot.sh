@@ -216,21 +216,38 @@ FM_SHELL_RC_BEGIN='# Firstmate RunPod environment begin'
 FM_SHELL_RC_END='# Firstmate RunPod environment end'
 
 write_account_shell_rc() {  # <path>
-  local path=$1 tmp
+  local path=$1 tmp target home
   if [ -e "$path" ] || [ -L "$path" ]; then
-    [ -f "$path" ] && [ ! -L "$path" ] || {
+    target=$path
+    if [ -L "$path" ]; then
+      home=$(cd "$FM_ACCOUNT_HOME" && pwd -P) || return 1
+      target=$(readlink -f -- "$path" 2>/dev/null) || {
+        log "refusing unsafe account shell startup path: $path"
+        return 1
+      }
+      case "$target" in
+        "$home"/*) ;;
+        *)
+          log "refusing account shell startup symlink outside the durable home: $path"
+          return 1
+          ;;
+      esac
+    fi
+    [ -f "$target" ] && [ ! -L "$target" ] || {
       log "refusing unsafe account shell startup path: $path"
       return 1
     }
+  else
+    target=$path
   fi
   tmp=$(mktemp "$FM_ACCOUNT_HOME/.fm-shell-rc.XXXXXX") || return 1
   {
-    if [ -f "$path" ]; then
+    if [ -f "$target" ]; then
       awk -v begin="$FM_SHELL_RC_BEGIN" -v end="$FM_SHELL_RC_END" '
         $0 == begin { managed = 1; next }
         $0 == end { managed = 0; next }
         !managed { print }
-      ' "$path"
+      ' "$target"
     fi
     printf '%s\n' "$FM_SHELL_RC_BEGIN"
     # shellcheck disable=SC2016 # HOME and PATH expand when the generated startup file is sourced.
@@ -239,7 +256,7 @@ write_account_shell_rc() {  # <path>
     printf '%s\n' "$FM_SHELL_RC_END"
   } > "$tmp" || { rm -f -- "$tmp"; return 1; }
   chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
-  mv -f -- "$tmp" "$path" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$target" || { rm -f -- "$tmp"; return 1; }
 }
 
 ensure_account_shell() {

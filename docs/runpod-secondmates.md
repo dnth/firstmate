@@ -102,6 +102,7 @@ bin/fm-runpod.sh wake <id> --min-vram 24
 After a volume's first wake reaches ready, log each runtime in once: use `bin/fm-runpod.sh ssh <id>`, run each harness's own login, and run `gh auth login`.
 SSH also becomes available before toolchain provisioning finishes, so it can be used from another terminal to diagnose a wake that is still waiting.
 Boot places `$HOME/.local/bin` first in the durable account's `.profile` and `.bashrc`, and reconciles retained `.bash_profile` or `.bash_login` files that take precedence for Bash login shells, so bare SSH login and interactive shells resolve the same installed harnesses as the fixed remote entrypoint.
+Conventional startup-file symlinks whose resolved regular-file targets remain inside the durable account home are preserved and reconciled at their targets; broken links, non-regular targets, and links escaping that home are refused.
 Readiness verifies executable presence and the durable account home, but deliberately neither detects nor gates vendor login state.
 Those logins land on the volume, so later wakes and replacement pods need none of it again.
 If provisioning or a later boot step fails, the pod stays running and wake remains unready; connect from another terminal with `bin/fm-runpod.sh ssh <id>` and inspect `/workspace/persistent-runtime/boot.log`.
@@ -162,8 +163,11 @@ If that volume has never reached ready, terminate the stuck billable pod while r
 bin/fm-runpod.sh recover-stuck <id> --yes
 ```
 
-The command requires `ever_ready=0`, re-reads provider endpoint state immediately before deletion, and performs bounded SSH checks against both the newly published endpoint and any endpoint retained in the local record.
-It refuses when the pod has become reachable or when reachability cannot be classified safely, and only then deletes the recorded pod, clears its stale endpoint, and returns the retained volume to `provisioned`.
+The command requires `ever_ready=0`, explicit `--yes` confirmation, a provider endpoint read, and bounded SSH checks against both the published endpoint and any endpoint retained in the local record.
+It prints the provider, current-endpoint, recorded-endpoint, and SSH evidence before acting, and it refuses when any endpoint is reachable or indeterminate.
+SSH exit 255 is indeterminate because it can represent authentication, host-key, configuration, or transport failure; it is never accepted as proof of unreachability.
+RunPod can publish an endpoint between any provider read and a later deletion, so this human-gated command does not claim race-free endpoint proof; ambiguity refusal and explicit confirmation are the accepted safety boundary rather than additional automated polling.
+Only after those guards does it delete the recorded pod, clear its stale endpoint, and return the retained volume to `provisioned`.
 It refuses once the volume has ever reached ready because an unreachable ready host may contain running or completed work whose outcome is unknown.
 Use the ordinary `sleep` path only after reconciling that work on the same host.
 Wake does not automatically create a replacement after an endpoint stall, even when the failed never-ready pod later becomes `TERMINATED` or absent, because the failed paid resource and its provider state remain the operator's evidence.

@@ -232,7 +232,19 @@ assert_contains "$out" "recover-stuck stalled --yes" \
 [ "$(runpod_api_calls "$API_LOG" "POST /pods")" = "$posts_before_failed_retry" ] \
   || fail "ordinary wake created a second pod before explicit recovery acknowledgement"
 pass "ordinary wake cannot replace a failed never-ready paid attempt without acknowledgement"
+deletes_before_recovery=$(runpod_api_calls "$API_LOG" "DELETE /pods/$STALLED_POD")
+out=$(rp recover-stuck stalled 2>&1) && fail "never-ready recovery deleted compute without explicit confirmation"
+assert_contains "$out" "pass --yes" \
+  "unconfirmed never-ready recovery did not name the explicit authorization"
+[ "$(runpod_api_calls "$API_LOG" "DELETE /pods/$STALLED_POD")" = "$deletes_before_recovery" ] \
+  || fail "unconfirmed never-ready recovery reached provider deletion"
 out=$(rp recover-stuck stalled --yes 2>&1) || fail "never-ready stuck recovery failed: $out"
+assert_contains "$out" "recover-stuck evidence:" \
+  "confirmed recovery did not print its provider and endpoint evidence"
+assert_contains "$out" "current_endpoint=none current_ssh=not-applicable" \
+  "confirmed recovery did not report the absent current endpoint"
+assert_contains "$out" "recorded_endpoint=none recorded_ssh=not-applicable confirmation=--yes" \
+  "confirmed recovery did not report recorded evidence and authorization"
 assert_contains "$out" "recovered-stuck: secondmate stalled" \
   "stuck recovery must report the exact pod it terminated"
 [ -z "$(record_field stalled pod_id)" ] || fail "stuck recovery left the terminated pod recorded"
@@ -263,8 +275,8 @@ jq '(.pods[] | select(.id == $p)) |= (.remainingInitPolls = 0 | .status = "RUNNI
   --arg p "$REACHABLE_POD" "$API_STATE" > "$API_STATE.next" && mv "$API_STATE.next" "$API_STATE"
 out=$(rp recover-stuck reachable --yes 2>&1) \
   && fail "recover-stuck terminated a pod that became SSH-reachable"
-assert_contains "$out" "now SSH-reachable" \
-  "reachable recovery refusal did not identify the renewed SSH proof"
+assert_contains "$out" "current_ssh=reachable:keyscan" \
+  "reachable recovery refusal did not print the renewed SSH proof"
 [ "$(jq -r --arg p "$REACHABLE_POD" '[.pods[] | select(.id == $p)] | length' "$API_STATE")" = 1 ] \
   || fail "reachable recovery refusal deleted compute"
 jq '(.pods[] | select(.id == $p)) |= (.remainingInitPolls = 999 | .status = "INITIALIZING" | .publicIp = null | .portMappings = null)' \
@@ -288,20 +300,25 @@ jq '(.pods[] | select(.id == $p)) |= (.remainingInitPolls = 999 | .status = "INI
   --arg p "$RECORDED_POD" "$API_STATE" > "$API_STATE.next" && mv "$API_STATE.next" "$API_STATE"
 out=$(FM_FAKE_SSH_REACHABLE_HOST="$RECORDED_HOST" rp recover-stuck recorded --yes 2>&1) \
   && fail "recover-stuck terminated compute while its recorded endpoint was reachable"
-assert_contains "$out" "recorded endpoint $RECORDED_HOST:$RECORDED_PORT" \
-  "recorded-endpoint reachability refusal did not identify the endpoint"
+assert_contains "$out" "recorded_endpoint=$RECORDED_HOST:$RECORDED_PORT recorded_ssh=reachable:ssh" \
+  "recorded-endpoint reachability refusal did not print the endpoint evidence"
 [ "$(jq -r --arg p "$RECORDED_POD" '[.pods[] | select(.id == $p)] | length' "$API_STATE")" = 1 ] \
   || fail "recorded-endpoint reachability refusal deleted compute"
 out=$(FM_FAKE_SSH_INDETERMINATE_HOST="$RECORDED_HOST" rp recover-stuck recorded --yes 2>&1) \
   && fail "recover-stuck accepted an indeterminate recorded endpoint"
-assert_contains "$out" "recorded endpoint $RECORDED_HOST:$RECORDED_PORT is indeterminate" \
-  "indeterminate recorded-endpoint refusal did not explain the safety boundary"
-rp recover-stuck recorded --yes >/dev/null 2>&1 \
-  || fail "a bounded unreachable recorded endpoint did not permit never-ready recovery"
-[ -z "$(record_field recorded pod_id)" ] \
-  || fail "recorded-only unreachable recovery left the pod recorded"
-rp destroy recorded --yes >/dev/null 2>&1 || fail "recorded-endpoint fixture volume cleanup failed"
-pass "recover-stuck probes recorded-only endpoints and refuses reachable or indeterminate results"
+assert_contains "$out" "recorded_endpoint=$RECORDED_HOST:$RECORDED_PORT recorded_ssh=indeterminate:ssh-exit-42" \
+  "indeterminate recorded-endpoint refusal did not print the safety evidence"
+out=$(rp recover-stuck recorded --yes 2>&1) \
+  && fail "recover-stuck treated SSH exit 255 as proof of unreachability"
+assert_contains "$out" "recorded_endpoint=$RECORDED_HOST:$RECORDED_PORT recorded_ssh=indeterminate:ssh-exit-255" \
+  "SSH exit 255 was not reported as indeterminate recorded-endpoint evidence"
+[ "$(jq -r --arg p "$RECORDED_POD" '[.pods[] | select(.id == $p)] | length' "$API_STATE")" = 1 ] \
+  || fail "SSH exit 255 ambiguity deleted compute"
+jq 'del(.pods[] | select(.id == $p)) | del(.volumes[] | select(.id == $v))' \
+  --arg p "$RECORDED_POD" --arg v "$(record_field recorded volume_id)" \
+  "$API_STATE" > "$API_STATE.next" && mv "$API_STATE.next" "$API_STATE"
+rm -f -- "$PARENT/data/runpod/recorded.meta" "$(fragment fm-sm-recorded-runpod)"
+pass "recover-stuck prints recorded evidence and refuses reachable or SSH-255 ambiguity"
 
 out=$(rp wake ios 2>&1) || fail "wake failed: $out"
 assert_contains "$out" "ready: secondmate ios" "wake must report readiness"

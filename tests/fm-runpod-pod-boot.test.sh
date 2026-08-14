@@ -509,7 +509,7 @@ jq '.operatorSetting = "keep"' "$HOMEDIR/.claude/settings.json" > "$HOMEDIR/.cla
   && mv "$HOMEDIR/.claude/settings.json.next" "$HOMEDIR/.claude/settings.json"
 printf 'export OPERATOR_PROFILE=keep\nPATH=/operator-profile\nunset IS_SANDBOX\n' > "$HOMEDIR/.profile"
 printf 'case $- in *i*) ;; *) return ;; esac\nexport OPERATOR_BASHRC=keep\nPATH=/operator-bashrc\nunset IS_SANDBOX\n' > "$HOMEDIR/.bashrc"
-printf 'export OPERATOR_BASH_PROFILE=keep\nPATH=/operator-bash-profile\nunset IS_SANDBOX\n' > "$HOMEDIR/.bash_profile"
+ln -s .profile "$HOMEDIR/.bash_profile"
 printf 'export OPERATOR_BASH_LOGIN=keep\nPATH=/operator-bash-login\nunset IS_SANDBOX\n' > "$HOMEDIR/.bash_login"
 rm -f "$w/volume/firstmate/bin/fm-claude-headless-setup.sh"
 : > "$w/calls.log"
@@ -548,9 +548,11 @@ jq -e '.operatorSetting == "keep" and .attribution.sessionUrl == false' "$HOMEDI
 profile_probe=$(HOME="$HOMEDIR" PATH=/usr/bin:/bin /bin/bash -c '. "$HOME/.profile"; printf "%s|%s|%s\n" "$(command -v codex)" "${IS_SANDBOX:-}" "${OPERATOR_PROFILE:-}"')
 [ "$profile_probe" = "$HOMEDIR/.local/bin/codex|1|keep" ] \
   || fail "retained .profile assignments overrode the managed RunPod environment: $profile_probe"
-profile_precedence_probe=$(HOME="$HOMEDIR" PATH=/usr/bin:/bin /bin/bash -c '. "$HOME/.bash_profile"; printf "%s|%s|%s\n" "$(command -v codex)" "${IS_SANDBOX:-}" "${OPERATOR_BASH_PROFILE:-}"')
+profile_precedence_probe=$(HOME="$HOMEDIR" PATH=/usr/bin:/bin /bin/bash -c '. "$HOME/.bash_profile"; printf "%s|%s|%s\n" "$(command -v codex)" "${IS_SANDBOX:-}" "${OPERATOR_PROFILE:-}"')
 [ "$profile_precedence_probe" = "$HOMEDIR/.local/bin/codex|1|keep" ] \
   || fail "a retained .bash_profile bypassed the managed RunPod environment: $profile_precedence_probe"
+[ -L "$HOMEDIR/.bash_profile" ] && [ "$(readlink "$HOMEDIR/.bash_profile")" = .profile ] \
+  || fail "replacement boot did not preserve the conventional .bash_profile symlink"
 bash_login_probe=$(HOME="$HOMEDIR" PATH=/usr/bin:/bin /bin/bash -c '. "$HOME/.bash_login"; printf "%s|%s|%s\n" "$(command -v claude)" "${IS_SANDBOX:-}" "${OPERATOR_BASH_LOGIN:-}"')
 [ "$bash_login_probe" = "$HOMEDIR/.local/bin/claude|1|keep" ] \
   || fail "a retained .bash_login bypassed the managed RunPod environment: $bash_login_probe"
@@ -567,6 +569,21 @@ assert_present "$w/volume/firstmate/bin/fm-claude-headless-setup.sh" \
 assert_present "$w/volume/persistent-runtime/boot.ready" "a replacement pod must reach readiness from the retained volume"
 pass "replacement pods restore ephemeral prerequisites and reuse the durable toolchain"
 pass "a login completed once on the volume survives pod replacement"
+
+wsymlink=$(new_world unsafe-shell-symlink)
+provision_only "$wsymlink"
+printf 'outside\n' > "$wsymlink/outside-profile"
+ln -s "$wsymlink/outside-profile" "$wsymlink/volume/home/.bash_profile"
+rm -f "$wsymlink/volume/persistent-runtime/boot.ready"
+: > "$wsymlink/volume/persistent-runtime/boot.log"
+provision_idempotent "$wsymlink"
+assert_absent "$wsymlink/volume/persistent-runtime/boot.ready" \
+  "a startup-file symlink escaping the durable home reached readiness"
+assert_grep 'startup symlink outside the durable home' "$wsymlink/volume/persistent-runtime/boot.log" \
+  "an escaping startup-file symlink did not produce a clear refusal"
+[ "$(cat "$wsymlink/outside-profile")" = outside ] \
+  || fail "replacement boot overwrote an escaping startup-file symlink target"
+pass "replacement boot preserves in-home startup symlinks and refuses escaping targets"
 
 # --- a failed passwd rewrite cannot be masked by the boot process HOME ------
 

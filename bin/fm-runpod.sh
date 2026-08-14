@@ -518,10 +518,14 @@ recover_endpoint_probe() {  # <alias> <host> <port> <user> <identity> <timeout>
   "$KEYSCAN_BIN" -T "$timeout" -p "$port" "$host" > "$scan" 2>/dev/null || rc=$?
   if [ "$rc" -eq 0 ]; then
     awk 'NF >= 3 && $1 !~ /^#/ { found = 1 } END { exit !found }' "$scan" \
-      && return 1
-    return 2
+      && { printf 'reachable:keyscan\n'; return 0; }
+    printf 'indeterminate:keyscan-malformed\n'
+    return 0
   fi
-  [ "$rc" -eq 1 ] && [ ! -s "$scan" ] || return 2
+  if [ "$rc" -ne 1 ] || [ -s "$scan" ]; then
+    printf 'indeterminate:keyscan-exit-%s\n' "$rc"
+    return 0
+  fi
   {
     printf 'Host %s\n' "$alias"
     printf '  HostName %s\n' "$host"
@@ -534,14 +538,13 @@ recover_endpoint_probe() {  # <alias> <host> <port> <user> <identity> <timeout>
     [ -z "$identity" ] || printf '  IdentityFile %s\n' "$identity"
     [ -z "$identity" ] || printf '  IdentitiesOnly yes\n'
   } > "$fragment"
-  chmod 600 "$fragment" || return 2
+  chmod 600 "$fragment" || { printf 'indeterminate:ssh-config\n'; return 0; }
   rc=0
   "$SSH_BIN" -o BatchMode=yes -o "ConnectTimeout=$timeout" \
     -F "$fragment" "$alias" true >/dev/null 2>&1 || rc=$?
   case "$rc" in
-    0) return 1 ;;
-    255) return 0 ;;
-    *) return 2 ;;
+    0) printf 'reachable:ssh\n' ;;
+    *) printf 'indeterminate:ssh-exit-%s\n' "$rc" ;;
   esac
 }
 
@@ -978,7 +981,8 @@ cmd_wake() {
 # unavailable, so only the ordinary guarded sleep path may terminate the pod.
 cmd_recover_stuck() {
   local id=${1:-} confirmed=0 pod_id pod raw rc=0 provider_state lifecycle host port alias remaining
-  local recorded_host recorded_port ssh_user ssh_identity probe_rc
+  local recorded_host recorded_port ssh_user ssh_identity recorded_endpoint current_endpoint
+  local recorded_ssh current_ssh
   shift || true
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -1010,43 +1014,43 @@ cmd_recover_stuck() {
   ssh_identity=$(record_get "$id" ssh_identity)
   remaining=$WAKE_TIMEOUT
   [ "$remaining" -le 15 ] || remaining=15
-  pod=$(pod_get "$pod_id") || die "the RunPod API could not be reached while inspecting stuck pod $pod_id"
-  if [ -n "$pod" ]; then
-    provider_state=$(pod_provider_state "$pod")
+  recorded_endpoint=none
+  recorded_ssh=not-applicable
+  if [ -n "$recorded_host" ] || [ -n "$recorded_port" ]; then
+    if [ -n "$recorded_host" ] && [ -n "$recorded_port" ]; then
+      recorded_endpoint="$recorded_host:$recorded_port"
+      recorded_ssh=$(recover_endpoint_probe "$alias" "$recorded_host" "$recorded_port" "$ssh_user" "$ssh_identity" "$remaining")
+    else
+      recorded_endpoint="${recorded_host:-missing-host}:${recorded_port:-missing-port}"
+      recorded_ssh=indeterminate:incomplete-endpoint
+    fi
   fi
   pod=$(pod_get "$pod_id" "$remaining") \
     || die "the RunPod API could not be reached while re-reading stuck pod $pod_id immediately before termination"
+  current_endpoint=none
+  current_ssh=not-applicable
   if [ -n "$pod" ]; then
     host=$(json_field "$pod" '.publicIp')
     port=$(json_field "$pod" '.portMappings."22"')
     provider_state=$(pod_provider_state "$pod")
+    if [ -n "$host" ] || [ -n "$port" ]; then
+      if [ -n "$host" ] && [ -n "$port" ]; then
+        current_endpoint="$host:$port"
+        current_ssh=$(recover_endpoint_probe "$alias" "$host" "$port" "$ssh_user" "$ssh_identity" "$remaining")
+      else
+        current_endpoint="${host:-missing-host}:${port:-missing-port}"
+        current_ssh=indeterminate:incomplete-endpoint
+      fi
+    fi
   else
     provider_state='desiredStatus=absent status=absent'
   fi
-  if [ -n "$host" ] || [ -n "$port" ]; then
-    [ -n "$host" ] && [ -n "$port" ] \
-      || die "stuck pod $pod_id now reports an incomplete SSH endpoint; refusing termination because reachability cannot be excluded"
-    probe_rc=0
-    recover_endpoint_probe "$alias" "$host" "$port" "$ssh_user" "$ssh_identity" "$remaining" || probe_rc=$?
-    case "$probe_rc" in
-      0) ;;
-      1) die "stuck pod $pod_id is now SSH-reachable at current provider endpoint $host:$port; refusing termination and requiring normal reconciliation" ;;
-      *) die "SSH reachability at current provider endpoint $host:$port is indeterminate; refusing termination because remote completion cannot be excluded" ;;
-    esac
-  fi
-  if [ -n "$recorded_host" ] || [ -n "$recorded_port" ]; then
-    [ -n "$recorded_host" ] && [ -n "$recorded_port" ] \
-      || die "secondmate $id has an incomplete recorded SSH endpoint; refusing termination because reachability cannot be excluded"
-    if [ "$recorded_host:$recorded_port" != "$host:$port" ]; then
-      probe_rc=0
-      recover_endpoint_probe "$alias" "$recorded_host" "$recorded_port" "$ssh_user" "$ssh_identity" "$remaining" || probe_rc=$?
-      case "$probe_rc" in
-        0) ;;
-        1) die "stuck pod $pod_id is SSH-reachable at recorded endpoint $recorded_host:$recorded_port; refusing termination and requiring normal reconciliation" ;;
-        *) die "SSH reachability at recorded endpoint $recorded_host:$recorded_port is indeterminate; refusing termination because remote completion cannot be excluded" ;;
-      esac
-    fi
-  fi
+  note "recover-stuck evidence: provider=($provider_state) current_endpoint=$current_endpoint current_ssh=$current_ssh recorded_endpoint=$recorded_endpoint recorded_ssh=$recorded_ssh confirmation=--yes"
+  case "$current_ssh $recorded_ssh" in
+    *reachable:*|*indeterminate:*)
+      die "stuck pod $pod_id has reachable or indeterminate SSH evidence; refusing termination because remote completion cannot be excluded"
+      ;;
+  esac
   if [ -n "$pod" ]; then
     raw=$(runpod_api DELETE "/pods/$pod_id" '') || rc=$?
     [ "$rc" -eq 0 ] \

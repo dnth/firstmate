@@ -248,27 +248,6 @@ secondmate_fallback_field() {
   configured_profile_field "$(secondmate_fallback_line)" "$1"
 }
 
-crew_fallback_field() {
-  configured_profile_field "$(crew_fallback_line)" "$1"
-}
-
-crew_fallback_harness() {
-  local value
-  value=$(crew_fallback_field 1)
-  [ -n "$value" ] && [ "$value" != default ] || return 0
-  printf '%s\n' "$value"
-}
-
-crew_fallback_model() {
-  [ -n "$(crew_fallback_harness)" ] || return 0
-  crew_fallback_field 2
-}
-
-crew_fallback_effort() {
-  [ -n "$(crew_fallback_harness)" ] || return 0
-  crew_fallback_field 3
-}
-
 secondmate_fallback_harness() {
   local sm
   sm=$(secondmate_fallback_field 1)
