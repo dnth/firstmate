@@ -194,7 +194,7 @@ toolchain_plan() {
 }
 
 ensure_treehouse_local_pool() {
-  local config_dir="$FM_ACCOUNT_HOME/.config/treehouse" config tmp
+  local config_dir="$FM_ACCOUNT_HOME/.config/treehouse" config tmp local_root volume_root
   case "$FM_TREEHOUSE_LOCAL_ROOT" in
     /*) ;;
     *) log "FATAL: the Treehouse pool root must be absolute"; return 1 ;;
@@ -216,6 +216,18 @@ ensure_treehouse_local_pool() {
     return 1
   fi
   mkdir -p "$config_dir" "$FM_TREEHOUSE_LOCAL_ROOT" || return 1
+  [ ! -L "$FM_TREEHOUSE_LOCAL_ROOT" ] || {
+    log "FATAL: the Treehouse pool root must not be a symlink"
+    return 1
+  }
+  local_root=$(cd "$FM_TREEHOUSE_LOCAL_ROOT" && pwd -P) || return 1
+  volume_root=$(cd "$FM_VOLUME" && pwd -P) || return 1
+  case "$local_root" in
+    "$volume_root"|"$volume_root"/*)
+      log "FATAL: the Treehouse pool root must stay off the network volume"
+      return 1
+      ;;
+  esac
   config="$config_dir/config.toml"
   [ ! -L "$config" ] || {
     log "FATAL: the Treehouse user config is a symlink"
@@ -293,6 +305,7 @@ write_account_shell_rc() {  # <path>
     # shellcheck disable=SC2016 # HOME and PATH expand when the generated startup file is sourced.
     printf '%s\n' 'export PATH="$HOME/.local/bin:$PATH"'
     printf '%s\n' 'export IS_SANDBOX=1'
+    printf 'export FM_TREEHOUSE_LOCAL_ROOT=%q\n' "$FM_TREEHOUSE_LOCAL_ROOT"
     printf '%s\n' "$FM_SHELL_RC_END"
   } > "$tmp" || { rm -f -- "$tmp"; return 1; }
   chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }

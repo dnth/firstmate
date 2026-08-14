@@ -5,6 +5,7 @@ REAL_GIT=${FM_TREEHOUSE_REAL_GIT:?}
 ERROR_FILE=${FM_TREEHOUSE_GUARD_ERROR_FILE:?}
 SAFE_FILE=${FM_TREEHOUSE_GUARD_SAFE_FILE:?}
 COMPLETE_FILE=${FM_TREEHOUSE_GUARD_COMPLETE_FILE:?}
+POOL_ROOT=${FM_TREEHOUSE_GUARD_POOL_ROOT:-}
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 # shellcheck source=bin/fm-pool-lib.sh
 . "$SCRIPT_DIR/../fm-pool-lib.sh"
@@ -104,6 +105,16 @@ if [ "${1:-}" = worktree ] && [ "${2:-}" = add ]; then
       exit 42
       ;;
   esac
+  if [ -n "$POOL_ROOT" ]; then
+    case "$target/" in
+      "$POOL_ROOT"/.treehouse/*) ;;
+      *)
+        printf 'error: refusing pooled worktree acquisition outside the required local pool: %s\n' \
+          "$target" >> "$ERROR_FILE"
+        exit 42
+        ;;
+    esac
+  fi
   repo_root=$("$REAL_GIT" -C "$PWD" rev-parse --show-toplevel 2>/dev/null) || {
     printf 'error: refusing pooled worktree acquisition because the repository root is unreadable\n' \
       >> "$ERROR_FILE"
@@ -129,19 +140,41 @@ if [ "${1:-}" = worktree ] && [ "${2:-}" = add ]; then
         "$target" >> "$ERROR_FILE"
       exit 42
     fi
-    worktrees=$("$REAL_GIT" -C "$PWD" worktree list --porcelain) || {
-      printf 'error: refusing pooled worktree acquisition because registered worktrees could not be verified\n' \
-        >> "$ERROR_FILE"
-      exit 42
-    }
+    worktrees_file="$COMPLETE_FILE.worktrees"
     registered=0
-    while IFS= read -r line; do
-      case "$line" in
-        "worktree $target") registered=1; break ;;
+    if "$REAL_GIT" -C "$PWD" worktree list --porcelain -z > "$worktrees_file" 2>/dev/null; then
+      while IFS= read -r -d '' line; do
+        case "$line" in
+          "worktree $target") registered=1; break ;;
+        esac
+      done < "$worktrees_file"
+    else
+      unsafe_target=0
+      case "$target" in
+        *$'\n'*|*$'\r'*|*$'\t'*) unsafe_target=1 ;;
       esac
-    done <<EOF
-$worktrees
-EOF
+      if [ "$unsafe_target" -eq 1 ] \
+        || printf '%s' "$target" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+        printf 'error: refusing pooled worktree acquisition because this Git cannot verify control-byte paths safely\n' \
+          >> "$ERROR_FILE"
+        exit 42
+      fi
+      "$REAL_GIT" -C "$PWD" worktree list --porcelain > "$worktrees_file" || {
+        printf 'error: refusing pooled worktree acquisition because registered worktrees could not be verified\n' \
+          >> "$ERROR_FILE"
+        exit 42
+      }
+      if grep -q '^worktree "' "$worktrees_file"; then
+        printf 'error: refusing pooled worktree acquisition because this Git cannot verify quoted worktree paths safely\n' \
+          >> "$ERROR_FILE"
+        exit 42
+      fi
+      while IFS= read -r line; do
+        case "$line" in
+          "worktree $target") registered=1; break ;;
+        esac
+      done < "$worktrees_file"
+    fi
     if [ "$registered" -eq 1 ]; then
       printf 'error: refusing pooled worktree acquisition because the existing target is already registered: %s\n' \
         "$target" >> "$ERROR_FILE"

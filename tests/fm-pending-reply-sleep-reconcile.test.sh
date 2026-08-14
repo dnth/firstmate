@@ -22,15 +22,26 @@ fm_pending_reply_mark_delivered "$STATE" "$corr" \
 rec=$(fm_pending_reply_path "$STATE" "$corr")
 fm_pending_reply_set "$rec" recovery_delivery_outcome failed
 fm_pending_reply_set "$rec" phase escalated
-printf 'blocked: pending-reply-recovery-delivery-failed: task=ios pending-reply-id=%s request=recover the remote reply\n' \
-  "$corr" >> "$STATE/ios.status"
-printf 'done [corr=%s]: fetched remote completion\n' "$corr" >> "$STATE/ios.status"
+{
+  printf 'blocked: pending-reply-recovery-delivery-failed: task=ios pending-reply-id=%s request=recover the remote reply\n' \
+    "$corr"
+  printf 'blocked [key=pending-reply-%s]: pending-reply-recovery-delivery-failed: task=ios pending-reply-id=%s request=recover the remote reply\n' \
+    "$corr" "$corr"
+  printf 'done [corr=%s]: fetched remote completion\n' "$corr"
+} >> "$STATE/ios.status"
 
 fm_pending_reply_reconcile_task "$STATE" ios "$STATE/ios.status" \
   || fail "the handled recovery reply did not reconcile"
 [ "$(fm_pending_reply_get "$rec" phase)" = resolved ] \
   || fail "the recovery-delivery-failed record remained unresolved"
 [ -z "$(status_open_decisions "$STATE/ios.status")" ] \
-  || fail "the exact legacy keyless pending-reply blocker remained open"
+  || fail "the keyed and exact legacy pending-reply blockers did not both close"
 
-pass "handled recovery replies resolve their records and exact legacy blockers"
+printf 'blocked: investigate external reference pending-reply-id=%s\n' "$corr" \
+  >> "$STATE/unrelated.status"
+fm_pending_reply_close_decision "$STATE/unrelated.status" "$corr" ios "recover the remote reply" \
+  || fail "the unrelated-decision reconciliation check failed"
+[ -n "$(status_open_decisions "$STATE/unrelated.status")" ] \
+  || fail "an unrelated keyless decision referencing the correlation id was closed"
+
+pass "handled recovery replies close only their keyed and exact legacy blockers"

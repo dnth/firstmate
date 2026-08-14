@@ -38,6 +38,41 @@ second=$(printf '%s\n' "$out" | tail -1)
 git -C "$REPO" worktree list --porcelain | grep -Fqx "worktree $orphan" \
   || fail "the recovered target was not registered as a Git worktree"
 
+registered_repo="$TMP_ROOT/registered-repo"
+registered_pool="$TMP_ROOT/"$'registered\npool'
+registered="$registered_pool/1/registered-repo"
+mkdir -p "$registered_repo" "$(dirname "$registered")"
+git -C "$registered_repo" init -q -b main
+git -C "$registered_repo" config user.name "Firstmate Tests"
+git -C "$registered_repo" config user.email "tests@firstmate.invalid"
+printf 'fixture\n' > "$registered_repo/README.md"
+git -C "$registered_repo" add README.md
+git -C "$registered_repo" commit -qm "initial fixture"
+git -C "$registered_repo" worktree add --detach "$registered" >/dev/null \
+  || fail "the unusual-path registered worktree could not be created"
+guard_dir="$TMP_ROOT/registered-guard"
+mkdir -p "$guard_dir"
+if (cd "$registered_repo" && \
+  FM_TREEHOUSE_REAL_GIT=$(command -v git) \
+  FM_TREEHOUSE_GUARD_ERROR_FILE="$guard_dir/error" \
+  FM_TREEHOUSE_GUARD_SAFE_FILE="$guard_dir/safe" \
+  FM_TREEHOUSE_GUARD_COMPLETE_FILE="$guard_dir/complete" \
+  "$ROOT/bin/treehouse-git-guard/git" worktree add "$registered") 2>/dev/null; then
+  fail "the guard accepted an already registered unusual-byte path"
+fi
+[ -d "$registered" ] || fail "the guard deleted an already registered unusual-byte path"
+
+network_pool="$TMP_ROOT/network-volume/treehouse"
+local_pool="$TMP_ROOT/local-treehouse"
+mkdir -p "$network_pool" "$local_pool"
+printf 'max_trees = 1\nroot = "%s"\n' "$network_pool" > "$REPO/treehouse.toml"
+if (cd "$REPO" && IS_SANDBOX=1 FM_TREEHOUSE_LOCAL_ROOT="$local_pool" \
+  "$ROOT/bin/fm-treehouse-get.sh" --lease --lease-holder wrong-root) >/dev/null 2>&1; then
+  fail "a repository Treehouse root bypassed the required RunPod-local pool"
+fi
+[ ! -d "$network_pool/.treehouse" ] \
+  || fail "the rejected repository root created a pool on network storage"
+
 (cd "$REPO" && treehouse return --if-lease-holder retry "$second") >/dev/null \
   || fail "the recovered lease could not be returned"
 (cd "$REPO" && treehouse return --if-lease-holder first "$first") >/dev/null \

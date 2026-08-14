@@ -40,6 +40,64 @@ repo=$PWD
 interactive_holder="fm-interactive-${BASHPID:-$$}"
 synthetic_acquired=
 synthetic_verified=0
+guard_pool_root=${FM_TREEHOUSE_LOCAL_ROOT:-}
+
+if [ "${IS_SANDBOX:-0}" = 1 ]; then
+  [ -n "$guard_pool_root" ] || {
+    echo "error: RunPod Treehouse acquisition requires a local pool root" >&2
+    exit 1
+  }
+  case "$guard_pool_root" in
+    /*) ;;
+    *) echo "error: RunPod Treehouse acquisition requires an absolute local pool root" >&2; exit 1 ;;
+  esac
+  case "$guard_pool_root/" in
+    *'/../'*|*'/./'*|*'//'* )
+      echo "error: RunPod Treehouse acquisition requires a normalized local pool root" >&2
+      exit 1
+      ;;
+  esac
+  [ -d "$guard_pool_root" ] && [ ! -L "$guard_pool_root" ] || {
+    echo "error: RunPod Treehouse acquisition requires a real local pool directory" >&2
+    exit 1
+  }
+  repo_root=$("$REAL_GIT" -C "$repo" rev-parse --show-toplevel 2>/dev/null) || {
+    echo "error: RunPod Treehouse acquisition could not read the repository root" >&2
+    exit 1
+  }
+  treehouse_config="$HOME/.config/treehouse/config.toml"
+  [ ! -f "$repo_root/treehouse.toml" ] || treehouse_config="$repo_root/treehouse.toml"
+  [ -f "$treehouse_config" ] || {
+    echo "error: RunPod Treehouse acquisition could not read its effective pool config" >&2
+    exit 1
+  }
+  if ! node - "$treehouse_config" "$guard_pool_root" "$repo_root" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+const [configPath, requiredRoot, repoRoot] = process.argv.slice(2);
+const lines = fs.readFileSync(configPath, "utf8").replace(/^\uFEFF/, "").split(/\r?\n/);
+let root;
+for (const line of lines) {
+  if (/^\s*\[/.test(line)) break;
+  if (!/^\s*root\s*=/.test(line)) continue;
+  const match = line.match(/^\s*root\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'([^']*)')\s*(?:#.*)?$/);
+  if (!match) process.exit(2);
+  root = match[1] === undefined ? match[2] : JSON.parse(`"${match[1]}"`);
+  break;
+}
+if (root === undefined || root.includes("$")) process.exit(2);
+const resolved = path.resolve(repoRoot, root);
+try {
+  if (fs.realpathSync(resolved) !== fs.realpathSync(requiredRoot)) process.exit(2);
+} catch {
+  process.exit(2);
+}
+NODE
+  then
+    echo "error: effective Treehouse config does not use the required RunPod-local pool root" >&2
+    exit 1
+  fi
+fi
 
 # shellcheck disable=SC2329 # Invoked indirectly by the signal trap handlers below.
 return_interrupted_synthetic_lease() {
@@ -123,6 +181,7 @@ FM_TREEHOUSE_REAL_GIT=$REAL_GIT \
 FM_TREEHOUSE_GUARD_ERROR_FILE="$GUARD_DIR/error" \
 FM_TREEHOUSE_GUARD_SAFE_FILE="$GUARD_DIR/safe" \
 FM_TREEHOUSE_GUARD_COMPLETE_FILE="$GUARD_DIR/complete" \
+FM_TREEHOUSE_GUARD_POOL_ROOT="$guard_pool_root" \
 PATH="$SCRIPT_DIR/treehouse-git-guard:$PATH" \
   treehouse get "${treehouse_args[@]}" > "$GUARD_DIR/stdout"
 status=$?

@@ -471,30 +471,40 @@ fm_pending_reply_resolve_via_of_line() {  # <line>
   esac
 }
 
-fm_pending_reply_close_decision() {  # <status-file> <corr_id>
-  local status_file=$1 corr=$2 open line key note decision_key resolution
+fm_pending_reply_close_decision() {  # <status-file> <corr_id> <task-id> <request-summary>
+  local status_file=$1 corr=$2 task_id=$3 summary=$4 open line key note decision_key
+  local keyed_open=0 legacy_open=0 legacy_missed legacy_delivery_unknown
+  local legacy_recovery_failed legacy_recovery_unknown
   [ -f "$status_file" ] && [ ! -L "$status_file" ] || return 0
   decision_key="pending-reply-$corr"
+  legacy_missed="pending-reply-missed: task=$task_id pending-reply-id=$corr request=$summary"
+  legacy_delivery_unknown="pending-reply-delivery-unknown: task=$task_id pending-reply-id=$corr request=$summary"
+  legacy_recovery_failed="pending-reply-recovery-delivery-failed: task=$task_id pending-reply-id=$corr request=$summary"
+  legacy_recovery_unknown="pending-reply-recovery-delivery-unknown: task=$task_id pending-reply-id=$corr request=$summary"
   open=$(status_open_decisions "$status_file")
   [ -n "$open" ] || return 0
-  resolution=
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     key=${line%%$'\t'*}
     note=${line#*$'\t'}
     note=${note#*$'\t'}
-    case "$note" in
-      *"pending-reply-id=$corr"*) ;;
-      *) continue ;;
-    esac
     case "$key" in
-      "$decision_key") resolution="resolved [key=$decision_key]: correlated pending reply reconciled"; break ;;
-      default) [ -n "$resolution" ] || resolution="resolved: correlated pending reply reconciled (pending-reply-id=$corr)" ;;
+      "$decision_key") keyed_open=1 ;;
+      default)
+        case "$note" in
+          "$legacy_missed"|"$legacy_delivery_unknown"|"$legacy_recovery_failed"|"$legacy_recovery_unknown")
+            legacy_open=1
+            ;;
+        esac
+        ;;
     esac
   done <<EOF
 $open
 EOF
-  [ -z "$resolution" ] || printf '%s\n' "$resolution" >> "$status_file"
+  [ "$keyed_open" -eq 0 ] \
+    || printf 'resolved [key=%s]: correlated pending reply reconciled\n' "$decision_key" >> "$status_file"
+  [ "$legacy_open" -eq 0 ] \
+    || printf 'resolved: correlated pending reply reconciled (pending-reply-id=%s)\n' "$corr" >> "$status_file"
 }
 
 # Idempotently resolve an expectation from a correlated parent report.
@@ -502,13 +512,16 @@ EOF
 fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
   local state=$1 corr=$2 status_override=${3-}
   local rec phase delivered marker delivery_entry delivery_state status_file signature previous line via now
+  local task_id summary
   local unconfirmed=0
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
+  task_id=$(fm_pending_reply_get "$rec" task_id)
+  summary=$(fm_pending_reply_get "$rec" request_summary)
   if [ "$phase" = resolved ]; then
     status_file=${status_override:-$(fm_pending_reply_get "$rec" parent_status)}
-    fm_pending_reply_close_decision "$status_file" "$corr" || return 1
+    fm_pending_reply_close_decision "$status_file" "$corr" "$task_id" "$summary" || return 1
     return 0
   fi
   delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
@@ -535,7 +548,7 @@ fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
   fi
   via=$(fm_pending_reply_resolve_via_of_line "$line")
   now=$(fm_pending_reply_now)
-  fm_pending_reply_close_decision "$status_file" "$corr" || return 1
+  fm_pending_reply_close_decision "$status_file" "$corr" "$task_id" "$summary" || return 1
   fm_pending_reply_set "$rec" phase resolved || return 1
   if [ -z "$delivered" ]; then
     fm_pending_reply_mark_delivered "$state" "$corr" "$now" || return 1
