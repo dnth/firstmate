@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# Treehouse command boundary for RunPod-local pools.
+# Outside the RunPod sandbox it is a transparent exec wrapper.
+# Inside the sandbox it preserves each repository's Treehouse settings while
+# replacing only its pool root in an isolated overlay under the validated local
+# container-storage root; it never edits the repository configuration.
 set -u
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)

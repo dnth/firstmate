@@ -16,6 +16,9 @@
 # report. Never loop, never repeatedly inject, never silently expire unresolved
 # records, and never treat wrong-home or structured-home heuristics as
 # acknowledgement.
+# Escalation opens the correlation-keyed pending-reply decision.
+# A later correlated report closes that decision and only the exact legacy
+# keyless blocker for the same record; unrelated open decisions are preserved.
 #
 # Record location (parent FM_HOME):
 #   state/pending-replies/<corr_id>
@@ -50,8 +53,9 @@
 #   wrong_home_scan_signature=
 #   grace_secs=             bounded grace before recovery is eligible
 #
-# Sourced by bin/fm-send.sh, bin/fm-watch.sh, bin/fm-secondmate-report.sh, and
-# tests. No side effects on source. set -u / set -e safe.
+# Sourced by the send, watch, report, remote-reply, remote-secondmate-control,
+# and RunPod lifecycle commands, plus tests.
+# No side effects on source. set -u / set -e safe.
 #
 # Tunables (env):
 #   FM_PENDING_REPLY_GRACE_SECS   default 120

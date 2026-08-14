@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+# Guarded Treehouse acquisition for every pooled Firstmate task.
+# It snapshots candidate reflogs before Treehouse runs, contains reset and clean
+# through treehouse-git-guard/git, and withholds the acquired path until the
+# append-only post-acquisition transition check succeeds.
+# The Git guard owns recovery of an interrupted worktree add and removes only
+# its exact expected Git-unregistered numbered-slot target.
+# --ready-file writes the verified acquired path from this invocation before an
+# interactive shell starts, so RunPod relaunch cannot reuse a stale pane cwd.
 set -u
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)

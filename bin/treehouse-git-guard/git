@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# Git boundary used only during guarded Treehouse acquisition.
+# Reset-like operations require ancestry proof before clean may run.
+# A worktree add may recover only its exact normalized numbered-slot target:
+# an existing Git registration is preserved, a missing registration is pruned,
+# and only a real Git-unregistered target directory may be removed before retry.
+# When FM_TREEHOUSE_GUARD_POOL_ROOT is set, every add must remain physically
+# contained in that validated RunPod-local pool.
 set -u
 
 REAL_GIT=${FM_TREEHOUSE_REAL_GIT:?}
