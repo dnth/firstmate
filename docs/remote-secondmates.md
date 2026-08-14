@@ -11,6 +11,7 @@ On macOS, Herdr's remote-session server belongs to the host's own GUI login sess
 In both cases, the agent's endpoint survives every disconnection the primary's supervision depends on.
 Local second mates are unaffected and keep their ordinary backend and session selection, as do the workers a remote second mate supervises inside its own home.
 A remote host may optionally be an ephemeral rented pod rather than a permanent machine; [`runpod-secondmates.md`](runpod-secondmates.md) owns its host-specific bootstrap and compute lifecycle, while this page's routing and safety contracts apply unchanged.
+That page also owns the RunPod OMP auth broker and its hard workstation-online dependency.
 
 ## Prerequisites
 

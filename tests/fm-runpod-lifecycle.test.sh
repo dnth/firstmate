@@ -48,6 +48,7 @@ rp() {  # run the provider with the fixture wired in
   FM_FAKE_RUNPOD_STATE="$API_STATE" \
   FM_FAKE_RUNPOD_LOG="$API_LOG" \
   FM_FAKE_REMOTE_LOG="$REMOTE_LOG" \
+  FM_RUNPOD_OMP_AUTH_BIN="$FAKEBIN/fm-runpod-omp-auth" \
   FM_RUNPOD_POLL_INTERVAL="${FM_TEST_RUNPOD_POLL_INTERVAL:-0}" \
   FM_RUNPOD_WAKE_TIMEOUT="${FM_TEST_RUNPOD_WAKE_TIMEOUT:-10}" \
   "$ROOT/bin/fm-runpod.sh" "$@"

@@ -46,6 +46,7 @@ world_env() {  # <world> -- <command...>
   FM_FAKE_RUNPOD_STATE="$w/runpod.json" \
   FM_FAKE_RUNPOD_LOG="$w/calls.log" \
   FM_FAKE_REMOTE_LOG="$w/calls.log" \
+  FM_RUNPOD_OMP_AUTH_BIN="$w/fakebin/fm-runpod-omp-auth" \
   FM_RUNPOD_POLL_INTERVAL=0 \
   FM_RUNPOD_WAKE_TIMEOUT=10 \
   "$@"

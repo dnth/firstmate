@@ -372,7 +372,21 @@ esac
 exit 0
 SH
 
-  chmod +x "$fakebin/curl" "$fakebin/ssh-keyscan" "$fakebin/ssh"
+  cat > "$fakebin/fm-runpod-omp-auth" <<'SH'
+#!/usr/bin/env bash
+printf 'OMP-AUTH %s\n' "$*" >> "${FM_FAKE_RUNPOD_LOG:-/dev/null}"
+case "${1:-}" in
+  start)
+    printf 'auth-broker: ready id=%s endpoint=http://127.0.0.1:8765 mode=credential-read-only\n' "${2:-}"
+    ;;
+  stop)
+    printf 'auth-broker: tunnel stopped id=%s\n' "${2:-}"
+    ;;
+esac
+exit 0
+SH
+
+  chmod +x "$fakebin/curl" "$fakebin/ssh-keyscan" "$fakebin/ssh" "$fakebin/fm-runpod-omp-auth"
 }
 
 # runpod_env <fixture-root> -- <command>: run a command with the fixture wired in.

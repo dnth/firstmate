@@ -322,6 +322,8 @@ run_spawn() {
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     HOME="${FM_TEST_HOME_OVERRIDE:-$HOME}" IS_SANDBOX="${FM_TEST_IS_SANDBOX:-}" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
+    FM_OMP_AUTH_BROKER_URL="${FM_TEST_OMP_AUTH_BROKER_URL:-}" \
+    FM_OMP_AUTH_BROKER_TOKEN_FILE="${FM_TEST_OMP_AUTH_BROKER_TOKEN_FILE:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_ENDPOINT_LOG="$endpointlog" \
     FM_FAKE_TREEHOUSE_LOG="$treehouselog" FM_FAKE_OMP_ACK="${FM_TEST_OMP_ACK:-}" \
     FM_FAKE_OMP_DYNAMIC_ACK="${FM_TEST_OMP_DYNAMIC_ACK:-0}" \
@@ -848,6 +850,48 @@ test_omp_threads_exact_identity_model_and_every_thinking_level() {
     unset FM_TEST_OMP_ACK
   done
   pass "OMP launches through its metadata-bound canonical Bun/OMP pair and forwards every supported thinking level"
+}
+
+test_omp_broker_env_uses_mode_600_file_without_exposing_bearer() {
+  local rec id out status launch token_file
+  id=$(profile_id profile-omp-broker-z8ob)
+  rec=$(make_spawn_case profile-omp-broker omp "$id")
+  read_case_record "$rec"
+  token_file="$CASE_DIR/omp-auth-broker.token"
+  printf '%s' 'dummy_broker_token_123' > "$token_file"
+  chmod 600 "$token_file"
+  export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
+  export FM_TEST_OMP_AUTH_BROKER_URL=http://127.0.0.1:8765
+  export FM_TEST_OMP_AUTH_BROKER_TOKEN_FILE="$token_file"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model openai-codex/gpt-5.6-sol --effort high)
+  status=$?
+  expect_code 0 "$status" "OMP spawn with a mode-600 broker token file should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "OMP_AUTH_BROKER_URL='http://127.0.0.1:8765'" \
+    "OMP launch did not receive the pod-loopback broker URL"
+  assert_contains "$launch" "OMP_AUTH_BROKER_TOKEN=\"\$(cat '$token_file')\"" \
+    "OMP launch did not defer bearer-file expansion to the pane shell"
+  assert_contains "$launch" "FM_OMP_AUTH_BROKER_TOKEN_FILE='$token_file'" \
+    "OMP launch did not retain the safe bearer-file path for descendant OMP crews"
+  assert_not_contains "$launch" 'dummy_broker_token_123' \
+    "OMP bearer bytes leaked into the literal backend launch command"
+
+  id=$(profile_id profile-omp-broker-mode-z8obm)
+  mkdir -p "$HOME_DIR/data/$id"
+  printf 'brief for %s\n' "$id" > "$HOME_DIR/data/$id/brief.md"
+  chmod 644 "$token_file"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model openai-codex/gpt-5.6-sol --effort high)
+  status=$?
+  expect_code 1 "$status" "OMP spawn must refuse a broker token file broader than mode 0600"
+  assert_contains "$out" 'OMP auth-broker token file must have mode 0600' \
+    "unsafe OMP broker token refusal did not name the required mode"
+  [ ! -s "$LAUNCH_LOG" ] || fail "unsafe OMP broker token mode typed a backend launch command"
+
+  unset FM_TEST_OMP_ACK FM_TEST_OMP_AUTH_BROKER_URL FM_TEST_OMP_AUTH_BROKER_TOKEN_FILE
+  pass "OMP broker launch env reads a mode-600 file inside the pane and never exposes bearer bytes"
 }
 
 test_omp_prewalk_threads_native_target_and_metadata() {
@@ -1928,6 +1972,7 @@ test_pi_threads_model_and_max_effort
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_omp_threads_exact_identity_model_and_every_thinking_level
+test_omp_broker_env_uses_mode_600_file_without_exposing_bearer
 test_omp_prewalk_threads_native_target_and_metadata
 test_omp_unusable_prewalk_target_keeps_full_starting_model_trajectory
 test_omp_prewalk_accepts_colon_selector_from_launch_worktree_catalog

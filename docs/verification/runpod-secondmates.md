@@ -14,6 +14,8 @@ Verified 2026-08-14 against the stateful RunPod REST double in `tests/runpod-fix
 bin/fm-test-run.sh tests/fm-runpod-lifecycle.test.sh
 bin/fm-test-run.sh tests/fm-runpod-routing.test.sh
 bin/fm-test-run.sh tests/fm-runpod-pod-boot.test.sh
+bin/fm-test-run.sh tests/fm-runpod-omp-auth.test.sh
+bin/fm-test-run.sh tests/fm-spawn-dispatch-profile.test.sh
 bin/fm-test-run.sh tests/fm-remote-doctor.test.sh
 bin/fm-test-run.sh tests/fm-remote-job.test.sh
 bin/fm-test-run.sh tests/fm-remote-entrypoint.test.sh
@@ -62,3 +64,28 @@ The provider double returns independently modeled `desiredStatus` and `status` f
 The SSH double separates boot readiness, host-key scanning, and remote command delivery, so a successful provider response cannot stand in for successful SSH bootstrap.
 No command above reads a real RunPod key, creates a real pod, or exercises a paid resource.
 The precise OMP `EADDRINUSE` root cause remains unverified and requires a future operator reproduction on a live pod.
+
+## OMP broker surface and read-only boundary
+
+Verified 2026-08-14 against installed `omp/17.2.11` at `/home/dnth/.bun/bin/omp`.
+
+```sh
+omp --version
+omp auth-broker --help
+omp auth-broker serve --help
+omp auth-broker token --help
+rg -n 'OMP_AUTH_BROKER_(URL|TOKEN)|RemoteAuthCredentialStore' \
+  /home/dnth/.bun/install/global/node_modules/@oh-my-pi/pi-coding-agent \
+  /home/dnth/.bun/install/global/node_modules/@oh-my-pi/pi-ai
+```
+
+The version command printed `omp/17.2.11`.
+The help output listed `auth-broker` and its `serve` and `token` actions, including `omp auth-broker serve`, `omp auth-broker serve --bind=127.0.0.1:9000`, and `omp auth-broker token` examples.
+The installed `discover.ts` resolves `OMP_AUTH_BROKER_URL` and `OMP_AUTH_BROKER_TOKEN`, constructs `AuthBrokerClient`, and wraps its snapshot in `RemoteAuthCredentialStore`.
+The installed `remote-store.ts` synchronous replace, upsert, and delete methods throw the read-only-client error, while its async remote hooks can upload, replace, and disable credentials through broker HTTP endpoints.
+The installed broker uses one bearer allow-list for both reads and writes, so the token itself has no credential-read-only scope.
+That evidence is why the RunPod tunnel terminates at `bin/fm-omp-auth-broker-readonly-proxy.mjs` instead of the unrestricted broker port.
+
+The mocked regression suite proves the active boundary without a live pod or network account.
+It installs the pod bearer through the boot script's public interface and checks mode 0600, exercises the public remote launch path and OMP pane-launch construction, verifies that credential upload and disable never reach the fake canonical broker, permits broker-side refresh, and forces two SSH drops before confirming a third tunnel attempt with the required keepalive flags.
+The live pod end-to-end runbook remains documented in [`runpod-secondmates.md`](../runpod-secondmates.md#live-end-to-end-verification-at-the-next-pod-awake-window) and was not executed because the pod was suspended and waking it solely for validation would incur cost.
