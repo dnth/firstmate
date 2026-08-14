@@ -260,6 +260,10 @@ cat > "$TUNNEL_BIN/curl" <<'SH'
 case "${FM_FAKE_PROXY_READY:-facade}" in
   facade) printf 'HTTP/1.1 200 OK\r\nx-fm-auth-broker-facade: credential-read-only\r\n\r\n' ;;
   raw) printf 'HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n' ;;
+  unhealthy)
+    printf 'HTTP/1.1 503 Service Unavailable\r\nx-fm-auth-broker-facade: credential-read-only\r\n\r\n'
+    exit 22
+    ;;
   *) exit 1 ;;
 esac
 SH
@@ -287,6 +291,19 @@ kill -TERM "$TUNNEL_PID" 2>/dev/null || true
 wait "$TUNNEL_PID" 2>/dev/null || true
 TUNNEL_PID=
 assert_absent "$TUNNEL_COUNT" "the facade readiness probe false-matched a raw broker health response"
+
+FM_HOME="$TUNNEL_HOME" FM_STATE_OVERRIDE="$TUNNEL_HOME/state" \
+  FM_RUNPOD_OMP_CURL_BIN="$TUNNEL_BIN/curl" FM_RUNPOD_OMP_SSH_BIN="$TUNNEL_BIN/ssh" \
+  FM_RUNPOD_OMP_PROXY_BIND=127.0.0.1:18766 FM_RUNPOD_OMP_REMOTE_BIND=127.0.0.1:8765 \
+  FM_RUNPOD_OMP_RESTART_DELAY=0.05 FM_FAKE_PROXY_READY=unhealthy FM_FAKE_TUNNEL_COUNT="$TUNNEL_COUNT" \
+  FM_FAKE_TUNNEL_LOG="$TUNNEL_LOG" \
+  "$AUTH" tunnel-run podmate pod-alias "$TMP_ROOT/pod.conf" >/dev/null 2>&1 &
+TUNNEL_PID=$!
+sleep 0.2
+kill -TERM "$TUNNEL_PID" 2>/dev/null || true
+wait "$TUNNEL_PID" 2>/dev/null || true
+TUNNEL_PID=
+assert_absent "$TUNNEL_COUNT" "the facade readiness probe accepted an unhealthy response"
 
 FM_HOME="$TUNNEL_HOME" FM_STATE_OVERRIDE="$TUNNEL_HOME/state" \
   FM_RUNPOD_OMP_CURL_BIN="$TUNNEL_BIN/curl" FM_RUNPOD_OMP_SSH_BIN="$TUNNEL_BIN/ssh" \
