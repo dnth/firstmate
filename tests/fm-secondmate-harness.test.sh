@@ -1136,7 +1136,7 @@ test_crew_primary_fallback_selection() {
   proj="$w/project"
   wt="$w/wt"
   launchlog="$w/launch.log"
-  id=crew-fallback-z2
+  id="crew-fallback-z2"
   mkdir -p "$home/config" "$home/data/$id" "$home/projects" "$home/state"
   printf 'codex\n' > "$home/config/crew-harness"
   printf 'claude\n' > "$home/config/crew-harness-fallback"
