@@ -50,6 +50,14 @@ case "${1:-}" in
     [ -z "${FM_FAKE_ENDPOINT_LOG:-}" ] || printf 'new-window\n' >> "$FM_FAKE_ENDPOINT_LOG"
     exit 0 ;;
   send-keys)
+    for a in "$@"; do
+      case "$a" in
+        *fm-treehouse-get.sh*' --ready-file '*)
+          ready_file=${a##* --ready-file }
+          printf '%s\n' "$FM_FAKE_PANE_PATH" > "$ready_file"
+          ;;
+      esac
+    done
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
       for a in "$@"; do
@@ -1852,7 +1860,7 @@ test_claude_root_sandbox_launch_is_unattended() {
   out=$(FM_TEST_HOME_OVERRIDE="$sandbox_home" FM_TEST_IS_SANDBOX=1 \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
-  expect_code 0 "$status" "sandboxed Claude spawn should succeed"
+  expect_code 0 "$status" "sandboxed Claude spawn should succeed"$'\n'"$out"$'\n'"$(cat "$LAUNCH_LOG")"
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "IS_SANDBOX=1 CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
     "sandboxed Claude launch did not carry the root bypass marker into the pane"
