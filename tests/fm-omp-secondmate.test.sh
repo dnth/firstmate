@@ -353,7 +353,7 @@ EOF_META
 }
 
 test_herdr_launch_exact_resume_recovery_and_abort() {
-  local out selected before
+  local out selected before token_file launch
   setup_case herdr-launch
 
   out=$(run_spawn_herdr 2>&1) || fail "fresh OMP Herdr secondmate spawn failed: $out"
@@ -370,6 +370,24 @@ test_herdr_launch_exact_resume_recovery_and_abort() {
   out=$(FM_TEST_STATE_MODE=missing run_spawn_herdr 2>&1) || fail "OMP Herdr secondmate exact resume failed: $out"
   assert_contains "$(cat "$LAUNCH_LOG")" "--resume '$selected'" \
     "OMP Herdr secondmate recovery did not resume the pointer-bound exact session"
+
+  setup_case herdr-broker-launch
+  token_file="$CASE/omp-auth-broker.token"
+  printf '%s' 'dummy_remote_agent_broker_token_789' > "$token_file"
+  chmod 600 "$token_file"
+  out=$(run_spawn_herdr \
+    FM_OMP_AUTH_BROKER_URL=http://127.0.0.1:8765 \
+    FM_OMP_AUTH_BROKER_TOKEN_FILE="$token_file" 2>&1) \
+    || fail "OMP Herdr secondmate broker launch failed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "OMP_AUTH_BROKER_URL='http://127.0.0.1:8765'" \
+    "OMP secondmate agent launch did not receive the pod-loopback broker URL"
+  assert_contains "$launch" "OMP_AUTH_BROKER_TOKEN=\"\$(cat '$token_file')\"" \
+    "OMP secondmate agent launch did not defer bearer expansion to the pane shell"
+  assert_contains "$launch" "FM_OMP_AUTH_BROKER_TOKEN_FILE='$token_file'" \
+    "OMP secondmate agent launch did not retain the safe token-file path for descendants"
+  assert_not_contains "$launch" 'dummy_remote_agent_broker_token_789' \
+    "OMP secondmate agent launch exposed broker bearer bytes in backend transport"
 
   setup_case herdr-live-refusal
   write_herdr_meta

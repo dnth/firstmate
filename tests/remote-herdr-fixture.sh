@@ -20,14 +20,18 @@
 # Usage:
 #   . "$(dirname "${BASH_SOURCE[0]}")/remote-herdr-fixture.sh"
 #   install_remote_herdr_fixture <remote-root> <state-file> <log-file> \
-#     <send-fail-flag> <socket-path>
+#     <send-fail-flag> <socket-path> [<omp-ack-pid> <omp-bun> <omp-bin>]
 #
 # Every invocation is appended verbatim to <log-file>, so a test reads back what
 # the remote pane received. Creating <send-fail-flag> makes every pane write
 # fail, which is how a test simulates an endpoint that cannot be reached.
+# Supplying the three OMP acknowledgement fields makes an OMP launch publish the
+# same home-owned integration marker, lock, and durable-session pointer that the
+# real primary extension publishes, while leaving every non-OMP launch unchanged.
 
 install_remote_herdr_fixture() { # <remote-root> <state> <log> <send-fail> <socket>
   local remote_root=$1 state=$2 log=$3 send_fail=$4 socket=$5 script="$1/bin/herdr"
+  local omp_ack_pid=${6:-} omp_bun=${7:-} omp_bin=${8:-}
   mkdir -p "$remote_root/bin"
   cat > "$script" <<SH
 #!/usr/bin/env bash
@@ -37,6 +41,8 @@ LOG='$log'
 SEND_FAIL='$send_fail'
 SOCKET='$socket'
 SH
+  printf 'OMP_ACK_PID=%q\nOMP_BUN=%q\nOMP_BIN=%q\n' \
+    "$omp_ack_pid" "$omp_bun" "$omp_bin" >> "$script"
   cat >> "$script" <<'SH'
 printf '%s\n' "$*" >> "$LOG"
 jq_state() { jq "$@" "$STATE"; }
@@ -92,10 +98,31 @@ case "${1:-} ${2:-}" in
        | .working |= with_entries(select(.key != $p))' | save ;;
   "pane send-text")
     [ ! -f "$SEND_FAIL" ] || exit 1
-    jq_state --arg p "${3:-}" '.typed[$p] = true' | save ;;
+    jq_state --arg p "${3:-}" --arg text "${4:-}" \
+      '.typed[$p] = true | .launch[$p] = $text' | save ;;
   "pane send-keys")
     [ ! -f "$SEND_FAIL" ] || exit 1
-    jq_state --arg p "${3:-}" '.typed[$p] = true | .working[$p] = true' | save ;;
+    pane=${3:-}
+    jq_state --arg p "$pane" '.typed[$p] = true | .working[$p] = true' | save
+    launch=$(jq_state -r --arg p "$pane" '.launch[$p] // ""')
+    if [ "${4:-}" = enter ] && [ -n "$OMP_ACK_PID" ] \
+       && [ -n "$OMP_BUN" ] && [ -n "$OMP_BIN" ]; then
+      case "$launch" in
+        *FM_OMP_SESSION_POINTER=*)
+          cwd=$(jq_state -r --arg p "$pane" '.tabs[] | select(.pane_id == $p) | .cwd // empty')
+          [ -n "$cwd" ] || exit 1
+          mkdir -p "$cwd/state/omp-sessions"
+          session="$cwd/state/omp-sessions/selected.jsonl"
+          printf '{"type":"session"}\n' > "$session"
+          printf '%s\n' "$session" > "$cwd/state/.omp-session"
+          version=$(bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_primary_watch_version "$1/.omp/extensions/fm-primary-omp.ts" "$1"' _ "$cwd")
+          printf '%s\n%s\n%s\n%s\n' "$version" "$OMP_ACK_PID" "$OMP_BUN" "$OMP_BIN" \
+            > "$cwd/state/.omp-primary-extension-loaded"
+          printf '%s\n' "$OMP_ACK_PID" > "$cwd/state/.lock"
+          ;;
+      esac
+    fi
+    ;;
   "pane read") printf '\n' ;;
   "pane process-info") printf '{"result":{"process":{"name":"codex"}}}\n' ;;
   "agent get")
@@ -121,5 +148,5 @@ SH
 # reset_remote_herdr_fixture <state>: return the fake host to "no workspaces,
 # tabs, or panes", which is what a test means by "the previous endpoint is gone".
 reset_remote_herdr_fixture() { # <state>
-  printf '{"next":1,"workspaces":[],"tabs":[],"typed":{},"working":{}}\n' > "$1"
+  printf '{"next":1,"workspaces":[],"tabs":[],"typed":{},"working":{},"launch":{}}\n' > "$1"
 }
