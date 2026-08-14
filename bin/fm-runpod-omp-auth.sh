@@ -201,8 +201,9 @@ broker_ready() {
 }
 
 proxy_ready() {
-  "$CURL_BIN" -fsS --max-time 2 "$(proxy_url)/v1/healthz" 2>/dev/null \
-    | grep -q '"mode"[[:space:]]*:[[:space:]]*"credential-read-only"'
+  "$CURL_BIN" -fsS --max-time 2 --dump-header - --output /dev/null \
+    "$(proxy_url)/v1/healthz" 2>/dev/null \
+    | grep -qi '^x-fm-auth-broker-facade:[[:space:]]*credential-read-only[[:space:]]*$'
 }
 
 wait_ready() {  # <label> <probe-function>
