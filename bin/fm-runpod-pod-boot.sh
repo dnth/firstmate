@@ -252,7 +252,32 @@ ensure_treehouse_local_pool() {
   tmp=$(mktemp "$config_dir/.config.toml.XXXXXX") || return 1
   {
     printf 'root = "%s"\n' "$FM_TREEHOUSE_LOCAL_ROOT"
-    [ ! -f "$config" ] || awk '$0 !~ /^[[:space:]]*(root|"root"|\047root\047)[[:space:]]*=/' "$config"
+    [ ! -f "$config" ] || awk '
+      function is_root_key(line, first, rest, end, key, tail, quote) {
+        sub(/^[[:space:]]*/, "", line)
+        first = substr(line, 1, 1)
+        quote = sprintf("%c", 39)
+        if (first == "\"" || first == quote) {
+          rest = substr(line, 2)
+          end = index(rest, first)
+          if (end == 0) return 0
+          key = substr(rest, 1, end - 1)
+          tail = substr(rest, end + 1)
+          if (tail !~ /^[[:space:]]*=/) return 0
+          if (first == "\"") {
+            gsub(/\\u0072|\\U00000072/, "r", key)
+            gsub(/\\u006[fF]|\\U0000006[fF]/, "o", key)
+            gsub(/\\u0074|\\U00000074/, "t", key)
+          }
+          return key == "root"
+        }
+        if (line !~ /^[A-Za-z0-9_-]+[[:space:]]*=/) return 0
+        key = line
+        sub(/[[:space:]]*=.*/, "", key)
+        return key == "root"
+      }
+      !is_root_key($0)
+    ' "$config"
   } > "$tmp" || { rm -f -- "$tmp"; return 1; }
   chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
   mv -f -- "$tmp" "$config" || { rm -f -- "$tmp"; return 1; }

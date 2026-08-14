@@ -83,6 +83,38 @@ fi
 [ ! -d "$network_pool/.treehouse" ] \
   || fail "the repository Treehouse root created a pool on network storage"
 
+concurrent_pool="$TMP_ROOT/concurrent-local-treehouse"
+mkdir -p "$concurrent_pool"
+printf 'max_trees = 4\n"root" = "%s"\n' "$network_pool" > "$REPO/treehouse.toml"
+concurrent_pids=
+for index in 1 2 3 4; do
+  (
+    cd "$REPO" || exit 1
+    IS_SANDBOX=1 FM_TREEHOUSE_LOCAL_ROOT="$concurrent_pool" \
+      "$ROOT/bin/fm-treehouse-get.sh" --lease --lease-holder "concurrent-$index"
+  ) > "$TMP_ROOT/concurrent-$index.out" 2> "$TMP_ROOT/concurrent-$index.err" &
+  concurrent_pids="$concurrent_pids $!"
+done
+index=0
+for concurrent_pid in $concurrent_pids; do
+  index=$((index + 1))
+  wait "$concurrent_pid" \
+    || fail "concurrent first acquisition $index failed: $(cat "$TMP_ROOT/concurrent-$index.err")"
+done
+[ "$(cat "$TMP_ROOT"/concurrent-*.out | sort -u | wc -l | tr -d ' ')" = 4 ] \
+  || fail "concurrent first acquisitions did not receive four distinct worktrees"
+for index in 1 2 3 4; do
+  concurrent_acquired=$(tail -1 "$TMP_ROOT/concurrent-$index.out")
+  case "$concurrent_acquired" in
+    "$concurrent_pool"/.treehouse/*) ;;
+    *) fail "concurrent acquisition escaped the local pool: $concurrent_acquired" ;;
+  esac
+  (cd "$REPO" && IS_SANDBOX=1 FM_TREEHOUSE_LOCAL_ROOT="$concurrent_pool" \
+    "$ROOT/bin/fm-treehouse-command.sh" return --if-lease-holder "concurrent-$index" "$concurrent_acquired") \
+    >/dev/null || fail "concurrent local lease $index could not be returned"
+done
+printf '%s\n' "$repo_config" > "$REPO/treehouse.toml"
+
 for unsafe_child in .treehouse .firstmate-config; do
   unsafe_pool="$TMP_ROOT/unsafe-${unsafe_child#.}"
   escaped="$TMP_ROOT/escaped-${unsafe_child#.}"

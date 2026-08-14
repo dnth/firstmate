@@ -390,7 +390,7 @@ provision_idempotent() {  # <world> [harness]
 
 w=$(new_world provision)
 mkdir -p "$w/volume/home/.config/treehouse"
-printf 'root = "%s"\nmax_trees = 8\n' "$w/volume/slow-treehouse" \
+printf '"r\\u006fot" = "%s"\nmax_trees = 8\n' "$w/volume/slow-treehouse" \
   > "$w/volume/home/.config/treehouse/config.toml"
 provision_only "$w"
 calls=$(cat "$w/calls.log")
@@ -418,6 +418,8 @@ assert_grep "root = \"$w/local-treehouse\"" "$HOMEDIR/.config/treehouse/config.t
   "boot did not place fresh Treehouse worktrees on local container storage"
 assert_grep 'max_trees = 8' "$HOMEDIR/.config/treehouse/config.toml" \
   "boot did not preserve the existing Treehouse pool settings"
+assert_not_contains "$(cat "$HOMEDIR/.config/treehouse/config.toml")" '"r\u006fot"' \
+  "boot retained a semantically duplicate escaped Treehouse root key"
 case "$(sed -n 's/^root = "\(.*\)"/\1/p' "$HOMEDIR/.config/treehouse/config.toml")" in
   "$w/volume"|"$w/volume"/*) fail "Treehouse worktrees remained on the slow network volume" ;;
 esac

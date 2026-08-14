@@ -86,7 +86,9 @@ fm_treehouse_local_pool_prepare() {  # <pool-root>
   fm_pool_real_directory "$root" || return 1
   for child in .treehouse .firstmate-config; do
     if [ ! -e "$root/$child" ] && [ ! -L "$root/$child" ]; then
-      mkdir -- "$root/$child" || return 1
+      mkdir -- "$root/$child" 2>/dev/null || {
+        [ -d "$root/$child" ] && [ ! -L "$root/$child" ] || return 1
+      }
     fi
   done
   fm_treehouse_local_pool_validate "$root"
@@ -98,7 +100,9 @@ fm_treehouse_local_pool_prepare_directory() {  # <safe-parent> <child-name>
   case "$name" in ''|.|..|*/*) return 1 ;; esac
   path="$parent/$name"
   if [ ! -e "$path" ] && [ ! -L "$path" ]; then
-    mkdir -- "$path" || return 1
+    mkdir -- "$path" 2>/dev/null || {
+      [ -d "$path" ] && [ ! -L "$path" ] || return 1
+    }
   fi
   fm_pool_real_directory "$path"
 }
