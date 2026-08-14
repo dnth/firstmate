@@ -311,16 +311,21 @@ ensure_runpod_sandbox_marker() {
 # bootstrap interface for installing the broker bearer while the rest of the
 # durable toolchain is still provisioning.
 install_boot_control() {
-  local source source_dir target tmp
+  local source source_dir helper target tmp
   source_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P) || return 1
   source=$source_dir/${BASH_SOURCE[0]##*/}
+  helper=$source_dir/fm-treehouse-root-lib.sh
   target=$FM_BOOT_CONTROL
   if [ "$source" = "$target" ]; then
     chmod 700 "$target" || return 1
     return 0
   fi
   tmp="$target.tmp.$$"
-  cp -f -- "$source" "$tmp" || { rm -f -- "$tmp"; return 1; }
+  if [ -f "$helper" ]; then
+    cat "$helper" "$source" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  else
+    cp -f -- "$source" "$tmp" || { rm -f -- "$tmp"; return 1; }
+  fi
   chmod 700 "$tmp" || { rm -f -- "$tmp"; return 1; }
   mv -f -- "$tmp" "$target" || { rm -f -- "$tmp"; return 1; }
 }

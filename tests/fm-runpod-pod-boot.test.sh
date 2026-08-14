@@ -466,6 +466,36 @@ assert_grep 'runpod-root-sandbox-v1' "$w/volume/persistent-runtime/runpod-root-s
   "boot did not publish the provider-owned root-sandbox marker"
 pass "first boot clones the code root and installs the required toolchain through the pinned installers"
 
+boot_control="$w/volume/persistent-runtime/fm-runpod-pod-boot.sh"
+control_install_out=$(
+  world_env "$w"
+  printf '%s' 'replacement_boot_broker_token_456' \
+    | bash "$boot_control" --install-omp-auth-broker-token
+) || fail "the installed boot control could not install a replacement broker token: $control_install_out"
+assert_contains "$control_install_out" 'installed=omp-auth-broker-token' \
+  "the installed boot control did not dispatch broker-token installation"
+control_check_out=$(
+  world_env "$w"
+  bash "$boot_control" --check-omp-auth-broker-client
+) || fail "the installed boot control could not check the broker client: $control_check_out"
+assert_contains "$control_check_out" 'auth-broker=ready mode=credential-read-only' \
+  "the installed boot control did not dispatch the broker-client check"
+pass "the persistent boot control keeps its pre-SSH broker options self-contained"
+
+w_bom=$(new_world bom-treehouse-config)
+mkdir -p "$w_bom/volume/home/.config/treehouse"
+printf '\357\273\277root = "%s"\nmax_trees = 7\n' "$w_bom/volume/slow-treehouse" \
+  > "$w_bom/volume/home/.config/treehouse/config.toml"
+provision_only "$w_bom"
+bom_config=$(cat "$w_bom/volume/home/.config/treehouse/config.toml")
+assert_contains "$bom_config" "$w_bom/local-treehouse" \
+  "boot did not prepend its local root to a BOM-prefixed config"
+assert_contains "$bom_config" $'\357\273\277root = "'"$w_bom/volume/slow-treehouse"$'"' \
+  "boot no longer preserved the originally unrecognized BOM-prefixed root assignment"
+assert_contains "$bom_config" 'max_trees = 7' \
+  "boot did not preserve settings after a BOM-prefixed root assignment"
+pass "boot retains its original BOM handling while replacing the pool root"
+
 assert_contains "$calls" \
   "sshd -t -o AllowTcpForwarding=remote -o GatewayPorts=no -o PermitListen=127.0.0.1:8765" \
   "pod boot did not validate the scoped remote-forward-only sshd policy"
