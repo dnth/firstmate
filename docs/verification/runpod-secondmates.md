@@ -18,9 +18,10 @@ bin/fm-test-run.sh tests/fm-remote-doctor.test.sh
 bin/fm-test-run.sh tests/fm-remote-job.test.sh
 bin/fm-test-run.sh tests/fm-remote-entrypoint.test.sh
 bin/fm-test-run.sh tests/fm-secondmate-harness.test.sh
+bin/fm-test-run.sh tests/fm-spawn-dispatch-profile.test.sh
 ```
 
-The exact new lifecycle results are:
+The recorded lifecycle results are:
 
 ```text
 ok - ordinary wake cannot replace a failed never-ready paid attempt without acknowledgement
@@ -30,7 +31,7 @@ ok - recover-stuck prints recorded evidence and refuses reachable or SSH-255 amb
 ok - stuck recovery never weakens unknown-completion safety after readiness
 ```
 
-The exact new routing results are:
+The recorded routing results are:
 
 ```text
 ok - RunPod remote homes route crews through a Codex primary and predictive Claude fallback
@@ -39,16 +40,20 @@ ok - an ordinary remote route keeps its existing liveness probe unchanged
 ok - every RunPod remote launch converges its provider-owned crew routing after inheritance
 ```
 
-The exact new boot and doctor results are:
+The recorded boot, doctor, and harness results are:
 
 ```text
+ok - the plan clones the code root, makes the account home durable, and prepares unattended shells
 ok - login, interactive, and non-interactive pod processes inherit the durable tool PATH and sandbox marker
 ok - Claude onboarding, bypass confirmation, and git attribution are preseeded on the volume
 ok - replacement pods restore ephemeral prerequisites and reuse the durable toolchain
+ok - replacement boot preserves in-home startup symlinks and refuses escaping targets
 ok - RunPod parity reports the observed OMP OAuth limitation without failing readiness
 ok - the provider-owned RunPod marker crosses the worker child environment
 ok - provider-owned RunPod markers cross doctor bootstrap without changing ordinary hosts
 ok - C11 crew routing uses the configured fallback only for a supported trigger
+ok - C12 malformed crew fallback profiles fail before quota evaluation or launch
+ok - sandboxed Claude launches carry IS_SANDBOX and preseed every first-run prompt
 ```
 
 ## Validation boundary
@@ -56,4 +61,4 @@ ok - C11 crew routing uses the configured fallback only for a supported trigger
 The provider double returns independently modeled `desiredStatus` and `status` fields, delays endpoint publication, records every pod deletion, and retains network volumes separately from pods.
 The SSH double separates boot readiness, host-key scanning, and remote command delivery, so a successful provider response cannot stand in for successful SSH bootstrap.
 No command above reads a real RunPod key, creates a real pod, or exercises a paid resource.
-The precise OMP `EADDRINUSE` root cause remains unverified because the task explicitly prohibited waking the suspended live pod.
+The precise OMP `EADDRINUSE` root cause remains unverified and requires a future operator reproduction on a live pod.

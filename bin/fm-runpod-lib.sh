@@ -16,7 +16,7 @@
 # the backend, lock, or registry libraries.
 #
 # Lifecycle values, written only by bin/fm-runpod.sh:
-#   provisioned - the volume exists and no pod has ever been created.
+#   provisioned - the volume exists and no pod is currently recorded.
 #   waking      - a locked wake is creating or verifying the pod right now.
 #   ready       - a pod is up, its endpoint is recorded, and SSH answered.
 #   suspending  - a locked sleep is quiescing and terminating the pod.

@@ -58,9 +58,10 @@
 # StrictHostKeyChecking is never disabled, and a later mismatch fails the
 # connection rather than being re-pinned.
 #
-# Idempotence and locking: provision, wake, sleep, and destroy each take the
-# per-second mate lifecycle lock in <FM_HOME>/state, so two concurrent wakes can
-# never create two pods for one second mate and lifecycle mutations cannot race.
+# Idempotence and locking: provision, wake, recover-stuck, sleep, and destroy
+# each take the per-second mate lifecycle lock in <FM_HOME>/state, so two
+# concurrent wakes can never create two pods for one second mate and lifecycle
+# mutations cannot race.
 #
 # Sleep is guarded by the same conditions bin/fm-teardown.sh refuses a remote
 # retirement for - remote child work, an unfinished backlog outbox, an

@@ -65,6 +65,7 @@ skills/              standalone public installer-facing skills, committed; not l
 bin/                 helper scripts, committed; read each script's header before first use
 .env                 optional X-mode pairing token; LOCAL, gitignored; presence-gates section 14
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate. Inherited as the literal file: a concrete primary adapter value also controls a secondmate home's own crewmates (section 4)
+config/crew-harness-fallback  optional predictive crewmate fallback profile; LOCAL, gitignored; format and selection are owned by docs/configuration.md
 config/crew-dispatch.json  optional crewmate dispatch profiles; LOCAL, gitignored; firstmate-maintained but human-editable natural-language rules that choose a per-task launch profile (section 4; schema in docs/configuration.md). Inherited by secondmate homes
 config/secondmate-harness  harness the PRIMARY uses to launch SECONDMATE agents, optionally followed by a model and effort token on the same line ("<harness> [<model>] [<effort>]"; section 4); LOCAL, gitignored; absent or "default" harness falls back to config/crew-harness then firstmate's own. The primary's own setting; NOT inherited into secondmate homes (secondmates do not spawn secondmates)
 config/secondmate-harness-fallback  optional primary-to-fallback secondmate profile with the same one-line format; LOCAL, gitignored; quota-aware resolution and metadata are owned by docs/configuration.md and secondmate-provisioning
