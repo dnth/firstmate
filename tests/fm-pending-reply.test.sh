@@ -280,7 +280,7 @@ test_second_missed_turn_escalates_once_and_stays_durable() {
   [ "$(phase_of "$state" "$corr")" = escalated ] || fail "phase should be escalated"
   status_line=$(tail -1 "$state/hibit.status")
   case "$status_line" in
-    blocked:*pending-reply-missed:*pending-reply-id=$corr*) : ;;
+    "blocked [key=pending-reply-$corr]:"*pending-reply-missed:*pending-reply-id=$corr*) : ;;
     *) fail "parent status should carry one blocked missed-report line"$'\n'"$status_line" ;;
   esac
   [ ! -s "$state/.wake-queue" ] || fail "direct escalation must not enqueue a duplicate check wake"

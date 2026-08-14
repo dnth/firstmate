@@ -68,6 +68,8 @@ _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/n
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-tmux-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$_FM_PENDING_REPLY_LIB_DIR/fm-classify-lib.sh"
 
 FM_PENDING_REPLY_SCHEMA='fm-pending-reply.v1'
 FM_PENDING_REPLY_CORR_RE='corr=[A-Fa-f0-9]{16}'
@@ -469,6 +471,32 @@ fm_pending_reply_resolve_via_of_line() {  # <line>
   esac
 }
 
+fm_pending_reply_close_decision() {  # <status-file> <corr_id>
+  local status_file=$1 corr=$2 open line key note decision_key resolution
+  [ -f "$status_file" ] && [ ! -L "$status_file" ] || return 0
+  decision_key="pending-reply-$corr"
+  open=$(status_open_decisions "$status_file")
+  [ -n "$open" ] || return 0
+  resolution=
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    key=${line%%$'\t'*}
+    note=${line#*$'\t'}
+    note=${note#*$'\t'}
+    case "$note" in
+      *"pending-reply-id=$corr"*) ;;
+      *) continue ;;
+    esac
+    case "$key" in
+      "$decision_key") resolution="resolved [key=$decision_key]: correlated pending reply reconciled"; break ;;
+      default) [ -n "$resolution" ] || resolution="resolved: correlated pending reply reconciled (pending-reply-id=$corr)" ;;
+    esac
+  done <<EOF
+$open
+EOF
+  [ -z "$resolution" ] || printf '%s\n' "$resolution" >> "$status_file"
+}
+
 # Idempotently resolve an expectation from a correlated parent report.
 # Returns 0 when the record is resolved after the call (already or newly).
 fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
@@ -479,6 +507,8 @@ fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
   [ -f "$rec" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
   if [ "$phase" = resolved ]; then
+    status_file=${status_override:-$(fm_pending_reply_get "$rec" parent_status)}
+    fm_pending_reply_close_decision "$status_file" "$corr" || return 1
     return 0
   fi
   delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
@@ -505,6 +535,7 @@ fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
   fi
   via=$(fm_pending_reply_resolve_via_of_line "$line")
   now=$(fm_pending_reply_now)
+  fm_pending_reply_close_decision "$status_file" "$corr" || return 1
   fm_pending_reply_set "$rec" phase resolved || return 1
   if [ -z "$delivered" ]; then
     fm_pending_reply_mark_delivered "$state" "$corr" "$now" || return 1
@@ -513,6 +544,22 @@ fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
   fm_pending_reply_set "$rec" resolved_epoch "$now" || return 1
   fm_pending_reply_set "$rec" resolved_via "$via" || return 1
   return 0
+}
+
+fm_pending_reply_reconcile_task() {  # <state-dir> <task_id> [status-file-override]
+  local state=$1 task_id=$2 status_override=${3-} dir rec corr phase unresolved=0
+  dir=$(fm_pending_reply_dir "$state")
+  [ -d "$dir" ] || return 0
+  for rec in "$dir"/*; do
+    [ -f "$rec" ] || continue
+    [ "$(fm_pending_reply_get "$rec" task_id)" = "$task_id" ] || continue
+    corr=$(fm_pending_reply_get "$rec" corr_id)
+    [ -n "$corr" ] || corr=$(basename "$rec")
+    fm_pending_reply_try_resolve "$state" "$corr" "$status_override" >/dev/null 2>&1 || true
+    phase=$(fm_pending_reply_get "$rec" phase)
+    [ "$phase" = resolved ] || unresolved=1
+  done
+  [ "$unresolved" -eq 0 ]
 }
 
 # Observe backend busy/idle evidence for the active turn without reading chat.
@@ -790,7 +837,7 @@ fm_pending_reply_reconcile_recovery() {  # <state-dir> <corr_id>
 # Retains the durable unresolved record. Never loops.
 fm_pending_reply_maybe_escalate() {  # <state-dir> <corr_id>
   local state=$1 corr=$2
-  local rec phase completed now task_id summary payload parent_status outcome
+  local rec phase completed now task_id summary payload parent_status outcome decision_key
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
@@ -828,8 +875,9 @@ fm_pending_reply_maybe_escalate() {  # <state-dir> <corr_id>
   esac
   [ -n "$parent_status" ] || return 1
   mkdir -p "$(dirname "$parent_status")" 2>/dev/null || return 1
-  if ! grep -Fqx "blocked: $payload" "$parent_status" 2>/dev/null; then
-    printf 'blocked: %s\n' "$payload" >> "$parent_status" 2>/dev/null || return 1
+  decision_key="pending-reply-$corr"
+  if ! grep -Fqx "blocked [key=$decision_key]: $payload" "$parent_status" 2>/dev/null; then
+    printf 'blocked [key=%s]: %s\n' "$decision_key" "$payload" >> "$parent_status" 2>/dev/null || return 1
   fi
   now=$(fm_pending_reply_now)
   fm_pending_reply_set "$rec" escalated_epoch "$now" || return 1

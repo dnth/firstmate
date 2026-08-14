@@ -349,6 +349,7 @@ cmd_handle_locked() {
   if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then
     return "$rc"
   fi
+  fm_pending_reply_reconcile_task "$STATE" "$id" "$STATE/$id.status" >/dev/null 2>&1 || true
   if [ "$class" = delta ]; then
     cmd_arm_locked "$id" || return 1
   fi

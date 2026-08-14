@@ -11,6 +11,7 @@
 #   fm-remote-secondmate-control.sh capture <id> [lines]
 #   fm-remote-secondmate-control.sh observe <id>
 #   fm-remote-secondmate-control.sh children <id>
+#   fm-remote-secondmate-control.sh sleep-reconcile <id>
 #   fm-remote-secondmate-control.sh runpod-crews <id>
 #   fm-remote-secondmate-control.sh sync <id>
 #   fm-remote-secondmate-control.sh update <id>
@@ -290,6 +291,35 @@ cmd_children() {
   printf 'children=%s\n' "$count"
 }
 
+cmd_sleep_reconcile() {
+  local id=$1 meta child mode kind state reconciled=0
+  validate_id "$id"
+  validate_home "$id"
+  for meta in "$TARGET_HOME/state"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    child=${meta##*/}
+    child=${child%.meta}
+    mode=$(fm_meta_get "$meta" mode)
+    kind=$(fm_meta_get "$meta" kind)
+    [ "$mode" = direct-PR ] && [ "$kind" = ship ] || continue
+    state=$(FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+      FM_STATE_OVERRIDE="$TARGET_HOME/state" FM_DATA_OVERRIDE="$TARGET_HOME/data" \
+      FM_CONFIG_OVERRIDE="$TARGET_HOME/config" \
+      "$SCRIPT_DIR/fm-crew-state.sh" "$child" 2>/dev/null || true)
+    case "$state" in
+      'state: done'|'state: done '*) ;;
+      *) continue ;;
+    esac
+    FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+      FM_STATE_OVERRIDE="$TARGET_HOME/state" FM_DATA_OVERRIDE="$TARGET_HOME/data" \
+      FM_CONFIG_OVERRIDE="$TARGET_HOME/config" \
+      "$SCRIPT_DIR/fm-teardown.sh" "$child" >/dev/null \
+      || die "finished direct-PR child $child could not be torn down safely"
+    reconciled=$((reconciled + 1))
+  done
+  printf 'reconciled=%s\n' "$reconciled"
+}
+
 # RunPod's OMP OAuth callback is not usable in the current headless container,
 # while Codex and Claude subscription authentication both survive on the
 # durable account home.
@@ -417,6 +447,7 @@ case "${1:-}" in
   capture) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_capture "$@" ;;
   observe) shift; [ "$#" -eq 1 ] || usage; cmd_observe "$@" ;;
   children) shift; [ "$#" -eq 1 ] || usage; cmd_children "$@" ;;
+  sleep-reconcile) shift; [ "$#" -eq 1 ] || usage; cmd_sleep_reconcile "$@" ;;
   runpod-crews) shift; [ "$#" -eq 1 ] || usage; cmd_runpod_crews "$@" ;;
   sync) shift; [ "$#" -eq 1 ] || usage; cmd_sync "$@" ;;
   update) shift; [ "$#" -eq 1 ] || usage; cmd_update "$@" ;;
