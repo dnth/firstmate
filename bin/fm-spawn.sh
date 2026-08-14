@@ -30,6 +30,8 @@
 #   and preserves ordinary OMP-configured behavior. Every non-OMP harness refuses it.
 #   Local OMP secondmate relaunches recover the recorded target when the caller does
 #   not repeat the flag, so exact-session recovery keeps the same launch profile.
+#   Remote secondmates refuse it because their control protocol does not carry a
+#   Prewalk target.
 #   --allow-project-omp-extensions bypasses omp's fail-closed check for tracked
 #   project `.omp/extensions` code and `.omp/settings.json#extensions` roots.
 #   Use it only after explicit captain approval:
