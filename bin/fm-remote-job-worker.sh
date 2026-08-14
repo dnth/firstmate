@@ -488,14 +488,10 @@ worker_capture_output() { # <fifo> <destination>
 }
 
 worker_runpod_treehouse_root() { # <account-home>
-  local account_home=$1 config root roots
+  local account_home=$1 config root
   config="$account_home/.config/treehouse/config.toml"
-  [ -f "$config" ] && [ ! -L "$config" ] || return 1
-  roots=$(sed -n 's/^[[:space:]]*root[[:space:]]*=[[:space:]]*"\([^"\\]*\)"[[:space:]]*$/\1/p' "$config") \
-    || return 1
-  case "$roots" in ''|*$'\n'*) return 1 ;; esac
-  root=$roots
-  fm_treehouse_local_pool_validate "$root" || return 1
+  root=$(fm_treehouse_root_config_read_worker "$config") || return 1
+  fm_treehouse_root_validate "$root" || return 1
   printf '%s\n' "$root"
 }
 

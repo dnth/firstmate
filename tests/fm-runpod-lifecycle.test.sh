@@ -175,6 +175,17 @@ assert_contains "$out" "RunPod API could not be reached while waiting for pod" \
 [ "$(record_field ios lifecycle)" != ready ] || fail "an endpoint timeout must never record the pod ready"
 pass "endpoint discovery shares the one wall-clock wake deadline"
 
+boot_payload=$(jq -r '.pods[] | select(.name == "fm-sm-ios") | .bootScript' "$API_STATE")
+boot_file="$TMP_ROOT/pod-boot.sh"
+if ! printf '%s' "$boot_payload" | base64 --decode > "$boot_file" 2>/dev/null; then
+  printf '%s' "$boot_payload" | base64 -D > "$boot_file" 2>/dev/null \
+    || fail "the provider boot payload was not valid base64"
+fi
+boot_plan=$(bash "$boot_file" --check 2>&1) || fail "the provider boot payload was not executable: $boot_plan"
+assert_contains "$boot_plan" "ensure=treehouse-local-pool" \
+  "the delivered boot payload could not run the pre-SSH Treehouse-root contract"
+pass "the provider boot payload carries the shared pre-SSH Treehouse-root contract"
+
 started=$(date +%s)
 out=$(FM_FAKE_KEYSCAN_BLOCK=1 FM_TEST_RUNPOD_POLL_INTERVAL=1 \
   FM_TEST_RUNPOD_WAKE_TIMEOUT=2 rp wake ios 2>&1) \

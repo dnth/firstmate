@@ -113,7 +113,7 @@ if [ "${1:-}" = worktree ] && [ "${2:-}" = add ]; then
       ;;
   esac
   if [ -n "$POOL_ROOT" ]; then
-    if ! fm_treehouse_local_pool_validate "$POOL_ROOT"; then
+    if ! fm_treehouse_root_validate "$POOL_ROOT"; then
       printf 'error: refusing pooled worktree acquisition because the required local pool has unsafe ancestors\n' \
         >> "$ERROR_FILE"
       exit 42
@@ -133,7 +133,7 @@ if [ "${1:-}" = worktree ] && [ "${2:-}" = add ]; then
     exit 42
   }
   target_parent=$(dirname "$target")
-  if [ -n "$POOL_ROOT" ] && ! fm_pool_real_directory "$target_parent"; then
+  if [ -n "$POOL_ROOT" ] && ! fm_treehouse_root_real_directory "$target_parent"; then
     printf 'error: refusing pooled worktree acquisition because the target parent has unsafe ancestors: %s\n' \
       "$target" >> "$ERROR_FILE"
     exit 42

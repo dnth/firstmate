@@ -343,7 +343,7 @@ world_env() {  # <world> [harness]; exports into the calling subshell
   export PATH="$w/fakebin:$w/basebin"
   export HOME="$w/home"
   export FM_VOLUME="$w/volume"
-  export FM_TREEHOUSE_LOCAL_ROOT="$w/local-treehouse"
+  export FM_TREEHOUSE_LOCAL_ROOT="${FM_TEST_TREEHOUSE_LOCAL_ROOT:-$w/local-treehouse}"
   export FM_REMOTE_ORIGIN="$w/origin"
   export FM_FAKE_CALLS="$w/calls.log"
   export FM_FAKE_EPHEMERAL_BIN="$w/fakebin"
@@ -402,9 +402,32 @@ provision_idempotent() {  # <world> [harness]
   )
 }
 
+w_nested=$(new_world nested-treehouse-root)
+FM_TEST_TREEHOUSE_LOCAL_ROOT="$w_nested/missing/parent/local-treehouse" \
+  provision_only "$w_nested"
+assert_present "$w_nested/missing/parent/local-treehouse/.treehouse" \
+  "boot no longer created a local Treehouse root through missing parents"
+assert_present "$w_nested/missing/parent/local-treehouse/.firstmate-config" \
+  "boot no longer created managed Treehouse directories through missing parents"
+pass "the pre-SSH Treehouse setup retains recursive missing-parent creation"
+
+w_pre_ssh=$(new_world pre-ssh-treehouse-refusal)
+pre_ssh_out=$(
+  world_env "$w_pre_ssh"
+  FM_TREEHOUSE_LOCAL_ROOT=relative-treehouse bash "$BOOT" 2>&1
+)
+pre_ssh_status=$?
+[ "$pre_ssh_status" -ne 0 ] || fail "boot accepted a relative Treehouse root"
+assert_contains "$pre_ssh_out" "Treehouse pool root must be absolute" \
+  "the original relative-root refusal changed"
+assert_not_contains "$(cat "$w_pre_ssh/calls.log")" "sshd " \
+  "Treehouse-root validation moved after SSH startup"
+pass "Treehouse-root validation still runs before SSH and provisioning"
+
 w=$(new_world provision)
 mkdir -p "$w/volume/home/.config/treehouse"
-printf '"r\\u006fot" = "%s"\nmax_trees = 8\n' "$w/volume/slow-treehouse" \
+printf 'root = "%s"\n"r\\u006fot" = "%s"\nmax_trees = 8\n' \
+  "$w/volume/first-slow-treehouse" "$w/volume/slow-treehouse" \
   > "$w/volume/home/.config/treehouse/config.toml"
 provision_only "$w"
 calls=$(cat "$w/calls.log")
@@ -434,6 +457,8 @@ assert_grep 'max_trees = 8' "$HOMEDIR/.config/treehouse/config.toml" \
   "boot did not preserve the existing Treehouse pool settings"
 assert_not_contains "$(cat "$HOMEDIR/.config/treehouse/config.toml")" '"r\u006fot"' \
   "boot retained a semantically duplicate escaped Treehouse root key"
+[ "$(grep -c '^root = ' "$HOMEDIR/.config/treehouse/config.toml")" = 1 ] \
+  || fail "boot no longer converged duplicate root assignments to one local root"
 case "$(sed -n 's/^root = "\(.*\)"/\1/p' "$HOMEDIR/.config/treehouse/config.toml")" in
   "$w/volume"|"$w/volume"/*) fail "Treehouse worktrees remained on the slow network volume" ;;
 esac

@@ -775,13 +775,14 @@ gpu_types_at_least() {  # <gb> -> one candidate id per line
   done < <(gpu_type_catalog)
 }
 
-# The pod runs the tracked boot script, delivered as one base64 environment
-# value, so the container image needs nothing preinstalled from this repo and
-# the boot contract stays versioned with the code that creates the pod.
+# The pod runs the tracked Treehouse-root helper and boot script as one base64
+# shell payload, so the container image needs nothing preinstalled from this
+# repo and the boot contract stays versioned with the code that creates the pod.
 pod_boot_env() {
-  [ -f "$SCRIPT_DIR/fm-runpod-pod-boot.sh" ] \
-    || die "the pod boot script is missing: $SCRIPT_DIR/fm-runpod-pod-boot.sh"
-  base64 < "$SCRIPT_DIR/fm-runpod-pod-boot.sh" | tr -d '\n'
+  local boot="$SCRIPT_DIR/fm-runpod-pod-boot.sh" helper="$SCRIPT_DIR/fm-treehouse-root-lib.sh"
+  [ -f "$boot" ] || die "the pod boot script is missing: $boot"
+  [ -f "$helper" ] || die "the Treehouse-root helper is missing: $helper"
+  cat "$helper" "$boot" | base64 | tr -d '\n'
 }
 
 pod_create_body() {  # <id> <compute> <gpu-type> <min-vram>
