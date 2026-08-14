@@ -313,8 +313,17 @@ Use this runbook during the next approved awake window:
 3. Run `bin/fm-runpod-omp-auth.sh status <id>` and confirm the broker, facade, and named tunnel all report `running`.
 4. Connect with `bin/fm-runpod.sh ssh <id>` and run `/workspace/persistent-runtime/fm-runpod-pod-boot.sh --check-omp-auth-broker-client`.
 5. In that pod shell, run `OMP_AUTH_BROKER_URL=http://127.0.0.1:8765 OMP_AUTH_BROKER_TOKEN="$(cat /workspace/persistent-runtime/omp-auth-broker.token)" omp auth-broker status --json` and confirm broker health without printing the token.
-6. Configure the primary home's `config/secondmate-harness` for OMP, launch with `bin/fm-spawn.sh <id> --secondmate`, and send a bounded request that asks the second mate to spawn one OMP crew, one Claude crew, and one Codex crew.
-7. Confirm all three crews reach their first turn, then land or tear them down through the normal guarded lifecycle before running `bin/fm-runpod.sh sleep <id>`.
+6. Configure the primary home's `config/secondmate-harness` for OMP, launch with `bin/fm-spawn.sh <id> --secondmate`, and send the second mate this bounded request:
+
+```text
+Spawn exactly two crews through the ordinary guarded lifecycle.
+Launch the first with harness `omp`, model `anthropic/claude-opus-4-8`, and effort `low`; ask it to reply exactly `claude-broker-ok` and then stop.
+Launch the second with harness `omp`, model `openai-codex/gpt-5.6-sol`, and effort `low`; ask it to reply exactly `gpt-broker-ok` and then stop.
+Report both task ids and responses without launching any native Claude or Codex crew.
+```
+
+7. Confirm the two OMP task records retain their explicit model selectors and both crews reach their first turn with the requested response.
+8. Land or tear down both crews through the normal guarded lifecycle before running `bin/fm-runpod.sh sleep <id>`.
 
 The runbook is intentionally operator-run because the pod is suspended and waking it solely for validation would incur cost.
 
