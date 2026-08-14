@@ -343,6 +343,7 @@ world_env() {  # <world> [harness]; exports into the calling subshell
   export PATH="$w/fakebin:$w/basebin"
   export HOME="$w/home"
   export FM_VOLUME="$w/volume"
+  export FM_TREEHOUSE_LOCAL_ROOT="$w/local-treehouse"
   export FM_REMOTE_ORIGIN="$w/origin"
   export FM_FAKE_CALLS="$w/calls.log"
   export FM_FAKE_EPHEMERAL_BIN="$w/fakebin"
@@ -402,6 +403,9 @@ provision_idempotent() {  # <world> [harness]
 }
 
 w=$(new_world provision)
+mkdir -p "$w/volume/home/.config/treehouse"
+printf '"r\\u006fot" = "%s"\nmax_trees = 8\n' "$w/volume/slow-treehouse" \
+  > "$w/volume/home/.config/treehouse/config.toml"
 provision_only "$w"
 calls=$(cat "$w/calls.log")
 
@@ -424,6 +428,15 @@ assert_present "$HOMEDIR/.local/bin/herdr" "later SSH jobs must receive a per-po
 assert_present "$HOMEDIR/.local/bin/node" "later SSH jobs must receive a per-pod link to durable Node"
 assert_present "$HOMEDIR/.local/bin/tasks-axi" "later SSH jobs must receive a per-pod link to durable npm tools"
 assert_present "$w/volume/persistent-runtime/toolchain.provisioned" "a completed provisioning run must record its marker"
+assert_grep "root = \"$w/local-treehouse\"" "$HOMEDIR/.config/treehouse/config.toml" \
+  "boot did not place fresh Treehouse worktrees on local container storage"
+assert_grep 'max_trees = 8' "$HOMEDIR/.config/treehouse/config.toml" \
+  "boot did not preserve the existing Treehouse pool settings"
+assert_not_contains "$(cat "$HOMEDIR/.config/treehouse/config.toml")" '"r\u006fot"' \
+  "boot retained a semantically duplicate escaped Treehouse root key"
+case "$(sed -n 's/^root = "\(.*\)"/\1/p' "$HOMEDIR/.config/treehouse/config.toml")" in
+  "$w/volume"|"$w/volume"/*) fail "Treehouse worktrees remained on the slow network volume" ;;
+esac
 assert_grep 'runpod-root-sandbox-v1' "$w/volume/persistent-runtime/runpod-root-sandbox" \
   "boot did not publish the provider-owned root-sandbox marker"
 pass "first boot clones the code root and installs the required toolchain through the pinned installers"

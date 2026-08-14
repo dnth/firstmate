@@ -75,6 +75,8 @@
 # 255, because unknown remote completion must be reconciled on the same host.
 # Sleep never retires the logical second mate: the route, the registry record,
 # the reply cursor, and the volume all survive it.
+# Before counting remote children, sleep safely tears down only direct-PR ship
+# tasks that report done and pass fm-teardown's ordinary landed-work guards.
 #
 # Automatic idle sleep is deliberately NOT implemented. Every suspension is an
 # explicit `sleep` from an operator or from firstmate, so a second mate is never
@@ -127,6 +129,8 @@ DEFAULT_SIZE_GB=100
 # status_open_decisions lives with the shared wake-classification vocabulary.
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-pending-reply-lib.sh
+. "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -1112,6 +1116,18 @@ remote_children_probe() {  # <id> -> prints the count, or dies
   printf '%s' "$out" | sed -n 's/^children=//p' | tail -1
 }
 
+remote_sleep_reconcile() {  # <id>
+  local id=$1 out rc=0
+  out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh sleep-reconcile "$id" < /dev/null 2>&1) || rc=$?
+  if [ "$rc" -eq 255 ]; then
+    die "secondmate $id is unreachable, so finished remote work cannot be reconciled before suspension"
+  fi
+  if [ "$rc" -ne 0 ]; then
+    [ -z "$out" ] || printf '%s\n' "$out" >&2
+    die "secondmate $id could not reconcile finished direct-PR work before suspension"
+  fi
+}
+
 sleep_guards() {  # <id>
   local id=$1 outbox rec phase task_id children open
   # Every guard below except the remote child-work probe reads this home's own
@@ -1122,6 +1138,7 @@ sleep_guards() {  # <id>
   if [ -e "$outbox" ] || [ -L "$outbox" ]; then
     die "secondmate $id still has an undelivered backlog handoff at $outbox; deliver it before suspending"
   fi
+  fm_pending_reply_reconcile_task "$STATE" "$id" "$STATE/$id.status" >/dev/null 2>&1 || true
   if [ -d "$STATE/pending-replies" ]; then
     for rec in "$STATE/pending-replies"/*; do
       [ -f "$rec" ] || continue
@@ -1136,6 +1153,7 @@ sleep_guards() {  # <id>
   [ -z "$open" ] \
     || die "secondmate $id still has unresolved decisions ($open); close them before suspending"
   route_is_remote "$id" || return 0
+  remote_sleep_reconcile "$id"
   children=$(remote_children_probe "$id")
   case "$children" in ''|*[!0-9]*) die "secondmate $id returned an unreadable child-work count; refusing to suspend" ;; esac
   [ "$children" -eq 0 ] \

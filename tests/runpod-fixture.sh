@@ -319,7 +319,22 @@ case "$command_name" in
       children)
         [ "${FM_FAKE_CHILDREN_MODE:-normal}" != unreachable ] || exit 255
         [ "${FM_FAKE_CHILDREN_MODE:-normal}" != error ] || { printf 'error: unreadable\n' >&2; exit 1; }
-        printf 'children=%s\n' "${FM_FAKE_REMOTE_CHILDREN:-0}"
+        if [ -n "${FM_FAKE_REMOTE_CHILDREN_FILE:-}" ] && [ -f "$FM_FAKE_REMOTE_CHILDREN_FILE" ]; then
+          printf 'children=%s\n' "$(cat "$FM_FAKE_REMOTE_CHILDREN_FILE")"
+        else
+          printf 'children=%s\n' "${FM_FAKE_REMOTE_CHILDREN:-0}"
+        fi
+        exit 0
+        ;;
+      sleep-reconcile)
+        [ "${FM_FAKE_CHILDREN_MODE:-normal}" != unreachable ] || exit 255
+        if [ "${FM_FAKE_DELIVERED_DIRECT_PR:-0}" = 1 ] \
+           && [ -n "${FM_FAKE_REMOTE_CHILDREN_FILE:-}" ]; then
+          printf '0\n' > "$FM_FAKE_REMOTE_CHILDREN_FILE"
+          printf 'reconciled=1\n'
+        else
+          printf 'reconciled=0\n'
+        fi
         exit 0
         ;;
       state) printf 'alive\n'; exit 0 ;;

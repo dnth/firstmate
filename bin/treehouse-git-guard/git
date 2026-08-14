@@ -1,11 +1,20 @@
 #!/usr/bin/env bash
+# Git boundary used only during guarded Treehouse acquisition.
+# Reset-like operations require ancestry proof before clean may run.
+# A worktree add may recover only its exact normalized numbered-slot target:
+# an existing Git registration is preserved, a missing registration is pruned,
+# and only a real Git-unregistered target directory may be removed before retry.
+# When FM_TREEHOUSE_GUARD_POOL_ROOT is set, every add must remain physically
+# contained in that validated RunPod-local pool.
 set -u
 
 REAL_GIT=${FM_TREEHOUSE_REAL_GIT:?}
 ERROR_FILE=${FM_TREEHOUSE_GUARD_ERROR_FILE:?}
 SAFE_FILE=${FM_TREEHOUSE_GUARD_SAFE_FILE:?}
 COMPLETE_FILE=${FM_TREEHOUSE_GUARD_COMPLETE_FILE:?}
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+POOL_ROOT=${FM_TREEHOUSE_GUARD_POOL_ROOT:-}
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+# shellcheck source=bin/fm-pool-lib.sh
 . "$SCRIPT_DIR/../fm-pool-lib.sh"
 
 if [ -f "$COMPLETE_FILE" ]; then
@@ -69,6 +78,137 @@ if [ "${1:-}" = clean ]; then
 fi
 
 if [ "${1:-}" = worktree ] && [ "${2:-}" = add ]; then
+  target=
+  skip_next=0
+  for arg in "${@:3}"; do
+    if [ "$skip_next" -eq 1 ]; then
+      skip_next=0
+      continue
+    fi
+    case "$arg" in
+      -b|-B|--reason) skip_next=1 ;;
+      --reason=*) ;;
+      -*) ;;
+      *) target=$arg; break ;;
+    esac
+  done
+  if [ -z "$target" ]; then
+    printf 'error: refusing pooled worktree acquisition because the worktree add target is unreadable\n' \
+      >> "$ERROR_FILE"
+    exit 42
+  fi
+  case "$target" in
+    /*) ;;
+    *)
+      printf 'error: refusing pooled worktree acquisition because the worktree add target is not absolute: %s\n' \
+        "$target" >> "$ERROR_FILE"
+      exit 42
+      ;;
+  esac
+  case "$target/" in
+    *'/../'*|*'/./'*|*'//'*)
+      printf 'error: refusing pooled worktree acquisition because the worktree add target is not normalized: %s\n' \
+        "$target" >> "$ERROR_FILE"
+      exit 42
+      ;;
+  esac
+  if [ -n "$POOL_ROOT" ]; then
+    if ! fm_treehouse_local_pool_validate "$POOL_ROOT"; then
+      printf 'error: refusing pooled worktree acquisition because the required local pool has unsafe ancestors\n' \
+        >> "$ERROR_FILE"
+      exit 42
+    fi
+    case "$target/" in
+      "$POOL_ROOT"/.treehouse/*) ;;
+      *)
+        printf 'error: refusing pooled worktree acquisition outside the required local pool: %s\n' \
+          "$target" >> "$ERROR_FILE"
+        exit 42
+        ;;
+    esac
+  fi
+  repo_root=$("$REAL_GIT" -C "$PWD" rev-parse --show-toplevel 2>/dev/null) || {
+    printf 'error: refusing pooled worktree acquisition because the repository root is unreadable\n' \
+      >> "$ERROR_FILE"
+    exit 42
+  }
+  target_parent=$(dirname "$target")
+  if [ -n "$POOL_ROOT" ] && ! fm_pool_real_directory "$target_parent"; then
+    printf 'error: refusing pooled worktree acquisition because the target parent has unsafe ancestors: %s\n' \
+      "$target" >> "$ERROR_FILE"
+    exit 42
+  fi
+  slot=${target_parent##*/}
+  case "$slot" in
+    ''|*[!0-9]*)
+      printf 'error: refusing pooled worktree acquisition because the target is outside a numbered pool slot: %s\n' \
+        "$target" >> "$ERROR_FILE"
+      exit 42
+      ;;
+  esac
+  if [ "${target##*/}" != "${repo_root##*/}" ] || [ -L "$target_parent" ]; then
+    printf 'error: refusing pooled worktree acquisition because the target does not match its repository pool slot: %s\n' \
+      "$target" >> "$ERROR_FILE"
+    exit 42
+  fi
+  worktrees_file="$COMPLETE_FILE.worktrees"
+  registered=0
+  if "$REAL_GIT" -C "$PWD" worktree list --porcelain -z > "$worktrees_file" 2>/dev/null; then
+    while IFS= read -r -d '' line; do
+      case "$line" in
+        "worktree $target") registered=1; break ;;
+      esac
+    done < "$worktrees_file"
+  else
+    unsafe_target=0
+    case "$target" in
+      *$'\n'*|*$'\r'*|*$'\t'*) unsafe_target=1 ;;
+    esac
+    if [ "$unsafe_target" -eq 1 ] \
+      || printf '%s' "$target" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+      printf 'error: refusing pooled worktree acquisition because this Git cannot verify control-byte paths safely\n' \
+        >> "$ERROR_FILE"
+      exit 42
+    fi
+    "$REAL_GIT" -C "$PWD" worktree list --porcelain > "$worktrees_file" || {
+      printf 'error: refusing pooled worktree acquisition because registered worktrees could not be verified\n' \
+        >> "$ERROR_FILE"
+      exit 42
+    }
+    if grep -q '^worktree "' "$worktrees_file"; then
+      printf 'error: refusing pooled worktree acquisition because this Git cannot verify quoted worktree paths safely\n' \
+        >> "$ERROR_FILE"
+      exit 42
+    fi
+    while IFS= read -r line; do
+      case "$line" in
+        "worktree $target") registered=1; break ;;
+      esac
+    done < "$worktrees_file"
+  fi
+  if [ "$registered" -eq 1 ]; then
+    if [ -e "$target" ] || [ -L "$target" ]; then
+      printf 'error: refusing pooled worktree acquisition because the existing target is already registered: %s\n' \
+        "$target" >> "$ERROR_FILE"
+      exit 42
+    fi
+    "$REAL_GIT" -C "$PWD" worktree remove --force "$target" || {
+      printf 'error: could not remove the exact missing worktree registration before retry: %s\n' \
+        "$target" >> "$ERROR_FILE"
+      exit 42
+    }
+  fi
+  if [ -e "$target" ] || [ -L "$target" ]; then
+    if [ -L "$target" ] || [ ! -d "$target" ]; then
+      printf 'error: refusing pooled worktree acquisition because the existing target is not a directory: %s\n' \
+        "$target" >> "$ERROR_FILE"
+      exit 42
+    fi
+    rm -rf -- "$target" || {
+      printf 'error: could not remove interrupted unregistered worktree target: %s\n' "$target" >> "$ERROR_FILE"
+      exit 42
+    }
+  fi
   "$REAL_GIT" "$@" || exit $?
   : > "$COMPLETE_FILE"
   exit 0

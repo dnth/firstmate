@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+# Guarded Treehouse acquisition for every pooled Firstmate task.
+# It snapshots candidate reflogs before Treehouse runs, contains reset and clean
+# through treehouse-git-guard/git, and withholds the acquired path until the
+# append-only post-acquisition transition check succeeds.
+# The Git guard owns recovery of an interrupted worktree add and removes only
+# its exact expected Git-unregistered numbered-slot target.
+# --ready-file writes the verified acquired path from this invocation before an
+# interactive shell starts, so RunPod relaunch cannot reuse a stale pane cwd.
 set -u
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
@@ -12,13 +20,42 @@ trap 'rm -rf "$GUARD_DIR"' EXIT
 . "$SCRIPT_DIR/fm-pool-lib.sh"
 
 lease_mode=0
-for arg in "$@"; do
-  [ "$arg" != --lease ] || lease_mode=1
+ready_file=
+treehouse_args=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --lease)
+      lease_mode=1
+      treehouse_args+=("$1")
+      ;;
+    --ready-file)
+      shift
+      [ "$#" -gt 0 ] || {
+        echo "error: --ready-file requires an absolute path" >&2
+        exit 2
+      }
+      ready_file=$1
+      case "$ready_file" in
+        /*) ;;
+        *) echo "error: --ready-file requires an absolute path" >&2; exit 2 ;;
+      esac
+      ;;
+    *) treehouse_args+=("$1") ;;
+  esac
+  shift
 done
 repo=$PWD
 interactive_holder="fm-interactive-${BASHPID:-$$}"
 synthetic_acquired=
 synthetic_verified=0
+guard_pool_root=${FM_TREEHOUSE_LOCAL_ROOT:-}
+
+if [ "${IS_SANDBOX:-0}" = 1 ]; then
+  [ -n "$guard_pool_root" ] || {
+    echo "error: RunPod Treehouse acquisition requires a local pool root" >&2
+    exit 1
+  }
+fi
 
 # shellcheck disable=SC2329 # Invoked indirectly by the signal trap handlers below.
 return_interrupted_synthetic_lease() {
@@ -39,7 +76,7 @@ return_interrupted_synthetic_lease() {
     echo "warning: interrupted guarded Treehouse shell preserved the dirty, live, or unverifiable lease at $path" >&2
     return 1
   fi
-  if ! ( cd "$repo" && treehouse return --if-lease-holder "$interactive_holder" "$path" ); then
+  if ! ( cd "$repo" && "$SCRIPT_DIR/fm-treehouse-command.sh" return --if-lease-holder "$interactive_holder" "$path" ); then
     echo "warning: interrupted guarded Treehouse shell could not return its verified clean lease at $path" >&2
     return 1
   fi
@@ -97,14 +134,14 @@ then
   exit 1
 fi
 
-treehouse_args=("$@")
 [ "$lease_mode" -eq 1 ] || treehouse_args+=(--lease --lease-holder "$interactive_holder")
 FM_TREEHOUSE_REAL_GIT=$REAL_GIT \
 FM_TREEHOUSE_GUARD_ERROR_FILE="$GUARD_DIR/error" \
 FM_TREEHOUSE_GUARD_SAFE_FILE="$GUARD_DIR/safe" \
 FM_TREEHOUSE_GUARD_COMPLETE_FILE="$GUARD_DIR/complete" \
+FM_TREEHOUSE_GUARD_POOL_ROOT="$guard_pool_root" \
 PATH="$SCRIPT_DIR/treehouse-git-guard:$PATH" \
-  treehouse get "${treehouse_args[@]}" > "$GUARD_DIR/stdout"
+  "$SCRIPT_DIR/fm-treehouse-command.sh" get "${treehouse_args[@]}" > "$GUARD_DIR/stdout"
 status=$?
 if [ "$lease_mode" -eq 0 ] && [ "$status" -eq 0 ]; then
   synthetic_acquired=$(sed -n '1p' "$GUARD_DIR/stdout")
@@ -171,9 +208,22 @@ if [ "$lease_mode" -eq 1 ]; then
 fi
 
 shell=${SHELL:-/bin/sh}
-( cd "$acquired" && TREEHOUSE_DIR="$acquired" FM_TREEHOUSE_WRAPPER_PID=$$ "$shell" )
+(
+  cd "$acquired" || exit 1
+  if [ -n "$ready_file" ]; then
+    ready_dir=$(dirname "$ready_file")
+    [ -d "$ready_dir" ] && [ ! -L "$ready_dir" ] && [ ! -L "$ready_file" ] || {
+      echo "error: guarded Treehouse ready path is unavailable or unsafe: $ready_file" >&2
+      exit 1
+    }
+    ready_tmp="$ready_dir/.ready.$$"
+    printf '%s\n' "$acquired" > "$ready_tmp" || exit 1
+    mv -f -- "$ready_tmp" "$ready_file" || exit 1
+  fi
+  TREEHOUSE_DIR="$acquired" FM_TREEHOUSE_WRAPPER_PID=$$ "$shell"
+)
 shell_status=$?
-if ! ( cd "$repo" && treehouse return --if-lease-holder "$interactive_holder" "$acquired" ); then
+if ! ( cd "$repo" && "$SCRIPT_DIR/fm-treehouse-command.sh" return --if-lease-holder "$interactive_holder" "$acquired" ); then
   echo "warning: guarded Treehouse shell exited but its lease at $acquired could not be returned" >&2
   exit 1
 fi

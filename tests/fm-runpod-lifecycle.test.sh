@@ -549,6 +549,36 @@ assert_contains "$out" "unresolved routed reply" "the refusal must name the outs
 printf 'task_id=ios\nphase=resolved\ncorr=00112233445566aa\n' > "$PARENT/state/pending-replies/00112233445566aa"
 pass "an unresolved routed reply blocks sleep"
 
+# A handled recovery reply may have landed after its recovery delivery failed,
+# while an older release left a keyless blocker open. Sleep reconciles both and
+# safely tears down a finished direct-PR child before evaluating child count.
+# shellcheck source=bin/fm-pending-reply-lib.sh
+. "$ROOT/bin/fm-pending-reply-lib.sh"
+recovery_corr=$(fm_pending_reply_create "$PARENT" "$PARENT/state" ios "handled recovery") \
+  || fail "could not create the recovery reconciliation fixture"
+fm_pending_reply_mark_delivered "$PARENT/state" "$recovery_corr"
+recovery_rec=$(fm_pending_reply_path "$PARENT/state" "$recovery_corr")
+fm_pending_reply_set "$recovery_rec" recovery_delivery_outcome failed
+fm_pending_reply_set "$recovery_rec" phase escalated
+printf 'blocked: pending-reply-recovery-delivery-failed: task=ios pending-reply-id=%s request=handled recovery\n' \
+  "$recovery_corr" >> "$PARENT/state/ios.status"
+printf 'done [corr=%s]: fetched handled reply\n' "$recovery_corr" >> "$PARENT/state/ios.status"
+REMOTE_CHILDREN_FILE="$TMP_ROOT/remote-children"
+printf '1\n' > "$REMOTE_CHILDREN_FILE"
+IOS_POD=$(record_field ios pod_id)
+out=$(FM_FAKE_REMOTE_CHILDREN_FILE="$REMOTE_CHILDREN_FILE" FM_FAKE_DELIVERED_DIRECT_PR=1 \
+  FM_FAKE_RUNPOD_FAIL="DELETE /pods/$IOS_POD" rp sleep ios 2>&1) \
+  && fail "the injected pod termination failure should still abort sleep"
+assert_contains "$out" "terminate pod $IOS_POD" \
+  "sleep did not pass reconciliation and reach the injected provider failure"
+[ "$(fm_pending_reply_get "$recovery_rec" phase)" = resolved ] \
+  || fail "sleep did not resolve the handled recovery-delivery-failed reply"
+[ -z "$(status_open_decisions "$PARENT/state/ios.status")" ] \
+  || fail "sleep did not close the exact legacy keyless reply blocker"
+[ "$(cat "$REMOTE_CHILDREN_FILE")" = 0 ] \
+  || fail "sleep did not tear down the delivered direct-PR child"
+pass "sleep reconciles handled recovery replies and delivered direct-PR children"
+
 printf 'needs-decision [key=ios-storage]: pick the storage tier\n' >> "$PARENT/state/ios.status"
 out=$(rp sleep ios 2>&1) && fail "sleep must refuse while a decision is open"
 assert_contains "$out" "unresolved decisions" "the refusal must name the open decision"

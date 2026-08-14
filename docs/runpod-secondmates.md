@@ -39,8 +39,9 @@ OMP is the deliberate exception because its subscription credentials remain in t
 Boot rewrites the account's entry in the pod's own `/etc/passwd` so an SSH login lands there, and writes the volume path to `/etc/firstmate/durable-root` so `bin/fm-remote-doctor.sh --parity` can verify it.
 That single move covers every runtime at once instead of one credential-directory variable per tool.
 
-Project clones and worktrees live under the second mate's own home, as on any other remote host.
-Each pod also has a disposable 40 GB container disk, the maximum RunPod accepts; reducing or replacing that disk loses no Firstmate state because everything durable lives on the network volume.
+Project clones live under the second mate's durable home, while Treehouse task worktrees live in a pool on the pod's local container storage so checkout activity never wedges on the network volume.
+The local Treehouse pool is disposable: replacing or suspending the pod removes its checked-out copies, while landed commits, task records, credentials, and every other durable Firstmate record remain on the network volume.
+Each pod has a disposable 40 GB container disk, the maximum RunPod accepts.
 Local second mates never get a volume.
 [`configuration.md`](configuration.md#runpod-compute-lifecycle-configrunpodenv-configrunpod-datarunpod) owns the local control-plane paths, record contents, credential contract, and generated SSH state.
 
@@ -182,7 +183,10 @@ Run `recover-stuck --yes` to acknowledge and clear that attempt before another o
 
 ## Suspending safely
 
-`sleep` refuses, and changes nothing, while any of these is true:
+Before evaluating these guards, `sleep` reconciles handled correlated replies and sends each finished delivered direct-PR child through the ordinary landed-work teardown guard.
+That cleanup removes only work already proven safe to tear down; unlanded or otherwise unsafe children remain and block suspension.
+
+`sleep` refuses, and leaves the pod running, while any of these is true:
 
 - The remote home still supervises workers.
 - A backlog handoff to that second mate is still undelivered.

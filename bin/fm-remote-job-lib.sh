@@ -27,7 +27,8 @@
 #
 # The worker accepts only a tracked, non-symlink executable named fm-*.sh below
 # its configured FM_ROOT/bin. Every child receives env -i with the composed
-# PATH, HOME, FM_HOME, FM_ROOT_OVERRIDE, and FM_REMOTE_JOB_ACTIVE=1. The PATH
+# PATH, HOME, FM_HOME, FM_ROOT_OVERRIDE, and FM_REMOTE_JOB_ACTIVE=1. RunPod
+# children also receive the validated FM_TREEHOUSE_LOCAL_ROOT. The PATH
 # is intentionally filesystem-discovered rather than login-shell-derived:
 # ~/.local/bin; nvm, asdf, and mise shims/install bins; Nix; Homebrew; and the
 # system tail. No shell startup files are evaluated.
@@ -774,19 +775,21 @@ fm_remote_job_worker_owned_alive() {
 }
 
 fm_remote_job_code_identity() { # <remote-root> <account-home>
-  local root=$1 account_home=$2 git_bin root_hash library_hash worker_hash
+  local root=$1 account_home=$2 git_bin root_hash library_hash pool_hash worker_hash
   root=$(fm_remote_job_canonical_existing_dir "$root") || return 1
   [ -f "$root/bin/fm-remote-job-lib.sh" ] && [ ! -L "$root/bin/fm-remote-job-lib.sh" ] || return 1
+  [ -f "$root/bin/fm-pool-lib.sh" ] && [ ! -L "$root/bin/fm-pool-lib.sh" ] || return 1
   [ -f "$root/bin/fm-remote-job-worker.sh" ] && [ ! -L "$root/bin/fm-remote-job-worker.sh" ] || return 1
   fm_remote_job_compose_operator_path "$account_home" >/dev/null
   git_bin=$(fm_remote_job_operator_tool git 2>/dev/null || true)
   [ -n "$git_bin" ] || return 1
   root_hash=$(printf '%s' "$root" | "$git_bin" hash-object --stdin 2>/dev/null) || return 1
   library_hash=$("$git_bin" hash-object -- "$root/bin/fm-remote-job-lib.sh" 2>/dev/null) || return 1
+  pool_hash=$("$git_bin" hash-object -- "$root/bin/fm-pool-lib.sh" 2>/dev/null) || return 1
   worker_hash=$("$git_bin" hash-object -- "$root/bin/fm-remote-job-worker.sh" 2>/dev/null) || return 1
-  case "$root_hash:$library_hash:$worker_hash" in *[!0-9a-f:]*) return 1 ;; esac
-  [ -n "$root_hash" ] && [ -n "$library_hash" ] && [ -n "$worker_hash" ] || return 1
-  printf '%s:%s:%s\n' "$root_hash" "$library_hash" "$worker_hash"
+  case "$root_hash:$library_hash:$pool_hash:$worker_hash" in *[!0-9a-f:]*) return 1 ;; esac
+  [ -n "$root_hash" ] && [ -n "$library_hash" ] && [ -n "$pool_hash" ] && [ -n "$worker_hash" ] || return 1
+  printf '%s:%s:%s:%s\n' "$root_hash" "$library_hash" "$pool_hash" "$worker_hash"
 }
 
 fm_remote_job_worker_identity_matches() { # <remote-root> <account-home>
@@ -927,6 +930,10 @@ fm_remote_job_ensure_worker() { # <remote-root> <account-home>
   [ -f "$root/bin/fm-remote-job-worker.sh" ] && [ ! -L "$root/bin/fm-remote-job-worker.sh" ] &&
     [ -x "$root/bin/fm-remote-job-worker.sh" ] || {
     FM_REMOTE_JOB_ERROR="configured remote root has no safe executable remote job worker"
+    return 1
+  }
+  [ -f "$root/bin/fm-pool-lib.sh" ] && [ ! -L "$root/bin/fm-pool-lib.sh" ] || {
+    FM_REMOTE_JOB_ERROR="configured remote root has no safe pool library"
     return 1
   }
   platform=$(fm_remote_job_platform)

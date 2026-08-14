@@ -77,6 +77,8 @@ FM_REMOTE_ROOT=${FM_REMOTE_ROOT:-$FM_VOLUME/firstmate}
 FM_REMOTE_HOME=${FM_REMOTE_HOME:-$FM_VOLUME/secondmate-home}
 FM_PERSIST=${FM_PERSIST:-$FM_VOLUME/persistent-runtime}
 FM_ACCOUNT_HOME=${FM_ACCOUNT_HOME:-$FM_VOLUME/home}
+FM_TREEHOUSE_LOCAL_ROOT=${FM_TREEHOUSE_LOCAL_ROOT:-/tmp/firstmate-treehouse}
+export FM_TREEHOUSE_LOCAL_ROOT
 FM_ORIGINAL_HOME=${HOME:-}
 FM_HOST_KEY_DIR="$FM_PERSIST/ssh"
 FM_SYSTEM_SSH_DIR=${FM_SYSTEM_SSH_DIR:-/etc/ssh}
@@ -178,6 +180,7 @@ toolchain_plan() {
   done
   plan_step account-home
   plan_step account-shell
+  plan_step treehouse-local-pool
   plan_step root-sandbox-marker
   plan_step node
   plan_step npm
@@ -204,6 +207,96 @@ toolchain_plan() {
   plan_step sshd-remote-forwarding
   plan_step omp-auth-broker-client
   [ -z "$FM_POD_HARNESS_NPM" ] || plan_step "harness:$FM_POD_HARNESS_NPM"
+}
+
+ensure_treehouse_local_pool() {
+  local config_dir="$FM_ACCOUNT_HOME/.config/treehouse" config tmp local_root volume_root
+  case "$FM_TREEHOUSE_LOCAL_ROOT" in
+    /*) ;;
+    *) log "FATAL: the Treehouse pool root must be absolute"; return 1 ;;
+  esac
+  case "$FM_TREEHOUSE_LOCAL_ROOT" in
+    "$FM_VOLUME"|"$FM_VOLUME"/*)
+      log "FATAL: the Treehouse pool root must stay off the network volume"
+      return 1
+      ;;
+  esac
+  case "$FM_TREEHOUSE_LOCAL_ROOT" in
+    *[\"\\]*)
+      log "FATAL: the Treehouse pool root contains unsupported characters"
+      return 1
+      ;;
+  esac
+  if printf '%s' "$FM_TREEHOUSE_LOCAL_ROOT" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+    log "FATAL: the Treehouse pool root contains unsupported characters"
+    return 1
+  fi
+  mkdir -p "$config_dir" "$FM_TREEHOUSE_LOCAL_ROOT" || return 1
+  [ ! -L "$FM_TREEHOUSE_LOCAL_ROOT" ] || {
+    log "FATAL: the Treehouse pool root must not be a symlink"
+    return 1
+  }
+  local_root=$(cd "$FM_TREEHOUSE_LOCAL_ROOT" && pwd -P) || return 1
+  [ "$local_root" = "$FM_TREEHOUSE_LOCAL_ROOT" ] || {
+    log "FATAL: the Treehouse pool root has symlinked ancestors"
+    return 1
+  }
+  volume_root=$(cd "$FM_VOLUME" && pwd -P) || return 1
+  case "$local_root" in
+    "$volume_root"|"$volume_root"/*)
+      log "FATAL: the Treehouse pool root must stay off the network volume"
+      return 1
+      ;;
+  esac
+  local child
+  for child in .treehouse .firstmate-config; do
+    if [ ! -e "$FM_TREEHOUSE_LOCAL_ROOT/$child" ] && [ ! -L "$FM_TREEHOUSE_LOCAL_ROOT/$child" ]; then
+      mkdir -- "$FM_TREEHOUSE_LOCAL_ROOT/$child" || return 1
+    fi
+    [ -d "$FM_TREEHOUSE_LOCAL_ROOT/$child" ] && [ ! -L "$FM_TREEHOUSE_LOCAL_ROOT/$child" ] \
+      && [ "$(cd "$FM_TREEHOUSE_LOCAL_ROOT/$child" && pwd -P)" = "$FM_TREEHOUSE_LOCAL_ROOT/$child" ] || {
+      log "FATAL: the Treehouse pool contains an unsafe managed directory"
+      return 1
+    }
+  done
+  config="$config_dir/config.toml"
+  [ ! -L "$config" ] || {
+    log "FATAL: the Treehouse user config is a symlink"
+    return 1
+  }
+  tmp=$(mktemp "$config_dir/.config.toml.XXXXXX") || return 1
+  {
+    printf 'root = "%s"\n' "$FM_TREEHOUSE_LOCAL_ROOT"
+    [ ! -f "$config" ] || awk '
+      function is_root_key(line, first, rest, end, key, tail, quote) {
+        sub(/^[[:space:]]*/, "", line)
+        first = substr(line, 1, 1)
+        quote = sprintf("%c", 39)
+        if (first == "\"" || first == quote) {
+          rest = substr(line, 2)
+          end = index(rest, first)
+          if (end == 0) return 0
+          key = substr(rest, 1, end - 1)
+          tail = substr(rest, end + 1)
+          if (tail !~ /^[[:space:]]*=/) return 0
+          if (first == "\"") {
+            gsub(/\\u0072|\\U00000072/, "r", key)
+            gsub(/\\u006[fF]|\\U0000006[fF]/, "o", key)
+            gsub(/\\u0074|\\U00000074/, "t", key)
+          }
+          return key == "root"
+        }
+        if (line !~ /^[A-Za-z0-9_-]+[[:space:]]*=/) return 0
+        key = line
+        sub(/[[:space:]]*=.*/, "", key)
+        return key == "root"
+      }
+      !is_root_key($0)
+    ' "$config"
+  } > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$config" || { rm -f -- "$tmp"; return 1; }
+  log "configured Treehouse worktrees on local container storage"
 }
 
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -268,6 +361,7 @@ write_account_shell_rc() {  # <path>
     # shellcheck disable=SC2016 # HOME and PATH expand when the generated startup file is sourced.
     printf '%s\n' 'export PATH="$HOME/.local/bin:$PATH"'
     printf '%s\n' 'export IS_SANDBOX=1'
+    printf 'export FM_TREEHOUSE_LOCAL_ROOT=%q\n' "$FM_TREEHOUSE_LOCAL_ROOT"
     printf '%s\n' "$FM_SHELL_RC_END"
   } > "$tmp" || { rm -f -- "$tmp"; return 1; }
   chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
@@ -997,6 +1091,7 @@ main() {
   # authorized key and every later login, must land on the volume.
   ensure_account_home || exit 1
   ensure_account_shell || exit 1
+  ensure_treehouse_local_pool || exit 1
   rm -f -- "$FM_BOOT_READY" || exit 1
 
   # SSH comes up FIRST, deliberately independent of provisioning. RunPod exposes
