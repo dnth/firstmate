@@ -20,8 +20,8 @@
 #                                        print the fallback MODEL token, or empty.
 #        fm-harness.sh secondmate-fallback-effort
 #                                        print the fallback EFFORT token, or empty.
-#        fm-harness.sh crew-fallback-harness|crew-fallback-model|crew-fallback-effort
-#                                        print fields from config/crew-harness-fallback.
+#        fm-harness.sh crew-fallback-profile
+#                                        validate and print the complete fallback profile.
 # config/secondmate-harness and config/secondmate-harness-fallback each use the
 # same single-line "<harness> [<model>] [<effort>]" parser, while the fallback
 # accessors read only the fallback file.
@@ -199,6 +199,30 @@ crew_fallback_line() {
   configured_profile_line "$CONFIG/crew-harness-fallback"
 }
 
+crew_fallback_profile() {
+  local line harness model effort
+  local -a fields
+  line=$(crew_fallback_line)
+  [ -n "$line" ] || return 0
+  read -r -a fields <<< "$line"
+  [ "${#fields[@]}" -le 3 ] || {
+    printf 'error: config/crew-harness-fallback must contain at most <harness> [<model>] [<effort>]\n' >&2
+    return 1
+  }
+  harness=${fields[0]:-}
+  model=${fields[1]:--}
+  effort=${fields[2]:--}
+  case "$effort" in
+    -|low|medium|high|xhigh|max) ;;
+    *)
+      printf "error: config/crew-harness-fallback effort token '%s' is invalid\n" "$effort" >&2
+      return 1
+      ;;
+  esac
+  [ "$harness" != default ] || return 0
+  printf '%s\t%s\t%s\n' "$harness" "$model" "$effort"
+}
+
 # Print the 1-based whitespace-separated token (1=harness, 2=model, 3=effort)
 # from a configured profile line, or nothing when that field is absent.
 configured_profile_field() {
@@ -299,8 +323,6 @@ case "${1:-}" in
   secondmate-fallback-harness) secondmate_fallback_harness ;;
   secondmate-fallback-model) secondmate_fallback_model ;;
   secondmate-fallback-effort) secondmate_fallback_effort ;;
-  crew-fallback-harness) crew_fallback_harness ;;
-  crew-fallback-model) crew_fallback_model ;;
-  crew-fallback-effort) crew_fallback_effort ;;
+  crew-fallback-profile) crew_fallback_profile ;;
   *) detect_own ;;
 esac

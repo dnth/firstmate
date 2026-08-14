@@ -25,7 +25,8 @@ The exact new lifecycle results are:
 ```text
 ok - ordinary wake cannot replace a failed never-ready paid attempt without acknowledgement
 ok - endpoint stalls report provider state and never-ready pods have a guarded recovery path
-ok - recover-stuck re-reads endpoint state and refuses SSH-reachable compute
+ok - recover-stuck probes a current-only endpoint and refuses SSH-reachable compute
+ok - recover-stuck probes recorded-only endpoints and refuses reachable or indeterminate results
 ok - stuck recovery never weakens unknown-completion safety after readiness
 ```
 

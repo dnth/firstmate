@@ -640,6 +640,9 @@ make_quota_axi() {
   cat > "$fakebin/quota-axi" <<'SH'
 #!/usr/bin/env bash
 set -u
+if [ -n "${FM_TEST_QUOTA_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$FM_TEST_QUOTA_LOG"
+fi
 if [ "${1:-}" = "--provider" ] && [ "${3:-}" = "--json" ]; then
   printf '%s\n' "${FM_TEST_QUOTA_JSON:-}"
 elif [ "${1:-}" = "auth" ] && [ "${2:-}" = "--json" ]; then
@@ -1160,6 +1163,46 @@ test_crew_primary_fallback_selection() {
   [ "$(meta_field "$meta" crew_fallback_reason)" = provider_unavailable ] \
     || fail "crew fallback metadata recorded the wrong supported trigger"
   pass "C11 crew routing uses the configured fallback only for a supported trigger"
+}
+
+test_crew_fallback_profile_validation() {
+  local case_name profile w home proj wt fakebin launchlog quota_log id out status
+  for case_name in invalid-effort extra-field; do
+    w="$TMP_ROOT/crew-fallback-$case_name"
+    home="$w/home"
+    proj="$w/project"
+    wt="$w/wt"
+    launchlog="$w/launch.log"
+    quota_log="$w/quota.log"
+    id="crew-fallback-$case_name-z3"
+    mkdir -p "$home/config" "$home/data/$id" "$home/projects" "$home/state"
+    printf 'codex\n' > "$home/config/crew-harness"
+    case "$case_name" in
+      invalid-effort) profile='claude default impossible' ;;
+      extra-field) profile='claude default low unexpected' ;;
+    esac
+    printf '%s\n' "$profile" > "$home/config/crew-harness-fallback"
+    printf 'brief\n' > "$home/data/$id/brief.md"
+    fm_git_worktree "$proj" "$wt" "$case_name"
+    fakebin=$(make_launch_capturing_tmux "$w/tmux")
+    make_quota_axi "$fakebin"
+    : > "$launchlog"
+    out=$(FM_TEST_QUOTA_LOG="$quota_log" \
+      PATH="$fakebin:$BASE_PATH" TMUX="fake,1,0" CLAUDECODE=1 \
+      FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+      FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+      FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_LAUNCH_LOG="$launchlog" \
+      "$ROOT/bin/fm-spawn.sh" "$id" "$proj" --mode no-mistakes --yolo off 2>&1)
+    status=$?
+    expect_code 1 "$status" "malformed crew fallback profile was accepted: $profile"
+    assert_contains "$out" "config/crew-harness-fallback" \
+      "malformed crew fallback refusal did not name its configuration source"
+    assert_absent "$quota_log" "malformed crew fallback reached quota evaluation"
+    [ ! -s "$launchlog" ] || fail "malformed crew fallback launched an agent"
+    assert_absent "$home/state/$id.meta" "malformed crew fallback wrote task metadata"
+  done
+  pass "C12 malformed crew fallback profiles fail before quota evaluation or launch"
 }
 
 # ===========================================================================
@@ -2724,6 +2767,7 @@ test_spawn_explicit_harness_uses_explicit_profile_axes
 test_spawned_secondmate_uses_its_harness_supervision_model
 test_spawn_fallback_chain_and_crew_scout_unaffected
 test_crew_primary_fallback_selection
+test_crew_fallback_profile_validation
 test_bootstrap_sweep_propagates_and_reconverges
 test_bootstrap_sweep_propagates_when_tracked_current
 test_bootstrap_sweep_defers_dispatch_on_stale_unignored_home

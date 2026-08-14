@@ -287,6 +287,12 @@ if [ "$transport" -eq 0 ]; then
   [ "$readiness" -eq 0 ] || [ "${FM_FAKE_BOOT_INCOMPLETE:-0}" != 1 ] || exit 255
   host=$(sed -n 's/^ *HostName *//p' "$conf" | head -1)
   port=$(sed -n 's/^ *Port *//p' "$conf" | head -1)
+  if [ "${FM_FAKE_SSH_REACHABLE_HOST:-}" = "$host" ]; then
+    exit 0
+  fi
+  if [ "${FM_FAKE_SSH_INDETERMINATE_HOST:-}" = "$host" ]; then
+    exit 42
+  fi
   state=${FM_FAKE_RUNPOD_STATE:?}
   live=$(jq -r --arg h "$host" --argjson p "${port:-0}" \
     '[.pods[] | select(.publicIp == $h and (.portMappings["22"] == $p))] | length' "$state" 2>/dev/null)

@@ -233,6 +233,7 @@ Primary-session watcher wake protocols are rendered at session start by [`bin/fm
 Claude's Stop `asyncRewake` hook owns tokenless re-arm cycles, Grok uses background-notify cycles, Codex uses bounded foreground checkpoints, Pi and pi-signed use the same two tracked Pi extensions, OMP uses its tracked native `.omp` extension, and OpenCode uses its TUI plugin.
 `config/crew-harness` is a local, gitignored file containing one adapter name for crewmate and scout launches.
 `config/crew-harness-fallback` is an optional local, gitignored `<harness> [<model>] [<effort>]` profile evaluated only when no dispatch profile or explicit harness or model override applies.
+Profiles with an invalid effort or more than three fields are refused before quota evaluation or launch.
 It uses the same predictive trigger as the secondmate fallback: proven credential or provider unavailability, or applicable effective headroom at zero; unknown or positive quota keeps the primary, and launch failures are never retried.
 When pi-signed is selected, Firstmate launches the executable named `pi-signed` from `PATH` with `FM_PI_HARNESS=pi-signed` and refuses the launch if it is unavailable rather than falling back to pi.
 Plain Pi launches set `FM_PI_HARNESS=pi`, so a signed primary's environment cannot relabel a plain Pi worker.

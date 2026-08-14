@@ -257,6 +257,8 @@ out=$(FM_FAKE_RUNPOD_INIT_POLLS=999 FM_TEST_RUNPOD_POLL_INTERVAL=1 \
   FM_TEST_RUNPOD_WAKE_TIMEOUT=2 rp wake reachable 2>&1) \
   && fail "reachable-recovery fixture unexpectedly reached ready"
 REACHABLE_POD=$(record_field reachable pod_id)
+[ -z "$(record_field reachable endpoint_host)" ] \
+  || fail "current-only recovery fixture unexpectedly recorded an endpoint"
 jq '(.pods[] | select(.id == $p)) |= (.remainingInitPolls = 0 | .status = "RUNNING" | .publicIp = "10.0.0.99" | .portMappings = {"22":20999})' \
   --arg p "$REACHABLE_POD" "$API_STATE" > "$API_STATE.next" && mv "$API_STATE.next" "$API_STATE"
 out=$(rp recover-stuck reachable --yes 2>&1) \
@@ -269,7 +271,37 @@ jq '(.pods[] | select(.id == $p)) |= (.remainingInitPolls = 999 | .status = "INI
   --arg p "$REACHABLE_POD" "$API_STATE" > "$API_STATE.next" && mv "$API_STATE.next" "$API_STATE"
 rp recover-stuck reachable --yes >/dev/null 2>&1 || fail "reachable fixture cleanup recovery failed"
 rp destroy reachable --yes >/dev/null 2>&1 || fail "reachable fixture volume cleanup failed"
-pass "recover-stuck re-reads endpoint state and refuses SSH-reachable compute"
+pass "recover-stuck probes a current-only endpoint and refuses SSH-reachable compute"
+
+out=$(rp provision recorded --datacenter EU-RO-1 --size 50 \
+  --code-origin https://example.test/firstmate.git 2>&1) \
+  || fail "recorded-endpoint recovery fixture provision failed: $out"
+out=$(FM_FAKE_BOOT_INCOMPLETE=1 FM_TEST_RUNPOD_POLL_INTERVAL=1 \
+  FM_TEST_RUNPOD_WAKE_TIMEOUT=2 rp wake recorded 2>&1) \
+  && fail "recorded-endpoint recovery fixture unexpectedly reached ready"
+RECORDED_POD=$(record_field recorded pod_id)
+RECORDED_HOST=$(record_field recorded endpoint_host)
+RECORDED_PORT=$(record_field recorded endpoint_port)
+[ -n "$RECORDED_HOST" ] && [ -n "$RECORDED_PORT" ] \
+  || fail "recorded-endpoint recovery fixture did not retain its discovered endpoint"
+jq '(.pods[] | select(.id == $p)) |= (.remainingInitPolls = 999 | .status = "INITIALIZING" | .publicIp = null | .portMappings = null)' \
+  --arg p "$RECORDED_POD" "$API_STATE" > "$API_STATE.next" && mv "$API_STATE.next" "$API_STATE"
+out=$(FM_FAKE_SSH_REACHABLE_HOST="$RECORDED_HOST" rp recover-stuck recorded --yes 2>&1) \
+  && fail "recover-stuck terminated compute while its recorded endpoint was reachable"
+assert_contains "$out" "recorded endpoint $RECORDED_HOST:$RECORDED_PORT" \
+  "recorded-endpoint reachability refusal did not identify the endpoint"
+[ "$(jq -r --arg p "$RECORDED_POD" '[.pods[] | select(.id == $p)] | length' "$API_STATE")" = 1 ] \
+  || fail "recorded-endpoint reachability refusal deleted compute"
+out=$(FM_FAKE_SSH_INDETERMINATE_HOST="$RECORDED_HOST" rp recover-stuck recorded --yes 2>&1) \
+  && fail "recover-stuck accepted an indeterminate recorded endpoint"
+assert_contains "$out" "recorded endpoint $RECORDED_HOST:$RECORDED_PORT is indeterminate" \
+  "indeterminate recorded-endpoint refusal did not explain the safety boundary"
+rp recover-stuck recorded --yes >/dev/null 2>&1 \
+  || fail "a bounded unreachable recorded endpoint did not permit never-ready recovery"
+[ -z "$(record_field recorded pod_id)" ] \
+  || fail "recorded-only unreachable recovery left the pod recorded"
+rp destroy recorded --yes >/dev/null 2>&1 || fail "recorded-endpoint fixture volume cleanup failed"
+pass "recover-stuck probes recorded-only endpoints and refuses reachable or indeterminate results"
 
 out=$(rp wake ios 2>&1) || fail "wake failed: $out"
 assert_contains "$out" "ready: secondmate ios" "wake must report readiness"

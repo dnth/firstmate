@@ -225,11 +225,6 @@ write_account_shell_rc() {  # <path>
   fi
   tmp=$(mktemp "$FM_ACCOUNT_HOME/.fm-shell-rc.XXXXXX") || return 1
   {
-    printf '%s\n' "$FM_SHELL_RC_BEGIN"
-    # shellcheck disable=SC2016 # HOME and PATH expand when the generated startup file is sourced.
-    printf '%s\n' 'export PATH="$HOME/.local/bin:$PATH"'
-    printf '%s\n' 'export IS_SANDBOX=1'
-    printf '%s\n' "$FM_SHELL_RC_END"
     if [ -f "$path" ]; then
       awk -v begin="$FM_SHELL_RC_BEGIN" -v end="$FM_SHELL_RC_END" '
         $0 == begin { managed = 1; next }
@@ -237,6 +232,11 @@ write_account_shell_rc() {  # <path>
         !managed { print }
       ' "$path"
     fi
+    printf '%s\n' "$FM_SHELL_RC_BEGIN"
+    # shellcheck disable=SC2016 # HOME and PATH expand when the generated startup file is sourced.
+    printf '%s\n' 'export PATH="$HOME/.local/bin:$PATH"'
+    printf '%s\n' 'export IS_SANDBOX=1'
+    printf '%s\n' "$FM_SHELL_RC_END"
   } > "$tmp" || { rm -f -- "$tmp"; return 1; }
   chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
   mv -f -- "$tmp" "$path" || { rm -f -- "$tmp"; return 1; }

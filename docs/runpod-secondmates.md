@@ -162,7 +162,7 @@ If that volume has never reached ready, terminate the stuck billable pod while r
 bin/fm-runpod.sh recover-stuck <id> --yes
 ```
 
-The command requires `ever_ready=0`, re-reads provider endpoint state immediately before deletion, and either proves the endpoint remains absent or performs a bounded SSH host-key handshake against the newly published endpoint.
+The command requires `ever_ready=0`, re-reads provider endpoint state immediately before deletion, and performs bounded SSH checks against both the newly published endpoint and any endpoint retained in the local record.
 It refuses when the pod has become reachable or when reachability cannot be classified safely, and only then deletes the recorded pod, clears its stale endpoint, and returns the retained volume to `provisioned`.
 It refuses once the volume has ever reached ready because an unreachable ready host may contain running or completed work whose outcome is unknown.
 Use the ordinary `sleep` path only after reconciling that work on the same host.

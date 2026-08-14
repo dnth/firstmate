@@ -1138,7 +1138,15 @@ case "$ARG3" in
       harness_src='config/crew-harness'
       CREW_MODEL_SOURCE=
       CREW_FALLBACK_REASON=
-      CREW_FALLBACK_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" crew-fallback-harness)
+      CREW_FALLBACK_PROFILE=$("$SCRIPT_DIR/fm-harness.sh" crew-fallback-profile) || exit 1
+      CREW_FALLBACK_HARNESS=
+      CREW_FALLBACK_MODEL=
+      CREW_FALLBACK_EFFORT=
+      if [ -n "$CREW_FALLBACK_PROFILE" ]; then
+        IFS=$'\t' read -r CREW_FALLBACK_HARNESS CREW_FALLBACK_MODEL CREW_FALLBACK_EFFORT <<< "$CREW_FALLBACK_PROFILE"
+        [ "$CREW_FALLBACK_MODEL" != - ] || CREW_FALLBACK_MODEL=
+        [ "$CREW_FALLBACK_EFFORT" != - ] || CREW_FALLBACK_EFFORT=
+      fi
       if [ -n "$CREW_FALLBACK_HARNESS" ]; then
         case "$CREW_FALLBACK_HARNESS" in
           claude|codex|opencode|pi|pi-signed|omp|grok|kimi) ;;
@@ -1150,17 +1158,12 @@ case "$ARG3" in
         fi
         case "$CREW_FALLBACK_REASON" in
           provider_unavailable|quota_exhausted)
-            CREW_FALLBACK_MODEL=$("$SCRIPT_DIR/fm-harness.sh" crew-fallback-model)
-            CREW_FALLBACK_EFFORT=$("$SCRIPT_DIR/fm-harness.sh" crew-fallback-effort)
             HARNESS=$CREW_FALLBACK_HARNESS
             harness_src='config/crew-harness-fallback'
             CREW_MODEL_SOURCE=fallback
             [ -z "$CREW_FALLBACK_MODEL" ] || MODEL=$CREW_FALLBACK_MODEL
             if [ "$EFFORT_SET" -eq 0 ] && [ -n "$CREW_FALLBACK_EFFORT" ]; then
-              case "$CREW_FALLBACK_EFFORT" in
-                low|medium|high|xhigh|max) EFFORT=$CREW_FALLBACK_EFFORT ;;
-                *) echo "warning: config/crew-harness-fallback effort token '$CREW_FALLBACK_EFFORT' is invalid; ignoring" >&2 ;;
-              esac
+              EFFORT=$CREW_FALLBACK_EFFORT
             fi
             ;;
         esac

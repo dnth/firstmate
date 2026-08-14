@@ -507,8 +507,10 @@ jq '.operatorState = "keep"' "$HOMEDIR/.claude.json" > "$HOMEDIR/.claude.json.ne
   && mv "$HOMEDIR/.claude.json.next" "$HOMEDIR/.claude.json"
 jq '.operatorSetting = "keep"' "$HOMEDIR/.claude/settings.json" > "$HOMEDIR/.claude/settings.json.next" \
   && mv "$HOMEDIR/.claude/settings.json.next" "$HOMEDIR/.claude/settings.json"
-printf '# operator bash profile\n' > "$HOMEDIR/.bash_profile"
-printf '# operator bash login\n' > "$HOMEDIR/.bash_login"
+printf 'export OPERATOR_PROFILE=keep\nPATH=/operator-profile\nunset IS_SANDBOX\n' > "$HOMEDIR/.profile"
+printf 'case $- in *i*) ;; *) return ;; esac\nexport OPERATOR_BASHRC=keep\nPATH=/operator-bashrc\nunset IS_SANDBOX\n' > "$HOMEDIR/.bashrc"
+printf 'export OPERATOR_BASH_PROFILE=keep\nPATH=/operator-bash-profile\nunset IS_SANDBOX\n' > "$HOMEDIR/.bash_profile"
+printf 'export OPERATOR_BASH_LOGIN=keep\nPATH=/operator-bash-login\nunset IS_SANDBOX\n' > "$HOMEDIR/.bash_login"
 rm -f "$w/volume/firstmate/bin/fm-claude-headless-setup.sh"
 : > "$w/calls.log"
 
@@ -543,12 +545,21 @@ jq -e '.operatorState == "keep" and .hasCompletedOnboarding == true' "$HOMEDIR/.
   || fail "a replacement pod clobbered existing Claude state while reconciling headless defaults"
 jq -e '.operatorSetting == "keep" and .attribution.sessionUrl == false' "$HOMEDIR/.claude/settings.json" >/dev/null \
   || fail "a replacement pod clobbered existing Claude settings while enforcing attribution"
-profile_precedence_probe=$(HOME="$HOMEDIR" PATH=/usr/bin:/bin /bin/bash -c '. "$HOME/.bash_profile"; printf "%s|%s\n" "$(command -v codex)" "${IS_SANDBOX:-}"')
-[ "$profile_precedence_probe" = "$HOMEDIR/.local/bin/codex|1" ] \
+profile_probe=$(HOME="$HOMEDIR" PATH=/usr/bin:/bin /bin/bash -c '. "$HOME/.profile"; printf "%s|%s|%s\n" "$(command -v codex)" "${IS_SANDBOX:-}" "${OPERATOR_PROFILE:-}"')
+[ "$profile_probe" = "$HOMEDIR/.local/bin/codex|1|keep" ] \
+  || fail "retained .profile assignments overrode the managed RunPod environment: $profile_probe"
+profile_precedence_probe=$(HOME="$HOMEDIR" PATH=/usr/bin:/bin /bin/bash -c '. "$HOME/.bash_profile"; printf "%s|%s|%s\n" "$(command -v codex)" "${IS_SANDBOX:-}" "${OPERATOR_BASH_PROFILE:-}"')
+[ "$profile_precedence_probe" = "$HOMEDIR/.local/bin/codex|1|keep" ] \
   || fail "a retained .bash_profile bypassed the managed RunPod environment: $profile_precedence_probe"
-bash_login_probe=$(HOME="$HOMEDIR" PATH=/usr/bin:/bin /bin/bash -c '. "$HOME/.bash_login"; printf "%s|%s\n" "$(command -v claude)" "${IS_SANDBOX:-}"')
-[ "$bash_login_probe" = "$HOMEDIR/.local/bin/claude|1" ] \
+bash_login_probe=$(HOME="$HOMEDIR" PATH=/usr/bin:/bin /bin/bash -c '. "$HOME/.bash_login"; printf "%s|%s|%s\n" "$(command -v claude)" "${IS_SANDBOX:-}" "${OPERATOR_BASH_LOGIN:-}"')
+[ "$bash_login_probe" = "$HOMEDIR/.local/bin/claude|1|keep" ] \
   || fail "a retained .bash_login bypassed the managed RunPod environment: $bash_login_probe"
+bashrc_probe=$(HOME="$HOMEDIR" PATH=/usr/bin:/bin /bin/bash --noprofile --norc -ic '. "$HOME/.bashrc"; printf "%s|%s|%s\n" "$(command -v claude)" "${IS_SANDBOX:-}" "${OPERATOR_BASHRC:-}"' 2>/dev/null | tail -1)
+[ "$bashrc_probe" = "$HOMEDIR/.local/bin/claude|1|keep" ] \
+  || fail "retained interactive .bashrc assignments overrode the managed RunPod environment: $bashrc_probe"
+noninteractive_bashrc_probe=$(HOME="$HOMEDIR" PATH=/usr/bin:/bin /bin/bash -c '. "$HOME/.bashrc"; printf "%s|%s\n" "${OPERATOR_BASHRC:-}" "${IS_SANDBOX:-}"')
+[ "$noninteractive_bashrc_probe" = '|' ] \
+  || fail "the retained .bashrc early return no longer protects non-interactive shells: $noninteractive_bashrc_probe"
 assert_contains "$(cat "$w/calls.log")" "pull --ff-only --quiet" \
   "a contract-5 replacement did not reconcile the tracked helper from its retained checkout"
 assert_present "$w/volume/firstmate/bin/fm-claude-headless-setup.sh" \
