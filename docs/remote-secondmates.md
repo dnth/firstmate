@@ -169,7 +169,9 @@ All remote secondmates on one host share `fm-remote` and retain separate `2ndmat
 An explicit request for any other backend is refused rather than honored, and the remote host refuses one too.
 An existing remote endpoint recorded in another Herdr session, including `default`, is classified as unverified and left untouched; launch, liveness recovery, control, and retirement refuse it until an operator explicitly migrates it instead of attempting a live cutover.
 A launch after a host has drifted out of readiness fails with the doctor's own gap text instead of leaving a half-created endpoint.
+OMP is accepted for the remote second-mate agent itself, as either the primary or configured fallback harness, through the same verified-adapter boundary as the other supported harnesses.
 Raw launch commands are not accepted for remote secondmates.
+`--prewalk-into` remains unavailable for remote secondmates because the remote control protocol does not carry a Prewalk target.
 Backends that already refuse secondmate launch, currently Orca and cmux, remain unsupported on the remote host.
 
 Startup liveness recovery relaunches a dead or missing remote second mate through this same command, so recovery passes the same readiness gate rather than a weaker one.

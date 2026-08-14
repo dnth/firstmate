@@ -283,7 +283,7 @@ Pod sshd accepts remote forwarding only, keeps `GatewayPorts` off, and permits o
 The workstation bearer copy is `<FM_HOME>/config/runpod/omp-auth-broker.token` and the pod copy is `/workspace/persistent-runtime/omp-auth-broker.token`.
 Both are regular mode-600 files.
 The bearer never appears in RunPod pod environment fields, SSH arguments, generated SSH fragments, endpoint metadata, logs, or tracked files.
-The pod's OMP launch receives `OMP_AUTH_BROKER_URL` and expands `OMP_AUTH_BROKER_TOKEN` from the mode-600 file inside the backend pane, after the literal command has crossed the terminal transport.
+The remote second-mate agent's OMP launch receives `OMP_AUTH_BROKER_URL` and expands `OMP_AUTH_BROKER_TOKEN` from the mode-600 file inside the backend pane, after the literal command has crossed the terminal transport.
 Descendant OMP crews retain the safe token-file path and repeat the same launch-time expansion.
 
 Installed OMP exposes remote credential-write hooks in addition to the local synchronous methods that throw on a `RemoteAuthCredentialStore`.

@@ -431,7 +431,7 @@ spawn_remote_secondmate() {
   if [ "$PREWALK_INTO_SET" -eq 1 ]; then
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
-    echo "error: --prewalk-into is unavailable for remote secondmates because their verified harness set does not include omp" >&2
+    echo "error: --prewalk-into is unavailable for remote secondmates because the remote control protocol does not carry a Prewalk target" >&2
     return 1
   fi
   host=$(secondmate_registry_field "$DATA/secondmates.md" "$id" host)
@@ -472,7 +472,7 @@ spawn_remote_secondmate() {
   fallback_effort=-
   if [ -n "$fallback_harness" ]; then
     case "$fallback_harness" in
-      claude|codex|opencode|pi|pi-signed|grok|kimi) ;;
+      omp|claude|codex|opencode|pi|pi-signed|grok|kimi) ;;
       *)
         fm_lock_release "$registry_lock" || true
         fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -499,7 +499,7 @@ spawn_remote_secondmate() {
     fallback_harness=-
   fi
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi) ;;
+    omp|claude|codex|opencode|pi|pi-signed|grok|kimi) ;;
     *)
       fm_lock_release "$registry_lock" || true
       fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -664,7 +664,7 @@ spawn_remote_secondmate() {
     echo "error: remote launch returned backend '${remote_backend:-missing}', expected herdr; preserving the remote route for reconciliation" >&2
     return 1
   fi
-  case "$remote_harness" in claude|codex|opencode|pi|pi-signed|grok|kimi) ;; *) remote_harness= ;; esac
+  case "$remote_harness" in omp|claude|codex|opencode|pi|pi-signed|grok|kimi) ;; *) remote_harness= ;; esac
   case "$remote_effort" in default|low|medium|high|xhigh|max) ;; *) remote_effort= ;; esac
   case "$remote_model_source:$remote_fallback_reason" in
     :|primary:) ;;

@@ -103,8 +103,38 @@ esac
 exit 0
 SH
 chmod +x "$REMOTE_ROOT/bin/tmux"
+cat > "$REMOTE_ROOT/bin/omp" <<'JS'
+#!/usr/bin/env bun
+if (process.argv[2] === "models" && process.argv.includes("--json")) {
+  console.log(JSON.stringify({models: [{selector: "test/model", thinking: ["low", "medium", "high", "xhigh"]}]}));
+} else {
+  console.log(`OMP 17.2.11
+--model=<value>
+--thinking=<value>
+--auto-approve
+--extension=<value>
+--session-dir=<value>
+--resume=<value>
+--prewalk native switch
+--prewalk-into=<value>
+--no-prewalk`);
+}
+JS
+chmod +x "$REMOTE_ROOT/bin/omp"
+REMOTE_OMP_BIN=$(fm_test_realpath "$REMOTE_ROOT/bin/omp")
+REMOTE_OMP_BUN=$(fm_test_realpath "$(command -v node)")
+ln -sf "$REMOTE_OMP_BUN" "$REMOTE_ROOT/bin/bun"
+cat > "$REMOTE_ROOT/bin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = auth ] && [ "${2:-}" = --json ]; then
+  printf '%s\n' '{"auth":[{"provider":"claude","sources":[{"source":"oauth-file","status":"available"}]}]}'
+elif [ "${1:-}" = --provider ] && [ "${3:-}" = --json ]; then
+  printf '%s\n' '{"providers":[{"provider":"claude","state":{"status":"fresh"},"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","effectivePercentRemaining":42}]}}]}'
+fi
+SH
+chmod +x "$REMOTE_ROOT/bin/quota-axi"
 install_remote_herdr_fixture "$REMOTE_ROOT" "$HERDR_STATE" "$HERDR_LOG" \
-  "$TMP_ROOT/herdr-send-fail" "$TMP_ROOT/herdr.sock"
+  "$TMP_ROOT/herdr-send-fail" "$TMP_ROOT/herdr.sock" "$$" "$REMOTE_OMP_BUN" "$REMOTE_OMP_BIN"
 git -C "$REMOTE_ROOT" init -q -b main
 git -C "$REMOTE_ROOT" config user.email test@example.com
 git -C "$REMOTE_ROOT" config user.name Test
@@ -233,6 +263,17 @@ case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
     printf 'target=default:w1:p2\n'
     printf 'herdr_session=default\n'
     printf 'harness=codex\n'
+    printf 'model=default\n'
+    printf 'effort=default\n'
+    exit 0
+    ;;
+  launch-unverified-harness-route:fm-remote-secondmate-control.sh:*)
+    [ "$_command_action" = launch ] || exit 93
+    printf 'schema=fm-remote-secondmate-control.v1\n'
+    printf 'backend=herdr\n'
+    printf 'target=fm-remote:w1:p2\n'
+    printf 'herdr_session=fm-remote\n'
+    printf 'harness=raw-agent\n'
     printf 'model=default\n'
     printf 'effort=default\n'
     exit 0
@@ -590,6 +631,18 @@ cmp -s "$TMP_ROOT/parent-ios-before-nonherdr.meta" "$PARENT/state/ios.meta" \
   || fail "parent rewrote its endpoint metadata after a non-herdr route refusal"
 cmp -s "$TMP_ROOT/registry-before-nonherdr.md" "$PARENT/data/secondmates.md" \
   || fail "parent removed or changed the registry route after a non-herdr route refusal"
+
+set +e
+FM_FAKE_SSH_MODE=launch-unverified-harness-route remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+  > "$TMP_ROOT/spawn-unverified-harness-route.out" 2>&1
+unverified_harness_parent_rc=$?
+set -e
+[ "$unverified_harness_parent_rc" -ne 0 ] || fail "parent accepted an unverified harness returned by the remote host"
+assert_grep 'remote launch returned malformed route metadata' \
+  "$TMP_ROOT/spawn-unverified-harness-route.out" \
+  "parent did not reject an unverified harness returned by the remote host"
+cmp -s "$TMP_ROOT/parent-ios-before-nonherdr.meta" "$PARENT/state/ios.meta" \
+  || fail "parent rewrote its endpoint metadata after an unverified returned-harness refusal"
 
 set +e
 FM_FAKE_SSH_MODE=launch-default-session-route remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
@@ -1024,5 +1077,59 @@ jq -e --arg workspace "$SIBLING_WORKSPACE" --arg pane "$SIBLING_PANE" '
 assert_no_grep 'session stop' "$HERDR_LOG" "remote retirement stopped the shared fm-remote session"
 assert_no_grep 'server stop' "$HERDR_LOG" "remote retirement stopped the shared fm-remote server"
 pass "remote retirement refuses child work, then removes only its own endpoint while a shared-session sibling survives"
+
+# The parent and remote host both accept OMP as an agent harness while keeping
+# the raw-command and remote-Prewalk refusals intact. The optional fallback is
+# accepted independently, then a second route drives the real OMP launch across
+# the encoded SSH/job boundary into the remote Herdr pane and back into parent
+# metadata.
+FALLBACK_REMOTE_HOME="$TMP_ROOT/remote-fallback-omp-home"
+printf 'claude opus medium\n' > "$PARENT/config/secondmate-harness"
+printf 'omp test/model low\n' > "$PARENT/config/secondmate-harness-fallback"
+FM_SECONDMATE_CHARTER='Exercise an OMP remote fallback configuration.' \
+  FM_SECONDMATE_SCOPE='remote fallback validation' \
+  remote_env "$ROOT/bin/fm-remote-home-seed.sh" fallback-omp remote-mac "$REMOTE_ROOT" \
+  "$FALLBACK_REMOTE_HOME" --no-projects >/dev/null \
+  || fail "remote OMP fallback route seeding failed"
+remote_env "$ROOT/bin/fm-spawn.sh" fallback-omp --secondmate >/dev/null 2>&1 \
+  || fail "remote spawn rejected OMP as the verified fallback harness"
+assert_grep 'harness=claude' "$PARENT/state/fallback-omp.meta" \
+  "fresh primary quota unexpectedly selected the OMP fallback"
+assert_grep 'secondmate_model_source=primary' "$PARENT/state/fallback-omp.meta" \
+  "accepted OMP fallback configuration lost the remote primary selection record"
+
+OMP_REMOTE_HOME="$TMP_ROOT/remote-omp-home"
+printf 'omp test/model low\n' > "$PARENT/config/secondmate-harness"
+rm -f "$PARENT/config/secondmate-harness-fallback"
+FM_SECONDMATE_CHARTER='Exercise the remote OMP agent launch.' \
+  FM_SECONDMATE_SCOPE='remote OMP launch validation' \
+  remote_env "$ROOT/bin/fm-remote-home-seed.sh" remote-omp remote-mac "$REMOTE_ROOT" \
+  "$OMP_REMOTE_HOME" --no-projects >/dev/null \
+  || fail "remote OMP route seeding failed"
+if remote_env "$ROOT/bin/fm-spawn.sh" remote-omp --secondmate --harness 'raw-agent --flag' \
+  > "$TMP_ROOT/remote-omp-raw.out" 2>&1; then
+  fail "remote secondmate accepted a raw launch command after OMP was allowlisted"
+fi
+assert_grep 'requires a verified harness adapter, not a raw launch command' \
+  "$TMP_ROOT/remote-omp-raw.out" "remote raw-command refusal weakened while allowlisting OMP"
+if remote_env "$ROOT/bin/fm-spawn.sh" remote-omp --secondmate --harness omp \
+  --prewalk-into test/model > "$TMP_ROOT/remote-omp-prewalk.out" 2>&1; then
+  fail "remote secondmate accepted a Prewalk target that its control protocol cannot carry"
+fi
+assert_grep 'remote control protocol does not carry a Prewalk target' \
+  "$TMP_ROOT/remote-omp-prewalk.out" "remote Prewalk refusal does not name its protocol boundary"
+: > "$HERDR_LOG"
+remote_env "$ROOT/bin/fm-spawn.sh" remote-omp --secondmate >/dev/null 2>&1 \
+  || fail "verified remote OMP secondmate launch failed"
+assert_grep 'harness=omp' "$PARENT/state/remote-omp.meta" \
+  "parent metadata rejected the OMP harness returned by the remote launch"
+assert_grep 'harness=omp' "$OMP_REMOTE_HOME/state/parent-route/remote-omp.meta" \
+  "remote endpoint metadata did not preserve its OMP harness"
+OMP_REMOTE_LAUNCH=$(grep -F 'FM_OMP_SESSION_POINTER=' "$HERDR_LOG" | tail -1 || true)
+assert_contains "$OMP_REMOTE_LAUNCH" "'$REMOTE_OMP_BUN' '$REMOTE_OMP_BIN'" \
+  "remote OMP pane did not receive the capability-checked Bun and OMP pair"
+assert_contains "$OMP_REMOTE_LAUNCH" "--session-dir '$OMP_REMOTE_HOME/state/omp-sessions'" \
+  "remote OMP pane did not receive its home-owned durable session directory"
+pass "remote OMP primary, fallback, result metadata, pane launch, and existing safety refusals hold end to end"
 
 echo "ALL TESTS PASSED"

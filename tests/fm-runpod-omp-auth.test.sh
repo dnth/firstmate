@@ -121,6 +121,9 @@ cat > "$CONTROL_ROOT/bin/fm-spawn.sh" <<'SH'
 printf 'url=%s\nfile=%s\ntoken=%s\n' \
   "${FM_OMP_AUTH_BROKER_URL:-}" "${FM_OMP_AUTH_BROKER_TOKEN_FILE:-}" "${OMP_AUTH_BROKER_TOKEN:-}" \
   > "$FM_FAKE_CONTROL_LOG"
+printf 'args=' >> "$FM_FAKE_CONTROL_LOG"
+printf '%q ' "$@" >> "$FM_FAKE_CONTROL_LOG"
+printf '\n' >> "$FM_FAKE_CONTROL_LOG"
 id=$1
 mkdir -p "$FM_STATE_OVERRIDE"
 printf '%s\n' \
@@ -142,6 +145,8 @@ assert_grep 'url=http://127.0.0.1:8765' "$CONTROL_LOG" \
   "remote secondmate control did not pass the loopback broker URL to fm-spawn"
 assert_grep "file=$TOKEN_FILE" "$CONTROL_LOG" \
   "remote secondmate control did not pass the safe token-file path to fm-spawn"
+assert_grep '--secondmate --harness omp --backend herdr' "$CONTROL_LOG" \
+  "remote secondmate control did not select OMP through fm-spawn's verified agent-harness interface"
 grep -Fx 'token=' "$CONTROL_LOG" >/dev/null \
   || fail "remote secondmate control expanded the broker bearer before the pane launch seam"
 assert_no_grep 'dummy_pod_broker_token_123' "$CONTROL_LOG" \
