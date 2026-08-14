@@ -11,6 +11,7 @@
 #   fm-remote-secondmate-control.sh capture <id> [lines]
 #   fm-remote-secondmate-control.sh observe <id>
 #   fm-remote-secondmate-control.sh children <id>
+#   fm-remote-secondmate-control.sh runpod-crews <id>
 #   fm-remote-secondmate-control.sh sync <id>
 #   fm-remote-secondmate-control.sh update <id>
 #   fm-remote-secondmate-control.sh retire <id> [--force]
@@ -289,6 +290,55 @@ cmd_children() {
   printf 'children=%s\n' "$count"
 }
 
+# RunPod's OMP OAuth callback is not usable in the current headless container,
+# while Codex and Claude subscription authentication both survive on the
+# durable account home.
+# This provider-owned layer is applied after ordinary inherited configuration,
+# so the secondmate agent remains on its separately selected harness but
+# every crew dispatch has a working GPT route by default.
+cmd_runpod_crews() {
+  local id=$1 config harness_tmp fallback_tmp path
+  validate_id "$id"
+  validate_home "$id"
+  config="$TARGET_HOME/config"
+  if [ -e "$config" ] || [ -L "$config" ]; then
+    [ -d "$config" ] && [ ! -L "$config" ] || die "remote config directory is unavailable or unsafe"
+  else
+    mkdir -p "$config" || die "remote config directory could not be created"
+  fi
+  for path in "$config/crew-harness" "$config/crew-harness-fallback" "$config/crew-dispatch.json"; do
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      [ -f "$path" ] && [ ! -L "$path" ] || die "refusing unsafe RunPod crew-routing path: $path"
+    fi
+  done
+  harness_tmp=$(mktemp "$config/.crew-harness.runpod.XXXXXX") \
+    || die "RunPod crew harness could not be staged"
+  fallback_tmp=$(mktemp "$config/.crew-harness-fallback.runpod.XXXXXX") \
+    || { rm -f -- "$harness_tmp"; die "RunPod crew dispatch could not be staged"; }
+  printf 'codex\n' > "$harness_tmp" || {
+    rm -f -- "$harness_tmp" "$fallback_tmp"
+    die "RunPod crew harness could not be written"
+  }
+  printf 'claude\n' > "$fallback_tmp" || {
+      rm -f -- "$harness_tmp" "$fallback_tmp"
+      die "RunPod crew fallback could not be written"
+    }
+  chmod 600 "$harness_tmp" "$fallback_tmp" || {
+    rm -f -- "$harness_tmp" "$fallback_tmp"
+    die "RunPod crew routing could not be secured"
+  }
+  mv -f -- "$harness_tmp" "$config/crew-harness" || {
+    rm -f -- "$harness_tmp" "$fallback_tmp"
+    die "RunPod crew harness could not be published"
+  }
+  mv -f -- "$fallback_tmp" "$config/crew-harness-fallback" || {
+    rm -f -- "$fallback_tmp"
+    die "RunPod crew fallback could not be published"
+  }
+  rm -f -- "$config/crew-dispatch.json" || die "RunPod crew dispatch override could not be retired"
+  printf 'runpod-crews: codex default with claude fallback\n'
+}
+
 cmd_sync() {
   local id=$1 target dirty head current
   validate_id "$id"
@@ -367,6 +417,7 @@ case "${1:-}" in
   capture) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_capture "$@" ;;
   observe) shift; [ "$#" -eq 1 ] || usage; cmd_observe "$@" ;;
   children) shift; [ "$#" -eq 1 ] || usage; cmd_children "$@" ;;
+  runpod-crews) shift; [ "$#" -eq 1 ] || usage; cmd_runpod_crews "$@" ;;
   sync) shift; [ "$#" -eq 1 ] || usage; cmd_sync "$@" ;;
   update) shift; [ "$#" -eq 1 ] || usage; cmd_update "$@" ;;
   retire) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_retire "$@" ;;

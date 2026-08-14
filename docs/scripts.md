@@ -45,7 +45,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-home-seed.sh`        | Transactionally provision a local secondmate home and maintain `data/secondmates.md` |
 | `fm-remote-home-seed.sh` | Register and provision a whole secondmate home on an SSH-reachable host              |
 | `fm-remote-readiness-lib.sh` | Shared remote second-mate readiness gate: check and, when needed, repair then re-check through `fm-remote-doctor.sh` |
-| `fm-runpod.sh`           | Optional RunPod compute lifecycle for one whole-home remote second mate: provision, wake, guarded sleep, status, cost, and destroy |
+| `fm-runpod.sh`           | Optional RunPod compute lifecycle for one whole-home remote second mate: provision, wake, guarded stuck recovery and sleep, status, cost, and destroy |
 | `fm-runpod-lib.sh`       | Dependency-free RunPod placement predicate read by supervision, convergence, and delivery |
 | `fm-runpod-pod-boot.sh`  | Tracked container boot contract sent to every RunPod pod; see [`runpod-secondmates.md`](runpod-secondmates.md#the-pods-boot-contract) |
 | `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates on the resolved harness and runtime backend |

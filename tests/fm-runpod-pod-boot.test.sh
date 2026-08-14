@@ -13,6 +13,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 BOOT="$ROOT/bin/fm-runpod-pod-boot.sh"
+REAL_JQ=$(command -v jq) || fail "jq is required to exercise Claude JSON setup"
 TMP_ROOT=$(fm_test_tmproot fm-runpod-pod-boot)
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
 
@@ -55,8 +56,12 @@ pass "the first-boot plan covers every tool the doctor reports as required for p
 assert_contains "$plan" "ensure=code-root" "the plan must clone the code root so first boot needs no manual clone"
 assert_contains "$plan" "ensure=account-home" \
   "the plan must move the account home onto the volume so logins survive pod replacement"
+assert_contains "$plan" "ensure=account-shell" \
+  "the plan must publish the durable account bin and root-sandbox marker to login shells"
+assert_contains "$plan" "ensure=claude-headless" \
+  "the plan must prepare Claude's unattended root-sandbox state"
 assert_contains "$plan" "ensure=bun" "omp runs on bun, so the plan must provision the bun runtime"
-pass "the plan clones the code root and makes the account home durable on first boot"
+pass "the plan clones the code root, makes the account home durable, and prepares unattended shells"
 
 # --- --check touches nothing -------------------------------------------------
 
@@ -90,6 +95,7 @@ new_world() {  # <name> -> world dir
     readlink rm sed seq sleep timeout uname; do
     ln -s "$(command -v "$tool")" "$w/basebin/$tool"
   done
+  ln -s "$REAL_JQ" "$w/basebin/jq"
 
   cat > "$w/templates/npm" <<'SH'
 #!/usr/bin/env bash
@@ -147,7 +153,13 @@ case " $* " in
   *" install "*)
     for pkg in "$@"; do
       case "$pkg" in
-        git|jq|curl|unzip)
+        git)
+          if [ ! -x "$FM_FAKE_EPHEMERAL_BIN/$pkg" ]; then
+            printf '#!/usr/bin/env bash\nexit 0\n' > "$FM_FAKE_EPHEMERAL_BIN/$pkg"
+            chmod +x "$FM_FAKE_EPHEMERAL_BIN/$pkg"
+          fi
+          ;;
+        jq|curl|unzip)
           printf '#!/usr/bin/env bash\nexit 0\n' > "$FM_FAKE_EPHEMERAL_BIN/$pkg"
           chmod +x "$FM_FAKE_EPHEMERAL_BIN/$pkg"
           ;;
@@ -259,6 +271,8 @@ if [ "${1:-}" = clone ]; then
   # somewhere the doctor cannot see fails the handoff instead of passing.
   cat > "$dest/bin/fm-remote-doctor.sh" <<'DOCTOR'
 #!/usr/bin/env bash
+printf 'sandbox=%s\n' "${IS_SANDBOX:-unset}" >> "$FM_FAKE_CALLS"
+[ "${IS_SANDBOX:-}" = 1 ] || exit 1
 for tool in herdr treehouse tasks-axi omp; do
   command -v "$tool" >> "$FM_FAKE_CALLS" || exit 1
 done
@@ -277,8 +291,14 @@ esac
 printf 'doctor %s\n' "$*" >> "$FM_FAKE_CALLS"
 exit 0
 DOCTOR
+  cp "$FM_FAKE_CLAUDE_SETUP" "$dest/bin/fm-claude-headless-setup.sh"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$dest/bin/fm-remote-entrypoint.sh"
-  chmod +x "$dest/bin/fm-remote-doctor.sh" "$dest/bin/fm-remote-entrypoint.sh"
+  chmod +x "$dest/bin/fm-remote-doctor.sh" "$dest/bin/fm-remote-entrypoint.sh" \
+    "$dest/bin/fm-claude-headless-setup.sh"
+fi
+if [ "${1:-}" = -C ] && [ "${3:-}" = pull ]; then
+  cp "$FM_FAKE_CLAUDE_SETUP" "$2/bin/fm-claude-headless-setup.sh"
+  chmod +x "$2/bin/fm-claude-headless-setup.sh"
 fi
 exit 0
 SH
@@ -298,9 +318,7 @@ SH
 printf 'sshd start\n' >> "$FM_FAKE_CALLS"
 exit 0
 SH
-  for t in jq unzip; do
-    printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/$t"
-  done
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/unzip"
   cat > "$fakebin/pgrep" <<'SH'
 #!/usr/bin/env bash
 # No daemon is running in a fresh test world. Returning not-found forces the
@@ -324,6 +342,7 @@ world_env() {  # <world> [harness]; exports into the calling subshell
   export FM_FAKE_NPM_TEMPLATE="$w/templates/npm"
   export FM_FAKE_NPX_TEMPLATE="$w/templates/npx"
   export FM_FAKE_BUN_TEMPLATE="$w/templates/bun"
+  export FM_FAKE_CLAUDE_SETUP="$ROOT/bin/fm-claude-headless-setup.sh"
   export FM_SYSTEM_SSH_DIR="$w/system-ssh"
   export FM_SSHD_FALLBACK="$w/fakebin/sshd"
   export FM_PASSWD_FILE="$w/etc/passwd"
@@ -338,16 +357,17 @@ provision_only() {  # <world> [harness]
   local w=$1 harness=${2:-}
   mkdir -p "$w/volume/persistent-runtime"
   : > "$w/volume/persistent-runtime/boot.log"
+  rm -f "$w/volume/persistent-runtime/boot.ready"
   (
     world_env "$w" "$harness"
     timeout 60 bash "$BOOT" >/dev/null 2>&1 &
     boot_pid=$!
     for _ in $(seq 1 300); do
-      grep -qxF "harness=$harness" "$w/volume/persistent-runtime/toolchain.provisioned" 2>/dev/null && break
+      grep -qF 'boot complete; holding the pod open' \
+        "$w/volume/persistent-runtime/boot.log" 2>/dev/null && break
       kill -0 "$boot_pid" 2>/dev/null || break
       sleep 0.1
     done
-    sleep 1
     kill "$boot_pid" 2>/dev/null || true
     wait "$boot_pid" 2>/dev/null || true
   )
@@ -390,7 +410,35 @@ assert_present "$HOMEDIR/.local/bin/herdr" "later SSH jobs must receive a per-po
 assert_present "$HOMEDIR/.local/bin/node" "later SSH jobs must receive a per-pod link to durable Node"
 assert_present "$HOMEDIR/.local/bin/tasks-axi" "later SSH jobs must receive a per-pod link to durable npm tools"
 assert_present "$w/volume/persistent-runtime/toolchain.provisioned" "a completed provisioning run must record its marker"
+assert_grep 'runpod-root-sandbox-v1' "$w/volume/persistent-runtime/runpod-root-sandbox" \
+  "boot did not publish the provider-owned root-sandbox marker"
 pass "first boot clones the code root and installs the required toolchain through the pinned installers"
+
+# Bare SSH login shells and interactive shells do not inherit the boot process's
+# PATH, so both account startup files must independently recover the durable bin.
+profile_probe=$(HOME="$HOMEDIR" PATH=/usr/bin:/bin /bin/bash -c '. "$HOME/.profile"; printf "%s|%s\n" "$(command -v codex)" "${IS_SANDBOX:-}"')
+[ "$profile_probe" = "$HOMEDIR/.local/bin/codex|1" ] \
+  || fail "the login-shell profile did not restore the durable tool PATH and IS_SANDBOX=1: $profile_probe"
+bashrc_probe=$(HOME="$HOMEDIR" PATH=/usr/bin:/bin /bin/bash -c '. "$HOME/.bashrc"; printf "%s|%s\n" "$(command -v claude)" "${IS_SANDBOX:-}"')
+[ "$bashrc_probe" = "$HOMEDIR/.local/bin/claude|1" ] \
+  || fail "the interactive-shell rc did not restore the durable tool PATH and IS_SANDBOX=1: $bashrc_probe"
+assert_contains "$calls" "sandbox=1" \
+  "the non-interactive readiness handoff did not inherit IS_SANDBOX=1"
+pass "login, interactive, and non-interactive pod processes inherit the durable tool PATH and sandbox marker"
+
+jq -e '
+  .hasCompletedOnboarding == true
+  and .theme == "dark"
+' "$HOMEDIR/.claude.json" >/dev/null \
+  || fail "Claude's durable state did not preseed onboarding and theme"
+jq -e '
+  .skipDangerousModePermissionPrompt == true
+  and .attribution.commit == ""
+  and .attribution.pr == ""
+  and .attribution.sessionUrl == false
+' "$HOMEDIR/.claude/settings.json" >/dev/null \
+  || fail "Claude's durable settings did not preseed unattended bypass and disabled attribution"
+pass "Claude onboarding, bypass confirmation, and git attribution are preseeded on the volume"
 
 # --- the account home is on the volume, so a login is once-per-volume --------
 #
@@ -456,11 +504,21 @@ pass "provisioning is idempotent across boots on the same volume"
 mkdir -p "$HOMEDIR/.claude" "$HOMEDIR/.config/gh"
 printf 'subscription-login\n' > "$HOMEDIR/.claude/.credentials.json"
 printf 'github.com:\n  oauth_token: login\n' > "$HOMEDIR/.config/gh/hosts.yml"
+jq '.operatorState = "keep"' "$HOMEDIR/.claude.json" > "$HOMEDIR/.claude.json.next" \
+  && mv "$HOMEDIR/.claude.json.next" "$HOMEDIR/.claude.json"
+jq '.operatorSetting = "keep"' "$HOMEDIR/.claude/settings.json" > "$HOMEDIR/.claude/settings.json.next" \
+  && mv "$HOMEDIR/.claude/settings.json.next" "$HOMEDIR/.claude/settings.json"
+printf 'export OPERATOR_PROFILE=keep\nPATH=/operator-profile\nunset IS_SANDBOX\n' > "$HOMEDIR/.profile"
+printf 'case $- in *i*) ;; *) return ;; esac\nexport OPERATOR_BASHRC=keep\nPATH=/operator-bashrc\nunset IS_SANDBOX\n' > "$HOMEDIR/.bashrc"
+ln -s .profile "$HOMEDIR/.bash_profile"
+printf 'export OPERATOR_BASH_LOGIN=keep\nPATH=/operator-bash-login\nunset IS_SANDBOX\n' > "$HOMEDIR/.bash_login"
+rm -f "$w/volume/firstmate/bin/fm-claude-headless-setup.sh"
+: > "$w/calls.log"
 
 rm -rf "${w:?}/home"
 rm -rf "${w:?}/system-ssh"
 mkdir -p "$w/home" "$w/system-ssh"
-rm -f "$w/fakebin/git" "$w/fakebin/jq" "$w/fakebin/curl" "$w/fakebin/unzip" \
+rm -f "$w/fakebin/jq" "$w/fakebin/curl" "$w/fakebin/unzip" \
   "$w/fakebin/sshd" "$w/fakebin/google-chrome"
 printf '%s:x:%s:%s:%s:/root:/bin/bash\n' "$(id -un)" "$(id -u)" "$(id -g)" "$(id -un)" > "$w/etc/passwd"
 : > "$w/calls.log"
@@ -484,9 +542,49 @@ assert_grep ":$HOMEDIR:" "$w/etc/passwd" "a replacement pod must point sshd back
   || fail "a replacement pod lost the harness login that was completed on the volume"
 assert_grep 'oauth_token: login' "$HOMEDIR/.config/gh/hosts.yml" \
   "a replacement pod lost the GitHub login that was completed on the volume"
+jq -e '.operatorState == "keep" and .hasCompletedOnboarding == true' "$HOMEDIR/.claude.json" >/dev/null \
+  || fail "a replacement pod clobbered existing Claude state while reconciling headless defaults"
+jq -e '.operatorSetting == "keep" and .attribution.sessionUrl == false' "$HOMEDIR/.claude/settings.json" >/dev/null \
+  || fail "a replacement pod clobbered existing Claude settings while enforcing attribution"
+profile_probe=$(HOME="$HOMEDIR" PATH=/usr/bin:/bin /bin/bash -c '. "$HOME/.profile"; printf "%s|%s|%s\n" "$(command -v codex)" "${IS_SANDBOX:-}" "${OPERATOR_PROFILE:-}"')
+[ "$profile_probe" = "$HOMEDIR/.local/bin/codex|1|keep" ] \
+  || fail "retained .profile assignments overrode the managed RunPod environment: $profile_probe"
+profile_precedence_probe=$(HOME="$HOMEDIR" PATH=/usr/bin:/bin /bin/bash -c '. "$HOME/.bash_profile"; printf "%s|%s|%s\n" "$(command -v codex)" "${IS_SANDBOX:-}" "${OPERATOR_PROFILE:-}"')
+[ "$profile_precedence_probe" = "$HOMEDIR/.local/bin/codex|1|keep" ] \
+  || fail "a retained .bash_profile bypassed the managed RunPod environment: $profile_precedence_probe"
+[ -L "$HOMEDIR/.bash_profile" ] && [ "$(readlink "$HOMEDIR/.bash_profile")" = .profile ] \
+  || fail "replacement boot did not preserve the conventional .bash_profile symlink"
+bash_login_probe=$(HOME="$HOMEDIR" PATH=/usr/bin:/bin /bin/bash -c '. "$HOME/.bash_login"; printf "%s|%s|%s\n" "$(command -v claude)" "${IS_SANDBOX:-}" "${OPERATOR_BASH_LOGIN:-}"')
+[ "$bash_login_probe" = "$HOMEDIR/.local/bin/claude|1|keep" ] \
+  || fail "a retained .bash_login bypassed the managed RunPod environment: $bash_login_probe"
+bashrc_probe=$(HOME="$HOMEDIR" PATH=/usr/bin:/bin /bin/bash --noprofile --norc -ic '. "$HOME/.bashrc"; printf "%s|%s|%s\n" "$(command -v claude)" "${IS_SANDBOX:-}" "${OPERATOR_BASHRC:-}"' 2>/dev/null | tail -1)
+[ "$bashrc_probe" = "$HOMEDIR/.local/bin/claude|1|keep" ] \
+  || fail "retained interactive .bashrc assignments overrode the managed RunPod environment: $bashrc_probe"
+noninteractive_bashrc_probe=$(HOME="$HOMEDIR" PATH=/usr/bin:/bin /bin/bash -c '. "$HOME/.bashrc"; printf "%s|%s\n" "${OPERATOR_BASHRC:-}" "${IS_SANDBOX:-}"')
+[ "$noninteractive_bashrc_probe" = '|' ] \
+  || fail "the retained .bashrc early return no longer protects non-interactive shells: $noninteractive_bashrc_probe"
+assert_contains "$(cat "$w/calls.log")" "pull --ff-only --quiet" \
+  "a contract-5 replacement did not reconcile the tracked helper from its retained checkout"
+assert_present "$w/volume/firstmate/bin/fm-claude-headless-setup.sh" \
+  "a contract-5 replacement could not recover the tracked Claude helper"
 assert_present "$w/volume/persistent-runtime/boot.ready" "a replacement pod must reach readiness from the retained volume"
 pass "replacement pods restore ephemeral prerequisites and reuse the durable toolchain"
 pass "a login completed once on the volume survives pod replacement"
+
+wsymlink=$(new_world unsafe-shell-symlink)
+provision_only "$wsymlink"
+printf 'outside\n' > "$wsymlink/outside-profile"
+ln -s "$wsymlink/outside-profile" "$wsymlink/volume/home/.bash_profile"
+rm -f "$wsymlink/volume/persistent-runtime/boot.ready"
+: > "$wsymlink/volume/persistent-runtime/boot.log"
+provision_idempotent "$wsymlink"
+assert_absent "$wsymlink/volume/persistent-runtime/boot.ready" \
+  "a startup-file symlink escaping the durable home reached readiness"
+assert_grep 'startup symlink outside the durable home' "$wsymlink/volume/persistent-runtime/boot.log" \
+  "an escaping startup-file symlink did not produce a clear refusal"
+[ "$(cat "$wsymlink/outside-profile")" = outside ] \
+  || fail "replacement boot overwrote an escaping startup-file symlink target"
+pass "replacement boot preserves in-home startup symlinks and refuses escaping targets"
 
 # --- a failed passwd rewrite cannot be masked by the boot process HOME ------
 

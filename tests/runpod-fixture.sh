@@ -154,7 +154,7 @@ case "$method $path" in
       --argjson cost "$cost" --argjson polls "$init_polls" --argjson seq "$seq" \
       --argjson gpus "$gpus" --argjson disk "${disk:-40}" \
       --argjson v "$(jq -c --arg v "$vol" '[.volumes[] | select(.id == $v)][0] // null' "$state")" \
-      '{id:$id,name:$n,imageName:$i,computeType:$c,desiredStatus:"RUNNING",costPerHr:$cost,containerDiskInGb:$disk,
+      '{id:$id,name:$n,imageName:$i,computeType:$c,desiredStatus:"RUNNING",status:"INITIALIZING",costPerHr:$cost,containerDiskInGb:$disk,
         lastStartedAt:"2026-08-12T00:00:00.000Z",bootScript:$b,requestedGpuTypeIds:$gpus,
         remainingInitPolls:$polls,seq:$seq,networkVolume:$v,
         publicIp:null,portMappings:null}')
@@ -170,7 +170,8 @@ case "$method $path" in
     # number of polls, exactly as a real pod publishes no IP while booting.
     apply '(.pods[] | select(.id == $p) | .remainingInitPolls) |= (if . > 0 then . - 1 else 0 end)
            | (.pods[] | select(.id == $p)) |= (if .remainingInitPolls == 0
-                then .publicIp = ("10.0.0." + (.seq | tostring))
+                then .status = "RUNNING"
+                   | .publicIp = ("10.0.0." + (.seq | tostring))
                    | .portMappings = {"22": (20000 + .seq)}
                 else . end)' --arg p "$pid" || exit 7
     emit "$(jq -c --arg p "$pid" '[.pods[] | select(.id == $p)][0]' "$state")" 200
@@ -286,6 +287,12 @@ if [ "$transport" -eq 0 ]; then
   [ "$readiness" -eq 0 ] || [ "${FM_FAKE_BOOT_INCOMPLETE:-0}" != 1 ] || exit 255
   host=$(sed -n 's/^ *HostName *//p' "$conf" | head -1)
   port=$(sed -n 's/^ *Port *//p' "$conf" | head -1)
+  if [ "${FM_FAKE_SSH_REACHABLE_HOST:-}" = "$host" ]; then
+    exit 0
+  fi
+  if [ "${FM_FAKE_SSH_INDETERMINATE_HOST:-}" = "$host" ]; then
+    exit 42
+  fi
   state=${FM_FAKE_RUNPOD_STATE:?}
   live=$(jq -r --arg h "$host" --argjson p "${port:-0}" \
     '[.pods[] | select(.publicIp == $h and (.portMappings["22"] == $p))] | length' "$state" 2>/dev/null)

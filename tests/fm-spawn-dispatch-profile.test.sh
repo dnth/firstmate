@@ -320,6 +320,7 @@ run_spawn() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    HOME="${FM_TEST_HOME_OVERRIDE:-$HOME}" IS_SANDBOX="${FM_TEST_IS_SANDBOX:-}" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_ENDPOINT_LOG="$endpointlog" \
     FM_FAKE_TREEHOUSE_LOG="$treehouselog" FM_FAKE_OMP_ACK="${FM_TEST_OMP_ACK:-}" \
@@ -1840,6 +1841,38 @@ test_claude_omits_config_dir_prefix_when_unset() {
   pass "claude omits the config-dir prefix when firstmate runs with the single-store default"
 }
 
+test_claude_root_sandbox_launch_is_unattended() {
+  local rec id out status launch sandbox_home project_key
+  id=$(profile_id profile-claude-root-sandbox-z18b)
+  rec=$(make_spawn_case profile-claude-root-sandbox claude "$id")
+  read_case_record "$rec"
+  sandbox_home="$CASE_DIR/account-home"
+  mkdir -p "$sandbox_home"
+
+  out=$(FM_TEST_HOME_OVERRIDE="$sandbox_home" FM_TEST_IS_SANDBOX=1 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "sandboxed Claude spawn should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "IS_SANDBOX=1 CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
+    "sandboxed Claude launch did not carry the root bypass marker into the pane"
+  project_key=$(cd "$WT_DIR" && pwd -P)
+  jq -e --arg project "$project_key" '
+    .hasCompletedOnboarding == true
+    and .projects[$project].hasTrustDialogAccepted == true
+    and .projects[$project].hasCompletedProjectOnboarding == true
+  ' "$sandbox_home/.claude.json" >/dev/null \
+    || fail "sandboxed Claude spawn did not pre-accept the isolated project trust/onboarding prompts"
+  jq -e '
+    .skipDangerousModePermissionPrompt == true
+    and .attribution.commit == ""
+    and .attribution.pr == ""
+    and .attribution.sessionUrl == false
+  ' "$sandbox_home/.claude/settings.json" >/dev/null \
+    || fail "sandboxed Claude spawn did not pre-accept bypass mode and disable attribution"
+  pass "sandboxed Claude launches carry IS_SANDBOX and preseed every first-run prompt"
+}
+
 test_non_claude_harness_ignores_config_dir() {
   local rec id out status launch
   id=$(profile_id profile-codex-nocfgdir-z19)
@@ -1935,6 +1968,7 @@ test_batch_forwards_shared_profile_flags
 test_batch_forwards_omp_prewalk_target
 test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
+test_claude_root_sandbox_launch_is_unattended
 test_non_claude_harness_ignores_config_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch
 

@@ -556,6 +556,9 @@ worker_run_job() { # <account-home> <job-dir>
     "FM_ROOT_OVERRIDE=$root"
     FM_REMOTE_JOB_ACTIVE=1
   )
+  if fm_remote_job_runpod_sandbox_active "$root"; then
+    child_env+=(IS_SANDBOX=1)
+  fi
   if [ -n "${FM_REMOTE_JOB_PLATFORM_OVERRIDE:-}" ]; then
     child_env+=("FM_REMOTE_JOB_PLATFORM_OVERRIDE=$FM_REMOTE_JOB_PLATFORM_OVERRIDE")
   fi

@@ -94,9 +94,9 @@ fm_quota_auth_sources_for_profile() {
   esac
 }
 
-# Print the predictive secondmate fallback reason for <harness> <model>, or nothing when
+# Print the predictive configured-profile fallback reason for <harness> <model>, or nothing when
 # quota data is missing, unresolved, usable, or otherwise cannot prove a trigger.
-fm_quota_secondmate_fallback_reason() {
+fm_quota_profile_fallback_reason() {
   local harness=$1 model=$2 provider sources auth_json auth_reason json
   provider=$(fm_quota_provider_for_profile "$harness" "$model")
   [ -n "$provider" ] || return 0
@@ -172,4 +172,8 @@ fm_quota_secondmate_fallback_reason() {
             end
         end
     ' 2>/dev/null
+}
+
+fm_quota_secondmate_fallback_reason() {
+  fm_quota_profile_fallback_reason "$@"
 }

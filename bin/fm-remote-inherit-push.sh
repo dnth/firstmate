@@ -21,6 +21,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
+# shellcheck source=bin/fm-runpod-lib.sh
+. "$SCRIPT_DIR/fm-runpod-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 sha256_file() {
@@ -88,3 +90,12 @@ while IFS= read -r rel; do
 done <<EOF
 $ITEMS
 EOF
+
+# A RunPod home needs a provider-specific working harness route after the
+# primary-authoritative inherited surface has landed.
+# Reapplying it on every convergence push keeps later primary config changes
+# from silently routing pod crews back through OMP's broken OAuth callback.
+if fm_runpod_is_managed "$DATA" "$ID"; then
+  "$SCRIPT_DIR/fm-on.sh" "$ID" \
+    fm-remote-secondmate-control.sh runpod-crews "$ID" < /dev/null
+fi

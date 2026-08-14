@@ -239,6 +239,7 @@ doctor() {
     FM_FAKE_LAUNCH_AGENT_LOG="$CASE_HOME/Library/Logs/$LABEL.log" \
     FM_REMOTE_JOB_PLATFORM_OVERRIDE="${CASE_PLATFORM_OVERRIDE-}" \
     FM_REMOTE_JOB_ACTIVE="${CASE_REMOTE_JOB_ACTIVE-1}" \
+    IS_SANDBOX="${CASE_IS_SANDBOX-}" \
     FM_DURABLE_ROOT_FILE="${CASE_DURABLE_ROOT_FILE-}" \
     FM_FAKE_ACCOUNT_HOME="${CASE_ACCOUNT_HOME-$CASE_HOME}" \
     "$ROOT/bin/fm-remote-doctor.sh" "$@" 2>&1
@@ -705,6 +706,16 @@ assert_contains "$DOCTOR_OUT" "parity omp=$CASE_BIN/omp" "a resolved parity harn
 assert_contains "$DOCTOR_OUT" 'check parity-toolchain=ok:' "a complete parity toolchain was not confirmed"
 assert_not_contains "$DOCTOR_OUT" 'parity gh=MISSING' "a resolved parity tool was reported missing"
 pass "a host carrying the whole parity toolchain passes the parity tier"
+
+CASE_IS_SANDBOX=1
+doctor --fix --parity
+expect_code 0 "$DOCTOR_RC" "a RunPod parity note changed the readiness verdict"
+assert_contains "$DOCTOR_OUT" 'note omp-oauth=' \
+  "a RunPod parity report omitted the known OMP OAuth callback limitation"
+assert_contains "$DOCTOR_OUT" 'EADDRINUSE' \
+  "the RunPod OMP OAuth note omitted the observed failure signature"
+unset CASE_IS_SANDBOX
+pass "RunPod parity reports the observed OMP OAuth limitation without failing readiness"
 
 # --- the durable-home check is what makes a login survive pod replacement ----
 #

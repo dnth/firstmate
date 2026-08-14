@@ -101,6 +101,8 @@ bin/fm-runpod.sh wake <id> --min-vram 24
 
 After a volume's first wake reaches ready, log each runtime in once: use `bin/fm-runpod.sh ssh <id>`, run each harness's own login, and run `gh auth login`.
 SSH also becomes available before toolchain provisioning finishes, so it can be used from another terminal to diagnose a wake that is still waiting.
+Boot places `$HOME/.local/bin` first in the durable account's `.profile` and `.bashrc`, and reconciles retained `.bash_profile` or `.bash_login` files that take precedence for Bash login shells, so bare SSH login and interactive shells resolve the same installed harnesses as the fixed remote entrypoint.
+Conventional startup-file symlinks whose resolved regular-file targets remain inside the durable account home are preserved and reconciled at their targets; broken links, non-regular targets, and links escaping that home are refused.
 Readiness verifies executable presence and the durable account home, but deliberately neither detects nor gates vendor login state.
 Those logins land on the volume, so later wakes and replacement pods need none of it again.
 If provisioning or a later boot step fails, the pod stays running and wake remains unready; connect from another terminal with `bin/fm-runpod.sh ssh <id>` and inspect `/workspace/persistent-runtime/boot.log`.
@@ -114,6 +116,9 @@ bin/fm-spawn.sh <id> --secondmate
 ```
 
 The first wake provisions the toolchain before this step, so the code root and required tools are already in place.
+Every RunPod home converges its crew dispatch after inherited configuration lands.
+Its `config/crew-harness` selects Codex as the genuine primary, and `config/crew-harness-fallback` selects Claude only when the supported predictive fallback trigger proves Codex unavailable or at zero effective headroom.
+That provider-owned layer affects crews only; the remote second-mate agent stays on the separately configured secondmate harness, which should remain Claude on this host.
 
 From here it is an ordinary remote second mate.
 Route work to it, steer it, and hand it backlog with the normal commands.
@@ -144,6 +149,29 @@ The provider treats `provisioned`, `waking`, `suspending`, and `suspended` as do
 Startup health polling, startup convergence, `bin/fm-config-push.sh`, and reply-source arming all skip a dormant route instead.
 None of them creates compute, and none of them reports the deliberate no-host state as a fault.
 An unrecognized lifecycle value is not dormant, so corrupt metadata surfaces as an ordinary route failure instead of repeatedly creating compute.
+The parent watcher also recognizes those lifecycle records directly and absorbs a dormant route on the long pause cadence without probing its absent beacon or escalating it as a possible wedge.
+
+### Endpoint stalls and never-ready recovery
+
+Wake uses one 20-minute default deadline for volume verification, endpoint publication, host-key discovery, and SSH bootstrap.
+`FM_RUNPOD_WAKE_TIMEOUT` can override that bound for tests or an operator with a known provider environment.
+When RunPod does not publish an SSH endpoint before the deadline, the error reports both the provider's `desiredStatus` and `status`, preserves the pod for inspection, and names the guarded recovery command.
+
+If that volume has never reached ready, terminate the stuck billable pod while retaining the volume:
+
+```sh
+bin/fm-runpod.sh recover-stuck <id> --yes
+```
+
+The command requires `ever_ready=0`, explicit `--yes` confirmation, a provider endpoint read, and bounded SSH checks against both the published endpoint and any endpoint retained in the local record.
+It prints the provider, current-endpoint, recorded-endpoint, and SSH evidence before acting, and it refuses when any endpoint is reachable or indeterminate.
+SSH exit 255 is indeterminate because it can represent authentication, host-key, configuration, or transport failure; it is never accepted as proof of unreachability.
+RunPod can publish an endpoint between any provider read and a later deletion, so this human-gated command does not claim race-free endpoint proof; ambiguity refusal and explicit confirmation are the accepted safety boundary rather than additional automated polling.
+Only after those guards does it delete the recorded pod, clear its stale endpoint, and return the retained volume to `provisioned`.
+It refuses once the volume has ever reached ready because an unreachable ready host may contain running or completed work whose outcome is unknown.
+Use the ordinary `sleep` path only after reconciling that work on the same host.
+Wake does not automatically create a replacement after an endpoint stall, even when the failed never-ready pod later becomes `TERMINATED` or absent, because the failed paid resource and its provider state remain the operator's evidence.
+Run `recover-stuck --yes` to acknowledge and clear that attempt before another ordinary wake can create replacement compute.
 
 ## Suspending safely
 
@@ -190,6 +218,8 @@ Boot first establishes the diagnostic SSH channel:
 2. Restore or create the volume-backed SSH host key, refusing to expose a container-local replacement if that identity cannot be persisted.
 3. Authorize the configured account key and start sshd.
 
+Boot also writes the durable login-shell PATH, the `IS_SANDBOX=1` shell environment, and a root-owned provider marker that the empty-environment doctor and remote-job boundaries validate before propagating `IS_SANDBOX=1`.
+
 Only after sshd starts does first boot provision the remaining noninteractive prerequisites:
 
 1. Install a current Node LTS and `bun`, the runtimes the rest of the toolchain needs.
@@ -205,7 +235,9 @@ The browser's shared libraries are the exception: they are container-local syste
 Boot publishes the durable browser at `/usr/bin/google-chrome` through a wrapper and then runs it, because a browser that exists but cannot start is a failure that belongs at provisioning time rather than in the middle of a worker's page.
 The wrapper adds `--no-sandbox --disable-dev-shm-usage` only when the pod runs as root, which keeps root-only Chrome startup policy at the launch seam without changing non-root calls.
 
-It then links the durable tools and fixed remote entrypoint and hands readiness to `bin/fm-remote-doctor.sh --fix --parity`.
+It then links the durable tools and fixed remote entrypoint, prepares Claude's durable unattended root state, and hands readiness to `bin/fm-remote-doctor.sh --fix --parity`.
+Claude setup preserves unrelated operator JSON keys while setting completed onboarding and a theme, accepting each launched worktree's trust and project-onboarding prompts, accepting the bypass-permissions warning, and disabling commit, PR, and session-URL attribution.
+Every Claude launch in the pod carries `IS_SANDBOX=1` into the long-lived backend pane, including the remote second mate and any Claude fallback crew.
 The doctor is the single owner of what "ready for a remote second mate" means, and on Linux it starts the remote job worker and the headless Herdr `fm-remote` server itself, with no GUI or Aqua session involved.
 Nothing in the boot script re-states the doctor's verdict; it installs toward that set and lets the doctor decide.
 Every failure after sshd starts is written to the volume-backed boot log and leaves the pod open for inspection.
@@ -213,6 +245,7 @@ Wake still requires the separate `boot.ready` sentinel written only after provis
 
 Durable provisioning is idempotent and volume-scoped.
 A marker records only the volume-resident contract, while every replacement pod re-ensures its container-local system packages before trusting it.
+A contract-current retained checkout that predates a newly required tracked boot helper is cleanly fast-forwarded to obtain that helper without changing the installed-tool contract.
 A raised contract version re-provisions the durable tools exactly once.
 `bin/fm-runpod-pod-boot.sh --check` prints the plan as one `ensure=<item>` line per step and touches nothing, which is how the contract is tested with no pod.
 
@@ -225,10 +258,17 @@ Credentials are never copied from the primary, never injected as pod environment
 The doctor checks that the account home is under the declared durable root, which is the structural guarantee that a completed login is once per volume.
 It deliberately does not try to read or report whether a given harness is logged in: that verdict would come from vendor-specific credential files this repository cannot prove against the real harnesses, and a check that cannot be proven is worse than an honest human step.
 
+OMP's OAuth callback login is a known exception on the current RunPod image.
+The live pilot observed `omp auth-broker login <provider>` and its `--via` form fail with `EADDRINUSE` while binding the localhost callback, even though a plain Node process could bind loopback on the same pod.
+The precise cause has not been established, so double binding, dual-stack behavior, and the Bun or OMP version remain hypotheses for a future operator session on a live pod.
+Use the default Codex subscription route, its Claude subscription fallback, or `OPENCODE_API_KEY` with an `opencode-go/deepseek` model instead.
+On a RunPod parity check, `bin/fm-remote-doctor.sh` prints this limitation as an informational `note omp-oauth=` line without changing readiness.
+
 `--harness-npm` remains available for an optional extra npm harness beyond the parity set; the parity set is installed either way, so leaving it unset is the normal case.
 
 ## Verification
 
+[`verification/runpod-secondmates.md`](verification/runpod-secondmates.md) records the dated portable evidence and its no-live-pod boundary.
 The portable tests drive the real provider against a stateful mocked RunPod REST double and a faked SSH boundary, so no account, key, or paid resource is involved:
 
 ```sh
@@ -237,7 +277,7 @@ bin/fm-test-run.sh tests/fm-runpod-routing.test.sh
 bin/fm-test-run.sh tests/fm-runpod-pod-boot.test.sh
 ```
 
-The lifecycle suite covers idempotent provision and wake, exactly one pod under concurrent wakes, CPU and GPU exclusivity, RunPod's 40 GB container-disk limit, endpoint refresh with a stable pinned host identity, every sleep guard, volume retention, and the guarded destroy path.
-The routing suite covers the supervision, convergence, and delivery wiring, including that an ordinary remote route and a local second mate are unaffected.
+The lifecycle suite covers idempotent provision and wake, exactly one pod under concurrent wakes, CPU and GPU exclusivity, RunPod's 40 GB container-disk limit, endpoint refresh with a stable pinned host identity, provider-state stall diagnosis, never-ready recovery, every sleep guard, volume retention, and the guarded destroy path.
+The routing suite covers provider-owned crew dispatch, dormant watcher handling, supervision, convergence, and delivery wiring, including that an ordinary remote route and a local second mate are unaffected.
 
 Real provisioning against a RunPod account remains an operator-run smoke test and is not claimed by the repository tests.

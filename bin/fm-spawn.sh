@@ -272,6 +272,8 @@ PREWALK_DISABLE_SUPPORTED=0
 OMP_PREWALK_FLAG_PROBLEM=
 SECONDMATE_MODEL_SOURCE=
 SECONDMATE_FALLBACK_REASON=
+CREW_MODEL_SOURCE=
+CREW_FALLBACK_REASON=
 BACKEND_ARG=
 MODE=
 YOLO=
@@ -1134,6 +1136,38 @@ case "$ARG3" in
       fi
       HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
       harness_src='config/crew-harness'
+      CREW_MODEL_SOURCE=
+      CREW_FALLBACK_REASON=
+      CREW_FALLBACK_PROFILE=$("$SCRIPT_DIR/fm-harness.sh" crew-fallback-profile) || exit 1
+      CREW_FALLBACK_HARNESS=
+      CREW_FALLBACK_MODEL=
+      CREW_FALLBACK_EFFORT=
+      if [ -n "$CREW_FALLBACK_PROFILE" ]; then
+        IFS=$'\t' read -r CREW_FALLBACK_HARNESS CREW_FALLBACK_MODEL CREW_FALLBACK_EFFORT <<< "$CREW_FALLBACK_PROFILE"
+        [ "$CREW_FALLBACK_MODEL" != - ] || CREW_FALLBACK_MODEL=
+        [ "$CREW_FALLBACK_EFFORT" != - ] || CREW_FALLBACK_EFFORT=
+      fi
+      if [ -n "$CREW_FALLBACK_HARNESS" ]; then
+        case "$CREW_FALLBACK_HARNESS" in
+          claude|codex|opencode|pi|pi-signed|omp|grok|kimi) ;;
+          *) echo "error: config/crew-harness-fallback names an unverified harness: $CREW_FALLBACK_HARNESS" >&2; exit 1 ;;
+        esac
+        CREW_MODEL_SOURCE=primary
+        if [ "$MODEL_SET" -eq 0 ]; then
+          CREW_FALLBACK_REASON=$(fm_quota_profile_fallback_reason "$HARNESS" "$MODEL" || true)
+        fi
+        case "$CREW_FALLBACK_REASON" in
+          provider_unavailable|quota_exhausted)
+            HARNESS=$CREW_FALLBACK_HARNESS
+            harness_src='config/crew-harness-fallback'
+            CREW_MODEL_SOURCE=fallback
+            [ -z "$CREW_FALLBACK_MODEL" ] || MODEL=$CREW_FALLBACK_MODEL
+            if [ "$EFFORT_SET" -eq 0 ] && [ -n "$CREW_FALLBACK_EFFORT" ]; then
+              EFFORT=$CREW_FALLBACK_EFFORT
+            fi
+            ;;
+        esac
+      fi
     fi
     if [ "$KIND" != secondmate ]; then
       LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
@@ -2755,6 +2789,17 @@ if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
   }
 fi
 
+# RunPod's root account is explicitly marked IS_SANDBOX=1 by pod boot.
+# Prepare Claude's durable onboarding and project trust after the isolated
+# worktree is authoritative, then carry the marker into the long-lived backend
+# pane because its daemon may predate this SSH process's environment.
+if [ "$HARNESS" = claude ] && [ "${IS_SANDBOX:-}" = 1 ]; then
+  "$SCRIPT_DIR/fm-claude-headless-setup.sh" --project "$WT" || {
+    echo "error: Claude's unattended root-sandbox state could not be prepared for $WT" >&2
+    exit 1
+  }
+fi
+
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
@@ -3086,6 +3131,10 @@ META_WINDOW=$T
     echo "secondmate_model_source=$SECONDMATE_MODEL_SOURCE"
     [ "$SECONDMATE_MODEL_SOURCE" != fallback ] || echo "secondmate_fallback_reason=$SECONDMATE_FALLBACK_REASON"
   fi
+  if [ "$KIND" != secondmate ] && [ -n "$CREW_MODEL_SOURCE" ]; then
+    echo "crew_model_source=$CREW_MODEL_SOURCE"
+    [ "$CREW_MODEL_SOURCE" != fallback ] || echo "crew_fallback_reason=$CREW_FALLBACK_REASON"
+  fi
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   if [ "$HARNESS" = omp ]; then
     echo "omp_bin=$OMP_BIN_CANON"
@@ -3163,6 +3212,9 @@ LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 # an unset value is the single-store default and needs no prefix.
 if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+fi
+if [ "$HARNESS" = claude ] && [ "${IS_SANDBOX:-}" = 1 ]; then
+  LAUNCH="IS_SANDBOX=1 $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
