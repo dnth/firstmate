@@ -66,12 +66,36 @@ network_pool="$TMP_ROOT/network-volume/treehouse"
 local_pool="$TMP_ROOT/local-treehouse"
 mkdir -p "$network_pool" "$local_pool"
 printf 'max_trees = 1\nroot = "%s"\n' "$network_pool" > "$REPO/treehouse.toml"
+repo_config=$(cat "$REPO/treehouse.toml")
+local_acquired=$(cd "$REPO" && IS_SANDBOX=1 FM_TREEHOUSE_LOCAL_ROOT="$local_pool" \
+  "$ROOT/bin/fm-treehouse-get.sh" --lease --lease-holder local-first) \
+  || fail "the repository Treehouse config was not routed to the RunPod-local pool"
+case "$local_acquired" in
+  "$local_pool"/.treehouse/*) ;;
+  *) fail "the repository Treehouse config acquired outside the RunPod-local pool: $local_acquired" ;;
+esac
+[ "$(cat "$REPO/treehouse.toml")" = "$repo_config" ] \
+  || fail "routing the repository Treehouse config changed the project copy"
 if (cd "$REPO" && IS_SANDBOX=1 FM_TREEHOUSE_LOCAL_ROOT="$local_pool" \
-  "$ROOT/bin/fm-treehouse-get.sh" --lease --lease-holder wrong-root) >/dev/null 2>&1; then
-  fail "a repository Treehouse root bypassed the required RunPod-local pool"
+  "$ROOT/bin/fm-treehouse-get.sh" --lease --lease-holder pool-limit) >/dev/null 2>&1; then
+  fail "the routed acquisition discarded the repository max_trees setting"
 fi
 [ ! -d "$network_pool/.treehouse" ] \
-  || fail "the rejected repository root created a pool on network storage"
+  || fail "the repository Treehouse root created a pool on network storage"
+
+rm -rf -- "$local_pool"
+mkdir -p "$local_pool"
+local_retry=$(cd "$REPO" && IS_SANDBOX=1 FM_TREEHOUSE_LOCAL_ROOT="$local_pool" \
+  "$ROOT/bin/fm-treehouse-get.sh" --lease --lease-holder local-retry) \
+  || fail "the replacement pod could not reconcile its exact missing worktree registration"
+[ "$local_retry" = "$local_acquired" ] \
+  || fail "the replacement pod acquired $local_retry instead of its recovered local slot $local_acquired"
+[ -d "$first" ] || fail "reconciling a missing local registration removed an existing worktree"
+git -C "$REPO" worktree list --porcelain | grep -Fqx "worktree $first" \
+  || fail "reconciling a missing local registration removed another registration"
+(cd "$REPO" && IS_SANDBOX=1 FM_TREEHOUSE_LOCAL_ROOT="$local_pool" \
+  "$ROOT/bin/fm-treehouse-command.sh" return --if-lease-holder local-retry "$local_retry") >/dev/null \
+  || fail "the routed local lease could not be returned"
 
 (cd "$REPO" && treehouse return --if-lease-holder retry "$second") >/dev/null \
   || fail "the recovered lease could not be returned"

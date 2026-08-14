@@ -836,7 +836,7 @@ spawn_omp_abort_clean_unchanged_worktree() {  # <context>
   if [ -z "$OMP_ABORT_INITIAL_HEAD" ] || [ "$current_head" != "$OMP_ABORT_INITIAL_HEAD" ] \
     || ! fm_pool_worktree_clean "$WT"; then
     echo "warning: $context found work to preserve in $WT" >&2
-  elif (cd "$PROJ_ABS" && treehouse return --force "$WT" >/dev/null 2>&1); then
+  elif (cd "$PROJ_ABS" && "$SCRIPT_DIR/fm-treehouse-command.sh" return --force "$WT" >/dev/null 2>&1); then
     [ -z "${TASK_TMP:-}" ] || rm -rf "$TASK_TMP"
     rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
       "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" "$STATE/$ID.omp-started"
@@ -850,7 +850,7 @@ spawn_abort_cleanup() {
   case "$PREWALK_ABORT_PHASE" in
     lease)
       PREWALK_ABORT_PHASE=none
-      if ! (cd "$PROJ_ABS" && treehouse return "$WT" >/dev/null 2>&1); then
+      if ! (cd "$PROJ_ABS" && "$SCRIPT_DIR/fm-treehouse-command.sh" return "$WT" >/dev/null 2>&1); then
         echo "warning: OMP preflight could not return its leased worktree $WT" >&2
       fi
       ;;

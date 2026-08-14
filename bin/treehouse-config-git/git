@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -u
+
+OVERLAY_REPO=${FM_TREEHOUSE_CONFIG_OVERLAY_REPO:?}
+SOURCE_REPO=${FM_TREEHOUSE_CONFIG_SOURCE_REPO:?}
+DOWNSTREAM_GIT=${FM_TREEHOUSE_CONFIG_DOWNSTREAM_GIT:?}
+
+if [ "$PWD" = "$OVERLAY_REPO" ]; then
+  if [ "$#" -eq 2 ] && [ "$1" = rev-parse ] && [ "$2" = --show-toplevel ]; then
+    printf '%s\n' "$OVERLAY_REPO"
+    exit 0
+  fi
+  cd "$SOURCE_REPO" || exit 1
+fi
+
+exec "$DOWNSTREAM_GIT" "$@"

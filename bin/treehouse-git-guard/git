@@ -134,58 +134,61 @@ if [ "${1:-}" = worktree ] && [ "${2:-}" = add ]; then
       "$target" >> "$ERROR_FILE"
     exit 42
   fi
+  worktrees_file="$COMPLETE_FILE.worktrees"
+  registered=0
+  if "$REAL_GIT" -C "$PWD" worktree list --porcelain -z > "$worktrees_file" 2>/dev/null; then
+    while IFS= read -r -d '' line; do
+      case "$line" in
+        "worktree $target") registered=1; break ;;
+      esac
+    done < "$worktrees_file"
+  else
+    unsafe_target=0
+    case "$target" in
+      *$'\n'*|*$'\r'*|*$'\t'*) unsafe_target=1 ;;
+    esac
+    if [ "$unsafe_target" -eq 1 ] \
+      || printf '%s' "$target" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+      printf 'error: refusing pooled worktree acquisition because this Git cannot verify control-byte paths safely\n' \
+        >> "$ERROR_FILE"
+      exit 42
+    fi
+    "$REAL_GIT" -C "$PWD" worktree list --porcelain > "$worktrees_file" || {
+      printf 'error: refusing pooled worktree acquisition because registered worktrees could not be verified\n' \
+        >> "$ERROR_FILE"
+      exit 42
+    }
+    if grep -q '^worktree "' "$worktrees_file"; then
+      printf 'error: refusing pooled worktree acquisition because this Git cannot verify quoted worktree paths safely\n' \
+        >> "$ERROR_FILE"
+      exit 42
+    fi
+    while IFS= read -r line; do
+      case "$line" in
+        "worktree $target") registered=1; break ;;
+      esac
+    done < "$worktrees_file"
+  fi
+  if [ "$registered" -eq 1 ]; then
+    if [ -e "$target" ] || [ -L "$target" ]; then
+      printf 'error: refusing pooled worktree acquisition because the existing target is already registered: %s\n' \
+        "$target" >> "$ERROR_FILE"
+      exit 42
+    fi
+    "$REAL_GIT" -C "$PWD" worktree remove --force "$target" || {
+      printf 'error: could not remove the exact missing worktree registration before retry: %s\n' \
+        "$target" >> "$ERROR_FILE"
+      exit 42
+    }
+  fi
   if [ -e "$target" ] || [ -L "$target" ]; then
     if [ -L "$target" ] || [ ! -d "$target" ]; then
       printf 'error: refusing pooled worktree acquisition because the existing target is not a directory: %s\n' \
         "$target" >> "$ERROR_FILE"
       exit 42
     fi
-    worktrees_file="$COMPLETE_FILE.worktrees"
-    registered=0
-    if "$REAL_GIT" -C "$PWD" worktree list --porcelain -z > "$worktrees_file" 2>/dev/null; then
-      while IFS= read -r -d '' line; do
-        case "$line" in
-          "worktree $target") registered=1; break ;;
-        esac
-      done < "$worktrees_file"
-    else
-      unsafe_target=0
-      case "$target" in
-        *$'\n'*|*$'\r'*|*$'\t'*) unsafe_target=1 ;;
-      esac
-      if [ "$unsafe_target" -eq 1 ] \
-        || printf '%s' "$target" | LC_ALL=C grep -q '[[:cntrl:]]'; then
-        printf 'error: refusing pooled worktree acquisition because this Git cannot verify control-byte paths safely\n' \
-          >> "$ERROR_FILE"
-        exit 42
-      fi
-      "$REAL_GIT" -C "$PWD" worktree list --porcelain > "$worktrees_file" || {
-        printf 'error: refusing pooled worktree acquisition because registered worktrees could not be verified\n' \
-          >> "$ERROR_FILE"
-        exit 42
-      }
-      if grep -q '^worktree "' "$worktrees_file"; then
-        printf 'error: refusing pooled worktree acquisition because this Git cannot verify quoted worktree paths safely\n' \
-          >> "$ERROR_FILE"
-        exit 42
-      fi
-      while IFS= read -r line; do
-        case "$line" in
-          "worktree $target") registered=1; break ;;
-        esac
-      done < "$worktrees_file"
-    fi
-    if [ "$registered" -eq 1 ]; then
-      printf 'error: refusing pooled worktree acquisition because the existing target is already registered: %s\n' \
-        "$target" >> "$ERROR_FILE"
-      exit 42
-    fi
     rm -rf -- "$target" || {
       printf 'error: could not remove interrupted unregistered worktree target: %s\n' "$target" >> "$ERROR_FILE"
-      exit 42
-    }
-    "$REAL_GIT" -C "$PWD" worktree prune || {
-      printf 'error: could not prune interrupted worktree metadata before retry\n' >> "$ERROR_FILE"
       exit 42
     }
   fi
