@@ -357,16 +357,16 @@ provision_only() {  # <world> [harness]
   local w=$1 harness=${2:-}
   mkdir -p "$w/volume/persistent-runtime"
   : > "$w/volume/persistent-runtime/boot.log"
+  rm -f "$w/volume/persistent-runtime/boot.ready"
   (
     world_env "$w" "$harness"
     timeout 60 bash "$BOOT" >/dev/null 2>&1 &
     boot_pid=$!
     for _ in $(seq 1 300); do
-      grep -qxF "harness=$harness" "$w/volume/persistent-runtime/toolchain.provisioned" 2>/dev/null && break
+      [ -s "$w/volume/persistent-runtime/boot.ready" ] && break
       kill -0 "$boot_pid" 2>/dev/null || break
       sleep 0.1
     done
-    sleep 1
     kill "$boot_pid" 2>/dev/null || true
     wait "$boot_pid" 2>/dev/null || true
   )
