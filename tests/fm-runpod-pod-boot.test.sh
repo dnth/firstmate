@@ -318,9 +318,7 @@ SH
 printf 'sshd start\n' >> "$FM_FAKE_CALLS"
 exit 0
 SH
-  for t in unzip; do
-    printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/$t"
-  done
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/unzip"
   cat > "$fakebin/pgrep" <<'SH'
 #!/usr/bin/env bash
 # No daemon is running in a fresh test world. Returning not-found forces the
