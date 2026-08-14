@@ -138,6 +138,11 @@ The bounded mutation-boundary output was:
 The installed broker uses one bearer allow-list for both reads and writes, so the token itself has no credential-read-only scope.
 That evidence is why the RunPod tunnel terminates at `bin/fm-omp-auth-broker-readonly-proxy.mjs` instead of the unrestricted broker port.
 
+OMP 17.3.4 compatibility was verified on 2026-08-14 against a real canonical workstation broker and the fixed facade.
+The canonical `GET /v1/healthz` body, including its `version`, passed through unchanged; adding a facade-owned `mode` field was rejected by OMP's strict health schema, so the facade now identifies itself only with `X-Fm-Auth-Broker-Facade: credential-read-only`.
+`omp auth-broker status --json` returned `"ok": true` through the facade, the readiness probe accepted the facade and rejected the raw broker, disallowed writes returned HTTP 403, and unauthenticated credential reads returned HTTP 401.
+
 The mocked regression suite proves the active boundary without a live pod or network account.
 It installs the pod bearer through the boot script's public interface and checks mode 0600, exercises the public remote launch path and OMP pane-launch construction, verifies exact versioned health-response passthrough and facade-only readiness identity, rejects unauthenticated requests, verifies that credential upload and disable never reach the fake canonical broker, permits broker-side refresh, and forces two SSH drops before confirming a third tunnel attempt with the required keepalive flags.
-The live pod end-to-end runbook remains documented in [`runpod-secondmates.md`](../runpod-secondmates.md#live-end-to-end-verification-at-the-next-pod-awake-window) and was not executed because the pod was suspended and waking it solely for validation would incur cost.
+The captain separately confirmed the fixed committed code during an approved live RunPod smoke: `omp auth-broker status --json` returned `"ok": true`, and the two OMP crews returned `claude-broker-ok` and `gpt-broker-ok` through the ordinary guarded lifecycle.
+The document-phase verification did not wake a pod; the reusable operator runbook remains in [`runpod-secondmates.md`](../runpod-secondmates.md#live-end-to-end-verification).

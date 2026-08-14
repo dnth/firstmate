@@ -120,6 +120,7 @@ const server = createServer(async (request, response) => {
     for (const [name, value] of upstreamResponse.headers) {
       if (!hopByHopHeaders.has(name.toLowerCase())) responseHeaders[name] = value;
     }
+    // OMP validates the canonical health body strictly, so facade identity belongs only in a response header.
     if (isHealthz) responseHeaders["x-fm-auth-broker-facade"] = "credential-read-only";
     response.writeHead(upstreamResponse.status, responseHeaders);
     if (upstreamResponse.body) Readable.fromWeb(upstreamResponse.body).pipe(response);
