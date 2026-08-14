@@ -21,7 +21,8 @@ RECOVERY_WORKER_PID=
 mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 trap 'if [ -n "$OTHER_PID" ]; then kill "$OTHER_PID" 2>/dev/null || true; fi; if [ -n "$RECOVERY_WORKER_PID" ]; then kill "$RECOVERY_WORKER_PID" 2>/dev/null || true; fi; if [ -f "$STATE_ROOT/worker.pid" ]; then kill "$(cat "$STATE_ROOT/worker.pid")" 2>/dev/null || true; fi; rm -rf -- "$TMP_ROOT"' EXIT
 
-cp "$ROOT/bin/fm-remote-job-lib.sh" "$ROOT/bin/fm-remote-job-worker.sh" "$ROOT/bin/fm-pool-lib.sh" \
+cp "$ROOT/bin/fm-remote-job-lib.sh" "$ROOT/bin/fm-remote-job-worker.sh" \
+  "$ROOT/bin/fm-pool-lib.sh" "$ROOT/bin/fm-treehouse-root-lib.sh" \
   "$ROOT/bin/fm-remote-delta-read.sh" "$REMOTE_ROOT/bin/"
 printf 'fixture\n' > "$REMOTE_ROOT/AGENTS.md"
 cat > "$REMOTE_ROOT/bin/fm-probe-job.sh" <<'SH'
@@ -211,6 +212,33 @@ assert_contains "$OUT" 'sandbox=1' "the provider-owned marker did not cross the 
 assert_contains "$OUT" "treehouse_root=$RUNPOD_TREEHOUSE_ROOT" "the validated local Treehouse root did not cross the worker child env -i boundary"
 fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the sandbox marker job could not be reaped"
 pass "the provider-owned RunPod marker crosses the worker child environment"
+
+assert_worker_treehouse_config_rejected() {  # <case>
+  local label=$1 job_id
+  fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-probe-job.sh </dev/null >/dev/null
+  job_id=$FM_REMOTE_JOB_ID
+  fm_remote_job_wait "$ACCOUNT_HOME" "$job_id" || fail "$FM_REMOTE_JOB_ERROR"
+  [ "$FM_REMOTE_JOB_EXIT" -eq 126 ] \
+    || fail "the strict worker accepted the $label Treehouse root assignment"
+  fm_remote_job_reap "$ACCOUNT_HOME" "$job_id" \
+    || fail "the rejected $label Treehouse job could not be reaped"
+}
+
+printf 'root = "%s"\nroot = "%s"\n' "$RUNPOD_TREEHOUSE_ROOT" "$RUNPOD_TREEHOUSE_ROOT" \
+  > "$ACCOUNT_HOME/.config/treehouse/config.toml"
+assert_worker_treehouse_config_rejected duplicate
+printf '"root" = "%s"\n' "$RUNPOD_TREEHOUSE_ROOT" \
+  > "$ACCOUNT_HOME/.config/treehouse/config.toml"
+assert_worker_treehouse_config_rejected quoted-key
+printf '"r\\u006fot" = "%s"\n' "$RUNPOD_TREEHOUSE_ROOT" \
+  > "$ACCOUNT_HOME/.config/treehouse/config.toml"
+assert_worker_treehouse_config_rejected escaped-key
+printf 'root = %s\n' "$RUNPOD_TREEHOUSE_ROOT" \
+  > "$ACCOUNT_HOME/.config/treehouse/config.toml"
+assert_worker_treehouse_config_rejected malformed
+printf 'root = "%s"\n' "$RUNPOD_TREEHOUSE_ROOT" \
+  > "$ACCOUNT_HOME/.config/treehouse/config.toml"
+pass "the RunPod worker retains strict root-assignment parsing"
 
 ACTIVE_SIDE_EFFECT="$TMP_ROOT/active-side-effect"
 FM_REMOTE_JOB_TIMEOUT=10

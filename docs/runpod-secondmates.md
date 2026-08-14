@@ -220,7 +220,7 @@ Treat it exactly like any other irreversible action.
 
 ## The pod's boot contract
 
-`bin/fm-runpod-pod-boot.sh` is the tracked boot script, sent to every pod base64-encoded in one environment variable and run as its start command.
+`bin/fm-runpod-pod-boot.sh` and its shared Treehouse-root helper are tracked as one combined shell payload, sent to every pod base64-encoded in one environment variable and run as its start command.
 The container image needs nothing from this repo preinstalled, and the boot contract is versioned with the code that creates the pod.
 
 Boot first establishes the diagnostic SSH channel:

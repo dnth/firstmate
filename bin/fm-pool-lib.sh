@@ -13,6 +13,11 @@
 # harness-noise allowlist filter through fm_pool_ignorable_porcelain_filter on
 # top of it rather than restating the exemption.
 
+FM_POOL_LIB_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+# shellcheck source=bin/fm-treehouse-root-lib.sh
+. "$FM_POOL_LIB_DIR/fm-treehouse-root-lib.sh"
+unset FM_POOL_LIB_DIR
+
 fm_pool_ignorable_porcelain_filter() {  # porcelain lines on stdin
   grep -vFx '?? treehouse.toml' || true
 }
@@ -62,47 +67,4 @@ fm_pool_worktree_idle() {  # <repo>
 $out
 EOF
   return 0
-}
-
-fm_pool_real_directory() {  # <absolute normalized directory>
-  local path=$1 physical
-  case "$path" in /*) ;; *) return 1 ;; esac
-  case "$path/" in *'/../'*|*'/./'*|*'//'*) return 1 ;; esac
-  [ -d "$path" ] && [ ! -L "$path" ] || return 1
-  physical=$(cd "$path" 2>/dev/null && pwd -P) || return 1
-  [ "$physical" = "$path" ]
-}
-
-fm_treehouse_local_pool_validate() {  # <pool-root>
-  local root=$1 child
-  fm_pool_real_directory "$root" || return 1
-  for child in .treehouse .firstmate-config; do
-    fm_pool_real_directory "$root/$child" || return 1
-  done
-}
-
-fm_treehouse_local_pool_prepare() {  # <pool-root>
-  local root=$1 child
-  fm_pool_real_directory "$root" || return 1
-  for child in .treehouse .firstmate-config; do
-    if [ ! -e "$root/$child" ] && [ ! -L "$root/$child" ]; then
-      mkdir -- "$root/$child" 2>/dev/null || {
-        [ -d "$root/$child" ] && [ ! -L "$root/$child" ] || return 1
-      }
-    fi
-  done
-  fm_treehouse_local_pool_validate "$root"
-}
-
-fm_treehouse_local_pool_prepare_directory() {  # <safe-parent> <child-name>
-  local parent=$1 name=$2 path
-  fm_pool_real_directory "$parent" || return 1
-  case "$name" in ''|.|..|*/*) return 1 ;; esac
-  path="$parent/$name"
-  if [ ! -e "$path" ] && [ ! -L "$path" ]; then
-    mkdir -- "$path" 2>/dev/null || {
-      [ -d "$path" ] && [ ! -L "$path" ] || return 1
-    }
-  fi
-  fm_pool_real_directory "$path"
 }

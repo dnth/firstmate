@@ -6,7 +6,6 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found"; exit 0; }
 command -v node >/dev/null 2>&1 || { echo "skip: node not found"; exit 0; }
 
 TMP_ROOT=$(fm_test_tmproot fm-treehouse-orphan-recovery)
@@ -20,6 +19,32 @@ git -C "$REPO" config user.email "tests@firstmate.invalid"
 printf 'fixture\n' > "$REPO/README.md"
 git -C "$REPO" add README.md
 git -C "$REPO" commit -qm "initial fixture"
+
+network_pool="$TMP_ROOT/network-volume/treehouse"
+local_pool="$TMP_ROOT/local-treehouse"
+overlay_fakebin="$TMP_ROOT/overlay-fakebin"
+mkdir -p "$network_pool" "$local_pool" "$overlay_fakebin"
+cat > "$overlay_fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+cat treehouse.toml
+SH
+chmod +x "$overlay_fakebin/treehouse"
+printf '\357\273\277"r\303\270ot" = "%s"\nmax_trees = 3\n' "$network_pool" \
+  > "$REPO/treehouse.toml"
+unicode_overlay=$(cd "$REPO" && PATH="$overlay_fakebin:$PATH" \
+  IS_SANDBOX=1 FM_TREEHOUSE_LOCAL_ROOT="$local_pool" \
+  "$ROOT/bin/fm-treehouse-command.sh" inspect) \
+  || fail "the BOM and Unicode-key overlay fixture could not be routed"
+assert_contains "$unicode_overlay" "root = \"$local_pool\"" \
+  "the overlay did not insert the RunPod-local root before a Unicode key"
+assert_contains "$unicode_overlay" "\"røot\" = \"$network_pool\"" \
+  "the overlay no longer preserved a non-root Unicode key"
+case "$unicode_overlay" in
+  *$'\357\273\277'*) fail "the overlay no longer strips the repository config BOM" ;;
+esac
+pass "the overlay retains its original BOM and Unicode-key handling"
+
+command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found"; exit 0; }
 printf 'max_trees = 2\nroot = "%s"\n' "$POOL_ROOT" > "$REPO/treehouse.toml"
 
 first=$(cd "$REPO" && "$ROOT/bin/fm-treehouse-get.sh" --lease --lease-holder first) \
@@ -62,8 +87,6 @@ if (cd "$registered_repo" && \
 fi
 [ -d "$registered" ] || fail "the guard deleted an already registered unusual-byte path"
 
-network_pool="$TMP_ROOT/network-volume/treehouse"
-local_pool="$TMP_ROOT/local-treehouse"
 mkdir -p "$network_pool" "$local_pool"
 printf 'max_trees = 1\n"root" = "%s"\n' "$network_pool" > "$REPO/treehouse.toml"
 repo_config=$(cat "$REPO/treehouse.toml")

@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Reproducible boot for a RunPod Linux container hosting one remote second mate.
 #
-# bin/fm-runpod.sh sends this exact file to every pod it creates, base64-encoded
-# in the FM_POD_BOOT_B64 environment variable, and makes the pod's start command
-# decode and exec it. The file is tracked, so the boot contract is versioned with
-# the code that creates the pod and the container image needs nothing from this
-# repo preinstalled.
+# bin/fm-runpod.sh sends this file after the shared Treehouse-root helper to
+# every pod it creates, base64-encoded in the FM_POD_BOOT_B64 environment
+# variable, and makes the pod's start command decode and exec the combined
+# payload. Both files are tracked, so the boot contract is versioned with the
+# code that creates the pod and the container image needs nothing from this repo
+# preinstalled.
 #
 # It does the smallest thing that makes the pod an ordinary SSH-reachable remote
 # second-mate host, then hands over:
@@ -71,6 +72,15 @@
 # This script runs as the container's PID 1 payload, so it must never exit while
 # the pod should stay up.
 set -u
+
+# A fresh pod receives this helper in the same boot payload. Direct invocations
+# from a checkout source the tracked copy instead.
+if ! declare -F fm_treehouse_root_prepare_runpod_boot >/dev/null; then
+  FM_TREEHOUSE_ROOT_LIB_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+  # shellcheck source=bin/fm-treehouse-root-lib.sh
+  . "$FM_TREEHOUSE_ROOT_LIB_DIR/fm-treehouse-root-lib.sh"
+  unset FM_TREEHOUSE_ROOT_LIB_DIR
+fi
 
 FM_VOLUME=${FM_VOLUME:-/workspace}
 FM_REMOTE_ROOT=${FM_REMOTE_ROOT:-$FM_VOLUME/firstmate}
@@ -209,96 +219,6 @@ toolchain_plan() {
   [ -z "$FM_POD_HARNESS_NPM" ] || plan_step "harness:$FM_POD_HARNESS_NPM"
 }
 
-ensure_treehouse_local_pool() {
-  local config_dir="$FM_ACCOUNT_HOME/.config/treehouse" config tmp local_root volume_root
-  case "$FM_TREEHOUSE_LOCAL_ROOT" in
-    /*) ;;
-    *) log "FATAL: the Treehouse pool root must be absolute"; return 1 ;;
-  esac
-  case "$FM_TREEHOUSE_LOCAL_ROOT" in
-    "$FM_VOLUME"|"$FM_VOLUME"/*)
-      log "FATAL: the Treehouse pool root must stay off the network volume"
-      return 1
-      ;;
-  esac
-  case "$FM_TREEHOUSE_LOCAL_ROOT" in
-    *[\"\\]*)
-      log "FATAL: the Treehouse pool root contains unsupported characters"
-      return 1
-      ;;
-  esac
-  if printf '%s' "$FM_TREEHOUSE_LOCAL_ROOT" | LC_ALL=C grep -q '[[:cntrl:]]'; then
-    log "FATAL: the Treehouse pool root contains unsupported characters"
-    return 1
-  fi
-  mkdir -p "$config_dir" "$FM_TREEHOUSE_LOCAL_ROOT" || return 1
-  [ ! -L "$FM_TREEHOUSE_LOCAL_ROOT" ] || {
-    log "FATAL: the Treehouse pool root must not be a symlink"
-    return 1
-  }
-  local_root=$(cd "$FM_TREEHOUSE_LOCAL_ROOT" && pwd -P) || return 1
-  [ "$local_root" = "$FM_TREEHOUSE_LOCAL_ROOT" ] || {
-    log "FATAL: the Treehouse pool root has symlinked ancestors"
-    return 1
-  }
-  volume_root=$(cd "$FM_VOLUME" && pwd -P) || return 1
-  case "$local_root" in
-    "$volume_root"|"$volume_root"/*)
-      log "FATAL: the Treehouse pool root must stay off the network volume"
-      return 1
-      ;;
-  esac
-  local child
-  for child in .treehouse .firstmate-config; do
-    if [ ! -e "$FM_TREEHOUSE_LOCAL_ROOT/$child" ] && [ ! -L "$FM_TREEHOUSE_LOCAL_ROOT/$child" ]; then
-      mkdir -- "$FM_TREEHOUSE_LOCAL_ROOT/$child" || return 1
-    fi
-    [ -d "$FM_TREEHOUSE_LOCAL_ROOT/$child" ] && [ ! -L "$FM_TREEHOUSE_LOCAL_ROOT/$child" ] \
-      && [ "$(cd "$FM_TREEHOUSE_LOCAL_ROOT/$child" && pwd -P)" = "$FM_TREEHOUSE_LOCAL_ROOT/$child" ] || {
-      log "FATAL: the Treehouse pool contains an unsafe managed directory"
-      return 1
-    }
-  done
-  config="$config_dir/config.toml"
-  [ ! -L "$config" ] || {
-    log "FATAL: the Treehouse user config is a symlink"
-    return 1
-  }
-  tmp=$(mktemp "$config_dir/.config.toml.XXXXXX") || return 1
-  {
-    printf 'root = "%s"\n' "$FM_TREEHOUSE_LOCAL_ROOT"
-    [ ! -f "$config" ] || awk '
-      function is_root_key(line, first, rest, end, key, tail, quote) {
-        sub(/^[[:space:]]*/, "", line)
-        first = substr(line, 1, 1)
-        quote = sprintf("%c", 39)
-        if (first == "\"" || first == quote) {
-          rest = substr(line, 2)
-          end = index(rest, first)
-          if (end == 0) return 0
-          key = substr(rest, 1, end - 1)
-          tail = substr(rest, end + 1)
-          if (tail !~ /^[[:space:]]*=/) return 0
-          if (first == "\"") {
-            gsub(/\\u0072|\\U00000072/, "r", key)
-            gsub(/\\u006[fF]|\\U0000006[fF]/, "o", key)
-            gsub(/\\u0074|\\U00000074/, "t", key)
-          }
-          return key == "root"
-        }
-        if (line !~ /^[A-Za-z0-9_-]+[[:space:]]*=/) return 0
-        key = line
-        sub(/[[:space:]]*=.*/, "", key)
-        return key == "root"
-      }
-      !is_root_key($0)
-    ' "$config"
-  } > "$tmp" || { rm -f -- "$tmp"; return 1; }
-  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
-  mv -f -- "$tmp" "$config" || { rm -f -- "$tmp"; return 1; }
-  log "configured Treehouse worktrees on local container storage"
-}
-
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # --- the durable account home ------------------------------------------------
@@ -391,16 +311,21 @@ ensure_runpod_sandbox_marker() {
 # bootstrap interface for installing the broker bearer while the rest of the
 # durable toolchain is still provisioning.
 install_boot_control() {
-  local source source_dir target tmp
+  local source source_dir helper target tmp
   source_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P) || return 1
   source=$source_dir/${BASH_SOURCE[0]##*/}
+  helper=$source_dir/fm-treehouse-root-lib.sh
   target=$FM_BOOT_CONTROL
   if [ "$source" = "$target" ]; then
     chmod 700 "$target" || return 1
     return 0
   fi
   tmp="$target.tmp.$$"
-  cp -f -- "$source" "$tmp" || { rm -f -- "$tmp"; return 1; }
+  if [ -f "$helper" ]; then
+    cat "$helper" "$source" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  else
+    cp -f -- "$source" "$tmp" || { rm -f -- "$tmp"; return 1; }
+  fi
   chmod 700 "$tmp" || { rm -f -- "$tmp"; return 1; }
   mv -f -- "$tmp" "$target" || { rm -f -- "$tmp"; return 1; }
 }
@@ -1091,7 +1016,7 @@ main() {
   # authorized key and every later login, must land on the volume.
   ensure_account_home || exit 1
   ensure_account_shell || exit 1
-  ensure_treehouse_local_pool || exit 1
+  fm_treehouse_root_prepare_runpod_boot || exit 1
   rm -f -- "$FM_BOOT_READY" || exit 1
 
   # SSH comes up FIRST, deliberately independent of provisioning. RunPod exposes

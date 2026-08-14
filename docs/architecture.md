@@ -154,6 +154,7 @@ For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved tas
 `fm-spawn.sh` also owns the base-freshness boundary for every ship and scout in a pooled Treehouse worktree: no worker starts from that worktree until it matches the fetched tip of origin's resolved default branch, and any unsafe or unverifiable base stops the spawn.
 Treehouse exposes no pre-reset hook, so Firstmate rejects non-ancestor slots through its guarded Git path and independently inspects append-only reflog transitions after non-interactive acquisition; every caller is withheld from the acquired path until that check passes, while a bypass is contained by preserving the lease for manual inspection.
 The headers in `bin/fm-treehouse-get.sh`, `bin/treehouse-git-guard/git`, and `bin/fm-pool-lib.sh` own the exact acquisition, ancestry, and shared clean-slot contracts.
+`bin/fm-treehouse-root-lib.sh` is the single owner of RunPod Treehouse-root parsing, physical containment, and idempotent managed-directory creation across boot, remote work, pool, command, and Git-guard callers.
 `fm-spawn.sh` then revalidates that the acquired slot is clean and fast-forwardable before launch, and [`tests/fm-spawn-pool-base-freshen.test.sh`](../tests/fm-spawn-pool-base-freshen.test.sh) owns the portable regression coverage.
 Before OMP reuses a pooled task worktree, `bin/fm-omp-process-lib.sh` clears prior runtime markers only after both recorded owners are proven absent; live or unverifiable ownership preserves the lease and stops the spawn.
 

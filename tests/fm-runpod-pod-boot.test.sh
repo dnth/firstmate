@@ -343,7 +343,7 @@ world_env() {  # <world> [harness]; exports into the calling subshell
   export PATH="$w/fakebin:$w/basebin"
   export HOME="$w/home"
   export FM_VOLUME="$w/volume"
-  export FM_TREEHOUSE_LOCAL_ROOT="$w/local-treehouse"
+  export FM_TREEHOUSE_LOCAL_ROOT="${FM_TEST_TREEHOUSE_LOCAL_ROOT:-$w/local-treehouse}"
   export FM_REMOTE_ORIGIN="$w/origin"
   export FM_FAKE_CALLS="$w/calls.log"
   export FM_FAKE_EPHEMERAL_BIN="$w/fakebin"
@@ -402,9 +402,33 @@ provision_idempotent() {  # <world> [harness]
   )
 }
 
+w_nested=$(new_world nested-treehouse-root)
+FM_TEST_TREEHOUSE_LOCAL_ROOT="$w_nested/missing/parent/local-treehouse" \
+  provision_only "$w_nested"
+assert_present "$w_nested/missing/parent/local-treehouse/.treehouse" \
+  "boot no longer created a local Treehouse root through missing parents"
+assert_present "$w_nested/missing/parent/local-treehouse/.firstmate-config" \
+  "boot no longer created managed Treehouse directories through missing parents"
+pass "the pre-SSH Treehouse setup retains recursive missing-parent creation"
+
+w_pre_ssh=$(new_world pre-ssh-treehouse-refusal)
+pre_ssh_out=$(
+  world_env "$w_pre_ssh"
+  FM_TREEHOUSE_LOCAL_ROOT=relative-treehouse timeout 5 bash "$BOOT" 2>&1
+)
+pre_ssh_status=$?
+[ "$pre_ssh_status" -ne 124 ] || fail "boot did not reject a relative Treehouse root before timing out"
+[ "$pre_ssh_status" -ne 0 ] || fail "boot accepted a relative Treehouse root"
+assert_contains "$pre_ssh_out" "Treehouse pool root must be absolute" \
+  "the original relative-root refusal changed"
+assert_not_contains "$(cat "$w_pre_ssh/calls.log")" "sshd " \
+  "Treehouse-root validation moved after SSH startup"
+pass "Treehouse-root validation still runs before SSH and provisioning"
+
 w=$(new_world provision)
 mkdir -p "$w/volume/home/.config/treehouse"
-printf '"r\\u006fot" = "%s"\nmax_trees = 8\n' "$w/volume/slow-treehouse" \
+printf 'root = "%s"\n"r\\u006fot" = "%s"\nmax_trees = 8\n' \
+  "$w/volume/first-slow-treehouse" "$w/volume/slow-treehouse" \
   > "$w/volume/home/.config/treehouse/config.toml"
 provision_only "$w"
 calls=$(cat "$w/calls.log")
@@ -434,12 +458,44 @@ assert_grep 'max_trees = 8' "$HOMEDIR/.config/treehouse/config.toml" \
   "boot did not preserve the existing Treehouse pool settings"
 assert_not_contains "$(cat "$HOMEDIR/.config/treehouse/config.toml")" '"r\u006fot"' \
   "boot retained a semantically duplicate escaped Treehouse root key"
+[ "$(grep -c '^root = ' "$HOMEDIR/.config/treehouse/config.toml")" = 1 ] \
+  || fail "boot no longer converged duplicate root assignments to one local root"
 case "$(sed -n 's/^root = "\(.*\)"/\1/p' "$HOMEDIR/.config/treehouse/config.toml")" in
   "$w/volume"|"$w/volume"/*) fail "Treehouse worktrees remained on the slow network volume" ;;
 esac
 assert_grep 'runpod-root-sandbox-v1' "$w/volume/persistent-runtime/runpod-root-sandbox" \
   "boot did not publish the provider-owned root-sandbox marker"
 pass "first boot clones the code root and installs the required toolchain through the pinned installers"
+
+boot_control="$w/volume/persistent-runtime/fm-runpod-pod-boot.sh"
+control_install_out=$(
+  world_env "$w"
+  printf '%s' 'replacement_boot_broker_token_456' \
+    | bash "$boot_control" --install-omp-auth-broker-token
+) || fail "the installed boot control could not install a replacement broker token: $control_install_out"
+assert_contains "$control_install_out" 'installed=omp-auth-broker-token' \
+  "the installed boot control did not dispatch broker-token installation"
+control_check_out=$(
+  world_env "$w"
+  bash "$boot_control" --check-omp-auth-broker-client
+) || fail "the installed boot control could not check the broker client: $control_check_out"
+assert_contains "$control_check_out" 'auth-broker=ready mode=credential-read-only' \
+  "the installed boot control did not dispatch the broker-client check"
+pass "the persistent boot control keeps its pre-SSH broker options self-contained"
+
+w_bom=$(new_world bom-treehouse-config)
+mkdir -p "$w_bom/volume/home/.config/treehouse"
+printf '\357\273\277root = "%s"\nmax_trees = 7\n' "$w_bom/volume/slow-treehouse" \
+  > "$w_bom/volume/home/.config/treehouse/config.toml"
+provision_only "$w_bom"
+bom_config=$(cat "$w_bom/volume/home/.config/treehouse/config.toml")
+assert_contains "$bom_config" "$w_bom/local-treehouse" \
+  "boot did not prepend its local root to a BOM-prefixed config"
+assert_contains "$bom_config" $'\357\273\277root = "'"$w_bom/volume/slow-treehouse"$'"' \
+  "boot no longer preserved the originally unrecognized BOM-prefixed root assignment"
+assert_contains "$bom_config" 'max_trees = 7' \
+  "boot did not preserve settings after a BOM-prefixed root assignment"
+pass "boot retains its original BOM handling while replacing the pool root"
 
 assert_contains "$calls" \
   "sshd -t -o AllowTcpForwarding=remote -o GatewayPorts=no -o PermitListen=127.0.0.1:8765" \
