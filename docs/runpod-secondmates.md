@@ -9,10 +9,13 @@ Nothing here is active until a home creates a RunPod record, so a fleet with no 
 
 ## How it works
 
+A RunPod second mate runs on any verified harness, exactly like a local one: you pick the harness, and most harnesses log in directly on the pod with their credentials kept on the durable volume.
+OMP on Claude or GPT subscription auth is the one exception, and it is the only reason the workstation runs an auth broker; skip that broker entirely for every other harness.
+
 Three pieces make up a RunPod second mate, and separating them is what lets it scale to zero without losing anything.
 A durable network volume holds the second mate's whole home: its Firstmate code root, its persistent `FM_HOME`, its project clones, its backlog, and every completed login.
 A pod is the rented compute, and it exists only while the second mate is awake; suspending the second mate destroys the pod and keeps the volume, so a dormant domain costs storage alone.
-The workstation, your primary home, stays on and stays the control plane: it owns routing and supervision, holds the SSH identity the pod is pinned against, and runs the OMP auth broker the pod depends on.
+The workstation, your primary home, stays on and stays the control plane: it owns routing and supervision, holds the SSH identity the pod is pinned against, and runs the OMP auth broker the pod depends on only when running OMP on subscription auth.
 
 The lifecycle follows from that split.
 You `provision` once to create the volume and record its placement, which costs storage and creates no compute.
@@ -23,6 +26,8 @@ When the work is done you `sleep` it back to volume-only, and the primary wakes 
 The pod never holds the Claude and GPT subscription credentials: the workstation is the only credential writer, running the broker and a credential-read-only facade in front of it.
 The pod reaches that facade over a supervised SSH reverse tunnel, authenticating with a mode-600 bearer file, so OMP authenticates from the pod while the subscription credentials and their refresh tokens stay on the workstation.
 The facade admits reads and server-side refreshes only and rejects every credential mutation, which keeps a single OAuth writer and avoids a dual-writer lockout.
+
+The diagram below is the OMP subscription-auth path, drawn only for when the second mate runs OMP on subscription auth; on every other harness the pod logs in directly and none of this topology exists.
 
 ```mermaid
 flowchart LR
@@ -315,6 +320,8 @@ OMP's interactive OAuth callback remains unusable on the current headless pod im
 The live pilot's `EADDRINUSE` observation remains evidence about the rejected pod-local login path, not a dependency of the broker design.
 
 ## OMP subscription auth through the workstation
+
+This section applies only when the second mate runs OMP on Claude or GPT subscription auth; every other harness logs in directly on the pod and never touches the broker.
 
 The workstation is the only credential writer and runs `omp auth-broker serve` against its already logged-in Claude and GPT subscription credentials.
 `bin/fm-runpod-omp-auth.sh` supervises that broker, a credential-read-only loopback facade, and one `ssh -R` tunnel per awake pod.
