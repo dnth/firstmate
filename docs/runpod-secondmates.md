@@ -16,7 +16,7 @@ The workstation, your primary home, stays on and stays the control plane: it own
 
 The lifecycle follows from that split.
 You `provision` once to create the volume and record its placement, which costs storage and creates no compute.
-`wake` rents and boots a pod from that volume, restores its persisted SSH host key so the identity survives pod replacement, and establishes connectivity including the OMP auth tunnel before the pod is declared ready.
+`wake` rents and boots a pod from that volume, creates or restores its volume-persisted SSH host key so the identity survives pod replacement, and establishes connectivity including the OMP auth tunnel before the pod is declared ready.
 You then seed the persistent home and spawn the second-mate agent, after which it is an ordinary remote second mate that you route work to, steer, and hand backlog with the normal commands.
 When the work is done you `sleep` it back to volume-only, and the primary wakes a dormant route automatically the moment it needs the host, so delivery and spawn never fail merely because the pod was suspended.
 
