@@ -9,8 +9,10 @@ Nothing here is active until a home creates a RunPod record, so a fleet with no 
 
 ## How it works
 
-A RunPod second mate runs on any verified harness, exactly like a local one: you pick the harness, and most harnesses log in directly on the pod with their credentials kept on the durable volume.
-OMP on Claude or GPT subscription auth is the one exception, and it is the only reason the workstation runs an auth broker; skip that broker entirely for every other harness.
+A RunPod second mate runs on any verified harness, exactly like a local one: you pick the harness and its authentication mode.
+Claude and Codex log in directly on the pod, with their credentials kept on the durable volume.
+OMP with an API-key provider reads its key from an environment variable and uses neither a login nor broker credentials.
+Wake establishes the workstation auth broker and reverse tunnel for every harness, but only OMP on Claude or GPT subscription auth uses and depends on those broker credentials because its subscription OAuth login cannot complete headless on a pod.
 
 Three pieces make up a RunPod second mate, and separating them is what lets it scale to zero without losing anything.
 A durable network volume holds the second mate's whole home: its Firstmate code root, its persistent `FM_HOME`, its project clones, its backlog, and every completed login.
@@ -27,7 +29,7 @@ The pod never holds the Claude and GPT subscription credentials: the workstation
 The pod reaches that facade over a supervised SSH reverse tunnel, authenticating with a mode-600 bearer file, so OMP authenticates from the pod while the subscription credentials and their refresh tokens stay on the workstation.
 The facade admits reads and server-side refreshes only and rejects every credential mutation, which keeps a single OAuth writer and avoids a dual-writer lockout.
 
-The diagram below is the OMP subscription-auth path, drawn only for when the second mate runs OMP on subscription auth; on every other harness the pod logs in directly and none of this topology exists.
+The diagram below shows the OMP subscription-auth path: wake establishes the broker and reverse tunnel in every case, but direct pod logins and OMP API-key environment-variable auth do not use this topology.
 
 ```mermaid
 flowchart LR
@@ -321,7 +323,7 @@ The live pilot's `EADDRINUSE` observation remains evidence about the rejected po
 
 ## OMP subscription auth through the workstation
 
-This section applies only when the second mate runs OMP on Claude or GPT subscription auth; every other harness logs in directly on the pod and never touches the broker.
+This section applies only when the second mate runs OMP on Claude or GPT subscription auth; direct-login harnesses keep credentials on the pod, and OMP API-key providers read an environment variable, so neither mode uses the broker credentials established at wake.
 
 The workstation is the only credential writer and runs `omp auth-broker serve` against its already logged-in Claude and GPT subscription credentials.
 `bin/fm-runpod-omp-auth.sh` supervises that broker, a credential-read-only loopback facade, and one `ssh -R` tunnel per awake pod.
