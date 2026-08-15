@@ -20,7 +20,7 @@ You `provision` once to create the volume and record its placement, which costs 
 You then seed the persistent home and spawn the second-mate agent, after which it is an ordinary remote second mate that you route work to, steer, and hand backlog with the normal commands.
 When the work is done you `sleep` it back to volume-only, and the primary wakes a dormant route automatically the moment it needs the host, so delivery and spawn never fail merely because the pod was suspended.
 
-OMP subscription auth is the one thing that deliberately does not live on the pod.
+Claude and GPT subscription credentials do not live on the pod.
 The pod never holds the Claude and GPT subscription credentials: the workstation is the only credential writer, running the broker and a credential-read-only facade in front of it.
 The pod reaches that facade over a supervised SSH reverse tunnel, authenticating with a mode-600 bearer file, so OMP authenticates from the pod while the subscription credentials and their refresh tokens stay on the workstation.
 The facade admits reads and server-side refreshes only and rejects every credential mutation, which keeps a single OAuth writer and avoids a dual-writer lockout.
