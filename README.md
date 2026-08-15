@@ -57,6 +57,16 @@ Launching a supported harness inside it instantiates your first mate - and makes
 
 Full detail on every feature lives in [docs/architecture.md](docs/architecture.md).
 
+## What this fork adds over upstream
+
+`dnth/firstmate` carries three features that are not in [upstream](https://github.com/kunchenguid/firstmate).
+
+- **RunPod remote secondmates** - run a persistent second mate on an on-demand RunPod GPU pod, with a scale-to-zero lifecycle so an idle domain drops to storage-only cost and a delivery wakes the pod back up. See [docs/runpod-secondmates.md](docs/runpod-secondmates.md); the compute lifecycle lives in `bin/fm-runpod*.sh`.
+- **OMP harness with a read-only credential broker** - OMP runs as a verified crew, scout, and primary runtime, and a workstation broker facade ([bin/fm-omp-auth-broker-readonly-proxy.mjs](bin/fm-omp-auth-broker-readonly-proxy.mjs)) lets OMP on a remote pod read auth snapshots and refreshes through a loopback tunnel while every credential-mutation endpoint is rejected, so the pod never receives the workstation's login credentials. See [docs/supervision-protocols/omp.md](docs/supervision-protocols/omp.md) for the OMP watcher protocol.
+- **Pi-compatible runtimes** - an explicit allowlist ([bin/fm-pi-compatible-runtimes](bin/fm-pi-compatible-runtimes) with `bin/fm-pi-compatible-lib.sh`) marks which runtimes share Pi's core, so OMP can reuse it without being recorded or recovered as Pi.
+
+Supporting these are extra treehouse pool helpers (`bin/fm-treehouse-*.sh`) and a TypeScript primary-watcher core (`bin/fm-primary-watch-core.ts`).
+
 ## Quick Start
 
 ### Requirements
