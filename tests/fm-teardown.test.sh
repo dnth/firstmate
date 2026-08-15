@@ -1774,6 +1774,90 @@ test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconf
   pass "forced teardown retains a nested secondmate home and its grandchild's Herdr identity when the grandchild close is unconfirmed"
 }
 
+# Remote-secondmate retirement must not choke on a state/pending-replies directory
+# that holds records for OTHER secondmates but none for the target. The local
+# pending-reply cleanup step used to inherit the exit status of its last per-record
+# check; when the final record belonged to a different task, that check was false and
+# the whole retirement false-failed at the very end - after the remote home had
+# already retired - with "remote pending-reply cleanup failed; preserving the local
+# route for retry". The cleanup must succeed when it finds nothing of its own to
+# remove, while still failing loudly on a genuinely unsafe entry.
+test_remote_secondmate_teardown_succeeds_with_only_foreign_pending_replies() {
+  local case_dir home teardown_bin rc
+  case_dir=$(make_case remote-sm-foreign-pending)
+  home="$case_dir/secondmate-home"
+  mkdir -p "$home" "$case_dir/data" "$case_dir/state/pending-replies"
+
+  # A remote secondmate task: remote_host/root/home in meta, kind=secondmate.
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=secondmate" \
+    "mode=local-only" \
+    "remote_host=sm-host" \
+    "remote_root=/remote/root" \
+    "home=$home"
+
+  # Registry route that matches the meta exactly, marked remote.
+  printf '%s\n' \
+    "- task-x1 - Remote pilot (host: sm-host; root: /remote/root; home: $home; scope: pilot work; projects: none; added 2026-08-01)" \
+    > "$case_dir/data/secondmates.md"
+
+  # The ONLY pending-reply record belongs to a DIFFERENT secondmate, so the target's
+  # cleanup loop finds nothing of its own to remove and its last per-record check is
+  # false - the pre-fix bug's exact trigger.
+  printf '%s\n' 'task_id=other-sm' 'phase=resolved' \
+    > "$case_dir/state/pending-replies/other-sm.reply"
+
+  # Copy bin/ so the remote retire, reply-lifecycle, and guard neighbors can be
+  # stubbed to succeed without real SSH or a real reply source, while the real
+  # fm-teardown.sh logic under test runs unchanged.
+  mkdir -p "$case_dir/test-root"
+  cp -R "$ROOT/bin" "$case_dir/test-root/bin"
+  cat > "$case_dir/test-root/bin/fm-on.sh" <<'SH'
+#!/usr/bin/env bash
+# Stub: the remote retire command always succeeds.
+exit 0
+SH
+  cat > "$case_dir/test-root/bin/fm-procevent-remote-reply.sh" <<'SH'
+#!/usr/bin/env bash
+# Stub: every reply-lifecycle transition succeeds and is a no-op.
+exit 0
+SH
+  cat > "$case_dir/test-root/bin/fm-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$case_dir/test-root/bin/fm-on.sh" \
+    "$case_dir/test-root/bin/fm-procevent-remote-reply.sh" \
+    "$case_dir/test-root/bin/fm-guard.sh"
+  teardown_bin="$case_dir/test-root/bin/fm-teardown.sh"
+
+  rc=0
+  FM_ROOT_OVERRIDE="$case_dir/test-root" \
+    FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_DATA_OVERRIDE="$case_dir/data" \
+    FM_CONFIG_OVERRIDE="$case_dir/config" \
+    PATH="$case_dir/fakebin:$PATH" \
+    "$teardown_bin" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" \
+    "remote-sm-foreign-pending: retirement must succeed when no pending reply is the target's"
+  assert_grep "teardown task-x1 complete" "$case_dir/stdout" \
+    "remote-sm-foreign-pending: retirement did not report completion"
+  # The foreign record is left untouched; only the target's own records are removed.
+  [ -f "$case_dir/state/pending-replies/other-sm.reply" ] \
+    || fail "remote-sm-foreign-pending: cleanup removed another secondmate's pending reply"
+  # The route is retired: the registry line is gone and the volatile records cleared.
+  ! grep -q '^- task-x1' "$case_dir/data/secondmates.md" \
+    || fail "remote-sm-foreign-pending: the retired route survived in the registry"
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "remote-sm-foreign-pending: retirement left the durable endpoint record behind"
+  pass "remote secondmate retirement succeeds when pending-replies holds only foreign records"
+}
+
 configure_herdr_projection_teardown_case() {  # <case-dir>
   local case_dir=$1 token=AbCdEfGhIjKlMnOpQrStUv
   sed -i.bak 's/^window=.*/window=fmtest:w1:p2/' "$case_dir/state/task-x1.meta"
@@ -2499,6 +2583,7 @@ test_herdr_flat_teardown_preflight_refuses_before_changes
 test_forced_secondmate_herdr_child_preflight_refuses_before_changes
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
 test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed
+test_remote_secondmate_teardown_succeeds_with_only_foreign_pending_replies
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_squash_merged_branch_deleted_allows
