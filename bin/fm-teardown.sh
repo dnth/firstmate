@@ -258,7 +258,7 @@ remote_pending_replies_cleanup() {
       [ -e "$rec" ] || [ -L "$rec" ] || continue
       [ -f "$rec" ] && [ ! -L "$rec" ] || exit 1
       if [ "$(fm_meta_get "$rec" task_id)" = "$ID" ]; then
-        rm -f -- "$rec"
+        rm -f -- "$rec" || exit 1
       fi
     done
   )
