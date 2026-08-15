@@ -7,6 +7,49 @@ Herdr remains its backend in the shared `fm-remote` session, the primary still o
 
 Nothing here is active until a home creates a RunPod record, so a fleet with no RunPod second mates behaves exactly as it did before.
 
+## How it works
+
+Three pieces make up a RunPod second mate, and separating them is what lets it scale to zero without losing anything.
+A durable network volume holds the second mate's whole home: its Firstmate code root, its persistent `FM_HOME`, its project clones, its backlog, and every completed login.
+A pod is the rented compute, and it exists only while the second mate is awake; suspending the second mate destroys the pod and keeps the volume, so a dormant domain costs storage alone.
+The workstation, your primary home, stays on and stays the control plane: it owns routing and supervision, holds the SSH identity the pod is pinned against, and runs the OMP auth broker the pod depends on.
+
+The lifecycle follows from that split.
+You `provision` once to create the volume and record its placement, which costs storage and creates no compute.
+`wake` rents and boots a pod from that volume, restores its persisted SSH host key so the identity survives pod replacement, and establishes connectivity including the OMP auth tunnel before the pod is declared ready.
+You then seed the persistent home and spawn the second-mate agent, after which it is an ordinary remote second mate that you route work to, steer, and hand backlog with the normal commands.
+When the work is done you `sleep` it back to volume-only, and the primary wakes a dormant route automatically the moment it needs the host, so delivery and spawn never fail merely because the pod was suspended.
+
+OMP subscription auth is the one thing that deliberately does not live on the pod.
+The pod never holds the Claude and GPT subscription credentials: the workstation is the only credential writer, running the broker and a credential-read-only facade in front of it.
+The pod reaches that facade over a supervised SSH reverse tunnel, authenticating with a mode-600 bearer file, so OMP authenticates from the pod while the subscription credentials and their refresh tokens stay on the workstation.
+The facade admits reads and server-side refreshes only and rejects every credential mutation, which keeps a single OAuth writer and avoids a dual-writer lockout.
+
+```mermaid
+flowchart LR
+  subgraph POD["Pod (rented only while awake)"]
+    agent["Second-mate agent + crews"]
+    omp["OMP client"]
+    loop["pod loopback :8765"]
+    agent --> omp
+    omp -->|"mode-600 bearer"| loop
+  end
+  subgraph WS["Workstation (always-on control plane)"]
+    facade["read-only facade :18766"]
+    broker["omp auth-broker :8765<br/>subscription credentials"]
+    facade -->|"reads and refresh only"| broker
+  end
+  vol[("Network volume<br/>durable whole home")]
+  agent -. reads and writes .- vol
+  loop ==>|"supervised SSH reverse tunnel"| facade
+```
+
+The sections below own the mechanics behind this picture.
+The operator sequence walks the exact `provision`, `wake`, seed, and `spawn` commands.
+The pod's boot contract owns what a fresh pod installs and how it reaches readiness from the volume.
+OMP subscription auth through the workstation owns the broker, facade, tunnel, and bearer contract.
+Waking is automatic where it matters and Suspending safely own the scale-to-zero behavior.
+
 ## Why a pod instead of a machine
 
 A remote second mate normally needs a machine that is always on.
