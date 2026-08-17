@@ -323,7 +323,7 @@ When a secondmate is launched on Pi or pi-signed, `fm-spawn.sh --secondmate` lau
 | Resume | Use the exact selected OMP binary with `--session-dir /tmp/fm-<id>/omp-sessions --resume <session-file> --auto-approve -e state/<id>.omp-ext.ts`. |
 
 OMP is an exact harness identity and is never normalized to Pi.
-`bin/fm-omp-capabilities.sh` resolves the exact executable and requires a Bun-backed entrypoint plus the model, thinking, unattended approval, external extension, task-local session directory, and resume surfaces before `fm-spawn` creates an endpoint.
+`bin/fm-omp-capabilities.sh` owns exact executable resolution and the Bun-backed launch and recovery capability checks that run before `fm-spawn` creates an endpoint.
 A failed OMP preflight never launches another executable as a fallback.
 Workers and scouts receive one typed `launch-brief` positional argument and an external per-task extension under `state/`.
 The extension reports `session_start` readiness, acknowledges the initial instruction through `turn_start`, and touches the task's turn-completion marker on every `turn_end`.

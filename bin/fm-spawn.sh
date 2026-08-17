@@ -1470,7 +1470,9 @@ if [ "$BACKEND" = orca ]; then
   fm_backend_orca_runtime_check || exit 1
 fi
 if [ "$HARNESS" = omp ]; then
-  OMP_BIN=$("$SCRIPT_DIR/fm-omp-capabilities.sh" --print-binary) || exit 1
+  OMP_CAPABILITY_ARGS=(--print-binary)
+  [ "$OMP_LAUNCH_TEMPLATE" -eq 0 ] || OMP_CAPABILITY_ARGS+=(--require-max-time)
+  OMP_BIN=$("$SCRIPT_DIR/fm-omp-capabilities.sh" "${OMP_CAPABILITY_ARGS[@]}") || exit 1
   OMP_BIN_CANON=$(fm_omp_process_resolve_path "$OMP_BIN") || {
     echo "error: selected OMP executable cannot be canonicalized: $OMP_BIN" >&2
     exit 1

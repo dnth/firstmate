@@ -121,6 +121,10 @@ test_capability_probe_accepts_required_surface() {
   status=$?
   expect_code 0 "$status" "complete OMP capability surface should pass"
   [ "$out" = "$fakebin/omp" ] || fail "capability probe did not print the exact selected OMP executable: $out"
+  out=$(PATH="$fakebin:/usr/bin:/bin" "$CAPABILITIES" --require-max-time --print-binary 2>&1)
+  status=$?
+  expect_code 0 "$status" "complete bounded OMP capability surface should pass"
+  [ "$out" = "$fakebin/omp" ] || fail "bounded capability probe did not print the exact selected OMP executable: $out"
   pass "OMP capability probe accepts the required launch and recovery surface"
 }
 
@@ -139,7 +143,7 @@ test_capability_probe_rejects_non_bun_entrypoint() {
 
 test_capability_probe_reports_every_missing_requirement() {
   local capability fakebin out status
-  for capability in '--model=' '--thinking=' '--auto-approve' '--max-time=' '--session-dir=' '--extension=' '--resume='; do
+  for capability in '--model=' '--thinking=' '--auto-approve' '--session-dir=' '--extension=' '--resume='; do
     fakebin="$TMP_ROOT/missing-${capability//[^a-z]/}"
     mkdir -p "$fakebin"
     write_fake_omp "$fakebin/omp" "$capability"
@@ -150,6 +154,30 @@ test_capability_probe_reports_every_missing_requirement() {
     assert_contains "$out" "$capability" "capability refusal did not name $capability"
   done
   pass "OMP capability probe names each missing launch or recovery requirement"
+}
+
+test_capability_probe_scopes_exact_max_time_to_bounded_launches() {
+  local fakebin out status
+  fakebin="$TMP_ROOT/max-time-scope"
+  mkdir -p "$fakebin"
+  write_fake_omp "$fakebin/omp" '--max-time='
+
+  out=$(PATH="$fakebin:/usr/bin:/bin" "$CAPABILITIES" --print-binary 2>&1)
+  status=$?
+  expect_code 0 "$status" "unbounded OMP capability probe should not require max-time"
+  [ "$out" = "$fakebin/omp" ] || fail "unbounded capability probe lost the selected OMP executable: $out"
+
+  out=$(PATH="$fakebin:/usr/bin:/bin" "$CAPABILITIES" --require-max-time --print-binary 2>&1)
+  status=$?
+  expect_code 1 "$status" "bounded OMP capability probe should require max-time"
+  assert_contains "$out" '--max-time=<value>' "bounded capability refusal did not name the exact flag"
+
+  sed -i '/--auto-approve/a --default-max-time=<value>' "$fakebin/omp"
+  out=$(PATH="$fakebin:/usr/bin:/bin" "$CAPABILITIES" --require-max-time --print-binary 2>&1)
+  status=$?
+  expect_code 1 "$status" "prefixed max-time option should not satisfy the exact capability"
+  assert_contains "$out" '--max-time=<value>' "prefixed option refusal did not name the exact flag"
+  pass "OMP max-time capability is exact and scoped to bounded launch templates"
 }
 
 test_capability_probe_never_falls_back_when_omp_is_missing() {
@@ -168,4 +196,5 @@ test_launch_boundary_marker_preserves_exact_omp_identity
 test_capability_probe_accepts_required_surface
 test_capability_probe_rejects_non_bun_entrypoint
 test_capability_probe_reports_every_missing_requirement
+test_capability_probe_scopes_exact_max_time_to_bounded_launches
 test_capability_probe_never_falls_back_when_omp_is_missing

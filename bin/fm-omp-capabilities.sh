@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
 # Verify the selected OMP executable has Firstmate's required lifecycle and exact process-ownership surface.
-# Usage: fm-omp-capabilities.sh [--print-binary]
+# Usage: fm-omp-capabilities.sh [--print-binary] [--require-max-time]
 # Success is silent unless --print-binary prints the resolved executable path.
 # Capability checks, rather than a semantic-version floor, own compatibility.
 set -u
 
 PRINT_BINARY=0
-case "${1:-}" in
-  '') ;;
-  --print-binary) PRINT_BINARY=1 ;;
-  -h|--help)
-    sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//'
-    exit 0
-    ;;
-  *) echo "error: unknown argument: $1" >&2; exit 2 ;;
-esac
+REQUIRE_MAX_TIME=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --print-binary) PRINT_BINARY=1 ;;
+    --require-max-time) REQUIRE_MAX_TIME=1 ;;
+    -h|--help)
+      sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    *) echo "error: unknown argument: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
 
 binary=$(command -v omp 2>/dev/null || true)
 if [ -z "$binary" ]; then
@@ -62,10 +66,13 @@ require_help_token() {
 require_help_token '--model=' '--model=<value>'
 require_help_token '--thinking=' '--thinking=<value>'
 require_help_token '--auto-approve' '--auto-approve'
-require_help_token '--max-time=' '--max-time=<value>'
 require_help_token '--session-dir=' '--session-dir=<value>'
 require_help_token '--extension=' '--extension=<value>'
 require_help_token '--resume=' '--resume=<value>'
+if [ "$REQUIRE_MAX_TIME" -eq 1 ]; then
+  printf '%s\n' "$help" | grep -E -- '(^|[[:space:],])--max-time=' >/dev/null 2>&1 \
+    || missing="${missing}${missing:+, }--max-time=<value>"
+fi
 
 if [ -n "$missing" ]; then
   echo "error: omp missing required capability(s): $missing; update OMP before selecting harness=omp" >&2

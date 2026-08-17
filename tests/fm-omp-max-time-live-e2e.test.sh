@@ -1,24 +1,39 @@
 #!/usr/bin/env bash
-# Opt-in real OMP max-time launch-parser guard without a model call.
+# Opt-in real OMP max-time deadline guard.
 set -u
 
 if [ "${FM_OMP_MAX_TIME_LIVE_E2E:-0}" != 1 ]; then
-  echo "skip: set FM_OMP_MAX_TIME_LIVE_E2E=1 to run the real OMP max-time parser guard"
+  echo "skip: set FM_OMP_MAX_TIME_LIVE_E2E=1 to run the real OMP max-time deadline guard"
   exit 0
 fi
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-OMP_BIN=$("$ROOT/bin/fm-omp-capabilities.sh" --print-binary) || fail "OMP capability check failed"
+command -v jq >/dev/null 2>&1 || fail "OMP max-time live guard requires jq"
+OMP_BIN=$("$ROOT/bin/fm-omp-capabilities.sh" --require-max-time --print-binary) || fail "OMP capability check failed"
 OMP_VERSION=$("$OMP_BIN" --version 2>&1 | head -1) || fail "OMP version probe failed for $OMP_BIN"
 [ -n "$OMP_VERSION" ] || fail "OMP version probe returned no version"
+TMP_ROOT=$(fm_test_tmproot fm-omp-max-time-live)
+EVENTS="$TMP_ROOT/events.jsonl"
+STDERR_LOG="$TMP_ROOT/stderr.log"
+MODEL=${FM_OMP_MAX_TIME_LIVE_MODEL:-openai-codex/gpt-5.6-sol}
 
-for duration in 1 1m 1h; do
-  output=$("$OMP_BIN" --max-time="$duration" --help 2>&1) \
-    || fail "OMP $OMP_VERSION rejected --max-time=$duration"
-  assert_contains "$output" '--max-time=<value>' \
-    "OMP $OMP_VERSION help lost the max-time capability after parsing --max-time=$duration"
-done
+started=$(date +%s)
+OMP_SKIP_SETUP=1 "$OMP_BIN" --model "$MODEL" --thinking low --no-session --no-tools \
+  --max-time=2 --mode=json 'Write an exhaustive response of at least ten thousand words about Unix history.' \
+  > "$EVENTS" 2> "$STDERR_LOG"
+status=$?
+elapsed=$(($(date +%s) - started))
+expect_code 0 "$status" "OMP $OMP_VERSION max-time session should terminate cleanly"
+[ "$elapsed" -ge 2 ] && [ "$elapsed" -le 15 ] \
+  || fail "OMP $OMP_VERSION max-time session elapsed ${elapsed}s outside the 2-15s bound"
+jq -se '
+  any(.[]; .type == "agent_start")
+  and any(.[]; .type == "message_start" and .message.role == "user")
+  and (.[-1].type == "agent_end" and .[-1].isTerminal == true)
+  and ([.[] | select(.type == "message_end" and .message.role == "assistant")] | all(.message.stopReason != "stop"))
+' "$EVENTS" >/dev/null \
+  || fail "OMP $OMP_VERSION did not publish an active deadline-terminated session"
 
-pass "OMP $OMP_VERSION accepts max-time seconds, minutes, and hours"
+pass "OMP $OMP_VERSION terminates an active session within the 2-15s deadline bound"

@@ -639,6 +639,27 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   pass "active crew-dispatch profile leaves the raw launch-command escape hatch unchanged"
 }
 
+test_raw_omp_launch_does_not_require_max_time_capability() {
+  local rec id out status launch
+  id=$(profile_id profile-raw-omp-z15b)
+  rec=$(make_spawn_case profile-raw-omp claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  printf 'invalid-for-omp\n' > "$HOME_DIR/config/omp-max-time"
+  sed -i "s/ '--max-time=<value>'//" "$FAKEBIN_DIR/omp"
+  export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "omp --legacy __OMPMAXTIME__")
+  status=$?
+  expect_code 0 "$status" "raw OMP launch should not require the max-time capability"
+  assert_contains "$out" "spawned $id harness=omp" "spawn did not retain raw OMP identity"
+  launch=$(cat "$LAUNCH_LOG")
+  [ "$launch" = "FM_OMP_HARNESS=omp omp --legacy __OMPMAXTIME__" ] \
+    || fail "raw OMP launch changed"$'\n'"actual: $launch"
+  pass "raw OMP launches ignore max-time configuration and capability checks"
+}
+
 test_claude_threads_model_and_effort() {
   local rec id out status launch
   id=$(profile_id profile-claude-z2)
@@ -2128,6 +2149,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
+test_raw_omp_launch_does_not_require_max_time_capability
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
