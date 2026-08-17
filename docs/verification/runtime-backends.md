@@ -155,6 +155,7 @@ Observed bounded output:
 
 ```text
 omp/17.3.4
+evidence: OMP omp/17.3.4 max-time=5 elapsed=6s stopReason=aborted errorMessage=Deadline exceeded
 ok - OMP omp/17.3.4 aborts an active session within the 5-15s deadline bound
 ```
 

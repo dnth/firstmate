@@ -37,5 +37,16 @@ jq -se '
       and all($assistant[]; .message.stopReason != "error"))
 ' "$EVENTS" >/dev/null \
   || fail "OMP $OMP_VERSION did not publish an active deadline-terminated session"
+deadline_evidence=$(jq -sr '
+  first(.[] | select(
+    .type == "message_end"
+    and .message.role == "assistant"
+    and .message.stopReason == "aborted"
+    and .message.errorMessage == "Deadline exceeded"
+  ))
+  | "stopReason=\(.message.stopReason) errorMessage=\(.message.errorMessage)"
+' "$EVENTS") || fail "OMP $OMP_VERSION deadline evidence could not be rendered"
+[ -n "$deadline_evidence" ] || fail "OMP $OMP_VERSION deadline evidence was empty"
 
+printf 'evidence: OMP %s max-time=5 elapsed=%ss %s\n' "$OMP_VERSION" "$elapsed" "$deadline_evidence"
 pass "OMP $OMP_VERSION aborts an active session within the 5-15s deadline bound"
