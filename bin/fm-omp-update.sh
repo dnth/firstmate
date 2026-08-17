@@ -107,8 +107,8 @@ add_sweep_state() {  # <state-dir> <owner-label>
   for meta in "$resolved"/*.meta; do
     [ -e "$meta" ] || [ -L "$meta" ] || continue
     index=${#SWEEP_META_PATHS[@]}
-    SWEEP_META_PATHS[$index]=$meta
-    SWEEP_META_OWNERS[$index]=$owner
+    SWEEP_META_PATHS[index]=$meta
+    SWEEP_META_OWNERS[index]=$owner
     if [ -L "$meta" ] || [ ! -f "$meta" ]; then
       note_unreachable "${owner:-this home}" "record $meta is not a plain file"
     fi
@@ -169,6 +169,7 @@ collect_sweep_dirs() {
   else
     return 0
   fi
+  # shellcheck disable=SC2094 # Validation copies this read-only snapshot to a distinct temporary file.
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in "- "*) ;; *) continue ;; esac
     secondmate_registry_parse_line "$line" || continue
