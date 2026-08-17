@@ -319,6 +319,9 @@ The refresh also prunes local branches whose remote is gone and that no worktree
 For a remote route, the configured code root updates from its own origin on that host before the persistent home fast-forwards to the code-root commit.
 The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
 Local homes share the guarded fast-forward helper, while remote updates delegate the same safety decision to the configured host through the generic transport.
+After those repo updates, the attended path can refresh the installed machine-wide `omp` executable through `bin/fm-omp-update.sh`.
+The helper reuses the durable fleet records and recovery-grade backend liveness classifier, and it refuses an install unless every worker in the active home and every registered local secondmate home is confirmed stopped.
+Its `--check` mode delegates to `omp update --check`, reports the current and available versions, and changes neither the executable nor fleet state.
 The mechanics are owned by the `/updatefirstmate` skill and firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) (self-update).
 
 ## Restart-proof
