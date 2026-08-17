@@ -21,19 +21,21 @@ MODEL=${FM_OMP_MAX_TIME_LIVE_MODEL:-openai-codex/gpt-5.6-sol}
 
 started=$(date +%s)
 OMP_SKIP_SETUP=1 "$OMP_BIN" --model "$MODEL" --thinking low --no-session --no-tools \
-  --max-time=2 --mode=json 'Write an exhaustive response of at least ten thousand words about Unix history.' \
+  --max-time=5 --mode=json 'Write an exhaustive response of at least ten thousand words about Unix history.' \
   > "$EVENTS" 2> "$STDERR_LOG"
 status=$?
 elapsed=$(($(date +%s) - started))
 expect_code 0 "$status" "OMP $OMP_VERSION max-time session should terminate cleanly"
-[ "$elapsed" -ge 2 ] && [ "$elapsed" -le 15 ] \
-  || fail "OMP $OMP_VERSION max-time session elapsed ${elapsed}s outside the 2-15s bound"
+[ "$elapsed" -ge 5 ] && [ "$elapsed" -le 15 ] \
+  || fail "OMP $OMP_VERSION max-time session elapsed ${elapsed}s outside the 5-15s bound"
 jq -se '
   any(.[]; .type == "agent_start")
   and any(.[]; .type == "message_start" and .message.role == "user")
   and (.[-1].type == "agent_end" and .[-1].isTerminal == true)
-  and ([.[] | select(.type == "message_end" and .message.role == "assistant")] | all(.message.stopReason != "stop"))
+  and ([.[] | select(.type == "message_end" and .message.role == "assistant")] as $assistant
+    | any($assistant[]; .message.stopReason == "aborted" and .message.errorMessage == "Deadline exceeded")
+      and all($assistant[]; .message.stopReason != "error"))
 ' "$EVENTS" >/dev/null \
   || fail "OMP $OMP_VERSION did not publish an active deadline-terminated session"
 
-pass "OMP $OMP_VERSION terminates an active session within the 2-15s deadline bound"
+pass "OMP $OMP_VERSION aborts an active session within the 5-15s deadline bound"

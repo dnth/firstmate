@@ -892,7 +892,7 @@ test_omp_threads_exact_identity_model_and_every_thinking_level() {
 }
 
 test_omp_threads_configurable_max_time() {
-  local rec id out status launch
+  local rec id out status launch corrupt_case corrupt_payload
 
   id=$(profile_id profile-omp-max-time-default-z8oa)
   rec=$(make_spawn_case profile-omp-max-time-default omp "$id")
@@ -941,6 +941,25 @@ test_omp_threads_configurable_max_time() {
     "invalid max-time refusal did not explain the accepted values"
   [ ! -s "$CASE_DIR/endpoint.log" ] || fail "invalid max-time config created a backend endpoint"
   [ ! -s "$LAUNCH_LOG" ] || fail "invalid max-time config typed an OMP launch command"
+
+  for corrupt_case in nul control; do
+    id=$(profile_id "profile-omp-max-time-$corrupt_case-z8oa")
+    rec=$(make_spawn_case "profile-omp-max-time-$corrupt_case" omp "$id")
+    read_case_record "$rec"
+    case "$corrupt_case" in
+      nul) corrupt_payload='off\0' ;;
+      control) corrupt_payload='off\001' ;;
+    esac
+    printf '%b' "$corrupt_payload" > "$HOME_DIR/config/omp-max-time"
+    unset FM_TEST_OMP_ACK
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 1 "$status" "OMP max-time config containing $corrupt_case bytes should refuse"
+    assert_contains "$out" "config/omp-max-time must contain text only" \
+      "binary max-time refusal did not explain the text-only contract"
+    [ ! -s "$CASE_DIR/endpoint.log" ] || fail "binary max-time config created a backend endpoint"
+    [ ! -s "$LAUNCH_LOG" ] || fail "binary max-time config typed an OMP launch command"
+  done
 
   id=$(profile_id profile-omp-max-time-dangling-z8oa)
   rec=$(make_spawn_case profile-omp-max-time-dangling omp "$id")

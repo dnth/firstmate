@@ -1066,12 +1066,26 @@ fi
 # The first non-empty, non-comment config line is authoritative, while a file
 # without a directive retains the default.
 omp_max_time_flag() {
-  local config_file="$CONFIG/omp-max-time" contents line value=3h amount
+  local config_file="$CONFIG/omp-max-time" byte_dump contents line value=3h amount
   if [ -e "$config_file" ] || [ -L "$config_file" ]; then
     { [ -f "$config_file" ] && [ ! -L "$config_file" ]; } || {
       echo "error: config/omp-max-time must be a regular file containing off or a positive duration such as 3600, 10m, or 1h" >&2
       return 1
     }
+    if ! byte_dump=$(LC_ALL=C od -An -v -tu1 "$config_file" 2>/dev/null); then
+      echo "error: config/omp-max-time could not be read; refusing an unbounded OMP launch" >&2
+      return 1
+    fi
+    if ! printf '%s\n' "$byte_dump" | awk '
+      {
+        for (i = 1; i <= NF; i++) {
+          if ($i != 9 && $i != 10 && $i != 13 && ($i < 32 || $i > 126)) exit 1
+        }
+      }
+    '; then
+      echo "error: config/omp-max-time must contain text only; NUL and other non-text bytes are invalid" >&2
+      return 1
+    fi
     if ! contents=$(< "$config_file"); then
       echo "error: config/omp-max-time could not be read; refusing an unbounded OMP launch" >&2
       return 1

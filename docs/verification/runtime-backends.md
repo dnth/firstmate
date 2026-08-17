@@ -155,10 +155,10 @@ Observed bounded output:
 
 ```text
 omp/17.3.4
-ok - OMP omp/17.3.4 terminates an active session within the 2-15s deadline bound
+ok - OMP omp/17.3.4 aborts an active session within the 5-15s deadline bound
 ```
 
-The guard starts a real headless OMP turn with `--max-time=2`, requires a terminal runtime event without a normally completed assistant response, and measures the full process lifetime including shutdown against the documented bound.
+The guard starts a real headless OMP turn with `--max-time=5`, requires the deadline-specific aborted assistant event and terminal runtime event, rejects unrelated errors, and measures the full process lifetime including shutdown against the documented bound.
 
 The native Prewalk launch surface was checked on 2026-08-11 against OMP 17.2.11 without starting a model call:
 
