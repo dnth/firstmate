@@ -112,6 +112,7 @@ if (process.argv[2] === "models" && process.argv.includes("--json")) {
 --model=<value>
 --thinking=<value>
 --auto-approve
+--max-time=<value>
 --extension=<value>
 --session-dir=<value>
 --resume=<value>

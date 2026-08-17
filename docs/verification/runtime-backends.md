@@ -144,6 +144,23 @@ Normal `/exit` stopped each OMP process without killing the private tmux server,
 The guarded primary, worker/scout, and secondmate owners reran on 2026-08-01 at head `491bc809a38a84f5ea651fd051b509cb511149a1` and returned four green results.
 The OMP 17.2.10 watcher-input regression passed on 2026-08-07 with the editable draft intact; the exact command and bounded output are recorded in [`supervision.md`](supervision.md#native-session-start-delivery).
 
+The OMP max-time deadline guard passed on 2026-08-17 against OMP 17.3.4 using the default `openai-codex/gpt-5.6-sol` live-test model:
+
+```sh
+omp --version
+FM_OMP_MAX_TIME_LIVE_E2E=1 tests/fm-omp-max-time-live-e2e.test.sh
+```
+
+Observed bounded output:
+
+```text
+omp/17.3.4
+evidence: OMP omp/17.3.4 max-time=5 elapsed=6s stopReason=aborted errorMessage=Deadline exceeded
+ok - OMP omp/17.3.4 aborts an active session within the 5-15s deadline bound
+```
+
+The guard starts a real headless OMP turn with `--max-time=5`, requires the deadline-specific aborted assistant event and terminal runtime event, rejects unrelated errors, and measures the full process lifetime including shutdown against the documented bound.
+
 The native Prewalk launch surface was checked on 2026-08-11 against OMP 17.2.11 without starting a model call:
 
 ```sh

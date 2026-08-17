@@ -22,6 +22,8 @@
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
+#   Verified OMP launch templates carry the runtime bound configured by config/omp-max-time.
+#   docs/configuration.md "OMP runtime bound" owns its default and accepted values.
 #   --prewalk-into <model-spec> opts an OMP profile into native Prewalk and records
 #   the effective target in task metadata. An unusable target falls back with
 #   --no-prewalk when supported. Without that flag, fallback proceeds with no
@@ -160,6 +162,7 @@
 #     __OMPSESSIONDIR__ task-local or secondmate-home OMP session directory for exact resume
 #     __OMPRESUMEFLAG__ empty for a fresh OMP launch or the exact retained secondmate session file
 #     __OMPPRIMARY__ absolute path to .omp/extensions/fm-primary-omp.ts in an OMP secondmate home
+#     __OMPMAXTIME__ OMP-only `--max-time=<duration>` fragment from config/omp-max-time
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
@@ -1059,6 +1062,56 @@ else
 fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
 
+# Print the validated OMP-only runtime-bound fragment.
+# The first non-empty, non-comment config line is authoritative, while a file
+# without a directive retains the default.
+omp_max_time_flag() {
+  local config_file="$CONFIG/omp-max-time" byte_dump contents line value=3h amount
+  if [ -e "$config_file" ] || [ -L "$config_file" ]; then
+    { [ -f "$config_file" ] && [ ! -L "$config_file" ]; } || {
+      echo "error: config/omp-max-time must be a regular file containing off or a positive duration such as 3600, 10m, or 1h" >&2
+      return 1
+    }
+    if ! byte_dump=$(LC_ALL=C od -An -v -tu1 "$config_file" 2>/dev/null); then
+      echo "error: config/omp-max-time could not be read; refusing an unbounded OMP launch" >&2
+      return 1
+    fi
+    if ! contents=$(printf '%s\n' "$byte_dump" | awk '
+      {
+        for (i = 1; i <= NF; i++) {
+          if ($i != 9 && $i != 10 && $i != 13 && ($i < 32 || $i > 126)) exit 1
+          printf "%c", $i
+        }
+      }
+    '); then
+      echo "error: config/omp-max-time must contain text only; NUL and other non-text bytes are invalid" >&2
+      return 1
+    fi
+    while IFS= read -r line || [ -n "$line" ]; do
+      line="${line#"${line%%[![:space:]]*}"}"
+      line="${line%"${line##*[![:space:]]}"}"
+      [ -n "$line" ] || continue
+      case "$line" in
+        '#'*) continue ;;
+      esac
+      value=$line
+      break
+    done <<< "$contents"
+  fi
+  [ "$value" != off ] || return 0
+  case "$value" in
+    *m|*h) amount=${value%?} ;;
+    *) amount=$value ;;
+  esac
+  case "$amount" in
+    ''|0*|*[!0-9]*)
+      echo "error: config/omp-max-time must contain off or a positive integer number of seconds, minutes (10m), or hours (1h)" >&2
+      return 1
+      ;;
+  esac
+  printf -- '--max-time=%s ' "$value"
+}
+
 # The verified launch command per adapter. The knowledge half of each adapter
 # (busy-state source, exit command, dialogs, quirks) lives in the harness-adapters skill.
 launch_template() {
@@ -1094,9 +1147,9 @@ launch_template() {
       if [ "$kind" = secondmate ]; then
         # The explicit path is the exact same tracked file native project discovery sees.
         # OMP 17.1.8's discoverExtensionPaths path-resolves and deduplicates before loading, so this guarantees the integration without registering it twice.
-        printf '%s' '__OMPBUN__ __OMPBIN__ --session-dir __OMPSESSIONDIR__ __OMPRESUMEFLAG__--auto-approve __MODELFLAG____EFFORTFLAG____PREWALKFLAG__-e __OMPPRIMARY__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' '__OMPBUN__ __OMPBIN__ --session-dir __OMPSESSIONDIR__ __OMPRESUMEFLAG__--auto-approve __OMPMAXTIME____MODELFLAG____EFFORTFLAG____PREWALKFLAG__-e __OMPPRIMARY__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' '__OMPBUN__ __OMPBIN__ --session-dir __OMPSESSIONDIR__ --auto-approve __MODELFLAG____EFFORTFLAG____PREWALKFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' '__OMPBUN__ __OMPBIN__ --session-dir __OMPSESSIONDIR__ --auto-approve __OMPMAXTIME____MODELFLAG____EFFORTFLAG____PREWALKFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
@@ -1116,8 +1169,10 @@ launch_template() {
   esac
 }
 
+RAW_LAUNCH=0
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
+    RAW_LAUNCH=1
     LAUNCH=$ARG3
     HARNESS=""
     for word in $LAUNCH; do
@@ -1272,6 +1327,13 @@ if [ "$PREWALK_INTO_SET" -eq 1 ]; then
   esac
 fi
 
+OMPMAXTIME=
+OMP_LAUNCH_TEMPLATE=0
+if [ "$RAW_LAUNCH" -eq 0 ] && [ "$HARNESS" = omp ]; then
+  OMP_LAUNCH_TEMPLATE=1
+  OMPMAXTIME=$(omp_max_time_flag) || exit 1
+fi
+
 case "$HARNESS" in
   pi|pi-signed) LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH" ;;
   omp) LAUNCH="FM_OMP_HARNESS=omp $LAUNCH" ;;
@@ -1419,7 +1481,9 @@ if [ "$BACKEND" = orca ]; then
   fm_backend_orca_runtime_check || exit 1
 fi
 if [ "$HARNESS" = omp ]; then
-  OMP_BIN=$("$SCRIPT_DIR/fm-omp-capabilities.sh" --print-binary) || exit 1
+  OMP_CAPABILITY_ARGS=(--print-binary)
+  [ "$OMP_LAUNCH_TEMPLATE" -eq 0 ] || OMP_CAPABILITY_ARGS+=(--require-max-time)
+  OMP_BIN=$("$SCRIPT_DIR/fm-omp-capabilities.sh" "${OMP_CAPABILITY_ARGS[@]}") || exit 1
   OMP_BIN_CANON=$(fm_omp_process_resolve_path "$OMP_BIN") || {
     echo "error: selected OMP executable cannot be canonicalized: $OMP_BIN" >&2
     exit 1
@@ -3216,6 +3280,7 @@ sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 PREWALKFLAG=$(prewalk_flag_for_harness "$HARNESS" "$PREWALK_INTO" "$PREWALK_DISABLED" "$PREWALK_DISABLE_SUPPORTED")
+[ "$OMP_LAUNCH_TEMPLATE" -eq 0 ] || LAUNCH=${LAUNCH//__OMPMAXTIME__/$OMPMAXTIME}
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__PREWALKFLAG__/$PREWALKFLAG}
