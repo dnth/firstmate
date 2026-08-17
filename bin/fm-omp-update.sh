@@ -62,11 +62,13 @@ meta_endpoint_class() {  # <meta-file>
   esac
 }
 
-# SWEEP_DIRS contains tab-separated "<state-dir><owner-label>" records.
-# The empty owner label names the active home.
-SWEEP_DIRS=""
-SWEEP_SEEN=" "
+SWEEP_STATE_DIRS=()
+SWEEP_META_PATHS=()
+SWEEP_META_OWNERS=()
 SWEEP_UNREACHABLE=""
+GATE_TMP_ROOT=""
+GATE_SEQUENCE=0
+GATE_TMP_DIR=""
 
 note_unreachable() {  # <owner-label> <reason>
   SWEEP_UNREACHABLE="$SWEEP_UNREACHABLE$1: $2
@@ -74,7 +76,7 @@ note_unreachable() {  # <owner-label> <reason>
 }
 
 add_sweep_state() {  # <state-dir> <owner-label>
-  local dir=$1 owner=$2 resolved
+  local dir=$1 owner=$2 resolved seen meta index
   if [ ! -d "$dir" ]; then
     if [ -e "$dir" ] || [ -L "$dir" ]; then
       note_unreachable "${owner:-this home}" \
@@ -86,10 +88,31 @@ add_sweep_state() {  # <state-dir> <owner-label>
     note_unreachable "${owner:-this home}" "its local records at $dir cannot be read"
     return 0
   }
-  case "$SWEEP_SEEN" in *" $resolved "*) return 0 ;; esac
-  SWEEP_SEEN="$SWEEP_SEEN$resolved "
-  SWEEP_DIRS="$SWEEP_DIRS$resolved	$owner
-"
+  case "$resolved$owner" in
+    *$'\t'*|*$'\n'*|*$'\r'*)
+      note_unreachable "${owner:-this home}" \
+        "its local records use an unsafe path"
+      return 0
+      ;;
+  esac
+  for seen in "${SWEEP_STATE_DIRS[@]}"; do
+    [ "$seen" != "$resolved" ] || return 0
+  done
+  if ! command ls -A "$resolved" > /dev/null 2>&1; then
+    note_unreachable "${owner:-this home}" \
+      "its local records at $resolved cannot be enumerated"
+    return 0
+  fi
+  SWEEP_STATE_DIRS[${#SWEEP_STATE_DIRS[@]}]=$resolved
+  for meta in "$resolved"/*.meta; do
+    [ -e "$meta" ] || [ -L "$meta" ] || continue
+    index=${#SWEEP_META_PATHS[@]}
+    SWEEP_META_PATHS[$index]=$meta
+    SWEEP_META_OWNERS[$index]=$owner
+    if [ -L "$meta" ] || [ ! -f "$meta" ]; then
+      note_unreachable "${owner:-this home}" "record $meta is not a plain file"
+    fi
+  done
 }
 
 add_sweep_home() {  # <home> <owner-label> [state-dir]
@@ -111,88 +134,105 @@ add_sweep_home() {  # <home> <owner-label> [state-dir]
 }
 
 collect_sweep_dirs() {
-  local meta id home line
-  SWEEP_DIRS=""
-  SWEEP_SEEN=" "
+  local meta id home line endpoint index
+  SWEEP_STATE_DIRS=()
+  SWEEP_META_PATHS=()
+  SWEEP_META_OWNERS=()
   SWEEP_UNREACHABLE=""
   add_sweep_home "$FM_HOME" "" "$STATE"
-  if [ -d "$STATE" ]; then
-    for meta in "$STATE"/*.meta; do
-      [ -e "$meta" ] || [ -L "$meta" ] || continue
-      if [ -L "$meta" ]; then
-        note_unreachable "this home" "record $meta is not a plain file"
-        continue
-      fi
-      [ -f "$meta" ] || continue
+  for index in "${!SWEEP_META_PATHS[@]}"; do
+    [ -z "${SWEEP_META_OWNERS[$index]}" ] || continue
+    meta=${SWEEP_META_PATHS[$index]}
+    if [ -f "$meta" ] && [ ! -L "$meta" ]; then
       meta_is_secondmate "$meta" || continue
       meta_is_remote_route "$meta" && continue
       id=$(basename "$meta" .meta)
       home=$(fm_meta_get "$meta" home)
       add_sweep_home "$home" "second mate $id's home"
-    done
-  fi
+    fi
+  done
   if [ -f "$SECONDMATES_MD" ] && [ ! -L "$SECONDMATES_MD" ]; then
-    while IFS= read -r line || [ -n "$line" ]; do
-      case "$line" in "- "*) ;; *) continue ;; esac
-      if ! secondmate_registry_parse_line "$line"; then
-        note_unreachable "the second mate registry" \
-          "its entry \"$line\" could not be read"
-        continue
-      fi
-      [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || continue
-      add_sweep_home "$SECONDMATE_REGISTRY_HOME" \
-        "second mate $SECONDMATE_REGISTRY_ID's home"
-    done < "$SECONDMATES_MD"
+    if ! cat "$SECONDMATES_MD" > "$GATE_TMP_DIR/secondmates.md" 2>/dev/null; then
+      note_unreachable "the second mate registry" \
+        "$SECONDMATES_MD cannot be read"
+      return 0
+    fi
+    if ! secondmate_registry_validate_bindings "$GATE_TMP_DIR/secondmates.md" \
+      secondmate_registry_path_key; then
+      note_unreachable "the second mate registry" "$SECONDMATE_REGISTRY_ERROR"
+      return 0
+    fi
   elif [ -e "$SECONDMATES_MD" ] || [ -L "$SECONDMATES_MD" ]; then
     note_unreachable "the second mate registry" \
       "$SECONDMATES_MD is not a plain file"
+    return 0
+  else
+    return 0
   fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in "- "*) ;; *) continue ;; esac
+    secondmate_registry_parse_line "$line" || continue
+    [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || continue
+    id=$SECONDMATE_REGISTRY_ID
+    home=$SECONDMATE_REGISTRY_HOME
+    endpoint=$STATE/$id.meta
+    if [ ! -f "$endpoint" ] || [ -L "$endpoint" ]; then
+      note_unreachable "second mate $id" \
+        "its registered local endpoint record $endpoint is unavailable or unsafe"
+    elif ! meta_is_secondmate "$endpoint" || meta_is_remote_route "$endpoint"; then
+      note_unreachable "second mate $id" \
+        "its registered local endpoint record does not describe that local second mate"
+    else
+      if ! secondmate_registry_validate_bindings "$GATE_TMP_DIR/secondmates.md" \
+        secondmate_registry_path_key "$id" "$(fm_meta_get "$endpoint" home)"; then
+        note_unreachable "second mate $id" "$SECONDMATE_REGISTRY_ERROR"
+      fi
+    fi
+    add_sweep_home "$home" "second mate $id's home"
+  done < "$GATE_TMP_DIR/secondmates.md"
 }
 
 BLOCK_KIND=""
 BLOCK_WHAT=""
 
 find_blocker() {
-  local dir owner meta id class reason label out
+  local owner meta id class reason label out index
   BLOCK_KIND=""
   BLOCK_WHAT=""
-  while IFS=$'\t' read -r dir owner; do
-    [ -n "$dir" ] || continue
-    for meta in "$dir"/*.meta; do
-      [ -e "$meta" ] || [ -L "$meta" ] || continue
-      if [ -L "$meta" ]; then
-        if [ -z "$BLOCK_KIND" ]; then
-          BLOCK_KIND=unclassified
-          BLOCK_WHAT="record $meta is not a plain file"
-        fi
-        continue
-      fi
-      [ -f "$meta" ] || continue
-      meta_is_remote_route "$meta" && continue
-      out=$(meta_endpoint_class "$meta" </dev/null)
-      class=${out%% *}
-      reason=${out#* }
-      [ "$class" != stopped ] || continue
-      id=$(basename "$meta" .meta)
-      if meta_is_secondmate "$meta"; then
-        label="second mate $id"
-      else
-        label="task $id"
-      fi
-      [ -z "$owner" ] || label="$label in $owner"
-      if [ "$class" = running ]; then
-        BLOCK_KIND=running
-        BLOCK_WHAT=$label
-        return 0
-      fi
+  for index in "${!SWEEP_META_PATHS[@]}"; do
+    meta=${SWEEP_META_PATHS[$index]}
+    owner=${SWEEP_META_OWNERS[$index]}
+    if [ -L "$meta" ] || [ ! -f "$meta" ]; then
       if [ -z "$BLOCK_KIND" ]; then
         BLOCK_KIND=unclassified
-        BLOCK_WHAT="$label: $reason"
+        BLOCK_WHAT="record $meta is not a plain file"
       fi
-    done
-  done <<EOF
-$SWEEP_DIRS
-EOF
+      continue
+    fi
+    if meta_is_secondmate "$meta" && meta_is_remote_route "$meta"; then
+      continue
+    fi
+    out=$(meta_endpoint_class "$meta" </dev/null)
+    class=${out%% *}
+    reason=${out#* }
+    [ "$class" != stopped ] || continue
+    id=$(basename "$meta" .meta)
+    if meta_is_secondmate "$meta"; then
+      label="second mate $id"
+    else
+      label="task $id"
+    fi
+    [ -z "$owner" ] || label="$label in $owner"
+    if [ "$class" = running ]; then
+      BLOCK_KIND=running
+      BLOCK_WHAT=$label
+      return 0
+    fi
+    if [ -z "$BLOCK_KIND" ]; then
+      BLOCK_KIND=unclassified
+      BLOCK_WHAT="$label: $reason"
+    fi
+  done
   if [ -z "$BLOCK_KIND" ] && [ -n "$SWEEP_UNREACHABLE" ]; then
     BLOCK_KIND=unclassified
     BLOCK_WHAT=$(printf '%s' "$SWEEP_UNREACHABLE" | sed -n '1p')
@@ -201,6 +241,9 @@ EOF
 }
 
 gate_allows_update() {
+  GATE_SEQUENCE=$((GATE_SEQUENCE + 1))
+  GATE_TMP_DIR=$GATE_TMP_ROOT/gate.$GATE_SEQUENCE
+  mkdir "$GATE_TMP_DIR"
   collect_sweep_dirs
   find_blocker || return 0
   if [ "$BLOCK_KIND" = running ]; then
@@ -237,6 +280,12 @@ printf 'omp: channel: %s\n' "$omp_path"
 printf 'omp: before: %s\n' "$(first_line "$before")"
 
 if [ "$mode" = update ]; then
+  GATE_TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-omp-update.XXXXXX") || {
+    printf '%s\n' 'omp: could not create fleet validation state' >&2
+    exit 1
+  }
+  trap 'rm -rf -- "$GATE_TMP_ROOT"' EXIT
+  gate_allows_update
   gate_allows_update
   if ! output=$("$omp_path" update 2>&1); then
     [ -z "$output" ] || printf '%s\n' "$output"
@@ -252,8 +301,10 @@ else
 fi
 [ -z "$output" ] || printf '%s\n' "$output"
 
-after=$("$omp_path" --version 2>/dev/null) || {
-  printf 'omp: could not read version after %s from %s\n' "$mode" "$omp_path" >&2
-  exit 1
-}
-printf 'omp: after: %s\n' "$(first_line "$after")"
+if [ "$mode" = update ]; then
+  after=$("$omp_path" --version 2>/dev/null) || {
+    printf 'omp: could not read version after %s from %s\n' "$mode" "$omp_path" >&2
+    exit 1
+  }
+  printf 'omp: after: %s\n' "$(first_line "$after")"
+fi

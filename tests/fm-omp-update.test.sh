@@ -25,6 +25,10 @@ make_world() {  # <name>
 printf '%s\n' "$*" >> "${OMP_TEST_LOG:?}"
 case "${1:-}" in
   --version)
+    if [ "${OMP_TEST_FAIL_SECOND_VERSION:-0}" -eq 1 ] \
+      && [ "$(grep -c '^--version$' "${OMP_TEST_LOG:?}")" -gt 1 ]; then
+      exit 88
+    fi
     cat "${OMP_TEST_VERSION:?}"
     ;;
   update)
@@ -68,6 +72,42 @@ SH
   chmod +x "$fakebin/tmux"
 }
 
+install_registered_home_tmux() {  # <fakebin>
+  local fakebin=$1
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-windows) printf '%s\n' secondmate child ;;
+  display-message)
+    case " $* " in
+      *' main:secondmate '*) printf '%s\n' bash ;;
+      *' main:child '*) printf '%s\n' claude ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/tmux"
+}
+
+install_recheck_spawn_ls() {  # <fakebin>
+  local fakebin=$1
+  cat > "$fakebin/ls" <<'SH'
+#!/usr/bin/env bash
+count=0
+[ ! -f "${OMP_TEST_RACE_COUNT:?}" ] || count=$(cat "${OMP_TEST_RACE_COUNT:?}")
+count=$((count + 1))
+printf '%s\n' "$count" > "${OMP_TEST_RACE_COUNT:?}"
+if [ "$count" -eq 2 ]; then
+  printf '%s\n' 'window=main:win' 'harness=claude' \
+    > "${OMP_TEST_RACE_STATE:?}/race.meta"
+fi
+exec /bin/ls "$@"
+SH
+  chmod +x "$fakebin/ls"
+}
+
 run_update() {  # <world> [args...]
   local world=$1
   shift
@@ -80,7 +120,7 @@ run_update() {  # <world> [args...]
 }
 
 test_refuses_a_live_fleet() {
-  local world secondmate_world out
+  local world secondmate_world registered_world out
   world=$(make_world live)
   install_alive_tmux "$world/fakebin"
   fm_write_meta "$world/home/state/live.meta" \
@@ -112,7 +152,87 @@ test_refuses_a_live_fleet() {
     "live secondmate refusal uses the persistent-worker label"
   assert_not_contains "$(cat "$secondmate_world/omp.log")" 'update' \
     "live secondmate never reaches omp update"
+
+  registered_world=$(make_world registered-home-live)
+  install_registered_home_tmux "$registered_world/fakebin"
+  mkdir -p "$registered_world/secondmate/state"
+  fm_write_meta "$registered_world/home/state/design.meta" \
+    'window=main:secondmate' \
+    'harness=claude' \
+    'kind=secondmate' \
+    "home=$registered_world/secondmate"
+  fm_write_meta "$registered_world/secondmate/state/child.meta" \
+    'window=main:child' \
+    'harness=claude'
+  printf '%s\n' \
+    "- design - design domain (home: $registered_world/secondmate; scope: design work; projects: alpha; added 2026-08-17)" \
+    > "$registered_world/home/data/secondmates.md"
+  if out=$(run_update "$registered_world" 2>&1); then
+    fail "omp update succeeded while a registered secondmate-home worker was alive"
+  fi
+  assert_contains "$out" \
+    "omp: refused: a worker is still running (task child in second mate design's home)" \
+    "registered secondmate-home refusal is explicit"
+  assert_not_contains "$(cat "$registered_world/omp.log")" 'update' \
+    "registered secondmate-home worker never reaches omp update"
   pass "omp update refuses a live fleet"
+}
+
+test_refuses_unclassifiable_durable_records() {
+  local world missing_world tab_world tab_home out
+  world=$(make_world nonplain-meta)
+  mkdir "$world/home/state/hidden.meta"
+  if out=$(run_update "$world" 2>&1); then
+    fail "omp update succeeded with a non-plain metadata record"
+  fi
+  assert_contains "$out" 'hidden.meta is not a plain file' \
+    "non-plain metadata refusal is explicit"
+  assert_not_contains "$(cat "$world/omp.log")" 'update' \
+    "non-plain metadata never reaches omp update"
+
+  missing_world=$(make_world missing-registered-endpoint)
+  mkdir -p "$missing_world/secondmate/state"
+  printf '%s\n' \
+    "- design - design domain (home: $missing_world/secondmate; scope: design work; projects: alpha; added 2026-08-17)" \
+    > "$missing_world/home/data/secondmates.md"
+  if out=$(run_update "$missing_world" 2>&1); then
+    fail "omp update succeeded without a registered secondmate endpoint record"
+  fi
+  assert_contains "$out" 'registered local endpoint record' \
+    "missing registered secondmate endpoint refusal is explicit"
+  assert_not_contains "$(cat "$missing_world/omp.log")" 'update' \
+    "missing registered endpoint never reaches omp update"
+
+  tab_world=$(make_world unsafe-registry)
+  tab_home="$tab_world/secondmate"$'\t'home
+  mkdir -p "$tab_home/state"
+  printf '%s\n' \
+    "- design - design domain (home: $tab_home; scope: design work; projects: alpha; added 2026-08-17)" \
+    > "$tab_world/home/data/secondmates.md"
+  if out=$(run_update "$tab_world" 2>&1); then
+    fail "omp update succeeded with a delimiter-unsafe registry binding"
+  fi
+  assert_contains "$out" 'unsafe secondmate route for design' \
+    "registry semantic validation refusal is explicit"
+  assert_not_contains "$(cat "$tab_world/omp.log")" 'update' \
+    "unsafe registry binding never reaches omp update"
+  pass "omp update refuses unclassifiable durable records"
+}
+
+test_rechecks_fleet_immediately_before_update() {
+  local world out
+  world=$(make_world recheck)
+  install_alive_tmux "$world/fakebin"
+  install_recheck_spawn_ls "$world/fakebin"
+  if out=$(OMP_TEST_RACE_STATE="$world/home/state" \
+    OMP_TEST_RACE_COUNT="$world/ls-count" run_update "$world" 2>&1); then
+    fail "omp update succeeded when a worker appeared before the binary swap"
+  fi
+  assert_contains "$out" 'omp: refused: a worker is still running (task race)' \
+    "pre-swap fleet recheck catches a newly recorded worker"
+  assert_not_contains "$(cat "$world/omp.log")" 'update' \
+    "pre-swap recheck refusal never reaches omp update"
+  pass "omp update rechecks fleet liveness before the binary swap"
 }
 
 test_check_is_detect_only() {
@@ -122,7 +242,7 @@ test_check_is_detect_only() {
     'window=main:win' \
     'harness=claude'
 
-  out=$(run_update "$world" --check)
+  out=$(OMP_TEST_FAIL_SECOND_VERSION=1 run_update "$world" --check)
   log=$(cat "$world/omp.log")
   assert_contains "$out" 'Current version: 17.3.4' \
     "check reports the current version"
@@ -165,6 +285,8 @@ test_never_forces_or_touches_the_daemon() {
 }
 
 test_refuses_a_live_fleet
+test_refuses_unclassifiable_durable_records
+test_rechecks_fleet_immediately_before_update
 test_check_is_detect_only
 test_never_forces_or_touches_the_daemon
 
