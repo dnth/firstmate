@@ -22,7 +22,7 @@
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
-#   OMP launches carry the runtime bound configured by config/omp-max-time.
+#   Verified OMP launch templates carry the runtime bound configured by config/omp-max-time.
 #   docs/configuration.md "OMP runtime bound" owns its default and accepted values.
 #   --prewalk-into <model-spec> opts an OMP profile into native Prewalk and records
 #   the effective target in task metadata. An unusable target falls back with

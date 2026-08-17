@@ -270,11 +270,12 @@ For OMP secondmate launches, it explicitly loads that home's `.omp/extensions/fm
 
 ### OMP runtime bound (config/omp-max-time)
 
-`config/omp-max-time` is a local, gitignored, non-inherited runtime bound for every OMP crewmate, scout, or secondmate this home launches.
+`config/omp-max-time` is a local, gitignored, non-inherited runtime bound for each OMP crewmate, scout, or secondmate this home launches through the verified adapter.
 An absent file, an empty file, or a file containing only blank and comment lines applies the default `--max-time=3h`.
+When present, the config path must be a readable, ordinary non-symlink regular file containing only printable ASCII plus tabs and line endings.
 The first non-empty, non-comment line may instead be a positive integer number of seconds, a positive integer suffixed with `m` for minutes, or a positive integer suffixed with `h` for hours, such as `3600`, `10m`, or `1h`.
 The literal `off` emits no `--max-time` flag and restores an unbounded OMP launch.
-Any other value, or a config path that is not a regular file, refuses the OMP spawn before endpoint creation instead of silently ignoring the bound.
+Any other value or invalid config file refuses the OMP spawn before endpoint creation instead of silently ignoring the bound.
 Non-OMP harnesses and raw launch commands do not read or receive this OMP-only setting.
 [`bin/fm-spawn.sh`](../bin/fm-spawn.sh) owns launch construction, while [`bin/fm-omp-capabilities.sh`](../bin/fm-omp-capabilities.sh) refuses an installed OMP executable whose help does not advertise `--max-time=<value>`.
 
