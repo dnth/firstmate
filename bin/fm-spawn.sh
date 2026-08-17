@@ -1076,18 +1076,15 @@ omp_max_time_flag() {
       echo "error: config/omp-max-time could not be read; refusing an unbounded OMP launch" >&2
       return 1
     fi
-    if ! printf '%s\n' "$byte_dump" | awk '
+    if ! contents=$(printf '%s\n' "$byte_dump" | awk '
       {
         for (i = 1; i <= NF; i++) {
           if ($i != 9 && $i != 10 && $i != 13 && ($i < 32 || $i > 126)) exit 1
+          printf "%c", $i
         }
       }
-    '; then
+    '); then
       echo "error: config/omp-max-time must contain text only; NUL and other non-text bytes are invalid" >&2
-      return 1
-    fi
-    if ! contents=$(< "$config_file"); then
-      echo "error: config/omp-max-time could not be read; refusing an unbounded OMP launch" >&2
       return 1
     fi
     while IFS= read -r line || [ -n "$line" ]; do

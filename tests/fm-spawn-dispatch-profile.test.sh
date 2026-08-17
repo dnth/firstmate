@@ -262,6 +262,22 @@ SH
   printf '%s\n' "$fakebin"
 }
 
+install_replacing_od() {
+  local fakebin=$1
+  cat > "$fakebin/od" <<'SH'
+#!/usr/bin/env bash
+"$FM_FAKE_OD_REAL" "$@"
+rc=$?
+[ "$rc" -eq 0 ] || exit "$rc"
+target=${!#}
+if [ -n "${FM_FAKE_OD_REPLACE_FILE:-}" ] && [ "$target" = "$FM_FAKE_OD_REPLACE_FILE" ]; then
+  printf 'off\0' > "$target.replacement"
+  mv "$target.replacement" "$target"
+fi
+SH
+  chmod +x "$fakebin/od"
+}
+
 make_spawn_case() {
   local name=$1 harness=$2 case_dir home proj wt fakebin launchlog id
   shift 2
@@ -892,7 +908,7 @@ test_omp_threads_exact_identity_model_and_every_thinking_level() {
 }
 
 test_omp_threads_configurable_max_time() {
-  local rec id out status launch corrupt_case corrupt_payload
+  local rec id out status launch corrupt_case corrupt_payload config_hex
 
   id=$(profile_id profile-omp-max-time-default-z8oa)
   rec=$(make_spawn_case profile-omp-max-time-default omp "$id")
@@ -916,6 +932,25 @@ test_omp_threads_configurable_max_time() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "--auto-approve --max-time=10m -e" \
     "configured OMP launch did not receive the max-time override"
+
+  id=$(profile_id profile-omp-max-time-snapshot-z8oa)
+  rec=$(make_spawn_case profile-omp-max-time-snapshot omp "$id")
+  read_case_record "$rec"
+  printf '10m\n' > "$HOME_DIR/config/omp-max-time"
+  install_replacing_od "$FAKEBIN_DIR"
+  export FM_FAKE_OD_REAL
+  FM_FAKE_OD_REAL=$(command -v od)
+  export FM_FAKE_OD_REPLACE_FILE="$HOME_DIR/config/omp-max-time"
+  export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  unset FM_FAKE_OD_REPLACE_FILE FM_FAKE_OD_REAL
+  expect_code 0 "$status" "OMP max-time launch should use its validated byte snapshot"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--auto-approve --max-time=10m -e" \
+    "atomic config replacement changed the validated max-time snapshot"
+  config_hex=$(od -An -tx1 "$HOME_DIR/config/omp-max-time" | tr -d ' \n')
+  [ "$config_hex" = 6f666600 ] || fail "snapshot regression did not replace the live config with off plus NUL"
 
   id=$(profile_id profile-omp-max-time-off-z8oa)
   rec=$(make_spawn_case profile-omp-max-time-off omp "$id")
