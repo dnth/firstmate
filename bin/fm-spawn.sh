@@ -1066,12 +1066,16 @@ fi
 # The first non-empty, non-comment config line is authoritative, while a file
 # without a directive retains the default.
 omp_max_time_flag() {
-  local config_file="$CONFIG/omp-max-time" line value=3h amount
-  if [ -e "$config_file" ]; then
-    [ -f "$config_file" ] || {
+  local config_file="$CONFIG/omp-max-time" contents line value=3h amount
+  if [ -e "$config_file" ] || [ -L "$config_file" ]; then
+    { [ -f "$config_file" ] && [ ! -L "$config_file" ]; } || {
       echo "error: config/omp-max-time must be a regular file containing off or a positive duration such as 3600, 10m, or 1h" >&2
       return 1
     }
+    if ! contents=$(< "$config_file"); then
+      echo "error: config/omp-max-time could not be read; refusing an unbounded OMP launch" >&2
+      return 1
+    fi
     while IFS= read -r line || [ -n "$line" ]; do
       line="${line#"${line%%[![:space:]]*}"}"
       line="${line%"${line##*[![:space:]]}"}"
@@ -1081,7 +1085,7 @@ omp_max_time_flag() {
       esac
       value=$line
       break
-    done < "$config_file"
+    done <<< "$contents"
   fi
   [ "$value" != off ] || return 0
   case "$value" in
@@ -1154,8 +1158,10 @@ launch_template() {
   esac
 }
 
+RAW_LAUNCH=0
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
+    RAW_LAUNCH=1
     LAUNCH=$ARG3
     HARNESS=""
     for word in $LAUNCH; do
@@ -1311,9 +1317,11 @@ if [ "$PREWALK_INTO_SET" -eq 1 ]; then
 fi
 
 OMPMAXTIME=
-case "$LAUNCH" in
-  *__OMPMAXTIME__*) OMPMAXTIME=$(omp_max_time_flag) || exit 1 ;;
-esac
+OMP_LAUNCH_TEMPLATE=0
+if [ "$RAW_LAUNCH" -eq 0 ] && [ "$HARNESS" = omp ]; then
+  OMP_LAUNCH_TEMPLATE=1
+  OMPMAXTIME=$(omp_max_time_flag) || exit 1
+fi
 
 case "$HARNESS" in
   pi|pi-signed) LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH" ;;
@@ -3259,7 +3267,7 @@ sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 PREWALKFLAG=$(prewalk_flag_for_harness "$HARNESS" "$PREWALK_INTO" "$PREWALK_DISABLED" "$PREWALK_DISABLE_SUPPORTED")
-LAUNCH=${LAUNCH//__OMPMAXTIME__/$OMPMAXTIME}
+[ "$OMP_LAUNCH_TEMPLATE" -eq 0 ] || LAUNCH=${LAUNCH//__OMPMAXTIME__/$OMPMAXTIME}
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__PREWALKFLAG__/$PREWALKFLAG}

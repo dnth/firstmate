@@ -144,6 +144,22 @@ Normal `/exit` stopped each OMP process without killing the private tmux server,
 The guarded primary, worker/scout, and secondmate owners reran on 2026-08-01 at head `491bc809a38a84f5ea651fd051b509cb511149a1` and returned four green results.
 The OMP 17.2.10 watcher-input regression passed on 2026-08-07 with the editable draft intact; the exact command and bounded output are recorded in [`supervision.md`](supervision.md#native-session-start-delivery).
 
+The OMP max-time launch parser guard passed on 2026-08-17 against OMP 17.3.4 without starting a model call:
+
+```sh
+omp --version
+FM_OMP_MAX_TIME_LIVE_E2E=1 tests/fm-omp-max-time-live-e2e.test.sh
+```
+
+Observed bounded output:
+
+```text
+omp/17.3.4
+ok - OMP omp/17.3.4 accepts max-time seconds, minutes, and hours
+```
+
+The guard invokes the installed OMP entrypoint with `--max-time=1`, `--max-time=1m`, and `--max-time=1h`, requires zero-exit help parsing for every supported duration form, and fails with the detected OMP version when the capability drifts.
+
 The native Prewalk launch surface was checked on 2026-08-11 against OMP 17.2.11 without starting a model call:
 
 ```sh

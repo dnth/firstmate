@@ -626,16 +626,17 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   rec=$(make_spawn_case profile-raw claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
+  printf 'invalid-for-omp\n' > "$HOME_DIR/config/omp-max-time"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "custom-agent --flag")
+    "$id" "$PROJ_DIR" "custom-agent --flag __OMPMAXTIME__")
   status=$?
   expect_code 0 "$status" "raw launch command should satisfy active dispatch-profile requirement"
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
-  pass "active crew-dispatch profile allows the raw launch-command escape hatch"
+  [ "$launch" = "custom-agent --flag __OMPMAXTIME__" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  pass "active crew-dispatch profile leaves the raw launch-command escape hatch unchanged"
 }
 
 test_claude_threads_model_and_effort() {
@@ -920,6 +921,33 @@ test_omp_threads_configurable_max_time() {
   [ ! -s "$CASE_DIR/endpoint.log" ] || fail "invalid max-time config created a backend endpoint"
   [ ! -s "$LAUNCH_LOG" ] || fail "invalid max-time config typed an OMP launch command"
 
+  id=$(profile_id profile-omp-max-time-dangling-z8oa)
+  rec=$(make_spawn_case profile-omp-max-time-dangling omp "$id")
+  read_case_record "$rec"
+  ln -s missing "$HOME_DIR/config/omp-max-time"
+  unset FM_TEST_OMP_ACK
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "dangling OMP max-time config should refuse"
+  assert_contains "$out" "config/omp-max-time must be a regular file" \
+    "dangling max-time refusal did not identify the invalid path"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "dangling max-time config created a backend endpoint"
+  [ ! -s "$LAUNCH_LOG" ] || fail "dangling max-time config typed an OMP launch command"
+
+  id=$(profile_id profile-omp-max-time-unreadable-z8oa)
+  rec=$(make_spawn_case profile-omp-max-time-unreadable omp "$id")
+  read_case_record "$rec"
+  printf '10m\n' > "$HOME_DIR/config/omp-max-time"
+  chmod 000 "$HOME_DIR/config/omp-max-time"
+  unset FM_TEST_OMP_ACK
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "unreadable OMP max-time config should refuse"
+  assert_contains "$out" "config/omp-max-time could not be read" \
+    "unreadable max-time refusal did not explain the failure"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "unreadable max-time config created a backend endpoint"
+  [ ! -s "$LAUNCH_LOG" ] || fail "unreadable max-time config typed an OMP launch command"
+
   id=$(profile_id profile-claude-ignores-omp-max-time-z8oa)
   rec=$(make_spawn_case profile-claude-ignores-omp-max-time claude "$id")
   read_case_record "$rec"
@@ -929,7 +957,7 @@ test_omp_threads_configurable_max_time() {
   expect_code 0 "$status" "non-OMP spawn should ignore config/omp-max-time"
   launch=$(cat "$LAUNCH_LOG")
   assert_not_contains "$launch" "--max-time" "OMP max-time config leaked into another harness"
-  pass "OMP max-time defaults to 3h, supports override and off, rejects invalid input, and stays OMP-only"
+  pass "OMP max-time defaults to 3h, supports override and off, fails closed, and stays OMP-only"
 }
 
 test_omp_broker_env_uses_mode_600_file_without_exposing_bearer() {
