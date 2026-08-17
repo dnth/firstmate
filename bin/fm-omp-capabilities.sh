@@ -62,6 +62,7 @@ require_help_token() {
 require_help_token '--model=' '--model=<value>'
 require_help_token '--thinking=' '--thinking=<value>'
 require_help_token '--auto-approve' '--auto-approve'
+require_help_token '--max-time=' '--max-time=<value>'
 require_help_token '--session-dir=' '--session-dir=<value>'
 require_help_token '--extension=' '--extension=<value>'
 require_help_token '--resume=' '--resume=<value>'

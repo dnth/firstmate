@@ -234,7 +234,7 @@ SH
 #!/usr/bin/env bun
 case "${1:-}" in
   --help)
-    printf '%s\n' '--model=<value>' '--thinking=<value>' '--auto-approve' '--session-dir=<value>' '-e, --extension=<value>' '-r, --resume=<value>' '--prewalk native-switch' '--prewalk-into=<value>' '--config=<value>'
+    printf '%s\n' '--model=<value>' '--thinking=<value>' '--auto-approve' '--max-time=<value>' '--session-dir=<value>' '-e, --extension=<value>' '-r, --resume=<value>' '--prewalk native-switch' '--prewalk-into=<value>' '--config=<value>'
     [ "${FM_FAKE_OMP_NO_PREWALK:-1}" != 1 ] || printf '%s\n' '--no-prewalk'
     ;;
   --version) printf 'omp/17.2.11\n' ;;
@@ -854,7 +854,7 @@ test_omp_threads_exact_identity_model_and_every_thinking_level() {
     launch=$(cat "$LAUNCH_LOG")
     expected_bin=$(cd "$FAKEBIN_DIR" && pwd -P)/omp
     expected_bun=$(cd "$FAKEBIN_DIR" && pwd -P)/bun
-    assert_contains "$launch" "FM_OMP_HARNESS=omp '$expected_bun' '$expected_bin' --session-dir '/tmp/fm-$id/omp-sessions' --auto-approve --model 'openai-codex/gpt-5.6-sol' --thinking '$effort' -e '$HOME_DIR/state/$id.omp-ext.ts'" \
+    assert_contains "$launch" "FM_OMP_HARNESS=omp '$expected_bun' '$expected_bin' --session-dir '/tmp/fm-$id/omp-sessions' --auto-approve --max-time=3h --model 'openai-codex/gpt-5.6-sol' --thinking '$effort' -e '$HOME_DIR/state/$id.omp-ext.ts'" \
       "OMP launch did not execute the canonical Bun/OMP pair with unattended mode, model, thinking, and extension"
     assert_grep "omp_bun=$expected_bun" "$HOME_DIR/state/$id.meta" \
       "OMP launch metadata did not bind the same Bun executable used by the literal pane command"
@@ -867,6 +867,69 @@ test_omp_threads_exact_identity_model_and_every_thinking_level() {
     unset FM_TEST_OMP_ACK
   done
   pass "OMP launches through its metadata-bound canonical Bun/OMP pair and forwards every supported thinking level"
+}
+
+test_omp_threads_configurable_max_time() {
+  local rec id out status launch
+
+  id=$(profile_id profile-omp-max-time-default-z8oa)
+  rec=$(make_spawn_case profile-omp-max-time-default omp "$id")
+  read_case_record "$rec"
+  export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "OMP spawn without max-time config should use the default"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--auto-approve --max-time=3h -e" \
+    "unconfigured OMP launch did not receive the three-hour default"
+
+  id=$(profile_id profile-omp-max-time-override-z8oa)
+  rec=$(make_spawn_case profile-omp-max-time-override omp "$id")
+  read_case_record "$rec"
+  printf '# bounded workers\n  10m  \n' > "$HOME_DIR/config/omp-max-time"
+  export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "OMP spawn with a max-time override should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--auto-approve --max-time=10m -e" \
+    "configured OMP launch did not receive the max-time override"
+
+  id=$(profile_id profile-omp-max-time-off-z8oa)
+  rec=$(make_spawn_case profile-omp-max-time-off omp "$id")
+  read_case_record "$rec"
+  printf 'off\n' > "$HOME_DIR/config/omp-max-time"
+  export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "OMP spawn with max-time disabled should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "--max-time" \
+    "config/omp-max-time=off did not restore an unbounded OMP launch"
+
+  id=$(profile_id profile-omp-max-time-invalid-z8oa)
+  rec=$(make_spawn_case profile-omp-max-time-invalid omp "$id")
+  read_case_record "$rec"
+  printf '10s\n' > "$HOME_DIR/config/omp-max-time"
+  unset FM_TEST_OMP_ACK
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "invalid OMP max-time config should refuse"
+  assert_contains "$out" "config/omp-max-time must contain off or a positive integer" \
+    "invalid max-time refusal did not explain the accepted values"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "invalid max-time config created a backend endpoint"
+  [ ! -s "$LAUNCH_LOG" ] || fail "invalid max-time config typed an OMP launch command"
+
+  id=$(profile_id profile-claude-ignores-omp-max-time-z8oa)
+  rec=$(make_spawn_case profile-claude-ignores-omp-max-time claude "$id")
+  read_case_record "$rec"
+  printf 'invalid-for-omp\n' > "$HOME_DIR/config/omp-max-time"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "non-OMP spawn should ignore config/omp-max-time"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "--max-time" "OMP max-time config leaked into another harness"
+  pass "OMP max-time defaults to 3h, supports override and off, rejects invalid input, and stays OMP-only"
 }
 
 test_omp_broker_env_uses_mode_600_file_without_exposing_bearer() {
@@ -1473,7 +1536,7 @@ test_omp_whitespace_identity_paths_refuse_before_endpoint() {
 
 test_omp_missing_binary_or_capability_refuses_before_endpoint_and_metadata() {
   local mode rec id out status endpoint_log
-  for mode in missing-binary missing-thinking existing-artifact; do
+  for mode in missing-binary missing-thinking missing-max-time existing-artifact; do
     id=$(profile_id "profile-omp-$mode-z8q")
     rec=$(make_spawn_case "profile-omp-$mode" omp "$id")
     read_case_record "$rec"
@@ -1482,6 +1545,7 @@ test_omp_missing_binary_or_capability_refuses_before_endpoint_and_metadata() {
     case "$mode" in
       missing-binary) rm -f "$FAKEBIN_DIR/omp" ;;
       missing-thinking) sed -i '/thinking/d' "$FAKEBIN_DIR/omp" ;;
+      missing-max-time) sed -i "s/ '--max-time=<value>'//" "$FAKEBIN_DIR/omp" ;;
       existing-artifact) : > "$HOME_DIR/state/$id.status" ;;
     esac
 
@@ -1495,6 +1559,8 @@ test_omp_missing_binary_or_capability_refuses_before_endpoint_and_metadata() {
     status=$?
     expect_code 1 "$status" "OMP $mode should refuse before launch"
     assert_contains "$out" "omp" "OMP preflight refusal did not name the selected runtime"
+    [ "$mode" != missing-max-time ] || assert_contains "$out" "--max-time=<value>" \
+      "OMP max-time capability refusal did not name the missing flag"
     assert_absent "$HOME_DIR/state/$id.meta" "OMP $mode refusal wrote task metadata"
     [ ! -s "$endpoint_log" ] || fail "OMP $mode refusal created a backend endpoint"
     [ ! -s "$LAUNCH_LOG" ] || fail "OMP $mode refusal typed a launch command"
@@ -2045,6 +2111,7 @@ test_pi_threads_model_and_max_effort
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_omp_threads_exact_identity_model_and_every_thinking_level
+test_omp_threads_configurable_max_time
 test_omp_broker_env_uses_mode_600_file_without_exposing_bearer
 test_secondmate_descendant_omp_inherits_complete_broker_pair
 test_omp_prewalk_threads_native_target_and_metadata

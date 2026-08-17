@@ -65,6 +65,7 @@ if (process.argv.includes("--hold")) {
 --model=provider/id
 --thinking=level
 --auto-approve
+--max-time=value
 --approval-mode=mode
 --extension=path
 --session-dir=path
@@ -442,7 +443,7 @@ test_launch_and_exact_resume() {
   assert_contains "$(cat "$LAUNCH_LOG")" "FM_OMP_SESSION_POINTER='$HOME_DIR/state/.omp-session'" "OMP launch did not bind the home-owned session pointer"
   assert_contains "$(cat "$LAUNCH_LOG")" "'$TEST_OMP_BUN' '$TEST_OMP_BIN'" \
     "OMP launch did not use the capability-checked canonical Bun/OMP pair"
-  assert_contains "$(cat "$LAUNCH_LOG")" "--session-dir '$HOME_DIR/state/omp-sessions' --auto-approve --model 'test/model' --thinking 'low'" "OMP launch did not preserve exact pins and durable session directory"
+  assert_contains "$(cat "$LAUNCH_LOG")" "--session-dir '$HOME_DIR/state/omp-sessions' --auto-approve --max-time=3h --model 'test/model' --thinking 'low'" "OMP launch did not preserve exact pins and durable session directory"
   assert_contains "$(cat "$LAUNCH_LOG")" "-e '$HOME_DIR/.omp/extensions/fm-primary-omp.ts'" "OMP launch did not preserve its exact adapter"
   assert_not_contains "$(cat "$LAUNCH_LOG")" '__OMP' "OMP launch retained an unsubstituted template placeholder"
   assert_contains "$(cat "$MAIN_STATE/$TASK_ID.meta")" 'harness=omp' "OMP identity was not recorded exactly"

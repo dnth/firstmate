@@ -20,6 +20,7 @@ case "\${1:-}" in
 --model=<value>
 --thinking=<value>
 --auto-approve
+--max-time=<value>
 --session-dir=<value>
 -e, --extension=<value>
 -r, --resume=<value>
@@ -138,7 +139,7 @@ test_capability_probe_rejects_non_bun_entrypoint() {
 
 test_capability_probe_reports_every_missing_requirement() {
   local capability fakebin out status
-  for capability in '--model=' '--thinking=' '--auto-approve' '--session-dir=' '--extension=' '--resume='; do
+  for capability in '--model=' '--thinking=' '--auto-approve' '--max-time=' '--session-dir=' '--extension=' '--resume='; do
     fakebin="$TMP_ROOT/missing-${capability//[^a-z]/}"
     mkdir -p "$fakebin"
     write_fake_omp "$fakebin/omp" "$capability"
