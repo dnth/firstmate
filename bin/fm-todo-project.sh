@@ -23,9 +23,9 @@
 # phases are projected - "Active" (every in-flight task) and "Ready" (every
 # dispatchable queued task from `tasks-axi ready`). A phase with no tasks is
 # omitted rather than emitted empty, because the tool requires at least one item
-# per phase; an empty board therefore emits `[]`. Item text is one line, capped
-# at FM_TODO_ITEM_MAX characters (default 100) so a long title cannot bloat the
-# projection.
+# per phase; an empty board therefore emits `[]`. Item text is one line and its
+# title is capped so the complete durable ID and separator are always preserved,
+# even when FM_TODO_ITEM_MAX (default 100) is smaller than that identity prefix.
 #
 # --check is REPORT-ONLY and never mutates the board. Reconciliation stays with
 # firstmate's judgment: an in-flight row with no worker may need a relaunch, a
@@ -36,10 +36,10 @@
 #
 # Findings:
 #   DRIFT inflight-no-worker: <id> - <reason>
-#     The board says in-flight but bin/fm-crew-state.sh - the single owner of
-#     current-state reconciliation - can find no worker at all (state `unknown`
-#     from source `none`: no metadata, a torn-down worktree, or a recorded
-#     endpoint that is gone). Liveness is never reimplemented here.
+#     The board says in-flight but its recorded metadata, worktree, window, or
+#     backend endpoint is gone. This uses fm-backend.sh's shared cheap endpoint
+#     existence primitive; bin/fm-crew-state.sh remains the owner of richer
+#     run-step, busy-state, and current-state reconciliation.
 #   DRIFT hold-expired: <id> - hold_until <date> passed
 #     A date-gated hold whose deadline has lapsed. tasks-axi's own gate is
 #     inactive ON and after that date, so `--state held` no longer lists these
@@ -52,7 +52,7 @@
 # DRIFT-CHECK-SKIPPED line naming the reason (still exit 0) and --emit refuses on
 # stderr with a non-zero exit rather than printing `[]`, which would wipe a live
 # todo list on a tooling failure.
-set -eu
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -87,8 +87,13 @@ if [ -z "${FM_HOME+x}" ] || [ -z "${FM_HOME:-}" ]; then
 fi
 [ -d "$FM_HOME" ] || fail "FM_HOME '$FM_HOME' is not a directory"
 
+# shellcheck source=bin/fm-backend.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-backend.sh"
+
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 BOARD="$DATA/backlog.md"
 
 ITEM_MAX=${FM_TODO_ITEM_MAX:-100}
@@ -113,15 +118,15 @@ board_unavailable_reason() {
   printf ''
 }
 
-# axi_rows <listing> <field> [<field>...]: TAB-separated selected fields, one
-# row per task. tasks-axi renders a `tasks[N]{f1,f2,...}:` (or `ready[N]{...}:`)
-# header naming the columns in order, then one indented row per task with
-# double-quoted fields wherever a value needs it. Reading the header rather than
-# assuming positions keeps this correct when a --fields list changes the tail.
+# axi_rows <table> <listing> <field> [<field>...]: validated TAB-separated
+# selected fields, one row per task. A successful empty listing must carry the
+# tool's explicit count-zero scalar; a non-empty listing must carry the expected
+# table header with every requested field and the declared number of parseable
+# rows. Anything else is incompatible rather than an empty board.
 axi_rows() {
-  local listing=$1
-  shift
-  printf '%s\n' "$listing" | awk -v want="$*" '
+  local table=$1 listing=$2
+  shift 2
+  awk -v table="$table" -v want="$*" '
     function split_row(line, out,   n, i, c, field, inq, nxt) {
       n = 0; field = ""; inq = 0; i = 1
       while (i <= length(line)) {
@@ -140,17 +145,30 @@ axi_rows() {
         if (c == ",") { out[++n] = field; field = ""; i += 1; continue }
         field = field c; i += 1
       }
+      if (inq) return -1
       out[++n] = field
       return n
     }
     BEGIN { nwant = split(want, wanted, " ") }
+    $0 == "count: 0" { zero_count = 1; next }
+    table == "tasks" && /^tasks: 0 .*tasks in this backlog$/ { zero_scalar = 1; next }
+    table == "ready" && $0 == "ready: 0 unblocked queued tasks" { zero_scalar = 1; next }
     /^help\[/ { exit }
     /^(tasks|ready)\[[0-9]+\]\{.*\}:$/ {
+      name = $0
+      sub(/\[.*/, "", name)
+      if (name != table) { rows = 0; next }
       spec = $0
       sub(/^[a-z]+\[[0-9]+\]\{/, "", spec)
       sub(/\}:$/, "", spec)
+      declared = $0
+      sub(/^[a-z]+\[/, "", declared)
+      sub(/\].*$/, "", declared)
+      for (key in index_of) delete index_of[key]
       ncol = split(spec, cols, ",")
       for (i = 1; i <= ncol; i++) index_of[cols[i]] = i
+      for (i = 1; i <= nwant; i++) if (!index_of[wanted[i]]) bad = 1
+      header = 1
       rows = 1
       next
     }
@@ -159,17 +177,28 @@ axi_rows() {
       sub(/^[[:space:]]+/, "", line)
       sub(/[[:space:]]+$/, "", line)
       if (line == "") next
-      split_row(line, cells)
+      for (key in cells) delete cells[key]
+      ncells = split_row(line, cells)
+      if (ncells != ncol) { bad = 1; next }
       out = ""
       for (i = 1; i <= nwant; i++) {
         col = index_of[wanted[i]]
         out = out (i > 1 ? "\t" : "") (col ? cells[col] : "")
       }
       print out
+      seen++
       next
     }
     { rows = 0 }
-  '
+    END {
+      if (header) {
+        if (bad || seen != declared) exit 3
+        exit 0
+      }
+      if (zero_count && zero_scalar) exit 0
+      exit 3
+    }
+  ' <<< "$listing"
 }
 
 axi_list() {  # <state> [<extra-fields>]
@@ -190,19 +219,27 @@ json_escape() {  # <text>
   printf '%s' "$s"
 }
 
-# One todo item line: "<id> - <title>", whitespace-collapsed and length-capped.
+# One todo item line: "<id> - <title>", whitespace-collapsed with only the
+# title length-capped. A too-small configured cap is raised per item just enough
+# to preserve the ID, separator, and an ellipsis.
 todo_item() {  # <id> <title>
-  local id=$1 title=$2 item
+  local id=$1 title=$2 prefix item_max title_max
   title=$(printf '%s' "$title" | tr '\t\n' '  ' | tr -s ' ' | sed 's/^ //; s/ $//')
-  if [ -n "$title" ] && [ "$title" != '-' ]; then
-    item="$id - $title"
-  else
-    item=$id
+  [ -n "$title" ] || title=-
+  prefix="$id - "
+  item_max=$ITEM_MAX
+  if [ "$item_max" -lt $((${#prefix} + 1)) ]; then
+    item_max=$((${#prefix} + 1))
   fi
-  if [ "${#item}" -gt "$ITEM_MAX" ]; then
-    item="${item:0:$((ITEM_MAX - 1))}…"
+  title_max=$((item_max - ${#prefix}))
+  if [ "${#title}" -gt "$title_max" ]; then
+    if [ "$title_max" -eq 1 ]; then
+      title=…
+    else
+      title="${title:0:$((title_max - 1))}…"
+    fi
   fi
-  printf '%s' "$item"
+  printf '%s%s' "$prefix" "$title"
 }
 
 # Collect "<id>\t<title>" rows for one phase into a JSON phase object, or
@@ -222,17 +259,21 @@ phase_json() {  # <phase-name> <rows>
 }
 
 run_emit() {
-  local reason in_flight ready phases=() rendered
+  local reason in_flight ready in_flight_rows ready_rows phases=() rendered
   reason=$(board_unavailable_reason)
   [ -z "$reason" ] || fail "cannot project the todo: $reason"
 
   in_flight=$(axi_list in_flight) || fail "tasks-axi list --state in_flight failed: $in_flight"
   ready=$(tasks-axi ready --file "$BOARD" 2>&1) || fail "tasks-axi ready failed: $ready"
+  in_flight_rows=$(axi_rows tasks "$in_flight" id title) \
+    || fail "tasks-axi list --state in_flight returned an unrecognized listing"
+  ready_rows=$(axi_rows ready "$ready" id title) \
+    || fail "tasks-axi ready returned an unrecognized listing"
 
-  if rendered=$(phase_json Active "$(axi_rows "$in_flight" id title)"); then
+  if rendered=$(phase_json Active "$in_flight_rows"); then
     phases+=("$rendered")
   fi
-  if rendered=$(phase_json Ready "$(axi_rows "$ready" id title)"); then
+  if rendered=$(phase_json Ready "$ready_rows"); then
     phases+=("$rendered")
   fi
 
@@ -252,23 +293,37 @@ run_emit() {
 
 # --- check ------------------------------------------------------------------
 
-# An in-flight row whose worker cannot be found at all. bin/fm-crew-state.sh is
-# the owner of that verdict: `state: unknown · source: none · <reason>` is its
-# one canonical way of saying no current-state source exists for this task.
+# An in-flight row whose recorded worker resources no longer exist. This is the
+# same cheap metadata and endpoint-liveness boundary used by session start.
 check_inflight() {  # <in_flight-listing>
-  local listing=$1 id verdict reason
+  local listing=$1 id meta worktree window backend target
   while IFS= read -r id; do
     [ -n "$id" ] || continue
-    verdict=$("$SCRIPT_DIR/fm-crew-state.sh" "$id" 2>/dev/null) || continue
-    case "$verdict" in
-      'state: unknown'*'source: none'*) ;;
-      *) continue ;;
-    esac
-    reason=${verdict##*source: none}
-    reason=${reason# · }
-    [ -n "$reason" ] || reason="no current-state source available"
-    printf 'DRIFT inflight-no-worker: %s - %s\n' "$id" "$reason"
-  done <<< "$(axi_rows "$listing" id)"
+    meta="$STATE/$id.meta"
+    if [ ! -f "$meta" ]; then
+      printf 'DRIFT inflight-no-worker: %s - no metadata\n' "$id"
+      continue
+    fi
+    worktree=$(fm_meta_get "$meta" worktree)
+    if [ -z "$worktree" ]; then
+      printf 'DRIFT inflight-no-worker: %s - no worktree recorded\n' "$id"
+      continue
+    fi
+    if [ ! -d "$worktree" ]; then
+      printf 'DRIFT inflight-no-worker: %s - worktree is gone\n' "$id"
+      continue
+    fi
+    window=$(fm_meta_get "$meta" window)
+    if [ -z "$window" ]; then
+      printf 'DRIFT inflight-no-worker: %s - no window recorded\n' "$id"
+      continue
+    fi
+    backend=$(fm_backend_of_meta "$meta")
+    target=$(fm_backend_target_of_meta "$meta")
+    if ! fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
+      printf 'DRIFT inflight-no-worker: %s - recorded endpoint is dead\n' "$id"
+    fi
+  done <<< "$(axi_rows tasks "$listing" id)"
 }
 
 # A date-gated hold whose deadline has lapsed.
@@ -288,7 +343,7 @@ check_holds() {  # <listing>...
         continue
       fi
       printf 'DRIFT hold-expired: %s - hold_until %s passed\n' "$id" "$hold_until"
-    done <<< "$(axi_rows "$listing" id hold_until)"
+    done <<< "$(axi_rows tasks "$listing" id hold_until)"
   done
 }
 
@@ -304,13 +359,21 @@ run_check() {
   # plus a named skip is more useful than silence.
   local -a hold_listings=()
   if in_flight=$(axi_list in_flight hold_until); then
-    check_inflight "$in_flight"
-    hold_listings+=("$in_flight")
+    if axi_rows tasks "$in_flight" id hold_until >/dev/null; then
+      check_inflight "$in_flight"
+      hold_listings+=("$in_flight")
+    else
+      printf 'DRIFT-CHECK-SKIPPED: tasks-axi list --state in_flight returned an unrecognized listing\n'
+    fi
   else
     printf 'DRIFT-CHECK-SKIPPED: tasks-axi list --state in_flight failed\n'
   fi
   if queued=$(axi_list queued hold_until); then
-    hold_listings+=("$queued")
+    if axi_rows tasks "$queued" id hold_until >/dev/null; then
+      hold_listings+=("$queued")
+    else
+      printf 'DRIFT-CHECK-SKIPPED: tasks-axi list --state queued returned an unrecognized listing\n'
+    fi
   else
     printf 'DRIFT-CHECK-SKIPPED: tasks-axi list --state queued failed\n'
   fi

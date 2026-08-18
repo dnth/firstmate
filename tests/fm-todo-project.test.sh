@@ -14,6 +14,8 @@
 #   (e) --check is silent when the board matches reality (live worker, unexpired
 #       hold), so it composes into the digest and a heartbeat without noise
 #   (f) FM_HOME is required fail-closed, like bin/fm-send.sh
+#   (g) incompatible successful listings fail closed in both modes
+#   (h) title truncation never clips the durable ID or separator
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -41,7 +43,12 @@ listings=${FM_FAKE_LISTINGS:?fake tasks-axi needs FM_FAKE_LISTINGS}
 serve() {
   if [ -f "$listings/$1" ]; then cat "$listings/$1"; else
     printf 'count: 0\n'
-    printf 'tasks: 0 tasks in this backlog\n'
+    if [ "$1" = ready ]; then
+      printf 'ready: 0 unblocked queued tasks\n'
+      printf 'ready_public_followups: 0 delivery-ready obligations\n'
+    else
+      printf 'tasks: 0 tasks in this backlog\n'
+    fi
   fi
   printf 'help[1]:\n'
   printf '%s\n' '  - Run `tasks-axi show <id>` for full notes on a task'
@@ -73,10 +80,13 @@ printf '%s\n' "fake tasks-axi: unexpected invocation: $*" >&2
 exit 9
 SH
   chmod +x "$fakebin/tasks-axi"
-  # fm-crew-state.sh reads a no-mistakes run and, failing that, the pane. No
-  # fixture here advertises a run, so every case falls through to the pane.
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
+set -u
+case "$*" in
+  'axi status') printf '%s\n' "${FM_FAKE_AXI_STATUS:-}" ;;
+  'runs --limit 200') printf '%s\n' "${FM_FAKE_RUNS_LIST:-}" ;;
+esac
 exit 0
 SH
   cat > "$fakebin/tmux" <<'SH'
@@ -111,7 +121,12 @@ write_listing() {  # <home> <name> <header-fields> <row>...
       fi
       printf '  %s\n' "$@"
     else
-      printf 'tasks: 0 tasks in this backlog\n'
+      if [ "$name" = ready ]; then
+        printf 'ready: 0 unblocked queued tasks\n'
+        printf 'ready_public_followups: 0 delivery-ready obligations\n'
+      else
+        printf 'tasks: 0 tasks in this backlog\n'
+      fi
     fi
   } > "$home/listings/$name"
 }
@@ -152,6 +167,21 @@ out=$(run_project "$home" --emit) || fail "--emit exited non-zero on an empty bo
 [ "$out" = '[]' ] || fail "empty board did not emit []: $out"
 pass "--emit on an empty board emits []"
 
+# A configured cap smaller than the durable identity is raised just enough to
+# keep that identity and truncate only the title.
+home=$(new_home emit-tiny-cap)
+write_listing "$home" in_flight 'id,state,kind,repo,title' \
+  'very-long-durable-task-id,in_flight,ship,firstmate,A title that will not fit'
+out=$(FM_TODO_ITEM_MAX=1 run_project "$home" --emit) || fail "--emit exited non-zero with a tiny item cap"
+printf '%s' "$out" > "$home/tiny-cap.json"
+node -e '
+  const list = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+  if (list[0].items[0] !== "very-long-durable-task-id - …") {
+    throw new Error("identity was clipped: " + list[0].items[0]);
+  }
+' "$home/tiny-cap.json" || fail "a tiny item cap clipped the durable task identity"
+pass "--emit truncates only titles and preserves a long durable ID"
+
 # --- (c) --check flags an in-flight task with no worker ----------------------
 
 home=$(new_home check-no-worker)
@@ -162,6 +192,35 @@ assert_contains "$out" "DRIFT inflight-no-worker: ghost-task" \
   "--check did not flag an in-flight task whose worker is gone"
 assert_not_contains "$out" "DRIFT hold-expired" "--check invented a hold finding"
 pass "--check flags an in-flight task whose worker is absent"
+
+# Every absent recorded-worker resource gets its own actionable reason.
+home=$(new_home check-missing-resources)
+mkdir -p "$home/live-worktree"
+fm_write_meta "$home/state/no-worktree.meta" \
+  'window=firstmate:fm-no-worktree' \
+  'kind=ship'
+fm_write_meta "$home/state/gone-worktree.meta" \
+  'window=firstmate:fm-gone-worktree' \
+  "worktree=$home/does-not-exist" \
+  'kind=ship'
+fm_write_meta "$home/state/no-window.meta" \
+  "worktree=$home/live-worktree" \
+  'kind=ship'
+write_listing "$home" in_flight 'id,state,kind,repo,title,hold_until' \
+  'no-meta,in_flight,ship,firstmate,Missing metadata,"-"' \
+  'no-worktree,in_flight,ship,firstmate,Missing worktree field,"-"' \
+  'gone-worktree,in_flight,ship,firstmate,Torn down worktree,"-"' \
+  'no-window,in_flight,ship,firstmate,Missing window field,"-"'
+out=$(run_project "$home" --check) || fail "--check exited non-zero"
+assert_contains "$out" "DRIFT inflight-no-worker: no-meta - no metadata" \
+  "--check did not distinguish missing task metadata"
+assert_contains "$out" "DRIFT inflight-no-worker: no-worktree - no worktree recorded" \
+  "--check did not distinguish a missing worktree field"
+assert_contains "$out" "DRIFT inflight-no-worker: gone-worktree - worktree is gone" \
+  "--check did not distinguish a torn-down worktree"
+assert_contains "$out" "DRIFT inflight-no-worker: no-window - no window recorded" \
+  "--check did not distinguish a missing recorded window"
+pass "--check reports each missing recorded-worker resource"
 
 # --- (d) --check flags a hold whose deadline has passed ----------------------
 
@@ -210,6 +269,31 @@ assert_contains "$out" "DRIFT inflight-no-worker: live-task" \
   "--check stayed silent after the same task's endpoint disappeared"
 pass "--check prints nothing when the board matches reality, and flags the same task once its endpoint is gone"
 
+# A matching run remains the richer current-state source even after the endpoint
+# dies, but it must not mask the cheaper recorded-endpoint drift verdict.
+head=$(git -C "$home/wt" rev-parse HEAD)
+run=$(cat <<EOF
+run:
+  id: "01RUN"
+  branch: fm/live-task
+  status: running
+  head: "$head"
+  findings: none
+  steps[2]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    review,running,0,0
+EOF
+)
+verdict=$(FM_FAKE_AXI_STATUS="$run" FM_FAKE_TMUX_MISSING=1 PATH="$home/fakebin:$PATH" \
+  FM_HOME="$home" "$ROOT/bin/fm-crew-state.sh" live-task)
+assert_contains "$verdict" "source: run-step" \
+  "fixture is vacuous: a matching run must survive the dead endpoint"
+out=$(FM_FAKE_AXI_STATUS="$run" FM_FAKE_TMUX_MISSING=1 run_project "$home" --check) \
+  || fail "--check exited non-zero for a dead endpoint with an attributed run"
+assert_contains "$out" "DRIFT inflight-no-worker: live-task - recorded endpoint is dead" \
+  "an attributed run hid the dead recorded endpoint"
+pass "--check flags a dead endpoint even when crew state is run-step sourced"
+
 # --- (f) FM_HOME is required fail-closed ------------------------------------
 
 home=$(new_home no-home)
@@ -222,3 +306,30 @@ expect_code 1 "$rc" "--emit without FM_HOME"
 assert_contains "$out" "FM_HOME is not set" "--emit did not refuse an unset FM_HOME"
 assert_not_contains "$out" "[]" "--emit printed a projection despite refusing"
 pass "FM_HOME is required fail-closed"
+
+# --- (g) incompatible successful listings fail closed ----------------------
+
+home=$(new_home incompatible-emit)
+write_listing "$home" in_flight 'state,kind,repo,title' \
+  'in_flight,ship,firstmate,Missing the required id field'
+set +e
+run_project "$home" --emit > "$home/emit.out" 2> "$home/emit.err"
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "--emit accepted an incompatible successful listing"
+[ ! -s "$home/emit.out" ] || fail "--emit printed stdout for an incompatible listing"
+err=$(<"$home/emit.err")
+assert_contains "$err" "unrecognized listing" \
+  "--emit did not diagnose an incompatible successful listing"
+pass "--emit refuses an incompatible successful board listing without stdout"
+
+home=$(new_home incompatible-check)
+write_listing "$home" in_flight 'id,state,kind,repo,title' \
+  'missing-hold-field,in_flight,ship,firstmate,Missing hold_until'
+out=$(run_project "$home" --check) || fail "--check did not retain its report-only exit contract"
+assert_contains "$out" \
+  "DRIFT-CHECK-SKIPPED: tasks-axi list --state in_flight returned an unrecognized listing" \
+  "--check did not report an incompatible successful listing as skipped"
+assert_not_contains "$out" "DRIFT inflight-no-worker" \
+  "--check derived findings from an incompatible listing"
+pass "--check skips an incompatible successful listing and still exits zero"

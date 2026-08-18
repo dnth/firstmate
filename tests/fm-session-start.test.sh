@@ -167,6 +167,11 @@ case "${1:-}" in
         printf '%s\n' 'startup recovery must never list done rows' >&2
         exit 9
         ;;
+      *'--state in_flight'*'--fields hold_until'*)
+        printf 'count: 1\n'
+        printf 'tasks[1]{id,state,kind,repo,title,hold_until}:\n'
+        printf '%s\n' '  compact-startup,in_flight,ship,firstmate,Compact startup digest,"-"'
+        ;;
       *'--state in_flight'*)
         task_header 1
         printf '%s\n' '  compact-startup,in_flight,ship,firstmate,Compact startup digest,none,captain,captain choice pending'
