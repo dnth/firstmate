@@ -167,6 +167,11 @@ case "${1:-}" in
         printf '%s\n' 'startup recovery must never list done rows' >&2
         exit 9
         ;;
+      *'--state in_flight'*'--fields hold_until'*)
+        printf 'count: 1\n'
+        printf 'tasks[1]{id,state,kind,repo,title,hold_until}:\n'
+        printf '%s\n' '  compact-startup,in_flight,ship,firstmate,Compact startup digest,"-"'
+        ;;
       *'--state in_flight'*)
         task_header 1
         printf '%s\n' '  compact-startup,in_flight,ship,firstmate,Compact startup digest,none,captain,captain choice pending'
@@ -178,6 +183,16 @@ case "${1:-}" in
       *'--state queued'*'--blocked'*)
         task_header 1
         printf '%s\n' '  blocked-followup,queued,scout,firstmate,Follow compact startup,compact-startup,"-","-"'
+        ;;
+      *'--state queued'*'--fields hold_until'*)
+        # The drift check's own hold listing (bin/fm-todo-project.sh --check).
+        printf 'count: %s\n' "${FM_FAKE_TASKS_AXI_HOLD_ROWS:-0}"
+        if [ "${FM_FAKE_TASKS_AXI_HOLD_ROWS:-0}" -gt 0 ]; then
+          printf 'tasks[1]{id,state,kind,repo,title,hold_until}:\n'
+          printf '%s\n' "  ${FM_FAKE_TASKS_AXI_HOLD_ROW:-lapsed-hold,queued,ship,firstmate,Lapsed hold,2020-01-01}"
+        else
+          printf 'tasks: 0 queued tasks in this backlog\n'
+        fi
         ;;
       *)
         printf '%s\n' 'startup recovery must not request an unfiltered whole-backlog listing' >&2
@@ -1490,6 +1505,39 @@ EOF
   pass "an empty fleet reports (none) for in-flight tasks and an absent AFK flag"
 }
 
+test_board_drift_block_is_surfaced_and_silent_when_clean() {
+  local rec root home fakebin out
+  rec=$(new_world board-drift)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_tasks_axi_compact "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  write_long_body_backlog "$home/data/backlog.md"
+
+  # The board's in-flight row has no task metadata at all, and one queued row
+  # carries a hold whose date has passed: both are drift the digest must show.
+  out=$(FM_FAKE_TASKS_AXI_HOLD_ROWS=1 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "Board-vs-reality drift (bin/fm-todo-project.sh --check)" \
+    "session start did not surface the board-vs-reality drift block"
+  assert_contains "$out" "DRIFT inflight-no-worker: compact-startup" \
+    "session start digest omitted an in-flight row whose worker is gone"
+  assert_contains "$out" "DRIFT hold-expired: lapsed-hold - hold_until 2020-01-01 passed" \
+    "session start digest omitted a hold whose deadline has passed"
+
+  # Same digest, board and fleet agreed: no drift subsection at all.
+  mkdir -p "$home/projects/firstmate"
+  printf 'window=fm-sess:compact\nworktree=%s\nproject=firstmate\nkind=ship\n' "$home/projects/firstmate" \
+    > "$home/state/compact-startup.meta"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_not_contains "$out" "Board-vs-reality drift" \
+    "session start printed the drift block when the board matched reality"
+  assert_not_contains "$out" "DRIFT " "session start printed a drift finding on a clean board"
+
+  pass "session start surfaces board-vs-reality drift and stays silent when the board matches reality"
+}
+
 test_next_step_sources_x_mode_cadence() {
   local rec root home fakebin out
   rec=$(new_world next-step-x)
@@ -1772,6 +1820,7 @@ test_backlog_queued_bound_discloses_its_remainder
 test_backlog_compact_manual_backend_skips_indented_bodies
 test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
 test_fleet_digest_empty_fleet
+test_board_drift_block_is_surfaced_and_silent_when_clean
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
 test_supervision_block_exactly_one_and_pi_diagnostic
