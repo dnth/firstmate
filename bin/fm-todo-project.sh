@@ -34,7 +34,7 @@
 # teardown, or nothing at all, and a lapsed hold on a captain-gated item is the
 # captain's to lift. It prints one finding per line and nothing when clean, so it
 # composes into the session-start digest and a heartbeat sweep without noise, and
-# it always exits 0 - it is a report, not a gate.
+# after invocation validation it always exits 0 - it is a report, not a gate.
 #
 # Findings:
 #   DRIFT inflight-no-worker: <id> - <reason>

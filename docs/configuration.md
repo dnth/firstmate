@@ -56,6 +56,7 @@ Because bootstrap requires `tasks-axi` on `PATH` on every profile, that delegati
 Compatible means the installed build passes the shared version and feature probe owned by [`bin/fm-tasks-axi-lib.sh`](../bin/fm-tasks-axi-lib.sh), including the atomic multi-ID move required by handoff delegation.
 Bootstrap requires compatible `tasks-axi` on every profile; see "Toolchain" below for missing-tool reporting and silent default-backend behavior.
 Set the local, gitignored `config/backlog-backend` file to `manual` to force manual backlog editing and suppress the verbose `BOOTSTRAP_INFO: tasks-axi available` fact, not missing-tool reporting.
+In manual mode, [`bin/fm-todo-project.sh`](../bin/fm-todo-project.sh) never parses `data/backlog.md` directly: its drift check reports that machine-side comparison was skipped, and its projection refuses rather than replacing a live session todo with an empty list.
 Absent or `tasks-axi` selects the default tasks-axi backend.
 The file format is unchanged in both modes; tasks-axi and manual edits produce the same `## In flight`, `## Queued`, and `## Done` sections.
 
@@ -550,7 +551,7 @@ Never describe this path as at-least-once, no-loss, or lossless.
 Runtime tuning via environment variables (defaults shown):
 
 ```sh
-FM_HOME=                 # optional operational home for most scripts, unset means this repo root; fm-send requires it explicitly
+FM_HOME=                 # optional operational home for most scripts, unset means this repo root; fm-send and fm-todo-project require it explicitly
 FM_ROOT_OVERRIDE=        # override firstmate repo root, tangle-guard target, and zellij/cmux home-title hash; also legacy whole-root override when FM_HOME is unset
 FM_STATE_OVERRIDE=       # alternate state dir, mainly for tests
 FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
