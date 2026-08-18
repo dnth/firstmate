@@ -120,15 +120,18 @@ board_unavailable_reason() {
   printf ''
 }
 
-# axi_rows <table> <listing> <field> [<field>...]: validated TAB-separated
-# selected fields, one row per task. A successful empty listing must carry the
-# tool's explicit count-zero scalar; a non-empty listing must carry the expected
-# table header with every requested field and the declared number of parseable
-# rows. Anything else is incompatible rather than an empty board.
+# axi_rows <table> <listing> <rows|items> <field> [<field>...]: validated
+# selected fields, as TAB-separated rows or JSON-escaped todo items. Item mode
+# keeps decoded values inside its byte-oriented parser through normalization,
+# codepoint-safe truncation, and JSON escaping, so NUL and UTF-8 never cross an
+# unsafe shell-string boundary. A successful empty listing must carry the tool's
+# explicit count-zero scalar; a non-empty listing must carry the expected table
+# header with every requested field and the declared number of parseable rows.
+# Anything else is incompatible rather than an empty board.
 axi_rows() {
-  local table=$1 listing=$2
-  shift 2
-  awk -v table="$table" -v want="$*" '
+  local table=$1 listing=$2 output=$3
+  shift 3
+  LC_ALL=C awk -v table="$table" -v output="$output" -v item_max="$ITEM_MAX" -v want="$*" '
     function hex_value(hex,   i, digit, value) {
       if (length(hex) != 4) return -1
       value = 0
@@ -147,44 +150,145 @@ axi_rows() {
       return sprintf("%c%c%c", 224 + int(code / 4096), \
         128 + int(code / 64) % 64, 128 + code % 64)
     }
-    function split_row(line, out,   n, i, c, field, inq, nxt, hex, code) {
-      n = 0; field = ""; inq = 0; i = 1
+    function decode_token(token,   i, c, nxt, hex, code, value) {
+      sub(/^[[:space:]]+/, "", token)
+      sub(/[[:space:]]+$/, "", token)
+      if (substr(token, 1, 1) != "\"") {
+        if (index(token, "\"") != 0) { token_bad = 1; return "" }
+        return token
+      }
+      if (length(token) < 2 || substr(token, length(token), 1) != "\"") {
+        token_bad = 1
+        return ""
+      }
+      token = substr(token, 2, length(token) - 2)
+      value = ""; i = 1
+      while (i <= length(token)) {
+        c = substr(token, i, 1)
+        if (c != "\\") { value = value c; i++; continue }
+        nxt = substr(token, i + 1, 1)
+        if (nxt == "\"" || nxt == "\\" || nxt == "/") {
+          value = value nxt; i += 2; continue
+        }
+        if (nxt == "b") { value = value sprintf("%c", 8); i += 2; continue }
+        if (nxt == "f") { value = value sprintf("%c", 12); i += 2; continue }
+        if (nxt == "n" || nxt == "r" || nxt == "t") {
+          value = value " "; i += 2; continue
+        }
+        if (nxt == "u") {
+          hex = substr(token, i + 2, 4)
+          code = hex_value(hex)
+          if (code < 0 || (code >= 55296 && code <= 57343)) {
+            token_bad = 1
+            return ""
+          }
+          if (code == 9 || code == 10 || code == 13) value = value " "
+          else value = value utf8(code)
+          i += 6
+          continue
+        }
+        token_bad = 1
+        return ""
+      }
+      return value
+    }
+    function split_row(line, out,   n, i, c, token, inq, nxt) {
+      n = 0; token = ""; inq = 0; i = 1
       while (i <= length(line)) {
         c = substr(line, i, 1)
-        if (inq) {
-          if (c == "\\") {
-            nxt = substr(line, i + 1, 1)
-            if (nxt == "\"" || nxt == "\\" || nxt == "/") {
-              field = field nxt; i += 2; continue
-            }
-            if (nxt == "b") { field = field sprintf("%c", 8); i += 2; continue }
-            if (nxt == "f") { field = field sprintf("%c", 12); i += 2; continue }
-            if (nxt == "n" || nxt == "r" || nxt == "t") {
-              field = field " "; i += 2; continue
-            }
-            if (nxt == "u") {
-              hex = substr(line, i + 2, 4)
-              code = hex_value(hex)
-              if (code <= 0 || (code >= 55296 && code <= 57343)) return -1
-              if (code == 9 || code == 10 || code == 13) field = field " "
-              else field = field utf8(code)
-              i += 6
-              continue
-            }
-            return -1
-          }
-          if (c == "\"") { inq = 0; i += 1; continue }
-          field = field c; i += 1; continue
+        if (inq && c == "\\") {
+          nxt = substr(line, i + 1, 1)
+          if (nxt == "") return -1
+          token = token c nxt; i += 2; continue
         }
-        if (c == "\"") { inq = 1; i += 1; continue }
-        if (c == ",") { out[++n] = field; field = ""; i += 1; continue }
-        field = field c; i += 1
+        if (c == "\"") { inq = !inq; token = token c; i++; continue }
+        if (c == "," && !inq) {
+          token_bad = 0
+          out[++n] = decode_token(token)
+          if (token_bad) return -1
+          token = ""; i++; continue
+        }
+        token = token c; i++
       }
       if (inq) return -1
-      out[++n] = field
+      token_bad = 0
+      out[++n] = decode_token(token)
+      if (token_bad) return -1
       return n
     }
-    BEGIN { nwant = split(want, wanted, " ") }
+    function byte_value(c) {
+      if (c == nul) return 0
+      return byte_of[c]
+    }
+    function utf8_step(s, pos,   b, b2, b3, b4) {
+      b = byte_value(substr(s, pos, 1))
+      if (b <= 127) return 1
+      b2 = byte_value(substr(s, pos + 1, 1))
+      if (b >= 194 && b <= 223 && b2 >= 128 && b2 <= 191) return 2
+      b3 = byte_value(substr(s, pos + 2, 1))
+      if (b == 224 && b2 >= 160 && b2 <= 191 && b3 >= 128 && b3 <= 191) return 3
+      if (b >= 225 && b <= 236 && b2 >= 128 && b2 <= 191 && b3 >= 128 && b3 <= 191) return 3
+      if (b == 237 && b2 >= 128 && b2 <= 159 && b3 >= 128 && b3 <= 191) return 3
+      if (b >= 238 && b <= 239 && b2 >= 128 && b2 <= 191 && b3 >= 128 && b3 <= 191) return 3
+      b4 = byte_value(substr(s, pos + 3, 1))
+      if (b == 240 && b2 >= 144 && b2 <= 191 && b3 >= 128 && b3 <= 191 && b4 >= 128 && b4 <= 191) return 4
+      if (b >= 241 && b <= 243 && b2 >= 128 && b2 <= 191 && b3 >= 128 && b3 <= 191 && b4 >= 128 && b4 <= 191) return 4
+      if (b == 244 && b2 >= 128 && b2 <= 143 && b3 >= 128 && b3 <= 191 && b4 >= 128 && b4 <= 191) return 4
+      return 0
+    }
+    function text_length(s,   pos, count, step) {
+      pos = 1; count = 0
+      while (pos <= length(s)) {
+        step = utf8_step(s, pos)
+        if (step == 0) { utf8_bad = 1; return 0 }
+        pos += step; count++
+      }
+      return count
+    }
+    function text_prefix(s, limit,   pos, count, step) {
+      pos = 1; count = 0
+      while (pos <= length(s) && count < limit) {
+        step = utf8_step(s, pos)
+        if (step == 0) { utf8_bad = 1; return "" }
+        pos += step; count++
+      }
+      return substr(s, 1, pos - 1)
+    }
+    function json_string(s,   i, c, b, result) {
+      result = "\""
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1); b = byte_value(c)
+        if (b == 34) result = result "\\\""
+        else if (b == 92) result = result "\\\\"
+        else if (b <= 31) result = result sprintf("\\u%04x", b)
+        else result = result c
+      }
+      return result "\""
+    }
+    function todo_json(id, title,   prefix, effective_max, title_max, title_len) {
+      gsub(/[\t\r\n]/, " ", title)
+      gsub(/ +/, " ", title)
+      sub(/^ /, "", title); sub(/ $/, "", title)
+      if (title == "") title = "-"
+      prefix = id " - "
+      utf8_bad = 0
+      effective_max = item_max
+      if (effective_max < text_length(prefix) + 1) effective_max = text_length(prefix) + 1
+      title_max = effective_max - text_length(prefix)
+      title_len = text_length(title)
+      if (utf8_bad) return ""
+      if (title_len > title_max) {
+        if (title_max == 1) title = "…"
+        else title = text_prefix(title, title_max - 1) "…"
+      }
+      if (utf8_bad) return ""
+      return json_string(prefix title)
+    }
+    BEGIN {
+      nul = sprintf("%c", 0)
+      for (i = 0; i <= 255; i++) byte_of[sprintf("%c", i)] = i
+      nwant = split(want, wanted, " ")
+    }
     $0 == "count: 0" { zero_count = 1; next }
     table == "tasks" && /^tasks: 0 .*tasks in this backlog$/ { zero_scalar = 1; next }
     table == "ready" && $0 == "ready: 0 unblocked queued tasks" { zero_scalar = 1; next }
@@ -220,6 +324,10 @@ axi_rows() {
         col = index_of[wanted[i]]
         out = out (i > 1 ? "\t" : "") (col ? cells[col] : "")
       }
+      if (output == "items") {
+        out = todo_json(cells[index_of["id"]], cells[index_of["title"]])
+        if (utf8_bad) { bad = 1; next }
+      }
       print out
       seen++
       next
@@ -247,56 +355,20 @@ axi_list() {  # <state> [<extra-fields>]
 
 # --- emit -------------------------------------------------------------------
 
-json_escape() {  # <text>
-  local s=$1 control octal escaped code
-  s=${s//\\/\\\\}
-  s=${s//\"/\\\"}
-  for ((code = 1; code <= 31; code++)); do
-    printf -v octal '%03o' "$code"
-    printf -v control '%b' "\\$octal"
-    printf -v escaped '\\u%04x' "$code"
-    s=${s//$control/$escaped}
-  done
-  printf '%s' "$s"
-}
-
-# One todo item line: "<id> - <title>", whitespace-collapsed with only the
-# title length-capped. A too-small configured cap is raised per item just enough
-# to preserve the ID, separator, and an ellipsis.
-todo_item() {  # <id> <title>
-  local id=$1 title=$2 prefix item_max title_max
-  title=$(printf '%s' "$title" | tr '\t\n\r' '   ' | tr -s ' ' | sed 's/^ //; s/ $//')
-  [ -n "$title" ] || title=-
-  prefix="$id - "
-  item_max=$ITEM_MAX
-  if [ "$item_max" -lt $((${#prefix} + 1)) ]; then
-    item_max=$((${#prefix} + 1))
-  fi
-  title_max=$((item_max - ${#prefix}))
-  if [ "${#title}" -gt "$title_max" ]; then
-    if [ "$title_max" -eq 1 ]; then
-      title=…
-    else
-      title="${title:0:$((title_max - 1))}…"
-    fi
-  fi
-  printf '%s%s' "$prefix" "$title"
-}
-
 # Collect "<id>\t<title>" rows for one phase into a JSON phase object, or
 # nothing when the phase has no tasks (the todo tool requires >= 1 item).
 phase_json() {  # <phase-name> <rows>
-  local name=$1 rows=$2 id title first=1 items=
+  local name=$1 rows=$2 item first=1 items=
   [ -n "$rows" ] || return 1
-  while IFS=$'\t' read -r id title; do
-    [ -n "$id" ] || continue
+  while IFS= read -r item; do
+    [ -n "$item" ] || continue
     [ "$first" -eq 1 ] || items="$items,"$'\n'
     first=0
-    items="$items$(printf '      "%s"' "$(json_escape "$(todo_item "$id" "$title")")")"
+    items="$items      $item"
   done <<< "$rows"
   [ "$first" -eq 0 ] || return 1
   printf '  {\n    "phase": "%s",\n    "items": [\n%s\n    ]\n  }' \
-    "$(json_escape "$name")" "$items"
+    "$name" "$items"
 }
 
 run_emit() {
@@ -306,9 +378,9 @@ run_emit() {
 
   in_flight=$(axi_list in_flight) || fail "tasks-axi list --state in_flight failed: $in_flight"
   ready=$(tasks-axi ready --file "$BOARD" 2>&1) || fail "tasks-axi ready failed: $ready"
-  in_flight_rows=$(axi_rows tasks "$in_flight" id title) \
+  in_flight_rows=$(axi_rows tasks "$in_flight" items id title) \
     || fail "tasks-axi list --state in_flight returned an unrecognized listing"
-  ready_rows=$(axi_rows ready "$ready" id title) \
+  ready_rows=$(axi_rows ready "$ready" items id title) \
     || fail "tasks-axi ready returned an unrecognized listing"
 
   if rendered=$(phase_json Active "$in_flight_rows"); then
@@ -364,7 +436,7 @@ check_inflight() {  # <in_flight-listing>
     if ! fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
       printf 'DRIFT inflight-no-worker: %s - recorded endpoint is dead\n' "$id"
     fi
-  done <<< "$(axi_rows tasks "$listing" id)"
+  done <<< "$(axi_rows tasks "$listing" rows id)"
 }
 
 # A date-gated hold whose deadline has lapsed.
@@ -384,7 +456,7 @@ check_holds() {  # <listing>...
         continue
       fi
       printf 'DRIFT hold-expired: %s - hold_until %s passed\n' "$id" "$hold_until"
-    done <<< "$(axi_rows tasks "$listing" id hold_until)"
+    done <<< "$(axi_rows tasks "$listing" rows id hold_until)"
   done
 }
 
@@ -400,7 +472,7 @@ run_check() {
   # plus a named skip is more useful than silence.
   local -a hold_listings=()
   if in_flight=$(axi_list in_flight hold_until); then
-    if axi_rows tasks "$in_flight" id hold_until >/dev/null; then
+    if axi_rows tasks "$in_flight" rows id hold_until >/dev/null; then
       check_inflight "$in_flight"
       hold_listings+=("$in_flight")
     else
@@ -410,7 +482,7 @@ run_check() {
     printf 'DRIFT-CHECK-SKIPPED: tasks-axi list --state in_flight failed\n'
   fi
   if queued=$(axi_list queued hold_until); then
-    if axi_rows tasks "$queued" id hold_until >/dev/null; then
+    if axi_rows tasks "$queued" rows id hold_until >/dev/null; then
       hold_listings+=("$queued")
     else
       printf 'DRIFT-CHECK-SKIPPED: tasks-axi list --state queued returned an unrecognized listing\n'

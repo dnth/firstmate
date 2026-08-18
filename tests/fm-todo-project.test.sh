@@ -17,6 +17,7 @@
 #   (g) incompatible successful listings fail closed in both modes
 #   (h) title truncation never clips the durable ID or separator
 #   (i) TOON escapes decode strictly without breaking item or JSON framing
+#   (j) truncation is codepoint-safe under a byte-oriented caller locale
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -175,6 +176,21 @@ node -e '
 ' "$home/escapes.json" || fail "--emit did not decode and safely project valid TOON escapes"
 pass "--emit strictly decodes valid TOON escapes into single-line JSON"
 
+home=$(new_home emit-nul)
+write_listing "$home" in_flight 'id,state,kind,repo,title' \
+  'nul-task,in_flight,ship,firstmate,"A\u0000B"'
+out=$(run_project "$home" --emit) || fail "--emit rejected a valid TOON NUL escape"
+printf '%s' "$out" > "$home/nul.json"
+node -e '
+  const text = require("node:fs").readFileSync(process.argv[1], "utf8");
+  if (!text.includes("\\u0000")) throw new Error("JSON did not preserve NUL as an escape");
+  const list = JSON.parse(text);
+  if (list[0].items[0] !== "nul-task - A\u0000B") {
+    throw new Error("NUL title: " + JSON.stringify(list[0].items[0]));
+  }
+' "$home/nul.json" || fail "--emit did not preserve a decoded NUL in valid JSON"
+pass "--emit preserves a valid TOON NUL escape as JSON Unicode"
+
 # --- (b) --emit on an empty board is exactly [] ------------------------------
 
 home=$(new_home emit-empty)
@@ -196,6 +212,20 @@ node -e '
   }
 ' "$home/tiny-cap.json" || fail "a tiny item cap clipped the durable task identity"
 pass "--emit truncates only titles and preserves a long durable ID"
+
+home=$(new_home emit-byte-locale)
+write_listing "$home" in_flight 'id,state,kind,repo,title' \
+  'utf8-task,in_flight,ship,firstmate,ééé'
+out=$(LC_ALL=C FM_TODO_ITEM_MAX=14 run_project "$home" --emit) \
+  || fail "--emit exited non-zero while truncating UTF-8 under LC_ALL=C"
+printf '%s' "$out" > "$home/byte-locale.json"
+node -e '
+  const list = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+  if (list[0].items[0] !== "utf8-task - é…") {
+    throw new Error("UTF-8 title: " + JSON.stringify(list[0].items[0]));
+  }
+' "$home/byte-locale.json" || fail "--emit split a UTF-8 codepoint under LC_ALL=C"
+pass "--emit truncates UTF-8 by codepoint independently of caller locale"
 
 # --- (c) --check flags an in-flight task with no worker ----------------------
 
@@ -348,6 +378,31 @@ assert_contains "$out" \
 assert_not_contains "$out" "DRIFT inflight-no-worker" \
   "--check derived findings from an incompatible listing"
 pass "--check skips an incompatible successful listing and still exits zero"
+
+home=$(new_home malformed-quote-emit)
+write_listing "$home" in_flight 'id,state,kind,repo,title' \
+  'bad-quote,in_flight,ship,firstmate,"title"junk'
+set +e
+run_project "$home" --emit > "$home/emit.out" 2> "$home/emit.err"
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "--emit accepted trailing text after a quoted TOON primitive"
+[ ! -s "$home/emit.out" ] || fail "--emit printed stdout for a malformed quoted primitive"
+err=$(<"$home/emit.err")
+assert_contains "$err" "unrecognized listing" \
+  "--emit did not diagnose a malformed quoted primitive"
+pass "--emit rejects trailing text after a quoted TOON primitive"
+
+home=$(new_home mid-cell-quote-emit)
+write_listing "$home" in_flight 'id,state,kind,repo,title' \
+  'bad-quote,in_flight,ship,firstmate,bad"quote"'
+set +e
+run_project "$home" --emit > "$home/emit.out" 2> "$home/emit.err"
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "--emit accepted a quote inside an unquoted TOON primitive"
+[ ! -s "$home/emit.out" ] || fail "--emit printed stdout for a mid-cell quote"
+pass "--emit rejects quotes inside unquoted TOON primitives"
 
 home=$(new_home invalid-escape-emit)
 write_listing "$home" in_flight 'id,state,kind,repo,title' \
