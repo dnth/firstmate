@@ -16,6 +16,7 @@
 #   (f) FM_HOME is required fail-closed, like bin/fm-send.sh
 #   (g) incompatible successful listings fail closed in both modes
 #   (h) title truncation never clips the durable ID or separator
+#   (i) TOON escapes decode strictly without breaking item or JSON framing
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -159,6 +160,20 @@ node -e '
   }
 ' "$home/emit.json" || fail "--emit did not project the board as todo-init JSON"
 pass "--emit projects in-flight work as Active and dispatchable queued work as Ready"
+
+home=$(new_home emit-escapes)
+write_listing "$home" in_flight 'id,state,kind,repo,title' \
+  'escape-task,in_flight,ship,firstmate,"A\"B\/C\\D\nE\rF\tG\bH\fI\u263A"'
+out=$(run_project "$home" --emit) || fail "--emit rejected valid TOON escapes"
+printf '%s' "$out" > "$home/escapes.json"
+node -e '
+  const list = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+  const expected = "escape-task - A\"B/C\\D E F G\bH\fI☺";
+  if (list[0].items[0] !== expected) {
+    throw new Error("escaped title: " + JSON.stringify(list[0].items[0]));
+  }
+' "$home/escapes.json" || fail "--emit did not decode and safely project valid TOON escapes"
+pass "--emit strictly decodes valid TOON escapes into single-line JSON"
 
 # --- (b) --emit on an empty board is exactly [] ------------------------------
 
@@ -333,3 +348,28 @@ assert_contains "$out" \
 assert_not_contains "$out" "DRIFT inflight-no-worker" \
   "--check derived findings from an incompatible listing"
 pass "--check skips an incompatible successful listing and still exits zero"
+
+home=$(new_home invalid-escape-emit)
+write_listing "$home" in_flight 'id,state,kind,repo,title' \
+  'bad-escape,in_flight,ship,firstmate,"bad\q"'
+set +e
+run_project "$home" --emit > "$home/emit.out" 2> "$home/emit.err"
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "--emit accepted an invalid TOON escape"
+[ ! -s "$home/emit.out" ] || fail "--emit printed stdout for an invalid TOON escape"
+err=$(<"$home/emit.err")
+assert_contains "$err" "unrecognized listing" \
+  "--emit did not diagnose a listing containing an invalid TOON escape"
+pass "--emit fails closed without stdout on an invalid TOON escape"
+
+home=$(new_home invalid-escape-check)
+write_listing "$home" in_flight 'id,state,kind,repo,title,hold_until' \
+  'bad-escape,in_flight,ship,firstmate,"bad\q","-"'
+out=$(run_project "$home" --check) || fail "--check did not retain its report-only exit contract"
+assert_contains "$out" \
+  "DRIFT-CHECK-SKIPPED: tasks-axi list --state in_flight returned an unrecognized listing" \
+  "--check did not skip a listing containing an invalid TOON escape"
+assert_not_contains "$out" "DRIFT inflight-no-worker" \
+  "--check derived findings from a row containing an invalid TOON escape"
+pass "--check skips an invalid TOON escape and still exits zero"

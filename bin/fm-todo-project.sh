@@ -26,6 +26,8 @@
 # per phase; an empty board therefore emits `[]`. Item text is one line and its
 # title is capped so the complete durable ID and separator are always preserved,
 # even when FM_TODO_ITEM_MAX (default 100) is smaller than that identity prefix.
+# TOON string escapes are decoded strictly, with line-breaking whitespace
+# collapsed before projection; malformed escapes make the listing incompatible.
 #
 # --check is REPORT-ONLY and never mutates the board. Reconciliation stays with
 # firstmate's judgment: an in-flight row with no worker may need a relaunch, a
@@ -127,16 +129,49 @@ axi_rows() {
   local table=$1 listing=$2
   shift 2
   awk -v table="$table" -v want="$*" '
-    function split_row(line, out,   n, i, c, field, inq, nxt) {
+    function hex_value(hex,   i, digit, value) {
+      if (length(hex) != 4) return -1
+      value = 0
+      for (i = 1; i <= 4; i++) {
+        digit = index("0123456789abcdef", tolower(substr(hex, i, 1))) - 1
+        if (digit < 0) return -1
+        value = value * 16 + digit
+      }
+      return value
+    }
+    function utf8(code) {
+      if (code <= 127) return sprintf("%c", code)
+      if (code <= 2047) {
+        return sprintf("%c%c", 192 + int(code / 64), 128 + code % 64)
+      }
+      return sprintf("%c%c%c", 224 + int(code / 4096), \
+        128 + int(code / 64) % 64, 128 + code % 64)
+    }
+    function split_row(line, out,   n, i, c, field, inq, nxt, hex, code) {
       n = 0; field = ""; inq = 0; i = 1
       while (i <= length(line)) {
         c = substr(line, i, 1)
         if (inq) {
           if (c == "\\") {
             nxt = substr(line, i + 1, 1)
-            # Only \" and \\ are escapes; every other backslash is literal text.
-            if (nxt == "\"" || nxt == "\\") { field = field nxt; i += 2; continue }
-            field = field c; i += 1; continue
+            if (nxt == "\"" || nxt == "\\" || nxt == "/") {
+              field = field nxt; i += 2; continue
+            }
+            if (nxt == "b") { field = field sprintf("%c", 8); i += 2; continue }
+            if (nxt == "f") { field = field sprintf("%c", 12); i += 2; continue }
+            if (nxt == "n" || nxt == "r" || nxt == "t") {
+              field = field " "; i += 2; continue
+            }
+            if (nxt == "u") {
+              hex = substr(line, i + 2, 4)
+              code = hex_value(hex)
+              if (code <= 0 || (code >= 55296 && code <= 57343)) return -1
+              if (code == 9 || code == 10 || code == 13) field = field " "
+              else field = field utf8(code)
+              i += 6
+              continue
+            }
+            return -1
           }
           if (c == "\"") { inq = 0; i += 1; continue }
           field = field c; i += 1; continue
@@ -213,9 +248,15 @@ axi_list() {  # <state> [<extra-fields>]
 # --- emit -------------------------------------------------------------------
 
 json_escape() {  # <text>
-  local s=$1
+  local s=$1 control octal escaped code
   s=${s//\\/\\\\}
   s=${s//\"/\\\"}
+  for ((code = 1; code <= 31; code++)); do
+    printf -v octal '%03o' "$code"
+    printf -v control '%b' "\\$octal"
+    printf -v escaped '\\u%04x' "$code"
+    s=${s//$control/$escaped}
+  done
   printf '%s' "$s"
 }
 
@@ -224,7 +265,7 @@ json_escape() {  # <text>
 # to preserve the ID, separator, and an ellipsis.
 todo_item() {  # <id> <title>
   local id=$1 title=$2 prefix item_max title_max
-  title=$(printf '%s' "$title" | tr '\t\n' '  ' | tr -s ' ' | sed 's/^ //; s/ $//')
+  title=$(printf '%s' "$title" | tr '\t\n\r' '   ' | tr -s ' ' | sed 's/^ //; s/ $//')
   [ -n "$title" ] || title=-
   prefix="$id - "
   item_max=$ITEM_MAX
