@@ -238,7 +238,8 @@ assert_contains "$out" "DRIFT inflight-no-worker: ghost-task" \
 assert_not_contains "$out" "DRIFT hold-expired" "--check invented a hold finding"
 pass "--check flags an in-flight task whose worker is absent"
 
-# Every absent recorded-worker resource gets its own actionable reason.
+# Missing worker resources are reported through fm-crew-state.sh's canonical
+# current-state verdict and reason.
 home=$(new_home check-missing-resources)
 mkdir -p "$home/live-worktree"
 fm_write_meta "$home/state/no-worktree.meta" \
@@ -257,15 +258,15 @@ write_listing "$home" in_flight 'id,state,kind,repo,title,hold_until' \
   'gone-worktree,in_flight,ship,firstmate,Torn down worktree,"-"' \
   'no-window,in_flight,ship,firstmate,Missing window field,"-"'
 out=$(run_project "$home" --check) || fail "--check exited non-zero"
-assert_contains "$out" "DRIFT inflight-no-worker: no-meta - no metadata" \
-  "--check did not distinguish missing task metadata"
-assert_contains "$out" "DRIFT inflight-no-worker: no-worktree - no worktree recorded" \
-  "--check did not distinguish a missing worktree field"
-assert_contains "$out" "DRIFT inflight-no-worker: gone-worktree - worktree is gone" \
-  "--check did not distinguish a torn-down worktree"
-assert_contains "$out" "DRIFT inflight-no-worker: no-window - no window recorded" \
-  "--check did not distinguish a missing recorded window"
-pass "--check reports each missing recorded-worker resource"
+assert_contains "$out" "DRIFT inflight-no-worker: no-meta - no metadata for no-meta" \
+  "--check did not relay the missing-metadata verdict"
+assert_contains "$out" "DRIFT inflight-no-worker: no-worktree - worktree gone" \
+  "--check did not relay the missing-worktree verdict"
+assert_contains "$out" "DRIFT inflight-no-worker: gone-worktree - worktree gone" \
+  "--check did not relay the torn-down-worktree verdict"
+assert_contains "$out" "DRIFT inflight-no-worker: no-window - no backend target recorded" \
+  "--check did not relay the missing-target verdict"
+pass "--check reports missing workers through crew-state verdicts"
 
 # --- (d) --check flags a hold whose deadline has passed ----------------------
 
@@ -314,8 +315,8 @@ assert_contains "$out" "DRIFT inflight-no-worker: live-task" \
   "--check stayed silent after the same task's endpoint disappeared"
 pass "--check prints nothing when the board matches reality, and flags the same task once its endpoint is gone"
 
-# A matching run remains the richer current-state source even after the endpoint
-# dies, but it must not mask the cheaper recorded-endpoint drift verdict.
+# A matching run is authoritative even after the endpoint dies, so the drift
+# check must accept fm-crew-state.sh's worker verdict instead of re-probing it.
 head=$(git -C "$home/wt" rev-parse HEAD)
 run=$(cat <<EOF
 run:
@@ -335,9 +336,8 @@ assert_contains "$verdict" "source: run-step" \
   "fixture is vacuous: a matching run must survive the dead endpoint"
 out=$(FM_FAKE_AXI_STATUS="$run" FM_FAKE_TMUX_MISSING=1 run_project "$home" --check) \
   || fail "--check exited non-zero for a dead endpoint with an attributed run"
-assert_contains "$out" "DRIFT inflight-no-worker: live-task - recorded endpoint is dead" \
-  "an attributed run hid the dead recorded endpoint"
-pass "--check flags a dead endpoint even when crew state is run-step sourced"
+[ -z "$out" ] || fail "--check disagreed with the authoritative run-step verdict: $out"
+pass "--check accepts a run-step-backed worker after its endpoint closes"
 
 # --- (f) FM_HOME is required fail-closed ------------------------------------
 

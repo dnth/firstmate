@@ -38,10 +38,10 @@
 #
 # Findings:
 #   DRIFT inflight-no-worker: <id> - <reason>
-#     The board says in-flight but its recorded metadata, worktree, window, or
-#     backend endpoint is gone. This uses fm-backend.sh's shared cheap endpoint
-#     existence primitive; bin/fm-crew-state.sh remains the owner of richer
-#     run-step, busy-state, and current-state reconciliation.
+#     The board says in-flight but bin/fm-crew-state.sh - the single owner of
+#     current-state reconciliation - can find no worker at all (state `unknown`
+#     from source `none`: no metadata, a torn-down worktree, or a recorded
+#     endpoint that is gone). Liveness is never reimplemented here.
 #   DRIFT hold-expired: <id> - hold_until <date> passed
 #     A date-gated hold whose deadline has lapsed. tasks-axi's own gate is
 #     inactive ON and after that date, so `--state held` no longer lists these
@@ -89,13 +89,8 @@ if [ -z "${FM_HOME+x}" ] || [ -z "${FM_HOME:-}" ]; then
 fi
 [ -d "$FM_HOME" ] || fail "FM_HOME '$FM_HOME' is not a directory"
 
-# shellcheck source=bin/fm-backend.sh
-# shellcheck disable=SC1091
-. "$SCRIPT_DIR/fm-backend.sh"
-
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
-STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 BOARD="$DATA/backlog.md"
 
 ITEM_MAX=${FM_TODO_ITEM_MAX:-100}
@@ -406,36 +401,22 @@ run_emit() {
 
 # --- check ------------------------------------------------------------------
 
-# An in-flight row whose recorded worker resources no longer exist. This is the
-# same cheap metadata and endpoint-liveness boundary used by session start.
+# An in-flight row whose worker cannot be found at all. bin/fm-crew-state.sh is
+# the owner of that verdict: `state: unknown · source: none · <reason>` is its
+# one canonical way of saying no current-state source exists for this task.
 check_inflight() {  # <in_flight-listing>
-  local listing=$1 id meta worktree window backend target
+  local listing=$1 id verdict reason
   while IFS= read -r id; do
     [ -n "$id" ] || continue
-    meta="$STATE/$id.meta"
-    if [ ! -f "$meta" ]; then
-      printf 'DRIFT inflight-no-worker: %s - no metadata\n' "$id"
-      continue
-    fi
-    worktree=$(fm_meta_get "$meta" worktree)
-    if [ -z "$worktree" ]; then
-      printf 'DRIFT inflight-no-worker: %s - no worktree recorded\n' "$id"
-      continue
-    fi
-    if [ ! -d "$worktree" ]; then
-      printf 'DRIFT inflight-no-worker: %s - worktree is gone\n' "$id"
-      continue
-    fi
-    window=$(fm_meta_get "$meta" window)
-    if [ -z "$window" ]; then
-      printf 'DRIFT inflight-no-worker: %s - no window recorded\n' "$id"
-      continue
-    fi
-    backend=$(fm_backend_of_meta "$meta")
-    target=$(fm_backend_target_of_meta "$meta")
-    if ! fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
-      printf 'DRIFT inflight-no-worker: %s - recorded endpoint is dead\n' "$id"
-    fi
+    verdict=$("$SCRIPT_DIR/fm-crew-state.sh" "$id" 2>/dev/null) || continue
+    case "$verdict" in
+      'state: unknown'*'source: none'*) ;;
+      *) continue ;;
+    esac
+    reason=${verdict##*source: none}
+    reason=${reason# · }
+    [ -n "$reason" ] || reason="no current-state source available"
+    printf 'DRIFT inflight-no-worker: %s - %s\n' "$id" "$reason"
   done <<< "$(axi_rows tasks "$listing" rows id)"
 }
 
