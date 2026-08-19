@@ -11,11 +11,18 @@ fi
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=bin/fm-primary-watch-version-lib.sh
 . "$ROOT/bin/fm-primary-watch-version-lib.sh"
+# shellcheck source=bin/fm-omp-process-lib.sh
+. "$ROOT/bin/fm-omp-process-lib.sh"
 
 command -v omp >/dev/null 2>&1 || fail "OMP (version unavailable) binary not found"
 OMP_BIN=$("$ROOT/bin/fm-omp-capabilities.sh" --print-binary) || fail "OMP capability check failed"
 OMP_VERSION=$("$OMP_BIN" --version 2>&1 | head -1) || fail "OMP version probe failed for $OMP_BIN"
 [ -n "$OMP_VERSION" ] || fail "OMP version probe returned no version"
+OMP_BIN=$(fm_test_realpath "$OMP_BIN") || fail "OMP binary realpath could not be resolved"
+OMP_LAUNCH_IDENTITY=$(fm_omp_process_launch_identity "$OMP_BIN") \
+  || fail "OMP launch identity could not be resolved for $OMP_BIN"
+EXPECTED_OMP_BUN=$(printf '%s\n' "$OMP_LAUNCH_IDENTITY" | sed -n '1p')
+EXPECTED_OMP_BIN=$(printf '%s\n' "$OMP_LAUNCH_IDENTITY" | sed -n '2p')
 command -v tmux >/dev/null 2>&1 || fail "OMP $OMP_VERSION primary E2E requires tmux"
 REAL_TMUX=$(command -v tmux)
 export FM_POLL=${FM_POLL:-0.2}
@@ -225,10 +232,10 @@ first_omp_pid=$(sed -n '2p' "$MARKER")
 expected_version=$(hash_file "$PROJECT/.omp/extensions/fm-primary-omp.ts" "$PROJECT")
 [ "$(head -n 1 "$MARKER")" = "$expected_version" ] || fail "OMP loaded marker was not tied to the adapter version"
 [ "$(wc -l < "$MARKER" | tr -d '[:space:]')" = 4 ] || fail "OMP loaded marker omitted executable identity"
-[ "$(sed -n '3p' "$MARKER")" = "$(fm_test_realpath "$(command -v bun)")" ] \
-  || fail "OMP loaded marker did not bind the Bun realpath"
-[ "$(sed -n '4p' "$MARKER")" = "$(fm_test_realpath "$OMP_BIN")" ] \
-  || fail "OMP loaded marker did not bind the selected OMP realpath"
+[ "$(sed -n '3p' "$MARKER")" = "$EXPECTED_OMP_BUN" ] \
+  || fail "OMP loaded marker did not bind the resolved runtime identity"
+[ "$(sed -n '4p' "$MARKER")" = "$EXPECTED_OMP_BIN" ] \
+  || fail "OMP loaded marker did not bind the selected OMP entrypoint identity"
 FM_STATE_OVERRIDE="$HOME_DIR/state" bash -c \
   '. "$1/bin/fm-session-lock-lib.sh"; fm_harness_pid_alive "$2"' _ "$PROJECT" "$first_omp_pid" \
   || fail "real OMP process-title identity did not satisfy the exact Bun argv boundary"
