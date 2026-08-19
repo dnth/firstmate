@@ -54,6 +54,10 @@ case "${1:-}" in
     exit 0
     ;;
   capture-pane)
+    if [ "$FM_TEST_MODE" = deadline ] && [ -f "$FM_TEST_ENTERED" ]; then
+      printf 'post-enter-capture\n' >> "$FM_TEST_SEND_LOG"
+      /bin/sleep 0.08
+    fi
     if [ "$FM_TEST_MODE" = queued ] \
       || { [ "$FM_TEST_MODE" = starts ] && [ -f "$FM_TEST_ENTERED" ]; }; then
       printf 'Working… ⟦esc⟧\n'
@@ -85,6 +89,8 @@ printf 'n%s\n' "$FM_TEST_BUN"
 SH
   cat > "$fb/sleep" <<'SH'
 #!/usr/bin/env bash
+[ "$FM_TEST_MODE" != stale-activity ] || [ "${1:-}" != 0.3 ] \
+  || touch "$FM_TEST_TURNSTART_MARKER"
 [ -z "${FM_TEST_SLEEP_LOG:-}" ] || printf '%s\n' "${1:-0}" >> "$FM_TEST_SLEEP_LOG"
 exit 0
 SH
@@ -188,6 +194,16 @@ test_turn_activity_advance_keeps_fast_success() {
   pass "fm-send: OMP session activity advancement proves a fast turn start"
 }
 
+test_pre_submit_activity_does_not_prove_new_turn() {
+  local home fb bun omp log entered rc
+  IFS=$'\t' read -r home fb bun omp log entered < <(setup_case stale-activity omp)
+  : > "$home/state/turn-test.omp-started"
+  run_case stale-activity "$home" "$fb" "$bun" "$omp" "$log" "$entered" >/dev/null 2>&1
+  rc=$?
+  expect_code 4 "$rc" "activity before the submit boundary must not prove the new steer started"
+  pass "fm-send: pre-submit activity cannot prove the submitted turn started"
+}
+
 test_busy_queued_enter_remains_success() {
   local home fb bun omp log entered rc
   IFS=$'\t' read -r home fb bun omp log entered < <(setup_case queued omp)
@@ -210,18 +226,17 @@ test_non_omp_does_not_gain_turn_start_verification() {
   pass "fm-send: turn-start verification remains scoped to OMP targets"
 }
 
-test_timeout_bounds_final_poll_interval() {
-  local home fb bun omp log entered rc sleep_log total
+test_timeout_uses_monotonic_deadline() {
+  local home fb bun omp log entered rc probes
   IFS=$'\t' read -r home fb bun omp log entered < <(setup_case bounded-timeout omp)
-  sleep_log="$home/sleep.log"
-  FM_TEST_SLEEP_LOG="$sleep_log" FM_SEND_TURNSTART_POLL=0.099 \
-    run_case wedge "$home" "$fb" "$bun" "$omp" "$log" "$entered" >/dev/null 2>&1
+  FM_SEND_TURNSTART_POLL=0.099 \
+    run_case deadline "$home" "$fb" "$bun" "$omp" "$log" "$entered" >/dev/null 2>&1
   rc=$?
   expect_code 4 "$rc" "a bounded no-turn poll should retain its distinct verdict"
-  total=$(awk '$1 > 0 && $1 <= 0.1 { sum += $1 } END { printf "%.6f", sum }' "$sleep_log")
-  awk -v total="$total" 'BEGIN { exit !(total >= 0.099999 && total <= 0.100001) }' \
-    || fail "turn-start polling slept $total seconds for a 0.1 second timeout"
-  pass "fm-send: the final turn-start poll is bounded by the configured timeout"
+  probes=$(grep -c '^post-enter-capture$' "$log")
+  [ "$probes" -eq 2 ] \
+    || fail "the expired turn-start deadline allowed an extra backend probe (captures=$probes)"
+  pass "fm-send: the monotonic deadline prevents post-expiry backend probes"
 }
 
 test_omp_key_ignores_turnstart_configuration() {
@@ -259,11 +274,21 @@ SH
   : > "$root/bin/fm-quota-axi-lib.sh"
   cat > "$root/bin/fm-send.sh" <<'SH'
 #!/usr/bin/env bash
-[ "$1" = 'fm-remote:w1:p1' ] || exit 81
-[ "$FM_STATE_OVERRIDE" = "$FM_HOME/state/parent-route" ] || exit 82
-[ "$FM_DATA_OVERRIDE" = "$FM_HOME/data/.parent-route" ] || exit 83
-[ "$(sed -n 's/^harness=//p' "$FM_STATE_OVERRIDE/remote-turn.meta")" = omp ] || exit 84
-exit 4
+case "$2" in
+  'remote steer')
+    [ "$1" = 'fm-remote:w1:p1' ] || exit 81
+    [ "$FM_STATE_OVERRIDE" = "$FM_HOME/state/parent-route" ] || exit 82
+    [ "$FM_DATA_OVERRIDE" = "$FM_HOME/data/.parent-route" ] || exit 83
+    [ "$(sed -n 's/^harness=//p' "$FM_STATE_OVERRIDE/remote-turn.meta")" = omp ] || exit 84
+    exit 4
+    ;;
+  'non-OMP steer')
+    [ "$FM_STATE_OVERRIDE" = "$FM_HOME/state" ] || exit 85
+    [ -z "${FM_DATA_OVERRIDE+x}" ] || exit 86
+    exit 0
+    ;;
+esac
+exit 87
 SH
   chmod +x "$root/bin/fm-remote-secondmate-control.sh" "$root/bin/fm-send.sh"
   : > "$home/AGENTS.md"
@@ -277,15 +302,77 @@ SH
     "$root/bin/fm-remote-secondmate-control.sh" send remote-turn 'remote steer' >/dev/null 2>&1
   rc=$?
   expect_code 4 "$rc" "remote control should preserve the host-local OMP no-turn verdict"
-  pass "fm-send: remote control verifies through task-bound OMP route metadata"
+  perl -pi -e 's/^harness=omp$/harness=codex/' "$home/state/parent-route/remote-turn.meta"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    "$root/bin/fm-remote-secondmate-control.sh" send remote-turn 'non-OMP steer' >/dev/null 2>&1
+  rc=$?
+  expect_code 0 "$rc" "remote non-OMP control should preserve its original home state routing"
+  pass "fm-send: remote OMP metadata routing leaves non-OMP state unchanged"
+}
+
+test_herdr_empty_requires_post_submit_turn_proof() {
+  local dir home fb bun omp session entered reads rc
+  dir="$TMP_ROOT/herdr-no-turn"
+  home="$dir/home"
+  fb=$(make_stubs "$dir")
+  bun="$dir/bun"
+  omp="$dir/omp"
+  session="$dir/session.jsonl"
+  entered="$dir/herdr-entered"
+  reads="$dir/herdr-working-read"
+  mkdir -p "$home/state"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$bun"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$omp"
+  chmod +x "$bun" "$omp"
+  : > "$session"
+  : > "$home/state/herdr-turn.omp-started"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  'status --json') printf '%s\n' '{"client":{"version":"0.7.5","protocol":16},"server":{"running":true}}' ;;
+  'pane get') printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p1"}}}' ;;
+  'pane send-text') : ;;
+  'pane send-keys') : > "$FM_TEST_HERDR_ENTERED" ;;
+  'agent get')
+    status=idle
+    if [ -f "$FM_TEST_HERDR_ENTERED" ] && [ ! -f "$FM_TEST_HERDR_WORKING_READ" ]; then
+      status=working
+      : > "$FM_TEST_HERDR_WORKING_READ"
+    fi
+    printf '{"result":{"agent":{"agent":"omp","agent_status":"%s","agent_session":{"kind":"path","value":"%s"}}}}\n' \
+      "$status" "$FM_TEST_HERDR_SESSION"
+    ;;
+esac
+SH
+  chmod +x "$fb/herdr"
+  bun=$(fm_test_realpath "$bun")
+  omp=$(fm_test_realpath "$omp")
+  fm_write_meta "$home/state/herdr-turn.meta" \
+    'window=fm-remote:w1:p1' 'endpoint_task_id=herdr-turn' 'backend=herdr' \
+    "worktree=$dir/worktree" "project=$dir/project" 'harness=omp' \
+    'herdr_session=fm-remote' 'herdr_workspace_id=w1' 'herdr_tab_id=w1:t1' \
+    'herdr_pane_id=w1:p1' "omp_bin=$omp" "omp_bun=$bun"
+  env PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_TEST_MODE=herdr FM_TEST_BUN="$bun" FM_TEST_OMP="$omp" \
+    FM_TEST_SEND_LOG="$dir/send.log" FM_TEST_ENTERED="$dir/tmux-entered" \
+    FM_TEST_TURNSTART_MARKER="$home/state/herdr-turn.omp-started" \
+    FM_TEST_HERDR_ENTERED="$entered" FM_TEST_HERDR_WORKING_READ="$reads" \
+    FM_TEST_HERDR_SESSION="$session" FM_SEND_RETRIES=1 FM_SEND_SLEEP=0 \
+    FM_SEND_SETTLE=0 FM_SEND_TURNSTART_TIMEOUT=0.1 FM_SEND_TURNSTART_POLL=0.02 \
+    "$SEND" herdr-turn 'remote coarse check' >/dev/null 2>&1
+  rc=$?
+  expect_code 4 "$rc" "a confirmed Herdr submit without post-submit turn proof should be delivered-no-turn"
+  pass "fm-send: Herdr empty still requires post-submit OMP turn proof"
 }
 
 test_confirmed_submit_without_turn_is_distinct_and_wakes_recovery
 test_turn_start_keeps_normal_success
 test_no_turn_does_not_close_answered_decision
 test_turn_activity_advance_keeps_fast_success
+test_pre_submit_activity_does_not_prove_new_turn
 test_busy_queued_enter_remains_success
 test_non_omp_does_not_gain_turn_start_verification
-test_timeout_bounds_final_poll_interval
+test_timeout_uses_monotonic_deadline
 test_omp_key_ignores_turnstart_configuration
 test_remote_control_uses_task_bound_omp_route
+test_herdr_empty_requires_post_submit_turn_proof

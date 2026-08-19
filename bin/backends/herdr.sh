@@ -2987,8 +2987,8 @@ fm_backend_herdr_wait_omp_session_exit() {  # <session-file> <byte-offset> <budg
 
 # Echoes empty|pending|unknown|send-failed, a subset of the proof-carrying
 # submit vocabulary. Empty means confirmed submitted for every backend.
-fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [harness] [canonical-omp-bun]
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${7:-} bun=${8:-}
+fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [harness] [canonical-omp-bun] [turnstart-reference]
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${7:-} bun=${8:-} turnstart_reference=${9:-}
   local i=0 verdict baseline confirm_sleep omp_confirm_sleep omp_session='' omp_offset='' omp_status='' omp_event
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   if [ "$harness" = omp ]; then
@@ -3004,6 +3004,10 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   if [ "$harness" != omp ]; then
     baseline=$(fm_backend_herdr_classify_submit_agent_status \
       "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")")
+  fi
+  if [ -n "$turnstart_reference" ] && ! touch "$turnstart_reference"; then
+    printf 'unknown'
+    return 0
   fi
   confirm_sleep=$(fm_backend_herdr_submit_confirm_budget "$sleep_s")
   while :; do

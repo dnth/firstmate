@@ -480,14 +480,18 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [harness] [bas
   fi
 }
 
-fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle> [harness] [canonical-omp-bun]
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${6:-} bun=${7:-}
+fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle> [harness] [canonical-omp-bun] [turnstart-reference]
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${6:-} bun=${7:-} turnstart_reference=${8:-}
   local baseline_busy=0
   if [ "$harness" = omp ] && fm_pane_is_busy "$target" omp; then
     baseline_busy=1
   fi
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
   sleep "$settle"
+  if [ -n "$turnstart_reference" ] && ! touch "$turnstart_reference"; then
+    printf 'unknown'
+    return 0
+  fi
   fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$harness" \
     "$baseline_busy" "$bun"
 }

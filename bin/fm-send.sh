@@ -15,14 +15,16 @@
 # submit or reports an inconclusive send. If a swallowed Enter is positively
 # confirmed, fm-send exits NON-ZERO so the caller knows the steer did not land
 # instead of silently leaving an unsubmitted instruction.
-# For an OMP target, a confirmed idle submit must also start a real turn within
-# FM_SEND_TURNSTART_TIMEOUT (default 1 second, maximum 3 seconds), sampled every
-# FM_SEND_TURNSTART_POLL (default 0.1 second). The proof is the existing backend
-# busy reader or advancement of the generated OMP turn-start marker. A confirmed
-# submit with no turn returns `delivered-no-turn` on stderr and exits 4. A
-# task-bound target also receives an actionable status event and durable watcher
-# wake so supervised recovery starts promptly without an automatic terminate or
-# relaunch.
+# For an OMP target, a confirmed idle submit must also start a real turn before
+# the monotonic FM_SEND_TURNSTART_TIMEOUT deadline (default 1 second, maximum 3
+# seconds), sampled no more often than FM_SEND_TURNSTART_POLL (default 0.1
+# second). Proof is the existing backend busy reader or advancement of the
+# generated OMP turn-start marker after the backend's submit-time baseline. A
+# confirmed submit with no proof returns `delivered-no-turn` on stderr and exits
+# 4. A task-bound target also receives an actionable status event and durable
+# watcher wake so supervised recovery starts promptly without an automatic
+# terminate or relaunch. Remote OMP control runs this same check beside the
+# endpoint and propagates exit 4 without redelivery.
 # An already-busy OMP pane has one narrow exception: a successfully transported
 # Enter may return `queued-unconfirmed`, which fm-send accepts as queued delivery
 # while preserving failures for transport errors and non-busy pending input.
@@ -206,6 +208,19 @@ fm_send_validate_turnstart_config() {
     echo "error: FM_SEND_TURNSTART_TIMEOUT must be 0.1..3 seconds and FM_SEND_TURNSTART_POLL must be 0.02..timeout" >&2
     return 1
   fi
+  if [ "$TARGET_BACKEND" != remote ] && ! fm_send_monotonic_now >/dev/null; then
+    echo "error: Perl Time::HiRes cannot provide the OMP turn-start monotonic clock" >&2
+    return 1
+  fi
+}
+
+fm_send_monotonic_now() {
+  local now
+  now=$(perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC \
+    -e 'printf "%.6f", clock_gettime(CLOCK_MONOTONIC)' 2>/dev/null) \
+    || return 1
+  case "$now" in ''|*[!0-9.]*) return 1 ;; esac
+  printf '%s' "$now"
 }
 
 fm_send_omp_is_busy() {
@@ -224,24 +239,32 @@ fm_send_omp_is_busy() {
 }
 
 fm_send_wait_for_omp_turn_start() {
-  local elapsed=0 interval
-  # Herdr's exact `empty` submit verdict already means its native agent-state
-  # reader observed a submit-active state after Enter. A remote control call
-  # runs this same verifier beside the endpoint and propagates its exact result.
-  case "$TARGET_BACKEND" in herdr|remote) return 0 ;; esac
-  while :; do
-    fm_send_omp_is_busy && return 0
-    if [ -n "$TARGET_OMP_TURNSTART_REFERENCE" ] \
+  local now deadline remaining interval signal
+  [ "$TARGET_BACKEND" != remote ] || return 0
+  now=$(fm_send_monotonic_now) || return 1
+  deadline=$(awk -v now="$now" -v timeout="$FM_SEND_TURNSTART_TIMEOUT_VALUE" \
+    'BEGIN { printf "%.6f", now + timeout }')
+  while remaining=$(fm_send_monotonic_now) \
+    && remaining=$(awk -v now="$remaining" -v deadline="$deadline" \
+      'BEGIN { remaining = deadline - now; if (remaining <= 0) exit 1; printf "%.6f", remaining }'); do
+    signal=0
+    fm_send_omp_is_busy && signal=1
+    if [ -n "$TARGET_OMP_TURNSTART_MARKER" ] \
+      && [ -n "$TARGET_OMP_TURNSTART_REFERENCE" ] \
       && [ "$TARGET_OMP_TURNSTART_MARKER" -nt "$TARGET_OMP_TURNSTART_REFERENCE" ]; then
+      signal=1
+    fi
+    now=$(fm_send_monotonic_now) || return 1
+    if [ "$signal" -eq 1 ] \
+      && awk -v now="$now" -v deadline="$deadline" 'BEGIN { exit !(now <= deadline) }'; then
       return 0
     fi
-    interval=$(awk -v elapsed="$elapsed" -v timeout="$FM_SEND_TURNSTART_TIMEOUT_VALUE" \
-      -v poll="$FM_SEND_TURNSTART_POLL_VALUE" \
-      'BEGIN { remaining = timeout - elapsed; if (remaining <= 0) exit 1; if (poll < remaining) remaining = poll; printf "%.6f", remaining }') \
+    remaining=$(awk -v now="$now" -v deadline="$deadline" \
+      'BEGIN { remaining = deadline - now; if (remaining <= 0) exit 1; printf "%.6f", remaining }') \
       || break
+    interval=$(awk -v remaining="$remaining" -v poll="$FM_SEND_TURNSTART_POLL_VALUE" \
+      'BEGIN { if (poll < remaining) remaining = poll; printf "%.6f", remaining }')
     sleep "$interval"
-    elapsed=$(awk -v elapsed="$elapsed" -v interval="$interval" \
-      'BEGIN { printf "%.6f", elapsed + interval }')
   done
   return 1
 }
@@ -250,7 +273,10 @@ fm_send_prepare_omp_turnstart_reference() {
   TARGET_OMP_TURNSTART_MARKER=
   [ -n "$TARGET_TASK_ID" ] || return 0
   TARGET_OMP_TURNSTART_MARKER="$STATE/$TARGET_TASK_ID.omp-started"
-  [ -f "$TARGET_OMP_TURNSTART_MARKER" ] && [ ! -L "$TARGET_OMP_TURNSTART_MARKER" ] || return 0
+  if [ -L "$TARGET_OMP_TURNSTART_MARKER" ] \
+    || { [ -e "$TARGET_OMP_TURNSTART_MARKER" ] && [ ! -f "$TARGET_OMP_TURNSTART_MARKER" ]; }; then
+    TARGET_OMP_TURNSTART_MARKER=
+  fi
   TARGET_OMP_TURNSTART_REFERENCE=$(mktemp "${TMPDIR:-/tmp}/fm-send-turnstart.XXXXXXXX") || {
     echo "error: cannot create OMP turn-start activity reference" >&2
     return 1
@@ -624,7 +650,7 @@ else
         verdict=send-failed
       fi
     fi
-  elif verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL" "$TARGET_HARNESS" "$TARGET_OMP_BUN"); then
+  elif verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL" "$TARGET_HARNESS" "$TARGET_OMP_BUN" "$TARGET_OMP_TURNSTART_REFERENCE"); then
     :
   else
     send_rc=$?
