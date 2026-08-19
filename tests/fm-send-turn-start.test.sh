@@ -124,8 +124,14 @@ setup_case() {  # <name> <harness> -> echoes "home fakebin bun omp log entered"
 
 run_case() {  # <mode> <home> <fakebin> <bun> <omp> <log> <entered> [fm-send args...]
   local mode=$1 home=$2 fb=$3 bun=$4 omp=$5 log=$6 entered=$7
+  local -a command
   shift 7
   [ $# -gt 0 ] || set -- 'steer now'
+  command=("$SEND" turn-test "$@")
+  if [ -n "${FM_TEST_COMMAND_TIMEOUT:-}" ]; then
+    command=(perl -e '$SIG{ALRM}=sub{exit 124}; alarm shift; exec @ARGV' \
+      "$FM_TEST_COMMAND_TIMEOUT" "${command[@]}")
+  fi
   env PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
     FM_TEST_MODE="$mode" FM_TEST_BUN="$bun" FM_TEST_OMP="$omp" \
     FM_TEST_SEND_LOG="$log" FM_TEST_ENTERED="$entered" \
@@ -134,7 +140,7 @@ run_case() {  # <mode> <home> <fakebin> <bun> <omp> <log> <entered> [fm-send arg
     FM_SEND_TURNSTART_TIMEOUT="${FM_SEND_TURNSTART_TIMEOUT:-0.3}" \
     FM_SEND_TURNSTART_POLL="${FM_SEND_TURNSTART_POLL:-0.02}" \
     FM_TEST_SLEEP_LOG="${FM_TEST_SLEEP_LOG:-}" \
-    "$SEND" turn-test "$@"
+    "${command[@]}"
 }
 
 test_confirmed_submit_without_turn_is_distinct_and_wakes_recovery() {
@@ -202,6 +208,24 @@ test_recovery_wake_failure_is_distinct_and_no_resend() {
     "the watcher-wake failure prevented the independent status-marker attempt"
   assert_single_submission_without_kill "$log" "watcher-wake persistence failure"
   pass "fm-send: wake persistence failure is distinct and never resends"
+}
+
+test_recovery_wake_lock_failure_is_bounded() {
+  local home fb bun omp log entered rc err status
+  IFS=$'\t' read -r home fb bun omp log entered < <(setup_case wake-lock-persistence omp)
+  err="$home/persistence.err"
+  : > "$home/state/.wake-queue.lock"
+  FM_TEST_COMMAND_TIMEOUT=5 \
+    run_case wedge "$home" "$fb" "$bun" "$omp" "$log" "$entered" >/dev/null 2>"$err"
+  rc=$?
+  expect_code 5 "$rc" "an unacquirable wake lock should return bounded persistence failure"
+  status=$(cat "$home/state/turn-test.status")
+  assert_contains "$status" 'failed: delivered-no-turn:' \
+    "the unacquirable wake lock prevented the independent status-marker attempt"
+  assert_contains "$(cat "$err")" 'delivered-no-turn-persistence-failed' \
+    "the unacquirable wake lock lost the post-delivery persistence verdict"
+  assert_single_submission_without_kill "$log" "wake-lock persistence failure"
+  pass "fm-send: unacquirable wake lock returns bounded failure"
 }
 
 test_turn_start_keeps_normal_success() {
@@ -481,6 +505,7 @@ SH
 test_confirmed_submit_without_turn_is_distinct_and_wakes_recovery
 test_recovery_marker_failure_is_distinct_and_no_resend
 test_recovery_wake_failure_is_distinct_and_no_resend
+test_recovery_wake_lock_failure_is_bounded
 test_turn_start_keeps_normal_success
 test_no_turn_does_not_close_answered_decision
 test_turn_activity_advance_keeps_fast_success

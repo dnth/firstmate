@@ -520,7 +520,7 @@ fm_wake_clean_field() {
 }
 
 fm_wake_append() {
-  local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status
+  local kind=$1 key=$2 payload=$3 lock_attempts=${4:-} clean_key clean_payload epoch seq seq_file status attempt=0
   case "$kind" in
     signal|stale|check|heartbeat) ;;
     *) printf 'fm_wake_append: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
@@ -532,7 +532,16 @@ fm_wake_append() {
   seq_file="$STATE/.wake-queue.seq"
   status=0
 
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  if [ -n "$lock_attempts" ]; then
+    case "$lock_attempts" in ''|*[!0-9]*|0) return 2 ;; esac
+    while ! fm_lock_try_acquire "$FM_WAKE_QUEUE_LOCK"; do
+      attempt=$((attempt + 1))
+      [ "$attempt" -lt "$lock_attempts" ] || return 3
+      sleep 0.05
+    done
+  else
+    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  fi
   seq=$(cat "$seq_file" 2>/dev/null || echo 0)
   case "$seq" in
     ''|*[!0-9]*) seq=0 ;;

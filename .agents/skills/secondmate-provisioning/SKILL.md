@@ -2,7 +2,7 @@
 name: secondmate-provisioning
 description: >-
   Agent-only reference for persistent secondmate setup and retirement.
-  Use when creating, seeding, validating, launching, recovering, handing backlog to, pushing inherited local material into, or retiring a secondmate home, when editing data/secondmates.md, or on a secondmate delivered-no-turn verdict.
+  Use when creating, seeding, validating, launching, recovering, handing backlog to, pushing inherited local material into, or retiring a secondmate home, when editing data/secondmates.md, or on a secondmate delivered-no-turn or delivered-no-turn-persistence-failed verdict.
   Covers local leases, whole-home remote routes, transactional seeding, project clone restrictions, secondmate harness pins, inherited local-material push, idle charter, handoff helper, and teardown safety.
 user-invocable: false
 metadata:
@@ -11,7 +11,7 @@ metadata:
 
 # secondmate-provisioning
 
-Use this reference before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a persistent secondmate, before editing `data/secondmates.md`, and when `fm-send.sh` reports `delivered-no-turn` for a secondmate.
+Use this reference before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a persistent secondmate, before editing `data/secondmates.md`, and when `fm-send.sh` reports `delivered-no-turn` or `delivered-no-turn-persistence-failed` for a secondmate.
 
 Keep the always-inline routing rules in `AGENTS.md` authoritative: route by natural-language `scope:`, local-only projects stay with the main firstmate, and secondmates are idle by default.
 
@@ -198,8 +198,8 @@ Do not hand off `local-only` items.
 
 ## Recovery
 
-A secondmate `delivered-no-turn` verdict means the request was submitted but did not start a turn, so never resend it as an undelivered request.
-Treat the verdict's `failed:` event and watcher wake as a supervised-recovery trigger, then inspect the direct report's current state and persistent home before any lifecycle action.
+Both secondmate delivered-no-turn verdicts mean the request was submitted but did not start a turn, so never resend it as an undelivered request.
+Treat the synchronous verdict itself as the supervised-recovery trigger, use any persisted `failed:` event and watcher wake as corroboration, then inspect the direct report's current state and persistent home before any lifecycle action.
 Load `harness-adapters` before interrupting, exiting, or relaunching the secondmate, and never force, discard, or reconstruct its child tree.
 
 For local `kind=secondmate` meta with no window, treat the secondmate as a dead persistent direct report and respawn it with:
