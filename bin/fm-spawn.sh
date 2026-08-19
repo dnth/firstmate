@@ -1465,6 +1465,7 @@ OMP_BUN_CANON=
 OMP_BUN_LAUNCH_PATH=
 OMP_BUN_LAUNCH_DIR=
 OMP_LAUNCH_ENV=
+OMP_LAUNCH_PATH_GUARD=
 OMP_PRIMARY_EXTENSION=
 OMP_SESSION_DIR=
 OMP_SESSION_POINTER=
@@ -3291,6 +3292,9 @@ if [ -n "$OMP_BUN_LAUNCH_DIR" ]; then
 fi
 if [ "$OMP_LAUNCH_TEMPLATE" -eq 1 ] && [ "$HARNESS" = omp ] && [ -n "$OMP_BIN_CANON" ]; then
   LAUNCH="FM_OMP_BUN=$(shell_quote "$OMP_BUN_CANON") FM_OMP_BIN=$(shell_quote "$OMP_BIN_CANON") $LAUNCH"
+  if [ -n "$OMP_BUN_LAUNCH_DIR" ]; then
+    OMP_LAUNCH_PATH_GUARD='case "${PATH-}" in *::*|:*|*:) exit 1 ;; esac; '
+  fi
 fi
 OMPRESUMEFLAG=
 [ -z "$OMP_RESUME_FILE" ] || OMPRESUMEFLAG="--resume $(shell_quote "$OMP_RESUME_FILE") "
@@ -3414,6 +3418,7 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
   fi
 fi
 sleep 0.3
+[ -z "$OMP_LAUNCH_PATH_GUARD" ] || LAUNCH="$OMP_LAUNCH_PATH_GUARD$LAUNCH"
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then

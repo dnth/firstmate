@@ -137,7 +137,11 @@ case "$cmd" in
       if [ "${args[$i]}" = -l ] && [ $((i + 1)) -lt ${#args[@]} ]; then
         printf '%s\n' "${args[$((i + 1))]}" > "$FM_TEST_LAUNCH_LOG"
         if [ "${FM_TEST_EXECUTE_LAUNCH:-0}" = 1 ] && [ -n "${FM_TEST_LAUNCH_EXEC_LOG:-}" ]; then
-          bash -c "$(cat "$FM_TEST_LAUNCH_LOG")" > "$FM_TEST_LAUNCH_EXEC_LOG" 2>&1 || exit 1
+          if [ -n "${FM_TEST_LAUNCH_CWD:-}" ]; then
+            (cd "$FM_TEST_LAUNCH_CWD" && bash -c "$(cat "$FM_TEST_LAUNCH_LOG")") > "$FM_TEST_LAUNCH_EXEC_LOG" 2>&1 || exit 1
+          else
+            bash -c "$(cat "$FM_TEST_LAUNCH_LOG")" > "$FM_TEST_LAUNCH_EXEC_LOG" 2>&1 || exit 1
+          fi
         fi
       fi
     done
@@ -515,6 +519,44 @@ test_rendered_legacy_launch_executes() {
   pass "rendered legacy OMP launch executes directly with its bound runtime"
 }
 
+test_legacy_launch_rejects_empty_path_components() {
+  local saved_base_path=$BASE_PATH safe_path path_form out hostile hostile_ran omp_log
+  safe_path=${BASE_PATH:-/usr/bin:/bin}
+  for path_form in leading trailing middle; do
+    setup_case "unsafe-path-$path_form"
+    hostile="$CASE/hostile-cwd"
+    hostile_ran="$CASE/hostile-bun-ran"
+    omp_log="$CASE/omp-exec.log"
+    mkdir -p "$hostile"
+    cat > "$hostile/bun" <<'SH'
+#!/bin/sh
+: > "$FM_TEST_HOSTILE_BUN_RAN"
+exit 42
+SH
+    chmod +x "$hostile/bun"
+    case "$path_form" in
+      leading) BASE_PATH=":$safe_path" ;;
+      trailing) BASE_PATH="$safe_path:" ;;
+      middle) BASE_PATH="$safe_path::$safe_path" ;;
+    esac
+    if out=$(FM_TEST_EXECUTE_LAUNCH=1 \
+      FM_TEST_LAUNCH_CWD="$hostile" \
+      FM_TEST_LAUNCH_EXEC_LOG="$CASE/launch-exec.log" \
+      FM_TEST_OMP_EXEC_LOG="$omp_log" \
+      FM_TEST_HOSTILE_BUN_RAN="$hostile_ran" \
+      run_spawn 2>&1); then
+      [ -s "$omp_log" ] || fail "safe OMP launch with $path_form PATH did not execute its selected entrypoint"
+      [ "$(sed -n '2p' "$omp_log")" = "$TEST_OMP_BUN" ] \
+        || fail "safe OMP launch with $path_form PATH used an unrecorded Bun runtime"
+    else
+      [ ! -e "$omp_log" ] || fail "unsafe OMP launch with $path_form PATH executed OMP before refusing"
+    fi
+    [ ! -e "$hostile_ran" ] || fail "unsafe OMP launch with $path_form PATH executed hostile ./bun"
+  done
+  BASE_PATH=$saved_base_path
+  pass "OMP rejects inherited PATH empty components before legacy launch execution"
+}
+
 test_duplicate_recovery_states() {
   local out before after mode expected version invalid_lock
 
@@ -624,5 +666,6 @@ test_stale_omp_runtime_cleanup
 test_herdr_launch_exact_resume_recovery_and_abort
 test_launch_and_exact_resume
 test_rendered_legacy_launch_executes
+test_legacy_launch_rejects_empty_path_components
 test_duplicate_recovery_states
 test_post_meta_abort_preserves_home
