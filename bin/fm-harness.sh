@@ -93,6 +93,12 @@ omp_ancestry_matches() {  # <exact|launch-shape>
 # The exact walk is skipped outright when this home holds no OMP identity
 # evidence, so non-OMP harnesses pay no ps forks on this frequently called path.
 omp_ancestry_is_exact() {
+  if [ -n "${FM_OMP_BUN:-}" ] && [ -n "${FM_OMP_BIN:-}" ]; then
+    FM_OMP_PROCESS_EXPECTED_BUN="$FM_OMP_BUN" \
+      FM_OMP_PROCESS_EXPECTED_BIN="$FM_OMP_BIN" \
+      omp_ancestry_matches exact
+    return
+  fi
   fm_omp_process_identity_available || return 1
   omp_ancestry_matches exact
 }
@@ -115,8 +121,12 @@ detect_own() {
   # multiplexer's stored environment can silently misidentify one of them before
   # ancestry is consulted. This is a precedence hazard, not evidence that
   # CLAUDECODE inheritance into a kimi child was observed; it was not observed.
-  [ "${FM_OMP_HARNESS:-}" = "omp" ] && omp_ancestry_matches launch-shape \
-    && { echo omp; return; }
+  if [ "${FM_OMP_HARNESS:-}" = "omp" ]; then
+    omp_ancestry_is_exact && { echo omp; return; }
+    if ! fm_omp_process_identity_available; then
+      omp_ancestry_matches launch-shape && { echo omp; return; }
+    fi
+  fi
   omp_ancestry_is_exact && { echo omp; return; }
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   if [ "${PI_CODING_AGENT:-}" = "true" ]; then

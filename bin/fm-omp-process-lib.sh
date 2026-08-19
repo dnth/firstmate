@@ -40,18 +40,24 @@ fm_omp_process_identity_path_valid() {  # <canonical-executable-path>
 }
 
 fm_omp_process_launch_identity() {  # <canonical-omp-path> -> runtime, OMP, and shebang lookup paths
-  local omp=$1 magic shebang runtime runtime_lookup=
+  local omp=$1 magic shebang runtime runtime_lookup= runtime_path=
   fm_omp_process_identity_path_valid "$omp" || return 1
   magic=$(LC_ALL=C dd if="$omp" bs=2 count=1 2>/dev/null) || return 1
   if [ "$magic" = '#!' ]; then
     IFS= read -r shebang < "$omp" || return 1
     case "$shebang" in
-      '#!/usr/bin/env bun'|'#!/usr/bin/env -S bun'|'#!'*/bun)
+      '#!/usr/bin/env bun'|'#!/usr/bin/env -S bun')
         runtime_lookup=$(command -v bun 2>/dev/null) || return 1
         case "$runtime_lookup" in /*) ;; *) return 1 ;; esac
         [ "$(basename "$runtime_lookup")" = bun ] || return 1
         [ -x "$runtime_lookup" ] || return 1
         runtime=$(fm_omp_process_resolve_path "$runtime_lookup") || return 1
+        fm_omp_process_identity_path_valid "$runtime" || return 1
+        ;;
+      '#!'/*/bun)
+        runtime_path=${shebang#\#!}
+        case "$runtime_path" in /*) ;; *) return 1 ;; esac
+        runtime=$(fm_omp_process_resolve_path "$runtime_path") || return 1
         fm_omp_process_identity_path_valid "$runtime" || return 1
         ;;
       *) return 1 ;;
@@ -95,6 +101,7 @@ fm_omp_process_primary_marker_path() {
 # probes may skip their process walk entirely.
 fm_omp_process_identity_available() {
   local marker
+  [ -n "${FM_OMP_BUN:-}" ] && [ -n "${FM_OMP_BIN:-}" ] && return 0
   [ -n "${FM_OMP_PROCESS_EXPECTED_BUN:-}" ] && [ -n "${FM_OMP_PROCESS_EXPECTED_BIN:-}" ] && return 0
   marker=$(fm_omp_process_primary_marker_path) || return 1
   [ -f "$marker" ]

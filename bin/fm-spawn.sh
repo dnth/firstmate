@@ -1502,15 +1502,14 @@ if [ "$HARNESS" = omp ]; then
     echo "error: selected OMP launch identity does not preserve its canonical entrypoint" >&2
     exit 1
   fi
-  if [ "$OMP_BUN_CANON" != "$OMP_BIN_CANON" ]; then
-    [ -n "$OMP_BUN_LAUNCH_PATH" ] || {
-      echo "error: selected Bun-script OMP has no launch-time Bun lookup path" >&2
-      exit 1
-    }
+  if [ -n "$OMP_BUN_LAUNCH_PATH" ]; then
     OMP_BUN_LAUNCH_DIR=$(cd "$(dirname "$OMP_BUN_LAUNCH_PATH")" 2>/dev/null && pwd -P) || {
       echo "error: selected Bun runtime directory cannot be resolved" >&2
       exit 1
     }
+    case "$OMP_BUN_LAUNCH_DIR" in
+      *:*) echo "error: selected Bun runtime directory cannot be represented in PATH" >&2; exit 1 ;;
+    esac
   fi
   if [ -n "$PREWALK_INTO" ]; then
     omp_prewalk_probe_flags "$OMP_BIN_CANON"
@@ -3287,8 +3286,11 @@ sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
 sq_ompprimary=$(shell_quote "$OMP_PRIMARY_EXTENSION")
-if [ "$OMP_BUN_CANON" != "$OMP_BIN_CANON" ]; then
-  OMP_LAUNCH_ENV="PATH=$(shell_quote "$OMP_BUN_LAUNCH_DIR"):\${PATH:-} "
+if [ -n "$OMP_BUN_LAUNCH_DIR" ]; then
+  OMP_LAUNCH_ENV="case \"\${PATH-}\" in *::*|:*|*:) exit 1 ;; esac; PATH=$(shell_quote "$OMP_BUN_LAUNCH_DIR")\${PATH:+:\$PATH} "
+fi
+if [ "$OMP_LAUNCH_TEMPLATE" -eq 1 ] && [ "$HARNESS" = omp ] && [ -n "$OMP_BIN_CANON" ]; then
+  LAUNCH="FM_OMP_BUN=$(shell_quote "$OMP_BUN_CANON") FM_OMP_BIN=$(shell_quote "$OMP_BIN_CANON") $LAUNCH"
 fi
 OMPRESUMEFLAG=
 [ -z "$OMP_RESUME_FILE" ] || OMPRESUMEFLAG="--resume $(shell_quote "$OMP_RESUME_FILE") "

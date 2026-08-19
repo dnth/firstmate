@@ -62,7 +62,8 @@ fm_composer_terminal_width() {  # <row> [canonical-runtime] [canonical-omp]
   case "$bun" in /*) ;; *) return 1 ;; esac
   [ -x "$bun" ] || return 1
   if [ -n "$omp" ] && [ "$bun" = "$omp" ]; then
-    out=$(printf '%s\n' "$1" | wc -L 2>/dev/null | tr -d '[:space:]') || return 1
+    [ "$(LC_ALL=C.UTF-8 locale charmap 2>/dev/null)" = UTF-8 ] || return 1
+    out=$(LC_ALL=C.UTF-8 printf '%s\n' "$1" | LC_ALL=C.UTF-8 wc -L 2>/dev/null | tr -d '[:space:]') || return 1
   else
     out=$("$bun" -e 'try { const width = Bun.stringWidth(process.argv[1]); if (!Number.isSafeInteger(width) || width < 0) process.exit(1); process.stdout.write(String(width)); } catch { process.exit(1); }' "$1" 2>/dev/null) || return 1
   fi

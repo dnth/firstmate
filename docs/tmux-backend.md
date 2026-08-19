@@ -54,7 +54,7 @@ Legacy Bun-script OMP requires an absolute argv entrypoint equal to `omp_bin`, a
 Standalone OMP requires `omp_bun` and `omp_bin` to be the same absolute executable path, and its PID executable check is decisive even when `comm=omp` is the only process name exposed.
 A bare Bun argv token is accepted only when its basename agrees and the independent PID executable check proves the recorded Bun binary; a bare OMP token or a fresh `PATH` lookup is never identity evidence.
 The canonical `omp_bun` and `omp_bin` identities must be absolute, executable, and whitespace-free because the portable process reader exposes one flattened argument string.
-Legacy launches invoke the selected OMP entrypoint directly with a launch-local `PATH` prefix that binds its `/usr/bin/env bun` shebang to the probed runtime, while standalone launches invoke the selected executable directly without passing it through Bun.
+Legacy launches invoke the selected OMP entrypoint directly, with env-based Bun shebangs receiving a launch-local `PATH` binding and explicit absolute Bun shebangs using their declared interpreter, while standalone launches invoke the selected executable directly without passing it through Bun.
 The primary adapter refuses unsupported paths before marker publication and replaces its marker atomically so a pre-existing symlink is never followed to its target.
 Only `dead` and `missing` authorize recovery because a false dead result could launch a duplicate agent.
 

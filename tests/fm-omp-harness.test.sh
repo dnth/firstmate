@@ -74,8 +74,16 @@ done
 self_dir=$(cd "$(dirname "$0")" && pwd -P)
 if [ "$pid" = 700 ]; then
   case "$field" in
-    comm=) printf '%s\n' bun ;;
-    args=) printf '%s %s\n' "$self_dir/bun" "$self_dir/omp --auto-approve" ;;
+    comm=)
+      if [ "${FM_TEST_OMP_SHAPE:-legacy}" = standalone ]; then printf '%s\n' omp; else printf '%s\n' bun; fi
+      ;;
+    args=)
+      if [ "${FM_TEST_OMP_SHAPE:-legacy}" = standalone ]; then
+        printf '%s\n' "$self_dir/omp --session-dir /tmp/omp-sessions"
+      else
+        printf '%s %s\n' "$self_dir/bun" "$self_dir/omp --auto-approve"
+      fi
+      ;;
     ppid=) printf '%s\n' 1 ;;
   esac
   exit 0
@@ -90,6 +98,18 @@ case "$pid:$field" in
 esac
 SH
   chmod +x "$fakebin/ps"
+  cat > "$fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+set -u
+self_dir=$(cd "$(dirname "$0")" && pwd -P)
+pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in -p) pid=$2; shift 2 ;; *) shift ;; esac
+done
+printf 'p%s\n' "$pid"
+printf 'n%s/omp\n' "$self_dir"
+SH
+  chmod +x "$fakebin/lsof"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/bun"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/omp"
   chmod +x "$fakebin/bun" "$fakebin/omp"
@@ -118,6 +138,49 @@ test_launch_boundary_marker_preserves_exact_omp_identity() {
     FM_OMP_HARNESS=omp-helper "$ROOT/bin/fm-harness.sh")
   [ "$out" != omp ] || fail "inexact OMP launch marker was accepted"
   pass "OMP worker tools preserve the exact launch-boundary harness identity"
+}
+
+test_standalone_worker_uses_bound_identity() {
+  local fakebin path out omp
+  fakebin=$(make_marker_fakebin "$TMP_ROOT/standalone-marker")
+  path="$fakebin:$(dirname "$(command -v node)"):${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
+  omp=$(fm_test_realpath "$fakebin/omp")
+
+  out=$(PATH="$path" env -u PI_CODING_AGENT -u CLAUDECODE -u GROK_AGENT \
+    FM_TEST_OMP_SHAPE=standalone FM_OMP_HARNESS=omp FM_OMP_BUN="$omp" FM_OMP_BIN="$omp" \
+    "$ROOT/bin/fm-harness.sh")
+  [ "$out" = omp ] || fail "standalone OMP worker lost its bound executable identity: $out"
+
+  out=$(PATH="$path" env -u PI_CODING_AGENT -u GROK_AGENT CLAUDECODE=1 \
+    FM_TEST_OMP_SHAPE=standalone FM_TEST_HARNESS_PARENT=500 FM_OMP_HARNESS=omp \
+    FM_OMP_BUN="$omp" FM_OMP_BIN="$omp" "$ROOT/bin/fm-harness.sh")
+  [ "$out" = claude ] || fail "nested claude inherited standalone OMP identity: $out"
+  pass "standalone OMP workers require exact bound executable and PID evidence"
+}
+
+test_launch_identity_honors_explicit_bun_shebang() {
+  local dir runtime omp other out expected_runtime expected_omp
+  dir="$TMP_ROOT/explicit-bun"
+  runtime="$dir/runtime/bun"
+  omp="$dir/omp"
+  other="$dir/other"
+  mkdir -p "$(dirname "$runtime")" "$other"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$runtime"
+  printf '#!%s\nexit 0\n' "$runtime" > "$omp"
+  printf '#!/usr/bin/env bash\nexit 99\n' > "$other/bun"
+  chmod +x "$runtime" "$omp" "$other/bun"
+  out=$(PATH="$other:/usr/bin:/bin" bash -c \
+    '. "$1/bin/fm-omp-process-lib.sh"; fm_omp_process_launch_identity "$2"' \
+    _ "$ROOT" "$omp")
+  expected_runtime=$(fm_test_realpath "$runtime")
+  expected_omp=$(fm_test_realpath "$omp")
+  [ "$(printf '%s\n' "$out" | sed -n '1p')" = "$expected_runtime" ] \
+    || fail "explicit Bun shebang did not bind its interpreter: $out"
+  [ "$(printf '%s\n' "$out" | sed -n '2p')" = "$expected_omp" ] \
+    || fail "explicit Bun shebang changed the OMP entrypoint identity: $out"
+  [ -z "$(printf '%s\n' "$out" | sed -n '3p')" ] \
+    || fail "explicit Bun shebang incorrectly requested PATH binding: $out"
+  pass "explicit Bun shebangs bind their declared interpreter"
 }
 
 test_capability_probe_accepts_required_surface() {
@@ -213,6 +276,8 @@ test_capability_probe_never_falls_back_when_omp_is_missing() {
 }
 
 test_launch_boundary_marker_preserves_exact_omp_identity
+test_standalone_worker_uses_bound_identity
+test_launch_identity_honors_explicit_bun_shebang
 test_capability_probe_accepts_required_surface
 test_capability_probe_accepts_standalone_executable
 test_capability_probe_rejects_non_bun_entrypoint

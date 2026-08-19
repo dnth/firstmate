@@ -892,7 +892,9 @@ test_omp_threads_exact_identity_model_and_every_thinking_level() {
     launch=$(cat "$LAUNCH_LOG")
     expected_bin=$(cd "$FAKEBIN_DIR" && pwd -P)/omp
     expected_bun=$(cd "$FAKEBIN_DIR" && pwd -P)/bun
-    assert_contains "$launch" "FM_OMP_HARNESS=omp '$expected_bin' --session-dir '/tmp/fm-$id/omp-sessions' --auto-approve --max-time=3h --model 'openai-codex/gpt-5.6-sol' --thinking '$effort' -e '$HOME_DIR/state/$id.omp-ext.ts'" \
+    assert_contains "$launch" "FM_OMP_BUN='$expected_bun' FM_OMP_BIN='$expected_bin' FM_OMP_HARNESS=omp" \
+      "OMP launch did not export its canonical runtime and entrypoint identities"
+    assert_contains "$launch" "PATH='$FAKEBIN_DIR'\${PATH:+:\$PATH} '$expected_bin' --session-dir '/tmp/fm-$id/omp-sessions' --auto-approve --max-time=3h --model 'openai-codex/gpt-5.6-sol' --thinking '$effort' -e '$HOME_DIR/state/$id.omp-ext.ts'" \
       "OMP launch did not execute the canonical entrypoint with unattended mode, model, thinking, and extension"
     assert_grep "omp_bun=$expected_bun" "$HOME_DIR/state/$id.meta" \
       "OMP launch metadata did not bind the same Bun executable used by the literal pane command"
@@ -1546,7 +1548,9 @@ test_omp_herdr_worker_and_scout_launch_with_exact_identity_and_ack() {
     assert_grep 'herdr_session=default' "$HOME_DIR/state/$id.meta" "OMP Herdr $kind metadata lost its named session"
     assert_grep 'herdr_pane_id=w1:p2' "$HOME_DIR/state/$id.meta" "OMP Herdr $kind metadata lost its exact pane"
     launch=$(cat "$LAUNCH_LOG")
-    assert_contains "$launch" "FM_OMP_HARNESS=omp '$(cd "$FAKEBIN_DIR" && pwd -P)/omp'" \
+    assert_contains "$launch" "FM_OMP_BUN='$(cd "$FAKEBIN_DIR" && pwd -P)/bun' FM_OMP_BIN='$(cd "$FAKEBIN_DIR" && pwd -P)/omp' FM_OMP_HARNESS=omp" \
+      "OMP Herdr $kind launch omitted its canonical identities"
+    assert_contains "$launch" "PATH='$(cd "$FAKEBIN_DIR" && pwd -P)'\${PATH:+:\$PATH} '$(cd "$FAKEBIN_DIR" && pwd -P)/omp'" \
       "OMP Herdr $kind launch omitted its canonical executable"
     assert_contains "$launch" "--session-dir '/tmp/fm-$id/omp-sessions'" "OMP Herdr $kind launch omitted its nonempty isolated session directory"
     assert_contains "$launch" "-e '$HOME_DIR/state/$id.omp-ext.ts'" "OMP Herdr $kind launch omitted its acknowledgement extension"
@@ -1628,7 +1632,7 @@ test_omp_whitespace_identity_paths_refuse_before_endpoint() {
     out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$path" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
     status=$?
     expect_code 1 "$status" "OMP should refuse a whitespace-bearing $mode identity"
-    assert_contains "$out" 'canonical executable paths without whitespace' \
+    assert_contains "$out" 'neither a Bun script nor a standalone executable' \
       "OMP whitespace-bearing $mode refusal was not actionable"
     [ ! -s "$CASE_DIR/endpoint.log" ] || fail "OMP whitespace-bearing $mode identity created an endpoint"
     [ ! -s "$LAUNCH_LOG" ] || fail "OMP whitespace-bearing $mode identity typed a launch command"

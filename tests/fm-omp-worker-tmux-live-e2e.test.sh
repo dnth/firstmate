@@ -237,7 +237,11 @@ SESSION_FILE=$(find "$SESSION_DIR" -type f -name '*.jsonl' -print 2>/dev/null | 
 OMP_RESUME_BUN=$(sed -n 's/^omp_bun=//p' "$HOME_DIR/state/$WORKER_ID.meta")
 OMP_RESUME_BIN=$(sed -n 's/^omp_bin=//p' "$HOME_DIR/state/$WORKER_ID.meta")
 [ -x "$OMP_RESUME_BUN" ] && [ -x "$OMP_RESUME_BIN" ] || fail "OMP resume metadata lost its canonical Bun/OMP pair"
-RESUME_COMMAND="FM_OMP_HARNESS=omp '$OMP_RESUME_BUN' '$OMP_RESUME_BIN' --session-dir '$SESSION_DIR' --resume '$SESSION_FILE' --auto-approve -e '$HOME_DIR/state/$WORKER_ID.omp-ext.ts'"
+RESUME_ENV="FM_OMP_BUN='$OMP_RESUME_BUN' FM_OMP_BIN='$OMP_RESUME_BIN' FM_OMP_HARNESS=omp"
+if [ "$OMP_RESUME_BUN" != "$OMP_RESUME_BIN" ]; then
+  RESUME_ENV="$RESUME_ENV PATH='$(dirname "$OMP_RESUME_BUN")'\${PATH:+:\$PATH}"
+fi
+RESUME_COMMAND="$RESUME_ENV '$OMP_RESUME_BIN' --session-dir '$SESSION_DIR' --resume '$SESSION_FILE' --auto-approve -e '$HOME_DIR/state/$WORKER_ID.omp-ext.ts'"
 rm -f "$HOME_DIR/state/$WORKER_ID.omp-ready"
 PATH="$WRAPPER_BIN:$PATH" tmux send-keys -t "$WORKER_TARGET" -l "$RESUME_COMMAND"
 PATH="$WRAPPER_BIN:$PATH" tmux send-keys -t "$WORKER_TARGET" Enter

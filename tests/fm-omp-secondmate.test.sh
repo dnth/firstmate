@@ -359,7 +359,7 @@ test_herdr_launch_exact_resume_recovery_and_abort() {
 
   out=$(run_spawn_herdr 2>&1) || fail "fresh OMP Herdr secondmate spawn failed: $out"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "PATH='$FAKEBIN':\${PATH:-} '$TEST_OMP_BIN' --session-dir '$HOME_DIR/state/omp-sessions'" \
+  assert_contains "$launch" "PATH='$FAKEBIN'\${PATH:+:\$PATH} '$TEST_OMP_BIN' --session-dir '$HOME_DIR/state/omp-sessions'" \
     "OMP Herdr secondmate launch did not invoke its canonical executable with the isolated session directory"
   assert_not_contains "$launch" "'$TEST_OMP_BUN' '$TEST_OMP_BIN'" \
     "OMP Herdr secondmate launch routed the selected executable through Bun"
@@ -445,7 +445,7 @@ test_launch_and_exact_resume() {
   out=$(run_spawn -- --prewalk-into 'test/finish:xhigh' 2>&1) || fail "fresh OMP secondmate spawn failed: $out"
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "FM_OMP_SESSION_POINTER='$HOME_DIR/state/.omp-session'" "OMP launch did not bind the home-owned session pointer"
-  assert_contains "$launch" "PATH='$FAKEBIN':\${PATH:-} '$TEST_OMP_BIN'" \
+  assert_contains "$launch" "PATH='$FAKEBIN'\${PATH:+:\$PATH} '$TEST_OMP_BIN'" \
     "OMP launch did not invoke the capability-checked canonical executable"
   assert_not_contains "$launch" "'$TEST_OMP_BUN' '$TEST_OMP_BIN'" \
     "OMP launch routed the selected executable through Bun"
