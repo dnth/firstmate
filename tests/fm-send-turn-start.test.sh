@@ -129,6 +129,7 @@ run_case() {  # <mode> <home> <fakebin> <bun> <omp> <log> <entered> [fm-send arg
   [ $# -gt 0 ] || set -- 'steer now'
   command=("$SEND" turn-test "$@")
   if [ -n "${FM_TEST_COMMAND_TIMEOUT:-}" ]; then
+    # shellcheck disable=SC2016 # Single quotes are deliberate: Perl expands its own variables.
     command=(perl -e '$SIG{ALRM}=sub{exit 124}; alarm shift; exec @ARGV' \
       "$FM_TEST_COMMAND_TIMEOUT" "${command[@]}")
   fi
