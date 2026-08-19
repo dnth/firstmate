@@ -500,7 +500,7 @@ if [ -n "$TARGET_META" ]; then
     MARK_FROM_FIRSTMATE=1
   fi
 fi
-if [ "$TARGET_HARNESS" = omp ] && [ "${1:-}" != "--key" ]; then
+if [ "$TARGET_HARNESS" = omp ] && [ "${1:-}" != "--key" ] && [ "$*" != /exit ]; then
   fm_send_validate_turnstart_config || exit 1
   fm_send_prepare_omp_turnstart_reference || exit 1
 fi
@@ -635,8 +635,8 @@ else
   esac
   retries=${FM_SEND_RETRIES:-3}
   sleep_s=${FM_SEND_SLEEP:-0.4}
-  # Type once, submit, verify. Exact empty confirms delivery; queued-unconfirmed
-  # permits only the narrow already-busy OMP queue decision.
+  # Type once, submit, verify. Exact empty confirms an ordinary submission;
+  # busy-confirmed and queued-unconfirmed retain the two OMP busy paths.
   send_rc=0
   if [ "$TARGET_BACKEND" = remote ]; then
     if "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send "$TARGET_REMOTE_ID" "$MESSAGE" < /dev/null >/dev/null; then
@@ -679,6 +679,11 @@ else
   post_delivery_failed=0
   case "$verdict" in
     empty)
+      if [ -n "$RESOLVE_KEYS" ]; then
+        fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || post_delivery_failed=1
+      fi
+      ;;
+    busy-confirmed)
       if [ -n "$RESOLVE_KEYS" ]; then
         fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || post_delivery_failed=1
       fi

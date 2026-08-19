@@ -2985,8 +2985,8 @@ fm_backend_herdr_wait_omp_session_exit() {  # <session-file> <byte-offset> <budg
   fm_backend_herdr_wait_omp_session_event exit "$1" "$2" "$3" "${4:-1}"
 }
 
-# Echoes empty|pending|unknown|send-failed, a subset of the proof-carrying
-# submit vocabulary. Empty means confirmed submitted for every backend.
+# Echoes empty|busy-confirmed|pending|unknown|send-failed from the
+# proof-carrying submit vocabulary.
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [harness] [canonical-omp-bun] [turnstart-reference]
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${7:-} bun=${8:-} turnstart_reference=${9:-}
   local i=0 verdict baseline confirm_sleep omp_confirm_sleep omp_session='' omp_offset='' omp_status='' omp_event
@@ -3037,7 +3037,11 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
       fi
       if fm_backend_herdr_wait_omp_session_event "$omp_event" "$omp_session" "$omp_offset" \
         "$omp_confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS" "$text"; then
-        printf 'empty'
+        if [ -n "$turnstart_reference" ]; then
+          printf 'busy-confirmed'
+        else
+          printf 'empty'
+        fi
       elif [ "$omp_status" = blocked ]; then
         printf 'unknown'
       else

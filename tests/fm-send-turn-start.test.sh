@@ -131,7 +131,7 @@ run_case() {  # <mode> <home> <fakebin> <bun> <omp> <log> <entered> [fm-send arg
     FM_TEST_SEND_LOG="$log" FM_TEST_ENTERED="$entered" \
     FM_TEST_TURNSTART_MARKER="$home/state/turn-test.omp-started" \
     FM_SEND_RETRIES=1 FM_SEND_SLEEP=0 FM_SEND_SETTLE=0 \
-    FM_SEND_TURNSTART_TIMEOUT="${FM_SEND_TURNSTART_TIMEOUT:-0.1}" \
+    FM_SEND_TURNSTART_TIMEOUT="${FM_SEND_TURNSTART_TIMEOUT:-0.3}" \
     FM_SEND_TURNSTART_POLL="${FM_SEND_TURNSTART_POLL:-0.02}" \
     FM_TEST_SLEEP_LOG="${FM_TEST_SLEEP_LOG:-}" \
     "$SEND" turn-test "$@"
@@ -229,7 +229,7 @@ test_non_omp_does_not_gain_turn_start_verification() {
 test_timeout_uses_monotonic_deadline() {
   local home fb bun omp log entered rc probes
   IFS=$'\t' read -r home fb bun omp log entered < <(setup_case bounded-timeout omp)
-  FM_SEND_TURNSTART_POLL=0.099 \
+  FM_SEND_TURNSTART_TIMEOUT=0.1 FM_SEND_TURNSTART_POLL=0.099 \
     run_case deadline "$home" "$fb" "$bun" "$omp" "$log" "$entered" >/dev/null 2>&1
   rc=$?
   expect_code 4 "$rc" "a bounded no-turn poll should retain its distinct verdict"
@@ -249,6 +249,18 @@ test_omp_key_ignores_turnstart_configuration() {
   [ "$(grep -c 'key=Enter' "$log")" -eq 1 ] \
     || fail "the OMP key path did not transport exactly one Enter"
   pass "fm-send: OMP keys ignore text-only turn-start configuration"
+}
+
+test_omp_exit_ignores_turnstart_configuration() {
+  local home fb bun omp log entered rc
+  IFS=$'\t' read -r home fb bun omp log entered < <(setup_case exit-config omp)
+  FM_SEND_TURNSTART_TIMEOUT=invalid \
+    run_case wedge "$home" "$fb" "$bun" "$omp" "$log" "$entered" /exit >/dev/null 2>&1
+  rc=$?
+  expect_code 0 "$rc" "OMP /exit should not validate turn-start-only configuration"
+  assert_absent "$home/state/turn-test.status" \
+    "OMP /exit emitted a turn-start recovery marker"
+  pass "fm-send: OMP /exit ignores turn-start-only setup"
 }
 
 test_remote_control_uses_task_bound_omp_route() {
@@ -332,10 +344,26 @@ case "${1:-} ${2:-}" in
   'status --json') printf '%s\n' '{"client":{"version":"0.7.5","protocol":16},"server":{"running":true}}' ;;
   'pane get') printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p1"}}}' ;;
   'pane send-text') : ;;
-  'pane send-keys') : > "$FM_TEST_HERDR_ENTERED" ;;
+  'pane send-keys')
+    : > "$FM_TEST_HERDR_ENTERED"
+    case "${FM_TEST_HERDR_EVENT:-}" in
+      message)
+        printf '{"type":"message","message":{"role":"user","content":[{"type":"text","text":"%s"}],"steering":true}}\n' \
+          "$FM_TEST_HERDR_TEXT" >> "$FM_TEST_HERDR_SESSION"
+        ;;
+      answer)
+        printf '{"type":"message","message":{"role":"toolResult","toolName":"ask","isError":false,"details":{"selectedOptions":["%s"]}}}\n' \
+          "$FM_TEST_HERDR_TEXT" >> "$FM_TEST_HERDR_SESSION"
+        ;;
+    esac
+    ;;
   'agent get')
-    status=idle
-    if [ -f "$FM_TEST_HERDR_ENTERED" ] && [ ! -f "$FM_TEST_HERDR_WORKING_READ" ]; then
+    status=${FM_TEST_HERDR_BASELINE:-idle}
+    if [ -f "$FM_TEST_HERDR_ENTERED" ]; then
+      status=idle
+    fi
+    if [ "${FM_TEST_HERDR_BASELINE:-idle}" = idle ] \
+      && [ -f "$FM_TEST_HERDR_ENTERED" ] && [ ! -f "$FM_TEST_HERDR_WORKING_READ" ]; then
       status=working
       : > "$FM_TEST_HERDR_WORKING_READ"
     fi
@@ -363,6 +391,41 @@ SH
   rc=$?
   expect_code 4 "$rc" "a confirmed Herdr submit without post-submit turn proof should be delivered-no-turn"
   pass "fm-send: Herdr empty still requires post-submit OMP turn proof"
+
+  rm -f "$entered" "$reads"
+  : > "$session"
+  env PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_TEST_MODE=herdr FM_TEST_BUN="$bun" FM_TEST_OMP="$omp" \
+    FM_TEST_SEND_LOG="$dir/send.log" FM_TEST_ENTERED="$dir/tmux-entered" \
+    FM_TEST_TURNSTART_MARKER="$home/state/herdr-turn.omp-started" \
+    FM_TEST_HERDR_ENTERED="$entered" FM_TEST_HERDR_WORKING_READ="$reads" \
+    FM_TEST_HERDR_SESSION="$session" FM_TEST_HERDR_BASELINE=working \
+    FM_TEST_HERDR_EVENT=message FM_TEST_HERDR_TEXT='busy steer' \
+    FM_SEND_RETRIES=1 FM_SEND_SLEEP=0 FM_SEND_SETTLE=0 \
+    FM_SEND_TURNSTART_TIMEOUT=0.1 FM_SEND_TURNSTART_POLL=0.02 \
+    "$SEND" herdr-turn 'busy steer' >/dev/null 2>&1
+  rc=$?
+  expect_code 0 "$rc" "a confirmed already-busy Herdr steer should skip idle turn-start verification"
+
+  rm -f "$entered" "$reads"
+  : > "$session"
+  printf 'blocked [key=herdr-answer]: choose a route\n' >> "$home/state/herdr-turn.status"
+  env PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_TEST_MODE=herdr FM_TEST_BUN="$bun" FM_TEST_OMP="$omp" \
+    FM_TEST_SEND_LOG="$dir/send.log" FM_TEST_ENTERED="$dir/tmux-entered" \
+    FM_TEST_TURNSTART_MARKER="$home/state/herdr-turn.omp-started" \
+    FM_TEST_HERDR_ENTERED="$entered" FM_TEST_HERDR_WORKING_READ="$reads" \
+    FM_TEST_HERDR_SESSION="$session" FM_TEST_HERDR_BASELINE=blocked \
+    FM_TEST_HERDR_EVENT=answer FM_TEST_HERDR_TEXT='blocked answer' \
+    FM_SEND_RETRIES=1 FM_SEND_SLEEP=0 FM_SEND_SETTLE=0 \
+    FM_SEND_TURNSTART_TIMEOUT=0.1 FM_SEND_TURNSTART_POLL=0.02 \
+    "$SEND" herdr-turn --resolve-key herdr-answer 'blocked answer' >/dev/null 2>&1
+  rc=$?
+  expect_code 0 "$rc" "a confirmed blocked Herdr answer should skip idle turn-start verification"
+  assert_contains "$(cat "$home/state/herdr-turn.status")" \
+    'resolved [key=herdr-answer]: answered: blocked answer' \
+    "the confirmed blocked Herdr answer did not close its decision"
+  pass "fm-send: confirmed busy and blocked Herdr deliveries preserve success"
 }
 
 test_confirmed_submit_without_turn_is_distinct_and_wakes_recovery
@@ -374,5 +437,6 @@ test_busy_queued_enter_remains_success
 test_non_omp_does_not_gain_turn_start_verification
 test_timeout_uses_monotonic_deadline
 test_omp_key_ignores_turnstart_configuration
+test_omp_exit_ignores_turnstart_configuration
 test_remote_control_uses_task_bound_omp_route
 test_herdr_empty_requires_post_submit_turn_proof
