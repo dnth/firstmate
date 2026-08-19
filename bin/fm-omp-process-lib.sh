@@ -39,15 +39,19 @@ fm_omp_process_identity_path_valid() {  # <canonical-executable-path>
   [ "$(fm_omp_process_resolve_path "$value" 2>/dev/null)" = "$value" ]
 }
 
-fm_omp_process_launch_identity() {  # <canonical-omp-path> -> <runtime-path> newline <omp-path>
-  local omp=$1 magic shebang runtime
+fm_omp_process_launch_identity() {  # <canonical-omp-path> -> runtime, OMP, and shebang lookup paths
+  local omp=$1 magic shebang runtime runtime_lookup=
   fm_omp_process_identity_path_valid "$omp" || return 1
   magic=$(LC_ALL=C dd if="$omp" bs=2 count=1 2>/dev/null) || return 1
   if [ "$magic" = '#!' ]; then
     IFS= read -r shebang < "$omp" || return 1
     case "$shebang" in
       '#!/usr/bin/env bun'|'#!/usr/bin/env -S bun'|'#!'*/bun)
-        runtime=$(fm_omp_process_resolve_path bun) || return 1
+        runtime_lookup=$(command -v bun 2>/dev/null) || return 1
+        case "$runtime_lookup" in /*) ;; *) return 1 ;; esac
+        [ "$(basename "$runtime_lookup")" = bun ] || return 1
+        [ -x "$runtime_lookup" ] || return 1
+        runtime=$(fm_omp_process_resolve_path "$runtime_lookup") || return 1
         fm_omp_process_identity_path_valid "$runtime" || return 1
         ;;
       *) return 1 ;;
@@ -55,7 +59,7 @@ fm_omp_process_launch_identity() {  # <canonical-omp-path> -> <runtime-path> new
   else
     runtime=$omp
   fi
-  printf '%s\n%s\n' "$runtime" "$omp"
+  printf '%s\n%s\n%s\n' "$runtime" "$omp" "$runtime_lookup"
 }
 
 fm_omp_primary_marker_read() {  # <marker>; sets FM_OMP_MARKER_{VERSION,PID,BUN,BIN}

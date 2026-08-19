@@ -52,15 +52,20 @@
 # include guard (matching bin/fm-tmux-lib.sh).
 
 # fm_composer_terminal_width: print the exact terminal-cell width of one OMP
-# structural row through the canonical Bun identity bound to that task (or to
-# the active OMP primary marker). A fresh PATH lookup is never runtime evidence.
+# structural row through the task-bound runtime and entrypoint identities.
+# Legacy Bun-script OMP uses Bun.stringWidth; standalone OMP uses the system
+# display-width boundary because its executable reserves -e for extensions.
 # Missing, relative, non-executable, or malformed support returns nonzero so
 # callers classify the candidate as unknown.
-fm_composer_terminal_width() {  # <row> [canonical-bun]
-  local bun=${2:-${FM_OMP_BUN:-}} out
+fm_composer_terminal_width() {  # <row> [canonical-runtime] [canonical-omp]
+  local bun=${2:-${FM_OMP_BUN:-}} omp=${3:-${FM_OMP_BIN:-}} out
   case "$bun" in /*) ;; *) return 1 ;; esac
   [ -x "$bun" ] || return 1
-  out=$("$bun" -e 'try { const width = Bun.stringWidth(process.argv[1]); if (!Number.isSafeInteger(width) || width < 0) process.exit(1); process.stdout.write(String(width)); } catch { process.exit(1); }' "$1" 2>/dev/null) || return 1
+  if [ -n "$omp" ] && [ "$bun" = "$omp" ]; then
+    out=$(printf '%s\n' "$1" | wc -L 2>/dev/null | tr -d '[:space:]') || return 1
+  else
+    out=$("$bun" -e 'try { const width = Bun.stringWidth(process.argv[1]); if (!Number.isSafeInteger(width) || width < 0) process.exit(1); process.stdout.write(String(width)); } catch { process.exit(1); }' "$1" 2>/dev/null) || return 1
+  fi
   case "$out" in ''|*[!0-9]*) return 1 ;; esac
   printf '%s' "$out"
 }

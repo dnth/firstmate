@@ -60,8 +60,8 @@ capture() {
 
 composer_state() {
   PATH="$WRAPPER_BIN:$PATH" bash -c \
-    '. "$1/bin/fm-backend.sh"; fm_backend_composer_state tmux "$2" omp "$3"' \
-    _ "$PROJECT" "$TARGET" "$(sed -n '3p' "$MARKER")"
+    '. "$1/bin/fm-backend.sh"; fm_backend_composer_state tmux "$2" omp "$3" "$4"' \
+    _ "$PROJECT" "$TARGET" "$(sed -n '3p' "$MARKER")" "$(sed -n '4p' "$MARKER")"
 }
 
 composer_text() {
@@ -165,10 +165,12 @@ wait_pid_change() {
 }
 
 submit_omp() {
-  local text=$1
+  local text=$1 bun bin
+  bun=$(sed -n '3p' "$MARKER")
+  bin=$(sed -n '4p' "$MARKER")
   PATH="$WRAPPER_BIN:$PATH" bash -c \
-    '. "$1/bin/fm-backend.sh"; fm_backend_send_text_submit tmux "$2" "$3" 5 0.2 2 "" omp' \
-    _ "$PROJECT" "$TARGET" "$text" >/dev/null
+    '. "$1/bin/fm-backend.sh"; fm_backend_send_text_submit tmux "$2" "$3" 5 0.2 2 "" omp "$4" "$5"' \
+    _ "$PROJECT" "$TARGET" "$text" "$bun" "$bin" >/dev/null
 }
 
 launch_omp() {
@@ -290,6 +292,7 @@ PATH="$WRAPPER_BIN:$PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$PROJECT" \
   FM_STATE_OVERRIDE="$HOME_DIR/state" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
   FM_SUPERVISOR_TARGET="$TARGET" FM_SUPERVISOR_BACKEND=tmux \
   FM_SUPERVISOR_HARNESS=omp FM_SUPERVISOR_OMP_BUN="$(sed -n '3p' "$MARKER")" \
+  FM_SUPERVISOR_OMP_BIN="$(sed -n '4p' "$MARKER")" \
   FM_INJECT_CONFIRM_RETRIES=5 FM_INJECT_CONFIRM_SLEEP=0.2 \
   bash -c '. "$1/bin/fm-supervise-daemon.sh"; inject_msg "OMP_AWAY_DELIVERY" "$2"' \
     _ "$PROJECT" "$HOME_DIR/state" \

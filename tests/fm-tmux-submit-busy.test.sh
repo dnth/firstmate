@@ -310,6 +310,35 @@ test_omp_composer_and_submission_use_verified_two_row_structure() {
   pass "OMP tmux composer keeps queued busy submits separate from unsubmitted input"
 }
 
+test_standalone_omp_composer_uses_shell_width_boundary() {
+  local dir fakebin composer standalone called top width vfile
+  dir="$TMP_ROOT/omp-standalone-composer"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  standalone="$dir/omp"
+  called="$dir/omp-called"
+  vfile="$dir/verdict"
+  cat > "$standalone" <<SH
+#!/usr/bin/env bash
+: > '$called'
+exit 1
+SH
+  chmod +x "$standalone"
+  top='╭── ⬢ GPT-5.6-Sol++ · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
+  width=$(fm_composer_terminal_width "$top" "$standalone" "$standalone") \
+    || fail "standalone OMP width boundary could not measure the structural row"
+  {
+    printf '%s\n' "$top"
+    printf '╰─%-*s─╯\n' "$((width - 4))" ' '
+  } > "$composer"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" \
+    fm_tmux_composer_state omp omp "$standalone" "$standalone" > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = empty ] \
+    || fail "standalone OMP composer should classify matching shell-width rows as empty, got '$(cat "$vfile")'"
+  [ ! -e "$called" ] || fail "standalone OMP composer passed the extension -e option to the compiled executable"
+  pass "standalone OMP composer measures width without invoking the compiled executable"
+}
+
 test_omp_idle_to_busy_preserved_and_busy_without_queue_fails_closed() {
   local dir fakebin composer busy_marker vfile
   dir="$TMP_ROOT/omp-idle-to-busy"
@@ -452,6 +481,7 @@ test_busy_pane_unknown_stays_unknown
 test_busy_pane_ambiguous_pending_retries_without_conversion
 test_unrecognized_state_skips_busy_conversion
 test_omp_composer_and_submission_use_verified_two_row_structure
+test_standalone_omp_composer_uses_shell_width_boundary
 test_omp_idle_to_busy_preserved_and_busy_without_queue_fails_closed
 test_omp_busy_signature_is_exact_and_scoped
 test_claude_busy_signature_uses_real_capture_shapes

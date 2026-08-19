@@ -1147,9 +1147,9 @@ launch_template() {
       if [ "$kind" = secondmate ]; then
         # The explicit path is the exact same tracked file native project discovery sees.
         # OMP 17.1.8's discoverExtensionPaths path-resolves and deduplicates before loading, so this guarantees the integration without registering it twice.
-        printf '%s' '__OMPBIN__ --session-dir __OMPSESSIONDIR__ __OMPRESUMEFLAG__--auto-approve __OMPMAXTIME____MODELFLAG____EFFORTFLAG____PREWALKFLAG__-e __OMPPRIMARY__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' '__OMPENV____OMPBIN__ --session-dir __OMPSESSIONDIR__ __OMPRESUMEFLAG__--auto-approve __OMPMAXTIME____MODELFLAG____EFFORTFLAG____PREWALKFLAG__-e __OMPPRIMARY__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' '__OMPBIN__ --session-dir __OMPSESSIONDIR__ --auto-approve __OMPMAXTIME____MODELFLAG____EFFORTFLAG____PREWALKFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' '__OMPENV____OMPBIN__ --session-dir __OMPSESSIONDIR__ --auto-approve __OMPMAXTIME____MODELFLAG____EFFORTFLAG____PREWALKFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
@@ -1462,6 +1462,9 @@ validate_omp_prewalk_for_launch_dir() {
 OMP_BIN=
 OMP_BIN_CANON=
 OMP_BUN_CANON=
+OMP_BUN_LAUNCH_PATH=
+OMP_BUN_LAUNCH_DIR=
+OMP_LAUNCH_ENV=
 OMP_PRIMARY_EXTENSION=
 OMP_SESSION_DIR=
 OMP_SESSION_POINTER=
@@ -1494,9 +1497,20 @@ if [ "$HARNESS" = omp ]; then
   }
   OMP_BUN_CANON=$(printf '%s\n' "$OMP_LAUNCH_IDENTITY" | sed -n '1p')
   OMP_LAUNCH_ENTRYPOINT=$(printf '%s\n' "$OMP_LAUNCH_IDENTITY" | sed -n '2p')
+  OMP_BUN_LAUNCH_PATH=$(printf '%s\n' "$OMP_LAUNCH_IDENTITY" | sed -n '3p')
   if [ "$OMP_LAUNCH_ENTRYPOINT" != "$OMP_BIN_CANON" ]; then
     echo "error: selected OMP launch identity does not preserve its canonical entrypoint" >&2
     exit 1
+  fi
+  if [ "$OMP_BUN_CANON" != "$OMP_BIN_CANON" ]; then
+    [ -n "$OMP_BUN_LAUNCH_PATH" ] || {
+      echo "error: selected Bun-script OMP has no launch-time Bun lookup path" >&2
+      exit 1
+    }
+    OMP_BUN_LAUNCH_DIR=$(cd "$(dirname "$OMP_BUN_LAUNCH_PATH")" 2>/dev/null && pwd -P) || {
+      echo "error: selected Bun runtime directory cannot be resolved" >&2
+      exit 1
+    }
   fi
   if [ -n "$PREWALK_INTO" ]; then
     omp_prewalk_probe_flags "$OMP_BIN_CANON"
@@ -3273,6 +3287,9 @@ sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
 sq_ompprimary=$(shell_quote "$OMP_PRIMARY_EXTENSION")
+if [ "$OMP_BUN_CANON" != "$OMP_BIN_CANON" ]; then
+  OMP_LAUNCH_ENV="PATH=$(shell_quote "$OMP_BUN_LAUNCH_DIR"):\${PATH:-} "
+fi
 OMPRESUMEFLAG=
 [ -z "$OMP_RESUME_FILE" ] || OMPRESUMEFLAG="--resume $(shell_quote "$OMP_RESUME_FILE") "
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
@@ -3290,6 +3307,7 @@ LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__OMPEXT__/$sq_ompext}
 LAUNCH=${LAUNCH//__OMPPRIMARY__/$sq_ompprimary}
+LAUNCH=${LAUNCH//__OMPENV__/$OMP_LAUNCH_ENV}
 LAUNCH=${LAUNCH//__OMPBIN__/$(shell_quote "$OMP_BIN_CANON")}
 LAUNCH=${LAUNCH//__OMPSESSIONDIR__/$(shell_quote "$OMP_SESSION_DIR")}
 LAUNCH=${LAUNCH//__OMPRESUMEFLAG__/$OMPRESUMEFLAG}

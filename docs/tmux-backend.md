@@ -49,9 +49,12 @@ Verify setup by spawning a small task and confirming its `fm-<id>` window appear
 A target-existence check proves only that the pane exists.
 The deeper tmux agent-liveness probe first verifies exact window membership, then reads process names to distinguish a running harness from a bare idle shell.
 It classifies recognized Claude, Codex, OpenCode, Pi, pi-signed, Grok, and Kimi process names as `alive`, common shells as `dead`, an authoritatively absent window as `missing`, unreadable state as `unreadable`, and every other process as `ambiguous`.
-OMP is the interpreter exception: recovery first validates its task-bound metadata, requires the actual foreground executable to equal the canonical Bun realpath, and requires the OMP entrypoint argv token to be an absolute path equal to the canonical launch identity.
-A bare Bun argv token is accepted only when its basename agrees and the independent PID executable check proves the recorded Bun binary; a bare OMP token, `comm=omp`, or a fresh `PATH` lookup is never identity evidence.
-The canonical `omp_bun` and `omp_bin` identities must be absolute, executable, and whitespace-free because the portable process reader exposes one flattened argument string; spawn refuses unsupported paths before endpoint publication, launches the canonical Bun/OMP pair literally, and records that same pair in task metadata.
+OMP recovery first validates its task-bound metadata and then distinguishes the two supported process shapes.
+Legacy Bun-script OMP requires an absolute argv entrypoint equal to `omp_bin`, an actual foreground executable equal to `omp_bun`, and an independent PID executable check for that same Bun runtime.
+Standalone OMP requires `omp_bun` and `omp_bin` to be the same absolute executable path, and its PID executable check is decisive even when `comm=omp` is the only process name exposed.
+A bare Bun argv token is accepted only when its basename agrees and the independent PID executable check proves the recorded Bun binary; a bare OMP token or a fresh `PATH` lookup is never identity evidence.
+The canonical `omp_bun` and `omp_bin` identities must be absolute, executable, and whitespace-free because the portable process reader exposes one flattened argument string.
+Legacy launches invoke the selected OMP entrypoint directly with a launch-local `PATH` prefix that binds its `/usr/bin/env bun` shebang to the probed runtime, while standalone launches invoke the selected executable directly without passing it through Bun.
 The primary adapter refuses unsupported paths before marker publication and replaces its marker atomically so a pre-existing symlink is never followed to its target.
 Only `dead` and `missing` authorize recovery because a false dead result could launch a duplicate agent.
 
@@ -72,7 +75,7 @@ Run the real-harness guard after any harness upgrade and before trusting refresh
 Agent liveness and composer safety are separate checks.
 For a bordered composer, the tmux reader locates the complete box structurally and classifies every content row through the shared ANSI and ghost handling in `bin/fm-composer-lib.sh`.
 The OMP two-row reader is tried only when the caller-supplied harness identity is OMP, because tmux exposes no native agent identity and another harness that happens to render an OMP-shaped row keeps the generic reader it was verified against.
-OMP's independent two-row composer additionally requires exact top/bottom terminal-cell width equality, measured with the canonical `omp_bun` from validated task metadata through the dispatcher and every submit retry; the active primary uses the equivalently validated Bun identity in its four-line marker.
+OMP's independent two-row composer additionally requires exact top/bottom terminal-cell width equality, measured with the canonical runtime and entrypoint identities from validated task metadata through the dispatcher and every submit retry; legacy scripts use Bun and standalone executables use the shell display-width boundary.
 A fresh `PATH` lookup, a missing binding, a non-executable path, or a runtime/process mismatch cannot authorize geometry and yields `unknown`.
 Real text on any content row is pending, while only an unambiguous box with every row empty is proven empty.
 Unreadable, incomplete, or structurally ambiguous boxes fail closed, and panes without a bordered composer retain the compatible cursor-row classification.

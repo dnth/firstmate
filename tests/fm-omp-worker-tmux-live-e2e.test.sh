@@ -106,7 +106,7 @@ agent_state() {
 
 composer_state() {
   PATH="$WRAPPER_BIN:$PATH" bash -c \
-    '. "$1/bin/fm-backend.sh"; meta=$(fm_backend_meta_for_window "$2" "$3") || exit 1; fm_backend_agent_record_identity tmux "$2" "$meta" || exit 1; fm_backend_composer_state tmux "$2" omp "$FM_BACKEND_AGENT_OMP_BUN"' \
+    '. "$1/bin/fm-backend.sh"; meta=$(fm_backend_meta_for_window "$2" "$3") || exit 1; fm_backend_agent_record_identity tmux "$2" "$meta" || exit 1; fm_backend_composer_state tmux "$2" omp "$FM_BACKEND_AGENT_OMP_BUN" "$FM_BACKEND_AGENT_OMP_BIN"' \
     _ "$ROOT" "$1" "$HOME_DIR/state"
 }
 
