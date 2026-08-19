@@ -283,6 +283,11 @@ fm_send_prepare_omp_turnstart_reference() {
   }
 }
 
+fm_send_setup_omp_turnstart() {
+  fm_send_validate_turnstart_config || return 1
+  fm_send_prepare_omp_turnstart_reference
+}
+
 fm_send_record_delivered_no_turn() {
   local status_file line wake_key
   [ -n "$TARGET_TASK_ID" ] || {
@@ -500,10 +505,6 @@ if [ -n "$TARGET_META" ]; then
     MARK_FROM_FIRSTMATE=1
   fi
 fi
-if [ "$TARGET_HARNESS" = omp ] && [ "${1:-}" != "--key" ] && [ "$*" != /exit ]; then
-  fm_send_validate_turnstart_config || exit 1
-  fm_send_prepare_omp_turnstart_reference || exit 1
-fi
 # Validate the answerer-closes request before any durable mutation or send: the
 # target must have a task ledger in THIS home, the send must carry an answer
 # message, and every named key must be open right now in that ledger per the
@@ -635,6 +636,10 @@ else
   esac
   retries=${FM_SEND_RETRIES:-3}
   sleep_s=${FM_SEND_SLEEP:-0.4}
+  turnstart_setup=
+  if [ "$TARGET_HARNESS" = omp ] && [ "$MESSAGE" != /exit ]; then
+    turnstart_setup=fm_send_setup_omp_turnstart
+  fi
   # Type once, submit, verify. Exact empty confirms an ordinary submission;
   # busy-confirmed and queued-unconfirmed retain the two OMP busy paths.
   send_rc=0
@@ -650,7 +655,7 @@ else
         verdict=send-failed
       fi
     fi
-  elif verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL" "$TARGET_HARNESS" "$TARGET_OMP_BUN" "$TARGET_OMP_TURNSTART_REFERENCE"); then
+  elif verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL" "$TARGET_HARNESS" "$TARGET_OMP_BUN" "$turnstart_setup"); then
     :
   else
     send_rc=$?
@@ -667,6 +672,19 @@ else
     echo "error: text not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1
   fi
+  case "$verdict" in
+    empty-turnstart:*)
+      TARGET_OMP_TURNSTART_REFERENCE=${verdict#empty-turnstart:}
+      FM_SEND_TURNSTART_TIMEOUT_VALUE=${FM_SEND_TURNSTART_TIMEOUT:-1}
+      FM_SEND_TURNSTART_POLL_VALUE=${FM_SEND_TURNSTART_POLL:-0.1}
+      TARGET_OMP_TURNSTART_MARKER="$STATE/$TARGET_TASK_ID.omp-started"
+      if [ -L "$TARGET_OMP_TURNSTART_MARKER" ] \
+        || { [ -e "$TARGET_OMP_TURNSTART_MARKER" ] && [ ! -f "$TARGET_OMP_TURNSTART_MARKER" ]; }; then
+        TARGET_OMP_TURNSTART_MARKER=
+      fi
+      verdict=empty
+      ;;
+  esac
   if [ "$verdict" != empty ] && [ "$TARGET_HARNESS" = omp ] && [ "$MESSAGE" = /exit ] \
      && [ -n "$TARGET_META" ] \
      && [ "$(fm_backend_agent_state "$TARGET_BACKEND" "$T" "$TARGET_META" 2>/dev/null)" = dead ]; then

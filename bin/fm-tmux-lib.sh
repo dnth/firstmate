@@ -480,18 +480,33 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [harness] [bas
   fi
 }
 
-fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle> [harness] [canonical-omp-bun] [turnstart-reference]
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${6:-} bun=${7:-} turnstart_reference=${8:-}
-  local baseline_busy=0
+fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle> [harness] [canonical-omp-bun] [turnstart-setup]
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${6:-} bun=${7:-} turnstart_setup=${8:-}
+  local baseline_busy=0 turnstart_reference='' verdict
   if [ "$harness" = omp ] && fm_pane_is_busy "$target" omp; then
     baseline_busy=1
   fi
-  tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
+  if [ "$harness" = omp ] && [ "$baseline_busy" -eq 0 ] && [ -n "$turnstart_setup" ]; then
+    "$turnstart_setup" || { printf 'turnstart-setup-failed'; return 0; }
+    turnstart_reference=${TARGET_OMP_TURNSTART_REFERENCE:-}
+  fi
+  tmux send-keys -t "$target" -l "$text" 2>/dev/null || {
+    [ -z "$turnstart_reference" ] || rm -f -- "$turnstart_reference"
+    printf 'send-failed'
+    return 0
+  }
   sleep "$settle"
   if [ -n "$turnstart_reference" ] && ! touch "$turnstart_reference"; then
+    rm -f -- "$turnstart_reference"
     printf 'unknown'
     return 0
   fi
-  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$harness" \
-    "$baseline_busy" "$bun"
+  verdict=$(fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$harness" \
+    "$baseline_busy" "$bun")
+  if [ -n "$turnstart_reference" ] && [ "$verdict" = empty ]; then
+    printf 'empty-turnstart:%s' "$turnstart_reference"
+  else
+    [ -z "$turnstart_reference" ] || rm -f -- "$turnstart_reference"
+    printf '%s' "$verdict"
+  fi
 }

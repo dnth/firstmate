@@ -201,7 +201,8 @@ Slash and dollar-prefixed input uses the shared harness-aware settle before the 
 Text is typed once; only Enter is retried.
 
 On an idle or done native baseline, ordinary submit confirmation waits for `working` or `blocked` across a bounded polling window.
-For OMP, that native transition already satisfies `fm-send.sh`'s turn-start requirement without a second rendered-state probe.
+For OMP, that native transition confirms submission, after which `fm-send.sh` applies the captain-approved coarse bounded check for native busy state or clear generated turn-start activity.
+The two stages intentionally share signals rather than claiming perfect submit and turn-start separation.
 On an already active or unreadable baseline, ordinary harnesses fall back to conservative composer clearance.
 OMP is stricter: the adapter binds the exact native OMP session path and pre-send byte offset before typing.
 That offset is always the end of a complete newline-terminated session record; when a partial record is still being appended the adapter waits a bounded time and then refuses rather than rewinding, because a mid-record offset would poison every later read and an earlier boundary could false-confirm an already-appended record.

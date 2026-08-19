@@ -207,13 +207,15 @@ test_pre_submit_activity_does_not_prove_new_turn() {
 test_busy_queued_enter_remains_success() {
   local home fb bun omp log entered rc
   IFS=$'\t' read -r home fb bun omp log entered < <(setup_case queued omp)
-  run_case queued "$home" "$fb" "$bun" "$omp" "$log" "$entered" >/dev/null 2>&1; rc=$?
+  FM_SEND_TURNSTART_TIMEOUT=invalid \
+    run_case queued "$home" "$fb" "$bun" "$omp" "$log" "$entered" >/dev/null 2>&1
+  rc=$?
   expect_code 0 "$rc" "the already-busy OMP queued-Enter exception should remain accepted"
   [ "$(grep -c 'key=Enter' "$log")" -eq 1 ] \
     || fail "the busy OMP queued-Enter path no longer transports exactly one Enter"
   assert_absent "$home/state/turn-test.status" \
     "the busy queued-Enter exception emitted a false no-turn recovery marker"
-  pass "fm-send: the already-busy OMP queued-Enter exception is unchanged"
+  pass "fm-send: already-busy OMP ignores idle-only turn-start setup"
 }
 
 test_non_omp_does_not_gain_turn_start_verification() {
@@ -402,7 +404,7 @@ SH
     FM_TEST_HERDR_SESSION="$session" FM_TEST_HERDR_BASELINE=working \
     FM_TEST_HERDR_EVENT=message FM_TEST_HERDR_TEXT='busy steer' \
     FM_SEND_RETRIES=1 FM_SEND_SLEEP=0 FM_SEND_SETTLE=0 \
-    FM_SEND_TURNSTART_TIMEOUT=0.1 FM_SEND_TURNSTART_POLL=0.02 \
+    FM_SEND_TURNSTART_TIMEOUT=invalid FM_SEND_TURNSTART_POLL=0.02 \
     "$SEND" herdr-turn 'busy steer' >/dev/null 2>&1
   rc=$?
   expect_code 0 "$rc" "a confirmed already-busy Herdr steer should skip idle turn-start verification"
@@ -418,14 +420,14 @@ SH
     FM_TEST_HERDR_SESSION="$session" FM_TEST_HERDR_BASELINE=blocked \
     FM_TEST_HERDR_EVENT=answer FM_TEST_HERDR_TEXT='blocked answer' \
     FM_SEND_RETRIES=1 FM_SEND_SLEEP=0 FM_SEND_SETTLE=0 \
-    FM_SEND_TURNSTART_TIMEOUT=0.1 FM_SEND_TURNSTART_POLL=0.02 \
+    FM_SEND_TURNSTART_TIMEOUT=invalid FM_SEND_TURNSTART_POLL=0.02 \
     "$SEND" herdr-turn --resolve-key herdr-answer 'blocked answer' >/dev/null 2>&1
   rc=$?
   expect_code 0 "$rc" "a confirmed blocked Herdr answer should skip idle turn-start verification"
   assert_contains "$(cat "$home/state/herdr-turn.status")" \
     'resolved [key=herdr-answer]: answered: blocked answer' \
     "the confirmed blocked Herdr answer did not close its decision"
-  pass "fm-send: confirmed busy and blocked Herdr deliveries preserve success"
+  pass "fm-send: busy and blocked Herdr ignore idle-only setup"
 }
 
 test_confirmed_submit_without_turn_is_distinct_and_wakes_recovery
