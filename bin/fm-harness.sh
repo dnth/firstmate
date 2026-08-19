@@ -41,13 +41,14 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # no match, so a foreign harness nested inside an OMP tree (an agent started
 # from OMP's bash tool) keeps its own identity instead of inheriting the OMP
 # marker from further up the chain.
-# Two evidence modes. `exact` requires the launch-bound Bun and OMP realpaths
+# Two evidence modes. `exact` requires the launch-bound runtime and OMP realpaths
 # published by the native primary (env pair or the loaded marker bound to the
-# PID). `launch-shape` proves only that the innermost harness ancestor is an
-# OMP process launched the way firstmate launches one - absolute Bun executable
-# followed by an absolute `omp` entrypoint - which is the evidence a spawned OMP
-# worker's own tree carries; it never runs on its own, only to qualify the
-# inherited FM_OMP_HARNESS launch-boundary marker.
+# PID); standalone OMP publishes the same executable in both paths.
+# `launch-shape` proves only that the innermost harness ancestor is a legacy
+# Bun-script OMP process launched the way firstmate launches one - an absolute
+# Bun executable followed by an absolute `omp` entrypoint - which is the evidence
+# a spawned OMP worker's own tree carries; it never runs on its own, only to
+# qualify the inherited FM_OMP_HARNESS launch-boundary marker.
 omp_launch_argv_shape() {  # <args>
   local first second rest bun_path omp_path
   read -r first second rest <<EOF
