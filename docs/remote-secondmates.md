@@ -183,7 +183,8 @@ FM_HOME=<primary-home> bin/fm-send.sh fm-<id> '<request>'
 ```
 
 For an OMP secondmate, the remote endpoint performs the same bounded turn-start verification beside its session.
-A remote `delivered-no-turn` result propagates as exit 4, records delivery without retrying the request, and wakes the primary home's supervised recovery path.
+Both remote post-delivery verdicts propagate without retrying the request: `delivered-no-turn` exits 4, while `delivered-no-turn-persistence-failed` exits 5 when a required remote recovery trigger could not be persisted.
+The primary records its own durable marker and watcher wake for either verdict, and lifecycle recovery remains supervised.
 
 Marked requests keep the existing correlation contract.
 The remote charter appends replies to `state/parent-replies.status` in the remote home.
