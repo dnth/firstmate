@@ -55,6 +55,10 @@ case "${1:-}" in
     exit 0 ;;
   capture-pane)
     if [ -n "${FM_FAKE_TMUX_CAPTURE_FILE:-}" ]; then
+      if [ "${FM_FAKE_TMUX_BUSY_AFTER_ENTER:-0}" = 1 ] \
+        && grep -Fq 'literal=0 arg=Enter' "$FM_TMUX_LOG"; then
+        printf 'Working… ⟦esc⟧\n'
+      fi
       cat "$FM_FAKE_TMUX_CAPTURE_FILE"
     else
       printf '╭────╮\n│    │\n╰────╯\n'
@@ -221,7 +225,8 @@ SH
     "omp_bin=$omp" "omp_bun=$actual_bun"
 
   PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
-    FM_FAKE_TMUX_INVENTORY=fm-omp-bound FM_FAKE_TMUX_CAPTURE_FILE="$capture" FM_SEND_SETTLE=0 \
+    FM_FAKE_TMUX_INVENTORY=fm-omp-bound FM_FAKE_TMUX_CAPTURE_FILE="$capture" \
+    FM_FAKE_TMUX_BUSY_AFTER_ENTER=1 FM_SEND_SETTLE=0 \
     "$SEND" omp-bound "bound geometry" >/dev/null 2>"$err"; rc=$?
   [ "$rc" -eq 0 ] || fail "OMP send with exact metadata-bound Bun should succeed despite PATH drift: $(cat "$err")"
   got=$(cat "$log")

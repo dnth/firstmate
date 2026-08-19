@@ -235,6 +235,41 @@ The Herdr role matrix required each expected turn-end or routed-reply notificati
 The deterministic tmux and Herdr fixtures reran on 2026-08-09 and proved that an already-busy OMP send returns `queued-unconfirmed` only after Enter transport succeeds, without reading a rendered steering count, while Enter transport failure returns `send-failed` and initially idle editable input remains pending and fails closed.
 This is revision-bound source-fixture evidence for the source under review, using Bun 1.3.14 only for terminal-cell measurement; it does not invoke OMP or make an OMP runtime-version claim.
 
+The deterministic fm-send turn-start fixture ran on 2026-08-19 and proved that an initially idle OMP submit must become busy or advance its generated turn-start marker after the submit-time baseline before success, while `delivered-no-turn` exits distinctly, queues supervised recovery, and never kills the endpoint.
+The same fixture proved bounded recovery wake-lock failure, required recovery-trigger persistence, distinct post-delivery persistence failure, the monotonic deadline, submit-time idle setup, Herdr post-submit check, confirmed busy and blocked compatibility, OMP exit compatibility, normal turn start, already-busy `queued-unconfirmed` exception, remote OMP routing, and unchanged non-OMP behavior.
+The tested source is Git revision `6c04b02de758deb82f2448bd258b5e1b72ff0743` plus binary patch SHA-256 `cc336b6d0dd73ca74adc28d665e3a29f28e064764441bda2c9f18c6a402360a5` over this exact file manifest and construction command:
+
+```sh
+git diff --binary 6c04b02de758deb82f2448bd258b5e1b72ff0743 -- bin/fm-send.sh bin/fm-wake-lib.sh tests/fm-send-turn-start.test.sh | sha256sum
+```
+
+This evidence uses stubbed backend state and process identity only, does not invoke a live OMP runtime, and makes no live OMP claim.
+
+```sh
+tests/fm-send-turn-start.test.sh
+```
+
+Observed output:
+
+```text
+ok - fm-send: confirmed OMP delivery without a turn returns delivered-no-turn and wakes supervised recovery
+ok - fm-send: marker persistence failure is distinct and never resends
+ok - fm-send: wake persistence failure is distinct and never resends
+ok - fm-send: unacquirable wake lock returns bounded failure
+ok - fm-send: a real OMP turn start preserves normal success
+ok - fm-send: delivered-no-turn never closes an answered decision
+ok - fm-send: OMP session activity advancement proves a fast turn start
+ok - fm-send: pre-submit activity cannot prove the submitted turn started
+ok - fm-send: already-busy OMP ignores idle-only turn-start setup
+ok - fm-send: turn-start verification remains scoped to OMP targets
+ok - fm-send: the monotonic deadline prevents post-expiry backend probes
+ok - fm-send: OMP keys ignore text-only turn-start configuration
+ok - fm-send: OMP /exit ignores turn-start-only setup
+ok - fm-send: remote OMP metadata routing leaves non-OMP state unchanged
+ok - fm-send: Herdr empty still requires post-submit OMP turn proof
+ok - fm-send: busy and blocked Herdr ignore idle-only setup
+```
+
 ```sh
 bash -c '
 set -e

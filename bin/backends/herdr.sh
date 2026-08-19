@@ -2985,10 +2985,11 @@ fm_backend_herdr_wait_omp_session_exit() {  # <session-file> <byte-offset> <budg
   fm_backend_herdr_wait_omp_session_event exit "$1" "$2" "$3" "${4:-1}"
 }
 
-# Echoes empty|pending|unknown|send-failed, a subset of the proof-carrying
-# submit vocabulary. Empty means confirmed submitted for every backend.
-fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [harness] [canonical-omp-bun]
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${7:-} bun=${8:-}
+# Echoes empty|busy-confirmed|pending|unknown|send-failed from the
+# proof-carrying submit vocabulary.
+fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [harness] [canonical-omp-bun] [turnstart-setup]
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${7:-} bun=${8:-} turnstart_setup=${9:-}
+  local turnstart_reference=''
   local i=0 verdict baseline confirm_sleep omp_confirm_sleep omp_session='' omp_offset='' omp_status='' omp_event
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   if [ "$harness" = omp ]; then
@@ -2999,15 +3000,32 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
     omp_offset=$FM_BACKEND_HERDR_OMP_SUBMIT_OFFSET
     omp_status=$FM_BACKEND_HERDR_OMP_SUBMIT_STATUS
   fi
-  fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
+  if [ "$harness" = omp ] && [ "$baseline" = idle ] && [ -n "$turnstart_setup" ]; then
+    "$turnstart_setup" || { printf 'turnstart-setup-failed'; return 0; }
+    turnstart_reference=${TARGET_OMP_TURNSTART_REFERENCE:-}
+  fi
+  fm_backend_herdr_send_literal "$target" "$text" || {
+    [ -z "$turnstart_reference" ] || rm -f -- "$turnstart_reference"
+    printf 'send-failed'
+    return 0
+  }
   sleep "$settle"
   if [ "$harness" != omp ]; then
     baseline=$(fm_backend_herdr_classify_submit_agent_status \
       "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")")
   fi
+  if [ -n "$turnstart_reference" ] && ! touch "$turnstart_reference"; then
+    rm -f -- "$turnstart_reference"
+    printf 'unknown'
+    return 0
+  fi
   confirm_sleep=$(fm_backend_herdr_submit_confirm_budget "$sleep_s")
   while :; do
-    fm_backend_herdr_send_key "$target" Enter || { printf 'send-failed'; return 0; }
+    fm_backend_herdr_send_key "$target" Enter || {
+      [ -z "$turnstart_reference" ] || rm -f -- "$turnstart_reference"
+      printf 'send-failed'
+      return 0
+    }
     if [ "$harness" = omp ] && [ "$text" = /exit ]; then
       omp_confirm_sleep=$(fm_backend_herdr_submit_confirm_budget "$FM_BACKEND_HERDR_OMP_EVENT_CONFIRM_SLEEP")
       if fm_backend_herdr_wait_omp_session_exit "$omp_session" "$omp_offset" \
@@ -3033,7 +3051,11 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
       fi
       if fm_backend_herdr_wait_omp_session_event "$omp_event" "$omp_session" "$omp_offset" \
         "$omp_confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS" "$text"; then
-        printf 'empty'
+        if [ -n "$turnstart_setup" ]; then
+          printf 'busy-confirmed'
+        else
+          printf 'empty'
+        fi
       elif [ "$omp_status" = blocked ]; then
         printf 'unknown'
       else
@@ -3048,12 +3070,26 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
       verdict=$(fm_backend_herdr_composer_state "$target" "$harness" "$bun")
     fi
     case "$verdict" in
-      busy) printf 'empty'; return 0 ;;
-      empty) printf 'empty'; return 0 ;;
-      unknown) printf 'unknown'; return 0 ;;
+      busy|empty)
+        if [ -n "$turnstart_reference" ]; then
+          printf 'empty-turnstart:%s' "$turnstart_reference"
+        else
+          printf 'empty'
+        fi
+        return 0
+        ;;
+      unknown)
+        [ -z "$turnstart_reference" ] || rm -f -- "$turnstart_reference"
+        printf 'unknown'
+        return 0
+        ;;
     esac
     i=$((i + 1))
-    [ "$i" -lt "$retries" ] || { printf 'pending'; return 0; }
+    if [ "$i" -ge "$retries" ]; then
+      [ -z "$turnstart_reference" ] || rm -f -- "$turnstart_reference"
+      printf 'pending'
+      return 0
+    fi
   done
 }
 

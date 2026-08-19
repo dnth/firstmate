@@ -182,6 +182,10 @@ Send routed requests normally:
 FM_HOME=<primary-home> bin/fm-send.sh fm-<id> '<request>'
 ```
 
+For an OMP secondmate, the remote endpoint performs the same bounded turn-start verification beside its session.
+Both remote post-delivery verdicts propagate without retrying the request: `delivered-no-turn` exits 4, while `delivered-no-turn-persistence-failed` exits 5 when a required remote recovery trigger could not be persisted.
+The primary records its own durable marker and watcher wake for either verdict, and lifecycle recovery remains supervised.
+
 Marked requests keep the existing correlation contract.
 The remote charter appends replies to `state/parent-replies.status` in the remote home.
 A process-event source performs a non-destructive, cursor-anchored delta read, validates bounded correlated status lines, fetches only referenced `data/*.md` documents through the confined reader, and appends each accepted line at most once to the primary status channel.
