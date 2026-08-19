@@ -395,17 +395,47 @@ test_local_secondmate_answer_is_marked_and_closed() {
 }
 
 setup_remote_home() {  # <name> -> echoes a remote-secondmate fixture home
-  local home
+  local home harness=${2:-claude}
   home=$(setup_home "$1")
   mkdir -p "$home/data"
   fm_write_meta "$home/state/rsm.meta" \
-    "window=fm-remote:w1:p1" "endpoint_task_id=rsm" "harness=claude" \
+    "window=fm-remote:w1:p1" "endpoint_task_id=rsm" "harness=$harness" \
     "kind=secondmate" "mode=secondmate" "yolo=off" \
     "remote_host=remote-mac" "remote_root=/remote/root" \
     "remote_backend=herdr" "remote_herdr_session=fm-remote" \
     "remote_target=fm-remote:w1:p1"
   printf '%s\n' '- rsm - remote test domain (host: remote-mac; root: /remote/root; home: /remote/home; scope: remote testing; projects: alpha; added 2026-08-02)' > "$home/data/secondmates.md"
   printf '%s\n' "$home"
+}
+
+test_remote_omp_no_turn_propagates_without_redelivery() {
+  local dir fb log home ssh_log pending rc status wake
+  dir="$TMP_ROOT/remote-no-turn"
+  mkdir -p "$dir"
+  fb=$(make_stubs "$dir")
+  log="$dir/send.log"
+  ssh_log="$dir/ssh.log"
+  : > "$ssh_log"
+  home=$(setup_remote_home remote-no-turn omp)
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_SSH_BIN="$fb/fake-ssh" FM_SSH_LOG="$ssh_log" FM_FAKE_SSH_RC=4 \
+    "$SEND" rsm "wake the remote domain" >/dev/null 2>&1
+  rc=$?
+  expect_code 4 "$rc" "a remote OMP delivered-no-turn result should propagate distinctly"
+  status=$(cat "$home/state/rsm.status")
+  assert_contains "$status" 'failed: delivered-no-turn:' \
+    "the remote OMP no-turn result did not mark local supervised recovery"
+  wake=$(cat "$home/state/.wake-queue")
+  assert_contains "$wake" $'\tsignal\trsm.status\tdelivered-no-turn: rsm' \
+    "the remote OMP no-turn result did not wake the parent supervisor"
+  pending=$(find "$home/state/pending-replies" -maxdepth 1 -type f ! -name '.*' -print)
+  if [ -z "$pending" ] || ! grep -Fqx 'phase=awaiting_report' "$pending"; then
+    fail "the remote OMP no-turn result discarded its already-delivered pending reply"
+  fi
+  [ "$(grep -c 'fm-remote-entrypoint.sh' "$ssh_log")" -eq 1 ] \
+    || fail "the remote OMP no-turn result retried the delivered request"
+  pass "a remote OMP delivered-no-turn result propagates without redelivery"
 }
 
 test_remote_secondmate_answer_closes_locally() {
@@ -542,6 +572,7 @@ test_multiple_keys_close_together
 test_long_key_preserves_resolved_prefix
 test_local_secondmate_answer_is_marked_and_closed
 test_remote_secondmate_answer_closes_locally
+test_remote_omp_no_turn_propagates_without_redelivery
 test_remote_transport_failure_does_not_close
 test_append_failure_reports_every_safe_manual_close
 test_secondmate_closes_before_pending_reply_commit_failure

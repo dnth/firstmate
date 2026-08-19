@@ -89,7 +89,10 @@ The daemon injects only into an affirmatively `empty` composer, so both `pending
 Unsupported supervisor backends refuse at daemon startup.
 Stalled escalation delivery writes `state/.subsuper-inject-wedged` and attempts a configured backend-independent active alert after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
 On an unmarked return, `bin/fm-afk-return.sh` owns ordered shutdown, durable catch-up evidence, and the fail-closed gate that keeps ordinary work behind every live firstmate-actionable blocker.
-`fm-send.sh` selects a pre-Enter popup-settle for slash commands and for codex `$...` skill invocations using metadata-routed target `harness=` values, then adds its own `FM_SEND_SETTLE` pause after successful text sends so immediate peeks catch the receiving turn starting; the sub-supervisor uses only the shared submit core and does not pay that post-submit pause.
+`fm-send.sh` selects a pre-Enter popup-settle for slash commands and for codex `$...` skill invocations using metadata-routed target `harness=` values.
+After a confirmed idle OMP submit, it uses the backend's existing native or rendered busy reader or advancement of the generated OMP turn-start marker to require a real turn start inside the bounded `FM_SEND_TURNSTART_TIMEOUT`; failure returns `delivered-no-turn` with exit 4 and queues supervised recovery without terminating the worker.
+The narrow already-busy OMP `queued-unconfirmed` verdict bypasses that transition check because the target is already in a turn.
+Successful text sends then receive the existing `FM_SEND_SETTLE` pause so immediate peeks catch the receiving turn, while the sub-supervisor uses only the shared submit core and pays neither fm-send-only step.
 
 ## Busy state is semantic, per adapter
 

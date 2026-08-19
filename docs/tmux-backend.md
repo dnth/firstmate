@@ -90,6 +90,9 @@ It types a message once and retries Enter only while the backend still permits a
 A proven empty composer is the ordinary positive delivery acknowledgement.
 Text left in established structure remains `pending`, text in ambiguous structure remains unproven, and unreadable or unsafe state remains unknown.
 `fm-send.sh` reports every unconfirmed verdict as a failure except the narrow already-busy OMP queue verdict below.
+For an initially idle OMP target, composer clearance remains submit proof but no longer counts as complete delivery by itself.
+`fm-send.sh` samples the existing OMP busy-footer reader and generated `state/<id>.omp-started` activity marker for at most `FM_SEND_TURNSTART_TIMEOUT`, then returns `delivered-no-turn` with exit 4 when neither proves a turn began.
+A task-bound `delivered-no-turn` also appends an actionable status event and durable watcher wake, while leaving the endpoint and worktree untouched for supervised recovery.
 
 OpenCode 1.18.4 has one busy-queue exception.
 While OpenCode is mid-turn, Enter queues the message but leaves its text visible until the turn completes.

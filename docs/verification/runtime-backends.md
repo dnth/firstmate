@@ -235,6 +235,25 @@ The Herdr role matrix required each expected turn-end or routed-reply notificati
 The deterministic tmux and Herdr fixtures reran on 2026-08-09 and proved that an already-busy OMP send returns `queued-unconfirmed` only after Enter transport succeeds, without reading a rendered steering count, while Enter transport failure returns `send-failed` and initially idle editable input remains pending and fails closed.
 This is revision-bound source-fixture evidence for the source under review, using Bun 1.3.14 only for terminal-cell measurement; it does not invoke OMP or make an OMP runtime-version claim.
 
+The deterministic fm-send turn-start fixture ran on 2026-08-19 and proved that an initially idle OMP submit must become busy or advance its generated turn-start marker before success, while `delivered-no-turn` exits distinctly, queues supervised recovery, and never kills the endpoint.
+The same fixture proved that a normal turn start, the already-busy `queued-unconfirmed` exception, and non-OMP delivery retain their prior success behavior.
+This is revision-bound source-fixture evidence for the source under review and uses stubbed tmux and process identity without invoking an OMP runtime.
+
+```sh
+tests/fm-send-turn-start.test.sh
+```
+
+Observed output:
+
+```text
+ok - fm-send: confirmed OMP delivery without a turn returns delivered-no-turn and wakes supervised recovery
+ok - fm-send: a real OMP turn start preserves normal success
+ok - fm-send: delivered-no-turn never closes an answered decision
+ok - fm-send: OMP session activity advancement proves a fast turn start
+ok - fm-send: the already-busy OMP queued-Enter exception is unchanged
+ok - fm-send: turn-start verification remains scoped to OMP targets
+```
+
 ```sh
 bash -c '
 set -e

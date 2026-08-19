@@ -15,12 +15,21 @@
 # submit or reports an inconclusive send. If a swallowed Enter is positively
 # confirmed, fm-send exits NON-ZERO so the caller knows the steer did not land
 # instead of silently leaving an unsubmitted instruction.
+# For an OMP target, a confirmed idle submit must also start a real turn within
+# FM_SEND_TURNSTART_TIMEOUT (default 1 second, maximum 3 seconds), sampled every
+# FM_SEND_TURNSTART_POLL (default 0.1 second). The proof is the existing backend
+# busy reader or advancement of the generated OMP turn-start marker. A confirmed
+# submit with no turn returns `delivered-no-turn` on stderr and exits 4. A
+# task-bound target also receives an actionable status event and durable watcher
+# wake so supervised recovery starts promptly without an automatic terminate or
+# relaunch.
 # An already-busy OMP pane has one narrow exception: a successfully transported
 # Enter may return `queued-unconfirmed`, which fm-send accepts as queued delivery
 # while preserving failures for transport errors and non-busy pending input.
 # Submission dispatches through the target's recorded backend; the tmux adapter
 # shares its composer/submit core with the away-mode daemon via bin/fm-tmux-lib.sh.
-# Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).
+# Tune submit confirmation with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP
+# (0.4).
 # Slash commands, and codex `$...` skill invocations resolved through harness
 # meta, get a longer pre-Enter settle so completion popups do not swallow Enter.
 #
@@ -33,8 +42,9 @@
 # marked - their behavior is unchanged.
 # Decision closure (answerer-closes): pass --resolve-key <key> (repeatable,
 # before the message) when this send answers an open keyed needs-decision: or
-# blocked: record in the target task's state/<id>.status. After the submit is
-# confirmed, fm-send itself appends the closing
+# blocked: record in the target task's state/<id>.status. After delivery is
+# confirmed and any required OMP turn-start verification succeeds, fm-send
+# itself appends the closing
 # "resolved [key=<key>]: answered: <capped excerpt>" line to that status file,
 # so the captain-facing OPEN DECISIONS record closes at answer time and never
 # depends on the busy worker writing a matching resolved line. The close is a
@@ -110,12 +120,17 @@ fi
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
 RUNPOD_DELIVERY_LOCK=
+TARGET_OMP_TURNSTART_REFERENCE=
 release_runpod_delivery_lock() {
   [ -n "$RUNPOD_DELIVERY_LOCK" ] || return 0
   fm_lock_release "$RUNPOD_DELIVERY_LOCK"
   RUNPOD_DELIVERY_LOCK=
 }
-trap release_runpod_delivery_lock EXIT
+fm_send_cleanup() {
+  release_runpod_delivery_lock
+  [ -z "$TARGET_OMP_TURNSTART_REFERENCE" ] || rm -f -- "$TARGET_OMP_TURNSTART_REFERENCE"
+}
+trap fm_send_cleanup EXIT
 # Answer notes use the same bounded status-line shape as the OPEN DECISIONS
 # renderer without adding a second shared helper to this fork.
 fm_send_resolved_line() {  # <key> <note>
@@ -177,6 +192,88 @@ fm_send_count_colons() {  # <string>
   local s=$1 no_colons
   no_colons=${s//:/}
   printf '%s' $(( ${#s} - ${#no_colons} ))
+}
+
+fm_send_validate_turnstart_config() {
+  FM_SEND_TURNSTART_TIMEOUT_VALUE=${FM_SEND_TURNSTART_TIMEOUT:-1}
+  FM_SEND_TURNSTART_POLL_VALUE=${FM_SEND_TURNSTART_POLL:-0.1}
+  if ! awk -v timeout="$FM_SEND_TURNSTART_TIMEOUT_VALUE" \
+    -v poll="$FM_SEND_TURNSTART_POLL_VALUE" \
+    'BEGIN {
+      number = "^([0-9]+([.][0-9]*)?|[.][0-9]+)$"
+      exit !(timeout ~ number && poll ~ number && timeout >= 0.1 && timeout <= 3 && poll >= 0.02 && poll <= timeout)
+    }'; then
+    echo "error: FM_SEND_TURNSTART_TIMEOUT must be 0.1..3 seconds and FM_SEND_TURNSTART_POLL must be 0.02..timeout" >&2
+    return 1
+  fi
+  FM_SEND_TURNSTART_POLLS=$(awk -v timeout="$FM_SEND_TURNSTART_TIMEOUT_VALUE" \
+    -v poll="$FM_SEND_TURNSTART_POLL_VALUE" \
+    'BEGIN { n = int(timeout / poll); if (n * poll < timeout) n++; print n + 1 }')
+}
+
+fm_send_omp_is_busy() {
+  case "$TARGET_BACKEND" in
+    herdr)
+      [ "$(fm_backend_busy_state herdr "$T")" = busy ]
+      ;;
+    tmux)
+      fm_backend_source tmux || return 1
+      fm_pane_is_busy "$T" omp
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+fm_send_wait_for_omp_turn_start() {
+  local i=0
+  [ "$TARGET_OMP_WAS_BUSY" -eq 0 ] || return 0
+  # Herdr's exact `empty` submit verdict already means its native agent-state
+  # reader observed a submit-active state after Enter. A remote control call
+  # runs this same verifier beside the endpoint and propagates its exact result.
+  case "$TARGET_BACKEND" in herdr|remote) return 0 ;; esac
+  while [ "$i" -lt "$FM_SEND_TURNSTART_POLLS" ]; do
+    fm_send_omp_is_busy && return 0
+    if [ -n "$TARGET_OMP_TURNSTART_REFERENCE" ] \
+      && [ "$TARGET_OMP_TURNSTART_MARKER" -nt "$TARGET_OMP_TURNSTART_REFERENCE" ]; then
+      return 0
+    fi
+    i=$((i + 1))
+    [ "$i" -lt "$FM_SEND_TURNSTART_POLLS" ] || break
+    sleep "$FM_SEND_TURNSTART_POLL_VALUE"
+  done
+  return 1
+}
+
+fm_send_prepare_omp_turnstart_reference() {
+  TARGET_OMP_TURNSTART_MARKER=
+  [ -n "$TARGET_TASK_ID" ] || return 0
+  TARGET_OMP_TURNSTART_MARKER="$STATE/$TARGET_TASK_ID.omp-started"
+  [ -f "$TARGET_OMP_TURNSTART_MARKER" ] && [ ! -L "$TARGET_OMP_TURNSTART_MARKER" ] || return 0
+  TARGET_OMP_TURNSTART_REFERENCE=$(mktemp "${TMPDIR:-/tmp}/fm-send-turnstart.XXXXXXXX") || {
+    echo "error: cannot create OMP turn-start activity reference" >&2
+    return 1
+  }
+}
+
+fm_send_record_delivered_no_turn() {
+  local status_file line wake_key
+  [ -n "$TARGET_TASK_ID" ] || {
+    echo "warning: delivered-no-turn has no task-bound status ledger; supervised recovery must be started manually" >&2
+    return 0
+  }
+  status_file="$STATE/$TARGET_TASK_ID.status"
+  wake_key="$TARGET_TASK_ID.status"
+  line='failed: delivered-no-turn: confirmed OMP steer did not start a turn; do not resend; supervised recovery must preserve the existing worktree'
+  if [ -L "$status_file" ] || { [ -e "$status_file" ] && [ ! -f "$status_file" ]; }; then
+    echo "warning: delivered-no-turn refuses a non-ordinary recovery marker at $status_file" >&2
+  elif ! printf '%s\n' "$line" >> "$status_file"; then
+    echo "warning: delivered-no-turn could not append its recovery marker to $status_file" >&2
+  fi
+  if ! fm_wake_append signal "$wake_key" "delivered-no-turn: $TARGET_TASK_ID"; then
+    echo "warning: delivered-no-turn could not enqueue its watcher wake for $TARGET_TASK_ID" >&2
+  fi
 }
 
 fm_send_resolve_target() {  # <raw-target>
@@ -346,18 +443,25 @@ if [ "$TARGET_BACKEND" = remote ] && fm_runpod_is_dormant "$DATA" "$TARGET_REMOT
 fi
 
 TARGET_OMP_BUN=
+TARGET_OMP_WAS_BUSY=0
 if [ "$TARGET_HARNESS" = omp ]; then
-  if [ -z "$TARGET_META" ] \
-     || ! fm_backend_agent_record_identity "$TARGET_BACKEND" "$T" "$TARGET_META"; then
-    echo "error: OMP target '$RAW_TARGET' lacks a valid task-bound Bun/OMP identity; refusing composer inspection and delivery" >&2
-    exit 1
+  if [ "$TARGET_BACKEND" != remote ]; then
+    if [ -z "$TARGET_META" ] \
+       || ! fm_backend_agent_record_identity "$TARGET_BACKEND" "$T" "$TARGET_META"; then
+      echo "error: OMP target '$RAW_TARGET' lacks a valid task-bound Bun/OMP identity; refusing composer inspection and delivery" >&2
+      exit 1
+    fi
+    TARGET_OMP_STATE=$(fm_backend_agent_state "$TARGET_BACKEND" "$T" "$TARGET_META" 2>/dev/null)
+    if [ "$TARGET_OMP_STATE" != alive ]; then
+      echo "error: OMP target '$RAW_TARGET' does not match a live task-bound Bun/OMP process (state=${TARGET_OMP_STATE:-unreadable}); refusing delivery" >&2
+      exit 1
+    fi
+    TARGET_OMP_BUN=$FM_BACKEND_AGENT_OMP_BUN
   fi
-  TARGET_OMP_STATE=$(fm_backend_agent_state "$TARGET_BACKEND" "$T" "$TARGET_META" 2>/dev/null)
-  if [ "$TARGET_OMP_STATE" != alive ]; then
-    echo "error: OMP target '$RAW_TARGET' does not match a live task-bound Bun/OMP process (state=${TARGET_OMP_STATE:-unreadable}); refusing delivery" >&2
-    exit 1
+  fm_send_validate_turnstart_config || exit 1
+  if fm_send_omp_is_busy; then
+    TARGET_OMP_WAS_BUSY=1
   fi
-  TARGET_OMP_BUN=$FM_BACKEND_AGENT_OMP_BUN
 fi
 
 # Classify a from-firstmate -> secondmate request. Only a task selector resolved
@@ -369,9 +473,14 @@ MARK_FROM_FIRSTMATE=0
 PENDING_REPLY_CORR=
 PENDING_REPLY_CREATED=0
 TARGET_TASK_ID=
-if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] && [ "$(fm_meta_get "$TARGET_META" kind)" = secondmate ]; then
-  MARK_FROM_FIRSTMATE=1
+if [ -n "$TARGET_META" ]; then
   TARGET_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
+  if [ -n "$TARGET_SELECTOR" ] && [ "$(fm_meta_get "$TARGET_META" kind)" = secondmate ]; then
+    MARK_FROM_FIRSTMATE=1
+  fi
+fi
+if [ "$TARGET_HARNESS" = omp ]; then
+  fm_send_prepare_omp_turnstart_reference || exit 1
 fi
 # Validate the answerer-closes request before any durable mutation or send: the
 # target must have a task ledger in THIS home, the send must carry an answer
@@ -512,7 +621,12 @@ else
       verdict=empty
     else
       send_rc=$?
-      verdict=send-failed
+      if [ "$send_rc" -eq 4 ] && [ "$TARGET_HARNESS" = omp ]; then
+        verdict='delivered-no-turn'
+        send_rc=0
+      else
+        verdict=send-failed
+      fi
     fi
   elif verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL" "$TARGET_HARNESS" "$TARGET_OMP_BUN"); then
     :
@@ -536,6 +650,10 @@ else
      && [ "$(fm_backend_agent_state "$TARGET_BACKEND" "$T" "$TARGET_META" 2>/dev/null)" = dead ]; then
     verdict=empty
   fi
+  if [ "$verdict" = empty ] && [ "$TARGET_HARNESS" = omp ] && [ "$MESSAGE" != /exit ] \
+     && ! fm_send_wait_for_omp_turn_start; then
+    verdict='delivered-no-turn'
+  fi
   post_delivery_failed=0
   case "$verdict" in
     empty)
@@ -546,6 +664,10 @@ else
     queued-unconfirmed)
       # The backend transported Enter to busy OMP without a native proof event.
       # Continue through the common delivery-confirmation path.
+      ;;
+    delivered-no-turn)
+      # Submission is durable, so pending-reply bookkeeping below still records
+      # delivery, but an answer cannot close its decision until a turn acts on it.
       ;;
     send-failed)
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
@@ -576,6 +698,11 @@ else
       fi
       post_delivery_failed=1
     fi
+  fi
+  if [ "$verdict" = delivered-no-turn ]; then
+    fm_send_record_delivered_no_turn
+    echo "error: delivered-no-turn: text was submitted to $T, but OMP did not start a turn within ${FM_SEND_TURNSTART_TIMEOUT_VALUE}s; do not resend; supervised recovery is required" >&2
+    exit 4
   fi
   [ "$post_delivery_failed" -eq 0 ] || exit 1
   # The submit was confirmed or accepted through the narrow busy-OMP queue
