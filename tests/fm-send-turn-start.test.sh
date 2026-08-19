@@ -156,6 +156,54 @@ test_confirmed_submit_without_turn_is_distinct_and_wakes_recovery() {
   pass "fm-send: confirmed OMP delivery without a turn returns delivered-no-turn and wakes supervised recovery"
 }
 
+assert_single_submission_without_kill() {  # <log> <failure-message>
+  local log=$1 message=$2
+  [ "$(grep -c 'literal=1' "$log")" -eq 1 ] \
+    && [ "$(grep -c 'key=Enter' "$log")" -eq 1 ] \
+    || fail "$message retried or retyped the delivered steer"
+  assert_not_contains "$(cat "$log")" 'kill-window' \
+    "$message invoked destructive recovery"
+}
+
+test_recovery_marker_failure_is_distinct_and_no_resend() {
+  local home fb bun omp log entered rc err wake
+  IFS=$'\t' read -r home fb bun omp log entered < <(setup_case marker-persistence omp)
+  err="$home/persistence.err"
+  : > "$home/status-target"
+  ln -s "$home/status-target" "$home/state/turn-test.status"
+  run_case wedge "$home" "$fb" "$bun" "$omp" "$log" "$entered" >/dev/null 2>"$err"
+  rc=$?
+  expect_code 5 "$rc" "a recovery-marker failure after delivery should be distinct"
+  assert_contains "$(cat "$err")" 'delivered-no-turn-persistence-failed' \
+    "the recovery-marker failure did not identify its post-delivery persistence state"
+  assert_contains "$(cat "$err")" 'do not resend' \
+    "the recovery-marker failure did not forbid redelivery"
+  wake=$(cat "$home/state/.wake-queue")
+  assert_contains "$wake" $'\tsignal\tturn-test.status\tdelivered-no-turn: turn-test' \
+    "the recovery-marker failure prevented the independent wake attempt"
+  assert_single_submission_without_kill "$log" "recovery-marker persistence failure"
+  pass "fm-send: marker persistence failure is distinct and never resends"
+}
+
+test_recovery_wake_failure_is_distinct_and_no_resend() {
+  local home fb bun omp log entered rc err status
+  IFS=$'\t' read -r home fb bun omp log entered < <(setup_case wake-persistence omp)
+  err="$home/persistence.err"
+  mkdir "$home/state/.wake-queue"
+  run_case wedge "$home" "$fb" "$bun" "$omp" "$log" "$entered" >/dev/null 2>"$err"
+  rc=$?
+  expect_code 5 "$rc" "a watcher-wake failure after delivery should be distinct"
+  assert_contains "$(cat "$err")" 'delivered-no-turn-persistence-failed' \
+    "the watcher-wake failure did not identify its post-delivery persistence state"
+  assert_contains "$(cat "$err")" 'already submitted' \
+    "the watcher-wake failure did not preserve delivered state"
+  status=$(cat "$home/state/turn-test.status")
+  assert_contains "$status" 'failed: delivered-no-turn:' \
+    "the watcher-wake failure prevented the independent status-marker attempt"
+  assert_single_submission_without_kill "$log" "watcher-wake persistence failure"
+  pass "fm-send: wake persistence failure is distinct and never resends"
+}
+
 test_turn_start_keeps_normal_success() {
   local home fb bun omp log entered rc
   IFS=$'\t' read -r home fb bun omp log entered < <(setup_case starts omp)
@@ -431,6 +479,8 @@ SH
 }
 
 test_confirmed_submit_without_turn_is_distinct_and_wakes_recovery
+test_recovery_marker_failure_is_distinct_and_no_resend
+test_recovery_wake_failure_is_distinct_and_no_resend
 test_turn_start_keeps_normal_success
 test_no_turn_does_not_close_answered_decision
 test_turn_activity_advance_keeps_fast_success

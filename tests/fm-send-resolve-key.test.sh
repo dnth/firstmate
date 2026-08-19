@@ -438,6 +438,39 @@ test_remote_omp_no_turn_propagates_without_redelivery() {
   pass "a remote OMP delivered-no-turn result propagates without redelivery"
 }
 
+test_remote_omp_persistence_failure_propagates_without_redelivery() {
+  local dir fb log home ssh_log pending rc err status wake
+  dir="$TMP_ROOT/remote-persistence-failure"
+  mkdir -p "$dir"
+  fb=$(make_stubs "$dir")
+  log="$dir/send.log"
+  ssh_log="$dir/ssh.log"
+  err="$dir/send.err"
+  : > "$ssh_log"
+  home=$(setup_remote_home remote-persistence-failure omp)
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_SSH_BIN="$fb/fake-ssh" FM_SSH_LOG="$ssh_log" FM_FAKE_SSH_RC=5 \
+    "$SEND" rsm "wake the remote domain" >/dev/null 2>"$err"
+  rc=$?
+  expect_code 5 "$rc" "a remote OMP persistence failure should propagate distinctly"
+  assert_contains "$(cat "$err")" 'delivered-no-turn-persistence-failed' \
+    "the remote persistence failure lost its post-delivery verdict"
+  status=$(cat "$home/state/rsm.status")
+  assert_contains "$status" 'failed: delivered-no-turn:' \
+    "the remote persistence failure did not attempt local supervised recovery"
+  wake=$(cat "$home/state/.wake-queue")
+  assert_contains "$wake" $'\tsignal\trsm.status\tdelivered-no-turn: rsm' \
+    "the remote persistence failure did not wake the parent supervisor"
+  pending=$(find "$home/state/pending-replies" -maxdepth 1 -type f ! -name '.*' -print)
+  if [ -z "$pending" ] || ! grep -Fqx 'phase=awaiting_report' "$pending"; then
+    fail "the remote persistence failure discarded its delivered pending reply"
+  fi
+  [ "$(grep -c 'fm-remote-entrypoint.sh' "$ssh_log")" -eq 1 ] \
+    || fail "the remote persistence failure retried the delivered request"
+  pass "a remote OMP persistence failure propagates without redelivery"
+}
+
 test_remote_secondmate_answer_closes_locally() {
   local dir fb log home ssh_log rc out
   dir="$TMP_ROOT/remote-ok"
@@ -573,6 +606,7 @@ test_long_key_preserves_resolved_prefix
 test_local_secondmate_answer_is_marked_and_closed
 test_remote_secondmate_answer_closes_locally
 test_remote_omp_no_turn_propagates_without_redelivery
+test_remote_omp_persistence_failure_propagates_without_redelivery
 test_remote_transport_failure_does_not_close
 test_append_failure_reports_every_safe_manual_close
 test_secondmate_closes_before_pending_reply_commit_failure

@@ -23,8 +23,10 @@
 # confirmed submit with no proof returns `delivered-no-turn` on stderr and exits
 # 4. A task-bound target also receives an actionable status event and durable
 # watcher wake so supervised recovery starts promptly without an automatic
-# terminate or relaunch. Remote OMP control runs this same check beside the
-# endpoint and propagates exit 4 without redelivery.
+# terminate or relaunch. Failure to persist either required recovery trigger
+# exits 5 as `delivered-no-turn-persistence-failed` after warning that delivery
+# already landed and must not be resent. Remote OMP control propagates both
+# post-delivery verdicts without redelivery.
 # An already-busy OMP pane has one narrow exception: a successfully transported
 # Enter may return `queued-unconfirmed`, which fm-send accepts as queued delivery
 # while preserving failures for transport errors and non-busy pending input.
@@ -289,22 +291,26 @@ fm_send_setup_omp_turnstart() {
 }
 
 fm_send_record_delivered_no_turn() {
-  local status_file line wake_key
+  local status_file line wake_key failed=0
   [ -n "$TARGET_TASK_ID" ] || {
-    echo "warning: delivered-no-turn has no task-bound status ledger; supervised recovery must be started manually" >&2
-    return 0
+    echo "error: delivered-no-turn has no task-bound status ledger; supervised recovery must be started manually" >&2
+    return 1
   }
   status_file="$STATE/$TARGET_TASK_ID.status"
   wake_key="$TARGET_TASK_ID.status"
   line='failed: delivered-no-turn: confirmed OMP steer did not start a turn; do not resend; supervised recovery must preserve the existing worktree'
   if [ -L "$status_file" ] || { [ -e "$status_file" ] && [ ! -f "$status_file" ]; }; then
-    echo "warning: delivered-no-turn refuses a non-ordinary recovery marker at $status_file" >&2
+    echo "error: delivered-no-turn refuses a non-ordinary recovery marker at $status_file" >&2
+    failed=1
   elif ! printf '%s\n' "$line" >> "$status_file"; then
-    echo "warning: delivered-no-turn could not append its recovery marker to $status_file" >&2
+    echo "error: delivered-no-turn could not append its recovery marker to $status_file" >&2
+    failed=1
   fi
   if ! fm_wake_append signal "$wake_key" "delivered-no-turn: $TARGET_TASK_ID"; then
-    echo "warning: delivered-no-turn could not enqueue its watcher wake for $TARGET_TASK_ID" >&2
+    echo "error: delivered-no-turn could not enqueue its watcher wake for $TARGET_TASK_ID" >&2
+    failed=1
   fi
+  [ "$failed" -eq 0 ]
 }
 
 fm_send_resolve_target() {  # <raw-target>
@@ -648,12 +654,11 @@ else
       verdict=empty
     else
       send_rc=$?
-      if [ "$send_rc" -eq 4 ] && [ "$TARGET_HARNESS" = omp ]; then
-        verdict='delivered-no-turn'
-        send_rc=0
-      else
-        verdict=send-failed
-      fi
+      case "$send_rc:$TARGET_HARNESS" in
+        4:omp) verdict='delivered-no-turn'; send_rc=0 ;;
+        5:omp) verdict='delivered-no-turn-persistence-failed'; send_rc=0 ;;
+        *) verdict=send-failed ;;
+      esac
     fi
   elif verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL" "$TARGET_HARNESS" "$TARGET_OMP_BUN" "$turnstart_setup"); then
     :
@@ -714,6 +719,8 @@ else
       # Submission is durable, so pending-reply bookkeeping below still records
       # delivery, but an answer cannot close its decision until a turn acts on it.
       ;;
+    delivered-no-turn-persistence-failed)
+      ;;
     send-failed)
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
@@ -744,11 +751,24 @@ else
       post_delivery_failed=1
     fi
   fi
-  if [ "$verdict" = delivered-no-turn ]; then
-    fm_send_record_delivered_no_turn
-    echo "error: delivered-no-turn: text was submitted to $T, but OMP did not start a turn within ${FM_SEND_TURNSTART_TIMEOUT_VALUE}s; do not resend; supervised recovery is required" >&2
-    exit 4
-  fi
+  case "$verdict" in
+    delivered-no-turn|delivered-no-turn-persistence-failed)
+      persistence_failed=0
+      [ "$verdict" = delivered-no-turn ] || persistence_failed=1
+      fm_send_record_delivered_no_turn || persistence_failed=1
+      if [ "$persistence_failed" -ne 0 ]; then
+        echo "error: delivered-no-turn-persistence-failed: text was already submitted to $T, but one or more required recovery triggers could not be persisted; do not resend; start supervised recovery manually" >&2
+        exit 5
+      fi
+      if [ -n "${FM_SEND_TURNSTART_TIMEOUT_VALUE:-}" ]; then
+        turnstart_window="within ${FM_SEND_TURNSTART_TIMEOUT_VALUE}s"
+      else
+        turnstart_window='within the remote bounded verification window'
+      fi
+      echo "error: delivered-no-turn: text was submitted to $T, but OMP did not start a turn $turnstart_window; do not resend; supervised recovery is required" >&2
+      exit 4
+      ;;
+  esac
   [ "$post_delivery_failed" -eq 0 ] || exit 1
   # The submit was confirmed or accepted through the narrow busy-OMP queue
   # verdict. The harness still needs a beat to spin up the

@@ -236,11 +236,11 @@ The deterministic tmux and Herdr fixtures reran on 2026-08-09 and proved that an
 This is revision-bound source-fixture evidence for the source under review, using Bun 1.3.14 only for terminal-cell measurement; it does not invoke OMP or make an OMP runtime-version claim.
 
 The deterministic fm-send turn-start fixture ran on 2026-08-19 and proved that an initially idle OMP submit must become busy or advance its generated turn-start marker after the submit-time baseline before success, while `delivered-no-turn` exits distinctly, queues supervised recovery, and never kills the endpoint.
-The same fixture proved the monotonic deadline, submit-time idle setup, Herdr post-submit check, confirmed busy and blocked compatibility, OMP exit compatibility, normal turn start, already-busy `queued-unconfirmed` exception, remote OMP routing, and unchanged non-OMP behavior.
-The tested source is Git revision `03ac735497b205719bb282c5a8eb4ea2e17dbcb7` plus binary patch SHA-256 `5f4b879db24e0b29e51ca2d5e978d6b5e945a3d71f2ada09ed09436ef74fd79d` over this exact file manifest and construction command:
+The same fixture proved required recovery-trigger persistence, distinct post-delivery persistence failure, the monotonic deadline, submit-time idle setup, Herdr post-submit check, confirmed busy and blocked compatibility, OMP exit compatibility, normal turn start, already-busy `queued-unconfirmed` exception, remote OMP routing, and unchanged non-OMP behavior.
+The tested source is Git revision `001f2203ee8c1064789560d872c3e5353d31fb9e` plus binary patch SHA-256 `4bff3a6b2865604cb0ebc6634b3b90433d6ebd932edcf248daaa7c0a4c667de7` over this exact file manifest and construction command:
 
 ```sh
-git diff --binary 03ac735497b205719bb282c5a8eb4ea2e17dbcb7 -- bin/backends/herdr.sh bin/backends/tmux.sh bin/fm-backend.sh bin/fm-send.sh bin/fm-tmux-lib.sh tests/fm-send-turn-start.test.sh | sha256sum
+git diff --binary 001f2203ee8c1064789560d872c3e5353d31fb9e -- bin/fm-send.sh tests/fm-send-turn-start.test.sh tests/fm-send-resolve-key.test.sh | sha256sum
 ```
 
 This evidence uses stubbed backend state and process identity only, does not invoke a live OMP runtime, and makes no live OMP claim.
@@ -253,6 +253,8 @@ Observed output:
 
 ```text
 ok - fm-send: confirmed OMP delivery without a turn returns delivered-no-turn and wakes supervised recovery
+ok - fm-send: marker persistence failure is distinct and never resends
+ok - fm-send: wake persistence failure is distinct and never resends
 ok - fm-send: a real OMP turn start preserves normal success
 ok - fm-send: delivered-no-turn never closes an answered decision
 ok - fm-send: OMP session activity advancement proves a fast turn start
