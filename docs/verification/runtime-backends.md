@@ -237,7 +237,7 @@ This is revision-bound source-fixture evidence for the source under review, usin
 
 The deterministic fm-send turn-start fixture ran on 2026-08-19 and proved that an initially idle OMP submit must become busy or advance its generated turn-start marker after the submit-time baseline before success, while `delivered-no-turn` exits distinctly, queues supervised recovery, and never kills the endpoint.
 The same fixture proved the monotonic deadline, Herdr post-submit check, normal turn start, already-busy `queued-unconfirmed` exception, remote OMP routing, and unchanged non-OMP behavior.
-The tested source is Git revision `6c72c63e902b020b051aa825f99e8581d41601c4` plus source-bundle SHA-256 `4b651ac05194a231d87fdd8a9e85b09eedc9da34c3dc845ec521e244d51f1e1c` over the changed delivery implementation and fixture files.
+The tested source is the exact Git revision `3600a1347731776437b5261fb6d4bcc5f8f55586`.
 This evidence uses stubbed backend state and process identity only, does not invoke a live OMP runtime, and makes no live OMP claim.
 
 ```sh
