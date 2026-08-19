@@ -61,6 +61,8 @@ if (process.argv.includes("--hold")) {
     {selector: "test/model", thinking: ["low", "medium", "high", "xhigh"]},
     {selector: "test/finish", thinking: ["low", "medium", "high", "xhigh"]}
   ]}));
+} else if (process.env.FM_TEST_OMP_EXEC_LOG && process.argv[2] !== "--help") {
+  require("node:fs").writeFileSync(process.env.FM_TEST_OMP_EXEC_LOG, `${process.argv[1]}\n${process.env.FM_OMP_BUN}\n${process.env.FM_OMP_BIN}\n`);
 } else console.log(`OMP 17.2.11
 --model=provider/id
 --thinking=level
@@ -134,6 +136,9 @@ case "$cmd" in
     for ((i=0; i<${#args[@]}; i++)); do
       if [ "${args[$i]}" = -l ] && [ $((i + 1)) -lt ${#args[@]} ]; then
         printf '%s\n' "${args[$((i + 1))]}" > "$FM_TEST_LAUNCH_LOG"
+        if [ "${FM_TEST_EXECUTE_LAUNCH:-0}" = 1 ] && [ -n "${FM_TEST_LAUNCH_EXEC_LOG:-}" ]; then
+          bash -c "$(cat "$FM_TEST_LAUNCH_LOG")" > "$FM_TEST_LAUNCH_EXEC_LOG" 2>&1 || exit 1
+        fi
       fi
     done
     if [ "${args[${#args[@]}-1]:-}" = Enter ] && [ -s "$FM_TEST_LAUNCH_LOG" ] && [ "${FM_TEST_SKIP_ACK:-0}" != 1 ]; then
@@ -490,6 +495,26 @@ test_launch_and_exact_resume() {
   pass "OMP secondmate launch and recovery use the isolated adapter and an exact home-owned session pointer"
 }
 
+test_rendered_legacy_launch_executes() {
+  local out exec_log omp_log
+  setup_case launch-exec
+  exec_log="$CASE/launch-exec.log"
+  omp_log="$CASE/omp-exec.log"
+  out=$(run_spawn \
+    FM_TEST_EXECUTE_LAUNCH=1 \
+    FM_TEST_LAUNCH_EXEC_LOG="$exec_log" \
+    FM_TEST_OMP_EXEC_LOG="$omp_log" 2>&1) \
+    || fail "rendered legacy OMP launch failed during execution: $out"
+  [ -s "$omp_log" ] || fail "rendered legacy OMP launch did not execute the selected entrypoint"
+  [ "$(sed -n '1p' "$omp_log")" = "$TEST_OMP_BIN" ] \
+    || fail "rendered legacy OMP launch executed the wrong entrypoint"
+  [ "$(sed -n '2p' "$omp_log")" = "$TEST_OMP_BUN" ] \
+    || fail "rendered legacy OMP launch did not bind its selected Bun runtime"
+  [ "$(sed -n '3p' "$omp_log")" = "$TEST_OMP_BIN" ] \
+    || fail "rendered legacy OMP launch did not preserve the standalone identity binding"
+  pass "rendered legacy OMP launch executes directly with its bound runtime"
+}
+
 test_duplicate_recovery_states() {
   local out before after mode expected version invalid_lock
 
@@ -598,5 +623,6 @@ test_stale_omp_runtime_cleanup() {
 test_stale_omp_runtime_cleanup
 test_herdr_launch_exact_resume_recovery_and_abort
 test_launch_and_exact_resume
+test_rendered_legacy_launch_executes
 test_duplicate_recovery_states
 test_post_meta_abort_preserves_home

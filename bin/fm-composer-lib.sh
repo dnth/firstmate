@@ -58,12 +58,25 @@
 # Missing, relative, non-executable, or malformed support returns nonzero so
 # callers classify the candidate as unknown.
 fm_composer_terminal_width() {  # <row> [canonical-runtime] [canonical-omp]
-  local bun=${2:-${FM_OMP_BUN:-}} omp=${3:-${FM_OMP_BIN:-}} out
+  local bun=${2:-${FM_OMP_BUN:-}} omp=${3:-${FM_OMP_BIN:-}} out width_locale width_locales
   case "$bun" in /*) ;; *) return 1 ;; esac
   [ -x "$bun" ] || return 1
   if [ -n "$omp" ] && [ "$bun" = "$omp" ]; then
-    [ "$(LC_ALL=C.UTF-8 locale charmap 2>/dev/null)" = UTF-8 ] || return 1
-    out=$(LC_ALL=C.UTF-8 printf '%s\n' "$1" | LC_ALL=C.UTF-8 wc -L 2>/dev/null | tr -d '[:space:]') || return 1
+    width_locales=$(
+      printf '%s\n' "${LC_ALL:-}" "${LC_CTYPE:-}" "${LANG:-}" \
+        C.UTF-8 C.utf8 en_US.UTF-8 en_US.utf8
+      locale -a 2>/dev/null || true
+    )
+    while IFS= read -r width_locale; do
+      [ -n "$width_locale" ] || continue
+      case "$(LC_ALL="$width_locale" locale charmap 2>/dev/null)" in
+        UTF-8|UTF8)
+          out=$(LC_ALL="$width_locale" printf '%s\n' "$1" | LC_ALL="$width_locale" wc -L 2>/dev/null | tr -d '[:space:]') || return 1
+          break
+          ;;
+      esac
+    done <<< "$width_locales"
+    [ -n "$out" ] || return 1
   else
     out=$("$bun" -e 'try { const width = Bun.stringWidth(process.argv[1]); if (!Number.isSafeInteger(width) || width < 0) process.exit(1); process.stdout.write(String(width)); } catch { process.exit(1); }' "$1" 2>/dev/null) || return 1
   fi

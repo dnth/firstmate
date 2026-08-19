@@ -311,7 +311,7 @@ test_omp_composer_and_submission_use_verified_two_row_structure() {
 }
 
 test_standalone_omp_composer_uses_shell_width_boundary() {
-  local dir fakebin composer standalone called top width vfile bun legacy_width
+  local dir fakebin composer standalone called top width vfile bun legacy_width locale_name
   dir="$TMP_ROOT/omp-standalone-composer"
   fakebin=$(make_submit_mock "$dir")
   composer="$dir/composer"
@@ -329,10 +329,14 @@ SH
     legacy_width=$(LC_ALL=C fm_composer_terminal_width "$top" "$bun") \
       || fail "legacy Bun width boundary could not measure the structural row"
   fi
-  width=$(fm_composer_terminal_width "$top" "$standalone" "$standalone") \
+  for locale_name in C POSIX; do
+    width=$(LC_ALL="$locale_name" fm_composer_terminal_width "$top" "$standalone" "$standalone") \
+      || fail "standalone OMP width boundary could not measure the structural row under $locale_name"
+    [ -z "${legacy_width:-}" ] || [ "$width" = "$legacy_width" ] \
+      || fail "standalone width boundary disagreed with Bun under $locale_name: $width vs $legacy_width"
+  done
+  width=$(LC_ALL=C fm_composer_terminal_width "$top" "$standalone" "$standalone") \
     || fail "standalone OMP width boundary could not measure the structural row"
-  [ -z "${legacy_width:-}" ] || [ "$width" = "$legacy_width" ] \
-    || fail "standalone width boundary disagreed with Bun under a C locale: $width vs $legacy_width"
   {
     printf '%s\n' "$top"
     printf '╰─%-*s─╯\n' "$((width - 4))" ' '
