@@ -311,7 +311,7 @@ test_omp_composer_and_submission_use_verified_two_row_structure() {
 }
 
 test_standalone_omp_composer_uses_shell_width_boundary() {
-  local dir fakebin composer standalone called top width vfile bun legacy_width locale_name
+  local dir fakebin composer standalone called top width vfile bun legacy_width locale_name real_wc
   dir="$TMP_ROOT/omp-standalone-composer"
   fakebin=$(make_submit_mock "$dir")
   composer="$dir/composer"
@@ -324,19 +324,26 @@ test_standalone_omp_composer_uses_shell_width_boundary() {
 exit 1
 SH
   chmod +x "$standalone"
+  real_wc=$(command -v wc)
+  cat > "$fakebin/wc" <<SH
+#!/usr/bin/env bash
+[ "\${1:-}" != -L ] || exit 64
+exec '$real_wc' "\$@"
+SH
+  chmod +x "$fakebin/wc"
   top='╭── ⬢ GPT-5.6-Sol++ · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
   if bun=$(command -v bun 2>/dev/null); then
     legacy_width=$(LC_ALL=C fm_composer_terminal_width "$top" "$bun") \
       || fail "legacy Bun width boundary could not measure the structural row"
   fi
   for locale_name in C POSIX; do
-    width=$(LC_ALL="$locale_name" fm_composer_terminal_width "$top" "$standalone" "$standalone") \
-      || fail "standalone OMP width boundary could not measure the structural row under $locale_name"
+    width=$(PATH="$fakebin:$PATH" LC_ALL="$locale_name" fm_composer_terminal_width "$top" "$standalone" "$standalone") \
+      || fail "standalone OMP width boundary could not measure the structural row without GNU wc -L under $locale_name"
     [ -z "${legacy_width:-}" ] || [ "$width" = "$legacy_width" ] \
       || fail "standalone width boundary disagreed with Bun under $locale_name: $width vs $legacy_width"
   done
-  width=$(LC_ALL=C fm_composer_terminal_width "$top" "$standalone" "$standalone") \
-    || fail "standalone OMP width boundary could not measure the structural row"
+  width=$(PATH="$fakebin:$PATH" LC_ALL=C fm_composer_terminal_width "$top" "$standalone" "$standalone") \
+    || fail "standalone OMP width boundary could not measure the structural row without GNU wc -L"
   {
     printf '%s\n' "$top"
     printf '╰─%-*s─╯\n' "$((width - 4))" ' '

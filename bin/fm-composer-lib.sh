@@ -53,15 +53,18 @@
 
 # fm_composer_terminal_width: print the exact terminal-cell width of one OMP
 # structural row through the task-bound runtime and entrypoint identities.
-# Legacy Bun-script OMP uses Bun.stringWidth; standalone OMP uses the system
-# display-width boundary because its executable reserves -e for extensions.
+# Legacy Bun-script OMP uses Bun.stringWidth. Standalone OMP finds the smallest
+# POSIX fold width that keeps the row intact under an installed UTF-8 locale;
+# unlike GNU-only `wc -L`, this boundary is also available on macOS.
 # Missing, relative, non-executable, or malformed support returns nonzero so
 # callers classify the candidate as unknown.
 fm_composer_terminal_width() {  # <row> [canonical-runtime] [canonical-omp]
   local bun=${2:-${FM_OMP_BUN:-}} omp=${3:-${FM_OMP_BIN:-}} out width_locale width_locales
+  local width_low width_high width_mid folded_lines
   case "$bun" in /*) ;; *) return 1 ;; esac
   [ -x "$bun" ] || return 1
   if [ -n "$omp" ] && [ "$bun" = "$omp" ]; then
+    case "$1" in *$'\n'*|*$'\r'*) return 1 ;; esac
     width_locales=$(
       printf '%s\n' "${LC_ALL:-}" "${LC_CTYPE:-}" "${LANG:-}" \
         C.UTF-8 C.utf8 en_US.UTF-8 en_US.utf8
@@ -70,13 +73,31 @@ fm_composer_terminal_width() {  # <row> [canonical-runtime] [canonical-omp]
     while IFS= read -r width_locale; do
       [ -n "$width_locale" ] || continue
       case "$(LC_ALL="$width_locale" locale charmap 2>/dev/null)" in
-        UTF-8|UTF8)
-          out=$(LC_ALL="$width_locale" printf '%s\n' "$1" | LC_ALL="$width_locale" wc -L 2>/dev/null | tr -d '[:space:]') || return 1
-          break
-          ;;
+        UTF-8|UTF8) break ;;
+        *) width_locale= ;;
       esac
     done <<< "$width_locales"
-    [ -n "$out" ] || return 1
+    [ -n "$width_locale" ] || return 1
+    width_high=$(LC_ALL=C printf '%s' "$1" | wc -c | tr -d '[:space:]') || return 1
+    case "$width_high" in ''|*[!0-9]*) return 1 ;; esac
+    if [ "$width_high" -eq 0 ]; then
+      out=0
+    else
+      width_low=1
+      while [ "$width_low" -lt "$width_high" ]; do
+        width_mid=$(((width_low + width_high) / 2))
+        folded_lines=$(LC_ALL="$width_locale" printf '%s\n' "$1" \
+          | LC_ALL="$width_locale" fold -w "$width_mid" 2>/dev/null \
+          | LC_ALL=C wc -l | tr -d '[:space:]') || return 1
+        case "$folded_lines" in ''|*[!0-9]*) return 1 ;; esac
+        if [ "$folded_lines" -le 1 ]; then
+          width_high=$width_mid
+        else
+          width_low=$((width_mid + 1))
+        fi
+      done
+      out=$width_low
+    fi
   else
     out=$("$bun" -e 'try { const width = Bun.stringWidth(process.argv[1]); if (!Number.isSafeInteger(width) || width < 0) process.exit(1); process.stdout.write(String(width)); } catch { process.exit(1); }' "$1" 2>/dev/null) || return 1
   fi
