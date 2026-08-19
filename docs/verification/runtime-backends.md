@@ -252,6 +252,9 @@ ok - fm-send: delivered-no-turn never closes an answered decision
 ok - fm-send: OMP session activity advancement proves a fast turn start
 ok - fm-send: the already-busy OMP queued-Enter exception is unchanged
 ok - fm-send: turn-start verification remains scoped to OMP targets
+ok - fm-send: the final turn-start poll is bounded by the configured timeout
+ok - fm-send: OMP keys ignore text-only turn-start configuration
+ok - fm-send: remote control verifies through task-bound OMP route metadata
 ```
 
 ```sh

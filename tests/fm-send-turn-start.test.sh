@@ -85,6 +85,7 @@ printf 'n%s\n' "$FM_TEST_BUN"
 SH
   cat > "$fb/sleep" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_TEST_SLEEP_LOG:-}" ] || printf '%s\n' "${1:-0}" >> "$FM_TEST_SLEEP_LOG"
 exit 0
 SH
   chmod +x "$fb/tmux" "$fb/ps" "$fb/lsof" "$fb/sleep"
@@ -124,7 +125,9 @@ run_case() {  # <mode> <home> <fakebin> <bun> <omp> <log> <entered> [fm-send arg
     FM_TEST_SEND_LOG="$log" FM_TEST_ENTERED="$entered" \
     FM_TEST_TURNSTART_MARKER="$home/state/turn-test.omp-started" \
     FM_SEND_RETRIES=1 FM_SEND_SLEEP=0 FM_SEND_SETTLE=0 \
-    FM_SEND_TURNSTART_TIMEOUT=0.1 FM_SEND_TURNSTART_POLL=0.02 \
+    FM_SEND_TURNSTART_TIMEOUT="${FM_SEND_TURNSTART_TIMEOUT:-0.1}" \
+    FM_SEND_TURNSTART_POLL="${FM_SEND_TURNSTART_POLL:-0.02}" \
+    FM_TEST_SLEEP_LOG="${FM_TEST_SLEEP_LOG:-}" \
     "$SEND" turn-test "$@"
 }
 
@@ -207,9 +210,82 @@ test_non_omp_does_not_gain_turn_start_verification() {
   pass "fm-send: turn-start verification remains scoped to OMP targets"
 }
 
+test_timeout_bounds_final_poll_interval() {
+  local home fb bun omp log entered rc sleep_log total
+  IFS=$'\t' read -r home fb bun omp log entered < <(setup_case bounded-timeout omp)
+  sleep_log="$home/sleep.log"
+  FM_TEST_SLEEP_LOG="$sleep_log" FM_SEND_TURNSTART_POLL=0.099 \
+    run_case wedge "$home" "$fb" "$bun" "$omp" "$log" "$entered" >/dev/null 2>&1
+  rc=$?
+  expect_code 4 "$rc" "a bounded no-turn poll should retain its distinct verdict"
+  total=$(awk '$1 > 0 && $1 <= 0.1 { sum += $1 } END { printf "%.6f", sum }' "$sleep_log")
+  awk -v total="$total" 'BEGIN { exit !(total >= 0.099999 && total <= 0.100001) }' \
+    || fail "turn-start polling slept $total seconds for a 0.1 second timeout"
+  pass "fm-send: the final turn-start poll is bounded by the configured timeout"
+}
+
+test_omp_key_ignores_turnstart_configuration() {
+  local home fb bun omp log entered rc
+  IFS=$'\t' read -r home fb bun omp log entered < <(setup_case key-config omp)
+  FM_SEND_TURNSTART_TIMEOUT=invalid \
+    run_case wedge "$home" "$fb" "$bun" "$omp" "$log" "$entered" --key Enter >/dev/null 2>&1
+  rc=$?
+  expect_code 0 "$rc" "an OMP key should not validate text-only turn-start configuration"
+  [ "$(grep -c 'key=Enter' "$log")" -eq 1 ] \
+    || fail "the OMP key path did not transport exactly one Enter"
+  pass "fm-send: OMP keys ignore text-only turn-start configuration"
+}
+
+test_remote_control_uses_task_bound_omp_route() {
+  local dir root home rc
+  dir="$TMP_ROOT/remote-control-route"
+  root="$dir/root"
+  home="$dir/home"
+  mkdir -p "$root/bin" "$home/bin" "$home/state/parent-route" "$home/data/.parent-route"
+  cp "$ROOT/bin/fm-remote-secondmate-control.sh" "$root/bin/"
+  cat > "$root/bin/fm-backend.sh" <<'SH'
+fm_backend_validate_task_endpoint() {
+  FM_BACKEND_VALIDATED_BACKEND=herdr
+  FM_BACKEND_VALIDATED_TARGET='fm-remote:w1:p1'
+}
+fm_backend_meta_exact_value() {
+  sed -n "s/^$2=//p" "$1"
+}
+fm_meta_get() {
+  sed -n "s/^$2=//p" "$1" | tail -1
+}
+SH
+  : > "$root/bin/fm-pending-reply-lib.sh"
+  : > "$root/bin/fm-quota-axi-lib.sh"
+  cat > "$root/bin/fm-send.sh" <<'SH'
+#!/usr/bin/env bash
+[ "$1" = 'fm-remote:w1:p1' ] || exit 81
+[ "$FM_STATE_OVERRIDE" = "$FM_HOME/state/parent-route" ] || exit 82
+[ "$FM_DATA_OVERRIDE" = "$FM_HOME/data/.parent-route" ] || exit 83
+[ "$(sed -n 's/^harness=//p' "$FM_STATE_OVERRIDE/remote-turn.meta")" = omp ] || exit 84
+exit 4
+SH
+  chmod +x "$root/bin/fm-remote-secondmate-control.sh" "$root/bin/fm-send.sh"
+  : > "$home/AGENTS.md"
+  printf 'remote-turn\n' > "$home/.fm-secondmate-home"
+  fm_write_meta "$home/state/parent-route/remote-turn.meta" \
+    'window=fm-remote:w1:p1' 'endpoint_task_id=remote-turn' 'backend=herdr' \
+    'worktree=/remote/worktree' 'project=/remote/project' 'harness=omp' \
+    'herdr_session=fm-remote' 'herdr_workspace_id=w1' 'herdr_tab_id=w1:t1' \
+    'herdr_pane_id=w1:p1'
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    "$root/bin/fm-remote-secondmate-control.sh" send remote-turn 'remote steer' >/dev/null 2>&1
+  rc=$?
+  expect_code 4 "$rc" "remote control should preserve the host-local OMP no-turn verdict"
+  pass "fm-send: remote control verifies through task-bound OMP route metadata"
+}
+
 test_confirmed_submit_without_turn_is_distinct_and_wakes_recovery
 test_turn_start_keeps_normal_success
 test_no_turn_does_not_close_answered_decision
 test_turn_activity_advance_keeps_fast_success
 test_busy_queued_enter_remains_success
 test_non_omp_does_not_gain_turn_start_verification
+test_timeout_bounds_final_poll_interval
+test_omp_key_ignores_turnstart_configuration
+test_remote_control_uses_task_bound_omp_route

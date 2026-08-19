@@ -206,9 +206,6 @@ fm_send_validate_turnstart_config() {
     echo "error: FM_SEND_TURNSTART_TIMEOUT must be 0.1..3 seconds and FM_SEND_TURNSTART_POLL must be 0.02..timeout" >&2
     return 1
   fi
-  FM_SEND_TURNSTART_POLLS=$(awk -v timeout="$FM_SEND_TURNSTART_TIMEOUT_VALUE" \
-    -v poll="$FM_SEND_TURNSTART_POLL_VALUE" \
-    'BEGIN { n = int(timeout / poll); if (n * poll < timeout) n++; print n + 1 }')
 }
 
 fm_send_omp_is_busy() {
@@ -227,21 +224,24 @@ fm_send_omp_is_busy() {
 }
 
 fm_send_wait_for_omp_turn_start() {
-  local i=0
-  [ "$TARGET_OMP_WAS_BUSY" -eq 0 ] || return 0
+  local elapsed=0 interval
   # Herdr's exact `empty` submit verdict already means its native agent-state
   # reader observed a submit-active state after Enter. A remote control call
   # runs this same verifier beside the endpoint and propagates its exact result.
   case "$TARGET_BACKEND" in herdr|remote) return 0 ;; esac
-  while [ "$i" -lt "$FM_SEND_TURNSTART_POLLS" ]; do
+  while :; do
     fm_send_omp_is_busy && return 0
     if [ -n "$TARGET_OMP_TURNSTART_REFERENCE" ] \
       && [ "$TARGET_OMP_TURNSTART_MARKER" -nt "$TARGET_OMP_TURNSTART_REFERENCE" ]; then
       return 0
     fi
-    i=$((i + 1))
-    [ "$i" -lt "$FM_SEND_TURNSTART_POLLS" ] || break
-    sleep "$FM_SEND_TURNSTART_POLL_VALUE"
+    interval=$(awk -v elapsed="$elapsed" -v timeout="$FM_SEND_TURNSTART_TIMEOUT_VALUE" \
+      -v poll="$FM_SEND_TURNSTART_POLL_VALUE" \
+      'BEGIN { remaining = timeout - elapsed; if (remaining <= 0) exit 1; if (poll < remaining) remaining = poll; printf "%.6f", remaining }') \
+      || break
+    sleep "$interval"
+    elapsed=$(awk -v elapsed="$elapsed" -v interval="$interval" \
+      'BEGIN { printf "%.6f", elapsed + interval }')
   done
   return 1
 }
@@ -443,7 +443,6 @@ if [ "$TARGET_BACKEND" = remote ] && fm_runpod_is_dormant "$DATA" "$TARGET_REMOT
 fi
 
 TARGET_OMP_BUN=
-TARGET_OMP_WAS_BUSY=0
 if [ "$TARGET_HARNESS" = omp ]; then
   if [ "$TARGET_BACKEND" != remote ]; then
     if [ -z "$TARGET_META" ] \
@@ -457,10 +456,6 @@ if [ "$TARGET_HARNESS" = omp ]; then
       exit 1
     fi
     TARGET_OMP_BUN=$FM_BACKEND_AGENT_OMP_BUN
-  fi
-  fm_send_validate_turnstart_config || exit 1
-  if fm_send_omp_is_busy; then
-    TARGET_OMP_WAS_BUSY=1
   fi
 fi
 
@@ -479,7 +474,8 @@ if [ -n "$TARGET_META" ]; then
     MARK_FROM_FIRSTMATE=1
   fi
 fi
-if [ "$TARGET_HARNESS" = omp ]; then
+if [ "$TARGET_HARNESS" = omp ] && [ "${1:-}" != "--key" ]; then
+  fm_send_validate_turnstart_config || exit 1
   fm_send_prepare_omp_turnstart_reference || exit 1
 fi
 # Validate the answerer-closes request before any durable mutation or send: the
