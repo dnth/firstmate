@@ -4,6 +4,9 @@
 # Success is silent unless --print-binary prints the resolved executable path.
 # Capability checks, rather than a semantic-version floor, own compatibility.
 set -u
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=bin/fm-omp-process-lib.sh
+. "$SCRIPT_DIR/fm-omp-process-lib.sh"
 
 PRINT_BINARY=0
 REQUIRE_MAX_TIME=0
@@ -40,15 +43,14 @@ if [ ! -x "$binary" ]; then
   exit 1
 fi
 
-entrypoint=$(readlink -f "$binary" 2>/dev/null || printf '%s' "$binary")
-IFS= read -r shebang < "$entrypoint" || shebang=
-case "$shebang" in
-  '#!/usr/bin/env bun'|'#!/usr/bin/env -S bun'|'#!'*/bun) ;;
-  *)
-    echo "error: omp entrypoint is not Bun-backed: $entrypoint; exact OMP process ownership requires a '#!/usr/bin/env bun' entrypoint" >&2
-    exit 1
-    ;;
-esac
+entrypoint=$(fm_omp_process_resolve_path "$binary") || {
+  echo "error: omp executable path cannot be canonicalized: $binary" >&2
+  exit 1
+}
+if ! fm_omp_process_launch_identity "$entrypoint" >/dev/null; then
+  echo "error: omp entrypoint is neither a Bun script nor a standalone executable with a verifiable launch identity: $entrypoint" >&2
+  exit 1
+fi
 
 if help=$("$binary" --help 2>&1); then
   :

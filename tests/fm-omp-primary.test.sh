@@ -131,6 +131,32 @@ test_exact_bun_omp_primary_identity() {
   pass "OMP primary identity requires launch-bound Bun and OMP realpaths plus the exact argv boundary"
 }
 
+test_standalone_omp_primary_identity() {
+  local fakebin got
+  fakebin=$(make_process_fakebin "$TMP_ROOT/standalone-process")
+  export FM_OMP_PROCESS_EXPECTED_BUN="$fakebin/omp"
+  export FM_OMP_PROCESS_EXPECTED_BIN="$fakebin/omp"
+
+  got=$(PATH="$fakebin:$BASE_PATH" FM_TEST_OMP_COMM=omp FM_TEST_EXPECTED_BUN="$fakebin/omp" \
+    bash -c '. "$0/bin/fm-session-lock-lib.sh"; fm_harness_ancestry_pid' "$ROOT")
+  [ "$got" = 700 ] || fail "standalone OMP ancestry resolved '$got', expected 700"
+  PATH="$fakebin:$BASE_PATH" FM_TEST_OMP_COMM=omp FM_TEST_EXPECTED_BUN="$fakebin/omp" \
+    bash -c '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 700' "$ROOT" \
+    || fail "standalone OMP lock owner was rejected"
+
+  if PATH="$fakebin:$BASE_PATH" FM_TEST_OMP_COMM=omp FM_TEST_EXPECTED_BUN="$fakebin/xomp" \
+    bash -c '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 700' "$ROOT"; then
+    fail "standalone OMP accepted a PID running a different executable"
+  fi
+  if PATH="$fakebin:$BASE_PATH" FM_TEST_OMP_COMM=omp FM_TEST_EXPECTED_BUN="$fakebin/omp" \
+    bash -c '. "$0/bin/fm-omp-process-lib.sh"; fm_omp_process_matches omp "omp --model test"' "$ROOT"; then
+    fail "standalone OMP identity was accepted without a PID"
+  fi
+
+  unset FM_OMP_PROCESS_EXPECTED_BUN FM_OMP_PROCESS_EXPECTED_BIN
+  pass "standalone OMP identity requires the launch-bound PID executable"
+}
+
 test_nested_foreign_harness_keeps_its_own_identity() {
   local fakebin got
   fakebin=$(make_process_fakebin "$TMP_ROOT/nested")
@@ -263,6 +289,35 @@ JS
   expect_code 0 "$status" "fresh native OMP startup"
   assert_contains "$out" fresh-native-nudge-once "fresh native OMP did not deliver exactly one startup instruction"
   pass "native OMP alone admits a fresh plain checkout and delivers one startup instruction"
+}
+
+test_native_identity_handles_virtual_entrypoint() {
+  local out status=0
+  out=$(CORE="$ROOT/bin/fm-primary-watch-core.ts" node --input-type=module 2>&1 <<'JS'
+import { realpathSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const { ompNativeProcessIdentity } = await import(`${pathToFileURL(process.env.CORE).href}?identity=${Date.now()}`);
+const original = process.argv[1];
+try {
+  process.argv[1] = process.env.CORE;
+  const legacy = ompNativeProcessIdentity();
+  if (legacy.bunPath !== realpathSync(process.execPath) || legacy.ompPath !== realpathSync(process.env.CORE)) {
+    throw new Error(`physical OMP identity changed: ${JSON.stringify(legacy)}`);
+  }
+  process.argv[1] = "/$bunfs/root/packages/coding-agent/src/cli.js";
+  const standalone = ompNativeProcessIdentity();
+  if (standalone.bunPath !== realpathSync(process.execPath) || standalone.ompPath !== standalone.bunPath) {
+    throw new Error(`standalone OMP identity was not executable-bound: ${JSON.stringify(standalone)}`);
+  }
+  console.log("native-identity-shapes-ok");
+} finally {
+  process.argv[1] = original;
+}
+JS
+  ) || status=$?
+  expect_code 0 "$status" "OMP native process identity shapes"
+  assert_contains "$out" native-identity-shapes-ok "OMP identity did not support both physical and virtual entrypoints"
+  pass "OMP native identity supports physical Bun scripts and standalone executables"
 }
 
 test_primary_marker_refuses_whitespace_identity() {
@@ -640,8 +695,10 @@ JS
 
 test_resolve_path_uses_node_when_readlink_f_is_unavailable
 test_exact_bun_omp_primary_identity
+test_standalone_omp_primary_identity
 test_nested_foreign_harness_keeps_its_own_identity
 test_primary_scope_requires_canonical_state
+test_native_identity_handles_virtual_entrypoint
 test_native_omp_fresh_checkout_nudges_once
 test_primary_marker_refuses_whitespace_identity
 test_native_primary_extension_contract

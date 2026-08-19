@@ -892,8 +892,8 @@ test_omp_threads_exact_identity_model_and_every_thinking_level() {
     launch=$(cat "$LAUNCH_LOG")
     expected_bin=$(cd "$FAKEBIN_DIR" && pwd -P)/omp
     expected_bun=$(cd "$FAKEBIN_DIR" && pwd -P)/bun
-    assert_contains "$launch" "FM_OMP_HARNESS=omp '$expected_bun' '$expected_bin' --session-dir '/tmp/fm-$id/omp-sessions' --auto-approve --max-time=3h --model 'openai-codex/gpt-5.6-sol' --thinking '$effort' -e '$HOME_DIR/state/$id.omp-ext.ts'" \
-      "OMP launch did not execute the canonical Bun/OMP pair with unattended mode, model, thinking, and extension"
+    assert_contains "$launch" "FM_OMP_HARNESS=omp '$expected_bin' --session-dir '/tmp/fm-$id/omp-sessions' --auto-approve --max-time=3h --model 'openai-codex/gpt-5.6-sol' --thinking '$effort' -e '$HOME_DIR/state/$id.omp-ext.ts'" \
+      "OMP launch did not execute the canonical entrypoint with unattended mode, model, thinking, and extension"
     assert_grep "omp_bun=$expected_bun" "$HOME_DIR/state/$id.meta" \
       "OMP launch metadata did not bind the same Bun executable used by the literal pane command"
     assert_not_contains "$launch" "--prewalk" "ordinary OMP launch must not enable Prewalk without explicit opt-in"
@@ -904,7 +904,7 @@ test_omp_threads_exact_identity_model_and_every_thinking_level() {
     assert_present "$HOME_DIR/state/$id.omp-ext.ts" "OMP launch did not create the external turn extension"
     unset FM_TEST_OMP_ACK
   done
-  pass "OMP launches through its metadata-bound canonical Bun/OMP pair and forwards every supported thinking level"
+  pass "OMP invokes its canonical entrypoint directly and records its runtime identity"
 }
 
 test_omp_threads_configurable_max_time() {
@@ -1546,8 +1546,8 @@ test_omp_herdr_worker_and_scout_launch_with_exact_identity_and_ack() {
     assert_grep 'herdr_session=default' "$HOME_DIR/state/$id.meta" "OMP Herdr $kind metadata lost its named session"
     assert_grep 'herdr_pane_id=w1:p2' "$HOME_DIR/state/$id.meta" "OMP Herdr $kind metadata lost its exact pane"
     launch=$(cat "$LAUNCH_LOG")
-    assert_contains "$launch" "FM_OMP_HARNESS=omp '$(cd "$FAKEBIN_DIR" && pwd -P)/bun' '$(cd "$FAKEBIN_DIR" && pwd -P)/omp'" \
-      "OMP Herdr $kind launch omitted its canonical Bun/OMP execution boundary"
+    assert_contains "$launch" "FM_OMP_HARNESS=omp '$(cd "$FAKEBIN_DIR" && pwd -P)/omp'" \
+      "OMP Herdr $kind launch omitted its canonical executable"
     assert_contains "$launch" "--session-dir '/tmp/fm-$id/omp-sessions'" "OMP Herdr $kind launch omitted its nonempty isolated session directory"
     assert_contains "$launch" "-e '$HOME_DIR/state/$id.omp-ext.ts'" "OMP Herdr $kind launch omitted its acknowledgement extension"
     unset FM_TEST_OMP_ACK

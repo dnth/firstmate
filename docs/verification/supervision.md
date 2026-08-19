@@ -115,6 +115,23 @@ ok - OMP omp/17.2.10 primary E2E proved watcher delivery with an intact editable
 
 The live guard observed the watcher wake in the OMP session and found the exact draft unchanged after delivery.
 
+OMP 17.3.8 standalone-executable compatibility was verified on 2026-08-20.
+
+```sh
+omp --version
+bin/fm-omp-capabilities.sh --require-max-time --print-binary
+env NO_MISTAKES_GATE=1 omp -p --no-tools --no-session --no-extensions -e .omp/extensions/fm-primary-omp.ts --model openai-codex/gpt-5.6-sol 'Reply exactly OMP_COMPILED_EXTENSION_OK'
+```
+
+```text
+omp/17.3.8
+/home/pranay/.bun/bin/omp
+OMP_COMPILED_EXTENSION_OK
+```
+
+The installed OMP was a Bun-compiled executable whose embedded `argv[1]` was not a filesystem object.
+The capability probe accepted its public CLI surface, and OMP loaded the tracked primary extension without trying to resolve the virtual entrypoint.
+
 Current deterministic and live entry points:
 
 ```sh

@@ -358,8 +358,8 @@ test_herdr_launch_exact_resume_recovery_and_abort() {
   setup_case herdr-launch
 
   out=$(run_spawn_herdr 2>&1) || fail "fresh OMP Herdr secondmate spawn failed: $out"
-  assert_contains "$(cat "$LAUNCH_LOG")" "'$TEST_OMP_BUN' '$TEST_OMP_BIN' --session-dir '$HOME_DIR/state/omp-sessions'" \
-    "OMP Herdr secondmate launch did not use its canonical Bun/OMP pair and isolated session directory"
+  assert_contains "$(cat "$LAUNCH_LOG")" "'$TEST_OMP_BIN' --session-dir '$HOME_DIR/state/omp-sessions'" \
+    "OMP Herdr secondmate launch did not invoke its canonical executable with the isolated session directory"
   assert_contains "$(cat "$MAIN_STATE/$TASK_ID.meta")" 'harness=omp' "OMP Herdr secondmate identity was not exact"
   assert_contains "$(cat "$MAIN_STATE/$TASK_ID.meta")" 'backend=herdr' "OMP Herdr secondmate backend was not recorded"
   assert_contains "$(cat "$MAIN_STATE/$TASK_ID.meta")" 'herdr_pane_id=w1:p2' "OMP Herdr secondmate exact pane was not recorded"
@@ -441,8 +441,8 @@ test_launch_and_exact_resume() {
 
   out=$(run_spawn -- --prewalk-into 'test/finish:xhigh' 2>&1) || fail "fresh OMP secondmate spawn failed: $out"
   assert_contains "$(cat "$LAUNCH_LOG")" "FM_OMP_SESSION_POINTER='$HOME_DIR/state/.omp-session'" "OMP launch did not bind the home-owned session pointer"
-  assert_contains "$(cat "$LAUNCH_LOG")" "'$TEST_OMP_BUN' '$TEST_OMP_BIN'" \
-    "OMP launch did not use the capability-checked canonical Bun/OMP pair"
+  assert_contains "$(cat "$LAUNCH_LOG")" "'$TEST_OMP_BIN'" \
+    "OMP launch did not invoke the capability-checked canonical executable"
   assert_contains "$(cat "$LAUNCH_LOG")" "--session-dir '$HOME_DIR/state/omp-sessions' --auto-approve --max-time=3h --model 'test/model' --thinking 'low'" "OMP launch did not preserve exact pins and durable session directory"
   assert_contains "$(cat "$LAUNCH_LOG")" "-e '$HOME_DIR/.omp/extensions/fm-primary-omp.ts'" "OMP launch did not preserve its exact adapter"
   assert_not_contains "$(cat "$LAUNCH_LOG")" '__OMP' "OMP launch retained an unsubstituted template placeholder"

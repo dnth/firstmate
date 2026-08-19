@@ -1127,8 +1127,8 @@ assert_grep 'harness=omp' "$PARENT/state/remote-omp.meta" \
 assert_grep 'harness=omp' "$OMP_REMOTE_HOME/state/parent-route/remote-omp.meta" \
   "remote endpoint metadata did not preserve its OMP harness"
 OMP_REMOTE_LAUNCH=$(grep -F 'FM_OMP_SESSION_POINTER=' "$HERDR_LOG" | tail -1 || true)
-assert_contains "$OMP_REMOTE_LAUNCH" "'$REMOTE_OMP_BUN' '$REMOTE_OMP_BIN'" \
-  "remote OMP pane did not receive the capability-checked Bun and OMP pair"
+assert_contains "$OMP_REMOTE_LAUNCH" "'$REMOTE_OMP_BIN'" \
+  "remote OMP pane did not receive the capability-checked executable"
 assert_contains "$OMP_REMOTE_LAUNCH" "--session-dir '$OMP_REMOTE_HOME/state/omp-sessions'" \
   "remote OMP pane did not receive its home-owned durable session directory"
 pass "remote OMP primary, fallback, result metadata, pane launch, and existing safety refusals hold end to end"

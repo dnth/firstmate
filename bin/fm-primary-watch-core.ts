@@ -78,10 +78,17 @@ export type PrimaryWatchCore = {
 
 // Single producer of the OMP native process identity pair. Both the loaded
 // marker and FM_OMP_PROCESS_EXPECTED_{BUN,BIN} come from here so the two can
-// never drift apart.
+// never drift apart. Bun-script OMP exposes a physical entrypoint through
+// argv[1]. A standalone Bun-compiled OMP instead exposes a virtual source path,
+// so process.execPath is both its runtime and OMP executable identity.
 export function ompNativeProcessIdentity(): { bunPath: string; ompPath: string } {
   const bunPath = realpathSync(process.execPath);
-  const ompPath = realpathSync(process.argv[1]);
+  let ompPath = bunPath;
+  try {
+    ompPath = realpathSync(process.argv[1]);
+  } catch {
+    // A compiled OMP has no physical argv[1]; its executable owns both roles.
+  }
   if (/\s/u.test(bunPath) || /\s/u.test(ompPath)) {
     throw new Error("OMP primary identity paths containing whitespace are unsupported");
   }

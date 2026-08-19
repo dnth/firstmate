@@ -45,6 +45,14 @@ SH
   chmod +x "$dir/bun"
 }
 
+write_fake_standalone_omp() {
+  local path=$1 omitted=${2:-}
+  write_fake_omp "$path" "$omitted"
+  sed '1d' "$path" > "$path.tmp"
+  mv "$path.tmp" "$path"
+  chmod +x "$path"
+}
+
 # Fake process tree for the launch-boundary marker walk: pid 700 is the spawned
 # OMP worker (bun executing an absolute omp entrypoint), pid 500 is a foreign
 # harness nested inside it, and every other pid is a plain tool process whose
@@ -128,6 +136,18 @@ test_capability_probe_accepts_required_surface() {
   pass "OMP capability probe accepts the required launch and recovery surface"
 }
 
+test_capability_probe_accepts_standalone_executable() {
+  local fakebin out status
+  fakebin="$TMP_ROOT/capabilities-standalone"
+  mkdir -p "$fakebin"
+  write_fake_standalone_omp "$fakebin/omp"
+  out=$(PATH="$fakebin:/usr/bin:/bin" "$CAPABILITIES" --print-binary 2>&1)
+  status=$?
+  expect_code 0 "$status" "standalone OMP capability surface should pass"
+  [ "$out" = "$fakebin/omp" ] || fail "standalone capability probe lost the selected OMP executable: $out"
+  pass "OMP capability probe accepts a standalone executable"
+}
+
 test_capability_probe_rejects_non_bun_entrypoint() {
   local fakebin out status
   fakebin="$TMP_ROOT/non-bun"
@@ -136,9 +156,9 @@ test_capability_probe_rejects_non_bun_entrypoint() {
   sed -i.bak '1s|.*|#!/usr/bin/env bash|' "$fakebin/omp"
   out=$(PATH="$fakebin:/usr/bin:/bin" "$CAPABILITIES" --print-binary 2>&1)
   status=$?
-  expect_code 1 "$status" "non-Bun OMP entrypoint should refuse exact ownership"
-  assert_contains "$out" "entrypoint is not Bun-backed" "non-Bun OMP refusal did not explain the ownership boundary"
-  pass "OMP capability probe enforces the Bun process identity used by session ownership"
+  expect_code 1 "$status" "interpreter-backed non-Bun OMP entrypoint should refuse exact ownership"
+  assert_contains "$out" "neither a Bun script nor a standalone executable" "non-Bun script refusal did not explain the ownership boundary"
+  pass "OMP capability probe rejects unsupported interpreter-backed process identity"
 }
 
 test_capability_probe_reports_every_missing_requirement() {
@@ -194,6 +214,7 @@ test_capability_probe_never_falls_back_when_omp_is_missing() {
 
 test_launch_boundary_marker_preserves_exact_omp_identity
 test_capability_probe_accepts_required_surface
+test_capability_probe_accepts_standalone_executable
 test_capability_probe_rejects_non_bun_entrypoint
 test_capability_probe_reports_every_missing_requirement
 test_capability_probe_scopes_exact_max_time_to_bounded_launches

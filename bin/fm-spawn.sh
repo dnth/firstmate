@@ -1147,9 +1147,9 @@ launch_template() {
       if [ "$kind" = secondmate ]; then
         # The explicit path is the exact same tracked file native project discovery sees.
         # OMP 17.1.8's discoverExtensionPaths path-resolves and deduplicates before loading, so this guarantees the integration without registering it twice.
-        printf '%s' '__OMPBUN__ __OMPBIN__ --session-dir __OMPSESSIONDIR__ __OMPRESUMEFLAG__--auto-approve __OMPMAXTIME____MODELFLAG____EFFORTFLAG____PREWALKFLAG__-e __OMPPRIMARY__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' '__OMPBIN__ --session-dir __OMPSESSIONDIR__ __OMPRESUMEFLAG__--auto-approve __OMPMAXTIME____MODELFLAG____EFFORTFLAG____PREWALKFLAG__-e __OMPPRIMARY__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' '__OMPBUN__ __OMPBIN__ --session-dir __OMPSESSIONDIR__ --auto-approve __OMPMAXTIME____MODELFLAG____EFFORTFLAG____PREWALKFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' '__OMPBIN__ --session-dir __OMPSESSIONDIR__ --auto-approve __OMPMAXTIME____MODELFLAG____EFFORTFLAG____PREWALKFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
@@ -1488,13 +1488,14 @@ if [ "$HARNESS" = omp ]; then
     echo "error: selected OMP executable cannot be canonicalized: $OMP_BIN" >&2
     exit 1
   }
-  OMP_BUN_CANON=$(fm_omp_process_resolve_path bun) || {
-    echo "error: selected OMP runtime cannot bind its Bun executable" >&2
+  OMP_LAUNCH_IDENTITY=$(fm_omp_process_launch_identity "$OMP_BIN_CANON") || {
+    echo "error: selected OMP executable has no verifiable launch identity: $OMP_BIN_CANON" >&2
     exit 1
   }
-  if ! fm_omp_process_identity_path_valid "$OMP_BIN_CANON" \
-     || ! fm_omp_process_identity_path_valid "$OMP_BUN_CANON"; then
-    echo "error: selected OMP and Bun identities must be canonical executable paths without whitespace" >&2
+  OMP_BUN_CANON=$(printf '%s\n' "$OMP_LAUNCH_IDENTITY" | sed -n '1p')
+  OMP_LAUNCH_ENTRYPOINT=$(printf '%s\n' "$OMP_LAUNCH_IDENTITY" | sed -n '2p')
+  if [ "$OMP_LAUNCH_ENTRYPOINT" != "$OMP_BIN_CANON" ]; then
+    echo "error: selected OMP launch identity does not preserve its canonical entrypoint" >&2
     exit 1
   fi
   if [ -n "$PREWALK_INTO" ]; then
@@ -3289,7 +3290,6 @@ LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__OMPEXT__/$sq_ompext}
 LAUNCH=${LAUNCH//__OMPPRIMARY__/$sq_ompprimary}
-LAUNCH=${LAUNCH//__OMPBUN__/$(shell_quote "$OMP_BUN_CANON")}
 LAUNCH=${LAUNCH//__OMPBIN__/$(shell_quote "$OMP_BIN_CANON")}
 LAUNCH=${LAUNCH//__OMPSESSIONDIR__/$(shell_quote "$OMP_SESSION_DIR")}
 LAUNCH=${LAUNCH//__OMPRESUMEFLAG__/$OMPRESUMEFLAG}

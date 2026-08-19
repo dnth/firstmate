@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Usage: source bin/fm-omp-process-lib.sh; fm_omp_process_matches <comm-or-path> <args> [pid]
-# Exact OMP process identity shared by primary ancestry and backend liveness probes.
-# Bun may publish comm=omp as its process title, but argv must still begin with the
-# launch-bound Bun executable and OMP entrypoint after canonical resolution.
-# Callers supply those paths from task metadata; primary probes may use the loaded
-# marker written by the running OMP extension and bound to the exact PID. A fresh
-# PATH lookup is never identity evidence. When Linux exposes /proc/<pid>/exe, that
-# executable must be the launch-bound Bun too. This file has no source side effects.
+# Usage: source bin/fm-omp-process-lib.sh
+# Exact OMP launch and process identity shared by capability checks, primary
+# ancestry, and backend liveness probes.
+# OMP may run as Bun executing a physical script or as one standalone
+# executable. Callers bind canonical launch paths from task metadata or the
+# PID-bound primary marker; a fresh PATH lookup is never identity evidence.
+# For standalone OMP, both paths are equal and the PID executable is decisive.
+# This file has no source side effects.
 
 fm_omp_process_resolve_path() {  # <path-or-command>
   local value=$1 resolved
@@ -37,6 +37,25 @@ fm_omp_process_identity_path_valid() {  # <canonical-executable-path>
   case "$value" in *[[:space:]]*) return 1 ;; esac
   [ -x "$value" ] || return 1
   [ "$(fm_omp_process_resolve_path "$value" 2>/dev/null)" = "$value" ]
+}
+
+fm_omp_process_launch_identity() {  # <canonical-omp-path> -> <runtime-path> newline <omp-path>
+  local omp=$1 magic shebang runtime
+  fm_omp_process_identity_path_valid "$omp" || return 1
+  magic=$(LC_ALL=C dd if="$omp" bs=2 count=1 2>/dev/null) || return 1
+  if [ "$magic" = '#!' ]; then
+    IFS= read -r shebang < "$omp" || return 1
+    case "$shebang" in
+      '#!/usr/bin/env bun'|'#!/usr/bin/env -S bun'|'#!'*/bun)
+        runtime=$(fm_omp_process_resolve_path bun) || return 1
+        fm_omp_process_identity_path_valid "$runtime" || return 1
+        ;;
+      *) return 1 ;;
+    esac
+  else
+    runtime=$omp
+  fi
+  printf '%s\n%s\n' "$runtime" "$omp"
 }
 
 fm_omp_primary_marker_read() {  # <marker>; sets FM_OMP_MARKER_{VERSION,PID,BUN,BIN}
@@ -103,10 +122,6 @@ fm_omp_process_matches() {  # <comm-or-path> <args> [pid]
   local actual_bun actual_omp process_exe
   comm=$(basename -- "$comm")
   case "$comm" in bun|omp) ;; *) return 1 ;; esac
-  read -r first second rest <<EOF
-$args
-EOF
-  [ -n "${first:-}" ] && [ -n "${second:-}" ] || return 1
   if { [ -z "$expected_bun" ] || [ -z "$expected_omp" ]; } && [ -n "$pid" ]; then
     marker_identity=$(fm_omp_process_primary_identity "$pid") || return 1
     expected_bun=$(printf '%s\n' "$marker_identity" | sed -n '1p')
@@ -117,6 +132,16 @@ EOF
   expected_omp=$(fm_omp_process_resolve_path "$expected_omp") || return 1
   fm_omp_process_identity_path_valid "$expected_bun" \
     && fm_omp_process_identity_path_valid "$expected_omp" || return 1
+  if [ "$expected_bun" = "$expected_omp" ]; then
+    [ -n "$pid" ] || return 1
+    process_exe=$(fm_omp_process_executable "$pid") || return 1
+    [ "$process_exe" = "$expected_omp" ]
+    return
+  fi
+  read -r first second rest <<EOF
+$args
+EOF
+  [ -n "${first:-}" ] && [ -n "${second:-}" ] || return 1
   case "$second" in /*) ;; *) return 1 ;; esac
   actual_omp=$(fm_omp_process_resolve_path "$second") || return 1
   [ "$actual_omp" = "$expected_omp" ] || return 1
