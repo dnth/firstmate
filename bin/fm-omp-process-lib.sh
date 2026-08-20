@@ -41,7 +41,7 @@ fm_omp_process_identity_path_valid() {  # <canonical-executable-path>
 }
 
 fm_omp_process_launch_identity() {  # <canonical-omp-path> -> runtime, OMP, and shebang lookup paths
-  local omp=$1 magic shebang runtime runtime_lookup= runtime_path=
+  local omp=$1 magic shebang runtime runtime_lookup='' runtime_path=''
   fm_omp_process_identity_path_valid "$omp" || return 1
   magic=$(LC_ALL=C dd if="$omp" bs=2 count=1 2>/dev/null) || return 1
   if [ "$magic" = '#!' ]; then
