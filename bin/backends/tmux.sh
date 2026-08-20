@@ -222,6 +222,10 @@ fm_backend_tmux_agent_state() {  # <target> [bun-realpath] [omp-realpath]
     return 0
   }
   comm=${comm#-}
+  if [ -n "$expected_bun" ] && [ "$expected_bun" = "$expected_omp" ]; then
+    fm_backend_tmux_bun_agent_state "$target" "$comm" "$expected_bun" "$expected_omp"
+    return 0
+  fi
   case "$comm" in
     *claude*|*codex*|*opencode*|*grok*|*kimi*|pi|pi-signed|pi-launcher|Pi) printf 'alive' ;;
     bun|omp|cli.js) fm_backend_tmux_bun_agent_state "$target" "$comm" "$expected_bun" "$expected_omp" ;;

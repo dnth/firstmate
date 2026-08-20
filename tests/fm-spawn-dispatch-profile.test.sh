@@ -1632,7 +1632,7 @@ test_omp_whitespace_identity_paths_refuse_before_endpoint() {
     out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$path" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
     status=$?
     expect_code 1 "$status" "OMP should refuse a whitespace-bearing $mode identity"
-    assert_contains "$out" 'neither a Bun script nor a standalone executable' \
+    assert_contains "$out" 'neither a Bun script nor a standalone native executable' \
       "OMP whitespace-bearing $mode refusal was not actionable"
     [ ! -s "$CASE_DIR/endpoint.log" ] || fail "OMP whitespace-bearing $mode identity created an endpoint"
     [ ! -s "$LAUNCH_LOG" ] || fail "OMP whitespace-bearing $mode identity typed a launch command"

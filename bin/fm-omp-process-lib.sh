@@ -41,7 +41,7 @@ fm_omp_process_identity_path_valid() {  # <canonical-executable-path>
 }
 
 fm_omp_process_launch_identity() {  # <canonical-omp-path> -> runtime, OMP, and shebang lookup paths
-  local omp=$1 magic shebang runtime runtime_lookup='' runtime_path=''
+  local omp=$1 magic native_magic shebang runtime runtime_lookup='' runtime_path=''
   fm_omp_process_identity_path_valid "$omp" || return 1
   magic=$(LC_ALL=C dd if="$omp" bs=2 count=1 2>/dev/null) || return 1
   if [ "$magic" = '#!' ]; then
@@ -64,6 +64,11 @@ fm_omp_process_launch_identity() {  # <canonical-omp-path> -> runtime, OMP, and 
       *) return 1 ;;
     esac
   else
+    native_magic=$(LC_ALL=C od -An -tx1 -N4 "$omp" 2>/dev/null | tr -d '[:space:]') || return 1
+    case "$native_magic" in
+      7f454c46|feedface|cefaedfe|feedfacf|cffaedfe|cafebabe|bebafeca|cafebabf|bfbafeca) ;;
+      *) return 1 ;;
+    esac
     runtime=$omp
   fi
   printf '%s\n%s\n%s\n' "$runtime" "$omp" "$runtime_lookup"
@@ -133,7 +138,6 @@ fm_omp_process_matches() {  # <comm-or-path> <args> [pid]
   local expected_bun=${FM_OMP_PROCESS_EXPECTED_BUN:-} expected_omp=${FM_OMP_PROCESS_EXPECTED_BIN:-}
   local actual_bun actual_omp process_exe
   comm=$(basename -- "$comm")
-  case "$comm" in bun|omp|cli.js) ;; *) return 1 ;; esac
   if { [ -z "$expected_bun" ] || [ -z "$expected_omp" ]; } && [ -n "$pid" ]; then
     marker_identity=$(fm_omp_process_primary_identity "$pid") || return 1
     expected_bun=$(printf '%s\n' "$marker_identity" | sed -n '1p')
@@ -150,6 +154,7 @@ fm_omp_process_matches() {  # <comm-or-path> <args> [pid]
     [ "$process_exe" = "$expected_omp" ]
     return
   fi
+  case "$comm" in bun|omp|cli.js) ;; *) return 1 ;; esac
   read -r first second rest <<EOF
 $args
 EOF
@@ -163,7 +168,8 @@ EOF
       [ "$actual_bun" = "$expected_bun" ] || return 1
       ;;
     *)
-      [ -n "$pid" ] && [ "$first" = "$(basename "$expected_bun")" ] || return 1
+      [ -n "$pid" ] || return 1
+      [ "$first" = bun ] || [ "$first" = "$(basename "$expected_bun")" ] || return 1
       ;;
   esac
   if [ -n "$pid" ]; then

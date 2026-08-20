@@ -549,12 +549,9 @@ SH
       FM_TEST_LAUNCH_EXEC_LOG="$exec_log" \
       FM_TEST_OMP_EXEC_LOG="$omp_log" \
       FM_TEST_HOSTILE_BUN_RAN="$hostile_ran" 2>&1); then
-      [ -s "$omp_log" ] || fail "safe OMP launch with $path_form PATH did not execute its selected entrypoint"
-      [ "$(sed -n '2p' "$omp_log")" = "$TEST_OMP_BUN" ] \
-        || fail "safe OMP launch with $path_form PATH used an unrecorded Bun runtime"
-    else
-      [ ! -e "$omp_log" ] || fail "unsafe OMP launch with $path_form PATH executed OMP before refusing"
+      fail "OMP launch accepted an inherited $path_form PATH with an empty component: $out"
     fi
+    [ ! -e "$omp_log" ] || fail "unsafe OMP launch with $path_form PATH executed OMP before refusing"
     [ -e "$exec_log" ] || fail "PATH safety case with $path_form PATH did not execute the rendered launch"
     [ ! -e "$hostile_ran" ] || fail "unsafe OMP launch with $path_form PATH executed hostile ./bun"
   done

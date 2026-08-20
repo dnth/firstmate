@@ -309,6 +309,16 @@ try {
   if (standalone.bunPath !== realpathSync(process.execPath) || standalone.ompPath !== standalone.bunPath) {
     throw new Error(`standalone OMP identity was not executable-bound: ${JSON.stringify(standalone)}`);
   }
+  process.argv[1] = "/firstmate-missing-legacy-omp-entrypoint";
+  let missingRejected = false;
+  try {
+    ompNativeProcessIdentity();
+  } catch {
+    missingRejected = true;
+  }
+  if (!missingRejected) {
+    throw new Error("missing physical OMP entrypoint was downgraded to standalone identity");
+  }
   console.log("native-identity-shapes-ok");
 } finally {
   process.argv[1] = original;
@@ -317,7 +327,7 @@ JS
   ) || status=$?
   expect_code 0 "$status" "OMP native process identity shapes"
   assert_contains "$out" native-identity-shapes-ok "OMP identity did not support both physical and virtual entrypoints"
-  pass "OMP native identity supports physical Bun scripts and standalone executables"
+  pass "OMP native identity supports physical Bun scripts and known compiled virtual entrypoints"
 }
 
 test_primary_marker_refuses_whitespace_identity() {

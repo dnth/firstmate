@@ -45,7 +45,7 @@ SH
   chmod +x "$dir/bun"
 }
 
-write_fake_standalone_omp() {
+write_fake_no_shebang_omp() {
   local path=$1 omitted=${2:-}
   write_fake_omp "$path" "$omitted"
   sed '1d' "$path" > "$path.tmp"
@@ -188,6 +188,28 @@ test_launch_identity_honors_explicit_bun_shebang() {
   pass "explicit Bun shebangs bind their declared interpreter"
 }
 
+test_env_shebang_bare_argv_matches_canonical_runtime() {
+  local dir runtime omp
+  dir="$TMP_ROOT/env-bun-argv"
+  runtime=$(fm_test_realpath "$(command -v bash)")
+  omp="$dir/omp"
+  mkdir -p "$dir"
+  printf '#!/usr/bin/env bun\nexit 0\n' > "$omp"
+  chmod +x "$omp"
+  omp=$(fm_test_realpath "$omp")
+  if ! FM_OMP_PROCESS_EXPECTED_BUN="$runtime" FM_OMP_PROCESS_EXPECTED_BIN="$omp" \
+    bash -c '. "$1"; fm_omp_process_matches bun "bun $2" "$$"' \
+      _ "$ROOT/bin/fm-omp-process-lib.sh" "$omp"; then
+    fail "env-shebang bare bun argv did not retain its canonical runtime identity"
+  fi
+  if FM_OMP_PROCESS_EXPECTED_BUN="$runtime" FM_OMP_PROCESS_EXPECTED_BIN="$omp" \
+    bash -c '. "$1"; fm_omp_process_matches bun "node $2" "$$"' \
+      _ "$ROOT/bin/fm-omp-process-lib.sh" "$omp"; then
+    fail "foreign bare runtime argv was accepted as env-shebang Bun"
+  fi
+  pass "env-shebang bare bun argv retains exact PID-bound canonical runtime identity"
+}
+
 test_capability_probe_accepts_required_surface() {
   local fakebin out status
   fakebin="$TMP_ROOT/capabilities-ok"
@@ -204,16 +226,37 @@ test_capability_probe_accepts_required_surface() {
   pass "OMP capability probe accepts the required launch and recovery surface"
 }
 
-test_capability_probe_accepts_standalone_executable() {
+test_capability_probe_accepts_installed_standalone_executable() {
+  local lookup entry identity out status=0
+  lookup=$(command -v omp 2>/dev/null) || {
+    pass "standalone OMP capability probe skipped because omp is unavailable"
+    return
+  }
+  entry=$(fm_test_realpath "$lookup")
+  identity=$(bash -c '. "$1"; fm_omp_process_launch_identity "$2"' _ \
+    "$ROOT/bin/fm-omp-process-lib.sh" "$entry") || fail "installed OMP has no verifiable launch identity"
+  if [ "$(printf '%s\n' "$identity" | sed -n '1p')" != "$entry" ]; then
+    pass "standalone OMP capability probe skipped because installed omp is a Bun script"
+    return
+  fi
+  out=$("$CAPABILITIES" --print-binary 2>&1) || status=$?
+  expect_code 0 "$status" "installed standalone OMP capability surface should pass"
+  [ "$(fm_test_realpath "$out")" = "$entry" ] \
+    || fail "standalone capability probe lost the selected OMP executable: $out"
+  pass "OMP capability probe accepts an installed standalone native executable"
+}
+
+test_capability_probe_rejects_no_shebang_text_wrapper() {
   local fakebin out status
-  fakebin="$TMP_ROOT/capabilities-standalone"
+  fakebin="$TMP_ROOT/capabilities-no-shebang"
   mkdir -p "$fakebin"
-  write_fake_standalone_omp "$fakebin/omp"
+  write_fake_no_shebang_omp "$fakebin/omp"
   out=$(PATH="$fakebin:/usr/bin:/bin" "$CAPABILITIES" --print-binary 2>&1)
   status=$?
-  expect_code 0 "$status" "standalone OMP capability surface should pass"
-  [ "$out" = "$fakebin/omp" ] || fail "standalone capability probe lost the selected OMP executable: $out"
-  pass "OMP capability probe accepts a standalone executable"
+  expect_code 1 "$status" "no-shebang text wrapper should not pass as standalone OMP"
+  assert_contains "$out" "neither a Bun script nor a standalone native executable" \
+    "no-shebang wrapper refusal did not explain the native identity boundary"
+  pass "OMP capability probe rejects no-shebang text wrappers"
 }
 
 test_capability_probe_rejects_non_bun_entrypoint() {
@@ -225,7 +268,7 @@ test_capability_probe_rejects_non_bun_entrypoint() {
   out=$(PATH="$fakebin:/usr/bin:/bin" "$CAPABILITIES" --print-binary 2>&1)
   status=$?
   expect_code 1 "$status" "interpreter-backed non-Bun OMP entrypoint should refuse exact ownership"
-  assert_contains "$out" "neither a Bun script nor a standalone executable" "non-Bun script refusal did not explain the ownership boundary"
+  assert_contains "$out" "neither a Bun script nor a standalone native executable" "non-Bun script refusal did not explain the ownership boundary"
   pass "OMP capability probe rejects unsupported interpreter-backed process identity"
 }
 
@@ -283,8 +326,10 @@ test_capability_probe_never_falls_back_when_omp_is_missing() {
 test_launch_boundary_marker_preserves_exact_omp_identity
 test_standalone_worker_uses_bound_identity
 test_launch_identity_honors_explicit_bun_shebang
+test_env_shebang_bare_argv_matches_canonical_runtime
 test_capability_probe_accepts_required_surface
-test_capability_probe_accepts_standalone_executable
+test_capability_probe_accepts_installed_standalone_executable
+test_capability_probe_rejects_no_shebang_text_wrapper
 test_capability_probe_rejects_non_bun_entrypoint
 test_capability_probe_reports_every_missing_requirement
 test_capability_probe_scopes_exact_max_time_to_bounded_launches

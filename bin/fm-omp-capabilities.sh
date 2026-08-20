@@ -48,7 +48,7 @@ entrypoint=$(fm_omp_process_resolve_path "$binary") || {
   exit 1
 }
 if ! fm_omp_process_launch_identity "$entrypoint" >/dev/null; then
-  echo "error: omp entrypoint is neither a Bun script nor a standalone executable with a verifiable launch identity: $entrypoint" >&2
+  echo "error: omp entrypoint is neither a Bun script nor a standalone native executable with a verifiable launch identity: $entrypoint" >&2
   exit 1
 fi
 

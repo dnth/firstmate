@@ -51,12 +51,12 @@
 # below. Re-sourcing is a cheap idempotent redefinition, so this file needs no
 # include guard (matching bin/fm-tmux-lib.sh).
 
-# fm_composer_terminal_width: print the exact terminal-cell width of one OMP
+# fm_composer_terminal_width: print the terminal-cell width of one OMP
 # structural row through the task-bound runtime and entrypoint identities.
-# Legacy Bun-script OMP uses Bun.stringWidth. Standalone OMP uses Node's Unicode
-# grapheme and property tables plus the same full-width ranges; it never passes
-# OMP's `-e` extension flag as Bun evaluation or relies on locale-sensitive
-# `fold`/`wc` behavior.
+# Legacy Bun-script OMP uses Bun.stringWidth. Standalone OMP uses a Node
+# fallback behaviorally pinned by compiled OMP 17.3.8 / Bun 1.3.14 fixtures;
+# it never passes OMP's `-e` extension flag as Bun evaluation or relies on
+# locale-sensitive `fold`/`wc` behavior.
 # Missing, relative, non-executable, or malformed support returns nonzero so
 # callers classify the candidate as unknown.
 fm_composer_terminal_width() {  # <row> [canonical-runtime] [canonical-omp]
@@ -88,48 +88,87 @@ const isFullwidth = codePoint => codePoint >= 0x1100 && (
   (codePoint >= 0x20000 && codePoint <= 0x3fffd)
 );
 
-let width = 0;
 const isEmojiPresentation = /\p{Emoji_Presentation}/u;
 const isEmoji = /\p{Emoji}/u;
 const isEmojiModifier = /\p{Emoji_Modifier}/u;
+const isEmojiModifierBase = /\p{Emoji_Modifier_Base}/u;
 const isJoinedEmoji = /\p{Extended_Pictographic}[\p{Mark}\p{Emoji_Modifier}\ufe0e\ufe0f]*\u200d\p{Extended_Pictographic}/u;
 const isRegionalIndicator = /\p{Regional_Indicator}/u;
 const isRegionalIndicatorFlag = /^(?:\p{Regional_Indicator}){2}$/u;
+const isKeycapBase = /^[#*0-9]$/u;
+const isKeycapSequence = /^[#*0-9]\ufe0f?\u20e3$/u;
 const isMarkOrFormat = /[\p{Mark}\p{Cf}\ufe0e\ufe0f]/u;
+// Node's Unicode 17 property data exposes reserved emoji slots that the
+// OMP 17.3.8 / Bun 1.3.14 width table keeps narrow unless VS16 is present.
+const isBunNarrowEmojiOverride = codePoint =>
+  codePoint === 0x1f6d8 ||
+  (codePoint >= 0x1fa89 && codePoint <= 0x1fa8a) ||
+  (codePoint >= 0x1fa8e && codePoint <= 0x1fa8f) ||
+  codePoint === 0x1fabe ||
+  codePoint === 0x1fac6 ||
+  codePoint === 0x1fac8 ||
+  codePoint === 0x1facd ||
+  codePoint === 0x1fadc ||
+  codePoint === 0x1fadf ||
+  (codePoint >= 0x1fae9 && codePoint <= 0x1faea) ||
+  codePoint === 0x1faef;
 const isEmojiPresentationBase = character =>
   isEmojiPresentation.test(character) &&
+  !isBunNarrowEmojiOverride(character.codePointAt(0)) &&
   !isEmojiModifier.test(character) &&
   !isRegionalIndicator.test(character);
 const componentWidth = character => {
+  if (isBunNarrowEmojiOverride(character.codePointAt(0))) return 1;
   if (isEmojiModifier.test(character)) return 2;
   if (isRegionalIndicator.test(character)) return 1;
   if (isEmojiPresentation.test(character)) return 2;
   return isFullwidth(character.codePointAt(0)) ? 2 : 1;
 };
-for (const { segment } of new Intl.Segmenter("en", { granularity: "grapheme" }).segment(input)) {
-  const components = [...segment].filter(character => !isMarkOrFormat.test(character));
-  if (components.length === 0) continue;
-  const base = components[0];
-  const hasVS16 = /[\ufe0f]/u.test(segment);
-  const hasEmojiBase =
-    isEmojiPresentationBase(base) ||
-    (hasVS16 && isEmoji.test(base) && !isEmojiModifier.test(base));
-  const hasOnlyEmojiModifiers =
-    components.length > 1 &&
-    components.slice(1).every(character => isEmojiModifier.test(character));
-  if (
-    isRegionalIndicatorFlag.test(segment) ||
-    isJoinedEmoji.test(segment) ||
-    (hasEmojiBase && hasOnlyEmojiModifiers)
-  ) {
-    width += 2;
-  } else if (hasVS16 && isEmoji.test(base) && !isEmojiModifier.test(base)) {
-    width += 2;
-  } else {
-    width += components.reduce((total, character) => total + componentWidth(character), 0);
+const segmenter = new Intl.Segmenter("en", { granularity: "grapheme" });
+const stringWidth = value => {
+  let width = 0;
+  for (const { segment } of segmenter.segment(value)) {
+    const components = [...segment].filter(character => !isMarkOrFormat.test(character));
+    if (components.length === 0) continue;
+    const base = components[0];
+    const hasVS16 = /[\ufe0f]/u.test(segment);
+    const hasEmojiBase =
+      isEmojiPresentationBase(base) ||
+      isEmojiModifierBase.test(base) ||
+      (hasVS16 && isEmoji.test(base) && !isEmojiModifier.test(base) && !isKeycapBase.test(base));
+    const hasOnlyEmojiModifiers =
+      components.length > 1 &&
+      components.slice(1).every(character => isEmojiModifier.test(character));
+    const hasDanglingEmojiJoiner =
+      /\u200d$/u.test(segment) &&
+      isEmoji.test(base) &&
+      !isBunNarrowEmojiOverride(base.codePointAt(0));
+    if (
+      isRegionalIndicatorFlag.test(segment) ||
+      isKeycapSequence.test(segment) ||
+      isJoinedEmoji.test(segment) ||
+      hasDanglingEmojiJoiner ||
+      (hasEmojiBase && hasOnlyEmojiModifiers)
+    ) {
+      width += 2;
+    } else if (hasVS16 && isEmoji.test(base) && !isEmojiModifier.test(base) && !isKeycapBase.test(base)) {
+      width += 2;
+    } else {
+      width += components.reduce((total, character) => total + componentWidth(character), 0);
+    }
   }
-}
-process.stdout.write(String(width));
+  return width;
+};
+const compatibilityFixtures = [
+  ["0\ufe0f", 1],
+  ["1\u20e3", 2],
+  ["✍🏻", 2],
+  ["하", 3],
+  ["\u{1fae9}", 1],
+  ["👩‍👩‍👧‍👦", 2],
+];
+if (compatibilityFixtures.some(([value, expected]) => stringWidth(value) !== expected)) process.exit(1);
+process.stdout.write(String(stringWidth(input)));
 JS
     ) || return 1
   else

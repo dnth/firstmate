@@ -166,19 +166,20 @@ OMP 17.3.8 standalone-executable compatibility was verified on 2026-08-20.
 ```sh
 omp --version
 bin/fm-omp-capabilities.sh --require-max-time --print-binary
-env NO_MISTAKES_GATE=1 omp -p --no-tools --no-session --no-extensions -e .omp/extensions/fm-primary-omp.ts --model openai-codex/gpt-5.6-sol 'Reply exactly OMP_COMPILED_EXTENSION_OK'
+FM_OMP_PRIMARY_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh
 ```
 
 Observed relevant output:
 
 ```text
 omp/17.3.8
-OMP_COMPILED_EXTENSION_OK
+ok - OMP omp/17.3.8 primary E2E proved fresh no-state and ordinary native discovery, exact ownership, once-only startup, guarded watcher startup, /new continuity, shutdown, resume, and away-mode delivery
+ok - OMP omp/17.3.8 primary E2E proved watcher delivery with an intact editable draft
 ```
 
 The capability probe returned the canonical selected executable path, which is omitted here because it is host-local.
 The installed OMP was a Bun-compiled executable whose embedded `argv[1]` was not a filesystem object.
-OMP loaded the tracked primary extension without trying to resolve the virtual entrypoint.
+The live primary check loaded the tracked extension in an ordinary disposable Firstmate checkout, required the four-line marker to bind both runtime and entrypoint identities to the compiled executable, and then proved PID ownership, startup, watcher, restart, shutdown, resume, and away-delivery behavior.
 
 The native Prewalk launch surface was checked on 2026-08-11 against OMP 17.2.11 without starting a model call:
 

@@ -83,12 +83,13 @@ export type PrimaryWatchCore = {
 // so process.execPath is both its runtime and OMP executable identity.
 export function ompNativeProcessIdentity(): { bunPath: string; ompPath: string } {
   const bunPath = realpathSync(process.execPath);
-  let ompPath = bunPath;
-  try {
-    ompPath = realpathSync(process.argv[1]);
-  } catch {
-    // A compiled OMP has no physical argv[1]; its executable owns both roles.
+  const argvEntrypoint = process.argv[1];
+  if (!argvEntrypoint) {
+    throw new Error("OMP primary has no runtime entrypoint identity");
   }
+  const ompPath = argvEntrypoint.startsWith("/$bunfs/")
+    ? bunPath
+    : realpathSync(argvEntrypoint);
   if (/\s/u.test(bunPath) || /\s/u.test(ompPath)) {
     throw new Error("OMP primary identity paths containing whitespace are unsupported");
   }
