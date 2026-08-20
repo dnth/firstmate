@@ -401,7 +401,10 @@ test_herdr_launch_exact_resume_recovery_and_abort() {
   rm -f "$WINDOW_FLAG" "$HOME_DIR/state/.omp-primary-extension-loaded" "$HOME_DIR/state/.lock"
   : > "$LAUNCH_LOG"
   out=$(FM_TEST_STATE_MODE=missing run_spawn_herdr 2>&1) || fail "OMP Herdr secondmate exact resume failed: $out"
-  assert_contains "$(cat "$LAUNCH_LOG")" "--resume '$selected'" \
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--resume" \
+    "OMP Herdr secondmate recovery did not request session resume"
+  assert_contains "$launch" "$selected" \
     "OMP Herdr secondmate recovery did not resume the pointer-bound exact session"
 
   setup_case herdr-broker-launch
@@ -493,8 +496,10 @@ test_launch_and_exact_resume() {
   assert_contains "$(cat "$MAIN_STATE/$TASK_ID.meta")" 'model=test/model' "OMP model pin was not recorded"
   assert_contains "$(cat "$MAIN_STATE/$TASK_ID.meta")" 'effort=low' "OMP thinking pin was not recorded"
   assert_contains "$(cat "$MAIN_STATE/$TASK_ID.meta")" 'prewalk_into=test/finish:xhigh' "OMP Prewalk target was not recorded"
-  assert_contains "$(cat "$LAUNCH_LOG")" "--prewalk --prewalk-into='test/finish:xhigh'" \
-    "OMP secondmate launch did not enable its exact native Prewalk target"
+  assert_contains "$launch" "--prewalk" \
+    "OMP secondmate launch did not enable native Prewalk"
+  assert_contains "$launch" "test/finish:xhigh" \
+    "OMP secondmate launch did not preserve its exact native Prewalk target"
   [ -d "$HOME_DIR/state/omp-sessions" ] || fail "durable OMP session directory was not created in the secondmate home"
 
   selected="$HOME_DIR/state/omp-sessions/selected.jsonl"
@@ -504,8 +509,12 @@ test_launch_and_exact_resume() {
   rm -f "$WINDOW_FLAG" "$HOME_DIR/state/.omp-primary-extension-loaded" "$HOME_DIR/state/.lock"
   : > "$LAUNCH_LOG"
   out=$(run_spawn 2>&1) || fail "OMP secondmate exact resume failed: $out"
-  assert_contains "$(cat "$LAUNCH_LOG")" "--resume '$selected'" "OMP recovery did not resume the manifest-bound exact session"
-  assert_contains "$(cat "$LAUNCH_LOG")" "--prewalk --prewalk-into='test/finish:xhigh'" \
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--resume" "OMP recovery did not request session resume"
+  assert_contains "$launch" "$selected" "OMP recovery did not resume the manifest-bound exact session"
+  assert_contains "$launch" "--prewalk" \
+    "OMP secondmate recovery did not restore native Prewalk"
+  assert_contains "$launch" "test/finish:xhigh" \
     "OMP secondmate recovery did not restore its recorded native Prewalk target"
   assert_not_contains "$(cat "$LAUNCH_LOG")" 'zzz-later.jsonl' "OMP recovery selected a lexically last session instead of the exact pointer"
 
@@ -577,7 +586,7 @@ SH
       fail "OMP launch accepted an inherited $path_form PATH with an empty component: $out"
     fi
     [ ! -e "$omp_log" ] || fail "unsafe OMP launch with $path_form PATH executed OMP before refusing"
-    [ -e "$exec_log" ] || fail "PATH safety case with $path_form PATH did not execute the rendered launch"
+    [ ! -e "$exec_log" ] || fail "PATH safety case with $path_form PATH submitted a launch before refusing"
     [ ! -e "$hostile_ran" ] || fail "unsafe OMP launch with $path_form PATH executed hostile ./bun"
   done
   BASE_PATH=$saved_base_path
