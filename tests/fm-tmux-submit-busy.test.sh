@@ -311,7 +311,7 @@ test_omp_composer_and_submission_use_verified_two_row_structure() {
 }
 
 test_standalone_omp_composer_uses_shell_width_boundary() {
-  local dir fakebin composer standalone called top width vfile bun legacy_width locale_name real_wc
+  local dir fakebin composer standalone called top width vfile bun legacy_width locale_name utility
   dir="$TMP_ROOT/omp-standalone-composer"
   fakebin=$(make_submit_mock "$dir")
   composer="$dir/composer"
@@ -324,13 +324,13 @@ test_standalone_omp_composer_uses_shell_width_boundary() {
 exit 1
 SH
   chmod +x "$standalone"
-  real_wc=$(command -v wc)
-  cat > "$fakebin/wc" <<SH
+  for utility in fold wc; do
+    cat > "$fakebin/$utility" <<'SH'
 #!/usr/bin/env bash
-[ "\${1:-}" != -L ] || exit 64
-exec '$real_wc' "\$@"
+exit 64
 SH
-  chmod +x "$fakebin/wc"
+    chmod +x "$fakebin/$utility"
+  done
   top='╭── ⬢ GPT-5.6-Sol++ · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
   if bun=$(command -v bun 2>/dev/null); then
     legacy_width=$(LC_ALL=C fm_composer_terminal_width "$top" "$bun") \
@@ -338,12 +338,12 @@ SH
   fi
   for locale_name in C POSIX; do
     width=$(PATH="$fakebin:$PATH" LC_ALL="$locale_name" fm_composer_terminal_width "$top" "$standalone" "$standalone") \
-      || fail "standalone OMP width boundary could not measure the structural row without GNU wc -L under $locale_name"
+      || fail "standalone OMP width boundary could not measure the structural row without fold or wc under $locale_name"
     [ -z "${legacy_width:-}" ] || [ "$width" = "$legacy_width" ] \
       || fail "standalone width boundary disagreed with Bun under $locale_name: $width vs $legacy_width"
   done
   width=$(PATH="$fakebin:$PATH" LC_ALL=C fm_composer_terminal_width "$top" "$standalone" "$standalone") \
-    || fail "standalone OMP width boundary could not measure the structural row without GNU wc -L"
+    || fail "standalone OMP width boundary could not measure the structural row without fold or wc"
   {
     printf '%s\n' "$top"
     printf '╰─%-*s─╯\n' "$((width - 4))" ' '

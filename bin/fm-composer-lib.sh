@@ -53,51 +53,53 @@
 
 # fm_composer_terminal_width: print the exact terminal-cell width of one OMP
 # structural row through the task-bound runtime and entrypoint identities.
-# Legacy Bun-script OMP uses Bun.stringWidth. Standalone OMP finds the smallest
-# POSIX fold width that keeps the row intact under an installed UTF-8 locale;
-# unlike GNU-only `wc -L`, this boundary is also available on macOS.
+# Legacy Bun-script OMP uses Bun.stringWidth. Standalone OMP uses Node's Unicode
+# grapheme and property tables plus the same full-width ranges; it never passes
+# OMP's `-e` extension flag as Bun evaluation or relies on locale-sensitive
+# `fold`/`wc` behavior.
 # Missing, relative, non-executable, or malformed support returns nonzero so
 # callers classify the candidate as unknown.
 fm_composer_terminal_width() {  # <row> [canonical-runtime] [canonical-omp]
-  local bun=${2:-${FM_OMP_BUN:-}} omp=${3:-${FM_OMP_BIN:-}} out width_locale width_locales
-  local width_low width_high width_mid folded_lines
+  local bun=${2:-${FM_OMP_BUN:-}} omp=${3:-${FM_OMP_BIN:-}} out node_bin
   case "$bun" in /*) ;; *) return 1 ;; esac
   [ -x "$bun" ] || return 1
   if [ -n "$omp" ] && [ "$bun" = "$omp" ]; then
-    case "$1" in *$'\n'*|*$'\r'*) return 1 ;; esac
-    width_locales=$(
-      printf '%s\n' "${LC_ALL:-}" "${LC_CTYPE:-}" "${LANG:-}" \
-        C.UTF-8 C.utf8 en_US.UTF-8 en_US.utf8
-      locale -a 2>/dev/null || true
-    )
-    while IFS= read -r width_locale; do
-      [ -n "$width_locale" ] || continue
-      case "$(LC_ALL="$width_locale" locale charmap 2>/dev/null)" in
-        UTF-8|UTF8) break ;;
-        *) width_locale= ;;
-      esac
-    done <<< "$width_locales"
-    [ -n "$width_locale" ] || return 1
-    width_high=$(LC_ALL=C printf '%s' "$1" | wc -c | tr -d '[:space:]') || return 1
-    case "$width_high" in ''|*[!0-9]*) return 1 ;; esac
-    if [ "$width_high" -eq 0 ]; then
-      out=0
-    else
-      width_low=1
-      while [ "$width_low" -lt "$width_high" ]; do
-        width_mid=$(((width_low + width_high) / 2))
-        folded_lines=$(LC_ALL="$width_locale" printf '%s\n' "$1" \
-          | LC_ALL="$width_locale" fold -w "$width_mid" 2>/dev/null \
-          | LC_ALL=C wc -l | tr -d '[:space:]') || return 1
-        case "$folded_lines" in ''|*[!0-9]*) return 1 ;; esac
-        if [ "$folded_lines" -le 1 ]; then
-          width_high=$width_mid
-        else
-          width_low=$((width_mid + 1))
-        fi
-      done
-      out=$width_low
-    fi
+    node_bin=$(command -v node 2>/dev/null) || return 1
+    case "$node_bin" in /*) ;; *) return 1 ;; esac
+    [ -x "$node_bin" ] || return 1
+    out=$("$node_bin" - "$1" 2>/dev/null <<'JS'
+const input = process.argv[2];
+if (input === undefined || /[\u0000-\u001f\u007f-\u009f]/u.test(input)) process.exit(1);
+
+const isFullwidth = codePoint => codePoint >= 0x1100 && (
+  codePoint <= 0x115f ||
+  codePoint === 0x2329 ||
+  codePoint === 0x232a ||
+  (codePoint >= 0x2e80 && codePoint <= 0x303e) ||
+  (codePoint >= 0x3040 && codePoint <= 0xa4cf) ||
+  (codePoint >= 0xac00 && codePoint <= 0xd7a3) ||
+  (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+  (codePoint >= 0xfe10 && codePoint <= 0xfe19) ||
+  (codePoint >= 0xfe30 && codePoint <= 0xfe6f) ||
+  (codePoint >= 0xff00 && codePoint <= 0xff60) ||
+  (codePoint >= 0xffe0 && codePoint <= 0xffe6) ||
+  (codePoint >= 0x1b000 && codePoint <= 0x1b001) ||
+  (codePoint >= 0x1f200 && codePoint <= 0x1f251) ||
+  (codePoint >= 0x20000 && codePoint <= 0x3fffd)
+);
+
+let width = 0;
+for (const { segment } of new Intl.Segmenter("en", { granularity: "grapheme" }).segment(input)) {
+  if (/[\p{Emoji_Presentation}\p{Regional_Indicator}\ufe0f\u200d]/u.test(segment)) {
+    width += 2;
+    continue;
+  }
+  const base = [...segment].find(character => !/[\p{Mark}\u200d\ufe0e\ufe0f]/u.test(character));
+  if (base !== undefined) width += isFullwidth(base.codePointAt(0)) ? 2 : 1;
+}
+process.stdout.write(String(width));
+JS
+    ) || return 1
   else
     out=$("$bun" -e 'try { const width = Bun.stringWidth(process.argv[1]); if (!Number.isSafeInteger(width) || width < 0) process.exit(1); process.stdout.write(String(width)); } catch { process.exit(1); }' "$1" 2>/dev/null) || return 1
   fi
