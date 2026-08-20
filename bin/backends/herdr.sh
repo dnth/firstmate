@@ -2352,20 +2352,8 @@ fm_backend_herdr_current_path() {  # <target>
 # ATOMICALLY - mirrors tmux's `send-keys -t T text Enter`. Used for the fixed
 # spawn-time commands (treehouse get, the GOTMPDIR export). `pane run` types
 # the command and submits it in one call (verified).
-fm_backend_herdr_wait_for_idle_shell() {  # <session> <pane>
-  local session=$1 pane=$2 attempt=0 max_attempts=${FM_BACKEND_HERDR_SHELL_READY_POLLS:-200}
-  case "$max_attempts" in ''|*[!0-9]*|0) max_attempts=200 ;; esac
-  while [ "$attempt" -lt "$max_attempts" ]; do
-    fm_backend_herdr_pane_idle_shell_pid "$session" "$pane" >/dev/null && return 0
-    sleep 0.1
-    attempt=$((attempt + 1))
-  done
-  return 1
-}
-
 fm_backend_herdr_send_text_line() {  # <target> <text>
   fm_backend_herdr_target_ready "$1" || return 1
-  fm_backend_herdr_wait_for_idle_shell "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" || return 1
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
 }
 

@@ -3419,24 +3419,13 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
 fi
 sleep 0.3
 [ -z "$OMP_LAUNCH_PATH_GUARD" ] || LAUNCH="$OMP_LAUNCH_PATH_GUARD$LAUNCH"
-if [ "$BACKEND" = herdr ]; then
-  # Herdr's new pane shell can still be rendering its startup surface after
-  # the preceding pane run returns; pane run keeps the launch command intact
-  # and submits it only once that shell is ready.
-  spawn_send_text_line "$T" "$LAUNCH" || exit 1
-  if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
-    HERDR_PROJECTION_ABORT_CLEANUP=0
-    spawn_herdr_presentation_order_lock_release
-  fi
-else
-  spawn_send_literal "$T" "$LAUNCH"
-  sleep 0.3
-  if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
-    HERDR_PROJECTION_ABORT_CLEANUP=0
-    spawn_herdr_presentation_order_lock_release
-  fi
-  spawn_send_key "$T" Enter
+spawn_send_literal "$T" "$LAUNCH"
+sleep 0.3
+if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
+  HERDR_PROJECTION_ABORT_CLEANUP=0
+  spawn_herdr_presentation_order_lock_release
 fi
+spawn_send_key "$T" Enter
 if [ "$HARNESS" = omp ]; then
   OMP_ACK_INTERVAL=${FM_OMP_LAUNCH_ACK_INTERVAL:-0.5}
   OMP_ACKED=0
@@ -3496,14 +3485,7 @@ if [ "$HARNESS" = omp ]; then
       exit 1
     fi
   else
-    # Herdr can spend longer creating the native OMP surface before its first
-    # turn than the tmux path, so keep its default acknowledgement window
-    # bounded but long enough for real Herdr startup.
-    if [ "$BACKEND" = herdr ]; then
-      OMP_ACK_POLLS=${FM_OMP_LAUNCH_ACK_POLLS:-600}
-    else
-      OMP_ACK_POLLS=${FM_OMP_LAUNCH_ACK_POLLS:-60}
-    fi
+    OMP_ACK_POLLS=${FM_OMP_LAUNCH_ACK_POLLS:-60}
     for _ in $(seq 1 "$OMP_ACK_POLLS"); do
       if [ -f "$OMP_STARTED" ]; then
         OMP_ACKED=1
