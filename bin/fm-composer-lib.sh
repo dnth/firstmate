@@ -91,24 +91,42 @@ const isFullwidth = codePoint => codePoint >= 0x1100 && (
 let width = 0;
 const isEmojiPresentation = /\p{Emoji_Presentation}/u;
 const isEmoji = /\p{Emoji}/u;
+const isEmojiModifier = /\p{Emoji_Modifier}/u;
 const isJoinedEmoji = /\p{Extended_Pictographic}[\p{Mark}\p{Emoji_Modifier}\ufe0e\ufe0f]*\u200d\p{Extended_Pictographic}/u;
+const isRegionalIndicator = /\p{Regional_Indicator}/u;
 const isRegionalIndicatorFlag = /^(?:\p{Regional_Indicator}){2}$/u;
 const isMarkOrFormat = /[\p{Mark}\p{Cf}\ufe0e\ufe0f]/u;
+const isEmojiPresentationBase = character =>
+  isEmojiPresentation.test(character) &&
+  !isEmojiModifier.test(character) &&
+  !isRegionalIndicator.test(character);
+const componentWidth = character => {
+  if (isEmojiModifier.test(character)) return 2;
+  if (isRegionalIndicator.test(character)) return 1;
+  if (isEmojiPresentation.test(character)) return 2;
+  return isFullwidth(character.codePointAt(0)) ? 2 : 1;
+};
 for (const { segment } of new Intl.Segmenter("en", { granularity: "grapheme" }).segment(input)) {
-  const base = [...segment].find(character => !isMarkOrFormat.test(character));
-  if (base === undefined) continue;
-  const baseWidth = isEmojiPresentation.test(base) || isFullwidth(base.codePointAt(0)) ? 2 : 1;
-  if (/[\ufe0e]/u.test(segment)) {
-    width += baseWidth;
-  } else if (
+  const components = [...segment].filter(character => !isMarkOrFormat.test(character));
+  if (components.length === 0) continue;
+  const base = components[0];
+  const hasVS16 = /[\ufe0f]/u.test(segment);
+  const hasEmojiBase =
+    isEmojiPresentationBase(base) ||
+    (hasVS16 && isEmoji.test(base) && !isEmojiModifier.test(base));
+  const hasOnlyEmojiModifiers =
+    components.length > 1 &&
+    components.slice(1).every(character => isEmojiModifier.test(character));
+  if (
     isRegionalIndicatorFlag.test(segment) ||
-    isEmojiPresentation.test(segment) ||
-    (/[\ufe0f]/u.test(segment) && isEmoji.test(segment)) ||
-    isJoinedEmoji.test(segment)
+    isJoinedEmoji.test(segment) ||
+    (hasEmojiBase && hasOnlyEmojiModifiers)
   ) {
     width += 2;
+  } else if (hasVS16 && isEmoji.test(base) && !isEmojiModifier.test(base)) {
+    width += 2;
   } else {
-    width += baseWidth;
+    width += components.reduce((total, character) => total + componentWidth(character), 0);
   }
 }
 process.stdout.write(String(width));

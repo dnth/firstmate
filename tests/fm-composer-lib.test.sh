@@ -147,7 +147,7 @@ assert_standalone_width_matches_bun_base() {
 }
 
 test_standalone_width_matches_bun_for_unicode_graphemes() {
-  local bun
+  local bun case_spec label mode row base
   if ! bun=$(command -v bun 2>/dev/null); then
     pass "standalone width parity skipped because bun is unavailable"
     return
@@ -156,15 +156,27 @@ test_standalone_width_matches_bun_for_unicode_graphemes() {
     pass "standalone width parity skipped because node is unavailable"
     return
   fi
-  assert_standalone_width_matches_bun "$bun" "VS15 text presentation" $'❤︎'
-  assert_standalone_width_matches_bun "$bun" "VS16 emoji presentation" $'❤️'
-  assert_standalone_width_matches_bun "$bun" "combining mark" $'é'
-  assert_standalone_width_matches_bun "$bun" "bare ZWJ" $'‍'
-  assert_standalone_width_matches_bun "$bun" "regional-indicator flag" $'🇮🇳'
-  assert_standalone_width_matches_bun "$bun" "CJK" $'界'
-  assert_standalone_width_matches_bun "$bun" "genuine family ZWJ emoji" $'👩‍👩‍👧‍👦'
-  assert_standalone_width_matches_bun_base "$bun" "dangling ZWJ" $'❤‍' $'❤'
-  assert_standalone_width_matches_bun "$bun" "OMP status row" '╭── ⬢ GPT-5.6-Sol++ · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
+  local cases=(
+    $'VS15 text presentation\tbun\t❤︎'
+    $'VS16 emoji presentation\tbun\t❤️'
+    $'combining mark\tbun\té'
+    $'bare ZWJ\tbun\t‍'
+    $'lone regional indicator\tbun\t🇮'
+    $'regional-indicator flag\tbun\t🇮🇳'
+    $'valid emoji modifier\tbun\t👍🏻'
+    $'invalid ASCII modifier\tbun\ta🏻'
+    $'CJK\tbun\t界'
+    $'genuine family ZWJ emoji\tbun\t👩‍👩‍👧‍👦'
+    $'dangling ZWJ\tbase\t❤‍\t❤'
+    $'OMP status row\tbun\t╭── ⬢ GPT-5.6-Sol++ · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
+  )
+  for case_spec in "${cases[@]}"; do
+    IFS=$'\t' read -r label mode row base <<< "$case_spec"
+    case "$mode" in
+      bun) assert_standalone_width_matches_bun "$bun" "$label" "$row" ;;
+      base) assert_standalone_width_matches_bun_base "$bun" "$label" "$row" "$base" ;;
+    esac
+  done
   pass "standalone width matches Bun.stringWidth for Unicode graphemes and the OMP status row"
 }
 
