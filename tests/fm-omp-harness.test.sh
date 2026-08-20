@@ -125,13 +125,20 @@ SH
 }
 
 test_launch_boundary_marker_preserves_exact_omp_identity() {
-  local fakebin path out
+  local fakebin path out home
   fakebin=$(make_marker_fakebin "$TMP_ROOT/marker")
   path="$fakebin:$(dirname "$(command -v node)"):${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
 
   out=$(PATH="$path" env -u PI_CODING_AGENT -u CLAUDECODE -u GROK_AGENT \
     FM_OMP_HARNESS=omp "$ROOT/bin/fm-harness.sh")
   [ "$out" = omp ] || fail "exact OMP launch marker resolved '$out'"
+
+  home="$TMP_ROOT/marker-home"
+  mkdir -p "$home/state"
+  : > "$home/state/.omp-primary-extension-loaded"
+  out=$(PATH="$path" env -u PI_CODING_AGENT -u CLAUDECODE -u GROK_AGENT \
+    FM_HOME="$home" FM_OMP_HARNESS=omp "$ROOT/bin/fm-harness.sh")
+  [ "$out" = omp ] || fail "an unrelated primary marker suppressed worker launch-shape identity: $out"
 
   out=$(PATH="$path" env -u PI_CODING_AGENT -u GROK_AGENT CLAUDECODE=1 \
     FM_OMP_HARNESS=omp "$ROOT/bin/fm-harness.sh")

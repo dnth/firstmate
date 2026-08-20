@@ -124,7 +124,7 @@ detect_own() {
   # CLAUDECODE inheritance into a kimi child was observed; it was not observed.
   if [ "${FM_OMP_HARNESS:-}" = "omp" ]; then
     omp_ancestry_is_exact && { echo omp; return; }
-    if ! fm_omp_process_identity_available; then
+    if [ -z "${FM_OMP_BUN:-}" ] && [ -z "${FM_OMP_BIN:-}" ]; then
       omp_ancestry_matches launch-shape && { echo omp; return; }
     fi
   fi
