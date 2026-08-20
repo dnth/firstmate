@@ -12,6 +12,7 @@ Pick Herdr when you want native busy, idle, and blocked state and accept the exp
 Prerequisites:
 
 - Herdr protocol 14 or newer, installed from [herdr.dev](https://herdr.dev).
+- `pane process-info` must return the exact pane id, pane-owned shell pid, foreground process group, and foreground process list used by the launch-readiness proof; a build that omits this verified shape is refused before any spawn command is typed.
 - `jq` for JSON responses.
 - The universal harness and toolchain requirements in [`configuration.md`](configuration.md#toolchain).
 - `python3` only for optional protocol-16 presentation-space ordering and native event subscription.
@@ -52,6 +53,10 @@ Older injection shapes are unverified, so a claimed launcher pane without the in
 With presentation spaces disabled, a crewmate or scout is created in the exact workspace that identity currently resolves to, read live from Herdr rather than from the injected snapshot, so the worker always appears beside the agent that launched it.
 Duplicate labels elsewhere in the session are irrelevant, and the globally focused workspace is never the target.
 A `--secondmate` launch is the deliberate exception: it stands up that secondmate home's own workspace instead of joining the launcher's.
+
+Before submitting any one-line spawn command, the adapter takes up to 200 strict samples of the exact pane's lone idle foreground shell, sleeping 0.1 seconds between unsuccessful samples.
+The proof accepts the pane-owned shell or one recognized descendant shell whose exact process ancestry, foreground process group, childless state, and sleeping or idle state agree; this covers Treehouse's guarded nested worktree shell without weakening the pane-owned proof used for destructive cleanup.
+It then submits the complete command atomically with `pane run`; a pane that never becomes provably idle stops the launch without typing or silently omitting a required preparatory command.
 
 A claimed parent identity that cannot be resolved exactly stops the spawn before any worker endpoint exists, rather than falling back to a label search.
 That covers a missing or unusable socket identity, a closed or unreadable launcher pane, a pane and tab that disagree about their workspace, a workspace missing from the session, and a pane belonging to another named session or Herdr server.

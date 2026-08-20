@@ -2743,6 +2743,111 @@ test_current_path_reads_cwd() {
   pass "fm_backend_herdr_current_path: reads pane foreground_cwd (the live running process), not the frozen creation-time cwd"
 }
 
+test_send_text_line_waits_for_idle_shell_and_submits_atomically() {
+  local dir attempts calls out
+  dir="$TMP_ROOT/send-text-line-ready"; mkdir -p "$dir"
+  attempts="$dir/attempts"; calls="$dir/calls"; printf '0\n' > "$attempts"; : > "$calls"
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    attempts=$1 calls=$2
+    fm_backend_herdr_target_ready() { fm_backend_herdr_parse_target "$1"; }
+    fm_backend_herdr_pane_idle_shell_sample() {
+      local count
+      count=$(cat "$attempts")
+      count=$((count + 1))
+      printf "%s\n" "$count" > "$attempts"
+      [ "$count" -ge 3 ]
+    }
+    fm_backend_herdr_cli() {
+      local arg
+      for arg in "$@"; do printf "\037%s" "$arg" >> "$calls"; done
+      printf "\n" >> "$calls"
+    }
+    sleep() { :; }
+    FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=3 \
+      fm_backend_herdr_send_text_line fmtest:w1:p2 "printf ready"
+  ' "$ROOT" "$attempts" "$calls" 2>&1)
+  expect_code 0 $? "send_text_line should wait through transient shell startup"
+  [ "$(cat "$attempts")" = 3 ] || fail "send_text_line did not consume the bounded idle-shell proof budget"
+  assert_contains "$(cat "$calls")" $'\x1f''fmtest'$'\x1f''pane'$'\x1f''run'$'\x1f''w1:p2'$'\x1f''printf ready' \
+    "send_text_line did not submit the complete command in one pane run call"
+
+  printf '0\n' > "$attempts"; : > "$calls"
+  if out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    attempts=$1 calls=$2
+    fm_backend_herdr_target_ready() { fm_backend_herdr_parse_target "$1"; }
+    fm_backend_herdr_pane_idle_shell_sample() {
+      local count
+      count=$(cat "$attempts")
+      printf "%s\n" "$((count + 1))" > "$attempts"
+      return 1
+    }
+    fm_backend_herdr_cli() { printf "unexpected\n" >> "$calls"; }
+    sleep() { :; }
+    FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=2 \
+      fm_backend_herdr_send_text_line fmtest:w1:p2 "printf unsafe"
+  ' "$ROOT" "$attempts" "$calls" 2>&1); then
+    fail "send_text_line must refuse when the shell never becomes provably idle"
+  fi
+  [ "$(cat "$attempts")" = 2 ] || fail "send_text_line did not stop at its configured readiness budget"
+  [ ! -s "$calls" ] || fail "send_text_line submitted text without proving an idle shell"
+  pass "fm_backend_herdr_send_text_line: waits for strict idle-shell proof, submits atomically, and refuses on timeout"
+}
+
+test_foreground_shell_proof_accepts_only_exact_idle_descendants() {
+  local dir info ps_bin out shape
+  dir="$TMP_ROOT/foreground-shell-proof"; mkdir -p "$dir"
+  info="$dir/info.json"; ps_bin="$dir/ps"
+  printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":4343,"foreground_processes":[{"pid":4343,"name":"fish","argv0":"fish"}]}}}' > "$info"
+  cat > "$ps_bin" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "-axo pid=,ppid=")
+    case "${FM_TEST_PS_SHAPE:-nested}" in
+      nested) printf '%s\n' '4242 1' '4300 4242' '4343 4300' ;;
+      foreign) printf '%s\n' '4242 1' '4343 1' ;;
+      child) printf '%s\n' '4242 1' '4300 4242' '4343 4300' '5000 4343' ;;
+    esac
+    ;;
+  "-p 4343 -o stat=") printf '%s\n' 'S' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$ps_bin"
+
+  out=$(FM_HERDR_PS_BIN="$ps_bin" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fixture=$1
+      fm_backend_herdr_cli() { cat "$fixture"; }
+      fm_backend_herdr_pane_idle_foreground_shell_pid fmtest w1:p2
+    ' "$ROOT" "$info")
+  [ "$out" = 4343 ] || fail "foreground proof rejected the exact idle Treehouse descendant shell, got '$out'"
+
+  if FM_HERDR_PS_BIN="$ps_bin" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fixture=$1
+      fm_backend_herdr_cli() { cat "$fixture"; }
+      fm_backend_herdr_pane_idle_shell_pid fmtest w1:p2
+    ' "$ROOT" "$info" >/dev/null 2>&1; then
+    fail "pane-owned cleanup proof accepted a nested foreground shell"
+  fi
+  for shape in foreign child; do
+    if FM_TEST_PS_SHAPE=$shape FM_HERDR_PS_BIN="$ps_bin" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+      bash -c '
+        . "$0/bin/backends/herdr.sh"
+        fixture=$1
+        fm_backend_herdr_cli() { cat "$fixture"; }
+        fm_backend_herdr_pane_idle_foreground_shell_pid fmtest w1:p2
+      ' "$ROOT" "$info" >/dev/null 2>&1; then
+      fail "foreground proof accepted a $shape shell process shape"
+    fi
+  done
+  pass "Herdr idle-shell proofs: submission accepts only an exact idle descendant while cleanup stays pane-owned"
+}
+
 # --- busy_state (semantic agent state) ---------------------------------------
 
 test_busy_state_working_maps_to_busy() {
@@ -4551,6 +4656,8 @@ test_capture_preserves_pane_read_failure
 test_send_key_normalizes_and_targets_pane
 test_kill_is_best_effort
 test_current_path_reads_cwd
+test_send_text_line_waits_for_idle_shell_and_submits_atomically
+test_foreground_shell_proof_accepts_only_exact_idle_descendants
 test_busy_state_working_maps_to_busy
 test_busy_state_done_and_blocked_map_to_idle
 test_busy_state_unknown_on_no_agent

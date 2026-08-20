@@ -2815,7 +2815,10 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
     printf -v treehouse_ready_quoted '%q' "$treehouse_ready_file"
     treehouse_get_command="$treehouse_get_command --ready-file $treehouse_ready_quoted"
   fi
-  spawn_send_text_line "$WT_TARGET" "$treehouse_get_command"
+  spawn_send_text_line "$WT_TARGET" "$treehouse_get_command" || {
+    echo "error: worktree setup command could not be submitted safely for $W" >&2
+    exit 1
+  }
 
   if [ "${IS_SANDBOX:-}" = 1 ]; then
     for _ in $(seq 1 60); do
@@ -3400,7 +3403,10 @@ fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
-spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+if ! spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"; then
+  echo "error: GOTMPDIR export could not be submitted safely for $W" >&2
+  exit 1
+fi
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
 # entirely when trace context is off.
@@ -3411,21 +3417,28 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
     fi
   else
     TRACE_SEND_STATUS=$?
-    if [ "$TRACE_SEND_STATUS" -eq 2 ]; then
-      echo "error: trace-context input could not be cleared for $W; refusing to append the launch command" >&2
+    if [ "$TRACE_SEND_STATUS" -eq 2 ] || [ "$BACKEND" = herdr ]; then
+      echo "error: trace-context export could not be submitted safely for $W; refusing to append the launch command" >&2
       exit 1
     fi
   fi
 fi
 sleep 0.3
 [ -z "$OMP_LAUNCH_PATH_GUARD" ] || LAUNCH="$OMP_LAUNCH_PATH_GUARD$LAUNCH"
-spawn_send_literal "$T" "$LAUNCH"
-sleep 0.3
+if [ "$BACKEND" = herdr ]; then
+  spawn_send_text_line "$T" "$LAUNCH" || {
+    echo "error: Herdr launch pane did not reach a proven idle shell; refusing to submit $HARNESS" >&2
+    exit 1
+  }
+else
+  spawn_send_literal "$T" "$LAUNCH"
+  sleep 0.3
+  spawn_send_key "$T" Enter
+fi
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
-spawn_send_key "$T" Enter
 if [ "$HARNESS" = omp ]; then
   OMP_ACK_INTERVAL=${FM_OMP_LAUNCH_ACK_INTERVAL:-0.5}
   OMP_ACKED=0

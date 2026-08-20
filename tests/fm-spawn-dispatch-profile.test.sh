@@ -149,6 +149,17 @@ case "$cmd $sub" in
       printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2"}}}'
     fi
     ;;
+  "pane process-info")
+    if [ -n "${FM_FAKE_HERDR_NESTED_SHELL_FLAG:-}" ] && [ -f "$FM_FAKE_HERDR_NESTED_SHELL_FLAG" ]; then
+      if [ "${FM_FAKE_HERDR_REFUSE_NESTED_SHELL:-0}" = 1 ]; then
+        printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":4343,"foreground_processes":[{"pid":4343,"name":"sleep","argv0":"sleep"}]}}}'
+      else
+        printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":4343,"foreground_processes":[{"pid":4343,"name":"fish","argv0":"fish"}]}}}'
+      fi
+    else
+      printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[{"pid":4242,"name":"fish","argv0":"fish"}]}}}'
+    fi
+    ;;
   "pane get")
     if [ -n "${FM_FAKE_HERDR_PANE_FLAG:-}" ] && [ ! -f "$FM_FAKE_HERDR_PANE_FLAG" ]; then
       printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
@@ -157,7 +168,19 @@ case "$cmd $sub" in
     printf '{"result":{"pane":{"pane_id":"%s","foreground_cwd":"%s"}}}\n' "${3:-w1:p2}" "${FM_FAKE_PANE_PATH:-}"
     ;;
   "pane run")
-    exit 0
+    if printf '%s' "${4:-}" | grep -Fq 'fm-treehouse-get.sh'; then
+      [ -z "${FM_FAKE_HERDR_NESTED_SHELL_FLAG:-}" ] || : > "$FM_FAKE_HERDR_NESTED_SHELL_FLAG"
+    fi
+    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
+      printf '%s\n' "${4:-}" >> "$FM_FAKE_LAUNCH_LOG"
+      if printf '%s' "${4:-}" | grep -Fq 'FM_OMP_HARNESS=omp'; then
+        [ -z "${FM_FAKE_OMP_ACK:-}" ] || : > "$FM_FAKE_OMP_ACK"
+        if [ "${FM_FAKE_OMP_DYNAMIC_ACK:-0}" = 1 ]; then
+          ack=$(printf '%s\n' "${4:-}" | sed -n "s/.* -e '\([^']*\)\.omp-ext\.ts'.*/\1.omp-started/p")
+          [ -z "$ack" ] || : > "$ack"
+        fi
+      fi
+    fi
     ;;
   "pane send-text")
     [ -z "${FM_FAKE_LAUNCH_LOG:-}" ] || printf '%s\n' "${4:-}" >> "$FM_FAKE_LAUNCH_LOG"
@@ -193,6 +216,21 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/herdr"
+  cat > "$fakebin/herdr-ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "-axo pid=,ppid=")
+    if [ -n "${FM_FAKE_HERDR_NESTED_SHELL_FLAG:-}" ] && [ -f "$FM_FAKE_HERDR_NESTED_SHELL_FLAG" ]; then
+      printf '%s\n' '4242 1' '4300 4242' '4343 4300'
+    else
+      printf '%s\n' '4242 1'
+    fi
+    ;;
+  "-p 4242 -o stat="|"-p 4343 -o stat=") printf '%s\n' 'S' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/herdr-ps"
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 [ -z "${FM_FAKE_TREEHOUSE_LOG:-}" ] || printf '%s|%s\n' "$PWD" "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
@@ -336,15 +374,17 @@ sync_project_commit() {
 }
 
 run_spawn() {
-  local home=$1 wt=$2 fakebin=$3 launchlog=$4 endpointlog treehouselog herdrpaneflag rc meta tasktmp
+  local home=$1 wt=$2 fakebin=$3 launchlog=$4 endpointlog treehouselog herdrpaneflag herdrshellflag rc meta tasktmp
   shift 4
   endpointlog="${launchlog%/*}/endpoint.log"
   treehouselog="${launchlog%/*}/treehouse.log"
   herdrpaneflag="${launchlog%/*}/herdr-pane"
+  herdrshellflag="${launchlog%/*}/herdr-nested-shell"
   : > "$launchlog"
   : > "$endpointlog"
   : > "$treehouselog"
   : > "$herdrpaneflag"
+  rm -f "$herdrshellflag"
   # CLAUDE_CONFIG_DIR is forwarded onto claude launches by fm-spawn, so pin it
   # explicitly (empty by default) instead of leaking the invoking shell's value,
   # which would make launch assertions depend on the developer's environment.
@@ -352,6 +392,8 @@ run_spawn() {
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    HERDR_ENV='' HERDR_PANE_ID='' HERDR_SESSION='' HERDR_SOCKET_PATH='' \
+    HERDR_TAB_ID='' HERDR_WORKSPACE_ID='' \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     HOME="${FM_TEST_HOME_OVERRIDE:-$HOME}" IS_SANDBOX="${FM_TEST_IS_SANDBOX:-}" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
@@ -370,8 +412,12 @@ run_spawn() {
     FM_FAKE_HERDR_RECLAIM_WORKSPACE_LABEL="${FM_TEST_HERDR_RECLAIM_WORKSPACE_LABEL:-}" \
     FM_FAKE_HERDR_RECLAIM_TASK_LABEL="${FM_TEST_HERDR_RECLAIM_TASK_LABEL:-}" \
     FM_FAKE_HERDR_PANE_FLAG="$herdrpaneflag" \
+    FM_FAKE_HERDR_NESTED_SHELL_FLAG="$herdrshellflag" \
+    FM_FAKE_HERDR_REFUSE_NESTED_SHELL="${FM_TEST_HERDR_REFUSE_NESTED_SHELL:-0}" \
+    FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS="${FM_TEST_HERDR_IDLE_SHELL_PROOF_POLLS:-}" \
     FM_FAKE_HERDR_REFUSE_CLOSE="${FM_TEST_HERDR_REFUSE_CLOSE:-0}" \
     FM_FAKE_OMP_META_TAMPER="${FM_TEST_OMP_META_TAMPER:-}" \
+    FM_HERDR_PS_BIN="$fakebin/herdr-ps" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
   rc=$?
@@ -1559,6 +1605,29 @@ test_omp_herdr_worker_and_scout_launch_with_exact_identity_and_ack() {
   pass "OMP Herdr workers and scouts preserve exact identity, isolated sessions, metadata, and launch acknowledgement"
 }
 
+test_herdr_required_export_refuses_after_nested_shell_timeout() {
+  local rec id out status
+  id=$(profile_id profile-herdr-required-export-z8pi)
+  rec=$(make_spawn_case profile-herdr-required-export claude "$id")
+  read_case_record "$rec"
+  export FM_TEST_HERDR_REFUSE_NESTED_SHELL=1
+  export FM_TEST_HERDR_IDLE_SHELL_PROOF_POLLS=1
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --backend herdr)
+  status=$?
+  unset FM_TEST_HERDR_REFUSE_NESTED_SHELL
+  unset FM_TEST_HERDR_IDLE_SHELL_PROOF_POLLS
+  expect_code 1 "$status" "Herdr spawn should refuse when the nested worktree shell is not provably idle"
+  assert_contains "$out" "GOTMPDIR export could not be submitted safely" \
+    "Herdr nested-shell timeout did not name the omitted required export"
+  assert_contains "$(cat "$LAUNCH_LOG")" "fm-treehouse-get.sh" \
+    "Herdr readiness fixture did not enter its nested Treehouse shell"
+  assert_not_contains "$(cat "$LAUNCH_LOG")" "claude --dangerously-skip-permissions" \
+    "Herdr spawn launched the agent after omitting a required export"
+  pass "Herdr launch refuses instead of omitting GOTMPDIR when the nested worktree shell never proves idle"
+}
+
 test_omp_refuses_unverified_backends_before_endpoint_creation() {
   local backend rec id out status endpoint_log
   for backend in zellij orca cmux; do
@@ -2238,6 +2307,7 @@ test_ordinary_herdr_ambiguous_reclaim_keeps_flat_fallback
 test_non_omp_prewalk_refuses_without_changing_normal_claude_launch
 test_omp_herdr_worker_and_scout_launch_with_exact_identity_and_ack
 test_omp_refuses_unverified_backends_before_endpoint_creation
+test_herdr_required_export_refuses_after_nested_shell_timeout
 test_omp_scout_uses_external_turn_extension
 test_omp_whitespace_identity_paths_refuse_before_endpoint
 test_omp_missing_binary_or_capability_refuses_before_endpoint_and_metadata
