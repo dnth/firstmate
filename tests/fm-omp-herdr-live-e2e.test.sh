@@ -141,33 +141,35 @@ if [ -e "/proc/\$PPID/exe" ]; then
 else
   parent_exe=\$(lsof -a -p "\$PPID" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
 fi
+native_omp_parent=0
 case "\$parent_exe:\$parent_args" in
-  "\$bun_bin":bun\ "\$omp_bin"\ *)
-    native_probe=0
-    native_probe_pane=
-    case "\$#:\$*" in
-      "1:agent"|"1:--help"|"2:agent --help"|"2:agent list"|"3:--session \$session --help") native_probe=1 ;;
-      3:agent\ get\ *) native_probe_pane=\$3 ;;
-      5:--session\ "\$session"\ agent\ get\ *) native_probe_pane=\$5 ;;
-      7:pane\ read\ *\ --source\ recent-unwrapped\ --lines\ *) native_probe_pane=\$3 ;;
-      7:agent\ read\ *\ --source\ recent-unwrapped\ --lines\ *)
-        case "\$7" in
-          ''|0*|*[!0-9]*) ;;
-          *) native_probe_pane=\$3 ;;
-        esac
-        ;;
-    esac
-    case "\$native_probe_pane" in
-      ''|*[!A-Za-z0-9._:@%+-]*) ;;
-      *) native_probe=1 ;;
-    esac
-    if [ "\$native_probe" -eq 1 ]; then
-      printf -v rendered '%q ' "\$@"
-      printf '%s\n' "\$rendered" >> "\$log.native-omp-probes"
-      exit 96
-    fi
-    ;;
+  "\$bun_bin":bun\ "\$omp_bin"\ *|"\$omp_bin":"\$omp_bin"\ *) native_omp_parent=1 ;;
 esac
+if [ "\$native_omp_parent" -eq 1 ]; then
+  native_probe=0
+  native_probe_pane=
+  case "\$#:\$*" in
+    "1:agent"|"1:--help"|"2:agent --help"|"2:agent list"|"2:pane read --help"|"3:--session \$session --help") native_probe=1 ;;
+    3:agent\ get\ *) native_probe_pane=\$3 ;;
+    5:--session\ "\$session"\ agent\ get\ *) native_probe_pane=\$5 ;;
+    7:pane\ read\ *\ --source\ recent-unwrapped\ --lines\ *) native_probe_pane=\$3 ;;
+    7:agent\ read\ *\ --source\ recent-unwrapped\ --lines\ *)
+      case "\$7" in
+        ''|0*|*[!0-9]*) ;;
+        *) native_probe_pane=\$3 ;;
+      esac
+      ;;
+  esac
+  case "\$native_probe_pane" in
+    ''|*[!A-Za-z0-9._:@%+-]*) ;;
+    *) native_probe=1 ;;
+  esac
+  if [ "\$native_probe" -eq 1 ]; then
+    printf -v rendered '%q ' "\$@"
+    printf '%s\n' "\$rendered" >> "\$log.native-omp-probes"
+    exit 96
+  fi
+fi
 if [ "\$#" -eq 2 ] && [ "\$1" = status ] && [ "\$2" = --json ] \
   && [ "\${HERDR_SESSION:-}" = "\$session" ]; then
   set -- "\$@" --session "\$session"
@@ -393,9 +395,14 @@ primary_drained_wake_after() { # <transcript-offset> <wake-text>
   tail -c "+$start" "$PRIMARY_SESSION" 2>/dev/null \
     | jq -se --arg text "$text" '
         (to_entries
-          | map(select(.value.type == "message" and .value.message.role == "user"
-              and .value.message.attribution == "user"
-              and any(.value.message.content[]?; .type == "text" and (.text | contains($text)))))
+          | map(select(
+              (.value.type == "custom_message"
+                and .value.customType == "firstmate-watcher-wake"
+                and ((.value.content // "") | contains($text)))
+              or
+              (.value.type == "message" and .value.message.role == "user"
+                and .value.message.attribution == "user"
+                and any(.value.message.content[]?; .type == "text" and (.text | contains($text))))))
           | first | .key) as $wake
         | if $wake == null then false
           else
@@ -789,7 +796,7 @@ env PATH="$WRAPPER_BIN:$BASE_PATH" HERDR_SESSION="$SESSION" FM_BACKEND=herdr \
 # its default-session tripwire.
 [ -s "$WRAPPER_LOG" ] || fail "production role matrix issued no Herdr commands through the wrapper"
 if [ -s "$WRAPPER_LOG.native-omp-probes" ]; then
-  grep -Ev "^(agent |--help |agent --help |agent list |agent get [A-Za-z0-9._:@%+-]+ |pane read [A-Za-z0-9._:@%+-]+ --source recent-unwrapped --lines [1-9][0-9]* |agent read [A-Za-z0-9._:@%+-]+ --source recent-unwrapped --lines [1-9][0-9]* |--session $SESSION --help |--session $SESSION agent get [A-Za-z0-9._:@%+-]+ )$" \
+  grep -Ev "^(agent |--help |agent --help |agent list |pane read --help |agent get [A-Za-z0-9._:@%+-]+ |pane read [A-Za-z0-9._:@%+-]+ --source recent-unwrapped --lines [1-9][0-9]* |agent read [A-Za-z0-9._:@%+-]+ --source recent-unwrapped --lines [1-9][0-9]* |--session $SESSION --help |--session $SESSION agent get [A-Za-z0-9._:@%+-]+ )$" \
     "$WRAPPER_LOG.native-omp-probes" >/dev/null \
     && fail "an unexpected native OMP Herdr probe escaped quarantine"
 fi
