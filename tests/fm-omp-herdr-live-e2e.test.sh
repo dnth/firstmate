@@ -455,16 +455,23 @@ send_task() {
 
 spawn_task() { # <id> [--scout]
   local id=$1
+  local -a delivery_args=()
   shift
+  if [ "${1:-}" != --scout ]; then
+    delivery_args+=(--mode direct-PR --yolo off)
+  fi
   fm_env FM_SPAWN_NO_GUARD=1 FM_OMP_LAUNCH_ACK_INTERVAL=0.25 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$PROJECT" --harness omp \
-      --model openai-codex/gpt-5.6-sol --effort low "$@"
+      --model openai-codex/gpt-5.6-sol --effort low "${delivery_args[@]}" "$@"
 }
 
 # --- real primary ------------------------------------------------------------
 mkdir -p "$PRIMARY_HOME/sessions"
 printf 'herdr\n' > "$PRIMARY_HOME/config/backend"
 printf 'omp\n' > "$PRIMARY_HOME/config/crew-harness"
+# Keep this role matrix on the flat per-home workspace path; disposable
+# presentation workspaces are covered by the dedicated Herdr presentation suite.
+printf 'off\n' > "$PRIMARY_HOME/config/herdr-presentation-spaces"
 primary_create=$(lab workspace create --cwd "$PRIMARY_PROJECT" --label omp-primary-live --no-focus) \
   || fail "could not create the guarded OMP primary workspace"
 PRIMARY_PANE=$(printf '%s' "$primary_create" | jq -r '.result.root_pane.pane_id // empty')
@@ -510,6 +517,7 @@ git -C "$PROJECT" commit -qm init
 git init -q --bare "$LAB/project-origin.git"
 git -C "$PROJECT" remote add origin "$LAB/project-origin.git"
 git -C "$PROJECT" push -qu origin main
+git -C "$LAB/project-origin.git" symbolic-ref HEAD refs/heads/main
 
 worker_log_start=$(wc -l < "$WRAPPER_LOG" | tr -d '[:space:]')
 worker_start_wake_offset=$(session_offset "$PRIMARY_SESSION") || exit 1
