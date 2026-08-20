@@ -76,7 +76,7 @@ omp_ancestry_matches() {  # <exact|launch-shape>
     case "$bc" in
       bun|omp|cli.js)
         args=$(ps -o args= -p "$pid" 2>/dev/null)
-        omp_launch_argv_shape "$args" && return 0
+        [ "$mode" = launch-shape ] && omp_launch_argv_shape "$args" && return 0
         ;;
       *claude*|*codex*|*opencode*|*grok*|kimi|pi|pi-signed) return 1 ;;
       node*|python*)

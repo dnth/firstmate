@@ -143,6 +143,11 @@ test_launch_boundary_marker_preserves_exact_omp_identity() {
     || fail "claude nested inside an OMP worker inherited the launch marker: $out"
 
   out=$(PATH="$path" env -u PI_CODING_AGENT -u CLAUDECODE -u GROK_AGENT \
+    FM_OMP_HARNESS=omp FM_OMP_BUN="$fakebin/claude" FM_OMP_BIN="$fakebin/omp" \
+    "$ROOT/bin/fm-harness.sh")
+  [ "$out" != omp ] || fail "exact OMP ancestry fell back to launch-shape evidence after an identity mismatch"
+
+  out=$(PATH="$path" env -u PI_CODING_AGENT -u CLAUDECODE -u GROK_AGENT \
     FM_OMP_HARNESS=omp-helper "$ROOT/bin/fm-harness.sh")
   [ "$out" != omp ] || fail "inexact OMP launch marker was accepted"
   pass "OMP worker tools preserve the exact launch-boundary harness identity"

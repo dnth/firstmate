@@ -12,6 +12,8 @@ fi
 
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$ROOT/bin/fm-supervision-lib.sh"
+# shellcheck source=bin/fm-omp-process-lib.sh
+. "$ROOT/bin/fm-omp-process-lib.sh"
 
 command -v omp >/dev/null 2>&1 || fail "omp not found"
 command -v herdr >/dev/null 2>&1 || fail "herdr not found"
@@ -20,8 +22,10 @@ command -v treehouse >/dev/null 2>&1 || fail "treehouse not found"
 
 OMP_BIN=$("$ROOT/bin/fm-omp-capabilities.sh" --print-binary) || fail "OMP capability check failed"
 OMP_BIN=$(fm_test_realpath "$OMP_BIN") || fail "OMP binary realpath could not be resolved"
-BUN_BIN=$(node -e 'const {realpathSync}=require("node:fs");process.stdout.write(realpathSync(process.argv[1]))' "$(command -v bun)") \
-  || fail "Bun realpath could not be resolved"
+OMP_LAUNCH_IDENTITY=$(fm_omp_process_launch_identity "$OMP_BIN") \
+  || fail "OMP launch identity could not be resolved for $OMP_BIN"
+OMP_RUNTIME=$(printf '%s\n' "$OMP_LAUNCH_IDENTITY" | sed -n '1p')
+OMP_BIN=$(printf '%s\n' "$OMP_LAUNCH_IDENTITY" | sed -n '2p')
 REAL_HERDR=$(command -v herdr)
 HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 [ -x "$HERDR_LAB_HELPER" ] || fail "Herdr lab helper is not executable: $HERDR_LAB_HELPER"
@@ -120,7 +124,8 @@ base_path='$BASE_PATH'
 wrapper_bin='$WRAPPER_BIN'
 log='$WRAPPER_LOG'
 omp_bin='$OMP_BIN'
-bun_bin='$BUN_BIN'
+omp_runtime='$OMP_RUNTIME'
+process_lib='$DRIVER_ROOT/bin/fm-omp-process-lib.sh'
 if [ "\${FM_HERDR_LAB_INNER:-0}" = 1 ]; then
   if [ "\${1:-}" = server ]; then
     exec env -u FM_HERDR_LAB_INNER "\$real" "\$@"
@@ -130,6 +135,7 @@ fi
 case "\${1:-}" in
   --version|-V|version) exec "\$real" "\$@" ;;
 esac
+. "\$process_lib"
 # OMP itself probes Herdr with its own prefix-session syntax. Those calls are
 # outside Firstmate's backend API and cannot satisfy this matrix's trailing-
 # session contract. Quarantine only the exact observed read-only forms from an
@@ -142,9 +148,10 @@ else
   parent_exe=\$(lsof -a -p "\$PPID" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
 fi
 native_omp_parent=0
-case "\$parent_exe:\$parent_args" in
-  "\$bun_bin":bun\ "\$omp_bin"\ *|"\$omp_bin":"\$omp_bin"\ *) native_omp_parent=1 ;;
-esac
+if FM_OMP_PROCESS_EXPECTED_BUN="\$omp_runtime" FM_OMP_PROCESS_EXPECTED_BIN="\$omp_bin" \
+    fm_omp_process_matches "\$parent_exe" "\$parent_args" "\$PPID"; then
+  native_omp_parent=1
+fi
 if [ "\$native_omp_parent" -eq 1 ]; then
   native_probe=0
   native_probe_pane=
