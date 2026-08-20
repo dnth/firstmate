@@ -156,11 +156,18 @@ fm_omp_process_matches() {  # <comm-or-path> <args> [pid]
   local expected_bun=${FM_OMP_PROCESS_EXPECTED_BUN:-} expected_omp=${FM_OMP_PROCESS_EXPECTED_BIN:-}
   local actual_bun actual_omp process_exe
   comm=$(basename -- "$comm")
-  if { [ -z "$expected_bun" ] || [ -z "$expected_omp" ]; } && [ -n "$pid" ]; then
-    marker_identity=$(fm_omp_process_primary_identity "$pid") || return 1
-    expected_bun=$(printf '%s\n' "$marker_identity" | sed -n '1p')
-    expected_omp=$(printf '%s\n' "$marker_identity" | sed -n '2p')
-    marker_bound=1
+  if [ -n "$pid" ]; then
+    marker_identity=$(fm_omp_process_primary_identity "$pid" 2>/dev/null || true)
+    if [ -n "$marker_identity" ]; then
+      if [ -z "$expected_bun" ] || [ -z "$expected_omp" ]; then
+        expected_bun=$(printf '%s\n' "$marker_identity" | sed -n '1p')
+        expected_omp=$(printf '%s\n' "$marker_identity" | sed -n '2p')
+        marker_bound=1
+      elif [ "$expected_bun" = "$(printf '%s\n' "$marker_identity" | sed -n '1p')" ] \
+        && [ "$expected_omp" = "$(printf '%s\n' "$marker_identity" | sed -n '2p')" ]; then
+        marker_bound=1
+      fi
+    fi
   fi
   [ -n "$expected_bun" ] && [ -n "$expected_omp" ] || return 1
   if [ "$marker_bound" -eq 1 ]; then

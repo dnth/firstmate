@@ -224,6 +224,11 @@ test_standalone_primary_survives_executable_replacement() {
   lock_status=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-lock.sh" status)
   assert_contains "$lock_status" "held by live harness pid $owner" \
     "session-lock liveness treated the live deleted standalone executable as stale"
+  lock_status=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_OMP_PROCESS_EXPECTED_BUN="$native" FM_OMP_PROCESS_EXPECTED_BIN="$native" \
+    "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$lock_status" "held by live harness pid $owner" \
+    "explicit marker paths bypassed deleted standalone executable ownership"
   kill "$owner" 2>/dev/null || true
   wait "$owner" 2>/dev/null || true
   expect_code 0 "$status" "a live standalone primary should retain marker identity after atomic executable replacement"
