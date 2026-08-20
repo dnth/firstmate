@@ -89,13 +89,27 @@ const isFullwidth = codePoint => codePoint >= 0x1100 && (
 );
 
 let width = 0;
+const isEmojiPresentation = /\p{Emoji_Presentation}/u;
+const isEmoji = /\p{Emoji}/u;
+const isExtendedPictographic = /\p{Extended_Pictographic}/u;
+const isRegionalIndicatorFlag = /^(?:\p{Regional_Indicator}){2}$/u;
+const isMarkOrFormat = /[\p{Mark}\p{Cf}\ufe0e\ufe0f]/u;
 for (const { segment } of new Intl.Segmenter("en", { granularity: "grapheme" }).segment(input)) {
-  if (/[\p{Emoji_Presentation}\p{Regional_Indicator}\ufe0f\u200d]/u.test(segment)) {
+  const base = [...segment].find(character => !isMarkOrFormat.test(character));
+  if (base === undefined) continue;
+  const baseWidth = isEmojiPresentation.test(base) || isFullwidth(base.codePointAt(0)) ? 2 : 1;
+  if (/[\ufe0e]/u.test(segment)) {
+    width += baseWidth;
+  } else if (
+    isRegionalIndicatorFlag.test(segment) ||
+    isEmojiPresentation.test(segment) ||
+    (/[\ufe0f]/u.test(segment) && isEmoji.test(segment)) ||
+    (/[\u200d]/u.test(segment) && isExtendedPictographic.test(segment))
+  ) {
     width += 2;
-    continue;
+  } else {
+    width += baseWidth;
   }
-  const base = [...segment].find(character => !/[\p{Mark}\u200d\ufe0e\ufe0f]/u.test(character));
-  if (base !== undefined) width += isFullwidth(base.codePointAt(0)) ? 2 : 1;
 }
 process.stdout.write(String(width));
 JS

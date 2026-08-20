@@ -128,6 +128,35 @@ test_real_text_is_pending() {
   pass "fm_composer_classify_content: real unsubmitted text reads pending (including a popup argument-hint fill)"
 }
 
+assert_standalone_width_matches_bun() {
+  local bun=$1 label=$2 row=$3 expected actual
+  expected=$("$bun" -e 'process.stdout.write(String(Bun.stringWidth(process.argv[1])))' "$row")
+  actual=$(fm_composer_terminal_width "$row" "$bun" "$bun") \
+    || fail "standalone width failed for $label"
+  [ "$actual" = "$expected" ] \
+    || fail "standalone width for $label was $actual, Bun.stringWidth returned $expected"
+}
+
+test_standalone_width_matches_bun_for_unicode_graphemes() {
+  local bun
+  if ! bun=$(command -v bun 2>/dev/null); then
+    pass "standalone width parity skipped because bun is unavailable"
+    return
+  fi
+  if ! command -v node >/dev/null 2>&1; then
+    pass "standalone width parity skipped because node is unavailable"
+    return
+  fi
+  assert_standalone_width_matches_bun "$bun" "VS15 text presentation" $'❤︎'
+  assert_standalone_width_matches_bun "$bun" "VS16 emoji presentation" $'❤️'
+  assert_standalone_width_matches_bun "$bun" "combining mark" $'é'
+  assert_standalone_width_matches_bun "$bun" "bare ZWJ" $'‍'
+  assert_standalone_width_matches_bun "$bun" "regional-indicator flag" $'🇮🇳'
+  assert_standalone_width_matches_bun "$bun" "CJK" $'界'
+  assert_standalone_width_matches_bun "$bun" "OMP status row" '╭── ⬢ GPT-5.6-Sol++ · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
+  pass "standalone width matches Bun.stringWidth for Unicode graphemes and the OMP status row"
+}
+
 test_bare_shell_glyphs_are_unknown
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
@@ -137,3 +166,4 @@ test_empty_content_is_empty
 test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
+test_standalone_width_matches_bun_for_unicode_graphemes
