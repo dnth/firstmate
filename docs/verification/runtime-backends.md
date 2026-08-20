@@ -161,6 +161,25 @@ ok - OMP omp/17.3.4 aborts an active session within the 5-15s deadline bound
 
 The guard starts a real headless OMP turn with `--max-time=5`, requires the deadline-specific aborted assistant event and terminal runtime event, rejects unrelated errors, and measures the full process lifetime including shutdown against the documented bound.
 
+OMP 17.3.8 standalone-executable compatibility was verified on 2026-08-20.
+
+```sh
+omp --version
+bin/fm-omp-capabilities.sh --require-max-time --print-binary
+env NO_MISTAKES_GATE=1 omp -p --no-tools --no-session --no-extensions -e .omp/extensions/fm-primary-omp.ts --model openai-codex/gpt-5.6-sol 'Reply exactly OMP_COMPILED_EXTENSION_OK'
+```
+
+Observed relevant output:
+
+```text
+omp/17.3.8
+OMP_COMPILED_EXTENSION_OK
+```
+
+The capability probe returned the canonical selected executable path, which is omitted here because it is host-local.
+The installed OMP was a Bun-compiled executable whose embedded `argv[1]` was not a filesystem object.
+OMP loaded the tracked primary extension without trying to resolve the virtual entrypoint.
+
 The native Prewalk launch surface was checked on 2026-08-11 against OMP 17.2.11 without starting a model call:
 
 ```sh
