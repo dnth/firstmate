@@ -1594,6 +1594,8 @@ test_omp_herdr_worker_and_scout_launch_with_exact_identity_and_ack() {
     assert_grep 'herdr_session=default' "$HOME_DIR/state/$id.meta" "OMP Herdr $kind metadata lost its named session"
     assert_grep 'herdr_pane_id=w1:p2' "$HOME_DIR/state/$id.meta" "OMP Herdr $kind metadata lost its exact pane"
     launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" "GOTMPDIR='/tmp/fm-$id/gotmp' FM_OMP_BUN=" \
+      "OMP Herdr $kind launch did not bind GOTMPDIR to the atomic agent command"
     assert_contains "$launch" "FM_OMP_BUN='$(cd "$FAKEBIN_DIR" && pwd -P)/bun' FM_OMP_BIN='$(cd "$FAKEBIN_DIR" && pwd -P)/omp' FM_OMP_HARNESS=omp" \
       "OMP Herdr $kind launch omitted its canonical identities"
     assert_contains "$launch" "PATH='$(cd "$FAKEBIN_DIR" && pwd -P)'\${PATH:+:\$PATH} '$(cd "$FAKEBIN_DIR" && pwd -P)/omp'" \
@@ -1605,7 +1607,7 @@ test_omp_herdr_worker_and_scout_launch_with_exact_identity_and_ack() {
   pass "OMP Herdr workers and scouts preserve exact identity, isolated sessions, metadata, and launch acknowledgement"
 }
 
-test_herdr_required_export_refuses_after_nested_shell_timeout() {
+test_herdr_launch_refuses_after_nested_shell_timeout() {
   local rec id out status
   id=$(profile_id profile-herdr-required-export-z8pi)
   rec=$(make_spawn_case profile-herdr-required-export claude "$id")
@@ -1619,13 +1621,13 @@ test_herdr_required_export_refuses_after_nested_shell_timeout() {
   unset FM_TEST_HERDR_REFUSE_NESTED_SHELL
   unset FM_TEST_HERDR_IDLE_SHELL_PROOF_POLLS
   expect_code 1 "$status" "Herdr spawn should refuse when the nested worktree shell is not provably idle"
-  assert_contains "$out" "GOTMPDIR export could not be submitted safely" \
-    "Herdr nested-shell timeout did not name the omitted required export"
+  assert_contains "$out" "launch pane did not reach a proven idle shell" \
+    "Herdr nested-shell timeout did not identify the refused atomic launch"
   assert_contains "$(cat "$LAUNCH_LOG")" "fm-treehouse-get.sh" \
     "Herdr readiness fixture did not enter its nested Treehouse shell"
   assert_not_contains "$(cat "$LAUNCH_LOG")" "claude --dangerously-skip-permissions" \
-    "Herdr spawn launched the agent after omitting a required export"
-  pass "Herdr launch refuses instead of omitting GOTMPDIR when the nested worktree shell never proves idle"
+    "Herdr spawn launched the agent without a proven idle nested shell"
+  pass "Herdr atomic launch refuses when the nested worktree shell never proves idle"
 }
 
 test_omp_refuses_unverified_backends_before_endpoint_creation() {
@@ -2307,7 +2309,7 @@ test_ordinary_herdr_ambiguous_reclaim_keeps_flat_fallback
 test_non_omp_prewalk_refuses_without_changing_normal_claude_launch
 test_omp_herdr_worker_and_scout_launch_with_exact_identity_and_ack
 test_omp_refuses_unverified_backends_before_endpoint_creation
-test_herdr_required_export_refuses_after_nested_shell_timeout
+test_herdr_launch_refuses_after_nested_shell_timeout
 test_omp_scout_uses_external_turn_extension
 test_omp_whitespace_identity_paths_refuse_before_endpoint
 test_omp_missing_binary_or_capability_refuses_before_endpoint_and_metadata

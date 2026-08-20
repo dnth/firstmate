@@ -89,6 +89,8 @@ JS
   cat > "$FAKEBIN/ps" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
+  "-p 987654 -o stat=") printf '%s\n' S ;;
+  "-axo pid=,ppid=") /usr/bin/ps "$@"; printf '%s\n' '987654 1' ;;
   *"tpgid="*"$FM_TEST_AGENT_PID"*) printf '%s\n' "$FM_TEST_AGENT_PID" ;;
   *"args="*"$FM_TEST_AGENT_PID"*) printf '%s %s --auto-approve\n' "$FM_TEST_OMP_BUN" "$FM_TEST_OMP_BIN" ;;
   *) exec /usr/bin/ps "$@" ;;
@@ -202,6 +204,9 @@ case "$cmd $sub" in
     fi
     printf '{"result":{"pane":{"pane_id":"w1:p2","foreground_cwd":"%s"}}}\n' "$FM_TEST_HOME"
     ;;
+  "pane process-info")
+    printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":987654,"foreground_process_group_id":987654,"foreground_processes":[{"pid":987654,"name":"fish","argv0":"fish"}]}}}'
+    ;;
   "agent get")
     if [ ! -f "$FM_TEST_WINDOW_FLAG" ]; then
       printf '%s\n' '{"error":{"code":"agent_not_found"}}' >&2
@@ -218,6 +223,16 @@ case "$cmd $sub" in
     printf '%s\n' '{"result":{"agent":{"agent":"omp","agent_status":"idle"}}}'
     ;;
   "pane run")
+    printf '%s\n' "${4:-}" > "$FM_TEST_LAUNCH_LOG"
+    if [ "${FM_TEST_SKIP_ACK:-0}" != 1 ]; then
+      mkdir -p "$FM_TEST_HOME/state/omp-sessions"
+      session="$FM_TEST_HOME/state/omp-sessions/${FM_TEST_ACK_SESSION:-selected.jsonl}"
+      printf '{"type":"session"}\n' > "$session"
+      printf '%s\n' "$session" > "$FM_TEST_HOME/state/.omp-session"
+      version=$(bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_primary_watch_version "$1/.omp/extensions/fm-primary-omp.ts" "$1"' _ "$FM_TEST_HOME")
+      printf '%s\n%s\n%s\n%s\n' "$version" "$FM_TEST_AGENT_PID" "$FM_TEST_OMP_BUN" "$FM_TEST_OMP_BIN" > "$FM_TEST_HOME/state/.omp-primary-extension-loaded"
+      printf '%s\n' "$FM_TEST_AGENT_PID" > "$FM_TEST_HOME/state/.lock"
+    fi
     ;;
   "pane send-text")
     printf '%s\n' "${4:-}" > "$FM_TEST_LAUNCH_LOG"

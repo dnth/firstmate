@@ -29,13 +29,18 @@ fm_omp_process_resolve_path() {  # <path-or-command>
   return 1
 }
 
-fm_omp_process_identity_path_valid() {  # <canonical-executable-path>
+fm_omp_process_identity_path_syntax_valid() {  # <canonical-executable-path>
   local value=$1
   case "$value" in /*) ;; *) return 1 ;; esac
+  case "$value" in *[[:space:]]*) return 1 ;; esac
+}
+
+fm_omp_process_identity_path_valid() {  # <canonical-executable-path>
+  local value=$1
+  fm_omp_process_identity_path_syntax_valid "$value" || return 1
   # ps exposes one flattened command string on the portable tmux path, so
   # whitespace-bearing executable paths cannot retain provable argv boundaries.
-  # Refuse them rather than guessing where either launch identity ends.
-  case "$value" in *[[:space:]]*) return 1 ;; esac
+  # The shared syntax check refuses them before any filesystem lookup.
   [ -x "$value" ] || return 1
   [ "$(fm_omp_process_resolve_path "$value" 2>/dev/null)" = "$value" ]
 }
@@ -89,8 +94,8 @@ fm_omp_primary_marker_read() {  # <marker>; sets FM_OMP_MARKER_{VERSION,PID,BUN,
   FM_OMP_MARKER_BIN=$(sed -n '4p' "$marker" 2>/dev/null)
   [ -n "$FM_OMP_MARKER_VERSION" ] || return 1
   case "$FM_OMP_MARKER_PID" in ''|*[!0-9]*) return 1 ;; esac
-  fm_omp_process_identity_path_valid "$FM_OMP_MARKER_BUN" \
-    && fm_omp_process_identity_path_valid "$FM_OMP_MARKER_BIN"
+  fm_omp_process_identity_path_syntax_valid "$FM_OMP_MARKER_BUN" \
+    && fm_omp_process_identity_path_syntax_valid "$FM_OMP_MARKER_BIN"
 }
 
 fm_omp_process_primary_marker_path() {
@@ -123,18 +128,31 @@ fm_omp_process_primary_identity() {  # <pid> -> <bun-realpath> newline <omp-real
 
 fm_omp_process_executable() {  # <pid>
   local pid=$1 path
-  if [ -e "/proc/$pid/exe" ]; then
-    fm_omp_process_resolve_path "/proc/$pid/exe"
+  if [ -L "/proc/$pid/exe" ]; then
+    path=$(readlink "/proc/$pid/exe" 2>/dev/null) || return 1
+    case "$path" in
+      *' (deleted)')
+        path=${path%' (deleted)'}
+        fm_omp_process_identity_path_syntax_valid "$path" || return 1
+        printf '%s' "$path"
+        ;;
+      *) fm_omp_process_resolve_path "/proc/$pid/exe" ;;
+    esac
     return
   fi
   command -v lsof >/dev/null 2>&1 || return 1
   path=$(lsof -a -p "$pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
   [ -n "$path" ] || return 1
-  fm_omp_process_resolve_path "$path"
+  case "$path" in *' (deleted)') path=${path%' (deleted)'} ;; esac
+  if [ -e "$path" ]; then
+    fm_omp_process_resolve_path "$path"
+  else
+    fm_omp_process_identity_path_syntax_valid "$path" && printf '%s' "$path"
+  fi
 }
 
 fm_omp_process_matches() {  # <comm-or-path> <args> [pid]
-  local comm=$1 args=$2 pid=${3:-} first second rest marker_identity
+  local comm=$1 args=$2 pid=${3:-} first second rest marker_identity marker_bound=0
   local expected_bun=${FM_OMP_PROCESS_EXPECTED_BUN:-} expected_omp=${FM_OMP_PROCESS_EXPECTED_BIN:-}
   local actual_bun actual_omp process_exe
   comm=$(basename -- "$comm")
@@ -142,12 +160,18 @@ fm_omp_process_matches() {  # <comm-or-path> <args> [pid]
     marker_identity=$(fm_omp_process_primary_identity "$pid") || return 1
     expected_bun=$(printf '%s\n' "$marker_identity" | sed -n '1p')
     expected_omp=$(printf '%s\n' "$marker_identity" | sed -n '2p')
+    marker_bound=1
   fi
   [ -n "$expected_bun" ] && [ -n "$expected_omp" ] || return 1
-  expected_bun=$(fm_omp_process_resolve_path "$expected_bun") || return 1
-  expected_omp=$(fm_omp_process_resolve_path "$expected_omp") || return 1
-  fm_omp_process_identity_path_valid "$expected_bun" \
-    && fm_omp_process_identity_path_valid "$expected_omp" || return 1
+  if [ "$marker_bound" -eq 1 ]; then
+    fm_omp_process_identity_path_syntax_valid "$expected_bun" \
+      && fm_omp_process_identity_path_syntax_valid "$expected_omp" || return 1
+  else
+    expected_bun=$(fm_omp_process_resolve_path "$expected_bun") || return 1
+    expected_omp=$(fm_omp_process_resolve_path "$expected_omp") || return 1
+    fm_omp_process_identity_path_valid "$expected_bun" \
+      && fm_omp_process_identity_path_valid "$expected_omp" || return 1
+  fi
   if [ "$expected_bun" = "$expected_omp" ]; then
     [ -n "$pid" ] || return 1
     process_exe=$(fm_omp_process_executable "$pid") || return 1

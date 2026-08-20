@@ -184,6 +184,52 @@ test_standalone_worker_uses_bound_identity() {
   [ "$out" = claude ] || fail "nested claude inherited standalone OMP identity: $out"
   pass "standalone OMP workers require exact bound executable and PID evidence"
 }
+test_standalone_primary_survives_executable_replacement() {
+  local dir state native owner target lock_status status=0
+  [ -L /proc/$$/exe ] || {
+    pass "standalone deleted-executable identity skipped without Linux procfs"
+    return
+  }
+  dir="$TMP_ROOT/deleted-standalone"
+  state="$dir/state"
+  native="$dir/omp"
+  mkdir -p "$state"
+  cp "$(command -v sleep)" "$native"
+  chmod +x "$native"
+  "$native" 30 &
+  owner=$!
+  target=$(readlink "/proc/$owner/exe" 2>/dev/null) || {
+    kill "$owner" 2>/dev/null || true
+    wait "$owner" 2>/dev/null || true
+    fail "could not read the copied standalone executable identity"
+  }
+  printf 'test-version\n%s\n%s\n%s\n' "$owner" "$native" "$native" \
+    > "$state/.omp-primary-extension-loaded"
+  printf '%s\n' "$owner" > "$state/.lock"
+  rm -f "$native"
+  case "$(readlink "/proc/$owner/exe" 2>/dev/null)" in
+    "$target (deleted)") ;;
+    *)
+      kill "$owner" 2>/dev/null || true
+      wait "$owner" 2>/dev/null || true
+      fail "fixture did not produce a live deleted executable"
+      ;;
+  esac
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-omp-process-lib.sh"
+    comm=$(ps -o comm= -p "$2") || exit 1
+    args=$(ps -o args= -p "$2") || exit 1
+    fm_omp_process_matches "$comm" "$args" "$2"
+  ' _ "$ROOT" "$owner" || status=$?
+  lock_status=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$lock_status" "held by live harness pid $owner" \
+    "session-lock liveness treated the live deleted standalone executable as stale"
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+  expect_code 0 "$status" "a live standalone primary should retain marker identity after atomic executable replacement"
+  pass "standalone primary identity survives a deleted launch-time executable path"
+}
+
 
 test_launch_identity_honors_explicit_bun_shebang() {
   local dir runtime omp other out expected_runtime expected_omp
@@ -347,6 +393,7 @@ test_capability_probe_never_falls_back_when_omp_is_missing() {
 
 test_launch_boundary_marker_preserves_exact_omp_identity
 test_standalone_worker_uses_bound_identity
+test_standalone_primary_survives_executable_replacement
 test_launch_identity_honors_explicit_bun_shebang
 test_env_shebang_bare_argv_matches_canonical_runtime
 test_capability_probe_accepts_required_surface

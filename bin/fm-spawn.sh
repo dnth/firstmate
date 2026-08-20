@@ -3400,30 +3400,42 @@ if [ "$KIND" = secondmate ]; then
   # injected carrier and this on/off snapshot are guaranteed to agree.
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
-# Export GOTMPDIR into the crewmate's pane shell so the agent and every child
-# process (go build, go test, ...) inherit it. Sent before the launch command so
-# the env is set when the agent starts; the brief sleep lets the export land.
-if ! spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"; then
-  echo "error: GOTMPDIR export could not be submitted safely for $W" >&2
-  exit 1
+# tmux-like backends configure the persistent pane shell before launch. Herdr
+# instead binds both values to the one atomic `pane run` command: acceptance of
+# a separate setup command would not prove that the shell executed it.
+HERDR_LAUNCH_ENV=
+if [ "$BACKEND" = herdr ]; then
+  HERDR_LAUNCH_ENV="GOTMPDIR=$(shell_quote "$TASK_TMP/gotmp") "
+else
+  if ! spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"; then
+    echo "error: GOTMPDIR export could not be submitted safely for $W" >&2
+    exit 1
+  fi
 fi
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
 # entirely when trace context is off.
 if [ -n "$SPAWN_TRACEPARENT" ]; then
-  if spawn_send_text_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
+  if [ "$BACKEND" = herdr ]; then
+    HERDR_LAUNCH_ENV="${HERDR_LAUNCH_ENV}TRACEPARENT=$(shell_quote "$SPAWN_TRACEPARENT") "
+    if ! echo "traceparent=$SPAWN_TRACEPARENT" >> "$STATE/$ID.meta"; then
+      HERDR_LAUNCH_ENV="GOTMPDIR=$(shell_quote "$TASK_TMP/gotmp") "
+      LAUNCH="unset TRACEPARENT; $LAUNCH"
+    fi
+  elif spawn_send_text_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
     if ! echo "traceparent=$SPAWN_TRACEPARENT" >> "$STATE/$ID.meta"; then
       LAUNCH="unset TRACEPARENT; $LAUNCH"
     fi
   else
     TRACE_SEND_STATUS=$?
-    if [ "$TRACE_SEND_STATUS" -eq 2 ] || [ "$BACKEND" = herdr ]; then
+    if [ "$TRACE_SEND_STATUS" -eq 2 ]; then
       echo "error: trace-context export could not be submitted safely for $W; refusing to append the launch command" >&2
       exit 1
     fi
   fi
 fi
 sleep 0.3
+[ "$BACKEND" != herdr ] || LAUNCH="$HERDR_LAUNCH_ENV$LAUNCH"
 [ -z "$OMP_LAUNCH_PATH_GUARD" ] || LAUNCH="$OMP_LAUNCH_PATH_GUARD$LAUNCH"
 if [ "$BACKEND" = herdr ]; then
   spawn_send_text_line "$T" "$LAUNCH" || {

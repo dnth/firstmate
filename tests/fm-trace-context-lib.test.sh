@@ -257,17 +257,22 @@ assert_grep 'echo "traceparent=$SPAWN_TRACEPARENT" >> "$STATE/$ID.meta"' "$SPAWN
 assert_grep 'export TRACEPARENT=' "$SPAWN" "fm-spawn.sh must inject the W3C TRACEPARENT env var"
 pass "fm-spawn.sh sources the lib and records one shared SPAWN_TRACEPARENT only after successful injection"
 
-# The injection must ride the same channel and site as GOTMPDIR (before launch,
-# unconditional across kinds): the TRACEPARENT export follows the GOTMPDIR export.
-gotmp_line=$(grep -n 'export GOTMPDIR=' "$SPAWN" | tail -1 | cut -d: -f1)
-tp_line=$(grep -n 'export TRACEPARENT=' "$SPAWN" | tail -1 | cut -d: -f1)
-# shellcheck disable=SC2016 # Dollar signs are literal source text in this grep pattern.
-meta_line=$(grep -n 'echo "traceparent=$SPAWN_TRACEPARENT" >>' "$SPAWN" | tail -1 | cut -d: -f1)
-[ -n "$gotmp_line" ] && [ -n "$tp_line" ] && [ -n "$meta_line" ] \
-  && [ "$tp_line" -gt "$gotmp_line" ] && [ "$((tp_line - gotmp_line))" -le 5 ] \
-  && [ "$meta_line" -gt "$tp_line" ] \
-  || fail "TRACEPARENT must be exported before metadata publication at the pre-launch GOTMPDIR site (gotmp=$gotmp_line tp=$tp_line meta=$meta_line)"
-pass "TRACEPARENT is injected at the unconditional pre-launch GOTMPDIR site and recorded only after successful delivery"
+# tmux-like backends export into their persistent shell; Herdr binds the same
+# carrier directly to its atomic launch command. Both paths publish metadata
+# only after selecting their injection form.
+# shellcheck disable=SC2016 # Dollar signs are literal source text in these fixed-string assertions.
+assert_grep 'HERDR_LAUNCH_ENV="GOTMPDIR=$(shell_quote "$TASK_TMP/gotmp") "' "$SPAWN" \
+  "fm-spawn.sh must bind GOTMPDIR directly to Herdr's atomic launch"
+# shellcheck disable=SC2016
+assert_grep 'HERDR_LAUNCH_ENV="${HERDR_LAUNCH_ENV}TRACEPARENT=$(shell_quote "$SPAWN_TRACEPARENT") "' "$SPAWN" \
+  "fm-spawn.sh must bind TRACEPARENT directly to Herdr's atomic launch"
+# shellcheck disable=SC2016
+assert_grep 'LAUNCH="$HERDR_LAUNCH_ENV$LAUNCH"' "$SPAWN" \
+  "fm-spawn.sh must bind the Herdr environment to the harness before any launch guard"
+# shellcheck disable=SC2016
+assert_grep 'spawn_send_text_line "$T" "$LAUNCH"' "$SPAWN" \
+  "fm-spawn.sh must submit the guarded Herdr launch as one command"
+pass "TRACEPARENT injection covers persistent-shell and atomic Herdr launch channels"
 
 # --- secondmate inheritance wires the nested chain ---------------------------
 
