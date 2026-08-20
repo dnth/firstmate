@@ -84,7 +84,7 @@ case "${1:-}" in
   display-message)
     case "$*" in
       *pane_current_command*) printf 'bun\n' ;;
-      *pane_pid*) printf '4242\n' ;;
+      *pane_pid*) printf '987654\n' ;;
     esac
     ;;
   list-windows) printf 'fm-ompunit\n' ;;
@@ -93,7 +93,7 @@ SH
   cat > "$fakebin/ps" <<SH
 #!/usr/bin/env bash
 case "\$*" in
-  *'tpgid='*) printf '4242\n' ;;
+  *'tpgid='*) printf '987654\n' ;;
   *'args='*) printf '%s\n' '$args' ;;
   *'comm='*) printf 'bun\n' ;;
 esac
@@ -106,8 +106,42 @@ SH
   printf '%s\n' "$fakebin"
 }
 
-write_omp_probe_meta() {  # <fakebin>
-  local fakebin=$1 meta="$TMP_ROOT/ompunit.meta"
+make_probe_tmux_omp_standalone_cli() {
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/omp"
+  chmod +x "$fakebin/omp"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  display-message)
+    case "$*" in
+      *pane_current_command*) printf 'cli.js\n' ;;
+      *pane_pid*) printf '987654\n' ;;
+    esac
+    ;;
+  list-windows) printf 'fm-ompunit\n' ;;
+esac
+SH
+  cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *'tpgid='*) printf '987654\n' ;;
+  *'args='*) printf '%s\n' '$fakebin/omp --session-dir /tmp/omp-sessions' ;;
+  *'comm='*) printf 'cli.js\n' ;;
+esac
+SH
+  cat > "$fakebin/lsof" <<SH
+#!/usr/bin/env bash
+printf 'n%s/omp\n' '$fakebin'
+SH
+  chmod +x "$fakebin/tmux" "$fakebin/ps" "$fakebin/lsof"
+  printf '%s\n' "$fakebin"
+}
+
+write_omp_probe_meta() {  # <fakebin> [runtime]
+  local fakebin=$1 runtime meta="$TMP_ROOT/ompunit.meta"
+  runtime=${2:-$fakebin/bun}
   cat > "$meta" <<EOF
 window=sess:fm-ompunit
 endpoint_task_id=ompunit
@@ -116,7 +150,7 @@ project=/tmp/ompunit-project
 harness=omp
 kind=secondmate
 omp_bin=$(fm_test_realpath "$fakebin/omp")
-omp_bun=$(fm_test_realpath "$fakebin/bun")
+omp_bun=$(fm_test_realpath "$runtime")
 EOF
   printf '%s\n' "$meta"
 }
@@ -186,6 +220,12 @@ EOF
   meta=$(write_omp_probe_meta "$fb")
   out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:fm-ompunit "$1"' "$ROOT" "$meta")
   [ "$out" = alive ] || fail "a metadata-bound exact Bun/OMP process should classify as alive, got '$out'"
+
+  fb=$(make_probe_tmux_omp_standalone_cli "$TMP_ROOT/tmux-omp-standalone-cli")
+  meta=$(write_omp_probe_meta "$fb" "$fb/omp")
+  out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:fm-ompunit "$1"' "$ROOT" "$meta")
+  [ "$out" = alive ] \
+    || fail "a standalone OMP process reported as cli.js should classify as alive, got '$out'"
 
   fb=$(make_probe_tmux_omp "$TMP_ROOT/tmux-omp-bare-bun" bare-bun)
   meta=$(write_omp_probe_meta "$fb")

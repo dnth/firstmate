@@ -70,7 +70,7 @@ omp_ancestry_matches() {  # <exact|launch-shape>
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
     bc=$(basename -- "$comm")
     case "$bc" in
-      bun|omp)
+      bun|omp|cli.js)
         args=$(ps -o args= -p "$pid" 2>/dev/null)
         if [ "$mode" = exact ]; then
           fm_omp_process_matches "$comm" "$args" "$pid" && return 0

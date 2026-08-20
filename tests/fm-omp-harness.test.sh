@@ -75,7 +75,11 @@ self_dir=$(cd "$(dirname "$0")" && pwd -P)
 if [ "$pid" = 700 ]; then
   case "$field" in
     comm=)
-      if [ "${FM_TEST_OMP_SHAPE:-legacy}" = standalone ]; then printf '%s\n' omp; else printf '%s\n' bun; fi
+      if [ "${FM_TEST_OMP_SHAPE:-legacy}" = standalone ]; then
+        printf '%s\n' "${FM_TEST_OMP_COMM:-omp}"
+      else
+        printf '%s\n' bun
+      fi
       ;;
     args=)
       if [ "${FM_TEST_OMP_SHAPE:-legacy}" = standalone ]; then
@@ -147,9 +151,10 @@ test_standalone_worker_uses_bound_identity() {
   omp=$(fm_test_realpath "$fakebin/omp")
 
   out=$(PATH="$path" env -u PI_CODING_AGENT -u CLAUDECODE -u GROK_AGENT \
-    FM_TEST_OMP_SHAPE=standalone FM_OMP_HARNESS=omp FM_OMP_BUN="$omp" FM_OMP_BIN="$omp" \
+    FM_TEST_OMP_SHAPE=standalone FM_TEST_OMP_COMM=cli.js FM_OMP_HARNESS=omp \
+    FM_OMP_BUN="$omp" FM_OMP_BIN="$omp" \
     "$ROOT/bin/fm-harness.sh")
-  [ "$out" = omp ] || fail "standalone OMP worker lost its bound executable identity: $out"
+  [ "$out" = omp ] || fail "standalone OMP worker reported as cli.js lost its bound executable identity: $out"
 
   out=$(PATH="$path" env -u PI_CODING_AGENT -u GROK_AGENT CLAUDECODE=1 \
     FM_TEST_OMP_SHAPE=standalone FM_TEST_HARNESS_PARENT=500 FM_OMP_HARNESS=omp \

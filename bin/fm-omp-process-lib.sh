@@ -6,6 +6,7 @@
 # executable. Callers bind canonical launch paths from task metadata or the
 # PID-bound primary marker; a fresh PATH lookup is never identity evidence.
 # For standalone OMP, both paths are equal and the PID executable is decisive.
+# Bun-compiled standalone OMP may report its embedded `cli.js` basename as comm.
 # This file has no source side effects.
 
 fm_omp_process_resolve_path() {  # <path-or-command>
@@ -132,7 +133,7 @@ fm_omp_process_matches() {  # <comm-or-path> <args> [pid]
   local expected_bun=${FM_OMP_PROCESS_EXPECTED_BUN:-} expected_omp=${FM_OMP_PROCESS_EXPECTED_BIN:-}
   local actual_bun actual_omp process_exe
   comm=$(basename -- "$comm")
-  case "$comm" in bun|omp) ;; *) return 1 ;; esac
+  case "$comm" in bun|omp|cli.js) ;; *) return 1 ;; esac
   if { [ -z "$expected_bun" ] || [ -z "$expected_omp" ]; } && [ -n "$pid" ]; then
     marker_identity=$(fm_omp_process_primary_identity "$pid") || return 1
     expected_bun=$(printf '%s\n' "$marker_identity" | sed -n '1p')
