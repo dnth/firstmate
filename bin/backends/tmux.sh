@@ -222,6 +222,10 @@ fm_backend_tmux_agent_state() {  # <target> [bun-realpath] [omp-realpath]
     return 0
   }
   comm=${comm#-}
+  case "$comm" in
+    zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'dead'; return 0 ;;
+    '') printf 'unreadable'; return 0 ;;
+  esac
   if [ -n "$expected_bun" ] && [ "$expected_bun" = "$expected_omp" ]; then
     fm_backend_tmux_bun_agent_state "$target" "$comm" "$expected_bun" "$expected_omp"
     return 0
@@ -229,8 +233,6 @@ fm_backend_tmux_agent_state() {  # <target> [bun-realpath] [omp-realpath]
   case "$comm" in
     *claude*|*codex*|*opencode*|*grok*|*kimi*|pi|pi-signed|pi-launcher|Pi) printf 'alive' ;;
     bun|omp|cli.js) fm_backend_tmux_bun_agent_state "$target" "$comm" "$expected_bun" "$expected_omp" ;;
-    zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'dead' ;;
-    '') printf 'unreadable' ;;
     *) printf 'ambiguous' ;;
   esac
 }

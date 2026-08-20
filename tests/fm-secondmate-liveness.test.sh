@@ -46,7 +46,7 @@ TMP_ROOT=$(fm_test_tmproot fm-secondmate-liveness)
 # #{pane_current_command} display-message query answers with the fixed value;
 # every other subcommand is a silent no-op success.
 make_probe_tmux() {
-  local dir=$1 comm=$2 fakebin
+  local dir=$1 comm=$2 window=${3:-win} fakebin
   fakebin=$(fm_fakebin "$dir")
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
@@ -55,7 +55,7 @@ case "\${1:-}" in
   display-message)
     for a in "\$@"; do case "\$a" in *pane_current_command*) printf '%s\n' '$comm'; exit 0 ;; esac; done
     exit 0 ;;
-  list-windows) printf '%s\n' win; exit 0 ;;
+  list-windows) printf '%s\n' '$window'; exit 0 ;;
 esac
 exit 0
 SH
@@ -235,6 +235,23 @@ EOF
   [ "$out" = alive ] \
     || fail "a renamed standalone OMP with exact executable identity should classify as alive, got '$out'"
 
+  fb=$(make_probe_tmux "$TMP_ROOT/tmux-omp-standalone-exited" bash fm-ompunit)
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fb/omp"
+  chmod +x "$fb/omp"
+  meta="$TMP_ROOT/ompunit.meta"
+  cat > "$meta" <<EOF
+window=sess:fm-ompunit
+endpoint_task_id=ompunit
+worktree=/tmp/ompunit-worktree
+project=/tmp/ompunit-project
+harness=omp
+kind=secondmate
+omp_bin=$(fm_test_realpath "$fb/omp")
+omp_bun=$(fm_test_realpath "$fb/omp")
+EOF
+  out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:fm-ompunit "$1"' "$ROOT" "$meta")
+  [ "$out" = dead ] \
+    || fail "an exited standalone OMP pane at a shell should classify as dead, got '$out'"
   fb=$(make_probe_tmux_omp "$TMP_ROOT/tmux-omp-bare-bun" bare-bun)
   meta=$(write_omp_probe_meta "$fb")
   out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:fm-ompunit "$1"' "$ROOT" "$meta")

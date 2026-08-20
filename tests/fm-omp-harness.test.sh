@@ -110,13 +110,17 @@ pid=
 while [ "$#" -gt 0 ]; do
   case "$1" in -p) pid=$2; shift 2 ;; *) shift ;; esac
 done
-printf 'p%s\n' "$pid"
-printf 'n%s/omp\n' "$self_dir"
+if [ "$pid" = 500 ]; then
+  printf 'n%s/claude\n' "$self_dir"
+else
+  printf 'n%s/omp\n' "$self_dir"
+fi
 SH
   chmod +x "$fakebin/lsof"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/bun"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/omp"
-  chmod +x "$fakebin/bun" "$fakebin/omp"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/claude"
+  chmod +x "$fakebin/bun" "$fakebin/omp" "$fakebin/claude"
   printf '%s\n' "$fakebin"
 }
 
@@ -155,6 +159,12 @@ test_standalone_worker_uses_bound_identity() {
     FM_OMP_BUN="$omp" FM_OMP_BIN="$omp" \
     "$ROOT/bin/fm-harness.sh")
   [ "$out" = omp ] || fail "standalone OMP worker reported as cli.js lost its bound executable identity: $out"
+
+  out=$(PATH="$path" env -u PI_CODING_AGENT -u CLAUDECODE -u GROK_AGENT \
+    FM_TEST_OMP_SHAPE=standalone FM_TEST_OMP_COMM=omp-17.3.8 FM_OMP_HARNESS=omp \
+    FM_OMP_BUN="$omp" FM_OMP_BIN="$omp" \
+    "$ROOT/bin/fm-harness.sh")
+  [ "$out" = omp ] || fail "renamed standalone OMP lost its exact PID-bound identity: $out"
 
   out=$(PATH="$path" env -u PI_CODING_AGENT -u GROK_AGENT CLAUDECODE=1 \
     FM_TEST_OMP_SHAPE=standalone FM_TEST_HARNESS_PARENT=500 FM_OMP_HARNESS=omp \

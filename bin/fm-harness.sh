@@ -69,14 +69,14 @@ omp_ancestry_matches() {  # <exact|launch-shape>
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
     bc=$(basename -- "$comm")
+    if [ "$mode" = exact ]; then
+      args=$(ps -o args= -p "$pid" 2>/dev/null)
+      fm_omp_process_matches "$comm" "$args" "$pid" && return 0
+    fi
     case "$bc" in
       bun|omp|cli.js)
         args=$(ps -o args= -p "$pid" 2>/dev/null)
-        if [ "$mode" = exact ]; then
-          fm_omp_process_matches "$comm" "$args" "$pid" && return 0
-        else
-          omp_launch_argv_shape "$args" && return 0
-        fi
+        omp_launch_argv_shape "$args" && return 0
         ;;
       *claude*|*codex*|*opencode*|*grok*|kimi|pi|pi-signed) return 1 ;;
       node*|python*)
