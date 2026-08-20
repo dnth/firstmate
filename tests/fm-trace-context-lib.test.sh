@@ -339,7 +339,7 @@ SH
 }
 
 test_herdr_spawn_executes_one_atomic_launch_with_trace_context() {
-  local dir home project worktree fakebin state log ps_bin side_effect id out status meta tp observed run_count launch_payload
+  local dir home project worktree fakebin state log ps_bin side_effect id out status meta tp observed run_count launch_payload unit_separator
   dir="$WORK/herdr-spawn"
   home="$dir/home"
   project="$dir/project"
@@ -389,9 +389,10 @@ SH
   observed=$(cat "$dir/observed")
   assert_contains "$observed" "TRACEPARENT=$tp" "the launched command must receive the recorded carrier"
   assert_contains "$observed" "GOTMPDIR=/tmp/fm-$id/gotmp" "the launched command must receive the task GOTMPDIR"
-  run_count=$(awk -F '\\x1f' '$2 == "pane" && $3 == "run" { count += 1 } END { print count + 0 }' "$log")
+  unit_separator=$'\x1f'
+  run_count=$(awk -F "$unit_separator" '$2 == "pane" && $3 == "run" { count += 1 } END { print count + 0 }' "$log")
   [ "$run_count" -eq 2 ] || fail "Herdr must submit treehouse setup and launch through two pane run calls (got $run_count)"
-  launch_payload=$(awk -F '\\x1f' '$2 == "pane" && $3 == "run" && $5 !~ /fm-treehouse-get.sh/ { print $5; exit }' "$log")
+  launch_payload=$(awk -F "$unit_separator" '$2 == "pane" && $3 == "run" && $5 !~ /fm-treehouse-get.sh/ { print $5; exit }' "$log")
   assert_contains "$launch_payload" "GOTMPDIR=" "the recorded Herdr launch command must bind GOTMPDIR"
   assert_contains "$launch_payload" "TRACEPARENT=" "the recorded Herdr launch command must bind TRACEPARENT"
   pass "an executable Herdr spawn records metadata and executes one atomic trace-aware launch"
