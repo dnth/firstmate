@@ -47,6 +47,7 @@ cp "$ROOT/AGENTS.md" "$ROOT/.tasks.toml" "$PROJECT/"
 cp -R "$ROOT/bin" "$PROJECT/bin"
 cp -R "$ROOT/docs/supervision-protocols" "$PROJECT/docs/supervision-protocols"
 cp -R "$ROOT/.agents/skills/harness-adapters" "$PROJECT/.agents/skills/harness-adapters"
+cp -R "$ROOT/.agents/skills/afk" "$PROJECT/.agents/skills/afk"
 cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$PROJECT/.omp/extensions/fm-primary-omp.ts"
 git init -q -b main "$PROJECT"
 fm_git_identity fmtest fmtest@example.invalid
