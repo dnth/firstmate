@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 # tests/fm-trace-context-lib.test.sh - unit tests for the native, default-off
-# W3C trace-context library (bin/fm-trace-context-lib.sh) plus structural checks
-# that bin/fm-spawn.sh wires it in at the pre-launch injection seam and that the
-# capability is inherited into secondmate homes. Pure functions, no backend and
-# no live spawn required.
+# W3C trace-context library (bin/fm-trace-context-lib.sh) plus an isolated spawn
+# fixture that exercises Herdr's launch command and secondmate inheritance.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -240,39 +238,166 @@ for tok in brief prompt report status ; do
 done
 pass "the lib code never reads a brief, prompt, report, or status - it cannot leak content"
 
-# --- structural wiring in bin/fm-spawn.sh ------------------------------------
+# --- executable Herdr launch wiring ------------------------------------------
 
-SPAWN="$ROOT/bin/fm-spawn.sh"
-# Patterns deliberately start after any leading '$' so the fixed-string grep needs
-# no shell metacharacters while still pinning the exact wiring.
-assert_grep 'fm-trace-context-lib.sh' "$SPAWN" "fm-spawn.sh must source the trace-context lib"
-assert_grep 'SPAWN_TRACEPARENT=' "$SPAWN" "fm-spawn.sh must assign the resolved carrier"
-assert_grep 'fm_trace_context_resolve' "$SPAWN" "fm-spawn.sh must resolve the carrier through the lib entry point"
-# shellcheck disable=SC2016 # Dollar signs are literal source text in this fixed-string assertion.
-assert_grep 'if spawn_send_text_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then' "$SPAWN" \
-  "fm-spawn.sh must condition metadata publication on successful carrier delivery"
-# shellcheck disable=SC2016 # Dollar signs are literal source text in this fixed-string assertion.
-assert_grep 'echo "traceparent=$SPAWN_TRACEPARENT" >> "$STATE/$ID.meta"' "$SPAWN" \
-  "fm-spawn.sh must record the delivered carrier in metadata"
-assert_grep 'export TRACEPARENT=' "$SPAWN" "fm-spawn.sh must inject the W3C TRACEPARENT env var"
-pass "fm-spawn.sh sources the lib and records one shared SPAWN_TRACEPARENT only after successful injection"
+make_trace_spawn_herdr_fixture() {
+  local dir=$1 fakebin="$1/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+log=${FM_HERDR_LOG:?}
+state=${FM_FAKE_HERDR_STATE:?}
+project=${FM_FAKE_PROJECT:?}
+worktree=${FM_FAKE_WORKTREE:?}
+{
+  printf 'HERDR_SESSION=%s' "${HERDR_SESSION:-}"
+  for arg in "$@"; do printf '\x1f%s' "$arg"; done
+  printf '\n'
+} >> "$log"
 
-# tmux-like backends export into their persistent shell; Herdr binds the same
-# carrier directly to its atomic launch command. Both paths publish metadata
-# only after selecting their injection form.
-# shellcheck disable=SC2016 # Dollar signs are literal source text in these fixed-string assertions.
-assert_grep 'HERDR_LAUNCH_ENV="GOTMPDIR=$(shell_quote "$TASK_TMP/gotmp") "' "$SPAWN" \
-  "fm-spawn.sh must bind GOTMPDIR directly to Herdr's atomic launch"
-# shellcheck disable=SC2016
-assert_grep 'HERDR_LAUNCH_ENV="${HERDR_LAUNCH_ENV}TRACEPARENT=$(shell_quote "$SPAWN_TRACEPARENT") "' "$SPAWN" \
-  "fm-spawn.sh must bind TRACEPARENT directly to Herdr's atomic launch"
-# shellcheck disable=SC2016
-assert_grep 'LAUNCH="$HERDR_LAUNCH_ENV$LAUNCH"' "$SPAWN" \
-  "fm-spawn.sh must bind the Herdr environment to the harness before any launch guard"
-# shellcheck disable=SC2016
-assert_grep 'spawn_send_text_line "$T" "$LAUNCH"' "$SPAWN" \
-  "fm-spawn.sh must submit the guarded Herdr launch as one command"
-pass "TRACEPARENT injection covers persistent-shell and atomic Herdr launch channels"
+case "${1:-} ${2:-}" in
+  "status --json")
+    printf '%s\n' '{"client":{"version":"0.7.5","protocol":14},"server":{"running":true}}'
+    ;;
+  "server")
+    ;;
+  "workspace list")
+    if [ -e "$state/workspace" ]; then
+      printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"ws1","label":"firstmate"}]}}'
+    else
+      printf '%s\n' '{"result":{"workspaces":[]}}'
+    fi
+    ;;
+  "workspace create")
+    : > "$state/workspace"
+    printf '%s\n' '{"result":{"workspace":{"workspace_id":"ws1","label":"firstmate"},"tab":{"tab_id":"seed-tab"},"root_pane":{"pane_id":"seed-pane"}}}'
+    ;;
+  "tab list")
+    if [ -e "$state/task" ]; then
+      printf '%s\n' '{"result":{"tabs":[{"tab_id":"seed-tab","label":"1"},{"tab_id":"task-tab","label":"fm-trace-herdr"}]}}'
+    else
+      printf '%s\n' '{"result":{"tabs":[{"tab_id":"seed-tab","label":"1"}]}}'
+    fi
+    ;;
+  "tab create")
+    : > "$state/task"
+    printf '%s\n' '{"result":{"tab":{"tab_id":"task-tab"},"root_pane":{"pane_id":"task-pane"}}}'
+    ;;
+  "pane list")
+    if [ -e "$state/task" ]; then
+      printf '%s\n' '{"result":{"panes":[{"pane_id":"seed-pane","tab_id":"seed-tab"},{"pane_id":"task-pane","tab_id":"task-tab"}]}}'
+    else
+      printf '%s\n' '{"result":{"panes":[{"pane_id":"seed-pane","tab_id":"seed-tab"}]}}'
+    fi
+    ;;
+  "pane get")
+    pane=${3:-}
+    if [ "$pane" = seed-pane ]; then
+      cwd=$project
+      tab=seed-tab
+    else
+      cwd=$project
+      tab=task-tab
+      [ -e "$state/ready" ] && cwd=$worktree
+    fi
+    printf '{"result":{"pane":{"pane_id":"%s","tab_id":"%s","workspace_id":"ws1","foreground_cwd":"%s"}}}\n' "$pane" "$tab" "$cwd"
+    ;;
+  "pane process-info")
+    pane=${4:-}
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[{"pid":4242,"name":"bash","argv0":"bash"}]}}}\n' "$pane"
+    ;;
+  "pane run")
+    pane=${3:-}
+    payload=${4:-}
+    case "$payload" in
+      *fm-treehouse-get.sh*)
+        : > "$state/ready"
+        ;;
+      *)
+        bash -c "$payload"
+        ;;
+    esac
+    ;;
+  "pane close")
+    ;;
+  "agent get")
+    printf '%s\n' '{"error":{"code":"agent_not_found"}}'
+    ;;
+esac
+SH
+  chmod +x "$fakebin/herdr"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "-axo pid=,ppid=") printf '%s\n' '4242 1' ;;
+  "-p 4242 -o stat=") printf '%s\n' 'S' ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '%s\n' "$fakebin"
+}
+
+test_herdr_spawn_executes_one_atomic_launch_with_trace_context() {
+  local dir home project worktree fakebin state log ps_bin side_effect id out status meta tp observed run_count launch_payload
+  dir="$WORK/herdr-spawn"
+  home="$dir/home"
+  project="$dir/project"
+  worktree="$dir/worktree"
+  state="$dir/herdr-state"
+  log="$dir/herdr.log"
+  ps_bin="$dir/ps-bin"
+  side_effect="$dir/launch-side-effect"
+  id=trace-herdr
+  mkdir -p "$home/data/$id" "$home/state" "$home/config" "$home/projects" "$state"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  printf '%s\n' "$$ on" > "$home/state/.trace-context-effective"
+  : > "$home/config/trace-context"
+  printf 'launch brief\n' > "$home/data/$id/brief.md"
+  printf '# fake firstmate home\n' > "$home/AGENTS.md"
+  mkdir -p "$home/bin"
+  fm_git_worktree "$project" "$worktree" trace-herdr
+  cat > "$side_effect" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf 'GOTMPDIR=%s\nTRACEPARENT=%s\n' "${GOTMPDIR:-}" "${TRACEPARENT:-}" > "${FM_TRACE_SPAWN_OBSERVED:?}"
+SH
+  chmod +x "$side_effect"
+  fakebin=$(make_trace_spawn_herdr_fixture "$dir")
+  : > "$log"
+  : > "$ps_bin"
+  cp "$fakebin/ps" "$ps_bin"
+  chmod +x "$ps_bin"
+
+  out=$(env -u FM_TRACE_CONTEXT -u HERDR_ENV -u HERDR_PANE_ID \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 HERDR_SESSION=trace-fixture \
+    FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" \
+    FM_FAKE_PROJECT="$project" FM_FAKE_WORKTREE="$worktree" \
+    FM_HERDR_PS_BIN="$ps_bin" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    FM_TRACE_SPAWN_OBSERVED="$dir/observed" PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$project" "env $side_effect" --backend herdr \
+    --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "the Herdr-backed spawn should succeed"
+  assert_contains "$out" "spawned $id" "the Herdr-backed spawn should report success"
+  meta="$home/state/$id.meta"
+  tp=$(sed -n 's/^traceparent=//p' "$meta")
+  fm_trace_context_valid "$tp" || fail "the executable Herdr spawn must record a valid carrier (got '$tp')"
+  observed=$(cat "$dir/observed")
+  assert_contains "$observed" "TRACEPARENT=$tp" "the launched command must receive the recorded carrier"
+  assert_contains "$observed" "GOTMPDIR=/tmp/fm-$id/gotmp" "the launched command must receive the task GOTMPDIR"
+  run_count=$(awk -F '\\x1f' '$2 == "pane" && $3 == "run" { count += 1 } END { print count + 0 }' "$log")
+  [ "$run_count" -eq 2 ] || fail "Herdr must submit treehouse setup and launch through two pane run calls (got $run_count)"
+  launch_payload=$(awk -F '\\x1f' '$2 == "pane" && $3 == "run" && $5 !~ /fm-treehouse-get.sh/ { print $5; exit }' "$log")
+  assert_contains "$launch_payload" "GOTMPDIR=" "the recorded Herdr launch command must bind GOTMPDIR"
+  assert_contains "$launch_payload" "TRACEPARENT=" "the recorded Herdr launch command must bind TRACEPARENT"
+  pass "an executable Herdr spawn records metadata and executes one atomic trace-aware launch"
+}
+
+test_herdr_spawn_executes_one_atomic_launch_with_trace_context
 
 # --- secondmate inheritance wires the nested chain ---------------------------
 
