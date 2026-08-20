@@ -17,7 +17,7 @@ OMP_VERSION=$("$OMP_BIN" --version 2>&1 | head -1) || fail "OMP version probe fa
 TMP_ROOT=$(fm_test_tmproot fm-omp-max-time-live)
 EVENTS="$TMP_ROOT/events.jsonl"
 STDERR_LOG="$TMP_ROOT/stderr.log"
-MODEL=${FM_OMP_MAX_TIME_LIVE_MODEL:-openai-codex/gpt-5.6-sol}
+MODEL=${FM_OMP_MAX_TIME_LIVE_MODEL:-openai-codex/gpt-5.6-luna}
 
 started=$(date +%s)
 OMP_SKIP_SETUP=1 "$OMP_BIN" --model "$MODEL" --thinking low --no-session --no-tools \

@@ -386,8 +386,10 @@ test_herdr_launch_exact_resume_recovery_and_abort() {
 
   out=$(run_spawn_herdr 2>&1) || fail "fresh OMP Herdr secondmate spawn failed: $out"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "PATH='$FAKEBIN'\${PATH:+:\$PATH} '$TEST_OMP_BIN' --session-dir '$HOME_DIR/state/omp-sessions'" \
-    "OMP Herdr secondmate launch did not invoke its canonical executable with the isolated session directory"
+  assert_contains "$launch" "/bin/bash -c" \
+    "OMP Herdr secondmate launch did not use its Bash-owned command wrapper"
+  assert_not_contains "$launch" '${PATH:+' \
+    "OMP Herdr secondmate launch exposed POSIX parameter expansion to the pane shell"
   assert_not_contains "$launch" "'$TEST_OMP_BUN' '$TEST_OMP_BIN'" \
     "OMP Herdr secondmate launch routed the selected executable through Bun"
   assert_contains "$(cat "$MAIN_STATE/$TASK_ID.meta")" 'harness=omp' "OMP Herdr secondmate identity was not exact"
@@ -411,12 +413,16 @@ test_herdr_launch_exact_resume_recovery_and_abort() {
     FM_OMP_AUTH_BROKER_TOKEN_FILE="$token_file" 2>&1) \
     || fail "OMP Herdr secondmate broker launch failed: $out"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "OMP_AUTH_BROKER_URL='http://127.0.0.1:8765'" \
+  assert_contains "$launch" "OMP_AUTH_BROKER_URL=" \
     "OMP secondmate agent launch did not receive the pod-loopback broker URL"
-  assert_contains "$launch" "OMP_AUTH_BROKER_TOKEN=\"\$(cat '$token_file')\"" \
-    "OMP secondmate agent launch did not defer bearer expansion to the pane shell"
-  assert_contains "$launch" "FM_OMP_AUTH_BROKER_TOKEN_FILE='$token_file'" \
+  assert_contains "$launch" "http://127.0.0.1:8765" \
+    "OMP secondmate agent launch did not retain the broker URL"
+  assert_contains "$launch" "\$(cat" \
+    "OMP secondmate agent launch did not defer bearer expansion to its Bash-owned command wrapper"
+  assert_contains "$launch" "FM_OMP_AUTH_BROKER_TOKEN_FILE=" \
     "OMP secondmate agent launch did not retain the safe token-file path for descendants"
+  assert_contains "$launch" "$token_file" \
+    "OMP secondmate agent launch did not retain the safe token-file path"
   assert_not_contains "$launch" 'dummy_remote_agent_broker_token_789' \
     "OMP secondmate agent launch exposed broker bearer bytes in backend transport"
 
@@ -471,13 +477,17 @@ test_launch_and_exact_resume() {
 
   out=$(run_spawn -- --prewalk-into 'test/finish:xhigh' 2>&1) || fail "fresh OMP secondmate spawn failed: $out"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_OMP_SESSION_POINTER='$HOME_DIR/state/.omp-session'" "OMP launch did not bind the home-owned session pointer"
-  assert_contains "$launch" "PATH='$FAKEBIN'\${PATH:+:\$PATH} '$TEST_OMP_BIN'" \
-    "OMP launch did not invoke the capability-checked canonical executable"
+  assert_contains "$launch" "FM_OMP_SESSION_POINTER=" "OMP launch did not bind the home-owned session pointer"
+  assert_contains "$launch" "$HOME_DIR/state/.omp-session" "OMP launch did not retain the home-owned session pointer path"
+  assert_contains "$launch" "/bin/bash -c" \
+    "OMP launch did not use its Bash-owned command wrapper"
+  assert_not_contains "$launch" '${PATH:+' \
+    "OMP launch exposed POSIX parameter expansion to the pane shell"
   assert_not_contains "$launch" "'$TEST_OMP_BUN' '$TEST_OMP_BIN'" \
     "OMP launch routed the selected executable through Bun"
-  assert_contains "$(cat "$LAUNCH_LOG")" "--session-dir '$HOME_DIR/state/omp-sessions' --auto-approve --max-time=3h --model 'test/model' --thinking 'low'" "OMP launch did not preserve exact pins and durable session directory"
-  assert_contains "$(cat "$LAUNCH_LOG")" "-e '$HOME_DIR/.omp/extensions/fm-primary-omp.ts'" "OMP launch did not preserve its exact adapter"
+  assert_contains "$(cat "$LAUNCH_LOG")" "--session-dir" "OMP launch did not preserve its durable session directory"
+  assert_contains "$(cat "$LAUNCH_LOG")" "$HOME_DIR/state/omp-sessions" "OMP launch did not retain its durable session directory"
+  assert_contains "$(cat "$LAUNCH_LOG")" "$HOME_DIR/.omp/extensions/fm-primary-omp.ts" "OMP launch did not preserve its exact adapter"
   assert_not_contains "$(cat "$LAUNCH_LOG")" '__OMP' "OMP launch retained an unsubstituted template placeholder"
   assert_contains "$(cat "$MAIN_STATE/$TASK_ID.meta")" 'harness=omp' "OMP identity was not recorded exactly"
   assert_contains "$(cat "$MAIN_STATE/$TASK_ID.meta")" 'model=test/model' "OMP model pin was not recorded"

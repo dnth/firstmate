@@ -137,7 +137,7 @@ test_busy_omp_mixed_enter_transport_retains_queued_delivery() {
   attempts="$dir/attempts.log"
   vfile="$dir/verdict"
   bun=$(command -v bun)
-  top='╭── ⬢ GPT-5.6-Sol++ · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
+  top='╭── ⬢ GPT-5.6-Luna · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
   width=$(fm_composer_terminal_width "$top" "$bun") \
     || fail "could not measure mixed Enter fixture width"
   printf '%s\n' "$top" > "$composer"
@@ -266,7 +266,7 @@ test_omp_composer_and_submission_use_verified_two_row_structure() {
   sent="$dir/sent.log"
   vfile="$dir/verdict"
   : > "$sent"
-  top='╭── ⬢ GPT-5.6-Sol++ · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
+  top='╭── ⬢ GPT-5.6-Luna · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
   width=$(fm_composer_terminal_width "$top" "$bun") \
     || fail "could not measure OMP fixture width"
 
@@ -331,7 +331,7 @@ exit 64
 SH
     chmod +x "$fakebin/$utility"
   done
-  top='╭── ⬢ GPT-5.6-Sol++ · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
+  top='╭── ⬢ GPT-5.6-Luna · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
   if bun=$(command -v bun 2>/dev/null); then
     legacy_width=$(LC_ALL=C fm_composer_terminal_width "$top" "$bun") \
       || fail "legacy Bun width boundary could not measure the structural row"
@@ -395,7 +395,7 @@ test_omp_busy_signature_is_exact_and_scoped() {
     || fail "live OMP Running-tool capture should classify busy"
   printf ' ⠦ Waiting thirty seconds ⟦esc⟧\n' | fm_busy_lines_match omp \
     || fail "live OMP Waiting-tool capture should classify busy"
-  printf '╭── ⬢ GPT-5.6-Sol++ · ◔ low ▶ 🌳 project/worker-wt ▶ ⑂ fm/omp-live-worker ▶────╮\n' \
+  printf '╭── ⬢ GPT-5.6-Luna · ◔ low ▶ 🌳 project/worker-wt ▶ ⑂ fm/omp-live-worker ▶────╮\n' \
     | fm_busy_lines_match omp \
     && fail "live OMP idle status bar must not classify busy"
   printf 'Working...\n' | fm_busy_lines_match omp \

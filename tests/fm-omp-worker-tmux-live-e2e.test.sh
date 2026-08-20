@@ -235,7 +235,7 @@ spawn_omp() {
     FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_BACKEND=tmux FM_SPAWN_NO_GUARD=1 \
     OMP_SKIP_SETUP=1 PATH="$WRAPPER_BIN:$PATH" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$PROJECT" "${args[@]}" --harness omp \
-      --model openai-codex/gpt-5.6-sol --effort low
+      --model openai-codex/gpt-5.6-luna --effort low
 }
 
 spawn_omp "$WORKER_ID" ship >/dev/null || fail "real OMP worker spawn failed"
@@ -244,13 +244,13 @@ WORKER_WT=$(sed -n 's/^worktree=//p' "$WORKER_META")
 WORKER_TARGET=$(sed -n 's/^window=//p' "$WORKER_META")
 assert_grep 'harness=omp' "$WORKER_META" "worker metadata lost exact OMP identity"
 assert_grep 'kind=ship' "$WORKER_META" "worker metadata lost ship kind"
-assert_grep 'model=openai-codex/gpt-5.6-sol' "$WORKER_META" "worker metadata lost selected model"
+assert_grep 'model=openai-codex/gpt-5.6-luna' "$WORKER_META" "worker metadata lost selected model"
 assert_grep 'effort=low' "$WORKER_META" "worker metadata lost selected thinking level"
 wait_file "$HOME_DIR/state/$WORKER_ID.omp-ready" || fail "OMP worker extension did not report session readiness"
 wait_file "$HOME_DIR/state/$WORKER_ID.turn-ended" || fail "initial OMP worker turn did not complete"
 wait_text_count "$WORKER_TARGET" OMP_INITIAL_DONE 2 || fail "initial OMP worker response was not observed"
 wait_launch_brief_once || fail "OMP worker initial launch brief was not persisted exactly once"
-assert_contains "$(capture "$WORKER_TARGET")" 'GPT-5.6-Sol' "OMP worker did not display the selected model"
+assert_contains "$(capture "$WORKER_TARGET")" 'GPT-5.6-Luna' "OMP worker did not display the selected model"
 assert_contains "$(capture "$WORKER_TARGET")" 'low' "OMP worker did not display the selected thinking level"
 [ "$(agent_state "$WORKER_TARGET")" = alive ] || fail "idle OMP worker was not classified alive"
 

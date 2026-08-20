@@ -1063,10 +1063,10 @@ unverified dispatch harness is flagged^{"rules":[{"when":"anything","use":{"harn
 unsupported codex max effort is flagged^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
 unsupported grok max effort is flagged^{"rules":[{"when":"deep current work","use":{"harness":"grok","model":"grok-4","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:max
 unsupported grok xhigh effort is flagged^{"rules":[{"when":"deep current work","use":{"harness":"grok","model":"grok-4","effort":"xhigh"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:xhigh
-pi max effort is accepted^{"rules":[{"when":"deep coding","use":{"harness":"pi","model":"openai-codex/gpt-5.6-sol","effort":"max"}}]}^empty^
-pi-signed max effort is accepted^{"rules":[{"when":"signed coding","use":{"harness":"pi-signed","model":"openai-codex/gpt-5.6-sol","effort":"max"}}]}^empty^
-omp max effort is accepted^{"rules":[{"when":"OMP coding","use":{"harness":"omp","model":"openai-codex/gpt-5.6-sol","effort":"max"}}]}^empty^
-omp prewalk target is accepted^{"rules":[{"when":"well-scoped coding","use":{"harness":"omp","model":"openai-codex/gpt-5.6-sol","effort":"xhigh","prewalk_into":"openai-codex/gpt-5.6-luna:xhigh"}}]}^empty^
+pi max effort is accepted^{"rules":[{"when":"deep coding","use":{"harness":"pi","model":"openai-codex/gpt-5.6-luna","effort":"max"}}]}^empty^
+pi-signed max effort is accepted^{"rules":[{"when":"signed coding","use":{"harness":"pi-signed","model":"openai-codex/gpt-5.6-luna","effort":"max"}}]}^empty^
+omp max effort is accepted^{"rules":[{"when":"OMP coding","use":{"harness":"omp","model":"openai-codex/gpt-5.6-luna","effort":"max"}}]}^empty^
+omp prewalk target is accepted^{"rules":[{"when":"well-scoped coding","use":{"harness":"omp","model":"openai-codex/gpt-5.6-luna","effort":"xhigh","prewalk_into":"openai-codex/gpt-5.6-luna:xhigh"}}]}^empty^
 non-omp prewalk target is flagged^{"rules":[{"when":"Claude coding","use":{"harness":"claude","model":"sonnet","effort":"high","prewalk_into":"openai-codex/gpt-5.6-luna:xhigh"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - prewalk_into requires harness=omp, not: claude
 empty prewalk target is flagged^{"rules":[{"when":"OMP coding","use":{"harness":"omp","prewalk_into":""}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - use profile model, effort, and prewalk_into must be non-empty strings when present
 unsupported opencode effort is flagged^{"rules":[{"when":"opencode work","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: opencode:high

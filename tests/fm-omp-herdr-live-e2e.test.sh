@@ -476,7 +476,7 @@ spawn_task() { # <id> [--scout]
   fi
   fm_env FM_SPAWN_NO_GUARD=1 FM_OMP_LAUNCH_ACK_INTERVAL=0.25 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$PROJECT" --harness omp \
-      --model openai-codex/gpt-5.6-sol --effort low "${delivery_args[@]}" "$@"
+      --model openai-codex/gpt-5.6-luna --effort low "${delivery_args[@]}" "$@"
 }
 
 # --- real primary ------------------------------------------------------------
@@ -492,7 +492,7 @@ PRIMARY_PANE=$(printf '%s' "$primary_create" | jq -r '.result.root_pane.pane_id 
 [ -n "$PRIMARY_PANE" ] || fail "primary workspace returned no pane"
 PRIMARY_TARGET="$SESSION:$PRIMARY_PANE"
 printf -v primary_launch \
-  "exec env PATH=%q OMP_SKIP_SETUP=1 FM_HOME=%q FM_ROOT_OVERRIDE=%q FM_STATE_OVERRIDE=%q FM_CONFIG_OVERRIDE=%q %q --model openai-codex/gpt-5.6-sol --thinking low --session-dir %q --auto-approve -e %q %q" \
+  "exec env PATH=%q OMP_SKIP_SETUP=1 FM_HOME=%q FM_ROOT_OVERRIDE=%q FM_STATE_OVERRIDE=%q FM_CONFIG_OVERRIDE=%q %q --model openai-codex/gpt-5.6-luna --thinking low --session-dir %q --auto-approve -e %q %q" \
   "$WRAPPER_BIN:$BASE_PATH" "$PRIMARY_HOME" "$PRIMARY_PROJECT" "$PRIMARY_HOME/state" "$PRIMARY_HOME/config" \
   "$OMP_BIN" "$PRIMARY_HOME/sessions" "$PRIMARY_PROJECT/.omp/extensions/fm-primary-omp.ts" \
   "Follow the injected startup instruction exactly once, call the fm_watch_arm_omp tool, then reply exactly: Herdr primary is ready."
@@ -712,7 +712,7 @@ SCOUT_WT=
 git clone -q "$DRIVER_ROOT" "$SECOND_HOME"
 mkdir -p "$SECOND_HOME/data" "$SECOND_HOME/state" "$SECOND_HOME/config" "$SECOND_HOME/projects"
 printf '%s\n' "$SECONDMATE_ID" > "$SECOND_HOME/.fm-secondmate-home"
-printf 'omp openai-codex/gpt-5.6-sol low\n' > "$HOME_DIR/config/secondmate-harness"
+printf 'omp openai-codex/gpt-5.6-luna low\n' > "$HOME_DIR/config/secondmate-harness"
 printf 'codex\n' > "$HOME_DIR/config/crew-harness"
 FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$HOME_DIR/state" \
   FM_DATA_OVERRIDE="$HOME_DIR/data" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \

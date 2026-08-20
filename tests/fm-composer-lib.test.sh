@@ -167,7 +167,7 @@ test_standalone_width_has_fixed_unicode_contract() {
     $'precomposed Hangul plus trailing Jamo\t3\t각'
     $'genuine family ZWJ emoji\t2\t👩‍👩‍👧‍👦'
     $'Unicode 17 unassigned emoji candidate\t1\t🫩'
-    $'OMP status row\t56\t╭── ⬢ GPT-5.6-Sol++ · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
+    $'OMP status row\t55\t╭── ⬢ GPT-5.6-Luna · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
   )
   for case_spec in "${cases[@]}"; do
     IFS=$'\t' read -r label expected row <<< "$case_spec"
@@ -201,7 +201,7 @@ test_standalone_width_matches_bun_for_unicode_graphemes() {
     $'precomposed Hangul plus trailing Jamo\t각'
     $'genuine family ZWJ emoji\t👩‍👩‍👧‍👦'
     $'Unicode 17 unassigned emoji candidate\t🫩'
-    $'OMP status row\t╭── ⬢ GPT-5.6-Sol++ · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
+    $'OMP status row\t╭── ⬢ GPT-5.6-Luna · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
   )
   for case_spec in "${cases[@]}"; do
     IFS=$'\t' read -r label row <<< "$case_spec"

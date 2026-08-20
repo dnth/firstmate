@@ -61,7 +61,7 @@ run_case() {
       PATH="$FAKEBIN:$PATH" QUOTA_AXI_CALLS="$CALLS" QUOTA_AXI_FIXTURE="$FIXTURE" \
         pi --print --approve --no-session --no-context-files --no-extensions \
           --no-skills --skill .agents/skills --tools bash \
-          --model openai-codex/gpt-5.6-sol --thinking high \
+          --model openai-codex/gpt-5.6-luna --thinking high \
           "$prompt"
   ) || fail "$label: Pi skill run failed: $out"
   calls=$(cat "$CALLS")

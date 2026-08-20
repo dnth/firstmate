@@ -126,24 +126,47 @@ fm_omp_process_primary_identity() {  # <pid> -> <bun-realpath> newline <omp-real
   printf '%s\n%s\n' "$FM_OMP_MARKER_BUN" "$FM_OMP_MARKER_BIN"
 }
 
+fm_omp_process_file_identity() {  # <file> -> device:inode
+  local file=$1
+  if stat -Lc '%d:%i' "$file" 2>/dev/null; then
+    return 0
+  fi
+  stat -f '%d:%i' "$file" 2>/dev/null
+}
+
 fm_omp_process_executable() {  # <pid>
-  local pid=$1 path
+  local pid=$1 path literal_identity process_identity lsof_output lsof_inode
   if [ -L "/proc/$pid/exe" ]; then
     path=$(readlink "/proc/$pid/exe" 2>/dev/null) || return 1
     case "$path" in
       *' (deleted)')
-        path=${path%' (deleted)'}
-        fm_omp_process_identity_path_syntax_valid "$path" || return 1
-        printf '%s' "$path"
+        process_identity=$(fm_omp_process_file_identity "/proc/$pid/exe" 2>/dev/null || true)
+        literal_identity=$(fm_omp_process_file_identity "$path" 2>/dev/null || true)
+        if [ -n "$process_identity" ] && [ "$process_identity" = "$literal_identity" ]; then
+          fm_omp_process_resolve_path "/proc/$pid/exe"
+        else
+          path=${path%' (deleted)'}
+          fm_omp_process_identity_path_syntax_valid "$path" || return 1
+          printf '%s' "$path"
+        fi
         ;;
       *) fm_omp_process_resolve_path "/proc/$pid/exe" ;;
     esac
     return
   fi
   command -v lsof >/dev/null 2>&1 || return 1
-  path=$(lsof -a -p "$pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
+  lsof_output=$(lsof -a -p "$pid" -d txt -Fni 2>/dev/null)
+  path=$(printf '%s\n' "$lsof_output" | sed -n 's/^n//p' | head -1)
+  lsof_inode=$(printf '%s\n' "$lsof_output" | sed -n 's/^i//p' | head -1)
   [ -n "$path" ] || return 1
-  case "$path" in *' (deleted)') path=${path%' (deleted)'} ;; esac
+  case "$path" in
+    *' (deleted)')
+      literal_identity=$(fm_omp_process_file_identity "$path" 2>/dev/null || true)
+      case "$literal_identity" in *:"$lsof_inode") ;;
+        *) path=${path%' (deleted)'} ;;
+      esac
+      ;;
+  esac
   if [ -e "$path" ]; then
     fm_omp_process_resolve_path "$path"
   else

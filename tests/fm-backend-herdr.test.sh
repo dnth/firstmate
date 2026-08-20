@@ -2984,7 +2984,7 @@ test_composer_state_omp_structure_classifies_empty_pending_and_multiline() {
     return
   fi
   bun=$(command -v bun)
-  top='╭── ⬢ GPT-5.6-Sol++ · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
+  top='╭── ⬢ GPT-5.6-Luna · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
   for case_id in empty pending multiline; do
     width=$(fm_composer_terminal_width "$top" "$bun") \
       || fail "could not measure OMP Herdr fixture width"
@@ -3033,7 +3033,7 @@ test_composer_state_omp_malformed_short_stale_working_and_unreadable_are_unknown
     return
   fi
   bun=$(command -v bun)
-  top='╭── ⬢ GPT-5.6-Sol++ · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
+  top='╭── ⬢ GPT-5.6-Luna · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
   width=$(fm_composer_terminal_width "$top" "$bun") || fail "could not measure unsafe OMP Herdr fixture width"
   for case_id in short malformed width-mismatch stale working blocked unreadable non-omp; do
     dir="$TMP_ROOT/composer-omp-unsafe-$case_id"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"

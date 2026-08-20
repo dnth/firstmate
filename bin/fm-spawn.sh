@@ -3290,14 +3290,19 @@ sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
 sq_ompprimary=$(shell_quote "$OMP_PRIMARY_EXTENSION")
-if [ -n "$OMP_BUN_LAUNCH_DIR" ]; then
-  OMP_LAUNCH_ENV="PATH=$(shell_quote "$OMP_BUN_LAUNCH_DIR")\${PATH:+:\$PATH} "
+if [ "$OMP_LAUNCH_TEMPLATE" -eq 1 ] && [ -n "$OMP_BUN_LAUNCH_DIR" ]; then
+  # The pane may be fish, so keep shell-specific lookup validation inside the
+  # Bash-owned OMP command rather than asking the pane shell to parse it.
+  case "${PATH-}" in
+    *::*|:*|*:)
+      echo "error: spawning env-shebang OMP requires a PATH without empty components" >&2
+      exit 1
+      ;;
+  esac
+  OMP_LAUNCH_PATH_GUARD="PATH=$(shell_quote "$OMP_BUN_LAUNCH_DIR${PATH:+:$PATH}"); export PATH; FM_OMP_BUN_LOOKUP=\$(command -v bun) || exit 1; FM_OMP_BUN_RESOLVED=\$(readlink -f \"\$FM_OMP_BUN_LOOKUP\" 2>/dev/null || node -e 'const { realpathSync } = require(\"node:fs\"); process.stdout.write(realpathSync(process.argv[1]));' \"\$FM_OMP_BUN_LOOKUP\") || exit 1; [ \"\$FM_OMP_BUN_RESOLVED\" = $(shell_quote "$OMP_BUN_CANON") ] || exit 1; "
 fi
 if [ "$OMP_LAUNCH_TEMPLATE" -eq 1 ] && [ "$HARNESS" = omp ] && [ -n "$OMP_BIN_CANON" ]; then
   LAUNCH="FM_OMP_BUN=$(shell_quote "$OMP_BUN_CANON") FM_OMP_BIN=$(shell_quote "$OMP_BIN_CANON") $LAUNCH"
-  if [ -n "$OMP_BUN_LAUNCH_DIR" ]; then
-    OMP_LAUNCH_PATH_GUARD="PATH=$(shell_quote "$OMP_BUN_LAUNCH_DIR")\${PATH:+:\$PATH}; case \"\${PATH-}\" in *::*|:*|*:) exit 1 ;; esac; FM_OMP_BUN_LOOKUP=\$(command -v bun) || exit 1; FM_OMP_BUN_RESOLVED=\$(readlink -f \"\$FM_OMP_BUN_LOOKUP\" 2>/dev/null || node -e 'const { realpathSync } = require(\"node:fs\"); process.stdout.write(realpathSync(process.argv[1]));' \"\$FM_OMP_BUN_LOOKUP\") || exit 1; [ \"\$FM_OMP_BUN_RESOLVED\" = $(shell_quote "$OMP_BUN_CANON") ] || exit 1; "
-  fi
 fi
 OMPRESUMEFLAG=
 [ -z "$OMP_RESUME_FILE" ] || OMPRESUMEFLAG="--resume $(shell_quote "$OMP_RESUME_FILE") "
@@ -3419,8 +3424,8 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
   if [ "$BACKEND" = herdr ]; then
     HERDR_LAUNCH_ENV="${HERDR_LAUNCH_ENV}TRACEPARENT=$(shell_quote "$SPAWN_TRACEPARENT") "
     if ! echo "traceparent=$SPAWN_TRACEPARENT" >> "$STATE/$ID.meta"; then
-      HERDR_LAUNCH_ENV="GOTMPDIR=$(shell_quote "$TASK_TMP/gotmp") "
-      LAUNCH="unset TRACEPARENT; $LAUNCH"
+      HERDR_LAUNCH_ENV=
+      LAUNCH="unset TRACEPARENT; GOTMPDIR=$(shell_quote "$TASK_TMP/gotmp") $LAUNCH"
     fi
   elif spawn_send_text_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
     if ! echo "traceparent=$SPAWN_TRACEPARENT" >> "$STATE/$ID.meta"; then
@@ -3437,6 +3442,9 @@ fi
 sleep 0.3
 [ "$BACKEND" != herdr ] || LAUNCH="$HERDR_LAUNCH_ENV$LAUNCH"
 [ -z "$OMP_LAUNCH_PATH_GUARD" ] || LAUNCH="$OMP_LAUNCH_PATH_GUARD$LAUNCH"
+if [ "$OMP_LAUNCH_TEMPLATE" -eq 1 ] && [ "$HARNESS" = omp ]; then
+  LAUNCH="/bin/bash -c $(shell_quote "$LAUNCH")"
+fi
 if [ "$BACKEND" = herdr ]; then
   spawn_send_text_line "$T" "$LAUNCH" || {
     echo "error: Herdr launch pane did not reach a proven idle shell; refusing to submit $HARNESS" >&2

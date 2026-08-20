@@ -98,7 +98,7 @@ PANE=$(printf '%s' "$create" | jq -r '.result.root_pane.pane_id // empty')
 TARGET="$SESSION:$PANE"
 
 printf -v launch \
-  "exec env OMP_SKIP_SETUP=1 PATH=%q %q --model openai-codex/gpt-5.6-sol --thinking low --session-dir %q --auto-approve -e %q %q" \
+  "exec env OMP_SKIP_SETUP=1 PATH=%q %q --model openai-codex/gpt-5.6-luna --thinking low --session-dir %q --auto-approve -e %q %q" \
   "$WRAPPER_BIN:$BASE_PATH" "$OMP_BIN" "$SESSION_DIR" "$OMP_EXTENSION" "Reply exactly OMP_HERDR_EXIT_READY."
 PATH="$BASE_PATH" "$HERDR_LAB_HELPER" run "$SESSION" pane run "$PANE" "$launch" >/dev/null \
   || fail "could not launch OMP in the guarded Herdr pane"

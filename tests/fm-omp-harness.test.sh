@@ -185,7 +185,7 @@ test_standalone_worker_uses_bound_identity() {
   pass "standalone OMP workers require exact bound executable and PID evidence"
 }
 test_standalone_primary_survives_executable_replacement() {
-  local dir state native owner target lock_status status=0
+  local dir state native owner target lock_status named_deleted lsof_result status=0
   [ -L /proc/$$/exe ] || {
     pass "standalone deleted-executable identity skipped without Linux procfs"
     return
@@ -207,6 +207,9 @@ test_standalone_primary_survives_executable_replacement() {
     > "$state/.omp-primary-extension-loaded"
   printf '%s\n' "$owner" > "$state/.lock"
   rm -f "$native"
+  named_deleted="$dir/omp (deleted)"
+  cp "$(command -v sleep)" "$named_deleted"
+  chmod +x "$named_deleted"
   case "$(readlink "/proc/$owner/exe" 2>/dev/null)" in
     "$target (deleted)") ;;
     *)
@@ -229,8 +232,17 @@ test_standalone_primary_survives_executable_replacement() {
     "$ROOT/bin/fm-lock.sh" status)
   assert_contains "$lock_status" "held by live harness pid $owner" \
     "explicit marker paths bypassed deleted standalone executable ownership"
+  lsof_result=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-omp-process-lib.sh"
+    named=$2
+    inode=$(stat -Lc "%i" "$named")
+    lsof() { printf "i%s\nn%s\n" "$inode" "$named"; }
+    fm_omp_process_executable 999999
+  ' _ "$ROOT" "$named_deleted")
+  [ "$lsof_result" = "$named_deleted" ] \
+    || fail "lsof identity stripped a literal executable path suffix '(deleted)'"
+  rm -f "$named_deleted"
   kill "$owner" 2>/dev/null || true
-  wait "$owner" 2>/dev/null || true
   expect_code 0 "$status" "a live standalone primary should retain marker identity after atomic executable replacement"
   pass "standalone primary identity survives a deleted launch-time executable path"
 }

@@ -184,7 +184,7 @@ submit_omp() {
 launch_omp() {
   local prompt=$1 command
   printf -v command \
-    "env FM_HOME=%q FM_ROOT_OVERRIDE=%q FM_STATE_OVERRIDE=%q FM_CONFIG_OVERRIDE=%q OMP_SKIP_SETUP=1 %q --model openai-codex/gpt-5.6-sol --thinking low --session-dir %q --auto-approve %q" \
+    "env FM_HOME=%q FM_ROOT_OVERRIDE=%q FM_STATE_OVERRIDE=%q FM_CONFIG_OVERRIDE=%q OMP_SKIP_SETUP=1 %q --model openai-codex/gpt-5.6-luna --thinking low --session-dir %q --auto-approve %q" \
     "$HOME_DIR" "$PROJECT" "$HOME_DIR/state" "$HOME_DIR/config" "$OMP_BIN" "$SESSION_DIR" "$prompt"
   PATH="$WRAPPER_BIN:$PATH" tmux send-keys -t "$TARGET" -l "$command"
   PATH="$WRAPPER_BIN:$PATH" tmux send-keys -t "$TARGET" Enter
@@ -202,7 +202,7 @@ git init -q -b main "$FALLBACK_PROJECT"
 git -C "$FALLBACK_PROJECT" add .
 git -C "$FALLBACK_PROJECT" commit -qm init
 PATH="$WRAPPER_BIN:$PATH" tmux new-session -d -s fallback -n omp -c "$FALLBACK_PROJECT" \
-  "env FM_HOME='$FALLBACK_HOME' FM_ROOT_OVERRIDE='$FALLBACK_PROJECT' FM_CONFIG_OVERRIDE='$FALLBACK_HOME/config' OMP_SKIP_SETUP=1 '$OMP_BIN' --model openai-codex/gpt-5.6-sol --thinking low --session-dir '$FALLBACK_SESSIONS'"
+  "env FM_HOME='$FALLBACK_HOME' FM_ROOT_OVERRIDE='$FALLBACK_PROJECT' FM_CONFIG_OVERRIDE='$FALLBACK_HOME/config' OMP_SKIP_SETUP=1 '$OMP_BIN' --model openai-codex/gpt-5.6-luna --thinking low --session-dir '$FALLBACK_SESSIONS'"
 wait_file_nonempty "$FALLBACK_HOME/state/.omp-primary-extension-loaded" \
   || fail "fresh plain-checkout OMP primary extension did not create state and load"
 fallback_pid=$(sed -n '2p' "$FALLBACK_HOME/state/.omp-primary-extension-loaded")
@@ -278,7 +278,7 @@ kill -0 "$second_watch_pid" 2>/dev/null && fail "OMP shutdown left its watcher g
 
 resume_prompt="Follow the injected Firstmate startup instruction exactly once after this resume. Then run this exact bash command: bin/fm-harness.sh > '$LAB/resume-harness'. Call the fm_watch_arm_omp tool exactly once. Reply exactly OMP_RESUME_READY."
 printf -v resume_command \
-  "env FM_HOME=%q FM_ROOT_OVERRIDE=%q FM_STATE_OVERRIDE=%q FM_CONFIG_OVERRIDE=%q OMP_SKIP_SETUP=1 %q --model openai-codex/gpt-5.6-sol --thinking low --session-dir %q --resume %q --auto-approve %q" \
+  "env FM_HOME=%q FM_ROOT_OVERRIDE=%q FM_STATE_OVERRIDE=%q FM_CONFIG_OVERRIDE=%q OMP_SKIP_SETUP=1 %q --model openai-codex/gpt-5.6-luna --thinking low --session-dir %q --resume %q --auto-approve %q" \
   "$HOME_DIR" "$PROJECT" "$HOME_DIR/state" "$HOME_DIR/config" "$OMP_BIN" "$SESSION_DIR" "$session_file" "$resume_prompt"
 PATH="$WRAPPER_BIN:$PATH" tmux send-keys -t "$TARGET" -l "$resume_command"
 PATH="$WRAPPER_BIN:$PATH" tmux send-keys -t "$TARGET" Enter

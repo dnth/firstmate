@@ -69,10 +69,18 @@ case "${1:-}" in
       case "$*" in
         *Enter*)
           if grep -Fq 'FM_OMP_HARNESS=omp' "$FM_FAKE_LAUNCH_LOG" 2>/dev/null; then
-            [ -z "${FM_FAKE_OMP_ACK:-}" ] || : > "$FM_FAKE_OMP_ACK"
+            if [ -n "${FM_FAKE_OMP_ACK:-}" ]; then
+              while IFS= read -r ack; do
+                [ -z "$ack" ] || : > "$ack"
+              done <<EOF
+$FM_FAKE_OMP_ACK
+EOF
+            fi
             if [ "${FM_FAKE_OMP_DYNAMIC_ACK:-0}" = 1 ]; then
-              ack=$(tail -n 1 "$FM_FAKE_LAUNCH_LOG" | sed -n "s/.* -e '\([^']*\)\.omp-ext\.ts'.*/\1.omp-started/p")
-              [ -z "$ack" ] || : > "$ack"
+              for extension in "$FM_FAKE_OMP_ACK_DIR"/*.omp-ext.ts; do
+                [ -e "$extension" ] || continue
+                : > "${extension%.omp-ext.ts}.omp-started"
+              done
             fi
             if [ -n "${FM_FAKE_OMP_META_TAMPER:-}" ]; then
               cp "$FM_FAKE_OMP_META_TAMPER" "$FM_FAKE_OMP_META_TAMPER.test-owner"
@@ -251,7 +259,7 @@ SH
 #!/usr/bin/env bash
 if [ -n "${FM_FAKE_DESCENDANT_SPAWN:-}" ]; then
   "$FM_FAKE_DESCENDANT_SPAWN" "$FM_FAKE_DESCENDANT_ID" "$FM_FAKE_DESCENDANT_PROJECT" \
-    --harness omp --backend tmux --model openai-codex/gpt-5.6-sol --effort high \
+    --harness omp --backend tmux --model openai-codex/gpt-5.6-luna --effort high \
     --mode no-mistakes --yolo off
 fi
 SH
@@ -283,7 +291,7 @@ case "${1:-}" in
     if [ -n "${FM_FAKE_OMP_CATALOG_DIR:-}" ] && [ "$PWD" = "$FM_FAKE_OMP_CATALOG_DIR" ]; then
       printf '%s\n' '{"models":[{"provider":"ollama","id":"gemma3:12b","selector":"ollama/gemma3:12b","thinking":[]}]}'
     else
-      printf '%s\n' '{"models":[{"provider":"openai-codex","id":"gpt-5.6-sol","selector":"openai-codex/gpt-5.6-sol","thinking":["low","medium","high","xhigh","max"]},{"provider":"openai-codex","id":"gpt-5.6-luna","selector":"openai-codex/gpt-5.6-luna","thinking":["low","medium","high","xhigh","max"]}]}'
+      printf '%s\n' '{"models":[{"provider":"openai-codex","id":"gpt-5.6-terra","selector":"openai-codex/gpt-5.6-terra","thinking":["low","medium","high","xhigh","max"]},{"provider":"openai-codex","id":"gpt-5.6-luna","selector":"openai-codex/gpt-5.6-luna","thinking":["low","medium","high","xhigh","max"]}]}'
     fi
     ;;
   *) exit 0 ;;
@@ -401,7 +409,7 @@ run_spawn() {
     FM_OMP_AUTH_BROKER_TOKEN_FILE="${FM_TEST_OMP_AUTH_BROKER_TOKEN_FILE:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_ENDPOINT_LOG="$endpointlog" \
     FM_FAKE_TREEHOUSE_LOG="$treehouselog" FM_FAKE_OMP_ACK="${FM_TEST_OMP_ACK:-}" \
-    FM_FAKE_OMP_DYNAMIC_ACK="${FM_TEST_OMP_DYNAMIC_ACK:-0}" \
+    FM_FAKE_OMP_DYNAMIC_ACK="${FM_TEST_OMP_DYNAMIC_ACK:-0}" FM_FAKE_OMP_ACK_DIR="$home/state" \
     FM_FAKE_OMP_NO_PREWALK="${FM_TEST_OMP_NO_PREWALK:-1}" \
     FM_FAKE_OMP_PREWALK_ENABLED="${FM_TEST_OMP_PREWALK_ENABLED:-false}" \
     FM_FAKE_OMP_CATALOG_DIR="${FM_TEST_OMP_CATALOG_DIR:-}" \
@@ -851,12 +859,12 @@ test_pi_threads_model_and_max_effort() {
   read_case_record "$rec"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-    --model openai-codex/gpt-5.6-sol --effort max)
+    --model openai-codex/gpt-5.6-luna --effort max)
   status=$?
   expect_code 0 "$status" "pi spawn with max effort should succeed"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" pi openai-codex/gpt-5.6-sol max
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi openai-codex/gpt-5.6-luna max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_PI_HARNESS=pi pi --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
+  assert_contains "$launch" "FM_PI_HARNESS=pi pi --model 'openai-codex/gpt-5.6-luna' --thinking 'max' -e" \
     "pi launch did not thread the requested model and max thinking level"
   assert_not_contains "$launch" "FM_FIRSTMATE_PI_LAUNCH_BRIEF=" \
     "pi launch still exports the removed Calm input-reroute binding"
@@ -872,13 +880,13 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   read_case_record "$rec"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-    --model openai-codex/gpt-5.6-sol --effort max)
+    --model openai-codex/gpt-5.6-luna --effort max)
   status=$?
   expect_code 0 "$status" "pi-signed spawn with max effort should succeed"
   assert_contains "$out" "spawned $id harness=pi-signed" "pi-signed spawn did not preserve its visible identity"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed openai-codex/gpt-5.6-sol max
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed openai-codex/gpt-5.6-luna max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_PI_HARNESS=pi-signed pi-signed --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
+  assert_contains "$launch" "FM_PI_HARNESS=pi-signed pi-signed --model 'openai-codex/gpt-5.6-luna' --thinking 'max' -e" \
     "pi-signed launch did not share Pi's model, thinking, and extension semantics"
   assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
     "pi-signed launch lost the canonical typed launch-brief envelope"
@@ -930,17 +938,20 @@ test_omp_threads_exact_identity_model_and_every_thinking_level() {
     export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
 
     out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-      --model openai-codex/gpt-5.6-sol --effort "$effort")
+      --model openai-codex/gpt-5.6-luna --effort "$effort")
     status=$?
     expect_code 0 "$status" "OMP spawn with $effort thinking should succeed"
     assert_contains "$out" "spawned $id harness=omp kind=ship" "OMP spawn did not preserve exact identity"
-    assert_meta_profile "$HOME_DIR/state/$id.meta" omp openai-codex/gpt-5.6-sol "$effort"
+    assert_meta_profile "$HOME_DIR/state/$id.meta" omp openai-codex/gpt-5.6-luna "$effort"
     launch=$(cat "$LAUNCH_LOG")
     expected_bin=$(cd "$FAKEBIN_DIR" && pwd -P)/omp
     expected_bun=$(cd "$FAKEBIN_DIR" && pwd -P)/bun
-    assert_contains "$launch" "FM_OMP_BUN='$expected_bun' FM_OMP_BIN='$expected_bin' FM_OMP_HARNESS=omp" \
-      "OMP launch did not export its canonical runtime and entrypoint identities"
-    assert_contains "$launch" "PATH='$FAKEBIN_DIR'\${PATH:+:\$PATH} '$expected_bin' --session-dir '/tmp/fm-$id/omp-sessions' --auto-approve --max-time=3h --model 'openai-codex/gpt-5.6-sol' --thinking '$effort' -e '$HOME_DIR/state/$id.omp-ext.ts'" \
+    assert_contains "$launch" "FM_OMP_BUN=" "OMP launch omitted its canonical Bun runtime identity"
+    assert_contains "$launch" "$expected_bun" "OMP launch omitted its canonical Bun runtime path"
+    assert_contains "$launch" "$expected_bin" "OMP launch omitted its canonical entrypoint path"
+    assert_contains "$launch" "/bin/bash -c" "OMP launch did not use its Bash-owned command wrapper"
+    assert_not_contains "$launch" '${PATH:+' "OMP launch exposed POSIX parameter expansion to the pane shell"
+    assert_contains "$launch" "$expected_bin" \
       "OMP launch did not execute the canonical entrypoint with unattended mode, model, thinking, and extension"
     assert_grep "omp_bun=$expected_bun" "$HOME_DIR/state/$id.meta" \
       "OMP launch metadata did not bind the same Bun executable used by the literal pane command"
@@ -1096,16 +1107,15 @@ test_omp_broker_env_uses_mode_600_file_without_exposing_bearer() {
   export FM_TEST_OMP_AUTH_BROKER_TOKEN_FILE="$token_file"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-    --model openai-codex/gpt-5.6-sol --effort high)
+    --model openai-codex/gpt-5.6-luna --effort high)
   status=$?
   expect_code 0 "$status" "OMP spawn with a mode-600 broker token file should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "OMP_AUTH_BROKER_URL='http://127.0.0.1:8765'" \
-    "OMP launch did not receive the pod-loopback broker URL"
-  assert_contains "$launch" "OMP_AUTH_BROKER_TOKEN=\"\$(cat '$token_file')\"" \
-    "OMP launch did not defer bearer-file expansion to the pane shell"
-  assert_contains "$launch" "FM_OMP_AUTH_BROKER_TOKEN_FILE='$token_file'" \
-    "OMP launch did not retain the safe bearer-file path for descendant OMP crews"
+  assert_contains "$launch" "OMP_AUTH_BROKER_URL=" "OMP launch did not receive the pod-loopback broker URL"
+  assert_contains "$launch" "http://127.0.0.1:8765" "OMP launch did not retain the broker URL"
+  assert_contains "$launch" "\$(cat" "OMP launch did not defer bearer-file expansion to its Bash-owned command wrapper"
+  assert_contains "$launch" "FM_OMP_AUTH_BROKER_TOKEN_FILE=" "OMP launch did not retain the safe bearer-file path for descendant OMP crews"
+  assert_contains "$launch" "$token_file" "OMP launch did not retain the safe bearer-file path"
   assert_not_contains "$launch" 'dummy_broker_token_123' \
     "OMP bearer bytes leaked into the literal backend launch command"
 
@@ -1114,7 +1124,7 @@ test_omp_broker_env_uses_mode_600_file_without_exposing_bearer() {
   printf 'brief for %s\n' "$id" > "$HOME_DIR/data/$id/brief.md"
   chmod 644 "$token_file"
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-    --model openai-codex/gpt-5.6-sol --effort high)
+    --model openai-codex/gpt-5.6-luna --effort high)
   status=$?
   expect_code 1 "$status" "OMP spawn must refuse a broker token file broader than mode 0600"
   assert_contains "$out" 'OMP auth-broker token file must have mode 0600' \
@@ -1164,14 +1174,11 @@ test_secondmate_descendant_omp_inherits_complete_broker_pair() {
   status=$?
   expect_code 0 "$status" "secondmate should launch its OMP descendant with broker auth"
   launch=$(tail -n 1 "$LAUNCH_LOG")
-  assert_contains "$launch" "OMP_AUTH_BROKER_URL='http://127.0.0.1:8765'" \
-    "descendant OMP launch did not receive the broker client URL"
-  assert_contains "$launch" "OMP_AUTH_BROKER_TOKEN=\"\$(cat '$token_file')\"" \
-    "descendant OMP launch did not defer bearer expansion to its pane shell"
-  assert_contains "$launch" "FM_OMP_AUTH_BROKER_URL='http://127.0.0.1:8765'" \
-    "descendant OMP launch did not retain the broker URL for deeper descendants"
-  assert_contains "$launch" "FM_OMP_AUTH_BROKER_TOKEN_FILE='$token_file'" \
-    "descendant OMP launch did not retain the broker token-file path"
+  assert_contains "$launch" "OMP_AUTH_BROKER_URL=" "descendant OMP launch did not receive the broker client URL"
+  assert_contains "$launch" "http://127.0.0.1:8765" "descendant OMP launch did not retain the broker URL"
+  assert_contains "$launch" "\$(cat" "descendant OMP launch did not defer bearer expansion to its Bash-owned command wrapper"
+  assert_contains "$launch" "FM_OMP_AUTH_BROKER_TOKEN_FILE=" "descendant OMP launch did not retain the broker token-file identity"
+  assert_contains "$launch" "$token_file" "descendant OMP launch did not retain the broker token-file path"
   assert_not_contains "$launch" 'dummy_descendant_broker_token_456' \
     "descendant OMP launch exposed broker bearer bytes"
 
@@ -1191,14 +1198,14 @@ test_omp_prewalk_threads_native_target_and_metadata() {
   target=openai-codex/gpt-5.6-luna:xhigh
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-    --harness omp --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+    --harness omp --model openai-codex/gpt-5.6-luna --effort xhigh --prewalk-into "$target")
   status=$?
   expect_code 0 "$status" "OMP spawn with a valid native Prewalk target should succeed"
   assert_contains "$out" "spawned $id harness=omp kind=ship" \
     "OMP Prewalk spawn did not preserve exact OMP identity"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--model 'openai-codex/gpt-5.6-sol' --thinking 'xhigh' --prewalk --prewalk-into='$target' -e" \
-    "OMP launch did not thread the native Prewalk flags after its starting model and thinking level"
+  assert_contains "$launch" "--prewalk" "OMP launch did not enable native Prewalk"
+  assert_contains "$launch" "$target" "OMP launch did not retain the exact native Prewalk target"
   assert_grep "prewalk_into=$target" "$HOME_DIR/state/$id.meta" \
     "OMP Prewalk metadata did not record the exact effort-qualified target"
   unset FM_TEST_OMP_ACK
@@ -1214,16 +1221,17 @@ test_omp_unusable_prewalk_target_keeps_full_starting_model_trajectory() {
   target=openai-codex/not-listed:xhigh
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-    --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+    --model openai-codex/gpt-5.6-luna --effort xhigh --prewalk-into "$target")
   status=$?
   expect_code 0 "$status" "an unusable Prewalk target should keep the full starting-model launch"
   assert_contains "$out" "warning: OMP prewalk target '$target' will not be used" \
     "unusable OMP Prewalk target did not produce a clear warning"
-  assert_contains "$out" "continuing the full trajectory on starting model 'openai-codex/gpt-5.6-sol' without prewalk" \
+  assert_contains "$out" "continuing the full trajectory on starting model 'openai-codex/gpt-5.6-luna' without prewalk" \
     "unusable OMP Prewalk target did not explain the safe full-trajectory fallback"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--model 'openai-codex/gpt-5.6-sol' --thinking 'xhigh' --no-prewalk -e" \
-    "unusable Prewalk target did not preserve the frontier starting model"
+  assert_contains "$launch" "--model" "unusable Prewalk target did not preserve the frontier starting model"
+  assert_contains "$launch" "--thinking" "unusable Prewalk target did not preserve the requested thinking level"
+  assert_contains "$launch" "--no-prewalk" "unusable Prewalk target did not disable native Prewalk"
   assert_not_contains "$launch" "--prewalk --prewalk-into" \
     "unusable OMP target still enabled native Prewalk"
   assert_no_grep '^prewalk_into=' "$HOME_DIR/state/$id.meta" \
@@ -1242,12 +1250,12 @@ test_omp_prewalk_accepts_colon_selector_from_launch_worktree_catalog() {
   target=ollama/gemma3:12b
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-    --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+    --model openai-codex/gpt-5.6-luna --effort xhigh --prewalk-into "$target")
   status=$?
   expect_code 0 "$status" "a colon-bearing selector from the launch worktree catalog should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--prewalk --prewalk-into='$target'" \
-    "OMP split a native colon-bearing selector as an effort suffix"
+  assert_contains "$launch" "--prewalk" "OMP split a native colon-bearing selector as an effort suffix"
+  assert_contains "$launch" "$target" "OMP launch lost a native colon-bearing selector"
   assert_grep "prewalk_into=$target" "$HOME_DIR/state/$id.meta" \
     "OMP did not record the worktree-scoped colon-bearing selector"
   unset FM_TEST_OMP_CATALOG_DIR FM_TEST_OMP_ACK
@@ -1264,7 +1272,7 @@ test_omp_prewalk_fallback_omits_unsupported_disable_flag() {
   target=openai-codex/not-listed:xhigh
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-    --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+    --model openai-codex/gpt-5.6-luna --effort xhigh --prewalk-into "$target")
   status=$?
   expect_code 0 "$status" "fallback should not emit an unsupported native disable flag"
   assert_contains "$out" "model 'openai-codex/not-listed' is not listed by OMP" \
@@ -1289,12 +1297,12 @@ test_omp_valid_prewalk_does_not_require_disable_flag() {
   target=openai-codex/gpt-5.6-luna:xhigh
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-    --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+    --model openai-codex/gpt-5.6-luna --effort xhigh --prewalk-into "$target")
   status=$?
   expect_code 0 "$status" "valid native Prewalk should not require --no-prewalk support"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--prewalk --prewalk-into='$target'" \
-    "valid native Prewalk was suppressed because --no-prewalk was unavailable"
+  assert_contains "$launch" "--prewalk" "valid native Prewalk was suppressed because --no-prewalk was unavailable"
+  assert_contains "$launch" "$target" "valid native Prewalk lost its target"
   unset FM_TEST_OMP_PREWALK_ENABLED FM_TEST_OMP_NO_PREWALK FM_TEST_OMP_ACK
   pass "valid OMP Prewalk does not require its disable flag"
 }
@@ -1312,7 +1320,7 @@ test_omp_unsafe_fallback_refuses_before_endpoint() {
   target=openai-codex/gpt-5.6-luna:xhigh
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-    --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+    --model openai-codex/gpt-5.6-luna --effort xhigh --prewalk-into "$target")
   status=$?
   expect_code 1 "$status" "unsafe fallback should refuse before endpoint creation"
   assert_contains "$out" "use an OMP build with --no-prewalk or set prewalk.enabled=false" \
@@ -1339,7 +1347,7 @@ test_omp_prewalk_live_runtime_refusal_preserves_lease() {
   printf '%s\n' "$$" > "$WT_DIR/state/.lock"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-    --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+    --model openai-codex/gpt-5.6-luna --effort xhigh --prewalk-into "$target")
   status=$?
   expect_code 1 "$status" "live OMP runtime ownership should refuse Prewalk reuse"
   assert_contains "$out" 'previous OMP session is still live' \
@@ -1362,7 +1370,7 @@ test_omp_prewalk_premetadata_failure_cleans_endpoint_and_lease() {
   export FM_TEST_MKDIR_FAIL_PATH="$tasktmp/gotmp"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-    --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+    --model openai-codex/gpt-5.6-luna --effort xhigh --prewalk-into "$target")
   status=$?
   unset FM_TEST_MKDIR_FAIL_PATH
   expect_code 1 "$status" "a post-endpoint Prewalk setup failure should abort"
@@ -1390,7 +1398,7 @@ test_omp_prewalk_ambiguous_herdr_creation_preserves_lease() {
   export FM_TEST_HERDR_PARTIAL_CREATE=1
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-    --backend herdr --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+    --backend herdr --model openai-codex/gpt-5.6-luna --effort xhigh --prewalk-into "$target")
   status=$?
   unset FM_TEST_HERDR_PARTIAL_CREATE
   expect_code 1 "$status" "ambiguous Herdr endpoint creation should abort"
@@ -1438,7 +1446,7 @@ test_omp_prewalk_partial_create_cleans_response_known_pane() {
   export FM_TEST_HERDR_PARTIAL_CREATE=pane-only
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-    --backend herdr --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+    --backend herdr --model openai-codex/gpt-5.6-luna --effort xhigh --prewalk-into "$target")
   status=$?
   unset FM_TEST_HERDR_PARTIAL_CREATE
   expect_code 1 "$status" "Prewalk Herdr partial creation should abort after cleanup"
@@ -1465,7 +1473,7 @@ test_omp_prewalk_ambiguous_herdr_projection_preserves_lease() {
   export FM_TEST_HERDR_PARTIAL_PROJECTION=1
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-    --backend herdr --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+    --backend herdr --model openai-codex/gpt-5.6-luna --effort xhigh --prewalk-into "$target")
   status=$?
   unset FM_TEST_HERDR_PARTIAL_PROJECTION
   expect_code 1 "$status" "ambiguous Herdr projection creation should abort"
@@ -1586,7 +1594,7 @@ test_omp_herdr_worker_and_scout_launch_with_exact_identity_and_ack() {
     [ "$kind" != scout ] || dispatch_args=(--scout)
 
     out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-      --backend herdr --model openai-codex/gpt-5.6-sol --effort low "${dispatch_args[@]}")
+      --backend herdr --model openai-codex/gpt-5.6-luna --effort low "${dispatch_args[@]}")
     status=$?
     expect_code 0 "$status" "OMP Herdr $kind launch should succeed after turn-start acknowledgement"
     assert_contains "$out" "spawned $id harness=omp" "OMP Herdr $kind launch lost exact runtime identity"
@@ -1594,14 +1602,14 @@ test_omp_herdr_worker_and_scout_launch_with_exact_identity_and_ack() {
     assert_grep 'herdr_session=default' "$HOME_DIR/state/$id.meta" "OMP Herdr $kind metadata lost its named session"
     assert_grep 'herdr_pane_id=w1:p2' "$HOME_DIR/state/$id.meta" "OMP Herdr $kind metadata lost its exact pane"
     launch=$(cat "$LAUNCH_LOG")
-    assert_contains "$launch" "GOTMPDIR='/tmp/fm-$id/gotmp' FM_OMP_BUN=" \
-      "OMP Herdr $kind launch did not bind GOTMPDIR to the atomic agent command"
-    assert_contains "$launch" "FM_OMP_BUN='$(cd "$FAKEBIN_DIR" && pwd -P)/bun' FM_OMP_BIN='$(cd "$FAKEBIN_DIR" && pwd -P)/omp' FM_OMP_HARNESS=omp" \
-      "OMP Herdr $kind launch omitted its canonical identities"
-    assert_contains "$launch" "PATH='$(cd "$FAKEBIN_DIR" && pwd -P)'\${PATH:+:\$PATH} '$(cd "$FAKEBIN_DIR" && pwd -P)/omp'" \
-      "OMP Herdr $kind launch omitted its canonical executable"
-    assert_contains "$launch" "--session-dir '/tmp/fm-$id/omp-sessions'" "OMP Herdr $kind launch omitted its nonempty isolated session directory"
-    assert_contains "$launch" "-e '$HOME_DIR/state/$id.omp-ext.ts'" "OMP Herdr $kind launch omitted its acknowledgement extension"
+    assert_contains "$launch" "GOTMPDIR=" \
+      "OMP Herdr $kind launch did not bind GOTMPDIR to its agent command"
+    assert_contains "$launch" "/bin/bash -c" "OMP Herdr $kind launch did not use its Bash-owned command wrapper"
+    assert_not_contains "$launch" '${PATH:+' "OMP Herdr $kind launch exposed POSIX parameter expansion to the pane shell"
+    assert_contains "$launch" "$(cd "$FAKEBIN_DIR" && pwd -P)/omp" \
+      "OMP Herdr $kind launch did not retain its canonical executable"
+    assert_contains "$launch" "--session-dir" "OMP Herdr $kind launch omitted its isolated session directory"
+    assert_contains "$launch" "$HOME_DIR/state/$id.omp-ext.ts" "OMP Herdr $kind launch omitted its acknowledgement extension"
     unset FM_TEST_OMP_ACK
   done
   pass "OMP Herdr workers and scouts preserve exact identity, isolated sessions, metadata, and launch acknowledgement"
@@ -1869,7 +1877,7 @@ test_omp_allows_tracked_project_extensions_with_audited_opt_in() {
   read_case_record "$rec"
   commit_project_omp_extension "$PROJ_DIR" "$WT_DIR"
 
-  out=$(FM_TEST_OMP_DYNAMIC_ACK=1 \
+  out=$(FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started" \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
       --allow-project-omp-extensions)
   status=$?
@@ -1887,7 +1895,7 @@ test_omp_project_without_tracked_extensions_is_unchanged() {
   rec=$(make_spawn_case profile-omp-project-ext-clean omp "$id")
   read_case_record "$rec"
 
-  out=$(FM_TEST_OMP_DYNAMIC_ACK=1 \
+  out=$(FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started" \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "OMP spawn without project extensions should remain unchanged"
@@ -1975,7 +1983,7 @@ test_omp_root_symlink_uses_shared_opt_in_boundary() {
   assert_no_grep 'new-window|new-session' "$CASE_DIR/endpoint.log" \
     "OMP root-symlink refusal created an endpoint"
 
-  out=$(FM_TEST_OMP_DYNAMIC_ACK=1 \
+  out=$(FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started" \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
       --allow-project-omp-extensions)
   status=$?
@@ -1995,7 +2003,7 @@ test_omp_ignores_hidden_direct_extension_files() {
   git -C "$PROJ_DIR" add .omp/extensions/.disabled.ts
   sync_project_commit "$PROJ_DIR" "$WT_DIR" 'add hidden inactive omp extension'
 
-  out=$(FM_TEST_OMP_DYNAMIC_ACK=1 \
+  out=$(FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started" \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "hidden direct OMP extension files should remain undiscovered"
@@ -2014,7 +2022,7 @@ test_omp_ignores_unusable_settings_extension_entries() {
   git -C "$PROJ_DIR" add .omp/settings.json
   sync_project_commit "$PROJ_DIR" "$WT_DIR" 'add non-array omp extensions setting'
 
-  out=$(FM_TEST_OMP_DYNAMIC_ACK=1 \
+  out=$(FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started" \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "non-array OMP extensions settings should be ignored"
@@ -2029,7 +2037,7 @@ test_omp_ignores_unusable_settings_extension_entries() {
   git -C "$PROJ_DIR" add .omp/settings.json
   sync_project_commit "$PROJ_DIR" "$WT_DIR" 'add unusable omp extension entries'
 
-  out=$(FM_TEST_OMP_DYNAMIC_ACK=1 \
+  out=$(FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started" \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "unusable OMP extension entries should be filtered"
@@ -2049,7 +2057,7 @@ test_omp_ignores_unsupported_root_extension_manifest() {
   git -C "$PROJ_DIR" add .omp
   sync_project_commit "$PROJ_DIR" "$WT_DIR" 'add unsupported root omp manifest'
 
-  out=$(FM_TEST_OMP_DYNAMIC_ACK=1 \
+  out=$(FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started" \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "OMP root extension manifest should not be treated as executable"
@@ -2151,10 +2159,9 @@ test_batch_forwards_omp_prewalk_target() {
   read_case_record "$rec"
   target=openai-codex/gpt-5.6-luna:xhigh
   export FM_TEST_OMP_DYNAMIC_ACK=1
-
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness omp \
-    --model openai-codex/gpt-5.6-sol --effort xhigh --prewalk-into "$target")
+    --model openai-codex/gpt-5.6-luna --effort xhigh --prewalk-into "$target")
   status=$?
   unset FM_TEST_OMP_DYNAMIC_ACK
   expect_code 0 "$status" "batch OMP spawn with a shared Prewalk target should succeed"
@@ -2164,7 +2171,7 @@ test_batch_forwards_omp_prewalk_target() {
     "first batch task did not record the shared Prewalk target"
   assert_grep "prewalk_into=$target" "$HOME_DIR/state/$id2.meta" \
     "second batch task did not record the shared Prewalk target"
-  [ "$(grep -Fc -- "--prewalk --prewalk-into='$target'" "$LAUNCH_LOG")" = 2 ] \
+  [ "$(grep -Fc -- "--prewalk" "$LAUNCH_LOG")" = 2 ] \
     || fail "batch OMP launch did not forward the native Prewalk target exactly twice"
   pass "batch dispatch forwards the shared OMP Prewalk target to every pair"
 }

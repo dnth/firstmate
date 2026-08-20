@@ -29,7 +29,7 @@ expected_omp=${FM_TEST_EXPECTED_OMP:-$self_dir/omp}
 if [ -n "${FM_TEST_OWNER_PID:-}" ] && [ "$pid" = "$FM_TEST_OWNER_PID" ]; then
   case "$field" in
     comm=) printf '%s\n' bun ;;
-    args=) printf '%s %s\n' "$expected_bun" "$expected_omp --model openai-codex/gpt-5.6-sol" ;;
+    args=) printf '%s %s\n' "$expected_bun" "$expected_omp --model openai-codex/gpt-5.6-luna" ;;
     ppid=) printf '%s\n' 1 ;;
   esac
   exit 0
@@ -40,7 +40,7 @@ if [ "$pid" = "$omp_pid" ]; then
     comm=) printf '%s\n' "${FM_TEST_OMP_COMM:-bun}" ;;
     args=)
       case "${FM_TEST_OMP_SHAPE:-exact}" in
-        exact) printf '%s %s\n' "$expected_bun" "$expected_omp --model openai-codex/gpt-5.6-sol" ;;
+        exact) printf '%s %s\n' "$expected_bun" "$expected_omp --model openai-codex/gpt-5.6-luna" ;;
         helper) printf '%s %s\n' "$expected_bun" "$self_dir/omp-helper --model test" ;;
         prefixed) printf '%s %s\n' "$expected_bun" "$self_dir/xomp --model test" ;;
         incidental) printf '%s %s\n' "$expected_bun" "$self_dir/tool.js --label omp" ;;

@@ -129,7 +129,7 @@ absent file -> own harness, empty model/effort^ABSENT^claude^^
 bare harness only -> empty model/effort (backward-compat)^claude^claude^^
 harness + model -> model only^claude opus^claude^opus^
 harness + model + effort -> both^claude opus high^claude^opus^high
-signed Pi wrapper + model + effort preserves every token^pi-signed openai-codex/gpt-5.6-sol max^pi-signed^openai-codex/gpt-5.6-sol^max
+signed Pi wrapper + model + effort preserves every token^pi-signed openai-codex/gpt-5.6-luna max^pi-signed^openai-codex/gpt-5.6-luna^max
 default harness token -> falls back to crew, empty model/effort^default^claude^^
 extra whitespace between tokens is tolerated^grok   grok-4    xhigh^grok^grok-4^xhigh
 leading/trailing blank lines and a comment are skipped^# a comment\n\nclaude opus low\n^claude^opus^low
@@ -156,12 +156,12 @@ test_secondmate_fallback_accessors() {
   [ -z "$got_h" ] && [ -z "$got_m" ] && [ -z "$got_e" ] \
     || fail "fallback accessors should be empty for the default token"
 
-  printf '# comment\n\nomp openai-codex/gpt-5.6-sol medium\n' > "$cfg/secondmate-harness-fallback"
+  printf '# comment\n\nomp openai-codex/gpt-5.6-luna medium\n' > "$cfg/secondmate-harness-fallback"
   got_h=$(FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-fallback-harness)
   got_m=$(FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-fallback-model)
   got_e=$(FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate-fallback-effort)
   [ "$got_h" = omp ] || fail "fallback accessor returned harness '$got_h', expected omp"
-  [ "$got_m" = openai-codex/gpt-5.6-sol ] || fail "fallback accessor returned model '$got_m'"
+  [ "$got_m" = openai-codex/gpt-5.6-luna ] || fail "fallback accessor returned model '$got_m'"
   [ "$got_e" = medium ] || fail "fallback accessor returned effort '$got_e', expected medium"
   pass "C1b fm-harness.sh fallback accessors handle absent, default, and configured profiles"
 }
@@ -695,7 +695,7 @@ test_secondmate_quota_fallback_selection() {
     launchlog="$w/launch.log"
     mkdir -p "$w/home/config"
     printf 'claude anthropic/claude-opus-4-8 medium\n' > "$w/home/config/secondmate-harness"
-    printf 'codex openai-codex/gpt-5.6-sol medium\n' > "$w/home/config/secondmate-harness-fallback"
+    printf 'codex openai-codex/gpt-5.6-luna medium\n' > "$w/home/config/secondmate-harness-fallback"
     make_seeded_home "$sm" sm
     out=$(spawn_secondmate_quota_capture "$w" sm "$sm" "$launchlog" "$quota_json" 2>&1); status=$?
     expect_code 0 "$status" "$label: spawn failed"$'\n'"$out"
@@ -715,9 +715,9 @@ test_secondmate_quota_fallback_selection() {
     fi
   done <<'ROWS'
 usable-runway^{"providers":[{"provider":"claude","state":{"status":"fresh"},"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","effectivePercentRemaining":42}]}}]}^claude^anthropic/claude-opus-4-8^primary^
-provider-unavailable^{"providers":[{"provider":"claude","state":{"status":"auth_required"},"quotaSemantics":{"effectiveAvailability":[]}}]}^codex^openai-codex/gpt-5.6-sol^fallback^provider_unavailable
-quota-exhausted^{"providers":[{"provider":"claude","state":{"status":"fresh"},"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","effectivePercentRemaining":0}]}}]}^codex^openai-codex/gpt-5.6-sol^fallback^quota_exhausted
-model-scope-exhausted^{"providers":[{"provider":"claude","state":{"status":"fresh"},"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","effectivePercentRemaining":42},{"scope":"model:claude-opus-4-8","effectivePercentRemaining":0}]}}]}^codex^openai-codex/gpt-5.6-sol^fallback^quota_exhausted
+provider-unavailable^{"providers":[{"provider":"claude","state":{"status":"auth_required"},"quotaSemantics":{"effectiveAvailability":[]}}]}^codex^openai-codex/gpt-5.6-luna^fallback^provider_unavailable
+quota-exhausted^{"providers":[{"provider":"claude","state":{"status":"fresh"},"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","effectivePercentRemaining":0}]}}]}^codex^openai-codex/gpt-5.6-luna^fallback^quota_exhausted
+model-scope-exhausted^{"providers":[{"provider":"claude","state":{"status":"fresh"},"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","effectivePercentRemaining":42},{"scope":"model:claude-opus-4-8","effectivePercentRemaining":0}]}}]}^codex^openai-codex/gpt-5.6-luna^fallback^quota_exhausted
 unmeasurable-but-usable^{"providers":[{"provider":"claude","state":{"status":"fresh"},"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","effectivePercentRemaining":null}]}}]}^claude^anthropic/claude-opus-4-8^primary^
 ROWS
 
@@ -749,7 +749,7 @@ test_secondmate_quota_profile_and_override_boundaries() {
   launchlog="$w/launch.log"
   mkdir -p "$w/home/config"
   printf 'claude opus medium\n' > "$w/home/config/secondmate-harness"
-  printf 'codex gpt-5.6-sol medium\n' > "$w/home/config/secondmate-harness-fallback"
+  printf 'codex gpt-5.6-luna medium\n' > "$w/home/config/secondmate-harness-fallback"
   make_seeded_home "$sm" sm
   out=$(spawn_secondmate_quota_capture "$w" sm "$sm" "$launchlog" "$quota" 2>&1); status=$?
   expect_code 0 "$status" "alias profile spawn failed"$'\n'"$out"
@@ -761,7 +761,7 @@ test_secondmate_quota_profile_and_override_boundaries() {
   launchlog="$w/launch.log"
   mkdir -p "$w/home/config"
   printf 'kimi kimi-for-coding medium\n' > "$w/home/config/secondmate-harness"
-  printf 'codex gpt-5.6-sol medium\n' > "$w/home/config/secondmate-harness-fallback"
+  printf 'codex gpt-5.6-luna medium\n' > "$w/home/config/secondmate-harness-fallback"
   make_seeded_home "$sm" sm
   quota='{"providers":[{"provider":"kimi","state":{"status":"fresh"},"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","effectivePercentRemaining":42}]}}]}'
   auth='{"auth":[{"provider":"kimi","sources":[{"source":"pi:kimi-coding","status":"available"},{"source":"kimi-code-cli","status":"expired"}]}]}'
@@ -777,7 +777,7 @@ test_secondmate_quota_profile_and_override_boundaries() {
   launchlog="$w/launch.log"
   mkdir -p "$w/home/config"
   printf 'claude opus medium\n' > "$w/home/config/secondmate-harness"
-  printf 'codex gpt-5.6-sol medium\n' > "$w/home/config/secondmate-harness-fallback"
+  printf 'codex gpt-5.6-luna medium\n' > "$w/home/config/secondmate-harness-fallback"
   make_seeded_home "$sm" sm
   quota='{"providers":[{"provider":"claude","state":{"status":"fresh"},"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","effectivePercentRemaining":42}]}}]}'
   out=$(FM_QUOTA_SECONDMATE_EXHAUSTION_FLOOR=50 \
@@ -791,7 +791,7 @@ test_secondmate_quota_profile_and_override_boundaries() {
   launchlog="$w/launch.log"
   mkdir -p "$w/home/config"
   printf 'claude opus medium\n' > "$w/home/config/secondmate-harness"
-  printf 'codex gpt-5.6-sol medium\n' > "$w/home/config/secondmate-harness-fallback"
+  printf 'codex gpt-5.6-luna medium\n' > "$w/home/config/secondmate-harness-fallback"
   make_seeded_home "$sm" sm
   quota='{"providers":[{"provider":"claude","state":{"status":"auth_required"}}]}'
   out=$(spawn_secondmate_quota_capture "$w" sm "$sm" "$launchlog" "$quota" --model sonnet 2>&1); status=$?
@@ -806,7 +806,7 @@ test_secondmate_quota_profile_and_override_boundaries() {
   launchlog="$w/launch.log"
   mkdir -p "$w/home/config"
   printf 'claude opus medium\n' > "$w/home/config/secondmate-harness"
-  printf 'codex gpt-5.6-sol low\n' > "$w/home/config/secondmate-harness-fallback"
+  printf 'codex gpt-5.6-luna low\n' > "$w/home/config/secondmate-harness-fallback"
   make_seeded_home "$sm" sm
   out=$(spawn_secondmate_quota_capture "$w" sm "$sm" "$launchlog" "$quota" --effort xhigh 2>&1); status=$?
   expect_code 0 "$status" "explicit-effort fallback spawn failed"$'\n'"$out"
@@ -823,7 +823,7 @@ test_secondmate_quota_does_not_mask_launch_failure() {
   launchlog="$w/launch.log"
   mkdir -p "$w/home/config"
   printf 'bogus anthropic/claude-opus-4-8 medium\n' > "$w/home/config/secondmate-harness"
-  printf 'codex openai-codex/gpt-5.6-sol medium\n' > "$w/home/config/secondmate-harness-fallback"
+  printf 'codex openai-codex/gpt-5.6-luna medium\n' > "$w/home/config/secondmate-harness-fallback"
   make_seeded_home "$sm" sm
 
   out=$(spawn_secondmate_quota_capture "$w" sm "$sm" "$launchlog" \

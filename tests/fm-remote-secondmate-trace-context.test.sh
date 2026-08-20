@@ -264,14 +264,14 @@ pass "boundary: each remote-routed second mate roots its own trace and never ado
 
 # --- quota selection belongs to the launch host and route echoes reality ----
 printf 'claude opus medium\n' > "$PARENT/config/secondmate-harness"
-printf 'codex gpt-5.6-sol high\n' > "$PARENT/config/secondmate-harness-fallback"
+printf 'codex gpt-5.6-luna high\n' > "$PARENT/config/secondmate-harness-fallback"
 printf 'fallback\n' > "$REMOTE_ROOT/.test-quota-mode"
 reset_remote_herdr_fixture "$HERDR_STATE"
 remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null 2>&1 \
   || fail "remote quota fallback spawn failed"
 [ "$(sed -n 's/^harness=//p' "$PARENT/state/ios.meta")" = codex ] \
   || fail "parent quota state overrode the remote launch host's fallback decision"
-[ "$(sed -n 's/^model=//p' "$PARENT/state/ios.meta")" = gpt-5.6-sol ] \
+[ "$(sed -n 's/^model=//p' "$PARENT/state/ios.meta")" = gpt-5.6-luna ] \
   || fail "parent did not record the model selected on the remote launch host"
 [ "$(sed -n 's/^secondmate_fallback_reason=//p' "$PARENT/state/ios.meta")" = provider_unavailable ] \
   || fail "parent did not record the remote launch host's fallback reason"
@@ -281,7 +281,7 @@ remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null 2>&1 \
   || fail "remote live-endpoint reuse failed"
 [ "$(sed -n 's/^harness=//p' "$PARENT/state/ios.meta")" = codex ] \
   || fail "live remote reuse misreported the requested harness instead of the running harness"
-[ "$(sed -n 's/^model=//p' "$PARENT/state/ios.meta")" = gpt-5.6-sol ] \
+[ "$(sed -n 's/^model=//p' "$PARENT/state/ios.meta")" = gpt-5.6-luna ] \
   || fail "live remote reuse misreported the requested model instead of the running model"
 [ "$(sed -n 's/^secondmate_model_source=//p' "$PARENT/state/ios.meta")" = fallback ] \
   || fail "live remote reuse lost the running endpoint's selection source"
