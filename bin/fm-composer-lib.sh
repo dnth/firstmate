@@ -91,7 +91,7 @@ const isFullwidth = codePoint => codePoint >= 0x1100 && (
 let width = 0;
 const isEmojiPresentation = /\p{Emoji_Presentation}/u;
 const isEmoji = /\p{Emoji}/u;
-const isExtendedPictographic = /\p{Extended_Pictographic}/u;
+const isJoinedEmoji = /\p{Extended_Pictographic}[\p{Mark}\p{Emoji_Modifier}\ufe0e\ufe0f]*\u200d\p{Extended_Pictographic}/u;
 const isRegionalIndicatorFlag = /^(?:\p{Regional_Indicator}){2}$/u;
 const isMarkOrFormat = /[\p{Mark}\p{Cf}\ufe0e\ufe0f]/u;
 for (const { segment } of new Intl.Segmenter("en", { granularity: "grapheme" }).segment(input)) {
@@ -104,7 +104,7 @@ for (const { segment } of new Intl.Segmenter("en", { granularity: "grapheme" }).
     isRegionalIndicatorFlag.test(segment) ||
     isEmojiPresentation.test(segment) ||
     (/[\ufe0f]/u.test(segment) && isEmoji.test(segment)) ||
-    (/[\u200d]/u.test(segment) && isExtendedPictographic.test(segment))
+    isJoinedEmoji.test(segment)
   ) {
     width += 2;
   } else {

@@ -137,6 +137,15 @@ assert_standalone_width_matches_bun() {
     || fail "standalone width for $label was $actual, Bun.stringWidth returned $expected"
 }
 
+assert_standalone_width_matches_bun_base() {
+  local bun=$1 label=$2 row=$3 base=$4 expected actual
+  expected=$("$bun" -e 'process.stdout.write(String(Bun.stringWidth(process.argv[2])))' "$row" "$base")
+  actual=$(fm_composer_terminal_width "$row" "$bun" "$bun") \
+    || fail "standalone width failed for $label"
+  [ "$actual" = "$expected" ] \
+    || fail "standalone width for $label was $actual, Bun base width returned $expected"
+}
+
 test_standalone_width_matches_bun_for_unicode_graphemes() {
   local bun
   if ! bun=$(command -v bun 2>/dev/null); then
@@ -153,6 +162,8 @@ test_standalone_width_matches_bun_for_unicode_graphemes() {
   assert_standalone_width_matches_bun "$bun" "bare ZWJ" $'‍'
   assert_standalone_width_matches_bun "$bun" "regional-indicator flag" $'🇮🇳'
   assert_standalone_width_matches_bun "$bun" "CJK" $'界'
+  assert_standalone_width_matches_bun "$bun" "genuine family ZWJ emoji" $'👩‍👩‍👧‍👦'
+  assert_standalone_width_matches_bun_base "$bun" "dangling ZWJ" $'❤‍' $'❤'
   assert_standalone_width_matches_bun "$bun" "OMP status row" '╭── ⬢ GPT-5.6-Sol++ · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
   pass "standalone width matches Bun.stringWidth for Unicode graphemes and the OMP status row"
 }
