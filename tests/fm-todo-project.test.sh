@@ -22,12 +22,12 @@
 #   (l) --check reports queued rows that already have a local worker
 #   (m) --check arms a missed PR watch and auto-closes only an exactly merged PR
 #   (n) lifecycle reconciliation requires explicit mutation authority
-#   (o) merged closure retries from the persisted open-row PR after teardown
+#   (o) merged closure failures do not retry after metadata teardown
 #   (p) each open task's canonical worker verdict is probed only once
 #   (q) listing fields match the installed tasks-axi contract
 #   (r) skipped arming accepts only exact PR-ready status events
-#   (s) completed rows leave no separate replay authority
-#   (t) reused IDs cannot inherit a prior row's PR authority
+#   (s) GitHub and GitLab primary merge paths each close once
+#   (t) direct forge polls are bounded and timeout stays non-merged
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -39,9 +39,9 @@ fm_git_identity fmtest fmtest@example.invalid
 
 # A hermetic home whose board listings are served from fixture files. The fake
 # tasks-axi answers only the surface this script uses - the compatibility probes,
-# `list --state <s> [--fields ...]`, `ready`, and the exact update/done lifecycle
-# edges - and refuses anything else, so a regression that reaches past that
-# surface fails loudly instead of silently reading the live fleet's board.
+# `list --state <s> [--fields ...]`, `ready`, and the exact done lifecycle edge -
+# and refuses anything else, so a regression that reaches past that surface
+# fails loudly instead of silently reading the live fleet's board.
 new_home() {  # <name> -> echoes home dir
   local name=$1 home fakebin
   home="$TMP_ROOT/$name"
@@ -53,21 +53,7 @@ new_home() {  # <name> -> echoes home dir
 set -u
 listings=${FM_FAKE_LISTINGS:?fake tasks-axi needs FM_FAKE_LISTINGS}
 serve() {
-  if [ -f "$listings/$1" ]; then
-    while IFS= read -r line || [ -n "$line" ]; do
-      case "$line" in
-        '  '*)
-          row=${line#  }
-          id=${row%%,*}
-          marker="$listings/board-pr-$id"
-          if [ -f "$marker" ]; then
-            line="${line%,*},pr:$(cat "$marker")"
-          fi
-          ;;
-      esac
-      printf '%s\n' "$line"
-    done < "$listings/$1"
-  else
+  if [ -f "$listings/$1" ]; then cat "$listings/$1"; else
     printf 'count: 0\n'
     if [ "$1" = ready ]; then
       printf 'ready: 0 unblocked queued tasks\n'
@@ -87,25 +73,7 @@ require_file() {
 }
 case "${1:-}" in
   --version|-v|-V) printf '%s\n' "${FM_FAKE_TASKS_AXI_VERSION:-0.2.4}"; exit 0 ;;
-  update)
-    if [ "${2:-}" = --help ]; then
-      printf '%s\n' 'usage: tasks-axi update <id> [--archive-body]'
-      exit 0
-    fi
-    require_file "$@"
-    id=${2:-}
-    pr=
-    while [ "$#" -gt 0 ]; do
-      [ "$1" = --pr ] && { pr=${2:-}; break; }
-      shift
-    done
-    [ -n "$id" ] && [ -n "$pr" ] || exit 9
-    [ -z "${FM_FAKE_UPDATE_LOG:-}" ] || printf '%s\n' "$id $pr" >> "$FM_FAKE_UPDATE_LOG"
-    [ -z "${FM_FAKE_LIFECYCLE_LOG:-}" ] || printf 'update %s\n' "$id" >> "$FM_FAKE_LIFECYCLE_LOG"
-    [ "${FM_FAKE_UPDATE_RC:-0}" -eq 0 ] || exit "${FM_FAKE_UPDATE_RC}"
-    printf '%s\n' "$pr" > "$listings/board-pr-$id"
-    exit 0
-    ;;
+  update) [ "${2:-}" = --help ] && { printf '%s\n' 'usage: tasks-axi update <id> [--archive-body]'; exit 0; } ;;
   mv) [ "${2:-}" = --help ] && { printf '%s\n' 'usage: tasks-axi mv <dest> [<id>...]'; exit 0; } ;;
   ready)
     require_file "$@"
@@ -114,8 +82,8 @@ case "${1:-}" in
   list)
     require_file "$@"
     case "$*" in
-      *'--fields '*repo*)
-        printf '%s\n' 'fake tasks-axi: repo is a base field, not an accepted extra field' >&2
+      *'--fields '*repo*|*'--fields '*links*)
+        printf '%s\n' 'fake tasks-axi: unsupported reconciliation field request' >&2
         exit 9
         ;;
     esac
@@ -132,7 +100,6 @@ case "${1:-}" in
     [ -z "${FM_FAKE_DONE_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_DONE_LOG"
     [ -z "${FM_FAKE_LIFECYCLE_LOG:-}" ] || printf 'done %s\n' "$id" >> "$FM_FAKE_LIFECYCLE_LOG"
     [ "${FM_FAKE_DONE_RC:-0}" -eq 0 ] || exit "${FM_FAKE_DONE_RC}"
-    rm -f "$listings/board-pr-$id"
     exit 0
     ;;
 esac
@@ -169,16 +136,7 @@ SH
 # One tasks-axi listing fixture, in the tool's own rendering.
 write_listing() {  # <home> <name> <header-fields> <row>...
   local home=$1 name=$2 fields=$3 count
-  local -a rows
   shift 3
-  case ",$fields," in
-    *,links,*) ;;
-    *)
-      fields="$fields,links"
-      for row in "$@"; do rows+=("$row,none"); done
-      set -- "${rows[@]}"
-      ;;
-  esac
   count=$#
   {
     printf 'count: %s\n' "$count"
@@ -242,13 +200,22 @@ rm -f "${FM_STATE_OVERRIDE:?}/$1.meta" "${FM_STATE_OVERRIDE:?}/$1.status"
 SH
   cat > "$home/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_FAKE_GH_SLEEP:-}" ] || sleep "$FM_FAKE_GH_SLEEP"
 case " $* " in
   *' --json state -q .state '*) printf '%s\n' "${FM_FAKE_GH_STATE:-OPEN}" ;;
   *) exit 1 ;;
 esac
 SH
+  cat > "$home/fakebin/glab" <<'SH'
+#!/usr/bin/env bash
+[ -z "${FM_FAKE_GLAB_SLEEP:-}" ] || sleep "$FM_FAKE_GLAB_SLEEP"
+case " $* " in
+  *' mr view '*' -R '*) printf 'state: %s\n' "${FM_FAKE_GLAB_STATE:-opened}" ;;
+  *) exit 1 ;;
+esac
+SH
   chmod +x "$root/bin/"*.sh
-  chmod +x "$home/fakebin/gh"
+  chmod +x "$home/fakebin/gh" "$home/fakebin/glab"
   printf '%s\n' "$root/bin/fm-todo-project.sh"
 }
 
@@ -540,7 +507,6 @@ lifecycle_project=$(make_lifecycle_project "$home")
 : > "$home/pr-check.log"
 : > "$home/teardown.log"
 : > "$home/done.log"
-: > "$home/update.log"
 : > "$home/lifecycle.log"
 fm_write_meta "$home/state/pr-task.meta" \
   'window=firstmate:fm-pr-task' \
@@ -556,7 +522,7 @@ write_listing "$home" in_flight 'id,state,kind,repo,title,hold_until' \
   'pr-task,in_flight,ship,firstmate,Ready pull request,"-"'
 out=$(FM_FAKE_GH_STATE=OPEN FM_FAKE_PR_CHECK_LOG="$home/pr-check.log" \
   FM_FAKE_TEARDOWN_LOG="$home/teardown.log" FM_FAKE_DONE_LOG="$home/done.log" \
-  FM_FAKE_UPDATE_LOG="$home/update.log" FM_FAKE_LIFECYCLE_LOG="$home/lifecycle.log" \
+  FM_FAKE_LIFECYCLE_LOG="$home/lifecycle.log" \
   run_lifecycle_project "$home" "$lifecycle_project" --check) \
   || fail "report-only --check exited non-zero for a missed PR watch"
 assert_contains "$out" \
@@ -565,12 +531,11 @@ assert_contains "$out" \
 [ ! -s "$home/pr-check.log" ] || fail "report-only --check armed a PR watch"
 [ ! -s "$home/teardown.log" ] || fail "report-only --check invoked teardown"
 [ ! -s "$home/done.log" ] || fail "report-only --check closed a board item"
-[ ! -s "$home/update.log" ] || fail "report-only --check persisted a board PR"
 assert_not_contains "$(cat "$home/state/pr-task.meta")" 'pr=' \
   "report-only --check changed canonical PR metadata"
 out=$(FM_FAKE_GH_STATE=OPEN FM_FAKE_PR_CHECK_LOG="$home/pr-check.log" \
   FM_FAKE_TEARDOWN_LOG="$home/teardown.log" FM_FAKE_DONE_LOG="$home/done.log" \
-  FM_FAKE_UPDATE_LOG="$home/update.log" FM_FAKE_LIFECYCLE_LOG="$home/lifecycle.log" \
+  FM_FAKE_LIFECYCLE_LOG="$home/lifecycle.log" \
   run_lifecycle_project "$home" "$lifecycle_project" --check --reconcile) \
   || fail "--check exited non-zero while recovering a missed PR watch"
 [ -z "$out" ] || fail "an open PR produced drift while its watch was recovered: $out"
@@ -580,11 +545,10 @@ assert_grep 'pr=https://github.com/example/repo/pull/41' "$home/state/pr-task.me
   "the recovered merge watch did not record canonical PR metadata"
 [ ! -s "$home/teardown.log" ] || fail "an unmerged PR triggered teardown"
 [ ! -s "$home/done.log" ] || fail "an unmerged PR closed its board item"
-[ ! -s "$home/update.log" ] || fail "an unmerged PR was persisted for close reconciliation"
 
 out=$(FM_FAKE_GH_STATE=MERGED FM_FAKE_PR_CHECK_LOG="$home/pr-check.log" \
   FM_FAKE_TEARDOWN_LOG="$home/teardown.log" FM_FAKE_DONE_LOG="$home/done.log" \
-  FM_FAKE_UPDATE_LOG="$home/update.log" FM_FAKE_LIFECYCLE_LOG="$home/lifecycle.log" \
+  FM_FAKE_LIFECYCLE_LOG="$home/lifecycle.log" \
   run_lifecycle_project "$home" "$lifecycle_project" --check --reconcile) \
   || fail "--check exited non-zero for an exactly merged PR"
 assert_contains "$out" \
@@ -597,11 +561,8 @@ assert_contains "$(cat "$home/done.log")" \
   "the merged-PR path did not close the board item with its recorded PR"
 assert_absent "$home/state/pr-task.meta" \
   "the merged-PR path did not tear down the task"
-assert_contains "$(cat "$home/update.log")" \
-  "pr-task https://github.com/example/repo/pull/41" \
-  "the merged-PR path did not persist its canonical PR on the open row"
-[ "$(cat "$home/lifecycle.log")" = $'update pr-task\nteardown pr-task\ndone pr-task' ] \
-  || fail "the merged-PR path did not persist before teardown and close: $(cat "$home/lifecycle.log")"
+[ "$(cat "$home/lifecycle.log")" = $'teardown pr-task\ndone pr-task' ] \
+  || fail "the merged-PR path did not teardown before close: $(cat "$home/lifecycle.log")"
 pass "--check recovers missed PR arming and closes only an exactly merged PR after teardown"
 
 home=$(new_home check-unrelated-status-url)
@@ -675,8 +636,7 @@ write_listing "$home" in_flight 'id,state,kind,repo,title,hold_until' \
   'dirty-pr,in_flight,ship,firstmate,Merged with local work,"-"'
 out=$(FM_FAKE_GH_STATE=MERGED FM_FAKE_TEARDOWN_REFUSE=1 \
   FM_FAKE_PR_CHECK_LOG="$home/pr-check.log" FM_FAKE_TEARDOWN_LOG="$home/teardown.log" \
-  FM_FAKE_DONE_LOG="$home/done.log" FM_FAKE_UPDATE_LOG="$home/update.log" \
-  run_lifecycle_project "$home" "$lifecycle_project" --check --reconcile) \
+  FM_FAKE_DONE_LOG="$home/done.log" run_lifecycle_project "$home" "$lifecycle_project" --check --reconcile) \
   || fail "--check lost its report-only exit contract after teardown refusal"
 assert_contains "$out" \
   "DRIFT merged-pr-open: dirty-pr - merged PR teardown refused; task and board item preserved" \
@@ -685,8 +645,6 @@ assert_contains "$out" \
   || fail "the refused merged-PR path did not use ordinary teardown"
 [ ! -s "$home/done.log" ] || fail "a teardown refusal still closed the board item"
 [ -f "$home/state/dirty-pr.meta" ] || fail "a teardown refusal erased task metadata"
-assert_grep 'https://github.com/example/repo/pull/42' "$home/listings/board-pr-dirty-pr" \
-  "the canonical PR was not persisted before refused teardown"
 pass "the merged-PR auto-close preserves the task and board item when ordinary teardown refuses"
 
 home=$(new_home check-merged-close-retry)
@@ -694,7 +652,6 @@ lifecycle_project=$(make_lifecycle_project "$home")
 : > "$home/pr-check.log"
 : > "$home/teardown.log"
 : > "$home/done.log"
-: > "$home/update.log"
 : > "$home/lifecycle.log"
 fm_write_meta "$home/state/retry-pr.meta" \
   'window=firstmate:fm-retry-pr' \
@@ -707,8 +664,7 @@ write_listing "$home" in_flight 'id,state,kind,repo,title,hold_until' \
   'retry-pr,in_flight,ship,firstmate,Merged close retry,"-"'
 out=$(FM_FAKE_GH_STATE=MERGED FM_FAKE_DONE_RC=1 \
   FM_FAKE_PR_CHECK_LOG="$home/pr-check.log" FM_FAKE_TEARDOWN_LOG="$home/teardown.log" \
-  FM_FAKE_DONE_LOG="$home/done.log" FM_FAKE_UPDATE_LOG="$home/update.log" \
-  FM_FAKE_LIFECYCLE_LOG="$home/lifecycle.log" \
+  FM_FAKE_DONE_LOG="$home/done.log" FM_FAKE_LIFECYCLE_LOG="$home/lifecycle.log" \
   run_lifecycle_project "$home" "$lifecycle_project" --check --reconcile) \
   || fail "--check lost its exit-zero contract after board-close failure"
 assert_contains "$out" \
@@ -718,72 +674,99 @@ assert_absent "$home/state/retry-pr.meta" \
   "the first retry fixture did not complete teardown"
 assert_absent "$home/state/retry-pr.status" \
   "the first retry fixture retained status identity unexpectedly"
-assert_grep 'https://github.com/example/repo/pull/43' "$home/listings/board-pr-retry-pr" \
-  "board-close failure lost the canonical PR persisted on the open row"
-[ "$(cat "$home/lifecycle.log")" = $'update retry-pr\nteardown retry-pr\ndone retry-pr' ] \
-  || fail "the first close attempt did not persist before teardown: $(cat "$home/lifecycle.log")"
+[ "$(cat "$home/lifecycle.log")" = $'teardown retry-pr\ndone retry-pr' ] \
+  || fail "the first close attempt did not teardown before closure: $(cat "$home/lifecycle.log")"
 
-out=$(FM_FAKE_GH_STATE=MERGED \
-  FM_FAKE_CREW_VERDICT='state: unknown · source: none · no metadata for retry-pr' \
-  FM_FAKE_PR_CHECK_LOG="$home/pr-check.log" \
-  FM_FAKE_TEARDOWN_LOG="$home/teardown.log" FM_FAKE_DONE_LOG="$home/done.log" \
-  FM_FAKE_UPDATE_LOG="$home/update.log" FM_FAKE_LIFECYCLE_LOG="$home/lifecycle.log" \
-  run_lifecycle_project "$home" "$lifecycle_project" --check --reconcile) \
-  || fail "--check could not retry closure from the persisted board PR"
-assert_contains "$out" \
-  "DRIFT merged-pr-open: retry-pr - merged PR closed and task torn down" \
-  "the persisted board PR did not retry closure after metadata removal"
-[ "$(wc -l < "$home/teardown.log" | tr -d ' ')" -eq 1 ] \
-  || fail "board-link recovery reran teardown after it had already succeeded"
-[ "$(wc -l < "$home/done.log" | tr -d ' ')" -eq 2 ] \
-  || fail "board closure was not attempted exactly once per reconciliation pass"
-[ "$(wc -l < "$home/update.log" | tr -d ' ')" -eq 2 ] \
-  || fail "each close attempt did not revalidate and persist the exact board PR"
-[ "$(cat "$home/lifecycle.log")" = $'update retry-pr\nteardown retry-pr\ndone retry-pr\nupdate retry-pr\ndone retry-pr' ] \
-  || fail "retry lifecycle was not idempotent: $(cat "$home/lifecycle.log")"
-assert_absent "$home/listings/board-pr-retry-pr" \
-  "successful close left open-row PR authority in the fake board"
-pass "merged board closure retries from the exact persisted open-row PR"
-
-write_listing "$home" in_flight 'id,state,kind,repo,title,hold_until' \
-  'retry-pr,in_flight,ship,firstmate,New work reusing a completed ID,"-"'
-: > "$home/update.log"
 : > "$home/teardown.log"
 : > "$home/done.log"
-out=$(FM_FAKE_GH_STATE=MERGED \
-  FM_FAKE_CREW_VERDICT='state: unknown · source: none · no metadata for retry-pr' \
-  FM_FAKE_PR_CHECK_LOG="$home/pr-check.log" FM_FAKE_TEARDOWN_LOG="$home/teardown.log" \
-  FM_FAKE_DONE_LOG="$home/done.log" FM_FAKE_UPDATE_LOG="$home/update.log" \
+: > "$home/lifecycle.log"
+out=$(FM_FAKE_GH_STATE=MERGED FM_FAKE_PR_CHECK_LOG="$home/pr-check.log" \
+  FM_FAKE_TEARDOWN_LOG="$home/teardown.log" FM_FAKE_DONE_LOG="$home/done.log" \
+  FM_FAKE_LIFECYCLE_LOG="$home/lifecycle.log" \
   run_lifecycle_project "$home" "$lifecycle_project" --check --reconcile) \
-  || fail "reused-ID check exited non-zero"
+  || fail "post-teardown check exited non-zero"
 assert_not_contains "$out" "DRIFT merged-pr-open: retry-pr" \
-  "a new row inherited the completed row's PR authority"
-[ ! -s "$home/update.log" ] || fail "ID reuse recreated old board PR authority"
-[ ! -s "$home/teardown.log" ] || fail "ID reuse invoked teardown"
-[ ! -s "$home/done.log" ] || fail "ID reuse closed the new row"
-pass "a completed row leaves no PR authority for later ID reuse"
+  "post-teardown reconciliation rediscovered merge authority without metadata"
+[ ! -s "$home/teardown.log" ] || fail "post-teardown reconciliation reran teardown"
+[ ! -s "$home/done.log" ] || fail "post-teardown reconciliation retried board closure"
+[ ! -s "$home/lifecycle.log" ] || fail "post-teardown reconciliation mutated lifecycle state"
+pass "a failed board close is not retried after metadata teardown"
 
 home=$(new_home check-unrelated-board-links)
 lifecycle_project=$(make_lifecycle_project "$home")
 : > "$home/pr-check.log"
 : > "$home/teardown.log"
 : > "$home/done.log"
-: > "$home/update.log"
 write_listing "$home" in_flight 'id,state,kind,repo,title,hold_until,links' \
-  'wrong-link-kind,in_flight,ship,firstmate,Doc link is not PR identity,"-",doc:https://github.com/example/repo/pull/72' \
-  'multiple-pr-links,in_flight,ship,firstmate,Ambiguous PR identity,"-","pr:https://github.com/example/repo/pull/73,pr:https://github.com/example/repo/pull/74"'
+  'unrelated-pr-link,in_flight,ship,firstmate,Depends on https://github.com/example/repo/pull/72,"-",pr:https://github.com/example/repo/pull/72'
 out=$(FM_FAKE_GH_STATE=MERGED \
   FM_FAKE_CREW_VERDICT='state: unknown · source: none · no metadata' \
   FM_FAKE_PR_CHECK_LOG="$home/pr-check.log" FM_FAKE_TEARDOWN_LOG="$home/teardown.log" \
-  FM_FAKE_DONE_LOG="$home/done.log" FM_FAKE_UPDATE_LOG="$home/update.log" \
+  FM_FAKE_DONE_LOG="$home/done.log" \
   run_lifecycle_project "$home" "$lifecycle_project" --check --reconcile) \
   || fail "unrelated board links broke the check contract"
 assert_not_contains "$out" "DRIFT merged-pr-open" \
-  "an unrelated or ambiguous board link became automatic-close authority"
-[ ! -s "$home/update.log" ] || fail "an unrelated board link was persisted as canonical PR identity"
+  "an unrelated board PR link became automatic-close authority"
 [ ! -s "$home/teardown.log" ] || fail "an unrelated board link invoked teardown"
 [ ! -s "$home/done.log" ] || fail "an unrelated board link closed a row"
-pass "only one exact typed PR link supplies board retry identity"
+pass "board PR links never supply automatic-close authority"
+
+home=$(new_home check-gitlab-primary-close)
+lifecycle_project=$(make_lifecycle_project "$home")
+: > "$home/pr-check.log"
+: > "$home/teardown.log"
+: > "$home/done.log"
+fm_write_meta "$home/state/gitlab-merged.meta" \
+  'window=firstmate:fm-gitlab-merged' \
+  "worktree=$home/wt" \
+  'project=firstmate' \
+  'kind=ship' \
+  'mode=no-mistakes' \
+  'pr=https://gitlab.example.com/group/project/-/merge_requests/81'
+write_listing "$home" in_flight 'id,state,kind,repo,title,hold_until' \
+  'gitlab-merged,in_flight,ship,firstmate,Merged GitLab work,"-"'
+out=$(FM_FAKE_GLAB_STATE=merged FM_FAKE_PR_CHECK_LOG="$home/pr-check.log" \
+  FM_FAKE_TEARDOWN_LOG="$home/teardown.log" FM_FAKE_DONE_LOG="$home/done.log" \
+  run_lifecycle_project "$home" "$lifecycle_project" --check --reconcile) \
+  || fail "GitLab exact-merge reconciliation exited non-zero"
+assert_contains "$out" \
+  "DRIFT merged-pr-open: gitlab-merged - merged PR closed and task torn down" \
+  "GitLab exact merge did not close its board row"
+[ "$(cat "$home/teardown.log")" = gitlab-merged ] \
+  || fail "GitLab exact merge did not use ordinary teardown"
+assert_contains "$(cat "$home/done.log")" \
+  "done gitlab-merged --file $home/data/backlog.md" \
+  "GitLab exact merge did not close its board row"
+assert_not_contains "$(cat "$home/done.log")" "--pr" \
+  "GitLab closure attempted to persist an unsupported MR representation"
+pass "GitLab exact merges close once without a board MR artifact"
+
+home=$(new_home check-pr-poll-timeout)
+lifecycle_project=$(make_lifecycle_project "$home")
+: > "$home/pr-check.log"
+: > "$home/teardown.log"
+: > "$home/done.log"
+fm_write_meta "$home/state/slow-pr.meta" \
+  'window=firstmate:fm-slow-pr' \
+  "worktree=$home/wt" \
+  'project=firstmate' \
+  'kind=ship' \
+  'mode=no-mistakes' \
+  'pr=https://github.com/example/repo/pull/82'
+write_listing "$home" in_flight 'id,state,kind,repo,title,hold_until' \
+  'slow-pr,in_flight,ship,firstmate,Slow forge lookup,"-"'
+started=$(date +%s)
+out=$(FM_TODO_PR_TIMEOUT=1 FM_FAKE_GH_SLEEP=5 \
+  FM_FAKE_PR_CHECK_LOG="$home/pr-check.log" FM_FAKE_TEARDOWN_LOG="$home/teardown.log" \
+  FM_FAKE_DONE_LOG="$home/done.log" run_lifecycle_project "$home" "$lifecycle_project" --check) \
+  || fail "timed-out report-only PR check exited non-zero"
+elapsed=$(($(date +%s) - started))
+[ "$elapsed" -le 3 ] || fail "direct PR poll exceeded its configured bound (${elapsed}s)"
+assert_not_contains "$out" "DRIFT merged-pr-open" \
+  "a timed-out PR poll was interpreted as merged"
+[ ! -s "$home/teardown.log" ] || fail "a timed-out PR poll invoked teardown"
+[ ! -s "$home/done.log" ] || fail "a timed-out PR poll closed a board row"
+pass "direct PR polling is bounded and timeout remains non-merged"
 
 # --- (i) FM_HOME is required fail-closed ------------------------------------
 

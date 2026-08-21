@@ -34,19 +34,19 @@
 # --check is strictly report-only unless its caller also supplies --reconcile
 # after verifying fleet-mutation authority. Reconciliation auto-fixes exactly
 # one unambiguous board state: an open task whose recorded PR is exactly merged.
-# It first persists the canonical PR as the authoritative open board row's typed
-# PR link, runs ordinary guarded teardown, and closes that row only after
-# teardown succeeds. A transient close failure therefore remains retryable from
-# the still-open row after task metadata is removed, without separate replay
-# authority. Retry revalidates the exact merged PR link and requires the
-# canonical no-worker verdict before closing. Once the row is Done it no longer
-# participates in reconciliation. Every other finding stays report-only and
-# requires firstmate judgment. Reconciliation recovers only the PR-ready status
-# contracts owned by bin/fm-brief.sh through bin/fm-pr-check.sh, so discovered
-# PR-bearing tasks converge on the ordinary merge watch without treating
-# unrelated status or board links as task identity. The command prints one
-# finding per line and nothing when clean, and after invocation validation it
-# always exits 0 - it is a reconciler, not a gate.
+# Only canonical task metadata supplies automatic-close authority. The direct
+# forge lookup is bounded by FM_TODO_PR_TIMEOUT (default 20 seconds); timeout or
+# any lookup failure remains unknown and non-merged. An exact merged result runs
+# ordinary guarded teardown, then attempts board closure once. GitHub closure
+# records the PR through tasks-axi; GitLab closure adds no unsupported board
+# representation. A close failure after successful teardown is reported but is
+# never retried automatically after metadata disappears. Every other finding
+# stays report-only and requires firstmate judgment. Reconciliation recovers
+# only the PR-ready status contracts owned by bin/fm-brief.sh through
+# bin/fm-pr-check.sh, so discovered PR-bearing tasks converge on the ordinary
+# merge watch without treating unrelated status or board links as task identity.
+# The command prints one finding per line and nothing when clean, and after
+# invocation validation it always exits 0 - it is a reconciler, not a gate.
 #
 # Findings:
 #   DRIFT inflight-no-worker: <id> - <reason>
@@ -131,6 +131,8 @@ SECONDMATES="$DATA/secondmates.md"
 
 ITEM_MAX=${FM_TODO_ITEM_MAX:-100}
 case "$ITEM_MAX" in ''|*[!0-9]*|0) ITEM_MAX=100 ;; esac
+PR_POLL_TIMEOUT=${FM_TODO_PR_TIMEOUT:-20}
+case "$PR_POLL_TIMEOUT" in ''|*[!0-9]*|0) PR_POLL_TIMEOUT=20 ;; esac
 
 # --- board access -----------------------------------------------------------
 
@@ -442,8 +444,6 @@ PR_CHECKED_IDS=$'\n'
 SECONDMATE_PROJECT_ROWS=
 CREW_PROBED_IDS=$'\n'
 CREW_VERDICT_ROWS=
-OPEN_IDS=$'\n'
-BOARD_PR_ROWS=
 
 id_in_set() {  # <newline-delimited-set> <id>
   case "$1" in
@@ -501,72 +501,19 @@ crew_verdict() {  # <id>
   "$SCRIPT_DIR/fm-crew-state.sh" "$1" 2>/dev/null
 }
 
-board_pr_from_links() {  # <links>
-  local links=$1 link url found= count=0
-  local -a board_links
-  IFS=, read -ra board_links <<< "$links"
-  for link in "${board_links[@]}"; do
-    case "$link" in pr:*) ;; *) continue ;; esac
-    url=${link#pr:}
-    fm_pr_url_parse "$url" || return 1
-    found=$FM_PR_URL
-    count=$((count + 1))
-  done
-  [ "$count" -eq 1 ] || return 1
-  printf '%s\n' "$found"
-}
-
-board_pr_for() {  # <id>
-  local want=$1 id url
-  while IFS=$'\t' read -r id url; do
-    [ "$id" = "$want" ] || continue
-    printf '%s\n' "$url"
-    return 0
-  done <<< "$BOARD_PR_ROWS"
-  return 1
-}
-
 capture_crew_verdicts() {  # <listing>...
-  local listing id links board_pr verdict
+  local listing id verdict
   for listing in "$@"; do
-    while IFS=$'\t' read -r id links; do
+    while IFS= read -r id; do
       [ -n "$id" ] || continue
       fm_pr_task_id_valid "$id" || continue
-      if ! id_in_set "$OPEN_IDS" "$id"; then
-        OPEN_IDS="${OPEN_IDS}${id}"$'\n'
-        if board_pr=$(board_pr_from_links "$links"); then
-          BOARD_PR_ROWS="${BOARD_PR_ROWS}${id}"$'\t'"${board_pr}"$'\n'
-        fi
-      fi
       id_in_set "$CREW_PROBED_IDS" "$id" && continue
       CREW_PROBED_IDS="${CREW_PROBED_IDS}${id}"$'\n'
       verdict=$(crew_verdict "$id") || continue
       case "$verdict" in *$'\n'*|*$'\t'*) continue ;; esac
       CREW_VERDICT_ROWS="${CREW_VERDICT_ROWS}${id}"$'\t'"${verdict}"$'\n'
-    done <<< "$(axi_rows tasks "$listing" rows id links)"
+    done <<< "$(axi_rows tasks "$listing" rows id)"
   done
-}
-
-current_board_pr_matches() {  # <id> <url>
-  local want=$1 want_url=$2 state listing id links found= board_pr
-  for state in in_flight queued; do
-    listing=$(axi_list "$state" links) || return 1
-    axi_rows tasks "$listing" rows id links >/dev/null || return 1
-    while IFS=$'\t' read -r id links; do
-      [ "$id" = "$want" ] || continue
-      board_pr=$(board_pr_from_links "$links") || return 1
-      [ "$board_pr" = "$want_url" ] || return 1
-      [ -z "$found" ] || [ "$found" = "$board_pr" ] || return 1
-      found=$board_pr
-    done <<< "$(axi_rows tasks "$listing" rows id links)"
-  done
-  [ -n "$found" ] || return 1
-}
-
-persist_board_pr_identity() {  # <id> <url>
-  local id=$1 url=$2
-  tasks-axi update "$id" --file "$BOARD" --pr "$url" >/dev/null 2>&1 || return 1
-  current_board_pr_matches "$id" "$url"
 }
 
 crew_verdict_for() {  # <id>
@@ -669,15 +616,24 @@ recorded_pr_identity() {  # <id>; sets TASK_PR_* globals
     TASK_PR_SOURCE=metadata
     return 0
   fi
-  url=$(board_pr_for "$id") || return 1
-  fm_pr_url_parse "$url" || return 1
-  set_task_pr_identity
-  TASK_PR_SOURCE=board
+  return 1
+}
+
+run_pr_poll_bounded() {  # <args...>
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$PR_POLL_TIMEOUT" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$PR_POLL_TIMEOUT" "$@"
+  elif command -v perl >/dev/null 2>&1; then
+    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$PR_POLL_TIMEOUT" "$@"
+  else
+    return 124
+  fi
 }
 
 pr_is_exactly_merged() {
   local result
-  result=$("$SCRIPT_DIR/fm-pr-poll.sh" --validated \
+  result=$(run_pr_poll_bounded "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
     "$TASK_PR_PROVIDER" "$TASK_PR_URL" "$TASK_PR_HOST" "$TASK_PR_PATH" "$TASK_PR_NUMBER" 2>/dev/null) || result=
   [ "$result" = merged ]
 }
@@ -700,11 +656,11 @@ ensure_pr_watch() {  # <id>
 
 close_merged_board_item() {  # <id>
   local id=$1
-  if ! current_board_pr_matches "$id" "$TASK_PR_URL"; then
-    printf 'DRIFT-CHECK-SKIPPED: canonical board PR for %s changed before closure\n' "$id"
-    return 1
+  local -a done_args=(done "$id" --file "$BOARD")
+  if [ "$TASK_PR_PROVIDER" = github ]; then
+    done_args+=(--pr "$TASK_PR_URL")
   fi
-  if ! tasks-axi "done" "$id" --file "$BOARD" --pr "$TASK_PR_URL" >/dev/null 2>&1; then
+  if ! tasks-axi "${done_args[@]}" >/dev/null 2>&1; then
     printf 'DRIFT merged-pr-open: %s - teardown completed but the merged board item could not be closed\n' "$id"
     return 1
   fi
@@ -713,36 +669,24 @@ close_merged_board_item() {  # <id>
 }
 
 auto_close_merged_pr() {  # <id>
-  local id=$1 verdict
+  local id=$1
   if [ "$RECONCILE" -eq 0 ]; then
     printf 'DRIFT merged-pr-open: %s - recorded PR is merged; reconciliation requires verified mutation authority\n' "$id"
     return 1
   fi
-  if ! persist_board_pr_identity "$id" "$TASK_PR_URL"; then
-    printf 'DRIFT merged-pr-open: %s - canonical PR could not be persisted on the open board row; task preserved\n' "$id"
+  if [ "$TASK_PR_SOURCE" != metadata ] \
+      || [ ! -e "$STATE/$id.meta" ] \
+      || [ -L "$STATE/$id.meta" ]; then
+    printf 'DRIFT merged-pr-open: %s - exact merge lacks canonical task metadata; automatic close refused\n' "$id"
     return 1
   fi
-  if [ "$TASK_PR_SOURCE" = board ]; then
-    verdict=$(crew_verdict_for "$id") || {
-      printf 'DRIFT merged-pr-open: %s - merged board PR has no canonical local-worker verdict; automatic close refused\n' "$id"
-      return 1
-    }
-    if ! verdict_has_no_source "$verdict"; then
-      printf 'DRIFT merged-pr-open: %s - merged board PR still has a local worker; automatic close refused\n' "$id"
-      return 1
-    fi
-  elif [ -e "$STATE/$id.meta" ] || [ -L "$STATE/$id.meta" ]; then
-    if ! task_pr_matches_metadata "$id"; then
-      printf 'DRIFT-CHECK-SKIPPED: canonical PR for %s no longer matches task metadata\n' "$id"
-      return 1
-    fi
-    if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
-        FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-teardown.sh" "$id" >/dev/null 2>&1; then
-      printf 'DRIFT merged-pr-open: %s - merged PR teardown refused; task and board item preserved\n' "$id"
-      return 1
-    fi
-  else
-    printf 'DRIFT merged-pr-open: %s - task metadata disappeared before guarded teardown; board item preserved\n' "$id"
+  if ! task_pr_matches_metadata "$id"; then
+    printf 'DRIFT-CHECK-SKIPPED: canonical PR for %s no longer matches task metadata\n' "$id"
+    return 1
+  fi
+  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-teardown.sh" "$id" >/dev/null 2>&1; then
+    printf 'DRIFT merged-pr-open: %s - merged PR teardown refused; task and board item preserved\n' "$id"
     return 1
   fi
   close_merged_board_item "$id"
@@ -850,8 +794,8 @@ run_check() {
   # One failed listing never suppresses the other's findings: a partial report
   # plus a named skip is more useful than silence.
   local -a hold_listings=() open_listings=()
-  if in_flight=$(axi_list in_flight hold_until,links); then
-    if axi_rows tasks "$in_flight" rows id hold_until repo links >/dev/null; then
+  if in_flight=$(axi_list in_flight hold_until); then
+    if axi_rows tasks "$in_flight" rows id hold_until repo >/dev/null; then
       in_flight_valid=1
       open_listings+=("$in_flight")
       hold_listings+=("$in_flight")
@@ -861,8 +805,8 @@ run_check() {
   else
     printf 'DRIFT-CHECK-SKIPPED: tasks-axi list --state in_flight failed\n'
   fi
-  if queued=$(axi_list queued hold_until,links); then
-    if axi_rows tasks "$queued" rows id hold_until repo links >/dev/null; then
+  if queued=$(axi_list queued hold_until); then
+    if axi_rows tasks "$queued" rows id hold_until repo >/dev/null; then
       queued_valid=1
       open_listings+=("$queued")
       hold_listings+=("$queued")

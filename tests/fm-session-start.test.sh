@@ -169,8 +169,8 @@ case "${1:-}" in
         ;;
       *'--state in_flight'*'--fields hold_until'*)
         printf 'count: 1\n'
-        printf 'tasks[1]{id,state,kind,repo,title,hold_until,links}:\n'
-        printf '%s\n' '  compact-startup,in_flight,ship,firstmate,Compact startup digest,"-",none'
+        printf 'tasks[1]{id,state,kind,repo,title,hold_until}:\n'
+        printf '%s\n' '  compact-startup,in_flight,ship,firstmate,Compact startup digest,"-"'
         ;;
       *'--state in_flight'*)
         task_header 1
@@ -188,8 +188,8 @@ case "${1:-}" in
         # The drift check's own hold listing (bin/fm-todo-project.sh --check).
         printf 'count: %s\n' "${FM_FAKE_TASKS_AXI_HOLD_ROWS:-0}"
         if [ "${FM_FAKE_TASKS_AXI_HOLD_ROWS:-0}" -gt 0 ]; then
-          printf 'tasks[1]{id,state,kind,repo,title,hold_until,links}:\n'
-          printf '%s\n' "  ${FM_FAKE_TASKS_AXI_HOLD_ROW:-lapsed-hold,queued,ship,firstmate,Lapsed hold,2020-01-01,none}"
+          printf 'tasks[1]{id,state,kind,repo,title,hold_until}:\n'
+          printf '%s\n' "  ${FM_FAKE_TASKS_AXI_HOLD_ROW:-lapsed-hold,queued,ship,firstmate,Lapsed hold,2020-01-01}"
         else
           printf 'tasks: 0 queued tasks in this backlog\n'
         fi
