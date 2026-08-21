@@ -105,6 +105,7 @@ state/               volatile runtime signals; gitignored
   <id>.pr-poll       private validated data sidecar for the byte-static PR merge poll
   <id>.pr-poll-registration  private transactional provenance record binding the task, canonical metadata identity, sidecar, and static poll publication
   <id>.pr-poll-retirement  private identity-bound crash-recovery receipt for one exact validated merged result; removed after its poll artifacts retire
+  <id>.todo-merged-reconciliation  private exact-merged board-reconciliation receipt; format and lifecycle are owned by bin/fm-todo-project.sh
   .pr-check-quarantine/  private non-runnable storage for checks neutralized by the non-executing migration
   .pr-check-migration.log  private per-task outcomes distinguishing rebuilt or canonically registered replacement polls, quarantined unarmed polls, and incomplete migrations
   .pr-check-migration-scan-v1  private marker proving the non-executing scan disabled every unsafe legacy check; .pr-check-migration-v1 separately records completed private repairs
@@ -350,7 +351,7 @@ The worker reports the PR when CI first becomes green rather than waiting for me
 ### PR ready, landing, and teardown
 
 For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
-On every PR-ready signal, immediately run `bin/fm-pr-check.sh <id> <PR url>` before reporting the result - it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher's merge poll, while `bin/fm-todo-project.sh --check` is the recovery backstop for a skipped arm.
+On every PR-ready signal, immediately run `bin/fm-pr-check.sh <id> <PR url>` before reporting the result - it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher's merge poll, while lock-owning reconciliation through `bin/fm-todo-project.sh --check --reconcile` is the recovery backstop for a skipped arm.
 Tell the captain the PR's full URL, always the complete `https://...` link rather than a bare `#number`, a concise outcome summary, and the no-mistakes risk level when applicable.
 A captain instruction to merge is explicit authority; `yolo` is the only standing routine authority.
 For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.
@@ -393,9 +394,9 @@ Handle actionable wakes as follows:
 2. For `stale:`, inspect the recorded endpoint and load `stuck-crewmate-recovery` for a stopped, looping, confused, or unresponsive worker; a deep-inspection reason also requires current-state and validation-log inspection.
 3. For `check:`, act on the named poll result, including merges, X-mode events, and process-to-event source results.
 4. For `heartbeat:`, review the whole fleet from the structured fleet view, reconcile suspicious tasks and PR state, update the backlog, and never report an unchanged fleet as progress.
-   Every heartbeat also re-runs `bin/fm-todo-project.sh --check`, reconciles what it flags, and re-projects the session todo from `--emit`.
+   Every lock-owning heartbeat also re-runs `bin/fm-todo-project.sh --check --reconcile`, reconciles what it flags, and re-projects the session todo from `--emit`.
 
-On an exact merged-PR check, immediately run `bin/fm-todo-project.sh --check`; its header owns the guarded teardown and sole automatic board close, after which section 10's projection refresh applies.
+On an exact merged-PR check with verified fleet-lock ownership, immediately run `bin/fm-todo-project.sh --check --reconcile`; its header owns the guarded teardown and sole automatic board close, while plain `--check` remains report-only, after which section 10's projection refresh applies.
 
 When any wake reports a merged PR for a project cloned in this home, refresh that clone through the guarded fleet-sync path.
 When X-linked work reaches a milestone or terminal state, load `fmx-respond`; before terminal teardown, use its promised-final reconciliation when a typed public commitment exists, otherwise post the final completion follow-up so the link clears even if earlier follow-ups were spent.

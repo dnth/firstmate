@@ -11,6 +11,8 @@
 # Usage:
 #   fm-todo-project.sh --emit     print the board as todo `init` list JSON
 #   fm-todo-project.sh --check    print board-vs-reality drift (default)
+#   fm-todo-project.sh --check --reconcile
+#                                reconcile lifecycle drift with verified authority
 #   fm-todo-project.sh --help
 #
 # FM_HOME must be set explicitly, exactly as bin/fm-send.sh requires it: a
@@ -29,15 +31,19 @@
 # TOON string escapes are decoded strictly, with line-breaking whitespace
 # collapsed before projection; malformed escapes make the listing incompatible.
 #
-# --check reports drift and auto-fixes exactly one unambiguous board state: an
-# open task whose recorded PR is exactly merged. That fix runs the ordinary
-# guarded teardown first and closes the board item only after teardown succeeds,
-# so dirty or unlanded work retains every existing refusal. Every other finding
-# stays report-only and requires firstmate judgment. A PR-ready status whose
-# metadata has not recorded the PR is recovered through bin/fm-pr-check.sh, so
-# every discovered PR-bearing task converges on the ordinary merge watch. The
-# command prints one finding per line and nothing when clean, and after invocation
-# validation it always exits 0 - it is a reconciler, not a gate.
+# --check is strictly report-only unless its caller also supplies --reconcile
+# after verifying fleet-mutation authority. Reconciliation auto-fixes exactly
+# one unambiguous board state: an open task whose recorded PR is exactly merged.
+# It first persists a private identity-bound merged receipt, runs ordinary
+# guarded teardown, and closes the board item only after teardown succeeds, so
+# dirty or unlanded work retains every existing refusal and a transient board
+# close failure remains retryable after task metadata is removed. Every other
+# finding stays report-only and requires firstmate judgment. Reconciliation also
+# recovers a PR-ready status whose metadata has not recorded the PR through
+# bin/fm-pr-check.sh, so every discovered PR-bearing task converges on the
+# ordinary merge watch. The command prints one finding per line and nothing when
+# clean, and after invocation validation it always exits 0 - it is a reconciler,
+# not a gate.
 #
 # Findings:
 #   DRIFT inflight-no-worker: <id> - <reason>
@@ -100,13 +106,14 @@ fail() {
 }
 
 MODE=check
-case "${1:-}" in
-  ''|--check) MODE=check ;;
-  --emit) MODE=emit ;;
-  -h|--help) usage; exit 0 ;;
-  *) fail "unknown argument '$1' (see --help)" ;;
+RECONCILE=0
+case "$#:$*" in
+  0:|1:--check) ;;
+  '2:--check --reconcile') RECONCILE=1 ;;
+  1:--emit) MODE=emit ;;
+  1:-h|1:--help) usage; exit 0 ;;
+  *) fail "invalid arguments '$*' (see --help)" ;;
 esac
-[ "$#" -le 1 ] || fail "unexpected extra argument '$2' (see --help)"
 
 if [ -z "${FM_HOME+x}" ] || [ -z "${FM_HOME:-}" ]; then
   fail "FM_HOME is not set; refusing to project or check a board without an explicit firstmate home"
@@ -430,6 +437,9 @@ run_emit() {
 AUTO_CLOSED_IDS=$'\n'
 PR_CHECKED_IDS=$'\n'
 SECONDMATE_PROJECT_ROWS=
+CREW_PROBED_IDS=$'\n'
+CREW_VERDICT_ROWS=
+MERGED_RECEIPT_SUFFIX=.todo-merged-reconciliation
 
 id_in_set() {  # <newline-delimited-set> <id>
   case "$1" in
@@ -487,6 +497,31 @@ crew_verdict() {  # <id>
   "$SCRIPT_DIR/fm-crew-state.sh" "$1" 2>/dev/null
 }
 
+capture_crew_verdicts() {  # <listing>...
+  local listing id verdict
+  for listing in "$@"; do
+    while IFS= read -r id; do
+      [ -n "$id" ] || continue
+      fm_pr_task_id_valid "$id" || continue
+      id_in_set "$CREW_PROBED_IDS" "$id" && continue
+      CREW_PROBED_IDS="${CREW_PROBED_IDS}${id}"$'\n'
+      verdict=$(crew_verdict "$id") || continue
+      case "$verdict" in *$'\n'*|*$'\t'*) continue ;; esac
+      CREW_VERDICT_ROWS="${CREW_VERDICT_ROWS}${id}"$'\t'"${verdict}"$'\n'
+    done <<< "$(axi_rows tasks "$listing" rows id)"
+  done
+}
+
+crew_verdict_for() {  # <id>
+  local want=$1 id verdict
+  while IFS=$'\t' read -r id verdict; do
+    [ "$id" = "$want" ] || continue
+    printf '%s\n' "$verdict"
+    return 0
+  done <<< "$CREW_VERDICT_ROWS"
+  return 1
+}
+
 verdict_has_no_source() {  # <fm-crew-state verdict>
   case "$1" in
     'state: unknown'*'source: none'*) return 0 ;;
@@ -507,6 +542,82 @@ status_pr_url() {  # <id>
   printf '%s\n' "$found"
 }
 
+set_task_pr_identity() {
+  TASK_PR_PROVIDER=$FM_PR_PROVIDER
+  TASK_PR_URL=$FM_PR_URL
+  TASK_PR_HOST=$FM_PR_HOST
+  TASK_PR_PATH=$FM_PR_PATH
+  TASK_PR_NUMBER=$FM_PR_NUMBER
+}
+
+merged_receipt_path() { printf '%s/%s%s\n' "$STATE" "$1" "$MERGED_RECEIPT_SUFFIX"; }
+
+merged_receipt_parse() {  # <id>; sets TASK_PR_* globals
+  local id=$1 receipt state_device version receipt_id provider url host path number result extra
+  fm_pr_task_id_valid "$id" || return 1
+  [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
+  state_device=$(fm_pr_file_device "$STATE") || return 1
+  receipt=$(merged_receipt_path "$id")
+  fm_pr_private_file_valid "$receipt" 600 "$state_device" || return 1
+  exec 9< "$receipt" || return 1
+  IFS= read -r version <&9 || { exec 9<&-; return 1; }
+  IFS= read -r receipt_id <&9 || { exec 9<&-; return 1; }
+  IFS= read -r provider <&9 || { exec 9<&-; return 1; }
+  IFS= read -r url <&9 || { exec 9<&-; return 1; }
+  IFS= read -r host <&9 || { exec 9<&-; return 1; }
+  IFS= read -r path <&9 || { exec 9<&-; return 1; }
+  IFS= read -r number <&9 || { exec 9<&-; return 1; }
+  IFS= read -r result <&9 || { exec 9<&-; return 1; }
+  if IFS= read -r extra <&9; then
+    exec 9<&-
+    return 1
+  fi
+  exec 9<&-
+  [ "$version" = fm-todo-merged-reconciliation-v1 ] || return 1
+  [ "$receipt_id" = "$id" ] || return 1
+  fm_pr_url_parse "$url" || return 1
+  [ "$provider" = "$FM_PR_PROVIDER" ] || return 1
+  [ "$host" = "$FM_PR_HOST" ] || return 1
+  [ "$path" = "$FM_PR_PATH" ] || return 1
+  [ "$number" = "$FM_PR_NUMBER" ] || return 1
+  [ "$result" = merged ] || return 1
+  set_task_pr_identity
+}
+
+merged_receipt_matches_task() {  # <id>
+  local meta="$STATE/$1.meta"
+  fm_pr_metadata_identity_parse "$meta" || return 1
+  [ "$FM_PR_META_PROVIDER" = "$TASK_PR_PROVIDER" ] || return 1
+  [ "$FM_PR_META_URL" = "$TASK_PR_URL" ] || return 1
+  [ "$FM_PR_META_HOST" = "$TASK_PR_HOST" ] || return 1
+  [ "$FM_PR_META_PATH" = "$TASK_PR_PATH" ] || return 1
+  [ "$FM_PR_META_NUMBER" = "$TASK_PR_NUMBER" ]
+}
+
+merged_receipt_publish() {  # <id>
+  local id=$1 receipt tmp existing_url=$TASK_PR_URL
+  receipt=$(merged_receipt_path "$id")
+  if [ -e "$receipt" ] || [ -L "$receipt" ]; then
+    merged_receipt_parse "$id" || return 1
+    [ "$TASK_PR_URL" = "$existing_url" ]
+    return
+  fi
+  [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
+  tmp=$(mktemp "$STATE/.todo-merged-reconciliation.${id}.XXXXXX") || return 1
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  if ! printf '%s\n' fm-todo-merged-reconciliation-v1 "$id" \
+      "$TASK_PR_PROVIDER" "$TASK_PR_URL" "$TASK_PR_HOST" "$TASK_PR_PATH" \
+      "$TASK_PR_NUMBER" merged > "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if ! fm_pr_regular_destination_or_absent "$receipt" || ! mv -- "$tmp" "$receipt"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  merged_receipt_parse "$id" && [ "$TASK_PR_URL" = "$existing_url" ]
+}
+
 recorded_pr_identity() {  # <id>; sets TASK_PR_* globals
   local id=$1 meta="$STATE/$1.meta" url
   TASK_PR_PROVIDER=
@@ -524,6 +635,12 @@ recorded_pr_identity() {  # <id>; sets TASK_PR_* globals
     return 0
   fi
   url=$(status_pr_url "$id") || return 1
+  if [ "$RECONCILE" -eq 0 ]; then
+    fm_pr_url_parse "$url" || return 1
+    set_task_pr_identity
+    TASK_PR_ARMED_NOW=0
+    return 0
+  fi
   if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
       "$SCRIPT_DIR/fm-pr-check.sh" "$id" "$url" >/dev/null 2>&1; then
     printf 'DRIFT-CHECK-SKIPPED: could not arm merge watch for %s\n' "$id"
@@ -554,25 +671,63 @@ ensure_pr_watch() {  # <id>
   if fm_pr_poll_artifacts_valid "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
     return 0
   fi
+  if [ "$RECONCILE" -eq 0 ]; then
+    printf 'DRIFT-CHECK-SKIPPED: merge watch for %s requires verified mutation authority\n' "$id"
+    return 0
+  fi
   if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
       "$SCRIPT_DIR/fm-pr-check.sh" "$id" "$TASK_PR_URL" >/dev/null 2>&1; then
     printf 'DRIFT-CHECK-SKIPPED: could not arm merge watch for %s\n' "$id"
   fi
 }
 
-auto_close_merged_pr() {  # <id>
-  local id=$1
-  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
-      FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-teardown.sh" "$id" >/dev/null 2>&1; then
-    printf 'DRIFT merged-pr-open: %s - merged PR teardown refused; task and board item preserved\n' "$id"
+close_merged_board_item() {  # <id>
+  local id=$1 receipt before_hash before_identity
+  receipt=$(merged_receipt_path "$id")
+  if ! merged_receipt_parse "$id" \
+      || ! before_hash=$(fm_pr_sha256 "$receipt") \
+      || ! before_identity=$(fm_pr_file_identity "$receipt"); then
+    printf 'DRIFT-CHECK-SKIPPED: merged reconciliation receipt for %s failed validation before board closure\n' "$id"
     return 1
   fi
   if ! tasks-axi "done" "$id" --file "$BOARD" --pr "$TASK_PR_URL" >/dev/null 2>&1; then
     printf 'DRIFT merged-pr-open: %s - teardown completed but the merged board item could not be closed\n' "$id"
     return 1
   fi
+  if ! merged_receipt_parse "$id" \
+      || [ "$(fm_pr_sha256 "$receipt")" != "$before_hash" ] \
+      || [ "$(fm_pr_file_identity "$receipt")" != "$before_identity" ] \
+      || ! rm -f -- "$receipt"; then
+    printf 'DRIFT merged-pr-open: %s - merged board item closed but reconciliation receipt cleanup failed\n' "$id"
+    mark_auto_closed "$id"
+    return 1
+  fi
   mark_auto_closed "$id"
   printf 'DRIFT merged-pr-open: %s - merged PR closed and task torn down\n' "$id"
+}
+
+auto_close_merged_pr() {  # <id>
+  local id=$1
+  if [ "$RECONCILE" -eq 0 ]; then
+    printf 'DRIFT merged-pr-open: %s - recorded PR is merged; reconciliation requires verified mutation authority\n' "$id"
+    return 1
+  fi
+  if ! merged_receipt_publish "$id"; then
+    printf 'DRIFT merged-pr-open: %s - merged reconciliation receipt could not be persisted; task and board item preserved\n' "$id"
+    return 1
+  fi
+  if [ -e "$STATE/$id.meta" ] || [ -L "$STATE/$id.meta" ]; then
+    if ! merged_receipt_matches_task "$id"; then
+      printf 'DRIFT-CHECK-SKIPPED: merged reconciliation receipt for %s does not match canonical task metadata\n' "$id"
+      return 1
+    fi
+    if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+        FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-teardown.sh" "$id" >/dev/null 2>&1; then
+      printf 'DRIFT merged-pr-open: %s - merged PR teardown refused; task and board item preserved\n' "$id"
+      return 1
+    fi
+  fi
+  close_merged_board_item "$id"
 }
 
 # Discover PR-ready status that missed its lifecycle arming, keep unmerged PRs
@@ -585,6 +740,14 @@ check_pr_lifecycle() {  # <listing>...
       fm_pr_task_id_valid "$id" || continue
       id_in_set "$PR_CHECKED_IDS" "$id" && continue
       PR_CHECKED_IDS="${PR_CHECKED_IDS}${id}"$'\n'
+      if [ -e "$(merged_receipt_path "$id")" ] || [ -L "$(merged_receipt_path "$id")" ]; then
+        if ! merged_receipt_parse "$id"; then
+          printf 'DRIFT-CHECK-SKIPPED: merged reconciliation receipt for %s is invalid\n' "$id"
+          continue
+        fi
+        auto_close_merged_pr "$id" || true
+        continue
+      fi
       recorded_pr_identity "$id" || continue
       if pr_is_exactly_merged; then
         auto_close_merged_pr "$id" || true
@@ -603,7 +766,7 @@ check_inflight() {  # <in_flight-listing>
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     id_in_set "$AUTO_CLOSED_IDS" "$id" && continue
-    verdict=$(crew_verdict "$id") || continue
+    verdict=$(crew_verdict_for "$id") || continue
     verdict_has_no_source "$verdict" || continue
     reason=${verdict##*source: none}
     reason=${reason# · }
@@ -623,7 +786,7 @@ check_secondmate_scopes() {  # <listing>...
       [ -n "$id" ] || continue
       id_in_set "$AUTO_CLOSED_IDS" "$id" && continue
       secondmate=$(secondmate_for_repo "$repo") || continue
-      verdict=$(crew_verdict "$id") || continue
+      verdict=$(crew_verdict_for "$id") || continue
       verdict_has_no_source "$verdict" || continue
       printf 'DRIFT secondmate-scope-on-main: %s - repo %s is registered to secondmate %s and has no local worker\n' \
         "$id" "$repo" "$secondmate"
@@ -637,7 +800,7 @@ check_queued_workers() {  # <queued-listing>
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     id_in_set "$AUTO_CLOSED_IDS" "$id" && continue
-    verdict=$(crew_verdict "$id") || continue
+    verdict=$(crew_verdict_for "$id") || continue
     verdict_has_no_source "$verdict" && continue
     printf 'DRIFT queued-has-worker: %s - board says queued but a local worker has a current-state source\n' "$id"
   done <<< "$(axi_rows tasks "$listing" rows id)"
@@ -698,6 +861,7 @@ run_check() {
   else
     printf 'DRIFT-CHECK-SKIPPED: tasks-axi list --state queued failed\n'
   fi
+  [ "${#open_listings[@]}" -eq 0 ] || capture_crew_verdicts "${open_listings[@]}"
   [ "${#open_listings[@]}" -eq 0 ] || check_pr_lifecycle "${open_listings[@]}"
   load_secondmate_projects && secondmate_projects_valid=1
   [ "$in_flight_valid" -eq 0 ] || check_inflight "$in_flight"

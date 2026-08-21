@@ -118,9 +118,10 @@
 # BOARD-VS-REALITY DRIFT: the fleet-state section already prints what the board
 # says and what the fleet is, so it also runs bin/fm-todo-project.sh --check -
 # the owner of that comparison - and shows its findings as a bounded subsection.
-# The check is report-only and silent when the two agree, so the subsection
-# appears only when this turn has something to reconcile, in both the locked and
-# the read-only path.
+# The check is report-only on the read-only path and receives explicit lifecycle
+# reconciliation authority only after this session verifies lock ownership. It
+# is silent when the two agree, so the subsection appears only when this turn has
+# something to reconcile.
 #
 # STATUS TAILS: FM_SESSION_START_STATUS_TAIL bounds how many lines each task's
 # tail prints, and bin/fm-line-cap-lib.sh bounds how long each of those lines
@@ -543,7 +544,11 @@ done
 # what the fleet IS. bin/fm-todo-project.sh owns the comparison, its sole exact
 # merged-PR auto-fix, and every report-only finding. It is silent when the two
 # agree, so this subsection appears only when there is drift.
-DRIFT_OUT=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-todo-project.sh" --check 2>&1) || DRIFT_OUT=
+if [ "$READ_ONLY" -eq 1 ]; then
+  DRIFT_OUT=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-todo-project.sh" --check 2>&1) || DRIFT_OUT=
+else
+  DRIFT_OUT=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-todo-project.sh" --check --reconcile 2>&1) || DRIFT_OUT=
+fi
 if [ -n "$DRIFT_OUT" ]; then
   subsection "Board-vs-reality drift (bin/fm-todo-project.sh --check)"
   printf '%s\n' "$DRIFT_OUT" | awk -v max="$DRIFT_LIMIT" '
