@@ -349,6 +349,32 @@ test_housekeeping_paused_resurfaces_and_resets() {
   pass "housekeeping re-surfaces a stale declared pause on the long cadence and resets its window"
 }
 
+test_housekeeping_pause_default_is_2700_and_override_wins() {
+  local dir state fakebin win pane key now
+  dir=$(make_supercase paused-default-boundary)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  win="sess:fm-held-default"; pane="$dir/pane.txt"
+  printf 'paused: holding for the upstream tool release\n' > "$state/held-default.status"
+  printf 'idle prompt $\n' > "$pane"
+  key=$(printf '%s' "held-default" | tr ':/.' '___')
+  now=$(date +%s)
+
+  echo $(( now - 2800 )) > "$state/.subsuper-paused-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" env -u FM_PAUSE_RESURFACE_SECS bash -c \
+    '. "$1"; housekeeping "$2"' bash "$DAEMON" "$state"
+  grep -F "awaiting external" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "an idle pause aged 2800s did not re-surface under the production default"
+
+  : > "$state/.subsuper-escalations"
+  echo $(( now - 2800 )) > "$state/.subsuper-paused-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=3000 housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "FM_PAUSE_RESURFACE_SECS=3000 did not override the shared default"
+  pass "daemon resolves the unset pause cadence to 2700s and preserves the environment override"
+}
+
 # A pause whose pane became busy again (the crew resumed) drops its marker without
 # escalating, exactly like a resumed wedge.
 test_housekeeping_paused_resumed_cleared() {
@@ -1871,6 +1897,7 @@ test_housekeeping_seeds_pause_marker_from_status
 test_housekeeping_persistent_stale_escalates
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
+test_housekeeping_pause_default_is_2700_and_override_wins
 test_housekeeping_paused_resumed_cleared
 test_housekeeping_paused_unpaused_cleared
 test_housekeeping_stale_marker_transitions_to_pause
