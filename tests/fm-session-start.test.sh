@@ -744,7 +744,18 @@ test_lock_refusal_read_only_path() {
 $rec
 EOF
   make_fake_toolchain "$fakebin"
+  make_fake_tasks_axi_compact "$fakebin"
   make_fake_ps_claude "$fakebin"
+  rm -f "$fakebin/chrome-devtools-axi"
+  : > "$home/data/backlog.md"
+  fm_write_meta "$home/state/compact-startup.meta" \
+    'window=firstmate:fm-compact-startup' \
+    "worktree=$home/missing-worktree" \
+    'project=firstmate' \
+    'kind=ship' \
+    'mode=no-mistakes'
+  printf '%s\n' 'done: PR https://github.com/example/repo/pull/45 checks green' \
+    > "$home/state/compact-startup.status"
 
   # A live secondmate meta with a window pointed at nothing real - if the
   # bootstrap sweep's secondmate_sync ran (a MUTATING step), it would try to
@@ -780,10 +791,18 @@ EOF
   assert_not_contains "$out" "run bin/fm-watch-arm.sh" "read-only guard printed a mutating watcher-arm instruction"
   assert_not_contains "$out" "git -C $root checkout main" "read-only bootstrap printed a state-changing checkout remediation"
 
-  # Detect-only bootstrap diagnostics still ran (the fakebin's PATH excludes
-  # tasks-axi, so bootstrap's own read-only tool-detection line fires
-  # deterministically regardless of what is installed on the test host).
-  assert_contains "$out" "MISSING: tasks-axi (install:" "detect-only bootstrap diagnostics did not run on the read-only path"
+  # Detect-only bootstrap diagnostics still ran, while the drift check stayed
+  # report-only even though it discovered a PR-ready task that needs arming.
+  assert_contains "$out" "MISSING: chrome-devtools-axi (install:" "detect-only bootstrap diagnostics did not run on the read-only path"
+  assert_contains "$out" \
+    "DRIFT-CHECK-SKIPPED: merge watch for compact-startup requires verified mutation authority" \
+    "lock-refused startup did not report the skipped lifecycle repair"
+  assert_not_contains "$(cat "$home/state/compact-startup.meta")" 'pr=' \
+    "lock-refused startup recorded PR metadata without mutation authority"
+  assert_absent "$home/state/compact-startup.check.sh" \
+    "lock-refused startup armed a merge check"
+  assert_absent "$home/state/compact-startup.pr-poll" \
+    "lock-refused startup wrote merge-poll state"
 
   # The mutating secondmate sweep must NOT have run: no SECONDMATE_SYNC/
   # NUDGE_SECONDMATES line, and the sowed secondmate meta's target dir is

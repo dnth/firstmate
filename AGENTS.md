@@ -350,7 +350,7 @@ The worker reports the PR when CI first becomes green rather than waiting for me
 ### PR ready, landing, and teardown
 
 For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
-Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
+On every PR-ready signal, immediately run `bin/fm-pr-check.sh <id> <PR url>` before reporting the result - it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher's merge poll, while lock-owning reconciliation through `bin/fm-todo-project.sh --check --reconcile` is the recovery backstop for a skipped arm.
 Tell the captain the PR's full URL, always the complete `https://...` link rather than a bare `#number`, a concise outcome summary, and the no-mistakes risk level when applicable.
 A captain instruction to merge is explicit authority; `yolo` is the only standing routine authority.
 For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.
@@ -358,7 +358,7 @@ For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary sin
 Tear down a ship task only after landing is confirmed.
 A teardown refusal for uncommitted or unlanded work is a stop-and-investigate result, never an obstacle to bypass.
 Never force teardown without explicit discard authority.
-After successful teardown, record completion, retain only the configured recent Done history, and re-evaluate queued work whose blockers and time gates have cleared.
+After successful teardown, record completion, retain only the configured recent Done history, re-evaluate queued work whose blockers and time gates have cleared, and re-project the session todo as section 10 requires.
 
 A secondmate is persistent and an empty queue is healthy.
 Retire one only on an explicit captain or main-firstmate decision, after loading `secondmate-provisioning`; its home must contain no work under way, and forced discard still requires explicit captain authority.
@@ -393,7 +393,9 @@ Handle actionable wakes as follows:
 2. For `stale:`, inspect the recorded endpoint and load `stuck-crewmate-recovery` for a stopped, looping, confused, or unresponsive worker; a deep-inspection reason also requires current-state and validation-log inspection.
 3. For `check:`, act on the named poll result, including merges, X-mode events, and process-to-event source results.
 4. For `heartbeat:`, review the whole fleet from the structured fleet view, reconcile suspicious tasks and PR state, update the backlog, and never report an unchanged fleet as progress.
-   Every heartbeat also re-runs `bin/fm-todo-project.sh --check`, reconciles what it flags, and re-projects the session todo from `--emit`.
+   Every lock-owning heartbeat also re-runs `bin/fm-todo-project.sh --check --reconcile`, reconciles what it flags, and re-projects the session todo from `--emit`.
+
+On an exact merged-PR check with verified fleet-lock ownership, immediately run `bin/fm-todo-project.sh --check --reconcile`; its header owns the guarded teardown and sole automatic board close, while plain `--check` remains report-only, after which section 10's projection refresh applies.
 
 When any wake reports a merged PR for a project cloned in this home, refresh that clone through the guarded fleet-sync path.
 When X-linked work reaches a milestone or terminal state, load `fmx-respond`; before terminal teardown, use its promised-final reconciliation when a typed public commitment exists, otherwise post the final completion follow-up so the link clears even if earlier follow-ups were spent.
@@ -478,10 +480,12 @@ Mention cost as a courtesy when unusually much work is running, but never block 
 It tracks work items only, never agents; persistent secondmates never appear as backlog items.
 The board is the single source of truth for fleet work, and the session todo list is a pure projection of it produced by `bin/fm-todo-project.sh`, never hand-diverged.
 Any durable operational thread worth tracking in that todo is therefore filed as a board item first, or the next projection loses it.
+Put deferred work on hold at deferral time; `bin/fm-todo-project.sh` owns why this keeps deferred rows out of the Ready projection.
 Work routed to a secondmate is recorded in that secondmate home's own backlog, not the main backlog.
 When a main-side thread such as a pending captain decision or relay reminder is worth durable tracking, file it as its own work item; use `tasks-axi hold <id> --reason "<reason>" --kind captain` for a captain-gated thread.
 Unresolved decisions discovered by investigations or visual reviews follow `decision-hold-lifecycle`, which owns their mandatory backlog lifecycle.
 Update the backlog on every dispatch, completion, and decision for a work item.
+After every board-changing event - including dispatch, close, decision, successful teardown, and merge-wake reconciliation - run `bin/fm-todo-project.sh --emit` and re-initialize the session todo from its output.
 Re-evaluate queued work after every teardown and heartbeat, dispatching items only when dependencies and time gates have cleared.
 
 `.tasks.toml`, `docs/configuration.md`, and current `tasks-axi --help` own the backlog schema, compatibility, retention, and routine command syntax.
