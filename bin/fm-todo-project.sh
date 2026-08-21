@@ -658,7 +658,7 @@ ensure_pr_watch() {  # <id>
 
 close_merged_board_item() {  # <id>
   local id=$1
-  local -a done_args=(done "$id" --file "$BOARD")
+  local -a done_args=('done' "$id" --file "$BOARD")
   if [ "$TASK_PR_PROVIDER" = github ]; then
     done_args+=(--pr "$TASK_PR_URL")
   fi
