@@ -169,8 +169,8 @@ case "${1:-}" in
         ;;
       *'--state in_flight'*'--fields hold_until'*)
         printf 'count: 1\n'
-        printf 'tasks[1]{id,state,kind,repo,title,hold_until,created}:\n'
-        printf '%s\n' '  compact-startup,in_flight,ship,firstmate,Compact startup digest,"-",2026-08-21'
+        printf 'tasks[1]{id,state,kind,repo,title,hold_until,links}:\n'
+        printf '%s\n' '  compact-startup,in_flight,ship,firstmate,Compact startup digest,"-",none'
         ;;
       *'--state in_flight'*)
         task_header 1
@@ -188,8 +188,8 @@ case "${1:-}" in
         # The drift check's own hold listing (bin/fm-todo-project.sh --check).
         printf 'count: %s\n' "${FM_FAKE_TASKS_AXI_HOLD_ROWS:-0}"
         if [ "${FM_FAKE_TASKS_AXI_HOLD_ROWS:-0}" -gt 0 ]; then
-          printf 'tasks[1]{id,state,kind,repo,title,hold_until,created}:\n'
-          printf '%s\n' "  ${FM_FAKE_TASKS_AXI_HOLD_ROW:-lapsed-hold,queued,ship,firstmate,Lapsed hold,2020-01-01,2026-08-21}"
+          printf 'tasks[1]{id,state,kind,repo,title,hold_until,links}:\n'
+          printf '%s\n' "  ${FM_FAKE_TASKS_AXI_HOLD_ROW:-lapsed-hold,queued,ship,firstmate,Lapsed hold,2020-01-01,none}"
         else
           printf 'tasks: 0 queued tasks in this backlog\n'
         fi
@@ -803,8 +803,6 @@ EOF
     "lock-refused startup armed a merge check"
   assert_absent "$home/state/compact-startup.pr-poll" \
     "lock-refused startup wrote merge-poll state"
-  assert_absent "$home/state/compact-startup.todo-merged-reconciliation" \
-    "lock-refused startup wrote a merged reconciliation receipt"
 
   # The mutating secondmate sweep must NOT have run: no SECONDMATE_SYNC/
   # NUDGE_SECONDMATES line, and the sowed secondmate meta's target dir is

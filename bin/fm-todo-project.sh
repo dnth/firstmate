@@ -2,7 +2,7 @@
 # fm-todo-project.sh - project the durable board into the session todo, and
 # report where the board has drifted from reality.
 #
-# The board (data/backlog.md, read only through tasks-axi) is the single source
+# The board (data/backlog.md, accessed only through tasks-axi) is the single source
 # of truth for fleet work. The harness todo list is a pure PROJECTION of it: it
 # is session-scoped, resets on restart, and is never hand-diverged, so it is
 # rebuilt from the board rather than maintained by hand. This script owns both
@@ -34,22 +34,19 @@
 # --check is strictly report-only unless its caller also supplies --reconcile
 # after verifying fleet-mutation authority. Reconciliation auto-fixes exactly
 # one unambiguous board state: an open task whose recorded PR is exactly merged.
-# It first persists a private identity-bound merged receipt, runs ordinary
-# guarded teardown, and closes the board item only after teardown succeeds, so
-# dirty or unlanded work retains every existing refusal and a transient board
-# close failure remains retryable after task metadata is removed. Each receipt
-# binds its task ID and canonical PR to the board row's exact created generation,
-# which is re-read before every close; an unbound or mismatched open receipt is
-# retired without touching the row. Receipts move from pending to closed only
-# after tasks-axi confirms closure; closed receipts carry cleanup authority but
-# never board-close authority, and the receipt sweep retires them independently
-# of open rows. Every other finding stays report-only and requires firstmate
-# judgment. Reconciliation recovers only the PR-ready status contracts owned by
-# bin/fm-brief.sh through bin/fm-pr-check.sh, so discovered PR-bearing tasks
-# converge on the ordinary merge watch without treating unrelated status URLs as
-# task identity. The command prints one finding per line and nothing when clean,
-# and after invocation validation it always exits 0 - it is a reconciler, not a
-# gate.
+# It first persists the canonical PR as the authoritative open board row's typed
+# PR link, runs ordinary guarded teardown, and closes that row only after
+# teardown succeeds. A transient close failure therefore remains retryable from
+# the still-open row after task metadata is removed, without separate replay
+# authority. Retry revalidates the exact merged PR link and requires the
+# canonical no-worker verdict before closing. Once the row is Done it no longer
+# participates in reconciliation. Every other finding stays report-only and
+# requires firstmate judgment. Reconciliation recovers only the PR-ready status
+# contracts owned by bin/fm-brief.sh through bin/fm-pr-check.sh, so discovered
+# PR-bearing tasks converge on the ordinary merge watch without treating
+# unrelated status or board links as task identity. The command prints one
+# finding per line and nothing when clean, and after invocation validation it
+# always exits 0 - it is a reconciler, not a gate.
 #
 # Findings:
 #   DRIFT inflight-no-worker: <id> - <reason>
@@ -446,8 +443,7 @@ SECONDMATE_PROJECT_ROWS=
 CREW_PROBED_IDS=$'\n'
 CREW_VERDICT_ROWS=
 OPEN_IDS=$'\n'
-OPEN_GENERATION_ROWS=
-MERGED_RECEIPT_SUFFIX=.todo-merged-reconciliation
+BOARD_PR_ROWS=
 
 id_in_set() {  # <newline-delimited-set> <id>
   case "$1" in
@@ -505,54 +501,72 @@ crew_verdict() {  # <id>
   "$SCRIPT_DIR/fm-crew-state.sh" "$1" 2>/dev/null
 }
 
+board_pr_from_links() {  # <links>
+  local links=$1 link url found= count=0
+  local -a board_links
+  IFS=, read -ra board_links <<< "$links"
+  for link in "${board_links[@]}"; do
+    case "$link" in pr:*) ;; *) continue ;; esac
+    url=${link#pr:}
+    fm_pr_url_parse "$url" || return 1
+    found=$FM_PR_URL
+    count=$((count + 1))
+  done
+  [ "$count" -eq 1 ] || return 1
+  printf '%s\n' "$found"
+}
+
+board_pr_for() {  # <id>
+  local want=$1 id url
+  while IFS=$'\t' read -r id url; do
+    [ "$id" = "$want" ] || continue
+    printf '%s\n' "$url"
+    return 0
+  done <<< "$BOARD_PR_ROWS"
+  return 1
+}
+
 capture_crew_verdicts() {  # <listing>...
-  local listing id generation verdict
+  local listing id links board_pr verdict
   for listing in "$@"; do
-    while IFS=$'\t' read -r id generation; do
+    while IFS=$'\t' read -r id links; do
       [ -n "$id" ] || continue
       fm_pr_task_id_valid "$id" || continue
       if ! id_in_set "$OPEN_IDS" "$id"; then
         OPEN_IDS="${OPEN_IDS}${id}"$'\n'
-        OPEN_GENERATION_ROWS="${OPEN_GENERATION_ROWS}${id}"$'\t'"${generation}"$'\n'
+        if board_pr=$(board_pr_from_links "$links"); then
+          BOARD_PR_ROWS="${BOARD_PR_ROWS}${id}"$'\t'"${board_pr}"$'\n'
+        fi
       fi
       id_in_set "$CREW_PROBED_IDS" "$id" && continue
       CREW_PROBED_IDS="${CREW_PROBED_IDS}${id}"$'\n'
       verdict=$(crew_verdict "$id") || continue
       case "$verdict" in *$'\n'*|*$'\t'*) continue ;; esac
       CREW_VERDICT_ROWS="${CREW_VERDICT_ROWS}${id}"$'\t'"${verdict}"$'\n'
-    done <<< "$(axi_rows tasks "$listing" rows id created)"
+    done <<< "$(axi_rows tasks "$listing" rows id links)"
   done
 }
 
-board_generation_valid() {
-  [[ "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
-}
-
-board_generation_for() {  # <id>
-  local want=$1 id generation
-  while IFS=$'\t' read -r id generation; do
-    [ "$id" = "$want" ] || continue
-    board_generation_valid "$generation" || return 1
-    printf '%s\n' "$generation"
-    return 0
-  done <<< "$OPEN_GENERATION_ROWS"
-  return 1
-}
-
-current_board_generation() {  # <id>
-  local want=$1 state listing id generation found=
+current_board_pr_matches() {  # <id> <url>
+  local want=$1 want_url=$2 state listing id links found= board_pr
   for state in in_flight queued; do
-    listing=$(axi_list "$state" created) || return 1
-    axi_rows tasks "$listing" rows id created >/dev/null || return 1
-    while IFS=$'\t' read -r id generation; do
+    listing=$(axi_list "$state" links) || return 1
+    axi_rows tasks "$listing" rows id links >/dev/null || return 1
+    while IFS=$'\t' read -r id links; do
       [ "$id" = "$want" ] || continue
-      board_generation_valid "$generation" || return 1
-      [ -z "$found" ] || [ "$found" = "$generation" ] || return 1
-      found=$generation
-    done <<< "$(axi_rows tasks "$listing" rows id created)"
+      board_pr=$(board_pr_from_links "$links") || return 1
+      [ "$board_pr" = "$want_url" ] || return 1
+      [ -z "$found" ] || [ "$found" = "$board_pr" ] || return 1
+      found=$board_pr
+    done <<< "$(axi_rows tasks "$listing" rows id links)"
   done
   [ -n "$found" ] || return 1
-  printf '%s\n' "$found"
+}
+
+persist_board_pr_identity() {  # <id> <url>
+  local id=$1 url=$2
+  tasks-axi update "$id" --file "$BOARD" --pr "$url" >/dev/null 2>&1 || return 1
+  current_board_pr_matches "$id" "$url"
 }
 
 crew_verdict_for() {  # <id>
@@ -602,54 +616,7 @@ set_task_pr_identity() {
   TASK_PR_NUMBER=$FM_PR_NUMBER
 }
 
-merged_receipt_path() { printf '%s/%s%s\n' "$STATE" "$1" "$MERGED_RECEIPT_SUFFIX"; }
-
-merged_receipt_parse() {  # <id>; sets TASK_PR_* globals
-  local id=$1 receipt state_device version receipt_id provider url host path number result stage generation= extra
-  TASK_RECEIPT_STAGE=
-  TASK_RECEIPT_GENERATION=
-  fm_pr_task_id_valid "$id" || return 1
-  [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
-  state_device=$(fm_pr_file_device "$STATE") || return 1
-  receipt=$(merged_receipt_path "$id")
-  fm_pr_private_file_valid "$receipt" 600 "$state_device" || return 1
-  exec 9< "$receipt" || return 1
-  IFS= read -r version <&9 || { exec 9<&-; return 1; }
-  IFS= read -r receipt_id <&9 || { exec 9<&-; return 1; }
-  IFS= read -r provider <&9 || { exec 9<&-; return 1; }
-  IFS= read -r url <&9 || { exec 9<&-; return 1; }
-  IFS= read -r host <&9 || { exec 9<&-; return 1; }
-  IFS= read -r path <&9 || { exec 9<&-; return 1; }
-  IFS= read -r number <&9 || { exec 9<&-; return 1; }
-  IFS= read -r result <&9 || { exec 9<&-; return 1; }
-  case "$version" in
-    fm-todo-merged-reconciliation-v1) stage=pending ;;
-    fm-todo-merged-reconciliation-v2)
-      IFS= read -r stage <&9 || { exec 9<&-; return 1; }
-      ;;
-    fm-todo-merged-reconciliation-v3)
-      IFS= read -r stage <&9 || { exec 9<&-; return 1; }
-      IFS= read -r generation <&9 || { exec 9<&-; return 1; }
-      ;;
-    *) exec 9<&-; return 1 ;;
-  esac
-  if IFS= read -r extra <&9; then exec 9<&-; return 1; fi
-  exec 9<&-
-  [ "$receipt_id" = "$id" ] || return 1
-  fm_pr_url_parse "$url" || return 1
-  [ "$provider" = "$FM_PR_PROVIDER" ] || return 1
-  [ "$host" = "$FM_PR_HOST" ] || return 1
-  [ "$path" = "$FM_PR_PATH" ] || return 1
-  [ "$number" = "$FM_PR_NUMBER" ] || return 1
-  [ "$result" = merged ] || return 1
-  case "$stage" in pending|closed) ;; *) return 1 ;; esac
-  [ -z "$generation" ] || board_generation_valid "$generation" || return 1
-  TASK_RECEIPT_STAGE=$stage
-  TASK_RECEIPT_GENERATION=$generation
-  set_task_pr_identity
-}
-
-merged_receipt_matches_task() {  # <id>
+task_pr_matches_metadata() {  # <id>
   local meta="$STATE/$1.meta"
   fm_pr_metadata_identity_parse "$meta" || return 1
   [ "$FM_PR_META_PROVIDER" = "$TASK_PR_PROVIDER" ] || return 1
@@ -657,103 +624,6 @@ merged_receipt_matches_task() {  # <id>
   [ "$FM_PR_META_HOST" = "$TASK_PR_HOST" ] || return 1
   [ "$FM_PR_META_PATH" = "$TASK_PR_PATH" ] || return 1
   [ "$FM_PR_META_NUMBER" = "$TASK_PR_NUMBER" ]
-}
-
-merged_receipt_publish() {  # <id>
-  local id=$1 receipt tmp existing_url=$TASK_PR_URL existing_generation=$TASK_BOARD_GENERATION
-  board_generation_valid "$existing_generation" || return 1
-  receipt=$(merged_receipt_path "$id")
-  if [ -e "$receipt" ] || [ -L "$receipt" ]; then
-    merged_receipt_parse "$id" || return 1
-    [ "$TASK_PR_URL" = "$existing_url" ] \
-      && [ "$TASK_RECEIPT_STAGE" = pending ] \
-      && [ "$TASK_RECEIPT_GENERATION" = "$existing_generation" ]
-    return
-  fi
-  [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
-  tmp=$(mktemp "$STATE/.todo-merged-reconciliation.${id}.XXXXXX") || return 1
-  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
-  if ! printf '%s\n' fm-todo-merged-reconciliation-v3 "$id" \
-      "$TASK_PR_PROVIDER" "$TASK_PR_URL" "$TASK_PR_HOST" "$TASK_PR_PATH" \
-      "$TASK_PR_NUMBER" merged pending "$existing_generation" > "$tmp"; then
-    rm -f -- "$tmp"
-    return 1
-  fi
-  if ! fm_pr_regular_destination_or_absent "$receipt" || ! mv -- "$tmp" "$receipt"; then
-    rm -f -- "$tmp"
-    return 1
-  fi
-  merged_receipt_parse "$id" \
-    && [ "$TASK_PR_URL" = "$existing_url" ] \
-    && [ "$TASK_RECEIPT_STAGE" = pending ] \
-    && [ "$TASK_RECEIPT_GENERATION" = "$existing_generation" ]
-}
-
-merged_receipt_mark_closed() {  # <id> [<completed-generation>]
-  local id=$1 completed_generation=${2:-} receipt tmp before_hash before_identity expected_url expected_generation
-  receipt=$(merged_receipt_path "$id")
-  merged_receipt_parse "$id" || return 1
-  case "$TASK_RECEIPT_STAGE" in pending) ;; closed) return 0 ;; esac
-  expected_url=$TASK_PR_URL
-  expected_generation=$TASK_RECEIPT_GENERATION
-  if [ -z "$expected_generation" ]; then expected_generation=$completed_generation; fi
-  board_generation_valid "$expected_generation" || return 1
-  before_hash=$(fm_pr_sha256 "$receipt") || return 1
-  before_identity=$(fm_pr_file_identity "$receipt") || return 1
-  tmp=$(mktemp "$STATE/.todo-merged-reconciliation.${id}.XXXXXX") || return 1
-  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
-  if ! printf '%s\n' fm-todo-merged-reconciliation-v3 "$id" \
-      "$TASK_PR_PROVIDER" "$TASK_PR_URL" "$TASK_PR_HOST" "$TASK_PR_PATH" \
-      "$TASK_PR_NUMBER" merged closed "$expected_generation" > "$tmp"; then
-    rm -f -- "$tmp"
-    return 1
-  fi
-  if ! merged_receipt_parse "$id" \
-      || [ "$TASK_RECEIPT_STAGE" != pending ] \
-      || [ "$(fm_pr_sha256 "$receipt")" != "$before_hash" ] \
-      || [ "$(fm_pr_file_identity "$receipt")" != "$before_identity" ] \
-      || ! mv -- "$tmp" "$receipt"; then
-    rm -f -- "$tmp"
-    return 1
-  fi
-  merged_receipt_parse "$id" \
-    && [ "$TASK_PR_URL" = "$expected_url" ] \
-    && [ "$TASK_RECEIPT_STAGE" = closed ] \
-    && [ "$TASK_RECEIPT_GENERATION" = "$expected_generation" ]
-}
-
-merged_receipt_retire_stale() {  # <id> <current-generation>
-  local id=$1 current_generation=$2 receipt before_hash before_identity
-  receipt=$(merged_receipt_path "$id")
-  board_generation_valid "$current_generation" || return 1
-  merged_receipt_parse "$id" || return 1
-  [ "$TASK_RECEIPT_STAGE" = pending ] || return 1
-  [ -z "$TASK_RECEIPT_GENERATION" ] \
-    || [ "$TASK_RECEIPT_GENERATION" != "$current_generation" ] \
-    || return 1
-  before_hash=$(fm_pr_sha256 "$receipt") || return 1
-  before_identity=$(fm_pr_file_identity "$receipt") || return 1
-  merged_receipt_parse "$id" \
-    && [ "$TASK_RECEIPT_STAGE" = pending ] \
-    && { [ -z "$TASK_RECEIPT_GENERATION" ] \
-      || [ "$TASK_RECEIPT_GENERATION" != "$current_generation" ]; } \
-    && [ "$(fm_pr_sha256 "$receipt")" = "$before_hash" ] \
-    && [ "$(fm_pr_file_identity "$receipt")" = "$before_identity" ] \
-    && rm -f -- "$receipt"
-}
-
-merged_receipt_remove_closed() {  # <id>
-  local id=$1 receipt before_hash before_identity
-  receipt=$(merged_receipt_path "$id")
-  merged_receipt_parse "$id" || return 1
-  [ "$TASK_RECEIPT_STAGE" = closed ] || return 1
-  before_hash=$(fm_pr_sha256 "$receipt") || return 1
-  before_identity=$(fm_pr_file_identity "$receipt") || return 1
-  merged_receipt_parse "$id" \
-    && [ "$TASK_RECEIPT_STAGE" = closed ] \
-    && [ "$(fm_pr_sha256 "$receipt")" = "$before_hash" ] \
-    && [ "$(fm_pr_file_identity "$receipt")" = "$before_identity" ] \
-    && rm -f -- "$receipt"
 }
 
 recorded_pr_identity() {  # <id>; sets TASK_PR_* globals
@@ -764,36 +634,45 @@ recorded_pr_identity() {  # <id>; sets TASK_PR_* globals
   TASK_PR_PATH=
   TASK_PR_NUMBER=
   TASK_PR_ARMED_NOW=0
+  TASK_PR_SOURCE=
   if fm_pr_metadata_identity_parse "$meta"; then
     TASK_PR_PROVIDER=$FM_PR_META_PROVIDER
     TASK_PR_URL=$FM_PR_META_URL
     TASK_PR_HOST=$FM_PR_META_HOST
     TASK_PR_PATH=$FM_PR_META_PATH
     TASK_PR_NUMBER=$FM_PR_META_NUMBER
+    TASK_PR_SOURCE=metadata
     return 0
   fi
-  url=$(status_pr_url "$id") || return 1
-  if [ "$RECONCILE" -eq 0 ]; then
-    fm_pr_url_parse "$url" || return 1
-    set_task_pr_identity
-    TASK_PR_ARMED_NOW=0
+  if url=$(status_pr_url "$id"); then
+    if [ "$RECONCILE" -eq 0 ]; then
+      fm_pr_url_parse "$url" || return 1
+      set_task_pr_identity
+      TASK_PR_SOURCE=status
+      return 0
+    fi
+    if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+        "$SCRIPT_DIR/fm-pr-check.sh" "$id" "$url" >/dev/null 2>&1; then
+      printf 'DRIFT-CHECK-SKIPPED: could not arm merge watch for %s\n' "$id"
+      return 1
+    fi
+    TASK_PR_ARMED_NOW=1
+    fm_pr_metadata_identity_parse "$meta" || {
+      printf 'DRIFT-CHECK-SKIPPED: merge watch for %s did not record canonical PR metadata\n' "$id"
+      return 1
+    }
+    TASK_PR_PROVIDER=$FM_PR_META_PROVIDER
+    TASK_PR_URL=$FM_PR_META_URL
+    TASK_PR_HOST=$FM_PR_META_HOST
+    TASK_PR_PATH=$FM_PR_META_PATH
+    TASK_PR_NUMBER=$FM_PR_META_NUMBER
+    TASK_PR_SOURCE=metadata
     return 0
   fi
-  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-      "$SCRIPT_DIR/fm-pr-check.sh" "$id" "$url" >/dev/null 2>&1; then
-    printf 'DRIFT-CHECK-SKIPPED: could not arm merge watch for %s\n' "$id"
-    return 1
-  fi
-  TASK_PR_ARMED_NOW=1
-  fm_pr_metadata_identity_parse "$meta" || {
-    printf 'DRIFT-CHECK-SKIPPED: merge watch for %s did not record canonical PR metadata\n' "$id"
-    return 1
-  }
-  TASK_PR_PROVIDER=$FM_PR_META_PROVIDER
-  TASK_PR_URL=$FM_PR_META_URL
-  TASK_PR_HOST=$FM_PR_META_HOST
-  TASK_PR_PATH=$FM_PR_META_PATH
-  TASK_PR_NUMBER=$FM_PR_META_NUMBER
+  url=$(board_pr_for "$id") || return 1
+  fm_pr_url_parse "$url" || return 1
+  set_task_pr_identity
+  TASK_PR_SOURCE=board
 }
 
 pr_is_exactly_merged() {
@@ -820,115 +699,41 @@ ensure_pr_watch() {  # <id>
 }
 
 close_merged_board_item() {  # <id>
-  local id=$1 current_generation
-  if ! merged_receipt_parse "$id" \
-      || [ "$TASK_RECEIPT_STAGE" != pending ] \
-      || ! board_generation_valid "$TASK_RECEIPT_GENERATION"; then
-    printf 'DRIFT-CHECK-SKIPPED: merged reconciliation receipt for %s failed validation before board closure\n' "$id"
-    return 1
-  fi
-  current_generation=$(current_board_generation "$id") || {
-    printf 'DRIFT-CHECK-SKIPPED: board generation for %s could not be verified before closure\n' "$id"
-    return 1
-  }
-  if [ "$current_generation" != "$TASK_RECEIPT_GENERATION" ]; then
-    printf 'DRIFT merged-pr-open: %s - stale reconciliation receipt does not match the current board generation\n' "$id"
+  local id=$1
+  if ! current_board_pr_matches "$id" "$TASK_PR_URL"; then
+    printf 'DRIFT-CHECK-SKIPPED: canonical board PR for %s changed before closure\n' "$id"
     return 1
   fi
   if ! tasks-axi "done" "$id" --file "$BOARD" --pr "$TASK_PR_URL" >/dev/null 2>&1; then
     printf 'DRIFT merged-pr-open: %s - teardown completed but the merged board item could not be closed\n' "$id"
     return 1
   fi
-  if ! merged_receipt_mark_closed "$id"; then
-    printf 'DRIFT merged-pr-open: %s - merged board item closed but reconciliation completion could not be recorded\n' "$id"
-    mark_auto_closed "$id"
-    return 1
-  fi
-  if ! merged_receipt_remove_closed "$id"; then
-    printf 'DRIFT merged-pr-open: %s - merged board item closed but reconciliation receipt cleanup failed\n' "$id"
-    mark_auto_closed "$id"
-    return 1
-  fi
   mark_auto_closed "$id"
   printf 'DRIFT merged-pr-open: %s - merged PR closed and task torn down\n' "$id"
 }
 
-done_listing_has_receipt() {  # <done-listing> <id> <url> <generation>
-  local listing=$1 want_id=$2 want_url=$3 want_generation=$4 id links generation link
-  local -a receipt_links
-  DONE_RECEIPT_GENERATION=
-  while IFS=$'\t' read -r id links generation; do
-    [ "$id" = "$want_id" ] || continue
-    board_generation_valid "$generation" || continue
-    if [ -n "$want_generation" ]; then
-      [ "$generation" = "$want_generation" ] || continue
-    fi
-    IFS=, read -ra receipt_links <<< "$links"
-    for link in "${receipt_links[@]}"; do
-      if [ "$link" = "pr:$want_url" ]; then
-        DONE_RECEIPT_GENERATION=$generation
-        return 0
-      fi
-    done
-  done <<< "$(axi_rows tasks "$listing" rows id links created)"
-  return 1
-}
-
-sweep_merged_receipts() {  # <done-listing-or-empty>
-  local done_listing=$1 receipt id completed_generation=
-  for receipt in "$STATE"/*"$MERGED_RECEIPT_SUFFIX"; do
-    [ -e "$receipt" ] || [ -L "$receipt" ] || continue
-    id=${receipt##*/}
-    id=${id%"$MERGED_RECEIPT_SUFFIX"}
-    if ! fm_pr_task_id_valid "$id"; then
-      printf 'DRIFT-CHECK-SKIPPED: merged reconciliation receipt has an invalid task identity\n'
-      continue
-    fi
-    if ! merged_receipt_parse "$id"; then
-      printf 'DRIFT-CHECK-SKIPPED: merged reconciliation receipt for %s is invalid\n' "$id"
-      PR_CHECKED_IDS="${PR_CHECKED_IDS}${id}"$'\n'
-      continue
-    fi
-    if [ "$TASK_RECEIPT_STAGE" = pending ] \
-        && id_in_set "$OPEN_IDS" "$id"; then
-      continue
-    fi
-    if [ "$TASK_RECEIPT_STAGE" = pending ]; then
-      [ -n "$done_listing" ] || continue
-      done_listing_has_receipt "$done_listing" "$id" "$TASK_PR_URL" "$TASK_RECEIPT_GENERATION" || continue
-      completed_generation=$DONE_RECEIPT_GENERATION
-    fi
-    PR_CHECKED_IDS="${PR_CHECKED_IDS}${id}"$'\n'
-    if [ "$RECONCILE" -eq 0 ]; then
-      printf 'DRIFT merged-pr-open: %s - completed reconciliation receipt cleanup requires verified mutation authority\n' "$id"
-      continue
-    fi
-    if [ "$TASK_RECEIPT_STAGE" = pending ] \
-        && ! merged_receipt_mark_closed "$id" "$completed_generation"; then
-      printf 'DRIFT-CHECK-SKIPPED: completed reconciliation receipt for %s could not record closure\n' "$id"
-      continue
-    fi
-    if merged_receipt_remove_closed "$id"; then
-      printf 'DRIFT merged-pr-open: %s - completed reconciliation receipt retired\n' "$id"
-    else
-      printf 'DRIFT-CHECK-SKIPPED: completed reconciliation receipt for %s could not be retired\n' "$id"
-    fi
-  done
-}
-
 auto_close_merged_pr() {  # <id>
-  local id=$1
+  local id=$1 verdict
   if [ "$RECONCILE" -eq 0 ]; then
     printf 'DRIFT merged-pr-open: %s - recorded PR is merged; reconciliation requires verified mutation authority\n' "$id"
     return 1
   fi
-  if ! merged_receipt_publish "$id"; then
-    printf 'DRIFT merged-pr-open: %s - merged reconciliation receipt could not be persisted; task and board item preserved\n' "$id"
+  if ! persist_board_pr_identity "$id" "$TASK_PR_URL"; then
+    printf 'DRIFT merged-pr-open: %s - canonical PR could not be persisted on the open board row; task preserved\n' "$id"
     return 1
   fi
-  if [ -e "$STATE/$id.meta" ] || [ -L "$STATE/$id.meta" ]; then
-    if ! merged_receipt_matches_task "$id"; then
-      printf 'DRIFT-CHECK-SKIPPED: merged reconciliation receipt for %s does not match canonical task metadata\n' "$id"
+  if [ "$TASK_PR_SOURCE" = board ]; then
+    verdict=$(crew_verdict_for "$id") || {
+      printf 'DRIFT merged-pr-open: %s - merged board PR has no canonical local-worker verdict; automatic close refused\n' "$id"
+      return 1
+    }
+    if ! verdict_has_no_source "$verdict"; then
+      printf 'DRIFT merged-pr-open: %s - merged board PR still has a local worker; automatic close refused\n' "$id"
+      return 1
+    fi
+  elif [ -e "$STATE/$id.meta" ] || [ -L "$STATE/$id.meta" ]; then
+    if ! task_pr_matches_metadata "$id"; then
+      printf 'DRIFT-CHECK-SKIPPED: canonical PR for %s no longer matches task metadata\n' "$id"
       return 1
     fi
     if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
@@ -936,6 +741,9 @@ auto_close_merged_pr() {  # <id>
       printf 'DRIFT merged-pr-open: %s - merged PR teardown refused; task and board item preserved\n' "$id"
       return 1
     fi
+  else
+    printf 'DRIFT merged-pr-open: %s - task metadata disappeared before guarded teardown; board item preserved\n' "$id"
+    return 1
   fi
   close_merged_board_item "$id"
 }
@@ -943,42 +751,15 @@ auto_close_merged_pr() {  # <id>
 # Discover PR-ready status that missed its lifecycle arming, keep unmerged PRs
 # watched, and reconcile the sole auto-fix when the forge returns exact merged.
 check_pr_lifecycle() {  # <listing>...
-  local listing id current_generation
+  local listing id
   for listing in "$@"; do
     while IFS= read -r id; do
       [ -n "$id" ] || continue
       fm_pr_task_id_valid "$id" || continue
       id_in_set "$PR_CHECKED_IDS" "$id" && continue
       PR_CHECKED_IDS="${PR_CHECKED_IDS}${id}"$'\n'
-      if [ -e "$(merged_receipt_path "$id")" ] || [ -L "$(merged_receipt_path "$id")" ]; then
-        if ! merged_receipt_parse "$id"; then
-          printf 'DRIFT-CHECK-SKIPPED: merged reconciliation receipt for %s is invalid\n' "$id"
-          continue
-        fi
-        current_generation=$(board_generation_for "$id") || {
-          printf 'DRIFT-CHECK-SKIPPED: board generation for %s is unavailable; reconciliation receipt preserved\n' "$id"
-          continue
-        }
-        if [ -z "$TASK_RECEIPT_GENERATION" ] \
-            || [ "$TASK_RECEIPT_GENERATION" != "$current_generation" ]; then
-          if [ "$RECONCILE" -eq 1 ] \
-              && merged_receipt_retire_stale "$id" "$current_generation"; then
-            printf 'DRIFT merged-pr-open: %s - stale reconciliation receipt retired without closing the current board generation\n' "$id"
-          else
-            printf 'DRIFT merged-pr-open: %s - stale reconciliation receipt does not authorize the current board generation\n' "$id"
-          fi
-          continue
-        fi
-        TASK_BOARD_GENERATION=$current_generation
-        auto_close_merged_pr "$id" || true
-        continue
-      fi
       recorded_pr_identity "$id" || continue
       if pr_is_exactly_merged; then
-        TASK_BOARD_GENERATION=$(board_generation_for "$id") || {
-          printf 'DRIFT-CHECK-SKIPPED: board generation for %s is unavailable; merged reconciliation preserved\n' "$id"
-          continue
-        }
         auto_close_merged_pr "$id" || true
       else
         ensure_pr_watch "$id"
@@ -1058,7 +839,7 @@ check_holds() {  # <listing>...
 }
 
 run_check() {
-  local reason in_flight queued done_receipts= receipt receipt_id receipts_present=0 receipts_need_done=0
+  local reason in_flight queued
   local in_flight_valid=0 queued_valid=0 secondmate_projects_valid=0
   reason=$(board_unavailable_reason)
   if [ -n "$reason" ]; then
@@ -1069,8 +850,8 @@ run_check() {
   # One failed listing never suppresses the other's findings: a partial report
   # plus a named skip is more useful than silence.
   local -a hold_listings=() open_listings=()
-  if in_flight=$(axi_list in_flight hold_until,created); then
-    if axi_rows tasks "$in_flight" rows id hold_until repo created >/dev/null; then
+  if in_flight=$(axi_list in_flight hold_until,links); then
+    if axi_rows tasks "$in_flight" rows id hold_until repo links >/dev/null; then
       in_flight_valid=1
       open_listings+=("$in_flight")
       hold_listings+=("$in_flight")
@@ -1080,8 +861,8 @@ run_check() {
   else
     printf 'DRIFT-CHECK-SKIPPED: tasks-axi list --state in_flight failed\n'
   fi
-  if queued=$(axi_list queued hold_until,created); then
-    if axi_rows tasks "$queued" rows id hold_until repo created >/dev/null; then
+  if queued=$(axi_list queued hold_until,links); then
+    if axi_rows tasks "$queued" rows id hold_until repo links >/dev/null; then
       queued_valid=1
       open_listings+=("$queued")
       hold_listings+=("$queued")
@@ -1092,32 +873,6 @@ run_check() {
     printf 'DRIFT-CHECK-SKIPPED: tasks-axi list --state queued failed\n'
   fi
   [ "${#open_listings[@]}" -eq 0 ] || capture_crew_verdicts "${open_listings[@]}"
-  for receipt in "$STATE"/*"$MERGED_RECEIPT_SUFFIX"; do
-    [ -e "$receipt" ] || [ -L "$receipt" ] || continue
-    receipts_present=1
-    receipt_id=${receipt##*/}
-    receipt_id=${receipt_id%"$MERGED_RECEIPT_SUFFIX"}
-    if fm_pr_task_id_valid "$receipt_id" \
-        && merged_receipt_parse "$receipt_id" \
-        && [ "$TASK_RECEIPT_STAGE" = pending ] \
-        && ! id_in_set "$OPEN_IDS" "$receipt_id"; then
-      receipts_need_done=1
-    fi
-  done
-  if [ "$receipts_need_done" -eq 1 ]; then
-    if done_receipts=$(axi_list done links,created); then
-      if ! axi_rows tasks "$done_receipts" rows id links created >/dev/null; then
-        printf 'DRIFT-CHECK-SKIPPED: tasks-axi list --state done returned an unrecognized receipt listing\n'
-        done_receipts=
-      fi
-    else
-      printf 'DRIFT-CHECK-SKIPPED: tasks-axi list --state done failed during receipt cleanup\n'
-      done_receipts=
-    fi
-  fi
-  if [ "$receipts_present" -eq 1 ]; then
-    sweep_merged_receipts "$done_receipts"
-  fi
   [ "${#open_listings[@]}" -eq 0 ] || check_pr_lifecycle "${open_listings[@]}"
   load_secondmate_projects && secondmate_projects_valid=1
   [ "$in_flight_valid" -eq 0 ] || check_inflight "$in_flight"
