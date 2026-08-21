@@ -549,6 +549,18 @@ assert_grep 'pr=https://github.com/example/repo/pull/41' "$home/state/pr-task.me
 out=$(FM_FAKE_GH_STATE=MERGED FM_FAKE_PR_CHECK_LOG="$home/pr-check.log" \
   FM_FAKE_TEARDOWN_LOG="$home/teardown.log" FM_FAKE_DONE_LOG="$home/done.log" \
   FM_FAKE_LIFECYCLE_LOG="$home/lifecycle.log" \
+  run_lifecycle_project "$home" "$lifecycle_project" --check) \
+  || fail "report-only --check exited non-zero for an exactly merged recorded PR"
+assert_contains "$out" \
+  "DRIFT merged-pr-open: pr-task - recorded PR is merged; reconciliation requires verified mutation authority" \
+  "report-only --check did not flag an exactly merged recorded PR"
+[ ! -s "$home/teardown.log" ] || fail "report-only merged-PR drift invoked teardown"
+[ ! -s "$home/done.log" ] || fail "report-only merged-PR drift closed its board item"
+[ -f "$home/state/pr-task.meta" ] || fail "report-only merged-PR drift erased canonical task metadata"
+
+out=$(FM_FAKE_GH_STATE=MERGED FM_FAKE_PR_CHECK_LOG="$home/pr-check.log" \
+  FM_FAKE_TEARDOWN_LOG="$home/teardown.log" FM_FAKE_DONE_LOG="$home/done.log" \
+  FM_FAKE_LIFECYCLE_LOG="$home/lifecycle.log" \
   run_lifecycle_project "$home" "$lifecycle_project" --check --reconcile) \
   || fail "--check exited non-zero for an exactly merged PR"
 assert_contains "$out" \
