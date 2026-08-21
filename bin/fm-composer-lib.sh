@@ -51,23 +51,10 @@
 # below. Re-sourcing is a cheap idempotent redefinition, so this file needs no
 # include guard (matching bin/fm-tmux-lib.sh).
 
-# fm_composer_terminal_width: print the terminal-cell width of one OMP
-# structural row through the task-bound runtime and entrypoint identities.
-# Legacy Bun-script OMP uses Bun.stringWidth. Standalone OMP uses a Node
-# fallback behaviorally pinned by compiled OMP 17.3.8 / Bun 1.3.14 fixtures;
-# it never passes OMP's `-e` extension flag as Bun evaluation or relies on
-# locale-sensitive `fold`/`wc` behavior.
-# Missing, relative, non-executable, or malformed support returns nonzero so
-# callers classify the candidate as unknown.
-fm_composer_terminal_width() {  # <row> [canonical-runtime] [canonical-omp]
-  local bun=${2:-${FM_OMP_BUN:-}} omp=${3:-${FM_OMP_BIN:-}} out node_bin
-  case "$bun" in /*) ;; *) return 1 ;; esac
-  [ -x "$bun" ] || return 1
-  if [ -n "$omp" ] && [ "$bun" = "$omp" ]; then
-    node_bin=$(command -v node 2>/dev/null) || return 1
-    case "$node_bin" in /*) ;; *) return 1 ;; esac
-    [ -x "$node_bin" ] || return 1
-    out=$("$node_bin" - "$1" 2>/dev/null <<'JS'
+# Keep the Node program's heredoc outside command substitution: stock Bash
+# 3.2 misparses that nesting and reports a later, unrelated case terminator.
+fm_composer_node_width() {  # <canonical-node> <row>
+  "$1" - "$2" 2>/dev/null <<'JS'
 const input = process.argv[2];
 if (input === undefined || /[\u0000-\u001f\u007f-\u009f]/u.test(input)) process.exit(1);
 
@@ -170,7 +157,25 @@ const compatibilityFixtures = [
 if (compatibilityFixtures.some(([value, expected]) => stringWidth(value) !== expected)) process.exit(1);
 process.stdout.write(String(stringWidth(input)));
 JS
-    ) || return 1
+}
+
+# fm_composer_terminal_width: print the terminal-cell width of one OMP
+# structural row through the task-bound runtime and entrypoint identities.
+# Legacy Bun-script OMP uses Bun.stringWidth. Standalone OMP uses a Node
+# fallback behaviorally pinned by compiled OMP 17.3.8 / Bun 1.3.14 fixtures;
+# it never passes OMP's `-e` extension flag as Bun evaluation or relies on
+# locale-sensitive `fold`/`wc` behavior.
+# Missing, relative, non-executable, or malformed support returns nonzero so
+# callers classify the candidate as unknown.
+fm_composer_terminal_width() {  # <row> [canonical-runtime] [canonical-omp]
+  local bun=${2:-${FM_OMP_BUN:-}} omp=${3:-${FM_OMP_BIN:-}} out node_bin
+  case "$bun" in /*) ;; *) return 1 ;; esac
+  [ -x "$bun" ] || return 1
+  if [ -n "$omp" ] && [ "$bun" = "$omp" ]; then
+    node_bin=$(command -v node 2>/dev/null) || return 1
+    case "$node_bin" in /*) ;; *) return 1 ;; esac
+    [ -x "$node_bin" ] || return 1
+    out=$(fm_composer_node_width "$node_bin" "$1") || return 1
   else
     out=$("$bun" -e 'try { const width = Bun.stringWidth(process.argv[1]); if (!Number.isSafeInteger(width) || width < 0) process.exit(1); process.stdout.write(String(width)); } catch { process.exit(1); }' "$1" 2>/dev/null) || return 1
   fi

@@ -950,6 +950,7 @@ test_omp_threads_exact_identity_model_and_every_thinking_level() {
     assert_contains "$launch" "$expected_bun" "OMP launch omitted its canonical Bun runtime path"
     assert_contains "$launch" "$expected_bin" "OMP launch omitted its canonical entrypoint path"
     assert_contains "$launch" "/bin/bash -c" "OMP launch did not use its Bash-owned command wrapper"
+    # shellcheck disable=SC2016 # The literal expansion must never reach the pane shell.
     assert_not_contains "$launch" '${PATH:+' "OMP launch exposed POSIX parameter expansion to the pane shell"
     assert_contains "$launch" "$expected_bin" \
       "OMP launch did not execute the canonical entrypoint with unattended mode, model, thinking, and extension"
@@ -1605,6 +1606,7 @@ test_omp_herdr_worker_and_scout_launch_with_exact_identity_and_ack() {
     assert_contains "$launch" "GOTMPDIR=" \
       "OMP Herdr $kind launch did not bind GOTMPDIR to its agent command"
     assert_contains "$launch" "/bin/bash -c" "OMP Herdr $kind launch did not use its Bash-owned command wrapper"
+    # shellcheck disable=SC2016 # The literal expansion must never reach the pane shell.
     assert_not_contains "$launch" '${PATH:+' "OMP Herdr $kind launch exposed POSIX parameter expansion to the pane shell"
     assert_contains "$launch" "$(cd "$FAKEBIN_DIR" && pwd -P)/omp" \
       "OMP Herdr $kind launch did not retain its canonical executable"

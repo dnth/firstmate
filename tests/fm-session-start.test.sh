@@ -471,6 +471,9 @@ case "${1:-} ${2:-}" in
       printf '%s\n' '{"result":{"panes":[]}}'
     fi
     ;;
+  "pane process-info")
+    printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"p-new","shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[{"pid":4242,"name":"fish","argv0":"fish"}]}}}'
+    ;;
   "pane get")
     pane=${3:-}
     if [ "$pane" = p-new ] && [ -e "$spawned" ]; then
@@ -502,6 +505,15 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/herdr"
+  cat > "$fakebin/herdr-ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "-axo pid=,ppid=") printf '%s\n' '4242 1' ;;
+  "-p 4242 -o stat=") printf '%s\n' 'S' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/herdr-ps"
 }
 
 # make_fake_herdr <fakebin> <live-pane>: `herdr pane get <pane>` succeeds only
@@ -598,10 +610,13 @@ EOF
   mate="$w/secondmate-$id"
   log="$w/herdr.log"
   state="$w/herdr.state"
+  git clone -q "$root" "$mate"
   mkdir -p "$mate/bin" "$mate/data" "$mate/state" "$mate/config" "$mate/projects"
   printf '%s\n' "$id" > "$mate/.fm-secondmate-home"
   printf '# Firstmate\n' > "$mate/AGENTS.md"
   printf 'Second mate charter.\n' > "$mate/data/charter.md"
+  printf '%s\n' '/.fm-secondmate-home' '/AGENTS.md' '/data/charter.md' '/config/' \
+    >> "$mate/.git/info/exclude"
   printf '%s\n' herdr > "$home/config/backend"
   printf '%s\n' pi > "$home/config/secondmate-harness"
   printf '%s\n' manual > "$home/config/backlog-backend"
@@ -632,6 +647,7 @@ run_session_start_herdr_secondmate() {
   local root=$1 home=$2 fakebin=$3 mate=$4 log=$5 state=$6
   FM_BACKEND=herdr FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" \
     FM_FAKE_SECOND_MATE_ID="$SESSION_START_HERDR_SECOND_MATE_ID" \
+    FM_HERDR_PS_BIN="$fakebin/herdr-ps" \
     run_session_start "$home" "$root" "$fakebin:$BASE_PATH"
 }
 
