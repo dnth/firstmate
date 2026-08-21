@@ -12,6 +12,8 @@ fi
 
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$ROOT/bin/fm-supervision-lib.sh"
+# shellcheck source=bin/fm-omp-process-lib.sh
+. "$ROOT/bin/fm-omp-process-lib.sh"
 
 command -v omp >/dev/null 2>&1 || fail "omp not found"
 command -v herdr >/dev/null 2>&1 || fail "herdr not found"
@@ -20,8 +22,10 @@ command -v treehouse >/dev/null 2>&1 || fail "treehouse not found"
 
 OMP_BIN=$("$ROOT/bin/fm-omp-capabilities.sh" --print-binary) || fail "OMP capability check failed"
 OMP_BIN=$(fm_test_realpath "$OMP_BIN") || fail "OMP binary realpath could not be resolved"
-BUN_BIN=$(node -e 'const {realpathSync}=require("node:fs");process.stdout.write(realpathSync(process.argv[1]))' "$(command -v bun)") \
-  || fail "Bun realpath could not be resolved"
+OMP_LAUNCH_IDENTITY=$(fm_omp_process_launch_identity "$OMP_BIN") \
+  || fail "OMP launch identity could not be resolved for $OMP_BIN"
+OMP_RUNTIME=$(printf '%s\n' "$OMP_LAUNCH_IDENTITY" | sed -n '1p')
+OMP_BIN=$(printf '%s\n' "$OMP_LAUNCH_IDENTITY" | sed -n '2p')
 REAL_HERDR=$(command -v herdr)
 HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 [ -x "$HERDR_LAB_HELPER" ] || fail "Herdr lab helper is not executable: $HERDR_LAB_HELPER"
@@ -120,7 +124,8 @@ base_path='$BASE_PATH'
 wrapper_bin='$WRAPPER_BIN'
 log='$WRAPPER_LOG'
 omp_bin='$OMP_BIN'
-bun_bin='$BUN_BIN'
+omp_runtime='$OMP_RUNTIME'
+process_lib='$DRIVER_ROOT/bin/fm-omp-process-lib.sh'
 if [ "\${FM_HERDR_LAB_INNER:-0}" = 1 ]; then
   if [ "\${1:-}" = server ]; then
     exec env -u FM_HERDR_LAB_INNER "\$real" "\$@"
@@ -130,6 +135,7 @@ fi
 case "\${1:-}" in
   --version|-V|version) exec "\$real" "\$@" ;;
 esac
+. "\$process_lib"
 # OMP itself probes Herdr with its own prefix-session syntax. Those calls are
 # outside Firstmate's backend API and cannot satisfy this matrix's trailing-
 # session contract. Quarantine only the exact observed read-only forms from an
@@ -141,33 +147,36 @@ if [ -e "/proc/\$PPID/exe" ]; then
 else
   parent_exe=\$(lsof -a -p "\$PPID" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
 fi
-case "\$parent_exe:\$parent_args" in
-  "\$bun_bin":bun\ "\$omp_bin"\ *)
-    native_probe=0
-    native_probe_pane=
-    case "\$#:\$*" in
-      "1:agent"|"1:--help"|"2:agent --help"|"2:agent list"|"3:--session \$session --help") native_probe=1 ;;
-      3:agent\ get\ *) native_probe_pane=\$3 ;;
-      5:--session\ "\$session"\ agent\ get\ *) native_probe_pane=\$5 ;;
-      7:pane\ read\ *\ --source\ recent-unwrapped\ --lines\ *) native_probe_pane=\$3 ;;
-      7:agent\ read\ *\ --source\ recent-unwrapped\ --lines\ *)
-        case "\$7" in
-          ''|0*|*[!0-9]*) ;;
-          *) native_probe_pane=\$3 ;;
-        esac
-        ;;
-    esac
-    case "\$native_probe_pane" in
-      ''|*[!A-Za-z0-9._:@%+-]*) ;;
-      *) native_probe=1 ;;
-    esac
-    if [ "\$native_probe" -eq 1 ]; then
-      printf -v rendered '%q ' "\$@"
-      printf '%s\n' "\$rendered" >> "\$log.native-omp-probes"
-      exit 96
-    fi
-    ;;
-esac
+native_omp_parent=0
+if FM_OMP_PROCESS_EXPECTED_BUN="\$omp_runtime" FM_OMP_PROCESS_EXPECTED_BIN="\$omp_bin" \
+    fm_omp_process_matches "\$parent_exe" "\$parent_args" "\$PPID"; then
+  native_omp_parent=1
+fi
+if [ "\$native_omp_parent" -eq 1 ]; then
+  native_probe=0
+  native_probe_pane=
+  case "\$#:\$*" in
+    "1:agent"|"1:--help"|"2:agent --help"|"2:agent list"|"2:pane read --help"|"3:--session \$session --help") native_probe=1 ;;
+    3:agent\ get\ *) native_probe_pane=\$3 ;;
+    5:--session\ "\$session"\ agent\ get\ *) native_probe_pane=\$5 ;;
+    7:pane\ read\ *\ --source\ recent-unwrapped\ --lines\ *) native_probe_pane=\$3 ;;
+    7:agent\ read\ *\ --source\ recent-unwrapped\ --lines\ *)
+      case "\$7" in
+        ''|0*|*[!0-9]*) ;;
+        *) native_probe_pane=\$3 ;;
+      esac
+      ;;
+  esac
+  case "\$native_probe_pane" in
+    ''|*[!A-Za-z0-9._:@%+-]*) ;;
+    *) native_probe=1 ;;
+  esac
+  if [ "\$native_probe" -eq 1 ]; then
+    printf -v rendered '%q ' "\$@"
+    printf '%s\n' "\$rendered" >> "\$log.native-omp-probes"
+    exit 96
+  fi
+fi
 if [ "\$#" -eq 2 ] && [ "\$1" = status ] && [ "\$2" = --json ] \
   && [ "\${HERDR_SESSION:-}" = "\$session" ]; then
   set -- "\$@" --session "\$session"
@@ -393,9 +402,14 @@ primary_drained_wake_after() { # <transcript-offset> <wake-text>
   tail -c "+$start" "$PRIMARY_SESSION" 2>/dev/null \
     | jq -se --arg text "$text" '
         (to_entries
-          | map(select(.value.type == "message" and .value.message.role == "user"
-              and .value.message.attribution == "user"
-              and any(.value.message.content[]?; .type == "text" and (.text | contains($text)))))
+          | map(select(
+              (.value.type == "custom_message"
+                and .value.customType == "firstmate-watcher-wake"
+                and ((.value.content // "") | contains($text)))
+              or
+              (.value.type == "message" and .value.message.role == "user"
+                and .value.message.attribution == "user"
+                and any(.value.message.content[]?; .type == "text" and (.text | contains($text))))))
           | first | .key) as $wake
         | if $wake == null then false
           else
@@ -455,23 +469,30 @@ send_task() {
 
 spawn_task() { # <id> [--scout]
   local id=$1
+  local -a delivery_args=()
   shift
+  if [ "${1:-}" != --scout ]; then
+    delivery_args+=(--mode direct-PR --yolo off)
+  fi
   fm_env FM_SPAWN_NO_GUARD=1 FM_OMP_LAUNCH_ACK_INTERVAL=0.25 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$PROJECT" --harness omp \
-      --model openai-codex/gpt-5.6-sol --effort low "$@"
+      --model openai-codex/gpt-5.6-luna --effort low "${delivery_args[@]}" "$@"
 }
 
 # --- real primary ------------------------------------------------------------
 mkdir -p "$PRIMARY_HOME/sessions"
 printf 'herdr\n' > "$PRIMARY_HOME/config/backend"
 printf 'omp\n' > "$PRIMARY_HOME/config/crew-harness"
+# Keep this role matrix on the flat per-home workspace path; disposable
+# presentation workspaces are covered by the dedicated Herdr presentation suite.
+printf 'off\n' > "$PRIMARY_HOME/config/herdr-presentation-spaces"
 primary_create=$(lab workspace create --cwd "$PRIMARY_PROJECT" --label omp-primary-live --no-focus) \
   || fail "could not create the guarded OMP primary workspace"
 PRIMARY_PANE=$(printf '%s' "$primary_create" | jq -r '.result.root_pane.pane_id // empty')
 [ -n "$PRIMARY_PANE" ] || fail "primary workspace returned no pane"
 PRIMARY_TARGET="$SESSION:$PRIMARY_PANE"
 printf -v primary_launch \
-  "exec env PATH=%q OMP_SKIP_SETUP=1 FM_HOME=%q FM_ROOT_OVERRIDE=%q FM_STATE_OVERRIDE=%q FM_CONFIG_OVERRIDE=%q %q --model openai-codex/gpt-5.6-sol --thinking low --session-dir %q --auto-approve -e %q %q" \
+  "exec env PATH=%q OMP_SKIP_SETUP=1 FM_HOME=%q FM_ROOT_OVERRIDE=%q FM_STATE_OVERRIDE=%q FM_CONFIG_OVERRIDE=%q %q --model openai-codex/gpt-5.6-luna --thinking low --session-dir %q --auto-approve -e %q %q" \
   "$WRAPPER_BIN:$BASE_PATH" "$PRIMARY_HOME" "$PRIMARY_PROJECT" "$PRIMARY_HOME/state" "$PRIMARY_HOME/config" \
   "$OMP_BIN" "$PRIMARY_HOME/sessions" "$PRIMARY_PROJECT/.omp/extensions/fm-primary-omp.ts" \
   "Follow the injected startup instruction exactly once, call the fm_watch_arm_omp tool, then reply exactly: Herdr primary is ready."
@@ -510,6 +531,7 @@ git -C "$PROJECT" commit -qm init
 git init -q --bare "$LAB/project-origin.git"
 git -C "$PROJECT" remote add origin "$LAB/project-origin.git"
 git -C "$PROJECT" push -qu origin main
+git -C "$LAB/project-origin.git" symbolic-ref HEAD refs/heads/main
 
 worker_log_start=$(wc -l < "$WRAPPER_LOG" | tr -d '[:space:]')
 worker_start_wake_offset=$(session_offset "$PRIMARY_SESSION") || exit 1
@@ -690,7 +712,7 @@ SCOUT_WT=
 git clone -q "$DRIVER_ROOT" "$SECOND_HOME"
 mkdir -p "$SECOND_HOME/data" "$SECOND_HOME/state" "$SECOND_HOME/config" "$SECOND_HOME/projects"
 printf '%s\n' "$SECONDMATE_ID" > "$SECOND_HOME/.fm-secondmate-home"
-printf 'omp openai-codex/gpt-5.6-sol low\n' > "$HOME_DIR/config/secondmate-harness"
+printf 'omp openai-codex/gpt-5.6-luna low\n' > "$HOME_DIR/config/secondmate-harness"
 printf 'codex\n' > "$HOME_DIR/config/crew-harness"
 FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$HOME_DIR/state" \
   FM_DATA_OVERRIDE="$HOME_DIR/data" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
@@ -781,7 +803,7 @@ env PATH="$WRAPPER_BIN:$BASE_PATH" HERDR_SESSION="$SESSION" FM_BACKEND=herdr \
 # its default-session tripwire.
 [ -s "$WRAPPER_LOG" ] || fail "production role matrix issued no Herdr commands through the wrapper"
 if [ -s "$WRAPPER_LOG.native-omp-probes" ]; then
-  grep -Ev "^(agent |--help |agent --help |agent list |agent get [A-Za-z0-9._:@%+-]+ |pane read [A-Za-z0-9._:@%+-]+ --source recent-unwrapped --lines [1-9][0-9]* |agent read [A-Za-z0-9._:@%+-]+ --source recent-unwrapped --lines [1-9][0-9]* |--session $SESSION --help |--session $SESSION agent get [A-Za-z0-9._:@%+-]+ )$" \
+  grep -Ev "^(agent |--help |agent --help |agent list |pane read --help |agent get [A-Za-z0-9._:@%+-]+ |pane read [A-Za-z0-9._:@%+-]+ --source recent-unwrapped --lines [1-9][0-9]* |agent read [A-Za-z0-9._:@%+-]+ --source recent-unwrapped --lines [1-9][0-9]* |--session $SESSION --help |--session $SESSION agent get [A-Za-z0-9._:@%+-]+ )$" \
     "$WRAPPER_LOG.native-omp-probes" >/dev/null \
     && fail "an unexpected native OMP Herdr probe escaped quarantine"
 fi

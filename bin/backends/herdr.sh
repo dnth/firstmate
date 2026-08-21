@@ -968,25 +968,32 @@ fm_backend_herdr_pid_is_bare_shell() {  # <ps-bin> <pid>
   return 1
 }
 
-# fm_backend_herdr_pane_idle_shell_pid: print the shell pid of <pane-id> only
-# when the exact pane provably holds one lone idle recognized shell: pane
-# process-info agrees on the pane id, the shell pid is both the foreground
-# process group and the sole foreground process, the foreground process name
-# and argv0 resolve to the same recognized shell, the operating-system
-# process table shows exactly that one shell row with no child process, and
-# the shell sits in a sleeping or idle state.
-# An idle interactive shell transiently hosts short-lived prompt helpers
-# (verified on the real 0.7.5 lab: a workspace.move relayout makes zsh redraw
-# its prompt, spawning starship as a second foreground process for a few
-# samples), so the proof retries strict single samples for a bounded settle
-# window and succeeds on the first fully clean one; a genuinely busy pane
-# fails every sample and still refuses.
-# This is the single owner of the idle-shell proof; the session-start
-# projection cleanup and every pane-death close path both rely on it.
+# fm_backend_herdr_pane_idle_shell_pid: print the pane-owned shell pid only
+# when the exact pane provably holds that one lone idle recognized shell.
+# This top-level proof licenses destructive pane-death cleanup.
 fm_backend_herdr_pane_idle_shell_pid() {  # <session> <pane-id>
+  fm_backend_herdr_pane_idle_shell_pid_for_mode pane "$1" "$2"
+}
+
+# fm_backend_herdr_pane_idle_foreground_shell_pid: print the exact pane's lone
+# idle foreground shell pid when it is either the pane-owned shell or a proven
+# descendant of it. Treehouse intentionally leaves its guarded wrapper and the
+# pane shell waiting behind a nested interactive worktree shell, so safe command
+# submission must target that foreground shell without granting it cleanup
+# authority.
+fm_backend_herdr_pane_idle_foreground_shell_pid() {  # <session> <pane-id>
+  fm_backend_herdr_pane_idle_shell_pid_for_mode foreground "$1" "$2"
+}
+
+# One retry owner for both strict proofs. An idle interactive shell transiently
+# hosts prompt helpers, so strict samples get a bounded settle opportunity; a
+# genuinely busy or unverifiable pane fails every sample and still refuses.
+fm_backend_herdr_pane_idle_shell_pid_for_mode() {  # <pane|foreground> <session> <pane-id>
+  local mode=$1 session=$2 pane=$3
   local attempt=0 max_attempts=${FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS:-10}
+  case "$max_attempts" in ''|*[!0-9]*|0) max_attempts=10 ;; esac
   while :; do
-    if fm_backend_herdr_pane_idle_shell_sample "$1" "$2"; then
+    if fm_backend_herdr_pane_idle_shell_sample "$session" "$pane" "$mode"; then
       return 0
     fi
     attempt=$((attempt + 1))
@@ -995,12 +1002,14 @@ fm_backend_herdr_pane_idle_shell_pid() {  # <session> <pane-id>
   done
 }
 
-# fm_backend_herdr_pane_idle_shell_sample: one strict instantaneous
-# observation for fm_backend_herdr_pane_idle_shell_pid, which owns the proof
-# contract and the settle retry.
-fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
-  local session=$1 pane=$2 info shell_pid foreground_pgid count
+# One strict instantaneous observation. Pane mode requires the pane-owned shell
+# itself and is used by cleanup. Foreground mode additionally accepts one idle
+# recognized descendant shell, but only after the OS process table proves the
+# exact foreground pid descends from the pane-owned shell and has no child.
+fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id> [pane|foreground]
+  local session=$1 pane=$2 mode=${3:-pane} info shell_pid foreground_pgid count
   local process_pid name argv0 shell_name rows stat ps_bin
+  case "$mode" in pane|foreground) ;; *) return 1 ;; esac
   info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 1
   printf '%s' "$info" | jq -e --arg pane "$pane" '
     .result.type == "pane_process_info"
@@ -1010,13 +1019,15 @@ fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
     '.result.process_info.shell_pid | select(type == "number" and . > 1) | floor' 2>/dev/null) || return 1
   foreground_pgid=$(printf '%s' "$info" | jq -er \
     '.result.process_info.foreground_process_group_id | select(type == "number" and . > 1) | floor' 2>/dev/null) || return 1
-  [ "$foreground_pgid" = "$shell_pid" ] || return 1
   count=$(printf '%s' "$info" | jq -er \
     '.result.process_info.foreground_processes | select(type == "array") | length' 2>/dev/null) || return 1
   [ "$count" -eq 1 ] || return 1
   process_pid=$(printf '%s' "$info" | jq -er \
     '.result.process_info.foreground_processes[0].pid | select(type == "number") | floor' 2>/dev/null) || return 1
-  [ "$process_pid" = "$shell_pid" ] || return 1
+  [ "$process_pid" = "$foreground_pgid" ] || return 1
+  if [ "$mode" = pane ] && [ "$process_pid" != "$shell_pid" ]; then
+    return 1
+  fi
   name=$(printf '%s' "$info" | jq -er \
     '.result.process_info.foreground_processes[0].name | select(type == "string" and length > 0)' 2>/dev/null) || return 1
   argv0=$(printf '%s' "$info" | jq -er '
@@ -1033,14 +1044,32 @@ fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
   ps_bin=${FM_HERDR_PS_BIN:-ps}
   command -v "$ps_bin" >/dev/null 2>&1 || return 1
   rows=$("$ps_bin" -axo pid=,ppid= 2>/dev/null) || return 1
-  printf '%s\n' "$rows" | awk -v shell="$shell_pid" '
-    $1 == shell { found++ }
-    $2 == shell { child++ }
-    END { exit(found == 1 && child == 0 ? 0 : 1) }
-  ' || return 1
-  stat=$("$ps_bin" -p "$shell_pid" -o stat= 2>/dev/null | tr -d '[:space:]') || return 1
+  if [ "$mode" = pane ]; then
+    printf '%s\n' "$rows" | awk -v shell="$shell_pid" '
+      $1 == shell { found++ }
+      $2 == shell { child++ }
+      END { exit(found == 1 && child == 0 ? 0 : 1) }
+    ' || return 1
+  else
+    printf '%s\n' "$rows" | awk -v root="$shell_pid" -v target="$process_pid" '
+      { parent[$1] = $2 }
+      $1 == target { found++ }
+      $2 == target { child++ }
+      END {
+        if (found != 1 || child != 0) exit 1
+        pid = target
+        for (depth = 0; depth < 256; depth++) {
+          if (pid == root) exit 0
+          if (!(pid in parent) || parent[pid] <= 1 || parent[pid] == pid) exit 1
+          pid = parent[pid]
+        }
+        exit 1
+      }
+    ' || return 1
+  fi
+  stat=$("$ps_bin" -p "$process_pid" -o stat= 2>/dev/null | tr -d '[:space:]') || return 1
   case "$stat" in S*|I*) ;; *) return 1 ;; esac
-  printf '%s\n' "$shell_pid"
+  printf '%s\n' "$process_pid"
 }
 
 # fm_backend_herdr_projection_order_best_effort: place the exact workspace id
@@ -2348,12 +2377,20 @@ fm_backend_herdr_current_path() {  # <target>
     | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null
 }
 
-# fm_backend_herdr_send_text_line: send one line of TEXT then submit,
-# ATOMICALLY - mirrors tmux's `send-keys -t T text Enter`. Used for the fixed
-# spawn-time commands (treehouse get, the GOTMPDIR export). `pane run` types
-# the command and submits it in one call (verified).
+# fm_backend_herdr_send_text_line: wait until the exact pane holds one proven
+# idle foreground shell, then submit TEXT atomically. A newly created Herdr
+# pane can still be running terminal-startup work after creation returns, while
+# an acquired Treehouse worktree deliberately uses a nested interactive shell.
+# Typing before either shell settles can lose or corrupt the command. This
+# non-destructive proof accepts only the pane-owned shell or its exact lone
+# foreground descendant and never grants pane-death cleanup authority.
 fm_backend_herdr_send_text_line() {  # <target> <text>
+  local ready_polls=${FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS:-200}
+  case "$ready_polls" in ''|*[!0-9]*|0) ready_polls=200 ;; esac
   fm_backend_herdr_target_ready "$1" || return 1
+  FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=$ready_polls \
+    fm_backend_herdr_pane_idle_foreground_shell_pid "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" >/dev/null \
+    || return 1
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
 }
 
@@ -2522,8 +2559,8 @@ FM_BACKEND_HERDR_OMP_COMPOSER_MIN_WIDTH=${FM_BACKEND_HERDR_OMP_COMPOSER_MIN_WIDT
 # model or the generic bordered-row model.
 # The candidate must end at the last non-empty captured row so a stale transcript
 # copy cannot become the live composer.
-fm_backend_herdr_omp_composer_find() {  # <ansi-capture> [canonical-omp-bun]
-  local cap=$1 bun=${2:-${FM_OMP_BUN:-}} line plain trimmed row=0 open=0 lines=0 max min_width
+fm_backend_herdr_omp_composer_find() {  # <ansi-capture> [runtime] [omp]
+  local cap=$1 bun=${2:-${FM_OMP_BUN:-}} omp=${3:-${FM_OMP_BIN:-}} line plain trimmed row=0 open=0 lines=0 max min_width
   local candidate="" bottom_inner bottom_width top_width=0 last_nonempty=0
   max=$FM_BACKEND_HERDR_OMP_COMPOSER_MAX_LINES
   min_width=$FM_BACKEND_HERDR_OMP_COMPOSER_MIN_WIDTH
@@ -2546,7 +2583,7 @@ fm_backend_herdr_omp_composer_find() {  # <ansi-capture> [canonical-omp-bun]
       '╭── '*' ▶'*'──╮')
         FM_BACKEND_HERDR_OMP_SIGNAL=1
         open=1
-        top_width=$(fm_composer_terminal_width "$trimmed" "$bun" 2>/dev/null || printf '0')
+        top_width=$(fm_composer_terminal_width "$trimmed" "$bun" "$omp" 2>/dev/null || printf '0')
         lines=0
         candidate=""
         ;;
@@ -2555,7 +2592,7 @@ fm_backend_herdr_omp_composer_find() {  # <ansi-capture> [canonical-omp-bun]
           FM_BACKEND_HERDR_OMP_FOUND=1
           FM_BACKEND_HERDR_OMP_BOTTOM_LINE=$row
           FM_BACKEND_HERDR_OMP_VALID=0
-          bottom_width=$(fm_composer_terminal_width "$trimmed" "$bun" 2>/dev/null || printf '0')
+          bottom_width=$(fm_composer_terminal_width "$trimmed" "$bun" "$omp" 2>/dev/null || printf '0')
           bottom_inner=${trimmed#╰─}
           bottom_inner=${bottom_inner%─╯}
           if [ "$top_width" -ge "$min_width" ] \
@@ -2654,8 +2691,8 @@ fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
   printf '%s' "$out" | jq -r '[.result.agent.agent // "", .result.agent.agent_status // ""] | @tsv' 2>/dev/null
 }
 
-fm_backend_herdr_composer_state() {  # <target> [harness] [canonical-omp-bun] -> empty|pending|unknown
-  local target=$1 harness=${2:-} bun=${3:-${FM_OMP_BUN:-}}
+fm_backend_herdr_composer_state() {  # <target> [harness] [runtime] [omp] -> empty|pending|unknown
+  local target=$1 harness=${2:-} bun=${3:-${FM_OMP_BUN:-}} omp=${4:-${FM_OMP_BIN:-}}
   local session pane cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped
   local identity agent agent_status row=0 generic_line=0
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
@@ -2668,7 +2705,7 @@ fm_backend_herdr_composer_state() {  # <target> [harness] [canonical-omp-bun] ->
   # Any OMP-shaped candidate that is malformed, stale, short, active, or
   # unreadable remains unknown rather than falling through to Pi or generic
   # rendering assumptions.
-  fm_backend_herdr_omp_composer_find "$cap" "$bun"
+  fm_backend_herdr_omp_composer_find "$cap" "$bun" "$omp"
   if [ "$FM_BACKEND_HERDR_OMP_SIGNAL" -eq 1 ]; then
     identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null || true)
     IFS=$'\t' read -r agent agent_status <<EOF
@@ -2987,8 +3024,8 @@ fm_backend_herdr_wait_omp_session_exit() {  # <session-file> <byte-offset> <budg
 
 # Echoes empty|busy-confirmed|pending|unknown|send-failed from the
 # proof-carrying submit vocabulary.
-fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [harness] [canonical-omp-bun] [turnstart-setup]
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${7:-} bun=${8:-} turnstart_setup=${9:-}
+fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [harness] [runtime] [omp] [turnstart-setup]
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${7:-} bun=${8:-} omp=${9:-} turnstart_setup=${10:-}
   local turnstart_reference=''
   local i=0 verdict baseline confirm_sleep omp_confirm_sleep omp_session='' omp_offset='' omp_status='' omp_event
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
@@ -3067,7 +3104,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
         "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS")
     else
       sleep "$sleep_s"
-      verdict=$(fm_backend_herdr_composer_state "$target" "$harness" "$bun")
+      verdict=$(fm_backend_herdr_composer_state "$target" "$harness" "$bun" "$omp")
     fi
     case "$verdict" in
       busy|empty)

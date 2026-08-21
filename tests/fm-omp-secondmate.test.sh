@@ -61,6 +61,8 @@ if (process.argv.includes("--hold")) {
     {selector: "test/model", thinking: ["low", "medium", "high", "xhigh"]},
     {selector: "test/finish", thinking: ["low", "medium", "high", "xhigh"]}
   ]}));
+} else if (process.env.FM_TEST_OMP_EXEC_LOG && process.argv[2] !== "--help") {
+  require("node:fs").writeFileSync(process.env.FM_TEST_OMP_EXEC_LOG, `${process.argv[1]}\n${process.env.FM_OMP_BUN}\n${process.env.FM_OMP_BIN}\n`);
 } else console.log(`OMP 17.2.11
 --model=provider/id
 --thinking=level
@@ -87,6 +89,8 @@ JS
   cat > "$FAKEBIN/ps" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
+  "-p 987654 -o stat=") printf '%s\n' S ;;
+  "-axo pid=,ppid=") /usr/bin/ps "$@"; printf '%s\n' '987654 1' ;;
   *"tpgid="*"$FM_TEST_AGENT_PID"*) printf '%s\n' "$FM_TEST_AGENT_PID" ;;
   *"args="*"$FM_TEST_AGENT_PID"*) printf '%s %s --auto-approve\n' "$FM_TEST_OMP_BUN" "$FM_TEST_OMP_BIN" ;;
   *) exec /usr/bin/ps "$@" ;;
@@ -134,6 +138,16 @@ case "$cmd" in
     for ((i=0; i<${#args[@]}; i++)); do
       if [ "${args[$i]}" = -l ] && [ $((i + 1)) -lt ${#args[@]} ]; then
         printf '%s\n' "${args[$((i + 1))]}" > "$FM_TEST_LAUNCH_LOG"
+        if [ "${FM_TEST_EXECUTE_LAUNCH:-0}" = 1 ] && [ -n "${FM_TEST_LAUNCH_EXEC_LOG:-}" ]; then
+          if [ "${FM_TEST_REMOVE_OMP_BUN_BEFORE_EXEC:-0}" = 1 ]; then
+            rm -f "${FM_TEST_OMP_BUN_LOOKUP:?}"
+          fi
+          if [ -n "${FM_TEST_LAUNCH_CWD:-}" ]; then
+            (cd "$FM_TEST_LAUNCH_CWD" && bash -c "$(cat "$FM_TEST_LAUNCH_LOG")") > "$FM_TEST_LAUNCH_EXEC_LOG" 2>&1 || exit 1
+          else
+            bash -c "$(cat "$FM_TEST_LAUNCH_LOG")" > "$FM_TEST_LAUNCH_EXEC_LOG" 2>&1 || exit 1
+          fi
+        fi
       fi
     done
     if [ "${args[${#args[@]}-1]:-}" = Enter ] && [ -s "$FM_TEST_LAUNCH_LOG" ] && [ "${FM_TEST_SKIP_ACK:-0}" != 1 ]; then
@@ -190,6 +204,9 @@ case "$cmd $sub" in
     fi
     printf '{"result":{"pane":{"pane_id":"w1:p2","foreground_cwd":"%s"}}}\n' "$FM_TEST_HOME"
     ;;
+  "pane process-info")
+    printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":987654,"foreground_process_group_id":987654,"foreground_processes":[{"pid":987654,"name":"fish","argv0":"fish"}]}}}'
+    ;;
   "agent get")
     if [ ! -f "$FM_TEST_WINDOW_FLAG" ]; then
       printf '%s\n' '{"error":{"code":"agent_not_found"}}' >&2
@@ -206,6 +223,16 @@ case "$cmd $sub" in
     printf '%s\n' '{"result":{"agent":{"agent":"omp","agent_status":"idle"}}}'
     ;;
   "pane run")
+    printf '%s\n' "${4:-}" > "$FM_TEST_LAUNCH_LOG"
+    if [ "${FM_TEST_SKIP_ACK:-0}" != 1 ]; then
+      mkdir -p "$FM_TEST_HOME/state/omp-sessions"
+      session="$FM_TEST_HOME/state/omp-sessions/${FM_TEST_ACK_SESSION:-selected.jsonl}"
+      printf '{"type":"session"}\n' > "$session"
+      printf '%s\n' "$session" > "$FM_TEST_HOME/state/.omp-session"
+      version=$(bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_primary_watch_version "$1/.omp/extensions/fm-primary-omp.ts" "$1"' _ "$FM_TEST_HOME")
+      printf '%s\n%s\n%s\n%s\n' "$version" "$FM_TEST_AGENT_PID" "$FM_TEST_OMP_BUN" "$FM_TEST_OMP_BIN" > "$FM_TEST_HOME/state/.omp-primary-extension-loaded"
+      printf '%s\n' "$FM_TEST_AGENT_PID" > "$FM_TEST_HOME/state/.lock"
+    fi
     ;;
   "pane send-text")
     printf '%s\n' "${4:-}" > "$FM_TEST_LAUNCH_LOG"
@@ -358,8 +385,14 @@ test_herdr_launch_exact_resume_recovery_and_abort() {
   setup_case herdr-launch
 
   out=$(run_spawn_herdr 2>&1) || fail "fresh OMP Herdr secondmate spawn failed: $out"
-  assert_contains "$(cat "$LAUNCH_LOG")" "'$TEST_OMP_BUN' '$TEST_OMP_BIN' --session-dir '$HOME_DIR/state/omp-sessions'" \
-    "OMP Herdr secondmate launch did not use its canonical Bun/OMP pair and isolated session directory"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "/bin/bash -c" \
+    "OMP Herdr secondmate launch did not use its Bash-owned command wrapper"
+  # shellcheck disable=SC2016 # The literal expansion must never reach the pane shell.
+  assert_not_contains "$launch" '${PATH:+' \
+    "OMP Herdr secondmate launch exposed POSIX parameter expansion to the pane shell"
+  assert_not_contains "$launch" "'$TEST_OMP_BUN' '$TEST_OMP_BIN'" \
+    "OMP Herdr secondmate launch routed the selected executable through Bun"
   assert_contains "$(cat "$MAIN_STATE/$TASK_ID.meta")" 'harness=omp' "OMP Herdr secondmate identity was not exact"
   assert_contains "$(cat "$MAIN_STATE/$TASK_ID.meta")" 'backend=herdr' "OMP Herdr secondmate backend was not recorded"
   assert_contains "$(cat "$MAIN_STATE/$TASK_ID.meta")" 'herdr_pane_id=w1:p2' "OMP Herdr secondmate exact pane was not recorded"
@@ -369,7 +402,10 @@ test_herdr_launch_exact_resume_recovery_and_abort() {
   rm -f "$WINDOW_FLAG" "$HOME_DIR/state/.omp-primary-extension-loaded" "$HOME_DIR/state/.lock"
   : > "$LAUNCH_LOG"
   out=$(FM_TEST_STATE_MODE=missing run_spawn_herdr 2>&1) || fail "OMP Herdr secondmate exact resume failed: $out"
-  assert_contains "$(cat "$LAUNCH_LOG")" "--resume '$selected'" \
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--resume" \
+    "OMP Herdr secondmate recovery did not request session resume"
+  assert_contains "$launch" "$selected" \
     "OMP Herdr secondmate recovery did not resume the pointer-bound exact session"
 
   setup_case herdr-broker-launch
@@ -381,12 +417,16 @@ test_herdr_launch_exact_resume_recovery_and_abort() {
     FM_OMP_AUTH_BROKER_TOKEN_FILE="$token_file" 2>&1) \
     || fail "OMP Herdr secondmate broker launch failed: $out"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "OMP_AUTH_BROKER_URL='http://127.0.0.1:8765'" \
+  assert_contains "$launch" "OMP_AUTH_BROKER_URL=" \
     "OMP secondmate agent launch did not receive the pod-loopback broker URL"
-  assert_contains "$launch" "OMP_AUTH_BROKER_TOKEN=\"\$(cat '$token_file')\"" \
-    "OMP secondmate agent launch did not defer bearer expansion to the pane shell"
-  assert_contains "$launch" "FM_OMP_AUTH_BROKER_TOKEN_FILE='$token_file'" \
+  assert_contains "$launch" "http://127.0.0.1:8765" \
+    "OMP secondmate agent launch did not retain the broker URL"
+  assert_contains "$launch" "\$(cat" \
+    "OMP secondmate agent launch did not defer bearer expansion to its Bash-owned command wrapper"
+  assert_contains "$launch" "FM_OMP_AUTH_BROKER_TOKEN_FILE=" \
     "OMP secondmate agent launch did not retain the safe token-file path for descendants"
+  assert_contains "$launch" "$token_file" \
+    "OMP secondmate agent launch did not retain the safe token-file path"
   assert_not_contains "$launch" 'dummy_remote_agent_broker_token_789' \
     "OMP secondmate agent launch exposed broker bearer bytes in backend transport"
 
@@ -436,22 +476,32 @@ test_herdr_launch_exact_resume_recovery_and_abort() {
 }
 
 test_launch_and_exact_resume() {
-  local out selected nested before after
+  local out selected nested before after launch
   setup_case launch
 
   out=$(run_spawn -- --prewalk-into 'test/finish:xhigh' 2>&1) || fail "fresh OMP secondmate spawn failed: $out"
-  assert_contains "$(cat "$LAUNCH_LOG")" "FM_OMP_SESSION_POINTER='$HOME_DIR/state/.omp-session'" "OMP launch did not bind the home-owned session pointer"
-  assert_contains "$(cat "$LAUNCH_LOG")" "'$TEST_OMP_BUN' '$TEST_OMP_BIN'" \
-    "OMP launch did not use the capability-checked canonical Bun/OMP pair"
-  assert_contains "$(cat "$LAUNCH_LOG")" "--session-dir '$HOME_DIR/state/omp-sessions' --auto-approve --max-time=3h --model 'test/model' --thinking 'low'" "OMP launch did not preserve exact pins and durable session directory"
-  assert_contains "$(cat "$LAUNCH_LOG")" "-e '$HOME_DIR/.omp/extensions/fm-primary-omp.ts'" "OMP launch did not preserve its exact adapter"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "FM_OMP_SESSION_POINTER=" "OMP launch did not bind the home-owned session pointer"
+  assert_contains "$launch" "$HOME_DIR/state/.omp-session" "OMP launch did not retain the home-owned session pointer path"
+  assert_contains "$launch" "/bin/bash -c" \
+    "OMP launch did not use its Bash-owned command wrapper"
+  # shellcheck disable=SC2016 # The literal expansion must never reach the pane shell.
+  assert_not_contains "$launch" '${PATH:+' \
+    "OMP launch exposed POSIX parameter expansion to the pane shell"
+  assert_not_contains "$launch" "'$TEST_OMP_BUN' '$TEST_OMP_BIN'" \
+    "OMP launch routed the selected executable through Bun"
+  assert_contains "$(cat "$LAUNCH_LOG")" "--session-dir" "OMP launch did not preserve its durable session directory"
+  assert_contains "$(cat "$LAUNCH_LOG")" "$HOME_DIR/state/omp-sessions" "OMP launch did not retain its durable session directory"
+  assert_contains "$(cat "$LAUNCH_LOG")" "$HOME_DIR/.omp/extensions/fm-primary-omp.ts" "OMP launch did not preserve its exact adapter"
   assert_not_contains "$(cat "$LAUNCH_LOG")" '__OMP' "OMP launch retained an unsubstituted template placeholder"
   assert_contains "$(cat "$MAIN_STATE/$TASK_ID.meta")" 'harness=omp' "OMP identity was not recorded exactly"
   assert_contains "$(cat "$MAIN_STATE/$TASK_ID.meta")" 'model=test/model' "OMP model pin was not recorded"
   assert_contains "$(cat "$MAIN_STATE/$TASK_ID.meta")" 'effort=low' "OMP thinking pin was not recorded"
   assert_contains "$(cat "$MAIN_STATE/$TASK_ID.meta")" 'prewalk_into=test/finish:xhigh' "OMP Prewalk target was not recorded"
-  assert_contains "$(cat "$LAUNCH_LOG")" "--prewalk --prewalk-into='test/finish:xhigh'" \
-    "OMP secondmate launch did not enable its exact native Prewalk target"
+  assert_contains "$launch" "--prewalk" \
+    "OMP secondmate launch did not enable native Prewalk"
+  assert_contains "$launch" "test/finish:xhigh" \
+    "OMP secondmate launch did not preserve its exact native Prewalk target"
   [ -d "$HOME_DIR/state/omp-sessions" ] || fail "durable OMP session directory was not created in the secondmate home"
 
   selected="$HOME_DIR/state/omp-sessions/selected.jsonl"
@@ -461,8 +511,12 @@ test_launch_and_exact_resume() {
   rm -f "$WINDOW_FLAG" "$HOME_DIR/state/.omp-primary-extension-loaded" "$HOME_DIR/state/.lock"
   : > "$LAUNCH_LOG"
   out=$(run_spawn 2>&1) || fail "OMP secondmate exact resume failed: $out"
-  assert_contains "$(cat "$LAUNCH_LOG")" "--resume '$selected'" "OMP recovery did not resume the manifest-bound exact session"
-  assert_contains "$(cat "$LAUNCH_LOG")" "--prewalk --prewalk-into='test/finish:xhigh'" \
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--resume" "OMP recovery did not request session resume"
+  assert_contains "$launch" "$selected" "OMP recovery did not resume the manifest-bound exact session"
+  assert_contains "$launch" "--prewalk" \
+    "OMP secondmate recovery did not restore native Prewalk"
+  assert_contains "$launch" "test/finish:xhigh" \
     "OMP secondmate recovery did not restore its recorded native Prewalk target"
   assert_not_contains "$(cat "$LAUNCH_LOG")" 'zzz-later.jsonl' "OMP recovery selected a lexically last session instead of the exact pointer"
 
@@ -482,6 +536,81 @@ test_launch_and_exact_resume() {
   assert_contains "$out" 'retained sessions but no exact session pointer' "unbound retained-session refusal was not actionable"
 
   pass "OMP secondmate launch and recovery use the isolated adapter and an exact home-owned session pointer"
+}
+
+test_rendered_legacy_launch_executes() {
+  local out exec_log omp_log
+  setup_case launch-exec
+  exec_log="$CASE/launch-exec.log"
+  omp_log="$CASE/omp-exec.log"
+  out=$(run_spawn \
+    FM_TEST_EXECUTE_LAUNCH=1 \
+    FM_TEST_LAUNCH_EXEC_LOG="$exec_log" \
+    FM_TEST_OMP_EXEC_LOG="$omp_log" 2>&1) \
+    || fail "rendered legacy OMP launch failed during execution: $out"
+  [ -s "$omp_log" ] || fail "rendered legacy OMP launch did not execute the selected entrypoint"
+  [ "$(sed -n '1p' "$omp_log")" = "$TEST_OMP_BIN" ] \
+    || fail "rendered legacy OMP launch executed the wrong entrypoint"
+  [ "$(sed -n '2p' "$omp_log")" = "$TEST_OMP_BUN" ] \
+    || fail "rendered legacy OMP launch did not bind its selected Bun runtime"
+  [ "$(sed -n '3p' "$omp_log")" = "$TEST_OMP_BIN" ] \
+    || fail "rendered legacy OMP launch did not preserve the standalone identity binding"
+  pass "rendered legacy OMP launch executes directly with its bound runtime"
+}
+
+test_legacy_launch_rejects_empty_path_components() {
+  local saved_base_path=$BASE_PATH safe_path path_form out hostile hostile_ran exec_log omp_log
+  safe_path=${BASE_PATH:-/usr/bin:/bin}
+  for path_form in leading trailing middle; do
+    setup_case "unsafe-path-$path_form"
+    hostile="$CASE/hostile-cwd"
+    hostile_ran="$CASE/hostile-bun-ran"
+    exec_log="$CASE/launch-exec.log"
+    omp_log="$CASE/omp-exec.log"
+    mkdir -p "$hostile"
+    cat > "$hostile/bun" <<'SH'
+#!/bin/sh
+: > "$FM_TEST_HOSTILE_BUN_RAN"
+exit 42
+SH
+    chmod +x "$hostile/bun"
+    case "$path_form" in
+      leading) BASE_PATH=":$safe_path" ;;
+      trailing) BASE_PATH="$safe_path:" ;;
+      middle) BASE_PATH="$safe_path::$safe_path" ;;
+    esac
+    if out=$(run_spawn \
+      FM_TEST_EXECUTE_LAUNCH=1 \
+      FM_TEST_LAUNCH_CWD="$hostile" \
+      FM_TEST_LAUNCH_EXEC_LOG="$exec_log" \
+      FM_TEST_OMP_EXEC_LOG="$omp_log" \
+      FM_TEST_HOSTILE_BUN_RAN="$hostile_ran" 2>&1); then
+      fail "OMP launch accepted an inherited $path_form PATH with an empty component: $out"
+    fi
+    [ ! -e "$omp_log" ] || fail "unsafe OMP launch with $path_form PATH executed OMP before refusing"
+    [ ! -e "$exec_log" ] || fail "PATH safety case with $path_form PATH submitted a launch before refusing"
+    [ ! -e "$hostile_ran" ] || fail "unsafe OMP launch with $path_form PATH executed hostile ./bun"
+  done
+  BASE_PATH=$saved_base_path
+  pass "OMP rejects inherited PATH empty components before legacy launch execution"
+}
+
+test_legacy_launch_rejects_runtime_fallback() {
+  local out exec_log omp_log
+  setup_case runtime-fallback
+  exec_log="$CASE/launch-exec.log"
+  omp_log="$CASE/omp-exec.log"
+  if out=$(run_spawn \
+    FM_TEST_EXECUTE_LAUNCH=1 \
+    FM_TEST_REMOVE_OMP_BUN_BEFORE_EXEC=1 \
+    FM_TEST_OMP_BUN_LOOKUP="$FAKEBIN/bun" \
+    FM_TEST_LAUNCH_EXEC_LOG="$exec_log" \
+    FM_TEST_OMP_EXEC_LOG="$omp_log" 2>&1); then
+    fail "OMP launch succeeded after its recorded Bun disappeared: $out"
+  fi
+  [ -e "$exec_log" ] || fail "runtime fallback case did not execute the rendered launch"
+  [ ! -e "$omp_log" ] || fail "OMP launched after its recorded Bun disappeared"
+  pass "OMP refuses a missing recorded Bun before direct legacy execution"
 }
 
 test_duplicate_recovery_states() {
@@ -592,5 +721,8 @@ test_stale_omp_runtime_cleanup() {
 test_stale_omp_runtime_cleanup
 test_herdr_launch_exact_resume_recovery_and_abort
 test_launch_and_exact_resume
+test_rendered_legacy_launch_executes
+test_legacy_launch_rejects_empty_path_components
+test_legacy_launch_rejects_runtime_fallback
 test_duplicate_recovery_states
 test_post_meta_abort_preserves_home

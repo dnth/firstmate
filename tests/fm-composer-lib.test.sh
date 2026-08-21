@@ -128,6 +128,88 @@ test_real_text_is_pending() {
   pass "fm_composer_classify_content: real unsubmitted text reads pending (including a popup argument-hint fill)"
 }
 
+assert_standalone_width_expected() {
+  local runtime=$1 label=$2 expected=$3 row=$4 actual
+  actual=$(fm_composer_terminal_width "$row" "$runtime" "$runtime") \
+    || fail "standalone width failed for $label"
+  [ "$actual" = "$expected" ] \
+    || fail "standalone width for $label was $actual, expected $expected"
+}
+
+assert_standalone_width_matches_bun() {
+  local bun=$1 label=$2 row=$3 expected actual
+  expected=$("$bun" -e 'process.stdout.write(String(Bun.stringWidth(process.argv[1])))' "$row")
+  actual=$(fm_composer_terminal_width "$row" "$bun" "$bun") \
+    || fail "standalone width failed for $label"
+  [ "$actual" = "$expected" ] \
+    || fail "standalone width for $label was $actual, Bun.stringWidth returned $expected"
+}
+
+test_standalone_width_has_fixed_unicode_contract() {
+  local node_bin case_spec label expected row
+  node_bin=$(command -v node 2>/dev/null) || fail "standalone width contract requires node"
+  local cases=(
+    $'VS15 text presentation\t1\t❤︎'
+    $'VS16 emoji presentation\t2\t❤️'
+    $'digit plus VS16\t1\t0️'
+    $'unqualified keycap\t2\t1⃣'
+    $'qualified keycap\t2\t1️⃣'
+    $'combining mark\t1\té'
+    $'bare ZWJ\t0\t‍'
+    $'dangling emoji ZWJ\t2\t❤‍'
+    $'lone regional indicator\t1\t🇮'
+    $'regional-indicator flag\t2\t🇮🇳'
+    $'emoji modifier base\t2\t✍🏻'
+    $'valid emoji modifier\t2\t👍🏻'
+    $'invalid ASCII modifier\t3\ta🏻'
+    $'CJK\t2\t界'
+    $'decomposed Hangul Jamo\t3\t하'
+    $'precomposed Hangul plus trailing Jamo\t3\t각'
+    $'genuine family ZWJ emoji\t2\t👩‍👩‍👧‍👦'
+    $'Unicode 17 unassigned emoji candidate\t1\t🫩'
+    $'OMP status row\t55\t╭── ⬢ GPT-5.6-Luna · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
+  )
+  for case_spec in "${cases[@]}"; do
+    IFS=$'\t' read -r label expected row <<< "$case_spec"
+    assert_standalone_width_expected "$node_bin" "$label" "$expected" "$row"
+  done
+  pass "standalone width has deterministic compiled-OMP-compatible Unicode fixtures"
+}
+
+test_standalone_width_matches_bun_for_unicode_graphemes() {
+  local bun case_spec label row
+  if ! bun=$(command -v bun 2>/dev/null); then
+    pass "optional standalone width parity skipped because bun is unavailable"
+    return
+  fi
+  local cases=(
+    $'VS15 text presentation\t❤︎'
+    $'VS16 emoji presentation\t❤️'
+    $'digit plus VS16\t0️'
+    $'unqualified keycap\t1⃣'
+    $'qualified keycap\t1️⃣'
+    $'combining mark\té'
+    $'bare ZWJ\t‍'
+    $'dangling emoji ZWJ\t❤‍'
+    $'lone regional indicator\t🇮'
+    $'regional-indicator flag\t🇮🇳'
+    $'emoji modifier base\t✍🏻'
+    $'valid emoji modifier\t👍🏻'
+    $'invalid ASCII modifier\ta🏻'
+    $'CJK\t界'
+    $'decomposed Hangul Jamo\t하'
+    $'precomposed Hangul plus trailing Jamo\t각'
+    $'genuine family ZWJ emoji\t👩‍👩‍👧‍👦'
+    $'Unicode 17 unassigned emoji candidate\t🫩'
+    $'OMP status row\t╭── ⬢ GPT-5.6-Luna · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
+  )
+  for case_spec in "${cases[@]}"; do
+    IFS=$'\t' read -r label row <<< "$case_spec"
+    assert_standalone_width_matches_bun "$bun" "$label" "$row"
+  done
+  pass "standalone width matches installed Bun.stringWidth for Unicode fixtures and the OMP status row"
+}
+
 test_bare_shell_glyphs_are_unknown
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
@@ -137,3 +219,5 @@ test_empty_content_is_empty
 test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
+test_standalone_width_has_fixed_unicode_contract
+test_standalone_width_matches_bun_for_unicode_graphemes

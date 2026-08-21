@@ -55,8 +55,8 @@ fm_backend_tmux_send_key() {  # <target> <key>
 # submit with Enter, retried (Enter only, never retyped) until the composer
 # clears. Re-exports fm_tmux_submit_core (bin/fm-tmux-lib.sh) verbatim; see
 # that file for the composer-verification contract and echoed verdicts.
-fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [harness] [canonical-omp-bun] [turnstart-setup]
-  fm_tmux_submit_core "$1" "$2" "$3" "$4" "$5" "${7:-}" "${8:-}" "${9:-}"
+fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [harness] [runtime] [omp] [turnstart-setup]
+  fm_tmux_submit_core "$1" "$2" "$3" "$4" "$5" "${7:-}" "${8:-}" "${9:-}" "${10:-}"
 }
 
 # fm_backend_tmux_container_ensure: reuse the current tmux session when
@@ -223,10 +223,16 @@ fm_backend_tmux_agent_state() {  # <target> [bun-realpath] [omp-realpath]
   }
   comm=${comm#-}
   case "$comm" in
+    zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'dead'; return 0 ;;
+    '') printf 'unreadable'; return 0 ;;
+  esac
+  if [ -n "$expected_bun" ] && [ "$expected_bun" = "$expected_omp" ]; then
+    fm_backend_tmux_bun_agent_state "$target" "$comm" "$expected_bun" "$expected_omp"
+    return 0
+  fi
+  case "$comm" in
     *claude*|*codex*|*opencode*|*grok*|*kimi*|pi|pi-signed|pi-launcher|Pi) printf 'alive' ;;
-    bun|omp) fm_backend_tmux_bun_agent_state "$target" "$comm" "$expected_bun" "$expected_omp" ;;
-    zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'dead' ;;
-    '') printf 'unreadable' ;;
+    bun|omp|cli.js) fm_backend_tmux_bun_agent_state "$target" "$comm" "$expected_bun" "$expected_omp" ;;
     *) printf 'ambiguous' ;;
   esac
 }

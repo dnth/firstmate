@@ -480,6 +480,7 @@ if [ "$TARGET_BACKEND" = remote ] && fm_runpod_is_dormant "$DATA" "$TARGET_REMOT
 fi
 
 TARGET_OMP_BUN=
+TARGET_OMP_BIN=
 if [ "$TARGET_HARNESS" = omp ]; then
   if [ "$TARGET_BACKEND" != remote ]; then
     if [ -z "$TARGET_META" ] \
@@ -493,6 +494,7 @@ if [ "$TARGET_HARNESS" = omp ]; then
       exit 1
     fi
     TARGET_OMP_BUN=$FM_BACKEND_AGENT_OMP_BUN
+    TARGET_OMP_BIN=$FM_BACKEND_AGENT_OMP_BIN
   fi
 fi
 
@@ -660,7 +662,7 @@ else
         *) verdict=send-failed ;;
       esac
     fi
-  elif verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL" "$TARGET_HARNESS" "$TARGET_OMP_BUN" "$turnstart_setup"); then
+  elif verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL" "$TARGET_HARNESS" "$TARGET_OMP_BUN" "$TARGET_OMP_BIN" "$turnstart_setup"); then
     :
   else
     send_rc=$?

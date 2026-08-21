@@ -214,7 +214,7 @@ SH
 printf 'n%s\n' '$actual_bun'
 SH
   chmod +x "$fb/ps" "$fb/lsof"
-  top='╭── ⬢ GPT-5.6-Sol++ · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
+  top='╭── ⬢ GPT-5.6-Luna · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
   width=$("$actual_bun" -e 'process.stdout.write(String(Bun.stringWidth(process.argv[1])))' "$top")
   printf '%s\n' "$top" > "$capture"
   printf '╰─%-*s─╯\n' "$((width - 4))" ' ' >> "$capture"

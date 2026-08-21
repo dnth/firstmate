@@ -161,7 +161,7 @@ test_queued_secondmate_target_confirms_delivery() {
   printf '#!/usr/bin/env bash\nexit 0\n' > "$omp"
   chmod +x "$omp"
   omp=$(fm_test_realpath "$omp")
-  top='╭── ⬢ GPT-5.6-Sol++ · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
+  top='╭── ⬢ GPT-5.6-Luna · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
   width=$(fm_composer_terminal_width "$top" "$actual_bun") \
     || fail "could not measure queued secondmate fixture"
   {
@@ -172,7 +172,8 @@ test_queued_secondmate_target_confirms_delivery() {
   cat > "$fb/ps" <<SH
 #!/usr/bin/env bash
 case "\$*" in
-  *tpgid=*) printf '4242\n' ;;
+  *tpgid=*) printf '999999\n' ;;
+  *comm=*) printf 'bun\n' ;;
   *args=*) printf '%s %s --auto-approve\n' '$actual_bun' '$omp' ;;
 esac
 SH

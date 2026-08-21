@@ -31,7 +31,7 @@
 
 install_remote_herdr_fixture() { # <remote-root> <state> <log> <send-fail> <socket>
   local remote_root=$1 state=$2 log=$3 send_fail=$4 socket=$5 script="$1/bin/herdr"
-  local omp_ack_pid=${6:-} omp_bun=${7:-} omp_bin=${8:-}
+  local omp_ack_pid=${6:-} omp_bun=${7:-} omp_bin=${8:-} real_ps ps_fixture
   mkdir -p "$remote_root/bin"
   cat > "$script" <<SH
 #!/usr/bin/env bash
@@ -47,6 +47,24 @@ SH
 printf '%s\n' "$*" >> "$LOG"
 jq_state() { jq "$@" "$STATE"; }
 save() { tmp="$STATE.tmp.$$"; cat > "$tmp" && mv "$tmp" "$STATE"; }
+publish_omp_ack() { # <pane> <launch>
+  local pane=$1 launch=$2 cwd session version
+  [ -n "$OMP_ACK_PID" ] && [ -n "$OMP_BUN" ] && [ -n "$OMP_BIN" ] || return 0
+  case "$launch" in
+    *FM_OMP_SESSION_POINTER=*)
+      cwd=$(jq_state -r --arg p "$pane" '.tabs[] | select(.pane_id == $p) | .cwd // empty')
+      [ -n "$cwd" ] || return 1
+      mkdir -p "$cwd/state/omp-sessions"
+      session="$cwd/state/omp-sessions/selected.jsonl"
+      printf '{"type":"session"}\n' > "$session"
+      printf '%s\n' "$session" > "$cwd/state/.omp-session"
+      version=$(bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_primary_watch_version "$1/.omp/extensions/fm-primary-omp.ts" "$1"' _ "$cwd")
+      printf '%s\n%s\n%s\n%s\n' "$version" "$OMP_ACK_PID" "$OMP_BUN" "$OMP_BIN" \
+        > "$cwd/state/.omp-primary-extension-loaded"
+      printf '%s\n' "$OMP_ACK_PID" > "$cwd/state/.lock"
+      ;;
+  esac
+}
 ws=""; label=""; cwd=""
 args=("$@")
 for ((i=0; i<${#args[@]}; i++)); do
@@ -100,31 +118,26 @@ case "${1:-} ${2:-}" in
     [ ! -f "$SEND_FAIL" ] || exit 1
     jq_state --arg p "${3:-}" --arg text "${4:-}" \
       '.typed[$p] = true | .launch[$p] = $text' | save ;;
+  "pane run")
+    [ ! -f "$SEND_FAIL" ] || exit 1
+    pane=${3:-}; launch=${4:-}
+    jq_state --arg p "$pane" --arg text "$launch" \
+      '.typed[$p] = true | .launch[$p] = $text | .working[$p] = true' | save
+    publish_omp_ack "$pane" "$launch"
+    ;;
   "pane send-keys")
     [ ! -f "$SEND_FAIL" ] || exit 1
     pane=${3:-}
     jq_state --arg p "$pane" '.typed[$p] = true | .working[$p] = true' | save
     launch=$(jq_state -r --arg p "$pane" '.launch[$p] // ""')
-    if [ "${4:-}" = enter ] && [ -n "$OMP_ACK_PID" ] \
-       && [ -n "$OMP_BUN" ] && [ -n "$OMP_BIN" ]; then
-      case "$launch" in
-        *FM_OMP_SESSION_POINTER=*)
-          cwd=$(jq_state -r --arg p "$pane" '.tabs[] | select(.pane_id == $p) | .cwd // empty')
-          [ -n "$cwd" ] || exit 1
-          mkdir -p "$cwd/state/omp-sessions"
-          session="$cwd/state/omp-sessions/selected.jsonl"
-          printf '{"type":"session"}\n' > "$session"
-          printf '%s\n' "$session" > "$cwd/state/.omp-session"
-          version=$(bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_primary_watch_version "$1/.omp/extensions/fm-primary-omp.ts" "$1"' _ "$cwd")
-          printf '%s\n%s\n%s\n%s\n' "$version" "$OMP_ACK_PID" "$OMP_BUN" "$OMP_BIN" \
-            > "$cwd/state/.omp-primary-extension-loaded"
-          printf '%s\n' "$OMP_ACK_PID" > "$cwd/state/.lock"
-          ;;
-      esac
+    if [ "${4:-}" = enter ]; then
+      publish_omp_ack "$pane" "$launch"
     fi
     ;;
   "pane read") printf '\n' ;;
-  "pane process-info") printf '{"result":{"process":{"name":"codex"}}}\n' ;;
+  "pane process-info")
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":987654,"foreground_process_group_id":987654,"foreground_processes":[{"pid":987654,"name":"fish","argv0":"fish"}]}}}\n' "${4:-${3:-}}"
+    ;;
   "agent get")
     pane=${3:-}
     if [ "$(jq_state -r --arg p "$pane" '.working[$p] // false')" = true ]; then
@@ -142,6 +155,21 @@ esac
 exit 0
 SH
   chmod +x "$script"
+  real_ps=$(command -v ps) || return 1
+  ps_fixture="$remote_root/bin/ps"
+  cat > "$ps_fixture" <<SH
+#!/usr/bin/env bash
+REAL_PS='$real_ps'
+case "\$*" in
+  "-axo pid=,ppid=")
+    "\$REAL_PS" "\$@"
+    printf '%s\n' '987654 1'
+    ;;
+  "-p 987654 -o stat=") printf '%s\n' 'S' ;;
+  *) exec "\$REAL_PS" "\$@" ;;
+esac
+SH
+  chmod +x "$ps_fixture"
   reset_remote_herdr_fixture "$state"
 }
 

@@ -137,7 +137,7 @@ test_busy_omp_mixed_enter_transport_retains_queued_delivery() {
   attempts="$dir/attempts.log"
   vfile="$dir/verdict"
   bun=$(command -v bun)
-  top='╭── ⬢ GPT-5.6-Sol++ · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
+  top='╭── ⬢ GPT-5.6-Luna · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
   width=$(fm_composer_terminal_width "$top" "$bun") \
     || fail "could not measure mixed Enter fixture width"
   printf '%s\n' "$top" > "$composer"
@@ -266,7 +266,7 @@ test_omp_composer_and_submission_use_verified_two_row_structure() {
   sent="$dir/sent.log"
   vfile="$dir/verdict"
   : > "$sent"
-  top='╭── ⬢ GPT-5.6-Sol++ · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
+  top='╭── ⬢ GPT-5.6-Luna · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
   width=$(fm_composer_terminal_width "$top" "$bun") \
     || fail "could not measure OMP fixture width"
 
@@ -310,6 +310,52 @@ test_omp_composer_and_submission_use_verified_two_row_structure() {
   pass "OMP tmux composer keeps queued busy submits separate from unsubmitted input"
 }
 
+test_standalone_omp_composer_uses_shell_width_boundary() {
+  local dir fakebin composer standalone called top width vfile bun legacy_width locale_name utility
+  dir="$TMP_ROOT/omp-standalone-composer"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  standalone="$dir/omp"
+  called="$dir/omp-called"
+  vfile="$dir/verdict"
+  cat > "$standalone" <<SH
+#!/usr/bin/env bash
+: > '$called'
+exit 1
+SH
+  chmod +x "$standalone"
+  for utility in fold wc; do
+    cat > "$fakebin/$utility" <<'SH'
+#!/usr/bin/env bash
+exit 64
+SH
+    chmod +x "$fakebin/$utility"
+  done
+  top='╭── ⬢ GPT-5.6-Luna · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
+  if bun=$(command -v bun 2>/dev/null); then
+    legacy_width=$(LC_ALL=C fm_composer_terminal_width "$top" "$bun") \
+      || fail "legacy Bun width boundary could not measure the structural row"
+  fi
+  for locale_name in C POSIX; do
+    width=$(PATH="$fakebin:$PATH" LC_ALL="$locale_name" fm_composer_terminal_width "$top" "$standalone" "$standalone") \
+      || fail "standalone OMP width boundary could not measure the structural row without fold or wc under $locale_name"
+    [ -z "${legacy_width:-}" ] || [ "$width" = "$legacy_width" ] \
+      || fail "standalone width boundary disagreed with Bun under $locale_name: $width vs $legacy_width"
+  done
+  width=$(PATH="$fakebin:$PATH" LC_ALL=C fm_composer_terminal_width "$top" "$standalone" "$standalone") \
+    || fail "standalone OMP width boundary could not measure the structural row without fold or wc"
+  {
+    printf '%s\n' "$top"
+    printf '╰─%-*s─╯\n' "$((width - 4))" ' '
+  } > "$composer"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" \
+    fm_tmux_composer_state omp omp "$standalone" "$standalone" > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = empty ] \
+    || fail "standalone OMP composer should classify matching shell-width rows as empty, got '$(cat "$vfile")'"
+  [ ! -e "$called" ] || fail "standalone OMP composer passed the extension -e option to the compiled executable"
+  pass "standalone OMP composer measures width without invoking the compiled executable"
+}
+
 test_omp_idle_to_busy_preserved_and_busy_without_queue_fails_closed() {
   local dir fakebin composer busy_marker vfile
   dir="$TMP_ROOT/omp-idle-to-busy"
@@ -349,7 +395,7 @@ test_omp_busy_signature_is_exact_and_scoped() {
     || fail "live OMP Running-tool capture should classify busy"
   printf ' ⠦ Waiting thirty seconds ⟦esc⟧\n' | fm_busy_lines_match omp \
     || fail "live OMP Waiting-tool capture should classify busy"
-  printf '╭── ⬢ GPT-5.6-Sol++ · ◔ low ▶ 🌳 project/worker-wt ▶ ⑂ fm/omp-live-worker ▶────╮\n' \
+  printf '╭── ⬢ GPT-5.6-Luna · ◔ low ▶ 🌳 project/worker-wt ▶ ⑂ fm/omp-live-worker ▶────╮\n' \
     | fm_busy_lines_match omp \
     && fail "live OMP idle status bar must not classify busy"
   printf 'Working...\n' | fm_busy_lines_match omp \
@@ -452,6 +498,7 @@ test_busy_pane_unknown_stays_unknown
 test_busy_pane_ambiguous_pending_retries_without_conversion
 test_unrecognized_state_skips_busy_conversion
 test_omp_composer_and_submission_use_verified_two_row_structure
+test_standalone_omp_composer_uses_shell_width_boundary
 test_omp_idle_to_busy_preserved_and_busy_without_queue_fails_closed
 test_omp_busy_signature_is_exact_and_scoped
 test_claude_busy_signature_uses_real_capture_shapes

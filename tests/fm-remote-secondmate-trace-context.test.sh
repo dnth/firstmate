@@ -44,10 +44,9 @@ trap 'FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" "$ROOT/bin/fm-proceven
 ) | (cd "$REMOTE_ROOT" && tar -xf -)
 
 # The remote host runs the Herdr fixture, whose every invocation is logged
-# verbatim, so the pre-launch `export TRACEPARENT=` line and the launch
-# literal's FM_TRACE_CONTEXT prefix are both observable exactly as the pane
-# received them. The tmux fixture below only keeps the remote home's own
-# non-second-mate tooling resolvable.
+# verbatim, so the launch-bound TRACEPARENT and FM_TRACE_CONTEXT values are
+# observable exactly as the pane received them. The tmux fixture below only
+# keeps the remote home's own non-second-mate tooling resolvable.
 cat > "$REMOTE_ROOT/bin/tmux" <<SH
 #!/usr/bin/env bash
 set -u
@@ -164,9 +163,9 @@ freeze_parent_session() {
   )
 }
 
-# What the remote pane actually received, read back from the remote tmux log.
+# What the remote pane actually received, read back from the Herdr command log.
 remote_injected_traceparent() {
-  sed -n 's/.*export TRACEPARENT=\([0-9a-f-]*\).*/\1/p' "$HERDR_LOG" | tail -1
+  sed -n "s/.*TRACEPARENT='\\([0-9a-f-]*\\)'.*/\\1/p" "$HERDR_LOG" | tail -1
 }
 remote_launch_snapshot() {
   grep -o 'FM_TRACE_CONTEXT=[a-z]*' "$HERDR_LOG" | tail -1 | cut -d= -f2
@@ -187,14 +186,14 @@ remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null 2>&1 \
 assert_present "$PARENT/state/ios.meta" "default-off remote spawn published no parent metadata"
 ! grep -q '^traceparent=' "$PARENT/state/ios.meta" \
   || fail "default-off remote spawn must not record a traceparent= line"
-! grep -q 'export TRACEPARENT=' "$HERDR_LOG" \
-  || fail "default-off remote spawn must not export a carrier into the remote pane"
+! grep -q 'TRACEPARENT=' "$HERDR_LOG" \
+  || fail "default-off remote spawn must not bind a carrier to the remote launch"
 ! grep -q '^traceparent=' "$REMOTE_HOME/state/parent-route/ios.meta" \
   || fail "default-off remote spawn must not record a carrier on the remote host"
 [ "$(remote_launch_snapshot)" = off ] \
   || fail "default-off remote spawn must deliver FM_TRACE_CONTEXT=off (got '$(remote_launch_snapshot)')"
 assert_absent "$REMOTE_HOME/config/trace-context" "default-off remote spawn inherited an enablement flag"
-grep -q 'export GOTMPDIR=' "$HERDR_LOG" || fail "the remote spawn should still run (GOTMPDIR is always exported)"
+grep -q "GOTMPDIR='" "$HERDR_LOG" || fail "the remote spawn should still run (GOTMPDIR is always launch-bound)"
 pass "disabled: a remote-routed second mate records and receives no carrier and stays enabled-off end to end"
 
 # --- enabled: one carrier is recorded by the parent and received remotely ----
@@ -211,25 +210,19 @@ INJECTED_TP=$(remote_injected_traceparent)
 fm_trace_context_valid "$PARENT_TP" \
   || fail "an enabled remote spawn must record a valid carrier in the parent metadata (got '$PARENT_TP')"
 fm_trace_context_valid "$INJECTED_TP" \
-  || fail "an enabled remote spawn must export a valid carrier into the remote pane (got '$INJECTED_TP')"
+  || fail "an enabled remote spawn must bind a valid carrier to the remote launch (got '$INJECTED_TP')"
 [ "$PARENT_TP" = "$INJECTED_TP" ] \
-  || fail "the parent's recorded carrier and the remote pane's carrier must be identical (parent='$PARENT_TP' pane='$INJECTED_TP')"
+  || fail "the parent's recorded carrier and the remote launch carrier must be identical (parent='$PARENT_TP' pane='$INJECTED_TP')"
 [ "$REMOTE_TP" = "$PARENT_TP" ] \
   || fail "the remote endpoint record must carry the parent's identity (remote='$REMOTE_TP' parent='$PARENT_TP')"
 [ "$(remote_launch_snapshot)" = on ] \
   || fail "an enabled remote spawn must deliver FM_TRACE_CONTEXT=on (got '$(remote_launch_snapshot)')"
 assert_present "$REMOTE_HOME/config/trace-context" \
   "an enabled remote launch did not inherit the enablement flag into the remote home"
-GOTMP_LINE=$(grep -n 'export GOTMPDIR=' "$HERDR_LOG" | tail -1 | cut -d: -f1)
-TP_LINE=$(grep -n 'export TRACEPARENT=' "$HERDR_LOG" | tail -1 | cut -d: -f1)
-LAUNCH_LINE=$(grep -n 'FM_TRACE_CONTEXT=' "$HERDR_LOG" | tail -1 | cut -d: -f1)
-[ -n "$GOTMP_LINE" ] && [ -n "$TP_LINE" ] && [ -n "$LAUNCH_LINE" ] \
-  || fail "remote pane log missing GOTMPDIR/TRACEPARENT/launch lines"
-[ "$TP_LINE" -gt "$GOTMP_LINE" ] \
-  || fail "the remote TRACEPARENT export must ride the GOTMPDIR pre-launch site (gotmp=$GOTMP_LINE tp=$TP_LINE)"
-[ "$TP_LINE" -lt "$LAUNCH_LINE" ] \
-  || fail "the remote TRACEPARENT export must be sent before the launch command (tp=$TP_LINE launch=$LAUNCH_LINE)"
-pass "enabled: a remote-routed second mate receives one carrier in its pane, identical to the parent's recorded identity, before launch"
+ATOMIC_LAUNCH_LINE=$(grep -n "GOTMPDIR='.*TRACEPARENT='.*FM_TRACE_CONTEXT=" "$HERDR_LOG" | tail -1 | cut -d: -f1)
+[ -n "$ATOMIC_LAUNCH_LINE" ] \
+  || fail "remote pane log did not bind GOTMPDIR and TRACEPARENT to the atomic launch command"
+pass "enabled: a remote-routed second mate receives one launch-bound carrier identical to the parent's recorded identity"
 
 # --- relaunch stability on the remote path ----------------------------------
 reset_remote_herdr_fixture "$HERDR_STATE"
@@ -271,14 +264,14 @@ pass "boundary: each remote-routed second mate roots its own trace and never ado
 
 # --- quota selection belongs to the launch host and route echoes reality ----
 printf 'claude opus medium\n' > "$PARENT/config/secondmate-harness"
-printf 'codex gpt-5.6-sol high\n' > "$PARENT/config/secondmate-harness-fallback"
+printf 'codex gpt-5.6-luna high\n' > "$PARENT/config/secondmate-harness-fallback"
 printf 'fallback\n' > "$REMOTE_ROOT/.test-quota-mode"
 reset_remote_herdr_fixture "$HERDR_STATE"
 remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null 2>&1 \
   || fail "remote quota fallback spawn failed"
 [ "$(sed -n 's/^harness=//p' "$PARENT/state/ios.meta")" = codex ] \
   || fail "parent quota state overrode the remote launch host's fallback decision"
-[ "$(sed -n 's/^model=//p' "$PARENT/state/ios.meta")" = gpt-5.6-sol ] \
+[ "$(sed -n 's/^model=//p' "$PARENT/state/ios.meta")" = gpt-5.6-luna ] \
   || fail "parent did not record the model selected on the remote launch host"
 [ "$(sed -n 's/^secondmate_fallback_reason=//p' "$PARENT/state/ios.meta")" = provider_unavailable ] \
   || fail "parent did not record the remote launch host's fallback reason"
@@ -288,7 +281,7 @@ remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null 2>&1 \
   || fail "remote live-endpoint reuse failed"
 [ "$(sed -n 's/^harness=//p' "$PARENT/state/ios.meta")" = codex ] \
   || fail "live remote reuse misreported the requested harness instead of the running harness"
-[ "$(sed -n 's/^model=//p' "$PARENT/state/ios.meta")" = gpt-5.6-sol ] \
+[ "$(sed -n 's/^model=//p' "$PARENT/state/ios.meta")" = gpt-5.6-luna ] \
   || fail "live remote reuse misreported the requested model instead of the running model"
 [ "$(sed -n 's/^secondmate_model_source=//p' "$PARENT/state/ios.meta")" = fallback ] \
   || fail "live remote reuse lost the running endpoint's selection source"

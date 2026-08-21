@@ -585,20 +585,15 @@ fm_daemon_primary_harness() {
   printf '%s' "$FM_DAEMON_PRIMARY_HARNESS"
 }
 
-# supervisor_omp_bun: the launch-bound Bun of the LIVE OMP primary, re-read on
-# every use. The marker can be absent, unverifiable, or owned by another process
-# when the daemon starts and become valid (or change) later, so a value resolved
-# once at startup would strand every OMP composer probe without a Bun path -
-# every verdict unknown, every away-mode escalation deferred forever. Empty
-# output means "no proven OMP identity right now", which the OMP probes already
-# treat as unreadable.
-supervisor_omp_bun() {  # [state] -> canonical Bun path, empty when unprovable
-  local state=${1:-$(_state_root)} marker comm args bun=""
+# supervisor_omp_identity: the launch-bound OMP runtime and entrypoint of the
+# LIVE OMP primary, re-read on every use. Empty fields mean no proven identity.
+supervisor_omp_identity() {  # [state] -> runtime<TAB>entrypoint
+  local state=${1:-$(_state_root)} marker comm args bun="" omp=""
   # An explicit environment override stays authoritative (operator-supplied and
   # exercised by the live harness fixtures); it is never derived from a probe,
   # so it cannot go stale behind a failed resolution.
   if [ -n "${FM_SUPERVISOR_OMP_BUN:-}" ]; then
-    printf '%s' "$FM_SUPERVISOR_OMP_BUN"
+    printf '%s\t%s' "$FM_SUPERVISOR_OMP_BUN" "${FM_SUPERVISOR_OMP_BIN:-}"
     return 0
   fi
   [ "${FM_SUPERVISOR_HARNESS:-}" = omp ] || return 0
@@ -610,9 +605,16 @@ supervisor_omp_bun() {  # [state] -> canonical Bun path, empty when unprovable
        FM_OMP_PROCESS_EXPECTED_BIN=$FM_OMP_MARKER_BIN \
        fm_omp_process_matches "$comm" "$args" "$FM_OMP_MARKER_PID"; then
       bun=$FM_OMP_MARKER_BUN
+      omp=$FM_OMP_MARKER_BIN
     fi
   fi
-  printf '%s' "$bun"
+  printf '%s\t%s' "$bun" "$omp"
+}
+
+supervisor_omp_bun() {  # [state] -> canonical runtime path, empty when unprovable
+  local identity
+  identity=$(supervisor_omp_identity "${1:-$(_state_root)}")
+  printf '%s' "${identity%%$'\t'*}"
 }
 
 pane_is_busy() {  # <target> [backend]
@@ -631,8 +633,12 @@ pane_is_busy() {  # <target> [backend]
 # every verdict except exact empty as unsafe. inject_msg reads the full verdict
 # directly and applies the same positive-proof boundary.
 pane_input_pending() {  # <target> [backend]
-  local target=$1 backend=${2:-tmux}
-  [ "$(fm_backend_composer_state "$backend" "$target" "${FM_SUPERVISOR_HARNESS:-}" "$(supervisor_omp_bun)" 2>/dev/null)" != empty ]
+  local target=$1 backend=${2:-tmux} identity omp_bun omp_bin
+  identity=$(supervisor_omp_identity)
+  IFS=$'\t' read -r omp_bun omp_bin <<EOF
+$identity
+EOF
+  [ "$(fm_backend_composer_state "$backend" "$target" "${FM_SUPERVISOR_HARNESS:-}" "$omp_bun" "$omp_bin" 2>/dev/null)" != empty ]
 }
 
 task_window_backend() {  # <window> <state>
@@ -1147,7 +1153,7 @@ window_for_task() {  # <task-key> [state]
 #     line, or a previous injection's unsent text), defer entirely - injecting
 #     would merge with the human's text.
 inject_msg() {  # <message> [state]
-  local msg=$1 state target backend harness retries sleep_s verdict composer encoded omp_bun
+  local msg=$1 state target backend harness retries sleep_s verdict composer encoded omp_bun omp_bin identity
   state="${2:-$(_state_root)}"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
@@ -1182,8 +1188,11 @@ inject_msg() {  # <message> [state]
   #      target - typing the escalation into a shell could execute it - so defer
   #      on anything that is not affirmatively 'empty'. A deferred escalation
   #      stays buffered for the next cycle or the catch-up flush.
-  omp_bun=$(supervisor_omp_bun "$state")
-  composer=$(fm_backend_composer_state "$backend" "$target" "${FM_SUPERVISOR_HARNESS:-}" "$omp_bun" 2>/dev/null)
+  identity=$(supervisor_omp_identity "$state")
+  IFS=$'\t' read -r omp_bun omp_bin <<EOF
+$identity
+EOF
+  composer=$(fm_backend_composer_state "$backend" "$target" "${FM_SUPERVISOR_HARNESS:-}" "$omp_bun" "$omp_bin" 2>/dev/null)
   if [ "$composer" != empty ]; then
     log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
     return 1
@@ -1208,7 +1217,7 @@ inject_msg() {  # <message> [state]
   esac
   retries=${FM_INJECT_CONFIRM_RETRIES:-$INJECT_CONFIRM_RETRIES_DEFAULT}
   sleep_s=${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}
-  verdict=$(fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s" "" "$harness" "$omp_bun")
+  verdict=$(fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s" "" "$harness" "$omp_bun" "$omp_bin")
   if [ "$verdict" = empty ]; then
     return 0  # Backend confirmed the submit.
   fi

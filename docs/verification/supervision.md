@@ -115,6 +115,8 @@ ok - OMP omp/17.2.10 primary E2E proved watcher delivery with an intact editable
 
 The live guard observed the watcher wake in the OMP session and found the exact draft unchanged after delivery.
 
+Standalone OMP executable compatibility is recorded in [runtime backend verification](runtime-backends.md#omp-lifecycle).
+
 Current deterministic and live entry points:
 
 ```sh

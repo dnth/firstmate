@@ -11,11 +11,18 @@ fi
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=bin/fm-primary-watch-version-lib.sh
 . "$ROOT/bin/fm-primary-watch-version-lib.sh"
+# shellcheck source=bin/fm-omp-process-lib.sh
+. "$ROOT/bin/fm-omp-process-lib.sh"
 
 command -v omp >/dev/null 2>&1 || fail "OMP (version unavailable) binary not found"
 OMP_BIN=$("$ROOT/bin/fm-omp-capabilities.sh" --print-binary) || fail "OMP capability check failed"
 OMP_VERSION=$("$OMP_BIN" --version 2>&1 | head -1) || fail "OMP version probe failed for $OMP_BIN"
 [ -n "$OMP_VERSION" ] || fail "OMP version probe returned no version"
+OMP_BIN=$(fm_test_realpath "$OMP_BIN") || fail "OMP binary realpath could not be resolved"
+OMP_LAUNCH_IDENTITY=$(fm_omp_process_launch_identity "$OMP_BIN") \
+  || fail "OMP launch identity could not be resolved for $OMP_BIN"
+EXPECTED_OMP_BUN=$(printf '%s\n' "$OMP_LAUNCH_IDENTITY" | sed -n '1p')
+EXPECTED_OMP_BIN=$(printf '%s\n' "$OMP_LAUNCH_IDENTITY" | sed -n '2p')
 command -v tmux >/dev/null 2>&1 || fail "OMP $OMP_VERSION primary E2E requires tmux"
 REAL_TMUX=$(command -v tmux)
 export FM_POLL=${FM_POLL:-0.2}
@@ -40,6 +47,7 @@ cp "$ROOT/AGENTS.md" "$ROOT/.tasks.toml" "$PROJECT/"
 cp -R "$ROOT/bin" "$PROJECT/bin"
 cp -R "$ROOT/docs/supervision-protocols" "$PROJECT/docs/supervision-protocols"
 cp -R "$ROOT/.agents/skills/harness-adapters" "$PROJECT/.agents/skills/harness-adapters"
+cp -R "$ROOT/.agents/skills/afk" "$PROJECT/.agents/skills/afk"
 cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$PROJECT/.omp/extensions/fm-primary-omp.ts"
 git init -q -b main "$PROJECT"
 fm_git_identity fmtest fmtest@example.invalid
@@ -60,8 +68,8 @@ capture() {
 
 composer_state() {
   PATH="$WRAPPER_BIN:$PATH" bash -c \
-    '. "$1/bin/fm-backend.sh"; fm_backend_composer_state tmux "$2" omp "$3"' \
-    _ "$PROJECT" "$TARGET" "$(sed -n '3p' "$MARKER")"
+    '. "$1/bin/fm-backend.sh"; fm_backend_composer_state tmux "$2" omp "$3" "$4"' \
+    _ "$PROJECT" "$TARGET" "$(sed -n '3p' "$MARKER")" "$(sed -n '4p' "$MARKER")"
 }
 
 composer_text() {
@@ -165,16 +173,18 @@ wait_pid_change() {
 }
 
 submit_omp() {
-  local text=$1
+  local text=$1 bun bin
+  bun=$(sed -n '3p' "$MARKER")
+  bin=$(sed -n '4p' "$MARKER")
   PATH="$WRAPPER_BIN:$PATH" bash -c \
-    '. "$1/bin/fm-backend.sh"; fm_backend_send_text_submit tmux "$2" "$3" 5 0.2 2 "" omp' \
-    _ "$PROJECT" "$TARGET" "$text" >/dev/null
+    '. "$1/bin/fm-backend.sh"; fm_backend_send_text_submit tmux "$2" "$3" 5 0.2 2 "" omp "$4" "$5"' \
+    _ "$PROJECT" "$TARGET" "$text" "$bun" "$bin" >/dev/null
 }
 
 launch_omp() {
   local prompt=$1 command
   printf -v command \
-    "env FM_HOME=%q FM_ROOT_OVERRIDE=%q FM_STATE_OVERRIDE=%q FM_CONFIG_OVERRIDE=%q OMP_SKIP_SETUP=1 %q --model openai-codex/gpt-5.6-sol --thinking low --session-dir %q --auto-approve %q" \
+    "env FM_HOME=%q FM_ROOT_OVERRIDE=%q FM_STATE_OVERRIDE=%q FM_CONFIG_OVERRIDE=%q OMP_SKIP_SETUP=1 %q --model openai-codex/gpt-5.6-luna --thinking low --session-dir %q --auto-approve %q" \
     "$HOME_DIR" "$PROJECT" "$HOME_DIR/state" "$HOME_DIR/config" "$OMP_BIN" "$SESSION_DIR" "$prompt"
   PATH="$WRAPPER_BIN:$PATH" tmux send-keys -t "$TARGET" -l "$command"
   PATH="$WRAPPER_BIN:$PATH" tmux send-keys -t "$TARGET" Enter
@@ -192,7 +202,7 @@ git init -q -b main "$FALLBACK_PROJECT"
 git -C "$FALLBACK_PROJECT" add .
 git -C "$FALLBACK_PROJECT" commit -qm init
 PATH="$WRAPPER_BIN:$PATH" tmux new-session -d -s fallback -n omp -c "$FALLBACK_PROJECT" \
-  "env FM_HOME='$FALLBACK_HOME' FM_ROOT_OVERRIDE='$FALLBACK_PROJECT' FM_CONFIG_OVERRIDE='$FALLBACK_HOME/config' OMP_SKIP_SETUP=1 '$OMP_BIN' --model openai-codex/gpt-5.6-sol --thinking low --session-dir '$FALLBACK_SESSIONS'"
+  "env FM_HOME='$FALLBACK_HOME' FM_ROOT_OVERRIDE='$FALLBACK_PROJECT' FM_CONFIG_OVERRIDE='$FALLBACK_HOME/config' OMP_SKIP_SETUP=1 '$OMP_BIN' --model openai-codex/gpt-5.6-luna --thinking low --session-dir '$FALLBACK_SESSIONS'"
 wait_file_nonempty "$FALLBACK_HOME/state/.omp-primary-extension-loaded" \
   || fail "fresh plain-checkout OMP primary extension did not create state and load"
 fallback_pid=$(sed -n '2p' "$FALLBACK_HOME/state/.omp-primary-extension-loaded")
@@ -223,10 +233,10 @@ first_omp_pid=$(sed -n '2p' "$MARKER")
 expected_version=$(hash_file "$PROJECT/.omp/extensions/fm-primary-omp.ts" "$PROJECT")
 [ "$(head -n 1 "$MARKER")" = "$expected_version" ] || fail "OMP loaded marker was not tied to the adapter version"
 [ "$(wc -l < "$MARKER" | tr -d '[:space:]')" = 4 ] || fail "OMP loaded marker omitted executable identity"
-[ "$(sed -n '3p' "$MARKER")" = "$(fm_test_realpath "$(command -v bun)")" ] \
-  || fail "OMP loaded marker did not bind the Bun realpath"
-[ "$(sed -n '4p' "$MARKER")" = "$(fm_test_realpath "$OMP_BIN")" ] \
-  || fail "OMP loaded marker did not bind the selected OMP realpath"
+[ "$(sed -n '3p' "$MARKER")" = "$EXPECTED_OMP_BUN" ] \
+  || fail "OMP loaded marker did not bind the resolved runtime identity"
+[ "$(sed -n '4p' "$MARKER")" = "$EXPECTED_OMP_BIN" ] \
+  || fail "OMP loaded marker did not bind the selected OMP entrypoint identity"
 FM_STATE_OVERRIDE="$HOME_DIR/state" bash -c \
   '. "$1/bin/fm-session-lock-lib.sh"; fm_harness_pid_alive "$2"' _ "$PROJECT" "$first_omp_pid" \
   || fail "real OMP process-title identity did not satisfy the exact Bun argv boundary"
@@ -268,7 +278,7 @@ kill -0 "$second_watch_pid" 2>/dev/null && fail "OMP shutdown left its watcher g
 
 resume_prompt="Follow the injected Firstmate startup instruction exactly once after this resume. Then run this exact bash command: bin/fm-harness.sh > '$LAB/resume-harness'. Call the fm_watch_arm_omp tool exactly once. Reply exactly OMP_RESUME_READY."
 printf -v resume_command \
-  "env FM_HOME=%q FM_ROOT_OVERRIDE=%q FM_STATE_OVERRIDE=%q FM_CONFIG_OVERRIDE=%q OMP_SKIP_SETUP=1 %q --model openai-codex/gpt-5.6-sol --thinking low --session-dir %q --resume %q --auto-approve %q" \
+  "env FM_HOME=%q FM_ROOT_OVERRIDE=%q FM_STATE_OVERRIDE=%q FM_CONFIG_OVERRIDE=%q OMP_SKIP_SETUP=1 %q --model openai-codex/gpt-5.6-luna --thinking low --session-dir %q --resume %q --auto-approve %q" \
   "$HOME_DIR" "$PROJECT" "$HOME_DIR/state" "$HOME_DIR/config" "$OMP_BIN" "$SESSION_DIR" "$session_file" "$resume_prompt"
 PATH="$WRAPPER_BIN:$PATH" tmux send-keys -t "$TARGET" -l "$resume_command"
 PATH="$WRAPPER_BIN:$PATH" tmux send-keys -t "$TARGET" Enter
@@ -290,6 +300,7 @@ PATH="$WRAPPER_BIN:$PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$PROJECT" \
   FM_STATE_OVERRIDE="$HOME_DIR/state" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
   FM_SUPERVISOR_TARGET="$TARGET" FM_SUPERVISOR_BACKEND=tmux \
   FM_SUPERVISOR_HARNESS=omp FM_SUPERVISOR_OMP_BUN="$(sed -n '3p' "$MARKER")" \
+  FM_SUPERVISOR_OMP_BIN="$(sed -n '4p' "$MARKER")" \
   FM_INJECT_CONFIRM_RETRIES=5 FM_INJECT_CONFIRM_SLEEP=0.2 \
   bash -c '. "$1/bin/fm-supervise-daemon.sh"; inject_msg "OMP_AWAY_DELIVERY" "$2"' \
     _ "$PROJECT" "$HOME_DIR/state" \

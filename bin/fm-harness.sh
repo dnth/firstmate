@@ -41,13 +41,14 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # no match, so a foreign harness nested inside an OMP tree (an agent started
 # from OMP's bash tool) keeps its own identity instead of inheriting the OMP
 # marker from further up the chain.
-# Two evidence modes. `exact` requires the launch-bound Bun and OMP realpaths
+# Two evidence modes. `exact` requires the launch-bound runtime and OMP realpaths
 # published by the native primary (env pair or the loaded marker bound to the
-# PID). `launch-shape` proves only that the innermost harness ancestor is an
-# OMP process launched the way firstmate launches one - absolute Bun executable
-# followed by an absolute `omp` entrypoint - which is the evidence a spawned OMP
-# worker's own tree carries; it never runs on its own, only to qualify the
-# inherited FM_OMP_HARNESS launch-boundary marker.
+# PID); standalone OMP publishes the same executable in both paths.
+# `launch-shape` proves only that the innermost harness ancestor is a legacy
+# Bun-script OMP process launched the way firstmate launches one - an absolute
+# Bun executable followed by an absolute `omp` entrypoint - which is the evidence
+# a spawned OMP worker's own tree carries; it never runs on its own, only to
+# qualify the inherited FM_OMP_HARNESS launch-boundary marker.
 omp_launch_argv_shape() {  # <args>
   local first second rest bun_path omp_path
   read -r first second rest <<EOF
@@ -68,14 +69,14 @@ omp_ancestry_matches() {  # <exact|launch-shape>
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
     bc=$(basename -- "$comm")
+    if [ "$mode" = exact ]; then
+      args=$(ps -o args= -p "$pid" 2>/dev/null)
+      fm_omp_process_matches "$comm" "$args" "$pid" && return 0
+    fi
     case "$bc" in
-      bun|omp)
+      bun|omp|cli.js)
         args=$(ps -o args= -p "$pid" 2>/dev/null)
-        if [ "$mode" = exact ]; then
-          fm_omp_process_matches "$comm" "$args" "$pid" && return 0
-        else
-          omp_launch_argv_shape "$args" && return 0
-        fi
+        [ "$mode" = launch-shape ] && omp_launch_argv_shape "$args" && return 0
         ;;
       *claude*|*codex*|*opencode*|*grok*|kimi|pi|pi-signed) return 1 ;;
       node*|python*)
@@ -93,6 +94,12 @@ omp_ancestry_matches() {  # <exact|launch-shape>
 # The exact walk is skipped outright when this home holds no OMP identity
 # evidence, so non-OMP harnesses pay no ps forks on this frequently called path.
 omp_ancestry_is_exact() {
+  if [ -n "${FM_OMP_BUN:-}" ] && [ -n "${FM_OMP_BIN:-}" ]; then
+    FM_OMP_PROCESS_EXPECTED_BUN="$FM_OMP_BUN" \
+      FM_OMP_PROCESS_EXPECTED_BIN="$FM_OMP_BIN" \
+      omp_ancestry_matches exact
+    return
+  fi
   fm_omp_process_identity_available || return 1
   omp_ancestry_matches exact
 }
@@ -115,8 +122,12 @@ detect_own() {
   # multiplexer's stored environment can silently misidentify one of them before
   # ancestry is consulted. This is a precedence hazard, not evidence that
   # CLAUDECODE inheritance into a kimi child was observed; it was not observed.
-  [ "${FM_OMP_HARNESS:-}" = "omp" ] && omp_ancestry_matches launch-shape \
-    && { echo omp; return; }
+  if [ "${FM_OMP_HARNESS:-}" = "omp" ]; then
+    omp_ancestry_is_exact && { echo omp; return; }
+    if [ -z "${FM_OMP_BUN:-}" ] && [ -z "${FM_OMP_BIN:-}" ]; then
+      omp_ancestry_matches launch-shape && { echo omp; return; }
+    fi
+  fi
   omp_ancestry_is_exact && { echo omp; return; }
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   if [ "${PI_CODING_AGENT:-}" = "true" ]; then

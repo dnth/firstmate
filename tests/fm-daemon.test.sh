@@ -1798,13 +1798,15 @@ test_inject_msg_herdr_submits_through_backend_dispatch() {
     fm_backend_send_text_submit() {
       [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected send_text_submit args: $1 $2"
       case "$3" in *"hello"*) : ;; *) fail "digest text missing from send_text_submit: $3" ;; esac
-      [ "$#" -eq 9 ] && [ "$7" = "" ] || fail "expected-label placeholder shifted the harness argument (argc=$#)"
+      [ "$#" -eq 10 ] && [ "$7" = "" ] || fail "expected-label placeholder shifted the harness argument (argc=$#)"
       [ "$8" = omp ] || fail "OMP Herdr injection did not forward exact harness identity: ${8:-missing}"
       [ "$9" = /verified/bun ] || fail "OMP Herdr injection did not forward its bound Bun identity: ${9:-missing}"
+      [ "${10:-}" = /verified/omp ] || fail "OMP Herdr injection did not forward its bound entrypoint identity: ${10:-missing}"
       printf 'empty'
     }
     FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" \
-      FM_SUPERVISOR_HARNESS=omp FM_SUPERVISOR_OMP_BUN=/verified/bun inject_msg "hello" "$state" \
+      FM_SUPERVISOR_HARNESS=omp FM_SUPERVISOR_OMP_BUN=/verified/bun \
+      FM_SUPERVISOR_OMP_BIN=/verified/omp inject_msg "hello" "$state" \
       || fail "inject_msg should succeed when OMP-native confirmation reports delivery"
   ) || fail "herdr successful-submit inject_msg subshell failed"
   pass "inject_msg: OMP Herdr away delivery reaches the exact-runtime native confirmation path"

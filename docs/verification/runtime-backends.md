@@ -144,7 +144,7 @@ Normal `/exit` stopped each OMP process without killing the private tmux server,
 The guarded primary, worker/scout, and secondmate owners reran on 2026-08-01 at head `491bc809a38a84f5ea651fd051b509cb511149a1` and returned four green results.
 The OMP 17.2.10 watcher-input regression passed on 2026-08-07 with the editable draft intact; the exact command and bounded output are recorded in [`supervision.md`](supervision.md#native-session-start-delivery).
 
-The OMP max-time deadline guard passed on 2026-08-17 against OMP 17.3.4 using the default `openai-codex/gpt-5.6-sol` live-test model:
+The OMP max-time deadline guard passed on 2026-08-17 against OMP 17.3.4 using `openai-codex/gpt-5.6-sol` as the explicit live-test model; the current fixture default is `openai-codex/gpt-5.6-luna`:
 
 ```sh
 omp --version
@@ -160,6 +160,26 @@ ok - OMP omp/17.3.4 aborts an active session within the 5-15s deadline bound
 ```
 
 The guard starts a real headless OMP turn with `--max-time=5`, requires the deadline-specific aborted assistant event and terminal runtime event, rejects unrelated errors, and measures the full process lifetime including shutdown against the documented bound.
+
+OMP 17.3.8 standalone-executable compatibility was verified on 2026-08-20.
+
+```sh
+omp --version
+bin/fm-omp-capabilities.sh --require-max-time --print-binary
+FM_OMP_PRIMARY_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh
+```
+
+Observed relevant output:
+
+```text
+omp/17.3.8
+ok - OMP omp/17.3.8 primary E2E proved fresh no-state and ordinary native discovery, exact ownership, once-only startup, guarded watcher startup, /new continuity, shutdown, resume, and away-mode delivery
+ok - OMP omp/17.3.8 primary E2E proved watcher delivery with an intact editable draft
+```
+
+The capability probe returned the canonical selected executable path, which is omitted here because it is host-local.
+The installed OMP was a Bun-compiled executable whose embedded `argv[1]` was not a filesystem object.
+The live primary check loaded the tracked extension in an ordinary disposable Firstmate checkout, required the four-line marker to bind both runtime and entrypoint identities to the compiled executable, and then proved PID ownership, startup, watcher, restart, shutdown, resume, and away-delivery behavior.
 
 The native Prewalk launch surface was checked on 2026-08-11 against OMP 17.2.11 without starting a model call:
 

@@ -51,16 +51,134 @@
 # below. Re-sourcing is a cheap idempotent redefinition, so this file needs no
 # include guard (matching bin/fm-tmux-lib.sh).
 
-# fm_composer_terminal_width: print the exact terminal-cell width of one OMP
-# structural row through the canonical Bun identity bound to that task (or to
-# the active OMP primary marker). A fresh PATH lookup is never runtime evidence.
+# Keep the Node program's heredoc outside command substitution: stock Bash
+# 3.2 misparses that nesting and reports a later, unrelated case terminator.
+fm_composer_node_width() {  # <canonical-node> <row>
+  "$1" - "$2" 2>/dev/null <<'JS'
+const input = process.argv[2];
+if (input === undefined || /[\u0000-\u001f\u007f-\u009f]/u.test(input)) process.exit(1);
+
+const isFullwidth = codePoint => codePoint >= 0x1100 && (
+  codePoint <= 0x115f ||
+  codePoint === 0x2329 ||
+  codePoint === 0x232a ||
+  (codePoint >= 0x2e80 && codePoint <= 0x303e) ||
+  (codePoint >= 0x3040 && codePoint <= 0xa4cf) ||
+  (codePoint >= 0xac00 && codePoint <= 0xd7a3) ||
+  (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+  (codePoint >= 0xfe10 && codePoint <= 0xfe19) ||
+  (codePoint >= 0xfe30 && codePoint <= 0xfe6f) ||
+  (codePoint >= 0xff00 && codePoint <= 0xff60) ||
+  (codePoint >= 0xffe0 && codePoint <= 0xffe6) ||
+  (codePoint >= 0x1b000 && codePoint <= 0x1b001) ||
+  (codePoint >= 0x1f200 && codePoint <= 0x1f251) ||
+  (codePoint >= 0x20000 && codePoint <= 0x3fffd)
+);
+
+const isEmojiPresentation = /\p{Emoji_Presentation}/u;
+const isEmoji = /\p{Emoji}/u;
+const isEmojiModifier = /\p{Emoji_Modifier}/u;
+const isEmojiModifierBase = /\p{Emoji_Modifier_Base}/u;
+const isJoinedEmoji = /\p{Extended_Pictographic}[\p{Mark}\p{Emoji_Modifier}\ufe0e\ufe0f]*\u200d\p{Extended_Pictographic}/u;
+const isRegionalIndicator = /\p{Regional_Indicator}/u;
+const isRegionalIndicatorFlag = /^(?:\p{Regional_Indicator}){2}$/u;
+const isKeycapBase = /^[#*0-9]$/u;
+const isKeycapSequence = /^[#*0-9]\ufe0f?\u20e3$/u;
+const isMarkOrFormat = /[\p{Mark}\p{Cf}\ufe0e\ufe0f]/u;
+// Node's Unicode 17 property data exposes reserved emoji slots that the
+// OMP 17.3.8 / Bun 1.3.14 width table keeps narrow unless VS16 is present.
+const isBunNarrowEmojiOverride = codePoint =>
+  codePoint === 0x1f6d8 ||
+  (codePoint >= 0x1fa89 && codePoint <= 0x1fa8a) ||
+  (codePoint >= 0x1fa8e && codePoint <= 0x1fa8f) ||
+  codePoint === 0x1fabe ||
+  codePoint === 0x1fac6 ||
+  codePoint === 0x1fac8 ||
+  codePoint === 0x1facd ||
+  codePoint === 0x1fadc ||
+  codePoint === 0x1fadf ||
+  (codePoint >= 0x1fae9 && codePoint <= 0x1faea) ||
+  codePoint === 0x1faef;
+const isEmojiPresentationBase = character =>
+  isEmojiPresentation.test(character) &&
+  !isBunNarrowEmojiOverride(character.codePointAt(0)) &&
+  !isEmojiModifier.test(character) &&
+  !isRegionalIndicator.test(character);
+const componentWidth = character => {
+  if (isBunNarrowEmojiOverride(character.codePointAt(0))) return 1;
+  if (isEmojiModifier.test(character)) return 2;
+  if (isRegionalIndicator.test(character)) return 1;
+  if (isEmojiPresentation.test(character)) return 2;
+  return isFullwidth(character.codePointAt(0)) ? 2 : 1;
+};
+const segmenter = new Intl.Segmenter("en", { granularity: "grapheme" });
+const stringWidth = value => {
+  let width = 0;
+  for (const { segment } of segmenter.segment(value)) {
+    const components = [...segment].filter(character => !isMarkOrFormat.test(character));
+    if (components.length === 0) continue;
+    const base = components[0];
+    const hasVS16 = /[\ufe0f]/u.test(segment);
+    const hasEmojiBase =
+      isEmojiPresentationBase(base) ||
+      isEmojiModifierBase.test(base) ||
+      (hasVS16 && isEmoji.test(base) && !isEmojiModifier.test(base) && !isKeycapBase.test(base));
+    const hasOnlyEmojiModifiers =
+      components.length > 1 &&
+      components.slice(1).every(character => isEmojiModifier.test(character));
+    const hasDanglingEmojiJoiner =
+      /\u200d$/u.test(segment) &&
+      isEmoji.test(base) &&
+      !isBunNarrowEmojiOverride(base.codePointAt(0));
+    if (
+      isRegionalIndicatorFlag.test(segment) ||
+      isKeycapSequence.test(segment) ||
+      isJoinedEmoji.test(segment) ||
+      hasDanglingEmojiJoiner ||
+      (hasEmojiBase && hasOnlyEmojiModifiers)
+    ) {
+      width += 2;
+    } else if (hasVS16 && isEmoji.test(base) && !isEmojiModifier.test(base) && !isKeycapBase.test(base)) {
+      width += 2;
+    } else {
+      width += components.reduce((total, character) => total + componentWidth(character), 0);
+    }
+  }
+  return width;
+};
+const compatibilityFixtures = [
+  ["0\ufe0f", 1],
+  ["1\u20e3", 2],
+  ["✍🏻", 2],
+  ["하", 3],
+  ["\u{1fae9}", 1],
+  ["👩‍👩‍👧‍👦", 2],
+];
+if (compatibilityFixtures.some(([value, expected]) => stringWidth(value) !== expected)) process.exit(1);
+process.stdout.write(String(stringWidth(input)));
+JS
+}
+
+# fm_composer_terminal_width: print the terminal-cell width of one OMP
+# structural row through the task-bound runtime and entrypoint identities.
+# Legacy Bun-script OMP uses Bun.stringWidth. Standalone OMP uses a Node
+# fallback behaviorally pinned by compiled OMP 17.3.8 / Bun 1.3.14 fixtures;
+# it never passes OMP's `-e` extension flag as Bun evaluation or relies on
+# locale-sensitive `fold`/`wc` behavior.
 # Missing, relative, non-executable, or malformed support returns nonzero so
 # callers classify the candidate as unknown.
-fm_composer_terminal_width() {  # <row> [canonical-bun]
-  local bun=${2:-${FM_OMP_BUN:-}} out
+fm_composer_terminal_width() {  # <row> [canonical-runtime] [canonical-omp]
+  local bun=${2:-${FM_OMP_BUN:-}} omp=${3:-${FM_OMP_BIN:-}} out node_bin
   case "$bun" in /*) ;; *) return 1 ;; esac
   [ -x "$bun" ] || return 1
-  out=$("$bun" -e 'try { const width = Bun.stringWidth(process.argv[1]); if (!Number.isSafeInteger(width) || width < 0) process.exit(1); process.stdout.write(String(width)); } catch { process.exit(1); }' "$1" 2>/dev/null) || return 1
+  if [ -n "$omp" ] && [ "$bun" = "$omp" ]; then
+    node_bin=$(command -v node 2>/dev/null) || return 1
+    case "$node_bin" in /*) ;; *) return 1 ;; esac
+    [ -x "$node_bin" ] || return 1
+    out=$(fm_composer_node_width "$node_bin" "$1") || return 1
+  else
+    out=$("$bun" -e 'try { const width = Bun.stringWidth(process.argv[1]); if (!Number.isSafeInteger(width) || width < 0) process.exit(1); process.stdout.write(String(width)); } catch { process.exit(1); }' "$1" 2>/dev/null) || return 1
+  fi
   case "$out" in ''|*[!0-9]*) return 1 ;; esac
   printf '%s' "$out"
 }

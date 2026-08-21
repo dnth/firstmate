@@ -29,7 +29,7 @@ MAIN_STATE="$PRIMARY_HOME/state"
 MAIN_DATA="$PRIMARY_HOME/data"
 MAIN_CONFIG="$PRIMARY_HOME/config"
 MAIN_PROJECTS="$PRIMARY_HOME/projects"
-MODEL=${FM_OMP_SECONDMATE_LIVE_MODEL:-openai-codex/gpt-5.6-sol}
+MODEL=${FM_OMP_SECONDMATE_LIVE_MODEL:-openai-codex/gpt-5.6-luna}
 THINKING=${FM_OMP_SECONDMATE_LIVE_THINKING:-low}
 
 cleanup() {
@@ -116,7 +116,7 @@ composer_empty() {
   local got
   # shellcheck disable=SC2016  # expansion belongs to the inner bash
   got=$(fm_env bash -c \
-    '. "$1/bin/fm-backend.sh"; fm_backend_agent_record_identity tmux "$2" "$3" || exit 1; fm_backend_composer_state tmux "$2" omp "$FM_BACKEND_AGENT_OMP_BUN"' \
+    '. "$1/bin/fm-backend.sh"; fm_backend_agent_record_identity tmux "$2" "$3" || exit 1; fm_backend_composer_state tmux "$2" omp "$FM_BACKEND_AGENT_OMP_BUN" "$FM_BACKEND_AGENT_OMP_BIN"' \
       _ "$ROOT" "$TARGET" "$MAIN_STATE/$ID.meta")
   [ "$got" = empty ]
 }

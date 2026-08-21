@@ -23,6 +23,7 @@ WORKER_ID=omp-live-worker
 SCOUT_ID=omp-live-scout
 WORKER_WT="$LAB/worker-wt"
 SCOUT_WT="$LAB/scout-wt"
+ORIGIN="$LAB/origin.git"
 
 remove_clean_worktree() {
   local wt=$1 label=$2
@@ -67,10 +68,15 @@ description: Test-only OMP skill submission probe.
 Respond exactly `OMP_SKILL_DONE`.
 EOF
 printf 'fixture\n' > "$PROJECT/README.md"
-git init -q "$PROJECT"
+git init -q -b main "$PROJECT"
 fm_git_identity fmtest fmtest@example.invalid
 git -C "$PROJECT" add .
 git -C "$PROJECT" commit -qm init
+git init -q --bare "$ORIGIN"
+git -C "$PROJECT" remote add origin "$ORIGIN"
+git -C "$PROJECT" push -q -u origin main
+git -C "$ORIGIN" symbolic-ref HEAD refs/heads/main
+git -C "$PROJECT" remote set-head origin main
 git -C "$PROJECT" worktree add -q -b fm/omp-live-worker "$WORKER_WT"
 git -C "$PROJECT" worktree add -q -b fm/omp-live-scout "$SCOUT_WT"
 
@@ -80,6 +86,40 @@ exec '$REAL_TMUX' -L '$SOCKET' "\$@"
 SH
 cat > "$WRAPPER_BIN/treehouse" <<SH
 #!/usr/bin/env bash
+set -u
+case "\${1:-}" in
+  get)
+    shift
+    lease=0
+    holder=
+    while [ "\$#" -gt 0 ]; do
+      case "\$1" in
+        --lease) lease=1 ;;
+        --lease-holder) shift; holder=\${1:-} ;;
+        --lease-holder=*) holder=\${1#--lease-holder=} ;;
+      esac
+      shift
+    done
+    if [ "\$lease" -eq 1 ]; then
+      case "\$holder" in
+        fm-$WORKER_ID) worktree='$WORKER_WT' ;;
+        fm-$SCOUT_ID) worktree='$SCOUT_WT' ;;
+        *) echo "unexpected OMP live fixture lease holder: \$holder" >&2; exit 1 ;;
+      esac
+      (
+        cd "\$worktree" || exit 1
+        git checkout --detach --force HEAD >/dev/null &&
+        git reset --hard HEAD >/dev/null &&
+        git clean -fd >/dev/null
+      ) || exit \$?
+      printf '%s\n' "\$worktree"
+      exit 0
+    fi
+    ;;
+  return)
+    exit 0
+    ;;
+esac
 window=\$(tmux display-message -p -t "\${TMUX_PANE:?}" '#{window_name}')
 case "\$window" in
   fm-$WORKER_ID) cd '$WORKER_WT' || exit 1 ;;
@@ -106,7 +146,7 @@ agent_state() {
 
 composer_state() {
   PATH="$WRAPPER_BIN:$PATH" bash -c \
-    '. "$1/bin/fm-backend.sh"; meta=$(fm_backend_meta_for_window "$2" "$3") || exit 1; fm_backend_agent_record_identity tmux "$2" "$meta" || exit 1; fm_backend_composer_state tmux "$2" omp "$FM_BACKEND_AGENT_OMP_BUN"' \
+    '. "$1/bin/fm-backend.sh"; meta=$(fm_backend_meta_for_window "$2" "$3") || exit 1; fm_backend_agent_record_identity tmux "$2" "$meta" || exit 1; fm_backend_composer_state tmux "$2" omp "$FM_BACKEND_AGENT_OMP_BUN" "$FM_BACKEND_AGENT_OMP_BIN"' \
     _ "$ROOT" "$1" "$HOME_DIR/state"
 }
 
@@ -134,6 +174,22 @@ wait_text_count() {
     i=$((i + 1))
   done
   capture "$target" >&2
+  return 1
+}
+
+wait_launch_brief_once() {
+  local session_dir=/tmp/fm-$WORKER_ID/omp-sessions attempts=120 i=0 count file file_count
+  while [ "$i" -lt "$attempts" ]; do
+    count=0
+    for file in "$session_dir"/*.jsonl; do
+      [ -f "$file" ] || continue
+      file_count=$(grep -Fhc 'FIRSTMATE_OP: v1 launch-brief:' "$file" 2>/dev/null || printf '0\n')
+      count=$((count + file_count))
+    done
+    [ "$count" = 1 ] && return 0
+    sleep 0.25
+    i=$((i + 1))
+  done
   return 1
 }
 
@@ -169,13 +225,17 @@ run_send() {
 
 spawn_omp() {
   local id=$1 kind=$2 args=()
-  [ "$kind" = scout ] && args+=(--scout)
+  if [ "$kind" = scout ]; then
+    args+=(--scout)
+  else
+    args+=(--mode no-mistakes --yolo off)
+  fi
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
     FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
     FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_BACKEND=tmux FM_SPAWN_NO_GUARD=1 \
     OMP_SKIP_SETUP=1 PATH="$WRAPPER_BIN:$PATH" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$PROJECT" --harness omp \
-      --model openai-codex/gpt-5.6-sol --effort low "${args[@]+"${args[@]}"}"
+    "$ROOT/bin/fm-spawn.sh" "$id" "$PROJECT" "${args[@]}" --harness omp \
+      --model openai-codex/gpt-5.6-luna --effort low
 }
 
 spawn_omp "$WORKER_ID" ship >/dev/null || fail "real OMP worker spawn failed"
@@ -184,14 +244,13 @@ WORKER_WT=$(sed -n 's/^worktree=//p' "$WORKER_META")
 WORKER_TARGET=$(sed -n 's/^window=//p' "$WORKER_META")
 assert_grep 'harness=omp' "$WORKER_META" "worker metadata lost exact OMP identity"
 assert_grep 'kind=ship' "$WORKER_META" "worker metadata lost ship kind"
-assert_grep 'model=openai-codex/gpt-5.6-sol' "$WORKER_META" "worker metadata lost selected model"
+assert_grep 'model=openai-codex/gpt-5.6-luna' "$WORKER_META" "worker metadata lost selected model"
 assert_grep 'effort=low' "$WORKER_META" "worker metadata lost selected thinking level"
 wait_file "$HOME_DIR/state/$WORKER_ID.omp-ready" || fail "OMP worker extension did not report session readiness"
 wait_file "$HOME_DIR/state/$WORKER_ID.turn-ended" || fail "initial OMP worker turn did not complete"
 wait_text_count "$WORKER_TARGET" OMP_INITIAL_DONE 2 || fail "initial OMP worker response was not observed"
-[ "$(capture "$WORKER_TARGET" | grep -Fc 'FIRSTMATE_OP: v1 launch-brief:')" -eq 1 ] \
-  || fail "OMP worker initial launch brief was not delivered exactly once"
-assert_contains "$(capture "$WORKER_TARGET")" 'GPT-5.6-Sol' "OMP worker did not display the selected model"
+wait_launch_brief_once || fail "OMP worker initial launch brief was not persisted exactly once"
+assert_contains "$(capture "$WORKER_TARGET")" 'GPT-5.6-Luna' "OMP worker did not display the selected model"
 assert_contains "$(capture "$WORKER_TARGET")" 'low' "OMP worker did not display the selected thinking level"
 [ "$(agent_state "$WORKER_TARGET")" = alive ] || fail "idle OMP worker was not classified alive"
 
@@ -237,7 +296,11 @@ SESSION_FILE=$(find "$SESSION_DIR" -type f -name '*.jsonl' -print 2>/dev/null | 
 OMP_RESUME_BUN=$(sed -n 's/^omp_bun=//p' "$HOME_DIR/state/$WORKER_ID.meta")
 OMP_RESUME_BIN=$(sed -n 's/^omp_bin=//p' "$HOME_DIR/state/$WORKER_ID.meta")
 [ -x "$OMP_RESUME_BUN" ] && [ -x "$OMP_RESUME_BIN" ] || fail "OMP resume metadata lost its canonical Bun/OMP pair"
-RESUME_COMMAND="FM_OMP_HARNESS=omp '$OMP_RESUME_BUN' '$OMP_RESUME_BIN' --session-dir '$SESSION_DIR' --resume '$SESSION_FILE' --auto-approve -e '$HOME_DIR/state/$WORKER_ID.omp-ext.ts'"
+RESUME_ENV="FM_OMP_BUN='$OMP_RESUME_BUN' FM_OMP_BIN='$OMP_RESUME_BIN' FM_OMP_HARNESS=omp"
+if [ "$OMP_RESUME_BUN" != "$OMP_RESUME_BIN" ]; then
+  RESUME_ENV="$RESUME_ENV PATH='$(dirname "$OMP_RESUME_BUN")'\${PATH:+:\$PATH}"
+fi
+RESUME_COMMAND="$RESUME_ENV '$OMP_RESUME_BIN' --session-dir '$SESSION_DIR' --resume '$SESSION_FILE' --auto-approve -e '$HOME_DIR/state/$WORKER_ID.omp-ext.ts'"
 rm -f "$HOME_DIR/state/$WORKER_ID.omp-ready"
 PATH="$WRAPPER_BIN:$PATH" tmux send-keys -t "$WORKER_TARGET" -l "$RESUME_COMMAND"
 PATH="$WRAPPER_BIN:$PATH" tmux send-keys -t "$WORKER_TARGET" Enter

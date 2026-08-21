@@ -123,7 +123,7 @@ run_ahoy_case() {
     cd "$PROJECT" &&
       pi --print --approve --no-session --no-context-files --no-extensions \
         --no-skills --skill .agents/skills --tools read \
-        --model openai-codex/gpt-5.6-sol --thinking low \
+        --model openai-codex/gpt-5.6-luna --thinking low \
         "$preceding" "/ahoy"
   ) || status=$?
   [ "$status" -eq 0 ] || fail "Pi Ahoy $label case exited $status: $out"
@@ -220,7 +220,7 @@ run_native_ahoy_regressions() {
       FM_HOME="$first_home" pi --print --approve --no-session --no-context-files --no-extensions \
         -e .pi/extensions/fm-primary-turnend-guard.ts \
         --no-skills --skill .agents/skills \
-        --model openai-codex/gpt-5.6-sol --thinking low \
+        --model openai-codex/gpt-5.6-luna --thinking low \
         "/ahoy"
   )
   printf '%s\n' "$first_out" | grep -Fq "AHOY_BEARINGS_BRANCH" \
@@ -233,7 +233,7 @@ run_native_ahoy_regressions() {
       FM_HOME="$later_home" pi --print --approve --no-session --no-context-files --no-extensions \
         -e .pi/extensions/fm-primary-turnend-guard.ts \
         --no-skills --skill .agents/skills \
-        --model openai-codex/gpt-5.6-sol --thinking low \
+        --model openai-codex/gpt-5.6-luna --thinking low \
         "Respond exactly PRIOR_BOUNDARY_ACK." "/ahoy"
   )
   printf '%s\n' "$later_out" | grep -Fq "PRIOR_BOUNDARY_ACK" \
@@ -266,7 +266,7 @@ chmod +x "$PROJECT/bin/fm-operational-input.sh"
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/config"
 
 "$TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -c "$PROJECT" \
-  "env FM_HOME='$HOME_DIR' FM_ROOT_OVERRIDE='$PROJECT' FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=600 bash -lc 'printf \"%s\\n\" \"\$\$\" > \"\$FM_HOME/state/.lock\"; pi --approve --no-session --no-context-files --no-extensions -e .pi/extensions/fm-calm.ts -e .pi/extensions/fm-primary-turnend-guard.ts -e .pi/extensions/fm-primary-pi-watch.ts --model openai-codex/gpt-5.6-sol --thinking low; rc=\$?; printf \"PI_EXIT=%s\\n\" \"\$rc\"; sleep 300'"
+  "env FM_HOME='$HOME_DIR' FM_ROOT_OVERRIDE='$PROJECT' FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=600 bash -lc 'printf \"%s\\n\" \"\$\$\" > \"\$FM_HOME/state/.lock\"; pi --approve --no-session --no-context-files --no-extensions -e .pi/extensions/fm-calm.ts -e .pi/extensions/fm-primary-turnend-guard.ts -e .pi/extensions/fm-primary-pi-watch.ts --model openai-codex/gpt-5.6-luna --thinking low; rc=\$?; printf \"PI_EXIT=%s\\n\" \"\$rc\"; sleep 300'"
 
 i=0
 while [ "$i" -lt 120 ]; do

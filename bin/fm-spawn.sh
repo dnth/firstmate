@@ -1147,9 +1147,9 @@ launch_template() {
       if [ "$kind" = secondmate ]; then
         # The explicit path is the exact same tracked file native project discovery sees.
         # OMP 17.1.8's discoverExtensionPaths path-resolves and deduplicates before loading, so this guarantees the integration without registering it twice.
-        printf '%s' '__OMPBUN__ __OMPBIN__ --session-dir __OMPSESSIONDIR__ __OMPRESUMEFLAG__--auto-approve __OMPMAXTIME____MODELFLAG____EFFORTFLAG____PREWALKFLAG__-e __OMPPRIMARY__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' '__OMPENV____OMPBIN__ --session-dir __OMPSESSIONDIR__ __OMPRESUMEFLAG__--auto-approve __OMPMAXTIME____MODELFLAG____EFFORTFLAG____PREWALKFLAG__-e __OMPPRIMARY__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' '__OMPBUN__ __OMPBIN__ --session-dir __OMPSESSIONDIR__ --auto-approve __OMPMAXTIME____MODELFLAG____EFFORTFLAG____PREWALKFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' '__OMPENV____OMPBIN__ --session-dir __OMPSESSIONDIR__ --auto-approve __OMPMAXTIME____MODELFLAG____EFFORTFLAG____PREWALKFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
@@ -1462,6 +1462,10 @@ validate_omp_prewalk_for_launch_dir() {
 OMP_BIN=
 OMP_BIN_CANON=
 OMP_BUN_CANON=
+OMP_BUN_LAUNCH_PATH=
+OMP_BUN_LAUNCH_DIR=
+OMP_LAUNCH_ENV=
+OMP_LAUNCH_PATH_GUARD=
 OMP_PRIMARY_EXTENSION=
 OMP_SESSION_DIR=
 OMP_SESSION_POINTER=
@@ -1488,14 +1492,25 @@ if [ "$HARNESS" = omp ]; then
     echo "error: selected OMP executable cannot be canonicalized: $OMP_BIN" >&2
     exit 1
   }
-  OMP_BUN_CANON=$(fm_omp_process_resolve_path bun) || {
-    echo "error: selected OMP runtime cannot bind its Bun executable" >&2
+  OMP_LAUNCH_IDENTITY=$(fm_omp_process_launch_identity "$OMP_BIN_CANON") || {
+    echo "error: selected OMP executable has no verifiable launch identity: $OMP_BIN_CANON" >&2
     exit 1
   }
-  if ! fm_omp_process_identity_path_valid "$OMP_BIN_CANON" \
-     || ! fm_omp_process_identity_path_valid "$OMP_BUN_CANON"; then
-    echo "error: selected OMP and Bun identities must be canonical executable paths without whitespace" >&2
+  OMP_BUN_CANON=$(printf '%s\n' "$OMP_LAUNCH_IDENTITY" | sed -n '1p')
+  OMP_LAUNCH_ENTRYPOINT=$(printf '%s\n' "$OMP_LAUNCH_IDENTITY" | sed -n '2p')
+  OMP_BUN_LAUNCH_PATH=$(printf '%s\n' "$OMP_LAUNCH_IDENTITY" | sed -n '3p')
+  if [ "$OMP_LAUNCH_ENTRYPOINT" != "$OMP_BIN_CANON" ]; then
+    echo "error: selected OMP launch identity does not preserve its canonical entrypoint" >&2
     exit 1
+  fi
+  if [ -n "$OMP_BUN_LAUNCH_PATH" ]; then
+    OMP_BUN_LAUNCH_DIR=$(cd "$(dirname "$OMP_BUN_LAUNCH_PATH")" 2>/dev/null && pwd -P) || {
+      echo "error: selected Bun runtime directory cannot be resolved" >&2
+      exit 1
+    }
+    case "$OMP_BUN_LAUNCH_DIR" in
+      *:*) echo "error: selected Bun runtime directory cannot be represented in PATH" >&2; exit 1 ;;
+    esac
   fi
   if [ -n "$PREWALK_INTO" ]; then
     omp_prewalk_probe_flags "$OMP_BIN_CANON"
@@ -2800,7 +2815,10 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
     printf -v treehouse_ready_quoted '%q' "$treehouse_ready_file"
     treehouse_get_command="$treehouse_get_command --ready-file $treehouse_ready_quoted"
   fi
-  spawn_send_text_line "$WT_TARGET" "$treehouse_get_command"
+  spawn_send_text_line "$WT_TARGET" "$treehouse_get_command" || {
+    echo "error: worktree setup command could not be submitted safely for $W" >&2
+    exit 1
+  }
 
   if [ "${IS_SANDBOX:-}" = 1 ]; then
     for _ in $(seq 1 60); do
@@ -3272,6 +3290,20 @@ sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
 sq_ompprimary=$(shell_quote "$OMP_PRIMARY_EXTENSION")
+if [ "$OMP_LAUNCH_TEMPLATE" -eq 1 ] && [ -n "$OMP_BUN_LAUNCH_DIR" ]; then
+  # The pane may be fish, so keep shell-specific lookup validation inside the
+  # Bash-owned OMP command rather than asking the pane shell to parse it.
+  case "${PATH-}" in
+    *::*|:*|*:)
+      echo "error: spawning env-shebang OMP requires a PATH without empty components" >&2
+      exit 1
+      ;;
+  esac
+  OMP_LAUNCH_PATH_GUARD="PATH=$(shell_quote "$OMP_BUN_LAUNCH_DIR${PATH:+:$PATH}"); export PATH; FM_OMP_BUN_LOOKUP=\$(command -v bun) || exit 1; FM_OMP_BUN_RESOLVED=\$(readlink -f \"\$FM_OMP_BUN_LOOKUP\" 2>/dev/null || node -e 'const { realpathSync } = require(\"node:fs\"); process.stdout.write(realpathSync(process.argv[1]));' \"\$FM_OMP_BUN_LOOKUP\") || exit 1; [ \"\$FM_OMP_BUN_RESOLVED\" = $(shell_quote "$OMP_BUN_CANON") ] || exit 1; "
+fi
+if [ "$OMP_LAUNCH_TEMPLATE" -eq 1 ] && [ "$HARNESS" = omp ] && [ -n "$OMP_BIN_CANON" ]; then
+  LAUNCH="FM_OMP_BUN=$(shell_quote "$OMP_BUN_CANON") FM_OMP_BIN=$(shell_quote "$OMP_BIN_CANON") $LAUNCH"
+fi
 OMPRESUMEFLAG=
 [ -z "$OMP_RESUME_FILE" ] || OMPRESUMEFLAG="--resume $(shell_quote "$OMP_RESUME_FILE") "
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
@@ -3289,7 +3321,7 @@ LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__OMPEXT__/$sq_ompext}
 LAUNCH=${LAUNCH//__OMPPRIMARY__/$sq_ompprimary}
-LAUNCH=${LAUNCH//__OMPBUN__/$(shell_quote "$OMP_BUN_CANON")}
+LAUNCH=${LAUNCH//__OMPENV__/$OMP_LAUNCH_ENV}
 LAUNCH=${LAUNCH//__OMPBIN__/$(shell_quote "$OMP_BIN_CANON")}
 LAUNCH=${LAUNCH//__OMPSESSIONDIR__/$(shell_quote "$OMP_SESSION_DIR")}
 LAUNCH=${LAUNCH//__OMPRESUMEFLAG__/$OMPRESUMEFLAG}
@@ -3373,34 +3405,60 @@ if [ "$KIND" = secondmate ]; then
   # injected carrier and this on/off snapshot are guaranteed to agree.
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
-# Export GOTMPDIR into the crewmate's pane shell so the agent and every child
-# process (go build, go test, ...) inherit it. Sent before the launch command so
-# the env is set when the agent starts; the brief sleep lets the export land.
-spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+# tmux-like backends configure the persistent pane shell before launch. Herdr
+# instead binds both values to the one atomic `pane run` command: acceptance of
+# a separate setup command would not prove that the shell executed it.
+HERDR_LAUNCH_ENV=
+if [ "$BACKEND" = herdr ]; then
+  HERDR_LAUNCH_ENV="GOTMPDIR=$(shell_quote "$TASK_TMP/gotmp") "
+else
+  if ! spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"; then
+    echo "error: GOTMPDIR export could not be submitted safely for $W" >&2
+    exit 1
+  fi
+fi
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
 # entirely when trace context is off.
 if [ -n "$SPAWN_TRACEPARENT" ]; then
-  if spawn_send_text_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
+  if [ "$BACKEND" = herdr ]; then
+    HERDR_LAUNCH_ENV="${HERDR_LAUNCH_ENV}TRACEPARENT=$(shell_quote "$SPAWN_TRACEPARENT") "
+    if ! echo "traceparent=$SPAWN_TRACEPARENT" >> "$STATE/$ID.meta"; then
+      HERDR_LAUNCH_ENV=
+      LAUNCH="unset TRACEPARENT; GOTMPDIR=$(shell_quote "$TASK_TMP/gotmp") $LAUNCH"
+    fi
+  elif spawn_send_text_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
     if ! echo "traceparent=$SPAWN_TRACEPARENT" >> "$STATE/$ID.meta"; then
       LAUNCH="unset TRACEPARENT; $LAUNCH"
     fi
   else
     TRACE_SEND_STATUS=$?
     if [ "$TRACE_SEND_STATUS" -eq 2 ]; then
-      echo "error: trace-context input could not be cleared for $W; refusing to append the launch command" >&2
+      echo "error: trace-context export could not be submitted safely for $W; refusing to append the launch command" >&2
       exit 1
     fi
   fi
 fi
 sleep 0.3
-spawn_send_literal "$T" "$LAUNCH"
-sleep 0.3
+[ "$BACKEND" != herdr ] || LAUNCH="$HERDR_LAUNCH_ENV$LAUNCH"
+[ -z "$OMP_LAUNCH_PATH_GUARD" ] || LAUNCH="$OMP_LAUNCH_PATH_GUARD$LAUNCH"
+if [ "$OMP_LAUNCH_TEMPLATE" -eq 1 ] && [ "$HARNESS" = omp ]; then
+  LAUNCH="/bin/bash -c $(shell_quote "$LAUNCH")"
+fi
+if [ "$BACKEND" = herdr ]; then
+  spawn_send_text_line "$T" "$LAUNCH" || {
+    echo "error: Herdr launch pane did not reach a proven idle shell; refusing to submit $HARNESS" >&2
+    exit 1
+  }
+else
+  spawn_send_literal "$T" "$LAUNCH"
+  sleep 0.3
+  spawn_send_key "$T" Enter
+fi
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
-spawn_send_key "$T" Enter
 if [ "$HARNESS" = omp ]; then
   OMP_ACK_INTERVAL=${FM_OMP_LAUNCH_ACK_INTERVAL:-0.5}
   OMP_ACKED=0
