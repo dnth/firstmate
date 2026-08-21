@@ -24,6 +24,9 @@
 #   (n) lifecycle reconciliation requires explicit mutation authority
 #   (o) merged closure retries from a validated receipt after teardown
 #   (p) each open task's canonical worker verdict is probed only once
+#   (q) listing fields match the installed tasks-axi contract
+#   (r) skipped arming accepts only exact PR-ready status events
+#   (s) completed receipts retire independently of open board rows
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -78,8 +81,15 @@ case "${1:-}" in
   list)
     require_file "$@"
     case "$*" in
+      *'--fields '*repo*)
+        printf '%s\n' 'fake tasks-axi: repo is a base field, not an accepted extra field' >&2
+        exit 9
+        ;;
+    esac
+    case "$*" in
       *'--state in_flight'*) serve in_flight ;;
       *'--state queued'*) serve queued ;;
+      *'--state done'*) serve done ;;
       *) printf '%s\n' "fake tasks-axi: unexpected listing: $*" >&2; exit 9 ;;
     esac
     ;;
@@ -144,8 +154,11 @@ write_listing() {  # <home> <name> <header-fields> <row>...
   } > "$home/listings/$name"
 }
 
-run_project() {  # <home> <mode>
-  PATH="$1/fakebin:$PATH" FM_HOME="$1" FM_FAKE_LISTINGS="$1/listings" "$PROJECT" "$2"
+run_project() {  # <home> <arguments>...
+  local home=$1
+  shift
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_FAKE_LISTINGS="$home/listings" \
+    "$PROJECT" "$@"
 }
 
 # Copy the real reconciler and its sourced libraries into a private executable
@@ -401,6 +414,12 @@ out=$(FM_FAKE_AXI_STATUS="$run" FM_FAKE_TMUX_MISSING=1 run_project "$home" --che
 [ -z "$out" ] || fail "--check disagreed with the authoritative run-step verdict: $out"
 pass "--check accepts a run-step-backed worker after its endpoint closes"
 
+home=$(new_home check-real-cli-fields)
+out=$(FM_HOME="$home" "$PROJECT" --check) \
+  || fail "--check failed against the installed tasks-axi list interface"
+[ -z "$out" ] || fail "the installed tasks-axi interface produced drift on an empty board: $out"
+pass "--check requests only supported extra fields from the real tasks-axi CLI"
+
 # --- (f) --check reports main-board work owned by a secondmate --------------
 
 home=$(new_home check-secondmate-scope)
@@ -480,7 +499,9 @@ fm_write_meta "$home/state/pr-task.meta" \
   'project=firstmate' \
   'kind=ship' \
   'mode=no-mistakes'
-printf '%s\n' 'done: PR https://github.com/example/repo/pull/41 checks green' \
+printf '%s\n' \
+  'working: dependency review at https://github.com/example/repo/pull/40' \
+  'done: PR https://github.com/example/repo/pull/41 checks green' \
   > "$home/state/pr-task.status"
 write_listing "$home" in_flight 'id,state,kind,repo,title,hold_until' \
   'pr-task,in_flight,ship,firstmate,Ready pull request,"-"'
@@ -528,6 +549,63 @@ assert_absent "$home/state/pr-task.meta" \
 assert_absent "$home/state/pr-task.todo-merged-reconciliation" \
   "successful board closure did not remove its reconciliation receipt"
 pass "--check recovers missed PR arming and closes only an exactly merged PR after teardown"
+
+home=$(new_home check-unrelated-status-url)
+lifecycle_project=$(make_lifecycle_project "$home")
+: > "$home/pr-check.log"
+: > "$home/teardown.log"
+: > "$home/done.log"
+fm_write_meta "$home/state/unrelated-url.meta" \
+  'window=firstmate:fm-unrelated-url' \
+  "worktree=$home/wt" \
+  'project=firstmate' \
+  'kind=ship' \
+  'mode=no-mistakes'
+printf '%s\n' \
+  'working: dependency https://github.com/example/repo/pull/51 is still open' \
+  'done: reviewed https://github.com/example/repo/pull/52' \
+  > "$home/state/unrelated-url.status"
+write_listing "$home" in_flight 'id,state,kind,repo,title,hold_until' \
+  'unrelated-url,in_flight,ship,firstmate,Unrelated status links,"-"'
+out=$(FM_FAKE_GH_STATE=MERGED FM_FAKE_PR_CHECK_LOG="$home/pr-check.log" \
+  FM_FAKE_TEARDOWN_LOG="$home/teardown.log" FM_FAKE_DONE_LOG="$home/done.log" \
+  run_lifecycle_project "$home" "$lifecycle_project" --check --reconcile) \
+  || fail "unrelated status URLs broke the check contract"
+[ -z "$out" ] || fail "unrelated status URLs produced lifecycle drift: $out"
+[ ! -s "$home/pr-check.log" ] || fail "an unrelated status URL armed a merge watch"
+[ ! -s "$home/teardown.log" ] || fail "an unrelated status URL authorized teardown"
+[ ! -s "$home/done.log" ] || fail "an unrelated status URL authorized board closure"
+assert_not_contains "$(cat "$home/state/unrelated-url.meta")" 'pr=' \
+  "an unrelated status URL became canonical PR metadata"
+assert_absent "$home/state/unrelated-url.todo-merged-reconciliation" \
+  "an unrelated status URL created reconciliation authority"
+pass "skipped-arm recovery rejects unrelated URLs in status history"
+
+home=$(new_home check-direct-pr-status)
+lifecycle_project=$(make_lifecycle_project "$home")
+: > "$home/pr-check.log"
+: > "$home/teardown.log"
+: > "$home/done.log"
+fm_write_meta "$home/state/direct-pr-ready.meta" \
+  'window=firstmate:fm-direct-pr-ready' \
+  "worktree=$home/wt" \
+  'project=firstmate' \
+  'kind=ship' \
+  'mode=direct-PR'
+printf '%s\n' 'done: PR https://github.com/example/repo/pull/53' \
+  > "$home/state/direct-pr-ready.status"
+write_listing "$home" in_flight 'id,state,kind,repo,title,hold_until' \
+  'direct-pr-ready,in_flight,ship,firstmate,Direct PR ready,"-"'
+out=$(FM_FAKE_GH_STATE=OPEN FM_FAKE_PR_CHECK_LOG="$home/pr-check.log" \
+  FM_FAKE_TEARDOWN_LOG="$home/teardown.log" FM_FAKE_DONE_LOG="$home/done.log" \
+  run_lifecycle_project "$home" "$lifecycle_project" --check --reconcile) \
+  || fail "the exact direct-PR ready event broke skipped-arm recovery"
+[ -z "$out" ] || fail "the exact direct-PR ready event produced drift: $out"
+assert_grep 'direct-pr-ready https://github.com/example/repo/pull/53' "$home/pr-check.log" \
+  "the exact direct-PR ready event did not arm its merge watch"
+[ ! -s "$home/teardown.log" ] || fail "an open direct PR triggered teardown"
+[ ! -s "$home/done.log" ] || fail "an open direct PR closed its board item"
+pass "skipped-arm recovery accepts both exact PR-ready status forms"
 
 home=$(new_home check-merged-teardown-refusal)
 lifecycle_project=$(make_lifecycle_project "$home")
@@ -631,6 +709,46 @@ assert_contains "$out" \
 assert_present "$home/state/invalid-receipt.todo-merged-reconciliation" \
   "receipt validation destroyed rejected evidence"
 pass "invalid merged receipts fail closed without changing task or board state"
+
+home=$(new_home check-completed-receipt-sweep)
+: > "$home/done.log"
+printf '%s\n' fm-todo-merged-reconciliation-v1 legacy-closed github \
+  https://github.com/example/repo/pull/61 github.com example/repo 61 merged \
+  > "$home/state/legacy-closed.todo-merged-reconciliation"
+chmod 600 "$home/state/legacy-closed.todo-merged-reconciliation"
+printf '%s\n' fm-todo-merged-reconciliation-v2 durable-closed github \
+  https://github.com/example/repo/pull/62 github.com example/repo 62 merged closed \
+  > "$home/state/durable-closed.todo-merged-reconciliation"
+chmod 600 "$home/state/durable-closed.todo-merged-reconciliation"
+write_listing "$home" done 'id,state,kind,repo,title,links' \
+  'legacy-closed,done,ship,firstmate,Legacy completed receipt,pr:https://github.com/example/repo/pull/61'
+out=$(FM_FAKE_DONE_LOG="$home/done.log" run_project "$home" --check) \
+  || fail "report-only completed-receipt sweep exited non-zero"
+assert_contains "$out" \
+  "DRIFT merged-pr-open: legacy-closed - completed reconciliation receipt cleanup requires verified mutation authority" \
+  "a legacy completed receipt was not recognized from exact Done identity"
+assert_contains "$out" \
+  "DRIFT merged-pr-open: durable-closed - completed reconciliation receipt cleanup requires verified mutation authority" \
+  "a closed receipt was not recognized independently of open rows"
+assert_present "$home/state/legacy-closed.todo-merged-reconciliation" \
+  "report-only cleanup removed a legacy receipt"
+assert_present "$home/state/durable-closed.todo-merged-reconciliation" \
+  "report-only cleanup removed a closed receipt"
+
+out=$(FM_FAKE_DONE_LOG="$home/done.log" run_project "$home" --check --reconcile) \
+  || fail "authorized completed-receipt sweep exited non-zero"
+assert_contains "$out" \
+  "DRIFT merged-pr-open: legacy-closed - completed reconciliation receipt retired" \
+  "the exact Done identity did not retire a legacy pending receipt"
+assert_contains "$out" \
+  "DRIFT merged-pr-open: durable-closed - completed reconciliation receipt retired" \
+  "the independent sweep did not retire a closed receipt"
+assert_absent "$home/state/legacy-closed.todo-merged-reconciliation" \
+  "legacy completed receipt survived authorized cleanup"
+assert_absent "$home/state/durable-closed.todo-merged-reconciliation" \
+  "closed receipt survived authorized cleanup"
+[ ! -s "$home/done.log" ] || fail "receipt cleanup replayed board closure"
+pass "completed exact-identity receipts retire independently of open rows"
 
 # --- (i) FM_HOME is required fail-closed ------------------------------------
 
