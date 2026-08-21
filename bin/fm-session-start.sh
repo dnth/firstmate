@@ -540,9 +540,9 @@ done
 [ "$ORPHAN_STATUS_FOUND" -eq 1 ] || printf '(none)\n'
 
 # The compact listing above is what the board SAYS; the metadata block above is
-# what the fleet IS. bin/fm-todo-project.sh owns the comparison and is
-# report-only, so reconciliation stays with firstmate's judgment. It is silent
-# when the two agree, so this subsection appears only when there is drift.
+# what the fleet IS. bin/fm-todo-project.sh owns the comparison, its sole exact
+# merged-PR auto-fix, and every report-only finding. It is silent when the two
+# agree, so this subsection appears only when there is drift.
 DRIFT_OUT=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-todo-project.sh" --check 2>&1) || DRIFT_OUT=
 if [ -n "$DRIFT_OUT" ]; then
   subsection "Board-vs-reality drift (bin/fm-todo-project.sh --check)"
