@@ -27,6 +27,7 @@
 #   (q) listing fields match the installed tasks-axi contract
 #   (r) skipped arming accepts only exact PR-ready status events
 #   (s) completed receipts retire independently of open board rows
+#   (t) receipt close authority is bound to one board-row generation
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -132,7 +133,16 @@ SH
 # One tasks-axi listing fixture, in the tool's own rendering.
 write_listing() {  # <home> <name> <header-fields> <row>...
   local home=$1 name=$2 fields=$3 count
+  local -a rows
   shift 3
+  case ",$fields," in
+    *,created,*) ;;
+    *)
+      fields="$fields,created"
+      for row in "$@"; do rows+=("$row,2026-08-21"); done
+      set -- "${rows[@]}"
+      ;;
+  esac
   count=$#
   {
     printf 'count: %s\n' "$count"
@@ -648,8 +658,8 @@ fm_write_meta "$home/state/retry-pr.meta" \
   'kind=ship' \
   'mode=no-mistakes' \
   'pr=https://github.com/example/repo/pull/43'
-write_listing "$home" in_flight 'id,state,kind,repo,title,hold_until' \
-  'retry-pr,in_flight,ship,firstmate,Merged close retry,"-"'
+write_listing "$home" in_flight 'id,state,kind,repo,title,hold_until,created' \
+  'retry-pr,in_flight,ship,firstmate,Merged close retry,"-",2026-08-20'
 out=$(FM_FAKE_GH_STATE=MERGED FM_FAKE_DONE_RC=1 \
   FM_FAKE_PR_CHECK_LOG="$home/pr-check.log" FM_FAKE_TEARDOWN_LOG="$home/teardown.log" \
   FM_FAKE_DONE_LOG="$home/done.log" run_lifecycle_project "$home" "$lifecycle_project" --check --reconcile) \
@@ -664,6 +674,8 @@ assert_absent "$home/state/retry-pr.status" \
 assert_present "$home/state/retry-pr.todo-merged-reconciliation" \
   "board-close failure lost the durable merged identity"
 
+write_listing "$home" in_flight 'id,state,kind,repo,title,hold_until,created' \
+  'retry-pr,in_flight,ship,firstmate,Merged close retry,"-",2026-08-20'
 out=$(FM_FAKE_GH_STATE=OPEN FM_FAKE_PR_CHECK_LOG="$home/pr-check.log" \
   FM_FAKE_TEARDOWN_LOG="$home/teardown.log" FM_FAKE_DONE_LOG="$home/done.log" \
   run_lifecycle_project "$home" "$lifecycle_project" --check --reconcile) \
@@ -677,7 +689,43 @@ assert_contains "$out" \
   || fail "board closure was not attempted exactly once per reconciliation pass"
 assert_absent "$home/state/retry-pr.todo-merged-reconciliation" \
   "successful retry did not remove the durable receipt"
-pass "merged board closure retries idempotently from its receipt after teardown"
+pass "merged board closure retries only against the matching board generation"
+
+home=$(new_home check-reused-receipt-id)
+lifecycle_project=$(make_lifecycle_project "$home")
+: > "$home/pr-check.log"
+: > "$home/teardown.log"
+: > "$home/done.log"
+printf '%s\n' fm-todo-merged-reconciliation-v3 reused-pr github \
+  https://github.com/example/repo/pull/71 github.com example/repo 71 merged pending 2026-08-20 \
+  > "$home/state/reused-pr.todo-merged-reconciliation"
+chmod 600 "$home/state/reused-pr.todo-merged-reconciliation"
+write_listing "$home" in_flight 'id,state,kind,repo,title,hold_until,created' \
+  'reused-pr,in_flight,ship,firstmate,New generation reusing an old ID,"-",2026-08-21'
+out=$(FM_FAKE_GH_STATE=OPEN FM_FAKE_PR_CHECK_LOG="$home/pr-check.log" \
+  FM_FAKE_TEARDOWN_LOG="$home/teardown.log" FM_FAKE_DONE_LOG="$home/done.log" \
+  run_lifecycle_project "$home" "$lifecycle_project" --check) \
+  || fail "report-only reused-ID reconciliation exited non-zero"
+assert_contains "$out" \
+  "DRIFT merged-pr-open: reused-pr - stale reconciliation receipt does not authorize the current board generation" \
+  "report-only reconciliation did not reject a receipt from an older row generation"
+[ ! -s "$home/teardown.log" ] || fail "a stale receipt invoked teardown"
+[ ! -s "$home/done.log" ] || fail "a stale receipt closed the reused board ID"
+assert_present "$home/state/reused-pr.todo-merged-reconciliation" \
+  "report-only reconciliation retired a stale receipt"
+
+out=$(FM_FAKE_GH_STATE=OPEN FM_FAKE_PR_CHECK_LOG="$home/pr-check.log" \
+  FM_FAKE_TEARDOWN_LOG="$home/teardown.log" FM_FAKE_DONE_LOG="$home/done.log" \
+  run_lifecycle_project "$home" "$lifecycle_project" --check --reconcile) \
+  || fail "authorized reused-ID reconciliation exited non-zero"
+assert_contains "$out" \
+  "DRIFT merged-pr-open: reused-pr - stale reconciliation receipt retired without closing the current board generation" \
+  "authorized reconciliation did not retire stale replay authority"
+[ ! -s "$home/teardown.log" ] || fail "stale receipt retirement invoked teardown"
+[ ! -s "$home/done.log" ] || fail "stale receipt retirement closed the reused board ID"
+assert_absent "$home/state/reused-pr.todo-merged-reconciliation" \
+  "stale replay authority survived authorized retirement"
+pass "reused task IDs cannot replay receipt authority across board generations"
 
 home=$(new_home check-invalid-merged-receipt)
 lifecycle_project=$(make_lifecycle_project "$home")
