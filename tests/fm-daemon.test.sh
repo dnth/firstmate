@@ -362,7 +362,7 @@ test_housekeeping_pause_default_is_2700_and_override_wins() {
   echo $(( now - 2800 )) > "$state/.subsuper-paused-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
     FM_STATE_OVERRIDE="$state" env -u FM_PAUSE_RESURFACE_SECS bash -c \
-    '. "$1"; housekeeping "$2"' bash "$DAEMON" "$state"
+    ". \"\$1\"; housekeeping \"\$2\"" bash "$DAEMON" "$state"
   grep -F "awaiting external" "$state/.subsuper-escalations" >/dev/null 2>&1 \
     || fail "an idle pause aged 2800s did not re-surface under the production default"
 
