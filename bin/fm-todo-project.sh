@@ -67,7 +67,7 @@
 #   DRIFT merged-pr-open: <id> - <reason>
 #     A task's canonical recorded PR is exactly merged while its board row is
 #     still open. This is the sole auto-fix: guarded teardown runs without force,
-#     then tasks-axi closes the item with its recorded PR URL.
+#     then tasks-axi closes the item, recording its URL only for GitHub.
 #   DRIFT queued-has-worker: <id> - <reason>
 #     A queued board row has a current-state source, so a local worker already
 #     exists even though the board still presents the work as dispatchable.
@@ -440,6 +440,7 @@ run_emit() {
 # --- check ------------------------------------------------------------------
 
 AUTO_CLOSED_IDS=$'\n'
+TORN_DOWN_IDS=$'\n'
 PR_CHECKED_IDS=$'\n'
 SECONDMATE_PROJECT_ROWS=
 CREW_PROBED_IDS=$'\n'
@@ -453,6 +454,7 @@ id_in_set() {  # <newline-delimited-set> <id>
 }
 
 mark_auto_closed() { AUTO_CLOSED_IDS="${AUTO_CLOSED_IDS}$1"$'\n'; }
+mark_torn_down() { TORN_DOWN_IDS="${TORN_DOWN_IDS}$1"$'\n'; }
 
 # Read the registry through its one parser and retain only exact project names.
 # The projects field is comma-separated provisioning data; matching it is a
@@ -689,6 +691,7 @@ auto_close_merged_pr() {  # <id>
     printf 'DRIFT merged-pr-open: %s - merged PR teardown refused; task and board item preserved\n' "$id"
     return 1
   fi
+  mark_torn_down "$id"
   close_merged_board_item "$id"
 }
 
@@ -720,6 +723,7 @@ check_inflight() {  # <in_flight-listing>
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     id_in_set "$AUTO_CLOSED_IDS" "$id" && continue
+    id_in_set "$TORN_DOWN_IDS" "$id" && continue
     verdict=$(crew_verdict_for "$id") || continue
     verdict_has_no_source "$verdict" || continue
     reason=${verdict##*source: none}
@@ -739,6 +743,7 @@ check_secondmate_scopes() {  # <listing>...
     while IFS=$'\t' read -r id repo; do
       [ -n "$id" ] || continue
       id_in_set "$AUTO_CLOSED_IDS" "$id" && continue
+      id_in_set "$TORN_DOWN_IDS" "$id" && continue
       secondmate=$(secondmate_for_repo "$repo") || continue
       verdict=$(crew_verdict_for "$id") || continue
       verdict_has_no_source "$verdict" || continue
@@ -754,6 +759,7 @@ check_queued_workers() {  # <queued-listing>
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     id_in_set "$AUTO_CLOSED_IDS" "$id" && continue
+    id_in_set "$TORN_DOWN_IDS" "$id" && continue
     verdict=$(crew_verdict_for "$id") || continue
     verdict_has_no_source "$verdict" && continue
     printf 'DRIFT queued-has-worker: %s - board says queued but a local worker has a current-state source\n' "$id"

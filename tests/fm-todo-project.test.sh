@@ -660,8 +660,8 @@ fm_write_meta "$home/state/retry-pr.meta" \
   'kind=ship' \
   'mode=no-mistakes' \
   'pr=https://github.com/example/repo/pull/43'
-write_listing "$home" in_flight 'id,state,kind,repo,title,hold_until' \
-  'retry-pr,in_flight,ship,firstmate,Merged close retry,"-"'
+write_listing "$home" queued 'id,state,kind,repo,title,hold_until' \
+  'retry-pr,queued,ship,firstmate,Merged close retry,"-"'
 out=$(FM_FAKE_GH_STATE=MERGED FM_FAKE_DONE_RC=1 \
   FM_FAKE_PR_CHECK_LOG="$home/pr-check.log" FM_FAKE_TEARDOWN_LOG="$home/teardown.log" \
   FM_FAKE_DONE_LOG="$home/done.log" FM_FAKE_LIFECYCLE_LOG="$home/lifecycle.log" \
@@ -670,6 +670,8 @@ out=$(FM_FAKE_GH_STATE=MERGED FM_FAKE_DONE_RC=1 \
 assert_contains "$out" \
   "DRIFT merged-pr-open: retry-pr - teardown completed but the merged board item could not be closed" \
   "--check did not surface the retryable board-close failure"
+assert_not_contains "$out" "DRIFT queued-has-worker: retry-pr" \
+  "the close-failure path reused a pre-teardown worker verdict"
 assert_absent "$home/state/retry-pr.meta" \
   "the first retry fixture did not complete teardown"
 assert_absent "$home/state/retry-pr.status" \
@@ -680,7 +682,9 @@ assert_absent "$home/state/retry-pr.status" \
 : > "$home/teardown.log"
 : > "$home/done.log"
 : > "$home/lifecycle.log"
-out=$(FM_FAKE_GH_STATE=MERGED FM_FAKE_PR_CHECK_LOG="$home/pr-check.log" \
+out=$(FM_FAKE_GH_STATE=MERGED \
+  FM_FAKE_CREW_VERDICT='state: unknown · source: none · no metadata for retry-pr' \
+  FM_FAKE_PR_CHECK_LOG="$home/pr-check.log" \
   FM_FAKE_TEARDOWN_LOG="$home/teardown.log" FM_FAKE_DONE_LOG="$home/done.log" \
   FM_FAKE_LIFECYCLE_LOG="$home/lifecycle.log" \
   run_lifecycle_project "$home" "$lifecycle_project" --check --reconcile) \

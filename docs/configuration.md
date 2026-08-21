@@ -591,6 +591,7 @@ FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; defaul
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_TODO_ITEM_MAX=100    # characters per projected session-todo item in bin/fm-todo-project.sh --emit
+FM_TODO_PR_TIMEOUT=20   # seconds allowed per direct forge poll in fm-todo-project; invalid or non-positive values reset to 20
 FM_TEARDOWN_NM_TIMEOUT=10    # seconds allowed per no-mistakes query or abort inside fm-teardown.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when axi status cannot be attributed to the current code
 FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by working/paused watcher triage
