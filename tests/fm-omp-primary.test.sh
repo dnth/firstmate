@@ -807,6 +807,96 @@ JS
   pass "OMP confirms the recovery handling handshake after delivering its wake steer"
 }
 
+# A refused handling handshake must be classified and surfaced exactly once
+# rather than swallowed, or OMP would deliver a wake whose recovery episode was
+# never handed off. Upstream pins this for Pi; the shared core makes the same
+# guarantee OMP's, so pin it here too.
+test_native_omp_refused_handling_delivery_is_typed_once() {
+  local fixture out status=0
+  fixture="$TMP_ROOT/native-handling-refused"
+  mkdir -p "$fixture/.omp/extensions" "$fixture/bin" "$fixture/config" "$fixture/state"
+  : > "$fixture/AGENTS.md"
+  git init -q -b main "$fixture"
+  cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$fixture/.omp/extensions/fm-primary-omp.ts"
+  cp "$ROOT/bin/fm-primary-watch-core.ts" "$fixture/bin/fm-primary-watch-core.ts"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$fixture/bin/fm-primary-scope-lib.sh"
+  cp "$ROOT/bin/fm-gate-refuse-lib.sh" "$fixture/bin/fm-gate-refuse-lib.sh"
+  cp "$ROOT/bin/fm-operational-input.sh" "$fixture/bin/fm-operational-input.sh"
+  cp "$ROOT/bin/fm-sessionstart-nudge.sh" "$fixture/bin/fm-sessionstart-nudge.sh"
+  cp "$ROOT/bin/fm-pi-compatible-runtimes" "$fixture/bin/fm-pi-compatible-runtimes"
+  cat > "$fixture/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'refused generation=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
+  echo "watcher: invalid handling delivery confirmation" >&2
+  exit 1
+fi
+printf 'arm=%s predecessor=%s\n' "$$" "${FM_WATCH_PREDECESSOR_ARM_PID:-none}" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: synthetic actionable close\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$fixture/bin/"*.sh
+
+  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" \
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" \
+    FM_ARM_LOG="$TMP_ROOT/native-handling-refused.log" \
+    FM_STOP_FILE="$TMP_ROOT/native-handling-refused.stop" \
+    node --input-type=module 2>&1 <<'JS'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const armRows = () => (existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+  : []);
+
+let tool = null;
+let steer = "";
+let steers = 0;
+const api = {
+  zod: { object: () => ({}) },
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_omp") tool = candidate;
+  },
+  sendMessage(message) {
+    steers += 1;
+    steer += String(message?.content ?? "");
+  },
+};
+writeFileSync(`${process.env.FM_STATE_OVERRIDE}/.lock`, `${process.pid}\n`);
+process.argv[1] = process.env.EXTENSION;
+const extension = await import(`${pathToFileURL(process.env.EXTENSION).href}?refused=${Date.now()}`);
+extension.default(api);
+if (!tool) throw new Error("OMP did not register its watcher arm tool");
+await tool.execute();
+for (let i = 0; i < 400 && !steer.includes("handling delivery confirmation was rejected"); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+if (!steer.includes("FIRSTMATE WATCHER WAKE")) throw new Error(`missing follow-up: ${steer}`);
+if (!steer.includes("handling delivery confirmation was rejected")) {
+  throw new Error(`refused handshake was swallowed: ${steer}`);
+}
+if (steers !== 1) throw new Error(`refused handshake was not a single typed steer, got ${steers}`);
+const refusals = armRows().filter((row) => row.startsWith("refused "));
+if (refusals.length < 1) throw new Error(`handling-delivered was never attempted: ${armRows().join(" | ")}`);
+console.log("omp-refused-handshake-ok");
+JS
+  ) || status=$?
+  printf 'stop\n' > "$TMP_ROOT/native-handling-refused.stop" 2>/dev/null || true
+  expect_code 0 "$status" "OMP refused handling delivery"
+  assert_contains "$out" omp-refused-handshake-ok "OMP swallowed a refused handling handshake"
+  pass "OMP surfaces a refused handling handshake as one typed wake"
+}
+
 test_resolve_path_uses_node_when_readlink_f_is_unavailable
 test_exact_bun_omp_primary_identity
 test_standalone_omp_primary_identity
@@ -817,3 +907,4 @@ test_native_omp_fresh_checkout_nudges_once
 test_primary_marker_refuses_whitespace_identity
 test_native_primary_extension_contract
 test_native_omp_confirms_recovery_handling_delivery
+test_native_omp_refused_handling_delivery_is_typed_once

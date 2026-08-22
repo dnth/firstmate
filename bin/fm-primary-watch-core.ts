@@ -324,28 +324,77 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     };
   }
 
-  async function sendWake(
-    owner: SessionGeneration,
-    message: string,
-    recovery?: RecoveryHandoff,
-  ): Promise<void> {
+  async function sendWake(owner: SessionGeneration, message: string): Promise<void> {
     if (!generationIsLive(owner)) return;
     const content = encodeOperationalInput(
       "watcher",
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
     );
     await sendFollowUp(content);
-    if (recovery) {
+  }
+
+  function confirmHandlingDelivery(recovery: RecoveryHandoff): { ok: boolean; detail: string } {
+    try {
       const result = spawnSync(
         "bash",
         [armScript, "--handling-delivered", recovery.generation, "--watcher-pid", recovery.watcherPid],
         {
           cwd: fmRoot,
+          encoding: "utf8",
           env: { ...process.env, FM_HOME: fmHome, FM_STATE_OVERRIDE: state, FM_ROOT_OVERRIDE: fmRoot },
         },
       );
-      if (result.status !== 0) throw new Error("watcher recovery delivery could not be confirmed");
+      if (result.status === 0) return { ok: true, detail: "" };
+      const stderr = (result.stderr || "").trim();
+      return {
+        ok: false,
+        detail:
+          `watcher: FAILED - handling delivery confirmation was rejected ` +
+          `(status=${result.status ?? "none"} generation=${recovery.generation} watcherPid=${recovery.watcherPid})` +
+          `${stderr ? `\n${stderr}` : ""}`,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        ok: false,
+        detail:
+          `watcher: FAILED - handling delivery confirmation could not be executed ` +
+          `(generation=${recovery.generation} watcherPid=${recovery.watcherPid})\n${message}`,
+      };
     }
+  }
+
+  // Retry once against whatever the live successor now reports: the first
+  // attempt can lose a race with a generation that moved on between readiness
+  // and delivery, and a second attempt costs one bounded call.
+  function confirmHandlingDeliveryWithRetry(
+    owner: SessionGeneration,
+    recovery: RecoveryHandoff,
+  ): { ok: boolean; detail: string } {
+    const snapshot = (): RecoveryHandoff => {
+      const current = owner.child ? armRecovery.get(owner.child) : undefined;
+      return current ?? recovery;
+    };
+    const first = confirmHandlingDelivery(snapshot());
+    if (first.ok) return first;
+    return confirmHandlingDelivery(snapshot());
+  }
+
+  async function deliverActionableWake(
+    owner: SessionGeneration,
+    message: string,
+    recovery?: RecoveryHandoff,
+  ): Promise<void> {
+    if (!generationIsLive(owner)) return;
+    if (recovery) {
+      const confirmed = confirmHandlingDeliveryWithRetry(owner, recovery);
+      if (!confirmed.ok) {
+        if (!pidAlive(recovery.watcherPid)) await retireArm(owner.child);
+        await sendWake(owner, `${message}\n\n${confirmed.detail}`);
+        return;
+      }
+    }
+    await sendWake(owner, message);
   }
 
   function surfaceFailure(owner: SessionGeneration, message: string): void {
@@ -564,18 +613,27 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       const classification = classifyClose(stdout, stderr, code, signal);
       const predecessor = String(armChild.pid ?? "");
       if (classification.kind === "actionable") {
+        if (owner.restoring) return;
         owner.retryFailures = 0;
         owner.restoring = true;
         void (async () => {
-          const restoration = await restoreAfterActionableClose(owner, predecessor);
-          if (generationIsLive(owner)) owner.restoring = false;
-          if (!generationIsLive(owner)) return;
-          const message = restoration.failure
-            ? `${classification.message}\n\n${restoration.failure}`
-            : classification.message;
-          await sendWake(owner, message, restoration.recovery);
-        })().catch(() => {
-        });
+          try {
+            const restoration = await restoreAfterActionableClose(owner, predecessor);
+            if (!generationIsLive(owner)) return;
+            const message = restoration.failure
+              ? `${classification.message}\n\n${restoration.failure}`
+              : classification.message;
+            await deliverActionableWake(owner, message, restoration.recovery);
+          } catch (error) {
+            const detail = error instanceof Error ? error.message : String(error);
+            surfaceFailure(
+              owner,
+              `watcher: FAILED - ${runtimeLabel} extension could not deliver an actionable wake\n${detail}`,
+            );
+          } finally {
+            if (generationIsLive(owner)) owner.restoring = false;
+          }
+        })();
         return;
       }
       if (owner.restoring) return;
