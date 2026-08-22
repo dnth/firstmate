@@ -108,6 +108,9 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | source-only supervision | a registered source with no task metadata trips the shared predicate and general guard |
 | argv integrity | an argument containing spaces survives as one argument, a shell-looking argument is passed literally with no interpretation, and an unrepresentable newline is rejected at registration |
 | bounded output | output beyond `FM_PROCEVENT_MAX_OUTPUT_BYTES` is drained while only the bound is staged, then truncated and captured |
+| condition->action single-fire and trust | `tests/fm-procevent-when.test.sh` drives the public `when` adapter and generic runner with real commands, proving stable true fires once, a claimed fire restarts as ambiguous without a second action, concurrent arms publish one complete watch, mutated specs or either executable are refused before execution, and protected RunPod, X-mode, public-followup, destructive, and command-carrier entrypoints fail closed at registration |
+| condition->action terminal outcomes | the same suite proves flapping true polls do not fire, action failure, condition error budget, deadline expiry, and a true poll completing after its deadline each produce the expected terminal captured result without an unsafe action |
+| condition->action process bounds | the same suite proves action timeout terminates descendants and command-output staging remains within `FM_WHEN_OUTPUT_TAIL_BYTES` while the command runs |
 | silent failure handling | a nonzero exit with no output publishes nothing and leaves the source registered for retry |
 | inertness | a home with no registered source generates no state, starts no process, and does not need supervision |
 
@@ -138,7 +141,8 @@ Without this launcher, reconcile would silently fail to start a runner on macOS 
 ## Scope
 
 The runner is domain-neutral and creates no endpoint, task metadata, or backlog item, so the supported primary harnesses and runtime backends are unaffected except through the `check` wake they already consume.
-Lavish is the first adapter; adding another requires only a new `bin/fm-procevent-<adapter>.sh`, whose `terminal` command is optional and defaults to keeping the source armed.
+Adapters extend the runner through `bin/fm-procevent-<adapter>.sh`; the `when` adapter also uses the runner library's locked registration publisher so its private trust state and source registration are serialized under one source boundary.
+An adapter's `terminal` command is optional and defaults to keeping the source armed.
 
 Proactive delivery is inside that same boundary.
 The watcher reports a queued process-event result through the one shared actionable-exit path (`wake` in `bin/fm-push-transition-lib.sh`) that every existing signal, stale, and check wake already uses, so it reads no pane, queries no backend, and names no harness.

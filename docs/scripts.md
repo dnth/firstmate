@@ -78,6 +78,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-secondmate-parent-lib.sh` | Parse durable secondmate parent-route binding records                              |
 | `fm-secondmate-report.sh` | Optional helper to append a correlated parent status or document-pointer report       |
 | `fm-procevent-remote-reply.sh` | Relay non-destructive remote-secondmate lifecycle deltas and resolve exact correlated pending replies through process events |
+| `fm-procevent-when.sh`   | Fire a trust-bound deterministic action at most once when its registered condition holds, then wake with the outcome |
 | `fm-gate-refuse-lib.sh`  | Shared no-mistakes gate-context refusal for fleet lifecycle entrypoints               |
 | `fm-primary-watch-core.ts` | Harness-neutral watcher lifecycle core bound by the Pi and OMP primary extensions (docs/watcher-continuity.md) |
 | `fm-primary-watch-version-lib.sh` | The one definition of a primary watcher marker version, hashing that adapter plus the shared core |
