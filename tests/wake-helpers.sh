@@ -110,6 +110,21 @@ SH
   printf '%s\n' "$fakebin/fm-crew-state.sh"
 }
 
+# Print the generation from a recovery marker token of any status/kind.
+recovery_marker_generation() {  # <marker-file>
+  sed -n 's/^[^:]*:[^:]*:\(.*\)$/\1/p' "$1"
+}
+
+# Acknowledge a drain from its captured stderr (the WAKE_ACK_REQUIRED line).
+ack_drain_err() {  # <state> <stderr-file>
+  local state=$1 err=$2 sequence generation
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  [ -n "$sequence" ] && [ -n "$generation" ] || return 1
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-drain.sh" \
+    --ack-through "$sequence" --recovery-generation "$generation"
+}
+
 make_supercase() {
   local name=$1 dir fakebin
   dir="$TMP_ROOT/$name"

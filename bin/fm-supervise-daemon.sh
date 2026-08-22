@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # fm-supervise-daemon.sh — presence-gated sub-supervisor (closes #27's P2).
 #
-# Wraps bin/fm-watch.sh: runs it as a child, classifies each wake reason, and
+# Wraps bin/fm-watch.sh: runs it as a child, presents and classifies every
+# durable wake after an actionable close, acknowledges only after routing, and
 # either SELF-HANDLES the routine majority in bash (no firstmate turn) or
 # ESCALATES a batched, distilled digest to the supervisor pane on
 # captain-relevant events plus bounded declared-pause rechecks. This is the
@@ -36,8 +37,11 @@
 #     to daemon-owned one-shot behavior and enqueues every wake to
 #     state/.wake-queue BEFORE advancing its suppression markers, so a
 #     crash/restart/missed injection is recovered on the next fm-wake-drain.sh.
-#     The daemon does not touch the queue; it only reads the watcher's stdout
-#     reason.
+#     After a watcher cycle, the daemon handles every durable row through that
+#     drain and acknowledges it only after a complete, stable presentation has
+#     been routed and every open-decision digest is confirmed delivered.
+#     Capture, buffering, or confirmed-delivery failure leaves the recovery
+#     episode durable for retry.
 #   - Fail-safe-to-escalate: any wake the classifier cannot confidently mark
 #     routine is escalated.
 #   - Bounded wedge latency: a stale pane without a declared external wait is
@@ -1334,6 +1338,105 @@ handle_wake() {  # <reason> <state>
   esac
 }
 
+handle_durable_wakes() {  # <watcher-reason> <state>
+  local fallback_reason=$1 state=$2 out err tab epoch sequence kind key payload rest line
+  local handled=0 ack_through ack_generation capture_before capture_after
+  local capture_valid=false decision_parse_state=outside decision_lines='' decision_count=0
+  local decisions_routed_completely=false
+  local decision_header='OPEN DECISIONS (still open, folded from the durable status logs - not just the latest line):'
+  local decision_terminator="OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'"
+  out=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || return 1
+  err=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || { rm -f "$out"; return 1; }
+  if ! "$FM_DAEMON_DIR/fm-wake-drain.sh" > "$out" 2> "$err"; then
+    cat "$err" >&2
+    rm -f "$out" "$err"
+    return 1
+  fi
+
+  if [ -f "$out" ] && [ ! -L "$out" ]; then
+    capture_before=$(cksum "$out" 2>/dev/null) && capture_valid=true
+  fi
+  tab=$(printf '\t')
+  if [ "$capture_valid" = true ]; then
+    while IFS="$tab" read -r epoch sequence kind key payload rest; do
+      case "$epoch" in ''|*[!0-9]*) continue ;; esac
+      case "$sequence" in ''|*[!0-9]*) continue ;; esac
+      case "$kind" in signal|stale|check|heartbeat) ;; *) continue ;; esac
+      handle_wake "$payload" "$state"
+      handled=$((handled + 1))
+    done < "$out" || capture_valid=false
+  fi
+  [ "$handled" -gt 0 ] || handle_wake "$fallback_reason" "$state"
+
+  if [ "$capture_valid" = true ]; then
+    while IFS= read -r line; do
+      case "$decision_parse_state" in
+        outside)
+          if [ "$line" = "$decision_header" ]; then
+            decision_parse_state=inside
+          else
+            case "$line" in
+              'OPEN DECISIONS'*) capture_valid=false; break ;;
+            esac
+          fi
+          ;;
+        inside)
+          if [ "$line" = "$decision_terminator" ]; then
+            decision_parse_state=complete
+          else
+            [ -n "$line" ] || { capture_valid=false; break; }
+            decision_lines="$decision_lines$line
+"
+            decision_count=$((decision_count + 1))
+          fi
+          ;;
+        complete)
+          [ -z "$line" ] || { capture_valid=false; break; }
+          ;;
+      esac
+    done < "$out" || capture_valid=false
+  fi
+  case "$decision_parse_state" in outside|complete) ;; *) capture_valid=false ;; esac
+  if [ "$capture_valid" = true ]; then
+    capture_after=$(cksum "$out" 2>/dev/null) || capture_valid=false
+    [ "$capture_valid" = false ] || [ "$capture_after" = "$capture_before" ] || capture_valid=false
+  fi
+
+  if [ "$capture_valid" = true ] && [ "$decision_count" -gt 0 ]; then
+    decisions_routed_completely=true
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      escalate_add "$state" "$line" || decisions_routed_completely=false
+    done <<EOF
+$decision_lines
+EOF
+    if [ "$decisions_routed_completely" = true ]; then
+      [ -s "$state/.subsuper-escalations" ] \
+        && escalate_flush "$state" \
+        || decisions_routed_completely=false
+    fi
+  elif [ "$capture_valid" = true ]; then
+    decisions_routed_completely=true
+    [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -gt 0 ] \
+      || { escalate_flush "$state" || true; }
+  fi
+
+  ack_through=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err" | tail -1)
+  ack_generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err" | tail -1)
+  grep -v '^WAKE_ACK_REQUIRED:' "$err" >&2 || true
+  rm -f "$out" "$err"
+  if [ "$decisions_routed_completely" != true ]; then
+    log "open decisions were not routed completely; retaining recovery episode"
+    return 1
+  fi
+  if [ -z "$ack_through" ] || [ -z "$ack_generation" ]; then
+    log "wake drain omitted its generation-bound acknowledgement; retaining durable wakes"
+    return 1
+  fi
+  "$FM_DAEMON_DIR/fm-wake-drain.sh" --ack-through "$ack_through" \
+    --recovery-generation "$ack_generation"
+}
+
 # --- log --------------------------------------------------------------------
 # Uses LOG set by fm_super_main; harmless no-op-ish if unset (tests source fns
 # directly and pass state explicitly, so they do not call log).
@@ -1567,7 +1670,9 @@ fm_super_main() {
           continue
         fi
         log "wake: $reason"
-        handle_wake "$reason" "$STATE"
+        if ! handle_durable_wakes "$reason" "$STATE"; then
+          log "durable wake handling was not acknowledged; restarting for recovery"
+        fi
         trim_log
       fi
       start_watcher || continue
