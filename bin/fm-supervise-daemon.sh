@@ -1336,8 +1336,8 @@ handle_wake() {  # <reason> <state>
 }
 
 handle_durable_wakes() {  # <watcher-reason> <state>
-  local fallback_reason=$1 state=$2 out err tab epoch sequence kind key payload rest
-  local handled=0 ack_through ack_generation
+  local fallback_reason=$1 state=$2 out err tab epoch sequence kind key payload rest line
+  local handled=0 ack_through ack_generation in_open_decisions=false
   out=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || return 1
   err=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || { rm -f "$out"; return 1; }
   if ! "$FM_DAEMON_DIR/fm-wake-drain.sh" > "$out" 2> "$err"; then
@@ -1355,6 +1355,23 @@ handle_durable_wakes() {  # <watcher-reason> <state>
     handled=$((handled + 1))
   done < "$out"
   [ "$handled" -gt 0 ] || handle_wake "$fallback_reason" "$state"
+
+  while IFS= read -r line; do
+    case "$line" in
+      'OPEN DECISIONS (still open,'*) in_open_decisions=true ;;
+      'OPEN DECISIONS: close one by answering it:'*) in_open_decisions=false ;;
+      *)
+        if [ "$in_open_decisions" = true ] && [ -n "$line" ]; then
+          escalate_add "$state" "$line"
+        fi
+        ;;
+    esac
+  done < "$out"
+  if [ "$in_open_decisions" = true ]; then
+    log "wake drain emitted an unterminated open-decisions section"
+  fi
+  [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -gt 0 ] \
+    || { escalate_flush "$state" || true; }
 
   ack_through=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err" | tail -1)
   ack_generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err" | tail -1)

@@ -118,6 +118,56 @@ test_routine_then_terminal_after_restart() {
   pass "lifecycle: routine self-handles, terminal survives a watcher restart, buffers once, no dup, injects once"
 }
 
+test_decision_only_recovery_routes_before_acknowledgement() {
+  local dir state daemon_bin expected marker
+  dir=$(make_supercase wd-decision-only-recovery)
+  state="$dir/state"
+  daemon_bin="$dir/daemon-bin"
+  expected="decision-task [key=release-route] needs-decision: choose the guarded release route"
+  marker="$state/.watcher-down"
+  mkdir -p "$daemon_bin"
+  printf 'needs-decision [key=release-route]: choose the guarded release route\nworking: unrelated progress after the decision\n' \
+    > "$state/decision-task.status"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_recovery_marker_publish "$2" downtime
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$marker" || fail "decision-only recovery marker could not be published"
+
+  cat > "$daemon_bin/fm-wake-drain.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = --ack-through ]; then
+  grep -F "$FM_EXPECTED_DECISION" "$FM_STATE_OVERRIDE/.subsuper-escalations" >/dev/null \
+    || { printf 'decision acknowledgement ran before decision routing\n' >&2; exit 91; }
+  printf 'ack-after-decision\n' > "$FM_STATE_OVERRIDE/.decision-ack-order"
+fi
+exec "$FM_REAL_WAKE_DRAIN" "$@"
+SH
+  chmod +x "$daemon_bin/fm-wake-drain.sh"
+
+  (
+    export FM_DAEMON_DIR="$daemon_bin"
+    export FM_REAL_WAKE_DRAIN="$DRAIN"
+    export FM_EXPECTED_DECISION="$expected"
+    export FM_STATE_OVERRIDE="$state"
+    export FM_ESCALATE_BATCH_SECS=30
+    handle_durable_wakes "check: rearm-resurface" "$state"
+  ) || fail "decision-only durable recovery failed"
+
+  grep -F "$expected" "$state/.subsuper-escalations" >/dev/null \
+    || fail "decision-only recovery omitted the buried open decision from its escalation"
+  grep -F 'check: rearm-resurface' "$state/.subsuper-escalations" >/dev/null \
+    || fail "decision-only recovery lost its generic fallback escalation"
+  [ -e "$state/.decision-ack-order" ] \
+    || fail "decision-only recovery did not prove routing before acknowledgement"
+  case "$(cat "$marker" 2>/dev/null || true)" in
+    acked:handling:*) ;;
+    *) fail "decision-only recovery did not retire its handled recovery episode" ;;
+  esac
+  pass "lifecycle: decision-only recovery routes the buried decision before acknowledgement"
+}
+
 # --- Phase 2: stale working-pane transient -> persistent -> resumed ----------
 test_stale_pane_transient_persistent_resume() {
   local dir state fakebin win key resumed_gen
@@ -168,4 +218,5 @@ test_stale_pane_transient_persistent_resume() {
 }
 
 test_routine_then_terminal_after_restart
+test_decision_only_recovery_routes_before_acknowledgement
 test_stale_pane_transient_persistent_resume
