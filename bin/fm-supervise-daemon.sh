@@ -38,7 +38,10 @@
 #     state/.wake-queue BEFORE advancing its suppression markers, so a
 #     crash/restart/missed injection is recovered on the next fm-wake-drain.sh.
 #     After a watcher cycle, the daemon handles every durable row through that
-#     drain and acknowledges it only after routing completes.
+#     drain and acknowledges it only after a complete, stable presentation has
+#     been routed and every open-decision digest is confirmed delivered.
+#     Capture, buffering, or confirmed-delivery failure leaves the recovery
+#     episode durable for retry.
 #   - Fail-safe-to-escalate: any wake the classifier cannot confidently mark
 #     routine is escalated.
 #   - Bounded wedge latency: a stale pane without a declared external wait is

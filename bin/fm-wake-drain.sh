@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Present durable watcher wake records, optionally acknowledge handled records,
-# annotate validated signal status keys, then assert liveness.
+# Present durable watcher wake records and the bounded folded OPEN DECISIONS
+# section, fail closed if that presentation cannot complete, optionally
+# acknowledge handled records, annotate validated signal status keys, then assert
+# liveness.
 #
 # Usage:
 #   fm-wake-drain.sh

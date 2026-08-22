@@ -705,8 +705,8 @@ JS
 
 # The shared core delivers the recovery handshake for every runtime bound to it,
 # so OMP must confirm a handling delivery exactly like Pi and OpenCode do: start
-# and verify the successor, deliver the wake steer, and only then run
-# fm-watch-arm.sh --handling-delivered for the generation the successor reported.
+# and verify the successor, run fm-watch-arm.sh --handling-delivered for the
+# generation the successor reported, and only then deliver the wake steer.
 # Upstream covers Pi and OpenCode; this pins the fork's OMP binding of the same
 # contract so a future adapter change cannot silently drop it.
 test_native_omp_confirms_recovery_handling_delivery() {

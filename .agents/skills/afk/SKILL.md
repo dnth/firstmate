@@ -138,7 +138,9 @@ behavior but needs a separate fix; the gap is recorded in
 
 ## Classification policy
 
-The daemon wraps `fm-watch.sh`, runs the watcher as a child, presents every durable wake after each actionable watcher close, classifies each presented record in bash, and acknowledges the presented generation only after routing completes.
+The daemon wraps `fm-watch.sh`, runs the watcher as a child, presents every durable wake after each actionable watcher close, and classifies each presented record in bash.
+It acknowledges the presented generation only after the drain output is complete and stable, every listed OPEN DECISION is buffered, and a buffered decision digest is confirmed delivered to the supervisor pane.
+An unreadable, truncated, mutated, or malformed presentation, a failed decision-buffer write, or an unconfirmed decision injection fails closed and leaves the recovery episode durable for retry.
 It self-handles the routine majority without consuming a firstmate turn.
 Captain-relevant events, plus a bounded recheck of a declared external wait that remains idle, escalate to firstmate's context as one pre-read, single-line, batched digest.
 The classification predicates (the captain-relevant verb set, declared-pause vocabulary, signal/stale tests, and fleet-scan) live in the shared `bin/fm-classify-lib.sh`, the same library the always-on watcher uses for its own triage when afk is off, so the two modes apply one identical policy.
@@ -231,7 +233,7 @@ Always exit through `bin/fm-afk-launch.sh stop`, which keeps `state/.afk` presen
 These properties must hold:
 
 - Nothing is lost after queue publication.
-  The daemon leaves every presented wake durable until routing completes and post-handling acknowledgement succeeds, so interruption replays the same work to the daemon or its successor.
+  The daemon leaves every presented wake durable until routing completes, every presented open-decision line is confirmed delivered, and post-handling acknowledgement succeeds, so interruption or a delivery failure replays the same work to the daemon or its successor.
 - Wedge detection is bounded-latency, not lossy.
 - Declared external waits are rechecked on a separate, bounded cadence rather than being mislabeled as wedges.
 - The catch-all scan backs up the keyword classifier.
