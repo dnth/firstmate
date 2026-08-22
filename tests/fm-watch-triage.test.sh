@@ -50,6 +50,34 @@ wait_live() {
   return 0
 }
 
+# Wait until the watcher has completed a whole poll cycle, or exited first.
+# The beacon is touched at the top of each poll, so observing two distinct
+# mtimes proves the cycle between them completed instead of passing vacuously
+# while a loaded machine is still doing bounded watcher startup work.
+wait_poll_cycle() {  # <state> <pid> [limit-ticks]
+  local state=$1 pid=$2 limit=${3:-300} beat first now i=0
+  beat="$state/.last-watcher-beat"
+  rm -f "$beat"
+  first=""
+  while [ "$i" -lt "$limit" ]; do
+    kill -0 "$pid" 2>/dev/null || return 1
+    first=$(file_mtime "$beat")
+    [ -n "$first" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  while [ "$i" -lt "$limit" ]; do
+    kill -0 "$pid" 2>/dev/null || return 1
+    now=$(file_mtime "$beat")
+    if [ -n "$now" ] && [ "$now" != "$first" ]; then
+      return 0
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
 wait_numeric_file() {
   local file=$1 limit=${2:-30} i=0 value
   while [ "$i" -lt "$limit" ]; do
@@ -413,7 +441,7 @@ test_provably_working_signal_absorbed() {
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
-  if ! wait_live "$pid" 30; then
+  if ! wait_poll_cycle "$state" "$pid"; then
     reap "$pid"; fail "watcher exited for a working: signal whose crew is provably working (should absorb): $(cat "$out")"
   fi
   [ ! -s "$out" ] || fail "provably-working signal printed a wake reason: $(cat "$out")"
@@ -433,7 +461,7 @@ test_turn_ended_provably_working_absorbed() {
   export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
-  if ! wait_live "$pid" 30; then
+  if ! wait_poll_cycle "$state" "$pid"; then
     reap "$pid"; fail "watcher exited for a turn-end whose crew is provably working (should absorb): $(cat "$out")"
   fi
   [ ! -s "$out" ] || fail "provably-working turn-end printed a wake reason: $(cat "$out")"
@@ -1239,7 +1267,7 @@ test_secondmate_stale_supervisor_beacon_escalates() {
   # The synthetic stale-secondmate hash intentionally differs from the seeded
   # pane hash, so production needs three one-second polls before publishing the
   # wedge timer. Leave scheduling headroom beyond that exact boundary.
-  wait_numeric_file "$state/.stale-since-$key" 60 || {
+  wait_numeric_file "$state/.stale-since-$key" 100 || {
     reap "$pid"; fail "a stale secondmate supervisor beacon did not start wedge tracking"
   }
   reap "$pid"
@@ -1285,7 +1313,7 @@ SH
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_numeric_file "$state/.stale-since-$key" 40 || {
+  wait_numeric_file "$state/.stale-since-$key" 100 || {
     reap "$pid"; fail "a local secondmate capture failure did not start wedge tracking"
   }
   reap "$pid"
@@ -1337,7 +1365,7 @@ SH
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_numeric_file "$state/.stale-since-$key" 50 || {
+  wait_numeric_file "$state/.stale-since-$key" 100 || {
     reap "$pid"; fail "a changing local secondmate capture prevented wedge tracking"
   }
   reap "$pid"
@@ -1378,7 +1406,7 @@ test_secondmate_future_supervisor_beacon_escalates() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_numeric_file "$state/.stale-since-$key" 30 \
+  wait_numeric_file "$state/.stale-since-$key" 100 \
     || { reap "$pid"; fail "a future-dated secondmate beacon suppressed wedge tracking"; }
   reap "$pid"
   unset FM_FAKE_CREW_STATE
@@ -1754,6 +1782,80 @@ test_busy_pane_changing_hash_escalates_past_turn_age_bound() {
   grep -F "stale: $window" "$out" >/dev/null || fail "busy turn-age escalation (changing hash) did not print the stale wake"
   grep -F "possible wedge" "$out" >/dev/null || fail "busy turn-age escalation (changing hash) did not flag a possible wedge"
   pass "a busy worker whose pane hash changes every poll still escalates once its completed-turn age reaches the bound"
+}
+
+# A single blocking external wait can keep a declared-pause pane semantically
+# busy past the completed-turn bound, bypassing the ordinary idle pause path.
+# Pin both sides of the discriminator on the same pane: the declared pause uses
+# the long cadence, and lifting the declaration restores wedge escalation.
+test_busy_declared_pause_uses_long_cadence_then_restores_wedge() {
+  local dir state fakebin out capture_file window key sig pid statusf
+  dir=$(make_case busy-declared-pause); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-review-scout"
+  statusf="$state/review-scout.status"
+  printf 'Working... (7200.4s) lavish-axi poll' > "$capture_file"
+  printf 'window=%s\nkind=scout\nharness=pi\n' "$window" > "$state/review-scout.meta"
+  record_pi_busy "$state" review-scout
+  printf 'paused: hosting the Lavish review, awaiting captain feedback\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-review-scout_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  touch -t 200001010000 "$state/review-scout.meta"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=1 \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a declared pause on a busy review pane was escalated: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a declared pause on a busy review pane printed a wake reason: $(cat "$out")"
+  [ -e "$state/.paused-$key" ] || fail "the busy-turn bound did not apply the declared-pause cadence"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a declared pause on a busy pane started the wedge timer"
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "a declared pause on a busy pane incremented the escalation counter"
+  reap "$pid"
+
+  set_mtime $(( $(date +%s) - 500 )) "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-review-scout_status"
+  printf '%s' "$(hash_text "$(cat "$capture_file")")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=1 \
+    FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || { reap "$pid"; fail "a declared pause past the long cadence was never rechecked"; }
+  grep -F "awaiting external" "$out" >/dev/null || fail "the recheck was not labeled a declared-pause recheck: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a declared pause on a busy pane was mislabeled a possible wedge: $(cat "$out")"
+  [ -e "$state/.paused-resurfaced-$key" ] || fail "the declared-pause re-surface throttle was cleared by the busy-turn bound"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a declared-pause recheck used the wedge timer"
+
+  printf 'working: review closed, resuming the sweep\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-review-scout_status"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=999 \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a lifted pause escalated before the wedge threshold: $(cat "$out")"
+  fi
+  [ -s "$state/.stale-since-$key" ] || fail "a lifted pause did not restore the busy-turn wedge timer"
+  [ ! -e "$state/.paused-$key" ] || fail "a lifted pause left declared-pause bookkeeping behind"
+  reap "$pid"
+
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || { reap "$pid"; fail "a lifted pause on an over-age busy pane no longer wedge-escalates"; }
+  grep -F "possible wedge" "$out" >/dev/null || fail "the restored busy-turn escalation did not flag a possible wedge: $(cat "$out")"
+  pass "a busy declared pause uses the long cadence, and lifting it restores wedge escalation"
 }
 
 test_busy_pane_turn_end_touch_resets_age() {
@@ -2368,6 +2470,7 @@ test_wedge_escalation_resets_when_pane_becomes_active
 test_busy_pane_below_turn_age_bound_is_absorbed
 test_busy_pane_stable_hash_escalates_past_turn_age_bound
 test_busy_pane_changing_hash_escalates_past_turn_age_bound
+test_busy_declared_pause_uses_long_cadence_then_restores_wedge
 test_busy_pane_turn_end_touch_resets_age
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
