@@ -1337,7 +1337,11 @@ handle_wake() {  # <reason> <state>
 
 handle_durable_wakes() {  # <watcher-reason> <state>
   local fallback_reason=$1 state=$2 out err tab epoch sequence kind key payload rest line
-  local handled=0 ack_through ack_generation in_open_decisions=false decision_route_failed=false
+  local handled=0 ack_through ack_generation capture_before capture_after
+  local capture_valid=false decision_parse_state=outside decision_lines='' decision_count=0
+  local decisions_routed_completely=false
+  local decision_header='OPEN DECISIONS (still open, folded from the durable status logs - not just the latest line):'
+  local decision_terminator="OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'"
   out=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || return 1
   err=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || { rm -f "$out"; return 1; }
   if ! "$FM_DAEMON_DIR/fm-wake-drain.sh" > "$out" 2> "$err"; then
@@ -1346,31 +1350,70 @@ handle_durable_wakes() {  # <watcher-reason> <state>
     return 1
   fi
 
+  if [ -f "$out" ] && [ ! -L "$out" ]; then
+    capture_before=$(cksum "$out" 2>/dev/null) && capture_valid=true
+  fi
   tab=$(printf '\t')
-  while IFS="$tab" read -r epoch sequence kind key payload rest; do
-    case "$epoch" in ''|*[!0-9]*) continue ;; esac
-    case "$sequence" in ''|*[!0-9]*) continue ;; esac
-    case "$kind" in signal|stale|check|heartbeat) ;; *) continue ;; esac
-    handle_wake "$payload" "$state"
-    handled=$((handled + 1))
-  done < "$out"
+  if [ "$capture_valid" = true ]; then
+    while IFS="$tab" read -r epoch sequence kind key payload rest; do
+      case "$epoch" in ''|*[!0-9]*) continue ;; esac
+      case "$sequence" in ''|*[!0-9]*) continue ;; esac
+      case "$kind" in signal|stale|check|heartbeat) ;; *) continue ;; esac
+      handle_wake "$payload" "$state"
+      handled=$((handled + 1))
+    done < "$out" || capture_valid=false
+  fi
   [ "$handled" -gt 0 ] || handle_wake "$fallback_reason" "$state"
 
-  while IFS= read -r line; do
-    case "$line" in
-      'OPEN DECISIONS (still open,'*) in_open_decisions=true ;;
-      'OPEN DECISIONS: close one by answering it:'*) in_open_decisions=false ;;
-      *)
-        if [ "$in_open_decisions" = true ] && [ -n "$line" ]; then
-          escalate_add "$state" "$line" || decision_route_failed=true
-        fi
-        ;;
-    esac
-  done < "$out"
-  if [ "$in_open_decisions" = true ]; then
-    log "wake drain emitted an unterminated open-decisions section"
+  if [ "$capture_valid" = true ]; then
+    while IFS= read -r line; do
+      case "$decision_parse_state" in
+        outside)
+          if [ "$line" = "$decision_header" ]; then
+            decision_parse_state=inside
+          else
+            case "$line" in
+              'OPEN DECISIONS'*) capture_valid=false; break ;;
+            esac
+          fi
+          ;;
+        inside)
+          if [ "$line" = "$decision_terminator" ]; then
+            decision_parse_state=complete
+          else
+            [ -n "$line" ] || { capture_valid=false; break; }
+            decision_lines="$decision_lines$line
+"
+            decision_count=$((decision_count + 1))
+          fi
+          ;;
+        complete)
+          [ -z "$line" ] || { capture_valid=false; break; }
+          ;;
+      esac
+    done < "$out" || capture_valid=false
   fi
-  if [ "$decision_route_failed" = false ]; then
+  case "$decision_parse_state" in outside|complete) ;; *) capture_valid=false ;; esac
+  if [ "$capture_valid" = true ]; then
+    capture_after=$(cksum "$out" 2>/dev/null) || capture_valid=false
+    [ "$capture_valid" = false ] || [ "$capture_after" = "$capture_before" ] || capture_valid=false
+  fi
+
+  if [ "$capture_valid" = true ] && [ "$decision_count" -gt 0 ]; then
+    decisions_routed_completely=true
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      escalate_add "$state" "$line" || decisions_routed_completely=false
+    done <<EOF
+$decision_lines
+EOF
+    if [ "$decisions_routed_completely" = true ]; then
+      [ -s "$state/.subsuper-escalations" ] \
+        && escalate_flush "$state" \
+        || decisions_routed_completely=false
+    fi
+  elif [ "$capture_valid" = true ]; then
+    decisions_routed_completely=true
     [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -gt 0 ] \
       || { escalate_flush "$state" || true; }
   fi
@@ -1379,8 +1422,8 @@ handle_durable_wakes() {  # <watcher-reason> <state>
   ack_generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err" | tail -1)
   grep -v '^WAKE_ACK_REQUIRED:' "$err" >&2 || true
   rm -f "$out" "$err"
-  if [ "$decision_route_failed" = true ]; then
-    log "open decisions could not be routed; retaining recovery episode"
+  if [ "$decisions_routed_completely" != true ]; then
+    log "open decisions were not routed completely; retaining recovery episode"
     return 1
   fi
   if [ -z "$ack_through" ] || [ -z "$ack_generation" ]; then

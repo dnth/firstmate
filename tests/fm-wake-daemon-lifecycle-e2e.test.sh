@@ -119,15 +119,21 @@ test_routine_then_terminal_after_restart() {
 }
 
 test_decision_only_recovery_routes_before_acknowledgement() {
-  local dir state daemon_bin expected marker
+  local dir state fakebin daemon_bin expected marker sent capture
   dir=$(make_supercase wd-decision-only-recovery)
   state="$dir/state"
+  fakebin="$dir/fakebin"
   daemon_bin="$dir/daemon-bin"
   expected="decision-task [key=release-route] needs-decision: choose the guarded release route"
   marker="$state/.watcher-down"
+  sent="$dir/sent.log"
+  capture="$dir/pane.txt"
   mkdir -p "$daemon_bin"
+  : > "$sent"
+  : > "$capture"
   printf 'needs-decision [key=release-route]: choose the guarded release route\nworking: unrelated progress after the decision\n' \
     > "$state/decision-task.status"
+  afk_enter "$state"
 
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
@@ -138,8 +144,8 @@ test_decision_only_recovery_routes_before_acknowledgement() {
 #!/usr/bin/env bash
 set -u
 if [ "${1:-}" = --ack-through ]; then
-  grep -F "$FM_EXPECTED_DECISION" "$FM_STATE_OVERRIDE/.subsuper-escalations" >/dev/null \
-    || { printf 'decision acknowledgement ran before decision routing\n' >&2; exit 91; }
+  grep -F "$FM_EXPECTED_DECISION" "$FM_EXPECTED_SENT" >/dev/null \
+    || { printf 'decision acknowledgement ran before confirmed decision injection\n' >&2; exit 91; }
   printf 'ack-after-decision\n' > "$FM_STATE_OVERRIDE/.decision-ack-order"
 fi
 exec "$FM_REAL_WAKE_DRAIN" "$@"
@@ -150,15 +156,22 @@ SH
     export FM_DAEMON_DIR="$daemon_bin"
     export FM_REAL_WAKE_DRAIN="$DRAIN"
     export FM_EXPECTED_DECISION="$expected"
+    export FM_EXPECTED_SENT="$sent"
     export FM_STATE_OVERRIDE="$state"
     export FM_ESCALATE_BATCH_SECS=30
+    export FM_FAKE_TMUX_PANE_ALIVE=1
+    export FM_FAKE_TMUX_SENT="$sent"
+    export FM_FAKE_TMUX_CAPTURE="$capture"
+    export PATH="$fakebin:$PATH"
     handle_durable_wakes "check: rearm-resurface" "$state"
   ) || fail "decision-only durable recovery failed"
 
-  grep -F "$expected" "$state/.subsuper-escalations" >/dev/null \
-    || fail "decision-only recovery omitted the buried open decision from its escalation"
-  grep -F 'check: rearm-resurface' "$state/.subsuper-escalations" >/dev/null \
-    || fail "decision-only recovery lost its generic fallback escalation"
+  grep -F "$expected" "$sent" >/dev/null \
+    || fail "decision-only recovery omitted the buried open decision from its injection"
+  grep -F 'check: rearm-resurface' "$sent" >/dev/null \
+    || fail "decision-only recovery lost its generic fallback injection"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "decision-only recovery acknowledged before its escalation buffer was injected"
   [ -e "$state/.decision-ack-order" ] \
     || fail "decision-only recovery did not prove routing before acknowledgement"
   case "$(cat "$marker" 2>/dev/null || true)" in
@@ -169,15 +182,21 @@ SH
 }
 
 test_decision_route_failure_retains_recovery_for_retry() {
-  local dir state daemon_bin expected marker
+  local dir state fakebin daemon_bin expected marker sent capture
   dir=$(make_supercase wd-decision-route-failure)
   state="$dir/state"
+  fakebin="$dir/fakebin"
   daemon_bin="$dir/daemon-bin"
   expected="decision-retry [key=release-route] needs-decision: preserve this choice for retry"
   marker="$state/.watcher-down"
+  sent="$dir/sent.log"
+  capture="$dir/pane.txt"
   mkdir -p "$daemon_bin" "$state/.subsuper-escalations"
+  : > "$sent"
+  : > "$capture"
   printf 'needs-decision [key=release-route]: preserve this choice for retry\nworking: unrelated progress after the decision\n' \
     > "$state/decision-retry.status"
+  afk_enter "$state"
 
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
@@ -199,6 +218,10 @@ SH
     export FM_REAL_WAKE_DRAIN="$DRAIN"
     export FM_STATE_OVERRIDE="$state"
     export FM_ESCALATE_BATCH_SECS=30
+    export FM_FAKE_TMUX_PANE_ALIVE=1
+    export FM_FAKE_TMUX_SENT="$sent"
+    export FM_FAKE_TMUX_CAPTURE="$capture"
+    export PATH="$fakebin:$PATH"
     handle_durable_wakes "check: rearm-resurface" "$state"
   ) 2> "$dir/failed-route.err"; then
     fail "decision routing failure was reported as acknowledged"
@@ -218,18 +241,178 @@ SH
     export FM_REAL_WAKE_DRAIN="$DRAIN"
     export FM_STATE_OVERRIDE="$state"
     export FM_ESCALATE_BATCH_SECS=30
+    export FM_FAKE_TMUX_PANE_ALIVE=1
+    export FM_FAKE_TMUX_SENT="$sent"
+    export FM_FAKE_TMUX_CAPTURE="$capture"
+    export PATH="$fakebin:$PATH"
     handle_durable_wakes "check: rearm-resurface" "$state"
   ) || fail "retained decision recovery could not be retried"
 
   [ -e "$state/.decision-ack-attempt" ] \
     || fail "successful decision retry did not reach recovery acknowledgement"
-  grep -F "$expected" "$state/.subsuper-escalations" >/dev/null \
-    || fail "successful decision retry did not route the retained decision"
+  grep -F "$expected" "$sent" >/dev/null \
+    || fail "successful decision retry did not inject the retained decision"
   case "$(cat "$marker" 2>/dev/null || true)" in
     acked:handling:*) ;;
     *) fail "successful decision retry did not retire its handled recovery episode" ;;
   esac
   pass "lifecycle: failed decision routing retains recovery for a successful retry"
+}
+
+test_incomplete_decision_capture_retains_recovery() {
+  local mode dir state daemon_bin marker expected
+  for mode in truncated remove-capture; do
+    dir=$(make_supercase "wd-decision-$mode")
+    state="$dir/state"
+    daemon_bin="$dir/daemon-bin"
+    marker="$state/.watcher-down"
+    expected="decision-$mode [key=route] needs-decision: retain this decision after $mode output"
+    mkdir -p "$daemon_bin"
+    printf 'needs-decision [key=route]: retain this decision after %s output\nworking: later progress\n' "$mode" \
+      > "$state/decision-$mode.status"
+
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      fm_recovery_marker_publish "$2" downtime
+    ' _ "$ROOT/bin/fm-wake-lib.sh" "$marker" || fail "$mode recovery marker could not be published"
+
+    cat > "$daemon_bin/fm-wake-drain.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = --ack-through ]; then
+  printf 'ack-attempted\n' > "$FM_STATE_OVERRIDE/.decision-ack-attempt"
+  exec "$FM_REAL_WAKE_DRAIN" "$@"
+fi
+case "$FM_DECISION_CAPTURE_MODE" in
+  truncated)
+    raw=$(mktemp "$FM_STATE_OVERRIDE/.truncated-drain.XXXXXX") || exit 1
+    raw_err=$(mktemp "$FM_STATE_OVERRIDE/.truncated-drain.XXXXXX") || { rm -f "$raw"; exit 1; }
+    rc=0
+    "$FM_REAL_WAKE_DRAIN" > "$raw" 2> "$raw_err" || rc=$?
+    sed '/^OPEN DECISIONS: close one by answering it:/,$d' "$raw"
+    cat "$raw_err" >&2
+    rm -f "$raw" "$raw_err"
+    exit "$rc"
+    ;;
+  remove-capture)
+    probe="decision-capture-probe-$$"
+    printf '%s\n' "$probe"
+    removed=false
+    for candidate in "$FM_STATE_OVERRIDE"/.subsuper-wake-drain.*; do
+      [ -f "$candidate" ] || continue
+      if grep -F -x "$probe" "$candidate" >/dev/null 2>&1; then
+        rm -f "$candidate" || exit 1
+        removed=true
+        break
+      fi
+    done
+    [ "$removed" = true ] || exit 92
+    exec "$FM_REAL_WAKE_DRAIN" "$@"
+    ;;
+  *) exit 93 ;;
+esac
+SH
+    chmod +x "$daemon_bin/fm-wake-drain.sh"
+
+    if (
+      export FM_DAEMON_DIR="$daemon_bin"
+      export FM_REAL_WAKE_DRAIN="$DRAIN"
+      export FM_DECISION_CAPTURE_MODE="$mode"
+      export FM_STATE_OVERRIDE="$state"
+      export FM_ESCALATE_BATCH_SECS=30
+      handle_durable_wakes "check: rearm-resurface" "$state"
+    ) 2> "$dir/failed-capture.err"; then
+      fail "$mode decision capture was reported as acknowledged"
+    fi
+
+    [ ! -e "$state/.decision-ack-attempt" ] \
+      || fail "$mode decision capture still invoked recovery acknowledgement"
+    case "$(cat "$marker" 2>/dev/null || true)" in
+      pending:handling:*|announced:handling:*) ;;
+      *) fail "$mode decision capture retired its recovery episode" ;;
+    esac
+    FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/retry.out" 2> "$dir/retry.err" \
+      || fail "$mode decision capture did not remain retryable"
+    grep -F "$expected" "$dir/retry.out" >/dev/null \
+      || fail "$mode decision capture lost the open decision before retry"
+  done
+  pass "lifecycle: incomplete decision captures retain recovery and remain retryable"
+}
+
+test_decision_injection_failure_retains_recovery() {
+  local dir state fakebin daemon_bin marker expected sent capture
+  dir=$(make_supercase wd-decision-injection-failure)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  daemon_bin="$dir/daemon-bin"
+  marker="$state/.watcher-down"
+  expected="decision-inject [key=route] needs-decision: retry after injection recovers"
+  sent="$dir/sent.log"
+  capture="$dir/pane.txt"
+  mkdir -p "$daemon_bin"
+  : > "$sent"
+  : > "$capture"
+  printf 'needs-decision [key=route]: retry after injection recovers\nworking: later progress\n' \
+    > "$state/decision-inject.status"
+  afk_enter "$state"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_recovery_marker_publish "$2" downtime
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$marker" || fail "injection retry recovery marker could not be published"
+
+  cat > "$daemon_bin/fm-wake-drain.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = --ack-through ]; then
+  printf 'ack-attempted\n' > "$FM_STATE_OVERRIDE/.decision-ack-attempt"
+fi
+exec "$FM_REAL_WAKE_DRAIN" "$@"
+SH
+  chmod +x "$daemon_bin/fm-wake-drain.sh"
+
+  if (
+    export FM_DAEMON_DIR="$daemon_bin"
+    export FM_REAL_WAKE_DRAIN="$DRAIN"
+    export FM_STATE_OVERRIDE="$state"
+    export FM_ESCALATE_BATCH_SECS=30
+    export FM_FAKE_TMUX_PANE_ALIVE=0
+    export FM_FAKE_TMUX_SENT="$sent"
+    export FM_FAKE_TMUX_CAPTURE="$capture"
+    export PATH="$fakebin:$PATH"
+    handle_durable_wakes "check: rearm-resurface" "$state"
+  ); then
+    fail "unconfirmed decision injection was reported as acknowledged"
+  fi
+
+  [ ! -e "$state/.decision-ack-attempt" ] \
+    || fail "unconfirmed decision injection still invoked recovery acknowledgement"
+  grep -F "$expected" "$state/.subsuper-escalations" >/dev/null \
+    || fail "unconfirmed decision injection did not preserve its durable buffer"
+  case "$(cat "$marker" 2>/dev/null || true)" in
+    pending:handling:*|announced:handling:*) ;;
+    *) fail "unconfirmed decision injection retired its recovery episode" ;;
+  esac
+
+  (
+    export FM_DAEMON_DIR="$daemon_bin"
+    export FM_REAL_WAKE_DRAIN="$DRAIN"
+    export FM_STATE_OVERRIDE="$state"
+    export FM_ESCALATE_BATCH_SECS=30
+    export FM_FAKE_TMUX_PANE_ALIVE=1
+    export FM_FAKE_TMUX_SENT="$sent"
+    export FM_FAKE_TMUX_CAPTURE="$capture"
+    export PATH="$fakebin:$PATH"
+    handle_durable_wakes "check: rearm-resurface" "$state"
+  ) || fail "retained decision injection could not be retried"
+
+  grep -F "$expected" "$sent" >/dev/null \
+    || fail "successful injection retry omitted the retained decision"
+  case "$(cat "$marker" 2>/dev/null || true)" in
+    acked:handling:*) ;;
+    *) fail "successful injection retry did not retire its handled recovery episode" ;;
+  esac
+  pass "lifecycle: unconfirmed decision injection retains recovery for retry"
 }
 
 # --- Phase 2: stale working-pane transient -> persistent -> resumed ----------
@@ -284,4 +467,6 @@ test_stale_pane_transient_persistent_resume() {
 test_routine_then_terminal_after_restart
 test_decision_only_recovery_routes_before_acknowledgement
 test_decision_route_failure_retains_recovery_for_retry
+test_incomplete_decision_capture_retains_recovery
+test_decision_injection_failure_retains_recovery
 test_stale_pane_transient_persistent_resume
