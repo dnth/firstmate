@@ -168,6 +168,70 @@ SH
   pass "lifecycle: decision-only recovery routes the buried decision before acknowledgement"
 }
 
+test_decision_route_failure_retains_recovery_for_retry() {
+  local dir state daemon_bin expected marker
+  dir=$(make_supercase wd-decision-route-failure)
+  state="$dir/state"
+  daemon_bin="$dir/daemon-bin"
+  expected="decision-retry [key=release-route] needs-decision: preserve this choice for retry"
+  marker="$state/.watcher-down"
+  mkdir -p "$daemon_bin" "$state/.subsuper-escalations"
+  printf 'needs-decision [key=release-route]: preserve this choice for retry\nworking: unrelated progress after the decision\n' \
+    > "$state/decision-retry.status"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_recovery_marker_publish "$2" downtime
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$marker" || fail "decision retry recovery marker could not be published"
+
+  cat > "$daemon_bin/fm-wake-drain.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = --ack-through ]; then
+  printf 'ack-attempted\n' > "$FM_STATE_OVERRIDE/.decision-ack-attempt"
+fi
+exec "$FM_REAL_WAKE_DRAIN" "$@"
+SH
+  chmod +x "$daemon_bin/fm-wake-drain.sh"
+
+  if (
+    export FM_DAEMON_DIR="$daemon_bin"
+    export FM_REAL_WAKE_DRAIN="$DRAIN"
+    export FM_STATE_OVERRIDE="$state"
+    export FM_ESCALATE_BATCH_SECS=30
+    handle_durable_wakes "check: rearm-resurface" "$state"
+  ) 2> "$dir/failed-route.err"; then
+    fail "decision routing failure was reported as acknowledged"
+  fi
+
+  [ ! -e "$state/.decision-ack-attempt" ] \
+    || fail "decision routing failure still invoked recovery acknowledgement"
+  case "$(cat "$marker" 2>/dev/null || true)" in
+    pending:handling:*|announced:handling:*) ;;
+    *) fail "decision routing failure retired its recovery episode" ;;
+  esac
+
+  rmdir "$state/.subsuper-escalations" \
+    || fail "decision routing failure fixture could not restore its escalation path"
+  (
+    export FM_DAEMON_DIR="$daemon_bin"
+    export FM_REAL_WAKE_DRAIN="$DRAIN"
+    export FM_STATE_OVERRIDE="$state"
+    export FM_ESCALATE_BATCH_SECS=30
+    handle_durable_wakes "check: rearm-resurface" "$state"
+  ) || fail "retained decision recovery could not be retried"
+
+  [ -e "$state/.decision-ack-attempt" ] \
+    || fail "successful decision retry did not reach recovery acknowledgement"
+  grep -F "$expected" "$state/.subsuper-escalations" >/dev/null \
+    || fail "successful decision retry did not route the retained decision"
+  case "$(cat "$marker" 2>/dev/null || true)" in
+    acked:handling:*) ;;
+    *) fail "successful decision retry did not retire its handled recovery episode" ;;
+  esac
+  pass "lifecycle: failed decision routing retains recovery for a successful retry"
+}
+
 # --- Phase 2: stale working-pane transient -> persistent -> resumed ----------
 test_stale_pane_transient_persistent_resume() {
   local dir state fakebin win key resumed_gen
@@ -219,4 +283,5 @@ test_stale_pane_transient_persistent_resume() {
 
 test_routine_then_terminal_after_restart
 test_decision_only_recovery_routes_before_acknowledgement
+test_decision_route_failure_retains_recovery_for_retry
 test_stale_pane_transient_persistent_resume
