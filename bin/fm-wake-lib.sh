@@ -474,8 +474,12 @@ _fm_recovery_lock_release() {  # <lock> <reentered>
   [ "${2:-0}" = 1 ] || fm_lock_release "$1"
 }
 
+# Preserve a pending episode's generation across downtime republication so its
+# outstanding acknowledgement remains usable; docs/watcher-continuity.md owns
+# the recovery contract and sequence-safety rationale.
 _fm_recovery_marker_publish() {
   local marker=$1 kind=${2:-downtime} lock_attempts=${3:-} lock status reentered
+  local saved_token generation=''
   case "$kind" in handling|downtime) ;; *) return 1 ;; esac
   lock="${marker}.lock"
   _fm_recovery_lock_acquire "$lock" "$lock_attempts" || { status=$?; return "$status"; }
@@ -484,7 +488,19 @@ _fm_recovery_marker_publish() {
     _fm_recovery_lock_release "$lock" "$reentered"
     return 1
   fi
-  if ! _fm_recovery_marker_write_locked "$marker" "$kind"; then
+  if [ "$kind" = downtime ]; then
+    # Read inline rather than in a command substitution: this runs inside the
+    # marker-lock critical section, so it must not add a subshell fork there.
+    # The token is restored because publishing owns no snapshot of its own.
+    saved_token=$FM_RECOVERY_MARKER_TOKEN
+    if fm_recovery_marker_read "$marker"; then
+      case "$FM_RECOVERY_MARKER_TOKEN" in
+        pending:handling:*|pending:downtime:*) generation=${FM_RECOVERY_MARKER_TOKEN##*:} ;;
+      esac
+    fi
+    FM_RECOVERY_MARKER_TOKEN=$saved_token
+  fi
+  if ! _fm_recovery_marker_write_locked "$marker" "$kind" "$generation"; then
     _fm_recovery_lock_release "$lock" "$reentered"
     return 1
   fi

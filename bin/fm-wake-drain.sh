@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Present durable watcher wake records, optionally acknowledge handled records,
 # annotate validated signal status keys, then assert liveness.
+#
+# Keep sequence-bound row consumption independent from generation-bound episode
+# retirement; docs/watcher-continuity.md owns the recovery contract.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,6 +20,7 @@ RAW_ROWS=
 RECOVERY_MARKER="$STATE/.watcher-down"
 RECOVERY_MARKER_TOKEN=
 RECOVERY_ACK_REQUIRED=false
+RECOVERY_ACK_MOVED=false
 ACK_THROUGH=
 ACK_GENERATION=
 
@@ -121,21 +125,30 @@ fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
 DRAIN_LOCK_HELD=true
 
 if [ -n "$ACK_THROUGH" ]; then
-  fm_recovery_marker_snapshot "$RECOVERY_MARKER" || exit 1
-  RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
-  if [ "${RECOVERY_MARKER_TOKEN##*:}" != "$ACK_GENERATION" ]; then
-    echo "wake drain: recovery generation is stale or could not be acknowledged safely" >&2
-    exit 1
-  fi
+  # Row consumption is bound to the monotonic sequence and always happens.
+  # Only retiring the episode is bound to the generation, so a generation that
+  # moved on names its own remedy instead of refusing and consuming nothing.
   DRAIN_TMP=$(mktemp "$STATE/.wake-queue.ack.XXXXXX") || exit 1
   chmod 0600 "$DRAIN_TMP" || exit 1
   awk -F '\t' -v cutoff="$ACK_THROUGH" '
     NF < 5 || $2 !~ /^[0-9]+$/ || $2 > cutoff { print }
   ' "$FM_WAKE_QUEUE" > "$DRAIN_TMP" || exit 1
   if [ ! -s "$DRAIN_TMP" ]; then
-    if ! fm_recovery_marker_ack "$RECOVERY_MARKER" "$ACK_GENERATION"; then
-      echo "wake drain: recovery generation is stale or could not be acknowledged safely" >&2
-      exit 1
+    fm_recovery_marker_ack "$RECOVERY_MARKER" "$ACK_GENERATION"
+    RECOVERY_ACK_STATUS=$?
+    case "$RECOVERY_ACK_STATUS" in
+      0) ;;
+      3) RECOVERY_ACK_MOVED=true ;;
+      *)
+        echo "wake drain: recovery episode could not be retired safely; re-run bin/fm-wake-drain.sh and use the new WAKE_ACK_REQUIRED command" >&2
+        exit 1
+        ;;
+    esac
+  else
+    fm_recovery_marker_snapshot "$RECOVERY_MARKER" || exit 1
+    RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
+    if [ "${RECOVERY_MARKER_TOKEN##*:}" != "$ACK_GENERATION" ]; then
+      RECOVERY_ACK_MOVED=true
     fi
   fi
   if ! _fm_atomic_replace "$DRAIN_TMP" "$FM_WAKE_QUEUE"; then
@@ -145,6 +158,10 @@ if [ -n "$ACK_THROUGH" ]; then
   DRAIN_TMP=
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
+  if [ "$RECOVERY_ACK_MOVED" = true ]; then
+    printf 'wake drain: acknowledged wakes through %s, but a newer recovery episode is pending; re-run bin/fm-wake-drain.sh and use the new WAKE_ACK_REQUIRED command\n' \
+      "$ACK_THROUGH" >&2
+  fi
   exit 0
 fi
 
