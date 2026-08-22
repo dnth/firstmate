@@ -14,7 +14,24 @@ REMOTE="$TMP_ROOT/remote"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT/fake")
 CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$REMOTE/state" "$REMOTE/data/reply" "$CLAIMS"
-trap 'FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true; if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then kill "$(cat "$TMP_ROOT/remote-jobs/worker.pid")" 2>/dev/null || true; fi; rm -rf -- "$TMP_ROOT"' EXIT
+cleanup() {
+  local worker_pid attempt=0
+  FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" \
+    "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
+  worker_pid=$(cat "$TMP_ROOT/remote-jobs/worker.pid" 2>/dev/null || true)
+  case "$worker_pid" in
+    ''|*[!0-9]*) ;;
+    *)
+      kill "$worker_pid" 2>/dev/null || true
+      while kill -0 "$worker_pid" 2>/dev/null && [ "$attempt" -lt 100 ]; do
+        attempt=$((attempt + 1))
+        sleep 0.05
+      done
+      ;;
+  esac
+  rm -rf -- "$TMP_ROOT"
+}
+trap cleanup EXIT
 
 cat > "$PARENT/data/secondmates.md" <<EOF
 - ios - iOS delivery (host: remote-mac; root: $ROOT; home: $REMOTE; scope: iOS work; projects: alpha; added 2026-08-02)

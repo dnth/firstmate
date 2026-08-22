@@ -780,6 +780,48 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   pass "a declared pause is absorbed on first sight, then re-surfaced as a recheck past the threshold, never wedge-escalated"
 }
 
+test_watcher_pause_default_is_2700_and_override_wins() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid back
+  dir=$(make_case paused-default-boundary); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held-default.status"
+  window="test:fm-held-default"
+  printf 'idle awaiting external\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/held-default.meta"
+  printf 'paused: awaiting the upstream release\n' > "$statusf"
+  back=$(( $(date +%s) - 2800 ))
+  set_mtime "$back" "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held-default_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle awaiting external")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream release'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 env -u FM_PAUSE_RESURFACE_SECS "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not re-surface a 2800s pause under the production default"
+  grep -F "awaiting external" "$out" >/dev/null \
+    || fail "watcher default-cadence recheck omitted its external-wait reason"
+
+  rm -f "$state/.paused-resurfaced-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=3000 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "FM_PAUSE_RESURFACE_SECS=3000 did not override the watcher default: $(cat "$out")"
+  fi
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "watcher resolves the unset pause cadence to 2700s and preserves the environment override"
+}
+
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
 # fm-crew-state then authoritatively reports stopped rather than paused, but the
 # confirmed-dead agent plus the declared wait or captain-held transfer must retain
@@ -2331,6 +2373,7 @@ test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
+test_watcher_pause_default_is_2700_and_override_wins
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
