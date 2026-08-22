@@ -63,9 +63,9 @@ No `/back` is needed. The first genuine message is the return signal:
 Bias ambiguous cases toward exit: a present captain beats token savings, and
 a false exit is self-correcting (the captain re-runs `/afk`).
 
-## Orthogonal to approval authority
+## Orthogonal to merge and finding authority
 
-afk changes how aggressively firstmate surfaces things, **not who approves what**.
+afk changes how aggressively firstmate surfaces things, **not merge or finding-decision authority**.
 "Away" never means "approves more" or "approves less."
 A PR ready for merge keeps the merge authority from `AGENTS.md` section 7, and a needs-decision finding keeps the `ask-user-authority` policy; anything requiring the captain still waits for the captain's explicit word.
 The daemon only batches the notification.
