@@ -152,19 +152,18 @@ exec "$FM_REAL_WAKE_DRAIN" "$@"
 SH
   chmod +x "$daemon_bin/fm-wake-drain.sh"
 
-  (
-    export FM_DAEMON_DIR="$daemon_bin"
-    export FM_REAL_WAKE_DRAIN="$DRAIN"
-    export FM_EXPECTED_DECISION="$expected"
-    export FM_EXPECTED_SENT="$sent"
-    export FM_STATE_OVERRIDE="$state"
-    export FM_ESCALATE_BATCH_SECS=30
-    export FM_FAKE_TMUX_PANE_ALIVE=1
-    export FM_FAKE_TMUX_SENT="$sent"
-    export FM_FAKE_TMUX_CAPTURE="$capture"
-    export PATH="$fakebin:$PATH"
-    handle_durable_wakes "check: rearm-resurface" "$state"
-  ) || fail "decision-only durable recovery failed"
+  FM_DAEMON_DIR="$daemon_bin" \
+    FM_REAL_WAKE_DRAIN="$DRAIN" \
+    FM_EXPECTED_DECISION="$expected" \
+    FM_EXPECTED_SENT="$sent" \
+    FM_STATE_OVERRIDE="$state" \
+    FM_ESCALATE_BATCH_SECS=30 \
+    FM_FAKE_TMUX_PANE_ALIVE=1 \
+    FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" \
+    PATH="$fakebin:$PATH" \
+    handle_durable_wakes "check: rearm-resurface" "$state" \
+    || fail "decision-only durable recovery failed"
 
   grep -F "$expected" "$sent" >/dev/null \
     || fail "decision-only recovery omitted the buried open decision from its injection"
@@ -213,17 +212,16 @@ exec "$FM_REAL_WAKE_DRAIN" "$@"
 SH
   chmod +x "$daemon_bin/fm-wake-drain.sh"
 
-  if (
-    export FM_DAEMON_DIR="$daemon_bin"
-    export FM_REAL_WAKE_DRAIN="$DRAIN"
-    export FM_STATE_OVERRIDE="$state"
-    export FM_ESCALATE_BATCH_SECS=30
-    export FM_FAKE_TMUX_PANE_ALIVE=1
-    export FM_FAKE_TMUX_SENT="$sent"
-    export FM_FAKE_TMUX_CAPTURE="$capture"
-    export PATH="$fakebin:$PATH"
-    handle_durable_wakes "check: rearm-resurface" "$state"
-  ) 2> "$dir/failed-route.err"; then
+  if FM_DAEMON_DIR="$daemon_bin" \
+    FM_REAL_WAKE_DRAIN="$DRAIN" \
+    FM_STATE_OVERRIDE="$state" \
+    FM_ESCALATE_BATCH_SECS=30 \
+    FM_FAKE_TMUX_PANE_ALIVE=1 \
+    FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" \
+    PATH="$fakebin:$PATH" \
+    handle_durable_wakes "check: rearm-resurface" "$state" \
+    2> "$dir/failed-route.err"; then
     fail "decision routing failure was reported as acknowledged"
   fi
 
@@ -236,17 +234,16 @@ SH
 
   rmdir "$state/.subsuper-escalations" \
     || fail "decision routing failure fixture could not restore its escalation path"
-  (
-    export FM_DAEMON_DIR="$daemon_bin"
-    export FM_REAL_WAKE_DRAIN="$DRAIN"
-    export FM_STATE_OVERRIDE="$state"
-    export FM_ESCALATE_BATCH_SECS=30
-    export FM_FAKE_TMUX_PANE_ALIVE=1
-    export FM_FAKE_TMUX_SENT="$sent"
-    export FM_FAKE_TMUX_CAPTURE="$capture"
-    export PATH="$fakebin:$PATH"
-    handle_durable_wakes "check: rearm-resurface" "$state"
-  ) || fail "retained decision recovery could not be retried"
+  FM_DAEMON_DIR="$daemon_bin" \
+    FM_REAL_WAKE_DRAIN="$DRAIN" \
+    FM_STATE_OVERRIDE="$state" \
+    FM_ESCALATE_BATCH_SECS=30 \
+    FM_FAKE_TMUX_PANE_ALIVE=1 \
+    FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" \
+    PATH="$fakebin:$PATH" \
+    handle_durable_wakes "check: rearm-resurface" "$state" \
+    || fail "retained decision recovery could not be retried"
 
   [ -e "$state/.decision-ack-attempt" ] \
     || fail "successful decision retry did not reach recovery acknowledgement"
@@ -314,14 +311,13 @@ esac
 SH
     chmod +x "$daemon_bin/fm-wake-drain.sh"
 
-    if (
-      export FM_DAEMON_DIR="$daemon_bin"
-      export FM_REAL_WAKE_DRAIN="$DRAIN"
-      export FM_DECISION_CAPTURE_MODE="$mode"
-      export FM_STATE_OVERRIDE="$state"
-      export FM_ESCALATE_BATCH_SECS=30
-      handle_durable_wakes "check: rearm-resurface" "$state"
-    ) 2> "$dir/failed-capture.err"; then
+    if FM_DAEMON_DIR="$daemon_bin" \
+      FM_REAL_WAKE_DRAIN="$DRAIN" \
+      FM_DECISION_CAPTURE_MODE="$mode" \
+      FM_STATE_OVERRIDE="$state" \
+      FM_ESCALATE_BATCH_SECS=30 \
+      handle_durable_wakes "check: rearm-resurface" "$state" \
+      2> "$dir/failed-capture.err"; then
       fail "$mode decision capture was reported as acknowledged"
     fi
 
@@ -371,17 +367,15 @@ exec "$FM_REAL_WAKE_DRAIN" "$@"
 SH
   chmod +x "$daemon_bin/fm-wake-drain.sh"
 
-  if (
-    export FM_DAEMON_DIR="$daemon_bin"
-    export FM_REAL_WAKE_DRAIN="$DRAIN"
-    export FM_STATE_OVERRIDE="$state"
-    export FM_ESCALATE_BATCH_SECS=30
-    export FM_FAKE_TMUX_PANE_ALIVE=0
-    export FM_FAKE_TMUX_SENT="$sent"
-    export FM_FAKE_TMUX_CAPTURE="$capture"
-    export PATH="$fakebin:$PATH"
-    handle_durable_wakes "check: rearm-resurface" "$state"
-  ); then
+  if FM_DAEMON_DIR="$daemon_bin" \
+    FM_REAL_WAKE_DRAIN="$DRAIN" \
+    FM_STATE_OVERRIDE="$state" \
+    FM_ESCALATE_BATCH_SECS=30 \
+    FM_FAKE_TMUX_PANE_ALIVE=0 \
+    FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" \
+    PATH="$fakebin:$PATH" \
+    handle_durable_wakes "check: rearm-resurface" "$state"; then
     fail "unconfirmed decision injection was reported as acknowledged"
   fi
 
@@ -394,17 +388,16 @@ SH
     *) fail "unconfirmed decision injection retired its recovery episode" ;;
   esac
 
-  (
-    export FM_DAEMON_DIR="$daemon_bin"
-    export FM_REAL_WAKE_DRAIN="$DRAIN"
-    export FM_STATE_OVERRIDE="$state"
-    export FM_ESCALATE_BATCH_SECS=30
-    export FM_FAKE_TMUX_PANE_ALIVE=1
-    export FM_FAKE_TMUX_SENT="$sent"
-    export FM_FAKE_TMUX_CAPTURE="$capture"
-    export PATH="$fakebin:$PATH"
-    handle_durable_wakes "check: rearm-resurface" "$state"
-  ) || fail "retained decision injection could not be retried"
+  FM_DAEMON_DIR="$daemon_bin" \
+    FM_REAL_WAKE_DRAIN="$DRAIN" \
+    FM_STATE_OVERRIDE="$state" \
+    FM_ESCALATE_BATCH_SECS=30 \
+    FM_FAKE_TMUX_PANE_ALIVE=1 \
+    FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" \
+    PATH="$fakebin:$PATH" \
+    handle_durable_wakes "check: rearm-resurface" "$state" \
+    || fail "retained decision injection could not be retried"
 
   grep -F "$expected" "$sent" >/dev/null \
     || fail "successful injection retry omitted the retained decision"
