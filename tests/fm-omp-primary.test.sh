@@ -703,6 +703,110 @@ JS
   pass "OMP native extension binds startup, guarded stop, watcher, safety, marker, and shutdown surfaces"
 }
 
+# The shared core delivers the recovery handshake for every runtime bound to it,
+# so OMP must confirm a handling delivery exactly like Pi and OpenCode do: start
+# and verify the successor, deliver the wake steer, and only then run
+# fm-watch-arm.sh --handling-delivered for the generation the successor reported.
+# Upstream covers Pi and OpenCode; this pins the fork's OMP binding of the same
+# contract so a future adapter change cannot silently drop it.
+test_native_omp_confirms_recovery_handling_delivery() {
+  local fixture out status=0
+  fixture="$TMP_ROOT/native-handling-delivery"
+  mkdir -p "$fixture/.omp/extensions" "$fixture/bin" "$fixture/config" "$fixture/state"
+  : > "$fixture/AGENTS.md"
+  git init -q -b main "$fixture"
+  cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$fixture/.omp/extensions/fm-primary-omp.ts"
+  cp "$ROOT/bin/fm-primary-watch-core.ts" "$fixture/bin/fm-primary-watch-core.ts"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$fixture/bin/fm-primary-scope-lib.sh"
+  cp "$ROOT/bin/fm-gate-refuse-lib.sh" "$fixture/bin/fm-gate-refuse-lib.sh"
+  cp "$ROOT/bin/fm-operational-input.sh" "$fixture/bin/fm-operational-input.sh"
+  cp "$ROOT/bin/fm-sessionstart-nudge.sh" "$fixture/bin/fm-sessionstart-nudge.sh"
+  cp "$ROOT/bin/fm-pi-compatible-runtimes" "$fixture/bin/fm-pi-compatible-runtimes"
+  cat > "$fixture/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed generation=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s predecessor=%s\n' "$$" "${FM_WATCH_PREDECESSOR_ARM_PID:-none}" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: synthetic actionable close\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$fixture/bin/"*.sh
+
+  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" \
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" \
+    FM_ARM_LOG="$TMP_ROOT/native-handling-delivery.log" \
+    FM_STOP_FILE="$TMP_ROOT/native-handling-delivery.stop" \
+    node --input-type=module 2>&1 <<'JS'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const armRows = () => (existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+  : []);
+
+let tool = null;
+let steers = 0;
+let rowsAtDelivery = -1;
+let deliveryOptions = null;
+const api = {
+  zod: { object: () => ({}) },
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_omp") tool = candidate;
+  },
+  sendMessage(_message, options) {
+    steers += 1;
+    deliveryOptions = options;
+    rowsAtDelivery = armRows().filter((row) => row.startsWith("arm=")).length;
+  },
+};
+writeFileSync(`${process.env.FM_STATE_OVERRIDE}/.lock`, `${process.pid}\n`);
+process.argv[1] = process.env.EXTENSION;
+const extension = await import(`${pathToFileURL(process.env.EXTENSION).href}?handling=${Date.now()}`);
+extension.default(api);
+if (!tool) throw new Error("OMP did not register its watcher arm tool");
+await tool.execute();
+for (let i = 0; i < 400 && !armRows().some((row) => row.startsWith("confirmed ")); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+const rows = armRows();
+const arms = rows.filter((row) => row.startsWith("arm="));
+if (arms.length !== 2) throw new Error(`expected one successor arm, got ${arms.length}: ${rows.join(" | ")}`);
+if (steers !== 1) throw new Error(`expected exactly one wake steer, got ${steers}`);
+if (deliveryOptions?.deliverAs !== "steer" || deliveryOptions?.triggerTurn !== true) {
+  throw new Error(`wake was not delivered as a turn-triggering steer: ${JSON.stringify(deliveryOptions)}`);
+}
+if (rowsAtDelivery !== 2) throw new Error(`wake delivery began before successor establishment (${rowsAtDelivery} arm rows)`);
+const confirmations = rows.filter((row) => row.startsWith("confirmed "));
+if (confirmations.length !== 1) {
+  throw new Error(`handling delivery was not confirmed exactly once: ${rows.join(" | ")}`);
+}
+if (!confirmations[0].includes("generation=fixture-generation")) {
+  throw new Error(`handling delivery confirmed the wrong generation: ${confirmations[0]}`);
+}
+if (rows.indexOf(confirmations[0]) < rows.lastIndexOf(arms[1])) {
+  throw new Error(`handling delivery was confirmed before its successor arm: ${rows.join(" | ")}`);
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+console.log("omp-handling-delivery-ok");
+JS
+  ) || status=$?
+  printf 'stop\n' > "$TMP_ROOT/native-handling-delivery.stop" 2>/dev/null || true
+  expect_code 0 "$status" "OMP recovery handling delivery"
+  assert_contains "$out" omp-handling-delivery-ok "OMP did not confirm its recovery handling delivery after the wake steer"
+  pass "OMP confirms the recovery handling handshake after delivering its wake steer"
+}
+
 test_resolve_path_uses_node_when_readlink_f_is_unavailable
 test_exact_bun_omp_primary_identity
 test_standalone_omp_primary_identity
@@ -712,3 +816,4 @@ test_native_identity_handles_virtual_entrypoint
 test_native_omp_fresh_checkout_nudges_once
 test_primary_marker_refuses_whitespace_identity
 test_native_primary_extension_contract
+test_native_omp_confirms_recovery_handling_delivery

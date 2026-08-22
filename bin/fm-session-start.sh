@@ -34,8 +34,8 @@
 #                       secondmate liveness, pending remote handoff retry,
 #                       X-mode artifact writes, fleet sync) also run only when
 #                       locked.
-#   3. wake-drain     - mutates the durable wake queue, so it also only runs
-#                       when locked.
+#   3. wake-drain     - presents durable wakes and advances recovery handling
+#                       state, so it also only runs when locked.
 #   4. supervision-instructions - the one emitted operating block for the
 #                       detected primary harness.
 #   5. read-once contract - the do-not-re-read contract covering every source
@@ -407,13 +407,13 @@ else
 fi
 
 # --- 3. wake-drain -------------------------------------------------------
-# Drained records are this turn's first work queue, and the drain's separate
-# OPEN DECISIONS section remains actionable even when that queue is empty
-# (AGENTS.md sections 3 and 8).
+# Presented records are this turn's first work queue and remain durable until
+# post-handling acknowledgement. The drain's separate OPEN DECISIONS section
+# remains actionable even when that queue is empty (AGENTS.md sections 3 and 8).
 # The drain also runs fm-guard.sh internally on the locked path, so the
 # tangle/watcher-liveness alarms land right here too, ahead of the bulk digest
 # below. The read-only path never touches the queue because it lacks mutation
-# authority, and another session may be actively draining it. It still runs
+# authority, and another session may be actively handling it. It still runs
 # fm-guard.sh directly with non-mutating advisory text, so the same alarms
 # surface without repair commands.
 subsection "WAKE QUEUE"

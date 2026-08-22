@@ -34,6 +34,8 @@ This is deliberate Option B ordering: the fleet is protected before the model ha
 
 Claude's Stop hook starts the successor arm at the next Stop after the handling turn, rather than before notification as Pi, OMP, and OpenCode do.
 The durable wake queue preserves actionable events during the residual active-turn window, and the bounded turn-end guard enforces recovery at Stop when no watcher or auto-arm claim is present.
+For every supported arm path, a successor that observes an accepted down stretch emits `check: rearm-resurface` through the ordinary durable handling path before settling into its live wait.
+That recovery presentation includes all unacknowledged queue rows and the existing cursor-folded OPEN DECISIONS set, so a still-open decision reappears even when recovery has no queue row of its own.
 The model no longer re-arms after ordinary wakes.
 No PreToolUse hook denies fleet commands based on watcher status.
 A genuine auto-arm failure describes the automatic mechanism as broken and never directs a routine manual background arm.
@@ -44,6 +46,15 @@ No adapter starts a replacement with shell `&`.
 
 The turn-end guard remains the final backstop rather than the normal continuity mechanism and cooperates with the auto-arm in its `--claude` mode.
 
+## Recovery-marker lock reentrancy
+
+`bin/fm-watch.sh`'s EXIT trap performs a recovery-marker transition, so a signal can fire that trap while an interrupted frame is still inside a marker critical section.
+Waiting there for a lock the same process already holds can never be satisfied: the watcher spins forever, ignores every later signal, and pins `state/.wake-queue.lock` with it, which wedges the whole home rather than one cycle.
+`bin/fm-wake-lib.sh`'s `fm_lock_held_by_self` therefore lets a marker transition detect that it reentered a lock this process already owns, proceed under the exclusion it already has, and leave the lock exactly as the interrupted frame left it.
+The exiting process abandons that lock, and `fm_lock_try_acquire` reclaims a dead owner's lock the same way it always has.
+Reentry is scoped to self-ownership only: a live foreign holder still blocks, and the bounded caller still reports exhaustion, so exclusion between processes is unchanged.
+`tests/fm-wake-queue.test.sh` drives the exact shape - hold the marker lock, run the transitions the EXIT trap uses, then prove a live foreign holder is still not treated as reentry.
+
 ## Arm-layer cycle contract
 
 `bin/fm-watch-arm.sh` never returns a clean empty success.
@@ -51,7 +62,7 @@ An actionable child output returns that reason normally.
 A zero/empty child return rechecks the home lock and beacon, attaches to a verified healthy successor when one exists, or resolves the close against the watcher's bounded terminal-delivery ledger.
 An attached arm follows verified identity-matched successors and resolves the same way when that chain ends without one, because it holds no handle on the watcher's stdout and cannot read the reason line itself.
 Before releasing its singleton lock after printing an actionable reason, the watcher records that reason with its PID and process identity in `state/.watch-deliveries.log`.
-A matching PID and identity lets an attached arm report the delivered reason and exit zero even after the durable wake queue was drained, while an unrelated queue producer or a recycled PID cannot satisfy the match.
+A matching PID and identity lets an attached arm report the delivered reason and exit zero even after its durable wake was handled and acknowledged, while an unrelated queue producer or a recycled PID cannot satisfy the match.
 Only a cycle with no matching delivery record emits `watcher: FAILED - cycle ended without an actionable reason` and exits nonzero.
 
 The arm layer appends one tab-separated record per observed cycle to `state/.watch-cycle-exits.log`.
@@ -69,7 +80,8 @@ The same suite covers ordinary same-process session replacement for `/new`, `/re
 It also covers a fresh factory bind without a prior shutdown: the superseded binding retires its arm child, cannot arm or reclaim ownership through retained session callbacks, the live binding keeps exactly one arm child, and repeated binds never accumulate more than one process-exit fallback.
 `tests/fm-omp-primary.test.sh` covers OMP's binding of the same core to its native session, watcher, and shutdown surfaces and pins the input-preserving custom-steer delivery contract.
 The opt-in `tests/fm-omp-primary-live-e2e.test.sh` proves a real OMP watcher wake reaches the session while its exact pending draft remains intact.
-`tests/fm-watcher-lock.test.sh` covers verified-successor attach, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
+`tests/fm-watch-arm.test.sh` covers durable queue replay, real remote parent-replies ingestion into the authoritative status log, decision-only OPEN DECISIONS recovery, interrupted handling replay, generation-bound acknowledgement, and a persistent live successor after recovery.
+`tests/fm-watcher-lock.test.sh` covers verified-successor attach, recovery publication before stale-lock removal, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
 `tests/fm-subagent-pretool-check.test.sh` proves Claude retains only the non-status Bash seatbelts.
 `tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, stale and live session owners, unchanged AFK and need boundaries, single-flight, bounded failure retries, benign live-watcher cycle ends, one-notice failure episodes, and exit-2 translation.
 `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` starts with the reproduced stale-lock state, runs session start first, completes two tokenless cycles, and checks the competing-live-owner negative control.

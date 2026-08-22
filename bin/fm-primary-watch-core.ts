@@ -37,6 +37,19 @@ type CloseClassification = {
   message: string;
 };
 
+// One outstanding watcher recovery episode, as reported by an established
+// successor arm. bin/fm-wake-lib.sh owns the marker grammar; this adapter only
+// carries the generation back so the handling handshake can name it.
+type RecoveryHandoff = {
+  generation: string;
+  watcherPid: string;
+};
+
+type RestorationResult = {
+  failure: string;
+  recovery?: RecoveryHandoff;
+};
+
 type SessionGeneration = {
   id: number;
   stopping: boolean;
@@ -214,6 +227,11 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
   let generation = createGeneration();
   const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
   const armClose = new WeakMap<ChildProcess, Promise<void>>();
+  // The recovery generation an established successor arm reported, keyed by the
+  // arm child that reported it. bin/fm-watch-arm.sh only prints it while a
+  // recovery episode is outstanding, so its absence means there is nothing to
+  // hand off and the ordinary wake path applies unchanged.
+  const armRecovery = new WeakMap<ChildProcess, RecoveryHandoff>();
 
   function lockOwnership(): LockOwnership {
     let lockPid = "";
@@ -306,13 +324,28 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     };
   }
 
-  async function sendWake(owner: SessionGeneration, message: string): Promise<void> {
+  async function sendWake(
+    owner: SessionGeneration,
+    message: string,
+    recovery?: RecoveryHandoff,
+  ): Promise<void> {
     if (!generationIsLive(owner)) return;
     const content = encodeOperationalInput(
       "watcher",
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
     );
     await sendFollowUp(content);
+    if (recovery) {
+      const result = spawnSync(
+        "bash",
+        [armScript, "--handling-delivered", recovery.generation, "--watcher-pid", recovery.watcherPid],
+        {
+          cwd: fmRoot,
+          env: { ...process.env, FM_HOME: fmHome, FM_STATE_OVERRIDE: state, FM_ROOT_OVERRIDE: fmRoot },
+        },
+      );
+      if (result.status !== 0) throw new Error("watcher recovery delivery could not be confirmed");
+    }
   }
 
   function surfaceFailure(owner: SessionGeneration, message: string): void {
@@ -360,20 +393,26 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     });
   }
 
-  async function restoreAfterActionableClose(owner: SessionGeneration, predecessorArmPid: string): Promise<string> {
+  async function restoreAfterActionableClose(
+    owner: SessionGeneration,
+    predecessorArmPid: string,
+  ): Promise<RestorationResult> {
     let failure = "";
     for (let attempt = 0; attempt <= retryLimit; attempt += 1) {
-      if (!generationIsLive(owner)) return "";
+      if (!generationIsLive(owner)) return { failure: "" };
       const replacement = startArm(owner, predecessorArmPid);
       const successorChild = owner.child;
-      if (replacement.ok && successorChild && await waitForReadiness(successorChild)) return "";
+      if (replacement.ok && successorChild && await waitForReadiness(successorChild)) {
+        return { failure: "", recovery: armRecovery.get(successorChild) };
+      }
       if (replacement.ok) {
         failure = `watcher: FAILED - ${runtimeLabel} extension could not verify a ready successor watcher`;
         if (!(await retireArm(successorChild))) {
-          return (
-            `${failure}\nwatcher: FAILED - ${runtimeLabel} extension could not restore watcher continuity ` +
-            `because the unready successor arm did not exit within ${armRetireTimeoutMs}ms`
-          );
+          return {
+            failure:
+              `${failure}\nwatcher: FAILED - ${runtimeLabel} extension could not restore watcher continuity ` +
+              `because the unready successor arm did not exit within ${armRetireTimeoutMs}ms`,
+          };
         }
       } else {
         failure = /(?:read-only|no live session)/.test(replacement.message)
@@ -384,7 +423,9 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       if (attempt === retryLimit) break;
       await waitForRetry(attempt + 1);
     }
-    return `${failure}\nwatcher: FAILED - ${runtimeLabel} extension could not restore watcher continuity after ${retryLimit} retries`;
+    return {
+      failure: `${failure}\nwatcher: FAILED - ${runtimeLabel} extension could not restore watcher continuity after ${retryLimit} retries`,
+    };
   }
 
   function scheduleRetry(owner: SessionGeneration, message: string, predecessorArmPid: string): void {
@@ -495,7 +536,10 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       resolveReadiness(ready);
     };
     const observeEstablishedArm = (): void => {
-      if (/^watcher: (?:started|attached)\b/m.test(`${stdout}\n${stderr}`)) {
+      const combined = `${stdout}\n${stderr}`;
+      const recovery = combined.match(/^watcher: started pid=([0-9]+).* recovery-generation=([A-Za-z0-9._-]+)$/m);
+      if (recovery) armRecovery.set(armChild, { watcherPid: recovery[1], generation: recovery[2] });
+      if (/^watcher: (?:started|attached)\b/m.test(combined)) {
         settleReadiness(true);
       }
     };
@@ -523,11 +567,13 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
         owner.retryFailures = 0;
         owner.restoring = true;
         void (async () => {
-          const failure = await restoreAfterActionableClose(owner, predecessor);
+          const restoration = await restoreAfterActionableClose(owner, predecessor);
           if (generationIsLive(owner)) owner.restoring = false;
           if (!generationIsLive(owner)) return;
-          const message = failure ? `${classification.message}\n\n${failure}` : classification.message;
-          await sendWake(owner, message);
+          const message = restoration.failure
+            ? `${classification.message}\n\n${restoration.failure}`
+            : classification.message;
+          await sendWake(owner, message, restoration.recovery);
         })().catch(() => {
         });
         return;
