@@ -521,38 +521,39 @@ _fm_recovery_marker_publish() {
 }
 
 _fm_recovery_marker_begin_handling() {
-  local marker=$1 expected_generation=${2:-} lock line generation
+  local marker=$1 expected_generation=${2:-} lock line generation status reentered
   lock="${marker}.lock"
-  fm_lock_acquire_wait "$lock" || return 1
+  _fm_recovery_lock_acquire "$lock" 20 || { status=$?; return "$status"; }
+  reentered=$FM_RECOVERY_LOCK_REENTERED
   if ! fm_recovery_marker_read "$marker"; then
-    fm_lock_release "$lock"
+    _fm_recovery_lock_release "$lock" "$reentered"
     return 1
   fi
   line=$FM_RECOVERY_MARKER_TOKEN
   generation=${line##*:}
   if [ -n "$expected_generation" ] && [ "$generation" != "$expected_generation" ]; then
-    fm_lock_release "$lock"
+    _fm_recovery_lock_release "$lock" "$reentered"
     return 3
   fi
   case "$line" in
     pending:handling:*|announced:handling:*) ;;
     pending:downtime:*)
       if ! _fm_recovery_marker_write_locked "$marker" handling "$generation"; then
-        fm_lock_release "$lock"
+        _fm_recovery_lock_release "$lock" "$reentered"
         return 1
       fi
       FM_RECOVERY_MARKER_TOKEN="pending:handling:$generation"
       ;;
     announced:downtime:*)
       if ! _fm_recovery_marker_write_locked "$marker" handling "$generation" announced; then
-        fm_lock_release "$lock"
+        _fm_recovery_lock_release "$lock" "$reentered"
         return 1
       fi
       FM_RECOVERY_MARKER_TOKEN="announced:handling:$generation"
       ;;
-    *) fm_lock_release "$lock"; return 1 ;;
+    *) _fm_recovery_lock_release "$lock" "$reentered"; return 1 ;;
   esac
-  fm_lock_release "$lock"
+  _fm_recovery_lock_release "$lock" "$reentered"
 }
 
 fm_recovery_marker_snapshot() {

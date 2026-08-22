@@ -15,6 +15,12 @@
 # child is reaped when the call returns, leaving NO watcher running and a false
 # "already running" off the dying process. That exact mistake silently took
 # supervision down for ~30 minutes.
+#
+# Usage:
+#   fm-watch-arm.sh [--restart]
+#   fm-watch-arm.sh --handling-delivered GENERATION --watcher-pid PID
+#
+# The handling-delivered form is an internal successor-confirmation interface.
 # On a harness with a PreToolUse-equivalent hook, bin/fm-arm-pretool-check.sh
 # applies the command-position policy before the command runs; see
 # docs/arm-pretool-check.md for the blessed tree and deny reason codes. It is a
@@ -25,7 +31,9 @@
 # liveness beacon (state/.last-watcher-beat) is fresh within FM_GUARD_GRACE (the
 # single source of truth, shared with fm-watch.sh and fm-guard.sh), and prints
 # exactly one unambiguous status line:
-#   watcher: started pid=<N> (beacon fresh)              - it launched one and confirmed it
+#   watcher: started pid=<N> (beacon fresh)[ recovery-generation=<generation>]
+#                                                        - it launched one and confirmed it;
+#                                                          the suffix is present for a handling successor
 #   watcher: attached pid=<N> (beacon <age>s)            - a live+fresh successor holds the lock;
 #                                                          this arm attaches and follows it
 #   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one

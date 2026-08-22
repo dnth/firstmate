@@ -751,6 +751,81 @@ test_marker_transitions_survive_reentry_from_an_exiting_frame() {
   pass "recovery-marker transitions reenter safely without breaking exclusion"
 }
 
+test_handling_confirmation_is_bounded_by_foreign_marker_lock() {
+  local dir state holder rc marker_before
+  dir=$(make_case handling-confirmation-lock)
+  state="$dir/state"
+  printf 'pending:downtime:bounded-generation\n' > "$state/.watcher-down"
+  chmod 0600 "$state/.watcher-down"
+  marker_before=$(cat "$state/.watcher-down")
+
+  # shellcheck disable=SC2016 # Expansion belongs to the inner bash, not this shell.
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    mkdir "$2/.watch.lock" || exit 1
+    printf "%s\n" "$BASHPID" > "$2/.watch.lock/pid"
+    printf "%s\n" "$3" > "$2/.watch.lock/fm-home"
+    printf "%s\n" "$1/bin/fm-watch.sh" > "$2/.watch.lock/watcher-path"
+    fm_pid_identity "$BASHPID" > "$2/.watch.lock/pid-identity" || exit 2
+    fm_lock_try_acquire "$2/.watcher-down.lock" || exit 3
+    printf ready > "$2/.handling-holder"
+    while [ ! -e "$2/.release-handling-holder" ]; do sleep 0.05; done
+    fm_lock_release "$2/.watcher-down.lock"
+    printf released > "$2/.handling-holder-released"
+    sleep 30
+  ' _ "$ROOT" "$state" "$dir" &
+  holder=$!
+  wait_for_file_content "$state/.handling-holder" || {
+    kill "$holder" 2>/dev/null || true
+    fail "foreign handling-confirmation lock holder never started"
+  }
+
+  set +e
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" timeout 5 "$ROOT/bin/fm-watch-arm.sh" \
+    --handling-delivered bounded-generation --watcher-pid "$holder" >/dev/null 2> "$dir/handling.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 124 ] || {
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    fail "handling confirmation hung behind a live foreign marker-lock holder"
+  }
+  [ "$rc" -eq 3 ] || {
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    fail "bounded handling confirmation reported status $rc instead of marker-lock exhaustion"
+  }
+  [ "$(cat "$state/.watcher-down")" = "$marker_before" ] || {
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    fail "handling confirmation modified the recovery marker behind a foreign lock holder"
+  }
+
+  : > "$state/.release-handling-holder"
+  wait_for_file_content "$state/.handling-holder-released" || {
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    fail "foreign handling-confirmation lock holder did not release its lock"
+  }
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" timeout 5 "$ROOT/bin/fm-watch-arm.sh" \
+    --handling-delivered bounded-generation --watcher-pid "$holder" >/dev/null 2> "$dir/uncontended.err" \
+    || {
+      kill "$holder" 2>/dev/null || true
+      wait "$holder" 2>/dev/null || true
+      fail "ordinary uncontended handling confirmation failed"
+    }
+  [ "$(cat "$state/.watcher-down")" = "pending:handling:bounded-generation" ] \
+    || {
+      kill "$holder" 2>/dev/null || true
+      wait "$holder" 2>/dev/null || true
+      fail "ordinary uncontended handling confirmation did not transition the recovery episode"
+    }
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+
+  pass "handling confirmation is bounded without bypassing foreign marker-lock exclusion"
+}
+
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
@@ -768,3 +843,4 @@ test_stale_recovery_generation_cannot_touch_a_newer_episode
 test_recovery_ack_failure_is_reported
 test_interruption_before_and_after_raw_commit
 test_marker_transitions_survive_reentry_from_an_exiting_frame
+test_handling_confirmation_is_bounded_by_foreign_marker_lock

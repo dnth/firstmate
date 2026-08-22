@@ -2,6 +2,10 @@
 # Present durable watcher wake records, optionally acknowledge handled records,
 # annotate validated signal status keys, then assert liveness.
 #
+# Usage:
+#   fm-wake-drain.sh
+#   fm-wake-drain.sh --ack-through SEQUENCE --recovery-generation GENERATION
+#
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
 set -u

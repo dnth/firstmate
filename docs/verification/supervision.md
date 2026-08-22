@@ -323,7 +323,7 @@ Stale prior-generation tool callbacks could not mutate the active child, repeate
 Plain Pi and pi-signed share the same tracked `.pi/extensions/fm-primary-pi-watch.ts` path, so both inherit the generation owner stated once in `bin/fm-primary-watch-core.ts`.
 OMP binds that same core through `.omp/extensions/fm-primary-omp.ts` and is covered by its own `tests/fm-omp-primary.test.sh` and the OMP row above; the remaining primary harnesses are not applicable because they do not use this extension generation lifecycle.
 
-The once-per-generation recovery bound and immediate handling-successor poll were verified on 2026-08-21 with the tracked Pi extension, real watcher processes, and an isolated home.
+The once-per-generation recovery bound and immediate handling-successor poll were verified on 2026-08-21 at revision `549dd1e0ff05f96607c5e7457b4d8e3d7396bd16` with the tracked Pi extension, real watcher processes, and an isolated home.
 The regression forced handling confirmation to fail, observed one recovery follow-up across the former repeat window, confirmed the successor remained live, and then proved a separate handling successor durably queued a crew event within the bounded poll window.
 
 ```sh
