@@ -385,17 +385,21 @@ unit_herdr_error_with_exact_ids_closes_exact() {
 }
 
 unit_herdr_run_failure_preserves_unconfirmed_record() {
-  local st
+  local st submitted
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-herdr-run-fail.XXXXXX")
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+  submitted="$st/submitted"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" SUBMITTED="$submitted" bash -c '
     . "$1"
+    . "$2/bin/backends/herdr.sh"
     fm_backend_source() { return 0; }
     fm_backend_herdr_server_ensure() { return 0; }
+    fm_backend_herdr_pane_idle_foreground_shell_pid() { return 0; }
     fm_backend_herdr_cli() {
       if [ "$2 $3" = "workspace create" ]; then
         printf %s '\''{"result":{"workspace":{"workspace_id":"ws-exact"},"root_pane":{"pane_id":"pane-exact"}}}'\''
         return 0
       elif [ "$2 $3" = "pane run" ]; then
+        : > "$SUBMITTED"
         return 1
       elif [ "$2 $3" = "pane get" ]; then
         printf %s '\''{"error":{"code":"transport_error"}}'\''
@@ -404,11 +408,12 @@ unit_herdr_run_failure_preserves_unconfirmed_record() {
       return 2
     }
     ! fm_afk_launch_create_herdr lab:captain herdr
-  ' _ "$LAUNCH"
-  if [ "$(cut -f2 "$st/state/.afk-daemon-terminal" 2>/dev/null || true)" = "lab:pane-exact" ]; then
-    pass "herdr run failure: unconfirmed exact id remains reconcilable"
+  ' _ "$LAUNCH" "$ROOT"
+  if [ -e "$submitted" ] \
+    && [ "$(cut -f2 "$st/state/.afk-daemon-terminal" 2>/dev/null || true)" = "lab:pane-exact" ]; then
+    pass "herdr send failure: submission is attempted and unconfirmed exact id remains reconcilable"
   else
-    fail "herdr run failure: unconfirmed exact id was discarded"
+    fail "herdr send failure: submission was skipped or unconfirmed exact id was discarded"
   fi
   rm -rf "$st"
 }
@@ -444,6 +449,13 @@ unit_herdr_submission_waits_for_idle_shell() {
           fi
           printf "%s\n" "$5" >> "$CALLS"
           ;;
+        "pane close")
+          printf "%s:%s\n" "$1" "$4" > "$CLOSED"
+          ;;
+        "pane get")
+          printf %s '\''{"error":{"code":"pane_not_found"}}'\''
+          return 2
+          ;;
       esac
       return 0
     }
@@ -452,17 +464,19 @@ unit_herdr_submission_waits_for_idle_shell() {
       printf "%s\t%s\t%s\n" "$1" "$2" "$3" > "$FM_AFK_LAUNCH_RECORD"
     }
     fm_afk_launch_commit_terminal() { return 0; }
-    fm_afk_launch_close_recorded() { : > "$CLOSED"; return 0; }
     sleep() { :; }
     run_case() {
-      local name=$1 threshold=$2 polls=$3 rc
+      local name=$1 threshold=$2 polls=$3 rc expected
       ATTEMPTS="$CASE_DIR/$name.attempts"
       CALLS="$CASE_DIR/$name.calls"
       EARLY="$CASE_DIR/$name.early"
       CLOSED="$CASE_DIR/$name.closed"
       READY_AFTER=$threshold
+      expected=$(printf '\''exec env FM_HOME=%q FM_STATE_OVERRIDE=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q FM_SUPERVISOR_HARNESS=%q %q'\'' \
+        "$FM_HOME" "$FM_AFK_LAUNCH_STATE" "lab:captain" herdr "$FM_SUPERVISOR_HARNESS" "$(fm_afk_launch_entry_cmd)")
       printf "0\n" > "$ATTEMPTS"
       : > "$CALLS"
+      printf "%s\n" "$expected" > "$CASE_DIR/$name.expected"
       rm -f "$EARLY" "$CLOSED"
       if FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=$polls \
         fm_afk_launch_create_herdr lab:captain herdr; then
@@ -478,6 +492,7 @@ unit_herdr_submission_waits_for_idle_shell() {
   if [ "$(cat "$case_dir/transient.result" 2>/dev/null || true)" = 0 ] \
     && [ "$(cat "$case_dir/transient.attempts" 2>/dev/null || true)" = 3 ] \
     && [ "$(wc -l < "$case_dir/transient.calls" 2>/dev/null || true)" = 1 ] \
+    && [ "$(cat "$case_dir/transient.calls" 2>/dev/null || true)" = "$(cat "$case_dir/transient.expected" 2>/dev/null || true)" ] \
     && [ ! -e "$case_dir/transient.early" ]; then
     pass "herdr submit: transient startup waits for idle shell before one complete command"
   else
@@ -486,7 +501,8 @@ unit_herdr_submission_waits_for_idle_shell() {
   if [ "$(cat "$case_dir/never.result" 2>/dev/null || true)" -ne 0 ] \
     && [ "$(cat "$case_dir/never.attempts" 2>/dev/null || true)" = 2 ] \
     && [ "$(wc -l < "$case_dir/never.calls" 2>/dev/null || true)" = 0 ] \
-    && [ -e "$case_dir/never.closed" ]; then
+    && [ "$(cat "$case_dir/never.closed" 2>/dev/null || true)" = "lab:pane-submit-ready" ] \
+    && [ ! -e "$st/state/.afk-daemon-terminal" ]; then
     pass "herdr submit: permanent unreadiness submits no command and rolls back exactly"
   else
     fail "herdr submit: permanent unreadiness submitted or skipped exact rollback"
