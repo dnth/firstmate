@@ -381,10 +381,7 @@ classify_stale() {  # <window> <state>
   local win=$1 state=$2 task last seen
   task=$(window_to_task "$win" "$state")
   last=$(last_status_line "$state/$task.status")
-  if [ -n "$last" ] && status_is_paused_or_captain_held "$last"; then
-    # A declared external wait or verified captain-held transfer leaves an idle
-    # endpoint intentionally. Treat both as a bounded pause rather than aging
-    # the same known-gone stale endpoint back into an identical wedge forever.
+  if [ -n "$last" ] && daemon_pause_status_is_valid "$win" "$state" "$last"; then
     printf 'pause|paused/held (awaiting external recovery), rechecked on a long cadence: %s' "$last"
     return
   fi
@@ -471,6 +468,15 @@ pause_marker_remove() {  # <window> <state>
   rm -f "$state/.subsuper-paused-$key"
 }
 
+pause_markers_remove() {  # <window> <state>
+  local win=$1 state=$2 task key watcher_key
+  task=$(window_to_task "$win" "$state")
+  key=$(_stale_key "$task")
+  watcher_key=$(_stale_key "$win")
+  rm -f "$state/.subsuper-paused-$key" "$state/.paused-$watcher_key" \
+    "$state/.paused-rechecked-$watcher_key" "$state/.paused-resurfaced-$watcher_key"
+}
+
 clear_pause_tracking() {  # <window> <state>
   local win=$1 state=$2 task key watcher_key
   task=$(window_to_task "$win" "$state")
@@ -487,12 +493,31 @@ reconcile_pause_tracking() {  # <window> <state> <last-status-line>
   key=$(_stale_key "$task")
   marker="$state/.subsuper-paused-$key"
   watcher_key=$(_stale_key "$win")
-  if status_is_paused_or_captain_held "$last"; then
+  if daemon_pause_status_is_valid "$win" "$state" "$last"; then
     stale_marker_remove "$win" "$state"
     pause_marker_record "$win" "$state"
+  elif status_is_paused_or_captain_held "$last" && ! status_is_paused "$last" \
+    && { [ -e "$marker" ] || [ -e "$state/.paused-$watcher_key" ]; }; then
+    pause_markers_remove "$win" "$state"
+    stale_marker_record "$win" "$state"
   elif [ -e "$marker" ] || [ -e "$state/.paused-$watcher_key" ]; then
     clear_pause_tracking "$win" "$state"
   fi
+}
+
+daemon_pause_status_is_valid() {  # <window> <state> <last-status-line>
+  local win=$1 state=$2 last=$3 task meta backend agent_state
+  status_is_paused "$last" && return 0
+  status_is_paused_or_captain_held "$last" || return 1
+  task=$(window_to_task "$win" "$state")
+  meta="$state/$task.meta"
+  [ -f "$meta" ] || return 1
+  backend=$(fm_backend_of_meta "$meta")
+  agent_state=$(fm_backend_agent_state "$backend" "$win" "$meta" 2>/dev/null || true)
+  case "$agent_state" in
+    dead|missing) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 migrate_watcher_pause_markers() {  # <state>
@@ -1047,7 +1072,7 @@ housekeeping() {  # <state>
     fi
     task=$(window_to_task "$win" "$state")
     last=$(last_status_line "$state/$task.status")
-    if [ -n "$last" ] && status_is_paused_or_captain_held "$last"; then
+    if [ -n "$last" ] && daemon_pause_status_is_valid "$win" "$state" "$last"; then
       reconcile_pause_tracking "$win" "$state" "$last"
       continue
     fi
@@ -1078,7 +1103,7 @@ housekeeping() {  # <state>
     fi
     task=$(window_to_task "$win" "$state")
     last=$(last_status_line "$state/$task.status")
-    if [ -z "$last" ] || ! status_is_paused_or_captain_held "$last"; then
+    if [ -z "$last" ] || ! daemon_pause_status_is_valid "$win" "$state" "$last"; then
       reconcile_pause_tracking "$win" "$state" "$last"
       continue
     fi
@@ -1090,7 +1115,7 @@ housekeeping() {  # <state>
       2) rm -f "$marker" ;;
       *)
         last=$(last_status_line "$state/$task.status")
-        if [ -n "$last" ] && status_is_paused_or_captain_held "$last"; then
+        if [ -n "$last" ] && daemon_pause_status_is_valid "$win" "$state" "$last"; then
           escalate_add "$state" "paused/held ${age}s (awaiting external recovery, recheck whether the wait still holds): $win"
           _now > "$marker"
         else
@@ -1332,6 +1357,9 @@ handle_wake() {  # <reason> <state>
         else
           pause_marker_remove "$arg" "$state"
           stale_marker_record "$arg" "$state"
+          if [ -n "$last" ] && status_is_paused_or_captain_held "$last" && ! status_is_paused "$last"; then
+            reconcile_pause_tracking "$arg" "$state" "$last"
+          fi
         fi
       fi
       log "self-handle: $reason -> $distilled"

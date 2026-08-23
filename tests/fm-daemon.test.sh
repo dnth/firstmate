@@ -224,23 +224,23 @@ test_stale_paused_classifies_pause() {
 # stale worker. It keeps the same known-gone endpoint on the bounded pause
 # path while ordinary working and terminal statuses retain their semantics.
 test_stale_captain_held_classifies_pause_without_wedge_replay() {
-  local dir state win key out
+  local dir state fakebin win key out
   dir=$(make_supercase stale-captain-held)
-  state="$dir/state"
+  state="$dir/state"; fakebin="$dir/fakebin"
   win="sess:fm-held-w11"
   key=$(printf '%s' "held-w11" | tr ':/.' '___')
   printf 'captain-held [key=route]: waiting for recovery ownership\n' > "$state/held-w11.status"
-  fm_write_meta "$state/held-w11.meta" "window=$win" "backend=tmux"
-  out=$(FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state")
+  fm_write_meta "$state/held-w11.meta" "window=$win" "backend=tmux" "harness=pi"
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW= classify_stale "$win" "$state")
   case "$out" in pause\|*) ;; *) fail "captain-held stale did not classify as bounded pause: $out" ;; esac
-  FM_STATE_OVERRIDE="$state" handle_wake \
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW= handle_wake \
     "stale: $win (idle 400s, possible wedge, escalation due to threshold)" "$state"
   [ -e "$state/.subsuper-paused-$key" ] \
     || fail "captain-held enriched stale did not stay on bounded pause tracking"
   [ ! -s "$state/.subsuper-escalations" ] \
     || fail "captain-held enriched stale bypassed pause classification"
 
-  FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW= handle_wake "stale: $win" "$state"
   [ -e "$state/.subsuper-paused-$key" ] || fail "captain-held stale did not create pause tracking"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "captain-held stale created wedge tracking"
 
@@ -253,10 +253,43 @@ test_stale_captain_held_classifies_pause_without_wedge_replay() {
   [ ! -s "$state/.subsuper-escalations" ] \
     || fail "known-gone captain-held endpoint replayed an identical wedge escalation"
 
-  FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW= handle_wake "stale: $win" "$state"
   [ -e "$state/.subsuper-paused-$key" ] || fail "repeated held stale lost bounded pause tracking"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "repeated held stale replayed wedge tracking"
   pass "captain-held known-gone stale remains a bounded pause without wedge replay"
+}
+
+test_stale_captain_held_live_or_ambiguous_remains_stale() {
+  local mode dir state fakebin win key out watcher_key mode_command backend_window
+  for mode in live ambiguous; do
+    dir=$(make_supercase "stale-captain-held-$mode")
+    state="$dir/state"; fakebin="$dir/fakebin"
+    win="sess:fm-held-$mode"
+    backend_window=${win#*:}
+    key=$(printf '%s' "held-$mode" | tr ':/.' '___')
+    watcher_key=$(printf '%s' "$win" | tr ':/.' '___')
+    printf 'captain-held [key=route]: waiting for recovery ownership\n' > "$state/held-$mode.status"
+    fm_write_meta "$state/held-$mode.meta" "window=$win" "backend=tmux" "harness=pi"
+    : > "$state/.paused-$watcher_key"
+    if [ "$mode" = live ]; then
+      mode_command=pi
+    else
+      mode_command=unrecognized-agent
+    fi
+    out=$(PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$backend_window" \
+      FM_FAKE_TMUX_CURRENT_COMMAND="$mode_command" classify_stale "$win" "$state")
+    case "$out" in
+      pause\|*) fail "$mode captain-held stale was suppressed despite endpoint liveness: $out" ;;
+      self\|*) ;;
+      *) fail "$mode captain-held stale returned an invalid decision: $out" ;;
+    esac
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$backend_window" \
+      FM_FAKE_TMUX_CURRENT_COMMAND="$mode_command" handle_wake "stale: $win" "$state"
+    [ -e "$state/.subsuper-stale-$key" ] || fail "$mode captain-held stale did not retain stale tracking"
+    [ ! -e "$state/.subsuper-paused-$key" ] || fail "$mode captain-held stale created daemon pause tracking"
+    [ ! -e "$state/.paused-$watcher_key" ] || fail "$mode captain-held stale retained watcher pause tracking"
+  done
+  pass "live and ambiguous captain-held endpoints remain on stale tracking"
 }
 
 # handle_wake on a paused stale records a pause marker, drops any pre-existing wedge
@@ -1928,6 +1961,7 @@ test_stale_diagnostic_wedge_survives_busy_housekeeping
 test_stale_terminal_escalates
 test_stale_paused_classifies_pause
 test_stale_captain_held_classifies_pause_without_wedge_replay
+test_stale_captain_held_live_or_ambiguous_remains_stale
 test_handle_wake_paused_records_pause_marker
 test_handle_wake_paused_signal_records_pause_marker
 test_handle_wake_terminal_signal_clears_pause_tracking
