@@ -449,6 +449,90 @@ SH
     "interrupted ordinary acquisition did not report its preserved dirty lease"
   pass "spawn guards Treehouse reset before non-ancestor acquisition"
 }
+test_accepted_local_base_refreshes_and_is_forwarded_to_treehouse() {
+  local rec id out status accepted provider_args
+  id='pool-accepted-local-base-r8'
+  rec=$(make_case accepted-local-base "$id")
+  read_case_record "$rec"
+  printf 'accepted local correction\n' > "$PROJECT_DIR/local-correction.txt"
+  git -C "$PROJECT_DIR" add local-correction.txt
+  git -C "$PROJECT_DIR" -c user.name=Test -c user.email=test@example.invalid commit -qm accepted-local-correction
+  accepted=$(git -C "$PROJECT_DIR" rev-parse HEAD)
+
+  cat > "$FAKEBIN_DIR/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -e
+case "${1:-}" in
+  get)
+    cd "$FM_FAKE_POOL"
+    git reset --hard "$FM_FAKE_LOCAL_DEFAULT" >/dev/null
+    git clean -df >/dev/null
+    printf '%s\n' "$FM_FAKE_POOL"
+    ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$FAKEBIN_DIR/treehouse"
+  provider_args="$CASE_DIR/provider-args"
+  out=$(cd "$PROJECT_DIR" && FM_FAKE_POOL="$POOL_DIR" FM_FAKE_LOCAL_DEFAULT="$accepted" \
+    FM_FAKE_PROVIDER_ARGS="$provider_args" PATH="$FAKEBIN_DIR:$PATH" \
+    "$ROOT/bin/fm-treehouse-get.sh" --lease --accepted-local-base "$accepted" 2>&1)
+  status=$?
+  expect_code 0 "$status" "Treehouse should accept the explicitly approved local default base"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$accepted" ] \
+    || fail "Treehouse did not acquire the explicitly approved local base"
+
+  git -C "$POOL_DIR" reset --hard "$INITIAL_SHA" >/dev/null
+  out=$(run_spawn "$id" --mode local-only --yolo off --accepted-local-base "$accepted")
+  status=$?
+  expect_code 0 "$status" "spawn should refresh a pooled worktree to the accepted local base"
+  assert_contains "$out" "spawned $id" "accepted local-base spawn did not report success"
+  assert_grep "--accepted-local-base $accepted" "$CASE_DIR/send.log" \
+    "spawn did not forward the accepted local base to its Treehouse command"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$accepted" ] \
+    || fail "spawn did not leave the pooled worktree at the accepted local base"
+  pass "local-only spawn and Treehouse acquisition honor an explicit accepted local base"
+}
+
+test_accepted_local_base_rejects_unsafe_or_ambiguous_input() {
+  local rec id out status accepted
+  id='pool-accepted-local-reject-r9'
+  rec=$(make_case accepted-local-reject "$id")
+  read_case_record "$rec"
+  printf 'accepted local correction\n' > "$PROJECT_DIR/local-correction.txt"
+  git -C "$PROJECT_DIR" add local-correction.txt
+  git -C "$PROJECT_DIR" -c user.name=Test -c user.email=test@example.invalid commit -qm accepted-local-correction
+  accepted=$(git -C "$PROJECT_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off --accepted-local-base "$accepted")
+  status=$?
+  [ "$status" -ne 0 ] || fail "non-local-only spawn accepted a local base"
+  assert_contains "$out" "valid only for a local-only ship" \
+    "non-local-only local-base rejection was unclear"
+  out=$(run_spawn "$id" --mode local-only --yolo off \
+    --accepted-local-base "$accepted" --accepted-local-base "$accepted")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted duplicate accepted-local-base arguments"
+  assert_contains "$out" "may be specified only once" \
+    "duplicate accepted-local-base rejection was unclear"
+  out=$(cd "$PROJECT_DIR" && FM_FAKE_POOL="$POOL_DIR" PATH="$FAKEBIN_DIR:$PATH" \
+    "$ROOT/bin/fm-treehouse-get.sh" --lease --accepted-local-base= 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "Treehouse accepted an explicitly empty local base"
+  assert_contains "$out" "must be a full lowercase hexadecimal commit SHA" \
+    "empty local-base rejection was unclear"
+
+
+  out=$(run_spawn "$id" --mode local-only --yolo off --accepted-local-base "$INITIAL_SHA")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a valid but stale local-base SHA"
+  assert_contains "$out" "must equal the current local default-branch tip" \
+    "stale local-base rejection was unclear"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$INITIAL_SHA" ] \
+    || fail "unsafe local-base input moved the pooled worktree"
+  pass "local-only allocation rejects wrong-mode and stale or ambiguous local-base input"
+}
+
 
 test_unresolved_remote_default_refuses_pool() {
   local rec id out status before
@@ -496,5 +580,7 @@ test_post_merge_hook_dirtiness_refuses_launch
 test_diverged_pool_refuses_without_discarding_commits
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
+test_accepted_local_base_refreshes_and_is_forwarded_to_treehouse
+test_accepted_local_base_rejects_unsafe_or_ambiguous_input
 
 echo "# all fm-spawn-pool-base-freshen tests passed"

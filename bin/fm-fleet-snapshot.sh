@@ -664,13 +664,24 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
             report_path:((.report_path // null) | if . == null then null else trunc(500) end),
             local_note:((.local_note // null) | if . == null then null else trunc(120) end),completion} ]
        | sort_by([(.completion.date // ""), .id]) | reverse) as $landed_all
-    | ([ $tasks[] | select(.current_state.state == "unknown") ]) as $unknown_children
+    | ([ $backlog.records[]? | .id | select(. != null) ]) as $backlog_record_ids
+    | ([ $owned_in_flight[] as $work
+       | select($work.requires_child_metadata)
+       | $tasks[]
+       | select(.id == $work.id and .current_state.state == "unknown") ]) as $unknown_children
     | ([ $owned_in_flight[]
          | select(.requires_child_metadata)
          | select(.id as $id | [$tasks[].id] | index($id) | not) ]) as $orphan_in_flight
     | ([ $tasks[]
          | select(.id as $id | [$owned_in_flight[].id] | index($id) | not)
-         | {id,state:.current_state.state} ]) as $unowned_children
+         | . as $task
+         | select(($backlog_record_ids | index($task.id) | not)
+                  or ($task.current_state.state != "parked"
+                      and $task.current_state.state != "paused"
+                      and $task.current_state.state != "blocked"))
+         | {id,state:.current_state.state,detail:.current_state.detail} ]) as $unowned_children
+    | ([ $unowned_children[]
+         | select(.state != "parked" and .state != "paused" and .state != "blocked") ]) as $unowned_unsafe
     | ([ $owned_in_flight[] as $work
          | $tasks[]
          | select(.id == $work.id and (.current_state.state == "done" or .current_state.state == "failed"))
@@ -685,10 +696,10 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
           {kind:"orphan_in_flight",ids:($orphan_in_flight | map(.id)),
            reason:("in-flight backlog item has no child metadata: " + ($orphan_in_flight | map(.id) | join(", ")))}
         else empty end,
-        if ($unowned_children | length) > 0 then
-          {kind:"unowned_current",ids:($unowned_children | map(.id)),
+        if ($unowned_unsafe | length) > 0 then
+          {kind:"unowned_current",ids:($unowned_unsafe | map(.id)),
            reason:("live child state has no in-flight backlog item: " +
-                   ($unowned_children | map(.id + "=" + .state) | join(", ")))}
+                   ($unowned_unsafe | map(.id + "=" + .state) | join(", ")))}
         else empty end,
         if ($terminal_in_flight | length) > 0 then
           {kind:"terminal_in_flight",ids:($terminal_in_flight | map(.id)),
@@ -702,7 +713,10 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
          | {id,kind,state:.current_state.state,source:.current_state.source,
             doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
     | ($captain_holds_all
-       + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
+       + ([ $tasks[] as $t
+            | select(($backlog_record_ids | index($t.id) | not)
+                     or ([$owned_in_flight[].id] | index($t.id) != null))
+            | ($t.hints.open_decisions // [])[]
             | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status"} ])) as $decisions_all
     | ([ $queued_all[]
          | select((.unresolved_blocker_ids | length) > 0 or (.hold_reason != null and .hold_kind != null))
@@ -717,12 +731,17 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
            | select(($work.hold_reason != null and $work.hold_kind != null) | not)
            | {id,title:((.backlog.title // .id) | trunc(90)),blocked_by:null,
               blocked_by_ids:[],unresolved_blocker_ids:[],
-              reason:((.current_state.detail // .current_state.state) | trunc(120)),source:"child-state"} ]) as $holds_all
+              reason:((.current_state.detail // .current_state.state) | trunc(120)),source:"child-state"} ]
+       + [ $unowned_children[]
+           | select(.state == "parked" or .state == "paused" or .state == "blocked")
+           | {id,title:(.id | trunc(90)),blocked_by:null,
+              blocked_by_ids:[],unresolved_blocker_ids:[],
+              reason:((.detail // .state) | trunc(120)),source:"child-state"} ]) as $holds_all
     | ($backlog.present == true
        and ($unstructured_current | length) == 0
        and ($unknown_children | length) == 0
        and ($orphan_in_flight | length) == 0
-       and ($unowned_children | length) == 0
+       and ($unowned_unsafe | length) == 0
        and ($terminal_in_flight | length) == 0) as $valid
     | (if ($strict_invalidities | length) > 0 then $strict_invalidities[0].reason
        elif ($unknown_children | length) > 0 then

@@ -5,6 +5,7 @@
 # append-only post-acquisition transition check succeeds.
 # The Git guard owns recovery of an interrupted worktree add and removes only
 # its exact expected Git-unregistered numbered-slot target.
+# --accepted-local-base <full commit SHA> is restricted to a current local default-branch tip and is verified before guarded acquisition.
 # --ready-file writes the verified acquired path from this invocation before an
 # interactive shell starts, so RunPod relaunch cannot reuse a stale pane cwd.
 set -u
@@ -21,6 +22,8 @@ trap 'rm -rf "$GUARD_DIR"' EXIT
 
 lease_mode=0
 ready_file=
+accepted_local_base=
+accepted_local_base_set=0
 treehouse_args=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -40,6 +43,27 @@ while [ "$#" -gt 0 ]; do
         *) echo "error: --ready-file requires an absolute path" >&2; exit 2 ;;
       esac
       ;;
+    --accepted-local-base)
+      [ "$accepted_local_base_set" -eq 0 ] || {
+        echo "error: --accepted-local-base may be specified only once" >&2
+        exit 2
+      }
+      shift
+      [ "$#" -gt 0 ] || {
+        echo "error: --accepted-local-base requires a full commit SHA" >&2
+        exit 2
+      }
+      accepted_local_base=$1
+      accepted_local_base_set=1
+      ;;
+    --accepted-local-base=*)
+      [ "$accepted_local_base_set" -eq 0 ] || {
+        echo "error: --accepted-local-base may be specified only once" >&2
+        exit 2
+      }
+      accepted_local_base=${1#--accepted-local-base=}
+      accepted_local_base_set=1
+      ;;
     *) treehouse_args+=("$1") ;;
   esac
   shift
@@ -55,6 +79,34 @@ if [ "${IS_SANDBOX:-0}" = 1 ]; then
     echo "error: RunPod Treehouse acquisition requires a local pool root" >&2
     exit 1
   }
+fi
+if [ "$accepted_local_base_set" -eq 1 ]; then
+  case "$accepted_local_base" in
+    ''|*[!0-9a-f]*)
+      echo "error: --accepted-local-base must be a full lowercase hexadecimal commit SHA" >&2
+      exit 2
+      ;;
+  esac
+  if [ "${#accepted_local_base}" -lt 40 ] || [ "${#accepted_local_base}" -gt 64 ]; then
+    echo "error: --accepted-local-base must be a full 40- to 64-character commit SHA" >&2
+    exit 2
+  fi
+  local_default=$(git -C "$repo" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+  local_default=${local_default#origin/}
+  if [ -z "$local_default" ]; then
+    for branch in main master; do
+      if git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
+        local_default=$branch
+        break
+      fi
+    done
+  fi
+  local_head=$(git -C "$repo" rev-parse --verify --quiet "refs/heads/$local_default^{commit}" 2>/dev/null || true)
+  resolved_base=$(git -C "$repo" rev-parse --verify --quiet "$accepted_local_base^{commit}" 2>/dev/null || true)
+  if [ -z "$local_default" ] || [ "$resolved_base" != "$accepted_local_base" ] || [ "$local_head" != "$accepted_local_base" ]; then
+    echo "error: --accepted-local-base must equal the current local default-branch tip" >&2
+    exit 2
+  fi
 fi
 
 # shellcheck disable=SC2329 # Invoked indirectly by the signal trap handlers below.
@@ -102,10 +154,14 @@ if ! "$SCRIPT_DIR/fm-treehouse-status-read-only.sh" --candidates "$PWD" > "$GUAR
   echo "error: could not establish a safe Treehouse acquisition boundary" >&2
   exit 1
 fi
-default_ref=$(git -C "$PWD" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null || true)
-if [ -z "$default_ref" ]; then
-  default_branch=$(git -C "$PWD" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
-  [ -z "$default_branch" ] || default_ref="refs/heads/$default_branch"
+if [ -n "$accepted_local_base" ]; then
+  default_ref=$accepted_local_base
+else
+  default_ref=$(git -C "$PWD" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null || true)
+  if [ -z "$default_ref" ]; then
+    default_branch=$(git -C "$PWD" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+    [ -z "$default_branch" ] || default_ref="refs/heads/$default_branch"
+  fi
 fi
 if ! node - "$GUARD_DIR/candidates" "$GUARD_DIR/reflogs.json" "$default_ref" "$REAL_GIT" <<'NODE'
 const fs = require("fs");
