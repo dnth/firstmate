@@ -487,6 +487,8 @@ SH
   status=$?
   expect_code 0 "$status" "spawn should refresh a pooled worktree to the accepted local base"
   assert_contains "$out" "spawned $id" "accepted local-base spawn did not report success"
+  assert_grep "--accepted-local-base $accepted" "$CASE_DIR/send.log" \
+    "spawn did not forward the accepted local base to its Treehouse command"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$accepted" ] \
     || fail "spawn did not leave the pooled worktree at the accepted local base"
   pass "local-only spawn and Treehouse acquisition honor an explicit accepted local base"
