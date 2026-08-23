@@ -249,6 +249,53 @@ test_domain_alpha_stale_parent_event_does_not_become_current_work() {
   [ ! -s "$home/net.log" ] || fail "Domain Alpha structured-home read made a network call: $(cat "$home/net.log")"
   pass "Domain Alpha structured state overrides a stale parent Phase 7 event"
 }
+test_stale_child_metadata_preserves_queued_holds_and_decisions() {
+  local home mate fakebin json canonical
+  home=$(make_home stale-child-metadata)
+  mate="$TMP_ROOT/stale-child-home"
+  make_valid_secondmate_home stale-domain "$mate"
+  append_secondmate_registry "$home" stale-domain "$mate"
+  fm_write_secondmate_meta "$home/state/stale-domain.meta" "$mate" "firstmate:fm-stale-domain" sample
+  mkdir -p "$mate/projects/stale-child"
+  fm_write_meta "$mate/state/stale-child.meta" \
+    "window=firstmate:fm-stale-child" "worktree=$mate/projects/stale-child" \
+    "project=sample" "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" stale-child idle
+  printf 'paused [key=stale-child-choice]: retain the child route while the record settles\n' \
+    > "$mate/state/stale-child.status"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] queued-child-choice - Choose the retained child route (repo: sample) (kind: captain) (hold: choose the retained child route) (hold-kind: captain)
+
+## Done
+EOF
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.secondmates | any(.[]; .id == "stale-domain"
+      and .state == "captain_decision"
+      and .provenance == "structured-home"
+      and .freshness == "fresh"))
+      and (.decisions_open | any(.[]; .owner == "stale-domain"
+        and .key == "queued-child-choice" and .verb == "captain-hold"))
+      and (.in_flight | any(.id == "stale-domain") | not)
+  ' >/dev/null || fail "stale child metadata hid queued hold or invalidated the structured home: $json"
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "stale-domain")
+    | .current.state == "captain_decision"
+      and .current.reason == null
+      and .provenance.selected == "structured-home"
+      and .invalidity.kind == null
+      and (.queued | any(.id == "queued-child-choice"))
+      and (.decisions_open | any(.id == "queued-child-choice"))
+  ' >/dev/null || fail "canonical child summary did not retain queued decision surfaces: $canonical"
+  pass "stale child metadata does not invalidate queued holds or decisions"
+}
+
 
 test_gnu_stat_uses_file_formats_without_bsd_fallback_pollution() {
   local home mate fakebin canonical stat_log
@@ -730,9 +777,9 @@ EOF
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
     .secondmate_current.records[] | select(.id == "states")
-    | .current.state == "unknown"
-      and (.current.reason | contains("live child state has no in-flight backlog item"))
-      and (.current.reason | contains("parked=parked"))
+    | .current.state == "captain_decision"
+      and .current.reason == null
+      and (.holds | any(.id == "parked" and .source == "child-state"))
   ' >/dev/null || fail "unowned held child was silently dropped: $canonical"
   cat > "$mate/data/backlog.md" <<'EOF'
 ## In flight
@@ -1890,6 +1937,7 @@ EOF
 }
 
 test_domain_alpha_stale_parent_event_does_not_become_current_work
+test_stale_child_metadata_preserves_queued_holds_and_decisions
 test_gnu_stat_uses_file_formats_without_bsd_fallback_pollution
 test_parent_activity_evidence_is_bounded_and_disclosed
 test_active_child_overrides_old_parent_event

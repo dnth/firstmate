@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>] [--allow-project-omp-extensions]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--accepted-local-base <full-commit-sha>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>] [--allow-project-omp-extensions]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>] [--allow-project-omp-extensions]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>] [--allow-project-omp-extensions] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
@@ -139,6 +139,10 @@
 #   worktree fetches origin, resolves the current remote default branch, and fast-forwards to its tip.
 #   An unreachable origin, unresolved default branch, dirty worktree, or
 #   non-fast-forwardable base refuses the spawn rather than risking stale history.
+#   An explicit --accepted-local-base <full commit SHA> is task-scoped to a
+#   local-only ship and makes the pooled worktree use the current local default
+#   branch without fetching or publishing it. Other delivery modes reject it.
+#   The SHA must equal the project's current local default-branch tip.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
@@ -289,6 +293,8 @@ EFFORT_SET=0
 PREWALK_INTO_SET=0
 BACKEND_SET=0
 ALLOW_PROJECT_OMP_EXTENSIONS=0
+ACCEPTED_LOCAL_BASE=
+ACCEPTED_LOCAL_BASE_SET=0
 MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
@@ -305,9 +311,17 @@ for a in "$@"; do
       effort) EFFORT=$a; EFFORT_SET=1 ;;
       prewalk-into) PREWALK_INTO=$a; PREWALK_INTO_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
+      accepted-local-base)
+        [ "$ACCEPTED_LOCAL_BASE_SET" -eq 0 ] || {
+          echo "error: --accepted-local-base may be specified only once" >&2
+          exit 1
+        }
+        ACCEPTED_LOCAL_BASE=$a
+        ACCEPTED_LOCAL_BASE_SET=1
+        ;;
+      traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
-      traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -325,6 +339,21 @@ for a in "$@"; do
     --prewalk-into) want_value=prewalk-into ;;
     --prewalk-into=*) PREWALK_INTO=${a#--prewalk-into=}; PREWALK_INTO_SET=1 ;;
     --backend) want_value=backend ;;
+    --accepted-local-base)
+      [ "$ACCEPTED_LOCAL_BASE_SET" -eq 0 ] || {
+        echo "error: --accepted-local-base may be specified only once" >&2
+        exit 1
+      }
+      want_value=accepted-local-base
+      ;;
+    --accepted-local-base=*)
+      [ "$ACCEPTED_LOCAL_BASE_SET" -eq 0 ] || {
+        echo "error: --accepted-local-base may be specified only once" >&2
+        exit 1
+      }
+      ACCEPTED_LOCAL_BASE=${a#--accepted-local-base=}
+      ACCEPTED_LOCAL_BASE_SET=1
+      ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
     --allow-project-omp-extensions) ALLOW_PROJECT_OMP_EXTENSIONS=1 ;;
     --mode) want_value=mode ;;
@@ -396,6 +425,22 @@ else
     echo "error: --yolo applies only to ship spawns; a scout delivers a report and a secondmate records its own fixed posture" >&2
     exit 1
   }
+fi
+if [ "$ACCEPTED_LOCAL_BASE_SET" -eq 1 ]; then
+  if [ "$KIND" != ship ] || [ "$MODE" != local-only ]; then
+    echo "error: --accepted-local-base is valid only for a local-only ship spawn" >&2
+    exit 1
+  fi
+  case "$ACCEPTED_LOCAL_BASE" in
+    ''|*[!0-9a-f]*)
+      echo "error: --accepted-local-base must be a full lowercase hexadecimal commit SHA" >&2
+      exit 1
+      ;;
+  esac
+  if [ "${#ACCEPTED_LOCAL_BASE}" -lt 40 ] || [ "${#ACCEPTED_LOCAL_BASE}" -gt 64 ]; then
+    echo "error: --accepted-local-base must be a full 40- to 64-character commit SHA" >&2
+    exit 1
+  fi
 fi
 
 REMOTE_RUNPOD_DELIVERY_LOCK=
@@ -766,6 +811,10 @@ if [ "$BACKEND" = cmux ] && [ "$KIND" = secondmate ]; then
   echo "error: backend=cmux does not support --secondmate spawns yet" >&2
   exit 1
 fi
+if [ "$ACCEPTED_LOCAL_BASE_SET" -eq 1 ] && [ "$BACKEND" = orca ]; then
+  echo "error: --accepted-local-base applies only to Treehouse-backed spawns; backend=orca owns its worktree" >&2
+  exit 1
+fi
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
@@ -992,6 +1041,10 @@ spawn_herdr_presentation_order_lock_release() {
 idpart=${POS[0]:-}
 idpart=${idpart%%=*}
 if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
+  if [ -n "$ACCEPTED_LOCAL_BASE" ]; then
+    echo "error: --accepted-local-base is task-scoped and cannot be combined with batch dispatch" >&2
+    exit 1
+  fi
   if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
     echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
     exit 1
@@ -1003,6 +1056,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ -z "$PREWALK_INTO" ] || shared_args+=(--prewalk-into "$PREWALK_INTO")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
+  [ -z "$ACCEPTED_LOCAL_BASE" ] || shared_args+=(--accepted-local-base "$ACCEPTED_LOCAL_BASE")
   [ "$ALLOW_PROJECT_OMP_EXTENSIONS" -eq 0 ] || shared_args+=(--allow-project-omp-extensions)
   # One delivery contract applies to every pair in a batch, exactly like the shared
   # harness. Each pair still re-validates it against its own brief, so a batch
@@ -2225,6 +2279,27 @@ BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 # (docs/herdr-backend.md "Known gaps").
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
 
+validate_accepted_local_base() {
+  [ "$ACCEPTED_LOCAL_BASE_SET" -eq 1 ] || return 0
+  local default local_head resolved
+  default=$(default_branch "$PROJ_ABS" 2>/dev/null || true)
+  [ -n "$default" ] || {
+    echo "error: cannot determine the project's local default branch for --accepted-local-base" >&2
+    return 1
+  }
+  resolved=$(git -C "$PROJ_ABS" rev-parse --verify --quiet "$ACCEPTED_LOCAL_BASE^{commit}" 2>/dev/null || true)
+  [ "$resolved" = "$ACCEPTED_LOCAL_BASE" ] || {
+    echo "error: --accepted-local-base must name an existing full commit SHA in the project" >&2
+    return 1
+  }
+  local_head=$(git -C "$PROJ_ABS" rev-parse --verify --quiet "refs/heads/$default^{commit}" 2>/dev/null || true)
+  [ "$local_head" = "$ACCEPTED_LOCAL_BASE" ] || {
+    echo "error: --accepted-local-base must equal the current local default-branch tip" >&2
+    return 1
+  }
+}
+validate_accepted_local_base || exit 1
+
 real_path_or_raw() {  # <path>
   local path=$1 real
   if real=$(cd "$path" 2>/dev/null && pwd -P); then
@@ -2273,20 +2348,24 @@ validate_spawn_pool_lease() { # <source> <inspect-target>
     refuse_spawn_pool_lease "$source yielded a dirty pool worktree ($dirty; allowed only a lone untracked treehouse.toml)" "$inspect_target"
     return 1
   fi
-  if ! git -C "$WT" fetch --quiet origin; then
-    refuse_spawn_pool_lease "$source could not fetch origin; refusing to launch from a potentially stale pool base" "$inspect_target"
-    return 1
+  if [ -n "$ACCEPTED_LOCAL_BASE" ]; then
+    target=$ACCEPTED_LOCAL_BASE
+  else
+    if ! git -C "$WT" fetch --quiet origin; then
+      refuse_spawn_pool_lease "$source could not fetch origin; refusing to launch from a potentially stale pool base" "$inspect_target"
+      return 1
+    fi
+    if ! git -C "$WT" remote set-head origin --auto >/dev/null 2>&1; then
+      refuse_spawn_pool_lease "$source could not resolve origin's current default branch" "$inspect_target"
+      return 1
+    fi
+    default=$(default_branch "$WT" 2>/dev/null || true)
+    [ -n "$default" ] || {
+      refuse_spawn_pool_lease "$source could not resolve the origin default branch" "$inspect_target"
+      return 1
+    }
+    target="origin/$default"
   fi
-  if ! git -C "$WT" remote set-head origin --auto >/dev/null 2>&1; then
-    refuse_spawn_pool_lease "$source could not resolve origin's current default branch" "$inspect_target"
-    return 1
-  fi
-  default=$(default_branch "$WT" 2>/dev/null || true)
-  [ -n "$default" ] || {
-    refuse_spawn_pool_lease "$source could not resolve the origin default branch" "$inspect_target"
-    return 1
-  }
-  target="origin/$default"
   expected=$(git -C "$WT" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null || true)
   [ -n "$expected" ] || {
     refuse_spawn_pool_lease "$source has no readable $target base" "$inspect_target"
@@ -2301,22 +2380,26 @@ validate_spawn_pool_lease() { # <source> <inspect-target>
 
 freshen_spawn_worktree_base() {  # <worktree>
   local worktree=$1 default target expected actual current
-  if ! git -C "$worktree" fetch --quiet origin; then
-    echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  fi
-  if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
-    echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  fi
-  default=$(default_branch "$worktree") || {
-    echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  }
-  target="origin/$default"
-  if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
-    echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
+  if [ -n "$ACCEPTED_LOCAL_BASE" ]; then
+    target=$ACCEPTED_LOCAL_BASE
+  else
+    if ! git -C "$worktree" fetch --quiet origin; then
+      echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+    if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
+      echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+    default=$(default_branch "$worktree") || {
+      echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    }
+    target="origin/$default"
+    if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
+      echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
   fi
   expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
     echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
@@ -2431,7 +2514,9 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 W="fm-$ID"
 SPAWN_START_DIR=$PROJ_ABS
 if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
-  WT=$(cd "$PROJ_ABS" && "$SCRIPT_DIR/fm-treehouse-get.sh" --lease --lease-holder "$W") || {
+  treehouse_lease_args=(--lease --lease-holder "$W")
+  [ -z "$ACCEPTED_LOCAL_BASE" ] || treehouse_lease_args+=(--accepted-local-base "$ACCEPTED_LOCAL_BASE")
+  WT=$(cd "$PROJ_ABS" && "$SCRIPT_DIR/fm-treehouse-get.sh" "${treehouse_lease_args[@]}") || {
     echo "error: OMP could not lease an authoritative pooled worktree before endpoint creation" >&2
     exit 1
   }
@@ -2806,6 +2891,10 @@ kimi_spawn_fail() {  # <detail>
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
   && [ "$PREWALK_WORKTREE_READY" != 1 ]; then
   printf -v treehouse_get_command '%q' "$SCRIPT_DIR/fm-treehouse-get.sh"
+  if [ -n "$ACCEPTED_LOCAL_BASE" ]; then
+    printf -v accepted_local_base_quoted '%q' "$ACCEPTED_LOCAL_BASE"
+    treehouse_get_command="$treehouse_get_command --accepted-local-base $accepted_local_base_quoted"
+  fi
   if [ "${IS_SANDBOX:-}" = 1 ]; then
     TREEHOUSE_READY_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-treehouse-ready.${ID}.XXXXXX") || {
       echo "error: could not create the guarded Treehouse ready directory" >&2
