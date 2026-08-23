@@ -673,7 +673,12 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
          | select(.requires_child_metadata)
          | select(.id as $id | [$tasks[].id] | index($id) | not) ]) as $orphan_in_flight
     | ([ $tasks[]
-         | select(.id as $id | ($backlog_record_ids | index($id) | not))
+         | select(.id as $id | [$owned_in_flight[].id] | index($id) | not)
+         | . as $task
+         | select(($backlog_record_ids | index($task.id) | not)
+                  or ($task.current_state.state != "parked"
+                      and $task.current_state.state != "paused"
+                      and $task.current_state.state != "blocked"))
          | {id,state:.current_state.state,detail:.current_state.detail} ]) as $unowned_children
     | ([ $unowned_children[]
          | select(.state != "parked" and .state != "paused" and .state != "blocked") ]) as $unowned_unsafe

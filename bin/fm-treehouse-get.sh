@@ -80,7 +80,7 @@ if [ "${IS_SANDBOX:-0}" = 1 ]; then
     exit 1
   }
 fi
-if [ -n "$accepted_local_base" ]; then
+if [ "$accepted_local_base_set" -eq 1 ]; then
   case "$accepted_local_base" in
     ''|*[!0-9a-f]*)
       echo "error: --accepted-local-base must be a full lowercase hexadecimal commit SHA" >&2

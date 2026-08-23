@@ -261,7 +261,7 @@ test_stale_child_metadata_preserves_queued_holds_and_decisions() {
     "window=firstmate:fm-stale-child" "worktree=$mate/projects/stale-child" \
     "project=sample" "harness=claude" "kind=ship" "mode=no-mistakes"
   record_claude_state "$mate/state" stale-child idle
-  printf 'paused [key=stale-child-choice]: retain the child route while the record settles\n' \
+  printf 'paused [key=stale-child-choice]: retain the child route while the record settles\nneeds-decision [key=stale-child-choice]: retain the stale child route\n' \
     > "$mate/state/stale-child.status"
   cat > "$mate/data/backlog.md" <<'EOF'
 ## In flight
@@ -292,6 +292,7 @@ EOF
       and .invalidity.kind == null
       and (.queued | any(.id == "queued-child-choice"))
       and (.decisions_open | any(.id == "queued-child-choice"))
+      and (.decisions_open | any(.id == "stale-child" and .key == "stale-child-choice" and .verb == "needs-decision"))
   ' >/dev/null || fail "canonical child summary did not retain queued decision surfaces: $canonical"
   pass "stale child metadata does not invalidate queued holds or decisions"
 }
@@ -309,6 +310,14 @@ test_unowned_working_child_state_is_invalid() {
     "project=sample" "harness=claude" "kind=ship" "mode=no-mistakes"
   record_claude_state "$mate/state" working-child busy
   printf 'working: stale live work\n' > "$mate/state/working-child.status"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] working-child - Stale working child (repo: sample) (kind: ship)
+
+## Done
+EOF
   fakebin=$(make_fakebin "$home")
   summary=$(PATH="$fakebin:$PATH" FM_HOME="$mate" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary)

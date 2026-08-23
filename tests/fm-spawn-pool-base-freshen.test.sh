@@ -515,6 +515,12 @@ test_accepted_local_base_rejects_unsafe_or_ambiguous_input() {
   [ "$status" -ne 0 ] || fail "spawn accepted duplicate accepted-local-base arguments"
   assert_contains "$out" "may be specified only once" \
     "duplicate accepted-local-base rejection was unclear"
+  out=$(cd "$PROJECT_DIR" && FM_FAKE_POOL="$POOL_DIR" PATH="$FAKEBIN_DIR:$PATH" \
+    "$ROOT/bin/fm-treehouse-get.sh" --lease --accepted-local-base= 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "Treehouse accepted an explicitly empty local base"
+  assert_contains "$out" "must be a full lowercase hexadecimal commit SHA" \
+    "empty local-base rejection was unclear"
 
 
   out=$(run_spawn "$id" --mode local-only --yolo off --accepted-local-base "$INITIAL_SHA")
