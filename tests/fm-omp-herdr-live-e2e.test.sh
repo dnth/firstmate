@@ -771,6 +771,38 @@ wait_for "primary-owned empty queue at exact native idle after secondmate recove
 send_task "$RESUMED_TARGET" /exit || fail "resumed OMP Herdr secondmate did not exit cleanly"
 wait_for "resumed secondmate pane absence" pane_missing "$RESUMED_TARGET"
 
+# The away launcher uses the same real OMP primary target after the role
+# matrix is complete. This is the daemon-backed readiness regression: the
+# daemon command must survive the new Herdr pane's startup shell, create one
+# exact non-visible workspace, and leave the captain pane untouched.
+afk_before_workspaces=$(lab workspace list | jq '[.result.workspaces[]?] | length')
+afk_start_output=$(fm_env FM_SUPERVISOR_TARGET="$PRIMARY_TARGET" \
+  FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_HARNESS=omp \
+  FM_AFK_LAUNCH_LABEL=omp-live-afk "$ROOT/bin/fm-afk-launch.sh" start) \
+  || fail "real OMP away launcher readiness failed"
+AFK_RECORD="$HOME_DIR/state/.afk-daemon-terminal"
+AFK_TARGET=$(cut -f2 "$AFK_RECORD")
+AFK_WORKSPACE=$(cut -f3 "$AFK_RECORD")
+[ "$AFK_TARGET" != "$PRIMARY_TARGET" ] \
+  || fail "real OMP away launcher reused the captain target"
+[ -n "$AFK_WORKSPACE" ] || fail "real OMP away launcher did not publish a workspace id"
+afk_after_workspaces=$(lab workspace list | jq '[.result.workspaces[]?] | length')
+[ "$afk_after_workspaces" -eq $((afk_before_workspaces + 1)) ] \
+  || fail "real OMP away launcher did not create exactly one isolated workspace"
+lab pane get "$PRIMARY_PANE" >/dev/null \
+  || fail "real OMP away launcher disturbed the captain pane"
+printf '%s\n' "$afk_start_output" | grep -F "daemon launched in non-visible herdr workspace" >/dev/null \
+  || fail "real OMP away launcher did not report its exact non-visible workspace"
+fm_env FM_SUPERVISOR_TARGET="$PRIMARY_TARGET" \
+  FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_HARNESS=omp \
+  "$ROOT/bin/fm-afk-launch.sh" stop >/dev/null \
+  || fail "real OMP away launcher did not cleanly stop its daemon"
+[ ! -e "$HOME_DIR/state/.afk" ] && [ ! -e "$AFK_RECORD" ] \
+  || fail "real OMP away launcher left durable away state after stop"
+afk_final_workspaces=$(lab workspace list | jq '[.result.workspaces[]?] | length')
+[ "$afk_final_workspaces" -eq "$afk_before_workspaces" ] \
+  || fail "real OMP away launcher leaked its isolated workspace"
+
 primary_offset=$(session_offset "$PRIMARY_SESSION") || exit 1
 primary_verdict=$(PATH="$WRAPPER_BIN:$BASE_PATH" HERDR_SESSION="$SESSION" \
   bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit "$1" /exit 1 0.2 0 "" omp' \
