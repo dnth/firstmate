@@ -447,11 +447,15 @@ stale_marker_record() {  # <window> <state>  — create if absent
   [ -e "$marker" ] || _now > "$marker"
 }
 
+stale_markers_remove_by_key() {  # <state> <key>
+  local state=$1 key=$2
+  rm -f "$state/.subsuper-stale-$key" "$state/.subsuper-remote-recheck-$key"
+}
+
 stale_marker_remove() {  # <window> <state>
   local win=$1 state=$2 key
   key=$(_stale_key "$(window_to_task "$win" "$state")")
-  rm -f "$state/.subsuper-stale-$key"
-  rm -f "$state/.subsuper-remote-recheck-$key"
+  stale_markers_remove_by_key "$state" "$key"
 }
 
 # Pause marker: state/.subsuper-paused-<key> holds the epoch a declared pause was
@@ -1137,7 +1141,7 @@ housekeeping() {  # <state>
     win=$(window_for_task "$key" "$state" 2>/dev/null || true)
     if [ -z "$win" ]; then
       # Window gone (task torn down): drop the marker, nothing to escalate.
-      rm -f "$marker"; continue
+      stale_markers_remove_by_key "$state" "$key"; continue
     fi
     task=$(window_to_task "$win" "$state")
     last=$(last_status_line "$state/$task.status")

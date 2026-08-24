@@ -387,6 +387,25 @@ SH
   pass "remote stale markers reconcile through owner results"
 }
 
+test_housekeeping_missing_window_clears_remote_recheck_marker() {
+  local dir state fakebin task key
+  dir=$(make_supercase stale-teardown-sidecar)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  task="remote-teardown-w6"
+  key=$(printf '%s' "$task" | tr ':/.' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  date +%s > "$state/.subsuper-remote-recheck-$key"
+  (
+    unset FM_FAKE_TMUX_WINDOW
+    PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+      FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+  ) || fail "missing-window housekeeping failed"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "missing window retained stale marker"
+  [ ! -e "$state/.subsuper-remote-recheck-$key" ] \
+    || fail "missing window retained remote recheck sidecar"
+  pass "missing-window cleanup removes stale markers and remote recheck sidecars"
+}
+
 test_stale_captain_held_herdr_live_or_ambiguous_remains_stale() {
   local mode dir state win out
   for mode in live unknown; do
@@ -2100,6 +2119,7 @@ test_stale_captain_held_classifies_pause_without_wedge_replay
 test_stale_captain_held_live_or_ambiguous_remains_stale
 test_stale_captain_held_remote_remains_ambiguous
 test_housekeeping_remote_stale_marker_rechecks_owner
+test_housekeeping_missing_window_clears_remote_recheck_marker
 test_stale_captain_held_herdr_live_or_ambiguous_remains_stale
 test_handle_wake_paused_records_pause_marker
 test_handle_wake_paused_signal_records_pause_marker
