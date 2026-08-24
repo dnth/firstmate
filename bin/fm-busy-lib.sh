@@ -311,21 +311,6 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       fi
       ;;
   esac
-  # Rendered Hermes evidence is screen state, not lifecycle fact, in BOTH
-  # directions: a redraw or tool render can show a ready footer mid-turn, and a
-  # lagging redraw can still show the busy footer and its elapsed segment after
-  # the turn-end hook has already settled the record. A valid trusted record
-  # therefore decides every gate; the rendered tail is consulted only when no
-  # such record exists.
-  hermes_native=
-  if [ "$harness" = hermes ]; then
-    if [ -z "$tail40" ] && command -v fm_backend_capture >/dev/null 2>&1; then
-      tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null || true)
-    fi
-    if [ -n "$tail40" ]; then
-      hermes_native=$(printf '%s\n' "$tail40" | fm_busy_hermes_tui_tail_state)
-    fi
-  fi
   out=$(fm_busy_record_read "$state" "$id") && rc=0 || rc=$?
   if [ "$rc" = 0 ]; then
     r_state=${out%% *}
@@ -344,14 +329,27 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       return 0
       ;;
   esac
-  # No record at all. The rendered Hermes tail is the only remaining evidence
-  # here, so both of its verdicts may settle without contradicting anything.
-  case "$hermes_native" in
-    busy|idle)
-      printf '%s hermes-tui' "$hermes_native"
-      return 0
-      ;;
-  esac
+  # No record at all. Rendered Hermes evidence is screen state, not lifecycle
+  # fact, in BOTH directions: a redraw or tool render can show a ready footer
+  # mid-turn, and a lagging redraw can still show the busy footer and its
+  # elapsed segment after the turn-end hook has already settled the record. A
+  # valid trusted record therefore decides every gate and returned above, so
+  # the tail is captured only here, where it is the only remaining evidence and
+  # both of its verdicts may settle without contradicting anything.
+  if [ "$harness" = hermes ]; then
+    if [ -z "$tail40" ] && command -v fm_backend_capture >/dev/null 2>&1; then
+      tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null || true)
+    fi
+    if [ -n "$tail40" ]; then
+      hermes_native=$(printf '%s\n' "$tail40" | fm_busy_hermes_tui_tail_state)
+      case "$hermes_native" in
+        busy|idle)
+          printf '%s hermes-tui' "$hermes_native"
+          return 0
+          ;;
+      esac
+    fi
+  fi
   # A native herdr busy verdict is semantic enough to trust for BUSY
   # (streaming means a turn is running); native idle is narrower than turn
   # state (a long foreground tool call reads idle) and stays unknown here.

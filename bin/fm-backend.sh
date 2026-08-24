@@ -724,25 +724,6 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
   esac
 }
 
-# fm_backend_send_text_line: submit one complete shell command through a
-# backend's fixed-command path. This is distinct from the interactive-agent
-# composer verifier below. It currently has no callers: the Hermes adapter that
-# used it now steers a persistent TUI composer instead of a pane shell. The
-# per-backend implementations it dispatches to remain directly exercised.
-fm_backend_send_text_line() {  # <backend> <target> <text> [expected-label]
-  local backend=$1
-  shift
-  fm_backend_source "$backend" || return 1
-  case "$backend" in
-    tmux) fm_backend_tmux_send_text_line "$@" ;;
-    herdr) fm_backend_herdr_send_text_line "$@" ;;
-    zellij) fm_backend_zellij_send_text_line "$@" ;;
-    orca) fm_backend_orca_send_text_line "$@" ;;
-    cmux) fm_backend_cmux_send_text_line "$@" ;;
-    *) echo "error: no send-text-line implementation for backend '$backend'" >&2; return 1 ;;
-  esac
-}
-
 # fm_backend_send_text_submit: type text once, then submit and verify,
 # retrying only the submission (never retyping). Echoes the backend's
 # proof-carrying verdict, including an optional idle OMP turn-start reference.
