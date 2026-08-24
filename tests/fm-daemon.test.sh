@@ -313,8 +313,8 @@ test_stale_captain_held_remote_remains_ambiguous() {
 }
 
 test_housekeeping_remote_stale_marker_rechecks_owner() {
-  local mode result status_line dir state win key capture_attempted probe_calls on_bin
-  for mode in dead missing alive ambiguous unknown working-missing; do
+  local mode result status_line dir state win key capture_attempted probe_calls on_bin remote_status_file
+  for mode in dead missing alive ambiguous unknown working-missing held-working; do
     dir=$(make_supercase "housekeeping-captain-held-remote-$mode")
     state="$dir/state"
     win="remote:held-remote-housekeeping"
@@ -322,12 +322,17 @@ test_housekeeping_remote_stale_marker_rechecks_owner() {
     capture_attempted="$dir/capture-attempted"
     probe_calls="$dir/probe-calls"
     on_bin="$dir/fm-on.sh"
+    remote_status_file="$state/held-remote-housekeeping.status"
     cat > "$on_bin" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${FM_REMOTE_PROBE_CALLS:?}"
 case "${FM_REMOTE_PROBE_RESULT:?}" in
   dead|missing|alive|ambiguous) printf '%s\n' "$FM_REMOTE_PROBE_RESULT" ;;
   working-missing) printf 'missing\n' ;;
+  held-working)
+    printf 'working: resumed while the owner probe was in flight\n' > "${FM_REMOTE_STATUS_FILE:?}"
+    printf 'missing\n'
+    ;;
   unknown) exit 1 ;;
 esac
 SH
@@ -352,11 +357,13 @@ SH
       fm_backend_capture() { : > "$capture_attempted"; return 1; }
       FM_STATE_OVERRIDE="$state" FM_ON_BIN="$on_bin" \
         FM_REMOTE_PROBE_RESULT="$result" FM_REMOTE_PROBE_CALLS="$probe_calls" \
+        FM_REMOTE_STATUS_FILE="$remote_status_file" \
         FM_STALE_ESCALATE_SECS=240 \
         FM_REMOTE_STALE_RECHECK_SECS=60 housekeeping "$state"
       if [ "$mode" = unknown ]; then
         FM_STATE_OVERRIDE="$state" FM_ON_BIN="$on_bin" \
           FM_REMOTE_PROBE_RESULT="$result" FM_REMOTE_PROBE_CALLS="$probe_calls" \
+          FM_REMOTE_STATUS_FILE="$remote_status_file" \
           FM_STALE_ESCALATE_SECS=240 \
           FM_REMOTE_STALE_RECHECK_SECS=60 housekeeping "$state"
       fi
@@ -367,9 +374,9 @@ SH
         [ ! -e "$state/.subsuper-stale-$key" ] || fail "$mode remote owner left stale marker"
         [ ! -s "$state/.subsuper-escalations" ] || fail "$mode remote owner escalated stale marker"
         ;;
-      alive|ambiguous|working-missing)
+      alive|ambiguous|working-missing|held-working)
         [ ! -e "$state/.subsuper-stale-$key" ] || fail "$mode remote owner left stale marker"
-        if [ "$mode" = working-missing ]; then
+        if [ "$mode" = working-missing ] || [ "$mode" = held-working ]; then
           grep -q 'remote stale endpoint gone while not captain-held' "$state/.subsuper-escalations" \
             || fail "$mode remote owner did not escalate stale marker"
         else
@@ -691,6 +698,32 @@ test_housekeeping_capture_failure_escalates_stale() {
   [ ! -e "$state/.subsuper-stale-$key" ] \
     || fail "capture failure retained ordinary stale tracking after escalation"
   pass "capture failure escalates stale visibility instead of clearing it"
+}
+
+test_housekeeping_local_liveness_rechecks_status() {
+  local dir state win task key status_file
+  dir=$(make_supercase stale-status-transition)
+  state="$dir/state"
+  task="status-transition-w7"; win="sess:fm-$task"
+  status_file="$state/$task.status"
+  printf 'captain-held [key=route]: waiting for recovery ownership\n' > "$status_file"
+  fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux" "harness=pi"
+  key=$(printf '%s' "$task" | tr ':/.' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  (
+    fm_backend_agent_state() { printf 'alive'; }
+    fm_backend_capture() {
+      printf 'idle\n'
+      printf 'working: resumed while the local probe was in flight\n' > "$status_file"
+    }
+    fm_busy_classify() { printf 'busy'; }
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  ) || fail "local status-transition housekeeping failed"
+  [ -e "$state/.subsuper-stale-$key" ] \
+    || fail "local liveness probe cleared a stale marker after a status transition"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "local status transition escalated before the fresh status path ran"
+  pass "local liveness rechecks status before clearing stale visibility"
 }
 
 test_housekeeping_resumed_stale_cleared() {
@@ -2129,6 +2162,7 @@ test_housekeeping_migrates_watcher_unpaused_marker_to_clear
 test_housekeeping_seeds_pause_marker_from_status
 test_housekeeping_persistent_stale_escalates
 test_housekeeping_capture_failure_escalates_stale
+test_housekeeping_local_liveness_rechecks_status
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
 test_housekeeping_pause_default_is_2700_and_override_wins

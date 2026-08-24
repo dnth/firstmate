@@ -1098,7 +1098,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest pause_secs
+  local state=$1 now due f key task win marker age last latest max_defer oldest pause_secs
   now=$(_now)
   migrate_watcher_pause_markers "$state"
 
@@ -1146,8 +1146,12 @@ housekeeping() {  # <state>
     task=$(window_to_task "$win" "$state")
     last=$(last_status_line "$state/$task.status")
     if [ -n "$last" ] && daemon_pause_status_is_valid "$win" "$state" "$last"; then
-      reconcile_pause_tracking "$win" "$state" "$last"
-      continue
+      latest=$(last_status_line "$state/$task.status")
+      if [ "$latest" = "$last" ]; then
+        reconcile_pause_tracking "$win" "$state" "$latest"
+        continue
+      fi
+      last=$latest
     fi
     age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
     [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
@@ -1155,22 +1159,41 @@ housekeeping() {  # <state>
       remote_stale_recheck "$win" "$state"
       case "$?" in
         0)
-          if [ -n "$last" ] && status_is_paused_or_captain_held "$last" \
-            && ! status_is_paused "$last"; then
+          latest=$(last_status_line "$state/$task.status")
+          if [ -n "$latest" ] && status_is_paused_or_captain_held "$latest" \
+            && ! status_is_paused "$latest"; then
             stale_marker_remove "$win" "$state"
+          elif [ -n "$latest" ] && status_is_paused "$latest"; then
+            reconcile_pause_tracking "$win" "$state" "$latest"
           else
             escalate_add "$state" "remote stale endpoint gone while not captain-held: $win"
             stale_marker_remove "$win" "$state"
           fi
           ;;
-        1) escalate_add "$state" "remote stale persisted ${age}s (possible wedge): $win"
-           stale_marker_remove "$win" "$state" ;;
+        1)
+          latest=$(last_status_line "$state/$task.status")
+          if [ -n "$latest" ] && status_is_paused "$latest"; then
+            reconcile_pause_tracking "$win" "$state" "$latest"
+          else
+            escalate_add "$state" "remote stale persisted ${age}s (possible wedge): $win"
+            stale_marker_remove "$win" "$state"
+          fi
+          ;;
       esac
       continue
     fi
     stale_window_is_busy "$win" "$state"
     case "$?" in
-      0) rm -f "$marker" ;;
+      0)
+        latest=$(last_status_line "$state/$task.status")
+        [ "$latest" = "$last" ] || continue
+        if [ -n "$latest" ] && status_is_paused_or_captain_held "$latest"; then
+          escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
+          stale_marker_remove "$win" "$state"
+        else
+          rm -f "$marker"
+        fi
+        ;;
       2) escalate_add "$state" "stale persisted ${age}s (possible wedge; endpoint unreadable): $win"
          stale_marker_remove "$win" "$state" ;;
       *) escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
