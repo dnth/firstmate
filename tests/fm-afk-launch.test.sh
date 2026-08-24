@@ -385,10 +385,10 @@ unit_herdr_error_with_exact_ids_closes_exact() {
 }
 
 unit_herdr_run_failure_preserves_unconfirmed_record() {
-  local st submitted
+  local st run_attempted
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-herdr-run-fail.XXXXXX")
-  submitted="$st/submitted"
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" SUBMITTED="$submitted" bash -c '
+  run_attempted="$st/run-attempted"
+  HERDR_RUN_ATTEMPTED="$run_attempted" FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
     . "$1"
     . "$2/bin/backends/herdr.sh"
     fm_backend_source() { return 0; }
@@ -399,7 +399,7 @@ unit_herdr_run_failure_preserves_unconfirmed_record() {
         printf %s '\''{"result":{"workspace":{"workspace_id":"ws-exact"},"root_pane":{"pane_id":"pane-exact"}}}'\''
         return 0
       elif [ "$2 $3" = "pane run" ]; then
-        : > "$SUBMITTED"
+        : > "$HERDR_RUN_ATTEMPTED"
         return 1
       elif [ "$2 $3" = "pane get" ]; then
         printf %s '\''{"error":{"code":"transport_error"}}'\''
@@ -409,11 +409,11 @@ unit_herdr_run_failure_preserves_unconfirmed_record() {
     }
     ! fm_afk_launch_create_herdr lab:captain herdr
   ' _ "$LAUNCH" "$ROOT"
-  if [ -e "$submitted" ] \
+  if [ -e "$run_attempted" ] \
     && [ "$(cut -f2 "$st/state/.afk-daemon-terminal" 2>/dev/null || true)" = "lab:pane-exact" ]; then
-    pass "herdr send failure: submission is attempted and unconfirmed exact id remains reconcilable"
+    pass "herdr run failure: unconfirmed exact id remains reconcilable"
   else
-    fail "herdr send failure: submission was skipped or unconfirmed exact id was discarded"
+    fail "herdr run failure: unconfirmed exact id was discarded"
   fi
   rm -rf "$st"
 }
