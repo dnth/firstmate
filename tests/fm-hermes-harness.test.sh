@@ -314,6 +314,7 @@ test_hermes_spawn_resume_skill_state_and_teardown() {
   fixture_hook pre_llm_call "$session"
   fixture_env "$SEND" "$TEST_ID" --key C-c || fail "Hermes interrupt key was not mapped"
   assert_contains "$(cat "$CASE_DIR/tmux.log")" " C-c" "Hermes interrupt did not send Ctrl+C"
+  # shellcheck disable=SC2016 # Positional parameters expand inside the fixture shell.
   interrupt_state=$(fixture_env bash -c '. "$1/bin/fm-busy-lib.sh"; fm_busy_classify tmux unused hermes "$2" "$3"' _ "$ROOT" "$TEST_ID" "$HOME_DIR/state")
   [ "$interrupt_state" = 'idle fm-interrupt' ] || fail "Hermes Ctrl+C did not record truthful idle state: $interrupt_state"
   fixture_env "$SEND" "$TEST_ID" /exit || fail "idle Hermes exit should be an idempotent no-op"
@@ -456,6 +457,7 @@ test_hermes_session_binding_and_busy_ack_order() {
   printf '%s\n' "$gen" > "$HOME_DIR/state/$TEST_ID.busy-gen"
   fixture_hook pre_llm_call "$stable"
   assert_present "$HOME_DIR/state/$TEST_ID.hermes-started" "matching Hermes session did not acknowledge after busy state"
+  # shellcheck disable=SC2016 # Positional parameters expand inside the fixture shell.
   busy=$(fixture_env bash -c '. "$1/bin/fm-busy-lib.sh"; fm_busy_classify tmux unused hermes "$2" "$3"' _ "$ROOT" "$TEST_ID" "$HOME_DIR/state")
   [ "${busy%% *}" = busy ] || fail "Hermes start acknowledgement did not imply semantic busy state"
   fixture_hook on_session_end "$stable"
@@ -469,7 +471,7 @@ test_hermes_session_binding_and_busy_ack_order() {
 # reusable, so this pins that consecutive acknowledgements differ on something
 # other than the pid.
 test_hermes_start_ack_is_unique_per_turn() {
-  local rec stable started first second first_nopid second_nopid n
+  local rec stable started first second first_nopid second_nopid
   TEST_ID=hermes-start-ack-x16
   rec=$(make_case start-ack "$TEST_ID")
   read_case "$rec"
@@ -496,7 +498,7 @@ test_hermes_start_ack_is_unique_per_turn() {
 
   # Every acknowledgement in a burst must be distinct, not merely adjacent ones.
   : > "$CASE_DIR/acks.log"
-  for n in 1 2 3 4 5 6 7 8; do
+  for _ in 1 2 3 4 5 6 7 8; do
     fixture_hook pre_llm_call "$stable"
     cut -d: -f1,2,4- < "$started" >> "$CASE_DIR/acks.log"
   done
@@ -522,6 +524,7 @@ test_hermes_hook_waits_through_busy_lock_contention() {
   rmdir "$HOME_DIR/state/$TEST_ID.busy-state.lock"
   wait "$hook_pid" || fail "Hermes pre-LLM hook failed after bounded busy-lock contention"
   assert_present "$HOME_DIR/state/$TEST_ID.hermes-started" "Hermes hook contention lost start acknowledgement"
+  # shellcheck disable=SC2016 # Positional parameters expand inside the fixture shell.
   busy=$(fixture_env bash -c '. "$1/bin/fm-busy-lib.sh"; fm_busy_classify tmux unused hermes "$2" "$3"' _ "$ROOT" "$TEST_ID" "$HOME_DIR/state")
   [ "${busy%% *}" = busy ] || fail "Hermes hook contention did not finish the busy transition"
   fixture_hook on_session_end "$stable"
@@ -616,7 +619,7 @@ test_hermes_spawn_requires_pre_llm_acknowledgement() {
 }
 
 test_hermes_concurrent_sends_serialize_through_acknowledgement() {
-  local rec block first_pid second_pid first_rc second_rc i commands status
+  local rec block first_pid second_pid first_rc second_rc commands status
   TEST_ID=hermes-concurrent-x4
   rec=$(make_case concurrent "$TEST_ID")
   read_case "$rec"
@@ -631,7 +634,7 @@ test_hermes_concurrent_sends_serialize_through_acknowledgement() {
   fixture_env env FM_FAKE_HERMES_BLOCK_DIR="$block" "$SEND" "$TEST_ID" \
     --resolve-key first-send 'First concurrent answer.' > "$CASE_DIR/first.out" 2>&1 &
   first_pid=$!
-  for i in $(seq 1 500); do
+  for _ in $(seq 1 500); do
     [ -f "$block/first-entered" ] && break
     sleep 0.01
   done
