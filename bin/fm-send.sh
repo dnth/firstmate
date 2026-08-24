@@ -941,6 +941,8 @@ else
       fi
       if [ -n "${FM_SEND_TURNSTART_TIMEOUT_VALUE:-}" ]; then
         turnstart_window="within ${FM_SEND_TURNSTART_TIMEOUT_VALUE}s"
+      elif [ "$TARGET_HARNESS" = hermes ]; then
+        turnstart_window="within its ${FM_SEND_HERMES_START_POLLS:-${FM_HERMES_LAUNCH_ACK_POLLS:-120}} x ${FM_SEND_HERMES_START_INTERVAL:-${FM_HERMES_LAUNCH_ACK_INTERVAL:-0.5}}s lifecycle-acknowledgement window"
       else
         turnstart_window='within the remote bounded verification window'
       fi

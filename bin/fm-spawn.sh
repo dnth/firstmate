@@ -1877,12 +1877,20 @@ case "$LAUNCH" in
       exit 1
     }
     HERMES_SESSION_FILE="$STATE/$ID.hermes-session"
-    if [ -f "$HERMES_SESSION_FILE" ] && [ ! -L "$HERMES_SESSION_FILE" ] \
-      && [ "$(wc -l < "$HERMES_SESSION_FILE" 2>/dev/null | tr -d '[:space:]')" = 1 ]; then
-      HERMES_RESUME_ID=$(cat "$HERMES_SESSION_FILE" 2>/dev/null || true)
+    if [ -e "$HERMES_SESSION_FILE" ] || [ -L "$HERMES_SESSION_FILE" ]; then
+      if [ -f "$HERMES_SESSION_FILE" ] && [ ! -L "$HERMES_SESSION_FILE" ] \
+        && [ "$(wc -l < "$HERMES_SESSION_FILE" 2>/dev/null | tr -d '[:space:]')" = 1 ]; then
+        HERMES_RESUME_ID=$(head -n 1 "$HERMES_SESSION_FILE" 2>/dev/null || true)
+      fi
       case "$HERMES_RESUME_ID" in
-        ''|*[!A-Za-z0-9._:-]*) HERMES_RESUME_ID= ;;
+        '') ;;
+        *[[:cntrl:]]*) HERMES_RESUME_ID= ;;
+        *) [ "${#HERMES_RESUME_ID}" -le 200 ] || HERMES_RESUME_ID= ;;
       esac
+      if [ -z "$HERMES_RESUME_ID" ]; then
+        echo "error: refusing Hermes spawn: $HERMES_SESSION_FILE exists but carries no usable resumable session id; a fresh session would be bound to that stale sidecar and its lifecycle bridge would never acknowledge a turn. Remove it (or run fm-teardown.sh $ID --force) and respawn" >&2
+        exit 1
+      fi
     fi
     LAUNCH=${LAUNCH//__HERMESBIN__/$(shell_quote "$HERMES_BIN")}
     ;;

@@ -383,6 +383,12 @@ test_hermes_spawn_tui_skill_state_and_teardown() {
     "Hermes skill invocation did not use the validated Firstmate skill pointer"
   assert_contains "$commands" "/native-check" "Hermes native skill invocation did not stay a TUI slash command"
   printf 'busy\n' > "$CASE_DIR/hermes-tui-state"
+  out=$(fixture_env "$SEND" "$TEST_ID" --key C-c 2>&1) \
+    && fail "Hermes Ctrl+C was admitted on a settled turn with only a stale busy screen"
+  assert_contains "$out" "idle-exit key" "stale-screen Ctrl+C refusal lost its idle-exit diagnostic"
+  assert_not_contains "$(cat "$CASE_DIR/tmux.log")" " C-c" \
+    "a stale busy screen sent Ctrl+C to an idle Hermes TUI"
+  fixture_hook pre_llm_call "$(cat "$HOME_DIR/state/$TEST_ID.hermes-session")"
   fixture_env "$SEND" "$TEST_ID" --key C-c || fail "Hermes interrupt key was not mapped"
   assert_contains "$(cat "$CASE_DIR/tmux.log")" " C-c" "Hermes interrupt did not send Ctrl+C"
   # shellcheck disable=SC2016 # Positional parameters expand inside the fixture shell.
@@ -523,6 +529,39 @@ test_hermes_spawn_resumes_existing_tui_session() {
   pass "Hermes persistent TUI resumes the exact task-bound session"
 }
 
+# A sidecar that carries no usable resume id must refuse the spawn by name. The
+# hook binds its session file once, so launching a fresh session against a stale
+# sidecar makes every later turn acknowledgement fail and wedges every retry.
+test_hermes_spawn_refuses_unusable_session_sidecar() {
+  local rec out sidecar
+  TEST_ID=hermes-stale-sidecar-x5
+  rec=$(make_case stale-sidecar "$TEST_ID")
+  read_case "$rec"
+  sidecar="$HOME_DIR/state/$TEST_ID.hermes-session"
+  printf 'first-session\nsecond-session\n' > "$sidecar"
+  out=$(fixture_env "$SPAWN" "$TEST_ID" "$PROJECT_DIR" --harness hermes \
+    --model gpt-5.6-sol --effort medium --mode no-mistakes --yolo off 2>&1) \
+    && fail "Hermes spawn accepted an unusable session sidecar"
+  assert_contains "$out" "$sidecar" "the stale-sidecar refusal did not name the sidecar"
+  assert_no_grep 'chat --tui' "$CASE_DIR/commands.log" \
+    "the stale-sidecar refusal still launched a fresh Hermes TUI"
+
+  : > "$sidecar"
+  out=$(fixture_env "$SPAWN" "$TEST_ID" "$PROJECT_DIR" --harness hermes \
+    --model gpt-5.6-sol --effort medium --mode no-mistakes --yolo off 2>&1) \
+    && fail "Hermes spawn accepted an empty session sidecar"
+  assert_contains "$out" "$sidecar" "the empty-sidecar refusal did not name the sidecar"
+
+  rm -f "$sidecar"
+  fixture_env "$SPAWN" "$TEST_ID" "$PROJECT_DIR" --harness hermes \
+    --model gpt-5.6-sol --effort medium --mode no-mistakes --yolo off >/dev/null \
+    || fail "Hermes spawn refused a clean first launch after the sidecar was removed"
+  fixture_env "$SEND" "$TEST_ID" /exit >/dev/null || fail "stale-sidecar fixture did not exit cleanly"
+  fixture_env "$TEARDOWN" "$TEST_ID" --force >/dev/null 2>&1 \
+    || fail "stale-sidecar fixture teardown failed"
+  pass "an unusable Hermes session sidecar refuses the spawn by name instead of wedging it"
+}
+
 test_hermes_session_binding_and_busy_ack_order() {
   local rec stable gen busy
   TEST_ID=hermes-session-binding-x9
@@ -598,12 +637,14 @@ test_hermes_start_ack_is_unique_per_turn() {
   pass "each Hermes start acknowledgement is unique independently of the hook pid"
 }
 
-# A rendered Hermes ready footer is a screen state, not a lifecycle fact: a
-# redraw, scroll, or tool render can show it while a turn is running. A trusted
-# pre_llm_call busy record must therefore outrank it, or fm-send would admit a
-# steer into a live turn (Hermes treats that as an interrupt, not a queue).
+# Rendered Hermes state is a screen, not a lifecycle fact, in both directions.
+# A redraw or tool render can show the ready footer while a turn runs, which
+# would let fm-send steer into a live turn (Hermes reads that as an interrupt).
+# A lagging redraw can still show the busy footer after the turn-end hook has
+# settled the record, which would let `--key C-c` reach an idle TUI and exit it,
+# destroying the persistent session. A valid trusted record decides both.
 test_hermes_busy_record_outranks_rendered_ready_footer() {
-  local rec stable ready busy
+  local rec stable ready working busy
   TEST_ID=hermes-record-precedence-x11
   rec=$(make_case record-precedence "$TEST_ID")
   read_case "$rec"
@@ -624,9 +665,21 @@ test_hermes_busy_record_outranks_rendered_ready_footer() {
     _ "$ROOT" "$TEST_ID" "$HOME_DIR/state" "$ready")
   [ "${busy%% *}" = idle ] \
     || fail "Hermes turn end did not settle idle with the same ready footer: $busy"
+  working=$' \xe2\x94\x80 (\xe2\x97\x94_\xe2\x97\x94) computing\xe2\x80\xa6 \xc2\xb7 3s \xe2\x94\x82 gpt 5.6 sol low \xe2\x94\x82\n \xe2\x9d\xaf Ctrl+C to interrupt\xe2\x80\xa6'
+  # shellcheck disable=SC2016 # Positional parameters expand inside the fixture shell.
+  busy=$(fixture_env bash -c '. "$1/bin/fm-busy-lib.sh"; fm_busy_classify tmux unused hermes "$2" "$3" "$4"' \
+    _ "$ROOT" "$TEST_ID" "$HOME_DIR/state" "$working")
+  [ "$busy" = 'idle hermes-hook' ] \
+    || fail "a lagging rendered busy footer overrode the trusted turn-end record: $busy"
+  rm -f "$HOME_DIR/state/$TEST_ID.busy-state"
+  # shellcheck disable=SC2016 # Positional parameters expand inside the fixture shell.
+  busy=$(fixture_env bash -c '. "$1/bin/fm-busy-lib.sh"; fm_busy_classify tmux unused hermes "$2" "$3" "$4"' \
+    _ "$ROOT" "$TEST_ID" "$HOME_DIR/state" "$working")
+  [ "$busy" = 'busy hermes-tui' ] \
+    || fail "the rendered busy footer was not consulted once no trusted record remained: $busy"
   fixture_env "$TEARDOWN" "$TEST_ID" --force >/dev/null 2>&1 \
     || fail "Hermes record-precedence fixture teardown failed"
-  pass "a trusted Hermes busy record outranks a rendered ready footer"
+  pass "a trusted Hermes lifecycle record outranks the rendered footer in both directions"
 }
 
 test_hermes_hook_waits_through_busy_lock_contention() {
@@ -1008,6 +1061,7 @@ test_workers_and_scouts_preserve_raw_launch_commands
 test_hermes_tui_busy_state_and_composer
 test_hermes_ready_gate_survives_c_locale
 test_hermes_spawn_resumes_existing_tui_session
+test_hermes_spawn_refuses_unusable_session_sidecar
 test_hermes_session_binding_and_busy_ack_order
 test_hermes_busy_record_outranks_rendered_ready_footer
 test_hermes_start_ack_is_unique_per_turn

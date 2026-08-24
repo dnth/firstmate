@@ -49,15 +49,16 @@
 # with the producing source as the second token. Precedence:
 #   1. dead endpoint (fm_busy_classify_live only) -> dead endpoint-gone
 #   2. standalone Kimi before verification       -> unknown kimi-unverified
-#   3. Hermes' verified live TUI footer, BUSY half only -> busy hermes-tui
-#      (rendered evidence may promote to busy, never demote a record)
-#   4. a valid, gen-matching, source-trusted record -> its state and source
-#   5. no record at all: Hermes' rendered ready footer -> idle hermes-tui,
+#   3. a valid, gen-matching, source-trusted record -> its state and source.
+#      For Hermes this outranks the rendered tail in BOTH directions: a
+#      trusted busy beats a rendered ready footer, and a trusted idle beats a
+#      lagging rendered busy footer.
+#   4. no record at all: Hermes' rendered busy or ready footer -> hermes-tui,
 #      then herdr's native busy verdict is trusted as busy (generation state
 #      is sufficient for busy, not for idle), then the Grok-only temporary
 #      regex fallback classifies a grok task from its rendered tail, then
 #      unknown missing
-#   6. malformed, stale, or untrusted records -> unknown, never a fallback
+#   5. malformed, stale, or untrusted records -> unknown, never a fallback
 # The Grok arm and the later live-verified Hermes TUI footer are the only
 # rendered-text classifications. Each is scoped to its exact harness and can
 # never classify another adapter. The delivery guards in bin/fm-tmux-lib.sh match rendered
@@ -310,11 +311,12 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       fi
       ;;
   esac
-  # Rendered Hermes evidence may only PROMOTE to busy. A rendered ready footer
-  # is a screen state, not a lifecycle fact: a redraw, scroll, or tool render
-  # can show it while a turn is running, so it must never demote a trusted
-  # pre_llm_call busy record. The idle half is consulted further down, only
-  # once the record read has established that no trusted record exists.
+  # Rendered Hermes evidence is screen state, not lifecycle fact, in BOTH
+  # directions: a redraw or tool render can show a ready footer mid-turn, and a
+  # lagging redraw can still show the busy footer and its elapsed segment after
+  # the turn-end hook has already settled the record. A valid trusted record
+  # therefore decides every gate; the rendered tail is consulted only when no
+  # such record exists.
   hermes_native=
   if [ "$harness" = hermes ]; then
     if [ -z "$tail40" ] && command -v fm_backend_capture >/dev/null 2>&1; then
@@ -322,10 +324,6 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
     fi
     if [ -n "$tail40" ]; then
       hermes_native=$(printf '%s\n' "$tail40" | fm_busy_hermes_tui_tail_state)
-      if [ "$hermes_native" = busy ]; then
-        printf 'busy hermes-tui'
-        return 0
-      fi
     fi
   fi
   out=$(fm_busy_record_read "$state" "$id") && rc=0 || rc=$?
@@ -346,12 +344,14 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       return 0
       ;;
   esac
-  # No record at all. A rendered Hermes ready footer is the only remaining
-  # evidence here, so it may now settle idle without contradicting anything.
-  if [ "$hermes_native" = idle ]; then
-    printf 'idle hermes-tui'
-    return 0
-  fi
+  # No record at all. The rendered Hermes tail is the only remaining evidence
+  # here, so both of its verdicts may settle without contradicting anything.
+  case "$hermes_native" in
+    busy|idle)
+      printf '%s hermes-tui' "$hermes_native"
+      return 0
+      ;;
+  esac
   # A native herdr busy verdict is semantic enough to trust for BUSY
   # (streaming means a turn is running); native idle is narrower than turn
   # state (a long foreground tool call reads idle) and stays unknown here.
