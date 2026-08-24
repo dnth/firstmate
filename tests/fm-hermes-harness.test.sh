@@ -46,7 +46,22 @@ submit_command() {
   printf '%s\n' "$command" >> "$FM_FAKE_COMMAND_LOG"
   case "$command" in
     *hermes*chat*-Q*--query*)
-      case "$command" in *--resume*) ;; *) fire_hook on_session_start ;; esac
+      case "$command" in
+        *--resume*)
+          if [ -n "${FM_FAKE_HERMES_BLOCK_DIR:-}" ]; then
+            if mkdir "$FM_FAKE_HERMES_BLOCK_DIR/first.claim" 2>/dev/null; then
+              touch "$FM_FAKE_HERMES_BLOCK_DIR/first-entered"
+              while [ ! -f "$FM_FAKE_HERMES_BLOCK_DIR/release-first" ]; do sleep 0.01; done
+            else
+              touch "$FM_FAKE_HERMES_BLOCK_DIR/second-entered"
+            fi
+          fi
+          ;;
+        *)
+          fire_hook on_session_start
+          [ "${FM_FAKE_HERMES_START_ONLY:-0}" != 1 ] || return 0
+          ;;
+      esac
       fire_hook pre_llm_call
       fire_hook on_session_end
       ;;
@@ -263,6 +278,71 @@ test_hermes_secondmate_is_refused() {
   pass "Hermes remains crewmate/scout-only"
 }
 
+test_hermes_spawn_requires_pre_llm_acknowledgement() {
+  local rec out rc
+  TEST_ID=hermes-start-only-x3
+  rec=$(make_case start-only "$TEST_ID")
+  read_case "$rec"
+  rc=0
+  out=$(fixture_env env FM_FAKE_HERMES_START_ONLY=1 "$SPAWN" "$TEST_ID" "$PROJECT_DIR" \
+    --harness hermes --model gpt-5.6-sol --effort high --mode no-mistakes --yolo off 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "Hermes spawn accepted on_session_start without pre_llm_call"
+  assert_contains "$out" "initial instruction did not publish a resumable session" \
+    "Hermes spawn did not refuse a missing pre_llm_call acknowledgement"
+  assert_not_contains "$out" "spawned $TEST_ID" "Hermes spawn reported success without pre_llm_call"
+  pass "Hermes spawn requires pre_llm_call acknowledgement"
+}
+
+test_hermes_concurrent_sends_serialize_through_acknowledgement() {
+  local rec block first_pid second_pid first_rc second_rc i commands status
+  TEST_ID=hermes-concurrent-x4
+  rec=$(make_case concurrent "$TEST_ID")
+  read_case "$rec"
+  fixture_env "$SPAWN" "$TEST_ID" "$PROJECT_DIR" --harness hermes \
+    --model gpt-5.6-sol --effort high --mode no-mistakes --yolo off >/dev/null \
+    || fail "Hermes concurrency fixture spawn failed"
+  block="$CASE_DIR/block"
+  mkdir -p "$block"
+  printf '%s\n' 'needs-decision [key=first-send]: first answer' \
+    'needs-decision [key=second-send]: second answer' >> "$HOME_DIR/state/$TEST_ID.status"
+
+  fixture_env env FM_FAKE_HERMES_BLOCK_DIR="$block" "$SEND" "$TEST_ID" \
+    --resolve-key first-send 'First concurrent answer.' > "$CASE_DIR/first.out" 2>&1 &
+  first_pid=$!
+  for i in $(seq 1 100); do
+    [ -f "$block/first-entered" ] && break
+    sleep 0.01
+  done
+  [ -f "$block/first-entered" ] || fail "first concurrent Hermes send did not reach the backend"
+
+  fixture_env env FM_FAKE_HERMES_BLOCK_DIR="$block" "$SEND" "$TEST_ID" \
+    --resolve-key second-send 'Second concurrent answer.' > "$CASE_DIR/second.out" 2>&1 &
+  second_pid=$!
+  for _ in $(seq 1 20); do
+    kill -0 "$second_pid" 2>/dev/null || break
+    sleep 0.01
+  done
+  assert_absent "$block/second-entered" "second concurrent Hermes send crossed the first acknowledgement boundary"
+  status=$(cat "$HOME_DIR/state/$TEST_ID.status")
+  assert_not_contains "$status" 'resolved [key=first-send]' "first decision closed before start acknowledgement"
+  assert_not_contains "$status" 'resolved [key=second-send]' "second decision closed before delivery"
+
+  touch "$block/release-first"
+  first_rc=0
+  wait "$first_pid" || first_rc=$?
+  second_rc=0
+  wait "$second_pid" || second_rc=$?
+  expect_code 0 "$first_rc" "first concurrent Hermes send should succeed"
+  expect_code 0 "$second_rc" "second concurrent Hermes send should succeed"
+  commands=$(cat "$CASE_DIR/commands.log")
+  assert_contains "$commands" "First concurrent answer." "first concurrent Hermes send was not delivered"
+  assert_contains "$commands" "Second concurrent answer." "second concurrent Hermes send was not delivered"
+  status=$(cat "$HOME_DIR/state/$TEST_ID.status")
+  assert_contains "$status" 'resolved [key=first-send]' "first decision did not close after acknowledgement"
+  assert_contains "$status" 'resolved [key=second-send]' "second decision did not close after acknowledgement"
+  pass "Hermes concurrent sends serialize through start acknowledgement"
+}
+
 test_hermes_static_crew_resolution() {
   local config out
   config="$TMP_ROOT/static-config"
@@ -276,4 +356,6 @@ test_hermes_static_crew_resolution() {
 test_hermes_hook_install_is_surgical_idempotent_and_removable
 test_hermes_spawn_resume_skill_state_and_teardown
 test_hermes_secondmate_is_refused
+test_hermes_spawn_requires_pre_llm_acknowledgement
+test_hermes_concurrent_sends_serialize_through_acknowledgement
 test_hermes_static_crew_resolution

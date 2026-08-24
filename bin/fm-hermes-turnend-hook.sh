@@ -136,11 +136,21 @@ gen=$(jq -er '.gen | strings | select(test("^[A-Za-z0-9._-]+$"))' "$registry" 2>
 [ "$session_file" = "$state/$id.hermes-session" ] || exit 0
 [ "$started" = "$state/$id.hermes-started" ] || exit 0
 [ -x "$root/bin/fm-busy-event.sh" ] || exit 0
+write_session() {
+  tmp=$(mktemp "$state/.${id}.hermes-session.XXXXXXXX" 2>/dev/null) || return 1
+  chmod 0600 "$tmp" 2>/dev/null || true
+  if printf '%s\n' "$session_id" > "$tmp" 2>/dev/null && mv -f "$tmp" "$session_file" 2>/dev/null; then
+    return 0
+  fi
+  rm -f -- "$tmp" 2>/dev/null || true
+  return 1
+}
 case "$event" in
-  on_session_start|pre_llm_call)
-    tmp=$(mktemp "$state/.${id}.hermes-session.XXXXXXXX" 2>/dev/null) || exit 0
-    chmod 0600 "$tmp" 2>/dev/null || true
-    if printf '%s\n' "$session_id" > "$tmp" 2>/dev/null && mv -f "$tmp" "$session_file" 2>/dev/null; then
+  on_session_start)
+    write_session || true
+    ;;
+  pre_llm_call)
+    if write_session; then
       started_tmp=$(mktemp "$state/.${id}.hermes-started.XXXXXXXX" 2>/dev/null) || exit 0
       chmod 0600 "$started_tmp" 2>/dev/null || true
       if ! printf '%s:%s:%s\n' "$session_id" "$event" "$$" > "$started_tmp" 2>/dev/null \
@@ -148,8 +158,6 @@ case "$event" in
         rm -f -- "$started_tmp" 2>/dev/null || true
       fi
       "$root/bin/fm-busy-event.sh" apply "$state" "$id" busy --gen "$gen" --source hermes-hook --event "$event" >/dev/null 2>&1 || true
-    else
-      rm -f -- "$tmp" 2>/dev/null || true
     fi
     ;;
   on_session_end)

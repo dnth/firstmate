@@ -130,6 +130,7 @@ fi
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 
 RUNPOD_DELIVERY_LOCK=
+HERMES_DELIVERY_LOCK=
 TARGET_OMP_TURNSTART_REFERENCE=
 TARGET_HERMES_START_REFERENCE=
 release_runpod_delivery_lock() {
@@ -139,6 +140,10 @@ release_runpod_delivery_lock() {
 }
 fm_send_cleanup() {
   release_runpod_delivery_lock
+  if [ -n "$HERMES_DELIVERY_LOCK" ]; then
+    fm_lock_release "$HERMES_DELIVERY_LOCK"
+    HERMES_DELIVERY_LOCK=
+  fi
   [ -z "$TARGET_OMP_TURNSTART_REFERENCE" ] || rm -f -- "$TARGET_OMP_TURNSTART_REFERENCE"
   [ -z "$TARGET_HERMES_START_REFERENCE" ] || rm -f -- "$TARGET_HERMES_START_REFERENCE"
 }
@@ -768,6 +773,11 @@ else
         *) echo "error: Hermes lifecycle state is unavailable (${HERMES_BUSY#* }); refusing an ambiguous exit" >&2; exit 1 ;;
       esac
     fi
+    HERMES_DELIVERY_LOCK="$STATE/.$TARGET_TASK_ID.hermes-delivery.lock"
+    fm_lock_acquire_wait "$HERMES_DELIVERY_LOCK" || {
+      echo "error: cannot lock Hermes delivery for $TARGET_TASK_ID" >&2
+      exit 1
+    }
     HERMES_BUSY=$(fm_busy_classify "$TARGET_BACKEND" "$T" hermes "$TARGET_TASK_ID" "$STATE")
     case "${HERMES_BUSY%% *}" in
       idle) ;;
