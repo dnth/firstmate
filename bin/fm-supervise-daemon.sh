@@ -707,6 +707,40 @@ stale_window_is_busy() {  # <window> <state>
   [ "${verdict%% *}" = busy ]
 }
 
+remote_stale_probe_with_deadline() {
+  local seconds=$1
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout --kill-after=1 "$seconds" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout --kill-after=1 "$seconds" "$@"
+  elif command -v perl >/dev/null 2>&1; then
+    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; waitpid $pid, 0; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$seconds" "$@"
+  else
+    return 124
+  fi
+}
+
+remote_stale_recheck() {  # <window> <state>
+  local win=$1 state=$2 task meta remote_host on_bin timeout age
+  task=$(window_to_task "$win" "$state")
+  meta="$state/$task.meta"
+  [ -f "$meta" ] || return 2
+  remote_host=$(fm_meta_get "$meta" remote_host)
+  [ -n "$remote_host" ] || return 2
+  on_bin=${FM_ON_BIN:-$FM_DAEMON_DIR/fm-on.sh}
+  timeout=${FM_WATCH_REMOTE_TIMEOUT:-5}
+  case "$timeout" in
+    ''|*[!0-9]*|0) timeout=5 ;;
+    *) [ "$timeout" -le 15 ] || timeout=5 ;;
+  esac
+  age=$(remote_stale_probe_with_deadline "$timeout" "$on_bin" "$task" \
+    fm-remote-secondmate-control.sh beacon-age "$task" </dev/null 2>/dev/null) || return 2
+  case "$age" in ''|*[!0-9]*) return 2 ;; esac
+  [ "$age" -ge 0 ] && [ "$age" -lt "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] && return 0
+  return 1
+}
+
 escalate_add() {  # <state> <distilled-item>
   local state=$1 item=$2 buf
   buf="$state/.subsuper-escalations"
@@ -1085,9 +1119,17 @@ housekeeping() {  # <state>
       reconcile_pause_tracking "$win" "$state" "$last"
       continue
     fi
-    task_window_is_remote "$win" "$state" && continue
     age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
     [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
+    if task_window_is_remote "$win" "$state"; then
+      remote_stale_recheck "$win" "$state"
+      case "$?" in
+        0) rm -f "$marker" ;;
+        1) escalate_add "$state" "remote stale persisted ${age}s (possible wedge): $win"
+           stale_marker_remove "$win" "$state" ;;
+      esac
+      continue
+    fi
     stale_window_is_busy "$win" "$state"
     case "$?" in
       0) rm -f "$marker" ;;
