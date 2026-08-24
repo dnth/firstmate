@@ -837,6 +837,25 @@ SH
   pass "the herdr reclaim guard preserves a bound Hermes session and fails closed"
 }
 
+test_hermes_scout_defaults_model_and_preserves_every_effort() {
+  local rec effort launch
+  for effort in low medium high xhigh max; do
+    TEST_ID="hermes-scout-default-$effort-x21"
+    rec=$(make_case "scout-default-$effort" "$TEST_ID")
+    read_case "$rec"
+    fixture_env "$SPAWN" "$TEST_ID" "$PROJECT_DIR" --harness hermes --scout \
+      --effort "$effort" >/dev/null 2>&1 || fail "Hermes scout spawn was refused for effort=$effort"
+    launch=$(grep 'hermes.*chat -Q' "$CASE_DIR/commands.log" | head -1)
+    assert_contains "$launch" "--provider openai-codex" "Hermes scout launch lost its provider"
+    assert_contains "$launch" "--model 'gpt-5.6-sol'" "Hermes scout launch did not default to gpt-5.6-sol"
+    assert_contains "$launch" "--reasoning '$effort'" "Hermes scout launch dropped reasoning effort $effort"
+    assert_grep "model=gpt-5.6-sol" "$HOME_DIR/state/$TEST_ID.meta" "Hermes scout metadata lost the default model"
+    assert_grep "effort=$effort" "$HOME_DIR/state/$TEST_ID.meta" "Hermes scout metadata lost effort $effort"
+    fixture_env "$TEARDOWN" "$TEST_ID" --force >/dev/null 2>&1 || fail "Hermes scout fixture teardown failed"
+  done
+  pass "Hermes scouts default to gpt-5.6-sol on openai-codex and preserve low/medium/high/xhigh/max reasoning"
+}
+
 test_hermes_hook_install_is_surgical_idempotent_and_removable
 test_hermes_spawn_resume_skill_state_and_teardown
 test_hermes_secondmate_is_refused
@@ -857,3 +876,4 @@ test_hermes_static_crew_resolution
 test_hermes_crew_only_is_filtered_from_secondmate_fallback
 test_hermes_herdr_idle_session_classifies_alive
 test_herdr_reclaim_guard_preserves_hermes_session
+test_hermes_scout_defaults_model_and_preserves_every_effort
