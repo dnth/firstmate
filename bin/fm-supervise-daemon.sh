@@ -1179,6 +1179,15 @@ housekeeping() {  # <state>
             stale_marker_remove "$win" "$state"
           fi
           ;;
+        2)
+          latest=$(last_status_line "$state/$task.status")
+          if [ -n "$latest" ] && daemon_pause_status_is_valid "$win" "$state" "$latest"; then
+            reconcile_pause_tracking "$win" "$state" "$latest"
+          else
+            escalate_add "$state" "remote stale owner probe inconclusive: $win"
+            stale_marker_remove "$win" "$state"
+          fi
+          ;;
       esac
       continue
     fi

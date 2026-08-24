@@ -385,8 +385,10 @@ SH
         fi
         ;;
       unknown)
-        [ -e "$state/.subsuper-stale-$key" ] || fail "unknown remote owner result dropped stale marker"
-        [ ! -s "$state/.subsuper-escalations" ] || fail "unknown remote owner result escalated without proof"
+        [ ! -e "$state/.subsuper-stale-$key" ] || fail "unknown remote owner result retained stale marker after escalation"
+        [ ! -e "$state/.subsuper-remote-recheck-$key" ] || fail "unknown remote owner result retained recheck throttle marker"
+        grep -q 'remote stale owner probe inconclusive' "$state/.subsuper-escalations" \
+          || fail "unknown remote owner result did not escalate bounded visibility"
         [ "$(wc -l < "$probe_calls")" -eq 1 ] || fail "unknown remote owner result was probed repeatedly"
         ;;
     esac
