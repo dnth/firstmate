@@ -300,7 +300,18 @@ pass "the remote doctor derives tool readiness from the installed worker"
 
 DOCTOR_BIN="$TMP_ROOT/doctor-bin"
 DOCTOR_HOME="$TMP_ROOT/doctor-home"
+MISSING_RUNTIME_TOOLS_ENV="$TMP_ROOT/missing-runtime-tools.bash"
 mkdir -p "$DOCTOR_BIN" "$DOCTOR_HOME"
+cat > "$MISSING_RUNTIME_TOOLS_ENV" <<'SH'
+command() {
+  if [ "${1:-}" = -v ]; then
+    case "${2:-}" in
+      herdr|omp|claude|codex|opencode|pi|pi-signed|grok|kimi) return 1 ;;
+    esac
+  fi
+  builtin command "$@"
+}
+SH
 ln -sf "$(command -v bash)" "$DOCTOR_BIN/bash"
 # Report a non-darwin host so this file keeps testing tool resolution alone and
 # never reads or writes the real account's launch agents.
@@ -311,7 +322,8 @@ printf 'Linux\n'
 SH
 chmod +x "$DOCTOR_BIN/uname"
 set +e
-out=$(HOME="$DOCTOR_HOME" PATH="$DOCTOR_BIN:/usr/bin:/bin:/usr/sbin:/sbin" "$ROOT/bin/fm-remote-doctor.sh" 2>&1)
+out=$(BASH_ENV="$MISSING_RUNTIME_TOOLS_ENV" HOME="$DOCTOR_HOME" \
+  PATH="$DOCTOR_BIN:/usr/bin:/bin:/usr/sbin:/sbin" "$ROOT/bin/fm-remote-doctor.sh" 2>&1)
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail "the remote doctor passed with a missing required tool"
