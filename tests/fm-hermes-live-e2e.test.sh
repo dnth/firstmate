@@ -4,8 +4,8 @@
 # This does not call fm-spawn or any runtime backend. It gives the real Hermes
 # CLI a temporary isolated profile containing copies of the current config and
 # OpenAI Codex auth, installs Firstmate's hook only in that profile, then proves
-# top-level -z exit, lifecycle notification, and same-session resume through the
-# v0.20.0 quiet chat path.
+# top-level -z exit, lifecycle notification, same-session resume, skill preload,
+# and fresh no-resume session publication through the v0.20.0 quiet chat path.
 set -u
 
 if [ "${FM_HERMES_LIVE_E2E:-0}" != 1 ]; then
@@ -118,4 +118,39 @@ grep -Fx 'HERMES-SKILL-OK' "$LAB/skill.out" >/dev/null \
   || fail "Hermes did not apply the preloaded skill: $(tr '\n' ' ' < "$LAB/skill.out")"
 printf 'output: exit=0 stdout=%s skill_preload=applied\n' \
   "$(tr '\n' ' ' < "$LAB/skill.out" | sed 's/[[:space:]]*$//')"
-printf 'ok - %s isolated mechanics: -z exit, lifecycle hook, same-session quiet resume, and skill preload\n' "$HERMES_VERSION"
+
+# Fresh production launch. fm-spawn launches exactly this - quiet chat with no
+# --resume - and then refuses the spawn unless on_session_start publishes
+# state/<id>.hermes-session and pre_llm_call publishes state/<id>.hermes-started.
+# Every marker is removed first so nothing here can be satisfied by the earlier
+# runs' residue, and the published session must be a genuinely new id.
+rm -f "$STATE/manual-hermes.turn-ended" "$STATE/manual-hermes.hermes-started" \
+  "$STATE/manual-hermes.hermes-session"
+# shellcheck disable=SC2016 # These are display-only exact command templates.
+FRESH_COMMAND='HERMES_HOME="$PROFILE" hermes chat -Q --query "Print exactly FRESH-OK" --provider openai-codex --model gpt-5.6-sol --reasoning low --accept-hooks --yolo --pass-session-id'
+printf 'command: %s\n' "$FRESH_COMMAND"
+(
+  cd "$WORKSPACE" || exit 1
+  HERMES_HOME="$PROFILE" "$HERMES_BIN" chat -Q --query \
+    "Print exactly FRESH-OK" \
+    --provider openai-codex --model gpt-5.6-sol --reasoning low \
+    --accept-hooks --yolo --pass-session-id
+) > "$LAB/fresh.out" 2> "$LAB/fresh.err" \
+  || fail "Hermes fresh-session mechanics probe failed: $(tail -10 "$LAB/fresh.err")"
+grep -Fx 'FRESH-OK' "$LAB/fresh.out" >/dev/null \
+  || fail "Hermes fresh session did not print exactly FRESH-OK: $(tr '\n' ' ' < "$LAB/fresh.out")"
+assert_present "$STATE/manual-hermes.hermes-session" \
+  "Hermes fresh quiet chat did not publish a resumable session through on_session_start"
+assert_present "$STATE/manual-hermes.hermes-started" \
+  "Hermes fresh quiet chat did not acknowledge its start through pre_llm_call"
+assert_present "$STATE/manual-hermes.turn-ended" \
+  "Hermes fresh quiet chat did not fire on_session_end"
+FRESH_SESSION=$(cat "$STATE/manual-hermes.hermes-session")
+[ -n "$FRESH_SESSION" ] || fail "Hermes fresh session id is empty"
+[ "$FRESH_SESSION" != "$SESSION_ID" ] \
+  || fail "Hermes fresh no-resume run reused the previous session id"
+BUSY=$(bash -c '. "$1/bin/fm-busy-lib.sh"; fm_busy_classify tmux unused hermes manual-hermes "$2"' _ "$ROOT" "$STATE")
+[ "$BUSY" = 'idle hermes-hook' ] || fail "Hermes fresh session did not settle idle: $BUSY"
+printf 'output: exit=0 stdout=%s session=published started=touched turn_end=touched new_session=yes busy=%s\n' \
+  "$(tr '\n' ' ' < "$LAB/fresh.out" | sed 's/[[:space:]]*$//')" "$BUSY"
+printf 'ok - %s isolated mechanics: -z exit, lifecycle hook, same-session quiet resume, skill preload, and fresh no-resume session publication\n' "$HERMES_VERSION"

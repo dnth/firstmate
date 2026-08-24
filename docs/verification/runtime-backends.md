@@ -143,6 +143,11 @@ HERMES_HOME="$PROFILE" hermes chat -Q --query \
   "Apply the preloaded skill" --skills fm-proof \
   --provider openai-codex --model gpt-5.6-sol --reasoning low \
   --accept-hooks --yolo --pass-session-id
+
+HERMES_HOME="$PROFILE" hermes chat -Q --query \
+  "Print exactly FRESH-OK" \
+  --provider openai-codex --model gpt-5.6-sol --reasoning low \
+  --accept-hooks --yolo --pass-session-id
 ```
 
 Observed bounded output:
@@ -154,13 +159,16 @@ command: HERMES_HOME="$PROFILE" hermes chat -Q --query "Print only the token I a
 output: exit=0 stdout=  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only RESUME-CONTEXT-824 same_session=yes turn_end=touched started=touched
 command: HERMES_HOME="$PROFILE" hermes chat -Q --query "Apply the preloaded skill" --skills fm-proof --provider openai-codex --model gpt-5.6-sol --reasoning low --accept-hooks --yolo --pass-session-id
 output: exit=0 stdout=HERMES-SKILL-OK skill_preload=applied
-ok - Hermes Agent v0.20.0 (2026.8.3) isolated mechanics: -z exit, lifecycle hook, same-session quiet resume, and skill preload
+command: HERMES_HOME="$PROFILE" hermes chat -Q --query "Print exactly FRESH-OK" --provider openai-codex --model gpt-5.6-sol --reasoning low --accept-hooks --yolo --pass-session-id
+output: exit=0 stdout=FRESH-OK session=published started=touched turn_end=touched new_session=yes busy=idle hermes-hook
+ok - Hermes Agent v0.20.0 (2026.8.3) isolated mechanics: -z exit, lifecycle hook, same-session quiet resume, skill preload, and fresh no-resume session publication
 ```
 
 The initial `-z` run proved the real one-shot process exits and `on_session_end` touches the task marker.
 The same run proved `on_session_start` and `pre_llm_call` publish the initial session and busy transition.
 The resumed quiet-chat process retained conversation context and the same session id, while only `pre_llm_call` supplied its start acknowledgement; `on_session_start` correctly remained a new-session-only event.
 The third isolated turn proved `--skills <skill>` loads and applies a profile-visible skill in the same quiet headless mode.
+The fourth run deleted `state/<id>.hermes-session`, `state/<id>.hermes-started`, and `state/<id>.turn-ended` first and then ran the exact production launch spelling with no `--resume`, proving `on_session_start` publishes a new resumable session and `pre_llm_call` publishes the start acknowledgement that `fm-spawn` hard-gates every Hermes spawn on.
 The adapter therefore uses `chat -Q --query` for production launch and resume because Hermes v0.20.0's top-level `-z` dispatcher does not thread the resume, session-id, reasoning, or skill axes required by Firstmate.
 
 ### OMP lifecycle

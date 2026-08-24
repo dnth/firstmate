@@ -47,6 +47,8 @@ Within the Pi family, only the exact launch-boundary marker `FM_PI_HARNESS=pi-si
 `bin/fm-harness.sh crew` resolves the effective crewmate harness from `config/crew-harness` (absent or `default` -> own).
 The configured crew-only `hermes` identity resolves through that same path, but it is not a verified primary or secondmate identity.
 `bin/fm-harness.sh secondmate` resolves the secondmate-launch harness through the chain `config/secondmate-harness` -> `config/crew-harness` -> own, so an unset `config/secondmate-harness` matches the crew harness.
+The one exception is a crew-only harness: `config/crew-harness: hermes` is filtered out of that implicit chain and resolution continues to own-harness detection, because no verified secondmate launch template serves it.
+An explicit `config/secondmate-harness: hermes` still resolves verbatim and is refused at the spawn kind boundary.
 `bin/fm-spawn.sh` uses `crew` mode for a crewmate/scout launch and `secondmate` mode for a `--secondmate` launch, re-resolving on every spawn so the split is durable across respawns; an explicit per-spawn harness arg overrides either.
 On `unknown`, ask the captain instead of guessing.
 A captain override always beats detection.

@@ -619,6 +619,81 @@ test_hermes_static_crew_resolution() {
   pass "fm-harness resolves configured Hermes crewmates"
 }
 
+# A crew-only Hermes fleet must still be able to launch secondmates: the
+# documented secondmate fallback chain skips the ineligible crew value and
+# continues to primary harness auto-detection instead of resolving to a harness
+# with no verified secondmate launch template.
+test_hermes_crew_only_is_filtered_from_secondmate_fallback() {
+  local config out
+  config="$TMP_ROOT/crew-only-secondmate/config"
+  mkdir -p "$config"
+  printf 'hermes\n' > "$config/crew-harness"
+  out=$(CLAUDECODE=1 FM_CONFIG_OVERRIDE="$config" "$ROOT/bin/fm-harness.sh" secondmate)
+  [ "$out" = claude ] \
+    || fail "crew-only hermes leaked into implicit secondmate resolution: '$out'"
+  out=$(CLAUDECODE=1 FM_CONFIG_OVERRIDE="$config" "$ROOT/bin/fm-harness.sh" crew)
+  [ "$out" = hermes ] || fail "crew resolution changed while filtering the secondmate: '$out'"
+
+  printf 'hermes\n' > "$config/secondmate-harness"
+  out=$(CLAUDECODE=1 FM_CONFIG_OVERRIDE="$config" "$ROOT/bin/fm-harness.sh" secondmate)
+  [ "$out" = hermes ] \
+    || fail "an explicit secondmate-harness must stay authoritative: '$out'"
+  pass "crew-only Hermes is ineligible for the implicit secondmate fallback"
+}
+
+# The Herdr reclaim guard classifies an existing endpoint through
+# fm_backend_agent_state with the task metadata. A Hermes crewmate parked at an
+# idle shell is agent-free at the pane layer, so only the session-bound upgrade
+# keeps it alive; without it the guard would reclaim the pane and destroy the
+# resumable session.
+test_hermes_herdr_idle_session_classifies_alive() {
+  local case_dir state fakebin meta out
+  case_dir="$TMP_ROOT/herdr-state"
+  state="$case_dir/state"
+  fakebin="$case_dir/bin"
+  mkdir -p "$state" "$fakebin"
+  ln -s "$JQ_BIN" "$fakebin/jq"
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$1 $2" in
+  'pane get') printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "$3" ;;
+  'agent get') printf '{"error":{"code":"agent_not_found"}}\n' ;;
+  *) printf '{"error":{"code":"unsupported"}}\n' ;;
+esac
+SH
+  chmod +x "$fakebin/herdr"
+  meta="$state/herdr-hermes.meta"
+  {
+    printf 'harness=hermes\n'
+    printf 'backend=herdr\n'
+    printf 'target=fmlab:pane-1\n'
+    printf 'hermes_session_file=%s\n' "$state/herdr-hermes.hermes-session"
+  } > "$meta"
+  printf 'hermes-session-herdr\n' > "$state/herdr-hermes.hermes-session"
+
+  # shellcheck disable=SC2016 # Positional parameters expand inside the probe shell.
+  out=$(PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$1/bin/fm-backend.sh"; fm_backend_agent_state herdr "$2" "$3"' _ "$ROOT" fmlab:pane-1 "$meta")
+  [ "$out" = alive ] || fail "idle Hermes herdr pane with a bound session classified '$out'"
+  # shellcheck disable=SC2016 # Positional parameters expand inside the probe shell.
+  out=$(PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$1/bin/fm-backend.sh"; fm_backend_agent_alive herdr "$2" "$3"' _ "$ROOT" fmlab:pane-1 "$meta")
+  [ "$out" = alive ] || fail "the three-state herdr view lost the Hermes upgrade: '$out'"
+
+  # shellcheck disable=SC2016 # Positional parameters expand inside the probe shell.
+  out=$(PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$1/bin/fm-backend.sh"; fm_backend_agent_state herdr "$2"' _ "$ROOT" fmlab:pane-1)
+  [ "$out" = dead ] || fail "an agent-free herdr pane without task meta classified '$out'"
+
+  rm -f "$state/herdr-hermes.hermes-session"
+  # shellcheck disable=SC2016 # Positional parameters expand inside the probe shell.
+  out=$(PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$1/bin/fm-backend.sh"; fm_backend_agent_state herdr "$2" "$3"' _ "$ROOT" fmlab:pane-1 "$meta")
+  [ "$out" = dead ] || fail "a Hermes pane with no bound session must not be alive: '$out'"
+  pass "an idle Hermes herdr endpoint with a bound session classifies alive"
+}
+
 test_hermes_hook_install_is_surgical_idempotent_and_removable
 test_hermes_spawn_resume_skill_state_and_teardown
 test_hermes_secondmate_is_refused
@@ -635,3 +710,5 @@ test_hermes_help_states_kind_scope
 test_hermes_spawn_requires_pre_llm_acknowledgement
 test_hermes_concurrent_sends_serialize_through_acknowledgement
 test_hermes_static_crew_resolution
+test_hermes_crew_only_is_filtered_from_secondmate_fallback
+test_hermes_herdr_idle_session_classifies_alive

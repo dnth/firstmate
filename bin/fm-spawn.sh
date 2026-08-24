@@ -2564,6 +2564,10 @@ herdr_projection_meta_field_exact() {  # <meta> <key>
 # Under the session lock, authoritative metadata must identify one positively
 # dead or agent-free endpoint before token inspection may allow flat fallback.
 # Exact Herdr fields are retained for the narrower version 2 reclaim path.
+# Both liveness reads go through fm_backend_agent_state with the task metadata,
+# so a harness whose liveness is session-bound rather than process-bound (hermes)
+# is classified alive here exactly as it is everywhere else, and its resumable
+# session is preserved instead of being reclaimed and destroyed.
 herdr_projection_existing_meta_allows_flat() {  # <meta>
   local meta=$1 old_backend old_target old_session old_pane old_state target_session target_pane
   HERDR_RECOVERY_BACKEND=""
@@ -2609,16 +2613,20 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
       echo "error: existing herdr endpoint for $ID could not be inspected; refusing duplicate launch" >&2
       return 1
     }
-    old_state=$(fm_backend_herdr_pane_agent_state "$old_session" "$old_pane")
+    old_state=$(fm_backend_agent_state herdr "$old_target" "$meta")
     case "$old_state" in
-      dead|no-agent) return 0 ;;
-      live|unknown)
-        echo "error: existing herdr endpoint for $ID is $old_state; refusing duplicate launch" >&2
+      dead|missing) return 0 ;;
+      alive)
+        echo "error: existing herdr endpoint for $ID is live; refusing duplicate launch" >&2
+        return 1
+        ;;
+      *)
+        echo "error: existing herdr endpoint for $ID is unknown; refusing duplicate launch" >&2
         return 1
         ;;
     esac
   fi
-  old_state=$(fm_backend_agent_alive "$old_backend" "$old_target")
+  old_state=$(fm_backend_agent_alive "$old_backend" "$old_target" "$meta")
   case "$old_state" in
     dead) return 0 ;;
     alive|unknown)

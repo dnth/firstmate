@@ -9,7 +9,9 @@
 #                                        config/crew-harness -> own. "default" or absent
 #                                        defers to the crew resolution, so an unset
 #                                        secondmate-harness behaves exactly as the crew
-#                                        harness did before this knob existed.
+#                                        harness did before this knob existed, except
+#                                        that a crew-only harness (hermes) is skipped
+#                                        and resolution continues to own detection.
 #        fm-harness.sh secondmate-model    print the optional MODEL token from
 #                                        config/secondmate-harness, or empty when absent.
 #        fm-harness.sh secondmate-effort   print the optional EFFORT token from
@@ -281,12 +283,29 @@ secondmate_fallback_effort() {
   secondmate_fallback_field 3
 }
 
+# Harness identities verified for crewmates and scouts only. They are never
+# eligible as an IMPLICIT secondmate selection, so a crew-only value configured
+# in config/crew-harness is filtered out of the secondmate fallback chain rather
+# than resolving to a harness that no secondmate launch template can serve.
+# An explicit config/secondmate-harness value is left alone: that is a conscious
+# per-fleet choice and fm-spawn refuses it at the kind boundary with a precise
+# diagnostic.
+crew_only_harness() {  # <harness>
+  case "$1" in
+    hermes) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Resolve the harness the PRIMARY uses to launch SECONDMATE agents: a fallback
-# chain config/secondmate-harness -> config/crew-harness -> own.
+# chain config/secondmate-harness -> config/crew-harness -> own, skipping a
+# crew-only config/crew-harness so the chain continues to own-harness detection.
 resolve_secondmate() {
-  local sm
+  local sm crew
   sm=$(secondmate_field 1)
-  if [ -z "$sm" ] || [ "$sm" = "default" ]; then resolve_crew; else echo "$sm"; fi
+  if [ -n "$sm" ] && [ "$sm" != "default" ]; then echo "$sm"; return; fi
+  crew=$(resolve_crew)
+  if crew_only_harness "$crew"; then detect_own; else echo "$crew"; fi
 }
 
 # Print the optional model token (2nd field) from config/secondmate-harness, or
