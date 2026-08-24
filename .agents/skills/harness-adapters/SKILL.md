@@ -483,7 +483,8 @@ Each Hermes crew worktree receives a gitignored `.fm-hermes-turnend` pointer; th
 The end event requires the same session id, touches `state/<id>.turn-ended`, and marks the turn idle.
 For this one-process-per-turn adapter, Hermes' `on_session_end` callback at the end of each `run_conversation` call is exactly the supervised turn boundary.
 
-`fm-send` refuses a resume command unless the semantic state is exactly idle, the task-bound session and profile metadata validate, and the recorded executable is still available.
+`fm-send` refuses a resume command unless the semantic state is exactly idle, the endpoint has a structural idle-shell proof, the task-bound session and profile metadata validate, and the recorded executable is still available.
+That shell proof is available on tmux and Herdr; Hermes resume delivery on other backends fails closed before command submission.
 Hermes has no safe mid-turn text-steer channel in this mode; a busy send is refused instead of typing into the running process, and the firstmate may interrupt with `C-c` before resuming.
 After submitting the resume shell command, `fm-send` requires a newer `hermes-started` acknowledgement before it closes any `--resolve-key` decision.
 If delivery landed but the start hook did not acknowledge it, the send fails as delivered-no-turn, records a supervised recovery wake, and warns not to resend.

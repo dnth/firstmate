@@ -795,6 +795,10 @@ else
         exit 1
       }
     fi
+    if ! fm_backend_idle_shell_ready "$TARGET_BACKEND" "$T"; then
+      echo "error: Hermes endpoint $T is not a proven idle shell on backend=$TARGET_BACKEND; nothing was sent" >&2
+      exit 1
+    fi
     if ! fm_backend_send_text_line "$TARGET_BACKEND" "$T" "$FM_SEND_HERMES_COMMAND" "$EXPECTED_LABEL"; then
       rm -f -- "$TARGET_HERMES_START_REFERENCE"
       TARGET_HERMES_START_REFERENCE=

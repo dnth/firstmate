@@ -153,6 +153,57 @@ fm_backend_tmux_current_command() {  # <target>
   tmux display-message -p -t "$1" '#{pane_current_command}' 2>/dev/null
 }
 
+fm_backend_tmux_idle_foreground_shell_sample() {  # <target>
+  local target=$1 ps_bin=${FM_TMUX_PS_BIN:-ps} pane_pid foreground_pgid comm argv0 rows
+  pane_pid=$(tmux display-message -p -t "$target" '#{pane_pid}' 2>/dev/null) || return 1
+  case "$pane_pid" in ''|*[!0-9]*|0|1) return 1 ;; esac
+  command -v "$ps_bin" >/dev/null 2>&1 || return 1
+  foreground_pgid=$("$ps_bin" -o tpgid= -p "$pane_pid" 2>/dev/null | tr -d '[:space:]') || return 1
+  case "$foreground_pgid" in ''|*[!0-9]*|0|1) return 1 ;; esac
+  comm=$("$ps_bin" -p "$foreground_pgid" -o comm= 2>/dev/null) || return 1
+  comm=$(printf '%s' "$comm" | tr -d '[:space:]')
+  comm=${comm#-}
+  comm=${comm##*/}
+  case "$comm" in sh|bash|zsh|dash|ksh|fish) ;; *) return 1 ;; esac
+  argv0=$("$ps_bin" -p "$foreground_pgid" -o args= 2>/dev/null) || return 1
+  argv0=${argv0%%[[:space:]]*}
+  argv0=${argv0#-}
+  argv0=${argv0##*/}
+  [ "$argv0" = "$comm" ] || return 1
+  rows=$("$ps_bin" -axo pid=,pgid=,ppid= 2>/dev/null) || return 1
+  printf '%s\n' "$rows" | awk -v root="$pane_pid" -v target="$foreground_pgid" '
+    {
+      parent[$1] = $3
+      if ($1 == target) found++
+      if ($2 == target) group++
+      if ($3 == target) child++
+    }
+    END {
+      if (found != 1 || group != 1 || child != 0) exit 1
+      pid = target
+      for (depth = 0; depth < 256; depth++) {
+        if (pid == root) exit 0
+        if (!(pid in parent) || parent[pid] <= 1 || parent[pid] == pid) exit 1
+        pid = parent[pid]
+      }
+      exit 1
+    }
+  '
+}
+
+fm_backend_tmux_idle_foreground_shell_pid() {  # <target>
+  local attempt=0 max_attempts=${FM_BACKEND_TMUX_IDLE_SHELL_PROOF_POLLS:-10}
+  case "$max_attempts" in ''|*[!0-9]*|0) max_attempts=10 ;; esac
+  while :; do
+    if fm_backend_tmux_idle_foreground_shell_sample "$1"; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt "$max_attempts" ] || return 1
+    sleep 0.1
+  done
+}
+
 fm_backend_tmux_bun_agent_state() {  # <target> <comm> [bun-realpath] [omp-realpath] -> alive|ambiguous|unreadable
   local target=$1 comm=$2 expected_bun=${3:-} expected_omp=${4:-} pane_pid foreground_pid args
   pane_pid=$(tmux display-message -p -t "$target" '#{pane_pid}' 2>/dev/null) || {

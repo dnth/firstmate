@@ -742,6 +742,23 @@ fm_backend_send_text_line() {  # <backend> <target> <text> [expected-label]
   esac
 }
 
+fm_backend_idle_shell_ready() {  # <backend> <target>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux)
+      fm_backend_tmux_idle_foreground_shell_pid "$1" >/dev/null
+      ;;
+    herdr)
+      fm_backend_herdr_target_ready "$1" || return 1
+      fm_backend_herdr_pane_idle_foreground_shell_pid \
+        "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" >/dev/null
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 # fm_backend_send_text_submit: type text once, then submit and verify,
 # retrying only the submission (never retyping). Echoes the backend's
 # proof-carrying verdict, including an optional idle OMP turn-start reference.

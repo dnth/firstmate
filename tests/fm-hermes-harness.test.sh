@@ -31,6 +31,18 @@ case "$*" in
 esac
 SH
   chmod +x "$fakebin/hermes"
+  cat > "$fakebin/pane-ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  '-o tpgid= -p 4100') printf '4200\n' ;;
+  '-p 4200 -o comm=') printf '%s\n' "${FM_FAKE_TMUX_COMMAND:-zsh}" ;;
+  '-p 4200 -o args=') printf '%s\n' "${FM_FAKE_TMUX_COMMAND:-zsh}" ;;
+  '-axo pid=,pgid=,ppid=') printf '%s\n' '4100 4100 1' '4200 4200 4100' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/pane-ps"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -69,7 +81,8 @@ submit_command() {
 }
 case "$*" in
   *'#{pane_current_path}'*) printf '%s\n' "$FM_FAKE_PANE_PATH"; exit 0 ;;
-  *'#{pane_current_command}'*) printf 'zsh\n'; exit 0 ;;
+  *'#{pane_current_command}'*) printf '%s\n' "${FM_FAKE_TMUX_COMMAND:-zsh}"; exit 0 ;;
+  *'#{pane_pid}'*) printf '4100\n'; exit 0 ;;
   *'#{pane_id}'*) printf '%%1\n'; exit 0 ;;
 esac
 case "${1:-}" in
@@ -150,6 +163,7 @@ fixture_env() {
     FM_FAKE_COMMAND_LOG="$CASE_DIR/commands.log" \
     FM_FAKE_PENDING_COMMAND="$CASE_DIR/pending" \
     FM_FAKE_WINDOW_STATE="$CASE_DIR/window.state" \
+    FM_TMUX_PS_BIN="$FAKEBIN_DIR/pane-ps" \
     FM_HERMES_PYTHON="$PYTHON_BIN" FM_HERMES_LAUNCH_ACK_POLLS=2 \
     FM_HERMES_LAUNCH_ACK_INTERVAL=0 FM_SEND_HERMES_START_POLLS=4 \
     FM_SEND_HERMES_START_INTERVAL=0.01 FM_SEND_SETTLE=0 TMUX='fake,1,0' \
@@ -278,6 +292,48 @@ test_hermes_secondmate_is_refused() {
   pass "Hermes remains crewmate/scout-only"
 }
 
+test_hermes_raw_secondmate_is_refused() {
+  local rec out rc
+  TEST_ID=hermes-raw-secondmate-x5
+  rec=$(make_case raw-secondmate "$TEST_ID")
+  read_case "$rec"
+  rc=0
+  out=$(fixture_env "$SPAWN" "$TEST_ID" "$HOME_DIR/not-a-secondmate" \
+    'hermes --yolo' --secondmate 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "raw Hermes command was accepted for a secondmate"
+  assert_contains "$out" "crewmates and scouts only" "raw Hermes secondmate refusal omitted its scope"
+  assert_not_contains "$(cat "$CASE_DIR/tmux.log")" "new-window" "raw Hermes secondmate refusal created an endpoint"
+  pass "Hermes raw launches remain crew and scout only"
+}
+
+test_hermes_resume_requires_idle_shell() {
+  local rec out rc before after
+  TEST_ID=hermes-shell-proof-x6
+  rec=$(make_case shell-proof "$TEST_ID")
+  read_case "$rec"
+  fixture_env "$SPAWN" "$TEST_ID" "$PROJECT_DIR" --harness hermes \
+    --model gpt-5.6-sol --effort high --mode no-mistakes --yolo off >/dev/null \
+    || fail "Hermes shell-proof fixture spawn failed"
+  before=$(wc -l < "$CASE_DIR/commands.log" | tr -d '[:space:]')
+  rc=0
+  out=$(fixture_env env FM_FAKE_TMUX_COMMAND=python "$SEND" "$TEST_ID" \
+    'Do not inject this command.' 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "Hermes resume accepted a non-shell foreground process"
+  assert_contains "$out" "not a proven idle shell" "Hermes unsafe endpoint refusal omitted its reason"
+  after=$(wc -l < "$CASE_DIR/commands.log" | tr -d '[:space:]')
+  [ "$after" = "$before" ] || fail "Hermes resume injected into the non-shell foreground process"
+  pass "Hermes resume requires a proven idle shell"
+}
+
+test_hermes_help_states_kind_scope() {
+  local out
+  out=$($SPAWN --help)
+  assert_contains "$out" "Hermes overrides only a crewmate or scout spawn" \
+    "fm-spawn help did not state Hermes kind scope"
+  assert_contains "$out" "refused for secondmates" "fm-spawn help did not state the secondmate refusal"
+  pass "fm-spawn help states Hermes kind scope"
+}
+
 test_hermes_spawn_requires_pre_llm_acknowledgement() {
   local rec out rc
   TEST_ID=hermes-start-only-x3
@@ -356,6 +412,9 @@ test_hermes_static_crew_resolution() {
 test_hermes_hook_install_is_surgical_idempotent_and_removable
 test_hermes_spawn_resume_skill_state_and_teardown
 test_hermes_secondmate_is_refused
+test_hermes_raw_secondmate_is_refused
+test_hermes_resume_requires_idle_shell
+test_hermes_help_states_kind_scope
 test_hermes_spawn_requires_pre_llm_acknowledgement
 test_hermes_concurrent_sends_serialize_through_acknowledgement
 test_hermes_static_crew_resolution

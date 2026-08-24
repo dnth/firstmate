@@ -222,6 +222,10 @@ The full cmux home label also includes a short hash of the resolved `FM_ROOT` pa
 ## Harness support
 
 claude, codex, opencode, pi, pi-signed, omp, grok, and kimi are empirically verified harness identities for crewmate and secondmate launches on their documented backend combinations.
+Hermes is verified only for crewmate and scout launches and is refused for primary sessions and secondmates, including a raw launch whose resolved executable is Hermes.
+Hermes resume delivery requires structural idle-shell proof, which is available on tmux and Herdr; other backends fail closed before command submission.
+Hermes profiles accept the shared `low`, `medium`, `high`, `xhigh`, and `max` effort vocabulary and forward it as native reasoning effort.
+Each Hermes crew spawn surgically registers guarded profile-global lifecycle hooks: session start captures the task-bound session, pre-LLM acknowledges the turn and records busy, and session end records idle.
 OMP is verified as a primary, crewmate, scout, and secondmate runtime only on tmux and Herdr; Zellij, Orca, and cmux reject OMP before endpoint creation and carry no live OMP claim.
 [README requirements](../README.md#requirements) owns the complete set supported for the primary session.
 New harnesses get verified through a supervised trial task before joining the set.
@@ -322,6 +326,7 @@ Per rule, `when` and `use` are required.
 Both `use` and the optional top-level `default` accept either one profile object or a non-empty array of profile objects.
 The single-object form stays fully backward-compatible, and every profile needs `harness`.
 Profile `model`, `effort`, and `prewalk_into` fields and rule `why` are optional.
+The verified `harness` values for crew profiles are `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `omp`, `grok`, `kimi`, and `hermes`.
 An omitted model or effort means the selected harness uses its own default for that axis.
 An omitted `prewalk_into` makes `fm-spawn.sh` add no Prewalk flags and preserves ordinary OMP-configured behavior byte-for-byte.
 `prewalk_into` is opt-in and valid only when the same profile selects `harness: "omp"`.

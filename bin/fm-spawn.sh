@@ -103,9 +103,10 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare CREWMATE adapter name
-#   (claude|codex|opencode|pi|pi-signed|omp|grok|kimi|hermes)
-#   overrides it for this spawn (either kind). A non-flag string containing
+#   /updatefirstmate, restart). A bare verified adapter name
+#   (claude|codex|opencode|pi|pi-signed|omp|grok|kimi) overrides selection for
+#   either kind. Hermes overrides only a crewmate or scout spawn and is refused for secondmates.
+#   A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. pi-signed launches that exact executable name from PATH and
 #   refuses before endpoint creation when it is unavailable; it never falls back to pi.
@@ -1369,11 +1370,11 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
   fi
 fi
 
+if [ "$HARNESS" = hermes ] && [ "$KIND" = secondmate ]; then
+  echo "error: harness=hermes is verified for crewmates and scouts only; secondmate support is not verified" >&2
+  exit 1
+fi
 if [ "$HARNESS" = hermes ] && [ "$RAW_LAUNCH" -eq 0 ]; then
-  if [ "$KIND" = secondmate ]; then
-    echo "error: harness=hermes is verified for crewmates and scouts only; secondmate support is not verified" >&2
-    exit 1
-  fi
   if [ -z "$MODEL" ] || [ "$MODEL" = default ]; then
     MODEL=gpt-5.6-sol
   fi
