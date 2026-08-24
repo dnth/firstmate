@@ -139,6 +139,9 @@ FM_HOME="$FM_LIVE_HOME" HERMES_HOME="$PROFILE" \
   'Use terminal_tool to run sleep 5, then reply exactly HERMES-TUI-STEER-OK.'
 
 FM_HOME="$FM_LIVE_HOME" HERMES_HOME="$PROFILE" \
+  bin/fm-send.sh hermes-live-worker /fmnative
+
+FM_HOME="$FM_LIVE_HOME" HERMES_HOME="$PROFILE" \
   bin/fm-send.sh hermes-live-worker --key C-c
 
 FM_HOME="$FM_LIVE_HOME" HERMES_HOME="$PROFILE" \
@@ -149,30 +152,35 @@ Observed bounded output:
 
 ```text
 command: fm-spawn hermes-live-worker --harness hermes --backend tmux --model gpt-5.6-sol --effort low
-output: persistent=yes session=20260825_005517_13f744 turn_end=touched busy=idle hermes-tui
+output: persistent=yes session=20260825_015339_afaae7 turn_end=touched busy=busy hermes-tui
 command: fm-send hermes-live-worker "Use terminal_tool to run sleep 5 ..."
-output: submit=verified busy=busy hermes-tui idle=idle hermes-tui turn_end=touched
+output: submit=verified busy=busy hermes-tui idle=idle hermes-hook turn_end=touched
+command: fm-send hermes-live-worker /fmnative
+output: native_skill=/fmnative send=0 busy=busy hermes-tui idle=idle hermes-hook turn_end=touched
 command: fm-send hermes-live-worker "sleep 20"; fm-send hermes-live-worker --key C-c
 output: interrupt=C-c state=idle fm-interrupt turn_end=touched
 command: fm-send hermes-live-worker /exit
 output: exit=0 foreground=shell
-command: fm-spawn hermes-live-worker ... --resume 20260825_005517_13f744 (from task state)
+command: fm-spawn hermes-live-worker ... --resume 20260825_015339_afaae7 (from task state)
 output: same_session=yes context=HERMES-TUI-RESUME-825
 command: fm-spawn hermes-live-scout --scout --harness hermes --backend tmux
 output: scout_persistent=yes turn_end=touched
-ok - Hermes Agent v0.20.0 (2026.8.3) persistent Hermes TUI: crew/scout launch, composer steer, busy->idle, turn-end, interrupt, exit, and exact-session resume
+ok - Hermes Agent v0.20.0 (2026.8.3) persistent Hermes TUI: crew/scout launch, composer steer, native skill turn, busy->idle, turn-end, interrupt, exit, and exact-session resume
 ```
 
 The TUI remained as the foreground process across ordinary turns and accepted every steer through its bare `❯` composer.
 The live busy surface had two independent positive signals: `Ctrl+C to interrupt…` in the composer and the status rule's `· <elapsed>` segment.
 The structural `─ ready │` rule proved idle after both normal completion and interruption.
+Rendered evidence only promotes to busy: once the lifecycle bridge has written a trusted record, classification reports that record's source, which is why each settled turn above reads `idle hermes-hook` rather than the rendered `idle hermes-tui`, while the pre-record spawn probe still reads `hermes-tui`.
+A native profile skill (`$HERMES_HOME/skills/fmnative/SKILL.md`, typed as the bare `/fmnative`) started a real model turn: `fm-send` exited 0 on its `pre_llm_call` turn-start proof, the busy surface appeared, the turn-end marker fired, and the model spoke the skill's token.
+That is the fail-closed contract holding for the native branch - a slash command that Hermes handled locally instead would have produced a `delivered-no-turn` failure rather than success.
 The `firstmate-lifecycle` profile plugin forwarded `on_session_start`, `pre_llm_call`, and `on_session_end` from the TUI gateway worker into the guarded shell handler, which captured the exact durable session and touched every turn-end marker.
 Direct config shell hooks were disconfirming evidence for the TUI path: v0.20.0 logged them as registered in the wrapper process but did not invoke them from gateway turns.
 The CLI `--reasoning low` value was also disconfirming by itself because v0.20.0's Python TUI launcher dropped it and initially rendered the profile's `high` value.
 The session-scoped `/reasoning low` setup command changed the live footer to `gpt 5.6 sol low` without changing the global reasoning setting.
 That local slash command does not start an agent turn, so its launch-time submission uses structural composer clearing instead of Herdr's ordinary working-state proof.
 The tmux probe also proved that Hermes' busy placeholder must classify as empty composer content, because a false pending verdict sends a second empty Enter and Hermes interprets the double Enter as an interrupt.
-The named Herdr lab independently produced `spawned ... window=fm-lab-hermes-tui-adapt-1672570-30455:w1:p6`, `busy hermes-tui`, `idle hermes-tui`, `HERMES-HERDR-STEER-OK`, an `interrupted` transcript line after `C-c`, `HERDR-RESUME-825` after relaunch on `w1:p7`, and `HERMES-HERDR-SCOUT-OK` on `w1:p9`.
+The named Herdr lab independently produced `spawned ... window=fm-lab-hermes-tui-adapt-1672570-30455:w1:p6`, `busy hermes-tui`, `idle hermes-tui` (that idle was sampled before the lifecycle record landed; a settled turn now reports `idle hermes-hook` as the tmux rerun above shows), `HERMES-HERDR-STEER-OK`, an `interrupted` transcript line after `C-c`, `HERDR-RESUME-825` after relaunch on `w1:p7`, and `HERMES-HERDR-SCOUT-OK` on `w1:p9`.
 The Herdr `/exit` path required a bounded process-exit wait because the TUI can spend tens of seconds shutting down MCP and child resources after the slash command clears its composer.
 
 ### OMP lifecycle

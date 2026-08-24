@@ -726,8 +726,9 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
 
 # fm_backend_send_text_line: submit one complete shell command through a
 # backend's fixed-command path. This is distinct from the interactive-agent
-# composer verifier below; callers that drive a pane's shell (rather than a
-# harness composer) route through it, and it has no interactive-harness users.
+# composer verifier below. It currently has no callers: the Hermes adapter that
+# used it now steers a persistent TUI composer instead of a pane shell. The
+# per-backend implementations it dispatches to remain directly exercised.
 fm_backend_send_text_line() {  # <backend> <target> <text> [expected-label]
   local backend=$1
   shift

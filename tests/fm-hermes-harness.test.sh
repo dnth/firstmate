@@ -238,6 +238,23 @@ for event in ("on_session_start", "pre_llm_call", "on_session_end"):
 PY
 }
 
+config_plugin_enabled() {  # <config.yaml>
+  "$PYTHON_BIN" - "$1" <<'PY'
+import sys
+import yaml
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    config = yaml.safe_load(stream)
+plugins = config.get("plugins") or {}
+enabled = plugins.get("enabled") or []
+disabled = plugins.get("disabled") or []
+if enabled.count("firstmate-lifecycle") != 1:
+    raise SystemExit(1)
+if "firstmate-lifecycle" in disabled:
+    raise SystemExit(1)
+PY
+}
+
 test_hermes_hook_install_is_surgical_idempotent_and_removable() {
   local home config original once no_newline timeouts
   home="$TMP_ROOT/config-surgery"
@@ -260,7 +277,8 @@ SH
     "$HOOK_INSTALLER" install || fail "Hermes hook install refused a foreign hooks mapping"
   assert_present "$home/plugins/firstmate-lifecycle/plugin.yaml" "Hermes lifecycle plugin manifest was not installed"
   assert_present "$home/plugins/firstmate-lifecycle/__init__.py" "Hermes lifecycle plugin bridge was not installed"
-  assert_grep 'firstmate-lifecycle' "$config" "Hermes lifecycle plugin was not enabled"
+  config_plugin_enabled "$config" \
+    || fail "Hermes lifecycle plugin was not enabled exactly once in plugins.enabled"
   mkdir -m 700 "$home/plugins/firstmate-lifecycle/__pycache__"
   printf 'test bytecode cache\n' > "$home/plugins/firstmate-lifecycle/__pycache__/__init__.cpython-311.pyc"
   chmod 600 "$home/plugins/firstmate-lifecycle/__pycache__/__init__.cpython-311.pyc"
@@ -468,6 +486,25 @@ test_hermes_tui_busy_state_and_composer() {
   pass "Hermes TUI busy and composer classifiers distinguish ready, working, placeholder, and pending text"
 }
 
+# The launch gate matches the TUI's box-drawing status rule with grep. Under a
+# C/POSIX locale a bracket expression would match single BYTES of those
+# multibyte glyphs, so a healthy TUI would never satisfy the gate and every
+# Hermes spawn would abort. A long-lived crew daemon commonly inherits no locale.
+test_hermes_ready_gate_survives_c_locale() {
+  local rec out
+  TEST_ID=hermes-c-locale-x7
+  rec=$(make_case c-locale "$TEST_ID")
+  read_case "$rec"
+  out=$(fixture_env env LC_ALL=C LANG=C LC_CTYPE=C "$SPAWN" "$TEST_ID" "$PROJECT_DIR" \
+    --harness hermes --model gpt-5.6-sol --effort low --mode no-mistakes --yolo off 2>&1) \
+    || fail "Hermes spawn failed under a C locale: $out"
+  assert_contains "$out" "spawned $TEST_ID harness=hermes" "C-locale Hermes spawn lost its launch line"
+  assert_grep "/reasoning low" "$CASE_DIR/commands.log" "C-locale Hermes spawn did not confirm its reasoning setup"
+  fixture_env "$TEARDOWN" "$TEST_ID" --force >/dev/null 2>&1 \
+    || fail "C-locale Hermes fixture teardown failed"
+  pass "the Hermes ready and reasoning launch gates match under a C locale"
+}
+
 test_hermes_spawn_resumes_existing_tui_session() {
   local rec launch
   TEST_ID=hermes-resume-tui-x22
@@ -524,37 +561,6 @@ test_hermes_session_binding_and_busy_ack_order() {
 # and event are stable by construction for a resumed task and a pid is
 # reusable, so this pins that consecutive acknowledgements differ on something
 # other than the pid.
-# A rendered Hermes ready footer is a screen state, not a lifecycle fact: a
-# redraw, scroll, or tool render can show it while a turn is running. A trusted
-# pre_llm_call busy record must therefore outrank it, or fm-send would admit a
-# steer into a live turn (Hermes treats that as an interrupt, not a queue).
-test_hermes_busy_record_outranks_rendered_ready_footer() {
-  local rec stable ready busy
-  TEST_ID=hermes-record-precedence-x11
-  rec=$(make_case record-precedence "$TEST_ID")
-  read_case "$rec"
-  fixture_env "$SPAWN" "$TEST_ID" "$PROJECT_DIR" --harness hermes \
-    --model gpt-5.6-sol --effort high --mode no-mistakes --yolo off >/dev/null \
-    || fail "Hermes record-precedence fixture spawn failed"
-  stable=$(cat "$HOME_DIR/state/$TEST_ID.hermes-session")
-  fixture_hook pre_llm_call "$stable"
-  ready=$' \xe2\x94\x80 ready \xe2\x94\x82 gpt 5.6 sol low \xe2\x94\x82\n \xe2\x9d\xaf Ask me anything\xe2\x80\xa6'
-  # shellcheck disable=SC2016 # Positional parameters expand inside the fixture shell.
-  busy=$(fixture_env bash -c '. "$1/bin/fm-busy-lib.sh"; fm_busy_classify tmux unused hermes "$2" "$3" "$4"' \
-    _ "$ROOT" "$TEST_ID" "$HOME_DIR/state" "$ready")
-  [ "${busy%% *}" = busy ] \
-    || fail "a rendered ready footer demoted a trusted busy lifecycle record: $busy"
-  fixture_hook on_session_end "$stable"
-  # shellcheck disable=SC2016 # Positional parameters expand inside the fixture shell.
-  busy=$(fixture_env bash -c '. "$1/bin/fm-busy-lib.sh"; fm_busy_classify tmux unused hermes "$2" "$3" "$4"' \
-    _ "$ROOT" "$TEST_ID" "$HOME_DIR/state" "$ready")
-  [ "${busy%% *}" = idle ] \
-    || fail "Hermes turn end did not settle idle with the same ready footer: $busy"
-  fixture_env "$TEARDOWN" "$TEST_ID" --force >/dev/null 2>&1 \
-    || fail "Hermes record-precedence fixture teardown failed"
-  pass "a trusted Hermes busy record outranks a rendered ready footer"
-}
-
 test_hermes_start_ack_is_unique_per_turn() {
   local rec stable started first second first_nopid second_nopid
   TEST_ID=hermes-start-ack-x16
@@ -590,6 +596,37 @@ test_hermes_start_ack_is_unique_per_turn() {
   [ "$(sort -u "$CASE_DIR/acks.log" | wc -l | tr -d '[:space:]')" = 8 ] \
     || fail "a burst of start acknowledgements repeated a pid-independent value"
   pass "each Hermes start acknowledgement is unique independently of the hook pid"
+}
+
+# A rendered Hermes ready footer is a screen state, not a lifecycle fact: a
+# redraw, scroll, or tool render can show it while a turn is running. A trusted
+# pre_llm_call busy record must therefore outrank it, or fm-send would admit a
+# steer into a live turn (Hermes treats that as an interrupt, not a queue).
+test_hermes_busy_record_outranks_rendered_ready_footer() {
+  local rec stable ready busy
+  TEST_ID=hermes-record-precedence-x11
+  rec=$(make_case record-precedence "$TEST_ID")
+  read_case "$rec"
+  fixture_env "$SPAWN" "$TEST_ID" "$PROJECT_DIR" --harness hermes \
+    --model gpt-5.6-sol --effort high --mode no-mistakes --yolo off >/dev/null \
+    || fail "Hermes record-precedence fixture spawn failed"
+  stable=$(cat "$HOME_DIR/state/$TEST_ID.hermes-session")
+  fixture_hook pre_llm_call "$stable"
+  ready=$' \xe2\x94\x80 ready \xe2\x94\x82 gpt 5.6 sol low \xe2\x94\x82\n \xe2\x9d\xaf Ask me anything\xe2\x80\xa6'
+  # shellcheck disable=SC2016 # Positional parameters expand inside the fixture shell.
+  busy=$(fixture_env bash -c '. "$1/bin/fm-busy-lib.sh"; fm_busy_classify tmux unused hermes "$2" "$3" "$4"' \
+    _ "$ROOT" "$TEST_ID" "$HOME_DIR/state" "$ready")
+  [ "${busy%% *}" = busy ] \
+    || fail "a rendered ready footer demoted a trusted busy lifecycle record: $busy"
+  fixture_hook on_session_end "$stable"
+  # shellcheck disable=SC2016 # Positional parameters expand inside the fixture shell.
+  busy=$(fixture_env bash -c '. "$1/bin/fm-busy-lib.sh"; fm_busy_classify tmux unused hermes "$2" "$3" "$4"' \
+    _ "$ROOT" "$TEST_ID" "$HOME_DIR/state" "$ready")
+  [ "${busy%% *}" = idle ] \
+    || fail "Hermes turn end did not settle idle with the same ready footer: $busy"
+  fixture_env "$TEARDOWN" "$TEST_ID" --force >/dev/null 2>&1 \
+    || fail "Hermes record-precedence fixture teardown failed"
+  pass "a trusted Hermes busy record outranks a rendered ready footer"
 }
 
 test_hermes_hook_waits_through_busy_lock_contention() {
@@ -969,6 +1006,7 @@ test_hermes_secondmate_is_refused
 test_secondmates_refuse_every_raw_launch_command
 test_workers_and_scouts_preserve_raw_launch_commands
 test_hermes_tui_busy_state_and_composer
+test_hermes_ready_gate_survives_c_locale
 test_hermes_spawn_resumes_existing_tui_session
 test_hermes_session_binding_and_busy_ack_order
 test_hermes_busy_record_outranks_rendered_ready_footer

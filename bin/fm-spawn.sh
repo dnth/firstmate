@@ -2969,7 +2969,7 @@ hermes_wait_for_ready() {
     pane=$(hermes_capture)
     composer=$(fm_backend_composer_state "$BACKEND" "$T" hermes 2>/dev/null || printf 'unknown')
     if [ "$composer" = empty ] \
-      && printf '%s\n' "$pane" | grep -qE '^[[:space:]]*[─━][[:space:]]+ready[[:space:]]*│'; then
+      && printf '%s\n' "$pane" | grep -qE '^[[:space:]]*(─|━)[[:space:]]+ready[[:space:]]*│'; then
       return 0
     fi
     i=$((i + 1))
@@ -3007,7 +3007,7 @@ hermes_wait_for_reasoning() {  # <effort>
   while [ "$i" -lt "$max" ]; do
     pane=$(hermes_capture)
     if printf '%s\n' "$pane" | grep -Fq "reasoning: $effort" \
-      && printf '%s\n' "$pane" | grep -qE '^[[:space:]]*[─━][[:space:]]+ready[[:space:]]*│'; then
+      && printf '%s\n' "$pane" | grep -qE '^[[:space:]]*(─|━)[[:space:]]+ready[[:space:]]*│'; then
       return 0
     fi
     i=$((i + 1))

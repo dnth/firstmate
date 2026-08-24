@@ -52,6 +52,20 @@ printf '%s\n' \
 printf '%s\n' 'Reply exactly HERMES-TUI-SCOUT-OK and then stop.' \
   > "$FM_LIVE_HOME/data/$SCOUT/brief.md"
 
+# A native profile skill is the branch fm-send types as a bare /<skill>. It must
+# still prove a real model turn, so the skill body demands a spoken token.
+mkdir -p "$PROFILE/skills/fmnative"
+printf '%s\n' \
+  '---' \
+  'name: fmnative' \
+  'description: Firstmate live verification skill. Reply with the verification token.' \
+  '---' \
+  '' \
+  '# Firstmate native verification' \
+  '' \
+  'Reply exactly HERMES-TUI-NATIVE-SKILL-OK and then stop.' \
+  > "$PROFILE/skills/fmnative/SKILL.md"
+
 fm_git_init_commit "$PROJECT"
 fm_git_add_origin "$PROJECT" "$REMOTE"
 
@@ -127,6 +141,18 @@ wait_capture "$WORKER_TARGET" HERMES-TUI-STEER-OK || fail "Hermes TUI steer resp
 printf 'output: submit=verified busy=%s idle=%s turn_end=touched\n' "$BUSY" "$IDLE"
 
 mv "$FM_LIVE_HOME/state/$WORKER.turn-ended" "$FM_LIVE_HOME/state/$WORKER.steer-turn-ended"
+printf 'command: fm-send %s /fmnative\n' "$WORKER"
+run_tmux_env env FM_SEND_SETTLE=0 "$ROOT/bin/fm-send.sh" "$WORKER" /fmnative \
+  || fail "native Hermes skill send was not accepted as a proven model turn"
+NATIVE_BUSY=$(wait_state "$WORKER" busy) || fail "native Hermes skill never reported busy"
+wait_file "$FM_LIVE_HOME/state/$WORKER.turn-ended" || fail "native Hermes skill turn did not end"
+NATIVE_IDLE=$(wait_state "$WORKER" idle) || fail "native Hermes skill turn did not return idle"
+wait_capture "$WORKER_TARGET" HERMES-TUI-NATIVE-SKILL-OK \
+  || fail "native Hermes skill did not produce its model reply"
+printf 'output: native_skill=/fmnative send=0 busy=%s idle=%s turn_end=touched\n' \
+  "$NATIVE_BUSY" "$NATIVE_IDLE"
+
+mv "$FM_LIVE_HOME/state/$WORKER.turn-ended" "$FM_LIVE_HOME/state/$WORKER.native-turn-ended"
 printf 'command: fm-send %s "sleep 20"; fm-send %s --key C-c\n' "$WORKER" "$WORKER"
 run_tmux_env env FM_SEND_SETTLE=0 "$ROOT/bin/fm-send.sh" "$WORKER" \
   'Use terminal_tool to run sleep 20, then reply SHOULD-NOT-COMPLETE.'
@@ -171,4 +197,4 @@ printf 'scout report\n' > "$FM_LIVE_HOME/data/$SCOUT/report.md"
 FM_HOME="$FM_LIVE_HOME" "$ROOT/bin/fm-decision-hold.sh" complete "$SCOUT" --none >/dev/null
 run_tmux_env "$ROOT/bin/fm-teardown.sh" "$SCOUT" >/dev/null
 
-printf 'ok - %s persistent Hermes TUI: crew/scout launch, composer steer, busy->idle, turn-end, interrupt, exit, and exact-session resume\n' "$HERMES_VERSION"
+printf 'ok - %s persistent Hermes TUI: crew/scout launch, composer steer, native skill turn, busy->idle, turn-end, interrupt, exit, and exact-session resume\n' "$HERMES_VERSION"
