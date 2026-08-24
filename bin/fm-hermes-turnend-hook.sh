@@ -142,6 +142,19 @@ session_matches() {
   current=$(cat "$session_file" 2>/dev/null) || return 1
   [ "$current" = "$session_id" ]
 }
+# A start acknowledgement is compared against a pre-send snapshot by content
+# (bin/fm-send.sh), so two consecutive turns of the same task MUST NOT be able
+# to produce identical bytes. Session id and event are stable by construction
+# for a resumed task and the pid is reusable, so every write carries a fresh
+# 128-bit nonce that no other write can repeat.
+start_nonce() {
+  local n
+  n=$(LC_ALL=C od -An -v -tx1 -N 16 /dev/urandom 2>/dev/null | tr -d ' \\n')
+  case "$n" in
+    ????????????????????????????????) printf '%s' "$n"; return 0 ;;
+  esac
+  printf '%s.%s.%s.%s' "$$" "${SECONDS:-0}" "${RANDOM:-0}" "${RANDOM:-0}"
+}
 capture_session() {
   if [ -e "$session_file" ] || [ -L "$session_file" ]; then
     session_matches
@@ -166,7 +179,7 @@ case "$event" in
       && "$root/bin/fm-busy-event.sh" apply "$state" "$id" busy --gen "$gen" --source hermes-hook --event "$event" >/dev/null 2>&1; then
       started_tmp=$(mktemp "$state/.${id}.hermes-started.XXXXXXXX" 2>/dev/null) || exit 0
       chmod 0600 "$started_tmp" 2>/dev/null || true
-      if ! printf '%s:%s:%s\n' "$session_id" "$event" "$$" > "$started_tmp" 2>/dev/null \
+      if ! printf '%s:%s:%s:%s\\n' "$session_id" "$event" "$$" "$(start_nonce)" > "$started_tmp" 2>/dev/null \
         || ! mv -f "$started_tmp" "$started" 2>/dev/null; then
         rm -f -- "$started_tmp" 2>/dev/null || true
       fi

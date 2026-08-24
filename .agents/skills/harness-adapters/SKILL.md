@@ -491,6 +491,7 @@ For this one-process-per-turn adapter, Hermes' `on_session_end` callback at the 
 That shell boundary is available on tmux and Herdr; Hermes spawns on other backends are refused before endpoint creation.
 Hermes has no safe mid-turn text-steer channel in this mode; a busy send is refused instead of typing into the running process, and the firstmate may interrupt with `C-c` before resuming.
 After submitting the resume shell command, `fm-send` requires a newer `hermes-started` acknowledgement before it closes any `--resolve-key` decision.
+That comparison is by content, so each acknowledgement carries a fresh 128-bit nonce alongside its session id, event, and pid: two turns of the same task can never write identical bytes, and hook-process pid reuse cannot make a running turn look like no turn at all.
 The resume acknowledgement wait inherits the launch acknowledgement poll count and interval unless a send-specific override is set, so transcript loading never receives a smaller default budget than a fresh launch.
 If delivery landed but the start hook did not acknowledge it, the send fails as delivered-no-turn, records a supervised recovery wake, and warns not to resend; failure to persist either recovery trigger returns the distinct delivered-no-turn-persistence-failed result.
 

@@ -462,6 +462,49 @@ test_hermes_session_binding_and_busy_ack_order() {
   pass "Hermes binds one session and acknowledges only after busy state"
 }
 
+# fm-send decides a resumed turn actually started by content-comparing
+# state/<id>.hermes-started against a snapshot taken before the resume, and a
+# false "equal" becomes a non-retryable delivered-no-turn verdict. Session id
+# and event are stable by construction for a resumed task and a pid is
+# reusable, so this pins that consecutive acknowledgements differ on something
+# other than the pid.
+test_hermes_start_ack_is_unique_per_turn() {
+  local rec stable started first second first_nopid second_nopid n
+  TEST_ID=hermes-start-ack-x16
+  rec=$(make_case start-ack "$TEST_ID")
+  read_case "$rec"
+  fixture_env "$SPAWN" "$TEST_ID" "$PROJECT_DIR" --harness hermes \
+    --model gpt-5.6-sol --effort high --mode no-mistakes --yolo off >/dev/null \
+    || fail "Hermes start-acknowledgement fixture spawn failed"
+  stable=$(cat "$HOME_DIR/state/$TEST_ID.hermes-session")
+  started="$HOME_DIR/state/$TEST_ID.hermes-started"
+
+  fixture_hook pre_llm_call "$stable"
+  first=$(cat "$started")
+  fixture_hook pre_llm_call "$stable"
+  second=$(cat "$started")
+
+  [ "${first%%:*}" = "$stable" ] && [ "${second%%:*}" = "$stable" ] \
+    || fail "a start acknowledgement lost its task-bound session id"
+  [ "$first" != "$second" ] \
+    || fail "two consecutive start acknowledgements were byte-identical: $first"
+
+  first_nopid=$(printf '%s\n' "$first" | cut -d: -f1,2,4-)
+  second_nopid=$(printf '%s\n' "$second" | cut -d: -f1,2,4-)
+  [ "$first_nopid" != "$second_nopid" ] \
+    || fail "start acknowledgements differ only by pid, so pid reuse would look like no new turn: $first_nopid"
+
+  # Every acknowledgement in a burst must be distinct, not merely adjacent ones.
+  : > "$CASE_DIR/acks.log"
+  for n in 1 2 3 4 5 6 7 8; do
+    fixture_hook pre_llm_call "$stable"
+    cut -d: -f1,2,4- < "$started" >> "$CASE_DIR/acks.log"
+  done
+  [ "$(sort -u "$CASE_DIR/acks.log" | wc -l | tr -d '[:space:]')" = 8 ] \
+    || fail "a burst of start acknowledgements repeated a pid-independent value"
+  pass "each Hermes start acknowledgement is unique independently of the hook pid"
+}
+
 test_hermes_hook_waits_through_busy_lock_contention() {
   local rec stable hook_pid busy
   TEST_ID=hermes-hook-contention-x13
@@ -799,6 +842,7 @@ test_workers_and_scouts_preserve_raw_launch_commands
 test_hermes_resume_requires_idle_shell
 test_hermes_resume_clears_pending_shell_input
 test_hermes_session_binding_and_busy_ack_order
+test_hermes_start_ack_is_unique_per_turn
 test_hermes_hook_waits_through_busy_lock_contention
 test_hermes_delivered_no_turn_persistence_failure_is_distinct
 test_hermes_resume_inherits_launch_ack_budget
