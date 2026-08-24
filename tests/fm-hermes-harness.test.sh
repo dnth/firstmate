@@ -335,9 +335,22 @@ test_hermes_secondmate_is_refused() {
   rc=0
   out=$(fixture_env "$SPAWN" "$TEST_ID" "$HOME_DIR/not-a-secondmate" --secondmate --harness hermes 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "Hermes was accepted as a secondmate harness"
-  assert_contains "$out" "hermes" "Hermes secondmate refusal omitted the harness identity"
+  assert_contains "$out" "harness=hermes is verified for crewmates and scouts only" \
+    "an explicit Hermes secondmate did not report the crew/scout-only reason"
+  assert_not_contains "$out" "unknown secondmate harness" \
+    "a verified crew-only harness was reported as unknown"
   assert_not_contains "$(cat "$CASE_DIR/tmux.log")" "new-window" "Hermes secondmate refusal created an endpoint"
-  pass "Hermes remains crewmate/scout-only"
+
+  printf 'hermes\n' > "$HOME_DIR/config/secondmate-harness"
+  rc=0
+  out=$(fixture_env "$SPAWN" "$TEST_ID" "$HOME_DIR/not-a-secondmate" --secondmate 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "config/secondmate-harness: hermes was accepted"
+  assert_contains "$out" "harness=hermes is verified for crewmates and scouts only" \
+    "a configured Hermes secondmate did not report the crew/scout-only reason"
+  assert_not_contains "$out" "no verified secondmate launch template" \
+    "a configured crew-only harness fell through to the generic template diagnostic"
+  rm -f "$HOME_DIR/config/secondmate-harness"
+  pass "Hermes remains crewmate/scout-only with an accurate diagnostic"
 }
 
 test_secondmates_refuse_every_raw_launch_command() {
@@ -694,6 +707,90 @@ SH
   pass "an idle Hermes herdr endpoint with a bound session classifies alive"
 }
 
+# The Herdr presentation-journal reclaim guard itself, driven directly through
+# bin/fm-spawn-herdr-reclaim-lib.sh. This is the code that decides whether a
+# relaunch under an existing task id may reclaim the recorded pane. Before the
+# routing fix it read the pane classifier without the task metadata, so an idle
+# Hermes crewmate looked agent-free and the guard allowed the reclaim that
+# deletes the session sidecar; with the metadata routed through
+# fm_backend_agent_state it refuses instead. The unreadable-metadata case pins
+# the fail-closed direction the same routing introduced.
+test_herdr_reclaim_guard_preserves_hermes_session() {
+  local case_dir state fakebin meta out rc
+  case_dir="$TMP_ROOT/herdr-reclaim-guard"
+  state="$case_dir/state"
+  fakebin="$case_dir/bin"
+  mkdir -p "$state" "$fakebin"
+  ln -s "$JQ_BIN" "$fakebin/jq"
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$1 ${2:-}" in
+  'status --json') printf '{"server":{"running":true},"client":{"protocol":14}}\n' ;;
+  'pane get') printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "$3" ;;
+  'agent get') printf '{"error":{"code":"agent_not_found"}}\n' ;;
+  *) printf '{"error":{"code":"unsupported"}}\n' ;;
+esac
+SH
+  chmod +x "$fakebin/herdr"
+
+  meta="$state/reclaim-hermes.meta"
+  {
+    printf 'harness=hermes\n'
+    printf 'backend=herdr\n'
+    printf 'window=fmlab:pane-1\n'
+    printf 'herdr_session=fmlab\n'
+    printf 'herdr_workspace_id=ws-1\n'
+    printf 'herdr_tab_id=tab-1\n'
+    printf 'herdr_pane_id=pane-1\n'
+    printf 'hermes_session_file=%s\n' "$state/reclaim-hermes.hermes-session"
+  } > "$meta"
+  printf 'hermes-session-reclaim\n' > "$state/reclaim-hermes.hermes-session"
+
+  # shellcheck disable=SC2016 # Positional parameters expand inside the guard shell.
+  rc=0
+  out=$(PATH="$fakebin:$BASE_PATH" bash -c '
+    set -u
+    ID=reclaim-hermes
+    . "$1/bin/fm-backend.sh"
+    . "$1/bin/fm-spawn-herdr-reclaim-lib.sh"
+    herdr_projection_existing_meta_allows_flat "$2"
+  ' _ "$ROOT" "$meta" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "the reclaim guard allowed a relaunch over an idle Hermes session: $out"
+  assert_contains "$out" "existing herdr endpoint for reclaim-hermes is live" \
+    "the reclaim guard did not classify the bound Hermes session as live"
+  assert_present "$state/reclaim-hermes.hermes-session" \
+    "the refused reclaim discarded the resumable session"
+
+  rm -f "$state/reclaim-hermes.hermes-session"
+  rc=0
+  out=$(PATH="$fakebin:$BASE_PATH" bash -c '
+    set -u
+    ID=reclaim-hermes
+    . "$1/bin/fm-backend.sh"
+    . "$1/bin/fm-spawn-herdr-reclaim-lib.sh"
+    herdr_projection_existing_meta_allows_flat "$2"
+  ' _ "$ROOT" "$meta" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "a Hermes endpoint with no bound session must still be reclaimable: $out"
+
+  printf 'harness=hermes\n' >> "$meta"
+  rc=0
+  out=$(PATH="$fakebin:$BASE_PATH" bash -c '
+    set -u
+    ID=reclaim-hermes
+    . "$1/bin/fm-backend.sh"
+    . "$1/bin/fm-spawn-herdr-reclaim-lib.sh"
+    herdr_projection_existing_meta_allows_flat "$2"
+  ' _ "$ROOT" "$meta" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "an ambiguous harness record must refuse the reclaim: $out"
+  assert_contains "$out" "existing herdr endpoint for reclaim-hermes is unknown" \
+    "an unreadable task record did not fail closed"
+  pass "the herdr reclaim guard preserves a bound Hermes session and fails closed"
+}
+
 test_hermes_hook_install_is_surgical_idempotent_and_removable
 test_hermes_spawn_resume_skill_state_and_teardown
 test_hermes_secondmate_is_refused
@@ -712,3 +809,4 @@ test_hermes_concurrent_sends_serialize_through_acknowledgement
 test_hermes_static_crew_resolution
 test_hermes_crew_only_is_filtered_from_secondmate_fallback
 test_hermes_herdr_idle_session_classifies_alive
+test_herdr_reclaim_guard_preserves_hermes_session

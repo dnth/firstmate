@@ -169,6 +169,7 @@ The same run proved `on_session_start` and `pre_llm_call` publish the initial se
 The resumed quiet-chat process retained conversation context and the same session id, while only `pre_llm_call` supplied its start acknowledgement; `on_session_start` correctly remained a new-session-only event.
 The third isolated turn proved `--skills <skill>` loads and applies a profile-visible skill in the same quiet headless mode.
 The fourth run deleted `state/<id>.hermes-session`, `state/<id>.hermes-started`, and `state/<id>.turn-ended` first and then ran the exact production launch spelling with no `--resume`, proving `on_session_start` publishes a new resumable session and `pre_llm_call` publishes the start acknowledgement that `fm-spawn` hard-gates every Hermes spawn on.
+The `tirith security scanner` line in the resume run's stdout is Hermes' own output, not the probe's: v0.20.0 prints it on stdout when it restores a session, so it appears on the `--resume` run and on none of the others. Two independent runs of the probe reproduced this transcript byte for byte.
 The adapter therefore uses `chat -Q --query` for production launch and resume because Hermes v0.20.0's top-level `-z` dispatcher does not thread the resume, session-id, reasoning, or skill axes required by Firstmate.
 
 ### OMP lifecycle

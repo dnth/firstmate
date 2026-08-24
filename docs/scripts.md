@@ -54,6 +54,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-omp-auth-broker-readonly-proxy.mjs` | Credential-read-only HTTP boundary between RunPod OMP clients and the canonical workstation broker |
 | `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates on the resolved harness and runtime backend |
 | `fm-omp-capabilities.sh` | Verify the selected OMP executable's required lifecycle and exact process-ownership surface before a launch |
+| `fm-spawn-herdr-reclaim-lib.sh` | Reclaim authority for a task whose herdr presentation journal is already published |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
 | `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab and cmux workspace titles |
 | `fm-composer-lib.sh`     | Single fleet-wide owner of composer-content classification for all backends          |

@@ -255,6 +255,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-omp-process-lib.sh"
 # shellcheck source=bin/fm-pool-lib.sh
 . "$SCRIPT_DIR/fm-pool-lib.sh"
+# shellcheck source=bin/fm-spawn-herdr-reclaim-lib.sh
+. "$SCRIPT_DIR/fm-spawn-herdr-reclaim-lib.sh"
 
 # shellcheck source=bin/fm-primary-watch-version-lib.sh
 . "$SCRIPT_DIR/fm-primary-watch-version-lib.sh"
@@ -556,6 +558,12 @@ spawn_remote_secondmate() {
   fi
   case "$harness" in
     omp|claude|codex|opencode|pi|pi-signed|grok|kimi) ;;
+    hermes)
+      fm_lock_release "$registry_lock" || true
+      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      echo "error: harness=hermes is verified for crewmates and scouts only; secondmate support is not verified" >&2
+      return 1
+      ;;
     *)
       fm_lock_release "$registry_lock" || true
       fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -1238,6 +1246,19 @@ launch_template() {
   esac
 }
 
+# Harness identities verified for crewmates and scouts only. A secondmate can
+# never launch one, so every route that resolves a secondmate harness refuses
+# here - before launch template selection - and reports the real reason instead
+# of the generic "unknown harness" / "no verified launch template" fallback.
+refuse_crew_only_secondmate() {  # <harness>
+  case "$1" in
+    hermes)
+      echo "error: harness=hermes is verified for crewmates and scouts only; secondmate support is not verified" >&2
+      exit 1
+      ;;
+  esac
+}
+
 RAW_LAUNCH=0
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
@@ -1310,6 +1331,7 @@ case "$ARG3" in
     ;;
   *)
     HARNESS=$ARG3
+    [ "$KIND" != secondmate ] || refuse_crew_only_secondmate "$HARNESS"
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || {
       if [ "$KIND" = secondmate ]; then
         echo "error: unknown secondmate harness '$HARNESS'; secondmates require a verified harness adapter" >&2
@@ -1375,6 +1397,7 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
           ;;
       esac
     fi
+    refuse_crew_only_secondmate "$HARNESS"
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || {
       echo "error: no verified secondmate launch template for harness '$HARNESS' (from $harness_src or detection)" >&2
       exit 1
@@ -1382,10 +1405,6 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
   fi
 fi
 
-if [ "$HARNESS" = hermes ] && [ "$KIND" = secondmate ]; then
-  echo "error: harness=hermes is verified for crewmates and scouts only; secondmate support is not verified" >&2
-  exit 1
-fi
 if [ "$HARNESS" = hermes ] && [ "$RAW_LAUNCH" -eq 0 ]; then
   if [ -z "$MODEL" ] || [ "$MODEL" = default ]; then
     MODEL=gpt-5.6-sol
@@ -2550,90 +2569,6 @@ freshen_spawn_worktree_base() {  # <worktree>
     echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current '$target' ('$expected'); refusing to launch" >&2
     return 1
   fi
-}
-
-herdr_projection_meta_field_exact() {  # <meta> <key>
-  local meta=$1 key=$2 count
-  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
-  count=$(grep -c "^${key}=" "$meta" 2>/dev/null || true)
-  [ "$count" = 1 ] || return 1
-  grep "^${key}=" "$meta" 2>/dev/null | cut -d= -f2-
-}
-
-# A stale presentation journal never grants launch authority.
-# Under the session lock, authoritative metadata must identify one positively
-# dead or agent-free endpoint before token inspection may allow flat fallback.
-# Exact Herdr fields are retained for the narrower version 2 reclaim path.
-# Both liveness reads go through fm_backend_agent_state with the task metadata,
-# so a harness whose liveness is session-bound rather than process-bound (hermes)
-# is classified alive here exactly as it is everywhere else, and its resumable
-# session is preserved instead of being reclaimed and destroyed.
-herdr_projection_existing_meta_allows_flat() {  # <meta>
-  local meta=$1 old_backend old_target old_session old_pane old_state target_session target_pane
-  HERDR_RECOVERY_BACKEND=""
-  HERDR_RECOVERY_WORKSPACE_ID=""
-  HERDR_RECOVERY_TAB_ID=""
-  HERDR_RECOVERY_PANE_ID=""
-  old_backend=$(fm_backend_of_meta "$meta")
-  old_target=$(fm_backend_target_of_meta "$meta")
-  [ -n "$old_target" ] || {
-    echo "error: existing metadata for $ID has no endpoint; refusing duplicate launch while its herdr presentation journal is quarantined" >&2
-    return 1
-  }
-  HERDR_RECOVERY_BACKEND=$old_backend
-  if [ "$old_backend" = herdr ]; then
-    fm_backend_herdr_parse_target "$old_target" || {
-      echo "error: existing herdr endpoint for $ID is malformed; refusing duplicate launch" >&2
-      return 1
-    }
-    target_session=$FM_BACKEND_HERDR_SESSION
-    target_pane=$FM_BACKEND_HERDR_PANE
-    old_session=$(herdr_projection_meta_field_exact "$meta" herdr_session) || {
-      echo "error: existing herdr metadata for $ID has an ambiguous session; refusing duplicate launch" >&2
-      return 1
-    }
-    HERDR_RECOVERY_WORKSPACE_ID=$(herdr_projection_meta_field_exact "$meta" herdr_workspace_id) || {
-      echo "error: existing herdr metadata for $ID has an ambiguous workspace; refusing duplicate launch" >&2
-      return 1
-    }
-    HERDR_RECOVERY_TAB_ID=$(herdr_projection_meta_field_exact "$meta" herdr_tab_id) || {
-      echo "error: existing herdr metadata for $ID has an ambiguous tab; refusing duplicate launch" >&2
-      return 1
-    }
-    old_pane=$(herdr_projection_meta_field_exact "$meta" herdr_pane_id) || {
-      echo "error: existing herdr metadata for $ID has an ambiguous pane; refusing duplicate launch" >&2
-      return 1
-    }
-    [ "$target_session" = "$old_session" ] && [ "$target_pane" = "$old_pane" ] || {
-      echo "error: existing herdr metadata for $ID has inconsistent endpoint identities; refusing duplicate launch" >&2
-      return 1
-    }
-    HERDR_RECOVERY_PANE_ID=$old_pane
-    fm_backend_herdr_server_ensure "$old_session" || {
-      echo "error: existing herdr endpoint for $ID could not be inspected; refusing duplicate launch" >&2
-      return 1
-    }
-    old_state=$(fm_backend_agent_state herdr "$old_target" "$meta")
-    case "$old_state" in
-      dead|missing) return 0 ;;
-      alive)
-        echo "error: existing herdr endpoint for $ID is live; refusing duplicate launch" >&2
-        return 1
-        ;;
-      *)
-        echo "error: existing herdr endpoint for $ID is unknown; refusing duplicate launch" >&2
-        return 1
-        ;;
-    esac
-  fi
-  old_state=$(fm_backend_agent_alive "$old_backend" "$old_target" "$meta")
-  case "$old_state" in
-    dead) return 0 ;;
-    alive|unknown)
-      echo "error: existing $old_backend endpoint for $ID is $old_state; refusing duplicate launch" >&2
-      return 1
-      ;;
-  esac
 }
 
 W="fm-$ID"
