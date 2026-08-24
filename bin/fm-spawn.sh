@@ -1370,14 +1370,31 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
   fi
 fi
 
+RAW_HERMES_LAUNCH=0
+if [ "$RAW_LAUNCH" -eq 1 ]; then
+  case "$LAUNCH" in *hermes*) RAW_HERMES_LAUNCH=1 ;; esac
+fi
 if [ "$HARNESS" = hermes ] && [ "$KIND" = secondmate ]; then
   echo "error: harness=hermes is verified for crewmates and scouts only; secondmate support is not verified" >&2
+  exit 1
+fi
+if [ "$RAW_HERMES_LAUNCH" -eq 1 ] && [ "$KIND" = secondmate ]; then
+  echo "error: raw Hermes launch commands are refused for secondmates, including wrapped commands" >&2
   exit 1
 fi
 if [ "$HARNESS" = hermes ] && [ "$RAW_LAUNCH" -eq 0 ]; then
   if [ -z "$MODEL" ] || [ "$MODEL" = default ]; then
     MODEL=gpt-5.6-sol
   fi
+fi
+if [ "$HARNESS" = hermes ] || [ "$RAW_HERMES_LAUNCH" -eq 1 ]; then
+  case "$BACKEND" in
+    tmux|herdr) ;;
+    *)
+      echo "error: harness=hermes supports resumable spawns only on tmux and herdr; backend=$BACKEND is refused" >&2
+      exit 1
+      ;;
+  esac
 fi
 
 if [ "$KIND" = secondmate ] && [ "$PREWALK_INTO_SET" -eq 0 ]; then

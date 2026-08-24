@@ -691,14 +691,21 @@ fm_send_wait_for_hermes_turn_start() {  # <reference>
 }
 
 fm_send_record_hermes_delivered_no_turn() {
-  local status_file="$STATE/$TARGET_TASK_ID.status" line
+  local status_file="$STATE/$TARGET_TASK_ID.status" line wake_key failed=0
+  wake_key="$TARGET_TASK_ID.status"
   line='failed: delivered-no-turn: Hermes resume command was submitted but pre_llm_call did not acknowledge it; do not resend; inspect the existing endpoint and session'
   if [ -L "$status_file" ] || { [ -e "$status_file" ] && [ ! -f "$status_file" ]; }; then
     echo "error: Hermes delivered-no-turn refuses a non-ordinary recovery marker at $status_file" >&2
-    return 1
+    failed=1
+  elif ! printf '%s\n' "$line" >> "$status_file"; then
+    echo "error: Hermes delivered-no-turn could not append its recovery marker to $status_file" >&2
+    failed=1
   fi
-  printf '%s\n' "$line" >> "$status_file" || return 1
-  fm_wake_append signal "$TARGET_TASK_ID.status" "delivered-no-turn: $TARGET_TASK_ID" 20
+  if ! fm_wake_append signal "$wake_key" "delivered-no-turn: $TARGET_TASK_ID" 20; then
+    echo "error: Hermes delivered-no-turn could not enqueue its watcher wake for $TARGET_TASK_ID" >&2
+    failed=1
+  fi
+  [ "$failed" -eq 0 ]
 }
 
 
@@ -808,7 +815,10 @@ else
     if ! fm_send_wait_for_hermes_turn_start "$TARGET_HERMES_START_REFERENCE"; then
       rm -f -- "$TARGET_HERMES_START_REFERENCE"
       TARGET_HERMES_START_REFERENCE=
-      fm_send_record_hermes_delivered_no_turn || true
+      if ! fm_send_record_hermes_delivered_no_turn; then
+        echo "error: delivered-no-turn-persistence-failed: Hermes resume was already submitted to $T, but one or more required recovery triggers could not be persisted; do not resend; start supervised recovery manually" >&2
+        exit 5
+      fi
       echo "error: delivered-no-turn: Hermes resume command was submitted to $T but pre_llm_call did not acknowledge it; do not resend" >&2
       exit 4
     fi

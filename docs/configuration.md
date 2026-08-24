@@ -223,9 +223,9 @@ The full cmux home label also includes a short hash of the resolved `FM_ROOT` pa
 
 claude, codex, opencode, pi, pi-signed, omp, grok, and kimi are empirically verified harness identities for crewmate and secondmate launches on their documented backend combinations.
 Hermes is verified only for crewmate and scout launches and is refused for primary sessions and secondmates, including a raw launch whose resolved executable is Hermes.
-Hermes resume delivery requires structural idle-shell proof, which is available on tmux and Herdr; other backends fail closed before command submission.
+Hermes resume delivery requires a structurally idle shell with cleared input, which is available on tmux and Herdr; Hermes spawns on other backends are refused before endpoint creation.
 Hermes profiles accept the shared `low`, `medium`, `high`, `xhigh`, and `max` effort vocabulary and forward it as native reasoning effort.
-Each Hermes crew spawn surgically registers guarded profile-global lifecycle hooks: session start captures the task-bound session, pre-LLM acknowledges the turn and records busy, and session end records idle.
+Each Hermes crew spawn surgically registers guarded profile-global lifecycle hooks: session start binds the task session once, matching pre-LLM records busy before acknowledging the turn, and matching session end records idle.
 OMP is verified as a primary, crewmate, scout, and secondmate runtime only on tmux and Herdr; Zellij, Orca, and cmux reject OMP before endpoint creation and carry no live OMP claim.
 [README requirements](../README.md#requirements) owns the complete set supported for the primary session.
 New harnesses get verified through a supervised trial task before joining the set.

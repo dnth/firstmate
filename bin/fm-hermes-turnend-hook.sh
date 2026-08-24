@@ -136,33 +136,43 @@ gen=$(jq -er '.gen | strings | select(test("^[A-Za-z0-9._-]+$"))' "$registry" 2>
 [ "$session_file" = "$state/$id.hermes-session" ] || exit 0
 [ "$started" = "$state/$id.hermes-started" ] || exit 0
 [ -x "$root/bin/fm-busy-event.sh" ] || exit 0
-write_session() {
+session_matches() {
+  [ -f "$session_file" ] && [ ! -L "$session_file" ] || return 1
+  current=$(cat "$session_file" 2>/dev/null) || return 1
+  [ "$current" = "$session_id" ]
+}
+capture_session() {
+  if [ -e "$session_file" ] || [ -L "$session_file" ]; then
+    session_matches
+    return
+  fi
   tmp=$(mktemp "$state/.${id}.hermes-session.XXXXXXXX" 2>/dev/null) || return 1
   chmod 0600 "$tmp" 2>/dev/null || true
-  if printf '%s\n' "$session_id" > "$tmp" 2>/dev/null && mv -f "$tmp" "$session_file" 2>/dev/null; then
+  if printf '%s\n' "$session_id" > "$tmp" 2>/dev/null \
+    && ln "$tmp" "$session_file" 2>/dev/null; then
+    rm -f -- "$tmp" 2>/dev/null || true
     return 0
   fi
   rm -f -- "$tmp" 2>/dev/null || true
-  return 1
+  session_matches
 }
 case "$event" in
   on_session_start)
-    write_session || true
+    capture_session || true
     ;;
   pre_llm_call)
-    if write_session; then
+    if session_matches \
+      && "$root/bin/fm-busy-event.sh" apply "$state" "$id" busy --gen "$gen" --source hermes-hook --event "$event" >/dev/null 2>&1; then
       started_tmp=$(mktemp "$state/.${id}.hermes-started.XXXXXXXX" 2>/dev/null) || exit 0
       chmod 0600 "$started_tmp" 2>/dev/null || true
       if ! printf '%s:%s:%s\n' "$session_id" "$event" "$$" > "$started_tmp" 2>/dev/null \
         || ! mv -f "$started_tmp" "$started" 2>/dev/null; then
         rm -f -- "$started_tmp" 2>/dev/null || true
       fi
-      "$root/bin/fm-busy-event.sh" apply "$state" "$id" busy --gen "$gen" --source hermes-hook --event "$event" >/dev/null 2>&1 || true
     fi
     ;;
   on_session_end)
-    current=$(cat "$session_file" 2>/dev/null) || exit 0
-    [ "$current" = "$session_id" ] || exit 0
+    session_matches || exit 0
     touch -- "$turnend" 2>/dev/null || true
     "$root/bin/fm-busy-event.sh" apply "$state" "$id" idle --gen "$gen" --source hermes-hook --event session-end >/dev/null 2>&1 || true
     ;;

@@ -479,15 +479,16 @@ Hermes documents that safe mode disables user config, rules and AGENTS injection
 `bin/fm-hermes-turnend-hook.sh` owns the surgical `config.yaml` integration.
 It installs one guarded command each for `on_session_start`, `pre_llm_call`, and `on_session_end`, plus a private token registry under the active Hermes home.
 Each Hermes crew worktree receives a gitignored `.fm-hermes-turnend` pointer; the global hook acts only when that token resolves to the exact task state paths and busy-state generation.
-`on_session_start` captures a newly created session id, while `pre_llm_call` refreshes the same task-bound id, touches `state/<id>.hermes-started`, and marks every initial or resumed turn busy.
+`on_session_start` binds the newly created task session only while the sidecar is absent.
+Later lifecycle events must match that stable id, and `pre_llm_call` records busy successfully before touching `state/<id>.hermes-started` for an initial or resumed turn.
 The end event requires the same session id, touches `state/<id>.turn-ended`, and marks the turn idle.
 For this one-process-per-turn adapter, Hermes' `on_session_end` callback at the end of each `run_conversation` call is exactly the supervised turn boundary.
 
-`fm-send` refuses a resume command unless the semantic state is exactly idle, the endpoint has a structural idle-shell proof, the task-bound session and profile metadata validate, and the recorded executable is still available.
-That shell proof is available on tmux and Herdr; Hermes resume delivery on other backends fails closed before command submission.
+`fm-send` refuses a resume command unless the semantic state is exactly idle, the endpoint has a structural idle-shell proof with shell input cleared, the task-bound session and profile metadata validate, and the recorded executable is still available.
+That shell boundary is available on tmux and Herdr; Hermes spawns on other backends are refused before endpoint creation.
 Hermes has no safe mid-turn text-steer channel in this mode; a busy send is refused instead of typing into the running process, and the firstmate may interrupt with `C-c` before resuming.
 After submitting the resume shell command, `fm-send` requires a newer `hermes-started` acknowledgement before it closes any `--resolve-key` decision.
-If delivery landed but the start hook did not acknowledge it, the send fails as delivered-no-turn, records a supervised recovery wake, and warns not to resend.
+If delivery landed but the start hook did not acknowledge it, the send fails as delivered-no-turn, records a supervised recovery wake, and warns not to resend; failure to persist either recovery trigger returns the distinct delivered-no-turn-persistence-failed result.
 
 An idle Hermes pane contains a shell rather than a persistent TUI process.
 `fm_backend_agent_state` therefore treats the exact combination of a valid task-bound Hermes session file and a still-present recorded endpoint as the adapter's resumable alive state.

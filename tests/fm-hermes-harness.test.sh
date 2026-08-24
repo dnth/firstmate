@@ -48,9 +48,9 @@ SH
 set -u
 printf '%s\n' "$*" >> "$FM_FAKE_TMUX_CALL_LOG"
 fire_hook() {
-  local event=$1 hook="$HERMES_HOME/fm-turn-end.sh"
-  printf '{"hook_event_name":"%s","session_id":"hermes-session-test","cwd":"%s","task_id":"","turn_id":"turn-test"}\n' \
-    "$event" "$FM_FAKE_PANE_PATH" \
+  local event=$1 session_id=${2:-hermes-session-test} hook="$HERMES_HOME/fm-turn-end.sh"
+  printf '{"hook_event_name":"%s","session_id":"%s","cwd":"%s","task_id":"","turn_id":"turn-test"}\n' \
+    "$event" "$session_id" "$FM_FAKE_PANE_PATH" \
     | HERMES_HOME="$HERMES_HOME" bash "$hook"
 }
 submit_command() {
@@ -68,6 +68,7 @@ submit_command() {
               touch "$FM_FAKE_HERMES_BLOCK_DIR/second-entered"
             fi
           fi
+          [ "${FM_FAKE_HERMES_NO_PRE_LLM:-0}" != 1 ] || return 0
           ;;
         *)
           fire_hook on_session_start
@@ -92,6 +93,9 @@ case "${1:-}" in
   kill-window) rm -f "$FM_FAKE_WINDOW_STATE"; exit 0 ;;
   has-session|new-session|set-window-option) exit 0 ;;
   send-keys)
+    case " $* " in
+      *' C-c '*) : > "$FM_FAKE_PENDING_COMMAND"; exit 0 ;;
+    esac
     prev=
     literal=
     for arg in "$@"; do
@@ -168,6 +172,14 @@ fixture_env() {
     FM_HERMES_LAUNCH_ACK_INTERVAL=0 FM_SEND_HERMES_START_POLLS=4 \
     FM_SEND_HERMES_START_INTERVAL=0.01 FM_SEND_SETTLE=0 TMUX='fake,1,0' \
     PATH="$FAKEBIN_DIR:$BASE_PATH" "$@"
+}
+
+fixture_hook() {
+  local event=$1 session_id=$2
+  printf '{"hook_event_name":"%s","session_id":"%s","cwd":"%s","task_id":"","turn_id":"turn-test"}\n' \
+    "$event" "$session_id" "$WORKTREE_DIR" \
+    | env HOME="$HOME_DIR" HERMES_HOME="$HERMES_HOME_DIR" PATH="$FAKEBIN_DIR:$BASE_PATH" \
+      bash "$HERMES_HOME_DIR/fm-turn-end.sh"
 }
 
 test_hermes_hook_install_is_surgical_idempotent_and_removable() {
@@ -306,6 +318,20 @@ test_hermes_raw_secondmate_is_refused() {
   pass "Hermes raw launches remain crew and scout only"
 }
 
+test_wrapped_hermes_raw_secondmate_is_refused() {
+  local rec out rc
+  TEST_ID=hermes-wrapped-secondmate-x7
+  rec=$(make_case wrapped-secondmate "$TEST_ID")
+  read_case "$rec"
+  rc=0
+  out=$(fixture_env "$SPAWN" "$TEST_ID" "$HOME_DIR/not-a-secondmate" \
+    'env HERMES_HOME=/tmp/profile hermes --yolo' --secondmate 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "wrapped raw Hermes command was accepted for a secondmate"
+  assert_contains "$out" "including wrapped commands" "wrapped Hermes refusal omitted its boundary"
+  assert_not_contains "$(cat "$CASE_DIR/tmux.log")" "new-window" "wrapped Hermes refusal created an endpoint"
+  pass "wrapped Hermes raw commands are refused for secondmates"
+}
+
 test_hermes_resume_requires_idle_shell() {
   local rec out rc before after
   TEST_ID=hermes-shell-proof-x6
@@ -323,6 +349,95 @@ test_hermes_resume_requires_idle_shell() {
   after=$(wc -l < "$CASE_DIR/commands.log" | tr -d '[:space:]')
   [ "$after" = "$before" ] || fail "Hermes resume injected into the non-shell foreground process"
   pass "Hermes resume requires a proven idle shell"
+}
+
+test_hermes_resume_clears_pending_shell_input() {
+  local rec commands
+  TEST_ID=hermes-pending-shell-x8
+  rec=$(make_case pending-shell "$TEST_ID")
+  read_case "$rec"
+  fixture_env "$SPAWN" "$TEST_ID" "$PROJECT_DIR" --harness hermes \
+    --model gpt-5.6-sol --effort high --mode no-mistakes --yolo off >/dev/null \
+    || fail "Hermes pending-shell fixture spawn failed"
+  printf '%s' 'stale unsubmitted input' > "$CASE_DIR/pending"
+  fixture_env "$SEND" "$TEST_ID" 'Run only this resumed turn.' \
+    || fail "Hermes resume did not establish an empty shell boundary"
+  commands=$(cat "$CASE_DIR/commands.log")
+  assert_contains "$commands" "Run only this resumed turn." "Hermes resume lost the intended command"
+  assert_not_contains "$commands" "stale unsubmitted input" "Hermes resume executed stale shell input"
+  pass "Hermes resume clears pending shell input before submission"
+}
+
+test_hermes_session_binding_and_busy_ack_order() {
+  local rec stable gen busy
+  TEST_ID=hermes-session-binding-x9
+  rec=$(make_case session-binding "$TEST_ID")
+  read_case "$rec"
+  fixture_env "$SPAWN" "$TEST_ID" "$PROJECT_DIR" --harness hermes \
+    --model gpt-5.6-sol --effort high --mode no-mistakes --yolo off >/dev/null \
+    || fail "Hermes session-binding fixture spawn failed"
+  stable=$(cat "$HOME_DIR/state/$TEST_ID.hermes-session")
+  rm -f "$HOME_DIR/state/$TEST_ID.hermes-started" "$HOME_DIR/state/$TEST_ID.turn-ended"
+  fixture_hook on_session_start nested-session
+  fixture_hook pre_llm_call nested-session
+  fixture_hook on_session_end nested-session
+  [ "$(cat "$HOME_DIR/state/$TEST_ID.hermes-session")" = "$stable" ] \
+    || fail "nested Hermes session replaced the task-bound session"
+  assert_absent "$HOME_DIR/state/$TEST_ID.hermes-started" "nested Hermes session acknowledged a task turn"
+  assert_absent "$HOME_DIR/state/$TEST_ID.turn-ended" "nested Hermes session ended the task turn"
+
+  gen=$(jq -r '.gen' "$HERMES_HOME_DIR/fm-turn-end.d/$(cat "$HOME_DIR/state/$TEST_ID.hermes-turnend-token")")
+  printf '%s\n' foreign-generation > "$HOME_DIR/state/$TEST_ID.busy-gen"
+  fixture_hook pre_llm_call "$stable"
+  assert_absent "$HOME_DIR/state/$TEST_ID.hermes-started" "Hermes acknowledged before busy state succeeded"
+  printf '%s\n' "$gen" > "$HOME_DIR/state/$TEST_ID.busy-gen"
+  fixture_hook pre_llm_call "$stable"
+  assert_present "$HOME_DIR/state/$TEST_ID.hermes-started" "matching Hermes session did not acknowledge after busy state"
+  busy=$(fixture_env bash -c '. "$1/bin/fm-busy-lib.sh"; fm_busy_classify tmux unused hermes "$2" "$3"' _ "$ROOT" "$TEST_ID" "$HOME_DIR/state")
+  [ "${busy%% *}" = busy ] || fail "Hermes start acknowledgement did not imply semantic busy state"
+  fixture_hook on_session_end "$stable"
+  pass "Hermes binds one session and acknowledges only after busy state"
+}
+
+test_hermes_delivered_no_turn_persistence_failure_is_distinct() {
+  local rec out rc wake
+  TEST_ID=hermes-persistence-x10
+  rec=$(make_case persistence "$TEST_ID")
+  read_case "$rec"
+  fixture_env "$SPAWN" "$TEST_ID" "$PROJECT_DIR" --harness hermes \
+    --model gpt-5.6-sol --effort high --mode no-mistakes --yolo off >/dev/null \
+    || fail "Hermes persistence fixture spawn failed"
+  rm -f "$HOME_DIR/state/$TEST_ID.status"
+  : > "$CASE_DIR/status-target"
+  ln -s "$CASE_DIR/status-target" "$HOME_DIR/state/$TEST_ID.status"
+  rc=0
+  out=$(fixture_env env FM_FAKE_HERMES_NO_PRE_LLM=1 "$SEND" "$TEST_ID" \
+    'Acknowledge failure probe.' 2>&1) || rc=$?
+  expect_code 5 "$rc" "Hermes recovery persistence failure should be distinct"
+  assert_contains "$out" "delivered-no-turn-persistence-failed" "Hermes persistence failure lost its verdict"
+  assert_contains "$out" "do not resend" "Hermes persistence failure did not forbid redelivery"
+  wake=$(cat "$HOME_DIR/state/.wake-queue")
+  assert_contains "$wake" $'\tsignal\t'"$TEST_ID.status"$'\tdelivered-no-turn: '"$TEST_ID" \
+    "Hermes marker failure prevented the independent recovery wake"
+  pass "Hermes persistence failure is distinct after delivery"
+}
+
+test_hermes_refuses_nonresumable_backends() {
+  local backend rec out rc
+  for backend in zellij orca cmux; do
+    TEST_ID="hermes-backend-$backend-x11"
+    rec=$(make_case "backend-$backend" "$TEST_ID")
+    read_case "$rec"
+    rc=0
+    out=$(fixture_env "$SPAWN" "$TEST_ID" "$PROJECT_DIR" --harness hermes --backend "$backend" \
+      --model gpt-5.6-sol --effort high --mode no-mistakes --yolo off 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "Hermes spawn accepted nonresumable backend=$backend"
+    assert_contains "$out" "supports resumable spawns only on tmux and herdr" \
+      "Hermes backend=$backend refusal omitted its resumability boundary"
+    assert_not_contains "$(cat "$CASE_DIR/tmux.log")" "new-window" \
+      "Hermes backend=$backend refusal created an endpoint"
+  done
+  pass "Hermes refuses backends without resumable idle-shell proof"
 }
 
 test_hermes_help_states_kind_scope() {
@@ -413,7 +528,12 @@ test_hermes_hook_install_is_surgical_idempotent_and_removable
 test_hermes_spawn_resume_skill_state_and_teardown
 test_hermes_secondmate_is_refused
 test_hermes_raw_secondmate_is_refused
+test_wrapped_hermes_raw_secondmate_is_refused
 test_hermes_resume_requires_idle_shell
+test_hermes_resume_clears_pending_shell_input
+test_hermes_session_binding_and_busy_ack_order
+test_hermes_delivered_no_turn_persistence_failure_is_distinct
+test_hermes_refuses_nonresumable_backends
 test_hermes_help_states_kind_scope
 test_hermes_spawn_requires_pre_llm_acknowledgement
 test_hermes_concurrent_sends_serialize_through_acknowledgement
