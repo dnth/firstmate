@@ -154,7 +154,8 @@ command: HERMES_HOME="$PROFILE" hermes chat -Q --query "Print only the token I a
 output: exit=0 stdout=  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
 RESUME-CONTEXT-824 same_session=yes turn_end=touched started=touched
 command: HERMES_HOME="$PROFILE" hermes chat -Q --query "Apply the preloaded skill" --skills fm-proof --provider openai-codex --model gpt-5.6-sol --reasoning low --accept-hooks --yolo --pass-session-id
-output: exit=0 stdout=HERMES-SKILL-OK skill_preload=applied
+output: exit=0 stdout=  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+HERMES-SKILL-OK skill_preload=applied
 ok - Hermes Agent v0.20.0 (2026.8.3) isolated mechanics: -z exit, lifecycle hook, same-session quiet resume, and skill preload
 ```
 

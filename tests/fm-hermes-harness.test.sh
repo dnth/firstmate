@@ -340,46 +340,46 @@ test_hermes_secondmate_is_refused() {
   pass "Hermes remains crewmate/scout-only"
 }
 
-test_hermes_raw_secondmate_is_refused() {
-  local rec out rc
-  TEST_ID=hermes-raw-secondmate-x5
-  rec=$(make_case raw-secondmate "$TEST_ID")
-  read_case "$rec"
-  rc=0
-  out=$(fixture_env "$SPAWN" "$TEST_ID" "$HOME_DIR/not-a-secondmate" \
-    'hermes --yolo' --secondmate 2>&1) || rc=$?
-  [ "$rc" -ne 0 ] || fail "raw Hermes command was accepted for a secondmate"
-  assert_contains "$out" "crewmates and scouts only" "raw Hermes secondmate refusal omitted its scope"
-  assert_not_contains "$(cat "$CASE_DIR/tmux.log")" "new-window" "raw Hermes secondmate refusal created an endpoint"
-  pass "Hermes raw launches remain crew and scout only"
+test_secondmates_refuse_every_raw_launch_command() {
+  local raw rec out rc index=0
+  for raw in \
+    'hermes --yolo' \
+    'env HERMES_HOME=/tmp/profile hermes --yolo' \
+    "bash -lc 'hermes --yolo'" \
+    'omp --resume /notes/hermes-port.md'; do
+    index=$((index + 1))
+    TEST_ID="raw-secondmate-refusal-x$index"
+    rec=$(make_case "raw-secondmate-$index" "$TEST_ID")
+    read_case "$rec"
+    rc=0
+    out=$(fixture_env "$SPAWN" "$TEST_ID" "$HOME_DIR/not-a-secondmate" "$raw" --secondmate 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "secondmate accepted raw launch command: $raw"
+    assert_contains "$out" "raw launch commands are unavailable for secondmates" \
+      "secondmate raw-command refusal omitted its kind boundary"
+    assert_not_contains "$(cat "$CASE_DIR/tmux.log")" "new-window" \
+      "secondmate raw-command refusal created an endpoint"
+  done
+  pass "secondmates refuse every raw launch command"
 }
 
-test_wrapped_hermes_raw_secondmate_is_refused() {
-  local rec out rc
-  TEST_ID=hermes-wrapped-secondmate-x7
-  rec=$(make_case wrapped-secondmate "$TEST_ID")
-  read_case "$rec"
-  rc=0
-  out=$(fixture_env "$SPAWN" "$TEST_ID" "$HOME_DIR/not-a-secondmate" \
-    'env HERMES_HOME=/tmp/profile hermes --yolo' --secondmate 2>&1) || rc=$?
-  [ "$rc" -ne 0 ] || fail "wrapped raw Hermes command was accepted for a secondmate"
-  assert_contains "$out" "crewmates and scouts only" "wrapped Hermes refusal omitted its boundary"
-  assert_not_contains "$(cat "$CASE_DIR/tmux.log")" "new-window" "wrapped Hermes refusal created an endpoint"
-  pass "wrapped Hermes raw commands are refused for secondmates"
-}
-
-test_nonhermes_raw_launch_mentions_do_not_select_hermes() {
-  local rec out rc
-  TEST_ID=raw-nonhermes-mention-x12
-  rec=$(make_case raw-nonhermes-mention "$TEST_ID")
-  read_case "$rec"
-  rc=0
-  out=$(fixture_env "$SPAWN" "$TEST_ID" "$HOME_DIR/not-a-secondmate" \
-    'omp --resume /notes/hermes-port.md' --secondmate 2>&1) || rc=$?
-  [ "$rc" -ne 0 ] || fail "invalid non-Hermes raw secondmate fixture unexpectedly launched"
-  assert_not_contains "$out" "harness=hermes" "raw executable resolution misclassified a later Hermes mention"
-  assert_not_contains "$out" "raw Hermes launch" "raw executable resolution substring-matched an argument"
-  pass "raw executable resolution ignores later Hermes mentions"
+test_workers_and_scouts_preserve_raw_launch_commands() {
+  local kind rec out
+  for kind in ship scout; do
+    TEST_ID="raw-$kind-preserved-x14"
+    rec=$(make_case "raw-$kind-preserved" "$TEST_ID")
+    read_case "$rec"
+    if [ "$kind" = scout ]; then
+      out=$(fixture_env "$SPAWN" "$TEST_ID" "$PROJECT_DIR" 'custom-agent --flag' --scout 2>&1) \
+        || fail "raw scout launch was refused"
+    else
+      out=$(fixture_env "$SPAWN" "$TEST_ID" "$PROJECT_DIR" 'custom-agent --flag' \
+        --mode no-mistakes --yolo off 2>&1) || fail "raw worker launch was refused"
+    fi
+    assert_contains "$out" "spawned $TEST_ID harness=custom-agent" "raw $kind launch lost its executable identity"
+    assert_contains "$(cat "$CASE_DIR/commands.log")" "custom-agent --flag" "raw $kind command was not submitted"
+    fixture_env "$TEARDOWN" "$TEST_ID" --force >/dev/null 2>&1 || fail "raw $kind fixture teardown failed"
+  done
+  pass "workers and scouts preserve raw launch commands"
 }
 
 test_hermes_resume_requires_idle_shell() {
@@ -495,6 +495,26 @@ test_hermes_delivered_no_turn_persistence_failure_is_distinct() {
   pass "Hermes persistence failure is distinct after delivery"
 }
 
+test_hermes_resume_inherits_launch_ack_budget() {
+  local rec out rc elapsed
+  TEST_ID=hermes-resume-budget-x15
+  rec=$(make_case resume-budget "$TEST_ID")
+  read_case "$rec"
+  fixture_env "$SPAWN" "$TEST_ID" "$PROJECT_DIR" --harness hermes \
+    --model gpt-5.6-sol --effort high --mode no-mistakes --yolo off >/dev/null \
+    || fail "Hermes resume-budget fixture spawn failed"
+  SECONDS=0
+  rc=0
+  out=$(fixture_env env -u FM_SEND_HERMES_START_POLLS -u FM_SEND_HERMES_START_INTERVAL \
+    FM_HERMES_LAUNCH_ACK_POLLS=2 FM_HERMES_LAUNCH_ACK_INTERVAL=0.01 \
+    FM_FAKE_HERMES_NO_PRE_LLM=1 "$SEND" "$TEST_ID" 'Budget inheritance probe.' 2>&1) || rc=$?
+  elapsed=$SECONDS
+  expect_code 4 "$rc" "Hermes resume without acknowledgement should keep delivered-no-turn semantics"
+  [ "$elapsed" -lt 10 ] || fail "Hermes resume did not inherit the bounded launch acknowledgement budget"
+  assert_contains "$out" "delivered-no-turn" "Hermes inherited-budget failure lost its verdict"
+  pass "Hermes resume inherits launch acknowledgement timing"
+}
+
 test_hermes_refuses_nonresumable_backends() {
   local backend rec out rc
   for backend in zellij orca cmux; do
@@ -519,6 +539,8 @@ test_hermes_help_states_kind_scope() {
   assert_contains "$out" "Hermes overrides only a crewmate or scout spawn" \
     "fm-spawn help did not state Hermes kind scope"
   assert_contains "$out" "refused for secondmates" "fm-spawn help did not state the secondmate refusal"
+  assert_contains "$out" "Secondmates refuse every raw launch command" \
+    "fm-spawn help did not state the raw-command kind boundary"
   pass "fm-spawn help states Hermes kind scope"
 }
 
@@ -600,14 +622,14 @@ test_hermes_static_crew_resolution() {
 test_hermes_hook_install_is_surgical_idempotent_and_removable
 test_hermes_spawn_resume_skill_state_and_teardown
 test_hermes_secondmate_is_refused
-test_hermes_raw_secondmate_is_refused
-test_wrapped_hermes_raw_secondmate_is_refused
-test_nonhermes_raw_launch_mentions_do_not_select_hermes
+test_secondmates_refuse_every_raw_launch_command
+test_workers_and_scouts_preserve_raw_launch_commands
 test_hermes_resume_requires_idle_shell
 test_hermes_resume_clears_pending_shell_input
 test_hermes_session_binding_and_busy_ack_order
 test_hermes_hook_waits_through_busy_lock_contention
 test_hermes_delivered_no_turn_persistence_failure_is_distinct
+test_hermes_resume_inherits_launch_ack_budget
 test_hermes_refuses_nonresumable_backends
 test_hermes_help_states_kind_scope
 test_hermes_spawn_requires_pre_llm_acknowledgement

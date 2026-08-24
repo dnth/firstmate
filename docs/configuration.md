@@ -222,7 +222,7 @@ The full cmux home label also includes a short hash of the resolved `FM_ROOT` pa
 ## Harness support
 
 claude, codex, opencode, pi, pi-signed, omp, grok, and kimi are empirically verified harness identities for crewmate and secondmate launches on their documented backend combinations.
-Hermes is verified only for crewmate and scout launches and is refused for primary sessions and secondmates, including a raw launch whose resolved executable is Hermes.
+Hermes is verified only for crewmate and scout launches and is refused for primary sessions and secondmates.
 Hermes resume delivery requires a structurally idle shell with cleared input, which is available on tmux and Herdr; Hermes spawns on other backends are refused before endpoint creation.
 Hermes profiles accept the shared `low`, `medium`, `high`, `xhigh`, and `max` effort vocabulary and forward it as native reasoning effort.
 Each Hermes crew spawn surgically registers guarded profile-global lifecycle hooks: session start binds the task session once, matching pre-LLM records busy before acknowledging the turn, and matching session end records idle.
@@ -252,8 +252,8 @@ A bare `<harness>` preserves the previous behavior: harness only, with no model 
 When the harness token is absent or `default`, secondmate launch falls back through `config/crew-harness` and then the primary's own harness, and no model or effort is read from that file.
 `fm-harness.sh secondmate-model` and `fm-harness.sh secondmate-effort` expose only the optional tokens from `config/secondmate-harness`; `config/crew-harness` remains a bare adapter-name file.
 An explicit harness argument to `fm-spawn.sh` still overrides either config file for that spawn only.
-An explicit `--model` or `--effort` overrides the matching token from `config/secondmate-harness`; for a local route, an explicit harness or raw launch command starts with clean model and effort defaults unless those flags are also passed.
-Remote secondmate routes accept verified harness adapters only and reject raw launch commands.
+An explicit `--model` or `--effort` overrides the matching token from `config/secondmate-harness`; for a local route, an explicit harness starts with clean model and effort defaults unless those flags are also passed.
+Local and remote secondmate routes accept verified harness adapters only and reject raw launch commands.
 `config/secondmate-harness-fallback` is an optional local, gitignored file with the same first-line `<harness> [<model>] [<effort>]` format, and its accessors read only that file.
 When the fallback file is absent, empty, or `default`, secondmate resolution remains unchanged and does not read quota.
 When it is present, `fm-spawn.sh` resolves the configured primary harness/model provider and credential surface through `quota-axi` and selects the fallback only for proven source or provider unavailability or effective headroom exhausted at the fixed zero boundary; unresolved but usable quota keeps the primary.

@@ -35,7 +35,8 @@ Each adapter's `Busy state` row names only which semantic source that harness us
 Never dispatch a crewmate or secondmate on an unverified adapter.
 If `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, tell the captain under `AGENTS.md` section 9 that the requested worker runtime is not verified yet, use firstmate's own verified runtime for current work, and ask only whether to verify the requested runtime before future use.
 Do not pause current work for that future-verification choice, and never launch an unverified adapter.
-If the captain asks for a new harness, propose verifying it first: spawn a trivial supervised task using `fm-spawn`'s raw-launch-command escape hatch, confirm every fact empirically, then record the mechanics in `fm-spawn`, its semantic busy source and trust gate in `bin/fm-busy-lib.sh`, any needed `FM_COMPOSER_IDLE_RE` empty-composer override plus any novel bare agent prompt glyph in `bin/fm-composer-lib.sh`'s shared composer classifier (the one fleet-wide owner of the empty/dead-shell/pending decision, so a new harness's own idle composer is not misread as a dead shell), the tmux agent-process liveness classification in `bin/backends/tmux.sh` when the harness can launch a secondmate, and the verified knowledge here.
+If the captain asks for a new harness, propose verifying it first: spawn a trivial supervised crewmate or scout using `fm-spawn`'s raw-launch-command escape hatch, confirm every fact empirically, then record the mechanics in `fm-spawn`, its semantic busy source and trust gate in `bin/fm-busy-lib.sh`, any needed `FM_COMPOSER_IDLE_RE` empty-composer override plus any novel bare agent prompt glyph in `bin/fm-composer-lib.sh`'s shared composer classifier (the one fleet-wide owner of the empty/dead-shell/pending decision, so a new harness's own idle composer is not misread as a dead shell), the tmux agent-process liveness classification in `bin/backends/tmux.sh` when the harness can launch a secondmate, and the verified knowledge here.
+Secondmate launches accept verified adapter identities only and never accept raw launch commands.
 
 ## Detection
 
@@ -488,6 +489,7 @@ For this one-process-per-turn adapter, Hermes' `on_session_end` callback at the 
 That shell boundary is available on tmux and Herdr; Hermes spawns on other backends are refused before endpoint creation.
 Hermes has no safe mid-turn text-steer channel in this mode; a busy send is refused instead of typing into the running process, and the firstmate may interrupt with `C-c` before resuming.
 After submitting the resume shell command, `fm-send` requires a newer `hermes-started` acknowledgement before it closes any `--resolve-key` decision.
+The resume acknowledgement wait inherits the launch acknowledgement poll count and interval unless a send-specific override is set, so transcript loading never receives a smaller default budget than a fresh launch.
 If delivery landed but the start hook did not acknowledge it, the send fails as delivered-no-turn, records a supervised recovery wake, and warns not to resend; failure to persist either recovery trigger returns the distinct delivered-no-turn-persistence-failed result.
 
 An idle Hermes pane contains a shell rather than a persistent TUI process.

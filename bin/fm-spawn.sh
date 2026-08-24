@@ -3,7 +3,7 @@
 # secondmate in its isolated firstmate home.
 # Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--accepted-local-base <full-commit-sha>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>] [--allow-project-omp-extensions]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>] [--allow-project-omp-extensions]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>] [--allow-project-omp-extensions] --secondmate
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>] [--allow-project-omp-extensions] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -106,9 +106,10 @@
 #   /updatefirstmate, restart). A bare verified adapter name
 #   (claude|codex|opencode|pi|pi-signed|omp|grok|kimi) overrides selection for
 #   either kind. Hermes overrides only a crewmate or scout spawn and is refused for secondmates.
-#   A non-flag string containing
-#   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters. pi-signed launches that exact executable name from PATH and
+#   For crewmates and scouts, a non-flag string containing whitespace is treated
+#   as a RAW launch command - the escape hatch for verifying new adapters.
+#   Secondmates refuse every raw launch command and accept adapter identities only.
+#   pi-signed launches that exact executable name from PATH and
 #   refuses before endpoint creation when it is unavailable; it never falls back to pi.
 #   omp resolves its exact executable and checks its required launch/recovery
 #   capabilities before endpoint creation; it never falls back to pi or another harness.
@@ -116,8 +117,8 @@
 #   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
 #   --secondmate spawn, those tokens apply only when this spawn also resolves its
 #   harness from config/secondmate-harness. An explicit per-spawn --harness,
-#   positional harness arg, or raw launch command starts with clean model/effort
-#   defaults unless the caller also passes explicit --model/--effort flags. When
+#   or positional harness arg starts with clean model/effort defaults unless the
+#   caller also passes explicit --model/--effort flags. When
 #   the file governs the spawn, its model/effort tokens are re-resolved on every
 #   respawn exactly like the harness axis, and explicit --model/--effort flags
 #   still win over the file's tokens.
@@ -1237,46 +1238,19 @@ launch_template() {
   esac
 }
 
-fm_spawn_raw_effective_harness() {  # <raw-command>
-  local raw=$1 word candidate wrapper= skip_next=0
-  local -a words
-  read -r -a words <<< "$raw"
-  for word in "${words[@]}"; do
-    if [ "$skip_next" -eq 1 ]; then
-      skip_next=0
-      continue
-    fi
-    word=${word#\"}
-    word=${word%\"}
-    word=${word#\'}
-    word=${word%\'}
-    case "$word" in [A-Za-z_]*=*) continue ;; esac
-    candidate=$(basename -- "$word")
-    case "$candidate" in
-      env|nohup|command|exec) wrapper=$candidate; continue ;;
-    esac
-    case "$wrapper:$word" in
-      env:-u|env:--unset|env:-C|env:--chdir|env:-a|env:--argv0|exec:-a)
-        skip_next=1
-        continue
-        ;;
-      *:--|*:-*) continue ;;
-    esac
-    printf '%s\n' "$candidate"
-    return 0
-  done
-  return 1
-}
-
 RAW_LAUNCH=0
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
+    if [ "$KIND" = secondmate ]; then
+      echo "error: raw launch commands are unavailable for secondmates; select a verified harness adapter" >&2
+      exit 1
+    fi
     RAW_LAUNCH=1
     LAUNCH=$ARG3
-    HARNESS=$(fm_spawn_raw_effective_harness "$LAUNCH") || {
-      echo "error: raw launch command has no resolvable effective executable" >&2
-      exit 1
-    }
+    HARNESS=""
+    for word in $LAUNCH; do
+      case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
+    done
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
@@ -1336,13 +1310,20 @@ case "$ARG3" in
     ;;
   *)
     HARNESS=$ARG3
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    LAUNCH=$(launch_template "$HARNESS" "$KIND") || {
+      if [ "$KIND" = secondmate ]; then
+        echo "error: unknown secondmate harness '$HARNESS'; secondmates require a verified harness adapter" >&2
+      else
+        echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2
+      fi
+      exit 1
+    }
     ;;
 esac
 
 # config/secondmate-harness may carry optional model/effort tokens alongside the
 # harness ("<harness> [<model>] [<effort>]"). They apply only when this is a
-# --secondmate spawn and no explicit per-spawn harness/raw launch was supplied, so
+# --secondmate spawn and no explicit per-spawn harness was supplied, so
 # the harness itself came from the secondmate config fallback chain. Resolving
 # here on every spawn makes the pin durable across respawns. Precedence: explicit
 # --model/--effort flags still win over the file's tokens.
@@ -1395,7 +1376,7 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
       esac
     fi
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || {
-      echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2
+      echo "error: no verified secondmate launch template for harness '$HARNESS' (from $harness_src or detection)" >&2
       exit 1
     }
   fi

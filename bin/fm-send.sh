@@ -683,7 +683,9 @@ fm_send_hermes_resume_command() {  # <message>
 }
 
 fm_send_wait_for_hermes_turn_start() {  # <reference>
-  local reference=$1 i=0 polls=${FM_SEND_HERMES_START_POLLS:-120} interval=${FM_SEND_HERMES_START_INTERVAL:-0.25}
+  local reference=$1 i=0
+  local polls=${FM_SEND_HERMES_START_POLLS:-${FM_HERMES_LAUNCH_ACK_POLLS:-120}}
+  local interval=${FM_SEND_HERMES_START_INTERVAL:-${FM_HERMES_LAUNCH_ACK_INTERVAL:-0.5}}
   while [ "$i" -lt "$polls" ]; do
     [ -f "$FM_SEND_HERMES_STARTED" ] && ! cmp -s "$FM_SEND_HERMES_STARTED" "$reference" && return 0
     i=$((i + 1))
