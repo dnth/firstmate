@@ -778,7 +778,7 @@ wait_for "resumed secondmate pane absence" pane_missing "$RESUMED_TARGET"
 afk_before_workspaces=$(lab workspace list | jq '[.result.workspaces[]?] | length')
 afk_start_output=$(fm_env FM_SUPERVISOR_TARGET="$PRIMARY_TARGET" \
   FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_HARNESS=omp \
-  FM_AFK_LAUNCH_LABEL=omp-live-afk "$ROOT/bin/fm-afk-launch.sh" start) \
+  FM_AFK_LAUNCH_LABEL=omp-live-afk "$ROOT/bin/fm-afk-launch.sh" start 2>&1) \
   || fail "real OMP away launcher readiness failed"
 AFK_RECORD="$HOME_DIR/state/.afk-daemon-terminal"
 AFK_TARGET=$(cut -f2 "$AFK_RECORD")
