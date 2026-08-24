@@ -506,12 +506,14 @@ reconcile_pause_tracking() {  # <window> <state> <last-status-line>
 }
 
 daemon_pause_status_is_valid() {  # <window> <state> <last-status-line>
-  local win=$1 state=$2 last=$3 task meta backend agent_state
+  local win=$1 state=$2 last=$3 task meta backend agent_state remote_host
   status_is_paused "$last" && return 0
   status_is_paused_or_captain_held "$last" || return 1
   task=$(window_to_task "$win" "$state")
   meta="$state/$task.meta"
   [ -f "$meta" ] || return 1
+  remote_host=$(fm_meta_get "$meta" remote_host)
+  [ -z "$remote_host" ] || return 1
   backend=$(fm_backend_of_meta "$meta")
   agent_state=$(fm_backend_agent_state "$backend" "$win" "$meta" 2>/dev/null || true)
   case "$agent_state" in

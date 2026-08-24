@@ -393,7 +393,7 @@ unit_herdr_run_failure_preserves_unconfirmed_record() {
     . "$2/bin/backends/herdr.sh"
     fm_backend_source() { return 0; }
     fm_backend_herdr_server_ensure() { return 0; }
-    fm_backend_herdr_pane_idle_foreground_shell_pid() { return 0; }
+    fm_backend_herdr_pane_idle_shell_sample() { return 0; }
     fm_backend_herdr_cli() {
       if [ "$2 $3" = "workspace create" ]; then
         printf %s '\''{"result":{"workspace":{"workspace_id":"ws-exact"},"root_pane":{"pane_id":"pane-exact"}}}'\''

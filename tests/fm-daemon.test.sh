@@ -292,6 +292,47 @@ test_stale_captain_held_live_or_ambiguous_remains_stale() {
   pass "live and ambiguous captain-held endpoints remain on stale tracking"
 }
 
+test_stale_captain_held_remote_remains_ambiguous() {
+  local dir state win out
+  dir=$(make_supercase stale-captain-held-remote)
+  state="$dir/state"
+  win="remote:held-remote"
+  printf 'captain-held [key=route]: waiting for recovery ownership\n' > "$state/held-remote.status"
+  fm_write_meta "$state/held-remote.meta" \
+    "window=$win" "remote_host=remote-mac" "remote_backend=herdr" \
+    "remote_target=fm-remote:w1:p1" "harness=codex"
+  (
+    fm_backend_agent_state() { printf 'missing'; }
+    out=$(classify_stale "$win" "$state")
+    case "$out" in
+      self\|*) ;;
+      *) fail "remote captain-held stale trusted a local missing verdict: $out" ;;
+    esac
+  ) || fail "remote captain-held stale liveness boundary failed"
+  pass "remote captain-held endpoints remain visible without local liveness proof"
+}
+
+test_stale_captain_held_herdr_live_or_ambiguous_remains_stale() {
+  local mode dir state win out
+  for mode in live unknown; do
+    dir=$(make_supercase "stale-captain-held-herdr-$mode")
+    state="$dir/state"
+    win="default:pane-held-$mode"
+    printf 'captain-held [key=route]: waiting for recovery ownership\n' > "$state/held-herdr-$mode.status"
+    fm_write_meta "$state/held-herdr-$mode.meta" "window=$win" "backend=herdr" "harness=pi"
+    (
+      fm_backend_source herdr
+      fm_backend_herdr_pane_agent_state() { printf '%s' "$FM_FAKE_HERDR_PANE_STATE"; }
+      out=$(FM_FAKE_HERDR_PANE_STATE="$mode" classify_stale "$win" "$state")
+      case "$out" in
+        self\|*) ;;
+        *) fail "Herdr $mode captain-held stale was suppressed: $out" ;;
+      esac
+    ) || fail "Herdr $mode captain-held liveness path failed"
+  done
+  pass "live and ambiguous Herdr captain-held endpoints remain visible"
+}
+
 # handle_wake on a paused stale records a pause marker, drops any pre-existing wedge
 # marker (so a working->paused pane is not still wedge-aged), and does NOT escalate
 # on the wake itself - the recheck is housekeeping's job on the long cadence.
@@ -1962,6 +2003,8 @@ test_stale_terminal_escalates
 test_stale_paused_classifies_pause
 test_stale_captain_held_classifies_pause_without_wedge_replay
 test_stale_captain_held_live_or_ambiguous_remains_stale
+test_stale_captain_held_remote_remains_ambiguous
+test_stale_captain_held_herdr_live_or_ambiguous_remains_stale
 test_handle_wake_paused_records_pause_marker
 test_handle_wake_paused_signal_records_pause_marker
 test_handle_wake_terminal_signal_clears_pause_tracking
