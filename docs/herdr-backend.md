@@ -289,6 +289,7 @@ The pane-independent max-defer alert is configured in [`wedge-alarm.md`](wedge-a
 Harnesses with native tracked background execution can run the daemon in their terminal.
 Pi has no such mechanism.
 `bin/fm-afk-launch.sh` therefore creates a dedicated unfocused Herdr workspace, runs the daemon there with an explicit supervisor target and backend, records the exact daemon pane, and closes only that pane on stop.
+`fm_afk_launch_create_herdr` submits the fixed daemon command through the same readiness-owning path as a Herdr spawn, so a newly created pane must pass the strict idle-foreground-shell proof before typing and an unready pane receives no command.
 It never splits the captain's active tab and never uses shell `&`.
 Recovery reconciles only the recorded exact id.
 
