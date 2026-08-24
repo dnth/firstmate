@@ -36,6 +36,10 @@
 # (0.4).
 # Slash commands, and codex `$...` skill invocations resolved through harness
 # meta, get a longer pre-Enter settle so completion popups do not swallow Enter.
+# Hermes is the headless exception: an idle task has no interactive composer,
+# so text is wrapped as a quiet `hermes chat -q --resume <session>` shell
+# command and submitted through the backend's fixed-command path. A leading
+# `/<skill>` is translated to Hermes' `--skills <skill>` preload form.
 #
 # From-firstmate marker: when the resolved target is a task selector whose meta
 # records kind=secondmate, the text uses the live-charter-compatible
@@ -122,9 +126,13 @@ fi
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-busy-lib.sh
+. "$SCRIPT_DIR/fm-busy-lib.sh"
 
 RUNPOD_DELIVERY_LOCK=
+HERMES_DELIVERY_LOCK=
 TARGET_OMP_TURNSTART_REFERENCE=
+TARGET_HERMES_START_REFERENCE=
 release_runpod_delivery_lock() {
   [ -n "$RUNPOD_DELIVERY_LOCK" ] || return 0
   fm_lock_release "$RUNPOD_DELIVERY_LOCK"
@@ -132,7 +140,12 @@ release_runpod_delivery_lock() {
 }
 fm_send_cleanup() {
   release_runpod_delivery_lock
+  if [ -n "$HERMES_DELIVERY_LOCK" ]; then
+    fm_lock_release "$HERMES_DELIVERY_LOCK"
+    HERMES_DELIVERY_LOCK=
+  fi
   [ -z "$TARGET_OMP_TURNSTART_REFERENCE" ] || rm -f -- "$TARGET_OMP_TURNSTART_REFERENCE"
+  [ -z "$TARGET_HERMES_START_REFERENCE" ] || rm -f -- "$TARGET_HERMES_START_REFERENCE"
 }
 trap fm_send_cleanup EXIT
 # Answer notes use the same bounded status-line shape as the OPEN DECISIONS
@@ -162,8 +175,10 @@ fm_send_id_from_meta() {  # <meta-file>
 
 fm_send_record_interrupt() {  # <key>
   local key=$1 id gen
-  [ "$key" = Escape ] || return 0
-  case "$TARGET_HARNESS" in claude*) : ;; *) return 0 ;; esac
+  case "$TARGET_HARNESS:$key" in
+    claude*:Escape|hermes:C-c) ;;
+    *) return 0 ;;
+  esac
   [ -n "$TARGET_META" ] || return 0
   id=$(fm_send_id_from_meta "$TARGET_META")
   [ -f "$STATE/$id.busy-gen" ] || return 0
@@ -175,7 +190,7 @@ fm_send_record_interrupt() {  # <key>
     "$FM_ROOT/bin/fm-busy-event.sh" apply "$STATE" "$id" idle \
       --current-gen --source fm-interrupt --event interrupt
   fi || {
-    echo "error: key '$key' reached $T, but the Claude interrupt state could not be recorded for $id" >&2
+    echo "error: key '$key' reached $T, but the $TARGET_HARNESS interrupt state could not be recorded for $id" >&2
     return 1
   }
 }
@@ -568,6 +583,135 @@ fm_send_close_resolved_keys() {  # <answer-text>
   fi
 }
 
+fm_send_shell_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
+fm_send_hermes_skill_resolution() {  # <hermes-home> <skill>
+  local hermes_home=$1 skill=$2 candidate resolved
+  candidate="$hermes_home/skills/$skill/SKILL.md"
+  if [ -f "$candidate" ]; then
+    printf 'native\t%s' "$skill"
+    return 0
+  fi
+  for candidate in \
+    "${HOME:-}/.agents/skills/$skill/SKILL.md" \
+    "${HOME:-}/.codex/skills/$skill/SKILL.md" \
+    "$FM_ROOT/.agents/skills/$skill/SKILL.md"; do
+    [ -f "$candidate" ] || continue
+    resolved=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || resolved=
+    [ -z "$resolved" ] || resolved="$resolved/$(basename "$candidate")"
+    [ -n "$resolved" ] && [ -f "$resolved" ] && [ ! -L "$resolved" ] || continue
+    printf 'pointer\t%s' "$resolved"
+    return 0
+  done
+  return 1
+}
+
+fm_send_hermes_resume_command() {  # <message>
+  local message=$1 binary hermes_home session_file session_id model effort started
+  local command_word skill rest query skill_flag='' effort_flag='' skill_resolution skill_mode skill_value
+  [ -n "$TARGET_META" ] && [ -f "$TARGET_META" ] && [ ! -L "$TARGET_META" ] || {
+    echo "error: Hermes resume requires task-bound metadata" >&2
+    return 1
+  }
+  fm_backend_hermes_session_ready "$TARGET_META" || {
+    echo "error: Hermes target '$RAW_TARGET' has no valid task-bound resumable session" >&2
+    return 1
+  }
+  binary=$(fm_meta_get "$TARGET_META" hermes_bin)
+  hermes_home=$(fm_meta_get "$TARGET_META" hermes_home)
+  session_file=$(fm_meta_get "$TARGET_META" hermes_session_file)
+  started=$(fm_meta_get "$TARGET_META" hermes_started)
+  model=$(fm_meta_get "$TARGET_META" model)
+  effort=$(fm_meta_get "$TARGET_META" effort)
+  case "$binary" in /*) ;; *) echo "error: Hermes metadata has no absolute executable" >&2; return 1 ;; esac
+  [ -x "$binary" ] || { echo "error: recorded Hermes executable is unavailable: $binary" >&2; return 1; }
+  case "$hermes_home" in /*) ;; *) echo "error: Hermes metadata has no absolute profile home" >&2; return 1 ;; esac
+  [ -d "$hermes_home" ] && [ ! -L "$hermes_home" ] || {
+    echo "error: recorded Hermes profile home is unavailable or unsafe: $hermes_home" >&2
+    return 1
+  }
+  [ "$started" = "$(cd "$STATE" 2>/dev/null && pwd -P)/$TARGET_TASK_ID.hermes-started" ] || {
+    echo "error: Hermes metadata has an invalid turn-start acknowledgement path" >&2
+    return 1
+  }
+  session_id=$(cat "$session_file" 2>/dev/null) || return 1
+  query=$message
+  case "$message" in
+    /*)
+      command_word=${message%% *}
+      skill=${command_word#/}
+      case "$skill" in
+        ''|*[!A-Za-z0-9._-]*)
+          echo "error: Hermes skill invocation must use /<skill> with a simple skill name" >&2
+          return 1
+          ;;
+      esac
+      rest=${message#"$command_word"}
+      rest=${rest# }
+      skill_resolution=$(fm_send_hermes_skill_resolution "$hermes_home" "$skill") || {
+        echo "error: Hermes skill '$skill' is not available in the active profile or Firstmate skill roots" >&2
+        return 1
+      }
+      IFS=$'\t' read -r skill_mode skill_value <<< "$skill_resolution"
+      case "$skill_mode" in
+        native)
+          skill_flag="--skills $(fm_send_shell_quote "$skill_value") "
+          if [ -n "$rest" ]; then
+            query=$rest
+          else
+            query="Apply the preloaded $skill skill now."
+          fi
+          ;;
+        pointer)
+          query="Read the skill at $skill_value completely and follow it now."
+          [ -z "$rest" ] || query="$query User instruction: $rest"
+          ;;
+        *) return 1 ;;
+      esac
+      ;;
+  esac
+  case "$effort" in
+    low|medium|high|xhigh|max) effort_flag="--reasoning $(fm_send_shell_quote "$effort") " ;;
+  esac
+  [ -n "$model" ] && [ "$model" != default ] || model=gpt-5.6-sol
+  FM_SEND_HERMES_STARTED=$started
+  FM_SEND_HERMES_COMMAND="HERMES_HOME=$(fm_send_shell_quote "$hermes_home") $(fm_send_shell_quote "$binary") chat -Q --query $(fm_send_shell_quote "$query") --provider openai-codex --model $(fm_send_shell_quote "$model") ${effort_flag}${skill_flag}--resume $(fm_send_shell_quote "$session_id") --no-restore-cwd --accept-hooks --yolo --pass-session-id"
+}
+
+fm_send_wait_for_hermes_turn_start() {  # <reference>
+  local reference=$1 i=0
+  local polls=${FM_SEND_HERMES_START_POLLS:-${FM_HERMES_LAUNCH_ACK_POLLS:-120}}
+  local interval=${FM_SEND_HERMES_START_INTERVAL:-${FM_HERMES_LAUNCH_ACK_INTERVAL:-0.5}}
+  while [ "$i" -lt "$polls" ]; do
+    [ -f "$FM_SEND_HERMES_STARTED" ] && ! cmp -s "$FM_SEND_HERMES_STARTED" "$reference" && return 0
+    i=$((i + 1))
+    [ "$i" -ge "$polls" ] || sleep "$interval"
+  done
+  return 1
+}
+
+fm_send_record_hermes_delivered_no_turn() {
+  local status_file="$STATE/$TARGET_TASK_ID.status" line wake_key failed=0
+  wake_key="$TARGET_TASK_ID.status"
+  line='failed: delivered-no-turn: Hermes resume command was submitted but pre_llm_call did not acknowledge it; do not resend; inspect the existing endpoint and session'
+  if [ -L "$status_file" ] || { [ -e "$status_file" ] && [ ! -f "$status_file" ]; }; then
+    echo "error: Hermes delivered-no-turn refuses a non-ordinary recovery marker at $status_file" >&2
+    failed=1
+  elif ! printf '%s\n' "$line" >> "$status_file"; then
+    echo "error: Hermes delivered-no-turn could not append its recovery marker to $status_file" >&2
+    failed=1
+  fi
+  if ! fm_wake_append signal "$wake_key" "delivered-no-turn: $TARGET_TASK_ID" 20; then
+    echo "error: Hermes delivered-no-turn could not enqueue its watcher wake for $TARGET_TASK_ID" >&2
+    failed=1
+  fi
+  [ "$failed" -eq 0 ]
+}
+
 
 
 # Resolve the target's harness from its meta (recorded by fm-spawn), used only to
@@ -626,6 +770,69 @@ else
       echo "error: failed to durably prepare pending-reply delivery for $TARGET_TASK_ID" >&2
       exit 1
     fi
+  fi
+  if [ "$TARGET_HARNESS" = hermes ]; then
+    if [ "$TARGET_BACKEND" = remote ] || [ -z "$TARGET_TASK_ID" ]; then
+      echo "error: Hermes resume requires a local crewmate/scout task selector" >&2
+      exit 1
+    fi
+    if [ "$MESSAGE" = /exit ]; then
+      HERMES_BUSY=$(fm_busy_classify "$TARGET_BACKEND" "$T" hermes "$TARGET_TASK_ID" "$STATE")
+      case "${HERMES_BUSY%% *}" in
+        idle) exit 0 ;;
+        busy) echo "error: Hermes has an active headless turn; interrupt it with --key C-c before exit" >&2; exit 1 ;;
+        *) echo "error: Hermes lifecycle state is unavailable (${HERMES_BUSY#* }); refusing an ambiguous exit" >&2; exit 1 ;;
+      esac
+    fi
+    HERMES_DELIVERY_LOCK="$STATE/.$TARGET_TASK_ID.hermes-delivery.lock"
+    fm_lock_acquire_wait "$HERMES_DELIVERY_LOCK" || {
+      echo "error: cannot lock Hermes delivery for $TARGET_TASK_ID" >&2
+      exit 1
+    }
+    HERMES_BUSY=$(fm_busy_classify "$TARGET_BACKEND" "$T" hermes "$TARGET_TASK_ID" "$STATE")
+    case "${HERMES_BUSY%% *}" in
+      idle) ;;
+      busy) echo "error: Hermes already has an active headless turn; interrupt or wait before sending another resume command" >&2; exit 1 ;;
+      *) echo "error: Hermes lifecycle state is unavailable (${HERMES_BUSY#* }); refusing to inject a shell command" >&2; exit 1 ;;
+    esac
+    fm_send_hermes_resume_command "$MESSAGE" || exit 1
+    TARGET_HERMES_START_REFERENCE=$(mktemp "${TMPDIR:-/tmp}/fm-send-hermes-start.XXXXXXXX") || {
+      echo "error: cannot create Hermes turn-start activity reference" >&2
+      exit 1
+    }
+    if [ -f "$FM_SEND_HERMES_STARTED" ]; then
+      cp "$FM_SEND_HERMES_STARTED" "$TARGET_HERMES_START_REFERENCE" || {
+        echo "error: cannot snapshot the Hermes turn-start acknowledgement" >&2
+        exit 1
+      }
+    fi
+    if ! fm_backend_idle_shell_ready "$TARGET_BACKEND" "$T"; then
+      echo "error: Hermes endpoint $T is not a proven idle shell on backend=$TARGET_BACKEND; nothing was sent" >&2
+      exit 1
+    fi
+    if ! fm_backend_send_text_line "$TARGET_BACKEND" "$T" "$FM_SEND_HERMES_COMMAND" "$EXPECTED_LABEL"; then
+      rm -f -- "$TARGET_HERMES_START_REFERENCE"
+      TARGET_HERMES_START_REFERENCE=
+      echo "error: Hermes resume command not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
+      exit 1
+    fi
+    if ! fm_send_wait_for_hermes_turn_start "$TARGET_HERMES_START_REFERENCE"; then
+      rm -f -- "$TARGET_HERMES_START_REFERENCE"
+      TARGET_HERMES_START_REFERENCE=
+      if ! fm_send_record_hermes_delivered_no_turn; then
+        echo "error: delivered-no-turn-persistence-failed: Hermes resume was already submitted to $T, but one or more required recovery triggers could not be persisted; do not resend; start supervised recovery manually" >&2
+        exit 5
+      fi
+      echo "error: delivered-no-turn: Hermes resume command was submitted to $T but pre_llm_call did not acknowledge it; do not resend" >&2
+      exit 4
+    fi
+    rm -f -- "$TARGET_HERMES_START_REFERENCE"
+    TARGET_HERMES_START_REFERENCE=
+    if [ -n "$RESOLVE_KEYS" ]; then
+      fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
+    fi
+    [ "${FM_SEND_SETTLE:-1}" = 0 ] || sleep "${FM_SEND_SETTLE:-1}"
+    exit 0
   fi
   # Slash commands open a completion popup in some TUIs (verified on codex);
   # submitting too fast selects nothing, so give the popup time to settle before

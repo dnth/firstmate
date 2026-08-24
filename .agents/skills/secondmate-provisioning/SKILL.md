@@ -84,14 +84,14 @@ Release happens only on explicit retirement or seed rollback, never on routine r
 
 `bin/fm-home-seed.sh` copies the charter into the secondmate home as `data/charter.md`.
 It also writes the gitignored `.fm-secondmate-parent` durable binding before the required `.fm-secondmate-home` identity marker; the parser header in [`bin/fm-secondmate-parent-lib.sh`](../../../bin/fm-secondmate-parent-lib.sh) owns the record contract, and both files must remain in place.
-`bin/fm-spawn.sh --secondmate` launches it through the secondmate harness path, resolving `config/secondmate-harness` -> `config/crew-harness` -> the primary's own harness unless an explicit per-spawn harness override is passed.
+`bin/fm-spawn.sh --secondmate` launches it through the secondmate harness path, resolving `config/secondmate-harness` -> `config/crew-harness` -> the primary's own harness unless an explicit per-spawn harness override is passed; [docs/configuration.md](../../../docs/configuration.md) owns that chain, including the crew-only harnesses it skips.
 
 `config/secondmate-harness` may also pin a concrete model and effort for the secondmate agent, in the SAME file rather than a new one: the format is a single whitespace-separated line `<harness> [<model>] [<effort>]`, with only the first non-empty, non-comment line parsed.
 A bare `<harness>` (today's format, e.g. `claude`) behaves exactly as before - harness only, no model/effort flag - so this is fully backward-compatible.
 `bin/fm-harness.sh secondmate-model` and `bin/fm-harness.sh secondmate-effort` print the optional 2nd/3rd tokens (empty when absent, or when the file is absent/`default`/harness-only); they read only `config/secondmate-harness`, never `config/crew-harness`.
 For a `--secondmate` spawn, `bin/fm-spawn.sh` populates `MODEL`/`EFFORT` from those tokens only when the harness itself came from the secondmate config path for that spawn.
-For a local route, an explicit per-spawn `--harness` flag, positional harness arg, or raw launch command starts clean on model and effort too, unless the caller also passes explicit `--model` or `--effort`.
-A remote route accepts only a verified harness adapter and refuses a raw launch command.
+For a local route, an explicit per-spawn `--harness` flag or positional harness arg starts clean on model and effort too, unless the caller also passes explicit `--model` or `--effort`.
+Local and remote secondmate routes both accept verified harness adapters only and refuse every raw launch command; the raw-command escape hatch remains available for crewmates and scouts.
 When the file's tokens do apply, an explicit per-spawn `--model` or `--effort` flag always wins over the file's token for that axis.
 Because this resolves from the file on every spawn, the pin is durable across every respawn (recovery, `/updatefirstmate`, restart) exactly like the harness axis itself - e.g. `config/secondmate-harness` containing `claude opus` keeps a secondmate pinned to Opus even if the primary's own default model later changes.
 
@@ -103,7 +103,7 @@ Known standalone and Pi credential surfaces are then checked through `quota-axi 
 An absent or indeterminate source mapping is uncertainty rather than proof of unavailability.
 The fallback is selected only when the selected credential surface reports `auth_required`, `unavailable`, `error`, `expired`, or `missing`, when the provider reports one of those states other than `missing`, or when applicable effective headroom is at or below the fixed exhaustion boundary of zero.
 Missing, malformed, unresolved, or otherwise unmeasurable quota with usable authentication keeps the primary selected, and any measurable positive effective headroom keeps the primary selected.
-An explicit harness, model, or raw launch command remains authoritative and does not enter configured primary-to-fallback substitution; an explicit effort remains unchanged if fallback selection replaces the configured harness/model pair.
+An explicit harness or model remains authoritative and does not enter configured primary-to-fallback substitution; an explicit effort remains unchanged if fallback selection replaces the configured harness/model pair.
 Selection is predictive only: a later primary launch failure is never retried on the fallback, so non-quota launch failures retain the existing error behavior.
 The selected profile is never written back to either config file, so each spawn and every recovery or liveness relaunch re-evaluates the primary and automatically returns to it when eligible.
 When configured primary-to-fallback selection runs and chooses the fallback, metadata records `secondmate_model_source=fallback` and `secondmate_fallback_reason=provider_unavailable|quota_exhausted`; when that selection runs and keeps the primary it records `secondmate_model_source=primary`.

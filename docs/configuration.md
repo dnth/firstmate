@@ -222,6 +222,10 @@ The full cmux home label also includes a short hash of the resolved `FM_ROOT` pa
 ## Harness support
 
 claude, codex, opencode, pi, pi-signed, omp, grok, and kimi are empirically verified harness identities for crewmate and secondmate launches on their documented backend combinations.
+Hermes is verified only for crewmate and scout launches and is refused for primary sessions and secondmates.
+Hermes resume delivery requires a structurally idle shell with cleared input, which is available on tmux and Herdr; Hermes spawns on other backends are refused before endpoint creation.
+Hermes profiles accept the shared `low`, `medium`, `high`, `xhigh`, and `max` effort vocabulary and forward it as native reasoning effort.
+Each Hermes crew spawn surgically registers guarded profile-global lifecycle hooks: session start binds the task session once, matching pre-LLM records busy before acknowledging the turn, and matching session end records idle.
 OMP is verified as a primary, crewmate, scout, and secondmate runtime only on tmux and Herdr; Zellij, Orca, and cmux reject OMP before endpoint creation and carry no live OMP claim.
 [README requirements](../README.md#requirements) owns the complete set supported for the primary session.
 New harnesses get verified through a supervised trial task before joining the set.
@@ -246,10 +250,12 @@ When it is absent or contains `default`, crewmates mirror the firstmate's own ha
 The first non-empty, non-comment line is parsed as `<harness> [<model>] [<effort>]`.
 A bare `<harness>` preserves the previous behavior: harness only, with no model or effort launch flag.
 When the harness token is absent or `default`, secondmate launch falls back through `config/crew-harness` and then the primary's own harness, and no model or effort is read from that file.
+A crew-only harness is ineligible for that implicit fallback: when `config/crew-harness` holds `hermes` and `config/secondmate-harness` is absent or `default`, the chain skips it and continues to the primary's own harness, so a Hermes crew fleet still launches secondmates without needing a new setting.
+An explicit `config/secondmate-harness: hermes` stays authoritative and is refused at the spawn kind boundary with a precise diagnostic rather than being silently rewritten.
 `fm-harness.sh secondmate-model` and `fm-harness.sh secondmate-effort` expose only the optional tokens from `config/secondmate-harness`; `config/crew-harness` remains a bare adapter-name file.
 An explicit harness argument to `fm-spawn.sh` still overrides either config file for that spawn only.
-An explicit `--model` or `--effort` overrides the matching token from `config/secondmate-harness`; for a local route, an explicit harness or raw launch command starts with clean model and effort defaults unless those flags are also passed.
-Remote secondmate routes accept verified harness adapters only and reject raw launch commands.
+An explicit `--model` or `--effort` overrides the matching token from `config/secondmate-harness`; for a local route, an explicit harness starts with clean model and effort defaults unless those flags are also passed.
+Local and remote secondmate routes accept verified harness adapters only and reject raw launch commands.
 `config/secondmate-harness-fallback` is an optional local, gitignored file with the same first-line `<harness> [<model>] [<effort>]` format, and its accessors read only that file.
 When the fallback file is absent, empty, or `default`, secondmate resolution remains unchanged and does not read quota.
 When it is present, `fm-spawn.sh` resolves the configured primary harness/model provider and credential surface through `quota-axi` and selects the fallback only for proven source or provider unavailability or effective headroom exhausted at the fixed zero boundary; unresolved but usable quota keeps the primary.
@@ -322,6 +328,7 @@ Per rule, `when` and `use` are required.
 Both `use` and the optional top-level `default` accept either one profile object or a non-empty array of profile objects.
 The single-object form stays fully backward-compatible, and every profile needs `harness`.
 Profile `model`, `effort`, and `prewalk_into` fields and rule `why` are optional.
+The verified `harness` values for crew profiles are `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `omp`, `grok`, `kimi`, and `hermes`.
 An omitted model or effort means the selected harness uses its own default for that axis.
 An omitted `prewalk_into` makes `fm-spawn.sh` add no Prewalk flags and preserves ordinary OMP-configured behavior byte-for-byte.
 `prewalk_into` is opt-in and valid only when the same profile selects `harness: "omp"`.

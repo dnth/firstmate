@@ -9,7 +9,9 @@
 #      crewmate harness). fm-harness.sh secondmate resolves the fallback chain
 #      config/secondmate-harness -> config/crew-harness -> own; an absent or
 #      "default" secondmate-harness behaves exactly as the crew harness did before
-#      this knob existed (full backward-compat). fm-spawn.sh resolves a secondmate
+#      this knob existed (full backward-compat), except that a crew-only harness
+#      configured in config/crew-harness (hermes) is ineligible for an implicit
+#      secondmate selection and the chain continues to own-harness detection. fm-spawn.sh resolves a secondmate
 #      launch through that mode, durably (every respawn re-resolves), while an
 #      explicit per-spawn harness arg still wins.
 #   B) Inheritance. The primary pushes a declared, extensible set of LOCAL
@@ -95,6 +97,9 @@ signed Pi wrapper remains a distinct secondmate value^codex^pi-signed^pi-signed^
 secondmate=default defers to crew^codex^default^codex^codex
 crew=default resolves to own, secondmate follows^default^-^claude^claude
 secondmate=default with crew absent -> own^-^default^claude^claude
+crew-only hermes crew, secondmate absent -> own, crew untouched^hermes^-^claude^hermes
+crew-only hermes crew, secondmate=default -> own, crew untouched^hermes^default^claude^hermes
+crew-only hermes crew, explicit secondmate wins^hermes^codex^codex^hermes
 ROWS
   pass "A1 fm-harness.sh secondmate resolves the fallback chain; crew mode unchanged"
 }
@@ -582,7 +587,7 @@ test_spawn_unverified_secondmate_harness_refused() {
     "$ROOT/bin/fm-spawn.sh" sm "$sm" --secondmate >/dev/null 2>"$err" || rc=$?
 
   [ "$rc" -ne 0 ] || fail "unverified: spawn should have failed"
-  assert_contains "$(cat "$err")" "no launch template for harness 'bogus'" \
+  assert_contains "$(cat "$err")" "no verified secondmate launch template for harness 'bogus'" \
     "unverified: error names the rejected harness"
   assert_contains "$(cat "$err")" "config/secondmate-harness" \
     "unverified: error names the secondmate-harness source"
@@ -829,7 +834,7 @@ test_secondmate_quota_does_not_mask_launch_failure() {
   out=$(spawn_secondmate_quota_capture "$w" sm "$sm" "$launchlog" \
     '{"providers":[{"provider":"claude","state":{"status":"fresh"},"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","effectivePercentRemaining":42}]}}]}' 2>&1); status=$?
   expect_code 1 "$status" "non-quota launch failure was silently accepted"$'\n'"$out"
-  assert_contains "$out" "no launch template for harness 'bogus'" \
+  assert_contains "$out" "no verified secondmate launch template for harness 'bogus'" \
     "non-quota launch failure did not surface the selected primary"
   [ ! -s "$launchlog" ] \
     || fail "non-quota launch failure unexpectedly launched the fallback"

@@ -651,6 +651,26 @@ assert_contains "$DOCTOR_OUT" "required harness=omp:$CASE_BIN/omp" "omp was not 
 assert_not_contains "$DOCTOR_OUT" 'required harness=MISSING' "omp did not satisfy the harness requirement"
 pass "omp satisfies the harness requirement on its own"
 
+# --- a crew-only harness never satisfies second-mate readiness ---------------
+#
+# This doctor owns REMOTE SECOND-MATE readiness, and the remote spawn route
+# accepts only harnesses that have a verified secondmate launch template.
+# Hermes is crewmate/scout-only, so a host carrying nothing else is genuinely
+# unready: reporting it as the required harness would hand the operator a green
+# verdict for a host on which every secondmate spawn is refused.
+
+new_case Linux with-herdr no-gui
+rm -f "$CASE_BIN/claude"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$CASE_BIN/hermes"
+chmod +x "$CASE_BIN/hermes"
+doctor
+expect_code 1 "$DOCTOR_RC" "a host whose only harness is crew-only hermes was reported ready"
+assert_contains "$DOCTOR_OUT" 'required harness=MISSING' \
+  "crew-only hermes was accepted as a second-mate harness"
+assert_not_contains "$DOCTOR_OUT" 'required harness=hermes' \
+  "crew-only hermes was named as the resolved second-mate harness"
+pass "a crew-only harness does not satisfy remote second-mate readiness"
+
 # --- the parity tier is opt-in and adds nothing to a default run -------------
 #
 # This doctor governs every remote second mate, not only the RunPod hosts that
