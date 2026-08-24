@@ -231,16 +231,16 @@ test_stale_captain_held_classifies_pause_without_wedge_replay() {
   key=$(printf '%s' "held-w11" | tr ':/.' '___')
   printf 'captain-held [key=route]: waiting for recovery ownership\n' > "$state/held-w11.status"
   fm_write_meta "$state/held-w11.meta" "window=$win" "backend=tmux" "harness=pi"
-  out=$(PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW= classify_stale "$win" "$state")
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW='' classify_stale "$win" "$state")
   case "$out" in pause\|*) ;; *) fail "captain-held stale did not classify as bounded pause: $out" ;; esac
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW= handle_wake \
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW='' handle_wake \
     "stale: $win (idle 400s, possible wedge, escalation due to threshold)" "$state"
   [ -e "$state/.subsuper-paused-$key" ] \
     || fail "captain-held enriched stale did not stay on bounded pause tracking"
   [ ! -s "$state/.subsuper-escalations" ] \
     || fail "captain-held enriched stale bypassed pause classification"
 
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW= handle_wake "stale: $win" "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW='' handle_wake "stale: $win" "$state"
   [ -e "$state/.subsuper-paused-$key" ] || fail "captain-held stale did not create pause tracking"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "captain-held stale created wedge tracking"
 
@@ -253,7 +253,7 @@ test_stale_captain_held_classifies_pause_without_wedge_replay() {
   [ ! -s "$state/.subsuper-escalations" ] \
     || fail "known-gone captain-held endpoint replayed an identical wedge escalation"
 
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW= handle_wake "stale: $win" "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW='' handle_wake "stale: $win" "$state"
   [ -e "$state/.subsuper-paused-$key" ] || fail "repeated held stale lost bounded pause tracking"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "repeated held stale replayed wedge tracking"
   pass "captain-held known-gone stale remains a bounded pause without wedge replay"
@@ -302,6 +302,7 @@ test_stale_captain_held_remote_remains_ambiguous() {
     "window=$win" "remote_host=remote-mac" "remote_backend=herdr" \
     "remote_target=fm-remote:w1:p1" "harness=codex"
   (
+    # shellcheck disable=SC2329 # Runtime override called indirectly by classify_stale.
     fm_backend_agent_state() { printf 'missing'; }
     out=$(classify_stale "$win" "$state")
     case "$out" in
@@ -425,6 +426,7 @@ test_stale_captain_held_herdr_live_or_ambiguous_remains_stale() {
     fm_write_meta "$state/held-herdr-$mode.meta" "window=$win" "backend=herdr" "harness=pi"
     (
       fm_backend_source herdr
+      # shellcheck disable=SC2329 # Runtime override called indirectly by classify_stale.
       fm_backend_herdr_pane_agent_state() { printf '%s' "$FM_FAKE_HERDR_PANE_STATE"; }
       out=$(FM_FAKE_HERDR_PANE_STATE="$mode" classify_stale "$win" "$state")
       case "$out" in
@@ -692,6 +694,7 @@ test_housekeeping_capture_failure_escalates_stale() {
   key=$(printf '%s' "$task" | tr ':/.' '___')
   echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
   (
+    # shellcheck disable=SC2329 # Runtime override called indirectly by housekeeping.
     fm_backend_capture() { return 1; }
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
   ) || fail "capture-failure housekeeping failed"
@@ -713,11 +716,14 @@ test_housekeeping_local_liveness_rechecks_status() {
   key=$(printf '%s' "$task" | tr ':/.' '___')
   echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
   (
+    # shellcheck disable=SC2329 # Runtime override called indirectly by housekeeping.
     fm_backend_agent_state() { printf 'alive'; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by housekeeping.
     fm_backend_capture() {
       printf 'idle\n'
       printf 'working: resumed while the local probe was in flight\n' > "$status_file"
     }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by housekeeping.
     fm_busy_classify() { printf 'busy'; }
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
   ) || fail "local status-transition housekeeping failed"
