@@ -1510,6 +1510,7 @@ write_ambiguous_reclaim_fixture() {
   } > "$home/state/$id.herdr-presentation"
   {
     printf 'window=default:w2:p2\n'
+    printf 'harness=claude\n'
     printf 'backend=herdr\n'
     printf 'herdr_session=default\n'
     printf 'herdr_workspace_id=w2\n'
