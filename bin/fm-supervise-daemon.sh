@@ -1150,7 +1150,15 @@ housekeeping() {  # <state>
     if task_window_is_remote "$win" "$state"; then
       remote_stale_recheck "$win" "$state"
       case "$?" in
-        0) rm -f "$marker" ;;
+        0)
+          if [ -n "$last" ] && status_is_paused_or_captain_held "$last" \
+            && ! status_is_paused "$last"; then
+            stale_marker_remove "$win" "$state"
+          else
+            escalate_add "$state" "remote stale endpoint gone while not captain-held: $win"
+            stale_marker_remove "$win" "$state"
+          fi
+          ;;
         1) escalate_add "$state" "remote stale persisted ${age}s (possible wedge): $win"
            stale_marker_remove "$win" "$state" ;;
       esac
@@ -1159,7 +1167,8 @@ housekeeping() {  # <state>
     stale_window_is_busy "$win" "$state"
     case "$?" in
       0) rm -f "$marker" ;;
-      2) rm -f "$marker" ;;
+      2) escalate_add "$state" "stale persisted ${age}s (possible wedge; endpoint unreadable): $win"
+         stale_marker_remove "$win" "$state" ;;
       *) escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
          stale_marker_remove "$win" "$state" ;;
     esac

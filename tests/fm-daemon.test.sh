@@ -312,9 +312,9 @@ test_stale_captain_held_remote_remains_ambiguous() {
   pass "remote captain-held endpoints remain visible without local liveness proof"
 }
 
-test_housekeeping_remote_captain_held_stale_marker_rechecks_owner() {
-  local mode dir state win key capture_attempted probe_calls on_bin
-  for mode in dead missing alive ambiguous unknown; do
+test_housekeeping_remote_stale_marker_rechecks_owner() {
+  local mode result status_line dir state win key capture_attempted probe_calls on_bin
+  for mode in dead missing alive ambiguous unknown working-missing; do
     dir=$(make_supercase "housekeeping-captain-held-remote-$mode")
     state="$dir/state"
     win="remote:held-remote-housekeeping"
@@ -327,11 +327,22 @@ test_housekeeping_remote_captain_held_stale_marker_rechecks_owner() {
 printf '%s\n' "$*" >> "${FM_REMOTE_PROBE_CALLS:?}"
 case "${FM_REMOTE_PROBE_RESULT:?}" in
   dead|missing|alive|ambiguous) printf '%s\n' "$FM_REMOTE_PROBE_RESULT" ;;
+  working-missing) printf 'missing\n' ;;
   unknown) exit 1 ;;
 esac
 SH
     chmod +x "$on_bin"
-    printf 'captain-held [key=route]: waiting for recovery ownership\n' > "$state/held-remote-housekeeping.status"
+    case "$mode" in
+      working-missing)
+        result=working-missing
+        status_line='working: supervising the remote secondmate'
+        ;;
+      *)
+        result=$mode
+        status_line='captain-held [key=route]: waiting for recovery ownership'
+        ;;
+    esac
+    printf '%s\n' "$status_line" > "$state/held-remote-housekeeping.status"
     fm_write_meta "$state/held-remote-housekeeping.meta" \
       "window=$win" "remote_host=remote-mac" "remote_backend=herdr" \
       "remote_target=fm-remote:w1:p1" "harness=codex"
@@ -340,12 +351,12 @@ SH
       fm_backend_agent_state() { printf 'missing'; }
       fm_backend_capture() { : > "$capture_attempted"; return 1; }
       FM_STATE_OVERRIDE="$state" FM_ON_BIN="$on_bin" \
-        FM_REMOTE_PROBE_RESULT="$mode" FM_REMOTE_PROBE_CALLS="$probe_calls" \
+        FM_REMOTE_PROBE_RESULT="$result" FM_REMOTE_PROBE_CALLS="$probe_calls" \
         FM_STALE_ESCALATE_SECS=240 \
         FM_REMOTE_STALE_RECHECK_SECS=60 housekeeping "$state"
       if [ "$mode" = unknown ]; then
         FM_STATE_OVERRIDE="$state" FM_ON_BIN="$on_bin" \
-          FM_REMOTE_PROBE_RESULT="$mode" FM_REMOTE_PROBE_CALLS="$probe_calls" \
+          FM_REMOTE_PROBE_RESULT="$result" FM_REMOTE_PROBE_CALLS="$probe_calls" \
           FM_STALE_ESCALATE_SECS=240 \
           FM_REMOTE_STALE_RECHECK_SECS=60 housekeeping "$state"
       fi
@@ -356,10 +367,15 @@ SH
         [ ! -e "$state/.subsuper-stale-$key" ] || fail "$mode remote owner left stale marker"
         [ ! -s "$state/.subsuper-escalations" ] || fail "$mode remote owner escalated stale marker"
         ;;
-      alive|ambiguous)
+      alive|ambiguous|working-missing)
         [ ! -e "$state/.subsuper-stale-$key" ] || fail "$mode remote owner left stale marker"
-        grep -q 'remote stale persisted' "$state/.subsuper-escalations" \
-          || fail "$mode remote owner did not escalate stale marker"
+        if [ "$mode" = working-missing ]; then
+          grep -q 'remote stale endpoint gone while not captain-held' "$state/.subsuper-escalations" \
+            || fail "$mode remote owner did not escalate stale marker"
+        else
+          grep -q 'remote stale persisted' "$state/.subsuper-escalations" \
+            || fail "$mode remote owner did not escalate stale marker"
+        fi
         ;;
       unknown)
         [ -e "$state/.subsuper-stale-$key" ] || fail "unknown remote owner result dropped stale marker"
@@ -368,7 +384,7 @@ SH
         ;;
     esac
   done
-  pass "remote captain-held stale markers reconcile through owner results"
+  pass "remote stale markers reconcile through owner results"
 }
 
 test_stale_captain_held_herdr_live_or_ambiguous_remains_stale() {
@@ -636,6 +652,26 @@ test_housekeeping_persistent_stale_escalates() {
   [ -s "$state/.subsuper-escalations" ] || fail "persistent stale was not escalated"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "stale marker not cleared after escalation"
   pass "persistent stale escalates after threshold and clears its marker"
+}
+
+test_housekeeping_capture_failure_escalates_stale() {
+  local dir state win task key
+  dir=$(make_supercase stale-capture-failure)
+  state="$dir/state"
+  task="capture-failure-w5"; win="sess:fm-$task"
+  printf 'working: still running\n' > "$state/$task.status"
+  fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux" "harness=pi"
+  key=$(printf '%s' "$task" | tr ':/.' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  (
+    fm_backend_capture() { return 1; }
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  ) || fail "capture-failure housekeeping failed"
+  grep -q 'endpoint unreadable' "$state/.subsuper-escalations" \
+    || fail "capture failure did not escalate the stale endpoint"
+  [ ! -e "$state/.subsuper-stale-$key" ] \
+    || fail "capture failure retained ordinary stale tracking after escalation"
+  pass "capture failure escalates stale visibility instead of clearing it"
 }
 
 test_housekeeping_resumed_stale_cleared() {
@@ -2063,7 +2099,7 @@ test_stale_paused_classifies_pause
 test_stale_captain_held_classifies_pause_without_wedge_replay
 test_stale_captain_held_live_or_ambiguous_remains_stale
 test_stale_captain_held_remote_remains_ambiguous
-test_housekeeping_remote_captain_held_stale_marker_rechecks_owner
+test_housekeeping_remote_stale_marker_rechecks_owner
 test_stale_captain_held_herdr_live_or_ambiguous_remains_stale
 test_handle_wake_paused_records_pause_marker
 test_handle_wake_paused_signal_records_pause_marker
@@ -2072,6 +2108,7 @@ test_housekeeping_migrates_watcher_pause_marker
 test_housekeeping_migrates_watcher_unpaused_marker_to_clear
 test_housekeeping_seeds_pause_marker_from_status
 test_housekeeping_persistent_stale_escalates
+test_housekeeping_capture_failure_escalates_stale
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
 test_housekeeping_pause_default_is_2700_and_override_wins
