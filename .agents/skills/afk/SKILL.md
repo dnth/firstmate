@@ -156,7 +156,7 @@ Classify each wake this way:
   If it remains declared and idle past `FM_PAUSE_RESURFACE_SECS`, housekeeping sends one awaiting-external recheck and resets the pause window; [`docs/configuration.md`](../../../docs/configuration.md) owns the shared default and override.
 - A `stale` `captain-held` recovery status is pause-like only after a local backend liveness probe proves the endpoint dead or missing.
   Live or ambiguous local endpoints remain stale and visible; remote endpoints never use local absence as proof and are rechecked through their owner.
-  A confirmed remote dead or missing endpoint clears stale tracking only while the status remains `captain-held`, while a changed, live, ambiguous, or inconclusive result remains visible or escalates.
+  For remote recovery, a confirmed dead or missing endpoint suppresses only a still-`captain-held` status; a declared `paused:` wait follows its existing long-cadence pause path, while other live, ambiguous, changed, or inconclusive recovery remains visible or escalates.
 - `check` -> always escalate. Check scripts print only when firstmate should wake.
 - `stale` with a terminal status or bare legacy captain-relevant line -> escalate.
   Nonterminal progress remains transient even when its prose contains a legacy free-text token or its seen-status marker already matches, so record a marker and self-handle.

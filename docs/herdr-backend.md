@@ -201,7 +201,7 @@ An environment variable alone is not reliable when another Herdr server is runni
 
 Literal text and Enter are separate operations for ordinary steers.
 Spawn-time fixed commands may use Herdr's atomic run primitive.
-The away launcher waits for the exact newly created pane to expose its pane-owned idle foreground shell before submitting the daemon command, so terminal-startup work cannot consume or corrupt it.
+The away launcher waits for the exact newly created pane to expose one proven idle foreground shell before submitting the daemon command, so terminal-startup work cannot consume or corrupt it.
 Enter, Escape, and Ctrl-C are supported.
 Slash and dollar-prefixed input uses the shared harness-aware settle before the first Enter so a completion popup cannot consume it.
 Text is typed once; only Enter is retried.
