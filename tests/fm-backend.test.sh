@@ -141,7 +141,7 @@ resolve_permissive_tmux_kill_ref() {
 # hence the dispatcher is a copied sibling, while the tmux adapter is extracted
 # from BASE_REF so conformance tests retain the exact historical behavior even
 # when this branch changes tmux dispatch semantics.
-OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tasks-axi-lib.sh fm-pr-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-supervision-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-nm-run-lib.sh fm-decision-hold.sh fm-backend.sh fm-operational-input.sh fm-public-followup-lib.sh fm-runpod-lib.sh fm-secondmate-registry-lib.sh fm-secondmate-parent-lib.sh fm-x-lib.sh"
+OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tasks-axi-lib.sh fm-pr-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-supervision-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-nm-run-lib.sh fm-decision-hold.sh fm-backend.sh fm-operational-input.sh fm-public-followup-lib.sh fm-runpod-lib.sh fm-secondmate-registry-lib.sh fm-secondmate-parent-lib.sh fm-x-lib.sh fm-busy-lib.sh fm-session-lock-lib.sh"
 # A pull-request merge may add a new main-only dependency that the branch's older baseline does not have yet.
 # Current entrypoints may source these feature-only libraries even in old fixtures.
 OLD_BIN_OPTIONAL_SIBLINGS="fm-pending-reply-lib.sh fm-omp-process-lib.sh fm-pool-lib.sh fm-treehouse-root-lib.sh fm-treehouse-command.sh"
