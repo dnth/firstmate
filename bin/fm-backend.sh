@@ -724,6 +724,24 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
   esac
 }
 
+# fm_backend_send_text_line: submit one complete shell command through a
+# backend's fixed-command path. This is distinct from the interactive-agent
+# composer verifier below and is used by the Hermes one-process-per-turn
+# adapter only after its semantic idle record proves the prior process ended.
+fm_backend_send_text_line() {  # <backend> <target> <text> [expected-label]
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_send_text_line "$@" ;;
+    herdr) fm_backend_herdr_send_text_line "$@" ;;
+    zellij) fm_backend_zellij_send_text_line "$@" ;;
+    orca) fm_backend_orca_send_text_line "$@" ;;
+    cmux) fm_backend_cmux_send_text_line "$@" ;;
+    *) echo "error: no send-text-line implementation for backend '$backend'" >&2; return 1 ;;
+  esac
+}
+
 # fm_backend_send_text_submit: type text once, then submit and verify,
 # retrying only the submission (never retyping). Echoes the backend's
 # proof-carrying verdict, including an optional idle OMP turn-start reference.
@@ -904,7 +922,8 @@ fm_backend_agent_record_identity() {  # <backend> <target> <meta>
 # fm_backend_agent_state: the single recovery-grade agent/endpoint state
 # contract. It is deliberately richer than fm_backend_target_exists's cheap
 # pane-presence read and prints exactly one of:
-#   alive      - a verified harness agent is running.
+#   alive      - a verified harness agent is running, or a Hermes task has a
+#                valid resumable session bound to its still-present endpoint.
 #   dead       - the endpoint exists but confidently has no agent.
 #   missing    - the recorded endpoint is authoritatively absent.
 #   ambiguous  - the endpoint exists but its process cannot be attributed.
@@ -916,8 +935,23 @@ fm_backend_agent_record_identity() {  # <backend> <target> <meta>
 # classifier. Zellij remains unverified because its secondmate ghost-tab and
 # agent-process recovery path has not been empirically validated. Orca and cmux
 # do not support secondmate spawns.
+fm_backend_hermes_session_ready() {  # <task-meta>
+  local meta=$1 id meta_dir expected session_file session_id
+  case "$(basename "$meta")" in *.meta) id=$(basename "$meta" .meta) ;; *) return 1 ;; esac
+  [ "$(grep -c '^hermes_session_file=' "$meta" 2>/dev/null)" -eq 1 ] || return 1
+  session_file=$(fm_meta_get "$meta" hermes_session_file)
+  meta_dir=$(cd "$(dirname "$meta")" 2>/dev/null && pwd -P) || return 1
+  expected="$meta_dir/$id.hermes-session"
+  [ "$session_file" = "$expected" ] || return 1
+  [ -f "$session_file" ] && [ ! -L "$session_file" ] || return 1
+  [ "$(wc -l < "$session_file" 2>/dev/null | tr -d '[:space:]')" = 1 ] || return 1
+  session_id=$(cat "$session_file" 2>/dev/null) || return 1
+  case "$session_id" in ''|*[!A-Za-z0-9._:-]*) return 1 ;; esac
+  return 0
+}
+
 fm_backend_agent_state() {  # <backend> <target> [task-meta]
-  local backend=$1 target=$2 meta=${3:-} record_harness
+  local backend=$1 target=$2 meta=${3:-} record_harness='' base_state
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }
   FM_BACKEND_AGENT_OMP_BIN=
   FM_BACKEND_AGENT_OMP_BUN=
@@ -935,10 +969,23 @@ fm_backend_agent_state() {  # <backend> <target> [task-meta]
     fi
   fi
   case "$backend" in
-    tmux) fm_backend_tmux_agent_state "$target" "$FM_BACKEND_AGENT_OMP_BUN" "$FM_BACKEND_AGENT_OMP_BIN" ;;
-    herdr) fm_backend_herdr_agent_state "$target" ;;
-    *) printf 'unverified' ;;
+    tmux) base_state=$(fm_backend_tmux_agent_state "$target" "$FM_BACKEND_AGENT_OMP_BUN" "$FM_BACKEND_AGENT_OMP_BIN") ;;
+    herdr) base_state=$(fm_backend_herdr_agent_state "$target") ;;
+    *) base_state=unverified ;;
   esac
+  if [ "$record_harness" = hermes ]; then
+    case "$base_state" in
+      alive|missing) printf '%s' "$base_state"; return 0 ;;
+      dead|ambiguous|unreadable|unverified)
+        if fm_backend_hermes_session_ready "$meta" \
+          && fm_backend_target_exists "$backend" "$target" 2>/dev/null; then
+          printf 'alive'
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  printf '%s' "$base_state"
 }
 
 # Backward-compatible three-state view for existing callers. An

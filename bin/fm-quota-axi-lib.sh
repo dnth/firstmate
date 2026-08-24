@@ -70,6 +70,7 @@ fm_quota_provider_for_profile() {
     codex) printf '%s\n' codex; return 0 ;;
     grok) printf '%s\n' grok; return 0 ;;
     kimi) printf '%s\n' kimi; return 0 ;;
+    hermes) printf '%s\n' codex; return 0 ;;
   esac
   case "$model" in
     */*) prefix=${model%%/*} ;;

@@ -119,6 +119,51 @@ That shared plain-Pi path is retained as disconfirming evidence against using an
 Firstmate therefore sets the exact `FM_PI_HARNESS` selection marker on both worker launch paths, while an unmarked Pi-family process remains `pi`.
 Both recorded runtime identities now classify the exact `pi-launcher` foreground command as `alive`.
 
+### Hermes crewmate mechanics
+
+Hermes Agent v0.20.0 was verified on 2026-08-24 against the configured `gpt-5.6-sol` model through the OpenAI Codex provider.
+The probe used a temporary mode-700 `HERMES_HOME` containing private copies of the current config and auth store, and removed that profile after the run.
+It did not call `fm-spawn`, create a runtime-backend endpoint, or modify the operator's real Hermes config.
+
+```sh
+FM_HERMES_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-hermes-live-e2e.test.sh
+
+HERMES_HOME="$PROFILE" hermes -z \
+  "Remember RESUME-CONTEXT-824 for the next turn and print exactly OK" \
+  --provider openai-codex --model gpt-5.6-sol --reasoning low \
+  --accept-hooks --yolo --pass-session-id
+
+HERMES_HOME="$PROFILE" hermes chat -Q -q \
+  "Print only the token I asked you to remember" \
+  --resume "$SESSION_ID" --no-restore-cwd \
+  --provider openai-codex --model gpt-5.6-sol --reasoning low \
+  --accept-hooks --yolo --pass-session-id
+
+HERMES_HOME="$PROFILE" hermes chat -Q -q \
+  "Apply the preloaded skill" --skills fm-proof \
+  --provider openai-codex --model gpt-5.6-sol --reasoning low \
+  --accept-hooks --yolo --pass-session-id
+```
+
+Observed bounded output:
+
+```text
+command: HERMES_HOME="$PROFILE" hermes -z "Remember RESUME-CONTEXT-824 for the next turn and print exactly OK" --provider openai-codex --model gpt-5.6-sol --reasoning low --accept-hooks --yolo --pass-session-id
+output: exit=0 stdout=OK turn_end=touched session=present started=touched busy=idle hermes-hook
+command: HERMES_HOME="$PROFILE" hermes chat -Q -q "Print only the token I asked you to remember" --resume "$SESSION_ID" --no-restore-cwd --provider openai-codex --model gpt-5.6-sol --reasoning low --accept-hooks --yolo --pass-session-id
+output: exit=0 stdout=  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+RESUME-CONTEXT-824 same_session=yes turn_end=touched started=touched
+command: HERMES_HOME="$PROFILE" hermes chat -Q -q "Apply the preloaded skill" --skills fm-proof --provider openai-codex --model gpt-5.6-sol --reasoning low --accept-hooks --yolo --pass-session-id
+output: exit=0 stdout=HERMES-SKILL-OK skill_preload=applied
+ok - Hermes Agent v0.20.0 (2026.8.3) isolated mechanics: -z exit, lifecycle hook, same-session quiet resume, and skill preload
+```
+
+The initial `-z` run proved the real one-shot process exits and `on_session_end` touches the task marker.
+The same run proved `on_session_start` and `pre_llm_call` publish the initial session and busy transition.
+The resumed quiet-chat process retained conversation context and the same session id, while only `pre_llm_call` supplied its start acknowledgement; `on_session_start` correctly remained a new-session-only event.
+The third isolated turn proved `--skills <skill>` loads and applies a profile-visible skill in the same quiet headless mode.
+The adapter therefore uses `chat -Q --query` for production launch and resume because Hermes v0.20.0's top-level `-z` dispatcher does not thread the resume, session-id, reasoning, or skill axes required by Firstmate.
+
 ### OMP lifecycle
 
 The complete tmux role matrix reran on 2026-07-31 against OMP 17.1.8 using separate private tmux sockets, temporary homes, and disposable git worktrees:
@@ -452,7 +497,7 @@ ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and 
 The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
 Valid cleanup removed only the exact task-bound target and left the control window live.
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
-Claude, Codex, OpenCode, Pi, pi-signed, Grok, and Kimi share that backend cleanup boundary; their harness-specific hook files and token cleanup run only after it, so no harness needs a separate endpoint parser.
+Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, and the crewmate-only Hermes adapter share that backend cleanup boundary; their harness-specific hook files and token cleanup run only after it, so no harness needs a separate endpoint parser.
 
 ## Herdr
 

@@ -103,7 +103,8 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|omp|grok|kimi)
+#   /updatefirstmate, restart). A bare CREWMATE adapter name
+#   (claude|codex|opencode|pi|pi-signed|omp|grok|kimi|hermes)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. pi-signed launches that exact executable name from PATH and
@@ -169,9 +170,12 @@
 #     __OMPMAXTIME__ OMP-only `--max-time=<duration>` fragment from config/omp-max-time
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
+#     __HERMESBIN__ absolute resolved Hermes executable (PATH first, then $HOME/.local/bin/hermes)
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
+# a firstmate-owned global hook and registry, and a gitignored per-task pointer.
+# Hermes uses surgically installed entries in the active profile's config.yaml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
@@ -1219,6 +1223,15 @@ launch_template() {
     # Its turn-end signal is a globally configured Stop hook plus a guarded
     # per-task worktree token, so no launch placeholder belongs here.
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
+    # Hermes v0.20.0's top-level -z path ignores --resume and
+    # --pass-session-id, so the equally headless quiet single-query path owns
+    # the resumable worker lifecycle. --safe-mode is intentionally absent: it
+    # disables config hooks and AGENTS/rules, including both supervision and
+    # the launch brief's project instructions. Hermes is crewmate/scout-only.
+    hermes)
+      [ "$kind" != secondmate ] || return 1
+      printf '%s' '__HERMESBIN__ chat -Q --query "$(__OPINPUT__ encode launch-brief < __BRIEF__)" --provider openai-codex __MODELFLAG____EFFORTFLAG__--accept-hooks --yolo --pass-session-id'
+      ;;
     *) return 1 ;;
   esac
 }
@@ -1265,7 +1278,7 @@ case "$ARG3" in
       fi
       if [ -n "$CREW_FALLBACK_HARNESS" ]; then
         case "$CREW_FALLBACK_HARNESS" in
-          claude|codex|opencode|pi|pi-signed|omp|grok|kimi) ;;
+          claude|codex|opencode|pi|pi-signed|omp|grok|kimi|hermes) ;;
           *) echo "error: config/crew-harness-fallback names an unverified harness: $CREW_FALLBACK_HARNESS" >&2; exit 1 ;;
         esac
         CREW_MODEL_SOURCE=primary
@@ -1353,6 +1366,16 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
       echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2
       exit 1
     }
+  fi
+fi
+
+if [ "$HARNESS" = hermes ] && [ "$RAW_LAUNCH" -eq 0 ]; then
+  if [ "$KIND" = secondmate ]; then
+    echo "error: harness=hermes is verified for crewmates and scouts only; secondmate support is not verified" >&2
+    exit 1
+  fi
+  if [ -z "$MODEL" ] || [ "$MODEL" = default ]; then
+    MODEL=gpt-5.6-sol
   fi
 fi
 
@@ -1667,11 +1690,57 @@ resolve_kimi_binary() {
   return 1
 }
 
+resolve_hermes_binary() {
+  local candidate dir fallback
+  candidate=$(command -v hermes 2>/dev/null || true)
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    case "$candidate" in
+      /*) printf '%s\n' "$candidate"; return 0 ;;
+      *)
+        dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
+        if [ -n "$dir" ]; then
+          printf '%s/%s\n' "$dir" "$(basename "$candidate")"
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  fallback="${HOME:-}/.local/bin/hermes"
+  if [ -n "${HOME:-}" ] && [ -x "$fallback" ]; then
+    printf '%s\n' "$fallback"
+    return 0
+  fi
+  echo "error: Hermes executable not found; searched PATH for 'hermes' and fallback '$fallback'" >&2
+  return 1
+}
+
+resolve_hermes_home() {
+  local binary=$1 config home
+  config=$("$binary" config path 2>/dev/null) || {
+    echo "error: Hermes could not report its active config path" >&2
+    return 1
+  }
+  case "$config" in /*/config.yaml) ;; *) echo "error: Hermes reported an unexpected config path: $config" >&2; return 1 ;; esac
+  [ -f "$config" ] && [ ! -L "$config" ] || {
+    echo "error: Hermes config must be a regular non-symlink file: $config" >&2
+    return 1
+  }
+  home=$(cd "$(dirname "$config")" 2>/dev/null && pwd -P) || {
+    echo "error: Hermes home could not be resolved from $config" >&2
+    return 1
+  }
+  [ "$config" = "$home/config.yaml" ] || {
+    echo "error: Hermes config path does not resolve directly inside its active home: $config" >&2
+    return 1
+  }
+  printf '%s\n' "$home"
+}
+
 model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi)
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|hermes)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1710,6 +1779,14 @@ effort_flag_for_harness() {
         low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
       esac
       ;;
+    hermes)
+      # Hermes v0.20.0 accepts the complete shared profile vocabulary through
+      # --reasoning. Its additional none/minimal/ultra values are outside
+      # Firstmate's shared effort axis and are therefore not synthesized here.
+      case "$effort" in
+        low|medium|high|xhigh|max) printf -- '--reasoning %s ' "$(shell_quote "$effort")" ;;
+      esac
+      ;;
     # opencode's interactive `opencode --prompt` launch has a verified --model
     # flag but no verified effort flag. Its `opencode run --variant` flag belongs
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
@@ -1739,6 +1816,24 @@ case "$LAUNCH" in
         exit 1
       }
     fi
+    ;;
+esac
+
+HERMES_BIN=
+HERMES_HOME_DIR=
+HERMES_SESSION_FILE=
+HERMES_STARTED=
+HERMES_LAUNCH_TEMPLATE=0
+case "$LAUNCH" in
+  *__HERMESBIN__*)
+    HERMES_LAUNCH_TEMPLATE=1
+    HERMES_BIN=$(resolve_hermes_binary) || exit 1
+    HERMES_HOME_DIR=$(resolve_hermes_home "$HERMES_BIN") || exit 1
+    HERMES_BIN="$HERMES_BIN" "$FM_ROOT/bin/fm-hermes-turnend-hook.sh" install || {
+      echo "error: refusing Hermes spawn because the global lifecycle hooks could not be installed safely" >&2
+      exit 1
+    }
+    LAUNCH=${LAUNCH//__HERMESBIN__/$(shell_quote "$HERMES_BIN")}
     ;;
 esac
 
@@ -3053,6 +3148,14 @@ if [ "$KIND" != secondmate ]; then
         exit 1
       }
       ;;
+    hermes)
+      if [ "$HERMES_LAUNCH_TEMPLATE" -eq 1 ]; then
+        BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
+          echo "error: failed to arm the busy-state contract for $ID" >&2
+          exit 1
+        }
+      fi
+      ;;
     kimi*)
       # Standalone Kimi stays unknown until fm_busy_kimi_verified opens on a
       # live-verified installed version (bin/fm-busy-lib.sh owns the gate and
@@ -3261,6 +3364,38 @@ EOF
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-kimi-turnend"
       exclude_path '.fm-kimi-turnend'
       ;;
+    hermes)
+      # Hermes runs one quiet single-query process per logical turn. Its
+      # profile-global shell hook is inert unless this worktree pointer names
+      # a private registry token. on_session_start captures a new session id,
+      # pre_llm_call acknowledges and marks each initial or resumed turn busy,
+      # and on_session_end closes the semantic turn and touches the watcher
+      # notification. The end hook is therefore the precise per-turn boundary
+      # for this one-process-per-turn adapter.
+      if [ "$HERMES_LAUNCH_TEMPLATE" -eq 1 ]; then
+        HERMES_AUTH_DIR="$HERMES_HOME_DIR/fm-turn-end.d"
+        HERMES_SESSION_FILE="$STATE_REAL/$ID.hermes-session"
+        HERMES_STARTED="$STATE_REAL/$ID.hermes-started"
+        rm -f -- "$HERMES_SESSION_FILE" "$HERMES_STARTED"
+        old_umask=$(umask)
+        umask 077
+        auth_file=$(mktemp "$HERMES_AUTH_DIR/fm.XXXXXXXXXXXX")
+        umask "$old_umask"
+        jq -n \
+          --arg turnend "$TURNEND" \
+          --arg session_file "$HERMES_SESSION_FILE" \
+          --arg started "$HERMES_STARTED" \
+          --arg root "$FM_ROOT" \
+          --arg state "$STATE_REAL" \
+          --arg id "$ID" \
+          --arg gen "$BUSY_GEN" \
+          '{turnend:$turnend,session_file:$session_file,started:$started,root:$root,state:$state,id:$id,gen:$gen}' \
+          > "$auth_file"
+        printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.hermes-turnend-token"
+        printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-hermes-turnend"
+        exclude_path '.fm-hermes-turnend'
+      fi
+      ;;
   esac
 fi
 
@@ -3338,6 +3473,12 @@ META_WINDOW=$T
   if [ "$HARNESS" = omp ]; then
     echo "omp_bin=$OMP_BIN_CANON"
     echo "omp_bun=$OMP_BUN_CANON"
+  fi
+  if [ "$HERMES_LAUNCH_TEMPLATE" -eq 1 ]; then
+    echo "hermes_bin=$HERMES_BIN"
+    echo "hermes_home=$HERMES_HOME_DIR"
+    echo "hermes_session_file=$HERMES_SESSION_FILE"
+    echo "hermes_started=$HERMES_STARTED"
   fi
   # Default-off writes no traceparent= line (meta stays byte-identical).
   # backend= is written only for a non-default (non-tmux) backend, so the
@@ -3429,6 +3570,9 @@ if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
 fi
 if [ "$HARNESS" = claude ] && [ "${IS_SANDBOX:-}" = 1 ]; then
   LAUNCH="IS_SANDBOX=1 $LAUNCH"
+fi
+if [ "$HERMES_LAUNCH_TEMPLATE" -eq 1 ]; then
+  LAUNCH="HERMES_HOME=$(shell_quote "$HERMES_HOME_DIR") $LAUNCH"
 fi
 # A RunPod secondmate carries the safe broker coordinates to its descendants,
 # and each OMP launch receives the workstation broker through a loopback-only
@@ -3622,6 +3766,27 @@ if [ "$HARNESS" = omp ]; then
     fi
   fi
   OMP_ABORT_CLEANUP=0
+fi
+if [ "$HERMES_LAUNCH_TEMPLATE" -eq 1 ]; then
+  HERMES_ACK_POLLS=${FM_HERMES_LAUNCH_ACK_POLLS:-120}
+  HERMES_ACK_INTERVAL=${FM_HERMES_LAUNCH_ACK_INTERVAL:-0.5}
+  HERMES_ACKED=0
+  for _ in $(seq 1 "$HERMES_ACK_POLLS"); do
+    if [ -s "$HERMES_SESSION_FILE" ] && [ -f "$HERMES_STARTED" ] \
+      && [ "$(wc -l < "$HERMES_SESSION_FILE" 2>/dev/null | tr -d '[:space:]')" = 1 ]; then
+      HERMES_SESSION_ID=$(cat "$HERMES_SESSION_FILE" 2>/dev/null || true)
+      case "$HERMES_SESSION_ID" in
+        ''|*[!A-Za-z0-9._:-]*) ;;
+        *) HERMES_ACKED=1; break ;;
+      esac
+    fi
+    sleep "$HERMES_ACK_INTERVAL"
+  done
+  if [ "$HERMES_ACKED" -ne 1 ]; then
+    printf 'failed: Hermes initial instruction did not publish a resumable session through its lifecycle hooks\n' >> "$STATE/$ID.status"
+    echo "error: Hermes initial instruction did not publish a resumable session through its lifecycle hooks; inspect window $T" >&2
+    exit 1
+  fi
 fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then

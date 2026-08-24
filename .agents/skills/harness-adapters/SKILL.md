@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, omp, grok, and kimi.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, omp, grok, kimi, and the crewmate-only Hermes adapter.
 user-invocable: false
 metadata:
   internal: true
@@ -44,6 +44,7 @@ OMP primary detection and lock liveness follow the distinct launch-bound identit
 That probe stops at the innermost harness ancestor, so an agent of another harness started from OMP's bash tool keeps its own identity instead of inheriting the OMP primary's.
 Within the Pi family, only the exact launch-boundary marker `FM_PI_HARNESS=pi-signed` alongside `PI_CODING_AGENT=true` selects the signed identity; unmarked shared launcher ancestry remains `pi`.
 `bin/fm-harness.sh crew` resolves the effective crewmate harness from `config/crew-harness` (absent or `default` -> own).
+The configured crew-only `hermes` identity resolves through that same path, but it is not a verified primary or secondmate identity.
 `bin/fm-harness.sh secondmate` resolves the secondmate-launch harness through the chain `config/secondmate-harness` -> `config/crew-harness` -> own, so an unset `config/secondmate-harness` matches the crew harness.
 `bin/fm-spawn.sh` uses `crew` mode for a crewmate/scout launch and `secondmate` mode for a `--secondmate` launch, re-resolving on every spawn so the split is durable across respawns; an explicit per-spawn harness arg overrides either.
 On `unknown`, ask the captain instead of guessing.
@@ -134,6 +135,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | omp | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Native `--prewalk --prewalk-into=<model-spec>` and an effort-qualified target parse were verified 2026-08-11 on OMP 17.2.11, extending the 2026-07-30 exact-worker evidence for all thinking levels on OMP 17.1.8; `docs/verification/runtime-backends.md` records the commands and bounded output. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
+| hermes | `--model <model>` | `--reasoning <low\|medium\|high\|xhigh\|max>` | Verified 2026-08-24 on Hermes Agent v0.20.0; Hermes additionally accepts none/minimal/ultra, but those are outside Firstmate's shared effort vocabulary. |
 
 The concrete `harness` field owns adapter identity independently of the model provider: `harness=pi` with `model=xai/grok-*` is Pi using xAI, not `harness=grok`, and does not require Grok CLI login; `harness=grok` remains the standalone Grok Build CLI adapter.
 Ordinary dispatch does not resolve that split in shell: establish which credential store a tuple reads from the discovery surfaces below plus `quota-axi auth --json`'s per-provider sources, and show that reasoning rather than inferring it from a harness, model, or source name.
@@ -153,6 +155,7 @@ Use the discovery surface in the current authenticated environment because suppo
 | omp | Run `omp models` or `omp models <provider>`; the selected OMP installation and authenticated account own current model availability. |
 | grok | Run `grok models`, which lists the models available to the current Grok installation and account. |
 | kimi | Run `kimi provider list --json`, which lists the current provider and model configuration. |
+| hermes | Run `hermes config get model` and `hermes status`; the former reports the active model/provider slugs and the latter confirms current authentication. |
 
 For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing from a name or prefix.
 A listing that reaches the account and does not contain the model is concrete evidence the model is unsupported: block that candidate and quote the result.
@@ -173,6 +176,7 @@ Natural language is acceptable if uncertain.
 - omp: `/skill:<name>`, for example `/skill:no-mistakes`; the tmux submission adapter verifies autocomplete closure through the structural OMP composer and a real turn transition.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) handles this through the structural composer reader; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
 - kimi: `/<skill>`, for example `/no-mistakes`.
+- hermes: `/<skill>`, for example `/no-mistakes`; `fm-send` uses Hermes' headless `--skills <skill>` preload when the active profile exposes the skill, otherwise it sends a validated absolute `SKILL.md` instruction from Firstmate's installed skill roots.
 
 ## Submission acknowledgement hazards
 
@@ -446,3 +450,44 @@ The delivery-only spinner match covers the full moon-phase glyph set rather than
 Each Kimi crew worktree receives a gitignored `.fm-kimi-turnend` token pointer, and the global hook touches that task's `state/<id>.turn-ended` only when the Stop payload's `cwd`, pointer, and registry entry all agree.
 A guarded silent hook cannot be verified from absence of effect, so prove invocation with an unguarded probe before concluding that the hook did not fire.
 The guarded turn-end signal remains a wake notification; standalone Kimi has no busy-state source until one is live-verified.
+
+## hermes (CREWMATE/SCOUT ONLY; VERIFIED 2026-08-24, Hermes Agent v0.20.0)
+
+Hermes is verified only as a crewmate or scout adapter.
+It is not a verified primary-session or secondmate adapter, and `fm-spawn --secondmate --harness hermes` is refused.
+
+| Fact | Value |
+|---|---|
+| Binary | Executable `hermes` from `PATH`, falling back to executable `$HOME/.local/bin/hermes`; spawn records the selected absolute executable and active Hermes home. |
+| Launch | Quiet headless single-query mode: `hermes chat -Q --query <brief> --provider openai-codex --model <model> [--reasoning <effort>] --accept-hooks --yolo --pass-session-id`; the default model for this adapter is `gpt-5.6-sol`. |
+| Provider | `openai-codex`, whose human-facing label is OpenAI Codex. |
+| Busy state | Firstmate's guarded global shell hook: `pre_llm_call` records busy and `on_session_end` records idle through `bin/fm-busy-event.sh`; `on_session_start` additionally captures a new session id. |
+| Exit command | None while idle because every headless turn exits back to the pane shell; `fm-send ... /exit` is an idempotent idle no-op. |
+| Interrupt | Single `Ctrl+C`, sent as `fm-send ... --key C-c`, interrupts the active headless process. |
+| Skill invocation | `/<skill>` through `fm-send`; Firstmate uses `--skills <skill>` when the Hermes profile exposes it and otherwise supplies the exact installed `SKILL.md` path in the resumed query. |
+| Resume | Every idle text steer runs a fresh quiet process with `--resume <state/<id>.hermes-session> --no-restore-cwd` and the recorded binary, profile home, model, provider, and reasoning axes. |
+| Autonomy | `--yolo --accept-hooks`; quiet single-query mode is non-interactive and cannot wedge on a clarification prompt. |
+| Trust | `--accept-hooks` handles Hermes' first-use `(event, command)` consent allowlist for the Firstmate hook. |
+
+Hermes v0.20.0 exposes top-level `-z`, but its top-level one-shot dispatcher does not thread `--resume`, `--pass-session-id`, `--reasoning`, `--skills`, or the hook-aware CLI session into that path.
+Firstmate therefore uses `chat -Q --query`, which is equally non-interactive and quiet while honoring all lifecycle axes required by the adapter.
+Do not substitute `-z` until a live Hermes release proves those flags reach the one-shot implementation.
+
+Do not add `--safe-mode` to the launch or resume command.
+Hermes documents that safe mode disables user config, rules and AGENTS injection, plugins, MCP servers, and shell hooks, so it would remove both task instructions and the supervised lifecycle signal.
+
+`bin/fm-hermes-turnend-hook.sh` owns the surgical `config.yaml` integration.
+It installs one guarded command each for `on_session_start`, `pre_llm_call`, and `on_session_end`, plus a private token registry under the active Hermes home.
+Each Hermes crew worktree receives a gitignored `.fm-hermes-turnend` pointer; the global hook acts only when that token resolves to the exact task state paths and busy-state generation.
+`on_session_start` captures a newly created session id, while `pre_llm_call` refreshes the same task-bound id, touches `state/<id>.hermes-started`, and marks every initial or resumed turn busy.
+The end event requires the same session id, touches `state/<id>.turn-ended`, and marks the turn idle.
+For this one-process-per-turn adapter, Hermes' `on_session_end` callback at the end of each `run_conversation` call is exactly the supervised turn boundary.
+
+`fm-send` refuses a resume command unless the semantic state is exactly idle, the task-bound session and profile metadata validate, and the recorded executable is still available.
+Hermes has no safe mid-turn text-steer channel in this mode; a busy send is refused instead of typing into the running process, and the firstmate may interrupt with `C-c` before resuming.
+After submitting the resume shell command, `fm-send` requires a newer `hermes-started` acknowledgement before it closes any `--resolve-key` decision.
+If delivery landed but the start hook did not acknowledge it, the send fails as delivered-no-turn, records a supervised recovery wake, and warns not to resend.
+
+An idle Hermes pane contains a shell rather than a persistent TUI process.
+`fm_backend_agent_state` therefore treats the exact combination of a valid task-bound Hermes session file and a still-present recorded endpoint as the adapter's resumable alive state.
+`fm-crew-state` remains harness-generic: the Hermes hook's semantic busy/idle record drives its pane-state gate, then an idle worker falls through to the existing status-log or no-mistakes run reconciliation.

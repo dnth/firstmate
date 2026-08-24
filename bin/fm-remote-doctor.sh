@@ -68,7 +68,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)}"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 REQUIRED_TOOLS=(git jq herdr tasks-axi treehouse)
-HARNESS_TOOLS=(omp claude codex opencode pi pi-signed grok kimi)
+HARNESS_TOOLS=(omp claude codex opencode pi pi-signed grok kimi hermes)
 OPTIONAL_TOOLS=(tmux no-mistakes gh)
 # The --parity tier. Every worker harness this fleet's crew dispatch can select,
 # plus the universal toolchain owned by docs/configuration.md "Toolchain", plus
