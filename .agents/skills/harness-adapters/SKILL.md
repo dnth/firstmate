@@ -464,10 +464,10 @@ It is not a verified primary-session or secondmate adapter, and `fm-spawn --seco
 | Binary | Executable `hermes` from `PATH`, falling back to executable `$HOME/.local/bin/hermes`; spawn records the selected absolute executable and active Hermes home. |
 | Launch | Persistent modern TUI: `hermes chat --tui --in <worktree> --no-restore-cwd --provider openai-codex --model <model> [--reasoning <effort>] [--resume <session>] --accept-hooks --yolo --pass-session-id`; the default model is `gpt-5.6-sol`. |
 | Provider | `openai-codex`, whose human-facing label is OpenAI Codex. |
-| Busy state | The live TUI footer: either the empty-composer placeholder `Ctrl+C to interrupt…` or the status rule's busy-only `· <elapsed>` segment proves busy; the structural `─ ready │` rule proves idle. |
+| Busy state | The plugin-forwarded lifecycle record first, in both directions; only when no valid record exists does the live TUI footer decide, where the empty-composer placeholder `Ctrl+C to interrupt…` or the status rule's busy-only `· <elapsed>` segment proves busy and the structural `─ ready │` rule proves idle. |
 | Composer | Bare `❯` row; idle suggestions are dim/muted ghost text, with the exact v0.20.0 plain-placeholder list retained as a degraded-capture fallback. |
 | Exit command | `/exit` through the composer; successful exit returns the pane to its shell. |
-| Interrupt | Single `Ctrl+C` while provably busy; idle `Ctrl+C` exits Hermes, so `fm-send --key C-c` refuses unless the live TUI is busy. |
+| Interrupt | Single `Ctrl+C` while provably busy; idle `Ctrl+C` exits Hermes, so `fm-send --key C-c` refuses unless the classified state above is exactly busy, and a lagging rendered busy row can never override a settled idle record. |
 | Skill invocation | `/<skill>` through `fm-send`; a skill installed in the Hermes profile stays a native TUI slash command, while a Firstmate-only skill becomes a validated exact `SKILL.md` pointer instruction. |
 | Resume | Relaunch the same persistent TUI with `--resume <state/<id>.hermes-session> --in <worktree> --no-restore-cwd`; spawn sends a recovery-specific brief pointer after readiness. |
 | Autonomy | `--yolo --accept-hooks`; clarification remains an interactive TUI surface rather than a headless process failure. |
@@ -489,7 +489,7 @@ Later lifecycle events must match that stable id, and `pre_llm_call` records bus
 The end event requires the same session id, touches `state/<id>.turn-ended`, and marks the turn idle.
 Hermes' `on_session_end` callback at the end of each TUI `run_conversation` call is the exact supervised turn boundary, including turns shorter than the watcher poll interval.
 
-`fm-send` refuses a composer injection unless the live TUI is exactly idle, the task-bound session and profile metadata validate, and the structural composer is empty.
+`fm-send` refuses a composer injection unless the classified state is exactly idle, the task-bound session and profile metadata validate, and the structural composer is empty.
 Hermes spawns on backends other than tmux and Herdr are refused before endpoint creation.
 Hermes' busy-input behavior is profile-configurable and can interrupt rather than queue, so a busy send is refused until the turn settles or Firstmate interrupts it with `C-c`.
 After submitting through the composer, `fm-send` requires a newer `hermes-started` acknowledgement before it closes any `--resolve-key` decision.
@@ -499,4 +499,5 @@ If delivery landed but the start hook did not acknowledge it, the send fails as 
 
 An idle Hermes pane retains the persistent TUI process.
 Tmux recovery validates the foreground Hermes process against the recorded executable, while Herdr requires a registered live agent rather than upgrading a shell husk from the session sidecar.
+A spawn that finds `state/<id>.hermes-session` present but carrying no usable resumable id refuses instead of launching a fresh session against that stale sidecar, because the lifecycle bridge would then never acknowledge a turn; remove the sidecar or run `fm-teardown.sh <id> --force` and respawn.
 `fm-crew-state` remains harness-generic: the Hermes hook's semantic busy/idle record drives its pane-state gate, then an idle worker falls through to the existing status-log or no-mistakes run reconciliation.

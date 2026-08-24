@@ -223,9 +223,9 @@ The full cmux home label also includes a short hash of the resolved `FM_ROOT` pa
 
 claude, codex, opencode, pi, pi-signed, omp, grok, and kimi are empirically verified harness identities for crewmate and secondmate launches on their documented backend combinations.
 Hermes is verified only for crewmate and scout launches and is refused for primary sessions and secondmates.
-Hermes resume delivery requires a structurally idle shell with cleared input, which is available on tmux and Herdr; Hermes spawns on other backends are refused before endpoint creation.
+Hermes runs as a persistent TUI and is steered through its composer, which is verified on tmux and Herdr; Hermes spawns on other backends are refused before endpoint creation.
 Hermes profiles accept the shared `low`, `medium`, `high`, `xhigh`, and `max` effort vocabulary and forward it as native reasoning effort.
-Each Hermes crew spawn surgically registers guarded profile-global lifecycle hooks: session start binds the task session once, matching pre-LLM records busy before acknowledging the turn, and matching session end records idle.
+Each Hermes crew spawn surgically registers the guarded profile-global lifecycle bridge: session start binds the task session once, matching pre-LLM records busy before acknowledging the turn, and matching session end records idle.
 OMP is verified as a primary, crewmate, scout, and secondmate runtime only on tmux and Herdr; Zellij, Orca, and cmux reject OMP before endpoint creation and carry no live OMP claim.
 [README requirements](../README.md#requirements) owns the complete set supported for the primary session.
 New harnesses get verified through a supervised trial task before joining the set.
@@ -649,7 +649,7 @@ FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRIES=3        # fetch retries after fm-fleet-s
 FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=1 # seconds fm-fleet-sync.sh waits before each of those retries
 FM_FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS=30       # min mtime age before fm-fleet-sync.sh treats a leftover packed-refs.lock as provably stale
 FM_BUSY_REGEX=          # optional override for rendered delivery guards and Grok's isolated task-state fallback; converted worker state ignores it
-FM_COMPOSER_IDLE_RE=    # optional override for the fleet-wide empty-composer placeholder regex, applied after ghost and border stripping. Unset installs the verified default alternation in bin/fm-composer-lib.sh covering the claude, codex, grok, and hermes placeholders; it applies to both the tmux and herdr composer readers, and FM_BACKEND_HERDR_IDLE_RE inherits it
+FM_COMPOSER_IDLE_RE=    # optional override for the fleet-wide empty-composer placeholder regex, applied after ghost and border stripping. Unset installs the verified default alternation in bin/fm-composer-lib.sh, which also treats Hermes' busy `Ctrl+C to interrupt…` placeholder as empty composer content so a retried Enter cannot read it as pending typed input; it applies to both the tmux and herdr composer readers, and FM_BACKEND_HERDR_IDLE_RE inherits it
 FM_COMPOSER_GHOST_LUMA_MAX=128   # fleet-wide: max perceived luminance (0.299R+0.587G+0.114B, 0-255) for a TRUECOLOR foreground to count as de-emphasised ghost/placeholder text and be stripped; dim/faint (SGR 2) is stripped regardless. Assumes a dark terminal theme (bin/fm-composer-lib.sh's fm_composer_strip_ghost, shared by the tmux and herdr composer readers)
 GROK_HOME=              # optional Grok config home for firstmate's global grok turn-end hook; defaults to ~/.grok
 FM_SEND_RETRIES=3       # fm-send Enter-retry attempts after typing the line once
@@ -658,6 +658,19 @@ FM_SEND_SETTLE=1        # seconds fm-send waits after a successful text submit; 
 FM_SEND_TURNSTART_TIMEOUT=1  # OMP-only seconds to verify an idle submit started a turn; accepted range 0.1..3
 FM_SEND_TURNSTART_POLL=0.1   # OMP-only turn-start sampling interval; accepted range 0.02..timeout
 # Initially idle, non-/exit OMP text submission requires Perl Time::HiRes for its monotonic turn-start deadline.
+FM_HERMES_READY_POLLS=120      # hermes-only: fm-spawn samples waiting for the persistent TUI's ready footer and empty composer
+FM_HERMES_READY_INTERVAL=0.5   # hermes-only: seconds between those readiness samples
+FM_HERMES_SETTING_POLLS=120    # hermes-only: fm-spawn samples waiting for the session-scoped /reasoning value to be confirmed on the ready footer
+FM_HERMES_SETTING_INTERVAL=0.25 # hermes-only: seconds between those reasoning-confirmation samples
+FM_HERMES_SUBMIT_RETRIES=3     # hermes-only: fm-spawn Enter retries per composer submit during launch setup
+FM_HERMES_SUBMIT_INTERVAL=0.4  # hermes-only: seconds between those submit checks
+FM_HERMES_LAUNCH_ACK_POLLS=120     # hermes-only: samples fm-spawn waits for the launch turn's lifecycle acknowledgement
+FM_HERMES_LAUNCH_ACK_INTERVAL=0.5  # hermes-only: seconds between those acknowledgement samples
+FM_SEND_HERMES_START_POLLS=        # hermes-only: fm-send turn-start acknowledgement samples; unset inherits FM_HERMES_LAUNCH_ACK_POLLS so a steer never gets a smaller budget than a launch
+FM_SEND_HERMES_START_INTERVAL=     # hermes-only: seconds between those samples; unset inherits FM_HERMES_LAUNCH_ACK_INTERVAL
+FM_SEND_HERMES_EXIT_POLLS=120      # hermes-only: samples fm-send waits for the pane to leave the TUI after /exit
+FM_SEND_HERMES_EXIT_INTERVAL=0.5   # hermes-only: seconds between those exit samples
+FM_HERMES_DEBUG=0              # hermes-only: 1 prints fm-spawn's final reasoning-probe capture to stderr when the setting is never confirmed
 FM_PENDING_REPLY_GRACE_SECS=120   # seconds after marked-request delivery before a completed turn without a correlated parent report is eligible for its one recovery repost
 # sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
 FM_SUPERVISOR_BACKEND=             # optional supervisor pane backend override; tmux/herdr only, otherwise detects $TMUX_PANE then HERDR_ENV/HERDR_PANE_ID before tmux fallback

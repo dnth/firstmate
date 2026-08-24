@@ -15,13 +15,18 @@
 # submit or reports an inconclusive send. If a swallowed Enter is positively
 # confirmed, fm-send exits NON-ZERO so the caller knows the steer did not land
 # instead of silently leaving an unsubmitted instruction.
-# For an OMP or Hermes target, a confirmed idle submit must also start a real turn before
-# the monotonic FM_SEND_TURNSTART_TIMEOUT deadline (default 1 second, maximum 3
-# seconds), sampled no more often than FM_SEND_TURNSTART_POLL (default 0.1
-# second). Proof is the existing backend busy reader or advancement of the
-# generated OMP turn-start marker after the backend's submit-time baseline. A
-# confirmed submit with no proof returns `delivered-no-turn` on stderr and exits
-# 4. A task-bound target also receives an actionable status event and durable
+# For an OMP or Hermes target, a confirmed idle submit must also start a real
+# turn before a bounded deadline. OMP uses the monotonic
+# FM_SEND_TURNSTART_TIMEOUT deadline (default 1 second, maximum 3 seconds),
+# sampled no more often than FM_SEND_TURNSTART_POLL (default 0.1 second), and
+# proves the turn through the existing backend busy reader or advancement of
+# the generated OMP turn-start marker after the backend's submit-time baseline.
+# Hermes proves it through a newer state/<id>.hermes-started acknowledgement
+# from its lifecycle bridge, polled FM_SEND_HERMES_START_POLLS times at
+# FM_SEND_HERMES_START_INTERVAL seconds (unset inherits the launch budget,
+# default 120 x 0.5 second), so a steer never gets a smaller budget than a
+# launch. A confirmed submit with no proof returns `delivered-no-turn` on
+# stderr and exits 4. A task-bound target also receives an actionable status event and durable
 # watcher wake so supervised recovery starts promptly without an automatic
 # terminate or relaunch. Failure to persist either required recovery trigger
 # exits 5 as `delivered-no-turn-persistence-failed` after warning that delivery
