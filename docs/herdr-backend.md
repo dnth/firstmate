@@ -201,6 +201,7 @@ An environment variable alone is not reliable when another Herdr server is runni
 
 Literal text and Enter are separate operations for ordinary steers.
 Spawn-time fixed commands may use Herdr's atomic run primitive.
+The away launcher waits for the exact newly created pane to expose its pane-owned idle foreground shell before submitting the daemon command, so terminal-startup work cannot consume or corrupt it.
 Enter, Escape, and Ctrl-C are supported.
 Slash and dollar-prefixed input uses the shared harness-aware settle before the first Enter so a completion popup cannot consume it.
 Text is typed once; only Enter is retried.
@@ -288,8 +289,9 @@ The pane-independent max-defer alert is configured in [`wedge-alarm.md`](wedge-a
 
 Harnesses with native tracked background execution can run the daemon in their terminal.
 Pi has no such mechanism.
-`bin/fm-afk-launch.sh` therefore creates a dedicated unfocused Herdr workspace, runs the daemon there with an explicit supervisor target and backend, records the exact daemon pane, and closes only that pane on stop.
-`fm_afk_launch_create_herdr` submits the fixed daemon command through the same readiness-owning path as a Herdr spawn, so a newly created pane must pass the strict idle-foreground-shell proof before typing and an unready pane receives no command.
+`bin/fm-afk-launch.sh` captures the captain target before creating anything, then creates one dedicated unfocused Herdr workspace, runs the daemon there with that explicit supervisor target and backend, records the exact daemon pane and workspace, and closes only that pane on stop.
+`fm_afk_launch_create_herdr` submits the fixed daemon command through the same readiness-owning path as a Herdr spawn, so the exact new pane must pass the strict idle-foreground-shell proof before typing.
+If readiness or command submission fails, it closes that exact pane and the outer launcher restores the prepared AFK state from its backup.
 It never splits the captain's active tab and never uses shell `&`.
 Recovery reconciles only the recorded exact id.
 
