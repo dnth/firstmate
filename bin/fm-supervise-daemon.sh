@@ -487,6 +487,14 @@ clear_pause_tracking() {  # <window> <state>
     "$state/.stale-$watcher_key" "$state/.stale-since-$watcher_key" "$state/.wedge-escalations-$watcher_key"
 }
 
+task_window_is_remote() {
+  local win=$1 state=$2 task meta
+  task=$(window_to_task "$win" "$state")
+  meta="$state/$task.meta"
+  [ -f "$meta" ] || return 1
+  [ -n "$(fm_meta_get "$meta" remote_host)" ]
+}
+
 reconcile_pause_tracking() {  # <window> <state> <last-status-line>
   local win=$1 state=$2 last=$3 task key marker watcher_key
   task=$(window_to_task "$win" "$state")
@@ -506,14 +514,13 @@ reconcile_pause_tracking() {  # <window> <state> <last-status-line>
 }
 
 daemon_pause_status_is_valid() {  # <window> <state> <last-status-line>
-  local win=$1 state=$2 last=$3 task meta backend agent_state remote_host
+  local win=$1 state=$2 last=$3 task meta backend agent_state
   status_is_paused "$last" && return 0
   status_is_paused_or_captain_held "$last" || return 1
   task=$(window_to_task "$win" "$state")
   meta="$state/$task.meta"
   [ -f "$meta" ] || return 1
-  remote_host=$(fm_meta_get "$meta" remote_host)
-  [ -z "$remote_host" ] || return 1
+  task_window_is_remote "$win" "$state" && return 1
   backend=$(fm_backend_of_meta "$meta")
   agent_state=$(fm_backend_agent_state "$backend" "$win" "$meta" 2>/dev/null || true)
   case "$agent_state" in
@@ -1078,6 +1085,7 @@ housekeeping() {  # <state>
       reconcile_pause_tracking "$win" "$state" "$last"
       continue
     fi
+    task_window_is_remote "$win" "$state" && continue
     age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
     [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
     stale_window_is_busy "$win" "$state"

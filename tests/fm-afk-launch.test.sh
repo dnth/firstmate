@@ -328,28 +328,34 @@ unit_signal_exits_with_lock_cleanup() {
 }
 
 unit_herdr_partial_create_recovery() {
-  local st recorded
+  local st recorded run_attempted
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-herdr-partial.XXXXXX")
   recorded="$st/recorded"
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_LAUNCH_ENTRY=/bin/true \
+  run_attempted="$st/run-attempted"
+  HERDR_RUN_ATTEMPTED="$run_attempted" FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_LAUNCH_ENTRY=/bin/true \
     FM_AFK_LAUNCH_LABEL=afk-exact-label RECORDED="$recorded" bash -c '
     . "$1"
+    . "$2/bin/backends/herdr.sh"
     fm_backend_source() { return 0; }
     fm_backend_herdr_server_ensure() { return 0; }
+    fm_backend_herdr_pane_idle_shell_sample() { return 0; }
     fm_backend_herdr_cli() {
       if [ "$2 $3" = "workspace create" ]; then
         printf %s '\''truncated'\''
         return 1
       elif [ "$2 $3" = "workspace list" ]; then
         printf %s '\''{"result":{"workspaces":[{"workspace_id":"ws-partial","label":"afk-exact-label"}]}}'\''
+      elif [ "$2 $3" = "pane run" ]; then
+        : > "$HERDR_RUN_ATTEMPTED"
+        printf %s '\''{"result":{}}'\''
       else
         printf %s '\''{"result":{"panes":[{"pane_id":"pane-exact"}]}}'\''
       fi
     }
     fm_afk_launch_record_write() { printf "%s:%s:%s" "$1" "$2" "$3" > "$RECORDED"; }
     fm_afk_launch_create_herdr lab:captain herdr
-  ' _ "$LAUNCH"
-  if [ "$(cat "$recorded" 2>/dev/null || true)" = "herdr:lab:pane-exact:ws-partial" ]; then
+  ' _ "$LAUNCH" "$ROOT"
+  if [ -e "$run_attempted" ] && [ "$(cat "$recorded" 2>/dev/null || true)" = "herdr:lab:pane-exact:ws-partial" ]; then
     pass "herdr create: malformed response recovers durable exact ownership"
   else
     fail "herdr create: malformed response left terminal ownership unknown"
@@ -548,7 +554,7 @@ unit_herdr_submission_waits_for_idle_shell() {
       printf "%s\t%s\t%s\n" "$1" "$2" "$3" > "$FM_AFK_LAUNCH_RECORD"
     }
     fm_afk_launch_commit_terminal() { return 0; }
-    fm_afk_launch_close_recorded() { : > "$CLOSED"; return 0; }
+    fm_afk_launch_close_recorded() { rm -f "$FM_AFK_LAUNCH_RECORD"; : > "$CLOSED"; return 0; }
     sleep() { :; }
     run_case() {
       local name=$1 threshold=$2 polls=$3 rc
@@ -582,7 +588,8 @@ unit_herdr_submission_waits_for_idle_shell() {
   if [ "$(cat "$case_dir/never.result" 2>/dev/null || true)" -ne 0 ] \
     && [ "$(cat "$case_dir/never.attempts" 2>/dev/null || true)" = 2 ] \
     && [ "$(wc -l < "$case_dir/never.calls" 2>/dev/null || true)" = 0 ] \
-    && [ -e "$case_dir/never.closed" ]; then
+    && [ -e "$case_dir/never.closed" ] \
+    && [ ! -e "$st/state/.afk-daemon-terminal" ]; then
     pass "herdr submit: permanent unreadiness submits no command and rolls back exactly"
   else
     fail "herdr submit: permanent unreadiness submitted or skipped exact rollback"

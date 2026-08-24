@@ -312,6 +312,29 @@ test_stale_captain_held_remote_remains_ambiguous() {
   pass "remote captain-held endpoints remain visible without local liveness proof"
 }
 
+test_housekeeping_remote_captain_held_stale_marker_survives_unreadable_recheck() {
+  local dir state win key capture_attempted
+  dir=$(make_supercase housekeeping-captain-held-remote)
+  state="$dir/state"
+  win="remote:held-remote-housekeeping"
+  key=$(printf '%s' "held-remote-housekeeping" | tr ':/.' '___')
+  capture_attempted="$dir/capture-attempted"
+  printf 'captain-held [key=route]: waiting for recovery ownership\n' > "$state/held-remote-housekeeping.status"
+  fm_write_meta "$state/held-remote-housekeeping.meta" \
+    "window=$win" "remote_host=remote-mac" "remote_backend=herdr" \
+    "remote_target=fm-remote:w1:p1" "harness=codex"
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  (
+    fm_backend_agent_state() { printf 'missing'; }
+    fm_backend_capture() { : > "$capture_attempted"; return 1; }
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  ) || fail "remote captain-held stale housekeeping failed"
+  [ -e "$state/.subsuper-stale-$key" ] || fail "remote captain-held stale marker was dropped after an unreadable local probe"
+  [ ! -e "$capture_attempted" ] || fail "remote captain-held stale attempted a local capture"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "remote captain-held stale escalated without an authoritative remote result"
+  pass "remote captain-held stale markers survive without authoritative remote liveness"
+}
+
 test_stale_captain_held_herdr_live_or_ambiguous_remains_stale() {
   local mode dir state win out
   for mode in live unknown; do
@@ -2004,6 +2027,7 @@ test_stale_paused_classifies_pause
 test_stale_captain_held_classifies_pause_without_wedge_replay
 test_stale_captain_held_live_or_ambiguous_remains_stale
 test_stale_captain_held_remote_remains_ambiguous
+test_housekeeping_remote_captain_held_stale_marker_survives_unreadable_recheck
 test_stale_captain_held_herdr_live_or_ambiguous_remains_stale
 test_handle_wake_paused_records_pause_marker
 test_handle_wake_paused_signal_records_pause_marker
