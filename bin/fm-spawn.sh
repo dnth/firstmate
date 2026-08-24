@@ -1237,15 +1237,46 @@ launch_template() {
   esac
 }
 
+fm_spawn_raw_effective_harness() {  # <raw-command>
+  local raw=$1 word candidate wrapper= skip_next=0
+  local -a words
+  read -r -a words <<< "$raw"
+  for word in "${words[@]}"; do
+    if [ "$skip_next" -eq 1 ]; then
+      skip_next=0
+      continue
+    fi
+    word=${word#\"}
+    word=${word%\"}
+    word=${word#\'}
+    word=${word%\'}
+    case "$word" in [A-Za-z_]*=*) continue ;; esac
+    candidate=$(basename -- "$word")
+    case "$candidate" in
+      env|nohup|command|exec) wrapper=$candidate; continue ;;
+    esac
+    case "$wrapper:$word" in
+      env:-u|env:--unset|env:-C|env:--chdir|env:-a|env:--argv0|exec:-a)
+        skip_next=1
+        continue
+        ;;
+      *:--|*:-*) continue ;;
+    esac
+    printf '%s\n' "$candidate"
+    return 0
+  done
+  return 1
+}
+
 RAW_LAUNCH=0
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     RAW_LAUNCH=1
     LAUNCH=$ARG3
-    HARNESS=""
-    for word in $LAUNCH; do
-      case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
-    done
+    HARNESS=$(fm_spawn_raw_effective_harness "$LAUNCH") || {
+      echo "error: raw launch command has no resolvable effective executable" >&2
+      exit 1
+    }
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
@@ -1370,16 +1401,8 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
   fi
 fi
 
-RAW_HERMES_LAUNCH=0
-if [ "$RAW_LAUNCH" -eq 1 ]; then
-  case "$LAUNCH" in *hermes*) RAW_HERMES_LAUNCH=1 ;; esac
-fi
 if [ "$HARNESS" = hermes ] && [ "$KIND" = secondmate ]; then
   echo "error: harness=hermes is verified for crewmates and scouts only; secondmate support is not verified" >&2
-  exit 1
-fi
-if [ "$RAW_HERMES_LAUNCH" -eq 1 ] && [ "$KIND" = secondmate ]; then
-  echo "error: raw Hermes launch commands are refused for secondmates, including wrapped commands" >&2
   exit 1
 fi
 if [ "$HARNESS" = hermes ] && [ "$RAW_LAUNCH" -eq 0 ]; then
@@ -1387,7 +1410,7 @@ if [ "$HARNESS" = hermes ] && [ "$RAW_LAUNCH" -eq 0 ]; then
     MODEL=gpt-5.6-sol
   fi
 fi
-if [ "$HARNESS" = hermes ] || [ "$RAW_HERMES_LAUNCH" -eq 1 ]; then
+if [ "$HARNESS" = hermes ]; then
   case "$BACKEND" in
     tmux|herdr) ;;
     *)

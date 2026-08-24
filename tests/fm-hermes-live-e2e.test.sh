@@ -83,11 +83,11 @@ printf 'output: exit=0 stdout=%s turn_end=touched session=present started=touche
 
 rm -f "$STATE/manual-hermes.turn-ended" "$STATE/manual-hermes.hermes-started"
 # shellcheck disable=SC2016 # These are display-only exact command templates.
-RESUME_COMMAND='HERMES_HOME="$PROFILE" hermes chat -Q -q "Print only the token I asked you to remember" --resume "$SESSION_ID" --no-restore-cwd --provider openai-codex --model gpt-5.6-sol --reasoning low --accept-hooks --yolo --pass-session-id'
+RESUME_COMMAND='HERMES_HOME="$PROFILE" hermes chat -Q --query "Print only the token I asked you to remember" --resume "$SESSION_ID" --no-restore-cwd --provider openai-codex --model gpt-5.6-sol --reasoning low --accept-hooks --yolo --pass-session-id'
 printf 'command: %s\n' "$RESUME_COMMAND"
 (
   cd "$WORKSPACE" || exit 1
-  HERMES_HOME="$PROFILE" "$HERMES_BIN" chat -Q -q \
+  HERMES_HOME="$PROFILE" "$HERMES_BIN" chat -Q --query \
     "Print only the token I asked you to remember" \
     --resume "$SESSION_ID" --no-restore-cwd \
     --provider openai-codex --model gpt-5.6-sol --reasoning low \
@@ -104,11 +104,11 @@ printf 'output: exit=0 stdout=%s same_session=yes turn_end=touched started=touch
   "$(tr '\n' ' ' < "$LAB/resume.out" | sed 's/[[:space:]]*$//')"
 
 # shellcheck disable=SC2016 # These are display-only exact command templates.
-SKILL_COMMAND='HERMES_HOME="$PROFILE" hermes chat -Q -q "Apply the preloaded skill" --skills fm-proof --provider openai-codex --model gpt-5.6-sol --reasoning low --accept-hooks --yolo --pass-session-id'
+SKILL_COMMAND='HERMES_HOME="$PROFILE" hermes chat -Q --query "Apply the preloaded skill" --skills fm-proof --provider openai-codex --model gpt-5.6-sol --reasoning low --accept-hooks --yolo --pass-session-id'
 printf 'command: %s\n' "$SKILL_COMMAND"
 (
   cd "$WORKSPACE" || exit 1
-  HERMES_HOME="$PROFILE" "$HERMES_BIN" chat -Q -q \
+  HERMES_HOME="$PROFILE" "$HERMES_BIN" chat -Q --query \
     "Apply the preloaded skill" --skills fm-proof \
     --provider openai-codex --model gpt-5.6-sol --reasoning low \
     --accept-hooks --yolo --pass-session-id

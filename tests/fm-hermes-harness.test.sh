@@ -182,8 +182,24 @@ fixture_hook() {
       bash "$HERMES_HOME_DIR/fm-turn-end.sh"
 }
 
+config_hook_timeouts() {
+  "$PYTHON_BIN" - "$1" <<'PY'
+import sys
+import yaml
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    config = yaml.safe_load(stream)
+for event in ("on_session_start", "pre_llm_call", "on_session_end"):
+    entries = config["hooks"][event]
+    owned = [entry for entry in entries if entry.get("command", "").endswith("/fm-turn-end.sh")]
+    if len(owned) != 1:
+        raise SystemExit(1)
+    print(owned[0]["timeout"])
+PY
+}
+
 test_hermes_hook_install_is_surgical_idempotent_and_removable() {
-  local home config original once no_newline
+  local home config original once no_newline timeouts
   home="$TMP_ROOT/config-surgery"
   config="$home/config.yaml"
   original="$home/original.yaml"
@@ -202,10 +218,26 @@ SH
   chmod +x "$TMP_ROOT/config-hermes"
   HERMES_HOME="$home" HERMES_BIN="$TMP_ROOT/config-hermes" FM_HERMES_PYTHON="$PYTHON_BIN" \
     "$HOOK_INSTALLER" install || fail "Hermes hook install refused a foreign hooks mapping"
+  timeouts=$(config_hook_timeouts "$config") || fail "Hermes hook timeouts were not readable"
+  [ "$timeouts" = $'10\n10\n10' ] || fail "Hermes hook timeout did not exceed the busy-lock budget"
   cp "$config" "$once"
   HERMES_HOME="$home" HERMES_BIN="$TMP_ROOT/config-hermes" FM_HERMES_PYTHON="$PYTHON_BIN" \
     "$HOOK_INSTALLER" install || fail "second Hermes hook install failed"
   cmp -s "$once" "$config" || fail "second Hermes hook install changed config bytes"
+  "$PYTHON_BIN" - "$config" <<'PY'
+import sys
+
+path = sys.argv[1]
+with open(path, "rb") as stream:
+    data = stream.read()
+if data.count(b"timeout: 10") != 3:
+    raise SystemExit(1)
+with open(path, "wb") as stream:
+    stream.write(data.replace(b"timeout: 10", b"timeout: 2"))
+PY
+  HERMES_HOME="$home" HERMES_BIN="$TMP_ROOT/config-hermes" FM_HERMES_PYTHON="$PYTHON_BIN" \
+    "$HOOK_INSTALLER" install || fail "Hermes hook installer did not upgrade legacy timeout entries"
+  cmp -s "$once" "$config" || fail "Hermes hook timeout upgrade changed unrelated config bytes"
   assert_grep '/foreign/hook.sh' "$config" "Hermes hook install removed a foreign hook"
   HERMES_HOME="$home" HERMES_BIN="$TMP_ROOT/config-hermes" FM_HERMES_PYTHON="$PYTHON_BIN" \
     "$HOOK_INSTALLER" remove || fail "Hermes hook removal failed"
@@ -227,7 +259,7 @@ SH
 }
 
 test_hermes_spawn_resume_skill_state_and_teardown() {
-  local rec out rc launch meta state_line token registry commands
+  local rec out rc launch meta state_line token registry commands session interrupt_state
   TEST_ID=hermes-lifecycle-x1
   rec=$(make_case lifecycle "$TEST_ID")
   read_case "$rec"
@@ -278,8 +310,12 @@ test_hermes_spawn_resume_skill_state_and_teardown() {
     "Hermes skill invocation did not use the validated Firstmate skill pointer"
   assert_contains "$commands" "--skills 'native-check'" "Hermes native skill invocation did not preload the skill"
   assert_contains "$commands" "Apply the preloaded native-check skill now." "Hermes native skill invocation lost its action prompt"
+  session=$(cat "$HOME_DIR/state/$TEST_ID.hermes-session")
+  fixture_hook pre_llm_call "$session"
   fixture_env "$SEND" "$TEST_ID" --key C-c || fail "Hermes interrupt key was not mapped"
   assert_contains "$(cat "$CASE_DIR/tmux.log")" " C-c" "Hermes interrupt did not send Ctrl+C"
+  interrupt_state=$(fixture_env bash -c '. "$1/bin/fm-busy-lib.sh"; fm_busy_classify tmux unused hermes "$2" "$3"' _ "$ROOT" "$TEST_ID" "$HOME_DIR/state")
+  [ "$interrupt_state" = 'idle fm-interrupt' ] || fail "Hermes Ctrl+C did not record truthful idle state: $interrupt_state"
   fixture_env "$SEND" "$TEST_ID" /exit || fail "idle Hermes exit should be an idempotent no-op"
 
   fixture_env "$TEARDOWN" "$TEST_ID" --force >/dev/null 2>&1 || fail "Hermes teardown failed"
@@ -327,9 +363,23 @@ test_wrapped_hermes_raw_secondmate_is_refused() {
   out=$(fixture_env "$SPAWN" "$TEST_ID" "$HOME_DIR/not-a-secondmate" \
     'env HERMES_HOME=/tmp/profile hermes --yolo' --secondmate 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "wrapped raw Hermes command was accepted for a secondmate"
-  assert_contains "$out" "including wrapped commands" "wrapped Hermes refusal omitted its boundary"
+  assert_contains "$out" "crewmates and scouts only" "wrapped Hermes refusal omitted its boundary"
   assert_not_contains "$(cat "$CASE_DIR/tmux.log")" "new-window" "wrapped Hermes refusal created an endpoint"
   pass "wrapped Hermes raw commands are refused for secondmates"
+}
+
+test_nonhermes_raw_launch_mentions_do_not_select_hermes() {
+  local rec out rc
+  TEST_ID=raw-nonhermes-mention-x12
+  rec=$(make_case raw-nonhermes-mention "$TEST_ID")
+  read_case "$rec"
+  rc=0
+  out=$(fixture_env "$SPAWN" "$TEST_ID" "$HOME_DIR/not-a-secondmate" \
+    'omp --resume /notes/hermes-port.md' --secondmate 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "invalid non-Hermes raw secondmate fixture unexpectedly launched"
+  assert_not_contains "$out" "harness=hermes" "raw executable resolution misclassified a later Hermes mention"
+  assert_not_contains "$out" "raw Hermes launch" "raw executable resolution substring-matched an argument"
+  pass "raw executable resolution ignores later Hermes mentions"
 }
 
 test_hermes_resume_requires_idle_shell() {
@@ -397,6 +447,29 @@ test_hermes_session_binding_and_busy_ack_order() {
   [ "${busy%% *}" = busy ] || fail "Hermes start acknowledgement did not imply semantic busy state"
   fixture_hook on_session_end "$stable"
   pass "Hermes binds one session and acknowledges only after busy state"
+}
+
+test_hermes_hook_waits_through_busy_lock_contention() {
+  local rec stable hook_pid busy
+  TEST_ID=hermes-hook-contention-x13
+  rec=$(make_case hook-contention "$TEST_ID")
+  read_case "$rec"
+  fixture_env "$SPAWN" "$TEST_ID" "$PROJECT_DIR" --harness hermes \
+    --model gpt-5.6-sol --effort high --mode no-mistakes --yolo off >/dev/null \
+    || fail "Hermes hook-contention fixture spawn failed"
+  stable=$(cat "$HOME_DIR/state/$TEST_ID.hermes-session")
+  rm -f "$HOME_DIR/state/$TEST_ID.hermes-started"
+  mkdir "$HOME_DIR/state/$TEST_ID.busy-state.lock"
+  fixture_hook pre_llm_call "$stable" > "$CASE_DIR/contention.out" 2>&1 &
+  hook_pid=$!
+  sleep 1
+  rmdir "$HOME_DIR/state/$TEST_ID.busy-state.lock"
+  wait "$hook_pid" || fail "Hermes pre-LLM hook failed after bounded busy-lock contention"
+  assert_present "$HOME_DIR/state/$TEST_ID.hermes-started" "Hermes hook contention lost start acknowledgement"
+  busy=$(fixture_env bash -c '. "$1/bin/fm-busy-lib.sh"; fm_busy_classify tmux unused hermes "$2" "$3"' _ "$ROOT" "$TEST_ID" "$HOME_DIR/state")
+  [ "${busy%% *}" = busy ] || fail "Hermes hook contention did not finish the busy transition"
+  fixture_hook on_session_end "$stable"
+  pass "Hermes hook survives bounded busy-lock contention"
 }
 
 test_hermes_delivered_no_turn_persistence_failure_is_distinct() {
@@ -480,7 +553,7 @@ test_hermes_concurrent_sends_serialize_through_acknowledgement() {
   fixture_env env FM_FAKE_HERMES_BLOCK_DIR="$block" "$SEND" "$TEST_ID" \
     --resolve-key first-send 'First concurrent answer.' > "$CASE_DIR/first.out" 2>&1 &
   first_pid=$!
-  for i in $(seq 1 100); do
+  for i in $(seq 1 500); do
     [ -f "$block/first-entered" ] && break
     sleep 0.01
   done
@@ -489,7 +562,7 @@ test_hermes_concurrent_sends_serialize_through_acknowledgement() {
   fixture_env env FM_FAKE_HERMES_BLOCK_DIR="$block" "$SEND" "$TEST_ID" \
     --resolve-key second-send 'Second concurrent answer.' > "$CASE_DIR/second.out" 2>&1 &
   second_pid=$!
-  for _ in $(seq 1 20); do
+  for _ in $(seq 1 200); do
     kill -0 "$second_pid" 2>/dev/null || break
     sleep 0.01
   done
@@ -529,9 +602,11 @@ test_hermes_spawn_resume_skill_state_and_teardown
 test_hermes_secondmate_is_refused
 test_hermes_raw_secondmate_is_refused
 test_wrapped_hermes_raw_secondmate_is_refused
+test_nonhermes_raw_launch_mentions_do_not_select_hermes
 test_hermes_resume_requires_idle_shell
 test_hermes_resume_clears_pending_shell_input
 test_hermes_session_binding_and_busy_ack_order
+test_hermes_hook_waits_through_busy_lock_contention
 test_hermes_delivered_no_turn_persistence_failure_is_distinct
 test_hermes_refuses_nonresumable_backends
 test_hermes_help_states_kind_scope

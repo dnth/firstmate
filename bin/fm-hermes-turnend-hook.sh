@@ -98,6 +98,7 @@ HOOK = os.path.join(HERMES_HOME, "fm-turn-end.sh")
 REGISTRY = os.path.join(HERMES_HOME, "fm-turn-end.d")
 TOKEN_NAME = re.compile(r"fm\.[A-Za-z0-9]{12}\Z")
 EVENTS = ("on_session_start", "pre_llm_call", "on_session_end")
+HOOK_TIMEOUT = 10
 TOP_BEGIN = "# BEGIN FIRSTMATE HERMES HOOKS"
 TOP_END = "# END FIRSTMATE HERMES HOOKS"
 IDENTIFIER = "FIRSTMATE HERMES"
@@ -260,7 +261,7 @@ def event_entry(command: str, indent: str) -> list[str]:
     quoted = json.dumps(command)
     return [
         f"{indent}- command: {quoted}\n",
-        f"{indent}  timeout: 2\n",
+        f"{indent}  timeout: {HOOK_TIMEOUT}\n",
     ]
 
 
@@ -271,13 +272,13 @@ def hook_block(command: str, begin_marker: str = TOP_BEGIN) -> list[str]:
         "hooks:\n",
         "  on_session_start:\n",
         f"    - command: {quoted}\n",
-        "      timeout: 2\n",
+        f"      timeout: {HOOK_TIMEOUT}\n",
         "  pre_llm_call:\n",
         f"    - command: {quoted}\n",
-        "      timeout: 2\n",
+        f"      timeout: {HOOK_TIMEOUT}\n",
         "  on_session_end:\n",
         f"    - command: {quoted}\n",
-        "      timeout: 2\n",
+        f"      timeout: {HOOK_TIMEOUT}\n",
         f"{TOP_END}\n",
     ]
 
@@ -290,8 +291,26 @@ def verify_installed_config(data: bytes, command: str) -> None:
         if not isinstance(entries, list):
             refuse(f"updated config.yaml did not retain a list for hooks.{event}.")
         matches = [entry for entry in entries if isinstance(entry, dict) and entry.get("command") == command]
-        if len(matches) != 1 or matches[0].get("timeout") != 2:
+        if len(matches) != 1 or matches[0].get("timeout") != HOOK_TIMEOUT:
             refuse(f"updated config.yaml did not contain exactly one Firstmate hooks.{event} entry.")
+
+
+def upgrade_owned_timeouts(original: bytes, regions) -> bytes:
+    text = original.decode("utf-8")
+    lines = text.splitlines(keepends=True)
+    found = 0
+    for start, end, _begin, _finish in regions:
+        for index in range(start + 1, end):
+            body = lines[index].rstrip("\r\n")
+            ending = lines[index][len(body):]
+            if body.strip() not in ("timeout: 2", f"timeout: {HOOK_TIMEOUT}"):
+                continue
+            indent = body[: len(body) - len(body.lstrip())]
+            lines[index] = f"{indent}timeout: {HOOK_TIMEOUT}{ending}"
+            found += 1
+    if found != len(EVENTS):
+        refuse("config.yaml has an unexpected Firstmate Hermes timeout shape.")
+    return "".join(lines).encode()
 
 
 def install_config(original: bytes, command: str) -> bytes:
@@ -300,12 +319,13 @@ def install_config(original: bytes, command: str) -> bytes:
     regions = marker_state(lines)
     if regions:
         if len(regions) == 1 and regions[0][2].startswith(TOP_BEGIN) and regions[0][3] == TOP_END:
-            verify_installed_config(original, command)
-            return original
-        if len(regions) == 3:
-            verify_installed_config(original, command)
-            return original
-        refuse("config.yaml has an unexpected Firstmate Hermes marker shape.")
+            candidate = upgrade_owned_timeouts(original, regions)
+        elif len(regions) == 3:
+            candidate = upgrade_owned_timeouts(original, regions)
+        else:
+            refuse("config.yaml has an unexpected Firstmate Hermes marker shape.")
+        verify_installed_config(candidate, command)
+        return candidate
 
     top = mapping_entries(root)
     if "hooks" not in top:

@@ -463,7 +463,7 @@ It is not a verified primary-session or secondmate adapter, and `fm-spawn --seco
 | Provider | `openai-codex`, whose human-facing label is OpenAI Codex. |
 | Busy state | Firstmate's guarded global shell hook: `pre_llm_call` records busy and `on_session_end` records idle through `bin/fm-busy-event.sh`; `on_session_start` additionally captures a new session id. |
 | Exit command | None while idle because every headless turn exits back to the pane shell; `fm-send ... /exit` is an idempotent idle no-op. |
-| Interrupt | Single `Ctrl+C`, sent as `fm-send ... --key C-c`, interrupts the active headless process. |
+| Interrupt | Single `Ctrl+C`, sent as `fm-send ... --key C-c`, interrupts the active headless process and records the task idle through the Firstmate-owned interrupt source after successful transport. |
 | Skill invocation | `/<skill>` through `fm-send`; Firstmate uses `--skills <skill>` when the Hermes profile exposes it and otherwise supplies the exact installed `SKILL.md` path in the resumed query. |
 | Resume | Every idle text steer runs a fresh quiet process with `--resume <state/<id>.hermes-session> --no-restore-cwd` and the recorded binary, profile home, model, provider, and reasoning axes. |
 | Autonomy | `--yolo --accept-hooks`; quiet single-query mode is non-interactive and cannot wedge on a clarification prompt. |
