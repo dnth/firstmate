@@ -14,6 +14,8 @@ fi
 . "$ROOT/bin/fm-supervision-lib.sh"
 # shellcheck source=bin/fm-omp-process-lib.sh
 . "$ROOT/bin/fm-omp-process-lib.sh"
+# shellcheck source=bin/backends/herdr.sh
+. "$ROOT/bin/backends/herdr.sh"
 
 command -v omp >/dev/null 2>&1 || fail "omp not found"
 command -v herdr >/dev/null 2>&1 || fail "herdr not found"
@@ -496,7 +498,8 @@ printf -v primary_launch \
   "$WRAPPER_BIN:$BASE_PATH" "$PRIMARY_HOME" "$PRIMARY_PROJECT" "$PRIMARY_HOME/state" "$PRIMARY_HOME/config" \
   "$OMP_BIN" "$PRIMARY_HOME/sessions" "$PRIMARY_PROJECT/.omp/extensions/fm-primary-omp.ts" \
   "Follow the injected startup instruction exactly once, call the fm_watch_arm_omp tool, then reply exactly: Herdr primary is ready."
-lab pane run "$PRIMARY_PANE" "$primary_launch" >/dev/null || fail "could not launch the real OMP primary"
+fm_backend_herdr_send_text_line "$PRIMARY_TARGET" "$primary_launch" \
+  || fail "could not launch the real OMP primary"
 wait_for "exact idle OMP primary identity" agent_is "$PRIMARY_TARGET" omp 'idle done'
 wait_for "OMP primary integration marker" file_nonempty "$PRIMARY_HOME/state/.omp-primary-extension-loaded"
 wait_for "OMP primary session lock" file_nonempty "$PRIMARY_HOME/state/.lock"
