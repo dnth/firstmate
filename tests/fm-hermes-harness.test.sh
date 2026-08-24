@@ -524,6 +524,37 @@ test_hermes_session_binding_and_busy_ack_order() {
 # and event are stable by construction for a resumed task and a pid is
 # reusable, so this pins that consecutive acknowledgements differ on something
 # other than the pid.
+# A rendered Hermes ready footer is a screen state, not a lifecycle fact: a
+# redraw, scroll, or tool render can show it while a turn is running. A trusted
+# pre_llm_call busy record must therefore outrank it, or fm-send would admit a
+# steer into a live turn (Hermes treats that as an interrupt, not a queue).
+test_hermes_busy_record_outranks_rendered_ready_footer() {
+  local rec stable ready busy
+  TEST_ID=hermes-record-precedence-x11
+  rec=$(make_case record-precedence "$TEST_ID")
+  read_case "$rec"
+  fixture_env "$SPAWN" "$TEST_ID" "$PROJECT_DIR" --harness hermes \
+    --model gpt-5.6-sol --effort high --mode no-mistakes --yolo off >/dev/null \
+    || fail "Hermes record-precedence fixture spawn failed"
+  stable=$(cat "$HOME_DIR/state/$TEST_ID.hermes-session")
+  fixture_hook pre_llm_call "$stable"
+  ready=$' \xe2\x94\x80 ready \xe2\x94\x82 gpt 5.6 sol low \xe2\x94\x82\n \xe2\x9d\xaf Ask me anything\xe2\x80\xa6'
+  # shellcheck disable=SC2016 # Positional parameters expand inside the fixture shell.
+  busy=$(fixture_env bash -c '. "$1/bin/fm-busy-lib.sh"; fm_busy_classify tmux unused hermes "$2" "$3" "$4"' \
+    _ "$ROOT" "$TEST_ID" "$HOME_DIR/state" "$ready")
+  [ "${busy%% *}" = busy ] \
+    || fail "a rendered ready footer demoted a trusted busy lifecycle record: $busy"
+  fixture_hook on_session_end "$stable"
+  # shellcheck disable=SC2016 # Positional parameters expand inside the fixture shell.
+  busy=$(fixture_env bash -c '. "$1/bin/fm-busy-lib.sh"; fm_busy_classify tmux unused hermes "$2" "$3" "$4"' \
+    _ "$ROOT" "$TEST_ID" "$HOME_DIR/state" "$ready")
+  [ "${busy%% *}" = idle ] \
+    || fail "Hermes turn end did not settle idle with the same ready footer: $busy"
+  fixture_env "$TEARDOWN" "$TEST_ID" --force >/dev/null 2>&1 \
+    || fail "Hermes record-precedence fixture teardown failed"
+  pass "a trusted Hermes busy record outranks a rendered ready footer"
+}
+
 test_hermes_start_ack_is_unique_per_turn() {
   local rec stable started first second first_nopid second_nopid
   TEST_ID=hermes-start-ack-x16
@@ -940,6 +971,7 @@ test_workers_and_scouts_preserve_raw_launch_commands
 test_hermes_tui_busy_state_and_composer
 test_hermes_spawn_resumes_existing_tui_session
 test_hermes_session_binding_and_busy_ack_order
+test_hermes_busy_record_outranks_rendered_ready_footer
 test_hermes_start_ack_is_unique_per_turn
 test_hermes_hook_waits_through_busy_lock_contention
 test_hermes_delivered_no_turn_persistence_failure_is_distinct

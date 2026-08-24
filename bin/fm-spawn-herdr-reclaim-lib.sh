@@ -25,11 +25,12 @@ herdr_projection_meta_field_exact() {  # <meta> <key>
 # dead or agent-free endpoint before token inspection may allow flat fallback.
 # Exact Herdr fields are retained for the narrower version 2 reclaim path.
 # Both liveness reads go through fm_backend_agent_state with the task metadata,
-# so a harness whose liveness is session-bound rather than process-bound (hermes)
-# is classified alive here exactly as it is everywhere else, and its resumable
-# session is preserved instead of being reclaimed and destroyed. Passing the
-# metadata also makes an unreadable or self-inconsistent record refuse rather
-# than read as an agent-free pane, which is the fail-closed direction.
+# so every harness is classified here exactly as it is everywhere else. Hermes
+# liveness is its persistent TUI process: a pane whose Hermes TUI is gone is
+# agent-free and reclaimable even when a resumable session id is still
+# recorded. Passing the metadata also makes an unreadable or self-inconsistent
+# record refuse rather than read as an agent-free pane, which is the
+# fail-closed direction.
 herdr_projection_existing_meta_allows_flat() {  # <meta>
   local meta=$1 old_backend old_target old_session old_pane old_state target_session target_pane
   HERDR_RECOVERY_BACKEND=""

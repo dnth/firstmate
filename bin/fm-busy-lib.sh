@@ -49,12 +49,14 @@
 # with the producing source as the second token. Precedence:
 #   1. dead endpoint (fm_busy_classify_live only) -> dead endpoint-gone
 #   2. standalone Kimi before verification       -> unknown kimi-unverified
-#   3. Hermes' verified live TUI footer -> busy or idle from hermes-tui
+#   3. Hermes' verified live TUI footer, BUSY half only -> busy hermes-tui
+#      (rendered evidence may promote to busy, never demote a record)
 #   4. a valid, gen-matching, source-trusted record -> its state and source
-#   5. no record at all: herdr's native busy verdict is trusted as busy
-#      (generation state is sufficient for busy, not for idle), then the
-#      Grok-only temporary regex fallback classifies a grok task from its
-#      rendered tail, then unknown missing
+#   5. no record at all: Hermes' rendered ready footer -> idle hermes-tui,
+#      then herdr's native busy verdict is trusted as busy (generation state
+#      is sufficient for busy, not for idle), then the Grok-only temporary
+#      regex fallback classifies a grok task from its rendered tail, then
+#      unknown missing
 #   6. malformed, stale, or untrusted records -> unknown, never a fallback
 # The Grok arm and the later live-verified Hermes TUI footer are the only
 # rendered-text classifications. Each is scoped to its exact harness and can
@@ -268,17 +270,17 @@ fm_busy_hermes_tui_tail_state() {
   local tail
   tail=$(grep -v '^[[:space:]]*$' | tail -16)
   if printf '%s\n' "$tail" \
-      | grep -qE '^[[:space:]]*❯[[:space:]]+Ctrl\+C to interrupt…?[[:space:]]*$'; then
+      | grep -qE '^[[:space:]]*❯[[:space:]]+Ctrl\+C to interrupt(…)?[[:space:]]*$'; then
     printf 'busy'
     return 0
   fi
   if printf '%s\n' "$tail" \
-      | grep -qE '^[[:space:]]*[─━][[:space:]].*[[:space:]]·[[:space:]]*([0-9]+h[[:space:]]+)?([0-9]+m[[:space:]]+)?[0-9]+s[[:space:]]*│'; then
+      | grep -qE '^[[:space:]]*(─|━)[[:space:]].*[[:space:]]·[[:space:]]*([0-9]+h[[:space:]]+)?([0-9]+m[[:space:]]+)?[0-9]+s[[:space:]]*│'; then
     printf 'busy'
     return 0
   fi
   if printf '%s\n' "$tail" \
-      | grep -qE '^[[:space:]]*[─━][[:space:]]+ready[[:space:]]*│'; then
+      | grep -qE '^[[:space:]]*(─|━)[[:space:]]+ready[[:space:]]*│'; then
     printf 'idle'
     return 0
   fi
@@ -293,7 +295,7 @@ fm_busy_hermes_tui_tail_state() {
 # if available, else reports unknown capture-failed.
 fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-}
-  local out rc r_state r_source native
+  local out rc r_state r_source native hermes_native
   case "$harness" in
     kimi*)
       if ! fm_busy_kimi_verified; then
@@ -308,18 +310,22 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       fi
       ;;
   esac
+  # Rendered Hermes evidence may only PROMOTE to busy. A rendered ready footer
+  # is a screen state, not a lifecycle fact: a redraw, scroll, or tool render
+  # can show it while a turn is running, so it must never demote a trusted
+  # pre_llm_call busy record. The idle half is consulted further down, only
+  # once the record read has established that no trusted record exists.
+  hermes_native=
   if [ "$harness" = hermes ]; then
     if [ -z "$tail40" ] && command -v fm_backend_capture >/dev/null 2>&1; then
       tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null || true)
     fi
     if [ -n "$tail40" ]; then
-      native=$(printf '%s\n' "$tail40" | fm_busy_hermes_tui_tail_state)
-      case "$native" in
-        busy|idle)
-          printf '%s hermes-tui' "$native"
-          return 0
-          ;;
-      esac
+      hermes_native=$(printf '%s\n' "$tail40" | fm_busy_hermes_tui_tail_state)
+      if [ "$hermes_native" = busy ]; then
+        printf 'busy hermes-tui'
+        return 0
+      fi
     fi
   fi
   out=$(fm_busy_record_read "$state" "$id") && rc=0 || rc=$?
@@ -340,10 +346,15 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       return 0
       ;;
   esac
-  # No record at all. A native herdr busy verdict is semantic enough to trust
-  # for BUSY (streaming means a turn is running); native idle is narrower
-  # than turn state (a long foreground tool call reads idle) and stays
-  # unknown here.
+  # No record at all. A rendered Hermes ready footer is the only remaining
+  # evidence here, so it may now settle idle without contradicting anything.
+  if [ "$hermes_native" = idle ]; then
+    printf 'idle hermes-tui'
+    return 0
+  fi
+  # A native herdr busy verdict is semantic enough to trust for BUSY
+  # (streaming means a turn is running); native idle is narrower than turn
+  # state (a long foreground tool call reads idle) and stays unknown here.
   if [ "$backend" = herdr ] && command -v fm_backend_busy_state >/dev/null 2>&1; then
     native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
     if [ "$native" = busy ]; then

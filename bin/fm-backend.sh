@@ -726,8 +726,8 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
 
 # fm_backend_send_text_line: submit one complete shell command through a
 # backend's fixed-command path. This is distinct from the interactive-agent
-# composer verifier below and is used by the Hermes one-process-per-turn
-# adapter only after its task lifecycle and idle-shell boundary are proven.
+# composer verifier below; callers that drive a pane's shell (rather than a
+# harness composer) route through it, and it has no interactive-harness users.
 fm_backend_send_text_line() {  # <backend> <target> <text> [expected-label]
   local backend=$1
   shift
@@ -739,28 +739,6 @@ fm_backend_send_text_line() {  # <backend> <target> <text> [expected-label]
     orca) fm_backend_orca_send_text_line "$@" ;;
     cmux) fm_backend_cmux_send_text_line "$@" ;;
     *) echo "error: no send-text-line implementation for backend '$backend'" >&2; return 1 ;;
-  esac
-}
-
-fm_backend_idle_shell_ready() {  # <backend> <target>
-  local backend=$1
-  shift
-  fm_backend_source "$backend" || return 1
-  case "$backend" in
-    tmux)
-      fm_backend_tmux_idle_foreground_shell_pid "$1" >/dev/null || return 1
-      fm_backend_tmux_send_key "$1" C-c >/dev/null 2>&1 || return 1
-      fm_backend_tmux_idle_foreground_shell_pid "$1" >/dev/null
-      ;;
-    herdr)
-      fm_backend_herdr_target_ready "$1" || return 1
-      fm_backend_herdr_pane_idle_foreground_shell_pid \
-        "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" >/dev/null || return 1
-      fm_backend_herdr_send_key "$1" C-c >/dev/null 2>&1 || return 1
-      fm_backend_herdr_pane_idle_foreground_shell_pid \
-        "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" >/dev/null
-      ;;
-    *) return 1 ;;
   esac
 }
 
