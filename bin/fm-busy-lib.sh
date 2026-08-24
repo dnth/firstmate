@@ -31,8 +31,8 @@
 #   pi-ext           Pi/pi-signed per-task extension (agent_start/agent_settled)
 #   opencode-plugin  OpenCode per-task plugin (session.status)
 #   claude-hook      Claude lifecycle hooks (UserPromptSubmit/Stop/StopFailure/SessionEnd)
-#   hermes-hook      Hermes shell hooks (pre_llm_call/on_session_end, with
-#                    on_session_start for initial session capture)
+#   hermes-hook      Hermes lifecycle bridge (plugin-forwarded TUI events,
+#                    plus compatible shell-hook events)
 #   codex-hook, codex-appserver  reserved: Codex, gated by
 #                    fm_busy_codex_semantic_source
 #   kimi-wire, kimi-hook  reserved: standalone Kimi, gated by fm_busy_kimi_verified
@@ -41,7 +41,7 @@
 #   fm-interrupt     a firstmate-controlled interruption of the worker
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
-#   endpoint-gone, herdr-native, grok-regex, missing, malformed,
+#   endpoint-gone, herdr-native, hermes-tui, grok-regex, missing, malformed,
 #   gen-mismatch, source-mismatch, kimi-unverified, codex-unverified,
 #   capture-failed, no-target
 #
@@ -49,16 +49,16 @@
 # with the producing source as the second token. Precedence:
 #   1. dead endpoint (fm_busy_classify_live only) -> dead endpoint-gone
 #   2. standalone Kimi before verification       -> unknown kimi-unverified
-#   3. a valid, gen-matching, source-trusted record -> its state and source
-#   4. no record at all: herdr's native busy verdict is trusted as busy
+#   3. Hermes' verified live TUI footer -> busy or idle from hermes-tui
+#   4. a valid, gen-matching, source-trusted record -> its state and source
+#   5. no record at all: herdr's native busy verdict is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the
 #      Grok-only temporary regex fallback classifies a grok task from its
 #      rendered tail, then unknown missing
-#   5. malformed, stale, or untrusted records -> unknown, never a fallback
-# The Grok arm is the ONLY rendered-text classification that survives the
-# redesign, because Grok's structured lifecycle was not credited-live-verified
-# in the approved audit; it is scoped to harness=grok and can never classify
-# another adapter. The delivery guards in bin/fm-tmux-lib.sh match rendered
+#   6. malformed, stale, or untrusted records -> unknown, never a fallback
+# The Grok arm and the later live-verified Hermes TUI footer are the only
+# rendered-text classifications. Each is scoped to its exact harness and can
+# never classify another adapter. The delivery guards in bin/fm-tmux-lib.sh match rendered
 # footers for submit acknowledgement and away-mode supervisor injection only;
 # neither is a recorded worker state source.
 #
@@ -258,6 +258,33 @@ fm_busy_grok_tail_busy() {
     | grep -qiE "${FM_BUSY_REGEX:-${FM_TMUX_GROK_BUSY_REGEX_DEFAULT:-Ctrl\\+c:cancel}}"
 }
 
+# fm_busy_hermes_tui_tail_state: classify the persistent Hermes v0.20.0 TUI
+# from its rendered footer/composer tail. The busy verdict has two independent
+# positive signals: the busy-only composer placeholder and the status rule's
+# elapsed-turn segment. The idle verdict requires the structural ready status
+# rule. Any other screen stays unknown rather than borrowing a shell prompt,
+# transcript text, splash banner, or a stale lifecycle record.
+fm_busy_hermes_tui_tail_state() {
+  local tail
+  tail=$(grep -v '^[[:space:]]*$' | tail -16)
+  if printf '%s\n' "$tail" \
+      | grep -qE '^[[:space:]]*❯[[:space:]]+Ctrl\+C to interrupt…?[[:space:]]*$'; then
+    printf 'busy'
+    return 0
+  fi
+  if printf '%s\n' "$tail" \
+      | grep -qE '^[[:space:]]*[─━][[:space:]].*[[:space:]]·[[:space:]]*([0-9]+h[[:space:]]+)?([0-9]+m[[:space:]]+)?[0-9]+s[[:space:]]*│'; then
+    printf 'busy'
+    return 0
+  fi
+  if printf '%s\n' "$tail" \
+      | grep -qE '^[[:space:]]*[─━][[:space:]]+ready[[:space:]]*│'; then
+    printf 'idle'
+    return 0
+  fi
+  printf 'unknown'
+}
+
 # fm_busy_classify: semantic classification for a task whose endpoint the
 # caller has already established as present. Prints "<verdict> <source>":
 # busy|idle|unknown plus the producing source (see header). Never probes
@@ -281,6 +308,20 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       fi
       ;;
   esac
+  if [ "$harness" = hermes ]; then
+    if [ -z "$tail40" ] && command -v fm_backend_capture >/dev/null 2>&1; then
+      tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null || true)
+    fi
+    if [ -n "$tail40" ]; then
+      native=$(printf '%s\n' "$tail40" | fm_busy_hermes_tui_tail_state)
+      case "$native" in
+        busy|idle)
+          printf '%s hermes-tui' "$native"
+          return 0
+          ;;
+      esac
+    fi
+  fi
   out=$(fm_busy_record_read "$state" "$id") && rc=0 || rc=$?
   if [ "$rc" = 0 ]; then
     r_state=${out%% *}

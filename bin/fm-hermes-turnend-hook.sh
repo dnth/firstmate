@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
-# Install or remove Firstmate's guarded Hermes crew lifecycle hooks.
+# Install or remove Firstmate's guarded Hermes crew lifecycle bridge.
 #
 # This command is the sole owner of the text-level edit to the active Hermes
 # config.yaml. It asks the selected Hermes executable for its profile-scoped
 # config path, validates the existing YAML, and adds marker-delimited entries
-# to the existing hooks mapping without serializing or reformatting foreign
-# config. Missing, malformed, symlinked, partially marked, or surprising config
-# is refused without a config write.
+# to the existing hooks and plugins.enabled mappings without serializing or
+# reformatting foreign config. Missing, malformed, symlinked, partially marked,
+# or surprising config is refused without a config write.
 #
-# The installed hook is passive and always exits zero. on_session_start records
-# a new resumable session id, pre_llm_call acknowledges every initial or resumed
-# turn and marks semantic busy state, and on_session_end marks semantic idle and
-# touches state/<id>.turn-ended. A worktree token must resolve through the
-# profile-private Firstmate registry before any event can act.
+# The shell hook remains the one lifecycle-event handler. The enabled
+# firstmate-lifecycle plugin invokes it from persistent TUI gateway turns,
+# while classic/headless Hermes can invoke the same handler through config
+# hooks. on_session_start records a new resumable session id, pre_llm_call
+# acknowledges every initial or resumed turn and marks semantic busy state,
+# and on_session_end marks semantic idle and touches state/<id>.turn-ended.
+# A worktree token must resolve through the profile-private Firstmate registry
+# before any event can act.
 #
 # Usage:
 #   fm-hermes-turnend-hook.sh install
@@ -96,11 +99,17 @@ HERMES_HOME = sys.argv[2]
 CONFIG = os.path.join(HERMES_HOME, "config.yaml")
 HOOK = os.path.join(HERMES_HOME, "fm-turn-end.sh")
 REGISTRY = os.path.join(HERMES_HOME, "fm-turn-end.d")
+PLUGIN_NAME = "firstmate-lifecycle"
+PLUGIN_DIR = os.path.join(HERMES_HOME, "plugins", PLUGIN_NAME)
+PLUGIN_MANIFEST = os.path.join(PLUGIN_DIR, "plugin.yaml")
+PLUGIN_INIT = os.path.join(PLUGIN_DIR, "__init__.py")
 TOKEN_NAME = re.compile(r"fm\.[A-Za-z0-9]{12}\Z")
 EVENTS = ("on_session_start", "pre_llm_call", "on_session_end")
 HOOK_TIMEOUT = 10
 TOP_BEGIN = "# BEGIN FIRSTMATE HERMES HOOKS"
 TOP_END = "# END FIRSTMATE HERMES HOOKS"
+PLUGIN_BEGIN = "# BEGIN FIRSTMATE HERMES PLUGIN ENABLE"
+PLUGIN_END = "# END FIRSTMATE HERMES PLUGIN ENABLE"
 IDENTIFIER = "FIRSTMATE HERMES"
 OWNS_PRECEDING_NEWLINE = " (OWNS PRECEDING NEWLINE)"
 
@@ -194,6 +203,56 @@ esac
 exit 0
 '''
 
+PLUGIN_MANIFEST_BYTES = b'''name: firstmate-lifecycle
+version: "1.0"
+description: Guarded Firstmate lifecycle bridge for persistent Hermes TUI crews.
+hooks:
+  - on_session_start
+  - pre_llm_call
+  - on_session_end
+'''
+
+PLUGIN_INIT_BYTES = b'''"""Guarded Firstmate lifecycle bridge for persistent Hermes TUI crews."""
+
+import json
+import os
+import subprocess
+from pathlib import Path
+
+
+_EVENTS = ("on_session_start", "pre_llm_call", "on_session_end")
+
+
+def _forward(event):
+    def callback(**kwargs):
+        home = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
+        hook = home / "fm-turn-end.sh"
+        if not hook.is_file() or hook.is_symlink():
+            return None
+        payload = dict(kwargs)
+        payload["hook_event_name"] = event
+        payload["cwd"] = str(Path.cwd())
+        try:
+            subprocess.run(
+                [str(hook)],
+                input=json.dumps(payload) + "\\n",
+                text=True,
+                timeout=10,
+                check=False,
+                env=os.environ.copy(),
+            )
+        except Exception:
+            pass
+        return None
+
+    return callback
+
+
+def register(ctx):
+    for event in _EVENTS:
+        ctx.register_hook(event, _forward(event))
+'''
+
 
 def refuse(reason: str) -> None:
     print(f"fm-hermes-turnend-hook: refused: {reason}", file=sys.stderr)
@@ -246,6 +305,8 @@ def marker_state(lines: list[str]):
     stack = None
     for index, line in enumerate(lines):
         stripped = line.strip()
+        if "FIRSTMATE HERMES PLUGIN ENABLE" in stripped:
+            continue
         if "BEGIN FIRSTMATE HERMES" in stripped:
             if stack is not None:
                 refuse("config.yaml has nested Firstmate Hermes region markers.")
@@ -261,6 +322,37 @@ def marker_state(lines: list[str]):
         refuse("config.yaml has a partial Firstmate Hermes region marker.")
     if len(regions) not in (0, 1, 3):
         refuse("config.yaml has duplicated Firstmate Hermes region markers.")
+    return regions
+
+
+def plugin_marker_state(lines: list[str]):
+    regions = []
+    stack = None
+    valid_begins = {
+        PLUGIN_BEGIN,
+        PLUGIN_BEGIN + OWNS_PRECEDING_NEWLINE,
+        PLUGIN_BEGIN + " (OWNS ENABLED)",
+        PLUGIN_BEGIN + " (OWNS ENABLED)" + OWNS_PRECEDING_NEWLINE,
+    }
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith(PLUGIN_BEGIN):
+            if stripped not in valid_begins:
+                refuse("config.yaml has an altered Firstmate Hermes plugin marker.")
+            if stack is not None:
+                refuse("config.yaml has nested Firstmate Hermes plugin markers.")
+            stack = (index, stripped)
+        elif stripped == PLUGIN_END:
+            if stack is None:
+                refuse("config.yaml has a partial Firstmate Hermes plugin marker.")
+            regions.append((stack[0], index, stack[1], stripped))
+            stack = None
+        elif "FIRSTMATE HERMES PLUGIN" in stripped:
+            refuse("config.yaml has an altered Firstmate Hermes plugin marker.")
+    if stack is not None:
+        refuse("config.yaml has a partial Firstmate Hermes plugin marker.")
+    if len(regions) not in (0, 1):
+        refuse("config.yaml has duplicated Firstmate Hermes plugin markers.")
     return regions
 
 
@@ -306,6 +398,27 @@ def verify_installed_config(data: bytes, command: str) -> None:
         matches = [entry for entry in entries if isinstance(entry, dict) and entry.get("command") == command]
         if len(matches) != 1 or matches[0].get("timeout") != HOOK_TIMEOUT:
             refuse(f"updated config.yaml did not contain exactly one Firstmate hooks.{event} entry.")
+
+
+def verify_plugin_enabled_config(data: bytes) -> None:
+    _text, parsed, _node = parse_yaml(data, "updated config.yaml")
+    plugins = parsed.get("plugins") or {}
+    if not isinstance(plugins, dict):
+        refuse("updated config.yaml did not retain a mapping for plugins.")
+    enabled = plugins.get("enabled", [])
+    if enabled is None:
+        enabled = []
+    if not isinstance(enabled, list):
+        refuse("updated config.yaml did not retain a list for plugins.enabled.")
+    if enabled.count(PLUGIN_NAME) != 1:
+        refuse("updated config.yaml did not contain exactly one Firstmate lifecycle plugin enable entry.")
+    disabled = plugins.get("disabled", [])
+    if disabled is None:
+        disabled = []
+    if not isinstance(disabled, list):
+        refuse("updated config.yaml did not retain a list for plugins.disabled.")
+    if PLUGIN_NAME in disabled:
+        refuse("config.yaml explicitly disables the Firstmate lifecycle plugin.")
 
 
 def upgrade_owned_timeouts(original: bytes, regions) -> bytes:
@@ -390,6 +503,92 @@ def install_config(original: bytes, command: str) -> bytes:
     return candidate
 
 
+def install_plugin_config(original: bytes) -> bytes:
+    text, parsed, root = parse_yaml(original, "config.yaml")
+    lines = text.splitlines(keepends=True)
+    regions = plugin_marker_state(lines)
+    plugins = parsed.get("plugins") or {}
+    if isinstance(plugins, dict):
+        disabled = plugins.get("disabled", [])
+        if disabled is None:
+            disabled = []
+        if not isinstance(disabled, list):
+            refuse("config.yaml plugins.disabled must use a list.")
+        if PLUGIN_NAME in disabled:
+            refuse("config.yaml explicitly disables the Firstmate lifecycle plugin.")
+        enabled = plugins.get("enabled", [])
+        if enabled is None:
+            enabled = []
+        if isinstance(enabled, list) and enabled.count(PLUGIN_NAME) == 1:
+            if regions:
+                verify_plugin_enabled_config(original)
+            return original
+        if isinstance(enabled, list) and enabled.count(PLUGIN_NAME) > 1:
+            refuse("config.yaml contains duplicate Firstmate lifecycle plugin enable entries.")
+    if regions:
+        refuse("config.yaml has a Firstmate Hermes plugin marker without its enable entry.")
+
+    top = mapping_entries(root)
+    additions: dict[int, list[str]] = {}
+    if "plugins" not in top:
+        owns_newline = bool(original and not original.endswith(b"\n"))
+        prefix = b"\n" if owns_newline else b""
+        begin = PLUGIN_BEGIN + (OWNS_PRECEDING_NEWLINE if owns_newline else "")
+        block = [
+            f"{begin}\n",
+            "plugins:\n",
+            "  enabled:\n",
+            f"    - {PLUGIN_NAME}\n",
+            f"{PLUGIN_END}\n",
+        ]
+        candidate = original + prefix + "".join(block).encode()
+        verify_plugin_enabled_config(candidate)
+        return candidate
+
+    _plugins_key, plugins_node = top["plugins"]
+    if isinstance(plugins_node, ScalarNode) and plugins_node.tag.endswith(":null"):
+        plugin_entries = {}
+        insertion_default = plugins_node.end_mark.line
+    elif isinstance(plugins_node, MappingNode) and not plugins_node.flow_style:
+        plugin_entries = mapping_entries(plugins_node)
+        insertion_default = plugins_node.end_mark.line
+    else:
+        refuse("config.yaml plugins must use a block-style mapping.")
+
+    if "enabled" not in plugin_entries:
+        insertion = insertion_default
+        block = [
+            f"  {PLUGIN_BEGIN} (OWNS ENABLED)\n",
+            "  enabled:\n",
+            f"    - {PLUGIN_NAME}\n",
+            f"  {PLUGIN_END}\n",
+        ]
+    else:
+        _enabled_key, enabled_node = plugin_entries["enabled"]
+        if not isinstance(enabled_node, SequenceNode) or enabled_node.flow_style:
+            refuse("config.yaml plugins.enabled must use a block-style list.")
+        insertion = enabled_node.end_mark.line
+        block = [
+            f"    {PLUGIN_BEGIN}\n",
+            f"    - {PLUGIN_NAME}\n",
+            f"    {PLUGIN_END}\n",
+        ]
+    additions[insertion] = block
+
+    if text and not text.endswith("\n"):
+        final_insertion = len(lines)
+        if final_insertion not in additions:
+            refuse("config.yaml has no safe line boundary for the Firstmate Hermes plugin entry.")
+        lines[-1] += "\n"
+        additions[final_insertion][0] = additions[final_insertion][0].rstrip("\n") + OWNS_PRECEDING_NEWLINE + "\n"
+
+    for insertion in sorted(additions, reverse=True):
+        lines[insertion:insertion] = additions[insertion]
+    candidate = "".join(lines).encode()
+    verify_plugin_enabled_config(candidate)
+    return candidate
+
+
 def remove_config(original: bytes) -> bytes:
     text, _parsed, _root = parse_yaml(original, "config.yaml")
     lines = text.splitlines(keepends=True)
@@ -406,6 +605,22 @@ def remove_config(original: bytes) -> bytes:
     if owns_newline_at_eof and candidate.endswith(b"\n"):
         candidate = candidate[:-1]
     parse_yaml(candidate, "config.yaml after Firstmate hook removal")
+    return candidate
+
+
+def remove_plugin_config(original: bytes) -> bytes:
+    text, _parsed, _root = parse_yaml(original, "config.yaml")
+    lines = text.splitlines(keepends=True)
+    regions = plugin_marker_state(lines)
+    if not regions:
+        return original
+    start, end, begin, _finish = regions[0]
+    owns_newline_at_eof = OWNS_PRECEDING_NEWLINE in begin and end == len(lines) - 1
+    del lines[start : end + 1]
+    candidate = "".join(lines).encode()
+    if owns_newline_at_eof and candidate.endswith(b"\n"):
+        candidate = candidate[:-1]
+    parse_yaml(candidate, "config.yaml after Firstmate plugin removal")
     return candidate
 
 
@@ -429,6 +644,20 @@ def atomic_write(path: str, data: bytes, mode: int) -> None:
         raise
 
 
+def validate_plugin_cache() -> None:
+    pycache = os.path.join(PLUGIN_DIR, "__pycache__")
+    if not os.path.lexists(pycache):
+        return
+    info = os.lstat(pycache)
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        refuse(f"Firstmate Hermes plugin bytecode cache is unexpected at {pycache}.")
+    for name in os.listdir(pycache):
+        path = os.path.join(pycache, name)
+        child = os.lstat(path)
+        if not re.fullmatch(r"__init__\..+\.pyc", name) or stat.S_ISLNK(child.st_mode) or not stat.S_ISREG(child.st_mode):
+            refuse(f"Firstmate Hermes plugin bytecode cache contains an unexpected entry at {path}.")
+
+
 def validate_owned_files_for_remove() -> None:
     if os.path.lexists(HOOK):
         info = regular_not_symlink(HOOK, "Firstmate Hermes hook script")
@@ -446,6 +675,23 @@ def validate_owned_files_for_remove() -> None:
             child = os.lstat(path)
             if not TOKEN_NAME.fullmatch(name) or stat.S_ISLNK(child.st_mode) or not stat.S_ISREG(child.st_mode):
                 refuse(f"Firstmate Hermes registry contains an unexpected entry at {path}.")
+    if os.path.lexists(PLUGIN_DIR):
+        info = os.lstat(PLUGIN_DIR)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            refuse(f"Firstmate Hermes plugin is not a regular directory at {PLUGIN_DIR}.")
+        expected = {"plugin.yaml": PLUGIN_MANIFEST_BYTES, "__init__.py": PLUGIN_INIT_BYTES}
+        names = set(os.listdir(PLUGIN_DIR))
+        if names - set(expected) - {"__pycache__"}:
+            refuse(f"Firstmate Hermes plugin contains unexpected entries at {PLUGIN_DIR}.")
+        for name, content in expected.items():
+            path = os.path.join(PLUGIN_DIR, name)
+            child = regular_not_symlink(path, f"Firstmate Hermes plugin {name}")
+            with open(path, "rb") as stream:
+                if stream.read() != content:
+                    refuse(f"Firstmate Hermes plugin has unexpected content at {path}.")
+            if stat.S_IMODE(child.st_mode) & 0o077:
+                refuse(f"Firstmate Hermes plugin has unexpectedly broad permissions at {path}.")
+        validate_plugin_cache()
 
 
 try:
@@ -456,7 +702,8 @@ try:
         original = stream.read()
     command = HOOK
     if ACTION == "install":
-        candidate = install_config(original, command)
+        candidate = install_plugin_config(original)
+        candidate = install_config(candidate, command)
         if os.path.lexists(REGISTRY):
             info = os.lstat(REGISTRY)
             if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
@@ -471,23 +718,58 @@ try:
                 refuse(f"Firstmate Hermes hook path has unexpected content at {HOOK}.")
         os.makedirs(REGISTRY, mode=0o700, exist_ok=True)
         os.chmod(REGISTRY, 0o700)
+        plugins_root = os.path.dirname(PLUGIN_DIR)
+        if os.path.lexists(plugins_root):
+            info = os.lstat(plugins_root)
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                refuse(f"Hermes plugins path is not a regular directory at {plugins_root}.")
+        else:
+            os.makedirs(plugins_root, mode=0o700)
+        if os.path.lexists(PLUGIN_DIR):
+            info = os.lstat(PLUGIN_DIR)
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                refuse(f"Firstmate Hermes plugin path is unexpected at {PLUGIN_DIR}.")
+            unexpected = set(os.listdir(PLUGIN_DIR)) - {"plugin.yaml", "__init__.py", "__pycache__"}
+            if unexpected:
+                refuse(f"Firstmate Hermes plugin contains unexpected entries at {PLUGIN_DIR}.")
+            validate_plugin_cache()
+            pycache = os.path.join(PLUGIN_DIR, "__pycache__")
+            if os.path.lexists(pycache):
+                shutil.rmtree(pycache)
+        else:
+            os.makedirs(PLUGIN_DIR, mode=0o700)
+        os.chmod(PLUGIN_DIR, 0o700)
         installed_hook = None
         if os.path.exists(HOOK):
             with open(HOOK, "rb") as stream:
                 installed_hook = stream.read()
         if installed_hook != HOOK_BYTES or stat.S_IMODE(os.stat(HOOK).st_mode) != 0o700:
             atomic_write(HOOK, HOOK_BYTES, 0o700)
+        for path, content in (
+            (PLUGIN_MANIFEST, PLUGIN_MANIFEST_BYTES),
+            (PLUGIN_INIT, PLUGIN_INIT_BYTES),
+        ):
+            installed = None
+            if os.path.exists(path):
+                regular_not_symlink(path, f"Firstmate Hermes plugin {os.path.basename(path)}")
+                with open(path, "rb") as stream:
+                    installed = stream.read()
+            if installed != content or stat.S_IMODE(os.stat(path).st_mode) != 0o600:
+                atomic_write(path, content, 0o600)
         if candidate != original:
             atomic_write(CONFIG, candidate, stat.S_IMODE(config_info.st_mode))
     else:
         validate_owned_files_for_remove()
         candidate = remove_config(original)
+        candidate = remove_plugin_config(candidate)
         if candidate != original:
             atomic_write(CONFIG, candidate, stat.S_IMODE(config_info.st_mode))
         if os.path.lexists(HOOK):
             os.unlink(HOOK)
         if os.path.lexists(REGISTRY):
             shutil.rmtree(REGISTRY)
+        if os.path.lexists(PLUGIN_DIR):
+            shutil.rmtree(PLUGIN_DIR)
 except OSError as error:
     refuse(f"filesystem operation failed: {error}.")
 PY

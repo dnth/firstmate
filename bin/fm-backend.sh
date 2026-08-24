@@ -912,10 +912,8 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
   esac
 }
 
-# fm_backend_agent_record_identity: validate one OMP recovery caller's durable
-# endpoint binding before an exact process verdict may use it. Invalid or
-# ambiguous OMP records are unreadable, never evidence that an endpoint is dead
-# or missing. Legacy non-OMP recovery keeps its established endpoint contract.
+# fm_backend_agent_record_identity: validate one OMP or Hermes recovery
+# caller's durable endpoint binding before an exact process verdict may use it.
 fm_backend_agent_record_identity() {  # <backend> <target> <meta>
   local backend=$1 target=$2 meta=$3 harness key value expected_id
   [ -n "$meta" ] && [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
@@ -929,6 +927,7 @@ fm_backend_agent_record_identity() {  # <backend> <target> <meta>
   harness=$(fm_meta_get "$meta" harness)
   FM_BACKEND_AGENT_OMP_BIN=
   FM_BACKEND_AGENT_OMP_BUN=
+  FM_BACKEND_AGENT_HERMES_BIN=
   if [ "$harness" = omp ]; then
     for key in omp_bin omp_bun; do
       [ "$(grep -c "^$key=" "$meta" 2>/dev/null)" -eq 1 ] || return 1
@@ -937,6 +936,12 @@ fm_backend_agent_record_identity() {  # <backend> <target> <meta>
     done
     FM_BACKEND_AGENT_OMP_BIN=$(fm_meta_get "$meta" omp_bin)
     FM_BACKEND_AGENT_OMP_BUN=$(fm_meta_get "$meta" omp_bun)
+  elif [ "$harness" = hermes ]; then
+    [ "$(grep -c '^hermes_bin=' "$meta" 2>/dev/null)" -eq 1 ] || return 1
+    value=$(fm_meta_get "$meta" hermes_bin)
+    case "$value" in /*) ;; *) return 1 ;; esac
+    [ -x "$value" ] || return 1
+    FM_BACKEND_AGENT_HERMES_BIN=$value
   fi
   return 0
 }
@@ -944,8 +949,7 @@ fm_backend_agent_record_identity() {  # <backend> <target> <meta>
 # fm_backend_agent_state: the single recovery-grade agent/endpoint state
 # contract. It is deliberately richer than fm_backend_target_exists's cheap
 # pane-presence read and prints exactly one of:
-#   alive      - a verified harness agent is running, or a Hermes task has a
-#                valid resumable session bound to its still-present endpoint.
+#   alive      - a verified persistent harness agent is running.
 #   dead       - the endpoint exists but confidently has no agent.
 #   missing    - the recorded endpoint is authoritatively absent.
 #   ambiguous  - the endpoint exists but its process cannot be attributed.
@@ -977,6 +981,7 @@ fm_backend_agent_state() {  # <backend> <target> [task-meta]
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }
   FM_BACKEND_AGENT_OMP_BIN=
   FM_BACKEND_AGENT_OMP_BUN=
+  FM_BACKEND_AGENT_HERMES_BIN=
   if [ -n "$meta" ]; then
     [ -f "$meta" ] && [ ! -L "$meta" ] \
       && [ "$(grep -c '^harness=' "$meta" 2>/dev/null)" -eq 1 ] || {
@@ -984,29 +989,17 @@ fm_backend_agent_state() {  # <backend> <target> [task-meta]
         return 0
       }
     record_harness=$(fm_meta_get "$meta" harness)
-    if [ "$record_harness" = omp ] \
+    if { [ "$record_harness" = omp ] || [ "$record_harness" = hermes ]; } \
        && ! fm_backend_agent_record_identity "$backend" "$target" "$meta"; then
       printf 'unreadable'
       return 0
     fi
   fi
   case "$backend" in
-    tmux) base_state=$(fm_backend_tmux_agent_state "$target" "$FM_BACKEND_AGENT_OMP_BUN" "$FM_BACKEND_AGENT_OMP_BIN") ;;
+    tmux) base_state=$(fm_backend_tmux_agent_state "$target" "$FM_BACKEND_AGENT_OMP_BUN" "$FM_BACKEND_AGENT_OMP_BIN" "$FM_BACKEND_AGENT_HERMES_BIN") ;;
     herdr) base_state=$(fm_backend_herdr_agent_state "$target") ;;
     *) base_state=unverified ;;
   esac
-  if [ "$record_harness" = hermes ]; then
-    case "$base_state" in
-      alive|missing) printf '%s' "$base_state"; return 0 ;;
-      dead|ambiguous|unreadable|unverified)
-        if fm_backend_hermes_session_ready "$meta" \
-          && fm_backend_target_exists "$backend" "$target" 2>/dev/null; then
-          printf 'alive'
-          return 0
-        fi
-        ;;
-    esac
-  fi
   printf '%s' "$base_state"
 }
 
