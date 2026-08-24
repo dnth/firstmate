@@ -373,9 +373,9 @@ jobs:
           set -eu
           [ ! -L CLAUDE.md ] || { echo "::error::CLAUDE.md must be a real @AGENTS.md pointer file, not a symlink"; exit 1; }
           cmp -s CLAUDE.md - <<'EOF' || { echo "::error::CLAUDE.md must be the canonical @AGENTS.md pointer"; exit 1; }
-<!-- Points Claude at AGENTS.md via import; edit AGENTS.md, not this file. -->
-@AGENTS.md
-EOF
+          <!-- Points Claude at AGENTS.md via import; edit AGENTS.md, not this file. -->
+          @AGENTS.md
+          EOF
           [ "$(readlink .claude/skills)" = "../.agents/skills" ] || { echo "::error::.claude/skills must be a symlink to ../.agents/skills"; exit 1; }
       - name: Personal fleet paths must not be tracked
         run: |

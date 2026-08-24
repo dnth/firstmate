@@ -479,8 +479,71 @@ SH
   pass "seeded dispatcher, adapter, production-owner, and test-local diagnostics preserve parity"
 }
 
+# Regression: the `invariants` job embedded a shell heredoc whose body sat at
+# column 0 inside a `run: |` block scalar. That ended the scalar early and made
+# .github/workflows/ci.yml unparseable, so GitHub answered the push with a
+# startup_failure run in which no job ever executed and every other CI guard in
+# this repo was silently unenforced. Assert against the parsed workflow model -
+# jobs, steps, and each step's emitted shell body - not the raw file text.
+test_workflows_parse_and_emit_valid_shell() {
+  local emitted rc script found=0
+  command -v python3 >/dev/null 2>&1 \
+    || fail "python3 is required to parse the CI workflow model"
+  python3 -c 'import yaml' >/dev/null 2>&1 \
+    || fail "python3 PyYAML is required to parse the CI workflow model"
+
+  emitted=$(fm_test_tmproot fm-workflow-model) || fail "could not create a fixture root"
+  rc=0
+  python3 - "$ROOT" "$emitted" <<'PY' || rc=$?
+import pathlib
+import sys
+
+import yaml
+
+root = pathlib.Path(sys.argv[1])
+out = pathlib.Path(sys.argv[2])
+workflows = sorted((root / ".github" / "workflows").glob("*.y*ml"))
+if not workflows:
+    print("no workflow files found", file=sys.stderr)
+    raise SystemExit(1)
+
+for workflow in workflows:
+    try:
+        model = yaml.safe_load(workflow.read_text(encoding="utf-8"))
+    except yaml.YAMLError as err:
+        print(f"{workflow}: not parseable as YAML: {err}", file=sys.stderr)
+        raise SystemExit(1)
+    jobs = (model or {}).get("jobs")
+    if not isinstance(jobs, dict) or not jobs:
+        print(f"{workflow}: declares no jobs", file=sys.stderr)
+        raise SystemExit(1)
+    for job_id, job in jobs.items():
+        for index, step in enumerate(job.get("steps") or []):
+            body = step.get("run")
+            if body is None:
+                continue
+            if not isinstance(body, str):
+                print(f"{workflow}: {job_id} step {index} run is not a string",
+                      file=sys.stderr)
+                raise SystemExit(1)
+            (out / f"{workflow.stem}.{job_id}.{index}.sh").write_text(
+                body, encoding="utf-8")
+PY
+  [ "$rc" -eq 0 ] || fail "GitHub workflow files did not parse into a job/step model"
+
+  while IFS= read -r script; do
+    [ -n "$script" ] || continue
+    found=$((found + 1))
+    bash -n "$script" \
+      || fail "workflow step body is not valid shell: $(basename "$script")"
+  done < <(find "$emitted" -maxdepth 1 -type f -name '*.sh' -print | LC_ALL=C sort)
+  [ "$found" -gt 0 ] || fail "no workflow run steps were emitted for shell checking"
+  pass "GitHub workflows parse into a job model and emit valid shell ($found run steps)"
+}
+
 test_list_files_reports_the_shell_inventory
 test_pins_an_explicit_version
+test_workflows_parse_and_emit_valid_shell
 test_installer_retries_transient_download_failure
 test_installer_falls_back_after_release_download_failure
 test_rejects_wrong_shellcheck_version
