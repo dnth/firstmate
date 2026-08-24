@@ -313,13 +313,24 @@ test_stale_captain_held_remote_remains_ambiguous() {
 }
 
 test_housekeeping_remote_captain_held_stale_marker_rechecks_owner() {
-  local mode dir state win key capture_attempted
-  for mode in fresh stale unknown; do
+  local mode dir state win key capture_attempted probe_calls on_bin
+  for mode in dead missing alive ambiguous unknown; do
     dir=$(make_supercase "housekeeping-captain-held-remote-$mode")
     state="$dir/state"
     win="remote:held-remote-housekeeping"
     key=$(printf '%s' "held-remote-housekeeping" | tr ':/.' '___')
     capture_attempted="$dir/capture-attempted"
+    probe_calls="$dir/probe-calls"
+    on_bin="$dir/fm-on.sh"
+    cat > "$on_bin" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_REMOTE_PROBE_CALLS:?}"
+case "${FM_REMOTE_PROBE_RESULT:?}" in
+  dead|missing|alive|ambiguous) printf '%s\n' "$FM_REMOTE_PROBE_RESULT" ;;
+  unknown) exit 1 ;;
+esac
+SH
+    chmod +x "$on_bin"
     printf 'captain-held [key=route]: waiting for recovery ownership\n' > "$state/held-remote-housekeeping.status"
     fm_write_meta "$state/held-remote-housekeeping.meta" \
       "window=$win" "remote_host=remote-mac" "remote_backend=herdr" \
@@ -328,29 +339,32 @@ test_housekeeping_remote_captain_held_stale_marker_rechecks_owner() {
     (
       fm_backend_agent_state() { printf 'missing'; }
       fm_backend_capture() { : > "$capture_attempted"; return 1; }
-      remote_stale_recheck() {
-        case "$mode" in
-          fresh) return 0 ;;
-          stale) return 1 ;;
-          unknown) return 2 ;;
-        esac
-      }
-      FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+      FM_STATE_OVERRIDE="$state" FM_ON_BIN="$on_bin" \
+        FM_REMOTE_PROBE_RESULT="$mode" FM_REMOTE_PROBE_CALLS="$probe_calls" \
+        FM_STALE_ESCALATE_SECS=240 \
+        FM_REMOTE_STALE_RECHECK_SECS=60 housekeeping "$state"
+      if [ "$mode" = unknown ]; then
+        FM_STATE_OVERRIDE="$state" FM_ON_BIN="$on_bin" \
+          FM_REMOTE_PROBE_RESULT="$mode" FM_REMOTE_PROBE_CALLS="$probe_calls" \
+          FM_STALE_ESCALATE_SECS=240 \
+          FM_REMOTE_STALE_RECHECK_SECS=60 housekeeping "$state"
+      fi
     ) || fail "remote captain-held stale housekeeping failed for $mode result"
     [ ! -e "$capture_attempted" ] || fail "remote captain-held stale attempted a local capture for $mode result"
     case "$mode" in
-      fresh)
-        [ ! -e "$state/.subsuper-stale-$key" ] || fail "fresh remote owner left stale marker"
-        [ ! -s "$state/.subsuper-escalations" ] || fail "fresh remote owner escalated stale marker"
+      dead|missing)
+        [ ! -e "$state/.subsuper-stale-$key" ] || fail "$mode remote owner left stale marker"
+        [ ! -s "$state/.subsuper-escalations" ] || fail "$mode remote owner escalated stale marker"
         ;;
-      stale)
-        [ ! -e "$state/.subsuper-stale-$key" ] || fail "stale remote owner left stale marker"
+      alive|ambiguous)
+        [ ! -e "$state/.subsuper-stale-$key" ] || fail "$mode remote owner left stale marker"
         grep -q 'remote stale persisted' "$state/.subsuper-escalations" \
-          || fail "stale remote owner did not escalate stale marker"
+          || fail "$mode remote owner did not escalate stale marker"
         ;;
       unknown)
         [ -e "$state/.subsuper-stale-$key" ] || fail "unknown remote owner result dropped stale marker"
         [ ! -s "$state/.subsuper-escalations" ] || fail "unknown remote owner result escalated without proof"
+        [ "$(wc -l < "$probe_calls")" -eq 1 ] || fail "unknown remote owner result was probed repeatedly"
         ;;
     esac
   done

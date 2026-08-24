@@ -97,6 +97,8 @@
 #                                   kinds.
 #          FM_STALE_ESCALATE_SECS   idle seconds before a stale pane escalates
 #                                   as a possible wedge (default 240)
+#          FM_REMOTE_STALE_RECHECK_SECS seconds between inconclusive remote
+#                                   stale-owner probes (default 60)
 #          FM_PAUSE_RESURFACE_SECS  idle seconds before a declared external wait
 #                                   re-surfaces as a recheck (default 2700)
 #          FM_ESCALATE_BATCH_SECS   buffer window for batched escalation
@@ -200,6 +202,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 FM_SUPERVISOR_SUPPORTED_BACKENDS="tmux herdr"
 INJECT_SKIP_DEFAULT="heartbeat"
 STALE_ESCALATE_SECS_DEFAULT=240
+REMOTE_STALE_RECHECK_SECS_DEFAULT=60
 ESCALATE_BATCH_SECS_DEFAULT=90
 HEARTBEAT_SCAN_SECS_DEFAULT=300
 HOUSEKEEPING_TICK_DEFAULT=15
@@ -448,6 +451,7 @@ stale_marker_remove() {  # <window> <state>
   local win=$1 state=$2 key
   key=$(_stale_key "$(window_to_task "$win" "$state")")
   rm -f "$state/.subsuper-stale-$key"
+  rm -f "$state/.subsuper-remote-recheck-$key"
 }
 
 # Pause marker: state/.subsuper-paused-<key> holds the epoch a declared pause was
@@ -483,6 +487,7 @@ clear_pause_tracking() {  # <window> <state>
   key=$(_stale_key "$task")
   watcher_key=$(_stale_key "$win")
   rm -f "$state/.subsuper-paused-$key" "$state/.subsuper-stale-$key" \
+    "$state/.subsuper-remote-recheck-$key" \
     "$state/.paused-$watcher_key" "$state/.paused-rechecked-$watcher_key" "$state/.paused-resurfaced-$watcher_key" \
     "$state/.stale-$watcher_key" "$state/.stale-since-$watcher_key" "$state/.wedge-escalations-$watcher_key"
 }
@@ -722,23 +727,44 @@ remote_stale_probe_with_deadline() {
 }
 
 remote_stale_recheck() {  # <window> <state>
-  local win=$1 state=$2 task meta remote_host on_bin timeout age
+  local win=$1 state=$2 task meta remote_host on_bin timeout retry_secs key marker now last endpoint_state
   task=$(window_to_task "$win" "$state")
   meta="$state/$task.meta"
   [ -f "$meta" ] || return 2
   remote_host=$(fm_meta_get "$meta" remote_host)
   [ -n "$remote_host" ] || return 2
+  retry_secs=${FM_REMOTE_STALE_RECHECK_SECS:-$REMOTE_STALE_RECHECK_SECS_DEFAULT}
+  case "$retry_secs" in
+    ''|*[!0-9]*) retry_secs=$REMOTE_STALE_RECHECK_SECS_DEFAULT ;;
+  esac
+  key=$(_stale_key "$task")
+  marker="$state/.subsuper-remote-recheck-$key"
+  now=$(_now)
+  last=$(cat "$marker" 2>/dev/null || true)
+  case "$last" in
+    ''|*[!0-9]*) ;;
+    *) [ "$((now - last))" -lt "$retry_secs" ] && return 2 ;;
+  esac
+  printf '%s\n' "$now" > "$marker"
   on_bin=${FM_ON_BIN:-$FM_DAEMON_DIR/fm-on.sh}
   timeout=${FM_WATCH_REMOTE_TIMEOUT:-5}
   case "$timeout" in
     ''|*[!0-9]*|0) timeout=5 ;;
     *) [ "$timeout" -le 15 ] || timeout=5 ;;
   esac
-  age=$(remote_stale_probe_with_deadline "$timeout" "$on_bin" "$task" \
-    fm-remote-secondmate-control.sh beacon-age "$task" </dev/null 2>/dev/null) || return 2
-  case "$age" in ''|*[!0-9]*) return 2 ;; esac
-  [ "$age" -ge 0 ] && [ "$age" -lt "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] && return 0
-  return 1
+  endpoint_state=$(remote_stale_probe_with_deadline "$timeout" "$on_bin" "$task" \
+    fm-remote-secondmate-control.sh state "$task" </dev/null 2>/dev/null) || return 2
+  case "$endpoint_state" in
+    dead|missing)
+      rm -f "$marker"
+      return 0
+      ;;
+    alive|ambiguous|unreadable|unverified)
+      rm -f "$marker"
+      return 1
+      ;;
+    *) return 2 ;;
+  esac
 }
 
 escalate_add() {  # <state> <distilled-item>
