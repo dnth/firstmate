@@ -28,9 +28,10 @@
 # worktree's base..HEAD diff with a deterministic conservative classifier.
 # Unreadable or uncertain inputs resolve to high.
 # Low is limited to a small docs or mechanical-config diff with passing mechanical
-# evidence, medium requires a bounded non-sensitive diff plus a passing test
-# receipt, and security, migration, concurrency, state/lifecycle, broad, binary,
-# weakly proven, or otherwise uncertain changes resolve to high.
+# evidence, and medium requires a bounded non-sensitive area declared by the
+# caller plus a strong passing test receipt.
+# Security, migration, concurrency, state/lifecycle, broad, binary, weakly proven,
+# undeclared, or otherwise uncertain changes resolve to high.
 # The resolved validation_tier, validation_path, reason code, base, head, size,
 # and start time are appended to state/<task-id>.meta for durable inspection.
 # Delivery mode remains authoritative: direct-PR and local-only never invoke
@@ -410,12 +411,18 @@ fi
 
 MECHANICAL_PROOF=0
 REGRESSION_PROOF=0
-if jq -se 'any(.[]; (.type | test("^(test|build|lint|typecheck)$")) and (.result | test("(pass|success|green|clean|(^|[^a-z])ok([^a-z]|$))"; "i")) and (.result | test("(fail|error|not pass|red|broken)"; "i") | not))' "$LEDGER" >/dev/null 2>&1; then
-  MECHANICAL_PROOF=1
-fi
-if jq -se 'any(.[]; .type == "test" and (.result | test("(pass|success|green|clean|(^|[^a-z])ok([^a-z]|$))"; "i")) and (.result | test("(fail|error|not pass|red|broken)"; "i") | not))' "$LEDGER" >/dev/null 2>&1; then
-  REGRESSION_PROOF=1
-fi
+PROOF_FLAGS=$(jq -rse '
+  def strong_result:
+    (test("(fail|error|not[[:space:]]+pass|red|broken|skip|(^|[^0-9])0[[:space:]]+(tests?[[:space:]]+)?pass|no[[:space:]]+tests?|empty)"; "i") | not)
+    and test("^([[:space:]]*(pass(ed)?|success(ful)?|green|clean|ok)[[:space:]]*|[[:space:]]*[1-9][0-9]*[[:space:]]+(tests?[[:space:]]+)?passed([[:space:]].*)?)$"; "i");
+  [
+    any(.[]; (.type | test("^(test|build|lint|typecheck)$")) and (.result | strong_result)),
+    any(.[]; .type == "test" and (.result | strong_result))
+  ] | @tsv
+' "$LEDGER")
+IFS=$'\t' read -r mechanical_proof regression_proof <<< "$PROOF_FLAGS"
+[ "$mechanical_proof" = true ] && MECHANICAL_PROOF=1
+[ "$regression_proof" = true ] && REGRESSION_PROOF=1
 
 TIER=high
 REASON=uncertain-input
@@ -449,12 +456,13 @@ elif [ -n "$RISKY_AREAS" ]; then
 elif [ "$LOW_PATH" -eq 1 ] && [ "$DIFF_FILES" -le 3 ] && [ "$DIFF_LINES" -le 80 ] && [ "$MECHANICAL_PROOF" -eq 1 ]; then
   TIER=low
   REASON=narrow-mechanical-change
-elif [ "$REGRESSION_PROOF" -eq 1 ]; then
-  TIER=medium
-  REASON=localized-change-with-test
 else
   TIER=high
-  REASON=weak-evidence
+  if [ "$REGRESSION_PROOF" -eq 1 ]; then
+    REASON=unclassified-change
+  else
+    REASON=weak-evidence
+  fi
 fi
 
 case "$MODE:$TIER" in

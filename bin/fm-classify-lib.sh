@@ -36,9 +36,8 @@ _FM_CLASSIFY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)"
 FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
 
 # The evidence checker used by ship_done_evidence_gate.
-# New-format ship briefs opt into the gate by carrying the exact acceptance
-# criteria heading that bin/fm-brief.sh scaffolds, while legacy in-flight briefs
-# without that section retain their pre-rollout completion behavior.
+# Every task recorded as kind=ship is subject to this gate, including promoted
+# scouts and malformed or pre-rollout briefs, which fail closed.
 FM_RECEIPT_CHECK_BIN="${FM_RECEIPT_CHECK_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-receipt-check.sh}"
 
 # Captain-relevant status verbs. A status line carrying any of these is work
@@ -103,18 +102,13 @@ status_is_terminal_verb() {
 }
 
 # Return 0 when a done state may be accepted for this task, or 1 with one compact
-# detail line when a new-format ship brief has missing or invalid evidence.
-# Non-ship tasks and legacy briefs without the exact acceptance-criteria section
-# are not applicable and return 0, preserving scout/report and rollout behavior.
+# detail line when a ship brief has missing or invalid evidence.
+# Non-ship tasks are not applicable and return 0, preserving scout/report behavior.
 # The executable checker owns criterion and ledger mechanics; this classifier
 # only supplies the completion-boundary decision used by fm-crew-state.sh.
 ship_done_evidence_gate() {  # <task-id> <kind>
-  local id=$1 kind=$2 data brief out rc missing invalid
+  local id=$1 kind=$2 out rc missing invalid
   [ "$kind" = ship ] || return 0
-  data=${FM_DATA_OVERRIDE:-${FM_HOME:-${FM_ROOT_OVERRIDE:-$_FM_CLASSIFY_LIB_DIR/..}}/data}
-  brief="$data/$id/brief.md"
-  [ -f "$brief" ] || return 0
-  grep -qx '# Acceptance criteria' "$brief" 2>/dev/null || return 0
   out=$("$FM_RECEIPT_CHECK_BIN" "$id" 2>/dev/null); rc=$?
   [ "$rc" -eq 0 ] && return 0
   if command -v jq >/dev/null 2>&1 && printf '%s' "$out" | jq -e . >/dev/null 2>&1; then

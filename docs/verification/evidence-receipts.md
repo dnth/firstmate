@@ -1,12 +1,12 @@
 # Evidence receipts and risk routing verification
 
-This record captures the active maintainer evidence for ship-task acceptance receipts and conservative validation routing as of 2026-08-25.
+This record captures the active maintainer evidence for ship-task acceptance receipts and conservative validation routing as of 2026-08-26.
 The exact ledger schema, criterion parser, classifier thresholds, metadata fields, and packet commands are owned by the headers and help output of `bin/fm-receipt.sh` and `bin/fm-receipt-check.sh`.
 
 ## Guarantees under test
 
 - New ship briefs receive stable acceptance-criterion ids and an empty append-only evidence ledger, while scout and secondmate scaffolds remain outside the receipt contract.
-- A new-format ship completion remains parked until every required criterion has structurally valid evidence.
+- Every ship completion, including a promoted scout, remains parked until a valid acceptance contract and structurally valid evidence cover every required criterion.
 - Low-risk routing is limited to narrow mechanically proven documentation or configuration changes.
 - Medium-risk routing creates a bounded task, evidence, diff, and risky-area audit packet.
 - High-risk, broad, sensitive, weakly proven, materially expanded, or uncertain changes retain full No-Mistakes validation.
@@ -16,7 +16,7 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 
 ## Verification environment
 
-- Date: 2026-08-25.
+- Date: 2026-08-26.
 - ShellCheck: 0.11.0.
 - Git: 2.34.1.
 - The receipt and crew-state integration is harness-neutral because every verified harness consumes the same generated brief, task data, status event, and `fm-crew-state.sh` boundary.
@@ -46,6 +46,7 @@ ok - material follow-up scope changes retain full No-Mistakes validation
 
 $ tests/fm-crew-state.test.sh
 ok - ship completion remains parked until every criterion has evidence
+ok - ship completion fails closed when the evidence contract is malformed
 all fm-crew-state tests passed
 
 $ tests/fm-brief.test.sh
@@ -81,6 +82,7 @@ exit 0
 $ tests/fm-task-delivery.test.sh
 ok - fm-spawn: a ship spawn requires a valid explicit mode and yolo before anything is created
 ok - fm-spawn: the brief's recorded mode and the spawn's explicit mode must agree
+ok - fm-promote: promotion installs a fail-closed ship evidence contract
 # all fm-task-delivery tests passed
 
 $ tests/fm-teardown-endpoint-safety.test.sh

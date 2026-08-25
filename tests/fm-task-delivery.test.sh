@@ -201,13 +201,23 @@ EOF
 # Promotion is where a scout's ship contract is finally decided, so it requires the
 # same explicit values and writes them into the task's durable record.
 test_promote_requires_and_records_the_delivery_contract() {
-  local home meta out status
+  local home meta brief ledger out status check_out check_status
   home="$TMP_ROOT/promote/home"
-  mkdir -p "$home/state"
+  mkdir -p "$home/state" "$home/data/promote-d1"
   meta="$home/state/promote-d1.meta"
+  brief="$home/data/promote-d1/brief.md"
+  ledger="$home/data/promote-d1/evidence.jsonl"
 
   write_scout_meta() {
     printf 'window=fm-promote-d1\nkind=scout\nworktree=/tmp/wt\n' > "$meta"
+    cat > "$brief" <<'EOF'
+# Task
+Investigate the fixture and report a recommendation.
+
+# Definition of done
+Write a report.
+EOF
+    rm -f "$ledger"
   }
 
   write_scout_meta
@@ -234,8 +244,13 @@ test_promote_requires_and_records_the_delivery_contract() {
   assert_grep 'mode=direct-PR' "$meta" "promotion did not record the decided delivery mode"
   assert_grep 'yolo=on' "$meta" "promotion did not record the decided merge posture"
   assert_contains "$out" "ship instructions for mode=direct-PR" "promotion hint did not carry the decided mode"
+  assert_present "$ledger" "promotion did not install the evidence ledger"
+  check_out=$(FM_HOME="$home" "$ROOT/bin/fm-receipt-check.sh" promote-d1 2>&1)
+  check_status=$?
+  expect_code 2 "$check_status" "promoted placeholder criteria must fail closed"
+  assert_contains "$check_out" "no placeholders" "promoted contract did not require concrete acceptance criteria"
   [ "$(grep -c '^mode=' "$meta")" = 1 ] || fail "promotion left more than one mode= line in the task record"
-  pass "fm-promote: promotion requires the delivery contract and records it exactly once"
+  pass "fm-promote: promotion installs a fail-closed ship evidence contract"
 }
 
 # The registry parser survives for the mechanical consumers only. It accepts the

@@ -175,6 +175,38 @@ test_high_risk_and_uncertain_inputs_fail_safe() {
   printf '%s' "$out" | jq -e '.tier == "high" and .reason == "weak-evidence"' >/dev/null \
     || fail "a negative test receipt was treated as strong regression proof"
 
+  id=zero-test-proof
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "0 tests passed"
+  add_receipt "$id" AC2 lint "passed"
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" --risky-area "parser boundary") \
+    || fail "zero-test plan should still be a successful plan"
+  printf '%s' "$out" | jq -e '.tier == "high" and .reason == "weak-evidence"' >/dev/null \
+    || fail "zero tests passed was treated as regression proof"
+
+  id=skipped-test-proof
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed, 1 skipped"
+  add_receipt "$id" AC2 lint "passed"
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" --risky-area "parser boundary") \
+    || fail "skipped-test plan should still be a successful plan"
+  printf '%s' "$out" | jq -e '.tier == "high" and .reason == "weak-evidence"' >/dev/null \
+    || fail "a skipped test run was treated as regression proof"
+
+  id=unclassified-login
+  base=$(make_project "$id" no-mistakes localized)
+  project="$TMP_ROOT/project-$id"
+  mv "$project/src/app.sh" "$project/src/login.sh"
+  mv "$project/tests/app.test.sh" "$project/tests/login.test.sh"
+  git -C "$project" add -A
+  git -C "$project" commit -q -m 'rename fixture to login surface'
+  add_receipt "$id" AC1 test "3 passed"
+  add_receipt "$id" AC2 lint "passed"
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base") \
+    || fail "unclassified login plan should still be a successful plan"
+  printf '%s' "$out" | jq -e '.tier == "high" and .reason == "unclassified-change"' >/dev/null \
+    || fail "filename silence downgraded an unclassified login change"
+
   id=uncertain-base
   base=$(make_project "$id" no-mistakes localized)
   add_receipt "$id" AC1 test "passed"
@@ -193,7 +225,7 @@ test_direct_and_local_modes_never_invoke_no_mistakes() {
     base=$(make_project "$id" "$mode" localized)
     add_receipt "$id" AC1 test "passed"
     add_receipt "$id" AC2 lint "passed"
-    out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base") \
+    out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" --risky-area "localized fixture") \
       || fail "$mode plan failed"
     expected=$mode
     printf '%s' "$out" | jq -e --arg expected "$expected" '.tier == "medium" and .path == $expected and .packet == null' >/dev/null \
@@ -207,7 +239,7 @@ test_follow_up_packet_uses_finding_delta_and_updated_receipts() {
   base=$(make_project "$id" no-mistakes localized)
   add_receipt "$id" AC1 test "2 passed"
   add_receipt "$id" AC2 lint "passed"
-  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null \
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" --risky-area "localized fixture" >/dev/null \
     || fail "initial medium plan failed"
   project="$TMP_ROOT/project-$id"
   initial_head=$(git -C "$project" rev-parse HEAD)
@@ -236,7 +268,7 @@ test_follow_up_scope_change_requires_full_rerun() {
   base=$(make_project "$id" no-mistakes localized)
   add_receipt "$id" AC1 test "2 passed"
   add_receipt "$id" AC2 lint "passed"
-  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null \
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" --risky-area "localized fixture" >/dev/null \
     || fail "initial medium plan failed"
   project="$TMP_ROOT/project-$id"
   initial_head=$(git -C "$project" rev-parse HEAD)

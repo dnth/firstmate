@@ -140,7 +140,26 @@ make_no_timeout_toolbin() {  # <dir> -> echoes toolbin path
 # Run the helper for one case dir. FM_FAKE_* env (run output, busy flag) are read
 # from the caller's environment by the fakes above.
 run_crew_state() {  # <case-dir> <id>
-  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" "$2"
+  local case_dir=$1 id=$2 brief ledger
+  if grep -qx 'kind=ship' "$case_dir/state/$id.meta" 2>/dev/null; then
+    brief="$case_dir/data/$id/brief.md"
+    ledger="$case_dir/data/$id/evidence.jsonl"
+    if [ ! -e "$brief" ]; then
+      mkdir -p "$case_dir/data/$id"
+      cat > "$brief" <<'EOF'
+# Task
+Exercise the crew-state fixture.
+
+# Acceptance criteria
+- AC1: The fixture has complete evidence.
+
+# Definition of done
+Delivery contract: mode=direct-PR
+EOF
+      printf '%s\n' '{"criterion":"AC1","type":"review","summary":"fixture evidence","result":"complete"}' > "$ledger"
+    fi
+  fi
+  PATH="$case_dir/fakebin:$PATH" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" "$CREW_STATE" "$id"
 }
 
 new_case() {  # <name> -> echoes case dir with an empty state/
@@ -1344,6 +1363,30 @@ EOF
   pass "ship completion remains parked until every criterion has evidence"
 }
 
+test_ship_done_with_malformed_brief_fails_closed() {
+  reset_fakes
+  local d out id=malformed-evidence-gate
+  d=$(new_case malformed-evidence-gate)
+  make_repo_on_branch "$d/wt" fm/malformed-evidence-gate
+  make_fakebin "$d" >/dev/null
+  mkdir -p "$d/data/$id"
+  cat > "$d/data/$id/brief.md" <<'EOF'
+# Task
+Exercise a pre-evidence ship brief.
+
+# Definition of done
+Delivery contract: mode=direct-PR
+EOF
+  fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=ship" "harness=claude" "mode=direct-PR"
+  printf 'done: PR https://github.com/o/r/pull/10\n' > "$d/state/$id.status"
+  arm_idle_record "$d/state" "$id"
+  out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_DATA_OVERRIDE="$d/data" "$CREW_STATE" "$id")
+  assert_contains "$out" "state: parked" "malformed ship brief must prevent done acceptance"
+  assert_contains "$out" "source: evidence-gate" "malformed ship brief must name the gate source"
+  assert_contains "$out" "evidence check failed" "malformed ship brief must fail closed"
+  pass "ship completion fails closed when the evidence contract is malformed"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -1394,5 +1437,6 @@ test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
 test_ship_done_is_held_until_evidence_is_complete
+test_ship_done_with_malformed_brief_fails_closed
 
 echo "all fm-crew-state tests passed"
