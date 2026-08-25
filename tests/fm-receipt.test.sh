@@ -8,7 +8,7 @@ set -u
 RECEIPT="$ROOT/bin/fm-receipt.sh"
 TMP_ROOT=$(fm_test_tmproot fm-receipt)
 HOME_DIR="$TMP_ROOT/home"
-mkdir -p "$HOME_DIR/data"
+mkdir -p "$HOME_DIR/data" "$HOME_DIR/state"
 
 write_ship() {  # <id>
   local id=$1
@@ -25,6 +25,7 @@ Exercise evidence receipts.
 Delivery contract: mode=no-mistakes
 EOF
   : > "$HOME_DIR/data/$id/evidence.jsonl"
+  fm_write_meta "$HOME_DIR/state/$id.meta" "kind=ship" "mode=no-mistakes"
 }
 
 test_appends_one_compact_valid_receipt() {
@@ -85,6 +86,7 @@ test_rejects_non_ship_and_unsafe_ledger() {
   local id=scout-task rc target
   mkdir -p "$HOME_DIR/data/$id"
   printf '# Task\nInvestigate only.\n' > "$HOME_DIR/data/$id/brief.md"
+  fm_write_meta "$HOME_DIR/state/$id.meta" "kind=scout"
   FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 review summary reviewed >/dev/null 2>&1
   rc=$?
   [ "$rc" -ne 0 ] || fail "receipt helper accepted a scout task"

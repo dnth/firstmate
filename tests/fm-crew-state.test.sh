@@ -1355,8 +1355,8 @@ EOF
   assert_contains "$out" "source: evidence-gate" "missing evidence must name the gate source"
   assert_contains "$out" "missing evidence: AC1,AC2" "gate must name every missing criterion"
 
-  FM_DATA_OVERRIDE="$d/data" "$ROOT/bin/fm-receipt.sh" "$id" AC1 test "implementation works" "passed" >/dev/null
-  FM_DATA_OVERRIDE="$d/data" "$ROOT/bin/fm-receipt.sh" "$id" AC2 lint "regression checks" "passed" >/dev/null
+  FM_DATA_OVERRIDE="$d/data" FM_STATE_OVERRIDE="$d/state" "$ROOT/bin/fm-receipt.sh" "$id" AC1 test "implementation works" "passed" >/dev/null
+  FM_DATA_OVERRIDE="$d/data" FM_STATE_OVERRIDE="$d/state" "$ROOT/bin/fm-receipt.sh" "$id" AC2 lint "regression checks" "passed" >/dev/null
   out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_DATA_OVERRIDE="$d/data" "$CREW_STATE" "$id")
   assert_contains "$out" "state: done" "complete evidence must release done acceptance"
   assert_contains "$out" "source: status-log" "released completion retains status-log source"

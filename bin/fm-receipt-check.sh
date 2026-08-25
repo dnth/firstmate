@@ -4,7 +4,9 @@
 # Usage:
 #   fm-receipt-check.sh <task-id>
 #   fm-receipt-check.sh <task-id> --criterion <criterion-id>
-#   fm-receipt-check.sh <task-id> --plan [--base <commit>] [--risky-area <text>]...
+#   fm-receipt-check.sh <task-id> --plan [--base <commit>]
+#                       [--change-class <localized-non-sensitive|sensitive>]
+#                       [--risky-area <text>]...
 #   fm-receipt-check.sh <task-id> --follow-up --delta-base <commit>
 #                       (--finding <text>|--finding-file <path>)...
 #                       [--invalidated-criterion <criterion-id>]...
@@ -12,7 +14,8 @@
 # The default command emits one compact fm-evidence-check.v1 JSON object.
 # It exits 0 when every declared criterion has at least one structurally valid
 # receipt, 1 when evidence is missing, and 2 for an invalid brief or ledger.
-# Scout and secondmate briefs return status=not-applicable without a ledger check.
+# Tasks whose metadata positively identifies them as scouts or secondmates return
+# status=not-applicable without a ledger check.
 #
 # Acceptance criteria are owned by the exact ship-brief section:
 #
@@ -27,9 +30,12 @@
 # --plan first requires a complete evidence check, then inspects the recorded
 # worktree's base..HEAD diff with a deterministic conservative classifier.
 # Unreadable or uncertain inputs resolve to high.
-# Low is limited to a small docs or mechanical-config diff with passing mechanical
-# evidence, and medium requires a bounded non-sensitive area declared by the
-# caller plus a strong passing test receipt.
+# Low is limited to a small documentation diff or an allowlisted mechanical-config
+# diff whose changed config files are named by strong mechanical receipts.
+# Medium requires --change-class localized-non-sensitive plus a strong passing
+# test receipt.
+# Free-form risky-area text is packet context and can raise risk but never proves
+# that a change is non-sensitive.
 # Security, migration, concurrency, state/lifecycle, broad, binary, weakly proven,
 # undeclared, or otherwise uncertain changes resolve to high.
 # The resolved validation_tier, validation_path, reason code, base, head, size,
@@ -41,7 +47,8 @@
 # A medium plan writes data/<task-id>/audit-packet.md with the task contract,
 # evidence ledger, base..HEAD diff, declared risky areas, and narrow audit remit.
 # --follow-up rewrites that packet around the original finding, delta, and updated
-# receipts only when the complete change still classifies medium.
+# receipts only when the complete change still classifies medium and --delta-base
+# exactly matches the latest recorded validation head.
 # A material scope/risk change records high/full-no-mistakes and refuses the
 # bounded follow-up so the supervisor retains a full rerun.
 set -eu
@@ -79,6 +86,7 @@ CRITERION_QUERY=
 BASE_INPUT=
 DELTA_BASE=
 RISKY_AREAS=
+CHANGE_CLASS=
 FINDINGS=
 FINDING_COUNT=0
 INVALIDATED=
@@ -107,13 +115,14 @@ while [ "$#" -gt 0 ]; do
       [ "$ACTION" = check ] || { echo "error: choose only one action" >&2; exit 2; }
       ACTION=follow-up
       ;;
-    --base|--delta-base|--risky-area|--finding|--finding-file|--invalidated-criterion)
+    --base|--delta-base|--change-class|--risky-area|--finding|--finding-file|--invalidated-criterion)
       [ "$#" -gt 0 ] || { echo "error: $option requires a value" >&2; exit 2; }
       value=$1
       shift
       case "$option" in
         --base) BASE_INPUT=$value ;;
         --delta-base) DELTA_BASE=$value ;;
+        --change-class) CHANGE_CLASS=$value ;;
         --risky-area) RISKY_AREAS=$(append_value "$RISKY_AREAS" "$value") ;;
         --finding)
           FINDINGS=$(append_value "$FINDINGS" "$value")
@@ -137,9 +146,14 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+case "$CHANGE_CLASS" in
+  ''|localized-non-sensitive|sensitive) ;;
+  *) echo "error: --change-class must be localized-non-sensitive or sensitive" >&2; exit 2 ;;
+esac
+
 case "$ACTION" in
   check|criterion)
-    [ -z "$BASE_INPUT$DELTA_BASE$RISKY_AREAS$FINDINGS$INVALIDATED" ] \
+    [ -z "$BASE_INPUT$DELTA_BASE$CHANGE_CLASS$RISKY_AREAS$FINDINGS$INVALIDATED" ] \
       || { echo "error: validation-planning options require --plan or --follow-up" >&2; exit 2; }
     ;;
   plan)
@@ -147,8 +161,8 @@ case "$ACTION" in
       || { echo "error: follow-up options require --follow-up" >&2; exit 2; }
     ;;
   follow-up)
-    [ -z "$BASE_INPUT$RISKY_AREAS" ] \
-      || { echo "error: --base and --risky-area apply only to --plan" >&2; exit 2; }
+    [ -z "$BASE_INPUT$CHANGE_CLASS$RISKY_AREAS" ] \
+      || { echo "error: --base, --change-class, and --risky-area apply only to --plan" >&2; exit 2; }
     [ -n "$DELTA_BASE" ] || { echo "error: --follow-up requires --delta-base" >&2; exit 2; }
     [ "$FINDING_COUNT" -gt 0 ] || { echo "error: --follow-up requires a finding" >&2; exit 2; }
     ;;
@@ -162,19 +176,40 @@ LEDGER="$TASK_DIR/evidence.jsonl"
 META="$STATE/$ID.meta"
 PACKET="$TASK_DIR/audit-packet.md"
 
+[ -f "$META" ] && [ ! -L "$META" ] \
+  || { echo "error: task metadata is missing or unsafe: $META" >&2; exit 2; }
+KIND_COUNT=$(grep -c '^kind=' "$META" 2>/dev/null || true)
+[ "$KIND_COUNT" -eq 1 ] \
+  || { echo "error: task metadata must contain exactly one kind" >&2; exit 2; }
+KIND=$(sed -n 's/^kind=//p' "$META")
+case "$KIND" in
+  scout|secondmate)
+    if [ "$ACTION" = criterion ]; then exit 1; fi
+    if [ "$ACTION" != check ]; then
+      echo "error: validation planning applies only to ship tasks" >&2
+      exit 2
+    fi
+    jq -cn --arg task "$ID" \
+      '{schema:"fm-evidence-check.v1",task:$task,kind:"non-ship",status:"not-applicable",required:[],evidenced:[],missing:[],invalid:[],receipt_count:0,ledger_exists:false}'
+    exit 0
+    ;;
+  ship) ;;
+  *) echo "error: task metadata has an invalid kind" >&2; exit 2 ;;
+esac
+
 [ -f "$BRIEF" ] && [ ! -L "$BRIEF" ] \
-  || { echo "error: task brief is missing or unsafe: $BRIEF" >&2; exit 2; }
+  || { echo "error: ship task brief is missing or unsafe: $BRIEF" >&2; exit 2; }
 
 MODE_COUNT=$(grep -c '^Delivery contract: mode=' "$BRIEF" 2>/dev/null || true)
-if [ "$MODE_COUNT" -eq 0 ]; then
-  MODE=
-  KIND=other
-elif [ "$MODE_COUNT" -eq 1 ]; then
+if [ "$MODE_COUNT" -eq 1 ]; then
   MODE=$(sed -n 's/^Delivery contract: mode=//p' "$BRIEF")
   case "$MODE" in
-    no-mistakes|direct-PR|local-only) KIND=ship ;;
+    no-mistakes|direct-PR|local-only) ;;
     *) echo "error: ship brief has an invalid delivery contract" >&2; exit 2 ;;
   esac
+elif [ "$MODE_COUNT" -eq 0 ]; then
+  echo "error: ship brief has no delivery contract" >&2
+  exit 2
 else
   echo "error: ship brief has multiple delivery contracts" >&2
   exit 2
@@ -190,17 +225,6 @@ EVIDENCED="$TMP_ROOT/evidenced"
 INVALID="$TMP_ROOT/invalid"
 : > "$EVIDENCED"
 : > "$INVALID"
-
-if [ "$KIND" = other ]; then
-  if [ "$ACTION" = criterion ]; then exit 1; fi
-  if [ "$ACTION" != check ]; then
-    echo "error: validation planning applies only to ship tasks" >&2
-    exit 2
-  fi
-  jq -cn --arg task "$ID" \
-    '{schema:"fm-evidence-check.v1",task:$task,kind:"non-ship",status:"not-applicable",required:[],evidenced:[],missing:[],invalid:[],receipt_count:0,ledger_exists:false}'
-  exit 0
-fi
 
 if ! awk '
   BEGIN { in_section=0; found=0; count=0; bad=0 }
@@ -337,6 +361,7 @@ esac
 
 RECORDED_TIER=
 RECORDED_PATH=
+RECORDED_HEAD=
 if [ "$ACTION" = follow-up ]; then
   RECORDED_TIER=$(grep '^validation_tier=' "$META" | tail -1 | cut -d= -f2- || true)
   RECORDED_PATH=$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)
@@ -344,7 +369,10 @@ if [ "$ACTION" = follow-up ]; then
     || { echo "error: bounded follow-up requires a recorded medium targeted-no-mistakes plan" >&2; exit 2; }
   BASE_INPUT=$(grep '^validation_base=' "$META" | tail -1 | cut -d= -f2- || true)
   [ -n "$BASE_INPUT" ] || { echo "error: recorded validation base is missing" >&2; exit 2; }
+  RECORDED_HEAD=$(grep '^validation_head=' "$META" | tail -1 | cut -d= -f2- || true)
+  [ -n "$RECORDED_HEAD" ] || { echo "error: recorded validation head is missing" >&2; exit 2; }
   RISKY_AREAS=$(grep '^validation_risky_areas=' "$META" | tail -1 | cut -d= -f2- || true)
+  CHANGE_CLASS=$(grep '^validation_change_class=' "$META" | tail -1 | cut -d= -f2- || true)
 fi
 
 BASE=
@@ -356,11 +384,14 @@ HAS_BINARY=0
 HAS_SPECIAL_MODE=0
 HIGH_PATH=0
 LOW_PATH=1
+CONFIG_COUNT=0
 SENSITIVE_PATH=
 NUMSTAT="$TMP_ROOT/numstat"
 NAMES="$TMP_ROOT/names"
+CONFIG_PATHS="$TMP_ROOT/config-paths"
 : > "$NUMSTAT"
 : > "$NAMES"
+: > "$CONFIG_PATHS"
 
 resolve_diff() {
   [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ] && git -C "$WORKTREE" rev-parse --git-dir >/dev/null 2>&1 || return 1
@@ -403,7 +434,11 @@ if [ "$DIFF_AVAILABLE" -eq 1 ]; then
         ;;
     esac
     case "$path" in
-      README.md|CONTRIBUTING.md|CHANGELOG.md|docs/*.md|*.json|*.yaml|*.yml|*.toml) ;;
+      README.md|CONTRIBUTING.md|CHANGELOG.md|docs/*.md) ;;
+      .editorconfig|.prettierignore|.prettierrc|.prettierrc.json|.prettierrc.yaml|.prettierrc.yml|.markdownlint.json|.markdownlint.yaml|.markdownlint.yml|.shellcheckrc)
+        printf '%s\n' "$path" >> "$CONFIG_PATHS"
+        CONFIG_COUNT=$((CONFIG_COUNT + 1))
+        ;;
       *) LOW_PATH=0 ;;
     esac
   done < "$NUMSTAT"
@@ -424,6 +459,22 @@ IFS=$'\t' read -r mechanical_proof regression_proof <<< "$PROOF_FLAGS"
 [ "$mechanical_proof" = true ] && MECHANICAL_PROOF=1
 [ "$regression_proof" = true ] && REGRESSION_PROOF=1
 
+CONFIG_PROOF=1
+if [ "$CONFIG_COUNT" -gt 0 ]; then
+  if ! jq -se --rawfile paths "$CONFIG_PATHS" '
+    def strong_result:
+      (test("(fail|error|not[[:space:]]+pass|red|broken|skip|(^|[^0-9])0[[:space:]]+(tests?[[:space:]]+)?pass|no[[:space:]]+tests?|empty)"; "i") | not)
+      and test("^([[:space:]]*(pass(ed)?|success(ful)?|green|clean|ok)[[:space:]]*|[[:space:]]*[1-9][0-9]*[[:space:]]+(tests?[[:space:]]+)?passed([[:space:]].*)?)$"; "i");
+    . as $receipts
+    | ($paths | split("\n") | map(select(length > 0))) as $required
+    | all($required[]; . as $path
+        | any($receipts[]; (.type | test("^(test|build|lint|typecheck)$"))
+            and .file == $path and (.result | strong_result)))
+  ' "$LEDGER" >/dev/null 2>&1; then
+    CONFIG_PROOF=0
+  fi
+fi
+
 TIER=high
 REASON=uncertain-input
 if [ "$DIFF_AVAILABLE" -eq 0 ] || [ "$DIFF_FILES" -eq 0 ]; then
@@ -441,24 +492,25 @@ elif [ "$HIGH_PATH" -eq 1 ]; then
 elif [ "$DIFF_FILES" -gt 8 ] || [ "$DIFF_LINES" -gt 400 ]; then
   TIER=high
   REASON=broad-change
-elif [ -n "$RISKY_AREAS" ]; then
-  if printf '%s\n' "$RISKY_AREAS" | tr '[:upper:]' '[:lower:]' \
-    | grep -Eq '(auth|security|migration|concurr|lifecycle|cross-cut|state|uncertain)'; then
-    TIER=high
-    REASON=declared-high-risk-area
-  elif [ "$REGRESSION_PROOF" -eq 1 ]; then
-    TIER=medium
-    REASON=localized-change-with-test
-  else
-    TIER=high
-    REASON=weak-evidence
-  fi
-elif [ "$LOW_PATH" -eq 1 ] && [ "$DIFF_FILES" -le 3 ] && [ "$DIFF_LINES" -le 80 ] && [ "$MECHANICAL_PROOF" -eq 1 ]; then
+elif [ "$CHANGE_CLASS" = sensitive ]; then
+  TIER=high
+  REASON=declared-sensitive-change
+elif [ -n "$RISKY_AREAS" ] && printf '%s\n' "$RISKY_AREAS" | tr '[:upper:]' '[:lower:]' \
+  | grep -Eq '(auth|security|migration|concurr|lifecycle|cross-cut|state|uncertain)'; then
+  TIER=high
+  REASON=declared-high-risk-area
+elif [ "$LOW_PATH" -eq 1 ] && [ "$DIFF_FILES" -le 3 ] && [ "$DIFF_LINES" -le 80 ] \
+  && [ "$MECHANICAL_PROOF" -eq 1 ] && [ "$CONFIG_PROOF" -eq 1 ]; then
   TIER=low
   REASON=narrow-mechanical-change
+elif [ "$CHANGE_CLASS" = localized-non-sensitive ] && [ "$REGRESSION_PROOF" -eq 1 ]; then
+  TIER=medium
+  REASON=localized-change-with-test
 else
   TIER=high
-  if [ "$REGRESSION_PROOF" -eq 1 ]; then
+  if [ "$LOW_PATH" -eq 1 ] && [ "$CONFIG_COUNT" -gt 0 ] && [ "$CONFIG_PROOF" -eq 0 ]; then
+    REASON=unbound-mechanical-config
+  elif [ "$REGRESSION_PROOF" -eq 1 ]; then
     REASON=unclassified-change
   else
     REASON=weak-evidence
@@ -495,6 +547,7 @@ write_meta_record() {  # <pass>
     printf 'validation_pass=%s\n' "$pass"
     printf 'validation_started_at=%s\n' "$now"
     printf 'validation_risky_areas=%s\n' "$normalized_risks"
+    printf 'validation_change_class=%s\n' "$CHANGE_CLASS"
     printf 'validation_packet=%s\n' "$packet_value"
     if [ "$pass" = follow-up ]; then
       printf 'validation_delta_base=%s\n' "$DELTA_BASE"
@@ -534,6 +587,7 @@ write_packet() {  # <initial|follow-up> <diff-base>
     printf 'Task: %s.\n' "$ID"
     printf 'Risk tier: medium.\n'
     printf 'Validation path: targeted-no-mistakes.\n'
+    printf 'Change class: %s.\n' "$CHANGE_CLASS"
     printf 'Brief source: %s.\n' "$BRIEF"
     printf 'Evidence source: %s.\n' "$LEDGER"
     printf 'Review diff: %s..%s.\n\n' "$diff_base" "$HEAD"
@@ -575,6 +629,10 @@ write_packet() {  # <initial|follow-up> <diff-base>
 if [ "$ACTION" = follow-up ]; then
   DELTA_RESOLVED=$(git -C "$WORKTREE" rev-parse --verify "$DELTA_BASE^{commit}" 2>/dev/null) \
     || { echo "error: invalid --delta-base: $DELTA_BASE" >&2; exit 2; }
+  RECORDED_HEAD_RESOLVED=$(git -C "$WORKTREE" rev-parse --verify "$RECORDED_HEAD^{commit}" 2>/dev/null) \
+    || { echo "error: recorded validation head is invalid" >&2; exit 2; }
+  [ "$DELTA_RESOLVED" = "$RECORDED_HEAD_RESOLVED" ] \
+    || { echo "error: --delta-base must equal the latest recorded validation head" >&2; exit 2; }
   git -C "$WORKTREE" merge-base --is-ancestor "$DELTA_RESOLVED" "$HEAD" 2>/dev/null \
     || { echo "error: delta base is not an ancestor of the current head" >&2; exit 2; }
   DELTA_BASE=$DELTA_RESOLVED

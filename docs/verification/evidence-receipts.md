@@ -7,11 +7,11 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 
 - New ship briefs receive stable acceptance-criterion ids and an empty append-only evidence ledger, while scout and secondmate scaffolds remain outside the receipt contract.
 - Every ship completion, including a promoted scout, remains parked until a valid acceptance contract and structurally valid evidence cover every required criterion.
-- Low-risk routing is limited to narrow mechanically proven documentation or configuration changes.
-- Medium-risk routing creates a bounded task, evidence, diff, and risky-area audit packet.
+- Low-risk routing is limited to narrow mechanically proven documentation or allowlisted configuration changes with file-bound proof.
+- Medium-risk routing requires an explicit localized-non-sensitive change class and creates a bounded task, evidence, diff, and risky-area audit packet.
 - High-risk, broad, sensitive, weakly proven, materially expanded, or uncertain changes retain full No-Mistakes validation.
 - `direct-PR` and `local-only` retain the evidence gate without entering No-Mistakes.
-- Medium follow-up review uses the finding, delta, and updated receipts, while material risk expansion requires a full rerun.
+- Medium follow-up review starts at the latest recorded validation head and uses the finding, delta, and updated receipts, while material risk expansion requires a full rerun.
 - PR-ready recording adds `validation_completed_at` beside the plan's `validation_started_at`, making implementation-complete to validation-complete latency directly measurable.
 
 ## Verification environment
@@ -38,6 +38,7 @@ ok - fm-receipt-check reports required, evidenced, and missing ids deterministic
 ok - fm-receipt-check distinguishes complete evidence from invalid JSONL
 ok - invalid ship briefs fail and scout/report behavior stays unchanged
 ok - low-risk mechanical changes can skip a full No-Mistakes run
+ok - low config requires an allowlisted path and applicable proof
 ok - medium-risk work produces a brief, evidence, diff, and risky-area audit packet
 ok - security and uncertain changes retain full No-Mistakes validation
 ok - direct-PR and local-only retain evidence gates without invoking No-Mistakes
