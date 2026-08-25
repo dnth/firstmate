@@ -1298,27 +1298,39 @@ EOF
 # even though its cwd is Hermes' installation directory, while the ordinary
 # cwd scan and descendant closure cover gateway children whose sanitized MCP
 # environments no longer carry it.
-# One bounded listing of every process with its environment, in the two forms
-# that carry it: the BSD stack (`axeww`, procps and macOS) and the macOS SysV
-# spelling (`-A -E -ww`). Hyphenated -e selects processes, it does not print
-# the environment, so this proves the environment really is present by looking
-# for this shell's own exported PATH in its own row and fails closed otherwise.
-ps_rows_with_environment() {
-  local out row pid
-  out=$(LC_ALL=C ps axeww -o pid=,command= 2>/dev/null) \
-    || out=$(LC_ALL=C ps -A -E -ww -o pid=,command= 2>/dev/null) \
-    || return 1
-  [ -n "$out" ] || return 1
+# One bounded listing of every process with its environment. Which ps form
+# carries the environment is platform-specific and cannot be decided from exit
+# status: on Darwin the bundled BSD `e` in `axeww` resolves to `-e`, documented
+# as identical to `-A`, so that form succeeds while printing no environment at
+# all. Every candidate is therefore run until one passes a positive control -
+# this shell's own row must carry its exported PATH - and the function fails
+# closed only after all of them have been tried and rejected.
+ps_rows_show_environment() {  # <rows>
+  local rows=$1 row pid
+  [ -n "$rows" ] || return 1
   while IFS= read -r row; do
     pid=${row#"${row%%[![:space:]]*}"}
     pid=${pid%%[[:space:]]*}
     [ "$pid" = "$$" ] || continue
     case " $row " in
-      *" PATH="*) printf '%s\n' "$out"; return 0 ;;
+      *" PATH="*) return 0 ;;
     esac
   done <<EOF
-$out
+$rows
 EOF
+  return 1
+}
+
+ps_rows_with_environment() {
+  local attempt out
+  local -a args
+  for attempt in 'axeww' '-A -E -ww' '-A -E'; do
+    read -r -a args <<< "$attempt"
+    out=$(LC_ALL=C ps "${args[@]}" -o pid=,command= 2>/dev/null) || continue
+    ps_rows_show_environment "$out" || continue
+    printf '%s\n' "$out"
+    return 0
+  done
   return 1
 }
 

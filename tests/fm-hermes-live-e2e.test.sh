@@ -61,22 +61,32 @@ live_expand_descendants() {  # <seed-pid-list>
   printf '%s\n' "$out" | grep -E '^[0-9]+$' | sort -un || true
 }
 
-live_ps_rows_with_environment() {
-  local out row pid
-  out=$(LC_ALL=C ps axeww -o pid=,command= 2>/dev/null) \
-    || out=$(LC_ALL=C ps -A -E -ww -o pid=,command= 2>/dev/null) \
-    || return 1
-  [ -n "$out" ] || return 1
+live_ps_rows_show_environment() {  # <rows>
+  local rows=$1 row pid
+  [ -n "$rows" ] || return 1
   while IFS= read -r row; do
     pid=${row#"${row%%[![:space:]]*}"}
     pid=${pid%%[[:space:]]*}
     [ "$pid" = "$$" ] || continue
     case " $row " in
-      *" PATH="*) printf '%s\n' "$out"; return 0 ;;
+      *" PATH="*) return 0 ;;
     esac
   done <<EOF
-$out
+$rows
 EOF
+  return 1
+}
+
+live_ps_rows_with_environment() {
+  local attempt out
+  local -a args
+  for attempt in 'axeww' '-A -E -ww' '-A -E'; do
+    read -r -a args <<< "$attempt"
+    out=$(LC_ALL=C ps "${args[@]}" -o pid=,command= 2>/dev/null) || continue
+    live_ps_rows_show_environment "$out" || continue
+    printf '%s\n' "$out"
+    return 0
+  done
   return 1
 }
 
@@ -123,7 +133,7 @@ live_cwd_pids() {  # <root>
       n*)
         path=${line#n}
         case "$path" in
-          "$root"|"$root"/*)
+          "$root"|"$root"/*|"$root (deleted)"|"$root"/*" (deleted)")
             [ "$pid" = "$$" ] || printf '%s\n' "$pid"
             ;;
         esac
@@ -158,7 +168,7 @@ live_owned_pids() {
 }
 
 live_force_reap() {
-  local signal pids pid
+  local signal pids pid remaining
   for signal in TERM KILL; do
     pids=$(live_owned_pids) || return 1
     [ -n "$pids" ] || return 0
@@ -170,7 +180,27 @@ $pids
 EOF
     sleep 0.5
   done
-  [ -z "$(live_owned_pids)" ]
+  remaining=$(live_owned_pids) || return 1
+  [ -z "$remaining" ]
+}
+
+# The kernel identity of a pid, so a survivor check can never be satisfied by
+# pid reuse and never depends on the ownership selector under test.
+live_pid_identity() {  # <pid>
+  local pid=$1 stat_line value
+  local -a stat_fields
+  if [ -r "/proc/$pid/stat" ]; then
+    stat_line=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
+    read -r -a stat_fields <<< "${stat_line##*)}"
+    [ "${#stat_fields[@]}" -ge 20 ] || return 1
+    case "${stat_fields[0]}" in Z*) return 1 ;; esac
+    printf 'starttime=%s\n' "${stat_fields[19]}"
+    return 0
+  fi
+  case "$(LC_ALL=C ps -p "$pid" -o state= 2>/dev/null)" in *Z*) return 1 ;; esac
+  value=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
+  [ -n "$value" ] || return 1
+  printf 'lstart=%s\n' "$value"
 }
 
 live_cleanup() {  # <original-exit-code>
@@ -185,10 +215,14 @@ live_cleanup() {  # <original-exit-code>
       || run_tmux_env "$ROOT/bin/fm-teardown.sh" "$id" --force >/dev/null 2>&1 \
       || cleanup_rc=1
   done
-  leftovers=$(live_owned_pids 2>/dev/null || true)
-  if [ -n "$leftovers" ]; then
-    printf 'not ok - live Hermes cleanup left owned process(es): %s\n' \
-      "$(printf '%s' "$leftovers" | tr '\n' ' ')" >&2
+  if leftovers=$(live_owned_pids); then
+    if [ -n "$leftovers" ]; then
+      printf 'not ok - live Hermes cleanup left owned process(es): %s\n' \
+        "$(printf '%s' "$leftovers" | tr '\n' ' ')" >&2
+      cleanup_rc=1
+    fi
+  else
+    printf 'not ok - live Hermes cleanup could not determine the owned process set\n' >&2
     cleanup_rc=1
   fi
   fm_test_cleanup
@@ -378,17 +412,44 @@ SCOUT_TOKEN=$(sed -n 's/^hermes_owner_token=//p' "$FM_LIVE_HOME/state/$SCOUT.met
 SCOUT_WT=$(sed -n 's/^worktree=//p' "$FM_LIVE_HOME/state/$SCOUT.meta")
 [ -n "$SCOUT_TOKEN" ] || fail "Hermes scout recorded no owner token"
 [ -n "$SCOUT_WT" ] || fail "Hermes scout recorded no worktree"
-SCOUT_TREE=$(live_task_pids "$SCOUT_TOKEN" "$SCOUT_WT")
+SCOUT_TREE=$(live_task_pids "$SCOUT_TOKEN" "$SCOUT_WT") \
+  || fail "could not determine the scout-owned process set before teardown"
 [ -n "$SCOUT_TREE" ] \
   || fail "Hermes scout owned no live process before teardown; the active-tree case would prove nothing"
+# The primary survivor proof is the concrete pre-teardown tree, pinned by
+# kernel identity while it is still intact.
+SCOUT_TRACKED=
+while IFS= read -r scout_pid; do
+  [ -n "$scout_pid" ] || continue
+  scout_identity=$(live_pid_identity "$scout_pid") || continue
+  SCOUT_TRACKED="$SCOUT_TRACKED$scout_pid $scout_identity
+"
+done <<EOF
+$SCOUT_TREE
+EOF
+[ -n "$SCOUT_TRACKED" ] || fail "could not pin any scout-owned process identity before teardown"
 printf 'scout report\n' > "$FM_LIVE_HOME/data/$SCOUT/report.md"
 FM_HOME="$FM_LIVE_HOME" "$ROOT/bin/fm-decision-hold.sh" complete "$SCOUT" --none >/dev/null
 printf 'command: fm-teardown %s (persistent TUI still running, no /exit)\n' "$SCOUT"
 run_tmux_env "$ROOT/bin/fm-teardown.sh" "$SCOUT" >/dev/null
-SCOUT_SURVIVORS=$(live_task_pids "$SCOUT_TOKEN" "$SCOUT_WT")
+SCOUT_TRACKED_SURVIVORS=
+while IFS= read -r scout_line; do
+  [ -n "$scout_line" ] || continue
+  scout_pid=${scout_line%% *}
+  scout_identity=${scout_line#* }
+  kill -0 "$scout_pid" 2>/dev/null || continue
+  [ "$(live_pid_identity "$scout_pid" 2>/dev/null || true)" = "$scout_identity" ] || continue
+  SCOUT_TRACKED_SURVIVORS="$SCOUT_TRACKED_SURVIVORS $scout_pid"
+done <<EOF
+$SCOUT_TRACKED
+EOF
+[ -z "$SCOUT_TRACKED_SURVIVORS" ] \
+  || fail "fm-teardown left pre-teardown scout process(es) alive:$SCOUT_TRACKED_SURVIVORS"
+SCOUT_SURVIVORS=$(live_task_pids "$SCOUT_TOKEN" "$SCOUT_WT") \
+  || fail "could not determine the scout-owned process set after teardown"
 [ -z "$SCOUT_SURVIVORS" ] \
   || fail "fm-teardown left scout-owned process(es) alive: $(printf '%s' "$SCOUT_SURVIVORS" | tr '\n' ' ')"
-printf 'output: active_teardown=yes owned_before=%s survivors=0\n' \
+printf 'output: active_teardown=yes owned_before=%s tracked_survivors=0 survivors=0\n' \
   "$(printf '%s' "$SCOUT_TREE" | tr '\n' ' ' | sed 's/ $//')"
 
 printf 'ok - %s persistent Hermes TUI: crew/scout launch, composer steer, native skill turn, busy->idle, turn-end, interrupt, exit, and exact-session resume\n' "$HERMES_VERSION"

@@ -2922,6 +2922,87 @@ test_hermes_marker_scan_without_proc_reaps_token_tree() {
   pass "the process-environment ownership scan reaps the token tree when /proc is unavailable"
 }
 
+test_hermes_marker_scan_tries_every_environment_ps_form() {
+  local case_dir rc token hermes_home registry state_real pid_file
+  local pid unrelated_pid survived=0 unrelated_survived=0 i
+  case_dir=$(make_case hermes-ps-env-candidates)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  token=fm.abcdefghijkl
+  hermes_home="$case_dir/hermes-home"
+  registry="$hermes_home/fm-turn-end.d/$token"
+  state_real=$(cd "$case_dir/state" && pwd -P)
+  mkdir -p "$hermes_home/fm-turn-end.d"
+  printf '%s\n' "$token" > "$case_dir/state/task-x1.hermes-turnend-token"
+  jq -n --arg id task-x1 --arg state "$state_real" \
+    --arg session_file "$state_real/task-x1.hermes-session" \
+    '{id:$id,state:$state,session_file:$session_file}' > "$registry"
+  printf '%s\n' \
+    'harness=hermes' \
+    "hermes_home=$hermes_home" \
+    "hermes_owner_token=$token" >> "$case_dir/state/task-x1.meta"
+  pid_file="$case_dir/owned.pid"
+
+  # A Darwin-shaped ps: the bundled BSD form succeeds but prints no
+  # environment (there `e` resolves to `-e`, "identical to -A"), and only the
+  # SysV `-E` spelling shows it. Selecting on exit status alone never reaches
+  # the second form.
+  cat > "$case_dir/fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = axeww ]; then
+  exec "$REAL_PS_FOR_TEST" -A -o pid=,command=
+fi
+if [ "${1:-}" = -A ] && [ "${2:-}" = -E ]; then
+  exec "$REAL_PS_FOR_TEST" axeww -o pid=,command=
+fi
+exec "$REAL_PS_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/ps"
+
+  FM_HERMES_TASK_TOKEN="$token" perl -MPOSIX -e '
+    my ($pid_file, $outside) = @ARGV;
+    POSIX::setsid();
+    chdir $outside or die "chdir outside";
+    open my $fh, ">", $pid_file or die "open";
+    print {$fh} "$$\n";
+    close $fh;
+    sleep 300;
+  ' "$pid_file" "$case_dir" &
+  pid=$!
+  disown
+  FM_HERMES_TASK_TOKEN=fm.unrelatedxyz sleep 300 &
+  unrelated_pid=$!
+  disown
+  i=0
+  while [ "$i" -lt 50 ]; do
+    [ -s "$pid_file" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+
+  rc=0
+  FM_PROC_ROOT_OVERRIDE="$case_dir/no-proc" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  if kill -0 "$pid" 2>/dev/null; then
+    survived=1
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  if kill -0 "$unrelated_pid" 2>/dev/null; then
+    unrelated_survived=1
+    kill -KILL "$unrelated_pid" 2>/dev/null || true
+  fi
+  wait "$pid" 2>/dev/null || true
+  wait "$unrelated_pid" 2>/dev/null || true
+
+  expect_code 0 "$rc" "hermes-ps-env-candidates: teardown should succeed"
+  [ "$survived" -eq 0 ] \
+    || fail "hermes-ps-env-candidates: the token root survived because only the first ps form was tried"
+  [ "$unrelated_survived" -eq 1 ] \
+    || fail "hermes-ps-env-candidates: teardown killed a process carrying a different token"
+  pass "the ownership scan keeps trying ps forms until one actually exposes the environment"
+}
+
 test_lsof_absent_reaps_tmux_process_group() {
   local case_dir rc pid path_without_lsof
   case_dir=$(make_case lsof-absent-process-group-reap)
@@ -3315,6 +3396,7 @@ test_lsof_absent_hermes_still_reaps_tmux_process_group
 test_hermes_without_jq_falls_back_instead_of_refusing
 test_hermes_descendant_closure_starts_only_at_token_roots
 test_hermes_marker_scan_without_proc_reaps_token_tree
+test_hermes_marker_scan_tries_every_environment_ps_form
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
 test_reused_pid_identity_is_not_force_killed
