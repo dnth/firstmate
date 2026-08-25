@@ -41,7 +41,7 @@ You may maintain this repo's private operational state directly.
 Shared tracked material is `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, `.agents/skills/`, and public `skills/`.
 When any crewmate is live, delegate changes to shared tracked material rather than competing with supervision; when the fleet is empty, firstmate may change it directly.
 This repo is a shared template, while `.env`, `data/`, `state/`, `config/`, `projects/`, and `.no-mistakes/` are captain-private and gitignored.
-Ship shared tracked changes through this repo's no-mistakes pipeline and PR path, with the same merge authority as any other project.
+Ship shared tracked changes through the risk-based delivery path in section 7, with the same PR and merge authority as any other project.
 Never add an agent name as a commit co-author.
 
 ## 2. Layout and state
@@ -283,6 +283,9 @@ Resolve every ship task's concrete delivery mode and `yolo` merge posture at int
 Pass the mode explicitly to the brief, and pass both values explicitly to the spawn and any scout promotion; each command refuses to guess the values it consumes.
 A current explicit captain instruction wins; otherwise the project's registry entry is the captain's standing posture, and dropping below its rigor needs a reason you can state.
 On a `no-mistakes-prod-only` project, classify the task's surface: internal-only tooling, automation, contributor or operator process, and release or submission work ships `direct-PR`, while product-facing, mixed, and uncertain work ships `no-mistakes`; never infer internal-only from file location or project name.
+For this repo's shared tracked documentation, pure prose in a CI-allowlisted non-authoritative document - typos, wording, formatting, README cleanup, or non-behavioral examples - ships `direct-PR`.
+Operationally or semantically authoritative documentation - API or contract docs, security instructions, deployment runbooks, configuration examples, migration guides, generated docs tied to code, `AGENTS.md`, `CLAUDE.md`, `.agents/skills/**`, or `skills/**` - ships `no-mistakes`, as do all documentation changes mixed with code.
+Never downgrade an authoritative document to the bypass path even when its path is CI-allowlisted; the CI allowlist is only the mechanical floor, not the whole delivery policy.
 An unregistered project or absent registry resolves to `no-mistakes` with yolo off, and the registration gap goes to the captain.
 Record the resulting mode, `yolo` merge posture, and the one-line reason for any deviation in the backlog item note.
 

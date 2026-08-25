@@ -3,15 +3,26 @@
 Thanks for wanting to contribute.
 One rule up front:
 
-**Human-authored pull requests targeting `main` must be raised through [`no-mistakes`](https://github.com/kunchenguid/no-mistakes).**
-We require this to reduce the maintainer's burden of reviewing and merging contributions.
+**Human-authored pull requests targeting `main` must use [`no-mistakes`](https://github.com/kunchenguid/no-mistakes) whenever they contain code or operationally or semantically authoritative documentation.**
+Pure prose in the root `README.md` and/or `CONTRIBUTING.md` may use a direct PR only when the change is non-authoritative.
+This risk-based gate reduces the maintainer's burden without applying the full pipeline to wording-only cleanup.
 
 `no-mistakes` puts a local git proxy in front of your real remote.
 Pushing through it runs an AI-driven review/test/lint pipeline in an isolated worktree, forwards the push upstream only after every check passes, and opens a clean PR automatically.
 
-A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and fails if the body is missing the deterministic signature that no-mistakes writes.
+A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and requires the deterministic signature that no-mistakes writes unless every changed path is exactly the root `README.md` and/or `CONTRIBUTING.md`.
+The check paginates the GitHub changed-files API and requires the signature on an API error, incomplete result, mixed change, or any path outside that exact allowlist.
 It evaluates every PR opening and body edit independently, so a later edit cannot replace an earlier pending compliance check.
-GitHub Actions and Dependabot are exempt so their automation keeps working, but regular contributor PRs without the signature will not be reviewed or merged.
+GitHub Actions and Dependabot are exempt so their automation keeps working, but other unsigned PRs pass this check only through the narrow prose allowlist.
+
+## Risk-based documentation gate
+
+A direct PR is acceptable for typos, wording, formatting, README cleanup, or non-behavioral examples when every changed file is the root `README.md` and/or `CONTRIBUTING.md`.
+API or contract docs, security instructions, deployment runbooks, configuration examples, migration guides, generated docs tied to code, `AGENTS.md`, `CLAUDE.md`, `.agents/skills/**`, and `skills/**` are authoritative and require no-mistakes.
+Documentation changed together with code also requires no-mistakes.
+Never downgrade an authoritative documentation change to the direct path even when it sits in a CI-allowlisted file; the CI allowlist is the mechanical floor, not the whole policy.
+When uncertain, use no-mistakes.
+The required-check workflow runs regression fixtures for the allowlisted pair, `AGENTS.md`, `docs/**`, `.agents/skills/**`, code, mixed prose and code, empty results, and malformed results before evaluating the live PR file list.
 
 ## Workflow
 
@@ -56,7 +67,7 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
 
 ## Development
 
-Tracked changes to firstmate itself - `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, `.agents/skills/`, and `skills/` - ship through the `no-mistakes` pipeline on a feature branch and require an explicit merge approval.
+Tracked changes to firstmate itself use the risk-based documentation rule above on a feature branch and require an explicit merge approval.
 Before making any such change, load the agent-only `firstmate-coding-guidelines` skill (`.agents/skills/firstmate-coding-guidelines/SKILL.md`).
 It has the knowledge-placement rules that keep `AGENTS.md` from regrowing after each diet pass.
 There is no reliable way for `bin/fm-brief.sh`'s scaffold to detect that a task's repo is firstmate itself, so firstmate adds this skill's load line to firstmate-repo briefs by hand.
