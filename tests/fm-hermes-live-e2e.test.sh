@@ -25,12 +25,123 @@ WORKER=hermes-live-worker
 SCOUT=hermes-live-scout
 WORKER_TARGET="firstmate:fm-$WORKER"
 
-live_cleanup() {
-  TMUX_TMPDIR="$TMUX_DIR" tmux kill-server 2>/dev/null || true
-  sleep 0.5
-  fm_test_cleanup
+live_owned_pids() {
+  local proc_dir pid line path table seeds result changed ppid ps_pids command
+  seeds=
+  if [ -d /proc ]; then
+    for proc_dir in /proc/[0-9]*; do
+      [ -r "$proc_dir/environ" ] || continue
+      pid=${proc_dir##*/}
+      [ "$pid" != "$$" ] || continue
+      if tr '\0' '\n' < "$proc_dir/environ" 2>/dev/null \
+          | grep -Fxq "HERMES_HOME=$PROFILE"; then
+        seeds="$seeds
+$pid"
+      fi
+    done
+  else
+    ps_pids=$(LC_ALL=C ps -e -o pid= 2>/dev/null) || return 1
+    while IFS= read -r pid; do
+      pid=$(printf '%s' "$pid" | tr -d '[:space:]')
+      case "$pid" in ''|*[!0-9]*) continue ;; esac
+      [ "$pid" != "$$" ] || continue
+      command=$(LC_ALL=C ps eww -p "$pid" -o command= 2>/dev/null) || continue
+      case " $command " in
+        *" HERMES_HOME=$PROFILE "*) seeds="$seeds
+$pid" ;;
+      esac
+    done <<EOF
+$ps_pids
+EOF
+  fi
+  if command -v lsof >/dev/null 2>&1; then
+    pid=
+    while IFS= read -r line; do
+      case "$line" in
+        p*) pid=${line#p} ;;
+        n*)
+          path=${line#n}
+          case "$path" in
+            "$LAB"|"$LAB"/*) seeds="$seeds
+$pid" ;;
+          esac
+          ;;
+      esac
+    done <<EOF
+$(lsof -a -d cwd -Fpn 2>/dev/null || true)
+EOF
+  fi
+  result=$(printf '%s\n' "$seeds" | grep -E '^[0-9]+$' | sort -un || true)
+  [ -n "$result" ] || return 0
+  table=$(LC_ALL=C ps -e -o pid=,ppid= 2>/dev/null) || return 1
+  changed=1
+  while [ "$changed" -eq 1 ]; do
+    changed=0
+    while read -r pid ppid; do
+      case "$pid:$ppid" in *[!0-9:]*|:*) continue ;; esac
+      printf '%s\n' "$result" | grep -Fxq "$ppid" || continue
+      if ! printf '%s\n' "$result" | grep -Fxq "$pid"; then
+        result="$result
+$pid"
+        changed=1
+      fi
+    done <<EOF
+$table
+EOF
+  done
+  printf '%s\n' "$result" | grep -E '^[0-9]+$' | sort -un || true
 }
-trap live_cleanup EXIT
+
+live_force_reap() {
+  local signal pids pid
+  for signal in TERM KILL; do
+    pids=$(live_owned_pids) || return 1
+    [ -n "$pids" ] || return 0
+    while IFS= read -r pid; do
+      [ -n "$pid" ] || continue
+      kill -"$signal" "$pid" 2>/dev/null || true
+    done <<EOF
+$pids
+EOF
+    sleep 0.5
+  done
+  [ -z "$(live_owned_pids)" ]
+}
+
+live_cleanup() {  # <original-exit-code>
+  local original_rc=$1 cleanup_rc=0 id leftovers stale
+  trap - EXIT INT TERM
+  set +e
+  live_force_reap || cleanup_rc=1
+  TMUX_TMPDIR="$TMUX_DIR" tmux kill-server 2>/dev/null || true
+  live_force_reap || cleanup_rc=1
+  for id in "$WORKER" "$SCOUT"; do
+    [ ! -f "$FM_LIVE_HOME/state/$id.meta" ] \
+      || run_tmux_env "$ROOT/bin/fm-teardown.sh" "$id" --force >/dev/null 2>&1 \
+      || cleanup_rc=1
+  done
+  leftovers=$(live_owned_pids 2>/dev/null || true)
+  if [ -n "$leftovers" ]; then
+    printf 'not ok - live Hermes cleanup left owned process(es): %s\n' \
+      "$(printf '%s' "$leftovers" | tr '\n' ' ')" >&2
+    cleanup_rc=1
+  fi
+  fm_test_cleanup
+  stale=$(compgen -G "${TMPDIR:-/tmp}/fm-hermes-live-e2e.*" || true)
+  if [ -n "$stale" ]; then
+    printf 'not ok - live Hermes cleanup left temp dirs: %s\n' \
+      "$(printf '%s' "$stale" | tr '\n' ' ')" >&2
+    cleanup_rc=1
+  fi
+  if [ "$cleanup_rc" -eq 0 ]; then
+    printf 'output: cleanup_owned_processes=0 cleanup_temp_dirs=0\n'
+  fi
+  if [ "$cleanup_rc" -ne 0 ]; then
+    exit 1
+  fi
+  exit "$original_rc"
+}
+trap 'live_cleanup $?' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 

@@ -498,6 +498,9 @@ The steering acknowledgement wait inherits the launch acknowledgement poll count
 If delivery landed but the start hook did not acknowledge it, the send fails as delivered-no-turn, records a supervised recovery wake, and warns not to resend; failure to persist either recovery trigger returns the distinct delivered-no-turn-persistence-failed result.
 
 An idle Hermes pane retains the persistent TUI process.
+Each Firstmate Hermes launch inherits `FM_HERMES_TASK_TOKEN` from the task's lifecycle registry token, and spawn records the same value as `hermes_owner_token` in task metadata.
+Teardown validates the metadata token against the private state sidecar and profile registry before it signals anything, then reaps the token-bearing Python and Node roots together with their exact descendant tree and worktree-rooted processes.
+Missing or inconsistent ownership proof refuses teardown instead of falling back to a broad Hermes or gateway process match, so another Hermes session sharing the profile is never a kill candidate.
 Tmux recovery validates the foreground Hermes process against the recorded executable, while Herdr requires a registered live agent rather than upgrading a shell husk from the session sidecar.
 A spawn that finds `state/<id>.hermes-session` present but carrying no usable resumable id refuses instead of launching a fresh session against that stale sidecar, because the lifecycle bridge would then never acknowledge a turn; remove the sidecar or run `fm-teardown.sh <id> --force` and respawn.
 `fm-crew-state` remains harness-generic: the Hermes hook's semantic busy/idle record drives its pane-state gate, then an idle worker falls through to the existing status-log or no-mistakes run reconciliation.

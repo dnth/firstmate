@@ -174,6 +174,7 @@
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __HERMESBIN__ absolute resolved Hermes executable (PATH first, then $HOME/.local/bin/hermes)
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
+# Hermes TUI launches additionally inherit the task-unique lifecycle token as FM_HERMES_TASK_TOKEN.
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -1866,6 +1867,7 @@ HERMES_HOME_DIR=
 HERMES_SESSION_FILE=
 HERMES_STARTED=
 HERMES_RESUME_ID=
+HERMES_OWNER_TOKEN=
 HERMES_LAUNCH_TEMPLATE=0
 case "$LAUNCH" in
   *__HERMESBIN__*)
@@ -3451,6 +3453,7 @@ EOF
           '{turnend:$turnend,session_file:$session_file,started:$started,root:$root,state:$state,id:$id,gen:$gen}' \
           > "$auth_file"
         printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.hermes-turnend-token"
+        HERMES_OWNER_TOKEN=${auth_file##*/}
         printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-hermes-turnend"
         exclude_path '.fm-hermes-turnend'
       fi
@@ -3536,6 +3539,7 @@ META_WINDOW=$T
   if [ "$HERMES_LAUNCH_TEMPLATE" -eq 1 ]; then
     echo "hermes_bin=$HERMES_BIN"
     echo "hermes_home=$HERMES_HOME_DIR"
+    echo "hermes_owner_token=$HERMES_OWNER_TOKEN"
     echo "hermes_session_file=$HERMES_SESSION_FILE"
     echo "hermes_started=$HERMES_STARTED"
   fi
@@ -3636,7 +3640,7 @@ if [ "$HARNESS" = claude ] && [ "${IS_SANDBOX:-}" = 1 ]; then
   LAUNCH="IS_SANDBOX=1 $LAUNCH"
 fi
 if [ "$HERMES_LAUNCH_TEMPLATE" -eq 1 ]; then
-  LAUNCH="HERMES_HOME=$(shell_quote "$HERMES_HOME_DIR") $LAUNCH"
+  LAUNCH="FM_HERMES_TASK_TOKEN=$(shell_quote "$HERMES_OWNER_TOKEN") HERMES_HOME=$(shell_quote "$HERMES_HOME_DIR") $LAUNCH"
 fi
 # A RunPod secondmate carries the safe broker coordinates to its descendants,
 # and each OMP launch receives the workstation broker through a loopback-only

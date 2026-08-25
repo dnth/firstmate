@@ -121,6 +121,14 @@
 #     roots are unique per task and never
 #     shared, so this can never reach another task's or the primary's
 #     processes. Idempotent: nothing left to find is a silent no-op.
+#     Hermes adds one task-unique FM_HERMES_TASK_TOKEN inherited by its
+#     persistent Python launcher, Node TUI, and gateway. Teardown accepts that
+#     token only when hermes_owner_token= metadata, the private state token,
+#     and the profile lifecycle registry bind the same task and state paths.
+#     The token-bearing roots and their exact process descendants join the cwd
+#     set before TERM/KILL, so process-group-detached MCP children are reaped
+#     without selecting any unmarked personal Hermes or gateway process.
+#     Missing or inconsistent Hermes ownership proof refuses before signaling.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1274,6 +1282,76 @@ $out
 EOF
 }
 
+# A persistent Hermes launch inherits one task-unique lifecycle token through
+# its Python launcher, Node TUI, and gateway. The token finds the TUI process
+# even though its cwd is Hermes' installation directory, while the ordinary
+# cwd scan and descendant closure cover gateway children whose sanitized MCP
+# environments no longer carry it.
+pids_with_env_marker() {  # <name> <value>
+  local name=$1 value=$2 proc_root proc_dir pid ps_pids out line
+  case "$name" in ''|*[!A-Z0-9_]*) return 1 ;; esac
+  case "$value" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  if [ -d "$proc_root" ]; then
+    for proc_dir in "$proc_root"/[0-9]*; do
+      [ -d "$proc_dir" ] || continue
+      pid=${proc_dir##*/}
+      [ "$pid" != "$$" ] || continue
+      [ -r "$proc_dir/environ" ] || continue
+      if tr '\0' '\n' < "$proc_dir/environ" 2>/dev/null \
+          | grep -Fxq "$name=$value"; then
+        printf '%s\n' "$pid"
+      fi
+    done
+    return 0
+  fi
+  ps_pids=$(LC_ALL=C ps -e -o pid= 2>/dev/null) || return 1
+  while IFS= read -r pid; do
+    pid=$(printf '%s' "$pid" | tr -d '[:space:]')
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    [ "$pid" != "$$" ] || continue
+    out=$(LC_ALL=C ps eww -p "$pid" -o command= 2>/dev/null) || continue
+    while IFS= read -r line; do
+      case " $line " in
+        *" $name=$value "*) printf '%s\n' "$pid"; break ;;
+      esac
+    done <<EOF
+$out
+EOF
+  done <<EOF
+$ps_pids
+EOF
+}
+
+task_pids_expand_descendants() {  # <seed-pid-list>
+  local seeds=$1 table result changed line pid ppid
+  [ -n "$seeds" ] || return 0
+  table=$(LC_ALL=C ps -e -o pid=,ppid= 2>/dev/null) || return 1
+  result=$(printf '%s\n' "$seeds" | grep -E '^[0-9]+$' | sort -un || true)
+  changed=1
+  while [ "$changed" -eq 1 ]; do
+    changed=0
+    while IFS= read -r line; do
+      read -r pid ppid <<EOF
+$line
+EOF
+      case "$pid:$ppid" in
+        *[!0-9:]*|:*) continue ;;
+      esac
+      [ "$pid" != "$$" ] || continue
+      task_pid_list_contains "$result" "$ppid" || continue
+      if ! task_pid_list_contains "$result" "$pid"; then
+        result="$result
+$pid"
+        changed=1
+      fi
+    done <<EOF
+$table
+EOF
+  done
+  printf '%s\n' "$result" | grep -E '^[0-9]+$' | sort -un || true
+}
+
 task_process_identity() {  # <pid>
   local pid=$1 proc_root stat_line starttime value
   local -a stat_fields
@@ -1318,6 +1396,67 @@ task_pids_under_roots() {  # <dir>...
 $dir_pids"
   done
   TASK_PIDS=$(printf '%s\n' "$pids" | grep -E '^[0-9]+$' | sort -un || true)
+}
+
+task_pids_for_reap() {  # <dir>...
+  local cwd_pids marker_pids seeds expanded
+  TASK_PIDS_FAILED_DIR=
+  if command -v lsof >/dev/null 2>&1; then
+    task_pids_under_roots "$@" || return 1
+    cwd_pids=$TASK_PIDS
+  else
+    cwd_pids=
+  fi
+  marker_pids=
+  if [ -n "${TASK_HERMES_OWNER_TOKEN:-}" ]; then
+    marker_pids=$(pids_with_env_marker FM_HERMES_TASK_TOKEN "$TASK_HERMES_OWNER_TOKEN") || {
+      TASK_PIDS_FAILED_DIR='Hermes owner marker'
+      return 1
+    }
+  fi
+  seeds=$(printf '%s\n%s\n' "$cwd_pids" "$marker_pids" \
+    | grep -E '^[0-9]+$' | sort -un || true)
+  expanded=$(task_pids_expand_descendants "$seeds") || {
+    TASK_PIDS_FAILED_DIR='task descendant tree'
+    return 1
+  }
+  TASK_PIDS=$expanded
+}
+
+verified_hermes_owner_token() {
+  local harness meta_token state_token hermes_home registry state_real session_file
+  harness=$(meta_value "$META" harness)
+  [ "$harness" = hermes ] || return 3
+  meta_token=$(meta_value "$META" hermes_owner_token)
+  case "$meta_token" in fm.????????????) ;; *) return 1 ;; esac
+  case "$meta_token" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+  [ -f "$STATE/$ID.hermes-turnend-token" ] \
+    && [ ! -L "$STATE/$ID.hermes-turnend-token" ] || return 1
+  [ "$(wc -l < "$STATE/$ID.hermes-turnend-token" 2>/dev/null | tr -d '[:space:]')" = 1 ] \
+    || return 1
+  state_token=$(cat "$STATE/$ID.hermes-turnend-token" 2>/dev/null) || return 1
+  [ "$state_token" = "$meta_token" ] || return 1
+  hermes_home=$(meta_value "$META" hermes_home)
+  case "$hermes_home" in /*) ;; *) return 1 ;; esac
+  registry="$hermes_home/fm-turn-end.d/$meta_token"
+  [ -f "$registry" ] && [ ! -L "$registry" ] || return 1
+  state_real=$(canonical_existing_dir "$STATE") || return 1
+  session_file="$state_real/$ID.hermes-session"
+  jq -e --arg id "$ID" --arg state "$state_real" --arg session_file "$session_file" \
+    '.id == $id and .state == $state and .session_file == $session_file' \
+    "$registry" >/dev/null 2>&1 || return 1
+  printf '%s\n' "$meta_token"
+}
+
+report_task_process_scan_failure() {
+  case "${TASK_PIDS_FAILED_DIR:-}" in
+    'Hermes owner marker'|'task descendant tree')
+      echo "REFUSED: cannot determine owned processes from the $TASK_PIDS_FAILED_DIR for $ID; preserving the endpoint, worktree, and task records for manual inspection or retry." >&2
+      ;;
+    *)
+      echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
+      ;;
+  esac
 }
 
 reap_task_backend_process_group() {  # <label>
@@ -1374,13 +1513,14 @@ reap_task_worktree_processes() {  # <label> <dir>...
   local label=$1 pids pid identity current_pids i pass=1 max_passes=3
   local -a tracked_pids tracked_identities remaining_pids remaining_identities
   shift
-  if ! command -v lsof >/dev/null 2>&1; then
+  if ! command -v lsof >/dev/null 2>&1 \
+     && [ -z "${TASK_HERMES_OWNER_TOKEN:-}" ]; then
     reap_task_backend_process_group "$label"
     return 0
   fi
   while [ "$pass" -le "$max_passes" ]; do
-    if ! task_pids_under_roots "$@"; then
-      echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
+    if ! task_pids_for_reap "$@"; then
+      report_task_process_scan_failure
       return 1
     fi
     pids=$TASK_PIDS
@@ -1390,8 +1530,8 @@ reap_task_worktree_processes() {  # <label> <dir>...
     while IFS= read -r pid; do
       [ -n "$pid" ] || continue
       if ! identity=$(task_process_identity "$pid"); then
-        if ! task_pids_under_roots "$@"; then
-          echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
+        if ! task_pids_for_reap "$@"; then
+          report_task_process_scan_failure
           return 1
         fi
         if task_pid_list_contains "$TASK_PIDS" "$pid"; then
@@ -1409,8 +1549,8 @@ EOF
       pass=$((pass + 1))
       continue
     fi
-    if ! task_pids_under_roots "$@"; then
-      echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
+    if ! task_pids_for_reap "$@"; then
+      report_task_process_scan_failure
       return 1
     fi
     current_pids=$TASK_PIDS
@@ -1424,8 +1564,8 @@ EOF
       fi
     done
     sleep 1
-    if ! task_pids_under_roots "$@"; then
-      echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
+    if ! task_pids_for_reap "$@"; then
+      report_task_process_scan_failure
       return 1
     fi
     current_pids=$TASK_PIDS
@@ -1442,8 +1582,8 @@ EOF
     done
     if [ "${#remaining_pids[@]}" -gt 0 ]; then
       echo "teardown: force-killing leaked $label process(es) for $ID: ${remaining_pids[*]}" >&2
-      if ! task_pids_under_roots "$@"; then
-        echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
+      if ! task_pids_for_reap "$@"; then
+        report_task_process_scan_failure
         return 1
       fi
       current_pids=$TASK_PIDS
@@ -1458,8 +1598,8 @@ EOF
     fi
     pass=$((pass + 1))
   done
-  if ! task_pids_under_roots "$@"; then
-    echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
+  if ! task_pids_for_reap "$@"; then
+    report_task_process_scan_failure
     return 1
   fi
   [ -z "$TASK_PIDS" ] && return 0
@@ -2212,6 +2352,17 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
     else
       exit 1
     fi
+  fi
+fi
+
+TASK_HERMES_OWNER_TOKEN=
+if TASK_HERMES_OWNER_TOKEN=$(verified_hermes_owner_token); then
+  :
+else
+  hermes_owner_rc=$?
+  if [ "$hermes_owner_rc" -ne 3 ]; then
+    echo "REFUSED: Hermes process ownership for $ID is missing or inconsistent; preserving the endpoint, worktree, and task records rather than risking an unrelated Hermes session." >&2
+    exit 1
   fi
 fi
 
