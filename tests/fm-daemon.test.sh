@@ -292,6 +292,29 @@ test_stale_captain_held_live_or_ambiguous_remains_stale() {
   pass "live and ambiguous captain-held endpoints remain on stale tracking"
 }
 
+test_stale_captain_held_rechecks_status_after_liveness() {
+  local dir state win task status_file out
+  dir=$(make_supercase stale-captain-held-status-transition)
+  state="$dir/state"
+  task="held-status-transition-w12"; win="sess:fm-$task"
+  status_file="$state/$task.status"
+  printf 'captain-held [key=route]: waiting for recovery ownership\n' > "$status_file"
+  fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux" "harness=pi"
+  (
+    fm_backend_agent_state() {
+      printf 'working: resumed while the liveness probe was in flight\n' > "$status_file"
+      printf 'dead\n'
+    }
+    out=$(FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state")
+    case "$out" in
+      pause\|*) fail "captain-held status transition was classified as pause: $out" ;;
+      self\|*working*) ;;
+      *) fail "captain-held status transition lost the fresh status: $out" ;;
+    esac
+  ) || fail "captain-held status-transition classification failed"
+  pass "captain-held stale classification rechecks status after liveness"
+}
+
 test_stale_captain_held_remote_remains_ambiguous() {
   local dir state win out
   dir=$(make_supercase stale-captain-held-remote)
@@ -2158,6 +2181,7 @@ test_stale_terminal_escalates
 test_stale_paused_classifies_pause
 test_stale_captain_held_classifies_pause_without_wedge_replay
 test_stale_captain_held_live_or_ambiguous_remains_stale
+test_stale_captain_held_rechecks_status_after_liveness
 test_stale_captain_held_remote_remains_ambiguous
 test_housekeeping_remote_stale_marker_rechecks_owner
 test_housekeeping_missing_window_clears_remote_recheck_marker

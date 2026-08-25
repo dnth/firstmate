@@ -381,13 +381,20 @@ classify_signal() {  # <reason-after-colon> <state>
 # first sight of a non-terminal stale it returns "self" and the caller records a
 # timestamp marker; persistence is escalated by housekeeping's recheck, not here.
 classify_stale() {  # <window> <state>
-  local win=$1 state=$2 task last seen
+  local win=$1 state=$2 task last latest pause_valid seen
   task=$(window_to_task "$win" "$state")
   last=$(last_status_line "$state/$task.status")
+  pause_valid=0
   if [ -n "$last" ] && daemon_pause_status_is_valid "$win" "$state" "$last"; then
-    printf 'pause|paused/held (awaiting external recovery), rechecked on a long cadence: %s' "$last"
+    pause_valid=1
+  fi
+  latest=$(last_status_line "$state/$task.status")
+  if [ "$pause_valid" = 1 ] && [ -n "$latest" ] \
+    && status_is_paused_or_captain_held "$latest"; then
+    printf 'pause|paused/held (awaiting external recovery), rechecked on a long cadence: %s' "$latest"
     return
   fi
+  last=$latest
   if [ -n "$last" ] && status_is_captain_relevant "$last"; then
     # Independent of free-text captain-relevant matching: a nonterminal progress
     # verb (working:) must never take the terminal stale path. Seen-status dedupe
@@ -523,7 +530,7 @@ reconcile_pause_tracking() {  # <window> <state> <last-status-line>
 }
 
 daemon_pause_status_is_valid() {  # <window> <state> <last-status-line>
-  local win=$1 state=$2 last=$3 task meta backend agent_state
+  local win=$1 state=$2 last=$3 task meta backend agent_state latest
   status_is_paused "$last" && return 0
   status_is_paused_or_captain_held "$last" || return 1
   task=$(window_to_task "$win" "$state")
@@ -533,7 +540,10 @@ daemon_pause_status_is_valid() {  # <window> <state> <last-status-line>
   backend=$(fm_backend_of_meta "$meta")
   agent_state=$(fm_backend_agent_state "$backend" "$win" "$meta" 2>/dev/null || true)
   case "$agent_state" in
-    dead|missing) return 0 ;;
+    dead|missing)
+      latest=$(last_status_line "$state/$task.status")
+      status_is_paused_or_captain_held "$latest"
+      ;;
     *) return 1 ;;
   esac
 }
