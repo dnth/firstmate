@@ -162,7 +162,7 @@ test_low_risk_skips_no_mistakes_under_explicit_policy() {
   base=$(make_project "$id" no-mistakes docs)
   add_receipt "$id" AC1 lint "passed"
   add_receipt "$id" AC2 review "reviewed"
-  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" --change-class non-authoritative-prose) \
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base") \
     || fail "low-risk plan failed"
   printf '%s' "$out" | jq -e '.tier == "low" and .path == "receipts-mechanical" and .packet == null' >/dev/null \
     || fail "narrow mechanically proven docs change did not take the low path"
@@ -188,7 +188,7 @@ test_low_risk_skips_no_mistakes_under_explicit_policy() {
   [ "$(grep '^validation_completed_head=' "$meta" | tail -1)" = 'validation_completed_head=' ] \
     || fail "stale completion remained active after the head changed"
   new_head=$(git -C "$project" rev-parse HEAD)
-  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" --change-class non-authoritative-prose >/dev/null \
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null \
     || fail "corrected low-risk change could not be replanned"
   add_receipt "$id" AC1 lint "passed"
   FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence mechanical-checks-passed >/dev/null \
@@ -217,8 +217,7 @@ test_terminal_paths_record_completion_at_their_boundary() {
     base=$(make_project "$id" "$mode" localized)
     add_receipt "$id" AC1 test "2 passed"
     add_receipt "$id" AC2 lint "passed"
-    FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" \
-      --change-class localized-non-sensitive >/dev/null || fail "$mode timing plan failed"
+    FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "$mode timing plan failed"
     meta="$HOME_DIR/state/$id.meta"
     grep -Eq '^validation_started_at=[0-9]+$' "$meta" || fail "$mode omitted validation start time"
     ! grep -q '^validation_completed_at=' "$meta" || fail "$mode completed validation during planning"
@@ -289,8 +288,7 @@ test_completion_signal_releases_validation_lock() {
   base=$(make_project "$id" no-mistakes localized)
   add_receipt "$id" AC1 test "2 passed"
   add_receipt "$id" AC2 lint "passed"
-  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" \
-    --change-class localized-non-sensitive >/dev/null || fail "signal fixture plan failed"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "signal fixture plan failed"
   expected_head=$(git -C "$TMP_ROOT/project-$id" rev-parse HEAD)
   running_status=$(nm_status RUN-signal "$expected_head" pending)
   passed_status=$(nm_status RUN-signal "$expected_head" passed)
@@ -322,8 +320,7 @@ test_dirty_worktrees_cannot_plan_or_complete() {
   project="$TMP_ROOT/project-$id"
   mkdir -p "$project/src"
   printf 'uncommitted secret\n' > "$project/src/security.txt"
-  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" \
-    --change-class non-authoritative-prose >/dev/null 2>&1
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null 2>&1
   rc=$?
   expect_code 2 "$rc" "dirty worktree cannot be planned"
 
@@ -331,8 +328,7 @@ test_dirty_worktrees_cannot_plan_or_complete() {
   base=$(make_project "$id" local-only localized)
   add_receipt "$id" AC1 test "2 passed"
   add_receipt "$id" AC2 lint "passed"
-  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" \
-    --change-class localized-non-sensitive >/dev/null || fail "dirty completion fixture plan failed"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "dirty completion fixture plan failed"
   project="$TMP_ROOT/project-$id"
   printf 'untracked\n' > "$project/untracked.txt"
   FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence branch-ready >/dev/null 2>&1
@@ -346,8 +342,7 @@ test_local_completion_requires_fast_forward_readiness() {
   base=$(make_project "$id" local-only localized)
   add_receipt "$id" AC1 test "2 passed"
   add_receipt "$id" AC2 lint "passed"
-  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" \
-    --change-class localized-non-sensitive >/dev/null || fail "local divergence fixture plan failed"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "local divergence fixture plan failed"
   project="$TMP_ROOT/project-$id"
   git -C "$project" checkout -q main
   printf 'advanced\n' >> "$project/README.md"
@@ -360,60 +355,10 @@ test_local_completion_requires_fast_forward_readiness() {
   pass "local completion requires fast-forward readiness"
 }
 
-test_low_config_requires_allowlist_and_applicable_proof() {
-  local id base out
-  id=package-config
-  base=$(make_project "$id" no-mistakes package)
-  add_receipt "$id" AC1 lint "passed"
-  add_receipt "$id" AC2 review "reviewed"
-  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base") \
-    || fail "package-manifest plan failed"
-  printf '%s' "$out" | jq -e '.tier == "high" and .reason == "default-high"' >/dev/null \
-    || fail "package manifest was treated as low-risk mechanical config"
 
-  id=allowlisted-config-unbound
-  base=$(make_project "$id" no-mistakes config)
-  add_receipt "$id" AC1 lint "passed"
-  add_receipt "$id" AC2 review "reviewed"
-  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base") \
-    || fail "unbound config plan failed"
-  printf '%s' "$out" | jq -e '.tier == "high" and .reason == "unbound-mechanical-config"' >/dev/null \
-    || fail "unbound config receipt was treated as applicable proof"
-
-  id=allowlisted-config-bound
-  base=$(make_project "$id" no-mistakes config)
-  add_receipt "$id" AC1 lint "passed" .editorconfig
-  add_receipt "$id" AC2 review "reviewed"
-  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base") \
-    || fail "bound config plan failed"
-  printf '%s' "$out" | jq -e '.tier == "low" and .path == "receipts-mechanical"' >/dev/null \
-    || fail "allowlisted config with applicable proof did not take the low path"
-  pass "low config requires an allowlisted path and applicable proof"
-}
-
-test_medium_plan_writes_a_bounded_audit_packet() {
-  local id=medium-feature base out packet meta
-  base=$(make_project "$id" no-mistakes localized)
-  add_receipt "$id" AC1 test "2 passed"
-  add_receipt "$id" AC2 typecheck "passed"
-  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" --change-class localized-non-sensitive --risky-area "parser boundary") \
-    || fail "medium-risk plan failed"
-  printf '%s' "$out" | jq -e '.tier == "medium" and .path == "targeted-no-mistakes" and (.packet | type == "string")' >/dev/null \
-    || fail "localized tested change did not take the targeted path"
-  packet=$(printf '%s' "$out" | jq -r '.packet')
-  assert_present "$packet" "targeted audit packet was not written"
-  assert_grep '## Task contract' "$packet" "packet omitted the task contract"
-  assert_grep '## Evidence receipts' "$packet" "packet omitted evidence"
-  assert_grep '## Diff' "$packet" "packet omitted the base..HEAD diff"
-  assert_grep 'parser boundary' "$packet" "packet omitted declared risky areas"
-  assert_grep 'Do not reimplement the feature during review.' "$packet" "packet omitted the bounded audit remit"
-  meta="$HOME_DIR/state/$id.meta"
-  grep -qx 'validation_path=targeted-no-mistakes' "$meta" || fail "targeted path was not recorded"
-  pass "medium-risk work produces a brief, evidence, diff, and risky-area audit packet"
-}
 
 test_high_risk_and_uncertain_inputs_fail_safe() {
-  local id=high-auth base out rc project hidden_base
+  local id=high-auth base out rc project hidden_base current_head running_status
   base=$(make_project "$id" no-mistakes auth)
   add_receipt "$id" AC1 test "3 passed"
   add_receipt "$id" AC2 lint "passed"
@@ -435,7 +380,7 @@ test_high_risk_and_uncertain_inputs_fail_safe() {
   base=$(make_project "$id" no-mistakes localized)
   add_receipt "$id" AC1 test "0 tests passed"
   add_receipt "$id" AC2 lint "passed"
-  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" --risky-area "parser boundary") \
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base") \
     || fail "zero-test plan should still be a successful plan"
   printf '%s' "$out" | jq -e '.tier == "high" and .reason == "default-high"' >/dev/null \
     || fail "zero tests passed was treated as regression proof"
@@ -444,7 +389,7 @@ test_high_risk_and_uncertain_inputs_fail_safe() {
   base=$(make_project "$id" no-mistakes localized)
   add_receipt "$id" AC1 test "2 passed, 1 skipped"
   add_receipt "$id" AC2 lint "passed"
-  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" --risky-area "parser boundary") \
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base") \
     || fail "skipped-test plan should still be a successful plan"
   printf '%s' "$out" | jq -e '.tier == "high" and .reason == "default-high"' >/dev/null \
     || fail "a skipped test run was treated as regression proof"
@@ -463,10 +408,9 @@ test_high_risk_and_uncertain_inputs_fail_safe() {
   printf '%s' "$out" | jq -e '.tier == "high" and .reason == "default-high"' >/dev/null \
     || fail "filename silence downgraded an unclassified login change"
 
-  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" --risky-area "login flow") \
-    || fail "free-form login plan should still be a successful plan"
-  printf '%s' "$out" | jq -e '.tier == "high" and .reason == "default-high"' >/dev/null \
-    || fail "free-form risky-area text was treated as positive safety proof"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" --risky-area "login flow" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "removed risk hints are rejected"
 
   id=hidden-sensitive-base
   base=$(make_project "$id" no-mistakes auth)
@@ -477,8 +421,8 @@ test_high_risk_and_uncertain_inputs_fail_safe() {
   git -C "$project" commit -q -m 'documentation tail'
   add_receipt "$id" AC1 lint "passed"
   add_receipt "$id" AC2 review "reviewed"
-  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$hidden_base" \
-    --change-class non-authoritative-prose) || fail "mismatched base should produce a conservative plan"
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$hidden_base") \
+    || fail "mismatched base should produce a conservative plan"
   printf '%s' "$out" | jq -e '.tier == "high" and .reason == "unreadable-or-empty-diff"' >/dev/null \
     || fail "caller-selected ancestor hid a sensitive commit"
 
@@ -490,6 +434,20 @@ test_high_risk_and_uncertain_inputs_fail_safe() {
   expect_code 0 "$rc" "uncertain diff still records a conservative plan"
   printf '%s' "$out" | jq -e '.tier == "high" and .reason == "unreadable-or-empty-diff"' >/dev/null \
     || fail "unreadable base did not fail safe to high"
+
+  id=preplan-run
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint "passed"
+  project="$TMP_ROOT/project-$id"
+  current_head=$(git -C "$project" rev-parse HEAD)
+  running_status=$(nm_status OLD-RUN "$current_head" pending)
+  FM_FAKE_NM_STATUS="$running_status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "preplan-run fixture planning failed"
+  FM_FAKE_NM_STATUS="$running_status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run OLD-RUN >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "run active before planning cannot bind to the new plan"
   pass "security and uncertain changes retain full No-Mistakes validation"
 }
 
@@ -500,7 +458,7 @@ test_direct_and_local_modes_never_invoke_no_mistakes() {
     base=$(make_project "$id" "$mode" localized)
     add_receipt "$id" AC1 test "passed"
     add_receipt "$id" AC2 lint "passed"
-    out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" --change-class localized-non-sensitive --risky-area "localized fixture") \
+    out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base") \
       || fail "$mode plan failed"
     expected=$mode
     printf '%s' "$out" | jq -e --arg expected "$expected" '.tier == "high" and .path == $expected' >/dev/null \
@@ -509,85 +467,7 @@ test_direct_and_local_modes_never_invoke_no_mistakes() {
   pass "direct-PR and local-only retain evidence gates without invoking No-Mistakes"
 }
 
-test_follow_up_packet_uses_finding_delta_and_updated_receipts() {
-  local id=medium-followup base initial_head current_head project out packet rc
-  base=$(make_project "$id" no-mistakes localized)
-  add_receipt "$id" AC1 test "2 passed"
-  add_receipt "$id" AC2 lint "passed"
-  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" --change-class localized-non-sensitive --risky-area "localized fixture" >/dev/null \
-    || fail "initial medium plan failed"
-  project="$TMP_ROOT/project-$id"
-  initial_head=$(git -C "$project" rev-parse HEAD)
-  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --follow-up --delta-base "$initial_head" \
-    --change-class localized-non-sensitive --risky-area "localized fixture" \
-    --finding "F1: output assertion was incomplete" 2>&1)
-  rc=$?
-  expect_code 2 "$rc" "follow-up refuses an unchanged head"
-  assert_contains "$out" "strict descendant" "unchanged-head refusal did not identify the delta contract"
-  printf '#!/usr/bin/env bash\nprintf "fixed\\n"\n' > "$project/src/app.sh"
-  git -C "$project" add src/app.sh
-  git -C "$project" commit -q -m 'resolve finding'
-  current_head=$(git -C "$project" rev-parse HEAD)
-  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --follow-up --delta-base "$current_head" \
-    --finding "F1: output assertion was incomplete" 2>&1)
-  rc=$?
-  expect_code 2 "$rc" "follow-up refuses a delta base that omits the finding fix"
-  assert_contains "$out" "latest recorded validation head" "follow-up refusal did not identify the continuity contract"
-  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --follow-up --delta-base "$initial_head" \
-    --change-class localized-non-sensitive --risky-area "localized fixture" \
-    --finding "F1: output assertion was incomplete" --invalidated-criterion AC99 2>&1)
-  rc=$?
-  expect_code 2 "$rc" "follow-up rejects undeclared invalidated criteria"
-  assert_contains "$out" "not declared" "invalidated-criterion refusal did not identify the bad id"
-  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --follow-up --delta-base "$initial_head" \
-    --change-class localized-non-sensitive --risky-area "localized fixture" \
-    --finding "F1: output assertion was incomplete" --invalidated-criterion AC1 2>&1)
-  rc=$?
-  expect_code 2 "$rc" "follow-up requires post-boundary evidence for invalidated criteria"
-  assert_contains "$out" "requires a new receipt" "missing replacement evidence was not identified"
-  add_receipt "$id" AC1 test "3 passed after fix"
-  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --follow-up --delta-base "$initial_head" \
-    --change-class localized-non-sensitive --risky-area "localized fixture" \
-    --finding "F1: output assertion was incomplete" --invalidated-criterion AC1) \
-    || fail "bounded follow-up plan failed"
-  printf '%s' "$out" | jq -e '
-    .status == "follow-up-ready" and .tier == "medium"
-    and .finding_count == 1 and .invalidated_receipt_count == 1
-  ' >/dev/null || fail "follow-up instrumentation is incomplete"
-  packet=$(printf '%s' "$out" | jq -r '.packet')
-  assert_grep 'Packet kind: follow-up.' "$packet" "follow-up packet was not marked"
-  assert_grep 'F1: output assertion was incomplete' "$packet" "follow-up packet omitted the finding"
-  assert_grep '3 passed after fix' "$packet" "follow-up packet omitted updated receipts"
-  assert_grep "Review diff: $initial_head.." "$packet" "follow-up packet did not bind the delta base"
-  grep -qx 'validation_pass=follow-up' "$HOME_DIR/state/$id.meta" || fail "follow-up pass was not recorded"
-  [ "$(grep -c '^validation_started_at=' "$HOME_DIR/state/$id.meta")" -eq 1 ] \
-    || fail "follow-up rewrote the implementation-complete timestamp"
-  pass "follow-up validation is bounded to the finding, delta, and updated receipts"
-}
 
-test_follow_up_scope_change_requires_full_rerun() {
-  local id=medium-scope-change base initial_head project out rc
-  base=$(make_project "$id" no-mistakes localized)
-  add_receipt "$id" AC1 test "2 passed"
-  add_receipt "$id" AC2 lint "passed"
-  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" --change-class localized-non-sensitive --risky-area "localized fixture" >/dev/null \
-    || fail "initial medium plan failed"
-  project="$TMP_ROOT/project-$id"
-  initial_head=$(git -C "$project" rev-parse HEAD)
-  printf 'validate_login() { return 0; }\n' > "$project/src/login.ts"
-  git -C "$project" add src/login.ts
-  git -C "$project" commit -q -m 'expand into login surface'
-  add_receipt "$id" AC1 test "3 passed after expansion"
-  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --follow-up --delta-base "$initial_head" \
-    --finding "F2: implementation expanded into login handling")
-  rc=$?
-  expect_code 1 "$rc" "material follow-up risk change refuses a bounded packet"
-  printf '%s' "$out" | jq -e '
-    .status == "full-rerun-required" and .tier == "high"
-    and .path == "full-no-mistakes" and .reason == "follow-up-scope-or-risk-changed"
-  ' >/dev/null || fail "scope-changing follow-up did not retain a full rerun"
-  pass "material follow-up scope changes retain full No-Mistakes validation"
-}
 
 test_reports_missing_criteria_deterministically
 test_complete_and_invalid_ledgers_have_distinct_results

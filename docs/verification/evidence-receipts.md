@@ -10,7 +10,6 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 - Low-risk routing is limited to narrow mechanically proven CHANGELOG prose, while every other change defaults high.
 - High-risk, broad, sensitive, weakly proven, materially expanded, or uncertain changes retain full No-Mistakes validation.
 - `direct-PR` and `local-only` retain the evidence gate without entering No-Mistakes.
-- Medium follow-up review requires a fresh localized-non-sensitive classification, a non-empty strict-descendant delta from the latest recorded validation head, and post-boundary replacement receipts for every invalidated criterion.
 - Follow-up work without fresh positive safety evidence or with material risk expansion requires a full rerun.
 - Initial planning records one `validation_started_at`, and completion requires observed post-plan mechanical evidence, the exact successful No-Mistakes run bound to the latest plan/path/head, forge-observed canonical PR/head metadata, or a clean fast-forward-ready branch.
 - Every completion requires path-specific terminal evidence, records its plan path and validated head, invalidates stale completion metadata when the worktree head changes, and refuses completion until the change is replanned or revalidated.
@@ -47,11 +46,8 @@ ok - low documentation requires positive non-authoritative prose classification
 ok - terminal delivery paths record one completion timestamp at their boundary
 ok - completion signals release the validation lock for retry
 ok - dirty worktrees cannot be planned or completed
-ok - low config requires an allowlisted path and applicable proof
 ok - security and uncertain changes retain full No-Mistakes validation
 ok - direct-PR and local-only retain evidence gates without invoking No-Mistakes
-ok - follow-up validation is bounded to the finding, delta, and updated receipts
-ok - material follow-up scope changes retain full No-Mistakes validation
 
 $ tests/fm-crew-state.test.sh
 ok - ship completion remains parked until every criterion has evidence

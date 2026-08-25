@@ -7,8 +7,6 @@
 #   fm-receipt-check.sh <task-id> --bind-run <run-id>
 #   fm-receipt-check.sh <task-id> --complete --terminal-evidence <evidence>
 #   fm-receipt-check.sh <task-id> --plan [--base <commit>]
-#                       [--change-class <non-authoritative-prose|localized-non-sensitive|sensitive>]
-#                       [--risky-area <text>]...
 #
 # The default command emits one compact fm-evidence-check.v1 JSON object.
 # It exits 0 when every declared criterion has at least one structurally valid
@@ -79,19 +77,8 @@ esac
 ACTION=check
 CRITERION_QUERY=
 BASE_INPUT=
-DELTA_BASE=
-RISKY_AREAS=
-CHANGE_CLASS=
-FINDINGS=
-FINDING_COUNT=0
-INVALIDATED=
-INVALIDATED_COUNT=0
 TERMINAL_EVIDENCE=
 RUN_ID_INPUT=
-
-append_value() {  # <current> <value>
-  if [ -n "$1" ]; then printf '%s\n%s' "$1" "$2"; else printf '%s' "$2"; fi
-}
 
 while [ "$#" -gt 0 ]; do
   option=$1
@@ -108,10 +95,6 @@ while [ "$#" -gt 0 ]; do
       [ "$ACTION" = check ] || { echo "error: choose only one action" >&2; exit 2; }
       ACTION=plan
       ;;
-    --follow-up)
-      [ "$ACTION" = check ] || { echo "error: choose only one action" >&2; exit 2; }
-      ACTION=follow-up
-      ;;
     --complete)
       [ "$ACTION" = check ] || { echo "error: choose only one action" >&2; exit 2; }
       ACTION=complete
@@ -123,31 +106,12 @@ while [ "$#" -gt 0 ]; do
       RUN_ID_INPUT=$1
       shift
       ;;
-    --base|--delta-base|--change-class|--risky-area|--finding|--finding-file|--invalidated-criterion|--terminal-evidence)
+    --base|--terminal-evidence)
       [ "$#" -gt 0 ] || { echo "error: $option requires a value" >&2; exit 2; }
       value=$1
       shift
       case "$option" in
         --base) BASE_INPUT=$value ;;
-        --delta-base) DELTA_BASE=$value ;;
-        --change-class) CHANGE_CLASS=$value ;;
-        --risky-area) RISKY_AREAS=$(append_value "$RISKY_AREAS" "$value") ;;
-        --finding)
-          FINDINGS=$(append_value "$FINDINGS" "$value")
-          FINDING_COUNT=$((FINDING_COUNT + 1))
-          ;;
-        --finding-file)
-          [ -f "$value" ] && [ ! -L "$value" ] \
-            || { echo "error: finding file is missing or unsafe: $value" >&2; exit 2; }
-          finding_text=$(cat "$value")
-          [ -n "$finding_text" ] || { echo "error: finding file is empty: $value" >&2; exit 2; }
-          FINDINGS=$(append_value "$FINDINGS" "$finding_text")
-          FINDING_COUNT=$((FINDING_COUNT + 1))
-          ;;
-        --invalidated-criterion)
-          INVALIDATED=$(append_value "$INVALIDATED" "$value")
-          INVALIDATED_COUNT=$((INVALIDATED_COUNT + 1))
-          ;;
         --terminal-evidence) TERMINAL_EVIDENCE=$value ;;
       esac
       ;;
@@ -155,34 +119,19 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-case "$CHANGE_CLASS" in
-  ''|non-authoritative-prose|localized-non-sensitive|sensitive) ;;
-  *) echo "error: invalid --change-class" >&2; exit 2 ;;
-esac
-
 case "$ACTION" in
   check|criterion|bind-run)
-    [ -z "$BASE_INPUT$DELTA_BASE$CHANGE_CLASS$RISKY_AREAS$FINDINGS$INVALIDATED" ] \
-      || { echo "error: validation-planning options require --plan or --follow-up" >&2; exit 2; }
+    [ -z "$BASE_INPUT" ] || { echo "error: --base requires --plan" >&2; exit 2; }
     [ -z "$TERMINAL_EVIDENCE" ] || { echo "error: --terminal-evidence requires --complete" >&2; exit 2; }
     if [ "$ACTION" = bind-run ]; then
       case "$RUN_ID_INPUT" in ''|*[!A-Za-z0-9._-]*) echo "error: invalid run id" >&2; exit 2 ;; esac
     fi
     ;;
   complete)
-    [ -z "$BASE_INPUT$DELTA_BASE$CHANGE_CLASS$RISKY_AREAS$FINDINGS$INVALIDATED" ] \
-      || { echo "error: validation-planning options require --plan or --follow-up" >&2; exit 2; }
+    [ -z "$BASE_INPUT" ] || { echo "error: --base requires --plan" >&2; exit 2; }
     [ -n "$TERMINAL_EVIDENCE" ] || { echo "error: --complete requires --terminal-evidence" >&2; exit 2; }
     ;;
   plan)
-    [ -z "$DELTA_BASE$FINDINGS$INVALIDATED$TERMINAL_EVIDENCE" ] \
-      || { echo "error: follow-up options require --follow-up" >&2; exit 2; }
-    ;;
-  follow-up)
-    [ -z "$BASE_INPUT" ] \
-      || { echo "error: --base applies only to --plan" >&2; exit 2; }
-    [ -n "$DELTA_BASE" ] || { echo "error: --follow-up requires --delta-base" >&2; exit 2; }
-    [ "$FINDING_COUNT" -gt 0 ] || { echo "error: --follow-up requires a finding" >&2; exit 2; }
     [ -z "$TERMINAL_EVIDENCE" ] || { echo "error: --terminal-evidence requires --complete" >&2; exit 2; }
     ;;
 esac
@@ -288,24 +237,6 @@ if ! awk '
   exit 2
 fi
 
-if [ "$ACTION" = follow-up ] && [ -n "$INVALIDATED" ]; then
-  INVALIDATED_SEEN="$TMP_ROOT/invalidated-seen"
-  : > "$INVALIDATED_SEEN"
-  while IFS= read -r invalidated_criterion; do
-    case "$invalidated_criterion" in
-      AC[1-9]|AC[1-9][0-9]*) ;;
-      *) echo "error: invalidated criterion must be AC followed by a positive integer" >&2; exit 2 ;;
-    esac
-    cut -f1 "$CRITERIA" | grep -Fx "$invalidated_criterion" >/dev/null 2>&1 \
-      || { echo "error: invalidated criterion is not declared: $invalidated_criterion" >&2; exit 2; }
-    if grep -Fx "$invalidated_criterion" "$INVALIDATED_SEEN" >/dev/null 2>&1; then
-      echo "error: invalidated criterion was supplied more than once: $invalidated_criterion" >&2
-      exit 2
-    fi
-    printf '%s\n' "$invalidated_criterion" >> "$INVALIDATED_SEEN"
-  done <<< "$INVALIDATED"
-fi
-
 if [ "$ACTION" = criterion ]; then
   case "$CRITERION_QUERY" in
     AC[1-9]|AC[1-9][0-9]*) ;;
@@ -406,6 +337,7 @@ if [ "$ACTION" = bind-run ]; then
   BIND_WORKTREE=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
   BIND_PATH=$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)
   BIND_HEAD=$(grep '^validation_head=' "$META" | tail -1 | cut -d= -f2- || true)
+  BIND_PREPLAN_RUN=$(grep '^validation_preplan_run_id=' "$META" | tail -1 | cut -d= -f2- || true)
   [ "$BIND_PATH" = full-no-mistakes ] || { echo "error: latest plan does not use full No-Mistakes" >&2; exit 2; }
   [ -n "$BIND_WORKTREE" ] && [ -d "$BIND_WORKTREE" ] || { echo "error: validation worktree is missing" >&2; exit 2; }
   BIND_HEAD=$(git -C "$BIND_WORKTREE" rev-parse --verify "$BIND_HEAD^{commit}" 2>/dev/null) \
@@ -418,6 +350,7 @@ if [ "$ACTION" = bind-run ]; then
   BIND_OBSERVED_HEAD=$(nm_status_field "$BIND_OUT" head)
   BIND_STATUS=$(nm_status_field "$BIND_OUT" status)
   BIND_OUTCOME=$(nm_status_field "$BIND_OUT" outcome)
+  [ "$RUN_ID_INPUT" != "$BIND_PREPLAN_RUN" ] || { echo "error: No-Mistakes run predates the latest plan" >&2; exit 2; }
   [ "$BIND_OBSERVED_ID" = "$RUN_ID_INPUT" ] && [ "$BIND_OBSERVED_HEAD" = "$BIND_HEAD" ] \
     && { [ "$BIND_STATUS" = running ] || [ "$BIND_STATUS" = fixing ] || [ "$BIND_STATUS" = ci ] || [ "$BIND_STATUS" = awaiting_approval ]; } \
     && [ "$BIND_OUTCOME" != passed ] \
@@ -430,7 +363,7 @@ if [ "$ACTION" = bind-run ]; then
 fi
 
 record_validation_completed() {
-  local started path completed completed_head completed_path completed_evidence now worktree validated_head current_head expected_evidence observed pr pr_head branch boundary new_receipts run_id run_path run_out observed_id observed_head outcome default_ref
+  local started path completed completed_head completed_path completed_evidence now worktree validated_head current_head expected_evidence observed pr pr_head branch boundary new_receipts run_id run_path run_out observed_id observed_head outcome default_ref default_branch
   VALIDATION_LOCK="$STATE/.$ID.validation-plan.lock"
   if ! mkdir "$VALIDATION_LOCK" 2>/dev/null; then
     VALIDATION_LOCK=
@@ -512,10 +445,17 @@ record_validation_completed() {
       branch=$(git -C "$worktree" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
       [ "$branch" = "fm/$ID" ] \
         || { release_validation_lock; echo "error: local-only branch is not ready" >&2; return 1; }
-      default_ref=$(git -C "$worktree" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null || true)
-      if [ -z "$default_ref" ]; then
-        for default_ref in main master; do
-          git -C "$worktree" show-ref --verify --quiet "refs/heads/$default_ref" && break
+      default_ref=$(git -C "$worktree" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+      default_ref=${default_ref#origin/}
+      if [ -n "$default_ref" ] && git -C "$worktree" show-ref --verify --quiet "refs/heads/$default_ref"; then
+        default_ref="refs/heads/$default_ref"
+      else
+        default_ref=
+        for default_branch in main master; do
+          if git -C "$worktree" show-ref --verify --quiet "refs/heads/$default_branch"; then
+            default_ref="refs/heads/$default_branch"
+            break
+          fi
         done
       fi
       if [ -z "$default_ref" ] \
@@ -670,7 +610,7 @@ case "$MODE:$TIER" in
 esac
 
 write_meta_record() {  # <pass>
-  local pass=$1 now normalized_risks packet_value started
+  local pass=$1 now packet_value started
   now=$(date +%s)
   VALIDATION_LOCK="$STATE/.$ID.validation-plan.lock"
   if ! mkdir "$VALIDATION_LOCK" 2>/dev/null; then
@@ -678,7 +618,6 @@ write_meta_record() {  # <pass>
     echo "error: validation metadata is locked by another planner: $STATE/.$ID.validation-plan.lock" >&2
     return 1
   fi
-  normalized_risks=$(printf '%s' "$RISKY_AREAS" | tr '\n\r' '; ')
   started=$(grep '^validation_started_at=' "$META" | head -1 | cut -d= -f2- || true)
   case "$started" in
     '') ;;
@@ -695,15 +634,9 @@ write_meta_record() {  # <pass>
     printf 'validation_diff_lines=%s\n' "$DIFF_LINES"
     printf 'validation_pass=%s\n' "$pass"
     [ -n "$started" ] || printf 'validation_started_at=%s\n' "$now"
-    printf 'validation_risky_areas=%s\n' "$normalized_risks"
-    printf 'validation_change_class=%s\n' "$CHANGE_CLASS"
     printf 'validation_ledger_receipt_count=%s\n' "$RECEIPT_COUNT"
+    printf 'validation_preplan_run_id=%s\n' "${PREPLAN_RUN_ID:-}"
     printf 'validation_packet=%s\n' "$packet_value"
-    if [ "$pass" = follow-up ]; then
-      printf 'validation_delta_base=%s\n' "$DELTA_BASE"
-      printf 'validation_finding_count=%s\n' "$FINDING_COUNT"
-      printf 'validation_invalidated_receipt_count=%s\n' "$INVALIDATED_COUNT"
-    fi
   } >> "$META"; then
     release_validation_lock
     echo "error: could not append validation metadata: $META" >&2
@@ -712,21 +645,8 @@ write_meta_record() {  # <pass>
   release_validation_lock
 }
 
-render_task_contract() {
-  awk '
-    /^# Task[[:space:]]*$/ { printing=1; next }
-    printing && /^# / { exit }
-    printing { print }
-  ' "$BRIEF"
-}
-
-render_acceptance_criteria() {
-  printf '# Acceptance criteria\n'
-  while IFS=$'\t' read -r criterion description; do
-    printf -- '- %s: %s\n' "$criterion" "$description"
-  done < "$CRITERIA"
-}
-
+PREPLAN_OUT=$(cd "$WORKTREE" && "$NO_MISTAKES_BIN" axi status 2>/dev/null || true)
+PREPLAN_RUN_ID=$(nm_status_field "$PREPLAN_OUT" id)
 write_meta_record initial
 jq -cn --arg task "$ID" --arg mode "$MODE" --arg tier "$TIER" --arg path "$VALIDATION_PATH" --arg reason "$REASON" \
   --arg base "$BASE" --arg head "$HEAD" \

@@ -65,8 +65,14 @@ done
 [ "${#CRITERIA[@]}" -gt 0 ] || { echo "error: promotion requires at least one concrete --criterion 'AC1: outcome'" >&2; exit 1; }
 CRITERIA_SEEN=
 for criterion in "${CRITERIA[@]}"; do
-  case "$criterion" in AC[1-9]:\ *|AC[1-9][0-9]*:\ *) ;; *) echo "error: invalid promotion criterion: $criterion" >&2; exit 1 ;; esac
-  criterion_id=${criterion%%:*}
+  case "$criterion" in *$'\n'*|*$'\r'*) echo "error: invalid promotion criterion" >&2; exit 1 ;; esac
+  if [[ ! "$criterion" =~ ^(AC[1-9][0-9]*):[[:space:]]+(.+)$ ]]; then
+    echo "error: invalid promotion criterion: $criterion" >&2
+    exit 1
+  fi
+  criterion_id=${BASH_REMATCH[1]}
+  criterion_description=${BASH_REMATCH[2]}
+  case "$criterion_description" in \{*\}) echo "error: promotion criterion must not be a placeholder" >&2; exit 1 ;; esac
   printf '%s\n' "$CRITERIA_SEEN" | grep -Fx "$criterion_id" >/dev/null 2>&1 \
     && { echo "error: duplicate promotion criterion: $criterion_id" >&2; exit 1; }
   CRITERIA_SEEN=$(printf '%s\n%s' "$CRITERIA_SEEN" "$criterion_id")

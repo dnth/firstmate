@@ -237,6 +237,13 @@ EOF
   [ "$status" -ne 0 ] || fail "promotion on a conditional policy should exit non-zero"
   assert_contains "$out" "classify this task's surface" "promote did not refuse the conditional policy as a task mode"
 
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 --mode direct-PR --yolo on \
+    --criterion 'AC1: {TODO}' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "promotion accepted a placeholder criterion"
+  assert_grep 'kind=scout' "$meta" "invalid criterion changed scout metadata"
+  [ ! -e "$ledger" ] || fail "invalid criterion created an evidence ledger"
+
   brief_before="$home/brief.before"
   meta_before="$home/meta.before"
   cp "$brief" "$brief_before"
