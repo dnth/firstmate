@@ -185,69 +185,64 @@ The Herdr `/exit` path required a bounded process-exit wait because the TUI can 
 
 ### Hermes task-owned process teardown
 
-Hermes Agent v0.20.0 and Herdr 0.7.3 were verified on 2026-08-25 after the task-owner reaping change.
-This record was captured against commit fa4c46c and predates every ownership-selector change that followed it on this branch, so it is retained as captured and does not prove the shipped selector.
-Commit ffe6787 made the marker scan fork-free, a0b3dd9 narrowed the descendant closure seed from the union of token-marker and worktree-cwd roots to the token-marker roots alone, d7361c6 and 1ea3587 rewrote the non-`/proc` process-environment scan, and the current head drops pids with no readable process identity from the owned set.
-The narrowing alone means the recorded PID lists and the `owned-after=0` verdict were produced by a strictly wider kill set than the shipped code computes, so that result cannot be replayed onto the shipped selector.
-The tmux transcript below also predates the active-teardown case, so it carries none of the `command: fm-teardown <id> (persistent TUI still running, no /exit)` or `output: active_teardown=yes ...` lines the current live test emits, and the live active-teardown path therefore has no recorded evidence yet.
-Both probes must be rerun against the final head and this whole section replaced before the change merges.
-The tmux verification used the live adapter test's private Hermes profile and tmux server.
-The Herdr verification used only `fm-herdr-lab.sh` with the generated non-default session `fm-lab-fm-hermes-tui-le-3564243-5376`.
+Hermes Agent v0.20.0 and Herdr 0.7.3 were verified on 2026-08-25 against the shipped ownership selector at head `1cf0e803`.
+Both probes ran from the no-mistakes gate worktree at that exact head, so the results below describe the code as it merges.
+The tmux verification used the live adapter test's private Hermes profile and tmux server, and tore down an active scout whose persistent TUI was still running.
+The Herdr verification used only `fm-herdr-lab.sh` for session lifecycle, with the generated non-default session `fm-lab-fm-hermes-final-1537953-14337`.
+The Herdr probe set the test-only `FM_GATE_REFUSE_BYPASS=1` because the code under test ran from the gate worktree.
 The default Herdr session remained running with the same fleet identity before and after the probe.
 
 ```sh
 FM_HERMES_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-hermes-live-e2e.test.sh
 
 HERDR_LAB_HELPER=/home/dnth/Desktop/firstmate/bin/fm-herdr-lab.sh
-HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-hermes-tui-leak-fix)
+HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-hermes-final)
 trap '"$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION"' EXIT
 "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION"
 
 env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_WORKSPACE_ID -u HERDR_TAB_ID \
   -u HERDR_SOCKET_PATH HERDR_SESSION="$HERDR_LAB_SESSION" \
-  FM_HOME="$FM_LIVE_HOME" HERMES_HOME="$PROFILE" \
-  bin/fm-spawn.sh hermes-herdr-reap-live "$PROJECT" \
+  FM_GATE_REFUSE_BYPASS=1 FM_HOME="$FM_LIVE_HOME" HERMES_HOME="$PROFILE" \
+  bin/fm-spawn.sh hermes-herdr-final-live "$PROJECT" \
   --harness hermes --backend herdr --model gpt-5.6-sol --effort low \
   --mode local-only --yolo off
 
 env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_WORKSPACE_ID -u HERDR_TAB_ID \
   -u HERDR_SOCKET_PATH HERDR_SESSION="$HERDR_LAB_SESSION" \
-  FM_HOME="$FM_LIVE_HOME" HERMES_HOME="$PROFILE" \
-  bin/fm-teardown.sh hermes-herdr-reap-live --force
+  FM_GATE_REFUSE_BYPASS=1 FM_HOME="$FM_LIVE_HOME" HERMES_HOME="$PROFILE" \
+  bin/fm-teardown.sh hermes-herdr-final-live --force
 ```
 
 Observed bounded output:
 
 ```text
 tmux:
-teardown: reaping leaked worktree process(es) for hermes-live-worker: 132007 132008
-teardown: reaping leaked worktree process(es) for hermes-live-scout: 186742 186743
+command: fm-teardown hermes-live-scout (persistent TUI still running, no /exit)
+teardown: reaping leaked worktree process(es) for hermes-live-scout: 1137083 1137084 1140677 1140918 1140955 1141348 1141350 1141352 1141354 1141356 1141357 1141359 1141363 1141577 1141584 1141662 1141697 1141847 1141849 1141851 1141854 1141855 1141877 1141882 1141885 1141919 1141923
+output: active_teardown=yes pane_root=1134158 owned_before=1134158 1136126 1137083 1137084 1140677 1140918 1140955 1141348 1141350 1141352 1141354 1141356 1141357 1141359 1141363 1141577 1141584 1141662 1141697 1141847 1141849 1141851 1141854 1141855 1141877 1141882 1141885 1141919 1141923 tracked_survivors=0 survivors=0
 ok - Hermes Agent v0.20.0 (2026.8.3) persistent Hermes TUI: crew/scout launch, composer steer, native skill turn, busy->idle, turn-end, interrupt, exit, and exact-session resume
 output: cleanup_owned_processes=0 cleanup_temp_dirs=0
-FM_TEST_END ... exit=0 duration_ms=126005 gate_skip=false
-
-interrupted tmux cleanup:
-^Coutput: cleanup_owned_processes=0 cleanup_temp_dirs=0
-process exit=130
+FM_TEST_END ... exit=0 duration_ms=160832
 
 Herdr:
-spawned hermes-herdr-reap-live ... window=fm-lab-fm-hermes-tui-le-3564243-5376:w1:p2
-output: owned-before=3569803,3570363,3570403,...,3577232
-owned roles: hermes chat --tui, ui-tui/dist/entry.js, tui_gateway.entry, five MCP watchdog/server branches, and their browser descendants
-teardown: reaping leaked worktree process(es) for hermes-herdr-reap-live: 3568245 3568246 3569803 ... 3577232
-teardown hermes-herdr-reap-live complete (window fm-lab-fm-hermes-tui-le-3564243-5376:w1:p2, worktree /home/dnth/.treehouse/project-ec558a/1/project)
-output: owned-after=0 personal-unchanged=2
-ok - guarded Herdr Hermes teardown reaped only the task-owned persistent TUI tree
-post-teardown session state: {"lab":[],"default":[{"name":"default","running":true}]}
+spawned hermes-herdr-final-live ... window=fm-lab-fm-hermes-final-1537953-14337:w1:p2
+output: active=yes marker_roots=1544325 1544435 1544437 1544868 1544917 1544982 1544983 owned_count=27 roles=MainThread,bun,chrome,git,git-remote-http,hermes,hound,python,python3,tradingview-mcp,uv
+teardown: reaping leaked worktree process(es) for hermes-herdr-final-live: 1542952 1542953 1544325 1544435 1544437 1544868 1544917 1544982 1544983 1546066 1546068 1546073 1546078 1546097 1546102 1546107 1546111 1546297 1546299 1546398 1546631 1546951 1546958 1546960 1546963 1546964 1546997 1547004 1547023 1547066 1547068
+output: captured_survivors=0 marker_survivors=0 personal_unchanged=4
+output: session_state={"lab":[],"default":[{"name":"default","running":true}]}
+ok - final-head guarded Herdr active teardown removed only the captured task tree
 ```
 
-The owner set was derived from the exact `FM_HERMES_TASK_TOKEN` recorded in task metadata and expanded through the kernel parent tree before any signal was sent.
-The probe included the Node TUI outside the worktree, the gateway inside the worktree, process-group-detached MCP watchdogs, and deeper MCP and browser descendants.
+Both probes tore down a live persistent tree: neither sent `/exit` first, so the Python launcher, the Node `ui-tui` child, the gateway, the detached MCP watchdog and server branches, and their descendants were all running when teardown was invoked.
+The owner set was derived from the exact `FM_HERMES_TASK_TOKEN` recorded in task metadata, expanded through the kernel parent tree from those token roots, and unioned with the flat set of processes whose cwd is the task worktree, before any signal was sent.
 One teardown invocation removed every task-owned process on both backends without a `REFUSED` retry.
-The two unrelated pre-existing Hermes processes retained the same PID and kernel start identity, proving that the shared personal profile was not used as a kill selector.
-The live tmux test's EXIT, INT, and TERM cleanup trap independently reaps the isolated profile and temp-root ownership set, then asserts zero owned processes and zero `/tmp/fm-hermes-live-e2e.*` directories before returning success.
-An explicit `Ctrl+C` during a later live run returned 130 only after the same zero-process and zero-directory assertion printed, which proves the interrupt path rather than inferring it from the normal EXIT path.
-The full personal MCP configuration produced more than twenty task descendants in the Herdr probe.
+The tmux survivor proof is independent of that selector: it pins the birth identity of the pane-rooted tree while it is still intact and requires every captured identity to be gone the moment the single teardown invocation returns, with no settle window.
+The Herdr probe reported `captured_survivors=0` and `marker_survivors=0` on the same immediate basis.
+Four unrelated personal Hermes processes retained the same kernel start identity across the Herdr probe, proving the shared personal profile was never used as a kill selector.
+The default Herdr session was still running with an unchanged fleet identity after the lab session was torn down, which is the tripwire for lab isolation.
+The live tmux test's EXIT, INT, and TERM cleanup trap independently reaps the isolated profile and temp-root ownership set, then asserts zero owned processes and zero `/tmp/fm-hermes-live-e2e.*` directories before returning on both success and failure.
+An explicit `Ctrl+C` during an earlier run on the same day returned 130 only after that same zero-process and zero-directory assertion printed, which proves the interrupt path rather than inferring it from the normal EXIT path.
+The full personal MCP configuration produced 27 task-owned processes in the Herdr probe.
 A smaller crew-specific MCP profile remains a follow-up because no supported isolated tool configuration was verified, and changing the captain's profile or silently removing crew tools is outside this fix.
 
 ### OMP lifecycle
