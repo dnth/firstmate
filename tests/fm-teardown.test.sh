@@ -2784,6 +2784,76 @@ test_hermes_without_jq_falls_back_instead_of_refusing() {
   pass "a Hermes task teardown falls back rather than refusing when jq cannot verify the registry"
 }
 
+test_hermes_descendant_closure_starts_only_at_token_roots() {
+  local case_dir rc token hermes_home registry state_real pid_file
+  local pid child_pid="" parent_survived=0 child_survived=0 i
+  case_dir=$(make_case hermes-closure-token-roots)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  token=fm.abcdefghijkl
+  hermes_home="$case_dir/hermes-home"
+  registry="$hermes_home/fm-turn-end.d/$token"
+  state_real=$(cd "$case_dir/state" && pwd -P)
+  mkdir -p "$hermes_home/fm-turn-end.d"
+  printf '%s\n' "$token" > "$case_dir/state/task-x1.hermes-turnend-token"
+  jq -n --arg id task-x1 --arg state "$state_real" \
+    --arg session_file "$state_real/task-x1.hermes-session" \
+    '{id:$id,state:$state,session_file:$session_file}' > "$registry"
+  printf '%s\n' \
+    'harness=hermes' \
+    "hermes_home=$hermes_home" \
+    "hermes_owner_token=$token" >> "$case_dir/state/task-x1.meta"
+  pid_file="$case_dir/child.pid"
+
+  # A worktree-rooted process that carries no owner token: it is reaped by the
+  # cwd rule, but the descendant closure starts only at token-bearing roots, so
+  # its detached child outside the task roots is not a kill candidate.
+  ( cd "$case_dir/wt" && exec perl -MPOSIX -e '
+      my ($pid_file, $outside) = @ARGV;
+      my $child = fork();
+      die "fork" unless defined $child;
+      if (!$child) {
+        POSIX::setsid();
+        chdir $outside or die "chdir outside";
+        $SIG{TERM} = "IGNORE";
+        open my $fh, ">", $pid_file or die "open";
+        print {$fh} "$$\n";
+        close $fh;
+        sleep 300;
+        exit 0;
+      }
+      sleep 300;
+    ' "$pid_file" "$case_dir" ) &
+  pid=$!
+  disown
+  i=0
+  while [ "$i" -lt 50 ]; do
+    [ -s "$pid_file" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  child_pid=$(cat "$pid_file" 2>/dev/null || true)
+  if [ -n "$child_pid" ] && kill -0 "$child_pid" 2>/dev/null; then
+    child_survived=1
+    kill -KILL "$child_pid" 2>/dev/null || true
+  fi
+  if kill -0 "$pid" 2>/dev/null; then
+    parent_survived=1
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+
+  expect_code 0 "$rc" "hermes-closure-token-roots: teardown should succeed"
+  [ "$parent_survived" -eq 0 ] \
+    || fail "hermes-closure-token-roots: the worktree-rooted process survived"
+  [ "$child_survived" -eq 1 ] \
+    || fail "hermes-closure-token-roots: the closure expanded from a cwd seed instead of a token root"
+  pass "a token-proven Hermes closure expands from token roots only, not from every cwd-owned process"
+}
+
 test_lsof_absent_reaps_tmux_process_group() {
   local case_dir rc pid path_without_lsof
   case_dir=$(make_case lsof-absent-process-group-reap)
@@ -3175,6 +3245,7 @@ test_hermes_legacy_state_token_without_meta_falls_back_to_cwd_reap
 test_defunct_survivor_does_not_block_teardown
 test_lsof_absent_hermes_still_reaps_tmux_process_group
 test_hermes_without_jq_falls_back_instead_of_refusing
+test_hermes_descendant_closure_starts_only_at_token_roots
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
 test_reused_pid_identity_is_not_force_killed

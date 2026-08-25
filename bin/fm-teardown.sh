@@ -1299,7 +1299,7 @@ EOF
 # cwd scan and descendant closure cover gateway children whose sanitized MCP
 # environments no longer carry it.
 pids_with_env_marker() {  # <name> <value>
-  local name=$1 value=$2 proc_root proc_dir pid entry ps_pids out line
+  local name=$1 value=$2 proc_root proc_dir pid entry out line
   case "$name" in ''|*[!A-Z0-9_]*) return 1 ;; esac
   case "$value" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
   proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
@@ -1318,21 +1318,19 @@ pids_with_env_marker() {  # <name> <value>
     done
     return 0
   fi
-  ps_pids=$(LC_ALL=C ps -e -o pid= 2>/dev/null) || return 1
-  while IFS= read -r pid; do
-    pid=$(printf '%s' "$pid" | tr -d '[:space:]')
+  out=$(LC_ALL=C ps -Aeww -o pid=,command= 2>/dev/null) || return 1
+  while IFS= read -r line; do
+    case " $line " in
+      *" $name=$value "*) ;;
+      *) continue ;;
+    esac
+    pid=${line#"${line%%[![:space:]]*}"}
+    pid=${pid%%[[:space:]]*}
     case "$pid" in ''|*[!0-9]*) continue ;; esac
     [ "$pid" != "$$" ] || continue
-    out=$(LC_ALL=C ps eww -p "$pid" -o command= 2>/dev/null) || continue
-    while IFS= read -r line; do
-      case " $line " in
-        *" $name=$value "*) printf '%s\n' "$pid"; break ;;
-      esac
-    done <<EOF
-$out
-EOF
+    printf '%s\n' "$pid"
   done <<EOF
-$ps_pids
+$out
 EOF
 }
 
@@ -1423,7 +1421,7 @@ $dir_pids"
 }
 
 task_pids_for_reap() {  # <dir>...
-  local cwd_pids marker_pids seeds expanded
+  local cwd_pids marker_pids expanded
   TASK_PIDS_FAILED_DIR=
   if command -v lsof >/dev/null 2>&1; then
     task_pids_under_roots "$@" || return 1
@@ -1439,13 +1437,12 @@ task_pids_for_reap() {  # <dir>...
     TASK_PIDS_FAILED_DIR='Hermes owner marker'
     return 1
   }
-  seeds=$(printf '%s\n%s\n' "$cwd_pids" "$marker_pids" \
-    | grep -E '^[0-9]+$' | sort -un || true)
-  expanded=$(task_pids_expand_descendants "$seeds") || {
+  expanded=$(task_pids_expand_descendants "$marker_pids") || {
     TASK_PIDS_FAILED_DIR='task descendant tree'
     return 1
   }
-  TASK_PIDS=$expanded
+  TASK_PIDS=$(printf '%s\n%s\n' "$cwd_pids" "$expanded" \
+    | grep -E '^[0-9]+$' | sort -un || true)
 }
 
 verified_hermes_owner_token() {

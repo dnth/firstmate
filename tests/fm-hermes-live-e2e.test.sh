@@ -61,106 +61,76 @@ live_expand_descendants() {  # <seed-pid-list>
   printf '%s\n' "$out" | grep -E '^[0-9]+$' | sort -un || true
 }
 
-live_task_pids() {  # <owner-token> <worktree>
-  local token=$1 worktree=$2 seeds proc_dir pid entry line path ps_pids cmdline
-  seeds=
+live_env_marker_pids() {  # <NAME=VALUE>
+  local marker=$1 proc_dir pid entry rows line
   if [ -d /proc ]; then
     for proc_dir in /proc/[0-9]*; do
       [ -r "$proc_dir/environ" ] || continue
       pid=${proc_dir##*/}
       [ "$pid" != "$$" ] || continue
       while IFS= read -r -d '' entry; do
-        if [ "$entry" = "FM_HERMES_TASK_TOKEN=$token" ]; then
-          seeds="$seeds
-$pid"
+        if [ "$entry" = "$marker" ]; then
+          printf '%s\n' "$pid"
           break
         fi
       done < "$proc_dir/environ" 2>/dev/null || true
     done
-  else
-    ps_pids=$(LC_ALL=C ps -e -o pid= 2>/dev/null) || return 1
-    while IFS= read -r pid; do
-      pid=$(printf '%s' "$pid" | tr -d '[:space:]')
-      case "$pid" in ''|*[!0-9]*) continue ;; esac
-      [ "$pid" != "$$" ] || continue
-      cmdline=$(LC_ALL=C ps eww -p "$pid" -o command= 2>/dev/null) || continue
-      case " $cmdline " in
-        *" FM_HERMES_TASK_TOKEN=$token "*) seeds="$seeds
-$pid" ;;
-      esac
-    done <<EOF
-$ps_pids
-EOF
+    return 0
   fi
-  if [ -n "$worktree" ] && command -v lsof >/dev/null 2>&1; then
-    pid=
-    while IFS= read -r line; do
-      case "$line" in
-        p*) pid=${line#p} ;;
-        n*)
-          path=${line#n}
-          case "$path" in
-            "$worktree"|"$worktree"/*) seeds="$seeds
-$pid" ;;
-          esac
-          ;;
-      esac
-    done <<EOF
+  rows=$(LC_ALL=C ps -Aeww -o pid=,command= 2>/dev/null) || return 1
+  while IFS= read -r line; do
+    case " $line " in
+      *" $marker "*) ;;
+      *) continue ;;
+    esac
+    pid=${line#"${line%%[![:space:]]*}"}
+    pid=${pid%%[[:space:]]*}
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    [ "$pid" != "$$" ] || continue
+    printf '%s\n' "$pid"
+  done <<EOF
+$rows
+EOF
+}
+
+live_cwd_pids() {  # <root>
+  local root=$1 pid line path
+  [ -n "$root" ] || return 0
+  command -v lsof >/dev/null 2>&1 || return 0
+  pid=
+  while IFS= read -r line; do
+    case "$line" in
+      p*) pid=${line#p} ;;
+      n*)
+        path=${line#n}
+        case "$path" in
+          "$root"|"$root"/*)
+            [ "$pid" = "$$" ] || printf '%s\n' "$pid"
+            ;;
+        esac
+        ;;
+    esac
+  done <<EOF
 $(lsof -a -d cwd -Fpn 2>/dev/null || true)
 EOF
-  fi
-  seeds=$(printf '%s\n' "$seeds" | grep -E '^[0-9]+$' | sort -un || true)
+}
+
+live_task_pids() {  # <owner-token> <worktree>
+  local token=$1 worktree=$2 marker_pids cwd_pids seeds
+  marker_pids=$(live_env_marker_pids "FM_HERMES_TASK_TOKEN=$token") || return 1
+  cwd_pids=$(live_cwd_pids "$worktree") || return 1
+  seeds=$(printf '%s\n%s\n' "$marker_pids" "$cwd_pids" \
+    | grep -E '^[0-9]+$' | sort -un || true)
   [ -n "$seeds" ] || return 0
   live_expand_descendants "$seeds"
 }
 
 live_owned_pids() {
-  local proc_dir pid line path seeds ps_pids command
-  seeds=
-  if [ -d /proc ]; then
-    for proc_dir in /proc/[0-9]*; do
-      [ -r "$proc_dir/environ" ] || continue
-      pid=${proc_dir##*/}
-      [ "$pid" != "$$" ] || continue
-      if tr '\0' '\n' < "$proc_dir/environ" 2>/dev/null \
-          | grep -Fxq "HERMES_HOME=$PROFILE"; then
-        seeds="$seeds
-$pid"
-      fi
-    done
-  else
-    ps_pids=$(LC_ALL=C ps -e -o pid= 2>/dev/null) || return 1
-    while IFS= read -r pid; do
-      pid=$(printf '%s' "$pid" | tr -d '[:space:]')
-      case "$pid" in ''|*[!0-9]*) continue ;; esac
-      [ "$pid" != "$$" ] || continue
-      command=$(LC_ALL=C ps eww -p "$pid" -o command= 2>/dev/null) || continue
-      case " $command " in
-        *" HERMES_HOME=$PROFILE "*) seeds="$seeds
-$pid" ;;
-      esac
-    done <<EOF
-$ps_pids
-EOF
-  fi
-  if command -v lsof >/dev/null 2>&1; then
-    pid=
-    while IFS= read -r line; do
-      case "$line" in
-        p*) pid=${line#p} ;;
-        n*)
-          path=${line#n}
-          case "$path" in
-            "$LAB"|"$LAB"/*) seeds="$seeds
-$pid" ;;
-          esac
-          ;;
-      esac
-    done <<EOF
-$(lsof -a -d cwd -Fpn 2>/dev/null || true)
-EOF
-  fi
-  seeds=$(printf '%s\n' "$seeds" | grep -E '^[0-9]+$' | sort -un || true)
+  local marker_pids cwd_pids seeds
+  marker_pids=$(live_env_marker_pids "HERMES_HOME=$PROFILE") || return 1
+  cwd_pids=$(live_cwd_pids "$LAB") || return 1
+  seeds=$(printf '%s\n%s\n' "$marker_pids" "$cwd_pids" \
+    | grep -E '^[0-9]+$' | sort -un || true)
   [ -n "$seeds" ] || return 0
   live_expand_descendants "$seeds"
 }
