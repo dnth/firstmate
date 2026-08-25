@@ -4,6 +4,7 @@
 # Usage:
 #   fm-receipt-check.sh <task-id>
 #   fm-receipt-check.sh <task-id> --criterion <criterion-id>
+#   fm-receipt-check.sh <task-id> --bind-run <run-id>
 #   fm-receipt-check.sh <task-id> --complete --terminal-evidence <evidence>
 #   fm-receipt-check.sh <task-id> --plan [--base <commit>]
 #                       [--change-class <non-authoritative-prose|localized-non-sensitive|sensitive>]
@@ -72,7 +73,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
+NO_MISTAKES_BIN="${FM_NO_MISTAKES_BIN:-no-mistakes}"
 
 usage() {
   awk '
@@ -107,6 +108,7 @@ FINDING_COUNT=0
 INVALIDATED=
 INVALIDATED_COUNT=0
 TERMINAL_EVIDENCE=
+RUN_ID_INPUT=
 
 append_value() {  # <current> <value>
   if [ -n "$1" ]; then printf '%s\n%s' "$1" "$2"; else printf '%s' "$2"; fi
@@ -134,6 +136,13 @@ while [ "$#" -gt 0 ]; do
     --complete)
       [ "$ACTION" = check ] || { echo "error: choose only one action" >&2; exit 2; }
       ACTION=complete
+      ;;
+    --bind-run)
+      [ "$#" -gt 0 ] || { echo "error: --bind-run requires a value" >&2; exit 2; }
+      [ "$ACTION" = check ] || { echo "error: choose only one action" >&2; exit 2; }
+      ACTION=bind-run
+      RUN_ID_INPUT=$1
+      shift
       ;;
     --base|--delta-base|--change-class|--risky-area|--finding|--finding-file|--invalidated-criterion|--terminal-evidence)
       [ "$#" -gt 0 ] || { echo "error: $option requires a value" >&2; exit 2; }
@@ -173,10 +182,13 @@ case "$CHANGE_CLASS" in
 esac
 
 case "$ACTION" in
-  check|criterion)
+  check|criterion|bind-run)
     [ -z "$BASE_INPUT$DELTA_BASE$CHANGE_CLASS$RISKY_AREAS$FINDINGS$INVALIDATED" ] \
       || { echo "error: validation-planning options require --plan or --follow-up" >&2; exit 2; }
     [ -z "$TERMINAL_EVIDENCE" ] || { echo "error: --terminal-evidence requires --complete" >&2; exit 2; }
+    if [ "$ACTION" = bind-run ]; then
+      case "$RUN_ID_INPUT" in ''|*[!A-Za-z0-9._-]*) echo "error: invalid run id" >&2; exit 2 ;; esac
+    fi
     ;;
   complete)
     [ -z "$BASE_INPUT$DELTA_BASE$CHANGE_CLASS$RISKY_AREAS$FINDINGS$INVALIDATED" ] \
@@ -408,8 +420,39 @@ if [ "$CHECK_RC" -ne 0 ]; then
   exit "$CHECK_RC"
 fi
 
+nm_status_field() {
+  printf '%s\n' "$1" | sed -n "s/^[[:space:]]*$2:[[:space:]]*\"\{0,1\}\([^\"]*\)\"\{0,1\}[[:space:]]*$/\1/p" | head -1
+}
+
+if [ "$ACTION" = bind-run ]; then
+  BIND_WORKTREE=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
+  BIND_PATH=$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)
+  BIND_HEAD=$(grep '^validation_head=' "$META" | tail -1 | cut -d= -f2- || true)
+  case "$BIND_PATH" in targeted-no-mistakes|full-no-mistakes) ;; *) echo "error: latest plan does not use No-Mistakes" >&2; exit 2 ;; esac
+  [ -n "$BIND_WORKTREE" ] && [ -d "$BIND_WORKTREE" ] || { echo "error: validation worktree is missing" >&2; exit 2; }
+  BIND_HEAD=$(git -C "$BIND_WORKTREE" rev-parse --verify "$BIND_HEAD^{commit}" 2>/dev/null) \
+    || { echo "error: validated head is missing" >&2; exit 2; }
+  [ -z "$(git -C "$BIND_WORKTREE" status --porcelain --untracked-files=all 2>/dev/null)" ] \
+    || { echo "error: validation worktree is dirty" >&2; exit 2; }
+  BIND_OUT=$(cd "$BIND_WORKTREE" && "$NO_MISTAKES_BIN" axi status --run "$RUN_ID_INPUT" 2>/dev/null) \
+    || { echo "error: No-Mistakes run could not be observed" >&2; exit 2; }
+  BIND_OBSERVED_ID=$(nm_status_field "$BIND_OUT" id)
+  BIND_OBSERVED_HEAD=$(nm_status_field "$BIND_OUT" head)
+  BIND_STATUS=$(nm_status_field "$BIND_OUT" status)
+  BIND_OUTCOME=$(nm_status_field "$BIND_OUT" outcome)
+  [ "$BIND_OBSERVED_ID" = "$RUN_ID_INPUT" ] && [ "$BIND_OBSERVED_HEAD" = "$BIND_HEAD" ] \
+    && { [ "$BIND_STATUS" = running ] || [ "$BIND_STATUS" = fixing ] || [ "$BIND_STATUS" = ci ] || [ "$BIND_STATUS" = awaiting_approval ]; } \
+    && [ "$BIND_OUTCOME" != passed ] \
+    || { echo "error: No-Mistakes run does not match the latest plan" >&2; exit 2; }
+  printf 'validation_run_id=%s\nvalidation_run_path=%s\nvalidation_run_head=%s\n' \
+    "$RUN_ID_INPUT" "$BIND_PATH" "$BIND_HEAD" >> "$META"
+  jq -cn --arg task "$ID" --arg run "$RUN_ID_INPUT" --arg path "$BIND_PATH" --arg head "$BIND_HEAD" \
+    '{schema:"fm-validation-run-binding.v1",task:$task,status:"bound",run:$run,path:$path,head:$head}'
+  exit 0
+fi
+
 record_validation_completed() {
-  local started path completed completed_head completed_path completed_evidence now worktree validated_head current_head expected_evidence observed pr pr_head branch boundary new_receipts crew_state
+  local started path completed completed_head completed_path completed_evidence now worktree validated_head current_head expected_evidence observed pr pr_head branch boundary new_receipts run_id run_path run_out observed_id observed_head outcome default_ref
   VALIDATION_LOCK="$STATE/.$ID.validation-plan.lock"
   if ! mkdir "$VALIDATION_LOCK" 2>/dev/null; then
     VALIDATION_LOCK=
@@ -460,14 +503,19 @@ record_validation_completed() {
       observed=post-plan-mechanical-receipt
       ;;
     targeted-no-mistakes|full-no-mistakes)
-      crew_state=$("$CREW_STATE_BIN" "$ID" 2>/dev/null || true)
-      if ! printf '%s\n' "$crew_state" | grep -q 'state: done' \
-        || ! printf '%s\n' "$crew_state" | grep -q 'source: run-step'; then
-        release_validation_lock
-        echo "error: no matching successful No-Mistakes run was observed" >&2
-        return 1
-      fi
-      observed=matching-no-mistakes-run
+      run_id=$(grep '^validation_run_id=' "$META" | tail -1 | cut -d= -f2- || true)
+      run_path=$(grep '^validation_run_path=' "$META" | tail -1 | cut -d= -f2- || true)
+      observed_head=$(grep '^validation_run_head=' "$META" | tail -1 | cut -d= -f2- || true)
+      [ -n "$run_id" ] && [ "$run_path" = "$path" ] && [ "$observed_head" = "$validated_head" ] \
+        || { release_validation_lock; echo "error: no No-Mistakes run is bound to the latest plan" >&2; return 1; }
+      run_out=$(cd "$worktree" && "$NO_MISTAKES_BIN" axi status --run "$run_id" 2>/dev/null) \
+        || { release_validation_lock; echo "error: bound No-Mistakes run could not be observed" >&2; return 1; }
+      observed_id=$(nm_status_field "$run_out" id)
+      observed_head=$(nm_status_field "$run_out" head)
+      outcome=$(nm_status_field "$run_out" outcome)
+      [ "$observed_id" = "$run_id" ] && [ "$observed_head" = "$validated_head" ] && [ "$outcome" = passed ] \
+        || { release_validation_lock; echo "error: bound No-Mistakes run did not pass at the exact validated head" >&2; return 1; }
+      observed=bound-matching-no-mistakes-run
       ;;
     direct-PR)
       pr=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
@@ -480,6 +528,18 @@ record_validation_completed() {
       branch=$(git -C "$worktree" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
       [ "$branch" = "fm/$ID" ] \
         || { release_validation_lock; echo "error: local-only branch is not ready" >&2; return 1; }
+      default_ref=$(git -C "$worktree" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null || true)
+      if [ -z "$default_ref" ]; then
+        for default_ref in main master; do
+          git -C "$worktree" show-ref --verify --quiet "refs/heads/$default_ref" && break
+        done
+      fi
+      if [ -z "$default_ref" ] \
+        || ! git -C "$worktree" merge-base --is-ancestor "$default_ref" "$validated_head" 2>/dev/null; then
+        release_validation_lock
+        echo "error: local-only branch is not fast-forward ready" >&2
+        return 1
+      fi
       observed=clean-ready-branch
       ;;
   esac

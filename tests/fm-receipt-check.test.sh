@@ -11,12 +11,18 @@ TMP_ROOT=$(fm_test_tmproot fm-receipt-check)
 HOME_DIR="$TMP_ROOT/home"
 mkdir -p "$HOME_DIR/data" "$HOME_DIR/state"
 fm_git_identity fmtest fmtest@example.invalid
-DONE_CREW_STATE="$TMP_ROOT/done-crew-state"
-cat > "$DONE_CREW_STATE" <<'EOF'
+FAKE_NO_MISTAKES="$TMP_ROOT/fake-no-mistakes"
+cat > "$FAKE_NO_MISTAKES" <<'EOF'
 #!/bin/sh
-printf 'state: done · source: run-step\n'
+printf '%s\n' "$FM_FAKE_NM_STATUS"
 EOF
-chmod +x "$DONE_CREW_STATE"
+chmod +x "$FAKE_NO_MISTAKES"
+
+nm_status() {  # <run-id> <head> <outcome>
+  local status
+  if [ "$3" = passed ]; then status=completed; else status=running; fi
+  printf 'run:\n  id: "%s"\n  status: %s\n  head: "%s"\noutcome: %s\n' "$1" "$status" "$2" "$3"
+}
 
 write_brief() {  # <id> <mode>
   local id=$1 mode=$2
@@ -202,7 +208,7 @@ test_docs_require_positive_non_authoritative_classification() {
 }
 
 test_terminal_paths_record_completion_at_their_boundary() {
-  local mode id base out meta expected_head evidence observed rc completion_env
+  local mode id base out meta expected_head evidence observed rc running_status passed_status
   for mode in no-mistakes direct-PR local-only; do
     id="completion-${mode}"
     base=$(make_project "$id" "$mode" localized)
@@ -214,7 +220,7 @@ test_terminal_paths_record_completion_at_their_boundary() {
     grep -Eq '^validation_started_at=[0-9]+$' "$meta" || fail "$mode omitted validation start time"
     ! grep -q '^validation_completed_at=' "$meta" || fail "$mode completed validation during planning"
     case "$mode" in
-      no-mistakes) evidence=no-mistakes-passed; observed=matching-no-mistakes-run ;;
+      no-mistakes) evidence=no-mistakes-passed; observed=bound-matching-no-mistakes-run ;;
       direct-PR) evidence=pr-opened; observed=canonical-pr-head ;;
       local-only) evidence=branch-ready; observed=clean-ready-branch ;;
     esac
@@ -228,23 +234,45 @@ test_terminal_paths_record_completion_at_their_boundary() {
     fi
     expected_head=$(git -C "$TMP_ROOT/project-$id" rev-parse HEAD)
     case "$mode" in
-      no-mistakes) completion_env="FM_CREW_STATE_BIN=$DONE_CREW_STATE" ;;
+      no-mistakes)
+        running_status=$(nm_status RUN-$id "$expected_head" pending)
+        passed_status=$(nm_status RUN-$id "$expected_head" passed)
+        FM_FAKE_NM_STATUS="$running_status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+          "$CHECK" "$id" --bind-run RUN-$id >/dev/null || fail "$mode run binding failed"
+        FM_FAKE_NM_STATUS="$(nm_status RUN-$id "$base" passed)" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" \
+          FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence "$evidence" >/dev/null 2>&1
+        rc=$?
+        expect_code 2 "$rc" "No-Mistakes completion rejects a different run head"
+        printf 'validation_run_path=full-no-mistakes\n' >> "$meta"
+        FM_FAKE_NM_STATUS="$passed_status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+          "$CHECK" "$id" --complete --terminal-evidence "$evidence" >/dev/null 2>&1
+        rc=$?
+        expect_code 2 "$rc" "No-Mistakes completion rejects a different run path"
+        printf 'validation_run_path=targeted-no-mistakes\n' >> "$meta"
+        ;;
       direct-PR)
         printf 'pr=https://github.com/o/r/pull/1\npr_head=%s\n' "$expected_head" >> "$meta"
-        completion_env=
         ;;
-      local-only) completion_env= ;;
+      local-only) ;;
     esac
-    # shellcheck disable=SC2086 # Optional environment assignment fixture.
-    out=$(env $completion_env FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence "$evidence") \
-      || fail "$mode completion recording failed"
+    if [ "$mode" = no-mistakes ]; then
+      out=$(FM_FAKE_NM_STATUS="$passed_status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+        "$CHECK" "$id" --complete --terminal-evidence "$evidence") || fail "$mode completion recording failed"
+    else
+      out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence "$evidence") \
+        || fail "$mode completion recording failed"
+    fi
     printf '%s' "$out" | jq -e --arg head "$expected_head" \
       --arg evidence "$observed" \
       '.status == "completed" and (.completed_at | type == "number") and .completed_head == $head and .evidence == $evidence' >/dev/null \
       || fail "$mode completion output was not machine-readable"
-    # shellcheck disable=SC2086 # Optional environment assignment fixture.
-    env $completion_env FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence "$evidence" >/dev/null \
-      || fail "$mode duplicate completion failed"
+    if [ "$mode" = no-mistakes ]; then
+      FM_FAKE_NM_STATUS="$passed_status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+        "$CHECK" "$id" --complete --terminal-evidence "$evidence" >/dev/null || fail "$mode duplicate completion failed"
+    else
+      FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence "$evidence" >/dev/null \
+        || fail "$mode duplicate completion failed"
+    fi
     [ "$(grep -c '^validation_completed_at=' "$meta")" -eq 1 ] || fail "$mode completion was not idempotent"
     [ "$(grep -c '^validation_completed_head=' "$meta")" -eq 1 ] || fail "$mode completed head was not idempotent"
     [ "$(grep -c '^validation_completed_path=' "$meta")" -eq 1 ] || fail "$mode completed path was not idempotent"
@@ -254,12 +282,17 @@ test_terminal_paths_record_completion_at_their_boundary() {
 }
 
 test_completion_signal_releases_validation_lock() {
-  local id=completion-signal base fakebin rc
+  local id=completion-signal base fakebin rc expected_head running_status passed_status
   base=$(make_project "$id" no-mistakes localized)
   add_receipt "$id" AC1 test "2 passed"
   add_receipt "$id" AC2 lint "passed"
   FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" \
     --change-class localized-non-sensitive >/dev/null || fail "signal fixture plan failed"
+  expected_head=$(git -C "$TMP_ROOT/project-$id" rev-parse HEAD)
+  running_status=$(nm_status RUN-signal "$expected_head" pending)
+  passed_status=$(nm_status RUN-signal "$expected_head" passed)
+  FM_FAKE_NM_STATUS="$running_status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-signal >/dev/null || fail "signal fixture run binding failed"
   fakebin="$TMP_ROOT/signal-fakebin"
   mkdir -p "$fakebin"
   cat > "$fakebin/date" <<'EOF'
@@ -268,12 +301,12 @@ kill -TERM "$PPID"
 exit 1
 EOF
   chmod +x "$fakebin/date"
-  PATH="$fakebin:$PATH" FM_CREW_STATE_BIN="$DONE_CREW_STATE" FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete \
+  PATH="$fakebin:$PATH" FM_FAKE_NM_STATUS="$passed_status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete \
     --terminal-evidence no-mistakes-passed >/dev/null 2>&1
   rc=$?
   [ "$rc" -ne 0 ] || fail "completion ignored the injected termination signal"
   [ ! -d "$HOME_DIR/state/.$id.validation-plan.lock" ] || fail "termination stranded the validation lock"
-  FM_CREW_STATE_BIN="$DONE_CREW_STATE" FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed >/dev/null \
+  FM_FAKE_NM_STATUS="$passed_status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed >/dev/null \
     || fail "completion could not retry after signal cleanup"
   pass "completion signals release the validation lock for retry"
 }
@@ -303,6 +336,25 @@ test_dirty_worktrees_cannot_plan_or_complete() {
   rc=$?
   expect_code 2 "$rc" "dirty worktree cannot complete"
   pass "dirty worktrees cannot be planned or completed"
+}
+
+test_local_completion_requires_fast_forward_readiness() {
+  local id=local-diverged base project rc
+  base=$(make_project "$id" local-only localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint "passed"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" \
+    --change-class localized-non-sensitive >/dev/null || fail "local divergence fixture plan failed"
+  project="$TMP_ROOT/project-$id"
+  git -C "$project" checkout -q main
+  printf 'advanced\n' >> "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" commit -q -m 'advance main'
+  git -C "$project" checkout -q "fm/$id"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence branch-ready >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "diverged local branch cannot complete"
+  pass "local completion requires fast-forward readiness"
 }
 
 test_low_config_requires_allowlist_and_applicable_proof() {
@@ -542,6 +594,7 @@ test_docs_require_positive_non_authoritative_classification
 test_terminal_paths_record_completion_at_their_boundary
 test_completion_signal_releases_validation_lock
 test_dirty_worktrees_cannot_plan_or_complete
+test_local_completion_requires_fast_forward_readiness
 test_low_config_requires_allowlist_and_applicable_proof
 test_medium_plan_writes_a_bounded_audit_packet
 test_high_risk_and_uncertain_inputs_fail_safe

@@ -227,6 +227,7 @@ test_ship_modes_generate_clean_briefs() {
         ;;
       no-mistakes)
         assert_grep "fm-receipt-check.sh $id --complete" "$brief" "$id: no-mistakes brief omitted pipeline completion"
+        assert_grep "fm-receipt-check.sh $id --bind-run" "$brief" "$id: no-mistakes brief omitted exact run binding"
         assert_grep "ordinary findings from any validation tier" "$brief" "$id: no-mistakes brief narrowed original-worker fixes"
         ;;
     esac

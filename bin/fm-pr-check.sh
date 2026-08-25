@@ -64,8 +64,7 @@ fi
 "$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || exit 1
 "$FM_ROOT/bin/fm-guard.sh" || true
 
-# pr_head uses the forge value when available and otherwise the clean recorded
-# task worktree head at this canonical PR-ready boundary.
+# pr_head is recorded only from a forge-observed value.
 # bin/fm-teardown.sh reads the head from the forge at teardown rather than from
 # metadata and falls back to its provider-agnostic content check, and
 # bin/fm-review-diff.sh resolves the head from the remote when none is recorded.
@@ -76,11 +75,6 @@ if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/d
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
   fi
-fi
-if [ -z "$PR_HEAD" ] && [ -n "$WT" ] && [ -d "$WT" ] \
-  && [ -z "$(git -C "$WT" status --porcelain --untracked-files=all 2>/dev/null)" ]; then
-  LOCAL_HEAD=$(git -C "$WT" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
-  fm_pr_head_valid "$LOCAL_HEAD" && PR_HEAD=$LOCAL_HEAD
 fi
 
 META_TMP=
