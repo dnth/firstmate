@@ -185,13 +185,11 @@ The Herdr `/exit` path required a bounded process-exit wait because the TUI can 
 
 ### Hermes task-owned process teardown
 
-Hermes Agent v0.20.0 and Herdr 0.7.3 were verified on 2026-08-25 against the ownership selector at head `1cf0e803`.
-Both probes ran from the no-mistakes gate worktree at that exact head, and they exercised the Linux `/proc` ownership path.
-Commit `0c864a1` landed after those runs and added one selector branch: a procfs that exposes no readable per-pid `environ` now falls through to the portable `ps` environment scan instead of reporting an empty owned set.
-That branch is unreachable on the Linux probe host, where every same-user sibling process has a readable `environ`, so the runs below describe the same selection this code performs there.
-Both probes are rerun against the final head before the change merges, and this record is finalized from those runs.
+Hermes Agent v0.20.0 and Herdr 0.7.3 were verified on 2026-08-25 against the ownership selector at head `aa25fee3`.
+Both probes ran from the no-mistakes gate worktree at that exact head, so the results below are the selector as it merges.
+Only documentation and test-side evidence commits follow that head, and none of them changes the production ownership selector this record proves.
 The tmux verification used the live adapter test's private Hermes profile and tmux server, and tore down an active scout whose persistent TUI was still running.
-The Herdr verification used only `fm-herdr-lab.sh` for session lifecycle, with the generated non-default session `fm-lab-fm-hermes-final-1537953-14337`.
+The Herdr verification used only `fm-herdr-lab.sh` for session lifecycle, with the generated non-default session `fm-lab-fm-hermes-final-3715267-15309`.
 The Herdr probe set the test-only `FM_GATE_REFUSE_BYPASS=1` because the code under test ran from the gate worktree.
 The default Herdr session remained running with the same fleet identity before and after the probe.
 
@@ -220,17 +218,18 @@ Observed bounded output:
 
 ```text
 tmux:
+output: marker_scan_selfcheck=ok unreadable_procfs_fallthrough=ps
 command: fm-teardown hermes-live-scout (persistent TUI still running, no /exit)
-teardown: reaping leaked worktree process(es) for hermes-live-scout: 1137083 1137084 1140677 1140918 1140955 1141348 1141350 1141352 1141354 1141356 1141357 1141359 1141363 1141577 1141584 1141662 1141697 1141847 1141849 1141851 1141854 1141855 1141877 1141882 1141885 1141919 1141923
-output: active_teardown=yes pane_root=1134158 owned_before=1134158 1136126 1137083 1137084 1140677 1140918 1140955 1141348 1141350 1141352 1141354 1141356 1141357 1141359 1141363 1141577 1141584 1141662 1141697 1141847 1141849 1141851 1141854 1141855 1141877 1141882 1141885 1141919 1141923 tracked_survivors=0 survivors=0
+teardown: reaping leaked worktree process(es) for hermes-live-scout: 3589231 3589232 3590357 3590605 3590652 3591036 3591038 3591040 3591042 3591044 3591046 3591047 3591051 3591210 3591250 3591297 3591412 3591558 3591566 3591568 3591571 3591572 3591595 3591600 3591613 3591638 3591639
+output: active_teardown=yes pane_root=3588600 owned_before=3588600 3588977 3589231 3589232 3590357 3590605 3590652 3591036 3591038 3591040 3591042 3591044 3591046 3591047 3591051 3591210 3591250 3591297 3591412 3591558 3591566 3591568 3591571 3591572 3591595 3591600 3591613 3591638 3591639 tracked_survivors=0 survivors=0
 ok - Hermes Agent v0.20.0 (2026.8.3) persistent Hermes TUI: crew/scout launch, composer steer, native skill turn, busy->idle, turn-end, interrupt, exit, and exact-session resume
 output: cleanup_owned_processes=0 cleanup_temp_dirs=0
-FM_TEST_END ... exit=0 duration_ms=160832
+FM_TEST_END ... exit=0 duration_ms=161567
 
 Herdr:
-spawned hermes-herdr-final-live ... window=fm-lab-fm-hermes-final-1537953-14337:w1:p2
-output: active=yes marker_roots=1544325 1544435 1544437 1544868 1544917 1544982 1544983 owned_count=27 roles=MainThread,bun,chrome,git,git-remote-http,hermes,hound,python,python3,tradingview-mcp,uv
-teardown: reaping leaked worktree process(es) for hermes-herdr-final-live: 1542952 1542953 1544325 1544435 1544437 1544868 1544917 1544982 1544983 1546066 1546068 1546073 1546078 1546097 1546102 1546107 1546111 1546297 1546299 1546398 1546631 1546951 1546958 1546960 1546963 1546964 1546997 1547004 1547023 1547066 1547068
+spawned hermes-herdr-final-live ... window=fm-lab-fm-hermes-final-3715267-15309:w1:p2
+output: active=yes marker_roots=3729447 3729989 3730043 3730100 3730101 owned_count=25 roles=MainThread,bun,chrome,git,git-remote-http,hermes,hound,python,python3,tradingview-mcp,uv
+teardown: reaping leaked worktree process(es) for hermes-herdr-final-live: 3726376 3726377 3729447 3729989 3730043 3730100 3730101 3731196 3731198 3731201 3731204 3731220 3731221 3731223 3731227 3731505 3731549 3731744 3731941 3732033 3732042 3732044 3732047 3732048 3732071 3732076 3732117 3732141 3732142
 output: captured_survivors=0 marker_survivors=0 personal_unchanged=4
 output: session_state={"lab":[],"default":[{"name":"default","running":true}]}
 ok - final-head guarded Herdr active teardown removed only the captured task tree
@@ -245,7 +244,7 @@ Four unrelated personal Hermes processes retained the same kernel start identity
 The default Herdr session was still running with an unchanged fleet identity after the lab session was torn down, which is the tripwire for lab isolation.
 The live tmux test's EXIT, INT, and TERM cleanup trap independently reaps the isolated profile and temp-root ownership set, then asserts zero owned processes and zero `/tmp/fm-hermes-live-e2e.*` directories before returning on both success and failure.
 An explicit `Ctrl+C` during an earlier run on the same day returned 130 only after that same zero-process and zero-directory assertion printed, which proves the interrupt path rather than inferring it from the normal EXIT path.
-The full personal MCP configuration produced 27 task-owned processes in the Herdr probe.
+The full personal MCP configuration produced 25 task-owned processes in the Herdr probe.
 A smaller crew-specific MCP profile remains a follow-up because no supported isolated tool configuration was verified, and changing the captain's profile or silently removing crew tools is outside this fix.
 
 ### OMP lifecycle

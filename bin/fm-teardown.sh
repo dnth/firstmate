@@ -128,11 +128,19 @@
 #     The token-bearing roots and their exact process descendants join the cwd
 #     set before TERM/KILL, so process-group-detached MCP children are reaped
 #     without selecting any unmarked personal Hermes or gateway process.
-#     Inconsistent Hermes ownership proof refuses before signaling, while a task
-#     whose metadata records no owner token (every launch before the token
-#     existed), whose profile registry is gone, or whose registry cannot be
-#     read because jq is unavailable keeps the plain cwd scan and backend
-#     process-group fallback.
+#     Ownership proof has two distinct failure shapes and they are handled
+#     differently on purpose. Proof that CONTRADICTS itself - a metadata token
+#     that disagrees with the state sidecar, or a registry that binds another
+#     task or state path - refuses before signaling anything, and --force does
+#     not override it. Proof that is simply ABSENT - metadata records no owner
+#     token at all (every launch before the token existed), the profile
+#     registry file is gone, or jq is unavailable to read it - never selects a
+#     process by its token: it drops to exactly the pre-token behaviour, the
+#     bounded worktree cwd scan plus the backend process-group reap. A
+#     token-bearing process whose cwd is outside the task roots is therefore
+#     left running in that case, which is the conservative half of the same
+#     rule that forbids signaling any Hermes process this task cannot prove it
+#     owns.
 #     A pid that is already a zombie counts as terminated everywhere ownership
 #     and survivors are accounted, so an unreaped defunct child never refuses.
 #     Only a token-proven Hermes task expands descendants; every other harness
@@ -2523,6 +2531,8 @@ else
     3) ;;
     4)
       echo "warning: Hermes process-ownership proof for $ID is unavailable (no owner token recorded, missing profile registry, or no jq to verify it); falling back to the bounded worktree cwd and backend process-group reap." >&2
+      echo "  No process is selected by its task token while ownership is unproven, so a token-bearing Hermes process whose cwd is outside this task's roots is left running rather than signalled." >&2
+      echo "  Restore the profile registry entry (or install jq) and rerun teardown to reap the full token tree." >&2
       ;;
     *)
       echo "REFUSED: Hermes process ownership for $ID is missing or inconsistent; preserving the endpoint, worktree, and task records rather than risking an unrelated Hermes session." >&2
