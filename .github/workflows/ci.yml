@@ -10,6 +10,86 @@ permissions:
   contents: read
 
 jobs:
+  markdown-lint:
+    name: Lint Markdown
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install pinned markdownlint-cli2
+        run: |
+          set -eu
+          npm install -g markdownlint-cli2@0.23.2
+          markdownlint-cli2 --version
+      - name: Lint tracked Markdown
+        shell: bash
+        run: |
+          set -eu
+          config="$RUNNER_TEMP/firstmate.markdownlint-cli2.jsonc"
+          cat > "$config" <<'EOF'
+          {
+            "config": {
+              "default": false,
+              "MD009": true,
+              "MD011": true,
+              "MD012": true,
+              "MD018": true,
+              "MD019": true,
+              "MD020": true,
+              "MD021": true,
+              "MD023": true,
+              "MD025": true,
+              "MD027": true,
+              "MD028": true,
+              "MD030": true,
+              "MD034": true,
+              "MD037": true,
+              "MD039": true,
+              "MD042": true,
+              "MD045": true,
+              "MD047": true
+            }
+          }
+          EOF
+          mapfile -d '' markdown_files < <(git ls-files -z -- '*.md')
+          [ "${#markdown_files[@]}" -gt 0 ] || {
+            echo "::error::No tracked Markdown files found"
+            exit 1
+          }
+          markdownlint-cli2 --config "$config" "${markdown_files[@]}"
+
+  markdown-links:
+    name: Check internal Markdown links
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install pinned markdown-link-check
+        run: |
+          set -eu
+          npm install -g markdown-link-check@3.15.0
+          markdown-link-check --version
+      - name: Check tracked Markdown links without external requests
+        shell: bash
+        run: |
+          set -eu
+          config="$RUNNER_TEMP/firstmate-markdown-link-check.json"
+          cat > "$config" <<'EOF'
+          {
+            "ignorePatterns": [
+              { "pattern": "^https?://" },
+              { "pattern": "^mailto:" }
+            ]
+          }
+          EOF
+          found=0
+          while IFS= read -r -d '' markdown_file; do
+            found=1
+            markdown-link-check --quiet --config "$config" "$markdown_file"
+          done < <(git ls-files -z -- '*.md')
+          [ "$found" -eq 1 ] || {
+            echo "::error::No tracked Markdown files found"
+            exit 1
+          }
+
   lint:
     name: Lint shell scripts
     runs-on: ubuntu-latest

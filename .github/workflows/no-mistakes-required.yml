@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 # GitHub concurrency groups retain at most one pending run, replacing older
 # pending runs even when cancel-in-progress is false. Give body-bearing events
@@ -28,12 +29,132 @@ jobs:
     steps:
       - name: Verify no-mistakes signature in PR body
         env:
+          GITHUB_TOKEN: ${{ github.token }}
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -eu
           marker='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
+
+          prose_safe_files() {
+            jq -e '
+              def safe_path:
+                . == "README.md" or . == "CONTRIBUTING.md";
+              type == "array" and
+              length > 0 and
+              all(.[];
+                type == "object" and
+                (.filename | type == "string") and
+                (.filename | safe_path) and
+                (
+                  (has("previous_filename") | not) or
+                  (
+                    (.previous_filename | type == "string") and
+                    (.previous_filename | safe_path)
+                  )
+                )
+              )
+            ' "$@" >/dev/null
+          }
+
+          assert_safe_fixture() {
+            fixture=$1
+            description=$2
+            if ! printf '%s\n' "$fixture" | prose_safe_files; then
+              echo "::error::Allowlist regression: expected bypass for $description"
+              exit 1
+            fi
+          }
+
+          assert_required_fixture() {
+            fixture=$1
+            description=$2
+            if printf '%s\n' "$fixture" | prose_safe_files; then
+              echo "::error::Allowlist regression: expected signature for $description"
+              exit 1
+            fi
+          }
+
+          # Workflow-level regression proof for the exact mechanical floor.
+          assert_safe_fixture '[{"filename":"README.md"}]' \
+            'root README.md without a signature'
+          assert_safe_fixture '[{"filename":"CONTRIBUTING.md"}]' \
+            'root CONTRIBUTING.md without a signature'
+          assert_safe_fixture \
+            '[{"filename":"README.md"},{"filename":"CONTRIBUTING.md"}]' \
+            'both root prose files without a signature'
+          assert_required_fixture '[{"filename":"AGENTS.md"}]' 'AGENTS.md'
+          assert_required_fixture '[{"filename":"docs/guide.md"}]' 'docs/**'
+          assert_required_fixture \
+            '[{"filename":".agents/skills/example/SKILL.md"}]' \
+            '.agents/skills/**'
+          assert_required_fixture '[{"filename":"bin/example.sh"}]' 'code'
+          assert_required_fixture \
+            '[{"filename":"README.md"},{"filename":"bin/example.sh"}]' \
+            'mixed prose and code'
+          assert_required_fixture '[]' 'an ambiguous empty result'
+          assert_required_fixture '{"filename":"README.md"}' 'a malformed API result'
+
+          api_ok=1
+          all_files_safe=1
+          changed_count=0
+          page=1
+          while :; do
+            page_file="$RUNNER_TEMP/pr-files-$page.json"
+            if ! curl --fail --silent --show-error --location \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer $GITHUB_TOKEN" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files?per_page=100&page=$page" \
+              --output "$page_file"; then
+              api_ok=0
+              break
+            fi
+
+            if ! page_count=$(jq -er \
+              'if type == "array" then length else error("expected array") end' \
+              "$page_file"); then
+              api_ok=0
+              break
+            fi
+            if [ "$page_count" -eq 0 ]; then
+              break
+            fi
+
+            if ! prose_safe_files "$page_file"; then
+              all_files_safe=0
+            fi
+            changed_count=$((changed_count + page_count))
+            if [ "$page_count" -lt 100 ]; then
+              break
+            fi
+            page=$((page + 1))
+            if [ "$page" -gt 100 ]; then
+              api_ok=0
+              break
+            fi
+          done
+
+          case "$PR_CHANGED_FILES" in
+            ''|*[!0-9]*) api_ok=0 ;;
+            *)
+              if [ "$changed_count" -eq 0 ] || \
+                [ "$changed_count" -ne "$PR_CHANGED_FILES" ]; then
+                api_ok=0
+              fi
+              ;;
+          esac
+
+          if [ "$api_ok" -eq 1 ] && [ "$all_files_safe" -eq 1 ]; then
+            echo "PR #${PR_NUMBER} changes only root README.md and/or CONTRIBUTING.md; no-mistakes signature waived."
+            exit 0
+          fi
+          if [ "$api_ok" -ne 1 ]; then
+            echo "::warning::Could not determine the complete PR file list; requiring no-mistakes signature."
+          fi
+
           if printf '%s' "${PR_BODY:-}" | grep -qF -- "$marker"; then
             echo "Found no-mistakes signature in PR #${PR_NUMBER} body."
             exit 0

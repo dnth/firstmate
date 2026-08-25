@@ -3,15 +3,26 @@
 Thanks for wanting to contribute.
 One rule up front:
 
-**Human-authored pull requests targeting `main` must be raised through [`no-mistakes`](https://github.com/kunchenguid/no-mistakes).**
-We require this to reduce the maintainer's burden of reviewing and merging contributions.
+**Human-authored pull requests targeting `main` must use [`no-mistakes`](https://github.com/kunchenguid/no-mistakes) whenever they contain code or operationally or semantically authoritative documentation.**
+Pure prose in the root `README.md` and/or `CONTRIBUTING.md` may use a direct PR only when the change is non-authoritative.
+This risk-based gate reduces the maintainer's burden without applying the full pipeline to wording-only cleanup.
 
 `no-mistakes` puts a local git proxy in front of your real remote.
 Pushing through it runs an AI-driven review/test/lint pipeline in an isolated worktree, forwards the push upstream only after every check passes, and opens a clean PR automatically.
 
-A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and fails if the body is missing the deterministic signature that no-mistakes writes.
+A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and requires the deterministic signature that no-mistakes writes unless every changed path is exactly the root `README.md` and/or `CONTRIBUTING.md`.
+The check paginates the GitHub changed-files API and requires the signature on an API error, incomplete result, mixed change, or any path outside that exact allowlist.
 It evaluates every PR opening and body edit independently, so a later edit cannot replace an earlier pending compliance check.
-GitHub Actions and Dependabot are exempt so their automation keeps working, but regular contributor PRs without the signature will not be reviewed or merged.
+GitHub Actions and Dependabot are exempt so their automation keeps working, but other unsigned PRs pass this check only through the narrow prose allowlist.
+
+## Risk-based documentation gate
+
+A direct PR is acceptable for typos, wording, formatting, README cleanup, or non-behavioral examples when every changed file is the root `README.md` and/or `CONTRIBUTING.md`.
+API or contract docs, security instructions, deployment runbooks, configuration examples, migration guides, generated docs tied to code, `AGENTS.md`, `CLAUDE.md`, `.agents/skills/**`, and `skills/**` are authoritative and require no-mistakes.
+Documentation changed together with code also requires no-mistakes.
+Never downgrade an authoritative documentation change to the direct path even when it sits in a CI-allowlisted file; the CI allowlist is the mechanical floor, not the whole policy.
+When uncertain, use no-mistakes.
+The required-check workflow runs regression fixtures for the allowlisted pair, `AGENTS.md`, `docs/**`, `.agents/skills/**`, code, mixed prose and code, empty results, and malformed results before evaluating the live PR file list.
 
 ## Workflow
 
@@ -56,7 +67,7 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
 
 ## Development
 
-Tracked changes to firstmate itself - `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, `.agents/skills/`, and `skills/` - ship through the `no-mistakes` pipeline on a feature branch and require an explicit merge approval.
+Tracked changes to firstmate itself use the risk-based documentation rule above on a feature branch and require an explicit merge approval.
 Before making any such change, load the agent-only `firstmate-coding-guidelines` skill (`.agents/skills/firstmate-coding-guidelines/SKILL.md`).
 It has the knowledge-placement rules that keep `AGENTS.md` from regrowing after each diet pass.
 There is no reliable way for `bin/fm-brief.sh`'s scaffold to detect that a task's repo is firstmate itself, so firstmate adds this skill's load line to firstmate-repo briefs by hand.
@@ -98,6 +109,8 @@ Portable shard balance evidence lives in `docs/fm-test-portable-shards.md`.
 Local no-mistakes Test stays intent-targeted and must not wire `commands.test` to `--all` or a `tests/*.test.sh` walk.
 Family selection is the ordinary local path; `--all` is deliberate full regression only.
 CI owns broad regression across required portable parallel shards, the portable serial lane's separate-runner shards, the Herdr lane, lint, invariants, the coverage guard, and stock macOS Bash compatibility in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+That workflow also runs two cheap Markdown jobs on every PR with pinned tool versions: a repo-clean `markdownlint-cli2` rule set over all tracked Markdown, and a `markdown-link-check` pass that resolves internal and relative links only, so external-site flakiness never blocks a merge.
+Both are CI-only; there is no local wrapper, so reproduce a failure with the exact pinned versions and inline configs in `ci.yml`.
 Use `bin/fm-test-run.sh --list-lanes` for exact lane names and `--help` for `--jobs` rules and required gate-skip flags when reproducing a lane locally.
 Discover tests by listing `tests/*.test.sh`: each is a self-contained bash script named `<subject>.test.sh`, and its header comment describes what it covers, so pass one to `bin/fm-test-run.sh` to focus on a subject with canonical timing output.
 Tests that need a real optional backend or an explicit opt-in (real herdr/zellij/cmux smoke tests, the live Pi regression) skip themselves and print the tool or environment gate needed to enable them, so the portable suite remains safe on machines without those tools.
