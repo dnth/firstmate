@@ -9,11 +9,6 @@
 #   fm-receipt-check.sh <task-id> --plan [--base <commit>]
 #                       [--change-class <non-authoritative-prose|localized-non-sensitive|sensitive>]
 #                       [--risky-area <text>]...
-#   fm-receipt-check.sh <task-id> --follow-up --delta-base <commit>
-#                       [--change-class <non-authoritative-prose|localized-non-sensitive|sensitive>]
-#                       [--risky-area <text>]...
-#                       (--finding <text>|--finding-file <path>)...
-#                       [--invalidated-criterion <criterion-id>]...
 #
 # The default command emits one compact fm-evidence-check.v1 JSON object.
 # It exits 0 when every declared criterion has at least one structurally valid
@@ -36,15 +31,9 @@
 # A supplied initial --base is accepted only when it equals the repository's
 # authoritative merge boundary.
 # Unreadable or uncertain inputs resolve to high.
-# Low is limited to a small documentation diff positively declared as
-# non-authoritative prose or an allowlisted mechanical-config diff whose changed
-# config files are named by strong mechanical receipts.
-# Medium requires --change-class localized-non-sensitive plus a strong passing
-# test receipt.
-# Free-form risky-area text is packet context and can raise risk but never proves
-# that a change is non-sensitive.
-# Security, migration, concurrency, state/lifecycle, broad, binary, weakly proven,
-# undeclared, or otherwise uncertain changes resolve to high.
+# Risk is binary: high by default, or low only for a narrow CHANGELOG-only prose
+# change with strong mechanical evidence.
+# Caller hints never lower risk.
 # The resolved validation_tier, validation_path, reason code, base, head, size,
 # and start time are appended to state/<task-id>.meta for durable inspection.
 # Every completion records validation_completed_head and refuses a current
@@ -53,19 +42,9 @@
 # --complete requires the path-specific terminal evidence named by the generated
 # instructions and records that evidence with the latest plan, path, and head.
 # Delivery mode remains authoritative: direct-PR and local-only never invoke
-# No-Mistakes, while no-mistakes maps low to receipts-mechanical, medium to a
-# targeted audit packet, and high to full-no-mistakes.
+# No-Mistakes, while no-mistakes maps low to receipts-mechanical and high to
+# full-no-mistakes.
 #
-# A medium plan writes data/<task-id>/audit-packet.md with the task contract,
-# evidence ledger, base..HEAD diff, declared risky areas, and narrow audit remit.
-# --follow-up freshly classifies the complete change and rewrites the packet around
-# the original finding, a non-empty strict-descendant delta, and updated receipts
-# only when the complete change still classifies medium and --delta-base exactly
-# matches the latest recorded validation head.
-# Initial planning records the ledger receipt count, and every invalidated criterion
-# requires a matching receipt appended after that boundary.
-# A material scope/risk change records high/full-no-mistakes and refuses the
-# bounded follow-up so the supervisor retains a full rerun.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -214,7 +193,6 @@ TASK_DIR="$DATA/$ID"
 BRIEF="$TASK_DIR/brief.md"
 LEDGER="$TASK_DIR/evidence.jsonl"
 META="$STATE/$ID.meta"
-PACKET="$TASK_DIR/audit-packet.md"
 
 [ -f "$META" ] && [ ! -L "$META" ] \
   || { echo "error: task metadata is missing or unsafe: $META" >&2; exit 2; }
@@ -428,7 +406,7 @@ if [ "$ACTION" = bind-run ]; then
   BIND_WORKTREE=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
   BIND_PATH=$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)
   BIND_HEAD=$(grep '^validation_head=' "$META" | tail -1 | cut -d= -f2- || true)
-  case "$BIND_PATH" in targeted-no-mistakes|full-no-mistakes) ;; *) echo "error: latest plan does not use No-Mistakes" >&2; exit 2 ;; esac
+  [ "$BIND_PATH" = full-no-mistakes ] || { echo "error: latest plan does not use full No-Mistakes" >&2; exit 2; }
   [ -n "$BIND_WORKTREE" ] && [ -d "$BIND_WORKTREE" ] || { echo "error: validation worktree is missing" >&2; exit 2; }
   BIND_HEAD=$(git -C "$BIND_WORKTREE" rev-parse --verify "$BIND_HEAD^{commit}" 2>/dev/null) \
     || { echo "error: validated head is missing" >&2; exit 2; }
@@ -468,7 +446,7 @@ record_validation_completed() {
   esac
   case "$path" in
     receipts-mechanical) expected_evidence=mechanical-checks-passed ;;
-    targeted-no-mistakes|full-no-mistakes) expected_evidence=no-mistakes-passed ;;
+    full-no-mistakes) expected_evidence=no-mistakes-passed ;;
     direct-PR) expected_evidence='pr-opened' ;;
     local-only) expected_evidence='branch-ready' ;;
     *) release_validation_lock; echo "error: validation path is missing or invalid" >&2; return 1 ;;
@@ -502,7 +480,7 @@ record_validation_completed() {
         || { release_validation_lock; echo "error: no post-plan mechanical evidence was observed" >&2; return 1; }
       observed=post-plan-mechanical-receipt
       ;;
-    targeted-no-mistakes|full-no-mistakes)
+    full-no-mistakes)
       run_id=$(grep '^validation_run_id=' "$META" | tail -1 | cut -d= -f2- || true)
       run_path=$(grep '^validation_run_path=' "$META" | tail -1 | cut -d= -f2- || true)
       observed_head=$(grep '^validation_run_head=' "$META" | tail -1 | cut -d= -f2- || true)
@@ -520,9 +498,15 @@ record_validation_completed() {
     direct-PR)
       pr=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
       pr_head=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
-      [ -n "$pr" ] && [ "$pr_head" = "$validated_head" ] \
-        || { release_validation_lock; echo "error: canonical PR metadata is missing or not bound to the validated head" >&2; return 1; }
-      observed=canonical-pr-head
+      case "$pr" in
+        https://github.com/*)
+          [ "$pr_head" = "$validated_head" ] \
+            || { release_validation_lock; echo "error: GitHub PR head is missing or not bound to the validated head" >&2; return 1; }
+          observed=canonical-github-pr-head
+          ;;
+        https://*) observed=canonical-non-github-pr ;;
+        *) release_validation_lock; echo "error: canonical PR metadata is missing" >&2; return 1 ;;
+      esac
       ;;
     local-only)
       branch=$(git -C "$worktree" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
@@ -595,25 +579,6 @@ if [ -n "$(git -C "$WORKTREE" status --porcelain --untracked-files=all 2>/dev/nu
   exit 2
 fi
 
-RECORDED_TIER=
-RECORDED_PATH=
-RECORDED_HEAD=
-RECORDED_LEDGER_RECEIPTS=
-if [ "$ACTION" = follow-up ]; then
-  RECORDED_TIER=$(grep '^validation_tier=' "$META" | tail -1 | cut -d= -f2- || true)
-  RECORDED_PATH=$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)
-  [ "$RECORDED_TIER:$RECORDED_PATH" = medium:targeted-no-mistakes ] \
-    || { echo "error: bounded follow-up requires a recorded medium targeted-no-mistakes plan" >&2; exit 2; }
-  BASE_INPUT=$(grep '^validation_base=' "$META" | tail -1 | cut -d= -f2- || true)
-  [ -n "$BASE_INPUT" ] || { echo "error: recorded validation base is missing" >&2; exit 2; }
-  RECORDED_HEAD=$(grep '^validation_head=' "$META" | tail -1 | cut -d= -f2- || true)
-  [ -n "$RECORDED_HEAD" ] || { echo "error: recorded validation head is missing" >&2; exit 2; }
-  RECORDED_LEDGER_RECEIPTS=$(grep '^validation_ledger_receipt_count=' "$META" | tail -1 | cut -d= -f2- || true)
-  case "$RECORDED_LEDGER_RECEIPTS" in
-    ''|*[!0-9]*) echo "error: recorded validation ledger boundary is missing or invalid" >&2; exit 2 ;;
-  esac
-fi
-
 BASE=
 HEAD=
 DIFF_AVAILABLE=0
@@ -621,34 +586,24 @@ DIFF_FILES=0
 DIFF_LINES=0
 HAS_BINARY=0
 HAS_SPECIAL_MODE=0
-HIGH_PATH=0
 LOW_PATH=1
-CONFIG_COUNT=0
-DOC_COUNT=0
-SENSITIVE_PATH=
 NUMSTAT="$TMP_ROOT/numstat"
 NAMES="$TMP_ROOT/names"
-CONFIG_PATHS="$TMP_ROOT/config-paths"
 : > "$NUMSTAT"
 : > "$NAMES"
-: > "$CONFIG_PATHS"
 
 resolve_diff() {
   local requested_base authoritative_base
   [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ] && git -C "$WORKTREE" rev-parse --git-dir >/dev/null 2>&1 || return 1
   [ -z "$(git -C "$WORKTREE" status --porcelain --untracked-files=all 2>/dev/null)" ] || return 1
   HEAD=$(git -C "$WORKTREE" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) || return 1
-  if [ "$ACTION" = follow-up ]; then
-    BASE=$(git -C "$WORKTREE" rev-parse --verify "$BASE_INPUT^{commit}" 2>/dev/null) || return 1
-  else
-    authoritative_base=$(git -C "$WORKTREE" merge-base HEAD refs/remotes/origin/HEAD 2>/dev/null \
+  authoritative_base=$(git -C "$WORKTREE" merge-base HEAD refs/remotes/origin/HEAD 2>/dev/null \
       || git -C "$WORKTREE" merge-base HEAD main 2>/dev/null \
       || git -C "$WORKTREE" merge-base HEAD master 2>/dev/null) || return 1
-    BASE=$authoritative_base
-    if [ -n "$BASE_INPUT" ]; then
-      requested_base=$(git -C "$WORKTREE" rev-parse --verify "$BASE_INPUT^{commit}" 2>/dev/null) || return 1
-      [ "$requested_base" = "$authoritative_base" ] || return 1
-    fi
+  BASE=$authoritative_base
+  if [ -n "$BASE_INPUT" ]; then
+    requested_base=$(git -C "$WORKTREE" rev-parse --verify "$BASE_INPUT^{commit}" 2>/dev/null) || return 1
+    [ "$requested_base" = "$authoritative_base" ] || return 1
   fi
   git -C "$WORKTREE" merge-base --is-ancestor "$BASE" "$HEAD" 2>/dev/null || return 1
   git -C "$WORKTREE" diff --no-ext-diff --no-renames --numstat "$BASE..$HEAD" > "$NUMSTAT" 2>/dev/null || return 1
@@ -669,55 +624,19 @@ if [ "$DIFF_AVAILABLE" -eq 1 ]; then
       *-*) HAS_BINARY=1 ;;
       *) DIFF_LINES=$((DIFF_LINES + added + deleted)) ;;
     esac
-    lower=$(printf '%s' "$path" | tr '[:upper:]' '[:lower:]')
-    if printf '%s\n' "$lower" | grep -Eq '(^|[/_.-])(api|architecture|auth[^/_.-]*|contracts?|deploy[^/_.-]*|security|secrets?|credentials?|crypt[^/_.-]*|migrations?|runbooks?|schema|database|concurr[^/_.-]*|locks?|threads?|queues?|lifecycle|state|workflow|daemon|watcher|teardown|permissions?|session)([/_.-]|$)'; then
-      HIGH_PATH=1
-      SENSITIVE_PATH=${SENSITIVE_PATH:-$path}
-    fi
     case "$path" in
-      AGENTS.md|CLAUDE.md|.agents/skills/*|skills/*|.github/workflows/*)
-        HIGH_PATH=1
-        SENSITIVE_PATH=${SENSITIVE_PATH:-$path}
-        ;;
-    esac
-    case "$path" in
-      README.md|CONTRIBUTING.md|CHANGELOG.md|docs/*.md)
-        DOC_COUNT=$((DOC_COUNT + 1))
-        ;;
-      .editorconfig|.prettierignore|.prettierrc|.prettierrc.json|.prettierrc.yaml|.prettierrc.yml|.markdownlint.json|.markdownlint.yaml|.markdownlint.yml|.shellcheckrc)
-        printf '%s\n' "$path" >> "$CONFIG_PATHS"
-        CONFIG_COUNT=$((CONFIG_COUNT + 1))
-        ;;
+      CHANGELOG.md) ;;
       *) LOW_PATH=0 ;;
     esac
   done < "$NUMSTAT"
 fi
 
 MECHANICAL_PROOF=0
-REGRESSION_PROOF=0
-PROOF_FLAGS=$(jq -L "$TMP_ROOT" -rse '
+if jq -L "$TMP_ROOT" -se '
   include "strong-result";
-  [
-    any(.[]; (.type | test("^(test|build|lint|typecheck)$")) and (.result | strong_result)),
-    any(.[]; .type == "test" and (.result | strong_result))
-  ] | @tsv
-' "$LEDGER")
-IFS=$'\t' read -r mechanical_proof regression_proof <<< "$PROOF_FLAGS"
-[ "$mechanical_proof" = true ] && MECHANICAL_PROOF=1
-[ "$regression_proof" = true ] && REGRESSION_PROOF=1
-
-CONFIG_PROOF=1
-if [ "$CONFIG_COUNT" -gt 0 ]; then
-  if ! jq -L "$TMP_ROOT" -se --rawfile paths "$CONFIG_PATHS" '
-    include "strong-result";
-    . as $receipts
-    | ($paths | split("\n") | map(select(length > 0))) as $required
-    | all($required[]; . as $path
-        | any($receipts[]; (.type | test("^(test|build|lint|typecheck)$"))
-            and .file == $path and (.result | strong_result)))
-  ' "$LEDGER" >/dev/null 2>&1; then
-    CONFIG_PROOF=0
-  fi
+  any(.[]; (.type | test("^(test|build|lint|typecheck)$")) and (.result | strong_result))
+' "$LEDGER" >/dev/null 2>&1; then
+  MECHANICAL_PROOF=1
 fi
 
 TIER=high
@@ -731,45 +650,22 @@ elif [ "$HAS_SPECIAL_MODE" -eq 1 ]; then
 elif [ "$HAS_BINARY" -eq 1 ]; then
   TIER=high
   REASON=binary-change
-elif [ "$HIGH_PATH" -eq 1 ]; then
-  TIER=high
-  REASON=sensitive-or-lifecycle-surface
 elif [ "$DIFF_FILES" -gt 8 ] || [ "$DIFF_LINES" -gt 400 ]; then
   TIER=high
   REASON=broad-change
-elif [ "$CHANGE_CLASS" = sensitive ]; then
-  TIER=high
-  REASON=declared-sensitive-change
-elif [ -n "$RISKY_AREAS" ] && printf '%s\n' "$RISKY_AREAS" | tr '[:upper:]' '[:lower:]' \
-  | grep -Eq '(auth|security|migration|concurr|lifecycle|cross-cut|state|uncertain)'; then
-  TIER=high
-  REASON=declared-high-risk-area
 elif [ "$LOW_PATH" -eq 1 ] && [ "$DIFF_FILES" -le 3 ] && [ "$DIFF_LINES" -le 80 ] \
-  && [ "$MECHANICAL_PROOF" -eq 1 ] && [ "$CONFIG_PROOF" -eq 1 ] \
-  && { [ "$DOC_COUNT" -eq 0 ] || [ "$CHANGE_CLASS" = non-authoritative-prose ]; }; then
+  && [ "$MECHANICAL_PROOF" -eq 1 ]; then
   TIER=low
-  REASON=narrow-mechanical-change
-elif [ "$CHANGE_CLASS" = localized-non-sensitive ] && [ "$REGRESSION_PROOF" -eq 1 ]; then
-  TIER=medium
-  REASON=localized-change-with-test
+  REASON=non-authoritative-prose
 else
   TIER=high
-  if [ "$LOW_PATH" -eq 1 ] && [ "$CONFIG_COUNT" -gt 0 ] && [ "$CONFIG_PROOF" -eq 0 ]; then
-    REASON=unbound-mechanical-config
-  elif [ "$DOC_COUNT" -gt 0 ] && [ "$CHANGE_CLASS" != non-authoritative-prose ]; then
-    REASON=unclassified-documentation
-  elif [ "$REGRESSION_PROOF" -eq 1 ]; then
-    REASON=unclassified-change
-  else
-    REASON=weak-evidence
-  fi
+  REASON=default-high
 fi
 
 case "$MODE:$TIER" in
   direct-PR:*) VALIDATION_PATH=direct-PR ;;
   local-only:*) VALIDATION_PATH=local-only ;;
   no-mistakes:low) VALIDATION_PATH=receipts-mechanical ;;
-  no-mistakes:medium) VALIDATION_PATH=targeted-no-mistakes ;;
   no-mistakes:high) VALIDATION_PATH=full-no-mistakes ;;
 esac
 
@@ -789,7 +685,6 @@ write_meta_record() {  # <pass>
     *[!0-9]*) release_validation_lock; echo "error: validation start timestamp is invalid" >&2; return 1 ;;
   esac
   packet_value=
-  [ "$VALIDATION_PATH" = targeted-no-mistakes ] && packet_value=$PACKET
   if ! {
     printf 'validation_tier=%s\n' "$TIER"
     printf 'validation_path=%s\n' "$VALIDATION_PATH"
@@ -832,113 +727,8 @@ render_acceptance_criteria() {
   done < "$CRITERIA"
 }
 
-write_packet() {  # <initial|follow-up> <diff-base>
-  local packet_kind=$1 diff_base=$2 tmp
-  tmp="$TASK_DIR/.audit-packet.tmp.$$"
-  umask 077
-  {
-    printf '# Targeted No-Mistakes audit packet\n\n'
-    printf 'Packet kind: %s.\n' "$packet_kind"
-    printf 'Task: %s.\n' "$ID"
-    printf 'Risk tier: medium.\n'
-    printf 'Validation path: targeted-no-mistakes.\n'
-    printf 'Change class: %s.\n' "$CHANGE_CLASS"
-    printf 'Brief source: %s.\n' "$BRIEF"
-    printf 'Evidence source: %s.\n' "$LEDGER"
-    printf 'Review diff: %s..%s.\n\n' "$diff_base" "$HEAD"
-    printf '## Audit remit\n\n'
-    printf 'Challenge unsupported or suspicious acceptance-criterion claims.\n'
-    printf 'Inspect the changed surface for material correctness, regression, and security issues.\n'
-    printf 'Flag important missing tests or evidence.\n'
-    printf 'Treat mechanically proven receipts as audit inputs and do not redo them without a concrete reason.\n'
-    printf 'Do not reimplement the feature during review.\n'
-    if [ "$packet_kind" = follow-up ]; then
-      printf 'Review the named finding resolution, the delta, and updated receipts instead of reconstructing the original review.\n'
-    fi
-    printf '\n## Task contract\n\n'
-    render_task_contract
-    printf '\n'
-    render_acceptance_criteria
-    printf '\n## Evidence receipts\n\n```jsonl\n'
-    cat "$LEDGER"
-    printf '```\n'
-    if [ -n "$RISKY_AREAS" ]; then
-      printf '\n## Declared risky areas\n\n'
-      printf '%s\n' "$RISKY_AREAS" | sed 's/^/- /'
-    fi
-    if [ "$packet_kind" = follow-up ]; then
-      printf '\n## Findings to resolve\n\n'
-      printf '%s\n' "$FINDINGS"
-      if [ -n "$INVALIDATED" ]; then
-        printf '\n## Receipt claims challenged by findings\n\n'
-        printf '%s\n' "$INVALIDATED" | sed 's/^/- /'
-      fi
-    fi
-    printf '\n## Diff\n\n```diff\n'
-    git -C "$WORKTREE" diff --no-ext-diff --no-renames --unified=3 "$diff_base..$HEAD"
-    printf '```\n'
-  } > "$tmp"
-  mv "$tmp" "$PACKET"
-}
-
-if [ "$ACTION" = follow-up ]; then
-  DELTA_RESOLVED=$(git -C "$WORKTREE" rev-parse --verify "$DELTA_BASE^{commit}" 2>/dev/null) \
-    || { echo "error: invalid --delta-base: $DELTA_BASE" >&2; exit 2; }
-  RECORDED_HEAD_RESOLVED=$(git -C "$WORKTREE" rev-parse --verify "$RECORDED_HEAD^{commit}" 2>/dev/null) \
-    || { echo "error: recorded validation head is invalid" >&2; exit 2; }
-  [ "$DELTA_RESOLVED" = "$RECORDED_HEAD_RESOLVED" ] \
-    || { echo "error: --delta-base must equal the latest recorded validation head" >&2; exit 2; }
-  git -C "$WORKTREE" merge-base --is-ancestor "$DELTA_RESOLVED" "$HEAD" 2>/dev/null \
-    || { echo "error: delta base is not an ancestor of the current head" >&2; exit 2; }
-  [ "$DELTA_RESOLVED" != "$HEAD" ] \
-    || { echo "error: follow-up head must be a strict descendant of the recorded validation head" >&2; exit 2; }
-  if git -C "$WORKTREE" diff --no-ext-diff --quiet "$DELTA_RESOLVED..$HEAD"; then
-    echo "error: follow-up delta is empty" >&2
-    exit 2
-  else
-    delta_diff_rc=$?
-    [ "$delta_diff_rc" -eq 1 ] \
-      || { echo "error: follow-up delta could not be inspected" >&2; exit 2; }
-  fi
-  [ "$RECORDED_LEDGER_RECEIPTS" -le "$RECEIPT_COUNT" ] \
-    || { echo "error: evidence ledger is shorter than the recorded validation boundary" >&2; exit 2; }
-  DELTA_BASE=$DELTA_RESOLVED
-  if [ "$TIER" != medium ]; then
-    VALIDATION_PATH=full-no-mistakes
-    TIER=high
-    REASON=follow-up-scope-or-risk-changed
-    write_meta_record follow-up
-    jq -cn --arg task "$ID" --arg tier "$TIER" --arg path "$VALIDATION_PATH" --arg reason "$REASON" \
-      '{schema:"fm-validation-plan.v1",task:$task,status:"full-rerun-required",tier:$tier,path:$path,reason:$reason}'
-    exit 1
-  fi
-  if [ -n "$INVALIDATED" ]; then
-    NEW_RECEIPTS="$TMP_ROOT/new-receipts.jsonl"
-    if [ "$RECORDED_LEDGER_RECEIPTS" -lt "$RECEIPT_COUNT" ]; then
-      tail -n "+$((RECORDED_LEDGER_RECEIPTS + 1))" "$LEDGER" > "$NEW_RECEIPTS"
-    else
-      : > "$NEW_RECEIPTS"
-    fi
-    while IFS= read -r invalidated_criterion; do
-      jq -se --arg criterion "$invalidated_criterion" \
-        'any(.[]; .criterion == $criterion)' "$NEW_RECEIPTS" >/dev/null 2>&1 \
-        || { echo "error: invalidated criterion requires a new receipt after the validation boundary: $invalidated_criterion" >&2; exit 2; }
-    done <<< "$INVALIDATED"
-  fi
-  write_packet follow-up "$DELTA_BASE"
-  write_meta_record follow-up
-  jq -cn --arg task "$ID" --arg tier "$TIER" --arg path "$VALIDATION_PATH" --arg reason "$REASON" \
-    --arg packet "$PACKET" --arg base "$BASE" --arg head "$HEAD" --arg delta_base "$DELTA_BASE" \
-    --argjson findings "$FINDING_COUNT" --argjson invalidated_receipts "$INVALIDATED_COUNT" \
-    '{schema:"fm-validation-plan.v1",task:$task,status:"follow-up-ready",tier:$tier,path:$path,reason:$reason,base:$base,head:$head,delta_base:$delta_base,packet:$packet,finding_count:$findings,invalidated_receipt_count:$invalidated_receipts}'
-  exit 0
-fi
-
-if [ "$VALIDATION_PATH" = targeted-no-mistakes ]; then
-  write_packet initial "$BASE"
-fi
 write_meta_record initial
 jq -cn --arg task "$ID" --arg mode "$MODE" --arg tier "$TIER" --arg path "$VALIDATION_PATH" --arg reason "$REASON" \
-  --arg base "$BASE" --arg head "$HEAD" --arg packet "$([ "$VALIDATION_PATH" = targeted-no-mistakes ] && printf '%s' "$PACKET")" \
+  --arg base "$BASE" --arg head "$HEAD" \
   --argjson diff_files "$DIFF_FILES" --argjson diff_lines "$DIFF_LINES" \
-  '{schema:"fm-validation-plan.v1",task:$task,status:"planned",mode:$mode,tier:$tier,path:$path,reason:$reason,base:$base,head:$head,diff_files:$diff_files,diff_lines:$diff_lines,packet:(if $packet == "" then null else $packet end)}'
+  '{schema:"fm-validation-plan.v1",task:$task,status:"planned",mode:$mode,tier:$tier,path:$path,reason:$reason,base:$base,head:$head,diff_files:$diff_files,diff_lines:$diff_lines}'

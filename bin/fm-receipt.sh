@@ -139,7 +139,8 @@ fi
 cleanup() {
   rmdir "$LOCK" 2>/dev/null || true
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
 
 if [ -L "$LEDGER" ] || { [ -e "$LEDGER" ] && [ ! -f "$LEDGER" ]; }; then
   echo "error: evidence ledger became unsafe before append: $LEDGER" >&2

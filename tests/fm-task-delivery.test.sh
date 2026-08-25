@@ -232,7 +232,7 @@ EOF
   [ "$status" -ne 0 ] || fail "promotion without --yolo should exit non-zero"
   assert_contains "$out" "promotion requires --yolo" "promote refusal did not name the missing merge posture"
 
-  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 --mode no-mistakes-prod-only --yolo off 2>&1)
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 --mode no-mistakes-prod-only --yolo off --criterion 'AC1: Fixture works' 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "promotion on a conditional policy should exit non-zero"
   assert_contains "$out" "classify this task's surface" "promote did not refuse the conditional policy as a task mode"
@@ -254,7 +254,7 @@ exec "$real_mv" "\$@"
 EOF
   chmod +x "$fakebin/mv"
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
-    "$PROMOTE" promote-d1 --mode direct-PR --yolo on 2>&1)
+    "$PROMOTE" promote-d1 --mode direct-PR --yolo on --criterion 'AC1: Fixture works' 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "promotion unexpectedly survived a metadata replacement failure"
   cmp -s "$brief_before" "$brief" || fail "failed promotion changed the original scout brief"
@@ -265,7 +265,7 @@ EOF
   [ -z "$leftovers" ] || fail "failed promotion left temporary artifacts: $leftovers"
 
   out=$(FM_FAIL_RESTORE=1 PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
-    "$PROMOTE" promote-d1 --mode direct-PR --yolo on 2>&1)
+    "$PROMOTE" promote-d1 --mode direct-PR --yolo on --criterion 'AC1: Fixture works' 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "promotion unexpectedly survived a rollback failure"
   assert_contains "$out" "recovery copy retained" "rollback failure was not reported loudly"
@@ -275,7 +275,7 @@ EOF
   cmp -s "$meta_before" "$meta" || fail "retained metadata recovery copy was not original"
   [ ! -e "$ledger" ] || fail "rollback failure left a partial evidence ledger"
 
-  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 --mode direct-PR --yolo on 2>&1)
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 --mode direct-PR --yolo on --criterion 'AC1: Fixture works' 2>&1)
   status=$?
   expect_code 0 "$status" "a promotion carrying both flags should succeed"
   assert_grep 'kind=ship' "$meta" "promotion did not restore ship teardown protection"
@@ -285,8 +285,8 @@ EOF
   assert_present "$ledger" "promotion did not install the evidence ledger"
   check_out=$(FM_HOME="$home" "$ROOT/bin/fm-receipt-check.sh" promote-d1 2>&1)
   check_status=$?
-  expect_code 2 "$check_status" "promoted placeholder criteria must fail closed"
-  assert_contains "$check_out" "no placeholders" "promoted contract did not require concrete acceptance criteria"
+  expect_code 1 "$check_status" "promoted concrete criteria require receipts"
+  assert_contains "$check_out" '"missing":["AC1"]' "promoted contract did not install concrete acceptance criteria"
   [ "$(grep -c '^mode=' "$meta")" = 1 ] || fail "promotion left more than one mode= line in the task record"
   pass "fm-promote: promotion installs a fail-closed ship evidence contract"
 }

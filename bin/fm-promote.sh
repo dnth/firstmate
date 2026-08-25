@@ -13,7 +13,7 @@
 # the same fail-closed completion gate. Firstmate resolves the posture after
 # reading the scout report (AGENTS.md section 7); this script never looks it up.
 # no-mistakes-prod-only is a registry policy rather than a task mode and is refused.
-# Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>
+# Usage: fm-promote.sh <task-id> --mode <mode> --yolo <on|off> --criterion 'AC1: outcome' [--criterion ...]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,6 +27,7 @@ YOLO=
 MODE_SET=0
 YOLO_SET=0
 POS=()
+CRITERIA=()
 want_value=
 for a in "$@"; do
   if [ -n "$want_value" ]; then
@@ -36,6 +37,7 @@ for a in "$@"; do
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
+      criterion) CRITERIA+=("$a") ;;
     esac
     want_value=
     continue
@@ -45,6 +47,8 @@ for a in "$@"; do
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     --yolo) want_value=yolo ;;
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
+    --criterion) want_value=criterion ;;
+    --criterion=*) CRITERIA+=("${a#--criterion=}") ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -58,6 +62,16 @@ done
   echo "error: promotion requires --yolo <on|off>; it is this task's merge authority, not a project lookup" >&2
   exit 1
 }
+[ "${#CRITERIA[@]}" -gt 0 ] || { echo "error: promotion requires at least one concrete --criterion 'AC1: outcome'" >&2; exit 1; }
+CRITERIA_SEEN=
+for criterion in "${CRITERIA[@]}"; do
+  case "$criterion" in AC[1-9]:\ *|AC[1-9][0-9]*:\ *) ;; *) echo "error: invalid promotion criterion: $criterion" >&2; exit 1 ;; esac
+  criterion_id=${criterion%%:*}
+  printf '%s\n' "$CRITERIA_SEEN" | grep -Fx "$criterion_id" >/dev/null 2>&1 \
+    && { echo "error: duplicate promotion criterion: $criterion_id" >&2; exit 1; }
+  CRITERIA_SEEN=$(printf '%s\n%s' "$CRITERIA_SEEN" "$criterion_id")
+done
+CRITERIA_BLOCK=$(printf -- '- %s\n' "${CRITERIA[@]}")
 case "$MODE" in
   no-mistakes|direct-PR|local-only) ;;
   no-mistakes-prod-only)
@@ -145,10 +159,10 @@ cp -p "$META" "$META_ORIGINAL"
 cat >> "$BRIEF_TMP" <<EOF
 
 # Acceptance criteria
-- AC1: {ACCEPTANCE CRITERION}
+$CRITERIA_BLOCK
 
 # Acceptance evidence
-Before reporting implementation complete, replace every acceptance-criterion placeholder and record at least one compact receipt for every criterion with \`$FM_ROOT/bin/fm-receipt.sh $ID <criterion> <type> <summary> <result> [options]\`.
+Before reporting implementation complete, record at least one compact receipt for every criterion with \`$FM_ROOT/bin/fm-receipt.sh $ID <criterion> <type> <summary> <result> [options]\`.
 Run \`$FM_ROOT/bin/fm-receipt-check.sh $ID\` and do not append \`done:\` unless its JSON status is \`complete\`.
 
 # Promoted ship delivery
@@ -178,4 +192,4 @@ COMMITTED=1
 
 HOME_Q=$(printf '%q' "$FM_HOME")
 echo "promoted $ID to ship mode=$MODE yolo=$YOLO (teardown protection restored)"
-echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID '<ship instructions for mode=$MODE: replace the acceptance-criterion placeholder; review scratch state with git status and git log; reset to a clean default-branch base; carry over only intended fix changes; create branch fm/$ID; implement; record receipts; report done>'"
+echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID '<ship instructions for mode=$MODE: read the concrete acceptance criteria in the promoted brief; review scratch state with git status and git log; reset to a clean default-branch base; carry over only intended fix changes; create branch fm/$ID; implement; record receipts; report done>'"

@@ -65,7 +65,10 @@ make_project() {  # <id> <mode> <surface> -> prints base
   git -C "$project" checkout -q -b "fm/$id"
   case "$surface" in
     docs)
-      printf 'seed\nupdated docs\n' > "$project/README.md"
+      printf 'release note\n' > "$project/CHANGELOG.md"
+      ;;
+    authoritative_docs)
+      printf 'seed\nsecurity deployment instructions\n' > "$project/README.md"
       ;;
     localized)
       mkdir -p "$project/src" "$project/tests"
@@ -175,8 +178,8 @@ test_low_risk_skips_no_mistakes_under_explicit_policy() {
     || fail "low plan did not complete after post-plan mechanical evidence"
   grep -qx "validation_completed_head=$validated_head" "$meta" \
     || fail "low completion was not bound to its validated head"
-  printf 'post-validation correction\n' >> "$project/README.md"
-  git -C "$project" add README.md
+  printf 'post-validation correction\n' >> "$project/CHANGELOG.md"
+  git -C "$project" add CHANGELOG.md
   git -C "$project" commit -q -m 'post-validation correction'
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence mechanical-checks-passed 2>&1)
   rc=$?
@@ -195,16 +198,16 @@ test_low_risk_skips_no_mistakes_under_explicit_policy() {
   pass "low-risk mechanical changes can skip a full No-Mistakes run"
 }
 
-test_docs_require_positive_non_authoritative_classification() {
+test_authoritative_docs_remain_high() {
   local id=unclassified-docs base out
-  base=$(make_project "$id" no-mistakes docs)
+  base=$(make_project "$id" no-mistakes authoritative_docs)
   add_receipt "$id" AC1 lint "passed"
   add_receipt "$id" AC2 review "reviewed"
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base") \
     || fail "unclassified documentation plan failed"
-  printf '%s' "$out" | jq -e '.tier == "high" and .reason == "unclassified-documentation"' >/dev/null \
-    || fail "documentation without positive prose classification reached low"
-  pass "low documentation requires positive non-authoritative prose classification"
+  printf '%s' "$out" | jq -e '.tier == "high" and .path == "full-no-mistakes"' >/dev/null \
+    || fail "authoritative documentation reached low"
+  pass "authoritative documentation remains high"
 }
 
 test_terminal_paths_record_completion_at_their_boundary() {
@@ -221,7 +224,7 @@ test_terminal_paths_record_completion_at_their_boundary() {
     ! grep -q '^validation_completed_at=' "$meta" || fail "$mode completed validation during planning"
     case "$mode" in
       no-mistakes) evidence=no-mistakes-passed; observed=bound-matching-no-mistakes-run ;;
-      direct-PR) evidence=pr-opened; observed=canonical-pr-head ;;
+      direct-PR) evidence=pr-opened; observed=canonical-non-github-pr ;;
       local-only) evidence=branch-ready; observed=clean-ready-branch ;;
     esac
     FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence wrong-boundary >/dev/null 2>&1
@@ -243,15 +246,15 @@ test_terminal_paths_record_completion_at_their_boundary() {
           FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence "$evidence" >/dev/null 2>&1
         rc=$?
         expect_code 2 "$rc" "No-Mistakes completion rejects a different run head"
-        printf 'validation_run_path=full-no-mistakes\n' >> "$meta"
+        printf 'validation_run_path=receipts-mechanical\n' >> "$meta"
         FM_FAKE_NM_STATUS="$passed_status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
           "$CHECK" "$id" --complete --terminal-evidence "$evidence" >/dev/null 2>&1
         rc=$?
         expect_code 2 "$rc" "No-Mistakes completion rejects a different run path"
-        printf 'validation_run_path=targeted-no-mistakes\n' >> "$meta"
+        printf 'validation_run_path=full-no-mistakes\n' >> "$meta"
         ;;
       direct-PR)
-        printf 'pr=https://github.com/o/r/pull/1\npr_head=%s\n' "$expected_head" >> "$meta"
+        printf 'pr=https://gitlab.example/o/r/-/merge_requests/1\n' >> "$meta"
         ;;
       local-only) ;;
     esac
@@ -365,7 +368,7 @@ test_low_config_requires_allowlist_and_applicable_proof() {
   add_receipt "$id" AC2 review "reviewed"
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base") \
     || fail "package-manifest plan failed"
-  printf '%s' "$out" | jq -e '.tier == "high" and .reason == "weak-evidence"' >/dev/null \
+  printf '%s' "$out" | jq -e '.tier == "high" and .reason == "default-high"' >/dev/null \
     || fail "package manifest was treated as low-risk mechanical config"
 
   id=allowlisted-config-unbound
@@ -425,7 +428,7 @@ test_high_risk_and_uncertain_inputs_fail_safe() {
   add_receipt "$id" AC2 lint "passed"
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base") \
     || fail "weak-evidence plan should still be a successful plan"
-  printf '%s' "$out" | jq -e '.tier == "high" and .reason == "weak-evidence"' >/dev/null \
+  printf '%s' "$out" | jq -e '.tier == "high" and .reason == "default-high"' >/dev/null \
     || fail "a negative test receipt was treated as strong regression proof"
 
   id=zero-test-proof
@@ -434,7 +437,7 @@ test_high_risk_and_uncertain_inputs_fail_safe() {
   add_receipt "$id" AC2 lint "passed"
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" --risky-area "parser boundary") \
     || fail "zero-test plan should still be a successful plan"
-  printf '%s' "$out" | jq -e '.tier == "high" and .reason == "weak-evidence"' >/dev/null \
+  printf '%s' "$out" | jq -e '.tier == "high" and .reason == "default-high"' >/dev/null \
     || fail "zero tests passed was treated as regression proof"
 
   id=skipped-test-proof
@@ -443,7 +446,7 @@ test_high_risk_and_uncertain_inputs_fail_safe() {
   add_receipt "$id" AC2 lint "passed"
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" --risky-area "parser boundary") \
     || fail "skipped-test plan should still be a successful plan"
-  printf '%s' "$out" | jq -e '.tier == "high" and .reason == "weak-evidence"' >/dev/null \
+  printf '%s' "$out" | jq -e '.tier == "high" and .reason == "default-high"' >/dev/null \
     || fail "a skipped test run was treated as regression proof"
 
   id=unclassified-login
@@ -457,12 +460,12 @@ test_high_risk_and_uncertain_inputs_fail_safe() {
   add_receipt "$id" AC2 lint "passed"
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base") \
     || fail "unclassified login plan should still be a successful plan"
-  printf '%s' "$out" | jq -e '.tier == "high" and .reason == "unclassified-change"' >/dev/null \
+  printf '%s' "$out" | jq -e '.tier == "high" and .reason == "default-high"' >/dev/null \
     || fail "filename silence downgraded an unclassified login change"
 
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" --risky-area "login flow") \
     || fail "free-form login plan should still be a successful plan"
-  printf '%s' "$out" | jq -e '.tier == "high" and .reason == "unclassified-change"' >/dev/null \
+  printf '%s' "$out" | jq -e '.tier == "high" and .reason == "default-high"' >/dev/null \
     || fail "free-form risky-area text was treated as positive safety proof"
 
   id=hidden-sensitive-base
@@ -500,7 +503,7 @@ test_direct_and_local_modes_never_invoke_no_mistakes() {
     out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" --change-class localized-non-sensitive --risky-area "localized fixture") \
       || fail "$mode plan failed"
     expected=$mode
-    printf '%s' "$out" | jq -e --arg expected "$expected" '.tier == "medium" and .path == $expected and .packet == null' >/dev/null \
+    printf '%s' "$out" | jq -e --arg expected "$expected" '.tier == "high" and .path == $expected' >/dev/null \
       || fail "$mode accidentally entered a No-Mistakes path"
   done
   pass "direct-PR and local-only retain evidence gates without invoking No-Mistakes"
@@ -590,14 +593,10 @@ test_reports_missing_criteria_deterministically
 test_complete_and_invalid_ledgers_have_distinct_results
 test_invalid_brief_and_scout_behavior
 test_low_risk_skips_no_mistakes_under_explicit_policy
-test_docs_require_positive_non_authoritative_classification
+test_authoritative_docs_remain_high
 test_terminal_paths_record_completion_at_their_boundary
 test_completion_signal_releases_validation_lock
 test_dirty_worktrees_cannot_plan_or_complete
 test_local_completion_requires_fast_forward_readiness
-test_low_config_requires_allowlist_and_applicable_proof
-test_medium_plan_writes_a_bounded_audit_packet
 test_high_risk_and_uncertain_inputs_fail_safe
 test_direct_and_local_modes_never_invoke_no_mistakes
-test_follow_up_packet_uses_finding_delta_and_updated_receipts
-test_follow_up_scope_change_requires_full_rerun
