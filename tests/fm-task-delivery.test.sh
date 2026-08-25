@@ -201,7 +201,7 @@ EOF
 # Promotion is where a scout's ship contract is finally decided, so it requires the
 # same explicit values and writes them into the task's durable record.
 test_promote_requires_and_records_the_delivery_contract() {
-  local home meta brief ledger out status check_out check_status
+  local home meta brief ledger out status check_out check_status fakebin real_mv brief_before meta_before leftovers
   home="$TMP_ROOT/promote/home"
   mkdir -p "$home/state" "$home/data/promote-d1"
   meta="$home/state/promote-d1.meta"
@@ -236,6 +236,32 @@ EOF
   status=$?
   [ "$status" -ne 0 ] || fail "promotion on a conditional policy should exit non-zero"
   assert_contains "$out" "classify this task's surface" "promote did not refuse the conditional policy as a task mode"
+
+  brief_before="$home/brief.before"
+  meta_before="$home/meta.before"
+  cp "$brief" "$brief_before"
+  cp "$meta" "$meta_before"
+  fakebin="$home/fakebin"
+  mkdir -p "$fakebin"
+  real_mv=$(command -v mv)
+  cat > "$fakebin/mv" <<EOF
+#!/bin/sh
+case "\$1" in
+  *.meta.promote.*) exit 71 ;;
+esac
+exec "$real_mv" "\$@"
+EOF
+  chmod +x "$fakebin/mv"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$PROMOTE" promote-d1 --mode direct-PR --yolo on 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "promotion unexpectedly survived a metadata replacement failure"
+  cmp -s "$brief_before" "$brief" || fail "failed promotion changed the original scout brief"
+  cmp -s "$meta_before" "$meta" || fail "failed promotion changed the original scout metadata"
+  [ ! -e "$ledger" ] || fail "failed promotion left a partial evidence ledger"
+  leftovers=$(find "$home/data/promote-d1" "$home/state" -maxdepth 1 \
+    \( -name '*.promote.*' -o -name '*.original.*' \) -print)
+  [ -z "$leftovers" ] || fail "failed promotion left temporary artifacts: $leftovers"
 
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 --mode direct-PR --yolo on 2>&1)
   status=$?

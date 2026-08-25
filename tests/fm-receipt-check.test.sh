@@ -154,7 +154,30 @@ test_low_risk_skips_no_mistakes_under_explicit_policy() {
   meta="$HOME_DIR/state/$id.meta"
   grep -qx 'validation_tier=low' "$meta" || fail "low tier was not recorded durably"
   grep -qx 'validation_path=receipts-mechanical' "$meta" || fail "low path was not recorded durably"
+  grep -Eq '^validation_started_at=[0-9]+$' "$meta" || fail "low plan omitted validation start time"
+  grep -Eq '^validation_completed_at=[0-9]+$' "$meta" || fail "low plan omitted immediate validation completion"
   pass "low-risk mechanical changes can skip a full No-Mistakes run"
+}
+
+test_terminal_paths_record_completion_at_their_boundary() {
+  local mode id base out meta
+  for mode in no-mistakes direct-PR local-only; do
+    id="completion-${mode}"
+    base=$(make_project "$id" "$mode" localized)
+    add_receipt "$id" AC1 test "2 passed"
+    add_receipt "$id" AC2 lint "passed"
+    FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" \
+      --change-class localized-non-sensitive >/dev/null || fail "$mode timing plan failed"
+    meta="$HOME_DIR/state/$id.meta"
+    grep -Eq '^validation_started_at=[0-9]+$' "$meta" || fail "$mode omitted validation start time"
+    ! grep -q '^validation_completed_at=' "$meta" || fail "$mode completed validation during planning"
+    out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete) || fail "$mode completion recording failed"
+    printf '%s' "$out" | jq -e '.status == "completed" and (.completed_at | type == "number")' >/dev/null \
+      || fail "$mode completion output was not machine-readable"
+    FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete >/dev/null || fail "$mode duplicate completion failed"
+    [ "$(grep -c '^validation_completed_at=' "$meta")" -eq 1 ] || fail "$mode completion was not idempotent"
+  done
+  pass "terminal delivery paths record one completion timestamp at their boundary"
 }
 
 test_low_config_requires_allowlist_and_applicable_proof() {
@@ -343,6 +366,8 @@ test_follow_up_packet_uses_finding_delta_and_updated_receipts() {
   assert_grep '3 passed after fix' "$packet" "follow-up packet omitted updated receipts"
   assert_grep "Review diff: $initial_head.." "$packet" "follow-up packet did not bind the delta base"
   grep -qx 'validation_pass=follow-up' "$HOME_DIR/state/$id.meta" || fail "follow-up pass was not recorded"
+  [ "$(grep -c '^validation_started_at=' "$HOME_DIR/state/$id.meta")" -eq 1 ] \
+    || fail "follow-up rewrote the implementation-complete timestamp"
   pass "follow-up validation is bounded to the finding, delta, and updated receipts"
 }
 
@@ -374,6 +399,7 @@ test_reports_missing_criteria_deterministically
 test_complete_and_invalid_ledgers_have_distinct_results
 test_invalid_brief_and_scout_behavior
 test_low_risk_skips_no_mistakes_under_explicit_policy
+test_terminal_paths_record_completion_at_their_boundary
 test_low_config_requires_allowlist_and_applicable_proof
 test_medium_plan_writes_a_bounded_audit_packet
 test_high_risk_and_uncertain_inputs_fail_safe

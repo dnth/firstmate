@@ -4,6 +4,7 @@
 # Usage:
 #   fm-receipt-check.sh <task-id>
 #   fm-receipt-check.sh <task-id> --criterion <criterion-id>
+#   fm-receipt-check.sh <task-id> --complete
 #   fm-receipt-check.sh <task-id> --plan [--base <commit>]
 #                       [--change-class <localized-non-sensitive|sensitive>]
 #                       [--risky-area <text>]...
@@ -42,6 +43,9 @@
 # undeclared, or otherwise uncertain changes resolve to high.
 # The resolved validation_tier, validation_path, reason code, base, head, size,
 # and start time are appended to state/<task-id>.meta for durable inspection.
+# Low-risk planning records completion immediately.
+# --complete records the other delivery paths' terminal validation boundary after
+# their generated instructions reach pipeline success, PR-open, or branch-ready.
 # Delivery mode remains authoritative: direct-PR and local-only never invoke
 # No-Mistakes, while no-mistakes maps low to receipts-mechanical, medium to a
 # targeted audit packet, and high to full-no-mistakes.
@@ -120,6 +124,10 @@ while [ "$#" -gt 0 ]; do
       [ "$ACTION" = check ] || { echo "error: choose only one action" >&2; exit 2; }
       ACTION=follow-up
       ;;
+    --complete)
+      [ "$ACTION" = check ] || { echo "error: choose only one action" >&2; exit 2; }
+      ACTION=complete
+      ;;
     --base|--delta-base|--change-class|--risky-area|--finding|--finding-file|--invalidated-criterion)
       [ "$#" -gt 0 ] || { echo "error: $option requires a value" >&2; exit 2; }
       value=$1
@@ -157,7 +165,7 @@ case "$CHANGE_CLASS" in
 esac
 
 case "$ACTION" in
-  check|criterion)
+  check|criterion|complete)
     [ -z "$BASE_INPUT$DELTA_BASE$CHANGE_CLASS$RISKY_AREAS$FINDINGS$INVALIDATED" ] \
       || { echo "error: validation-planning options require --plan or --follow-up" >&2; exit 2; }
     ;;
@@ -372,6 +380,50 @@ if [ "$CHECK_RC" -ne 0 ]; then
   exit "$CHECK_RC"
 fi
 
+record_validation_completed() {
+  local lock started path completed count now
+  lock="$STATE/.$ID.validation-plan.lock"
+  if ! mkdir "$lock" 2>/dev/null; then
+    echo "error: validation metadata is locked by another planner" >&2
+    return 1
+  fi
+  started=$(grep '^validation_started_at=' "$META" | head -1 | cut -d= -f2- || true)
+  path=$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)
+  case "$started" in
+    ''|*[!0-9]*) rmdir "$lock"; echo "error: validation start timestamp is missing or invalid" >&2; return 1 ;;
+  esac
+  case "$path" in
+    receipts-mechanical|targeted-no-mistakes|full-no-mistakes|direct-PR|local-only) ;;
+    *) rmdir "$lock"; echo "error: validation path is missing or invalid" >&2; return 1 ;;
+  esac
+  count=$(grep -c '^validation_completed_at=' "$META" 2>/dev/null || true)
+  if [ "$count" -gt 1 ]; then
+    rmdir "$lock"
+    echo "error: validation completion timestamp is ambiguous" >&2
+    return 1
+  fi
+  completed=$(grep '^validation_completed_at=' "$META" | tail -1 | cut -d= -f2- || true)
+  if [ -n "$completed" ]; then
+    case "$completed" in
+      *[!0-9]*) rmdir "$lock"; echo "error: validation completion timestamp is invalid" >&2; return 1 ;;
+    esac
+  else
+    now=$(date +%s)
+    printf 'validation_completed_at=%s\n' "$now" >> "$META" \
+      || { rmdir "$lock"; echo "error: could not record validation completion" >&2; return 1; }
+    completed=$now
+  fi
+  rmdir "$lock"
+  printf '%s\n' "$completed"
+}
+
+if [ "$ACTION" = complete ]; then
+  VALIDATION_COMPLETED=$(record_validation_completed) || exit 2
+  jq -cn --arg task "$ID" --argjson completed_at "$VALIDATION_COMPLETED" \
+    '{schema:"fm-validation-completion.v1",task:$task,status:"completed",completed_at:$completed_at}'
+  exit 0
+fi
+
 [ -f "$META" ] && [ ! -L "$META" ] \
   || { echo "error: task metadata is missing or unsafe: $META" >&2; exit 2; }
 WORKTREE=$(grep '^worktree=' "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true)
@@ -554,7 +606,7 @@ case "$MODE:$TIER" in
 esac
 
 write_meta_record() {  # <pass>
-  local pass=$1 now lock normalized_risks packet_value
+  local pass=$1 now lock normalized_risks packet_value started
   now=$(date +%s)
   lock="$STATE/.$ID.validation-plan.lock"
   if ! mkdir "$lock" 2>/dev/null; then
@@ -562,6 +614,11 @@ write_meta_record() {  # <pass>
     return 1
   fi
   normalized_risks=$(printf '%s' "$RISKY_AREAS" | tr '\n\r' '; ')
+  started=$(grep '^validation_started_at=' "$META" | head -1 | cut -d= -f2- || true)
+  case "$started" in
+    '') ;;
+    *[!0-9]*) rmdir "$lock"; echo "error: validation start timestamp is invalid" >&2; return 1 ;;
+  esac
   packet_value=
   [ "$VALIDATION_PATH" = targeted-no-mistakes ] && packet_value=$PACKET
   if ! {
@@ -573,7 +630,7 @@ write_meta_record() {  # <pass>
     printf 'validation_diff_files=%s\n' "$DIFF_FILES"
     printf 'validation_diff_lines=%s\n' "$DIFF_LINES"
     printf 'validation_pass=%s\n' "$pass"
-    printf 'validation_started_at=%s\n' "$now"
+    [ -n "$started" ] || printf 'validation_started_at=%s\n' "$now"
     printf 'validation_risky_areas=%s\n' "$normalized_risks"
     printf 'validation_change_class=%s\n' "$CHANGE_CLASS"
     printf 'validation_ledger_receipt_count=%s\n' "$RECEIPT_COUNT"
@@ -712,6 +769,9 @@ if [ "$VALIDATION_PATH" = targeted-no-mistakes ]; then
   write_packet initial "$BASE"
 fi
 write_meta_record initial
+if [ "$VALIDATION_PATH" = receipts-mechanical ]; then
+  record_validation_completed >/dev/null
+fi
 jq -cn --arg task "$ID" --arg mode "$MODE" --arg tier "$TIER" --arg path "$VALIDATION_PATH" --arg reason "$REASON" \
   --arg base "$BASE" --arg head "$HEAD" --arg packet "$([ "$VALIDATION_PATH" = targeted-no-mistakes ] && printf '%s' "$PACKET")" \
   --argjson diff_files "$DIFF_FILES" --argjson diff_lines "$DIFF_LINES" \

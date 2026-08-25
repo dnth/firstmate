@@ -216,6 +216,19 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
+    case "$mode" in
+      direct-PR)
+        assert_grep "fm-receipt-check.sh $id --plan" "$brief" "$id: direct-PR brief omitted validation start"
+        assert_grep "fm-receipt-check.sh $id --complete" "$brief" "$id: direct-PR brief omitted PR-open completion"
+        ;;
+      local-only)
+        assert_grep "fm-receipt-check.sh $id --plan" "$brief" "$id: local-only brief omitted validation start"
+        assert_grep "fm-receipt-check.sh $id --complete" "$brief" "$id: local-only brief omitted branch-ready completion"
+        ;;
+      no-mistakes)
+        assert_grep "fm-receipt-check.sh $id --complete" "$brief" "$id: no-mistakes brief omitted pipeline completion"
+        ;;
+    esac
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"

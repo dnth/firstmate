@@ -13,7 +13,8 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 - `direct-PR` and `local-only` retain the evidence gate without entering No-Mistakes.
 - Medium follow-up review requires a fresh localized-non-sensitive classification, a non-empty strict-descendant delta from the latest recorded validation head, and post-boundary replacement receipts for every invalidated criterion.
 - Follow-up work without fresh positive safety evidence or with material risk expansion requires a full rerun.
-- PR-ready recording adds `validation_completed_at` beside the plan's `validation_started_at`, making implementation-complete to validation-complete latency directly measurable.
+- Initial planning records one `validation_started_at`, low-risk planning completes immediately, and every other generated delivery path records `validation_completed_at` at pipeline success, PR-open, or branch-ready before its terminal status.
+- PR-ready recording preserves the path-specific completion boundary instead of replacing it with later PR-monitor setup time.
 
 ## Verification environment
 
@@ -39,6 +40,7 @@ ok - fm-receipt-check reports required, evidenced, and missing ids deterministic
 ok - fm-receipt-check distinguishes complete evidence from invalid JSONL
 ok - invalid ship briefs fail and scout/report behavior stays unchanged
 ok - low-risk mechanical changes can skip a full No-Mistakes run
+ok - terminal delivery paths record one completion timestamp at their boundary
 ok - low config requires an allowlisted path and applicable proof
 ok - medium-risk work produces a brief, evidence, diff, and risky-area audit packet
 ok - security and uncertain changes retain full No-Mistakes validation

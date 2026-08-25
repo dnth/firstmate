@@ -94,12 +94,30 @@ fi
 
 BRIEF_TMP="$TASK_DIR/.brief.promote.$$"
 META_TMP="$STATE/.$ID.meta.promote.$$"
+BRIEF_ORIGINAL="$TASK_DIR/.brief.original.$$"
+META_ORIGINAL="$STATE/.$ID.meta.original.$$"
+COMMITTED=0
+EVIDENCE_CREATED=0
+BRIEF_REPLACED=0
+META_REPLACED=0
 cleanup() {
-  rm -f "$BRIEF_TMP" "$META_TMP"
+  if [ "$COMMITTED" -ne 1 ]; then
+    if [ "$META_REPLACED" -eq 1 ] && [ -f "$META_ORIGINAL" ]; then
+      mv "$META_ORIGINAL" "$META" 2>/dev/null || true
+    fi
+    if [ "$BRIEF_REPLACED" -eq 1 ] && [ -f "$BRIEF_ORIGINAL" ]; then
+      mv "$BRIEF_ORIGINAL" "$BRIEF" 2>/dev/null || true
+    fi
+    [ "$EVIDENCE_CREATED" -ne 1 ] || rm -f "$EVIDENCE"
+  fi
+  rm -f "$BRIEF_TMP" "$META_TMP" "$BRIEF_ORIGINAL" "$META_ORIGINAL"
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
 
 cp "$BRIEF" "$BRIEF_TMP"
+cp -p "$BRIEF" "$BRIEF_ORIGINAL"
+cp -p "$META" "$META_ORIGINAL"
 cat >> "$BRIEF_TMP" <<EOF
 
 # Acceptance criteria
@@ -114,7 +132,9 @@ Delivery contract: mode=$MODE
 EOF
 
 umask 077
+EVIDENCE_CREATED=1
 if ! ( set -C; : > "$EVIDENCE" ) 2>/dev/null; then
+  EVIDENCE_CREATED=0
   echo "error: could not prepare evidence ledger: $EVIDENCE" >&2
   exit 1
 fi
@@ -126,9 +146,11 @@ grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META" > "$META_TMP"
   echo "yolo=$YOLO"
 } >> "$META_TMP"
 
+BRIEF_REPLACED=1
 mv "$BRIEF_TMP" "$BRIEF"
+META_REPLACED=1
 mv "$META_TMP" "$META"
-trap - EXIT HUP INT TERM
+COMMITTED=1
 
 HOME_Q=$(printf '%q' "$FM_HOME")
 echo "promoted $ID to ship mode=$MODE yolo=$YOLO (teardown protection restored)"

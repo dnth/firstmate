@@ -530,6 +530,7 @@ test_valid_recording_and_merge_derivation() {
   dir=$(make_case valid-recording)
   write_task_meta "$dir"
   printf 'validation_started_at=1787670000\n' >> "$dir/home/state/task-a.meta"
+  printf 'validation_completed_at=1787670005\n' >> "$dir/home/state/task-a.meta"
   expected=0123456789abcdef0123456789abcdef01234567
   FM_TEST_GH_HEAD=$expected run_check_entry "$dir" task-a https://github.com/my-org/repo_name.with-dots/pull/37 \
     > "$dir/stdout" 2> "$dir/stderr" || fail "valid direct check failed"
@@ -537,8 +538,8 @@ test_valid_recording_and_merge_derivation() {
   grep -qxF 'pr=https://github.com/my-org/repo_name.with-dots/pull/37' "$dir/home/state/task-a.meta" \
     || fail "canonical pr metadata was not exact"
   grep -qxF "pr_head=$expected" "$dir/home/state/task-a.meta" || fail "PR head metadata was not exact"
-  grep -Eq '^validation_completed_at=[0-9]+$' "$dir/home/state/task-a.meta" \
-    || fail "PR-ready recording omitted validation completion instrumentation"
+  grep -qx 'validation_completed_at=1787670005' "$dir/home/state/task-a.meta" \
+    || fail "PR-ready recording changed the path-specific validation completion time"
   cmp -s "$POLL" "$dir/home/state/task-a.check.sh" || fail "published check was not byte-for-byte static"
   [ "$(file_mode "$dir/home/state/task-a.check.sh")" = 600 ] || fail "published check mode was not 0600"
   [ "$(file_mode "$dir/home/state/task-a.pr-poll")" = 600 ] || fail "published sidecar mode was not 0600"

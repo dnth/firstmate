@@ -43,7 +43,8 @@
 # Every ship scaffold also declares stable acceptance-criterion ids in an exact
 # "# Acceptance criteria" section and creates the append-only evidence ledger at
 # data/<task-id>/evidence.jsonl. bin/fm-receipt-check.sh owns the section parser,
-# evidence gate, conservative risk plan, and targeted audit-packet mechanics.
+# evidence gate, conservative risk plan, validation timing, and targeted
+# audit-packet mechanics.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
@@ -369,7 +370,8 @@ case "$MODE" in
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch and every declared acceptance criterion has a receipt.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+When it is implemented and committed, run \`$FM_ROOT/bin/fm-receipt-check.sh $ID --plan\`, then push your branch and open a PR with \`gh-axi\`.
+After the PR opens, run \`$FM_ROOT/bin/fm-receipt-check.sh $ID --complete\`, append \`done: PR {url}\` to the status file, and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
     ;;
@@ -382,7 +384,8 @@ Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\` and every declared acceptance criterion has a receipt. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
+When it is implemented, committed, and ready in the branch, run \`$FM_ROOT/bin/fm-receipt-check.sh $ID --plan\` followed by \`$FM_ROOT/bin/fm-receipt-check.sh $ID --complete\`.
+Then append \`done: ready in branch fm/$ID\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
     ;;
@@ -408,7 +411,7 @@ Two firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), run \`$FM_ROOT/bin/fm-receipt-check.sh $ID --complete\`, append \`done: PR {url} checks green\`, and stop. You are finished.
 EOF
     ;;
 esac
