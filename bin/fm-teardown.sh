@@ -1461,11 +1461,36 @@ $dir_pids"
 # a live owned process, and keeping such a pid in the owned set turns an
 # unreaped zombie into a permanent refusal - including on a degraded ps table
 # with no state column, where the descendant closure cannot see it is defunct.
+# A pid that is still alive but whose state cannot be read is a different case
+# and must never be dropped: it stays in the set so the identity check refuses
+# and preserves the records rather than removing a worktree underneath it.
+task_pid_is_defunct() {  # <pid>
+  local pid=$1 proc_root stat_line state
+  local -a stat_fields
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  if [ -r "$proc_root/$pid/stat" ]; then
+    stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
+    read -r -a stat_fields <<< "${stat_line##*)}"
+    [ "${#stat_fields[@]}" -ge 1 ] || return 1
+    case "${stat_fields[0]}" in Z*) return 0 ;; esac
+    return 1
+  fi
+  state=$(LC_ALL=C ps -p "$pid" -o state= 2>/dev/null) || return 1
+  state=$(fm_nm_trim "$state")
+  case "$state" in Z*) return 0 ;; esac
+  return 1
+}
+
 task_pids_alive_only() {  # <pid-list>
   local pid
   while IFS= read -r pid; do
     case "$pid" in ''|*[!0-9]*) continue ;; esac
-    task_process_identity "$pid" >/dev/null 2>&1 || continue
+    if task_process_identity "$pid" >/dev/null 2>&1; then
+      printf '%s\n' "$pid"
+      continue
+    fi
+    task_pid_is_defunct "$pid" && continue
+    kill -0 "$pid" 2>/dev/null || continue
     printf '%s\n' "$pid"
   done <<EOF
 $1

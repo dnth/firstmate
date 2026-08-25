@@ -473,23 +473,16 @@ FM_HOME="$FM_LIVE_HOME" "$ROOT/bin/fm-decision-hold.sh" complete "$SCOUT" --none
 printf 'command: fm-teardown %s (persistent TUI still running, no /exit)\n' "$SCOUT"
 run_tmux_env "$ROOT/bin/fm-teardown.sh" "$SCOUT" >/dev/null
 SCOUT_TRACKED_SURVIVORS=
-SCOUT_SETTLE=0
-while [ "$SCOUT_SETTLE" -lt 40 ]; do
-  SCOUT_TRACKED_SURVIVORS=
-  while IFS= read -r scout_line; do
-    [ -n "$scout_line" ] || continue
-    scout_pid=${scout_line%% *}
-    scout_identity=${scout_line#* }
-    kill -0 "$scout_pid" 2>/dev/null || continue
-    [ "$(live_pid_identity "$scout_pid" 2>/dev/null || true)" = "$scout_identity" ] || continue
-    SCOUT_TRACKED_SURVIVORS="$SCOUT_TRACKED_SURVIVORS $scout_pid"
-  done <<EOF
+while IFS= read -r scout_line; do
+  [ -n "$scout_line" ] || continue
+  scout_pid=${scout_line%% *}
+  scout_identity=${scout_line#* }
+  kill -0 "$scout_pid" 2>/dev/null || continue
+  [ "$(live_pid_identity "$scout_pid" 2>/dev/null || true)" = "$scout_identity" ] || continue
+  SCOUT_TRACKED_SURVIVORS="$SCOUT_TRACKED_SURVIVORS $scout_pid"
+done <<EOF
 $SCOUT_TRACKED
 EOF
-  [ -n "$SCOUT_TRACKED_SURVIVORS" ] || break
-  sleep 0.25
-  SCOUT_SETTLE=$((SCOUT_SETTLE + 1))
-done
 [ -z "$SCOUT_TRACKED_SURVIVORS" ] \
   || fail "fm-teardown left pre-teardown scout process(es) alive:$SCOUT_TRACKED_SURVIVORS"
 SCOUT_SURVIVORS=$(live_task_pids "$SCOUT_TOKEN" "$SCOUT_WT") \

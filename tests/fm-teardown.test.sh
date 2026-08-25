@@ -3085,6 +3085,56 @@ SH
   pass "a defunct descendant of a token root converges even when the ps table has no state column"
 }
 
+test_unprovable_live_identity_refuses_instead_of_dropping() {
+  local case_dir rc pid survived=0
+  case_dir=$(make_case unprovable-identity-refusal)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+
+  # No /proc and a ps that cannot answer any per-process query: the process is
+  # demonstrably alive, but neither its birth identity nor its state can be
+  # proven, which must refuse rather than silently clear the owned set.
+  cat > "$case_dir/fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -p ]; then
+  exit 1
+fi
+exec "$REAL_PS_FOR_TEST" "$@"
+SH
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+printf 'return\n' >> "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/ps" "$case_dir/fakebin/treehouse"
+
+  rc=0
+  FM_PROC_ROOT_OVERRIDE="$case_dir/no-proc" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  if kill -0 "$pid" 2>/dev/null; then
+    survived=1
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  wait "$pid" 2>/dev/null || true
+
+  expect_code 1 "$rc" "unprovable-identity-refusal: an unprovable live process must refuse teardown"
+  [ "$survived" -eq 1 ] \
+    || fail "unprovable-identity-refusal: teardown signaled a process it could not verify"
+  assert_grep "cannot verify leaked process" "$case_dir/stderr" \
+    "unprovable-identity-refusal: teardown did not report the unverifiable process"
+  assert_present "$case_dir/wt" "unprovable-identity-refusal: teardown removed the worktree"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "unprovable-identity-refusal: teardown removed task metadata"
+  assert_absent "$case_dir/treehouse.log" \
+    "unprovable-identity-refusal: teardown returned the worktree"
+  pass "a live process whose identity cannot be proven refuses teardown instead of being dropped"
+}
+
 test_lsof_absent_reaps_tmux_process_group() {
   local case_dir rc pid path_without_lsof
   case_dir=$(make_case lsof-absent-process-group-reap)
@@ -3480,6 +3530,7 @@ test_hermes_descendant_closure_starts_only_at_token_roots
 test_hermes_marker_scan_without_proc_reaps_token_tree
 test_hermes_marker_scan_tries_every_environment_ps_form
 test_hermes_defunct_descendant_converges_without_ps_state_column
+test_unprovable_live_identity_refuses_instead_of_dropping
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
 test_reused_pid_identity_is_not_force_killed
