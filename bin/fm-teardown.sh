@@ -1297,7 +1297,10 @@ EOF
 # its Python launcher, Node TUI, and gateway. The token finds the TUI process
 # even though its cwd is Hermes' installation directory, while the ordinary
 # cwd scan and descendant closure cover gateway children whose sanitized MCP
-# environments no longer carry it.
+# environments no longer carry it. A /proc that exposes no readable environ at
+# all (a stripped mount, or a procfs that has no such file) proves nothing, so
+# it falls through to the portable ps environment scan instead of reporting an
+# empty owned set.
 # One bounded listing of every process with its environment. Which ps form
 # carries the environment is platform-specific and cannot be decided from exit
 # status: on Darwin the bundled BSD `e` in `axeww` resolves to `-e`, documented
@@ -1335,16 +1338,18 @@ ps_rows_with_environment() {
 }
 
 pids_with_env_marker() {  # <name> <value>
-  local name=$1 value=$2 proc_root proc_dir pid entry out line
+  local name=$1 value=$2 proc_root proc_dir pid entry out line readable
   case "$name" in ''|*[!A-Z0-9_]*) return 1 ;; esac
   case "$value" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
   proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
   if [ -d "$proc_root" ]; then
+    readable=0
     for proc_dir in "$proc_root"/[0-9]*; do
       [ -d "$proc_dir" ] || continue
       pid=${proc_dir##*/}
       [ "$pid" != "$$" ] || continue
       [ -r "$proc_dir/environ" ] || continue
+      readable=1
       while IFS= read -r -d '' entry; do
         if [ "$entry" = "$name=$value" ]; then
           printf '%s\n' "$pid"
@@ -1352,7 +1357,7 @@ pids_with_env_marker() {  # <name> <value>
         fi
       done < "$proc_dir/environ" 2>/dev/null || true
     done
-    return 0
+    [ "$readable" -eq 0 ] || return 0
   fi
   out=$(ps_rows_with_environment) || return 1
   while IFS= read -r line; do
@@ -2521,6 +2526,9 @@ else
       ;;
     *)
       echo "REFUSED: Hermes process ownership for $ID is missing or inconsistent; preserving the endpoint, worktree, and task records rather than risking an unrelated Hermes session." >&2
+      echo "  --force cannot override ownership proof, because no flag can make an unproven Hermes process safe to signal." >&2
+      echo "  Recover by repairing the task-bound proof so it agrees again: hermes_owner_token= in $META, the single token line in $STATE/$ID.hermes-turnend-token, and the registry file \$HERMES_HOME/fm-turn-end.d/<token> whose id, state, and session_file name $ID and this state directory." >&2
+      echo "  Otherwise let the task's own endpoint close the tree (fm-send.sh $ID /exit) and retry, or identify the survivors yourself by their FM_HERMES_TASK_TOKEN environment entry before clearing them by hand." >&2
       exit 1
       ;;
   esac

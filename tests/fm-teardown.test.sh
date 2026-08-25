@@ -2373,6 +2373,10 @@ test_hermes_inconsistent_owner_marker_refuses_without_signaling() {
     || fail "hermes-owner-marker-refusal: teardown signaled an unproven marker process"
   assert_grep "Hermes process ownership for task-x1 is missing or inconsistent" \
     "$case_dir/stderr" "hermes-owner-marker-refusal: refusal did not name ownership proof"
+  assert_grep "--force cannot override ownership proof" "$case_dir/stderr" \
+    "hermes-owner-marker-refusal: refusal did not say --force cannot bypass it"
+  assert_grep "hermes-turnend-token" "$case_dir/stderr" \
+    "hermes-owner-marker-refusal: refusal named no concrete recovery path"
   assert_present "$case_dir/state/task-x1.meta" \
     "hermes-owner-marker-refusal: refusal erased task metadata"
   pass "inconsistent Hermes ownership proof refuses without signaling the matching process"
@@ -3135,6 +3139,77 @@ EOF
   pass "a live process whose identity cannot be proven refuses teardown instead of being dropped"
 }
 
+test_hermes_marker_scan_falls_through_unreadable_proc() {
+  local case_dir rc token hermes_home registry state_real fake_proc pid_file
+  local pid unrelated_pid survived=0 unrelated_survived=0 i
+  case_dir=$(make_case hermes-unreadable-proc)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  token=fm.abcdefghijkl
+  hermes_home="$case_dir/hermes-home"
+  registry="$hermes_home/fm-turn-end.d/$token"
+  state_real=$(cd "$case_dir/state" && pwd -P)
+  mkdir -p "$hermes_home/fm-turn-end.d"
+  printf '%s\n' "$token" > "$case_dir/state/task-x1.hermes-turnend-token"
+  jq -n --arg id task-x1 --arg state "$state_real" \
+    --arg session_file "$state_real/task-x1.hermes-session" \
+    '{id:$id,state:$state,session_file:$session_file}' > "$registry"
+  printf '%s\n' \
+    'harness=hermes' \
+    "hermes_home=$hermes_home" \
+    "hermes_owner_token=$token" >> "$case_dir/state/task-x1.meta"
+  pid_file="$case_dir/owned.pid"
+
+  # A procfs that carries numeric pid directories but exposes no environ at
+  # all, as a stripped mount or a non-Linux procfs does. It can prove nothing
+  # about ownership, so an empty result from it must not read as "nothing owned".
+  fake_proc="$case_dir/proc-no-environ"
+  mkdir -p "$fake_proc/1" "$fake_proc/1234" "$fake_proc/5678"
+
+  FM_HERMES_TASK_TOKEN="$token" perl -MPOSIX -e '
+    my ($pid_file, $outside) = @ARGV;
+    POSIX::setsid();
+    chdir $outside or die "chdir outside";
+    open my $fh, ">", $pid_file or die "open";
+    print {$fh} "$$\n";
+    close $fh;
+    sleep 300;
+  ' "$pid_file" "$case_dir" &
+  pid=$!
+  disown
+  FM_HERMES_TASK_TOKEN=fm.unrelatedxyz sleep 300 &
+  unrelated_pid=$!
+  disown
+  i=0
+  while [ "$i" -lt 50 ]; do
+    [ -s "$pid_file" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+
+  rc=0
+  FM_PROC_ROOT_OVERRIDE="$fake_proc" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  if kill -0 "$pid" 2>/dev/null; then
+    survived=1
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  if kill -0 "$unrelated_pid" 2>/dev/null; then
+    unrelated_survived=1
+    kill -KILL "$unrelated_pid" 2>/dev/null || true
+  fi
+  wait "$pid" 2>/dev/null || true
+  wait "$unrelated_pid" 2>/dev/null || true
+
+  expect_code 0 "$rc" "hermes-unreadable-proc: teardown should succeed"
+  [ "$survived" -eq 0 ] \
+    || fail "hermes-unreadable-proc: an unreadable procfs reported zero owned processes and the token tree survived"
+  [ "$unrelated_survived" -eq 1 ] \
+    || fail "hermes-unreadable-proc: teardown killed a process carrying a different token"
+  pass "a procfs with no readable environ falls through to the portable environment scan"
+}
+
 test_lsof_absent_reaps_tmux_process_group() {
   local case_dir rc pid path_without_lsof
   case_dir=$(make_case lsof-absent-process-group-reap)
@@ -3531,6 +3606,7 @@ test_hermes_marker_scan_without_proc_reaps_token_tree
 test_hermes_marker_scan_tries_every_environment_ps_form
 test_hermes_defunct_descendant_converges_without_ps_state_column
 test_unprovable_live_identity_refuses_instead_of_dropping
+test_hermes_marker_scan_falls_through_unreadable_proc
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
 test_reused_pid_identity_is_not_force_killed
