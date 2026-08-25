@@ -291,6 +291,47 @@ test_stale_captain_held_live_or_ambiguous_remains_stale() {
   done
   pass "live and ambiguous captain-held endpoints remain on stale tracking"
 }
+test_enriched_stale_captain_held_requires_valid_pause() {
+  local mode dir state fakebin win task backend_window mode_command key
+  for mode in live ambiguous remote; do
+    dir=$(make_supercase "stale-captain-held-enriched-$mode")
+    state="$dir/state"
+    fakebin="$dir/fakebin"
+    task="held-enriched-$mode"
+    if [ "$mode" = remote ]; then
+      win="remote:$task"
+      fm_write_meta "$state/$task.meta" \
+        "window=$win" "remote_host=remote-mac" "remote_backend=herdr" \
+        "remote_target=fm-remote:w1:p1" "harness=codex"
+    else
+      win="sess:fm-$task"
+      backend_window=${win#*:}
+      if [ "$mode" = live ]; then
+        mode_command=pi
+      else
+        mode_command=unrecognized-agent
+      fi
+      fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux" "harness=pi"
+    fi
+    key=$(printf '%s' "$task" | tr ':/.' '___')
+    printf 'captain-held [key=route]: waiting for recovery ownership\n' \
+      > "$state/$task.status"
+    if [ "$mode" = remote ]; then
+      FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=90 \
+        handle_wake "stale: $win (idle 400s, possible wedge, escalation due to threshold)" "$state"
+    else
+      PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$backend_window" \
+        FM_FAKE_TMUX_CURRENT_COMMAND="$mode_command" \
+        FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=90 \
+        handle_wake "stale: $win (idle 400s, possible wedge, escalation due to threshold)" "$state"
+    fi
+    grep -q 'idle 400s, possible wedge' "$state/.subsuper-escalations" \
+      || fail "$mode enriched captain-held stale wake was not surfaced"
+    [ ! -e "$state/.subsuper-paused-$key" ] \
+      || fail "$mode enriched captain-held stale wake created bounded pause tracking"
+  done
+  pass "enriched captain-held stale wakes surface without validated pause proof"
+}
 
 test_stale_captain_held_rechecks_status_after_liveness() {
   local dir state win task status_file out
@@ -2182,6 +2223,7 @@ test_stale_terminal_escalates
 test_stale_paused_classifies_pause
 test_stale_captain_held_classifies_pause_without_wedge_replay
 test_stale_captain_held_live_or_ambiguous_remains_stale
+test_enriched_stale_captain_held_requires_valid_pause
 test_stale_captain_held_rechecks_status_after_liveness
 test_stale_captain_held_remote_remains_ambiguous
 test_housekeeping_remote_stale_marker_rechecks_owner

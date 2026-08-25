@@ -1433,10 +1433,16 @@ handle_wake() {  # <reason> <state>
               decision=$(classify_stale "$arg" "$state")
               case "$stale_detail" in
                 idle\ *s,\ possible\ wedge,\ escalation\ *)
+                  # An enriched stale wake already crossed the wedge threshold.
+                  # Preserve only a validated captain-held pause; declared
+                  # paused status, live/ambiguous endpoints, and remote
+                  # captain-held tasks must remain visible to the supervisor.
                   held_last=$(last_status_line "$state/$(window_to_task "$arg" "$state").status")
-                  if [ "$(status_line_verb "$held_last")" != "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-captain-held}" ]; then
+                  if [ "${decision%%|*}" != pause ] \
+                    || [ "$(status_line_verb "$held_last")" != "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-captain-held}" ]; then
                     decision="escalate|${reason#stale: }"
-                  fi ;;
+                  fi
+                  ;;
               esac ;;
     check:*)  decision=$(classify_check "$reason") ;;
     heartbeat|heartbeat:*) decision=$(classify_heartbeat) ;;
