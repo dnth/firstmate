@@ -25,8 +25,44 @@ WORKER=hermes-live-worker
 SCOUT=hermes-live-scout
 WORKER_TARGET="firstmate:fm-$WORKER"
 
+live_expand_descendants() {  # <seed-pid-list>
+  local seeds=$1 table out
+  [ -n "$seeds" ] || return 0
+  table=$(LC_ALL=C ps -e -o pid=,ppid=,state= 2>/dev/null) \
+    || table=$(LC_ALL=C ps -e -o pid=,ppid= 2>/dev/null) || return 1
+  out=$(printf '%s\n@\n%s\n' "$seeds" "$table" | awk -v self="$$" '
+    BEGIN { seeding = 1 }
+    seeding {
+      if ($0 == "@") { seeding = 0; next }
+      if ($1 ~ /^[0-9]+$/) owned[$1] = 1
+      next
+    }
+    {
+      if (NF < 2 || $1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/) next
+      if (NF >= 3 && $3 ~ /^Z/) { zombie[$1] = 1; next }
+      if ($1 == self) next
+      kids[$2] = kids[$2] " " $1
+    }
+    END {
+      n = 0
+      for (p in owned) queue[n++] = p
+      for (i = 0; i < n; i++) {
+        cnt = split(kids[queue[i]], child, " ")
+        for (j = 1; j <= cnt; j++) {
+          c = child[j]
+          if (c == "" || (c in owned)) continue
+          owned[c] = 1
+          queue[n++] = c
+        }
+      }
+      for (p in owned) if (!(p in zombie)) print p
+    }
+  ') || return 1
+  printf '%s\n' "$out" | grep -E '^[0-9]+$' | sort -un || true
+}
+
 live_owned_pids() {
-  local proc_dir pid line path table seeds result changed ppid ps_pids command
+  local proc_dir pid line path seeds ps_pids command
   seeds=
   if [ -d /proc ]; then
     for proc_dir in /proc/[0-9]*; do
@@ -71,25 +107,9 @@ $pid" ;;
 $(lsof -a -d cwd -Fpn 2>/dev/null || true)
 EOF
   fi
-  result=$(printf '%s\n' "$seeds" | grep -E '^[0-9]+$' | sort -un || true)
-  [ -n "$result" ] || return 0
-  table=$(LC_ALL=C ps -e -o pid=,ppid= 2>/dev/null) || return 1
-  changed=1
-  while [ "$changed" -eq 1 ]; do
-    changed=0
-    while read -r pid ppid; do
-      case "$pid:$ppid" in *[!0-9:]*|:*) continue ;; esac
-      printf '%s\n' "$result" | grep -Fxq "$ppid" || continue
-      if ! printf '%s\n' "$result" | grep -Fxq "$pid"; then
-        result="$result
-$pid"
-        changed=1
-      fi
-    done <<EOF
-$table
-EOF
-  done
-  printf '%s\n' "$result" | grep -E '^[0-9]+$' | sort -un || true
+  seeds=$(printf '%s\n' "$seeds" | grep -E '^[0-9]+$' | sort -un || true)
+  [ -n "$seeds" ] || return 0
+  live_expand_descendants "$seeds"
 }
 
 live_force_reap() {

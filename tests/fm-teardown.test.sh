@@ -554,7 +554,7 @@ run_teardown() {
 make_path_without_lsof() {  # <case-dir>
   local case_dir=$1 path_dir="$1/path-without-lsof" cmd resolved
   mkdir -p "$path_dir"
-  for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id ln \
+  for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id jq ln \
     mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
     resolved=$(command -v "$cmd" 2>/dev/null) || continue
     case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
@@ -2571,6 +2571,148 @@ test_non_hermes_descendant_outside_worktree_is_left_alone() {
   pass "a non-Hermes task never signals descendants whose cwd is outside its own roots"
 }
 
+test_hermes_legacy_state_token_without_meta_falls_back_to_cwd_reap() {
+  local case_dir rc pid unrelated_pid survived=0 unrelated_survived=0
+  case_dir=$(make_case hermes-legacy-state-token)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  # The exact on-disk shape a persistent-TUI task spawned before the owner
+  # token existed leaves behind: the private lifecycle sidecar is present, the
+  # metadata carries no hermes_owner_token line.
+  printf '%s\n' fm.abcdefghijkl > "$case_dir/state/task-x1.hermes-turnend-token"
+  printf '%s\n' \
+    'harness=hermes' \
+    "hermes_home=$case_dir/hermes-home" >> "$case_dir/state/task-x1.meta"
+
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  FM_HERMES_TASK_TOKEN=fm.abcdefghijkl sleep 300 &
+  unrelated_pid=$!
+  disown
+  sleep 0.3
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  if kill -0 "$pid" 2>/dev/null; then
+    survived=1
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  if kill -0 "$unrelated_pid" 2>/dev/null; then
+    unrelated_survived=1
+    kill -KILL "$unrelated_pid" 2>/dev/null || true
+  fi
+  wait "$pid" 2>/dev/null || true
+  wait "$unrelated_pid" 2>/dev/null || true
+
+  expect_code 0 "$rc" "hermes-legacy-state-token: an in-flight pre-token Hermes task must still tear down"
+  [ "$survived" -eq 0 ] \
+    || fail "hermes-legacy-state-token: the worktree-rooted process was not reaped"
+  [ "$unrelated_survived" -eq 1 ] \
+    || fail "hermes-legacy-state-token: teardown signaled a token-bearing process it never proved"
+  assert_grep "no Hermes process-ownership proof is recorded for task-x1" \
+    "$case_dir/stderr" "hermes-legacy-state-token: teardown did not warn about the fallback"
+  pass "a Hermes task with a lifecycle sidecar but no owner-token metadata still tears down"
+}
+
+test_defunct_survivor_does_not_block_teardown() {
+  local case_dir rc supervisor child_file child_pid="" supervisor_survived=0
+  case_dir=$(make_case defunct-survivor-convergence)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  child_file="$case_dir/child.pid"
+
+  # The supervisor lives outside the task roots (never owned) and never reaps,
+  # so the owned child it forked stays visible as a defunct entry after
+  # teardown terminates it.
+  perl -e '
+    my ($file, $worktree) = @ARGV;
+    my $child = fork();
+    die "fork" unless defined $child;
+    if (!$child) {
+      chdir $worktree or die "chdir worktree";
+      exec "sleep", "300" or die "exec";
+    }
+    open my $fh, ">", $file or die "open";
+    print {$fh} "$child\n";
+    close $fh;
+    sleep 300;
+  ' "$child_file" "$case_dir/wt" &
+  supervisor=$!
+  disown
+  sleep 0.4
+  child_pid=$(cat "$child_file" 2>/dev/null || true)
+  [ -n "$child_pid" ] || fail "defunct-survivor-convergence: setup child never started"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  if kill -0 "$supervisor" 2>/dev/null; then
+    supervisor_survived=1
+    kill -KILL "$supervisor" 2>/dev/null || true
+  fi
+  wait "$supervisor" 2>/dev/null || true
+
+  expect_code 0 "$rc" "defunct-survivor-convergence: an unreaped defunct child must not refuse teardown"
+  ! grep -q "remain after 3 reap attempts" "$case_dir/stderr" \
+    || fail "defunct-survivor-convergence: teardown counted a defunct process as a survivor"
+  [ "$supervisor_survived" -eq 1 ] \
+    || fail "defunct-survivor-convergence: teardown signaled the unowned supervisor"
+  pass "a defunct child left by an unowned supervisor never blocks teardown convergence"
+}
+
+test_lsof_absent_hermes_still_reaps_tmux_process_group() {
+  local case_dir rc pid token hermes_home registry state_real path_without_lsof
+  case_dir=$(make_case lsof-absent-hermes-process-group)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  token=fm.abcdefghijkl
+  hermes_home="$case_dir/hermes-home"
+  registry="$hermes_home/fm-turn-end.d/$token"
+  state_real=$(cd "$case_dir/state" && pwd -P)
+  mkdir -p "$hermes_home/fm-turn-end.d"
+  printf '%s\n' "$token" > "$case_dir/state/task-x1.hermes-turnend-token"
+  jq -n --arg id task-x1 --arg state "$state_real" \
+    --arg session_file "$state_real/task-x1.hermes-session" \
+    '{id:$id,state:$state,session_file:$session_file}' > "$registry"
+  printf '%s\n' \
+    'harness=hermes' \
+    "hermes_home=$hermes_home" \
+    "hermes_owner_token=$token" >> "$case_dir/state/task-x1.meta"
+  path_without_lsof=$(make_path_without_lsof "$case_dir")
+  PATH="$path_without_lsof" command -v lsof >/dev/null 2>&1 \
+    && fail "lsof-absent-hermes-process-group: fixture path unexpectedly exposes lsof"
+
+  # A pane sibling that carries no owner token and descends from no
+  # token-bearing root: only the backend process-group fallback can reach it.
+  perl -e 'setpgrp(0, 0); chdir shift or die; exec "sleep", "300"' "$case_dir/wt" &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null \
+    || fail "lsof-absent-hermes-process-group: setup sleeper did not start"
+  cat > "$case_dir/fakebin/tmux" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = display-message ] && [ "\${*: -1}" = '#{pane_pid}' ]; then
+  printf '%s\n' '$pid'
+fi
+exit 0
+EOF
+  chmod +x "$case_dir/fakebin/tmux"
+
+  rc=0
+  FM_TEARDOWN_TEST_PATH="$path_without_lsof" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "lsof-absent-hermes-process-group: teardown should succeed"
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "lsof-absent-hermes-process-group: the pane process group survived a token-proven Hermes teardown"
+  fi
+  pass "a token-proven Hermes task keeps the tmux process-group fallback when lsof is missing"
+}
+
 test_lsof_absent_reaps_tmux_process_group() {
   local case_dir rc pid path_without_lsof
   case_dir=$(make_case lsof-absent-process-group-reap)
@@ -2958,6 +3100,9 @@ test_hermes_orphaned_descendant_is_force_killed
 test_hermes_task_without_owner_token_falls_back_to_cwd_reap
 test_hermes_missing_profile_registry_falls_back_to_cwd_reap
 test_non_hermes_descendant_outside_worktree_is_left_alone
+test_hermes_legacy_state_token_without_meta_falls_back_to_cwd_reap
+test_defunct_survivor_does_not_block_teardown
+test_lsof_absent_hermes_still_reaps_tmux_process_group
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
 test_reused_pid_identity_is_not_force_killed

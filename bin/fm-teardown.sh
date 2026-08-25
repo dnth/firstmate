@@ -128,9 +128,12 @@
 #     The token-bearing roots and their exact process descendants join the cwd
 #     set before TERM/KILL, so process-group-detached MCP children are reaped
 #     without selecting any unmarked personal Hermes or gateway process.
-#     Missing or inconsistent Hermes ownership proof refuses before signaling,
-#     while a task that never recorded a token (or whose profile registry is
-#     gone) keeps the plain cwd scan and backend process-group fallback.
+#     Inconsistent Hermes ownership proof refuses before signaling, while a task
+#     whose metadata records no owner token (every launch before the token
+#     existed) or whose profile registry is gone keeps the plain cwd scan and
+#     backend process-group fallback.
+#     A pid that is already a zombie counts as terminated everywhere ownership
+#     and survivors are accounted, so an unreaped defunct child never refuses.
 #     Only a token-proven Hermes task expands descendants; every other harness
 #     keeps the cwd-rooted selection unchanged. Processes proven owned in a
 #     pass stay tracked by process identity through the KILL escalation and the
@@ -1333,7 +1336,8 @@ EOF
 task_pids_expand_descendants() {  # <seed-pid-list>
   local seeds=$1 table out
   [ -n "$seeds" ] || return 0
-  table=$(LC_ALL=C ps -e -o pid=,ppid= 2>/dev/null) || return 1
+  table=$(LC_ALL=C ps -e -o pid=,ppid=,state= 2>/dev/null) \
+    || table=$(LC_ALL=C ps -e -o pid=,ppid= 2>/dev/null) || return 1
   out=$(printf '%s\n@\n%s\n' "$seeds" "$table" | awk -v self="$$" '
     BEGIN { seeding = 1 }
     seeding {
@@ -1343,6 +1347,7 @@ task_pids_expand_descendants() {  # <seed-pid-list>
     }
     {
       if (NF < 2 || $1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/) next
+      if (NF >= 3 && $3 ~ /^Z/) { zombie[$1] = 1; next }
       if ($1 == self) next
       kids[$2] = kids[$2] " " $1
     }
@@ -1358,25 +1363,29 @@ task_pids_expand_descendants() {  # <seed-pid-list>
           queue[n++] = c
         }
       }
-      for (p in owned) print p
+      for (p in owned) if (!(p in zombie)) print p
     }
   ') || return 1
   printf '%s\n' "$out" | grep -E '^[0-9]+$' | sort -un || true
 }
 
 task_process_identity() {  # <pid>
-  local pid=$1 proc_root stat_line starttime value
+  local pid=$1 proc_root stat_line starttime state value
   local -a stat_fields
   proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
   if [ -r "$proc_root/$pid/stat" ]; then
     stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
     read -r -a stat_fields <<< "${stat_line##*)}"
     [ "${#stat_fields[@]}" -ge 20 ] || return 1
+    case "${stat_fields[0]}" in Z*) return 1 ;; esac
     starttime=${stat_fields[19]}
     case "$starttime" in ''|*[!0-9]*) return 1 ;; esac
     printf 'starttime=%s\n' "$starttime"
     return 0
   fi
+  state=$(LC_ALL=C ps -p "$pid" -o state= 2>/dev/null) || state=
+  state=$(fm_nm_trim "$state")
+  case "$state" in Z*) return 1 ;; esac
   value=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
   value=$(fm_nm_trim "$value")
   [ -n "$value" ] || return 1
@@ -1441,11 +1450,7 @@ verified_hermes_owner_token() {
   harness=$(meta_value "$META" harness)
   [ "$harness" = hermes ] || return 3
   meta_token=$(meta_value "$META" hermes_owner_token)
-  if [ -z "$meta_token" ] \
-     && [ ! -e "$STATE/$ID.hermes-turnend-token" ] \
-     && [ ! -L "$STATE/$ID.hermes-turnend-token" ]; then
-    return 4
-  fi
+  [ -n "$meta_token" ] || return 4
   case "$meta_token" in fm.????????????) ;; *) return 1 ;; esac
   case "$meta_token" in *[!A-Za-z0-9._-]*) return 1 ;; esac
   [ -f "$STATE/$ID.hermes-turnend-token" ] \
@@ -1582,10 +1587,9 @@ reap_task_worktree_processes() {  # <label> <dir>...
   shift
   REAP_TRACKED_PIDS=()
   REAP_TRACKED_IDENTITIES=()
-  if ! command -v lsof >/dev/null 2>&1 \
-     && [ -z "${TASK_HERMES_OWNER_TOKEN:-}" ]; then
+  if ! command -v lsof >/dev/null 2>&1; then
     reap_task_backend_process_group "$label"
-    return 0
+    [ -n "${TASK_HERMES_OWNER_TOKEN:-}" ] || return 0
   fi
   while [ "$pass" -le "$max_passes" ]; do
     if ! task_pids_for_reap "$@"; then
