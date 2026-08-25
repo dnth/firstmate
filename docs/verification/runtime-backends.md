@@ -185,8 +185,11 @@ The Herdr `/exit` path required a bounded process-exit wait because the TUI can 
 
 ### Hermes task-owned process teardown
 
-Hermes Agent v0.20.0 and Herdr 0.7.3 were verified on 2026-08-25 against the shipped ownership selector at head `1cf0e803`.
-Both probes ran from the no-mistakes gate worktree at that exact head, so the results below describe the code as it merges.
+Hermes Agent v0.20.0 and Herdr 0.7.3 were verified on 2026-08-25 against the ownership selector at head `1cf0e803`.
+Both probes ran from the no-mistakes gate worktree at that exact head, and they exercised the Linux `/proc` ownership path.
+Commit `0c864a1` landed after those runs and added one selector branch: a procfs that exposes no readable per-pid `environ` now falls through to the portable `ps` environment scan instead of reporting an empty owned set.
+That branch is unreachable on the Linux probe host, where every same-user sibling process has a readable `environ`, so the runs below describe the same selection this code performs there.
+Both probes are rerun against the final head before the change merges, and this record is finalized from those runs.
 The tmux verification used the live adapter test's private Hermes profile and tmux server, and tore down an active scout whose persistent TUI was still running.
 The Herdr verification used only `fm-herdr-lab.sh` for session lifecycle, with the generated non-default session `fm-lab-fm-hermes-final-1537953-14337`.
 The Herdr probe set the test-only `FM_GATE_REFUSE_BYPASS=1` because the code under test ran from the gate worktree.

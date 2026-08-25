@@ -90,13 +90,20 @@ live_ps_rows_with_environment() {
   return 1
 }
 
+# Mirrors bin/fm-teardown.sh pids_with_env_marker: a procfs that exposes no
+# readable environ at all proves nothing about ownership, so it falls through
+# to the positively controlled ps scan instead of reporting an empty set.
 live_env_marker_pids() {  # <NAME=VALUE>
-  local marker=$1 proc_dir pid entry rows line
-  if [ -d /proc ]; then
-    for proc_dir in /proc/[0-9]*; do
-      [ -r "$proc_dir/environ" ] || continue
+  local marker=$1 proc_root proc_dir pid entry rows line readable
+  proc_root=${FM_LIVE_PROC_ROOT:-/proc}
+  if [ -d "$proc_root" ]; then
+    readable=0
+    for proc_dir in "$proc_root"/[0-9]*; do
+      [ -d "$proc_dir" ] || continue
       pid=${proc_dir##*/}
       [ "$pid" != "$$" ] || continue
+      [ -r "$proc_dir/environ" ] || continue
+      readable=1
       while IFS= read -r -d '' entry; do
         if [ "$entry" = "$marker" ]; then
           printf '%s\n' "$pid"
@@ -104,7 +111,7 @@ live_env_marker_pids() {  # <NAME=VALUE>
         fi
       done < "$proc_dir/environ" 2>/dev/null || true
     done
-    return 0
+    [ "$readable" -eq 0 ] || return 0
   fi
   rows=$(live_ps_rows_with_environment) || return 1
   while IFS= read -r line; do
@@ -278,6 +285,40 @@ live_cleanup() {  # <original-exit-code>
 trap 'live_cleanup $?' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+# The ownership scan is what every zero-survivor assertion below rests on, so
+# prove it cannot report "nothing owned" just because a procfs exposes no
+# environ. A fake proc root with pid directories and no environ must still
+# find a process this run started, through the ps fallback.
+live_selfcheck_marker_scan() {
+  local probe_marker=fm-live-selfcheck-$$ probe_pid fake_proc found
+  fake_proc="$LAB/proc-no-environ"
+  mkdir -p "$fake_proc/1" "$fake_proc/2"
+  env "FM_LIVE_SELFCHECK=$probe_marker" sleep 120 &
+  probe_pid=$!
+  disown
+  sleep 0.3
+  found=$(FM_LIVE_PROC_ROOT="$fake_proc" \
+    live_env_marker_pids "FM_LIVE_SELFCHECK=$probe_marker") || {
+    kill -KILL "$probe_pid" 2>/dev/null || true
+    fail "ownership scan failed closed but reported no error path for an unreadable procfs"
+  }
+  printf '%s\n' "$found" | grep -Fxq "$probe_pid" || {
+    kill -KILL "$probe_pid" 2>/dev/null || true
+    fail "ownership scan reported zero owned processes from a procfs with no readable environ"
+  }
+  found=$(FM_LIVE_PROC_ROOT="$fake_proc" \
+    live_env_marker_pids "FM_LIVE_SELFCHECK=$probe_marker-absent") || true
+  [ -z "$found" ] || {
+    kill -KILL "$probe_pid" 2>/dev/null || true
+    fail "ownership scan matched a marker no process carries: $found"
+  }
+  kill -KILL "$probe_pid" 2>/dev/null || true
+  wait "$probe_pid" 2>/dev/null || true
+  rm -rf "$fake_proc"
+  printf 'output: marker_scan_selfcheck=ok unreadable_procfs_fallthrough=ps\n'
+}
+live_selfcheck_marker_scan
 
 mkdir -m 700 "$PROFILE" "$FM_LIVE_HOME" "$TMUX_DIR"
 mkdir -p "$FM_LIVE_HOME/data/$WORKER" "$FM_LIVE_HOME/data/$SCOUT" \
