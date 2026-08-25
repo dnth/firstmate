@@ -220,6 +220,289 @@ test_stale_paused_classifies_pause() {
   pass "paused reasons with captain phrases remain pause-classified"
 }
 
+# A captain-held transfer is an intentional recovery wait, not a repeatedly
+# stale worker. It keeps the same known-gone endpoint on the bounded pause
+# path while ordinary working and terminal statuses retain their semantics.
+test_stale_captain_held_classifies_pause_without_wedge_replay() {
+  local dir state fakebin win key out
+  dir=$(make_supercase stale-captain-held)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  win="sess:fm-held-w11"
+  key=$(printf '%s' "held-w11" | tr ':/.' '___')
+  printf 'captain-held [key=route]: waiting for recovery ownership\n' > "$state/held-w11.status"
+  fm_write_meta "$state/held-w11.meta" "window=$win" "backend=tmux" "harness=pi"
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW='' classify_stale "$win" "$state")
+  case "$out" in pause\|*) ;; *) fail "captain-held stale did not classify as bounded pause: $out" ;; esac
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW='' handle_wake \
+    "stale: $win (idle 400s, possible wedge, escalation due to threshold)" "$state"
+  [ -e "$state/.subsuper-paused-$key" ] \
+    || fail "captain-held enriched stale did not stay on bounded pause tracking"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "captain-held enriched stale bypassed pause classification"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW='' handle_wake "stale: $win" "$state"
+  [ -e "$state/.subsuper-paused-$key" ] || fail "captain-held stale did not create pause tracking"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "captain-held stale created wedge tracking"
+
+  date +%s > "$state/.subsuper-paused-$key"
+  (
+    fm_backend_capture() { return 1; }
+    PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+      FM_PAUSE_RESURFACE_SECS=0 housekeeping "$state"
+  )
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "known-gone captain-held endpoint replayed an identical wedge escalation"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW='' handle_wake "stale: $win" "$state"
+  [ -e "$state/.subsuper-paused-$key" ] || fail "repeated held stale lost bounded pause tracking"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "repeated held stale replayed wedge tracking"
+  pass "captain-held known-gone stale remains a bounded pause without wedge replay"
+}
+
+test_stale_captain_held_live_or_ambiguous_remains_stale() {
+  local mode dir state fakebin win key out watcher_key mode_command backend_window
+  for mode in live ambiguous; do
+    dir=$(make_supercase "stale-captain-held-$mode")
+    state="$dir/state"; fakebin="$dir/fakebin"
+    win="sess:fm-held-$mode"
+    backend_window=${win#*:}
+    key=$(printf '%s' "held-$mode" | tr ':/.' '___')
+    watcher_key=$(printf '%s' "$win" | tr ':/.' '___')
+    printf 'captain-held [key=route]: waiting for recovery ownership\n' > "$state/held-$mode.status"
+    fm_write_meta "$state/held-$mode.meta" "window=$win" "backend=tmux" "harness=pi"
+    : > "$state/.paused-$watcher_key"
+    if [ "$mode" = live ]; then
+      mode_command=pi
+    else
+      mode_command=unrecognized-agent
+    fi
+    out=$(PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$backend_window" \
+      FM_FAKE_TMUX_CURRENT_COMMAND="$mode_command" classify_stale "$win" "$state")
+    case "$out" in
+      pause\|*) fail "$mode captain-held stale was suppressed despite endpoint liveness: $out" ;;
+      self\|*) ;;
+      *) fail "$mode captain-held stale returned an invalid decision: $out" ;;
+    esac
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$backend_window" \
+      FM_FAKE_TMUX_CURRENT_COMMAND="$mode_command" handle_wake "stale: $win" "$state"
+    [ -e "$state/.subsuper-stale-$key" ] || fail "$mode captain-held stale did not retain stale tracking"
+    [ ! -e "$state/.subsuper-paused-$key" ] || fail "$mode captain-held stale created daemon pause tracking"
+    [ ! -e "$state/.paused-$watcher_key" ] || fail "$mode captain-held stale retained watcher pause tracking"
+  done
+  pass "live and ambiguous captain-held endpoints remain on stale tracking"
+}
+test_enriched_stale_captain_held_requires_valid_pause() {
+  local mode dir state fakebin win task backend_window mode_command key
+  for mode in live ambiguous remote; do
+    dir=$(make_supercase "stale-captain-held-enriched-$mode")
+    state="$dir/state"
+    fakebin="$dir/fakebin"
+    task="held-enriched-$mode"
+    if [ "$mode" = remote ]; then
+      win="remote:$task"
+      fm_write_meta "$state/$task.meta" \
+        "window=$win" "remote_host=remote-mac" "remote_backend=herdr" \
+        "remote_target=fm-remote:w1:p1" "harness=codex"
+    else
+      win="sess:fm-$task"
+      backend_window=${win#*:}
+      if [ "$mode" = live ]; then
+        mode_command=pi
+      else
+        mode_command=unrecognized-agent
+      fi
+      fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux" "harness=pi"
+    fi
+    key=$(printf '%s' "$task" | tr ':/.' '___')
+    printf 'captain-held [key=route]: waiting for recovery ownership\n' \
+      > "$state/$task.status"
+    if [ "$mode" = remote ]; then
+      FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=90 \
+        handle_wake "stale: $win (idle 400s, possible wedge, escalation due to threshold)" "$state"
+    else
+      PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$backend_window" \
+        FM_FAKE_TMUX_CURRENT_COMMAND="$mode_command" \
+        FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=90 \
+        handle_wake "stale: $win (idle 400s, possible wedge, escalation due to threshold)" "$state"
+    fi
+    grep -q 'idle 400s, possible wedge' "$state/.subsuper-escalations" \
+      || fail "$mode enriched captain-held stale wake was not surfaced"
+    [ ! -e "$state/.subsuper-paused-$key" ] \
+      || fail "$mode enriched captain-held stale wake created bounded pause tracking"
+  done
+  pass "enriched captain-held stale wakes surface without validated pause proof"
+}
+
+test_stale_captain_held_rechecks_status_after_liveness() {
+  local dir state win task status_file out
+  dir=$(make_supercase stale-captain-held-status-transition)
+  state="$dir/state"
+  task="held-status-transition-w12"; win="sess:fm-$task"
+  status_file="$state/$task.status"
+  printf 'captain-held [key=route]: waiting for recovery ownership\n' > "$status_file"
+  fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux" "harness=pi"
+  (
+    # shellcheck disable=SC2329 # Runtime override called indirectly by classify_stale.
+    fm_backend_agent_state() {
+      printf 'working: resumed while the liveness probe was in flight\n' > "$status_file"
+      printf 'dead\n'
+    }
+    out=$(FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state")
+    case "$out" in
+      pause\|*) fail "captain-held status transition was classified as pause: $out" ;;
+      self\|*working*) ;;
+      *) fail "captain-held status transition lost the fresh status: $out" ;;
+    esac
+  ) || fail "captain-held status-transition classification failed"
+  pass "captain-held stale classification rechecks status after liveness"
+}
+
+test_stale_captain_held_remote_remains_ambiguous() {
+  local dir state win out
+  dir=$(make_supercase stale-captain-held-remote)
+  state="$dir/state"
+  win="remote:held-remote"
+  printf 'captain-held [key=route]: waiting for recovery ownership\n' > "$state/held-remote.status"
+  fm_write_meta "$state/held-remote.meta" \
+    "window=$win" "remote_host=remote-mac" "remote_backend=herdr" \
+    "remote_target=fm-remote:w1:p1" "harness=codex"
+  (
+    # shellcheck disable=SC2329 # Runtime override called indirectly by classify_stale.
+    fm_backend_agent_state() { printf 'missing'; }
+    out=$(classify_stale "$win" "$state")
+    case "$out" in
+      self\|*) ;;
+      *) fail "remote captain-held stale trusted a local missing verdict: $out" ;;
+    esac
+  ) || fail "remote captain-held stale liveness boundary failed"
+  pass "remote captain-held endpoints remain visible without local liveness proof"
+}
+
+test_housekeeping_remote_stale_marker_rechecks_owner() {
+  local mode result status_line dir state win key capture_attempted probe_calls on_bin remote_status_file
+  for mode in dead missing alive ambiguous unknown working-missing held-working; do
+    dir=$(make_supercase "housekeeping-captain-held-remote-$mode")
+    state="$dir/state"
+    win="remote:held-remote-housekeeping"
+    key=$(printf '%s' "held-remote-housekeeping" | tr ':/.' '___')
+    capture_attempted="$dir/capture-attempted"
+    probe_calls="$dir/probe-calls"
+    on_bin="$dir/fm-on.sh"
+    remote_status_file="$state/held-remote-housekeeping.status"
+    cat > "$on_bin" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_REMOTE_PROBE_CALLS:?}"
+case "${FM_REMOTE_PROBE_RESULT:?}" in
+  dead|missing|alive|ambiguous) printf '%s\n' "$FM_REMOTE_PROBE_RESULT" ;;
+  working-missing) printf 'missing\n' ;;
+  held-working)
+    printf 'working: resumed while the owner probe was in flight\n' > "${FM_REMOTE_STATUS_FILE:?}"
+    printf 'missing\n'
+    ;;
+  unknown) exit 1 ;;
+esac
+SH
+    chmod +x "$on_bin"
+    case "$mode" in
+      working-missing)
+        result=working-missing
+        status_line='working: supervising the remote secondmate'
+        ;;
+      *)
+        result=$mode
+        status_line='captain-held [key=route]: waiting for recovery ownership'
+        ;;
+    esac
+    printf '%s\n' "$status_line" > "$state/held-remote-housekeeping.status"
+    fm_write_meta "$state/held-remote-housekeeping.meta" \
+      "window=$win" "remote_host=remote-mac" "remote_backend=herdr" \
+      "remote_target=fm-remote:w1:p1" "harness=codex"
+    echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+    (
+      fm_backend_agent_state() { printf 'missing'; }
+      fm_backend_capture() { : > "$capture_attempted"; return 1; }
+      FM_STATE_OVERRIDE="$state" FM_ON_BIN="$on_bin" \
+        FM_REMOTE_PROBE_RESULT="$result" FM_REMOTE_PROBE_CALLS="$probe_calls" \
+        FM_REMOTE_STATUS_FILE="$remote_status_file" \
+        FM_STALE_ESCALATE_SECS=240 \
+        FM_REMOTE_STALE_RECHECK_SECS=60 housekeeping "$state"
+      if [ "$mode" = unknown ]; then
+        FM_STATE_OVERRIDE="$state" FM_ON_BIN="$on_bin" \
+          FM_REMOTE_PROBE_RESULT="$result" FM_REMOTE_PROBE_CALLS="$probe_calls" \
+          FM_REMOTE_STATUS_FILE="$remote_status_file" \
+          FM_STALE_ESCALATE_SECS=240 \
+          FM_REMOTE_STALE_RECHECK_SECS=60 housekeeping "$state"
+      fi
+    ) || fail "remote captain-held stale housekeeping failed for $mode result"
+    [ ! -e "$capture_attempted" ] || fail "remote captain-held stale attempted a local capture for $mode result"
+    case "$mode" in
+      dead|missing)
+        [ ! -e "$state/.subsuper-stale-$key" ] || fail "$mode remote owner left stale marker"
+        [ ! -s "$state/.subsuper-escalations" ] || fail "$mode remote owner escalated stale marker"
+        ;;
+      alive|ambiguous|working-missing|held-working)
+        [ ! -e "$state/.subsuper-stale-$key" ] || fail "$mode remote owner left stale marker"
+        if [ "$mode" = working-missing ] || [ "$mode" = held-working ]; then
+          grep -q 'remote stale endpoint gone while not captain-held' "$state/.subsuper-escalations" \
+            || fail "$mode remote owner did not escalate stale marker"
+        else
+          grep -q 'remote stale persisted' "$state/.subsuper-escalations" \
+            || fail "$mode remote owner did not escalate stale marker"
+        fi
+        ;;
+      unknown)
+        [ ! -e "$state/.subsuper-stale-$key" ] || fail "unknown remote owner result retained stale marker after escalation"
+        [ ! -e "$state/.subsuper-remote-recheck-$key" ] || fail "unknown remote owner result retained recheck throttle marker"
+        grep -q 'remote stale owner probe inconclusive' "$state/.subsuper-escalations" \
+          || fail "unknown remote owner result did not escalate bounded visibility"
+        [ "$(wc -l < "$probe_calls")" -eq 1 ] || fail "unknown remote owner result was probed repeatedly"
+        ;;
+    esac
+  done
+  pass "remote stale markers reconcile through owner results"
+}
+
+test_housekeeping_missing_window_clears_remote_recheck_marker() {
+  local dir state fakebin task key
+  dir=$(make_supercase stale-teardown-sidecar)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  task="remote-teardown-w6"
+  key=$(printf '%s' "$task" | tr ':/.' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  date +%s > "$state/.subsuper-remote-recheck-$key"
+  (
+    unset FM_FAKE_TMUX_WINDOW
+    PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+      FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+  ) || fail "missing-window housekeeping failed"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "missing window retained stale marker"
+  [ ! -e "$state/.subsuper-remote-recheck-$key" ] \
+    || fail "missing window retained remote recheck sidecar"
+  pass "missing-window cleanup removes stale markers and remote recheck sidecars"
+}
+
+test_stale_captain_held_herdr_live_or_ambiguous_remains_stale() {
+  local mode dir state win out
+  for mode in live unknown; do
+    dir=$(make_supercase "stale-captain-held-herdr-$mode")
+    state="$dir/state"
+    win="default:pane-held-$mode"
+    printf 'captain-held [key=route]: waiting for recovery ownership\n' > "$state/held-herdr-$mode.status"
+    fm_write_meta "$state/held-herdr-$mode.meta" "window=$win" "backend=herdr" "harness=pi"
+    (
+      fm_backend_source herdr
+      # shellcheck disable=SC2329 # Runtime override called indirectly by classify_stale.
+      fm_backend_herdr_pane_agent_state() { printf '%s' "$FM_FAKE_HERDR_PANE_STATE"; }
+      out=$(FM_FAKE_HERDR_PANE_STATE="$mode" classify_stale "$win" "$state")
+      case "$out" in
+        self\|*) ;;
+        *) fail "Herdr $mode captain-held stale was suppressed: $out" ;;
+      esac
+    ) || fail "Herdr $mode captain-held liveness path failed"
+  done
+  pass "live and ambiguous Herdr captain-held endpoints remain visible"
+}
+
 # handle_wake on a paused stale records a pause marker, drops any pre-existing wedge
 # marker (so a working->paused pane is not still wedge-aged), and does NOT escalate
 # on the wake itself - the recheck is housekeeping's job on the long cadence.
@@ -464,6 +747,56 @@ test_housekeeping_persistent_stale_escalates() {
   [ -s "$state/.subsuper-escalations" ] || fail "persistent stale was not escalated"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "stale marker not cleared after escalation"
   pass "persistent stale escalates after threshold and clears its marker"
+}
+
+test_housekeeping_capture_failure_escalates_stale() {
+  local dir state win task key
+  dir=$(make_supercase stale-capture-failure)
+  state="$dir/state"
+  task="capture-failure-w5"; win="sess:fm-$task"
+  printf 'working: still running\n' > "$state/$task.status"
+  fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux" "harness=pi"
+  key=$(printf '%s' "$task" | tr ':/.' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  (
+    # shellcheck disable=SC2329 # Runtime override called indirectly by housekeeping.
+    fm_backend_capture() { return 1; }
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  ) || fail "capture-failure housekeeping failed"
+  grep -q 'endpoint unreadable' "$state/.subsuper-escalations" \
+    || fail "capture failure did not escalate the stale endpoint"
+  [ ! -e "$state/.subsuper-stale-$key" ] \
+    || fail "capture failure retained ordinary stale tracking after escalation"
+  pass "capture failure escalates stale visibility instead of clearing it"
+}
+
+test_housekeeping_local_liveness_rechecks_status() {
+  local dir state win task key status_file
+  dir=$(make_supercase stale-status-transition)
+  state="$dir/state"
+  task="status-transition-w7"; win="sess:fm-$task"
+  status_file="$state/$task.status"
+  printf 'captain-held [key=route]: waiting for recovery ownership\n' > "$status_file"
+  fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux" "harness=pi"
+  key=$(printf '%s' "$task" | tr ':/.' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  (
+    # shellcheck disable=SC2329 # Runtime override called indirectly by housekeeping.
+    fm_backend_agent_state() { printf 'alive'; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by housekeeping.
+    fm_backend_capture() {
+      printf 'idle\n'
+      printf 'working: resumed while the local probe was in flight\n' > "$status_file"
+    }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by housekeeping.
+    fm_busy_classify() { printf 'busy'; }
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  ) || fail "local status-transition housekeeping failed"
+  [ -e "$state/.subsuper-stale-$key" ] \
+    || fail "local liveness probe cleared a stale marker after a status transition"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "local status transition escalated before the fresh status path ran"
+  pass "local liveness rechecks status before clearing stale visibility"
 }
 
 test_housekeeping_resumed_stale_cleared() {
@@ -1888,6 +2221,14 @@ test_stale_transient_self_records_marker
 test_stale_diagnostic_wedge_survives_busy_housekeeping
 test_stale_terminal_escalates
 test_stale_paused_classifies_pause
+test_stale_captain_held_classifies_pause_without_wedge_replay
+test_stale_captain_held_live_or_ambiguous_remains_stale
+test_enriched_stale_captain_held_requires_valid_pause
+test_stale_captain_held_rechecks_status_after_liveness
+test_stale_captain_held_remote_remains_ambiguous
+test_housekeeping_remote_stale_marker_rechecks_owner
+test_housekeeping_missing_window_clears_remote_recheck_marker
+test_stale_captain_held_herdr_live_or_ambiguous_remains_stale
 test_handle_wake_paused_records_pause_marker
 test_handle_wake_paused_signal_records_pause_marker
 test_handle_wake_terminal_signal_clears_pause_tracking
@@ -1895,6 +2236,8 @@ test_housekeeping_migrates_watcher_pause_marker
 test_housekeeping_migrates_watcher_unpaused_marker_to_clear
 test_housekeeping_seeds_pause_marker_from_status
 test_housekeeping_persistent_stale_escalates
+test_housekeeping_capture_failure_escalates_stale
+test_housekeeping_local_liveness_rechecks_status
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
 test_housekeeping_pause_default_is_2700_and_override_wins

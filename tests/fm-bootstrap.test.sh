@@ -588,9 +588,20 @@ ROWS
 }
 
 test_session_provider_backends_gate_own_cli_not_tmux() {
-  local backend cli case_dir fakebin out missing
+  local backend cli case_dir fakebin out missing no_session_provider_env
   # With the backend's OWN session CLI absent (and tmux also absent), bootstrap
   # must fail closed on the genuine dep and never substitute a false tmux demand.
+  no_session_provider_env="$TMP_ROOT/no-session-provider.bash"
+  cat > "$no_session_provider_env" <<'SH'
+command() {
+  if [ "${1:-}" = -v ]; then
+    case "${2:-}" in
+      herdr|zellij|cmux) return 1 ;;
+    esac
+  fi
+  builtin command "$@"
+}
+SH
   while IFS='^' read -r backend cli; do
     [ -n "$backend" ] || continue
     case_dir="$TMP_ROOT/$backend-missing-cli"
@@ -599,7 +610,8 @@ test_session_provider_backends_gate_own_cli_not_tmux() {
     printf '%s\n' "$backend" > "$case_dir/home/config/backend"
     # Toolchain has jq + treehouse but NOT the session CLI and NOT tmux.
     fakebin=$(make_fake_toolchain_no_tmux "$case_dir")
-    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    out=$(BASH_ENV="$no_session_provider_env" PATH="$fakebin:$BASE_PATH" \
+      FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
     if [ "$backend" = herdr ]; then
       missing="MISSING_MANUAL: herdr (instructions: https://herdr.dev)"
