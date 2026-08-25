@@ -61,6 +61,59 @@ live_expand_descendants() {  # <seed-pid-list>
   printf '%s\n' "$out" | grep -E '^[0-9]+$' | sort -un || true
 }
 
+live_task_pids() {  # <owner-token> <worktree>
+  local token=$1 worktree=$2 seeds proc_dir pid entry line path ps_pids cmdline
+  seeds=
+  if [ -d /proc ]; then
+    for proc_dir in /proc/[0-9]*; do
+      [ -r "$proc_dir/environ" ] || continue
+      pid=${proc_dir##*/}
+      [ "$pid" != "$$" ] || continue
+      while IFS= read -r -d '' entry; do
+        if [ "$entry" = "FM_HERMES_TASK_TOKEN=$token" ]; then
+          seeds="$seeds
+$pid"
+          break
+        fi
+      done < "$proc_dir/environ" 2>/dev/null || true
+    done
+  else
+    ps_pids=$(LC_ALL=C ps -e -o pid= 2>/dev/null) || return 1
+    while IFS= read -r pid; do
+      pid=$(printf '%s' "$pid" | tr -d '[:space:]')
+      case "$pid" in ''|*[!0-9]*) continue ;; esac
+      [ "$pid" != "$$" ] || continue
+      cmdline=$(LC_ALL=C ps eww -p "$pid" -o command= 2>/dev/null) || continue
+      case " $cmdline " in
+        *" FM_HERMES_TASK_TOKEN=$token "*) seeds="$seeds
+$pid" ;;
+      esac
+    done <<EOF
+$ps_pids
+EOF
+  fi
+  if [ -n "$worktree" ] && command -v lsof >/dev/null 2>&1; then
+    pid=
+    while IFS= read -r line; do
+      case "$line" in
+        p*) pid=${line#p} ;;
+        n*)
+          path=${line#n}
+          case "$path" in
+            "$worktree"|"$worktree"/*) seeds="$seeds
+$pid" ;;
+          esac
+          ;;
+      esac
+    done <<EOF
+$(lsof -a -d cwd -Fpn 2>/dev/null || true)
+EOF
+  fi
+  seeds=$(printf '%s\n' "$seeds" | grep -E '^[0-9]+$' | sort -un || true)
+  [ -n "$seeds" ] || return 0
+  live_expand_descendants "$seeds"
+}
+
 live_owned_pids() {
   local proc_dir pid line path seeds ps_pids command
   seeds=
@@ -329,9 +382,21 @@ wait_file "$FM_LIVE_HOME/state/$SCOUT.turn-ended" || fail "Hermes scout TUI turn
 SCOUT_TARGET=$(sed -n 's/^window=//p' "$FM_LIVE_HOME/state/$SCOUT.meta")
 wait_capture "$SCOUT_TARGET" HERMES-TUI-SCOUT-OK || fail "Hermes scout TUI response missing"
 printf 'output: scout_persistent=yes turn_end=touched\n'
-run_tmux_env "$ROOT/bin/fm-send.sh" "$SCOUT" /exit
+SCOUT_TOKEN=$(sed -n 's/^hermes_owner_token=//p' "$FM_LIVE_HOME/state/$SCOUT.meta")
+SCOUT_WT=$(sed -n 's/^worktree=//p' "$FM_LIVE_HOME/state/$SCOUT.meta")
+[ -n "$SCOUT_TOKEN" ] || fail "Hermes scout recorded no owner token"
+[ -n "$SCOUT_WT" ] || fail "Hermes scout recorded no worktree"
+SCOUT_TREE=$(live_task_pids "$SCOUT_TOKEN" "$SCOUT_WT")
+[ -n "$SCOUT_TREE" ] \
+  || fail "Hermes scout owned no live process before teardown; the active-tree case would prove nothing"
 printf 'scout report\n' > "$FM_LIVE_HOME/data/$SCOUT/report.md"
 FM_HOME="$FM_LIVE_HOME" "$ROOT/bin/fm-decision-hold.sh" complete "$SCOUT" --none >/dev/null
+printf 'command: fm-teardown %s (persistent TUI still running, no /exit)\n' "$SCOUT"
 run_tmux_env "$ROOT/bin/fm-teardown.sh" "$SCOUT" >/dev/null
+SCOUT_SURVIVORS=$(live_task_pids "$SCOUT_TOKEN" "$SCOUT_WT")
+[ -z "$SCOUT_SURVIVORS" ] \
+  || fail "fm-teardown left scout-owned process(es) alive: $(printf '%s' "$SCOUT_SURVIVORS" | tr '\n' ' ')"
+printf 'output: active_teardown=yes owned_before=%s survivors=0\n' \
+  "$(printf '%s' "$SCOUT_TREE" | tr '\n' ' ' | sed 's/ $//')"
 
 printf 'ok - %s persistent Hermes TUI: crew/scout launch, composer steer, native skill turn, busy->idle, turn-end, interrupt, exit, and exact-session resume\n' "$HERMES_VERSION"

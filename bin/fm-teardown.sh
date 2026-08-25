@@ -130,8 +130,9 @@
 #     without selecting any unmarked personal Hermes or gateway process.
 #     Inconsistent Hermes ownership proof refuses before signaling, while a task
 #     whose metadata records no owner token (every launch before the token
-#     existed) or whose profile registry is gone keeps the plain cwd scan and
-#     backend process-group fallback.
+#     existed), whose profile registry is gone, or whose registry cannot be
+#     read because jq is unavailable keeps the plain cwd scan and backend
+#     process-group fallback.
 #     A pid that is already a zombie counts as terminated everywhere ownership
 #     and survivors are accounted, so an unreaped defunct child never refuses.
 #     Only a token-proven Hermes task expands descendants; every other harness
@@ -1298,7 +1299,7 @@ EOF
 # cwd scan and descendant closure cover gateway children whose sanitized MCP
 # environments no longer carry it.
 pids_with_env_marker() {  # <name> <value>
-  local name=$1 value=$2 proc_root proc_dir pid ps_pids out line
+  local name=$1 value=$2 proc_root proc_dir pid entry ps_pids out line
   case "$name" in ''|*[!A-Z0-9_]*) return 1 ;; esac
   case "$value" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
   proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
@@ -1308,10 +1309,12 @@ pids_with_env_marker() {  # <name> <value>
       pid=${proc_dir##*/}
       [ "$pid" != "$$" ] || continue
       [ -r "$proc_dir/environ" ] || continue
-      if tr '\0' '\n' < "$proc_dir/environ" 2>/dev/null \
-          | grep -Fxq "$name=$value"; then
-        printf '%s\n' "$pid"
-      fi
+      while IFS= read -r -d '' entry; do
+        if [ "$entry" = "$name=$value" ]; then
+          printf '%s\n' "$pid"
+          break
+        fi
+      done < "$proc_dir/environ" 2>/dev/null || true
     done
     return 0
   fi
@@ -1466,6 +1469,7 @@ verified_hermes_owner_token() {
     return 4
   fi
   [ -f "$registry" ] && [ ! -L "$registry" ] || return 1
+  command -v jq >/dev/null 2>&1 || return 4
   state_real=$(canonical_existing_dir "$STATE") || return 1
   session_file="$state_real/$ID.hermes-session"
   jq -e --arg id "$ID" --arg state "$state_real" --arg session_file "$session_file" \
@@ -2439,7 +2443,7 @@ else
   case "$hermes_owner_rc" in
     3) ;;
     4)
-      echo "warning: no Hermes process-ownership proof is recorded for $ID (pre-token task or removed profile registry); falling back to the bounded worktree cwd and backend process-group reap." >&2
+      echo "warning: Hermes process-ownership proof for $ID is unavailable (no owner token recorded, missing profile registry, or no jq to verify it); falling back to the bounded worktree cwd and backend process-group reap." >&2
       ;;
     *)
       echo "REFUSED: Hermes process ownership for $ID is missing or inconsistent; preserving the endpoint, worktree, and task records rather than risking an unrelated Hermes session." >&2

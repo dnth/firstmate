@@ -549,17 +549,32 @@ run_teardown() {
     "$TEARDOWN" task-x1 "$@"
 }
 
-# Build the teardown test's executable search path without lsof, regardless of
-# whether the host installs it in /usr/bin, /usr/sbin, or a package-manager bin.
-make_path_without_lsof() {  # <case-dir>
-  local case_dir=$1 path_dir="$1/path-without-lsof" cmd resolved
+# Build a teardown test search path that deliberately omits chosen tools,
+# regardless of whether the host installs them in /usr/bin, /usr/sbin, or a
+# package-manager bin.
+FM_TEST_PATH_COMMANDS=(awk bash basename cat chmod cp cut date dirname env find git grep head
+  hostname id jq ln lsof mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat
+  tail timeout tr uname wc xargs)
+
+make_path_excluding() {  # <case-dir> <fixture-name> <excluded-cmd>...
+  local case_dir=$1 name=$2
+  shift 2
+  local path_dir="$case_dir/path-$name" cmd resolved excluded skip
   mkdir -p "$path_dir"
-  for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id jq ln \
-    mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
+  for cmd in "${FM_TEST_PATH_COMMANDS[@]}"; do
+    skip=0
+    for excluded in "$@"; do
+      [ "$cmd" != "$excluded" ] || skip=1
+    done
+    [ "$skip" -eq 0 ] || continue
     resolved=$(command -v "$cmd" 2>/dev/null) || continue
     case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
   done
   printf '%s\n' "$path_dir"
+}
+
+make_path_without_lsof() {  # <case-dir>
+  make_path_excluding "$1" without-lsof lsof
 }
 
 test_local_only_fork_remote_allows() {
@@ -2468,7 +2483,7 @@ test_hermes_task_without_owner_token_falls_back_to_cwd_reap() {
     || fail "hermes-legacy-fallback: the worktree-rooted process was not reaped"
   [ "$unrelated_survived" -eq 1 ] \
     || fail "hermes-legacy-fallback: teardown signaled a token-bearing process it never proved"
-  assert_grep "no Hermes process-ownership proof is recorded for task-x1" \
+  assert_grep "Hermes process-ownership proof for task-x1 is unavailable" \
     "$case_dir/stderr" "hermes-legacy-fallback: teardown did not warn about the fallback"
   pass "a Hermes task with no recorded owner token falls back to the worktree cwd reap"
 }
@@ -2513,7 +2528,7 @@ test_hermes_missing_profile_registry_falls_back_to_cwd_reap() {
     || fail "hermes-registry-absent-fallback: the worktree-rooted process was not reaped"
   [ "$unrelated_survived" -eq 1 ] \
     || fail "hermes-registry-absent-fallback: teardown signaled a token whose registry proof is gone"
-  assert_grep "no Hermes process-ownership proof is recorded for task-x1" \
+  assert_grep "Hermes process-ownership proof for task-x1 is unavailable" \
     "$case_dir/stderr" "hermes-registry-absent-fallback: teardown did not warn about the fallback"
   pass "a Hermes task whose profile registry is gone falls back to the worktree cwd reap"
 }
@@ -2611,7 +2626,7 @@ test_hermes_legacy_state_token_without_meta_falls_back_to_cwd_reap() {
     || fail "hermes-legacy-state-token: the worktree-rooted process was not reaped"
   [ "$unrelated_survived" -eq 1 ] \
     || fail "hermes-legacy-state-token: teardown signaled a token-bearing process it never proved"
-  assert_grep "no Hermes process-ownership proof is recorded for task-x1" \
+  assert_grep "Hermes process-ownership proof for task-x1 is unavailable" \
     "$case_dir/stderr" "hermes-legacy-state-token: teardown did not warn about the fallback"
   pass "a Hermes task with a lifecycle sidecar but no owner-token metadata still tears down"
 }
@@ -2711,6 +2726,62 @@ EOF
     fail "lsof-absent-hermes-process-group: the pane process group survived a token-proven Hermes teardown"
   fi
   pass "a token-proven Hermes task keeps the tmux process-group fallback when lsof is missing"
+}
+
+test_hermes_without_jq_falls_back_instead_of_refusing() {
+  local case_dir rc token hermes_home registry state_real path_without_jq
+  local pid unrelated_pid survived=0 unrelated_survived=0
+  case_dir=$(make_case hermes-no-jq-fallback)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  token=fm.abcdefghijkl
+  hermes_home="$case_dir/hermes-home"
+  registry="$hermes_home/fm-turn-end.d/$token"
+  state_real=$(cd "$case_dir/state" && pwd -P)
+  mkdir -p "$hermes_home/fm-turn-end.d"
+  printf '%s\n' "$token" > "$case_dir/state/task-x1.hermes-turnend-token"
+  jq -n --arg id task-x1 --arg state "$state_real" \
+    --arg session_file "$state_real/task-x1.hermes-session" \
+    '{id:$id,state:$state,session_file:$session_file}' > "$registry"
+  printf '%s\n' \
+    'harness=hermes' \
+    "hermes_home=$hermes_home" \
+    "hermes_owner_token=$token" >> "$case_dir/state/task-x1.meta"
+  path_without_jq=$(make_path_excluding "$case_dir" without-jq jq)
+  PATH="$path_without_jq" command -v jq >/dev/null 2>&1 \
+    && fail "hermes-no-jq-fallback: fixture path unexpectedly exposes jq"
+
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  FM_HERMES_TASK_TOKEN="$token" sleep 300 &
+  unrelated_pid=$!
+  disown
+  sleep 0.3
+
+  rc=0
+  FM_TEARDOWN_TEST_PATH="$path_without_jq" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  if kill -0 "$pid" 2>/dev/null; then
+    survived=1
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  if kill -0 "$unrelated_pid" 2>/dev/null; then
+    unrelated_survived=1
+    kill -KILL "$unrelated_pid" 2>/dev/null || true
+  fi
+  wait "$pid" 2>/dev/null || true
+  wait "$unrelated_pid" 2>/dev/null || true
+
+  expect_code 0 "$rc" "hermes-no-jq-fallback: an unverifiable registry must not refuse teardown"
+  [ "$survived" -eq 0 ] \
+    || fail "hermes-no-jq-fallback: the worktree-rooted process was not reaped"
+  [ "$unrelated_survived" -eq 1 ] \
+    || fail "hermes-no-jq-fallback: teardown signaled a token it could not prove"
+  assert_grep "Hermes process-ownership proof for task-x1 is unavailable" \
+    "$case_dir/stderr" "hermes-no-jq-fallback: teardown did not report unavailable ownership proof"
+  pass "a Hermes task teardown falls back rather than refusing when jq cannot verify the registry"
 }
 
 test_lsof_absent_reaps_tmux_process_group() {
@@ -3103,6 +3174,7 @@ test_non_hermes_descendant_outside_worktree_is_left_alone
 test_hermes_legacy_state_token_without_meta_falls_back_to_cwd_reap
 test_defunct_survivor_does_not_block_teardown
 test_lsof_absent_hermes_still_reaps_tmux_process_group
+test_hermes_without_jq_falls_back_instead_of_refusing
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
 test_reused_pid_identity_is_not_force_killed
