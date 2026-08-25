@@ -5,12 +5,12 @@
 # durable wake after an actionable close, acknowledges only after routing, and
 # either SELF-HANDLES the routine majority in bash (no firstmate turn) or
 # ESCALATES a batched, distilled digest to the supervisor pane on
-# captain-relevant events plus bounded declared-pause rechecks. This is the
-# token-efficient replacement for the prior always-inject daemon: routine
-# signal/stale/heartbeat wakes cost zero firstmate context; only done/
-# needs-decision/blocked/failed/persistent-wedge/check-output events and a
-# declared-pause recheck reach the LLM, and even then as one pre-read digest per
-# batch window.
+# captain-relevant events plus bounded declared-pause and remote stale-owner
+# rechecks. This is the token-efficient replacement for the prior always-inject
+# daemon: routine signal/stale/heartbeat wakes cost zero firstmate context;
+# only done/needs-decision/blocked/failed/persistent-wedge/check-output events,
+# declared-pause rechecks, and unresolved remote stale-owner results reach the
+# LLM, and even then as one pre-read digest per batch window.
 #
 # PRESENCE-GATING (the /afk contract). The daemon is the away-mode engine: it
 # injects ONLY when the durable away-mode flag state/.afk is present. Invoking
@@ -44,13 +44,16 @@
 #     episode durable for retry.
 #   - Fail-safe-to-escalate: any wake the classifier cannot confidently mark
 #     routine is escalated.
-#   - Bounded wedge latency: a stale pane without a declared external wait is
-#     escalated only after it has been idle for STALE_ESCALATE_SECS
+#   - Bounded wedge latency: an ordinary stale pane without a declared external
+#     wait is escalated only after it has been idle for STALE_ESCALATE_SECS
 #     (configurable), rechecked once. A wedged crewmate is therefore detected
-#     within STALE_ESCALATE_SECS + a tick, never lost. A declared pause instead
-#     gets its own longer PAUSE_RESURFACE_SECS recheck, never a wedge escalation.
-#     Crewmates are autonomous, so a delayed stale response does not stall a
-#     healthy crewmate's own progress.
+#     within STALE_ESCALATE_SECS + a tick, never lost. A declared pause or a
+#     captain-held recovery whose endpoint is proven dead or missing instead
+#     gets its own longer PAUSE_RESURFACE_SECS recheck, never a wedge
+#     escalation. Live or ambiguous recovery stays visible, and remote stale
+#     endpoints are checked through their owner; inconclusive owner results are
+#     escalated rather than silently deferred. Crewmates are autonomous, so a
+#     delayed stale response does not stall a healthy crewmate's own progress.
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
 #     undelivered past FM_MAX_DEFER_SECS, the daemon retries a normal flush and
 #     writes state/.subsuper-inject-wedged and attempts a configurable active

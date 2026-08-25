@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # fm-afk-launch.sh - the single owner of the away-mode daemon TERMINAL lifecycle:
 # launch it in a NON-VISIBLE tracked terminal per backend, record its exact id,
-# tear it down by that exact id, and reconcile a leaked one after a crash.
+# wait for backend readiness before submission, tear it down by that exact id,
+# and reconcile a leaked one after a crash.
 #
-# Why this exists (docs/herdr-backend.md "Away-mode daemon terminal launch"):
+# Why this exists (docs/herdr-backend.md "Away-mode supervisor support"):
 # bin/fm-afk-start.sh execs the supervise daemon in the FOREGROUND of whatever
 # terminal it is already in. Harnesses with a native in-pane tracked-background
 # tool (claude, grok) run it there directly and it is fine. A harness with NO
@@ -24,10 +25,11 @@
 # Usage:
 #   fm-afk-launch.sh start     Capture the captain pane, then (unless the daemon
 #                              is already running) launch the daemon in a fresh
-#                              non-visible terminal for the detected backend and
-#                              record it. Idempotent: an already-running daemon
-#                              just refreshes state/.afk; a recorded-but-dead
-#                              terminal is reconciled (closed by id) first.
+#                              non-visible terminal for the detected backend,
+#                              wait for its readiness, and record it. Idempotent:
+#                              an already-running daemon just refreshes state/.afk;
+#                              a recorded-but-dead terminal is reconciled (closed
+#                              by id) first.
 #   fm-afk-launch.sh start-native
 #                              Prepare lifecycle state for a harness-native
 #                              background job and record that no terminal exists.

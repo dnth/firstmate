@@ -2,7 +2,7 @@
 name: afk
 description: >-
   Enter away-mode supervision when the captain invokes /afk, says they are going afk, `state/.afk` exists, an incoming message starts with `FM_INJECT_MARK`, or any `state/.subsuper-*` marker is involved.
-  It sets a durable away-mode flag so the sub-supervisor daemon can self-handle routine wakes and escalate captain-relevant events plus bounded declared-external-wait or unresolved remote captain-held recovery rechecks as batched digests during walk-away stretches, then exits automatically when any real unmarked message returns firstmate to full per-wake responsiveness.
+  It sets a durable away-mode flag so the sub-supervisor daemon can self-handle routine wakes and escalate captain-relevant events plus bounded declared-external-wait or remote stale-owner rechecks as batched digests during walk-away stretches, then exits automatically when any real unmarked message returns firstmate to full per-wake responsiveness.
 user-invocable: true
 metadata:
   internal: true
@@ -155,8 +155,10 @@ Classify each wake this way:
 - `signal` or `stale` for a declared `paused:` external wait -> self-handle and track the pause rather than a wedge.
   If it remains declared and idle past `FM_PAUSE_RESURFACE_SECS`, housekeeping sends one awaiting-external recheck and resets the pause window; [`docs/configuration.md`](../../../docs/configuration.md) owns the shared default and override.
 - A `stale` `captain-held` recovery status is pause-like only after a local backend liveness probe proves the endpoint dead or missing.
-  Live or ambiguous local endpoints remain stale and visible; remote endpoints never use local absence as proof and are rechecked through their owner.
-  For remote recovery, a confirmed dead or missing endpoint suppresses only a still-`captain-held` status; a declared `paused:` wait follows its existing long-cadence pause path, while other live, ambiguous, changed, or inconclusive recovery remains visible or escalates.
+  Live or ambiguous local endpoints remain stale and visible.
+  Every stale remote endpoint is rechecked through its owner rather than trusting local absence.
+  A confirmed dead or missing remote endpoint suppresses only a still-`captain-held` status; a non-held stale worker remains visible or escalates.
+  A declared `paused:` wait follows its existing long-cadence pause path, while other live, ambiguous, changed, or inconclusive recovery remains visible or escalates.
 - `check` -> always escalate. Check scripts print only when firstmate should wake.
 - `stale` with a terminal status or bare legacy captain-relevant line -> escalate.
   Nonterminal progress remains transient even when its prose contains a legacy free-text token or its seen-status marker already matches, so record a marker and self-handle.
