@@ -1298,6 +1298,30 @@ EOF
 # even though its cwd is Hermes' installation directory, while the ordinary
 # cwd scan and descendant closure cover gateway children whose sanitized MCP
 # environments no longer carry it.
+# One bounded listing of every process with its environment, in the two forms
+# that carry it: the BSD stack (`axeww`, procps and macOS) and the macOS SysV
+# spelling (`-A -E -ww`). Hyphenated -e selects processes, it does not print
+# the environment, so this proves the environment really is present by looking
+# for this shell's own exported PATH in its own row and fails closed otherwise.
+ps_rows_with_environment() {
+  local out row pid
+  out=$(LC_ALL=C ps axeww -o pid=,command= 2>/dev/null) \
+    || out=$(LC_ALL=C ps -A -E -ww -o pid=,command= 2>/dev/null) \
+    || return 1
+  [ -n "$out" ] || return 1
+  while IFS= read -r row; do
+    pid=${row#"${row%%[![:space:]]*}"}
+    pid=${pid%%[[:space:]]*}
+    [ "$pid" = "$$" ] || continue
+    case " $row " in
+      *" PATH="*) printf '%s\n' "$out"; return 0 ;;
+    esac
+  done <<EOF
+$out
+EOF
+  return 1
+}
+
 pids_with_env_marker() {  # <name> <value>
   local name=$1 value=$2 proc_root proc_dir pid entry out line
   case "$name" in ''|*[!A-Z0-9_]*) return 1 ;; esac
@@ -1318,7 +1342,7 @@ pids_with_env_marker() {  # <name> <value>
     done
     return 0
   fi
-  out=$(LC_ALL=C ps -Aeww -o pid=,command= 2>/dev/null) || return 1
+  out=$(ps_rows_with_environment) || return 1
   while IFS= read -r line; do
     case " $line " in
       *" $name=$value "*) ;;

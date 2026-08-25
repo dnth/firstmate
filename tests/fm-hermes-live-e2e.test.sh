@@ -61,6 +61,25 @@ live_expand_descendants() {  # <seed-pid-list>
   printf '%s\n' "$out" | grep -E '^[0-9]+$' | sort -un || true
 }
 
+live_ps_rows_with_environment() {
+  local out row pid
+  out=$(LC_ALL=C ps axeww -o pid=,command= 2>/dev/null) \
+    || out=$(LC_ALL=C ps -A -E -ww -o pid=,command= 2>/dev/null) \
+    || return 1
+  [ -n "$out" ] || return 1
+  while IFS= read -r row; do
+    pid=${row#"${row%%[![:space:]]*}"}
+    pid=${pid%%[[:space:]]*}
+    [ "$pid" = "$$" ] || continue
+    case " $row " in
+      *" PATH="*) printf '%s\n' "$out"; return 0 ;;
+    esac
+  done <<EOF
+$out
+EOF
+  return 1
+}
+
 live_env_marker_pids() {  # <NAME=VALUE>
   local marker=$1 proc_dir pid entry rows line
   if [ -d /proc ]; then
@@ -77,7 +96,7 @@ live_env_marker_pids() {  # <NAME=VALUE>
     done
     return 0
   fi
-  rows=$(LC_ALL=C ps -Aeww -o pid=,command= 2>/dev/null) || return 1
+  rows=$(live_ps_rows_with_environment) || return 1
   while IFS= read -r line; do
     case " $line " in
       *" $marker "*) ;;
@@ -115,14 +134,17 @@ $(lsof -a -d cwd -Fpn 2>/dev/null || true)
 EOF
 }
 
+# The same selector bin/fm-teardown.sh task_pids_for_reap implements: the
+# descendant closure starts at the exact task-token roots only, and that
+# closure is unioned with the flat set of processes whose cwd is the task
+# worktree.
 live_task_pids() {  # <owner-token> <worktree>
-  local token=$1 worktree=$2 marker_pids cwd_pids seeds
+  local token=$1 worktree=$2 marker_pids cwd_pids expanded
   marker_pids=$(live_env_marker_pids "FM_HERMES_TASK_TOKEN=$token") || return 1
   cwd_pids=$(live_cwd_pids "$worktree") || return 1
-  seeds=$(printf '%s\n%s\n' "$marker_pids" "$cwd_pids" \
-    | grep -E '^[0-9]+$' | sort -un || true)
-  [ -n "$seeds" ] || return 0
-  live_expand_descendants "$seeds"
+  expanded=$(live_expand_descendants "$marker_pids") || return 1
+  printf '%s\n%s\n' "$cwd_pids" "$expanded" \
+    | grep -E '^[0-9]+$' | sort -un || true
 }
 
 live_owned_pids() {
