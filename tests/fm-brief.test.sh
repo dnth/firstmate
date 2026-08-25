@@ -207,6 +207,10 @@ test_ship_modes_generate_clean_briefs() {
     brief="$home/data/$id/brief.md"
     assert_present "$brief" "$id: brief was not scaffolded"
     assert_grep "# Definition of done" "$brief" "$id: brief missing Definition of done section"
+    assert_grep "# Acceptance criteria" "$brief" "$id: ship brief missing stable acceptance criteria section"
+    assert_grep "- AC1: {ACCEPTANCE CRITERION}" "$brief" "$id: ship brief missing the AC1 scaffold"
+    assert_present "$home/data/$id/evidence.jsonl" "$id: ship evidence ledger was not created"
+    [ ! -s "$home/data/$id/evidence.jsonl" ] || fail "$id: new evidence ledger was not empty"
     grep -qx "Delivery contract: mode=$mode" "$brief" \
       || fail "$id: brief did not record its machine-readable delivery contract line"
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
@@ -256,8 +260,8 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
-    "explicit no-mistakes brief did not render the pipeline definition of done"
+  assert_grep "Firstmate will then classify validation risk" "$brief" \
+    "explicit no-mistakes brief did not render risk-based validation"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a6 never-registered --mode local-only >/dev/null 2>&1 \
@@ -699,6 +703,8 @@ test_scout_and_secondmate_scaffold() {
   assert_present "$brief" "scout brief was not scaffolded"
   assert_grep "SCOUT task" "$brief" "scout brief must declare itself a scout task"
   assert_grep "report.md" "$brief" "scout brief must point at the report deliverable"
+  assert_no_grep "# Acceptance criteria" "$brief" "scout brief must not gain the ship evidence contract"
+  assert_absent "$BRIEF_HOME/data/brief-scout-q6/evidence.jsonl" "scout scaffold created a ship evidence ledger"
 
   FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
     FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-sm-q6 --secondmate alpha >/dev/null 2>&1 \

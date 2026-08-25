@@ -85,8 +85,16 @@ SEP=' · '
 
 # Emit the one canonical line and exit 0. Detail is optional.
 emit() {  # <state> <source> [detail]
-  local line="state: $1${SEP}source: $2"
-  [ -n "${3:-}" ] && line="$line${SEP}$3"
+  local state=$1 source=$2 detail=${3:-} gate_detail line
+  if [ "$state" = 'done' ] && [ "${KIND:-}" = ship ]; then
+    gate_detail=$(ship_done_evidence_gate "$ID" ship) || {
+      state=parked
+      source=evidence-gate
+      detail=$gate_detail
+    }
+  fi
+  line="state: $state${SEP}source: $source"
+  [ -n "$detail" ] && line="$line${SEP}$detail"
   printf '%s\n' "$line"
   exit 0
 }

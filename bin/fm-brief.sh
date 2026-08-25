@@ -40,6 +40,10 @@
 # "Delivery contract: mode=<mode>" line. bin/fm-spawn.sh reads that line and refuses
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
+# Every ship scaffold also declares stable acceptance-criterion ids in an exact
+# "# Acceptance criteria" section and creates the append-only evidence ledger at
+# data/<task-id>/evidence.jsonl. bin/fm-receipt-check.sh owns the section parser,
+# evidence gate, conservative risk plan, and targeted audit-packet mechanics.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
@@ -168,6 +172,11 @@ fi
 
 BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
+EVIDENCE="$DATA/$ID/evidence.jsonl"
+if [ "$KIND" = ship ] && { [ -e "$EVIDENCE" ] || [ -L "$EVIDENCE" ]; }; then
+  echo "error: $EVIDENCE already exists" >&2
+  exit 1
+fi
 mkdir -p "$DATA/$ID"
 
 shell_quote() {
@@ -359,7 +368,7 @@ case "$MODE" in
 # Definition of done
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
-The task is complete only when committed on your branch.
+The task is complete only when committed on your branch and every declared acceptance criterion has a receipt.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
@@ -371,7 +380,7 @@ EOF
 # Definition of done
 Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
-The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
+The task is complete only when committed on your branch \`fm/$ID\` and every declared acceptance criterion has a receipt. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
@@ -384,14 +393,14 @@ EOF
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=no-mistakes
-The task is complete only when committed on your branch.
+The task is complete only when committed on your branch and every declared acceptance criterion has a receipt.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+Firstmate will then classify validation risk and instruct you to follow the recorded receipts-only, targeted No-Mistakes, or full No-Mistakes path.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
 When starting no-mistakes, make \`--intent\` preserve all relevant content from this brief's \`# Task\` section plus every later accepted Firstmate requirement, clarification, constraint, exclusion, and supersession, carrying only each requirement's current accepted form; retain direct requirements instead of substituting a diff summary, and exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific.
-Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
+Do not hand-edit, commit, or fix findings yourself while a run is active; fix targeted-audit findings only after Firstmate directs the supported abort and branch-custody return sequence.
 
 Two firstmate-specific rules layer on top of that guidance:
 - ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.
@@ -414,6 +423,9 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 # Task
 {TASK}
+
+# Acceptance criteria
+- AC1: {ACCEPTANCE CRITERION}
 
 $HERDR_SECTION
 
@@ -459,6 +471,17 @@ For anything the codebase already shows, prefer a pointer to the authoritative f
 If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
 
+# Acceptance evidence
+Before reporting implementation complete, record at least one compact receipt for every acceptance criterion with \`$FM_ROOT/bin/fm-receipt.sh $ID <criterion> <type> <summary> <result> [options]\`.
+Run \`$FM_ROOT/bin/fm-receipt-check.sh $ID\` and do not append \`done:\` unless its JSON status is \`complete\`.
+Receipts are audit inputs rather than proof that every claim is trustworthy; keep summaries and results compact and point to commands or artifacts when useful.
+
 $DOD
 EOF
+umask 077
+if ! ( set -C; : > "$EVIDENCE" ) 2>/dev/null; then
+  echo "error: could not create new evidence ledger: $EVIDENCE" >&2
+  rm -f "$BRIEF"
+  exit 1
+fi
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"

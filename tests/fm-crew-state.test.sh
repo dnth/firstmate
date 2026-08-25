@@ -1309,6 +1309,41 @@ test_missing_run_head_falls_back_to_current_state() {
   pass "missing run head falls back instead of matching by branch"
 }
 
+test_ship_done_is_held_until_evidence_is_complete() {
+  reset_fakes
+  local d out id=evidence-gate
+  d=$(new_case evidence-gate)
+  make_repo_on_branch "$d/wt" fm/evidence-gate
+  make_fakebin "$d" >/dev/null
+  mkdir -p "$d/data/$id"
+  cat > "$d/data/$id/brief.md" <<'EOF'
+# Task
+Exercise the completion evidence gate.
+
+# Acceptance criteria
+- AC1: The implementation works.
+- AC2: The regression stays covered.
+
+# Definition of done
+Delivery contract: mode=direct-PR
+EOF
+  : > "$d/data/$id/evidence.jsonl"
+  fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=ship" "harness=claude" "mode=direct-PR"
+  printf 'done: PR https://github.com/o/r/pull/9\n' > "$d/state/$id.status"
+  arm_idle_record "$d/state" "$id"
+  out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_DATA_OVERRIDE="$d/data" "$CREW_STATE" "$id")
+  assert_contains "$out" "state: parked" "missing evidence must prevent done acceptance"
+  assert_contains "$out" "source: evidence-gate" "missing evidence must name the gate source"
+  assert_contains "$out" "missing evidence: AC1,AC2" "gate must name every missing criterion"
+
+  FM_DATA_OVERRIDE="$d/data" "$ROOT/bin/fm-receipt.sh" "$id" AC1 test "implementation works" "passed" >/dev/null
+  FM_DATA_OVERRIDE="$d/data" "$ROOT/bin/fm-receipt.sh" "$id" AC2 lint "regression checks" "passed" >/dev/null
+  out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_DATA_OVERRIDE="$d/data" "$CREW_STATE" "$id")
+  assert_contains "$out" "state: done" "complete evidence must release done acceptance"
+  assert_contains "$out" "source: status-log" "released completion retains status-log source"
+  pass "ship completion remains parked until every criterion has evidence"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -1358,5 +1393,6 @@ test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
+test_ship_done_is_held_until_evidence_is_complete
 
 echo "all fm-crew-state tests passed"
