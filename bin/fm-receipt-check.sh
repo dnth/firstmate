@@ -8,6 +8,8 @@
 #                       [--change-class <localized-non-sensitive|sensitive>]
 #                       [--risky-area <text>]...
 #   fm-receipt-check.sh <task-id> --follow-up --delta-base <commit>
+#                       [--change-class <localized-non-sensitive|sensitive>]
+#                       [--risky-area <text>]...
 #                       (--finding <text>|--finding-file <path>)...
 #                       [--invalidated-criterion <criterion-id>]...
 #
@@ -46,9 +48,12 @@
 #
 # A medium plan writes data/<task-id>/audit-packet.md with the task contract,
 # evidence ledger, base..HEAD diff, declared risky areas, and narrow audit remit.
-# --follow-up rewrites that packet around the original finding, delta, and updated
-# receipts only when the complete change still classifies medium and --delta-base
-# exactly matches the latest recorded validation head.
+# --follow-up freshly classifies the complete change and rewrites the packet around
+# the original finding, a non-empty strict-descendant delta, and updated receipts
+# only when the complete change still classifies medium and --delta-base exactly
+# matches the latest recorded validation head.
+# Initial planning records the ledger receipt count, and every invalidated criterion
+# requires a matching receipt appended after that boundary.
 # A material scope/risk change records high/full-no-mistakes and refuses the
 # bounded follow-up so the supervisor retains a full rerun.
 set -eu
@@ -161,8 +166,8 @@ case "$ACTION" in
       || { echo "error: follow-up options require --follow-up" >&2; exit 2; }
     ;;
   follow-up)
-    [ -z "$BASE_INPUT$CHANGE_CLASS$RISKY_AREAS" ] \
-      || { echo "error: --base, --change-class, and --risky-area apply only to --plan" >&2; exit 2; }
+    [ -z "$BASE_INPUT" ] \
+      || { echo "error: --base applies only to --plan" >&2; exit 2; }
     [ -n "$DELTA_BASE" ] || { echo "error: --follow-up requires --delta-base" >&2; exit 2; }
     [ "$FINDING_COUNT" -gt 0 ] || { echo "error: --follow-up requires a finding" >&2; exit 2; }
     ;;
@@ -255,6 +260,24 @@ if ! awk '
 ' "$BRIEF" > "$CRITERIA"; then
   echo "error: ship brief must contain one valid '# Acceptance criteria' section with unique AC ids and no placeholders" >&2
   exit 2
+fi
+
+if [ "$ACTION" = follow-up ] && [ -n "$INVALIDATED" ]; then
+  INVALIDATED_SEEN="$TMP_ROOT/invalidated-seen"
+  : > "$INVALIDATED_SEEN"
+  while IFS= read -r invalidated_criterion; do
+    case "$invalidated_criterion" in
+      AC[1-9]|AC[1-9][0-9]*) ;;
+      *) echo "error: invalidated criterion must be AC followed by a positive integer" >&2; exit 2 ;;
+    esac
+    cut -f1 "$CRITERIA" | grep -Fx "$invalidated_criterion" >/dev/null 2>&1 \
+      || { echo "error: invalidated criterion is not declared: $invalidated_criterion" >&2; exit 2; }
+    if grep -Fx "$invalidated_criterion" "$INVALIDATED_SEEN" >/dev/null 2>&1; then
+      echo "error: invalidated criterion was supplied more than once: $invalidated_criterion" >&2
+      exit 2
+    fi
+    printf '%s\n' "$invalidated_criterion" >> "$INVALIDATED_SEEN"
+  done <<< "$INVALIDATED"
 fi
 
 if [ "$ACTION" = criterion ]; then
@@ -362,6 +385,7 @@ esac
 RECORDED_TIER=
 RECORDED_PATH=
 RECORDED_HEAD=
+RECORDED_LEDGER_RECEIPTS=
 if [ "$ACTION" = follow-up ]; then
   RECORDED_TIER=$(grep '^validation_tier=' "$META" | tail -1 | cut -d= -f2- || true)
   RECORDED_PATH=$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)
@@ -371,8 +395,10 @@ if [ "$ACTION" = follow-up ]; then
   [ -n "$BASE_INPUT" ] || { echo "error: recorded validation base is missing" >&2; exit 2; }
   RECORDED_HEAD=$(grep '^validation_head=' "$META" | tail -1 | cut -d= -f2- || true)
   [ -n "$RECORDED_HEAD" ] || { echo "error: recorded validation head is missing" >&2; exit 2; }
-  RISKY_AREAS=$(grep '^validation_risky_areas=' "$META" | tail -1 | cut -d= -f2- || true)
-  CHANGE_CLASS=$(grep '^validation_change_class=' "$META" | tail -1 | cut -d= -f2- || true)
+  RECORDED_LEDGER_RECEIPTS=$(grep '^validation_ledger_receipt_count=' "$META" | tail -1 | cut -d= -f2- || true)
+  case "$RECORDED_LEDGER_RECEIPTS" in
+    ''|*[!0-9]*) echo "error: recorded validation ledger boundary is missing or invalid" >&2; exit 2 ;;
+  esac
 fi
 
 BASE=
@@ -446,10 +472,14 @@ fi
 
 MECHANICAL_PROOF=0
 REGRESSION_PROOF=0
-PROOF_FLAGS=$(jq -rse '
-  def strong_result:
-    (test("(fail|error|not[[:space:]]+pass|red|broken|skip|(^|[^0-9])0[[:space:]]+(tests?[[:space:]]+)?pass|no[[:space:]]+tests?|empty)"; "i") | not)
-    and test("^([[:space:]]*(pass(ed)?|success(ful)?|green|clean|ok)[[:space:]]*|[[:space:]]*[1-9][0-9]*[[:space:]]+(tests?[[:space:]]+)?passed([[:space:]].*)?)$"; "i");
+STRONG_RESULT_MODULE="$TMP_ROOT/strong-result.jq"
+cat > "$STRONG_RESULT_MODULE" <<'JQ'
+def strong_result:
+  (test("(fail|error|not[[:space:]]+pass|red|broken|skip|(^|[^0-9])0[[:space:]]+(tests?[[:space:]]+)?pass|no[[:space:]]+tests?|empty)"; "i") | not)
+  and test("^([[:space:]]*(pass(ed)?|success(ful)?|green|clean|ok)[[:space:]]*|[[:space:]]*[1-9][0-9]*[[:space:]]+(tests?[[:space:]]+)?passed([[:space:]].*)?)$"; "i");
+JQ
+PROOF_FLAGS=$(jq -L "$TMP_ROOT" -rse '
+  include "strong-result";
   [
     any(.[]; (.type | test("^(test|build|lint|typecheck)$")) and (.result | strong_result)),
     any(.[]; .type == "test" and (.result | strong_result))
@@ -461,10 +491,8 @@ IFS=$'\t' read -r mechanical_proof regression_proof <<< "$PROOF_FLAGS"
 
 CONFIG_PROOF=1
 if [ "$CONFIG_COUNT" -gt 0 ]; then
-  if ! jq -se --rawfile paths "$CONFIG_PATHS" '
-    def strong_result:
-      (test("(fail|error|not[[:space:]]+pass|red|broken|skip|(^|[^0-9])0[[:space:]]+(tests?[[:space:]]+)?pass|no[[:space:]]+tests?|empty)"; "i") | not)
-      and test("^([[:space:]]*(pass(ed)?|success(ful)?|green|clean|ok)[[:space:]]*|[[:space:]]*[1-9][0-9]*[[:space:]]+(tests?[[:space:]]+)?passed([[:space:]].*)?)$"; "i");
+  if ! jq -L "$TMP_ROOT" -se --rawfile paths "$CONFIG_PATHS" '
+    include "strong-result";
     . as $receipts
     | ($paths | split("\n") | map(select(length > 0))) as $required
     | all($required[]; . as $path
@@ -548,6 +576,7 @@ write_meta_record() {  # <pass>
     printf 'validation_started_at=%s\n' "$now"
     printf 'validation_risky_areas=%s\n' "$normalized_risks"
     printf 'validation_change_class=%s\n' "$CHANGE_CLASS"
+    printf 'validation_ledger_receipt_count=%s\n' "$RECEIPT_COUNT"
     printf 'validation_packet=%s\n' "$packet_value"
     if [ "$pass" = follow-up ]; then
       printf 'validation_delta_base=%s\n' "$DELTA_BASE"
@@ -635,6 +664,18 @@ if [ "$ACTION" = follow-up ]; then
     || { echo "error: --delta-base must equal the latest recorded validation head" >&2; exit 2; }
   git -C "$WORKTREE" merge-base --is-ancestor "$DELTA_RESOLVED" "$HEAD" 2>/dev/null \
     || { echo "error: delta base is not an ancestor of the current head" >&2; exit 2; }
+  [ "$DELTA_RESOLVED" != "$HEAD" ] \
+    || { echo "error: follow-up head must be a strict descendant of the recorded validation head" >&2; exit 2; }
+  if git -C "$WORKTREE" diff --no-ext-diff --quiet "$DELTA_RESOLVED..$HEAD"; then
+    echo "error: follow-up delta is empty" >&2
+    exit 2
+  else
+    delta_diff_rc=$?
+    [ "$delta_diff_rc" -eq 1 ] \
+      || { echo "error: follow-up delta could not be inspected" >&2; exit 2; }
+  fi
+  [ "$RECORDED_LEDGER_RECEIPTS" -le "$RECEIPT_COUNT" ] \
+    || { echo "error: evidence ledger is shorter than the recorded validation boundary" >&2; exit 2; }
   DELTA_BASE=$DELTA_RESOLVED
   if [ "$TIER" != medium ]; then
     VALIDATION_PATH=full-no-mistakes
@@ -644,6 +685,19 @@ if [ "$ACTION" = follow-up ]; then
     jq -cn --arg task "$ID" --arg tier "$TIER" --arg path "$VALIDATION_PATH" --arg reason "$REASON" \
       '{schema:"fm-validation-plan.v1",task:$task,status:"full-rerun-required",tier:$tier,path:$path,reason:$reason}'
     exit 1
+  fi
+  if [ -n "$INVALIDATED" ]; then
+    NEW_RECEIPTS="$TMP_ROOT/new-receipts.jsonl"
+    if [ "$RECORDED_LEDGER_RECEIPTS" -lt "$RECEIPT_COUNT" ]; then
+      tail -n "+$((RECORDED_LEDGER_RECEIPTS + 1))" "$LEDGER" > "$NEW_RECEIPTS"
+    else
+      : > "$NEW_RECEIPTS"
+    fi
+    while IFS= read -r invalidated_criterion; do
+      jq -se --arg criterion "$invalidated_criterion" \
+        'any(.[]; .criterion == $criterion)' "$NEW_RECEIPTS" >/dev/null 2>&1 \
+        || { echo "error: invalidated criterion requires a new receipt after the validation boundary: $invalidated_criterion" >&2; exit 2; }
+    done <<< "$INVALIDATED"
   fi
   write_packet follow-up "$DELTA_BASE"
   write_meta_record follow-up

@@ -301,17 +301,36 @@ test_follow_up_packet_uses_finding_delta_and_updated_receipts() {
     || fail "initial medium plan failed"
   project="$TMP_ROOT/project-$id"
   initial_head=$(git -C "$project" rev-parse HEAD)
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --follow-up --delta-base "$initial_head" \
+    --change-class localized-non-sensitive --risky-area "localized fixture" \
+    --finding "F1: output assertion was incomplete" 2>&1)
+  rc=$?
+  expect_code 2 "$rc" "follow-up refuses an unchanged head"
+  assert_contains "$out" "strict descendant" "unchanged-head refusal did not identify the delta contract"
   printf '#!/usr/bin/env bash\nprintf "fixed\\n"\n' > "$project/src/app.sh"
   git -C "$project" add src/app.sh
   git -C "$project" commit -q -m 'resolve finding'
   current_head=$(git -C "$project" rev-parse HEAD)
-  add_receipt "$id" AC1 test "3 passed after fix"
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --follow-up --delta-base "$current_head" \
     --finding "F1: output assertion was incomplete" 2>&1)
   rc=$?
   expect_code 2 "$rc" "follow-up refuses a delta base that omits the finding fix"
   assert_contains "$out" "latest recorded validation head" "follow-up refusal did not identify the continuity contract"
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --follow-up --delta-base "$initial_head" \
+    --change-class localized-non-sensitive --risky-area "localized fixture" \
+    --finding "F1: output assertion was incomplete" --invalidated-criterion AC99 2>&1)
+  rc=$?
+  expect_code 2 "$rc" "follow-up rejects undeclared invalidated criteria"
+  assert_contains "$out" "not declared" "invalidated-criterion refusal did not identify the bad id"
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --follow-up --delta-base "$initial_head" \
+    --change-class localized-non-sensitive --risky-area "localized fixture" \
+    --finding "F1: output assertion was incomplete" --invalidated-criterion AC1 2>&1)
+  rc=$?
+  expect_code 2 "$rc" "follow-up requires post-boundary evidence for invalidated criteria"
+  assert_contains "$out" "requires a new receipt" "missing replacement evidence was not identified"
+  add_receipt "$id" AC1 test "3 passed after fix"
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --follow-up --delta-base "$initial_head" \
+    --change-class localized-non-sensitive --risky-area "localized fixture" \
     --finding "F1: output assertion was incomplete" --invalidated-criterion AC1) \
     || fail "bounded follow-up plan failed"
   printf '%s' "$out" | jq -e '
@@ -336,12 +355,12 @@ test_follow_up_scope_change_requires_full_rerun() {
     || fail "initial medium plan failed"
   project="$TMP_ROOT/project-$id"
   initial_head=$(git -C "$project" rev-parse HEAD)
-  printf 'validate_token() { return 0; }\n' > "$project/src/auth.sh"
-  git -C "$project" add src/auth.sh
-  git -C "$project" commit -q -m 'expand into auth surface'
+  printf 'validate_login() { return 0; }\n' > "$project/src/login.ts"
+  git -C "$project" add src/login.ts
+  git -C "$project" commit -q -m 'expand into login surface'
   add_receipt "$id" AC1 test "3 passed after expansion"
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --follow-up --delta-base "$initial_head" \
-    --finding "F2: implementation expanded into authentication")
+    --finding "F2: implementation expanded into login handling")
   rc=$?
   expect_code 1 "$rc" "material follow-up risk change refuses a bounded packet"
   printf '%s' "$out" | jq -e '

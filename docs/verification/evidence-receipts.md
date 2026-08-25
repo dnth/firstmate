@@ -11,7 +11,8 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 - Medium-risk routing requires an explicit localized-non-sensitive change class and creates a bounded task, evidence, diff, and risky-area audit packet.
 - High-risk, broad, sensitive, weakly proven, materially expanded, or uncertain changes retain full No-Mistakes validation.
 - `direct-PR` and `local-only` retain the evidence gate without entering No-Mistakes.
-- Medium follow-up review starts at the latest recorded validation head and uses the finding, delta, and updated receipts, while material risk expansion requires a full rerun.
+- Medium follow-up review requires a fresh localized-non-sensitive classification, a non-empty strict-descendant delta from the latest recorded validation head, and post-boundary replacement receipts for every invalidated criterion.
+- Follow-up work without fresh positive safety evidence or with material risk expansion requires a full rerun.
 - PR-ready recording adds `validation_completed_at` beside the plan's `validation_started_at`, making implementation-complete to validation-complete latency directly measurable.
 
 ## Verification environment
