@@ -187,7 +187,7 @@ The Herdr `/exit` path required a bounded process-exit wait because the TUI can 
 
 Hermes Agent v0.20.0 and Herdr 0.7.3 were verified on 2026-08-25 against the ownership selector at head `aa25fee3`.
 Both probes ran from the no-mistakes gate worktree at that exact head, so the results below are the selector as it merges.
-Only documentation and test-side evidence commits follow that head, and none of them changes the production ownership selector this record proves.
+The commits after that head touch only documentation, tests, code comments, and two added stderr lines on the unproven-ownership warning path, so the ownership selector this record proves is unchanged.
 The tmux verification used the live adapter test's private Hermes profile and tmux server, and tore down an active scout whose persistent TUI was still running.
 The Herdr verification used only `fm-herdr-lab.sh` for session lifecycle, with the generated non-default session `fm-lab-fm-hermes-final-3715267-15309`.
 The Herdr probe set the test-only `FM_GATE_REFUSE_BYPASS=1` because the code under test ran from the gate worktree.
