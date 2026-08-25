@@ -186,10 +186,11 @@ The Herdr `/exit` path required a bounded process-exit wait because the TUI can 
 ### Hermes task-owned process teardown
 
 Hermes Agent v0.20.0 and Herdr 0.7.3 were verified on 2026-08-25 after the task-owner reaping change.
-This record was captured against commit fa4c46c and predates two later ownership-selector changes on this branch, so it is retained as captured and does not yet prove the shipped selector.
-Commit a0b3dd9 narrowed the descendant closure seed from the union of token-marker and worktree-cwd roots to the token-marker roots alone, so the recorded PID lists and the `owned-after=0` verdict were produced by a strictly wider kill set than the shipped code computes.
-Commit d7361c6 and its follow-up rewrote the non-`/proc` process-environment scan, which the Linux runs below never reached because they take the `/proc` path.
-Both probes must be rerun against the final selector and this section replaced before the change merges.
+This record was captured against commit fa4c46c and predates every ownership-selector change that followed it on this branch, so it is retained as captured and does not prove the shipped selector.
+Commit ffe6787 made the marker scan fork-free, a0b3dd9 narrowed the descendant closure seed from the union of token-marker and worktree-cwd roots to the token-marker roots alone, d7361c6 and 1ea3587 rewrote the non-`/proc` process-environment scan, and the current head drops pids with no readable process identity from the owned set.
+The narrowing alone means the recorded PID lists and the `owned-after=0` verdict were produced by a strictly wider kill set than the shipped code computes, so that result cannot be replayed onto the shipped selector.
+The tmux transcript below also predates the active-teardown case, so it carries none of the `command: fm-teardown <id> (persistent TUI still running, no /exit)` or `output: active_teardown=yes ...` lines the current live test emits, and the live active-teardown path therefore has no recorded evidence yet.
+Both probes must be rerun against the final head and this whole section replaced before the change merges.
 The tmux verification used the live adapter test's private Hermes profile and tmux server.
 The Herdr verification used only `fm-herdr-lab.sh` with the generated non-default session `fm-lab-fm-hermes-tui-le-3564243-5376`.
 The default Herdr session remained running with the same fleet identity before and after the probe.

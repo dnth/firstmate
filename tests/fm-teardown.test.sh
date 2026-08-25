@@ -3003,6 +3003,88 @@ SH
   pass "the ownership scan keeps trying ps forms until one actually exposes the environment"
 }
 
+test_hermes_defunct_descendant_converges_without_ps_state_column() {
+  local case_dir rc token hermes_home registry state_real pid_file
+  local root_pid="" zombie_pid="" survived=0 i
+  case_dir=$(make_case hermes-defunct-no-ps-state)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  token=fm.abcdefghijkl
+  hermes_home="$case_dir/hermes-home"
+  registry="$hermes_home/fm-turn-end.d/$token"
+  state_real=$(cd "$case_dir/state" && pwd -P)
+  mkdir -p "$hermes_home/fm-turn-end.d"
+  printf '%s\n' "$token" > "$case_dir/state/task-x1.hermes-turnend-token"
+  jq -n --arg id task-x1 --arg state "$state_real" \
+    --arg session_file "$state_real/task-x1.hermes-session" \
+    '{id:$id,state:$state,session_file:$session_file}' > "$registry"
+  printf '%s\n' \
+    'harness=hermes' \
+    "hermes_home=$hermes_home" \
+    "hermes_owner_token=$token" >> "$case_dir/state/task-x1.meta"
+  pid_file="$case_dir/tree.pids"
+
+  # A ps whose bulk table has no state column, so the descendant closure cannot
+  # tell a defunct child from a live one.
+  cat > "$case_dir/fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -e ] && [ "${2:-}" = -o ] && [ "${3:-}" = 'pid=,ppid=,state=' ]; then
+  exit 1
+fi
+exec "$REAL_PS_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/ps"
+
+  # The token root outlives a child it never wait()s for, so that child stays
+  # defunct in the marker-expanded set for as long as the root is alive.
+  FM_HERMES_TASK_TOKEN="$token" perl -e '
+    my ($pid_file, $outside) = @ARGV;
+    chdir $outside or die "chdir outside";
+    my $child = fork();
+    die "fork" unless defined $child;
+    exit 0 unless $child;
+    open my $fh, ">", $pid_file or die "open";
+    print {$fh} "$$\n$child\n";
+    close $fh;
+    sleep 300;
+  ' "$pid_file" "$case_dir" &
+  disown
+  i=0
+  while [ "$i" -lt 50 ]; do
+    [ -f "$pid_file" ] && [ "$(wc -l < "$pid_file")" -ge 2 ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  root_pid=$(sed -n 1p "$pid_file" 2>/dev/null || true)
+  zombie_pid=$(sed -n 2p "$pid_file" 2>/dev/null || true)
+  [ -n "$root_pid" ] && [ -n "$zombie_pid" ] \
+    || fail "hermes-defunct-no-ps-state: setup did not record the token root and its child"
+  i=0
+  while [ "$i" -lt 50 ]; do
+    case "$(sed -n 's/^State:[[:space:]]*//p' "/proc/$zombie_pid/status" 2>/dev/null)" in
+      Z*) break ;;
+    esac
+    sleep 0.1
+    i=$((i + 1))
+  done
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  if kill -0 "$root_pid" 2>/dev/null; then
+    survived=1
+    kill -KILL "$root_pid" 2>/dev/null || true
+  fi
+  wait "$root_pid" 2>/dev/null || true
+
+  expect_code 0 "$rc" "hermes-defunct-no-ps-state: a defunct descendant must not refuse teardown"
+  [ "$survived" -eq 0 ] \
+    || fail "hermes-defunct-no-ps-state: the token root survived teardown"
+  ! grep -q REFUSED "$case_dir/stderr" \
+    || fail "hermes-defunct-no-ps-state: teardown refused over a defunct descendant"
+  pass "a defunct descendant of a token root converges even when the ps table has no state column"
+}
+
 test_lsof_absent_reaps_tmux_process_group() {
   local case_dir rc pid path_without_lsof
   case_dir=$(make_case lsof-absent-process-group-reap)
@@ -3397,6 +3479,7 @@ test_hermes_without_jq_falls_back_instead_of_refusing
 test_hermes_descendant_closure_starts_only_at_token_roots
 test_hermes_marker_scan_without_proc_reaps_token_tree
 test_hermes_marker_scan_tries_every_environment_ps_form
+test_hermes_defunct_descendant_converges_without_ps_state_column
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
 test_reused_pid_identity_is_not_force_killed

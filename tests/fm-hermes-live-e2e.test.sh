@@ -186,6 +186,35 @@ EOF
 
 # The kernel identity of a pid, so a survivor check can never be satisfied by
 # pid reuse and never depends on the ownership selector under test.
+live_pane_tree_pids() {  # <root-pid>
+  local root=$1 table line pid ppid result changed depth=0
+  case "$root" in ''|*[!0-9]*) return 1 ;; esac
+  table=$(LC_ALL=C ps -e -o pid=,ppid= 2>/dev/null) || return 1
+  result=" $root "
+  changed=1
+  while [ "$changed" -eq 1 ] && [ "$depth" -lt 64 ]; do
+    changed=0
+    depth=$((depth + 1))
+    while IFS= read -r line; do
+      pid=${line#"${line%%[![:space:]]*}"}
+      ppid=${pid#* }
+      pid=${pid%%[[:space:]]*}
+      ppid=${ppid#"${ppid%%[![:space:]]*}"}
+      ppid=${ppid%%[[:space:]]*}
+      case "$pid" in ''|*[!0-9]*) continue ;; esac
+      case "$ppid" in ''|*[!0-9]*) continue ;; esac
+      [ "$pid" != "$$" ] || continue
+      case "$result" in *" $pid "*) continue ;; esac
+      case "$result" in
+        *" $ppid "*) result="$result$pid "; changed=1; ;;
+      esac
+    done <<EOF
+$table
+EOF
+  done
+  printf '%s\n' "$result" | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -un || true
+}
+
 live_pid_identity() {  # <pid>
   local pid=$1 stat_line value
   local -a stat_fields
@@ -412,8 +441,19 @@ SCOUT_TOKEN=$(sed -n 's/^hermes_owner_token=//p' "$FM_LIVE_HOME/state/$SCOUT.met
 SCOUT_WT=$(sed -n 's/^worktree=//p' "$FM_LIVE_HOME/state/$SCOUT.meta")
 [ -n "$SCOUT_TOKEN" ] || fail "Hermes scout recorded no owner token"
 [ -n "$SCOUT_WT" ] || fail "Hermes scout recorded no worktree"
-SCOUT_TREE=$(live_task_pids "$SCOUT_TOKEN" "$SCOUT_WT") \
+SCOUT_SELECTED=$(live_task_pids "$SCOUT_TOKEN" "$SCOUT_WT") \
   || fail "could not determine the scout-owned process set before teardown"
+# The capture is seeded from the isolated tmux pane that runs this scout, not
+# from any copy of the production selector, and walked down the kernel parent
+# links, so a shipped closure that under-selects still leaves survivors in it.
+SCOUT_PANE_PID=$(TMUX_TMPDIR="$TMUX_DIR" tmux display-message -p -t "$SCOUT_TARGET" '#{pane_pid}')
+case "$SCOUT_PANE_PID" in
+  ''|*[!0-9]*) fail "could not resolve the scout pane pid from $SCOUT_TARGET" ;;
+esac
+SCOUT_PANE_TREE=$(live_pane_tree_pids "$SCOUT_PANE_PID") \
+  || fail "could not walk the scout pane process tree before teardown"
+SCOUT_TREE=$(printf '%s\n%s\n' "$SCOUT_SELECTED" "$SCOUT_PANE_TREE" \
+  | grep -E '^[0-9]+$' | sort -un || true)
 [ -n "$SCOUT_TREE" ] \
   || fail "Hermes scout owned no live process before teardown; the active-tree case would prove nothing"
 # The primary survivor proof is the concrete pre-teardown tree, pinned by
@@ -433,23 +473,30 @@ FM_HOME="$FM_LIVE_HOME" "$ROOT/bin/fm-decision-hold.sh" complete "$SCOUT" --none
 printf 'command: fm-teardown %s (persistent TUI still running, no /exit)\n' "$SCOUT"
 run_tmux_env "$ROOT/bin/fm-teardown.sh" "$SCOUT" >/dev/null
 SCOUT_TRACKED_SURVIVORS=
-while IFS= read -r scout_line; do
-  [ -n "$scout_line" ] || continue
-  scout_pid=${scout_line%% *}
-  scout_identity=${scout_line#* }
-  kill -0 "$scout_pid" 2>/dev/null || continue
-  [ "$(live_pid_identity "$scout_pid" 2>/dev/null || true)" = "$scout_identity" ] || continue
-  SCOUT_TRACKED_SURVIVORS="$SCOUT_TRACKED_SURVIVORS $scout_pid"
-done <<EOF
+SCOUT_SETTLE=0
+while [ "$SCOUT_SETTLE" -lt 40 ]; do
+  SCOUT_TRACKED_SURVIVORS=
+  while IFS= read -r scout_line; do
+    [ -n "$scout_line" ] || continue
+    scout_pid=${scout_line%% *}
+    scout_identity=${scout_line#* }
+    kill -0 "$scout_pid" 2>/dev/null || continue
+    [ "$(live_pid_identity "$scout_pid" 2>/dev/null || true)" = "$scout_identity" ] || continue
+    SCOUT_TRACKED_SURVIVORS="$SCOUT_TRACKED_SURVIVORS $scout_pid"
+  done <<EOF
 $SCOUT_TRACKED
 EOF
+  [ -n "$SCOUT_TRACKED_SURVIVORS" ] || break
+  sleep 0.25
+  SCOUT_SETTLE=$((SCOUT_SETTLE + 1))
+done
 [ -z "$SCOUT_TRACKED_SURVIVORS" ] \
   || fail "fm-teardown left pre-teardown scout process(es) alive:$SCOUT_TRACKED_SURVIVORS"
 SCOUT_SURVIVORS=$(live_task_pids "$SCOUT_TOKEN" "$SCOUT_WT") \
   || fail "could not determine the scout-owned process set after teardown"
 [ -z "$SCOUT_SURVIVORS" ] \
   || fail "fm-teardown left scout-owned process(es) alive: $(printf '%s' "$SCOUT_SURVIVORS" | tr '\n' ' ')"
-printf 'output: active_teardown=yes owned_before=%s tracked_survivors=0 survivors=0\n' \
-  "$(printf '%s' "$SCOUT_TREE" | tr '\n' ' ' | sed 's/ $//')"
+printf 'output: active_teardown=yes pane_root=%s owned_before=%s tracked_survivors=0 survivors=0\n' \
+  "$SCOUT_PANE_PID" "$(printf '%s' "$SCOUT_TREE" | tr '\n' ' ' | sed 's/ $//')"
 
 printf 'ok - %s persistent Hermes TUI: crew/scout launch, composer steer, native skill turn, busy->idle, turn-end, interrupt, exit, and exact-session resume\n' "$HERMES_VERSION"

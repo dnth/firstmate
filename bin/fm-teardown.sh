@@ -1456,6 +1456,22 @@ $dir_pids"
   TASK_PIDS=$(printf '%s\n' "$pids" | grep -E '^[0-9]+$' | sort -un || true)
 }
 
+# A pid whose process identity cannot be read is already gone: it exited, or
+# it is defunct and only its parent's missing wait() keeps the slot. Neither is
+# a live owned process, and keeping such a pid in the owned set turns an
+# unreaped zombie into a permanent refusal - including on a degraded ps table
+# with no state column, where the descendant closure cannot see it is defunct.
+task_pids_alive_only() {  # <pid-list>
+  local pid
+  while IFS= read -r pid; do
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    task_process_identity "$pid" >/dev/null 2>&1 || continue
+    printf '%s\n' "$pid"
+  done <<EOF
+$1
+EOF
+}
+
 task_pids_for_reap() {  # <dir>...
   local cwd_pids marker_pids expanded
   TASK_PIDS_FAILED_DIR=
@@ -1466,7 +1482,7 @@ task_pids_for_reap() {  # <dir>...
     cwd_pids=
   fi
   if [ -z "${TASK_HERMES_OWNER_TOKEN:-}" ]; then
-    TASK_PIDS=$(printf '%s\n' "$cwd_pids" | grep -E '^[0-9]+$' | sort -un || true)
+    TASK_PIDS=$(task_pids_alive_only "$cwd_pids" | sort -un || true)
     return 0
   fi
   marker_pids=$(pids_with_env_marker FM_HERMES_TASK_TOKEN "$TASK_HERMES_OWNER_TOKEN") || {
@@ -1477,8 +1493,8 @@ task_pids_for_reap() {  # <dir>...
     TASK_PIDS_FAILED_DIR='task descendant tree'
     return 1
   }
-  TASK_PIDS=$(printf '%s\n%s\n' "$cwd_pids" "$expanded" \
-    | grep -E '^[0-9]+$' | sort -un || true)
+  TASK_PIDS=$(task_pids_alive_only "$(printf '%s\n%s\n' "$cwd_pids" "$expanded")" \
+    | sort -un || true)
 }
 
 verified_hermes_owner_token() {
