@@ -7,14 +7,16 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 
 - New ship briefs receive stable acceptance-criterion ids and an empty append-only evidence ledger, while scout and secondmate scaffolds remain outside the receipt contract.
 - Every ship completion, including a promoted scout, remains parked until a valid acceptance contract and structurally valid evidence cover every required criterion.
-- Low-risk routing is limited to narrow mechanically proven documentation or allowlisted configuration changes with file-bound proof.
+- Low-risk routing is limited to narrow mechanically proven documentation positively classified as non-authoritative prose or allowlisted configuration changes with file-bound proof.
 - Medium-risk routing requires an explicit localized-non-sensitive change class and creates a bounded task, evidence, diff, and risky-area audit packet.
 - High-risk, broad, sensitive, weakly proven, materially expanded, or uncertain changes retain full No-Mistakes validation.
 - `direct-PR` and `local-only` retain the evidence gate without entering No-Mistakes.
 - Medium follow-up review requires a fresh localized-non-sensitive classification, a non-empty strict-descendant delta from the latest recorded validation head, and post-boundary replacement receipts for every invalidated criterion.
 - Follow-up work without fresh positive safety evidence or with material risk expansion requires a full rerun.
 - Initial planning records one `validation_started_at`, low-risk planning completes immediately, and every other generated delivery path records `validation_completed_at` at pipeline success, PR-open, or branch-ready before its terminal status.
-- Every completion records `validation_completed_head`, invalidates stale completion metadata when the worktree head changes, and refuses completion until the change is replanned or revalidated.
+- Every completion requires path-specific terminal evidence, records its plan path and validated head, invalidates stale completion metadata when the worktree head changes, and refuses completion until the change is replanned or revalidated.
+- Initial planning accepts a caller base only when it equals the repository's authoritative merge boundary, so a later ancestor cannot hide earlier task commits.
+- Ordinary No-Mistakes findings at every risk tier return to the original worker through guarded custody return, while only medium-risk follow-up remains bounded.
 - PR-ready recording preserves the path-specific completion boundary instead of replacing it with later PR-monitor setup time.
 
 ## Verification environment
@@ -41,7 +43,9 @@ ok - fm-receipt-check reports required, evidenced, and missing ids deterministic
 ok - fm-receipt-check distinguishes complete evidence from invalid JSONL
 ok - invalid ship briefs fail and scout/report behavior stays unchanged
 ok - low-risk mechanical changes can skip a full No-Mistakes run
+ok - low documentation requires positive non-authoritative prose classification
 ok - terminal delivery paths record one completion timestamp at their boundary
+ok - completion signals release the validation lock for retry
 ok - low config requires an allowlisted path and applicable proof
 ok - medium-risk work produces a brief, evidence, diff, and risky-area audit packet
 ok - security and uncertain changes retain full No-Mistakes validation

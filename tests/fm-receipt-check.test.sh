@@ -147,7 +147,7 @@ test_low_risk_skips_no_mistakes_under_explicit_policy() {
   base=$(make_project "$id" no-mistakes docs)
   add_receipt "$id" AC1 lint "passed"
   add_receipt "$id" AC2 review "reviewed"
-  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base") \
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" --change-class non-authoritative-prose) \
     || fail "low-risk plan failed"
   printf '%s' "$out" | jq -e '.tier == "low" and .path == "receipts-mechanical" and .packet == null' >/dev/null \
     || fail "narrow mechanically proven docs change did not take the low path"
@@ -163,22 +163,34 @@ test_low_risk_skips_no_mistakes_under_explicit_policy() {
   printf 'post-validation correction\n' >> "$project/README.md"
   git -C "$project" add README.md
   git -C "$project" commit -q -m 'post-validation correction'
-  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete 2>&1)
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence mechanical-checks-passed 2>&1)
   rc=$?
   expect_code 2 "$rc" "completion refuses code changed after validation"
   assert_contains "$out" "replan and revalidate" "stale completion refusal omitted recovery guidance"
   [ "$(grep '^validation_completed_head=' "$meta" | tail -1)" = 'validation_completed_head=' ] \
     || fail "stale completion remained active after the head changed"
   new_head=$(git -C "$project" rev-parse HEAD)
-  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null \
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" --change-class non-authoritative-prose >/dev/null \
     || fail "corrected low-risk change could not be replanned"
   [ "$(grep '^validation_completed_head=' "$meta" | tail -1)" = "validation_completed_head=$new_head" ] \
     || fail "replanned completion did not bind the corrected head"
   pass "low-risk mechanical changes can skip a full No-Mistakes run"
 }
 
+test_docs_require_positive_non_authoritative_classification() {
+  local id=unclassified-docs base out
+  base=$(make_project "$id" no-mistakes docs)
+  add_receipt "$id" AC1 lint "passed"
+  add_receipt "$id" AC2 review "reviewed"
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base") \
+    || fail "unclassified documentation plan failed"
+  printf '%s' "$out" | jq -e '.tier == "high" and .reason == "unclassified-documentation"' >/dev/null \
+    || fail "documentation without positive prose classification reached low"
+  pass "low documentation requires positive non-authoritative prose classification"
+}
+
 test_terminal_paths_record_completion_at_their_boundary() {
-  local mode id base out meta expected_head
+  local mode id base out meta expected_head evidence rc
   for mode in no-mistakes direct-PR local-only; do
     id="completion-${mode}"
     base=$(make_project "$id" "$mode" localized)
@@ -189,16 +201,54 @@ test_terminal_paths_record_completion_at_their_boundary() {
     meta="$HOME_DIR/state/$id.meta"
     grep -Eq '^validation_started_at=[0-9]+$' "$meta" || fail "$mode omitted validation start time"
     ! grep -q '^validation_completed_at=' "$meta" || fail "$mode completed validation during planning"
-    out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete) || fail "$mode completion recording failed"
+    case "$mode" in
+      no-mistakes) evidence=no-mistakes-passed ;;
+      direct-PR) evidence=pr-opened ;;
+      local-only) evidence=branch-ready ;;
+    esac
+    FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence wrong-boundary >/dev/null 2>&1
+    rc=$?
+    expect_code 2 "$rc" "$mode rejects terminal evidence for another path"
+    out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence "$evidence") \
+      || fail "$mode completion recording failed"
     expected_head=$(git -C "$TMP_ROOT/project-$id" rev-parse HEAD)
     printf '%s' "$out" | jq -e --arg head "$expected_head" \
-      '.status == "completed" and (.completed_at | type == "number") and .completed_head == $head' >/dev/null \
+      --arg evidence "$evidence" \
+      '.status == "completed" and (.completed_at | type == "number") and .completed_head == $head and .evidence == $evidence' >/dev/null \
       || fail "$mode completion output was not machine-readable"
-    FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete >/dev/null || fail "$mode duplicate completion failed"
+    FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence "$evidence" >/dev/null \
+      || fail "$mode duplicate completion failed"
     [ "$(grep -c '^validation_completed_at=' "$meta")" -eq 1 ] || fail "$mode completion was not idempotent"
     [ "$(grep -c '^validation_completed_head=' "$meta")" -eq 1 ] || fail "$mode completed head was not idempotent"
+    [ "$(grep -c '^validation_completed_path=' "$meta")" -eq 1 ] || fail "$mode completed path was not idempotent"
+    [ "$(grep -c '^validation_completed_evidence=' "$meta")" -eq 1 ] || fail "$mode terminal evidence was not idempotent"
   done
   pass "terminal delivery paths record one completion timestamp at their boundary"
+}
+
+test_completion_signal_releases_validation_lock() {
+  local id=completion-signal base fakebin rc
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint "passed"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" \
+    --change-class localized-non-sensitive >/dev/null || fail "signal fixture plan failed"
+  fakebin="$TMP_ROOT/signal-fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/date" <<'EOF'
+#!/bin/sh
+kill -TERM "$PPID"
+exit 1
+EOF
+  chmod +x "$fakebin/date"
+  PATH="$fakebin:$PATH" FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete \
+    --terminal-evidence no-mistakes-passed >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "completion ignored the injected termination signal"
+  [ ! -d "$HOME_DIR/state/.$id.validation-plan.lock" ] || fail "termination stranded the validation lock"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed >/dev/null \
+    || fail "completion could not retry after signal cleanup"
+  pass "completion signals release the validation lock for retry"
 }
 
 test_low_config_requires_allowlist_and_applicable_proof() {
@@ -254,7 +304,7 @@ test_medium_plan_writes_a_bounded_audit_packet() {
 }
 
 test_high_risk_and_uncertain_inputs_fail_safe() {
-  local id=high-auth base out rc project
+  local id=high-auth base out rc project hidden_base
   base=$(make_project "$id" no-mistakes auth)
   add_receipt "$id" AC1 test "3 passed"
   add_receipt "$id" AC2 lint "passed"
@@ -308,6 +358,20 @@ test_high_risk_and_uncertain_inputs_fail_safe() {
     || fail "free-form login plan should still be a successful plan"
   printf '%s' "$out" | jq -e '.tier == "high" and .reason == "unclassified-change"' >/dev/null \
     || fail "free-form risky-area text was treated as positive safety proof"
+
+  id=hidden-sensitive-base
+  base=$(make_project "$id" no-mistakes auth)
+  project="$TMP_ROOT/project-$id"
+  hidden_base=$(git -C "$project" rev-parse HEAD)
+  printf 'documentation tail\n' >> "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" commit -q -m 'documentation tail'
+  add_receipt "$id" AC1 lint "passed"
+  add_receipt "$id" AC2 review "reviewed"
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$hidden_base" \
+    --change-class non-authoritative-prose) || fail "mismatched base should produce a conservative plan"
+  printf '%s' "$out" | jq -e '.tier == "high" and .reason == "unreadable-or-empty-diff"' >/dev/null \
+    || fail "caller-selected ancestor hid a sensitive commit"
 
   id=uncertain-base
   base=$(make_project "$id" no-mistakes localized)
@@ -420,7 +484,9 @@ test_reports_missing_criteria_deterministically
 test_complete_and_invalid_ledgers_have_distinct_results
 test_invalid_brief_and_scout_behavior
 test_low_risk_skips_no_mistakes_under_explicit_policy
+test_docs_require_positive_non_authoritative_classification
 test_terminal_paths_record_completion_at_their_boundary
+test_completion_signal_releases_validation_lock
 test_low_config_requires_allowlist_and_applicable_proof
 test_medium_plan_writes_a_bounded_audit_packet
 test_high_risk_and_uncertain_inputs_fail_safe

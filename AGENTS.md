@@ -332,7 +332,7 @@ After an autonomous merge, give the captain a one-line full-URL or local-main ou
 On a ship worker's implementation-complete `done:`, run `bin/fm-receipt-check.sh <id>` before accepting completion, and steer the same worker back with the reported missing or invalid criteria instead of starting review when the check is not complete.
 After complete receipts, run the helper's `--plan` action and follow its durably recorded path without allowing an uncertain classification to fall below high.
 The helper records validation timing at the implementation-complete plan and generated brief's terminal boundary, binds completion to the current validated head, and completes a low plan immediately.
-For a low-risk `no-mistakes` plan, keep the existing mechanical checks, have the same worker raise the PR without starting a No-Mistakes run, then rerun the helper's `--complete` action so any post-plan head change forces replanning before the terminal status.
+For a low-risk `no-mistakes` plan, keep the existing mechanical checks, have the same worker raise the PR without starting a No-Mistakes run, then rerun the helper's `--complete --terminal-evidence mechanical-checks-passed` action so any post-plan head change forces replanning before the terminal status.
 For a medium-risk `no-mistakes` plan, give the same worker the generated audit packet as its No-Mistakes intent so review challenges the explicit claims and changed surface without reconstructing or reimplementing the task.
 For a high-risk `no-mistakes` plan, trigger the full validation on the same worker after its implementation commit, using the harness invocation owned by `harness-adapters`.
 The `direct-PR` and `local-only` modes stop after their evidence-gated delivery steps and never invoke No-Mistakes because of the risk tier.
@@ -340,11 +340,11 @@ The task worker that starts a no-mistakes run drives the pipeline and owns every
 Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
 Once validation starts, prefer routing new requirements to follow-up work rather than expanding the current task, unless a new requirement completely invalidates the work being validated; however, the smallest downstream changes needed to keep already accepted product or engineering behavior correct, add behavioral tests where an executable contract exists, or keep documentation accurate remain within the current task even when they touch files not named at intake, and corrections required to satisfy already accepted intent are not new requirements.
 
-Outside the targeted-finding return path below, only a current, explicit captain instruction that completely invalidates the work being validated keeps the task with the same worker instead of routing it to follow-up work or handing it to a replacement.
+Outside the ordinary-finding return path below, only a current, explicit captain instruction that completely invalidates the work being validated keeps the task with the same worker instead of routing it to follow-up work or handing it to a replacement.
 That worker cancels the active run through no-mistakes axi's supported abort command and confirms through axi status that the run has stopped before changing any code.
 The worker then follows `branch_sync.next_action` from structured axi status: use axi sync's supported guarded recovery only when its code is `recover_custody`, and otherwise proceed only when structured status confirms that branch ownership is already returned and no recovery is required.
 Custody recovery settles branch ownership, not content: the worker must replace the obsolete work from the correct pre-invalidation base rather than building on top of the recovered-but-obsolete head, keeping the obsolete run's own pipeline-fix commits out of what gets validated and shipped.
-Apart from supersession or the targeted-finding return path, do not hand-edit, commit, restart, or start a second validation run while a run still owns the branch.
+Apart from supersession or the ordinary-finding custody-return path, do not hand-edit, commit, restart, or start a second validation run while a run still owns the branch.
 Once ownership is settled, validate exactly once against that final head so no obsolete or intermediate head is ever treated as authoritative.
 
 An ask-user finding returns as `needs-decision`; firstmate loads `ask-user-authority` and either decides or escalates per that skill.
@@ -352,12 +352,12 @@ Send the same worker one exact decision naming the decision key, step, action, a
 Require the matching `resolved` event, forbid `--yes`, and require the worker to process every synchronous return until completion or a genuinely new escalation.
 Resume fleet supervision immediately after the decision lands.
 
-For ordinary findings from a targeted audit, steer the original worker to return branch custody through the supported No-Mistakes abort and sync sequence, fix the findings itself, update receipts, and generate the helper's bounded follow-up packet from the finding and delta.
-Use the bounded follow-up only while the complete change remains medium-risk; a material scope or risk change takes the helper's high-risk full-rerun result.
+For ordinary findings from any No-Mistakes tier, steer the original worker to return branch custody through the supported abort and sync sequence, fix the findings itself, and update receipts.
+Use the bounded finding and delta follow-up only while the complete change remains medium-risk; high-risk work and any material scope or risk change return to full validation after the original worker's fix.
 
 Judge validation by the current-code-matched run step through `bin/fm-crew-state.sh`, not by shell liveness or the last status event.
 Running, fixing, or CI states remain working; parked approval or fix-review states require the worker to follow the active gate help; passed or checks-passed is done; failed or cancelled is failed.
-A worker hand-editing, committing, aborting, or restarting during an active validation run duplicates pipeline ownership outside the supersession or targeted-finding custody-return sequences above; steer it back to the gate response flow.
+A worker hand-editing, committing, aborting, or restarting during an active validation run duplicates pipeline ownership outside the supersession or ordinary-finding custody-return sequences above; steer it back to the gate response flow.
 The worker reports the PR when CI first becomes green rather than waiting for merge monitoring to finish.
 
 ### PR ready, landing, and teardown

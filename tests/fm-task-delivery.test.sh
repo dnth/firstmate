@@ -201,7 +201,7 @@ EOF
 # Promotion is where a scout's ship contract is finally decided, so it requires the
 # same explicit values and writes them into the task's durable record.
 test_promote_requires_and_records_the_delivery_contract() {
-  local home meta brief ledger out status check_out check_status fakebin real_mv brief_before meta_before leftovers
+  local home meta brief ledger out status check_out check_status fakebin real_mv brief_before meta_before leftovers recovery
   home="$TMP_ROOT/promote/home"
   mkdir -p "$home/state" "$home/data/promote-d1"
   meta="$home/state/promote-d1.meta"
@@ -248,6 +248,7 @@ EOF
 #!/bin/sh
 case "\$1" in
   *.meta.promote.*) exit 71 ;;
+  *.meta.original.*) [ "\${FM_FAIL_RESTORE:-0}" != 1 ] || exit 72 ;;
 esac
 exec "$real_mv" "\$@"
 EOF
@@ -262,6 +263,17 @@ EOF
   leftovers=$(find "$home/data/promote-d1" "$home/state" -maxdepth 1 \
     \( -name '*.promote.*' -o -name '*.original.*' \) -print)
   [ -z "$leftovers" ] || fail "failed promotion left temporary artifacts: $leftovers"
+
+  out=$(FM_FAIL_RESTORE=1 PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$PROMOTE" promote-d1 --mode direct-PR --yolo on 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "promotion unexpectedly survived a rollback failure"
+  assert_contains "$out" "recovery copy retained" "rollback failure was not reported loudly"
+  recovery=$(find "$home/state" -maxdepth 1 -name '.promote-d1.meta.original.*' -print)
+  [ -f "$recovery" ] || fail "rollback failure destroyed the metadata recovery copy"
+  "$real_mv" "$recovery" "$meta"
+  cmp -s "$meta_before" "$meta" || fail "retained metadata recovery copy was not original"
+  [ ! -e "$ledger" ] || fail "rollback failure left a partial evidence ledger"
 
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 --mode direct-PR --yolo on 2>&1)
   status=$?

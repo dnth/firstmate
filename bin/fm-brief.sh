@@ -371,7 +371,7 @@ Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch and every declared acceptance criterion has a receipt.
 When it is implemented and committed, run \`$FM_ROOT/bin/fm-receipt-check.sh $ID --plan\`, then push your branch and open a PR with \`gh-axi\`.
-After the PR opens, run \`$FM_ROOT/bin/fm-receipt-check.sh $ID --complete\`, append \`done: PR {url}\` to the status file, and stop.
+After the PR opens, run \`$FM_ROOT/bin/fm-receipt-check.sh $ID --complete --terminal-evidence pr-opened\`, append \`done: PR {url}\` to the status file, and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
     ;;
@@ -384,7 +384,7 @@ Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\` and every declared acceptance criterion has a receipt. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-When it is implemented, committed, and ready in the branch, run \`$FM_ROOT/bin/fm-receipt-check.sh $ID --plan\` followed by \`$FM_ROOT/bin/fm-receipt-check.sh $ID --complete\`.
+When it is implemented, committed, and ready in the branch, run \`$FM_ROOT/bin/fm-receipt-check.sh $ID --plan\` followed by \`$FM_ROOT/bin/fm-receipt-check.sh $ID --complete --terminal-evidence branch-ready\`.
 Then append \`done: ready in branch fm/$ID\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
@@ -403,7 +403,7 @@ Firstmate will then classify validation risk and instruct you to follow the reco
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
 When starting no-mistakes, make \`--intent\` preserve all relevant content from this brief's \`# Task\` section plus every later accepted Firstmate requirement, clarification, constraint, exclusion, and supersession, carrying only each requirement's current accepted form; retain direct requirements instead of substituting a diff summary, and exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific.
-Do not hand-edit, commit, or fix findings yourself while a run is active; fix targeted-audit findings only after Firstmate directs the supported abort and branch-custody return sequence.
+Do not hand-edit, commit, or fix findings yourself while a run is active; fix ordinary findings from any validation tier only after Firstmate directs the supported abort and branch-custody return sequence.
 
 Two firstmate-specific rules layer on top of that guidance:
 - ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.
@@ -411,7 +411,7 @@ Two firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), run \`$FM_ROOT/bin/fm-receipt-check.sh $ID --complete\`, append \`done: PR {url} checks green\`, and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), run \`$FM_ROOT/bin/fm-receipt-check.sh $ID --complete --terminal-evidence no-mistakes-passed\`, append \`done: PR {url} checks green\`, and stop. You are finished.
 EOF
     ;;
 esac

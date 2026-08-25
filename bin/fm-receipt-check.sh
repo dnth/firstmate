@@ -4,12 +4,12 @@
 # Usage:
 #   fm-receipt-check.sh <task-id>
 #   fm-receipt-check.sh <task-id> --criterion <criterion-id>
-#   fm-receipt-check.sh <task-id> --complete
+#   fm-receipt-check.sh <task-id> --complete --terminal-evidence <evidence>
 #   fm-receipt-check.sh <task-id> --plan [--base <commit>]
-#                       [--change-class <localized-non-sensitive|sensitive>]
+#                       [--change-class <non-authoritative-prose|localized-non-sensitive|sensitive>]
 #                       [--risky-area <text>]...
 #   fm-receipt-check.sh <task-id> --follow-up --delta-base <commit>
-#                       [--change-class <localized-non-sensitive|sensitive>]
+#                       [--change-class <non-authoritative-prose|localized-non-sensitive|sensitive>]
 #                       [--risky-area <text>]...
 #                       (--finding <text>|--finding-file <path>)...
 #                       [--invalidated-criterion <criterion-id>]...
@@ -32,9 +32,12 @@
 #
 # --plan first requires a complete evidence check, then inspects the recorded
 # worktree's base..HEAD diff with a deterministic conservative classifier.
+# A supplied initial --base is accepted only when it equals the repository's
+# authoritative merge boundary.
 # Unreadable or uncertain inputs resolve to high.
-# Low is limited to a small documentation diff or an allowlisted mechanical-config
-# diff whose changed config files are named by strong mechanical receipts.
+# Low is limited to a small documentation diff positively declared as
+# non-authoritative prose or an allowlisted mechanical-config diff whose changed
+# config files are named by strong mechanical receipts.
 # Medium requires --change-class localized-non-sensitive plus a strong passing
 # test receipt.
 # Free-form risky-area text is packet context and can raise risk but never proves
@@ -46,8 +49,8 @@
 # Every completion records validation_completed_head and refuses a current
 # worktree HEAD that differs from the latest validation_head.
 # Low-risk planning records completion immediately.
-# --complete records the other delivery paths' terminal validation boundary after
-# their generated instructions reach pipeline success, PR-open, or branch-ready.
+# --complete requires the path-specific terminal evidence named by the generated
+# instructions and records that evidence with the latest plan, path, and head.
 # Delivery mode remains authoritative: direct-PR and local-only never invoke
 # No-Mistakes, while no-mistakes maps low to receipts-mechanical, medium to a
 # targeted audit packet, and high to full-no-mistakes.
@@ -102,6 +105,7 @@ FINDINGS=
 FINDING_COUNT=0
 INVALIDATED=
 INVALIDATED_COUNT=0
+TERMINAL_EVIDENCE=
 
 append_value() {  # <current> <value>
   if [ -n "$1" ]; then printf '%s\n%s' "$1" "$2"; else printf '%s' "$2"; fi
@@ -130,7 +134,7 @@ while [ "$#" -gt 0 ]; do
       [ "$ACTION" = check ] || { echo "error: choose only one action" >&2; exit 2; }
       ACTION=complete
       ;;
-    --base|--delta-base|--change-class|--risky-area|--finding|--finding-file|--invalidated-criterion)
+    --base|--delta-base|--change-class|--risky-area|--finding|--finding-file|--invalidated-criterion|--terminal-evidence)
       [ "$#" -gt 0 ] || { echo "error: $option requires a value" >&2; exit 2; }
       value=$1
       shift
@@ -155,6 +159,7 @@ while [ "$#" -gt 0 ]; do
           INVALIDATED=$(append_value "$INVALIDATED" "$value")
           INVALIDATED_COUNT=$((INVALIDATED_COUNT + 1))
           ;;
+        --terminal-evidence) TERMINAL_EVIDENCE=$value ;;
       esac
       ;;
     *) echo "error: unknown option: $option" >&2; exit 2 ;;
@@ -162,17 +167,23 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$CHANGE_CLASS" in
-  ''|localized-non-sensitive|sensitive) ;;
-  *) echo "error: --change-class must be localized-non-sensitive or sensitive" >&2; exit 2 ;;
+  ''|non-authoritative-prose|localized-non-sensitive|sensitive) ;;
+  *) echo "error: invalid --change-class" >&2; exit 2 ;;
 esac
 
 case "$ACTION" in
-  check|criterion|complete)
+  check|criterion)
     [ -z "$BASE_INPUT$DELTA_BASE$CHANGE_CLASS$RISKY_AREAS$FINDINGS$INVALIDATED" ] \
       || { echo "error: validation-planning options require --plan or --follow-up" >&2; exit 2; }
+    [ -z "$TERMINAL_EVIDENCE" ] || { echo "error: --terminal-evidence requires --complete" >&2; exit 2; }
+    ;;
+  complete)
+    [ -z "$BASE_INPUT$DELTA_BASE$CHANGE_CLASS$RISKY_AREAS$FINDINGS$INVALIDATED" ] \
+      || { echo "error: validation-planning options require --plan or --follow-up" >&2; exit 2; }
+    [ -n "$TERMINAL_EVIDENCE" ] || { echo "error: --complete requires --terminal-evidence" >&2; exit 2; }
     ;;
   plan)
-    [ -z "$DELTA_BASE$FINDINGS$INVALIDATED" ] \
+    [ -z "$DELTA_BASE$FINDINGS$INVALIDATED$TERMINAL_EVIDENCE" ] \
       || { echo "error: follow-up options require --follow-up" >&2; exit 2; }
     ;;
   follow-up)
@@ -180,6 +191,7 @@ case "$ACTION" in
       || { echo "error: --base applies only to --plan" >&2; exit 2; }
     [ -n "$DELTA_BASE" ] || { echo "error: --follow-up requires --delta-base" >&2; exit 2; }
     [ "$FINDING_COUNT" -gt 0 ] || { echo "error: --follow-up requires a finding" >&2; exit 2; }
+    [ -z "$TERMINAL_EVIDENCE" ] || { echo "error: --terminal-evidence requires --complete" >&2; exit 2; }
     ;;
 esac
 
@@ -231,10 +243,17 @@ else
 fi
 
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-receipt-check.XXXXXX")
+VALIDATION_LOCK=
 cleanup() {
+  [ -z "$VALIDATION_LOCK" ] || rmdir "$VALIDATION_LOCK" 2>/dev/null || true
   rm -rf "$TMP_ROOT"
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+release_validation_lock() {
+  [ -z "$VALIDATION_LOCK" ] || rmdir "$VALIDATION_LOCK" 2>/dev/null || true
+  VALIDATION_LOCK=
+}
 CRITERIA="$TMP_ROOT/criteria.tsv"
 EVIDENCED="$TMP_ROOT/evidenced"
 INVALID="$TMP_ROOT/invalid"
@@ -383,9 +402,10 @@ if [ "$CHECK_RC" -ne 0 ]; then
 fi
 
 record_validation_completed() {
-  local lock started path completed completed_head now worktree validated_head current_head
-  lock="$STATE/.$ID.validation-plan.lock"
-  if ! mkdir "$lock" 2>/dev/null; then
+  local started path completed completed_head completed_path completed_evidence now worktree validated_head current_head expected_evidence
+  VALIDATION_LOCK="$STATE/.$ID.validation-plan.lock"
+  if ! mkdir "$VALIDATION_LOCK" 2>/dev/null; then
+    VALIDATION_LOCK=
     echo "error: validation metadata is locked by another planner" >&2
     return 1
   fi
@@ -394,52 +414,63 @@ record_validation_completed() {
   worktree=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
   validated_head=$(grep '^validation_head=' "$META" | tail -1 | cut -d= -f2- || true)
   case "$started" in
-    ''|*[!0-9]*) rmdir "$lock"; echo "error: validation start timestamp is missing or invalid" >&2; return 1 ;;
+    ''|*[!0-9]*) release_validation_lock; echo "error: validation start timestamp is missing or invalid" >&2; return 1 ;;
   esac
   case "$path" in
-    receipts-mechanical|targeted-no-mistakes|full-no-mistakes|direct-PR|local-only) ;;
-    *) rmdir "$lock"; echo "error: validation path is missing or invalid" >&2; return 1 ;;
+    receipts-mechanical) expected_evidence=mechanical-checks-passed ;;
+    targeted-no-mistakes|full-no-mistakes) expected_evidence=no-mistakes-passed ;;
+    direct-PR) expected_evidence=pr-opened ;;
+    local-only) expected_evidence=branch-ready ;;
+    *) release_validation_lock; echo "error: validation path is missing or invalid" >&2; return 1 ;;
   esac
+  [ "$TERMINAL_EVIDENCE" = "$expected_evidence" ] \
+    || { release_validation_lock; echo "error: terminal evidence does not match validation path $path" >&2; return 1; }
   [ -n "$worktree" ] && [ -d "$worktree" ] \
-    || { rmdir "$lock"; echo "error: validation worktree is missing" >&2; return 1; }
+    || { release_validation_lock; echo "error: validation worktree is missing" >&2; return 1; }
   validated_head=$(git -C "$worktree" rev-parse --verify "$validated_head^{commit}" 2>/dev/null) \
-    || { rmdir "$lock"; echo "error: validated head is missing or invalid" >&2; return 1; }
+    || { release_validation_lock; echo "error: validated head is missing or invalid" >&2; return 1; }
   current_head=$(git -C "$worktree" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) \
-    || { rmdir "$lock"; echo "error: current worktree head is unavailable" >&2; return 1; }
+    || { release_validation_lock; echo "error: current worktree head is unavailable" >&2; return 1; }
   if [ "$current_head" != "$validated_head" ]; then
-    printf 'validation_completed_at=\nvalidation_completed_head=\n' >> "$META" \
-      || { rmdir "$lock"; echo "error: could not invalidate stale validation completion" >&2; return 1; }
-    rmdir "$lock"
+    printf 'validation_completed_at=\nvalidation_completed_head=\nvalidation_completed_path=\nvalidation_completed_evidence=\n' >> "$META" \
+      || { release_validation_lock; echo "error: could not invalidate stale validation completion" >&2; return 1; }
+    release_validation_lock
     echo "error: current worktree head differs from the validated head; replan and revalidate" >&2
     return 1
   fi
   completed=$(grep '^validation_completed_at=' "$META" | tail -1 | cut -d= -f2- || true)
   completed_head=$(grep '^validation_completed_head=' "$META" | tail -1 | cut -d= -f2- || true)
+  completed_path=$(grep '^validation_completed_path=' "$META" | tail -1 | cut -d= -f2- || true)
+  completed_evidence=$(grep '^validation_completed_evidence=' "$META" | tail -1 | cut -d= -f2- || true)
   if [ -n "$completed_head" ]; then
     [ -n "$completed" ] \
-      || { rmdir "$lock"; echo "error: validation completion timestamp is missing" >&2; return 1; }
+      || { release_validation_lock; echo "error: validation completion timestamp is missing" >&2; return 1; }
     case "$completed" in
-      *[!0-9]*) rmdir "$lock"; echo "error: validation completion timestamp is invalid" >&2; return 1 ;;
+      *[!0-9]*) release_validation_lock; echo "error: validation completion timestamp is invalid" >&2; return 1 ;;
     esac
     completed_head=$(git -C "$worktree" rev-parse --verify "$completed_head^{commit}" 2>/dev/null) \
-      || { rmdir "$lock"; echo "error: validation completed head is invalid" >&2; return 1; }
+      || { release_validation_lock; echo "error: validation completed head is invalid" >&2; return 1; }
   fi
-  if [ "$completed_head" != "$validated_head" ]; then
+  if [ "$completed_head:$completed_path:$completed_evidence" != "$validated_head:$path:$TERMINAL_EVIDENCE" ]; then
     now=$(date +%s)
-    printf 'validation_completed_at=%s\nvalidation_completed_head=%s\n' "$now" "$validated_head" >> "$META" \
-      || { rmdir "$lock"; echo "error: could not record validation completion" >&2; return 1; }
+    printf 'validation_completed_at=%s\nvalidation_completed_head=%s\nvalidation_completed_path=%s\nvalidation_completed_evidence=%s\n' \
+      "$now" "$validated_head" "$path" "$TERMINAL_EVIDENCE" >> "$META" \
+      || { release_validation_lock; echo "error: could not record validation completion" >&2; return 1; }
     completed=$now
     completed_head=$validated_head
   fi
-  rmdir "$lock"
-  printf '%s\t%s\n' "$completed" "$completed_head"
+  release_validation_lock
+  VALIDATION_COMPLETED=$completed
+  VALIDATION_COMPLETED_HEAD=$completed_head
+  VALIDATION_COMPLETED_PATH=$path
+  VALIDATION_COMPLETED_EVIDENCE=$TERMINAL_EVIDENCE
 }
 
 if [ "$ACTION" = complete ]; then
-  VALIDATION_COMPLETION=$(record_validation_completed) || exit 2
-  IFS=$'\t' read -r VALIDATION_COMPLETED VALIDATION_COMPLETED_HEAD <<< "$VALIDATION_COMPLETION"
+  record_validation_completed || exit 2
   jq -cn --arg task "$ID" --argjson completed_at "$VALIDATION_COMPLETED" --arg completed_head "$VALIDATION_COMPLETED_HEAD" \
-    '{schema:"fm-validation-completion.v1",task:$task,status:"completed",completed_at:$completed_at,completed_head:$completed_head}'
+    --arg path "$VALIDATION_COMPLETED_PATH" --arg evidence "$VALIDATION_COMPLETED_EVIDENCE" \
+    '{schema:"fm-validation-completion.v1",task:$task,status:"completed",completed_at:$completed_at,completed_head:$completed_head,path:$path,evidence:$evidence}'
   exit 0
 fi
 
@@ -482,6 +513,7 @@ HAS_SPECIAL_MODE=0
 HIGH_PATH=0
 LOW_PATH=1
 CONFIG_COUNT=0
+DOC_COUNT=0
 SENSITIVE_PATH=
 NUMSTAT="$TMP_ROOT/numstat"
 NAMES="$TMP_ROOT/names"
@@ -491,14 +523,20 @@ CONFIG_PATHS="$TMP_ROOT/config-paths"
 : > "$CONFIG_PATHS"
 
 resolve_diff() {
+  local requested_base authoritative_base
   [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ] && git -C "$WORKTREE" rev-parse --git-dir >/dev/null 2>&1 || return 1
   HEAD=$(git -C "$WORKTREE" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) || return 1
-  if [ -n "$BASE_INPUT" ]; then
+  if [ "$ACTION" = follow-up ]; then
     BASE=$(git -C "$WORKTREE" rev-parse --verify "$BASE_INPUT^{commit}" 2>/dev/null) || return 1
   else
-    BASE=$(git -C "$WORKTREE" merge-base HEAD refs/remotes/origin/HEAD 2>/dev/null \
+    authoritative_base=$(git -C "$WORKTREE" merge-base HEAD refs/remotes/origin/HEAD 2>/dev/null \
       || git -C "$WORKTREE" merge-base HEAD main 2>/dev/null \
       || git -C "$WORKTREE" merge-base HEAD master 2>/dev/null) || return 1
+    BASE=$authoritative_base
+    if [ -n "$BASE_INPUT" ]; then
+      requested_base=$(git -C "$WORKTREE" rev-parse --verify "$BASE_INPUT^{commit}" 2>/dev/null) || return 1
+      [ "$requested_base" = "$authoritative_base" ] || return 1
+    fi
   fi
   git -C "$WORKTREE" merge-base --is-ancestor "$BASE" "$HEAD" 2>/dev/null || return 1
   git -C "$WORKTREE" diff --no-ext-diff --no-renames --numstat "$BASE..$HEAD" > "$NUMSTAT" 2>/dev/null || return 1
@@ -531,7 +569,9 @@ if [ "$DIFF_AVAILABLE" -eq 1 ]; then
         ;;
     esac
     case "$path" in
-      README.md|CONTRIBUTING.md|CHANGELOG.md|docs/*.md) ;;
+      README.md|CONTRIBUTING.md|CHANGELOG.md|docs/*.md)
+        DOC_COUNT=$((DOC_COUNT + 1))
+        ;;
       .editorconfig|.prettierignore|.prettierrc|.prettierrc.json|.prettierrc.yaml|.prettierrc.yml|.markdownlint.json|.markdownlint.yaml|.markdownlint.yml|.shellcheckrc)
         printf '%s\n' "$path" >> "$CONFIG_PATHS"
         CONFIG_COUNT=$((CONFIG_COUNT + 1))
@@ -599,7 +639,8 @@ elif [ -n "$RISKY_AREAS" ] && printf '%s\n' "$RISKY_AREAS" | tr '[:upper:]' '[:l
   TIER=high
   REASON=declared-high-risk-area
 elif [ "$LOW_PATH" -eq 1 ] && [ "$DIFF_FILES" -le 3 ] && [ "$DIFF_LINES" -le 80 ] \
-  && [ "$MECHANICAL_PROOF" -eq 1 ] && [ "$CONFIG_PROOF" -eq 1 ]; then
+  && [ "$MECHANICAL_PROOF" -eq 1 ] && [ "$CONFIG_PROOF" -eq 1 ] \
+  && { [ "$DOC_COUNT" -eq 0 ] || [ "$CHANGE_CLASS" = non-authoritative-prose ]; }; then
   TIER=low
   REASON=narrow-mechanical-change
 elif [ "$CHANGE_CLASS" = localized-non-sensitive ] && [ "$REGRESSION_PROOF" -eq 1 ]; then
@@ -609,6 +650,8 @@ else
   TIER=high
   if [ "$LOW_PATH" -eq 1 ] && [ "$CONFIG_COUNT" -gt 0 ] && [ "$CONFIG_PROOF" -eq 0 ]; then
     REASON=unbound-mechanical-config
+  elif [ "$DOC_COUNT" -gt 0 ] && [ "$CHANGE_CLASS" != non-authoritative-prose ]; then
+    REASON=unclassified-documentation
   elif [ "$REGRESSION_PROOF" -eq 1 ]; then
     REASON=unclassified-change
   else
@@ -625,18 +668,19 @@ case "$MODE:$TIER" in
 esac
 
 write_meta_record() {  # <pass>
-  local pass=$1 now lock normalized_risks packet_value started
+  local pass=$1 now normalized_risks packet_value started
   now=$(date +%s)
-  lock="$STATE/.$ID.validation-plan.lock"
-  if ! mkdir "$lock" 2>/dev/null; then
-    echo "error: validation metadata is locked by another planner: $lock" >&2
+  VALIDATION_LOCK="$STATE/.$ID.validation-plan.lock"
+  if ! mkdir "$VALIDATION_LOCK" 2>/dev/null; then
+    VALIDATION_LOCK=
+    echo "error: validation metadata is locked by another planner: $STATE/.$ID.validation-plan.lock" >&2
     return 1
   fi
   normalized_risks=$(printf '%s' "$RISKY_AREAS" | tr '\n\r' '; ')
   started=$(grep '^validation_started_at=' "$META" | head -1 | cut -d= -f2- || true)
   case "$started" in
     '') ;;
-    *[!0-9]*) rmdir "$lock"; echo "error: validation start timestamp is invalid" >&2; return 1 ;;
+    *[!0-9]*) release_validation_lock; echo "error: validation start timestamp is invalid" >&2; return 1 ;;
   esac
   packet_value=
   [ "$VALIDATION_PATH" = targeted-no-mistakes ] && packet_value=$PACKET
@@ -660,11 +704,11 @@ write_meta_record() {  # <pass>
       printf 'validation_invalidated_receipt_count=%s\n' "$INVALIDATED_COUNT"
     fi
   } >> "$META"; then
-    rmdir "$lock" 2>/dev/null || true
+    release_validation_lock
     echo "error: could not append validation metadata: $META" >&2
     return 1
   fi
-  rmdir "$lock"
+  release_validation_lock
 }
 
 render_task_contract() {
@@ -789,7 +833,8 @@ if [ "$VALIDATION_PATH" = targeted-no-mistakes ]; then
 fi
 write_meta_record initial
 if [ "$VALIDATION_PATH" = receipts-mechanical ]; then
-  record_validation_completed >/dev/null
+  TERMINAL_EVIDENCE=mechanical-checks-passed
+  record_validation_completed
 fi
 jq -cn --arg task "$ID" --arg mode "$MODE" --arg tier "$TIER" --arg path "$VALIDATION_PATH" --arg reason "$REASON" \
   --arg base "$BASE" --arg head "$HEAD" --arg packet "$([ "$VALIDATION_PATH" = targeted-no-mistakes ] && printf '%s' "$PACKET")" \

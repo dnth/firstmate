@@ -101,18 +101,42 @@ EVIDENCE_CREATED=0
 BRIEF_REPLACED=0
 META_REPLACED=0
 cleanup() {
+  local cleanup_rc=0
   if [ "$COMMITTED" -ne 1 ]; then
-    if [ "$META_REPLACED" -eq 1 ] && [ -f "$META_ORIGINAL" ]; then
-      mv "$META_ORIGINAL" "$META" 2>/dev/null || true
+    if [ "$META_REPLACED" -eq 1 ]; then
+      if [ -f "$META_ORIGINAL" ] && mv "$META_ORIGINAL" "$META"; then
+        META_REPLACED=0
+      else
+        echo "error: promotion rollback could not restore metadata; recovery copy retained at $META_ORIGINAL" >&2
+        cleanup_rc=1
+      fi
     fi
-    if [ "$BRIEF_REPLACED" -eq 1 ] && [ -f "$BRIEF_ORIGINAL" ]; then
-      mv "$BRIEF_ORIGINAL" "$BRIEF" 2>/dev/null || true
+    if [ "$BRIEF_REPLACED" -eq 1 ]; then
+      if [ -f "$BRIEF_ORIGINAL" ] && mv "$BRIEF_ORIGINAL" "$BRIEF"; then
+        BRIEF_REPLACED=0
+      else
+        echo "error: promotion rollback could not restore brief; recovery copy retained at $BRIEF_ORIGINAL" >&2
+        cleanup_rc=1
+      fi
     fi
-    [ "$EVIDENCE_CREATED" -ne 1 ] || rm -f "$EVIDENCE"
+    if [ "$EVIDENCE_CREATED" -eq 1 ] && ! rm -f "$EVIDENCE"; then
+      echo "error: promotion rollback could not remove the new evidence ledger" >&2
+      cleanup_rc=1
+    fi
   fi
-  rm -f "$BRIEF_TMP" "$META_TMP" "$BRIEF_ORIGINAL" "$META_ORIGINAL"
+  rm -f "$BRIEF_TMP" "$META_TMP"
+  [ "$COMMITTED" -eq 1 ] || [ "$BRIEF_REPLACED" -eq 1 ] || rm -f "$BRIEF_ORIGINAL"
+  [ "$COMMITTED" -eq 1 ] || [ "$META_REPLACED" -eq 1 ] || rm -f "$META_ORIGINAL"
+  [ "$COMMITTED" -ne 1 ] || rm -f "$BRIEF_ORIGINAL" "$META_ORIGINAL"
+  return "$cleanup_rc"
 }
-trap cleanup EXIT
+on_exit() {
+  local rc=$?
+  cleanup || rc=1
+  trap - EXIT
+  exit "$rc"
+}
+trap on_exit EXIT
 trap 'exit 1' HUP INT TERM
 
 cp "$BRIEF" "$BRIEF_TMP"
