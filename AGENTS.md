@@ -331,8 +331,8 @@ After an autonomous merge, give the captain a one-line full-URL or local-main ou
 
 On a ship worker's implementation-complete `done:`, run `bin/fm-receipt-check.sh <id>` before accepting completion, and steer the same worker back with the reported missing or invalid criteria instead of starting review when the check is not complete.
 After complete receipts, run the helper's `--plan` action and follow its durably recorded path without allowing an uncertain classification to fall below high.
-The helper records validation timing at the implementation-complete plan and the generated brief's terminal boundary, with a low plan completing immediately.
-For a low-risk `no-mistakes` plan, keep the existing mechanical checks and have the same worker raise the PR without starting a No-Mistakes run.
+The helper records validation timing at the implementation-complete plan and generated brief's terminal boundary, binds completion to the current validated head, and completes a low plan immediately.
+For a low-risk `no-mistakes` plan, keep the existing mechanical checks, have the same worker raise the PR without starting a No-Mistakes run, then rerun the helper's `--complete` action so any post-plan head change forces replanning before the terminal status.
 For a medium-risk `no-mistakes` plan, give the same worker the generated audit packet as its No-Mistakes intent so review challenges the explicit claims and changed surface without reconstructing or reimplementing the task.
 For a high-risk `no-mistakes` plan, trigger the full validation on the same worker after its implementation commit, using the harness invocation owned by `harness-adapters`.
 The `direct-PR` and `local-only` modes stop after their evidence-gated delivery steps and never invoke No-Mistakes because of the risk tier.

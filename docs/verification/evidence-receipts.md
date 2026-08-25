@@ -14,6 +14,7 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 - Medium follow-up review requires a fresh localized-non-sensitive classification, a non-empty strict-descendant delta from the latest recorded validation head, and post-boundary replacement receipts for every invalidated criterion.
 - Follow-up work without fresh positive safety evidence or with material risk expansion requires a full rerun.
 - Initial planning records one `validation_started_at`, low-risk planning completes immediately, and every other generated delivery path records `validation_completed_at` at pipeline success, PR-open, or branch-ready before its terminal status.
+- Every completion records `validation_completed_head`, invalidates stale completion metadata when the worktree head changes, and refuses completion until the change is replanned or revalidated.
 - PR-ready recording preserves the path-specific completion boundary instead of replacing it with later PR-monitor setup time.
 
 ## Verification environment

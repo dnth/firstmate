@@ -43,6 +43,8 @@
 # undeclared, or otherwise uncertain changes resolve to high.
 # The resolved validation_tier, validation_path, reason code, base, head, size,
 # and start time are appended to state/<task-id>.meta for durable inspection.
+# Every completion records validation_completed_head and refuses a current
+# worktree HEAD that differs from the latest validation_head.
 # Low-risk planning records completion immediately.
 # --complete records the other delivery paths' terminal validation boundary after
 # their generated instructions reach pipeline success, PR-open, or branch-ready.
@@ -381,7 +383,7 @@ if [ "$CHECK_RC" -ne 0 ]; then
 fi
 
 record_validation_completed() {
-  local lock started path completed count now
+  local lock started path completed completed_head now worktree validated_head current_head
   lock="$STATE/.$ID.validation-plan.lock"
   if ! mkdir "$lock" 2>/dev/null; then
     echo "error: validation metadata is locked by another planner" >&2
@@ -389,6 +391,8 @@ record_validation_completed() {
   fi
   started=$(grep '^validation_started_at=' "$META" | head -1 | cut -d= -f2- || true)
   path=$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)
+  worktree=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
+  validated_head=$(grep '^validation_head=' "$META" | tail -1 | cut -d= -f2- || true)
   case "$started" in
     ''|*[!0-9]*) rmdir "$lock"; echo "error: validation start timestamp is missing or invalid" >&2; return 1 ;;
   esac
@@ -396,31 +400,46 @@ record_validation_completed() {
     receipts-mechanical|targeted-no-mistakes|full-no-mistakes|direct-PR|local-only) ;;
     *) rmdir "$lock"; echo "error: validation path is missing or invalid" >&2; return 1 ;;
   esac
-  count=$(grep -c '^validation_completed_at=' "$META" 2>/dev/null || true)
-  if [ "$count" -gt 1 ]; then
+  [ -n "$worktree" ] && [ -d "$worktree" ] \
+    || { rmdir "$lock"; echo "error: validation worktree is missing" >&2; return 1; }
+  validated_head=$(git -C "$worktree" rev-parse --verify "$validated_head^{commit}" 2>/dev/null) \
+    || { rmdir "$lock"; echo "error: validated head is missing or invalid" >&2; return 1; }
+  current_head=$(git -C "$worktree" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) \
+    || { rmdir "$lock"; echo "error: current worktree head is unavailable" >&2; return 1; }
+  if [ "$current_head" != "$validated_head" ]; then
+    printf 'validation_completed_at=\nvalidation_completed_head=\n' >> "$META" \
+      || { rmdir "$lock"; echo "error: could not invalidate stale validation completion" >&2; return 1; }
     rmdir "$lock"
-    echo "error: validation completion timestamp is ambiguous" >&2
+    echo "error: current worktree head differs from the validated head; replan and revalidate" >&2
     return 1
   fi
   completed=$(grep '^validation_completed_at=' "$META" | tail -1 | cut -d= -f2- || true)
-  if [ -n "$completed" ]; then
+  completed_head=$(grep '^validation_completed_head=' "$META" | tail -1 | cut -d= -f2- || true)
+  if [ -n "$completed_head" ]; then
+    [ -n "$completed" ] \
+      || { rmdir "$lock"; echo "error: validation completion timestamp is missing" >&2; return 1; }
     case "$completed" in
       *[!0-9]*) rmdir "$lock"; echo "error: validation completion timestamp is invalid" >&2; return 1 ;;
     esac
-  else
+    completed_head=$(git -C "$worktree" rev-parse --verify "$completed_head^{commit}" 2>/dev/null) \
+      || { rmdir "$lock"; echo "error: validation completed head is invalid" >&2; return 1; }
+  fi
+  if [ "$completed_head" != "$validated_head" ]; then
     now=$(date +%s)
-    printf 'validation_completed_at=%s\n' "$now" >> "$META" \
+    printf 'validation_completed_at=%s\nvalidation_completed_head=%s\n' "$now" "$validated_head" >> "$META" \
       || { rmdir "$lock"; echo "error: could not record validation completion" >&2; return 1; }
     completed=$now
+    completed_head=$validated_head
   fi
   rmdir "$lock"
-  printf '%s\n' "$completed"
+  printf '%s\t%s\n' "$completed" "$completed_head"
 }
 
 if [ "$ACTION" = complete ]; then
-  VALIDATION_COMPLETED=$(record_validation_completed) || exit 2
-  jq -cn --arg task "$ID" --argjson completed_at "$VALIDATION_COMPLETED" \
-    '{schema:"fm-validation-completion.v1",task:$task,status:"completed",completed_at:$completed_at}'
+  VALIDATION_COMPLETION=$(record_validation_completed) || exit 2
+  IFS=$'\t' read -r VALIDATION_COMPLETED VALIDATION_COMPLETED_HEAD <<< "$VALIDATION_COMPLETION"
+  jq -cn --arg task "$ID" --argjson completed_at "$VALIDATION_COMPLETED" --arg completed_head "$VALIDATION_COMPLETED_HEAD" \
+    '{schema:"fm-validation-completion.v1",task:$task,status:"completed",completed_at:$completed_at,completed_head:$completed_head}'
   exit 0
 fi
 

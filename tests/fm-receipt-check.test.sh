@@ -143,7 +143,7 @@ EOF
 }
 
 test_low_risk_skips_no_mistakes_under_explicit_policy() {
-  local id=low-docs base out meta
+  local id=low-docs base out meta project validated_head new_head rc
   base=$(make_project "$id" no-mistakes docs)
   add_receipt "$id" AC1 lint "passed"
   add_receipt "$id" AC2 review "reviewed"
@@ -156,11 +156,29 @@ test_low_risk_skips_no_mistakes_under_explicit_policy() {
   grep -qx 'validation_path=receipts-mechanical' "$meta" || fail "low path was not recorded durably"
   grep -Eq '^validation_started_at=[0-9]+$' "$meta" || fail "low plan omitted validation start time"
   grep -Eq '^validation_completed_at=[0-9]+$' "$meta" || fail "low plan omitted immediate validation completion"
+  project="$TMP_ROOT/project-$id"
+  validated_head=$(git -C "$project" rev-parse HEAD)
+  grep -qx "validation_completed_head=$validated_head" "$meta" \
+    || fail "low completion was not bound to its validated head"
+  printf 'post-validation correction\n' >> "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" commit -q -m 'post-validation correction'
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete 2>&1)
+  rc=$?
+  expect_code 2 "$rc" "completion refuses code changed after validation"
+  assert_contains "$out" "replan and revalidate" "stale completion refusal omitted recovery guidance"
+  [ "$(grep '^validation_completed_head=' "$meta" | tail -1)" = 'validation_completed_head=' ] \
+    || fail "stale completion remained active after the head changed"
+  new_head=$(git -C "$project" rev-parse HEAD)
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null \
+    || fail "corrected low-risk change could not be replanned"
+  [ "$(grep '^validation_completed_head=' "$meta" | tail -1)" = "validation_completed_head=$new_head" ] \
+    || fail "replanned completion did not bind the corrected head"
   pass "low-risk mechanical changes can skip a full No-Mistakes run"
 }
 
 test_terminal_paths_record_completion_at_their_boundary() {
-  local mode id base out meta
+  local mode id base out meta expected_head
   for mode in no-mistakes direct-PR local-only; do
     id="completion-${mode}"
     base=$(make_project "$id" "$mode" localized)
@@ -172,10 +190,13 @@ test_terminal_paths_record_completion_at_their_boundary() {
     grep -Eq '^validation_started_at=[0-9]+$' "$meta" || fail "$mode omitted validation start time"
     ! grep -q '^validation_completed_at=' "$meta" || fail "$mode completed validation during planning"
     out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete) || fail "$mode completion recording failed"
-    printf '%s' "$out" | jq -e '.status == "completed" and (.completed_at | type == "number")' >/dev/null \
+    expected_head=$(git -C "$TMP_ROOT/project-$id" rev-parse HEAD)
+    printf '%s' "$out" | jq -e --arg head "$expected_head" \
+      '.status == "completed" and (.completed_at | type == "number") and .completed_head == $head' >/dev/null \
       || fail "$mode completion output was not machine-readable"
     FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete >/dev/null || fail "$mode duplicate completion failed"
     [ "$(grep -c '^validation_completed_at=' "$meta")" -eq 1 ] || fail "$mode completion was not idempotent"
+    [ "$(grep -c '^validation_completed_head=' "$meta")" -eq 1 ] || fail "$mode completed head was not idempotent"
   done
   pass "terminal delivery paths record one completion timestamp at their boundary"
 }
