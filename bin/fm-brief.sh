@@ -371,7 +371,7 @@ Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch and every declared acceptance criterion has a receipt.
 When it is implemented and committed, run \`$FM_ROOT/bin/fm-receipt-check.sh $ID --plan\`, then push your branch and open a PR with \`gh-axi\`.
-After the PR opens, run \`$FM_ROOT/bin/fm-receipt-check.sh $ID --complete --terminal-evidence pr-opened\`, append \`done: PR {url}\` to the status file, and stop.
+After the PR opens, append \`done: PR {url}\` to the status file and stop; Firstmate's canonical PR-ready helper records the observed completion.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
     ;;

@@ -219,7 +219,7 @@ test_ship_modes_generate_clean_briefs() {
     case "$mode" in
       direct-PR)
         assert_grep "fm-receipt-check.sh $id --plan" "$brief" "$id: direct-PR brief omitted validation start"
-        assert_grep "fm-receipt-check.sh $id --complete" "$brief" "$id: direct-PR brief omitted PR-open completion"
+        assert_grep "canonical PR-ready helper records the observed completion" "$brief" "$id: direct-PR brief omitted observed PR completion"
         ;;
       local-only)
         assert_grep "fm-receipt-check.sh $id --plan" "$brief" "$id: local-only brief omitted validation start"

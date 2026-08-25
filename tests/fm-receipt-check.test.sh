@@ -11,6 +11,12 @@ TMP_ROOT=$(fm_test_tmproot fm-receipt-check)
 HOME_DIR="$TMP_ROOT/home"
 mkdir -p "$HOME_DIR/data" "$HOME_DIR/state"
 fm_git_identity fmtest fmtest@example.invalid
+DONE_CREW_STATE="$TMP_ROOT/done-crew-state"
+cat > "$DONE_CREW_STATE" <<'EOF'
+#!/bin/sh
+printf 'state: done · source: run-step\n'
+EOF
+chmod +x "$DONE_CREW_STATE"
 
 write_brief() {  # <id> <mode>
   local id=$1 mode=$2
@@ -155,9 +161,12 @@ test_low_risk_skips_no_mistakes_under_explicit_policy() {
   grep -qx 'validation_tier=low' "$meta" || fail "low tier was not recorded durably"
   grep -qx 'validation_path=receipts-mechanical' "$meta" || fail "low path was not recorded durably"
   grep -Eq '^validation_started_at=[0-9]+$' "$meta" || fail "low plan omitted validation start time"
-  grep -Eq '^validation_completed_at=[0-9]+$' "$meta" || fail "low plan omitted immediate validation completion"
   project="$TMP_ROOT/project-$id"
   validated_head=$(git -C "$project" rev-parse HEAD)
+  ! grep -q '^validation_completed_at=' "$meta" || fail "low plan completed before post-plan mechanical evidence"
+  add_receipt "$id" AC1 lint "passed"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence mechanical-checks-passed >/dev/null \
+    || fail "low plan did not complete after post-plan mechanical evidence"
   grep -qx "validation_completed_head=$validated_head" "$meta" \
     || fail "low completion was not bound to its validated head"
   printf 'post-validation correction\n' >> "$project/README.md"
@@ -172,6 +181,9 @@ test_low_risk_skips_no_mistakes_under_explicit_policy() {
   new_head=$(git -C "$project" rev-parse HEAD)
   FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" --change-class non-authoritative-prose >/dev/null \
     || fail "corrected low-risk change could not be replanned"
+  add_receipt "$id" AC1 lint "passed"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence mechanical-checks-passed >/dev/null \
+    || fail "replanned low-risk change did not complete"
   [ "$(grep '^validation_completed_head=' "$meta" | tail -1)" = "validation_completed_head=$new_head" ] \
     || fail "replanned completion did not bind the corrected head"
   pass "low-risk mechanical changes can skip a full No-Mistakes run"
@@ -190,7 +202,7 @@ test_docs_require_positive_non_authoritative_classification() {
 }
 
 test_terminal_paths_record_completion_at_their_boundary() {
-  local mode id base out meta expected_head evidence rc
+  local mode id base out meta expected_head evidence observed rc completion_env
   for mode in no-mistakes direct-PR local-only; do
     id="completion-${mode}"
     base=$(make_project "$id" "$mode" localized)
@@ -202,21 +214,36 @@ test_terminal_paths_record_completion_at_their_boundary() {
     grep -Eq '^validation_started_at=[0-9]+$' "$meta" || fail "$mode omitted validation start time"
     ! grep -q '^validation_completed_at=' "$meta" || fail "$mode completed validation during planning"
     case "$mode" in
-      no-mistakes) evidence=no-mistakes-passed ;;
-      direct-PR) evidence=pr-opened ;;
-      local-only) evidence=branch-ready ;;
+      no-mistakes) evidence=no-mistakes-passed; observed=matching-no-mistakes-run ;;
+      direct-PR) evidence=pr-opened; observed=canonical-pr-head ;;
+      local-only) evidence=branch-ready; observed=clean-ready-branch ;;
     esac
     FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence wrong-boundary >/dev/null 2>&1
     rc=$?
     expect_code 2 "$rc" "$mode rejects terminal evidence for another path"
-    out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence "$evidence") \
-      || fail "$mode completion recording failed"
+    if [ "$mode" != local-only ]; then
+      FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence "$evidence" >/dev/null 2>&1
+      rc=$?
+      expect_code 2 "$rc" "$mode rejects unobserved terminal evidence"
+    fi
     expected_head=$(git -C "$TMP_ROOT/project-$id" rev-parse HEAD)
+    case "$mode" in
+      no-mistakes) completion_env="FM_CREW_STATE_BIN=$DONE_CREW_STATE" ;;
+      direct-PR)
+        printf 'pr=https://github.com/o/r/pull/1\npr_head=%s\n' "$expected_head" >> "$meta"
+        completion_env=
+        ;;
+      local-only) completion_env= ;;
+    esac
+    # shellcheck disable=SC2086 # Optional environment assignment fixture.
+    out=$(env $completion_env FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence "$evidence") \
+      || fail "$mode completion recording failed"
     printf '%s' "$out" | jq -e --arg head "$expected_head" \
-      --arg evidence "$evidence" \
+      --arg evidence "$observed" \
       '.status == "completed" and (.completed_at | type == "number") and .completed_head == $head and .evidence == $evidence' >/dev/null \
       || fail "$mode completion output was not machine-readable"
-    FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence "$evidence" >/dev/null \
+    # shellcheck disable=SC2086 # Optional environment assignment fixture.
+    env $completion_env FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence "$evidence" >/dev/null \
       || fail "$mode duplicate completion failed"
     [ "$(grep -c '^validation_completed_at=' "$meta")" -eq 1 ] || fail "$mode completion was not idempotent"
     [ "$(grep -c '^validation_completed_head=' "$meta")" -eq 1 ] || fail "$mode completed head was not idempotent"
@@ -241,14 +268,41 @@ kill -TERM "$PPID"
 exit 1
 EOF
   chmod +x "$fakebin/date"
-  PATH="$fakebin:$PATH" FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete \
+  PATH="$fakebin:$PATH" FM_CREW_STATE_BIN="$DONE_CREW_STATE" FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete \
     --terminal-evidence no-mistakes-passed >/dev/null 2>&1
   rc=$?
   [ "$rc" -ne 0 ] || fail "completion ignored the injected termination signal"
   [ ! -d "$HOME_DIR/state/.$id.validation-plan.lock" ] || fail "termination stranded the validation lock"
-  FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed >/dev/null \
+  FM_CREW_STATE_BIN="$DONE_CREW_STATE" FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed >/dev/null \
     || fail "completion could not retry after signal cleanup"
   pass "completion signals release the validation lock for retry"
+}
+
+test_dirty_worktrees_cannot_plan_or_complete() {
+  local id=dirty-plan base project out rc
+  base=$(make_project "$id" no-mistakes docs)
+  add_receipt "$id" AC1 lint "passed"
+  add_receipt "$id" AC2 review "reviewed"
+  project="$TMP_ROOT/project-$id"
+  mkdir -p "$project/src"
+  printf 'uncommitted secret\n' > "$project/src/security.txt"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" \
+    --change-class non-authoritative-prose >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "dirty worktree cannot be planned"
+
+  id=dirty-completion
+  base=$(make_project "$id" local-only localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint "passed"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" \
+    --change-class localized-non-sensitive >/dev/null || fail "dirty completion fixture plan failed"
+  project="$TMP_ROOT/project-$id"
+  printf 'untracked\n' > "$project/untracked.txt"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence branch-ready >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "dirty worktree cannot complete"
+  pass "dirty worktrees cannot be planned or completed"
 }
 
 test_low_config_requires_allowlist_and_applicable_proof() {
@@ -487,6 +541,7 @@ test_low_risk_skips_no_mistakes_under_explicit_policy
 test_docs_require_positive_non_authoritative_classification
 test_terminal_paths_record_completion_at_their_boundary
 test_completion_signal_releases_validation_lock
+test_dirty_worktrees_cannot_plan_or_complete
 test_low_config_requires_allowlist_and_applicable_proof
 test_medium_plan_writes_a_bounded_audit_packet
 test_high_risk_and_uncertain_inputs_fail_safe

@@ -13,8 +13,9 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 - `direct-PR` and `local-only` retain the evidence gate without entering No-Mistakes.
 - Medium follow-up review requires a fresh localized-non-sensitive classification, a non-empty strict-descendant delta from the latest recorded validation head, and post-boundary replacement receipts for every invalidated criterion.
 - Follow-up work without fresh positive safety evidence or with material risk expansion requires a full rerun.
-- Initial planning records one `validation_started_at`, low-risk planning completes immediately, and every other generated delivery path records `validation_completed_at` at pipeline success, PR-open, or branch-ready before its terminal status.
+- Initial planning records one `validation_started_at`, and completion requires observed post-plan mechanical evidence, a matching successful No-Mistakes run, canonical PR/head metadata, or a clean ready branch.
 - Every completion requires path-specific terminal evidence, records its plan path and validated head, invalidates stale completion metadata when the worktree head changes, and refuses completion until the change is replanned or revalidated.
+- Planning and completion refuse tracked, staged, or untracked worktree changes.
 - Initial planning accepts a caller base only when it equals the repository's authoritative merge boundary, so a later ancestor cannot hide earlier task commits.
 - Ordinary No-Mistakes findings at every risk tier return to the original worker through guarded custody return, while only medium-risk follow-up remains bounded.
 - PR-ready recording preserves the path-specific completion boundary instead of replacing it with later PR-monitor setup time.
@@ -46,6 +47,7 @@ ok - low-risk mechanical changes can skip a full No-Mistakes run
 ok - low documentation requires positive non-authoritative prose classification
 ok - terminal delivery paths record one completion timestamp at their boundary
 ok - completion signals release the validation lock for retry
+ok - dirty worktrees cannot be planned or completed
 ok - low config requires an allowlisted path and applicable proof
 ok - medium-risk work produces a brief, evidence, diff, and risky-area audit packet
 ok - security and uncertain changes retain full No-Mistakes validation

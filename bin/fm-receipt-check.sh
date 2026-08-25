@@ -48,7 +48,7 @@
 # and start time are appended to state/<task-id>.meta for durable inspection.
 # Every completion records validation_completed_head and refuses a current
 # worktree HEAD that differs from the latest validation_head.
-# Low-risk planning records completion immediately.
+# Low-risk completion requires a strong mechanical receipt appended after planning.
 # --complete requires the path-specific terminal evidence named by the generated
 # instructions and records that evidence with the latest plan, path, and head.
 # Delivery mode remains authoritative: direct-PR and local-only never invoke
@@ -72,6 +72,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
 
 usage() {
   awk '
@@ -257,8 +258,14 @@ release_validation_lock() {
 CRITERIA="$TMP_ROOT/criteria.tsv"
 EVIDENCED="$TMP_ROOT/evidenced"
 INVALID="$TMP_ROOT/invalid"
+STRONG_RESULT_MODULE="$TMP_ROOT/strong-result.jq"
 : > "$EVIDENCED"
 : > "$INVALID"
+cat > "$STRONG_RESULT_MODULE" <<'JQ'
+def strong_result:
+  (test("(fail|error|not[[:space:]]+pass|red|broken|skip|(^|[^0-9])0[[:space:]]+(tests?[[:space:]]+)?pass|no[[:space:]]+tests?|empty)"; "i") | not)
+  and test("^([[:space:]]*(pass(ed)?|success(ful)?|green|clean|ok)[[:space:]]*|[[:space:]]*[1-9][0-9]*[[:space:]]+(tests?[[:space:]]+)?passed([[:space:]].*)?)$"; "i");
+JQ
 
 if ! awk '
   BEGIN { in_section=0; found=0; count=0; bad=0 }
@@ -402,7 +409,7 @@ if [ "$CHECK_RC" -ne 0 ]; then
 fi
 
 record_validation_completed() {
-  local started path completed completed_head completed_path completed_evidence now worktree validated_head current_head expected_evidence
+  local started path completed completed_head completed_path completed_evidence now worktree validated_head current_head expected_evidence observed pr pr_head branch boundary new_receipts crew_state
   VALIDATION_LOCK="$STATE/.$ID.validation-plan.lock"
   if ! mkdir "$VALIDATION_LOCK" 2>/dev/null; then
     VALIDATION_LOCK=
@@ -419,8 +426,8 @@ record_validation_completed() {
   case "$path" in
     receipts-mechanical) expected_evidence=mechanical-checks-passed ;;
     targeted-no-mistakes|full-no-mistakes) expected_evidence=no-mistakes-passed ;;
-    direct-PR) expected_evidence=pr-opened ;;
-    local-only) expected_evidence=branch-ready ;;
+    direct-PR) expected_evidence='pr-opened' ;;
+    local-only) expected_evidence='branch-ready' ;;
     *) release_validation_lock; echo "error: validation path is missing or invalid" >&2; return 1 ;;
   esac
   [ "$TERMINAL_EVIDENCE" = "$expected_evidence" ] \
@@ -431,6 +438,8 @@ record_validation_completed() {
     || { release_validation_lock; echo "error: validated head is missing or invalid" >&2; return 1; }
   current_head=$(git -C "$worktree" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) \
     || { release_validation_lock; echo "error: current worktree head is unavailable" >&2; return 1; }
+  [ -z "$(git -C "$worktree" status --porcelain --untracked-files=all 2>/dev/null)" ] \
+    || { release_validation_lock; echo "error: validation worktree is dirty; commit or remove all changes" >&2; return 1; }
   if [ "$current_head" != "$validated_head" ]; then
     printf 'validation_completed_at=\nvalidation_completed_head=\nvalidation_completed_path=\nvalidation_completed_evidence=\n' >> "$META" \
       || { release_validation_lock; echo "error: could not invalidate stale validation completion" >&2; return 1; }
@@ -438,6 +447,42 @@ record_validation_completed() {
     echo "error: current worktree head differs from the validated head; replan and revalidate" >&2
     return 1
   fi
+  observed=
+  case "$path" in
+    receipts-mechanical)
+      boundary=$(grep '^validation_ledger_receipt_count=' "$META" | tail -1 | cut -d= -f2- || true)
+      case "$boundary" in ''|*[!0-9]*) release_validation_lock; echo "error: mechanical evidence boundary is missing" >&2; return 1 ;; esac
+      new_receipts="$TMP_ROOT/completion-new-receipts.jsonl"
+      tail -n "+$((boundary + 1))" "$LEDGER" > "$new_receipts"
+      jq -L "$TMP_ROOT" -se 'include "strong-result"; any(.[]; (.type | test("^(test|build|lint|typecheck)$")) and (.result | strong_result))' \
+        "$new_receipts" >/dev/null 2>&1 \
+        || { release_validation_lock; echo "error: no post-plan mechanical evidence was observed" >&2; return 1; }
+      observed=post-plan-mechanical-receipt
+      ;;
+    targeted-no-mistakes|full-no-mistakes)
+      crew_state=$("$CREW_STATE_BIN" "$ID" 2>/dev/null || true)
+      if ! printf '%s\n' "$crew_state" | grep -q 'state: done' \
+        || ! printf '%s\n' "$crew_state" | grep -q 'source: run-step'; then
+        release_validation_lock
+        echo "error: no matching successful No-Mistakes run was observed" >&2
+        return 1
+      fi
+      observed=matching-no-mistakes-run
+      ;;
+    direct-PR)
+      pr=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
+      pr_head=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
+      [ -n "$pr" ] && [ "$pr_head" = "$validated_head" ] \
+        || { release_validation_lock; echo "error: canonical PR metadata is missing or not bound to the validated head" >&2; return 1; }
+      observed=canonical-pr-head
+      ;;
+    local-only)
+      branch=$(git -C "$worktree" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+      [ "$branch" = "fm/$ID" ] \
+        || { release_validation_lock; echo "error: local-only branch is not ready" >&2; return 1; }
+      observed=clean-ready-branch
+      ;;
+  esac
   completed=$(grep '^validation_completed_at=' "$META" | tail -1 | cut -d= -f2- || true)
   completed_head=$(grep '^validation_completed_head=' "$META" | tail -1 | cut -d= -f2- || true)
   completed_path=$(grep '^validation_completed_path=' "$META" | tail -1 | cut -d= -f2- || true)
@@ -451,10 +496,10 @@ record_validation_completed() {
     completed_head=$(git -C "$worktree" rev-parse --verify "$completed_head^{commit}" 2>/dev/null) \
       || { release_validation_lock; echo "error: validation completed head is invalid" >&2; return 1; }
   fi
-  if [ "$completed_head:$completed_path:$completed_evidence" != "$validated_head:$path:$TERMINAL_EVIDENCE" ]; then
+  if [ "$completed_head:$completed_path:$completed_evidence" != "$validated_head:$path:$observed" ]; then
     now=$(date +%s)
     printf 'validation_completed_at=%s\nvalidation_completed_head=%s\nvalidation_completed_path=%s\nvalidation_completed_evidence=%s\n' \
-      "$now" "$validated_head" "$path" "$TERMINAL_EVIDENCE" >> "$META" \
+      "$now" "$validated_head" "$path" "$observed" >> "$META" \
       || { release_validation_lock; echo "error: could not record validation completion" >&2; return 1; }
     completed=$now
     completed_head=$validated_head
@@ -463,7 +508,7 @@ record_validation_completed() {
   VALIDATION_COMPLETED=$completed
   VALIDATION_COMPLETED_HEAD=$completed_head
   VALIDATION_COMPLETED_PATH=$path
-  VALIDATION_COMPLETED_EVIDENCE=$TERMINAL_EVIDENCE
+  VALIDATION_COMPLETED_EVIDENCE=$observed
 }
 
 if [ "$ACTION" = complete ]; then
@@ -483,6 +528,12 @@ case "$MODE" in
   no-mistakes|direct-PR|local-only) ;;
   *) echo "error: task metadata has no concrete delivery mode" >&2; exit 2 ;;
 esac
+[ -n "$WORKTREE" ] && [ -d "$WORKTREE" ] \
+  || { echo "error: validation worktree is missing" >&2; exit 2; }
+if [ -n "$(git -C "$WORKTREE" status --porcelain --untracked-files=all 2>/dev/null)" ]; then
+  echo "error: validation worktree is dirty; commit or remove all changes" >&2
+  exit 2
+fi
 
 RECORDED_TIER=
 RECORDED_PATH=
@@ -525,6 +576,7 @@ CONFIG_PATHS="$TMP_ROOT/config-paths"
 resolve_diff() {
   local requested_base authoritative_base
   [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ] && git -C "$WORKTREE" rev-parse --git-dir >/dev/null 2>&1 || return 1
+  [ -z "$(git -C "$WORKTREE" status --porcelain --untracked-files=all 2>/dev/null)" ] || return 1
   HEAD=$(git -C "$WORKTREE" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) || return 1
   if [ "$ACTION" = follow-up ]; then
     BASE=$(git -C "$WORKTREE" rev-parse --verify "$BASE_INPUT^{commit}" 2>/dev/null) || return 1
@@ -583,12 +635,6 @@ fi
 
 MECHANICAL_PROOF=0
 REGRESSION_PROOF=0
-STRONG_RESULT_MODULE="$TMP_ROOT/strong-result.jq"
-cat > "$STRONG_RESULT_MODULE" <<'JQ'
-def strong_result:
-  (test("(fail|error|not[[:space:]]+pass|red|broken|skip|(^|[^0-9])0[[:space:]]+(tests?[[:space:]]+)?pass|no[[:space:]]+tests?|empty)"; "i") | not)
-  and test("^([[:space:]]*(pass(ed)?|success(ful)?|green|clean|ok)[[:space:]]*|[[:space:]]*[1-9][0-9]*[[:space:]]+(tests?[[:space:]]+)?passed([[:space:]].*)?)$"; "i");
-JQ
 PROOF_FLAGS=$(jq -L "$TMP_ROOT" -rse '
   include "strong-result";
   [
@@ -832,10 +878,6 @@ if [ "$VALIDATION_PATH" = targeted-no-mistakes ]; then
   write_packet initial "$BASE"
 fi
 write_meta_record initial
-if [ "$VALIDATION_PATH" = receipts-mechanical ]; then
-  TERMINAL_EVIDENCE=mechanical-checks-passed
-  record_validation_completed
-fi
 jq -cn --arg task "$ID" --arg mode "$MODE" --arg tier "$TIER" --arg path "$VALIDATION_PATH" --arg reason "$REASON" \
   --arg base "$BASE" --arg head "$HEAD" --arg packet "$([ "$VALIDATION_PATH" = targeted-no-mistakes ] && printf '%s' "$PACKET")" \
   --argjson diff_files "$DIFF_FILES" --argjson diff_lines "$DIFF_LINES" \
