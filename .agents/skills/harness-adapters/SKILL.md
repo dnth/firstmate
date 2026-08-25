@@ -498,6 +498,15 @@ The steering acknowledgement wait inherits the launch acknowledgement poll count
 If delivery landed but the start hook did not acknowledge it, the send fails as delivered-no-turn, records a supervised recovery wake, and warns not to resend; failure to persist either recovery trigger returns the distinct delivered-no-turn-persistence-failed result.
 
 An idle Hermes pane retains the persistent TUI process.
+Each Firstmate Hermes launch inherits `FM_HERMES_TASK_TOKEN` from the task's lifecycle registry token, and spawn records the same value as `hermes_owner_token` in task metadata.
+Teardown validates the metadata token against the private state sidecar and profile registry before it signals anything, then reaps the token-bearing Python and Node roots together with their exact descendant tree and worktree-rooted processes.
+Inconsistent ownership proof refuses teardown instead of falling back to a broad Hermes or gateway process match, so another Hermes session sharing the profile is never a kill candidate.
+`--force` cannot override that refusal, and the refusal names its own recovery: repair the metadata token, the state sidecar, and the profile registry entry until they agree again, or let the task endpoint close the tree with `fm-send.sh <id> /exit` before retrying.
+Absent proof and contradictory proof are different cases on purpose: a metadata token that disagrees with the state sidecar or a registry bound to another task refuses, while proof that is simply missing degrades instead of refusing.
+A task whose metadata records no owner token, including every persistent-TUI launch from before the token existed, whose profile registry file is gone, or whose registry cannot be read because jq is absent, warns and reaps only the worktree-rooted processes, exactly as teardown behaved before the token existed.
+That degraded path never selects a process by its task token, so a token-bearing process whose cwd sits outside the task roots is left running; restoring the registry entry or installing jq and rerunning teardown reaps the full tree.
+When lsof is unavailable teardown still reaps the tmux pane process group first, for the legacy fallback and for a token-proven task alike, and a process that is already defunct counts as terminated rather than as a survivor.
+The descendant closure is token-proven Hermes only; every other harness keeps the worktree cwd selection unchanged.
 Tmux recovery validates the foreground Hermes process against the recorded executable, while Herdr requires a registered live agent rather than upgrading a shell husk from the session sidecar.
 A spawn that finds `state/<id>.hermes-session` present but carrying no usable resumable id refuses instead of launching a fresh session against that stale sidecar, because the lifecycle bridge would then never acknowledge a turn; remove the sidecar or run `fm-teardown.sh <id> --force` and respawn.
 `fm-crew-state` remains harness-generic: the Hermes hook's semantic busy/idle record drives its pane-state gate, then an idle worker falls through to the existing status-log or no-mistakes run reconciliation.

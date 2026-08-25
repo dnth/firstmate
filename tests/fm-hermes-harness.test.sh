@@ -346,6 +346,8 @@ test_hermes_spawn_tui_skill_state_and_teardown() {
   assert_contains "$launch" "--model 'gpt-5.6-sol'" "Hermes launch lost its model"
   assert_contains "$launch" "--reasoning 'xhigh'" "Hermes launch lost its reasoning effort"
   assert_contains "$launch" "--accept-hooks --yolo --pass-session-id" "Hermes launch lost autonomy/session flags"
+  assert_contains "$launch" "FM_HERMES_TASK_TOKEN='fm." \
+    "Hermes launch did not carry its task-unique process owner token"
   assert_not_contains "$launch" "--safe-mode" "Hermes launch disabled its hooks and rules"
   assert_not_contains "$launch" " -Q " "Hermes launch retained the headless quiet path"
 
@@ -353,6 +355,7 @@ test_hermes_spawn_tui_skill_state_and_teardown() {
   assert_grep 'harness=hermes' "$meta" "Hermes metadata lost its harness identity"
   assert_grep 'model=gpt-5.6-sol' "$meta" "Hermes metadata lost its model"
   assert_grep 'effort=xhigh' "$meta" "Hermes metadata lost its effort"
+  assert_grep 'hermes_owner_token=fm.' "$meta" "Hermes metadata lost its process owner token"
   assert_present "$HOME_DIR/state/$TEST_ID.hermes-session" "Hermes start hook did not record a session"
   assert_present "$HOME_DIR/state/$TEST_ID.turn-ended" "Hermes end hook did not touch the turn marker"
   assert_present "$HOME_DIR/state/$TEST_ID.hermes-started" "Hermes start hook did not acknowledge launch"

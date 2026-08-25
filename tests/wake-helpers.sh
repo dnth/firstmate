@@ -266,6 +266,21 @@ SH
   printf '%s\n' "$dir"
 }
 
+# Stop <pid> for good, then reap it. TERM alone is not enough: a watcher inside
+# wake() ignores HUP INT TERM, and bash drops a signal whose trap string fails to
+# parse, so a plain "kill; wait" can block for the whole CI job instead of ending
+# one test. KILL cannot be swallowed, so escalate to it after a bounded grace.
+stop_pid() {  # <pid> [term-grace-ticks]
+  local pid=$1 grace=${2:-100} i=0
+  kill "$pid" 2>/dev/null || true
+  while [ "$i" -lt "$grace" ] && is_live_non_zombie "$pid"; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  kill -KILL "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+
 wait_for_exit() {
   local pid=$1 limit=${2:-50} i=0
   while [ "$i" -lt "$limit" ]; do
@@ -276,8 +291,7 @@ wait_for_exit() {
     sleep 0.1
     i=$((i + 1))
   done
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  stop_pid "$pid"
   return 124
 }
 

@@ -149,7 +149,61 @@ record_pi_busy() {  # <state-dir> <id>
     --source pi-ext --event agent-start
 }
 
-reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
+reap() { stop_pid "$1"; }
+
+# --- watcher stop contract (tests/wake-helpers.sh) --------------------------
+# Every watcher test here ends by stopping a live fm-watch.sh, and a watcher
+# swallows HUP INT TERM while it is inside wake(). A stop that sends TERM and
+# then waits unconditionally therefore blocks forever on such a watcher, which
+# is how one wedged watcher consumed a whole 15-minute CI shard instead of
+# failing its own test. Stopping must stay bounded and must actually end the
+# process, so drive the helper against a child that ignores every stoppable
+# signal.
+test_stop_pid_ends_a_term_immune_child() {
+  local dir probe rc_file done_file kid_file kid pid i=0 rc
+  dir=$(make_case stop-pid-term-immune)
+  probe="$dir/term-immune.sh"; rc_file="$dir/rc"; done_file="$dir/done"; kid_file="$dir/kid"
+  cat > "$probe" <<'SH'
+#!/usr/bin/env bash
+set -u
+trap '' HUP INT TERM
+printf '%s\n' "$$" > "$1"
+while :; do sleep 0.05; done
+SH
+  chmod +x "$probe"
+  (
+    bash "$probe" "$kid_file" &
+    wait_for_exit "$!" 2
+    printf '%s\n' "$?" > "$rc_file"
+    : > "$done_file"
+  ) &
+  pid=$!
+  while [ "$i" -lt 300 ] && [ ! -e "$done_file" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kid=$(cat "$kid_file" 2>/dev/null || true)
+  if [ ! -e "$done_file" ]; then
+    [ -z "$kid" ] || kill -KILL "$kid" 2>/dev/null || true
+    kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "stopping a watcher that ignores SIGTERM never returned"
+  fi
+  wait "$pid" 2>/dev/null || true
+  rc=$(cat "$rc_file")
+  [ "$rc" = 124 ] || fail "a child that outlived its wait reported exit $rc instead of the 124 timeout"
+  [ -n "$kid" ] || fail "the term-immune probe never recorded its pid"
+  i=0
+  while [ "$i" -lt 100 ] && kill -0 "$kid" 2>/dev/null; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  if kill -0 "$kid" 2>/dev/null; then
+    kill -KILL "$kid" 2>/dev/null || true
+    fail "a child that ignores SIGTERM survived the stop"
+  fi
+  pass "stopping a watcher that ignores SIGTERM is bounded and leaves no survivor"
+}
 
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
 
@@ -2503,6 +2557,7 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   pass "AFK changed paused panes hand off plain stale identities for daemon-owned pause triage"
 }
 
+test_stop_pid_ends_a_term_immune_child
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
