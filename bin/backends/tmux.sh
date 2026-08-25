@@ -229,6 +229,37 @@ fm_backend_tmux_bun_agent_state() {  # <target> <comm> [bun-realpath] [omp-realp
   fi
 }
 
+fm_backend_tmux_hermes_agent_state() {  # <target> <absolute-hermes-bin> -> alive|ambiguous|unreadable
+  local target=$1 expected=$2 ps_bin=${FM_TMUX_PS_BIN:-ps} pane_pid foreground_pid comm args
+  case "$expected" in /*) ;; *) printf 'unreadable'; return 0 ;; esac
+  [ -x "$expected" ] || { printf 'unreadable'; return 0; }
+  pane_pid=$(tmux display-message -p -t "$target" '#{pane_pid}' 2>/dev/null) || {
+    printf 'unreadable'
+    return 0
+  }
+  case "$pane_pid" in ''|*[!0-9]*) printf 'unreadable'; return 0 ;; esac
+  foreground_pid=$("$ps_bin" -o tpgid= -p "$pane_pid" 2>/dev/null | tr -d '[:space:]') || {
+    printf 'unreadable'
+    return 0
+  }
+  case "$foreground_pid" in ''|*[!0-9]*|0|1) printf 'unreadable'; return 0 ;; esac
+  comm=$("$ps_bin" -p "$foreground_pid" -o comm= 2>/dev/null) || {
+    printf 'unreadable'
+    return 0
+  }
+  comm=$(printf '%s' "$comm" | tr -d '[:space:]')
+  comm=${comm#-}
+  args=$("$ps_bin" -p "$foreground_pid" -o args= 2>/dev/null) || {
+    printf 'unreadable'
+    return 0
+  }
+  case "$comm" in hermes|python|python[0-9]|python[0-9].[0-9]*) ;; *) printf 'ambiguous'; return 0 ;; esac
+  case " $args " in
+    *" $expected "*) printf 'alive' ;;
+    *) printf 'ambiguous' ;;
+  esac
+}
+
 # fm_backend_tmux_agent_state: recovery-grade harness-agent state for one
 # recorded target. See bin/fm-backend.sh's fm_backend_agent_state for the
 # shared state vocabulary and docs/tmux-backend.md "Agent liveness probe" for
@@ -238,8 +269,9 @@ fm_backend_tmux_bun_agent_state() {  # <target> <comm> [bun-realpath] [omp-realp
 # An omitted window or a definitive missing-session/server response is
 # `missing`; any other inventory or pane read failure is `unreadable`, so a
 # transient tmux problem never licenses a duplicate.
-fm_backend_tmux_agent_state() {  # <target> [bun-realpath] [omp-realpath]
-  local target=$1 expected_bun=${2:-} expected_omp=${3:-} comm session window windows inventory_status
+fm_backend_tmux_agent_state() {  # <target> [bun-realpath] [omp-realpath] [hermes-bin]
+  local target=$1 expected_bun=${2:-} expected_omp=${3:-} expected_hermes=${4:-}
+  local comm session window windows inventory_status
   case "$target" in
     *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
     *:*) ;;
@@ -279,6 +311,10 @@ fm_backend_tmux_agent_state() {  # <target> [bun-realpath] [omp-realpath]
   esac
   if [ -n "$expected_bun" ] && [ "$expected_bun" = "$expected_omp" ]; then
     fm_backend_tmux_bun_agent_state "$target" "$comm" "$expected_bun" "$expected_omp"
+    return 0
+  fi
+  if [ -n "$expected_hermes" ]; then
+    fm_backend_tmux_hermes_agent_state "$target" "$expected_hermes"
     return 0
   fi
   case "$comm" in

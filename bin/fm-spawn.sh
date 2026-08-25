@@ -1233,14 +1233,15 @@ launch_template() {
     # Its turn-end signal is a globally configured Stop hook plus a guarded
     # per-task worktree token, so no launch placeholder belongs here.
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
-    # Hermes v0.20.0's top-level -z path ignores --resume and
-    # --pass-session-id, so the equally headless quiet single-query path owns
-    # the resumable worker lifecycle. --safe-mode is intentionally absent: it
-    # disables config hooks and AGENTS/rules, including both supervision and
-    # the launch brief's project instructions. Hermes is crewmate/scout-only.
+    # Hermes v0.20.0's modern TUI is launched bare and receives the brief only
+    # after its structural composer-ready gate below. The CLI --reasoning flag
+    # is retained for forward compatibility, while the same launch gate also
+    # applies the verified session-scoped /reasoning command because v0.20.0's
+    # Python TUI launcher currently drops that flag. --safe-mode is absent
+    # because it disables rules, plugins, and lifecycle supervision.
     hermes)
       [ "$kind" != secondmate ] || return 1
-      printf '%s' '__HERMESBIN__ chat -Q --query "$(__OPINPUT__ encode launch-brief < __BRIEF__)" --provider openai-codex __MODELFLAG____EFFORTFLAG__--accept-hooks --yolo --pass-session-id'
+      printf '%s' '__HERMESBIN__ chat --tui --in __HERMESWORKTREE__ --no-restore-cwd --provider openai-codex __MODELFLAG____EFFORTFLAG____HERMESRESUMEFLAG__--accept-hooks --yolo --pass-session-id'
       ;;
     *) return 1 ;;
   esac
@@ -1414,7 +1415,7 @@ if [ "$HARNESS" = hermes ]; then
   case "$BACKEND" in
     tmux|herdr) ;;
     *)
-      echo "error: harness=hermes supports resumable spawns only on tmux and herdr; backend=$BACKEND is refused" >&2
+      echo "error: harness=hermes supports persistent TUI spawns only on tmux and herdr; backend=$BACKEND is refused" >&2
       exit 1
       ;;
   esac
@@ -1864,6 +1865,7 @@ HERMES_BIN=
 HERMES_HOME_DIR=
 HERMES_SESSION_FILE=
 HERMES_STARTED=
+HERMES_RESUME_ID=
 HERMES_LAUNCH_TEMPLATE=0
 case "$LAUNCH" in
   *__HERMESBIN__*)
@@ -1871,9 +1873,25 @@ case "$LAUNCH" in
     HERMES_BIN=$(resolve_hermes_binary) || exit 1
     HERMES_HOME_DIR=$(resolve_hermes_home "$HERMES_BIN") || exit 1
     HERMES_BIN="$HERMES_BIN" "$FM_ROOT/bin/fm-hermes-turnend-hook.sh" install || {
-      echo "error: refusing Hermes spawn because the global lifecycle hooks could not be installed safely" >&2
+      echo "error: refusing Hermes spawn because the lifecycle bridge could not be installed safely" >&2
       exit 1
     }
+    HERMES_SESSION_FILE="$STATE/$ID.hermes-session"
+    if [ -e "$HERMES_SESSION_FILE" ] || [ -L "$HERMES_SESSION_FILE" ]; then
+      if [ -f "$HERMES_SESSION_FILE" ] && [ ! -L "$HERMES_SESSION_FILE" ] \
+        && [ "$(wc -l < "$HERMES_SESSION_FILE" 2>/dev/null | tr -d '[:space:]')" = 1 ]; then
+        HERMES_RESUME_ID=$(head -n 1 "$HERMES_SESSION_FILE" 2>/dev/null || true)
+      fi
+      case "$HERMES_RESUME_ID" in
+        '') ;;
+        *[[:cntrl:]]*) HERMES_RESUME_ID= ;;
+        *) [ "${#HERMES_RESUME_ID}" -le 200 ] || HERMES_RESUME_ID= ;;
+      esac
+      if [ -z "$HERMES_RESUME_ID" ]; then
+        echo "error: refusing Hermes spawn: $HERMES_SESSION_FILE exists but carries no usable resumable session id; a fresh session would be bound to that stale sidecar and its lifecycle bridge would never acknowledge a turn. Remove it (or run fm-teardown.sh $ID --force) and respawn" >&2
+        exit 1
+      fi
+    fi
     LAUNCH=${LAUNCH//__HERMESBIN__/$(shell_quote "$HERMES_BIN")}
     ;;
 esac
@@ -2948,6 +2966,67 @@ kimi_spawn_fail() {  # <detail>
   echo "error: $1; inspect window $T" >&2
 }
 
+hermes_capture() {
+  fm_backend_capture "$BACKEND" "$T" 80 "$W" 2>/dev/null || true
+}
+
+hermes_wait_for_ready() {
+  local pane composer i=0 max=${FM_HERMES_READY_POLLS:-120}
+  local interval=${FM_HERMES_READY_INTERVAL:-0.5}
+  while [ "$i" -lt "$max" ]; do
+    pane=$(hermes_capture)
+    composer=$(fm_backend_composer_state "$BACKEND" "$T" hermes 2>/dev/null || printf 'unknown')
+    if [ "$composer" = empty ] \
+      && printf '%s\n' "$pane" | grep -qE '^[[:space:]]*(─|━)[[:space:]]+ready[[:space:]]*│'; then
+      return 0
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+hermes_submit_setup() {  # <text> <settle>
+  local text=$1 settle=$2 verdict state i=0 retries=${FM_HERMES_SUBMIT_RETRIES:-3}
+  local interval=${FM_HERMES_SUBMIT_INTERVAL:-0.4}
+  case "$text" in
+    '/reasoning '*)
+      spawn_send_literal "$T" "$text" || return 1
+      sleep "$settle"
+      while [ "$i" -lt "$retries" ]; do
+        spawn_send_key "$T" Enter || return 1
+        sleep "$interval"
+        state=$(fm_backend_composer_state "$BACKEND" "$T" hermes 2>/dev/null || printf 'unknown')
+        [ "$state" != empty ] || return 0
+        case "$state" in pending|pending-unproven) ;; *) return 1 ;; esac
+        i=$((i + 1))
+      done
+      return 1
+      ;;
+  esac
+  verdict=$(fm_backend_send_text_submit "$BACKEND" "$T" "$text" "$retries" \
+    "$interval" "$settle" "$W" hermes) || return 1
+  [ "$verdict" = empty ]
+}
+
+hermes_wait_for_reasoning() {  # <effort>
+  local effort=$1 pane i=0 max=${FM_HERMES_SETTING_POLLS:-120}
+  local interval=${FM_HERMES_SETTING_INTERVAL:-0.25}
+  while [ "$i" -lt "$max" ]; do
+    pane=$(hermes_capture)
+    if printf '%s\n' "$pane" | grep -Fq "reasoning: $effort" \
+      && printf '%s\n' "$pane" | grep -qE '^[[:space:]]*(─|━)[[:space:]]+ready[[:space:]]*│'; then
+      return 0
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  if [ "${FM_HERMES_DEBUG:-0}" = 1 ]; then
+    printf 'Hermes reasoning probe final capture:\n%s\n' "$pane" >&2
+  fi
+  return 1
+}
+
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
   && [ "$PREWALK_WORKTREE_READY" != 1 ]; then
   printf -v treehouse_get_command '%q' "$SCRIPT_DIR/fm-treehouse-get.sh"
@@ -3330,22 +3409,37 @@ EOF
       exclude_path '.fm-kimi-turnend'
       ;;
     hermes)
-      # Hermes runs one quiet single-query process per logical turn. Its
-      # profile-global shell hook is inert unless this worktree pointer names
-      # a private registry token. on_session_start captures a new session id,
-      # pre_llm_call acknowledges and marks each initial or resumed turn busy,
+      # Hermes runs one persistent TUI process. The profile-global lifecycle
+      # plugin forwards each gateway turn into the same guarded shell handler
+      # used by compatible classic/headless runs. on_session_start captures a
+      # new session id, pre_llm_call acknowledges the initial or resumed turn,
       # and on_session_end closes the semantic turn and touches the watcher
-      # notification. The end hook is therefore the precise per-turn boundary
-      # for this one-process-per-turn adapter.
+      # notification without polling away a short turn.
       if [ "$HERMES_LAUNCH_TEMPLATE" -eq 1 ]; then
         HERMES_AUTH_DIR="$HERMES_HOME_DIR/fm-turn-end.d"
         HERMES_SESSION_FILE="$STATE_REAL/$ID.hermes-session"
         HERMES_STARTED="$STATE_REAL/$ID.hermes-started"
-        rm -f -- "$HERMES_SESSION_FILE" "$HERMES_STARTED"
-        old_umask=$(umask)
-        umask 077
-        auth_file=$(mktemp "$HERMES_AUTH_DIR/fm.XXXXXXXXXXXX")
-        umask "$old_umask"
+        rm -f -- "$HERMES_STARTED"
+        auth_file=
+        if [ -f "$STATE/$ID.hermes-turnend-token" ] && [ ! -L "$STATE/$ID.hermes-turnend-token" ]; then
+          prior_token=$(cat "$STATE/$ID.hermes-turnend-token" 2>/dev/null || true)
+          case "$prior_token" in
+            fm.????????????)
+              prior_auth="$HERMES_AUTH_DIR/$prior_token"
+              if [ -f "$prior_auth" ] && [ ! -L "$prior_auth" ] \
+                && jq -e --arg id "$ID" --arg state "$STATE_REAL" \
+                  '.id == $id and .state == $state' "$prior_auth" >/dev/null 2>&1; then
+                auth_file=$prior_auth
+              fi
+              ;;
+          esac
+        fi
+        if [ -z "$auth_file" ]; then
+          old_umask=$(umask)
+          umask 077
+          auth_file=$(mktemp "$HERMES_AUTH_DIR/fm.XXXXXXXXXXXX")
+          umask "$old_umask"
+        fi
         jq -n \
           --arg turnend "$TURNEND" \
           --arg session_file "$HERMES_SESSION_FILE" \
@@ -3504,9 +3598,12 @@ OMPRESUMEFLAG=
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
+sq_hermes_worktree=$(shell_quote "$WT")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 PREWALKFLAG=$(prewalk_flag_for_harness "$HARNESS" "$PREWALK_INTO" "$PREWALK_DISABLED" "$PREWALK_DISABLE_SUPPORTED")
+HERMESRESUMEFLAG=
+[ -z "$HERMES_RESUME_ID" ] || HERMESRESUMEFLAG="--resume $(shell_quote "$HERMES_RESUME_ID") "
 [ "$OMP_LAUNCH_TEMPLATE" -eq 0 ] || LAUNCH=${LAUNCH//__OMPMAXTIME__/$OMPMAXTIME}
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
@@ -3523,6 +3620,8 @@ LAUNCH=${LAUNCH//__OMPRESUMEFLAG__/$OMPRESUMEFLAG}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
+LAUNCH=${LAUNCH//__HERMESWORKTREE__/$sq_hermes_worktree}
+LAUNCH=${LAUNCH//__HERMESRESUMEFLAG__/$HERMESRESUMEFLAG}
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
 # inherit firstmate's current environment, so a bare `claude` in the pane falls
 # back to the default ~/.claude store even when firstmate itself runs under a
@@ -3733,6 +3832,32 @@ if [ "$HARNESS" = omp ]; then
   OMP_ABORT_CLEANUP=0
 fi
 if [ "$HERMES_LAUNCH_TEMPLATE" -eq 1 ]; then
+  if ! hermes_wait_for_ready; then
+    printf 'failed: Hermes persistent TUI did not reach its verified ready composer\n' >> "$STATE/$ID.status"
+    echo "error: Hermes persistent TUI did not reach its verified ready composer; inspect window $T" >&2
+    exit 1
+  fi
+  case "$EFFORT" in
+    low|medium|high|xhigh|max)
+      if ! hermes_submit_setup "/reasoning $EFFORT" 1.2 \
+        || ! hermes_wait_for_reasoning "$EFFORT"; then
+        printf 'failed: Hermes persistent TUI did not apply its session-scoped reasoning effort\n' >> "$STATE/$ID.status"
+        echo "error: Hermes persistent TUI did not apply reasoning=$EFFORT; inspect window $T" >&2
+        exit 1
+      fi
+      ;;
+  esac
+  if [ -n "$HERMES_RESUME_ID" ]; then
+    HERMES_POINTER="Resume the task from the brief at $BRIEF_REAL using the restored session context, and continue until the brief's completion gate."
+  else
+    HERMES_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
+  fi
+  rm -f -- "$TURNEND"
+  if ! hermes_submit_setup "$HERMES_POINTER" 0.3; then
+    printf 'failed: Hermes persistent TUI brief pointer could not be submitted\n' >> "$STATE/$ID.status"
+    echo "error: Hermes persistent TUI brief pointer could not be submitted; inspect window $T" >&2
+    exit 1
+  fi
   HERMES_ACK_POLLS=${FM_HERMES_LAUNCH_ACK_POLLS:-120}
   HERMES_ACK_INTERVAL=${FM_HERMES_LAUNCH_ACK_INTERVAL:-0.5}
   HERMES_ACKED=0
@@ -3748,8 +3873,8 @@ if [ "$HERMES_LAUNCH_TEMPLATE" -eq 1 ]; then
     sleep "$HERMES_ACK_INTERVAL"
   done
   if [ "$HERMES_ACKED" -ne 1 ]; then
-    printf 'failed: Hermes initial instruction did not publish a resumable session through its lifecycle hooks\n' >> "$STATE/$ID.status"
-    echo "error: Hermes initial instruction did not publish a resumable session through its lifecycle hooks; inspect window $T" >&2
+    printf 'failed: Hermes persistent TUI initial instruction did not publish a resumable session through its lifecycle bridge\n' >> "$STATE/$ID.status"
+    echo "error: Hermes persistent TUI initial instruction did not publish a resumable session through its lifecycle bridge; inspect window $T" >&2
     exit 1
   fi
 fi

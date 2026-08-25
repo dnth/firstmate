@@ -121,56 +121,67 @@ Both recorded runtime identities now classify the exact `pi-launcher` foreground
 
 ### Hermes crewmate mechanics
 
-Hermes Agent v0.20.0 was verified on 2026-08-24 against the configured `gpt-5.6-sol` model through the OpenAI Codex provider.
-The probe used a temporary mode-700 `HERMES_HOME` containing private copies of the current config and auth store, and removed that profile after the run.
-It did not call `fm-spawn`, create a runtime-backend endpoint, or modify the operator's real Hermes config.
+Hermes Agent v0.20.0 was verified on 2026-08-25 against `gpt-5.6-sol` through the OpenAI Codex provider.
+The tmux E2E used a private `TMUX_TMPDIR`, a temporary mode-700 `HERMES_HOME`, a temporary Firstmate home, and disposable git worktrees.
+The Herdr E2E used only the guarded `fm-herdr-lab.sh` interface and the named session `fm-lab-hermes-tui-adapt-1672570-30455`.
+The lab helper's before-and-after tripwire preserved the running `default` session, and the pre-existing stray `default:w80:p2` pane was never addressed.
 
 ```sh
 FM_HERMES_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-hermes-live-e2e.test.sh
 
-HERMES_HOME="$PROFILE" hermes -z \
-  "Remember RESUME-CONTEXT-824 for the next turn and print exactly OK" \
-  --provider openai-codex --model gpt-5.6-sol --reasoning low \
-  --accept-hooks --yolo --pass-session-id
+FM_HOME="$FM_LIVE_HOME" HERMES_HOME="$PROFILE" \
+  bin/fm-spawn.sh hermes-live-worker "$PROJECT" \
+  --harness hermes --backend tmux --model gpt-5.6-sol --effort low \
+  --mode local-only --yolo off
 
-HERMES_HOME="$PROFILE" hermes chat -Q --query \
-  "Print only the token I asked you to remember" \
-  --resume "$SESSION_ID" --no-restore-cwd \
-  --provider openai-codex --model gpt-5.6-sol --reasoning low \
-  --accept-hooks --yolo --pass-session-id
+FM_HOME="$FM_LIVE_HOME" HERMES_HOME="$PROFILE" \
+  bin/fm-send.sh hermes-live-worker \
+  'Use terminal_tool to run sleep 5, then reply exactly HERMES-TUI-STEER-OK.'
 
-HERMES_HOME="$PROFILE" hermes chat -Q --query \
-  "Apply the preloaded skill" --skills fm-proof \
-  --provider openai-codex --model gpt-5.6-sol --reasoning low \
-  --accept-hooks --yolo --pass-session-id
+FM_HOME="$FM_LIVE_HOME" HERMES_HOME="$PROFILE" \
+  bin/fm-send.sh hermes-live-worker /fmnative
 
-HERMES_HOME="$PROFILE" hermes chat -Q --query \
-  "Print exactly FRESH-OK" \
-  --provider openai-codex --model gpt-5.6-sol --reasoning low \
-  --accept-hooks --yolo --pass-session-id
+FM_HOME="$FM_LIVE_HOME" HERMES_HOME="$PROFILE" \
+  bin/fm-send.sh hermes-live-worker --key C-c
+
+FM_HOME="$FM_LIVE_HOME" HERMES_HOME="$PROFILE" \
+  bin/fm-send.sh hermes-live-worker /exit
 ```
 
 Observed bounded output:
 
 ```text
-command: HERMES_HOME="$PROFILE" hermes -z "Remember RESUME-CONTEXT-824 for the next turn and print exactly OK" --provider openai-codex --model gpt-5.6-sol --reasoning low --accept-hooks --yolo --pass-session-id
-output: exit=0 stdout=OK turn_end=touched session=present started=touched busy=idle hermes-hook
-command: HERMES_HOME="$PROFILE" hermes chat -Q --query "Print only the token I asked you to remember" --resume "$SESSION_ID" --no-restore-cwd --provider openai-codex --model gpt-5.6-sol --reasoning low --accept-hooks --yolo --pass-session-id
-output: exit=0 stdout=  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only RESUME-CONTEXT-824 same_session=yes turn_end=touched started=touched
-command: HERMES_HOME="$PROFILE" hermes chat -Q --query "Apply the preloaded skill" --skills fm-proof --provider openai-codex --model gpt-5.6-sol --reasoning low --accept-hooks --yolo --pass-session-id
-output: exit=0 stdout=HERMES-SKILL-OK skill_preload=applied
-command: HERMES_HOME="$PROFILE" hermes chat -Q --query "Print exactly FRESH-OK" --provider openai-codex --model gpt-5.6-sol --reasoning low --accept-hooks --yolo --pass-session-id
-output: exit=0 stdout=FRESH-OK session=published started=touched turn_end=touched new_session=yes busy=idle hermes-hook
-ok - Hermes Agent v0.20.0 (2026.8.3) isolated mechanics: -z exit, lifecycle hook, same-session quiet resume, skill preload, and fresh no-resume session publication
+command: fm-spawn hermes-live-worker --harness hermes --backend tmux --model gpt-5.6-sol --effort low
+output: persistent=yes session=20260825_022814_bd8c33 turn_end=touched busy=idle hermes-hook
+command: fm-send hermes-live-worker "Use terminal_tool to run sleep 5 ..."
+output: submit=verified busy=busy hermes-hook idle=idle hermes-hook turn_end=touched
+command: fm-send hermes-live-worker /fmnative
+output: native_skill=/fmnative send=0 busy=busy hermes-hook idle=idle hermes-hook turn_end=touched
+command: fm-send hermes-live-worker "sleep 20"; fm-send hermes-live-worker --key C-c
+output: interrupt=C-c state=idle fm-interrupt turn_end=touched
+command: fm-send hermes-live-worker /exit
+output: exit=0 foreground=shell
+command: fm-spawn hermes-live-worker ... --resume 20260825_022814_bd8c33 (from task state)
+output: same_session=yes context=HERMES-TUI-RESUME-825
+command: fm-spawn hermes-live-scout --scout --harness hermes --backend tmux
+output: scout_persistent=yes turn_end=touched
+ok - Hermes Agent v0.20.0 (2026.8.3) persistent Hermes TUI: crew/scout launch, composer steer, native skill turn, busy->idle, turn-end, interrupt, exit, and exact-session resume
 ```
 
-The initial `-z` run proved the real one-shot process exits and `on_session_end` touches the task marker.
-The same run proved `on_session_start` and `pre_llm_call` publish the initial session and busy transition.
-The resumed quiet-chat process retained conversation context and the same session id, while only `pre_llm_call` supplied its start acknowledgement; `on_session_start` correctly remained a new-session-only event.
-The third isolated turn proved `--skills <skill>` loads and applies a profile-visible skill in the same quiet headless mode.
-The fourth run deleted `state/<id>.hermes-session`, `state/<id>.hermes-started`, and `state/<id>.turn-ended` first and then ran the exact production launch spelling with no `--resume`, proving `on_session_start` publishes a new resumable session and `pre_llm_call` publishes the start acknowledgement that `fm-spawn` hard-gates every Hermes spawn on.
-The `tirith security scanner` line in the resume run's stdout is Hermes' own output, not the probe's: v0.20.0 prints it on stdout when it restores a session, so it appears on the `--resume` run and on none of the others. Two independent runs of the probe reproduced this transcript byte for byte.
-The adapter therefore uses `chat -Q --query` for production launch and resume because Hermes v0.20.0's top-level `-z` dispatcher does not thread the resume, session-id, reasoning, or skill axes required by Firstmate.
+The TUI remained as the foreground process across ordinary turns and accepted every steer through its bare `❯` composer.
+The live busy surface had two independent positive signals: `Ctrl+C to interrupt…` in the composer and the status rule's `· <elapsed>` segment.
+The structural `─ ready │` rule proved idle after both normal completion and interruption.
+Those two rendered signals are what the missing-record fallback reads; they are not what the transcript above sampled. A valid trusted lifecycle record decides classification in both directions, and the rendered tail is captured only after the record read finds no valid record, so every sample above - taken once the bridge had already published a record - reports `hermes-hook` in both states. That ordering is what keeps a lagging busy redraw from letting `--key C-c` reach an already-idle TUI and exit it, and it is why no `hermes-tui` verdict appears in a record-backed sample.
+A native profile skill (`$HERMES_HOME/skills/fmnative/SKILL.md`, typed as the bare `/fmnative`) started a real model turn: `fm-send` exited 0 on its `pre_llm_call` turn-start proof, the busy surface appeared, the turn-end marker fired, and the model spoke the skill's token.
+That is the fail-closed contract holding for the native branch - a slash command that Hermes handled locally instead would have produced a `delivered-no-turn` failure rather than success.
+The `firstmate-lifecycle` profile plugin forwarded `on_session_start`, `pre_llm_call`, and `on_session_end` from the TUI gateway worker into the guarded shell handler, which captured the exact durable session and touched every turn-end marker.
+Direct config shell hooks were disconfirming evidence for the TUI path: v0.20.0 logged them as registered in the wrapper process but did not invoke them from gateway turns.
+The CLI `--reasoning low` value was also disconfirming by itself because v0.20.0's Python TUI launcher dropped it and initially rendered the profile's `high` value.
+The session-scoped `/reasoning low` setup command changed the live footer to `gpt 5.6 sol low` without changing the global reasoning setting.
+That local slash command does not start an agent turn, so its launch-time submission uses structural composer clearing instead of Herdr's ordinary working-state proof.
+The tmux probe also proved that Hermes' busy placeholder must classify as empty composer content, because a false pending verdict sends a second empty Enter and Hermes interprets the double Enter as an interrupt.
+The named Herdr lab ran once on 2026-08-25 under the earlier classification ordering and has not been rerun; its verdicts are recorded here as captured. It independently produced `spawned ... window=fm-lab-hermes-tui-adapt-1672570-30455:w1:p6`, `busy hermes-tui`, `idle hermes-tui` (both rendered verdicts predate the record-first precedence change - under the shipped ordering the same samples report `hermes-hook`, as the rerun tmux transcript above shows), `HERMES-HERDR-STEER-OK`, an `interrupted` transcript line after `C-c`, `HERDR-RESUME-825` after relaunch on `w1:p7`, and `HERMES-HERDR-SCOUT-OK` on `w1:p9`.
+The Herdr `/exit` path required a bounded process-exit wait because the TUI can spend tens of seconds shutting down MCP and child resources after the slash command clears its composer.
 
 ### OMP lifecycle
 

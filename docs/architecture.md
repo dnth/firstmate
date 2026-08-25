@@ -94,7 +94,7 @@ Unsupported supervisor backends refuse at daemon startup.
 Stalled escalation delivery writes `state/.subsuper-inject-wedged` and attempts a configured backend-independent active alert after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
 On an unmarked return, `bin/fm-afk-return.sh` owns ordered shutdown, durable catch-up evidence, and the fail-closed gate that keeps ordinary work behind every live firstmate-actionable blocker.
 `fm-send.sh` selects a pre-Enter popup-settle for slash commands and for codex `$...` skill invocations using metadata-routed target `harness=` values.
-`fm-send.sh` owns the OMP post-submit turn-start, queued-busy exception, and supervised-recovery contract documented in its header.
+`fm-send.sh` owns the OMP and Hermes post-submit turn-start checks, OMP's queued-busy exception, and the supervised-recovery contract documented in its header.
 Successful text sends then receive the existing `FM_SEND_SETTLE` pause so immediate peeks catch the receiving turn, while the sub-supervisor uses only the shared submit core and pays neither fm-send-only step.
 
 ## Busy state is semantic, per adapter
@@ -102,9 +102,10 @@ Successful text sends then receive the existing `FM_SEND_SETTLE` pause so immedi
 `bin/fm-busy-lib.sh` is the single owner of what "this worker is busy" means, and `bin/fm-busy-event.sh` is the only writer of the per-task records it reads.
 Every classification returns a verdict of busy, idle, unknown, or dead together with the source that produced it, so a consumer or a diagnostic can never confuse semantic state with a fallback.
 
-Each converted adapter reports its own turn lifecycle through a machine-readable contract the vendor already exposes, rather than through rendered footer text: Pi and pi-signed through the Firstmate-owned extension's `agent_start` and `agent_settled` confirmed by `ctx.isIdle()`, OpenCode through its plugin's semantic `session.status`, and Claude through owned `UserPromptSubmit`, `Stop`, `StopFailure`, and `SessionEnd` hooks.
+Each converted adapter reports its own turn lifecycle through the strongest verified source the vendor exposes: Pi and pi-signed through the Firstmate-owned extension's `agent_start` and `agent_settled` confirmed by `ctx.isIdle()`, OpenCode through its plugin's semantic `session.status`, Claude through owned lifecycle hooks, and Hermes through its live TUI's busy-only composer/footer plus a plugin-forwarded lifecycle bridge for exact turn boundaries.
 Kimi behind Pi inherits Pi's lifecycle.
-Codex and standalone Kimi classify unknown behind explicit probes until a semantic source is live-verified for them, and Grok keeps one clearly isolated rendered-tail fallback that can only ever classify a Grok task.
+Codex and standalone Kimi classify unknown behind explicit probes until a semantic source is live-verified for them, while the Hermes and Grok rendered sources are isolated by exact harness identity.
+Hermes' bridged lifecycle record outranks its rendered footer in both directions - a trusted busy beats a rendered ready row and a trusted idle beats a lagging rendered busy row - and the rendered tail is read only when no valid record exists, so neither a steer nor a `C-c` interrupt is gated on a stale screen.
 
 Missing, malformed, stale, untrusted, or unverified semantic state is unknown, never idle, and unknown is never promoted to busy either.
 Ordinary task-state consumers act only on an exact busy verdict, so an unreadable worker surfaces for a closer look instead of being absorbed as still-working or written off as finished.
@@ -112,7 +113,7 @@ Endpoint death is the only process-level override and yields dead; child process
 `state/<id>.turn-ended` files remain wake notifications, not current state.
 
 Each record is bound to an incarnation token minted when the task's wiring is armed, so an event from a superseded incarnation is rejected rather than applied, and a record left behind by one classifies unknown.
-Three rendered-text readers deliberately remain outside this contract because they answer delivery questions: the submit acknowledgement and away-mode supervisor-pane busy guard in `bin/fm-tmux-lib.sh`, and the secondmate delivery-confirmation observation in `bin/fm-pending-reply-lib.sh`.
+Three other rendered-text readers deliberately remain outside this contract because they answer delivery questions: the submit acknowledgement and away-mode supervisor-pane busy guard in `bin/fm-tmux-lib.sh`, and the secondmate delivery-confirmation observation in `bin/fm-pending-reply-lib.sh`.
 All are harness-scoped rather than a global pattern union, and none is a recorded worker state source.
 
 ## Harness identity and the Pi-compatible family
@@ -136,9 +137,9 @@ It owns task endpoint creation, bounded capture, text/key sends, current-path re
 Runtime auto-detection is innermost-first: `$TMUX` wins over `HERDR_ENV=1`, which wins over cmux's primary `CMUX_WORKSPACE_ID` marker and documented fallback signals; auto-detected herdr or cmux prints a one-time opt-out notice, auto-detected tmux stays silent, and zellij and orca are never auto-detected (only explicit selection).
 Unknown backend names fail loudly.
 For compatibility, default tmux tasks do not write `backend=tmux`; every reader treats a missing `backend=` field as `tmux`.
-`fm-watch.sh` decides each window's busy state through the semantic contract above rather than by polling the backend for rendered text.
+`fm-watch.sh` decides each window's busy state through the semantic contract above, which includes the harness-scoped Hermes and Grok rendered-tail sources.
 Herdr's native `agent.get` verdict still participates, but only as evidence of activity: a native `busy` is accepted when the task has no record of its own, while a native `idle` is not, because `agent.get` reports generation state and reads idle while a worker blocks on its own long-running foreground tool call.
-tmux, zellij, orca, and cmux expose no native busy primitive at all, so a task on those backends is classified purely from its adapter's own lifecycle record.
+Tmux, Zellij, Orca, and cmux expose no native busy primitive, so tasks on those backends use their adapter lifecycle record or an explicitly verified harness-scoped rendered source.
 That poll loop is still the default event source for backends with no native push events, so this stays an extraction of the abstraction rather than a watcher rewrite.
 For capable Herdr sessions, the same watcher replaces its terminal sleep with a bounded native event wait that immediately surfaces `blocked`; [Push events and polling fallback](herdr-backend.md#push-events-and-polling-fallback) owns the current mechanism and capability gates, while [runtime backend verification](verification/runtime-backends.md#native-blocked-event) owns the active evidence.
 The deeper session-start agent-process liveness probe is separate from that busy-state poll: tmux and Herdr have verified classifiers for secondmate recovery, Zellij remains unverified, and Orca and cmux do not support secondmate spawns.

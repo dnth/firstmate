@@ -36,8 +36,8 @@ SH
 set -u
 case "$*" in
   '-o tpgid= -p 4100') printf '4200\n' ;;
-  '-p 4200 -o comm=') printf '%s\n' "${FM_FAKE_TMUX_COMMAND:-zsh}" ;;
-  '-p 4200 -o args=') printf '%s\n' "${FM_FAKE_TMUX_COMMAND:-zsh}" ;;
+  '-p 4200 -o comm=') printf '%s\n' "${FM_FAKE_PS_COMMAND:-hermes}" ;;
+  '-p 4200 -o args=') printf 'python3 %s chat --tui\n' "$FM_FAKE_HERMES_BIN" ;;
   '-axo pid=,pgid=,ppid=') printf '%s\n' '4100 4100 1' '4200 4200 4100' ;;
   *) exit 1 ;;
 esac
@@ -48,7 +48,10 @@ SH
 set -u
 printf '%s\n' "$*" >> "$FM_FAKE_TMUX_CALL_LOG"
 fire_hook() {
-  local event=$1 session_id=${2:-hermes-session-test} hook="$HERMES_HOME/fm-turn-end.sh"
+  local event=$1 session_id=${2:-} hook="$HERMES_HOME/fm-turn-end.sh"
+  if [ -z "$session_id" ]; then
+    session_id=$(cat "$FM_FAKE_HERMES_SESSION_FILE" 2>/dev/null || printf 'hermes-session-test')
+  fi
   printf '{"hook_event_name":"%s","session_id":"%s","cwd":"%s","task_id":"","turn_id":"turn-test"}\n' \
     "$event" "$session_id" "$FM_FAKE_PANE_PATH" \
     | HERMES_HOME="$HERMES_HOME" bash "$hook"
@@ -57,24 +60,23 @@ submit_command() {
   local command=$1
   printf '%s\n' "$command" >> "$FM_FAKE_COMMAND_LOG"
   case "$command" in
-    *hermes*chat*-Q*--query*)
-      case "$command" in
-        *--resume*)
-          if [ -n "${FM_FAKE_HERMES_BLOCK_DIR:-}" ]; then
-            if mkdir "$FM_FAKE_HERMES_BLOCK_DIR/first.claim" 2>/dev/null; then
-              touch "$FM_FAKE_HERMES_BLOCK_DIR/first-entered"
-              while [ ! -f "$FM_FAKE_HERMES_BLOCK_DIR/release-first" ]; do sleep 0.01; done
-            else
-              touch "$FM_FAKE_HERMES_BLOCK_DIR/second-entered"
-            fi
-          fi
-          [ "${FM_FAKE_HERMES_NO_PRE_LLM:-0}" != 1 ] || return 0
-          ;;
-        *)
-          fire_hook on_session_start
-          [ "${FM_FAKE_HERMES_START_ONLY:-0}" != 1 ] || return 0
-          ;;
-      esac
+    *hermes*chat*--tui*) printf 'idle\n' > "$FM_FAKE_HERMES_TUI_STATE" ;;
+    '/reasoning '*) printf '%s\n' "${command#/reasoning }" > "$FM_FAKE_HERMES_REASONING" ;;
+    /exit) printf 'shell\n' > "$FM_FAKE_HERMES_TUI_STATE" ;;
+    *)
+      if [ -n "${FM_FAKE_HERMES_BLOCK_DIR:-}" ]; then
+        if mkdir "$FM_FAKE_HERMES_BLOCK_DIR/first.claim" 2>/dev/null; then
+          touch "$FM_FAKE_HERMES_BLOCK_DIR/first-entered"
+          while [ ! -f "$FM_FAKE_HERMES_BLOCK_DIR/release-first" ]; do sleep 0.01; done
+        else
+          touch "$FM_FAKE_HERMES_BLOCK_DIR/second-entered"
+        fi
+      fi
+      if [ ! -s "$FM_FAKE_HERMES_SESSION_FILE" ]; then
+        fire_hook on_session_start
+      fi
+      [ "${FM_FAKE_HERMES_START_ONLY:-0}" != 1 ] || return 0
+      [ "${FM_FAKE_HERMES_NO_PRE_LLM:-0}" != 1 ] || return 0
       fire_hook pre_llm_call
       fire_hook on_session_end
       ;;
@@ -82,9 +84,18 @@ submit_command() {
 }
 case "$*" in
   *'#{pane_current_path}'*) printf '%s\n' "$FM_FAKE_PANE_PATH"; exit 0 ;;
-  *'#{pane_current_command}'*) printf '%s\n' "${FM_FAKE_TMUX_COMMAND:-zsh}"; exit 0 ;;
+  *'#{pane_current_command}'*)
+    if [ "$(cat "$FM_FAKE_HERMES_TUI_STATE" 2>/dev/null)" = shell ]; then
+      printf 'zsh\n'
+    else
+      printf '%s\n' "${FM_FAKE_TMUX_COMMAND:-python3}"
+    fi
+    exit 0
+    ;;
   *'#{pane_pid}'*) printf '4100\n'; exit 0 ;;
   *'#{pane_id}'*) printf '%%1\n'; exit 0 ;;
+  *'#{cursor_y}'*) printf '2\n'; exit 0 ;;
+  *'#{pane_height}'*) printf '3\n'; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
@@ -94,7 +105,7 @@ case "${1:-}" in
   has-session|new-session|set-window-option) exit 0 ;;
   send-keys)
     case " $* " in
-      *' C-c '*) : > "$FM_FAKE_PENDING_COMMAND"; exit 0 ;;
+      *' C-c '*) : > "$FM_FAKE_PENDING_COMMAND"; printf 'idle\n' > "$FM_FAKE_HERMES_TUI_STATE"; exit 0 ;;
     esac
     prev=
     literal=
@@ -120,7 +131,28 @@ case "${1:-}" in
     esac
     exit 0
     ;;
-  capture-pane) printf '$ \n'; exit 0 ;;
+  capture-pane)
+    state=$(cat "$FM_FAKE_HERMES_TUI_STATE" 2>/dev/null || printf 'shell')
+    if [ "$state" = shell ]; then
+      printf '$ \n'
+      exit 0
+    fi
+    reasoning=$(cat "$FM_FAKE_HERMES_REASONING" 2>/dev/null || printf 'high')
+    if [ "$state" = busy ]; then
+      printf ' ─ (busy) thinking… · 0s │ gpt 5.6 sol %s │\n ❯ Ctrl+C to interrupt…\n' "$reasoning"
+      exit 0
+    fi
+    if [ -s "$FM_FAKE_PENDING_COMMAND" ]; then
+      composer="❯ $(cat "$FM_FAKE_PENDING_COMMAND")"
+    else
+      composer='❯ Ask me anything…'
+    fi
+    case " $* " in
+      *' -E 2 '*) printf '%s\n' "$composer" ;;
+      *) printf ' reasoning: %s\n ─ ready │ gpt 5.6 sol %s │\n%s\n' "$reasoning" "$reasoning" "$composer" ;;
+    esac
+    exit 0
+    ;;
 esac
 exit 0
 SH
@@ -148,6 +180,8 @@ make_case() {
   : > "$case_dir/tmux.log"
   : > "$case_dir/commands.log"
   : > "$case_dir/pending"
+  printf 'shell\n' > "$case_dir/hermes-tui-state"
+  printf 'high\n' > "$case_dir/hermes-reasoning"
   printf '%s\n' "$case_dir|$home|$hermes_home|$project|$worktree|$fakebin"
 }
 
@@ -166,10 +200,16 @@ fixture_env() {
     FM_FAKE_WINDOW="fm-$TEST_ID" FM_FAKE_TMUX_CALL_LOG="$CASE_DIR/tmux.log" \
     FM_FAKE_COMMAND_LOG="$CASE_DIR/commands.log" \
     FM_FAKE_PENDING_COMMAND="$CASE_DIR/pending" \
+    FM_FAKE_HERMES_TUI_STATE="$CASE_DIR/hermes-tui-state" \
+    FM_FAKE_HERMES_REASONING="$CASE_DIR/hermes-reasoning" \
+    FM_FAKE_HERMES_SESSION_FILE="$HOME_DIR/state/$TEST_ID.hermes-session" \
+    FM_FAKE_HERMES_BIN="$FAKEBIN_DIR/hermes" \
     FM_FAKE_WINDOW_STATE="$CASE_DIR/window.state" \
     FM_TMUX_PS_BIN="$FAKEBIN_DIR/pane-ps" \
     FM_HERMES_PYTHON="$PYTHON_BIN" FM_HERMES_LAUNCH_ACK_POLLS=2 \
-    FM_HERMES_LAUNCH_ACK_INTERVAL=0 FM_SEND_HERMES_START_POLLS=4 \
+    FM_HERMES_LAUNCH_ACK_INTERVAL=0 FM_HERMES_READY_POLLS=4 \
+    FM_HERMES_READY_INTERVAL=0 FM_HERMES_SETTING_POLLS=4 \
+    FM_HERMES_SETTING_INTERVAL=0 FM_SEND_HERMES_START_POLLS=4 \
     FM_SEND_HERMES_START_INTERVAL=0.01 FM_SEND_SETTLE=0 TMUX='fake,1,0' \
     PATH="$FAKEBIN_DIR:$BASE_PATH" "$@"
 }
@@ -198,6 +238,23 @@ for event in ("on_session_start", "pre_llm_call", "on_session_end"):
 PY
 }
 
+config_plugin_enabled() {  # <config.yaml>
+  "$PYTHON_BIN" - "$1" <<'PY'
+import sys
+import yaml
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    config = yaml.safe_load(stream)
+plugins = config.get("plugins") or {}
+enabled = plugins.get("enabled") or []
+disabled = plugins.get("disabled") or []
+if enabled.count("firstmate-lifecycle") != 1:
+    raise SystemExit(1)
+if "firstmate-lifecycle" in disabled:
+    raise SystemExit(1)
+PY
+}
+
 test_hermes_hook_install_is_surgical_idempotent_and_removable() {
   local home config original once no_newline timeouts
   home="$TMP_ROOT/config-surgery"
@@ -218,12 +275,20 @@ SH
   chmod +x "$TMP_ROOT/config-hermes"
   HERMES_HOME="$home" HERMES_BIN="$TMP_ROOT/config-hermes" FM_HERMES_PYTHON="$PYTHON_BIN" \
     "$HOOK_INSTALLER" install || fail "Hermes hook install refused a foreign hooks mapping"
+  assert_present "$home/plugins/firstmate-lifecycle/plugin.yaml" "Hermes lifecycle plugin manifest was not installed"
+  assert_present "$home/plugins/firstmate-lifecycle/__init__.py" "Hermes lifecycle plugin bridge was not installed"
+  config_plugin_enabled "$config" \
+    || fail "Hermes lifecycle plugin was not enabled exactly once in plugins.enabled"
+  mkdir -m 700 "$home/plugins/firstmate-lifecycle/__pycache__"
+  printf 'test bytecode cache\n' > "$home/plugins/firstmate-lifecycle/__pycache__/__init__.cpython-311.pyc"
+  chmod 600 "$home/plugins/firstmate-lifecycle/__pycache__/__init__.cpython-311.pyc"
   timeouts=$(config_hook_timeouts "$config") || fail "Hermes hook timeouts were not readable"
   [ "$timeouts" = $'10\n10\n10' ] || fail "Hermes hook timeout did not exceed the busy-lock budget"
   cp "$config" "$once"
   HERMES_HOME="$home" HERMES_BIN="$TMP_ROOT/config-hermes" FM_HERMES_PYTHON="$PYTHON_BIN" \
     "$HOOK_INSTALLER" install || fail "second Hermes hook install failed"
   cmp -s "$once" "$config" || fail "second Hermes hook install changed config bytes"
+  assert_absent "$home/plugins/firstmate-lifecycle/__pycache__" "Hermes hook install retained stale plugin bytecode"
   "$PYTHON_BIN" - "$config" <<'PY'
 import sys
 
@@ -244,6 +309,7 @@ PY
   cmp -s "$original" "$config" || fail "Hermes hook removal did not restore foreign config bytes"
   assert_absent "$home/fm-turn-end.sh" "Hermes hook removal left its script"
   assert_absent "$home/fm-turn-end.d" "Hermes hook removal left its registry"
+  assert_absent "$home/plugins/firstmate-lifecycle" "Hermes hook removal left its lifecycle plugin"
 
   no_newline="$TMP_ROOT/config-no-newline"
   mkdir -p "$no_newline"
@@ -258,24 +324,30 @@ PY
   pass "Hermes hook install preserves foreign YAML and is idempotent and removable"
 }
 
-test_hermes_spawn_resume_skill_state_and_teardown() {
-  local rec out rc launch meta state_line token registry commands session interrupt_state
+test_hermes_spawn_tui_skill_state_and_teardown() {
+  local rec out rc launch meta state_line token registry commands interrupt_state
   TEST_ID=hermes-lifecycle-x1
   rec=$(make_case lifecycle "$TEST_ID")
   read_case "$rec"
   out=$(fixture_env "$SPAWN" "$TEST_ID" "$PROJECT_DIR" --harness hermes \
     --model gpt-5.6-sol --effort xhigh --mode no-mistakes --yolo off 2>&1)
   rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf '%s\nstate=%s\ncommands:\n%s\ntmux:\n%s\n' "$out" \
+      "$(cat "$CASE_DIR/hermes-tui-state")" "$(cat "$CASE_DIR/commands.log")" \
+      "$(cat "$CASE_DIR/tmux.log")" >&2
+  fi
   expect_code 0 "$rc" "Hermes spawn should succeed"
   assert_contains "$out" "spawned $TEST_ID harness=hermes" "Hermes spawn did not report success"
-  launch=$(grep 'hermes.*chat -Q' "$CASE_DIR/commands.log" | head -1)
-  assert_contains "$launch" "chat -Q --query" "Hermes launch did not use quiet headless chat"
+  launch=$(grep 'hermes.*chat --tui' "$CASE_DIR/commands.log" | head -1)
+  assert_contains "$launch" "chat --tui" "Hermes launch did not use the persistent TUI"
+  assert_contains "$launch" "--in '$WORKTREE_DIR' --no-restore-cwd" "Hermes launch did not pin the task worktree"
   assert_contains "$launch" "--provider openai-codex" "Hermes launch lost its provider"
   assert_contains "$launch" "--model 'gpt-5.6-sol'" "Hermes launch lost its model"
   assert_contains "$launch" "--reasoning 'xhigh'" "Hermes launch lost its reasoning effort"
   assert_contains "$launch" "--accept-hooks --yolo --pass-session-id" "Hermes launch lost autonomy/session flags"
   assert_not_contains "$launch" "--safe-mode" "Hermes launch disabled its hooks and rules"
-  assert_not_contains "$launch" " -z " "Hermes launch used the non-resumable v0.20.0 one-shot path"
+  assert_not_contains "$launch" " -Q " "Hermes launch retained the headless quiet path"
 
   meta="$HOME_DIR/state/$TEST_ID.meta"
   assert_grep 'harness=hermes' "$meta" "Hermes metadata lost its harness identity"
@@ -300,24 +372,29 @@ test_hermes_spawn_resume_skill_state_and_teardown() {
   [ "$(fixture_env bash -c '. "$1/bin/fm-backend.sh"; fm_backend_agent_state tmux "$2" "$3"' _ "$ROOT" "firstmate:fm-$TEST_ID" "$meta")" = alive ] \
     || fail "Hermes resumable idle endpoint did not classify alive"
 
-  fixture_env "$SEND" "$TEST_ID" 'Continue with the adapter.' || fail "Hermes follow-up resume failed"
-  fixture_env "$SEND" "$TEST_ID" /no-mistakes || fail "Hermes skill resume failed"
-  fixture_env "$SEND" "$TEST_ID" /native-check || fail "Hermes native skill resume failed"
+  fixture_env "$SEND" "$TEST_ID" 'Continue with the adapter.' || fail "Hermes TUI steer failed"
+  fixture_env "$SEND" "$TEST_ID" /no-mistakes || fail "Hermes skill steer failed"
+  fixture_env "$SEND" "$TEST_ID" /native-check || fail "Hermes native skill steer failed"
   commands=$(cat "$CASE_DIR/commands.log")
-  assert_contains "$commands" "--resume 'hermes-session-test'" "Hermes steer did not resume the stable session"
-  assert_contains "$commands" "--no-restore-cwd" "Hermes steer did not retain the task worktree"
+  [ "$(grep -c 'hermes.*chat --tui' "$CASE_DIR/commands.log")" = 1 ] \
+    || fail "Hermes steer launched another process instead of using the persistent composer"
+  assert_contains "$commands" "Continue with the adapter." "Hermes TUI steer lost its message"
   assert_contains "$commands" "Read the skill at $HOME_DIR/.agents/skills/no-mistakes/SKILL.md completely and follow it now." \
     "Hermes skill invocation did not use the validated Firstmate skill pointer"
-  assert_contains "$commands" "--skills 'native-check'" "Hermes native skill invocation did not preload the skill"
-  assert_contains "$commands" "Apply the preloaded native-check skill now." "Hermes native skill invocation lost its action prompt"
-  session=$(cat "$HOME_DIR/state/$TEST_ID.hermes-session")
-  fixture_hook pre_llm_call "$session"
+  assert_contains "$commands" "/native-check" "Hermes native skill invocation did not stay a TUI slash command"
+  printf 'busy\n' > "$CASE_DIR/hermes-tui-state"
+  out=$(fixture_env "$SEND" "$TEST_ID" --key C-c 2>&1) \
+    && fail "Hermes Ctrl+C was admitted on a settled turn with only a stale busy screen"
+  assert_contains "$out" "idle-exit key" "stale-screen Ctrl+C refusal lost its idle-exit diagnostic"
+  assert_not_contains "$(cat "$CASE_DIR/tmux.log")" " C-c" \
+    "a stale busy screen sent Ctrl+C to an idle Hermes TUI"
+  fixture_hook pre_llm_call "$(cat "$HOME_DIR/state/$TEST_ID.hermes-session")"
   fixture_env "$SEND" "$TEST_ID" --key C-c || fail "Hermes interrupt key was not mapped"
   assert_contains "$(cat "$CASE_DIR/tmux.log")" " C-c" "Hermes interrupt did not send Ctrl+C"
   # shellcheck disable=SC2016 # Positional parameters expand inside the fixture shell.
   interrupt_state=$(fixture_env bash -c '. "$1/bin/fm-busy-lib.sh"; fm_busy_classify tmux unused hermes "$2" "$3"' _ "$ROOT" "$TEST_ID" "$HOME_DIR/state")
-  [ "$interrupt_state" = 'idle fm-interrupt' ] || fail "Hermes Ctrl+C did not record truthful idle state: $interrupt_state"
-  fixture_env "$SEND" "$TEST_ID" /exit || fail "idle Hermes exit should be an idempotent no-op"
+  [ "$interrupt_state" = 'idle fm-interrupt' ] || fail "Hermes Ctrl+C did not record the interrupt edge: $interrupt_state"
+  fixture_env "$SEND" "$TEST_ID" /exit || fail "Hermes /exit did not stop the persistent TUI"
 
   fixture_env "$TEARDOWN" "$TEST_ID" --force >/dev/null 2>&1 || fail "Hermes teardown failed"
   assert_absent "$WORKTREE_DIR/.fm-hermes-turnend" "Hermes pointer survived teardown"
@@ -325,7 +402,7 @@ test_hermes_spawn_resume_skill_state_and_teardown() {
   assert_absent "$HOME_DIR/state/$TEST_ID.hermes-turnend-token" "Hermes state token survived teardown"
   assert_absent "$HOME_DIR/state/$TEST_ID.hermes-session" "Hermes session sidecar survived teardown"
   assert_absent "$HOME_DIR/state/$TEST_ID.hermes-started" "Hermes start marker survived teardown"
-  pass "Hermes crew lifecycle covers launch, hook state, resume, skill, interrupt, exit, state read, and teardown"
+  pass "Hermes crew lifecycle covers persistent TUI launch, steering, skill, interrupt, exit, state read, and teardown"
 }
 
 test_hermes_secondmate_is_refused() {
@@ -396,40 +473,93 @@ test_workers_and_scouts_preserve_raw_launch_commands() {
   pass "workers and scouts preserve raw launch commands"
 }
 
-test_hermes_resume_requires_idle_shell() {
-  local rec out rc before after
-  TEST_ID=hermes-shell-proof-x6
-  rec=$(make_case shell-proof "$TEST_ID")
-  read_case "$rec"
-  fixture_env "$SPAWN" "$TEST_ID" "$PROJECT_DIR" --harness hermes \
-    --model gpt-5.6-sol --effort high --mode no-mistakes --yolo off >/dev/null \
-    || fail "Hermes shell-proof fixture spawn failed"
-  before=$(wc -l < "$CASE_DIR/commands.log" | tr -d '[:space:]')
-  rc=0
-  out=$(fixture_env env FM_FAKE_TMUX_COMMAND=python "$SEND" "$TEST_ID" \
-    'Do not inject this command.' 2>&1) || rc=$?
-  [ "$rc" -ne 0 ] || fail "Hermes resume accepted a non-shell foreground process"
-  assert_contains "$out" "not a proven idle shell" "Hermes unsafe endpoint refusal omitted its reason"
-  after=$(wc -l < "$CASE_DIR/commands.log" | tr -d '[:space:]')
-  [ "$after" = "$before" ] || fail "Hermes resume injected into the non-shell foreground process"
-  pass "Hermes resume requires a proven idle shell"
+test_hermes_tui_busy_state_and_composer() {
+  local state out idle busy
+  state="$TMP_ROOT/tui-classifier-state"
+  mkdir -p "$state"
+  idle=$' ─ ready │ gpt 5.6 sol low │\n ❯ Ask me anything…'
+  busy=$' ─ (◔_◔) computing… · 2s │ gpt 5.6 sol low │\n ❯ Ctrl+C to interrupt…'
+  out=$(bash -c '. "$1/bin/fm-busy-lib.sh"; fm_busy_classify tmux unused hermes tui "$2" "$3"' _ "$ROOT" "$state" "$idle")
+  [ "$out" = 'idle hermes-tui' ] || fail "Hermes ready footer classified '$out'"
+  out=$(bash -c '. "$1/bin/fm-busy-lib.sh"; fm_busy_classify tmux unused hermes tui "$2" "$3"' _ "$ROOT" "$state" "$busy")
+  [ "$out" = 'busy hermes-tui' ] || fail "Hermes busy footer classified '$out'"
+  out=$(bash -c '. "$1/bin/fm-composer-lib.sh"; fm_composer_classify_content 0 "$2" "$FM_COMPOSER_IDLE_RE"' _ "$ROOT" '❯ Ask me anything…')
+  [ "$out" = empty ] || fail "Hermes plain placeholder composer classified '$out'"
+  out=$(bash -c '. "$1/bin/fm-composer-lib.sh"; fm_composer_classify_content 0 "$2" "$FM_COMPOSER_IDLE_RE"' _ "$ROOT" '❯ Ctrl+C to interrupt…')
+  [ "$out" = empty ] || fail "Hermes busy placeholder composer classified '$out'"
+  out=$(bash -c '. "$1/bin/fm-composer-lib.sh"; fm_composer_classify_content 0 "$2" "$FM_COMPOSER_IDLE_RE"' _ "$ROOT" '❯ real pending text')
+  [ "$out" = pending ] || fail "Hermes real composer text classified '$out'"
+  pass "Hermes TUI busy and composer classifiers distinguish ready, working, placeholder, and pending text"
 }
 
-test_hermes_resume_clears_pending_shell_input() {
-  local rec commands
-  TEST_ID=hermes-pending-shell-x8
-  rec=$(make_case pending-shell "$TEST_ID")
+# The launch gate matches the TUI's box-drawing status rule with grep. Under a
+# C/POSIX locale a bracket expression would match single BYTES of those
+# multibyte glyphs, so a healthy TUI would never satisfy the gate and every
+# Hermes spawn would abort. A long-lived crew daemon commonly inherits no locale.
+test_hermes_ready_gate_survives_c_locale() {
+  local rec out
+  TEST_ID=hermes-c-locale-x7
+  rec=$(make_case c-locale "$TEST_ID")
   read_case "$rec"
+  out=$(fixture_env env LC_ALL=C LANG=C LC_CTYPE=C "$SPAWN" "$TEST_ID" "$PROJECT_DIR" \
+    --harness hermes --model gpt-5.6-sol --effort low --mode no-mistakes --yolo off 2>&1) \
+    || fail "Hermes spawn failed under a C locale: $out"
+  assert_contains "$out" "spawned $TEST_ID harness=hermes" "C-locale Hermes spawn lost its launch line"
+  assert_grep "/reasoning low" "$CASE_DIR/commands.log" "C-locale Hermes spawn did not confirm its reasoning setup"
+  fixture_env "$TEARDOWN" "$TEST_ID" --force >/dev/null 2>&1 \
+    || fail "C-locale Hermes fixture teardown failed"
+  pass "the Hermes ready and reasoning launch gates match under a C locale"
+}
+
+test_hermes_spawn_resumes_existing_tui_session() {
+  local rec launch
+  TEST_ID=hermes-resume-tui-x22
+  rec=$(make_case resume-tui "$TEST_ID")
+  read_case "$rec"
+  printf 'hermes-session-existing\n' > "$HOME_DIR/state/$TEST_ID.hermes-session"
   fixture_env "$SPAWN" "$TEST_ID" "$PROJECT_DIR" --harness hermes \
-    --model gpt-5.6-sol --effort high --mode no-mistakes --yolo off >/dev/null \
-    || fail "Hermes pending-shell fixture spawn failed"
-  printf '%s' 'stale unsubmitted input' > "$CASE_DIR/pending"
-  fixture_env "$SEND" "$TEST_ID" 'Run only this resumed turn.' \
-    || fail "Hermes resume did not establish an empty shell boundary"
-  commands=$(cat "$CASE_DIR/commands.log")
-  assert_contains "$commands" "Run only this resumed turn." "Hermes resume lost the intended command"
-  assert_not_contains "$commands" "stale unsubmitted input" "Hermes resume executed stale shell input"
-  pass "Hermes resume clears pending shell input before submission"
+    --model gpt-5.6-sol --effort medium --mode no-mistakes --yolo off >/dev/null \
+    || fail "Hermes persistent TUI resume spawn failed"
+  launch=$(grep 'hermes.*chat --tui' "$CASE_DIR/commands.log" | head -1)
+  assert_contains "$launch" "--resume 'hermes-session-existing'" "Hermes TUI launch did not resume the exact bound session"
+  assert_contains "$(cat "$CASE_DIR/commands.log")" "Resume the task from the brief at" \
+    "Hermes resumed TUI did not receive the recovery-specific brief pointer"
+  fixture_env "$SEND" "$TEST_ID" /exit >/dev/null || fail "Hermes resumed TUI did not exit cleanly"
+  fixture_env "$TEARDOWN" "$TEST_ID" --force >/dev/null 2>&1 || fail "Hermes resumed fixture teardown failed"
+  pass "Hermes persistent TUI resumes the exact task-bound session"
+}
+
+# A sidecar that carries no usable resume id must refuse the spawn by name. The
+# hook binds its session file once, so launching a fresh session against a stale
+# sidecar makes every later turn acknowledgement fail and wedges every retry.
+test_hermes_spawn_refuses_unusable_session_sidecar() {
+  local rec out sidecar
+  TEST_ID=hermes-stale-sidecar-x5
+  rec=$(make_case stale-sidecar "$TEST_ID")
+  read_case "$rec"
+  sidecar="$HOME_DIR/state/$TEST_ID.hermes-session"
+  printf 'first-session\nsecond-session\n' > "$sidecar"
+  out=$(fixture_env "$SPAWN" "$TEST_ID" "$PROJECT_DIR" --harness hermes \
+    --model gpt-5.6-sol --effort medium --mode no-mistakes --yolo off 2>&1) \
+    && fail "Hermes spawn accepted an unusable session sidecar"
+  assert_contains "$out" "$sidecar" "the stale-sidecar refusal did not name the sidecar"
+  assert_no_grep 'chat --tui' "$CASE_DIR/commands.log" \
+    "the stale-sidecar refusal still launched a fresh Hermes TUI"
+
+  : > "$sidecar"
+  out=$(fixture_env "$SPAWN" "$TEST_ID" "$PROJECT_DIR" --harness hermes \
+    --model gpt-5.6-sol --effort medium --mode no-mistakes --yolo off 2>&1) \
+    && fail "Hermes spawn accepted an empty session sidecar"
+  assert_contains "$out" "$sidecar" "the empty-sidecar refusal did not name the sidecar"
+
+  rm -f "$sidecar"
+  fixture_env "$SPAWN" "$TEST_ID" "$PROJECT_DIR" --harness hermes \
+    --model gpt-5.6-sol --effort medium --mode no-mistakes --yolo off >/dev/null \
+    || fail "Hermes spawn refused a clean first launch after the sidecar was removed"
+  fixture_env "$SEND" "$TEST_ID" /exit >/dev/null || fail "stale-sidecar fixture did not exit cleanly"
+  fixture_env "$TEARDOWN" "$TEST_ID" --force >/dev/null 2>&1 \
+    || fail "stale-sidecar fixture teardown failed"
+  pass "an unusable Hermes session sidecar refuses the spawn by name instead of wedging it"
 }
 
 test_hermes_session_binding_and_busy_ack_order() {
@@ -505,6 +635,51 @@ test_hermes_start_ack_is_unique_per_turn() {
   [ "$(sort -u "$CASE_DIR/acks.log" | wc -l | tr -d '[:space:]')" = 8 ] \
     || fail "a burst of start acknowledgements repeated a pid-independent value"
   pass "each Hermes start acknowledgement is unique independently of the hook pid"
+}
+
+# Rendered Hermes state is a screen, not a lifecycle fact, in both directions.
+# A redraw or tool render can show the ready footer while a turn runs, which
+# would let fm-send steer into a live turn (Hermes reads that as an interrupt).
+# A lagging redraw can still show the busy footer after the turn-end hook has
+# settled the record, which would let `--key C-c` reach an idle TUI and exit it,
+# destroying the persistent session. A valid trusted record decides both.
+test_hermes_busy_record_outranks_rendered_ready_footer() {
+  local rec stable ready working busy
+  TEST_ID=hermes-record-precedence-x11
+  rec=$(make_case record-precedence "$TEST_ID")
+  read_case "$rec"
+  fixture_env "$SPAWN" "$TEST_ID" "$PROJECT_DIR" --harness hermes \
+    --model gpt-5.6-sol --effort high --mode no-mistakes --yolo off >/dev/null \
+    || fail "Hermes record-precedence fixture spawn failed"
+  stable=$(cat "$HOME_DIR/state/$TEST_ID.hermes-session")
+  fixture_hook pre_llm_call "$stable"
+  ready=$' \xe2\x94\x80 ready \xe2\x94\x82 gpt 5.6 sol low \xe2\x94\x82\n \xe2\x9d\xaf Ask me anything\xe2\x80\xa6'
+  # shellcheck disable=SC2016 # Positional parameters expand inside the fixture shell.
+  busy=$(fixture_env bash -c '. "$1/bin/fm-busy-lib.sh"; fm_busy_classify tmux unused hermes "$2" "$3" "$4"' \
+    _ "$ROOT" "$TEST_ID" "$HOME_DIR/state" "$ready")
+  [ "${busy%% *}" = busy ] \
+    || fail "a rendered ready footer demoted a trusted busy lifecycle record: $busy"
+  fixture_hook on_session_end "$stable"
+  # shellcheck disable=SC2016 # Positional parameters expand inside the fixture shell.
+  busy=$(fixture_env bash -c '. "$1/bin/fm-busy-lib.sh"; fm_busy_classify tmux unused hermes "$2" "$3" "$4"' \
+    _ "$ROOT" "$TEST_ID" "$HOME_DIR/state" "$ready")
+  [ "${busy%% *}" = idle ] \
+    || fail "Hermes turn end did not settle idle with the same ready footer: $busy"
+  working=$' \xe2\x94\x80 (\xe2\x97\x94_\xe2\x97\x94) computing\xe2\x80\xa6 \xc2\xb7 3s \xe2\x94\x82 gpt 5.6 sol low \xe2\x94\x82\n \xe2\x9d\xaf Ctrl+C to interrupt\xe2\x80\xa6'
+  # shellcheck disable=SC2016 # Positional parameters expand inside the fixture shell.
+  busy=$(fixture_env bash -c '. "$1/bin/fm-busy-lib.sh"; fm_busy_classify tmux unused hermes "$2" "$3" "$4"' \
+    _ "$ROOT" "$TEST_ID" "$HOME_DIR/state" "$working")
+  [ "$busy" = 'idle hermes-hook' ] \
+    || fail "a lagging rendered busy footer overrode the trusted turn-end record: $busy"
+  rm -f "$HOME_DIR/state/$TEST_ID.busy-state"
+  # shellcheck disable=SC2016 # Positional parameters expand inside the fixture shell.
+  busy=$(fixture_env bash -c '. "$1/bin/fm-busy-lib.sh"; fm_busy_classify tmux unused hermes "$2" "$3" "$4"' \
+    _ "$ROOT" "$TEST_ID" "$HOME_DIR/state" "$working")
+  [ "$busy" = 'busy hermes-tui' ] \
+    || fail "the rendered busy footer was not consulted once no trusted record remained: $busy"
+  fixture_env "$TEARDOWN" "$TEST_ID" --force >/dev/null 2>&1 \
+    || fail "Hermes record-precedence fixture teardown failed"
+  pass "a trusted Hermes lifecycle record outranks the rendered footer in both directions"
 }
 
 test_hermes_hook_waits_through_busy_lock_contention() {
@@ -584,8 +759,8 @@ test_hermes_refuses_nonresumable_backends() {
     out=$(fixture_env "$SPAWN" "$TEST_ID" "$PROJECT_DIR" --harness hermes --backend "$backend" \
       --model gpt-5.6-sol --effort high --mode no-mistakes --yolo off 2>&1) || rc=$?
     [ "$rc" -ne 0 ] || fail "Hermes spawn accepted nonresumable backend=$backend"
-    assert_contains "$out" "supports resumable spawns only on tmux and herdr" \
-      "Hermes backend=$backend refusal omitted its resumability boundary"
+    assert_contains "$out" "supports persistent TUI spawns only on tmux and herdr" \
+      "Hermes backend=$backend refusal omitted its persistent-TUI boundary"
     assert_not_contains "$(cat "$CASE_DIR/tmux.log")" "new-window" \
       "Hermes backend=$backend refusal created an endpoint"
   done
@@ -700,12 +875,9 @@ test_hermes_crew_only_is_filtered_from_secondmate_fallback() {
   pass "crew-only Hermes is ineligible for the implicit secondmate fallback"
 }
 
-# The Herdr reclaim guard classifies an existing endpoint through
-# fm_backend_agent_state with the task metadata. A Hermes crewmate parked at an
-# idle shell is agent-free at the pane layer, so only the session-bound upgrade
-# keeps it alive; without it the guard would reclaim the pane and destroy the
-# resumable session.
-test_hermes_herdr_idle_session_classifies_alive() {
+# A persistent Hermes Herdr pane is alive only while Herdr reports a registered
+# agent; the resumable session sidecar no longer upgrades an idle shell husk.
+test_hermes_herdr_persistent_process_classifies_alive() {
   local case_dir state fakebin meta out
   case_dir="$TMP_ROOT/herdr-state"
   state="$case_dir/state"
@@ -717,40 +889,52 @@ test_hermes_herdr_idle_session_classifies_alive() {
 set -u
 case "$1 $2" in
   'pane get') printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "$3" ;;
-  'agent get') printf '{"error":{"code":"agent_not_found"}}\n' ;;
+  'agent get')
+    if [ "$(cat "$FM_FAKE_HERDR_MODE")" = live ]; then
+      printf '{"result":{"agent":{"agent":"hermes","agent_status":"idle"}}}\n'
+    else
+      printf '{"error":{"code":"agent_not_found"}}\n'
+    fi
+    ;;
   *) printf '{"error":{"code":"unsupported"}}\n' ;;
 esac
 SH
   chmod +x "$fakebin/herdr"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/hermes"
+  chmod +x "$fakebin/hermes"
+  printf 'live\n' > "$case_dir/herdr-mode"
   meta="$state/herdr-hermes.meta"
   {
+    printf 'window=fmlab:pane-1\n'
+    printf 'endpoint_task_id=herdr-hermes\n'
+    printf 'worktree=/tmp/herdr-hermes-worktree\n'
+    printf 'project=/tmp/herdr-hermes-project\n'
     printf 'harness=hermes\n'
     printf 'backend=herdr\n'
-    printf 'target=fmlab:pane-1\n'
+    printf 'herdr_session=fmlab\n'
+    printf 'herdr_workspace_id=ws-1\n'
+    printf 'herdr_tab_id=tab-1\n'
+    printf 'herdr_pane_id=pane-1\n'
+    printf 'hermes_bin=%s\n' "$fakebin/hermes"
     printf 'hermes_session_file=%s\n' "$state/herdr-hermes.hermes-session"
   } > "$meta"
   printf 'hermes-session-herdr\n' > "$state/herdr-hermes.hermes-session"
 
   # shellcheck disable=SC2016 # Positional parameters expand inside the probe shell.
-  out=$(PATH="$fakebin:$BASE_PATH" bash -c \
+  out=$(FM_FAKE_HERDR_MODE="$case_dir/herdr-mode" PATH="$fakebin:$BASE_PATH" bash -c \
     '. "$1/bin/fm-backend.sh"; fm_backend_agent_state herdr "$2" "$3"' _ "$ROOT" fmlab:pane-1 "$meta")
-  [ "$out" = alive ] || fail "idle Hermes herdr pane with a bound session classified '$out'"
+  [ "$out" = alive ] || fail "persistent Hermes herdr pane classified '$out'"
   # shellcheck disable=SC2016 # Positional parameters expand inside the probe shell.
-  out=$(PATH="$fakebin:$BASE_PATH" bash -c \
+  out=$(FM_FAKE_HERDR_MODE="$case_dir/herdr-mode" PATH="$fakebin:$BASE_PATH" bash -c \
     '. "$1/bin/fm-backend.sh"; fm_backend_agent_alive herdr "$2" "$3"' _ "$ROOT" fmlab:pane-1 "$meta")
-  [ "$out" = alive ] || fail "the three-state herdr view lost the Hermes upgrade: '$out'"
+  [ "$out" = alive ] || fail "the three-state herdr view lost the live Hermes TUI: '$out'"
 
+  printf 'husk\n' > "$case_dir/herdr-mode"
   # shellcheck disable=SC2016 # Positional parameters expand inside the probe shell.
-  out=$(PATH="$fakebin:$BASE_PATH" bash -c \
-    '. "$1/bin/fm-backend.sh"; fm_backend_agent_state herdr "$2"' _ "$ROOT" fmlab:pane-1)
-  [ "$out" = dead ] || fail "an agent-free herdr pane without task meta classified '$out'"
-
-  rm -f "$state/herdr-hermes.hermes-session"
-  # shellcheck disable=SC2016 # Positional parameters expand inside the probe shell.
-  out=$(PATH="$fakebin:$BASE_PATH" bash -c \
+  out=$(FM_FAKE_HERDR_MODE="$case_dir/herdr-mode" PATH="$fakebin:$BASE_PATH" bash -c \
     '. "$1/bin/fm-backend.sh"; fm_backend_agent_state herdr "$2" "$3"' _ "$ROOT" fmlab:pane-1 "$meta")
-  [ "$out" = dead ] || fail "a Hermes pane with no bound session must not be alive: '$out'"
-  pass "an idle Hermes herdr endpoint with a bound session classifies alive"
+  [ "$out" = dead ] || fail "a Hermes shell husk with a session sidecar classified '$out'"
+  pass "Hermes Herdr liveness requires the persistent registered TUI process"
 }
 
 # The Herdr presentation-journal reclaim guard itself, driven directly through
@@ -774,28 +958,41 @@ set -u
 case "$1 ${2:-}" in
   'status --json') printf '{"server":{"running":true},"client":{"protocol":14}}\n' ;;
   'pane get') printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "$3" ;;
-  'agent get') printf '{"error":{"code":"agent_not_found"}}\n' ;;
+  'agent get')
+    if [ "$(cat "$FM_FAKE_HERDR_MODE")" = live ]; then
+      printf '{"result":{"agent":{"agent":"hermes","agent_status":"idle"}}}\n'
+    else
+      printf '{"error":{"code":"agent_not_found"}}\n'
+    fi
+    ;;
   *) printf '{"error":{"code":"unsupported"}}\n' ;;
 esac
 SH
   chmod +x "$fakebin/herdr"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/hermes"
+  chmod +x "$fakebin/hermes"
+  printf 'live\n' > "$case_dir/herdr-mode"
 
   meta="$state/reclaim-hermes.meta"
   {
     printf 'harness=hermes\n'
+    printf 'endpoint_task_id=reclaim-hermes\n'
+    printf 'worktree=/tmp/reclaim-hermes-worktree\n'
+    printf 'project=/tmp/reclaim-hermes-project\n'
     printf 'backend=herdr\n'
     printf 'window=fmlab:pane-1\n'
     printf 'herdr_session=fmlab\n'
     printf 'herdr_workspace_id=ws-1\n'
     printf 'herdr_tab_id=tab-1\n'
     printf 'herdr_pane_id=pane-1\n'
+    printf 'hermes_bin=%s\n' "$fakebin/hermes"
     printf 'hermes_session_file=%s\n' "$state/reclaim-hermes.hermes-session"
   } > "$meta"
   printf 'hermes-session-reclaim\n' > "$state/reclaim-hermes.hermes-session"
 
   # shellcheck disable=SC2016 # Positional parameters expand inside the guard shell.
   rc=0
-  out=$(PATH="$fakebin:$BASE_PATH" bash -c '
+  out=$(FM_FAKE_HERDR_MODE="$case_dir/herdr-mode" PATH="$fakebin:$BASE_PATH" bash -c '
     set -u
     ID=reclaim-hermes
     . "$1/bin/fm-backend.sh"
@@ -809,9 +1006,9 @@ SH
   assert_present "$state/reclaim-hermes.hermes-session" \
     "the refused reclaim discarded the resumable session"
 
-  rm -f "$state/reclaim-hermes.hermes-session"
+  printf 'husk\n' > "$case_dir/herdr-mode"
   rc=0
-  out=$(PATH="$fakebin:$BASE_PATH" bash -c '
+  out=$(FM_FAKE_HERDR_MODE="$case_dir/herdr-mode" PATH="$fakebin:$BASE_PATH" bash -c '
     set -u
     ID=reclaim-hermes
     . "$1/bin/fm-backend.sh"
@@ -819,11 +1016,11 @@ SH
     herdr_projection_existing_meta_allows_flat "$2"
   ' _ "$ROOT" "$meta" 2>&1) || rc=$?
   [ "$rc" -eq 0 ] \
-    || fail "a Hermes endpoint with no bound session must still be reclaimable: $out"
+    || fail "a Hermes pane without its persistent TUI must be reclaimable even with resume state: $out"
 
   printf 'harness=hermes\n' >> "$meta"
   rc=0
-  out=$(PATH="$fakebin:$BASE_PATH" bash -c '
+  out=$(FM_FAKE_HERDR_MODE="$case_dir/herdr-mode" PATH="$fakebin:$BASE_PATH" bash -c '
     set -u
     ID=reclaim-hermes
     . "$1/bin/fm-backend.sh"
@@ -834,7 +1031,7 @@ SH
     || fail "an ambiguous harness record must refuse the reclaim: $out"
   assert_contains "$out" "existing herdr endpoint for reclaim-hermes is unknown" \
     "an unreadable task record did not fail closed"
-  pass "the herdr reclaim guard preserves a bound Hermes session and fails closed"
+  pass "the herdr reclaim guard preserves a live Hermes TUI and reclaims only a proven husk"
 }
 
 test_hermes_scout_defaults_model_and_preserves_every_effort() {
@@ -845,7 +1042,7 @@ test_hermes_scout_defaults_model_and_preserves_every_effort() {
     read_case "$rec"
     fixture_env "$SPAWN" "$TEST_ID" "$PROJECT_DIR" --harness hermes --scout \
       --effort "$effort" >/dev/null 2>&1 || fail "Hermes scout spawn was refused for effort=$effort"
-    launch=$(grep 'hermes.*chat -Q' "$CASE_DIR/commands.log" | head -1)
+    launch=$(grep 'hermes.*chat --tui' "$CASE_DIR/commands.log" | head -1)
     assert_contains "$launch" "--provider openai-codex" "Hermes scout launch lost its provider"
     assert_contains "$launch" "--model 'gpt-5.6-sol'" "Hermes scout launch did not default to gpt-5.6-sol"
     assert_contains "$launch" "--reasoning '$effort'" "Hermes scout launch dropped reasoning effort $effort"
@@ -857,13 +1054,16 @@ test_hermes_scout_defaults_model_and_preserves_every_effort() {
 }
 
 test_hermes_hook_install_is_surgical_idempotent_and_removable
-test_hermes_spawn_resume_skill_state_and_teardown
+test_hermes_spawn_tui_skill_state_and_teardown
 test_hermes_secondmate_is_refused
 test_secondmates_refuse_every_raw_launch_command
 test_workers_and_scouts_preserve_raw_launch_commands
-test_hermes_resume_requires_idle_shell
-test_hermes_resume_clears_pending_shell_input
+test_hermes_tui_busy_state_and_composer
+test_hermes_ready_gate_survives_c_locale
+test_hermes_spawn_resumes_existing_tui_session
+test_hermes_spawn_refuses_unusable_session_sidecar
 test_hermes_session_binding_and_busy_ack_order
+test_hermes_busy_record_outranks_rendered_ready_footer
 test_hermes_start_ack_is_unique_per_turn
 test_hermes_hook_waits_through_busy_lock_contention
 test_hermes_delivered_no_turn_persistence_failure_is_distinct
@@ -874,6 +1074,6 @@ test_hermes_spawn_requires_pre_llm_acknowledgement
 test_hermes_concurrent_sends_serialize_through_acknowledgement
 test_hermes_static_crew_resolution
 test_hermes_crew_only_is_filtered_from_secondmate_fallback
-test_hermes_herdr_idle_session_classifies_alive
+test_hermes_herdr_persistent_process_classifies_alive
 test_herdr_reclaim_guard_preserves_hermes_session
 test_hermes_scout_defaults_model_and_preserves_every_effort

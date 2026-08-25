@@ -51,6 +51,13 @@
 # below. Re-sourcing is a cheap idempotent redefinition, so this file needs no
 # include guard (matching bin/fm-tmux-lib.sh).
 
+# Plain-capture fallback for verified idle placeholders. ANSI-capable readers
+# normally remove these dim/muted runs through fm_composer_strip_ghost first;
+# the exact list prevents a degraded plain capture from treating the Hermes
+# v0.20.0 composer as pending without making arbitrary `Try "..."` user text
+# disappear. Grok's existing placeholder is retained in the same owner.
+FM_COMPOSER_IDLE_RE=${FM_COMPOSER_IDLE_RE:-'^(Type a message\.\.\.|Ask me anything…|Try "explain this codebase"|Try "write a test for…"|Try "refactor the auth module"|Try "/help" for commands|Try "fix the lint errors"|Try "how does the config loader work\?"|Ctrl\+C to interrupt…)$'}
+
 # Keep the Node program's heredoc outside command substitution: stock Bash
 # 3.2 misparses that nesting and reports a later, unrelated case terminator.
 fm_composer_node_width() {  # <canonical-node> <row>

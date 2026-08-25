@@ -138,7 +138,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | omp | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Native `--prewalk --prewalk-into=<model-spec>` and an effort-qualified target parse were verified 2026-08-11 on OMP 17.2.11, extending the 2026-07-30 exact-worker evidence for all thinking levels on OMP 17.1.8; `docs/verification/runtime-backends.md` records the commands and bounded output. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
-| hermes | `--model <model>` | `--reasoning <low\|medium\|high\|xhigh\|max>` | Verified 2026-08-24 on Hermes Agent v0.20.0; Hermes additionally accepts none/minimal/ultra, but those are outside Firstmate's shared effort vocabulary. |
+| hermes | `--model <model>` | `--reasoning <low\|medium\|high\|xhigh\|max>` plus session-scoped `/reasoning` | Verified 2026-08-25 on Hermes Agent v0.20.0; the TUI launcher drops the CLI value, so spawn applies the session command too. Hermes additionally accepts none/minimal/ultra, but those are outside Firstmate's shared effort vocabulary. |
 
 The concrete `harness` field owns adapter identity independently of the model provider: `harness=pi` with `model=xai/grok-*` is Pi using xAI, not `harness=grok`, and does not require Grok CLI login; `harness=grok` remains the standalone Grok Build CLI adapter.
 Ordinary dispatch does not resolve that split in shell: establish which credential store a tuple reads from the discovery surfaces below plus `quota-axi auth --json`'s per-provider sources, and show that reasoning rather than inferring it from a harness, model, or source name.
@@ -179,7 +179,7 @@ Natural language is acceptable if uncertain.
 - omp: `/skill:<name>`, for example `/skill:no-mistakes`; the tmux submission adapter verifies autocomplete closure through the structural OMP composer and a real turn transition.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) handles this through the structural composer reader; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
 - kimi: `/<skill>`, for example `/no-mistakes`.
-- hermes: `/<skill>`, for example `/no-mistakes`; `fm-send` uses Hermes' headless `--skills <skill>` preload when the active profile exposes the skill, otherwise it sends a validated absolute `SKILL.md` instruction from Firstmate's installed skill roots.
+- hermes: `/<skill>`, for example `/no-mistakes`; `fm-send` preserves the native TUI skill command when the active profile exposes it, otherwise it sends a validated absolute `SKILL.md` instruction from Firstmate's installed skill roots.
 
 ## Submission acknowledgement hazards
 
@@ -454,7 +454,7 @@ Each Kimi crew worktree receives a gitignored `.fm-kimi-turnend` token pointer, 
 A guarded silent hook cannot be verified from absence of effect, so prove invocation with an unguarded probe before concluding that the hook did not fire.
 The guarded turn-end signal remains a wake notification; standalone Kimi has no busy-state source until one is live-verified.
 
-## hermes (CREWMATE/SCOUT ONLY; VERIFIED 2026-08-24, Hermes Agent v0.20.0)
+## hermes (CREWMATE/SCOUT ONLY; VERIFIED 2026-08-25, Hermes Agent v0.20.0)
 
 Hermes is verified only as a crewmate or scout adapter.
 It is not a verified primary-session or secondmate adapter, and `fm-spawn --secondmate --harness hermes` is refused.
@@ -462,39 +462,42 @@ It is not a verified primary-session or secondmate adapter, and `fm-spawn --seco
 | Fact | Value |
 |---|---|
 | Binary | Executable `hermes` from `PATH`, falling back to executable `$HOME/.local/bin/hermes`; spawn records the selected absolute executable and active Hermes home. |
-| Launch | Quiet headless single-query mode: `hermes chat -Q --query <brief> --provider openai-codex --model <model> [--reasoning <effort>] --accept-hooks --yolo --pass-session-id`; the default model for this adapter is `gpt-5.6-sol`. |
+| Launch | Persistent modern TUI: `hermes chat --tui --in <worktree> --no-restore-cwd --provider openai-codex --model <model> [--reasoning <effort>] [--resume <session>] --accept-hooks --yolo --pass-session-id`; the default model is `gpt-5.6-sol`. |
 | Provider | `openai-codex`, whose human-facing label is OpenAI Codex. |
-| Busy state | Firstmate's guarded global shell hook: `pre_llm_call` records busy and `on_session_end` records idle through `bin/fm-busy-event.sh`; `on_session_start` additionally captures a new session id. |
-| Exit command | None while idle because every headless turn exits back to the pane shell; `fm-send ... /exit` is an idempotent idle no-op. |
-| Interrupt | Single `Ctrl+C`, sent as `fm-send ... --key C-c`, interrupts the active headless process and records the task idle through the Firstmate-owned interrupt source after successful transport. |
-| Skill invocation | `/<skill>` through `fm-send`; Firstmate uses `--skills <skill>` when the Hermes profile exposes it and otherwise supplies the exact installed `SKILL.md` path in the resumed query. |
-| Resume | Every idle text steer runs a fresh quiet process with `--resume <state/<id>.hermes-session> --no-restore-cwd` and the recorded binary, profile home, model, provider, and reasoning axes. |
-| Autonomy | `--yolo --accept-hooks`; quiet single-query mode is non-interactive and cannot wedge on a clarification prompt. |
+| Busy state | The plugin-forwarded lifecycle record first, in both directions; only when no valid record exists does the live TUI footer decide, where the empty-composer placeholder `Ctrl+C to interrupt…` or the status rule's busy-only `· <elapsed>` segment proves busy and the structural `─ ready │` rule proves idle. |
+| Composer | Bare `❯` row; idle suggestions are dim/muted ghost text, with the exact v0.20.0 plain-placeholder list retained as a degraded-capture fallback. |
+| Exit command | `/exit` through the composer; successful exit returns the pane to its shell. |
+| Interrupt | Single `Ctrl+C` while provably busy; idle `Ctrl+C` exits Hermes, so `fm-send --key C-c` refuses unless the classified state above is exactly busy, and a lagging rendered busy row can never override a settled idle record. |
+| Skill invocation | `/<skill>` through `fm-send`; a skill installed in the Hermes profile stays a native TUI slash command, while a Firstmate-only skill becomes a validated exact `SKILL.md` pointer instruction. |
+| Resume | Relaunch the same persistent TUI with `--resume <state/<id>.hermes-session> --in <worktree> --no-restore-cwd`; spawn sends a recovery-specific brief pointer after readiness. |
+| Autonomy | `--yolo --accept-hooks`; clarification remains an interactive TUI surface rather than a headless process failure. |
 | Trust | `--accept-hooks` handles Hermes' first-use `(event, command)` consent allowlist for the Firstmate hook. |
 
-Hermes v0.20.0 exposes top-level `-z`, but its top-level one-shot dispatcher does not thread `--resume`, `--pass-session-id`, `--reasoning`, `--skills`, or the hook-aware CLI session into that path.
-Firstmate therefore uses `chat -Q --query`, which is equally non-interactive and quiet while honoring all lifecycle axes required by the adapter.
-Do not substitute `-z` until a live Hermes release proves those flags reach the one-shot implementation.
+Hermes v0.20.0's Python TUI launcher threads model, provider, skills, resume, hook acceptance, yolo, and session-id flags into the gateway process, but it drops the parsed `--reasoning` value.
+Firstmate retains the CLI flag for forward compatibility and also submits the verified session-scoped `/reasoning <low|medium|high|xhigh|max>` command before the launch brief.
+The adapter refuses the spawn unless Hermes confirms the selected effort and returns to its ready footer.
 
 Do not add `--safe-mode` to the launch or resume command.
-Hermes documents that safe mode disables user config, rules and AGENTS injection, plugins, MCP servers, and shell hooks, so it would remove both task instructions and the supervised lifecycle signal.
+Hermes documents that safe mode disables user config, rules and AGENTS injection, plugins, MCP servers, and shell hooks, so it would remove both task instructions and the supervised lifecycle bridge.
 
-`bin/fm-hermes-turnend-hook.sh` owns the surgical `config.yaml` integration.
-It installs one guarded command each for `on_session_start`, `pre_llm_call`, and `on_session_end`, plus a private token registry under the active Hermes home.
+`bin/fm-hermes-turnend-hook.sh` owns the surgical `config.yaml` integration and the profile-local `firstmate-lifecycle` plugin.
+The plugin is enabled with one marker-delimited `plugins.enabled` entry and forwards TUI gateway lifecycle callbacks into the same guarded shell handler used by compatible classic runs.
+This bridge is necessary because v0.20.0 logs config shell hooks as registered in the TUI wrapper but does not invoke them from the gateway worker.
 Each Hermes crew worktree receives a gitignored `.fm-hermes-turnend` pointer; the global hook acts only when that token resolves to the exact task state paths and busy-state generation.
 `on_session_start` binds the newly created task session only while the sidecar is absent.
 Later lifecycle events must match that stable id, and `pre_llm_call` records busy successfully before touching `state/<id>.hermes-started` for an initial or resumed turn.
 The end event requires the same session id, touches `state/<id>.turn-ended`, and marks the turn idle.
-For this one-process-per-turn adapter, Hermes' `on_session_end` callback at the end of each `run_conversation` call is exactly the supervised turn boundary.
+Hermes' `on_session_end` callback at the end of each TUI `run_conversation` call is the exact supervised turn boundary, including turns shorter than the watcher poll interval.
 
-`fm-send` refuses a resume command unless the semantic state is exactly idle, the endpoint has a structural idle-shell proof with shell input cleared, the task-bound session and profile metadata validate, and the recorded executable is still available.
-That shell boundary is available on tmux and Herdr; Hermes spawns on other backends are refused before endpoint creation.
-Hermes has no safe mid-turn text-steer channel in this mode; a busy send is refused instead of typing into the running process, and the firstmate may interrupt with `C-c` before resuming.
-After submitting the resume shell command, `fm-send` requires a newer `hermes-started` acknowledgement before it closes any `--resolve-key` decision.
+`fm-send` refuses a composer injection unless the classified state is exactly idle, the task-bound session and profile metadata validate, and the structural composer is empty.
+Hermes spawns on backends other than tmux and Herdr are refused before endpoint creation.
+Hermes' busy-input behavior is profile-configurable and can interrupt rather than queue, so a busy send is refused until the turn settles or Firstmate interrupts it with `C-c`.
+After submitting through the composer, `fm-send` requires a newer `hermes-started` acknowledgement before it closes any `--resolve-key` decision.
 That comparison is by content, so each acknowledgement carries a fresh 128-bit nonce alongside its session id, event, and pid: two turns of the same task can never write identical bytes, and hook-process pid reuse cannot make a running turn look like no turn at all.
-The resume acknowledgement wait inherits the launch acknowledgement poll count and interval unless a send-specific override is set, so transcript loading never receives a smaller default budget than a fresh launch.
+The steering acknowledgement wait inherits the launch acknowledgement poll count and interval unless a send-specific override is set, so transcript loading never receives a smaller default budget than a fresh launch.
 If delivery landed but the start hook did not acknowledge it, the send fails as delivered-no-turn, records a supervised recovery wake, and warns not to resend; failure to persist either recovery trigger returns the distinct delivered-no-turn-persistence-failed result.
 
-An idle Hermes pane contains a shell rather than a persistent TUI process.
-`fm_backend_agent_state` therefore treats the exact combination of a valid task-bound Hermes session file and a still-present recorded endpoint as the adapter's resumable alive state.
+An idle Hermes pane retains the persistent TUI process.
+Tmux recovery validates the foreground Hermes process against the recorded executable, while Herdr requires a registered live agent rather than upgrading a shell husk from the session sidecar.
+A spawn that finds `state/<id>.hermes-session` present but carrying no usable resumable id refuses instead of launching a fresh session against that stale sidecar, because the lifecycle bridge would then never acknowledge a turn; remove the sidecar or run `fm-teardown.sh <id> --force` and respawn.
 `fm-crew-state` remains harness-generic: the Hermes hook's semantic busy/idle record drives its pane-state gate, then an idle worker falls through to the existing status-log or no-mistakes run reconciliation.
