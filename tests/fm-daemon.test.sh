@@ -301,6 +301,7 @@ test_stale_captain_held_rechecks_status_after_liveness() {
   printf 'captain-held [key=route]: waiting for recovery ownership\n' > "$status_file"
   fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux" "harness=pi"
   (
+    # shellcheck disable=SC2329 # Runtime override called indirectly by classify_stale.
     fm_backend_agent_state() {
       printf 'working: resumed while the liveness probe was in flight\n' > "$status_file"
       printf 'dead\n'
