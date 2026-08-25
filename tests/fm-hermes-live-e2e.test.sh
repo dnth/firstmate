@@ -109,7 +109,7 @@ EOF
 }
 
 live_cleanup() {  # <original-exit-code>
-  local original_rc=$1 cleanup_rc=0 id leftovers stale
+  local original_rc=$1 cleanup_rc=0 id leftovers stale dir
   trap - EXIT INT TERM
   set +e
   live_force_reap || cleanup_rc=1
@@ -127,10 +127,16 @@ live_cleanup() {  # <original-exit-code>
     cleanup_rc=1
   fi
   fm_test_cleanup
-  stale=$(compgen -G "${TMPDIR:-/tmp}/fm-hermes-live-e2e.*" || true)
+  stale=
+  for dir in "${TMPDIR:-/tmp}"/fm-hermes-live-e2e.*; do
+    [ -d "$dir" ] || continue
+    if [ "$dir" = "$LAB" ] \
+       || [ "$(sed -n 1p "$dir/.fm-test-fixture" 2>/dev/null)" = "$$" ]; then
+      stale="$stale $dir"
+    fi
+  done
   if [ -n "$stale" ]; then
-    printf 'not ok - live Hermes cleanup left temp dirs: %s\n' \
-      "$(printf '%s' "$stale" | tr '\n' ' ')" >&2
+    printf 'not ok - live Hermes cleanup left temp dirs:%s\n' "$stale" >&2
     cleanup_rc=1
   fi
   if [ "$cleanup_rc" -eq 0 ]; then

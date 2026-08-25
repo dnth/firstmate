@@ -2363,6 +2363,214 @@ test_hermes_inconsistent_owner_marker_refuses_without_signaling() {
   pass "inconsistent Hermes ownership proof refuses without signaling the matching process"
 }
 
+test_hermes_orphaned_descendant_is_force_killed() {
+  local case_dir rc token hermes_home registry state_real pid_file
+  local pid owned_survivors="" i
+  case_dir=$(make_case hermes-orphaned-descendant)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  token=fm.abcdefghijkl
+  hermes_home="$case_dir/hermes-home"
+  registry="$hermes_home/fm-turn-end.d/$token"
+  state_real=$(cd "$case_dir/state" && pwd -P)
+  mkdir -p "$hermes_home/fm-turn-end.d"
+  printf '%s\n' "$token" > "$case_dir/state/task-x1.hermes-turnend-token"
+  jq -n --arg id task-x1 --arg state "$state_real" \
+    --arg session_file "$state_real/task-x1.hermes-session" \
+    '{id:$id,state:$state,session_file:$session_file}' > "$registry"
+  printf '%s\n' \
+    'harness=hermes' \
+    "hermes_home=$hermes_home" \
+    "hermes_owner_token=$token" >> "$case_dir/state/task-x1.meta"
+  pid_file="$case_dir/owned.pids"
+
+  # The token-bearing launcher dies on the first TERM, orphaning a setsid'd
+  # child that carries no token and whose cwd is outside the worktree: after
+  # the TERM pass nothing in a fresh ownership scan can still find that child,
+  # so only the tracked set can carry it into the KILL escalation.
+  FM_HERMES_TASK_TOKEN="$token" perl -MPOSIX -e '
+    my ($pid_file, $outside) = @ARGV;
+    my $watchdog = fork();
+    die "fork watchdog" unless defined $watchdog;
+    if (!$watchdog) {
+      POSIX::setsid();
+      chdir $outside or die "chdir outside";
+      open my $fh, ">>", $pid_file or die "open pids";
+      print {$fh} "$$\n";
+      close $fh;
+      exec "env", "-u", "FM_HERMES_TASK_TOKEN", "perl", "-e",
+        q{$SIG{TERM} = "IGNORE"; sleep 300;}
+        or die "exec watchdog";
+    }
+    open my $fh, ">>", $pid_file or die "open pids";
+    print {$fh} "$$\n";
+    close $fh;
+    sleep 300;
+  ' "$pid_file" "$case_dir" &
+  disown
+  i=0
+  while [ "$i" -lt 50 ]; do
+    [ -f "$pid_file" ] && [ "$(wc -l < "$pid_file")" -ge 2 ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    if kill -0 "$pid" 2>/dev/null; then
+      owned_survivors="$owned_survivors $pid"
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  done < "$pid_file"
+
+  expect_code 0 "$rc" "hermes-orphaned-descendant: teardown should succeed in one invocation"
+  [ -z "$owned_survivors" ] \
+    || fail "hermes-orphaned-descendant: orphaned owned process survived:$owned_survivors"
+  pass "a descendant orphaned by the TERM pass is still force-killed from the tracked set"
+}
+
+test_hermes_task_without_owner_token_falls_back_to_cwd_reap() {
+  local case_dir rc pid unrelated_pid survived=0 unrelated_survived=0
+  case_dir=$(make_case hermes-legacy-fallback)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  printf '%s\n' \
+    'harness=hermes' \
+    "hermes_home=$case_dir/hermes-home" >> "$case_dir/state/task-x1.meta"
+
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  FM_HERMES_TASK_TOKEN=fm.abcdefghijkl sleep 300 &
+  unrelated_pid=$!
+  disown
+  sleep 0.3
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  if kill -0 "$pid" 2>/dev/null; then
+    survived=1
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  if kill -0 "$unrelated_pid" 2>/dev/null; then
+    unrelated_survived=1
+    kill -KILL "$unrelated_pid" 2>/dev/null || true
+  fi
+  wait "$pid" 2>/dev/null || true
+  wait "$unrelated_pid" 2>/dev/null || true
+
+  expect_code 0 "$rc" "hermes-legacy-fallback: a pre-token Hermes task must still tear down"
+  [ "$survived" -eq 0 ] \
+    || fail "hermes-legacy-fallback: the worktree-rooted process was not reaped"
+  [ "$unrelated_survived" -eq 1 ] \
+    || fail "hermes-legacy-fallback: teardown signaled a token-bearing process it never proved"
+  assert_grep "no Hermes process-ownership proof is recorded for task-x1" \
+    "$case_dir/stderr" "hermes-legacy-fallback: teardown did not warn about the fallback"
+  pass "a Hermes task with no recorded owner token falls back to the worktree cwd reap"
+}
+
+test_hermes_missing_profile_registry_falls_back_to_cwd_reap() {
+  local case_dir rc token pid unrelated_pid survived=0 unrelated_survived=0
+  case_dir=$(make_case hermes-registry-absent-fallback)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  token=fm.abcdefghijkl
+  mkdir -p "$case_dir/hermes-home/fm-turn-end.d"
+  printf '%s\n' "$token" > "$case_dir/state/task-x1.hermes-turnend-token"
+  printf '%s\n' \
+    'harness=hermes' \
+    "hermes_home=$case_dir/hermes-home" \
+    "hermes_owner_token=$token" >> "$case_dir/state/task-x1.meta"
+
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  FM_HERMES_TASK_TOKEN="$token" sleep 300 &
+  unrelated_pid=$!
+  disown
+  sleep 0.3
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  if kill -0 "$pid" 2>/dev/null; then
+    survived=1
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  if kill -0 "$unrelated_pid" 2>/dev/null; then
+    unrelated_survived=1
+    kill -KILL "$unrelated_pid" 2>/dev/null || true
+  fi
+  wait "$pid" 2>/dev/null || true
+  wait "$unrelated_pid" 2>/dev/null || true
+
+  expect_code 0 "$rc" "hermes-registry-absent-fallback: a rotated profile must still tear down"
+  [ "$survived" -eq 0 ] \
+    || fail "hermes-registry-absent-fallback: the worktree-rooted process was not reaped"
+  [ "$unrelated_survived" -eq 1 ] \
+    || fail "hermes-registry-absent-fallback: teardown signaled a token whose registry proof is gone"
+  assert_grep "no Hermes process-ownership proof is recorded for task-x1" \
+    "$case_dir/stderr" "hermes-registry-absent-fallback: teardown did not warn about the fallback"
+  pass "a Hermes task whose profile registry is gone falls back to the worktree cwd reap"
+}
+
+test_non_hermes_descendant_outside_worktree_is_left_alone() {
+  local case_dir rc pid_file pid survived_child=0 parent_survived=0 i child_pid=""
+  case_dir=$(make_case non-hermes-descendant-scope)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  pid_file="$case_dir/child.pid"
+
+  ( cd "$case_dir/wt" && exec perl -MPOSIX -e '
+      my ($pid_file, $outside) = @ARGV;
+      my $child = fork();
+      die "fork" unless defined $child;
+      if (!$child) {
+        POSIX::setsid();
+        chdir $outside or die "chdir outside";
+        $SIG{TERM} = "IGNORE";
+        open my $fh, ">", $pid_file or die "open";
+        print {$fh} "$$\n";
+        close $fh;
+        sleep 300;
+        exit 0;
+      }
+      sleep 300;
+    ' "$pid_file" "$case_dir" ) &
+  pid=$!
+  disown
+  i=0
+  while [ "$i" -lt 50 ]; do
+    [ -s "$pid_file" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  child_pid=$(cat "$pid_file" 2>/dev/null || true)
+  if [ -n "$child_pid" ] && kill -0 "$child_pid" 2>/dev/null; then
+    survived_child=1
+    kill -KILL "$child_pid" 2>/dev/null || true
+  fi
+  if kill -0 "$pid" 2>/dev/null; then
+    parent_survived=1
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+
+  expect_code 0 "$rc" "non-hermes-descendant-scope: teardown should succeed"
+  [ "$parent_survived" -eq 0 ] \
+    || fail "non-hermes-descendant-scope: the worktree-rooted process survived"
+  [ "$survived_child" -eq 1 ] \
+    || fail "non-hermes-descendant-scope: teardown widened descendant signaling beyond Hermes"
+  pass "a non-Hermes task never signals descendants whose cwd is outside its own roots"
+}
+
 test_lsof_absent_reaps_tmux_process_group() {
   local case_dir rc pid path_without_lsof
   case_dir=$(make_case lsof-absent-process-group-reap)
@@ -2746,6 +2954,10 @@ test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
 test_hermes_owner_marker_reaps_detached_tree_only
 test_hermes_inconsistent_owner_marker_refuses_without_signaling
+test_hermes_orphaned_descendant_is_force_killed
+test_hermes_task_without_owner_token_falls_back_to_cwd_reap
+test_hermes_missing_profile_registry_falls_back_to_cwd_reap
+test_non_hermes_descendant_outside_worktree_is_left_alone
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
 test_reused_pid_identity_is_not_force_killed

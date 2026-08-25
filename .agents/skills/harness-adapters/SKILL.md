@@ -500,7 +500,9 @@ If delivery landed but the start hook did not acknowledge it, the send fails as 
 An idle Hermes pane retains the persistent TUI process.
 Each Firstmate Hermes launch inherits `FM_HERMES_TASK_TOKEN` from the task's lifecycle registry token, and spawn records the same value as `hermes_owner_token` in task metadata.
 Teardown validates the metadata token against the private state sidecar and profile registry before it signals anything, then reaps the token-bearing Python and Node roots together with their exact descendant tree and worktree-rooted processes.
-Missing or inconsistent ownership proof refuses teardown instead of falling back to a broad Hermes or gateway process match, so another Hermes session sharing the profile is never a kill candidate.
+Inconsistent ownership proof refuses teardown instead of falling back to a broad Hermes or gateway process match, so another Hermes session sharing the profile is never a kill candidate.
+A task that never recorded a token, or whose profile registry file is gone, warns and reaps only the worktree-rooted processes and the backend process group, exactly as teardown behaved before the token existed.
+The descendant closure is token-proven Hermes only; every other harness keeps the worktree cwd selection unchanged.
 Tmux recovery validates the foreground Hermes process against the recorded executable, while Herdr requires a registered live agent rather than upgrading a shell husk from the session sidecar.
 A spawn that finds `state/<id>.hermes-session` present but carrying no usable resumable id refuses instead of launching a fresh session against that stale sidecar, because the lifecycle bridge would then never acknowledge a turn; remove the sidecar or run `fm-teardown.sh <id> --force` and respawn.
 `fm-crew-state` remains harness-generic: the Hermes hook's semantic busy/idle record drives its pane-state gate, then an idle worker falls through to the existing status-log or no-mistakes run reconciliation.
