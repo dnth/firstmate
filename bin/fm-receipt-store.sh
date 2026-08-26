@@ -56,6 +56,12 @@ use IO::Handle;
 my ($arg1, $arg2, $arg3, $arg4) = @ARGV;
 my $ready = $ENV{FM_RECEIPT_STORE_MODE} eq "hold" ? $arg3 : undef;
 my $append_tmp;
+END { unlink($append_tmp) if defined($append_tmp) && -e $append_tmp; }
+$SIG{HUP} = $SIG{INT} = $SIG{TERM} = sub {
+  unlink($append_tmp) if defined($append_tmp) && -e $append_tmp;
+  $append_tmp = undef;
+  exit 1;
+};
 
 sub publish_ready {
   my ($code) = @_;
@@ -183,7 +189,13 @@ print {$criterion_parser} $brief_text or refuse("task brief could not reach the 
 close($criterion_parser) or refuse("criterion is not declared by a valid ship brief: $criterion");
 
 my $record = "$ENV{FM_RECEIPT_PAYLOAD}\n";
-my $temp_name = ".evidence.tmp.$$";
+sysopen(my $random, "/dev/urandom", O_RDONLY | O_NOFOLLOW)
+  or refuse("temporary evidence nonce source is unavailable");
+my $nonce_bytes;
+my $nonce_read = sysread($random, $nonce_bytes, 16);
+refuse("temporary evidence nonce could not be read") unless defined($nonce_read) && $nonce_read == 16;
+close($random) or refuse("temporary evidence nonce source could not be closed");
+my $temp_name = ".evidence.tmp." . unpack("H*", $nonce_bytes);
 $append_tmp = $temp_name;
 sysopen(my $temp, $temp_name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)
   or refuse("temporary evidence ledger could not be created");

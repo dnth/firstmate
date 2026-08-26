@@ -391,9 +391,9 @@ if [ "$LEDGER_EXISTS" = true ]; then
       and (.outcome | type == "string" and test("^(passed|failed)$"))
       and (.summary | type == "string" and test("[^[:space:]]"))
       and (.result | type == "string" and test("[^[:space:]]"))
-      and ((.command // "") | type == "string")
-      and ((.artifact // "") | type == "string")
-      and ((.file // "") | type == "string")
+      and ((has("command") | not) or (.command | type == "string"))
+      and ((has("artifact") | not) or (.artifact | type == "string"))
+      and ((has("file") | not) or (.file | type == "string"))
     ' >/dev/null 2>&1; then
       printf 'line %s: invalid v1 receipt\n' "$line_number" >> "$INVALID"
       continue

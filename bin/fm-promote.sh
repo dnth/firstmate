@@ -97,8 +97,9 @@ cd "$TASK_DIR" || { echo "error: scout task directory could not be pinned" >&2; 
 TASK_DIR=$(pwd -P)
 [ "$(dirname "$TASK_DIR")" = "$DATA_REAL" ] \
   || { echo "error: scout task directory escapes the task store" >&2; exit 1; }
-BRIEF="$TASK_DIR/brief.md"
-EVIDENCE="$TASK_DIR/evidence.jsonl"
+TASK_DIR=.
+BRIEF=./brief.md
+EVIDENCE=./evidence.jsonl
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
 [ -f "$BRIEF" ] && [ ! -L "$BRIEF" ] \

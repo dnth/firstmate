@@ -178,6 +178,16 @@ test_complete_and_invalid_ledgers_have_distinct_results() {
   expect_code 2 "$rc" "whitespace-only ledger strings are invalid"
   printf '%s' "$out" | jq -e '.status == "invalid"' >/dev/null \
     || fail "whitespace-only summary was not reported invalid"
+
+  id=nonstring-pointer-ledger
+  write_brief "$id" direct-PR
+  printf '%s\n' '{"criterion":"AC1","type":"test","outcome":"passed","summary":"test","result":"passed","command":null}' \
+    '{"criterion":"AC2","type":"lint","outcome":"passed","summary":"lint","result":"passed","file":false}' \
+    > "$HOME_DIR/data/$id/evidence.jsonl"
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id"); rc=$?
+  expect_code 2 "$rc" "present optional pointer values must be strings"
+  printf '%s' "$out" | jq -e '.status == "invalid" and (.invalid | length) == 2' >/dev/null \
+    || fail "non-string optional pointers were not reported invalid"
   pass "fm-receipt-check distinguishes complete evidence from invalid JSONL"
 }
 

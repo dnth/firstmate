@@ -113,7 +113,7 @@ test_rejects_invalid_schema_and_undeclared_criteria() {
 }
 
 test_portable_paths_and_failed_append_rollback() {
-  local id=portable-store modules ledger before rc
+  local id=portable-store modules ledger before rc leftovers
   write_ship "$id"
   modules="$TMP_ROOT/perl-modules"
   mkdir -p "$modules"
@@ -165,6 +165,8 @@ PERL
   [ "$rc" -ne 0 ] || fail "fault-injected partial append unexpectedly succeeded"
   [ "$(wc -c < "$ledger")" -eq "$before" ] || fail "failed partial append left a ledger tail"
   jq -e . "$ledger" >/dev/null || fail "failed partial append corrupted prior JSONL"
+  leftovers=$(find "$HOME_DIR/data/$id" -maxdepth 1 -name '.evidence.tmp.*' -print)
+  [ -z "$leftovers" ] || fail "failed atomic append left an owned temporary ledger"
   pass "fm-receipt uses portable paths and rolls back incomplete appends"
 }
 

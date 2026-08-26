@@ -158,7 +158,7 @@ Exercise the crew-state fixture.
 # Definition of done
 Delivery contract: mode=$fixture_mode
 EOF
-      printf '%s\n' '{"criterion":"AC1","type":"review","summary":"fixture evidence","result":"complete"}' > "$ledger"
+      printf '%s\n' '{"criterion":"AC1","type":"review","outcome":"passed","summary":"fixture evidence","result":"complete"}' > "$ledger"
     fi
     if ! grep -q '^mode=' "$case_dir/state/$id.meta" 2>/dev/null; then
       printf 'mode=direct-PR\n' >> "$case_dir/state/$id.meta"
@@ -1368,8 +1368,12 @@ EOF
   assert_contains "$out" "source: evidence-gate" "missing evidence must name the gate source"
   assert_contains "$out" "missing evidence: AC1,AC2" "gate must name every missing criterion"
 
-  FM_DATA_OVERRIDE="$d/data" FM_STATE_OVERRIDE="$d/state" "$ROOT/bin/fm-receipt.sh" "$id" AC1 test "implementation works" "passed" >/dev/null
-  FM_DATA_OVERRIDE="$d/data" FM_STATE_OVERRIDE="$d/state" "$ROOT/bin/fm-receipt.sh" "$id" AC2 lint "regression checks" "passed" >/dev/null
+  FM_DATA_OVERRIDE="$d/data" FM_STATE_OVERRIDE="$d/state" "$ROOT/bin/fm-receipt.sh" "$id" AC1 test "implementation works" "passed" --outcome passed >/dev/null
+  FM_DATA_OVERRIDE="$d/data" FM_STATE_OVERRIDE="$d/state" "$ROOT/bin/fm-receipt.sh" "$id" AC2 lint "regression checks" "failed" --outcome failed >/dev/null
+  out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_DATA_OVERRIDE="$d/data" "$CREW_STATE" "$id")
+  assert_contains "$out" "state: parked" "failed outcome must keep completion parked"
+  assert_contains "$out" "missing evidence: AC2" "failed outcome must leave its criterion missing"
+  FM_DATA_OVERRIDE="$d/data" FM_STATE_OVERRIDE="$d/state" "$ROOT/bin/fm-receipt.sh" "$id" AC2 lint "regression checks" "passed" --outcome passed >/dev/null
   out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_DATA_OVERRIDE="$d/data" "$CREW_STATE" "$id")
   assert_contains "$out" "state: done" "complete evidence must release done acceptance"
   assert_contains "$out" "source: status-log" "released completion retains status-log source"
