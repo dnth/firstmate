@@ -6,12 +6,13 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 ## Guarantees under test
 
 - New ship briefs receive stable acceptance-criterion ids and an empty append-only evidence ledger, while scout and secondmate scaffolds remain outside the receipt contract.
+- Concurrent ship scaffolds use one exclusive brief identity, so a losing invocation cannot remove the winning brief or evidence contract.
 - Ship scaffold output requires replacing both task and acceptance-criterion placeholders, and spawn refuses unresolved task text or criteria before endpoint creation.
 - Every ship completion, including a promoted scout, remains parked until a valid acceptance contract and structurally valid evidence cover every required criterion.
 - Low-risk routing is limited to CHANGELOG formatting or reflow changes whose non-whitespace byte sequence is identical and which have file-bound mechanical proof, while every content-byte or uncertain change defaults high.
 - High-risk, broad, sensitive, weakly proven, materially expanded, or uncertain changes retain full No-Mistakes validation.
 - `direct-PR` and `local-only` retain the evidence gate without entering No-Mistakes.
-- The explicit implementation-complete action records the first timestamp idempotently with the current clean commit, planning requires that current-head binding, and `validation_started_at` uses the implementation-complete time as its interval origin.
+- The explicit implementation-complete action records one current timestamp for the current clean commit, refreshes that timestamp when the head changes, remains idempotent for the same head, and supplies the plan interval origin.
 - Completion requires observed post-plan mechanical evidence, the exact No-Mistakes run created with the latest unguessable plan generation and bound to its path and head with current checks-green status or CI-log evidence, a GitHub PR with forge-observed exact-head metadata, a supported non-GitHub direct-PR with the existing canonical HTTPS PR URL predicate and no head observation, or a clean fast-forward-ready branch.
 - Receipt append and check share one executable owner that resolves and pins every raw data-path component inside the store process, opens and verifies the task directory relative to that pinned parent, and then opens relative no-follow brief and single-link ledger paths portably on Linux and macOS.
 - Promotion pins and verifies its scout task directory before reading or replacing the brief and ledger, and refuses symlinked or out-of-root task paths before mutation.
@@ -75,7 +76,7 @@ ok - exact bound runs complete from the shared current CI-log readiness predicat
 ok - finding-to-criterion invalidations remain inspectable in task metadata
 ok - low-risk mechanical changes can skip a full No-Mistakes run
 ok - low risk requires safe changelog prose and file-bound mechanical evidence
-ok - implementation completion is explicit, first-idempotent, and plan-bound
+ok - implementation completion refreshes per head and remains idempotent
 ok - plan publication holds the pinned ledger boundary against concurrent receipts
 ok - diff summary errors fail closed before risk classification
 ok - successful terminal runs bind while failed runs remain rejected
@@ -104,6 +105,7 @@ all fm-crew-state tests passed
 $ tests/fm-brief.test.sh
 ok - fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly
 ok - fm-brief: scout and secondmate code paths still scaffold well-formed briefs
+ok - fm-brief: concurrent ship scaffolds preserve one complete owner
 
 $ bin/fm-lint.sh
 fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)

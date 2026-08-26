@@ -257,6 +257,24 @@ if [ "$KIND" = ship ] && { [ -e "$EVIDENCE_LOCK" ] || [ -L "$EVIDENCE_LOCK" ]; }
   exit 1
 fi
 mkdir -p "$DATA/$ID"
+umask 077
+BRIEF_TOKEN=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
+[ "${#BRIEF_TOKEN}" -eq 32 ] || { echo "error: brief claim identity could not be created" >&2; exit 1; }
+BRIEF_OWNER="$DATA/$ID/.brief.owner.$BRIEF_TOKEN"
+if ! ( set -C; : > "$BRIEF_OWNER" ) 2>/dev/null || ! ln "$BRIEF_OWNER" "$BRIEF" 2>/dev/null; then
+  rm -f "$BRIEF_OWNER"
+  echo "error: $BRIEF already exists" >&2
+  exit 1
+fi
+BRIEF_COMMITTED=0
+cleanup_brief_claim() {
+  if [ "$BRIEF_COMMITTED" -ne 1 ] && [ -e "$BRIEF_OWNER" ] && [ "$BRIEF" -ef "$BRIEF_OWNER" ]; then
+    rm -f "$BRIEF"
+  fi
+  rm -f "$BRIEF_OWNER"
+}
+trap cleanup_brief_claim EXIT
+trap 'exit 1' HUP INT TERM
 
 shell_quote() {
   printf "'"
@@ -344,8 +362,9 @@ When you have no assigned or in-flight work after that reconciliation, go idle a
 An empty queue is a healthy resting state, not a cue to invent work: never spawn a survey, audit, or any self-directed "find work" task on your own initiative.
 If this charter cannot be carried out, append \`blocked: {why}\` or \`failed: {why}\` to the main status file and stop.
 EOF
+BRIEF_COMMITTED=1
 if [ "$SECONDMATE_CHARTER" = "{TASK}" ]; then
-  echo "scaffolded: $BRIEF (secondmate charter; replace {TASK})"
+echo "scaffolded: $BRIEF (secondmate charter; replace {TASK})"
 else
   echo "scaffolded: $BRIEF (secondmate charter)"
 fi
@@ -431,6 +450,7 @@ Before reporting done, read and follow \`$FM_ROOT/.agents/skills/decision-hold-l
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF
+BRIEF_COMMITTED=1
 echo "scaffolded: $BRIEF (scout; replace {TASK})"
 exit 0
 fi
@@ -511,15 +531,14 @@ Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced 
 
 $DOD
 EOF
-umask 077
 if ! ( set -C; : > "$EVIDENCE" ) 2>/dev/null; then
   echo "error: could not create new evidence ledger: $EVIDENCE" >&2
-  rm -f "$BRIEF"
   exit 1
 fi
 if ! ( set -C; : > "$EVIDENCE_LOCK" ) 2>/dev/null; then
   echo "error: could not create new evidence lock: $EVIDENCE_LOCK" >&2
-  rm -f "$BRIEF" "$EVIDENCE"
+  rm -f "$EVIDENCE"
   exit 1
 fi
+BRIEF_COMMITTED=1
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and every {ACCEPTANCE CRITERION})"

@@ -469,26 +469,22 @@ if [ "$ACTION" = implementation-complete ]; then
     echo "error: implementation completion metadata is locked" >&2
     exit 2
   fi
-  IMPLEMENTATION_COMPLETED=$(grep '^implementation_completed_at=' "$META" | head -1 | cut -d= -f2- || true)
+  IMPLEMENTATION_COMPLETED=$(grep '^implementation_completed_at=' "$META" | tail -1 | cut -d= -f2- || true)
   RECORDED_IMPLEMENTATION_HEAD=$(grep '^implementation_completed_head=' "$META" | tail -1 | cut -d= -f2- || true)
-  case "$IMPLEMENTATION_COMPLETED" in
-    '')
-      IMPLEMENTATION_COMPLETED=$(date +%s)
-      case "$IMPLEMENTATION_COMPLETED" in
-        ''|*[!0-9]*) release_validation_lock; echo "error: implementation completion timestamp could not be recorded" >&2; exit 2 ;;
-      esac
-      printf 'implementation_completed_at=%s\nimplementation_completed_head=%s\n' \
-        "$IMPLEMENTATION_COMPLETED" "$IMPLEMENTATION_HEAD" >> "$META" \
-        || { release_validation_lock; echo "error: could not record implementation completion" >&2; exit 2; }
-      ;;
-    *[!0-9]*) release_validation_lock; echo "error: implementation completion timestamp is invalid" >&2; exit 2 ;;
-    *)
-      if [ "$RECORDED_IMPLEMENTATION_HEAD" != "$IMPLEMENTATION_HEAD" ]; then
-        printf 'implementation_completed_head=%s\n' "$IMPLEMENTATION_HEAD" >> "$META" \
-          || { release_validation_lock; echo "error: could not update implementation head" >&2; exit 2; }
-      fi
-      ;;
-  esac
+  if [ "$RECORDED_IMPLEMENTATION_HEAD" != "$IMPLEMENTATION_HEAD" ]; then
+    IMPLEMENTATION_COMPLETED=$(date +%s)
+    case "$IMPLEMENTATION_COMPLETED" in
+      ''|*[!0-9]*) release_validation_lock; echo "error: implementation completion timestamp could not be recorded" >&2; exit 2 ;;
+    esac
+    printf 'implementation_completed_at=%s\nimplementation_completed_head=%s\n' \
+      "$IMPLEMENTATION_COMPLETED" "$IMPLEMENTATION_HEAD" >> "$META" \
+      || { release_validation_lock; echo "error: could not record implementation completion" >&2; exit 2; }
+  else
+    case "$IMPLEMENTATION_COMPLETED" in
+      '') release_validation_lock; echo "error: implementation completion timestamp is missing" >&2; exit 2 ;;
+      *[!0-9]*) release_validation_lock; echo "error: implementation completion timestamp is invalid" >&2; exit 2 ;;
+    esac
+  fi
   release_validation_lock
   jq -cn --arg task "$ID" --argjson completed_at "$IMPLEMENTATION_COMPLETED" --arg completed_head "$IMPLEMENTATION_HEAD" \
     '{schema:"fm-implementation-completion.v1",task:$task,status:"completed",completed_at:$completed_at,completed_head:$completed_head}'
@@ -809,7 +805,7 @@ resolve_diff() {
 
 resolve_diff \
   || { echo "error: authoritative validation base and diff could not be resolved" >&2; exit 2; }
-IMPLEMENTATION_COMPLETED=$(grep '^implementation_completed_at=' "$META" | head -1 | cut -d= -f2- || true)
+IMPLEMENTATION_COMPLETED=$(grep '^implementation_completed_at=' "$META" | tail -1 | cut -d= -f2- || true)
 IMPLEMENTATION_HEAD=$(grep '^implementation_completed_head=' "$META" | tail -1 | cut -d= -f2- || true)
 case "$IMPLEMENTATION_COMPLETED" in
   ''|*[!0-9]*) echo "error: record implementation completion before planning" >&2; exit 2 ;;

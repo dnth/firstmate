@@ -733,6 +733,43 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+test_concurrent_ship_scaffold_has_one_owner() {
+  local home id=brief-concurrent-owner fakebin barrier target real_mkdir first second successes=0 leftovers
+  home="$TMP_ROOT/concurrent-owner/home"
+  fakebin="$TMP_ROOT/concurrent-owner/fakebin"
+  barrier="$TMP_ROOT/concurrent-owner/barrier"
+  target="$home/data/$id"
+  real_mkdir=$(command -v mkdir)
+  mkdir -p "$home/data" "$fakebin" "$barrier"
+  cat > "$fakebin/mkdir" <<EOF
+#!/bin/sh
+if [ "\$*" = "-p $target" ]; then
+  : > "$barrier/ready.\$PPID"
+  while [ "\$(find "$barrier" -name 'ready.*' -type f | wc -l | tr -d ' ')" -lt 2 ]; do
+    sleep 0.01
+  done
+fi
+exec "$real_mkdir" "\$@"
+EOF
+  chmod +x "$fakebin/mkdir"
+  PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" alpha --mode direct-PR \
+    > "$home/first.out" 2>&1 &
+  first=$!
+  PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" alpha --mode direct-PR \
+    > "$home/second.out" 2>&1 &
+  second=$!
+  if wait "$first"; then successes=$((successes + 1)); fi
+  if wait "$second"; then successes=$((successes + 1)); fi
+  [ "$successes" -eq 1 ] || fail "concurrent ship scaffolds did not produce exactly one owner"
+  assert_present "$target/brief.md" "winning scaffold lost its brief"
+  assert_present "$target/evidence.jsonl" "winning scaffold lost its evidence ledger"
+  assert_present "$target/.evidence.lock" "winning scaffold lost its evidence lock"
+  assert_grep 'Delivery contract: mode=direct-PR' "$target/brief.md" "winning scaffold brief was incomplete"
+  leftovers=$(find "$target" -name '.brief.owner.*' -print)
+  [ -z "$leftovers" ] || fail "completed scaffold retained brief ownership artifacts: $leftovers"
+  pass "fm-brief: concurrent ship scaffolds preserve one complete owner"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -753,3 +790,4 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_concurrent_ship_scaffold_has_one_owner

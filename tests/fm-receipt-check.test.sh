@@ -624,7 +624,7 @@ test_low_risk_requires_safe_prose_and_applicable_evidence() {
 }
 
 test_implementation_completion_precedes_planning() {
-  local id=implementation-boundary base fakebin out rc meta head
+  local id=implementation-boundary base fakebin out rc meta head new_head project
   base=$(make_project "$id" no-mistakes localized)
   FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test primary passed --outcome passed >/dev/null \
     || fail "implementation boundary AC1 receipt failed"
@@ -652,13 +652,29 @@ EOF
     || fail "duplicate implementation boundary failed"
   meta="$HOME_DIR/state/$id.meta"
   [ "$(grep -c '^implementation_completed_at=' "$meta")" -eq 1 ] \
-    || fail "implementation completion timestamp was not first-idempotent"
+    || fail "same-head implementation completion was not idempotent"
+  project="$TMP_ROOT/project-$id"
+  printf 'head change\n' >> "$project/src/app.sh"
+  git -C "$project" add src/app.sh
+  git -C "$project" commit -q -m 'advance implementation head'
+  new_head=$(git -C "$project" rev-parse HEAD)
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_DATE=250 FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --implementation-complete) \
+    || fail "changed-head implementation boundary failed"
+  printf '%s' "$out" | jq -e --arg head "$new_head" \
+    '.completed_at == 250 and .completed_head == $head' >/dev/null \
+    || fail "changed-head implementation completion did not refresh its binding"
+  PATH="$fakebin:$PATH" FM_FAKE_DATE=275 FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --implementation-complete >/dev/null \
+    || fail "same changed-head implementation boundary failed"
+  [ "$(grep -c '^implementation_completed_at=' "$meta")" -eq 2 ] \
+    || fail "changed-head timestamp was not refreshed exactly once"
   PATH="$fakebin:$PATH" FM_FAKE_DATE=300 FM_FAKE_NM_STATUS= FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --plan --base "$base" >/dev/null \
     || fail "plan after implementation boundary failed"
-  [ "$(grep '^validation_started_at=' "$meta" | tail -1)" = 'validation_started_at=100' ] \
-    || fail "validation interval did not originate at implementation completion"
-  pass "implementation completion is explicit, first-idempotent, and plan-bound"
+  [ "$(grep '^validation_started_at=' "$meta" | tail -1)" = 'validation_started_at=250' ] \
+    || fail "validation interval did not originate at current-head implementation completion"
+  pass "implementation completion refreshes per head and remains idempotent"
 }
 
 test_plan_boundary_excludes_concurrent_receipts() {
