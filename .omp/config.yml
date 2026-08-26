@@ -1,0 +1,5 @@
+# Enable the OMP advisor in worktrees of this Firstmate repository.
+# Project-local configuration does not enable the advisor in unrelated projects.
+# No project-local model role is set, so OMP resolves the advisor role from higher-level configuration.
+advisor:
+  enabled: true

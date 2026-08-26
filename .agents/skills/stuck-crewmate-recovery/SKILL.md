@@ -46,8 +46,12 @@ Escalate in order:
 2. If the crewmate is waiting on a question its brief already answers, answer in one line via `FM_HOME=<this-firstmate-home> bin/fm-send.sh` from an active firstmate session unless `FM_HOME` is already set to the active firstmate home; when that question is an open keyed decision or blocker, pass its key through `--resolve-key` as required by `bin/fm-send.sh`'s header contract.
 3. If the crewmate is confused or looping, interrupt with the adapter's interrupt key, then redirect with one corrective line.
    For example, for a single-Escape adapter: `FM_HOME=<this-firstmate-home> bin/fm-send.sh <window> --key Escape`.
-4. If the crewmate is genuinely wedged after redirection, exit the agent with the adapter's exit command and relaunch with the same brief plus a `progress so far` note appended to it.
+4. For a live OMP agent whose PROVIDER STREAM is wedged but whose composer still submits input, send `/fresh` via `fm-send` first and confirm it takes a fresh turn.
+   `/fresh` rotates provider-stream state while retaining the local transcript, session file, and identity, and is rejected during active streaming, so abort the current turn first when needed.
+   This does not fix a herdr composer-submit freeze where input is swallowed and `/fresh` cannot be submitted; that distinct case still requires the existing kill-plus-respawn recovery.
+   If `/fresh` cannot be submitted or does not clear the wedge, continue with the recovery below.
+5. If the crewmate is genuinely wedged after redirection, exit the agent with the adapter's exit command and relaunch with the same brief plus a `progress so far` note appended to it.
    Genuine wedging means looping, unresponsive, repeating the same obstacle, or truly dead.
    A low context reading is not wedging; modern harnesses auto-compact and keep going.
    The worktree and commits persist, so relaunch is cheap.
-5. If a second relaunch fails too, write `failed` to the backlog and tell the captain the plain failure, preserved work, and consequence using `AGENTS.md` section 9; do not mention metadata, harness, window, or worktree unless the path itself is needed for action.
+6. If a second relaunch fails too, write `failed` to the backlog and tell the captain the plain failure, preserved work, and consequence using `AGENTS.md` section 9; do not mention metadata, harness, window, or worktree unless the path itself is needed for action.

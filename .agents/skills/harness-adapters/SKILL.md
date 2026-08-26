@@ -333,6 +333,7 @@ OMP workers keep their sessions under the task temp root so recovery can resume 
 [The tmux backend guide](../../../docs/tmux-backend.md#current-behavior-and-safety) owns OMP's launch identity, supported canonical paths, composer geometry, submission, and recovery behavior.
 [The Herdr backend guide](../../../docs/herdr-backend.md#composer-and-injection-safety) owns OMP's native identity, composer, busy steering, normal exit, and blocked-injection behavior on Herdr.
 OMP is verified only on tmux and Herdr; the backend applicability rationale and inspection evidence live in [runtime-backends verification](../../../docs/verification/runtime-backends.md#omp-applicability-outside-tmux-and-herdr).
+Before killing and respawning a live OMP agent for a wedged PROVIDER STREAM, follow the `/fresh` step in [stuck-crewmate recovery](../stuck-crewmate-recovery/SKILL.md#live-endpoint-escalation); that recovery procedure owns its composer-submit precondition, retained state, active-stream rejection, and herdr composer-submit-freeze exception.
 
 **Primary-session integration fact (verified 2026-07-31, OMP 17.1.8).**
 Plain OMP started from the Firstmate root discovers `.omp/extensions/fm-primary-omp.ts` natively, including in a fresh checkout before canonical `state/` exists; `omp -e .omp/extensions/fm-primary-omp.ts` remains the explicit recovery fallback.
