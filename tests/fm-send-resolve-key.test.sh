@@ -306,7 +306,7 @@ test_omp_missing_native_binding_does_not_close() {
   rc=$?
   [ "$rc" -ne 0 ] \
     || fail "an OMP task without a native bridge should refuse instead of using queued composer delivery"
-  assert_contains "$(cat "$err")" "no live native send bridge" \
+  assert_contains "$(cat "$err")" "native send bridge" \
     "missing native OMP bridge refusal did not name the binding"
   assert_no_grep 'resolved' "$home/state/tq.status" \
     "a missing-native OMP send closed the decision"

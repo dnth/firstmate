@@ -319,7 +319,11 @@ fm_send_omp_native_user_message() {
     return 1
   }
   expected="/tmp/fm-$TARGET_TASK_ID/omp-send.sock"
-  socket=${TARGET_OMP_NATIVE_SOCKET:-$expected}
+  if [ -z "$TARGET_OMP_NATIVE_SOCKET" ]; then
+    echo "error: OMP worker $TARGET_TASK_ID has no metadata-bound native send bridge; refusing composer injection" >&2
+    return 1
+  fi
+  socket=$TARGET_OMP_NATIVE_SOCKET
   if [ "$socket" != "$expected" ]; then
     echo "error: OMP native worker bridge path is not bound to task $TARGET_TASK_ID" >&2
     return 1

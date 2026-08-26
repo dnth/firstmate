@@ -201,16 +201,41 @@ JS
 }
 
 test_omp_task_without_native_binding_refuses_without_composer_injection() {
-  local home fb bun omp log entered rc err
+  local home fb bun omp log entered rc err socket request server
   IFS=$'\t' read -r home fb bun omp log entered < <(setup_case missing-native omp)
   err="$home/missing-native.err"
+  socket="/tmp/fm-turn-test/omp-send.sock"
+  request="$home/native-request.json"
+  mkdir -p "$(dirname "$socket")"
+  node --input-type=module - "$socket" "$request" <<'JS' &
+import { writeFileSync } from "node:fs";
+import net from "node:net";
+import process from "node:process";
+
+const [socketPath, requestPath] = process.argv.slice(2);
+const server = net.createServer((socket) => {
+  socket.on("data", (chunk) => writeFileSync(requestPath, chunk));
+});
+server.listen(socketPath);
+JS
+  server=$!
+  for _ in $(seq 1 100); do
+    [ -S "$socket" ] && break
+    sleep 0.01
+  done
   set +e
   run_case missing-native "$home" "$fb" "$bun" "$omp" "$log" "$entered" \
     >/dev/null 2>"$err"
   rc=$?
+  kill "$server" 2>/dev/null || true
+  wait "$server" 2>/dev/null || true
+  rm -f "$socket"
+  rmdir /tmp/fm-turn-test 2>/dev/null || true
   expect_code 1 "$rc" "an OMP task without native binding should refuse ordinary text"
-  assert_contains "$(cat "$err")" 'no live native send bridge' \
+  assert_contains "$(cat "$err")" 'no metadata-bound native send bridge' \
     "missing native OMP binding refusal was not actionable"
+  assert_absent "$request" \
+    "missing native OMP binding connected to the predictable socket"
   assert_not_contains "$(cat "$log")" 'literal=' \
     "missing native OMP binding typed terminal text"
   assert_not_contains "$(cat "$log")" 'key=Enter' \

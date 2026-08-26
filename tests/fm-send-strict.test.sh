@@ -232,7 +232,7 @@ SH
   got=$(cat "$log")
   assert_not_contains "$got" "literal=1 arg=bound geometry" \
     "OMP send typed into the composer before finding its missing native bridge"
-  assert_contains "$(cat "$err")" "no live native send bridge" \
+  assert_contains "$(cat "$err")" "native send bridge" \
     "OMP missing native bridge refusal did not name the task-bound binding"
 
   before=$(wc -l < "$log" | tr -d ' ')
