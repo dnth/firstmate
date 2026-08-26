@@ -77,14 +77,21 @@ if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/d
 fi
 
 META_TMP=
+VALIDATION_LOCK=
 pr_check_cleanup() {
   fm_pr_poll_cleanup
   [ -z "$META_TMP" ] || rm -f -- "$META_TMP"
+  [ -z "$VALIDATION_LOCK" ] || rmdir "$VALIDATION_LOCK" 2>/dev/null || true
 }
 trap pr_check_cleanup EXIT
 trap 'exit 1' HUP INT TERM
 fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" "$SCRIPT_DIR/fm-pr-poll.sh" \
   || { echo "error: could not prepare PR poll" >&2; exit 1; }
+
+VALIDATION_LOCK="$STATE/.$ID.validation-plan.lock"
+mkdir "$VALIDATION_LOCK" 2>/dev/null \
+  || { VALIDATION_LOCK=; echo "error: validation metadata is locked" >&2; exit 1; }
+EXPECTED_GENERATION=$(grep '^validation_generation=' "$META" | tail -1 | cut -d= -f2- || true)
 
 META_DEVICE=$(fm_pr_file_device "$META") || exit 1
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
@@ -115,6 +122,8 @@ fm_pr_metadata_identity_parse "$META" || exit 1
 
 VALIDATION_PATH=$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)
 VALIDATION_GENERATION=$(grep '^validation_generation=' "$META" | tail -1 | cut -d= -f2- || true)
+[ "$VALIDATION_GENERATION" = "$EXPECTED_GENERATION" ] \
+  || { echo "error: validation generation changed during PR registration" >&2; exit 1; }
 fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2
   exit 1
@@ -124,6 +133,8 @@ if [ "$VALIDATION_PATH" = direct-PR ] || [ "$VALIDATION_PATH" = receipts-mechani
     || { echo "error: PR validation generation is missing" >&2; exit 1; }
   printf 'validation_pr_published_generation=%s\n' "$VALIDATION_GENERATION" >> "$META" \
     || { echo "error: PR watcher publication could not be recorded" >&2; exit 1; }
+  rmdir "$VALIDATION_LOCK" || { echo "error: validation metadata lock could not be released" >&2; exit 1; }
+  VALIDATION_LOCK=
   "$SCRIPT_DIR/fm-receipt-check.sh" "$ID" --complete --terminal-evidence pr-opened >/dev/null \
     || { echo "error: PR validation completion could not be observed" >&2; exit 1; }
 fi

@@ -518,6 +518,13 @@ if [ "$ACTION" = invalidate-claim ]; then
   exit 0
 fi
 
+mechanical_evidence_covers_file() {
+  local ledger=$1 file=$2
+  jq --arg file "$file" -se '
+    any(.[]; .file == $file and .outcome == "passed" and (.type | test("^(test|build|lint|typecheck)$")))
+  ' "$ledger" >/dev/null 2>&1
+}
+
 if [ "$ACTION" = bind-run ]; then
   BIND_WORKTREE=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
   BIND_PATH=$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)
@@ -582,9 +589,7 @@ verify_mechanical_ready() {
     && [ -s "$completion_files" ] || { echo "error: planned mechanical change files could not be observed" >&2; return 1; }
   while IFS= read -r changed_file; do
     [ -n "$changed_file" ] || continue
-    jq --arg file "$changed_file" -se '
-      any(.[]; .file == $file and .outcome == "passed" and (.type | test("^(test|build|lint|typecheck)$")))
-    ' "$new_receipts" >/dev/null 2>&1 \
+    mechanical_evidence_covers_file "$new_receipts" "$changed_file" \
       || { echo "error: no applicable post-plan mechanical evidence was observed for $changed_file" >&2; return 1; }
   done < "$completion_files"
 }
@@ -862,9 +867,7 @@ MECHANICAL_PROOF=1
 if [ "$DIFF_AVAILABLE" -eq 1 ]; then
   while IFS= read -r changed_file; do
     [ -n "$changed_file" ] || continue
-    if ! jq --arg file "$changed_file" -se '
-      any(.[]; .file == $file and .outcome == "passed" and (.type | test("^(test|build|lint|typecheck)$")))
-    ' "$LEDGER" >/dev/null 2>&1; then
+    if ! mechanical_evidence_covers_file "$LEDGER" "$changed_file"; then
       MECHANICAL_PROOF=0
       break
     fi

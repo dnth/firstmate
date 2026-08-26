@@ -16,6 +16,7 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 - Completion requires observed post-plan mechanical evidence, the exact No-Mistakes run created with the latest unguessable plan generation and bound to its path and head with current checks-green status or CI-log evidence, a GitHub PR with forge-observed exact-head metadata, a supported non-GitHub direct-PR with the existing canonical HTTPS PR URL predicate and no head observation, or a clean fast-forward-ready branch.
 - Receipt append and check share one executable owner that resolves and pins every raw data-path component inside the store process, opens and verifies the task directory relative to that pinned parent, and then opens relative no-follow brief and single-link ledger paths portably on Linux and macOS.
 - Promotion pins and verifies its scout task directory before reading or replacing the brief and ledger, and refuses symlinked or out-of-root task paths before mutation.
+- Promotion retries recover one identity-bound unfinished transaction, while post-commit reporting cannot reverse durable success.
 - Planning retains the pinned shared ledger lock through metadata publication, so only receipts appended after the published plan boundary qualify as fresh mechanical evidence.
 - The checker parent owns a read/write release descriptor before snapshot spawn, so early child failures cannot block cleanup waiting for a FIFO reader.
 - Snapshot readiness status is checked and terminal on publication failure; hold documents ready `0`, refusal `1`, and missing-ledger `3` statuses.
@@ -131,6 +132,7 @@ ok - fm-pr-merge refuses before merging when task meta is missing
 
 $ tests/fm-pr-check-security.test.sh
 ok - valid direct and merge flows record exact metadata and reject multiline head metadata
+ok - PR registration serializes with validation planning
 exit 0
 
 $ tests/fm-task-delivery.test.sh
@@ -149,6 +151,8 @@ ok - fm-promote: interrupted task replacement rolls back atomically
 ok - fm-promote: store signals before commit roll back both replacements
 ok - fm-promote: intermediate state symlinks fail closed
 ok - fm-promote: state path replacement cannot redirect metadata
+ok - fm-promote: retry recovers an identity-bound crashed transaction
+ok - fm-promote: post-commit reporting cannot reverse success
 ok - fm-project-mode: the conditional policy is accepted, mapped for mechanical callers, and readable raw
 # all fm-task-delivery tests passed
 

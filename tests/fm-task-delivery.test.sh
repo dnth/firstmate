@@ -593,6 +593,57 @@ EOF
   pass "fm-promote: state path replacement cannot redirect metadata"
 }
 
+test_crashed_promotion_recovers_on_retry() {
+  local home wrapper id=promote-crash-retry status
+  home="$TMP_ROOT/promote-crash-retry/home"
+  wrapper="$home/crash-wrapper.sh"
+  mkdir -p "$home/data/$id" "$home/state"
+  printf '# Task\nCrash recovery fixture.\n\n# Setup\nScout setup.\n' > "$home/data/$id/brief.md"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$home/state/$id.meta"
+  cat > "$wrapper" <<EOF
+#!/usr/bin/env bash
+set -eu
+phase=\$1
+"$ROOT/bin/fm-promote-transaction.sh" "\$@"
+if [ "\$phase" = prepare ]; then
+  kill -KILL "\$PPID"
+fi
+EOF
+  chmod +x "$wrapper"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-receipt-store.sh" "$id" promote "$wrapper" "$id" direct-PR off '- AC1: Concrete outcome' \
+    >/dev/null 2>&1
+  status=$?
+  [ "$status" -ne 0 ] || fail "crashed promotion unexpectedly reported success"
+  FM_HOME="$home" "$PROMOTE" "$id" --mode direct-PR --yolo off --criterion 'AC1: Concrete outcome' \
+    >/dev/null || fail "retry did not recover and complete the unfinished promotion"
+  assert_grep 'kind=ship' "$home/state/$id.meta" "recovered promotion did not commit ship metadata"
+  assert_present "$home/data/$id/evidence.jsonl" "recovered promotion did not commit evidence"
+  pass "fm-promote: retry recovers an identity-bound crashed transaction"
+}
+
+test_report_failure_preserves_committed_promotion() {
+  local home wrapper id=promote-report-failure
+  home="$TMP_ROOT/promote-report-failure/home"
+  wrapper="$home/report-wrapper.sh"
+  mkdir -p "$home/data/$id" "$home/state"
+  printf '# Task\nReport failure fixture.\n\n# Setup\nScout setup.\n' > "$home/data/$id/brief.md"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$home/state/$id.meta"
+  cat > "$wrapper" <<EOF
+#!/usr/bin/env bash
+set -eu
+[ "\$1" != report ] || exit 9
+exec "$ROOT/bin/fm-promote-transaction.sh" "\$@"
+EOF
+  chmod +x "$wrapper"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-receipt-store.sh" "$id" promote "$wrapper" "$id" direct-PR off '- AC1: Concrete outcome' \
+    >/dev/null 2>&1 || fail "post-commit report failure changed promotion success"
+  assert_grep 'kind=ship' "$home/state/$id.meta" "report failure lost committed ship metadata"
+  assert_present "$home/data/$id/evidence.jsonl" "report failure lost committed evidence"
+  pass "fm-promote: post-commit reporting cannot reverse success"
+}
+
 # The registry parser survives for the mechanical consumers only. It accepts the
 # conditional policy, maps it to its most rigorous leg for them, and exposes the
 # raw annotation for the one caller that must tell a policy from a flat mode.
@@ -642,5 +693,7 @@ test_interrupted_replacements_roll_back
 test_store_signals_roll_back_before_commit
 test_promote_rejects_intermediate_state_symlink
 test_state_path_replacement_cannot_redirect_promotion
+test_crashed_promotion_recovers_on_retry
+test_report_failure_preserves_committed_promotion
 test_project_mode_maps_the_conditional_policy
 echo "# all fm-task-delivery tests passed"

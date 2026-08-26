@@ -3365,6 +3365,22 @@ test_gitlab_merged_poll_retires() {
   pass "GitHub and GitLab exact merged results share one retirement path"
 }
 
+test_validation_plan_lock_serializes_pr_registration() {
+  local dir rc
+  dir=$(make_case validation-plan-lock)
+  write_task_meta "$dir"
+  printf 'validation_generation=plan-locked\nvalidation_path=direct-PR\n' >> "$dir/home/state/task-a.meta"
+  mkdir "$dir/home/state/.task-a.validation-plan.lock"
+  set +e
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/18 >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "PR registration ignored the active validation-plan lock"
+  assert_no_grep '^pr=' "$dir/home/state/task-a.meta" "locked PR registration replaced metadata"
+  assert_absent "$dir/home/state/task-a.check.sh" "locked PR registration published a watcher"
+  pass "PR registration serializes with validation planning"
+}
+
 test_parser_matrix
 test_gitlab_merge_watch
 test_merged_poll_retires_once
@@ -3374,6 +3390,7 @@ test_external_merge_transition_retires_only_terminal_poll
 test_retirement_refuses_replacement_and_nonterminal_results
 test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
+test_validation_plan_lock_serializes_pr_registration
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert

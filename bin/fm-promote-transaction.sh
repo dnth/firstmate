@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Internal promotion transaction for fm-receipt-store.sh.
+# Usage: fm-promote-transaction.sh <prepare|precommit|report|rollback> <task-id> <mode> <yolo> <criteria-block> <token>
+# prepare installs the task-side candidate while retaining identity-bound recovery files.
+# precommit validates that recovery ownership remains intact, report emits post-commit guidance, and rollback restores the task-side original.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

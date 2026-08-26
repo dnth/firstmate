@@ -271,6 +271,56 @@ if ($ENV{FM_RECEIPT_STORE_MODE} eq "promote") {
     $state = $next;
   }
   my $meta_name = "$task_name.meta";
+  chdir($task) or refuse("pinned task directory could not be re-entered");
+  opendir(my $task_entries, ".") or refuse("promotion task directory could not be inspected");
+  my @unfinished = map { /^\.promotion\.owner\.([0-9a-f]{32})\z/ ? $1 : () } readdir($task_entries);
+  closedir($task_entries) or refuse("promotion task directory inspection could not close");
+  refuse("multiple unfinished promotion transactions require recovery") if @unfinished > 1;
+  if (@unfinished == 1) {
+    my $unfinished_token = $unfinished[0];
+    chdir($state) or refuse("pinned state directory could not be re-entered");
+    my $old_backup = ".$task_name.meta.original.$unfinished_token";
+    my $have_backup = sysopen(my $old_meta, $old_backup, O_RDONLY | O_NOFOLLOW);
+    if ($have_backup) {
+      my @old_identity = stat($old_meta);
+      refuse("unfinished promotion metadata backup is invalid") unless @old_identity
+        && S_ISREG($old_identity[2]) && $old_identity[3] == 1;
+      local $/;
+      my $old_text = <$old_meta>;
+      defined($old_text) or refuse("unfinished promotion metadata backup could not be read");
+      close($old_meta) or refuse("unfinished promotion metadata backup could not be closed");
+      my $recovery_name = ".$task_name.meta.recovery.$token";
+      write_new_file($recovery_name, $old_text);
+      rename($recovery_name, $meta_name)
+        or refuse("unfinished promotion metadata could not be restored");
+    } else {
+      refuse("unfinished promotion metadata backup is unsafe") unless $! == ENOENT;
+      sysopen(my $current_meta, $meta_name, O_RDONLY | O_NOFOLLOW)
+        or refuse("unfinished promotion metadata recovery is unavailable");
+      local $/;
+      my $current_text = <$current_meta>;
+      defined($current_text) or refuse("unfinished promotion metadata recovery could not be read");
+      close($current_meta) or refuse("unfinished promotion metadata recovery could not close");
+      my @current_kinds = ($current_text =~ /^kind=(.*)$/mg);
+      refuse("unfinished promotion metadata backup is missing") unless @current_kinds == 1
+        && $current_kinds[0] eq "scout";
+    }
+    chdir($task) or refuse("pinned task directory could not be re-entered");
+    system($command, "rollback", @command_args, $unfinished_token) == 0
+      or refuse("unfinished promotion task contract could not be restored");
+    $task->sync && $state->sync
+      or refuse("unfinished promotion recovery could not be synced");
+    retire_promotion_task_artifacts($unfinished_token)
+      or refuse("unfinished promotion task artifacts could not be retired");
+    chdir($state) or refuse("pinned state directory could not be re-entered");
+    unlink(".$task_name.meta.promote.$unfinished_token");
+    unlink(".$task_name.meta.original.$unfinished_token");
+    unlink(".$task_name.meta.restore.$unfinished_token");
+    $state->sync or refuse("unfinished promotion state cleanup could not be synced");
+    chdir($task) or refuse("pinned task directory could not be re-entered");
+    $task->sync or refuse("unfinished promotion task cleanup could not be synced");
+  }
+  chdir($state) or refuse("pinned state directory could not be re-entered");
   sysopen(my $meta, $meta_name, O_RDONLY | O_NOFOLLOW)
     or refuse("promotion task metadata is missing or unsafe");
   my @meta_identity = stat($meta);
@@ -330,8 +380,8 @@ if ($ENV{FM_RECEIPT_STORE_MODE} eq "promote") {
       $state->sync or refuse("promoted state directory could not be synced");
       chdir($task) or refuse("pinned task directory could not be re-entered");
       $task->sync or refuse("promoted task directory could not be synced");
-      my $report_status = system($command, "report", @command_args, $token);
-      exit 0 if $report_status == 0;
+      system($command, "report", @command_args, $token);
+      exit 0;
     }
     exit 1;
   }
