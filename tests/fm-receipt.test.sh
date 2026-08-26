@@ -236,6 +236,48 @@ EOF
   pass "fm-receipt rejects task-directory replacement before its no-follow open"
 }
 
+test_data_directory_swap_before_open_is_rejected() {
+  local id=swapped-data data moved outside fakebin real_perl ready release pid rc
+  write_ship "$id"
+  data="$HOME_DIR/data"
+  moved="$HOME_DIR/data-pinned"
+  outside="$TMP_ROOT/outside-swapped-data"
+  fakebin="$TMP_ROOT/data-swap-fakebin"
+  ready="$TMP_ROOT/data-swap-ready"
+  release="$TMP_ROOT/data-swap-release"
+  mkdir -p "$outside/$id" "$fakebin"
+  cp "$data/$id/brief.md" "$outside/$id/brief.md"
+  : > "$outside/$id/evidence.jsonl"
+  mkfifo "$release"
+  real_perl=$(command -v perl)
+  cat > "$fakebin/perl" <<EOF
+#!/bin/sh
+if mkdir "$TMP_ROOT/data-swap-once" 2>/dev/null; then
+  : > "$ready"
+  IFS= read -r _ < "$release"
+fi
+exec "$real_perl" "\$@"
+EOF
+  chmod +x "$fakebin/perl"
+  PATH="$fakebin:$PATH" FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test summary passed \
+    > "$TMP_ROOT/data-swap-output" 2>&1 &
+  pid=$!
+  while [ ! -e "$ready" ]; do
+    kill -0 "$pid" 2>/dev/null || fail "receipt exited before the data-directory swap boundary"
+  done
+  mv "$data" "$moved"
+  ln -s "$outside" "$data"
+  printf 'continue\n' > "$release"
+  wait "$pid"
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "receipt followed a replaced data-directory prefix"
+  [ ! -s "$moved/$id/evidence.jsonl" ] || fail "rejected data replacement mutated the original ledger"
+  [ ! -s "$outside/$id/evidence.jsonl" ] || fail "data replacement redirected the receipt outside its pinned root"
+  rm "$data"
+  mv "$moved" "$data"
+  pass "fm-receipt rejects data-directory replacement before its pinned open"
+}
+
 test_ledger_replacement_after_open_cannot_redirect_append() {
   local id=swapped-ledger task ledger pinned replacement ready release holder receipt_pid rc
   id=swapped-ledger
@@ -282,4 +324,5 @@ test_rejects_invalid_schema_and_undeclared_criteria
 test_portable_paths_and_failed_append_rollback
 test_rejects_non_ship_and_unsafe_ledger
 test_task_directory_swap_before_open_is_rejected
+test_data_directory_swap_before_open_is_rejected
 test_ledger_replacement_after_open_cannot_redirect_append

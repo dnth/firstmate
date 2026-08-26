@@ -12,7 +12,7 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 - `direct-PR` and `local-only` retain the evidence gate without entering No-Mistakes.
 - The explicit implementation-complete action records the first timestamp idempotently with the current clean commit, planning requires that current-head binding, and `validation_started_at` uses the implementation-complete time as its interval origin.
 - Completion requires observed post-plan mechanical evidence, the exact No-Mistakes run created with the latest unguessable plan generation and bound to its path and head with current checks-green status or CI-log evidence, a GitHub PR with forge-observed exact-head metadata, a supported non-GitHub direct-PR with the existing canonical HTTPS PR URL predicate and no head observation, or a clean fast-forward-ready branch.
-- Receipt append and check share one executable owner that enters a verified canonical non-symlink task directory, revalidates its identity, and opens relative no-follow brief and single-link ledger paths portably on Linux and macOS.
+- Receipt append and check share one executable owner that pins and verifies the canonical non-symlink data directory first, opens and verifies the task directory relative to that pinned parent, and then opens relative no-follow brief and single-link ledger paths portably on Linux and macOS.
 - Planning retains the pinned shared ledger lock through metadata publication, so only receipts appended after the published plan boundary qualify as fresh mechanical evidence.
 - Receipt append, check, and promotion consume one executable acceptance-criterion parser that requires nonblank descriptions.
 - Structurally valid receipts require non-whitespace summary and result strings; explicit failure and error inflections, negative, empty, zero-test, zero-example, zero-spec, zero-case, zero-scenario, zero-collection, or skip results remain recorded but leave their criteria unevidenced, while nonzero successes with zero/no-failure or zero/no-error suffixes and descriptive expected results such as `401` remain eligible.
@@ -51,6 +51,7 @@ ok - fm-receipt rejects invalid types, ids, missing results, and undeclared crit
 ok - fm-receipt uses portable paths and rolls back incomplete appends
 ok - fm-receipt refuses non-ship tasks and unsafe ledger paths
 ok - fm-receipt rejects task-directory replacement before its no-follow open
+ok - fm-receipt rejects data-directory replacement before its pinned open
 ok - fm-receipt appends only through the ledger descriptor opened before validation
 
 $ tests/fm-receipt-check.test.sh

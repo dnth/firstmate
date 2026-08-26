@@ -85,17 +85,33 @@ sub copy_file {
   close($output) or refuse("could not close pinned task snapshot");
 }
 
-my $task_path = "$ENV{FM_RECEIPT_STORE_DATA}/$ENV{FM_RECEIPT_STORE_ID}";
-sysopen(my $task, $task_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
-  or refuse("task directory is missing or unsafe: $task_path");
+my $data_path = $ENV{FM_RECEIPT_STORE_DATA};
+sysopen(my $data, $data_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+  or refuse("data directory is missing or unsafe: $data_path");
+my @data_identity = stat($data);
+refuse("data path is not a directory") unless @data_identity && S_ISDIR($data_identity[2]);
+my @named_data_identity = lstat($data_path);
+refuse("data directory identity changed") unless @named_data_identity
+  && !S_ISLNK($named_data_identity[2])
+  && $named_data_identity[0] == $data_identity[0]
+  && $named_data_identity[1] == $data_identity[1];
+chdir($data_path) or refuse("data directory could not be entered safely");
+my @data_cwd_identity = stat(".");
+refuse("data directory identity changed after entry") unless @data_cwd_identity
+  && $data_cwd_identity[0] == $data_identity[0]
+  && $data_cwd_identity[1] == $data_identity[1];
+
+my $task_name = $ENV{FM_RECEIPT_STORE_ID};
+sysopen(my $task, $task_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+  or refuse("task directory is missing or unsafe: $task_name");
 my @task_identity = stat($task);
 refuse("task path is not a directory") unless @task_identity && S_ISDIR($task_identity[2]);
-my @named_identity = lstat($task_path);
+my @named_identity = lstat($task_name);
 refuse("task directory identity changed") unless @named_identity
   && !S_ISLNK($named_identity[2])
   && $named_identity[0] == $task_identity[0]
   && $named_identity[1] == $task_identity[1];
-chdir($task_path) or refuse("task directory could not be entered safely");
+chdir($task_name) or refuse("task directory could not be entered safely");
 my @cwd_identity = stat(".");
 refuse("task directory identity changed after entry") unless @cwd_identity
   && $cwd_identity[0] == $task_identity[0]
