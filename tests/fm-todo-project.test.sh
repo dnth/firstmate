@@ -333,14 +333,17 @@ home=$(new_home check-missing-resources)
 mkdir -p "$home/live-worktree"
 fm_write_meta "$home/state/no-worktree.meta" \
   'window=firstmate:fm-no-worktree' \
-  'kind=ship'
+  'kind=ship' \
+  'mode=no-mistakes'
 fm_write_meta "$home/state/gone-worktree.meta" \
   'window=firstmate:fm-gone-worktree' \
   "worktree=$home/does-not-exist" \
-  'kind=ship'
+  'kind=ship' \
+  'mode=no-mistakes'
 fm_write_meta "$home/state/no-window.meta" \
   "worktree=$home/live-worktree" \
-  'kind=ship'
+  'kind=ship' \
+  'mode=no-mistakes'
 write_listing "$home" in_flight 'id,state,kind,repo,title,hold_until' \
   'no-meta,in_flight,ship,firstmate,Missing metadata,"-"' \
   'no-worktree,in_flight,ship,firstmate,Missing worktree field,"-"' \

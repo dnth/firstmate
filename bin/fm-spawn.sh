@@ -2404,9 +2404,13 @@ if [ "$KIND" = ship ]; then
     echo "error: ship brief still contains {TASK}; replace every scaffold placeholder before spawn" >&2
     exit 1
   fi
-  if ! "$FM_ROOT/bin/fm-receipt-check.sh" --parse-criteria "$BRIEF" >/dev/null 2>&1; then
-    echo "error: ship brief acceptance criteria are missing, invalid, or still contain placeholders" >&2
-    exit 1
+  if grep -Fx '# Acceptance criteria' "$BRIEF" >/dev/null 2>&1; then
+    if ! "$FM_ROOT/bin/fm-receipt-check.sh" --parse-criteria "$BRIEF" >/dev/null 2>&1; then
+      echo "error: ship brief acceptance criteria are invalid or still contain placeholders" >&2
+      exit 1
+    fi
+  else
+    echo "warning: $BRIEF predates acceptance-criterion receipts; launching is allowed, but implementation completion remains evidence-gated until Firstmate installs concrete criteria" >&2
   fi
   PROJ_NAME=$(basename "$PROJ_ABS")
   BRIEF_MODE=$(sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)

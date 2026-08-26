@@ -89,6 +89,22 @@ EOF
   pass "fm-spawn: unresolved task and criterion placeholders refuse before launch"
 }
 
+test_spawn_allows_legacy_brief_until_completion_gate() {
+  local rec home proj fakebin out
+  rec=$(make_home legacy-brief)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  mkdir -p "$home/data/legacy-brief"
+  printf '# Task\nLegacy ship created before evidence receipts.\n' > "$home/data/legacy-brief/brief.md"
+  out=$(run_spawn "$home" "$fakebin" legacy-brief "$proj" claude --mode no-mistakes --yolo off)
+  assert_contains "$out" "predates acceptance-criterion receipts" \
+    "legacy ship brief did not disclose its deferred evidence migration"
+  assert_not_contains "$out" "acceptance criteria are invalid" \
+    "legacy ship brief was rejected before its completion gate"
+  pass "fm-spawn: legacy ship briefs launch but disclose deferred evidence migration"
+}
+
 run_spawn() {  # <home> <fakebin> <spawn-args...>
   local home=$1 fakebin=$2
   shift 2
@@ -719,6 +735,7 @@ EOF
 test_ship_spawn_requires_a_valid_delivery_contract
 test_promote_transaction_help
 test_spawn_refuses_unresolved_brief_placeholders
+test_spawn_allows_legacy_brief_until_completion_gate
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry

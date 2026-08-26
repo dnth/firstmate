@@ -70,11 +70,7 @@ test_append_is_additive_and_result_flag_works() {
 test_head_binding_is_canonical() {
   local id=canonical-head project expected_head out rc
   project="$TMP_ROOT/project-$id"
-  mkdir -p "$project"
-  git -C "$project" init -q
-  printf 'evidence head fixture\n' > "$project/README.md"
-  git -C "$project" add README.md
-  git -C "$project" commit -q -m init
+  fm_git_init_commit "$project"
   expected_head=$(git -C "$project" rev-parse HEAD)
   write_ship "$id"
   fm_write_meta "$HOME_DIR/state/$id.meta" "worktree=$project" "kind=ship" "mode=no-mistakes"

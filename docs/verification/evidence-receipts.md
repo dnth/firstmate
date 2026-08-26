@@ -8,6 +8,7 @@ The exact receipt key and type schema is owned by the header and `--help` output
 - New ship briefs receive stable acceptance-criterion ids plus an empty append-only evidence ledger and lock through one atomic pinned-directory publication, while scout and secondmate scaffolds remain outside the receipt contract.
 - Concurrent ship scaffolds use one exclusive brief identity, so a losing invocation cannot remove the winning brief or evidence contract.
 - Ship scaffold output requires replacing both task and acceptance-criterion placeholders, and spawn refuses unresolved task text or criteria before endpoint creation.
+- Legacy ship briefs without an acceptance-criteria section may still launch with an explicit migration warning, but the completion gate remains parked until Firstmate installs a valid evidence contract.
 - Every ship completion, including a promoted scout, remains parked until a valid acceptance contract and structurally valid evidence cover every required criterion.
 - Low-risk routing is limited to CHANGELOG formatting or reflow changes whose non-whitespace byte sequence is identical and which have file-bound mechanical proof, while every content-byte or uncertain change defaults high.
 - High-risk, broad, sensitive, weakly proven, materially expanded, or uncertain changes retain full No-Mistakes validation.
@@ -158,6 +159,7 @@ $ tests/fm-task-delivery.test.sh
 ok - fm-spawn: a ship spawn requires a valid explicit mode and yolo before anything is created
 ok - fm-promote-transaction: help renders successfully
 ok - fm-spawn: unresolved task and criterion placeholders refuse before launch
+ok - fm-spawn: legacy ship briefs launch but disclose deferred evidence migration
 ok - fm-spawn: scout and secondmate spawns refuse ship delivery flags
 ok - fm-spawn: the brief's recorded mode and the spawn's explicit mode must agree
 ok - fm-spawn: a rigor downgrade against the registered posture is announced, never blocked
