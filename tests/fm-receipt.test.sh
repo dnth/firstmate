@@ -383,6 +383,39 @@ EOF
   pass "fm-receipt atomically replaces the ledger without mutating hard-link aliases"
 }
 
+test_physical_home_prefix_allows_system_symlinks_only() {
+  local real_home linked_home outside id=physical-prefix rc
+  real_home="$TMP_ROOT/physical-home"
+  linked_home="$TMP_ROOT/linked-home"
+  outside="$TMP_ROOT/physical-outside"
+  mkdir -p "$real_home/data/$id" "$real_home/state" "$outside/$id"
+  cat > "$real_home/data/$id/brief.md" <<'EOF'
+# Task
+Exercise physical home resolution.
+
+# Acceptance criteria
+- AC1: The receipt remains inside the trusted home.
+
+# Definition of done
+Delivery contract: mode=no-mistakes
+EOF
+  : > "$real_home/data/$id/evidence.jsonl"
+  : > "$real_home/data/$id/.evidence.lock"
+  fm_write_meta "$real_home/state/$id.meta" "kind=ship" "mode=no-mistakes"
+  ln -s "$real_home" "$linked_home"
+  FM_HOME="$linked_home" "$RECEIPT" "$id" AC1 test physical passed --outcome passed >/dev/null \
+    || fail "physical trusted-home prefix was rejected"
+  mv "$real_home/data" "$real_home/safe-data"
+  cp -R "$real_home/safe-data/$id/." "$outside/$id/"
+  : > "$outside/$id/evidence.jsonl"
+  ln -s "$outside" "$real_home/data"
+  FM_HOME="$linked_home" "$RECEIPT" "$id" AC1 test redirected passed --outcome passed >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "symlinked data suffix escaped the physical trusted home"
+  [ ! -s "$outside/$id/evidence.jsonl" ] || fail "refused data symlink mutated outside evidence"
+  pass "fm-receipt physicalizes trusted home prefixes but rejects data symlinks"
+}
+
 test_appends_one_compact_valid_receipt
 test_append_is_additive_and_result_flag_works
 test_large_receipt_is_appended_completely
@@ -393,3 +426,4 @@ test_task_directory_swap_before_open_is_rejected
 test_data_directory_swap_before_open_is_rejected
 test_open_data_directory_replacement_is_rejected
 test_ledger_replacement_after_open_cannot_redirect_append
+test_physical_home_prefix_allows_system_symlinks_only

@@ -15,6 +15,7 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 - The explicit implementation-complete action records one current timestamp for the current clean commit, refreshes that timestamp when the head changes, remains idempotent for the same head, and supplies the plan interval origin.
 - Completion requires observed post-plan mechanical evidence, the exact No-Mistakes run created with the latest unguessable plan generation and bound to its path and head with current checks-green status or CI-log evidence, a GitHub PR with forge-observed exact-head metadata, a supported non-GitHub direct-PR with the existing canonical HTTPS PR URL predicate and no head observation, or a clean fast-forward-ready branch.
 - Receipt append and check share one executable owner that resolves and pins every raw data-path component inside the store process, opens and verifies the task directory relative to that pinned parent, and then opens relative no-follow brief and single-link ledger paths portably on Linux and macOS.
+- Receipt storage physicalizes the trusted Firstmate-home prefix for standard system symlinks, then retains no-follow checks for the data suffix, task directory, and task artifacts.
 - Promotion pins and verifies its scout task directory before reading or replacing the brief and ledger, and refuses symlinked or out-of-root task paths before mutation.
 - Promotion retries distinguish identity-bound unfinished rollback from committed retirement recovery, while post-commit reporting cannot reverse durable success.
 - Planning retains the pinned shared ledger lock through metadata publication, so only receipts appended after the published plan boundary qualify as fresh mechanical evidence.
@@ -61,6 +62,7 @@ ok - fm-receipt rejects task-directory replacement before its no-follow open
 ok - fm-receipt rejects data-directory replacement before its pinned open
 ok - fm-receipt rejects regular data replacement after pinning
 ok - fm-receipt atomically replaces the ledger without mutating hard-link aliases
+ok - fm-receipt physicalizes trusted home prefixes but rejects data symlinks
 
 $ tests/fm-receipt-check.test.sh
 ok - fm-receipt-check help renders an executable generation-bound bind command

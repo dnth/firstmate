@@ -18,6 +18,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+
+FM_HOME_LEXICAL=${FM_HOME%/}
+FM_HOME_PHYSICAL=$(CDPATH='' cd -P -- "$FM_HOME" 2>/dev/null && pwd -P) \
+  || { echo "error: Firstmate home is missing or unsafe" >&2; exit 1; }
+resolve_trusted_home_path() {
+  case "$1" in
+    "$FM_HOME_LEXICAL") printf '%s\n' "$FM_HOME_PHYSICAL" ;;
+    "$FM_HOME_LEXICAL"/*) printf '%s/%s\n' "$FM_HOME_PHYSICAL" "${1#"$FM_HOME_LEXICAL"/}" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+DATA=$(resolve_trusted_home_path "$DATA")
+STATE=$(resolve_trusted_home_path "$STATE")
 
 usage() {
   awk '
@@ -47,7 +61,7 @@ esac
 
 command -v perl >/dev/null 2>&1 || { echo "error: perl is required" >&2; exit 1; }
 
-FM_RECEIPT_STORE_DATA="$DATA" FM_RECEIPT_STORE_ID="$ID" FM_RECEIPT_STORE_MODE="$MODE" \
+FM_RECEIPT_STORE_DATA="$DATA" FM_RECEIPT_STORE_STATE="$STATE" FM_RECEIPT_STORE_ID="$ID" FM_RECEIPT_STORE_MODE="$MODE" \
   perl - "$@" <<'PERL'
 use strict;
 use warnings;
@@ -55,6 +69,7 @@ use Cwd qw(getcwd);
 use Errno qw(EEXIST ENOENT EINTR);
 use Fcntl qw(:DEFAULT :flock :mode);
 use IO::Handle;
+use Digest::SHA qw(sha256_hex);
 
 my ($arg1, $arg2, $arg3, $arg4) = @ARGV;
 my $ready = $ENV{FM_RECEIPT_STORE_MODE} eq "hold" ? $arg3 : undef;
@@ -129,8 +144,8 @@ sub retire_promotion_task_artifacts {
   local $/;
   my $owner_token = <$owner>;
   close($owner) or return 0;
-  $owner_token =~ s/\n\z// if defined($owner_token);
-  return 0 unless defined($owner_token) && $owner_token eq $token;
+  my ($marker_token) = defined($owner_token) ? split(/\n/, $owner_token) : ();
+  return 0 unless defined($marker_token) && $marker_token eq $token;
   for my $name (
     ".brief.original.$token",
     ".brief.promote.$token",
@@ -248,7 +263,8 @@ if ($ENV{FM_RECEIPT_STORE_MODE} eq "promote") {
   close($random) or refuse("promotion nonce source could not be closed");
   my $token = unpack("H*", $nonce_bytes);
   my ($command, @command_args) = @ARGV;
-  my $state_path = $ENV{FM_STATE_OVERRIDE} // "";
+  my $contract_hash = sha256_hex(join("\0", @command_args));
+  my $state_path = $ENV{FM_RECEIPT_STORE_STATE} // "";
   refuse("promotion state directory path is unsafe") unless $state_path =~ m{^/};
   my @state_components = grep { length($_) } split(m{/+}, $state_path);
   refuse("promotion state directory path is unsafe") if !@state_components
@@ -285,6 +301,19 @@ if ($ENV{FM_RECEIPT_STORE_MODE} eq "promote") {
   refuse("multiple unfinished promotion transactions require recovery") if keys(%recovery_tokens) > 1;
   if (@committed_tokens == 1) {
     my $committed_token = $committed_tokens[0];
+    my $committed_name = ".promotion.committed.$committed_token";
+    sysopen(my $committed_file, $committed_name, O_RDONLY | O_NOFOLLOW)
+      or refuse("committed promotion marker is missing or unsafe");
+    my @committed_identity = stat($committed_file);
+    refuse("committed promotion marker is invalid") unless @committed_identity
+      && S_ISREG($committed_identity[2]) && $committed_identity[3] == 1;
+    local $/;
+    my $committed_text = <$committed_file>;
+    close($committed_file) or refuse("committed promotion marker could not be closed");
+    my ($recorded_token, $recorded_hash) = split(/\n/, $committed_text // "");
+    refuse("committed promotion contract differs from retry") unless defined($recorded_token)
+      && defined($recorded_hash) && $recorded_token eq $committed_token
+      && $recorded_hash eq $contract_hash;
     retire_promotion_task_artifacts($committed_token)
       or refuse("committed promotion task artifacts could not be retired");
     chdir($state) or refuse("pinned state directory could not be re-entered");
@@ -293,8 +322,6 @@ if ($ENV{FM_RECEIPT_STORE_MODE} eq "promote") {
     unlink(".$task_name.meta.restore.$committed_token");
     $state->sync or refuse("committed promotion state cleanup could not be synced");
     chdir($task) or refuse("pinned task directory could not be re-entered");
-    unlink(".promotion.committed.$committed_token")
-      or refuse("committed promotion marker could not be retired");
     $task->sync or refuse("committed promotion task cleanup could not be synced");
     system($command, "report", @command_args, $committed_token);
     exit 0;
@@ -395,7 +422,7 @@ if ($ENV{FM_RECEIPT_STORE_MODE} eq "promote") {
   }
   my $committed = $status == 0 && $meta_replaced && $task->sync && $state->sync && !$promotion_signal;
   if ($committed) {
-    write_new_file(".promotion.committed.$token", "$token\n");
+    write_new_file(".promotion.committed.$token", "$token\n$contract_hash\n");
     $task->sync or refuse("promotion commit marker could not be synced");
     if (retire_promotion_task_artifacts($token)) {
       chdir($state) or refuse("pinned state directory could not be re-entered");
@@ -404,8 +431,6 @@ if ($ENV{FM_RECEIPT_STORE_MODE} eq "promote") {
       unlink($meta_restore);
       $state->sync or refuse("promoted state directory could not be synced");
       chdir($task) or refuse("pinned task directory could not be re-entered");
-      unlink(".promotion.committed.$token")
-        or refuse("promotion commit marker could not be retired");
       $task->sync or refuse("promoted task directory could not be synced");
       system($command, "report", @command_args, $token);
       exit 0;

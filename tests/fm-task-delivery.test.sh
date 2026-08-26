@@ -436,7 +436,7 @@ test_concurrent_promotion_preserves_winner_lock() {
   second=$!
   if wait "$first"; then successes=$((successes + 1)); fi
   if wait "$second"; then successes=$((successes + 1)); fi
-  [ "$successes" -eq 1 ] || fail "concurrent promotion did not produce exactly one winner"
+  [ "$successes" -eq 2 ] || fail "identical concurrent promotion did not converge on the committed contract"
   assert_present "$home/data/$id/.evidence.lock" "losing promotion removed the winner's evidence lock"
   assert_present "$home/data/$id/evidence.jsonl" "winning promotion did not retain its evidence ledger"
   assert_grep 'kind=ship' "$home/state/$id.meta" "winning promotion did not retain ship metadata"
@@ -645,21 +645,23 @@ EOF
 }
 
 test_committed_retirement_recovery_is_idempotent() {
-  local home id=promote-committed-recovery token=0123456789abcdef0123456789abcdef
+  local home id=promote-committed-recovery token marker
   home="$TMP_ROOT/promote-committed-recovery/home"
   mkdir -p "$home/data/$id" "$home/state"
   printf '# Task\nCommitted recovery fixture.\n\n# Setup\nScout setup.\n' > "$home/data/$id/brief.md"
   printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$home/state/$id.meta"
   FM_HOME="$home" "$PROMOTE" "$id" --mode direct-PR --yolo off --criterion 'AC1: Concrete outcome' \
     >/dev/null || fail "committed recovery fixture promotion failed"
-  printf '%s\n' "$token" > "$home/data/$id/.promotion.committed.$token"
+  marker=$(find "$home/data/$id" -name '.promotion.committed.*' -type f -print)
+  [ -n "$marker" ] || fail "committed promotion did not retain its completion record"
+  token=${marker##*.}
   printf '%s\n' "$token" > "$home/data/$id/.promotion.owner.$token"
   : > "$home/state/.$id.meta.original.$token"
   FM_HOME="$home" "$PROMOTE" "$id" --mode direct-PR --yolo off --criterion 'AC1: Concrete outcome' \
     >/dev/null || fail "retry did not finalize the committed transaction"
   assert_grep 'kind=ship' "$home/state/$id.meta" "committed recovery rolled metadata back to scout"
   assert_present "$home/data/$id/evidence.jsonl" "committed recovery removed evidence"
-  assert_absent "$home/data/$id/.promotion.committed.$token" "committed recovery retained its marker"
+  assert_present "$marker" "committed recovery lost its completion record"
   pass "fm-promote: committed retirement recovery preserves ship state"
 }
 
