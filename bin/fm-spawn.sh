@@ -2075,12 +2075,13 @@ omp_project_extension_preflight() {
     fi
   fi
 
-  trusted="$FM_ROOT/.omp/extensions/fm-primary-omp.ts"
   if [ -n "$offenders" ]; then
     filtered=
     while IFS= read -r path; do
       if [ "$KIND" = secondmate ] \
-        && [ "$path" = ".omp/extensions/fm-primary-omp.ts" ] \
+        && { [ "$path" = ".omp/extensions/fm-primary-omp.ts" ] \
+          || [ "$path" = ".omp/extensions/fm-fleet-hooks.ts" ]; } \
+        && trusted="$FM_ROOT/$path" \
         && [ -f "$trusted" ] && [ ! -L "$trusted" ] \
         && [ -f "$project/$path" ] && [ ! -L "$project/$path" ] \
         && cmp -s "$project/$path" "$trusted"; then

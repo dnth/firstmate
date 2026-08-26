@@ -63,23 +63,22 @@ export type FleetMeta = {
 export type FleetSnapshotInput = {
 	metas?: readonly FleetMeta[];
 	openDecisions?: readonly string[];
-	backlog?: string;
+	todoProjection?: string;
 	maxChars?: number;
 };
 
-function parseBacklogCounts(backlog: string | undefined): { ready: number; inFlight: number } {
-	let section = "";
+export function parseTodoProjectionCounts(source: string): { ready: number; inFlight: number } {
+	const projection = JSON.parse(source) as unknown;
+	if (!Array.isArray(projection)) throw new TypeError("todo projection must be an array");
 	let ready = 0;
 	let inFlight = 0;
-	for (const line of (backlog ?? "").split(/\r?\n/)) {
-		const heading = line.match(/^##\s+(.+?)\s*$/);
-		if (heading) {
-			section = heading[1].toLowerCase();
-			continue;
-		}
-		if (!/^\s*-\s+/.test(line)) continue;
-		if (section === "queued") ready += 1;
-		if (section === "in flight" || section === "in-flight") inFlight += 1;
+	for (const phase of projection) {
+		if (!phase || typeof phase !== "object") throw new TypeError("todo phase must be an object");
+		const record = phase as { phase?: unknown; items?: unknown };
+		if (typeof record.phase !== "string" || !Array.isArray(record.items)) throw new TypeError("todo phase is malformed");
+		if (!record.items.every((item) => typeof item === "string")) throw new TypeError("todo items must be strings");
+		if (record.phase === "Ready") ready += record.items.length;
+		if (record.phase === "Active") inFlight += record.items.length;
 	}
 	return { ready, inFlight };
 }
@@ -89,22 +88,38 @@ function compact(value: string | undefined, fallback = "-"): string {
 	return normalized ? normalized.replace(/\s+/g, " ") : fallback;
 }
 
-/** Build a bounded, deterministic fleet context line from read-only fixtures. */
-export function buildFleetSnapshot(input: FleetSnapshotInput): string {
-	const maxChars = Math.max(1, input.maxChars ?? 1200);
-	const metas = [...(input.metas ?? [])].sort((a, b) => a.id.localeCompare(b.id));
-	const roster = metas.length === 0
-		? "none"
-		: metas.map((meta) => `${compact(meta.id)}(${compact(meta.kind, "crew")},${compact(meta.window)},${compact(meta.project)})`).join(" ");
-	const prs = metas.filter((meta) => meta.pr).map((meta) => `${compact(meta.id)}=${compact(meta.pr)}`).join(" ") || "none";
-	const decisions = (input.openDecisions ?? []).map((decision) => compact(decision)).filter(Boolean);
-	const decisionText = decisions.length > 0 ? decisions.join(" | ") : "none";
-	const counts = parseBacklogCounts(input.backlog);
-	const full = `Firstmate fleet snapshot: roster ${roster}; OPEN DECISIONS ${decisionText}; in-flight PRs ${prs}; backlog Ready=${counts.ready} In-flight=${counts.inFlight}`;
-	return full.length <= maxChars ? full : `${full.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+export function boundSnapshotItems(items: readonly string[], maxChars: number): string {
+	if (items.length === 0) return "none";
+	const shown: string[] = [];
+	for (let index = 0; index < items.length; index += 1) {
+		const candidate = [...shown, items[index]].join(" ");
+		const omitted = items.length - index - 1;
+		const suffix = omitted > 0 ? ` …(+${omitted} omitted)` : "";
+		if (`${candidate}${suffix}`.length > maxChars) break;
+		shown.push(items[index]);
+	}
+	const omitted = items.length - shown.length;
+	if (omitted === 0) return shown.join(" ");
+	return `${shown.join(" ")}${shown.length > 0 ? " " : ""}…(+${omitted} omitted)`;
 }
 
-function parseMeta(id: string, source: string): FleetMeta {
+/** Build a bounded, deterministic fleet context line from read-only fixtures. */
+export function buildFleetSnapshot(input: FleetSnapshotInput): string {
+	const maxChars = Math.max(240, input.maxChars ?? 1200);
+	const metas = [...(input.metas ?? [])].sort((a, b) => a.id.localeCompare(b.id));
+	const rosterItems = metas.map((meta) => `${compact(meta.id)}(${compact(meta.kind, "crew")},${compact(meta.window)},${compact(meta.project)})`);
+	const prItems = metas.filter((meta) => meta.pr).map((meta) => `${compact(meta.id)}=${compact(meta.pr)}`);
+	const decisionItems = (input.openDecisions ?? []).map((decision) => compact(decision)).filter((decision) => decision !== "-");
+	const counts = parseTodoProjectionCounts(input.todoProjection ?? "[]");
+	const fixed = `Firstmate fleet snapshot: roster ; OPEN DECISIONS ; in-flight PRs ; backlog Ready=${counts.ready} In-flight=${counts.inFlight}`;
+	const available = Math.max(0, maxChars - fixed.length);
+	const rosterBudget = Math.floor(available * 0.4);
+	const decisionBudget = Math.floor(available * 0.35);
+	const prBudget = available - rosterBudget - decisionBudget;
+	return `Firstmate fleet snapshot: roster ${boundSnapshotItems(rosterItems, rosterBudget)}; OPEN DECISIONS ${boundSnapshotItems(decisionItems, decisionBudget)}; in-flight PRs ${boundSnapshotItems(prItems, prBudget)}; backlog Ready=${counts.ready} In-flight=${counts.inFlight}`;
+}
+
+export function parseFleetMeta(id: string, source: string): FleetMeta {
 	const values: Record<string, string> = {};
 	for (const line of source.split(/\r?\n/)) {
 		const separator = line.indexOf("=");
@@ -114,41 +129,39 @@ function parseMeta(id: string, source: string): FleetMeta {
 	return { id, kind: values.kind, window: values.window, project: values.project, pr: values.pr };
 }
 
-function parseOpenDecisions(id: string, source: string): string[] {
-	const open = new Map<string, { verb: string; note: string }>();
+export function parseOpenDecisionRows(source: string): string[] {
+	const decisions: string[] = [];
 	for (const line of source.split(/\r?\n/)) {
-		const match = line.match(/^\s*(needs-decision|blocked|resolved|captain-held)(?:\s+\[key=([A-Za-z0-9._-]+)\])?\s*:\s*(.*)$/);
-		if (!match) continue;
-		const key = match[2] || "default";
-		if (match[1] === "needs-decision" || match[1] === "blocked") open.set(key, { verb: match[1], note: match[3] });
-		else open.delete(key);
+		if (!line) continue;
+		const fields = line.split("\t");
+		if (fields.length < 4) throw new TypeError("open-decision row is malformed");
+		const [id, key, verb, ...note] = fields;
+		decisions.push(`${compact(id)}: ${compact(verb)} [key=${compact(key, "default")}]: ${compact(note.join("\t"))}`);
 	}
-	return [...open.values()].map((decision) => `${id}: ${decision.verb}: ${decision.note}`);
+	return decisions;
 }
 
-function readFleetSnapshot(state: string, data: string): string {
+function runReadOnly(command: string, args: string[], extensionRoot: string, fmHome: string): string {
+	const result = spawnSync(command, args, {
+		cwd: extensionRoot,
+		encoding: "utf8",
+		env: { ...process.env, FM_HOME: fmHome },
+		maxBuffer: 256 * 1024,
+	});
+	if (result.error || result.status !== 0) throw result.error ?? new Error(`${command} failed`);
+	return result.stdout ?? "";
+}
+
+function readFleetSnapshot(extensionRoot: string, fmHome: string, state: string): string {
 	const metas: FleetMeta[] = [];
 	for (const entry of readdirSync(state)) {
 		if (!entry.endsWith(".meta")) continue;
 		const id = entry.slice(0, -5);
-		metas.push(parseMeta(id, readFileSync(resolve(state, entry), "utf8")));
+		metas.push(parseFleetMeta(id, readFileSync(resolve(state, entry), "utf8")));
 	}
-	const openDecisions: string[] = [];
-	for (const meta of metas) {
-		const statusPath = resolve(state, `${meta.id}.status`);
-		try {
-			openDecisions.push(...parseOpenDecisions(meta.id, readFileSync(statusPath, "utf8")));
-		} catch {
-			// Missing status logs are normal for a newly launched task.
-		}
-	}
-	let backlog: string | undefined;
-	try {
-		backlog = readFileSync(resolve(data, "backlog.md"), "utf8");
-	} catch {
-		backlog = undefined;
-	}
-	return buildFleetSnapshot({ metas, openDecisions, backlog });
+	const openDecisionRows = runReadOnly("bash", ["-c", '. "$1/bin/fm-classify-lib.sh"; scan_open_decisions "$2"', "_", extensionRoot, state], extensionRoot, fmHome);
+	const todoProjection = runReadOnly(resolve(extensionRoot, "bin/fm-todo-project.sh"), ["--emit"], extensionRoot, fmHome);
+	return buildFleetSnapshot({ metas, openDecisions: parseOpenDecisionRows(openDecisionRows), todoProjection });
 }
 
 function register(pi: ExtensionAPI, event: string, handler: (event: any, ctx: any) => unknown): void {
@@ -191,8 +204,7 @@ export default function fmFleetHooks(pi: ExtensionAPI): void {
 			const extensionRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 			const fmHome = process.env.FM_HOME || extensionRoot;
 			const state = process.env.FM_STATE_OVERRIDE || resolve(fmHome, "state");
-			const data = process.env.FM_DATA_OVERRIDE || resolve(fmHome, "data");
-			const context = readFleetSnapshot(state, data);
+			const context = readFleetSnapshot(extensionRoot, fmHome, state);
 			return { context: [context] };
 		} catch {
 			return undefined;
