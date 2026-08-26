@@ -247,8 +247,13 @@ fi
 BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
 EVIDENCE="$DATA/$ID/evidence.jsonl"
+EVIDENCE_LOCK="$DATA/$ID/.evidence.lock"
 if [ "$KIND" = ship ] && { [ -e "$EVIDENCE" ] || [ -L "$EVIDENCE" ]; }; then
   echo "error: $EVIDENCE already exists" >&2
+  exit 1
+fi
+if [ "$KIND" = ship ] && { [ -e "$EVIDENCE_LOCK" ] || [ -L "$EVIDENCE_LOCK" ]; }; then
+  echo "error: $EVIDENCE_LOCK already exists" >&2
   exit 1
 fi
 mkdir -p "$DATA/$ID"
@@ -510,6 +515,11 @@ umask 077
 if ! ( set -C; : > "$EVIDENCE" ) 2>/dev/null; then
   echo "error: could not create new evidence ledger: $EVIDENCE" >&2
   rm -f "$BRIEF"
+  exit 1
+fi
+if ! ( set -C; : > "$EVIDENCE_LOCK" ) 2>/dev/null; then
+  echo "error: could not create new evidence lock: $EVIDENCE_LOCK" >&2
+  rm -f "$BRIEF" "$EVIDENCE"
   exit 1
 fi
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and every {ACCEPTANCE CRITERION})"

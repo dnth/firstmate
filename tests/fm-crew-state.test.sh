@@ -160,6 +160,7 @@ Delivery contract: mode=$fixture_mode
 EOF
       printf '%s\n' '{"criterion":"AC1","type":"review","outcome":"passed","summary":"fixture evidence","result":"complete"}' > "$ledger"
     fi
+    [ -e "$case_dir/data/$id/.evidence.lock" ] || : > "$case_dir/data/$id/.evidence.lock"
     if ! grep -q '^mode=' "$case_dir/state/$id.meta" 2>/dev/null; then
       printf 'mode=direct-PR\n' >> "$case_dir/state/$id.meta"
       added_mode=1
@@ -1360,6 +1361,7 @@ Exercise the completion evidence gate.
 Delivery contract: mode=no-mistakes
 EOF
   : > "$d/data/$id/evidence.jsonl"
+  : > "$d/data/$id/.evidence.lock"
   fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=ship" "harness=claude" "mode=no-mistakes"
   printf 'done: implementation complete\n' > "$d/state/$id.status"
   arm_idle_record "$d/state" "$id"

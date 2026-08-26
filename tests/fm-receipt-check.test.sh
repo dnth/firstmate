@@ -74,6 +74,7 @@ Implement the fixture behavior.
 Delivery contract: mode=$mode
 EOF
   : > "$HOME_DIR/data/$id/evidence.jsonl"
+  : > "$HOME_DIR/data/$id/.evidence.lock"
   fm_write_meta "$HOME_DIR/state/$id.meta" "kind=ship" "mode=$mode"
 }
 
@@ -272,6 +273,7 @@ EOF
   FM_HOME="$HOME_DIR" "$CHECK" "$old" >/dev/null 2>&1
   rc=$?
   expect_code 2 "$rc" "metadata kind=ship fails closed without a delivery contract"
+  [ ! -e "$HOME_DIR/data/$old/.evidence.lock" ] || fail "read-only checking created a missing evidence lock"
 
   outside="$TMP_ROOT/outside-linked-ship"
   mkdir -p "$outside"
@@ -427,6 +429,7 @@ test_shared_criterion_parser_drives_append_and_check() {
 Delivery contract: mode=direct-PR
 EOF
   : > "$HOME_DIR/data/$id/evidence.jsonl"
+  : > "$HOME_DIR/data/$id/.evidence.lock"
   fm_write_meta "$HOME_DIR/state/$id.meta" "kind=ship" "mode=direct-PR"
   FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC10 test summary passed --outcome passed >/dev/null \
     || fail "receipt append rejected a criterion accepted by the shared parser"

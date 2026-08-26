@@ -26,6 +26,7 @@ Exercise evidence receipts.
 Delivery contract: mode=no-mistakes
 EOF
   : > "$HOME_DIR/data/$id/evidence.jsonl"
+  : > "$HOME_DIR/data/$id/.evidence.lock"
   fm_write_meta "$HOME_DIR/state/$id.meta" "kind=ship" "mode=no-mistakes"
 }
 

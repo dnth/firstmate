@@ -332,7 +332,8 @@ EOF
   cmp -s "$meta_before" "$meta" || fail "retained metadata recovery copy was not original"
   [ ! -e "$ledger" ] || fail "rollback failure left a partial evidence ledger"
 
-  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 --mode direct-PR --yolo on --criterion 'AC1: API returns {"ok":true}' 2>&1)
+  out=$(FM_PROMOTE_PINNED=1 FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$PROMOTE" promote-d1 --mode direct-PR --yolo on --criterion 'AC1: API returns {"ok":true}' 2>&1)
   status=$?
   expect_code 0 "$status" "a promotion carrying both flags should succeed"
   assert_grep 'kind=ship' "$meta" "promotion did not restore ship teardown protection"
@@ -340,6 +341,7 @@ EOF
   assert_grep 'yolo=on' "$meta" "promotion did not record the decided merge posture"
   assert_contains "$out" "ship instructions for mode=direct-PR" "promotion hint did not carry the decided mode"
   assert_present "$ledger" "promotion did not install the evidence ledger"
+  assert_present "$home/data/promote-d1/.evidence.lock" "promotion did not install the evidence lock"
   assert_no_grep 'Never push to any remote' "$brief" "promoted direct-PR brief retained scout push prohibition"
   assert_grep 'Preserve this requirement when the scout becomes a ship task.' "$brief" "promotion truncated task content at an embedded setup heading"
   assert_grep "fm-receipt-check.sh promote-d1 --plan" "$brief" "promoted direct-PR brief omitted validation planning"
@@ -363,8 +365,8 @@ Implement the promoted No-Mistakes fixture.
 # Setup
 Scout-only setup instructions begin here.
 EOF
-  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-nm --mode no-mistakes --yolo off \
-    --criterion 'AC1: Fixture works' 2>&1)
+  out=$(cd "$TMP_ROOT/promote" && FM_HOME=home FM_STATE_OVERRIDE=home/state FM_DATA_OVERRIDE=home/data \
+    "$PROMOTE" promote-nm --mode no-mistakes --yolo off --criterion 'AC1: Fixture works' 2>&1)
   status=$?
   expect_code 0 "$status" "a No-Mistakes promotion should succeed"
   assert_grep 'Firstmate-Validation-Generation: <plan-generation>' "$home/data/promote-nm/brief.md" "promoted No-Mistakes brief omitted generation-bound run creation"

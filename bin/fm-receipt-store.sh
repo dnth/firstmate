@@ -4,6 +4,7 @@
 # Usage:
 #   fm-receipt-store.sh <task-id> hold <brief-out> <ledger-out> <ready-file> <release-fifo>
 #   fm-receipt-store.sh <task-id> append <criterion> <criterion-parser>
+#   fm-receipt-store.sh <task-id> promote <transaction-command> [<arg> ...]
 #
 # hold snapshots the pinned brief and ledger under a shared ledger lock, writes
 # 0 (ready), 1 (refused), or 3 (ledger missing) to ready-file, and on ready or
@@ -39,8 +40,8 @@ case "$ID" in
 esac
 case "$MODE:$#" in
   hold:4|append:2) ;;
-  run:0) usage >&2; exit 2 ;;
-  run:*) ;;
+  promote:0) usage >&2; exit 2 ;;
+  promote:*) ;;
   *) usage >&2; exit 2 ;;
 esac
 
@@ -142,7 +143,11 @@ sysopen(my $brief, "brief.md", O_RDONLY | O_NOFOLLOW)
   or refuse("task brief is missing or unsafe");
 my @brief_identity = stat($brief);
 refuse("task brief is not a regular file") unless @brief_identity && S_ISREG($brief_identity[2]);
-sysopen(my $task_lock, ".evidence.lock", O_RDWR | O_CREAT | O_NOFOLLOW, 0600)
+my @named_lock_identity = lstat(".evidence.lock");
+my $lock_created = !@named_lock_identity;
+my $lock_flags = O_RDWR | O_NOFOLLOW;
+$lock_flags |= O_CREAT if $ENV{FM_RECEIPT_STORE_MODE} eq "promote";
+sysopen(my $task_lock, ".evidence.lock", $lock_flags, 0600)
   or refuse("task evidence lock is missing or unsafe");
 my @lock_identity = stat($task_lock);
 refuse("task evidence lock must be a single-link regular file") unless @lock_identity
@@ -171,9 +176,16 @@ if ($ENV{FM_RECEIPT_STORE_MODE} eq "hold") {
   exit($ledger_missing ? 3 : 0);
 }
 
-if ($ENV{FM_RECEIPT_STORE_MODE} eq "run") {
+if ($ENV{FM_RECEIPT_STORE_MODE} eq "promote") {
   flock($task_lock, LOCK_EX) or refuse("task evidence lock could not be acquired");
-  exec @ARGV or refuse("pinned task command could not be executed");
+  my $status = system @ARGV;
+  if ($status != 0) {
+    unlink(".evidence.lock") if $lock_created;
+    $task->sync or refuse("task directory could not be synced after promotion rollback");
+    exit($status == -1 ? 1 : $status >> 8);
+  }
+  $task->sync or refuse("promoted task directory could not be synced");
+  exit 0;
 }
 
 my $criterion = $arg1;
