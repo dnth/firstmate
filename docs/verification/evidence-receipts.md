@@ -1,23 +1,25 @@
 # Evidence receipts and risk routing verification
 
 This record captures the active maintainer evidence for ship-task acceptance receipts and conservative validation routing as of 2026-08-26.
-The exact ledger schema, criterion parser, classifier thresholds, metadata fields, and packet commands are owned by the headers and help output of `bin/fm-receipt.sh` and `bin/fm-receipt-check.sh`.
+The exact ledger schema, criterion parser, classifier thresholds, metadata fields, and lifecycle commands are owned by the headers and help output of `bin/fm-receipt.sh` and `bin/fm-receipt-check.sh`.
 
 ## Guarantees under test
 
 - New ship briefs receive stable acceptance-criterion ids and an empty append-only evidence ledger, while scout and secondmate scaffolds remain outside the receipt contract.
 - Every ship completion, including a promoted scout, remains parked until a valid acceptance contract and structurally valid evidence cover every required criterion.
-- Low-risk routing is limited to narrow mechanically proven CHANGELOG prose, while every other change defaults high.
+- Low-risk routing is limited to narrow non-command CHANGELOG prose with file-bound mechanical proof for every changed file, while every other change defaults high.
 - High-risk, broad, sensitive, weakly proven, materially expanded, or uncertain changes retain full No-Mistakes validation.
 - `direct-PR` and `local-only` retain the evidence gate without entering No-Mistakes.
 - Initial planning records one `validation_started_at`, and completion requires observed post-plan mechanical evidence, the exact No-Mistakes run created with the latest unguessable plan generation and bound to its path and head with current checks-green status or CI-log evidence, forge-observed canonical PR/head metadata, or a clean fast-forward-ready branch.
 - Receipt appends open the canonical task directory and original single-link ledger through portable no-follow descriptors before validation, so concurrent path replacement cannot redirect evidence.
 - Receipt checks snapshot the pinned non-symlink task contract and single-link ledger before parsing, so task replacement and external hard links cannot redirect completion evidence.
 - Receipt append, check, and promotion consume one executable acceptance-criterion parser that requires nonblank descriptions.
-- Structurally valid receipts with explicit failure inflections, negative, empty, zero-test, or skip results remain recorded but leave their criteria unevidenced, while zero-failure success summaries and descriptive expected results such as `401` remain eligible.
+- Structurally valid receipts with explicit failure inflections, negative, empty, equivalent zero-test orderings, or skip results remain recorded but leave their criteria unevidenced, while zero-failure success summaries and descriptive expected results such as `401` remain eligible.
 - Normal and promoted ship briefs consume the same executable acceptance-evidence and per-mode delivery renderer.
 - The pinned brief and task metadata must record the same concrete delivery mode before validation can proceed.
 - Findings that invalidate a receipt or acceptance claim append one idempotent finding-to-criterion marker to task metadata.
+- Successful exact-head runs can bind after reaching checks-passed or passed, while failed and cancelled runs remain ineligible.
+- No-Mistakes status, intent, and CI-log observations use the shared bounded call boundary.
 - Every completion requires path-specific terminal evidence, records its plan path and validated head, invalidates stale completion metadata when the worktree head changes, and refuses completion until the change is replanned or revalidated.
 - Planning and completion refuse tracked, staged, or untracked worktree changes.
 - Initial planning accepts a caller base only when it equals the repository's authoritative merge boundary, so a later ancestor cannot hide earlier task commits.
@@ -55,6 +57,9 @@ ok - receipt append and check consume one criterion grammar
 ok - exact bound runs complete from the shared current CI-log readiness predicate
 ok - finding-to-criterion invalidations remain inspectable in task metadata
 ok - low-risk mechanical changes can skip a full No-Mistakes run
+ok - low risk requires safe changelog prose and file-bound mechanical evidence
+ok - successful terminal runs bind while failed runs remain rejected
+ok - No-Mistakes status, intent, and CI-log observations are bounded
 ok - authoritative documentation remains high
 ok - terminal delivery paths record one completion timestamp at their boundary
 ok - completion signals release the validation lock for retry

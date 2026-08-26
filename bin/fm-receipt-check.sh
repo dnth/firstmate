@@ -35,7 +35,7 @@
 # authoritative merge boundary.
 # Unreadable or uncertain inputs resolve to high.
 # Risk is binary: high by default, or low only for a narrow CHANGELOG-only prose
-# change with strong mechanical evidence.
+# change with file-bound strong mechanical evidence for every changed file.
 # Caller hints never lower risk.
 # The resolved validation_tier, validation_path, reason code, base, head, size,
 # and start time are appended to state/<task-id>.meta for durable inspection.
@@ -58,7 +58,6 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-NO_MISTAKES_BIN="${FM_NO_MISTAKES_BIN:-no-mistakes}"
 NM_TIMEOUT=${FM_RECEIPT_NM_TIMEOUT:-10}
 case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
 
@@ -388,14 +387,14 @@ STRONG_RESULT_MODULE="$TMP_ROOT/strong-result.jq"
 : > "$INVALID"
 cat > "$STRONG_RESULT_MODULE" <<'JQ'
 def without_zero_failures:
-  gsub("(^|[^0-9])0[[:space:]]+fail(s|ed|ures?)?([^[:alnum:]_]|$)"; " "; "i")
+  gsub("(^|[^[:alnum:]_])(0[[:space:]]+fail(s|ed|ures?)?|fail(s|ed|ures?)[[:space:]]*:[[:space:]]*0)([^[:alnum:]_]|$)"; " "; "i")
   | sub("[[:space:],;:]+$"; "")
   | sub("^[[:space:],;:]+"; "");
 def evidence_result:
   without_zero_failures
   |
   (test("^[[:space:]]*$") | not)
-  and (test("(^|[^[:alnum:]_])(fail(s|ed|ures?)?|error|negative|red|broken|skip(s|ped|ping)?|empty)([^[:alnum:]_]|$)|not[[:space:]]+pass(ed)?|no[[:space:]]+tests?|(^|[^0-9])0[[:space:]]+(tests?([[:space:]]+passed)?|passed)([^[:alnum:]_]|$)"; "i") | not);
+  and (test("(^|[^[:alnum:]_])(fail(s|ed|ures?)?|error|negative|red|broken|skip(s|ped|ping)?|empty)([^[:alnum:]_]|$)|not[[:space:]]+pass(ed)?|no[[:space:]]+tests?|(^|[^0-9])0[[:space:]]+(tests?([[:space:]]+passed)?|passed)([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(tests?|passed)[[:space:]]*:[[:space:]]*0([^0-9]|$)|(^|[^[:alnum:]_])passed[[:space:]]+0[[:space:]]+tests?([^[:alnum:]_]|$)"; "i") | not);
 def strong_result:
   without_zero_failures
   | evidence_result
@@ -531,9 +530,9 @@ if [ "$ACTION" = bind-run ]; then
     || { echo "error: validated head is missing" >&2; exit 2; }
   [ -z "$(git -C "$BIND_WORKTREE" status --porcelain --untracked-files=all 2>/dev/null)" ] \
     || { echo "error: validation worktree is dirty" >&2; exit 2; }
-  BIND_OUT=$(cd "$BIND_WORKTREE" && "$NO_MISTAKES_BIN" axi status --run "$RUN_ID_INPUT" 2>/dev/null) \
+  BIND_OUT=$(fm_nm_run_checked "$BIND_WORKTREE" "$NM_TIMEOUT" axi status --run "$RUN_ID_INPUT") \
     || { echo "error: No-Mistakes run could not be observed" >&2; exit 2; }
-  BIND_INTENT=$(cd "$BIND_WORKTREE" && "$NO_MISTAKES_BIN" axi logs --step intent --run "$RUN_ID_INPUT" 2>/dev/null) \
+  BIND_INTENT=$(fm_nm_run_checked "$BIND_WORKTREE" "$NM_TIMEOUT" axi logs --step intent --run "$RUN_ID_INPUT") \
     || { echo "error: No-Mistakes run intent could not be observed" >&2; exit 2; }
   BIND_OBSERVED_ID=$(nm_status_field "$BIND_OUT" id)
   BIND_OBSERVED_HEAD=$(nm_status_field "$BIND_OUT" head)
@@ -543,9 +542,14 @@ if [ "$ACTION" = bind-run ]; then
   [ "$RUN_GENERATION_INPUT" = "$BIND_GENERATION" ] || { echo "error: run generation does not match the latest plan" >&2; exit 2; }
   printf '%s\n' "$BIND_INTENT" | grep -Fqx "Firstmate-Validation-Generation: $BIND_GENERATION" \
     || { echo "error: No-Mistakes run was not created for the latest plan generation" >&2; exit 2; }
+  BIND_STATE_OK=0
+  case "$BIND_STATUS:$BIND_OUTCOME" in
+    failed:*|cancelled:*|*:failed|*:cancelled) ;;
+    passed:*|checks-passed:*|*:passed|*:checks-passed) BIND_STATE_OK=1 ;;
+    running:*|fixing:*|ci:*|awaiting_approval:*) BIND_STATE_OK=1 ;;
+  esac
   [ "$BIND_OBSERVED_ID" = "$RUN_ID_INPUT" ] && [ "$BIND_OBSERVED_HEAD" = "$BIND_HEAD" ] \
-    && { [ "$BIND_STATUS" = running ] || [ "$BIND_STATUS" = fixing ] || [ "$BIND_STATUS" = ci ] || [ "$BIND_STATUS" = awaiting_approval ]; } \
-    && [ "$BIND_OUTCOME" != passed ] \
+    && [ "$BIND_STATE_OK" -eq 1 ] \
     || { echo "error: No-Mistakes run does not match the latest plan" >&2; exit 2; }
   [ -n "$BIND_GENERATION" ] || { echo "error: validation generation is missing" >&2; exit 2; }
   printf 'validation_run_id=%s\nvalidation_run_path=%s\nvalidation_run_head=%s\nvalidation_run_generation=%s\n' \
@@ -556,7 +560,7 @@ if [ "$ACTION" = bind-run ]; then
 fi
 
 record_validation_completed() {
-  local started path generation completed completed_head completed_path completed_evidence completed_generation now worktree validated_head current_head expected_evidence observed pr pr_head branch boundary new_receipts run_id run_path run_generation run_out observed_id observed_head outcome run_status default_ref default_branch ci_state run_ready
+  local started path generation completed completed_head completed_path completed_evidence completed_generation now worktree validated_head current_head expected_evidence observed pr pr_head branch boundary new_receipts run_id run_path run_generation run_out observed_id observed_head outcome run_status default_ref default_branch ci_state run_ready changed_file completion_files validation_base
   VALIDATION_LOCK="$STATE/.$ID.validation-plan.lock"
   if ! mkdir "$VALIDATION_LOCK" 2>/dev/null; then
     VALIDATION_LOCK=
@@ -602,9 +606,19 @@ record_validation_completed() {
       case "$boundary" in ''|*[!0-9]*) release_validation_lock; echo "error: mechanical evidence boundary is missing" >&2; return 1 ;; esac
       new_receipts="$TMP_ROOT/completion-new-receipts.jsonl"
       tail -n "+$((boundary + 1))" "$LEDGER" > "$new_receipts"
-      jq -L "$TMP_ROOT" -se 'include "strong-result"; any(.[]; (.type | test("^(test|build|lint|typecheck)$")) and (.result | strong_result))' \
-        "$new_receipts" >/dev/null 2>&1 \
-        || { release_validation_lock; echo "error: no post-plan mechanical evidence was observed" >&2; return 1; }
+      validation_base=$(grep '^validation_base=' "$META" | tail -1 | cut -d= -f2- || true)
+      completion_files="$TMP_ROOT/completion-files"
+      git -C "$worktree" diff --no-ext-diff --no-renames --name-only "$validation_base..$validated_head" > "$completion_files" 2>/dev/null \
+        && [ -s "$completion_files" ] \
+        || { release_validation_lock; echo "error: planned mechanical change files could not be observed" >&2; return 1; }
+      while IFS= read -r changed_file; do
+        [ -n "$changed_file" ] || continue
+        jq -L "$TMP_ROOT" --arg file "$changed_file" -se '
+          include "strong-result";
+          any(.[]; .file == $file and (.type | test("^(test|build|lint|typecheck)$")) and (.result | strong_result))
+        ' "$new_receipts" >/dev/null 2>&1 \
+          || { release_validation_lock; echo "error: no applicable post-plan mechanical evidence was observed for $changed_file" >&2; return 1; }
+      done < "$completion_files"
       observed=post-plan-mechanical-receipt
       ;;
     full-no-mistakes)
@@ -614,7 +628,7 @@ record_validation_completed() {
       observed_head=$(grep '^validation_run_head=' "$META" | tail -1 | cut -d= -f2- || true)
       [ -n "$run_id" ] && [ "$run_path" = "$path" ] && [ "$run_generation" = "$generation" ] && [ "$observed_head" = "$validated_head" ] \
         || { release_validation_lock; echo "error: no No-Mistakes run is bound to the latest plan" >&2; return 1; }
-      run_out=$(cd "$worktree" && "$NO_MISTAKES_BIN" axi status --run "$run_id" 2>/dev/null) \
+      run_out=$(fm_nm_run_checked "$worktree" "$NM_TIMEOUT" axi status --run "$run_id") \
         || { release_validation_lock; echo "error: bound No-Mistakes run could not be observed" >&2; return 1; }
       observed_id=$(nm_status_field "$run_out" id)
       observed_head=$(nm_status_field "$run_out" head)
@@ -729,6 +743,7 @@ DIFF_LINES=0
 HAS_BINARY=0
 HAS_SPECIAL_MODE=0
 LOW_PATH=1
+LOW_STRUCTURE=0
 NUMSTAT="$TMP_ROOT/numstat"
 NAMES="$TMP_ROOT/names"
 : > "$NUMSTAT"
@@ -777,12 +792,41 @@ if [ "$DIFF_AVAILABLE" -eq 1 ]; then
   done < "$NUMSTAT"
 fi
 
-MECHANICAL_PROOF=0
-if jq -L "$TMP_ROOT" -se '
-  include "strong-result";
-  any(.[]; (.type | test("^(test|build|lint|typecheck)$")) and (.result | strong_result))
-' "$LEDGER" >/dev/null 2>&1; then
-  MECHANICAL_PROOF=1
+if [ "$DIFF_AVAILABLE" -eq 1 ] && [ "$LOW_PATH" -eq 1 ]; then
+  LOW_PATCH="$TMP_ROOT/low-prose.patch"
+  if git -C "$WORKTREE" diff --no-ext-diff --no-renames --unified=0 "$BASE..$HEAD" -- CHANGELOG.md > "$LOW_PATCH" 2>/dev/null \
+    && awk '
+      BEGIN { changed=0; bad=0 }
+      /^\+\+\+ / || /^--- / || /^@@/ || /^diff --git / || /^index / { next }
+      /^[+-]/ {
+        changed=1
+        line=substr($0, 2)
+        lower=tolower(line)
+        if (line ~ /`/ || line ~ /^\t/ || line ~ /^    /) bad=1
+        if (line ~ /^[[:space:]]*([$>]|\.\/|\/)/) bad=1
+        if (line ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_.-]*[[:space:]]*[:=][[:space:]]*[^[:space:]]/) bad=1
+        if (lower ~ /(^|[[:space:]])(sudo|kubectl|docker|podman|npm|npx|pnpm|yarn|bun|pip|python|ruby|cargo|make|just|git|gh|curl|wget|ssh|scp|rsync|systemctl|terraform|ansible|helm|wrangler|no-mistakes)([[:space:]]|$)/) bad=1
+      }
+      END { exit(changed && !bad ? 0 : 1) }
+    ' "$LOW_PATCH"; then
+    LOW_STRUCTURE=1
+  fi
+fi
+
+MECHANICAL_PROOF=1
+if [ "$DIFF_AVAILABLE" -eq 1 ]; then
+  while IFS= read -r changed_file; do
+    [ -n "$changed_file" ] || continue
+    if ! jq -L "$TMP_ROOT" --arg file "$changed_file" -se '
+      include "strong-result";
+      any(.[]; .file == $file and (.type | test("^(test|build|lint|typecheck)$")) and (.result | strong_result))
+    ' "$LEDGER" >/dev/null 2>&1; then
+      MECHANICAL_PROOF=0
+      break
+    fi
+  done < "$NAMES"
+else
+  MECHANICAL_PROOF=0
 fi
 
 TIER=high
@@ -799,7 +843,7 @@ elif [ "$HAS_BINARY" -eq 1 ]; then
 elif [ "$DIFF_FILES" -gt 8 ] || [ "$DIFF_LINES" -gt 400 ]; then
   TIER=high
   REASON=broad-change
-elif [ "$LOW_PATH" -eq 1 ] && [ "$DIFF_FILES" -le 3 ] && [ "$DIFF_LINES" -le 80 ] \
+elif [ "$LOW_PATH" -eq 1 ] && [ "$LOW_STRUCTURE" -eq 1 ] && [ "$DIFF_FILES" -le 3 ] && [ "$DIFF_LINES" -le 80 ] \
   && [ "$MECHANICAL_PROOF" -eq 1 ]; then
   TIER=low
   REASON=non-authoritative-prose
@@ -859,7 +903,7 @@ PLAN_GENERATION=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
 [ "${#PLAN_GENERATION}" -eq 32 ] || { echo "error: validation generation could not be created" >&2; exit 2; }
 PREPLAN_RUN_ID=
 if [ "$VALIDATION_PATH" = full-no-mistakes ]; then
-  PREPLAN_OUT=$(cd "$WORKTREE" && "$NO_MISTAKES_BIN" axi status 2>/dev/null) \
+  PREPLAN_OUT=$(fm_nm_run_checked "$WORKTREE" "$NM_TIMEOUT" axi status) \
     || { echo "error: pre-plan No-Mistakes boundary could not be observed" >&2; exit 2; }
   PREPLAN_RUN_ID=$(nm_status_field "$PREPLAN_OUT" id)
 fi

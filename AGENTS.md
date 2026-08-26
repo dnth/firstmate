@@ -315,9 +315,9 @@ A separate review or audit is allowed only when the captain explicitly requests 
 If fast-path risk needs more rigor, escalate whether to use no-mistakes instead of inventing a manual gate.
 The path's worker, automated gates, and captain approval remain authoritative:
 
-- **no-mistakes** requires complete receipts, uses receipts plus mechanical checks only for structurally proven non-authoritative prose, defaults every other change to full No-Mistakes, then raises a PR and waits for the configured merge authority.
-- **direct-PR** requires complete receipts, then has the worker push and open a PR without the no-mistakes pipeline before waiting for the configured merge authority.
-- **local-only** requires complete receipts, then has the worker stop with a clean ready branch before waiting for the configured merge authority and firstmate's guarded fast-forward merge path.
+- **no-mistakes** runs its selected validation path through a PR, then waits for the configured merge authority.
+- **direct-PR** has the worker push and open a PR without the no-mistakes pipeline, then waits for the configured merge authority.
+- **local-only** has the worker stop with a clean ready branch, then waits for the configured merge authority before firstmate uses the guarded fast-forward merge path.
 
 Delivery mode and `yolo` are orthogonal.
 `yolo` governs merge authority only: with it off, the captain approves every PR merge and every local-only landing; with it on, firstmate merges green, in-scope work itself.
@@ -329,12 +329,9 @@ After an autonomous merge, give the captain a one-line full-URL or local-main ou
 
 ### Validate
 
-On a ship worker's implementation-complete `done:`, run `bin/fm-receipt-check.sh <id>` before accepting completion, and steer the same worker back with the reported missing or invalid criteria instead of starting review when the check is not complete.
-After complete receipts, run the helper's `--plan` action and follow its durably recorded path without allowing an uncertain classification to fall below high.
-The helper records validation timing at the implementation-complete plan and generated brief's observed terminal boundary and binds completion to clean committed code at the current validated head.
-For a low-risk `no-mistakes` plan, have the same worker run the mechanical checks, append a fresh mechanical receipt, and pass the helper's completion action before raising the PR without No-Mistakes.
-For a high-risk `no-mistakes` plan, trigger full validation on the same worker after its implementation commit, using the harness invocation owned by `harness-adapters`.
-The `direct-PR` and `local-only` modes stop after their evidence-gated delivery steps and never invoke No-Mistakes because of the risk tier.
+On a ship worker's implementation-complete `done:`, follow the evidence and validation lifecycle owned by `bin/fm-receipt-check.sh` before accepting completion, returning missing or invalid criteria to the same worker.
+Follow its durably recorded path, keep uncertain classifications high, and keep `direct-PR` and `local-only` outside No-Mistakes.
+For high-risk `no-mistakes` work, trigger full validation on the same worker using the harness invocation owned by `harness-adapters`.
 The task worker that starts a no-mistakes run drives the pipeline and owns every `no-mistakes axi run` and `no-mistakes axi respond` call through the next gate or outcome.
 Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
 Once validation starts, prefer routing new requirements to follow-up work rather than expanding the current task, unless a new requirement completely invalidates the work being validated; however, the smallest downstream changes needed to keep already accepted product or engineering behavior correct, add behavioral tests where an executable contract exists, or keep documentation accurate remain within the current task even when they touch files not named at intake, and corrections required to satisfy already accepted intent are not new requirements.
@@ -352,7 +349,7 @@ Require the matching `resolved` event, forbid `--yes`, and require the worker to
 Resume fleet supervision immediately after the decision lands.
 
 For ordinary findings from any No-Mistakes tier, steer the original worker to return branch custody through the supported abort and sync sequence, fix the findings itself, and update receipts.
-When a finding invalidates a receipt or acceptance claim, record its finding id and criterion through `bin/fm-receipt-check.sh` before returning branch custody.
+When a finding invalidates a receipt or acceptance claim, use the receipt checker owner to record it before returning branch custody.
 After the original worker's fix, return high-risk work to full validation with the updated receipts and delta context.
 
 Judge validation by the current-code-matched run step through `bin/fm-crew-state.sh`, not by shell liveness or the last status event.

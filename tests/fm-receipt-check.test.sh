@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Behavior tests for evidence completeness, risk routing, and audit packets.
+# Behavior tests for evidence completeness and risk routing.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -149,7 +149,7 @@ test_complete_and_invalid_ledgers_have_distinct_results() {
 test_explicit_negative_results_leave_criteria_missing() {
   local id=negative-results out rc result
   write_brief "$id" direct-PR
-  for result in failed failure "3 failures" negative "not passed" "no tests" "0 tests" "0 passed" skipped empty; do
+  for result in failed failure "3 failures" negative "not passed" "no tests" "0 tests" "0 passed" "passed 0 tests" "tests: 0" "passed: 0" skipped empty; do
     add_receipt "$id" AC1 test "$result"
   done
   add_receipt "$id" AC2 api 401
@@ -160,7 +160,7 @@ test_explicit_negative_results_leave_criteria_missing() {
     and .required == ["AC1","AC2"]
     and .evidenced == ["AC2"]
     and .missing == ["AC1"]
-    and .receipt_count == 11
+    and .receipt_count == 14
   ' >/dev/null || fail "negative-result evidence status was not deterministic"
   add_receipt "$id" AC1 test passed
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id"); rc=$?
@@ -370,11 +370,11 @@ test_claim_invalidation_marker_is_append_only_and_idempotent() {
 test_low_risk_skips_no_mistakes_under_explicit_policy() {
   local id=low-docs base out meta project validated_head new_head rc
   base=$(make_project "$id" no-mistakes docs)
-  add_receipt "$id" AC1 lint "passed"
+  add_receipt "$id" AC1 lint "passed" CHANGELOG.md
   add_receipt "$id" AC2 review "reviewed"
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base") \
     || fail "low-risk plan failed"
-  printf '%s' "$out" | jq -e '.tier == "low" and .path == "receipts-mechanical" and .packet == null' >/dev/null \
+  printf '%s' "$out" | jq -e '.tier == "low" and .path == "receipts-mechanical"' >/dev/null \
     || fail "narrow mechanically proven docs change did not take the low path"
   meta="$HOME_DIR/state/$id.meta"
   grep -qx 'validation_tier=low' "$meta" || fail "low tier was not recorded durably"
@@ -384,6 +384,10 @@ test_low_risk_skips_no_mistakes_under_explicit_policy() {
   validated_head=$(git -C "$project" rev-parse HEAD)
   ! grep -q '^validation_completed_at=' "$meta" || fail "low plan completed before post-plan mechanical evidence"
   add_receipt "$id" AC1 lint "passed"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence mechanical-checks-passed >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "low completion rejects mechanical evidence unrelated to the changed file"
+  add_receipt "$id" AC1 lint "passed" CHANGELOG.md
   FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence mechanical-checks-passed >/dev/null \
     || fail "low plan did not complete after post-plan mechanical evidence"
   grep -qx "validation_completed_head=$validated_head" "$meta" \
@@ -400,12 +404,123 @@ test_low_risk_skips_no_mistakes_under_explicit_policy() {
   new_head=$(git -C "$project" rev-parse HEAD)
   FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null \
     || fail "corrected low-risk change could not be replanned"
-  add_receipt "$id" AC1 lint "passed"
+  add_receipt "$id" AC1 lint "passed" CHANGELOG.md
   FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence mechanical-checks-passed >/dev/null \
     || fail "replanned low-risk change did not complete"
   [ "$(grep '^validation_completed_head=' "$meta" | tail -1)" = "validation_completed_head=$new_head" ] \
     || fail "replanned completion did not bind the corrected head"
   pass "low-risk mechanical changes can skip a full No-Mistakes run"
+}
+
+test_low_risk_requires_safe_prose_and_applicable_evidence() {
+  local id base out project
+  id=low-unbound-proof
+  base=$(make_project "$id" no-mistakes docs)
+  add_receipt "$id" AC1 lint passed
+  add_receipt "$id" AC2 review reviewed
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base") \
+    || fail "unbound-proof plan failed"
+  printf '%s' "$out" | jq -e '.tier == "high" and .path == "full-no-mistakes"' >/dev/null \
+    || fail "unrelated mechanical evidence downgraded a changelog change"
+
+  id=low-command-prose
+  base=$(make_project "$id" no-mistakes docs)
+  project="$TMP_ROOT/project-$id"
+  printf 'Run `kubectl apply -f production.yaml` during deployment.\n' >> "$project/CHANGELOG.md"
+  git -C "$project" add CHANGELOG.md
+  git -C "$project" commit -q -m 'add deployment command'
+  add_receipt "$id" AC1 lint passed CHANGELOG.md
+  add_receipt "$id" AC2 review reviewed
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base") \
+    || fail "command-like prose plan failed"
+  printf '%s' "$out" | jq -e '.tier == "high" and .path == "full-no-mistakes"' >/dev/null \
+    || fail "command-like changelog prose reached low"
+  pass "low risk requires safe changelog prose and file-bound mechanical evidence"
+}
+
+test_terminal_and_failed_runs_bind_by_current_plan() {
+  local id base project head generation terminal failed rc
+  id=terminal-bind
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint passed
+  FM_FAKE_NM_STATUS= FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "terminal-bind plan failed"
+  project="$TMP_ROOT/project-$id"
+  head=$(git -C "$project" rev-parse HEAD)
+  generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
+  terminal=$(printf 'run:\n  id: "RUN-terminal"\n  status: completed\n  head: "%s"\noutcome: checks-passed\n' "$head")
+  FM_FAKE_NM_STATUS="$terminal" FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: $generation" \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-terminal --generation "$generation" >/dev/null \
+    || fail "successful terminal run could not bind to its current plan"
+
+  id=failed-bind
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint passed
+  FM_FAKE_NM_STATUS= FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "failed-bind plan failed"
+  project="$TMP_ROOT/project-$id"
+  head=$(git -C "$project" rev-parse HEAD)
+  generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
+  failed=$(printf 'run:\n  id: "RUN-failed"\n  status: failed\n  head: "%s"\noutcome: failed\n' "$head")
+  FM_FAKE_NM_STATUS="$failed" FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: $generation" \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-failed --generation "$generation" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "failed terminal run cannot bind"
+  pass "successful terminal runs bind while failed runs remain rejected"
+}
+
+test_no_mistakes_observations_are_bounded() {
+  local hang_nm id base project head generation running ci_status rc
+  hang_nm="$TMP_ROOT/hang-no-mistakes"
+  cat > "$hang_nm" <<'EOF'
+#!/bin/sh
+case "$*" in
+  *"$FM_HANG_ON"*) sleep 5 ;;
+esac
+case "$*" in
+  *"axi logs --step intent --run "*) printf '%s\n' "${FM_FAKE_NM_INTENT:-}" ;;
+  *"axi logs --step ci --run "*) printf '%s\n' "${FM_FAKE_NM_CI_LOG:-}" ;;
+  *) printf '%s\n' "${FM_FAKE_NM_STATUS:-}" ;;
+esac
+EOF
+  chmod +x "$hang_nm"
+
+  id=bounded-observation
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint passed
+  FM_HANG_ON='axi status' FM_RECEIPT_NM_TIMEOUT=1 FM_NO_MISTAKES_BIN="$hang_nm" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --plan --base "$base" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "planning bounds No-Mistakes status observation"
+
+  FM_FAKE_NM_STATUS= FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "bounded observation fixture plan failed"
+  project="$TMP_ROOT/project-$id"
+  head=$(git -C "$project" rev-parse HEAD)
+  generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
+  running=$(nm_status RUN-bounded "$head" pending)
+  FM_HANG_ON='axi logs --step intent' FM_RECEIPT_NM_TIMEOUT=1 FM_FAKE_NM_STATUS="$running" \
+    FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: $generation" FM_NO_MISTAKES_BIN="$hang_nm" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-bounded --generation "$generation" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "run binding bounds No-Mistakes intent observation"
+
+  FM_FAKE_NM_STATUS="$running" FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: $generation" \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-bounded --generation "$generation" >/dev/null \
+    || fail "bounded observation fixture binding failed"
+  ci_status=$(printf 'run:\n  id: "RUN-bounded"\n  status: ci\n  head: "%s"\noutcome: pending\n' "$head")
+  FM_HANG_ON='axi logs --step ci' FM_RECEIPT_NM_TIMEOUT=1 FM_FAKE_NM_STATUS="$ci_status" \
+    FM_NO_MISTAKES_BIN="$hang_nm" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "completion bounds No-Mistakes CI-log observation"
+  pass "No-Mistakes status, intent, and CI-log observations are bounded"
 }
 
 test_authoritative_docs_remain_high() {
@@ -774,6 +889,9 @@ test_shared_criterion_parser_drives_append_and_check
 test_ci_green_log_allows_exact_bound_run_completion
 test_claim_invalidation_marker_is_append_only_and_idempotent
 test_low_risk_skips_no_mistakes_under_explicit_policy
+test_low_risk_requires_safe_prose_and_applicable_evidence
+test_terminal_and_failed_runs_bind_by_current_plan
+test_no_mistakes_observations_are_bounded
 test_authoritative_docs_remain_high
 test_terminal_paths_record_completion_at_their_boundary
 test_completion_signal_releases_validation_lock
