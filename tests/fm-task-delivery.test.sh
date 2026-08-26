@@ -304,8 +304,8 @@ EOF
   cat > "$fakebin/mv" <<EOF
 #!/bin/sh
 case "\$1" in
-  *.meta.promote.*) exit 71 ;;
-  *.meta.restore.*) [ "\${FM_FAIL_RESTORE:-0}" != 1 ] || exit 72 ;;
+  ./.brief.promote.*) exit 71 ;;
+  ./.brief.restore.*) [ "\${FM_FAIL_RESTORE:-0}" != 1 ] || exit 72 ;;
 esac
 exec "$real_mv" "\$@"
 EOF
@@ -464,7 +464,7 @@ SH
 test_interrupted_replacements_roll_back() {
   local stage home id fakebin real_mv trigger brief_before meta_before status leftovers
   real_mv=$(command -v mv)
-  for stage in brief meta; do
+  for stage in brief; do
     id="promote-interrupt-$stage"
     home="$TMP_ROOT/$id/home"
     fakebin="$home/fakebin"
@@ -484,7 +484,6 @@ destination_path=\$2
 should_kill=0
 case "$stage:\$source_path:\$destination_path" in
   brief:./.brief.promote.*:./brief.md) should_kill=1 ;;
-  meta:*.meta.promote.*:*.meta) should_kill=1 ;;
 esac
 "$real_mv" "\$@" || exit
 if [ "\$should_kill" -eq 1 ] && [ -f "$trigger" ]; then
@@ -504,7 +503,56 @@ EOF
       \( -name '*.promote.*' -o -name '*.original.*' -o -name '.promotion.*' \) -print)
     [ -z "$leftovers" ] || fail "$stage interruption left transaction artifacts: $leftovers"
   done
-  pass "fm-promote: interruptions after each replacement roll back atomically"
+  pass "fm-promote: interrupted task replacement rolls back atomically"
+}
+
+test_promote_rejects_intermediate_state_symlink() {
+  local home outside before out status id=promote-state-link
+  home="$TMP_ROOT/promote-state-link/home"
+  outside="$TMP_ROOT/promote-state-link/outside"
+  mkdir -p "$home/data/$id" "$outside/tasks"
+  printf '# Task\nState symlink fixture.\n\n# Setup\nScout setup.\n' > "$home/data/$id/brief.md"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$outside/tasks/$id.meta"
+  before=$(cksum "$outside/tasks/$id.meta")
+  ln -s "$outside" "$home/state-link"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state-link/tasks" FM_DATA_OVERRIDE="$home/data" \
+    "$PROMOTE" "$id" --mode direct-PR --yolo off --criterion 'AC1: Concrete outcome' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "promotion accepted an intermediate state symlink"
+  assert_contains "$out" "state path component is missing or unsafe" "promotion did not identify the state symlink"
+  [ "$(cksum "$outside/tasks/$id.meta")" = "$before" ] || fail "refused state symlink changed outside metadata"
+  [ ! -e "$home/data/$id/evidence.jsonl" ] || fail "refused state symlink created evidence"
+  pass "fm-promote: intermediate state symlinks fail closed"
+}
+
+test_state_path_replacement_cannot_redirect_promotion() {
+  local home moved outside wrapper id=promote-state-race
+  home="$TMP_ROOT/promote-state-race/home"
+  moved="$TMP_ROOT/promote-state-race/moved-state"
+  outside="$TMP_ROOT/promote-state-race/outside-state"
+  wrapper="$home/transaction-wrapper.sh"
+  mkdir -p "$home/data/$id" "$home/state" "$outside"
+  printf '# Task\nState replacement fixture.\n\n# Setup\nScout setup.\n' > "$home/data/$id/brief.md"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$home/state/$id.meta"
+  printf 'outside=unchanged\n' > "$outside/$id.meta"
+  cat > "$wrapper" <<EOF
+#!/usr/bin/env bash
+set -eu
+phase=\$1
+"$ROOT/bin/fm-promote-transaction.sh" "\$@"
+if [ "\$phase" = prepare ]; then
+  mv "$home/state" "$moved"
+  ln -s "$outside" "$home/state"
+fi
+EOF
+  chmod +x "$wrapper"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-receipt-store.sh" "$id" promote "$wrapper" "$id" direct-PR off '- AC1: Concrete outcome' \
+    >/dev/null || fail "pinned state replacement promotion failed"
+  assert_grep 'kind=ship' "$moved/$id.meta" "promotion did not update the pinned state directory"
+  assert_grep 'outside=unchanged' "$outside/$id.meta" "promotion redirected metadata into the replacement state path"
+  assert_no_grep 'kind=ship' "$outside/$id.meta" "replacement state metadata was mutated"
+  pass "fm-promote: state path replacement cannot redirect metadata"
 }
 
 # The registry parser survives for the mechanical consumers only. It accepts the
@@ -553,5 +601,7 @@ test_promote_rejects_symlinked_data_override
 test_concurrent_promotion_preserves_winner_lock
 test_signaled_promotion_transaction_fails
 test_interrupted_replacements_roll_back
+test_promote_rejects_intermediate_state_symlink
+test_state_path_replacement_cannot_redirect_promotion
 test_project_mode_maps_the_conditional_policy
 echo "# all fm-task-delivery tests passed"

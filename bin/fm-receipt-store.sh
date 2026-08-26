@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Own the portable pinned task, brief, and evidence-ledger descriptor boundary.
+# Own the portable pinned task, state metadata, brief, and evidence-ledger descriptor boundary.
 #
 # Usage:
 #   fm-receipt-store.sh <task-id> hold <brief-out> <ledger-out> <ready-file> <release-fifo>
@@ -95,6 +95,21 @@ sub copy_file {
     print {$output} substr($buffer, 0, $read) or refuse("could not write pinned task snapshot");
   }
   close($output) or refuse("could not close pinned task snapshot");
+}
+
+sub write_new_file {
+  my ($name, $bytes) = @_;
+  sysopen(my $output, $name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)
+    or refuse("promotion metadata artifact could not be created");
+  my $offset = 0;
+  while ($offset < length($bytes)) {
+    my $written = syswrite($output, $bytes, length($bytes) - $offset, $offset);
+    next if !defined($written) && $! == EINTR;
+    refuse("promotion metadata artifact could not be written") unless defined($written) && $written > 0;
+    $offset += $written;
+  }
+  $output->sync or refuse("promotion metadata artifact could not be synced");
+  close($output) or refuse("promotion metadata artifact could not be closed");
 }
 
 my $data_path = $ENV{FM_RECEIPT_STORE_DATA};
@@ -203,19 +218,106 @@ if ($ENV{FM_RECEIPT_STORE_MODE} eq "promote") {
   my $token = unpack("H*", $nonce_bytes);
   my ($command, @command_args) = @ARGV;
   my $state_path = $ENV{FM_STATE_OVERRIDE} // "";
-  sysopen(my $state, $state_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
-    or refuse("promotion state directory is missing or unsafe");
+  refuse("promotion state directory path is unsafe") unless $state_path =~ m{^/};
+  my @state_components = grep { length($_) } split(m{/+}, $state_path);
+  refuse("promotion state directory path is unsafe") if !@state_components
+    || grep { $_ eq "." || $_ eq ".." } @state_components;
+  chdir("/") or refuse("absolute root could not be entered for promotion state");
+  my @state_pins;
+  my $state;
+  for my $component (@state_components) {
+    sysopen(my $next, $component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+      or refuse("state path component is missing or unsafe: $component");
+    my @next_identity = stat($next);
+    refuse("state path component is not a directory: $component") unless @next_identity && S_ISDIR($next_identity[2]);
+    my @named_next_identity = lstat($component);
+    refuse("state path component identity changed: $component") unless @named_next_identity
+      && !S_ISLNK($named_next_identity[2])
+      && $named_next_identity[0] == $next_identity[0]
+      && $named_next_identity[1] == $next_identity[1];
+    chdir($component) or refuse("state path component could not be entered safely: $component");
+    my @entered_identity = stat(".");
+    refuse("state path component identity changed after entry: $component") unless @entered_identity
+      && $entered_identity[0] == $next_identity[0]
+      && $entered_identity[1] == $next_identity[1];
+    push @state_pins, $next;
+    $state = $next;
+  }
+  my $meta_name = "$task_name.meta";
+  sysopen(my $meta, $meta_name, O_RDONLY | O_NOFOLLOW)
+    or refuse("promotion task metadata is missing or unsafe");
+  my @meta_identity = stat($meta);
+  refuse("promotion task metadata must be a single-link regular file") unless @meta_identity
+    && S_ISREG($meta_identity[2]) && $meta_identity[3] == 1;
+  local $/;
+  my $meta_text = <$meta>;
+  defined($meta_text) or refuse("promotion task metadata could not be read");
+  my @kinds = ($meta_text =~ /^kind=(.*)$/mg);
+  refuse("task is not a scout task") unless @kinds == 1 && $kinds[0] eq "scout";
+  my $mode = $command_args[1] // "";
+  my $yolo = $command_args[2] // "";
+  my $new_meta = $meta_text;
+  $new_meta =~ s/^(?:kind|mode|yolo)=.*\n?//mg;
+  $new_meta .= "\n" if length($new_meta) && $new_meta !~ /\n\z/;
+  $new_meta .= "kind=ship\nmode=$mode\nyolo=$yolo\n";
+  my $meta_temp = ".$task_name.meta.promote.$token";
+  my $meta_backup = ".$task_name.meta.original.$token";
+  my $meta_restore = ".$task_name.meta.restore.$token";
+  write_new_file($meta_backup, $meta_text);
+  write_new_file($meta_temp, $new_meta);
+  write_new_file($meta_restore, $meta_text);
+  chdir($task) or refuse("pinned task directory could not be re-entered");
   my $status = system($command, "prepare", @command_args, $token);
-  if ($status == 0 && $task->sync && $state->sync) {
+  my $meta_replaced = 0;
+  if ($status == 0) {
+    chdir($state) or refuse("pinned state directory could not be re-entered");
+    my @named_meta_identity = lstat($meta_name);
+    if (@named_meta_identity
+      && !S_ISLNK($named_meta_identity[2])
+      && $named_meta_identity[0] == $meta_identity[0]
+      && $named_meta_identity[1] == $meta_identity[1]
+      && rename($meta_temp, $meta_name)) {
+      $meta_replaced = 1;
+    } else {
+      $status = -1;
+    }
+    chdir($task) or refuse("pinned task directory could not be re-entered");
+  }
+  if ($status == 0 && $meta_replaced && $task->sync && $state->sync) {
     my $finalize_status = system($command, "finalize", @command_args, $token);
-    exit 0 if $finalize_status == 0;
+    if ($finalize_status == 0) {
+      chdir($state) or refuse("pinned state directory could not be re-entered");
+      unlink($meta_backup);
+      unlink($meta_temp);
+      unlink($meta_restore);
+      $state->sync or refuse("promoted state directory could not be synced");
+      exit 0;
+    }
     $status = $finalize_status;
   }
+  my $meta_rollback = 1;
+  if ($meta_replaced) {
+    chdir($state) or refuse("pinned state directory could not be re-entered");
+    if (rename($meta_restore, $meta_name)) {
+      $meta_rollback = 1;
+    } else {
+      $meta_rollback = 0;
+    }
+    chdir($task) or refuse("pinned task directory could not be re-entered");
+  }
   my $rollback_status = system($command, "rollback", @command_args, $token);
-  my $rollback_synced = $rollback_status == 0 && $task->sync && $state->sync;
+  my $rollback_synced = $meta_rollback && $rollback_status == 0 && $task->sync && $state->sync;
   my $cleanup_status = $rollback_synced
     ? system($command, "cleanup", @command_args, $token)
     : -1;
+  if ($rollback_synced && $cleanup_status == 0) {
+    chdir($state) or refuse("pinned state directory could not be re-entered");
+    unlink($meta_backup);
+    unlink($meta_temp);
+    unlink($meta_restore);
+    $state->sync or refuse("rolled-back state directory could not be synced");
+    chdir($task) or refuse("pinned task directory could not be re-entered");
+  }
   if ($lock_created && $rollback_synced && $cleanup_status == 0) {
     my @owned_named_lock = lstat(".evidence.lock");
     unlink(".evidence.lock") if @owned_named_lock
