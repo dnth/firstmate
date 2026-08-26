@@ -206,19 +206,24 @@ Enter, Escape, and Ctrl-C are supported.
 Slash and dollar-prefixed input uses the shared harness-aware settle before the first Enter so a completion popup cannot consume it.
 Text is typed once; only Enter is retried.
 
-On an idle or done native baseline, ordinary submit confirmation waits for `working` or `blocked` across a bounded polling window.
+On an idle or done native baseline, ordinary submit confirmation first waits for `working` or `blocked` across a bounded polling window.
+If native status stays idle, the shared composer verdict is the next positive signal: a cleared composer confirms delivery, and proven pending text retries Enter.
+For every non-OMP harness, text that remains pending after the retry budget stays pending even when native status is `working`.
+For OMP only, `fm_composer_queued_enter_verdict` treats proven pending text plus native `working` as a queued delivered Enter and keeps an idle pending composer as a genuine swallow.
 For OMP, that native transition confirms submission, after which `fm-send.sh` applies a coarse bounded check for native busy state or advancement of the generated turn-start marker after the submit-time baseline.
 The two stages intentionally share signals rather than claiming perfect submit and turn-start separation.
 On an already active or unreadable baseline, ordinary harnesses fall back to conservative composer clearance.
 OMP is stricter: the adapter binds the exact native OMP session path and pre-send byte offset before typing.
 That offset is always the end of a complete newline-terminated session record; when a partial record is still being appended the adapter waits a bounded time and then refuses rather than rewinding, because a mid-record offset would poison every later read and an earlier boundary could false-confirm an already-appended record.
 A busy OMP steer sends one Enter and normally succeeds after an appended exact-text user message carries native `steering:true`; an identical ordinary user message is not acknowledgement.
-If the Enter transport succeeds but that native event is not observed within the bounded window, the already-busy generating path returns `queued-unconfirmed` without retrying or scraping rendered queue counts; `fm-send` accepts that narrow verdict as delivered so OMP can consume the steer on its next turn.
+If that native event is not observed within the bounded window, the adapter verifies the composer before considering the narrow fallback.
+A cleared composer or proven pending text plus a current native `working` state returns `queued-unconfirmed`, which `fm-send` accepts so OMP can consume the steer on its next turn.
+Pending text plus idle, done, blocked, or unreadable native state remains unsubmitted and makes `fm-send` fail.
 An Enter transport failure returns `send-failed`, and every non-busy editable composer remains subject to the ordinary pending or unknown fail-closed behavior.
 A `blocked` OMP agent is parked on an open ask rather than generating, so its proof is instead a successful post-offset `ask` tool result whose structured `selectedOptions` is exactly the sent text; a steering user record is never accepted there, and an errored answer is a rejection, not delivery.
 OMP `/exit` succeeds only after a post-offset normal `session_exit` event, then closes the exact owned Herdr pane and verifies it is absent; it never falls back to a steering acknowledgement.
 A fully unreadable target stops retrying and reports unknown.
-The poll density bounds the residual possibility of an extremely fast complete turn; a missed ordinary transition can cause only a redundant Enter on an empty composer, never duplicate message text.
+The poll density bounds the residual possibility of an extremely fast complete turn, while the composer fallback prevents an idle pending steer from being reported delivered.
 
 `pane read --lines N` can return empty output when N is below the viewport height.
 The capture owner requests at least 200 lines from Herdr and trims locally to the caller's bound.
@@ -319,14 +324,13 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 - A Firstmate outside Herdr cannot resolve a launcher workspace, so a colliding home label refuses new spawns until the collision is cleared.
 - Ghost and placeholder recognition depends on ANSI de-emphasis and fails safely to pending when unavailable.
 - Mid-session backend agent-identity probing remains session-start-only; see [Restart and liveness behavior](#restart-and-liveness-behavior).
-- OpenCode 1.18.4 can accept Enter while busy without clearing the composer.
-  The tmux backend has a busy-queue fallback, but Herdr still reports this case as submit pending and needs a separate adapter fix.
 - Only tmux and Herdr can host the away-mode supervisor terminal.
 
 ## Regression entry points
 
 ```sh
 tests/fm-backend-herdr.test.sh
+tests/fm-composer-lib.test.sh
 tests/fm-backend-herdr-smoke.test.sh
 tests/fm-backend-herdr-prune-safety-e2e.test.sh
 tests/fm-backend-herdr-respawn-idem-e2e.test.sh

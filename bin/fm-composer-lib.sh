@@ -371,3 +371,22 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   # Real, unsubmitted content remains.
   printf 'pending'; return 0
 }
+
+# fm_composer_queued_enter_verdict: the ONE busy-queued-Enter policy.
+# After the Enter retry budget is spent, convert a structurally proven pending
+# composer given a delivery-busy signal from the adapter:
+#   pending + busy    -> empty   (Enter was accepted and queued; do not re-send)
+#   pending + idle    -> pending (genuine swallow; caller must not assume delivery)
+#   pending + unknown -> pending (unreadable busy is not proof of a queue)
+# Every other composer verdict is returned unchanged, so empty and unknown
+# never receive this conversion.
+# Adapters supply their own busy primitive; this function does not read a pane.
+fm_composer_queued_enter_verdict() {  # <composer-state> <busy|idle|unknown>
+  local state=$1 busy=${2:-}
+  [ "$state" = pending ] || { printf '%s' "$state"; return 0; }
+  if [ "$busy" = busy ]; then
+    printf 'empty'
+  else
+    printf 'pending'
+  fi
+}

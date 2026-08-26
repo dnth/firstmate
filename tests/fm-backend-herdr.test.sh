@@ -3604,8 +3604,23 @@ test_send_text_submit_omp_busy_steer_requires_matching_new_session_event() {
   pass "fm_backend_herdr_send_text_submit: a busy OMP steer confirms only from the exact matching post-offset session event"
 }
 
+write_omp_submit_composer_response() {  # <path> <content> <bun>
+  local path=$1 content=$2 bun=$3 top width
+  top='╭── ⬢ GPT-5.6-Luna · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
+  width=$(fm_composer_terminal_width "$top" "$bun") \
+    || fail "could not measure OMP submit fixture width"
+  {
+    printf '%s\n\n' "$top"
+    printf '╰─%-*s─╯\n' "$((width - 4))" "$content"
+  } > "$path"
+}
+
 test_send_text_submit_omp_busy_steer_accepts_queued_composer() {
-  local dir log resp fb out enter_count send_count session text
+  local dir log resp fb out enter_count send_count session text bun
+  if ! bun=$(command -v bun 2>/dev/null); then
+    pass "busy OMP queued-composer submit subtest skipped: bun not found"
+    return
+  fi
   dir="$TMP_ROOT/submit-omp-busy-queued-composer"
   mkdir -p "$dir/responses"
   log="$dir/log"
@@ -3615,8 +3630,11 @@ test_send_text_submit_omp_busy_steer_accepts_queued_composer() {
   text='After the current tool finishes, report OMP_BUSY_QUEUED.'
   printf '%s\n' '{"type":"session","version":3}' > "$session"
   printf '{"result":{"agent":{"agent":"omp","agent_status":"working","agent_session":{"kind":"path","value":"%s"}}}}\n' "$session" > "$resp/1.out"
+  write_omp_submit_composer_response "$resp/4.out" ' queued steer' "$bun"
+  printf '%s\n' '{"result":{"agent":{"agent":"omp","agent_status":"working"}}}' > "$resp/5.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"working"}}}' > "$resp/6.out"
   fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+  out=$( PATH="$fb:$PATH" FM_OMP_BUN="$bun" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0 \
     FM_BACKEND_HERDR_OMP_EVENT_CONFIRM_SLEEP=0 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0 "" omp' "$ROOT" "$text" )
@@ -3629,18 +3647,57 @@ test_send_text_submit_omp_busy_steer_accepts_queued_composer() {
   pass "fm_backend_herdr_send_text_submit: busy OMP without proof is queued-unconfirmed"
 }
 
+test_send_text_submit_omp_pending_composer_that_is_no_longer_busy_fails_closed() {
+  local dir log resp fb out enter_count send_count session text bun
+  if ! bun=$(command -v bun 2>/dev/null); then
+    pass "OMP unsubmitted-composer regression subtest skipped: bun not found"
+    return
+  fi
+  dir="$TMP_ROOT/submit-omp-unsubmitted-composer"
+  mkdir -p "$dir/responses"
+  log="$dir/log"
+  resp="$dir/responses"
+  : > "$log"
+  session="$dir/omp-session.jsonl"
+  text='This steer must not be reported delivered while it remains in an idle composer.'
+  printf '%s\n' '{"type":"session","version":3}' > "$session"
+  printf '{"result":{"agent":{"agent":"omp","agent_status":"working","agent_session":{"kind":"path","value":"%s"}}}}\n' "$session" > "$resp/1.out"
+  write_omp_submit_composer_response "$resp/4.out" ' unsent steer' "$bun"
+  printf '%s\n' '{"result":{"agent":{"agent":"omp","agent_status":"idle"}}}' > "$resp/5.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}' > "$resp/6.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_OMP_BUN="$bun" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0 \
+    FM_BACKEND_HERDR_OMP_EVENT_CONFIRM_SLEEP=0 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0 "" omp' "$ROOT" "$text" )
+  [ "$out" = pending ] \
+    || fail "an OMP steer left in a now-idle composer must fail closed as pending, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  send_count=$(grep -c $'\x1f''pane'$'\x1f''send-text'$'\x1f''w1:p2'$'\x1f' "$log")
+  [ "$enter_count" -eq 1 ] && [ "$send_count" -eq 1 ] \
+    || fail "unsubmitted OMP verification retyped or retried the busy steer (send-text=$send_count enter=$enter_count)"
+  pass "fm_backend_herdr_send_text_submit: an OMP steer left pending after the pane becomes idle is not submitted"
+}
+
 
 
 
 test_send_text_submit_omp_busy_default_event_budget_is_bounded_and_long_enough() {
-  local dir log resp fb out session text sleep_log sleeps
+  local dir log resp fb out session text sleep_log sleeps bun
+  if ! bun=$(command -v bun 2>/dev/null); then
+    pass "busy OMP default-budget submit subtest skipped: bun not found"
+    return
+  fi
   dir="$TMP_ROOT/submit-omp-busy-default-budget"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; sleep_log="$dir/sleeps"; : > "$log"; : > "$sleep_log"
   session="$dir/omp-session.jsonl"
   text='Wait for the native steering event without redelivery.'
   printf '%s\n' '{"type":"session","version":3}' > "$session"
   printf '{"result":{"agent":{"agent":"omp","agent_status":"working","agent_session":{"kind":"path","value":"%s"}}}}\n' "$session" > "$resp/1.out"
+  write_omp_submit_composer_response "$resp/4.out" ' queued steer' "$bun"
+  printf '%s\n' '{"result":{"agent":{"agent":"omp","agent_status":"working"}}}' > "$resp/5.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"working"}}}' > "$resp/6.out"
   fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_SLEEP_LOG="$sleep_log" \
+  out=$( PATH="$fb:$PATH" FM_OMP_BUN="$bun" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_SLEEP_LOG="$sleep_log" \
     FM_BACKEND_HERDR_SUBMIT_POLLS=2 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0 \
     FM_BACKEND_HERDR_OMP_EVENT_CONFIRM_SLEEP='' \
     bash -c '. "$0/bin/backends/herdr.sh"; sleep() { printf "sleep:%s\n" "$1" >> "$FM_SLEEP_LOG"; }; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0 "" omp' "$ROOT" "$text" )
@@ -3653,14 +3710,21 @@ test_send_text_submit_omp_busy_default_event_budget_is_bounded_and_long_enough()
 }
 
 test_send_text_submit_omp_busy_without_new_event_refuses_without_retry() {
-  local dir log resp fb out enter_count send_count session text
+  local dir log resp fb out enter_count send_count session text bun
+  if ! bun=$(command -v bun 2>/dev/null); then
+    pass "busy OMP no-new-event submit subtest skipped: bun not found"
+    return
+  fi
   dir="$TMP_ROOT/submit-omp-busy-no-ack"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   session="$dir/omp-session.jsonl"
   text='Do not duplicate this busy steer.'
   printf '{"type":"message","message":{"role":"user","content":[{"type":"text","text":"%s"}],"steering":true}}\n' "$text" > "$session"
   printf '{"result":{"agent":{"agent":"omp","agent_status":"working","agent_session":{"kind":"path","value":"%s"}}}}\n' "$session" > "$resp/1.out"
+  write_omp_submit_composer_response "$resp/4.out" ' queued steer' "$bun"
+  printf '%s\n' '{"result":{"agent":{"agent":"omp","agent_status":"working"}}}' > "$resp/5.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"working"}}}' > "$resp/6.out"
   fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+  out=$( PATH="$fb:$PATH" FM_OMP_BUN="$bun" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     FM_BACKEND_HERDR_SUBMIT_POLLS=2 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0 \
     FM_BACKEND_HERDR_OMP_EVENT_CONFIRM_SLEEP=0 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0 "" omp' "$ROOT" "$text" )
@@ -3789,7 +3853,10 @@ test_send_text_submit_detects_swallowed_enter() {
   # started a turn (swallowed), so wait_for_working never observes "busy".
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/6.out"
+  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/5.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/7.out"
+  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/8.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/9.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
@@ -3812,9 +3879,11 @@ test_send_text_submit_popup_autocomplete_requires_second_enter() {
   # 4: agent get -> idle (not submitted yet)
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
-  # 5: send-keys enter (#2) - actually submits
-  # 6: agent get -> working (submitted)
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/6.out"
+  # 5: composer still holds the placeholder fill, so it remains pending.
+  printf '  \xe2\x9d\xaf /compact\n' > "$resp/5.out"
+  # 6: send-keys enter (#2) - actually submits
+  # 7: agent get -> working (submitted)
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/7.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "/compact" 3 0.01 1.2' "$ROOT" )
@@ -3839,22 +3908,53 @@ test_send_text_submit_confirms_blocked_after_enter() {
   pass "fm_backend_herdr_send_text_submit: a post-Enter blocked state confirms delivery without retrying into the prompt"
 }
 
-test_send_text_submit_preexisting_working_does_not_false_confirm_swallowed_enter() {
+test_send_text_submit_preexisting_working_pending_fails_closed_for_non_omp() {
   local dir log resp fb out enter_count read_count
   dir="$TMP_ROOT/submit-preexisting-working-swallow"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/3.out"
   printf '  \xe2\x9d\xaf hello captain\n' > "$resp/4.out"
   printf '  \xe2\x9d\xaf hello captain\n' > "$resp/6.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
-  [ "$out" = pending ] || fail "send_text_submit must not accept preexisting working as proof that this Enter landed, got '$out'"
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01 "" claude' "$ROOT" )
+  [ "$out" = pending ] || fail "non-OMP preexisting working must not convert pending input into delivery, got '$out'"
   enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
-  [ "$enter_count" -eq 2 ] || fail "preexisting-working swallowed Enter should retry Enter up to the configured count, sent $enter_count Enter(s)"
+  [ "$enter_count" -eq 2 ] || fail "non-OMP pending input should retry Enter up to the configured count, sent $enter_count Enter(s)"
   read_count=$(grep -c $'\x1f''pane'$'\x1f''read' "$log")
-  [ "$read_count" -eq 2 ] || fail "preexisting-working confirmation should fall back to composer reads, made $read_count read(s)"
-  pass "fm_backend_herdr_send_text_submit: preexisting working is not accepted as submit proof when the composer still holds the message"
+  [ "$read_count" -eq 2 ] || fail "non-OMP pending confirmation should read the composer twice, made $read_count read(s)"
+  pass "fm_backend_herdr_send_text_submit: non-OMP working + pending stays pending"
+}
+
+test_send_text_submit_typed_idle_placeholder_stays_pending() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-typed-idle-placeholder"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
+  printf '  \xe2\x9d\xaf Type a message...\n' > "$resp/5.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/7.out"
+  printf '  \xe2\x9d\xaf Type a message...\n' > "$resp/8.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "Type a message..." 2 0.01 0.01 "" claude' "$ROOT" )
+  [ "$out" = pending ] || fail "typed text matching an idle placeholder must remain pending, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 2 ] || fail "typed placeholder text should exhaust the configured Enter retries, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: typed idle-placeholder text stays pending"
+}
+
+test_send_text_submit_idle_native_empty_composer_confirms_delivery() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-idle-native-empty-composer"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
+  printf '  \xe2\x9d\xaf\n' > "$resp/5.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 3 0.01 0.01' "$ROOT" )
+  [ "$out" = empty ] || fail "an idle native status plus a cleared composer must confirm delivery, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "a cleared composer should confirm without extra Enters, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: idle native agent-state plus empty composer reports empty"
 }
 
 # Regression for the submit-confirmation side of the 2026-07-07 incident:
@@ -3952,6 +4052,21 @@ test_send_text_submit_unknown_on_capture_failure() {
   enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
   [ "$enter_count" -eq 1 ] || fail "send_text_submit must never retry past an unreadable target (that is a hard I/O failure, not a timing race), sent $enter_count Enter(s)"
   pass "fm_backend_herdr_send_text_submit: reports 'unknown' when the post-Enter agent-get read fails (never retries past an unreadable target)"
+}
+
+test_send_text_submit_unknown_on_composer_capture_failure() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-composer-read-fail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
+  printf '1\n' > "$resp/5.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "x" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = unknown ] || fail "send_text_submit should report unknown when native status stays idle but the composer cannot be read, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "send_text_submit must not retry Enter after composer verification becomes unreadable, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: an unreadable composer stops Enter retries after native status stays idle"
 }
 
 # --- fm-backend.sh dispatch wiring -------------------------------------------
@@ -4699,6 +4814,7 @@ test_send_text_submit_omp_exit_requires_normal_session_event_and_closes_endpoint
 test_send_text_submit_omp_exit_without_normal_event_never_falls_back_to_steering_ack
 test_send_text_submit_omp_busy_steer_requires_matching_new_session_event
 test_send_text_submit_omp_busy_steer_accepts_queued_composer
+test_send_text_submit_omp_pending_composer_that_is_no_longer_busy_fails_closed
 test_send_text_submit_omp_busy_default_event_budget_is_bounded_and_long_enough
 test_send_text_submit_omp_busy_without_new_event_refuses_without_retry
 test_send_text_submit_omp_busy_enter_transport_failure_returns_send_failed
@@ -4709,13 +4825,16 @@ test_send_text_submit_detects_landed_send
 test_send_text_submit_detects_swallowed_enter
 test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_text_submit_confirms_blocked_after_enter
-test_send_text_submit_preexisting_working_does_not_false_confirm_swallowed_enter
+test_send_text_submit_preexisting_working_pending_fails_closed_for_non_omp
+test_send_text_submit_typed_idle_placeholder_stays_pending
+test_send_text_submit_idle_native_empty_composer_confirms_delivery
 test_send_text_submit_confirms_despite_codex_idle_tip_composer
 test_composer_state_codex_dynamic_idle_tip_reads_empty_when_faint
 test_composer_state_guard_still_refuses_real_pending_text_after_submit_confirmation_change
 test_send_text_submit_slow_transition_within_one_enter_needs_no_extra_enter
 test_send_text_submit_send_failed
 test_send_text_submit_unknown_on_capture_failure
+test_send_text_submit_unknown_on_composer_capture_failure
 test_dispatch_routes_herdr_backend
 test_dispatch_busy_state_unknown_for_tmux
 test_dispatch_composer_state_routes_by_backend

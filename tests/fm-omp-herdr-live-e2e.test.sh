@@ -2,10 +2,12 @@
 # Opt-in real OMP primary, worker, scout, and secondmate lifecycle in one guarded Herdr lab.
 set -u
 
-if [ "${FM_OMP_HERDR_LIVE_E2E:-0}" != 1 ]; then
-  echo "skip: set FM_OMP_HERDR_LIVE_E2E=1 to run the isolated OMP Herdr role matrix"
+if [ "${FM_OMP_HERDR_LIVE_E2E:-0}" != 1 ] \
+   && [ "${FM_OMP_HERDR_SUBMIT_LIVE_E2E:-0}" != 1 ]; then
+  echo "skip: set FM_OMP_HERDR_LIVE_E2E=1 for the role matrix or FM_OMP_HERDR_SUBMIT_LIVE_E2E=1 for submit fallback"
   exit 0
 fi
+SUBMIT_ONLY=${FM_OMP_HERDR_SUBMIT_LIVE_E2E:-0}
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -566,6 +568,41 @@ await_primary_wake_and_drain "worker startup turn-end delivery" "$worker_start_w
   "$HOME_DIR/state/$WORKER_ID.turn-ended"
 
 rm -f "$HOME_DIR/state/$WORKER_ID.turn-ended"
+worker_busy_wake_offset=$(session_offset "$PRIMARY_SESSION") || exit 1
+send_task "$WORKER_ID" 'Run this exact bash command: sleep 10. Then reply exactly: The worker completed its timed command.' \
+  || fail "worker busy-turn setup was not submitted"
+wait_for "native working worker state" agent_is "$WORKER_TARGET" omp working
+steer_offset=$(session_offset "$WORKER_SESSION") || exit 1
+fallback_steer='After the tool finishes, reply exactly: The busy worker message was processed.'
+fallback_verdict=$(
+  export PATH="$WRAPPER_BIN:$BASE_PATH" HERDR_ENV=1 HERDR_SESSION="$SESSION"
+  fm_backend_herdr_wait_omp_session_event() { return 1; }
+  FM_BACKEND_HERDR_SUBMIT_POLLS=4 FM_BACKEND_HERDR_OMP_EVENT_CONFIRM_SLEEP=0 \
+    fm_backend_herdr_send_text_submit "$WORKER_TARGET" "$fallback_steer" 3 0.2 0 "" \
+      omp "$OMP_RUNTIME" "$OMP_BIN"
+)
+[ "$fallback_verdict" = queued-unconfirmed ] \
+  || fail "real working OMP composer fallback returned '$fallback_verdict' without its native event"
+wait_for "worker exact native steering event" session_has_exact_steer_after \
+  "$WORKER_SESSION" "$steer_offset" "$fallback_steer"
+wait_for "worker busy turn completion" file_exists "$HOME_DIR/state/$WORKER_ID.turn-ended"
+wait_for "worker busy response" file_has "$WORKER_SESSION" 'The busy worker message was processed.'
+wait_for "worker return to idle" agent_is "$WORKER_TARGET" omp 'idle done'
+await_primary_wake_and_drain "worker busy turn-end delivery" "$worker_busy_wake_offset" \
+  "FIRSTMATE WATCHER WAKE: signal: $HOME_DIR/state/$WORKER_ID.turn-ended" \
+  "$HOME_DIR/state/$WORKER_ID.turn-ended"
+
+if [ "$SUBMIT_ONLY" = 1 ]; then
+  send_task "$WORKER_ID" /exit || fail "submit-fallback worker /exit was not event-confirmed"
+  wait_for "submit-fallback worker pane absence" pane_missing "$WORKER_TARGET"
+  fm_env "$ROOT/bin/fm-teardown.sh" "$WORKER_ID" >/dev/null \
+    || fail "submit-fallback worker cleanup failed"
+  WORKER_WT=
+  pass "real Herdr OMP submit fallback: missing native event used working composer queue proof"
+  exit 0
+fi
+
+rm -f "$HOME_DIR/state/$WORKER_ID.turn-ended"
 blocked_prompt="Before continuing, use the ask tool for one single-choice question: 'Which audience should the report focus on?' Offer exactly two options, 'Operators' and 'Maintainers', and wait for my selection."
 blocked_wake_offset=$(session_offset "$PRIMARY_SESSION") || exit 1
 send_task "$WORKER_ID" "$blocked_prompt" || fail "worker question-induced blocked-state setup was not submitted"
@@ -618,23 +655,6 @@ wait_for "worker idle turn completion" file_exists "$HOME_DIR/state/$WORKER_ID.t
 wait_for "worker idle response" file_has "$WORKER_SESSION" 'The idle worker message was processed.'
 wait_for "worker idle steering return" agent_is "$WORKER_TARGET" omp 'idle done'
 await_primary_wake_and_drain "worker idle turn-end delivery" "$worker_idle_wake_offset" \
-  "FIRSTMATE WATCHER WAKE: signal: $HOME_DIR/state/$WORKER_ID.turn-ended" \
-  "$HOME_DIR/state/$WORKER_ID.turn-ended"
-
-rm -f "$HOME_DIR/state/$WORKER_ID.turn-ended"
-worker_busy_wake_offset=$(session_offset "$PRIMARY_SESSION") || exit 1
-send_task "$WORKER_ID" 'Run this exact bash command: sleep 10. Then reply exactly: The worker completed its timed command.' \
-  || fail "worker busy-turn setup was not submitted"
-wait_for "native working worker state" agent_is "$WORKER_TARGET" omp working
-steer_offset=$(session_offset "$WORKER_SESSION") || exit 1
-send_task "$WORKER_ID" 'After the tool finishes, reply exactly: The busy worker message was processed.' \
-  || fail "worker busy steering was not event-confirmed"
-wait_for "worker exact native steering event" session_has_exact_steer_after \
-  "$WORKER_SESSION" "$steer_offset" 'After the tool finishes, reply exactly: The busy worker message was processed.'
-wait_for "worker busy turn completion" file_exists "$HOME_DIR/state/$WORKER_ID.turn-ended"
-wait_for "worker busy response" file_has "$WORKER_SESSION" 'The busy worker message was processed.'
-wait_for "worker return to idle" agent_is "$WORKER_TARGET" omp 'idle done'
-await_primary_wake_and_drain "worker busy turn-end delivery" "$worker_busy_wake_offset" \
   "FIRSTMATE WATCHER WAKE: signal: $HOME_DIR/state/$WORKER_ID.turn-ended" \
   "$HOME_DIR/state/$WORKER_ID.turn-ended"
 
@@ -854,4 +874,4 @@ FM_HERDR_LAB_INNER=1 PATH="$WRAPPER_BIN:$BASE_PATH" \
   || fail "guarded Herdr role-matrix teardown or default-session tripwire failed"
 TEARDOWN_DONE=1
 
-pass "real Herdr OMP role matrix: primary, worker/scout idle and busy steering, blocked escalation, secondmate, normal exits, recovery, duplicate refusal, and guarded teardown"
+pass "real Herdr OMP role matrix: missing-event composer fallback, native-event steering, lifecycle, and guarded teardown"

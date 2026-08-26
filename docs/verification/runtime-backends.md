@@ -380,7 +380,8 @@ The secondmate integration checks prove that the exact Firstmate primary extensi
 
 The Herdr role matrix required each expected turn-end or routed-reply notification to reach the durable queue or the primary follow-up transcript before the fixture drained it.
 
-The deterministic tmux and Herdr fixtures reran on 2026-08-09 and proved that an already-busy OMP send returns `queued-unconfirmed` only after Enter transport succeeds, without reading a rendered steering count, while Enter transport failure returns `send-failed` and initially idle editable input remains pending and fails closed.
+The deterministic composer, tmux, and Herdr fixtures reran on 2026-08-26 and proved that an already-busy OMP send returns `queued-unconfirmed` only after Enter transport succeeds and the composer either clears or remains proven pending while native state is still working.
+The same fixtures proved that a pending OMP composer after native state becomes idle returns `pending`, Enter transport failure returns `send-failed`, and initially idle editable input fails closed.
 This is revision-bound source-fixture evidence for the source under review, using Bun 1.3.14 only for terminal-cell measurement; it does not invoke OMP or make an OMP runtime-version claim.
 
 The deterministic fm-send turn-start fixture ran on 2026-08-19 and proved that an initially idle OMP submit must become busy or advance its generated turn-start marker after the submit-time baseline before success, while `delivered-no-turn` exits distinctly, queues supervised recovery, and never kills the endpoint.
@@ -423,19 +424,24 @@ bash -c '
 set -e
 evidence_dir=$(mktemp -d)
 trap "rm -rf \"$evidence_dir\"" EXIT
-command -v bun >/dev/null
 bun --version > "$evidence_dir/actual.out"
+tests/fm-composer-lib.test.sh > "$evidence_dir/composer.out"
 tests/fm-tmux-submit-busy.test.sh > "$evidence_dir/tmux.out"
 tests/fm-backend-herdr.test.sh > "$evidence_dir/herdr.out"
-grep -hE "^(ok - (fm_tmux_submit_enter_core: idle pane \\+ pending composer stays pending|fm_tmux_submit_enter_core: busy OMP Enter transport failure|busy OMP mixed Enter transport retains queued delivery|OMP tmux composer keeps queued busy submits|fm_backend_herdr_send_text_submit: busy OMP without proof|fm_backend_herdr_send_text_submit: busy OMP Enter transport failure))" "$evidence_dir/tmux.out" "$evidence_dir/herdr.out" >> "$evidence_dir/actual.out"
+grep -hE "^(ok - (fm_composer_queued_enter_verdict: pending \+ busy returns empty|fm_composer_queued_enter_verdict: pending \+ idle/unknown stays pending|fm_tmux_submit_enter_core: idle pane \+ pending composer stays pending|fm_tmux_submit_enter_core: busy OMP Enter transport failure|busy OMP mixed Enter transport retains queued delivery|OMP tmux composer keeps queued busy submits|fm_backend_herdr_send_text_submit: busy OMP without proof|fm_backend_herdr_send_text_submit: an OMP steer left pending|fm_backend_herdr_send_text_submit: busy OMP Enter transport failure|fm_backend_herdr_send_text_submit: non-OMP working \+ pending stays pending|fm_backend_herdr_send_text_submit: typed idle-placeholder text stays pending))" "$evidence_dir/composer.out" "$evidence_dir/tmux.out" "$evidence_dir/herdr.out" >> "$evidence_dir/actual.out"
 cat > "$evidence_dir/expected.out" <<EOF
 1.3.14
+ok - fm_composer_queued_enter_verdict: pending + busy returns empty (queued Enter)
+ok - fm_composer_queued_enter_verdict: pending + idle/unknown stays pending
 ok - fm_tmux_submit_enter_core: idle pane + pending composer stays pending (genuine swallow preserved)
 ok - fm_tmux_submit_enter_core: busy OMP Enter transport failure returns send-failed
 ok - busy OMP mixed Enter transport retains queued delivery
 ok - OMP tmux composer keeps queued busy submits separate from unsubmitted input
 ok - fm_backend_herdr_send_text_submit: busy OMP without proof is queued-unconfirmed
+ok - fm_backend_herdr_send_text_submit: an OMP steer left pending after the pane becomes idle is not submitted
 ok - fm_backend_herdr_send_text_submit: busy OMP Enter transport failure returns send-failed
+ok - fm_backend_herdr_send_text_submit: non-OMP working + pending stays pending
+ok - fm_backend_herdr_send_text_submit: typed idle-placeholder text stays pending
 EOF
 diff -u "$evidence_dir/expected.out" "$evidence_dir/actual.out"
 cat "$evidence_dir/actual.out"
@@ -446,12 +452,17 @@ Observed bounded output:
 
 ```text
 1.3.14
+ok - fm_composer_queued_enter_verdict: pending + busy returns empty (queued Enter)
+ok - fm_composer_queued_enter_verdict: pending + idle/unknown stays pending
 ok - fm_tmux_submit_enter_core: idle pane + pending composer stays pending (genuine swallow preserved)
 ok - fm_tmux_submit_enter_core: busy OMP Enter transport failure returns send-failed
 ok - busy OMP mixed Enter transport retains queued delivery
 ok - OMP tmux composer keeps queued busy submits separate from unsubmitted input
 ok - fm_backend_herdr_send_text_submit: busy OMP without proof is queued-unconfirmed
+ok - fm_backend_herdr_send_text_submit: an OMP steer left pending after the pane becomes idle is not submitted
 ok - fm_backend_herdr_send_text_submit: busy OMP Enter transport failure returns send-failed
+ok - fm_backend_herdr_send_text_submit: non-OMP working + pending stays pending
+ok - fm_backend_herdr_send_text_submit: typed idle-placeholder text stays pending
 ```
 
 The full OMP contract and both live backend matrices passed together in one clean-environment runner invocation on 2026-08-01 at head `491bc809a38a84f5ea651fd051b509cb511149a1`:
@@ -774,37 +785,39 @@ Observed guarantee: one exact home-local, journal-correlated, one-tab and one-pa
 
 ### OMP lifecycle
 
-The complete Herdr role matrix reran on 2026-08-01 against OMP 17.1.8 and Herdr 0.7.5 protocol 17 in one guarded non-default lab session.
+The focused Herdr submit guard ran on 2026-08-26 against OMP 18.0.4 and Herdr 0.8.2 in one guarded non-default lab session.
+It suppressed the native session-event confirmation inside the production submit function, required the real OMP composer plus current native `working` state to return `queued-unconfirmed`, and independently required the exact steering event to appear afterward.
 The fixture verifies the exact trailing `--session <name>` binding, routes the two bare read-only production client reads (`session list --json` and `api schema --json`) through the named lab helper binding so the event fast-path resolves its socket and capability instead of silently degrading to polling, rejects every other `session` subcommand and every `server` operation, and requires the helper's default-session tripwire to survive final teardown.
 Every wrapper refusal - unbound, outside the lab session, `server`, and any non-`list` `session` subcommand - is recorded in the wrapper's callers log through one shared refusal path and fails the matrix, so a refused call can no longer pass unnoticed as a poll-path fallback.
 
 ```sh
-omp --version
-herdr --version
+bash -c '
+set -e
+evidence_dir=$(mktemp -d)
+trap "rm -rf \"$evidence_dir\"" EXIT
+omp --version > "$evidence_dir/actual.out"
+herdr --version >> "$evidence_dir/actual.out"
 env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SOCKET_PATH -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
-  HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
-  FM_OMP_HERDR_LIVE_E2E=1 \
-  bin/fm-test-run.sh tests/fm-omp-herdr-live-e2e.test.sh
-env -i HOME="$HOME" USER="$USER" LOGNAME="$LOGNAME" PATH="$PATH" LC_ALL=C TERM=dumb SHELL=/bin/bash \
-  FM_OMP_HERDR_EXIT_LIVE_E2E=1 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
-  bin/fm-test-run.sh tests/fm-omp-herdr-exit-live-e2e.test.sh
+  HERDR_LAB_HELPER=/home/dnth/Desktop/firstmate/bin/fm-herdr-lab.sh \
+  FM_OMP_HERDR_SUBMIT_LIVE_E2E=1 \
+  bin/fm-test-run.sh tests/fm-omp-herdr-live-e2e.test.sh > "$evidence_dir/live.out"
+grep -F "ok - real Herdr OMP submit fallback: missing native event used working composer queue proof" "$evidence_dir/live.out" >> "$evidence_dir/actual.out"
+cat > "$evidence_dir/expected.out" <<EOF
+omp/18.0.4
+herdr 0.8.2
+ok - real Herdr OMP submit fallback: missing native event used working composer queue proof
+EOF
+diff -u "$evidence_dir/expected.out" "$evidence_dir/actual.out"
+cat "$evidence_dir/actual.out"
+'
 ```
 
 Observed bounded output:
 
 ```text
-omp/17.1.8
-herdr 0.7.5
-{"client":17,"server":17}
-FM_TEST_BEGIN 2026-08-01T01:41:56Z tests/fm-omp-herdr-live-e2e.test.sh family=live-harness-optin expected_gate_skip=optin-env
-WARNING: queued wakes pending - drain them with bin/fm-wake-drain.sh before anything else.
-ok - real Herdr OMP role matrix: primary, worker/scout idle and busy steering, blocked escalation, secondmate, normal exits, recovery, duplicate refusal, and guarded teardown
-FM_TEST_END 2026-08-01T01:46:07Z tests/fm-omp-herdr-live-e2e.test.sh exit=0 duration_ms=251807 gate_skip=false
-FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=251880
-FM_TEST_BEGIN 2026-08-01T01:46:33Z tests/fm-omp-herdr-exit-live-e2e.test.sh family=live-harness-optin expected_gate_skip=optin-env
-ok - real Herdr OMP /exit: exact native identity, post-offset normal session_exit, pane absence, and guarded tripwire teardown
-FM_TEST_END 2026-08-01T01:46:51Z tests/fm-omp-herdr-exit-live-e2e.test.sh exit=0 duration_ms=18266 gate_skip=false
-FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=18323
+omp/18.0.4
+herdr 0.8.2
+ok - real Herdr OMP submit fallback: missing native event used working composer queue proof
 ```
 
 The primary loaded the tracked OMP adapter, acquired its home session lock, completed a guarded turn, and kept its watcher live while the other roles ran.
