@@ -51,9 +51,11 @@ use warnings;
 use Cwd qw(getcwd);
 use Errno qw(ENOENT EINTR);
 use Fcntl qw(:DEFAULT :flock :mode);
+use IO::Handle;
 
 my ($arg1, $arg2, $arg3, $arg4) = @ARGV;
 my $ready = $ENV{FM_RECEIPT_STORE_MODE} eq "hold" ? $arg3 : undef;
+my $append_tmp;
 
 sub publish_ready {
   my ($code) = @_;
@@ -66,6 +68,7 @@ sub publish_ready {
 
 sub refuse {
   print STDERR "error: $_[0]\n";
+  unlink($append_tmp) if defined($append_tmp) && -e $append_tmp;
   publish_ready(1);
   exit 1;
 }
@@ -131,8 +134,14 @@ sysopen(my $brief, "brief.md", O_RDONLY | O_NOFOLLOW)
   or refuse("task brief is missing or unsafe");
 my @brief_identity = stat($brief);
 refuse("task brief is not a regular file") unless @brief_identity && S_ISREG($brief_identity[2]);
+sysopen(my $task_lock, ".evidence.lock", O_RDWR | O_CREAT | O_NOFOLLOW, 0600)
+  or refuse("task evidence lock is missing or unsafe");
+my @lock_identity = stat($task_lock);
+refuse("task evidence lock must be a single-link regular file") unless @lock_identity
+  && S_ISREG($lock_identity[2]) && $lock_identity[3] == 1;
 
 if ($ENV{FM_RECEIPT_STORE_MODE} eq "hold") {
+  flock($task_lock, LOCK_SH) or refuse("task evidence lock could not be acquired");
   my $ledger_missing = 0;
   my $ledger;
   if (!sysopen($ledger, "evidence.jsonl", O_RDONLY | O_NOFOLLOW)) {
@@ -143,7 +152,6 @@ if ($ENV{FM_RECEIPT_STORE_MODE} eq "hold") {
     my @ledger_identity = stat($ledger);
     refuse("evidence ledger must be a single-link regular file") unless @ledger_identity
       && S_ISREG($ledger_identity[2]) && $ledger_identity[3] == 1;
-    flock($ledger, LOCK_SH) or refuse("evidence ledger could not be locked");
   }
   sysopen(my $release, $arg4, O_RDWR | O_NOFOLLOW)
     or refuse("evidence ledger release channel is unsafe");
@@ -157,14 +165,12 @@ if ($ENV{FM_RECEIPT_STORE_MODE} eq "hold") {
 
 my $criterion = $arg1;
 my $parser = $arg2;
-sysopen(my $ledger, "evidence.jsonl", O_WRONLY | O_APPEND | O_NOFOLLOW)
+flock($task_lock, LOCK_EX) or refuse("task evidence lock could not be acquired");
+sysopen(my $ledger, "evidence.jsonl", O_RDONLY | O_NOFOLLOW)
   or refuse("evidence ledger is missing or unsafe");
 my @ledger_identity = stat($ledger);
 refuse("evidence ledger must be a single-link regular file") unless @ledger_identity
   && S_ISREG($ledger_identity[2]) && $ledger_identity[3] == 1;
-flock($ledger, LOCK_EX) or refuse("evidence ledger could not be locked");
-my $original_eof = sysseek($ledger, 0, 2);
-defined($original_eof) or refuse("evidence ledger end could not be observed");
 
 local $/;
 my $brief_text = <$brief>;
@@ -177,17 +183,36 @@ print {$criterion_parser} $brief_text or refuse("task brief could not reach the 
 close($criterion_parser) or refuse("criterion is not declared by a valid ship brief: $criterion");
 
 my $record = "$ENV{FM_RECEIPT_PAYLOAD}\n";
-my $offset = 0;
-while ($offset < length($record)) {
-  my $written = syswrite($ledger, $record, length($record) - $offset, $offset);
-  next if !defined($written) && $! == EINTR;
-  if (!defined($written) || $written <= 0) {
-    if ($offset > 0) {
-      truncate($ledger, $original_eof) or refuse("incomplete evidence append could not be rolled back");
-    }
-    refuse("evidence receipt append failed");
+my $temp_name = ".evidence.tmp.$$";
+$append_tmp = $temp_name;
+sysopen(my $temp, $temp_name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)
+  or refuse("temporary evidence ledger could not be created");
+my $buffer;
+while (1) {
+  my $read = sysread($ledger, $buffer, 65536);
+  next if !defined($read) && $! == EINTR;
+  refuse("evidence ledger could not be copied") unless defined($read);
+  last if $read == 0;
+  my $offset = 0;
+  while ($offset < $read) {
+    my $written = syswrite($temp, $buffer, $read - $offset, $offset);
+    next if !defined($written) && $! == EINTR;
+    refuse("evidence ledger copy failed") unless defined($written) && $written > 0;
+    $offset += $written;
   }
-  $offset += $written;
 }
-close($ledger) or refuse("evidence ledger close failed");
+my $record_offset = 0;
+while ($record_offset < length($record)) {
+  my $written = syswrite($temp, $record, length($record) - $record_offset, $record_offset);
+  next if !defined($written) && $! == EINTR;
+  refuse("evidence receipt write failed") unless defined($written) && $written > 0;
+  $record_offset += $written;
+}
+$temp->sync or refuse("temporary evidence ledger could not be synced");
+my @temp_identity = stat($temp);
+refuse("temporary evidence ledger must be a single-link regular file") unless @temp_identity
+  && S_ISREG($temp_identity[2]) && $temp_identity[3] == 1;
+close($temp) or refuse("temporary evidence ledger close failed");
+rename($temp_name, "evidence.jsonl") or refuse("evidence ledger replacement failed");
+$append_tmp = undef;
 PERL

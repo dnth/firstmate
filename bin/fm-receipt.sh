@@ -13,6 +13,7 @@
 #   result      Compact observed result, either positional or supplied by --result.
 #
 # Options:
+#   --outcome <passed|failed>  Required closed evidence outcome.
 #   --result <text>    Observed result when it is not supplied positionally.
 #   --command <text>   Command that produced the evidence.
 #   --artifact <path>  Artifact or URL carrying the evidence.
@@ -48,6 +49,7 @@ SUMMARY=$4
 shift 4
 
 RESULT=
+OUTCOME=
 COMMAND=
 ARTIFACT=
 FILE_POINTER=
@@ -63,11 +65,12 @@ while [ "$#" -gt 0 ]; do
   option=$1
   shift
   case "$option" in
-    --result|--command|--artifact|--file)
+    --outcome|--result|--command|--artifact|--file)
       [ "$#" -gt 0 ] || { echo "error: $option requires a value" >&2; exit 2; }
       value=$1
       shift
       case "$option" in
+        --outcome) OUTCOME=$value ;;
         --result) RESULT=$value ;;
         --command) COMMAND=$value ;;
         --artifact) ARTIFACT=$value ;;
@@ -84,14 +87,11 @@ case "$ID" in
     exit 2
     ;;
 esac
-case "$CRITERION" in
-  AC[1-9]|AC[1-9][0-9]*) ;;
-  *) echo "error: criterion must be AC followed by a positive integer (got '$CRITERION')" >&2; exit 2 ;;
-esac
 case "$TYPE" in
   test|build|lint|typecheck|api|browser|manual|review) ;;
   *) echo "error: unsupported receipt type: $TYPE" >&2; exit 2 ;;
 esac
+case "$OUTCOME" in passed|failed) ;; *) echo "error: --outcome must be passed or failed" >&2; exit 2 ;; esac
 case "$SUMMARY" in *[![:space:]]*) ;; *) echo "error: summary must not be empty" >&2; exit 2 ;; esac
 case "$RESULT" in *[![:space:]]*) ;; *) echo "error: result must not be empty" >&2; exit 2 ;; esac
 
@@ -100,12 +100,13 @@ command -v jq >/dev/null 2>&1 || { echo "error: jq is required" >&2; exit 1; }
 receipt=$(jq -cn \
   --arg criterion "$CRITERION" \
   --arg type "$TYPE" \
+  --arg outcome "$OUTCOME" \
   --arg summary "$SUMMARY" \
   --arg result "$RESULT" \
   --arg command "$COMMAND" \
   --arg artifact "$ARTIFACT" \
   --arg file "$FILE_POINTER" '
-    {criterion:$criterion,type:$type,summary:$summary,result:$result}
+    {criterion:$criterion,type:$type,outcome:$outcome,summary:$summary,result:$result}
     + (if $command == "" then {} else {command:$command} end)
     + (if $artifact == "" then {} else {artifact:$artifact} end)
     + (if $file == "" then {} else {file:$file} end)

@@ -377,6 +377,25 @@ EOF
   pass "fm-promote: promotion installs a fail-closed ship evidence contract"
 }
 
+test_promote_rejects_symlinked_task_directory() {
+  local home outside before out status
+  home="$TMP_ROOT/promote-symlink/home"
+  outside="$TMP_ROOT/promote-symlink/outside"
+  mkdir -p "$home/state" "$home/data" "$outside"
+  printf 'window=fm-promote-link\nkind=scout\nworktree=/tmp/wt\n' > "$home/state/promote-link.meta"
+  printf '# Task\nOutside scout.\n\n# Setup\nScout setup.\n' > "$outside/brief.md"
+  before=$(cksum "$outside/brief.md")
+  ln -s "$outside" "$home/data/promote-link"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-link --mode direct-PR --yolo off \
+    --criterion 'AC1: Concrete outcome' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "promotion accepted a symlinked task directory"
+  assert_contains "$out" "task directory is missing or unsafe" "promotion did not identify the unsafe task directory"
+  [ "$(cksum "$outside/brief.md")" = "$before" ] || fail "refused promotion changed the outside brief"
+  [ ! -e "$outside/evidence.jsonl" ] || fail "refused promotion created an outside ledger"
+  pass "fm-promote: symlinked task directories refuse before mutation"
+}
+
 # The registry parser survives for the mechanical consumers only. It accepts the
 # conditional policy, maps it to its most rigorous leg for them, and exposes the
 # raw annotation for the one caller that must tell a policy from a flat mode.
@@ -418,5 +437,6 @@ test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
+test_promote_rejects_symlinked_task_directory
 test_project_mode_maps_the_conditional_policy
 echo "# all fm-task-delivery tests passed"

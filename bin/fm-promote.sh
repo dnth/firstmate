@@ -89,6 +89,14 @@ esac
 ID=${POS[0]}
 META="$STATE/$ID.meta"
 TASK_DIR="$DATA/$ID"
+[ -d "$TASK_DIR" ] && [ ! -L "$TASK_DIR" ] \
+  || { echo "error: scout task directory is missing or unsafe: $TASK_DIR" >&2; exit 1; }
+DATA_REAL=$(CDPATH='' cd -- "$DATA" 2>/dev/null && pwd -P) \
+  || { echo "error: task data directory is unsafe: $DATA" >&2; exit 1; }
+cd "$TASK_DIR" || { echo "error: scout task directory could not be pinned" >&2; exit 1; }
+TASK_DIR=$(pwd -P)
+[ "$(dirname "$TASK_DIR")" = "$DATA_REAL" ] \
+  || { echo "error: scout task directory escapes the task store" >&2; exit 1; }
 BRIEF="$TASK_DIR/brief.md"
 EVIDENCE="$TASK_DIR/evidence.jsonl"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }

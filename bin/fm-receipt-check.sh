@@ -26,9 +26,8 @@
 # Every listed criterion is required in v1.
 # IDs must be unique AC-prefixed positive integers, and placeholder descriptions
 # are invalid once completion is checked.
-# Structurally valid receipts with explicit failure, negative, zero-test, empty,
-# or skip result indicators remain recorded but do not evidence their criterion.
-# A positive result paired only with an explicit zero-failure phrase remains eligible.
+# Only structurally valid receipts with outcome=passed evidence their criterion;
+# result remains descriptive, so expected observations such as 401 stay usable.
 # --implementation-complete records the first implementation completion time and
 # current clean commit before --plan may publish a validation generation.
 #
@@ -48,7 +47,7 @@
 # When --plan returns path=receipts-mechanical, append fresh successful mechanical
 # evidence for every changed file with:
 #
-#   bin/fm-receipt.sh <task-id> <criterion> <test|build|lint|typecheck> <summary> <result> --file <changed-file>
+#   bin/fm-receipt.sh <task-id> <criterion> <test|build|lint|typecheck> <summary> <result> --outcome passed --file <changed-file>
 #
 # Then complete that exact generation and head with:
 #
@@ -363,24 +362,8 @@ esac
 CRITERIA="$TMP_ROOT/criteria.tsv"
 EVIDENCED="$TMP_ROOT/evidenced"
 INVALID="$TMP_ROOT/invalid"
-STRONG_RESULT_MODULE="$TMP_ROOT/strong-result.jq"
 : > "$EVIDENCED"
 : > "$INVALID"
-cat > "$STRONG_RESULT_MODULE" <<'JQ'
-def without_zero_failures_or_errors:
-  gsub("(^|[^[:alnum:]_])((0|zero)[[:space:]]+(fail(s|ed|ures?)?|errors?)|(fail(s|ed|ures?)?|errors?)[[:space:]]*:?[[:space:]]*(0|zero)|no[[:space:]]+(fail(s|ed|ures?)?|errors?))([^[:alnum:]_]|$)"; " "; "i")
-  | sub("[[:space:],;:]+$"; "")
-  | sub("^[[:space:],;:]+"; "");
-def evidence_result:
-  without_zero_failures_or_errors
-  |
-  (test("^[[:space:]]*$") | not)
-  and (test("(^|[^[:alnum:]_])(fail(s|ed|ures?)?|errors?|negative|red|broken|skip(s|ped|ping)?|empty|unsuccessful(ly)?)([^[:alnum:]_]|$)|not[[:space:]]+(pass(ed)?|successful|working)|((did|does)[[:space:]]+not|(didn|doesn)['’]t)[[:space:]]+(pass(ed)?|succeed(ed)?|work(ed)?)|none[[:space:]]+(passed|succeeded)|(^|[^[:alnum:]_])((0|zero)[[:space:]]+(succeed(ed)?|success(es)?)|no[[:space:]]+success(es)?)([^[:alnum:]_]|$)|no[[:space:]]+tests?[[:space:]]+passed|no[[:space:]]+(tests?|items?|cases?|examples?|specs?|scenarios?)|(^|[^0-9])0[[:space:]]+(passed|tests?|items?|cases?|examples?|specs?|scenarios?)([^[:alnum:]_]|$|[[:space:],])|(^|[^[:alnum:]_])(tests?|passed)[[:space:]]*:[[:space:]]*0([^0-9]|$)|(^|[^[:alnum:]_])(tests?|passed)[[:space:]]+0([^0-9]|$)|(^|[^[:alnum:]_])passed[[:space:]]+0[[:space:]]+tests?([^[:alnum:]_]|$)|(^|[^0-9])0[[:space:]]*(/|of|out[[:space:]]+of)[[:space:]]*0[[:space:]]+(tests?([[:space:]]+passed)?|passed)([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(tests?([[:space:]]+passed)?|passed)[[:space:]]*:?[[:space:]]*0[[:space:]]*(/|of|out[[:space:]]+of)[[:space:]]*0([[:space:]]+tests?)?([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(ran|run|collected|found|discovered)[[:space:]]*:?[[:space:]]*0[[:space:]]+(tests?|items?|cases?|examples?|specs?|scenarios?)([^[:alnum:]_]|$)"; "i") | not);
-def strong_result:
-  without_zero_failures_or_errors
-  | evidence_result
-  and test("^([[:space:]]*(pass(ed)?|success(ful)?|green|clean|ok)[[:space:]]*|[[:space:]]*[1-9][0-9]*[[:space:]]+(tests?[[:space:]]+)?passed([[:space:]].*)?)$"; "i");
-JQ
 
 "$SCRIPT_DIR/fm-receipt-check.sh" --parse-criteria "$BRIEF" > "$CRITERIA" || exit 2
 
@@ -402,9 +385,10 @@ if [ "$LEDGER_EXISTS" = true ]; then
     [ -n "$line" ] || { printf 'line %s: blank JSONL record\n' "$line_number" >> "$INVALID"; continue; }
     if ! printf '%s' "$line" | jq -e '
       type == "object"
-      and ((keys - ["artifact","command","criterion","file","result","summary","type"]) | length == 0)
+      and ((keys - ["artifact","command","criterion","file","outcome","result","summary","type"]) | length == 0)
       and (.criterion | type == "string" and test("^AC[1-9][0-9]*$"))
       and (.type | type == "string" and test("^(test|build|lint|typecheck|api|browser|manual|review)$"))
+      and (.outcome | type == "string" and test("^(passed|failed)$"))
       and (.summary | type == "string" and test("[^[:space:]]"))
       and (.result | type == "string" and test("[^[:space:]]"))
       and ((.command // "") | type == "string")
@@ -420,7 +404,7 @@ if [ "$LEDGER_EXISTS" = true ]; then
       continue
     fi
     RECEIPT_COUNT=$((RECEIPT_COUNT + 1))
-    if printf '%s' "$line" | jq -L "$TMP_ROOT" -e 'include "strong-result"; .result | evidence_result' >/dev/null 2>&1; then
+    if [ "$(printf '%s' "$line" | jq -r '.outcome')" = passed ]; then
       printf '%s\n' "$receipt_criterion" >> "$EVIDENCED"
     fi
   done < "$LEDGER"
@@ -640,9 +624,8 @@ record_validation_completed() {
         || { release_validation_lock; echo "error: planned mechanical change files could not be observed" >&2; return 1; }
       while IFS= read -r changed_file; do
         [ -n "$changed_file" ] || continue
-        jq -L "$TMP_ROOT" --arg file "$changed_file" -se '
-          include "strong-result";
-          any(.[]; .file == $file and (.type | test("^(test|build|lint|typecheck)$")) and (.result | strong_result))
+        jq --arg file "$changed_file" -se '
+          any(.[]; .file == $file and .outcome == "passed" and (.type | test("^(test|build|lint|typecheck)$")))
         ' "$new_receipts" >/dev/null 2>&1 \
           || { release_validation_lock; echo "error: no applicable post-plan mechanical evidence was observed for $changed_file" >&2; return 1; }
       done < "$completion_files"
@@ -852,9 +835,8 @@ MECHANICAL_PROOF=1
 if [ "$DIFF_AVAILABLE" -eq 1 ]; then
   while IFS= read -r changed_file; do
     [ -n "$changed_file" ] || continue
-    if ! jq -L "$TMP_ROOT" --arg file "$changed_file" -se '
-      include "strong-result";
-      any(.[]; .file == $file and (.type | test("^(test|build|lint|typecheck)$")) and (.result | strong_result))
+    if ! jq --arg file "$changed_file" -se '
+      any(.[]; .file == $file and .outcome == "passed" and (.type | test("^(test|build|lint|typecheck)$")))
     ' "$LEDGER" >/dev/null 2>&1; then
       MECHANICAL_PROOF=0
       break
@@ -945,7 +927,7 @@ write_meta_record initial
 RECEIPT_COMMAND=
 COMPLETE_COMMAND=
 if [ "$VALIDATION_PATH" = receipts-mechanical ]; then
-  RECEIPT_COMMAND="bin/fm-receipt.sh $ID <criterion> <test|build|lint|typecheck> <summary> <result> --file <changed-file>"
+  RECEIPT_COMMAND="bin/fm-receipt.sh $ID <criterion> <test|build|lint|typecheck> <summary> <result> --outcome passed --file <changed-file>"
   COMPLETE_COMMAND="bin/fm-receipt-check.sh $ID --complete --terminal-evidence mechanical-checks-passed"
 fi
 jq -cn --arg task "$ID" --arg mode "$MODE" --arg tier "$TIER" --arg path "$VALIDATION_PATH" --arg reason "$REASON" \

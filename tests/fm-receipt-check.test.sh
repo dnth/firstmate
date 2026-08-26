@@ -77,13 +77,13 @@ EOF
   fm_write_meta "$HOME_DIR/state/$id.meta" "kind=ship" "mode=$mode"
 }
 
-add_receipt() {  # <id> <criterion> <type> <result>
-  local id=$1 criterion=$2 type=$3 result=$4 file=${5:-}
+add_receipt() {  # <id> <criterion> <type> <result> [file] [outcome]
+  local id=$1 criterion=$2 type=$3 result=$4 file=${5:-} outcome=${6:-passed}
   if [ -n "$file" ]; then
-    FM_HOME="$HOME_DIR" "$RECEIPT" "$id" "$criterion" "$type" "evidence for $criterion" "$result" --file "$file" >/dev/null \
+    FM_HOME="$HOME_DIR" "$RECEIPT" "$id" "$criterion" "$type" "evidence for $criterion" "$result" --outcome "$outcome" --file "$file" >/dev/null \
       || fail "could not append fixture receipt for $id/$criterion"
   else
-    FM_HOME="$HOME_DIR" "$RECEIPT" "$id" "$criterion" "$type" "evidence for $criterion" "$result" >/dev/null \
+    FM_HOME="$HOME_DIR" "$RECEIPT" "$id" "$criterion" "$type" "evidence for $criterion" "$result" --outcome "$outcome" >/dev/null \
       || fail "could not append fixture receipt for $id/$criterion"
   fi
   if [ "$criterion" = AC2 ] && grep -q '^worktree=' "$HOME_DIR/state/$id.meta" 2>/dev/null; then
@@ -162,7 +162,7 @@ test_complete_and_invalid_ledgers_have_distinct_results() {
   expect_code 0 "$rc" "complete evidence exits 0"
   printf '%s' "$out" | jq -e '.status == "complete" and .missing == [] and .receipt_count == 2' >/dev/null \
     || fail "complete evidence JSON is wrong"
-  printf '%s\n' '{"criterion":"AC1","type":"test","summary":"x","result":"passed","extra":true}' \
+  printf '%s\n' '{"criterion":"AC1","type":"test","outcome":"passed","summary":"x","result":"passed","extra":true}' \
     >> "$HOME_DIR/data/$id/evidence.jsonl"
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id"); rc=$?
   expect_code 2 "$rc" "invalid ledger exits 2"
@@ -171,8 +171,8 @@ test_complete_and_invalid_ledgers_have_distinct_results() {
 
   id=whitespace-ledger
   write_brief "$id" direct-PR
-  printf '%s\n' '{"criterion":"AC1","type":"test","summary":"   ","result":"passed"}' \
-    '{"criterion":"AC2","type":"lint","summary":"lint","result":"   "}' \
+  printf '%s\n' '{"criterion":"AC1","type":"test","outcome":"passed","summary":"   ","result":"passed"}' \
+    '{"criterion":"AC2","type":"lint","outcome":"passed","summary":"lint","result":"   "}' \
     > "$HOME_DIR/data/$id/evidence.jsonl"
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id"); rc=$?
   expect_code 2 "$rc" "whitespace-only ledger strings are invalid"
@@ -185,7 +185,7 @@ test_explicit_negative_results_leave_criteria_missing() {
   local id=negative-results out rc result
   write_brief "$id" direct-PR
   for result in failed failure "3 failures" "3 errors" negative unsuccessful unsuccessfully "did not pass" "does not pass" "didn't pass" "doesn't pass" "did not succeed" "does not succeed" "didn't succeed" "did not work" "does not work" "didn't work" "doesn't work" "not working" "none passed" "no tests passed" "0 succeeded" "zero succeeded" "0 successes" "zero successes" "no successes" "not successful" "not passed" "no tests" "0 tests" "0 passed" "passed 0" "tests 0" "passed 0 tests" "tests: 0" "passed: 0" "0/0 tests passed" "0 of 0 tests passed" "tests passed: 0/0" "collected 0 items" "0 items collected" "found 0 items" "no items collected" "0 examples" "0 examples, 0 failures" "ran 0 specs" "0 specs" "0 cases" "0 scenarios" "0 errors" "errors: 0" "no errors" "no failures" "zero failures" "zero errors" skipped empty; do
-    add_receipt "$id" AC1 test "$result"
+    add_receipt "$id" AC1 test "$result" "" failed
   done
   add_receipt "$id" AC2 api 401
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id"); rc=$?
@@ -271,7 +271,7 @@ EOF
 # Definition of done
 Delivery contract: mode=direct-PR
 EOF
-  printf '%s\n' '{"criterion":"AC1","type":"test","summary":"external","result":"passed"}' > "$outside/evidence.jsonl"
+  printf '%s\n' '{"criterion":"AC1","type":"test","outcome":"passed","summary":"external","result":"passed"}' > "$outside/evidence.jsonl"
   ln -s "$outside" "$HOME_DIR/data/$linked"
   fm_write_meta "$HOME_DIR/state/$linked.meta" "kind=ship" "mode=direct-PR"
   FM_HOME="$HOME_DIR" "$CHECK" "$linked" >/dev/null 2>&1
@@ -362,8 +362,8 @@ test_pinned_checker_rejects_redirected_and_linked_evidence() {
   mkdir -p "$outside" "$fakebin"
   cp "$task/brief.md" "$outside/brief.md"
   printf '%s\n' \
-    '{"criterion":"AC1","type":"test","summary":"external","result":"passed"}' \
-    '{"criterion":"AC2","type":"lint","summary":"external","result":"passed"}' > "$outside/evidence.jsonl"
+    '{"criterion":"AC1","type":"test","outcome":"passed","summary":"external","result":"passed"}' \
+    '{"criterion":"AC2","type":"lint","outcome":"passed","summary":"external","result":"passed"}' > "$outside/evidence.jsonl"
   mkfifo "$release"
   real_grep=$(command -v grep)
   cat > "$fakebin/grep" <<EOF
@@ -418,7 +418,7 @@ Delivery contract: mode=direct-PR
 EOF
   : > "$HOME_DIR/data/$id/evidence.jsonl"
   fm_write_meta "$HOME_DIR/state/$id.meta" "kind=ship" "mode=direct-PR"
-  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC10 test summary passed >/dev/null \
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC10 test summary passed --outcome passed >/dev/null \
     || fail "receipt append rejected a criterion accepted by the shared parser"
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id"); rc=$?
   expect_code 0 "$rc" "checker accepts the same detailed criterion as append"
@@ -520,7 +520,7 @@ test_low_risk_skips_no_mistakes_under_explicit_policy() {
     || fail "low-risk plan failed"
   printf '%s' "$out" | jq -e --arg id "$id" '
     .tier == "low" and .path == "receipts-mechanical"
-    and .receipt_command == ("bin/fm-receipt.sh " + $id + " <criterion> <test|build|lint|typecheck> <summary> <result> --file <changed-file>")
+    and .receipt_command == ("bin/fm-receipt.sh " + $id + " <criterion> <test|build|lint|typecheck> <summary> <result> --outcome passed --file <changed-file>")
     and .complete_command == ("bin/fm-receipt-check.sh " + $id + " --complete --terminal-evidence mechanical-checks-passed")
   ' >/dev/null \
     || fail "narrow mechanically proven docs change did not take the low path"
@@ -626,9 +626,9 @@ test_low_risk_requires_safe_prose_and_applicable_evidence() {
 test_implementation_completion_precedes_planning() {
   local id=implementation-boundary base fakebin out rc meta head
   base=$(make_project "$id" no-mistakes localized)
-  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test primary passed >/dev/null \
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test primary passed --outcome passed >/dev/null \
     || fail "implementation boundary AC1 receipt failed"
-  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC2 lint secondary passed >/dev/null \
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC2 lint secondary passed --outcome passed >/dev/null \
     || fail "implementation boundary AC2 receipt failed"
   FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null 2>&1
   rc=$?
@@ -685,7 +685,7 @@ EOF
   while [ ! -e "$ready" ]; do
     kill -0 "$plan_pid" 2>/dev/null || fail "planner exited before the publication boundary"
   done
-  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 lint fresh passed --file CHANGELOG.md \
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 lint fresh passed --outcome passed --file CHANGELOG.md \
     > "$TMP_ROOT/plan-boundary-receipt" 2>&1 &
   receipt_pid=$!
   sleep 1
@@ -984,8 +984,8 @@ test_git_status_errors_fail_every_cleanliness_gate() {
   id=status-error
   base=$(make_project "$id" direct-PR localized)
   project="$TMP_ROOT/project-$id"
-  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test primary passed >/dev/null || fail "status-error AC1 receipt failed"
-  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC2 lint secondary passed >/dev/null || fail "status-error AC2 receipt failed"
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test primary passed --outcome passed >/dev/null || fail "status-error AC1 receipt failed"
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC2 lint secondary passed --outcome passed >/dev/null || fail "status-error AC2 receipt failed"
   fakebin="$TMP_ROOT/status-error-bin"
   mkdir -p "$fakebin"
   real_git=$(command -v git)
@@ -1092,7 +1092,7 @@ test_high_risk_and_uncertain_inputs_fail_safe() {
 
   id=weak-test-proof
   base=$(make_project "$id" no-mistakes localized)
-  add_receipt "$id" AC1 test "not passed"
+  add_receipt "$id" AC1 test "not passed" "" failed
   add_receipt "$id" AC2 lint "passed"
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base"); rc=$?
   expect_code 1 "$rc" "negative test evidence blocks validation planning"
@@ -1101,7 +1101,7 @@ test_high_risk_and_uncertain_inputs_fail_safe() {
 
   id=zero-test-proof
   base=$(make_project "$id" no-mistakes localized)
-  add_receipt "$id" AC1 test "0 tests passed"
+  add_receipt "$id" AC1 test "0 tests passed" "" failed
   add_receipt "$id" AC2 lint "passed"
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base"); rc=$?
   expect_code 1 "$rc" "zero-test evidence blocks validation planning"
@@ -1110,7 +1110,7 @@ test_high_risk_and_uncertain_inputs_fail_safe() {
 
   id=skipped-test-proof
   base=$(make_project "$id" no-mistakes localized)
-  add_receipt "$id" AC1 test "2 passed, 1 skipped"
+  add_receipt "$id" AC1 test "2 passed, 1 skipped" "" failed
   add_receipt "$id" AC2 lint "passed"
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base"); rc=$?
   expect_code 1 "$rc" "skipped-test evidence blocks validation planning"

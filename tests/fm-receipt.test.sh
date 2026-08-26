@@ -35,10 +35,11 @@ test_appends_one_compact_valid_receipt() {
   ledger="$HOME_DIR/data/$id/evidence.jsonl"
   out=$(FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test \
     "primary behavior is covered" "12 passed" \
-    --command "tests/primary.test.sh" --artifact "artifacts/result.json" --file "src/primary.sh") \
+    --outcome passed --command "tests/primary.test.sh" --artifact "artifacts/result.json" --file "src/primary.sh") \
     || fail "valid receipt append failed"
   printf '%s' "$out" | jq -e '
     .criterion == "AC1" and .type == "test"
+    and .outcome == "passed"
     and .summary == "primary behavior is covered"
     and .result == "12 passed"
     and .command == "tests/primary.test.sh"
@@ -54,10 +55,10 @@ test_append_is_additive_and_result_flag_works() {
   local id=append-additive ledger first
   write_ship "$id"
   ledger="$HOME_DIR/data/$id/evidence.jsonl"
-  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 lint "lint is clean" --result "passed" >/dev/null \
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 lint "lint is clean" --result "passed" --outcome passed >/dev/null \
     || fail "--result receipt append failed"
   first=$(sed -n '1p' "$ledger")
-  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC2 review "regression reviewed" "approved" >/dev/null \
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC2 review "regression reviewed" "approved" --outcome passed >/dev/null \
     || fail "second receipt append failed"
   [ "$(wc -l < "$ledger" | tr -d ' ')" -eq 2 ] || fail "second append did not preserve both records"
   [ "$(sed -n '1p' "$ledger")" = "$first" ] || fail "second append rewrote the first receipt"
@@ -69,7 +70,7 @@ test_large_receipt_is_appended_completely() {
   write_ship "$id"
   ledger="$HOME_DIR/data/$id/evidence.jsonl"
   result=$(awk 'BEGIN { for (i=0; i<32768; i++) printf "x" }')
-  out=$(FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test large "$result") \
+  out=$(FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test large "$result" --outcome passed) \
     || fail "large receipt append failed"
   [ "$(printf '%s' "$out" | jq -r '.result | length')" -eq 32768 ] \
     || fail "large receipt output was truncated"
@@ -79,23 +80,31 @@ test_large_receipt_is_appended_completely() {
 }
 
 test_rejects_invalid_schema_and_undeclared_criteria() {
-  local id=append-invalid rc before
+  local id=append-invalid rc before out
   write_ship "$id"
   before=$(wc -c < "$HOME_DIR/data/$id/evidence.jsonl")
   for args in \
-    "$id AC0 test summary passed" \
-    "$id AC3 test summary passed" \
-    "$id AC1 unknown summary passed" \
-    "$id AC1 test summary"; do
+    "$id AC0 test summary passed --outcome passed" \
+    "$id AC3 test summary passed --outcome passed" \
+    "$id AC1 unknown summary passed --outcome passed" \
+    "$id AC1 test summary --outcome passed"; do
     # shellcheck disable=SC2086 # Each row is an intentional argument fixture.
     FM_HOME="$HOME_DIR" "$RECEIPT" $args >/dev/null 2>&1
     rc=$?
     [ "$rc" -ne 0 ] || fail "invalid receipt fixture unexpectedly succeeded: $args"
   done
-  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test '   ' passed >/dev/null 2>&1
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test summary passed --outcome unknown >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "receipt helper accepted an unknown outcome"
+  out=$(FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AX1 test summary passed --outcome passed 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "receipt helper accepted an undeclared criterion grammar"
+  assert_contains "$out" "criterion is not declared by a valid ship brief" \
+    "criterion validation did not reach the shared parser owner"
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test '   ' passed --outcome passed >/dev/null 2>&1
   rc=$?
   [ "$rc" -ne 0 ] || fail "receipt helper accepted a whitespace-only summary"
-  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test summary '   ' >/dev/null 2>&1
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test summary '   ' --outcome passed >/dev/null 2>&1
   rc=$?
   [ "$rc" -ne 0 ] || fail "receipt helper accepted a whitespace-only result"
   [ "$(wc -c < "$HOME_DIR/data/$id/evidence.jsonl")" -eq "$before" ] \
@@ -123,10 +132,10 @@ BEGIN {
 1;
 PERL
   PERL5LIB="$modules" PERL5OPT=-MRejectDevFd FM_HOME="$HOME_DIR" \
-    "$RECEIPT" "$id" AC1 test portable passed >/dev/null \
+    "$RECEIPT" "$id" AC1 test portable passed --outcome passed >/dev/null \
     || fail "public receipt append required /dev/fd directory traversal"
   PERL5LIB="$modules" PERL5OPT=-MRejectDevFd FM_HOME="$HOME_DIR" \
-    "$RECEIPT" "$id" AC2 lint portable passed >/dev/null \
+    "$RECEIPT" "$id" AC2 lint portable passed --outcome passed >/dev/null \
     || fail "second public receipt append required /dev/fd directory traversal"
   PERL5LIB="$modules" PERL5OPT=-MRejectDevFd FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" >/dev/null \
@@ -151,7 +160,7 @@ BEGIN {
 1;
 PERL
   PERL5LIB="$modules" PERL5OPT=-MFailSyswrite FM_HOME="$HOME_DIR" \
-    "$RECEIPT" "$id" AC2 lint rollback passed >/dev/null 2>&1
+    "$RECEIPT" "$id" AC2 lint rollback passed --outcome passed >/dev/null 2>&1
   rc=$?
   [ "$rc" -ne 0 ] || fail "fault-injected partial append unexpectedly succeeded"
   [ "$(wc -c < "$ledger")" -eq "$before" ] || fail "failed partial append left a ledger tail"
@@ -164,7 +173,7 @@ test_rejects_non_ship_and_unsafe_ledger() {
   mkdir -p "$HOME_DIR/data/$id"
   printf '# Task\nInvestigate only.\n' > "$HOME_DIR/data/$id/brief.md"
   fm_write_meta "$HOME_DIR/state/$id.meta" "kind=scout"
-  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 review summary reviewed >/dev/null 2>&1
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 review summary reviewed --outcome passed >/dev/null 2>&1
   rc=$?
   [ "$rc" -ne 0 ] || fail "receipt helper accepted a scout task"
 
@@ -174,7 +183,7 @@ test_rejects_non_ship_and_unsafe_ledger() {
   : > "$target"
   rm -f "$HOME_DIR/data/$id/evidence.jsonl"
   ln -s "$target" "$HOME_DIR/data/$id/evidence.jsonl"
-  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test summary passed >/dev/null 2>&1
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test summary passed --outcome passed >/dev/null 2>&1
   rc=$?
   [ "$rc" -ne 0 ] || fail "receipt helper followed a ledger symlink"
   [ ! -s "$target" ] || fail "receipt helper wrote through a ledger symlink"
@@ -183,7 +192,7 @@ test_rejects_non_ship_and_unsafe_ledger() {
   write_ship "$id"
   alias="$TMP_ROOT/ledger-alias"
   ln "$HOME_DIR/data/$id/evidence.jsonl" "$alias"
-  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test summary passed >/dev/null 2>&1
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test summary passed --outcome passed >/dev/null 2>&1
   rc=$?
   [ "$rc" -ne 0 ] || fail "receipt helper accepted a multiply linked ledger"
   [ ! -s "$alias" ] || fail "receipt helper mutated a hard-linked ledger alias"
@@ -191,7 +200,7 @@ test_rejects_non_ship_and_unsafe_ledger() {
   id=linked-task
   mkdir -p "$TMP_ROOT/outside-task"
   ln -s "$TMP_ROOT/outside-task" "$HOME_DIR/data/$id"
-  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test summary passed >/dev/null 2>&1
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test summary passed --outcome passed >/dev/null 2>&1
   rc=$?
   [ "$rc" -ne 0 ] || fail "receipt helper accepted a symlinked task directory"
   pass "fm-receipt refuses non-ship tasks and unsafe ledger paths"
@@ -220,7 +229,7 @@ fi
 exec "$real_jq" "\$@"
 EOF
   chmod +x "$fakebin/jq"
-  PATH="$fakebin:$PATH" FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test summary passed > "$TMP_ROOT/swap-output" 2>&1 &
+  PATH="$fakebin:$PATH" FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test summary passed --outcome passed > "$TMP_ROOT/swap-output" 2>&1 &
   pid=$!
   while [ ! -e "$ready" ]; do
     kill -0 "$pid" 2>/dev/null || fail "receipt exited before the directory-swap boundary"
@@ -259,7 +268,7 @@ fi
 exec "$real_perl" "\$@"
 EOF
   chmod +x "$fakebin/perl"
-  PATH="$fakebin:$PATH" FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test summary passed \
+  PATH="$fakebin:$PATH" FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test summary passed --outcome passed \
     > "$TMP_ROOT/data-swap-output" 2>&1 &
   pid=$!
   while [ ! -e "$ready" ]; do
@@ -313,7 +322,7 @@ BEGIN {
 PERL
   PERL5LIB="$modules" PERL5OPT=-MHoldDataOpen FM_DATA_OPEN_READY="$ready" \
     FM_DATA_OPEN_RELEASE="$release" FM_HOME="$HOME_DIR" \
-    "$RECEIPT" "$id" AC1 test summary passed > "$TMP_ROOT/opened-data-output" 2>&1 &
+    "$RECEIPT" "$id" AC1 test summary passed --outcome passed > "$TMP_ROOT/opened-data-output" 2>&1 &
   pid=$!
   while [ ! -e "$ready" ]; do
     kill -0 "$pid" 2>/dev/null || fail "receipt exited before pinning the data directory"
@@ -335,42 +344,40 @@ PERL
 }
 
 test_ledger_replacement_after_open_cannot_redirect_append() {
-  local id=swapped-ledger task ledger pinned replacement ready release holder receipt_pid rc
+  local id=swapped-ledger task ledger alias fakebin real_awk ready release receipt_pid rc
   id=swapped-ledger
   write_ship "$id"
   task="$HOME_DIR/data/$id"
   ledger="$task/evidence.jsonl"
-  pinned="$task/evidence.original"
-  replacement="$task/evidence.replacement"
-  ready="$TMP_ROOT/ledger-lock-ready"
-  release="$TMP_ROOT/ledger-lock-release"
+  alias="$task/evidence.alias"
+  fakebin="$TMP_ROOT/ledger-link-fakebin"
+  ready="$TMP_ROOT/ledger-link-ready"
+  release="$TMP_ROOT/ledger-link-release"
+  mkdir -p "$fakebin"
   mkfifo "$release"
-  FM_LOCK_LEDGER="$ledger" FM_LOCK_READY="$ready" FM_LOCK_RELEASE="$release" perl -MFcntl=:flock -e '
-    open(my $ledger, "+<", $ENV{FM_LOCK_LEDGER}) or exit 1;
-    flock($ledger, LOCK_EX) or exit 1;
-    open(my $ready, ">", $ENV{FM_LOCK_READY}) or exit 1;
-    close($ready) or exit 1;
-    open(my $release, "<", $ENV{FM_LOCK_RELEASE}) or exit 1;
-    <$release>;
-  ' &
-  holder=$!
-  while [ ! -e "$ready" ]; do
-    kill -0 "$holder" 2>/dev/null || fail "ledger lock holder exited before the race boundary"
-  done
-  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test summary passed > "$TMP_ROOT/ledger-swap-output" 2>&1 &
+  real_awk=$(command -v awk)
+  cat > "$fakebin/awk" <<EOF
+#!/bin/sh
+if mkdir "$TMP_ROOT/ledger-link-once" 2>/dev/null; then
+  : > "$ready"
+  IFS= read -r _ < "$release"
+fi
+exec "$real_awk" "\$@"
+EOF
+  chmod +x "$fakebin/awk"
+  PATH="$fakebin:$PATH" FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test summary passed --outcome passed > "$TMP_ROOT/ledger-swap-output" 2>&1 &
   receipt_pid=$!
-  sleep 1
-  mv "$ledger" "$pinned"
-  : > "$replacement"
-  mv "$replacement" "$ledger"
+  while [ ! -e "$ready" ]; do
+    kill -0 "$receipt_pid" 2>/dev/null || fail "receipt exited before the hard-link race boundary"
+  done
+  ln "$ledger" "$alias"
   printf 'continue\n' > "$release"
-  wait "$holder" || fail "ledger lock holder failed"
   wait "$receipt_pid"
   rc=$?
-  expect_code 0 "$rc" "receipt append through the original ledger descriptor"
-  [ "$(wc -l < "$pinned" | tr -d ' ')" -eq 1 ] || fail "receipt did not append through its pinned ledger descriptor"
-  [ ! -s "$ledger" ] || fail "ledger replacement redirected the receipt append"
-  pass "fm-receipt appends only through the ledger descriptor opened before validation"
+  expect_code 0 "$rc" "receipt append through atomic ledger replacement"
+  [ ! -s "$alias" ] || fail "atomic append mutated a concurrent hard-link alias"
+  [ "$(wc -l < "$ledger" | tr -d ' ')" -eq 1 ] || fail "atomic append did not publish one canonical record"
+  pass "fm-receipt atomically replaces the ledger without mutating hard-link aliases"
 }
 
 test_appends_one_compact_valid_receipt

@@ -14,12 +14,13 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 - The explicit implementation-complete action records the first timestamp idempotently with the current clean commit, planning requires that current-head binding, and `validation_started_at` uses the implementation-complete time as its interval origin.
 - Completion requires observed post-plan mechanical evidence, the exact No-Mistakes run created with the latest unguessable plan generation and bound to its path and head with current checks-green status or CI-log evidence, a GitHub PR with forge-observed exact-head metadata, a supported non-GitHub direct-PR with the existing canonical HTTPS PR URL predicate and no head observation, or a clean fast-forward-ready branch.
 - Receipt append and check share one executable owner that resolves and pins every raw data-path component inside the store process, opens and verifies the task directory relative to that pinned parent, and then opens relative no-follow brief and single-link ledger paths portably on Linux and macOS.
+- Promotion pins and verifies its scout task directory before reading or replacing the brief and ledger, and refuses symlinked or out-of-root task paths before mutation.
 - Planning retains the pinned shared ledger lock through metadata publication, so only receipts appended after the published plan boundary qualify as fresh mechanical evidence.
 - The checker parent owns a read/write release descriptor before snapshot spawn, so early child failures cannot block cleanup waiting for a FIFO reader.
 - Snapshot readiness status is checked and terminal on publication failure; hold documents ready `0`, refusal `1`, and missing-ledger `3` statuses.
 - Receipt append, check, and promotion consume one executable acceptance-criterion parser that requires nonblank descriptions.
-- Structurally valid receipts require non-whitespace summary and result strings; explicit failure and error inflections, direct unsuccessful, did-not-pass, did-not-work, or zero-success wording, negative, empty, zero-test, zero-example, zero-spec, zero-case, zero-scenario, zero-collection, or skip results remain recorded but leave their criteria unevidenced, while nonzero successes with numeric, word-form, or no-failure/no-error suffixes and descriptive expected results such as `401` remain eligible.
-- Receipt append retries interrupted or partial writes under the exclusive ledger lock until the complete JSONL record is stored, and rolls an incomplete failed append back to its original EOF.
+- Structurally valid receipts require non-whitespace summary and result strings plus a closed `outcome=passed|failed` field; only `passed` evidences a criterion, while `result` remains descriptive so expected observations such as `401` are unambiguous.
+- Receipt append holds a stable task lock, copies the canonical single-link ledger plus one complete record to a synced mode-0600 single-link temporary file, and atomically renames it over the canonical ledger so concurrent hard-link aliases retain the old inode.
 - Criterion parsing rejects known scaffold placeholder tokens in balanced or unmatched brace forms while allowing concrete brace syntax such as JSON examples.
 - One shared cleanliness predicate requires `git status` to succeed with empty tracked, staged, and untracked output for implementation completion, planning, binding, and terminal completion.
 - Every plan requires a resolved authoritative base and commit diff before it can publish any delivery path.
@@ -57,7 +58,7 @@ ok - fm-receipt refuses non-ship tasks and unsafe ledger paths
 ok - fm-receipt rejects task-directory replacement before its no-follow open
 ok - fm-receipt rejects data-directory replacement before its pinned open
 ok - fm-receipt rejects regular data replacement after pinning
-ok - fm-receipt appends only through the ledger descriptor opened before validation
+ok - fm-receipt atomically replaces the ledger without mutating hard-link aliases
 
 $ tests/fm-receipt-check.test.sh
 ok - fm-receipt-check help renders an executable generation-bound bind command
@@ -133,6 +134,7 @@ ok - fm-spawn: a ship spawn requires a valid explicit mode and yolo before anyth
 ok - fm-spawn: unresolved task and criterion placeholders refuse before launch
 ok - fm-spawn: the brief's recorded mode and the spawn's explicit mode must agree
 ok - fm-promote: promotion installs a fail-closed ship evidence contract
+ok - fm-promote: symlinked task directories refuse before mutation
 # all fm-task-delivery tests passed
 
 $ tests/fm-teardown-endpoint-safety.test.sh
