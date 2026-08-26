@@ -12,7 +12,10 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 - `direct-PR` and `local-only` retain the evidence gate without entering No-Mistakes.
 - Initial planning records one `validation_started_at`, and completion requires observed post-plan mechanical evidence, the exact successful No-Mistakes run created with the latest unguessable plan generation and bound to its path and head, forge-observed canonical PR/head metadata, or a clean fast-forward-ready branch.
 - Receipt appends open the canonical task directory and original single-link ledger through portable no-follow descriptors before validation, so concurrent path replacement cannot redirect evidence.
-- Normal and promoted ship briefs consume the same executable per-mode delivery renderer.
+- Receipt checks snapshot the pinned non-symlink task contract and single-link ledger before parsing, so task replacement and external hard links cannot redirect completion evidence.
+- Receipt append and check consume one executable acceptance-criterion parser.
+- Normal and promoted ship briefs consume the same executable acceptance-evidence and per-mode delivery renderer.
+- Findings that invalidate a receipt or acceptance claim append one idempotent finding-to-criterion marker to task metadata.
 - Every completion requires path-specific terminal evidence, records its plan path and validated head, invalidates stale completion metadata when the worktree head changes, and refuses completion until the change is replanned or revalidated.
 - Planning and completion refuse tracked, staged, or untracked worktree changes.
 - Initial planning accepts a caller base only when it equals the repository's authoritative merge boundary, so a later ancestor cannot hide earlier task commits.
@@ -43,6 +46,9 @@ ok - fm-receipt-check help renders an executable generation-bound bind command
 ok - fm-receipt-check reports required, evidenced, and missing ids deterministically
 ok - fm-receipt-check distinguishes complete evidence from invalid JSONL
 ok - invalid ship briefs fail and scout/report behavior stays unchanged
+ok - fm-receipt-check pins task evidence and rejects hard-linked ledgers
+ok - receipt append and check consume one criterion grammar
+ok - finding-to-criterion invalidations remain inspectable in task metadata
 ok - low-risk mechanical changes can skip a full No-Mistakes run
 ok - authoritative documentation remains high
 ok - terminal delivery paths record one completion timestamp at their boundary

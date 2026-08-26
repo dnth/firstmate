@@ -172,10 +172,6 @@ cat >> "$BRIEF_TMP" <<EOF
 # Acceptance criteria
 $CRITERIA_BLOCK
 
-# Acceptance evidence
-Before reporting implementation complete, record at least one compact receipt for every criterion with \`$FM_ROOT/bin/fm-receipt.sh $ID <criterion> <type> <summary> <result> [options]\`.
-Run \`$FM_ROOT/bin/fm-receipt-check.sh $ID\` and do not append \`done:\` unless its JSON status is \`complete\`.
-
 # Ship setup and delivery
 Verify \`pwd -P\` and \`git rev-parse --show-toplevel\` still identify the isolated task worktree before changing code.
 Reset scratch work to a clean default-branch base, carry over only intended changes, and create \`fm/$ID\`.

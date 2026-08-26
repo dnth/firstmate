@@ -100,6 +100,17 @@ render_ship_delivery() {
   local task_id=$1 delivery_mode
   delivery_mode=$2
   case "$delivery_mode" in
+    no-mistakes|direct-PR|local-only) ;;
+    *) echo "error: delivery renderer requires no-mistakes, direct-PR, or local-only" >&2; return 1 ;;
+  esac
+  cat <<EOF
+# Acceptance evidence
+Before reporting implementation complete, record at least one compact receipt for every acceptance criterion with \`$FM_ROOT/bin/fm-receipt.sh $task_id <criterion> <type> <summary> <result> [options]\`.
+Run \`$FM_ROOT/bin/fm-receipt-check.sh $task_id\` and do not append \`done:\` unless its JSON status is \`complete\`.
+Receipts are audit inputs rather than proof that every claim is trustworthy; keep summaries and results compact and point to commands or artifacts when useful.
+
+EOF
+  case "$delivery_mode" in
     direct-PR)
       cat <<EOF
 # Definition of done
@@ -146,7 +157,6 @@ Two firstmate-specific rules layer on top of that guidance:
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), run \`$FM_ROOT/bin/fm-receipt-check.sh $task_id --complete --terminal-evidence no-mistakes-passed\`, append \`done: PR {url} checks green\`, and stop. You are finished.
 EOF
       ;;
-    *) echo "error: delivery renderer requires no-mistakes, direct-PR, or local-only" >&2; return 1 ;;
   esac
 }
 
@@ -492,11 +502,6 @@ Record only project knowledge useful to almost every future session.
 For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
 If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
-
-# Acceptance evidence
-Before reporting implementation complete, record at least one compact receipt for every acceptance criterion with \`$FM_ROOT/bin/fm-receipt.sh $ID <criterion> <type> <summary> <result> [options]\`.
-Run \`$FM_ROOT/bin/fm-receipt-check.sh $ID\` and do not append \`done:\` unless its JSON status is \`complete\`.
-Receipts are audit inputs rather than proof that every claim is trustworthy; keep summaries and results compact and point to commands or artifacts when useful.
 
 $DOD
 EOF

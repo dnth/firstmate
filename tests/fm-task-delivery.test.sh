@@ -302,7 +302,7 @@ EOF
   assert_grep "fm-receipt-check.sh promote-d1 --plan" "$brief" "promoted direct-PR brief omitted validation planning"
   assert_grep 'done: PR {url}' "$brief" "promoted direct-PR brief omitted its terminal sequence"
   expected_delivery=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" --render-ship-delivery promote-d1 direct-PR)
-  actual_delivery=$(awk '/^# Definition of done$/{delivery=""; emit=1} emit{delivery=delivery $0 ORS} END{printf "%s", delivery}' "$brief")
+  actual_delivery=$(awk '/^# Acceptance evidence$/{delivery=""; emit=1} emit{delivery=delivery $0 ORS} END{printf "%s", delivery}' "$brief")
   [ "$actual_delivery" = "$expected_delivery" ] || fail "promotion did not reuse fm-brief's direct-PR delivery renderer"
   check_out=$(FM_HOME="$home" "$ROOT/bin/fm-receipt-check.sh" promote-d1 2>&1)
   check_status=$?
@@ -328,7 +328,7 @@ EOF
   assert_grep 'fm-receipt-check.sh promote-nm --complete --terminal-evidence no-mistakes-passed' "$home/data/promote-nm/brief.md" "promoted No-Mistakes brief omitted completion recording"
   assert_grep 'done: PR {url} checks green' "$home/data/promote-nm/brief.md" "promoted No-Mistakes brief omitted its CI-ready terminal status"
   expected_delivery=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" --render-ship-delivery promote-nm no-mistakes)
-  actual_delivery=$(awk '/^# Definition of done$/{delivery=""; emit=1} emit{delivery=delivery $0 ORS} END{printf "%s", delivery}' "$home/data/promote-nm/brief.md")
+  actual_delivery=$(awk '/^# Acceptance evidence$/{delivery=""; emit=1} emit{delivery=delivery $0 ORS} END{printf "%s", delivery}' "$home/data/promote-nm/brief.md")
   [ "$actual_delivery" = "$expected_delivery" ] || fail "promotion did not reuse fm-brief's No-Mistakes delivery renderer"
   pass "fm-promote: promotion installs a fail-closed ship evidence contract"
 }

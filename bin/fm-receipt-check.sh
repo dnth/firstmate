@@ -7,6 +7,8 @@
 #   fm-receipt-check.sh <task-id> --bind-run <run-id> --generation <plan-generation>
 #   fm-receipt-check.sh <task-id> --complete --terminal-evidence <evidence>
 #   fm-receipt-check.sh <task-id> --plan [--base <commit>]
+#   fm-receipt-check.sh <task-id> --invalidate-claim <finding-id> --invalidated-criterion <criterion-id>
+#   fm-receipt-check.sh --parse-criteria <brief-file|-> [--require <criterion-id>]
 #
 # The default command emits one compact fm-evidence-check.v1 JSON object.
 # It exits 0 when every declared criterion has at least one structurally valid
@@ -39,6 +41,8 @@
 # Low-risk completion requires a strong mechanical receipt appended after planning.
 # --complete requires the path-specific terminal evidence named by the generated
 # instructions and records that evidence with the latest plan, path, and head.
+# --invalidate-claim appends one idempotent finding-to-criterion marker to task
+# metadata after confirming that the criterion and evidence contract are current.
 # Delivery mode remains authoritative: direct-PR and local-only never invoke
 # No-Mistakes, while no-mistakes maps low to receipts-mechanical and high to
 # full-no-mistakes.
@@ -60,6 +64,59 @@ usage() {
   ' "$0"
 }
 
+parse_criteria() {
+  awk '
+    BEGIN { in_section=0; found=0; count=0; bad=0 }
+    /^# Acceptance criteria[[:space:]]*$/ {
+      if (found) bad=1
+      found=1
+      in_section=1
+      next
+    }
+    in_section && /^#/ { in_section=0 }
+    in_section && /^[[:space:]]*$/ { next }
+    in_section {
+      if ($0 !~ /^- AC[1-9][0-9]*:[[:space:]]+.+/) { bad=1; next }
+      line=$0
+      sub(/^- /, "", line)
+      id=line
+      sub(/:.*/, "", id)
+      description=line
+      sub(/^[^:]*:[[:space:]]*/, "", description)
+      if (description ~ /^\{.*\}$/) bad=1
+      if (seen[id]++) bad=1
+      print id "\t" description
+      count++
+    }
+    END {
+      if (!found || count == 0 || bad) exit 2
+    }
+  ' "$1"
+}
+
+if [ "${1:-}" = --parse-criteria ]; then
+  [ "$#" -eq 2 ] || [ "$#" -eq 4 ] \
+    || { echo "error: --parse-criteria requires <brief-file|-> [--require <criterion-id>]" >&2; exit 2; }
+  PARSE_INPUT=$2
+  PARSE_REQUIRED=
+  if [ "$#" -eq 4 ]; then
+    [ "$3" = --require ] || { echo "error: unknown parser option: $3" >&2; exit 2; }
+    PARSE_REQUIRED=$4
+    case "$PARSE_REQUIRED" in AC[1-9]|AC[1-9][0-9]*) ;; *) exit 1 ;; esac
+  fi
+  PARSE_TMP=$(mktemp "${TMPDIR:-/tmp}/fm-receipt-criteria.XXXXXX")
+  trap 'rm -f "$PARSE_TMP"' EXIT
+  trap 'exit 1' HUP INT TERM
+  parse_criteria "$PARSE_INPUT" > "$PARSE_TMP" \
+    || { echo "error: ship brief must contain one valid '# Acceptance criteria' section with unique AC ids and no placeholders" >&2; exit 2; }
+  if [ -n "$PARSE_REQUIRED" ] && ! cut -f1 "$PARSE_TMP" | grep -Fx "$PARSE_REQUIRED" >/dev/null 2>&1; then
+    exit 1
+  fi
+  [ -z "$PARSE_REQUIRED" ] || exit 0
+  cat "$PARSE_TMP"
+  exit 0
+fi
+
 case "${1:-}" in
   -h|--help) usage; exit 0 ;;
 esac
@@ -80,6 +137,8 @@ BASE_INPUT=
 TERMINAL_EVIDENCE=
 RUN_ID_INPUT=
 RUN_GENERATION_INPUT=
+INVALIDATION_FINDING=
+INVALIDATION_CRITERION=
 
 while [ "$#" -gt 0 ]; do
   option=$1
@@ -107,6 +166,18 @@ while [ "$#" -gt 0 ]; do
       RUN_ID_INPUT=$1
       shift
       ;;
+    --invalidate-claim)
+      [ "$#" -gt 0 ] || { echo "error: --invalidate-claim requires a value" >&2; exit 2; }
+      [ "$ACTION" = check ] || { echo "error: choose only one action" >&2; exit 2; }
+      ACTION=invalidate-claim
+      INVALIDATION_FINDING=$1
+      shift
+      ;;
+    --invalidated-criterion)
+      [ "$#" -gt 0 ] || { echo "error: --invalidated-criterion requires a value" >&2; exit 2; }
+      INVALIDATION_CRITERION=$1
+      shift
+      ;;
     --generation)
       [ "$#" -gt 0 ] || { echo "error: --generation requires a value" >&2; exit 2; }
       RUN_GENERATION_INPUT=$1
@@ -129,14 +200,22 @@ if [ "$ACTION" != bind-run ] && [ -n "$RUN_GENERATION_INPUT" ]; then
   echo "error: --generation requires --bind-run" >&2
   exit 2
 fi
+if [ "$ACTION" != invalidate-claim ] && [ -n "$INVALIDATION_CRITERION" ]; then
+  echo "error: --invalidated-criterion requires --invalidate-claim" >&2
+  exit 2
+fi
 
 case "$ACTION" in
-  check|criterion|bind-run)
+  check|criterion|bind-run|invalidate-claim)
     [ -z "$BASE_INPUT" ] || { echo "error: --base requires --plan" >&2; exit 2; }
     [ -z "$TERMINAL_EVIDENCE" ] || { echo "error: --terminal-evidence requires --complete" >&2; exit 2; }
     if [ "$ACTION" = bind-run ]; then
       case "$RUN_ID_INPUT" in ''|*[!A-Za-z0-9._-]*) echo "error: invalid run id" >&2; exit 2 ;; esac
       [ -n "$RUN_GENERATION_INPUT" ] || { echo "error: --bind-run requires --generation" >&2; exit 2; }
+    fi
+    if [ "$ACTION" = invalidate-claim ]; then
+      case "$INVALIDATION_FINDING" in F[1-9]|F[1-9][0-9]*) ;; *) echo "error: invalid finding id" >&2; exit 2 ;; esac
+      case "$INVALIDATION_CRITERION" in AC[1-9]|AC[1-9][0-9]*) ;; *) echo "error: invalid invalidated criterion" >&2; exit 2 ;; esac
     fi
     ;;
   complete)
@@ -151,8 +230,8 @@ esac
 command -v jq >/dev/null 2>&1 || { echo "error: jq is required" >&2; exit 2; }
 
 TASK_DIR="$DATA/$ID"
-BRIEF="$TASK_DIR/brief.md"
-LEDGER="$TASK_DIR/evidence.jsonl"
+BRIEF_PATH="$TASK_DIR/brief.md"
+LEDGER_PATH="$TASK_DIR/evidence.jsonl"
 META="$STATE/$ID.meta"
 
 [ -f "$META" ] && [ ! -L "$META" ] \
@@ -176,16 +255,96 @@ case "$KIND" in
   *) echo "error: task metadata has an invalid kind" >&2; exit 2 ;;
 esac
 
-[ -d "$DATA" ] && [ ! -L "$TASK_DIR" ] && [ -d "$TASK_DIR" ] \
-  || { echo "error: ship task directory is missing or unsafe: $TASK_DIR" >&2; exit 2; }
+command -v perl >/dev/null 2>&1 || { echo "error: perl is required" >&2; exit 2; }
+[ -d "$DATA" ] || { echo "error: data directory is missing: $DATA" >&2; exit 2; }
 DATA_REAL=$(CDPATH='' cd -- "$DATA" 2>/dev/null && pwd -P) \
   || { echo "error: data directory is unsafe: $DATA" >&2; exit 2; }
-TASK_REAL=$(CDPATH='' cd -- "$TASK_DIR" 2>/dev/null && pwd -P) \
-  || { echo "error: ship task directory is unsafe: $TASK_DIR" >&2; exit 2; }
-[ "$TASK_REAL" = "$DATA_REAL/$ID" ] \
-  || { echo "error: ship task directory escapes the data root" >&2; exit 2; }
-[ -f "$BRIEF" ] && [ ! -L "$BRIEF" ] \
-  || { echo "error: ship task brief is missing or unsafe: $BRIEF" >&2; exit 2; }
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-receipt-check.XXXXXX")
+VALIDATION_LOCK=
+cleanup() {
+  [ -z "$VALIDATION_LOCK" ] || rmdir "$VALIDATION_LOCK" 2>/dev/null || true
+  rm -rf "$TMP_ROOT"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+release_validation_lock() {
+  [ -z "$VALIDATION_LOCK" ] || rmdir "$VALIDATION_LOCK" 2>/dev/null || true
+  VALIDATION_LOCK=
+}
+BRIEF="$TMP_ROOT/brief.md"
+LEDGER="$TMP_ROOT/evidence.jsonl"
+: > "$BRIEF"
+: > "$LEDGER"
+set +e
+FM_RECEIPT_DATA="$DATA_REAL" FM_RECEIPT_ID="$ID" FM_RECEIPT_BRIEF_OUT="$BRIEF" \
+  FM_RECEIPT_LEDGER_OUT="$LEDGER" perl - <<'PERL'
+use strict;
+use warnings;
+use Errno qw(ENOENT);
+use Fcntl qw(:DEFAULT :flock :mode);
+
+sub refuse {
+  print STDERR "error: $_[0]\n";
+  exit 1;
+}
+
+sub copy_file {
+  my ($source, $destination) = @_;
+  open(my $output, ">", $destination) or refuse("could not prepare pinned task snapshot");
+  my $buffer;
+  while (1) {
+    my $read = sysread($source, $buffer, 65536);
+    defined($read) or refuse("could not read pinned task artifact");
+    last if $read == 0;
+    print {$output} substr($buffer, 0, $read) or refuse("could not write pinned task snapshot");
+  }
+  close($output) or refuse("could not close pinned task snapshot");
+}
+
+my $task_path = "$ENV{FM_RECEIPT_DATA}/$ENV{FM_RECEIPT_ID}";
+sysopen(my $task, $task_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+  or refuse("ship task directory is missing or unsafe: $task_path");
+my @task_identity = stat($task);
+refuse("ship task path is not a directory") unless @task_identity && S_ISDIR($task_identity[2]);
+my @named_identity = lstat($task_path);
+refuse("ship task directory identity changed") unless @named_identity
+  && !S_ISLNK($named_identity[2])
+  && $named_identity[0] == $task_identity[0]
+  && $named_identity[1] == $task_identity[1];
+my $task_fd_path = "/dev/fd/" . fileno($task);
+my @descriptor_identity = stat($task_fd_path);
+refuse("portable task descriptor path is unavailable") unless @descriptor_identity
+  && $descriptor_identity[0] == $task_identity[0]
+  && $descriptor_identity[1] == $task_identity[1];
+
+sysopen(my $brief, "$task_fd_path/brief.md", O_RDONLY | O_NOFOLLOW)
+  or refuse("ship task brief is missing or unsafe");
+my @brief_identity = stat($brief);
+refuse("ship task brief is not a regular file") unless @brief_identity && S_ISREG($brief_identity[2]);
+my $ledger_missing = 0;
+my $ledger;
+if (!sysopen($ledger, "$task_fd_path/evidence.jsonl", O_RDONLY | O_NOFOLLOW)) {
+  $ledger_missing = 1 if $! == ENOENT;
+  refuse("evidence ledger is missing or unsafe") unless $ledger_missing;
+}
+if (!$ledger_missing) {
+  my @ledger_identity = stat($ledger);
+  refuse("evidence ledger must be a single-link regular file") unless @ledger_identity
+    && S_ISREG($ledger_identity[2]) && $ledger_identity[3] == 1;
+  flock($ledger, LOCK_SH) or refuse("evidence ledger could not be locked");
+}
+
+copy_file($brief, $ENV{FM_RECEIPT_BRIEF_OUT});
+copy_file($ledger, $ENV{FM_RECEIPT_LEDGER_OUT}) unless $ledger_missing;
+exit($ledger_missing ? 3 : 0);
+PERL
+SNAPSHOT_RC=$?
+set -e
+case "$SNAPSHOT_RC" in
+  0) PINNED_LEDGER_EXISTS=true ;;
+  3) PINNED_LEDGER_EXISTS=false ;;
+  *) exit 2 ;;
+esac
 
 MODE_COUNT=$(grep -c '^Delivery contract: mode=' "$BRIEF" 2>/dev/null || true)
 if [ "$MODE_COUNT" -eq 1 ]; then
@@ -201,19 +360,6 @@ else
   echo "error: ship brief has multiple delivery contracts" >&2
   exit 2
 fi
-
-TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-receipt-check.XXXXXX")
-VALIDATION_LOCK=
-cleanup() {
-  [ -z "$VALIDATION_LOCK" ] || rmdir "$VALIDATION_LOCK" 2>/dev/null || true
-  rm -rf "$TMP_ROOT"
-}
-trap cleanup EXIT
-trap 'exit 1' HUP INT TERM
-release_validation_lock() {
-  [ -z "$VALIDATION_LOCK" ] || rmdir "$VALIDATION_LOCK" 2>/dev/null || true
-  VALIDATION_LOCK=
-}
 CRITERIA="$TMP_ROOT/criteria.tsv"
 EVIDENCED="$TMP_ROOT/evidenced"
 INVALID="$TMP_ROOT/invalid"
@@ -226,36 +372,7 @@ def strong_result:
   and test("^([[:space:]]*(pass(ed)?|success(ful)?|green|clean|ok)[[:space:]]*|[[:space:]]*[1-9][0-9]*[[:space:]]+(tests?[[:space:]]+)?passed([[:space:]].*)?)$"; "i");
 JQ
 
-if ! awk '
-  BEGIN { in_section=0; found=0; count=0; bad=0 }
-  /^# Acceptance criteria[[:space:]]*$/ {
-    if (found) bad=1
-    found=1
-    in_section=1
-    next
-  }
-  in_section && /^#/ { in_section=0 }
-  in_section && /^[[:space:]]*$/ { next }
-  in_section {
-    if ($0 !~ /^- AC[1-9][0-9]*:[[:space:]]+.+/) { bad=1; next }
-    line=$0
-    sub(/^- /, "", line)
-    id=line
-    sub(/:.*/, "", id)
-    description=line
-    sub(/^[^:]*:[[:space:]]*/, "", description)
-    if (description ~ /^\{.*\}$/) bad=1
-    if (seen[id]++) bad=1
-    print id "\t" description
-    count++
-  }
-  END {
-    if (!found || count == 0 || bad) exit 1
-  }
-' "$BRIEF" > "$CRITERIA"; then
-  echo "error: ship brief must contain one valid '# Acceptance criteria' section with unique AC ids and no placeholders" >&2
-  exit 2
-fi
+"$SCRIPT_DIR/fm-receipt-check.sh" --parse-criteria "$BRIEF" > "$CRITERIA" || exit 2
 
 if [ "$ACTION" = criterion ]; then
   case "$CRITERION_QUERY" in
@@ -267,11 +384,8 @@ if [ "$ACTION" = criterion ]; then
 fi
 
 RECEIPT_COUNT=0
-LEDGER_EXISTS=false
-if [ -L "$LEDGER" ] || { [ -e "$LEDGER" ] && [ ! -f "$LEDGER" ]; }; then
-  printf '%s\n' "ledger is not a regular file" > "$INVALID"
-elif [ -f "$LEDGER" ]; then
-  LEDGER_EXISTS=true
+LEDGER_EXISTS=$PINNED_LEDGER_EXISTS
+if [ "$LEDGER_EXISTS" = true ]; then
   line_number=0
   while IFS= read -r line || [ -n "$line" ]; do
     line_number=$((line_number + 1))
@@ -330,7 +444,7 @@ fi
 CHECK_JSON=$(jq -cn \
   --arg task "$ID" \
   --arg status "$CHECK_STATUS" \
-  --arg ledger "$LEDGER" \
+  --arg ledger "$LEDGER_PATH" \
   --argjson required "$REQUIRED_JSON" \
   --argjson evidenced "$EVIDENCED_JSON" \
   --argjson missing "$MISSING_JSON" \
@@ -347,6 +461,26 @@ fi
 if [ "$CHECK_RC" -ne 0 ]; then
   printf '%s\n' "$CHECK_JSON"
   exit "$CHECK_RC"
+fi
+
+if [ "$ACTION" = invalidate-claim ]; then
+  cut -f1 "$CRITERIA" | grep -Fx "$INVALIDATION_CRITERION" >/dev/null 2>&1 \
+    || { echo "error: invalidated criterion is not declared by the ship brief" >&2; exit 2; }
+  INVALIDATION_MARKER="validation_claim_invalidation=$INVALIDATION_FINDING:$INVALIDATION_CRITERION"
+  VALIDATION_LOCK="$STATE/.$ID.validation-plan.lock"
+  if ! mkdir "$VALIDATION_LOCK" 2>/dev/null; then
+    VALIDATION_LOCK=
+    echo "error: validation metadata is locked" >&2
+    exit 2
+  fi
+  if ! grep -Fx "$INVALIDATION_MARKER" "$META" >/dev/null 2>&1; then
+    printf '%s\n' "$INVALIDATION_MARKER" >> "$META" \
+      || { release_validation_lock; echo "error: could not record claim invalidation" >&2; exit 2; }
+  fi
+  release_validation_lock
+  jq -cn --arg task "$ID" --arg finding "$INVALIDATION_FINDING" --arg criterion "$INVALIDATION_CRITERION" \
+    '{schema:"fm-claim-invalidation.v1",task:$task,status:"recorded",finding:$finding,criterion:$criterion}'
+  exit 0
 fi
 
 nm_status_field() {

@@ -118,7 +118,7 @@ receipt=$(jq -cn \
   ')
 
 if ! FM_RECEIPT_DATA="$DATA_REAL" FM_RECEIPT_ID="$ID" FM_RECEIPT_CRITERION="$CRITERION" \
-  FM_RECEIPT_PAYLOAD="$receipt" perl - <<'PERL'
+  FM_RECEIPT_PAYLOAD="$receipt" FM_RECEIPT_PARSER="$SCRIPT_DIR/fm-receipt-check.sh" perl - <<'PERL'
 use strict;
 use warnings;
 use Fcntl qw(:DEFAULT :flock :mode);
@@ -160,33 +160,10 @@ my $brief_text = <$brief>;
 defined($brief_text) or refuse("task brief could not be read");
 my @delivery = ($brief_text =~ /^Delivery contract: mode=(no-mistakes|direct-PR|local-only)$/mg);
 refuse("receipts apply only to ship tasks with one delivery contract") unless @delivery == 1;
-my %criteria;
-my $sections = 0;
-my $in_section = 0;
-my $invalid = 0;
-for my $line (split /\n/, $brief_text, -1) {
-  if ($line =~ /^# Acceptance criteria\s*$/) {
-    $sections++;
-    $in_section = 1;
-    next;
-  }
-  if ($in_section && $line =~ /^#/) {
-    $in_section = 0;
-  }
-  next unless $in_section;
-  next if $line =~ /^\s*$/;
-  if ($line !~ /^- (AC[1-9][0-9]*):\s+(.+)$/) {
-    $invalid = 1;
-    next;
-  }
-  my ($criterion, $description) = ($1, $2);
-  $invalid = 1 if $description =~ /^\{.*\}$/ || exists $criteria{$criterion};
-  $criteria{$criterion} = 1;
-}
-refuse("ship brief has an invalid acceptance-criterion contract")
-  if $sections != 1 || $invalid || !%criteria;
-refuse("criterion is not declared by the ship brief: $ENV{FM_RECEIPT_CRITERION}")
-  unless $criteria{$ENV{FM_RECEIPT_CRITERION}};
+open(my $parser, "|-", $ENV{FM_RECEIPT_PARSER}, "--parse-criteria", "-", "--require", $ENV{FM_RECEIPT_CRITERION})
+  or refuse("acceptance-criterion parser could not start");
+print {$parser} $brief_text or refuse("task brief could not reach the acceptance-criterion parser");
+close($parser) or refuse("criterion is not declared by a valid ship brief: $ENV{FM_RECEIPT_CRITERION}");
 
 my $record = "$ENV{FM_RECEIPT_PAYLOAD}\n";
 my $written = syswrite($ledger, $record);

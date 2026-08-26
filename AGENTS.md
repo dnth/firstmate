@@ -352,6 +352,7 @@ Require the matching `resolved` event, forbid `--yes`, and require the worker to
 Resume fleet supervision immediately after the decision lands.
 
 For ordinary findings from any No-Mistakes tier, steer the original worker to return branch custody through the supported abort and sync sequence, fix the findings itself, and update receipts.
+When a finding invalidates a receipt or acceptance claim, record its finding id and criterion through `bin/fm-receipt-check.sh` before returning branch custody.
 After the original worker's fix, return high-risk work to full validation with the updated receipts and delta context.
 
 Judge validation by the current-code-matched run step through `bin/fm-crew-state.sh`, not by shell liveness or the last status event.

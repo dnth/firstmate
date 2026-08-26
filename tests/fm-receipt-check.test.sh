@@ -191,6 +191,104 @@ EOF
   pass "invalid ship briefs fail and scout/report behavior stays unchanged"
 }
 
+test_pinned_checker_rejects_redirected_and_linked_evidence() {
+  local id=pinned-check task moved outside fakebin real_grep ready release pid out rc alias
+  write_brief "$id" direct-PR
+  add_receipt "$id" AC1 test passed
+  task="$HOME_DIR/data/$id"
+  moved="$HOME_DIR/data/$id-original"
+  outside="$TMP_ROOT/outside-pinned-check"
+  fakebin="$TMP_ROOT/checker-race-fakebin"
+  ready="$TMP_ROOT/checker-race-ready"
+  release="$TMP_ROOT/checker-race-release"
+  mkdir -p "$outside" "$fakebin"
+  cp "$task/brief.md" "$outside/brief.md"
+  printf '%s\n' \
+    '{"criterion":"AC1","type":"test","summary":"external","result":"passed"}' \
+    '{"criterion":"AC2","type":"lint","summary":"external","result":"passed"}' > "$outside/evidence.jsonl"
+  mkfifo "$release"
+  real_grep=$(command -v grep)
+  cat > "$fakebin/grep" <<EOF
+#!/bin/sh
+case "\$*" in
+  *"Delivery contract: mode="*)
+    if mkdir "$TMP_ROOT/checker-race-once" 2>/dev/null; then
+      : > "$ready"
+      IFS= read -r _ < "$release"
+    fi
+    ;;
+esac
+exec "$real_grep" "\$@"
+EOF
+  chmod +x "$fakebin/grep"
+  PATH="$fakebin:$PATH" FM_HOME="$HOME_DIR" "$CHECK" "$id" > "$TMP_ROOT/checker-race-output" 2>&1 &
+  pid=$!
+  while [ ! -e "$ready" ]; do
+    kill -0 "$pid" 2>/dev/null || fail "checker exited before the task replacement boundary"
+  done
+  mv "$task" "$moved"
+  ln -s "$outside" "$task"
+  printf 'continue\n' > "$release"
+  wait "$pid"
+  rc=$?
+  expect_code 1 "$rc" "checker uses the pinned incomplete ledger after task replacement"
+  out=$(cat "$TMP_ROOT/checker-race-output")
+  printf '%s' "$out" | jq -e '.status == "missing" and .missing == ["AC2"]' >/dev/null \
+    || fail "task replacement redirected the checker away from its pinned evidence"
+
+  id=checker-linked-ledger
+  write_brief "$id" direct-PR
+  add_receipt "$id" AC1 test passed
+  add_receipt "$id" AC2 lint passed
+  alias="$TMP_ROOT/checker-ledger-alias"
+  ln "$HOME_DIR/data/$id/evidence.jsonl" "$alias"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "checker rejects a multiply linked evidence ledger"
+  pass "fm-receipt-check pins task evidence and rejects hard-linked ledgers"
+}
+
+test_shared_criterion_parser_drives_append_and_check() {
+  local id=shared-criteria out rc
+  id=shared-criteria
+  mkdir -p "$HOME_DIR/data/$id"
+  cat > "$HOME_DIR/data/$id/brief.md" <<'EOF'
+# Acceptance criteria
+- AC10: A detailed outcome: including punctuation.
+# Definition of done
+Delivery contract: mode=direct-PR
+EOF
+  : > "$HOME_DIR/data/$id/evidence.jsonl"
+  fm_write_meta "$HOME_DIR/state/$id.meta" "kind=ship" "mode=direct-PR"
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC10 test summary passed >/dev/null \
+    || fail "receipt append rejected a criterion accepted by the shared parser"
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id"); rc=$?
+  expect_code 0 "$rc" "checker accepts the same detailed criterion as append"
+  printf '%s' "$out" | jq -e '.required == ["AC10"] and .evidenced == ["AC10"]' >/dev/null \
+    || fail "shared criterion parser produced inconsistent append/check behavior"
+  pass "receipt append and check consume one criterion grammar"
+}
+
+test_claim_invalidation_marker_is_append_only_and_idempotent() {
+  local id=claim-invalidation out rc meta
+  write_brief "$id" no-mistakes
+  add_receipt "$id" AC1 test passed
+  add_receipt "$id" AC2 lint passed
+  meta="$HOME_DIR/state/$id.meta"
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --invalidate-claim F9 --invalidated-criterion AC1) \
+    || fail "claim invalidation marker failed"
+  printf '%s' "$out" | jq -e '.status == "recorded" and .finding == "F9" and .criterion == "AC1"' >/dev/null \
+    || fail "claim invalidation result was not machine-readable"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --invalidate-claim F9 --invalidated-criterion AC1 >/dev/null \
+    || fail "duplicate claim invalidation was not idempotent"
+  [ "$(grep -c '^validation_claim_invalidation=F9:AC1$' "$meta")" -eq 1 ] \
+    || fail "claim invalidation marker was not append-only and idempotent"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --invalidate-claim F10 --invalidated-criterion AC3 >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "claim invalidation rejects an undeclared criterion"
+  pass "finding-to-criterion invalidations remain inspectable in task metadata"
+}
+
 test_low_risk_skips_no_mistakes_under_explicit_policy() {
   local id=low-docs base out meta project validated_head new_head rc
   base=$(make_project "$id" no-mistakes docs)
@@ -591,6 +689,9 @@ test_help_advertises_generation_bound_run_binding
 test_reports_missing_criteria_deterministically
 test_complete_and_invalid_ledgers_have_distinct_results
 test_invalid_brief_and_scout_behavior
+test_pinned_checker_rejects_redirected_and_linked_evidence
+test_shared_criterion_parser_drives_append_and_check
+test_claim_invalidation_marker_is_append_only_and_idempotent
 test_low_risk_skips_no_mistakes_under_explicit_policy
 test_authoritative_docs_remain_high
 test_terminal_paths_record_completion_at_their_boundary
