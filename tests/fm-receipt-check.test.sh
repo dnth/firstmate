@@ -8,6 +8,7 @@ set -u
 CHECK="$ROOT/bin/fm-receipt-check.sh"
 RECEIPT="$ROOT/bin/fm-receipt.sh"
 STORE="$ROOT/bin/fm-receipt-store.sh"
+BRIEF="$ROOT/bin/fm-brief.sh"
 TMP_ROOT=$(fm_test_tmproot fm-receipt-check)
 HOME_DIR="$TMP_ROOT/home"
 mkdir -p "$HOME_DIR/data" "$HOME_DIR/state"
@@ -42,6 +43,8 @@ test_help_advertises_generation_bound_run_binding() {
   out=$("$CHECK" --help) || fail "receipt checker help failed"
   assert_contains "$out" "--bind-run <run-id> --generation <plan-generation>" \
     "receipt checker help omitted the required run generation"
+  assert_contains "$out" "--implementation-complete" \
+    "receipt checker help omitted the implementation boundary action"
   assert_contains "$out" "--complete --terminal-evidence mechanical-checks-passed" \
     "receipt checker help omitted the receipts-mechanical completion command"
   out=$("$STORE" --help) || fail "receipt store help failed"
@@ -49,6 +52,10 @@ test_help_advertises_generation_bound_run_binding() {
     "receipt store help omitted the pinned read mode"
   assert_contains "$out" "append <criterion> <criterion-parser>" \
     "receipt store help omitted the pinned append mode"
+  out=$("$BRIEF" --render-ship-delivery help-task no-mistakes) \
+    || fail "ship delivery renderer failed"
+  assert_contains "$out" "fm-receipt-check.sh help-task --implementation-complete" \
+    "generated ship sequence omitted the implementation boundary action"
   pass "fm-receipt-check help renders an executable generation-bound bind command"
 }
 
@@ -79,6 +86,9 @@ add_receipt() {  # <id> <criterion> <type> <result>
     FM_HOME="$HOME_DIR" "$RECEIPT" "$id" "$criterion" "$type" "evidence for $criterion" "$result" >/dev/null \
       || fail "could not append fixture receipt for $id/$criterion"
   fi
+  if [ "$criterion" = AC2 ] && grep -q '^worktree=' "$HOME_DIR/state/$id.meta" 2>/dev/null; then
+    FM_HOME="$HOME_DIR" "$CHECK" "$id" --implementation-complete >/dev/null 2>&1 || true
+  fi
 }
 
 make_project() {  # <id> <mode> <surface> -> prints base
@@ -86,7 +96,10 @@ make_project() {  # <id> <mode> <surface> -> prints base
   mkdir -p "$project"
   git -C "$project" init -q
   printf 'seed\n' > "$project/README.md"
-  [ "$surface" != docs ] || printf 'Release notee\n' > "$project/CHANGELOG.md"
+  case "$surface" in
+    docs) printf 'Release note\n' > "$project/CHANGELOG.md" ;;
+    policy_docs) printf 'Passwords expire in 90 days.\n' > "$project/CHANGELOG.md" ;;
+  esac
   git -C "$project" add .
   git -C "$project" commit -q -m init
   git -C "$project" branch -M main
@@ -94,7 +107,10 @@ make_project() {  # <id> <mode> <surface> -> prints base
   git -C "$project" checkout -q -b "fm/$id"
   case "$surface" in
     docs)
-      printf 'Release note\n' > "$project/CHANGELOG.md"
+      printf 'Release  note\n' > "$project/CHANGELOG.md"
+      ;;
+    policy_docs)
+      printf 'Passwords expire in 30 days.\n' > "$project/CHANGELOG.md"
       ;;
     authoritative_docs)
       printf 'seed\nsecurity deployment instructions\n' > "$project/README.md"
@@ -158,7 +174,7 @@ test_complete_and_invalid_ledgers_have_distinct_results() {
 test_explicit_negative_results_leave_criteria_missing() {
   local id=negative-results out rc result
   write_brief "$id" direct-PR
-  for result in failed failure "3 failures" negative "not passed" "no tests" "0 tests" "0 passed" "passed 0" "tests 0" "passed 0 tests" "tests: 0" "passed: 0" "0/0 tests passed" "0 of 0 tests passed" "tests passed: 0/0" skipped empty; do
+  for result in failed failure "3 failures" negative "not passed" "no tests" "0 tests" "0 passed" "passed 0" "tests 0" "passed 0 tests" "tests: 0" "passed: 0" "0/0 tests passed" "0 of 0 tests passed" "tests passed: 0/0" "collected 0 items" "0 items collected" "found 0 items" "no items collected" skipped empty; do
     add_receipt "$id" AC1 test "$result"
   done
   add_receipt "$id" AC2 api 401
@@ -169,7 +185,7 @@ test_explicit_negative_results_leave_criteria_missing() {
     and .required == ["AC1","AC2"]
     and .evidenced == ["AC2"]
     and .missing == ["AC1"]
-    and .receipt_count == 19
+    and .receipt_count == 23
   ' >/dev/null || fail "negative-result evidence status was not deterministic"
   add_receipt "$id" AC1 test passed
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id"); rc=$?
@@ -405,7 +421,7 @@ test_low_risk_skips_no_mistakes_under_explicit_policy() {
     || fail "low plan did not complete after post-plan mechanical evidence"
   grep -qx "validation_completed_head=$validated_head" "$meta" \
     || fail "low completion was not bound to its validated head"
-  printf 'Release notes\n' > "$project/CHANGELOG.md"
+  printf 'Release   note\n' > "$project/CHANGELOG.md"
   git -C "$project" add CHANGELOG.md
   git -C "$project" commit -q -m 'post-validation correction'
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence mechanical-checks-passed 2>&1)
@@ -415,6 +431,8 @@ test_low_risk_skips_no_mistakes_under_explicit_policy() {
   [ "$(grep '^validation_completed_head=' "$meta" | tail -1)" = 'validation_completed_head=' ] \
     || fail "stale completion remained active after the head changed"
   new_head=$(git -C "$project" rev-parse HEAD)
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --implementation-complete >/dev/null \
+    || fail "corrected low-risk change did not record implementation completion"
   FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null \
     || fail "corrected low-risk change could not be replanned"
   add_receipt "$id" AC1 lint "passed" CHANGELOG.md
@@ -461,7 +479,67 @@ test_low_risk_requires_safe_prose_and_applicable_evidence() {
     || fail "prescriptive prose plan failed"
   printf '%s' "$out" | jq -e '.tier == "high" and .path == "full-no-mistakes"' >/dev/null \
     || fail "prescriptive changelog prose reached low"
+
+  id=low-policy-value
+  base=$(make_project "$id" no-mistakes policy_docs)
+  add_receipt "$id" AC1 lint passed CHANGELOG.md
+  add_receipt "$id" AC2 review reviewed
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base") \
+    || fail "policy-value plan failed"
+  printf '%s' "$out" | jq -e '.tier == "high" and .path == "full-no-mistakes"' >/dev/null \
+    || fail "policy value change reached low"
+
+  id=low-typo-content
+  base=$(make_project "$id" no-mistakes docs)
+  project="$TMP_ROOT/project-$id"
+  printf 'Release notee\n' > "$project/CHANGELOG.md"
+  git -C "$project" add CHANGELOG.md
+  git -C "$project" commit -q -m 'change prose bytes'
+  add_receipt "$id" AC1 lint passed CHANGELOG.md
+  add_receipt "$id" AC2 review reviewed
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base") \
+    || fail "content-byte plan failed"
+  printf '%s' "$out" | jq -e '.tier == "high" and .path == "full-no-mistakes"' >/dev/null \
+    || fail "content-byte typo reached low"
   pass "low risk requires safe changelog prose and file-bound mechanical evidence"
+}
+
+test_implementation_completion_precedes_planning() {
+  local id=implementation-boundary base fakebin out rc meta head
+  base=$(make_project "$id" no-mistakes localized)
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test primary passed >/dev/null \
+    || fail "implementation boundary AC1 receipt failed"
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC2 lint secondary passed >/dev/null \
+    || fail "implementation boundary AC2 receipt failed"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "planning requires an explicit implementation boundary"
+  fakebin="$TMP_ROOT/implementation-date-bin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/date" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$FM_FAKE_DATE"
+EOF
+  chmod +x "$fakebin/date"
+  head=$(git -C "$TMP_ROOT/project-$id" rev-parse HEAD)
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_DATE=100 FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --implementation-complete) \
+    || fail "implementation boundary action failed"
+  printf '%s' "$out" | jq -e --arg head "$head" \
+    '.status == "completed" and .completed_at == 100 and .completed_head == $head' >/dev/null \
+    || fail "implementation boundary output was not machine-readable"
+  PATH="$fakebin:$PATH" FM_FAKE_DATE=200 FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --implementation-complete >/dev/null \
+    || fail "duplicate implementation boundary failed"
+  meta="$HOME_DIR/state/$id.meta"
+  [ "$(grep -c '^implementation_completed_at=' "$meta")" -eq 1 ] \
+    || fail "implementation completion timestamp was not first-idempotent"
+  PATH="$fakebin:$PATH" FM_FAKE_DATE=300 FM_FAKE_NM_STATUS= FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --plan --base "$base" >/dev/null \
+    || fail "plan after implementation boundary failed"
+  [ "$(grep '^validation_started_at=' "$meta" | tail -1)" = 'validation_started_at=100' ] \
+    || fail "validation interval did not originate at implementation completion"
+  pass "implementation completion is explicit, first-idempotent, and plan-bound"
 }
 
 test_plan_boundary_excludes_concurrent_receipts() {
@@ -961,6 +1039,7 @@ test_ci_green_log_allows_exact_bound_run_completion
 test_claim_invalidation_marker_is_append_only_and_idempotent
 test_low_risk_skips_no_mistakes_under_explicit_policy
 test_low_risk_requires_safe_prose_and_applicable_evidence
+test_implementation_completion_precedes_planning
 test_plan_boundary_excludes_concurrent_receipts
 test_terminal_and_failed_runs_bind_by_current_plan
 test_no_mistakes_observations_are_bounded

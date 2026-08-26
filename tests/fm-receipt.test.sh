@@ -63,6 +63,20 @@ test_append_is_additive_and_result_flag_works() {
   pass "fm-receipt preserves prior records and accepts --result"
 }
 
+test_large_receipt_is_appended_completely() {
+  local id=append-large ledger result out
+  write_ship "$id"
+  ledger="$HOME_DIR/data/$id/evidence.jsonl"
+  result=$(awk 'BEGIN { for (i=0; i<32768; i++) printf "x" }')
+  out=$(FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test large "$result") \
+    || fail "large receipt append failed"
+  [ "$(printf '%s' "$out" | jq -r '.result | length')" -eq 32768 ] \
+    || fail "large receipt output was truncated"
+  [ "$(jq -r '.result | length' "$ledger")" -eq 32768 ] \
+    || fail "large ledger record was truncated"
+  pass "fm-receipt appends complete large JSONL records"
+}
+
 test_rejects_invalid_schema_and_undeclared_criteria() {
   local id=append-invalid rc before
   write_ship "$id"
@@ -200,6 +214,7 @@ test_ledger_replacement_after_open_cannot_redirect_append() {
 
 test_appends_one_compact_valid_receipt
 test_append_is_additive_and_result_flag_works
+test_large_receipt_is_appended_completely
 test_rejects_invalid_schema_and_undeclared_criteria
 test_rejects_non_ship_and_unsafe_ledger
 test_task_directory_swap_before_open_is_rejected

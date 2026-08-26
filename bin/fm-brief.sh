@@ -107,6 +107,7 @@ render_ship_delivery() {
 # Acceptance evidence
 Before reporting implementation complete, record at least one compact receipt for every acceptance criterion with \`$FM_ROOT/bin/fm-receipt.sh $task_id <criterion> <type> <summary> <result> [options]\`.
 Run \`$FM_ROOT/bin/fm-receipt-check.sh $task_id\` and do not append \`done:\` unless its JSON status is \`complete\`.
+After the implementation is committed and evidence is complete, run \`$FM_ROOT/bin/fm-receipt-check.sh $task_id --implementation-complete\` before any validation plan or implementation-complete \`done:\` report.
 Receipts are audit inputs rather than proof that every claim is trustworthy; keep summaries and results compact and point to commands or artifacts when useful.
 
 EOF

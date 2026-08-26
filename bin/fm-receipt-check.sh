@@ -4,6 +4,7 @@
 # Usage:
 #   fm-receipt-check.sh <task-id>
 #   fm-receipt-check.sh <task-id> --criterion <criterion-id>
+#   fm-receipt-check.sh <task-id> --implementation-complete
 #   fm-receipt-check.sh <task-id> --bind-run <run-id> --generation <plan-generation>
 #   fm-receipt-check.sh <task-id> --complete --terminal-evidence <evidence>
 #   fm-receipt-check.sh <task-id> --plan [--base <commit>]
@@ -28,6 +29,8 @@
 # Structurally valid receipts with explicit failure, negative, zero-test, empty,
 # or skip result indicators remain recorded but do not evidence their criterion.
 # A positive result paired only with an explicit zero-failure phrase remains eligible.
+# --implementation-complete records the first implementation completion time and
+# current clean commit before --plan may publish a validation generation.
 #
 # --plan first requires a complete evidence check, then inspects the recorded
 # worktree's base..HEAD diff with a deterministic conservative classifier.
@@ -172,6 +175,10 @@ while [ "$#" -gt 0 ]; do
       [ "$ACTION" = check ] || { echo "error: choose only one action" >&2; exit 2; }
       ACTION=plan
       ;;
+    --implementation-complete)
+      [ "$ACTION" = check ] || { echo "error: choose only one action" >&2; exit 2; }
+      ACTION=implementation-complete
+      ;;
     --complete)
       [ "$ACTION" = check ] || { echo "error: choose only one action" >&2; exit 2; }
       ACTION=complete
@@ -223,7 +230,7 @@ if [ "$ACTION" != invalidate-claim ] && [ -n "$INVALIDATION_CRITERION" ]; then
 fi
 
 case "$ACTION" in
-  check|criterion|bind-run|invalidate-claim)
+  check|criterion|implementation-complete|bind-run|invalidate-claim)
     [ -z "$BASE_INPUT" ] || { echo "error: --base requires --plan" >&2; exit 2; }
     [ -z "$TERMINAL_EVIDENCE" ] || { echo "error: --terminal-evidence requires --complete" >&2; exit 2; }
     if [ "$ACTION" = bind-run ]; then
@@ -356,7 +363,7 @@ def evidence_result:
   without_zero_failures
   |
   (test("^[[:space:]]*$") | not)
-  and (test("(^|[^[:alnum:]_])(fail(s|ed|ures?)?|error|negative|red|broken|skip(s|ped|ping)?|empty)([^[:alnum:]_]|$)|not[[:space:]]+pass(ed)?|no[[:space:]]+tests?|(^|[^0-9])0[[:space:]]+(tests?([[:space:]]+passed)?|passed)([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(tests?|passed)[[:space:]]*:[[:space:]]*0([^0-9]|$)|(^|[^[:alnum:]_])(tests?|passed)[[:space:]]+0([^0-9]|$)|(^|[^[:alnum:]_])passed[[:space:]]+0[[:space:]]+tests?([^[:alnum:]_]|$)|(^|[^0-9])0[[:space:]]*(/|of|out[[:space:]]+of)[[:space:]]*0[[:space:]]+(tests?([[:space:]]+passed)?|passed)([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(tests?([[:space:]]+passed)?|passed)[[:space:]]*:?[[:space:]]*0[[:space:]]*(/|of|out[[:space:]]+of)[[:space:]]*0([[:space:]]+tests?)?([^[:alnum:]_]|$)"; "i") | not);
+  and (test("(^|[^[:alnum:]_])(fail(s|ed|ures?)?|error|negative|red|broken|skip(s|ped|ping)?|empty)([^[:alnum:]_]|$)|not[[:space:]]+pass(ed)?|no[[:space:]]+(tests?|items?|cases?)|(^|[^0-9])0[[:space:]]+(tests?([[:space:]]+passed)?|passed)([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(tests?|passed)[[:space:]]*:[[:space:]]*0([^0-9]|$)|(^|[^[:alnum:]_])(tests?|passed)[[:space:]]+0([^0-9]|$)|(^|[^[:alnum:]_])passed[[:space:]]+0[[:space:]]+tests?([^[:alnum:]_]|$)|(^|[^0-9])0[[:space:]]*(/|of|out[[:space:]]+of)[[:space:]]*0[[:space:]]+(tests?([[:space:]]+passed)?|passed)([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(tests?([[:space:]]+passed)?|passed)[[:space:]]*:?[[:space:]]*0[[:space:]]*(/|of|out[[:space:]]+of)[[:space:]]*0([[:space:]]+tests?)?([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(collected|found|discovered)[[:space:]]*:?[[:space:]]*0[[:space:]]+(items?|cases?)([^[:alnum:]_]|$)|(^|[^0-9])0[[:space:]]+(items?|cases?)[[:space:]]+(collected|found|discovered)([^[:alnum:]_]|$)"; "i") | not);
 def strong_result:
   without_zero_failures
   | evidence_result
@@ -456,6 +463,46 @@ if [ "$CHECK_RC" -ne 0 ]; then
   exit "$CHECK_RC"
 fi
 
+if [ "$ACTION" = implementation-complete ]; then
+  IMPLEMENTATION_WORKTREE=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
+  [ -n "$IMPLEMENTATION_WORKTREE" ] && [ -d "$IMPLEMENTATION_WORKTREE" ] \
+    || { echo "error: implementation worktree is missing" >&2; exit 2; }
+  IMPLEMENTATION_HEAD=$(git -C "$IMPLEMENTATION_WORKTREE" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) \
+    || { echo "error: implementation head is unavailable" >&2; exit 2; }
+  [ -z "$(git -C "$IMPLEMENTATION_WORKTREE" status --porcelain --untracked-files=all 2>/dev/null)" ] \
+    || { echo "error: implementation worktree is dirty" >&2; exit 2; }
+  VALIDATION_LOCK="$STATE/.$ID.validation-plan.lock"
+  if ! mkdir "$VALIDATION_LOCK" 2>/dev/null; then
+    VALIDATION_LOCK=
+    echo "error: implementation completion metadata is locked" >&2
+    exit 2
+  fi
+  IMPLEMENTATION_COMPLETED=$(grep '^implementation_completed_at=' "$META" | head -1 | cut -d= -f2- || true)
+  RECORDED_IMPLEMENTATION_HEAD=$(grep '^implementation_completed_head=' "$META" | tail -1 | cut -d= -f2- || true)
+  case "$IMPLEMENTATION_COMPLETED" in
+    '')
+      IMPLEMENTATION_COMPLETED=$(date +%s)
+      case "$IMPLEMENTATION_COMPLETED" in
+        ''|*[!0-9]*) release_validation_lock; echo "error: implementation completion timestamp could not be recorded" >&2; exit 2 ;;
+      esac
+      printf 'implementation_completed_at=%s\nimplementation_completed_head=%s\n' \
+        "$IMPLEMENTATION_COMPLETED" "$IMPLEMENTATION_HEAD" >> "$META" \
+        || { release_validation_lock; echo "error: could not record implementation completion" >&2; exit 2; }
+      ;;
+    *[!0-9]*) release_validation_lock; echo "error: implementation completion timestamp is invalid" >&2; exit 2 ;;
+    *)
+      if [ "$RECORDED_IMPLEMENTATION_HEAD" != "$IMPLEMENTATION_HEAD" ]; then
+        printf 'implementation_completed_head=%s\n' "$IMPLEMENTATION_HEAD" >> "$META" \
+          || { release_validation_lock; echo "error: could not update implementation head" >&2; exit 2; }
+      fi
+      ;;
+  esac
+  release_validation_lock
+  jq -cn --arg task "$ID" --argjson completed_at "$IMPLEMENTATION_COMPLETED" --arg completed_head "$IMPLEMENTATION_HEAD" \
+    '{schema:"fm-implementation-completion.v1",task:$task,status:"completed",completed_at:$completed_at,completed_head:$completed_head}'
+  exit 0
+fi
+
 if [ "$ACTION" = invalidate-claim ]; then
   cut -f1 "$CRITERIA" | grep -Fx "$INVALIDATION_CRITERION" >/dev/null 2>&1 \
     || { echo "error: invalidated criterion is not declared by the ship brief" >&2; exit 2; }
@@ -529,7 +576,7 @@ record_validation_completed() {
     echo "error: validation metadata is locked by another planner" >&2
     return 1
   fi
-  started=$(grep '^validation_started_at=' "$META" | head -1 | cut -d= -f2- || true)
+  started=$(grep '^validation_started_at=' "$META" | tail -1 | cut -d= -f2- || true)
   path=$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)
   generation=$(grep '^validation_generation=' "$META" | tail -1 | cut -d= -f2- || true)
   worktree=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
@@ -739,6 +786,13 @@ resolve_diff() {
 }
 
 resolve_diff || true
+IMPLEMENTATION_COMPLETED=$(grep '^implementation_completed_at=' "$META" | head -1 | cut -d= -f2- || true)
+IMPLEMENTATION_HEAD=$(grep '^implementation_completed_head=' "$META" | tail -1 | cut -d= -f2- || true)
+case "$IMPLEMENTATION_COMPLETED" in
+  ''|*[!0-9]*) echo "error: record implementation completion before planning" >&2; exit 2 ;;
+esac
+[ -n "$HEAD" ] && [ "$IMPLEMENTATION_HEAD" = "$HEAD" ] \
+  || { echo "error: implementation completion is not bound to the current head" >&2; exit 2; }
 if [ "$DIFF_AVAILABLE" -eq 1 ]; then
   while IFS=$'\t' read -r added deleted path; do
     [ -n "$path" ] || continue
@@ -758,40 +812,26 @@ if [ "$DIFF_AVAILABLE" -eq 1 ] && [ "$LOW_PATH" -eq 1 ]; then
   LOW_PATCH="$TMP_ROOT/low-prose.patch"
   if git -C "$WORKTREE" diff --no-ext-diff --no-renames --unified=0 "$BASE..$HEAD" -- CHANGELOG.md > "$LOW_PATCH" 2>/dev/null \
     && awk '
-      function forbidden(line, lower) {
-        lower=tolower(line)
-        if (line ~ /`/ || line ~ /^\t/ || line ~ /^    /) return 1
-        if (line ~ /^[[:space:]]*([$>]|\.\/|\/)/) return 1
-        if (line ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_.-]*[[:space:]]*[:=][[:space:]]*[^[:space:]]/) return 1
-        if (lower ~ /(^|[^[:alnum:]_])(must|should|required|requires?|never|always|ensure|run|use|configure|deploy|rotate|administrator|operator|security|access|tokens?|credentials?)([^[:alnum:]_]|$)/) return 1
-        return 0
-      }
-      function distance(a, b, i, j, cost, key) {
-        for (key in edit) delete edit[key]
-        for (i=0; i<=length(a); i++) edit[i,0]=i
-        for (j=0; j<=length(b); j++) edit[0,j]=j
-        for (i=1; i<=length(a); i++) {
-          for (j=1; j<=length(b); j++) {
-            cost=(substr(a,i,1) == substr(b,j,1) ? 0 : 1)
-            edit[i,j]=edit[i-1,j]+1
-            if (edit[i,j-1]+1 < edit[i,j]) edit[i,j]=edit[i,j-1]+1
-            if (edit[i-1,j-1]+cost < edit[i,j]) edit[i,j]=edit[i-1,j-1]+cost
-          }
-        }
-        return edit[length(a),length(b)]
-      }
-      BEGIN { removed=0; added=0; bad=0 }
+      BEGIN { removed=0; added=0; old_bytes=""; new_bytes=""; bad=0 }
       /^\+\+\+ / || /^--- / || /^@@/ || /^diff --git / || /^index / { next }
-      /^-/ { old[++removed]=substr($0, 2); next }
-      /^\+/ { new[++added]=substr($0, 2); next }
+      /^-/ {
+        line=substr($0, 2)
+        if (line !~ /^[[:alnum:]][[:alnum:][:space:].,;:!?()"'"'"'-]*$/) { bad=1; next }
+        removed++
+        gsub(/[[:space:]]/, "", line)
+        old_bytes=old_bytes line
+        next
+      }
+      /^\+/ {
+        line=substr($0, 2)
+        if (line !~ /^[[:alnum:]][[:alnum:][:space:].,;:!?()"'"'"'-]*$/) { bad=1; next }
+        added++
+        gsub(/[[:space:]]/, "", line)
+        new_bytes=new_bytes line
+        next
+      }
       END {
-        if (removed == 0 || removed != added || removed > 2) exit 1
-        for (i=1; i<=removed; i++) {
-          if (forbidden(old[i]) || forbidden(new[i])) exit 1
-          if (length(old[i]) > 240 || length(new[i]) > 240) exit 1
-          if (distance(tolower(old[i]), tolower(new[i])) > 4) exit 1
-        }
-        exit 0
+        exit(!bad && removed > 0 && added > 0 && old_bytes != "" && old_bytes == new_bytes ? 0 : 1)
       }
     ' "$LOW_PATCH"; then
     LOW_STRUCTURE=1
@@ -845,15 +885,14 @@ case "$MODE:$TIER" in
 esac
 
 write_meta_record() {  # <pass>
-  local pass=$1 now started previous_generation
-  now=$(date +%s)
+  local pass=$1 started previous_generation
   VALIDATION_LOCK="$STATE/.$ID.validation-plan.lock"
   if ! mkdir "$VALIDATION_LOCK" 2>/dev/null; then
     VALIDATION_LOCK=
     echo "error: validation metadata is locked by another planner: $STATE/.$ID.validation-plan.lock" >&2
     return 1
   fi
-  started=$(grep '^validation_started_at=' "$META" | head -1 | cut -d= -f2- || true)
+  started=$(grep '^validation_started_at=' "$META" | tail -1 | cut -d= -f2- || true)
   previous_generation=$(grep '^validation_generation=' "$META" | tail -1 | cut -d= -f2- || true)
   case "$started" in
     '') ;;
@@ -869,7 +908,7 @@ write_meta_record() {  # <pass>
     printf 'validation_diff_files=%s\n' "$DIFF_FILES"
     printf 'validation_diff_lines=%s\n' "$DIFF_LINES"
     printf 'validation_pass=%s\n' "$pass"
-    [ -n "$started" ] || printf 'validation_started_at=%s\n' "$now"
+    [ "$started" = "$IMPLEMENTATION_COMPLETED" ] || printf 'validation_started_at=%s\n' "$IMPLEMENTATION_COMPLETED"
     printf 'validation_ledger_receipt_count=%s\n' "$RECEIPT_COUNT"
     printf 'validation_preplan_run_id=%s\n' "${PREPLAN_RUN_ID:-}"
     if [ -n "$previous_generation" ]; then

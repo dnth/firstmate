@@ -50,7 +50,7 @@ FM_RECEIPT_STORE_DATA="$DATA_REAL" FM_RECEIPT_STORE_ID="$ID" FM_RECEIPT_STORE_MO
   perl - "$@" <<'PERL'
 use strict;
 use warnings;
-use Errno qw(ENOENT);
+use Errno qw(ENOENT EINTR);
 use Fcntl qw(:DEFAULT :flock :mode);
 
 my ($arg1, $arg2, $arg3, $arg4) = @ARGV;
@@ -148,7 +148,12 @@ print {$criterion_parser} $brief_text or refuse("task brief could not reach the 
 close($criterion_parser) or refuse("criterion is not declared by a valid ship brief: $criterion");
 
 my $record = "$ENV{FM_RECEIPT_PAYLOAD}\n";
-my $written = syswrite($ledger, $record);
-refuse("evidence receipt append failed") unless defined($written) && $written == length($record);
+my $offset = 0;
+while ($offset < length($record)) {
+  my $written = syswrite($ledger, $record, length($record) - $offset, $offset);
+  next if !defined($written) && $! == EINTR;
+  refuse("evidence receipt append failed") unless defined($written) && $written > 0;
+  $offset += $written;
+}
 close($ledger) or refuse("evidence ledger close failed");
 PERL
