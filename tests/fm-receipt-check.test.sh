@@ -145,6 +145,41 @@ test_complete_and_invalid_ledgers_have_distinct_results() {
   pass "fm-receipt-check distinguishes complete evidence from invalid JSONL"
 }
 
+test_explicit_negative_results_leave_criteria_missing() {
+  local id=negative-results out rc result
+  write_brief "$id" direct-PR
+  for result in failed failure negative "not passed" "no tests" "0 tests" "0 passed" skipped empty; do
+    add_receipt "$id" AC1 test "$result"
+  done
+  add_receipt "$id" AC2 api 401
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id"); rc=$?
+  expect_code 1 "$rc" "explicit negative results leave their criterion missing"
+  printf '%s' "$out" | jq -e '
+    .status == "missing"
+    and .required == ["AC1","AC2"]
+    and .evidenced == ["AC2"]
+    and .missing == ["AC1"]
+    and .receipt_count == 10
+  ' >/dev/null || fail "negative-result evidence status was not deterministic"
+  add_receipt "$id" AC1 test passed
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id"); rc=$?
+  expect_code 0 "$rc" "a later positive receipt evidences the missing criterion"
+  printf '%s' "$out" | jq -e '.evidenced == ["AC1","AC2"] and .missing == []' >/dev/null \
+    || fail "positive receipt did not recover a criterion with prior negative receipts"
+  pass "failed, skipped, empty, and zero-test results stay unevidenced while 401 counts"
+}
+
+test_delivery_mode_mismatch_fails_closed() {
+  local id=mode-mismatch out rc
+  write_brief "$id" no-mistakes
+  fm_write_meta "$HOME_DIR/state/$id.meta" "kind=ship" "mode=direct-PR"
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" 2>&1); rc=$?
+  expect_code 2 "$rc" "contradictory brief and metadata modes fail closed"
+  assert_contains "$out" "contradicts the pinned ship brief" \
+    "mode contradiction refusal did not identify its authority boundary"
+  pass "pinned brief and metadata delivery modes must match exactly"
+}
+
 test_invalid_brief_and_scout_behavior() {
   local id=placeholder-brief rc out scout=scout-brief old=old-ship-brief linked=linked-ship outside
   mkdir -p "$HOME_DIR/data/$id"
@@ -558,28 +593,28 @@ test_high_risk_and_uncertain_inputs_fail_safe() {
   base=$(make_project "$id" no-mistakes localized)
   add_receipt "$id" AC1 test "not passed"
   add_receipt "$id" AC2 lint "passed"
-  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base") \
-    || fail "weak-evidence plan should still be a successful plan"
-  printf '%s' "$out" | jq -e '.tier == "high" and .reason == "default-high"' >/dev/null \
-    || fail "a negative test receipt was treated as strong regression proof"
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base"); rc=$?
+  expect_code 1 "$rc" "negative test evidence blocks validation planning"
+  printf '%s' "$out" | jq -e '.status == "missing" and .missing == ["AC1"]' >/dev/null \
+    || fail "negative test evidence did not leave its criterion missing"
 
   id=zero-test-proof
   base=$(make_project "$id" no-mistakes localized)
   add_receipt "$id" AC1 test "0 tests passed"
   add_receipt "$id" AC2 lint "passed"
-  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base") \
-    || fail "zero-test plan should still be a successful plan"
-  printf '%s' "$out" | jq -e '.tier == "high" and .reason == "default-high"' >/dev/null \
-    || fail "zero tests passed was treated as regression proof"
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base"); rc=$?
+  expect_code 1 "$rc" "zero-test evidence blocks validation planning"
+  printf '%s' "$out" | jq -e '.status == "missing" and .missing == ["AC1"]' >/dev/null \
+    || fail "zero-test evidence did not leave its criterion missing"
 
   id=skipped-test-proof
   base=$(make_project "$id" no-mistakes localized)
   add_receipt "$id" AC1 test "2 passed, 1 skipped"
   add_receipt "$id" AC2 lint "passed"
-  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base") \
-    || fail "skipped-test plan should still be a successful plan"
-  printf '%s' "$out" | jq -e '.tier == "high" and .reason == "default-high"' >/dev/null \
-    || fail "a skipped test run was treated as regression proof"
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base"); rc=$?
+  expect_code 1 "$rc" "skipped-test evidence blocks validation planning"
+  printf '%s' "$out" | jq -e '.status == "missing" and .missing == ["AC1"]' >/dev/null \
+    || fail "skipped-test evidence did not leave its criterion missing"
 
   id=unclassified-login
   base=$(make_project "$id" no-mistakes localized)
@@ -688,6 +723,8 @@ test_direct_and_local_modes_never_invoke_no_mistakes() {
 test_help_advertises_generation_bound_run_binding
 test_reports_missing_criteria_deterministically
 test_complete_and_invalid_ledgers_have_distinct_results
+test_explicit_negative_results_leave_criteria_missing
+test_delivery_mode_mismatch_fails_closed
 test_invalid_brief_and_scout_behavior
 test_pinned_checker_rejects_redirected_and_linked_evidence
 test_shared_criterion_parser_drives_append_and_check

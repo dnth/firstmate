@@ -14,7 +14,9 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 - Receipt appends open the canonical task directory and original single-link ledger through portable no-follow descriptors before validation, so concurrent path replacement cannot redirect evidence.
 - Receipt checks snapshot the pinned non-symlink task contract and single-link ledger before parsing, so task replacement and external hard links cannot redirect completion evidence.
 - Receipt append and check consume one executable acceptance-criterion parser.
+- Structurally valid receipts with explicit failure, negative, empty, zero-test, or skip results remain recorded but leave their criteria unevidenced, while descriptive expected results such as `401` remain eligible.
 - Normal and promoted ship briefs consume the same executable acceptance-evidence and per-mode delivery renderer.
+- The pinned brief and task metadata must record the same concrete delivery mode before validation can proceed.
 - Findings that invalidate a receipt or acceptance claim append one idempotent finding-to-criterion marker to task metadata.
 - Every completion requires path-specific terminal evidence, records its plan path and validated head, invalidates stale completion metadata when the worktree head changes, and refuses completion until the change is replanned or revalidated.
 - Planning and completion refuse tracked, staged, or untracked worktree changes.
@@ -45,6 +47,8 @@ $ tests/fm-receipt-check.test.sh
 ok - fm-receipt-check help renders an executable generation-bound bind command
 ok - fm-receipt-check reports required, evidenced, and missing ids deterministically
 ok - fm-receipt-check distinguishes complete evidence from invalid JSONL
+ok - failed, skipped, empty, and zero-test results stay unevidenced while 401 counts
+ok - pinned brief and metadata delivery modes must match exactly
 ok - invalid ship briefs fail and scout/report behavior stays unchanged
 ok - fm-receipt-check pins task evidence and rejects hard-linked ledgers
 ok - receipt append and check consume one criterion grammar

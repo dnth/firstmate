@@ -25,6 +25,8 @@
 # Every listed criterion is required in v1.
 # IDs must be unique AC-prefixed positive integers, and placeholder descriptions
 # are invalid once completion is checked.
+# Structurally valid receipts with explicit failure, negative, zero-test, empty,
+# or skip result indicators remain recorded but do not evidence their criterion.
 #
 # --plan first requires a complete evidence check, then inspects the recorded
 # worktree's base..HEAD diff with a deterministic conservative classifier.
@@ -45,7 +47,7 @@
 # metadata after confirming that the criterion and evidence contract are current.
 # Delivery mode remains authoritative: direct-PR and local-only never invoke
 # No-Mistakes, while no-mistakes maps low to receipts-mechanical and high to
-# full-no-mistakes.
+# full-no-mistakes, and the pinned brief and metadata mode must match exactly.
 #
 set -eu
 
@@ -360,6 +362,16 @@ else
   echo "error: ship brief has multiple delivery contracts" >&2
   exit 2
 fi
+META_MODE_COUNT=$(grep -c '^mode=' "$META" 2>/dev/null || true)
+[ "$META_MODE_COUNT" -eq 1 ] \
+  || { echo "error: task metadata must contain exactly one concrete delivery mode" >&2; exit 2; }
+META_MODE=$(sed -n 's/^mode=//p' "$META")
+case "$META_MODE" in
+  no-mistakes|direct-PR|local-only) ;;
+  *) echo "error: task metadata has no concrete delivery mode" >&2; exit 2 ;;
+esac
+[ "$META_MODE" = "$MODE" ] \
+  || { echo "error: task metadata delivery mode contradicts the pinned ship brief" >&2; exit 2; }
 CRITERIA="$TMP_ROOT/criteria.tsv"
 EVIDENCED="$TMP_ROOT/evidenced"
 INVALID="$TMP_ROOT/invalid"
@@ -367,8 +379,11 @@ STRONG_RESULT_MODULE="$TMP_ROOT/strong-result.jq"
 : > "$EVIDENCED"
 : > "$INVALID"
 cat > "$STRONG_RESULT_MODULE" <<'JQ'
+def evidence_result:
+  (test("^[[:space:]]*$") | not)
+  and (test("(^|[^[:alnum:]_])(fail(ed|ure)?|error|negative|red|broken|skip(ped)?|empty)([^[:alnum:]_]|$)|not[[:space:]]+pass(ed)?|no[[:space:]]+tests?|(^|[^0-9])0[[:space:]]+(tests?([[:space:]]+passed)?|passed)([^[:alnum:]_]|$)"; "i") | not);
 def strong_result:
-  (test("(fail|error|not[[:space:]]+pass|red|broken|skip|(^|[^0-9])0[[:space:]]+(tests?[[:space:]]+)?pass|no[[:space:]]+tests?|empty)"; "i") | not)
+  evidence_result
   and test("^([[:space:]]*(pass(ed)?|success(ful)?|green|clean|ok)[[:space:]]*|[[:space:]]*[1-9][0-9]*[[:space:]]+(tests?[[:space:]]+)?passed([[:space:]].*)?)$"; "i");
 JQ
 
@@ -409,8 +424,10 @@ if [ "$LEDGER_EXISTS" = true ]; then
       printf 'line %s: undeclared criterion %s\n' "$line_number" "$receipt_criterion" >> "$INVALID"
       continue
     fi
-    printf '%s\n' "$receipt_criterion" >> "$EVIDENCED"
     RECEIPT_COUNT=$((RECEIPT_COUNT + 1))
+    if printf '%s' "$line" | jq -L "$TMP_ROOT" -e 'include "strong-result"; .result | evidence_result' >/dev/null 2>&1; then
+      printf '%s\n' "$receipt_criterion" >> "$EVIDENCED"
+    fi
   done < "$LEDGER"
 fi
 
@@ -676,12 +693,6 @@ fi
 [ -f "$META" ] && [ ! -L "$META" ] \
   || { echo "error: task metadata is missing or unsafe: $META" >&2; exit 2; }
 WORKTREE=$(grep '^worktree=' "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-META_MODE=$(grep '^mode=' "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-[ -n "$META_MODE" ] && MODE=$META_MODE
-case "$MODE" in
-  no-mistakes|direct-PR|local-only) ;;
-  *) echo "error: task metadata has no concrete delivery mode" >&2; exit 2 ;;
-esac
 [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ] \
   || { echo "error: validation worktree is missing" >&2; exit 2; }
 if [ -n "$(git -C "$WORKTREE" status --porcelain --untracked-files=all 2>/dev/null)" ]; then
