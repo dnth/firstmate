@@ -42,14 +42,12 @@ case "$MODE:$#" in
 esac
 
 command -v perl >/dev/null 2>&1 || { echo "error: perl is required" >&2; exit 1; }
-[ -d "$DATA" ] || { echo "error: data directory is missing: $DATA" >&2; exit 1; }
-DATA_REAL=$(CDPATH='' cd -- "$DATA" 2>/dev/null && pwd -P) \
-  || { echo "error: data directory is unsafe: $DATA" >&2; exit 1; }
 
-FM_RECEIPT_STORE_DATA="$DATA_REAL" FM_RECEIPT_STORE_ID="$ID" FM_RECEIPT_STORE_MODE="$MODE" \
+FM_RECEIPT_STORE_DATA="$DATA" FM_RECEIPT_STORE_ID="$ID" FM_RECEIPT_STORE_MODE="$MODE" \
   perl - "$@" <<'PERL'
 use strict;
 use warnings;
+use Cwd qw(getcwd);
 use Errno qw(ENOENT EINTR);
 use Fcntl qw(:DEFAULT :flock :mode);
 
@@ -86,20 +84,30 @@ sub copy_file {
 }
 
 my $data_path = $ENV{FM_RECEIPT_STORE_DATA};
-sysopen(my $data, $data_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
-  or refuse("data directory is missing or unsafe: $data_path");
-my @data_identity = stat($data);
-refuse("data path is not a directory") unless @data_identity && S_ISDIR($data_identity[2]);
-my @named_data_identity = lstat($data_path);
-refuse("data directory identity changed") unless @named_data_identity
-  && !S_ISLNK($named_data_identity[2])
-  && $named_data_identity[0] == $data_identity[0]
-  && $named_data_identity[1] == $data_identity[1];
-chdir($data_path) or refuse("data directory could not be entered safely");
-my @data_cwd_identity = stat(".");
-refuse("data directory identity changed after entry") unless @data_cwd_identity
-  && $data_cwd_identity[0] == $data_identity[0]
-  && $data_cwd_identity[1] == $data_identity[1];
+$data_path = getcwd() . "/" . $data_path unless $data_path =~ m{^/};
+my @components = grep { length($_) } split(m{/+}, $data_path);
+refuse("data directory path is unsafe") if !@components || grep { $_ eq "." || $_ eq ".." } @components;
+sysopen(my $root, "/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+  or refuse("absolute root could not be pinned");
+chdir("/") or refuse("absolute root could not be entered");
+my @pins = ($root);
+for my $component (@components) {
+  sysopen(my $next, $component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+    or refuse("data path component is missing or unsafe: $component");
+  my @next_identity = stat($next);
+  refuse("data path component is not a directory: $component") unless @next_identity && S_ISDIR($next_identity[2]);
+  my @named_next_identity = lstat($component);
+  refuse("data path component identity changed: $component") unless @named_next_identity
+    && !S_ISLNK($named_next_identity[2])
+    && $named_next_identity[0] == $next_identity[0]
+    && $named_next_identity[1] == $next_identity[1];
+  chdir($component) or refuse("data path component could not be entered safely: $component");
+  my @cwd_identity = stat(".");
+  refuse("data path component identity changed after entry: $component") unless @cwd_identity
+    && $cwd_identity[0] == $next_identity[0]
+    && $cwd_identity[1] == $next_identity[1];
+  push @pins, $next;
+}
 
 my $task_name = $ENV{FM_RECEIPT_STORE_ID};
 sysopen(my $task, $task_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)

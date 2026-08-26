@@ -280,9 +280,6 @@ case "$KIND" in
 esac
 
 command -v perl >/dev/null 2>&1 || { echo "error: perl is required" >&2; exit 2; }
-[ -d "$DATA" ] || { echo "error: data directory is missing: $DATA" >&2; exit 2; }
-DATA_REAL=$(CDPATH='' cd -- "$DATA" 2>/dev/null && pwd -P) \
-  || { echo "error: data directory is unsafe: $DATA" >&2; exit 2; }
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-receipt-check.XXXXXX")
 TMP_ROOT=$(CDPATH='' cd -- "$TMP_ROOT" && pwd -P)
 VALIDATION_LOCK=
@@ -316,7 +313,7 @@ LEDGER="$TMP_ROOT/evidence.jsonl"
 STORE_READY="$TMP_ROOT/store.ready"
 STORE_RELEASE="$TMP_ROOT/store.release"
 mkfifo "$STORE_RELEASE"
-FM_DATA_OVERRIDE="$DATA_REAL" "$SCRIPT_DIR/fm-receipt-store.sh" "$ID" hold \
+FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-receipt-store.sh" "$ID" hold \
   "$BRIEF" "$LEDGER" "$STORE_READY" "$STORE_RELEASE" &
 STORE_PID=$!
 while [ ! -s "$STORE_READY" ]; do

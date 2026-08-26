@@ -278,6 +278,62 @@ EOF
   pass "fm-receipt rejects data-directory replacement before its pinned open"
 }
 
+test_open_data_directory_replacement_is_rejected() {
+  local id=opened-data-swap data moved replacement modules ready release pid rc
+  write_ship "$id"
+  data="$HOME_DIR/data"
+  moved="$HOME_DIR/data-opened"
+  replacement="$HOME_DIR/data"
+  modules="$TMP_ROOT/opened-data-modules"
+  ready="$TMP_ROOT/opened-data-ready"
+  release="$TMP_ROOT/opened-data-release"
+  mkdir -p "$modules"
+  mkfifo "$release"
+  cat > "$modules/HoldDataOpen.pm" <<'PERL'
+package HoldDataOpen;
+use strict;
+use warnings;
+our $held = 0;
+BEGIN {
+  *CORE::GLOBAL::sysopen = sub (*$$;$) {
+    my $ok = @_ == 4
+      ? CORE::sysopen($_[0], $_[1], $_[2], $_[3])
+      : CORE::sysopen($_[0], $_[1], $_[2]);
+    if ($ok && !$held && $_[1] eq "data") {
+      $held = 1;
+      open(my $ready, ">", $ENV{FM_DATA_OPEN_READY}) or die "ready failed\n";
+      close($ready) or die "ready close failed\n";
+      open(my $release, "<", $ENV{FM_DATA_OPEN_RELEASE}) or die "release failed\n";
+      <$release>;
+    }
+    return $ok;
+  };
+}
+1;
+PERL
+  PERL5LIB="$modules" PERL5OPT=-MHoldDataOpen FM_DATA_OPEN_READY="$ready" \
+    FM_DATA_OPEN_RELEASE="$release" FM_HOME="$HOME_DIR" \
+    "$RECEIPT" "$id" AC1 test summary passed > "$TMP_ROOT/opened-data-output" 2>&1 &
+  pid=$!
+  while [ ! -e "$ready" ]; do
+    kill -0 "$pid" 2>/dev/null || fail "receipt exited before pinning the data directory"
+  done
+  mv "$data" "$moved"
+  mkdir -p "$replacement/$id"
+  cp "$moved/$id/brief.md" "$replacement/$id/brief.md"
+  : > "$replacement/$id/evidence.jsonl"
+  printf 'continue\n' > "$release"
+  wait "$pid"
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "receipt accepted a regular replacement after opening data"
+  [ ! -s "$moved/$id/evidence.jsonl" ] || fail "rejected opened-data replacement mutated the original ledger"
+  [ ! -s "$replacement/$id/evidence.jsonl" ] || fail "opened-data replacement redirected the receipt"
+  rm "$replacement/$id/brief.md" "$replacement/$id/evidence.jsonl"
+  rmdir "$replacement/$id" "$replacement"
+  mv "$moved" "$data"
+  pass "fm-receipt rejects regular data replacement after pinning"
+}
+
 test_ledger_replacement_after_open_cannot_redirect_append() {
   local id=swapped-ledger task ledger pinned replacement ready release holder receipt_pid rc
   id=swapped-ledger
@@ -325,4 +381,5 @@ test_portable_paths_and_failed_append_rollback
 test_rejects_non_ship_and_unsafe_ledger
 test_task_directory_swap_before_open_is_rejected
 test_data_directory_swap_before_open_is_rejected
+test_open_data_directory_replacement_is_rejected
 test_ledger_replacement_after_open_cannot_redirect_append

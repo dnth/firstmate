@@ -96,9 +96,6 @@ case "$SUMMARY" in *[![:space:]]*) ;; *) echo "error: summary must not be empty"
 case "$RESULT" in *[![:space:]]*) ;; *) echo "error: result must not be empty" >&2; exit 2 ;; esac
 
 command -v jq >/dev/null 2>&1 || { echo "error: jq is required" >&2; exit 1; }
-[ -d "$DATA" ] || { echo "error: data directory is missing: $DATA" >&2; exit 1; }
-DATA_REAL=$(CDPATH='' cd -- "$DATA" 2>/dev/null && pwd -P) \
-  || { echo "error: data directory is unsafe: $DATA" >&2; exit 1; }
 
 receipt=$(jq -cn \
   --arg criterion "$CRITERION" \
@@ -114,7 +111,7 @@ receipt=$(jq -cn \
     + (if $file == "" then {} else {file:$file} end)
   ')
 
-if ! FM_DATA_OVERRIDE="$DATA_REAL" FM_RECEIPT_PAYLOAD="$receipt" \
+if ! FM_DATA_OVERRIDE="$DATA" FM_RECEIPT_PAYLOAD="$receipt" \
   "$SCRIPT_DIR/fm-receipt-store.sh" "$ID" append "$CRITERION" "$SCRIPT_DIR/fm-receipt-check.sh"; then
   exit 1
 fi
