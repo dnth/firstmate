@@ -45,6 +45,7 @@ const secretFixture = [
   "0123456789abcdef0123456789abcdef",
   "API_KEY=abcdefghijk123456",
   'QUOTED_API_KEY="abcdefgh"',
+  'ESCAPED_API_KEY="abcd\\"efgh"',
   "PASSWORD='hunter2!'",
   "glrt-abcdefghijklmnop",
   "gldt-abcdefghijklmnop",
@@ -55,12 +56,14 @@ assert.match(redacted, /ordinary prose stays visible/);
 assert.match(redacted, /\[REDACTED:ANSIBLE_VAULT\]/);
 assert.match(redacted, /\[REDACTED:API_KEY\]/);
 assert.match(redacted, /\[REDACTED:QUOTED_API_KEY\]/);
+assert.match(redacted, /\[REDACTED:ESCAPED_API_KEY\]/);
 assert.match(redacted, /\[REDACTED:PASSWORD\]/);
 assert.ok(!redacted.includes("0123456789abcdef0123456789abcdef"));
 assert.ok(!redacted.includes("glrt-abcdefghijklmnop"));
 assert.ok(!redacted.includes("gldt-abcdefghijklmnop"));
 assert.ok(!redacted.includes("glcbt-abcdefghijklmnop"));
 assert.equal(redactSecretText('API_KEY="1234567"'), 'API_KEY="1234567"');
+assert.equal(redactSecretText('API_KEY="abc\\"def"'), 'API_KEY="abc\\"def"');
 assert.equal(redactToolResultContent([{ type: "text", text: "ordinary prose" }]), undefined);
 const chunks = redactToolResultContent([
   { type: "text", text: "API_KEY=abcdefghijk123456" },
@@ -181,3 +184,45 @@ after_handler=$(fixture_digest)
 [ "$before_handler" = "$after_handler" ] \
   || fail "OMP fleet handlers mutated the observable board or state bytes"
 pass "OMP fleet drift and compaction handlers leave board and state bytes unchanged"
+
+mkfifo "$HOME_FIXTURE/state/a-fifo.meta"
+FM_HOOKS="$HANDLER_HOOKS" FM_HOME="$HOME_FIXTURE" FM_STATE_OVERRIDE="$HOME_FIXTURE/state" \
+FM_DATA_OVERRIDE="$HOME_FIXTURE/data" node --experimental-strip-types --input-type=module <<'JS'
+import assert from "node:assert/strict";
+const { default: extension } = await import(process.env.FM_HOOKS);
+const handlers = new Map();
+extension({ on(name, handler) { handlers.set(name, handler); } });
+const started = Date.now();
+assert.equal(await handlers.get("session.compacting")({}, {}), undefined);
+assert.ok(Date.now() - started < 1000);
+JS
+fifo_status=$?
+rm "$HOME_FIXTURE/state/a-fifo.meta"
+expect_code 0 "$fifo_status" "OMP fleet compaction should reject FIFO metadata without blocking"
+
+ln -s ship-1.meta "$HOME_FIXTURE/state/a-link.meta"
+FM_HOOKS="$HANDLER_HOOKS" FM_HOME="$HOME_FIXTURE" FM_STATE_OVERRIDE="$HOME_FIXTURE/state" \
+FM_DATA_OVERRIDE="$HOME_FIXTURE/data" node --experimental-strip-types --input-type=module <<'JS'
+import assert from "node:assert/strict";
+const { default: extension } = await import(process.env.FM_HOOKS);
+const handlers = new Map();
+extension({ on(name, handler) { handlers.set(name, handler); } });
+assert.equal(await handlers.get("session.compacting")({}, {}), undefined);
+JS
+link_status=$?
+rm "$HOME_FIXTURE/state/a-link.meta"
+expect_code 0 "$link_status" "OMP fleet compaction should reject symlink metadata"
+
+dd if=/dev/zero of="$HOME_FIXTURE/state/z-large.meta" bs=65537 count=1 2>/dev/null
+FM_HOOKS="$HANDLER_HOOKS" FM_HOME="$HOME_FIXTURE" FM_STATE_OVERRIDE="$HOME_FIXTURE/state" \
+FM_DATA_OVERRIDE="$HOME_FIXTURE/data" node --experimental-strip-types --input-type=module <<'JS'
+import assert from "node:assert/strict";
+const { default: extension } = await import(process.env.FM_HOOKS);
+const handlers = new Map();
+extension({ on(name, handler) { handlers.set(name, handler); } });
+assert.equal(await handlers.get("session.compacting")({}, {}), undefined);
+JS
+large_status=$?
+rm "$HOME_FIXTURE/state/z-large.meta"
+expect_code 0 "$large_status" "OMP fleet compaction should reject oversized metadata"
+pass "OMP fleet compaction rejects unsafe metadata entries without blocking"

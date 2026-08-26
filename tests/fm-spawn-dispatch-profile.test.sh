@@ -2113,7 +2113,7 @@ test_omp_secondmate_inspects_staged_live_extensions() {
     "OMP secondmate refusal incorrectly flagged Firstmate's exact tracked fleet hooks"
   assert_no_grep 'new-window|new-session' "$CASE_DIR/endpoint.log" \
     "OMP staged secondmate-extension refusal created an endpoint"
-  pass "OMP secondmates inspect staged live extensions"
+  pass "OMP secondmates trust exact primary and fleet extensions while inspecting staged code"
 }
 
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {

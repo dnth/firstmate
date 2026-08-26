@@ -2,7 +2,7 @@
 // This adapter is intentionally separate from fm-primary-omp.ts, which owns
 // native lifecycle and watcher integration.
 import { spawnSync } from "node:child_process";
-import { readdirSync, readFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readdirSync, readSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
@@ -16,8 +16,9 @@ const SECRET_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
 	{ pattern: /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/g, label: "BEARER" },
 ];
 
-const NAMED_SECRET_PATTERN = /\b((?:[A-Za-z_][A-Za-z0-9_]*)?(?:KEY|SECRET|TOKEN|PASSWORD|PASS|CREDENTIAL)[A-Za-z0-9_]*)\s*=\s*(?:"([^"\r\n]{8,})"|'([^'\r\n]{8,})'|([^\s"'`]{8,}))/g;
+const NAMED_SECRET_PATTERN = /\b((?:[A-Za-z_][A-Za-z0-9_]*)?(?:KEY|SECRET|TOKEN|PASSWORD|PASS|CREDENTIAL)[A-Za-z0-9_]*)\s*=\s*(?:"((?:\\.|[^"\\\r\n]){8,})"|'((?:\\.|[^'\\\r\n]){8,})'|([^\s"'`]{8,}))/g;
 const READ_ONLY_TIMEOUT_MS = 2000;
+const MAX_META_BYTES = 64 * 1024;
 
 /** Redact only credential-shaped substrings, preserving ordinary prose. */
 export function redactSecretText(text: string): string {
@@ -162,12 +163,31 @@ function runReadOnly(command: string, args: string[], extensionRoot: string, fmH
 	return result.stdout ?? "";
 }
 
+function readFleetMetaFile(path: string): string {
+	const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+	try {
+		const stat = fstatSync(fd);
+		if (!stat.isFile() || stat.size > MAX_META_BYTES) throw new TypeError("fleet metadata is not a bounded regular file");
+		const buffer = Buffer.alloc(MAX_META_BYTES + 1);
+		let length = 0;
+		while (length < buffer.length) {
+			const bytesRead = readSync(fd, buffer, length, buffer.length - length, null);
+			if (bytesRead === 0) break;
+			length += bytesRead;
+		}
+		if (length > MAX_META_BYTES) throw new TypeError("fleet metadata exceeds the size bound");
+		return buffer.subarray(0, length).toString("utf8");
+	} finally {
+		closeSync(fd);
+	}
+}
+
 function readFleetSnapshot(extensionRoot: string, fmHome: string, state: string): string {
 	const metas: FleetMeta[] = [];
 	for (const entry of readdirSync(state)) {
 		if (!entry.endsWith(".meta")) continue;
 		const id = entry.slice(0, -5);
-		metas.push(parseFleetMeta(id, readFileSync(resolve(state, entry), "utf8")));
+		metas.push(parseFleetMeta(id, readFleetMetaFile(resolve(state, entry))));
 	}
 	const openDecisionRows = runReadOnly("bash", ["-c", '. "$1/bin/fm-classify-lib.sh"; scan_open_decisions "$2"', "_", extensionRoot, state], extensionRoot, fmHome);
 	const todoProjection = runReadOnly(resolve(extensionRoot, "bin/fm-todo-project.sh"), ["--emit"], extensionRoot, fmHome);
