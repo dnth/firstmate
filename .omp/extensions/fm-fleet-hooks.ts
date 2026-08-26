@@ -11,12 +11,13 @@ export type ToolContent = { type: string; text?: string; [key: string]: unknown 
 
 const SECRET_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
 	{ pattern: /\$ANSIBLE_VAULT;[^\r\n]+(?:\r?\n[0-9a-fA-F]{16,})+/g, label: "ANSIBLE_VAULT" },
-	{ pattern: /\b(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{12,}|gloas-[A-Za-z0-9_-]{12,}|sk-(?:proj-)?[A-Za-z0-9_-]{16,})\b/g, label: "TOKEN" },
+	{ pattern: /\b(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9_]{20,}|gl(?:pat|oas|rt|dt|cbt)-[A-Za-z0-9_-]{12,}|sk-(?:proj-)?[A-Za-z0-9_-]{16,})\b/g, label: "TOKEN" },
 	{ pattern: /\bAKIA[0-9A-Z]{16}\b/g, label: "AWS_ACCESS_KEY" },
 	{ pattern: /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/g, label: "BEARER" },
 ];
 
-const NAMED_SECRET_PATTERN = /\b([A-Za-z_][A-Za-z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD|PASS|CREDENTIAL)[A-Za-z0-9_]*)\s*=\s*([^\s"'`]{8,})/g;
+const NAMED_SECRET_PATTERN = /\b((?:[A-Za-z_][A-Za-z0-9_]*)?(?:KEY|SECRET|TOKEN|PASSWORD|PASS|CREDENTIAL)[A-Za-z0-9_]*)\s*=\s*(?:"([^"\r\n]{8,})"|'([^'\r\n]{8,})'|([^\s"'`]{8,}))/g;
+const READ_ONLY_TIMEOUT_MS = 2000;
 
 /** Redact only credential-shaped substrings, preserving ordinary prose. */
 export function redactSecretText(text: string): string {
@@ -42,10 +43,17 @@ export function redactToolResultContent(content: readonly ToolContent[]): ToolCo
 
 /** Parse report-only fm-todo-project --check output into a bounded note. */
 export function parseTodoCheckDrift(output: string): string | undefined {
-	const findings = output
-		.split(/\r?\n/)
-		.map((line) => line.trim())
-		.filter((line) => line.startsWith("DRIFT "));
+	const findings: string[] = [];
+	for (const rawLine of output.split(/\r?\n/)) {
+		const line = rawLine.trim();
+		if (!line) continue;
+		if (line.startsWith("DRIFT ")) {
+			findings.push(line);
+			continue;
+		}
+		if (line.startsWith("DRIFT-CHECK-SKIPPED: ")) continue;
+		throw new TypeError("drift output is malformed");
+	}
 	if (findings.length === 0) return undefined;
 	const suffix = findings.length > 1 ? ` (+${findings.length - 1} more)` : "";
 	const first = findings[0].slice(0, 220);
@@ -147,8 +155,10 @@ function runReadOnly(command: string, args: string[], extensionRoot: string, fmH
 		encoding: "utf8",
 		env: { ...process.env, FM_HOME: fmHome },
 		maxBuffer: 256 * 1024,
+		timeout: READ_ONLY_TIMEOUT_MS,
+		killSignal: "SIGKILL",
 	});
-	if (result.error || result.status !== 0) throw result.error ?? new Error(`${command} failed`);
+	if (result.error || result.status !== 0 || result.signal || result.stderr) throw result.error ?? new Error(`${command} failed`);
 	return result.stdout ?? "";
 }
 
@@ -182,13 +192,7 @@ export default function fmFleetHooks(pi: ExtensionAPI): void {
 		try {
 			const extensionRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 			const fmHome = process.env.FM_HOME || extensionRoot;
-			const result = spawnSync(resolve(extensionRoot, "bin/fm-todo-project.sh"), ["--check"], {
-				cwd: extensionRoot,
-				encoding: "utf8",
-				env: { ...process.env, FM_HOME: fmHome },
-				maxBuffer: 256 * 1024,
-			});
-			const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+			const output = runReadOnly(resolve(extensionRoot, "bin/fm-todo-project.sh"), ["--check"], extensionRoot, fmHome);
 			const note = parseTodoCheckDrift(output);
 			if (!note) return undefined;
 			const sendMessage = (pi as unknown as { sendMessage?: (message: string, options?: { deliverAs?: string }) => void }).sendMessage;

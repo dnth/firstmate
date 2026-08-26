@@ -44,12 +44,23 @@ const secretFixture = [
   "$ANSIBLE_VAULT;1.1;AES256",
   "0123456789abcdef0123456789abcdef",
   "API_KEY=abcdefghijk123456",
+  'QUOTED_API_KEY="abcdefgh"',
+  "PASSWORD='hunter2!'",
+  "glrt-abcdefghijklmnop",
+  "gldt-abcdefghijklmnop",
+  "glcbt-abcdefghijklmnop",
 ].join("\n");
 const redacted = redactSecretText(secretFixture);
 assert.match(redacted, /ordinary prose stays visible/);
 assert.match(redacted, /\[REDACTED:ANSIBLE_VAULT\]/);
 assert.match(redacted, /\[REDACTED:API_KEY\]/);
+assert.match(redacted, /\[REDACTED:QUOTED_API_KEY\]/);
+assert.match(redacted, /\[REDACTED:PASSWORD\]/);
 assert.ok(!redacted.includes("0123456789abcdef0123456789abcdef"));
+assert.ok(!redacted.includes("glrt-abcdefghijklmnop"));
+assert.ok(!redacted.includes("gldt-abcdefghijklmnop"));
+assert.ok(!redacted.includes("glcbt-abcdefghijklmnop"));
+assert.equal(redactSecretText('API_KEY="1234567"'), 'API_KEY="1234567"');
 assert.equal(redactToolResultContent([{ type: "text", text: "ordinary prose" }]), undefined);
 const chunks = redactToolResultContent([
   { type: "text", text: "API_KEY=abcdefghijk123456" },
@@ -60,6 +71,8 @@ assert.match(chunks?.[0].text ?? "", /REDACTED:API_KEY/);
 
 assert.equal(parseTodoCheckDrift(""), undefined);
 assert.match(parseTodoCheckDrift("DRIFT queued-has-worker: queued-1 - worker exists") ?? "", /queued-1/);
+assert.equal(parseTodoCheckDrift("DRIFT-CHECK-SKIPPED: tasks-axi unavailable"), undefined);
+assert.throws(() => parseTodoCheckDrift("unexpected output"), /malformed/);
 
 assert.deepEqual(parseFleetMeta("ship-1", "kind=ship\nwindow=crew:ship-1\nproject=alpha\npr=https://github.com/example/alpha/pull/7\n"), {
   id: "ship-1", kind: "ship", window: "crew:ship-1", project: "alpha", pr: "https://github.com/example/alpha/pull/7",
@@ -116,9 +129,16 @@ cp "$FM_HOOKS" "$HANDLER_ROOT/.omp/extensions/fm-fleet-hooks.ts"
 cp "$ROOT/bin/fm-classify-lib.sh" "$HANDLER_ROOT/bin/fm-classify-lib.sh"
 cat > "$HANDLER_ROOT/bin/fm-todo-project.sh" <<'SH'
 #!/usr/bin/env bash
-case "${1:-}" in
-  --check) printf '%s\n' 'DRIFT queued-has-worker: queued-1 - worker exists' ;;
-  --emit) printf '%s\n' '[{"phase":"Active","items":["ship-1 - Ship Alpha"]},{"phase":"Ready","items":["queued-1 - Queue Beta"]}]' ;;
+[ "$#" -eq 1 ] || exit 2
+case "${FM_FAKE_TODO_MODE:-ok}:${1:-}" in
+  partial-failure:--check)
+    printf '%s\n' 'DRIFT queued-has-worker: partial output must be ignored'
+    exit 7
+    ;;
+  invalid:--check) printf '%s\n' 'not a drift protocol line' ;;
+  hang:--check) exec sleep 10 ;;
+  ok:--check) printf '%s\n' 'DRIFT queued-has-worker: queued-1 - worker exists' ;;
+  *:--emit) printf '%s\n' '[{"phase":"Active","items":["ship-1 - Ship Alpha"]},{"phase":"Ready","items":["queued-1 - Queue Beta"]}]' ;;
   *) exit 2 ;;
 esac
 SH
@@ -138,6 +158,18 @@ assert.equal(await handlers.get("tool_result")({ content: null }), undefined);
 const reminder = await handlers.get("todo_reminder")({}, {});
 assert.match(reminder?.context?.[0] ?? "", /Firstmate board drift/);
 assert.equal(sent.length, 1);
+process.env.FM_FAKE_TODO_MODE = "partial-failure";
+assert.equal(await handlers.get("todo_reminder")({}, {}), undefined);
+assert.equal(sent.length, 1);
+process.env.FM_FAKE_TODO_MODE = "invalid";
+assert.equal(await handlers.get("todo_reminder")({}, {}), undefined);
+assert.equal(sent.length, 1);
+process.env.FM_FAKE_TODO_MODE = "hang";
+const timeoutStarted = Date.now();
+assert.equal(await handlers.get("todo_reminder")({}, {}), undefined);
+assert.ok(Date.now() - timeoutStarted < 5000);
+assert.equal(sent.length, 1);
+process.env.FM_FAKE_TODO_MODE = "ok";
 const compacted = await handlers.get("session.compacting")({}, {});
 assert.match(compacted?.context?.[0] ?? "", /Firstmate fleet snapshot/);
 assert.match(compacted?.context?.[0] ?? "", /ship-1/);
