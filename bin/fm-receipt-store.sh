@@ -12,6 +12,9 @@
 # with the same status.
 # append validates the pinned ship brief and criterion, then appends the compact
 # JSON payload from FM_RECEIPT_PAYLOAD under an exclusive ledger lock.
+# promote holds the exclusive task lock across the transaction child's documented
+# phases, durably commits task and state replacements, recovers identity-bound
+# unfinished work, and retains the committed record through retirement.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -127,6 +130,34 @@ sub write_new_file {
   close($output) or refuse("promotion metadata artifact could not be closed");
 }
 
+sub pin_absolute_directory {
+  my ($path, $label) = @_;
+  refuse("$label directory path is unsafe") unless defined($path) && $path =~ m{^/};
+  my @components = grep { length($_) } split(m{/+}, $path);
+  refuse("$label directory path is unsafe") if !@components || grep { $_ eq "." || $_ eq ".." } @components;
+  sysopen(my $root, "/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+    or refuse("absolute root could not be pinned");
+  chdir("/") or refuse("absolute root could not be entered");
+  my @pins = ($root);
+  my $last = $root;
+  for my $component (@components) {
+    sysopen(my $next, $component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+      or refuse("$label path component is missing or unsafe: $component");
+    my @next_identity = stat($next);
+    refuse("$label path component is not a directory: $component") unless @next_identity && S_ISDIR($next_identity[2]);
+    my @named_identity = lstat($component);
+    refuse("$label path component identity changed: $component") unless @named_identity
+      && !S_ISLNK($named_identity[2]) && $named_identity[0] == $next_identity[0] && $named_identity[1] == $next_identity[1];
+    chdir($component) or refuse("$label path component could not be entered safely: $component");
+    my @entered_identity = stat(".");
+    refuse("$label path component identity changed after entry: $component") unless @entered_identity
+      && $entered_identity[0] == $next_identity[0] && $entered_identity[1] == $next_identity[1];
+    push @pins, $next;
+    $last = $next;
+  }
+  return ($last, \@pins);
+}
+
 sub retire_promotion_task_artifacts {
   my ($token) = @_;
   my $owner_name = ".promotion.owner.$token";
@@ -160,29 +191,7 @@ sub retire_promotion_task_artifacts {
 
 my $data_path = $ENV{FM_RECEIPT_STORE_DATA};
 $data_path = getcwd() . "/" . $data_path unless $data_path =~ m{^/};
-my @components = grep { length($_) } split(m{/+}, $data_path);
-refuse("data directory path is unsafe") if !@components || grep { $_ eq "." || $_ eq ".." } @components;
-sysopen(my $root, "/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
-  or refuse("absolute root could not be pinned");
-chdir("/") or refuse("absolute root could not be entered");
-my @pins = ($root);
-for my $component (@components) {
-  sysopen(my $next, $component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
-    or refuse("data path component is missing or unsafe: $component");
-  my @next_identity = stat($next);
-  refuse("data path component is not a directory: $component") unless @next_identity && S_ISDIR($next_identity[2]);
-  my @named_next_identity = lstat($component);
-  refuse("data path component identity changed: $component") unless @named_next_identity
-    && !S_ISLNK($named_next_identity[2])
-    && $named_next_identity[0] == $next_identity[0]
-    && $named_next_identity[1] == $next_identity[1];
-  chdir($component) or refuse("data path component could not be entered safely: $component");
-  my @cwd_identity = stat(".");
-  refuse("data path component identity changed after entry: $component") unless @cwd_identity
-    && $cwd_identity[0] == $next_identity[0]
-    && $cwd_identity[1] == $next_identity[1];
-  push @pins, $next;
-}
+my ($data_root, $data_pins) = pin_absolute_directory($data_path, "data");
 
 my $task_name = $ENV{FM_RECEIPT_STORE_ID};
 sysopen(my $task, $task_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
@@ -265,31 +274,7 @@ if ($ENV{FM_RECEIPT_STORE_MODE} eq "promote") {
   my ($command, @command_args) = @ARGV;
   my $contract_hash = sha256_hex(join("\0", @command_args));
   my $state_path = $ENV{FM_RECEIPT_STORE_STATE} // "";
-  refuse("promotion state directory path is unsafe") unless $state_path =~ m{^/};
-  my @state_components = grep { length($_) } split(m{/+}, $state_path);
-  refuse("promotion state directory path is unsafe") if !@state_components
-    || grep { $_ eq "." || $_ eq ".." } @state_components;
-  chdir("/") or refuse("absolute root could not be entered for promotion state");
-  my @state_pins;
-  my $state;
-  for my $component (@state_components) {
-    sysopen(my $next, $component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
-      or refuse("state path component is missing or unsafe: $component");
-    my @next_identity = stat($next);
-    refuse("state path component is not a directory: $component") unless @next_identity && S_ISDIR($next_identity[2]);
-    my @named_next_identity = lstat($component);
-    refuse("state path component identity changed: $component") unless @named_next_identity
-      && !S_ISLNK($named_next_identity[2])
-      && $named_next_identity[0] == $next_identity[0]
-      && $named_next_identity[1] == $next_identity[1];
-    chdir($component) or refuse("state path component could not be entered safely: $component");
-    my @entered_identity = stat(".");
-    refuse("state path component identity changed after entry: $component") unless @entered_identity
-      && $entered_identity[0] == $next_identity[0]
-      && $entered_identity[1] == $next_identity[1];
-    push @state_pins, $next;
-    $state = $next;
-  }
+  my ($state, $state_pins) = pin_absolute_directory($state_path, "state");
   my $meta_name = "$task_name.meta";
   chdir($task) or refuse("pinned task directory could not be re-entered");
   opendir(my $task_entries, ".") or refuse("promotion task directory could not be inspected");

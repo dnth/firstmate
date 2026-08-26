@@ -56,6 +56,8 @@ test_help_advertises_generation_bound_run_binding() {
     "receipt store help omitted the pinned read mode"
   assert_contains "$out" "append <criterion> <criterion-parser>" \
     "receipt store help omitted the pinned append mode"
+  assert_contains "$out" "recovers identity-bound" \
+    "receipt store help omitted promotion recovery ownership"
   out=$("$BRIEF" --render-ship-delivery help-task no-mistakes) \
     || fail "ship delivery renderer failed"
   assert_contains "$out" "fm-receipt-check.sh help-task --implementation-complete" \

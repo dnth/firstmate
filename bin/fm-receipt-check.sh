@@ -301,11 +301,16 @@ VALIDATION_LOCK=
 STORE_PID=
 STORE_RELEASE=
 STORE_RELEASE_OPEN=0
+STORE_READY=
 cleanup() {
   [ -z "$VALIDATION_LOCK" ] || rmdir "$VALIDATION_LOCK" 2>/dev/null || true
   if [ -n "$STORE_PID" ]; then
     if kill -0 "$STORE_PID" 2>/dev/null; then
-      printf 'release\n' >&9 2>/dev/null || true
+      if [ -s "$STORE_READY" ]; then
+        printf 'release\n' >&9 2>/dev/null || true
+      else
+        kill -TERM "$STORE_PID" 2>/dev/null || true
+      fi
     fi
     wait "$STORE_PID" 2>/dev/null || true
   fi

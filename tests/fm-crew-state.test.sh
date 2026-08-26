@@ -62,6 +62,7 @@ make_fakebin() {  # <dir> -> echoes fakebin path
   cat > "$fb/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 set -u
+[ -z "${FM_FAKE_NM_CALL_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_NM_CALL_LOG"
 case "${1:-}" in
   axi)
     shift
@@ -143,7 +144,7 @@ run_crew_state() {  # <case-dir> <id>
   local case_dir=$1 id=$2 brief ledger fixture_head fixture_mode added_mode=0
   if grep -qx 'kind=ship' "$case_dir/state/$id.meta" 2>/dev/null; then
     fixture_mode=$(sed -n 's/^mode=//p' "$case_dir/state/$id.meta" | tail -1)
-    [ -n "$fixture_mode" ] || fixture_mode=direct-PR
+    [ -n "$fixture_mode" ] || fixture_mode=no-mistakes
     brief="$case_dir/data/$id/brief.md"
     ledger="$case_dir/data/$id/evidence.jsonl"
     if [ ! -e "$brief" ]; then
@@ -162,13 +163,13 @@ EOF
     fi
     [ -e "$case_dir/data/$id/.evidence.lock" ] || : > "$case_dir/data/$id/.evidence.lock"
     if ! grep -q '^mode=' "$case_dir/state/$id.meta" 2>/dev/null; then
-      printf 'mode=direct-PR\n' >> "$case_dir/state/$id.meta"
+      printf 'mode=no-mistakes\n' >> "$case_dir/state/$id.meta"
       added_mode=1
     fi
     if [ "$added_mode" -eq 1 ]; then
       fixture_head=$(git -C "$case_dir/wt" rev-parse HEAD 2>/dev/null || true)
       if [ -n "$fixture_head" ]; then
-        printf 'validation_generation=legacy-fixture\nvalidation_path=direct-PR\nvalidation_head=%s\nvalidation_completed_generation=legacy-fixture\nvalidation_completed_path=direct-PR\nvalidation_completed_head=%s\n' \
+        printf 'validation_generation=legacy-fixture\nvalidation_path=full-no-mistakes\nvalidation_head=%s\nvalidation_completed_generation=legacy-fixture\nvalidation_completed_path=full-no-mistakes\nvalidation_completed_head=%s\n' \
           "$fixture_head" "$fixture_head" >> "$case_dir/state/$id.meta"
       fi
     fi
@@ -1498,6 +1499,26 @@ EOF
   pass "LOW validation remains parked until PR completion"
 }
 
+test_fast_modes_skip_no_mistakes_lookup() {
+  reset_fakes
+  local mode d out id log
+  for mode in direct-PR local-only; do
+    id="fast-mode-${mode}"
+    d=$(new_case "$id")
+    make_repo_on_branch "$d/wt" "fm/$id"
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=ship" "harness=claude" "mode=$mode"
+    printf 'working: fast path\n' > "$d/state/$id.status"
+    log="$d/no-mistakes.calls"
+    : > "$log"
+    FM_FAKE_NM_CALL_LOG="$log" FM_FAKE_AXI_STATUS="$(run_passed "fm/$id")" FM_FAKE_BUSY=0 arm_idle_record "$d/state" "$id"
+    out=$(FM_FAKE_NM_CALL_LOG="$log" run_crew_state "$d" "$id")
+    [ ! -s "$log" ] || fail "$mode state read invoked No-Mistakes"
+    assert_not_contains "$out" "source: run-step" "$mode inherited unrelated No-Mistakes state"
+  done
+  pass "direct-PR and local-only state reads skip No-Mistakes"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -1552,5 +1573,6 @@ test_ship_done_with_malformed_brief_fails_closed
 test_run_step_done_requires_current_plan_completion
 test_status_log_done_requires_existing_plan_completion
 test_low_validation_waits_for_pr_completion
+test_fast_modes_skip_no_mistakes_lookup
 
 echo "all fm-crew-state tests passed"

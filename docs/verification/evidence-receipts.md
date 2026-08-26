@@ -11,7 +11,7 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 - Every ship completion, including a promoted scout, remains parked until a valid acceptance contract and structurally valid evidence cover every required criterion.
 - Low-risk routing is limited to CHANGELOG formatting or reflow changes whose non-whitespace byte sequence is identical and which have file-bound mechanical proof, while every content-byte or uncertain change defaults high.
 - High-risk, broad, sensitive, weakly proven, materially expanded, or uncertain changes retain full No-Mistakes validation.
-- `direct-PR` and `local-only` retain the evidence gate without entering No-Mistakes.
+- `direct-PR` and `local-only` retain the evidence gate and current-state reconciliation without entering No-Mistakes.
 - The explicit implementation-complete action records one current timestamp for the current clean commit, refreshes that timestamp when the head changes, remains idempotent for the same head, and supplies the plan interval origin.
 - Completion requires observed post-plan mechanical evidence, the exact No-Mistakes run created with the latest unguessable plan generation and bound to its path and head with current checks-green status or CI-log evidence, a GitHub PR with forge-observed exact-head metadata, a supported non-GitHub direct-PR with the existing canonical HTTPS PR URL predicate and no head observation, or a clean fast-forward-ready branch.
 - Receipt append and check share one executable owner that resolves and pins every raw data-path component inside the store process, opens and verifies the task directory relative to that pinned parent, and then opens relative no-follow brief and single-link ledger paths portably on Linux and macOS.
@@ -104,6 +104,7 @@ ok - run-step done requires current-generation validation completion
 ok - status-log done requires existing plan completion
 ok - final done requires a clean inspectable worktree
 ok - LOW validation remains parked until PR completion
+ok - direct-PR and local-only state reads skip No-Mistakes
 all fm-crew-state tests passed
 
 $ tests/fm-brief.test.sh
