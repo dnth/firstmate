@@ -878,6 +878,10 @@ else
     send_rc=$?
   fi
   if [ "$send_rc" -ne 0 ]; then
+    if [ "$native_omp" -eq 1 ] && [ "$send_rc" -eq 255 ]; then
+      verdict='delivered-ambiguous'
+      send_rc=0
+    fi
     if [ "$TARGET_BACKEND" = remote ] && [ "$send_rc" -eq 255 ] && [ -n "$PENDING_REPLY_CORR" ]; then
       fm_pending_reply_mark_delivery_unknown "$STATE" "$PENDING_REPLY_CORR" || true
       echo "error: text delivery to remote secondmate $TARGET_REMOTE_ID is unknown; do not resend - same-host reconciliation is required" >&2
@@ -926,6 +930,7 @@ else
     fi
   fi
   post_delivery_failed=0
+  post_delivery_exit=1
   case "$verdict" in
     empty)
       if [ -n "$RESOLVE_KEYS" ]; then
@@ -950,6 +955,11 @@ else
       # delivery, but an answer cannot close its decision until a turn acts on it.
       ;;
     delivered-no-turn-persistence-failed)
+      ;;
+    delivered-ambiguous)
+      echo "error: delivered-ambiguous: text was delivered to $T, but its native OMP receipt persistence failed; do not resend; reconcile the worker receipt manually" >&2
+      post_delivery_failed=1
+      post_delivery_exit=5
       ;;
     send-failed)
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
@@ -1001,7 +1011,7 @@ else
       exit 4
       ;;
   esac
-  [ "$post_delivery_failed" -eq 0 ] || exit 1
+  [ "$post_delivery_failed" -eq 0 ] || exit "$post_delivery_exit"
   case "$verdict" in
     native-queued\ *) printf '%s\n' "$verdict" ;;
   esac

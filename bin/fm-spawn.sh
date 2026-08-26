@@ -3411,7 +3411,18 @@ function startNativeBridge(omp: any): void {
         try {
           recordNativeReceipt({ requestId, taskId, session: nativeSession, status: "received" });
           omp.sendUserMessage(request.content);
-          recordNativeReceipt({ requestId, taskId, session: nativeSession, status: "accepted" });
+          try {
+            recordNativeReceipt({ requestId, taskId, session: nativeSession, status: "accepted" });
+          } catch (receiptError) {
+            const reason = receiptError instanceof Error ? receiptError.message : String(receiptError);
+            try {
+              recordNativeReceipt({ requestId, taskId, session: nativeSession, status: "ambiguous", reason });
+            } catch {
+              void receiptError;
+            }
+            nativeReply(socket, { ...common, status: "ambiguous", session: nativeSession, reason });
+            return;
+          }
           nativeReply(socket, { ...common, status: "accepted", session: nativeSession });
         } catch (error) {
           const reason = error instanceof Error ? error.message : String(error);

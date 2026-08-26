@@ -60,6 +60,10 @@ socket.on("data", (chunk) => {
     finish(1, "error: native OMP worker returned a mismatched receipt");
     return;
   }
+  if (response?.status === "ambiguous" && typeof response.session === "string" && response.session) {
+    finish(255, `error: native OMP worker delivered the message but its receipt is ambiguous: ${response.reason || "receipt persistence failed"}; do not resend`);
+    return;
+  }
   if (response?.status !== "accepted" || typeof response.session !== "string" || !response.session) {
     finish(1, `error: native OMP worker refused the message: ${response?.reason || "no reason supplied"}`);
     return;
