@@ -274,6 +274,9 @@ The Kimi installer requires an existing regular non-symlink `~/.kimi-code/config
 Its `remove` action excises only the marker-delimited Firstmate region and removes Firstmate's hook files.
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 For OMP secondmate launches, it explicitly loads that home's `.omp/extensions/fm-primary-omp.ts`, keeps exact resume state under `state/omp-sessions`, and publishes `state/.omp-session` only after the adapter binds the selected conversation.
+The separately discovered `.omp/extensions/fm-fleet-hooks.ts` fails open while redacting credential-shaped values from text chunks in tool results, reporting valid `fm-todo-project.sh --check` drift through hidden next-turn context, and injecting a bounded roster, OPEN DECISIONS, in-flight PR, and Ready/In-flight backlog snapshot during compaction.
+It reads the active firstmate or secondmate home's own fleet state through `FM_HOME`; malformed or unreadable input, command failure, or a bounded read-only subprocess timeout suppresses that hook output instead of interrupting the OMP turn.
+[`docs/verification/runtime-backends.md`](verification/runtime-backends.md#omp-project-extension-discovery) records the deterministic coverage and the pending live OMP event-delivery check.
 
 ### OMP runtime bound (config/omp-max-time)
 
