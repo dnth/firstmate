@@ -36,8 +36,9 @@
 # the agent is mid-turn, opencode accepts Enter as a "send when the turn ends"
 # keystroke but does NOT clear the composer until then, so the composer keeps
 # showing the typed text the whole time. The submit core falls back to
-# fm_pane_is_busy once the Enter-retry budget is spent: a busy non-OMP pane
-# reports empty because that harness's queue behavior is established, while an
+# fm_pane_is_busy once the Enter-retry budget is spent and delegates the
+# conversion to fm_composer_queued_enter_verdict: a busy non-OMP pane reports
+# empty because that harness's queue behavior is established, while an
 # already-busy OMP pane reports queued-unconfirmed unless its native delivery
 # path provides positive proof. Idle panes keep the pending verdict.
 #
@@ -427,14 +428,14 @@ fm_pane_is_busy() {  # <target> [harness]
 # and queues it for after the current turn, but keeps the typed text visible in
 # the composer. Once the Enter-retry budget is spent and a structurally proven
 # composer still reads "pending", the submit core falls back to
-# `fm_pane_is_busy`: a busy non-OMP pane reports empty because that harness's
+# `fm_pane_is_busy` through the shared `fm_composer_queued_enter_verdict`: a busy non-OMP pane reports empty because that harness's
 # queue behavior is established, while an already-busy OMP pane reports
 # queued-unconfirmed because no reliable delivery proof was observed. Idle panes
 # keep the pending verdict. Pending-unproven receives the same Enter retry
 # budget but never reaches either conversion.
 fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [harness] [baseline-busy] [runtime] [omp]
   local target=$1 retries=$2 sleep_s=$3 harness=${4:-} baseline_busy=${5:-0} bun=${6:-} omp=${7:-}
-  local i=0 state enter_sent=0
+  local i=0 state enter_sent=0 busy_state
   while :; do
     if ! tmux send-keys -t "$target" Enter 2>/dev/null; then
       i=$((i + 1))
@@ -473,10 +474,12 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [harness] [bas
     printf 'queued-unconfirmed'
   elif [ "$state" != pending ]; then
     printf '%s' "$state"
-  elif [ "$harness" != omp ] && fm_pane_is_busy "$target" "$harness"; then
-    printf 'empty'
-  else
+  elif [ "$harness" = omp ]; then
     printf 'pending'
+  else
+    busy_state=idle
+    fm_pane_is_busy "$target" "$harness" && busy_state=busy
+    fm_composer_queued_enter_verdict "$state" "$busy_state"
   fi
 }
 

@@ -380,7 +380,8 @@ The secondmate integration checks prove that the exact Firstmate primary extensi
 
 The Herdr role matrix required each expected turn-end or routed-reply notification to reach the durable queue or the primary follow-up transcript before the fixture drained it.
 
-The deterministic tmux and Herdr fixtures reran on 2026-08-09 and proved that an already-busy OMP send returns `queued-unconfirmed` only after Enter transport succeeds, without reading a rendered steering count, while Enter transport failure returns `send-failed` and initially idle editable input remains pending and fails closed.
+The deterministic composer, tmux, and Herdr fixtures reran on 2026-08-26 and proved that an already-busy OMP send returns `queued-unconfirmed` only after Enter transport succeeds and the composer either clears or remains proven pending while native state is still working.
+The same fixtures proved that a pending OMP composer after native state becomes idle returns `pending`, Enter transport failure returns `send-failed`, and initially idle editable input fails closed.
 This is revision-bound source-fixture evidence for the source under review, using Bun 1.3.14 only for terminal-cell measurement; it does not invoke OMP or make an OMP runtime-version claim.
 
 The deterministic fm-send turn-start fixture ran on 2026-08-19 and proved that an initially idle OMP submit must become busy or advance its generated turn-start marker after the submit-time baseline before success, while `delivered-no-turn` exits distinctly, queues supervised recovery, and never kills the endpoint.
@@ -419,38 +420,24 @@ ok - fm-send: busy and blocked Herdr ignore idle-only setup
 ```
 
 ```sh
-bash -c '
-set -e
-evidence_dir=$(mktemp -d)
-trap "rm -rf \"$evidence_dir\"" EXIT
-command -v bun >/dev/null
-bun --version > "$evidence_dir/actual.out"
-tests/fm-tmux-submit-busy.test.sh > "$evidence_dir/tmux.out"
-tests/fm-backend-herdr.test.sh > "$evidence_dir/herdr.out"
-grep -hE "^(ok - (fm_tmux_submit_enter_core: idle pane \\+ pending composer stays pending|fm_tmux_submit_enter_core: busy OMP Enter transport failure|busy OMP mixed Enter transport retains queued delivery|OMP tmux composer keeps queued busy submits|fm_backend_herdr_send_text_submit: busy OMP without proof|fm_backend_herdr_send_text_submit: busy OMP Enter transport failure))" "$evidence_dir/tmux.out" "$evidence_dir/herdr.out" >> "$evidence_dir/actual.out"
-cat > "$evidence_dir/expected.out" <<EOF
-1.3.14
-ok - fm_tmux_submit_enter_core: idle pane + pending composer stays pending (genuine swallow preserved)
-ok - fm_tmux_submit_enter_core: busy OMP Enter transport failure returns send-failed
-ok - busy OMP mixed Enter transport retains queued delivery
-ok - OMP tmux composer keeps queued busy submits separate from unsubmitted input
-ok - fm_backend_herdr_send_text_submit: busy OMP without proof is queued-unconfirmed
-ok - fm_backend_herdr_send_text_submit: busy OMP Enter transport failure returns send-failed
-EOF
-diff -u "$evidence_dir/expected.out" "$evidence_dir/actual.out"
-cat "$evidence_dir/actual.out"
-'
+bun --version
+tests/fm-composer-lib.test.sh
+tests/fm-tmux-submit-busy.test.sh
+tests/fm-backend-herdr.test.sh
 ```
 
 Observed bounded output:
 
 ```text
 1.3.14
+ok - fm_composer_queued_enter_verdict: pending + busy returns empty (queued Enter)
+ok - fm_composer_queued_enter_verdict: pending + idle/unknown stays pending
 ok - fm_tmux_submit_enter_core: idle pane + pending composer stays pending (genuine swallow preserved)
 ok - fm_tmux_submit_enter_core: busy OMP Enter transport failure returns send-failed
 ok - busy OMP mixed Enter transport retains queued delivery
 ok - OMP tmux composer keeps queued busy submits separate from unsubmitted input
 ok - fm_backend_herdr_send_text_submit: busy OMP without proof is queued-unconfirmed
+ok - fm_backend_herdr_send_text_submit: an OMP steer left pending after the pane becomes idle is not submitted
 ok - fm_backend_herdr_send_text_submit: busy OMP Enter transport failure returns send-failed
 ```
 

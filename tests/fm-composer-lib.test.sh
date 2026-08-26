@@ -210,6 +210,33 @@ test_standalone_width_matches_bun_for_unicode_graphemes() {
   pass "standalone width matches installed Bun.stringWidth for Unicode fixtures and the OMP status row"
 }
 
+test_queued_enter_verdict_busy_pending_is_empty() {
+  local out
+  out=$(fm_composer_queued_enter_verdict pending busy)
+  [ "$out" = empty ] || fail "busy + proven pending must be queued delivery (empty), got '$out'"
+  pass "fm_composer_queued_enter_verdict: pending + busy returns empty (queued Enter)"
+}
+
+test_queued_enter_verdict_idle_pending_stays_pending() {
+  local out
+  out=$(fm_composer_queued_enter_verdict pending idle)
+  [ "$out" = pending ] || fail "idle + proven pending must stay a genuine swallow, got '$out'"
+  out=$(fm_composer_queued_enter_verdict pending unknown)
+  [ "$out" = pending ] || fail "unknown busy is not proof of a queue, got '$out'"
+  pass "fm_composer_queued_enter_verdict: pending + idle/unknown stays pending"
+}
+
+test_queued_enter_verdict_does_not_convert_other_states() {
+  local state out
+  for state in empty pending-unproven unknown send-failed future-state; do
+    out=$(fm_composer_queued_enter_verdict "$state" busy)
+    [ "$out" = "$state" ] || fail "busy must not convert '$state', got '$out'"
+    out=$(fm_composer_queued_enter_verdict "$state" idle)
+    [ "$out" = "$state" ] || fail "idle must not convert '$state', got '$out'"
+  done
+  pass "fm_composer_queued_enter_verdict: only proven pending is converted"
+}
+
 test_bare_shell_glyphs_are_unknown
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
@@ -221,3 +248,6 @@ test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
 test_standalone_width_has_fixed_unicode_contract
 test_standalone_width_matches_bun_for_unicode_graphemes
+test_queued_enter_verdict_busy_pending_is_empty
+test_queued_enter_verdict_idle_pending_stays_pending
+test_queued_enter_verdict_does_not_convert_other_states

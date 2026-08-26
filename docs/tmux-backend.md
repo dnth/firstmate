@@ -111,7 +111,6 @@ Every other harness keeps the original behavior of returning `unknown` immediate
 ## Limits and regression entry points
 
 - tmux is the reference path and supports secondmate homes.
-- The OpenCode busy-queue exception is tmux-specific; Herdr retains its separately documented gap.
 
 ```sh
 tests/fm-backend-tmux-smoke.test.sh

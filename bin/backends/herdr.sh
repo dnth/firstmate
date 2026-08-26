@@ -2691,8 +2691,9 @@ fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
   printf '%s' "$out" | jq -r '[.result.agent.agent // "", .result.agent.agent_status // ""] | @tsv' 2>/dev/null
 }
 
-fm_backend_herdr_composer_state() {  # <target> [harness] [runtime] [omp] -> empty|pending|unknown
+fm_backend_herdr_composer_state() {  # <target> [harness] [runtime] [omp] [submit-active] -> empty|pending|unknown
   local target=$1 harness=${2:-} bun=${3:-${FM_OMP_BUN:-}} omp=${4:-${FM_OMP_BIN:-}}
+  local submit_active=${5:-0}
   local session pane cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped
   local identity agent agent_status row=0 generic_line=0
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
@@ -2704,24 +2705,24 @@ fm_backend_herdr_composer_state() {  # <target> [harness] [runtime] [omp] -> emp
   # OMP has its own structural contract and native exact identity.
   # Any OMP-shaped candidate that is malformed, stale, short, active, or
   # unreadable remains unknown rather than falling through to Pi or generic
-  # rendering assumptions.
+  # rendering assumptions. The submit-only flag permits a working OMP identity
+  # to expose its proven composer state after Enter; ordinary injection guards
+  # keep the established active-OMP unknown verdict.
   fm_backend_herdr_omp_composer_find "$cap" "$bun" "$omp"
   if [ "$FM_BACKEND_HERDR_OMP_SIGNAL" -eq 1 ]; then
     identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null || true)
     IFS=$'\t' read -r agent agent_status <<EOF
 $identity
 EOF
-    case "$agent:$agent_status" in
-      omp:working|omp:blocked|omp:idle|omp:done)
-        if [ "$agent_status" = idle ] || [ "$agent_status" = "done" ]; then
-          if [ "$FM_BACKEND_HERDR_OMP_FOUND" -eq 1 ] \
-             && [ "$FM_BACKEND_HERDR_OMP_VALID" -eq 1 ]; then
-            stripped=$(printf '%s\n' "$FM_BACKEND_HERDR_OMP_CONTENT" | fm_composer_strip_ghost)
-            stripped="${stripped#"${stripped%%[![:space:]]*}"}"
-            stripped="${stripped%"${stripped##*[![:space:]]}"}"
-            fm_composer_classify_content 1 "$stripped" "$FM_BACKEND_HERDR_IDLE_RE"
-            return 0
-          fi
+    case "$agent:$agent_status:$submit_active" in
+      omp:idle:*|omp:done:*|omp:working:1)
+        if [ "$FM_BACKEND_HERDR_OMP_FOUND" -eq 1 ] \
+           && [ "$FM_BACKEND_HERDR_OMP_VALID" -eq 1 ]; then
+          stripped=$(printf '%s\n' "$FM_BACKEND_HERDR_OMP_CONTENT" | fm_composer_strip_ghost)
+          stripped="${stripped#"${stripped%%[![:space:]]*}"}"
+          stripped="${stripped%"${stripped##*[![:space:]]}"}"
+          fm_composer_classify_content 1 "$stripped" "$FM_BACKEND_HERDR_IDLE_RE"
+          return 0
         fi
         ;;
     esac
@@ -2827,33 +2828,26 @@ EOF
 
 # fm_backend_herdr_send_text_submit: type <text> into <target> once (raw,
 # unsubmitted, via send_literal), then submit with a named Enter key, retried
-# (Enter only, never retyped) until herdr's NATIVE agent-state (agent get)
-# confirms a real turn started. Verified hazard (herdr-verification-p2.md
+# (Enter only, never retyped) until native agent-state, a cleared composer, or
+# fm_composer_queued_enter_verdict confirms delivery. Verified hazard (herdr-verification-p2.md
 # "slash/$ autocomplete popup"): a `/`- or `$`-prefixed send opens a
 # completion popup within ~0.1s, exactly like tmux's claude/codex popups, so
 # the caller's <settle> before the first Enter matters here the same way it
 # does for tmux.
 #
-# Confirmation signal (rewritten for the 2026-07-07 incident below;
-# superseded a composer-content read that itself replaced a delta-based check
-# for the 2026-07-03 incident): when the target is legibly idle before Enter,
+# Confirmation signal: when the target is legibly idle before Enter,
 # submission is confirmed by fm_backend_herdr_wait_for_working observing a
-# submit-active agent_status after Enter, NOT by reading the composer's own
-# row. This makes the normal confirmation path cross-agent: it is the same
-# semantic signal regardless of what text a harness's idle composer happens
-# to display.
+# submit-active agent_status after Enter.
+# When native state stays idle, a cleared composer confirms delivery while
+# proven pending text retries Enter and remains unconfirmed on an idle target.
 #
 # Incident (2026-07-07, followed up on 2026-07-08): a redelivery loop in the
 # away-mode daemon. Root cause: composer-content submit confirmation was too
 # sensitive to harness rendering details. Real claude/codex use bare prompt
 # rows, and real codex adds dynamic idle suggestions after `›`; the later
 # ANSI-aware composer classifier now handles the pre-injection guard for that
-# Codex shape, but idle-baseline submit confirmation deliberately stays on
-# native agent-state so delivery does not depend on composer text. Composer
-# content is retained for other callers (the away-mode daemon's PRE-injection
-# empty-box guard, still dispatched via fm_backend_composer_state /
-# fm_backend_herdr_composer_state) and for submit attempts whose pre-Enter
-# agent-state baseline is not legibly idle.
+# Codex shape, and submit confirmation still prefers native agent-state before
+# consulting the composer only when native state supplies no positive signal.
 #
 # This also still correctly handles the earlier 2026-07-03 incident (a
 # slash-command popup selection/placeholder-fill on the FIRST Enter is not a
@@ -2870,23 +2864,15 @@ EOF
 #     across herdr's per-attempt confirmation budget (not once at the end), so a
 #     transition landing partway through a window is still caught before this
 #     loop gives up and sends a needless extra Enter.
-#   - Instant round-trip (a turn starts AND returns to idle between two
-#     polls): unavoidable in the absolute, but bounded by how tightly polls
-#     are packed into the budget; real claude/codex measured first-working
-#     at 90-490ms, comfortably inside a several-hundred-ms, multiply-sampled
-#     window, so this has not been observed in practice. On the (unobserved)
-#     residual chance it happens, the verdict is "pending" and the caller
-#     never retypes - only re-sends Enter, which lands on an already-empty
-#     composer and is a no-op, not a duplicate delivery of <text> (see
-#     fm-send.sh/fm-supervise-daemon.sh: retyping only happens if a caller
-#     re-invokes this function from scratch with the same text after seeing
-#     an error, which is a human/escalation decision, not an automatic
-#     retry).
+#   - Instant round-trip or a native state that stays idle: bounded by the
+#     composer fallback. A cleared composer is delivery; a pending composer on
+#     an idle target is a swallow, and extra Enter never retypes <text>.
 # OMP's busy steering path is the one native exception to the generic
 # preexisting-working fallback. Before typing, it binds the exact native OMP
 # session path and byte offset. After one Enter, a matching native session event
-# confirms delivery. If that event is not observed, the result remains an
-# honest busy-queued-unconfirmed verdict rather than a scraped terminal guess.
+# confirms delivery. If that event is not observed, only a cleared composer or
+# proven pending text plus a current native working state can return the narrow
+# queued-unconfirmed verdict; an idle pending composer remains unsubmitted.
 fm_backend_herdr_omp_submit_snapshot() {  # <session> <pane_id>
   local session=$1 pane_id=$2 out
   FM_BACKEND_HERDR_OMP_SUBMIT_STATUS=
@@ -3022,12 +3008,28 @@ fm_backend_herdr_wait_omp_session_exit() {  # <session-file> <byte-offset> <budg
   fm_backend_herdr_wait_omp_session_event exit "$1" "$2" "$3" "${4:-1}"
 }
 
-# Echoes empty|busy-confirmed|pending|unknown|send-failed from the
+# fm_backend_herdr_queued_enter_busy: supply Herdr's native delivery-busy
+# signal to the shared queued-Enter policy.
+# Only working proves a generating turn; blocked, idle, done, and unreadable
+# states cannot convert a pending composer into delivery.
+fm_backend_herdr_queued_enter_busy() {  # <target> -> busy|idle|unknown
+  local target=$1 raw
+  fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
+  raw=$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
+  case "$raw" in
+    working) printf 'busy' ;;
+    idle|done|blocked) printf 'idle' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+# Echoes empty|busy-confirmed|queued-unconfirmed|pending|unknown|send-failed from the
 # proof-carrying submit vocabulary.
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [harness] [runtime] [omp] [turnstart-setup]
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${7:-} bun=${8:-} omp=${9:-} turnstart_setup=${10:-}
   local turnstart_reference=''
   local i=0 verdict baseline confirm_sleep omp_confirm_sleep omp_session='' omp_offset='' omp_status='' omp_event
+  local queued_verdict
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   if [ "$harness" = omp ]; then
     fm_backend_herdr_omp_submit_snapshot "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
@@ -3096,15 +3098,25 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
       elif [ "$omp_status" = blocked ]; then
         printf 'unknown'
       else
-        printf 'queued-unconfirmed'
+        verdict=$(fm_backend_herdr_composer_state "$target" "$harness" "$bun" "$omp" 1)
+        queued_verdict=$(fm_composer_queued_enter_verdict "$verdict" \
+          "$(fm_backend_herdr_queued_enter_busy "$target")")
+        if [ "$verdict" = empty ] || [ "$queued_verdict" = empty ]; then
+          printf 'queued-unconfirmed'
+        else
+          printf '%s' "$queued_verdict"
+        fi
       fi
       return 0
     elif [ "$baseline" = idle ]; then
       verdict=$(fm_backend_herdr_wait_for_working "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
         "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS")
+      if [ "$verdict" = idle ]; then
+        verdict=$(fm_backend_herdr_composer_state "$target" "$harness" "$bun" "$omp" 1)
+      fi
     else
       sleep "$sleep_s"
-      verdict=$(fm_backend_herdr_composer_state "$target" "$harness" "$bun" "$omp")
+      verdict=$(fm_backend_herdr_composer_state "$target" "$harness" "$bun" "$omp" 1)
     fi
     case "$verdict" in
       busy|empty)
@@ -3123,8 +3135,14 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
     esac
     i=$((i + 1))
     if [ "$i" -ge "$retries" ]; then
-      [ -z "$turnstart_reference" ] || rm -f -- "$turnstart_reference"
-      printf 'pending'
+      queued_verdict=$(fm_composer_queued_enter_verdict "$verdict" \
+        "$(fm_backend_herdr_queued_enter_busy "$target")")
+      if [ "$queued_verdict" = empty ] && [ -n "$turnstart_reference" ]; then
+        printf 'empty-turnstart:%s' "$turnstart_reference"
+      else
+        [ -z "$turnstart_reference" ] || rm -f -- "$turnstart_reference"
+        printf '%s' "$queued_verdict"
+      fi
       return 0
     fi
   done
