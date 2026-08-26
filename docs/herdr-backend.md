@@ -215,9 +215,9 @@ The two stages intentionally share signals rather than claiming perfect submit a
 On an already active or unreadable baseline, ordinary harnesses fall back to conservative composer clearance.
 OMP is stricter: the adapter binds the exact native OMP session path and pre-send byte offset before typing.
 That offset is always the end of a complete newline-terminated session record; when a partial record is still being appended the adapter waits a bounded time and then refuses rather than rewinding, because a mid-record offset would poison every later read and an earlier boundary could false-confirm an already-appended record.
-A busy OMP steer sends one Enter and normally succeeds after an appended exact-text user message carries native `steering:true`; an identical ordinary user message is not acknowledgement.
+For a legacy direct composer caller, a busy OMP steer sends one Enter and normally succeeds after an appended exact-text user message carries native `steering:true`; an identical ordinary user message is not acknowledgement.
 If that native event is not observed within the bounded window, the adapter verifies the composer before considering the narrow fallback.
-A cleared composer or proven pending text plus a current native `working` state returns `queued-unconfirmed`, which `fm-send` accepts so OMP can consume the steer on its next turn.
+A cleared composer or proven pending text plus a current native `working` state returns `queued-unconfirmed`, which that direct caller may accept so OMP can consume the steer on its next turn.
 Pending text plus idle, done, blocked, or unreadable native state remains unsubmitted and makes `fm-send` fail.
 An Enter transport failure returns `send-failed`, and every non-busy editable composer remains subject to the ordinary pending or unknown fail-closed behavior.
 A `blocked` OMP agent is parked on an open ask rather than generating, so its proof is instead a successful post-offset `ask` tool result whose structured `selectedOptions` is exactly the sent text; a steering user record is never accepted there, and an errored answer is a rejection, not delivery.
