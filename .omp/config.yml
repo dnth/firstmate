@@ -1,7 +1,5 @@
 # Enable the OMP advisor for firstmate + secondmate sessions only.
-# This is project config for the firstmate repo, so it applies to every firstmate
-# worktree (the primary checkout and each secondmate home) and NOT to any other omp
-# project, which keep the global advisor.enabled: false. The advisor model resolves
-# from modelRoles.advisor (opencode-go/mimo-v2.5:medium in this fleet's global config).
+# This is project config for the firstmate repo, so it applies to every firstmate worktree (the primary checkout and each secondmate home) and NOT to any other omp project, which keep the global advisor.enabled: false.
+# The advisor model resolves from modelRoles.advisor (opencode-go/mimo-v2.5:medium in this fleet's global config).
 advisor:
   enabled: true
