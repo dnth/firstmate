@@ -22,7 +22,7 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 - Structurally valid receipts require non-whitespace summary and result strings plus a closed `outcome=passed|failed` field; only `passed` evidences a criterion, while `result` remains descriptive so expected observations such as `401` are unambiguous.
 - Receipt append holds a stable task lock, copies the canonical single-link ledger plus one complete record to a synced mode-0600 single-link temporary file, and atomically renames it over the canonical ledger so concurrent hard-link aliases retain the old inode.
 - Criterion parsing rejects known scaffold placeholder tokens in balanced or unmatched brace forms while allowing concrete brace syntax such as JSON examples.
-- One shared cleanliness predicate requires `git status` to succeed with empty tracked, staged, and untracked output for implementation completion, planning, binding, and terminal completion.
+- One shared cleanliness predicate requires `git status` to succeed with empty tracked, staged, and untracked output for implementation completion, planning, binding, terminal completion, and final done acceptance.
 - Every plan requires a resolved authoritative base and commit diff before it can publish any delivery path.
 - Every diff input, including the special-mode summary probe, must execute successfully before risk classification.
 - Normal and promoted ship briefs consume the same executable acceptance-evidence and per-mode delivery renderer.
@@ -64,7 +64,7 @@ $ tests/fm-receipt-check.test.sh
 ok - fm-receipt-check help renders an executable generation-bound bind command
 ok - fm-receipt-check reports required, evidenced, and missing ids deterministically
 ok - fm-receipt-check distinguishes complete evidence from invalid JSONL
-ok - failed, skipped, empty, and zero-test results stay unevidenced while 401 counts
+ok - closed passed and failed outcomes control criterion evidence
 ok - pinned brief and metadata delivery modes must match exactly
 ok - invalid ship briefs fail and scout/report behavior stays unchanged
 ok - early snapshot failures release cleanup without a FIFO reader
@@ -97,6 +97,8 @@ ok - ship completion remains parked until every criterion has evidence
 ok - ship completion fails closed when the evidence contract is malformed
 ok - run-step done requires current-generation validation completion
 ok - status-log done requires existing plan completion
+ok - final done requires a clean inspectable worktree
+ok - LOW validation remains parked until PR completion
 all fm-crew-state tests passed
 
 $ tests/fm-brief.test.sh
@@ -132,9 +134,20 @@ exit 0
 $ tests/fm-task-delivery.test.sh
 ok - fm-spawn: a ship spawn requires a valid explicit mode and yolo before anything is created
 ok - fm-spawn: unresolved task and criterion placeholders refuse before launch
+ok - fm-spawn: scout and secondmate spawns refuse ship delivery flags
 ok - fm-spawn: the brief's recorded mode and the spawn's explicit mode must agree
+ok - fm-spawn: a rigor downgrade against the registered posture is announced, never blocked
+ok - fm-spawn: a scout spawn resolves no delivery posture from the registry
 ok - fm-promote: promotion installs a fail-closed ship evidence contract
 ok - fm-promote: symlinked task directories refuse before mutation
+ok - fm-promote: configured data symlinks remain visible to no-follow pinning
+ok - fm-promote: concurrent losers cannot remove the winner lock
+ok - fm-promote: signal-terminated transactions fail closed
+ok - fm-promote: interrupted task replacement rolls back atomically
+ok - fm-promote: store signals before commit roll back both replacements
+ok - fm-promote: intermediate state symlinks fail closed
+ok - fm-promote: state path replacement cannot redirect metadata
+ok - fm-project-mode: the conditional policy is accepted, mapped for mechanical callers, and readable raw
 # all fm-task-delivery tests passed
 
 $ tests/fm-teardown-endpoint-safety.test.sh

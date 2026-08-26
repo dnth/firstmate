@@ -29,10 +29,11 @@ ready_valid() {
 }
 
 case "$PHASE" in
-  finalize)
+  precommit)
     owner_valid && ready_valid || exit 1
-    rm -f "$BRIEF_ORIGINAL" "$BRIEF_TMP" "$BRIEF_RESTORE" "$READY" "$OWNER" \
-      || echo "warning: promotion committed but a recovery artifact could not be removed" >&2
+    exit 0
+    ;;
+  report)
     HOME_Q=$(printf '%q' "$FM_HOME")
     echo "promoted $ID to ship mode=$MODE yolo=$YOLO (teardown protection restored)"
     echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID '<ship instructions for mode=$MODE: read the concrete acceptance criteria in the promoted brief; review scratch state with git status and git log; reset to a clean default-branch base; carry over only intended fix changes; create branch fm/$ID; implement; record receipts; report done>'"
@@ -53,11 +54,6 @@ case "$PHASE" in
     fi
     rm -f "$BRIEF_TMP" "$BRIEF_RESTORE"
     exit "$rc"
-    ;;
-  cleanup)
-    owner_valid || exit 0
-    rm -f "$BRIEF_ORIGINAL" "$BRIEF_TMP" "$BRIEF_RESTORE" "$READY" "$OWNER"
-    exit 0
     ;;
   prepare) ;;
   *) exit 2 ;;

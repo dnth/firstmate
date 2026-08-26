@@ -80,6 +80,8 @@ case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
 
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-worktree-clean-lib.sh
+. "$SCRIPT_DIR/fm-worktree-clean-lib.sh"
 
 usage() {
   awk '
@@ -317,11 +319,6 @@ release_validation_lock() {
   [ -z "$VALIDATION_LOCK" ] || rmdir "$VALIDATION_LOCK" 2>/dev/null || true
   VALIDATION_LOCK=
 }
-git_worktree_is_clean() {
-  local worktree=$1 status_output
-  status_output=$(git -C "$worktree" status --porcelain --untracked-files=all 2>/dev/null) || return 1
-  [ -z "$status_output" ]
-}
 BRIEF="$TMP_ROOT/brief.md"
 LEDGER="$TMP_ROOT/evidence.jsonl"
 : > "$BRIEF"
@@ -464,7 +461,7 @@ if [ "$ACTION" = implementation-complete ]; then
     || { echo "error: implementation worktree is missing" >&2; exit 2; }
   IMPLEMENTATION_HEAD=$(git -C "$IMPLEMENTATION_WORKTREE" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) \
     || { echo "error: implementation head is unavailable" >&2; exit 2; }
-  git_worktree_is_clean "$IMPLEMENTATION_WORKTREE" \
+  fm_worktree_is_clean "$IMPLEMENTATION_WORKTREE" \
     || { echo "error: implementation worktree is dirty" >&2; exit 2; }
   VALIDATION_LOCK="$STATE/.$ID.validation-plan.lock"
   if ! mkdir "$VALIDATION_LOCK" 2>/dev/null; then
@@ -534,7 +531,7 @@ if [ "$ACTION" = bind-run ]; then
   [ -n "$BIND_WORKTREE" ] && [ -d "$BIND_WORKTREE" ] || { echo "error: validation worktree is missing" >&2; exit 2; }
   BIND_HEAD=$(git -C "$BIND_WORKTREE" rev-parse --verify "$BIND_HEAD^{commit}" 2>/dev/null) \
     || { echo "error: validated head is missing" >&2; exit 2; }
-  git_worktree_is_clean "$BIND_WORKTREE" \
+  fm_worktree_is_clean "$BIND_WORKTREE" \
     || { echo "error: validation worktree is dirty" >&2; exit 2; }
   BIND_OUT=$(fm_nm_run_checked "$BIND_WORKTREE" "$NM_TIMEOUT" axi status --run "$RUN_ID_INPUT") \
     || { echo "error: No-Mistakes run could not be observed" >&2; exit 2; }
@@ -577,7 +574,7 @@ verify_mechanical_ready() {
   current_head=$(git -C "$worktree" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) \
     || { echo "error: current worktree head is unavailable" >&2; return 1; }
   [ "$current_head" = "$validated_head" ] || { echo "error: current worktree head differs from the validated head; replan and revalidate" >&2; return 1; }
-  git_worktree_is_clean "$worktree" || { echo "error: validation worktree is dirty; commit or remove all changes" >&2; return 1; }
+  fm_worktree_is_clean "$worktree" || { echo "error: validation worktree is dirty; commit or remove all changes" >&2; return 1; }
   boundary=$(grep '^validation_ledger_receipt_count=' "$META" | tail -1 | cut -d= -f2- || true)
   case "$boundary" in ''|*[!0-9]*) echo "error: mechanical evidence boundary is missing" >&2; return 1 ;; esac
   new_receipts="$TMP_ROOT/completion-new-receipts.jsonl"
@@ -632,7 +629,7 @@ record_validation_completed() {
     || { release_validation_lock; echo "error: validated head is missing or invalid" >&2; return 1; }
   current_head=$(git -C "$worktree" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) \
     || { release_validation_lock; echo "error: current worktree head is unavailable" >&2; return 1; }
-  git_worktree_is_clean "$worktree" \
+  fm_worktree_is_clean "$worktree" \
     || { release_validation_lock; echo "error: validation worktree is dirty; commit or remove all changes" >&2; return 1; }
   if [ "$current_head" != "$validated_head" ]; then
     printf 'validation_completed_at=\nvalidation_completed_head=\nvalidation_completed_path=\nvalidation_completed_evidence=\nvalidation_completed_generation=\n' >> "$META" \
@@ -762,7 +759,7 @@ fi
 WORKTREE=$(grep '^worktree=' "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true)
 [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ] \
   || { echo "error: validation worktree is missing" >&2; exit 2; }
-if ! git_worktree_is_clean "$WORKTREE"; then
+if ! fm_worktree_is_clean "$WORKTREE"; then
   echo "error: validation worktree is dirty; commit or remove all changes" >&2
   exit 2
 fi
@@ -784,7 +781,7 @@ NAMES="$TMP_ROOT/names"
 resolve_diff() {
   local requested_base authoritative_base origin_head
   [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ] && git -C "$WORKTREE" rev-parse --git-dir >/dev/null 2>&1 || return 1
-  git_worktree_is_clean "$WORKTREE" || return 1
+  fm_worktree_is_clean "$WORKTREE" || return 1
   HEAD=$(git -C "$WORKTREE" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) || return 1
   origin_head=$(git -C "$WORKTREE" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null || true)
   if [ -n "$origin_head" ]; then

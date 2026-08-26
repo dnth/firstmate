@@ -112,6 +112,33 @@ sub write_new_file {
   close($output) or refuse("promotion metadata artifact could not be closed");
 }
 
+sub retire_promotion_task_artifacts {
+  my ($token) = @_;
+  my $owner_name = ".promotion.owner.$token";
+  my @owner_identity = lstat($owner_name);
+  return 1 if !@owner_identity && $! == ENOENT;
+  return 0 unless @owner_identity && !S_ISLNK($owner_identity[2]);
+  sysopen(my $owner, $owner_name, O_RDONLY | O_NOFOLLOW) or return 0;
+  my @opened_identity = stat($owner);
+  return 0 unless @opened_identity && S_ISREG($opened_identity[2]) && $opened_identity[3] == 1
+    && $opened_identity[0] == $owner_identity[0] && $opened_identity[1] == $owner_identity[1];
+  local $/;
+  my $owner_token = <$owner>;
+  close($owner) or return 0;
+  $owner_token =~ s/\n\z// if defined($owner_token);
+  return 0 unless defined($owner_token) && $owner_token eq $token;
+  for my $name (
+    ".brief.original.$token",
+    ".brief.promote.$token",
+    ".brief.restore.$token",
+    ".promotion.ready.$token",
+    $owner_name
+  ) {
+    unlink($name) if lstat($name);
+  }
+  return 1;
+}
+
 my $data_path = $ENV{FM_RECEIPT_STORE_DATA};
 $data_path = getcwd() . "/" . $data_path unless $data_path =~ m{^/};
 my @components = grep { length($_) } split(m{/+}, $data_path);
@@ -267,7 +294,12 @@ if ($ENV{FM_RECEIPT_STORE_MODE} eq "promote") {
   write_new_file($meta_temp, $new_meta);
   write_new_file($meta_restore, $meta_text);
   chdir($task) or refuse("pinned task directory could not be re-entered");
+  my $promotion_signal = 0;
+  local $SIG{HUP} = local $SIG{INT} = local $SIG{TERM} = sub {
+    $promotion_signal = 1;
+  };
   my $status = system($command, "prepare", @command_args, $token);
+  $status = -1 if $promotion_signal;
   my $meta_replaced = 0;
   if ($status == 0) {
     chdir($state) or refuse("pinned state directory could not be re-entered");
@@ -283,17 +315,25 @@ if ($ENV{FM_RECEIPT_STORE_MODE} eq "promote") {
     }
     chdir($task) or refuse("pinned task directory could not be re-entered");
   }
-  if ($status == 0 && $meta_replaced && $task->sync && $state->sync) {
-    my $finalize_status = system($command, "finalize", @command_args, $token);
-    if ($finalize_status == 0) {
+  if ($status == 0 && $meta_replaced) {
+    my $precommit_status = system($command, "precommit", @command_args, $token);
+    $status = $precommit_status if $precommit_status != 0;
+    $status = -1 if $promotion_signal;
+  }
+  my $committed = $status == 0 && $meta_replaced && $task->sync && $state->sync && !$promotion_signal;
+  if ($committed) {
+    if (retire_promotion_task_artifacts($token)) {
       chdir($state) or refuse("pinned state directory could not be re-entered");
       unlink($meta_backup);
       unlink($meta_temp);
       unlink($meta_restore);
       $state->sync or refuse("promoted state directory could not be synced");
-      exit 0;
+      chdir($task) or refuse("pinned task directory could not be re-entered");
+      $task->sync or refuse("promoted task directory could not be synced");
+      my $report_status = system($command, "report", @command_args, $token);
+      exit 0 if $report_status == 0;
     }
-    $status = $finalize_status;
+    exit 1;
   }
   my $meta_rollback = 1;
   if ($meta_replaced) {
@@ -307,10 +347,8 @@ if ($ENV{FM_RECEIPT_STORE_MODE} eq "promote") {
   }
   my $rollback_status = system($command, "rollback", @command_args, $token);
   my $rollback_synced = $meta_rollback && $rollback_status == 0 && $task->sync && $state->sync;
-  my $cleanup_status = $rollback_synced
-    ? system($command, "cleanup", @command_args, $token)
-    : -1;
-  if ($rollback_synced && $cleanup_status == 0) {
+  my $retired = $rollback_synced && retire_promotion_task_artifacts($token);
+  if ($rollback_synced && $retired) {
     chdir($state) or refuse("pinned state directory could not be re-entered");
     unlink($meta_backup);
     unlink($meta_temp);
@@ -318,7 +356,7 @@ if ($ENV{FM_RECEIPT_STORE_MODE} eq "promote") {
     $state->sync or refuse("rolled-back state directory could not be synced");
     chdir($task) or refuse("pinned task directory could not be re-entered");
   }
-  if ($lock_created && $rollback_synced && $cleanup_status == 0) {
+  if ($lock_created && $rollback_synced && $retired) {
     my @owned_named_lock = lstat(".evidence.lock");
     unlink(".evidence.lock") if @owned_named_lock
       && !S_ISLNK($owned_named_lock[2])
@@ -326,7 +364,7 @@ if ($ENV{FM_RECEIPT_STORE_MODE} eq "promote") {
       && $owned_named_lock[1] == $lock_identity[1];
     $task->sync;
   }
-  exit 1 unless $rollback_synced && $cleanup_status == 0;
+  exit 1 unless $rollback_synced && $retired;
   exit 1 if $status == -1 || ($status & 127);
   my $exit_code = $status >> 8;
   exit($exit_code == 0 ? 1 : $exit_code);

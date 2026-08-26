@@ -506,6 +506,44 @@ EOF
   pass "fm-promote: interrupted task replacement rolls back atomically"
 }
 
+test_store_signals_roll_back_before_commit() {
+  local stage home id wrapper brief_before meta_before status leftovers
+  for stage in brief meta; do
+    id="promote-store-signal-$stage"
+    home="$TMP_ROOT/$id/home"
+    wrapper="$home/transaction-wrapper.sh"
+    mkdir -p "$home/data/$id" "$home/state"
+    printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$home/state/$id.meta"
+    printf '# Task\nStore signal fixture.\n\n# Setup\nScout setup.\n' > "$home/data/$id/brief.md"
+    brief_before="$home/brief.before"
+    meta_before="$home/meta.before"
+    cp "$home/data/$id/brief.md" "$brief_before"
+    cp "$home/state/$id.meta" "$meta_before"
+    cat > "$wrapper" <<EOF
+#!/usr/bin/env bash
+set -eu
+phase=\$1
+"$ROOT/bin/fm-promote-transaction.sh" "\$@"
+case "$stage:\$phase" in
+  brief:prepare|meta:precommit) kill -TERM "\$PPID" ;;
+esac
+EOF
+    chmod +x "$wrapper"
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+      "$ROOT/bin/fm-receipt-store.sh" "$id" promote "$wrapper" "$id" direct-PR off '- AC1: Concrete outcome' \
+      >/dev/null 2>&1
+    status=$?
+    [ "$status" -ne 0 ] || fail "$stage-boundary store signal reported success"
+    cmp -s "$brief_before" "$home/data/$id/brief.md" || fail "$stage-boundary store signal did not restore the brief"
+    cmp -s "$meta_before" "$home/state/$id.meta" || fail "$stage-boundary store signal did not restore metadata"
+    [ ! -e "$home/data/$id/evidence.jsonl" ] || fail "$stage-boundary store signal retained evidence"
+    leftovers=$(find "$home/data/$id" "$home/state" -maxdepth 1 \
+      \( -name '*.promote.*' -o -name '*.original.*' -o -name '.promotion.*' \) -print)
+    [ -z "$leftovers" ] || fail "$stage-boundary store signal left transaction artifacts: $leftovers"
+  done
+  pass "fm-promote: store signals before commit roll back both replacements"
+}
+
 test_promote_rejects_intermediate_state_symlink() {
   local home outside before out status id=promote-state-link
   home="$TMP_ROOT/promote-state-link/home"
@@ -601,6 +639,7 @@ test_promote_rejects_symlinked_data_override
 test_concurrent_promotion_preserves_winner_lock
 test_signaled_promotion_transaction_fails
 test_interrupted_replacements_roll_back
+test_store_signals_roll_back_before_commit
 test_promote_rejects_intermediate_state_symlink
 test_state_path_replacement_cannot_redirect_promotion
 test_project_mode_maps_the_conditional_policy

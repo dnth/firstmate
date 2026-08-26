@@ -1456,7 +1456,7 @@ test_status_log_done_requires_existing_plan_completion() {
 
 test_low_validation_waits_for_pr_completion() {
   reset_fakes
-  local d out id=low-pr-stage head
+  local d out id=low-pr-stage head statusbin real_git
   d=$(new_case low-pr-stage)
   make_repo_on_branch "$d/wt" "fm/$id"
   make_fakebin "$d" >/dev/null
@@ -1473,8 +1473,28 @@ test_low_validation_waits_for_pr_completion() {
   assert_contains "$out" "source: validation-gate" "LOW PR wait did not name the validation gate"
   printf 'validation_completed_generation=low-plan\nvalidation_completed_path=receipts-mechanical\nvalidation_completed_head=%s\n' "$head" \
     >> "$d/state/$id.meta"
+  printf 'untracked\n' > "$d/wt/untracked.txt"
   out=$(run_crew_state "$d" "$id")
-  assert_contains "$out" "state: done" "LOW PR completion did not release final done"
+  assert_contains "$out" "state: parked" "dirty worktree escaped final done acceptance"
+  assert_contains "$out" "worktree is dirty or could not be inspected" "dirty final gate omitted its reason"
+  rm -f "$d/wt/untracked.txt"
+  statusbin="$d/statusbin"
+  real_git=$(command -v git)
+  mkdir -p "$statusbin"
+  cat > "$statusbin/git" <<EOF
+#!/bin/sh
+case "\$*" in
+  *"status --porcelain --untracked-files=all"*) exit 7 ;;
+esac
+exec "$real_git" "\$@"
+EOF
+  chmod +x "$statusbin/git"
+  out=$(PATH="$statusbin:$PATH" run_crew_state "$d" "$id")
+  assert_contains "$out" "state: parked" "uninspectable worktree escaped final done acceptance"
+  rm -f "$statusbin/git"
+  out=$(run_crew_state "$d" "$id")
+  assert_contains "$out" "state: done" "clean LOW PR completion did not release final done"
+  pass "final done requires a clean inspectable worktree"
   pass "LOW validation remains parked until PR completion"
 }
 

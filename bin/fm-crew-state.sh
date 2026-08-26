@@ -67,6 +67,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-worktree-clean-lib.sh
+. "$SCRIPT_DIR/fm-worktree-clean-lib.sh"
 
 ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
@@ -86,6 +88,13 @@ SEP=' · '
 # Emit the one canonical line and exit 0. Detail is optional.
 emit() {  # <state> <source> [detail]
   local state=$1 source=$2 detail=${3:-} gate_detail line generation completed_generation validation_head completed_head validation_path completed_path current_head mode requires_validation=0
+  if [ "$state" = 'done' ] && [ "${KIND:-}" = ship ]; then
+    if ! fm_worktree_is_clean "${WT:-}"; then
+      state=parked
+      source=validation-gate
+      detail='worktree is dirty or could not be inspected'
+    fi
+  fi
   if [ "$state" = 'done' ] && [ "${KIND:-}" = ship ]; then
     gate_detail=$(ship_done_evidence_gate "$ID" ship) || {
       state=parked
