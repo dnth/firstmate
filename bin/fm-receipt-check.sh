@@ -361,17 +361,17 @@ STRONG_RESULT_MODULE="$TMP_ROOT/strong-result.jq"
 : > "$EVIDENCED"
 : > "$INVALID"
 cat > "$STRONG_RESULT_MODULE" <<'JQ'
-def without_zero_failures:
-  gsub("(^|[^[:alnum:]_])(0[[:space:]]+fail(s|ed|ures?)?|fail(s|ed|ures?)[[:space:]]*:[[:space:]]*0)([^[:alnum:]_]|$)"; " "; "i")
+def without_zero_failures_or_errors:
+  gsub("(^|[^[:alnum:]_])(0[[:space:]]+(fail(s|ed|ures?)?|errors?)|(fail(s|ed|ures?)?|errors?)[[:space:]]*:?[[:space:]]*0)([^[:alnum:]_]|$)"; " "; "i")
   | sub("[[:space:],;:]+$"; "")
   | sub("^[[:space:],;:]+"; "");
 def evidence_result:
-  without_zero_failures
+  without_zero_failures_or_errors
   |
   (test("^[[:space:]]*$") | not)
   and (test("(^|[^[:alnum:]_])(fail(s|ed|ures?)?|error|negative|red|broken|skip(s|ped|ping)?|empty)([^[:alnum:]_]|$)|not[[:space:]]+pass(ed)?|no[[:space:]]+(tests?|items?|cases?|examples?|specs?|scenarios?)|(^|[^0-9])0[[:space:]]+(passed|tests?|items?|cases?|examples?|specs?|scenarios?)([^[:alnum:]_]|$|[[:space:],])|(^|[^[:alnum:]_])(tests?|passed)[[:space:]]*:[[:space:]]*0([^0-9]|$)|(^|[^[:alnum:]_])(tests?|passed)[[:space:]]+0([^0-9]|$)|(^|[^[:alnum:]_])passed[[:space:]]+0[[:space:]]+tests?([^[:alnum:]_]|$)|(^|[^0-9])0[[:space:]]*(/|of|out[[:space:]]+of)[[:space:]]*0[[:space:]]+(tests?([[:space:]]+passed)?|passed)([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(tests?([[:space:]]+passed)?|passed)[[:space:]]*:?[[:space:]]*0[[:space:]]*(/|of|out[[:space:]]+of)[[:space:]]*0([[:space:]]+tests?)?([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(ran|run|collected|found|discovered)[[:space:]]*:?[[:space:]]*0[[:space:]]+(tests?|items?|cases?|examples?|specs?|scenarios?)([^[:alnum:]_]|$)"; "i") | not);
 def strong_result:
-  without_zero_failures
+  without_zero_failures_or_errors
   | evidence_result
   and test("^([[:space:]]*(pass(ed)?|success(ful)?|green|clean|ok)[[:space:]]*|[[:space:]]*[1-9][0-9]*[[:space:]]+(tests?[[:space:]]+)?passed([[:space:]].*)?)$"; "i");
 JQ
@@ -512,7 +512,13 @@ fi
 if [ "$ACTION" = invalidate-claim ]; then
   cut -f1 "$CRITERIA" | grep -Fx "$INVALIDATION_CRITERION" >/dev/null 2>&1 \
     || { echo "error: invalidated criterion is not declared by the ship brief" >&2; exit 2; }
-  INVALIDATION_MARKER="validation_claim_invalidation=$INVALIDATION_FINDING:$INVALIDATION_CRITERION"
+  INVALIDATION_GENERATION=$(grep '^validation_generation=' "$META" | tail -1 | cut -d= -f2- || true)
+  [ "${#INVALIDATION_GENERATION}" -eq 32 ] \
+    || { echo "error: claim invalidation requires a current validation generation" >&2; exit 2; }
+  case "$INVALIDATION_GENERATION" in
+    *[!0-9a-f]*) echo "error: claim invalidation requires a current validation generation" >&2; exit 2 ;;
+  esac
+  INVALIDATION_MARKER="validation_claim_invalidation=$INVALIDATION_GENERATION:$INVALIDATION_FINDING:$INVALIDATION_CRITERION"
   VALIDATION_LOCK="$STATE/.$ID.validation-plan.lock"
   if ! mkdir "$VALIDATION_LOCK" 2>/dev/null; then
     VALIDATION_LOCK=
@@ -524,8 +530,8 @@ if [ "$ACTION" = invalidate-claim ]; then
       || { release_validation_lock; echo "error: could not record claim invalidation" >&2; exit 2; }
   fi
   release_validation_lock
-  jq -cn --arg task "$ID" --arg finding "$INVALIDATION_FINDING" --arg criterion "$INVALIDATION_CRITERION" \
-    '{schema:"fm-claim-invalidation.v1",task:$task,status:"recorded",finding:$finding,criterion:$criterion}'
+  jq -cn --arg task "$ID" --arg generation "$INVALIDATION_GENERATION" --arg finding "$INVALIDATION_FINDING" --arg criterion "$INVALIDATION_CRITERION" \
+    '{schema:"fm-claim-invalidation.v1",task:$task,status:"recorded",generation:$generation,finding:$finding,criterion:$criterion}'
   exit 0
 fi
 

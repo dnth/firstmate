@@ -15,7 +15,7 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 - Receipt append and check share one executable owner that enters a verified canonical non-symlink task directory, revalidates its identity, and opens relative no-follow brief and single-link ledger paths portably on Linux and macOS.
 - Planning retains the pinned shared ledger lock through metadata publication, so only receipts appended after the published plan boundary qualify as fresh mechanical evidence.
 - Receipt append, check, and promotion consume one executable acceptance-criterion parser that requires nonblank descriptions.
-- Structurally valid receipts require non-whitespace summary and result strings; explicit failure inflections, negative, empty, zero-test, zero-example, zero-spec, zero-case, zero-scenario, zero-collection, or skip results remain recorded but leave their criteria unevidenced, while zero-failure success summaries and descriptive expected results such as `401` remain eligible.
+- Structurally valid receipts require non-whitespace summary and result strings; explicit failure inflections, negative, empty, zero-test, zero-example, zero-spec, zero-case, zero-scenario, zero-collection, or skip results remain recorded but leave their criteria unevidenced, while nonzero successes with zero-failure or zero-error suffixes and descriptive expected results such as `401` remain eligible.
 - Receipt append retries interrupted or partial writes under the exclusive ledger lock until the complete JSONL record is stored, and rolls an incomplete failed append back to its original EOF.
 - Criterion parsing rejects every opening or closing brace in a description, including balanced and unmatched placeholder syntax.
 - One shared cleanliness predicate requires `git status` to succeed with empty tracked, staged, and untracked output for implementation completion, planning, binding, and terminal completion.
@@ -23,7 +23,7 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 - Every diff input, including the special-mode summary probe, must execute successfully before risk classification.
 - Normal and promoted ship briefs consume the same executable acceptance-evidence and per-mode delivery renderer.
 - The pinned brief and task metadata must record the same concrete delivery mode before validation can proceed.
-- Findings that invalidate a receipt or acceptance claim append one idempotent finding-to-criterion marker to task metadata.
+- Findings that invalidate a receipt or acceptance claim append one generation-scoped idempotent finding-to-criterion marker to task metadata.
 - Successful exact-head runs can bind after reaching checks-passed or passed, while failed and cancelled runs remain ineligible.
 - No-Mistakes status, intent, and CI-log observations use the shared bounded call boundary.
 - Every completion requires path-specific terminal evidence, records its plan path and validated head, invalidates stale completion metadata when the worktree head changes, and refuses completion until the change is replanned or revalidated.

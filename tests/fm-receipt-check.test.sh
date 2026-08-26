@@ -184,7 +184,7 @@ test_complete_and_invalid_ledgers_have_distinct_results() {
 test_explicit_negative_results_leave_criteria_missing() {
   local id=negative-results out rc result
   write_brief "$id" direct-PR
-  for result in failed failure "3 failures" negative "not passed" "no tests" "0 tests" "0 passed" "passed 0" "tests 0" "passed 0 tests" "tests: 0" "passed: 0" "0/0 tests passed" "0 of 0 tests passed" "tests passed: 0/0" "collected 0 items" "0 items collected" "found 0 items" "no items collected" "0 examples" "0 examples, 0 failures" "ran 0 specs" "0 specs" "0 cases" "0 scenarios" skipped empty; do
+  for result in failed failure "3 failures" negative "not passed" "no tests" "0 tests" "0 passed" "passed 0" "tests 0" "passed 0 tests" "tests: 0" "passed: 0" "0/0 tests passed" "0 of 0 tests passed" "tests passed: 0/0" "collected 0 items" "0 items collected" "found 0 items" "no items collected" "0 examples" "0 examples, 0 failures" "ran 0 specs" "0 specs" "0 cases" "0 scenarios" "0 errors" "errors: 0" skipped empty; do
     add_receipt "$id" AC1 test "$result"
   done
   add_receipt "$id" AC2 api 401
@@ -195,7 +195,7 @@ test_explicit_negative_results_leave_criteria_missing() {
     and .required == ["AC1","AC2"]
     and .evidenced == ["AC2"]
     and .missing == ["AC1"]
-    and .receipt_count == 29
+    and .receipt_count == 31
   ' >/dev/null || fail "negative-result evidence status was not deterministic"
   add_receipt "$id" AC1 test passed
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id"); rc=$?
@@ -211,6 +211,15 @@ test_explicit_negative_results_leave_criteria_missing() {
   expect_code 0 "$rc" "zero-failure success summary and expected 401 evidence both count"
   printf '%s' "$out" | jq -e '.evidenced == ["AC1","AC2"] and .missing == []' >/dev/null \
     || fail "zero-failure success summary was rejected as negative evidence"
+
+  id=zero-error-success
+  write_brief "$id" direct-PR
+  add_receipt "$id" AC1 test "10 passed, errors: 0"
+  add_receipt "$id" AC2 test "10 passed, 0 errors"
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id"); rc=$?
+  expect_code 0 "$rc" "nonzero passes with zero errors count as evidence"
+  printf '%s' "$out" | jq -e '.evidenced == ["AC1","AC2"] and .missing == []' >/dev/null \
+    || fail "zero-error success suffix was rejected"
   pass "failed, skipped, empty, and zero-test results stay unevidenced while 401 counts"
 }
 
@@ -395,19 +404,34 @@ test_ci_green_log_allows_exact_bound_run_completion() {
 }
 
 test_claim_invalidation_marker_is_append_only_and_idempotent() {
-  local id=claim-invalidation out rc meta
-  write_brief "$id" no-mistakes
+  local id=claim-invalidation out rc meta base generation first_generation
+  base=$(make_project "$id" no-mistakes localized)
   add_receipt "$id" AC1 test passed
   add_receipt "$id" AC2 lint passed
   meta="$HOME_DIR/state/$id.meta"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --invalidate-claim F9 --invalidated-criterion AC1 >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "claim invalidation requires a current plan generation"
+  FM_FAKE_NM_STATUS= FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null \
+    || fail "claim invalidation fixture plan failed"
+  first_generation=$(grep '^validation_generation=' "$meta" | tail -1 | cut -d= -f2-)
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --invalidate-claim F9 --invalidated-criterion AC1) \
     || fail "claim invalidation marker failed"
-  printf '%s' "$out" | jq -e '.status == "recorded" and .finding == "F9" and .criterion == "AC1"' >/dev/null \
+  printf '%s' "$out" | jq -e --arg generation "$first_generation" \
+    '.status == "recorded" and .generation == $generation and .finding == "F9" and .criterion == "AC1"' >/dev/null \
     || fail "claim invalidation result was not machine-readable"
   FM_HOME="$HOME_DIR" "$CHECK" "$id" --invalidate-claim F9 --invalidated-criterion AC1 >/dev/null \
     || fail "duplicate claim invalidation was not idempotent"
-  [ "$(grep -c '^validation_claim_invalidation=F9:AC1$' "$meta")" -eq 1 ] \
+  [ "$(grep -c "^validation_claim_invalidation=$first_generation:F9:AC1\$" "$meta")" -eq 1 ] \
     || fail "claim invalidation marker was not append-only and idempotent"
+  FM_FAKE_NM_STATUS= FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null \
+    || fail "claim invalidation fixture replan failed"
+  generation=$(grep '^validation_generation=' "$meta" | tail -1 | cut -d= -f2-)
+  [ "$generation" != "$first_generation" ] || fail "claim invalidation replan reused its generation"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --invalidate-claim F9 --invalidated-criterion AC1 >/dev/null \
+    || fail "later-generation claim invalidation failed"
+  [ "$(grep -c '^validation_claim_invalidation=.*:F9:AC1$' "$meta")" -eq 2 ] \
+    || fail "later generation collapsed a distinct claim invalidation"
   FM_HOME="$HOME_DIR" "$CHECK" "$id" --invalidate-claim F10 --invalidated-criterion AC3 >/dev/null 2>&1
   rc=$?
   expect_code 2 "$rc" "claim invalidation rejects an undeclared criterion"
