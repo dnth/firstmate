@@ -43,8 +43,7 @@
 # Every ship scaffold also declares stable acceptance-criterion ids in an exact
 # "# Acceptance criteria" section and creates the append-only evidence ledger at
 # data/<task-id>/evidence.jsonl. bin/fm-receipt-check.sh owns the section parser,
-# evidence gate, conservative risk plan, validation timing, and targeted
-# audit-packet mechanics.
+# evidence gate, conservative binary risk plan, and validation timing.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.

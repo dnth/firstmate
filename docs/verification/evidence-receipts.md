@@ -10,7 +10,6 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 - Low-risk routing is limited to narrow mechanically proven CHANGELOG prose, while every other change defaults high.
 - High-risk, broad, sensitive, weakly proven, materially expanded, or uncertain changes retain full No-Mistakes validation.
 - `direct-PR` and `local-only` retain the evidence gate without entering No-Mistakes.
-- Follow-up work without fresh positive safety evidence or with material risk expansion requires a full rerun.
 - Initial planning records one `validation_started_at`, and completion requires observed post-plan mechanical evidence, the exact successful No-Mistakes run bound to the latest plan/path/head, forge-observed canonical PR/head metadata, or a clean fast-forward-ready branch.
 - Every completion requires path-specific terminal evidence, records its plan path and validated head, invalidates stale completion metadata when the worktree head changes, and refuses completion until the change is replanned or revalidated.
 - Planning and completion refuse tracked, staged, or untracked worktree changes.
@@ -45,13 +44,17 @@ ok - low-risk mechanical changes can skip a full No-Mistakes run
 ok - low documentation requires positive non-authoritative prose classification
 ok - terminal delivery paths record one completion timestamp at their boundary
 ok - completion signals release the validation lock for retry
+ok - replanning invalidates prior run and completion bindings
 ok - dirty worktrees cannot be planned or completed
+ok - direct and local plans never invoke No-Mistakes
+ok - local completion requires fast-forward readiness
 ok - security and uncertain changes retain full No-Mistakes validation
 ok - direct-PR and local-only retain evidence gates without invoking No-Mistakes
 
 $ tests/fm-crew-state.test.sh
 ok - ship completion remains parked until every criterion has evidence
 ok - ship completion fails closed when the evidence contract is malformed
+ok - run-step done requires current-generation validation completion
 all fm-crew-state tests passed
 
 $ tests/fm-brief.test.sh

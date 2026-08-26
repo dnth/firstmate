@@ -1387,6 +1387,28 @@ EOF
   pass "ship completion fails closed when the evidence contract is malformed"
 }
 
+test_run_step_done_requires_current_plan_completion() {
+  reset_fakes
+  local d out id=validation-stage head
+  d=$(new_case validation-stage)
+  make_repo_on_branch "$d/wt" "fm/$id"
+  make_fakebin "$d" >/dev/null
+  head=$(git -C "$d/wt" rev-parse HEAD)
+  fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=ship" "harness=claude" \
+    "mode=no-mistakes" "validation_generation=plan-1" "validation_path=full-no-mistakes" "validation_head=$head"
+  FM_FAKE_AXI_STATUS=$(run_passed "fm/$id")
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" "$id"
+  out=$(run_crew_state "$d" "$id")
+  assert_contains "$out" "state: parked" "passed run without plan completion must remain parked"
+  assert_contains "$out" "source: validation-gate" "missing completion must name the validation gate"
+  printf 'validation_completed_generation=plan-1\nvalidation_completed_path=full-no-mistakes\nvalidation_completed_head=%s\n' "$head" \
+    >> "$d/state/$id.meta"
+  out=$(run_crew_state "$d" "$id")
+  assert_contains "$out" "state: done" "current plan completion must release final done"
+  pass "run-step done requires current-generation validation completion"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -1438,5 +1460,6 @@ test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
 test_ship_done_is_held_until_evidence_is_complete
 test_ship_done_with_malformed_brief_fails_closed
+test_run_step_done_requires_current_plan_completion
 
 echo "all fm-crew-state tests passed"

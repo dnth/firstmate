@@ -14,6 +14,7 @@ fm_git_identity fmtest fmtest@example.invalid
 FAKE_NO_MISTAKES="$TMP_ROOT/fake-no-mistakes"
 cat > "$FAKE_NO_MISTAKES" <<'EOF'
 #!/bin/sh
+[ -z "${FM_NM_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_NM_LOG"
 printf '%s\n' "$FM_FAKE_NM_STATUS"
 EOF
 chmod +x "$FAKE_NO_MISTAKES"
@@ -312,6 +313,27 @@ EOF
   pass "completion signals release the validation lock for retry"
 }
 
+test_replan_invalidates_run_binding() {
+  local id=replan-binding base project head running passed rc
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint "passed"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "initial binding plan failed"
+  project="$TMP_ROOT/project-$id"
+  head=$(git -C "$project" rev-parse HEAD)
+  running=$(nm_status RUN-old "$head" pending)
+  passed=$(nm_status RUN-old "$head" passed)
+  FM_FAKE_NM_STATUS="$running" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-old >/dev/null || fail "initial run binding failed"
+  FM_FAKE_NM_STATUS="$running" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "replan failed"
+  FM_FAKE_NM_STATUS="$passed" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "replan invalidates the prior run binding"
+  pass "replanning invalidates prior run and completion bindings"
+}
+
 test_dirty_worktrees_cannot_plan_or_complete() {
   local id=dirty-plan base project out rc
   base=$(make_project "$id" no-mistakes docs)
@@ -335,6 +357,22 @@ test_dirty_worktrees_cannot_plan_or_complete() {
   rc=$?
   expect_code 2 "$rc" "dirty worktree cannot complete"
   pass "dirty worktrees cannot be planned or completed"
+}
+
+test_direct_and_local_plans_never_query_no_mistakes() {
+  local mode id base log
+  log="$TMP_ROOT/non-nm-plan.log"
+  : > "$log"
+  for mode in direct-PR local-only; do
+    id="no-nm-${mode}"
+    base=$(make_project "$id" "$mode" localized)
+    add_receipt "$id" AC1 test "2 passed"
+    add_receipt "$id" AC2 lint "passed"
+    FM_NM_LOG="$log" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+      "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "$mode plan failed"
+  done
+  [ ! -s "$log" ] || fail "direct/local planning invoked No-Mistakes"
+  pass "direct and local plans never invoke No-Mistakes"
 }
 
 test_local_completion_requires_fast_forward_readiness() {
@@ -476,7 +514,9 @@ test_low_risk_skips_no_mistakes_under_explicit_policy
 test_authoritative_docs_remain_high
 test_terminal_paths_record_completion_at_their_boundary
 test_completion_signal_releases_validation_lock
+test_replan_invalidates_run_binding
 test_dirty_worktrees_cannot_plan_or_complete
+test_direct_and_local_plans_never_query_no_mistakes
 test_local_completion_requires_fast_forward_readiness
 test_high_risk_and_uncertain_inputs_fail_safe
 test_direct_and_local_modes_never_invoke_no_mistakes

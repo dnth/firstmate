@@ -85,13 +85,29 @@ SEP=' · '
 
 # Emit the one canonical line and exit 0. Detail is optional.
 emit() {  # <state> <source> [detail]
-  local state=$1 source=$2 detail=${3:-} gate_detail line
+  local state=$1 source=$2 detail=${3:-} gate_detail line generation completed_generation validation_head completed_head validation_path completed_path current_head
   if [ "$state" = 'done' ] && [ "${KIND:-}" = ship ]; then
     gate_detail=$(ship_done_evidence_gate "$ID" ship) || {
       state=parked
       source=evidence-gate
       detail=$gate_detail
     }
+  fi
+  if [ "$state" = 'done' ] && [ "$source" = 'run-step' ] && [ "${KIND:-}" = ship ]; then
+    generation=$(grep '^validation_generation=' "$META" | tail -1 | cut -d= -f2- || true)
+    completed_generation=$(grep '^validation_completed_generation=' "$META" | tail -1 | cut -d= -f2- || true)
+    validation_head=$(grep '^validation_head=' "$META" | tail -1 | cut -d= -f2- || true)
+    completed_head=$(grep '^validation_completed_head=' "$META" | tail -1 | cut -d= -f2- || true)
+    validation_path=$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)
+    completed_path=$(grep '^validation_completed_path=' "$META" | tail -1 | cut -d= -f2- || true)
+    current_head=$(git -C "${WT:-}" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
+    if [ -n "$generation" ] && { [ "$completed_generation" != "$generation" ] \
+      || [ "$completed_head" != "$validation_head" ] || [ "$current_head" != "$validation_head" ] \
+      || [ "$completed_path" != "$validation_path" ]; }; then
+      state=parked
+      source=validation-gate
+      detail='validation completion is missing or stale for the current plan'
+    fi
   fi
   line="state: $state${SEP}source: $source"
   [ -n "$detail" ] && line="$line${SEP}$detail"

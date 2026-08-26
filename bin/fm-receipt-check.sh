@@ -337,6 +337,7 @@ if [ "$ACTION" = bind-run ]; then
   BIND_WORKTREE=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
   BIND_PATH=$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)
   BIND_HEAD=$(grep '^validation_head=' "$META" | tail -1 | cut -d= -f2- || true)
+  BIND_GENERATION=$(grep '^validation_generation=' "$META" | tail -1 | cut -d= -f2- || true)
   BIND_PREPLAN_RUN=$(grep '^validation_preplan_run_id=' "$META" | tail -1 | cut -d= -f2- || true)
   [ "$BIND_PATH" = full-no-mistakes ] || { echo "error: latest plan does not use full No-Mistakes" >&2; exit 2; }
   [ -n "$BIND_WORKTREE" ] && [ -d "$BIND_WORKTREE" ] || { echo "error: validation worktree is missing" >&2; exit 2; }
@@ -355,15 +356,16 @@ if [ "$ACTION" = bind-run ]; then
     && { [ "$BIND_STATUS" = running ] || [ "$BIND_STATUS" = fixing ] || [ "$BIND_STATUS" = ci ] || [ "$BIND_STATUS" = awaiting_approval ]; } \
     && [ "$BIND_OUTCOME" != passed ] \
     || { echo "error: No-Mistakes run does not match the latest plan" >&2; exit 2; }
-  printf 'validation_run_id=%s\nvalidation_run_path=%s\nvalidation_run_head=%s\n' \
-    "$RUN_ID_INPUT" "$BIND_PATH" "$BIND_HEAD" >> "$META"
+  [ -n "$BIND_GENERATION" ] || { echo "error: validation generation is missing" >&2; exit 2; }
+  printf 'validation_run_id=%s\nvalidation_run_path=%s\nvalidation_run_head=%s\nvalidation_run_generation=%s\n' \
+    "$RUN_ID_INPUT" "$BIND_PATH" "$BIND_HEAD" "$BIND_GENERATION" >> "$META"
   jq -cn --arg task "$ID" --arg run "$RUN_ID_INPUT" --arg path "$BIND_PATH" --arg head "$BIND_HEAD" \
     '{schema:"fm-validation-run-binding.v1",task:$task,status:"bound",run:$run,path:$path,head:$head}'
   exit 0
 fi
 
 record_validation_completed() {
-  local started path completed completed_head completed_path completed_evidence now worktree validated_head current_head expected_evidence observed pr pr_head branch boundary new_receipts run_id run_path run_out observed_id observed_head outcome default_ref default_branch
+  local started path generation completed completed_head completed_path completed_evidence completed_generation now worktree validated_head current_head expected_evidence observed pr pr_head branch boundary new_receipts run_id run_path run_generation run_out observed_id observed_head outcome default_ref default_branch
   VALIDATION_LOCK="$STATE/.$ID.validation-plan.lock"
   if ! mkdir "$VALIDATION_LOCK" 2>/dev/null; then
     VALIDATION_LOCK=
@@ -372,6 +374,7 @@ record_validation_completed() {
   fi
   started=$(grep '^validation_started_at=' "$META" | head -1 | cut -d= -f2- || true)
   path=$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)
+  generation=$(grep '^validation_generation=' "$META" | tail -1 | cut -d= -f2- || true)
   worktree=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
   validated_head=$(grep '^validation_head=' "$META" | tail -1 | cut -d= -f2- || true)
   case "$started" in
@@ -395,7 +398,7 @@ record_validation_completed() {
   [ -z "$(git -C "$worktree" status --porcelain --untracked-files=all 2>/dev/null)" ] \
     || { release_validation_lock; echo "error: validation worktree is dirty; commit or remove all changes" >&2; return 1; }
   if [ "$current_head" != "$validated_head" ]; then
-    printf 'validation_completed_at=\nvalidation_completed_head=\nvalidation_completed_path=\nvalidation_completed_evidence=\n' >> "$META" \
+    printf 'validation_completed_at=\nvalidation_completed_head=\nvalidation_completed_path=\nvalidation_completed_evidence=\nvalidation_completed_generation=\n' >> "$META" \
       || { release_validation_lock; echo "error: could not invalidate stale validation completion" >&2; return 1; }
     release_validation_lock
     echo "error: current worktree head differs from the validated head; replan and revalidate" >&2
@@ -416,8 +419,9 @@ record_validation_completed() {
     full-no-mistakes)
       run_id=$(grep '^validation_run_id=' "$META" | tail -1 | cut -d= -f2- || true)
       run_path=$(grep '^validation_run_path=' "$META" | tail -1 | cut -d= -f2- || true)
+      run_generation=$(grep '^validation_run_generation=' "$META" | tail -1 | cut -d= -f2- || true)
       observed_head=$(grep '^validation_run_head=' "$META" | tail -1 | cut -d= -f2- || true)
-      [ -n "$run_id" ] && [ "$run_path" = "$path" ] && [ "$observed_head" = "$validated_head" ] \
+      [ -n "$run_id" ] && [ "$run_path" = "$path" ] && [ "$run_generation" = "$generation" ] && [ "$observed_head" = "$validated_head" ] \
         || { release_validation_lock; echo "error: no No-Mistakes run is bound to the latest plan" >&2; return 1; }
       run_out=$(cd "$worktree" && "$NO_MISTAKES_BIN" axi status --run "$run_id" 2>/dev/null) \
         || { release_validation_lock; echo "error: bound No-Mistakes run could not be observed" >&2; return 1; }
@@ -471,6 +475,7 @@ record_validation_completed() {
   completed_head=$(grep '^validation_completed_head=' "$META" | tail -1 | cut -d= -f2- || true)
   completed_path=$(grep '^validation_completed_path=' "$META" | tail -1 | cut -d= -f2- || true)
   completed_evidence=$(grep '^validation_completed_evidence=' "$META" | tail -1 | cut -d= -f2- || true)
+  completed_generation=$(grep '^validation_completed_generation=' "$META" | tail -1 | cut -d= -f2- || true)
   if [ -n "$completed_head" ]; then
     [ -n "$completed" ] \
       || { release_validation_lock; echo "error: validation completion timestamp is missing" >&2; return 1; }
@@ -480,10 +485,10 @@ record_validation_completed() {
     completed_head=$(git -C "$worktree" rev-parse --verify "$completed_head^{commit}" 2>/dev/null) \
       || { release_validation_lock; echo "error: validation completed head is invalid" >&2; return 1; }
   fi
-  if [ "$completed_head:$completed_path:$completed_evidence" != "$validated_head:$path:$observed" ]; then
+  if [ "$completed_head:$completed_path:$completed_evidence:$completed_generation" != "$validated_head:$path:$observed:$generation" ]; then
     now=$(date +%s)
-    printf 'validation_completed_at=%s\nvalidation_completed_head=%s\nvalidation_completed_path=%s\nvalidation_completed_evidence=%s\n' \
-      "$now" "$validated_head" "$path" "$observed" >> "$META" \
+    printf 'validation_completed_at=%s\nvalidation_completed_head=%s\nvalidation_completed_path=%s\nvalidation_completed_evidence=%s\nvalidation_completed_generation=%s\n' \
+      "$now" "$validated_head" "$path" "$observed" "$generation" >> "$META" \
       || { release_validation_lock; echo "error: could not record validation completion" >&2; return 1; }
     completed=$now
     completed_head=$validated_head
@@ -610,7 +615,7 @@ case "$MODE:$TIER" in
 esac
 
 write_meta_record() {  # <pass>
-  local pass=$1 now packet_value started
+  local pass=$1 now started previous_generation
   now=$(date +%s)
   VALIDATION_LOCK="$STATE/.$ID.validation-plan.lock"
   if ! mkdir "$VALIDATION_LOCK" 2>/dev/null; then
@@ -619,12 +624,13 @@ write_meta_record() {  # <pass>
     return 1
   fi
   started=$(grep '^validation_started_at=' "$META" | head -1 | cut -d= -f2- || true)
+  previous_generation=$(grep '^validation_generation=' "$META" | tail -1 | cut -d= -f2- || true)
   case "$started" in
     '') ;;
     *[!0-9]*) release_validation_lock; echo "error: validation start timestamp is invalid" >&2; return 1 ;;
   esac
-  packet_value=
   if ! {
+    printf 'validation_generation=%s\n' "$PLAN_GENERATION"
     printf 'validation_tier=%s\n' "$TIER"
     printf 'validation_path=%s\n' "$VALIDATION_PATH"
     printf 'validation_reason=%s\n' "$REASON"
@@ -636,7 +642,10 @@ write_meta_record() {  # <pass>
     [ -n "$started" ] || printf 'validation_started_at=%s\n' "$now"
     printf 'validation_ledger_receipt_count=%s\n' "$RECEIPT_COUNT"
     printf 'validation_preplan_run_id=%s\n' "${PREPLAN_RUN_ID:-}"
-    printf 'validation_packet=%s\n' "$packet_value"
+    if [ -n "$previous_generation" ]; then
+      printf 'validation_run_id=\nvalidation_run_path=\nvalidation_run_head=\nvalidation_run_generation=\n'
+      printf 'validation_completed_at=\nvalidation_completed_head=\nvalidation_completed_path=\nvalidation_completed_evidence=\nvalidation_completed_generation=\n'
+    fi
   } >> "$META"; then
     release_validation_lock
     echo "error: could not append validation metadata: $META" >&2
@@ -645,8 +654,12 @@ write_meta_record() {  # <pass>
   release_validation_lock
 }
 
-PREPLAN_OUT=$(cd "$WORKTREE" && "$NO_MISTAKES_BIN" axi status 2>/dev/null || true)
-PREPLAN_RUN_ID=$(nm_status_field "$PREPLAN_OUT" id)
+PLAN_GENERATION="$(date +%s).$$"
+PREPLAN_RUN_ID=
+if [ "$VALIDATION_PATH" = full-no-mistakes ]; then
+  PREPLAN_OUT=$(cd "$WORKTREE" && "$NO_MISTAKES_BIN" axi status 2>/dev/null || true)
+  PREPLAN_RUN_ID=$(nm_status_field "$PREPLAN_OUT" id)
+fi
 write_meta_record initial
 jq -cn --arg task "$ID" --arg mode "$MODE" --arg tier "$TIER" --arg path "$VALIDATION_PATH" --arg reason "$REASON" \
   --arg base "$BASE" --arg head "$HEAD" \
