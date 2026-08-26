@@ -140,13 +140,15 @@ make_no_timeout_toolbin() {  # <dir> -> echoes toolbin path
 # Run the helper for one case dir. FM_FAKE_* env (run output, busy flag) are read
 # from the caller's environment by the fakes above.
 run_crew_state() {  # <case-dir> <id>
-  local case_dir=$1 id=$2 brief ledger
+  local case_dir=$1 id=$2 brief ledger fixture_head fixture_mode added_mode=0
   if grep -qx 'kind=ship' "$case_dir/state/$id.meta" 2>/dev/null; then
+    fixture_mode=$(sed -n 's/^mode=//p' "$case_dir/state/$id.meta" | tail -1)
+    [ -n "$fixture_mode" ] || fixture_mode=direct-PR
     brief="$case_dir/data/$id/brief.md"
     ledger="$case_dir/data/$id/evidence.jsonl"
     if [ ! -e "$brief" ]; then
       mkdir -p "$case_dir/data/$id"
-      cat > "$brief" <<'EOF'
+      cat > "$brief" <<EOF
 # Task
 Exercise the crew-state fixture.
 
@@ -154,9 +156,20 @@ Exercise the crew-state fixture.
 - AC1: The fixture has complete evidence.
 
 # Definition of done
-Delivery contract: mode=direct-PR
+Delivery contract: mode=$fixture_mode
 EOF
       printf '%s\n' '{"criterion":"AC1","type":"review","summary":"fixture evidence","result":"complete"}' > "$ledger"
+    fi
+    if ! grep -q '^mode=' "$case_dir/state/$id.meta" 2>/dev/null; then
+      printf 'mode=direct-PR\n' >> "$case_dir/state/$id.meta"
+      added_mode=1
+    fi
+    if [ "$added_mode" -eq 1 ]; then
+      fixture_head=$(git -C "$case_dir/wt" rev-parse HEAD 2>/dev/null || true)
+      if [ -n "$fixture_head" ]; then
+        printf 'validation_generation=legacy-fixture\nvalidation_path=direct-PR\nvalidation_head=%s\nvalidation_completed_generation=legacy-fixture\nvalidation_completed_path=direct-PR\nvalidation_completed_head=%s\n' \
+          "$fixture_head" "$fixture_head" >> "$case_dir/state/$id.meta"
+      fi
     fi
   fi
   PATH="$case_dir/fakebin:$PATH" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" "$CREW_STATE" "$id"

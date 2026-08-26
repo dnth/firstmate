@@ -17,6 +17,7 @@ cat > "$FAKE_NO_MISTAKES" <<'EOF'
 [ -z "${FM_NM_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_NM_LOG"
 case "$*" in
   *"axi logs --step intent --run "*) printf '%s\n' "${FM_FAKE_NM_INTENT:-}" ;;
+  *"axi logs --step ci --run "*) printf '%s\n' "${FM_FAKE_NM_CI_LOG:-}" ;;
   *) printf '%s\n' "$FM_FAKE_NM_STATUS" ;;
 esac
 EOF
@@ -148,7 +149,7 @@ test_complete_and_invalid_ledgers_have_distinct_results() {
 test_explicit_negative_results_leave_criteria_missing() {
   local id=negative-results out rc result
   write_brief "$id" direct-PR
-  for result in failed failure negative "not passed" "no tests" "0 tests" "0 passed" skipped empty; do
+  for result in failed failure "3 failures" negative "not passed" "no tests" "0 tests" "0 passed" skipped empty; do
     add_receipt "$id" AC1 test "$result"
   done
   add_receipt "$id" AC2 api 401
@@ -159,13 +160,22 @@ test_explicit_negative_results_leave_criteria_missing() {
     and .required == ["AC1","AC2"]
     and .evidenced == ["AC2"]
     and .missing == ["AC1"]
-    and .receipt_count == 10
+    and .receipt_count == 11
   ' >/dev/null || fail "negative-result evidence status was not deterministic"
   add_receipt "$id" AC1 test passed
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id"); rc=$?
   expect_code 0 "$rc" "a later positive receipt evidences the missing criterion"
   printf '%s' "$out" | jq -e '.evidenced == ["AC1","AC2"] and .missing == []' >/dev/null \
     || fail "positive receipt did not recover a criterion with prior negative receipts"
+
+  id=zero-failure-success
+  write_brief "$id" direct-PR
+  add_receipt "$id" AC1 test "10 passed, 0 FAILURES"
+  add_receipt "$id" AC2 api 401
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id"); rc=$?
+  expect_code 0 "$rc" "zero-failure success summary and expected 401 evidence both count"
+  printf '%s' "$out" | jq -e '.evidenced == ["AC1","AC2"] and .missing == []' >/dev/null \
+    || fail "zero-failure success summary was rejected as negative evidence"
   pass "failed, skipped, empty, and zero-test results stay unevidenced while 401 counts"
 }
 
@@ -301,7 +311,40 @@ EOF
   expect_code 0 "$rc" "checker accepts the same detailed criterion as append"
   printf '%s' "$out" | jq -e '.required == ["AC10"] and .evidenced == ["AC10"]' >/dev/null \
     || fail "shared criterion parser produced inconsistent append/check behavior"
+  printf '# Acceptance criteria\n- AC1:    \n# End acceptance criteria\n' \
+    | "$CHECK" --parse-criteria - >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "shared criterion parser rejects an all-whitespace description"
   pass "receipt append and check consume one criterion grammar"
+}
+
+test_ci_green_log_allows_exact_bound_run_completion() {
+  local id=ci-log-ready base project head generation running ci_status rc
+  id=ci-log-ready
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint passed
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null \
+    || fail "CI-log readiness fixture plan failed"
+  project="$TMP_ROOT/project-$id"
+  head=$(git -C "$project" rev-parse HEAD)
+  generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
+  running=$(nm_status RUN-ci-log "$head" pending)
+  FM_FAKE_NM_STATUS="$running" FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: $generation" \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-ci-log --generation "$generation" >/dev/null \
+    || fail "CI-log readiness fixture run binding failed"
+  ci_status=$(printf 'run:\n  id: "RUN-ci-log"\n  status: ci\n  head: "%s"\noutcome: pending\n' "$head")
+  FM_FAKE_NM_STATUS="$ci_status" FM_FAKE_NM_CI_LOG='CI checks running' \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "current CI log keeps pending checks incomplete"
+  FM_FAKE_NM_STATUS="$ci_status" FM_FAKE_NM_CI_LOG='all CI checks passed - still monitoring until merged or closed' \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed >/dev/null \
+    || fail "current checks-green CI log did not complete the exact bound run"
+  pass "exact bound runs complete from the shared current CI-log readiness predicate"
 }
 
 test_claim_invalidation_marker_is_append_only_and_idempotent() {
@@ -728,6 +771,7 @@ test_delivery_mode_mismatch_fails_closed
 test_invalid_brief_and_scout_behavior
 test_pinned_checker_rejects_redirected_and_linked_evidence
 test_shared_criterion_parser_drives_append_and_check
+test_ci_green_log_allows_exact_bound_run_completion
 test_claim_invalidation_marker_is_append_only_and_idempotent
 test_low_risk_skips_no_mistakes_under_explicit_policy
 test_authoritative_docs_remain_high

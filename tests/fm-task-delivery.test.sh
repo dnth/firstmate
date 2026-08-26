@@ -251,6 +251,18 @@ EOF
   assert_grep 'kind=scout' "$meta" "invalid criterion changed scout metadata"
   [ ! -e "$ledger" ] || fail "invalid criterion created an evidence ledger"
 
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 --mode direct-PR --yolo on \
+    --criterion 'AC1: First outcome' --criterion 'AC1: Duplicate outcome' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "promotion accepted duplicate criterion ids"
+  assert_grep 'kind=scout' "$meta" "duplicate criteria changed scout metadata"
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 --mode direct-PR --yolo on \
+    --criterion 'AC1:    ' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "promotion accepted an all-whitespace criterion description"
+  assert_grep 'kind=scout' "$meta" "whitespace criterion changed scout metadata"
+
   brief_before="$home/brief.before"
   meta_before="$home/meta.before"
   cp "$brief" "$brief_before"

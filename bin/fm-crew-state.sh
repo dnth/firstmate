@@ -303,35 +303,10 @@ nm_effective_ci_step_status() {
   fi
 }
 
-# Root cause of the PR #252 incident (2026-07): for a repo where merge is left
-# to the captain, no-mistakes' ci step (and therefore top-level status/outcome)
-# stays "running" for the ENTIRE CI-monitor phase, including long after GitHub
-# reports every check green - it only reaches outcome=passed once the PR is
-# actually merged (or failed/cancelled if closed). `axi status`'s steps[] table
-# never distinguishes "still waiting on checks" from "checks green, waiting on
-# merge": both read as plain `ci,running,...`. The only place that transition is
-# recorded is the ci step's own log text, e.g. "all CI checks passed - still
-# monitoring until merged or closed" or "no CI checks reported - still
-# monitoring until merged or closed" (verified against 360+ real run logs under
-# ~/.no-mistakes/logs/*/ci.log on the installed v1.32.2 binary, including the
-# actual PR #252 run). Reads the ci step's log tail via `axi logs` and scans it
-# for the MOST RECENT recognized marker (the log is append-only/chronological,
-# so the last match is current): green with nothing red after it means CI is
-# green right now, still only waiting on merge/close.
 nm_ci_checks_state() {
-  local run_id log_tail marker
+  local run_id
   run_id=$(strip_quotes "$(nm_field id)")
-  [ -n "$run_id" ] || { printf 'unknown'; return; }
-  log_tail=$(nm_run axi logs --step ci --run "$run_id") || true
-  [ -n "$log_tail" ] || { printf 'unknown'; return; }
-  marker=$(printf '%s\n' "$log_tail" \
-    | grep -E 'CI checks passed|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running|base branch advanced.*re-arming CI monitor timeout' \
-    | tail -1)
-  case "$marker" in
-    *"checks passed"*|*"no CI checks reported - still monitoring"*) printf 'green' ;;
-    *"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'not-ready' ;;
-    *) printf 'unknown' ;;
-  esac
+  fm_nm_ci_checks_state "$WT" "$NM_TIMEOUT" "$run_id"
 }
 # Coarse fallback for cross-branch attribution. `no-mistakes axi status` (bare)
 # reports the active-or-most-recent run for the CURRENT branch when one

@@ -27,6 +27,7 @@
 # are invalid once completion is checked.
 # Structurally valid receipts with explicit failure, negative, zero-test, empty,
 # or skip result indicators remain recorded but do not evidence their criterion.
+# A positive result paired only with an explicit zero-failure phrase remains eligible.
 #
 # --plan first requires a complete evidence check, then inspects the recorded
 # worktree's base..HEAD diff with a deterministic conservative classifier.
@@ -42,7 +43,8 @@
 # worktree HEAD that differs from the latest validation_head.
 # Low-risk completion requires a strong mechanical receipt appended after planning.
 # --complete requires the path-specific terminal evidence named by the generated
-# instructions and records that evidence with the latest plan, path, and head.
+# instructions and records that evidence with the latest plan, path, and head;
+# exact bound runs may prove current checks-green readiness through the shared CI log predicate.
 # --invalidate-claim appends one idempotent finding-to-criterion marker to task
 # metadata after confirming that the criterion and evidence contract are current.
 # Delivery mode remains authoritative: direct-PR and local-only never invoke
@@ -57,6 +59,11 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 NO_MISTAKES_BIN="${FM_NO_MISTAKES_BIN:-no-mistakes}"
+NM_TIMEOUT=${FM_RECEIPT_NM_TIMEOUT:-10}
+case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
+
+# shellcheck source=bin/fm-nm-run-lib.sh
+. "$SCRIPT_DIR/fm-nm-run-lib.sh"
 
 usage() {
   awk '
@@ -85,6 +92,7 @@ parse_criteria() {
       sub(/:.*/, "", id)
       description=line
       sub(/^[^:]*:[[:space:]]*/, "", description)
+      if (description !~ /[^[:space:]]/) bad=1
       if (description ~ /^\{.*\}$/) bad=1
       if (seen[id]++) bad=1
       print id "\t" description
@@ -379,11 +387,18 @@ STRONG_RESULT_MODULE="$TMP_ROOT/strong-result.jq"
 : > "$EVIDENCED"
 : > "$INVALID"
 cat > "$STRONG_RESULT_MODULE" <<'JQ'
+def without_zero_failures:
+  gsub("(^|[^0-9])0[[:space:]]+fail(s|ed|ures?)?([^[:alnum:]_]|$)"; " "; "i")
+  | sub("[[:space:],;:]+$"; "")
+  | sub("^[[:space:],;:]+"; "");
 def evidence_result:
+  without_zero_failures
+  |
   (test("^[[:space:]]*$") | not)
-  and (test("(^|[^[:alnum:]_])(fail(ed|ure)?|error|negative|red|broken|skip(ped)?|empty)([^[:alnum:]_]|$)|not[[:space:]]+pass(ed)?|no[[:space:]]+tests?|(^|[^0-9])0[[:space:]]+(tests?([[:space:]]+passed)?|passed)([^[:alnum:]_]|$)"; "i") | not);
+  and (test("(^|[^[:alnum:]_])(fail(s|ed|ures?)?|error|negative|red|broken|skip(s|ped|ping)?|empty)([^[:alnum:]_]|$)|not[[:space:]]+pass(ed)?|no[[:space:]]+tests?|(^|[^0-9])0[[:space:]]+(tests?([[:space:]]+passed)?|passed)([^[:alnum:]_]|$)"; "i") | not);
 def strong_result:
-  evidence_result
+  without_zero_failures
+  | evidence_result
   and test("^([[:space:]]*(pass(ed)?|success(ful)?|green|clean|ok)[[:space:]]*|[[:space:]]*[1-9][0-9]*[[:space:]]+(tests?[[:space:]]+)?passed([[:space:]].*)?)$"; "i");
 JQ
 
@@ -541,7 +556,7 @@ if [ "$ACTION" = bind-run ]; then
 fi
 
 record_validation_completed() {
-  local started path generation completed completed_head completed_path completed_evidence completed_generation now worktree validated_head current_head expected_evidence observed pr pr_head branch boundary new_receipts run_id run_path run_generation run_out observed_id observed_head outcome run_status default_ref default_branch
+  local started path generation completed completed_head completed_path completed_evidence completed_generation now worktree validated_head current_head expected_evidence observed pr pr_head branch boundary new_receipts run_id run_path run_generation run_out observed_id observed_head outcome run_status default_ref default_branch ci_state run_ready
   VALIDATION_LOCK="$STATE/.$ID.validation-plan.lock"
   if ! mkdir "$VALIDATION_LOCK" 2>/dev/null; then
     VALIDATION_LOCK=
@@ -605,8 +620,14 @@ record_validation_completed() {
       observed_head=$(nm_status_field "$run_out" head)
       outcome=$(nm_status_field "$run_out" outcome)
       run_status=$(nm_status_field "$run_out" status)
-      if [ "$observed_id" != "$run_id" ] || [ "$observed_head" != "$validated_head" ] \
-        || { [ "$outcome" != passed ] && [ "$outcome" != checks-passed ] && [ "$run_status" != checks-passed ]; }; then
+      run_ready=0
+      if [ "$outcome" = passed ] || [ "$outcome" = checks-passed ] || [ "$run_status" = checks-passed ]; then
+        run_ready=1
+      elif [ "$run_status" = ci ] || [ "$run_status" = running ]; then
+        ci_state=$(fm_nm_ci_checks_state "$worktree" "$NM_TIMEOUT" "$run_id")
+        [ "$ci_state" != green ] || run_ready=1
+      fi
+      if [ "$observed_id" != "$run_id" ] || [ "$observed_head" != "$validated_head" ] || [ "$run_ready" -ne 1 ]; then
         release_validation_lock
         echo "error: bound No-Mistakes run did not pass checks at the exact validated head" >&2
         return 1
