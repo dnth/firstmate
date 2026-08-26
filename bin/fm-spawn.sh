@@ -39,7 +39,7 @@
 #   Use it only after explicit captain approval:
 #   omp auto-executes those files before the model reasons about the task, and
 #   firstmate launches omp with --auto-approve. Firstmate's exact tracked primary
-#   extension is allowlisted only for validated secondmate-home launches.
+#   and fleet-hook extensions are allowlisted only for validated secondmate-home launches.
 #   This flag has no effect on other harnesses. Successful OMP spawns record
 #   allow_project_omp_extensions=1 in task metadata for auditability.
 #   --backend <name> is the explicit runtime session-provider backend for this
@@ -2075,12 +2075,13 @@ omp_project_extension_preflight() {
     fi
   fi
 
-  trusted="$FM_ROOT/.omp/extensions/fm-primary-omp.ts"
   if [ -n "$offenders" ]; then
     filtered=
     while IFS= read -r path; do
       if [ "$KIND" = secondmate ] \
-        && [ "$path" = ".omp/extensions/fm-primary-omp.ts" ] \
+        && { [ "$path" = ".omp/extensions/fm-primary-omp.ts" ] \
+          || [ "$path" = ".omp/extensions/fm-fleet-hooks.ts" ]; } \
+        && trusted="$FM_ROOT/$path" \
         && [ -f "$trusted" ] && [ ! -L "$trusted" ] \
         && [ -f "$project/$path" ] && [ ! -L "$project/$path" ] \
         && cmp -s "$project/$path" "$trusted"; then

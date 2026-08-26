@@ -274,6 +274,9 @@ The Kimi installer requires an existing regular non-symlink `~/.kimi-code/config
 Its `remove` action excises only the marker-delimited Firstmate region and removes Firstmate's hook files.
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 For OMP secondmate launches, it explicitly loads that home's `.omp/extensions/fm-primary-omp.ts`, keeps exact resume state under `state/omp-sessions`, and publishes `state/.omp-session` only after the adapter binds the selected conversation.
+The separately discovered `.omp/extensions/fm-fleet-hooks.ts` fails open while redacting credential-shaped values from text chunks in tool results, reporting valid `fm-todo-project.sh --check` drift through hidden next-turn context, and injecting a bounded roster, OPEN DECISIONS, in-flight PR, and Ready/In-flight backlog snapshot during compaction.
+It reads the active firstmate or secondmate home's own fleet state through `FM_HOME`; malformed or unreadable input, command failure, or a bounded read-only subprocess timeout suppresses that hook output instead of interrupting the OMP turn.
+[`docs/verification/runtime-backends.md`](verification/runtime-backends.md#omp-project-extension-discovery) records the deterministic coverage and the pending live OMP event-delivery check.
 
 ### OMP runtime bound (config/omp-max-time)
 
@@ -294,7 +297,7 @@ Those project files execute before the worker reasons about its brief, and First
 `fm-spawn.sh` therefore refuses an OMP crewmate or secondmate launch when the final project worktree contains git-tracked auto-executed `.omp/extensions` entries or a tracked project settings extension selector.
 Only explicit captain approval for that project authorizes the per-spawn override described in `fm-spawn.sh`'s header.
 The successful OMP task metadata records `allow_project_omp_extensions=1` whenever that override is passed.
-The exact tracked Firstmate primary extension at `.omp/extensions/fm-primary-omp.ts` is excluded only for a validated secondmate home when its live contents match Firstmate's own copy, so the home-root integration injected with `-e` remains unaffected.
+The exact tracked Firstmate extensions at `.omp/extensions/fm-primary-omp.ts` and `.omp/extensions/fm-fleet-hooks.ts` are excluded only for a validated secondmate home when each file's live contents match Firstmate's own copy, so the primary integration can be loaded explicitly and the fleet hooks remain available to native discovery in that home's OMP session.
 Other harnesses do not run this preflight because they do not auto-execute OMP project extensions.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)

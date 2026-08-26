@@ -2094,6 +2094,7 @@ test_omp_secondmate_inspects_staged_live_extensions() {
   make_seeded_secondmate_home "$sm" "$id"
   mkdir -p "$sm/.omp/extensions" "$sm/state" "$sm/config" "$sm/projects"
   cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$sm/.omp/extensions/fm-primary-omp.ts"
+  cp "$ROOT/.omp/extensions/fm-fleet-hooks.ts" "$sm/.omp/extensions/fm-fleet-hooks.ts"
   git -C "$sm" init -q
   git -C "$sm" add .
   git -C "$sm" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
@@ -2108,9 +2109,11 @@ test_omp_secondmate_inspects_staged_live_extensions() {
     "OMP secondmate refusal inspected committed content instead of the live index and worktree"
   assert_not_contains "$out" ".omp/extensions/fm-primary-omp.ts" \
     "OMP secondmate refusal incorrectly flagged Firstmate's exact tracked primary extension"
+  assert_not_contains "$out" ".omp/extensions/fm-fleet-hooks.ts" \
+    "OMP secondmate refusal incorrectly flagged Firstmate's exact tracked fleet hooks"
   assert_no_grep 'new-window|new-session' "$CASE_DIR/endpoint.log" \
     "OMP staged secondmate-extension refusal created an endpoint"
-  pass "OMP secondmates inspect staged live extensions"
+  pass "OMP secondmates trust exact primary and fleet extensions while inspecting staged code"
 }
 
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
