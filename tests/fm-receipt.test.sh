@@ -120,7 +120,7 @@ test_rejects_non_ship_and_unsafe_ledger() {
   pass "fm-receipt refuses non-ship tasks and unsafe ledger paths"
 }
 
-test_task_directory_swap_cannot_redirect_append() {
+test_task_directory_swap_before_open_is_rejected() {
   local id=swapped-task task moved outside fakebin real_jq ready release pid rc
   write_ship "$id"
   task="$HOME_DIR/data/$id"
@@ -153,14 +153,54 @@ EOF
   printf 'continue\n' > "$release"
   wait "$pid"
   rc=$?
-  expect_code 0 "$rc" "a pinned receipt append should survive task-path replacement"
-  [ "$(wc -l < "$moved/evidence.jsonl" | tr -d ' ')" -eq 1 ] || fail "receipt did not append to the pinned ledger"
+  [ "$rc" -ne 0 ] || fail "receipt accepted a task path replaced before its no-follow open"
+  [ ! -s "$moved/evidence.jsonl" ] || fail "rejected task-path replacement mutated the original ledger"
   [ ! -s "$outside/evidence.jsonl" ] || fail "task-path replacement redirected the receipt outside its pinned directory"
-  pass "fm-receipt pins the task directory across append-time path replacement"
+  pass "fm-receipt rejects task-directory replacement before its no-follow open"
+}
+
+test_ledger_replacement_after_open_cannot_redirect_append() {
+  local id=swapped-ledger task ledger pinned replacement ready release holder receipt_pid rc
+  id=swapped-ledger
+  write_ship "$id"
+  task="$HOME_DIR/data/$id"
+  ledger="$task/evidence.jsonl"
+  pinned="$task/evidence.original"
+  replacement="$task/evidence.replacement"
+  ready="$TMP_ROOT/ledger-lock-ready"
+  release="$TMP_ROOT/ledger-lock-release"
+  mkfifo "$release"
+  FM_LOCK_LEDGER="$ledger" FM_LOCK_READY="$ready" FM_LOCK_RELEASE="$release" perl -MFcntl=:flock -e '
+    open(my $ledger, "+<", $ENV{FM_LOCK_LEDGER}) or exit 1;
+    flock($ledger, LOCK_EX) or exit 1;
+    open(my $ready, ">", $ENV{FM_LOCK_READY}) or exit 1;
+    close($ready) or exit 1;
+    open(my $release, "<", $ENV{FM_LOCK_RELEASE}) or exit 1;
+    <$release>;
+  ' &
+  holder=$!
+  while [ ! -e "$ready" ]; do
+    kill -0 "$holder" 2>/dev/null || fail "ledger lock holder exited before the race boundary"
+  done
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test summary passed > "$TMP_ROOT/ledger-swap-output" 2>&1 &
+  receipt_pid=$!
+  sleep 1
+  mv "$ledger" "$pinned"
+  : > "$replacement"
+  mv "$replacement" "$ledger"
+  printf 'continue\n' > "$release"
+  wait "$holder" || fail "ledger lock holder failed"
+  wait "$receipt_pid"
+  rc=$?
+  expect_code 0 "$rc" "receipt append through the original ledger descriptor"
+  [ "$(wc -l < "$pinned" | tr -d ' ')" -eq 1 ] || fail "receipt did not append through its pinned ledger descriptor"
+  [ ! -s "$ledger" ] || fail "ledger replacement redirected the receipt append"
+  pass "fm-receipt appends only through the ledger descriptor opened before validation"
 }
 
 test_appends_one_compact_valid_receipt
 test_append_is_additive_and_result_flag_works
 test_rejects_invalid_schema_and_undeclared_criteria
 test_rejects_non_ship_and_unsafe_ledger
-test_task_directory_swap_cannot_redirect_append
+test_task_directory_swap_before_open_is_rejected
+test_ledger_replacement_after_open_cannot_redirect_append

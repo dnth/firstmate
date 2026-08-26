@@ -18,10 +18,10 @@
 #   --artifact <path>  Artifact or URL carrying the evidence.
 #   --file <path>      Source or evidence file pointer.
 #
-# The helper validates the task, schema, and criterion before taking an exclusive
-# task-local append lock.
-# It writes exactly one compact JSON object with one append operation and never
-# rewrites existing evidence.
+# The helper validates input schema, opens the task, brief, and original ledger
+# through portable no-follow descriptors, locks that ledger, validates the pinned
+# ship contract and criterion, and appends exactly one compact JSON object without
+# rewriting existing evidence.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -97,32 +97,11 @@ esac
 [ -n "$SUMMARY" ] || { echo "error: summary must not be empty" >&2; exit 2; }
 [ -n "$RESULT" ] || { echo "error: result must not be empty" >&2; exit 2; }
 
-TASK_DIR="$DATA/$ID"
-BRIEF="$TASK_DIR/brief.md"
-LEDGER="$TASK_DIR/evidence.jsonl"
-LOCK="$TASK_DIR/.evidence-append.lock"
-
-[ -d "$DATA" ] && [ ! -L "$TASK_DIR" ] && [ -d "$TASK_DIR" ] \
-  || { echo "error: task directory is missing or unsafe: $TASK_DIR" >&2; exit 1; }
-DATA_REAL=$(cd "$DATA" && pwd -P)
-TASK_REAL=$(cd "$TASK_DIR" && pwd -P)
-[ "$TASK_REAL" = "$DATA_REAL/$ID" ] || { echo "error: task directory escapes data root" >&2; exit 1; }
-exec 8< "$TASK_DIR"
-TASK_IDENTITY=$(stat -L -c '%d:%i' "$TASK_DIR" 2>/dev/null || stat -L -f '%d:%i' "$TASK_DIR" 2>/dev/null)
-PINNED_DIR="/proc/$$/fd/8"
-PINNED_IDENTITY=$(stat -L -c '%d:%i' "$PINNED_DIR" 2>/dev/null || stat -L -f '%d:%i' "$PINNED_DIR" 2>/dev/null)
-[ "$TASK_IDENTITY" = "$PINNED_IDENTITY" ] || { echo "error: task directory identity changed" >&2; exit 1; }
-BRIEF="$PINNED_DIR/brief.md"
-LEDGER="$PINNED_DIR/evidence.jsonl"
-LOCK="$PINNED_DIR/.evidence-append.lock"
-[ -f "$BRIEF" ] && [ ! -L "$BRIEF" ] \
-  || { echo "error: task brief is missing or unsafe: $BRIEF" >&2; exit 1; }
-grep -Eq '^Delivery contract: mode=(no-mistakes|direct-PR|local-only)$' "$BRIEF" \
-  || { echo "error: receipts apply only to ship tasks with a delivery contract" >&2; exit 1; }
-"$SCRIPT_DIR/fm-receipt-check.sh" "$ID" --criterion "$CRITERION" >/dev/null \
-  || { echo "error: criterion is not declared by the ship brief: $CRITERION" >&2; exit 1; }
-
 command -v jq >/dev/null 2>&1 || { echo "error: jq is required" >&2; exit 1; }
+command -v perl >/dev/null 2>&1 || { echo "error: perl is required" >&2; exit 1; }
+[ -d "$DATA" ] || { echo "error: data directory is missing: $DATA" >&2; exit 1; }
+DATA_REAL=$(CDPATH='' cd -- "$DATA" 2>/dev/null && pwd -P) \
+  || { echo "error: data directory is unsafe: $DATA" >&2; exit 1; }
 
 receipt=$(jq -cn \
   --arg criterion "$CRITERION" \
@@ -138,45 +117,83 @@ receipt=$(jq -cn \
     + (if $file == "" then {} else {file:$file} end)
   ')
 
-if [ -L "$LEDGER" ] || [ ! -f "$LEDGER" ]; then
-  echo "error: evidence ledger is not a regular file: $LEDGER" >&2
-  exit 1
-fi
-ledger_links() {
-  stat -c %h "$1" 2>/dev/null || stat -f %l "$1" 2>/dev/null
-}
-[ "$(ledger_links "$LEDGER")" = 1 ] \
-  || { echo "error: evidence ledger has multiple links" >&2; exit 1; }
+if ! FM_RECEIPT_DATA="$DATA_REAL" FM_RECEIPT_ID="$ID" FM_RECEIPT_CRITERION="$CRITERION" \
+  FM_RECEIPT_PAYLOAD="$receipt" perl - <<'PERL'
+use strict;
+use warnings;
+use Fcntl qw(:DEFAULT :flock :mode);
 
-umask 077
-if ! mkdir "$LOCK" 2>/dev/null; then
-  echo "error: evidence ledger is locked by another append: $LOCK" >&2
-  exit 1
-fi
-cleanup() {
-  rmdir "$LOCK" 2>/dev/null || true
+sub refuse {
+  print STDERR "error: $_[0]\n";
+  exit 1;
 }
-trap cleanup EXIT
-trap 'exit 1' HUP INT TERM
 
-if [ -L "$LEDGER" ] || [ ! -f "$LEDGER" ]; then
-  echo "error: evidence ledger became unsafe before append: $LEDGER" >&2
+my $task_path = "$ENV{FM_RECEIPT_DATA}/$ENV{FM_RECEIPT_ID}";
+sysopen(my $task, $task_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+  or refuse("task directory is missing or unsafe: $task_path");
+my @task_identity = stat($task);
+refuse("task path is not a directory") unless @task_identity && S_ISDIR($task_identity[2]);
+my @named_identity = lstat($task_path);
+refuse("task directory identity changed") unless @named_identity
+  && !S_ISLNK($named_identity[2])
+  && $named_identity[0] == $task_identity[0]
+  && $named_identity[1] == $task_identity[1];
+my $task_fd_path = "/dev/fd/" . fileno($task);
+my @descriptor_identity = stat($task_fd_path);
+refuse("portable task descriptor path is unavailable") unless @descriptor_identity
+  && $descriptor_identity[0] == $task_identity[0]
+  && $descriptor_identity[1] == $task_identity[1];
+
+sysopen(my $brief, "$task_fd_path/brief.md", O_RDONLY | O_NOFOLLOW)
+  or refuse("task brief is missing or unsafe");
+my @brief_identity = stat($brief);
+refuse("task brief is not a regular file") unless @brief_identity && S_ISREG($brief_identity[2]);
+sysopen(my $ledger, "$task_fd_path/evidence.jsonl", O_WRONLY | O_APPEND | O_NOFOLLOW)
+  or refuse("evidence ledger is missing or unsafe");
+my @ledger_identity = stat($ledger);
+refuse("evidence ledger must be a single-link regular file") unless @ledger_identity
+  && S_ISREG($ledger_identity[2]) && $ledger_identity[3] == 1;
+flock($ledger, LOCK_EX) or refuse("evidence ledger could not be locked");
+
+local $/;
+my $brief_text = <$brief>;
+defined($brief_text) or refuse("task brief could not be read");
+my @delivery = ($brief_text =~ /^Delivery contract: mode=(no-mistakes|direct-PR|local-only)$/mg);
+refuse("receipts apply only to ship tasks with one delivery contract") unless @delivery == 1;
+my %criteria;
+my $sections = 0;
+my $in_section = 0;
+my $invalid = 0;
+for my $line (split /\n/, $brief_text, -1) {
+  if ($line =~ /^# Acceptance criteria\s*$/) {
+    $sections++;
+    $in_section = 1;
+    next;
+  }
+  if ($in_section && $line =~ /^#/) {
+    $in_section = 0;
+  }
+  next unless $in_section;
+  next if $line =~ /^\s*$/;
+  if ($line !~ /^- (AC[1-9][0-9]*):\s+(.+)$/) {
+    $invalid = 1;
+    next;
+  }
+  my ($criterion, $description) = ($1, $2);
+  $invalid = 1 if $description =~ /^\{.*\}$/ || exists $criteria{$criterion};
+  $criteria{$criterion} = 1;
+}
+refuse("ship brief has an invalid acceptance-criterion contract")
+  if $sections != 1 || $invalid || !%criteria;
+refuse("criterion is not declared by the ship brief: $ENV{FM_RECEIPT_CRITERION}")
+  unless $criteria{$ENV{FM_RECEIPT_CRITERION}};
+
+my $record = "$ENV{FM_RECEIPT_PAYLOAD}\n";
+my $written = syswrite($ledger, $record);
+refuse("evidence receipt append failed") unless defined($written) && $written == length($record);
+close($ledger) or refuse("evidence ledger close failed");
+PERL
+then
   exit 1
 fi
-[ "$(ledger_links "$LEDGER")" = 1 ] \
-  || { echo "error: evidence ledger became multiply linked" >&2; exit 1; }
-command -v perl >/dev/null 2>&1 || { echo "error: perl is required" >&2; exit 1; }
-if ! printf '%s\n' "$receipt" | FM_PINNED_LEDGER="$LEDGER" perl -MFcntl=O_WRONLY,O_APPEND,O_NOFOLLOW -e '
-  sysopen(my $ledger, $ENV{FM_PINNED_LEDGER}, O_WRONLY | O_APPEND | O_NOFOLLOW) or exit 1;
-  my @identity = stat($ledger);
-  exit 1 unless @identity && $identity[3] == 1;
-  while (<STDIN>) { print {$ledger} $_ or exit 1; }
-  close($ledger) or exit 1;
-'; then
-  echo "error: evidence ledger identity changed before append" >&2
-  exit 1
-fi
-cleanup
-trap - EXIT
-exec 8<&-
 printf '%s\n' "$receipt"

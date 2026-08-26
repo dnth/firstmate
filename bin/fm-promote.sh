@@ -10,7 +10,8 @@
 # contract is decided: --mode and --yolo are REQUIRED and written into the meta
 # alongside the kind= flip. Promotion also installs the ship acceptance-criterion
 # scaffold and evidence ledger before changing kind=, so every ship path reaches
-# the same fail-closed completion gate. Firstmate resolves the posture after
+# the same fail-closed completion gate. bin/fm-brief.sh's delivery renderer owns
+# the per-mode worker contract reused here. Firstmate resolves the posture after
 # reading the scout report (AGENTS.md section 7); this script never looks it up.
 # no-mistakes-prod-only is a registry policy rather than a task mode and is refused.
 # Usage: fm-promote.sh <task-id> --mode <mode> --yolo <on|off> --criterion 'AC1: outcome' [--criterion ...]
@@ -164,11 +165,8 @@ SETUP_LINE=$(grep -n '^# Setup[[:space:]]*$' "$BRIEF" | tail -1 | cut -d: -f1 ||
 head -n "$((SETUP_LINE - 1))" "$BRIEF" > "$BRIEF_TMP"
 cp -p "$BRIEF" "$BRIEF_ORIGINAL"
 cp -p "$META" "$META_ORIGINAL"
-case "$MODE" in
-  direct-PR) PROMOTED_FLOW="Run \`$FM_ROOT/bin/fm-receipt-check.sh $ID --plan\`, push only \`fm/$ID\`, open the PR, append \`done: PR {url}\`, and stop; Firstmate records completion after publishing the watcher." ;;
-  local-only) PROMOTED_FLOW="Run \`$FM_ROOT/bin/fm-receipt-check.sh $ID --plan\`, then \`$FM_ROOT/bin/fm-receipt-check.sh $ID --complete --terminal-evidence branch-ready\`, append \`done: ready in branch fm/$ID\`, and stop without pushing." ;;
-  no-mistakes) PROMOTED_FLOW="Append \`done: implementation complete\` and stop so Firstmate can run \`$FM_ROOT/bin/fm-receipt-check.sh $ID --plan\`. If the plan selects receipts-only validation, run the required mechanical checks, append fresh mechanical evidence, run \`$FM_ROOT/bin/fm-receipt-check.sh $ID --complete --terminal-evidence mechanical-checks-passed\`, open the PR, append \`done: PR {url} checks green\`, and stop. If the plan selects full No-Mistakes, include the exact line \`Firstmate-Validation-Generation: <plan-generation>\` in its \`--intent\`, start the run, immediately bind it with \`$FM_ROOT/bin/fm-receipt-check.sh $ID --bind-run <run-id> --generation <plan-generation>\`, drive the run until it reports CI green, run \`$FM_ROOT/bin/fm-receipt-check.sh $ID --complete --terminal-evidence no-mistakes-passed\`, append \`done: PR {url} checks green\`, and stop." ;;
-esac
+PROMOTED_DELIVERY=$("$FM_ROOT/bin/fm-brief.sh" --render-ship-delivery "$ID" "$MODE") \
+  || { echo "error: could not render the ship delivery contract" >&2; exit 1; }
 cat >> "$BRIEF_TMP" <<EOF
 
 # Acceptance criteria
@@ -178,13 +176,11 @@ $CRITERIA_BLOCK
 Before reporting implementation complete, record at least one compact receipt for every criterion with \`$FM_ROOT/bin/fm-receipt.sh $ID <criterion> <type> <summary> <result> [options]\`.
 Run \`$FM_ROOT/bin/fm-receipt-check.sh $ID\` and do not append \`done:\` unless its JSON status is \`complete\`.
 
-# Promoted ship delivery
-Delivery contract: mode=$MODE
-
 # Ship setup and delivery
 Verify \`pwd -P\` and \`git rev-parse --show-toplevel\` still identify the isolated task worktree before changing code.
 Reset scratch work to a clean default-branch base, carry over only intended changes, and create \`fm/$ID\`.
-$PROMOTED_FLOW
+
+$PROMOTED_DELIVERY
 EOF
 
 umask 077

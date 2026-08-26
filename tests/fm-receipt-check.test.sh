@@ -35,6 +35,14 @@ nm_status() {  # <run-id> <head> <outcome>
   printf 'run:\n  id: "%s"\n  status: %s\n  head: "%s"\noutcome: %s\n' "$1" "$status" "$2" "$3"
 }
 
+test_help_advertises_generation_bound_run_binding() {
+  local out
+  out=$("$CHECK" --help) || fail "receipt checker help failed"
+  assert_contains "$out" "--bind-run <run-id> --generation <plan-generation>" \
+    "receipt checker help omitted the required run generation"
+  pass "fm-receipt-check help renders an executable generation-bound bind command"
+}
+
 write_brief() {  # <id> <mode>
   local id=$1 mode=$2
   mkdir -p "$HOME_DIR/data/$id"
@@ -138,7 +146,7 @@ test_complete_and_invalid_ledgers_have_distinct_results() {
 }
 
 test_invalid_brief_and_scout_behavior() {
-  local id=placeholder-brief rc out scout=scout-brief old=old-ship-brief
+  local id=placeholder-brief rc out scout=scout-brief old=old-ship-brief linked=linked-ship outside
   mkdir -p "$HOME_DIR/data/$id"
   cat > "$HOME_DIR/data/$id/brief.md" <<'EOF'
 # Acceptance criteria
@@ -156,6 +164,21 @@ EOF
   FM_HOME="$HOME_DIR" "$CHECK" "$old" >/dev/null 2>&1
   rc=$?
   expect_code 2 "$rc" "metadata kind=ship fails closed without a delivery contract"
+
+  outside="$TMP_ROOT/outside-linked-ship"
+  mkdir -p "$outside"
+  cat > "$outside/brief.md" <<'EOF'
+# Acceptance criteria
+- AC1: External evidence exists.
+# Definition of done
+Delivery contract: mode=direct-PR
+EOF
+  printf '%s\n' '{"criterion":"AC1","type":"test","summary":"external","result":"passed"}' > "$outside/evidence.jsonl"
+  ln -s "$outside" "$HOME_DIR/data/$linked"
+  fm_write_meta "$HOME_DIR/state/$linked.meta" "kind=ship" "mode=direct-PR"
+  FM_HOME="$HOME_DIR" "$CHECK" "$linked" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "ship evidence checker rejects a symlinked task directory"
 
   mkdir -p "$HOME_DIR/data/$scout"
   printf '# Task\nInvestigate only.\n' > "$HOME_DIR/data/$scout/brief.md"
@@ -564,6 +587,7 @@ test_direct_and_local_modes_never_invoke_no_mistakes() {
 
 
 
+test_help_advertises_generation_bound_run_binding
 test_reports_missing_criteria_deterministically
 test_complete_and_invalid_ledgers_have_distinct_results
 test_invalid_brief_and_scout_behavior

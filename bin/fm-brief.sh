@@ -9,6 +9,7 @@
 # Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
+#        fm-brief.sh --render-ship-delivery <task-id> <no-mistakes|direct-PR|local-only>
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   --secondmate writes a persistent secondmate charter. The project list
@@ -94,6 +95,68 @@ resolve_directory_input() {
 }
 
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+
+render_ship_delivery() {
+  local task_id=$1 delivery_mode
+  delivery_mode=$2
+  case "$delivery_mode" in
+    direct-PR)
+      cat <<EOF
+# Definition of done
+Delivery contract: mode=direct-PR
+This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
+The task is complete only when committed on your branch and every declared acceptance criterion has a receipt.
+When it is implemented and committed, run \`$FM_ROOT/bin/fm-receipt-check.sh $task_id --plan\`, then push your branch and open a PR with \`gh-axi\`.
+After the PR opens, append \`done: PR {url}\` to the status file and stop; Firstmate's canonical PR-ready helper records the observed completion.
+Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
+EOF
+      ;;
+    local-only)
+      cat <<EOF
+# Definition of done
+Delivery contract: mode=local-only
+This task ships **local-only**: no remote, no PR, no pipeline.
+The task is complete only when committed on your branch \`fm/$task_id\` and every declared acceptance criterion has a receipt. Do NOT push, do NOT open a PR, do NOT merge.
+Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
+When it is implemented, committed, and ready in the branch, run \`$FM_ROOT/bin/fm-receipt-check.sh $task_id --plan\` followed by \`$FM_ROOT/bin/fm-receipt-check.sh $task_id --complete --terminal-evidence branch-ready\`.
+Then append \`done: ready in branch fm/$task_id\` to the status file and stop.
+The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
+EOF
+      ;;
+    no-mistakes)
+      cat <<EOF
+# Definition of done
+Delivery contract: mode=no-mistakes
+The task is complete only when committed on your branch and every declared acceptance criterion has a receipt.
+When you believe it is complete, append \`done: {summary}\` to the status file and stop.
+Firstmate will then classify validation risk and instruct you to follow the recorded receipts-only or full No-Mistakes path.
+
+You drive no-mistakes by responding to its gates, not by implementing fixes.
+Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
+When starting no-mistakes, make \`--intent\` preserve all relevant content from this brief's \`# Task\` section plus every later accepted Firstmate requirement, clarification, constraint, exclusion, and supersession, carrying only each requirement's current accepted form; retain direct requirements instead of substituting a diff summary, and exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific.
+Include the exact line \`Firstmate-Validation-Generation: <plan-generation>\` in the No-Mistakes \`--intent\`, then immediately bind the returned run id with \`$FM_ROOT/bin/fm-receipt-check.sh $task_id --bind-run <run-id> --generation <plan-generation>\` so completion can prove that exact run, generation, path, and head.
+Do not hand-edit, commit, or fix findings yourself while a run is active; fix ordinary findings from any validation tier only after Firstmate directs the supported abort and branch-custody return sequence.
+
+Two firstmate-specific rules layer on top of that guidance:
+- ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.
+  Firstmate applies \`ask-user-authority\` and obtains any required captain decision.
+  When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
+- Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
+
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), run \`$FM_ROOT/bin/fm-receipt-check.sh $task_id --complete --terminal-evidence no-mistakes-passed\`, append \`done: PR {url} checks green\`, and stop. You are finished.
+EOF
+      ;;
+    *) echo "error: delivery renderer requires no-mistakes, direct-PR, or local-only" >&2; return 1 ;;
+  esac
+}
+
+if [ "${1:-}" = --render-ship-delivery ]; then
+  [ "$#" -eq 3 ] || { echo "error: --render-ship-delivery requires <task-id> <mode>" >&2; exit 1; }
+  case "$2" in ''|.|..|*[!A-Za-z0-9._-]*|[._-]*) echo "error: invalid task id: $2" >&2; exit 1 ;; esac
+  render_ship_delivery "$2" "$3"
+  exit $?
+fi
+
 FM_HOME=$(resolve_directory_input FM_HOME "${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}") || exit 1
 if [ -n "${FM_DATA_OVERRIDE:-}" ]; then
   DATA=$(resolve_directory_input FM_DATA_OVERRIDE "$FM_DATA_OVERRIDE") || exit 1
@@ -364,62 +427,18 @@ case "$MODE" in
   direct-PR)
     SETUP2=""
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
-    IFS= read -r -d '' DOD <<EOF || true
-# Definition of done
-Delivery contract: mode=direct-PR
-This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
-The task is complete only when committed on your branch and every declared acceptance criterion has a receipt.
-When it is implemented and committed, run \`$FM_ROOT/bin/fm-receipt-check.sh $ID --plan\`, then push your branch and open a PR with \`gh-axi\`.
-After the PR opens, append \`done: PR {url}\` to the status file and stop; Firstmate's canonical PR-ready helper records the observed completion.
-Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
-EOF
     ;;
   local-only)
     SETUP2=""
     RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
-    IFS= read -r -d '' DOD <<EOF || true
-# Definition of done
-Delivery contract: mode=local-only
-This task ships **local-only**: no remote, no PR, no pipeline.
-The task is complete only when committed on your branch \`fm/$ID\` and every declared acceptance criterion has a receipt. Do NOT push, do NOT open a PR, do NOT merge.
-Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-When it is implemented, committed, and ready in the branch, run \`$FM_ROOT/bin/fm-receipt-check.sh $ID --plan\` followed by \`$FM_ROOT/bin/fm-receipt-check.sh $ID --complete --terminal-evidence branch-ready\`.
-Then append \`done: ready in branch fm/$ID\` to the status file and stop.
-The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
-EOF
     ;;
   *)  # no-mistakes
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
-    IFS= read -r -d '' DOD <<EOF || true
-# Definition of done
-Delivery contract: mode=no-mistakes
-The task is complete only when committed on your branch and every declared acceptance criterion has a receipt.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then classify validation risk and instruct you to follow the recorded receipts-only or full No-Mistakes path.
-
-You drive no-mistakes by responding to its gates, not by implementing fixes.
-Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
-When starting no-mistakes, make \`--intent\` preserve all relevant content from this brief's \`# Task\` section plus every later accepted Firstmate requirement, clarification, constraint, exclusion, and supersession, carrying only each requirement's current accepted form; retain direct requirements instead of substituting a diff summary, and exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific.
-Include the exact line \`Firstmate-Validation-Generation: <plan-generation>\` in the No-Mistakes \`--intent\`, then immediately bind the returned run id with \`$FM_ROOT/bin/fm-receipt-check.sh $ID --bind-run <run-id> --generation <plan-generation>\` so completion can prove that exact run, generation, path, and head.
-Do not hand-edit, commit, or fix findings yourself while a run is active; fix ordinary findings from any validation tier only after Firstmate directs the supported abort and branch-custody return sequence.
-
-Two firstmate-specific rules layer on top of that guidance:
-- ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.
-  Firstmate applies \`ask-user-authority\` and obtains any required captain decision.
-  When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
-- Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
-
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), run \`$FM_ROOT/bin/fm-receipt-check.sh $ID --complete --terminal-evidence no-mistakes-passed\`, append \`done: PR {url} checks green\`, and stop. You are finished.
-EOF
     ;;
 esac
-
-# read -r -d '' preserves the heredoc's trailing newline that the removed
-# $(...) command substitution used to strip. Drop that one newline so generated
-# briefs stay byte-identical to the historical Bash 5 output.
-DOD=${DOD%$'\n'}
+DOD=$(render_ship_delivery "$ID" "$MODE")
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.

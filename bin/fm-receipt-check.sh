@@ -4,7 +4,7 @@
 # Usage:
 #   fm-receipt-check.sh <task-id>
 #   fm-receipt-check.sh <task-id> --criterion <criterion-id>
-#   fm-receipt-check.sh <task-id> --bind-run <run-id>
+#   fm-receipt-check.sh <task-id> --bind-run <run-id> --generation <plan-generation>
 #   fm-receipt-check.sh <task-id> --complete --terminal-evidence <evidence>
 #   fm-receipt-check.sh <task-id> --plan [--base <commit>]
 #
@@ -176,6 +176,14 @@ case "$KIND" in
   *) echo "error: task metadata has an invalid kind" >&2; exit 2 ;;
 esac
 
+[ -d "$DATA" ] && [ ! -L "$TASK_DIR" ] && [ -d "$TASK_DIR" ] \
+  || { echo "error: ship task directory is missing or unsafe: $TASK_DIR" >&2; exit 2; }
+DATA_REAL=$(CDPATH='' cd -- "$DATA" 2>/dev/null && pwd -P) \
+  || { echo "error: data directory is unsafe: $DATA" >&2; exit 2; }
+TASK_REAL=$(CDPATH='' cd -- "$TASK_DIR" 2>/dev/null && pwd -P) \
+  || { echo "error: ship task directory is unsafe: $TASK_DIR" >&2; exit 2; }
+[ "$TASK_REAL" = "$DATA_REAL/$ID" ] \
+  || { echo "error: ship task directory escapes the data root" >&2; exit 2; }
 [ -f "$BRIEF" ] && [ ! -L "$BRIEF" ] \
   || { echo "error: ship task brief is missing or unsafe: $BRIEF" >&2; exit 2; }
 

@@ -201,7 +201,7 @@ EOF
 # Promotion is where a scout's ship contract is finally decided, so it requires the
 # same explicit values and writes them into the task's durable record.
 test_promote_requires_and_records_the_delivery_contract() {
-  local home meta brief ledger out status check_out check_status fakebin real_mv brief_before meta_before leftovers recovery
+  local home meta brief ledger out status check_out check_status fakebin real_mv brief_before meta_before leftovers recovery expected_delivery actual_delivery
   home="$TMP_ROOT/promote/home"
   mkdir -p "$home/state" "$home/data/promote-d1"
   meta="$home/state/promote-d1.meta"
@@ -301,6 +301,9 @@ EOF
   assert_grep 'Preserve this requirement when the scout becomes a ship task.' "$brief" "promotion truncated task content at an embedded setup heading"
   assert_grep "fm-receipt-check.sh promote-d1 --plan" "$brief" "promoted direct-PR brief omitted validation planning"
   assert_grep 'done: PR {url}' "$brief" "promoted direct-PR brief omitted its terminal sequence"
+  expected_delivery=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" --render-ship-delivery promote-d1 direct-PR)
+  actual_delivery=$(awk '/^# Definition of done$/{delivery=""; emit=1} emit{delivery=delivery $0 ORS} END{printf "%s", delivery}' "$brief")
+  [ "$actual_delivery" = "$expected_delivery" ] || fail "promotion did not reuse fm-brief's direct-PR delivery renderer"
   check_out=$(FM_HOME="$home" "$ROOT/bin/fm-receipt-check.sh" promote-d1 2>&1)
   check_status=$?
   expect_code 1 "$check_status" "promoted concrete criteria require receipts"
@@ -324,6 +327,9 @@ EOF
   assert_grep 'fm-receipt-check.sh promote-nm --bind-run <run-id> --generation <plan-generation>' "$home/data/promote-nm/brief.md" "promoted No-Mistakes brief omitted run binding"
   assert_grep 'fm-receipt-check.sh promote-nm --complete --terminal-evidence no-mistakes-passed' "$home/data/promote-nm/brief.md" "promoted No-Mistakes brief omitted completion recording"
   assert_grep 'done: PR {url} checks green' "$home/data/promote-nm/brief.md" "promoted No-Mistakes brief omitted its CI-ready terminal status"
+  expected_delivery=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" --render-ship-delivery promote-nm no-mistakes)
+  actual_delivery=$(awk '/^# Definition of done$/{delivery=""; emit=1} emit{delivery=delivery $0 ORS} END{printf "%s", delivery}' "$home/data/promote-nm/brief.md")
+  [ "$actual_delivery" = "$expected_delivery" ] || fail "promotion did not reuse fm-brief's No-Mistakes delivery renderer"
   pass "fm-promote: promotion installs a fail-closed ship evidence contract"
 }
 

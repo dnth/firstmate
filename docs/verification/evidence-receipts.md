@@ -11,7 +11,8 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 - High-risk, broad, sensitive, weakly proven, materially expanded, or uncertain changes retain full No-Mistakes validation.
 - `direct-PR` and `local-only` retain the evidence gate without entering No-Mistakes.
 - Initial planning records one `validation_started_at`, and completion requires observed post-plan mechanical evidence, the exact successful No-Mistakes run created with the latest unguessable plan generation and bound to its path and head, forge-observed canonical PR/head metadata, or a clean fast-forward-ready branch.
-- Receipt appends pin the canonical task directory and open the single-link ledger without following links, so concurrent path replacement cannot redirect evidence.
+- Receipt appends open the canonical task directory and original single-link ledger through portable no-follow descriptors before validation, so concurrent path replacement cannot redirect evidence.
+- Normal and promoted ship briefs consume the same executable per-mode delivery renderer.
 - Every completion requires path-specific terminal evidence, records its plan path and validated head, invalidates stale completion metadata when the worktree head changes, and refuses completion until the change is replanned or revalidated.
 - Planning and completion refuse tracked, staged, or untracked worktree changes.
 - Initial planning accepts a caller base only when it equals the repository's authoritative merge boundary, so a later ancestor cannot hide earlier task commits.
@@ -34,9 +35,11 @@ ok - fm-receipt appends one compact validated receipt
 ok - fm-receipt preserves prior records and accepts --result
 ok - fm-receipt rejects invalid types, ids, missing results, and undeclared criteria
 ok - fm-receipt refuses non-ship tasks and unsafe ledger paths
-ok - fm-receipt pins the task directory across append-time path replacement
+ok - fm-receipt rejects task-directory replacement before its no-follow open
+ok - fm-receipt appends only through the ledger descriptor opened before validation
 
 $ tests/fm-receipt-check.test.sh
+ok - fm-receipt-check help renders an executable generation-bound bind command
 ok - fm-receipt-check reports required, evidenced, and missing ids deterministically
 ok - fm-receipt-check distinguishes complete evidence from invalid JSONL
 ok - invalid ship briefs fail and scout/report behavior stays unchanged
