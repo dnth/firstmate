@@ -40,7 +40,6 @@
 # classifiable uncertainty resolves to high.
 # Risk is binary: high by default, or low only for a narrow CHANGELOG-only prose
 # change with file-bound strong mechanical evidence for every changed file.
-# Caller hints never lower risk.
 # The resolved validation_tier, validation_path, reason code, base, head, size,
 # and start time are appended to state/<task-id>.meta for durable inspection.
 # Every completion records validation_completed_head and refuses a current

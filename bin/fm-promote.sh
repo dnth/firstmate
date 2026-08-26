@@ -89,14 +89,29 @@ esac
 ID=${POS[0]}
 
 absolute_lexical_path() {
-  case "$1" in
-    /*) printf '%s\n' "$1" ;;
-    *) printf '%s/%s\n' "$PWD" "$1" ;;
+  local path=$1 component normalized= components=()
+  case "$path" in
+    *$'\n'*|*$'\r'*) return 1 ;;
+    /*) ;;
+    *) path="$PWD/$path" ;;
   esac
+  IFS=/ read -r -a components <<< "$path"
+  for component in "${components[@]}"; do
+    case "$component" in
+      ''|.) ;;
+      ..) return 1 ;;
+      *) normalized="$normalized/$component" ;;
+    esac
+  done
+  [ -n "$normalized" ] || normalized=/
+  printf '%s\n' "$normalized"
 }
-FM_HOME=$(absolute_lexical_path "$FM_HOME")
-STATE=$(absolute_lexical_path "$STATE")
-DATA=$(absolute_lexical_path "$DATA")
+FM_HOME=$(absolute_lexical_path "$FM_HOME") \
+  || { echo "error: Firstmate home path contains unsafe traversal" >&2; exit 1; }
+STATE=$(absolute_lexical_path "$STATE") \
+  || { echo "error: state path contains unsafe traversal" >&2; exit 1; }
+DATA=$(absolute_lexical_path "$DATA") \
+  || { echo "error: data path contains unsafe traversal" >&2; exit 1; }
 
 exec env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
   "$FM_ROOT/bin/fm-receipt-store.sh" "$ID" promote \

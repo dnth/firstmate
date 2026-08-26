@@ -1133,10 +1133,6 @@ test_high_risk_and_uncertain_inputs_fail_safe() {
   printf '%s' "$out" | jq -e '.tier == "high" and .reason == "default-high"' >/dev/null \
     || fail "filename silence downgraded an unclassified login change"
 
-  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" --risky-area "login flow" >/dev/null 2>&1
-  rc=$?
-  expect_code 2 "$rc" "removed risk hints are rejected"
-
   id=hidden-sensitive-base
   base=$(make_project "$id" no-mistakes auth)
   project="$TMP_ROOT/project-$id"

@@ -202,25 +202,21 @@ if ($ENV{FM_RECEIPT_STORE_MODE} eq "promote") {
   close($random) or refuse("promotion nonce source could not be closed");
   my $token = unpack("H*", $nonce_bytes);
   my ($command, @command_args) = @ARGV;
+  my $state_path = $ENV{FM_STATE_OVERRIDE} // "";
+  sysopen(my $state, $state_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+    or refuse("promotion state directory is missing or unsafe");
   my $status = system($command, "prepare", @command_args, $token);
-  my $prepared = $status == 0;
-  my $state;
-  if ($prepared) {
-    my $state_path = $ENV{FM_STATE_OVERRIDE} // "";
-    sysopen($state, $state_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
-      or $status = -1;
-  }
-  if ($prepared && $status == 0 && $task->sync && $state->sync) {
+  if ($status == 0 && $task->sync && $state->sync) {
     my $finalize_status = system($command, "finalize", @command_args, $token);
     exit 0 if $finalize_status == 0;
     $status = $finalize_status;
   }
-  if ($prepared) {
-    system($command, "rollback", @command_args, $token);
-    $task->sync;
-    $state->sync if defined($state);
-  }
-  if ($lock_created) {
+  my $rollback_status = system($command, "rollback", @command_args, $token);
+  my $rollback_synced = $rollback_status == 0 && $task->sync && $state->sync;
+  my $cleanup_status = $rollback_synced
+    ? system($command, "cleanup", @command_args, $token)
+    : -1;
+  if ($lock_created && $rollback_synced && $cleanup_status == 0) {
     my @owned_named_lock = lstat(".evidence.lock");
     unlink(".evidence.lock") if @owned_named_lock
       && !S_ISLNK($owned_named_lock[2])
@@ -228,6 +224,7 @@ if ($ENV{FM_RECEIPT_STORE_MODE} eq "promote") {
       && $owned_named_lock[1] == $lock_identity[1];
     $task->sync;
   }
+  exit 1 unless $rollback_synced && $cleanup_status == 0;
   exit 1 if $status == -1 || ($status & 127);
   my $exit_code = $status >> 8;
   exit($exit_code == 0 ? 1 : $exit_code);

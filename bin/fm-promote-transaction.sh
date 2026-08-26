@@ -20,10 +20,23 @@ BRIEF_TMP="./.brief.promote.$TOKEN"
 META_TMP="$STATE/.$ID.meta.promote.$TOKEN"
 BRIEF_ORIGINAL="./.brief.original.$TOKEN"
 META_ORIGINAL="$STATE/.$ID.meta.original.$TOKEN"
+BRIEF_RESTORE="./.brief.restore.$TOKEN"
+META_RESTORE="$STATE/.$ID.meta.restore.$TOKEN"
+OWNER="./.promotion.owner.$TOKEN"
+READY="./.promotion.ready.$TOKEN"
+
+owner_valid() {
+  [ -f "$OWNER" ] && [ ! -L "$OWNER" ] && [ "$(cat "$OWNER")" = "$TOKEN" ]
+}
+
+ready_valid() {
+  [ -f "$READY" ] && [ ! -L "$READY" ] && [ "$(cat "$READY")" = "$TOKEN" ]
+}
 
 case "$PHASE" in
   finalize)
-    rm -f "$BRIEF_ORIGINAL" "$META_ORIGINAL" "$BRIEF_TMP" "$META_TMP" \
+    owner_valid && ready_valid || exit 1
+    rm -f "$BRIEF_ORIGINAL" "$META_ORIGINAL" "$BRIEF_TMP" "$META_TMP" "$BRIEF_RESTORE" "$META_RESTORE" "$READY" "$OWNER" \
       || echo "warning: promotion committed but a recovery artifact could not be removed" >&2
     HOME_Q=$(printf '%q' "$FM_HOME")
     echo "promoted $ID to ship mode=$MODE yolo=$YOLO (teardown protection restored)"
@@ -31,15 +44,32 @@ case "$PHASE" in
     exit 0
     ;;
   rollback)
+    owner_valid || exit 0
     rc=0
-    if [ -f "$META_ORIGINAL" ]; then
-      mv "$META_ORIGINAL" "$META" || rc=1
+    if ready_valid; then
+      if [ -f "$META_ORIGINAL" ]; then
+        rm -f "$META_RESTORE"
+        if ! cp -p "$META_ORIGINAL" "$META_RESTORE" || ! mv "$META_RESTORE" "$META"; then
+          echo "error: promotion rollback could not restore metadata; recovery copy retained at $META_ORIGINAL" >&2
+          rc=1
+        fi
+      fi
+      if [ -f "$BRIEF_ORIGINAL" ]; then
+        rm -f "$BRIEF_RESTORE"
+        if ! cp -p "$BRIEF_ORIGINAL" "$BRIEF_RESTORE" || ! mv "$BRIEF_RESTORE" "$BRIEF"; then
+          echo "error: promotion rollback could not restore brief; recovery copy retained at $BRIEF_ORIGINAL" >&2
+          rc=1
+        fi
+      fi
+      rm -f "$EVIDENCE" || rc=1
     fi
-    if [ -f "$BRIEF_ORIGINAL" ]; then
-      mv "$BRIEF_ORIGINAL" "$BRIEF" || rc=1
-    fi
-    rm -f "$EVIDENCE" "$BRIEF_TMP" "$META_TMP"
+    rm -f "$BRIEF_TMP" "$META_TMP" "$BRIEF_RESTORE" "$META_RESTORE"
     exit "$rc"
+    ;;
+  cleanup)
+    owner_valid || exit 0
+    rm -f "$BRIEF_ORIGINAL" "$META_ORIGINAL" "$BRIEF_TMP" "$META_TMP" "$BRIEF_RESTORE" "$META_RESTORE" "$READY" "$OWNER"
+    exit 0
     ;;
   prepare) ;;
   *) exit 2 ;;
@@ -62,52 +92,15 @@ if [ -e "$EVIDENCE" ] || [ -L "$EVIDENCE" ]; then
 fi
 
 umask 077
+if ! ( set -C; printf '%s\n' "$TOKEN" > "$OWNER" ) 2>/dev/null; then
+  exit 1
+fi
 for transaction_file in "$BRIEF_TMP" "$META_TMP" "$BRIEF_ORIGINAL" "$META_ORIGINAL"; do
   if ! ( set -C; : > "$transaction_file" ) 2>/dev/null; then
     rm -f "$BRIEF_TMP" "$META_TMP" "$BRIEF_ORIGINAL" "$META_ORIGINAL"
     exit 1
   fi
 done
-COMMITTED=0
-EVIDENCE_CREATED=0
-BRIEF_REPLACED=0
-META_REPLACED=0
-cleanup() {
-  local cleanup_rc=0
-  if [ "$COMMITTED" -ne 1 ]; then
-    if [ "$META_REPLACED" -eq 1 ]; then
-      if mv "$META_ORIGINAL" "$META"; then
-        META_REPLACED=0
-      else
-        echo "error: promotion rollback could not restore metadata; recovery copy retained at $META_ORIGINAL" >&2
-        cleanup_rc=1
-      fi
-    fi
-    if [ "$BRIEF_REPLACED" -eq 1 ]; then
-      if mv "$BRIEF_ORIGINAL" "$BRIEF"; then
-        BRIEF_REPLACED=0
-      else
-        echo "error: promotion rollback could not restore brief; recovery copy retained at $BRIEF_ORIGINAL" >&2
-        cleanup_rc=1
-      fi
-    fi
-    if [ "$EVIDENCE_CREATED" -eq 1 ] && ! rm -f "$EVIDENCE"; then
-      echo "error: promotion rollback could not remove the new evidence ledger" >&2
-      cleanup_rc=1
-    fi
-  fi
-  rm -f "$BRIEF_TMP" "$META_TMP"
-  [ "$COMMITTED" -eq 1 ] || [ "$BRIEF_REPLACED" -eq 1 ] || rm -f "$BRIEF_ORIGINAL"
-  [ "$COMMITTED" -eq 1 ] || [ "$META_REPLACED" -eq 1 ] || rm -f "$META_ORIGINAL"
-  return "$cleanup_rc"
-}
-on_exit() {
-  local rc=$?
-  cleanup || rc=1
-  trap - EXIT
-  exit "$rc"
-}
-trap on_exit EXIT
 trap 'exit 1' HUP INT TERM
 
 SETUP_LINE=$(grep -n '^# Setup[[:space:]]*$' "$BRIEF" | tail -1 | cut -d: -f1 || true)
@@ -129,9 +122,11 @@ Reset scratch work to a clean default-branch base, carry over only intended chan
 $PROMOTED_DELIVERY
 EOF
 
-EVIDENCE_CREATED=1
+if ! ( set -C; printf '%s\n' "$TOKEN" > "$READY" ) 2>/dev/null; then
+  exit 1
+fi
+
 if ! ( set -C; : > "$EVIDENCE" ) 2>/dev/null; then
-  EVIDENCE_CREATED=0
   echo "error: could not prepare evidence ledger: $EVIDENCE" >&2
   exit 1
 fi
@@ -143,8 +138,5 @@ grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META" > "$META_TMP"
   echo "yolo=$YOLO"
 } >> "$META_TMP"
 
-BRIEF_REPLACED=1
 mv "$BRIEF_TMP" "$BRIEF"
-META_REPLACED=1
 mv "$META_TMP" "$META"
-COMMITTED=1

@@ -305,7 +305,7 @@ EOF
 #!/bin/sh
 case "\$1" in
   *.meta.promote.*) exit 71 ;;
-  *.meta.original.*) [ "\${FM_FAIL_RESTORE:-0}" != 1 ] || exit 72 ;;
+  *.meta.restore.*) [ "\${FM_FAIL_RESTORE:-0}" != 1 ] || exit 72 ;;
 esac
 exec "$real_mv" "\$@"
 EOF
@@ -365,7 +365,7 @@ Implement the promoted No-Mistakes fixture.
 # Setup
 Scout-only setup instructions begin here.
 EOF
-  out=$(cd "$TMP_ROOT/promote" && FM_HOME=home FM_STATE_OVERRIDE=home/state FM_DATA_OVERRIDE=home/data \
+  out=$(cd "$TMP_ROOT/promote" && FM_HOME=./home FM_STATE_OVERRIDE=./home/./state FM_DATA_OVERRIDE=./home/./data \
     "$PROMOTE" promote-nm --mode no-mistakes --yolo off --criterion 'AC1: Fixture works' 2>&1)
   status=$?
   expect_code 0 "$status" "a No-Mistakes promotion should succeed"
@@ -414,6 +414,11 @@ test_promote_rejects_symlinked_data_override() {
   assert_contains "$out" "data path component is missing or unsafe" "promotion hid the configured data symlink before pinning"
   [ "$(cksum "$outside/promote-link/brief.md")" = "$before" ] || fail "refused data override changed the outside brief"
   [ ! -e "$outside/promote-link/evidence.jsonl" ] || fail "refused data override created an outside ledger"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data-link/../data-link" \
+    "$PROMOTE" promote-link --mode direct-PR --yolo off --criterion 'AC1: Concrete outcome' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "promotion accepted lexical parent traversal"
+  assert_contains "$out" "data path contains unsafe traversal" "promotion did not reject lexical parent traversal"
   pass "fm-promote: configured data symlinks remain visible to no-follow pinning"
 }
 
@@ -454,6 +459,52 @@ SH
   status=$?
   [ "$status" -ne 0 ] || fail "signal-terminated promotion transaction reported success"
   pass "fm-promote: signal-terminated transactions fail closed"
+}
+
+test_interrupted_replacements_roll_back() {
+  local stage home id fakebin real_mv trigger brief_before meta_before status leftovers
+  real_mv=$(command -v mv)
+  for stage in brief meta; do
+    id="promote-interrupt-$stage"
+    home="$TMP_ROOT/$id/home"
+    fakebin="$home/fakebin"
+    trigger="$home/kill-trigger"
+    mkdir -p "$home/data/$id" "$home/state" "$fakebin"
+    printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$home/state/$id.meta"
+    printf '# Task\nInterrupted promotion.\n\n# Setup\nScout setup.\n' > "$home/data/$id/brief.md"
+    brief_before="$home/brief.before"
+    meta_before="$home/meta.before"
+    cp "$home/data/$id/brief.md" "$brief_before"
+    cp "$home/state/$id.meta" "$meta_before"
+    : > "$trigger"
+    cat > "$fakebin/mv" <<EOF
+#!/bin/sh
+source_path=\$1
+destination_path=\$2
+should_kill=0
+case "$stage:\$source_path:\$destination_path" in
+  brief:./.brief.promote.*:./brief.md) should_kill=1 ;;
+  meta:*.meta.promote.*:*.meta) should_kill=1 ;;
+esac
+"$real_mv" "\$@" || exit
+if [ "\$should_kill" -eq 1 ] && [ -f "$trigger" ]; then
+  rm -f "$trigger"
+  kill -KILL "\$PPID"
+fi
+EOF
+    chmod +x "$fakebin/mv"
+    PATH="$fakebin:$PATH" FM_HOME="$home" "$PROMOTE" "$id" --mode direct-PR --yolo off \
+      --criterion 'AC1: Concrete outcome' >/dev/null 2>&1
+    status=$?
+    [ "$status" -ne 0 ] || fail "$stage replacement interruption reported success"
+    cmp -s "$brief_before" "$home/data/$id/brief.md" || fail "$stage interruption did not restore the scout brief"
+    cmp -s "$meta_before" "$home/state/$id.meta" || fail "$stage interruption did not restore scout metadata"
+    [ ! -e "$home/data/$id/evidence.jsonl" ] || fail "$stage interruption retained a partial evidence ledger"
+    leftovers=$(find "$home/data/$id" "$home/state" -maxdepth 1 \
+      \( -name '*.promote.*' -o -name '*.original.*' -o -name '.promotion.*' \) -print)
+    [ -z "$leftovers" ] || fail "$stage interruption left transaction artifacts: $leftovers"
+  done
+  pass "fm-promote: interruptions after each replacement roll back atomically"
 }
 
 # The registry parser survives for the mechanical consumers only. It accepts the
@@ -501,5 +552,6 @@ test_promote_rejects_symlinked_task_directory
 test_promote_rejects_symlinked_data_override
 test_concurrent_promotion_preserves_winner_lock
 test_signaled_promotion_transaction_fails
+test_interrupted_replacements_roll_back
 test_project_mode_maps_the_conditional_policy
 echo "# all fm-task-delivery tests passed"
