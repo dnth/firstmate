@@ -7,6 +7,7 @@ set -u
 
 RECEIPT="$ROOT/bin/fm-receipt.sh"
 CHECK="$ROOT/bin/fm-receipt-check.sh"
+SCHEMA="$ROOT/bin/fm-receipt-schema.sh"
 TMP_ROOT=$(fm_test_tmproot fm-receipt)
 HOME_DIR="$TMP_ROOT/home"
 mkdir -p "$HOME_DIR/data" "$HOME_DIR/state"
@@ -64,6 +65,30 @@ test_append_is_additive_and_result_flag_works() {
   [ "$(wc -l < "$ledger" | tr -d ' ')" -eq 2 ] || fail "second append did not preserve both records"
   [ "$(sed -n '1p' "$ledger")" = "$first" ] || fail "second append rewrote the first receipt"
   pass "fm-receipt preserves prior records and accepts --result"
+}
+
+test_head_binding_is_canonical() {
+  local id=canonical-head project expected_head out rc
+  project="$TMP_ROOT/project-$id"
+  mkdir -p "$project"
+  git -C "$project" init -q
+  printf 'evidence head fixture\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" commit -q -m init
+  expected_head=$(git -C "$project" rev-parse HEAD)
+  write_ship "$id"
+  fm_write_meta "$HOME_DIR/state/$id.meta" "worktree=$project" "kind=ship" "mode=no-mistakes"
+  out=$(FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test \
+    "head binding is canonical" "1 passed" --outcome success) \
+    || fail "head-bound receipt append failed"
+  printf '%s' "$out" | jq -e --arg head "$expected_head" \
+    '.head == $head and ((.head | length) == 40 or (.head | length) == 64)' >/dev/null \
+    || fail "receipt did not bind the canonical current commit id"
+  printf '%s\n' '{"criterion":"AC1","type":"test","outcome":"success","summary":"x","result":"passed","head":"0123456789012345678901234567890123456789\n"}' \
+    | "$SCHEMA" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "receipt schema accepted a newline-suffixed commit id"
+  pass "fm-receipt stores and validates an exact canonical commit id"
 }
 
 test_large_receipt_is_appended_completely() {
@@ -418,6 +443,7 @@ EOF
 
 test_appends_one_compact_valid_receipt
 test_append_is_additive_and_result_flag_works
+test_head_binding_is_canonical
 test_large_receipt_is_appended_completely
 test_rejects_invalid_schema_and_undeclared_criteria
 test_portable_paths_and_failed_append_rollback

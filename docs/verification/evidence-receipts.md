@@ -23,6 +23,7 @@ The exact receipt key and type schema is owned by the header and `--help` output
 - Snapshot readiness status is checked and terminal on publication failure; hold documents ready `0`, refusal `1`, missing-ledger `3`, and pinned non-ship `4` statuses.
 - Receipt append, check, and promotion consume one executable acceptance-criterion parser that requires nonblank descriptions.
 - Structurally valid receipts require non-whitespace summary and result strings plus an explicit structured outcome; only `outcome=success` evidences a criterion, while failure, negative, zero, skipped, empty, placeholder, weak, and legacy outcomes remain unevidenced and `result` stays descriptive so expected observations such as `401` are unambiguous.
+- Head-bound receipts store only the exact canonical 40- or 64-character lowercase hexadecimal commit id reported by Git.
 - Receipt append holds a stable task lock, copies the canonical single-link ledger plus one complete record to a synced mode-0600 single-link temporary file, and atomically renames it over the canonical ledger so concurrent hard-link aliases retain the old inode.
 - Criterion parsing rejects known scaffold placeholder tokens in balanced or unmatched brace forms while allowing concrete brace syntax such as JSON examples.
 - One shared cleanliness predicate requires `git status` with submodule ignores disabled to succeed with empty tracked, staged, untracked, and submodule output for implementation completion, planning, binding, terminal completion, and final done acceptance.
@@ -47,6 +48,7 @@ The exact receipt key and type schema is owned by the header and `--help` output
 
 - Claim invalidation reads the worktree head immediately before acquiring the validation metadata lock, so an unsupported concurrent ref mutation can bind the marker to the earlier head; the single-operator workflow excludes that mutation during validation.
 - PR registration snapshots and replaces metadata through separate pinned-store processes, so an unsupported concurrent byte-identical state-directory swap can move the transaction to the replacement directory; the single-operator workflow excludes state-directory replacement during validation.
+
 ## Verification environment
 
 - Date: 2026-08-26.
@@ -61,6 +63,7 @@ The focused behavioral suites passed with these exact commands.
 $ tests/fm-receipt.test.sh
 ok - fm-receipt appends one compact validated receipt
 ok - fm-receipt preserves prior records and accepts --result
+ok - fm-receipt stores and validates an exact canonical commit id
 ok - fm-receipt appends complete large JSONL records
 ok - fm-receipt rejects invalid types, ids, missing results, and undeclared criteria
 ok - fm-receipt uses portable paths and rolls back incomplete appends

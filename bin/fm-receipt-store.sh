@@ -708,7 +708,7 @@ if (@worktrees == 1 && length($worktrees[0])) {
   if (open(my $git_head, "-|", "git", "-C", $worktrees[0], "rev-parse", "--verify", "HEAD^{commit}")) {
     my $head = <$git_head>;
     if (close($git_head) && defined($head)) {
-      chomp($head);
+      $head =~ s/\r?\n\z//;
       $payload->{head} = $head if $head =~ /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
     }
   }

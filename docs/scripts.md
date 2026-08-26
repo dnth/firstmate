@@ -70,9 +70,9 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-local-default.sh`    | Resolve the local default branch shared by readiness and guarded landing              |
 | `fm-review-diff.sh`      | Review a crewmate branch or resolved PR head against the authoritative base          |
 | `fm-receipt.sh`          | Append one validated acceptance-criterion evidence receipt to a ship task             |
-| `fm-receipt-check.sh`    | Check ship evidence and record conservative binary risk routing                      |
+| `fm-receipt-check.sh`    | Check ship evidence and own risk-based validation planning and completion             |
 | `fm-receipt-schema.sh`   | Validate the single receipt JSON schema used by append and read paths                |
-| `fm-receipt-store.sh`    | Pin and lock ship receipt storage for snapshot reads and validated appends            |
+| `fm-receipt-store.sh`    | Own pinned ship contracts, evidence, metadata updates, and promotion storage           |
 | `fm-marker-lib.sh`       | Compatibility entry point for the from-firstmate carrier owned by `fm-operational-input.sh` |
 | `fm-pending-reply-lib.sh` | Parent-owned secondmate pending-reply expectations, recovery, and one-shot escalation |
 | `fm-secondmate-parent-lib.sh` | Parse durable secondmate parent-route binding records                              |
@@ -101,7 +101,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-vendor-auth-probe.sh`| Run one hard-bounded, non-destructive authentication probe of a named vendor CLI and report the fact |
 | `fm-wake-drain.sh`       | Present durable watcher wakes and OPEN DECISIONS, consume acknowledged rows through their sequence, retire only the matching recovery generation, then assert supervision health |
 | `fm-wake-lib.sh`         | Shared durable wake queue, recovery generations, portable locks, and watcher identity/health helpers |
-| `fm-classify-lib.sh`     | Shared wake-classification vocabulary and durable keyed-decision folds and scans     |
+| `fm-classify-lib.sh`     | Shared wake classification, ship evidence gate, and durable keyed-decision folds     |
 | `fm-send.sh`             | Send one verified literal line or supported key through the target's recorded backend, with OMP turn-start verification |
 | `fm-busy-lib.sh`         | Single owner of the semantic busy-state contract: verdicts, source attribution, and per-harness sources |
 | `fm-busy-event.sh`       | The only writer of a task's semantic busy-state record; arms an incarnation and applies lifecycle events |
@@ -112,9 +112,11 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-pr-lib.sh`           | Own canonical task and PR validation plus private atomic PR-poll publication and identity-bound retirement |
 | `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated PR/MR-poll sidecars           |
 | `fm-pr-check-migrate.sh` | Quarantine older task polls without execution and rebuild only canonical polls       |
-| `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, then atomically arm a static merge poll |
+| `fm-pr-check.sh`         | Publish a static merge poll and atomically record validated PR-path metadata          |
 | `fm-pr-merge.sh`         | Record PR metadata, then merge a task's canonical full GitHub URL                    |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task with an explicit delivery mode |
+| `fm-promote-transaction.sh` | Execute the pinned store's recoverable scout-to-ship promotion phases              |
+| `fm-worktree-clean-lib.sh` | Own the shared fail-closed worktree cleanliness predicate                          |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |
 | `fm-pi-compatible-lib.sh` | Shared membership predicate for the verified Pi-compatible harness family            |

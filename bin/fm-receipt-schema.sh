@@ -35,5 +35,6 @@ jq -e '
   and ((has("command") | not) or (.command | type == "string"))
   and ((has("artifact") | not) or (.artifact | type == "string"))
   and ((has("file") | not) or (.file | type == "string"))
-  and ((has("head") | not) or (.head | type == "string" and test("^([0-9a-f]{40}|[0-9a-f]{64})$")))
+  and ((has("head") | not) or (.head | type == "string"
+    and ((length == 40 or length == 64) and test("^[0-9a-f]+$"))))
 ' >/dev/null
