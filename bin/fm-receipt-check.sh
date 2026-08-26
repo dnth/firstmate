@@ -285,13 +285,17 @@ TMP_ROOT=$(CDPATH='' cd -- "$TMP_ROOT" && pwd -P)
 VALIDATION_LOCK=
 STORE_PID=
 STORE_RELEASE=
+STORE_RELEASE_OPEN=0
 cleanup() {
   [ -z "$VALIDATION_LOCK" ] || rmdir "$VALIDATION_LOCK" 2>/dev/null || true
   if [ -n "$STORE_PID" ]; then
     if kill -0 "$STORE_PID" 2>/dev/null; then
-      printf 'release\n' > "$STORE_RELEASE" 2>/dev/null || true
+      printf 'release\n' >&9 2>/dev/null || true
     fi
     wait "$STORE_PID" 2>/dev/null || true
+  fi
+  if [ "$STORE_RELEASE_OPEN" -eq 1 ]; then
+    exec 9>&-
   fi
   rm -rf "$TMP_ROOT"
 }
@@ -313,6 +317,8 @@ LEDGER="$TMP_ROOT/evidence.jsonl"
 STORE_READY="$TMP_ROOT/store.ready"
 STORE_RELEASE="$TMP_ROOT/store.release"
 mkfifo "$STORE_RELEASE"
+exec 9<> "$STORE_RELEASE"
+STORE_RELEASE_OPEN=1
 FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-receipt-store.sh" "$ID" hold \
   "$BRIEF" "$LEDGER" "$STORE_READY" "$STORE_RELEASE" &
 STORE_PID=$!
@@ -366,7 +372,7 @@ def evidence_result:
   without_zero_failures_or_errors
   |
   (test("^[[:space:]]*$") | not)
-  and (test("(^|[^[:alnum:]_])(fail(s|ed|ures?)?|errors?|negative|red|broken|skip(s|ped|ping)?|empty)([^[:alnum:]_]|$)|not[[:space:]]+pass(ed)?|no[[:space:]]+(tests?|items?|cases?|examples?|specs?|scenarios?)|(^|[^0-9])0[[:space:]]+(passed|tests?|items?|cases?|examples?|specs?|scenarios?)([^[:alnum:]_]|$|[[:space:],])|(^|[^[:alnum:]_])(tests?|passed)[[:space:]]*:[[:space:]]*0([^0-9]|$)|(^|[^[:alnum:]_])(tests?|passed)[[:space:]]+0([^0-9]|$)|(^|[^[:alnum:]_])passed[[:space:]]+0[[:space:]]+tests?([^[:alnum:]_]|$)|(^|[^0-9])0[[:space:]]*(/|of|out[[:space:]]+of)[[:space:]]*0[[:space:]]+(tests?([[:space:]]+passed)?|passed)([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(tests?([[:space:]]+passed)?|passed)[[:space:]]*:?[[:space:]]*0[[:space:]]*(/|of|out[[:space:]]+of)[[:space:]]*0([[:space:]]+tests?)?([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(ran|run|collected|found|discovered)[[:space:]]*:?[[:space:]]*0[[:space:]]+(tests?|items?|cases?|examples?|specs?|scenarios?)([^[:alnum:]_]|$)"; "i") | not);
+  and (test("(^|[^[:alnum:]_])(fail(s|ed|ures?)?|errors?|negative|red|broken|skip(s|ped|ping)?|empty|unsuccessful(ly)?)([^[:alnum:]_]|$)|not[[:space:]]+(pass(ed)?|successful)|((did|does)[[:space:]]+not|didn['’]t)[[:space:]]+pass(ed)?|no[[:space:]]+(tests?|items?|cases?|examples?|specs?|scenarios?)|(^|[^0-9])0[[:space:]]+(passed|tests?|items?|cases?|examples?|specs?|scenarios?)([^[:alnum:]_]|$|[[:space:],])|(^|[^[:alnum:]_])(tests?|passed)[[:space:]]*:[[:space:]]*0([^0-9]|$)|(^|[^[:alnum:]_])(tests?|passed)[[:space:]]+0([^0-9]|$)|(^|[^[:alnum:]_])passed[[:space:]]+0[[:space:]]+tests?([^[:alnum:]_]|$)|(^|[^0-9])0[[:space:]]*(/|of|out[[:space:]]+of)[[:space:]]*0[[:space:]]+(tests?([[:space:]]+passed)?|passed)([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(tests?([[:space:]]+passed)?|passed)[[:space:]]*:?[[:space:]]*0[[:space:]]*(/|of|out[[:space:]]+of)[[:space:]]*0([[:space:]]+tests?)?([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(ran|run|collected|found|discovered)[[:space:]]*:?[[:space:]]*0[[:space:]]+(tests?|items?|cases?|examples?|specs?|scenarios?)([^[:alnum:]_]|$)"; "i") | not);
 def strong_result:
   without_zero_failures_or_errors
   | evidence_result

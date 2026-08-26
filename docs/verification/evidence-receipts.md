@@ -14,8 +14,9 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 - Completion requires observed post-plan mechanical evidence, the exact No-Mistakes run created with the latest unguessable plan generation and bound to its path and head with current checks-green status or CI-log evidence, a GitHub PR with forge-observed exact-head metadata, a supported non-GitHub direct-PR with the existing canonical HTTPS PR URL predicate and no head observation, or a clean fast-forward-ready branch.
 - Receipt append and check share one executable owner that resolves and pins every raw data-path component inside the store process, opens and verifies the task directory relative to that pinned parent, and then opens relative no-follow brief and single-link ledger paths portably on Linux and macOS.
 - Planning retains the pinned shared ledger lock through metadata publication, so only receipts appended after the published plan boundary qualify as fresh mechanical evidence.
+- The checker parent owns a read/write release descriptor before snapshot spawn, so early child failures cannot block cleanup waiting for a FIFO reader.
 - Receipt append, check, and promotion consume one executable acceptance-criterion parser that requires nonblank descriptions.
-- Structurally valid receipts require non-whitespace summary and result strings; explicit failure and error inflections, negative, empty, zero-test, zero-example, zero-spec, zero-case, zero-scenario, zero-collection, or skip results remain recorded but leave their criteria unevidenced, while nonzero successes with zero/no-failure or zero/no-error suffixes and descriptive expected results such as `401` remain eligible.
+- Structurally valid receipts require non-whitespace summary and result strings; explicit failure and error inflections, direct unsuccessful or did-not-pass wording, negative, empty, zero-test, zero-example, zero-spec, zero-case, zero-scenario, zero-collection, or skip results remain recorded but leave their criteria unevidenced, while nonzero successes with zero/no-failure or zero/no-error suffixes and descriptive expected results such as `401` remain eligible.
 - Receipt append retries interrupted or partial writes under the exclusive ledger lock until the complete JSONL record is stored, and rolls an incomplete failed append back to its original EOF.
 - Criterion parsing rejects every opening or closing brace in a description, including balanced and unmatched placeholder syntax.
 - One shared cleanliness predicate requires `git status` to succeed with empty tracked, staged, and untracked output for implementation completion, planning, binding, and terminal completion.
@@ -62,6 +63,7 @@ ok - fm-receipt-check distinguishes complete evidence from invalid JSONL
 ok - failed, skipped, empty, and zero-test results stay unevidenced while 401 counts
 ok - pinned brief and metadata delivery modes must match exactly
 ok - invalid ship briefs fail and scout/report behavior stays unchanged
+ok - early snapshot failures release cleanup without a FIFO reader
 ok - fm-receipt-check pins task evidence and rejects hard-linked ledgers
 ok - receipt append and check consume one criterion grammar
 ok - exact bound runs complete from the shared current CI-log readiness predicate
