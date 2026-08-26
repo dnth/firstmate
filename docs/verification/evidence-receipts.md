@@ -7,12 +7,12 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 
 - New ship briefs receive stable acceptance-criterion ids and an empty append-only evidence ledger, while scout and secondmate scaffolds remain outside the receipt contract.
 - Every ship completion, including a promoted scout, remains parked until a valid acceptance contract and structurally valid evidence cover every required criterion.
-- Low-risk routing is limited to narrow non-command CHANGELOG prose with file-bound mechanical proof for every changed file, while every other change defaults high.
+- Low-risk routing is limited to mechanically small CHANGELOG typo or formatting corrections with file-bound mechanical proof, while prescriptive, structural, additive, or uncertain prose defaults high.
 - High-risk, broad, sensitive, weakly proven, materially expanded, or uncertain changes retain full No-Mistakes validation.
 - `direct-PR` and `local-only` retain the evidence gate without entering No-Mistakes.
 - Initial planning records one `validation_started_at`, and completion requires observed post-plan mechanical evidence, the exact No-Mistakes run created with the latest unguessable plan generation and bound to its path and head with current checks-green status or CI-log evidence, a GitHub PR with forge-observed exact-head metadata, a supported non-GitHub direct-PR with the existing canonical HTTPS PR URL predicate and no head observation, or a clean fast-forward-ready branch.
-- Receipt appends open the canonical task directory and original single-link ledger through portable no-follow descriptors before validation, so concurrent path replacement cannot redirect evidence.
-- Receipt checks snapshot the pinned non-symlink task contract and single-link ledger before parsing, so task replacement and external hard links cannot redirect completion evidence.
+- Receipt append and check share one executable owner for portable no-follow task, brief, and single-link ledger descriptors, with exclusive append and retained shared-snapshot lock modes.
+- Planning retains the pinned shared ledger lock through metadata publication, so only receipts appended after the published plan boundary qualify as fresh mechanical evidence.
 - Receipt append, check, and promotion consume one executable acceptance-criterion parser that requires nonblank descriptions.
 - Structurally valid receipts with explicit failure inflections, negative, empty, equivalent zero-test orderings including zero-of-zero fractions, or skip results remain recorded but leave their criteria unevidenced, while zero-failure success summaries and descriptive expected results such as `401` remain eligible.
 - Normal and promoted ship briefs consume the same executable acceptance-evidence and per-mode delivery renderer.
@@ -58,6 +58,7 @@ ok - exact bound runs complete from the shared current CI-log readiness predicat
 ok - finding-to-criterion invalidations remain inspectable in task metadata
 ok - low-risk mechanical changes can skip a full No-Mistakes run
 ok - low risk requires safe changelog prose and file-bound mechanical evidence
+ok - plan publication holds the pinned ledger boundary against concurrent receipts
 ok - successful terminal runs bind while failed runs remain rejected
 ok - No-Mistakes status, intent, and CI-log observations are bounded
 ok - authoritative documentation remains high

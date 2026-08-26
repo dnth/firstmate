@@ -140,7 +140,7 @@ EOF
 Delivery contract: mode=no-mistakes
 The task is complete only when committed on your branch and every declared acceptance criterion has a receipt.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then classify validation risk and instruct you to follow the recorded receipts-only or full No-Mistakes path.
+Firstmate will then classify validation risk; follow the receipt checker's plan output and help for the exact recorded receipts-mechanical or full No-Mistakes path.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.

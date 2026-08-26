@@ -41,7 +41,15 @@
 # and start time are appended to state/<task-id>.meta for durable inspection.
 # Every completion records validation_completed_head and refuses a current
 # worktree HEAD that differs from the latest validation_head.
-# Low-risk completion requires a strong mechanical receipt appended after planning.
+# When --plan returns path=receipts-mechanical, append fresh successful mechanical
+# evidence for every changed file with:
+#
+#   bin/fm-receipt.sh <task-id> <criterion> <test|build|lint|typecheck> <summary> <result> --file <changed-file>
+#
+# Then complete that exact generation and head with:
+#
+#   bin/fm-receipt-check.sh <task-id> --complete --terminal-evidence mechanical-checks-passed
+#
 # --complete requires the path-specific terminal evidence named by the generated
 # instructions and records that evidence with the latest plan, path, and head;
 # exact bound runs may prove current checks-green readiness through the shared CI log predicate.
@@ -270,8 +278,16 @@ DATA_REAL=$(CDPATH='' cd -- "$DATA" 2>/dev/null && pwd -P) \
   || { echo "error: data directory is unsafe: $DATA" >&2; exit 2; }
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-receipt-check.XXXXXX")
 VALIDATION_LOCK=
+STORE_PID=
+STORE_RELEASE=
 cleanup() {
   [ -z "$VALIDATION_LOCK" ] || rmdir "$VALIDATION_LOCK" 2>/dev/null || true
+  if [ -n "$STORE_PID" ]; then
+    if kill -0 "$STORE_PID" 2>/dev/null; then
+      printf 'release\n' > "$STORE_RELEASE" 2>/dev/null || true
+    fi
+    wait "$STORE_PID" 2>/dev/null || true
+  fi
   rm -rf "$TMP_ROOT"
 }
 trap cleanup EXIT
@@ -284,71 +300,17 @@ BRIEF="$TMP_ROOT/brief.md"
 LEDGER="$TMP_ROOT/evidence.jsonl"
 : > "$BRIEF"
 : > "$LEDGER"
-set +e
-FM_RECEIPT_DATA="$DATA_REAL" FM_RECEIPT_ID="$ID" FM_RECEIPT_BRIEF_OUT="$BRIEF" \
-  FM_RECEIPT_LEDGER_OUT="$LEDGER" perl - <<'PERL'
-use strict;
-use warnings;
-use Errno qw(ENOENT);
-use Fcntl qw(:DEFAULT :flock :mode);
-
-sub refuse {
-  print STDERR "error: $_[0]\n";
-  exit 1;
-}
-
-sub copy_file {
-  my ($source, $destination) = @_;
-  open(my $output, ">", $destination) or refuse("could not prepare pinned task snapshot");
-  my $buffer;
-  while (1) {
-    my $read = sysread($source, $buffer, 65536);
-    defined($read) or refuse("could not read pinned task artifact");
-    last if $read == 0;
-    print {$output} substr($buffer, 0, $read) or refuse("could not write pinned task snapshot");
-  }
-  close($output) or refuse("could not close pinned task snapshot");
-}
-
-my $task_path = "$ENV{FM_RECEIPT_DATA}/$ENV{FM_RECEIPT_ID}";
-sysopen(my $task, $task_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
-  or refuse("ship task directory is missing or unsafe: $task_path");
-my @task_identity = stat($task);
-refuse("ship task path is not a directory") unless @task_identity && S_ISDIR($task_identity[2]);
-my @named_identity = lstat($task_path);
-refuse("ship task directory identity changed") unless @named_identity
-  && !S_ISLNK($named_identity[2])
-  && $named_identity[0] == $task_identity[0]
-  && $named_identity[1] == $task_identity[1];
-my $task_fd_path = "/dev/fd/" . fileno($task);
-my @descriptor_identity = stat($task_fd_path);
-refuse("portable task descriptor path is unavailable") unless @descriptor_identity
-  && $descriptor_identity[0] == $task_identity[0]
-  && $descriptor_identity[1] == $task_identity[1];
-
-sysopen(my $brief, "$task_fd_path/brief.md", O_RDONLY | O_NOFOLLOW)
-  or refuse("ship task brief is missing or unsafe");
-my @brief_identity = stat($brief);
-refuse("ship task brief is not a regular file") unless @brief_identity && S_ISREG($brief_identity[2]);
-my $ledger_missing = 0;
-my $ledger;
-if (!sysopen($ledger, "$task_fd_path/evidence.jsonl", O_RDONLY | O_NOFOLLOW)) {
-  $ledger_missing = 1 if $! == ENOENT;
-  refuse("evidence ledger is missing or unsafe") unless $ledger_missing;
-}
-if (!$ledger_missing) {
-  my @ledger_identity = stat($ledger);
-  refuse("evidence ledger must be a single-link regular file") unless @ledger_identity
-    && S_ISREG($ledger_identity[2]) && $ledger_identity[3] == 1;
-  flock($ledger, LOCK_SH) or refuse("evidence ledger could not be locked");
-}
-
-copy_file($brief, $ENV{FM_RECEIPT_BRIEF_OUT});
-copy_file($ledger, $ENV{FM_RECEIPT_LEDGER_OUT}) unless $ledger_missing;
-exit($ledger_missing ? 3 : 0);
-PERL
-SNAPSHOT_RC=$?
-set -e
+STORE_READY="$TMP_ROOT/store.ready"
+STORE_RELEASE="$TMP_ROOT/store.release"
+mkfifo "$STORE_RELEASE"
+FM_DATA_OVERRIDE="$DATA_REAL" "$SCRIPT_DIR/fm-receipt-store.sh" "$ID" hold \
+  "$BRIEF" "$LEDGER" "$STORE_READY" "$STORE_RELEASE" &
+STORE_PID=$!
+while [ ! -s "$STORE_READY" ]; do
+  kill -0 "$STORE_PID" 2>/dev/null \
+    || { wait "$STORE_PID" 2>/dev/null || true; STORE_PID=; echo "error: pinned evidence snapshot failed" >&2; exit 2; }
+done
+SNAPSHOT_RC=$(sed -n '1p' "$STORE_READY")
 case "$SNAPSHOT_RC" in
   0) PINNED_LEDGER_EXISTS=true ;;
   3) PINNED_LEDGER_EXISTS=false ;;
@@ -394,7 +356,7 @@ def evidence_result:
   without_zero_failures
   |
   (test("^[[:space:]]*$") | not)
-  and (test("(^|[^[:alnum:]_])(fail(s|ed|ures?)?|error|negative|red|broken|skip(s|ped|ping)?|empty)([^[:alnum:]_]|$)|not[[:space:]]+pass(ed)?|no[[:space:]]+tests?|(^|[^0-9])0[[:space:]]+(tests?([[:space:]]+passed)?|passed)([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(tests?|passed)[[:space:]]*:[[:space:]]*0([^0-9]|$)|(^|[^[:alnum:]_])passed[[:space:]]+0[[:space:]]+tests?([^[:alnum:]_]|$)|(^|[^0-9])0[[:space:]]*(/|of|out[[:space:]]+of)[[:space:]]*0[[:space:]]+(tests?([[:space:]]+passed)?|passed)([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(tests?([[:space:]]+passed)?|passed)[[:space:]]*:?[[:space:]]*0[[:space:]]*(/|of|out[[:space:]]+of)[[:space:]]*0([[:space:]]+tests?)?([^[:alnum:]_]|$)"; "i") | not);
+  and (test("(^|[^[:alnum:]_])(fail(s|ed|ures?)?|error|negative|red|broken|skip(s|ped|ping)?|empty)([^[:alnum:]_]|$)|not[[:space:]]+pass(ed)?|no[[:space:]]+tests?|(^|[^0-9])0[[:space:]]+(tests?([[:space:]]+passed)?|passed)([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(tests?|passed)[[:space:]]*:[[:space:]]*0([^0-9]|$)|(^|[^[:alnum:]_])(tests?|passed)[[:space:]]+0([^0-9]|$)|(^|[^[:alnum:]_])passed[[:space:]]+0[[:space:]]+tests?([^[:alnum:]_]|$)|(^|[^0-9])0[[:space:]]*(/|of|out[[:space:]]+of)[[:space:]]*0[[:space:]]+(tests?([[:space:]]+passed)?|passed)([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(tests?([[:space:]]+passed)?|passed)[[:space:]]*:?[[:space:]]*0[[:space:]]*(/|of|out[[:space:]]+of)[[:space:]]*0([[:space:]]+tests?)?([^[:alnum:]_]|$)"; "i") | not);
 def strong_result:
   without_zero_failures
   | evidence_result
@@ -796,18 +758,41 @@ if [ "$DIFF_AVAILABLE" -eq 1 ] && [ "$LOW_PATH" -eq 1 ]; then
   LOW_PATCH="$TMP_ROOT/low-prose.patch"
   if git -C "$WORKTREE" diff --no-ext-diff --no-renames --unified=0 "$BASE..$HEAD" -- CHANGELOG.md > "$LOW_PATCH" 2>/dev/null \
     && awk '
-      BEGIN { changed=0; bad=0 }
-      /^\+\+\+ / || /^--- / || /^@@/ || /^diff --git / || /^index / { next }
-      /^[+-]/ {
-        changed=1
-        line=substr($0, 2)
+      function forbidden(line, lower) {
         lower=tolower(line)
-        if (line ~ /`/ || line ~ /^\t/ || line ~ /^    /) bad=1
-        if (line ~ /^[[:space:]]*([$>]|\.\/|\/)/) bad=1
-        if (line ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_.-]*[[:space:]]*[:=][[:space:]]*[^[:space:]]/) bad=1
-        if (lower ~ /(^|[[:space:]])(sudo|kubectl|docker|podman|npm|npx|pnpm|yarn|bun|pip|python|ruby|cargo|make|just|git|gh|curl|wget|ssh|scp|rsync|systemctl|terraform|ansible|helm|wrangler|no-mistakes)([[:space:]]|$)/) bad=1
+        if (line ~ /`/ || line ~ /^\t/ || line ~ /^    /) return 1
+        if (line ~ /^[[:space:]]*([$>]|\.\/|\/)/) return 1
+        if (line ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_.-]*[[:space:]]*[:=][[:space:]]*[^[:space:]]/) return 1
+        if (lower ~ /(^|[^[:alnum:]_])(must|should|required|requires?|never|always|ensure|run|use|configure|deploy|rotate|administrator|operator|security|access|tokens?|credentials?)([^[:alnum:]_]|$)/) return 1
+        return 0
       }
-      END { exit(changed && !bad ? 0 : 1) }
+      function distance(a, b, i, j, cost, key) {
+        for (key in edit) delete edit[key]
+        for (i=0; i<=length(a); i++) edit[i,0]=i
+        for (j=0; j<=length(b); j++) edit[0,j]=j
+        for (i=1; i<=length(a); i++) {
+          for (j=1; j<=length(b); j++) {
+            cost=(substr(a,i,1) == substr(b,j,1) ? 0 : 1)
+            edit[i,j]=edit[i-1,j]+1
+            if (edit[i,j-1]+1 < edit[i,j]) edit[i,j]=edit[i,j-1]+1
+            if (edit[i-1,j-1]+cost < edit[i,j]) edit[i,j]=edit[i-1,j-1]+cost
+          }
+        }
+        return edit[length(a),length(b)]
+      }
+      BEGIN { removed=0; added=0; bad=0 }
+      /^\+\+\+ / || /^--- / || /^@@/ || /^diff --git / || /^index / { next }
+      /^-/ { old[++removed]=substr($0, 2); next }
+      /^\+/ { new[++added]=substr($0, 2); next }
+      END {
+        if (removed == 0 || removed != added || removed > 2) exit 1
+        for (i=1; i<=removed; i++) {
+          if (forbidden(old[i]) || forbidden(new[i])) exit 1
+          if (length(old[i]) > 240 || length(new[i]) > 240) exit 1
+          if (distance(tolower(old[i]), tolower(new[i])) > 4) exit 1
+        }
+        exit 0
+      }
     ' "$LOW_PATCH"; then
     LOW_STRUCTURE=1
   fi
@@ -843,7 +828,7 @@ elif [ "$HAS_BINARY" -eq 1 ]; then
 elif [ "$DIFF_FILES" -gt 8 ] || [ "$DIFF_LINES" -gt 400 ]; then
   TIER=high
   REASON=broad-change
-elif [ "$LOW_PATH" -eq 1 ] && [ "$LOW_STRUCTURE" -eq 1 ] && [ "$DIFF_FILES" -le 3 ] && [ "$DIFF_LINES" -le 80 ] \
+elif [ "$LOW_PATH" -eq 1 ] && [ "$LOW_STRUCTURE" -eq 1 ] && [ "$DIFF_FILES" -eq 1 ] && [ "$DIFF_LINES" -le 4 ] \
   && [ "$MECHANICAL_PROOF" -eq 1 ]; then
   TIER=low
   REASON=non-authoritative-prose
@@ -908,7 +893,15 @@ if [ "$VALIDATION_PATH" = full-no-mistakes ]; then
   PREPLAN_RUN_ID=$(nm_status_field "$PREPLAN_OUT" id)
 fi
 write_meta_record initial
+RECEIPT_COMMAND=
+COMPLETE_COMMAND=
+if [ "$VALIDATION_PATH" = receipts-mechanical ]; then
+  RECEIPT_COMMAND="bin/fm-receipt.sh $ID <criterion> <test|build|lint|typecheck> <summary> <result> --file <changed-file>"
+  COMPLETE_COMMAND="bin/fm-receipt-check.sh $ID --complete --terminal-evidence mechanical-checks-passed"
+fi
 jq -cn --arg task "$ID" --arg mode "$MODE" --arg tier "$TIER" --arg path "$VALIDATION_PATH" --arg reason "$REASON" \
   --arg base "$BASE" --arg head "$HEAD" --arg generation "$PLAN_GENERATION" \
+  --arg receipt_command "$RECEIPT_COMMAND" --arg complete_command "$COMPLETE_COMMAND" \
   --argjson diff_files "$DIFF_FILES" --argjson diff_lines "$DIFF_LINES" \
-  '{schema:"fm-validation-plan.v1",task:$task,status:"planned",mode:$mode,tier:$tier,path:$path,reason:$reason,base:$base,head:$head,generation:$generation,diff_files:$diff_files,diff_lines:$diff_lines}'
+  '{schema:"fm-validation-plan.v1",task:$task,status:"planned",mode:$mode,tier:$tier,path:$path,reason:$reason,base:$base,head:$head,generation:$generation,diff_files:$diff_files,diff_lines:$diff_lines}
+   + (if $path == "receipts-mechanical" then {receipt_command:$receipt_command,complete_command:$complete_command} else {} end)'

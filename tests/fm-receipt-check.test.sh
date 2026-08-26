@@ -7,6 +7,7 @@ set -u
 
 CHECK="$ROOT/bin/fm-receipt-check.sh"
 RECEIPT="$ROOT/bin/fm-receipt.sh"
+STORE="$ROOT/bin/fm-receipt-store.sh"
 TMP_ROOT=$(fm_test_tmproot fm-receipt-check)
 HOME_DIR="$TMP_ROOT/home"
 mkdir -p "$HOME_DIR/data" "$HOME_DIR/state"
@@ -41,6 +42,13 @@ test_help_advertises_generation_bound_run_binding() {
   out=$("$CHECK" --help) || fail "receipt checker help failed"
   assert_contains "$out" "--bind-run <run-id> --generation <plan-generation>" \
     "receipt checker help omitted the required run generation"
+  assert_contains "$out" "--complete --terminal-evidence mechanical-checks-passed" \
+    "receipt checker help omitted the receipts-mechanical completion command"
+  out=$("$STORE" --help) || fail "receipt store help failed"
+  assert_contains "$out" "hold <brief-out> <ledger-out>" \
+    "receipt store help omitted the pinned read mode"
+  assert_contains "$out" "append <criterion> <criterion-parser>" \
+    "receipt store help omitted the pinned append mode"
   pass "fm-receipt-check help renders an executable generation-bound bind command"
 }
 
@@ -78,14 +86,15 @@ make_project() {  # <id> <mode> <surface> -> prints base
   mkdir -p "$project"
   git -C "$project" init -q
   printf 'seed\n' > "$project/README.md"
-  git -C "$project" add README.md
+  [ "$surface" != docs ] || printf 'Release notee\n' > "$project/CHANGELOG.md"
+  git -C "$project" add .
   git -C "$project" commit -q -m init
   git -C "$project" branch -M main
   base=$(git -C "$project" rev-parse HEAD)
   git -C "$project" checkout -q -b "fm/$id"
   case "$surface" in
     docs)
-      printf 'release note\n' > "$project/CHANGELOG.md"
+      printf 'Release note\n' > "$project/CHANGELOG.md"
       ;;
     authoritative_docs)
       printf 'seed\nsecurity deployment instructions\n' > "$project/README.md"
@@ -149,7 +158,7 @@ test_complete_and_invalid_ledgers_have_distinct_results() {
 test_explicit_negative_results_leave_criteria_missing() {
   local id=negative-results out rc result
   write_brief "$id" direct-PR
-  for result in failed failure "3 failures" negative "not passed" "no tests" "0 tests" "0 passed" "passed 0 tests" "tests: 0" "passed: 0" "0/0 tests passed" "0 of 0 tests passed" "tests passed: 0/0" skipped empty; do
+  for result in failed failure "3 failures" negative "not passed" "no tests" "0 tests" "0 passed" "passed 0" "tests 0" "passed 0 tests" "tests: 0" "passed: 0" "0/0 tests passed" "0 of 0 tests passed" "tests passed: 0/0" skipped empty; do
     add_receipt "$id" AC1 test "$result"
   done
   add_receipt "$id" AC2 api 401
@@ -160,7 +169,7 @@ test_explicit_negative_results_leave_criteria_missing() {
     and .required == ["AC1","AC2"]
     and .evidenced == ["AC2"]
     and .missing == ["AC1"]
-    and .receipt_count == 17
+    and .receipt_count == 19
   ' >/dev/null || fail "negative-result evidence status was not deterministic"
   add_receipt "$id" AC1 test passed
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id"); rc=$?
@@ -374,7 +383,11 @@ test_low_risk_skips_no_mistakes_under_explicit_policy() {
   add_receipt "$id" AC2 review "reviewed"
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base") \
     || fail "low-risk plan failed"
-  printf '%s' "$out" | jq -e '.tier == "low" and .path == "receipts-mechanical"' >/dev/null \
+  printf '%s' "$out" | jq -e --arg id "$id" '
+    .tier == "low" and .path == "receipts-mechanical"
+    and .receipt_command == ("bin/fm-receipt.sh " + $id + " <criterion> <test|build|lint|typecheck> <summary> <result> --file <changed-file>")
+    and .complete_command == ("bin/fm-receipt-check.sh " + $id + " --complete --terminal-evidence mechanical-checks-passed")
+  ' >/dev/null \
     || fail "narrow mechanically proven docs change did not take the low path"
   meta="$HOME_DIR/state/$id.meta"
   grep -qx 'validation_tier=low' "$meta" || fail "low tier was not recorded durably"
@@ -392,7 +405,7 @@ test_low_risk_skips_no_mistakes_under_explicit_policy() {
     || fail "low plan did not complete after post-plan mechanical evidence"
   grep -qx "validation_completed_head=$validated_head" "$meta" \
     || fail "low completion was not bound to its validated head"
-  printf 'post-validation correction\n' >> "$project/CHANGELOG.md"
+  printf 'Release notes\n' > "$project/CHANGELOG.md"
   git -C "$project" add CHANGELOG.md
   git -C "$project" commit -q -m 'post-validation correction'
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence mechanical-checks-passed 2>&1)
@@ -435,7 +448,65 @@ test_low_risk_requires_safe_prose_and_applicable_evidence() {
     || fail "command-like prose plan failed"
   printf '%s' "$out" | jq -e '.tier == "high" and .path == "full-no-mistakes"' >/dev/null \
     || fail "command-like changelog prose reached low"
+
+  id=low-prescriptive-prose
+  base=$(make_project "$id" no-mistakes docs)
+  project="$TMP_ROOT/project-$id"
+  printf 'Administrators must rotate access tokens every 30 days.\n' >> "$project/CHANGELOG.md"
+  git -C "$project" add CHANGELOG.md
+  git -C "$project" commit -q -m 'add prescriptive security text'
+  add_receipt "$id" AC1 lint passed CHANGELOG.md
+  add_receipt "$id" AC2 review reviewed
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base") \
+    || fail "prescriptive prose plan failed"
+  printf '%s' "$out" | jq -e '.tier == "high" and .path == "full-no-mistakes"' >/dev/null \
+    || fail "prescriptive changelog prose reached low"
   pass "low risk requires safe changelog prose and file-bound mechanical evidence"
+}
+
+test_plan_boundary_excludes_concurrent_receipts() {
+  local id=plan-receipt-boundary base fakebin real_od ready release plan_pid receipt_pid rc meta
+  base=$(make_project "$id" no-mistakes docs)
+  add_receipt "$id" AC1 lint passed CHANGELOG.md
+  add_receipt "$id" AC2 review reviewed
+  fakebin="$TMP_ROOT/plan-boundary-fakebin"
+  ready="$TMP_ROOT/plan-boundary-ready"
+  release="$TMP_ROOT/plan-boundary-release"
+  mkdir -p "$fakebin"
+  mkfifo "$release"
+  real_od=$(command -v od)
+  cat > "$fakebin/od" <<EOF
+#!/bin/sh
+: > "$ready"
+IFS= read -r _ < "$release"
+exec "$real_od" "\$@"
+EOF
+  chmod +x "$fakebin/od"
+  PATH="$fakebin:$PATH" FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" \
+    > "$TMP_ROOT/plan-boundary-output" 2>&1 &
+  plan_pid=$!
+  while [ ! -e "$ready" ]; do
+    kill -0 "$plan_pid" 2>/dev/null || fail "planner exited before the publication boundary"
+  done
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 lint fresh passed --file CHANGELOG.md \
+    > "$TMP_ROOT/plan-boundary-receipt" 2>&1 &
+  receipt_pid=$!
+  sleep 1
+  kill -0 "$receipt_pid" 2>/dev/null \
+    || fail "receipt append crossed the unpublished plan boundary"
+  printf 'continue\n' > "$release"
+  wait "$plan_pid"
+  rc=$?
+  expect_code 0 "$rc" "planner publishes while holding the pinned ledger boundary"
+  wait "$receipt_pid"
+  rc=$?
+  expect_code 0 "$rc" "receipt appends after the published plan boundary"
+  meta="$HOME_DIR/state/$id.meta"
+  [ "$(grep '^validation_ledger_receipt_count=' "$meta" | tail -1)" = 'validation_ledger_receipt_count=2' ] \
+    || fail "plan boundary included a receipt appended after publication"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence mechanical-checks-passed >/dev/null \
+    || fail "post-publication receipt did not satisfy fresh mechanical evidence"
+  pass "plan publication holds the pinned ledger boundary against concurrent receipts"
 }
 
 test_terminal_and_failed_runs_bind_by_current_plan() {
@@ -890,6 +961,7 @@ test_ci_green_log_allows_exact_bound_run_completion
 test_claim_invalidation_marker_is_append_only_and_idempotent
 test_low_risk_skips_no_mistakes_under_explicit_policy
 test_low_risk_requires_safe_prose_and_applicable_evidence
+test_plan_boundary_excludes_concurrent_receipts
 test_terminal_and_failed_runs_bind_by_current_plan
 test_no_mistakes_observations_are_bounded
 test_authoritative_docs_remain_high

@@ -1018,7 +1018,7 @@ families_for_changed_path() {
       printf '%s\n' session-bootstrap
       ;;
     bin/fm-lint.sh|bin/fm-install-shellcheck.sh|\
-    bin/fm-brief.sh|bin/fm-receipt.sh|bin/fm-receipt-check.sh|\
+    bin/fm-brief.sh|bin/fm-receipt.sh|bin/fm-receipt-check.sh|bin/fm-receipt-store.sh|\
     bin/fm-ensure-agents-md.sh|bin/fm-crew-state.sh|\
     bin/fm-decision-hold.sh|bin/fm-supervision*|bin/fm-transition-lib.sh|\
     bin/fm-tmux-lib.sh|bin/fm-marker-lib.sh|bin/fm-operational-input.sh|bin/fm-tasks-axi-lib.sh|\

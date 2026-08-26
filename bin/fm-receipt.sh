@@ -18,10 +18,8 @@
 #   --artifact <path>  Artifact or URL carrying the evidence.
 #   --file <path>      Source or evidence file pointer.
 #
-# The helper validates input schema, opens the task, brief, and original ledger
-# through portable no-follow descriptors, locks that ledger, validates the pinned
-# ship contract and criterion, and appends exactly one compact JSON object without
-# rewriting existing evidence.
+# The helper validates input schema and delegates the pinned ship-contract append
+# to fm-receipt-store.sh, then emits exactly one compact JSON object.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -98,7 +96,6 @@ esac
 [ -n "$RESULT" ] || { echo "error: result must not be empty" >&2; exit 2; }
 
 command -v jq >/dev/null 2>&1 || { echo "error: jq is required" >&2; exit 1; }
-command -v perl >/dev/null 2>&1 || { echo "error: perl is required" >&2; exit 1; }
 [ -d "$DATA" ] || { echo "error: data directory is missing: $DATA" >&2; exit 1; }
 DATA_REAL=$(CDPATH='' cd -- "$DATA" 2>/dev/null && pwd -P) \
   || { echo "error: data directory is unsafe: $DATA" >&2; exit 1; }
@@ -117,60 +114,8 @@ receipt=$(jq -cn \
     + (if $file == "" then {} else {file:$file} end)
   ')
 
-if ! FM_RECEIPT_DATA="$DATA_REAL" FM_RECEIPT_ID="$ID" FM_RECEIPT_CRITERION="$CRITERION" \
-  FM_RECEIPT_PAYLOAD="$receipt" FM_RECEIPT_PARSER="$SCRIPT_DIR/fm-receipt-check.sh" perl - <<'PERL'
-use strict;
-use warnings;
-use Fcntl qw(:DEFAULT :flock :mode);
-
-sub refuse {
-  print STDERR "error: $_[0]\n";
-  exit 1;
-}
-
-my $task_path = "$ENV{FM_RECEIPT_DATA}/$ENV{FM_RECEIPT_ID}";
-sysopen(my $task, $task_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
-  or refuse("task directory is missing or unsafe: $task_path");
-my @task_identity = stat($task);
-refuse("task path is not a directory") unless @task_identity && S_ISDIR($task_identity[2]);
-my @named_identity = lstat($task_path);
-refuse("task directory identity changed") unless @named_identity
-  && !S_ISLNK($named_identity[2])
-  && $named_identity[0] == $task_identity[0]
-  && $named_identity[1] == $task_identity[1];
-my $task_fd_path = "/dev/fd/" . fileno($task);
-my @descriptor_identity = stat($task_fd_path);
-refuse("portable task descriptor path is unavailable") unless @descriptor_identity
-  && $descriptor_identity[0] == $task_identity[0]
-  && $descriptor_identity[1] == $task_identity[1];
-
-sysopen(my $brief, "$task_fd_path/brief.md", O_RDONLY | O_NOFOLLOW)
-  or refuse("task brief is missing or unsafe");
-my @brief_identity = stat($brief);
-refuse("task brief is not a regular file") unless @brief_identity && S_ISREG($brief_identity[2]);
-sysopen(my $ledger, "$task_fd_path/evidence.jsonl", O_WRONLY | O_APPEND | O_NOFOLLOW)
-  or refuse("evidence ledger is missing or unsafe");
-my @ledger_identity = stat($ledger);
-refuse("evidence ledger must be a single-link regular file") unless @ledger_identity
-  && S_ISREG($ledger_identity[2]) && $ledger_identity[3] == 1;
-flock($ledger, LOCK_EX) or refuse("evidence ledger could not be locked");
-
-local $/;
-my $brief_text = <$brief>;
-defined($brief_text) or refuse("task brief could not be read");
-my @delivery = ($brief_text =~ /^Delivery contract: mode=(no-mistakes|direct-PR|local-only)$/mg);
-refuse("receipts apply only to ship tasks with one delivery contract") unless @delivery == 1;
-open(my $parser, "|-", $ENV{FM_RECEIPT_PARSER}, "--parse-criteria", "-", "--require", $ENV{FM_RECEIPT_CRITERION})
-  or refuse("acceptance-criterion parser could not start");
-print {$parser} $brief_text or refuse("task brief could not reach the acceptance-criterion parser");
-close($parser) or refuse("criterion is not declared by a valid ship brief: $ENV{FM_RECEIPT_CRITERION}");
-
-my $record = "$ENV{FM_RECEIPT_PAYLOAD}\n";
-my $written = syswrite($ledger, $record);
-refuse("evidence receipt append failed") unless defined($written) && $written == length($record);
-close($ledger) or refuse("evidence ledger close failed");
-PERL
-then
+if ! FM_DATA_OVERRIDE="$DATA_REAL" FM_RECEIPT_PAYLOAD="$receipt" \
+  "$SCRIPT_DIR/fm-receipt-store.sh" "$ID" append "$CRITERION" "$SCRIPT_DIR/fm-receipt-check.sh"; then
   exit 1
 fi
 printf '%s\n' "$receipt"
