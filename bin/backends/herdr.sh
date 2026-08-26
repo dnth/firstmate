@@ -2691,9 +2691,31 @@ fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
   printf '%s' "$out" | jq -r '[.result.agent.agent // "", .result.agent.agent_status // ""] | @tsv' 2>/dev/null
 }
 
-fm_backend_herdr_composer_state() {  # <target> [harness] [runtime] [omp] [submit-active] -> empty|pending|unknown
+fm_backend_herdr_submit_content_matches() {  # <content> <text>
+  local content=$1 text=$2
+  [ -n "$text" ] || return 1
+  case "$content" in
+    '❯ '*) content=${content#'❯ '} ;;
+    '› '*) content=${content#'› '} ;;
+    '> '*) content=${content#'> '} ;;
+    '$ '*) content=${content#'$ '} ;;
+    '% '*) content=${content#'% '} ;;
+    '# '*) content=${content#'# '} ;;
+    '❯'*) content=${content#'❯'} ;;
+    '›'*) content=${content#'›'} ;;
+    '>'*) content=${content#'>'} ;;
+    '$'*) content=${content#'$'} ;;
+    '%'*) content=${content#'%'} ;;
+    '#'*) content=${content#'#'} ;;
+  esac
+  content="${content#"${content%%[![:space:]]*}"}"
+  content="${content%"${content##*[![:space:]]}"}"
+  [ "$content" = "$text" ]
+}
+
+fm_backend_herdr_composer_state() {  # <target> [harness] [runtime] [omp] [submit-active] [submit-text] -> empty|pending|unknown
   local target=$1 harness=${2:-} bun=${3:-${FM_OMP_BUN:-}} omp=${4:-${FM_OMP_BIN:-}}
-  local submit_active=${5:-0}
+  local submit_active=${5:-0} submit_text=${6:-}
   local session pane cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped
   local identity agent agent_status row=0 generic_line=0
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
@@ -2721,6 +2743,11 @@ EOF
           stripped=$(printf '%s\n' "$FM_BACKEND_HERDR_OMP_CONTENT" | fm_composer_strip_ghost)
           stripped="${stripped#"${stripped%%[![:space:]]*}"}"
           stripped="${stripped%"${stripped##*[![:space:]]}"}"
+          if [ "$submit_active" = 1 ] \
+             && fm_backend_herdr_submit_content_matches "$stripped" "$submit_text"; then
+            printf 'pending'
+            return 0
+          fi
           fm_composer_classify_content 1 "$stripped" "$FM_BACKEND_HERDR_IDLE_RE"
           return 0
         fi
@@ -2821,6 +2848,11 @@ EOF
   # shape only ever starts with an AGENT glyph (FM_BACKEND_HERDR_BARE_PROMPT_RE
   # is '^(❯|›)'), so a bare shell prompt never reaches here - it stays 'unknown'
   # via the no-composer-row path above, exactly as before.
+  if [ "$submit_active" = 1 ] \
+     && fm_backend_herdr_submit_content_matches "$stripped" "$submit_text"; then
+    printf 'pending'
+    return 0
+  fi
   fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE"
 }
 
@@ -3098,7 +3130,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
       elif [ "$omp_status" = blocked ]; then
         printf 'unknown'
       else
-        verdict=$(fm_backend_herdr_composer_state "$target" "$harness" "$bun" "$omp" 1)
+        verdict=$(fm_backend_herdr_composer_state "$target" "$harness" "$bun" "$omp" 1 "$text")
         queued_verdict=$(fm_composer_queued_enter_verdict "$verdict" \
           "$(fm_backend_herdr_queued_enter_busy "$target")")
         if [ "$verdict" = empty ] || [ "$queued_verdict" = empty ]; then
@@ -3112,11 +3144,11 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
       verdict=$(fm_backend_herdr_wait_for_working "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
         "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS")
       if [ "$verdict" = idle ]; then
-        verdict=$(fm_backend_herdr_composer_state "$target" "$harness" "$bun" "$omp" 1)
+        verdict=$(fm_backend_herdr_composer_state "$target" "$harness" "$bun" "$omp" 1 "$text")
       fi
     else
       sleep "$sleep_s"
-      verdict=$(fm_backend_herdr_composer_state "$target" "$harness" "$bun" "$omp" 1)
+      verdict=$(fm_backend_herdr_composer_state "$target" "$harness" "$bun" "$omp" 1 "$text")
     fi
     case "$verdict" in
       busy|empty)
@@ -3135,8 +3167,12 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
     esac
     i=$((i + 1))
     if [ "$i" -ge "$retries" ]; then
-      queued_verdict=$(fm_composer_queued_enter_verdict "$verdict" \
-        "$(fm_backend_herdr_queued_enter_busy "$target")")
+      if [ "$harness" = omp ]; then
+        queued_verdict=$(fm_composer_queued_enter_verdict "$verdict" \
+          "$(fm_backend_herdr_queued_enter_busy "$target")")
+      else
+        queued_verdict=$verdict
+      fi
       if [ "$queued_verdict" = empty ] && [ -n "$turnstart_reference" ]; then
         printf 'empty-turnstart:%s' "$turnstart_reference"
       else

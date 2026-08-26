@@ -3908,21 +3908,38 @@ test_send_text_submit_confirms_blocked_after_enter() {
   pass "fm_backend_herdr_send_text_submit: a post-Enter blocked state confirms delivery without retrying into the prompt"
 }
 
-test_send_text_submit_preexisting_working_pending_is_queued_enter() {
+test_send_text_submit_preexisting_working_pending_fails_closed_for_non_omp() {
   local dir log resp fb out enter_count read_count
-  dir="$TMP_ROOT/submit-preexisting-working-queued"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  dir="$TMP_ROOT/submit-preexisting-working-swallow"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
   printf '  \xe2\x9d\xaf hello captain\n' > "$resp/4.out"
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/5.out"
+  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/6.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 1 0.01 0.01' "$ROOT" )
-  [ "$out" = empty ] || fail "a working native baseline plus proven pending after retries is a queued Enter, got '$out'"
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01 "" claude' "$ROOT" )
+  [ "$out" = pending ] || fail "non-OMP preexisting working must not convert pending input into delivery, got '$out'"
   enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
-  [ "$enter_count" -eq 1 ] || fail "queued-Enter confirmation should use the configured retry count, sent $enter_count Enter(s)"
+  [ "$enter_count" -eq 2 ] || fail "non-OMP pending input should retry Enter up to the configured count, sent $enter_count Enter(s)"
   read_count=$(grep -c $'\x1f''pane'$'\x1f''read' "$log")
-  [ "$read_count" -eq 1 ] || fail "queued-Enter confirmation should read the composer exactly once, made $read_count read(s)"
-  pass "fm_backend_herdr_send_text_submit: native working + proven pending after retries reports empty (queued Enter)"
+  [ "$read_count" -eq 2 ] || fail "non-OMP pending confirmation should read the composer twice, made $read_count read(s)"
+  pass "fm_backend_herdr_send_text_submit: non-OMP working + pending stays pending"
+}
+
+test_send_text_submit_typed_idle_placeholder_stays_pending() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-typed-idle-placeholder"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
+  printf '  \xe2\x9d\xaf Type a message...\n' > "$resp/5.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/7.out"
+  printf '  \xe2\x9d\xaf Type a message...\n' > "$resp/8.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "Type a message..." 2 0.01 0.01 "" claude' "$ROOT" )
+  [ "$out" = pending ] || fail "typed text matching an idle placeholder must remain pending, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 2 ] || fail "typed placeholder text should exhaust the configured Enter retries, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: typed idle-placeholder text stays pending"
 }
 
 test_send_text_submit_idle_native_empty_composer_confirms_delivery() {
@@ -4808,7 +4825,8 @@ test_send_text_submit_detects_landed_send
 test_send_text_submit_detects_swallowed_enter
 test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_text_submit_confirms_blocked_after_enter
-test_send_text_submit_preexisting_working_pending_is_queued_enter
+test_send_text_submit_preexisting_working_pending_fails_closed_for_non_omp
+test_send_text_submit_typed_idle_placeholder_stays_pending
 test_send_text_submit_idle_native_empty_composer_confirms_delivery
 test_send_text_submit_confirms_despite_codex_idle_tip_composer
 test_composer_state_codex_dynamic_idle_tip_reads_empty_when_faint
