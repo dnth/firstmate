@@ -5,6 +5,7 @@
 #   fm-receipt-check.sh <task-id>
 #   fm-receipt-check.sh <task-id> --criterion <criterion-id>
 #   fm-receipt-check.sh <task-id> --implementation-complete
+#   fm-receipt-check.sh <task-id> --mechanical-ready
 #   fm-receipt-check.sh <task-id> --bind-run <run-id> --generation <plan-generation>
 #   fm-receipt-check.sh <task-id> --complete --terminal-evidence <evidence>
 #   fm-receipt-check.sh <task-id> --plan [--base <commit>]
@@ -49,9 +50,15 @@
 #
 #   bin/fm-receipt.sh <task-id> <criterion> <test|build|lint|typecheck> <summary> <result> --outcome passed --file <changed-file>
 #
-# Then complete that exact generation and head with:
+# Verify those fresh receipts, then push/open the PR and report its URL:
 #
-#   bin/fm-receipt-check.sh <task-id> --complete --terminal-evidence mechanical-checks-passed
+#   bin/fm-receipt-check.sh <task-id> --mechanical-ready
+#   git push -u origin fm/<task-id>
+#   gh-axi pr create ...
+#   done: PR <url>
+#
+# Firstmate's canonical PR-ready helper then publishes the watcher and records
+# final completion with `bin/fm-pr-check.sh <task-id> <url>`.
 #
 # --complete requires the path-specific terminal evidence named by the generated
 # instructions and records that evidence with the latest plan, path, and head;
@@ -181,6 +188,10 @@ while [ "$#" -gt 0 ]; do
       [ "$ACTION" = check ] || { echo "error: choose only one action" >&2; exit 2; }
       ACTION=implementation-complete
       ;;
+    --mechanical-ready)
+      [ "$ACTION" = check ] || { echo "error: choose only one action" >&2; exit 2; }
+      ACTION=mechanical-ready
+      ;;
     --complete)
       [ "$ACTION" = check ] || { echo "error: choose only one action" >&2; exit 2; }
       ACTION=complete
@@ -232,7 +243,7 @@ if [ "$ACTION" != invalidate-claim ] && [ -n "$INVALIDATION_CRITERION" ]; then
 fi
 
 case "$ACTION" in
-  check|criterion|implementation-complete|bind-run|invalidate-claim)
+  check|criterion|implementation-complete|mechanical-ready|bind-run|invalidate-claim)
     [ -z "$BASE_INPUT" ] || { echo "error: --base requires --plan" >&2; exit 2; }
     [ -z "$TERMINAL_EVIDENCE" ] || { echo "error: --terminal-evidence requires --complete" >&2; exit 2; }
     if [ "$ACTION" = bind-run ]; then
@@ -514,10 +525,6 @@ if [ "$ACTION" = invalidate-claim ]; then
   exit 0
 fi
 
-nm_status_field() {
-  printf '%s\n' "$1" | sed -n "s/^[[:space:]]*$2:[[:space:]]*\"\{0,1\}\([^\"]*\)\"\{0,1\}[[:space:]]*$/\1/p" | head -1
-}
-
 if [ "$ACTION" = bind-run ]; then
   BIND_WORKTREE=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
   BIND_PATH=$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)
@@ -534,10 +541,10 @@ if [ "$ACTION" = bind-run ]; then
     || { echo "error: No-Mistakes run could not be observed" >&2; exit 2; }
   BIND_INTENT=$(fm_nm_run_checked "$BIND_WORKTREE" "$NM_TIMEOUT" axi logs --step intent --run "$RUN_ID_INPUT") \
     || { echo "error: No-Mistakes run intent could not be observed" >&2; exit 2; }
-  BIND_OBSERVED_ID=$(nm_status_field "$BIND_OUT" id)
-  BIND_OBSERVED_HEAD=$(nm_status_field "$BIND_OUT" head)
-  BIND_STATUS=$(nm_status_field "$BIND_OUT" status)
-  BIND_OUTCOME=$(nm_status_field "$BIND_OUT" outcome)
+  BIND_OBSERVED_ID=$(fm_nm_field "$BIND_OUT" id)
+  BIND_OBSERVED_HEAD=$(fm_nm_field "$BIND_OUT" head)
+  BIND_STATUS=$(fm_nm_field "$BIND_OUT" status)
+  BIND_OUTCOME=$(fm_nm_field "$BIND_OUT" outcome)
   [ "$RUN_ID_INPUT" != "$BIND_PREPLAN_RUN" ] || { echo "error: No-Mistakes run predates the latest plan" >&2; exit 2; }
   [ "$RUN_GENERATION_INPUT" = "$BIND_GENERATION" ] || { echo "error: run generation does not match the latest plan" >&2; exit 2; }
   printf '%s\n' "$BIND_INTENT" | grep -Fqx "Firstmate-Validation-Generation: $BIND_GENERATION" \
@@ -559,8 +566,44 @@ if [ "$ACTION" = bind-run ]; then
   exit 0
 fi
 
+verify_mechanical_ready() {
+  local boundary worktree validated_head current_head validation_base new_receipts completion_files changed_file
+  [ "$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)" = receipts-mechanical ] \
+    || { echo "error: latest plan does not use mechanical receipts" >&2; return 1; }
+  worktree=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
+  validated_head=$(grep '^validation_head=' "$META" | tail -1 | cut -d= -f2- || true)
+  [ -n "$worktree" ] && [ -d "$worktree" ] || { echo "error: validation worktree is missing" >&2; return 1; }
+  validated_head=$(git -C "$worktree" rev-parse --verify "$validated_head^{commit}" 2>/dev/null) \
+    || { echo "error: validated head is missing or invalid" >&2; return 1; }
+  current_head=$(git -C "$worktree" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) \
+    || { echo "error: current worktree head is unavailable" >&2; return 1; }
+  [ "$current_head" = "$validated_head" ] || { echo "error: current worktree head differs from the validated head; replan and revalidate" >&2; return 1; }
+  git_worktree_is_clean "$worktree" || { echo "error: validation worktree is dirty; commit or remove all changes" >&2; return 1; }
+  boundary=$(grep '^validation_ledger_receipt_count=' "$META" | tail -1 | cut -d= -f2- || true)
+  case "$boundary" in ''|*[!0-9]*) echo "error: mechanical evidence boundary is missing" >&2; return 1 ;; esac
+  new_receipts="$TMP_ROOT/completion-new-receipts.jsonl"
+  tail -n "+$((boundary + 1))" "$LEDGER" > "$new_receipts"
+  validation_base=$(grep '^validation_base=' "$META" | tail -1 | cut -d= -f2- || true)
+  completion_files="$TMP_ROOT/completion-files"
+  git -C "$worktree" diff --no-ext-diff --no-renames --name-only "$validation_base..$validated_head" > "$completion_files" 2>/dev/null \
+    && [ -s "$completion_files" ] || { echo "error: planned mechanical change files could not be observed" >&2; return 1; }
+  while IFS= read -r changed_file; do
+    [ -n "$changed_file" ] || continue
+    jq --arg file "$changed_file" -se '
+      any(.[]; .file == $file and .outcome == "passed" and (.type | test("^(test|build|lint|typecheck)$")))
+    ' "$new_receipts" >/dev/null 2>&1 \
+      || { echo "error: no applicable post-plan mechanical evidence was observed for $changed_file" >&2; return 1; }
+  done < "$completion_files"
+}
+
+if [ "$ACTION" = mechanical-ready ]; then
+  verify_mechanical_ready || exit 2
+  jq -cn --arg task "$ID" '{schema:"fm-mechanical-readiness.v1",task:$task,status:"ready"}'
+  exit 0
+fi
+
 record_validation_completed() {
-  local started path generation completed completed_head completed_path completed_evidence completed_generation now worktree validated_head current_head expected_evidence observed pr pr_head branch boundary new_receipts run_id run_path run_generation run_out observed_id observed_head outcome run_status default_ref default_branch ci_state run_ready changed_file completion_files validation_base
+  local started path generation published_generation completed completed_head completed_path completed_evidence completed_generation now worktree validated_head current_head expected_evidence observed pr pr_head branch boundary new_receipts run_id run_path run_generation run_out observed_id observed_head outcome run_status default_ref default_branch ci_state run_ready changed_file completion_files validation_base
   VALIDATION_LOCK="$STATE/.$ID.validation-plan.lock"
   if ! mkdir "$VALIDATION_LOCK" 2>/dev/null; then
     VALIDATION_LOCK=
@@ -576,7 +619,7 @@ record_validation_completed() {
     ''|*[!0-9]*) release_validation_lock; echo "error: validation start timestamp is missing or invalid" >&2; return 1 ;;
   esac
   case "$path" in
-    receipts-mechanical) expected_evidence=mechanical-checks-passed ;;
+    receipts-mechanical) expected_evidence=pr-opened ;;
     full-no-mistakes) expected_evidence=no-mistakes-passed ;;
     direct-PR) expected_evidence='pr-opened' ;;
     local-only) expected_evidence='branch-ready' ;;
@@ -602,23 +645,22 @@ record_validation_completed() {
   observed=
   case "$path" in
     receipts-mechanical)
-      boundary=$(grep '^validation_ledger_receipt_count=' "$META" | tail -1 | cut -d= -f2- || true)
-      case "$boundary" in ''|*[!0-9]*) release_validation_lock; echo "error: mechanical evidence boundary is missing" >&2; return 1 ;; esac
-      new_receipts="$TMP_ROOT/completion-new-receipts.jsonl"
-      tail -n "+$((boundary + 1))" "$LEDGER" > "$new_receipts"
-      validation_base=$(grep '^validation_base=' "$META" | tail -1 | cut -d= -f2- || true)
-      completion_files="$TMP_ROOT/completion-files"
-      git -C "$worktree" diff --no-ext-diff --no-renames --name-only "$validation_base..$validated_head" > "$completion_files" 2>/dev/null \
-        && [ -s "$completion_files" ] \
-        || { release_validation_lock; echo "error: planned mechanical change files could not be observed" >&2; return 1; }
-      while IFS= read -r changed_file; do
-        [ -n "$changed_file" ] || continue
-        jq --arg file "$changed_file" -se '
-          any(.[]; .file == $file and .outcome == "passed" and (.type | test("^(test|build|lint|typecheck)$")))
-        ' "$new_receipts" >/dev/null 2>&1 \
-          || { release_validation_lock; echo "error: no applicable post-plan mechanical evidence was observed for $changed_file" >&2; return 1; }
-      done < "$completion_files"
-      observed=post-plan-mechanical-receipt
+      verify_mechanical_ready \
+        || { release_validation_lock; return 1; }
+      published_generation=$(grep '^validation_pr_published_generation=' "$META" | tail -1 | cut -d= -f2- || true)
+      [ "$published_generation" = "$generation" ] \
+        || { release_validation_lock; echo "error: PR watcher was not published for the latest plan" >&2; return 1; }
+      pr=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
+      pr_head=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
+      case "$pr" in
+        https://github.com/*)
+          [ "$pr_head" = "$validated_head" ] \
+            || { release_validation_lock; echo "error: GitHub PR head is missing or not bound to the validated head" >&2; return 1; }
+          ;;
+        https://*) ;;
+        *) release_validation_lock; echo "error: canonical PR metadata is missing" >&2; return 1 ;;
+      esac
+      observed=post-plan-mechanical-receipt-and-pr
       ;;
     full-no-mistakes)
       run_id=$(grep '^validation_run_id=' "$META" | tail -1 | cut -d= -f2- || true)
@@ -629,10 +671,10 @@ record_validation_completed() {
         || { release_validation_lock; echo "error: no No-Mistakes run is bound to the latest plan" >&2; return 1; }
       run_out=$(fm_nm_run_checked "$worktree" "$NM_TIMEOUT" axi status --run "$run_id") \
         || { release_validation_lock; echo "error: bound No-Mistakes run could not be observed" >&2; return 1; }
-      observed_id=$(nm_status_field "$run_out" id)
-      observed_head=$(nm_status_field "$run_out" head)
-      outcome=$(nm_status_field "$run_out" outcome)
-      run_status=$(nm_status_field "$run_out" status)
+      observed_id=$(fm_nm_field "$run_out" id)
+      observed_head=$(fm_nm_field "$run_out" head)
+      outcome=$(fm_nm_field "$run_out" outcome)
+      run_status=$(fm_nm_field "$run_out" status)
       run_ready=0
       if [ "$outcome" = passed ] || [ "$outcome" = checks-passed ] || [ "$run_status" = checks-passed ]; then
         run_ready=1
@@ -648,6 +690,9 @@ record_validation_completed() {
       observed=bound-matching-no-mistakes-run
       ;;
     direct-PR)
+      published_generation=$(grep '^validation_pr_published_generation=' "$META" | tail -1 | cut -d= -f2- || true)
+      [ "$published_generation" = "$generation" ] \
+        || { release_validation_lock; echo "error: PR watcher was not published for the latest plan" >&2; return 1; }
       pr=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
       pr_head=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
       case "$pr" in
@@ -892,6 +937,7 @@ write_meta_record() {  # <pass>
     [ "$started" = "$IMPLEMENTATION_COMPLETED" ] || printf 'validation_started_at=%s\n' "$IMPLEMENTATION_COMPLETED"
     printf 'validation_ledger_receipt_count=%s\n' "$RECEIPT_COUNT"
     printf 'validation_preplan_run_id=%s\n' "${PREPLAN_RUN_ID:-}"
+    printf 'validation_pr_published_generation=\n'
     if [ -n "$previous_generation" ]; then
       printf 'validation_run_id=\nvalidation_run_path=\nvalidation_run_head=\nvalidation_run_generation=\n'
       printf 'validation_completed_at=\nvalidation_completed_head=\nvalidation_completed_path=\nvalidation_completed_evidence=\nvalidation_completed_generation=\n'
@@ -910,18 +956,28 @@ PREPLAN_RUN_ID=
 if [ "$VALIDATION_PATH" = full-no-mistakes ]; then
   PREPLAN_OUT=$(fm_nm_run_checked "$WORKTREE" "$NM_TIMEOUT" axi status) \
     || { echo "error: pre-plan No-Mistakes boundary could not be observed" >&2; exit 2; }
-  PREPLAN_RUN_ID=$(nm_status_field "$PREPLAN_OUT" id)
+  PREPLAN_RUN_ID=$(fm_nm_field "$PREPLAN_OUT" id)
 fi
 write_meta_record initial
 RECEIPT_COMMAND=
-COMPLETE_COMMAND=
+MECHANICAL_COMMAND=
+PUSH_COMMAND=
+PR_COMMAND=
+DONE_STATUS=
+REGISTER_COMMAND=
 if [ "$VALIDATION_PATH" = receipts-mechanical ]; then
   RECEIPT_COMMAND="bin/fm-receipt.sh $ID <criterion> <test|build|lint|typecheck> <summary> <result> --outcome passed --file <changed-file>"
-  COMPLETE_COMMAND="bin/fm-receipt-check.sh $ID --complete --terminal-evidence mechanical-checks-passed"
+  MECHANICAL_COMMAND="bin/fm-receipt-check.sh $ID --mechanical-ready"
+  PUSH_COMMAND="git push -u origin fm/$ID"
+  PR_COMMAND="gh-axi pr create <options>"
+  DONE_STATUS="done: PR <url>"
+  REGISTER_COMMAND="bin/fm-pr-check.sh $ID <url>"
 fi
 jq -cn --arg task "$ID" --arg mode "$MODE" --arg tier "$TIER" --arg path "$VALIDATION_PATH" --arg reason "$REASON" \
   --arg base "$BASE" --arg head "$HEAD" --arg generation "$PLAN_GENERATION" \
-  --arg receipt_command "$RECEIPT_COMMAND" --arg complete_command "$COMPLETE_COMMAND" \
+  --arg receipt_command "$RECEIPT_COMMAND" --arg mechanical_command "$MECHANICAL_COMMAND" \
+  --arg push_command "$PUSH_COMMAND" --arg pr_command "$PR_COMMAND" --arg done_status "$DONE_STATUS" \
+  --arg register_command "$REGISTER_COMMAND" \
   --argjson diff_files "$DIFF_FILES" --argjson diff_lines "$DIFF_LINES" \
   '{schema:"fm-validation-plan.v1",task:$task,status:"planned",mode:$mode,tier:$tier,path:$path,reason:$reason,base:$base,head:$head,generation:$generation,diff_files:$diff_files,diff_lines:$diff_lines}
-   + (if $path == "receipts-mechanical" then {receipt_command:$receipt_command,complete_command:$complete_command} else {} end)'
+   + (if $path == "receipts-mechanical" then {receipt_command:$receipt_command,mechanical_command:$mechanical_command,push_command:$push_command,pr_command:$pr_command,done_status:$done_status,register_command:$register_command} else {} end)'

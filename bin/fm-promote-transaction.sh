@@ -6,14 +6,44 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
-[ "$#" -eq 4 ] || exit 2
-ID=$1
-MODE=$2
-YOLO=$3
-CRITERIA_BLOCK=$4
+[ "$#" -eq 6 ] || exit 2
+PHASE=$1
+ID=$2
+MODE=$3
+YOLO=$4
+CRITERIA_BLOCK=$5
+TOKEN=$6
 META="$STATE/$ID.meta"
 BRIEF=./brief.md
 EVIDENCE=./evidence.jsonl
+BRIEF_TMP="./.brief.promote.$TOKEN"
+META_TMP="$STATE/.$ID.meta.promote.$TOKEN"
+BRIEF_ORIGINAL="./.brief.original.$TOKEN"
+META_ORIGINAL="$STATE/.$ID.meta.original.$TOKEN"
+
+case "$PHASE" in
+  finalize)
+    rm -f "$BRIEF_ORIGINAL" "$META_ORIGINAL" "$BRIEF_TMP" "$META_TMP" \
+      || echo "warning: promotion committed but a recovery artifact could not be removed" >&2
+    HOME_Q=$(printf '%q' "$FM_HOME")
+    echo "promoted $ID to ship mode=$MODE yolo=$YOLO (teardown protection restored)"
+    echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID '<ship instructions for mode=$MODE: read the concrete acceptance criteria in the promoted brief; review scratch state with git status and git log; reset to a clean default-branch base; carry over only intended fix changes; create branch fm/$ID; implement; record receipts; report done>'"
+    exit 0
+    ;;
+  rollback)
+    rc=0
+    if [ -f "$META_ORIGINAL" ]; then
+      mv "$META_ORIGINAL" "$META" || rc=1
+    fi
+    if [ -f "$BRIEF_ORIGINAL" ]; then
+      mv "$BRIEF_ORIGINAL" "$BRIEF" || rc=1
+    fi
+    rm -f "$EVIDENCE" "$BRIEF_TMP" "$META_TMP"
+    exit "$rc"
+    ;;
+  prepare) ;;
+  *) exit 2 ;;
+esac
 
 [ -f "$META" ] && [ ! -L "$META" ] || { echo "error: no safe meta for task $ID at $META" >&2; exit 1; }
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
@@ -32,11 +62,12 @@ if [ -e "$EVIDENCE" ] || [ -L "$EVIDENCE" ]; then
 fi
 
 umask 077
-BRIEF_TMP=$(mktemp ./.brief.promote.XXXXXXXX) || exit 1
-META_TMP=$(mktemp "$STATE/.$ID.meta.promote.XXXXXXXX") || { rm -f "$BRIEF_TMP"; exit 1; }
-BRIEF_ORIGINAL=$(mktemp ./.brief.original.XXXXXXXX) || { rm -f "$BRIEF_TMP" "$META_TMP"; exit 1; }
-META_ORIGINAL=$(mktemp "$STATE/.$ID.meta.original.XXXXXXXX") \
-  || { rm -f "$BRIEF_TMP" "$META_TMP" "$BRIEF_ORIGINAL"; exit 1; }
+for transaction_file in "$BRIEF_TMP" "$META_TMP" "$BRIEF_ORIGINAL" "$META_ORIGINAL"; do
+  if ! ( set -C; : > "$transaction_file" ) 2>/dev/null; then
+    rm -f "$BRIEF_TMP" "$META_TMP" "$BRIEF_ORIGINAL" "$META_ORIGINAL"
+    exit 1
+  fi
+done
 COMMITTED=0
 EVIDENCE_CREATED=0
 BRIEF_REPLACED=0
@@ -68,7 +99,6 @@ cleanup() {
   rm -f "$BRIEF_TMP" "$META_TMP"
   [ "$COMMITTED" -eq 1 ] || [ "$BRIEF_REPLACED" -eq 1 ] || rm -f "$BRIEF_ORIGINAL"
   [ "$COMMITTED" -eq 1 ] || [ "$META_REPLACED" -eq 1 ] || rm -f "$META_ORIGINAL"
-  [ "$COMMITTED" -ne 1 ] || rm -f "$BRIEF_ORIGINAL" "$META_ORIGINAL"
   return "$cleanup_rc"
 }
 on_exit() {
@@ -118,7 +148,3 @@ mv "$BRIEF_TMP" "$BRIEF"
 META_REPLACED=1
 mv "$META_TMP" "$META"
 COMMITTED=1
-
-HOME_Q=$(printf '%q' "$FM_HOME")
-echo "promoted $ID to ship mode=$MODE yolo=$YOLO (teardown protection restored)"
-echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID '<ship instructions for mode=$MODE: read the concrete acceptance criteria in the promoted brief; review scratch state with git status and git log; reset to a clean default-branch base; carry over only intended fix changes; create branch fm/$ID; implement; record receipts; report done>'"

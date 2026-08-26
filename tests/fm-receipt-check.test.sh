@@ -45,8 +45,10 @@ test_help_advertises_generation_bound_run_binding() {
     "receipt checker help omitted the required run generation"
   assert_contains "$out" "--implementation-complete" \
     "receipt checker help omitted the implementation boundary action"
-  assert_contains "$out" "--complete --terminal-evidence mechanical-checks-passed" \
-    "receipt checker help omitted the receipts-mechanical completion command"
+  assert_contains "$out" "--mechanical-ready" \
+    "receipt checker help omitted the receipts-mechanical readiness command"
+  assert_contains "$out" "bin/fm-pr-check.sh <task-id> <url>" \
+    "receipt checker help omitted canonical LOW PR registration"
   out=$("$STORE" --help) || fail "receipt store help failed"
   assert_contains "$out" "hold <brief-out> <ledger-out>" \
     "receipt store help omitted the pinned read mode"
@@ -192,55 +194,26 @@ test_complete_and_invalid_ledgers_have_distinct_results() {
   pass "fm-receipt-check distinguishes complete evidence from invalid JSONL"
 }
 
-test_explicit_negative_results_leave_criteria_missing() {
-  local id=negative-results out rc result
+test_closed_outcomes_control_evidence() {
+  local id=closed-outcomes out rc
   write_brief "$id" direct-PR
-  for result in failed failure "3 failures" "3 errors" negative unsuccessful unsuccessfully "did not pass" "does not pass" "didn't pass" "doesn't pass" "did not succeed" "does not succeed" "didn't succeed" "did not work" "does not work" "didn't work" "doesn't work" "not working" "none passed" "no tests passed" "0 succeeded" "zero succeeded" "0 successes" "zero successes" "no successes" "not successful" "not passed" "no tests" "0 tests" "0 passed" "passed 0" "tests 0" "passed 0 tests" "tests: 0" "passed: 0" "0/0 tests passed" "0 of 0 tests passed" "tests passed: 0/0" "collected 0 items" "0 items collected" "found 0 items" "no items collected" "0 examples" "0 examples, 0 failures" "ran 0 specs" "0 specs" "0 cases" "0 scenarios" "0 errors" "errors: 0" "no errors" "no failures" "zero failures" "zero errors" skipped empty; do
-    add_receipt "$id" AC1 test "$result" "" failed
-  done
-  add_receipt "$id" AC2 api 401
+  add_receipt "$id" AC1 test "12 passed" "" failed
+  add_receipt "$id" AC2 test "0 tests passed" "" passed
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id"); rc=$?
-  expect_code 1 "$rc" "explicit negative results leave their criterion missing"
+  expect_code 1 "$rc" "failed outcome leaves its criterion missing"
   printf '%s' "$out" | jq -e '
     .status == "missing"
     and .required == ["AC1","AC2"]
     and .evidenced == ["AC2"]
     and .missing == ["AC1"]
-    and .receipt_count == 58
-  ' >/dev/null || fail "negative-result evidence status was not deterministic"
-  add_receipt "$id" AC1 test passed
+    and .receipt_count == 2
+  ' >/dev/null || fail "closed outcome evidence status was not deterministic"
+  add_receipt "$id" AC1 test failed "" passed
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id"); rc=$?
-  expect_code 0 "$rc" "a later positive receipt evidences the missing criterion"
+  expect_code 0 "$rc" "passed outcome evidences regardless of descriptive result"
   printf '%s' "$out" | jq -e '.evidenced == ["AC1","AC2"] and .missing == []' >/dev/null \
-    || fail "positive receipt did not recover a criterion with prior negative receipts"
-
-  id=zero-failure-success
-  write_brief "$id" direct-PR
-  add_receipt "$id" AC1 test "10 passed, 0 FAILURES"
-  add_receipt "$id" AC2 api 401
-  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id"); rc=$?
-  expect_code 0 "$rc" "zero-failure success summary and expected 401 evidence both count"
-  printf '%s' "$out" | jq -e '.evidenced == ["AC1","AC2"] and .missing == []' >/dev/null \
-    || fail "zero-failure success summary was rejected as negative evidence"
-
-  id=zero-error-success
-  write_brief "$id" direct-PR
-  add_receipt "$id" AC1 test "10 passed, zero failures"
-  add_receipt "$id" AC2 test "10 passed, zero errors"
-  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id"); rc=$?
-  expect_code 0 "$rc" "nonzero passes with zero errors count as evidence"
-  printf '%s' "$out" | jq -e '.evidenced == ["AC1","AC2"] and .missing == []' >/dev/null \
-    || fail "zero-error success suffix was rejected"
-
-  id=nonzero-succeeded
-  write_brief "$id" direct-PR
-  add_receipt "$id" AC1 test "10 succeeded"
-  add_receipt "$id" AC2 api 401
-  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id"); rc=$?
-  expect_code 0 "$rc" "nonzero succeeded result is not a zero-success marker"
-  printf '%s' "$out" | jq -e '.evidenced == ["AC1","AC2"] and .missing == []' >/dev/null \
-    || fail "zero-success matching consumed a trailing digit from nonzero success"
-  pass "failed, skipped, empty, and zero-test results stay unevidenced while 401 counts"
+    || fail "passed outcome did not recover the criterion"
+  pass "closed passed and failed outcomes control criterion evidence"
 }
 
 test_delivery_mode_mismatch_fails_closed() {
@@ -525,7 +498,7 @@ test_claim_invalidation_marker_is_append_only_and_idempotent() {
 }
 
 test_low_risk_skips_no_mistakes_under_explicit_policy() {
-  local id=low-docs base out meta project validated_head new_head rc
+  local id=low-docs base out meta project validated_head new_head generation rc
   base=$(make_project "$id" no-mistakes docs)
   add_receipt "$id" AC1 lint "passed" CHANGELOG.md
   add_receipt "$id" AC2 review "reviewed"
@@ -534,7 +507,11 @@ test_low_risk_skips_no_mistakes_under_explicit_policy() {
   printf '%s' "$out" | jq -e --arg id "$id" '
     .tier == "low" and .path == "receipts-mechanical"
     and .receipt_command == ("bin/fm-receipt.sh " + $id + " <criterion> <test|build|lint|typecheck> <summary> <result> --outcome passed --file <changed-file>")
-    and .complete_command == ("bin/fm-receipt-check.sh " + $id + " --complete --terminal-evidence mechanical-checks-passed")
+    and .mechanical_command == ("bin/fm-receipt-check.sh " + $id + " --mechanical-ready")
+    and .push_command == ("git push -u origin fm/" + $id)
+    and .pr_command == "gh-axi pr create <options>"
+    and .done_status == "done: PR <url>"
+    and .register_command == ("bin/fm-pr-check.sh " + $id + " <url>")
   ' >/dev/null \
     || fail "narrow mechanically proven docs change did not take the low path"
   meta="$HOME_DIR/state/$id.meta"
@@ -545,18 +522,26 @@ test_low_risk_skips_no_mistakes_under_explicit_policy() {
   validated_head=$(git -C "$project" rev-parse HEAD)
   ! grep -q '^validation_completed_at=' "$meta" || fail "low plan completed before post-plan mechanical evidence"
   add_receipt "$id" AC1 lint "passed"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --mechanical-ready >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "low readiness rejects mechanical evidence unrelated to the changed file"
+  add_receipt "$id" AC1 lint "passed" CHANGELOG.md
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --mechanical-ready >/dev/null \
+    || fail "low plan was not mechanically ready after post-plan evidence"
   FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence mechanical-checks-passed >/dev/null 2>&1
   rc=$?
-  expect_code 2 "$rc" "low completion rejects mechanical evidence unrelated to the changed file"
-  add_receipt "$id" AC1 lint "passed" CHANGELOG.md
-  FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence mechanical-checks-passed >/dev/null \
-    || fail "low plan did not complete after post-plan mechanical evidence"
+  expect_code 2 "$rc" "mechanical readiness alone cannot complete PR delivery"
+  generation=$(grep '^validation_generation=' "$meta" | tail -1 | cut -d= -f2-)
+  printf 'pr=https://github.com/example/repo/pull/1\npr_head=%s\nvalidation_pr_published_generation=%s\n' \
+    "$validated_head" "$generation" >> "$meta"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence pr-opened >/dev/null \
+    || fail "low plan did not complete after PR evidence"
   grep -qx "validation_completed_head=$validated_head" "$meta" \
     || fail "low completion was not bound to its validated head"
   printf 'Release   note\n' > "$project/CHANGELOG.md"
   git -C "$project" add CHANGELOG.md
   git -C "$project" commit -q -m 'post-validation correction'
-  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence mechanical-checks-passed 2>&1)
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence pr-opened 2>&1)
   rc=$?
   expect_code 2 "$rc" "completion refuses code changed after validation"
   assert_contains "$out" "replan and revalidate" "stale completion refusal omitted recovery guidance"
@@ -568,7 +553,9 @@ test_low_risk_skips_no_mistakes_under_explicit_policy() {
   FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null \
     || fail "corrected low-risk change could not be replanned"
   add_receipt "$id" AC1 lint "passed" CHANGELOG.md
-  FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence mechanical-checks-passed >/dev/null \
+  generation=$(grep '^validation_generation=' "$meta" | tail -1 | cut -d= -f2-)
+  printf 'pr_head=%s\nvalidation_pr_published_generation=%s\n' "$new_head" "$generation" >> "$meta"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence pr-opened >/dev/null \
     || fail "replanned low-risk change did not complete"
   [ "$(grep '^validation_completed_head=' "$meta" | tail -1)" = "validation_completed_head=$new_head" ] \
     || fail "replanned completion did not bind the corrected head"
@@ -714,7 +701,7 @@ EOF
   meta="$HOME_DIR/state/$id.meta"
   [ "$(grep '^validation_ledger_receipt_count=' "$meta" | tail -1)" = 'validation_ledger_receipt_count=2' ] \
     || fail "plan boundary included a receipt appended after publication"
-  FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence mechanical-checks-passed >/dev/null \
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --mechanical-ready >/dev/null \
     || fail "post-publication receipt did not satisfy fresh mechanical evidence"
   pass "plan publication holds the pinned ledger boundary against concurrent receipts"
 }
@@ -883,7 +870,9 @@ test_terminal_paths_record_completion_at_their_boundary() {
         printf 'validation_run_path=full-no-mistakes\n' >> "$meta"
         ;;
       direct-PR)
-        printf 'pr=https://gitlab.example/o/r/-/merge_requests/1\n' >> "$meta"
+        generation=$(grep '^validation_generation=' "$meta" | tail -1 | cut -d= -f2-)
+        printf 'pr=https://gitlab.example/o/r/-/merge_requests/1\nvalidation_pr_published_generation=%s\n' \
+          "$generation" >> "$meta"
         ;;
       local-only) ;;
     esac
@@ -1108,27 +1097,27 @@ test_high_risk_and_uncertain_inputs_fail_safe() {
   add_receipt "$id" AC1 test "not passed" "" failed
   add_receipt "$id" AC2 lint "passed"
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base"); rc=$?
-  expect_code 1 "$rc" "negative test evidence blocks validation planning"
+  expect_code 1 "$rc" "failed test outcome blocks validation planning"
   printf '%s' "$out" | jq -e '.status == "missing" and .missing == ["AC1"]' >/dev/null \
-    || fail "negative test evidence did not leave its criterion missing"
+    || fail "failed test outcome did not leave its criterion missing"
 
   id=zero-test-proof
   base=$(make_project "$id" no-mistakes localized)
   add_receipt "$id" AC1 test "0 tests passed" "" failed
   add_receipt "$id" AC2 lint "passed"
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base"); rc=$?
-  expect_code 1 "$rc" "zero-test evidence blocks validation planning"
+  expect_code 1 "$rc" "failed zero-test outcome blocks validation planning"
   printf '%s' "$out" | jq -e '.status == "missing" and .missing == ["AC1"]' >/dev/null \
-    || fail "zero-test evidence did not leave its criterion missing"
+    || fail "failed zero-test outcome did not leave its criterion missing"
 
   id=skipped-test-proof
   base=$(make_project "$id" no-mistakes localized)
   add_receipt "$id" AC1 test "2 passed, 1 skipped" "" failed
   add_receipt "$id" AC2 lint "passed"
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base"); rc=$?
-  expect_code 1 "$rc" "skipped-test evidence blocks validation planning"
+  expect_code 1 "$rc" "failed skipped-test outcome blocks validation planning"
   printf '%s' "$out" | jq -e '.status == "missing" and .missing == ["AC1"]' >/dev/null \
-    || fail "skipped-test evidence did not leave its criterion missing"
+    || fail "failed skipped-test outcome did not leave its criterion missing"
 
   id=unclassified-login
   base=$(make_project "$id" no-mistakes localized)
@@ -1238,7 +1227,7 @@ test_direct_and_local_modes_never_invoke_no_mistakes() {
 test_help_advertises_generation_bound_run_binding
 test_reports_missing_criteria_deterministically
 test_complete_and_invalid_ledgers_have_distinct_results
-test_explicit_negative_results_leave_criteria_missing
+test_closed_outcomes_control_evidence
 test_delivery_mode_mismatch_fails_closed
 test_invalid_brief_and_scout_behavior
 test_early_snapshot_failure_does_not_block_cleanup

@@ -52,7 +52,9 @@ fm_nm_strip_quotes() {
 
 # Scalar value of a TOON key in captured `axi status` output $1.
 fm_nm_field() {  # <toon-output> <key>
-  printf '%s\n' "$1" | sed -n "s/^[[:space:]]*$2:[[:space:]]*\(.*\)/\1/p" | head -1
+  local value
+  value=$(printf '%s\n' "$1" | sed -n "s/^[[:space:]]*$2:[[:space:]]*\(.*\)/\1/p" | head -1)
+  fm_nm_strip_quotes "$value"
 }
 
 # 0 if run head $2 matches worktree $1's code identity, per the same rule

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Record a PR-ready task: store one validated canonical pr=<url> and the forge's
 # exact pr_head=<sha> when available, atomically arm a static merge poll, then
-# record direct-PR validation completion only after publication succeeds.
+# record PR-path validation completion only after publication succeeds.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
@@ -114,12 +114,17 @@ fm_pr_metadata_identity_parse "$META" || exit 1
   && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || exit 1
 
 VALIDATION_PATH=$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)
+VALIDATION_GENERATION=$(grep '^validation_generation=' "$META" | tail -1 | cut -d= -f2- || true)
 fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2
   exit 1
 }
-if [ "$VALIDATION_PATH" = direct-PR ]; then
+if [ "$VALIDATION_PATH" = direct-PR ] || [ "$VALIDATION_PATH" = receipts-mechanical ]; then
+  [ -n "$VALIDATION_GENERATION" ] \
+    || { echo "error: PR validation generation is missing" >&2; exit 1; }
+  printf 'validation_pr_published_generation=%s\n' "$VALIDATION_GENERATION" >> "$META" \
+    || { echo "error: PR watcher publication could not be recorded" >&2; exit 1; }
   "$SCRIPT_DIR/fm-receipt-check.sh" "$ID" --complete --terminal-evidence pr-opened >/dev/null \
-    || { echo "error: direct-PR validation completion could not be observed" >&2; exit 1; }
+    || { echo "error: PR validation completion could not be observed" >&2; exit 1; }
 fi
 printf 'armed: state/%s.check.sh\n' "$ID"

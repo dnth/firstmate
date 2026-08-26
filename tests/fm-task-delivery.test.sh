@@ -398,6 +398,64 @@ test_promote_rejects_symlinked_task_directory() {
   pass "fm-promote: symlinked task directories refuse before mutation"
 }
 
+test_promote_rejects_symlinked_data_override() {
+  local home outside before out status
+  home="$TMP_ROOT/promote-data-symlink/home"
+  outside="$TMP_ROOT/promote-data-symlink/outside"
+  mkdir -p "$home/state" "$outside/promote-link"
+  printf 'window=fm-promote-link\nkind=scout\nworktree=/tmp/wt\n' > "$home/state/promote-link.meta"
+  printf '# Task\nOutside scout.\n\n# Setup\nScout setup.\n' > "$outside/promote-link/brief.md"
+  before=$(cksum "$outside/promote-link/brief.md")
+  ln -s "$outside" "$home/data-link"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data-link" \
+    "$PROMOTE" promote-link --mode direct-PR --yolo off --criterion 'AC1: Concrete outcome' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "promotion accepted a symlinked data override"
+  assert_contains "$out" "data path component is missing or unsafe" "promotion hid the configured data symlink before pinning"
+  [ "$(cksum "$outside/promote-link/brief.md")" = "$before" ] || fail "refused data override changed the outside brief"
+  [ ! -e "$outside/promote-link/evidence.jsonl" ] || fail "refused data override created an outside ledger"
+  pass "fm-promote: configured data symlinks remain visible to no-follow pinning"
+}
+
+test_concurrent_promotion_preserves_winner_lock() {
+  local home id=promote-race first second successes=0
+  home="$TMP_ROOT/promote-race/home"
+  mkdir -p "$home/state" "$home/data/$id"
+  printf 'window=fm-promote-race\nkind=scout\nworktree=/tmp/wt\n' > "$home/state/$id.meta"
+  printf '# Task\nRace promotion.\n\n# Setup\nScout setup.\n' > "$home/data/$id/brief.md"
+  FM_HOME="$home" "$PROMOTE" "$id" --mode direct-PR --yolo off --criterion 'AC1: Concrete outcome' \
+    > "$home/first.out" 2>&1 &
+  first=$!
+  FM_HOME="$home" "$PROMOTE" "$id" --mode direct-PR --yolo off --criterion 'AC1: Concrete outcome' \
+    > "$home/second.out" 2>&1 &
+  second=$!
+  if wait "$first"; then successes=$((successes + 1)); fi
+  if wait "$second"; then successes=$((successes + 1)); fi
+  [ "$successes" -eq 1 ] || fail "concurrent promotion did not produce exactly one winner"
+  assert_present "$home/data/$id/.evidence.lock" "losing promotion removed the winner's evidence lock"
+  assert_present "$home/data/$id/evidence.jsonl" "winning promotion did not retain its evidence ledger"
+  assert_grep 'kind=ship' "$home/state/$id.meta" "winning promotion did not retain ship metadata"
+  pass "fm-promote: concurrent losers cannot remove the winner lock"
+}
+
+test_signaled_promotion_transaction_fails() {
+  local home id=promote-signal transaction status
+  home="$TMP_ROOT/promote-signal/home"
+  transaction="$home/signaled-transaction.sh"
+  mkdir -p "$home/data/$id" "$home/state"
+  printf '# Task\nSignal fixture.\n' > "$home/data/$id/brief.md"
+  cat > "$transaction" <<'SH'
+#!/bin/sh
+kill -TERM "$$"
+SH
+  chmod +x "$transaction"
+  FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" \
+    "$ROOT/bin/fm-receipt-store.sh" "$id" promote "$transaction" >/dev/null 2>&1
+  status=$?
+  [ "$status" -ne 0 ] || fail "signal-terminated promotion transaction reported success"
+  pass "fm-promote: signal-terminated transactions fail closed"
+}
+
 # The registry parser survives for the mechanical consumers only. It accepts the
 # conditional policy, maps it to its most rigorous leg for them, and exposes the
 # raw annotation for the one caller that must tell a policy from a flat mode.
@@ -440,5 +498,8 @@ test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_promote_rejects_symlinked_task_directory
+test_promote_rejects_symlinked_data_override
+test_concurrent_promotion_preserves_winner_lock
+test_signaled_promotion_transaction_fails
 test_project_mode_maps_the_conditional_policy
 echo "# all fm-task-delivery tests passed"

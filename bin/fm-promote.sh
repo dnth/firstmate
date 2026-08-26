@@ -88,15 +88,15 @@ esac
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=${POS[0]}
 
-canonical_dir() {
-  CDPATH='' cd -P -- "$1" 2>/dev/null && pwd -P
+absolute_lexical_path() {
+  case "$1" in
+    /*) printf '%s\n' "$1" ;;
+    *) printf '%s/%s\n' "$PWD" "$1" ;;
+  esac
 }
-FM_HOME=$(canonical_dir "$FM_HOME") \
-  || { echo "error: Firstmate home is missing or unsafe: $FM_HOME" >&2; exit 1; }
-STATE=$(canonical_dir "$STATE") \
-  || { echo "error: state directory is missing or unsafe: $STATE" >&2; exit 1; }
-DATA=$(canonical_dir "$DATA") \
-  || { echo "error: data directory is missing or unsafe: $DATA" >&2; exit 1; }
+FM_HOME=$(absolute_lexical_path "$FM_HOME")
+STATE=$(absolute_lexical_path "$STATE")
+DATA=$(absolute_lexical_path "$DATA")
 
 exec env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
   "$FM_ROOT/bin/fm-receipt-store.sh" "$ID" promote \

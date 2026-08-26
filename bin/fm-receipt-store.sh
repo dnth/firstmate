@@ -52,7 +52,7 @@ FM_RECEIPT_STORE_DATA="$DATA" FM_RECEIPT_STORE_ID="$ID" FM_RECEIPT_STORE_MODE="$
 use strict;
 use warnings;
 use Cwd qw(getcwd);
-use Errno qw(ENOENT EINTR);
+use Errno qw(EEXIST ENOENT EINTR);
 use Fcntl qw(:DEFAULT :flock :mode);
 use IO::Handle;
 
@@ -143,12 +143,23 @@ sysopen(my $brief, "brief.md", O_RDONLY | O_NOFOLLOW)
   or refuse("task brief is missing or unsafe");
 my @brief_identity = stat($brief);
 refuse("task brief is not a regular file") unless @brief_identity && S_ISREG($brief_identity[2]);
-my @named_lock_identity = lstat(".evidence.lock");
-my $lock_created = !@named_lock_identity;
-my $lock_flags = O_RDWR | O_NOFOLLOW;
-$lock_flags |= O_CREAT if $ENV{FM_RECEIPT_STORE_MODE} eq "promote";
-sysopen(my $task_lock, ".evidence.lock", $lock_flags, 0600)
-  or refuse("task evidence lock is missing or unsafe");
+my $task_lock;
+my $lock_created = 0;
+if ($ENV{FM_RECEIPT_STORE_MODE} eq "promote") {
+  if (!sysopen($task_lock, ".evidence.lock", O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)) {
+    if ($! == EEXIST) {
+      sysopen($task_lock, ".evidence.lock", O_RDWR | O_NOFOLLOW, 0600)
+        or refuse("task evidence lock is missing or unsafe");
+    } else {
+      refuse("task evidence lock is missing or unsafe");
+    }
+  } else {
+    $lock_created = 1;
+  }
+} else {
+  sysopen($task_lock, ".evidence.lock", O_RDWR | O_NOFOLLOW, 0600)
+    or refuse("task evidence lock is missing or unsafe");
+}
 my @lock_identity = stat($task_lock);
 refuse("task evidence lock must be a single-link regular file") unless @lock_identity
   && S_ISREG($lock_identity[2]) && $lock_identity[3] == 1;
@@ -178,14 +189,48 @@ if ($ENV{FM_RECEIPT_STORE_MODE} eq "hold") {
 
 if ($ENV{FM_RECEIPT_STORE_MODE} eq "promote") {
   flock($task_lock, LOCK_EX) or refuse("task evidence lock could not be acquired");
-  my $status = system @ARGV;
-  if ($status != 0) {
-    unlink(".evidence.lock") if $lock_created;
-    $task->sync or refuse("task directory could not be synced after promotion rollback");
-    exit($status == -1 ? 1 : $status >> 8);
+  my @current_named_lock = lstat(".evidence.lock");
+  refuse("task evidence lock identity changed") unless @current_named_lock
+    && !S_ISLNK($current_named_lock[2])
+    && $current_named_lock[0] == $lock_identity[0]
+    && $current_named_lock[1] == $lock_identity[1];
+  sysopen(my $random, "/dev/urandom", O_RDONLY | O_NOFOLLOW)
+    or refuse("promotion nonce source is unavailable");
+  my $nonce_bytes;
+  my $nonce_read = sysread($random, $nonce_bytes, 16);
+  refuse("promotion nonce could not be read") unless defined($nonce_read) && $nonce_read == 16;
+  close($random) or refuse("promotion nonce source could not be closed");
+  my $token = unpack("H*", $nonce_bytes);
+  my ($command, @command_args) = @ARGV;
+  my $status = system($command, "prepare", @command_args, $token);
+  my $prepared = $status == 0;
+  my $state;
+  if ($prepared) {
+    my $state_path = $ENV{FM_STATE_OVERRIDE} // "";
+    sysopen($state, $state_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+      or $status = -1;
   }
-  $task->sync or refuse("promoted task directory could not be synced");
-  exit 0;
+  if ($prepared && $status == 0 && $task->sync && $state->sync) {
+    my $finalize_status = system($command, "finalize", @command_args, $token);
+    exit 0 if $finalize_status == 0;
+    $status = $finalize_status;
+  }
+  if ($prepared) {
+    system($command, "rollback", @command_args, $token);
+    $task->sync;
+    $state->sync if defined($state);
+  }
+  if ($lock_created) {
+    my @owned_named_lock = lstat(".evidence.lock");
+    unlink(".evidence.lock") if @owned_named_lock
+      && !S_ISLNK($owned_named_lock[2])
+      && $owned_named_lock[0] == $lock_identity[0]
+      && $owned_named_lock[1] == $lock_identity[1];
+    $task->sync;
+  }
+  exit 1 if $status == -1 || ($status & 127);
+  my $exit_code = $status >> 8;
+  exit($exit_code == 0 ? 1 : $exit_code);
 }
 
 my $criterion = $arg1;

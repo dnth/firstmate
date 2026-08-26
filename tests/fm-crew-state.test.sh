@@ -1454,6 +1454,30 @@ test_status_log_done_requires_existing_plan_completion() {
   pass "status-log done requires existing plan completion"
 }
 
+test_low_validation_waits_for_pr_completion() {
+  reset_fakes
+  local d out id=low-pr-stage head
+  d=$(new_case low-pr-stage)
+  make_repo_on_branch "$d/wt" "fm/$id"
+  make_fakebin "$d" >/dev/null
+  head=$(git -C "$d/wt" rev-parse HEAD)
+  fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=ship" "harness=claude" \
+    "mode=no-mistakes" "validation_generation=low-plan" "validation_path=receipts-mechanical" "validation_head=$head"
+  printf 'done: implementation complete\n' > "$d/state/$id.status"
+  FM_FAKE_AXI_STATUS=
+  FM_FAKE_RUNS_LIST=
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" "$id"
+  out=$(run_crew_state "$d" "$id")
+  assert_contains "$out" "state: parked" "LOW implementation done escaped before PR completion"
+  assert_contains "$out" "source: validation-gate" "LOW PR wait did not name the validation gate"
+  printf 'validation_completed_generation=low-plan\nvalidation_completed_path=receipts-mechanical\nvalidation_completed_head=%s\n' "$head" \
+    >> "$d/state/$id.meta"
+  out=$(run_crew_state "$d" "$id")
+  assert_contains "$out" "state: done" "LOW PR completion did not release final done"
+  pass "LOW validation remains parked until PR completion"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -1507,5 +1531,6 @@ test_ship_done_is_held_until_evidence_is_complete
 test_ship_done_with_malformed_brief_fails_closed
 test_run_step_done_requires_current_plan_completion
 test_status_log_done_requires_existing_plan_completion
+test_low_validation_waits_for_pr_completion
 
 echo "all fm-crew-state tests passed"
