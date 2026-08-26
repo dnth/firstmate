@@ -269,7 +269,6 @@ esac
 command -v jq >/dev/null 2>&1 || { echo "error: jq is required" >&2; exit 2; }
 
 TASK_DIR="$DATA/$ID"
-BRIEF_PATH="$TASK_DIR/brief.md"
 LEDGER_PATH="$TASK_DIR/evidence.jsonl"
 
 command -v perl >/dev/null 2>&1 || { echo "error: perl is required" >&2; exit 2; }
@@ -592,8 +591,10 @@ if [ "$ACTION" = invalidate-claim ]; then
   esac
   INVALIDATION_WORKTREE=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
   INVALIDATION_HEAD=$(git -C "$INVALIDATION_WORKTREE" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
-  [ -n "$INVALIDATION_HEAD" ] && fm_worktree_is_clean "$INVALIDATION_WORKTREE" \
-    || { echo "error: claim invalidation requires a clean current worktree head" >&2; exit 2; }
+  if [ -z "$INVALIDATION_HEAD" ] || ! fm_worktree_is_clean "$INVALIDATION_WORKTREE"; then
+    echo "error: claim invalidation requires a clean current worktree head" >&2
+    exit 2
+  fi
   INVALIDATION_PREFIX="validation_claim_invalidation=$INVALIDATION_GENERATION:$INVALIDATION_FINDING:$INVALIDATION_CRITERION:"
   INVALIDATION_MARKER="$INVALIDATION_PREFIX$INVALIDATION_HEAD:$RECEIPT_COUNT"
   VALIDATION_LOCK="$STATE/.$ID.validation-plan.lock"
@@ -718,7 +719,7 @@ record_validation_completed() {
     ''|*[!0-9]*) release_validation_lock; echo "error: validation start timestamp is missing or invalid" >&2; return 1 ;;
   esac
   case "$path" in
-    receipts-mechanical) expected_evidence=pr-opened ;;
+    receipts-mechanical) expected_evidence='pr-opened' ;;
     full-no-mistakes) expected_evidence=no-mistakes-passed ;;
     direct-PR) expected_evidence='pr-opened' ;;
     local-only) expected_evidence='branch-ready' ;;

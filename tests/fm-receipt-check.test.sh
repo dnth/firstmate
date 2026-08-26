@@ -505,7 +505,7 @@ test_claim_invalidation_marker_is_append_only_and_idempotent() {
   FM_HOME="$HOME_DIR" "$CHECK" "$id" --invalidate-claim F9 --invalidated-criterion AC1 >/dev/null 2>&1
   rc=$?
   expect_code 2 "$rc" "claim invalidation requires a current plan generation"
-  FM_FAKE_NM_STATUS= FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null \
+  FM_FAKE_NM_STATUS='' FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null \
     || fail "claim invalidation fixture plan failed"
   first_generation=$(grep '^validation_generation=' "$meta" | tail -1 | cut -d= -f2-)
   project="$TMP_ROOT/project-$id"
@@ -525,7 +525,7 @@ test_claim_invalidation_marker_is_append_only_and_idempotent() {
     || fail "duplicate claim invalidation was not idempotent"
   [ "$(grep -c "^validation_claim_invalidation=$first_generation:F9:AC1:$invalidated_head:$invalidated_boundary\$" "$meta")" -eq 1 ] \
     || fail "claim invalidation marker was not append-only and idempotent"
-  out=$(FM_FAKE_NM_STATUS= FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" 2>&1)
+  out=$(FM_FAKE_NM_STATUS='' FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" 2>&1)
   rc=$?
   expect_code 2 "$rc" "claim invalidation refuses a same-head replan"
   assert_contains "$out" "strict non-empty follow-up delta" \
@@ -533,7 +533,7 @@ test_claim_invalidation_marker_is_append_only_and_idempotent() {
   printf '#!/usr/bin/env bash\nprintf "fixed\\n"\n' > "$project/src/app.sh"
   git -C "$project" add src/app.sh
   git -C "$project" commit -q -m 'resolve invalidated claim'
-  out=$(FM_FAKE_NM_STATUS= FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" 2>&1)
+  out=$(FM_FAKE_NM_STATUS='' FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" 2>&1)
   rc=$?
   expect_code 2 "$rc" "claim invalidation requires post-boundary evidence"
   assert_contains "$out" "requires fresh successful evidence" \
@@ -541,7 +541,7 @@ test_claim_invalidation_marker_is_append_only_and_idempotent() {
   add_receipt "$id" AC1 test "fixed behavior"
   FM_HOME="$HOME_DIR" "$CHECK" "$id" --implementation-complete >/dev/null \
     || fail "claim invalidation fix did not refresh implementation completion"
-  FM_FAKE_NM_STATUS= FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null \
+  FM_FAKE_NM_STATUS='' FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null \
     || fail "claim invalidation fixture replan failed after a fix and fresh evidence"
   generation=$(grep '^validation_generation=' "$meta" | tail -1 | cut -d= -f2-)
   [ "$generation" != "$first_generation" ] || fail "claim invalidation replan reused its generation"
@@ -634,7 +634,7 @@ test_low_risk_requires_safe_prose_and_applicable_evidence() {
   id=low-command-prose
   base=$(make_project "$id" no-mistakes docs)
   project="$TMP_ROOT/project-$id"
-  printf 'Run `kubectl apply -f production.yaml` during deployment.\n' >> "$project/CHANGELOG.md"
+  printf "Run \`kubectl apply -f production.yaml\` during deployment.\n" >> "$project/CHANGELOG.md"
   git -C "$project" add CHANGELOG.md
   git -C "$project" commit -q -m 'add deployment command'
   add_receipt "$id" AC1 lint passed CHANGELOG.md
@@ -727,7 +727,7 @@ EOF
     || fail "same changed-head implementation boundary failed"
   [ "$(grep -c '^implementation_completed_at=' "$meta")" -eq 2 ] \
     || fail "changed-head timestamp was not refreshed exactly once"
-  PATH="$fakebin:$PATH" FM_FAKE_DATE=300 FM_FAKE_NM_STATUS= FM_HOME="$HOME_DIR" \
+  PATH="$fakebin:$PATH" FM_FAKE_DATE=300 FM_FAKE_NM_STATUS='' FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --plan --base "$base" >/dev/null \
     || fail "plan after implementation boundary failed"
   [ "$(grep '^validation_started_at=' "$meta" | tail -1)" = 'validation_started_at=250' ] \
@@ -804,11 +804,11 @@ EOF
 
 test_terminal_and_failed_runs_bind_by_current_plan() {
   local id base project head generation terminal failed rc
-  id=terminal-bind
+  id='terminal-bind'
   base=$(make_project "$id" no-mistakes localized)
   add_receipt "$id" AC1 test "2 passed"
   add_receipt "$id" AC2 lint passed
-  FM_FAKE_NM_STATUS= FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+  FM_FAKE_NM_STATUS='' FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "terminal-bind plan failed"
   project="$TMP_ROOT/project-$id"
   head=$(git -C "$project" rev-parse HEAD)
@@ -819,11 +819,11 @@ test_terminal_and_failed_runs_bind_by_current_plan() {
     "$CHECK" "$id" --bind-run RUN-terminal --generation "$generation" >/dev/null \
     || fail "successful terminal run could not bind to its current plan"
 
-  id=failed-bind
+  id='failed-bind'
   base=$(make_project "$id" no-mistakes localized)
   add_receipt "$id" AC1 test "2 passed"
   add_receipt "$id" AC2 lint passed
-  FM_FAKE_NM_STATUS= FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+  FM_FAKE_NM_STATUS='' FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "failed-bind plan failed"
   project="$TMP_ROOT/project-$id"
   head=$(git -C "$project" rev-parse HEAD)
@@ -862,7 +862,7 @@ EOF
   rc=$?
   expect_code 2 "$rc" "planning bounds No-Mistakes status observation"
 
-  FM_FAKE_NM_STATUS= FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+  FM_FAKE_NM_STATUS='' FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "bounded observation fixture plan failed"
   project="$TMP_ROOT/project-$id"
   head=$(git -C "$project" rev-parse HEAD)
@@ -913,7 +913,7 @@ test_terminal_paths_record_completion_at_their_boundary() {
     case "$mode" in
       no-mistakes) evidence=no-mistakes-passed; observed=bound-matching-no-mistakes-run ;;
       direct-PR) evidence=pr-opened; observed=canonical-non-github-pr ;;
-      local-only) evidence=branch-ready; observed=clean-ready-branch ;;
+      local-only) evidence='branch-ready'; observed='clean-ready-branch' ;;
     esac
     FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence wrong-boundary >/dev/null 2>&1
     rc=$?
@@ -1057,7 +1057,7 @@ test_dirty_worktrees_cannot_plan_or_complete() {
 
 test_git_status_errors_fail_every_cleanliness_gate() {
   local id=status-error base project fakebin real_git rc
-  id=status-error
+  id='status-error'
   base=$(make_project "$id" direct-PR localized)
   project="$TMP_ROOT/project-$id"
   FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test primary passed --outcome success >/dev/null || fail "status-error AC1 receipt failed"

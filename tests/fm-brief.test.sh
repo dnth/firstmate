@@ -216,7 +216,7 @@ test_ship_modes_generate_clean_briefs() {
     [ ! -s "$home/data/$id/evidence.jsonl" ] || fail "$id: new evidence ledger was not empty"
     assert_grep '--outcome <success|failure|negative|zero|skipped|empty|placeholder|weak>' "$brief" \
       "$id: generated receipt contract omitted the structured outcomes"
-    assert_grep 'Only `--outcome success` evidences a criterion' "$brief" \
+    assert_grep "Only \`--outcome success\` evidences a criterion" "$brief" \
       "$id: generated receipt contract did not identify its sole affirmative outcome"
     grep -qx "Delivery contract: mode=$mode" "$brief" \
       || fail "$id: brief did not record its machine-readable delivery contract line"

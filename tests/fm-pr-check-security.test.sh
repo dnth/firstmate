@@ -541,9 +541,11 @@ test_valid_recording_and_merge_derivation() {
   dir=$(make_case valid-recording)
   write_task_meta "$dir"
   expected=0123456789abcdef0123456789abcdef01234567
-  printf 'validation_started_at=1787670000\n' >> "$dir/home/state/task-a.meta"
-  printf 'validation_completed_at=1787670005\n' >> "$dir/home/state/task-a.meta"
-  printf 'validation_completed_head=%s\n' "$expected" >> "$dir/home/state/task-a.meta"
+  {
+    printf 'validation_started_at=1787670000\n'
+    printf 'validation_completed_at=1787670005\n'
+    printf 'validation_completed_head=%s\n' "$expected"
+  } >> "$dir/home/state/task-a.meta"
   FM_TEST_GH_HEAD=$expected run_check_entry "$dir" task-a https://github.com/my-org/repo_name.with-dots/pull/37 \
     > "$dir/stdout" 2> "$dir/stderr" || fail "valid direct check failed"
 

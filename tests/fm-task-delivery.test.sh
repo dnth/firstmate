@@ -479,6 +479,8 @@ SH
 test_interrupted_replacements_roll_back() {
   local stage home id fakebin real_mv trigger brief_before meta_before status leftovers
   real_mv=$(command -v mv)
+  # Mirrors the multi-stage rollback case below.
+  # shellcheck disable=SC2043
   for stage in brief; do
     id="promote-interrupt-$stage"
     home="$TMP_ROOT/$id/home"

@@ -89,7 +89,7 @@ esac
 ID=${POS[0]}
 
 absolute_lexical_path() {
-  local path=$1 component normalized= components=()
+  local path=$1 component normalized='' components=()
   case "$path" in
     *$'\n'*|*$'\r'*) return 1 ;;
     /*) ;;
