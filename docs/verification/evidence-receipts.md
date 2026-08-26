@@ -43,6 +43,12 @@ The exact receipt key and type schema is owned by the header and `--help` output
 - Ordinary No-Mistakes findings return to the original worker through guarded custody return and then full revalidation.
 - Direct-PR registration publishes its watcher before recording completion, while other paths preserve their earlier path-specific completion boundary.
 
+## Known limitations
+
+- Claim invalidation reads the worktree head immediately before acquiring the validation metadata lock, so an unsupported concurrent ref mutation can bind the marker to the earlier head; the single-operator workflow excludes that mutation during validation.
+- PR registration snapshots and replaces metadata through separate pinned-store processes, so an unsupported concurrent byte-identical state-directory swap can move the transaction to the replacement directory; the single-operator workflow excludes state-directory replacement during validation.
+- Backlog task `evidence-race-restructure` tracks a possible future single-owner transaction redesign if these concurrency assumptions change.
+
 ## Verification environment
 
 - Date: 2026-08-26.
@@ -143,11 +149,13 @@ ok - fm-pr-merge refuses before merging when task meta is missing
 $ tests/fm-pr-check-security.test.sh
 ok - valid direct and merge flows record exact metadata and reject multiline head metadata
 ok - PR registration serializes with validation planning
+ok - fast PR registration completes and keeps its watcher armed
 ok - PR metadata publication rejects post-snapshot redirection
 exit 0
 
 $ tests/fm-task-delivery.test.sh
 ok - fm-spawn: a ship spawn requires a valid explicit mode and yolo before anything is created
+ok - fm-promote-transaction: help renders successfully
 ok - fm-spawn: unresolved task and criterion placeholders refuse before launch
 ok - fm-spawn: scout and secondmate spawns refuse ship delivery flags
 ok - fm-spawn: the brief's recorded mode and the spawn's explicit mode must agree

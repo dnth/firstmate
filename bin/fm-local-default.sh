@@ -8,8 +8,19 @@
 # Any missing or unreadable boundary exits nonzero without output.
 set -eu
 
-REPO=${1:?usage: fm-local-default.sh <repository>}
+usage() {
+  awk '
+    NR == 1 { next }
+    /^#/ { sub(/^# ?/, ""); print; next }
+    { exit }
+  ' "$0"
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+esac
 [ "$#" -eq 1 ] || { echo "usage: fm-local-default.sh <repository>" >&2; exit 2; }
+REPO=$1
 [ -d "$REPO" ] || { echo "error: repository is missing: $REPO" >&2; exit 1; }
 
 ref=$(git -C "$REPO" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)

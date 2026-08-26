@@ -10,6 +10,7 @@ RECEIPT="$ROOT/bin/fm-receipt.sh"
 STORE="$ROOT/bin/fm-receipt-store.sh"
 SCHEMA="$ROOT/bin/fm-receipt-schema.sh"
 BRIEF="$ROOT/bin/fm-brief.sh"
+LOCAL_DEFAULT="$ROOT/bin/fm-local-default.sh"
 TMP_ROOT=$(fm_test_tmproot fm-receipt-check)
 HOME_DIR="$TMP_ROOT/home"
 mkdir -p "$HOME_DIR/data" "$HOME_DIR/state"
@@ -64,6 +65,9 @@ test_help_advertises_generation_bound_run_binding() {
     "receipt schema help omitted its executable interface"
   assert_contains "$out" "required criterion, type, outcome" \
     "receipt schema help omitted its required key contract"
+  out=$("$LOCAL_DEFAULT" --help) || fail "local default help failed"
+  assert_contains "$out" "Usage: fm-local-default.sh <repository>" \
+    "local default help omitted its executable interface"
   out=$("$BRIEF" --render-ship-delivery help-task no-mistakes) \
     || fail "ship delivery renderer failed"
   assert_contains "$out" "fm-receipt-check.sh help-task --implementation-complete" \

@@ -19,6 +19,7 @@ set -u
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
+PROMOTE_TRANSACTION="$ROOT/bin/fm-promote-transaction.sh"
 PROJECT_MODE="$ROOT/bin/fm-project-mode.sh"
 TMP_ROOT=$(fm_test_tmproot fm-task-delivery)
 
@@ -47,6 +48,14 @@ write_brief() {  # <home> <id> [<recorded-mode>]
     printf 'You are a crewmate.\n\n# Task\nConcrete fixture task.\n\n# Acceptance criteria\n- AC1: Fixture outcome is concrete.\n\n# Definition of done\n'
     [ -z "$mode" ] || printf 'Delivery contract: mode=%s\n' "$mode"
   } > "$home/data/$id/brief.md"
+}
+
+test_promote_transaction_help() {
+  local out
+  out=$("$PROMOTE_TRANSACTION" --help) || fail "promotion transaction help failed"
+  assert_contains "$out" "Usage: fm-promote-transaction.sh" \
+    "promotion transaction help omitted its executable interface"
+  pass "fm-promote-transaction: help renders successfully"
 }
 
 test_spawn_refuses_unresolved_brief_placeholders() {
@@ -700,6 +709,7 @@ EOF
 }
 
 test_ship_spawn_requires_a_valid_delivery_contract
+test_promote_transaction_help
 test_spawn_refuses_unresolved_brief_placeholders
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch

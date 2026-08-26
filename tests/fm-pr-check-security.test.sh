@@ -114,9 +114,9 @@ SH
 }
 
 write_task_meta() {
-  local dir=$1 id=${2:-task-a}
+  local dir=$1 id=${2:-task-a} mode=${3:-no-mistakes}
   mkdir -p "$dir/home/data/$id"
-  printf '# Task\nFixture.\n\n# Acceptance criteria\n- AC1: Fixture works.\n\n# Definition of done\nDelivery contract: mode=no-mistakes\n' \
+  printf '# Task\nFixture.\n\n# Acceptance criteria\n- AC1: Fixture works.\n\n# Definition of done\nDelivery contract: mode=%s\n' "$mode" \
     > "$dir/home/data/$id/brief.md"
   : > "$dir/home/data/$id/evidence.jsonl"
   : > "$dir/home/data/$id/.evidence.lock"
@@ -126,7 +126,7 @@ write_task_meta() {
     "worktree=$dir/wt" \
     "project=$dir/project" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=$mode"
 }
 
 write_poll_meta() {
@@ -3392,6 +3392,31 @@ test_validation_plan_lock_serializes_pr_registration() {
   pass "PR registration serializes with validation planning"
 }
 
+test_fast_pr_path_records_completion_and_keeps_watcher() {
+  local dir head generation
+  dir=$(make_case fast-pr-completion)
+  write_task_meta "$dir" task-a direct-PR
+  git -C "$dir/wt" init -q
+  fm_git_identity fmtest fmtest@example.invalid
+  printf 'fixture\n' > "$dir/wt/file.txt"
+  git -C "$dir/wt" add file.txt
+  git -C "$dir/wt" commit -q -m fixture
+  head=$(git -C "$dir/wt" rev-parse HEAD)
+  generation=0123456789abcdef0123456789abcdef
+  printf '{"criterion":"AC1","type":"test","outcome":"success","summary":"fixture","result":"passed","head":"%s"}\n' "$head" \
+    > "$dir/home/data/task-a/evidence.jsonl"
+  printf 'validation_generation=%s\nvalidation_path=direct-PR\nvalidation_head=%s\nvalidation_started_at=1787670000\n' \
+    "$generation" "$head" >> "$dir/home/state/task-a.meta"
+  FM_TEST_GH_HEAD="$head" run_check_entry "$dir" task-a https://github.com/o/r/pull/20 \
+    > "$dir/fast.out" 2> "$dir/fast.err" || fail "direct-PR registration did not complete"
+  assert_present "$dir/home/state/task-a.check.sh" "direct-PR completion revoked its watcher"
+  grep -qx "validation_pr_published_generation=$generation" "$dir/home/state/task-a.meta" \
+    || fail "direct-PR completion lost its watcher generation"
+  grep -qx "validation_completed_head=$head" "$dir/home/state/task-a.meta" \
+    || fail "direct-PR completion did not bind the validated head"
+  pass "fast PR registration completes and keeps its watcher armed"
+}
+
 test_pr_metadata_swap_after_snapshot_fails_closed() {
   local dir ready release external original pid rc
   dir=$(make_case pr-metadata-swap)
@@ -3433,6 +3458,7 @@ test_retirement_refuses_replacement_and_nonterminal_results
 test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
 test_validation_plan_lock_serializes_pr_registration
+test_fast_pr_path_records_completion_and_keeps_watcher
 test_pr_metadata_swap_after_snapshot_fails_closed
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
