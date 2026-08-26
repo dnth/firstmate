@@ -85,7 +85,7 @@ SEP=' · '
 
 # Emit the one canonical line and exit 0. Detail is optional.
 emit() {  # <state> <source> [detail]
-  local state=$1 source=$2 detail=${3:-} gate_detail line generation completed_generation validation_head completed_head validation_path completed_path current_head
+  local state=$1 source=$2 detail=${3:-} gate_detail line generation completed_generation validation_head completed_head validation_path completed_path current_head mode requires_validation=0
   if [ "$state" = 'done' ] && [ "${KIND:-}" = ship ]; then
     gate_detail=$(ship_done_evidence_gate "$ID" ship) || {
       state=parked
@@ -93,15 +93,18 @@ emit() {  # <state> <source> [detail]
       detail=$gate_detail
     }
   fi
-  if [ "$state" = 'done' ] && [ "$source" = 'run-step' ] && [ "${KIND:-}" = ship ]; then
+  if [ "$state" = 'done' ] && [ "${KIND:-}" = ship ]; then
     generation=$(grep '^validation_generation=' "$META" | tail -1 | cut -d= -f2- || true)
+    mode=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
+    [ -z "$generation" ] || requires_validation=1
+    if [ "$source" = 'run-step' ] && [ "$mode" = no-mistakes ]; then requires_validation=1; fi
     completed_generation=$(grep '^validation_completed_generation=' "$META" | tail -1 | cut -d= -f2- || true)
     validation_head=$(grep '^validation_head=' "$META" | tail -1 | cut -d= -f2- || true)
     completed_head=$(grep '^validation_completed_head=' "$META" | tail -1 | cut -d= -f2- || true)
     validation_path=$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)
     completed_path=$(grep '^validation_completed_path=' "$META" | tail -1 | cut -d= -f2- || true)
     current_head=$(git -C "${WT:-}" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
-    if [ -n "$generation" ] && { [ "$completed_generation" != "$generation" ] \
+    if [ "$requires_validation" -eq 1 ] && { [ -z "$generation" ] || [ "$completed_generation" != "$generation" ] \
       || [ "$completed_head" != "$validation_head" ] || [ "$current_head" != "$validation_head" ] \
       || [ "$completed_path" != "$validation_path" ]; }; then
       state=parked

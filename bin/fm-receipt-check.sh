@@ -451,10 +451,11 @@ record_validation_completed() {
         || { release_validation_lock; echo "error: local-only branch is not ready" >&2; return 1; }
       default_ref=$(git -C "$worktree" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
       default_ref=${default_ref#origin/}
-      if [ -n "$default_ref" ] && git -C "$worktree" show-ref --verify --quiet "refs/heads/$default_ref"; then
+      if [ -n "$default_ref" ]; then
+        git -C "$worktree" show-ref --verify --quiet "refs/heads/$default_ref" \
+          || { release_validation_lock; echo "error: authoritative local default branch is missing" >&2; return 1; }
         default_ref="refs/heads/$default_ref"
       else
-        default_ref=
         for default_branch in main master; do
           if git -C "$worktree" show-ref --verify --quiet "refs/heads/$default_branch"; then
             default_ref="refs/heads/$default_branch"
@@ -657,7 +658,8 @@ write_meta_record() {  # <pass>
 PLAN_GENERATION="$(date +%s).$$"
 PREPLAN_RUN_ID=
 if [ "$VALIDATION_PATH" = full-no-mistakes ]; then
-  PREPLAN_OUT=$(cd "$WORKTREE" && "$NO_MISTAKES_BIN" axi status 2>/dev/null || true)
+  PREPLAN_OUT=$(cd "$WORKTREE" && "$NO_MISTAKES_BIN" axi status 2>/dev/null) \
+    || { echo "error: pre-plan No-Mistakes boundary could not be observed" >&2; exit 2; }
   PREPLAN_RUN_ID=$(nm_status_field "$PREPLAN_OUT" id)
 fi
 write_meta_record initial

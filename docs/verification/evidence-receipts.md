@@ -22,8 +22,6 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 - Date: 2026-08-26.
 - ShellCheck: 0.11.0.
 - Git: 2.34.1.
-- The receipt and crew-state integration is harness-neutral because every verified harness consumes the same generated brief, task data, status event, and `fm-crew-state.sh` boundary.
-- The integration is backend-neutral because it does not change endpoint operations and reads only the common `kind`, `mode`, and `worktree` task metadata recorded for tmux, Herdr, Zellij, Orca, and cmux.
 
 ## Commands and results
 
@@ -55,6 +53,7 @@ $ tests/fm-crew-state.test.sh
 ok - ship completion remains parked until every criterion has evidence
 ok - ship completion fails closed when the evidence contract is malformed
 ok - run-step done requires current-generation validation completion
+ok - status-log done requires existing plan completion
 all fm-crew-state tests passed
 
 $ tests/fm-brief.test.sh
@@ -96,6 +95,3 @@ ok - fm-promote: promotion installs a fail-closed ship evidence contract
 $ tests/fm-teardown-endpoint-safety.test.sh
 ok - fm-teardown: missing, empty, malformed, ambiguous, and task-mismatched endpoints refuse before every mutation or runtime call
 ```
-
-The broader teardown suite passed its unlanded-work refusal cases on this host before reaching its existing content-in-default fixture, which requires `git merge-tree --write-tree` support unavailable in Git 2.34.1.
-The unsupported fixture exited nonzero without changing the receipt implementation, and the portable teardown endpoint-safety suite above completed successfully.

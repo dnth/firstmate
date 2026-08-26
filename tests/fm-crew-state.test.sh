@@ -1395,10 +1395,13 @@ test_run_step_done_requires_current_plan_completion() {
   make_fakebin "$d" >/dev/null
   head=$(git -C "$d/wt" rev-parse HEAD)
   fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=ship" "harness=claude" \
-    "mode=no-mistakes" "validation_generation=plan-1" "validation_path=full-no-mistakes" "validation_head=$head"
+    "mode=no-mistakes"
   FM_FAKE_AXI_STATUS=$(run_passed "fm/$id")
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" "$id"
+  out=$(run_crew_state "$d" "$id")
+  assert_contains "$out" "state: parked" "passed run without a plan must remain parked"
+  printf 'validation_generation=plan-1\nvalidation_path=full-no-mistakes\nvalidation_head=%s\n' "$head" >> "$d/state/$id.meta"
   out=$(run_crew_state "$d" "$id")
   assert_contains "$out" "state: parked" "passed run without plan completion must remain parked"
   assert_contains "$out" "source: validation-gate" "missing completion must name the validation gate"
@@ -1407,6 +1410,26 @@ test_run_step_done_requires_current_plan_completion() {
   out=$(run_crew_state "$d" "$id")
   assert_contains "$out" "state: done" "current plan completion must release final done"
   pass "run-step done requires current-generation validation completion"
+}
+
+test_status_log_done_requires_existing_plan_completion() {
+  reset_fakes
+  local d out id=status-validation-stage head
+  d=$(new_case status-validation-stage)
+  make_repo_on_branch "$d/wt" "fm/$id"
+  make_fakebin "$d" >/dev/null
+  head=$(git -C "$d/wt" rev-parse HEAD)
+  fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=ship" "harness=claude" \
+    "mode=direct-PR" "validation_generation=plan-2" "validation_path=direct-PR" "validation_head=$head"
+  printf 'done: PR https://example.test/pull/1\n' > "$d/state/$id.status"
+  FM_FAKE_AXI_STATUS=
+  FM_FAKE_RUNS_LIST=
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" "$id"
+  out=$(run_crew_state "$d" "$id")
+  assert_contains "$out" "state: parked" "status-log done with an incomplete plan must remain parked"
+  assert_contains "$out" "source: validation-gate" "status-log completion must name the validation gate"
+  pass "status-log done requires existing plan completion"
 }
 
 test_active_run_is_authoritative
@@ -1461,5 +1484,6 @@ test_missing_run_head_falls_back_to_current_state
 test_ship_done_is_held_until_evidence_is_complete
 test_ship_done_with_malformed_brief_fails_closed
 test_run_step_done_requires_current_plan_completion
+test_status_log_done_requires_existing_plan_completion
 
 echo "all fm-crew-state tests passed"

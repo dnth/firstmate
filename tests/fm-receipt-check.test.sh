@@ -18,6 +18,13 @@ cat > "$FAKE_NO_MISTAKES" <<'EOF'
 printf '%s\n' "$FM_FAKE_NM_STATUS"
 EOF
 chmod +x "$FAKE_NO_MISTAKES"
+export FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES"
+FAIL_NO_MISTAKES="$TMP_ROOT/fail-no-mistakes"
+cat > "$FAIL_NO_MISTAKES" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+chmod +x "$FAIL_NO_MISTAKES"
 
 nm_status() {  # <run-id> <head> <outcome>
   local status
@@ -390,6 +397,18 @@ test_local_completion_requires_fast_forward_readiness() {
   FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence branch-ready >/dev/null 2>&1
   rc=$?
   expect_code 2 "$rc" "diverged local branch cannot complete"
+
+  id=local-missing-default
+  base=$(make_project "$id" local-only localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint "passed"
+  project="$TMP_ROOT/project-$id"
+  git -C "$project" update-ref refs/remotes/origin/develop "$base"
+  git -C "$project" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/develop
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "missing-default fixture plan failed"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence branch-ready >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "missing authoritative local default branch cannot complete"
   pass "local completion requires fast-forward readiness"
 }
 
@@ -486,6 +505,14 @@ test_high_risk_and_uncertain_inputs_fail_safe() {
     "$CHECK" "$id" --bind-run OLD-RUN >/dev/null 2>&1
   rc=$?
   expect_code 2 "$rc" "run active before planning cannot bind to the new plan"
+
+  id=preplan-observation-failure
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint "passed"
+  FM_NO_MISTAKES_BIN="$FAIL_NO_MISTAKES" FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "full validation planning fails closed when its run boundary is unavailable"
   pass "security and uncertain changes retain full No-Mistakes validation"
 }
 
