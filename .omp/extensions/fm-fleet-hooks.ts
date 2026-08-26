@@ -18,18 +18,22 @@ const SECRET_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
 
 const NAMED_SECRET_PATTERN = /\b((?:[A-Za-z_][A-Za-z0-9_]*)?(?:KEY|SECRET|TOKEN|PASSWORD|PASS|CREDENTIAL)[A-Za-z0-9_]*)\s*=\s*(?:"((?:\\.|[^"\\\r\n]){8,})"|'((?:\\.|[^'\\\r\n]){8,})'|([^\s"'`]{8,}))/g;
 const READ_ONLY_TIMEOUT_MS = 2000;
+const SNAPSHOT_SCAN_TIMEOUT_MS = 5000;
 const MAX_META_BYTES = 64 * 1024;
 const PROCESS_GROUP_RUNNER = `
 set -u
 timeout_seconds=$1
 shift
-set -m
-"$@" &
+if command -v setsid >/dev/null 2>&1; then
+	setsid --wait "$@" &
+else
+	"$@" &
+fi
 command_pid=$!
-set +m
 (
 	sleep "$timeout_seconds"
 	kill -KILL -- "-$command_pid" 2>/dev/null || true
+	kill -KILL "$command_pid" 2>/dev/null || true
 ) </dev/null >/dev/null 2>&1 &
 watchdog_pid=$!
 set +e
@@ -170,13 +174,13 @@ export function parseOpenDecisionRows(source: string): string[] {
 	return decisions;
 }
 
-function runReadOnly(command: string, args: string[], extensionRoot: string, fmHome: string): string {
-	const result = spawnSync("bash", ["-c", PROCESS_GROUP_RUNNER, "_", (READ_ONLY_TIMEOUT_MS / 1000).toFixed(3), command, ...args], {
+function runReadOnly(command: string, args: string[], extensionRoot: string, fmHome: string, timeoutMs = READ_ONLY_TIMEOUT_MS): string {
+	const result = spawnSync("bash", ["-c", PROCESS_GROUP_RUNNER, "_", (timeoutMs / 1000).toFixed(3), command, ...args], {
 		cwd: extensionRoot,
 		encoding: "utf8",
 		env: { ...process.env, FM_HOME: fmHome },
 		maxBuffer: 256 * 1024,
-		timeout: READ_ONLY_TIMEOUT_MS + 1000,
+		timeout: timeoutMs + 1000,
 		killSignal: "SIGKILL",
 	});
 	if (result.error || result.status !== 0 || result.signal || result.stderr) throw result.error ?? new Error(`${command} failed`);
@@ -209,7 +213,7 @@ function readFleetSnapshot(extensionRoot: string, fmHome: string, state: string)
 		const id = entry.slice(0, -5);
 		metas.push(parseFleetMeta(id, readFleetMetaFile(resolve(state, entry))));
 	}
-	const openDecisionRows = runReadOnly("bash", ["-c", '. "$1/bin/fm-classify-lib.sh"; scan_open_decisions "$2"', "_", extensionRoot, state], extensionRoot, fmHome);
+	const openDecisionRows = runReadOnly("bash", ["-c", '. "$1/bin/fm-classify-lib.sh"; scan_open_decisions "$2"', "_", extensionRoot, state], extensionRoot, fmHome, SNAPSHOT_SCAN_TIMEOUT_MS);
 	const todoProjection = runReadOnly(resolve(extensionRoot, "bin/fm-todo-project.sh"), ["--emit"], extensionRoot, fmHome);
 	return buildFleetSnapshot({ metas, openDecisions: parseOpenDecisionRows(openDecisionRows), todoProjection });
 }
