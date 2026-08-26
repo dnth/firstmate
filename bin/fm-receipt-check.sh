@@ -383,18 +383,7 @@ if [ "$LEDGER_EXISTS" = true ]; then
   while IFS= read -r line || [ -n "$line" ]; do
     line_number=$((line_number + 1))
     [ -n "$line" ] || { printf 'line %s: blank JSONL record\n' "$line_number" >> "$INVALID"; continue; }
-    if ! printf '%s' "$line" | jq -e '
-      type == "object"
-      and ((keys - ["artifact","command","criterion","file","outcome","result","summary","type"]) | length == 0)
-      and (.criterion | type == "string" and test("^AC[1-9][0-9]*$"))
-      and (.type | type == "string" and test("^(test|build|lint|typecheck|api|browser|manual|review)$"))
-      and (.outcome | type == "string" and test("^(passed|failed)$"))
-      and (.summary | type == "string" and test("[^[:space:]]"))
-      and (.result | type == "string" and test("[^[:space:]]"))
-      and ((has("command") | not) or (.command | type == "string"))
-      and ((has("artifact") | not) or (.artifact | type == "string"))
-      and ((has("file") | not) or (.file | type == "string"))
-    ' >/dev/null 2>&1; then
+    if ! printf '%s\n' "$line" | "$SCRIPT_DIR/fm-receipt-schema.sh"; then
       printf 'line %s: invalid v1 receipt\n' "$line_number" >> "$INVALID"
       continue
     fi

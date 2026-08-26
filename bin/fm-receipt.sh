@@ -87,14 +87,6 @@ case "$ID" in
     exit 2
     ;;
 esac
-case "$TYPE" in
-  test|build|lint|typecheck|api|browser|manual|review) ;;
-  *) echo "error: unsupported receipt type: $TYPE" >&2; exit 2 ;;
-esac
-case "$OUTCOME" in passed|failed) ;; *) echo "error: --outcome must be passed or failed" >&2; exit 2 ;; esac
-case "$SUMMARY" in *[![:space:]]*) ;; *) echo "error: summary must not be empty" >&2; exit 2 ;; esac
-case "$RESULT" in *[![:space:]]*) ;; *) echo "error: result must not be empty" >&2; exit 2 ;; esac
-
 command -v jq >/dev/null 2>&1 || { echo "error: jq is required" >&2; exit 1; }
 
 receipt=$(jq -cn \
@@ -111,6 +103,8 @@ receipt=$(jq -cn \
     + (if $artifact == "" then {} else {artifact:$artifact} end)
     + (if $file == "" then {} else {file:$file} end)
   ')
+printf '%s\n' "$receipt" | "$SCRIPT_DIR/fm-receipt-schema.sh" \
+  || { echo "error: invalid receipt schema" >&2; exit 2; }
 
 if ! FM_DATA_OVERRIDE="$DATA" FM_RECEIPT_PAYLOAD="$receipt" \
   "$SCRIPT_DIR/fm-receipt-store.sh" "$ID" append "$CRITERION" "$SCRIPT_DIR/fm-receipt-check.sh"; then

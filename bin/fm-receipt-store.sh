@@ -39,6 +39,8 @@ case "$ID" in
 esac
 case "$MODE:$#" in
   hold:4|append:2) ;;
+  run:0) usage >&2; exit 2 ;;
+  run:*) ;;
   *) usage >&2; exit 2 ;;
 esac
 
@@ -169,6 +171,11 @@ if ($ENV{FM_RECEIPT_STORE_MODE} eq "hold") {
   exit($ledger_missing ? 3 : 0);
 }
 
+if ($ENV{FM_RECEIPT_STORE_MODE} eq "run") {
+  flock($task_lock, LOCK_EX) or refuse("task evidence lock could not be acquired");
+  exec @ARGV or refuse("pinned task command could not be executed");
+}
+
 my $criterion = $arg1;
 my $parser = $arg2;
 flock($task_lock, LOCK_EX) or refuse("task evidence lock could not be acquired");
@@ -227,4 +234,5 @@ refuse("temporary evidence ledger must be a single-link regular file") unless @t
 close($temp) or refuse("temporary evidence ledger close failed");
 rename($temp_name, "evidence.jsonl") or refuse("evidence ledger replacement failed");
 $append_tmp = undef;
+$task->sync or refuse("task directory could not be synced");
 PERL

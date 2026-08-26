@@ -16,6 +16,7 @@
 # no-mistakes-prod-only is a registry policy rather than a task mode and is refused.
 # Usage: fm-promote.sh <task-id> --mode <mode> --yolo <on|off> --criterion 'AC1: outcome' [--criterion ...]
 set -eu
+ORIGINAL_ARGS=("$@")
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -88,15 +89,10 @@ esac
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=${POS[0]}
 META="$STATE/$ID.meta"
-TASK_DIR="$DATA/$ID"
-[ -d "$TASK_DIR" ] && [ ! -L "$TASK_DIR" ] \
-  || { echo "error: scout task directory is missing or unsafe: $TASK_DIR" >&2; exit 1; }
-DATA_REAL=$(CDPATH='' cd -- "$DATA" 2>/dev/null && pwd -P) \
-  || { echo "error: task data directory is unsafe: $DATA" >&2; exit 1; }
-cd "$TASK_DIR" || { echo "error: scout task directory could not be pinned" >&2; exit 1; }
-TASK_DIR=$(pwd -P)
-[ "$(dirname "$TASK_DIR")" = "$DATA_REAL" ] \
-  || { echo "error: scout task directory escapes the task store" >&2; exit 1; }
+if [ "${FM_PROMOTE_PINNED:-0}" != 1 ]; then
+  exec env FM_PROMOTE_PINNED=1 FM_DATA_OVERRIDE="$DATA" \
+    "$FM_ROOT/bin/fm-receipt-store.sh" "$ID" run "$SCRIPT_DIR/fm-promote.sh" "${ORIGINAL_ARGS[@]}"
+fi
 TASK_DIR=.
 BRIEF=./brief.md
 EVIDENCE=./evidence.jsonl
