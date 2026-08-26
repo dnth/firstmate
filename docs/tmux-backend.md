@@ -102,7 +102,7 @@ Ambiguous pending text never receives the busy-queue conversion.
 
 OMP has one narrower exception, scoped to `harness=omp` alone.
 The submit core records whether the pane is busy before typing.
-For an already-busy worker, one successfully transported Enter followed by structurally proven pending or empty OMP input returns `queued-unconfirmed` without scraping the rendered steering queue; `fm-send` accepts only that narrow verdict as queued delivery.
+For an already-busy worker, one successfully transported Enter followed by structurally proven pending or empty OMP input returns `queued-unconfirmed` without scraping the rendered steering queue; the shared backend submit core retains that narrow verdict for its direct callers. New task-bound OMP ordinary text sent through `fm-send` uses the generated native worker bridge instead and refuses if that bridge is unavailable.
 An Enter transport failure returns `send-failed`, while an initially idle pane with editable input left pending still fails closed.
 For an initially idle OMP pane, an `unknown` composer followed by the exact OMP busy signature remains positive proof that the ordinary turn started.
 Every other harness keeps the original behavior of returning `unknown` immediately without further Enter retries.

@@ -32,9 +32,11 @@
 # exits 5 as `delivered-no-turn-persistence-failed` after warning that delivery
 # already landed and must not be resent. Remote OMP control propagates both
 # post-delivery verdicts without redelivery.
-# An already-busy OMP pane has one narrow exception: a successfully transported
-# Enter may return `queued-unconfirmed`, which fm-send accepts as queued delivery
-# while preserving failures for transport errors and non-busy pending input.
+# Task-bound OMP ordinary text uses the generated native worker bridge and the
+# extension's sendUserMessage API, which returns a task/session-bound receipt
+# without typing into the terminal composer. Missing or unavailable native
+# binding is an explicit refusal. The explicit backend escape hatch and /exit
+# retain their backend-specific behavior.
 # Submission dispatches through the target's recorded backend; the tmux adapter
 # shares its composer/submit core with the away-mode daemon via bin/fm-tmux-lib.sh.
 # Tune submit confirmation with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP
@@ -310,6 +312,34 @@ fm_send_setup_omp_turnstart() {
   fm_send_prepare_omp_turnstart_reference
 }
 
+fm_send_omp_native_user_message() {
+  local expected socket
+  [ -n "$TARGET_TASK_ID" ] || {
+    echo "error: native OMP worker steering requires a task selector" >&2
+    return 1
+  }
+  expected="/tmp/fm-$TARGET_TASK_ID/omp-send.sock"
+  socket=${TARGET_OMP_NATIVE_SOCKET:-$expected}
+  if [ "$socket" != "$expected" ]; then
+    echo "error: OMP native worker bridge path is not bound to task $TARGET_TASK_ID" >&2
+    return 1
+  fi
+  if [ ! -S "$socket" ]; then
+    echo "error: OMP worker $TARGET_TASK_ID has no live native send bridge; refusing composer injection" >&2
+    return 1
+  fi
+  if [ ! -r "$FM_ROOT/bin/fm-omp-send.mjs" ]; then
+    echo "error: native OMP worker sender is unavailable at $FM_ROOT/bin/fm-omp-send.mjs" >&2
+    return 1
+  fi
+  if ! command -v node >/dev/null 2>&1; then
+    echo "error: node is unavailable for the native OMP worker sender" >&2
+    return 1
+  fi
+  node "$FM_ROOT/bin/fm-omp-send.mjs" \
+    --socket "$socket" --task "$TARGET_TASK_ID" --message "$MESSAGE"
+}
+
 fm_send_record_delivered_no_turn() {
   local status_file line wake_key failed=0
   [ -n "$TARGET_TASK_ID" ] || {
@@ -504,6 +534,7 @@ fi
 
 TARGET_OMP_BUN=
 TARGET_OMP_BIN=
+TARGET_OMP_NATIVE_SOCKET=
 if [ "$TARGET_HARNESS" = omp ]; then
   if [ "$TARGET_BACKEND" != remote ]; then
     if [ -z "$TARGET_META" ] \
@@ -518,6 +549,7 @@ if [ "$TARGET_HARNESS" = omp ]; then
     fi
     TARGET_OMP_BUN=$FM_BACKEND_AGENT_OMP_BUN
     TARGET_OMP_BIN=$FM_BACKEND_AGENT_OMP_BIN
+    TARGET_OMP_NATIVE_SOCKET=$(fm_meta_get "$TARGET_META" omp_native_socket)
   fi
 fi
 
@@ -813,13 +845,23 @@ else
   retries=${FM_SEND_RETRIES:-3}
   sleep_s=${FM_SEND_SLEEP:-0.4}
   turnstart_setup=
-  if [ "$TARGET_HARNESS" = omp ] && [ "$MESSAGE" != /exit ]; then
+  native_omp=0
+  if [ "$TARGET_HARNESS" = omp ] && [ "$TARGET_BACKEND" != remote ] \
+    && [ -n "$TARGET_SELECTOR" ] && [ "$MESSAGE" != /exit ]; then
+    native_omp=1
+  elif [ "$TARGET_HARNESS" = omp ] && [ "$MESSAGE" != /exit ]; then
     turnstart_setup=fm_send_setup_omp_turnstart
   fi
-  # Type once, submit, verify. Exact empty confirms an ordinary submission;
-  # busy-confirmed and queued-unconfirmed retain the two OMP busy paths.
+  # Native OMP task delivery returns its own receipt; other backends retain the
+  # existing type-once, submit, and verify contract.
   send_rc=0
-  if [ "$TARGET_BACKEND" = remote ]; then
+  if [ "$native_omp" -eq 1 ]; then
+    if verdict=$(fm_send_omp_native_user_message); then
+      :
+    else
+      send_rc=$?
+    fi
+  elif [ "$TARGET_BACKEND" = remote ]; then
     if "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send "$TARGET_REMOTE_ID" "$MESSAGE" < /dev/null >/dev/null; then
       verdict=empty
     else
@@ -895,9 +937,13 @@ else
         fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || post_delivery_failed=1
       fi
       ;;
+    native-queued\ *)
+      if [ -n "$RESOLVE_KEYS" ]; then
+        fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || post_delivery_failed=1
+      fi
+      ;;
     queued-unconfirmed)
-      # The backend transported Enter to busy OMP without a native proof event.
-      # Continue through the common delivery-confirmation path.
+      # This remains available only to non-task-bound backend callers.
       ;;
     delivered-no-turn)
       # Submission is durable, so pending-reply bookkeeping below still records
@@ -956,10 +1002,14 @@ else
       ;;
   esac
   [ "$post_delivery_failed" -eq 0 ] || exit 1
-  # The submit was confirmed or accepted through the narrow busy-OMP queue
-  # verdict. The harness still needs a beat to spin up the
-  # turn before its busy footer shows. Pause so an immediate peek catches the
-  # crewmate actually working instead of the stale idle pane. FM_SEND_SETTLE=0
-  # disables it. Scoped to this path only, never the shared submit core.
-  [ "${FM_SEND_SETTLE:-1}" = 0 ] || sleep "${FM_SEND_SETTLE:-1}"
+  case "$verdict" in
+    native-queued\ *) printf '%s\n' "$verdict" ;;
+  esac
+  if [ "$native_omp" -eq 0 ]; then
+    # The harness still needs a beat to spin up the turn before its busy footer
+    # shows. Pause so an immediate peek catches the crewmate actually working
+    # instead of the stale idle pane. FM_SEND_SETTLE=0 disables it. Scoped to
+    # this path only, never the shared submit core.
+    [ "${FM_SEND_SETTLE:-1}" = 0 ] || sleep "${FM_SEND_SETTLE:-1}"
+  fi
 fi

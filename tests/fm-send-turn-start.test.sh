@@ -3,10 +3,9 @@
 #
 # These tests drive the public fm-send executable through a stubbed tmux
 # backend and fake process identity, so no live OMP session is required.
-# They prove a confirmed submit does not count as success until an initially
-# idle OMP target becomes busy or advances its turn-start marker, while the
-# already-busy queued-Enter exception and non-OMP delivery keep their existing
-# behavior.
+# They prove task-bound OMP text uses the native worker bridge or refuses
+# without typing into the terminal composer, while lifecycle keys and non-OMP
+# delivery keep their existing behavior.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -142,6 +141,81 @@ run_case() {  # <mode> <home> <fakebin> <bun> <omp> <log> <entered> [fm-send arg
     FM_SEND_TURNSTART_POLL="${FM_SEND_TURNSTART_POLL:-0.02}" \
     FM_TEST_SLEEP_LOG="${FM_TEST_SLEEP_LOG:-}" \
     "${command[@]}"
+}
+
+test_native_omp_worker_send_uses_bound_session_api() {
+  local home fb bun omp log entered dir socket request server out rc
+  IFS=$'\t' read -r home fb bun omp log entered < <(setup_case native-worker omp)
+  dir=$(dirname "$home")
+  socket="/tmp/fm-turn-test/omp-send.sock"
+  request="$dir/native-request.json"
+  mkdir -p "$(dirname "$socket")"
+  printf 'omp_native_socket=%s\n' "$socket" >> "$home/state/turn-test.meta"
+  node --input-type=module - "$socket" "$request" <<'JS' &
+import { unlinkSync, writeFileSync } from "node:fs";
+import net from "node:net";
+
+const [socketPath, requestPath] = process.argv.slice(2);
+try { unlinkSync(socketPath); } catch {}
+const server = net.createServer((socket) => {
+  let input = "";
+  socket.setEncoding("utf8");
+  socket.on("data", (chunk) => {
+    input += chunk;
+    const newline = input.indexOf("\n");
+    if (newline < 0) return;
+    const request = JSON.parse(input.slice(0, newline));
+    writeFileSync(requestPath, JSON.stringify(request));
+    socket.end(JSON.stringify({
+      requestId: request.requestId,
+      taskId: request.taskId,
+      status: "accepted",
+      session: "/tmp/omp-native-session.jsonl",
+    }) + "\n", () => server.close());
+  });
+});
+server.listen(socketPath);
+JS
+  server=$!
+  for _ in $(seq 1 100); do
+    [ -S "$socket" ] && break
+    sleep 0.01
+  done
+  set +e
+  out=$(env PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_TEST_MODE=native-worker FM_TEST_BUN="$bun" FM_TEST_OMP="$omp" \
+    FM_TEST_SEND_LOG="$log" FM_TEST_ENTERED="$entered" FM_SEND_SETTLE=0 \
+    "$SEND" turn-test 'message stays out of the composer' 2>"$home/native.err")
+  rc=$?
+  wait "$server" || true
+  expect_code 0 "$rc" "a bridge-bearing OMP worker should accept native text delivery"
+  assert_contains "$out" 'native-queued request=' "native OMP delivery did not return its request receipt"
+  assert_contains "$(cat "$request")" 'message stays out of the composer' \
+    "native OMP delivery did not preserve exact message content"
+  assert_not_contains "$(cat "$log")" 'literal=' \
+    "native OMP delivery typed into the terminal composer"
+  assert_not_contains "$(cat "$log")" 'key=Enter' \
+    "native OMP delivery submitted a terminal Enter"
+  rmdir /tmp/fm-turn-test 2>/dev/null || true
+  pass "fm-send: bridge-bearing OMP worker text uses the task-bound native session API"
+}
+
+test_omp_task_without_native_binding_refuses_without_composer_injection() {
+  local home fb bun omp log entered rc err
+  IFS=$'\t' read -r home fb bun omp log entered < <(setup_case missing-native omp)
+  err="$home/missing-native.err"
+  set +e
+  run_case missing-native "$home" "$fb" "$bun" "$omp" "$log" "$entered" \
+    >/dev/null 2>"$err"
+  rc=$?
+  expect_code 1 "$rc" "an OMP task without native binding should refuse ordinary text"
+  assert_contains "$(cat "$err")" 'no live native send bridge' \
+    "missing native OMP binding refusal was not actionable"
+  assert_not_contains "$(cat "$log")" 'literal=' \
+    "missing native OMP binding typed terminal text"
+  assert_not_contains "$(cat "$log")" 'key=Enter' \
+    "missing native OMP binding submitted terminal Enter"
+  pass "fm-send: missing native OMP binding refuses without composer delivery"
 }
 
 test_confirmed_submit_without_turn_is_distinct_and_wakes_recovery() {
@@ -503,18 +577,9 @@ SH
   pass "fm-send: busy and blocked Herdr ignore idle-only setup"
 }
 
-test_confirmed_submit_without_turn_is_distinct_and_wakes_recovery
-test_recovery_marker_failure_is_distinct_and_no_resend
-test_recovery_wake_failure_is_distinct_and_no_resend
-test_recovery_wake_lock_failure_is_bounded
-test_turn_start_keeps_normal_success
-test_no_turn_does_not_close_answered_decision
-test_turn_activity_advance_keeps_fast_success
-test_pre_submit_activity_does_not_prove_new_turn
-test_busy_queued_enter_remains_success
+test_native_omp_worker_send_uses_bound_session_api
+test_omp_task_without_native_binding_refuses_without_composer_injection
 test_non_omp_does_not_gain_turn_start_verification
-test_timeout_uses_monotonic_deadline
 test_omp_key_ignores_turnstart_configuration
 test_omp_exit_ignores_turnstart_configuration
 test_remote_control_uses_task_bound_omp_route
-test_herdr_empty_requires_post_submit_turn_proof

@@ -277,14 +277,14 @@ test_unconfirmed_send_does_not_close() {
   pass "an unconfirmed send never closes the decision"
 }
 
-test_busy_omp_queued_unconfirmed_does_not_close() {
+test_omp_missing_native_binding_does_not_close() {
   local dir fb log err home project worktree omp runtime rc out
-  dir="$TMP_ROOT/queued-unconfirmed"
+  dir="$TMP_ROOT/missing-native"
   mkdir -p "$dir"
   fb=$(make_stubs "$dir")
   log="$dir/send.log"
   err="$dir/send.err"
-  home=$(setup_home queued-unconfirmed)
+  home=$(setup_home missing-native)
   project="$dir/project"
   worktree="$dir/worktree"
   mkdir -p "$project" "$worktree"
@@ -304,14 +304,16 @@ test_busy_omp_queued_unconfirmed_does_not_close() {
     run_send "$fb" "$home" "$log" \
     tq --resolve-key queue-proof "answer may only be queued"
   rc=$?
-  [ "$rc" -eq 0 ] \
-    || fail "the existing busy OMP queued steer path should still succeed: $(cat "$err")"
+  [ "$rc" -ne 0 ] \
+    || fail "an OMP task without a native bridge should refuse instead of using queued composer delivery"
+  assert_contains "$(cat "$err")" "no live native send bridge" \
+    "missing native OMP bridge refusal did not name the binding"
   assert_no_grep 'resolved' "$home/state/tq.status" \
-    "a queued-unconfirmed OMP send closed the decision"
+    "a missing-native OMP send closed the decision"
   out=$(drain_out "$home")
   printf '%s' "$out" | grep -F '[key=queue-proof]' >/dev/null \
-    || fail "the decision vanished after a queued-unconfirmed OMP send"
-  pass "a busy OMP queued-unconfirmed send leaves the decision open"
+    || fail "the decision vanished after a missing-native OMP send"
+  pass "an OMP task without native binding leaves the decision open without composer delivery"
 }
 
 test_multiple_keys_close_together() {
@@ -600,7 +602,7 @@ test_send_without_flag_and_progress_never_closes
 test_not_open_key_refuses_before_send
 test_failed_send_does_not_close
 test_unconfirmed_send_does_not_close
-test_busy_omp_queued_unconfirmed_does_not_close
+test_omp_missing_native_binding_does_not_close
 test_multiple_keys_close_together
 test_long_key_preserves_resolved_prefix
 test_local_secondmate_answer_is_marked_and_closed

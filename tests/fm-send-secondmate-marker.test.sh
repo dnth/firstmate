@@ -25,10 +25,10 @@ SEND="$ROOT/bin/fm-send.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-send-marker)
 
-# A fake tmux that (a) records the literal text of every `send-keys -l` to
+# A fake tmux that (a) records the literal text of every send-keys -l to
 # FM_SEND_LOG and (b) renders a captured busy OMP layout whose editable
-# composer remains visible after Enter. The submit path therefore exercises the
-# busy OMP queued-unconfirmed verdict without scraping a Steering list.
+# composer remains visible after Enter. The clean-cutover OMP refusal test
+# proves this terminal path is not used for task-bound ordinary text.
 # display-message yields a numeric cursor_y; the non-OMP path returns an empty
 # bordered composer so fm_tmux_composer_state reads "empty" on the first Enter.
 # Only the literal (-l) text is logged; Enter retries and --key sends are not.
@@ -145,10 +145,10 @@ test_secondmate_target_is_marked() {
     || fail "marked secondmate send should create a parent pending-reply record"
   pass "fm-send: a kind=secondmate target gets the from-firstmate marker and corr prepended"
 }
-test_queued_secondmate_target_confirms_delivery() {
-  local dir fb log home rc got corr rec actual_bun omp top width
+test_secondmate_omp_without_native_binding_refuses_delivery() {
+  local dir fb log home rc actual_bun omp top width
   if ! command -v bun >/dev/null 2>&1; then
-    pass "fm-send: queued OMP secondmate confirmation skipped because bun is unavailable"
+    pass "fm-send: OMP secondmate native-binding refusal skipped because bun is unavailable"
     return
   fi
   dir="$TMP_ROOT/sm-queued"
@@ -187,17 +187,9 @@ SH
   FM_SEND_OMP_BUSY=1 FM_SEND_OMP=1 FM_SEND_ENTERED="$dir/entered" \
     FM_SEND_OMP_BEFORE="$dir/before" FM_SEND_OMP_AFTER="$dir/after" \
     run_send "$fb" "$home" "$log" "domain" "queue the steer"; rc=$?
-  expect_code 0 "$rc" "a queued OMP secondmate steer should succeed"
-  got=$(cat "$log")
-  # shellcheck source=/dev/null
-  . "$ROOT/bin/fm-pending-reply-lib.sh"
-  corr=$(fm_pending_reply_extract_corr "$got")
-  rec=$(fm_pending_reply_path "$home/state" "$corr")
-  [ -n "$(fm_pending_reply_get "$rec" delivered_epoch)" ] \
-    || fail "a queued secondmate steer should confirm delivery in its pending-reply record"
-  [ "$(fm_pending_reply_get "$rec" phase)" = awaiting_report ] \
-    || fail "delivery confirmation must leave the queued secondmate expectation awaiting its correlated report"
-  pass "fm-send: a queued OMP secondmate steer confirms delivery without discarding the pending-reply expectation"
+  expect_code 1 "$rc" "an OMP secondmate without native binding should refuse delivery"
+  [ ! -s "$log" ] || fail "OMP secondmate native-binding refusal typed into the composer"
+  pass "fm-send: OMP secondmate without native binding refuses composer delivery"
 }
 
 test_exact_secondmate_task_id_is_marked() {
@@ -339,7 +331,7 @@ test_marked_send_preserves_trailing_newlines() {
 }
 
 test_secondmate_target_is_marked
-test_queued_secondmate_target_confirms_delivery
+test_secondmate_omp_without_native_binding_refuses_delivery
 test_exact_secondmate_task_id_is_marked
 test_crewmate_target_is_not_marked
 test_explicit_window_is_not_marked

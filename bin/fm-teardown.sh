@@ -2407,7 +2407,8 @@ cleanup_firstmate_home_children() {
     rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" \
       "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
       "$sub_state/$child_id.omp-ext.ts" "$sub_state/$child_id.omp-ready" \
-      "$sub_state/$child_id.omp-started" \
+      "$sub_state/$child_id.omp-started" "$sub_state/$child_id.omp-send.sock" \
+      "$sub_state/$child_id.omp-send.receipts" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.hermes-turnend-token" "$sub_state/$child_id.hermes-session" \
       "$sub_state/$child_id.hermes-started"
@@ -2697,7 +2698,8 @@ remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" \
-  "$STATE/$ID.omp-started" \
+  "$STATE/$ID.omp-started" "$STATE/$ID.omp-send.sock" \
+  "$STATE/$ID.omp-send.receipts" \
   "$STATE/$ID.grok-turnend-token" "$STATE/$ID.kimi-turnend-token" \
   "$STATE/$ID.hermes-turnend-token" "$STATE/$ID.hermes-session" \
   "$STATE/$ID.hermes-started" \

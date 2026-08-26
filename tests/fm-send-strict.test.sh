@@ -228,10 +228,12 @@ SH
     FM_FAKE_TMUX_INVENTORY=fm-omp-bound FM_FAKE_TMUX_CAPTURE_FILE="$capture" \
     FM_FAKE_TMUX_BUSY_AFTER_ENTER=1 FM_SEND_SETTLE=0 \
     "$SEND" omp-bound "bound geometry" >/dev/null 2>"$err"; rc=$?
-  [ "$rc" -eq 0 ] || fail "OMP send with exact metadata-bound Bun should succeed despite PATH drift: $(cat "$err")"
+  [ "$rc" -ne 0 ] || fail "OMP send without a native bridge should refuse despite a valid metadata-bound Bun"
   got=$(cat "$log")
-  assert_contains "$got" "literal=1 arg=bound geometry" \
-    "OMP send did not type after validating its task-bound Bun"
+  assert_not_contains "$got" "literal=1 arg=bound geometry" \
+    "OMP send typed into the composer before finding its missing native bridge"
+  assert_contains "$(cat "$err")" "no live native send bridge" \
+    "OMP missing native bridge refusal did not name the task-bound binding"
 
   before=$(wc -l < "$log" | tr -d ' ')
   awk -v bad="$fb/bun" 'BEGIN{FS=OFS="="} $1=="omp_bun"{$2=bad} {print}' \
@@ -245,7 +247,7 @@ SH
     "OMP mismatched-Bun refusal did not name the identity failure"
   [ "$(wc -l < "$log" | tr -d ' ')" = "$before" ] \
     || fail "OMP mismatched-Bun refusal typed into the pane"
-  pass "fm-send strict: OMP composer and submit use the validated metadata Bun and reject process mismatch"
+  pass "fm-send strict: OMP validates metadata identity and refuses composer fallback without native binding"
 }
 
 test_fm_prefixed_herdr_session_is_an_explicit_target() {

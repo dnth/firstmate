@@ -462,7 +462,7 @@ const api = {
 process.argv[1] = process.env.EXTENSION;
 const extension = await import(`${pathToFileURL(process.env.EXTENSION).href}?test=${Date.now()}`);
 await extension.default(api);
-for (const required of ["session_start", "session_switch", "before_agent_start", "session_stop", "tool_call", "session_shutdown"]) {
+for (const required of ["session_start", "session_switch", "turn_start", "before_agent_start", "session_stop", "tool_call", "session_shutdown"]) {
   if (!handlers.has(required)) throw new Error(`missing OMP native handler ${required}`);
 }
 if (!commands.has("fm-watch-arm-omp") || !tools.has("fm_watch_arm_omp")) {
@@ -564,14 +564,20 @@ if (watcherMessages.length !== 1 || !watcherMessages[0].message.content.includes
 }
 if (
   watcherMessages[0].message.customType !== "firstmate-watcher-wake" ||
-  watcherMessages[0].options?.deliverAs !== "steer" ||
+  watcherMessages[0].options?.deliverAs !== "nextTurn" ||
   watcherMessages[0].options?.triggerTurn !== true
 ) {
-  throw new Error(`OMP watcher notification did not preserve the editable draft delivery mode: ${JSON.stringify(watcherMessages[0])}`);
+  throw new Error(`OMP watcher notification did not use hidden next-turn delivery: ${JSON.stringify(watcherMessages[0])}`);
 }
 if (!existsSync(`${process.env.FM_STATE_OVERRIDE}/watch-successor-ready`)) {
   throw new Error("OMP actionable notification arrived before successor readiness");
 }
+writeFileSync(`${process.env.FM_STATE_OVERRIDE}/watch-trigger`, "second\n");
+await new Promise(resolve => setTimeout(resolve, 100));
+if (watcherMessages.length !== 1) {
+  throw new Error(`OMP watcher notification burst was not coalesced before turn start: ${JSON.stringify(watcherMessages)}`);
+}
+handlers.get("turn_start")({ type: "turn_start" }, extensionContext);
 await handlers.get("session_shutdown")({ type: "session_shutdown" }, {});
 await new Promise(resolve => setTimeout(resolve, 80));
 console.log(JSON.stringify({ startupMessages: 3, guarded: true, tools: tools.size, watcherMessages: watcherMessages.length, customMessages: customMessages.length }));
@@ -706,7 +712,8 @@ JS
 # The shared core delivers the recovery handshake for every runtime bound to it,
 # so OMP must confirm a handling delivery exactly like Pi and OpenCode do: start
 # and verify the successor, run fm-watch-arm.sh --handling-delivered for the
-# generation the successor reported, and only then deliver the wake steer.
+# generation the successor reported, and only then queue the hidden next-turn
+# wake notification.
 # Upstream covers Pi and OpenCode; this pins the fork's OMP binding of the same
 # contract so a future adapter change cannot silently drop it.
 test_native_omp_confirms_recovery_handling_delivery() {
@@ -783,8 +790,8 @@ const rows = armRows();
 const arms = rows.filter((row) => row.startsWith("arm="));
 if (arms.length !== 2) throw new Error(`expected one successor arm, got ${arms.length}: ${rows.join(" | ")}`);
 if (steers !== 1) throw new Error(`expected exactly one wake steer, got ${steers}`);
-if (deliveryOptions?.deliverAs !== "steer" || deliveryOptions?.triggerTurn !== true) {
-  throw new Error(`wake was not delivered as a turn-triggering steer: ${JSON.stringify(deliveryOptions)}`);
+if (deliveryOptions?.deliverAs !== "nextTurn" || deliveryOptions?.triggerTurn !== true) {
+  throw new Error(`wake was not delivered as a hidden turn-triggering notification: ${JSON.stringify(deliveryOptions)}`);
 }
 if (rowsAtDelivery !== 2) throw new Error(`wake delivery began before successor establishment (${rowsAtDelivery} arm rows)`);
 const confirmations = rows.filter((row) => row.startsWith("confirmed "));
@@ -804,7 +811,7 @@ JS
   printf 'stop\n' > "$TMP_ROOT/native-handling-delivery.stop" 2>/dev/null || true
   expect_code 0 "$status" "OMP recovery handling delivery"
   assert_contains "$out" omp-handling-delivery-ok "OMP did not confirm its recovery handling delivery after the wake steer"
-  pass "OMP confirms the recovery handling handshake after delivering its wake steer"
+  pass "OMP confirms the recovery handling handshake before queueing its hidden wake notification"
 }
 
 # A refused handling handshake must be classified and surfaced exactly once

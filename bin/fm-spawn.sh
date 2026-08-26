@@ -908,7 +908,8 @@ spawn_omp_abort_clean_unchanged_worktree() {  # <context>
   elif (cd "$PROJ_ABS" && "$SCRIPT_DIR/fm-treehouse-command.sh" return --force "$WT" >/dev/null 2>&1); then
     [ -z "${TASK_TMP:-}" ] || rm -rf "$TASK_TMP"
     rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
-      "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" "$STATE/$ID.omp-started"
+      "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" "$STATE/$ID.omp-started" \
+      "$STATE/$ID.omp-send.sock" "$STATE/$ID.omp-send.receipts"
   else
     echo "warning: $context could not return the unchanged worktree $WT" >&2
   fi
@@ -1681,7 +1682,8 @@ if [ "$HARNESS" = omp ]; then
           ;;
       esac
     fi
-    for artifact in "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" "$STATE/$ID.omp-started"; do
+    for artifact in "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" "$STATE/$ID.omp-started" \
+      "$STATE/$ID.omp-send.sock" "$STATE/$ID.omp-send.receipts"; do
       if [ -e "$artifact" ] || [ -L "$artifact" ]; then
         echo "error: refusing OMP secondmate launch because worker-only artifact exists at $artifact" >&2
         exit 1
@@ -1690,7 +1692,8 @@ if [ "$HARNESS" = omp ]; then
   else
     for artifact in \
       "$STATE/$ID.meta" "$STATE/$ID.status" "$STATE/$ID.omp-ext.ts" \
-      "$STATE/$ID.omp-ready" "$STATE/$ID.omp-started" "/tmp/fm-$ID"; do
+      "$STATE/$ID.omp-ready" "$STATE/$ID.omp-started" \
+      "$STATE/$ID.omp-send.sock" "$STATE/$ID.omp-send.receipts" "/tmp/fm-$ID"; do
       if [ -e "$artifact" ] || [ -L "$artifact" ]; then
         echo "error: refusing OMP spawn because task $ID already has artifacts at $artifact; reconcile or clean the prior task before retrying" >&2
         exit 1
@@ -3337,14 +3340,120 @@ EOF
     omp)
       OMP_READY="$STATE_REAL/$ID.omp-ready"
       OMP_STARTED="$STATE_REAL/$ID.omp-started"
-      rm -f "$OMP_READY" "$OMP_STARTED"
+      OMP_NATIVE_SOCKET="$TASK_TMP/omp-send.sock"
+      OMP_NATIVE_RECEIPT="$STATE_REAL/$ID.omp-send.receipts"
+      rm -f "$OMP_READY" "$OMP_STARTED" "$OMP_NATIVE_SOCKET"
       cat > "$STATE/$ID.omp-ext.ts" <<EOF
 // Firstmate OMP launch acknowledgement and turn-end signal; written by fm-spawn.
 import { execFile } from "node:child_process";
+import { appendFileSync, chmodSync, existsSync, lstatSync, unlinkSync } from "node:fs";
+import { createServer } from "node:net";
+const taskId = "$ID";
+const nativeSocket = "$OMP_NATIVE_SOCKET";
+const nativeReceipt = "$OMP_NATIVE_RECEIPT";
+let nativeSession = "";
+let nativeServer: any;
+
+function nativeReply(socket: any, response: any): void {
+  socket.end(JSON.stringify(response) + "\n");
+}
+
+function recordNativeReceipt(record: any): void {
+  appendFileSync(nativeReceipt, JSON.stringify(record) + "\n", { mode: 0o600 });
+}
+
+function bindNativeSession(ctx: any): void {
+  const sessionFile = ctx?.sessionManager?.getSessionFile?.();
+  nativeSession = typeof sessionFile === "string" && sessionFile.startsWith("/") ? sessionFile : "";
+}
+
+function startNativeBridge(omp: any): void {
+  try {
+    if (existsSync(nativeSocket)) {
+      const prior = lstatSync(nativeSocket);
+      if (!prior.isSocket()) return;
+      unlinkSync(nativeSocket);
+    }
+    nativeServer = createServer((socket: any) => {
+      let input = "";
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk: string) => {
+        input += chunk;
+        if (input.length > 1024 * 1024) {
+          nativeReply(socket, { status: "refused", reason: "request exceeds native OMP bridge limit" });
+          socket.destroy();
+          return;
+        }
+        const end = input.indexOf("\n");
+        if (end < 0) return;
+        socket.pause();
+        let request: any;
+        try {
+          request = JSON.parse(input.slice(0, end));
+        } catch {
+          nativeReply(socket, { status: "refused", reason: "malformed native OMP request" });
+          return;
+        }
+        const requestId = typeof request.requestId === "string" ? request.requestId : "";
+        const common = { requestId, taskId };
+        if (request.version !== 1 || !/^[0-9a-f-]{36}$/.test(requestId) || request.taskId !== taskId) {
+          nativeReply(socket, { ...common, status: "refused", reason: "native OMP request version or task binding is invalid" });
+          return;
+        }
+        if (typeof request.content !== "string") {
+          nativeReply(socket, { ...common, status: "refused", reason: "native OMP content is not text" });
+          return;
+        }
+        if (!nativeSession) {
+          nativeReply(socket, { ...common, status: "refused", reason: "OMP session identity is not ready" });
+          return;
+        }
+        try {
+          recordNativeReceipt({ requestId, taskId, session: nativeSession, status: "received" });
+          omp.sendUserMessage(request.content);
+          recordNativeReceipt({ requestId, taskId, session: nativeSession, status: "accepted" });
+          nativeReply(socket, { ...common, status: "accepted", session: nativeSession });
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          try {
+            recordNativeReceipt({ requestId, taskId, session: nativeSession, status: "refused", reason });
+          } catch {
+            // Preserve the original native API failure as the caller-visible reason.
+          }
+          nativeReply(socket, { ...common, status: "refused", reason });
+        }
+      });
+    });
+    nativeServer.on("error", () => {});
+    nativeServer.listen(nativeSocket, () => {
+      chmodSync(nativeSocket, 0o600);
+      nativeServer.unref();
+    });
+  } catch {
+    nativeServer = undefined;
+  }
+}
+
+function stopNativeBridge(): void {
+  nativeServer?.close();
+  nativeServer = undefined;
+  try {
+    if (existsSync(nativeSocket) && lstatSync(nativeSocket).isSocket()) unlinkSync(nativeSocket);
+  } catch {
+    // Teardown must not change OMP's own shutdown result.
+  }
+}
+
 export default function (omp: any) {
-  omp.on("session_start", () => execFile("touch", ["$OMP_READY"]));
+  startNativeBridge(omp);
+  omp.on("session_start", (_event: any, ctx: any) => {
+    bindNativeSession(ctx);
+    execFile("touch", ["$OMP_READY"]);
+  });
+  omp.on("session_switch", (_event: any, ctx: any) => bindNativeSession(ctx));
   omp.on("turn_start", () => execFile("touch", ["$OMP_STARTED"]));
   omp.on("turn_end", () => execFile("touch", ["$TURNEND"]));
+  omp.on("session_shutdown", () => stopNativeBridge());
 }
 EOF
       ;;
@@ -3547,6 +3656,7 @@ META_WINDOW=$T
   if [ "$HARNESS" = omp ]; then
     echo "omp_bin=$OMP_BIN_CANON"
     echo "omp_bun=$OMP_BUN_CANON"
+    echo "omp_native_socket=$TASK_TMP/omp-send.sock"
   fi
   if [ "$HERMES_LAUNCH_TEMPLATE" -eq 1 ]; then
     echo "hermes_bin=$HERMES_BIN"

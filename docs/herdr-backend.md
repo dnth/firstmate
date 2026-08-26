@@ -210,7 +210,7 @@ On an idle or done native baseline, ordinary submit confirmation first waits for
 If native status stays idle, the shared composer verdict is the next positive signal: a cleared composer confirms delivery, and proven pending text retries Enter.
 For every non-OMP harness, text that remains pending after the retry budget stays pending even when native status is `working`.
 For OMP only, `fm_composer_queued_enter_verdict` treats proven pending text plus native `working` as a queued delivered Enter and keeps an idle pending composer as a genuine swallow.
-For OMP, that native transition confirms submission, after which `fm-send.sh` applies a coarse bounded check for native busy state or advancement of the generated turn-start marker after the submit-time baseline.
+For legacy direct composer callers, that native transition confirms submission, after which the caller applies a coarse bounded check for native busy state or advancement of the generated turn-start marker after the submit-time baseline.
 The two stages intentionally share signals rather than claiming perfect submit and turn-start separation.
 On an already active or unreadable baseline, ordinary harnesses fall back to conservative composer clearance.
 OMP is stricter: the adapter binds the exact native OMP session path and pre-send byte offset before typing.
@@ -222,6 +222,7 @@ Pending text plus idle, done, blocked, or unreadable native state remains unsubm
 An Enter transport failure returns `send-failed`, and every non-busy editable composer remains subject to the ordinary pending or unknown fail-closed behavior.
 A `blocked` OMP agent is parked on an open ask rather than generating, so its proof is instead a successful post-offset `ask` tool result whose structured `selectedOptions` is exactly the sent text; a steering user record is never accepted there, and an errored answer is a rejection, not delivery.
 OMP `/exit` succeeds only after a post-offset normal `session_exit` event, then closes the exact owned Herdr pane and verifies it is absent; it never falls back to a steering acknowledgement.
+Task-bound OMP ordinary text through `fm-send.sh` is the clean-cutover exception: it requires the generated task-bound native bridge and calls the worker's `sendUserMessage` API, refusing before any composer input when the bridge is missing, stale, or ambiguous.
 A fully unreadable target stops retrying and reports unknown.
 The poll density bounds the residual possibility of an extremely fast complete turn, while the composer fallback prevents an idle pending steer from being reported delivered.
 

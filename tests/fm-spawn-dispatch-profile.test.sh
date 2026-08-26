@@ -956,6 +956,8 @@ test_omp_threads_exact_identity_model_and_every_thinking_level() {
       "OMP launch did not execute the canonical entrypoint with unattended mode, model, thinking, and extension"
     assert_grep "omp_bun=$expected_bun" "$HOME_DIR/state/$id.meta" \
       "OMP launch metadata did not bind the same Bun executable used by the literal pane command"
+    assert_grep "omp_native_socket=/tmp/fm-$id/omp-send.sock" "$HOME_DIR/state/$id.meta" \
+      "OMP launch metadata did not bind its task-scoped native worker bridge"
     assert_not_contains "$launch" "--prewalk" "ordinary OMP launch must not enable Prewalk without explicit opt-in"
     assert_no_grep '^prewalk_into=' "$HOME_DIR/state/$id.meta" \
       "ordinary OMP metadata must not add a prewalk target"
@@ -1679,13 +1681,23 @@ test_omp_scout_uses_external_turn_extension() {
   rm -f "$HOME_DIR/state/$id.omp-ready" "$HOME_DIR/state/$id.omp-started" "$HOME_DIR/state/$id.turn-ended"
   PLUGIN="$HOME_DIR/state/$id.omp-ext.ts" READY="$HOME_DIR/state/$id.omp-ready" \
     STARTED="$HOME_DIR/state/$id.omp-started" TURNENDED="$HOME_DIR/state/$id.turn-ended" \
+    NATIVE_SOCKET="/tmp/fm-$id/omp-send.sock" NATIVE_RECEIPT="/tmp/fm-$id/omp-send.receipts" \
     node --input-type=module <<'JS'
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import net from "node:net";
 import { pathToFileURL } from "node:url";
 const handlers = new Map();
+const messages = [];
 const extension = await import(pathToFileURL(process.env.PLUGIN).href);
-extension.default({ on(name, handler) { handlers.set(name, handler); } });
-await handlers.get("session_start")?.();
+extension.default({
+  on(name, handler) { handlers.set(name, handler); },
+  sendUserMessage(content) { messages.push(content); },
+});
+const sessionFile = process.env.PLUGIN + ".session.jsonl";
+await handlers.get("session_start")?.(
+  { type: "session_start" },
+  { sessionManager: { getSessionFile: () => sessionFile } },
+);
 await handlers.get("turn_start")?.();
 await handlers.get("turn_end")?.();
 for (let i = 0; i < 50 && (!existsSync(process.env.READY) || !existsSync(process.env.STARTED) || !existsSync(process.env.TURNENDED)); i += 1) {
@@ -1694,6 +1706,35 @@ for (let i = 0; i < 50 && (!existsSync(process.env.READY) || !existsSync(process
 if (!existsSync(process.env.READY)) throw new Error("OMP session_start did not report readiness");
 if (!existsSync(process.env.STARTED)) throw new Error("OMP turn_start did not acknowledge launch");
 if (!existsSync(process.env.TURNENDED)) throw new Error("OMP turn_end did not publish completion");
+const request = {
+  version: 1,
+  requestId: "00000000-0000-4000-8000-000000000001",
+  taskId: process.env.PLUGIN.split("/").pop().replace(".omp-ext.ts", ""),
+  content: "native worker content",
+};
+const response = await new Promise((resolve, reject) => {
+  const client = net.createConnection(process.env.NATIVE_SOCKET);
+  let input = "";
+  client.setEncoding("utf8");
+  client.on("connect", () => client.end(JSON.stringify(request) + "\n"));
+  client.on("data", (chunk) => {
+    input += chunk;
+    const newline = input.indexOf("\n");
+    if (newline >= 0) resolve(JSON.parse(input.slice(0, newline)));
+  });
+  client.on("error", reject);
+});
+if (response.status !== "accepted" || response.taskId !== request.taskId || response.session !== sessionFile) {
+  throw new Error("native OMP bridge returned an invalid receipt: " + JSON.stringify(response));
+}
+if (messages.length !== 1 || messages[0] !== request.content) {
+  throw new Error("native OMP bridge did not call sendUserMessage exactly: " + JSON.stringify(messages));
+}
+const receipts = readFileSync(process.env.NATIVE_RECEIPT, "utf8");
+if (!receipts.includes('"status":"received"') || !receipts.includes('"status":"accepted"')) {
+  throw new Error("native OMP bridge did not persist its receipt: " + receipts);
+}
+await handlers.get("session_shutdown")?.();
 JS
   unset FM_TEST_OMP_ACK
   pass "OMP scouts retain scout semantics and external per-turn notification"

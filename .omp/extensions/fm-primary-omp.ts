@@ -177,6 +177,7 @@ export default function (omp: ExtensionAPI) {
   if (!primaryIntegrationApplies()) return;
   publishNativeProcessIdentity();
   let pendingStartupNudge = "";
+  let watcherNotificationOutstanding = false;
   const watch = createPrimaryWatchCore({
     runtime: "omp",
     runtimeLabel: "OMP",
@@ -190,19 +191,30 @@ export default function (omp: ExtensionAPI) {
     repairToolName: "fm_watch_arm_omp",
     encodeOperationalInput,
     sendFollowUp: async (content) => {
-      // Deliver a custom steer so OMP wakes idle sessions without touching the editable draft.
-      omp.sendMessage(
-        {
-          customType: "firstmate-watcher-wake",
-          content,
-          display: false,
-          attribution: "agent",
-          details: { kind: "watcher", runtime: "omp" },
-        },
-        { deliverAs: "steer", triggerTurn: true },
-      );
+      // Queue one hidden next-turn notification until OMP starts the turn that consumes it.
+      if (watcherNotificationOutstanding) return;
+      watcherNotificationOutstanding = true;
+      try {
+        omp.sendMessage(
+          {
+            customType: "firstmate-watcher-wake",
+            content,
+            display: false,
+            attribution: "agent",
+            details: { kind: "watcher", runtime: "omp" },
+          },
+          { deliverAs: "nextTurn", triggerTurn: true },
+        );
+      } catch (error) {
+        watcherNotificationOutstanding = false;
+        throw error;
+      }
     },
   });
+
+  const clearWatcherNotification = (): void => {
+    watcherNotificationOutstanding = false;
+  };
 
   const deliverSessionstartNudge = (forceForNativeSwitch = false): void => {
     watch.markLoaded();
@@ -210,18 +222,22 @@ export default function (omp: ExtensionAPI) {
   };
 
   omp.on("session_start", (_event, ctx) => {
+    clearWatcherNotification();
     watch.sessionStart();
     publishSecondmateSession(ctx);
     deliverSessionstartNudge();
   });
 
   omp.on("session_switch", (event, ctx) => {
+    clearWatcherNotification();
     watch.sessionShutdown();
     watch.sessionStart();
     publishSecondmateSession(ctx);
     deliverSessionstartNudge(event.reason === "new" || event.reason === "resume");
     watch.arm();
   });
+
+  omp.on("turn_start", clearWatcherNotification);
 
   omp.on("before_agent_start", (): BeforeAgentStartEventResult | undefined => {
     if (!pendingStartupNudge) return undefined;

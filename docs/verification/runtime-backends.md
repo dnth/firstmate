@@ -523,7 +523,7 @@ FM_TEST_SUMMARY_FAMILY family=watcher-wake-lock count=2 duration_ms=97033 failed
 Every listed script ran at that head with no gate skip.
 The isolated Herdr role matrix emitted no queued-wake warning.
 The final run retained the fresh-beacon, pending-notification, queue-drain, and bounded-delivery assertions in the Herdr fixture.
-The focused OMP adapter contract now delivers watcher wakes as a custom steer with `triggerTurn`, preserving the editable draft while retaining idle wake and streaming delivery.
+The focused OMP adapter contract now delivers watcher wakes as one hidden custom `nextTurn` notification with `triggerTurn`, preserving the editable draft while coalescing additional wakes until the receiving turn starts.
 The tmux role fixtures emitted their expected task-copy worktree and missing-fixture-watcher notices.
 The Herdr exit fixture refused an unlocked presentation close after proving normal process exit, then completed its named guarded teardown.
 
