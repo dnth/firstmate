@@ -214,8 +214,15 @@ test_promote_requires_and_records_the_delivery_contract() {
 # Task
 Investigate the fixture and report a recommendation.
 
+# Setup
+This heading and the requirement after it belong to the task description.
+Preserve this requirement when the scout becomes a ship task.
+
 # Definition of done
 Write a report.
+
+# Setup
+Scout-only setup instructions begin here.
 EOF
     rm -f "$ledger"
   }
@@ -291,6 +298,7 @@ EOF
   assert_contains "$out" "ship instructions for mode=direct-PR" "promotion hint did not carry the decided mode"
   assert_present "$ledger" "promotion did not install the evidence ledger"
   assert_no_grep 'Never push to any remote' "$brief" "promoted direct-PR brief retained scout push prohibition"
+  assert_grep 'Preserve this requirement when the scout becomes a ship task.' "$brief" "promotion truncated task content at an embedded setup heading"
   assert_grep "fm-receipt-check.sh promote-d1 --plan" "$brief" "promoted direct-PR brief omitted validation planning"
   assert_grep 'done: PR {url}' "$brief" "promoted direct-PR brief omitted its terminal sequence"
   check_out=$(FM_HOME="$home" "$ROOT/bin/fm-receipt-check.sh" promote-d1 2>&1)
@@ -298,6 +306,24 @@ EOF
   expect_code 1 "$check_status" "promoted concrete criteria require receipts"
   assert_contains "$check_out" '"missing":["AC1"]' "promoted contract did not install concrete acceptance criteria"
   [ "$(grep -c '^mode=' "$meta")" = 1 ] || fail "promotion left more than one mode= line in the task record"
+
+  mkdir -p "$home/data/promote-nm"
+  printf 'window=fm-promote-nm\nkind=scout\nworktree=/tmp/wt\n' > "$home/state/promote-nm.meta"
+  cat > "$home/data/promote-nm/brief.md" <<'EOF'
+# Task
+Implement the promoted No-Mistakes fixture.
+
+# Setup
+Scout-only setup instructions begin here.
+EOF
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-nm --mode no-mistakes --yolo off \
+    --criterion 'AC1: Fixture works' 2>&1)
+  status=$?
+  expect_code 0 "$status" "a No-Mistakes promotion should succeed"
+  assert_grep 'Firstmate-Validation-Generation: <plan-generation>' "$home/data/promote-nm/brief.md" "promoted No-Mistakes brief omitted generation-bound run creation"
+  assert_grep 'fm-receipt-check.sh promote-nm --bind-run <run-id> --generation <plan-generation>' "$home/data/promote-nm/brief.md" "promoted No-Mistakes brief omitted run binding"
+  assert_grep 'fm-receipt-check.sh promote-nm --complete --terminal-evidence no-mistakes-passed' "$home/data/promote-nm/brief.md" "promoted No-Mistakes brief omitted completion recording"
+  assert_grep 'done: PR {url} checks green' "$home/data/promote-nm/brief.md" "promoted No-Mistakes brief omitted its CI-ready terminal status"
   pass "fm-promote: promotion installs a fail-closed ship evidence contract"
 }
 

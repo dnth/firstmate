@@ -359,12 +359,16 @@ if [ "$ACTION" = bind-run ]; then
     || { echo "error: validation worktree is dirty" >&2; exit 2; }
   BIND_OUT=$(cd "$BIND_WORKTREE" && "$NO_MISTAKES_BIN" axi status --run "$RUN_ID_INPUT" 2>/dev/null) \
     || { echo "error: No-Mistakes run could not be observed" >&2; exit 2; }
+  BIND_INTENT=$(cd "$BIND_WORKTREE" && "$NO_MISTAKES_BIN" axi logs --step intent --run "$RUN_ID_INPUT" 2>/dev/null) \
+    || { echo "error: No-Mistakes run intent could not be observed" >&2; exit 2; }
   BIND_OBSERVED_ID=$(nm_status_field "$BIND_OUT" id)
   BIND_OBSERVED_HEAD=$(nm_status_field "$BIND_OUT" head)
   BIND_STATUS=$(nm_status_field "$BIND_OUT" status)
   BIND_OUTCOME=$(nm_status_field "$BIND_OUT" outcome)
   [ "$RUN_ID_INPUT" != "$BIND_PREPLAN_RUN" ] || { echo "error: No-Mistakes run predates the latest plan" >&2; exit 2; }
   [ "$RUN_GENERATION_INPUT" = "$BIND_GENERATION" ] || { echo "error: run generation does not match the latest plan" >&2; exit 2; }
+  printf '%s\n' "$BIND_INTENT" | grep -Fqx "Firstmate-Validation-Generation: $BIND_GENERATION" \
+    || { echo "error: No-Mistakes run was not created for the latest plan generation" >&2; exit 2; }
   [ "$BIND_OBSERVED_ID" = "$RUN_ID_INPUT" ] && [ "$BIND_OBSERVED_HEAD" = "$BIND_HEAD" ] \
     && { [ "$BIND_STATUS" = running ] || [ "$BIND_STATUS" = fixing ] || [ "$BIND_STATUS" = ci ] || [ "$BIND_STATUS" = awaiting_approval ]; } \
     && [ "$BIND_OUTCOME" != passed ] \
@@ -677,7 +681,8 @@ write_meta_record() {  # <pass>
   release_validation_lock
 }
 
-PLAN_GENERATION="$(date +%s).$$"
+PLAN_GENERATION=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
+[ "${#PLAN_GENERATION}" -eq 32 ] || { echo "error: validation generation could not be created" >&2; exit 2; }
 PREPLAN_RUN_ID=
 if [ "$VALIDATION_PATH" = full-no-mistakes ]; then
   PREPLAN_OUT=$(cd "$WORKTREE" && "$NO_MISTAKES_BIN" axi status 2>/dev/null) \

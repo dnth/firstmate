@@ -107,6 +107,14 @@ LOCK="$TASK_DIR/.evidence-append.lock"
 DATA_REAL=$(cd "$DATA" && pwd -P)
 TASK_REAL=$(cd "$TASK_DIR" && pwd -P)
 [ "$TASK_REAL" = "$DATA_REAL/$ID" ] || { echo "error: task directory escapes data root" >&2; exit 1; }
+exec 8< "$TASK_DIR"
+TASK_IDENTITY=$(stat -L -c '%d:%i' "$TASK_DIR" 2>/dev/null || stat -L -f '%d:%i' "$TASK_DIR" 2>/dev/null)
+PINNED_DIR="/proc/$$/fd/8"
+PINNED_IDENTITY=$(stat -L -c '%d:%i' "$PINNED_DIR" 2>/dev/null || stat -L -f '%d:%i' "$PINNED_DIR" 2>/dev/null)
+[ "$TASK_IDENTITY" = "$PINNED_IDENTITY" ] || { echo "error: task directory identity changed" >&2; exit 1; }
+BRIEF="$PINNED_DIR/brief.md"
+LEDGER="$PINNED_DIR/evidence.jsonl"
+LOCK="$PINNED_DIR/.evidence-append.lock"
 [ -f "$BRIEF" ] && [ ! -L "$BRIEF" ] \
   || { echo "error: task brief is missing or unsafe: $BRIEF" >&2; exit 1; }
 grep -Eq '^Delivery contract: mode=(no-mistakes|direct-PR|local-only)$' "$BRIEF" \
@@ -130,17 +138,14 @@ receipt=$(jq -cn \
     + (if $file == "" then {} else {file:$file} end)
   ')
 
-if [ -L "$LEDGER" ] || { [ -e "$LEDGER" ] && [ ! -f "$LEDGER" ]; }; then
+if [ -L "$LEDGER" ] || [ ! -f "$LEDGER" ]; then
   echo "error: evidence ledger is not a regular file: $LEDGER" >&2
   exit 1
 fi
 ledger_links() {
   stat -c %h "$1" 2>/dev/null || stat -f %l "$1" 2>/dev/null
 }
-ledger_identity() {
-  stat -L -c '%d:%i' "$1" 2>/dev/null || stat -L -f '%d:%i' "$1" 2>/dev/null
-}
-[ ! -e "$LEDGER" ] || [ "$(ledger_links "$LEDGER")" = 1 ] \
+[ "$(ledger_links "$LEDGER")" = 1 ] \
   || { echo "error: evidence ledger has multiple links" >&2; exit 1; }
 
 umask 077
@@ -154,16 +159,24 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
-if [ -L "$LEDGER" ] || { [ -e "$LEDGER" ] && [ ! -f "$LEDGER" ]; }; then
+if [ -L "$LEDGER" ] || [ ! -f "$LEDGER" ]; then
   echo "error: evidence ledger became unsafe before append: $LEDGER" >&2
   exit 1
 fi
-[ ! -e "$LEDGER" ] || [ "$(ledger_links "$LEDGER")" = 1 ] \
+[ "$(ledger_links "$LEDGER")" = 1 ] \
   || { echo "error: evidence ledger became multiply linked" >&2; exit 1; }
-exec 9>> "$LEDGER"
-[ ! -L "$LEDGER" ] && [ "$(ledger_links "$LEDGER")" = 1 ] \
-  && [ "$(ledger_identity "$LEDGER")" = "$(ledger_identity /dev/fd/9)" ] \
-  || { echo "error: evidence ledger identity changed before append" >&2; exit 1; }
-printf '%s\n' "$receipt" >&9
-exec 9>&-
+command -v perl >/dev/null 2>&1 || { echo "error: perl is required" >&2; exit 1; }
+if ! printf '%s\n' "$receipt" | FM_PINNED_LEDGER="$LEDGER" perl -MFcntl=O_WRONLY,O_APPEND,O_NOFOLLOW -e '
+  sysopen(my $ledger, $ENV{FM_PINNED_LEDGER}, O_WRONLY | O_APPEND | O_NOFOLLOW) or exit 1;
+  my @identity = stat($ledger);
+  exit 1 unless @identity && $identity[3] == 1;
+  while (<STDIN>) { print {$ledger} $_ or exit 1; }
+  close($ledger) or exit 1;
+'; then
+  echo "error: evidence ledger identity changed before append" >&2
+  exit 1
+fi
+cleanup
+trap - EXIT
+exec 8<&-
 printf '%s\n' "$receipt"

@@ -15,7 +15,10 @@ FAKE_NO_MISTAKES="$TMP_ROOT/fake-no-mistakes"
 cat > "$FAKE_NO_MISTAKES" <<'EOF'
 #!/bin/sh
 [ -z "${FM_NM_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_NM_LOG"
-printf '%s\n' "$FM_FAKE_NM_STATUS"
+case "$*" in
+  *"axi logs --step intent --run "*) printf '%s\n' "${FM_FAKE_NM_INTENT:-}" ;;
+  *) printf '%s\n' "$FM_FAKE_NM_STATUS" ;;
+esac
 EOF
 chmod +x "$FAKE_NO_MISTAKES"
 export FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES"
@@ -219,7 +222,7 @@ test_authoritative_docs_remain_high() {
 }
 
 test_terminal_paths_record_completion_at_their_boundary() {
-  local mode id base out meta expected_head evidence observed rc running_status passed_status
+  local mode id base out meta expected_head evidence observed rc running_status passed_status generation
   for mode in no-mistakes direct-PR local-only; do
     id="completion-${mode}"
     base=$(make_project "$id" "$mode" localized)
@@ -247,7 +250,9 @@ test_terminal_paths_record_completion_at_their_boundary() {
       no-mistakes)
         running_status=$(nm_status RUN-$id "$expected_head" pending)
         passed_status=$(nm_status RUN-$id "$expected_head" checks-passed)
-        FM_FAKE_NM_STATUS="$running_status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+        generation=$(grep '^validation_generation=' "$meta" | tail -1 | cut -d= -f2-)
+        FM_FAKE_NM_STATUS="$running_status" FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: $generation" \
+          FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
           "$CHECK" "$id" --bind-run RUN-$id --generation "$(grep '^validation_generation=' "$meta" | tail -1 | cut -d= -f2-)" >/dev/null || fail "$mode run binding failed"
         FM_FAKE_NM_STATUS="$(nm_status RUN-$id "$base" passed)" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" \
           FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence "$evidence" >/dev/null 2>&1
@@ -292,7 +297,7 @@ test_terminal_paths_record_completion_at_their_boundary() {
 }
 
 test_completion_signal_releases_validation_lock() {
-  local id=completion-signal base fakebin rc expected_head running_status passed_status
+  local id=completion-signal base fakebin rc expected_head running_status passed_status generation
   base=$(make_project "$id" no-mistakes localized)
   add_receipt "$id" AC1 test "2 passed"
   add_receipt "$id" AC2 lint "passed"
@@ -300,7 +305,9 @@ test_completion_signal_releases_validation_lock() {
   expected_head=$(git -C "$TMP_ROOT/project-$id" rev-parse HEAD)
   running_status=$(nm_status RUN-signal "$expected_head" pending)
   passed_status=$(nm_status RUN-signal "$expected_head" passed)
-  FM_FAKE_NM_STATUS="$running_status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+  generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
+  FM_FAKE_NM_STATUS="$running_status" FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: $generation" \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --bind-run RUN-signal --generation "$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)" >/dev/null || fail "signal fixture run binding failed"
   fakebin="$TMP_ROOT/signal-fakebin"
   mkdir -p "$fakebin"
@@ -321,7 +328,7 @@ EOF
 }
 
 test_replan_invalidates_run_binding() {
-  local id=replan-binding base project head running passed rc
+  local id=replan-binding base project head running passed rc generation
   base=$(make_project "$id" no-mistakes localized)
   add_receipt "$id" AC1 test "2 passed"
   add_receipt "$id" AC2 lint "passed"
@@ -330,7 +337,9 @@ test_replan_invalidates_run_binding() {
   head=$(git -C "$project" rev-parse HEAD)
   running=$(nm_status RUN-old "$head" pending)
   passed=$(nm_status RUN-old "$head" passed)
-  FM_FAKE_NM_STATUS="$running" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+  generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
+  FM_FAKE_NM_STATUS="$running" FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: $generation" \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --bind-run RUN-old --generation "$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)" >/dev/null || fail "initial run binding failed"
   FM_FAKE_NM_STATUS="$running" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "replan failed"
@@ -415,7 +424,7 @@ test_local_completion_requires_fast_forward_readiness() {
 
 
 test_high_risk_and_uncertain_inputs_fail_safe() {
-  local id=high-auth base out rc project hidden_base current_head running_status
+  local id=high-auth base out rc project hidden_base current_head running_status generation other_status
   base=$(make_project "$id" no-mistakes auth)
   add_receipt "$id" AC1 test "3 passed"
   add_receipt "$id" AC2 lint "passed"
@@ -505,6 +514,17 @@ test_high_risk_and_uncertain_inputs_fail_safe() {
     "$CHECK" "$id" --bind-run OLD-RUN --generation "$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)" >/dev/null 2>&1
   rc=$?
   expect_code 2 "$rc" "run active before planning cannot bind to the new plan"
+  generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
+  other_status=$(nm_status OTHER-RUN "$current_head" pending)
+  FM_FAKE_NM_STATUS="$other_status" FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: stale" \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run OTHER-RUN --generation "$generation" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "another pre-existing run cannot claim the new generation"
+  FM_FAKE_NM_STATUS="$other_status" FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: $generation" \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run OTHER-RUN --generation "$generation" >/dev/null \
+    || fail "run carrying the authoritative plan generation could not bind"
 
   id=preplan-observation-failure
   base=$(make_project "$id" no-mistakes localized)

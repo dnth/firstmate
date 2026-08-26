@@ -402,7 +402,7 @@ Firstmate will then classify validation risk and instruct you to follow the reco
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
 When starting no-mistakes, make \`--intent\` preserve all relevant content from this brief's \`# Task\` section plus every later accepted Firstmate requirement, clarification, constraint, exclusion, and supersession, carrying only each requirement's current accepted form; retain direct requirements instead of substituting a diff summary, and exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific.
-Immediately bind the returned run id with \`$FM_ROOT/bin/fm-receipt-check.sh $ID --bind-run <run-id> --generation <plan-generation>\` so completion can prove that exact run, generation, path, and head.
+Include the exact line \`Firstmate-Validation-Generation: <plan-generation>\` in the No-Mistakes \`--intent\`, then immediately bind the returned run id with \`$FM_ROOT/bin/fm-receipt-check.sh $ID --bind-run <run-id> --generation <plan-generation>\` so completion can prove that exact run, generation, path, and head.
 Do not hand-edit, commit, or fix findings yourself while a run is active; fix ordinary findings from any validation tier only after Firstmate directs the supported abort and branch-custody return sequence.
 
 Two firstmate-specific rules layer on top of that guidance:

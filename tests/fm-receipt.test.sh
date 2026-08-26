@@ -120,7 +120,47 @@ test_rejects_non_ship_and_unsafe_ledger() {
   pass "fm-receipt refuses non-ship tasks and unsafe ledger paths"
 }
 
+test_task_directory_swap_cannot_redirect_append() {
+  local id=swapped-task task moved outside fakebin real_jq ready release pid rc
+  write_ship "$id"
+  task="$HOME_DIR/data/$id"
+  moved="$HOME_DIR/data/$id-pinned"
+  outside="$TMP_ROOT/outside-swapped-task"
+  fakebin="$TMP_ROOT/swap-fakebin"
+  ready="$TMP_ROOT/swap-ready"
+  release="$TMP_ROOT/swap-release"
+  mkdir -p "$outside" "$fakebin"
+  cp "$task/brief.md" "$outside/brief.md"
+  : > "$outside/evidence.jsonl"
+  mkfifo "$release"
+  real_jq=$(command -v jq)
+  cat > "$fakebin/jq" <<EOF
+#!/bin/sh
+if mkdir "$TMP_ROOT/swap-once" 2>/dev/null; then
+  : > "$ready"
+  IFS= read -r _ < "$release"
+fi
+exec "$real_jq" "\$@"
+EOF
+  chmod +x "$fakebin/jq"
+  PATH="$fakebin:$PATH" FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test summary passed > "$TMP_ROOT/swap-output" 2>&1 &
+  pid=$!
+  while [ ! -e "$ready" ]; do
+    kill -0 "$pid" 2>/dev/null || fail "receipt exited before the directory-swap boundary"
+  done
+  mv "$task" "$moved"
+  ln -s "$outside" "$task"
+  printf 'continue\n' > "$release"
+  wait "$pid"
+  rc=$?
+  expect_code 0 "$rc" "a pinned receipt append should survive task-path replacement"
+  [ "$(wc -l < "$moved/evidence.jsonl" | tr -d ' ')" -eq 1 ] || fail "receipt did not append to the pinned ledger"
+  [ ! -s "$outside/evidence.jsonl" ] || fail "task-path replacement redirected the receipt outside its pinned directory"
+  pass "fm-receipt pins the task directory across append-time path replacement"
+}
+
 test_appends_one_compact_valid_receipt
 test_append_is_additive_and_result_flag_works
 test_rejects_invalid_schema_and_undeclared_criteria
 test_rejects_non_ship_and_unsafe_ledger
+test_task_directory_swap_cannot_redirect_append

@@ -159,13 +159,15 @@ on_exit() {
 trap on_exit EXIT
 trap 'exit 1' HUP INT TERM
 
-awk '/^# Setup[[:space:]]*$/{exit} {print}' "$BRIEF" > "$BRIEF_TMP"
+SETUP_LINE=$(grep -n '^# Setup[[:space:]]*$' "$BRIEF" | tail -1 | cut -d: -f1 || true)
+[ -n "$SETUP_LINE" ] || { echo "error: scout brief is missing its scaffold setup boundary" >&2; exit 1; }
+head -n "$((SETUP_LINE - 1))" "$BRIEF" > "$BRIEF_TMP"
 cp -p "$BRIEF" "$BRIEF_ORIGINAL"
 cp -p "$META" "$META_ORIGINAL"
 case "$MODE" in
   direct-PR) PROMOTED_FLOW="Run \`$FM_ROOT/bin/fm-receipt-check.sh $ID --plan\`, push only \`fm/$ID\`, open the PR, append \`done: PR {url}\`, and stop; Firstmate records completion after publishing the watcher." ;;
   local-only) PROMOTED_FLOW="Run \`$FM_ROOT/bin/fm-receipt-check.sh $ID --plan\`, then \`$FM_ROOT/bin/fm-receipt-check.sh $ID --complete --terminal-evidence branch-ready\`, append \`done: ready in branch fm/$ID\`, and stop without pushing." ;;
-  no-mistakes) PROMOTED_FLOW="Append \`done: implementation complete\` for Firstmate to plan; follow the selected receipts-only or full No-Mistakes path, bind any run to the returned plan generation, record completion, then append the mode's final PR-ready done line." ;;
+  no-mistakes) PROMOTED_FLOW="Append \`done: implementation complete\` and stop so Firstmate can run \`$FM_ROOT/bin/fm-receipt-check.sh $ID --plan\`. If the plan selects receipts-only validation, run the required mechanical checks, append fresh mechanical evidence, run \`$FM_ROOT/bin/fm-receipt-check.sh $ID --complete --terminal-evidence mechanical-checks-passed\`, open the PR, append \`done: PR {url} checks green\`, and stop. If the plan selects full No-Mistakes, include the exact line \`Firstmate-Validation-Generation: <plan-generation>\` in its \`--intent\`, start the run, immediately bind it with \`$FM_ROOT/bin/fm-receipt-check.sh $ID --bind-run <run-id> --generation <plan-generation>\`, drive the run until it reports CI green, run \`$FM_ROOT/bin/fm-receipt-check.sh $ID --complete --terminal-evidence no-mistakes-passed\`, append \`done: PR {url} checks green\`, and stop." ;;
 esac
 cat >> "$BRIEF_TMP" <<EOF
 
