@@ -884,10 +884,10 @@ EOF
     .secondmate_current.records[] | select(.id == "states")
     | .current.state == "unknown"
       and (.current.reason | contains("terminal child state"))
-      and (.current.reason | contains("done=done"))
       and (.current.reason | contains("failed=failed"))
+      and ((.current.reason | contains("done=done")) | not)
   ' >/dev/null || fail "terminal in-flight child states were silently dropped: $canonical"
-  pass "nonprogressing child states are explicit and inconsistent terminal rows invalidate"
+  pass "evidence-gated done is nonterminal while an inconsistent failed row invalidates"
 }
 
 test_registry_unavailability_and_bounds_are_explicit() {

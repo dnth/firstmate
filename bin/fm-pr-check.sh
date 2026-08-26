@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Record a PR-ready task: store one validated canonical pr=<url> and the forge's
-# exact pr_head=<sha> when available, then atomically arm a static merge poll.
+# exact pr_head=<sha> when available, atomically arm a static merge poll, then
+# record PR-path validation completion only after publication succeeds.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
@@ -11,6 +12,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
@@ -32,13 +34,6 @@ HOST=$FM_PR_HOST
 PROJECT_PATH=$FM_PR_PATH
 NUMBER=$FM_PR_NUMBER
 
-# Task-derived paths are constructed only after the canonical ID validation.
-META="$STATE/$ID.meta"
-if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" != 1 ]; then
-  echo "error: task metadata is unavailable" >&2
-  exit 1
-fi
-
 # A prior exact merged result may have queued its durable wake immediately
 # before interruption.
 # Finish only its identity-bound receipt before publishing a replacement poll.
@@ -46,6 +41,23 @@ fm_pr_poll_retirement_recover_one "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" || 
   echo "error: pending PR poll retirement could not be validated" >&2
   exit 1
 }
+
+META_SNAPSHOT=$(mktemp "$STATE/.fm-pr-meta-snapshot.XXXXXX") || exit 1
+META_RECORDS=$(mktemp "$STATE/.fm-pr-meta-records.XXXXXX") || { rm -f -- "$META_SNAPSHOT"; exit 1; }
+META_UPDATED=$(mktemp "$STATE/.fm-pr-meta-updated.XXXXXX") \
+  || { rm -f -- "$META_SNAPSHOT" "$META_RECORDS"; exit 1; }
+VALIDATION_LOCK=
+pr_check_cleanup() {
+  fm_pr_poll_cleanup
+  rm -f -- "$META_SNAPSHOT" "$META_RECORDS" "$META_UPDATED"
+  [ -z "$VALIDATION_LOCK" ] || rmdir "$VALIDATION_LOCK" 2>/dev/null || true
+}
+trap pr_check_cleanup EXIT
+trap 'exit 1' HUP INT TERM
+FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
+  "$SCRIPT_DIR/fm-receipt-store.sh" "$ID" meta-read "$META_SNAPSHOT" \
+  || { echo "error: task metadata is unavailable" >&2; exit 1; }
+META="$META_SNAPSHOT"
 
 # Refuse to arm a GitLab watch with no glab on PATH. The poll is silent on
 # every error by design, so a missing CLI would be indistinguishable from a
@@ -62,10 +74,7 @@ fi
 "$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || exit 1
 "$FM_ROOT/bin/fm-guard.sh" || true
 
-# pr_head is recorded only when the forge's CLI can supply it. gh exposes the
-# head commit as a selectable field; plain glab exposes it only inside its JSON
-# output, which would need a JSON processor firstmate does not require, so a
-# GitLab task records no pr_head. Both consumers already treat it as optional:
+# pr_head is recorded only from a forge-observed value.
 # bin/fm-teardown.sh reads the head from the forge at teardown rather than from
 # metadata and falls back to its provider-agnostic content check, and
 # bin/fm-review-diff.sh resolves the head from the remote when none is recorded.
@@ -78,45 +87,48 @@ if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/d
   fi
 fi
 
-META_TMP=
-pr_check_cleanup() {
-  fm_pr_poll_cleanup
-  [ -z "$META_TMP" ] || rm -f -- "$META_TMP"
-}
-trap pr_check_cleanup EXIT
-trap 'exit 1' HUP INT TERM
 fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" "$SCRIPT_DIR/fm-pr-poll.sh" \
   || { echo "error: could not prepare PR poll" >&2; exit 1; }
 
-META_DEVICE=$(fm_pr_file_device "$META") || exit 1
-STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
-[ "$META_DEVICE" = "$STATE_DEVICE" ] || { echo "error: task metadata is unavailable" >&2; exit 1; }
-META_TMP=$(mktemp "$STATE/.fm-pr-meta.XXXXXX") || exit 1
-while IFS= read -r line || [ -n "$line" ]; do
-  case "$line" in
-    pr=*|pr_head=*) ;;
-    *) printf '%s\n' "$line" >> "$META_TMP" || exit 1 ;;
-  esac
-done < "$META"
-printf 'pr=%s\n' "$URL" >> "$META_TMP" || exit 1
-[ -z "$PR_HEAD" ] || printf 'pr_head=%s\n' "$PR_HEAD" >> "$META_TMP" || exit 1
-chmod 0600 "$META_TMP" || exit 1
-fm_pr_private_file_valid "$META_TMP" 600 "$STATE_DEVICE" || exit 1
-fm_pr_metadata_identity_parse "$META_TMP" || exit 1
-[ "$FM_PR_META_PROVIDER" = "$PROVIDER" ] && [ "$FM_PR_META_URL" = "$URL" ] \
-  && [ "$FM_PR_META_HOST" = "$HOST" ] && [ "$FM_PR_META_PATH" = "$PROJECT_PATH" ] \
-  && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || exit 1
-fm_pr_regular_destination_on_device_or_absent "$META" "$STATE_DEVICE" || exit 1
-mv -f -- "$META_TMP" "$META" || exit 1
-META_TMP=
-fm_pr_private_file_valid "$META" 600 "$STATE_DEVICE" || exit 1
-fm_pr_metadata_identity_parse "$META" || exit 1
-[ "$FM_PR_META_PROVIDER" = "$PROVIDER" ] && [ "$FM_PR_META_URL" = "$URL" ] \
-  && [ "$FM_PR_META_HOST" = "$HOST" ] && [ "$FM_PR_META_PATH" = "$PROJECT_PATH" ] \
-  && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || exit 1
-
-fm_pr_poll_publish_prepared || {
+VALIDATION_LOCK="$STATE/.$ID.validation-plan.lock"
+mkdir "$VALIDATION_LOCK" 2>/dev/null \
+  || { VALIDATION_LOCK=; echo "error: validation metadata is locked" >&2; exit 1; }
+EXPECTED_GENERATION=$(grep '^validation_generation=' "$META" | tail -1 | cut -d= -f2- || true)
+VALIDATION_PATH=$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)
+VALIDATION_GENERATION=$(grep '^validation_generation=' "$META" | tail -1 | cut -d= -f2- || true)
+[ "$VALIDATION_GENERATION" = "$EXPECTED_GENERATION" ] \
+  || { echo "error: validation generation changed during PR registration" >&2; exit 1; }
+printf 'pr=%s\n' "$URL" > "$META_RECORDS" || exit 1
+[ -z "$PR_HEAD" ] || printf 'pr_head=%s\n' "$PR_HEAD" >> "$META_RECORDS" || exit 1
+META_REPLACE_KEYS=pr,pr_head
+if [ "$VALIDATION_PATH" = direct-PR ] || [ "$VALIDATION_PATH" = receipts-mechanical ]; then
+  [ -n "$VALIDATION_GENERATION" ] \
+    || { echo "error: PR validation generation is missing" >&2; exit 1; }
+  printf 'validation_pr_published_generation=%s\n' "$VALIDATION_GENERATION" >> "$META_RECORDS" || exit 1
+  META_REPLACE_KEYS="$META_REPLACE_KEYS,validation_pr_published_generation"
+fi
+fm_pr_poll_publish_prepared defer-metadata || {
   echo "error: could not publish PR poll" >&2
   exit 1
 }
+if ! FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" FM_RECEIPT_META_REPLACE_KEYS="$META_REPLACE_KEYS" \
+  "$SCRIPT_DIR/fm-receipt-store.sh" "$ID" meta-replace "$META" "$META_RECORDS" "$META_UPDATED"; then
+  fm_pr_poll_revoke_final || true
+  echo "error: PR metadata publication could not be recorded" >&2
+  exit 1
+fi
+mv -f -- "$META_UPDATED" "$META"
+fm_pr_metadata_identity_parse "$META" || { fm_pr_poll_revoke_final || true; exit 1; }
+[ "$FM_PR_META_PROVIDER" = "$PROVIDER" ] && [ "$FM_PR_META_URL" = "$URL" ] \
+  && [ "$FM_PR_META_HOST" = "$HOST" ] && [ "$FM_PR_META_PATH" = "$PROJECT_PATH" ] \
+  && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] \
+  || { fm_pr_poll_revoke_final || true; exit 1; }
+fm_pr_poll_artifacts_valid "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" \
+  || { fm_pr_poll_revoke_final || true; echo "error: published PR poll is invalid" >&2; exit 1; }
+if [ "$VALIDATION_PATH" = direct-PR ] || [ "$VALIDATION_PATH" = receipts-mechanical ]; then
+  rmdir "$VALIDATION_LOCK" || { echo "error: validation metadata lock could not be released" >&2; exit 1; }
+  VALIDATION_LOCK=
+  "$SCRIPT_DIR/fm-receipt-check.sh" "$ID" --complete --terminal-evidence pr-opened >/dev/null \
+    || { echo "error: PR validation completion could not be observed" >&2; exit 1; }
+fi
 printf 'armed: state/%s.check.sh\n' "$ID"

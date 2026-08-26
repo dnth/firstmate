@@ -67,6 +67,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-worktree-clean-lib.sh
+. "$SCRIPT_DIR/fm-worktree-clean-lib.sh"
 
 ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
@@ -85,8 +87,61 @@ SEP=' · '
 
 # Emit the one canonical line and exit 0. Detail is optional.
 emit() {  # <state> <source> [detail]
-  local line="state: $1${SEP}source: $2"
-  [ -n "${3:-}" ] && line="$line${SEP}$3"
+  local state=$1 source=$2 detail=${3:-} gate_detail line generation completed_generation validation_head completed_head validation_path completed_path current_head mode implementation_completed implementation_head requires_validation=0
+  if [ "$state" = 'done' ] && [ "${KIND:-}" = ship ]; then
+    if ! fm_worktree_is_clean "${WT:-}"; then
+      state=parked
+      source=validation-gate
+      detail='worktree is dirty or could not be inspected'
+    fi
+  fi
+  if [ "$state" = 'done' ] && [ "${KIND:-}" = ship ]; then
+    gate_detail=$(ship_done_evidence_gate "$ID" ship) || {
+      state=parked
+      source=evidence-gate
+      detail=$gate_detail
+    }
+  fi
+  if [ "$state" = 'done' ] && [ "${KIND:-}" = ship ]; then
+    implementation_completed=$(grep '^implementation_completed_at=' "$META" | tail -1 | cut -d= -f2- || true)
+    implementation_head=$(grep '^implementation_completed_head=' "$META" | tail -1 | cut -d= -f2- || true)
+    current_head=$(git -C "${WT:-}" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
+    case "$implementation_completed" in
+      ''|*[!0-9]*)
+        state=parked
+        source=implementation-gate
+        detail='implementation completion is missing or invalid for the current head'
+        ;;
+      *)
+        if [ -z "$current_head" ] || [ "$implementation_head" != "$current_head" ]; then
+          state=parked
+          source=implementation-gate
+          detail='implementation completion is missing or stale for the current head'
+        fi
+        ;;
+    esac
+  fi
+  if [ "$state" = 'done' ] && [ "${KIND:-}" = ship ]; then
+    generation=$(grep '^validation_generation=' "$META" | tail -1 | cut -d= -f2- || true)
+    mode=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
+    [ -z "$generation" ] || requires_validation=1
+    if [ "$source" = 'run-step' ] && [ "$mode" = no-mistakes ]; then requires_validation=1; fi
+    case "$mode" in direct-PR|local-only) requires_validation=1 ;; esac
+    completed_generation=$(grep '^validation_completed_generation=' "$META" | tail -1 | cut -d= -f2- || true)
+    validation_head=$(grep '^validation_head=' "$META" | tail -1 | cut -d= -f2- || true)
+    completed_head=$(grep '^validation_completed_head=' "$META" | tail -1 | cut -d= -f2- || true)
+    validation_path=$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)
+    completed_path=$(grep '^validation_completed_path=' "$META" | tail -1 | cut -d= -f2- || true)
+    if [ "$requires_validation" -eq 1 ] && { [ -z "$generation" ] || [ "$completed_generation" != "$generation" ] \
+      || [ "$completed_head" != "$validation_head" ] || [ "$current_head" != "$validation_head" ] \
+      || [ "$completed_path" != "$validation_path" ]; }; then
+      state=parked
+      source=validation-gate
+      detail='validation completion is missing or stale for the current plan'
+    fi
+  fi
+  line="state: $state${SEP}source: $source"
+  [ -n "$detail" ] && line="$line${SEP}$detail"
   printf '%s\n' "$line"
   exit 0
 }
@@ -102,7 +157,18 @@ meta_value() {  # <key>
 WT=$(meta_value worktree)
 KIND=$(meta_value kind)
 HARNESS=$(meta_value harness)
+MODE=$(meta_value mode)
 [ -n "$KIND" ] || KIND=ship
+if [ "$KIND" = ship ]; then
+  MODE_COUNT=$(grep -c '^mode=' "$META" 2>/dev/null || true)
+  if [ "$MODE_COUNT" -ne 1 ]; then
+    emit unknown metadata-gate "ship metadata must record exactly one delivery mode"
+  fi
+  case "$MODE" in
+    no-mistakes|direct-PR|local-only) ;;
+    *) emit unknown metadata-gate "ship metadata has an invalid delivery mode" ;;
+  esac
+fi
 
 # A torn-down (or never-created) worktree has no current state to read.
 if [ -z "$WT" ] || [ ! -d "$WT" ]; then
@@ -275,35 +341,10 @@ nm_effective_ci_step_status() {
   fi
 }
 
-# Root cause of the PR #252 incident (2026-07): for a repo where merge is left
-# to the captain, no-mistakes' ci step (and therefore top-level status/outcome)
-# stays "running" for the ENTIRE CI-monitor phase, including long after GitHub
-# reports every check green - it only reaches outcome=passed once the PR is
-# actually merged (or failed/cancelled if closed). `axi status`'s steps[] table
-# never distinguishes "still waiting on checks" from "checks green, waiting on
-# merge": both read as plain `ci,running,...`. The only place that transition is
-# recorded is the ci step's own log text, e.g. "all CI checks passed - still
-# monitoring until merged or closed" or "no CI checks reported - still
-# monitoring until merged or closed" (verified against 360+ real run logs under
-# ~/.no-mistakes/logs/*/ci.log on the installed v1.32.2 binary, including the
-# actual PR #252 run). Reads the ci step's log tail via `axi logs` and scans it
-# for the MOST RECENT recognized marker (the log is append-only/chronological,
-# so the last match is current): green with nothing red after it means CI is
-# green right now, still only waiting on merge/close.
 nm_ci_checks_state() {
-  local run_id log_tail marker
+  local run_id
   run_id=$(strip_quotes "$(nm_field id)")
-  [ -n "$run_id" ] || { printf 'unknown'; return; }
-  log_tail=$(nm_run axi logs --step ci --run "$run_id") || true
-  [ -n "$log_tail" ] || { printf 'unknown'; return; }
-  marker=$(printf '%s\n' "$log_tail" \
-    | grep -E 'CI checks passed|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running|base branch advanced.*re-arming CI monitor timeout' \
-    | tail -1)
-  case "$marker" in
-    *"checks passed"*|*"no CI checks reported - still monitoring"*) printf 'green' ;;
-    *"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'not-ready' ;;
-    *) printf 'unknown' ;;
-  esac
+  fm_nm_ci_checks_state "$WT" "$NM_TIMEOUT" "$run_id"
 }
 # Coarse fallback for cross-branch attribution. `no-mistakes axi status` (bare)
 # reports the active-or-most-recent run for the CURRENT branch when one
@@ -391,7 +432,7 @@ RUN_SOURCE=full
 COARSE_STATUS=""
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
-if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
+if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")

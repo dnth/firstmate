@@ -12,16 +12,16 @@
 # form preserves stdout, stderr, and exit status; the checked form discards
 # stderr, while fm_nm_run keeps the fail-open query contract for read-only callers.
 fm_nm_run_bounded() {  # <dir> <timeout_secs> <args...>
-  local dir=$1 timeout_secs=$2 have_timeout=none
+  local dir=$1 timeout_secs=$2 have_timeout=none nm_bin=${FM_NO_MISTAKES_BIN:-no-mistakes}
   shift 2
   if command -v timeout >/dev/null 2>&1; then have_timeout=timeout
   elif command -v gtimeout >/dev/null 2>&1; then have_timeout=gtimeout
   elif command -v perl >/dev/null 2>&1; then have_timeout=perl
   fi
   case "$have_timeout" in
-    timeout)  ( cd "$dir" && timeout "$timeout_secs" no-mistakes "$@" ) ;;
-    gtimeout) ( cd "$dir" && gtimeout "$timeout_secs" no-mistakes "$@" ) ;;
-    perl)     ( cd "$dir" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$timeout_secs" no-mistakes "$@" ) ;;
+    timeout)  ( cd "$dir" && timeout "$timeout_secs" "$nm_bin" "$@" ) ;;
+    gtimeout) ( cd "$dir" && gtimeout "$timeout_secs" "$nm_bin" "$@" ) ;;
+    perl)     ( cd "$dir" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$timeout_secs" "$nm_bin" "$@" ) ;;
     *)        return 1 ;;
   esac
 }
@@ -52,7 +52,9 @@ fm_nm_strip_quotes() {
 
 # Scalar value of a TOON key in captured `axi status` output $1.
 fm_nm_field() {  # <toon-output> <key>
-  printf '%s\n' "$1" | sed -n "s/^[[:space:]]*$2:[[:space:]]*\(.*\)/\1/p" | head -1
+  local value
+  value=$(printf '%s\n' "$1" | sed -n "s/^[[:space:]]*$2:[[:space:]]*\(.*\)/\1/p" | head -1)
+  fm_nm_strip_quotes "$value"
 }
 
 # 0 if run head $2 matches worktree $1's code identity, per the same rule
@@ -70,4 +72,24 @@ fm_nm_head_matches_worktree() {  # <worktree> <run_head>
   run_full=$(git -C "$wt" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 1
   [ "$run_full" = "$local_full" ] && return 0
   git -C "$wt" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null
+}
+
+# During no-mistakes' ci monitor, top-level status and outcome stay running after
+# checks turn green until the PR merges, while the append-only ci log records the
+# transition. The most recent recognized log marker is therefore authoritative:
+# green remains ready unless a later running, failed, issue, or re-arm marker
+# supersedes it.
+fm_nm_ci_checks_state() {  # <worktree> <timeout-secs> <run-id>
+  local wt=$1 timeout_secs=$2 run_id=$3 log_tail marker
+  [ -n "$run_id" ] || { printf 'unknown'; return 0; }
+  log_tail=$(fm_nm_run "$wt" "$timeout_secs" axi logs --step ci --run "$run_id")
+  [ -n "$log_tail" ] || { printf 'unknown'; return 0; }
+  marker=$(printf '%s\n' "$log_tail" \
+    | grep -E 'CI checks passed|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running|base branch advanced.*re-arming CI monitor timeout' \
+    | tail -1)
+  case "$marker" in
+    *"checks passed"*|*"no CI checks reported - still monitoring"*) printf 'green' ;;
+    *"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'not-ready' ;;
+    *) printf 'unknown' ;;
+  esac
 }

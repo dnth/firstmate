@@ -77,7 +77,13 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case " $* " in
-  *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
+  *" headRefOid "*)
+    if [ -n "${FM_TEST_GH_HEAD_READY:-}" ]; then
+      : > "$FM_TEST_GH_HEAD_READY"
+      while [ ! -e "$FM_TEST_GH_HEAD_RELEASE" ]; do sleep 0.01; done
+    fi
+    printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}"
+    ;;
   *" state "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
     [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
@@ -108,14 +114,19 @@ SH
 }
 
 write_task_meta() {
-  local dir=$1 id=${2:-task-a}
+  local dir=$1 id=${2:-task-a} mode=${3:-no-mistakes}
+  mkdir -p "$dir/home/data/$id"
+  printf '# Task\nFixture.\n\n# Acceptance criteria\n- AC1: Fixture works.\n\n# Definition of done\nDelivery contract: mode=%s\n' "$mode" \
+    > "$dir/home/data/$id/brief.md"
+  : > "$dir/home/data/$id/evidence.jsonl"
+  : > "$dir/home/data/$id/.evidence.lock"
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" \
     "endpoint_task_id=$id" \
     "worktree=$dir/wt" \
     "project=$dir/project" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=$mode"
 }
 
 write_poll_meta() {
@@ -530,12 +541,21 @@ test_valid_recording_and_merge_derivation() {
   dir=$(make_case valid-recording)
   write_task_meta "$dir"
   expected=0123456789abcdef0123456789abcdef01234567
+  {
+    printf 'validation_started_at=1787670000\n'
+    printf 'validation_completed_at=1787670005\n'
+    printf 'validation_completed_head=%s\n' "$expected"
+  } >> "$dir/home/state/task-a.meta"
   FM_TEST_GH_HEAD=$expected run_check_entry "$dir" task-a https://github.com/my-org/repo_name.with-dots/pull/37 \
     > "$dir/stdout" 2> "$dir/stderr" || fail "valid direct check failed"
 
   grep -qxF 'pr=https://github.com/my-org/repo_name.with-dots/pull/37' "$dir/home/state/task-a.meta" \
     || fail "canonical pr metadata was not exact"
   grep -qxF "pr_head=$expected" "$dir/home/state/task-a.meta" || fail "PR head metadata was not exact"
+  grep -qx 'validation_completed_at=1787670005' "$dir/home/state/task-a.meta" \
+    || fail "PR-ready recording changed the path-specific validation completion time"
+  grep -qx "validation_completed_head=$expected" "$dir/home/state/task-a.meta" \
+    || fail "PR-ready recording changed the validated completion head"
   cmp -s "$POLL" "$dir/home/state/task-a.check.sh" || fail "published check was not byte-for-byte static"
   [ "$(file_mode "$dir/home/state/task-a.check.sh")" = 600 ] || fail "published check mode was not 0600"
   [ "$(file_mode "$dir/home/state/task-a.pr-poll")" = 600 ] || fail "published sidecar mode was not 0600"
@@ -557,6 +577,8 @@ test_valid_recording_and_merge_derivation() {
   [ "$count" -eq 1 ] || fail "duplicate pr metadata was appended"
   count=$(grep -c '^pr_head=' "$dir/home/state/task-a.meta")
   [ "$count" -eq 1 ] || fail "duplicate pr_head metadata was appended"
+  count=$(grep -c '^validation_completed_at=' "$dir/home/state/task-a.meta")
+  [ "$count" -eq 1 ] || fail "duplicate validation completion metadata was appended"
 
   : > "$dir/gh-axi.log"
   run_merge_entry "$dir" task-a https://github.com/my-org/repo_name.with-dots/pull/37 -- --merge \
@@ -3356,6 +3378,78 @@ test_gitlab_merged_poll_retires() {
   pass "GitHub and GitLab exact merged results share one retirement path"
 }
 
+test_validation_plan_lock_serializes_pr_registration() {
+  local dir rc
+  dir=$(make_case validation-plan-lock)
+  write_task_meta "$dir"
+  printf 'validation_generation=plan-locked\nvalidation_path=direct-PR\n' >> "$dir/home/state/task-a.meta"
+  mkdir "$dir/home/state/.task-a.validation-plan.lock"
+  set +e
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/18 >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "PR registration ignored the active validation-plan lock"
+  assert_no_grep '^pr=' "$dir/home/state/task-a.meta" "locked PR registration replaced metadata"
+  assert_absent "$dir/home/state/task-a.check.sh" "locked PR registration published a watcher"
+  pass "PR registration serializes with validation planning"
+}
+
+test_fast_pr_path_records_completion_and_keeps_watcher() {
+  local dir head generation
+  dir=$(make_case fast-pr-completion)
+  write_task_meta "$dir" task-a direct-PR
+  git -C "$dir/wt" init -q
+  fm_git_identity fmtest fmtest@example.invalid
+  printf 'fixture\n' > "$dir/wt/file.txt"
+  git -C "$dir/wt" add file.txt
+  git -C "$dir/wt" commit -q -m fixture
+  head=$(git -C "$dir/wt" rev-parse HEAD)
+  generation=0123456789abcdef0123456789abcdef
+  printf '{"criterion":"AC1","type":"test","outcome":"success","summary":"fixture","result":"passed","head":"%s"}\n' "$head" \
+    > "$dir/home/data/task-a/evidence.jsonl"
+  printf 'validation_generation=%s\nvalidation_path=direct-PR\nvalidation_head=%s\nvalidation_started_at=1787670000\n' \
+    "$generation" "$head" >> "$dir/home/state/task-a.meta"
+  FM_TEST_GH_HEAD="$head" run_check_entry "$dir" task-a https://github.com/o/r/pull/20 \
+    > "$dir/fast.out" 2> "$dir/fast.err" || fail "direct-PR registration did not complete"
+  assert_present "$dir/home/state/task-a.check.sh" "direct-PR completion revoked its watcher"
+  grep -qx "validation_pr_published_generation=$generation" "$dir/home/state/task-a.meta" \
+    || fail "direct-PR completion lost its watcher generation"
+  grep -qx "validation_completed_head=$head" "$dir/home/state/task-a.meta" \
+    || fail "direct-PR completion did not bind the validated head"
+  pass "fast PR registration completes and keeps its watcher armed"
+}
+
+test_pr_metadata_swap_after_snapshot_fails_closed() {
+  local dir ready release external original pid rc
+  dir=$(make_case pr-metadata-swap)
+  write_task_meta "$dir"
+  printf 'validation_generation=plan-swap\nvalidation_path=direct-PR\n' >> "$dir/home/state/task-a.meta"
+  ready="$dir/head.ready"
+  release="$dir/head.release"
+  external="$dir/external-meta"
+  original="$dir/original-meta"
+  printf 'external sentinel\n' > "$external"
+  FM_TEST_GH_HEAD_READY="$ready" FM_TEST_GH_HEAD_RELEASE="$release" \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/19 > "$dir/swap.out" 2> "$dir/swap.err" &
+  pid=$!
+  while [ ! -e "$ready" ]; do
+    kill -0 "$pid" 2>/dev/null || fail "PR registration exited before the metadata swap boundary"
+  done
+  mv "$dir/home/state/task-a.meta" "$original"
+  ln -s "$external" "$dir/home/state/task-a.meta"
+  : > "$release"
+  set +e
+  wait "$pid"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "PR registration accepted metadata replaced after its pinned snapshot"
+  [ "$(cat "$external")" = 'external sentinel' ] || fail "PR metadata swap redirected the transaction"
+  assert_absent "$dir/home/state/task-a.check.sh" "failed metadata transaction left a published watcher"
+  assert_absent "$dir/home/state/task-a.pr-poll" "failed metadata transaction left a published sidecar"
+  assert_absent "$dir/home/state/task-a.pr-poll-registration" "failed metadata transaction left published provenance"
+  pass "PR metadata publication rejects post-snapshot redirection"
+}
+
 test_parser_matrix
 test_gitlab_merge_watch
 test_merged_poll_retires_once
@@ -3365,6 +3459,9 @@ test_external_merge_transition_retires_only_terminal_poll
 test_retirement_refuses_replacement_and_nonterminal_results
 test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
+test_validation_plan_lock_serializes_pr_registration
+test_fast_pr_path_records_completion_and_keeps_watcher
+test_pr_metadata_swap_after_snapshot_fails_closed
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert

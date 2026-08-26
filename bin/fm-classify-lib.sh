@@ -35,6 +35,11 @@ _FM_CLASSIFY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)"
 # or no-mistakes install; absent, it points at the real sibling script.
 FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
 
+# The evidence checker used by ship_done_evidence_gate.
+# Every task recorded as kind=ship is subject to this gate, including promoted
+# scouts and malformed or pre-rollout briefs, which fail closed.
+FM_RECEIPT_CHECK_BIN="${FM_RECEIPT_CHECK_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-receipt-check.sh}"
+
 # Captain-relevant status verbs. A status line carrying any of these is work
 # firstmate must see. Lines without these verbs are no-verb signals: the watcher
 # absorbs them only with positive provably-working evidence, while the daemon uses
@@ -94,6 +99,32 @@ status_is_terminal_verb() {
     done|needs-decision|blocked|failed) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# Return 0 when a done state may be accepted for this task, or 1 with one compact
+# detail line when a ship brief has missing or invalid evidence.
+# Non-ship tasks are not applicable and return 0, preserving scout/report behavior.
+# The executable checker owns criterion and ledger mechanics; this classifier
+# only supplies the completion-boundary decision used by fm-crew-state.sh.
+ship_done_evidence_gate() {  # <task-id> <kind>
+  local id=$1 kind=$2 out rc missing invalid
+  [ "$kind" = ship ] || return 0
+  out=$("$FM_RECEIPT_CHECK_BIN" "$id" 2>/dev/null); rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  if command -v jq >/dev/null 2>&1 && printf '%s' "$out" | jq -e . >/dev/null 2>&1; then
+    missing=$(printf '%s' "$out" | jq -r '.missing | join(",")')
+    invalid=$(printf '%s' "$out" | jq -r '.invalid | join("; ")')
+    if [ -n "$invalid" ]; then
+      printf 'invalid evidence: %s' "$invalid"
+    elif [ -n "$missing" ]; then
+      printf 'missing evidence: %s' "$missing"
+    else
+      printf 'evidence check failed'
+    fi
+  else
+    printf 'evidence check failed'
+  fi
+  return 1
 }
 
 # 0 if the given (last) status line matches a captain-relevant verb.

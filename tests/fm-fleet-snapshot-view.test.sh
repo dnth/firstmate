@@ -106,7 +106,7 @@ EOF
     "project=alpha" \
     "harness=claude" \
     "kind=ship" \
-    "mode=ship" \
+    "mode=no-mistakes" \
     "yolo=off" \
     "pr=https://github.com/kunchenguid/firstmate/pull/9"
   printf 'needs-decision: choose an API shape\n' > "$home/state/ship-task.status"
@@ -142,7 +142,7 @@ EOF
     "project=alpha" \
     "harness=codex" \
     "kind=ship" \
-    "mode=ship"
+    "mode=no-mistakes"
 }
 
 test_omp_secondmate_snapshot_uses_bound_identity() {
@@ -266,7 +266,7 @@ EOF
     "project=alpha" \
     "harness=codex" \
     "kind=ship" \
-    "mode=ship"
+    "mode=no-mistakes"
   printf 'working: visible\n' > "$home/state/visible-ship.status"
   fakebin=$(make_fakebin "$home")
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
@@ -294,7 +294,7 @@ EOF
     "project=alpha" \
     "harness=codex" \
     "kind=ship" \
-    "mode=ship"
+    "mode=no-mistakes"
   printf 'working: orphan now live\n' > "$home/state/orphan-ship.status"
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '
@@ -326,7 +326,7 @@ test_normalized_roles_and_plural_blocker_readiness() {
 EOF
   fm_write_meta "$home/state/worker.meta" \
     "window=firstmate:fm-worker" "worktree=$home/projects/worker" "project=alpha" \
-    "harness=codex" "kind=ship" "mode=ship"
+    "harness=codex" "kind=ship" "mode=no-mistakes"
   printf 'working: preparing canary\n' > "$home/state/worker.status"
   fakebin=$(make_fakebin "$home")
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
@@ -414,7 +414,7 @@ test_event_hints_follow_reconciled_current_state() {
     "project=alpha" \
     "harness=claude" \
     "kind=ship" \
-    "mode=ship"
+    "mode=no-mistakes"
   record_claude_idle "$home/state" active-decision
   printf 'needs-decision: choose an API shape\n' > "$home/state/active-decision.status"
   fm_write_meta "$home/state/active-blocked.meta" \
@@ -423,7 +423,7 @@ test_event_hints_follow_reconciled_current_state() {
     "project=alpha" \
     "harness=claude" \
     "kind=ship" \
-    "mode=ship"
+    "mode=no-mistakes"
   record_claude_idle "$home/state" active-blocked
   printf 'blocked: waiting on access\n' > "$home/state/active-blocked.status"
   fm_write_meta "$home/state/stale-decision.meta" \
@@ -432,7 +432,7 @@ test_event_hints_follow_reconciled_current_state() {
     "project=alpha" \
     "harness=claude" \
     "kind=ship" \
-    "mode=ship"
+    "mode=no-mistakes"
   hint_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" stale-decision)
   "$ROOT/bin/fm-busy-event.sh" apply "$home/state" stale-decision busy --gen "$hint_gen" \
     --source claude-hook --event user-prompt-submit
@@ -443,7 +443,7 @@ test_event_hints_follow_reconciled_current_state() {
     "project=alpha" \
     "harness=claude" \
     "kind=ship" \
-    "mode=ship"
+    "mode=no-mistakes"
   hint_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" stale-blocked)
   "$ROOT/bin/fm-busy-event.sh" apply "$home/state" stale-blocked busy --gen "$hint_gen" \
     --source claude-hook --event user-prompt-submit

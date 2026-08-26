@@ -2400,6 +2400,18 @@ delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task
 # line. A spawn that disagrees would launch a worker whose instructions and whose
 # recorded task delivery differ, which is the exact drift this contract prevents.
 if [ "$KIND" = ship ]; then
+  if grep -F '{TASK}' "$BRIEF" >/dev/null 2>&1; then
+    echo "error: ship brief still contains {TASK}; replace every scaffold placeholder before spawn" >&2
+    exit 1
+  fi
+  if grep -Fx '# Acceptance criteria' "$BRIEF" >/dev/null 2>&1; then
+    if ! "$FM_ROOT/bin/fm-receipt-check.sh" --parse-criteria "$BRIEF" >/dev/null 2>&1; then
+      echo "error: ship brief acceptance criteria are invalid or still contain placeholders" >&2
+      exit 1
+    fi
+  else
+    echo "warning: $BRIEF predates acceptance-criterion receipts; launching is allowed, but implementation completion remains evidence-gated until Firstmate installs concrete criteria" >&2
+  fi
   PROJ_NAME=$(basename "$PROJ_ABS")
   BRIEF_MODE=$(sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
   if [ -z "$BRIEF_MODE" ]; then

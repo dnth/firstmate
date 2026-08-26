@@ -195,23 +195,49 @@ EOF
 # one of these DOD blocks, since a broken heredoc corrupts or empties the
 # generated brief content, not just the script's own syntax.
 test_ship_modes_generate_clean_briefs() {
-  local home id mode brief status
+  local home id mode brief status out
   home="$TMP_ROOT/ship-home"
   write_registry "$home"
 
   for id_mode in "brief-nomistakes-a1:no-mistakes" "brief-directpr-a2:direct-PR" "brief-localonly-a3:local-only"; do
     id=${id_mode%%:*}
     mode=${id_mode##*:}
-    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1; status=$?
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" 2>&1); status=$?
     expect_code 0 "$status" "fm-brief.sh $id --mode $mode should exit 0"
+    assert_contains "$out" "replace {TASK} and every {ACCEPTANCE CRITERION}" \
+      "$id: scaffold success omitted required placeholder replacements"
     brief="$home/data/$id/brief.md"
     assert_present "$brief" "$id: brief was not scaffolded"
     assert_grep "# Definition of done" "$brief" "$id: brief missing Definition of done section"
+    assert_grep "# Acceptance criteria" "$brief" "$id: ship brief missing stable acceptance criteria section"
+    assert_grep "- AC1: {ACCEPTANCE CRITERION}" "$brief" "$id: ship brief missing the AC1 scaffold"
+    assert_present "$home/data/$id/evidence.jsonl" "$id: ship evidence ledger was not created"
+    assert_present "$home/data/$id/.evidence.lock" "$id: ship evidence lock was not created"
+    [ ! -s "$home/data/$id/evidence.jsonl" ] || fail "$id: new evidence ledger was not empty"
+    assert_grep '--outcome <success|failure|negative|zero|skipped|empty|placeholder|weak>' "$brief" \
+      "$id: generated receipt contract omitted the structured outcomes"
+    assert_grep "Only \`--outcome success\` evidences a criterion" "$brief" \
+      "$id: generated receipt contract did not identify its sole affirmative outcome"
     grep -qx "Delivery contract: mode=$mode" "$brief" \
       || fail "$id: brief did not record its machine-readable delivery contract line"
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
+    case "$mode" in
+      direct-PR)
+        assert_grep "fm-receipt-check.sh $id --plan" "$brief" "$id: direct-PR brief omitted validation start"
+        assert_grep "canonical PR-ready helper records the observed completion" "$brief" "$id: direct-PR brief omitted observed PR completion"
+        ;;
+      local-only)
+        assert_grep "fm-receipt-check.sh $id --plan" "$brief" "$id: local-only brief omitted validation start"
+        assert_grep "fm-receipt-check.sh $id --complete" "$brief" "$id: local-only brief omitted branch-ready completion"
+        ;;
+      no-mistakes)
+        assert_grep "fm-receipt-check.sh $id --complete" "$brief" "$id: no-mistakes brief omitted pipeline completion"
+        assert_grep "fm-receipt-check.sh $id --bind-run" "$brief" "$id: no-mistakes brief omitted exact run binding"
+        assert_grep "ordinary findings from any validation tier" "$brief" "$id: no-mistakes brief narrowed original-worker fixes"
+        ;;
+    esac
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
@@ -256,8 +282,8 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
-    "explicit no-mistakes brief did not render the pipeline definition of done"
+  assert_grep "Firstmate will then classify validation risk" "$brief" \
+    "explicit no-mistakes brief did not render risk-based validation"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a6 never-registered --mode local-only >/dev/null 2>&1 \
@@ -699,6 +725,8 @@ test_scout_and_secondmate_scaffold() {
   assert_present "$brief" "scout brief was not scaffolded"
   assert_grep "SCOUT task" "$brief" "scout brief must declare itself a scout task"
   assert_grep "report.md" "$brief" "scout brief must point at the report deliverable"
+  assert_no_grep "# Acceptance criteria" "$brief" "scout brief must not gain the ship evidence contract"
+  assert_absent "$BRIEF_HOME/data/brief-scout-q6/evidence.jsonl" "scout scaffold created a ship evidence ledger"
 
   FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
     FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-sm-q6 --secondmate alpha >/dev/null 2>&1 \
@@ -708,6 +736,82 @@ test_scout_and_secondmate_scaffold() {
   assert_grep "persistent second mate" "$brief" \
     "secondmate charter must declare its role"
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
+}
+
+test_concurrent_ship_scaffold_has_one_owner() {
+  local home id=brief-concurrent-owner target first second successes=0 leftovers
+  home="$TMP_ROOT/concurrent-owner/home"
+  target="$home/data/$id"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" alpha --mode direct-PR \
+    > "$home/first.out" 2>&1 &
+  first=$!
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" alpha --mode direct-PR \
+    > "$home/second.out" 2>&1 &
+  second=$!
+  if wait "$first"; then successes=$((successes + 1)); fi
+  if wait "$second"; then successes=$((successes + 1)); fi
+  [ "$successes" -eq 1 ] || fail "concurrent ship scaffolds did not produce exactly one owner"
+  assert_present "$target/brief.md" "winning scaffold lost its brief"
+  assert_present "$target/evidence.jsonl" "winning scaffold lost its evidence ledger"
+  assert_present "$target/.evidence.lock" "winning scaffold lost its evidence lock"
+  assert_grep 'Delivery contract: mode=direct-PR' "$target/brief.md" "winning scaffold brief was incomplete"
+  leftovers=$(find "$target" -name '.brief.owner.*' -print)
+  [ -z "$leftovers" ] || fail "completed scaffold retained brief ownership artifacts: $leftovers"
+  pass "fm-brief: concurrent ship scaffolds preserve one complete owner"
+}
+
+test_ship_scaffold_rejects_destination_swap_and_retries_cleanly() {
+  local home id=brief-destination-swap modules ready release outside pid rc leftovers
+  home="$TMP_ROOT/destination-swap/home"
+  modules="$TMP_ROOT/destination-swap/modules"
+  ready="$TMP_ROOT/destination-swap/ready"
+  release="$TMP_ROOT/destination-swap/release"
+  outside="$TMP_ROOT/destination-swap/outside"
+  mkdir -p "$home/data" "$modules" "$outside"
+  printf 'sentinel\n' > "$outside/keep"
+  cat > "$modules/HoldScaffoldRename.pm" <<'PERL'
+package HoldScaffoldRename;
+use strict;
+use warnings;
+BEGIN {
+  *CORE::GLOBAL::rename = sub ($$) {
+    if (defined($ENV{FM_SCAFFOLD_DEST}) && $_[1] eq $ENV{FM_SCAFFOLD_DEST} && $_[0] =~ /^\./) {
+      open(my $ready, ">", $ENV{FM_SCAFFOLD_READY}) or die "ready: $!";
+      close($ready) or die "ready close: $!";
+      select(undef, undef, undef, 0.01) until -e $ENV{FM_SCAFFOLD_RELEASE};
+    }
+    return CORE::rename($_[0], $_[1]);
+  };
+}
+1;
+PERL
+  PERL5LIB="$modules" PERL5OPT=-MHoldScaffoldRename FM_SCAFFOLD_DEST="$id" \
+    FM_SCAFFOLD_READY="$ready" FM_SCAFFOLD_RELEASE="$release" FM_HOME="$home" \
+    "$ROOT/bin/fm-brief.sh" "$id" alpha --mode direct-PR > "$home/swap.out" 2> "$home/swap.err" &
+  pid=$!
+  while [ ! -e "$ready" ]; do
+    kill -0 "$pid" 2>/dev/null || fail "ship scaffold exited before its atomic publication boundary"
+  done
+  ln -s "$outside" "$home/data/$id"
+  : > "$release"
+  set +e
+  wait "$pid"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "ship scaffold published through a replaced destination"
+  [ "$(cat "$outside/keep")" = sentinel ] || fail "ship scaffold changed the redirected destination"
+  [ "$(find "$outside" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -eq 1 ] \
+    || fail "ship scaffold created evidence through the redirected destination"
+  leftovers=$(find "$home/data" -maxdepth 1 -name ".$id.scaffold.*" -print)
+  [ -z "$leftovers" ] || fail "refused ship scaffold left staging artifacts"
+  rm "$home/data/$id"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" alpha --mode direct-PR >/dev/null \
+    || fail "ship scaffold retry failed after an interrupted publication"
+  assert_present "$home/data/$id/brief.md" "ship scaffold retry did not publish the brief"
+  assert_present "$home/data/$id/evidence.jsonl" "ship scaffold retry did not publish the ledger"
+  assert_present "$home/data/$id/.evidence.lock" "ship scaffold retry did not publish the lock"
+  pass "fm-brief: ship evidence publication is atomic and retryable"
 }
 
 test_script_parses
@@ -730,3 +834,5 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_concurrent_ship_scaffold_has_one_owner
+test_ship_scaffold_rejects_destination_swap_and_retries_cleanly
