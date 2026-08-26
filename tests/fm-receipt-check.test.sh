@@ -45,6 +45,8 @@ test_help_advertises_generation_bound_run_binding() {
     "receipt checker help omitted the required run generation"
   assert_contains "$out" "--implementation-complete" \
     "receipt checker help omitted the implementation boundary action"
+  assert_contains "$out" "refreshes it when that head changes" \
+    "receipt checker help misstated current-head timestamp refresh"
   assert_contains "$out" "--mechanical-ready" \
     "receipt checker help omitted the receipts-mechanical readiness command"
   assert_contains "$out" "bin/fm-pr-check.sh <task-id> <url>" \

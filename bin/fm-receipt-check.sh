@@ -29,8 +29,9 @@
 # are invalid once completion is checked.
 # Only structurally valid receipts with outcome=passed evidence their criterion;
 # result remains descriptive, so expected observations such as 401 stay usable.
-# --implementation-complete records the first implementation completion time and
-# current clean commit before --plan may publish a validation generation.
+# --implementation-complete records one timestamp bound to the current clean
+# implementation head, refreshes it when that head changes, and remains
+# idempotent for repeated calls at the same head before --plan.
 #
 # --plan first requires a complete evidence check, then inspects the recorded
 # worktree's base..HEAD diff with a deterministic conservative classifier.
