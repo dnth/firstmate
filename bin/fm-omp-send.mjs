@@ -22,16 +22,10 @@ if (!socketPath || !taskId || content === undefined) {
   process.exit(2);
 }
 
-const requestId = randomUUID();
-const timeout = setTimeout(() => {
-  process.stderr.write(`error: native OMP worker receipt timed out (request=${requestId})\n`);
-  process.exit(1);
-}, 3000);
-timeout.unref();
-
 const socket = net.createConnection(socketPath);
 let input = "";
 let settled = false;
+let requestWritten = false;
 const finish = (code, message = "") => {
   if (settled) return;
   settled = true;
@@ -40,10 +34,29 @@ const finish = (code, message = "") => {
   socket.destroy();
   process.exit(code);
 };
+const finishAmbiguous = (reason) => finish(
+  255,
+  `error: native OMP worker delivery is ambiguous after request write: ${reason}; do not resend`,
+);
+const requestId = randomUUID();
+const timeout = setTimeout(() => {
+  if (requestWritten) {
+    finishAmbiguous(`receipt timed out (request=${requestId})`);
+  } else {
+    finish(1, `error: native OMP worker receipt timed out before request write (request=${requestId})`);
+  }
+}, 3000);
+timeout.unref();
 
 socket.setEncoding("utf8");
 socket.on("connect", () => {
-  socket.end(`${JSON.stringify({ version: 1, requestId, taskId, content })}\n`);
+  try {
+    requestWritten = true;
+    socket.end(`${JSON.stringify({ version: 1, requestId, taskId, content })}\n`);
+  } catch (error) {
+    requestWritten = false;
+    finish(1, `error: native OMP worker request could not be written: ${error.message}`);
+  }
 });
 socket.on("data", (chunk) => {
   input += chunk;
@@ -53,19 +66,27 @@ socket.on("data", (chunk) => {
   try {
     response = JSON.parse(input.slice(0, newline));
   } catch {
-    finish(1, "error: native OMP worker returned malformed receipt");
+    finishAmbiguous("malformed receipt");
     return;
   }
   if (response?.requestId !== requestId || response?.taskId !== taskId) {
-    finish(1, "error: native OMP worker returned a mismatched receipt");
+    finishAmbiguous("mismatched receipt");
     return;
   }
   if (response?.status === "ambiguous" && typeof response.session === "string" && response.session) {
     finish(255, `error: native OMP worker delivered the message but its receipt is ambiguous: ${response.reason || "receipt persistence failed"}; do not resend`);
     return;
   }
-  if (response?.status !== "accepted" || typeof response.session !== "string" || !response.session) {
+  if (response?.status === "refused") {
     finish(1, `error: native OMP worker refused the message: ${response?.reason || "no reason supplied"}`);
+    return;
+  }
+  if (response?.status === "ambiguous") {
+    finishAmbiguous("malformed ambiguous receipt");
+    return;
+  }
+  if (response?.status !== "accepted" || typeof response.session !== "string" || !response.session) {
+    finishAmbiguous("malformed receipt");
     return;
   }
   process.stdout.write(`native-queued request=${requestId} session=${response.session}\n`);
@@ -73,5 +94,8 @@ socket.on("data", (chunk) => {
 });
 socket.on("error", (error) => finish(1, `error: native OMP worker bridge unavailable: ${error.message}`));
 socket.on("close", () => {
-  if (!settled) finish(1, "error: native OMP worker closed the bridge without a receipt");
+  if (!settled) {
+    if (requestWritten) finishAmbiguous("bridge closed without a receipt");
+    else finish(1, "error: native OMP worker closed the bridge before request write");
+  }
 });

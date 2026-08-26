@@ -243,6 +243,64 @@ JS
   pass "fm-send: missing native OMP binding refuses without composer delivery"
 }
 
+test_post_write_native_receipt_uncertainty_is_ambiguous() {
+  local mode home fb bun omp log entered socket request server rc err
+  for mode in timeout malformed close; do
+    IFS=$'\t' read -r home fb bun omp log entered < <(setup_case "post-write-$mode" omp)
+    socket="/tmp/fm-turn-test/omp-send.sock"
+    request="$home/native-request.json"
+    err="$home/post-write.err"
+    mkdir -p "$(dirname "$socket")"
+    rm -f "$socket"
+    printf 'omp_native_socket=%s\n' "$socket" >> "$home/state/turn-test.meta"
+    node --input-type=module - "$socket" "$request" "$mode" <<'JS' &
+import { writeFileSync } from "node:fs";
+import net from "node:net";
+import process from "node:process";
+
+const [socketPath, requestPath, mode] = process.argv.slice(2);
+const server = net.createServer((socket) => {
+  let input = "";
+  socket.setEncoding("utf8");
+  socket.on("data", (chunk) => {
+    input += chunk;
+    if (!input.includes("\n")) return;
+    writeFileSync(requestPath, input);
+    if (mode === "malformed") socket.end("not-json\n");
+    else if (mode === "close") socket.end();
+  });
+});
+server.listen(socketPath);
+JS
+    server=$!
+    for _ in $(seq 1 100); do
+      [ -S "$socket" ] && break
+      sleep 0.01
+    done
+    env PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+      FM_TEST_MODE="post-write-$mode" FM_TEST_BUN="$bun" FM_TEST_OMP="$omp" \
+      FM_TEST_SEND_LOG="$log" FM_TEST_ENTERED="$entered" FM_SEND_SETTLE=0 \
+      "$SEND" turn-test 'steer now' >/dev/null 2>"$err"
+    rc=$?
+    kill "$server" 2>/dev/null || true
+    wait "$server" 2>/dev/null || true
+    expect_code 5 "$rc" "a post-write $mode receipt uncertainty should be delivered-ambiguous"
+    assert_contains "$(cat "$err")" 'delivered-ambiguous' \
+      "post-write $mode uncertainty did not use the ambiguous delivery verdict"
+    assert_contains "$(cat "$err")" 'do not resend' \
+      "post-write $mode uncertainty did not forbid redelivery"
+    assert_contains "$(cat "$request")" 'steer now' \
+      "post-write $mode test did not prove the request reached the bridge"
+    assert_not_contains "$(cat "$log")" 'literal=' \
+      "post-write $mode uncertainty typed terminal text"
+    assert_not_contains "$(cat "$log")" 'key=Enter' \
+      "post-write $mode uncertainty submitted terminal Enter"
+    rm -f "$socket"
+    rmdir /tmp/fm-turn-test 2>/dev/null || true
+  done
+  pass "fm-send: post-write timeout, malformed receipt, and receipt-less close refuse resend ambiguously"
+}
+
 test_confirmed_submit_without_turn_is_distinct_and_wakes_recovery() {
   local home fb bun omp log entered rc err status wake
   IFS=$'\t' read -r home fb bun omp log entered < <(setup_case wedge omp)
@@ -604,6 +662,7 @@ SH
 
 test_native_omp_worker_send_uses_bound_session_api
 test_omp_task_without_native_binding_refuses_without_composer_injection
+test_post_write_native_receipt_uncertainty_is_ambiguous
 test_non_omp_does_not_gain_turn_start_verification
 test_omp_key_ignores_turnstart_configuration
 test_omp_exit_ignores_turnstart_configuration
