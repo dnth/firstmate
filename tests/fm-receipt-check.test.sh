@@ -8,6 +8,7 @@ set -u
 CHECK="$ROOT/bin/fm-receipt-check.sh"
 RECEIPT="$ROOT/bin/fm-receipt.sh"
 STORE="$ROOT/bin/fm-receipt-store.sh"
+SCHEMA="$ROOT/bin/fm-receipt-schema.sh"
 BRIEF="$ROOT/bin/fm-brief.sh"
 TMP_ROOT=$(fm_test_tmproot fm-receipt-check)
 HOME_DIR="$TMP_ROOT/home"
@@ -58,6 +59,11 @@ test_help_advertises_generation_bound_run_binding() {
     "receipt store help omitted the pinned append mode"
   assert_contains "$out" "recovers identity-bound" \
     "receipt store help omitted promotion recovery ownership"
+  out=$("$SCHEMA" --help) || fail "receipt schema help failed"
+  assert_contains "$out" "Usage: fm-receipt-schema.sh" \
+    "receipt schema help omitted its executable interface"
+  assert_contains "$out" "required criterion, type, outcome" \
+    "receipt schema help omitted its required key contract"
   out=$("$BRIEF" --render-ship-delivery help-task no-mistakes) \
     || fail "ship delivery renderer failed"
   assert_contains "$out" "fm-receipt-check.sh help-task --implementation-complete" \
@@ -487,7 +493,7 @@ test_ci_green_log_allows_exact_bound_run_completion() {
 }
 
 test_claim_invalidation_marker_is_append_only_and_idempotent() {
-  local id=claim-invalidation out rc meta base generation first_generation project
+  local id=claim-invalidation out rc meta base generation first_generation project invalidated_head invalidated_boundary
   base=$(make_project "$id" no-mistakes localized)
   add_receipt "$id" AC1 test passed
   add_receipt "$id" AC2 lint passed
@@ -498,21 +504,28 @@ test_claim_invalidation_marker_is_append_only_and_idempotent() {
   FM_FAKE_NM_STATUS= FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null \
     || fail "claim invalidation fixture plan failed"
   first_generation=$(grep '^validation_generation=' "$meta" | tail -1 | cut -d= -f2-)
+  project="$TMP_ROOT/project-$id"
+  printf '#!/usr/bin/env bash\nprintf "pre-finding\\n"\n' > "$project/src/app.sh"
+  git -C "$project" add src/app.sh
+  git -C "$project" commit -q -m 'change before finding'
+  add_receipt "$id" AC1 test "pre-finding evidence"
+  invalidated_head=$(git -C "$project" rev-parse HEAD)
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --invalidate-claim F9 --invalidated-criterion AC1) \
     || fail "claim invalidation marker failed"
-  printf '%s' "$out" | jq -e --arg generation "$first_generation" \
-    '.status == "recorded" and .generation == $generation and .finding == "F9" and .criterion == "AC1"' >/dev/null \
+  invalidated_boundary=$(printf '%s' "$out" | jq -r '.receipt_boundary')
+  printf '%s' "$out" | jq -e --arg generation "$first_generation" --arg head "$invalidated_head" \
+    '.status == "recorded" and .generation == $generation and .finding == "F9" and .criterion == "AC1"
+      and .invalidated_head == $head and .receipt_boundary == 3' >/dev/null \
     || fail "claim invalidation result was not machine-readable"
   FM_HOME="$HOME_DIR" "$CHECK" "$id" --invalidate-claim F9 --invalidated-criterion AC1 >/dev/null \
     || fail "duplicate claim invalidation was not idempotent"
-  [ "$(grep -c "^validation_claim_invalidation=$first_generation:F9:AC1\$" "$meta")" -eq 1 ] \
+  [ "$(grep -c "^validation_claim_invalidation=$first_generation:F9:AC1:$invalidated_head:$invalidated_boundary\$" "$meta")" -eq 1 ] \
     || fail "claim invalidation marker was not append-only and idempotent"
   out=$(FM_FAKE_NM_STATUS= FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" 2>&1)
   rc=$?
   expect_code 2 "$rc" "claim invalidation refuses a same-head replan"
   assert_contains "$out" "strict non-empty follow-up delta" \
     "same-head invalidation refusal omitted the delta boundary"
-  project="$TMP_ROOT/project-$id"
   printf '#!/usr/bin/env bash\nprintf "fixed\\n"\n' > "$project/src/app.sh"
   git -C "$project" add src/app.sh
   git -C "$project" commit -q -m 'resolve invalidated claim'
@@ -530,7 +543,7 @@ test_claim_invalidation_marker_is_append_only_and_idempotent() {
   [ "$generation" != "$first_generation" ] || fail "claim invalidation replan reused its generation"
   FM_HOME="$HOME_DIR" "$CHECK" "$id" --invalidate-claim F9 --invalidated-criterion AC1 >/dev/null \
     || fail "later-generation claim invalidation failed"
-  [ "$(grep -c '^validation_claim_invalidation=.*:F9:AC1$' "$meta")" -eq 2 ] \
+  [ "$(grep -c '^validation_claim_invalidation=.*:F9:AC1:.*:[0-9][0-9]*$' "$meta")" -eq 2 ] \
     || fail "later generation collapsed a distinct claim invalidation"
   FM_HOME="$HOME_DIR" "$CHECK" "$id" --invalidate-claim F10 --invalidated-criterion AC3 >/dev/null 2>&1
   rc=$?

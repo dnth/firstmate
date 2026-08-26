@@ -212,7 +212,12 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "# Acceptance criteria" "$brief" "$id: ship brief missing stable acceptance criteria section"
     assert_grep "- AC1: {ACCEPTANCE CRITERION}" "$brief" "$id: ship brief missing the AC1 scaffold"
     assert_present "$home/data/$id/evidence.jsonl" "$id: ship evidence ledger was not created"
+    assert_present "$home/data/$id/.evidence.lock" "$id: ship evidence lock was not created"
     [ ! -s "$home/data/$id/evidence.jsonl" ] || fail "$id: new evidence ledger was not empty"
+    assert_grep '--outcome <success|failure|negative|zero|skipped|empty|placeholder|weak>' "$brief" \
+      "$id: generated receipt contract omitted the structured outcomes"
+    assert_grep 'Only `--outcome success` evidences a criterion' "$brief" \
+      "$id: generated receipt contract did not identify its sole affirmative outcome"
     grep -qx "Delivery contract: mode=$mode" "$brief" \
       || fail "$id: brief did not record its machine-readable delivery contract line"
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
@@ -734,28 +739,14 @@ test_scout_and_secondmate_scaffold() {
 }
 
 test_concurrent_ship_scaffold_has_one_owner() {
-  local home id=brief-concurrent-owner fakebin barrier target real_mkdir first second successes=0 leftovers
+  local home id=brief-concurrent-owner target first second successes=0 leftovers
   home="$TMP_ROOT/concurrent-owner/home"
-  fakebin="$TMP_ROOT/concurrent-owner/fakebin"
-  barrier="$TMP_ROOT/concurrent-owner/barrier"
   target="$home/data/$id"
-  real_mkdir=$(command -v mkdir)
-  mkdir -p "$home/data" "$fakebin" "$barrier"
-  cat > "$fakebin/mkdir" <<EOF
-#!/bin/sh
-if [ "\$*" = "-p $target" ]; then
-  : > "$barrier/ready.\$PPID"
-  while [ "\$(find "$barrier" -name 'ready.*' -type f | wc -l | tr -d ' ')" -lt 2 ]; do
-    sleep 0.01
-  done
-fi
-exec "$real_mkdir" "\$@"
-EOF
-  chmod +x "$fakebin/mkdir"
-  PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" alpha --mode direct-PR \
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" alpha --mode direct-PR \
     > "$home/first.out" 2>&1 &
   first=$!
-  PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" alpha --mode direct-PR \
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" alpha --mode direct-PR \
     > "$home/second.out" 2>&1 &
   second=$!
   if wait "$first"; then successes=$((successes + 1)); fi
@@ -768,6 +759,59 @@ EOF
   leftovers=$(find "$target" -name '.brief.owner.*' -print)
   [ -z "$leftovers" ] || fail "completed scaffold retained brief ownership artifacts: $leftovers"
   pass "fm-brief: concurrent ship scaffolds preserve one complete owner"
+}
+
+test_ship_scaffold_rejects_destination_swap_and_retries_cleanly() {
+  local home id=brief-destination-swap modules ready release outside pid rc leftovers
+  home="$TMP_ROOT/destination-swap/home"
+  modules="$TMP_ROOT/destination-swap/modules"
+  ready="$TMP_ROOT/destination-swap/ready"
+  release="$TMP_ROOT/destination-swap/release"
+  outside="$TMP_ROOT/destination-swap/outside"
+  mkdir -p "$home/data" "$modules" "$outside"
+  printf 'sentinel\n' > "$outside/keep"
+  cat > "$modules/HoldScaffoldRename.pm" <<'PERL'
+package HoldScaffoldRename;
+use strict;
+use warnings;
+BEGIN {
+  *CORE::GLOBAL::rename = sub ($$) {
+    if (defined($ENV{FM_SCAFFOLD_DEST}) && $_[1] eq $ENV{FM_SCAFFOLD_DEST} && $_[0] =~ /^\./) {
+      open(my $ready, ">", $ENV{FM_SCAFFOLD_READY}) or die "ready: $!";
+      close($ready) or die "ready close: $!";
+      select(undef, undef, undef, 0.01) until -e $ENV{FM_SCAFFOLD_RELEASE};
+    }
+    return CORE::rename($_[0], $_[1]);
+  };
+}
+1;
+PERL
+  PERL5LIB="$modules" PERL5OPT=-MHoldScaffoldRename FM_SCAFFOLD_DEST="$id" \
+    FM_SCAFFOLD_READY="$ready" FM_SCAFFOLD_RELEASE="$release" FM_HOME="$home" \
+    "$ROOT/bin/fm-brief.sh" "$id" alpha --mode direct-PR > "$home/swap.out" 2> "$home/swap.err" &
+  pid=$!
+  while [ ! -e "$ready" ]; do
+    kill -0 "$pid" 2>/dev/null || fail "ship scaffold exited before its atomic publication boundary"
+  done
+  ln -s "$outside" "$home/data/$id"
+  : > "$release"
+  set +e
+  wait "$pid"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "ship scaffold published through a replaced destination"
+  [ "$(cat "$outside/keep")" = sentinel ] || fail "ship scaffold changed the redirected destination"
+  [ "$(find "$outside" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -eq 1 ] \
+    || fail "ship scaffold created evidence through the redirected destination"
+  leftovers=$(find "$home/data" -maxdepth 1 -name ".$id.scaffold.*" -print)
+  [ -z "$leftovers" ] || fail "refused ship scaffold left staging artifacts"
+  rm "$home/data/$id"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" alpha --mode direct-PR >/dev/null \
+    || fail "ship scaffold retry failed after an interrupted publication"
+  assert_present "$home/data/$id/brief.md" "ship scaffold retry did not publish the brief"
+  assert_present "$home/data/$id/evidence.jsonl" "ship scaffold retry did not publish the ledger"
+  assert_present "$home/data/$id/.evidence.lock" "ship scaffold retry did not publish the lock"
+  pass "fm-brief: ship evidence publication is atomic and retryable"
 }
 
 test_script_parses
@@ -791,3 +835,4 @@ test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_concurrent_ship_scaffold_has_one_owner
+test_ship_scaffold_rejects_destination_swap_and_retries_cleanly

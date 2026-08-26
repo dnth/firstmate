@@ -386,49 +386,60 @@ CRITERIA="$TMP_ROOT/criteria.tsv"
 EVIDENCED="$TMP_ROOT/evidenced"
 INVALID="$TMP_ROOT/invalid"
 ACTIVE_INVALIDATED="$TMP_ROOT/active-invalidated"
+ACTIVE_INVALIDATIONS="$TMP_ROOT/active-invalidations.tsv"
+ACTIVE_REQUIREMENTS="$TMP_ROOT/active-requirements.tsv"
 : > "$EVIDENCED"
 : > "$INVALID"
 : > "$ACTIVE_INVALIDATED"
+: > "$ACTIVE_INVALIDATIONS"
+: > "$ACTIVE_REQUIREMENTS"
 
 "$SCRIPT_DIR/fm-receipt-check.sh" --parse-criteria "$BRIEF" > "$CRITERIA" || exit 2
 
 CURRENT_GENERATION=$(grep '^validation_generation=' "$META" | tail -1 | cut -d= -f2- || true)
 if [ -n "$CURRENT_GENERATION" ]; then
-  awk -v prefix="validation_claim_invalidation=$CURRENT_GENERATION:" '
+  awk -v prefix="validation_claim_invalidation=$CURRENT_GENERATION:" -v invalid="$INVALID" '
     index($0, prefix) == 1 {
       value=substr($0, length(prefix) + 1)
-      if (value ~ /^F[1-9][0-9]*:AC[1-9][0-9]*$/) {
-        sub(/^F[1-9][0-9]*:/, "", value)
-        print value
+      count=split(value, fields, ":")
+      if (count == 4 && fields[1] ~ /^F[1-9][0-9]*$/ && fields[2] ~ /^AC[1-9][0-9]*$/ \
+        && fields[3] ~ /^[0-9a-f]+$/ && (length(fields[3]) == 40 || length(fields[3]) == 64) \
+        && fields[4] ~ /^[0-9]+$/ && length(fields[4]) <= 18) {
+        print fields[2] "\t" fields[3] "\t" fields[4]
+      } else {
+        print "active invalidation record is malformed" >> invalid
       }
     }
-  ' "$META" \
-    | sort -u > "$ACTIVE_INVALIDATED"
+  ' "$META" | sort -u > "$ACTIVE_INVALIDATIONS"
 fi
-FOLLOWUP_DELTA_READY=0
-INVALIDATION_BOUNDARY=
-if [ -s "$ACTIVE_INVALIDATED" ]; then
-  INVALIDATION_BOUNDARY=$(grep '^validation_ledger_receipt_count=' "$META" | tail -1 | cut -d= -f2- || true)
+if [ -s "$ACTIVE_INVALIDATIONS" ]; then
+  cut -f1 "$ACTIVE_INVALIDATIONS" | sort -u > "$ACTIVE_INVALIDATED"
   INVALIDATION_WORKTREE=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
-  INVALIDATION_HEAD=$(grep '^validation_head=' "$META" | tail -1 | cut -d= -f2- || true)
-  case "$INVALIDATION_BOUNDARY" in
-    ''|*[!0-9]*) printf 'active invalidation has no valid receipt boundary\n' >> "$INVALID" ;;
-    *)
-      CURRENT_INVALIDATION_HEAD=$(git -C "$INVALIDATION_WORKTREE" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
-      if [ -n "$CURRENT_INVALIDATION_HEAD" ] && [ "$CURRENT_INVALIDATION_HEAD" != "$INVALIDATION_HEAD" ] \
-        && git -C "$INVALIDATION_WORKTREE" merge-base --is-ancestor "$INVALIDATION_HEAD" "$CURRENT_INVALIDATION_HEAD" 2>/dev/null; then
+  CURRENT_INVALIDATION_HEAD=$(git -C "$INVALIDATION_WORKTREE" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
+  while IFS= read -r invalidated_criterion; do
+    INVALIDATION_READY=1
+    INVALIDATION_BOUNDARY=0
+    while IFS=$'\t' read -r record_criterion record_head record_boundary; do
+      [ "$record_criterion" = "$invalidated_criterion" ] || continue
+      [ "$record_boundary" -le "$INVALIDATION_BOUNDARY" ] || INVALIDATION_BOUNDARY=$record_boundary
+      if [ -n "$CURRENT_INVALIDATION_HEAD" ] && [ "$CURRENT_INVALIDATION_HEAD" != "$record_head" ] \
+        && git -C "$INVALIDATION_WORKTREE" merge-base --is-ancestor "$record_head" "$CURRENT_INVALIDATION_HEAD" 2>/dev/null; then
         set +e
-        git -C "$INVALIDATION_WORKTREE" diff --no-ext-diff --quiet "$INVALIDATION_HEAD..$CURRENT_INVALIDATION_HEAD"
+        git -C "$INVALIDATION_WORKTREE" diff --no-ext-diff --quiet "$record_head..$CURRENT_INVALIDATION_HEAD"
         INVALIDATION_DIFF_RC=$?
         set -e
         case "$INVALIDATION_DIFF_RC" in
-          1) FOLLOWUP_DELTA_READY=1 ;;
-          0) ;;
-          *) printf 'active invalidation delta could not be inspected\n' >> "$INVALID" ;;
+          1) ;;
+          0) INVALIDATION_READY=0 ;;
+          *) printf 'active invalidation delta could not be inspected\n' >> "$INVALID"; INVALIDATION_READY=0 ;;
         esac
+      else
+        INVALIDATION_READY=0
       fi
-      ;;
-  esac
+    done < "$ACTIVE_INVALIDATIONS"
+    [ "$INVALIDATION_READY" -eq 1 ] \
+      && printf '%s\t%s\n' "$invalidated_criterion" "$INVALIDATION_BOUNDARY" >> "$ACTIVE_REQUIREMENTS"
+  done < "$ACTIVE_INVALIDATED"
 fi
 
 if [ "$ACTION" = criterion ]; then
@@ -460,7 +471,8 @@ if [ "$LEDGER_EXISTS" = true ]; then
     if [ "$(printf '%s' "$line" | jq -r '.outcome')" = success ]; then
       if grep -Fx "$receipt_criterion" "$ACTIVE_INVALIDATED" >/dev/null 2>&1; then
         receipt_head=$(printf '%s' "$line" | jq -r '.head // ""')
-        if [ "$FOLLOWUP_DELTA_READY" -eq 1 ] && [ "$RECEIPT_COUNT" -gt "$INVALIDATION_BOUNDARY" ] \
+        receipt_boundary=$(awk -F '\t' -v criterion="$receipt_criterion" '$1 == criterion { print $2 }' "$ACTIVE_REQUIREMENTS")
+        if [ -n "$receipt_boundary" ] && [ "$RECEIPT_COUNT" -gt "$receipt_boundary" ] \
           && [ "$receipt_head" = "$CURRENT_INVALIDATION_HEAD" ]; then
           printf '%s\n' "$receipt_criterion" >> "$EVIDENCED"
         fi
@@ -470,6 +482,10 @@ if [ "$LEDGER_EXISTS" = true ]; then
     fi
   done < "$LEDGER"
 fi
+while IFS=$'\t' read -r _criterion required_boundary; do
+  [ "$required_boundary" -le "$RECEIPT_COUNT" ] \
+    || printf 'active invalidation boundary exceeds the evidence ledger\n' >> "$INVALID"
+done < "$ACTIVE_REQUIREMENTS"
 
 REQUIRED_JSON=$(cut -f1 "$CRITERIA" | jq -Rsc 'split("\n") | map(select(length > 0))')
 EVIDENCED_ORDERED="$TMP_ROOT/evidenced-ordered"
@@ -516,7 +532,7 @@ if [ "$ACTION" = check ]; then
 fi
 
 if [ "$ACTION" = plan ] && [ -s "$ACTIVE_INVALIDATED" ]; then
-  [ "$FOLLOWUP_DELTA_READY" -eq 1 ] \
+  [ "$(wc -l < "$ACTIVE_REQUIREMENTS" | tr -d ' ')" -eq "$(wc -l < "$ACTIVE_INVALIDATED" | tr -d ' ')" ] \
     || { echo "error: invalidated criteria require a strict non-empty follow-up delta" >&2; exit 2; }
   while IFS= read -r invalidated_criterion; do
     grep -Fx "$invalidated_criterion" "$EVIDENCED" >/dev/null 2>&1 \
@@ -574,20 +590,31 @@ if [ "$ACTION" = invalidate-claim ]; then
   case "$INVALIDATION_GENERATION" in
     *[!0-9a-f]*) echo "error: claim invalidation requires a current validation generation" >&2; exit 2 ;;
   esac
-  INVALIDATION_MARKER="validation_claim_invalidation=$INVALIDATION_GENERATION:$INVALIDATION_FINDING:$INVALIDATION_CRITERION"
+  INVALIDATION_WORKTREE=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
+  INVALIDATION_HEAD=$(git -C "$INVALIDATION_WORKTREE" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
+  [ -n "$INVALIDATION_HEAD" ] && fm_worktree_is_clean "$INVALIDATION_WORKTREE" \
+    || { echo "error: claim invalidation requires a clean current worktree head" >&2; exit 2; }
+  INVALIDATION_PREFIX="validation_claim_invalidation=$INVALIDATION_GENERATION:$INVALIDATION_FINDING:$INVALIDATION_CRITERION:"
+  INVALIDATION_MARKER="$INVALIDATION_PREFIX$INVALIDATION_HEAD:$RECEIPT_COUNT"
   VALIDATION_LOCK="$STATE/.$ID.validation-plan.lock"
   if ! mkdir "$VALIDATION_LOCK" 2>/dev/null; then
     VALIDATION_LOCK=
     echo "error: validation metadata is locked" >&2
     exit 2
   fi
-  if ! grep -Fx "$INVALIDATION_MARKER" "$META" >/dev/null 2>&1; then
+  EXISTING_INVALIDATION=$(awk -v prefix="$INVALIDATION_PREFIX" 'index($0, prefix) == 1 { print; exit }' "$META")
+  if [ -z "$EXISTING_INVALIDATION" ]; then
     printf '%s\n' "$INVALIDATION_MARKER" | append_meta_records \
       || { release_validation_lock; echo "error: could not record claim invalidation" >&2; exit 2; }
   fi
   release_validation_lock
-  jq -cn --arg task "$ID" --arg generation "$INVALIDATION_GENERATION" --arg finding "$INVALIDATION_FINDING" --arg criterion "$INVALIDATION_CRITERION" \
-    '{schema:"fm-claim-invalidation.v1",task:$task,status:"recorded",generation:$generation,finding:$finding,criterion:$criterion}'
+  RECORDED_INVALIDATION=$(awk -v prefix="$INVALIDATION_PREFIX" 'index($0, prefix) == 1 { print; exit }' "$META")
+  RECORDED_INVALIDATION=${RECORDED_INVALIDATION#"$INVALIDATION_PREFIX"}
+  RECORDED_HEAD=${RECORDED_INVALIDATION%:*}
+  RECORDED_BOUNDARY=${RECORDED_INVALIDATION##*:}
+  jq -cn --arg task "$ID" --arg generation "$INVALIDATION_GENERATION" --arg finding "$INVALIDATION_FINDING" \
+    --arg criterion "$INVALIDATION_CRITERION" --arg invalidated_head "$RECORDED_HEAD" --argjson receipt_boundary "$RECORDED_BOUNDARY" \
+    '{schema:"fm-claim-invalidation.v1",task:$task,status:"recorded",generation:$generation,finding:$finding,criterion:$criterion,invalidated_head:$invalidated_head,receipt_boundary:$receipt_boundary}'
   exit 0
 fi
 

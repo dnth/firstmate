@@ -1,11 +1,11 @@
 # Evidence receipts and risk routing verification
 
 This record captures the active maintainer evidence for ship-task acceptance receipts and conservative validation routing as of 2026-08-26.
-The exact ledger schema, criterion parser, classifier thresholds, metadata fields, and lifecycle commands are owned by the headers and help output of `bin/fm-receipt.sh` and `bin/fm-receipt-check.sh`.
+The exact receipt key and type schema is owned by the header and `--help` output of `bin/fm-receipt-schema.sh`; the criterion parser, classifier thresholds, metadata fields, and lifecycle commands are owned by the headers and help output of `bin/fm-receipt-check.sh`, `bin/fm-receipt.sh`, and `bin/fm-receipt-store.sh` at their respective executable boundaries.
 
 ## Guarantees under test
 
-- New ship briefs receive stable acceptance-criterion ids and an empty append-only evidence ledger, while scout and secondmate scaffolds remain outside the receipt contract.
+- New ship briefs receive stable acceptance-criterion ids plus an empty append-only evidence ledger and lock through one atomic pinned-directory publication, while scout and secondmate scaffolds remain outside the receipt contract.
 - Concurrent ship scaffolds use one exclusive brief identity, so a losing invocation cannot remove the winning brief or evidence contract.
 - Ship scaffold output requires replacing both task and acceptance-criterion placeholders, and spawn refuses unresolved task text or criteria before endpoint creation.
 - Every ship completion, including a promoted scout, remains parked until a valid acceptance contract and structurally valid evidence cover every required criterion.
@@ -31,8 +31,9 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 - Normal and promoted ship briefs consume the same executable acceptance-evidence and per-mode delivery renderer.
 - The pinned brief and task metadata must record the same concrete delivery mode before validation can proceed.
 - Ship state requires exactly one valid recorded delivery mode before any No-Mistakes lookup.
-- Findings that invalidate a receipt or acceptance claim append one generation-scoped idempotent finding-to-criterion marker to task metadata, require a strict non-empty descendant delta, and require a post-boundary successful receipt bound to the new head before replanning or completion.
+- Findings that invalidate a receipt or acceptance claim atomically bind one generation-scoped idempotent finding-to-criterion marker to the invalidation-time head and receipt boundary, then require a strict non-empty descendant delta and a later successful receipt bound to the new head before replanning or completion.
 - One pinned state-directory owner snapshots single-link no-follow metadata and performs compare-bound atomic replacements for every validation metadata update.
+- PR registration publishes canonical PR identity and its validation publication generation through one compare-bound pinned metadata replacement after the watcher artifacts publish, and revokes those artifacts if that replacement fails.
 - Successful exact-head runs can bind after reaching checks-passed or passed, while failed and cancelled runs remain ineligible.
 - No-Mistakes status, intent, and CI-log observations use the shared bounded call boundary.
 - Every completion requires path-specific terminal evidence, records its plan path and validated head, invalidates stale completion metadata when the worktree head changes, and refuses completion until the change is replanned or revalidated.
@@ -115,6 +116,7 @@ $ tests/fm-brief.test.sh
 ok - fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly
 ok - fm-brief: scout and secondmate code paths still scaffold well-formed briefs
 ok - fm-brief: concurrent ship scaffolds preserve one complete owner
+ok - fm-brief: ship evidence publication is atomic and retryable
 
 $ bin/fm-lint.sh
 fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
@@ -141,6 +143,7 @@ ok - fm-pr-merge refuses before merging when task meta is missing
 $ tests/fm-pr-check-security.test.sh
 ok - valid direct and merge flows record exact metadata and reject multiline head metadata
 ok - PR registration serializes with validation planning
+ok - PR metadata publication rejects post-snapshot redirection
 exit 0
 
 $ tests/fm-task-delivery.test.sh

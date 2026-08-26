@@ -77,7 +77,13 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case " $* " in
-  *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
+  *" headRefOid "*)
+    if [ -n "${FM_TEST_GH_HEAD_READY:-}" ]; then
+      : > "$FM_TEST_GH_HEAD_READY"
+      while [ ! -e "$FM_TEST_GH_HEAD_RELEASE" ]; do sleep 0.01; done
+    fi
+    printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}"
+    ;;
   *" state "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
     [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
@@ -109,6 +115,11 @@ SH
 
 write_task_meta() {
   local dir=$1 id=${2:-task-a}
+  mkdir -p "$dir/home/data/$id"
+  printf '# Task\nFixture.\n\n# Acceptance criteria\n- AC1: Fixture works.\n\n# Definition of done\nDelivery contract: mode=no-mistakes\n' \
+    > "$dir/home/data/$id/brief.md"
+  : > "$dir/home/data/$id/evidence.jsonl"
+  : > "$dir/home/data/$id/.evidence.lock"
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" \
     "endpoint_task_id=$id" \
@@ -3381,6 +3392,37 @@ test_validation_plan_lock_serializes_pr_registration() {
   pass "PR registration serializes with validation planning"
 }
 
+test_pr_metadata_swap_after_snapshot_fails_closed() {
+  local dir ready release external original pid rc
+  dir=$(make_case pr-metadata-swap)
+  write_task_meta "$dir"
+  printf 'validation_generation=plan-swap\nvalidation_path=direct-PR\n' >> "$dir/home/state/task-a.meta"
+  ready="$dir/head.ready"
+  release="$dir/head.release"
+  external="$dir/external-meta"
+  original="$dir/original-meta"
+  printf 'external sentinel\n' > "$external"
+  FM_TEST_GH_HEAD_READY="$ready" FM_TEST_GH_HEAD_RELEASE="$release" \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/19 > "$dir/swap.out" 2> "$dir/swap.err" &
+  pid=$!
+  while [ ! -e "$ready" ]; do
+    kill -0 "$pid" 2>/dev/null || fail "PR registration exited before the metadata swap boundary"
+  done
+  mv "$dir/home/state/task-a.meta" "$original"
+  ln -s "$external" "$dir/home/state/task-a.meta"
+  : > "$release"
+  set +e
+  wait "$pid"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "PR registration accepted metadata replaced after its pinned snapshot"
+  [ "$(cat "$external")" = 'external sentinel' ] || fail "PR metadata swap redirected the transaction"
+  assert_absent "$dir/home/state/task-a.check.sh" "failed metadata transaction left a published watcher"
+  assert_absent "$dir/home/state/task-a.pr-poll" "failed metadata transaction left a published sidecar"
+  assert_absent "$dir/home/state/task-a.pr-poll-registration" "failed metadata transaction left published provenance"
+  pass "PR metadata publication rejects post-snapshot redirection"
+}
+
 test_parser_matrix
 test_gitlab_merge_watch
 test_merged_poll_retires_once
@@ -3391,6 +3433,7 @@ test_retirement_refuses_replacement_and_nonterminal_results
 test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
 test_validation_plan_lock_serializes_pr_registration
+test_pr_metadata_swap_after_snapshot_fails_closed
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert

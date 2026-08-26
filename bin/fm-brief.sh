@@ -105,7 +105,8 @@ render_ship_delivery() {
   esac
   cat <<EOF
 # Acceptance evidence
-Before reporting implementation complete, record at least one compact receipt for every acceptance criterion with \`$FM_ROOT/bin/fm-receipt.sh $task_id <criterion> <type> <summary> <result> --outcome <passed|failed> [options]\`.
+Before reporting implementation complete, record at least one compact receipt for every acceptance criterion with \`$FM_ROOT/bin/fm-receipt.sh $task_id <criterion> <type> <summary> <result> --outcome <success|failure|negative|zero|skipped|empty|placeholder|weak> [options]\`.
+Only \`--outcome success\` evidences a criterion; every other structured outcome records an unevidenced negative or inconclusive result.
 Run \`$FM_ROOT/bin/fm-receipt-check.sh $task_id\` and do not append \`done:\` unless its JSON status is \`complete\`.
 After the implementation is committed and evidence is complete, run \`$FM_ROOT/bin/fm-receipt-check.sh $task_id --implementation-complete\` before any validation plan or implementation-complete \`done:\` report.
 Receipts are audit inputs rather than proof that every claim is trustworthy; keep summaries and results compact and point to commands or artifacts when useful.
@@ -245,36 +246,28 @@ if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
 fi
 
 BRIEF="$DATA/$ID/brief.md"
-[ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
-EVIDENCE="$DATA/$ID/evidence.jsonl"
-EVIDENCE_LOCK="$DATA/$ID/.evidence.lock"
-if [ "$KIND" = ship ] && { [ -e "$EVIDENCE" ] || [ -L "$EVIDENCE" ]; }; then
-  echo "error: $EVIDENCE already exists" >&2
-  exit 1
-fi
-if [ "$KIND" = ship ] && { [ -e "$EVIDENCE_LOCK" ] || [ -L "$EVIDENCE_LOCK" ]; }; then
-  echo "error: $EVIDENCE_LOCK already exists" >&2
-  exit 1
-fi
-mkdir -p "$DATA/$ID"
 umask 077
-BRIEF_TOKEN=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
-[ "${#BRIEF_TOKEN}" -eq 32 ] || { echo "error: brief claim identity could not be created" >&2; exit 1; }
-BRIEF_OWNER="$DATA/$ID/.brief.owner.$BRIEF_TOKEN"
-if ! ( set -C; : > "$BRIEF_OWNER" ) 2>/dev/null || ! ln "$BRIEF_OWNER" "$BRIEF" 2>/dev/null; then
-  rm -f "$BRIEF_OWNER"
-  echo "error: $BRIEF already exists" >&2
-  exit 1
-fi
 BRIEF_COMMITTED=0
-cleanup_brief_claim() {
-  if [ "$BRIEF_COMMITTED" -ne 1 ] && [ -e "$BRIEF_OWNER" ] && [ "$BRIEF" -ef "$BRIEF_OWNER" ]; then
-    rm -f "$BRIEF"
+if [ "$KIND" != ship ]; then
+  [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
+  mkdir -p "$DATA/$ID"
+  BRIEF_TOKEN=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
+  [ "${#BRIEF_TOKEN}" -eq 32 ] || { echo "error: brief claim identity could not be created" >&2; exit 1; }
+  BRIEF_OWNER="$DATA/$ID/.brief.owner.$BRIEF_TOKEN"
+  if ! ( set -C; : > "$BRIEF_OWNER" ) 2>/dev/null || ! ln "$BRIEF_OWNER" "$BRIEF" 2>/dev/null; then
+    rm -f "$BRIEF_OWNER"
+    echo "error: $BRIEF already exists" >&2
+    exit 1
   fi
-  rm -f "$BRIEF_OWNER"
-}
-trap cleanup_brief_claim EXIT
-trap 'exit 1' HUP INT TERM
+  cleanup_brief_claim() {
+    if [ "$BRIEF_COMMITTED" -ne 1 ] && [ -e "$BRIEF_OWNER" ] && [ "$BRIEF" -ef "$BRIEF_OWNER" ]; then
+      rm -f "$BRIEF"
+    fi
+    rm -f "$BRIEF_OWNER"
+  }
+  trap cleanup_brief_claim EXIT
+  trap 'exit 1' HUP INT TERM
+fi
 
 shell_quote() {
   printf "'"
@@ -476,7 +469,7 @@ case "$MODE" in
 esac
 DOD=$(render_ship_delivery "$ID" "$MODE")
 
-cat > "$BRIEF" <<EOF
+IFS= read -r -d '' SHIP_BRIEF <<EOF || true
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 # Task
@@ -531,13 +524,9 @@ Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced 
 
 $DOD
 EOF
-if ! ( set -C; : > "$EVIDENCE" ) 2>/dev/null; then
-  echo "error: could not create new evidence ledger: $EVIDENCE" >&2
-  exit 1
-fi
-if ! ( set -C; : > "$EVIDENCE_LOCK" ) 2>/dev/null; then
-  echo "error: could not create new evidence lock: $EVIDENCE_LOCK" >&2
-  rm -f "$EVIDENCE"
+if ! FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
+  FM_RECEIPT_SCAFFOLD_BRIEF="$SHIP_BRIEF" "$FM_ROOT/bin/fm-receipt-store.sh" "$ID" scaffold; then
+  echo "error: could not atomically scaffold ship task: $DATA/$ID" >&2
   exit 1
 fi
 BRIEF_COMMITTED=1
