@@ -159,9 +159,14 @@ on_exit() {
 trap on_exit EXIT
 trap 'exit 1' HUP INT TERM
 
-cp "$BRIEF" "$BRIEF_TMP"
+awk '/^# Setup[[:space:]]*$/{exit} {print}' "$BRIEF" > "$BRIEF_TMP"
 cp -p "$BRIEF" "$BRIEF_ORIGINAL"
 cp -p "$META" "$META_ORIGINAL"
+case "$MODE" in
+  direct-PR) PROMOTED_FLOW="Run \`$FM_ROOT/bin/fm-receipt-check.sh $ID --plan\`, push only \`fm/$ID\`, open the PR, append \`done: PR {url}\`, and stop; Firstmate records completion after publishing the watcher." ;;
+  local-only) PROMOTED_FLOW="Run \`$FM_ROOT/bin/fm-receipt-check.sh $ID --plan\`, then \`$FM_ROOT/bin/fm-receipt-check.sh $ID --complete --terminal-evidence branch-ready\`, append \`done: ready in branch fm/$ID\`, and stop without pushing." ;;
+  no-mistakes) PROMOTED_FLOW="Append \`done: implementation complete\` for Firstmate to plan; follow the selected receipts-only or full No-Mistakes path, bind any run to the returned plan generation, record completion, then append the mode's final PR-ready done line." ;;
+esac
 cat >> "$BRIEF_TMP" <<EOF
 
 # Acceptance criteria
@@ -173,6 +178,11 @@ Run \`$FM_ROOT/bin/fm-receipt-check.sh $ID\` and do not append \`done:\` unless 
 
 # Promoted ship delivery
 Delivery contract: mode=$MODE
+
+# Ship setup and delivery
+Verify \`pwd -P\` and \`git rev-parse --show-toplevel\` still identify the isolated task worktree before changing code.
+Reset scratch work to a clean default-branch base, carry over only intended changes, and create \`fm/$ID\`.
+$PROMOTED_FLOW
 EOF
 
 umask 077

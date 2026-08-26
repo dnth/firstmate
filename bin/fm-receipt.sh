@@ -102,7 +102,11 @@ BRIEF="$TASK_DIR/brief.md"
 LEDGER="$TASK_DIR/evidence.jsonl"
 LOCK="$TASK_DIR/.evidence-append.lock"
 
-[ -d "$TASK_DIR" ] || { echo "error: task directory does not exist: $TASK_DIR" >&2; exit 1; }
+[ -d "$DATA" ] && [ ! -L "$TASK_DIR" ] && [ -d "$TASK_DIR" ] \
+  || { echo "error: task directory is missing or unsafe: $TASK_DIR" >&2; exit 1; }
+DATA_REAL=$(cd "$DATA" && pwd -P)
+TASK_REAL=$(cd "$TASK_DIR" && pwd -P)
+[ "$TASK_REAL" = "$DATA_REAL/$ID" ] || { echo "error: task directory escapes data root" >&2; exit 1; }
 [ -f "$BRIEF" ] && [ ! -L "$BRIEF" ] \
   || { echo "error: task brief is missing or unsafe: $BRIEF" >&2; exit 1; }
 grep -Eq '^Delivery contract: mode=(no-mistakes|direct-PR|local-only)$' "$BRIEF" \
@@ -130,6 +134,14 @@ if [ -L "$LEDGER" ] || { [ -e "$LEDGER" ] && [ ! -f "$LEDGER" ]; }; then
   echo "error: evidence ledger is not a regular file: $LEDGER" >&2
   exit 1
 fi
+ledger_links() {
+  stat -c %h "$1" 2>/dev/null || stat -f %l "$1" 2>/dev/null
+}
+ledger_identity() {
+  stat -L -c '%d:%i' "$1" 2>/dev/null || stat -L -f '%d:%i' "$1" 2>/dev/null
+}
+[ ! -e "$LEDGER" ] || [ "$(ledger_links "$LEDGER")" = 1 ] \
+  || { echo "error: evidence ledger has multiple links" >&2; exit 1; }
 
 umask 077
 if ! mkdir "$LOCK" 2>/dev/null; then
@@ -146,5 +158,12 @@ if [ -L "$LEDGER" ] || { [ -e "$LEDGER" ] && [ ! -f "$LEDGER" ]; }; then
   echo "error: evidence ledger became unsafe before append: $LEDGER" >&2
   exit 1
 fi
-printf '%s\n' "$receipt" >> "$LEDGER"
+[ ! -e "$LEDGER" ] || [ "$(ledger_links "$LEDGER")" = 1 ] \
+  || { echo "error: evidence ledger became multiply linked" >&2; exit 1; }
+exec 9>> "$LEDGER"
+[ ! -L "$LEDGER" ] && [ "$(ledger_links "$LEDGER")" = 1 ] \
+  && [ "$(ledger_identity "$LEDGER")" = "$(ledger_identity /dev/fd/9)" ] \
+  || { echo "error: evidence ledger identity changed before append" >&2; exit 1; }
+printf '%s\n' "$receipt" >&9
+exec 9>&-
 printf '%s\n' "$receipt"

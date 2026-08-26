@@ -79,6 +79,7 @@ CRITERION_QUERY=
 BASE_INPUT=
 TERMINAL_EVIDENCE=
 RUN_ID_INPUT=
+RUN_GENERATION_INPUT=
 
 while [ "$#" -gt 0 ]; do
   option=$1
@@ -106,6 +107,11 @@ while [ "$#" -gt 0 ]; do
       RUN_ID_INPUT=$1
       shift
       ;;
+    --generation)
+      [ "$#" -gt 0 ] || { echo "error: --generation requires a value" >&2; exit 2; }
+      RUN_GENERATION_INPUT=$1
+      shift
+      ;;
     --base|--terminal-evidence)
       [ "$#" -gt 0 ] || { echo "error: $option requires a value" >&2; exit 2; }
       value=$1
@@ -119,12 +125,18 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+if [ "$ACTION" != bind-run ] && [ -n "$RUN_GENERATION_INPUT" ]; then
+  echo "error: --generation requires --bind-run" >&2
+  exit 2
+fi
+
 case "$ACTION" in
   check|criterion|bind-run)
     [ -z "$BASE_INPUT" ] || { echo "error: --base requires --plan" >&2; exit 2; }
     [ -z "$TERMINAL_EVIDENCE" ] || { echo "error: --terminal-evidence requires --complete" >&2; exit 2; }
     if [ "$ACTION" = bind-run ]; then
       case "$RUN_ID_INPUT" in ''|*[!A-Za-z0-9._-]*) echo "error: invalid run id" >&2; exit 2 ;; esac
+      [ -n "$RUN_GENERATION_INPUT" ] || { echo "error: --bind-run requires --generation" >&2; exit 2; }
     fi
     ;;
   complete)
@@ -352,6 +364,7 @@ if [ "$ACTION" = bind-run ]; then
   BIND_STATUS=$(nm_status_field "$BIND_OUT" status)
   BIND_OUTCOME=$(nm_status_field "$BIND_OUT" outcome)
   [ "$RUN_ID_INPUT" != "$BIND_PREPLAN_RUN" ] || { echo "error: No-Mistakes run predates the latest plan" >&2; exit 2; }
+  [ "$RUN_GENERATION_INPUT" = "$BIND_GENERATION" ] || { echo "error: run generation does not match the latest plan" >&2; exit 2; }
   [ "$BIND_OBSERVED_ID" = "$RUN_ID_INPUT" ] && [ "$BIND_OBSERVED_HEAD" = "$BIND_HEAD" ] \
     && { [ "$BIND_STATUS" = running ] || [ "$BIND_STATUS" = fixing ] || [ "$BIND_STATUS" = ci ] || [ "$BIND_STATUS" = awaiting_approval ]; } \
     && [ "$BIND_OUTCOME" != passed ] \
@@ -365,7 +378,7 @@ if [ "$ACTION" = bind-run ]; then
 fi
 
 record_validation_completed() {
-  local started path generation completed completed_head completed_path completed_evidence completed_generation now worktree validated_head current_head expected_evidence observed pr pr_head branch boundary new_receipts run_id run_path run_generation run_out observed_id observed_head outcome default_ref default_branch
+  local started path generation completed completed_head completed_path completed_evidence completed_generation now worktree validated_head current_head expected_evidence observed pr pr_head branch boundary new_receipts run_id run_path run_generation run_out observed_id observed_head outcome run_status default_ref default_branch
   VALIDATION_LOCK="$STATE/.$ID.validation-plan.lock"
   if ! mkdir "$VALIDATION_LOCK" 2>/dev/null; then
     VALIDATION_LOCK=
@@ -428,8 +441,13 @@ record_validation_completed() {
       observed_id=$(nm_status_field "$run_out" id)
       observed_head=$(nm_status_field "$run_out" head)
       outcome=$(nm_status_field "$run_out" outcome)
-      [ "$observed_id" = "$run_id" ] && [ "$observed_head" = "$validated_head" ] && [ "$outcome" = passed ] \
-        || { release_validation_lock; echo "error: bound No-Mistakes run did not pass at the exact validated head" >&2; return 1; }
+      run_status=$(nm_status_field "$run_out" status)
+      if [ "$observed_id" != "$run_id" ] || [ "$observed_head" != "$validated_head" ] \
+        || { [ "$outcome" != passed ] && [ "$outcome" != checks-passed ] && [ "$run_status" != checks-passed ]; }; then
+        release_validation_lock
+        echo "error: bound No-Mistakes run did not pass checks at the exact validated head" >&2
+        return 1
+      fi
       observed=bound-matching-no-mistakes-run
       ;;
     direct-PR)
@@ -539,13 +557,17 @@ NAMES="$TMP_ROOT/names"
 : > "$NAMES"
 
 resolve_diff() {
-  local requested_base authoritative_base
+  local requested_base authoritative_base origin_head
   [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ] && git -C "$WORKTREE" rev-parse --git-dir >/dev/null 2>&1 || return 1
   [ -z "$(git -C "$WORKTREE" status --porcelain --untracked-files=all 2>/dev/null)" ] || return 1
   HEAD=$(git -C "$WORKTREE" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) || return 1
-  authoritative_base=$(git -C "$WORKTREE" merge-base HEAD refs/remotes/origin/HEAD 2>/dev/null \
-      || git -C "$WORKTREE" merge-base HEAD main 2>/dev/null \
+  origin_head=$(git -C "$WORKTREE" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null || true)
+  if [ -n "$origin_head" ]; then
+    authoritative_base=$(git -C "$WORKTREE" merge-base HEAD "$origin_head" 2>/dev/null) || return 1
+  else
+    authoritative_base=$(git -C "$WORKTREE" merge-base HEAD main 2>/dev/null \
       || git -C "$WORKTREE" merge-base HEAD master 2>/dev/null) || return 1
+  fi
   BASE=$authoritative_base
   if [ -n "$BASE_INPUT" ]; then
     requested_base=$(git -C "$WORKTREE" rev-parse --verify "$BASE_INPUT^{commit}" 2>/dev/null) || return 1
@@ -664,6 +686,6 @@ if [ "$VALIDATION_PATH" = full-no-mistakes ]; then
 fi
 write_meta_record initial
 jq -cn --arg task "$ID" --arg mode "$MODE" --arg tier "$TIER" --arg path "$VALIDATION_PATH" --arg reason "$REASON" \
-  --arg base "$BASE" --arg head "$HEAD" \
+  --arg base "$BASE" --arg head "$HEAD" --arg generation "$PLAN_GENERATION" \
   --argjson diff_files "$DIFF_FILES" --argjson diff_lines "$DIFF_LINES" \
-  '{schema:"fm-validation-plan.v1",task:$task,status:"planned",mode:$mode,tier:$tier,path:$path,reason:$reason,base:$base,head:$head,diff_files:$diff_files,diff_lines:$diff_lines}'
+  '{schema:"fm-validation-plan.v1",task:$task,status:"planned",mode:$mode,tier:$tier,path:$path,reason:$reason,base:$base,head:$head,generation:$generation,diff_files:$diff_files,diff_lines:$diff_lines}'

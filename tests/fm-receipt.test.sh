@@ -83,7 +83,7 @@ test_rejects_invalid_schema_and_undeclared_criteria() {
 }
 
 test_rejects_non_ship_and_unsafe_ledger() {
-  local id=scout-task rc target
+  local id=scout-task rc target alias
   mkdir -p "$HOME_DIR/data/$id"
   printf '# Task\nInvestigate only.\n' > "$HOME_DIR/data/$id/brief.md"
   fm_write_meta "$HOME_DIR/state/$id.meta" "kind=scout"
@@ -101,6 +101,22 @@ test_rejects_non_ship_and_unsafe_ledger() {
   rc=$?
   [ "$rc" -ne 0 ] || fail "receipt helper followed a ledger symlink"
   [ ! -s "$target" ] || fail "receipt helper wrote through a ledger symlink"
+
+  id=linked-ledger
+  write_ship "$id"
+  alias="$TMP_ROOT/ledger-alias"
+  ln "$HOME_DIR/data/$id/evidence.jsonl" "$alias"
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test summary passed >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "receipt helper accepted a multiply linked ledger"
+  [ ! -s "$alias" ] || fail "receipt helper mutated a hard-linked ledger alias"
+
+  id=linked-task
+  mkdir -p "$TMP_ROOT/outside-task"
+  ln -s "$TMP_ROOT/outside-task" "$HOME_DIR/data/$id"
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test summary passed >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "receipt helper accepted a symlinked task directory"
   pass "fm-receipt refuses non-ship tasks and unsafe ledger paths"
 }
 

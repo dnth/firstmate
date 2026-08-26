@@ -15,7 +15,7 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 - Planning and completion refuse tracked, staged, or untracked worktree changes.
 - Initial planning accepts a caller base only when it equals the repository's authoritative merge boundary, so a later ancestor cannot hide earlier task commits.
 - Ordinary No-Mistakes findings return to the original worker through guarded custody return and then full revalidation.
-- PR-ready recording preserves the path-specific completion boundary instead of replacing it with later PR-monitor setup time.
+- Direct-PR registration publishes its watcher before recording completion, while other paths preserve their earlier path-specific completion boundary.
 
 ## Verification environment
 
@@ -39,7 +39,7 @@ ok - fm-receipt-check reports required, evidenced, and missing ids deterministic
 ok - fm-receipt-check distinguishes complete evidence from invalid JSONL
 ok - invalid ship briefs fail and scout/report behavior stays unchanged
 ok - low-risk mechanical changes can skip a full No-Mistakes run
-ok - low documentation requires positive non-authoritative prose classification
+ok - authoritative documentation remains high
 ok - terminal delivery paths record one completion timestamp at their boundary
 ok - completion signals release the validation lock for retry
 ok - replanning invalidates prior run and completion bindings

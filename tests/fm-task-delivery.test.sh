@@ -290,6 +290,9 @@ EOF
   assert_grep 'yolo=on' "$meta" "promotion did not record the decided merge posture"
   assert_contains "$out" "ship instructions for mode=direct-PR" "promotion hint did not carry the decided mode"
   assert_present "$ledger" "promotion did not install the evidence ledger"
+  assert_no_grep 'Never push to any remote' "$brief" "promoted direct-PR brief retained scout push prohibition"
+  assert_grep "fm-receipt-check.sh promote-d1 --plan" "$brief" "promoted direct-PR brief omitted validation planning"
+  assert_grep 'done: PR {url}' "$brief" "promoted direct-PR brief omitted its terminal sequence"
   check_out=$(FM_HOME="$home" "$ROOT/bin/fm-receipt-check.sh" promote-d1 2>&1)
   check_status=$?
   expect_code 1 "$check_status" "promoted concrete criteria require receipts"

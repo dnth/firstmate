@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Record a PR-ready task: store one validated canonical pr=<url> and the forge's
-# exact pr_head=<sha> when available, then atomically arm a static merge poll.
-# Validation timing and its completed head are recorded at the earlier
-# path-specific boundary by bin/fm-receipt-check.sh and preserved here unchanged.
+# exact pr_head=<sha> when available, atomically arm a static merge poll, then
+# record direct-PR validation completion only after publication succeeds.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,

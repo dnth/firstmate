@@ -246,9 +246,9 @@ test_terminal_paths_record_completion_at_their_boundary() {
     case "$mode" in
       no-mistakes)
         running_status=$(nm_status RUN-$id "$expected_head" pending)
-        passed_status=$(nm_status RUN-$id "$expected_head" passed)
+        passed_status=$(nm_status RUN-$id "$expected_head" checks-passed)
         FM_FAKE_NM_STATUS="$running_status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
-          "$CHECK" "$id" --bind-run RUN-$id >/dev/null || fail "$mode run binding failed"
+          "$CHECK" "$id" --bind-run RUN-$id --generation "$(grep '^validation_generation=' "$meta" | tail -1 | cut -d= -f2-)" >/dev/null || fail "$mode run binding failed"
         FM_FAKE_NM_STATUS="$(nm_status RUN-$id "$base" passed)" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" \
           FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence "$evidence" >/dev/null 2>&1
         rc=$?
@@ -301,7 +301,7 @@ test_completion_signal_releases_validation_lock() {
   running_status=$(nm_status RUN-signal "$expected_head" pending)
   passed_status=$(nm_status RUN-signal "$expected_head" passed)
   FM_FAKE_NM_STATUS="$running_status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
-    "$CHECK" "$id" --bind-run RUN-signal >/dev/null || fail "signal fixture run binding failed"
+    "$CHECK" "$id" --bind-run RUN-signal --generation "$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)" >/dev/null || fail "signal fixture run binding failed"
   fakebin="$TMP_ROOT/signal-fakebin"
   mkdir -p "$fakebin"
   cat > "$fakebin/date" <<'EOF'
@@ -331,7 +331,7 @@ test_replan_invalidates_run_binding() {
   running=$(nm_status RUN-old "$head" pending)
   passed=$(nm_status RUN-old "$head" passed)
   FM_FAKE_NM_STATUS="$running" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
-    "$CHECK" "$id" --bind-run RUN-old >/dev/null || fail "initial run binding failed"
+    "$CHECK" "$id" --bind-run RUN-old --generation "$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)" >/dev/null || fail "initial run binding failed"
   FM_FAKE_NM_STATUS="$running" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "replan failed"
   FM_FAKE_NM_STATUS="$passed" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
@@ -502,7 +502,7 @@ test_high_risk_and_uncertain_inputs_fail_safe() {
   FM_FAKE_NM_STATUS="$running_status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "preplan-run fixture planning failed"
   FM_FAKE_NM_STATUS="$running_status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
-    "$CHECK" "$id" --bind-run OLD-RUN >/dev/null 2>&1
+    "$CHECK" "$id" --bind-run OLD-RUN --generation "$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)" >/dev/null 2>&1
   rc=$?
   expect_code 2 "$rc" "run active before planning cannot bind to the new plan"
 
@@ -513,6 +513,16 @@ test_high_risk_and_uncertain_inputs_fail_safe() {
   FM_NO_MISTAKES_BIN="$FAIL_NO_MISTAKES" FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null 2>&1
   rc=$?
   expect_code 2 "$rc" "full validation planning fails closed when its run boundary is unavailable"
+
+  id=dangling-origin-head
+  base=$(make_project "$id" no-mistakes docs)
+  project="$TMP_ROOT/project-$id"
+  git -C "$project" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/missing
+  add_receipt "$id" AC1 lint "passed"
+  add_receipt "$id" AC2 review "reviewed"
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan) || fail "dangling origin plan should fail safe"
+  printf '%s' "$out" | jq -e '.tier == "high" and .reason == "unreadable-or-empty-diff"' >/dev/null \
+    || fail "dangling origin HEAD fell back to a low local base"
   pass "security and uncertain changes retain full No-Mistakes validation"
 }
 
