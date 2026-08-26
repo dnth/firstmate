@@ -115,13 +115,17 @@ sub write_new_file {
 sub retire_promotion_task_artifacts {
   my ($token) = @_;
   my $owner_name = ".promotion.owner.$token";
+  my $committed_name = ".promotion.committed.$token";
   my @owner_identity = lstat($owner_name);
-  return 1 if !@owner_identity && $! == ENOENT;
-  return 0 unless @owner_identity && !S_ISLNK($owner_identity[2]);
-  sysopen(my $owner, $owner_name, O_RDONLY | O_NOFOLLOW) or return 0;
+  my @committed_identity = lstat($committed_name);
+  my ($identity, $marker_name) = @owner_identity
+    ? (\@owner_identity, $owner_name)
+    : (\@committed_identity, $committed_name);
+  return 0 unless @$identity && !S_ISLNK($identity->[2]);
+  sysopen(my $owner, $marker_name, O_RDONLY | O_NOFOLLOW) or return 0;
   my @opened_identity = stat($owner);
   return 0 unless @opened_identity && S_ISREG($opened_identity[2]) && $opened_identity[3] == 1
-    && $opened_identity[0] == $owner_identity[0] && $opened_identity[1] == $owner_identity[1];
+    && $opened_identity[0] == $identity->[0] && $opened_identity[1] == $identity->[1];
   local $/;
   my $owner_token = <$owner>;
   close($owner) or return 0;
@@ -273,9 +277,28 @@ if ($ENV{FM_RECEIPT_STORE_MODE} eq "promote") {
   my $meta_name = "$task_name.meta";
   chdir($task) or refuse("pinned task directory could not be re-entered");
   opendir(my $task_entries, ".") or refuse("promotion task directory could not be inspected");
-  my @unfinished = map { /^\.promotion\.owner\.([0-9a-f]{32})\z/ ? $1 : () } readdir($task_entries);
+  my @entries = readdir($task_entries);
+  my @unfinished = map { /^\.promotion\.owner\.([0-9a-f]{32})\z/ ? $1 : () } @entries;
+  my @committed_tokens = map { /^\.promotion\.committed\.([0-9a-f]{32})\z/ ? $1 : () } @entries;
   closedir($task_entries) or refuse("promotion task directory inspection could not close");
-  refuse("multiple unfinished promotion transactions require recovery") if @unfinished > 1;
+  my %recovery_tokens = map { $_ => 1 } (@unfinished, @committed_tokens);
+  refuse("multiple unfinished promotion transactions require recovery") if keys(%recovery_tokens) > 1;
+  if (@committed_tokens == 1) {
+    my $committed_token = $committed_tokens[0];
+    retire_promotion_task_artifacts($committed_token)
+      or refuse("committed promotion task artifacts could not be retired");
+    chdir($state) or refuse("pinned state directory could not be re-entered");
+    unlink(".$task_name.meta.promote.$committed_token");
+    unlink(".$task_name.meta.original.$committed_token");
+    unlink(".$task_name.meta.restore.$committed_token");
+    $state->sync or refuse("committed promotion state cleanup could not be synced");
+    chdir($task) or refuse("pinned task directory could not be re-entered");
+    unlink(".promotion.committed.$committed_token")
+      or refuse("committed promotion marker could not be retired");
+    $task->sync or refuse("committed promotion task cleanup could not be synced");
+    system($command, "report", @command_args, $committed_token);
+    exit 0;
+  }
   if (@unfinished == 1) {
     my $unfinished_token = $unfinished[0];
     chdir($state) or refuse("pinned state directory could not be re-entered");
@@ -330,9 +353,9 @@ if ($ENV{FM_RECEIPT_STORE_MODE} eq "promote") {
   my $meta_text = <$meta>;
   defined($meta_text) or refuse("promotion task metadata could not be read");
   my @kinds = ($meta_text =~ /^kind=(.*)$/mg);
-  refuse("task is not a scout task") unless @kinds == 1 && $kinds[0] eq "scout";
   my $mode = $command_args[1] // "";
   my $yolo = $command_args[2] // "";
+  refuse("task is not a scout task") unless @kinds == 1 && $kinds[0] eq "scout";
   my $new_meta = $meta_text;
   $new_meta =~ s/^(?:kind|mode|yolo)=.*\n?//mg;
   $new_meta .= "\n" if length($new_meta) && $new_meta !~ /\n\z/;
@@ -372,6 +395,8 @@ if ($ENV{FM_RECEIPT_STORE_MODE} eq "promote") {
   }
   my $committed = $status == 0 && $meta_replaced && $task->sync && $state->sync && !$promotion_signal;
   if ($committed) {
+    write_new_file(".promotion.committed.$token", "$token\n");
+    $task->sync or refuse("promotion commit marker could not be synced");
     if (retire_promotion_task_artifacts($token)) {
       chdir($state) or refuse("pinned state directory could not be re-entered");
       unlink($meta_backup);
@@ -379,6 +404,8 @@ if ($ENV{FM_RECEIPT_STORE_MODE} eq "promote") {
       unlink($meta_restore);
       $state->sync or refuse("promoted state directory could not be synced");
       chdir($task) or refuse("pinned task directory could not be re-entered");
+      unlink(".promotion.committed.$token")
+        or refuse("promotion commit marker could not be retired");
       $task->sync or refuse("promoted task directory could not be synced");
       system($command, "report", @command_args, $token);
       exit 0;

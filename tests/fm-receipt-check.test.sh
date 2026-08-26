@@ -1033,6 +1033,30 @@ EOF
   pass "git status errors fail implementation, planning, and completion cleanliness gates"
 }
 
+test_submodule_ignore_cannot_hide_dirty_work() {
+  local id=dirty-submodule project subrepo rc
+  make_project "$id" no-mistakes localized >/dev/null
+  project="$TMP_ROOT/project-$id"
+  subrepo="$TMP_ROOT/subrepo-$id"
+  git init -q "$subrepo"
+  git -C "$subrepo" config user.email test@example.com
+  git -C "$subrepo" config user.name Test
+  printf 'tracked\n' > "$subrepo/tracked.txt"
+  git -C "$subrepo" add tracked.txt
+  git -C "$subrepo" commit -q -m initial
+  git -C "$project" -c protocol.file.allow=always submodule add -q "$subrepo" vendor/sub
+  git -C "$project" config -f .gitmodules submodule.vendor/sub.ignore all
+  git -C "$project" add .gitmodules vendor/sub
+  git -C "$project" commit -q -m 'add ignored submodule'
+  add_receipt "$id" AC1 test passed
+  add_receipt "$id" AC2 lint passed
+  printf 'dirty\n' >> "$project/vendor/sub/tracked.txt"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --implementation-complete >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "configured submodule ignore cannot hide dirty work"
+  pass "shared cleanliness inspects ignored submodules"
+}
+
 test_direct_and_local_plans_never_query_no_mistakes() {
   local mode id base log
   log="$TMP_ROOT/non-nm-plan.log"
@@ -1263,6 +1287,7 @@ test_completion_signal_releases_validation_lock
 test_replan_invalidates_run_binding
 test_dirty_worktrees_cannot_plan_or_complete
 test_git_status_errors_fail_every_cleanliness_gate
+test_submodule_ignore_cannot_hide_dirty_work
 test_direct_and_local_plans_never_query_no_mistakes
 test_local_completion_requires_fast_forward_readiness
 test_shared_local_default_resolver

@@ -644,6 +644,25 @@ EOF
   pass "fm-promote: post-commit reporting cannot reverse success"
 }
 
+test_committed_retirement_recovery_is_idempotent() {
+  local home id=promote-committed-recovery token=0123456789abcdef0123456789abcdef
+  home="$TMP_ROOT/promote-committed-recovery/home"
+  mkdir -p "$home/data/$id" "$home/state"
+  printf '# Task\nCommitted recovery fixture.\n\n# Setup\nScout setup.\n' > "$home/data/$id/brief.md"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$home/state/$id.meta"
+  FM_HOME="$home" "$PROMOTE" "$id" --mode direct-PR --yolo off --criterion 'AC1: Concrete outcome' \
+    >/dev/null || fail "committed recovery fixture promotion failed"
+  printf '%s\n' "$token" > "$home/data/$id/.promotion.committed.$token"
+  printf '%s\n' "$token" > "$home/data/$id/.promotion.owner.$token"
+  : > "$home/state/.$id.meta.original.$token"
+  FM_HOME="$home" "$PROMOTE" "$id" --mode direct-PR --yolo off --criterion 'AC1: Concrete outcome' \
+    >/dev/null || fail "retry did not finalize the committed transaction"
+  assert_grep 'kind=ship' "$home/state/$id.meta" "committed recovery rolled metadata back to scout"
+  assert_present "$home/data/$id/evidence.jsonl" "committed recovery removed evidence"
+  assert_absent "$home/data/$id/.promotion.committed.$token" "committed recovery retained its marker"
+  pass "fm-promote: committed retirement recovery preserves ship state"
+}
+
 # The registry parser survives for the mechanical consumers only. It accepts the
 # conditional policy, maps it to its most rigorous leg for them, and exposes the
 # raw annotation for the one caller that must tell a policy from a flat mode.
@@ -695,5 +714,6 @@ test_promote_rejects_intermediate_state_symlink
 test_state_path_replacement_cannot_redirect_promotion
 test_crashed_promotion_recovers_on_retry
 test_report_failure_preserves_committed_promotion
+test_committed_retirement_recovery_is_idempotent
 test_project_mode_maps_the_conditional_policy
 echo "# all fm-task-delivery tests passed"

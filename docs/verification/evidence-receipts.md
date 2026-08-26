@@ -16,7 +16,7 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 - Completion requires observed post-plan mechanical evidence, the exact No-Mistakes run created with the latest unguessable plan generation and bound to its path and head with current checks-green status or CI-log evidence, a GitHub PR with forge-observed exact-head metadata, a supported non-GitHub direct-PR with the existing canonical HTTPS PR URL predicate and no head observation, or a clean fast-forward-ready branch.
 - Receipt append and check share one executable owner that resolves and pins every raw data-path component inside the store process, opens and verifies the task directory relative to that pinned parent, and then opens relative no-follow brief and single-link ledger paths portably on Linux and macOS.
 - Promotion pins and verifies its scout task directory before reading or replacing the brief and ledger, and refuses symlinked or out-of-root task paths before mutation.
-- Promotion retries recover one identity-bound unfinished transaction, while post-commit reporting cannot reverse durable success.
+- Promotion retries distinguish identity-bound unfinished rollback from committed retirement recovery, while post-commit reporting cannot reverse durable success.
 - Planning retains the pinned shared ledger lock through metadata publication, so only receipts appended after the published plan boundary qualify as fresh mechanical evidence.
 - The checker parent owns a read/write release descriptor before snapshot spawn, so early child failures cannot block cleanup waiting for a FIFO reader.
 - Snapshot readiness status is checked and terminal on publication failure; hold documents ready `0`, refusal `1`, and missing-ledger `3` statuses.
@@ -24,7 +24,7 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 - Structurally valid receipts require non-whitespace summary and result strings plus a closed `outcome=passed|failed` field; only `passed` evidences a criterion, while `result` remains descriptive so expected observations such as `401` are unambiguous.
 - Receipt append holds a stable task lock, copies the canonical single-link ledger plus one complete record to a synced mode-0600 single-link temporary file, and atomically renames it over the canonical ledger so concurrent hard-link aliases retain the old inode.
 - Criterion parsing rejects known scaffold placeholder tokens in balanced or unmatched brace forms while allowing concrete brace syntax such as JSON examples.
-- One shared cleanliness predicate requires `git status` to succeed with empty tracked, staged, and untracked output for implementation completion, planning, binding, terminal completion, and final done acceptance.
+- One shared cleanliness predicate requires `git status` with submodule ignores disabled to succeed with empty tracked, staged, untracked, and submodule output for implementation completion, planning, binding, terminal completion, and final done acceptance.
 - Every plan requires a resolved authoritative base and commit diff before it can publish any delivery path.
 - Every diff input, including the special-mode summary probe, must execute successfully before risk classification.
 - Normal and promoted ship briefs consume the same executable acceptance-evidence and per-mode delivery renderer.
@@ -88,6 +88,7 @@ ok - completion signals release the validation lock for retry
 ok - replanning invalidates prior run and completion bindings
 ok - dirty worktrees cannot be planned or completed
 ok - git status errors fail implementation, planning, and completion cleanliness gates
+ok - shared cleanliness inspects ignored submodules
 ok - direct and local plans never invoke No-Mistakes
 ok - local completion requires fast-forward readiness
 ok - local readiness and landing share one fail-closed default resolver
@@ -153,6 +154,7 @@ ok - fm-promote: intermediate state symlinks fail closed
 ok - fm-promote: state path replacement cannot redirect metadata
 ok - fm-promote: retry recovers an identity-bound crashed transaction
 ok - fm-promote: post-commit reporting cannot reverse success
+ok - fm-promote: committed retirement recovery preserves ship state
 ok - fm-project-mode: the conditional policy is accepted, mapped for mechanical callers, and readable raw
 # all fm-task-delivery tests passed
 
