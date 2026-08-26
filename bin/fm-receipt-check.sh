@@ -103,7 +103,7 @@ parse_criteria() {
       description=line
       sub(/^[^:]*:[[:space:]]*/, "", description)
       if (description !~ /[^[:space:]]/) bad=1
-      if (description ~ /\{[^}]*\}/) bad=1
+      if (description ~ /[{}]/) bad=1
       if (seen[id]++) bad=1
       print id "\t" description
       count++
@@ -784,8 +784,10 @@ resolve_diff() {
   git -C "$WORKTREE" merge-base --is-ancestor "$BASE" "$HEAD" 2>/dev/null || return 1
   git -C "$WORKTREE" diff --no-ext-diff --no-renames --numstat "$BASE..$HEAD" > "$NUMSTAT" 2>/dev/null || return 1
   git -C "$WORKTREE" diff --no-ext-diff --no-renames --name-only "$BASE..$HEAD" > "$NAMES" 2>/dev/null || return 1
-  if git -C "$WORKTREE" diff --no-ext-diff --no-renames --summary "$BASE..$HEAD" \
-    | grep -Eq '(mode change|mode (100755|120000|160000))'; then
+  DIFF_SUMMARY="$TMP_ROOT/diff-summary"
+  git -C "$WORKTREE" diff --no-ext-diff --no-renames --summary "$BASE..$HEAD" > "$DIFF_SUMMARY" 2>/dev/null \
+    || return 1
+  if grep -Eq '(mode change|mode (100755|120000|160000))' "$DIFF_SUMMARY"; then
     HAS_SPECIAL_MODE=1
   fi
   DIFF_AVAILABLE=1

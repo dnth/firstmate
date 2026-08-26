@@ -354,6 +354,14 @@ EOF
     | "$CHECK" --parse-criteria - >/dev/null 2>&1
   rc=$?
   expect_code 2 "$rc" "shared criterion parser rejects embedded placeholders"
+  printf '# Acceptance criteria\n- AC1: Implement {TODO before completion.\n# End acceptance criteria\n' \
+    | "$CHECK" --parse-criteria - >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "shared criterion parser rejects unmatched opening braces"
+  printf '# Acceptance criteria\n- AC1: Implement TODO} before completion.\n# End acceptance criteria\n' \
+    | "$CHECK" --parse-criteria - >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "shared criterion parser rejects unmatched closing braces"
   pass "receipt append and check consume one criterion grammar"
 }
 
@@ -599,6 +607,28 @@ EOF
   FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence mechanical-checks-passed >/dev/null \
     || fail "post-publication receipt did not satisfy fresh mechanical evidence"
   pass "plan publication holds the pinned ledger boundary against concurrent receipts"
+}
+
+test_diff_summary_errors_fail_planning() {
+  local id=summary-error base fakebin real_git rc
+  base=$(make_project "$id" no-mistakes docs)
+  add_receipt "$id" AC1 lint passed CHANGELOG.md
+  add_receipt "$id" AC2 review reviewed
+  fakebin="$TMP_ROOT/summary-error-bin"
+  mkdir -p "$fakebin"
+  real_git=$(command -v git)
+  cat > "$fakebin/git" <<EOF
+#!/bin/sh
+case "\$*" in
+  *"diff --no-ext-diff --no-renames --summary"*) exit 7 ;;
+esac
+exec "$real_git" "\$@"
+EOF
+  chmod +x "$fakebin/git"
+  PATH="$fakebin:$PATH" FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "diff summary errors cannot publish a plan"
+  pass "diff summary errors fail closed before risk classification"
 }
 
 test_terminal_and_failed_runs_bind_by_current_plan() {
@@ -1090,6 +1120,7 @@ test_low_risk_skips_no_mistakes_under_explicit_policy
 test_low_risk_requires_safe_prose_and_applicable_evidence
 test_implementation_completion_precedes_planning
 test_plan_boundary_excludes_concurrent_receipts
+test_diff_summary_errors_fail_planning
 test_terminal_and_failed_runs_bind_by_current_plan
 test_no_mistakes_observations_are_bounded
 test_authoritative_docs_remain_high
