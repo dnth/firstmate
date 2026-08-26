@@ -169,8 +169,8 @@ EOF
     if [ "$added_mode" -eq 1 ]; then
       fixture_head=$(git -C "$case_dir/wt" rev-parse HEAD 2>/dev/null || true)
       if [ -n "$fixture_head" ]; then
-        printf 'validation_generation=legacy-fixture\nvalidation_path=full-no-mistakes\nvalidation_head=%s\nvalidation_completed_generation=legacy-fixture\nvalidation_completed_path=full-no-mistakes\nvalidation_completed_head=%s\n' \
-          "$fixture_head" "$fixture_head" >> "$case_dir/state/$id.meta"
+        printf 'implementation_completed_at=1\nimplementation_completed_head=%s\nvalidation_generation=legacy-fixture\nvalidation_path=full-no-mistakes\nvalidation_head=%s\nvalidation_completed_generation=legacy-fixture\nvalidation_completed_path=full-no-mistakes\nvalidation_completed_head=%s\n' \
+          "$fixture_head" "$fixture_head" "$fixture_head" >> "$case_dir/state/$id.meta"
       fi
     fi
   fi
@@ -1378,9 +1378,20 @@ EOF
   assert_contains "$out" "missing evidence: AC2" "failed outcome must leave its criterion missing"
   FM_DATA_OVERRIDE="$d/data" FM_STATE_OVERRIDE="$d/state" "$ROOT/bin/fm-receipt.sh" "$id" AC2 lint "regression checks" "passed" --outcome success >/dev/null
   out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_DATA_OVERRIDE="$d/data" "$CREW_STATE" "$id")
-  assert_contains "$out" "state: done" "complete evidence must release done acceptance"
+  assert_contains "$out" "state: parked" "complete evidence must still require implementation completion"
+  assert_contains "$out" "source: implementation-gate" "missing implementation completion must name its gate"
+  FM_DATA_OVERRIDE="$d/data" FM_STATE_OVERRIDE="$d/state" "$ROOT/bin/fm-receipt-check.sh" "$id" --implementation-complete >/dev/null \
+    || fail "implementation completion fixture could not be recorded"
+  out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_DATA_OVERRIDE="$d/data" "$CREW_STATE" "$id")
+  assert_contains "$out" "state: done" "current-head implementation completion must release done acceptance"
   assert_contains "$out" "source: status-log" "released completion retains status-log source"
-  pass "ship completion remains parked until every criterion has evidence"
+  printf 'head change\n' >> "$d/wt/file.txt"
+  git -C "$d/wt" add file.txt
+  git -C "$d/wt" commit -q -m 'advance implementation head'
+  out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_DATA_OVERRIDE="$d/data" "$CREW_STATE" "$id")
+  assert_contains "$out" "state: parked" "stale implementation completion escaped after a head change"
+  assert_contains "$out" "source: implementation-gate" "stale implementation completion must name its gate"
+  pass "ship completion requires evidence and current-head implementation completion"
 }
 
 test_ship_done_with_malformed_brief_fails_closed() {
@@ -1416,6 +1427,7 @@ test_run_step_done_requires_current_plan_completion() {
   head=$(git -C "$d/wt" rev-parse HEAD)
   fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=ship" "harness=claude" \
     "mode=no-mistakes"
+  printf 'implementation_completed_at=1\nimplementation_completed_head=%s\n' "$head" >> "$d/state/$id.meta"
   FM_FAKE_AXI_STATUS=$(run_passed "fm/$id")
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" "$id"
@@ -1441,6 +1453,7 @@ test_status_log_done_requires_existing_plan_completion() {
   head=$(git -C "$d/wt" rev-parse HEAD)
   fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=ship" "harness=claude" \
     "mode=direct-PR"
+  printf 'implementation_completed_at=1\nimplementation_completed_head=%s\n' "$head" >> "$d/state/$id.meta"
   printf 'done: PR https://example.test/pull/1\n' > "$d/state/$id.status"
   FM_FAKE_AXI_STATUS=
   FM_FAKE_RUNS_LIST=
@@ -1463,7 +1476,8 @@ test_low_validation_waits_for_pr_completion() {
   make_fakebin "$d" >/dev/null
   head=$(git -C "$d/wt" rev-parse HEAD)
   fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=ship" "harness=claude" \
-    "mode=no-mistakes" "validation_generation=low-plan" "validation_path=receipts-mechanical" "validation_head=$head"
+    "mode=no-mistakes" "implementation_completed_at=1" "implementation_completed_head=$head" \
+    "validation_generation=low-plan" "validation_path=receipts-mechanical" "validation_head=$head"
   printf 'done: implementation complete\n' > "$d/state/$id.status"
   FM_FAKE_AXI_STATUS=
   FM_FAKE_RUNS_LIST=

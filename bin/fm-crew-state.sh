@@ -87,7 +87,7 @@ SEP=' · '
 
 # Emit the one canonical line and exit 0. Detail is optional.
 emit() {  # <state> <source> [detail]
-  local state=$1 source=$2 detail=${3:-} gate_detail line generation completed_generation validation_head completed_head validation_path completed_path current_head mode requires_validation=0
+  local state=$1 source=$2 detail=${3:-} gate_detail line generation completed_generation validation_head completed_head validation_path completed_path current_head mode implementation_completed implementation_head requires_validation=0
   if [ "$state" = 'done' ] && [ "${KIND:-}" = ship ]; then
     if ! fm_worktree_is_clean "${WT:-}"; then
       state=parked
@@ -103,6 +103,25 @@ emit() {  # <state> <source> [detail]
     }
   fi
   if [ "$state" = 'done' ] && [ "${KIND:-}" = ship ]; then
+    implementation_completed=$(grep '^implementation_completed_at=' "$META" | tail -1 | cut -d= -f2- || true)
+    implementation_head=$(grep '^implementation_completed_head=' "$META" | tail -1 | cut -d= -f2- || true)
+    current_head=$(git -C "${WT:-}" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
+    case "$implementation_completed" in
+      ''|*[!0-9]*)
+        state=parked
+        source=implementation-gate
+        detail='implementation completion is missing or invalid for the current head'
+        ;;
+      *)
+        if [ -z "$current_head" ] || [ "$implementation_head" != "$current_head" ]; then
+          state=parked
+          source=implementation-gate
+          detail='implementation completion is missing or stale for the current head'
+        fi
+        ;;
+    esac
+  fi
+  if [ "$state" = 'done' ] && [ "${KIND:-}" = ship ]; then
     generation=$(grep '^validation_generation=' "$META" | tail -1 | cut -d= -f2- || true)
     mode=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
     [ -z "$generation" ] || requires_validation=1
@@ -113,7 +132,6 @@ emit() {  # <state> <source> [detail]
     completed_head=$(grep '^validation_completed_head=' "$META" | tail -1 | cut -d= -f2- || true)
     validation_path=$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)
     completed_path=$(grep '^validation_completed_path=' "$META" | tail -1 | cut -d= -f2- || true)
-    current_head=$(git -C "${WT:-}" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
     if [ "$requires_validation" -eq 1 ] && { [ -z "$generation" ] || [ "$completed_generation" != "$generation" ] \
       || [ "$completed_head" != "$validation_head" ] || [ "$current_head" != "$validation_head" ] \
       || [ "$completed_path" != "$validation_path" ]; }; then
