@@ -248,6 +248,12 @@ test_promote_requires_and_records_the_delivery_contract() {
   brief="$home/data/promote-d1/brief.md"
   ledger="$home/data/promote-d1/evidence.jsonl"
 
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "promotion without a task id should exit non-zero"
+  assert_contains "$out" "--criterion 'AC1: outcome' [--criterion ...]" \
+    "promotion usage omitted the required criterion contract"
+
   write_scout_meta() {
     printf 'window=fm-promote-d1\nkind=scout\nworktree=/tmp/wt\n' > "$meta"
     cat > "$brief" <<'EOF'

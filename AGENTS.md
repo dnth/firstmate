@@ -511,7 +511,7 @@ Preserve durable structured identifiers, dependencies, and completion artifact l
 ## 11. Crewmate briefs
 
 `bin/fm-brief.sh` and its help own scaffold syntax, generated variants, status protocol, delivery-mode definitions of done, and exact safety mechanics.
-Every new ship brief declares stable acceptance-criterion ids and receives an append-only `evidence.jsonl`; the receipt helpers own the exact schema, parsing, and completion check, while scout/report behavior remains separate.
+Every new ship brief declares stable acceptance-criterion ids and receives an append-only `evidence.jsonl`; `bin/fm-receipt-schema.sh` owns the receipt schema, `bin/fm-receipt-check.sh` owns criterion parsing and completion checking, and scout/report behavior remains separate.
 Use its scaffold as the contract, then replace every `{TASK}` placeholder with a clear task description, acceptance criteria, constraints, and necessary context before dispatch or seeding.
 Keep additions task-specific rather than repeating lifecycle instructions, and alter generated sections only when the task genuinely differs from the standard shape.
 
