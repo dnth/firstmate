@@ -6,8 +6,9 @@
 #   fm-receipt-store.sh <task-id> append <criterion> <criterion-parser>
 #
 # hold snapshots the pinned brief and ledger under a shared ledger lock, writes
-# 0 or 3 (ledger missing) to ready-file, and retains the lock until release-fifo
-# receives one line.
+# 0 (ready), 1 (refused), or 3 (ledger missing) to ready-file, and on ready or
+# missing retains the lock until release-fifo receives one line before exiting
+# with the same status.
 # append validates the pinned ship brief and criterion, then appends the compact
 # JSON payload from FM_RECEIPT_PAYLOAD under an exclusive ledger lock.
 set -eu
@@ -56,10 +57,11 @@ my $ready = $ENV{FM_RECEIPT_STORE_MODE} eq "hold" ? $arg3 : undef;
 
 sub publish_ready {
   my ($code) = @_;
-  return unless defined($ready);
-  open(my $output, ">", $ready) or return;
-  print {$output} "$code\n";
-  close($output);
+  return 1 unless defined($ready);
+  open(my $output, ">", $ready) or return 0;
+  print {$output} "$code\n" or return 0;
+  close($output) or return 0;
+  return 1;
 }
 
 sub refuse {
@@ -147,7 +149,8 @@ if ($ENV{FM_RECEIPT_STORE_MODE} eq "hold") {
     or refuse("evidence ledger release channel is unsafe");
   copy_file($brief, $arg1);
   copy_file($ledger, $arg2) unless $ledger_missing;
-  publish_ready($ledger_missing ? 3 : 0);
+  publish_ready($ledger_missing ? 3 : 0)
+    or refuse("snapshot readiness could not be published");
   scalar(<$release>);
   exit($ledger_missing ? 3 : 0);
 }

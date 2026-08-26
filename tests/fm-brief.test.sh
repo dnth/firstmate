@@ -195,15 +195,17 @@ EOF
 # one of these DOD blocks, since a broken heredoc corrupts or empties the
 # generated brief content, not just the script's own syntax.
 test_ship_modes_generate_clean_briefs() {
-  local home id mode brief status
+  local home id mode brief status out
   home="$TMP_ROOT/ship-home"
   write_registry "$home"
 
   for id_mode in "brief-nomistakes-a1:no-mistakes" "brief-directpr-a2:direct-PR" "brief-localonly-a3:local-only"; do
     id=${id_mode%%:*}
     mode=${id_mode##*:}
-    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1; status=$?
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" 2>&1); status=$?
     expect_code 0 "$status" "fm-brief.sh $id --mode $mode should exit 0"
+    assert_contains "$out" "replace {TASK} and every {ACCEPTANCE CRITERION}" \
+      "$id: scaffold success omitted required placeholder replacements"
     brief="$home/data/$id/brief.md"
     assert_present "$brief" "$id: brief was not scaffolded"
     assert_grep "# Definition of done" "$brief" "$id: brief missing Definition of done section"

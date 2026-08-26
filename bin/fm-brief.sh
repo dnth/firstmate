@@ -2,8 +2,8 @@
 # Scaffold a crewmate brief or persistent secondmate charter at
 # data/<task-id>/brief.md under the active firstmate home.
 # For ordinary tasks, the standard Setup/Rules/Definition-of-done contract is
-# filled in. Firstmate then replaces the {TASK} placeholder with the task
-# description, acceptance criteria, and context, and may adjust other sections
+# filled in. Firstmate then replaces the {TASK} and every acceptance-criterion
+# placeholder with the task description, concrete outcomes, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
 # Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
@@ -512,4 +512,4 @@ if ! ( set -C; : > "$EVIDENCE" ) 2>/dev/null; then
   rm -f "$BRIEF"
   exit 1
 fi
-echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"
+echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and every {ACCEPTANCE CRITERION})"

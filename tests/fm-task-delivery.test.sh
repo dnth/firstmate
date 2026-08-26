@@ -44,9 +44,33 @@ write_brief() {  # <home> <id> [<recorded-mode>]
   local home=$1 id=$2 mode=${3:-}
   mkdir -p "$home/data/$id"
   {
-    printf 'You are a crewmate.\n\n# Definition of done\n'
+    printf 'You are a crewmate.\n\n# Task\nConcrete fixture task.\n\n# Acceptance criteria\n- AC1: Fixture outcome is concrete.\n\n# Definition of done\n'
     [ -z "$mode" ] || printf 'Delivery contract: mode=%s\n' "$mode"
   } > "$home/data/$id/brief.md"
+}
+
+test_spawn_refuses_unresolved_brief_placeholders() {
+  local rec home proj fakebin out status
+  rec=$(make_home placeholders)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  write_brief "$home" unresolved-task no-mistakes
+  printf '\n{TASK}\n' >> "$home/data/unresolved-task/brief.md"
+  out=$(run_spawn "$home" "$fakebin" unresolved-task "$proj" claude --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted an unresolved task placeholder"
+  assert_contains "$out" "still contains {TASK}" "spawn did not identify the task placeholder"
+
+  write_brief "$home" unresolved-criterion no-mistakes
+  sed 's/Fixture outcome is concrete/{ACCEPTANCE CRITERION}/' \
+    "$home/data/unresolved-criterion/brief.md" > "$home/data/unresolved-criterion/brief.tmp"
+  mv "$home/data/unresolved-criterion/brief.tmp" "$home/data/unresolved-criterion/brief.md"
+  out=$(run_spawn "$home" "$fakebin" unresolved-criterion "$proj" claude --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted an unresolved criterion placeholder"
+  assert_contains "$out" "still contain placeholders" "spawn did not identify the criterion placeholder"
+  pass "fm-spawn: unresolved task and criterion placeholders refuse before launch"
 }
 
 run_spawn() {  # <home> <fakebin> <spawn-args...>
@@ -380,6 +404,7 @@ EOF
 }
 
 test_ship_spawn_requires_a_valid_delivery_contract
+test_spawn_refuses_unresolved_brief_placeholders
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry

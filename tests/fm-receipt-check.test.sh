@@ -184,7 +184,7 @@ test_complete_and_invalid_ledgers_have_distinct_results() {
 test_explicit_negative_results_leave_criteria_missing() {
   local id=negative-results out rc result
   write_brief "$id" direct-PR
-  for result in failed failure "3 failures" "3 errors" negative unsuccessful unsuccessfully "did not pass" "does not pass" "didn't pass" "not successful" "not passed" "no tests" "0 tests" "0 passed" "passed 0" "tests 0" "passed 0 tests" "tests: 0" "passed: 0" "0/0 tests passed" "0 of 0 tests passed" "tests passed: 0/0" "collected 0 items" "0 items collected" "found 0 items" "no items collected" "0 examples" "0 examples, 0 failures" "ran 0 specs" "0 specs" "0 cases" "0 scenarios" "0 errors" "errors: 0" "no errors" "no failures" skipped empty; do
+  for result in failed failure "3 failures" "3 errors" negative unsuccessful unsuccessfully "did not pass" "does not pass" "didn't pass" "did not succeed" "does not succeed" "didn't succeed" "none passed" "no tests passed" "not successful" "not passed" "no tests" "0 tests" "0 passed" "passed 0" "tests 0" "passed 0 tests" "tests: 0" "passed: 0" "0/0 tests passed" "0 of 0 tests passed" "tests passed: 0/0" "collected 0 items" "0 items collected" "found 0 items" "no items collected" "0 examples" "0 examples, 0 failures" "ran 0 specs" "0 specs" "0 cases" "0 scenarios" "0 errors" "errors: 0" "no errors" "no failures" skipped empty; do
     add_receipt "$id" AC1 test "$result"
   done
   add_receipt "$id" AC2 api 401
@@ -195,7 +195,7 @@ test_explicit_negative_results_leave_criteria_missing() {
     and .required == ["AC1","AC2"]
     and .evidenced == ["AC2"]
     and .missing == ["AC1"]
-    and .receipt_count == 40
+    and .receipt_count == 45
   ' >/dev/null || fail "negative-result evidence status was not deterministic"
   add_receipt "$id" AC1 test passed
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id"); rc=$?
@@ -308,6 +308,36 @@ PERL
   rc=$?
   expect_code 2 "$rc" "early snapshot open failure returns promptly"
   pass "early snapshot failures release cleanup without a FIFO reader"
+}
+
+test_readiness_publication_failure_is_terminal() {
+  local id=readiness-failure fakebin real_perl pid rc attempts=0
+  write_brief "$id" direct-PR
+  fakebin="$TMP_ROOT/readiness-failure-bin"
+  mkdir -p "$fakebin"
+  real_perl=$(command -v perl)
+  cat > "$fakebin/perl" <<EOF
+#!/bin/sh
+mkdir "\$4" 2>/dev/null || true
+exec "$real_perl" "\$@"
+EOF
+  chmod +x "$fakebin/perl"
+  PATH="$fakebin:$PATH" FM_HOME="$HOME_DIR" "$CHECK" "$id" \
+    > "$TMP_ROOT/readiness-failure-output" 2>&1 &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null && [ "$attempts" -lt 150 ]; do
+    attempts=$((attempts + 1))
+    sleep 0.02
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "readiness publication failure left parent or child waiting"
+  fi
+  wait "$pid"
+  rc=$?
+  expect_code 2 "$rc" "readiness publication failure is terminal"
+  pass "snapshot readiness publication failures terminate without waiting"
 }
 
 test_pinned_checker_rejects_redirected_and_linked_evidence() {
@@ -1167,6 +1197,7 @@ test_explicit_negative_results_leave_criteria_missing
 test_delivery_mode_mismatch_fails_closed
 test_invalid_brief_and_scout_behavior
 test_early_snapshot_failure_does_not_block_cleanup
+test_readiness_publication_failure_is_terminal
 test_pinned_checker_rejects_redirected_and_linked_evidence
 test_shared_criterion_parser_drives_append_and_check
 test_ci_green_log_allows_exact_bound_run_completion

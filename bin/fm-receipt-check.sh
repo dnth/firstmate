@@ -322,7 +322,7 @@ STORE_RELEASE_OPEN=1
 FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-receipt-store.sh" "$ID" hold \
   "$BRIEF" "$LEDGER" "$STORE_READY" "$STORE_RELEASE" &
 STORE_PID=$!
-while [ ! -s "$STORE_READY" ]; do
+while [ ! -f "$STORE_READY" ] || [ -L "$STORE_READY" ] || [ ! -s "$STORE_READY" ]; do
   kill -0 "$STORE_PID" 2>/dev/null \
     || { wait "$STORE_PID" 2>/dev/null || true; STORE_PID=; echo "error: pinned evidence snapshot failed" >&2; exit 2; }
 done
@@ -372,7 +372,7 @@ def evidence_result:
   without_zero_failures_or_errors
   |
   (test("^[[:space:]]*$") | not)
-  and (test("(^|[^[:alnum:]_])(fail(s|ed|ures?)?|errors?|negative|red|broken|skip(s|ped|ping)?|empty|unsuccessful(ly)?)([^[:alnum:]_]|$)|not[[:space:]]+(pass(ed)?|successful)|((did|does)[[:space:]]+not|didn['’]t)[[:space:]]+pass(ed)?|no[[:space:]]+(tests?|items?|cases?|examples?|specs?|scenarios?)|(^|[^0-9])0[[:space:]]+(passed|tests?|items?|cases?|examples?|specs?|scenarios?)([^[:alnum:]_]|$|[[:space:],])|(^|[^[:alnum:]_])(tests?|passed)[[:space:]]*:[[:space:]]*0([^0-9]|$)|(^|[^[:alnum:]_])(tests?|passed)[[:space:]]+0([^0-9]|$)|(^|[^[:alnum:]_])passed[[:space:]]+0[[:space:]]+tests?([^[:alnum:]_]|$)|(^|[^0-9])0[[:space:]]*(/|of|out[[:space:]]+of)[[:space:]]*0[[:space:]]+(tests?([[:space:]]+passed)?|passed)([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(tests?([[:space:]]+passed)?|passed)[[:space:]]*:?[[:space:]]*0[[:space:]]*(/|of|out[[:space:]]+of)[[:space:]]*0([[:space:]]+tests?)?([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(ran|run|collected|found|discovered)[[:space:]]*:?[[:space:]]*0[[:space:]]+(tests?|items?|cases?|examples?|specs?|scenarios?)([^[:alnum:]_]|$)"; "i") | not);
+  and (test("(^|[^[:alnum:]_])(fail(s|ed|ures?)?|errors?|negative|red|broken|skip(s|ped|ping)?|empty|unsuccessful(ly)?)([^[:alnum:]_]|$)|not[[:space:]]+(pass(ed)?|successful)|((did|does)[[:space:]]+not|didn['’]t)[[:space:]]+(pass(ed)?|succeed(ed)?)|none[[:space:]]+(passed|succeeded)|no[[:space:]]+tests?[[:space:]]+passed|no[[:space:]]+(tests?|items?|cases?|examples?|specs?|scenarios?)|(^|[^0-9])0[[:space:]]+(passed|tests?|items?|cases?|examples?|specs?|scenarios?)([^[:alnum:]_]|$|[[:space:],])|(^|[^[:alnum:]_])(tests?|passed)[[:space:]]*:[[:space:]]*0([^0-9]|$)|(^|[^[:alnum:]_])(tests?|passed)[[:space:]]+0([^0-9]|$)|(^|[^[:alnum:]_])passed[[:space:]]+0[[:space:]]+tests?([^[:alnum:]_]|$)|(^|[^0-9])0[[:space:]]*(/|of|out[[:space:]]+of)[[:space:]]*0[[:space:]]+(tests?([[:space:]]+passed)?|passed)([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(tests?([[:space:]]+passed)?|passed)[[:space:]]*:?[[:space:]]*0[[:space:]]*(/|of|out[[:space:]]+of)[[:space:]]*0([[:space:]]+tests?)?([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(ran|run|collected|found|discovered)[[:space:]]*:?[[:space:]]*0[[:space:]]+(tests?|items?|cases?|examples?|specs?|scenarios?)([^[:alnum:]_]|$)"; "i") | not);
 def strong_result:
   without_zero_failures_or_errors
   | evidence_result

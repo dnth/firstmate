@@ -6,6 +6,7 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 ## Guarantees under test
 
 - New ship briefs receive stable acceptance-criterion ids and an empty append-only evidence ledger, while scout and secondmate scaffolds remain outside the receipt contract.
+- Ship scaffold output requires replacing both task and acceptance-criterion placeholders, and spawn refuses unresolved task text or criteria before endpoint creation.
 - Every ship completion, including a promoted scout, remains parked until a valid acceptance contract and structurally valid evidence cover every required criterion.
 - Low-risk routing is limited to CHANGELOG formatting or reflow changes whose non-whitespace byte sequence is identical and which have file-bound mechanical proof, while every content-byte or uncertain change defaults high.
 - High-risk, broad, sensitive, weakly proven, materially expanded, or uncertain changes retain full No-Mistakes validation.
@@ -15,6 +16,7 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 - Receipt append and check share one executable owner that resolves and pins every raw data-path component inside the store process, opens and verifies the task directory relative to that pinned parent, and then opens relative no-follow brief and single-link ledger paths portably on Linux and macOS.
 - Planning retains the pinned shared ledger lock through metadata publication, so only receipts appended after the published plan boundary qualify as fresh mechanical evidence.
 - The checker parent owns a read/write release descriptor before snapshot spawn, so early child failures cannot block cleanup waiting for a FIFO reader.
+- Snapshot readiness status is checked and terminal on publication failure; hold documents ready `0`, refusal `1`, and missing-ledger `3` statuses.
 - Receipt append, check, and promotion consume one executable acceptance-criterion parser that requires nonblank descriptions.
 - Structurally valid receipts require non-whitespace summary and result strings; explicit failure and error inflections, direct unsuccessful or did-not-pass wording, negative, empty, zero-test, zero-example, zero-spec, zero-case, zero-scenario, zero-collection, or skip results remain recorded but leave their criteria unevidenced, while nonzero successes with zero/no-failure or zero/no-error suffixes and descriptive expected results such as `401` remain eligible.
 - Receipt append retries interrupted or partial writes under the exclusive ledger lock until the complete JSONL record is stored, and rolls an incomplete failed append back to its original EOF.
@@ -64,6 +66,7 @@ ok - failed, skipped, empty, and zero-test results stay unevidenced while 401 co
 ok - pinned brief and metadata delivery modes must match exactly
 ok - invalid ship briefs fail and scout/report behavior stays unchanged
 ok - early snapshot failures release cleanup without a FIFO reader
+ok - snapshot readiness publication failures terminate without waiting
 ok - fm-receipt-check pins task evidence and rejects hard-linked ledgers
 ok - receipt append and check consume one criterion grammar
 ok - exact bound runs complete from the shared current CI-log readiness predicate
@@ -125,6 +128,7 @@ exit 0
 
 $ tests/fm-task-delivery.test.sh
 ok - fm-spawn: a ship spawn requires a valid explicit mode and yolo before anything is created
+ok - fm-spawn: unresolved task and criterion placeholders refuse before launch
 ok - fm-spawn: the brief's recorded mode and the spawn's explicit mode must agree
 ok - fm-promote: promotion installs a fail-closed ship evidence contract
 # all fm-task-delivery tests passed
