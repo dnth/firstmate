@@ -92,8 +92,8 @@ case "$TYPE" in
   test|build|lint|typecheck|api|browser|manual|review) ;;
   *) echo "error: unsupported receipt type: $TYPE" >&2; exit 2 ;;
 esac
-[ -n "$SUMMARY" ] || { echo "error: summary must not be empty" >&2; exit 2; }
-[ -n "$RESULT" ] || { echo "error: result must not be empty" >&2; exit 2; }
+case "$SUMMARY" in *[![:space:]]*) ;; *) echo "error: summary must not be empty" >&2; exit 2 ;; esac
+case "$RESULT" in *[![:space:]]*) ;; *) echo "error: result must not be empty" >&2; exit 2 ;; esac
 
 command -v jq >/dev/null 2>&1 || { echo "error: jq is required" >&2; exit 1; }
 [ -d "$DATA" ] || { echo "error: data directory is missing: $DATA" >&2; exit 1; }

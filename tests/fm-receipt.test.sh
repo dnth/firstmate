@@ -6,6 +6,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 RECEIPT="$ROOT/bin/fm-receipt.sh"
+CHECK="$ROOT/bin/fm-receipt-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-receipt)
 HOME_DIR="$TMP_ROOT/home"
 mkdir -p "$HOME_DIR/data" "$HOME_DIR/state"
@@ -91,9 +92,71 @@ test_rejects_invalid_schema_and_undeclared_criteria() {
     rc=$?
     [ "$rc" -ne 0 ] || fail "invalid receipt fixture unexpectedly succeeded: $args"
   done
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test '   ' passed >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "receipt helper accepted a whitespace-only summary"
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test summary '   ' >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "receipt helper accepted a whitespace-only result"
   [ "$(wc -c < "$HOME_DIR/data/$id/evidence.jsonl")" -eq "$before" ] \
     || fail "a refused receipt mutated the ledger"
   pass "fm-receipt rejects invalid types, ids, missing results, and undeclared criteria"
+}
+
+test_portable_paths_and_failed_append_rollback() {
+  local id=portable-store modules ledger before rc
+  write_ship "$id"
+  modules="$TMP_ROOT/perl-modules"
+  mkdir -p "$modules"
+  cat > "$modules/RejectDevFd.pm" <<'PERL'
+package RejectDevFd;
+use strict;
+use warnings;
+BEGIN {
+  *CORE::GLOBAL::sysopen = sub (*$$;$) {
+    die "nonportable /dev/fd traversal\n" if defined($_[1]) && $_[1] =~ m{^/dev/fd/};
+    return @_ == 4
+      ? CORE::sysopen($_[0], $_[1], $_[2], $_[3])
+      : CORE::sysopen($_[0], $_[1], $_[2]);
+  };
+}
+1;
+PERL
+  PERL5LIB="$modules" PERL5OPT=-MRejectDevFd FM_HOME="$HOME_DIR" \
+    "$RECEIPT" "$id" AC1 test portable passed >/dev/null \
+    || fail "public receipt append required /dev/fd directory traversal"
+  PERL5LIB="$modules" PERL5OPT=-MRejectDevFd FM_HOME="$HOME_DIR" \
+    "$RECEIPT" "$id" AC2 lint portable passed >/dev/null \
+    || fail "second public receipt append required /dev/fd directory traversal"
+  PERL5LIB="$modules" PERL5OPT=-MRejectDevFd FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" >/dev/null \
+    || fail "public receipt check required /dev/fd directory traversal"
+  ledger="$HOME_DIR/data/$id/evidence.jsonl"
+  before=$(wc -c < "$ledger")
+  cat > "$modules/FailSyswrite.pm" <<'PERL'
+package FailSyswrite;
+use strict;
+use warnings;
+use Errno qw(ENOSPC);
+our $calls = 0;
+BEGIN {
+  *CORE::GLOBAL::syswrite = sub (*$$;$$) {
+    if ($calls++ == 0) {
+      return CORE::syswrite($_[0], $_[1], 5, $_[3] // 0);
+    }
+    $! = ENOSPC;
+    return undef;
+  };
+}
+1;
+PERL
+  PERL5LIB="$modules" PERL5OPT=-MFailSyswrite FM_HOME="$HOME_DIR" \
+    "$RECEIPT" "$id" AC2 lint rollback passed >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "fault-injected partial append unexpectedly succeeded"
+  [ "$(wc -c < "$ledger")" -eq "$before" ] || fail "failed partial append left a ledger tail"
+  jq -e . "$ledger" >/dev/null || fail "failed partial append corrupted prior JSONL"
+  pass "fm-receipt uses portable paths and rolls back incomplete appends"
 }
 
 test_rejects_non_ship_and_unsafe_ledger() {
@@ -216,6 +279,7 @@ test_appends_one_compact_valid_receipt
 test_append_is_additive_and_result_flag_works
 test_large_receipt_is_appended_completely
 test_rejects_invalid_schema_and_undeclared_criteria
+test_portable_paths_and_failed_append_rollback
 test_rejects_non_ship_and_unsafe_ledger
 test_task_directory_swap_before_open_is_rejected
 test_ledger_replacement_after_open_cannot_redirect_append

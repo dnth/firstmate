@@ -168,13 +168,23 @@ test_complete_and_invalid_ledgers_have_distinct_results() {
   expect_code 2 "$rc" "invalid ledger exits 2"
   printf '%s' "$out" | jq -e '.status == "invalid" and (.invalid | length) == 1' >/dev/null \
     || fail "invalid ledger was not reported mechanically"
+
+  id=whitespace-ledger
+  write_brief "$id" direct-PR
+  printf '%s\n' '{"criterion":"AC1","type":"test","summary":"   ","result":"passed"}' \
+    '{"criterion":"AC2","type":"lint","summary":"lint","result":"   "}' \
+    > "$HOME_DIR/data/$id/evidence.jsonl"
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id"); rc=$?
+  expect_code 2 "$rc" "whitespace-only ledger strings are invalid"
+  printf '%s' "$out" | jq -e '.status == "invalid"' >/dev/null \
+    || fail "whitespace-only summary was not reported invalid"
   pass "fm-receipt-check distinguishes complete evidence from invalid JSONL"
 }
 
 test_explicit_negative_results_leave_criteria_missing() {
   local id=negative-results out rc result
   write_brief "$id" direct-PR
-  for result in failed failure "3 failures" negative "not passed" "no tests" "0 tests" "0 passed" "passed 0" "tests 0" "passed 0 tests" "tests: 0" "passed: 0" "0/0 tests passed" "0 of 0 tests passed" "tests passed: 0/0" "collected 0 items" "0 items collected" "found 0 items" "no items collected" skipped empty; do
+  for result in failed failure "3 failures" negative "not passed" "no tests" "0 tests" "0 passed" "passed 0" "tests 0" "passed 0 tests" "tests: 0" "passed: 0" "0/0 tests passed" "0 of 0 tests passed" "tests passed: 0/0" "collected 0 items" "0 items collected" "found 0 items" "no items collected" "0 examples" "0 examples, 0 failures" "ran 0 specs" "0 specs" "0 cases" "0 scenarios" skipped empty; do
     add_receipt "$id" AC1 test "$result"
   done
   add_receipt "$id" AC2 api 401
@@ -185,7 +195,7 @@ test_explicit_negative_results_leave_criteria_missing() {
     and .required == ["AC1","AC2"]
     and .evidenced == ["AC2"]
     and .missing == ["AC1"]
-    and .receipt_count == 23
+    and .receipt_count == 29
   ' >/dev/null || fail "negative-result evidence status was not deterministic"
   add_receipt "$id" AC1 test passed
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id"); rc=$?
@@ -340,6 +350,10 @@ EOF
     | "$CHECK" --parse-criteria - >/dev/null 2>&1
   rc=$?
   expect_code 2 "$rc" "shared criterion parser rejects an all-whitespace description"
+  printf '# Acceptance criteria\n- AC1: Implement {TODO} before completion.\n# End acceptance criteria\n' \
+    | "$CHECK" --parse-criteria - >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "shared criterion parser rejects embedded placeholders"
   pass "receipt append and check consume one criterion grammar"
 }
 
@@ -838,6 +852,40 @@ test_dirty_worktrees_cannot_plan_or_complete() {
   pass "dirty worktrees cannot be planned or completed"
 }
 
+test_git_status_errors_fail_every_cleanliness_gate() {
+  local id=status-error base project fakebin real_git rc
+  id=status-error
+  base=$(make_project "$id" direct-PR localized)
+  project="$TMP_ROOT/project-$id"
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test primary passed >/dev/null || fail "status-error AC1 receipt failed"
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC2 lint secondary passed >/dev/null || fail "status-error AC2 receipt failed"
+  fakebin="$TMP_ROOT/status-error-bin"
+  mkdir -p "$fakebin"
+  real_git=$(command -v git)
+  cat > "$fakebin/git" <<EOF
+#!/bin/sh
+case "\$*" in
+  *"status --porcelain"*) exit 7 ;;
+esac
+exec "$real_git" "\$@"
+EOF
+  chmod +x "$fakebin/git"
+  PATH="$fakebin:$PATH" FM_HOME="$HOME_DIR" "$CHECK" "$id" --implementation-complete >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "implementation completion rejects status errors"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --implementation-complete >/dev/null || fail "status-error implementation marker failed"
+  PATH="$fakebin:$PATH" FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "planning rejects status errors"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "status-error plan failed"
+  printf 'pr=https://gitlab.example/o/r/-/merge_requests/2\n' >> "$HOME_DIR/state/$id.meta"
+  PATH="$fakebin:$PATH" FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence pr-opened >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "completion rejects status errors"
+  [ -d "$project/.git" ] || fail "status-error fixture lost its repository"
+  pass "git status errors fail implementation, planning, and completion cleanliness gates"
+}
+
 test_direct_and_local_plans_never_query_no_mistakes() {
   local mode id base log
   log="$TMP_ROOT/non-nm-plan.log"
@@ -950,19 +998,17 @@ test_high_risk_and_uncertain_inputs_fail_safe() {
   git -C "$project" commit -q -m 'documentation tail'
   add_receipt "$id" AC1 lint "passed"
   add_receipt "$id" AC2 review "reviewed"
-  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$hidden_base") \
-    || fail "mismatched base should produce a conservative plan"
-  printf '%s' "$out" | jq -e '.tier == "high" and .reason == "unreadable-or-empty-diff"' >/dev/null \
-    || fail "caller-selected ancestor hid a sensitive commit"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$hidden_base" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "caller-selected ancestor cannot publish a plan"
 
   id=uncertain-base
   base=$(make_project "$id" no-mistakes localized)
   add_receipt "$id" AC1 test "passed"
   add_receipt "$id" AC2 lint "passed"
-  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base does-not-exist); rc=$?
-  expect_code 0 "$rc" "uncertain diff still records a conservative plan"
-  printf '%s' "$out" | jq -e '.tier == "high" and .reason == "unreadable-or-empty-diff"' >/dev/null \
-    || fail "unreadable base did not fail safe to high"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base does-not-exist >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "unresolved base cannot publish a plan"
 
   id=preplan-run
   base=$(make_project "$id" no-mistakes localized)
@@ -1003,19 +1049,22 @@ test_high_risk_and_uncertain_inputs_fail_safe() {
   git -C "$project" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/missing
   add_receipt "$id" AC1 lint "passed"
   add_receipt "$id" AC2 review "reviewed"
-  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan) || fail "dangling origin plan should fail safe"
-  printf '%s' "$out" | jq -e '.tier == "high" and .reason == "unreadable-or-empty-diff"' >/dev/null \
-    || fail "dangling origin HEAD fell back to a low local base"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "dangling origin HEAD cannot publish a plan"
   pass "security and uncertain changes retain full No-Mistakes validation"
 }
 
 test_direct_and_local_modes_never_invoke_no_mistakes() {
-  local mode id base out expected
+  local mode id base out expected rc
   for mode in direct-PR local-only; do
     id="mode-${mode}"
     base=$(make_project "$id" "$mode" localized)
     add_receipt "$id" AC1 test "passed"
     add_receipt "$id" AC2 lint "passed"
+    FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base does-not-exist >/dev/null 2>&1
+    rc=$?
+    expect_code 2 "$rc" "$mode refuses an unresolved authoritative base"
     out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base") \
       || fail "$mode plan failed"
     expected=$mode
@@ -1048,6 +1097,7 @@ test_terminal_paths_record_completion_at_their_boundary
 test_completion_signal_releases_validation_lock
 test_replan_invalidates_run_binding
 test_dirty_worktrees_cannot_plan_or_complete
+test_git_status_errors_fail_every_cleanliness_gate
 test_direct_and_local_plans_never_query_no_mistakes
 test_local_completion_requires_fast_forward_readiness
 test_high_risk_and_uncertain_inputs_fail_safe

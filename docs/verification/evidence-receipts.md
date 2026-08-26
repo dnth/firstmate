@@ -12,11 +12,14 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 - `direct-PR` and `local-only` retain the evidence gate without entering No-Mistakes.
 - The explicit implementation-complete action records the first timestamp idempotently with the current clean commit, planning requires that current-head binding, and `validation_started_at` uses the implementation-complete time as its interval origin.
 - Completion requires observed post-plan mechanical evidence, the exact No-Mistakes run created with the latest unguessable plan generation and bound to its path and head with current checks-green status or CI-log evidence, a GitHub PR with forge-observed exact-head metadata, a supported non-GitHub direct-PR with the existing canonical HTTPS PR URL predicate and no head observation, or a clean fast-forward-ready branch.
-- Receipt append and check share one executable owner for portable no-follow task, brief, and single-link ledger descriptors, with exclusive append and retained shared-snapshot lock modes.
+- Receipt append and check share one executable owner that enters a verified canonical non-symlink task directory, revalidates its identity, and opens relative no-follow brief and single-link ledger paths portably on Linux and macOS.
 - Planning retains the pinned shared ledger lock through metadata publication, so only receipts appended after the published plan boundary qualify as fresh mechanical evidence.
 - Receipt append, check, and promotion consume one executable acceptance-criterion parser that requires nonblank descriptions.
-- Structurally valid receipts with explicit failure inflections, negative, empty, zero-test, zero-collection, or skip results remain recorded but leave their criteria unevidenced, while zero-failure success summaries and descriptive expected results such as `401` remain eligible.
-- Receipt append retries interrupted or partial writes under the exclusive ledger lock until the complete JSONL record is stored.
+- Structurally valid receipts require non-whitespace summary and result strings; explicit failure inflections, negative, empty, zero-test, zero-example, zero-spec, zero-case, zero-scenario, zero-collection, or skip results remain recorded but leave their criteria unevidenced, while zero-failure success summaries and descriptive expected results such as `401` remain eligible.
+- Receipt append retries interrupted or partial writes under the exclusive ledger lock until the complete JSONL record is stored, and rolls an incomplete failed append back to its original EOF.
+- Criterion parsing rejects unresolved brace placeholders wherever they occur in a description.
+- One shared cleanliness predicate requires `git status` to succeed with empty tracked, staged, and untracked output for implementation completion, planning, binding, and terminal completion.
+- Every plan requires a resolved authoritative base and commit diff before it can publish any delivery path.
 - Normal and promoted ship briefs consume the same executable acceptance-evidence and per-mode delivery renderer.
 - The pinned brief and task metadata must record the same concrete delivery mode before validation can proceed.
 - Findings that invalidate a receipt or acceptance claim append one idempotent finding-to-criterion marker to task metadata.
@@ -44,6 +47,7 @@ ok - fm-receipt appends one compact validated receipt
 ok - fm-receipt preserves prior records and accepts --result
 ok - fm-receipt appends complete large JSONL records
 ok - fm-receipt rejects invalid types, ids, missing results, and undeclared criteria
+ok - fm-receipt uses portable paths and rolls back incomplete appends
 ok - fm-receipt refuses non-ship tasks and unsafe ledger paths
 ok - fm-receipt rejects task-directory replacement before its no-follow open
 ok - fm-receipt appends only through the ledger descriptor opened before validation
@@ -70,6 +74,7 @@ ok - terminal delivery paths record one completion timestamp at their boundary
 ok - completion signals release the validation lock for retry
 ok - replanning invalidates prior run and completion bindings
 ok - dirty worktrees cannot be planned or completed
+ok - git status errors fail implementation, planning, and completion cleanliness gates
 ok - direct and local plans never invoke No-Mistakes
 ok - local completion requires fast-forward readiness
 ok - security and uncertain changes retain full No-Mistakes validation

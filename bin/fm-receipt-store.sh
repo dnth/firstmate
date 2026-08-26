@@ -95,13 +95,13 @@ refuse("task directory identity changed") unless @named_identity
   && !S_ISLNK($named_identity[2])
   && $named_identity[0] == $task_identity[0]
   && $named_identity[1] == $task_identity[1];
-my $task_fd_path = "/dev/fd/" . fileno($task);
-my @descriptor_identity = stat($task_fd_path);
-refuse("portable task descriptor path is unavailable") unless @descriptor_identity
-  && $descriptor_identity[0] == $task_identity[0]
-  && $descriptor_identity[1] == $task_identity[1];
+chdir($task_path) or refuse("task directory could not be entered safely");
+my @cwd_identity = stat(".");
+refuse("task directory identity changed after entry") unless @cwd_identity
+  && $cwd_identity[0] == $task_identity[0]
+  && $cwd_identity[1] == $task_identity[1];
 
-sysopen(my $brief, "$task_fd_path/brief.md", O_RDONLY | O_NOFOLLOW)
+sysopen(my $brief, "brief.md", O_RDONLY | O_NOFOLLOW)
   or refuse("task brief is missing or unsafe");
 my @brief_identity = stat($brief);
 refuse("task brief is not a regular file") unless @brief_identity && S_ISREG($brief_identity[2]);
@@ -109,7 +109,7 @@ refuse("task brief is not a regular file") unless @brief_identity && S_ISREG($br
 if ($ENV{FM_RECEIPT_STORE_MODE} eq "hold") {
   my $ledger_missing = 0;
   my $ledger;
-  if (!sysopen($ledger, "$task_fd_path/evidence.jsonl", O_RDONLY | O_NOFOLLOW)) {
+  if (!sysopen($ledger, "evidence.jsonl", O_RDONLY | O_NOFOLLOW)) {
     $ledger_missing = 1 if $! == ENOENT;
     refuse("evidence ledger is missing or unsafe") unless $ledger_missing;
   }
@@ -130,12 +130,14 @@ if ($ENV{FM_RECEIPT_STORE_MODE} eq "hold") {
 
 my $criterion = $arg1;
 my $parser = $arg2;
-sysopen(my $ledger, "$task_fd_path/evidence.jsonl", O_WRONLY | O_APPEND | O_NOFOLLOW)
+sysopen(my $ledger, "evidence.jsonl", O_WRONLY | O_APPEND | O_NOFOLLOW)
   or refuse("evidence ledger is missing or unsafe");
 my @ledger_identity = stat($ledger);
 refuse("evidence ledger must be a single-link regular file") unless @ledger_identity
   && S_ISREG($ledger_identity[2]) && $ledger_identity[3] == 1;
 flock($ledger, LOCK_EX) or refuse("evidence ledger could not be locked");
+my $original_eof = sysseek($ledger, 0, 2);
+defined($original_eof) or refuse("evidence ledger end could not be observed");
 
 local $/;
 my $brief_text = <$brief>;
@@ -152,7 +154,12 @@ my $offset = 0;
 while ($offset < length($record)) {
   my $written = syswrite($ledger, $record, length($record) - $offset, $offset);
   next if !defined($written) && $! == EINTR;
-  refuse("evidence receipt append failed") unless defined($written) && $written > 0;
+  if (!defined($written) || $written <= 0) {
+    if ($offset > 0) {
+      truncate($ledger, $original_eof) or refuse("incomplete evidence append could not be rolled back");
+    }
+    refuse("evidence receipt append failed");
+  }
   $offset += $written;
 }
 close($ledger) or refuse("evidence ledger close failed");

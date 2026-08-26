@@ -103,7 +103,7 @@ parse_criteria() {
       description=line
       sub(/^[^:]*:[[:space:]]*/, "", description)
       if (description !~ /[^[:space:]]/) bad=1
-      if (description ~ /^\{.*\}$/) bad=1
+      if (description ~ /\{[^}]*\}/) bad=1
       if (seen[id]++) bad=1
       print id "\t" description
       count++
@@ -284,6 +284,7 @@ command -v perl >/dev/null 2>&1 || { echo "error: perl is required" >&2; exit 2;
 DATA_REAL=$(CDPATH='' cd -- "$DATA" 2>/dev/null && pwd -P) \
   || { echo "error: data directory is unsafe: $DATA" >&2; exit 2; }
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-receipt-check.XXXXXX")
+TMP_ROOT=$(CDPATH='' cd -- "$TMP_ROOT" && pwd -P)
 VALIDATION_LOCK=
 STORE_PID=
 STORE_RELEASE=
@@ -302,6 +303,11 @@ trap 'exit 1' HUP INT TERM
 release_validation_lock() {
   [ -z "$VALIDATION_LOCK" ] || rmdir "$VALIDATION_LOCK" 2>/dev/null || true
   VALIDATION_LOCK=
+}
+git_worktree_is_clean() {
+  local worktree=$1 status_output
+  status_output=$(git -C "$worktree" status --porcelain --untracked-files=all 2>/dev/null) || return 1
+  [ -z "$status_output" ]
 }
 BRIEF="$TMP_ROOT/brief.md"
 LEDGER="$TMP_ROOT/evidence.jsonl"
@@ -363,7 +369,7 @@ def evidence_result:
   without_zero_failures
   |
   (test("^[[:space:]]*$") | not)
-  and (test("(^|[^[:alnum:]_])(fail(s|ed|ures?)?|error|negative|red|broken|skip(s|ped|ping)?|empty)([^[:alnum:]_]|$)|not[[:space:]]+pass(ed)?|no[[:space:]]+(tests?|items?|cases?)|(^|[^0-9])0[[:space:]]+(tests?([[:space:]]+passed)?|passed)([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(tests?|passed)[[:space:]]*:[[:space:]]*0([^0-9]|$)|(^|[^[:alnum:]_])(tests?|passed)[[:space:]]+0([^0-9]|$)|(^|[^[:alnum:]_])passed[[:space:]]+0[[:space:]]+tests?([^[:alnum:]_]|$)|(^|[^0-9])0[[:space:]]*(/|of|out[[:space:]]+of)[[:space:]]*0[[:space:]]+(tests?([[:space:]]+passed)?|passed)([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(tests?([[:space:]]+passed)?|passed)[[:space:]]*:?[[:space:]]*0[[:space:]]*(/|of|out[[:space:]]+of)[[:space:]]*0([[:space:]]+tests?)?([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(collected|found|discovered)[[:space:]]*:?[[:space:]]*0[[:space:]]+(items?|cases?)([^[:alnum:]_]|$)|(^|[^0-9])0[[:space:]]+(items?|cases?)[[:space:]]+(collected|found|discovered)([^[:alnum:]_]|$)"; "i") | not);
+  and (test("(^|[^[:alnum:]_])(fail(s|ed|ures?)?|error|negative|red|broken|skip(s|ped|ping)?|empty)([^[:alnum:]_]|$)|not[[:space:]]+pass(ed)?|no[[:space:]]+(tests?|items?|cases?|examples?|specs?|scenarios?)|(^|[^0-9])0[[:space:]]+(passed|tests?|items?|cases?|examples?|specs?|scenarios?)([^[:alnum:]_]|$|[[:space:],])|(^|[^[:alnum:]_])(tests?|passed)[[:space:]]*:[[:space:]]*0([^0-9]|$)|(^|[^[:alnum:]_])(tests?|passed)[[:space:]]+0([^0-9]|$)|(^|[^[:alnum:]_])passed[[:space:]]+0[[:space:]]+tests?([^[:alnum:]_]|$)|(^|[^0-9])0[[:space:]]*(/|of|out[[:space:]]+of)[[:space:]]*0[[:space:]]+(tests?([[:space:]]+passed)?|passed)([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(tests?([[:space:]]+passed)?|passed)[[:space:]]*:?[[:space:]]*0[[:space:]]*(/|of|out[[:space:]]+of)[[:space:]]*0([[:space:]]+tests?)?([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(ran|run|collected|found|discovered)[[:space:]]*:?[[:space:]]*0[[:space:]]+(tests?|items?|cases?|examples?|specs?|scenarios?)([^[:alnum:]_]|$)"; "i") | not);
 def strong_result:
   without_zero_failures
   | evidence_result
@@ -393,8 +399,8 @@ if [ "$LEDGER_EXISTS" = true ]; then
       and ((keys - ["artifact","command","criterion","file","result","summary","type"]) | length == 0)
       and (.criterion | type == "string" and test("^AC[1-9][0-9]*$"))
       and (.type | type == "string" and test("^(test|build|lint|typecheck|api|browser|manual|review)$"))
-      and (.summary | type == "string" and length > 0)
-      and (.result | type == "string" and length > 0)
+      and (.summary | type == "string" and test("[^[:space:]]"))
+      and (.result | type == "string" and test("[^[:space:]]"))
       and ((.command // "") | type == "string")
       and ((.artifact // "") | type == "string")
       and ((.file // "") | type == "string")
@@ -469,7 +475,7 @@ if [ "$ACTION" = implementation-complete ]; then
     || { echo "error: implementation worktree is missing" >&2; exit 2; }
   IMPLEMENTATION_HEAD=$(git -C "$IMPLEMENTATION_WORKTREE" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) \
     || { echo "error: implementation head is unavailable" >&2; exit 2; }
-  [ -z "$(git -C "$IMPLEMENTATION_WORKTREE" status --porcelain --untracked-files=all 2>/dev/null)" ] \
+  git_worktree_is_clean "$IMPLEMENTATION_WORKTREE" \
     || { echo "error: implementation worktree is dirty" >&2; exit 2; }
   VALIDATION_LOCK="$STATE/.$ID.validation-plan.lock"
   if ! mkdir "$VALIDATION_LOCK" 2>/dev/null; then
@@ -537,7 +543,7 @@ if [ "$ACTION" = bind-run ]; then
   [ -n "$BIND_WORKTREE" ] && [ -d "$BIND_WORKTREE" ] || { echo "error: validation worktree is missing" >&2; exit 2; }
   BIND_HEAD=$(git -C "$BIND_WORKTREE" rev-parse --verify "$BIND_HEAD^{commit}" 2>/dev/null) \
     || { echo "error: validated head is missing" >&2; exit 2; }
-  [ -z "$(git -C "$BIND_WORKTREE" status --porcelain --untracked-files=all 2>/dev/null)" ] \
+  git_worktree_is_clean "$BIND_WORKTREE" \
     || { echo "error: validation worktree is dirty" >&2; exit 2; }
   BIND_OUT=$(fm_nm_run_checked "$BIND_WORKTREE" "$NM_TIMEOUT" axi status --run "$RUN_ID_INPUT") \
     || { echo "error: No-Mistakes run could not be observed" >&2; exit 2; }
@@ -599,7 +605,7 @@ record_validation_completed() {
     || { release_validation_lock; echo "error: validated head is missing or invalid" >&2; return 1; }
   current_head=$(git -C "$worktree" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) \
     || { release_validation_lock; echo "error: current worktree head is unavailable" >&2; return 1; }
-  [ -z "$(git -C "$worktree" status --porcelain --untracked-files=all 2>/dev/null)" ] \
+  git_worktree_is_clean "$worktree" \
     || { release_validation_lock; echo "error: validation worktree is dirty; commit or remove all changes" >&2; return 1; }
   if [ "$current_head" != "$validated_head" ]; then
     printf 'validation_completed_at=\nvalidation_completed_head=\nvalidation_completed_path=\nvalidation_completed_evidence=\nvalidation_completed_generation=\n' >> "$META" \
@@ -739,7 +745,7 @@ fi
 WORKTREE=$(grep '^worktree=' "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true)
 [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ] \
   || { echo "error: validation worktree is missing" >&2; exit 2; }
-if [ -n "$(git -C "$WORKTREE" status --porcelain --untracked-files=all 2>/dev/null)" ]; then
+if ! git_worktree_is_clean "$WORKTREE"; then
   echo "error: validation worktree is dirty; commit or remove all changes" >&2
   exit 2
 fi
@@ -761,7 +767,7 @@ NAMES="$TMP_ROOT/names"
 resolve_diff() {
   local requested_base authoritative_base origin_head
   [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ] && git -C "$WORKTREE" rev-parse --git-dir >/dev/null 2>&1 || return 1
-  [ -z "$(git -C "$WORKTREE" status --porcelain --untracked-files=all 2>/dev/null)" ] || return 1
+  git_worktree_is_clean "$WORKTREE" || return 1
   HEAD=$(git -C "$WORKTREE" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) || return 1
   origin_head=$(git -C "$WORKTREE" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null || true)
   if [ -n "$origin_head" ]; then
@@ -785,7 +791,8 @@ resolve_diff() {
   DIFF_AVAILABLE=1
 }
 
-resolve_diff || true
+resolve_diff \
+  || { echo "error: authoritative validation base and diff could not be resolved" >&2; exit 2; }
 IMPLEMENTATION_COMPLETED=$(grep '^implementation_completed_at=' "$META" | head -1 | cut -d= -f2- || true)
 IMPLEMENTATION_HEAD=$(grep '^implementation_completed_head=' "$META" | tail -1 | cut -d= -f2- || true)
 case "$IMPLEMENTATION_COMPLETED" in
