@@ -10,11 +10,11 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 - Low-risk routing is limited to narrow non-command CHANGELOG prose with file-bound mechanical proof for every changed file, while every other change defaults high.
 - High-risk, broad, sensitive, weakly proven, materially expanded, or uncertain changes retain full No-Mistakes validation.
 - `direct-PR` and `local-only` retain the evidence gate without entering No-Mistakes.
-- Initial planning records one `validation_started_at`, and completion requires observed post-plan mechanical evidence, the exact No-Mistakes run created with the latest unguessable plan generation and bound to its path and head with current checks-green status or CI-log evidence, forge-observed canonical PR/head metadata, or a clean fast-forward-ready branch.
+- Initial planning records one `validation_started_at`, and completion requires observed post-plan mechanical evidence, the exact No-Mistakes run created with the latest unguessable plan generation and bound to its path and head with current checks-green status or CI-log evidence, a GitHub PR with forge-observed exact-head metadata, a supported non-GitHub direct-PR with the existing canonical HTTPS PR URL predicate and no head observation, or a clean fast-forward-ready branch.
 - Receipt appends open the canonical task directory and original single-link ledger through portable no-follow descriptors before validation, so concurrent path replacement cannot redirect evidence.
 - Receipt checks snapshot the pinned non-symlink task contract and single-link ledger before parsing, so task replacement and external hard links cannot redirect completion evidence.
 - Receipt append, check, and promotion consume one executable acceptance-criterion parser that requires nonblank descriptions.
-- Structurally valid receipts with explicit failure inflections, negative, empty, equivalent zero-test orderings, or skip results remain recorded but leave their criteria unevidenced, while zero-failure success summaries and descriptive expected results such as `401` remain eligible.
+- Structurally valid receipts with explicit failure inflections, negative, empty, equivalent zero-test orderings including zero-of-zero fractions, or skip results remain recorded but leave their criteria unevidenced, while zero-failure success summaries and descriptive expected results such as `401` remain eligible.
 - Normal and promoted ship briefs consume the same executable acceptance-evidence and per-mode delivery renderer.
 - The pinned brief and task metadata must record the same concrete delivery mode before validation can proceed.
 - Findings that invalidate a receipt or acceptance claim append one idempotent finding-to-criterion marker to task metadata.
