@@ -70,6 +70,13 @@ EOF
   status=$?
   [ "$status" -ne 0 ] || fail "spawn accepted an unresolved criterion placeholder"
   assert_contains "$out" "still contain placeholders" "spawn did not identify the criterion placeholder"
+
+  write_brief "$home" concrete-braces no-mistakes
+  sed 's/Fixture outcome is concrete/API returns {"ok":true}/' \
+    "$home/data/concrete-braces/brief.md" > "$home/data/concrete-braces/brief.tmp"
+  mv "$home/data/concrete-braces/brief.tmp" "$home/data/concrete-braces/brief.md"
+  out=$(run_spawn "$home" "$fakebin" concrete-braces "$proj" claude --mode no-mistakes --yolo off)
+  assert_not_contains "$out" "acceptance criteria are missing" "spawn rejected concrete brace syntax"
   pass "fm-spawn: unresolved task and criterion placeholders refuse before launch"
 }
 
@@ -325,7 +332,7 @@ EOF
   cmp -s "$meta_before" "$meta" || fail "retained metadata recovery copy was not original"
   [ ! -e "$ledger" ] || fail "rollback failure left a partial evidence ledger"
 
-  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 --mode direct-PR --yolo on --criterion 'AC1: Fixture works' 2>&1)
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 --mode direct-PR --yolo on --criterion 'AC1: API returns {"ok":true}' 2>&1)
   status=$?
   expect_code 0 "$status" "a promotion carrying both flags should succeed"
   assert_grep 'kind=ship' "$meta" "promotion did not restore ship teardown protection"
@@ -337,6 +344,7 @@ EOF
   assert_grep 'Preserve this requirement when the scout becomes a ship task.' "$brief" "promotion truncated task content at an embedded setup heading"
   assert_grep "fm-receipt-check.sh promote-d1 --plan" "$brief" "promoted direct-PR brief omitted validation planning"
   assert_grep 'done: PR {url}' "$brief" "promoted direct-PR brief omitted its terminal sequence"
+  assert_grep 'AC1: API returns {"ok":true}' "$brief" "promotion rejected concrete brace syntax"
   expected_delivery=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" --render-ship-delivery promote-d1 direct-PR)
   actual_delivery=$(awk '/^# Acceptance evidence$/{delivery=""; emit=1} emit{delivery=delivery $0 ORS} END{printf "%s", delivery}' "$brief")
   [ "$actual_delivery" = "$expected_delivery" ] || fail "promotion did not reuse fm-brief's direct-PR delivery renderer"

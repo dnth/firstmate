@@ -36,7 +36,8 @@
 # worktree's base..HEAD diff with a deterministic conservative classifier.
 # A supplied initial --base is accepted only when it equals the repository's
 # authoritative merge boundary.
-# Unreadable or uncertain inputs resolve to high.
+# Unreadable or unresolvable authoritative inputs are refused without a plan;
+# classifiable uncertainty resolves to high.
 # Risk is binary: high by default, or low only for a narrow CHANGELOG-only prose
 # change with file-bound strong mechanical evidence for every changed file.
 # Caller hints never lower risk.
@@ -103,7 +104,9 @@ parse_criteria() {
       description=line
       sub(/^[^:]*:[[:space:]]*/, "", description)
       if (description !~ /[^[:space:]]/) bad=1
-      if (description ~ /[{}]/) bad=1
+      upper=toupper(description)
+      if (upper ~ /\{[[:space:]]*(TASK|TODO|ACCEPTANCE[ _-]+CRITERION|PLACEHOLDER)([[:space:]}]|$)/) bad=1
+      if (upper ~ /(TASK|TODO|ACCEPTANCE[ _-]+CRITERION|PLACEHOLDER)[[:space:]]*\}/) bad=1
       if (seen[id]++) bad=1
       print id "\t" description
       count++
@@ -365,14 +368,14 @@ STRONG_RESULT_MODULE="$TMP_ROOT/strong-result.jq"
 : > "$INVALID"
 cat > "$STRONG_RESULT_MODULE" <<'JQ'
 def without_zero_failures_or_errors:
-  gsub("(^|[^[:alnum:]_])(0[[:space:]]+(fail(s|ed|ures?)?|errors?)|(fail(s|ed|ures?)?|errors?)[[:space:]]*:?[[:space:]]*0|no[[:space:]]+(fail(s|ed|ures?)?|errors?))([^[:alnum:]_]|$)"; " "; "i")
+  gsub("(^|[^[:alnum:]_])((0|zero)[[:space:]]+(fail(s|ed|ures?)?|errors?)|(fail(s|ed|ures?)?|errors?)[[:space:]]*:?[[:space:]]*(0|zero)|no[[:space:]]+(fail(s|ed|ures?)?|errors?))([^[:alnum:]_]|$)"; " "; "i")
   | sub("[[:space:],;:]+$"; "")
   | sub("^[[:space:],;:]+"; "");
 def evidence_result:
   without_zero_failures_or_errors
   |
   (test("^[[:space:]]*$") | not)
-  and (test("(^|[^[:alnum:]_])(fail(s|ed|ures?)?|errors?|negative|red|broken|skip(s|ped|ping)?|empty|unsuccessful(ly)?)([^[:alnum:]_]|$)|not[[:space:]]+(pass(ed)?|successful)|((did|does)[[:space:]]+not|didn['’]t)[[:space:]]+(pass(ed)?|succeed(ed)?)|none[[:space:]]+(passed|succeeded)|no[[:space:]]+tests?[[:space:]]+passed|no[[:space:]]+(tests?|items?|cases?|examples?|specs?|scenarios?)|(^|[^0-9])0[[:space:]]+(passed|tests?|items?|cases?|examples?|specs?|scenarios?)([^[:alnum:]_]|$|[[:space:],])|(^|[^[:alnum:]_])(tests?|passed)[[:space:]]*:[[:space:]]*0([^0-9]|$)|(^|[^[:alnum:]_])(tests?|passed)[[:space:]]+0([^0-9]|$)|(^|[^[:alnum:]_])passed[[:space:]]+0[[:space:]]+tests?([^[:alnum:]_]|$)|(^|[^0-9])0[[:space:]]*(/|of|out[[:space:]]+of)[[:space:]]*0[[:space:]]+(tests?([[:space:]]+passed)?|passed)([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(tests?([[:space:]]+passed)?|passed)[[:space:]]*:?[[:space:]]*0[[:space:]]*(/|of|out[[:space:]]+of)[[:space:]]*0([[:space:]]+tests?)?([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(ran|run|collected|found|discovered)[[:space:]]*:?[[:space:]]*0[[:space:]]+(tests?|items?|cases?|examples?|specs?|scenarios?)([^[:alnum:]_]|$)"; "i") | not);
+  and (test("(^|[^[:alnum:]_])(fail(s|ed|ures?)?|errors?|negative|red|broken|skip(s|ped|ping)?|empty|unsuccessful(ly)?)([^[:alnum:]_]|$)|not[[:space:]]+(pass(ed)?|successful|working)|((did|does)[[:space:]]+not|didn['’]t)[[:space:]]+(pass(ed)?|succeed(ed)?|work(ed)?)|none[[:space:]]+(passed|succeeded)|((0|zero)[[:space:]]+succeed(ed)?|no[[:space:]]+success(es)?)([^[:alnum:]_]|$)|no[[:space:]]+tests?[[:space:]]+passed|no[[:space:]]+(tests?|items?|cases?|examples?|specs?|scenarios?)|(^|[^0-9])0[[:space:]]+(passed|tests?|items?|cases?|examples?|specs?|scenarios?)([^[:alnum:]_]|$|[[:space:],])|(^|[^[:alnum:]_])(tests?|passed)[[:space:]]*:[[:space:]]*0([^0-9]|$)|(^|[^[:alnum:]_])(tests?|passed)[[:space:]]+0([^0-9]|$)|(^|[^[:alnum:]_])passed[[:space:]]+0[[:space:]]+tests?([^[:alnum:]_]|$)|(^|[^0-9])0[[:space:]]*(/|of|out[[:space:]]+of)[[:space:]]*0[[:space:]]+(tests?([[:space:]]+passed)?|passed)([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(tests?([[:space:]]+passed)?|passed)[[:space:]]*:?[[:space:]]*0[[:space:]]*(/|of|out[[:space:]]+of)[[:space:]]*0([[:space:]]+tests?)?([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(ran|run|collected|found|discovered)[[:space:]]*:?[[:space:]]*0[[:space:]]+(tests?|items?|cases?|examples?|specs?|scenarios?)([^[:alnum:]_]|$)"; "i") | not);
 def strong_result:
   without_zero_failures_or_errors
   | evidence_result
