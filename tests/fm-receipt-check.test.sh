@@ -184,7 +184,7 @@ test_complete_and_invalid_ledgers_have_distinct_results() {
 test_explicit_negative_results_leave_criteria_missing() {
   local id=negative-results out rc result
   write_brief "$id" direct-PR
-  for result in failed failure "3 failures" "3 errors" negative unsuccessful unsuccessfully "did not pass" "does not pass" "didn't pass" "did not succeed" "does not succeed" "didn't succeed" "did not work" "does not work" "didn't work" "not working" "none passed" "no tests passed" "0 succeeded" "zero succeeded" "no successes" "not successful" "not passed" "no tests" "0 tests" "0 passed" "passed 0" "tests 0" "passed 0 tests" "tests: 0" "passed: 0" "0/0 tests passed" "0 of 0 tests passed" "tests passed: 0/0" "collected 0 items" "0 items collected" "found 0 items" "no items collected" "0 examples" "0 examples, 0 failures" "ran 0 specs" "0 specs" "0 cases" "0 scenarios" "0 errors" "errors: 0" "no errors" "no failures" "zero failures" "zero errors" skipped empty; do
+  for result in failed failure "3 failures" "3 errors" negative unsuccessful unsuccessfully "did not pass" "does not pass" "didn't pass" "doesn't pass" "did not succeed" "does not succeed" "didn't succeed" "did not work" "does not work" "didn't work" "doesn't work" "not working" "none passed" "no tests passed" "0 succeeded" "zero succeeded" "0 successes" "zero successes" "no successes" "not successful" "not passed" "no tests" "0 tests" "0 passed" "passed 0" "tests 0" "passed 0 tests" "tests: 0" "passed: 0" "0/0 tests passed" "0 of 0 tests passed" "tests passed: 0/0" "collected 0 items" "0 items collected" "found 0 items" "no items collected" "0 examples" "0 examples, 0 failures" "ran 0 specs" "0 specs" "0 cases" "0 scenarios" "0 errors" "errors: 0" "no errors" "no failures" "zero failures" "zero errors" skipped empty; do
     add_receipt "$id" AC1 test "$result"
   done
   add_receipt "$id" AC2 api 401
@@ -195,7 +195,7 @@ test_explicit_negative_results_leave_criteria_missing() {
     and .required == ["AC1","AC2"]
     and .evidenced == ["AC2"]
     and .missing == ["AC1"]
-    and .receipt_count == 54
+    and .receipt_count == 58
   ' >/dev/null || fail "negative-result evidence status was not deterministic"
   add_receipt "$id" AC1 test passed
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id"); rc=$?
@@ -220,6 +220,15 @@ test_explicit_negative_results_leave_criteria_missing() {
   expect_code 0 "$rc" "nonzero passes with zero errors count as evidence"
   printf '%s' "$out" | jq -e '.evidenced == ["AC1","AC2"] and .missing == []' >/dev/null \
     || fail "zero-error success suffix was rejected"
+
+  id=nonzero-succeeded
+  write_brief "$id" direct-PR
+  add_receipt "$id" AC1 test "10 succeeded"
+  add_receipt "$id" AC2 api 401
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id"); rc=$?
+  expect_code 0 "$rc" "nonzero succeeded result is not a zero-success marker"
+  printf '%s' "$out" | jq -e '.evidenced == ["AC1","AC2"] and .missing == []' >/dev/null \
+    || fail "zero-success matching consumed a trailing digit from nonzero success"
   pass "failed, skipped, empty, and zero-test results stay unevidenced while 401 counts"
 }
 
@@ -1050,6 +1059,25 @@ test_local_completion_requires_fast_forward_readiness() {
   pass "local completion requires fast-forward readiness"
 }
 
+test_shared_local_default_resolver() {
+  local id=local-default-resolver base project out rc
+  base=$(make_project "$id" local-only localized)
+  project="$TMP_ROOT/project-$id"
+  out=$("$ROOT/bin/fm-local-default.sh" "$project") \
+    || fail "shared local default resolver rejected main fallback"
+  [ "$out" = main ] || fail "shared local default resolver returned '$out', expected main"
+  git -C "$project" branch develop "$base"
+  git -C "$project" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/develop
+  out=$("$ROOT/bin/fm-local-default.sh" "$project") \
+    || fail "shared local default resolver rejected a local origin/HEAD branch"
+  [ "$out" = develop ] || fail "shared local default resolver returned '$out', expected develop"
+  git -C "$project" branch -D develop >/dev/null
+  "$ROOT/bin/fm-local-default.sh" "$project" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "shared local default resolver fell back around a missing origin/HEAD branch"
+  pass "local readiness and landing share one fail-closed default resolver"
+}
+
 
 
 test_high_risk_and_uncertain_inputs_fail_safe() {
@@ -1221,5 +1249,6 @@ test_dirty_worktrees_cannot_plan_or_complete
 test_git_status_errors_fail_every_cleanliness_gate
 test_direct_and_local_plans_never_query_no_mistakes
 test_local_completion_requires_fast_forward_readiness
+test_shared_local_default_resolver
 test_high_risk_and_uncertain_inputs_fail_safe
 test_direct_and_local_modes_never_invoke_no_mistakes

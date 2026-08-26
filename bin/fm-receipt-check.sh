@@ -375,7 +375,7 @@ def evidence_result:
   without_zero_failures_or_errors
   |
   (test("^[[:space:]]*$") | not)
-  and (test("(^|[^[:alnum:]_])(fail(s|ed|ures?)?|errors?|negative|red|broken|skip(s|ped|ping)?|empty|unsuccessful(ly)?)([^[:alnum:]_]|$)|not[[:space:]]+(pass(ed)?|successful|working)|((did|does)[[:space:]]+not|didn['’]t)[[:space:]]+(pass(ed)?|succeed(ed)?|work(ed)?)|none[[:space:]]+(passed|succeeded)|((0|zero)[[:space:]]+succeed(ed)?|no[[:space:]]+success(es)?)([^[:alnum:]_]|$)|no[[:space:]]+tests?[[:space:]]+passed|no[[:space:]]+(tests?|items?|cases?|examples?|specs?|scenarios?)|(^|[^0-9])0[[:space:]]+(passed|tests?|items?|cases?|examples?|specs?|scenarios?)([^[:alnum:]_]|$|[[:space:],])|(^|[^[:alnum:]_])(tests?|passed)[[:space:]]*:[[:space:]]*0([^0-9]|$)|(^|[^[:alnum:]_])(tests?|passed)[[:space:]]+0([^0-9]|$)|(^|[^[:alnum:]_])passed[[:space:]]+0[[:space:]]+tests?([^[:alnum:]_]|$)|(^|[^0-9])0[[:space:]]*(/|of|out[[:space:]]+of)[[:space:]]*0[[:space:]]+(tests?([[:space:]]+passed)?|passed)([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(tests?([[:space:]]+passed)?|passed)[[:space:]]*:?[[:space:]]*0[[:space:]]*(/|of|out[[:space:]]+of)[[:space:]]*0([[:space:]]+tests?)?([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(ran|run|collected|found|discovered)[[:space:]]*:?[[:space:]]*0[[:space:]]+(tests?|items?|cases?|examples?|specs?|scenarios?)([^[:alnum:]_]|$)"; "i") | not);
+  and (test("(^|[^[:alnum:]_])(fail(s|ed|ures?)?|errors?|negative|red|broken|skip(s|ped|ping)?|empty|unsuccessful(ly)?)([^[:alnum:]_]|$)|not[[:space:]]+(pass(ed)?|successful|working)|((did|does)[[:space:]]+not|(didn|doesn)['’]t)[[:space:]]+(pass(ed)?|succeed(ed)?|work(ed)?)|none[[:space:]]+(passed|succeeded)|(^|[^[:alnum:]_])((0|zero)[[:space:]]+(succeed(ed)?|success(es)?)|no[[:space:]]+success(es)?)([^[:alnum:]_]|$)|no[[:space:]]+tests?[[:space:]]+passed|no[[:space:]]+(tests?|items?|cases?|examples?|specs?|scenarios?)|(^|[^0-9])0[[:space:]]+(passed|tests?|items?|cases?|examples?|specs?|scenarios?)([^[:alnum:]_]|$|[[:space:],])|(^|[^[:alnum:]_])(tests?|passed)[[:space:]]*:[[:space:]]*0([^0-9]|$)|(^|[^[:alnum:]_])(tests?|passed)[[:space:]]+0([^0-9]|$)|(^|[^[:alnum:]_])passed[[:space:]]+0[[:space:]]+tests?([^[:alnum:]_]|$)|(^|[^0-9])0[[:space:]]*(/|of|out[[:space:]]+of)[[:space:]]*0[[:space:]]+(tests?([[:space:]]+passed)?|passed)([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(tests?([[:space:]]+passed)?|passed)[[:space:]]*:?[[:space:]]*0[[:space:]]*(/|of|out[[:space:]]+of)[[:space:]]*0([[:space:]]+tests?)?([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(ran|run|collected|found|discovered)[[:space:]]*:?[[:space:]]*0[[:space:]]+(tests?|items?|cases?|examples?|specs?|scenarios?)([^[:alnum:]_]|$)"; "i") | not);
 def strong_result:
   without_zero_failures_or_errors
   | evidence_result
@@ -692,20 +692,9 @@ record_validation_completed() {
       branch=$(git -C "$worktree" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
       [ "$branch" = "fm/$ID" ] \
         || { release_validation_lock; echo "error: local-only branch is not ready" >&2; return 1; }
-      default_ref=$(git -C "$worktree" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
-      default_ref=${default_ref#origin/}
-      if [ -n "$default_ref" ]; then
-        git -C "$worktree" show-ref --verify --quiet "refs/heads/$default_ref" \
-          || { release_validation_lock; echo "error: authoritative local default branch is missing" >&2; return 1; }
-        default_ref="refs/heads/$default_ref"
-      else
-        for default_branch in main master; do
-          if git -C "$worktree" show-ref --verify --quiet "refs/heads/$default_branch"; then
-            default_ref="refs/heads/$default_branch"
-            break
-          fi
-        done
-      fi
+      default_branch=$("$SCRIPT_DIR/fm-local-default.sh" "$worktree") \
+        || { release_validation_lock; echo "error: authoritative local default branch is missing" >&2; return 1; }
+      default_ref="refs/heads/$default_branch"
       if [ -z "$default_ref" ] \
         || ! git -C "$worktree" merge-base --is-ancestor "$default_ref" "$validated_head" 2>/dev/null; then
         release_validation_lock

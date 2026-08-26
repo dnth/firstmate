@@ -67,6 +67,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-config-push.sh`      | Push declared inherited local material to live local or remote secondmates and send the placement-specific config reread when changed |
 | `fm-project-mode.sh`     | Resolve a project's registered delivery posture from `data/projects.md` for fleet sync and home seeding |
 | `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after approval            |
+| `fm-local-default.sh`    | Resolve the local default branch shared by readiness and guarded landing              |
 | `fm-review-diff.sh`      | Review a crewmate branch or resolved PR head against the authoritative base          |
 | `fm-receipt.sh`          | Append one validated acceptance-criterion evidence receipt to a ship task             |
 | `fm-receipt-check.sh`    | Check ship evidence and record conservative binary risk routing                      |

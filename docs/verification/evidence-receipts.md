@@ -30,6 +30,7 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 - Successful exact-head runs can bind after reaching checks-passed or passed, while failed and cancelled runs remain ineligible.
 - No-Mistakes status, intent, and CI-log observations use the shared bounded call boundary.
 - Every completion requires path-specific terminal evidence, records its plan path and validated head, invalidates stale completion metadata when the worktree head changes, and refuses completion until the change is replanned or revalidated.
+- Local-only readiness and guarded landing consume one fail-closed executable default-branch resolver.
 - Planning and completion refuse tracked, staged, or untracked worktree changes.
 - Initial planning accepts a caller base only when it equals the repository's authoritative merge boundary, so a later ancestor cannot hide earlier task commits.
 - Ordinary No-Mistakes findings return to the original worker through guarded custody return and then full revalidation.
@@ -86,6 +87,7 @@ ok - dirty worktrees cannot be planned or completed
 ok - git status errors fail implementation, planning, and completion cleanliness gates
 ok - direct and local plans never invoke No-Mistakes
 ok - local completion requires fast-forward readiness
+ok - local readiness and landing share one fail-closed default resolver
 ok - security and uncertain changes retain full No-Mistakes validation
 ok - direct-PR and local-only retain evidence gates without invoking No-Mistakes
 
