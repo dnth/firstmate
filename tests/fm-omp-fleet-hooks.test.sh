@@ -188,7 +188,9 @@ assert.equal(sent.length, 1);
 process.env.FM_FAKE_TODO_MODE = "ok";
 const compacted = await handlers.get("session.compacting")({}, {});
 assert.match(compacted?.context?.[0] ?? "", /Firstmate fleet snapshot/);
-assert.match(compacted?.context?.[0] ?? "", /ship-1/);
+assert.match(compacted?.context?.[0] ?? "", /ship-1\(ship,crew:ship-1,alpha\)/);
+assert.match(compacted?.context?.[0] ?? "", /choose deployment route/);
+assert.match(compacted?.context?.[0] ?? "", /Ready=1 In-flight=1/);
 console.log("ok - OMP fleet handlers register independently and fail open");
 JS
 handler_status=$?

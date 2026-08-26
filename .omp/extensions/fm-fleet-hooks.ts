@@ -1,7 +1,7 @@
 // Read-only, fail-open fleet context hooks for OMP sessions.
 // This adapter is intentionally separate from fm-primary-omp.ts, which owns
 // native lifecycle and watcher integration.
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { closeSync, constants, fstatSync, openSync, readdirSync, readSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,29 +20,7 @@ const NAMED_SECRET_PATTERN = /\b((?:[A-Za-z_][A-Za-z0-9_]*)?(?:KEY|SECRET|TOKEN|
 const READ_ONLY_TIMEOUT_MS = 2000;
 const SNAPSHOT_SCAN_TIMEOUT_MS = 5000;
 const MAX_META_BYTES = 64 * 1024;
-const PROCESS_GROUP_RUNNER = `
-set -u
-timeout_seconds=$1
-shift
-if command -v setsid >/dev/null 2>&1; then
-	setsid --wait "$@" &
-else
-	"$@" &
-fi
-command_pid=$!
-(
-	sleep "$timeout_seconds"
-	kill -KILL -- "-$command_pid" 2>/dev/null || true
-	kill -KILL "$command_pid" 2>/dev/null || true
-) </dev/null >/dev/null 2>&1 &
-watchdog_pid=$!
-set +e
-wait "$command_pid"
-status=$?
-kill "$watchdog_pid" 2>/dev/null || true
-wait "$watchdog_pid" 2>/dev/null || true
-exit "$status"
-`;
+const MAX_COMMAND_OUTPUT_BYTES = 256 * 1024;
 
 /** Redact only credential-shaped substrings, preserving ordinary prose. */
 export function redactSecretText(text: string): string {
@@ -174,17 +152,62 @@ export function parseOpenDecisionRows(source: string): string[] {
 	return decisions;
 }
 
-function runReadOnly(command: string, args: string[], extensionRoot: string, fmHome: string, timeoutMs = READ_ONLY_TIMEOUT_MS): string {
-	const result = spawnSync("bash", ["-c", PROCESS_GROUP_RUNNER, "_", (timeoutMs / 1000).toFixed(3), command, ...args], {
-		cwd: extensionRoot,
-		encoding: "utf8",
-		env: { ...process.env, FM_HOME: fmHome },
-		maxBuffer: 256 * 1024,
-		timeout: timeoutMs + 1000,
-		killSignal: "SIGKILL",
+function runReadOnly(command: string, args: string[], extensionRoot: string, fmHome: string, timeoutMs = READ_ONLY_TIMEOUT_MS): Promise<string> {
+	return new Promise((resolveOutput, rejectOutput) => {
+		const child = spawn(command, args, {
+			cwd: extensionRoot,
+			detached: true,
+			env: { ...process.env, FM_HOME: fmHome },
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		const stdout: Buffer[] = [];
+		const stderr: Buffer[] = [];
+		let outputBytes = 0;
+		let settled = false;
+		const finish = (error?: Error, output?: string): void => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			if (error) rejectOutput(error);
+			else resolveOutput(output ?? "");
+		};
+		const killGroup = (): void => {
+			if (child.pid === undefined) throw new Error(`${command} did not start`);
+			process.kill(-child.pid, "SIGKILL");
+		};
+		const capture = (target: Buffer[]) => (chunk: Buffer): void => {
+			if (settled) return;
+			outputBytes += chunk.length;
+			if (outputBytes > MAX_COMMAND_OUTPUT_BYTES) {
+				try {
+					killGroup();
+				} catch {
+				}
+				finish(new Error(`${command} output exceeded the limit`));
+				return;
+			}
+			target.push(chunk);
+		};
+		child.stdout.on("data", capture(stdout));
+		child.stderr.on("data", capture(stderr));
+		child.once("error", (error) => finish(error));
+		child.once("close", (status, signal) => {
+			const stderrText = Buffer.concat(stderr).toString("utf8");
+			if (status !== 0 || signal !== null || stderrText) {
+				finish(new Error(`${command} failed`));
+				return;
+			}
+			finish(undefined, Buffer.concat(stdout).toString("utf8"));
+		});
+		const timer = setTimeout(() => {
+			try {
+				killGroup();
+				finish(new Error(`${command} timed out`));
+			} catch (error) {
+				finish(error instanceof Error ? error : new Error(`${command} timed out`));
+			}
+		}, timeoutMs);
 	});
-	if (result.error || result.status !== 0 || result.signal || result.stderr) throw result.error ?? new Error(`${command} failed`);
-	return result.stdout ?? "";
 }
 
 function readFleetMetaFile(path: string): string {
@@ -206,15 +229,15 @@ function readFleetMetaFile(path: string): string {
 	}
 }
 
-function readFleetSnapshot(extensionRoot: string, fmHome: string, state: string): string {
+async function readFleetSnapshot(extensionRoot: string, fmHome: string, state: string): Promise<string> {
 	const metas: FleetMeta[] = [];
 	for (const entry of readdirSync(state)) {
 		if (!entry.endsWith(".meta")) continue;
 		const id = entry.slice(0, -5);
 		metas.push(parseFleetMeta(id, readFleetMetaFile(resolve(state, entry))));
 	}
-	const openDecisionRows = runReadOnly("bash", ["-c", '. "$1/bin/fm-classify-lib.sh"; scan_open_decisions "$2"', "_", extensionRoot, state], extensionRoot, fmHome, SNAPSHOT_SCAN_TIMEOUT_MS);
-	const todoProjection = runReadOnly(resolve(extensionRoot, "bin/fm-todo-project.sh"), ["--emit"], extensionRoot, fmHome);
+	const openDecisionRows = await runReadOnly("bash", ["-c", '. "$1/bin/fm-classify-lib.sh"; scan_open_decisions "$2"', "_", extensionRoot, state], extensionRoot, fmHome, SNAPSHOT_SCAN_TIMEOUT_MS);
+	const todoProjection = await runReadOnly(resolve(extensionRoot, "bin/fm-todo-project.sh"), ["--emit"], extensionRoot, fmHome);
 	return buildFleetSnapshot({ metas, openDecisions: parseOpenDecisionRows(openDecisionRows), todoProjection });
 }
 
@@ -232,11 +255,11 @@ export default function fmFleetHooks(pi: ExtensionAPI): void {
 		}
 	});
 
-	register(pi, "todo_reminder", () => {
+	register(pi, "todo_reminder", async () => {
 		try {
 			const extensionRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 			const fmHome = process.env.FM_HOME || extensionRoot;
-			const output = runReadOnly(resolve(extensionRoot, "bin/fm-todo-project.sh"), ["--check"], extensionRoot, fmHome);
+			const output = await runReadOnly(resolve(extensionRoot, "bin/fm-todo-project.sh"), ["--check"], extensionRoot, fmHome);
 			const note = parseTodoCheckDrift(output);
 			if (!note) return undefined;
 			pi.sendMessage(
@@ -255,12 +278,12 @@ export default function fmFleetHooks(pi: ExtensionAPI): void {
 		}
 	});
 
-	register(pi, "session.compacting", () => {
+	register(pi, "session.compacting", async () => {
 		try {
 			const extensionRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 			const fmHome = process.env.FM_HOME || extensionRoot;
 			const state = process.env.FM_STATE_OVERRIDE || resolve(fmHome, "state");
-			const context = readFleetSnapshot(extensionRoot, fmHome, state);
+			const context = await readFleetSnapshot(extensionRoot, fmHome, state);
 			return { context: [context] };
 		} catch {
 			return undefined;
