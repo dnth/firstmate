@@ -19,6 +19,26 @@ const SECRET_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
 const NAMED_SECRET_PATTERN = /\b((?:[A-Za-z_][A-Za-z0-9_]*)?(?:KEY|SECRET|TOKEN|PASSWORD|PASS|CREDENTIAL)[A-Za-z0-9_]*)\s*=\s*(?:"((?:\\.|[^"\\\r\n]){8,})"|'((?:\\.|[^'\\\r\n]){8,})'|([^\s"'`]{8,}))/g;
 const READ_ONLY_TIMEOUT_MS = 2000;
 const MAX_META_BYTES = 64 * 1024;
+const PROCESS_GROUP_RUNNER = `
+set -u
+timeout_seconds=$1
+shift
+set -m
+"$@" &
+command_pid=$!
+set +m
+(
+	sleep "$timeout_seconds"
+	kill -KILL -- "-$command_pid" 2>/dev/null || true
+) </dev/null >/dev/null 2>&1 &
+watchdog_pid=$!
+set +e
+wait "$command_pid"
+status=$?
+kill "$watchdog_pid" 2>/dev/null || true
+wait "$watchdog_pid" 2>/dev/null || true
+exit "$status"
+`;
 
 /** Redact only credential-shaped substrings, preserving ordinary prose. */
 export function redactSecretText(text: string): string {
@@ -151,12 +171,12 @@ export function parseOpenDecisionRows(source: string): string[] {
 }
 
 function runReadOnly(command: string, args: string[], extensionRoot: string, fmHome: string): string {
-	const result = spawnSync(command, args, {
+	const result = spawnSync("bash", ["-c", PROCESS_GROUP_RUNNER, "_", (READ_ONLY_TIMEOUT_MS / 1000).toFixed(3), command, ...args], {
 		cwd: extensionRoot,
 		encoding: "utf8",
 		env: { ...process.env, FM_HOME: fmHome },
 		maxBuffer: 256 * 1024,
-		timeout: READ_ONLY_TIMEOUT_MS,
+		timeout: READ_ONLY_TIMEOUT_MS + 1000,
 		killSignal: "SIGKILL",
 	});
 	if (result.error || result.status !== 0 || result.signal || result.stderr) throw result.error ?? new Error(`${command} failed`);
@@ -215,9 +235,17 @@ export default function fmFleetHooks(pi: ExtensionAPI): void {
 			const output = runReadOnly(resolve(extensionRoot, "bin/fm-todo-project.sh"), ["--check"], extensionRoot, fmHome);
 			const note = parseTodoCheckDrift(output);
 			if (!note) return undefined;
-			const sendMessage = (pi as unknown as { sendMessage?: (message: string, options?: { deliverAs?: string }) => void }).sendMessage;
-			if (typeof sendMessage === "function") sendMessage.call(pi, note, { deliverAs: "nextTurn" });
-			return { context: [note] };
+			pi.sendMessage(
+				{
+					customType: "firstmate-todo-drift",
+					content: note,
+					display: false,
+					attribution: "agent",
+					details: { kind: "todo-drift", runtime: "omp" },
+				},
+				{ deliverAs: "nextTurn" },
+			);
+			return undefined;
 		} catch {
 			return undefined;
 		}

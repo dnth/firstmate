@@ -139,7 +139,10 @@ case "${FM_FAKE_TODO_MODE:-ok}:${1:-}" in
     exit 7
     ;;
   invalid:--check) printf '%s\n' 'not a drift protocol line' ;;
-  hang:--check) exec sleep 10 ;;
+  hang:--check)
+    sleep 10 &
+    wait
+    ;;
   ok:--check) printf '%s\n' 'DRIFT queued-has-worker: queued-1 - worker exists' ;;
   *:--emit) printf '%s\n' '[{"phase":"Active","items":["ship-1 - Ship Alpha"]},{"phase":"Ready","items":["queued-1 - Queue Beta"]}]' ;;
   *) exit 2 ;;
@@ -155,12 +158,22 @@ const { default: extension } = await import(process.env.FM_HOOKS);
 
 const handlers = new Map();
 const sent = [];
-extension({ on(name, handler) { handlers.set(name, handler); }, sendMessage(message) { sent.push(message); } });
+extension({ on(name, handler) { handlers.set(name, handler); }, sendMessage(message, options) { sent.push({ message, options }); } });
 assert.deepEqual([...handlers.keys()], ["tool_result", "todo_reminder", "session.compacting"]);
 assert.equal(await handlers.get("tool_result")({ content: null }), undefined);
 const reminder = await handlers.get("todo_reminder")({}, {});
-assert.match(reminder?.context?.[0] ?? "", /Firstmate board drift/);
+assert.equal(reminder, undefined);
 assert.equal(sent.length, 1);
+assert.deepEqual(sent[0], {
+  message: {
+    customType: "firstmate-todo-drift",
+    content: "Firstmate board drift: DRIFT queued-has-worker: queued-1 - worker exists",
+    display: false,
+    attribution: "agent",
+    details: { kind: "todo-drift", runtime: "omp" },
+  },
+  options: { deliverAs: "nextTurn" },
+});
 process.env.FM_FAKE_TODO_MODE = "partial-failure";
 assert.equal(await handlers.get("todo_reminder")({}, {}), undefined);
 assert.equal(sent.length, 1);
