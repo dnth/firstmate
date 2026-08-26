@@ -1344,11 +1344,11 @@ Exercise the completion evidence gate.
 - AC2: The regression stays covered.
 
 # Definition of done
-Delivery contract: mode=direct-PR
+Delivery contract: mode=no-mistakes
 EOF
   : > "$d/data/$id/evidence.jsonl"
-  fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=ship" "harness=claude" "mode=direct-PR"
-  printf 'done: PR https://github.com/o/r/pull/9\n' > "$d/state/$id.status"
+  fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=ship" "harness=claude" "mode=no-mistakes"
+  printf 'done: implementation complete\n' > "$d/state/$id.status"
   arm_idle_record "$d/state" "$id"
   out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_DATA_OVERRIDE="$d/data" "$CREW_STATE" "$id")
   assert_contains "$out" "state: parked" "missing evidence must prevent done acceptance"
@@ -1420,12 +1420,15 @@ test_status_log_done_requires_existing_plan_completion() {
   make_fakebin "$d" >/dev/null
   head=$(git -C "$d/wt" rev-parse HEAD)
   fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=ship" "harness=claude" \
-    "mode=direct-PR" "validation_generation=plan-2" "validation_path=direct-PR" "validation_head=$head"
+    "mode=direct-PR"
   printf 'done: PR https://example.test/pull/1\n' > "$d/state/$id.status"
   FM_FAKE_AXI_STATUS=
   FM_FAKE_RUNS_LIST=
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" "$id"
+  out=$(run_crew_state "$d" "$id")
+  assert_contains "$out" "state: parked" "direct-PR done without a plan must remain parked"
+  printf 'validation_generation=plan-2\nvalidation_path=direct-PR\nvalidation_head=%s\n' "$head" >> "$d/state/$id.meta"
   out=$(run_crew_state "$d" "$id")
   assert_contains "$out" "state: parked" "status-log done with an incomplete plan must remain parked"
   assert_contains "$out" "source: validation-gate" "status-log completion must name the validation gate"

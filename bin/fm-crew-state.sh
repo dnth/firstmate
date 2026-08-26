@@ -98,6 +98,7 @@ emit() {  # <state> <source> [detail]
     mode=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
     [ -z "$generation" ] || requires_validation=1
     if [ "$source" = 'run-step' ] && [ "$mode" = no-mistakes ]; then requires_validation=1; fi
+    case "$mode" in direct-PR|local-only) requires_validation=1 ;; esac
     completed_generation=$(grep '^validation_completed_generation=' "$META" | tail -1 | cut -d= -f2- || true)
     validation_head=$(grep '^validation_head=' "$META" | tail -1 | cut -d= -f2- || true)
     completed_head=$(grep '^validation_completed_head=' "$META" | tail -1 | cut -d= -f2- || true)

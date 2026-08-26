@@ -115,13 +115,12 @@ fm_pr_metadata_identity_parse "$META" || exit 1
   && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || exit 1
 
 VALIDATION_PATH=$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)
-if [ "$VALIDATION_PATH" = direct-PR ]; then
-  "$SCRIPT_DIR/fm-receipt-check.sh" "$ID" --complete --terminal-evidence pr-opened >/dev/null \
-    || { echo "error: direct-PR validation completion could not be observed" >&2; exit 1; }
-fi
-
 fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2
   exit 1
 }
+if [ "$VALIDATION_PATH" = direct-PR ]; then
+  "$SCRIPT_DIR/fm-receipt-check.sh" "$ID" --complete --terminal-evidence pr-opened >/dev/null \
+    || { echo "error: direct-PR validation completion could not be observed" >&2; exit 1; }
+fi
 printf 'armed: state/%s.check.sh\n' "$ID"
