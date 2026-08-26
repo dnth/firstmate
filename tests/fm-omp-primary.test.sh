@@ -555,6 +555,7 @@ const toolResult = await toolPromise;
 if (!toolResult.details.ok || !toolResult.content[0].text.includes("OMP extension")) {
   throw new Error(`OMP watcher tool did not route through the shared core: ${JSON.stringify(toolResult)}`);
 }
+handlers.get("turn_start")({ type: "turn_start", turnIndex: 7, timestamp: Date.now() }, extensionContext);
 writeFileSync(`${process.env.FM_STATE_OVERRIDE}/watch-trigger`, "go\n");
 for (let i = 0; i < 100 && watcherMessages.length === 0; i += 1) {
   await new Promise(resolve => setTimeout(resolve, 20));
@@ -572,12 +573,13 @@ if (
 if (!existsSync(`${process.env.FM_STATE_OVERRIDE}/watch-successor-ready`)) {
   throw new Error("OMP actionable notification arrived before successor readiness");
 }
+handlers.get("turn_start")({ type: "turn_start", turnIndex: 7, timestamp: Date.now() }, extensionContext);
 writeFileSync(`${process.env.FM_STATE_OVERRIDE}/watch-trigger`, "second\n");
 await new Promise(resolve => setTimeout(resolve, 100));
 if (watcherMessages.length !== 1) {
   throw new Error(`OMP watcher notification burst was not coalesced before turn start: ${JSON.stringify(watcherMessages)}`);
 }
-handlers.get("turn_start")({ type: "turn_start" }, extensionContext);
+handlers.get("turn_start")({ type: "turn_start", turnIndex: 8, timestamp: Date.now() }, extensionContext);
 await handlers.get("session_shutdown")({ type: "session_shutdown" }, {});
 await new Promise(resolve => setTimeout(resolve, 80));
 console.log(JSON.stringify({ startupMessages: 3, guarded: true, tools: tools.size, watcherMessages: watcherMessages.length, customMessages: customMessages.length }));

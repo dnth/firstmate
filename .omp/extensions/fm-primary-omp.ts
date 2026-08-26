@@ -178,6 +178,8 @@ export default function (omp: ExtensionAPI) {
   publishNativeProcessIdentity();
   let pendingStartupNudge = "";
   let watcherNotificationOutstanding = false;
+  let watcherNotificationTurnIndex: number | undefined;
+  let currentTurnIndex = -1;
   const watch = createPrimaryWatchCore({
     runtime: "omp",
     runtimeLabel: "OMP",
@@ -194,6 +196,7 @@ export default function (omp: ExtensionAPI) {
       // Queue one hidden next-turn notification until OMP starts the turn that consumes it.
       if (watcherNotificationOutstanding) return;
       watcherNotificationOutstanding = true;
+      watcherNotificationTurnIndex = currentTurnIndex + 1;
       try {
         omp.sendMessage(
           {
@@ -214,6 +217,7 @@ export default function (omp: ExtensionAPI) {
 
   const clearWatcherNotification = (): void => {
     watcherNotificationOutstanding = false;
+    watcherNotificationTurnIndex = undefined;
   };
 
   const deliverSessionstartNudge = (forceForNativeSwitch = false): void => {
@@ -237,7 +241,16 @@ export default function (omp: ExtensionAPI) {
     watch.arm();
   });
 
-  omp.on("turn_start", clearWatcherNotification);
+  omp.on("turn_start", (event) => {
+    currentTurnIndex = event.turnIndex;
+    if (
+      watcherNotificationOutstanding &&
+      watcherNotificationTurnIndex !== undefined &&
+      event.turnIndex >= watcherNotificationTurnIndex
+    ) {
+      clearWatcherNotification();
+    }
+  });
 
   omp.on("before_agent_start", (): BeforeAgentStartEventResult | undefined => {
     if (!pendingStartupNudge) return undefined;
