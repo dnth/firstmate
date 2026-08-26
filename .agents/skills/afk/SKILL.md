@@ -117,7 +117,7 @@ submit landed.
 For tmux that confirmation is a cleared composer, using the same corrected,
 border-aware detector as the composer guard.
 For herdr, idle-baseline submits first seek native agent-state showing a real turn started, then use the shared composer verdict when native state stays idle.
-A cleared composer confirms delivery, while pending text retries Enter and reaches the shared queued-Enter verdict only after the retry budget.
+A cleared composer confirms delivery, while pending text retries Enter and remains pending except on Herdr's OMP-only queued path.
 A bordered-empty or ghost-only composer is recognized as empty where that backend uses composer confirmation, rather than mistaken for a swallowed Enter.
 `fm-send.sh` uses the same primitive and exits non-zero
 when a steer's Enter is positively swallowed, so firstmate learns an instruction
@@ -125,7 +125,7 @@ did not land instead of leaving it unsubmitted.
 
 **Busy-queued Enter exception (opencode 1.18.4 and OMP).**
 Some busy harnesses keep accepted queued text visible in the composer.
-Tmux and herdr delegate the final conversion to `fm_composer_queued_enter_verdict` in `bin/fm-composer-lib.sh` rather than treating visible text alone as a swallowed Enter.
+Tmux uses `fm_composer_queued_enter_verdict` for its established non-OMP busy queue, while herdr uses it only for OMP.
 The daemon still clears its buffer only on the backend's success verdict.
 [`docs/tmux-backend.md`](../../../docs/tmux-backend.md) and [`docs/herdr-backend.md`](../../../docs/herdr-backend.md) own the backend-specific confirmation signals and OMP's narrower `queued-unconfirmed` result.
 
@@ -195,7 +195,7 @@ the operational prefix lets firstmate distinguish it from a real captain message
   primitive reports `empty` as its caller-facing success verdict.
   For tmux that verdict means the shared-ghost-aware and border-aware composer
   cleared.
-  For herdr it means native agent-state observed a real turn start, the shared classifier proved the composer cleared, or the shared queued-Enter verdict proved delivery while busy.
+  For herdr it means native agent-state observed a real turn start, the shared classifier proved the composer cleared, or the OMP-only queued-Enter verdict proved delivery while busy.
   This lets ghost-only or bordered-empty composers count as empty where a composer read is the active confirmation signal.
 - **Marker strip** - `strip_injection_marker` removes the current operational
   prefix or legacy bare marker before classification or relay, so the digest

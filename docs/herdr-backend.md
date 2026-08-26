@@ -208,7 +208,8 @@ Text is typed once; only Enter is retried.
 
 On an idle or done native baseline, ordinary submit confirmation first waits for `working` or `blocked` across a bounded polling window.
 If native status stays idle, the shared composer verdict is the next positive signal: a cleared composer confirms delivery, and proven pending text retries Enter.
-After the retry budget, `fm_composer_queued_enter_verdict` treats proven pending text plus native `working` as a queued delivered Enter and keeps an idle pending composer as a genuine swallow.
+For every non-OMP harness, text that remains pending after the retry budget stays pending even when native status is `working`.
+For OMP only, `fm_composer_queued_enter_verdict` treats proven pending text plus native `working` as a queued delivered Enter and keeps an idle pending composer as a genuine swallow.
 For OMP, that native transition confirms submission, after which `fm-send.sh` applies a coarse bounded check for native busy state or advancement of the generated turn-start marker after the submit-time baseline.
 The two stages intentionally share signals rather than claiming perfect submit and turn-start separation.
 On an already active or unreadable baseline, ordinary harnesses fall back to conservative composer clearance.
