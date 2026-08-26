@@ -159,7 +159,7 @@ Exercise the crew-state fixture.
 # Definition of done
 Delivery contract: mode=$fixture_mode
 EOF
-      printf '%s\n' '{"criterion":"AC1","type":"review","outcome":"passed","summary":"fixture evidence","result":"complete"}' > "$ledger"
+      printf '%s\n' '{"criterion":"AC1","type":"review","outcome":"success","summary":"fixture evidence","result":"complete"}' > "$ledger"
     fi
     [ -e "$case_dir/data/$id/.evidence.lock" ] || : > "$case_dir/data/$id/.evidence.lock"
     if ! grep -q '^mode=' "$case_dir/state/$id.meta" 2>/dev/null; then
@@ -1134,7 +1134,7 @@ SH
   chmod +x "$d/fakebin/no-mistakes"
   toolbin=$(make_no_timeout_toolbin "$d")
   fm_write_meta "$d/state/feat-timeout.meta" "window=fm:fm-feat-timeout" "worktree=$d/wt" "kind=ship" \
-    "harness=claude"
+    "harness=claude" "mode=no-mistakes"
   FM_FAKE_BUSY=1
   local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-timeout)
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-timeout busy --gen "$gen" \
@@ -1209,7 +1209,7 @@ test_provably_working_via_runs_list_fallback() {
   make_repo_on_branch "$d/wt" fm/feat-provable
   short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
   make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-provable.meta" "window=fm:fm-feat-provable" "worktree=$d/wt" "kind=ship"
+  fm_write_meta "$d/state/feat-provable.meta" "window=fm:fm-feat-provable" "worktree=$d/wt" "kind=ship" "mode=no-mistakes"
   FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
   FM_FAKE_RUNS_LIST="$(cat <<EOF
   running    fm/other-crew aaaaaaa  2026-07-02 22:10
@@ -1226,7 +1226,7 @@ test_not_provably_working_when_stopped() {
   local d; d=$(new_case provably-working-stopped)
   make_repo_on_branch "$d/wt" fm/feat-stopped
   make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-stopped.meta" "window=fm:fm-feat-stopped" "worktree=$d/wt" "kind=ship"
+  fm_write_meta "$d/state/feat-stopped.meta" "window=fm:fm-feat-stopped" "worktree=$d/wt" "kind=ship" "mode=no-mistakes"
   # Repo-wide run belongs to someone else, and this branch has no row in the
   # runs list either (it never validated, or genuinely finished/stopped) - the
   # only remaining signal is the pane, which is idle.
@@ -1371,12 +1371,12 @@ EOF
   assert_contains "$out" "source: evidence-gate" "missing evidence must name the gate source"
   assert_contains "$out" "missing evidence: AC1,AC2" "gate must name every missing criterion"
 
-  FM_DATA_OVERRIDE="$d/data" FM_STATE_OVERRIDE="$d/state" "$ROOT/bin/fm-receipt.sh" "$id" AC1 test "implementation works" "passed" --outcome passed >/dev/null
-  FM_DATA_OVERRIDE="$d/data" FM_STATE_OVERRIDE="$d/state" "$ROOT/bin/fm-receipt.sh" "$id" AC2 lint "regression checks" "failed" --outcome failed >/dev/null
+  FM_DATA_OVERRIDE="$d/data" FM_STATE_OVERRIDE="$d/state" "$ROOT/bin/fm-receipt.sh" "$id" AC1 test "implementation works" "passed" --outcome success >/dev/null
+  FM_DATA_OVERRIDE="$d/data" FM_STATE_OVERRIDE="$d/state" "$ROOT/bin/fm-receipt.sh" "$id" AC2 lint "regression checks" "failed" --outcome failure >/dev/null
   out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_DATA_OVERRIDE="$d/data" "$CREW_STATE" "$id")
   assert_contains "$out" "state: parked" "failed outcome must keep completion parked"
   assert_contains "$out" "missing evidence: AC2" "failed outcome must leave its criterion missing"
-  FM_DATA_OVERRIDE="$d/data" FM_STATE_OVERRIDE="$d/state" "$ROOT/bin/fm-receipt.sh" "$id" AC2 lint "regression checks" "passed" --outcome passed >/dev/null
+  FM_DATA_OVERRIDE="$d/data" FM_STATE_OVERRIDE="$d/state" "$ROOT/bin/fm-receipt.sh" "$id" AC2 lint "regression checks" "passed" --outcome success >/dev/null
   out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_DATA_OVERRIDE="$d/data" "$CREW_STATE" "$id")
   assert_contains "$out" "state: done" "complete evidence must release done acceptance"
   assert_contains "$out" "source: status-log" "released completion retains status-log source"
@@ -1519,6 +1519,37 @@ test_fast_modes_skip_no_mistakes_lookup() {
   pass "direct-PR and local-only state reads skip No-Mistakes"
 }
 
+test_missing_or_malformed_ship_mode_fails_before_run_lookup() {
+  reset_fakes
+  local variant d out id log
+  for variant in missing malformed duplicate; do
+    id="unsafe-mode-$variant"
+    d=$(new_case "$id")
+    make_repo_on_branch "$d/wt" "fm/$id"
+    make_fakebin "$d" >/dev/null
+    case "$variant" in
+      missing)
+        fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=ship" "harness=claude"
+        ;;
+      malformed)
+        fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=ship" "harness=claude" "mode=unknown"
+        ;;
+      duplicate)
+        fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "kind=ship" "harness=claude" \
+          "mode=direct-PR" "mode=no-mistakes"
+        ;;
+    esac
+    log="$d/no-mistakes.calls"
+    : > "$log"
+    out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_DATA_OVERRIDE="$d/data" \
+      FM_FAKE_NM_CALL_LOG="$log" FM_FAKE_AXI_STATUS="$(run_passed "fm/$id")" "$CREW_STATE" "$id")
+    [ ! -s "$log" ] || fail "$variant ship mode invoked No-Mistakes"
+    assert_contains "$out" "state: unknown" "$variant ship mode did not fail closed"
+    assert_contains "$out" "source: metadata-gate" "$variant ship mode did not name its metadata gate"
+  done
+  pass "ship state requires one valid mode before run lookup"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -1574,5 +1605,6 @@ test_run_step_done_requires_current_plan_completion
 test_status_log_done_requires_existing_plan_completion
 test_low_validation_waits_for_pr_completion
 test_fast_modes_skip_no_mistakes_lookup
+test_missing_or_malformed_ship_mode_fails_before_run_lookup
 
 echo "all fm-crew-state tests passed"

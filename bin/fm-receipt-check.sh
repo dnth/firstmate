@@ -27,7 +27,7 @@
 # Every listed criterion is required in v1.
 # IDs must be unique AC-prefixed positive integers, and placeholder descriptions
 # are invalid once completion is checked.
-# Only structurally valid receipts with outcome=passed evidence their criterion;
+# Only structurally valid receipts with outcome=success evidence their criterion;
 # result remains descriptive, so expected observations such as 401 stay usable.
 # --implementation-complete records one timestamp bound to the current clean
 # implementation head, refreshes it when that head changes, and remains
@@ -48,7 +48,7 @@
 # When --plan returns path=receipts-mechanical, append fresh successful mechanical
 # evidence for every changed file with:
 #
-#   bin/fm-receipt.sh <task-id> <criterion> <test|build|lint|typecheck> <summary> <result> --outcome passed --file <changed-file>
+#   bin/fm-receipt.sh <task-id> <criterion> <test|build|lint|typecheck> <summary> <result> --outcome success --file <changed-file>
 #
 # Verify those fresh receipts, then push/open the PR and report its URL:
 #
@@ -271,28 +271,6 @@ command -v jq >/dev/null 2>&1 || { echo "error: jq is required" >&2; exit 2; }
 TASK_DIR="$DATA/$ID"
 BRIEF_PATH="$TASK_DIR/brief.md"
 LEDGER_PATH="$TASK_DIR/evidence.jsonl"
-META="$STATE/$ID.meta"
-
-[ -f "$META" ] && [ ! -L "$META" ] \
-  || { echo "error: task metadata is missing or unsafe: $META" >&2; exit 2; }
-KIND_COUNT=$(grep -c '^kind=' "$META" 2>/dev/null || true)
-[ "$KIND_COUNT" -eq 1 ] \
-  || { echo "error: task metadata must contain exactly one kind" >&2; exit 2; }
-KIND=$(sed -n 's/^kind=//p' "$META")
-case "$KIND" in
-  scout|secondmate)
-    if [ "$ACTION" = criterion ]; then exit 1; fi
-    if [ "$ACTION" != check ]; then
-      echo "error: validation planning applies only to ship tasks" >&2
-      exit 2
-    fi
-    jq -cn --arg task "$ID" \
-      '{schema:"fm-evidence-check.v1",task:$task,kind:"non-ship",status:"not-applicable",required:[],evidenced:[],missing:[],invalid:[],receipt_count:0,ledger_exists:false}'
-    exit 0
-    ;;
-  ship) ;;
-  *) echo "error: task metadata has an invalid kind" >&2; exit 2 ;;
-esac
 
 command -v perl >/dev/null 2>&1 || { echo "error: perl is required" >&2; exit 2; }
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-receipt-check.XXXXXX")
@@ -327,6 +305,7 @@ release_validation_lock() {
 }
 BRIEF="$TMP_ROOT/brief.md"
 LEDGER="$TMP_ROOT/evidence.jsonl"
+META="$TMP_ROOT/task.meta"
 : > "$BRIEF"
 : > "$LEDGER"
 STORE_READY="$TMP_ROOT/store.ready"
@@ -335,7 +314,7 @@ mkfifo "$STORE_RELEASE"
 exec 9<> "$STORE_RELEASE"
 STORE_RELEASE_OPEN=1
 FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-receipt-store.sh" "$ID" hold \
-  "$BRIEF" "$LEDGER" "$STORE_READY" "$STORE_RELEASE" &
+  "$BRIEF" "$LEDGER" "$META" "$STORE_READY" "$STORE_RELEASE" &
 STORE_PID=$!
 while [ ! -f "$STORE_READY" ] || [ -L "$STORE_READY" ] || [ ! -s "$STORE_READY" ]; do
   kill -0 "$STORE_PID" 2>/dev/null \
@@ -345,8 +324,39 @@ SNAPSHOT_RC=$(sed -n '1p' "$STORE_READY")
 case "$SNAPSHOT_RC" in
   0) PINNED_LEDGER_EXISTS=true ;;
   3) PINNED_LEDGER_EXISTS=false ;;
+  4) PINNED_LEDGER_EXISTS=false ;;
   *) exit 2 ;;
 esac
+
+KIND_COUNT=$(grep -c '^kind=' "$META" 2>/dev/null || true)
+[ "$KIND_COUNT" -eq 1 ] \
+  || { echo "error: task metadata must contain exactly one kind" >&2; exit 2; }
+KIND=$(sed -n 's/^kind=//p' "$META")
+case "$KIND" in
+  scout|secondmate)
+    if [ "$ACTION" = criterion ]; then exit 1; fi
+    if [ "$ACTION" != check ]; then
+      echo "error: validation planning applies only to ship tasks" >&2
+      exit 2
+    fi
+    jq -cn --arg task "$ID" \
+      '{schema:"fm-evidence-check.v1",task:$task,kind:"non-ship",status:"not-applicable",required:[],evidenced:[],missing:[],invalid:[],receipt_count:0,ledger_exists:false}'
+    exit 0
+    ;;
+  ship) ;;
+  *) echo "error: task metadata has an invalid kind" >&2; exit 2 ;;
+esac
+
+append_meta_records() {
+  local records updated
+  records=$(mktemp "$TMP_ROOT/meta-records.XXXXXX")
+  updated=$(mktemp "$TMP_ROOT/meta-updated.XXXXXX")
+  cat > "$records"
+  FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-receipt-store.sh" "$ID" meta-append "$META" "$records" "$updated" \
+    || return 1
+  mv "$updated" "$META"
+}
 
 MODE_COUNT=$(grep -c '^Delivery contract: mode=' "$BRIEF" 2>/dev/null || true)
 if [ "$MODE_COUNT" -eq 1 ]; then
@@ -375,10 +385,51 @@ esac
 CRITERIA="$TMP_ROOT/criteria.tsv"
 EVIDENCED="$TMP_ROOT/evidenced"
 INVALID="$TMP_ROOT/invalid"
+ACTIVE_INVALIDATED="$TMP_ROOT/active-invalidated"
 : > "$EVIDENCED"
 : > "$INVALID"
+: > "$ACTIVE_INVALIDATED"
 
 "$SCRIPT_DIR/fm-receipt-check.sh" --parse-criteria "$BRIEF" > "$CRITERIA" || exit 2
+
+CURRENT_GENERATION=$(grep '^validation_generation=' "$META" | tail -1 | cut -d= -f2- || true)
+if [ -n "$CURRENT_GENERATION" ]; then
+  awk -v prefix="validation_claim_invalidation=$CURRENT_GENERATION:" '
+    index($0, prefix) == 1 {
+      value=substr($0, length(prefix) + 1)
+      if (value ~ /^F[1-9][0-9]*:AC[1-9][0-9]*$/) {
+        sub(/^F[1-9][0-9]*:/, "", value)
+        print value
+      }
+    }
+  ' "$META" \
+    | sort -u > "$ACTIVE_INVALIDATED"
+fi
+FOLLOWUP_DELTA_READY=0
+INVALIDATION_BOUNDARY=
+if [ -s "$ACTIVE_INVALIDATED" ]; then
+  INVALIDATION_BOUNDARY=$(grep '^validation_ledger_receipt_count=' "$META" | tail -1 | cut -d= -f2- || true)
+  INVALIDATION_WORKTREE=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
+  INVALIDATION_HEAD=$(grep '^validation_head=' "$META" | tail -1 | cut -d= -f2- || true)
+  case "$INVALIDATION_BOUNDARY" in
+    ''|*[!0-9]*) printf 'active invalidation has no valid receipt boundary\n' >> "$INVALID" ;;
+    *)
+      CURRENT_INVALIDATION_HEAD=$(git -C "$INVALIDATION_WORKTREE" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
+      if [ -n "$CURRENT_INVALIDATION_HEAD" ] && [ "$CURRENT_INVALIDATION_HEAD" != "$INVALIDATION_HEAD" ] \
+        && git -C "$INVALIDATION_WORKTREE" merge-base --is-ancestor "$INVALIDATION_HEAD" "$CURRENT_INVALIDATION_HEAD" 2>/dev/null; then
+        set +e
+        git -C "$INVALIDATION_WORKTREE" diff --no-ext-diff --quiet "$INVALIDATION_HEAD..$CURRENT_INVALIDATION_HEAD"
+        INVALIDATION_DIFF_RC=$?
+        set -e
+        case "$INVALIDATION_DIFF_RC" in
+          1) FOLLOWUP_DELTA_READY=1 ;;
+          0) ;;
+          *) printf 'active invalidation delta could not be inspected\n' >> "$INVALID" ;;
+        esac
+      fi
+      ;;
+  esac
+fi
 
 if [ "$ACTION" = criterion ]; then
   case "$CRITERION_QUERY" in
@@ -406,8 +457,16 @@ if [ "$LEDGER_EXISTS" = true ]; then
       continue
     fi
     RECEIPT_COUNT=$((RECEIPT_COUNT + 1))
-    if [ "$(printf '%s' "$line" | jq -r '.outcome')" = passed ]; then
-      printf '%s\n' "$receipt_criterion" >> "$EVIDENCED"
+    if [ "$(printf '%s' "$line" | jq -r '.outcome')" = success ]; then
+      if grep -Fx "$receipt_criterion" "$ACTIVE_INVALIDATED" >/dev/null 2>&1; then
+        receipt_head=$(printf '%s' "$line" | jq -r '.head // ""')
+        if [ "$FOLLOWUP_DELTA_READY" -eq 1 ] && [ "$RECEIPT_COUNT" -gt "$INVALIDATION_BOUNDARY" ] \
+          && [ "$receipt_head" = "$CURRENT_INVALIDATION_HEAD" ]; then
+          printf '%s\n' "$receipt_criterion" >> "$EVIDENCED"
+        fi
+      else
+        printf '%s\n' "$receipt_criterion" >> "$EVIDENCED"
+      fi
     fi
   done < "$LEDGER"
 fi
@@ -456,7 +515,16 @@ if [ "$ACTION" = check ]; then
   exit "$CHECK_RC"
 fi
 
-if [ "$CHECK_RC" -ne 0 ]; then
+if [ "$ACTION" = plan ] && [ -s "$ACTIVE_INVALIDATED" ]; then
+  [ "$FOLLOWUP_DELTA_READY" -eq 1 ] \
+    || { echo "error: invalidated criteria require a strict non-empty follow-up delta" >&2; exit 2; }
+  while IFS= read -r invalidated_criterion; do
+    grep -Fx "$invalidated_criterion" "$EVIDENCED" >/dev/null 2>&1 \
+      || { echo "error: invalidated criterion requires fresh successful evidence after its generation boundary: $invalidated_criterion" >&2; exit 2; }
+  done < "$ACTIVE_INVALIDATED"
+fi
+
+if [ "$CHECK_RC" -ne 0 ] && [ "$ACTION" != invalidate-claim ]; then
   printf '%s\n' "$CHECK_JSON"
   exit "$CHECK_RC"
 fi
@@ -483,7 +551,7 @@ if [ "$ACTION" = implementation-complete ]; then
       ''|*[!0-9]*) release_validation_lock; echo "error: implementation completion timestamp could not be recorded" >&2; exit 2 ;;
     esac
     printf 'implementation_completed_at=%s\nimplementation_completed_head=%s\n' \
-      "$IMPLEMENTATION_COMPLETED" "$IMPLEMENTATION_HEAD" >> "$META" \
+      "$IMPLEMENTATION_COMPLETED" "$IMPLEMENTATION_HEAD" | append_meta_records \
       || { release_validation_lock; echo "error: could not record implementation completion" >&2; exit 2; }
   else
     case "$IMPLEMENTATION_COMPLETED" in
@@ -514,7 +582,7 @@ if [ "$ACTION" = invalidate-claim ]; then
     exit 2
   fi
   if ! grep -Fx "$INVALIDATION_MARKER" "$META" >/dev/null 2>&1; then
-    printf '%s\n' "$INVALIDATION_MARKER" >> "$META" \
+    printf '%s\n' "$INVALIDATION_MARKER" | append_meta_records \
       || { release_validation_lock; echo "error: could not record claim invalidation" >&2; exit 2; }
   fi
   release_validation_lock
@@ -526,7 +594,7 @@ fi
 mechanical_evidence_covers_file() {
   local ledger=$1 file=$2
   jq --arg file "$file" -se '
-    any(.[]; .file == $file and .outcome == "passed" and (.type | test("^(test|build|lint|typecheck)$")))
+    any(.[]; .file == $file and .outcome == "success" and (.type | test("^(test|build|lint|typecheck)$")))
   ' "$ledger" >/dev/null 2>&1
 }
 
@@ -565,7 +633,8 @@ if [ "$ACTION" = bind-run ]; then
     || { echo "error: No-Mistakes run does not match the latest plan" >&2; exit 2; }
   [ -n "$BIND_GENERATION" ] || { echo "error: validation generation is missing" >&2; exit 2; }
   printf 'validation_run_id=%s\nvalidation_run_path=%s\nvalidation_run_head=%s\nvalidation_run_generation=%s\n' \
-    "$RUN_ID_INPUT" "$BIND_PATH" "$BIND_HEAD" "$BIND_GENERATION" >> "$META"
+    "$RUN_ID_INPUT" "$BIND_PATH" "$BIND_HEAD" "$BIND_GENERATION" | append_meta_records \
+    || { echo "error: could not bind the No-Mistakes run" >&2; exit 2; }
   jq -cn --arg task "$ID" --arg run "$RUN_ID_INPUT" --arg path "$BIND_PATH" --arg head "$BIND_HEAD" \
     '{schema:"fm-validation-run-binding.v1",task:$task,status:"bound",run:$run,path:$path,head:$head}'
   exit 0
@@ -639,7 +708,7 @@ record_validation_completed() {
   fm_worktree_is_clean "$worktree" \
     || { release_validation_lock; echo "error: validation worktree is dirty; commit or remove all changes" >&2; return 1; }
   if [ "$current_head" != "$validated_head" ]; then
-    printf 'validation_completed_at=\nvalidation_completed_head=\nvalidation_completed_path=\nvalidation_completed_evidence=\nvalidation_completed_generation=\n' >> "$META" \
+    printf 'validation_completed_at=\nvalidation_completed_head=\nvalidation_completed_path=\nvalidation_completed_evidence=\nvalidation_completed_generation=\n' | append_meta_records \
       || { release_validation_lock; echo "error: could not invalidate stale validation completion" >&2; return 1; }
     release_validation_lock
     echo "error: current worktree head differs from the validated head; replan and revalidate" >&2
@@ -741,7 +810,7 @@ record_validation_completed() {
   if [ "$completed_head:$completed_path:$completed_evidence:$completed_generation" != "$validated_head:$path:$observed:$generation" ]; then
     now=$(date +%s)
     printf 'validation_completed_at=%s\nvalidation_completed_head=%s\nvalidation_completed_path=%s\nvalidation_completed_evidence=%s\nvalidation_completed_generation=%s\n' \
-      "$now" "$validated_head" "$path" "$observed" "$generation" >> "$META" \
+      "$now" "$validated_head" "$path" "$observed" "$generation" | append_meta_records \
       || { release_validation_lock; echo "error: could not record validation completion" >&2; return 1; }
     completed=$now
     completed_head=$validated_head
@@ -943,7 +1012,7 @@ write_meta_record() {  # <pass>
       printf 'validation_run_id=\nvalidation_run_path=\nvalidation_run_head=\nvalidation_run_generation=\n'
       printf 'validation_completed_at=\nvalidation_completed_head=\nvalidation_completed_path=\nvalidation_completed_evidence=\nvalidation_completed_generation=\n'
     fi
-  } >> "$META"; then
+  } | append_meta_records; then
     release_validation_lock
     echo "error: could not append validation metadata: $META" >&2
     return 1
@@ -967,7 +1036,7 @@ PR_COMMAND=
 DONE_STATUS=
 REGISTER_COMMAND=
 if [ "$VALIDATION_PATH" = receipts-mechanical ]; then
-  RECEIPT_COMMAND="bin/fm-receipt.sh $ID <criterion> <test|build|lint|typecheck> <summary> <result> --outcome passed --file <changed-file>"
+  RECEIPT_COMMAND="bin/fm-receipt.sh $ID <criterion> <test|build|lint|typecheck> <summary> <result> --outcome success --file <changed-file>"
   MECHANICAL_COMMAND="bin/fm-receipt-check.sh $ID --mechanical-ready"
   PUSH_COMMAND="git push -u origin fm/$ID"
   PR_COMMAND="gh-axi pr create <options>"

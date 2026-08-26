@@ -2,14 +2,15 @@
 # Own the portable pinned task, state metadata, brief, and evidence-ledger descriptor boundary.
 #
 # Usage:
-#   fm-receipt-store.sh <task-id> hold <brief-out> <ledger-out> <ready-file> <release-fifo>
+#   fm-receipt-store.sh <task-id> hold <brief-out> <ledger-out> <meta-out> <ready-file> <release-fifo>
 #   fm-receipt-store.sh <task-id> append <criterion> <criterion-parser>
+#   fm-receipt-store.sh <task-id> meta-append <expected-meta> <records> <updated-meta-out>
 #   fm-receipt-store.sh <task-id> promote <transaction-command> [<arg> ...]
 #
 # hold snapshots the pinned brief and ledger under a shared ledger lock, writes
-# 0 (ready), 1 (refused), or 3 (ledger missing) to ready-file, and on ready or
-# missing retains the lock until release-fifo receives one line before exiting
-# with the same status.
+# 0 (ready), 1 (refused), 3 (ledger missing), or 4 (non-ship) to ready-file.
+# Ready and missing-ledger snapshots retain the lock until release-fifo receives
+# one line before exiting with the same status.
 # append validates the pinned ship brief and criterion, then appends the compact
 # JSON payload from FM_RECEIPT_PAYLOAD under an exclusive ledger lock.
 # promote holds the exclusive task lock across the transaction child's documented
@@ -56,7 +57,7 @@ case "$ID" in
   ''|.|..|*[!A-Za-z0-9._-]*|[._-]*) echo "error: invalid task id: $ID" >&2; exit 2 ;;
 esac
 case "$MODE:$#" in
-  hold:4|append:2) ;;
+  hold:5|append:2|meta-append:3) ;;
   promote:0) usage >&2; exit 2 ;;
   promote:*) ;;
   *) usage >&2; exit 2 ;;
@@ -73,9 +74,10 @@ use Errno qw(EEXIST ENOENT EINTR);
 use Fcntl qw(:DEFAULT :flock :mode);
 use IO::Handle;
 use Digest::SHA qw(sha256_hex);
+use JSON::PP qw(decode_json encode_json);
 
-my ($arg1, $arg2, $arg3, $arg4) = @ARGV;
-my $ready = $ENV{FM_RECEIPT_STORE_MODE} eq "hold" ? $arg3 : undef;
+my ($arg1, $arg2, $arg3, $arg4, $arg5) = @ARGV;
+my $ready = $ENV{FM_RECEIPT_STORE_MODE} eq "hold" ? $arg4 : undef;
 my $append_tmp;
 END { unlink($append_tmp) if defined($append_tmp) && -e $append_tmp; }
 $SIG{HUP} = $SIG{INT} = $SIG{TERM} = sub {
@@ -103,8 +105,19 @@ sub refuse {
 sub copy_file {
   my ($source, $destination) = @_;
   sysseek($source, 0, 0) or refuse("could not rewind pinned task artifact");
-  sysopen(my $output, $destination, O_WRONLY | O_CREAT | O_TRUNC, 0600)
+  my @destination_identity = lstat($destination);
+  refuse("pinned task snapshot destination is unsafe") if @destination_identity
+    && (S_ISLNK($destination_identity[2]) || !S_ISREG($destination_identity[2]) || $destination_identity[3] != 1);
+  sysopen(my $output, $destination, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600)
     or refuse("could not prepare pinned task snapshot");
+  my @output_identity = stat($output);
+  refuse("pinned task snapshot must be a single-link regular file") unless @output_identity
+    && S_ISREG($output_identity[2]) && $output_identity[3] == 1;
+  my @named_output_identity = lstat($destination);
+  refuse("pinned task snapshot destination identity changed") unless @named_output_identity
+    && !S_ISLNK($named_output_identity[2])
+    && $named_output_identity[0] == $output_identity[0]
+    && $named_output_identity[1] == $output_identity[1];
   my $buffer;
   while (1) {
     my $read = sysread($source, $buffer, 65536);
@@ -213,6 +226,88 @@ sysopen(my $brief, "brief.md", O_RDONLY | O_NOFOLLOW)
   or refuse("task brief is missing or unsafe");
 my @brief_identity = stat($brief);
 refuse("task brief is not a regular file") unless @brief_identity && S_ISREG($brief_identity[2]);
+
+my $state_path = $ENV{FM_RECEIPT_STORE_STATE} // "";
+my ($state, $state_pins) = pin_absolute_directory($state_path, "state");
+my $meta_name = "$task_name.meta";
+my $meta;
+my @meta_identity;
+if ($ENV{FM_RECEIPT_STORE_MODE} ne "promote") {
+  sysopen($meta, $meta_name, O_RDONLY | O_NOFOLLOW)
+    or refuse("task metadata is missing or unsafe");
+  @meta_identity = stat($meta);
+  refuse("task metadata must be a single-link regular file") unless @meta_identity
+    && S_ISREG($meta_identity[2]) && $meta_identity[3] == 1;
+  my @named_meta_identity = lstat($meta_name);
+  refuse("task metadata identity changed") unless @named_meta_identity
+    && !S_ISLNK($named_meta_identity[2])
+    && $named_meta_identity[0] == $meta_identity[0]
+    && $named_meta_identity[1] == $meta_identity[1];
+}
+
+if ($ENV{FM_RECEIPT_STORE_MODE} eq "meta-append") {
+  my ($expected_path, $records_path, $updated_path) = @ARGV;
+  sysopen(my $expected, $expected_path, O_RDONLY | O_NOFOLLOW)
+    or refuse("expected metadata snapshot is missing or unsafe");
+  sysopen(my $records, $records_path, O_RDONLY | O_NOFOLLOW)
+    or refuse("metadata records are missing or unsafe");
+  my @expected_identity = stat($expected);
+  my @records_identity = stat($records);
+  refuse("expected metadata snapshot must be a single-link regular file") unless @expected_identity
+    && S_ISREG($expected_identity[2]) && $expected_identity[3] == 1;
+  refuse("metadata records must be a single-link regular file") unless @records_identity
+    && S_ISREG($records_identity[2]) && $records_identity[3] == 1;
+  local $/;
+  my $current_text = <$meta>;
+  my $expected_text = <$expected>;
+  my $records_text = <$records>;
+  defined($current_text) && defined($expected_text) && defined($records_text)
+    or refuse("metadata update input could not be read");
+  refuse("task metadata changed during validation") unless $current_text eq $expected_text;
+  refuse("metadata records are empty") unless length($records_text);
+  my $new_text = $current_text;
+  $new_text .= "\n" if length($new_text) && $new_text !~ /\n\z/;
+  $new_text .= $records_text;
+  $new_text .= "\n" if $new_text !~ /\n\z/;
+  sysopen(my $random, "/dev/urandom", O_RDONLY | O_NOFOLLOW)
+    or refuse("metadata nonce source is unavailable");
+  my $nonce_bytes;
+  my $nonce_read = sysread($random, $nonce_bytes, 16);
+  refuse("metadata nonce could not be read") unless defined($nonce_read) && $nonce_read == 16;
+  close($random) or refuse("metadata nonce source could not be closed");
+  my $temp_name = ".$task_name.meta.update." . unpack("H*", $nonce_bytes);
+  $append_tmp = $temp_name;
+  write_new_file($temp_name, $new_text);
+  my @current_named_identity = lstat($meta_name);
+  refuse("task metadata identity changed before replacement") unless @current_named_identity
+    && !S_ISLNK($current_named_identity[2])
+    && $current_named_identity[0] == $meta_identity[0]
+    && $current_named_identity[1] == $meta_identity[1];
+  rename($temp_name, $meta_name) or refuse("task metadata replacement failed");
+  $append_tmp = undef;
+  $state->sync or refuse("state directory could not be synced after metadata replacement");
+  sysopen(my $updated, $meta_name, O_RDONLY | O_NOFOLLOW)
+    or refuse("updated task metadata could not be pinned");
+  my @updated_identity = stat($updated);
+  refuse("updated task metadata must be a single-link regular file") unless @updated_identity
+    && S_ISREG($updated_identity[2]) && $updated_identity[3] == 1;
+  copy_file($updated, $updated_path);
+  exit 0;
+}
+
+if ($ENV{FM_RECEIPT_STORE_MODE} eq "hold") {
+  local $/;
+  my $meta_text = <$meta>;
+  defined($meta_text) or refuse("task metadata could not be read");
+  my @kinds = ($meta_text =~ /^kind=(.*)$/mg);
+  if (@kinds == 1 && ($kinds[0] eq "scout" || $kinds[0] eq "secondmate")) {
+    copy_file($meta, $arg3);
+    publish_ready(4) or refuse("snapshot readiness could not be published");
+    exit 4;
+  }
+}
+
+chdir($task) or refuse("pinned task directory could not be re-entered");
 my $task_lock;
 my $lock_created = 0;
 if ($ENV{FM_RECEIPT_STORE_MODE} eq "promote") {
@@ -247,10 +342,11 @@ if ($ENV{FM_RECEIPT_STORE_MODE} eq "hold") {
     refuse("evidence ledger must be a single-link regular file") unless @ledger_identity
       && S_ISREG($ledger_identity[2]) && $ledger_identity[3] == 1;
   }
-  sysopen(my $release, $arg4, O_RDWR | O_NOFOLLOW)
+  sysopen(my $release, $arg5, O_RDWR | O_NOFOLLOW)
     or refuse("evidence ledger release channel is unsafe");
   copy_file($brief, $arg1);
   copy_file($ledger, $arg2) unless $ledger_missing;
+  copy_file($meta, $arg3);
   publish_ready($ledger_missing ? 3 : 0)
     or refuse("snapshot readiness could not be published");
   scalar(<$release>);
@@ -273,9 +369,6 @@ if ($ENV{FM_RECEIPT_STORE_MODE} eq "promote") {
   my $token = unpack("H*", $nonce_bytes);
   my ($command, @command_args) = @ARGV;
   my $contract_hash = sha256_hex(join("\0", @command_args));
-  my $state_path = $ENV{FM_RECEIPT_STORE_STATE} // "";
-  my ($state, $state_pins) = pin_absolute_directory($state_path, "state");
-  my $meta_name = "$task_name.meta";
   chdir($task) or refuse("pinned task directory could not be re-entered");
   opendir(my $task_entries, ".") or refuse("promotion task directory could not be inspected");
   my @entries = readdir($task_entries);
@@ -356,9 +449,9 @@ if ($ENV{FM_RECEIPT_STORE_MODE} eq "promote") {
     $task->sync or refuse("unfinished promotion task cleanup could not be synced");
   }
   chdir($state) or refuse("pinned state directory could not be re-entered");
-  sysopen(my $meta, $meta_name, O_RDONLY | O_NOFOLLOW)
+  sysopen($meta, $meta_name, O_RDONLY | O_NOFOLLOW)
     or refuse("promotion task metadata is missing or unsafe");
-  my @meta_identity = stat($meta);
+  @meta_identity = stat($meta);
   refuse("promotion task metadata must be a single-link regular file") unless @meta_identity
     && S_ISREG($meta_identity[2]) && $meta_identity[3] == 1;
   local $/;
@@ -476,7 +569,42 @@ open(my $criterion_parser, "|-", $parser, "--parse-criteria", "-", "--require", 
 print {$criterion_parser} $brief_text or refuse("task brief could not reach the acceptance-criterion parser");
 close($criterion_parser) or refuse("criterion is not declared by a valid ship brief: $criterion");
 
-my $record = "$ENV{FM_RECEIPT_PAYLOAD}\n";
+chdir($state) or refuse("pinned state directory could not be re-entered for receipt binding");
+my @receipt_meta_identity = lstat($meta_name);
+if (!@receipt_meta_identity || S_ISLNK($receipt_meta_identity[2])
+  || $receipt_meta_identity[0] != $meta_identity[0]
+  || $receipt_meta_identity[1] != $meta_identity[1]) {
+  close($meta) or refuse("superseded task metadata could not be closed");
+  sysopen($meta, $meta_name, O_RDONLY | O_NOFOLLOW)
+    or refuse("current task metadata is missing or unsafe");
+  @meta_identity = stat($meta);
+  refuse("current task metadata must be a single-link regular file") unless @meta_identity
+    && S_ISREG($meta_identity[2]) && $meta_identity[3] == 1;
+  @receipt_meta_identity = lstat($meta_name);
+  refuse("current task metadata identity changed during receipt binding") unless @receipt_meta_identity
+    && !S_ISLNK($receipt_meta_identity[2])
+    && $receipt_meta_identity[0] == $meta_identity[0]
+    && $receipt_meta_identity[1] == $meta_identity[1];
+}
+chdir($task) or refuse("pinned task directory could not be re-entered after receipt binding");
+sysseek($meta, 0, 0) or refuse("task metadata could not be rewound for receipt binding");
+local $/;
+my $meta_text = <$meta>;
+defined($meta_text) or refuse("task metadata could not be read for receipt binding");
+my @worktrees = ($meta_text =~ /^worktree=(.*)$/mg);
+my $payload = eval { decode_json($ENV{FM_RECEIPT_PAYLOAD}) };
+refuse("evidence receipt payload is invalid") unless defined($payload) && ref($payload) eq "HASH";
+if (@worktrees == 1 && length($worktrees[0])) {
+  if (open(my $git_head, "-|", "git", "-C", $worktrees[0], "rev-parse", "--verify", "HEAD^{commit}")) {
+    my $head = <$git_head>;
+    if (close($git_head) && defined($head)) {
+      chomp($head);
+      $payload->{head} = $head if $head =~ /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+    }
+  }
+}
+my $payload_text = encode_json($payload);
+my $record = "$payload_text\n";
 sysopen(my $random, "/dev/urandom", O_RDONLY | O_NOFOLLOW)
   or refuse("temporary evidence nonce source is unavailable");
 my $nonce_bytes;
@@ -516,4 +644,5 @@ close($temp) or refuse("temporary evidence ledger close failed");
 rename($temp_name, "evidence.jsonl") or refuse("evidence ledger replacement failed");
 $append_tmp = undef;
 $task->sync or refuse("task directory could not be synced");
+print "$payload_text\n";
 PERL

@@ -13,7 +13,8 @@
 #   result      Compact observed result, either positional or supplied by --result.
 #
 # Options:
-#   --outcome <passed|failed>  Required closed evidence outcome.
+#   --outcome <status> Required structured outcome: success, failure, negative,
+#                      zero, skipped, empty, placeholder, or weak.
 #   --result <text>    Observed result when it is not supplied positionally.
 #   --command <text>   Command that produced the evidence.
 #   --artifact <path>  Artifact or URL carrying the evidence.
@@ -106,8 +107,8 @@ receipt=$(jq -cn \
 printf '%s\n' "$receipt" | "$SCRIPT_DIR/fm-receipt-schema.sh" \
   || { echo "error: invalid receipt schema" >&2; exit 2; }
 
-if ! FM_DATA_OVERRIDE="$DATA" FM_RECEIPT_PAYLOAD="$receipt" \
-  "$SCRIPT_DIR/fm-receipt-store.sh" "$ID" append "$CRITERION" "$SCRIPT_DIR/fm-receipt-check.sh"; then
+if ! stored_receipt=$(FM_DATA_OVERRIDE="$DATA" FM_RECEIPT_PAYLOAD="$receipt" \
+  "$SCRIPT_DIR/fm-receipt-store.sh" "$ID" append "$CRITERION" "$SCRIPT_DIR/fm-receipt-check.sh"); then
   exit 1
 fi
-printf '%s\n' "$receipt"
+printf '%s\n' "$stored_receipt"

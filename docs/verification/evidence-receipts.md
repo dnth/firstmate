@@ -20,9 +20,9 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 - Promotion retries distinguish identity-bound unfinished rollback from committed retirement recovery, while post-commit reporting cannot reverse durable success.
 - Planning retains the pinned shared ledger lock through metadata publication, so only receipts appended after the published plan boundary qualify as fresh mechanical evidence.
 - The checker parent owns a read/write release descriptor before snapshot spawn, so early child failures cannot block cleanup waiting for a FIFO reader.
-- Snapshot readiness status is checked and terminal on publication failure; hold documents ready `0`, refusal `1`, and missing-ledger `3` statuses.
+- Snapshot readiness status is checked and terminal on publication failure; hold documents ready `0`, refusal `1`, missing-ledger `3`, and pinned non-ship `4` statuses.
 - Receipt append, check, and promotion consume one executable acceptance-criterion parser that requires nonblank descriptions.
-- Structurally valid receipts require non-whitespace summary and result strings plus a closed `outcome=passed|failed` field; only `passed` evidences a criterion, while `result` remains descriptive so expected observations such as `401` are unambiguous.
+- Structurally valid receipts require non-whitespace summary and result strings plus an explicit structured outcome; only `outcome=success` evidences a criterion, while failure, negative, zero, skipped, empty, placeholder, weak, and legacy outcomes remain unevidenced and `result` stays descriptive so expected observations such as `401` are unambiguous.
 - Receipt append holds a stable task lock, copies the canonical single-link ledger plus one complete record to a synced mode-0600 single-link temporary file, and atomically renames it over the canonical ledger so concurrent hard-link aliases retain the old inode.
 - Criterion parsing rejects known scaffold placeholder tokens in balanced or unmatched brace forms while allowing concrete brace syntax such as JSON examples.
 - One shared cleanliness predicate requires `git status` with submodule ignores disabled to succeed with empty tracked, staged, untracked, and submodule output for implementation completion, planning, binding, terminal completion, and final done acceptance.
@@ -30,7 +30,9 @@ The exact ledger schema, criterion parser, classifier thresholds, metadata field
 - Every diff input, including the special-mode summary probe, must execute successfully before risk classification.
 - Normal and promoted ship briefs consume the same executable acceptance-evidence and per-mode delivery renderer.
 - The pinned brief and task metadata must record the same concrete delivery mode before validation can proceed.
-- Findings that invalidate a receipt or acceptance claim append one generation-scoped idempotent finding-to-criterion marker to task metadata.
+- Ship state requires exactly one valid recorded delivery mode before any No-Mistakes lookup.
+- Findings that invalidate a receipt or acceptance claim append one generation-scoped idempotent finding-to-criterion marker to task metadata, require a strict non-empty descendant delta, and require a post-boundary successful receipt bound to the new head before replanning or completion.
+- One pinned state-directory owner snapshots single-link no-follow metadata and performs compare-bound atomic replacements for every validation metadata update.
 - Successful exact-head runs can bind after reaching checks-passed or passed, while failed and cancelled runs remain ineligible.
 - No-Mistakes status, intent, and CI-log observations use the shared bounded call boundary.
 - Every completion requires path-specific terminal evidence, records its plan path and validated head, invalidates stale completion metadata when the worktree head changes, and refuses completion until the change is replanned or revalidated.
@@ -68,8 +70,9 @@ $ tests/fm-receipt-check.test.sh
 ok - fm-receipt-check help renders an executable generation-bound bind command
 ok - fm-receipt-check reports required, evidenced, and missing ids deterministically
 ok - fm-receipt-check distinguishes complete evidence from invalid JSONL
-ok - closed passed and failed outcomes control criterion evidence
+ok - structured success and negative outcomes control criterion evidence
 ok - pinned brief and metadata delivery modes must match exactly
+ok - pinned metadata owner rejects hard-linked validation records
 ok - invalid ship briefs fail and scout/report behavior stays unchanged
 ok - early snapshot failures release cleanup without a FIFO reader
 ok - snapshot readiness publication failures terminate without waiting
@@ -105,6 +108,7 @@ ok - status-log done requires existing plan completion
 ok - final done requires a clean inspectable worktree
 ok - LOW validation remains parked until PR completion
 ok - direct-PR and local-only state reads skip No-Mistakes
+ok - ship state requires one valid mode before run lookup
 all fm-crew-state tests passed
 
 $ tests/fm-brief.test.sh

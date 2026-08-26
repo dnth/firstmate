@@ -141,7 +141,16 @@ KIND=$(meta_value kind)
 HARNESS=$(meta_value harness)
 MODE=$(meta_value mode)
 [ -n "$KIND" ] || KIND=ship
-[ "$KIND" != ship ] || [ -n "$MODE" ] || MODE=no-mistakes
+if [ "$KIND" = ship ]; then
+  MODE_COUNT=$(grep -c '^mode=' "$META" 2>/dev/null || true)
+  if [ "$MODE_COUNT" -ne 1 ]; then
+    emit unknown metadata-gate "ship metadata must record exactly one delivery mode"
+  fi
+  case "$MODE" in
+    no-mistakes|direct-PR|local-only) ;;
+    *) emit unknown metadata-gate "ship metadata has an invalid delivery mode" ;;
+  esac
+fi
 
 # A torn-down (or never-created) worktree has no current state to read.
 if [ -z "$WT" ] || [ ! -d "$WT" ]; then

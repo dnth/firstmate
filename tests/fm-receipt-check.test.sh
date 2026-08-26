@@ -85,7 +85,7 @@ EOF
 }
 
 add_receipt() {  # <id> <criterion> <type> <result> [file] [outcome]
-  local id=$1 criterion=$2 type=$3 result=$4 file=${5:-} outcome=${6:-passed}
+  local id=$1 criterion=$2 type=$3 result=$4 file=${5:-} outcome=${6:-success}
   if [ -n "$file" ]; then
     FM_HOME="$HOME_DIR" "$RECEIPT" "$id" "$criterion" "$type" "evidence for $criterion" "$result" --outcome "$outcome" --file "$file" >/dev/null \
       || fail "could not append fixture receipt for $id/$criterion"
@@ -201,23 +201,28 @@ test_complete_and_invalid_ledgers_have_distinct_results() {
 test_closed_outcomes_control_evidence() {
   local id=closed-outcomes out rc
   write_brief "$id" direct-PR
-  add_receipt "$id" AC1 test "12 passed" "" failed
-  add_receipt "$id" AC2 test "0 tests passed" "" passed
+  add_receipt "$id" AC1 test "12 passed" "" failure
+  add_receipt "$id" AC2 test "0 tests passed" "" zero
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id"); rc=$?
   expect_code 1 "$rc" "failed outcome leaves its criterion missing"
   printf '%s' "$out" | jq -e '
     .status == "missing"
     and .required == ["AC1","AC2"]
-    and .evidenced == ["AC2"]
-    and .missing == ["AC1"]
+    and .evidenced == []
+    and .missing == ["AC1","AC2"]
     and .receipt_count == 2
   ' >/dev/null || fail "closed outcome evidence status was not deterministic"
-  add_receipt "$id" AC1 test failed "" passed
+  add_receipt "$id" AC1 test failed "" success
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id"); rc=$?
-  expect_code 0 "$rc" "passed outcome evidences regardless of descriptive result"
+  expect_code 1 "$rc" "success outcome evidences regardless of descriptive result"
+  printf '%s' "$out" | jq -e '.evidenced == ["AC1"] and .missing == ["AC2"]' >/dev/null \
+    || fail "success outcome did not recover the criterion"
+  add_receipt "$id" AC2 api 401 "" success
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id"); rc=$?
+  expect_code 0 "$rc" "expected observations can carry explicit success"
   printf '%s' "$out" | jq -e '.evidenced == ["AC1","AC2"] and .missing == []' >/dev/null \
-    || fail "passed outcome did not recover the criterion"
-  pass "closed passed and failed outcomes control criterion evidence"
+    || fail "expected 401 success did not recover the criterion"
+  pass "structured success and negative outcomes control criterion evidence"
 }
 
 test_delivery_mode_mismatch_fails_closed() {
@@ -229,6 +234,21 @@ test_delivery_mode_mismatch_fails_closed() {
   assert_contains "$out" "contradicts the pinned ship brief" \
     "mode contradiction refusal did not identify its authority boundary"
   pass "pinned brief and metadata delivery modes must match exactly"
+}
+
+test_metadata_hard_links_are_rejected_by_the_pinned_owner() {
+  local id=hard-linked-meta outside out rc
+  write_brief "$id" direct-PR
+  outside="$TMP_ROOT/external-meta"
+  cp "$HOME_DIR/state/$id.meta" "$outside"
+  rm "$HOME_DIR/state/$id.meta"
+  ln "$outside" "$HOME_DIR/state/$id.meta"
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" 2>&1)
+  rc=$?
+  expect_code 2 "$rc" "hard-linked metadata fails closed"
+  assert_contains "$out" "single-link regular file" \
+    "hard-linked metadata refusal did not come from the pinned state owner"
+  pass "pinned metadata owner rejects hard-linked validation records"
 }
 
 test_invalid_brief_and_scout_behavior() {
@@ -408,7 +428,7 @@ EOF
   : > "$HOME_DIR/data/$id/evidence.jsonl"
   : > "$HOME_DIR/data/$id/.evidence.lock"
   fm_write_meta "$HOME_DIR/state/$id.meta" "kind=ship" "mode=direct-PR"
-  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC10 test summary passed --outcome passed >/dev/null \
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC10 test summary passed --outcome success >/dev/null \
     || fail "receipt append rejected a criterion accepted by the shared parser"
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id"); rc=$?
   expect_code 0 "$rc" "checker accepts the same detailed criterion as append"
@@ -467,7 +487,7 @@ test_ci_green_log_allows_exact_bound_run_completion() {
 }
 
 test_claim_invalidation_marker_is_append_only_and_idempotent() {
-  local id=claim-invalidation out rc meta base generation first_generation
+  local id=claim-invalidation out rc meta base generation first_generation project
   base=$(make_project "$id" no-mistakes localized)
   add_receipt "$id" AC1 test passed
   add_receipt "$id" AC2 lint passed
@@ -487,8 +507,25 @@ test_claim_invalidation_marker_is_append_only_and_idempotent() {
     || fail "duplicate claim invalidation was not idempotent"
   [ "$(grep -c "^validation_claim_invalidation=$first_generation:F9:AC1\$" "$meta")" -eq 1 ] \
     || fail "claim invalidation marker was not append-only and idempotent"
+  out=$(FM_FAKE_NM_STATUS= FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" 2>&1)
+  rc=$?
+  expect_code 2 "$rc" "claim invalidation refuses a same-head replan"
+  assert_contains "$out" "strict non-empty follow-up delta" \
+    "same-head invalidation refusal omitted the delta boundary"
+  project="$TMP_ROOT/project-$id"
+  printf '#!/usr/bin/env bash\nprintf "fixed\\n"\n' > "$project/src/app.sh"
+  git -C "$project" add src/app.sh
+  git -C "$project" commit -q -m 'resolve invalidated claim'
+  out=$(FM_FAKE_NM_STATUS= FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" 2>&1)
+  rc=$?
+  expect_code 2 "$rc" "claim invalidation requires post-boundary evidence"
+  assert_contains "$out" "requires fresh successful evidence" \
+    "missing invalidation receipt did not identify its generation boundary"
+  add_receipt "$id" AC1 test "fixed behavior"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --implementation-complete >/dev/null \
+    || fail "claim invalidation fix did not refresh implementation completion"
   FM_FAKE_NM_STATUS= FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null \
-    || fail "claim invalidation fixture replan failed"
+    || fail "claim invalidation fixture replan failed after a fix and fresh evidence"
   generation=$(grep '^validation_generation=' "$meta" | tail -1 | cut -d= -f2-)
   [ "$generation" != "$first_generation" ] || fail "claim invalidation replan reused its generation"
   FM_HOME="$HOME_DIR" "$CHECK" "$id" --invalidate-claim F9 --invalidated-criterion AC1 >/dev/null \
@@ -510,7 +547,7 @@ test_low_risk_skips_no_mistakes_under_explicit_policy() {
     || fail "low-risk plan failed"
   printf '%s' "$out" | jq -e --arg id "$id" '
     .tier == "low" and .path == "receipts-mechanical"
-    and .receipt_command == ("bin/fm-receipt.sh " + $id + " <criterion> <test|build|lint|typecheck> <summary> <result> --outcome passed --file <changed-file>")
+    and .receipt_command == ("bin/fm-receipt.sh " + $id + " <criterion> <test|build|lint|typecheck> <summary> <result> --outcome success --file <changed-file>")
     and .mechanical_command == ("bin/fm-receipt-check.sh " + $id + " --mechanical-ready")
     and .push_command == ("git push -u origin fm/" + $id)
     and .pr_command == "gh-axi pr create <options>"
@@ -630,9 +667,9 @@ test_low_risk_requires_safe_prose_and_applicable_evidence() {
 test_implementation_completion_precedes_planning() {
   local id=implementation-boundary base fakebin out rc meta head new_head project
   base=$(make_project "$id" no-mistakes localized)
-  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test primary passed --outcome passed >/dev/null \
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test primary passed --outcome success >/dev/null \
     || fail "implementation boundary AC1 receipt failed"
-  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC2 lint secondary passed --outcome passed >/dev/null \
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC2 lint secondary passed --outcome success >/dev/null \
     || fail "implementation boundary AC2 receipt failed"
   FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null 2>&1
   rc=$?
@@ -705,7 +742,7 @@ EOF
   while [ ! -e "$ready" ]; do
     kill -0 "$plan_pid" 2>/dev/null || fail "planner exited before the publication boundary"
   done
-  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 lint fresh passed --outcome passed --file CHANGELOG.md \
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 lint fresh passed --outcome success --file CHANGELOG.md \
     > "$TMP_ROOT/plan-boundary-receipt" 2>&1 &
   receipt_pid=$!
   sleep 1
@@ -1006,8 +1043,8 @@ test_git_status_errors_fail_every_cleanliness_gate() {
   id=status-error
   base=$(make_project "$id" direct-PR localized)
   project="$TMP_ROOT/project-$id"
-  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test primary passed --outcome passed >/dev/null || fail "status-error AC1 receipt failed"
-  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC2 lint secondary passed --outcome passed >/dev/null || fail "status-error AC2 receipt failed"
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test primary passed --outcome success >/dev/null || fail "status-error AC1 receipt failed"
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC2 lint secondary passed --outcome success >/dev/null || fail "status-error AC2 receipt failed"
   fakebin="$TMP_ROOT/status-error-bin"
   mkdir -p "$fakebin"
   real_git=$(command -v git)
@@ -1138,7 +1175,7 @@ test_high_risk_and_uncertain_inputs_fail_safe() {
 
   id=weak-test-proof
   base=$(make_project "$id" no-mistakes localized)
-  add_receipt "$id" AC1 test "not passed" "" failed
+  add_receipt "$id" AC1 test "not passed" "" failure
   add_receipt "$id" AC2 lint "passed"
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base"); rc=$?
   expect_code 1 "$rc" "failed test outcome blocks validation planning"
@@ -1147,7 +1184,7 @@ test_high_risk_and_uncertain_inputs_fail_safe() {
 
   id=zero-test-proof
   base=$(make_project "$id" no-mistakes localized)
-  add_receipt "$id" AC1 test "0 tests passed" "" failed
+  add_receipt "$id" AC1 test "0 tests passed" "" zero
   add_receipt "$id" AC2 lint "passed"
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base"); rc=$?
   expect_code 1 "$rc" "failed zero-test outcome blocks validation planning"
@@ -1156,7 +1193,7 @@ test_high_risk_and_uncertain_inputs_fail_safe() {
 
   id=skipped-test-proof
   base=$(make_project "$id" no-mistakes localized)
-  add_receipt "$id" AC1 test "2 passed, 1 skipped" "" failed
+  add_receipt "$id" AC1 test "2 passed, 1 skipped" "" skipped
   add_receipt "$id" AC2 lint "passed"
   out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base"); rc=$?
   expect_code 1 "$rc" "failed skipped-test outcome blocks validation planning"
@@ -1269,6 +1306,7 @@ test_reports_missing_criteria_deterministically
 test_complete_and_invalid_ledgers_have_distinct_results
 test_closed_outcomes_control_evidence
 test_delivery_mode_mismatch_fails_closed
+test_metadata_hard_links_are_rejected_by_the_pinned_owner
 test_invalid_brief_and_scout_behavior
 test_early_snapshot_failure_does_not_block_cleanup
 test_readiness_publication_failure_is_terminal
