@@ -717,13 +717,16 @@ export default function (pi: ExtensionAPI) {
     try {
       const recorded = readFileSync(sessionPointer, "utf8").trim();
       if (recorded && existsSync(recorded)) {
-        sessionManager = await SessionManager.open(recorded, sessionsDir);
+        sessionManager = await SessionManager.open(recorded, sessionsDir, undefined, { suppressBreadcrumb: true });
       }
     } catch {
       sessionManager = null;
     }
     if (!sessionManager) {
-      sessionManager = SessionManager.create(fmRoot, sessionsDir);
+      sessionManager = await SessionManager.inMemory(fmRoot).persistCopy({
+        sessionDir: sessionsDir,
+        suppressBreadcrumb: true,
+      });
     }
     if (!actingAsOwner(branchGeneration)) throw new Error("supervision session was replaced or lost lock ownership");
     const leaseHolderPid = ownedLockPid;

@@ -2095,6 +2095,10 @@ test_omp_secondmate_inspects_staged_live_extensions() {
   mkdir -p "$sm/.omp/extensions" "$sm/state" "$sm/config" "$sm/projects"
   cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$sm/.omp/extensions/fm-primary-omp.ts"
   cp "$ROOT/.omp/extensions/fm-fleet-hooks.ts" "$sm/.omp/extensions/fm-fleet-hooks.ts"
+  cp "$ROOT/.omp/extensions/fm-branch-supervision-omp.ts" "$sm/.omp/extensions/fm-branch-supervision-omp.ts"
+  mkdir -p "$sm/.omp/extensions/lib"
+  cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$sm/.omp/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-branch-model-picker.ts" "$sm/.omp/extensions/lib/fm-branch-model-picker.ts"
   git -C "$sm" init -q
   git -C "$sm" add .
   git -C "$sm" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
@@ -2111,9 +2115,41 @@ test_omp_secondmate_inspects_staged_live_extensions() {
     "OMP secondmate refusal incorrectly flagged Firstmate's exact tracked primary extension"
   assert_not_contains "$out" ".omp/extensions/fm-fleet-hooks.ts" \
     "OMP secondmate refusal incorrectly flagged Firstmate's exact tracked fleet hooks"
+  assert_not_contains "$out" ".omp/extensions/fm-branch-supervision-omp.ts" \
+    "OMP secondmate refusal incorrectly flagged Firstmate's exact tracked branch extension closure"
   assert_no_grep 'new-window|new-session' "$CASE_DIR/endpoint.log" \
     "OMP staged secondmate-extension refusal created an endpoint"
   pass "OMP secondmates trust exact primary and fleet extensions while inspecting staged code"
+}
+
+test_omp_secondmate_rejects_modified_branch_helper() {
+  local rec id sm out status
+  id=$(profile_id profile-omp-secondmate-branch-helper-z30)
+  rec=$(make_spawn_case profile-omp-secondmate-branch-helper omp "$id")
+  read_case_record "$rec"
+  printf '%s\n' omp > "$HOME_DIR/config/secondmate-harness"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  mkdir -p "$sm/.omp/extensions/lib" "$sm/state" "$sm/config" "$sm/projects"
+  cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$sm/.omp/extensions/fm-primary-omp.ts"
+  cp "$ROOT/.omp/extensions/fm-fleet-hooks.ts" "$sm/.omp/extensions/fm-fleet-hooks.ts"
+  cp "$ROOT/.omp/extensions/fm-branch-supervision-omp.ts" "$sm/.omp/extensions/fm-branch-supervision-omp.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$sm/.omp/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-branch-model-picker.ts" "$sm/.omp/extensions/lib/fm-branch-model-picker.ts"
+  git -C "$sm" init -q
+  git -C "$sm" add .
+  git -C "$sm" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'seed branch extension closure'
+  printf '\nexport const untrustedSecondmateChange = true;\n' >> "$sm/.omp/extensions/lib/fm-branch-dispatch.ts"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 1 "$status" "OMP secondmate with a modified branch helper should fail the trusted exemption"
+  assert_contains "$out" ".omp/extensions/fm-branch-supervision-omp.ts" \
+    "OMP secondmate helper mismatch did not reject the importing branch extension"
+  assert_no_grep 'new-window|new-session' "$CASE_DIR/endpoint.log" \
+    "OMP secondmate helper mismatch created an endpoint"
+  pass "OMP secondmates trust the branch extension only with its exact helper closure"
 }
 
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
@@ -2342,6 +2378,7 @@ test_omp_ignores_unusable_settings_extension_entries
 test_omp_ignores_unsupported_root_extension_manifest
 test_omp_does_not_trust_copied_primary_adapter_in_projects
 test_omp_secondmate_inspects_staged_live_extensions
+test_omp_secondmate_rejects_modified_branch_helper
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags
 test_batch_forwards_omp_prewalk_target

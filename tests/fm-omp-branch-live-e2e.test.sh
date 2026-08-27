@@ -9,7 +9,8 @@
 #     provider call, so this always runs).
 #   - resident + non-leak (Spike A): a second resident AgentSession is created,
 #     re-prompted after a mirror inject, and its own turn output never reaches
-#     MAIN - only fm-branch-merge notes do.
+#     MAIN - only fm-branch-merge notes do - without replacing MAIN's terminal
+#     resume breadcrumb.
 #   - turn accounting (Spike B): a routine verdict merges with no new turn; a
 #     captain verdict opens exactly one follow-up turn.
 # The resident and turn-accounting checks issue trivial prompts against the
@@ -42,18 +43,25 @@ cp "$ROOT/.omp/extensions/lib/fm-branch-model-picker.ts" "$repo/.omp/extensions/
 ln -s "$OMP_NODE_MODULES" "$repo/node_modules"
 
 cat > "$repo/driver.mjs" <<'EOF'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { getTerminalSessionsDir } from "@oh-my-pi/pi-utils";
 
 const HOME = process.env.FM_HOME;
 const EXT = process.env.SPIKE_EXT;
 const MODE = process.env.SPIKE_MODE;
 const WAKE = process.env.SPIKE_WAKE || "signal: live probe wake";
 const fail = (m) => { console.log("DRIVER_FAIL: " + m); process.exit(1); };
+const breadcrumbPath = join(getTerminalSessionsDir(), `tmux-${process.env.TMUX_PANE}`);
+const mainBreadcrumb = `${HOME}\n${HOME}/main-session.jsonl\n`;
 
 mkdirSync(`${HOME}/state`, { recursive: true });
 mkdirSync(`${HOME}/config`, { recursive: true });
 mkdirSync(`${HOME}/projects/live-probe`, { recursive: true });
+mkdirSync(getTerminalSessionsDir(), { recursive: true });
+writeFileSync(breadcrumbPath, mainBreadcrumb);
+process.on("exit", () => rmSync(breadcrumbPath, { force: true }));
 writeFileSync(`${HOME}/state/live-probe.meta`, `project=${HOME}/projects/live-probe\nwindow=fm-live-probe\n`);
 writeFileSync(`${HOME}/state/.wake-queue`, "1\t1\tsignal\tlive-probe.status\tsignal: live probe wake\n");
 writeFileSync(`${HOME}/state/.lock`, `${process.pid}\n`);
@@ -108,6 +116,7 @@ if (MODE === "degrade") {
 
 const branchLive = existsSync(`${HOME}/state/.branch-session`) && existsSync(sessionFile());
 if (!branchLive) fail("a resident branch session was not created");
+if (readFileSync(breadcrumbPath, "utf8") !== mainBreadcrumb) fail("the branch session replaced MAIN's resume breadcrumb");
 if (sent.some((s) => s.m.customType !== "fm-branch-merge")) fail("a non-merge (branch turn) message leaked into MAIN");
 if (sent.length < 1) fail("the branch produced no merge into MAIN");
 for (const s of sent) {
@@ -131,7 +140,7 @@ EOF
 
 run_driver() { # <mode> <wake>
   FM_HOME="$TMP_ROOT/home-$1" SPIKE_EXT="$repo/.omp/extensions/fm-branch-supervision-omp.ts" \
-    SPIKE_MODE="$1" SPIKE_WAKE="${2:-}" FM_ROOT_OVERRIDE="$ROOT" \
+    SPIKE_MODE="$1" SPIKE_WAKE="${2:-}" FM_ROOT_OVERRIDE="$ROOT" TMUX_PANE="fm-branch-live-$1" \
     bun "$repo/driver.mjs" 2>&1
 }
 
