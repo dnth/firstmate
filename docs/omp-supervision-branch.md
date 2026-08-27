@@ -38,13 +38,13 @@ This feature is OMP-only by construction and changes nothing anywhere else:
 ## Transitions and what is out of scope
 
 Ownership transitions happen only at a clean boundary or by killing the process and letting a fresh one re-arm - never by a synchronous handoff from a live or hung branch.
-A branch generation runs a wake to a clean completion boundary; the next wake reopens the same persistent conversation.
+A branch generation serializes each wake through a clean completion boundary, and the next wake re-prompts the same resident conversation; only the first wake in a fresh process reopens the durable branch conversation.
 `session_start` (a cold start of a fresh process) is the sole clean-boundary arm; the branch is otherwise persistent across main's own session navigation.
 
 Three capabilities are deliberately out of scope for this port and are a future iteration:
 
 - Mid-flight branch replacement - displacing a live branch and re-arming a replacement inside the same process.
-- Mid-branch model or effort hot-swap - the branch keeps its model and effort until it completes or the process restarts; a `/supervision-model` change is a pin applied at the next branch build, not to the running branch.
+- Mid-branch model or effort hot-swap - the branch keeps its model and effort until a fresh process rebuilds it; a `/supervision-model` change is a pin applied at the next branch build, not to the running branch.
 - Hung-branch live takeover - a branch stuck inside a model call is recovered by killing the process (its leases and wake-grant rows go stale on death and are swept), not by main taking ownership away from it.
 
 The reason is structural: OMP coordinates the two in-process actors through shared filesystem locks (the wake-queue lock and the lease-command lock) acquired by synchronous subprocess calls with no timeout.
@@ -101,5 +101,6 @@ What is new is only the attended path: outside away mode, the branch absorbs the
 ## Verification
 
 Portable regressions: `tests/fm-omp-branch-supervision.test.sh` (prompt byte-stability, outcome store append-only, lease actor partition and guards, wake-grant lifecycle, non-branch-home invariance) and the per-actor consume regression in `tests/fm-wake-queue.test.sh` (branch-scoped acknowledgement never swallows a main-owned row, main excludes branch-granted rows, and the inert pre-branch path).
+The versioned branch-marker closure is covered through `tests/fm-session-start.test.sh`, and the secondmate imported-helper trust boundary is covered through `tests/fm-spawn-dispatch-profile.test.sh`.
 The strict typecheck in `tests/fm-omp-branch-types.test.sh` pins the extension against the installed `@oh-my-pi/pi-coding-agent` package and fails on any renamed or removed named export or effort-level drift.
 Live guard: `FM_OMP_BRANCH_LIVE_E2E=1 tests/fm-omp-branch-live-e2e.test.sh` exercises the real installed OMP SDK; run it after every OMP upgrade and record the dated result in [docs/verification/runtime-backends.md](verification/runtime-backends.md).

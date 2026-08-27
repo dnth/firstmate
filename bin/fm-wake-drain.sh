@@ -273,8 +273,8 @@ if [ -n "$ACK_THROUGH" ]; then
   # A scoped main ack consumes EXACTLY the presentation-time .main-eligible-rows
   # snapshot and never re-claims here. Re-claiming at acknowledgement time would
   # broaden main's owned set to rows it never presented - in particular a
-  # branch-owned row released during a supervision-branch replacement could be
-  # newly claimed and then deleted at main's cutoff without either actor ever
+  # branch-owned row whose grant was released after main's presentation could
+  # be newly claimed and then deleted at main's cutoff without main ever
   # presenting it. A row that arrived after presentation was not presented, so
   # it is not main's to acknowledge; it stays queued for the next drain.
   DRAIN_TMP=$(mktemp "$STATE/.wake-queue.ack.XXXXXX") || exit 1

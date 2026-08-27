@@ -297,7 +297,7 @@ Those project files execute before the worker reasons about its brief, and First
 `fm-spawn.sh` therefore refuses an OMP crewmate or secondmate launch when the final project worktree contains git-tracked auto-executed `.omp/extensions` entries or a tracked project settings extension selector.
 Only explicit captain approval for that project authorizes the per-spawn override described in `fm-spawn.sh`'s header.
 The successful OMP task metadata records `allow_project_omp_extensions=1` whenever that override is passed.
-The exact tracked Firstmate extensions at `.omp/extensions/fm-primary-omp.ts`, `.omp/extensions/fm-fleet-hooks.ts`, and `.omp/extensions/fm-branch-supervision-omp.ts` are excluded only for a validated secondmate home when each file's live contents match Firstmate's own copy, so the primary integration can be loaded explicitly and the fleet hooks and supervision branch remain available to native discovery in that home's OMP session.
+The exact tracked Firstmate extensions at `.omp/extensions/fm-primary-omp.ts`, `.omp/extensions/fm-fleet-hooks.ts`, and `.omp/extensions/fm-branch-supervision-omp.ts` are excluded only for a validated secondmate home when each file's live contents and every imported Firstmate helper in its trusted closure match Firstmate's own copies, so the primary integration can be loaded explicitly and the fleet hooks and supervision branch remain available to native discovery in that home's OMP session.
 Other harnesses do not run this preflight because they do not auto-execute OMP project extensions.
 
 ## OMP supervision branch

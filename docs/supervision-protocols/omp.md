@@ -26,6 +26,6 @@ Remote timeout, beacon read failure, and unavailable pane capture are missing ev
 
 The integrated startup, blocking stop, primary safety, watcher, follow-up, and shutdown adapter lives at `__FM_OMP_PRIMARY_EXT__`.
 Plain OMP discovers this tracked project extension natively from `.omp/extensions/` without Pi project trust or Pi event semantics.
-`bin/fm-session-start.sh` validates the adapter's version-bound marker against the live session-lock owner and prints the exact restart fallback when validation fails.
+`bin/fm-session-start.sh` validates the primary adapter marker and the supervision-branch marker against the live session-lock owner and their complete versioned extension/helper closures, then prints the exact restart fallback when either validation fails.
 
 On an OMP primary that owns the fleet lock, a persistent in-process supervision branch absorbs the routine majority of eligible wakes and merges only captain-worthy outcomes back as one follow-up turn; it is default-on and inert when unused, and a broken branch degrades to today's wake-to-main path, so ordinary supervision handling here is unchanged (design: `docs/omp-supervision-branch.md`).

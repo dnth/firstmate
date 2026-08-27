@@ -613,7 +613,7 @@ ok - OMP supervision branch live guard passed against @oh-my-pi/pi-coding-agent 
 ```
 
 The guard proves a broken branch (an unresolvable model pin) falls the wake back to main through the primary adapter's watcher-wake steer with triggerTurn, not sendUserMessage, leaving the wake queue durable.
-It proves a resident second AgentSession is created and remains re-promptable on a later wake without its turn output reaching main, and that a routine verdict opens no new main turn while a captain verdict opens exactly one follow-up turn.
+It proves a resident second AgentSession is created and remains re-promptable on a later wake without its turn output reaching main or replacing main's terminal resume breadcrumb, and that a routine verdict opens no new main turn while a captain verdict opens exactly one follow-up turn.
 The captain sub-check is skipped, not passed, on a run where the model judges the captain-worthy fixture routine.
 
 The branch session is built with the native prompt-cache options providerPromptCacheKey and providerPromptCacheKeySource "explicit"; the belt-and-suspenders before_provider_request rewrite hook is retained but inert under OMP, whose extension-facing provider payload carries no prompt_cache_key field.

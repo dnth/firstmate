@@ -356,7 +356,7 @@ type ReadonlyEntries = {
 };
 
 // Volatile mirror-collection state. Instance-scoped and cleared at the
-// session replacement boundary, so a replacement extension instance
+// process boundary, so a fresh extension instance
 // reconstructs EXCLUSIVELY from the durable cursor: dialog collected but not
 // yet delivered re-mirrors rather than dropping (the durable cursor advances
 // only in flushMirror after delivery).
@@ -509,9 +509,8 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  // A replaced branch conversation must not leave its per-task leases behind
-  // (the session-lock holder pid is still alive, so the sweep alone would
-  // keep them). One bulk release per generation, at activation.
+  // Clear any stray branch leases before a cold-start generation begins work.
+  // One bulk release runs per generation, at activation.
   function releaseBranchLeases(expectedGeneration: number): boolean {
     if (!generationOwnsLock(expectedGeneration)) return false;
     try {
@@ -704,10 +703,9 @@ export default function (pi: ExtensionAPI) {
   async function createBranch(branchGeneration: number): Promise<AgentSession> {
     // Resolved first, before any session file or prompt work: a model pin OMP
     // cannot honor must fail before this build leaves anything behind. Every
-    // branch build goes through here - first wake of a cold start, and the
-    // reopen after /new, /resume, /fork, or reload - so resolving the model
-    // and the effort here is what makes the captain's current choices
-    // authoritative on all of them.
+    // branch build goes through here on the first wake after a cold start, so
+    // resolving the model and effort here makes the captain's current choices
+    // authoritative whenever a fresh process creates or reopens the branch.
     const pinned = branchModelSelection();
     const effort = branchEffortSelection(pinned?.model);
     const prompt = spawnSync("bash", [promptScript], {

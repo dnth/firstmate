@@ -28,9 +28,9 @@
 #     or sweep. Liveness requires a coding-agent calling context plus state/.lock, and
 #     the recorded pid must BE its current holder, so a lease left by an exited
 #     coding-agent session goes stale even if its pid was recycled by an unrelated
-#     process, and a non-coding-agent home never honors a leftover lease. A lease held by the
-#     live current session but an abandoned branch conversation is recovered
-#     by the branch extension's generation-activation cleanup.
+#     process, and a non-coding-agent home never honors a leftover lease. The
+#     branch extension also clears stray branch leases when its cold-start
+#     generation activates, before that generation accepts work.
 #
 # THREAT MODEL (deliberate, captain-decided): these guards are
 # CONFUSED-AGENT-GRADE, the same grade bin/fm-gate-refuse-lib.sh documents

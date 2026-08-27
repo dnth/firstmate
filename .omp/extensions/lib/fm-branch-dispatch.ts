@@ -50,7 +50,7 @@ const EMPTY_SCOPE: UnreadWakeScope = { status: "empty", eligible: false, project
 const UNSAFE_SCOPE: UnreadWakeScope = { status: "unsafe", eligible: false, projects: [], eligibleSeqs: [], corrupted: true };
 
 // scopeForUnreadWake is the single owner of branch-eligibility classification
-// (docs/omp-supervision-branch.md "Autonomy"; docs/omp-supervision-branch.md
+// (docs/omp-supervision-branch.md "Components and their owners" and
 // "Per-actor acknowledgement"). bin/fm-wake-drain.sh never reclassifies a row
 // itself - it only consumes the exact sequence-number snapshot this function
 // (via writeEligibleRowsSnapshot) hands it.

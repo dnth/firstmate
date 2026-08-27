@@ -22,8 +22,7 @@
 #       nothing (exit 1) when the task is unleased.
 #   fm-lease.sh release-actor --actor main|branch
 #       Drop every lease the named actor holds; the OMP branch extension runs
-#       this at generation activation so a replaced branch conversation's
-#       leases never outlive it.
+#       this at cold-start generation activation before accepting branch work.
 #   fm-lease.sh sweep
 #       Remove every provably stale lease in this home. Run at session start
 #       (a lease held by a dead actor is cleared at session start); safe to
