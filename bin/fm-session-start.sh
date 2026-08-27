@@ -439,7 +439,9 @@ else
   # output, cursor untouched - in a home that has no branch outcome store, so
   # this is a no-op for any home that never runs the supervision branch, and it
   # only runs on this lock-owning path.
-  "$SCRIPT_DIR/fm-branch-outcome.sh" startup-replay 2>/dev/null || true
+  if ! "$SCRIPT_DIR/fm-branch-outcome.sh" startup-replay; then
+    :
+  fi
 fi
 
 # --- 4. supervision operating instructions ----------------------------------

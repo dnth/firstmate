@@ -887,6 +887,30 @@ test_main_drain_excludes_rows_already_granted_to_branch() {
   pass "a main drain excludes a branch-granted row and acknowledges only its own presented rows"
 }
 
+test_branch_owner_activation_rollback_stops_after_publication() {
+  local dir state grant status=0
+  grant="$ROOT/bin/fm-wake-grant.sh"
+  dir=$(make_case branch-activation-rollback)
+  state="$dir/state"
+  append_wake "$state" signal "task-a.status" "signal: task-a" || fail "signal append failed"
+
+  FM_STATE_OVERRIDE="$state" "$grant" activate "$$" rollback-empty || fail "branch owner activation failed"
+  FM_STATE_OVERRIDE="$state" "$grant" deactivate "$$" rollback-empty >/dev/null 2>&1 && \
+    fail "removed deactivate surface still accepted an owner deletion"
+  [ -e "$state/.branch-eligible-owner" ] || fail "removed deactivate surface deleted the branch owner"
+  FM_STATE_OVERRIDE="$state" "$grant" rollback-activation "$$" rollback-empty \
+    || fail "pre-publication activation rollback failed"
+  [ ! -e "$state/.branch-eligible-owner" ] || fail "pre-publication rollback retained the branch owner"
+
+  FM_STATE_OVERRIDE="$state" "$grant" activate "$$" rollback-published || fail "second branch owner activation failed"
+  FM_STATE_OVERRIDE="$state" "$grant" publish rollback-published 1 || fail "branch row publication failed"
+  FM_STATE_OVERRIDE="$state" "$grant" rollback-activation "$$" rollback-published >/dev/null 2>&1 || status=$?
+  [ "$status" -ne 0 ] || fail "activation rollback deleted an owner after rows were published"
+  [ -e "$state/.branch-eligible-owner" ] || fail "refused activation rollback deleted the active owner"
+  [ -e "$state/.branch-eligible-rows" ] || fail "refused activation rollback deleted the published rows"
+  pass "branch activation rollback succeeds before publication and preserves every active grant"
+}
+
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
@@ -907,3 +931,4 @@ test_marker_transitions_survive_reentry_from_an_exiting_frame
 test_handling_confirmation_is_bounded_by_foreign_marker_lock
 test_branch_actor_scoped_ack_never_swallows_a_main_owned_row
 test_main_drain_excludes_rows_already_granted_to_branch
+test_branch_owner_activation_rollback_stops_after_publication

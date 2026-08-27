@@ -206,13 +206,13 @@ export function releaseEligibleRowsSnapshot(state: string, grantScript: string, 
   return runGrantScript(state, grantScript, ["release", generation]) === 0;
 }
 
-export function deactivateEligibleRowsOwner(
+export function rollbackEligibleRowsOwnerActivation(
   state: string,
   grantScript: string,
   ownerPid: number,
   generation: string,
 ): boolean {
-  return runGrantScript(state, grantScript, ["deactivate", String(ownerPid), generation]) === 0;
+  return runGrantScript(state, grantScript, ["rollback-activation", String(ownerPid), generation]) === 0;
 }
 
 export interface BranchDispatchOffer {

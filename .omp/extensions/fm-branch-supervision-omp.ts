@@ -83,9 +83,9 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import {
   activateEligibleRowsOwner,
-  deactivateEligibleRowsOwner,
   FM_BRANCH_DISPATCH_EVENT,
   releaseEligibleRowsSnapshot,
+  rollbackEligibleRowsOwnerActivation,
   scopeForUnreadWake,
   writeEligibleRowsSnapshot,
   type BranchDispatchOffer,
@@ -527,7 +527,7 @@ export default function (pi: ExtensionAPI) {
       if (!generationOwnsLock(expectedGeneration)) return false;
       if (!activateEligibleRowsOwner(state, wakeGrantScript, process.pid, String(expectedGeneration))) return false;
       if (!generationOwnsLock(expectedGeneration)) {
-        deactivateEligibleRowsOwner(state, wakeGrantScript, process.pid, String(expectedGeneration));
+        rollbackEligibleRowsOwnerActivation(state, wakeGrantScript, process.pid, String(expectedGeneration));
         return false;
       }
       markLoaded();

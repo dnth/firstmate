@@ -40,9 +40,11 @@
 #   fm-branch-outcome.sh startup-replay
 #     Session-start recovery: print visible unread records under a labeled
 #     header into the locked startup digest, skip rows whose `silent` field is
-#     true, and mark every unread row read. Prints nothing when nothing visible
-#     is unread, so a home that never ran the branch stays silent. Run it only
-#     when the session holds the lock (fm-session-start.sh owns the call site).
+#     true, and mark the valid unread prefix read. A torn record stops replay at
+#     its expected sequence with one bounded diagnostic, while earlier valid
+#     outcomes are still emitted. Prints nothing when nothing visible is unread,
+#     so a home that never ran the branch stays silent. Run it only when the
+#     session holds the lock (fm-session-start.sh owns the call site).
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -80,10 +82,8 @@ read_cursor() {
   printf '%s\n' "${value:-0}"
 }
 
-last_seq() {
-  local value
-  [ -s "$STORE" ] || { printf '0\n'; return 0; }
-  value=$(tail -n 1 "$STORE" 2>/dev/null | jq -er '
+normalize_record() { # <jsonl-line>
+  printf '%s\n' "$1" | jq -ec '
     select(type == "object")
     | select(
         keys == ["epoch", "seq", "summary", "task", "verdict", "wake"]
@@ -93,9 +93,18 @@ last_seq() {
     | select((.epoch | type) == "number" and .epoch >= 0 and .epoch == (.epoch | floor))
     | select((.task | type) == "string" and (.wake | type) == "string")
     | select((.summary | type) == "string" and (.verdict == "routine" or .verdict == "captain"))
-    | .seq
-  ') || return 1
-  printf '%s\n' "$value"
+    | if has("silent")
+      then {seq, epoch, task, wake, verdict, summary, silent}
+      else {seq, epoch, task, wake, verdict, summary}
+      end
+  '
+}
+
+last_seq() {
+  local normalized
+  [ -s "$STORE" ] || { printf '0\n'; return 0; }
+  normalized=$(normalize_record "$(tail -n 1 "$STORE" 2>/dev/null)") || return 1
+  printf '%s\n' "$normalized" | jq -r '.seq'
 }
 
 record_seq() { # <jsonl-line>
@@ -175,7 +184,8 @@ case "$CMD" in
     CURSOR_VALUE=$(read_cursor)
     EXPECTED=$(( CURSOR_VALUE + 1 ))
     NEXT=$(print_unread | sed -n '1p')
-    NEXT_SEQ=$(record_seq "$NEXT")
+    NEXT_NORMALIZED=$(normalize_record "$NEXT" 2>/dev/null || true)
+    NEXT_SEQ=$(record_seq "$NEXT_NORMALIZED")
     if [ "$SEQ" != "$EXPECTED" ] || [ "$NEXT_SEQ" != "$SEQ" ]; then
       fm_lock_release "$LOCK"
       echo "error: live outcome handoff refused - seq $SEQ is not the next unread record after cursor $CURSOR_VALUE" >&2
@@ -198,17 +208,46 @@ case "$CMD" in
   startup-replay)
     [ "$#" -eq 0 ] || usage
     fm_lock_acquire_wait "$LOCK"
-    UNREAD=$(print_unread)
-    if [ -n "$UNREAD" ]; then
-      VISIBLE=$(printf '%s\n' "$UNREAD" | jq -c 'select(.silent != true)')
+    CURSOR_VALUE=$(read_cursor)
+    EXPECTED=1
+    VALID_UNREAD=
+    TORN_SEQUENCE=
+    if [ -s "$STORE" ]; then
+      while IFS= read -r LINE || [ -n "$LINE" ]; do
+        if ! NORMALIZED=$(normalize_record "$LINE" 2>/dev/null); then
+          TORN_SEQUENCE=$EXPECTED
+          break
+        fi
+        RECORD_SEQUENCE=$(record_seq "$NORMALIZED")
+        if [ "$RECORD_SEQUENCE" != "$EXPECTED" ]; then
+          TORN_SEQUENCE=$EXPECTED
+          break
+        fi
+        if [ "$RECORD_SEQUENCE" -gt "$CURSOR_VALUE" ]; then
+          if [ -n "$VALID_UNREAD" ]; then
+            VALID_UNREAD="$VALID_UNREAD
+$NORMALIZED"
+          else
+            VALID_UNREAD=$NORMALIZED
+          fi
+        fi
+        EXPECTED=$(( EXPECTED + 1 ))
+      done < "$STORE"
+    fi
+    if [ -n "$VALID_UNREAD" ]; then
+      VISIBLE=$(printf '%s\n' "$VALID_UNREAD" | jq -c 'select(.silent != true)')
       if [ -n "$VISIBLE" ]; then
         printf 'BRANCH OUTCOMES (handled by the supervision branch, not yet seen by this session):\n'
         printf '%s\n' "$VISIBLE"
       fi
-      LAST=$(record_seq "$(printf '%s\n' "$UNREAD" | tail -n 1)")
+      LAST=$(record_seq "$(printf '%s\n' "$VALID_UNREAD" | tail -n 1)")
       [ -z "$LAST" ] || advance_cursor "$LAST"
     fi
     fm_lock_release "$LOCK"
+    if [ -n "$TORN_SEQUENCE" ]; then
+      printf 'error: branch outcome startup replay stopped at torn sequence %s; valid earlier outcomes were replayed and later outcomes remain unread\n' "$TORN_SEQUENCE" >&2
+      exit 1
+    fi
     ;;
   *) usage ;;
 esac

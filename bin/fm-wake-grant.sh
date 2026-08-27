@@ -20,9 +20,9 @@
 #   release GENERATION
 #     Remove $STATE/.branch-eligible-rows, keeping the owner, after a settled
 #     prompt.
-#   deactivate PID GENERATION
-#     Remove both $STATE/.branch-eligible-rows and $STATE/.branch-eligible-owner
-#     at a replacement/shutdown boundary so main can reclaim the rows.
+#   rollback-activation PID GENERATION
+#     Remove the caller-owned $STATE/.branch-eligible-owner only when activation
+#     has not published $STATE/.branch-eligible-rows; refuse once rows exist.
 #
 # Ownership is bound to the recorded PID's live process identity and the caller's
 # GENERATION, so a stale or cross-generation caller is refused rather than
@@ -141,17 +141,20 @@ case "${1:-}" in
     owner_matches '' "$generation" || exit 1
     rm -f -- "$BRANCH_ROWS" || exit 1
     ;;
-  deactivate)
+  rollback-activation)
     pid=${2:-}
     generation=${3:-}
     [ "$#" -eq 3 ] || exit 2
     fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
     LOCK_HELD=true
     owner_matches "$pid" "$generation" || exit 1
-    rm -f -- "$BRANCH_ROWS" "$BRANCH_OWNER" || exit 1
+    if [ -e "$BRANCH_ROWS" ] || [ -L "$BRANCH_ROWS" ]; then
+      exit 1
+    fi
+    rm -f -- "$BRANCH_OWNER" || exit 1
     ;;
   *)
-    echo "usage: fm-wake-grant.sh activate PID GENERATION | publish GENERATION SEQUENCE... | release GENERATION | deactivate PID GENERATION" >&2
+    echo "usage: fm-wake-grant.sh activate PID GENERATION | publish GENERATION SEQUENCE... | release GENERATION | rollback-activation PID GENERATION" >&2
     exit 2
     ;;
 esac

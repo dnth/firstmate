@@ -752,6 +752,33 @@ EOF
   pass "context digest distinguishes ABSENT, empty-but-present, and populated files"
 }
 
+test_branch_outcome_replay_surfaces_torn_tail_after_valid_prefix() {
+  local rec root home fakebin out status=0 cursor
+  rec=$(new_world branch-outcome-torn-tail)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-a --verdict routine --summary 'alpha outcome survived before corruption' >/dev/null \
+    || fail "first branch outcome append failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-b --verdict captain --summary 'bravo outcome survived before corruption' >/dev/null \
+    || fail "second branch outcome append failed"
+  printf '{"seq":3,"epoch":' >> "$home/state/branch-outcomes.jsonl"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH" 2>&1) || status=$?
+  expect_code 0 "$status" "session start with a torn branch outcome tail"
+  assert_contains "$out" "alpha outcome survived before corruption" "session start hid the first valid outcome"
+  assert_contains "$out" "bravo outcome survived before corruption" "session start hid the second valid outcome"
+  assert_contains "$out" "startup replay stopped at torn sequence 3" "session start swallowed the torn-outcome diagnostic"
+  cursor=$(cat "$home/state/.branch-outcomes-cursor" 2>/dev/null || true)
+  [ "$cursor" = 2 ] || fail "valid replay prefix advanced the outcome cursor to '$cursor', expected 2"
+  pass "session start replays the valid outcome prefix and surfaces a torn-tail diagnostic"
+}
+
 # --- lock refusal: read-only path --------------------------------------------
 
 test_lock_refusal_read_only_path() {
@@ -1842,6 +1869,7 @@ EOF
 }
 
 test_context_digest_absent_empty_present
+test_branch_outcome_replay_surfaces_torn_tail_after_valid_prefix
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
 test_trace_context_effective_state_is_frozen_after_lock
