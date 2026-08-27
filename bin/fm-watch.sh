@@ -115,6 +115,7 @@ case "$REMOTE_TIMEOUT" in
 esac
 WATCHER_DOWNTIME_MARKER="$STATE/.watcher-down"
 WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
+VALIDATION_PLAN_LOCK_STALE_SECS=30
 # The singleton-lock acquisition, EXIT trap, and the blocking supervision loop
 # all live below the source guard at the very bottom of this file (see "Main
 # entry"). Sourcing this file for unit tests therefore loads the functions -
@@ -1021,6 +1022,9 @@ while :; do
           out=$FM_CHECK_RESULT
         elif [ -d "$STATE/.$id.validation-plan.lock" ] \
           && [ ! -L "$STATE/.$id.validation-plan.lock" ] \
+          && validation_lock_age=$(fm_path_age "$STATE/.$id.validation-plan.lock") \
+          && [ "$validation_lock_age" -ge 0 ] \
+          && [ "$validation_lock_age" -lt "$VALIDATION_PLAN_LOCK_STALE_SECS" ] \
           && fm_pr_poll_artifacts_valid "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" defer-metadata; then
           # fm-pr-check publishes the authenticated poll tuple before its
           # atomic metadata replacement while holding this transaction lock.
