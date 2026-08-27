@@ -3451,7 +3451,7 @@ test_pr_metadata_swap_after_snapshot_fails_closed() {
 }
 
 test_watcher_defers_pre_metadata_poll_during_validation_lock() {
-  local dir state original watcher_pid rc i
+  local dir state original watcher_pid rc
   dir=$(make_case watcher-defer-metadata)
   state="$dir/home/state"
   write_task_meta "$dir"
@@ -3461,22 +3461,31 @@ test_watcher_defers_pre_metadata_poll_during_validation_lock() {
     || fail "could not seed the canonical poll for the defer-metadata race"
   original="$dir/original-meta"
   cp "$state/task-a.meta" "$original"
-  printf '%s\n' 'pr=https://github.com/o/r/pull/999' >> "$state/task-a.meta"
-  mkdir "$state/.task-a.validation-plan.lock"
+  touch "$state/.last-check"
+  rm -f "$state/.last-watcher-beat"
 
   set +e
-  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+  FM_TEST_CHECK_INTERVAL=300 FM_TEST_GH_STATE=MERGED \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" \
     > "$dir/watch.out" 2> "$dir/watch.err" &
   watcher_pid=$!
   set -e
-  i=0
-  while [ "$i" -lt 100 ] && ! kill -0 "$watcher_pid" 2>/dev/null; do
-    sleep 0.01
-    i=$((i + 1))
+  while [ ! -e "$state/.last-watcher-beat" ]; do
+    kill -0 "$watcher_pid" 2>/dev/null \
+      || fail "watcher exited before completing startup migration"
   done
-  sleep 0.15
+  mkdir "$state/.task-a.validation-plan.lock"
+  printf '%s\n' 'pr=https://github.com/o/r/pull/999' >> "$state/task-a.meta"
+  rm -f "$state/.last-check"
+  while [ ! -e "$state/.last-check" ]; do
+    kill -0 "$watcher_pid" 2>/dev/null \
+      || fail "watcher exited before deferring the pre-metadata poll"
+  done
+  kill -0 "$watcher_pid" 2>/dev/null \
+    || fail "watcher surfaced the pre-metadata poll before metadata publication"
   cp "$original" "$state/task-a.meta"
   rmdir "$state/.task-a.validation-plan.lock"
+  rm -f "$state/.last-check"
   set +e
   wait "$watcher_pid"
   rc=$?
@@ -3488,6 +3497,43 @@ test_watcher_defers_pre_metadata_poll_during_validation_lock() {
     || fail "watcher surfaced the pre-metadata poll as unauthenticated"
   [ ! -s "$dir/watch.err" ] || fail "defer-metadata watcher emitted errors"
   pass "watcher defers valid pre-metadata polls while the validation lock is held"
+}
+
+test_watcher_surfaces_pre_metadata_poll_after_validation_lock_stales() {
+  local dir state watcher_pid rc
+  dir=$(make_case watcher-stale-defer-metadata)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  FM_TEST_GH_HEAD=0123456789abcdef0123456789abcdef01234567 \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/22 \
+    > "$dir/arm.out" 2> "$dir/arm.err" \
+    || fail "could not seed the canonical poll for stale-lock recovery"
+  touch "$state/.last-check"
+  rm -f "$state/.last-watcher-beat"
+
+  set +e
+  FM_TEST_CHECK_INTERVAL=300 FM_TEST_GH_STATE=MERGED \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/watch.out" 2> "$dir/watch.err" &
+  watcher_pid=$!
+  set -e
+  while [ ! -e "$state/.last-watcher-beat" ]; do
+    kill -0 "$watcher_pid" 2>/dev/null \
+      || fail "watcher exited before completing stale-lock startup migration"
+  done
+  mkdir "$state/.task-a.validation-plan.lock"
+  touch -t 200001010000 "$state/.task-a.validation-plan.lock"
+  printf '%s\n' 'pr=https://github.com/o/r/pull/999' >> "$state/task-a.meta"
+  rm -f "$state/.last-check"
+  set +e
+  wait "$watcher_pid"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "watcher did not recover from the stale validation lock"
+  grep -q 'rejected unauthenticated state checks:.*task-a.check.sh' "$dir/watch.out" \
+    || fail "stale validation lock continued deferring the pre-metadata poll"
+  [ ! -s "$dir/watch.err" ] || fail "stale-lock watcher emitted errors"
+  pass "watcher bounds pre-metadata deferral by validation lock freshness"
 }
 
 test_parser_matrix
@@ -3503,6 +3549,7 @@ test_validation_plan_lock_serializes_pr_registration
 test_fast_pr_path_records_completion_and_keeps_watcher
 test_pr_metadata_swap_after_snapshot_fails_closed
 test_watcher_defers_pre_metadata_poll_during_validation_lock
+test_watcher_surfaces_pre_metadata_poll_after_validation_lock_stales
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
