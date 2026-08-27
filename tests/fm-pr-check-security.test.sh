@@ -3450,6 +3450,46 @@ test_pr_metadata_swap_after_snapshot_fails_closed() {
   pass "PR metadata publication rejects post-snapshot redirection"
 }
 
+test_watcher_defers_pre_metadata_poll_during_validation_lock() {
+  local dir state original watcher_pid rc i
+  dir=$(make_case watcher-defer-metadata)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  FM_TEST_GH_HEAD=0123456789abcdef0123456789abcdef01234567 \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/21 \
+    > "$dir/arm.out" 2> "$dir/arm.err" \
+    || fail "could not seed the canonical poll for the defer-metadata race"
+  original="$dir/original-meta"
+  cp "$state/task-a.meta" "$original"
+  printf '%s\n' 'pr=https://github.com/o/r/pull/999' >> "$state/task-a.meta"
+  mkdir "$state/.task-a.validation-plan.lock"
+
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/watch.out" 2> "$dir/watch.err" &
+  watcher_pid=$!
+  set -e
+  i=0
+  while [ "$i" -lt 100 ] && ! kill -0 "$watcher_pid" 2>/dev/null; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  sleep 0.15
+  cp "$original" "$state/task-a.meta"
+  rmdir "$state/.task-a.validation-plan.lock"
+  set +e
+  wait "$watcher_pid"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "watcher did not resume after validation metadata was published"
+  grep -q '^check: .*task-a.check.sh: merged$' "$dir/watch.out" \
+    || fail "watcher did not authenticate the poll after the metadata swap"
+  ! grep -q 'rejected unauthenticated state checks' "$dir/watch.out" \
+    || fail "watcher surfaced the pre-metadata poll as unauthenticated"
+  [ ! -s "$dir/watch.err" ] || fail "defer-metadata watcher emitted errors"
+  pass "watcher defers valid pre-metadata polls while the validation lock is held"
+}
+
 test_parser_matrix
 test_gitlab_merge_watch
 test_merged_poll_retires_once
@@ -3462,6 +3502,7 @@ test_gitlab_merged_poll_retires
 test_validation_plan_lock_serializes_pr_registration
 test_fast_pr_path_records_completion_and_keeps_watcher
 test_pr_metadata_swap_after_snapshot_fails_closed
+test_watcher_defers_pre_metadata_poll_during_validation_lock
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
