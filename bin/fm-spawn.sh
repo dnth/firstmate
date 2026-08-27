@@ -1097,6 +1097,13 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+# Role partition: spawning new work is MAIN-owned. The supervision branch never
+# spawns a task or worker; it reports and leaves creation to main (contract:
+# bin/fm-lease-lib.sh; no-op in homes without a branch actor). Branch-driven
+# recovery relaunch runs through the harness adapter, not this entrypoint.
+# shellcheck source=bin/fm-lease-lib.sh
+. "$SCRIPT_DIR/fm-lease-lib.sh"
+fm_lease_forbid_branch "new-task spawn (fm-spawn)"
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
 if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   echo "error: another spawn is already creating task $ID" >&2
@@ -2080,7 +2087,8 @@ omp_project_extension_preflight() {
     while IFS= read -r path; do
       if [ "$KIND" = secondmate ] \
         && { [ "$path" = ".omp/extensions/fm-primary-omp.ts" ] \
-          || [ "$path" = ".omp/extensions/fm-fleet-hooks.ts" ]; } \
+          || [ "$path" = ".omp/extensions/fm-fleet-hooks.ts" ] \
+          || [ "$path" = ".omp/extensions/fm-branch-supervision-omp.ts" ]; } \
         && trusted="$FM_ROOT/$path" \
         && [ -f "$trusted" ] && [ ! -L "$trusted" ] \
         && [ -f "$project/$path" ] && [ ! -L "$project/$path" ] \

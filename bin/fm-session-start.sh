@@ -430,6 +430,16 @@ else
   else
     printf '(no queued wakes)\n'
   fi
+  # Surface any outcomes the OMP supervision branch handled but that never
+  # reached this session's tail (a merge/cursor advance that did not complete),
+  # into this locked digest (docs/omp-supervision-branch.md). startup-replay
+  # prints its records BEFORE advancing its durable cursor, so its stdout flows
+  # directly here rather than through a capture-then-print that could advance
+  # the cursor past an outcome an interrupt then dropped. It is inert - no
+  # output, cursor untouched - in a home that has no branch outcome store, so
+  # this is a no-op for any home that never runs the supervision branch, and it
+  # only runs on this lock-owning path.
+  "$SCRIPT_DIR/fm-branch-outcome.sh" startup-replay 2>/dev/null || true
 fi
 
 # --- 4. supervision operating instructions ----------------------------------

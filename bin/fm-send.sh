@@ -151,6 +151,11 @@ fm_send_cleanup() {
   fi
   [ -z "$TARGET_OMP_TURNSTART_REFERENCE" ] || rm -f -- "$TARGET_OMP_TURNSTART_REFERENCE"
   [ -z "$TARGET_HERMES_START_REFERENCE" ] || rm -f -- "$TARGET_HERMES_START_REFERENCE"
+  # Release the supervision lease-command lock retained by a successful steer
+  # guard (idempotent; a no-op when no guard retained it).
+  if declare -F fm_lease_guard_release >/dev/null 2>&1; then
+    fm_lease_guard_release || true
+  fi
 }
 trap fm_send_cleanup EXIT
 # Answer notes use the same bounded status-line shape as the OPEN DECISIONS
@@ -443,6 +448,20 @@ RAW_TARGET=$1
 fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
 shift
+
+# Supervision lease guard: a steer is overlap territory between the two
+# supervision actors, so refuse while the OTHER actor holds this task's live
+# lease. A home with no supervision branch has no lease files and passes
+# untouched; fm_send_cleanup releases a retained guard (contract:
+# bin/fm-lease-lib.sh).
+# shellcheck source=bin/fm-lease-lib.sh
+. "$SCRIPT_DIR/fm-lease-lib.sh"
+if [ -n "$TARGET_META" ]; then
+  LEASE_GUARD_TASK=$(fm_send_id_from_meta "$TARGET_META")
+  if [ -n "$LEASE_GUARD_TASK" ]; then
+    fm_lease_guard "$LEASE_GUARD_TASK" "steer (fm-send)"
+  fi
+fi
 # Collect --resolve-key flags (answerer-closes; see the header contract). They
 # must precede --key or the message text; everything after the last flag is the
 # message exactly as before, so ordinary sends are byte-identical.

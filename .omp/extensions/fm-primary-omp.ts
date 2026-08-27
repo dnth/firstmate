@@ -12,6 +12,11 @@ import type {
   SessionStopEventResult,
 } from "@oh-my-pi/pi-coding-agent";
 import { createPrimaryWatchCore, ompNativeProcessIdentity } from "../../bin/fm-primary-watch-core.ts";
+import {
+  createBranchDispatchOffer,
+  FM_BRANCH_DISPATCH_EVENT,
+  scopeForUnreadWake,
+} from "./lib/fm-branch-dispatch.ts";
 
 const extensionFile = fileURLToPath(import.meta.url);
 const root = resolve(dirname(extensionFile), "../..");
@@ -177,6 +182,26 @@ export default function (omp: ExtensionAPI) {
   if (!primaryIntegrationApplies()) return;
   publishNativeProcessIdentity();
   let pendingStartupNudge = "";
+
+  // Supervision-branch dispatch handshake (docs/omp-supervision-branch.md).
+  // Build one offer per ordinary actionable wake and emit it on the shared
+  // event bus; a live, enabled branch extension calls accept() synchronously
+  // inside its handler (EventBus.emit runs a synchronous handler to completion
+  // before returning), so reading offer.accepted right after emit routes
+  // branch-vs-main. A check-kind trigger (merge polls, relay mentions,
+  // credential/auth failures) is never offered - it stays main-owned - and with
+  // no branch extension loaded no one accepts, so every wake falls through to
+  // main exactly as before.
+  const offerWakeToBranch = (message: string): boolean => {
+    const heartbeat = /^heartbeat($|:)/.test(message);
+    const isCheckTrigger = /^check:/.test(message);
+    const scope = scopeForUnreadWake(state, heartbeat);
+    const eligible = !isCheckTrigger && scope.eligible;
+    const offer = createBranchDispatchOffer(message, scope.projects, heartbeat, eligible);
+    omp.events?.emit?.(FM_BRANCH_DISPATCH_EVENT, offer);
+    return offer.accepted;
+  };
+
   const watch = createPrimaryWatchCore({
     runtime: "omp",
     runtimeLabel: "OMP",
@@ -202,6 +227,7 @@ export default function (omp: ExtensionAPI) {
         { deliverAs: "steer", triggerTurn: true },
       );
     },
+    offerWakeToBranch,
   });
 
   const deliverSessionstartNudge = (forceForNativeSwitch = false): void => {

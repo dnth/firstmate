@@ -188,6 +188,22 @@ if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
 fi
 ID=$1
 FORCE=${2:-}
+# Role partition: a forced teardown discards work, and the supervision branch
+# never discards anything - only an ordinary landed-work teardown is branch
+# territory (contract: bin/fm-lease-lib.sh; no-op in homes without a branch
+# actor). The branch claims a task's lease before an ordinary teardown, so a
+# main teardown of that task is surfaced through the branch's own claim-refusal
+# report rather than a lock-retaining guard here.
+# shellcheck source=bin/fm-lease-lib.sh
+. "$SCRIPT_DIR/fm-lease-lib.sh"
+# Resolve the actor explicitly first, with its own failure check: fm_lease_actor
+# inside an `if` condition would not stop under set -e, so an invalid
+# FM_SUPERVISION_ACTOR would merely print a diagnostic and let teardown continue.
+TEARDOWN_ACTOR=$(fm_lease_actor) || exit "$FM_LEASE_REFUSE_EXIT"
+if [ "$FORCE" = --force ] && [ "$TEARDOWN_ACTOR" = branch ]; then
+  echo "error: forced teardown refused - the supervision branch cannot discard work" >&2
+  exit "$FM_LEASE_REFUSE_EXIT"
+fi
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never tear
 # down a worktree (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent

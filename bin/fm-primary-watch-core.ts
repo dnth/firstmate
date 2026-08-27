@@ -78,6 +78,14 @@ export type PrimaryWatchCoreOptions = {
   repairToolName: string;
   encodeOperationalInput: (kind: "watcher", content: string) => string;
   sendFollowUp: (content: string) => Promise<void>;
+  // Optional supervision-branch dispatch handshake. When supplied (the OMP
+  // adapter with its branch extension loaded), the core offers each ordinary
+  // actionable wake to the branch before delivering it to main; a synchronous
+  // true means the branch now owns handling the wake and main is not woken. An
+  // adapter without a supervision branch omits this, and every wake goes to
+  // main exactly as before (docs/omp-supervision-branch.md). Never offered for
+  // a repair-failed delivery: only main can repair the watcher cycle.
+  offerWakeToBranch?: (message: string) => boolean;
 };
 
 export type PrimaryWatchCore = {
@@ -205,6 +213,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     repairToolName,
     encodeOperationalInput,
     sendFollowUp,
+    offerWakeToBranch,
   } = options;
   const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
   const extensionVersion = `sha256:${createHash("sha256")
@@ -383,6 +392,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
   async function deliverActionableWake(
     owner: SessionGeneration,
     message: string,
+    repairFailed: boolean,
     recovery?: RecoveryHandoff,
   ): Promise<void> {
     if (!generationIsLive(owner)) return;
@@ -394,6 +404,12 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
         return;
       }
     }
+    // Offer an ordinary actionable wake to the supervision branch when one is
+    // wired in; a synchronous accept means the branch owns handling it and main
+    // stays quiet. A repair-failed delivery is never offered - only main can
+    // repair the watcher cycle. Absent a branch, this is a no-op and every wake
+    // goes to main exactly as before.
+    if (!repairFailed && offerWakeToBranch?.(message)) return;
     await sendWake(owner, message);
   }
 
@@ -623,7 +639,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
             const message = restoration.failure
               ? `${classification.message}\n\n${restoration.failure}`
               : classification.message;
-            await deliverActionableWake(owner, message, restoration.recovery);
+            await deliverActionableWake(owner, message, Boolean(restoration.failure), restoration.recovery);
           } catch (error) {
             const detail = error instanceof Error ? error.message : String(error);
             surfaceFailure(
