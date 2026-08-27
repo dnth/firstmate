@@ -188,6 +188,26 @@ if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
 fi
 ID=$1
 FORCE=${2:-}
+# Role partition: a forced teardown discards work, and the supervision branch
+# never discards anything (contract: bin/fm-lease-lib.sh).
+# shellcheck source=bin/fm-lease-lib.sh
+. "$SCRIPT_DIR/fm-lease-lib.sh"
+# Resolve the actor explicitly first, with its own failure check: fm_lease_actor
+# inside an `if` condition would not stop under set -e, so an invalid
+# FM_SUPERVISION_ACTOR would merely print a diagnostic and let teardown continue.
+TEARDOWN_ACTOR=$(fm_lease_actor) || exit "$FM_LEASE_REFUSE_EXIT"
+if [ "$FORCE" = --force ] && [ "$TEARDOWN_ACTOR" = branch ]; then
+  echo "error: forced teardown refused - the supervision branch cannot discard work" >&2
+  exit "$FM_LEASE_REFUSE_EXIT"
+fi
+teardown_exit_cleanup() {
+  if declare -F teardown_release_herdr_locks >/dev/null 2>&1; then
+    teardown_release_herdr_locks || true
+  fi
+  fm_lease_guard_release || true
+}
+trap teardown_exit_cleanup EXIT
+fm_lease_guard "$ID" "teardown"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never tear
 # down a worktree (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -2283,7 +2303,6 @@ $session	$lock_path"
       else
         TEARDOWN_HERDR_LOCK_RECORDS="$session	$lock_path"
       fi
-      trap teardown_release_herdr_locks EXIT
       return 0
     fi
     sleep 0.1

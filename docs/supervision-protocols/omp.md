@@ -17,6 +17,7 @@ When this session owns supervision and away mode is not active:
 10. An unexpected child close enters bounded exponential retry, and an exhausted retry or lost session lock is surfaced as a watcher failure.
 11. Missing, failed, or unhealthy cycle only: drain queued notifications, inspect the failure, call `fm_watch_arm_omp`, and restart with the explicit `-e` fallback if the integration is missing or stale.
 12. Never use shell `&` for watcher supervision.
+13. While the supervision branch is active, MAIN must claim the reserved backlog lease before every `tasks-axi` or direct `data/backlog.md` mutation, then release it after the mutation: `bin/fm-lease.sh claim backlog`, mutate, `bin/fm-lease.sh release backlog`.
 
 For a persistent secondmate, the watcher in that secondmate home touches `state/.last-watcher-beat` at the start of every cycle.
 The parent watcher treats a fresh, non-future secondmate-home beacon as positive liveness evidence when the secondmate is neither paused nor captain-held and its pane is idle between child polls, reading remote beacon age through a short bounded call with a forced-kill grace on the configured host route.
@@ -25,4 +26,6 @@ Remote timeout, beacon read failure, and unavailable pane capture are missing ev
 
 The integrated startup, blocking stop, primary safety, watcher, follow-up, and shutdown adapter lives at `__FM_OMP_PRIMARY_EXT__`.
 Plain OMP discovers this tracked project extension natively from `.omp/extensions/` without Pi project trust or Pi event semantics.
-`bin/fm-session-start.sh` validates the adapter's version-bound marker against the live session-lock owner and prints the exact restart fallback when validation fails.
+`bin/fm-session-start.sh` validates the primary adapter marker and the supervision-branch marker against the live session-lock owner and their complete versioned extension/helper closures, then prints the exact restart fallback when either validation fails.
+
+On an OMP primary that owns the fleet lock, a persistent in-process supervision branch absorbs the routine majority of eligible wakes and merges only captain-worthy outcomes back as one follow-up turn; it is default-on and inert when unused, and a broken branch degrades to today's wake-to-main path, so ordinary supervision handling here is unchanged (design: `docs/omp-supervision-branch.md`).

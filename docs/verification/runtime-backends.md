@@ -594,6 +594,33 @@ Valid cleanup removed only the exact task-bound target and left the control wind
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, and the crewmate-only Hermes adapter share that backend cleanup boundary; their harness-specific hook files and token cleanup run only after it, so no harness needs a separate endpoint parser.
 
+### OMP supervision branch
+
+The OMP supervision-branch concurrency and delivery contract (docs/omp-supervision-branch.md) was verified on 2026-08-27 against @oh-my-pi/pi-coding-agent 17.3.4.
+It drives the tracked extension behind a mocked ExtensionAPI host while branch-session creation uses the real createAgentSession and SessionManager SDK surfaces.
+
+```sh
+FM_OMP_BRANCH_LIVE_E2E=1 tests/fm-omp-branch-live-e2e.test.sh
+```
+
+Observed bounded output:
+
+```text
+ok - a broken branch degrades to wake-to-main with no lost wake (real SDK)
+ok - a resident, re-promptable second session handles a wake without leaking into MAIN (real SDK)
+ok - a captain-worthy wake opens exactly one follow-up turn on MAIN (real SDK)
+ok - OMP supervision branch live guard passed against @oh-my-pi/pi-coding-agent 17.3.4
+```
+
+The guard proves a broken branch (an unresolvable model pin) falls the wake back to main through the primary adapter's watcher-wake steer with triggerTurn, not sendUserMessage, leaving the wake queue durable.
+It proves a resident second AgentSession is created and remains re-promptable on a later wake without its turn output reaching main or replacing main's terminal resume breadcrumb, and that a routine verdict opens no new main turn while a captain verdict opens exactly one follow-up turn.
+The captain sub-check is skipped, not passed, on a run where the model judges the captain-worthy fixture routine.
+
+The branch session is built with the native prompt-cache options providerPromptCacheKey and providerPromptCacheKeySource "explicit"; the belt-and-suspenders before_provider_request rewrite hook is retained but inert under OMP, whose extension-facing provider payload carries no prompt_cache_key field.
+The committed live guard does not observe server-side cache-read token counts, which OMP does not expose to the extension surface, so no cache-hit-rate claim is made here.
+
+Mid-flight branch replacement, model/effort hot-swap, and hung-branch live takeover are deliberately out of scope for this port (docs/omp-supervision-branch.md), so the guard exercises only the shipped surface: a resident branch with clean-boundary and kill-restart transitions.
+
 ## Herdr
 
 The compatibility floor is protocol 14.

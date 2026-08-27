@@ -38,8 +38,9 @@
 #   project `.omp/extensions` code and `.omp/settings.json#extensions` roots.
 #   Use it only after explicit captain approval:
 #   omp auto-executes those files before the model reasons about the task, and
-#   firstmate launches omp with --auto-approve. Firstmate's exact tracked primary
-#   and fleet-hook extensions are allowlisted only for validated secondmate-home launches.
+#   firstmate launches omp with --auto-approve. Firstmate's exact tracked primary,
+#   fleet-hook, and supervision-branch extensions, including their imported OMP
+#   helper closure, are allowlisted only for validated secondmate-home launches.
 #   This flag has no effect on other harnesses. Successful OMP spawns record
 #   allow_project_omp_extensions=1 in task metadata for auditability.
 #   --backend <name> is the explicit runtime session-provider backend for this
@@ -1097,6 +1098,13 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+# Role partition: spawning new work is MAIN-owned. The supervision branch never
+# spawns a task or worker; it reports and leaves creation to main (contract:
+# bin/fm-lease-lib.sh; no-op in homes without a branch actor). Branch-driven
+# recovery relaunch runs through the harness adapter, not this entrypoint.
+# shellcheck source=bin/fm-lease-lib.sh
+. "$SCRIPT_DIR/fm-lease-lib.sh"
+fm_lease_forbid_branch "new-task spawn (fm-spawn)"
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
 if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   echo "error: another spawn is already creating task $ID" >&2
@@ -1915,8 +1923,35 @@ resolve_project_dir_arg() {
     *) printf '%s\n' "$path" ;;
   esac
 }
+omp_secondmate_extension_matches_trusted_closure() {
+  local project=$1 path=$2 trusted dependency dependencies=
+  case "$path" in
+    .omp/extensions/fm-primary-omp.ts|.omp/extensions/fm-fleet-hooks.ts|.omp/extensions/fm-branch-supervision-omp.ts) ;;
+    *) return 1 ;;
+  esac
+  trusted="$FM_ROOT/$path"
+  [ -f "$trusted" ] && [ ! -L "$trusted" ] \
+    && [ -f "$project/$path" ] && [ ! -L "$project/$path" ] \
+    && cmp -s "$project/$path" "$trusted" || return 1
+  case "$path" in
+    .omp/extensions/fm-primary-omp.ts)
+      dependencies=.omp/extensions/lib/fm-branch-dispatch.ts
+      ;;
+    .omp/extensions/fm-branch-supervision-omp.ts)
+      dependencies=".omp/extensions/lib/fm-branch-dispatch.ts
+.omp/extensions/lib/fm-branch-model-picker.ts"
+      ;;
+  esac
+  [ -n "$dependencies" ] || return 0
+  while IFS= read -r dependency; do
+    trusted="$FM_ROOT/$dependency"
+    [ -f "$trusted" ] && [ ! -L "$trusted" ] \
+      && [ -f "$project/$dependency" ] && [ ! -L "$project/$dependency" ] \
+      && cmp -s "$project/$dependency" "$trusted" || return 1
+  done <<< "$dependencies"
+}
 omp_project_extension_preflight() {
-  local project=$1 record metadata stage path relative offenders manifest_state trusted
+  local project=$1 record metadata stage path relative offenders manifest_state
   local settings_path settings_state scan_source tracked_count index_status head_status seen duplicate
   local omp_root_offender=0 extensions_root_offender=0
   local -a seen_paths
@@ -2079,12 +2114,7 @@ omp_project_extension_preflight() {
     filtered=
     while IFS= read -r path; do
       if [ "$KIND" = secondmate ] \
-        && { [ "$path" = ".omp/extensions/fm-primary-omp.ts" ] \
-          || [ "$path" = ".omp/extensions/fm-fleet-hooks.ts" ]; } \
-        && trusted="$FM_ROOT/$path" \
-        && [ -f "$trusted" ] && [ ! -L "$trusted" ] \
-        && [ -f "$project/$path" ] && [ ! -L "$project/$path" ] \
-        && cmp -s "$project/$path" "$trusted"; then
+        && omp_secondmate_extension_matches_trusted_closure "$project" "$path"; then
         continue
       fi
       filtered="${filtered}${filtered:+$'\n'}$path"

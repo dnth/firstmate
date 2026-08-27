@@ -17,6 +17,12 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# The supervision branch never merges a PR: it reports a green PR and leaves the
+# merge to main (role partition: docs/omp-supervision-branch.md; no-op in homes
+# without a branch actor - contract: bin/fm-lease-lib.sh).
+# shellcheck source=bin/fm-lease-lib.sh
+. "$SCRIPT_DIR/fm-lease-lib.sh"
+fm_lease_forbid_branch "PR merge (fm-pr-merge)"
 
 if [ "$#" -lt 2 ]; then
   echo "error: invalid PR merge request" >&2

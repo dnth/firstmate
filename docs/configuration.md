@@ -297,8 +297,50 @@ Those project files execute before the worker reasons about its brief, and First
 `fm-spawn.sh` therefore refuses an OMP crewmate or secondmate launch when the final project worktree contains git-tracked auto-executed `.omp/extensions` entries or a tracked project settings extension selector.
 Only explicit captain approval for that project authorizes the per-spawn override described in `fm-spawn.sh`'s header.
 The successful OMP task metadata records `allow_project_omp_extensions=1` whenever that override is passed.
-The exact tracked Firstmate extensions at `.omp/extensions/fm-primary-omp.ts` and `.omp/extensions/fm-fleet-hooks.ts` are excluded only for a validated secondmate home when each file's live contents match Firstmate's own copy, so the primary integration can be loaded explicitly and the fleet hooks remain available to native discovery in that home's OMP session.
+The exact tracked Firstmate extensions at `.omp/extensions/fm-primary-omp.ts`, `.omp/extensions/fm-fleet-hooks.ts`, and `.omp/extensions/fm-branch-supervision-omp.ts` are excluded only for a validated secondmate home when each file's live contents and every imported Firstmate helper in its trusted closure match Firstmate's own copies, so the primary integration can be loaded explicitly and the fleet hooks and supervision branch remain available to native discovery in that home's OMP session.
 Other harnesses do not run this preflight because they do not auto-execute OMP project extensions.
+
+## OMP supervision branch
+
+On an OMP primary, a persistent in-process supervision branch handles eligible task-local wake rows and selected heartbeat reviews while keeping main-only rows on the captain-facing path; [docs/omp-supervision-branch.md](omp-supervision-branch.md) owns row eligibility, mixed-queue dispatch, heartbeat routing, and the pre-drain recheck.
+Supervision is default-on: once an OMP primary session owns this home's fleet lock, the branch is eligible for every task with no captain grant file required.
+A genuinely no-op heartbeat is absorbed in bash and never reaches OMP, and every watcher-failure alarm stays on the captain-facing main path.
+Away mode still declines every wake offer, and a broken branch still falls back to today's wake-to-main path.
+The branch's role stays bounded: it cannot merge a PR, land local work, or freshly spawn, and every existing captain gate remains unchanged.
+Homes on any other primary harness never load this feature and are entirely unaffected.
+A captain-facing (verdict `captain`) branch outcome opens exactly one follow-up turn on main - that turn is the captain-visible result, and OMP never separately renders the merge note itself.
+A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is delivered silently with no rendered note, while every other routine outcome still appends a rendered, sailboat-prefixed note.
+
+## OMP supervision branch model and effort (config/supervision-branch-model, config/supervision-branch-effort)
+
+Supervision is an easier job than the captain's own conversation, so the branch can run on a cheaper model than main and at a shallower reasoning effort.
+The OMP `/supervision-model` command settles both in one flow: it opens a select dialog over the models OMP's registry reports with configured credentials, plus a first "Follow main" entry, and then a second select dialog for the branch's reasoning effort.
+Both picks change the supervision branch alone and never the captain's own conversation model or effort, because the command resolves the branch's model with pure registry lookups and never calls OMP's own set-model path.
+It persists the model pick in gitignored `config/supervision-branch-model` and the effort pick in gitignored `config/supervision-branch-effort`, both under the effective Firstmate home, resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root derived from the extension path, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.
+Firstmate keeps no model catalog of its own; the list is what OMP's registry reports as available with configured credentials when the picker opens.
+Stored OAuth and API-key credentials retain their native credential type because Firstmate never copies, converts, installs, or overwrites credentials for the branch.
+The model file holds one `<provider>/<model-id>` line followed by one newline, split at the first `/` so a provider-qualified model id such as `openrouter/anthropic/claude-sonnet-4-5` survives intact.
+An absent, unreadable, or unparseable file means no pin, and the branch then follows main's own current model, applied explicitly on every branch build.
+A valid pin wins over main and remains unaffected by main's model changes.
+Picking "Follow main" removes the file, and the command writes a pin at mode `0600` and replaces it atomically so a failed write leaves the current choice unchanged rather than claiming persistence.
+The file's current state decides the branch model on every branch build - the first wake after a cold start, which reopens the persistent conversation recorded in `state/.branch-session` - and it overrides whatever model that reopened session recorded, so the choice survives a restart.
+That override is what keeps "Follow main" honest: a branch conversation that ran under an earlier pin still records that model, so clearing the file explicitly applies main's model rather than letting the reopened session restore the old one.
+Only when main's own model is unknown, or this home's stored credentials cannot run it, does an unpinned build fall back to passing no override at all, which is the behavior from before this file existed; the wake is never lost over model choice, and the command says plainly when main's model could not be applied.
+A pin naming a model the registry cannot hand back, because the model is unknown or has no configured credentials, is never silently downgraded onto main's model: the branch refuses to build and the wake falls back to the captain-facing main path naming the unusable pin, exactly as any other unreachable branch does.
+A new pick does not rebuild the branch already running: mid-flight model or effort change is out of scope, so the pin takes effect at the next branch build (see [docs/omp-supervision-branch.md](omp-supervision-branch.md)).
+If no branch is running yet in this process, the next wake builds it and applies the pin immediately; if a branch is already running, only a fresh process can rebuild it and apply the pin.
+
+The effort file holds one OMP thinking level followed by one newline, one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`, and the two pins are independent: a captain may pin a model, an effort, both, or neither.
+The effort step runs after the model step because the effective branch model decides how a level clamps: OMP owns the clamp, so a pinned level the branch's model cannot run becomes that model's nearest supported level rather than a refusal, the captain's raw pick is kept so it applies again on a model that supports it, and the command reports the level the branch will really run at rather than the raw pin.
+An absent, unreadable, or unrecognized file means no effort pin, and the branch then follows main's own current effort, applied explicitly on every branch build; a value OMP would not recognize is treated as no pin rather than passed to the clamp.
+A valid pin wins over main and remains unaffected by main's effort changes.
+Picking "Follow main" removes the file, and the command writes an effort pin at mode `0600` and replaces it atomically, exactly as it writes a model pin.
+The effort file's current state decides the branch effort on every branch build, on the same create-and-reopen contract as the model pin and for the same reason: a reopened branch conversation records the effort it last ran under, so only an explicit override keeps "Follow main" honest.
+Only when main's own effort cannot be read either does an unpinned build fall back to passing no effort override at all, which is the behavior from before this file existed.
+
+Cancelling the model picker cancels the whole command and changes neither choice.
+Cancelling only the effort picker keeps the standing effort choice and still applies the model pick made in the same run, and the command's one closing message reports both choices as they will actually take effect.
+Both choices are local to each Firstmate home and are not part of secondmate inherited configuration, the same as the Pi Calm preference; a secondmate home pins its own supervision model and effort with its own `/supervision-model`.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 

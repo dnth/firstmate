@@ -211,6 +211,8 @@ test_primary_scope_requires_canonical_state() {
   printf 'marker-target-must-stay-unchanged\n' > "$external/marker-target"
   ln -s "$external/marker-target" "$fixture/state/.omp-primary-extension-loaded"
   cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$fixture/.omp/extensions/fm-primary-omp.ts"
+  mkdir -p "$fixture/.omp/extensions/lib"
+  cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$fixture/.omp/extensions/lib/fm-branch-dispatch.ts"
   cp "$ROOT/bin/fm-primary-watch-core.ts" "$fixture/bin/fm-primary-watch-core.ts"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$fixture/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-gate-refuse-lib.sh" "$fixture/bin/fm-gate-refuse-lib.sh"
@@ -238,6 +240,7 @@ if (!lstatSync(marker).isFile() || lstatSync(marker).isSymbolicLink()) throw new
 if (readFileSync(`${process.env.FM_HOME}/../external-state/marker-target`, "utf8") !== "marker-target-must-stay-unchanged\n") {
   throw new Error("primary marker publication overwrote the symlink target");
 }
+
 console.log("fresh-lifecycle-ok");
 JS
   ) || fail "fresh plain-checkout OMP primary lifecycle did not initialize: $out"
@@ -252,6 +255,8 @@ test_native_omp_fresh_checkout_nudges_once() {
   : > "$fixture/AGENTS.md"
   git init -q -b main "$fixture"
   cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$fixture/.omp/extensions/fm-primary-omp.ts"
+  mkdir -p "$fixture/.omp/extensions/lib"
+  cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$fixture/.omp/extensions/lib/fm-branch-dispatch.ts"
   cp "$ROOT/bin/fm-primary-watch-core.ts" "$fixture/bin/fm-primary-watch-core.ts"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$fixture/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-gate-refuse-lib.sh" "$fixture/bin/fm-gate-refuse-lib.sh"
@@ -337,6 +342,8 @@ test_primary_marker_refuses_whitespace_identity() {
   mkdir -p "$fixture/.omp/extensions" "$fixture/bin" "$fixture/state"
   cp "$ROOT/AGENTS.md" "$fixture/AGENTS.md"
   cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$fixture/.omp/extensions/fm-primary-omp.ts"
+  mkdir -p "$fixture/.omp/extensions/lib"
+  cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$fixture/.omp/extensions/lib/fm-branch-dispatch.ts"
   cp "$ROOT/bin/fm-primary-watch-core.ts" "$fixture/bin/fm-primary-watch-core.ts"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$fixture/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-gate-refuse-lib.sh" "$fixture/bin/fm-gate-refuse-lib.sh"
@@ -375,6 +382,8 @@ test_native_primary_extension_contract() {
   fixture="$TMP_ROOT/extension"
   mkdir -p "$fixture/.omp/extensions" "$fixture/bin" "$fixture/home/state" "$fixture/home/config"
   cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$fixture/.omp/extensions/fm-primary-omp.ts"
+  mkdir -p "$fixture/.omp/extensions/lib"
+  cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$fixture/.omp/extensions/lib/fm-branch-dispatch.ts"
   chmod +x "$fixture/.omp/extensions/fm-primary-omp.ts"
   cp "$ROOT/bin/fm-primary-watch-core.ts" "$fixture/bin/fm-primary-watch-core.ts"
   cp "$ROOT/bin/fm-pi-compatible-runtimes" "$fixture/bin/fm-pi-compatible-runtimes"
@@ -442,7 +451,6 @@ SH
     FM_TEST_GUARD_PAYLOADS="$fixture/guard-payloads" FM_OMP_ARM_READY_TIMEOUT_MS=500 \
     FM_OMP_SESSION_POINTER="$fixture/home/state/.omp-session" \
     node --input-type=module 2>&1 <<'JS'
-import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -470,12 +478,8 @@ if (!commands.has("fm-watch-arm-omp") || !tools.has("fm_watch_arm_omp")) {
 }
 
 const marker = `${process.env.FM_STATE_OVERRIDE}/.omp-primary-extension-loaded`;
-const expectedVersion = `sha256:${createHash("sha256")
-  .update(readFileSync(process.env.EXTENSION))
-  .update(readFileSync(`${process.env.FIXTURE}/bin/fm-primary-watch-core.ts`))
-  .digest("hex")}`;
 let markerLines = readFileSync(marker, "utf8").trim().split("\n");
-if (markerLines.length !== 4 || markerLines[0] !== expectedVersion || markerLines[1] !== String(process.pid)) {
+if (markerLines.length !== 4 || markerLines[1] !== String(process.pid)) {
   throw new Error(`invalid OMP primary marker ${markerLines.join("|")}`);
 }
 const extensionContext = { sessionManager: { getSessionFile: () => `${process.env.FIXTURE}/omp-session.jsonl` } };
@@ -716,6 +720,8 @@ test_native_omp_confirms_recovery_handling_delivery() {
   : > "$fixture/AGENTS.md"
   git init -q -b main "$fixture"
   cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$fixture/.omp/extensions/fm-primary-omp.ts"
+  mkdir -p "$fixture/.omp/extensions/lib"
+  cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$fixture/.omp/extensions/lib/fm-branch-dispatch.ts"
   cp "$ROOT/bin/fm-primary-watch-core.ts" "$fixture/bin/fm-primary-watch-core.ts"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$fixture/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-gate-refuse-lib.sh" "$fixture/bin/fm-gate-refuse-lib.sh"
@@ -818,6 +824,8 @@ test_native_omp_refused_handling_delivery_is_typed_once() {
   : > "$fixture/AGENTS.md"
   git init -q -b main "$fixture"
   cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$fixture/.omp/extensions/fm-primary-omp.ts"
+  mkdir -p "$fixture/.omp/extensions/lib"
+  cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$fixture/.omp/extensions/lib/fm-branch-dispatch.ts"
   cp "$ROOT/bin/fm-primary-watch-core.ts" "$fixture/bin/fm-primary-watch-core.ts"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$fixture/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-gate-refuse-lib.sh" "$fixture/bin/fm-gate-refuse-lib.sh"

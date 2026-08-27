@@ -670,15 +670,18 @@ install_primary_watch_core_fixture() {
 
 install_omp_primary_extension_fixture() {
   local root=$1
-  mkdir -p "$root/.omp/extensions"
+  mkdir -p "$root/.omp/extensions/lib"
   cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$root/.omp/extensions/fm-primary-omp.ts"
+  cp "$ROOT/.omp/extensions/fm-branch-supervision-omp.ts" "$root/.omp/extensions/fm-branch-supervision-omp.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$root/.omp/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-branch-model-picker.ts" "$root/.omp/extensions/lib/fm-branch-model-picker.ts"
   install_primary_watch_core_fixture "$root"
 }
 
-write_omp_primary_loaded_marker() {
-  local home=$1 root=$2 pid=$3 fakebin=$4 version
-  version=$(fm_primary_watch_version "$root/.omp/extensions/fm-primary-omp.ts" "$root")
-  printf '%s\n%s\n%s\n%s\n' "$version" "$pid" "$(fm_test_realpath "$fakebin/bun")" "$(fm_test_realpath "$fakebin/omp")" > "$home/state/.omp-primary-extension-loaded"
+write_omp_branch_loaded_marker() {
+  local home=$1 root=$2 pid=$3 version
+  version=$(fm_omp_branch_extension_version "$root/.omp/extensions/fm-branch-supervision-omp.ts" "$root")
+  printf '%s\n%s\n' "$version" "$pid" > "$home/state/.omp-branch-extension-loaded"
 }
 
 install_pi_turnend_extension_fixture() {
@@ -749,6 +752,33 @@ EOF
   assert_contains "$cap_section" "(present, empty)" "empty-but-present captain.md was not distinguished from ABSENT"
 
   pass "context digest distinguishes ABSENT, empty-but-present, and populated files"
+}
+
+test_branch_outcome_replay_surfaces_torn_tail_after_valid_prefix() {
+  local rec root home fakebin out status=0 cursor
+  rec=$(new_world branch-outcome-torn-tail)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-a --verdict routine --summary 'alpha outcome survived before corruption' >/dev/null \
+    || fail "first branch outcome append failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-b --verdict captain --summary 'bravo outcome survived before corruption' >/dev/null \
+    || fail "second branch outcome append failed"
+  printf '{"seq":3,"epoch":' >> "$home/state/branch-outcomes.jsonl"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH" 2>&1) || status=$?
+  expect_code 0 "$status" "session start with a torn branch outcome tail"
+  assert_contains "$out" "alpha outcome survived before corruption" "session start hid the first valid outcome"
+  assert_contains "$out" "bravo outcome survived before corruption" "session start hid the second valid outcome"
+  assert_contains "$out" "startup replay stopped at torn sequence 3" "session start swallowed the torn-outcome diagnostic"
+  cursor=$(cat "$home/state/.branch-outcomes-cursor" 2>/dev/null || true)
+  [ "$cursor" = 2 ] || fail "valid replay prefix advanced the outcome cursor to '$cursor', expected 2"
+  pass "session start replays the valid outcome prefix and surfaces a torn-tail diagnostic"
 }
 
 # --- lock refusal: read-only path --------------------------------------------
@@ -1684,33 +1714,90 @@ EOF
 }
 
 test_omp_primary_marker_is_bound_to_lock_owner() {
-  local rec root home fakebin out holder_pid marker
+  local rec root home fakebin out holder_pid ready attempts=0 failure='' branch_file dispatch_file picker_file
   rec=$(new_world omp-loaded-marker)
   IFS='|' read -r root home fakebin <<EOF
 $rec
 EOF
+  home=$root
+  mkdir -p "$root/state" "$root/data" "$root/config"
+  printf '# Firstmate\n' > "$root/AGENTS.md"
   make_fake_toolchain "$fakebin"
   prepare_fake_omp_holder_bins "$fakebin"
-  "$fakebin/bun" "$fakebin/omp" --hold &
-  holder_pid=$!
-  make_fake_ps_omp_holder "$fakebin" "$holder_pid"
   install_omp_primary_extension_fixture "$root"
-  write_omp_primary_loaded_marker "$home" "$root" "$holder_pid" "$fakebin"
+  cp "$ROOT/bin/fm-gate-refuse-lib.sh" "$root/bin/fm-gate-refuse-lib.sh"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$root/bin/fm-primary-scope-lib.sh"
+  cp "$ROOT/bin/fm-pi-compatible-runtimes" "$root/bin/fm-pi-compatible-runtimes"
+  ready="$root/state/marker-producer-ready"
+  EXTENSION="$root/.omp/extensions/fm-primary-omp.ts" OMP_ENTRY="$fakebin/omp" \
+    FM_HOME="$root" FM_ROOT_OVERRIDE="$root" FM_STATE_OVERRIDE="$root/state" READY="$ready" \
+    node --input-type=module <<'JS' &
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+process.argv[1] = process.env.OMP_ENTRY;
+const api = {
+  events: { emit() {} },
+  zod: { object: () => ({}) },
+  on() {},
+  registerCommand() {},
+  registerTool() {},
+  sendMessage() {},
+  sendUserMessage() {},
+};
+const extension = await import(`${pathToFileURL(process.env.EXTENSION).href}?marker-producer=${Date.now()}`);
+extension.default(api);
+writeFileSync(process.env.READY, "ready\n");
+setInterval(() => {}, 60_000);
+JS
+  holder_pid=$!
+  while [ ! -s "$ready" ] && [ "$attempts" -lt 100 ]; do
+    sleep 0.05
+    attempts=$((attempts + 1))
+  done
+  if [ ! -s "$ready" ]; then
+    kill "$holder_pid" 2>/dev/null || true
+    wait "$holder_pid" 2>/dev/null || true
+    fail "real OMP marker producer did not become ready"
+  fi
+  make_fake_ps_omp_holder "$fakebin" "$holder_pid"
+  write_omp_branch_loaded_marker "$home" "$root" "$holder_pid"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_not_contains "$out" "OMP_PRIMARY_EXTENSION: not loaded or stale" \
-    "OMP diagnostic rejected the current version-bound owning-session marker"
+  case "$out" in
+    *"OMP_PRIMARY_EXTENSION: not loaded or stale"*) failure="OMP diagnostic rejected the marker published by the live OMP integration" ;;
+  esac
+  case "$out" in
+    *"OMP_BRANCH_EXTENSION: not loaded or stale"*) failure=${failure:-"OMP diagnostic rejected the current branch marker"} ;;
+  esac
 
-  marker="$home/state/.omp-primary-extension-loaded"
-  printf 'stale-extension-version\n%s\n%s\n%s\n' "$holder_pid" \
-    "$(fm_test_realpath "$fakebin/bun")" "$(fm_test_realpath "$fakebin/omp")" > "$marker"
+  branch_file="$root/.omp/extensions/fm-branch-supervision-omp.ts"
+  dispatch_file="$root/.omp/extensions/lib/fm-branch-dispatch.ts"
+  picker_file="$root/.omp/extensions/lib/fm-branch-model-picker.ts"
+  printf '\nexport const staleBranchExtensionFixture = true;\n' >> "$branch_file"
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  case "$out" in
+    *"OMP_BRANCH_EXTENSION: not loaded or stale"*) ;;
+    *) failure=${failure:-"session start trusted a stale branch extension marker"} ;;
+  esac
+  cp "$ROOT/.omp/extensions/fm-branch-supervision-omp.ts" "$branch_file"
+  printf '\nexport const staleBranchDispatchFixture = true;\n' >> "$dispatch_file"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  case "$out" in
+    *"OMP_BRANCH_EXTENSION: not loaded or stale"*) ;;
+    *) failure=${failure:-"session start trusted a branch marker after its dispatch helper changed"} ;;
+  esac
+  cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$dispatch_file"
+  printf '\nexport const staleBranchPickerFixture = true;\n' >> "$picker_file"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  case "$out" in
+    *"OMP_BRANCH_EXTENSION: not loaded or stale"*) ;;
+    *) failure=${failure:-"session start trusted a branch marker after its model-picker helper changed"} ;;
+  esac
   kill "$holder_pid" 2>/dev/null || true
   wait "$holder_pid" 2>/dev/null || true
-  assert_contains "$out" "OMP_PRIMARY_EXTENSION: not loaded or stale" \
-    "OMP diagnostic trusted a stale marker from the current lock owner"
+  [ -z "$failure" ] || fail "$failure"
 
-  pass "session start binds OMP primary readiness to adapter version and live lock ownership"
+  pass "session start rejects stale branch extension and helper markers"
 }
 
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization() {
@@ -1841,6 +1928,7 @@ EOF
 }
 
 test_context_digest_absent_empty_present
+test_branch_outcome_replay_surfaces_torn_tail_after_valid_prefix
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
 test_trace_context_effective_state_is_frozen_after_lock
