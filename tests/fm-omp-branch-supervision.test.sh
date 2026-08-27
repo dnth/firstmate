@@ -361,7 +361,8 @@ test_omp_extension_establishes_main_actor_context() {
   printf '%s\n' 'export function clampThinkingLevel(_model, level) { return level; }' > "$package_dir/ai-shim.js"
 
   out=$(env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
-    EXTENSION_PATH="$fixture/.omp/extensions/fm-branch-supervision-omp.ts" bun -e '
+    EXTENSION_PATH="$fixture/.omp/extensions/fm-branch-supervision-omp.ts" \
+    node --experimental-strip-types --input-type=module -e '
       await import(process.env.EXTENSION_PATH);
       if (process.env.PI_CODING_AGENT !== "true") throw new Error("coding-agent marker missing");
       if (process.env.FM_SUPERVISION_ACTOR !== "main") throw new Error("main supervision actor missing");
