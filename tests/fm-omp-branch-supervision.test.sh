@@ -80,13 +80,13 @@ assert rows[0]["silent"] is False and rows[1]["silent"] is False, rows
 PY
 
   snapshot=$(cat "$store")
-  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 1 || fail "mark-read failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" handoff-next --seq 1 || fail "contiguous handoff failed"
   unread=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread) || fail "unread failed"
   case "$unread" in
     '{"seq":2,'*) ;;
     *) fail "unread did not return exactly the records above the cursor: $unread" ;;
   esac
-  [ "$(cat "$store")" = "$snapshot" ] || fail "mark-read rewrote the append-only store"
+  [ "$(cat "$store")" = "$snapshot" ] || fail "contiguous handoff rewrote the append-only store"
 
   replay=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay) || fail "startup-replay failed"
   assert_contains "$replay" "BRANCH OUTCOMES" "replay lost its section header"
@@ -136,6 +136,13 @@ test_outcome_live_handoff_requires_contiguous_sequence() {
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
     --task task-2 --verdict routine --summary 'second durable outcome' >/dev/null \
     || fail "second contiguous-handoff append failed"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 2 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "external bulk cursor advancement remained callable"
+  unread=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread) || fail "unread after bulk-advance refusal failed"
+  assert_contains "$unread" '"seq":1' "bulk-advance refusal lost unread seq 1"
+  assert_contains "$unread" '"seq":2' "bulk-advance refusal lost unread seq 2"
 
   out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" handoff-next --seq 2 2>&1)
   status=$?

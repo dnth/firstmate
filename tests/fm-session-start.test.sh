@@ -670,8 +670,9 @@ install_primary_watch_core_fixture() {
 
 install_omp_primary_extension_fixture() {
   local root=$1
-  mkdir -p "$root/.omp/extensions"
+  mkdir -p "$root/.omp/extensions/lib"
   cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$root/.omp/extensions/fm-primary-omp.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$root/.omp/extensions/lib/fm-branch-dispatch.ts"
   install_primary_watch_core_fixture "$root"
 }
 

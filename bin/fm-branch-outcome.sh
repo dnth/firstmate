@@ -31,8 +31,6 @@
 #     Append one outcome record; prints the assigned seq.
 #   fm-branch-outcome.sh unread
 #     Print every unread record (raw JSONL). Exit 0 with no output when none.
-#   fm-branch-outcome.sh mark-read --through <seq>
-#     Advance the cursor (never backwards) after handing the records to OMP.
 #   fm-branch-outcome.sh handoff-next --seq <seq>
 #     Advance the cursor for exactly the next unread live-delivery record.
 #     Refuse when an earlier unread record exists so live delivery cannot skip
@@ -56,7 +54,7 @@ CURSOR="$STATE/.branch-outcomes-cursor"
 LOCK="$STATE/.branch-outcomes.lock"
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | handoff-next --seq <seq> | mark-read --through <seq> | list [--recent <n>] | startup-replay" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | handoff-next --seq <seq> | list [--recent <n>] | startup-replay" >&2
   exit 2
 }
 
@@ -166,15 +164,6 @@ case "$CMD" in
     [ "$#" -eq 0 ] || usage
     fm_lock_acquire_wait "$LOCK"
     print_unread
-    fm_lock_release "$LOCK"
-    ;;
-  mark-read)
-    [ "${1:-}" = --through ] || usage
-    THROUGH=${2:-}
-    case "$THROUGH" in ''|*[!0-9]*) usage ;; esac
-    [ "$#" -eq 2 ] || usage
-    fm_lock_acquire_wait "$LOCK"
-    advance_cursor "$THROUGH"
     fm_lock_release "$LOCK"
     ;;
   handoff-next)

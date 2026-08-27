@@ -994,9 +994,9 @@ ${context.command}
   // supported levels for the effort step, with no parallel Firstmate catalog.
   // Both steps use OMP's portable ctx.ui.select dialog. Pinning the branch only
   // writes the pin file: it never calls setModel (so it never moves main's own
-  // conversation) and never swaps the live branch. A saved pin takes effect when
-  // the branch is next built - the next firstmate start, or after the branch is
-  // torn down - because mid-flight model/effort change is out of scope
+  // conversation) and never swaps the live branch. A saved pin takes effect at
+  // the next Firstmate start, when a fresh process rebuilds the branch, because
+  // mid-flight model/effort change is out of scope
   // (docs/omp-supervision-branch.md).
   pi.registerCommand?.("supervision-model", {
     description: "Pick the model and reasoning effort Firstmate's OMP supervision branch uses, or follow main's.",
@@ -1040,16 +1040,16 @@ ${context.command}
       }
       let modelReport: { message: string; warning: boolean };
       if (picked !== FOLLOW_MAIN_VALUE) {
-        modelReport = { message: `Supervision branch model pinned to ${picked}; it takes effect when the branch is next started.`, warning: false };
+        modelReport = { message: `Supervision branch model pinned to ${picked}; it takes effect at the next Firstmate start.`, warning: false };
       } else {
         // Clearing the pin only follows main if main's model can actually be
         // applied to the branch; say what will really happen at the next build.
         const following = mainModel ? resolveBranchModel(mainModel.provider, mainModel.id) : null;
         if (following?.ok) branchModel = following.selection.model;
         modelReport = following?.ok
-          ? { message: `Supervision branch will follow main's model (${modelLabel(following.selection.model)}) when it is next started.`, warning: false }
+          ? { message: `Supervision branch will follow main's model (${modelLabel(following.selection.model)}) at the next Firstmate start.`, warning: false }
           : {
-              message: `Supervision branch pin cleared, but main's model could not be applied (${following ? following.reason : "main's model is not known yet"}); the next branch will retry when it is started.`,
+              message: `Supervision branch pin cleared, but main's model could not be applied (${following ? following.reason : "main's model is not known yet"}); it will retry at the next Firstmate start.`,
               warning: true,
             };
       }
@@ -1057,7 +1057,7 @@ ${context.command}
       // The model choice is already persisted, so a failing effort step must
       // never swallow it: the pin still stands and the captain still hears what
       // was saved and what was not. Neither choice touches the branch already
-      // running for this session - both apply at the next branch build.
+      // running for this session - both apply at the next Firstmate start.
       let effortReport: { message: string; warning: boolean };
       try {
         effortReport = await pickBranchEffort(ctx, branchModel);
@@ -1134,7 +1134,7 @@ ${context.command}
     }
     const chosen = pin ?? mainEffort();
     if (chosen === undefined) {
-      return "Effort follows main, whose own effort is not known yet, so the branch keeps the effort its own session recorded until it is next started.";
+      return "Effort follows main, whose own effort is not known yet, so the branch keeps the effort its own session recorded until the next Firstmate start.";
     }
     const applied = clampThinkingLevel(branchModel, chosen);
     if (pin === null) return `Effort follows main (${applied}).`;

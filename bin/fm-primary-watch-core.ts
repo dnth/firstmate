@@ -26,8 +26,8 @@ import {
 import { fileURLToPath } from "node:url";
 
 // The marker version must cover every file the watcher lifecycle is built from:
-// the runtime adapter AND this shared core. Verifiers recompute it from the same
-// two files (bin/fm-primary-watch-version-lib.sh).
+// the runtime adapter, this shared core, and OMP's dispatch helper when present.
+// Verifiers recompute it from the same files (bin/fm-primary-watch-version-lib.sh).
 const coreFile = fileURLToPath(import.meta.url);
 
 type LockOwnership = "owned" | "missing" | "other";
@@ -216,10 +216,13 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     offerWakeToBranch,
   } = options;
   const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
-  const extensionVersion = `sha256:${createHash("sha256")
+  const extensionVersionHash = createHash("sha256")
     .update(readFileSync(extensionFile))
-    .update(readFileSync(coreFile))
-    .digest("hex")}`;
+    .update(readFileSync(coreFile));
+  if (runtime === "omp") {
+    extensionVersionHash.update(readFileSync(`${fmRoot}/.omp/extensions/lib/fm-branch-dispatch.ts`));
+  }
+  const extensionVersion = `sha256:${extensionVersionHash.digest("hex")}`;
   const retryBaseMs = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
   const retryMaxMs = positiveInteger("FM_WATCH_REARM_RETRY_MAX_MS", 4000);
   const retryLimit = positiveInteger("FM_WATCH_REARM_RETRY_LIMIT", 5);

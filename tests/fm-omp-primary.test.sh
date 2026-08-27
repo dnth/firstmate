@@ -4,6 +4,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-primary-watch-version-lib.sh
+. "$ROOT/bin/fm-primary-watch-version-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-omp-primary)
 trap 'rm -rf "$TMP_ROOT"' EXIT
@@ -240,11 +242,29 @@ if (!lstatSync(marker).isFile() || lstatSync(marker).isSymbolicLink()) throw new
 if (readFileSync(`${process.env.FM_HOME}/../external-state/marker-target`, "utf8") !== "marker-target-must-stay-unchanged\n") {
   throw new Error("primary marker publication overwrote the symlink target");
 }
+
 console.log("fresh-lifecycle-ok");
 JS
   ) || fail "fresh plain-checkout OMP primary lifecycle did not initialize: $out"
   assert_contains "$out" fresh-lifecycle-ok "fresh OMP lifecycle did not publish its four-line identity marker"
   pass "OMP fresh primary lifecycle creates canonical state and atomically replaces a marker symlink without following it"
+}
+
+test_primary_marker_version_covers_dispatch_helper() {
+  local fixture before after
+  fixture="$TMP_ROOT/marker-version"
+  mkdir -p "$fixture/.omp/extensions/lib" "$fixture/bin"
+  cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$fixture/.omp/extensions/fm-primary-omp.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$fixture/.omp/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/bin/fm-primary-watch-core.ts" "$fixture/bin/fm-primary-watch-core.ts"
+
+  before=$(fm_primary_watch_version "$fixture/.omp/extensions/fm-primary-omp.ts" "$fixture") \
+    || fail "OMP primary marker version could not be computed"
+  printf '\nexport const markerVersionFixture = true;\n' >> "$fixture/.omp/extensions/lib/fm-branch-dispatch.ts"
+  after=$(fm_primary_watch_version "$fixture/.omp/extensions/fm-primary-omp.ts" "$fixture") \
+    || fail "OMP primary marker version could not be recomputed"
+  [ "$before" != "$after" ] || fail "dispatch-helper change did not invalidate the OMP primary marker version"
+  pass "OMP primary marker version changes with its dispatch helper"
 }
 
 test_native_omp_fresh_checkout_nudges_once() {
@@ -481,6 +501,7 @@ const marker = `${process.env.FM_STATE_OVERRIDE}/.omp-primary-extension-loaded`;
 const expectedVersion = `sha256:${createHash("sha256")
   .update(readFileSync(process.env.EXTENSION))
   .update(readFileSync(`${process.env.FIXTURE}/bin/fm-primary-watch-core.ts`))
+  .update(readFileSync(`${process.env.FIXTURE}/.omp/extensions/lib/fm-branch-dispatch.ts`))
   .digest("hex")}`;
 let markerLines = readFileSync(marker, "utf8").trim().split("\n");
 if (markerLines.length !== 4 || markerLines[0] !== expectedVersion || markerLines[1] !== String(process.pid)) {
@@ -914,6 +935,7 @@ test_exact_bun_omp_primary_identity
 test_standalone_omp_primary_identity
 test_nested_foreign_harness_keeps_its_own_identity
 test_primary_scope_requires_canonical_state
+test_primary_marker_version_covers_dispatch_helper
 test_native_identity_handles_virtual_entrypoint
 test_native_omp_fresh_checkout_nudges_once
 test_primary_marker_refuses_whitespace_identity
