@@ -278,6 +278,28 @@ test_send_lease_guard_serializes_a_held_task() {
   pass "main steer and teardown refuse before mutation while the branch holds the task lease"
 }
 
+test_pr_check_lease_guard_serializes_task_metadata() {
+  local home out status
+  home="$TMP_ROOT/pr-check-guard-home"
+  mkdir -p "$home/state"
+  printf '%s\n' "$$" > "$home/state/.lock"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-pr-check.sh" task-pr 'https://github.com/example/repo/pull/1' 2>&1)
+  status=$?
+  [ "$status" -ne 6 ] || fail "fm-pr-check refused without a supervision actor or task lease: $out"
+  assert_not_contains "$out" "supervision actor" "fm-pr-check's inert path emitted a lease diagnostic"
+
+  PI_CODING_AGENT=true FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID=$$ \
+    "$ROOT/bin/fm-lease.sh" claim task-pr --actor branch || fail "branch PR-task lease claim failed"
+  out=$(PI_CODING_AGENT=true FM_HOME="$home" FM_SUPERVISION_ACTOR=main \
+    "$ROOT/bin/fm-pr-check.sh" task-pr 'https://github.com/example/repo/pull/1' 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "fm-pr-check did not refuse main while branch held the task lease: $out"
+  assert_contains "$out" "leased to the branch supervision actor" "fm-pr-check refusal lost the lease holder"
+  [ ! -e "$home/state/.fm-lease-command.lock" ] || fail "refused fm-pr-check left the lease-command lock behind"
+  pass "fm-pr-check stays inert without supervision and refuses a branch-held task lease"
+}
+
 # --- inert in a home that never runs the branch -------------------------------
 
 test_non_branch_home_is_untouched() {
@@ -356,5 +378,6 @@ test_outcome_live_handoff_requires_contiguous_sequence
 test_lease_exclusivity_release_stale_and_sweep
 test_role_partition_refuses_the_branch_actor
 test_send_lease_guard_serializes_a_held_task
+test_pr_check_lease_guard_serializes_task_metadata
 test_non_branch_home_is_untouched
 test_omp_extension_establishes_main_actor_context

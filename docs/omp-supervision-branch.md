@@ -32,6 +32,8 @@ This feature is OMP-only by construction and changes nothing anywhere else:
 - Consistency: `bin/fm-lease-lib.sh` owns the per-task lease contract, the main-only role partition, and the deliberate CONFUSED-AGENT-GRADE threat model these guards target (captain-decided; adversarial-grade separation is out of scope and tracked as follow-up design work); `bin/fm-lease.sh` is the command surface.
   The lease liveness gate reads the ambient coding-agent-context marker `PI_CODING_AGENT`; the Pi runtime sets it natively, and the OMP branch extension sets it at load so the byte-identical bash lease layer recognizes both the main and branch actors under OMP.
   The marker alone does not make an ordinary Pi session contend the branch's command lock: `fm_lease_guard` retains that lock only for an explicit `main`/`branch` supervision actor or a task that already has a lease, so a home that never runs the branch stays inert.
+  Both OMP actors claim the reserved `backlog` lease around `tasks-axi` and direct backlog writes, with the branch contract in `bin/fm-branch-prompt.sh` and MAIN's matching contract in `docs/supervision-protocols/omp.md`.
+  `bin/fm-pr-check.sh` enforces the task lease at its executable entry boundary before PR metadata or watcher publication changes.
 
 ## Transitions and what is out of scope
 

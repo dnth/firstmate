@@ -53,15 +53,16 @@
 #   - Role partition (fm_lease_forbid_branch): actions MAIN alone owns -
 #     merging a PR, landing local-only work, spawning workers - refuse the
 #     branch actor outright, lease or no lease.
-#   - "backlog" is a reserved claimable resource name used by the branch
-#     prompt around its own data/backlog.md writes. This is deliberately
-#     branch-side containment only; main's tasks-axi path has no executable
-#     backlog lease guard in this scope.
+#   - "backlog" is a reserved claimable resource name used symmetrically by
+#     both actors around tasks-axi and data/backlog.md writes. The branch prompt
+#     and OMP main supervision instructions require the same claim-mutate-release
+#     sequence. bin/fm-pr-check.sh separately guards its task metadata mutation
+#     at the executable entry boundary.
 #
 # Sourced by bin/fm-send.sh, bin/fm-control.sh, bin/fm-teardown.sh,
-# bin/fm-pr-merge.sh, bin/fm-merge-local.sh, bin/fm-spawn.sh, and
-# bin/fm-lease.sh. Callers must have $STATE resolved before calling. No side
-# effects on source. set -u / set -e safe.
+# bin/fm-pr-check.sh, bin/fm-pr-merge.sh, bin/fm-merge-local.sh,
+# bin/fm-spawn.sh, and bin/fm-lease.sh. Callers must have $STATE resolved before
+# calling. No side effects on source. set -u / set -e safe.
 
 # Distinct from usage errors (2), the gate refusal (3), and fm-send's
 # unconfirmed submit (3): recognizable as "the other supervision actor holds

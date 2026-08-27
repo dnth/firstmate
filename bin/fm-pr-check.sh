@@ -17,6 +17,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-lease-lib.sh
+. "$SCRIPT_DIR/fm-lease-lib.sh"
 
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2
@@ -34,6 +36,12 @@ HOST=$FM_PR_HOST
 PROJECT_PATH=$FM_PR_PATH
 NUMBER=$FM_PR_NUMBER
 
+pr_check_lease_cleanup() {
+  fm_lease_guard_release || true
+}
+trap pr_check_lease_cleanup EXIT
+fm_lease_guard "$ID" "PR check registration"
+
 # A prior exact merged result may have queued its durable wake immediately
 # before interruption.
 # Finish only its identity-bound receipt before publishing a replacement poll.
@@ -48,6 +56,7 @@ META_UPDATED=$(mktemp "$STATE/.fm-pr-meta-updated.XXXXXX") \
   || { rm -f -- "$META_SNAPSHOT" "$META_RECORDS"; exit 1; }
 VALIDATION_LOCK=
 pr_check_cleanup() {
+  fm_lease_guard_release || true
   fm_pr_poll_cleanup
   rm -f -- "$META_SNAPSHOT" "$META_RECORDS" "$META_UPDATED"
   [ -z "$VALIDATION_LOCK" ] || rmdir "$VALIDATION_LOCK" 2>/dev/null || true

@@ -17,6 +17,7 @@ When this session owns supervision and away mode is not active:
 10. An unexpected child close enters bounded exponential retry, and an exhausted retry or lost session lock is surfaced as a watcher failure.
 11. Missing, failed, or unhealthy cycle only: drain queued notifications, inspect the failure, call `fm_watch_arm_omp`, and restart with the explicit `-e` fallback if the integration is missing or stale.
 12. Never use shell `&` for watcher supervision.
+13. While the supervision branch is active, MAIN must claim the reserved backlog lease before every `tasks-axi` or direct `data/backlog.md` mutation, then release it after the mutation: `bin/fm-lease.sh claim backlog`, mutate, `bin/fm-lease.sh release backlog`.
 
 For a persistent secondmate, the watcher in that secondmate home touches `state/.last-watcher-beat` at the start of every cycle.
 The parent watcher treats a fresh, non-future secondmate-home beacon as positive liveness evidence when the secondmate is neither paused nor captain-held and its pane is idle between child polls, reading remote beacon age through a short bounded call with a forced-kill grace on the configured host route.
