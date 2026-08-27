@@ -125,6 +125,34 @@ test_outcome_startup_replay_preserves_silence() {
   pass "startup replay skips silent outcomes and preserves visible rows"
 }
 
+test_outcome_live_handoff_requires_contiguous_sequence() {
+  local home out status replay unread
+  home="$TMP_ROOT/store-contiguous-home"
+  mkdir -p "$home/state"
+
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-1 --verdict routine --summary 'first durable outcome' >/dev/null \
+    || fail "first contiguous-handoff append failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-2 --verdict routine --summary 'second durable outcome' >/dev/null \
+    || fail "second contiguous-handoff append failed"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" handoff-next --seq 2 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "live handoff skipped unread seq 1 and advanced through seq 2"
+  assert_contains "$out" "not the next unread record" "gap refusal lost its diagnostic"
+  unread=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread) || fail "unread after gap refusal failed"
+  assert_contains "$unread" '"seq":1' "gap refusal lost unread seq 1"
+  assert_contains "$unread" '"seq":2' "gap refusal lost unread seq 2"
+
+  replay=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay) || fail "startup replay after gap refusal failed"
+  assert_contains "$replay" "first durable outcome" "startup replay lost the earlier unread outcome"
+  assert_contains "$replay" "second durable outcome" "startup replay lost the later unread outcome"
+  [ -z "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread)" ] \
+    || fail "startup replay did not acknowledge the complete unread prefix"
+  pass "live outcome handoff refuses gaps and leaves the complete unread prefix for startup replay"
+}
+
 # --- lease contract -----------------------------------------------------------
 
 test_lease_exclusivity_release_stale_and_sweep() {
@@ -223,10 +251,14 @@ test_send_lease_guard_serializes_a_held_task() {
   # Main's steer of the same task is now refused by the wired fm-send guard with
   # exit 6 and the holder diagnostic, before any backend delivery (the guard
   # runs before the delivery code, so exit 6 is proof of no delivery side effect).
-  out=$(FM_HOME="$home" "$ROOT/bin/fm-send.sh" task-guard "hello" 2>&1)
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=main "$ROOT/bin/fm-send.sh" task-guard "hello" 2>&1)
   [ "$?" -eq 6 ] || fail "fm-send did not refuse a main steer while the branch holds the lease: $out"
   assert_contains "$out" "leased to the branch supervision actor" "fm-send refusal lost the holder"
-  pass "fm-send refuses a main steer (exit 6, holder named, pre-delivery) while the branch holds the task's lease"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=main "$ROOT/bin/fm-teardown.sh" task-guard 2>&1)
+  [ "$?" -eq 6 ] || fail "fm-teardown did not refuse main while the branch holds the task lease: $out"
+  assert_contains "$out" "leased to the branch supervision actor" "fm-teardown refusal lost the holder"
+  [ ! -e "$home/state/.fm-lease-command.lock" ] || fail "a refused main mutation left the lease-command lock behind"
+  pass "main steer and teardown refuse before mutation while the branch holds the task lease"
 }
 
 # --- inert in a home that never runs the branch -------------------------------
@@ -243,6 +275,15 @@ test_non_branch_home_is_untouched() {
   [ "$status" -ne 6 ] || fail "a non-branch teardown hit the lease refusal"
   assert_not_contains "$out" "cannot discard work" "a non-branch teardown hit the branch-discard refusal"
   assert_not_contains "$out" "supervision actor" "a non-branch teardown hit a lease refusal"
+
+  STATE="$home/state" PI_CODING_AGENT=true FM_SUPERVISION_ACTOR=main bash -c '
+    . "$1"
+    fm_lease_guard task-none "OMP main steer"
+    [ "$FM_LEASE_GUARD_LOCK" = "$STATE/.fm-lease-command.lock" ]
+    [ -e "$STATE/.fm-lease-command.lock" ]
+    fm_lease_guard_release
+    [ ! -e "$STATE/.fm-lease-command.lock" ]
+  ' _ "$ROOT/bin/fm-lease-lib.sh" || fail "an explicit OMP main actor did not retain and release the lease-command lock"
 
   # Pi sets PI_CODING_AGENT in ordinary sessions too. Without an explicit
   # supervision actor or an existing task lease, that ambient marker alone must
@@ -267,10 +308,36 @@ test_non_branch_home_is_untouched() {
   pass "a home that never runs the branch has no lease files, no actor state, no retained command lock, and silent guards"
 }
 
+test_omp_extension_establishes_main_actor_context() {
+  local fixture package_dir out
+  fixture="$TMP_ROOT/extension-main-actor"
+  package_dir="$fixture/node_modules/@oh-my-pi/pi-coding-agent"
+  mkdir -p "$fixture/.omp/extensions/lib" "$package_dir"
+  cp "$ROOT/.omp/extensions/fm-branch-supervision-omp.ts" "$fixture/.omp/extensions/fm-branch-supervision-omp.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$fixture/.omp/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-branch-model-picker.ts" "$fixture/.omp/extensions/lib/fm-branch-model-picker.ts"
+  printf '%s\n' '{"type":"module","exports":{".":"./index.js","./extensibility/legacy-pi-coding-agent-shim":"./coding-shim.js","./extensibility/legacy-pi-ai-shim":"./ai-shim.js"}}' > "$package_dir/package.json"
+  printf '%s\n' 'export function createAgentSession() {} export class SessionManager {}' > "$package_dir/index.js"
+  printf '%s\n' 'export function createBashToolDefinition() {} export const Type = {};' > "$package_dir/coding-shim.js"
+  printf '%s\n' 'export function clampThinkingLevel(_model, level) { return level; }' > "$package_dir/ai-shim.js"
+
+  out=$(env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
+    EXTENSION_PATH="$fixture/.omp/extensions/fm-branch-supervision-omp.ts" bun -e '
+      await import(process.env.EXTENSION_PATH);
+      if (process.env.PI_CODING_AGENT !== "true") throw new Error("coding-agent marker missing");
+      if (process.env.FM_SUPERVISION_ACTOR !== "main") throw new Error("main supervision actor missing");
+      console.log("main actor established");
+    ' 2>&1) || fail "OMP extension load did not establish the main actor context: $out"
+  assert_contains "$out" "main actor established" "OMP extension actor probe did not complete"
+  pass "OMP extension load establishes the main supervision actor context"
+}
+
 test_branch_prompt_is_byte_stable_and_above_cache_floor
 test_outcome_store_is_append_only_with_cursor_reads
 test_outcome_startup_replay_preserves_silence
+test_outcome_live_handoff_requires_contiguous_sequence
 test_lease_exclusivity_release_stale_and_sweep
 test_role_partition_refuses_the_branch_actor
 test_send_lease_guard_serializes_a_held_task
 test_non_branch_home_is_untouched
+test_omp_extension_establishes_main_actor_context

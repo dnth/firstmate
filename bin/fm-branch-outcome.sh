@@ -33,6 +33,10 @@
 #     Print every unread record (raw JSONL). Exit 0 with no output when none.
 #   fm-branch-outcome.sh mark-read --through <seq>
 #     Advance the cursor (never backwards) after handing the records to OMP.
+#   fm-branch-outcome.sh handoff-next --seq <seq>
+#     Advance the cursor for exactly the next unread live-delivery record.
+#     Refuse when an earlier unread record exists so live delivery cannot skip
+#     a durable outcome that must remain available to startup replay.
 #   fm-branch-outcome.sh list [--recent <n>]
 #     Print the last n records (default 20), read or not.
 #   fm-branch-outcome.sh startup-replay
@@ -52,7 +56,7 @@ CURSOR="$STATE/.branch-outcomes-cursor"
 LOCK="$STATE/.branch-outcomes.lock"
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | list [--recent <n>] | startup-replay" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | handoff-next --seq <seq> | mark-read --through <seq> | list [--recent <n>] | startup-replay" >&2
   exit 2
 }
 
@@ -171,6 +175,24 @@ case "$CMD" in
     [ "$#" -eq 2 ] || usage
     fm_lock_acquire_wait "$LOCK"
     advance_cursor "$THROUGH"
+    fm_lock_release "$LOCK"
+    ;;
+  handoff-next)
+    [ "${1:-}" = --seq ] || usage
+    SEQ=${2:-}
+    case "$SEQ" in ''|0|0*|*[!0-9]*) usage ;; esac
+    [ "$#" -eq 2 ] || usage
+    fm_lock_acquire_wait "$LOCK"
+    CURSOR_VALUE=$(read_cursor)
+    EXPECTED=$(( CURSOR_VALUE + 1 ))
+    NEXT=$(print_unread | sed -n '1p')
+    NEXT_SEQ=$(record_seq "$NEXT")
+    if [ "$SEQ" != "$EXPECTED" ] || [ "$NEXT_SEQ" != "$SEQ" ]; then
+      fm_lock_release "$LOCK"
+      echo "error: live outcome handoff refused - seq $SEQ is not the next unread record after cursor $CURSOR_VALUE" >&2
+      exit 1
+    fi
+    advance_cursor "$SEQ"
     fm_lock_release "$LOCK"
     ;;
   list)

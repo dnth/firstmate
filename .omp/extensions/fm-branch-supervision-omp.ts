@@ -119,6 +119,7 @@ const effortPinFile = join(config, "supervision-branch-effort");
 // fm-send delete it and mutate the same task concurrently. The marker's whole
 // purpose is to prove the coding-agent context, so it must always be present.
 process.env.PI_CODING_AGENT = "true";
+process.env.FM_SUPERVISION_ACTOR = "main";
 
 // Same tool set in the same order on every request (part of the cached
 // prefix). "bash" resolves to the customTools override below, which injects
@@ -580,7 +581,7 @@ export default function (pi: ExtensionAPI) {
   ): boolean {
     if (!actingAsOwner(expectedGeneration)) return false;
     // Advance the cursor first so the outcome can never be delivered twice.
-    if (/^[0-9]+$/.test(seq) && !runOutcomeScript(["mark-read", "--through", seq]).ok) {
+    if (/^[0-9]+$/.test(seq) && !runOutcomeScript(["handoff-next", "--seq", seq]).ok) {
       return false;
     }
     if (verdict === "captain") {
