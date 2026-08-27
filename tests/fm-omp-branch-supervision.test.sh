@@ -16,7 +16,7 @@ TMP_ROOT=$(fm_test_tmproot fm-omp-branch-supervision)
 # --- byte-stable branch prompt ------------------------------------------------
 
 test_branch_prompt_is_byte_stable_and_above_cache_floor() {
-  local home_a home_b out_a out_b out_c size
+  local home_a home_b out_a out_b out_c size report_tail acknowledge_tail release_tail
   home_a="$TMP_ROOT/prompt-home-a"
   home_b="$TMP_ROOT/prompt-home-b"
   mkdir -p "$home_a/state" "$home_b/state"
@@ -50,6 +50,16 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
   # The port names OMP, not Pi, and references no fork-absent fm-control.sh.
   case "$out_a" in *"one Pi process"*) fail "branch prompt still names a Pi process" ;; esac
   case "$out_a" in *"fm-control.sh"*) fail "branch prompt references fork-absent bin/fm-control.sh" ;; esac
+  report_tail=${out_a#*'4. Report:'}
+  [ "$report_tail" != "$out_a" ] || fail "branch prompt lost the report completion step"
+  acknowledge_tail=${report_tail#*'5. Acknowledge:'}
+  [ "$acknowledge_tail" != "$report_tail" ] || fail "branch prompt does not order acknowledgement after reporting"
+  release_tail=${acknowledge_tail#*'6. Release every lease you claimed:'}
+  [ "$release_tail" != "$acknowledge_tail" ] || fail "branch prompt does not order lease release after acknowledgement"
+  case "$release_tail" in
+    *"must not end until steps 4 through 6 succeed in that exact order"*) ;;
+    *) fail "branch prompt does not make report, acknowledgement, and release a hard turn-completion gate" ;;
+  esac
   pass "branch prompt is byte-stable across homes, cwd, timezone, and time, above the cache floor, OMP-named"
 }
 

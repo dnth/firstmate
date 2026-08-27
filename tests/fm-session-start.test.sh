@@ -676,12 +676,6 @@ install_omp_primary_extension_fixture() {
   install_primary_watch_core_fixture "$root"
 }
 
-write_omp_primary_loaded_marker() {
-  local home=$1 root=$2 pid=$3 fakebin=$4 version
-  version=$(fm_primary_watch_version "$root/.omp/extensions/fm-primary-omp.ts" "$root")
-  printf '%s\n%s\n%s\n%s\n' "$version" "$pid" "$(fm_test_realpath "$fakebin/bun")" "$(fm_test_realpath "$fakebin/omp")" > "$home/state/.omp-primary-extension-loaded"
-}
-
 install_pi_turnend_extension_fixture() {
   local root=$1
   mkdir -p "$root/.pi/extensions"
@@ -1712,33 +1706,69 @@ EOF
 }
 
 test_omp_primary_marker_is_bound_to_lock_owner() {
-  local rec root home fakebin out holder_pid marker
+  local rec root home fakebin out holder_pid ready attempts=0 failure=
   rec=$(new_world omp-loaded-marker)
   IFS='|' read -r root home fakebin <<EOF
 $rec
 EOF
+  home=$root
+  mkdir -p "$root/state" "$root/data" "$root/config"
+  printf '# Firstmate\n' > "$root/AGENTS.md"
   make_fake_toolchain "$fakebin"
   prepare_fake_omp_holder_bins "$fakebin"
-  "$fakebin/bun" "$fakebin/omp" --hold &
-  holder_pid=$!
-  make_fake_ps_omp_holder "$fakebin" "$holder_pid"
   install_omp_primary_extension_fixture "$root"
-  write_omp_primary_loaded_marker "$home" "$root" "$holder_pid" "$fakebin"
+  cp "$ROOT/bin/fm-gate-refuse-lib.sh" "$root/bin/fm-gate-refuse-lib.sh"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$root/bin/fm-primary-scope-lib.sh"
+  cp "$ROOT/bin/fm-pi-compatible-runtimes" "$root/bin/fm-pi-compatible-runtimes"
+  ready="$root/state/marker-producer-ready"
+  EXTENSION="$root/.omp/extensions/fm-primary-omp.ts" OMP_ENTRY="$fakebin/omp" \
+    FM_HOME="$root" FM_ROOT_OVERRIDE="$root" FM_STATE_OVERRIDE="$root/state" READY="$ready" \
+    node --input-type=module <<'JS' &
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+process.argv[1] = process.env.OMP_ENTRY;
+const api = {
+  events: { emit() {} },
+  zod: { object: () => ({}) },
+  on() {},
+  registerCommand() {},
+  registerTool() {},
+  sendMessage() {},
+  sendUserMessage() {},
+};
+const extension = await import(`${pathToFileURL(process.env.EXTENSION).href}?marker-producer=${Date.now()}`);
+extension.default(api);
+writeFileSync(process.env.READY, "ready\n");
+setInterval(() => {}, 60_000);
+JS
+  holder_pid=$!
+  while [ ! -s "$ready" ] && [ "$attempts" -lt 100 ]; do
+    sleep 0.05
+    attempts=$((attempts + 1))
+  done
+  if [ ! -s "$ready" ]; then
+    kill "$holder_pid" 2>/dev/null || true
+    wait "$holder_pid" 2>/dev/null || true
+    fail "real OMP marker producer did not become ready"
+  fi
+  make_fake_ps_omp_holder "$fakebin" "$holder_pid"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_not_contains "$out" "OMP_PRIMARY_EXTENSION: not loaded or stale" \
-    "OMP diagnostic rejected the current version-bound owning-session marker"
+  case "$out" in
+    *"OMP_PRIMARY_EXTENSION: not loaded or stale"*) failure="OMP diagnostic rejected the marker published by the live OMP integration" ;;
+  esac
 
-  marker="$home/state/.omp-primary-extension-loaded"
-  printf 'stale-extension-version\n%s\n%s\n%s\n' "$holder_pid" \
-    "$(fm_test_realpath "$fakebin/bun")" "$(fm_test_realpath "$fakebin/omp")" > "$marker"
+  printf '\nexport const staleMarkerBoundaryFixture = true;\n' >> "$root/.omp/extensions/lib/fm-branch-dispatch.ts"
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  case "$out" in
+    *"OMP_PRIMARY_EXTENSION: not loaded or stale"*) ;;
+    *) failure=${failure:-"session start trusted a live marker after its loaded dispatch helper changed"} ;;
+  esac
   kill "$holder_pid" 2>/dev/null || true
   wait "$holder_pid" 2>/dev/null || true
-  assert_contains "$out" "OMP_PRIMARY_EXTENSION: not loaded or stale" \
-    "OMP diagnostic trusted a stale marker from the current lock owner"
+  [ -z "$failure" ] || fail "$failure"
 
-  pass "session start binds OMP primary readiness to adapter version and live lock ownership"
+  pass "session start rejects a live OMP marker after its loaded dispatch helper changes"
 }
 
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization() {
