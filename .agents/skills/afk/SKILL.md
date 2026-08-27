@@ -132,8 +132,11 @@ The daemon still clears its buffer only on the backend's success verdict.
 ## Classification policy
 
 The daemon wraps `fm-watch.sh`, runs the watcher as a child, presents every durable wake after each actionable watcher close, and classifies each presented record in bash.
-It acknowledges the presented generation only after the drain output is complete and stable, every listed OPEN DECISION is buffered, and a buffered decision digest is confirmed delivered to the supervisor pane.
-An unreadable, truncated, mutated, or malformed presentation, a failed decision-buffer write, or an unconfirmed decision injection fails closed and leaves the recovery episode durable for retry.
+For a recovery episode, it rebuilds a generation-scoped current projection from the durable queue, recovery state, and keyed OPEN DECISIONS on every retry instead of appending that projection to the unrelated asynchronous escalation buffer.
+It retains the fallback notification only when that current projection has neither a durable row nor an open decision.
+It acknowledges the presented generation only after the drain output is complete and stable and the current projection is confirmed delivered to the supervisor pane.
+An unreadable, truncated, mutated, or malformed presentation, a failed projection write, or an unconfirmed delivery fails closed and leaves the episode durable and its relevant signals reclassifiable for retry.
+The status-dedup markers for that projection commit only with its generation-bound acknowledgement, so a failed delivery cannot suppress a later retry.
 It self-handles the routine majority without consuming a firstmate turn.
 Captain-relevant events, plus a bounded recheck of a declared external wait that remains idle or an unresolved remote captain-held recovery, escalate to firstmate's context as one pre-read, single-line, batched digest.
 The classification predicates (the captain-relevant verb set, declared-pause vocabulary, signal/stale tests, and fleet-scan) live in the shared `bin/fm-classify-lib.sh`, the same library the always-on watcher uses for its own triage when afk is off, so the two modes apply one identical policy.
@@ -221,7 +224,7 @@ the operational prefix lets firstmate distinguish it from a real captain message
 
 ## Stale-artifact lifecycle
 
-Treat `state/.subsuper-escalations`, its `.since` sidecar, and `state/.subsuper-inject-wedged` as session-scoped delivery artifacts, not as the durable work record.
+Treat `state/.subsuper-escalations`, its `.since` sidecar, the generation-bound `state/.subsuper-recovery-escalations` projection and `.generation` sidecar, and `state/.subsuper-inject-wedged` as session-scoped delivery artifacts, not as the durable work record.
 Always enter through `bin/fm-afk-launch.sh`, which clears prior-session artifacts only for a fresh entry and preserves the current session's buffer on refresh.
 Always exit through `bin/fm-afk-launch.sh stop`, which keeps `state/.afk` present through the daemon's shutdown flush and clears it last.
 `docs/herdr-backend.md` "Away-mode supervisor support" owns the current mechanism, and `docs/verification/runtime-backends.md` "Away-mode transport" owns active evidence.
