@@ -672,8 +672,16 @@ install_omp_primary_extension_fixture() {
   local root=$1
   mkdir -p "$root/.omp/extensions/lib"
   cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$root/.omp/extensions/fm-primary-omp.ts"
+  cp "$ROOT/.omp/extensions/fm-branch-supervision-omp.ts" "$root/.omp/extensions/fm-branch-supervision-omp.ts"
   cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$root/.omp/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-branch-model-picker.ts" "$root/.omp/extensions/lib/fm-branch-model-picker.ts"
   install_primary_watch_core_fixture "$root"
+}
+
+write_omp_branch_loaded_marker() {
+  local home=$1 root=$2 pid=$3 version
+  version=$(fm_omp_branch_extension_version "$root/.omp/extensions/fm-branch-supervision-omp.ts" "$root")
+  printf '%s\n%s\n' "$version" "$pid" > "$home/state/.omp-branch-extension-loaded"
 }
 
 install_pi_turnend_extension_fixture() {
@@ -1706,7 +1714,7 @@ EOF
 }
 
 test_omp_primary_marker_is_bound_to_lock_owner() {
-  local rec root home fakebin out holder_pid ready attempts=0 failure=
+  local rec root home fakebin out holder_pid ready attempts=0 failure='' branch_file dispatch_file picker_file
   rec=$(new_world omp-loaded-marker)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -1752,23 +1760,44 @@ JS
     fail "real OMP marker producer did not become ready"
   fi
   make_fake_ps_omp_holder "$fakebin" "$holder_pid"
+  write_omp_branch_loaded_marker "$home" "$root" "$holder_pid"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   case "$out" in
     *"OMP_PRIMARY_EXTENSION: not loaded or stale"*) failure="OMP diagnostic rejected the marker published by the live OMP integration" ;;
   esac
+  case "$out" in
+    *"OMP_BRANCH_EXTENSION: not loaded or stale"*) failure=${failure:-"OMP diagnostic rejected the current branch marker"} ;;
+  esac
 
-  printf '\nexport const staleMarkerBoundaryFixture = true;\n' >> "$root/.omp/extensions/lib/fm-branch-dispatch.ts"
+  branch_file="$root/.omp/extensions/fm-branch-supervision-omp.ts"
+  dispatch_file="$root/.omp/extensions/lib/fm-branch-dispatch.ts"
+  picker_file="$root/.omp/extensions/lib/fm-branch-model-picker.ts"
+  printf '\nexport const staleBranchExtensionFixture = true;\n' >> "$branch_file"
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   case "$out" in
-    *"OMP_PRIMARY_EXTENSION: not loaded or stale"*) ;;
-    *) failure=${failure:-"session start trusted a live marker after its loaded dispatch helper changed"} ;;
+    *"OMP_BRANCH_EXTENSION: not loaded or stale"*) ;;
+    *) failure=${failure:-"session start trusted a stale branch extension marker"} ;;
+  esac
+  cp "$ROOT/.omp/extensions/fm-branch-supervision-omp.ts" "$branch_file"
+  printf '\nexport const staleBranchDispatchFixture = true;\n' >> "$dispatch_file"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  case "$out" in
+    *"OMP_BRANCH_EXTENSION: not loaded or stale"*) ;;
+    *) failure=${failure:-"session start trusted a branch marker after its dispatch helper changed"} ;;
+  esac
+  cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$dispatch_file"
+  printf '\nexport const staleBranchPickerFixture = true;\n' >> "$picker_file"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  case "$out" in
+    *"OMP_BRANCH_EXTENSION: not loaded or stale"*) ;;
+    *) failure=${failure:-"session start trusted a branch marker after its model-picker helper changed"} ;;
   esac
   kill "$holder_pid" 2>/dev/null || true
   wait "$holder_pid" 2>/dev/null || true
   [ -z "$failure" ] || fail "$failure"
 
-  pass "session start rejects a live OMP marker after its loaded dispatch helper changes"
+  pass "session start rejects stale branch extension and helper markers"
 }
 
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization() {

@@ -469,8 +469,14 @@ if [ "$PRIMARY_HARNESS" = omp ]; then
   OMP_PRIMARY_EXT="$FM_ROOT/.omp/extensions/fm-primary-omp.ts"
   OMP_PRIMARY_MARKER="$STATE/.omp-primary-extension-loaded"
   OMP_PRIMARY_VERSION=$(fm_primary_watch_version "$OMP_PRIMARY_EXT" "$FM_ROOT" || printf '')
+  OMP_BRANCH_EXT="$FM_ROOT/.omp/extensions/fm-branch-supervision-omp.ts"
+  OMP_BRANCH_MARKER="$STATE/.omp-branch-extension-loaded"
+  OMP_BRANCH_VERSION=$(fm_omp_branch_extension_version "$OMP_BRANCH_EXT" "$FM_ROOT" || printf '')
   if ! primary_extension_loaded "$OMP_PRIMARY_MARKER" "$OMP_PRIMARY_VERSION" "$STATE/.lock" omp; then
     printf 'OMP_PRIMARY_EXTENSION: not loaded or stale - restart plain omp from %s so %s auto-loads; if native project discovery is unavailable, restart with omp -e %s\n' "$FM_ROOT" "$OMP_PRIMARY_EXT" "$OMP_PRIMARY_EXT"
+  fi
+  if ! primary_extension_loaded "$OMP_BRANCH_MARKER" "$OMP_BRANCH_VERSION" "$STATE/.lock"; then
+    printf 'OMP_BRANCH_EXTENSION: not loaded or stale - restart plain omp from %s so %s auto-loads alongside the primary integration\n' "$FM_ROOT" "$OMP_BRANCH_EXT"
   fi
 fi
 "$SCRIPT_DIR/fm-supervision-instructions.sh" \

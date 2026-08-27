@@ -109,6 +109,11 @@ const operationalInputScript = join(fmRoot, "bin", "fm-operational-input.sh");
 const leaseScript = join(fmRoot, "bin", "fm-lease.sh");
 const wakeGrantScript = join(fmRoot, "bin", "fm-wake-grant.sh");
 const loadedMarker = join(state, ".omp-branch-extension-loaded");
+const branchExtensionVersion = `sha256:${createHash("sha256")
+  .update(readFileSync(extensionFile))
+  .update(readFileSync(join(extensionDir, "lib", "fm-branch-dispatch.ts")))
+  .update(readFileSync(join(extensionDir, "lib", "fm-branch-model-picker.ts")))
+  .digest("hex")}`;
 const modelPinFile = join(config, "supervision-branch-model");
 const effortPinFile = join(config, "supervision-branch-effort");
 
@@ -491,11 +496,16 @@ export default function (pi: ExtensionAPI) {
   }
 
   function markLoaded(): void {
+    if (lockOwnership() === "other") return;
+    const temporary = `${loadedMarker}.tmp.${process.pid}.${randomUUID()}`;
     try {
       mkdirSync(state, { recursive: true });
-      writeFileSync(loadedMarker, `${process.pid}\n`);
+      writeFileSync(temporary, `${branchExtensionVersion}\n${process.pid}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+      renameSync(temporary, loadedMarker);
     } catch {
       // Diagnostic marker only; never block activation on it.
+    } finally {
+      rmSync(temporary, { force: true });
     }
   }
 
@@ -1169,4 +1179,5 @@ ${context.command}
       };
     },
   });
+  markLoaded();
 }
