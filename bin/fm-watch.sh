@@ -1019,6 +1019,14 @@ while :; do
           run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
             "$provider" "$url" "$host" "$path" "$number" || exit 1
           out=$FM_CHECK_RESULT
+        elif [ -d "$STATE/.$id.validation-plan.lock" ] \
+          && [ ! -L "$STATE/.$id.validation-plan.lock" ] \
+          && fm_pr_poll_artifacts_valid "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" defer-metadata; then
+          # fm-pr-check publishes the authenticated poll tuple before its
+          # atomic metadata replacement while holding this transaction lock.
+          # Retry on the next cycle instead of surfacing that brief, valid
+          # pre-metadata state as an unauthenticated check.
+          continue
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
           run_check_capture "$custom_snapshot" || exit 1
