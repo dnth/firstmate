@@ -206,6 +206,10 @@
       "audience": "public-product"
     },
     {
+      "path": "VISION.md",
+      "audience": "public-product"
+    },
+    {
       "path": "docs/architecture.md",
       "audience": "maintainer-architecture"
     },
