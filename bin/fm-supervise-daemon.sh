@@ -1595,7 +1595,7 @@ handle_durable_wakes() {  # <watcher-reason> <state>
   local handled=0 ack_through ack_generation capture_before capture_after recovery_projection_tmp recovery_seen_tmp
   local capture_valid=false decision_parse_state=outside decision_lines='' decision_count=0
   local decisions_routed_completely=false
-  local FM_ESCALATION_SINK FM_DEFER_ESCALATION_FLUSH=1 FM_RECOVERY_SEEN_SINK FM_RECOVERY_RECLASSIFY_SIGNALS=1
+  local FM_ESCALATION_SINK FM_DEFER_ESCALATION_FLUSH=1 FM_RECOVERY_SEEN_SINK FM_RECOVERY_RECLASSIFY_SIGNALS=0
   local decision_header='OPEN DECISIONS (still open, folded from the durable status logs - not just the latest line):'
   local decision_terminator="OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'"
   recovery_projection_tmp=$(mktemp "$state/.subsuper-recovery-projection.XXXXXX") || return 1
@@ -1617,6 +1617,13 @@ handle_durable_wakes() {  # <watcher-reason> <state>
     cat "$err" >&2
     rm -f "$out" "$err" "$recovery_projection_tmp" "$recovery_seen_tmp"
     return 1
+  fi
+
+  ack_through=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err" | tail -1)
+  ack_generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err" | tail -1)
+  if [ -n "$ack_generation" ] \
+     && [ "$(cat "$(recovery_projection_generation_path "$state")" 2>/dev/null || true)" = "$ack_generation" ]; then
+    FM_RECOVERY_RECLASSIFY_SIGNALS=1
   fi
 
   if [ -f "$out" ] && [ ! -L "$out" ]; then
@@ -1680,8 +1687,6 @@ EOF
     handle_wake "$fallback_reason" "$state"
   fi
 
-  ack_through=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err" | tail -1)
-  ack_generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err" | tail -1)
   if [ "$capture_valid" = true ] && [ -n "$ack_through" ] && [ -n "$ack_generation" ]; then
     if recovery_projection_replace "$state" "$ack_generation" "$recovery_projection_tmp"; then
       recovery_projection_tmp=
