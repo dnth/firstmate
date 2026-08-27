@@ -364,8 +364,12 @@ classify_signal() {  # <reason-after-colon> <state>
     # single source of truth shared between the per-wake signal path and the
     # heartbeat scan. all_seen stays 1 only if EVERY relevant file was seen.
     task=$(basename "$f"); task="${task%.status}"
-    seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
-    [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] || all_seen=0
+    if [ "${FM_RECOVERY_RECLASSIFY_SIGNALS:-0}" = 1 ]; then
+      all_seen=0
+    else
+      seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
+      [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] || all_seen=0
+    fi
   done
   # strip a trailing " | " separator so the distilled line is clean
   distilled="${distilled% | }"
@@ -591,6 +595,15 @@ mark_status_seen() {  # <state> <task> <last-line>
   printf '%s' "$line" > "$state/.subsuper-seen-status-$(_stale_key "$task")"
 }
 
+stage_or_mark_status_seen() {  # <state> <task> <last-line>
+  local state=$1 task=$2 line=$3
+  if [ -n "${FM_RECOVERY_SEEN_SINK:-}" ]; then
+    printf '%s\t%s\n' "$task" "$line" >> "$FM_RECOVERY_SEEN_SINK"
+  else
+    mark_status_seen "$state" "$task" "$line"
+  fi
+}
+
 # Mark every captain-relevant status line a per-wake classification escalated as
 # seen, so the catch-all scan does not re-escalate the same line within
 # HEARTBEAT_SCAN_SECS. Mirrors classify_signal/classify_stale's relevance test.
@@ -604,14 +617,23 @@ mark_escalated_seen() {  # <kind> <arg> <state>
         [ -n "$last" ] || continue
         status_is_captain_relevant "$last" || continue
         task=$(basename "$f"); task="${task%.status}"
-        mark_status_seen "$state" "$task" "$last"
+        stage_or_mark_status_seen "$state" "$task" "$last"
       done ;;
     stale)
       task=$(window_to_task "$arg" "$state")
       last=$(last_status_line "$state/$task.status")
       [ -n "$last" ] && status_is_captain_relevant "$last" \
-        && mark_status_seen "$state" "$task" "$last" ;;
+        && stage_or_mark_status_seen "$state" "$task" "$last" ;;
   esac
+}
+
+commit_recovery_seen_statuses() {  # <state> <staged-statuses>
+  local state=$1 staged=$2 task line
+  [ -f "$staged" ] && [ ! -L "$staged" ] || return 1
+  while IFS="$(printf '\t')" read -r task line; do
+    [ -n "$task" ] && [ -n "$line" ] || return 1
+    mark_status_seen "$state" "$task" "$line" || return 1
+  done < "$staged"
 }
 
 # Busy and composer-empty detection form the injection boundary.
@@ -1570,22 +1592,30 @@ handle_wake() {  # <reason> <state>
 
 handle_durable_wakes() {  # <watcher-reason> <state>
   local fallback_reason=$1 state=$2 out err tab epoch sequence kind key payload rest line
-  local handled=0 ack_through ack_generation capture_before capture_after recovery_projection_tmp
+  local handled=0 ack_through ack_generation capture_before capture_after recovery_projection_tmp recovery_seen_tmp
   local capture_valid=false decision_parse_state=outside decision_lines='' decision_count=0
   local decisions_routed_completely=false
-  local FM_ESCALATION_SINK FM_DEFER_ESCALATION_FLUSH=1
+  local FM_ESCALATION_SINK FM_DEFER_ESCALATION_FLUSH=1 FM_RECOVERY_SEEN_SINK FM_RECOVERY_RECLASSIFY_SIGNALS=1
   local decision_header='OPEN DECISIONS (still open, folded from the durable status logs - not just the latest line):'
   local decision_terminator="OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'"
   recovery_projection_tmp=$(mktemp "$state/.subsuper-recovery-projection.XXXXXX") || return 1
+  recovery_seen_tmp=$(mktemp "$state/.subsuper-recovery-seen.XXXXXX") || {
+    rm -f "$recovery_projection_tmp"
+    return 1
+  }
   FM_ESCALATION_SINK=$recovery_projection_tmp
-  out=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || { rm -f "$recovery_projection_tmp"; return 1; }
+  FM_RECOVERY_SEEN_SINK=$recovery_seen_tmp
+  out=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || {
+    rm -f "$recovery_projection_tmp" "$recovery_seen_tmp"
+    return 1
+  }
   err=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || {
-    rm -f "$out" "$recovery_projection_tmp"
+    rm -f "$out" "$recovery_projection_tmp" "$recovery_seen_tmp"
     return 1
   }
   if ! "$FM_DAEMON_DIR/fm-wake-drain.sh" > "$out" 2> "$err"; then
     cat "$err" >&2
-    rm -f "$out" "$err" "$recovery_projection_tmp"
+    rm -f "$out" "$err" "$recovery_projection_tmp" "$recovery_seen_tmp"
     return 1
   fi
 
@@ -1663,18 +1693,26 @@ EOF
   grep -v '^WAKE_ACK_REQUIRED:' "$err" >&2 || true
   rm -f "$out" "$err" "$recovery_projection_tmp"
   if [ "$decisions_routed_completely" != true ]; then
+    rm -f "$recovery_seen_tmp"
     log "current recovery projection was not delivered; retaining recovery episode"
     return 1
   fi
   if [ -z "$ack_through" ] || [ -z "$ack_generation" ]; then
+    rm -f "$recovery_seen_tmp"
     log "wake drain omitted its generation-bound acknowledgement; retaining durable wakes"
     return 1
   fi
   if "$FM_DAEMON_DIR/fm-wake-drain.sh" --ack-through "$ack_through" \
     --recovery-generation "$ack_generation"; then
+    commit_recovery_seen_statuses "$state" "$recovery_seen_tmp" || {
+      rm -f "$recovery_seen_tmp"
+      return 1
+    }
+    rm -f "$recovery_seen_tmp"
     recovery_projection_clear "$state"
     return 0
   fi
+  rm -f "$recovery_seen_tmp"
   return 1
 }
 

@@ -496,6 +496,65 @@ SH
   pass "lifecycle: retries rebuild a current decision-only recovery projection"
 }
 
+test_terminal_signal_retry_rebuilds_with_current_decision() {
+  local dir state fakebin terminal sent capture expected_terminal expected_decision marker
+  dir=$(make_supercase wd-terminal-signal-retry)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  terminal="$state/retry-terminal.status"
+  sent="$dir/sent.log"
+  capture="$dir/pane.txt"
+  marker="$state/.watcher-down"
+  expected_terminal="retry-terminal.status: done: durable terminal needs delivery"
+  expected_decision="current-decision [key=current] needs-decision: choose the recovery route"
+  : > "$sent"
+  : > "$capture"
+  printf 'done: durable terminal needs delivery\n' > "$terminal"
+  append_wake "$state" signal retry-terminal.status "signal: $terminal" \
+    || fail "terminal signal could not be queued"
+  afk_enter "$state"
+
+  if FM_STATE_OVERRIDE="$state" \
+    FM_ESCALATE_BATCH_SECS=30 \
+    FM_FAKE_TMUX_PANE_ALIVE=0 \
+    FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" \
+    PATH="$fakebin:$PATH" \
+    handle_durable_wakes "check: rearm-resurface" "$state"; then
+    fail "failed terminal delivery was acknowledged"
+  fi
+  [ -s "$state/.wake-queue" ] \
+    || fail "failed terminal delivery removed its durable queue row"
+  case "$(cat "$marker" 2>/dev/null || true)" in
+    pending:handling:*|announced:handling:*) ;;
+    *) fail "failed terminal delivery retired its recovery episode" ;;
+  esac
+
+  printf 'captain-held [key=route]: waiting for captain recovery choice\n' > "$state/held-route.status"
+  printf 'needs-decision [key=current]: choose the recovery route\n' > "$state/current-decision.status"
+
+  FM_STATE_OVERRIDE="$state" \
+    FM_ESCALATE_BATCH_SECS=30 \
+    FM_FAKE_TMUX_PANE_ALIVE=1 \
+    FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" \
+    PATH="$fakebin:$PATH" \
+    handle_durable_wakes "check: rearm-resurface" "$state" \
+    || fail "terminal recovery retry failed"
+
+  grep -F "$expected_terminal" "$sent" >/dev/null \
+    || fail "terminal signal was acknowledged without being rendered after retry"
+  grep -F "$expected_decision" "$sent" >/dev/null \
+    || fail "retry omitted the current recovery decision"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "successful terminal retry did not acknowledge its durable row"
+  case "$(cat "$marker" 2>/dev/null || true)" in
+    acked:handling:*) ;;
+    *) fail "successful terminal retry did not retire its recovery episode" ;;
+  esac
+  pass "lifecycle: failed terminal retry rebuilds its durable signal with current decisions"
+}
+
 # --- Phase 2: stale working-pane transient -> persistent -> resumed ----------
 test_stale_pane_transient_persistent_resume() {
   local dir state fakebin win key resumed_gen
@@ -551,4 +610,5 @@ test_decision_route_failure_retains_recovery_for_retry
 test_incomplete_decision_capture_retains_recovery
 test_decision_injection_failure_retains_recovery
 test_decision_retry_rebuilds_current_projection
+test_terminal_signal_retry_rebuilds_with_current_decision
 test_stale_pane_transient_persistent_resume
