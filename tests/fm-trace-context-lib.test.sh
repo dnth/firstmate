@@ -311,7 +311,10 @@ case "${1:-} ${2:-}" in
     pane=${3:-}
     payload=${4:-}
     case "$payload" in
-      *fm-treehouse-get.sh*)
+      *fm-treehouse-get.sh*--ready-file*)
+        ready_file=${payload##* --ready-file }
+        ready_file=${ready_file%% *}
+        printf '%s\n' "$worktree" > "$ready_file"
         : > "$state/ready"
         ;;
       *)
