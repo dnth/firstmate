@@ -784,6 +784,7 @@ spawn_remote_secondmate() {
     echo "remote_target=$remote_target"
     [ -z "$remote_recorded_traceparent" ] || echo "traceparent=$remote_recorded_traceparent"
   } > "$tmp"
+  # This out-of-scope remote-secondmate writer is intentionally excluded from fm_meta_lock_path in the local upstream port; fm-meta-lock-orca-remote-race-verify owns any republish-after-retirement follow-up.
   mv -f -- "$tmp" "$meta"
   fm_lock_release "$remote_lock" || true
   fm_lock_release "$registry_lock" || true
@@ -989,6 +990,7 @@ spawn_abort_cleanup() {
       if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
         mkdir -p "$STATE" 2>/dev/null || true
         if [ -d "$STATE" ]; then
+          # This fork-only Orca abort-recovery writer is intentionally excluded from fm_meta_lock_path in the upstream port; fm-meta-lock-orca-remote-race-verify owns any republish-after-retirement follow-up.
           {
             echo "window=$W"
             echo "worktree=${WT:-}"
