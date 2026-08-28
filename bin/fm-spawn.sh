@@ -1208,6 +1208,11 @@ if [ "$RECOVER" -eq 1 ]; then
   YOLO=$FM_SPAWN_RECOVERY_YOLO
   PREWALK_INTO=$FM_SPAWN_RECOVERY_PREWALK_INTO
   ALLOW_PROJECT_OMP_EXTENSIONS=$FM_SPAWN_RECOVERY_ALLOW_PROJECT_OMP_EXTENSIONS
+  if [ "$BACKEND" = herdr ]; then
+    # Every adapter operation, including launcher-parent verification, must
+    # inherit the task record's exact session rather than an ambient default.
+    export HERDR_SESSION=$FM_SPAWN_RECOVERY_HERDR_SESSION
+  fi
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
     ''|claude|codex|opencode|pi|pi-signed|omp|grok|kimi)
@@ -2763,6 +2768,23 @@ freshen_spawn_worktree_base() {  # <worktree>
   fi
 }
 
+bind_fresh_omp_task_branch() {  # <worktree> <task-id>
+  local worktree=$1 id=$2 expected current
+  expected="fm/$id"
+  current=$(git -C "$worktree" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  if [ "$current" = "$expected" ]; then
+    return 0
+  fi
+  if [ -n "$current" ]; then
+    echo "error: OMP ordinary-worker spawn requires its fresh pooled worktree to be detached or already on $expected; found branch $current" >&2
+    return 1
+  fi
+  if ! git -C "$worktree" switch --quiet -c "$expected"; then
+    echo "error: OMP ordinary-worker spawn could not establish task branch $expected in its fresh pooled worktree" >&2
+    return 1
+  fi
+}
+
 W="fm-$ID"
 SPAWN_START_DIR=$PROJ_ABS
 if [ "$RECOVER" -eq 1 ]; then
@@ -2783,6 +2805,7 @@ elif [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
     exit 1
   fi
   freshen_spawn_worktree_base "$WT" || exit 1
+  bind_fresh_omp_task_branch "$WT" "$ID" || exit 1
   validate_omp_prewalk_for_launch_dir "$WT"
   omp_project_extension_preflight "$WT" || exit 1
   OMP_ABORT_INITIAL_HEAD=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || {

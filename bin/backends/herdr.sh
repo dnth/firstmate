@@ -187,9 +187,9 @@ fm_backend_herdr_workspace_label() {
 # keep every call site a minimal, append-only diff) always routes correctly,
 # including starting a genuinely separate, isolated server process. The env
 # var is kept alongside it - harmless, self-documenting, and forward-
-# compatible if a future herdr build honors it. Never used by
-# fm_backend_herdr_version_check, which is intentionally session-independent
-# (reads only .client.* fields).
+# compatible if a future herdr build honors it. The optional session-aware
+# version probe uses this path too, so recovery never lets an ambient session
+# select even its client-capability check.
 fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
   local session=$1
   shift
@@ -205,11 +205,19 @@ fm_backend_herdr_tool_check() {
 
 # fm_backend_herdr_version_check: refuse loudly on a missing/incompatible
 # herdr client. Verified locally: v0.7.1, protocol 14 (herdr status --json's
-# .client.protocol; client info is session-independent, unlike .server).
-fm_backend_herdr_version_check() {
+# .client.protocol). An optional exact session keeps recovery independent of
+# ambient HERDR_SESSION even though the client fields themselves are shared.
+fm_backend_herdr_version_check() {  # [<exact-session>]
   fm_backend_herdr_tool_check || return 1
-  local status protocol version
-  status=$(herdr status --json 2>/dev/null) || { echo "error: 'herdr status --json' failed; is herdr installed correctly?" >&2; return 1; }
+  local session=${1:-} status protocol version
+  if [ -n "$session" ]; then
+    status=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null) || {
+      echo "error: 'herdr status --json' failed for session '$session'; is herdr installed correctly?" >&2
+      return 1
+    }
+  else
+    status=$(herdr status --json 2>/dev/null) || { echo "error: 'herdr status --json' failed; is herdr installed correctly?" >&2; return 1; }
+  fi
   protocol=$(printf '%s' "$status" | jq -r '.client.protocol // empty' 2>/dev/null)
   version=$(printf '%s' "$status" | jq -r '.client.version // empty' 2>/dev/null)
   case "$protocol" in
@@ -1622,8 +1630,8 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd> [<launcher-relationship
 # fm_backend_herdr_workspace_ensure, which owns its meaning.
 fm_backend_herdr_container_ensure() {  # <cwd-for-a-fresh-workspace> [<launcher-relationship>] [<exact-session>]
   local cwd=${1:-$PWD} relationship=${2:-launcher-home} session=${3:-} label status
-  fm_backend_herdr_version_check || return 1
   [ -n "$session" ] || session=$(fm_backend_herdr_session)
+  fm_backend_herdr_version_check "$session" || return 1
   fm_backend_herdr_server_ensure "$session" || return 1
   fm_backend_herdr_workspace_ensure "$session" "$cwd" "$relationship" >/dev/null && status=0 || status=$?
   # A 3 already reported the exact placement it refused to guess at; adding the

@@ -49,7 +49,7 @@ git -C "$PROJECT" remote add origin "$ORIGIN"
 git -C "$PROJECT" push -q -u origin main
 git -C "$ORIGIN" symbolic-ref HEAD refs/heads/main
 git -C "$PROJECT" remote set-head origin main
-git -C "$PROJECT" worktree add -q -b "fm/$ID" "$WORKTREE"
+git -C "$PROJECT" worktree add -q --detach "$WORKTREE"
 
 [ ! -e "$TASK_TMP" ] && [ ! -L "$TASK_TMP" ] \
   || fail "recovery fixture task root already exists: $TASK_TMP"
@@ -224,6 +224,8 @@ cp "$HOME_DIR/data/$ID/brief.md" "$LAB/brief.before"
 cp "$SESSION_FILE" "$LAB/session.before"
 cp "$HOME_DIR/state/$ID.status" "$LAB/status.before"
 BRANCH=$(git -C "$WORKTREE" symbolic-ref --quiet --short HEAD) || fail "fixture worker is not on a branch"
+[ "$BRANCH" = "fm/$ID" ] \
+  || fail "initial OMP worker did not establish its task branch from a detached lease"
 assert_contains "$(cat "$META")" "branch=$BRANCH" \
   "initial worker did not record its exact branch identity"
 
