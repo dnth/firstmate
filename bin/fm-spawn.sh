@@ -13,9 +13,10 @@
 #   branch, isolated worktree, task temporary root, and endpoint only from the
 #   task record, proves its Treehouse lease still names `fm-<task-id>`, and never
 #   allocates, returns, freshens, resets, or changes the preserved worktree.
-#   A surviving exactly-one task session is resumed, while an absent or empty
-#   task session directory starts a new OMP session with a continuation note.
-#   More than one session refuses, because guessing can split a task transcript.
+#   A valid exact durable session pointer disambiguates retained sibling sessions.
+#   Only multiple unpointed legacy task sessions refuse, because guessing can
+#   split a task transcript; an absent or empty task session directory starts a
+#   new OMP session with a continuation note.
 #   Endpoint metadata remains unchanged until the replacement's first turn
 #   acknowledges, then one atomic replacement updates only endpoint fields while
 #   retaining every unrelated record line.

@@ -101,6 +101,7 @@ const sessionDir = value("--session-dir");
 const resume = value("--resume");
 const extension = value("-e", "--extension");
 if (!sessionDir || !extension) process.exit(2);
+if (process.env.GOTMPDIR) await Bun.write(`${process.env.GOTMPDIR}/fixture-build-artifact`, "fixture build artifact\n");
 const sessionFile = `${sessionDir}/fixture-session.jsonl`;
 const prior = resume ? await Bun.file(sessionFile).text() : "";
 await Bun.write(sessionFile, `${prior}${resume ? "replacement-attempt\n" : "FIRSTMATE_OP: v1 launch-brief: fixture\n"}`);
@@ -196,6 +197,9 @@ assert_contains "$SYMLINK_OUTPUT" "could not select one exact prior task session
 cmp -s "$META" "$LAB/meta.before" || fail "symlinked-session refusal rewrote metadata"
 rm -f "$SESSION_DIR/symlinked.jsonl"
 
+rm -rf "$TASK_TMP/gotmp"
+mkdir -p "$TASK_TMP"
+printf 'pre-existing scratch\n' > "$TASK_TMP/preserve-me"
 INJECTED_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_BEFORE_PUBLISH=1 spawn "$ID" --recover 2>&1)
 INJECTED_STATUS=$?
 [ "$INJECTED_STATUS" -ne 0 ] || fail "recovery test injector unexpectedly published metadata"
@@ -206,6 +210,9 @@ cmp -s "$SESSION_FILE" "$LAB/session.before" || fail "failed recovery did not re
 cmp -s "$HOME_DIR/state/$ID.status" "$LAB/status.before" || fail "failed recovery rewrote task status"
 [ "$(git -C "$WORKTREE" symbolic-ref --quiet --short HEAD)" = "$BRANCH" ] || fail "failed recovery changed the branch"
 [ -f "$WORKTREE/.recovery-preserved" ] || fail "failed recovery discarded uncommitted work"
+[ -f "$TASK_TMP/preserve-me" ] || fail "failed recovery removed pre-existing task scratch"
+[ ! -e "$TASK_TMP/gotmp" ] && [ ! -L "$TASK_TMP/gotmp" ] \
+  || fail "failed recovery retained replacement-owned build scratch"
 
 RECOVERED_OUTPUT=$(spawn "$ID" --recover) || fail "guarded recovery from a missing endpoint failed"
 assert_contains "$RECOVERED_OUTPUT" "recovered $ID harness=omp" "recovery did not report success"

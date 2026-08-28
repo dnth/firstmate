@@ -126,7 +126,7 @@ fm_spawn_recovery_collect_direct_sessions() { # <session-dir>
 }
 
 fm_spawn_recovery_select_session() { # <state> <tasktmp> <task-id>
-  local state=$1 tasktmp=$2 id=$3 session_dir pointer legacy_dir candidate
+  local state=$1 tasktmp=$2 id=$3 session_dir pointer legacy_dir gotmp candidate
   state=$(cd "$state" 2>/dev/null && pwd -P) || return 1
   local -a candidates=()
   [ "${SPAWN_TASK_LOCK_HELD:-0}" = 1 ] \
@@ -139,6 +139,7 @@ fm_spawn_recovery_select_session() { # <state> <tasktmp> <task-id>
   FM_SPAWN_RECOVERY_FRESH_SESSION_FILE=
   FM_SPAWN_RECOVERY_SESSION_DIR_CREATED=0
   FM_SPAWN_RECOVERY_TASKTMP_CREATED=0
+  FM_SPAWN_RECOVERY_GOTMP_CREATED=0
   FM_SPAWN_RECOVERY_SESSION_DIR_WAS_EMPTY=0
   FM_SPAWN_RECOVERY_LEGACY_SESSION_FILE=
   FM_SPAWN_RECOVERY_LEGACY_SESSION_BOUND=0
@@ -147,8 +148,17 @@ fm_spawn_recovery_select_session() { # <state> <tasktmp> <task-id>
   session_dir=$FM_SPAWN_RECOVERY_SESSION_DIR
   pointer=$FM_SPAWN_RECOVERY_SESSION_POINTER
   legacy_dir="$tasktmp/omp-sessions"
+  gotmp="$tasktmp/gotmp"
   if [ ! -e "$tasktmp" ] && [ ! -L "$tasktmp" ]; then
     FM_SPAWN_RECOVERY_TASKTMP_CREATED=1
+    FM_SPAWN_RECOVERY_GOTMP_CREATED=1
+  else
+    [ -d "$tasktmp" ] && [ ! -L "$tasktmp" ] || return 1
+    if [ ! -e "$gotmp" ] && [ ! -L "$gotmp" ]; then
+      FM_SPAWN_RECOVERY_GOTMP_CREATED=1
+    else
+      [ -d "$gotmp" ] && [ ! -L "$gotmp" ] || return 1
+    fi
   fi
 
   if [ -e "$pointer" ] || [ -L "$pointer" ]; then
@@ -509,11 +519,19 @@ fm_spawn_recovery_remove_fresh_session_artifacts() {
 }
 
 fm_spawn_recovery_remove_replacement_scratch() {
-  local tasktmp=${FM_SPAWN_RECOVERY_TASKTMP:-}
-  [ "${FM_SPAWN_RECOVERY_TASKTMP_CREATED:-0}" = 1 ] || return 0
+  local tasktmp=${FM_SPAWN_RECOVERY_TASKTMP:-} gotmp
+  case "${FM_SPAWN_RECOVERY_TASKTMP_CREATED:-0}:${FM_SPAWN_RECOVERY_GOTMP_CREATED:-0}" in
+    1:*|*:1) ;;
+    *) return 0 ;;
+  esac
   [ -n "$tasktmp" ] || return 1
-  rmdir -- "$tasktmp/gotmp" 2>/dev/null || true
-  rmdir -- "$tasktmp" 2>/dev/null || true
+  gotmp="$tasktmp/gotmp"
+  if [ "${FM_SPAWN_RECOVERY_GOTMP_CREATED:-0}" = 1 ]; then
+    rm -rf -- "$gotmp" || return 1
+  fi
+  if [ "${FM_SPAWN_RECOVERY_TASKTMP_CREATED:-0}" = 1 ]; then
+    rm -rf -- "$tasktmp" || return 1
+  fi
 }
 
 fm_spawn_recovery_remove_legacy_session_binding() {
