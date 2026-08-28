@@ -603,16 +603,22 @@ fm_spawn_recovery_publish_candidate() { # <state> <task-id> <backend> <target>
 }
 
 fm_spawn_recovery_remove_fresh_session_artifacts() {
-  local session_dir=${FM_SPAWN_RECOVERY_SESSION_DIR:-} file
+  local session_dir=${FM_SPAWN_RECOVERY_SESSION_DIR:-} file quarantine
   [ "${FM_SPAWN_RECOVERY_SESSION_MODE:-}" = fresh ] || return 0
   file=${FM_SPAWN_RECOVERY_FRESH_SESSION_FILE:-}
   if [ -n "$file" ]; then
     [ -f "$file" ] && [ ! -L "$file" ] \
-      && [ "$(cd "$(dirname "$file")" && pwd -P)" = "$(cd "$session_dir" && pwd -P)" ] \
-      && rm -f -- "$file"
+      && [ "$(cd "$(dirname "$file")" && pwd -P)" = "$(cd "$session_dir" && pwd -P)" ] || return 1
+    if ! rm -f -- "$file"; then
+      quarantine=$(mktemp "$(dirname "$file")/.fm-spawn-recovery-failed-session.XXXXXX") || return 1
+      rm -f -- "$quarantine" || return 1
+      mv -- "$file" "$quarantine" || return 1
+      return 1
+    fi
+    [ ! -e "$file" ] && [ ! -L "$file" ] || return 1
   fi
   if [ "${FM_SPAWN_RECOVERY_SESSION_DIR_CREATED:-0}" = 1 ]; then
-    rmdir -- "$session_dir" 2>/dev/null || true
+    rmdir -- "$session_dir" || return 1
   fi
 }
 
@@ -633,14 +639,17 @@ fm_spawn_recovery_remove_replacement_scratch() {
 }
 
 fm_spawn_recovery_remove_legacy_session_binding() {
-  local session_dir=${FM_SPAWN_RECOVERY_SESSION_DIR:-} file=${FM_SPAWN_RECOVERY_RESUME_FILE:-}
+  local session_dir=${FM_SPAWN_RECOVERY_SESSION_DIR:-} file=${FM_SPAWN_RECOVERY_RESUME_FILE:-} quarantine
   [ "${FM_SPAWN_RECOVERY_LEGACY_SESSION_BOUND:-0}" = 1 ] || return 0
   [ -f "$file" ] && [ ! -L "$file" ] \
-    && [ "$(cd "$(dirname "$file")" && pwd -P)" = "$(cd "$session_dir" && pwd -P)" ] \
-    && rm -f -- "$file"
-  if [ "${FM_SPAWN_RECOVERY_SESSION_DIR_CREATED:-0}" = 1 ]; then
-    rmdir -- "$session_dir" 2>/dev/null || true
+    && [ "$(cd "$(dirname "$file")" && pwd -P)" = "$(cd "$session_dir" && pwd -P)" ] || return 1
+  if ! rm -f -- "$file"; then
+    quarantine=$(mktemp "$(dirname "$file")/.fm-spawn-recovery-failed-session.XXXXXX") || return 1
+    rm -f -- "$quarantine" || return 1
+    mv -- "$file" "$quarantine" || return 1
+    return 1
   fi
+  [ ! -e "$file" ] && [ ! -L "$file" ] || return 1
 }
 
 fm_spawn_recovery_restore_pointer() {
@@ -870,12 +879,21 @@ fm_spawn_recovery_abort() { # <backend> <target>
     FM_SPAWN_RECOVERY_PUBLISHED=0
   fi
   if [ "${FM_SPAWN_RECOVERY_LEGACY_SESSION_BOUND:-0}" = 1 ]; then
-    rm -f -- "${FM_SPAWN_RECOVERY_SESSION_BACKUP:-}"
-    FM_SPAWN_RECOVERY_SESSION_BACKUP=
     fm_spawn_recovery_remove_legacy_session_binding || {
       echo "warning: OMP recovery could not remove its failed legacy-session binding; preserving recovery artifacts and task state" >&2
       return 1
     }
+    rm -f -- "${FM_SPAWN_RECOVERY_SESSION_BACKUP:-}" || {
+      echo "warning: OMP recovery could not remove its failed legacy-session snapshot; preserving recovery artifacts and task state" >&2
+      return 1
+    }
+    FM_SPAWN_RECOVERY_SESSION_BACKUP=
+    if [ "${FM_SPAWN_RECOVERY_SESSION_DIR_CREATED:-0}" = 1 ]; then
+      rmdir -- "$FM_SPAWN_RECOVERY_SESSION_DIR" || {
+        echo "warning: OMP recovery could not remove its failed legacy-session directory; preserving recovery artifacts and task state" >&2
+        return 1
+      }
+    fi
   elif [ -n "${FM_SPAWN_RECOVERY_SESSION_BACKUP:-}" ]; then
     mv -f -- "$FM_SPAWN_RECOVERY_SESSION_BACKUP" "$FM_SPAWN_RECOVERY_RESUME_FILE" || {
       echo "warning: OMP recovery could not restore its exact prior session snapshot; preserving recovery artifacts and task state" >&2

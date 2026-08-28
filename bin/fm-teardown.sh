@@ -694,6 +694,63 @@ restore_ordinary_omp_session_archive() {
     "$restored/pointer-backup" "$restored/sessions-backup" \
     "$pointer_present" "$session_present"
 }
+snapshot_ordinary_omp_cleanup_state() {
+  local state_dir=$1 id=$2 pointer session_dir meta staged archive pointer_present=0 session_present=0
+  pointer="$state_dir/$id.omp-session"
+  session_dir="$state_dir/$id.omp-sessions"
+  meta="$state_dir/$id.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  staged=$(mktemp -d "$state_dir/.fm-teardown-omp-state.XXXXXX") || return 1
+  cp -p -- "$meta" "$staged/meta" || {
+    rm -rf -- "$staged"
+    return 1
+  }
+  if [ -e "$pointer" ] || [ -L "$pointer" ]; then
+    [ -f "$pointer" ] && [ ! -L "$pointer" ] \
+      && cp -p -- "$pointer" "$staged/pointer-backup" || {
+      rm -rf -- "$staged"
+      return 1
+    }
+    pointer_present=1
+  fi
+  if [ -e "$session_dir" ] || [ -L "$session_dir" ]; then
+    [ -d "$session_dir" ] && [ ! -L "$session_dir" ] \
+      && cp -Rp -- "$session_dir" "$staged/sessions-backup" || {
+      rm -rf -- "$staged"
+      return 1
+    }
+    session_present=1
+  fi
+  archive=$(mktemp "$state_dir/.fm-teardown-omp-state.XXXXXX.tar") || {
+    rm -rf -- "$staged"
+    return 1
+  }
+  tar -C "$staged" -cf "$archive" . || {
+    rm -f -- "$archive"
+    rm -rf -- "$staged"
+    return 1
+  }
+  rm -rf -- "$staged" || return 1
+  TEARDOWN_OMP_CLEANUP_ARCHIVE=$archive
+  TEARDOWN_OMP_CLEANUP_POINTER_PRESENT=$pointer_present
+  TEARDOWN_OMP_CLEANUP_SESSION_PRESENT=$session_present
+}
+restore_ordinary_omp_cleanup_state() {
+  local state_dir=$1 id=$2 archive=${TEARDOWN_OMP_CLEANUP_ARCHIVE:-} restored meta
+  [ -f "$archive" ] && [ ! -L "$archive" ] || return 1
+  restored=$(mktemp -d "$state_dir/.fm-teardown-omp-state-restore.XXXXXX") || return 1
+  tar -xf "$archive" -C "$restored" || {
+    rm -rf -- "$restored"
+    return 1
+  }
+  meta="$state_dir/$id.meta"
+  [ -f "$restored/meta" ] && [ ! -L "$restored/meta" ] \
+    && mv -f -- "$restored/meta" "$meta" || return 1
+  restore_ordinary_omp_session_state "$state_dir/$id.omp-session" \
+    "$state_dir/$id.omp-sessions" "$restored/pointer-backup" \
+    "$restored/sessions-backup" "${TEARDOWN_OMP_CLEANUP_POINTER_PRESENT:-0}" \
+    "${TEARDOWN_OMP_CLEANUP_SESSION_PRESENT:-0}"
+}
 remove_ordinary_omp_session_state() {  # <state-dir> <task-id>
   local state_dir=$1 id=$2 pointer session_dir transaction rollback finalization archive staged_pointer staged_session
   local pointer_backup session_backup pointer_present=0 session_present=0
@@ -2843,6 +2900,9 @@ remove_grok_turnend_auth "$STATE" "$ID"
 remove_kimi_turnend_auth "$STATE" "$ID"
 remove_hermes_turnend_auth "$STATE" "$ID" "$META"
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
+TEARDOWN_OMP_CLEANUP_ARCHIVE=
+TEARDOWN_OMP_CLEANUP_POINTER_PRESENT=0
+TEARDOWN_OMP_CLEANUP_SESSION_PRESENT=0
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
@@ -2850,16 +2910,26 @@ remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 case "$KIND:$HARNESS" in
   ship:omp|scout:omp)
+    snapshot_ordinary_omp_cleanup_state "$STATE" "$ID" || exit 1
     remove_ordinary_omp_session_state "$STATE" "$ID" || exit 1
     ;;
 esac
-rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
+if ! rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" \
   "$STATE/$ID.omp-started" \
   "$STATE/$ID.grok-turnend-token" "$STATE/$ID.kimi-turnend-token" \
   "$STATE/$ID.hermes-turnend-token" "$STATE/$ID.hermes-session" \
   "$STATE/$ID.hermes-started" \
-  "$STATE/.$ID.open-decisions-cursor"
+  "$STATE/.$ID.open-decisions-cursor"; then
+  [ -z "$TEARDOWN_OMP_CLEANUP_ARCHIVE" ] \
+    || restore_ordinary_omp_cleanup_state "$STATE" "$ID" || exit 1
+  exit 1
+fi
+if [ -n "$TEARDOWN_OMP_CLEANUP_ARCHIVE" ] \
+   && ! rm -f -- "$TEARDOWN_OMP_CLEANUP_ARCHIVE"; then
+  restore_ordinary_omp_cleanup_state "$STATE" "$ID" || exit 1
+  exit 1
+fi
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi

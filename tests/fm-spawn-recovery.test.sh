@@ -11,6 +11,7 @@ command -v tmux >/dev/null 2>&1 || fail "tmux is required for the recovery fixtu
 LAB=$(fm_test_tmproot fm-spawn-recovery)
 REAL_TMUX=$(command -v tmux)
 REAL_TAR=$(command -v tar)
+REAL_RM=$(command -v rm)
 SOCKET="fm-spawn-recovery-$$"
 HOME_DIR="$LAB/home"
 PROJECT="$LAB/project"
@@ -62,6 +63,16 @@ cat > "$WRAPPER_BIN/tar" <<SH
 #!/usr/bin/env bash
 [ "\${FM_SPAWN_RECOVERY_TEST_FAIL_SNAPSHOT:-0}" != 1 ] || exit 1
 exec '$REAL_TAR' "\$@"
+SH
+cat > "$WRAPPER_BIN/rm" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  if [ "\${FM_SPAWN_RECOVERY_TEST_FAIL_FRESH_SESSION_CLEANUP:-0}" = 1 ] \
+     && [ "\$arg" = '$HOME_DIR/state/$ID.omp-sessions/fixture-session.jsonl' ]; then
+    exit 1
+  fi
+done
+exec '$REAL_RM' "\$@"
 SH
 cat > "$WRAPPER_BIN/treehouse" <<SH
 #!/usr/bin/env bash
@@ -141,7 +152,7 @@ await turnStart();
 await new Promise((resolve) => setTimeout(resolve, 20));
 await new Promise(() => {});
 JS
-chmod +x "$WRAPPER_BIN/tmux" "$WRAPPER_BIN/tar" "$WRAPPER_BIN/treehouse" "$WRAPPER_BIN/omp"
+chmod +x "$WRAPPER_BIN/tmux" "$WRAPPER_BIN/tar" "$WRAPPER_BIN/rm" "$WRAPPER_BIN/treehouse" "$WRAPPER_BIN/omp"
 
 FIXTURE_PATH="$WRAPPER_BIN:$PATH"
 export OMP_FIXTURE_LOG="$LAB/omp-launches"
@@ -524,4 +535,14 @@ cmp -s "$HOME_DIR/state/$MALFORMED_ID.meta" "$LAB/malformed.before" \
 rm -f "$WORKTREE/.recovery-preserved"
 PATH="$FIXTURE_PATH" tmux kill-window -t "$TARGET"
 wait_for_state missing || fail "recovered fixture endpoint did not stop"
+cp "$LAB/meta.before-branch-mismatch" "$META"
+rm -f "$SESSION_POINTER"
+rm -rf "$SESSION_DIR" "$TASK_TMP/omp-sessions"
+FRESH_CLEANUP_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_FINALIZATION=1 \
+  FM_SPAWN_RECOVERY_TEST_FAIL_FRESH_SESSION_CLEANUP=1 spawn "$ID" --recover 2>&1)
+FRESH_CLEANUP_STATUS=$?
+[ "$FRESH_CLEANUP_STATUS" -ne 0 ] || fail "fresh-session cleanup failure unexpectedly succeeded"
+wait_for_state missing || fail "fresh-session cleanup failure retained replacement endpoint"
+FRESH_DIRECT_SESSIONS=$(find "$SESSION_DIR" -maxdepth 1 -type f -name '*.jsonl' -print)
+[ -z "$FRESH_DIRECT_SESSIONS" ] || fail "fresh-session cleanup failure stranded an unpointed durable session"
 pass "guarded OMP recovery preserves task state, restores failed attempts, and rejects unsafe records"
