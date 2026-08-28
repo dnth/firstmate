@@ -2333,7 +2333,7 @@ SH
 
 test_config_reread_serializes_concurrent_pushes() {
   local w head fakebin marker entered log first_out second_out first_pid first_status second_status
-  local first_instr second_instr first_line second_line
+  local first_instr second_instr first_line second_line real_mv
   w=$(new_world config-reread-serialized-pushes)
   head=$(git -C "$w/main" rev-parse HEAD)
   add_sm_worktree "$w" sm "$head"
@@ -2342,23 +2342,28 @@ test_config_reread_serializes_concurrent_pushes() {
   printf 'one\n' > "$w/home/config/crew-harness"
 
   fakebin=$(make_fake_toolchain "$w")
-  mv "$fakebin/tmux" "$fakebin/tmux.real"
+  real_mv=$(command -v mv)
   marker="$w/first-send.marker"
   entered="$w/first-send.entered"
   log="$w/config-reread-serialized.tmux.log"
-  cat > "$fakebin/tmux" <<SH
+  cat > "$fakebin/mv" <<SH
 #!/usr/bin/env bash
-case "\$*" in
-  *send-keys*)
+target=
+for arg in "\$@"; do target=\$arg; done
+case "\$target" in
+  "$w/home/state/sm.inbox/"*.msg)
     if (set -o noclobber; : > "$marker") 2>/dev/null; then
+      "$real_mv" "\$@"
+      status=\$?
       : > "$entered"
       sleep 1
+      exit "\$status"
     fi
     ;;
 esac
-exec "$fakebin/tmux.real" "\$@"
+exec "$real_mv" "\$@"
 SH
-  chmod +x "$fakebin/tmux"
+  chmod +x "$fakebin/mv"
 
   first_out="$w/first-push.out"
   (
