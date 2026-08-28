@@ -342,14 +342,26 @@ fm_spawn_recovery_snapshot_worktree() {
     return 1
   }
   case "$branch_ref" in refs/heads/*) ;; *) rm -rf -- "$snapshot"; return 1 ;; esac
-  printf '%s\n' "$head" > "$snapshot/head" \
-    && printf '%s\n' "$branch_ref" > "$snapshot/branch-ref" \
-    && git -C "$worktree" diff --cached --binary > "$snapshot/index.patch" \
-    && git -C "$worktree" diff --binary > "$snapshot/worktree.patch" \
-    && (cd "$worktree" && tar --exclude=.git -cf "$snapshot/worktree.tar" .) || {
-      rm -rf -- "$snapshot"
-      return 1
-    }
+  if ! printf '%s\n' "$head" > "$snapshot/head"; then
+    rm -rf -- "$snapshot"
+    return 1
+  fi
+  if ! printf '%s\n' "$branch_ref" > "$snapshot/branch-ref"; then
+    rm -rf -- "$snapshot"
+    return 1
+  fi
+  if ! git -C "$worktree" diff --cached --binary > "$snapshot/index.patch"; then
+    rm -rf -- "$snapshot"
+    return 1
+  fi
+  if ! git -C "$worktree" diff --binary > "$snapshot/worktree.patch"; then
+    rm -rf -- "$snapshot"
+    return 1
+  fi
+  if ! (cd "$worktree" && tar --exclude=.git -cf "$snapshot/worktree.tar" .); then
+    rm -rf -- "$snapshot"
+    return 1
+  fi
   FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT=$snapshot
 }
 

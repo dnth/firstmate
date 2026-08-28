@@ -706,19 +706,25 @@ snapshot_ordinary_omp_cleanup_state() {
     return 1
   }
   if [ -e "$pointer" ] || [ -L "$pointer" ]; then
-    [ -f "$pointer" ] && [ ! -L "$pointer" ] \
-      && cp -p -- "$pointer" "$staged/pointer-backup" || {
+    if [ ! -f "$pointer" ] || [ -L "$pointer" ]; then
       rm -rf -- "$staged"
       return 1
-    }
+    fi
+    if ! cp -p -- "$pointer" "$staged/pointer-backup"; then
+      rm -rf -- "$staged"
+      return 1
+    fi
     pointer_present=1
   fi
   if [ -e "$session_dir" ] || [ -L "$session_dir" ]; then
-    [ -d "$session_dir" ] && [ ! -L "$session_dir" ] \
-      && cp -Rp -- "$session_dir" "$staged/sessions-backup" || {
+    if [ ! -d "$session_dir" ] || [ -L "$session_dir" ]; then
       rm -rf -- "$staged"
       return 1
-    }
+    fi
+    if ! cp -Rp -- "$session_dir" "$staged/sessions-backup"; then
+      rm -rf -- "$staged"
+      return 1
+    fi
     session_present=1
   fi
   archive=$(mktemp "$state_dir/.fm-teardown-omp-state-$id.XXXXXX.tar") || {

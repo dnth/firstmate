@@ -547,10 +547,10 @@ TEARDOWN_ROLLBACK_STATUS=$?
 assert_contains "$TEARDOWN_ROLLBACK_OUTPUT" "unfinished ordinary-session teardown rollback state" \
   "recovery did not refuse unfinished ordinary-session teardown rollback state"
 rm -f "$TEARDOWN_ARCHIVE"
-FRESH_CLEANUP_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_FINALIZATION=1 \
-  FM_SPAWN_RECOVERY_TEST_FAIL_FRESH_SESSION_CLEANUP=1 spawn "$ID" --recover 2>&1)
-FRESH_CLEANUP_STATUS=$?
-[ "$FRESH_CLEANUP_STATUS" -ne 0 ] || fail "fresh-session cleanup failure unexpectedly succeeded"
+if FM_SPAWN_RECOVERY_TEST_FAIL_FINALIZATION=1 \
+  FM_SPAWN_RECOVERY_TEST_FAIL_FRESH_SESSION_CLEANUP=1 spawn "$ID" --recover >/dev/null 2>&1; then
+  fail "fresh-session cleanup failure unexpectedly succeeded"
+fi
 wait_for_state missing || fail "fresh-session cleanup failure retained replacement endpoint"
 FRESH_DIRECT_SESSIONS=$(find "$SESSION_DIR" -maxdepth 1 -type f -name '*.jsonl' -print)
 [ -z "$FRESH_DIRECT_SESSIONS" ] || fail "fresh-session cleanup failure stranded an unpointed durable session"
