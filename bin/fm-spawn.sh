@@ -22,7 +22,7 @@
 #   retaining every unrelated record line.
 #   Failed replacement cleanup stops only the exact replacement endpoint it
 #   created or relaunched, restores a resumed session snapshot, and removes only
-#   recovery-owned artifacts; the original record and isolated worktree remain.
+#   recovery-owned artifacts; the original record and isolated worktree are restored.
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -3536,7 +3536,7 @@ EOF
       ;;
     omp)
       if [ "$RECOVER" -eq 1 ]; then
-        fm_spawn_recovery_prepare_launch_artifacts "$STATE_REAL" "$ID" "$BRIEF" || {
+        fm_spawn_recovery_prepare_launch_artifacts "$TASK_TMP" "$ID" "$BRIEF" || {
           echo "error: OMP recovery could not prepare isolated replacement launch artifacts; preserving task state" >&2
           exit 1
         }

@@ -87,6 +87,7 @@ esac
 SH
 cat > "$WRAPPER_BIN/omp" <<'JS'
 #!/usr/bin/env bun
+import { appendFileSync } from "node:fs";
 const args = process.argv.slice(2);
 if (args.includes("--help")) {
   console.log("--model= --thinking= --auto-approve --session-dir= --extension= --resume= --max-time=");
@@ -108,6 +109,17 @@ if (process.env.GOTMPDIR) await Bun.write(`${process.env.GOTMPDIR}/traceparent`,
 const sessionFile = `${sessionDir}/fixture-session.jsonl`;
 const prior = resume ? await Bun.file(sessionFile).text() : "";
 await Bun.write(sessionFile, `${prior}${resume ? "replacement-attempt\n" : "FIRSTMATE_OP: v1 launch-brief: fixture\n"}`);
+if (resume && process.env.OMP_FIXTURE_LOG) appendFileSync(process.env.OMP_FIXTURE_LOG, `${extension}\n`);
+if (resume && await Bun.file(".recovery-mutate-on-launch").exists()) {
+  await Bun.write(".recovery-replacement-edit", "replacement edit\n");
+  const add = Bun.spawnSync(["git", "add", ".recovery-replacement-edit"]);
+  if (add.exitCode !== 0) process.exit(add.exitCode ?? 1);
+  const commit = Bun.spawnSync([
+    "git", "-c", "user.name=Recovery Fixture", "-c", "user.email=recovery@example.invalid",
+    "commit", "-m", "replacement mutation",
+  ]);
+  if (commit.exitCode !== 0) process.exit(commit.exitCode ?? 1);
+}
 const handlers = new Map();
 const mod = await import(`${new URL(`file://${extension}`).href}?fixture=${process.pid}-${Date.now()}`);
 mod.default({ on(event, handler) { handlers.set(event, handler); } });
@@ -122,6 +134,7 @@ JS
 chmod +x "$WRAPPER_BIN/tmux" "$WRAPPER_BIN/treehouse" "$WRAPPER_BIN/omp"
 
 FIXTURE_PATH="$WRAPPER_BIN:$PATH"
+export OMP_FIXTURE_LOG="$LAB/omp-launches"
 PATH="$FIXTURE_PATH" tmux new-session -d -s firstmate -n fixture -c "$PROJECT"
 PATH="$FIXTURE_PATH" tmux set-option -g default-shell /bin/bash
 PATH="$FIXTURE_PATH" tmux set-option -g default-command "env PATH='$FIXTURE_PATH' bash --noprofile --norc"
@@ -196,6 +209,10 @@ assert_contains "$POINTER_OUTPUT" "recovered $ID harness=omp" \
 wait_for_state alive || fail "authoritative-pointer recovery was not live"
 [ "$(cat "$SESSION_POINTER")" = "$SESSION_FILE" ] \
   || fail "authoritative-pointer recovery changed the selected exact session"
+case "$(tail -n 1 "$OMP_FIXTURE_LOG")" in
+  "$TASK_TMP"/.fm-spawn-recovery-ext.*.ts) ;;
+  *) fail "recovery did not stage its OMP launch extension in task scratch" ;;
+esac
 [ "$(cat "$TASK_TMP/gotmp/traceparent")" = "$RECORDED_TRACEPARENT" ] \
   || fail "recovery did not preserve the recorded trace context"
 PATH="$FIXTURE_PATH" tmux kill-window -t "$TARGET"
@@ -214,6 +231,11 @@ rm -f "$SESSION_DIR/symlinked.jsonl"
 rm -rf "$TASK_TMP/gotmp"
 mkdir -p "$TASK_TMP"
 printf 'pre-existing scratch\n' > "$TASK_TMP/preserve-me"
+printf 'launch mutation marker\n' > "$WORKTREE/.recovery-mutate-on-launch"
+printf 'staged recovery state\n' > "$WORKTREE/.recovery-staged"
+git -C "$WORKTREE" add .recovery-staged
+printf 'unstaged recovery state\n' >> "$WORKTREE/.recovery-staged"
+RECOVERY_HEAD=$(git -C "$WORKTREE" rev-parse HEAD) || fail "fixture could not record the pre-recovery worktree head"
 INJECTED_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_BEFORE_PUBLISH=1 spawn "$ID" --recover 2>&1)
 INJECTED_STATUS=$?
 [ "$INJECTED_STATUS" -ne 0 ] || fail "recovery test injector unexpectedly published metadata"
@@ -223,10 +245,18 @@ cmp -s "$META" "$LAB/meta.before" || fail "failed recovery rewrote metadata"
 cmp -s "$SESSION_FILE" "$LAB/session.before" || fail "failed recovery did not restore the exact session bytes"
 cmp -s "$HOME_DIR/state/$ID.status" "$LAB/status.before" || fail "failed recovery rewrote task status"
 [ "$(git -C "$WORKTREE" symbolic-ref --quiet --short HEAD)" = "$BRANCH" ] || fail "failed recovery changed the branch"
+[ "$(git -C "$WORKTREE" rev-parse HEAD)" = "$RECOVERY_HEAD" ] || fail "failed recovery retained a replacement commit"
 [ -f "$WORKTREE/.recovery-preserved" ] || fail "failed recovery discarded uncommitted work"
+[ -f "$WORKTREE/.recovery-mutate-on-launch" ] || fail "failed recovery discarded pre-existing mutation marker"
+[ ! -e "$WORKTREE/.recovery-replacement-edit" ] || fail "failed recovery retained replacement worktree edits"
+[ "$(git -C "$WORKTREE" show :'.recovery-staged')" = 'staged recovery state' ] \
+  || fail "failed recovery did not restore staged worktree state"
+[ "$(cat "$WORKTREE/.recovery-staged")" = $'staged recovery state\nunstaged recovery state' ] \
+  || fail "failed recovery did not restore unstaged worktree state"
 [ -f "$TASK_TMP/preserve-me" ] || fail "failed recovery removed pre-existing task scratch"
 [ ! -e "$TASK_TMP/gotmp" ] && [ ! -L "$TASK_TMP/gotmp" ] \
   || fail "failed recovery retained replacement-owned build scratch"
+rm -f "$WORKTREE/.recovery-mutate-on-launch"
 
 RECOVERED_OUTPUT=$(spawn "$ID" --recover) || fail "guarded recovery from a missing endpoint failed"
 assert_contains "$RECOVERED_OUTPUT" "recovered $ID harness=omp" "recovery did not report success"

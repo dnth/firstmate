@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Guarded ordinary-worker OMP recovery support for bin/fm-spawn.sh.
+# Usage: source bin/fm-spawn-recovery-lib.sh from bin/fm-spawn.sh.
 #
 # This library owns recovery-only identity validation, session selection, staged
 # endpoint metadata, and rollback cleanup.  fm-spawn owns argument parsing,
@@ -303,6 +304,50 @@ fm_spawn_recovery_capture_fresh_session() {
   esac
 }
 
+fm_spawn_recovery_snapshot_worktree() {
+  local tasktmp=${FM_SPAWN_RECOVERY_TASKTMP:-} worktree=${FM_SPAWN_RECOVERY_WORKTREE:-}
+  local snapshot head
+  [ -n "$tasktmp" ] && [ -n "$worktree" ] || return 1
+  [ -d "$worktree" ] && [ ! -L "$worktree" ] || return 1
+  if [ "${FM_SPAWN_RECOVERY_TASKTMP_CREATED:-0}" = 1 ]; then
+    [ ! -e "$tasktmp" ] && [ ! -L "$tasktmp" ] || return 1
+    mkdir -m 700 -- "$tasktmp" || return 1
+  else
+    [ -d "$tasktmp" ] && [ ! -L "$tasktmp" ] || return 1
+  fi
+  snapshot=$(mktemp -d "$tasktmp/.fm-spawn-recovery-worktree.XXXXXX") || return 1
+  head=$(git -C "$worktree" rev-parse --verify HEAD 2>/dev/null) || {
+    rm -rf -- "$snapshot"
+    return 1
+  }
+  printf '%s\n' "$head" > "$snapshot/head" \
+    && git -C "$worktree" diff --cached --binary > "$snapshot/index.patch" \
+    && (cd "$worktree" && tar --exclude=.git -cf "$snapshot/worktree.tar" .) || {
+      rm -rf -- "$snapshot"
+      return 1
+    }
+  FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT=$snapshot
+}
+
+fm_spawn_recovery_restore_worktree() {
+  local snapshot=${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}
+  local worktree=${FM_SPAWN_RECOVERY_WORKTREE:-} head
+  [ -n "$snapshot" ] || return 0
+  [ -d "$snapshot" ] && [ ! -L "$snapshot" ] \
+    && [ -f "$snapshot/head" ] && [ ! -L "$snapshot/head" ] \
+    && [ -f "$snapshot/index.patch" ] && [ ! -L "$snapshot/index.patch" ] \
+    && [ -f "$snapshot/worktree.tar" ] && [ ! -L "$snapshot/worktree.tar" ] \
+    && [ -d "$worktree" ] && [ ! -L "$worktree" ] || return 1
+  IFS= read -r head < "$snapshot/head" || return 1
+  [ "$(git -C "$worktree" rev-parse --verify "$head^{commit}" 2>/dev/null || true)" = "$head" ] || return 1
+  git -C "$worktree" reset --hard "$head" >/dev/null \
+    && git -C "$worktree" clean -fdx >/dev/null \
+    && git -C "$worktree" apply --index "$snapshot/index.patch" \
+    && tar -xf "$snapshot/worktree.tar" -C "$worktree" || return 1
+  rm -rf -- "$snapshot" || return 1
+  FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT=
+}
+
 fm_spawn_recovery_prepare() { # <state> <data> <task-id>
   local state=$1 data=$2 id=$3 meta kind harness tasktmp model effort old_backend old_target endpoint_state
   local project worktree branch expected_tmp prewalk prewalk_count allow_extensions allow_count
@@ -317,6 +362,7 @@ fm_spawn_recovery_prepare() { # <state> <data> <task-id>
   FM_SPAWN_RECOVERY_EXTENSION=
   FM_SPAWN_RECOVERY_READY=
   FM_SPAWN_RECOVERY_STARTED=
+  FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT=
   FM_SPAWN_RECOVERY_TRACEPARENT=
   FM_SPAWN_RECOVERY_TRACEPARENT_PRESENT=0
   [ -f "$meta" ] && [ ! -L "$meta" ] || {
@@ -441,13 +487,17 @@ fm_spawn_recovery_prepare() { # <state> <data> <task-id>
   }
   FM_SPAWN_RECOVERY_META_SNAPSHOT=$(mktemp "$state/.fm-spawn-recovery-meta.XXXXXX") || return 1
   cat -- "$meta" > "$FM_SPAWN_RECOVERY_META_SNAPSHOT" || return 1
+  FM_SPAWN_RECOVERY_TASKTMP=$tasktmp
+  fm_spawn_recovery_snapshot_worktree || {
+    echo "error: OMP recovery could not snapshot the preserved isolated worktree for task $id; preserving task state" >&2
+    return 1
+  }
   FM_SPAWN_RECOVERY_META=$meta
   FM_SPAWN_RECOVERY_OLD_BACKEND=$old_backend
   FM_SPAWN_RECOVERY_OLD_TARGET=$old_target
   FM_SPAWN_RECOVERY_KIND=$kind
   FM_SPAWN_RECOVERY_MODEL=$model
   FM_SPAWN_RECOVERY_EFFORT=$effort
-  FM_SPAWN_RECOVERY_TASKTMP=$tasktmp
 }
 
 fm_spawn_recovery_preflight() { # <state> <data> <task-id>
@@ -460,14 +510,15 @@ fm_spawn_recovery_preflight() { # <state> <data> <task-id>
   return 1
 }
 
-fm_spawn_recovery_prepare_launch_artifacts() { # <state> <task-id> <brief>
-  local state=$1 id=$2 brief=$3 old_umask
+fm_spawn_recovery_prepare_launch_artifacts() { # <tasktmp> <task-id> <brief>
+  local tasktmp=$1 id=$2 brief=$3 old_umask
+  [ -d "$tasktmp" ] && [ ! -L "$tasktmp" ] || return 1
   old_umask=$(umask)
   umask 077
-  FM_SPAWN_RECOVERY_NOTE=$(mktemp "$state/.fm-spawn-recovery-note.XXXXXX") || { umask "$old_umask"; return 1; }
-  FM_SPAWN_RECOVERY_EXTENSION=$(mktemp "$state/.fm-spawn-recovery-ext.XXXXXX.ts") || { umask "$old_umask"; return 1; }
-  FM_SPAWN_RECOVERY_READY=$(mktemp "$state/.fm-spawn-recovery-ready.XXXXXX") || { umask "$old_umask"; return 1; }
-  FM_SPAWN_RECOVERY_STARTED=$(mktemp "$state/.fm-spawn-recovery-started.XXXXXX") || { umask "$old_umask"; return 1; }
+  FM_SPAWN_RECOVERY_NOTE=$(mktemp "$tasktmp/.fm-spawn-recovery-note.XXXXXX") || { umask "$old_umask"; return 1; }
+  FM_SPAWN_RECOVERY_EXTENSION=$(mktemp "$tasktmp/.fm-spawn-recovery-ext.XXXXXX.ts") || { umask "$old_umask"; return 1; }
+  FM_SPAWN_RECOVERY_READY=$(mktemp "$tasktmp/.fm-spawn-recovery-ready.XXXXXX") || { umask "$old_umask"; return 1; }
+  FM_SPAWN_RECOVERY_STARTED=$(mktemp "$tasktmp/.fm-spawn-recovery-started.XXXXXX") || { umask "$old_umask"; return 1; }
   rm -f -- "$FM_SPAWN_RECOVERY_READY" "$FM_SPAWN_RECOVERY_STARTED"
   umask "$old_umask"
   cat -- "$brief" > "$FM_SPAWN_RECOVERY_NOTE" || return 1
@@ -591,12 +642,18 @@ fm_spawn_recovery_cleanup_artifacts() {
     "${FM_SPAWN_RECOVERY_EXTENSION:-}" \
     "${FM_SPAWN_RECOVERY_READY:-}" \
     "${FM_SPAWN_RECOVERY_STARTED:-}"
+  if [ -n "${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}" ] \
+     && [ -d "$FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT" ] \
+     && [ ! -L "$FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT" ]; then
+    rm -rf -- "$FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT"
+  fi
   FM_SPAWN_RECOVERY_CANDIDATE_META=
   FM_SPAWN_RECOVERY_META_SNAPSHOT=
   FM_SPAWN_RECOVERY_NOTE=
   FM_SPAWN_RECOVERY_EXTENSION=
   FM_SPAWN_RECOVERY_READY=
   FM_SPAWN_RECOVERY_STARTED=
+  FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT=
 }
 
 fm_spawn_recovery_complete() {
@@ -631,6 +688,10 @@ fm_spawn_recovery_abort() { # <backend> <target>
       return 1
     fi
   fi
+  fm_spawn_recovery_restore_worktree || {
+    echo "warning: OMP recovery could not restore the preserved isolated worktree snapshot; preserving recovery artifacts and task state" >&2
+    return 1
+  }
   if [ "${FM_SPAWN_RECOVERY_LEGACY_SESSION_BOUND:-0}" = 1 ]; then
     rm -f -- "${FM_SPAWN_RECOVERY_SESSION_BACKUP:-}"
     FM_SPAWN_RECOVERY_SESSION_BACKUP=

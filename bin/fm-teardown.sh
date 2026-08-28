@@ -684,8 +684,11 @@ remove_ordinary_omp_session_state() {  # <state-dir> <task-id>
       return 1
     }
   fi
+  if [ -d "$session_dir" ]; then
+    rm -rf -- "$session_dir" || return 1
+    [ ! -e "$session_dir" ] && [ ! -L "$session_dir" ] || return 1
+  fi
   rm -f -- "$pointer"
-  [ ! -d "$session_dir" ] || rm -rf -- "$session_dir"
 }
 
 
