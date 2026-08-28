@@ -193,6 +193,7 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # CONSTANT line the worker recovers semantically, while skipping on ambiguous
 # verdicts would starve a harness whose idle screen the classifier cannot
 # positively identify (that classifier is advisory here by design).
+# Hermes doorbells intentionally do not take .hermes-delivery.lock in this faithful upstream port; fm-inbox-hermes-doorbell-serialize owns the serialization follow-up.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [harness] [omp-runtime] [omp-bin]
   local backend=$1 target=$2 rec=$3 label=${4:-}
   local harness=${5:-} omp_runtime=${6:-} omp_bin=${7:-} line cstate verdict
