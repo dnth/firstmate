@@ -185,7 +185,7 @@ wait_text_count() {
 }
 
 wait_launch_brief_once() {
-  local session_dir=/tmp/fm-$WORKER_ID/omp-sessions attempts=120 i=0 count file file_count
+  local session_dir="$HOME_DIR/state/$WORKER_ID.omp-sessions" attempts=120 i=0 count file file_count
   while [ "$i" -lt "$attempts" ]; do
     count=0
     for file in "$session_dir"/*.jsonl; do
@@ -272,7 +272,7 @@ assert_contains "$(capture "$WORKER_TARGET")" 'low' "OMP worker did not display 
 # isolate the guarded restart path when a current OMP build changes composer
 # rendering independently of launch and recovery semantics.
 if [ "${FM_OMP_TMUX_RECOVERY_ONLY:-0}" = 1 ]; then
-  SESSION_DIR="/tmp/fm-$WORKER_ID/omp-sessions"
+  SESSION_DIR="$HOME_DIR/state/$WORKER_ID.omp-sessions"
   SESSION_FILE=
   for candidate in "$SESSION_DIR"/*.jsonl; do
     [ -f "$candidate" ] || continue
@@ -280,6 +280,8 @@ if [ "${FM_OMP_TMUX_RECOVERY_ONLY:-0}" = 1 ]; then
     break
   done
   [ -n "$SESSION_FILE" ] || fail "OMP worker session file was not retained for recovery"
+  [ "$(cat "$HOME_DIR/state/$WORKER_ID.omp-session")" = "$SESSION_FILE" ] \
+    || fail "OMP worker durable session pointer did not name its retained session"
   WORKER_META_BEFORE="$LAB/worker.meta.before"
   WORKER_BRIEF_BEFORE="$LAB/worker.brief.before"
   cp "$WORKER_META" "$WORKER_META_BEFORE"
@@ -352,7 +354,7 @@ for _ in $(seq 1 120); do
   sleep 0.25
 done
 [ "$(agent_state "$WORKER_TARGET")" = dead ] || fail "OMP clean exit did not return to the shell"
-SESSION_DIR="/tmp/fm-$WORKER_ID/omp-sessions"
+SESSION_DIR="$HOME_DIR/state/$WORKER_ID.omp-sessions"
 SESSION_FILE=$(find "$SESSION_DIR" -type f -name '*.jsonl' -print -quit 2>/dev/null)
 [ -n "$SESSION_FILE" ] || fail "OMP worker session file was not retained for recovery"
 WORKER_META_BEFORE="$LAB/worker.meta.before"

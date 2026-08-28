@@ -130,7 +130,8 @@
 #   either kind. Hermes overrides only a crewmate or scout spawn and is refused for secondmates.
 #   For crewmates and scouts, a non-flag string containing whitespace is treated
 #   as a RAW launch command - the escape hatch for verifying new adapters.
-#   Secondmates refuse every raw launch command and accept adapter identities only.
+#   Raw OMP is refused because it cannot publish the durable exact-session pointer;
+#   secondmates likewise refuse every raw launch command and accept adapter identities only.
 #   pi-signed launches that exact executable name from PATH and
 #   refuses before endpoint creation when it is unavailable; it never falls back to pi.
 #   omp resolves its exact executable and checks its required launch/recovery
@@ -186,10 +187,11 @@
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
-#     __OMPEXT__   absolute path to state/<task-id>.omp-ext.ts (OMP turn-start
-#                  acknowledgement and turn-end extension, also outside the worktree)
-#     __OMPSESSIONDIR__ task-local or secondmate-home OMP session directory for exact resume
-#     __OMPRESUMEFLAG__ empty for a fresh OMP launch or the exact retained secondmate session file
+#     __OMPEXT__   absolute path to state/<task-id>.omp-ext.ts (OMP turn-start,
+#                  durable exact-session pointer publication, and turn-end extension)
+#     __OMPSESSIONDIR__ durable state/<task-id>.omp-sessions for ordinary workers,
+#                  or state/omp-sessions in an OMP secondmate home
+#     __OMPRESUMEFLAG__ empty for a fresh OMP launch or the exact durable prior session
 #     __OMPPRIMARY__ absolute path to .omp/extensions/fm-primary-omp.ts in an OMP secondmate home
 #     __OMPMAXTIME__ OMP-only `--max-time=<duration>` fragment from config/omp-max-time
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
@@ -963,6 +965,12 @@ spawn_omp_abort_clean_unchanged_worktree() {  # <context>
     || ! fm_pool_worktree_clean "$WT"; then
     echo "warning: $context found work to preserve in $WT" >&2
   elif (cd "$PROJ_ABS" && "$SCRIPT_DIR/fm-treehouse-command.sh" return --force "$WT" >/dev/null 2>&1); then
+    if [ -e "$STATE/$ID.omp-session" ] && [ ! -L "$STATE/$ID.omp-session" ]; then
+      rm -f -- "$STATE/$ID.omp-session"
+    fi
+    if [ -d "$STATE/$ID.omp-sessions" ] && [ ! -L "$STATE/$ID.omp-sessions" ]; then
+      rm -rf -- "$STATE/$ID.omp-sessions"
+    fi
     [ -z "${TASK_TMP:-}" ] || rm -rf "$TASK_TMP"
     rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
       "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" "$STATE/$ID.omp-started"
@@ -1536,6 +1544,11 @@ if [ "$PREWALK_INTO_SET" -eq 1 ]; then
   esac
 fi
 
+if [ "$RAW_LAUNCH" -eq 1 ] && [ "$HARNESS" = omp ]; then
+  echo "error: raw OMP launch commands cannot publish the durable exact-session pointer; select the verified OMP harness instead" >&2
+  exit 1
+fi
+
 OMPMAXTIME=
 OMP_LAUNCH_TEMPLATE=0
 if [ "$RAW_LAUNCH" -eq 0 ] && [ "$HARNESS" = omp ]; then
@@ -1785,7 +1798,8 @@ if [ "$HARNESS" = omp ]; then
   elif [ "$RECOVER" -eq 0 ]; then
     for artifact in \
       "$STATE/$ID.meta" "$STATE/$ID.status" "$STATE/$ID.omp-ext.ts" \
-      "$STATE/$ID.omp-ready" "$STATE/$ID.omp-started" "/tmp/fm-$ID"; do
+      "$STATE/$ID.omp-ready" "$STATE/$ID.omp-started" \
+      "$STATE/$ID.omp-session" "$STATE/$ID.omp-sessions" "/tmp/fm-$ID"; do
       if [ -e "$artifact" ] || [ -L "$artifact" ]; then
         echo "error: refusing OMP spawn because task $ID already has artifacts at $artifact; reconcile or clean the prior task before retrying" >&2
         exit 1
@@ -2284,6 +2298,28 @@ prepare_omp_secondmate_session() {
     return 1
   fi
 }
+prepare_omp_ordinary_session() {
+  OMP_SESSION_DIR="$STATE_REAL/$ID.omp-sessions"
+  OMP_SESSION_POINTER="$STATE_REAL/$ID.omp-session"
+  if [ -L "$OMP_SESSION_DIR" ] || [ -L "$OMP_SESSION_POINTER" ]; then
+    echo "error: OMP ordinary-worker session state must not use symlinks for task $ID" >&2
+    return 1
+  fi
+  mkdir -p "$OMP_SESSION_DIR" || {
+    echo "error: cannot create durable OMP ordinary-worker session directory: $OMP_SESSION_DIR" >&2
+    return 1
+  }
+  chmod 0700 "$OMP_SESSION_DIR" 2>/dev/null || true
+  OMP_SESSION_DIR=$(cd "$OMP_SESSION_DIR" && pwd -P) || {
+    echo "error: could not resolve durable OMP ordinary-worker session directory for task $ID" >&2
+    return 1
+  }
+  [ "$(dirname "$OMP_SESSION_DIR")" = "$STATE_REAL" ] || {
+    echo "error: durable OMP ordinary-worker session directory escapes state for task $ID" >&2
+    return 1
+  }
+}
+
 
 validate_firstmate_home_for_spawn() {
   local id=$1 home=$2 abs_home abs_active_home abs_root marker_id
@@ -3316,22 +3352,22 @@ if [ "$RECOVER" -eq 1 ]; then
   }
   mkdir -p "$TASK_TMP/gotmp"
   OMP_SESSION_DIR=$FM_SPAWN_RECOVERY_SESSION_DIR
+  OMP_SESSION_POINTER=$FM_SPAWN_RECOVERY_SESSION_POINTER
   OMP_RESUME_FILE=$FM_SPAWN_RECOVERY_RESUME_FILE
-  mkdir -p "$OMP_SESSION_DIR"
 else
   mkdir -p "$TASK_TMP/gotmp"
-  if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
-    OMP_SESSION_DIR="$TASK_TMP/omp-sessions"
-    mkdir -p "$OMP_SESSION_DIR"
-  fi
+fi
+
+mkdir -p "$STATE"
+STATE_REAL=$(cd "$STATE" && pwd -P)
+if [ "$RECOVER" -eq 0 ] && [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
+  prepare_omp_ordinary_session || exit 1
 fi
 
 # Per-harness turn-end hook where enabled: a file that touches
 # state/<id>.turn-ended when the agent finishes a turn. Worktree-resident hooks
 # and token pointers stay out of git's view so they never block teardown's dirty
 # check or leak into a commit.
-mkdir -p "$STATE"
-STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
 exclude_path() {
   local rel=$1 EXCL
@@ -3509,10 +3545,28 @@ EOF
         rm -f "$OMP_READY" "$OMP_STARTED"
       fi
       cat > "$OMP_EXTENSION_PATH" <<EOF
-// Firstmate OMP launch acknowledgement and turn-end signal; written by fm-spawn.
+// Firstmate OMP launch acknowledgement, durable session pointer, and turn-end signal; written by fm-spawn.
 import { execFile } from "node:child_process";
+import { renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute } from "node:path";
+const sessionDir = "$OMP_SESSION_DIR";
+const sessionPointer = "$OMP_SESSION_POINTER";
+function publishSession(ctx: any): void {
+  const sessionFile = ctx?.sessionManager?.getSessionFile?.();
+  if (!sessionFile || !isAbsolute(sessionFile) || dirname(sessionFile) !== sessionDir) return;
+  const temp = sessionPointer + ".tmp." + process.pid;
+  try {
+    writeFileSync(temp, sessionFile + "\n", { mode: 0o600 });
+    renameSync(temp, sessionPointer);
+  } catch {
+    try { unlinkSync(temp); } catch {}
+  }
+}
 export default function (omp: any) {
-  omp.on("session_start", () => execFile("touch", ["$OMP_READY"]));
+  omp.on("session_start", (_event: any, ctx: any) => {
+    publishSession(ctx);
+    execFile("touch", ["$OMP_READY"]);
+  });
   omp.on("turn_start", () => execFile("touch", ["$OMP_STARTED"]));
   omp.on("turn_end", () => execFile("touch", ["$TURNEND"]));
 }
@@ -4039,7 +4093,25 @@ if [ "$HARNESS" = omp ]; then
         echo "error: OMP recovery found an ambiguous fresh task session; preserving task state" >&2
         exit 1
       fi
-      if [ -f "$OMP_STARTED" ]; then
+      OMP_WORKER_SESSION_OK=0
+      OMP_WORKER_SESSION=
+      if [ -f "$OMP_SESSION_POINTER" ] && [ ! -L "$OMP_SESSION_POINTER" ] \
+         && [ "$(wc -l < "$OMP_SESSION_POINTER" | tr -d '[:space:]')" = 1 ] \
+         && [ "$(tail -c 1 "$OMP_SESSION_POINTER" | od -An -tuC | tr -d '[:space:]')" = 10 ]; then
+        IFS= read -r OMP_WORKER_SESSION < "$OMP_SESSION_POINTER" || OMP_WORKER_SESSION=
+        case "$OMP_WORKER_SESSION" in
+          "$OMP_SESSION_DIR"/*.jsonl)
+            OMP_WORKER_SESSION_PARENT=$(cd "$(dirname "$OMP_WORKER_SESSION")" 2>/dev/null && pwd -P || true)
+            if [ "$OMP_WORKER_SESSION_PARENT" = "$OMP_SESSION_DIR" ] \
+               && [ ! -L "$OMP_WORKER_SESSION" ] \
+               && [ -f "$OMP_WORKER_SESSION" ] \
+               && { [ -z "$OMP_RESUME_FILE" ] || [ "$OMP_WORKER_SESSION" = "$OMP_RESUME_FILE" ]; }; then
+              OMP_WORKER_SESSION_OK=1
+            fi
+            ;;
+        esac
+      fi
+      if [ -f "$OMP_STARTED" ] && [ "$OMP_WORKER_SESSION_OK" -eq 1 ]; then
         OMP_ACKED=1
         break
       fi

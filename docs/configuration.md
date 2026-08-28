@@ -82,8 +82,9 @@ A cmux spawn additionally version-gates against the installed `cmux` binary's ve
 A backend spawn refusal from a missing dependency, version gate, or unauthenticated socket is terminal for that selected backend; firstmate surfaces it as a blocker instead of silently retrying another backend.
 Task meta records `backend=` only for a non-default backend; an absent `backend=` means `tmux`, preserving existing default-path meta files.
 Every new task records `endpoint_task_id=` as the cleanup binding between the metadata filename and its opaque runtime endpoint.
-An OMP task additionally records canonical `omp_bin=` and `omp_bun=` launch identities.
-For a confirmed-stopped or absent ordinary OMP worker or scout, `bin/fm-spawn.sh <id> --recover` is the only supported recovery entrypoint; it verifies and atomically replaces the endpoint binding only after the retained session acknowledges.
+An ordinary OMP task stores its canonical `omp_bin=` and `omp_bun=` launch identities plus its exact conversation under `state/<id>.omp-sessions/`, with `state/<id>.omp-session` atomically pointing to the one resumable direct-child session.
+For a confirmed-stopped or absent ordinary OMP worker or scout, `bin/fm-spawn.sh <id> --recover` is the only supported recovery entrypoint; it verifies the pointer or one legacy temporary session, resumes or starts in the durable task state, and atomically replaces the endpoint binding only after acknowledgement.
+Raw OMP launch commands are rejected because they cannot satisfy this session-publication contract; ordinary OMP work must use the verified harness path.
 A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
 A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
 An Orca task additionally records `orca_worktree_id=` and `terminal=`, with `window=fm-<id>` kept as the shared firstmate alias.
@@ -287,7 +288,7 @@ When present, the config path must be a readable, ordinary non-symlink regular f
 The first non-empty, non-comment line may instead be a positive integer number of seconds, a positive integer suffixed with `m` for minutes, or a positive integer suffixed with `h` for hours, such as `3600`, `10m`, or `1h`.
 The literal `off` emits no `--max-time` flag and restores an unbounded OMP launch.
 Any other value or invalid config file refuses the OMP spawn before endpoint creation instead of silently ignoring the bound.
-Non-OMP harnesses and raw launch commands do not read or receive this OMP-only setting.
+Non-OMP harnesses and non-OMP raw launch commands do not read or receive this OMP-only setting.
 [`bin/fm-spawn.sh`](../bin/fm-spawn.sh) owns launch construction, while [`bin/fm-omp-capabilities.sh`](../bin/fm-omp-capabilities.sh) refuses an installed OMP executable whose help does not advertise `--max-time=<value>`.
 
 ## OMP project extensions

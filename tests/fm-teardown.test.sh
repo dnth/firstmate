@@ -696,6 +696,56 @@ test_no_mistakes_origin_remote_allows() {
     "nm-origin: open-decisions cursor survived teardown"
   pass "no-mistakes worktree with HEAD on origin is torn down (no regression)"
 }
+test_teardown_retires_durable_ordinary_omp_sessions() {
+  local case_dir rc session_dir session_file pointer
+  case_dir=$(make_case durable-ordinary-omp)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'harness=omp' >> "$case_dir/state/task-x1.meta"
+  session_dir="$case_dir/state/task-x1.omp-sessions"
+  session_file="$session_dir/retained.jsonl"
+  pointer="$case_dir/state/task-x1.omp-session"
+  mkdir -p "$session_dir"
+  printf 'FIRSTMATE_OP: v1 launch-brief: retained\n' > "$session_file"
+  printf '%s\n' "$session_file" > "$pointer"
+  wt_commit "$case_dir" "shippable OMP work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "durable-ordinary-omp: teardown should succeed for landed work"
+  assert_absent "$pointer" "durable-ordinary-omp: durable OMP pointer survived landed teardown"
+  assert_absent "$session_dir" "durable-ordinary-omp: durable OMP session state survived landed teardown"
+  pass "landed ordinary OMP teardown retires only its durable session state"
+}
+test_teardown_preserves_unlanded_ordinary_omp_sessions() {
+  local case_dir rc session_dir session_file pointer
+  case_dir=$(make_case unlanded-ordinary-omp)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'harness=omp' >> "$case_dir/state/task-x1.meta"
+  session_dir="$case_dir/state/task-x1.omp-sessions"
+  session_file="$session_dir/retained.jsonl"
+  pointer="$case_dir/state/task-x1.omp-session"
+  mkdir -p "$session_dir"
+  printf 'FIRSTMATE_OP: v1 launch-brief: unlanded\n' > "$session_file"
+  printf '%s\n' "$session_file" > "$pointer"
+  wt_commit_file "$case_dir" feature.txt hello "unpushed OMP work"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "unlanded-ordinary-omp: teardown should refuse"
+  [ -f "$pointer" ] || fail "unlanded-ordinary-omp: refusal removed durable OMP session pointer"
+  [ -f "$session_file" ] || fail "unlanded-ordinary-omp: refusal removed durable OMP session"
+  pass "unlanded ordinary OMP teardown preserves its durable session state"
+}
+
+
 
 test_no_mistakes_truly_unpushed_refuses() {
   local case_dir rc
@@ -714,7 +764,6 @@ test_no_mistakes_truly_unpushed_refuses() {
   grep -q REFUSED "$case_dir/stderr" || fail "nm-unpushed: no REFUSED line in stderr"
   pass "no-mistakes worktree with genuinely unlanded work is refused (safety preserved)"
 }
-
 test_squash_merged_branch_deleted_allows() {
   local case_dir rc pr_head
   case_dir=$(make_case squash-merged)
@@ -3548,6 +3597,8 @@ test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
+test_teardown_retires_durable_ordinary_omp_sessions
+test_teardown_preserves_unlanded_ordinary_omp_sessions
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes

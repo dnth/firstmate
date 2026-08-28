@@ -31,8 +31,8 @@ Do not sweep another home's endpoints or infer ownership from a matching window 
 
 Before relaunch, prove that no live agent still owns the recorded task and that the existing worktree remains available.
 For a `harness=omp` task, use only `bin/fm-spawn.sh <id> --recover`.
-It validates the recorded OMP identity, delivery contract, isolated copy, treehouse lease, session selection, and current endpoint before resuming the exact prior session or starting one fresh only when none exists.
-It preserves the original brief, progress, status, trace context, uncommitted changes, commits, task identity, and branch until the replacement acknowledges, then replaces only the recorded endpoint binding atomically.
+It validates the recorded OMP identity, delivery contract, isolated copy, Treehouse lease, durable exact-session pointer, and current endpoint before resuming the exact prior session or binding one unambiguous legacy temporary session into the durable task state.
+It preserves the original brief, progress, status, trace context, uncommitted changes, commits, task identity, branch, and durable session state until the replacement acknowledges, then replaces only the recorded endpoint binding atomically.
 Do not use a generic spawn, hand-send an OMP resume command, or write task records by hand.
 For another harness, preserve the same task identity and recorded worktree while following that adapter's recovery procedure.
 If the worktree or ownership cannot be reconciled safely, leave all state intact and report the task failed or blocked with the conflicting evidence.

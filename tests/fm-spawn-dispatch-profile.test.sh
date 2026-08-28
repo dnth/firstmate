@@ -36,6 +36,17 @@ make_spawn_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+publish_omp_session_for_ack() {
+  local ack=$1 base session_dir session
+  [ -n "$ack" ] || return 0
+  base=${ack%.omp-started}
+  [ "$base" != "$ack" ] || return 0
+  session_dir="$base.omp-sessions"
+  session="$session_dir/fixture-session.jsonl"
+  mkdir -p "$session_dir"
+  [ -f "$session" ] || printf 'FIRSTMATE_OP: v1 launch-brief: fixture\n' > "$session"
+  printf '%s\n' "$session" > "$base.omp-session"
+}
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
@@ -71,7 +82,10 @@ case "${1:-}" in
           if grep -Fq 'FM_OMP_HARNESS=omp' "$FM_FAKE_LAUNCH_LOG" 2>/dev/null; then
             if [ -n "${FM_FAKE_OMP_ACK:-}" ]; then
               while IFS= read -r ack; do
-                [ -z "$ack" ] || : > "$ack"
+                if [ -n "$ack" ]; then
+                  : > "$ack"
+                  publish_omp_session_for_ack "$ack"
+                fi
               done <<EOF
 $FM_FAKE_OMP_ACK
 EOF
@@ -80,6 +94,7 @@ EOF
               for extension in "$FM_FAKE_OMP_ACK_DIR"/*.omp-ext.ts; do
                 [ -e "$extension" ] || continue
                 : > "${extension%.omp-ext.ts}.omp-started"
+                publish_omp_session_for_ack "${extension%.omp-ext.ts}.omp-started"
               done
             fi
             if [ -n "${FM_FAKE_OMP_META_TAMPER:-}" ]; then
@@ -99,6 +114,17 @@ SH
   cat > "$fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
+publish_omp_session_for_ack() {
+  local ack=$1 base session_dir session
+  [ -n "$ack" ] || return 0
+  base=${ack%.omp-started}
+  [ "$base" != "$ack" ] || return 0
+  session_dir="$base.omp-sessions"
+  session="$session_dir/fixture-session.jsonl"
+  mkdir -p "$session_dir"
+  [ -f "$session" ] || printf 'FIRSTMATE_OP: v1 launch-brief: fixture\n' > "$session"
+  printf '%s\n' "$session" > "$base.omp-session"
+}
 cmd=${1:-}
 sub=${2:-}
 case "$cmd $sub" in
@@ -182,10 +208,14 @@ case "$cmd $sub" in
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       printf '%s\n' "${4:-}" >> "$FM_FAKE_LAUNCH_LOG"
       if printf '%s' "${4:-}" | grep -Fq 'FM_OMP_HARNESS=omp'; then
-        [ -z "${FM_FAKE_OMP_ACK:-}" ] || : > "$FM_FAKE_OMP_ACK"
+        if [ -n "${FM_FAKE_OMP_ACK:-}" ]; then
+          : > "$FM_FAKE_OMP_ACK"
+          publish_omp_session_for_ack "$FM_FAKE_OMP_ACK"
+        fi
         if [ "${FM_FAKE_OMP_DYNAMIC_ACK:-0}" = 1 ]; then
           ack=$(printf '%s\n' "${4:-}" | sed -n "s/.* -e '\([^']*\)\.omp-ext\.ts'.*/\1.omp-started/p")
           [ -z "$ack" ] || : > "$ack"
+          publish_omp_session_for_ack "$ack"
         fi
       fi
     fi
@@ -197,7 +227,10 @@ case "$cmd $sub" in
     case "${4:-}" in
       enter)
         if grep -Fq 'FM_OMP_HARNESS=omp' "${FM_FAKE_LAUNCH_LOG:-/dev/null}" 2>/dev/null; then
-          [ -z "${FM_FAKE_OMP_ACK:-}" ] || : > "$FM_FAKE_OMP_ACK"
+          if [ -n "${FM_FAKE_OMP_ACK:-}" ]; then
+            : > "$FM_FAKE_OMP_ACK"
+            publish_omp_session_for_ack "$FM_FAKE_OMP_ACK"
+          fi
         fi
         ;;
     esac
@@ -709,25 +742,23 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   pass "active crew-dispatch profile leaves the raw launch-command escape hatch unchanged"
 }
 
-test_raw_omp_launch_does_not_require_max_time_capability() {
-  local rec id out status launch
+test_raw_omp_launch_refuses_without_durable_session_contract() {
+  local rec id out status
   id=$(profile_id profile-raw-omp-z15b)
   rec=$(make_spawn_case profile-raw-omp claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
   printf 'invalid-for-omp\n' > "$HOME_DIR/config/omp-max-time"
   sed -i "s/ '--max-time=<value>'//" "$FAKEBIN_DIR/omp"
-  export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "omp --legacy __OMPMAXTIME__")
+    "$id" "$PROJ_DIR" "omp --legacy __OMPMAXTIME__" 2>&1)
   status=$?
-  expect_code 0 "$status" "raw OMP launch should not require the max-time capability"
-  assert_contains "$out" "spawned $id harness=omp" "spawn did not retain raw OMP identity"
-  launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "FM_OMP_HARNESS=omp omp --legacy __OMPMAXTIME__" ] \
-    || fail "raw OMP launch changed"$'\n'"actual: $launch"
-  pass "raw OMP launches ignore max-time configuration and capability checks"
+  expect_code 1 "$status" "raw OMP launch must refuse without the durable exact-session contract"
+  assert_contains "$out" "raw OMP launch commands cannot publish the durable exact-session pointer" \
+    "raw OMP refusal did not name the durable session boundary"
+  [ ! -s "$LAUNCH_LOG" ] || fail "raw OMP refusal still submitted a launch command"
+  pass "raw OMP launch commands refuse before bypassing durable exact-session storage"
 }
 
 test_claude_threads_model_and_effort() {
@@ -2327,7 +2358,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
-test_raw_omp_launch_does_not_require_max_time_capability
+test_raw_omp_launch_refuses_without_durable_session_contract
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort

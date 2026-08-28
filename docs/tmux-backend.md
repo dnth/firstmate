@@ -49,7 +49,7 @@ Verify setup by spawning a small task and confirming its `fm-<id>` window appear
 A target-existence check proves only that the pane exists.
 The deeper tmux agent-liveness probe first verifies exact window membership, then reads process names to distinguish a running harness from a bare idle shell.
 It classifies recognized Claude, Codex, OpenCode, Pi, pi-signed, Grok, and Kimi process names as `alive`, common shells as `dead`, an authoritatively absent window as `missing`, unreadable state as `unreadable`, and every other process as `ambiguous`.
-For an ordinary OMP worker or scout, invoke recovery only through `bin/fm-spawn.sh <id> --recover`; it validates the task-bound metadata, retained isolated copy and lease, and exact session before launching.
+For an ordinary OMP worker or scout, invoke recovery only through `bin/fm-spawn.sh <id> --recover`; it validates task-bound metadata, lease, and the durable `state/<id>.omp-session` pointer before resuming one exact session or binding one unambiguous legacy temporary session into durable task state.
 Legacy Bun-script OMP requires an absolute argv entrypoint equal to `omp_bin`, an actual foreground executable equal to `omp_bun`, and an independent PID executable check for that same Bun runtime.
 Standalone OMP requires `omp_bun` and `omp_bin` to be the same absolute executable path, and its exact PID executable check is decisive regardless of the process name exposed by a renamed or symlinked installation.
 For legacy env-shebang launches, a bare `bun` argv token or the canonical runtime basename is accepted only when the independent PID executable check proves the recorded Bun binary; a bare OMP token or a fresh `PATH` lookup is never identity evidence.

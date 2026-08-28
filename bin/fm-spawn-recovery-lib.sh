@@ -108,86 +108,178 @@ fm_spawn_recovery_validate_lease() { # <project> <worktree> <task-id>
   ' >/dev/null 2>&1
 }
 
-fm_spawn_recovery_select_session() { # <tasktmp> <task-id>
-  local tasktmp=$1 id=$2 session_dir candidate_count candidate
+fm_spawn_recovery_collect_direct_sessions() { # <session-dir>
+  local session_dir=$1 candidate nullglob_was_set=0
+  FM_SPAWN_RECOVERY_DIRECT_SESSIONS=()
+  [ -d "$session_dir" ] && [ ! -L "$session_dir" ] \
+    && [ -r "$session_dir" ] && [ -x "$session_dir" ] || return 1
+  shopt -q nullglob && nullglob_was_set=1
+  shopt -s nullglob
+  for candidate in "$session_dir"/*.jsonl; do
+    if [ ! -f "$candidate" ] || [ -L "$candidate" ]; then
+      [ "$nullglob_was_set" -eq 1 ] || shopt -u nullglob
+      return 1
+    fi
+    FM_SPAWN_RECOVERY_DIRECT_SESSIONS+=("$candidate")
+  done
+  [ "$nullglob_was_set" -eq 1 ] || shopt -u nullglob
+}
+
+fm_spawn_recovery_select_session() { # <state> <tasktmp> <task-id>
+  local state=$1 tasktmp=$2 id=$3 session_dir pointer legacy_dir candidate
+  state=$(cd "$state" 2>/dev/null && pwd -P) || return 1
   local -a candidates=()
   [ "${SPAWN_TASK_LOCK_HELD:-0}" = 1 ] \
     || [ "${FM_SPAWN_RECOVERY_PREFLIGHT_ONLY:-0}" = 1 ] \
     || return 1
   FM_SPAWN_RECOVERY_SESSION_MODE=fresh
-  FM_SPAWN_RECOVERY_SESSION_DIR="$tasktmp/omp-sessions"
+  FM_SPAWN_RECOVERY_SESSION_DIR="$state/$id.omp-sessions"
+  FM_SPAWN_RECOVERY_SESSION_POINTER="$state/$id.omp-session"
   FM_SPAWN_RECOVERY_RESUME_FILE=
   FM_SPAWN_RECOVERY_FRESH_SESSION_FILE=
   FM_SPAWN_RECOVERY_SESSION_DIR_CREATED=0
   FM_SPAWN_RECOVERY_TASKTMP_CREATED=0
   FM_SPAWN_RECOVERY_SESSION_DIR_WAS_EMPTY=0
+  FM_SPAWN_RECOVERY_LEGACY_SESSION_FILE=
+  FM_SPAWN_RECOVERY_LEGACY_SESSION_BOUND=0
+  FM_SPAWN_RECOVERY_POINTER_BACKUP=
+  FM_SPAWN_RECOVERY_POINTER_WAS_ABSENT=0
+  session_dir=$FM_SPAWN_RECOVERY_SESSION_DIR
+  pointer=$FM_SPAWN_RECOVERY_SESSION_POINTER
+  legacy_dir="$tasktmp/omp-sessions"
+
+  if [ -e "$pointer" ] || [ -L "$pointer" ]; then
+    [ -f "$pointer" ] && [ ! -L "$pointer" ] \
+      && [ "$(wc -l < "$pointer" 2>/dev/null | tr -d '[:space:]')" = 1 ] \
+      && [ "$(tail -c 1 "$pointer" 2>/dev/null | od -An -tuC | tr -d '[:space:]')" = 10 ] || return 1
+    [ -d "$session_dir" ] && [ ! -L "$session_dir" ] || return 1
+    IFS= read -r candidate < "$pointer" || candidate=
+    case "$candidate" in "$session_dir"/*.jsonl) ;; *) return 1 ;; esac
+    [ "$(cd "$(dirname "$candidate")" && pwd -P)" = "$(cd "$session_dir" && pwd -P)" ] \
+      && [ -f "$candidate" ] && [ ! -L "$candidate" ] || return 1
+    fm_spawn_recovery_collect_direct_sessions "$session_dir" || return 1
+    FM_SPAWN_RECOVERY_SESSION_MODE=resume
+    FM_SPAWN_RECOVERY_RESUME_FILE=$candidate
+    return 0
+  fi
+
+  if [ -e "$session_dir" ] || [ -L "$session_dir" ]; then
+    [ -d "$session_dir" ] && [ ! -L "$session_dir" ] || return 1
+    fm_spawn_recovery_collect_direct_sessions "$session_dir" || return 1
+    candidates=("${FM_SPAWN_RECOVERY_DIRECT_SESSIONS[@]}")
+    [ "${#candidates[@]}" -eq 0 ] || return 1
+    FM_SPAWN_RECOVERY_SESSION_DIR_WAS_EMPTY=1
+  else
+    FM_SPAWN_RECOVERY_SESSION_DIR_CREATED=1
+  fi
+
   if [ ! -e "$tasktmp" ] && [ ! -L "$tasktmp" ]; then
     FM_SPAWN_RECOVERY_TASKTMP_CREATED=1
     return 0
   fi
   [ -d "$tasktmp" ] && [ ! -L "$tasktmp" ] || return 1
-  session_dir=$FM_SPAWN_RECOVERY_SESSION_DIR
-  if [ ! -e "$session_dir" ] && [ ! -L "$session_dir" ]; then
-    FM_SPAWN_RECOVERY_SESSION_DIR_CREATED=1
+  if [ ! -e "$legacy_dir" ] && [ ! -L "$legacy_dir" ]; then
     return 0
   fi
-  [ -d "$session_dir" ] && [ ! -L "$session_dir" ] \
-    && [ -r "$session_dir" ] && [ -x "$session_dir" ] || return 1
-  mapfile -t candidates < <(
-    shopt -s nullglob
-    for candidate in "$session_dir"/*.jsonl; do
-      printf '%s\n' "$candidate"
-    done
-  )
-  candidate_count=${#candidates[@]}
-  case "$candidate_count" in
-    0)
-      FM_SPAWN_RECOVERY_SESSION_DIR_WAS_EMPTY=1
-      return 0
-      ;;
+  [ -d "$legacy_dir" ] && [ ! -L "$legacy_dir" ] || return 1
+  fm_spawn_recovery_collect_direct_sessions "$legacy_dir" || return 1
+  candidates=("${FM_SPAWN_RECOVERY_DIRECT_SESSIONS[@]}")
+  case "${#candidates[@]}" in
+    0) return 0 ;;
     1)
       candidate=${candidates[0]}
-      [ "$(cd "$(dirname "$candidate")" && pwd -P)" = "$(cd "$session_dir" && pwd -P)" ] || return 1
       grep -Fq 'FIRSTMATE_OP: v1 launch-brief:' "$candidate" 2>/dev/null || return 1
       FM_SPAWN_RECOVERY_SESSION_MODE=resume
-      FM_SPAWN_RECOVERY_RESUME_FILE=$candidate
+      FM_SPAWN_RECOVERY_LEGACY_SESSION_FILE=$candidate
       return 0
       ;;
     *) return 1 ;;
   esac
 }
 
+fm_spawn_recovery_bind_legacy_session() {
+  local source=${FM_SPAWN_RECOVERY_LEGACY_SESSION_FILE:-} session_dir dest mode created=0
+  [ -n "$source" ] || return 0
+  session_dir=$FM_SPAWN_RECOVERY_SESSION_DIR
+  if [ ! -e "$session_dir" ] && [ ! -L "$session_dir" ]; then
+    mkdir -p "$session_dir" || return 1
+    chmod 0700 "$session_dir" 2>/dev/null || true
+    FM_SPAWN_RECOVERY_SESSION_DIR_CREATED=1
+    created=1
+  fi
+  if [ ! -d "$session_dir" ] || [ -L "$session_dir" ]; then
+    [ "$created" = 0 ] || rmdir -- "$session_dir" 2>/dev/null || true
+    return 1
+  fi
+  dest="$session_dir/$(basename "$source")"
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    [ "$created" = 0 ] || rmdir -- "$session_dir" 2>/dev/null || true
+    return 1
+  fi
+  mode=$(stat -c %a "$source" 2>/dev/null || true)
+  if ! cat -- "$source" > "$dest"; then
+    rm -f -- "$dest"
+    [ "$created" = 0 ] || rmdir -- "$session_dir" 2>/dev/null || true
+    return 1
+  fi
+  [ -z "$mode" ] || chmod "$mode" "$dest" 2>/dev/null || true
+  FM_SPAWN_RECOVERY_RESUME_FILE=$dest
+  FM_SPAWN_RECOVERY_LEGACY_SESSION_BOUND=1
+}
+fm_spawn_recovery_prepare_session_storage() {
+  local session_dir=${FM_SPAWN_RECOVERY_SESSION_DIR:-}
+  [ -n "$session_dir" ] || return 1
+  fm_spawn_recovery_bind_legacy_session || return 1
+  if [ ! -e "$session_dir" ] && [ ! -L "$session_dir" ]; then
+    mkdir -p "$session_dir" || return 1
+    chmod 0700 "$session_dir" 2>/dev/null || true
+    FM_SPAWN_RECOVERY_SESSION_DIR_CREATED=1
+  fi
+  [ -d "$session_dir" ] && [ ! -L "$session_dir" ] || return 1
+}
+
+
 fm_spawn_recovery_backup_session() {
-  local source dir mode
+  local source dir mode pointer pointer_backup session_backup
   source=${FM_SPAWN_RECOVERY_RESUME_FILE:-}
+  pointer=${FM_SPAWN_RECOVERY_SESSION_POINTER:-}
   FM_SPAWN_RECOVERY_SESSION_BACKUP=
+  [ -n "$pointer" ] || return 1
+  if [ -e "$pointer" ] || [ -L "$pointer" ]; then
+    [ -f "$pointer" ] && [ ! -L "$pointer" ] || return 1
+    pointer_backup=$(mktemp "$(dirname "$pointer")/.fm-spawn-recovery-pointer.XXXXXX") || return 1
+    if ! cat -- "$pointer" > "$pointer_backup"; then
+      rm -f -- "$pointer_backup"
+      return 1
+    fi
+    FM_SPAWN_RECOVERY_POINTER_BACKUP=$pointer_backup
+  else
+    FM_SPAWN_RECOVERY_POINTER_WAS_ABSENT=1
+  fi
   [ "$FM_SPAWN_RECOVERY_SESSION_MODE" = resume ] || return 0
+  [ -f "$source" ] && [ ! -L "$source" ] || return 1
   dir=$(dirname "$source")
   mode=$(stat -c %a "$source" 2>/dev/null || true)
-  FM_SPAWN_RECOVERY_SESSION_BACKUP=$(mktemp "$dir/.fm-spawn-recovery-session.XXXXXX") || return 1
-  cat -- "$source" > "$FM_SPAWN_RECOVERY_SESSION_BACKUP" || return 1
-  [ -z "$mode" ] || chmod "$mode" "$FM_SPAWN_RECOVERY_SESSION_BACKUP" 2>/dev/null || true
+  session_backup=$(mktemp "$dir/.fm-spawn-recovery-session.XXXXXX") || return 1
+  if ! cat -- "$source" > "$session_backup"; then
+    rm -f -- "$session_backup"
+    return 1
+  fi
+  [ -z "$mode" ] || chmod "$mode" "$session_backup" 2>/dev/null || true
+  FM_SPAWN_RECOVERY_SESSION_BACKUP=$session_backup
 }
 
 fm_spawn_recovery_capture_fresh_session() {
-  local session_dir=${FM_SPAWN_RECOVERY_SESSION_DIR:-} candidate_count candidate
+  local session_dir=${FM_SPAWN_RECOVERY_SESSION_DIR:-} candidate
   local -a candidates=()
   [ "${FM_SPAWN_RECOVERY_SESSION_MODE:-}" = fresh ] || return 0
   [ -d "$session_dir" ] && [ ! -L "$session_dir" ] || return 0
-  [ -r "$session_dir" ] && [ -x "$session_dir" ] || return 1
-  mapfile -t candidates < <(
-    shopt -s nullglob
-    for candidate in "$session_dir"/*.jsonl; do
-      printf '%s\n' "$candidate"
-    done
-  )
-  candidate_count=${#candidates[@]}
-  case "$candidate_count" in
+  fm_spawn_recovery_collect_direct_sessions "$session_dir" || return 1
+  candidates=("${FM_SPAWN_RECOVERY_DIRECT_SESSIONS[@]}")
+  case "${#candidates[@]}" in
     0) return 0 ;;
     1)
       candidate=${candidates[0]}
-      [ -f "$candidate" ] && [ ! -L "$candidate" ] || return 1
-      [ "$(cd "$(dirname "$candidate")" && pwd -P)" = "$(cd "$session_dir" && pwd -P)" ] || return 1
       if [ -n "${FM_SPAWN_RECOVERY_FRESH_SESSION_FILE:-}" ] \
          && [ "$FM_SPAWN_RECOVERY_FRESH_SESSION_FILE" != "$candidate" ]; then
         return 1
@@ -297,7 +389,7 @@ fm_spawn_recovery_prepare() { # <state> <data> <task-id>
       ;;
   esac
   FM_SPAWN_RECOVERY_ENDPOINT_STATE=$endpoint_state
-  fm_spawn_recovery_select_session "$tasktmp" "$id" || {
+  fm_spawn_recovery_select_session "$state" "$tasktmp" "$id" || {
     echo "error: OMP recovery could not select one exact prior task session for $id; preserving task state" >&2
     return 1
   }
@@ -306,6 +398,10 @@ fm_spawn_recovery_prepare() { # <state> <data> <task-id>
   if [ "${FM_SPAWN_RECOVERY_PREFLIGHT_ONLY:-0}" = 1 ]; then
     return 0
   fi
+  fm_spawn_recovery_prepare_session_storage || {
+    echo "error: OMP recovery could not prepare durable session storage for task $id; preserving task state" >&2
+    return 1
+  }
   fm_spawn_recovery_backup_session || {
     echo "error: OMP recovery could not snapshot the exact prior session for task $id; preserving task state" >&2
     return 1
@@ -404,15 +500,43 @@ fm_spawn_recovery_remove_fresh_session_artifacts() {
       && [ "$(cd "$(dirname "$file")" && pwd -P)" = "$(cd "$session_dir" && pwd -P)" ] \
       && rm -f -- "$file"
   fi
-  if [ "${FM_SPAWN_RECOVERY_TASKTMP_CREATED:-0}" = 1 ]; then
-    rmdir -- "$tasktmp/gotmp" 2>/dev/null || true
-    rmdir -- "$session_dir" 2>/dev/null || true
-    rmdir -- "$tasktmp" 2>/dev/null || true
-    return 0
-  fi
   if [ "${FM_SPAWN_RECOVERY_SESSION_DIR_CREATED:-0}" = 1 ]; then
     rmdir -- "$session_dir" 2>/dev/null || true
   fi
+  if [ "${FM_SPAWN_RECOVERY_TASKTMP_CREATED:-0}" = 1 ]; then
+    rmdir -- "$tasktmp/gotmp" 2>/dev/null || true
+    rmdir -- "$tasktmp" 2>/dev/null || true
+  fi
+}
+
+fm_spawn_recovery_remove_legacy_session_binding() {
+  local session_dir=${FM_SPAWN_RECOVERY_SESSION_DIR:-} file=${FM_SPAWN_RECOVERY_RESUME_FILE:-}
+  [ "${FM_SPAWN_RECOVERY_LEGACY_SESSION_BOUND:-0}" = 1 ] || return 0
+  [ -f "$file" ] && [ ! -L "$file" ] \
+    && [ "$(cd "$(dirname "$file")" && pwd -P)" = "$(cd "$session_dir" && pwd -P)" ] \
+    && rm -f -- "$file"
+  if [ "${FM_SPAWN_RECOVERY_SESSION_DIR_CREATED:-0}" = 1 ]; then
+    rmdir -- "$session_dir" 2>/dev/null || true
+  fi
+}
+
+fm_spawn_recovery_restore_pointer() {
+  local pointer=${FM_SPAWN_RECOVERY_SESSION_POINTER:-} session_dir=${FM_SPAWN_RECOVERY_SESSION_DIR:-} value
+  [ -n "$pointer" ] || return 1
+  if [ -n "${FM_SPAWN_RECOVERY_POINTER_BACKUP:-}" ]; then
+    mv -f -- "$FM_SPAWN_RECOVERY_POINTER_BACKUP" "$pointer" || return 1
+    FM_SPAWN_RECOVERY_POINTER_BACKUP=
+    return 0
+  fi
+  [ "${FM_SPAWN_RECOVERY_POINTER_WAS_ABSENT:-0}" = 1 ] || return 0
+  if [ ! -e "$pointer" ] && [ ! -L "$pointer" ]; then
+    return 0
+  fi
+  [ -f "$pointer" ] && [ ! -L "$pointer" ] \
+    && [ "$(wc -l < "$pointer" 2>/dev/null | tr -d '[:space:]')" = 1 ] || return 1
+  IFS= read -r value < "$pointer" || value=
+  case "$value" in "$session_dir"/*.jsonl) ;; *) return 1 ;; esac
+  rm -f -- "$pointer"
 }
 
 fm_spawn_recovery_cleanup_artifacts() {
@@ -432,8 +556,10 @@ fm_spawn_recovery_cleanup_artifacts() {
 
 fm_spawn_recovery_complete() {
   [ "${FM_SPAWN_RECOVERY_PUBLISHED:-0}" = 1 ] || return 1
-  rm -f -- "${FM_SPAWN_RECOVERY_SESSION_BACKUP:-}"
+  rm -f -- "${FM_SPAWN_RECOVERY_SESSION_BACKUP:-}" \
+    "${FM_SPAWN_RECOVERY_POINTER_BACKUP:-}"
   FM_SPAWN_RECOVERY_SESSION_BACKUP=
+  FM_SPAWN_RECOVERY_POINTER_BACKUP=
   fm_spawn_recovery_cleanup_artifacts
 }
 
@@ -441,8 +567,10 @@ fm_spawn_recovery_abort() { # <backend> <target>
   local backend=${1:-} target=${2:-} state
   [ "${FM_SPAWN_RECOVERY_ACTIVE:-0}" = 1 ] || return 0
   if [ "${FM_SPAWN_RECOVERY_PUBLISHED:-0}" = 1 ]; then
-    rm -f -- "${FM_SPAWN_RECOVERY_SESSION_BACKUP:-}"
+    rm -f -- "${FM_SPAWN_RECOVERY_SESSION_BACKUP:-}" \
+      "${FM_SPAWN_RECOVERY_POINTER_BACKUP:-}"
     FM_SPAWN_RECOVERY_SESSION_BACKUP=
+    FM_SPAWN_RECOVERY_POINTER_BACKUP=
     fm_spawn_recovery_cleanup_artifacts
     return 0
   fi
@@ -458,7 +586,14 @@ fm_spawn_recovery_abort() { # <backend> <target>
       return 1
     fi
   fi
-  if [ -n "${FM_SPAWN_RECOVERY_SESSION_BACKUP:-}" ]; then
+  if [ "${FM_SPAWN_RECOVERY_LEGACY_SESSION_BOUND:-0}" = 1 ]; then
+    rm -f -- "${FM_SPAWN_RECOVERY_SESSION_BACKUP:-}"
+    FM_SPAWN_RECOVERY_SESSION_BACKUP=
+    fm_spawn_recovery_remove_legacy_session_binding || {
+      echo "warning: OMP recovery could not remove its failed legacy-session binding; preserving recovery artifacts and task state" >&2
+      return 1
+    }
+  elif [ -n "${FM_SPAWN_RECOVERY_SESSION_BACKUP:-}" ]; then
     mv -f -- "$FM_SPAWN_RECOVERY_SESSION_BACKUP" "$FM_SPAWN_RECOVERY_RESUME_FILE" || {
       echo "warning: OMP recovery could not restore its exact prior session snapshot; preserving recovery artifacts and task state" >&2
       return 1
@@ -473,5 +608,9 @@ fm_spawn_recovery_abort() { # <backend> <target>
     }
     fm_spawn_recovery_remove_fresh_session_artifacts
   fi
+  fm_spawn_recovery_restore_pointer || {
+    echo "warning: OMP recovery could not restore its durable session pointer; preserving recovery artifacts and task state" >&2
+    return 1
+  }
   fm_spawn_recovery_cleanup_artifacts
 }

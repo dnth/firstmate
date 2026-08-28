@@ -27,8 +27,11 @@
 # for the common case where there is no remote at all.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
-# product. Teardown proceeds only once the report exists and the shared
-# unresolved-decision completion gate verifies its captain-held inventory.
+# product. Teardown proceeds only once that report and the shared
+# unresolved-decision completion gate are both present.
+# For an ordinary OMP worker, this same guarded landed-task path retires its
+# durable state/<task-id>.omp-sessions/ and .omp-session pointer only after the
+# worktree, endpoint, and unlanded-work checks above have all succeeded.
 # Before destructive cleanup, teardown validates task check artifacts and any
 # matching quarantine entries as ordinary single-link files on the state
 # device. It refuses and preserves task state when that proof fails; otherwise
@@ -450,6 +453,7 @@ ORCA_PATH_MATCH_VERIFIED=0
 
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
+HARNESS=$(fm_meta_get "$META" harness)
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 PUBLIC_FOLLOWUP_HOME=$FM_HOME
@@ -664,6 +668,26 @@ remove_hermes_turnend_auth() {
   hooks_dir="$hermes_home/fm-turn-end.d"
   rm -f "$hooks_dir/$token"
 }
+remove_ordinary_omp_session_state() {  # <state-dir> <task-id>
+  local state_dir=$1 id=$2 pointer session_dir
+  pointer="$state_dir/$id.omp-session"
+  session_dir="$state_dir/$id.omp-sessions"
+  if [ -e "$pointer" ] || [ -L "$pointer" ]; then
+    [ -f "$pointer" ] && [ ! -L "$pointer" ] || {
+      echo "error: refusing to remove unsafe ordinary OMP session pointer for $id" >&2
+      return 1
+    }
+  fi
+  if [ -e "$session_dir" ] || [ -L "$session_dir" ]; then
+    [ -d "$session_dir" ] && [ ! -L "$session_dir" ] || {
+      echo "error: refusing to remove unsafe ordinary OMP session directory for $id" >&2
+      return 1
+    }
+  fi
+  rm -f -- "$pointer"
+  [ ! -d "$session_dir" ] || rm -rf -- "$session_dir"
+}
+
 
 retire_busy_state() {
   local state_dir=$1 id=$2 gen=${3:-}
@@ -2709,6 +2733,11 @@ remove_grok_turnend_auth "$STATE" "$ID"
 remove_kimi_turnend_auth "$STATE" "$ID"
 remove_hermes_turnend_auth "$STATE" "$ID" "$META"
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
+case "$KIND:$HARNESS" in
+  ship:omp|scout:omp)
+    remove_ordinary_omp_session_state "$STATE" "$ID" || exit 1
+    ;;
+esac
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"

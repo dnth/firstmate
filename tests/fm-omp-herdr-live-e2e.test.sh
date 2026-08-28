@@ -566,8 +566,10 @@ wait_for "worker extension readiness" file_exists "$HOME_DIR/state/$WORKER_ID.om
 wait_for "worker first turn" file_exists "$HOME_DIR/state/$WORKER_ID.turn-ended"
 wait_for "exact idle worker identity" agent_is "$WORKER_TARGET" omp 'idle done'
 WORKER_SESSION=$(session_file_for "$WORKER_TARGET")
-case "$WORKER_SESSION" in "/tmp/fm-$WORKER_ID/omp-sessions/"*.jsonl) ;; *) fail "worker Herdr identity did not bind its task-owned session" ;; esac
+case "$WORKER_SESSION" in "$HOME_DIR/state/$WORKER_ID.omp-sessions/"*.jsonl) ;; *) fail "worker Herdr identity did not bind its durable task session" ;; esac
 file_has "$WORKER_SESSION" 'Herdr worker is ready.' || fail "worker launch brief did not complete"
+[ "$(cat "$HOME_DIR/state/$WORKER_ID.omp-session")" = "$WORKER_SESSION" ] \
+  || fail "worker Herdr durable OMP session pointer did not name its exact session"
 
 # This narrow lane proves the guarded Herdr recovery lifecycle independently of
 # the primary's asynchronous notification relay.
