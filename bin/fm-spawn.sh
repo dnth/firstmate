@@ -12,7 +12,8 @@
 #   It derives the harness, backend, model, effort, delivery posture, project,
 #   branch, isolated worktree, task temporary root, and endpoint only from the
 #   task record, proves its Treehouse lease still names `fm-<task-id>`, and never
-#   allocates, returns, freshens, resets, or changes the preserved worktree.
+#   allocates, returns, freshens, or changes the preserved worktree before a failed
+#   replacement restores its exact snapshot.
 #   A valid exact durable session pointer disambiguates retained sibling sessions.
 #   Only multiple unpointed legacy task sessions refuse, because guessing can
 #   split a task transcript; an absent or empty task session directory starts a

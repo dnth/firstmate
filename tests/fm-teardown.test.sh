@@ -60,6 +60,8 @@ PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
 REAL_GIT_FOR_TEST=$(command -v git)
 export REAL_GIT_FOR_TEST
+REAL_RM_FOR_TEST=$(command -v rm)
+export REAL_RM_FOR_TEST
 REAL_PS_FOR_TEST=$(command -v ps)
 export REAL_PS_FOR_TEST
 REAL_LSOF_FOR_TEST=$(command -v lsof)
@@ -771,6 +773,40 @@ test_teardown_preserves_pointer_when_ordinary_omp_session_cleanup_fails() {
   [ -f "$pointer" ] || fail "durable-ordinary-omp-cleanup-failure: failed cleanup removed durable OMP pointer"
   [ -f "$session_file" ] || fail "durable-ordinary-omp-cleanup-failure: failed cleanup removed durable OMP session"
   pass "failed ordinary OMP cleanup preserves its durable session pointer"
+}
+
+test_teardown_preserves_session_when_ordinary_omp_pointer_cleanup_fails() {
+  local case_dir rc session_dir session_file pointer
+  case_dir=$(make_case durable-ordinary-omp-pointer-cleanup-failure)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'harness=omp' >> "$case_dir/state/task-x1.meta"
+  session_dir="$case_dir/state/task-x1.omp-sessions"
+  session_file="$session_dir/retained.jsonl"
+  pointer="$case_dir/state/task-x1.omp-session"
+  mkdir -p "$session_dir"
+  printf 'FIRSTMATE_OP: v1 launch-brief: retained\n' > "$session_file"
+  printf '%s\n' "$session_file" > "$pointer"
+  wt_commit "$case_dir" "shippable OMP work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  cat > "$case_dir/fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in */.fm-teardown-omp-session.*/pointer) exit 1 ;; esac
+done
+exec "$REAL_RM_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/rm"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "durable-ordinary-omp-pointer-cleanup-failure: teardown should refuse incomplete pointer cleanup"
+  [ -f "$pointer" ] || fail "durable-ordinary-omp-pointer-cleanup-failure: failed pointer cleanup removed durable OMP pointer"
+  [ -f "$session_file" ] || fail "durable-ordinary-omp-pointer-cleanup-failure: failed pointer cleanup removed durable OMP session"
+  pass "failed ordinary OMP pointer cleanup preserves durable session state"
 }
 
 
@@ -3628,6 +3664,7 @@ test_no_mistakes_origin_remote_allows
 test_teardown_retires_durable_ordinary_omp_sessions
 test_teardown_preserves_unlanded_ordinary_omp_sessions
 test_teardown_preserves_pointer_when_ordinary_omp_session_cleanup_fails
+test_teardown_preserves_session_when_ordinary_omp_pointer_cleanup_fails
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes

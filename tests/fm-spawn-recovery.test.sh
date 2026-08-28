@@ -37,9 +37,10 @@ printf '%s on\n' "$$" > "$HOME_DIR/state/.trace-context-effective"
 printf 'Recovery fixture: acknowledge the first turn.\n' > "$HOME_DIR/data/$ID/brief.md"
 mkdir -p "$PROJECT"
 printf 'fixture\n' > "$PROJECT/README.md"
+printf 'tracked deletion fixture\n' > "$PROJECT/rollback-delete.txt"
 git init -q -b main "$PROJECT"
 fm_git_identity fmtest fmtest@example.invalid
-git -C "$PROJECT" add README.md
+git -C "$PROJECT" add README.md rollback-delete.txt
 git -C "$PROJECT" commit -qm initial
 git init -q --bare "$ORIGIN"
 git -C "$PROJECT" remote add origin "$ORIGIN"
@@ -111,6 +112,9 @@ const prior = resume ? await Bun.file(sessionFile).text() : "";
 await Bun.write(sessionFile, `${prior}${resume ? "replacement-attempt\n" : "FIRSTMATE_OP: v1 launch-brief: fixture\n"}`);
 if (resume && process.env.OMP_FIXTURE_LOG) appendFileSync(process.env.OMP_FIXTURE_LOG, `${extension}\n`);
 if (resume && await Bun.file(".recovery-mutate-on-launch").exists()) {
+  const replacementBranch = (await Bun.file(".recovery-mutate-on-launch").text()).trim();
+  const switchBranch = Bun.spawnSync(["git", "switch", replacementBranch]);
+  if (switchBranch.exitCode !== 0) process.exit(switchBranch.exitCode ?? 1);
   await Bun.write(".recovery-replacement-edit", "replacement edit\n");
   const add = Bun.spawnSync(["git", "add", ".recovery-replacement-edit"]);
   if (add.exitCode !== 0) process.exit(add.exitCode ?? 1);
@@ -231,11 +235,15 @@ rm -f "$SESSION_DIR/symlinked.jsonl"
 rm -rf "$TASK_TMP/gotmp"
 mkdir -p "$TASK_TMP"
 printf 'pre-existing scratch\n' > "$TASK_TMP/preserve-me"
-printf 'launch mutation marker\n' > "$WORKTREE/.recovery-mutate-on-launch"
 printf 'staged recovery state\n' > "$WORKTREE/.recovery-staged"
 git -C "$WORKTREE" add .recovery-staged
 printf 'unstaged recovery state\n' >> "$WORKTREE/.recovery-staged"
 RECOVERY_HEAD=$(git -C "$WORKTREE" rev-parse HEAD) || fail "fixture could not record the pre-recovery worktree head"
+RECOVERY_ALT_BRANCH="$BRANCH-recovery-rollback"
+git -C "$WORKTREE" branch "$RECOVERY_ALT_BRANCH" "$RECOVERY_HEAD" \
+  || fail "fixture could not create the alternate replacement branch"
+printf '%s\n' "$RECOVERY_ALT_BRANCH" > "$WORKTREE/.recovery-mutate-on-launch"
+rm "$WORKTREE/rollback-delete.txt"
 INJECTED_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_BEFORE_PUBLISH=1 spawn "$ID" --recover 2>&1)
 INJECTED_STATUS=$?
 [ "$INJECTED_STATUS" -ne 0 ] || fail "recovery test injector unexpectedly published metadata"
@@ -246,9 +254,11 @@ cmp -s "$SESSION_FILE" "$LAB/session.before" || fail "failed recovery did not re
 cmp -s "$HOME_DIR/state/$ID.status" "$LAB/status.before" || fail "failed recovery rewrote task status"
 [ "$(git -C "$WORKTREE" symbolic-ref --quiet --short HEAD)" = "$BRANCH" ] || fail "failed recovery changed the branch"
 [ "$(git -C "$WORKTREE" rev-parse HEAD)" = "$RECOVERY_HEAD" ] || fail "failed recovery retained a replacement commit"
+[ "$(git -C "$WORKTREE" rev-parse "$BRANCH")" = "$RECOVERY_HEAD" ] || fail "failed recovery did not restore the recorded branch ref"
 [ -f "$WORKTREE/.recovery-preserved" ] || fail "failed recovery discarded uncommitted work"
 [ -f "$WORKTREE/.recovery-mutate-on-launch" ] || fail "failed recovery discarded pre-existing mutation marker"
 [ ! -e "$WORKTREE/.recovery-replacement-edit" ] || fail "failed recovery retained replacement worktree edits"
+[ ! -e "$WORKTREE/rollback-delete.txt" ] || fail "failed recovery restored an unstaged tracked deletion"
 [ "$(git -C "$WORKTREE" show :'.recovery-staged')" = 'staged recovery state' ] \
   || fail "failed recovery did not restore staged worktree state"
 [ "$(cat "$WORKTREE/.recovery-staged")" = $'staged recovery state\nunstaged recovery state' ] \

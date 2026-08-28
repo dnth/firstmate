@@ -306,7 +306,7 @@ fm_spawn_recovery_capture_fresh_session() {
 
 fm_spawn_recovery_snapshot_worktree() {
   local tasktmp=${FM_SPAWN_RECOVERY_TASKTMP:-} worktree=${FM_SPAWN_RECOVERY_WORKTREE:-}
-  local snapshot head
+  local snapshot head branch_ref
   [ -n "$tasktmp" ] && [ -n "$worktree" ] || return 1
   [ -d "$worktree" ] && [ ! -L "$worktree" ] || return 1
   if [ "${FM_SPAWN_RECOVERY_TASKTMP_CREATED:-0}" = 1 ]; then
@@ -320,8 +320,15 @@ fm_spawn_recovery_snapshot_worktree() {
     rm -rf -- "$snapshot"
     return 1
   }
+  branch_ref=$(git -C "$worktree" symbolic-ref -q HEAD 2>/dev/null) || {
+    rm -rf -- "$snapshot"
+    return 1
+  }
+  case "$branch_ref" in refs/heads/*) ;; *) rm -rf -- "$snapshot"; return 1 ;; esac
   printf '%s\n' "$head" > "$snapshot/head" \
+    && printf '%s\n' "$branch_ref" > "$snapshot/branch-ref" \
     && git -C "$worktree" diff --cached --binary > "$snapshot/index.patch" \
+    && git -C "$worktree" diff --binary > "$snapshot/worktree.patch" \
     && (cd "$worktree" && tar --exclude=.git -cf "$snapshot/worktree.tar" .) || {
       rm -rf -- "$snapshot"
       return 1
@@ -331,18 +338,25 @@ fm_spawn_recovery_snapshot_worktree() {
 
 fm_spawn_recovery_restore_worktree() {
   local snapshot=${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}
-  local worktree=${FM_SPAWN_RECOVERY_WORKTREE:-} head
+  local worktree=${FM_SPAWN_RECOVERY_WORKTREE:-} head branch_ref
   [ -n "$snapshot" ] || return 0
   [ -d "$snapshot" ] && [ ! -L "$snapshot" ] \
     && [ -f "$snapshot/head" ] && [ ! -L "$snapshot/head" ] \
+    && [ -f "$snapshot/branch-ref" ] && [ ! -L "$snapshot/branch-ref" ] \
     && [ -f "$snapshot/index.patch" ] && [ ! -L "$snapshot/index.patch" ] \
+    && [ -f "$snapshot/worktree.patch" ] && [ ! -L "$snapshot/worktree.patch" ] \
     && [ -f "$snapshot/worktree.tar" ] && [ ! -L "$snapshot/worktree.tar" ] \
     && [ -d "$worktree" ] && [ ! -L "$worktree" ] || return 1
   IFS= read -r head < "$snapshot/head" || return 1
+  IFS= read -r branch_ref < "$snapshot/branch-ref" || return 1
+  case "$branch_ref" in refs/heads/*) ;; *) return 1 ;; esac
   [ "$(git -C "$worktree" rev-parse --verify "$head^{commit}" 2>/dev/null || true)" = "$head" ] || return 1
-  git -C "$worktree" reset --hard "$head" >/dev/null \
+  git -C "$worktree" update-ref "$branch_ref" "$head" \
+    && git -C "$worktree" symbolic-ref HEAD "$branch_ref" \
+    && git -C "$worktree" reset --hard "$head" >/dev/null \
     && git -C "$worktree" clean -fdx >/dev/null \
     && git -C "$worktree" apply --index "$snapshot/index.patch" \
+    && git -C "$worktree" apply "$snapshot/worktree.patch" \
     && tar -xf "$snapshot/worktree.tar" -C "$worktree" || return 1
   rm -rf -- "$snapshot" || return 1
   FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT=
