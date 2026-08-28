@@ -4,6 +4,24 @@
 # Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--accepted-local-base <full-commit-sha>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>] [--allow-project-omp-extensions]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>] [--allow-project-omp-extensions]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>] [--allow-project-omp-extensions] --secondmate
+#        fm-spawn.sh <task-id> --recover
+#   --recover is the sole ordinary-worker reboot-recovery operation.
+#   It accepts only one existing recorded harness=omp ship or scout task on tmux
+#   or Herdr and refuses every non-OMP, secondmate, live, ambiguous, unreadable,
+#   ownership-mismatched, or fresh-allocation request before mutation.
+#   It derives the harness, backend, model, effort, delivery posture, project,
+#   branch, isolated worktree, task temporary root, and endpoint only from the
+#   task record, proves its Treehouse lease still names `fm-<task-id>`, and never
+#   allocates, returns, freshens, resets, or changes the preserved worktree.
+#   A surviving exactly-one task session is resumed, while an absent or empty
+#   task session directory starts a new OMP session with a continuation note.
+#   More than one session refuses, because guessing can split a task transcript.
+#   Endpoint metadata remains unchanged until the replacement's first turn
+#   acknowledges, then one atomic replacement updates only endpoint fields while
+#   retaining every unrelated record line.
+#   Failed replacement cleanup stops only the exact replacement endpoint it
+#   created or relaunched, restores a resumed session snapshot, and removes only
+#   recovery-owned artifacts; the original record and isolated worktree remain.
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -98,6 +116,9 @@
 #   Every single-task invocation holds one task-id-scoped lock across backend
 #   creation through metadata publication, so concurrent same-id spawns serialize
 #   even when they select different backends.
+#   Recovery uses the ordinary verified OMP launch template and the same adapter
+#   creation path as a fresh spawn, but it is mutually exclusive with every
+#   fresh-spawn input flag, worktree allocation, branch/base operation, and batch.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -257,6 +278,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-omp-process-lib.sh"
 # shellcheck source=bin/fm-pool-lib.sh
 . "$SCRIPT_DIR/fm-pool-lib.sh"
+# shellcheck source=bin/fm-spawn-recovery-lib.sh
+. "$SCRIPT_DIR/fm-spawn-recovery-lib.sh"
 # shellcheck source=bin/fm-spawn-herdr-reclaim-lib.sh
 . "$SCRIPT_DIR/fm-spawn-herdr-reclaim-lib.sh"
 
@@ -277,9 +300,6 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
-# Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
-# set by the batch loop below), so the guard runs once for the batch, not once per pair.
-[ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
 KIND=ship
 HARNESS_ARG=
 MODEL=
@@ -308,6 +328,7 @@ ACCEPTED_LOCAL_BASE_SET=0
 MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
+RECOVER=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -340,13 +361,14 @@ for a in "$@"; do
   case "$a" in
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
+    --recover) RECOVER=1 ;;
     --harness) want_value=harness ;;
     --harness=*) HARNESS_ARG=${a#--harness=}; HARNESS_SET=1 ;;
     --model) want_value=model ;;
     --model=*) MODEL=${a#--model=}; MODEL_SET=1 ;;
     --effort) want_value=effort ;;
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
-    --prewalk-into) want_value=prewalk-into ;;
+    --prewalk-into) want_value="prewalk-into" ;;
     --prewalk-into=*) PREWALK_INTO=${a#--prewalk-into=}; PREWALK_INTO_SET=1 ;;
     --backend) want_value=backend ;;
     --accepted-local-base)
@@ -384,6 +406,36 @@ done
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
+if [ "$RECOVER" -eq 1 ]; then
+  [ "${#POS[@]}" -eq 1 ] || {
+    echo "error: --recover requires exactly one recorded task id and accepts no project path or batch pair" >&2
+    exit 1
+  }
+  [ "$KIND" = ship ] \
+    && [ "$HARNESS_SET" -eq 0 ] \
+    && [ "$MODEL_SET" -eq 0 ] \
+    && [ "$EFFORT_SET" -eq 0 ] \
+    && [ "$PREWALK_INTO_SET" -eq 0 ] \
+    && [ "$BACKEND_SET" -eq 0 ] \
+    && [ "$ALLOW_PROJECT_OMP_EXTENSIONS" -eq 0 ] \
+    && [ "$ACCEPTED_LOCAL_BASE_SET" -eq 0 ] \
+    && [ "$MODE_SET" -eq 0 ] \
+    && [ "$YOLO_SET" -eq 0 ] \
+    && [ "$TRACEPARENT_SET" -eq 0 ] || {
+      echo "error: --recover derives every launch and delivery field from the existing task record and is mutually exclusive with fresh-spawn flags" >&2
+      exit 1
+    }
+  fm_task_id_creation_valid "${POS[0]}" || {
+    echo "error: invalid recovery task id" >&2
+    exit 2
+  }
+  RECOVERY_PRESELECTED_BACKEND=$(fm_spawn_recovery_preselect "$STATE" "${POS[0]}") || exit 1
+  fm_spawn_recovery_preflight "$STATE" "$DATA" "${POS[0]}" || exit 1
+fi
+# Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
+# set by the batch loop below), so the guard runs once for the batch, not once per pair.
+# Recovery reaches this only after its read-only task-record preselection.
+[ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -406,7 +458,9 @@ esac
 # firstmate's per-task decision, so they are required and closed-set validated
 # here rather than resolved from the project registry. Scouts deliver a report
 # and record no delivery posture; secondmate spawns hardcode theirs.
-if [ "$KIND" = ship ]; then
+if [ "$RECOVER" -eq 1 ]; then
+  :
+elif [ "$KIND" = ship ]; then
   [ "$MODE_SET" -eq 1 ] || {
     echo "error: ship spawns require --mode <no-mistakes|direct-PR|local-only>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
     exit 1
@@ -812,7 +866,9 @@ fi
 # recorded in meta only when it is NOT tmux (fm-teardown.sh and fm-watch.sh's
 # window_backend/fm_backend_of_meta already treat an absent backend= as tmux),
 # so the default path's meta stays byte-identical.
-if [ "$BACKEND_SET" -eq 1 ]; then
+if [ "$RECOVER" -eq 1 ]; then
+  BACKEND=$RECOVERY_PRESELECTED_BACKEND
+elif [ "$BACKEND_SET" -eq 1 ]; then
   BACKEND=$BACKEND_ARG
 else
   BACKEND=$(fm_backend_name)
@@ -917,6 +973,11 @@ spawn_omp_abort_clean_unchanged_worktree() {  # <context>
 
 spawn_abort_cleanup() {
   local status=$? meta
+  if [ "$RECOVER" -eq 1 ] && [ "${FM_SPAWN_RECOVERY_ACTIVE:-0}" = 1 ]; then
+    OMP_ABORT_CLEANUP=0
+    PREWALK_ABORT_PHASE=none
+    fm_spawn_recovery_abort "$BACKEND" "${T:-}" || true
+  fi
   case "$PREWALK_ABORT_PHASE" in
     lease)
       PREWALK_ABORT_PHASE=none
@@ -1098,13 +1159,16 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
-# Role partition: spawning new work is MAIN-owned. The supervision branch never
-# spawns a task or worker; it reports and leaves creation to main (contract:
-# bin/fm-lease-lib.sh; no-op in homes without a branch actor). Branch-driven
-# recovery relaunch runs through the harness adapter, not this entrypoint.
+# Role partition: both new task creation and ordinary-worker recovery are
+# MAIN-owned.  The supervision branch reports failed workers, then main enters
+# this guarded spawn interface to preserve task identity and branch custody.
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
-fm_lease_forbid_branch "new-task spawn (fm-spawn)"
+if [ "$RECOVER" -eq 1 ]; then
+  fm_lease_forbid_branch "ordinary-worker recovery (fm-spawn)"
+else
+  fm_lease_forbid_branch "new-task spawn (fm-spawn)"
+fi
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
 if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   echo "error: another spawn is already creating task $ID" >&2
@@ -1114,8 +1178,25 @@ SPAWN_TASK_LOCK_HELD=1
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
-
-if [ "$KIND" = secondmate ]; then
+if [ "$RECOVER" -eq 1 ]; then
+  fm_spawn_recovery_prepare "$STATE" "$DATA" "$ID" || exit 1
+  [ "$BACKEND" = "$FM_SPAWN_RECOVERY_OLD_BACKEND" ] || {
+    echo "error: OMP recovery backend changed while task identity was being validated; preserving task state" >&2
+    exit 1
+  }
+  KIND=$FM_SPAWN_RECOVERY_KIND
+  PROJ=$FM_SPAWN_RECOVERY_PROJECT
+  PROJ_ABS=$FM_SPAWN_RECOVERY_PROJECT
+  WT=$FM_SPAWN_RECOVERY_WORKTREE
+  BRIEF="$DATA/$ID/brief.md"
+  ARG3=omp
+  MODEL=$FM_SPAWN_RECOVERY_MODEL
+  EFFORT=$FM_SPAWN_RECOVERY_EFFORT
+  MODE=$FM_SPAWN_RECOVERY_MODE
+  YOLO=$FM_SPAWN_RECOVERY_YOLO
+  PREWALK_INTO=$FM_SPAWN_RECOVERY_PREWALK_INTO
+  ALLOW_PROJECT_OMP_EXTENSIONS=$FM_SPAWN_RECOVERY_ALLOW_PROJECT_OMP_EXTENSIONS
+elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
     ''|claude|codex|opencode|pi|pi-signed|omp|grok|kimi)
       ARG3=${POS[1]:-}
@@ -1226,7 +1307,7 @@ launch_template() {
         # OMP 17.1.8's discoverExtensionPaths path-resolves and deduplicates before loading, so this guarantees the integration without registering it twice.
         printf '%s' '__OMPENV____OMPBIN__ --session-dir __OMPSESSIONDIR__ __OMPRESUMEFLAG__--auto-approve __OMPMAXTIME____MODELFLAG____EFFORTFLAG____PREWALKFLAG__-e __OMPPRIMARY__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' '__OMPENV____OMPBIN__ --session-dir __OMPSESSIONDIR__ --auto-approve __OMPMAXTIME____MODELFLAG____EFFORTFLAG____PREWALKFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' '__OMPENV____OMPBIN__ --session-dir __OMPSESSIONDIR__ __OMPRESUMEFLAG__--auto-approve __OMPMAXTIME____MODELFLAG____EFFORTFLAG____PREWALKFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
@@ -1625,6 +1706,12 @@ if [ "$HARNESS" = omp ]; then
     exit 1
   }
   OMP_BUN_CANON=$(printf '%s\n' "$OMP_LAUNCH_IDENTITY" | sed -n '1p')
+  if [ "$RECOVER" -eq 1 ] \
+     && { [ "$OMP_BIN_CANON" != "$FM_SPAWN_RECOVERY_OMP_BIN" ] \
+       || [ "$OMP_BUN_CANON" != "$FM_SPAWN_RECOVERY_OMP_BUN" ]; }; then
+    echo "error: OMP recovery requires the recorded verified OMP and Bun identities; preserving task state" >&2
+    exit 1
+  fi
   OMP_LAUNCH_ENTRYPOINT=$(printf '%s\n' "$OMP_LAUNCH_IDENTITY" | sed -n '2p')
   OMP_BUN_LAUNCH_PATH=$(printf '%s\n' "$OMP_LAUNCH_IDENTITY" | sed -n '3p')
   if [ "$OMP_LAUNCH_ENTRYPOINT" != "$OMP_BIN_CANON" ]; then
@@ -1695,7 +1782,7 @@ if [ "$HARNESS" = omp ]; then
         exit 1
       fi
     done
-  else
+  elif [ "$RECOVER" -eq 0 ]; then
     for artifact in \
       "$STATE/$ID.meta" "$STATE/$ID.status" "$STATE/$ID.omp-ext.ts" \
       "$STATE/$ID.omp-ready" "$STATE/$ID.omp-started" "/tmp/fm-$ID"; do
@@ -2292,7 +2379,9 @@ if [ "$KIND" = secondmate ]; then
   fi
 fi
 
-if [ "$KIND" = secondmate ]; then
+if [ "$RECOVER" -eq 1 ]; then
+  :
+elif [ "$KIND" = secondmate ]; then
   [ -n "$FIRSTMATE_HOME" ] || { echo "error: no firstmate home supplied or registered for $ID" >&2; exit 1; }
   PROJ_ABS=$(validate_firstmate_home_for_spawn "$ID" "$FIRSTMATE_HOME")
   if [ -e "$DATA/secondmates.md" ] || [ -L "$DATA/secondmates.md" ]; then
@@ -2405,7 +2494,7 @@ if [ "$KIND" = secondmate ]; then
   else
     BRIEF="$DATA/$ID/brief.md"
   fi
-else
+elif [ "$RECOVER" -eq 0 ]; then
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
   WT=""
   BRIEF="$DATA/$ID/brief.md"
@@ -2636,7 +2725,9 @@ freshen_spawn_worktree_base() {  # <worktree>
 
 W="fm-$ID"
 SPAWN_START_DIR=$PROJ_ABS
-if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
+if [ "$RECOVER" -eq 1 ]; then
+  SPAWN_START_DIR=$WT
+elif [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
   treehouse_lease_args=(--lease --lease-holder "$W")
   [ -z "$ACCEPTED_LOCAL_BASE" ] || treehouse_lease_args+=(--accepted-local-base "$ACCEPTED_LOCAL_BASE")
   WT=$(cd "$PROJ_ABS" && "$SCRIPT_DIR/fm-treehouse-get.sh" "${treehouse_lease_args[@]}") || {
@@ -2660,6 +2751,21 @@ if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
   }
   SPAWN_START_DIR=$WT
 fi
+if [ "$RECOVER" -eq 1 ] && [ "$FM_SPAWN_RECOVERY_ENDPOINT_STATE" = dead ]; then
+  T=$FM_SPAWN_RECOVERY_OLD_TARGET
+  case "$BACKEND" in
+    tmux)
+      WT_TARGET=$T
+      ;;
+    herdr)
+      HERDR_SES=$FM_SPAWN_RECOVERY_HERDR_SESSION
+      HERDR_WORKSPACE_ID=$FM_SPAWN_RECOVERY_HERDR_WORKSPACE_ID
+      HERDR_TAB_ID=$FM_SPAWN_RECOVERY_HERDR_TAB_ID
+      HERDR_PANE_ID=$FM_SPAWN_RECOVERY_HERDR_PANE_ID
+      WT_TARGET=$T
+      ;;
+  esac
+else
 case "$BACKEND" in
   tmux)
     SES=$(fm_backend_tmux_container_ensure)
@@ -2840,7 +2946,7 @@ case "$BACKEND" in
       HERDR_SES=${CONTAINER%%:*}
       HERDR_WORKSPACE_ID=${CONTAINER#*:}
       HERDR_PARTIAL_CREATE_POLICY=preserve
-      [ "$PREWALK_ABORT_PHASE" != lease ] || HERDR_PARTIAL_CREATE_POLICY=prewalk-transactional
+      [ "$PREWALK_ABORT_PHASE" != lease ] || HERDR_PARTIAL_CREATE_POLICY="prewalk-transactional"
       set +e
       HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task \
         "$CONTAINER" "$W" "$SPAWN_START_DIR" "$HERDR_SEEDED_DEFAULT_TAB_ID" "$HERDR_PARTIAL_CREATE_POLICY")
@@ -2912,7 +3018,13 @@ EOF
     T="$ORCA_TERMINAL"
     ;;
 esac
-[ "$PREWALK_ABORT_PHASE" != lease ] || PREWALK_ABORT_PHASE=endpoint
+fi
+if [ "$RECOVER" -eq 1 ] && [ "$FM_SPAWN_RECOVERY_ENDPOINT_STATE" = missing ]; then
+  FM_SPAWN_RECOVERY_ENDPOINT_CREATED=1
+fi
+if [ "$RECOVER" -eq 0 ] && [ "$PREWALK_ABORT_PHASE" = lease ]; then
+  PREWALK_ABORT_PHASE=endpoint
+fi
 if [ "$KIND" = secondmate ]; then
   FM_INHERITABLE_CONFIG=trace-context \
     propagate_inheritable_config "$CONFIG" "$PROJ_ABS/config" \
@@ -3073,7 +3185,7 @@ hermes_wait_for_reasoning() {  # <effort>
 }
 
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
-  && [ "$PREWALK_WORKTREE_READY" != 1 ]; then
+  && [ "$PREWALK_WORKTREE_READY" != 1 ] && [ "$RECOVER" -eq 0 ]; then
   printf -v treehouse_get_command '%q' "$SCRIPT_DIR/fm-treehouse-get.sh"
   if [ -n "$ACCEPTED_LOCAL_BASE" ]; then
     printf -v accepted_local_base_quoted '%q' "$ACCEPTED_LOCAL_BASE"
@@ -3156,16 +3268,24 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
   fi
 fi
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
-  && [ "$PREWALK_WORKTREE_READY" != 1 ]; then
+  && [ "$PREWALK_WORKTREE_READY" != 1 ] && [ "$RECOVER" -eq 0 ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
-if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ] \
-  && [ "$PREWALK_WORKTREE_READY" != 1 ]; then
-  validate_omp_prewalk_for_launch_dir "$WT"
+if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
+  if [ "$RECOVER" -eq 1 ]; then
+    RECOVERY_PREWALK_INTO=$PREWALK_INTO
+    validate_omp_prewalk_for_launch_dir "$WT"
+    [ "$PREWALK_INTO" = "$RECOVERY_PREWALK_INTO" ] || {
+      echo "error: OMP recovery cannot reproduce the recorded prewalk configuration; preserving task state" >&2
+      exit 1
+    }
+  elif [ "$PREWALK_WORKTREE_READY" != 1 ]; then
+    validate_omp_prewalk_for_launch_dir "$WT"
+  fi
   omp_project_extension_preflight "$WT" || exit 1
 fi
 
-if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
+if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ] && [ "$RECOVER" -eq 0 ]; then
   OMP_ABORT_INITIAL_HEAD=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || {
     echo "error: OMP spawn could not bind cleanup to the initial worktree HEAD" >&2
     exit 1
@@ -3184,19 +3304,26 @@ if [ "$HARNESS" = claude ] && [ "${IS_SANDBOX:-}" = 1 ]; then
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
-# create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
-# Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
-# later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
-# targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
 TASK_TMP="/tmp/fm-$ID"
 if [ -L "$TASK_TMP" ]; then
   echo "error: task temp root must not be a symlink: $TASK_TMP" >&2
   exit 1
 fi
-mkdir -p "$TASK_TMP/gotmp"
-if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
-  OMP_SESSION_DIR="$TASK_TMP/omp-sessions"
+if [ "$RECOVER" -eq 1 ]; then
+  [ "$TASK_TMP" = "$FM_SPAWN_RECOVERY_TASKTMP" ] || {
+    echo "error: OMP recovery task temp root changed after validation; preserving task state" >&2
+    exit 1
+  }
+  mkdir -p "$TASK_TMP/gotmp"
+  OMP_SESSION_DIR=$FM_SPAWN_RECOVERY_SESSION_DIR
+  OMP_RESUME_FILE=$FM_SPAWN_RECOVERY_RESUME_FILE
   mkdir -p "$OMP_SESSION_DIR"
+else
+  mkdir -p "$TASK_TMP/gotmp"
+  if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
+    OMP_SESSION_DIR="$TASK_TMP/omp-sessions"
+    mkdir -p "$OMP_SESSION_DIR"
+  fi
 fi
 
 # Per-harness turn-end hook where enabled: a file that touches
@@ -3366,10 +3493,22 @@ export default function (pi: any) {
 EOF
       ;;
     omp)
-      OMP_READY="$STATE_REAL/$ID.omp-ready"
-      OMP_STARTED="$STATE_REAL/$ID.omp-started"
-      rm -f "$OMP_READY" "$OMP_STARTED"
-      cat > "$STATE/$ID.omp-ext.ts" <<EOF
+      if [ "$RECOVER" -eq 1 ]; then
+        fm_spawn_recovery_prepare_launch_artifacts "$STATE_REAL" "$ID" "$BRIEF" || {
+          echo "error: OMP recovery could not prepare isolated replacement launch artifacts; preserving task state" >&2
+          exit 1
+        }
+        BRIEF=$FM_SPAWN_RECOVERY_NOTE
+        OMP_EXTENSION_PATH=$FM_SPAWN_RECOVERY_EXTENSION
+        OMP_READY=$FM_SPAWN_RECOVERY_READY
+        OMP_STARTED=$FM_SPAWN_RECOVERY_STARTED
+      else
+        OMP_EXTENSION_PATH="$STATE/$ID.omp-ext.ts"
+        OMP_READY="$STATE_REAL/$ID.omp-ready"
+        OMP_STARTED="$STATE_REAL/$ID.omp-started"
+        rm -f "$OMP_READY" "$OMP_STARTED"
+      fi
+      cat > "$OMP_EXTENSION_PATH" <<EOF
 // Firstmate OMP launch acknowledgement and turn-end signal; written by fm-spawn.
 import { execFile } from "node:child_process";
 export default function (omp: any) {
@@ -3550,6 +3689,7 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+if [ "$RECOVER" -eq 0 ]; then
 {
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
@@ -3615,8 +3755,25 @@ META_WINDOW=$T
     echo "projects=$SECONDMATE_PROJECTS"
   fi
 } > "$STATE/$ID.meta"
-[ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
-if [ "$HARNESS" = omp ]; then
+fi
+if [ "$RECOVER" -eq 1 ]; then
+  if ! fm_spawn_recovery_stage_candidate_meta "$STATE_REAL" "$ID" "$BACKEND" "$T" \
+    "${HERDR_SES:-}" "${HERDR_WORKSPACE_ID:-}" "${HERDR_TAB_ID:-}" "${HERDR_PANE_ID:-}"; then
+    if [ "$FM_SPAWN_RECOVERY_ENDPOINT_STATE" = missing ]; then
+      fm_backend_kill "$BACKEND" "$T" 2>/dev/null || true
+      recovery_stage_state=$(fm_backend_agent_state "$BACKEND" "$T" 2>/dev/null || printf 'unreadable')
+      [ "$recovery_stage_state" = missing ] || {
+        echo "error: OMP recovery could not stop its unrecorded replacement endpoint after metadata staging failed; preserving task state" >&2
+        exit 1
+      }
+    fi
+    echo "error: OMP recovery could not stage replacement endpoint metadata; preserving task state" >&2
+    exit 1
+  fi
+elif [ "$BACKEND" = orca ]; then
+  ORCA_ABORT_CLEANUP=0
+fi
+if [ "$HARNESS" = omp ] && [ "$RECOVER" -eq 0 ]; then
   OMP_ABORT_CLEANUP=1
   PREWALK_ABORT_PHASE=none
 fi
@@ -3624,7 +3781,7 @@ fi
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
-sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
+sq_ompext=$(shell_quote "${OMP_EXTENSION_PATH:-$STATE/$ID.omp-ext.ts}")
 sq_ompprimary=$(shell_quote "$OMP_PRIMARY_EXTENSION")
 if [ "$OMP_LAUNCH_TEMPLATE" -eq 1 ] && [ -n "$OMP_BUN_LAUNCH_DIR" ]; then
   # The pane may be fish, so keep shell-specific lookup validation inside the
@@ -3752,6 +3909,12 @@ fi
 # tmux-like backends configure the persistent pane shell before launch. Herdr
 # instead binds both values to the one atomic `pane run` command: acceptance of
 # a separate setup command would not prove that the shell executed it.
+if [ "$RECOVER" -eq 1 ] && [ "$FM_SPAWN_RECOVERY_ENDPOINT_STATE" = dead ]; then
+  spawn_send_text_line "$T" "cd $(shell_quote "$WT")" || {
+    echo "error: OMP recovery could not enter the preserved isolated worktree in its recorded endpoint; preserving task state" >&2
+    exit 1
+  }
+fi
 HERDR_LAUNCH_ENV=
 if [ "$BACKEND" = herdr ]; then
   HERDR_LAUNCH_ENV="GOTMPDIR=$(shell_quote "$TASK_TMP/gotmp") "
@@ -3767,12 +3930,12 @@ fi
 if [ -n "$SPAWN_TRACEPARENT" ]; then
   if [ "$BACKEND" = herdr ]; then
     HERDR_LAUNCH_ENV="${HERDR_LAUNCH_ENV}TRACEPARENT=$(shell_quote "$SPAWN_TRACEPARENT") "
-    if ! echo "traceparent=$SPAWN_TRACEPARENT" >> "$STATE/$ID.meta"; then
+    if [ "$RECOVER" -eq 0 ] && ! echo "traceparent=$SPAWN_TRACEPARENT" >> "$STATE/$ID.meta"; then
       HERDR_LAUNCH_ENV=
       LAUNCH="unset TRACEPARENT; GOTMPDIR=$(shell_quote "$TASK_TMP/gotmp") $LAUNCH"
     fi
   elif spawn_send_text_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
-    if ! echo "traceparent=$SPAWN_TRACEPARENT" >> "$STATE/$ID.meta"; then
+    if [ "$RECOVER" -eq 0 ] && ! echo "traceparent=$SPAWN_TRACEPARENT" >> "$STATE/$ID.meta"; then
       LAUNCH="unset TRACEPARENT; $LAUNCH"
     fi
   else
@@ -3794,10 +3957,18 @@ if [ "$BACKEND" = herdr ]; then
     echo "error: Herdr launch pane did not reach a proven idle shell; refusing to submit $HARNESS" >&2
     exit 1
   }
+  [ "$RECOVER" -eq 0 ] || FM_SPAWN_RECOVERY_ENDPOINT_CREATED=1
 else
-  spawn_send_literal "$T" "$LAUNCH"
+  spawn_send_literal "$T" "$LAUNCH" || {
+    echo "error: launch command could not be submitted safely for $W" >&2
+    exit 1
+  }
+  [ "$RECOVER" -eq 0 ] || FM_SPAWN_RECOVERY_ENDPOINT_CREATED=1
   sleep 0.3
-  spawn_send_key "$T" Enter
+  spawn_send_key "$T" Enter || {
+    echo "error: launch command could not be submitted for $W" >&2
+    exit 1
+  }
 fi
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
@@ -3864,6 +4035,10 @@ if [ "$HARNESS" = omp ]; then
   else
     OMP_ACK_POLLS=${FM_OMP_LAUNCH_ACK_POLLS:-60}
     for _ in $(seq 1 "$OMP_ACK_POLLS"); do
+      if [ "$RECOVER" -eq 1 ] && ! fm_spawn_recovery_capture_fresh_session; then
+        echo "error: OMP recovery found an ambiguous fresh task session; preserving task state" >&2
+        exit 1
+      fi
       if [ -f "$OMP_STARTED" ]; then
         OMP_ACKED=1
         break
@@ -3871,12 +4046,31 @@ if [ "$HARNESS" = omp ]; then
       sleep "$OMP_ACK_INTERVAL"
     done
     if [ "$OMP_ACKED" -ne 1 ]; then
-      printf 'failed: OMP initial instruction was not acknowledged by a turn_start event\n' >> "$STATE/$ID.status"
+      if [ "$RECOVER" -eq 0 ]; then
+        printf 'failed: OMP initial instruction was not acknowledged by a turn_start event\n' >> "$STATE/$ID.status"
+      fi
       echo "error: OMP initial instruction was not acknowledged by a turn_start event; cleaning the owned launch" >&2
       exit 1
     fi
   fi
-  OMP_ABORT_CLEANUP=0
+  if [ "$RECOVER" -eq 1 ]; then
+    if [ "$FM_SPAWN_RECOVERY_SESSION_MODE" = fresh ] \
+       && [ -z "$FM_SPAWN_RECOVERY_FRESH_SESSION_FILE" ]; then
+      echo "error: OMP recovery did not capture its one fresh task session before acknowledgement; preserving task state" >&2
+      exit 1
+    fi
+    if [ "${FM_SPAWN_RECOVERY_TEST_FAIL_BEFORE_PUBLISH:-0}" = 1 ]; then
+      echo "error: OMP recovery test injector stopped before endpoint publication" >&2
+      exit 1
+    fi
+    fm_spawn_recovery_publish_candidate "$STATE_REAL" "$ID" "$BACKEND" "$T" || exit 1
+    fm_spawn_recovery_complete || {
+      echo "error: OMP recovery published its replacement endpoint but could not retire private recovery artifacts" >&2
+      exit 1
+    }
+  else
+    OMP_ABORT_CLEANUP=0
+  fi
 fi
 if [ "$HERMES_LAUNCH_TEMPLATE" -eq 1 ]; then
   if ! hermes_wait_for_ready; then
@@ -3961,4 +4155,8 @@ fi
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
-echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"
+if [ "$RECOVER" -eq 1 ]; then
+  echo "recovered $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"
+else
+  echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"
+fi

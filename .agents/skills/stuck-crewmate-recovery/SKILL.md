@@ -30,8 +30,11 @@ Use `treehouse status` for treehouse-backed tmux, herdr, zellij, or cmux tasks, 
 Do not sweep another home's endpoints or infer ownership from a matching window label.
 
 Before relaunch, prove that no live agent still owns the recorded task and that the existing worktree remains available.
-Preserve its uncommitted changes and commits, keep the same task identity, and resume or relaunch the recorded harness in that existing worktree with the same brief plus a concise progress note.
-Do not use a fresh generic spawn while the recorded worktree is unaccounted for, because allocating another worktree can split one task across two copies.
+For a `harness=omp` task, use only `bin/fm-spawn.sh <id> --recover`.
+It validates the recorded OMP identity, delivery contract, isolated copy, treehouse lease, session selection, and current endpoint before resuming the exact prior session or starting one fresh only when none exists.
+It preserves the original brief, progress, status, trace context, uncommitted changes, commits, task identity, and branch until the replacement acknowledges, then replaces only the recorded endpoint binding atomically.
+Do not use a generic spawn, hand-send an OMP resume command, or write task records by hand.
+For another harness, preserve the same task identity and recorded worktree while following that adapter's recovery procedure.
 If the worktree or ownership cannot be reconciled safely, leave all state intact and report the task failed or blocked with the conflicting evidence.
 
 ## Live-endpoint escalation

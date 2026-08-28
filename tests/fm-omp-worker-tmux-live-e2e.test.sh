@@ -106,15 +106,22 @@ case "\${1:-}" in
         fm-$SCOUT_ID) worktree='$SCOUT_WT' ;;
         *) echo "unexpected OMP live fixture lease holder: \$holder" >&2; exit 1 ;;
       esac
+      # Fresh fixture acquisition must satisfy fm-treehouse-get's guarded
+      # clean-base proof. Recovery never enters this branch.
       (
         cd "\$worktree" || exit 1
-        git checkout --detach --force HEAD >/dev/null &&
-        git reset --hard HEAD >/dev/null &&
+        git reset --hard HEAD >/dev/null
         git clean -fd >/dev/null
-      ) || exit \$?
+      ) || exit 1
       printf '%s\n' "\$worktree"
       exit 0
     fi
+    ;;
+  status)
+    [ "\${2:-}" = --json ] || exit 1
+    printf '[{"path":"%s","status":"leased","lease_holder":"fm-$WORKER_ID","lease_id":"worker-live"},{"path":"%s","status":"leased","lease_holder":"fm-$SCOUT_ID","lease_id":"scout-live"}]\n' \
+      '$WORKER_WT' '$SCOUT_WT'
+    exit 0
     ;;
   return)
     exit 0
@@ -237,6 +244,13 @@ spawn_omp() {
     "$ROOT/bin/fm-spawn.sh" "$id" "$PROJECT" "${args[@]}" --harness omp \
       --model openai-codex/gpt-5.6-luna --effort low
 }
+recover_omp() {
+  FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_BACKEND=tmux FM_SPAWN_NO_GUARD=1 \
+    OMP_SKIP_SETUP=1 PATH="$WRAPPER_BIN:$PATH" \
+    "$ROOT/bin/fm-spawn.sh" "$1" --recover
+}
 
 spawn_omp "$WORKER_ID" ship >/dev/null || fail "real OMP worker spawn failed"
 WORKER_META="$HOME_DIR/state/$WORKER_ID.meta"
@@ -246,6 +260,7 @@ assert_grep 'harness=omp' "$WORKER_META" "worker metadata lost exact OMP identit
 assert_grep 'kind=ship' "$WORKER_META" "worker metadata lost ship kind"
 assert_grep 'model=openai-codex/gpt-5.6-luna' "$WORKER_META" "worker metadata lost selected model"
 assert_grep 'effort=low' "$WORKER_META" "worker metadata lost selected thinking level"
+
 wait_file "$HOME_DIR/state/$WORKER_ID.omp-ready" || fail "OMP worker extension did not report session readiness"
 wait_file "$HOME_DIR/state/$WORKER_ID.turn-ended" || fail "initial OMP worker turn did not complete"
 wait_text_count "$WORKER_TARGET" OMP_INITIAL_DONE 2 || fail "initial OMP worker response was not observed"
@@ -253,6 +268,54 @@ wait_launch_brief_once || fail "OMP worker initial launch brief was not persiste
 assert_contains "$(capture "$WORKER_TARGET")" 'GPT-5.6-Luna' "OMP worker did not display the selected model"
 assert_contains "$(capture "$WORKER_TARGET")" 'low' "OMP worker did not display the selected thinking level"
 [ "$(agent_state "$WORKER_TARGET")" = alive ] || fail "idle OMP worker was not classified alive"
+# The narrow live recovery lane avoids additional composer steering so it can
+# isolate the guarded restart path when a current OMP build changes composer
+# rendering independently of launch and recovery semantics.
+if [ "${FM_OMP_TMUX_RECOVERY_ONLY:-0}" = 1 ]; then
+  SESSION_DIR="/tmp/fm-$WORKER_ID/omp-sessions"
+  SESSION_FILE=
+  for candidate in "$SESSION_DIR"/*.jsonl; do
+    [ -f "$candidate" ] || continue
+    SESSION_FILE=$candidate
+    break
+  done
+  [ -n "$SESSION_FILE" ] || fail "OMP worker session file was not retained for recovery"
+  WORKER_META_BEFORE="$LAB/worker.meta.before"
+  WORKER_BRIEF_BEFORE="$LAB/worker.brief.before"
+  cp "$WORKER_META" "$WORKER_META_BEFORE"
+  cp "$HOME_DIR/data/$WORKER_ID/brief.md" "$WORKER_BRIEF_BEFORE"
+  printf 'preserve this uncommitted recovery fixture change\n' > "$WORKER_WT/.recovery-preserved"
+  WORKER_BRANCH=$(git -C "$WORKER_WT" symbolic-ref --quiet --short HEAD) \
+    || fail "OMP worker recovery fixture lost its non-default branch"
+  PATH="$WRAPPER_BIN:$PATH" tmux kill-window -t "$WORKER_TARGET"
+  for _ in $(seq 1 120); do
+    [ "$(agent_state "$WORKER_TARGET")" = missing ] && break
+    sleep 0.25
+  done
+  [ "$(agent_state "$WORKER_TARGET")" = missing ] \
+    || fail "OMP worker endpoint did not become missing for guarded recovery"
+  RECOVERY_OUTPUT=$(recover_omp "$WORKER_ID") || fail "guarded OMP worker recovery failed"
+  assert_contains "$RECOVERY_OUTPUT" "recovered $WORKER_ID harness=omp" \
+    "guarded recovery did not report the recovered worker"
+  for _ in $(seq 1 160); do
+    [ "$(agent_state "$WORKER_TARGET")" = alive ] && break
+    sleep 0.25
+  done
+  [ "$(agent_state "$WORKER_TARGET")" = alive ] \
+    || fail "guarded OMP recovery did not restore a live agent"
+  cmp -s "$WORKER_META" "$WORKER_META_BEFORE" \
+    || fail "guarded recovery rewrote same-endpoint metadata"
+  cmp -s "$HOME_DIR/data/$WORKER_ID/brief.md" "$WORKER_BRIEF_BEFORE" \
+    || fail "guarded recovery rewrote the preserved brief"
+  [ "$(git -C "$WORKER_WT" symbolic-ref --quiet --short HEAD)" = "$WORKER_BRANCH" ] \
+    || fail "guarded recovery changed the worker branch"
+  [ -f "$WORKER_WT/.recovery-preserved" ] \
+    || fail "guarded recovery discarded uncommitted task work"
+  rm -f "$WORKER_WT/.recovery-preserved"
+  PATH="$WRAPPER_BIN:$PATH" tmux kill-window -t "$WORKER_TARGET"
+  pass "real tmux OMP guarded recovery preserves the task copy and retained session"
+  exit 0
+fi
 
 rm -f "$HOME_DIR/state/$WORKER_ID.turn-ended"
 run_send "$WORKER_ID" 'Respond exactly OMP_IDLE_STEER_DONE.' || fail "idle OMP steer was not acknowledged"
@@ -290,23 +353,33 @@ for _ in $(seq 1 120); do
 done
 [ "$(agent_state "$WORKER_TARGET")" = dead ] || fail "OMP clean exit did not return to the shell"
 SESSION_DIR="/tmp/fm-$WORKER_ID/omp-sessions"
-SESSION_FILE=$(find "$SESSION_DIR" -type f -name '*.jsonl' -print 2>/dev/null | head -1)
-[ -n "$SESSION_FILE" ] || fail "OMP worker session file was not retained for resume"
-
-OMP_RESUME_BUN=$(sed -n 's/^omp_bun=//p' "$HOME_DIR/state/$WORKER_ID.meta")
-OMP_RESUME_BIN=$(sed -n 's/^omp_bin=//p' "$HOME_DIR/state/$WORKER_ID.meta")
-[ -x "$OMP_RESUME_BUN" ] && [ -x "$OMP_RESUME_BIN" ] || fail "OMP resume metadata lost its canonical Bun/OMP pair"
-RESUME_ENV="FM_OMP_BUN='$OMP_RESUME_BUN' FM_OMP_BIN='$OMP_RESUME_BIN' FM_OMP_HARNESS=omp"
-if [ "$OMP_RESUME_BUN" != "$OMP_RESUME_BIN" ]; then
-  RESUME_ENV="$RESUME_ENV PATH='$(dirname "$OMP_RESUME_BUN")'\${PATH:+:\$PATH}"
-fi
-RESUME_COMMAND="$RESUME_ENV '$OMP_RESUME_BIN' --session-dir '$SESSION_DIR' --resume '$SESSION_FILE' --auto-approve -e '$HOME_DIR/state/$WORKER_ID.omp-ext.ts'"
-rm -f "$HOME_DIR/state/$WORKER_ID.omp-ready"
-PATH="$WRAPPER_BIN:$PATH" tmux send-keys -t "$WORKER_TARGET" -l "$RESUME_COMMAND"
-PATH="$WRAPPER_BIN:$PATH" tmux send-keys -t "$WORKER_TARGET" Enter
-wait_file "$HOME_DIR/state/$WORKER_ID.omp-ready" 160 || fail "OMP resume extension did not report readiness"
-wait_idle "$WORKER_TARGET" 160 || fail "OMP resume did not restore an idle composer"
-[ "$(agent_state "$WORKER_TARGET")" = alive ] || fail "OMP resume did not restore the live agent"
+SESSION_FILE=$(find "$SESSION_DIR" -type f -name '*.jsonl' -print -quit 2>/dev/null)
+[ -n "$SESSION_FILE" ] || fail "OMP worker session file was not retained for recovery"
+WORKER_META_BEFORE="$LAB/worker.meta.before"
+WORKER_BRIEF_BEFORE="$LAB/worker.brief.before"
+WORKER_STATUS_BEFORE="$LAB/worker.status.before"
+cp "$WORKER_META" "$WORKER_META_BEFORE"
+cp "$HOME_DIR/data/$WORKER_ID/brief.md" "$WORKER_BRIEF_BEFORE"
+printf 'signal: preserved recovery fixture event\n' > "$HOME_DIR/state/$WORKER_ID.status"
+cp "$HOME_DIR/state/$WORKER_ID.status" "$WORKER_STATUS_BEFORE"
+printf 'preserve this uncommitted recovery fixture change\n' > "$WORKER_WT/.recovery-preserved"
+WORKER_BRANCH=$(git -C "$WORKER_WT" symbolic-ref --quiet --short HEAD) \
+  || fail "OMP worker recovery fixture lost its non-default branch"
+RECOVERY_OUTPUT=$(recover_omp "$WORKER_ID") || fail "guarded OMP worker recovery failed"
+assert_contains "$RECOVERY_OUTPUT" "recovered $WORKER_ID harness=omp" "guarded recovery did not report the recovered worker"
+cmp -s "$WORKER_META" "$WORKER_META_BEFORE" \
+  || fail "guarded recovery rewrote metadata beyond its same-endpoint replacement"
+cmp -s "$HOME_DIR/data/$WORKER_ID/brief.md" "$WORKER_BRIEF_BEFORE" \
+  || fail "guarded recovery rewrote the preserved brief"
+cmp -s "$HOME_DIR/state/$WORKER_ID.status" "$WORKER_STATUS_BEFORE" \
+  || fail "guarded recovery rewrote preserved task status"
+[ "$(git -C "$WORKER_WT" symbolic-ref --quiet --short HEAD)" = "$WORKER_BRANCH" ] \
+  || fail "guarded recovery changed the worker branch"
+[ -f "$WORKER_WT/.recovery-preserved" ] \
+  || fail "guarded recovery discarded uncommitted task work"
+wait_idle "$WORKER_TARGET" 160 || fail "guarded OMP recovery did not restore an idle composer"
+[ "$(agent_state "$WORKER_TARGET")" = alive ] || fail "guarded OMP recovery did not restore the live agent"
+rm -f "$WORKER_WT/.recovery-preserved"
 rm -f "$HOME_DIR/state/$WORKER_ID.turn-ended"
 run_send "$WORKER_ID" 'Reply with the remembered session token only.' || fail "resumed OMP session did not accept input"
 wait_file "$HOME_DIR/state/$WORKER_ID.turn-ended" || fail "resumed OMP session did not complete a turn"

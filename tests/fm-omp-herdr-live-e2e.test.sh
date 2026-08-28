@@ -483,6 +483,11 @@ spawn_task() { # <id> [--scout]
       --model openai-codex/gpt-5.6-luna --effort low "${delivery_args[@]}" "$@"
 }
 
+recover_task() { # <id>
+  fm_env FM_SPAWN_NO_GUARD=1 FM_OMP_LAUNCH_ACK_INTERVAL=0.25 \
+    "$ROOT/bin/fm-spawn.sh" "$1" --recover
+}
+
 # --- real primary ------------------------------------------------------------
 mkdir -p "$PRIMARY_HOME/sessions"
 printf 'herdr\n' > "$PRIMARY_HOME/config/backend"
@@ -563,6 +568,52 @@ wait_for "exact idle worker identity" agent_is "$WORKER_TARGET" omp 'idle done'
 WORKER_SESSION=$(session_file_for "$WORKER_TARGET")
 case "$WORKER_SESSION" in "/tmp/fm-$WORKER_ID/omp-sessions/"*.jsonl) ;; *) fail "worker Herdr identity did not bind its task-owned session" ;; esac
 file_has "$WORKER_SESSION" 'Herdr worker is ready.' || fail "worker launch brief did not complete"
+
+# This narrow lane proves the guarded Herdr recovery lifecycle independently of
+# the primary's asynchronous notification relay.
+if [ "${FM_OMP_HERDR_RECOVERY_ONLY:-0}" = 1 ]; then
+  git -C "$WORKER_WT" switch -c "fm/$WORKER_ID-recovery" >/dev/null \
+    || fail "Herdr recovery fixture could not create its isolated task branch"
+  WORKER_BRANCH=$(git -C "$WORKER_WT" symbolic-ref --quiet --short HEAD) \
+    || fail "Herdr worker recovery fixture lost its non-default branch"
+  WORKER_BRIEF_BEFORE="$LAB/worker-brief-before.md"
+  WORKER_STATUS_BEFORE="$LAB/worker-status-before"
+  cp "$HOME_DIR/data/$WORKER_ID/brief.md" "$WORKER_BRIEF_BEFORE"
+  printf 'signal: preserved Herdr recovery fixture event\n' > "$HOME_DIR/state/$WORKER_ID.status"
+  cp "$HOME_DIR/state/$WORKER_ID.status" "$WORKER_STATUS_BEFORE"
+  printf 'preserved Herdr recovery fixture change\n' > "$WORKER_WT/.recovery-preserved"
+  lab pane close "$(pane_id "$WORKER_TARGET")" >/dev/null \
+    || fail "guarded Herdr worker pane removal failed"
+  wait_for "exact worker pane absence before recovery" pane_missing "$WORKER_TARGET"
+  recovery_output=$(recover_task "$WORKER_ID") \
+    || fail "guarded OMP Herdr worker recovery failed"
+  assert_contains "$recovery_output" "recovered $WORKER_ID harness=omp" \
+    "guarded Herdr recovery did not report the recovered worker"
+  WORKER_TARGET=$(sed -n 's/^window=//p' "$WORKER_META")
+  [ -n "$WORKER_TARGET" ] || fail "guarded Herdr recovery did not publish a replacement endpoint"
+  [ "$(sed -n 's/^worktree=//p' "$WORKER_META")" = "$WORKER_WT" ] \
+    || fail "guarded Herdr recovery changed the worker isolated worktree"
+  assert_grep "herdr_session=$SESSION" "$WORKER_META" \
+    "guarded Herdr recovery changed the exact lab session"
+  [ "$(git -C "$WORKER_WT" symbolic-ref --quiet --short HEAD)" = "$WORKER_BRANCH" ] \
+    || fail "guarded Herdr recovery changed the worker branch"
+  [ -f "$WORKER_WT/.recovery-preserved" ] \
+    || fail "guarded Herdr recovery discarded uncommitted task work"
+  cmp -s "$HOME_DIR/data/$WORKER_ID/brief.md" "$WORKER_BRIEF_BEFORE" \
+    || fail "guarded Herdr recovery rewrote the preserved brief"
+  cmp -s "$HOME_DIR/state/$WORKER_ID.status" "$WORKER_STATUS_BEFORE" \
+    || fail "guarded Herdr recovery rewrote task status"
+  wait_for "recovered exact idle worker identity" agent_is "$WORKER_TARGET" omp 'idle done'
+  RESUMED_WORKER_SESSION=$(session_file_for "$WORKER_TARGET")
+  [ "$RESUMED_WORKER_SESSION" = "$WORKER_SESSION" ] \
+    || fail "guarded Herdr recovery changed the retained session identity"
+  rm -f "$WORKER_WT/.recovery-preserved"
+  lab pane close "$(pane_id "$WORKER_TARGET")" >/dev/null \
+    || fail "guarded recovered worker pane removal failed"
+  wait_for "exact recovered worker pane absence" pane_missing "$WORKER_TARGET"
+  pass "real Herdr OMP guarded recovery preserves the task copy and retained session"
+  exit 0
+fi
 await_primary_wake_and_drain "worker startup turn-end delivery" "$worker_start_wake_offset" \
   "FIRSTMATE WATCHER WAKE: signal: $HOME_DIR/state/$WORKER_ID.turn-ended" \
   "$HOME_DIR/state/$WORKER_ID.turn-ended"
@@ -658,6 +709,54 @@ await_primary_wake_and_drain "worker idle turn-end delivery" "$worker_idle_wake_
   "FIRSTMATE WATCHER WAKE: signal: $HOME_DIR/state/$WORKER_ID.turn-ended" \
   "$HOME_DIR/state/$WORKER_ID.turn-ended"
 
+
+# Exercise the production recovery entrypoint after an exact guarded pane loss.
+rm -f "$HOME_DIR/state/$WORKER_ID.turn-ended"
+WORKER_BRANCH=$(git -C "$WORKER_WT" symbolic-ref --quiet --short HEAD) \
+  || fail "Herdr worker recovery fixture lost its non-default branch"
+WORKER_BRIEF_BEFORE="$LAB/worker-brief-before.md"
+cp "$HOME_DIR/data/$WORKER_ID/brief.md" "$WORKER_BRIEF_BEFORE"
+printf 'preserved Herdr recovery fixture change\n' > "$WORKER_WT/.recovery-preserved"
+worker_recovery_wake_offset=$(session_offset "$PRIMARY_SESSION") || exit 1
+lab pane close "$(pane_id "$WORKER_TARGET")" >/dev/null \
+  || fail "guarded Herdr worker pane removal failed"
+wait_for "exact worker pane absence before recovery" pane_missing "$WORKER_TARGET"
+recovery_output=$(recover_task "$WORKER_ID") \
+  || fail "guarded OMP Herdr worker recovery failed"
+assert_contains "$recovery_output" "recovered $WORKER_ID harness=omp" \
+  "guarded Herdr recovery did not report the recovered worker"
+WORKER_TARGET=$(sed -n 's/^window=//p' "$WORKER_META")
+[ -n "$WORKER_TARGET" ] || fail "guarded Herdr recovery did not publish a replacement endpoint"
+[ "$(sed -n 's/^worktree=//p' "$WORKER_META")" = "$WORKER_WT" ] \
+  || fail "guarded Herdr recovery changed the worker isolated worktree"
+[ "$(git -C "$WORKER_WT" symbolic-ref --quiet --short HEAD)" = "$WORKER_BRANCH" ] \
+  || fail "guarded Herdr recovery changed the worker branch"
+[ -f "$WORKER_WT/.recovery-preserved" ] \
+  || fail "guarded Herdr recovery discarded uncommitted task work"
+cmp -s "$HOME_DIR/data/$WORKER_ID/brief.md" "$WORKER_BRIEF_BEFORE" \
+  || fail "guarded Herdr recovery rewrote the preserved brief"
+wait_for "recovered exact idle worker identity" agent_is "$WORKER_TARGET" omp 'idle done'
+RESUMED_WORKER_SESSION=$(session_file_for "$WORKER_TARGET")
+[ "$RESUMED_WORKER_SESSION" = "$WORKER_SESSION" ] \
+  || fail "guarded Herdr recovery changed the retained session identity"
+wait_for "recovered worker first turn" file_exists "$HOME_DIR/state/$WORKER_ID.turn-ended"
+await_primary_wake_and_drain "worker recovery turn-end delivery" "$worker_recovery_wake_offset" \
+  "FIRSTMATE WATCHER WAKE: signal: $HOME_DIR/state/$WORKER_ID.turn-ended" \
+  "$HOME_DIR/state/$WORKER_ID.turn-ended"
+rm -f "$WORKER_WT/.recovery-preserved" "$HOME_DIR/state/$WORKER_ID.turn-ended"
+worker_recovery_text='Reply exactly: The recovered worker message was processed.'
+worker_recovery_offset=$(session_offset "$WORKER_SESSION") || exit 1
+worker_recovery_steer_wake_offset=$(session_offset "$PRIMARY_SESSION") || exit 1
+send_task "$WORKER_ID" "$worker_recovery_text" \
+  || fail "recovered Herdr worker did not accept input"
+wait_for "recovered worker exact steering event" session_has_exact_user_after \
+  "$WORKER_SESSION" "$worker_recovery_offset" "$worker_recovery_text" false
+wait_for "recovered worker turn completion" file_exists "$HOME_DIR/state/$WORKER_ID.turn-ended"
+wait_for "recovered worker response" file_has "$WORKER_SESSION" 'The recovered worker message was processed.'
+wait_for "recovered worker return to idle" agent_is "$WORKER_TARGET" omp 'idle done'
+await_primary_wake_and_drain "recovered worker turn-end delivery" "$worker_recovery_steer_wake_offset" \
+  "FIRSTMATE WATCHER WAKE: signal: $HOME_DIR/state/$WORKER_ID.turn-ended" \
+  "$HOME_DIR/state/$WORKER_ID.turn-ended"
 worker_exit_offset=$(session_offset "$WORKER_SESSION") || exit 1
 send_task "$WORKER_ID" /exit || fail "production worker /exit was not event-confirmed"
 wait_for "exact worker pane absence" pane_missing "$WORKER_TARGET"
