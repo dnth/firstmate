@@ -2811,7 +2811,14 @@ if [ "$RECOVER" -eq 1 ] && [ "$FM_SPAWN_RECOVERY_ENDPOINT_STATE" = dead ]; then
 else
 case "$BACKEND" in
   tmux)
-    SES=$(fm_backend_tmux_container_ensure)
+    if [ "$RECOVER" -eq 1 ]; then
+      SES=$(fm_backend_tmux_container_ensure "$FM_SPAWN_RECOVERY_TMUX_SESSION") || {
+        echo "error: OMP recovery could not restore its recorded tmux session; preserving task state" >&2
+        exit 1
+      }
+    else
+      SES=$(fm_backend_tmux_container_ensure)
+    fi
     T="$SES:$W"
     # #134 robustness (tmux): fm_backend_tmux_create_task captures a stable window
     # id and pins the window name (automatic-rename/allow-rename off) so a captain's

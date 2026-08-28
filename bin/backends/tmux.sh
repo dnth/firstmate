@@ -61,9 +61,15 @@ fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
 
 # fm_backend_tmux_container_ensure: reuse the current tmux session when
 # firstmate itself runs inside tmux, else ensure a dedicated detached
-# "firstmate" session exists. Mirrors fm-spawn.sh's container-ensure block;
-# prints the resolved session name.
-fm_backend_tmux_container_ensure() {
+# "firstmate" session exists. An explicit session name is used exactly, which
+# lets guarded recovery recreate a missing endpoint in its recorded session.
+fm_backend_tmux_container_ensure() {  # [<session-name>]
+  local requested=${1:-}
+  if [ -n "$requested" ]; then
+    tmux has-session -t "=$requested" 2>/dev/null || tmux new-session -d -s "$requested" || return 1
+    printf '%s\n' "$requested"
+    return 0
+  fi
   if [ -n "${TMUX:-}" ]; then
     tmux display-message -p '#S'
   else

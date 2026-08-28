@@ -363,7 +363,7 @@ fm_spawn_recovery_restore_worktree() {
 }
 
 fm_spawn_recovery_prepare() { # <state> <data> <task-id>
-  local state=$1 data=$2 id=$3 meta kind harness tasktmp model effort old_backend old_target endpoint_state
+  local state=$1 data=$2 id=$3 meta kind harness tasktmp model effort old_backend old_target endpoint_state tmux_session
   local project worktree branch expected_tmp prewalk prewalk_count allow_extensions allow_count
   local traceparent traceparent_count
   meta="$state/$id.meta"
@@ -387,6 +387,15 @@ fm_spawn_recovery_prepare() { # <state> <data> <task-id>
   old_backend=$FM_BACKEND_VALIDATED_BACKEND
   old_target=$FM_BACKEND_VALIDATED_TARGET
   case "$old_backend" in tmux|herdr) ;; *) return 1 ;; esac
+  FM_SPAWN_RECOVERY_TMUX_SESSION=
+  if [ "$old_backend" = tmux ]; then
+    case "$old_target" in
+      *:*) tmux_session=${old_target%%:*} ;;
+      *) return 1 ;;
+    esac
+    [ -n "$tmux_session" ] || return 1
+    FM_SPAWN_RECOVERY_TMUX_SESSION=$tmux_session
+  fi
   FM_SPAWN_RECOVERY_HERDR_SESSION=
   FM_SPAWN_RECOVERY_HERDR_WORKSPACE_ID=
   FM_SPAWN_RECOVERY_HERDR_TAB_ID=

@@ -10,6 +10,7 @@ command -v tmux >/dev/null 2>&1 || fail "tmux is required for the recovery fixtu
 
 LAB=$(fm_test_tmproot fm-spawn-recovery)
 REAL_TMUX=$(command -v tmux)
+REAL_TAR=$(command -v tar)
 SOCKET="fm-spawn-recovery-$$"
 HOME_DIR="$LAB/home"
 PROJECT="$LAB/project"
@@ -56,6 +57,11 @@ TASK_TMP_OWNED=1
 cat > "$WRAPPER_BIN/tmux" <<SH
 #!/usr/bin/env bash
 exec '$REAL_TMUX' -L '$SOCKET' "\$@"
+SH
+cat > "$WRAPPER_BIN/tar" <<SH
+#!/usr/bin/env bash
+[ "\${FM_SPAWN_RECOVERY_TEST_FAIL_SNAPSHOT:-0}" != 1 ] || exit 1
+exec '$REAL_TAR' "\$@"
 SH
 cat > "$WRAPPER_BIN/treehouse" <<SH
 #!/usr/bin/env bash
@@ -135,7 +141,7 @@ await turnStart();
 await new Promise((resolve) => setTimeout(resolve, 20));
 await new Promise(() => {});
 JS
-chmod +x "$WRAPPER_BIN/tmux" "$WRAPPER_BIN/treehouse" "$WRAPPER_BIN/omp"
+chmod +x "$WRAPPER_BIN/tmux" "$WRAPPER_BIN/tar" "$WRAPPER_BIN/treehouse" "$WRAPPER_BIN/omp"
 
 FIXTURE_PATH="$WRAPPER_BIN:$PATH"
 export OMP_FIXTURE_LOG="$LAB/omp-launches"
@@ -194,6 +200,12 @@ RECORDED_TRACEPARENT=$(sed -n 's/^traceparent=//p' "$META")
   || fail "initial worker did not receive its recorded trace context"
 printf '%s off\n' "$$" > "$HOME_DIR/state/.trace-context-effective"
 
+PATH="$FIXTURE_PATH" tmux kill-window -t "$TARGET"
+wait_for_state missing || fail "fixture endpoint did not become missing"
+RECORDED_TMUX_SESSION="recovery-$ID"
+awk -v target="$RECORDED_TMUX_SESSION:fm-$ID" '/^window=/ { print "window=" target; next } { print }' "$META" > "$LAB/meta.recorded-session"
+mv "$LAB/meta.recorded-session" "$META"
+TARGET="$RECORDED_TMUX_SESSION:fm-$ID"
 printf 'uncommitted recovery state\n' > "$WORKTREE/.recovery-preserved"
 printf 'signal: preserved fixture event\n' > "$HOME_DIR/state/$ID.status"
 cp "$META" "$LAB/meta.before"
@@ -204,13 +216,13 @@ BRANCH=$(git -C "$WORKTREE" symbolic-ref --quiet --short HEAD) || fail "fixture 
 assert_contains "$(cat "$META")" "branch=$BRANCH" \
   "initial worker did not record its exact branch identity"
 
-PATH="$FIXTURE_PATH" tmux kill-window -t "$TARGET"
-wait_for_state missing || fail "fixture endpoint did not become missing"
 printf 'FIRSTMATE_OP: v1 launch-brief: retained-sibling\n' > "$SESSION_DIR/retained-sibling.jsonl"
 POINTER_OUTPUT=$(spawn "$ID" --recover) || fail "authoritative durable pointer did not disambiguate retained sessions"
 assert_contains "$POINTER_OUTPUT" "recovered $ID harness=omp" \
   "authoritative-pointer recovery did not report success"
 wait_for_state alive || fail "authoritative-pointer recovery was not live"
+[ "$(PATH="$FIXTURE_PATH" tmux display-message -p -t "$TARGET" '#S')" = "$RECORDED_TMUX_SESSION" ] \
+  || fail "recovery did not recreate the worker in its recorded tmux session"
 [ "$(cat "$SESSION_POINTER")" = "$SESSION_FILE" ] \
   || fail "authoritative-pointer recovery changed the selected exact session"
 case "$(tail -n 1 "$OMP_FIXTURE_LOG")" in
@@ -310,6 +322,14 @@ PATH="$FIXTURE_PATH" tmux kill-window -t "$TARGET"
 wait_for_state missing || fail "dead-endpoint recovery did not leave a removable endpoint"
 rm -rf "$TASK_TMP"
 [ ! -e "$TASK_TMP" ] || fail "fixture could not remove volatile task scratch"
+SNAPSHOT_FAILURE_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_SNAPSHOT=1 spawn "$ID" --recover 2>&1)
+SNAPSHOT_FAILURE_STATUS=$?
+[ "$SNAPSHOT_FAILURE_STATUS" -ne 0 ] || fail "snapshot-failure recovery unexpectedly launched"
+assert_contains "$SNAPSHOT_FAILURE_OUTPUT" "could not snapshot the preserved isolated worktree" \
+  "snapshot-failure recovery did not name its snapshot boundary"
+wait_for_state missing || fail "snapshot-failure recovery created an endpoint"
+[ ! -e "$TASK_TMP" ] && [ ! -L "$TASK_TMP" ] \
+  || fail "snapshot-failure recovery retained attempt-owned task scratch"
 DURABLE_OUTPUT=$(spawn "$ID" --recover) || fail "recovery after task scratch removal failed"
 assert_contains "$DURABLE_OUTPUT" "recovered $ID harness=omp" \
   "durable-session recovery did not report success"

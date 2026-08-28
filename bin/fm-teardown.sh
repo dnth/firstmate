@@ -729,7 +729,12 @@ remove_ordinary_omp_session_state() {  # <state-dir> <task-id>
     [ "$pointer_present" != 1 ] || mv -- "$pointer_backup" "$pointer" 2>/dev/null || true
     return 1
   fi
-  rm -rf -- "$transaction" || true
+  if ! rm -rf -- "$transaction"; then
+    [ "$session_present" != 1 ] || mv -- "$session_backup" "$session_dir" || return 1
+    [ "$pointer_present" != 1 ] || mv -- "$pointer_backup" "$pointer" || return 1
+    rmdir -- "$transaction" 2>/dev/null || true
+    return 1
+  fi
 }
 
 
