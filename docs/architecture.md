@@ -98,7 +98,7 @@ Ordinary local task steering uses a durable sequenced record under `state/<id>.i
 `bin/fm-task-inbox-lib.sh` owns the record, sequence, doorbell, acknowledgement layout, and watcher retry ladder.
 `fm-send.sh` owns the local inbox-versus-typed selector and enqueue-time decision closure.
 On the typed plane, `fm-send.sh` retains popup settle, OMP and Hermes post-submit turn-start checks, OMP's queued-busy exception, and supervised recovery.
-Successful text sends then receive the existing `FM_SEND_SETTLE` pause so immediate peeks catch the receiving turn, while the sub-supervisor uses only the shared submit core and pays neither fm-send-only step.
+Successful typed text sends then receive the existing `FM_SEND_SETTLE` pause so immediate peeks catch the receiving turn, while the sub-supervisor uses only the shared submit core and pays neither fm-send-only step.
 
 ## Busy state is semantic, per adapter
 
