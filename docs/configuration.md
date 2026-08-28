@@ -698,9 +698,12 @@ FM_BUSY_REGEX=          # optional override for rendered delivery guards and Gro
 FM_COMPOSER_IDLE_RE=    # optional override for the fleet-wide empty-composer placeholder regex, applied after ghost and border stripping. Unset installs the verified default alternation in bin/fm-composer-lib.sh, which also treats Hermes' busy `Ctrl+C to interrupt…` placeholder as empty composer content so a retried Enter cannot read it as pending typed input; it applies to both the tmux and herdr composer readers, and FM_BACKEND_HERDR_IDLE_RE inherits it
 FM_COMPOSER_GHOST_LUMA_MAX=128   # fleet-wide: max perceived luminance (0.299R+0.587G+0.114B, 0-255) for a TRUECOLOR foreground to count as de-emphasised ghost/placeholder text and be stripped; dim/faint (SGR 2) is stripped regardless. Assumes a dark terminal theme (bin/fm-composer-lib.sh's fm_composer_strip_ghost, shared by the tmux and herdr composer readers)
 GROK_HOME=              # optional Grok config home for firstmate's global grok turn-end hook; defaults to ~/.grok
-FM_SEND_RETRIES=3       # fm-send Enter-retry attempts after typing the line once
-FM_SEND_SLEEP=0.4       # seconds between fm-send submit checks
-FM_SEND_SETTLE=1        # seconds fm-send waits after a successful text submit; 0 disables
+FM_TASK_INBOX_GRACE_SECS=90  # seconds before an unhandled local task record is eligible for a watcher re-ring, and between later attempts
+FM_TASK_INBOX_RING_MAX=3     # watcher doorbell attempts before one ordinary stale wake escalates the unhandled record
+FM_TASK_INBOX_LOCK_WAIT_SECS=5 # bounded wait for inbox sequence allocation and fm-send's final metadata revalidation; invalid values use 5
+FM_SEND_RETRIES=3       # typed-plane fm-send Enter-retry attempts after typing the line once
+FM_SEND_SLEEP=0.4       # seconds between typed-plane fm-send submit checks
+FM_SEND_SETTLE=1        # seconds fm-send waits after a successful typed submit; 0 disables
 FM_SEND_TURNSTART_TIMEOUT=1  # OMP-only seconds to verify an idle submit started a turn; accepted range 0.1..3
 FM_SEND_TURNSTART_POLL=0.1   # OMP-only turn-start sampling interval; accepted range 0.02..timeout
 # Initially idle, non-/exit OMP text submission requires Perl Time::HiRes for its monotonic turn-start deadline.

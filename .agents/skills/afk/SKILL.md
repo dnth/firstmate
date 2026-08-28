@@ -119,9 +119,7 @@ border-aware detector as the composer guard.
 For herdr, idle-baseline submits first seek native agent-state showing a real turn started, then use the shared composer verdict when native state stays idle.
 A cleared composer confirms delivery, while pending text retries Enter and remains pending except on Herdr's OMP-only queued path.
 A bordered-empty or ghost-only composer is recognized as empty where that backend uses composer confirmation, rather than mistaken for a swallowed Enter.
-`fm-send.sh` uses the same primitive and exits non-zero
-when a steer's Enter is positively swallowed, so firstmate learns an instruction
-did not land instead of leaving it unsubmitted.
+`fm-send.sh` uses the same primitive only on its typed plane and exits non-zero when that plane's Enter is positively swallowed; ordinary local text steers use the durable inbox and do not treat doorbell submission as delivery proof.
 
 **Busy-queued Enter exception (opencode 1.18.4 and OMP).**
 Some busy harnesses keep accepted queued text visible in the composer.

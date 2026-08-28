@@ -74,7 +74,8 @@ This active probe is scoped to spawn-time worktree discovery and is not advertis
 The adapter records the previously active tab and immediately restores it with `go-to-tab-by-id`.
 There is a narrow visible race between those calls that no current Zellij flag can remove.
 
-Literal send uses bracketed paste followed by a separate explicit Enter.
+An ordinary metadata-routed `fm-send.sh` text steer becomes a durable steering-inbox record, and only its best-effort constant doorbell passes through Zellij's submit machinery.
+On the typed plane, literal send uses bracketed paste followed by a separate explicit Enter.
 The adapter supports `Enter`, `Esc`, and the one-argument key expression `Ctrl c` through the shared key vocabulary.
 Zellij exposes no cursor-row, ANSI composer style, or native agent-state signal, so submit acknowledgement remains content-delta based.
 This can distinguish no change from a changed screen but is less precise than tmux's structural box reader or Herdr's native state plus structural classifier.

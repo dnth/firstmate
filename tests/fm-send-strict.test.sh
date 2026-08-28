@@ -111,8 +111,11 @@ test_exact_lane_id_send_still_works() {
     "$SEND" mpf-lane-m8 "lost dispatch" >/dev/null 2>"$err"; rc=$?
   expect_code 0 "$rc" "exact task id send should succeed when metadata exists"
   got=$(cat "$log")
-  assert_contains "$got" "target=sess:fm-mpf-lane-m8 literal=1 arg=lost dispatch" "exact id should type literal text to the meta target"
-  assert_contains "$got" "target=sess:fm-mpf-lane-m8 literal=0 arg=Enter" "exact id should submit with Enter"
+  assert_contains "$got" "target=sess:fm-mpf-lane-m8 literal=1 arg=Firstmate instruction waiting" \
+    "exact id should ring the doorbell at the meta target"
+  assert_contains "$got" "target=sess:fm-mpf-lane-m8 literal=0 arg=Enter" "exact id should submit the doorbell with Enter"
+  grep -qF 'lost dispatch' "$home/state/mpf-lane-m8.inbox/001.msg" \
+    || fail "exact id should record the steer in the task inbox"
   pass "fm-send strict: exact task/lane ids resolve through home metadata"
 }
 
@@ -227,10 +230,10 @@ SH
   PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
     FM_FAKE_TMUX_INVENTORY=fm-omp-bound FM_FAKE_TMUX_CAPTURE_FILE="$capture" \
     FM_FAKE_TMUX_BUSY_AFTER_ENTER=1 FM_SEND_SETTLE=0 \
-    "$SEND" omp-bound "bound geometry" >/dev/null 2>"$err"; rc=$?
+    "$SEND" omp-bound "/bound-geometry" >/dev/null 2>"$err"; rc=$?
   [ "$rc" -eq 0 ] || fail "OMP send with exact metadata-bound Bun should succeed despite PATH drift: $(cat "$err")"
   got=$(cat "$log")
-  assert_contains "$got" "literal=1 arg=bound geometry" \
+  assert_contains "$got" "literal=1 arg=/bound-geometry" \
     "OMP send did not type after validating its task-bound Bun"
 
   before=$(wc -l < "$log" | tr -d ' ')
@@ -239,7 +242,7 @@ SH
   mv "$home/state/omp-bound.meta.next" "$home/state/omp-bound.meta"
   PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
     FM_FAKE_TMUX_INVENTORY=fm-omp-bound FM_FAKE_TMUX_CAPTURE_FILE="$capture" FM_SEND_SETTLE=0 \
-    "$SEND" omp-bound "must refuse" >/dev/null 2>"$err"; rc=$?
+    "$SEND" omp-bound "/must-refuse" >/dev/null 2>"$err"; rc=$?
   [ "$rc" -ne 0 ] || fail "OMP send accepted metadata Bun that mismatched the live process"
   assert_contains "$(cat "$err")" "does not match a live task-bound Bun/OMP process" \
     "OMP mismatched-Bun refusal did not name the identity failure"
@@ -274,10 +277,13 @@ test_healthy_fm_id_send_still_works() {
     "$SEND" fm-lane-ok "hello captain" >/dev/null 2>"$err"; rc=$?
   expect_code 0 "$rc" "healthy fm-id send should succeed"
   got=$(cat "$log")
-  assert_contains "$got" "target=sess:fm-lane-ok literal=1 arg=hello captain" "healthy send should type literal text to the meta target"
-  assert_contains "$got" "target=sess:fm-lane-ok literal=0 arg=Enter" "healthy send should submit with Enter"
+  assert_contains "$got" "target=sess:fm-lane-ok literal=1 arg=Firstmate instruction waiting" \
+    "healthy send should ring the doorbell at the meta target"
+  assert_contains "$got" "target=sess:fm-lane-ok literal=0 arg=Enter" "healthy send should submit the doorbell with Enter"
+  grep -qF 'hello captain' "$home/state/lane-ok.inbox/001.msg" \
+    || fail "healthy send should record the steer in the task inbox"
   assert_contains "$(cat "$err")" "requested message WILL still be sent" "fm-send guard banner should keep send-specific continuation wording"
-  pass "fm-send strict: healthy fm-<id> sends still type once and submit"
+  pass "fm-send strict: healthy fm-<id> sends record the steer and ring once"
 }
 
 test_exact_lane_id_send_still_works

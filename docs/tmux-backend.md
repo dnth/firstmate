@@ -92,8 +92,8 @@ The supervisor guard selects only the detected primary harness's signature rathe
 It types a message once and retries Enter only while the backend still permits another safe submission attempt.
 A proven empty composer is the ordinary positive delivery acknowledgement.
 Text left in established structure remains `pending`, text in ambiguous structure remains unproven, and unreadable or unsafe state remains unknown.
-`fm-send.sh` reports every unconfirmed verdict as a failure except the narrow already-busy OMP queue verdict below.
-For an initially idle OMP target, composer clearance remains submit proof while `fm-send.sh` owns the subsequent turn-start and supervised-recovery contract.
+An ordinary metadata-routed `fm-send.sh` text steer becomes a durable steering-inbox record plus a best-effort constant doorbell line (`bin/fm-task-inbox-lib.sh`).
+The verdicts above remain delivery-critical for the typed plane, where `fm-send.sh` preserves the fork's submit and OMP/Hermes turn-start verification.
 
 OpenCode 1.18.4 has one busy-queue exception.
 While OpenCode is mid-turn, Enter queues the message but leaves its text visible until the turn completes.

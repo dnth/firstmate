@@ -265,9 +265,7 @@ If a pane shows the exit banner, relaunch with `--continue` to resume the sessio
 While opencode is mid-turn, the composer accepts Enter as a "send when the turn
 ends" keystroke but does not clear the typed text from the composer until the
 turn actually finishes.
-Without a conversion, every `fm-send` to a busy opencode pane exits non-zero on a
-false "Enter swallowed", and every daemon escalation that lands while the
-primary is mid-turn is treated as wedged.
+Without a conversion, every typed-plane `fm-send` to a busy opencode pane exits non-zero on a false "Enter swallowed", and every daemon escalation that lands while the primary is mid-turn is treated as wedged.
 Tmux delegates this OpenCode exception to `fm_composer_queued_enter_verdict` in `bin/fm-composer-lib.sh`; herdr uses that policy only for its separate OMP path.
 The backend-specific signals and OMP's narrower `queued-unconfirmed` result are documented in `docs/tmux-backend.md` and `docs/herdr-backend.md`.
 Regression coverage is `tests/fm-tmux-submit-busy.test.sh`, `tests/fm-composer-lib.test.sh`, and `tests/fm-backend-herdr.test.sh`.

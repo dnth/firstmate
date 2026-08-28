@@ -94,8 +94,10 @@ The daemon injects only into an affirmatively `empty` composer, so both `pending
 Unsupported supervisor backends refuse at daemon startup.
 Stalled escalation delivery writes `state/.subsuper-inject-wedged` and attempts a configured backend-independent active alert after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
 On an unmarked return, `bin/fm-afk-return.sh` owns ordered shutdown, durable catch-up evidence, and the fail-closed gate that keeps ordinary work behind every live firstmate-actionable blocker.
-`fm-send.sh` selects a pre-Enter popup-settle for slash commands and for codex `$...` skill invocations using metadata-routed target `harness=` values.
-`fm-send.sh` owns the OMP and Hermes post-submit turn-start checks, OMP's queued-busy exception, and the supervised-recovery contract documented in its header.
+Ordinary local task steering uses a durable sequenced record under `state/<id>.inbox/`; the endpoint receives only a constant doorbell, and the worker acknowledges action by moving the record into `handled/`.
+`bin/fm-task-inbox-lib.sh` owns the record, sequence, doorbell, acknowledgement layout, and watcher retry ladder.
+`fm-send.sh` owns the local inbox-versus-typed selector and enqueue-time decision closure.
+On the typed plane, `fm-send.sh` retains popup settle, OMP and Hermes post-submit turn-start checks, OMP's queued-busy exception, and supervised recovery.
 Successful text sends then receive the existing `FM_SEND_SETTLE` pause so immediate peeks catch the receiving turn, while the sub-supervisor uses only the shared submit core and pays neither fm-send-only step.
 
 ## Busy state is semantic, per adapter

@@ -104,6 +104,8 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-runpod-lib.sh
 . "$SCRIPT_DIR/fm-runpod-lib.sh"
+# shellcheck source=bin/fm-task-inbox-lib.sh
+. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -280,6 +282,61 @@ window_label() {
   local w=$1 task
   task=$(window_to_task "$w" "$STATE")
   [ -n "$task" ] && printf 'fm-%s' "$task"
+}
+
+inbox_steer_check() {  # <window> <task>
+  local window=$1 task=$2 action verb record count tail40 reason ring_rc
+  local meta backend label harness omp_runtime omp_bin
+  action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0
+  verb=${action%% *}
+  [ "$verb" != quiet ] || return 0
+  record=${action#* }
+  count=
+  if [ "$verb" = escalate ]; then
+    count=${record##* }
+    record=${record% *}
+  fi
+  meta=$(fm_backend_meta_for_window "$window" "$STATE" 2>/dev/null || true)
+  [ -n "$meta" ] || return 0
+  backend=$(fm_backend_of_meta "$meta")
+  label=$(window_label "$window")
+  harness=$(fm_meta_get "$meta" harness)
+  omp_runtime=$(fm_meta_get "$meta" omp_bun)
+  omp_bin=$(fm_meta_get "$meta" omp_bin)
+  tail40=$(fm_backend_capture "$backend" "$window" 40 "$label" 2>/dev/null) || tail40=
+  window_is_busy "$window" "$tail40" && return 0
+  case "$verb" in
+    ring)
+      ring_rc=0
+      fm_task_inbox_ring "$backend" "$window" "$record" "$label" \
+        "$harness" "$omp_runtime" "$omp_bin" || ring_rc=$?
+      if ! fm_task_inbox_record_ring "$STATE" "$task" "$record"; then
+        if [ ! -f "$record" ]; then
+          fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
+          return 0
+        fi
+        if [ -d "${record%/*}" ]; then
+          reason="stale: $window (steering-inbox ladder bookkeeping unwritable: ${record%/*}/.ring-state cannot be written while $record stays unhandled; inspect the inbox directory)"
+          fm_wake_append stale "$window" "$reason" || exit 1
+          wake "$reason"
+        fi
+      fi
+      triage_log "steer-inbox delivery attempt: $task ${record##*/} result=$ring_rc"
+      ;;
+    escalate)
+      reason="stale: $window (unread firstmate instruction: $record still unhandled after $count doorbell delivery attempts with an idle pane; inspect the worker)"
+      if [ ! -d "${record%/*}" ] || [ ! -f "$record" ]; then
+        fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
+        return 0
+      fi
+      fm_wake_append stale "$window" "$reason" || exit 1
+      if ! fm_task_inbox_record_escalated "$STATE" "$task" "$record"; then
+        echo "error: stale wake was queued for $task but its inbox escalation marker could not be written" >&2
+        exit 1
+      fi
+      wake "$reason"
+      ;;
+  esac
 }
 
 recorded_windows() {
@@ -1130,6 +1187,7 @@ EOF
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
+    [ -z "$task" ] || inbox_steer_check "$w" "$task"
     key=${w//:/_}
     key=${key//\//_}
     key=${key//./_}

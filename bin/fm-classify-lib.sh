@@ -185,7 +185,8 @@ status_is_paused_or_captain_held() {  # <status-line>
 # captain-held backlog transfer referencing that key CLOSES it; a later unrelated
 # terminal line never clears an open captain decision.
 # Who WRITES the closing line is owned elsewhere: the answering firstmate closes
-# at answer time through fm-send's --resolve-key (bin/fm-send.sh header), and a
+# at inbox enqueue or confirmed typed delivery through fm-send's --resolve-key
+# (bin/fm-send.sh header), and a
 # worker self-closes only a blocker that cleared without an answer (bin/fm-brief.sh
 # rule 6), so closure never depends on a busy worker's discipline.
 #
