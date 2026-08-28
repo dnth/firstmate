@@ -183,13 +183,15 @@
 #   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
 #   $vars and silently breaks ad-hoc `for ... in $pairs` loops).
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
-#     __BRIEF__    absolute path to data/<task-id>/brief.md
+#     __BRIEF__    absolute path to data/<task-id>/brief.md, or a private staged
+#                  recovery note that prepends that preserved brief
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __OMPEXT__   absolute path to state/<task-id>.omp-ext.ts (OMP turn-start,
-#                  durable exact-session pointer publication, and turn-end extension)
+#                  durable exact-session pointer publication, and turn-end extension),
+#                  or a private staged recovery extension
 #     __OMPSESSIONDIR__ durable state/<task-id>.omp-sessions for ordinary workers,
 #                  or state/omp-sessions in an OMP secondmate home
 #     __OMPRESUMEFLAG__ empty for a fresh OMP launch or the exact durable prior session
@@ -1205,6 +1207,9 @@ if [ "$RECOVER" -eq 1 ]; then
   YOLO=$FM_SPAWN_RECOVERY_YOLO
   PREWALK_INTO=$FM_SPAWN_RECOVERY_PREWALK_INTO
   ALLOW_PROJECT_OMP_EXTENSIONS=$FM_SPAWN_RECOVERY_ALLOW_PROJECT_OMP_EXTENSIONS
+  if [ "$BACKEND" = herdr ]; then
+    HERDR_SESSION=$FM_SPAWN_RECOVERY_HERDR_SESSION
+  fi
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
     ''|claude|codex|opencode|pi|pi-signed|omp|grok|kimi)
@@ -3730,7 +3735,14 @@ fi
 # carrier, and this host only delivers it. The validated --traceparent value
 # then IS the decision, so the enablement snapshot handed to the new Secondmate
 # agrees with the carrier it receives exactly as on the local path.
-if [ "$TRACEPARENT_SET" -eq 1 ]; then
+if [ "$RECOVER" -eq 1 ]; then
+  SPAWN_TRACE_EFFECTIVE=off
+  SPAWN_TRACEPARENT=
+  if [ "$FM_SPAWN_RECOVERY_TRACEPARENT_PRESENT" = 1 ]; then
+    SPAWN_TRACE_EFFECTIVE=on
+    SPAWN_TRACEPARENT=$FM_SPAWN_RECOVERY_TRACEPARENT
+  fi
+elif [ "$TRACEPARENT_SET" -eq 1 ]; then
   SPAWN_TRACE_EFFECTIVE=on
   SPAWN_TRACEPARENT=$TRACEPARENT_ARG
 else

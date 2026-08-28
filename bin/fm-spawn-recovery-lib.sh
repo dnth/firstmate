@@ -306,6 +306,7 @@ fm_spawn_recovery_capture_fresh_session() {
 fm_spawn_recovery_prepare() { # <state> <data> <task-id>
   local state=$1 data=$2 id=$3 meta kind harness tasktmp model effort old_backend old_target endpoint_state
   local project worktree branch expected_tmp prewalk prewalk_count allow_extensions allow_count
+  local traceparent traceparent_count
   meta="$state/$id.meta"
   FM_SPAWN_RECOVERY_ACTIVE=1
   FM_SPAWN_RECOVERY_PUBLISHED=0
@@ -316,6 +317,8 @@ fm_spawn_recovery_prepare() { # <state> <data> <task-id>
   FM_SPAWN_RECOVERY_EXTENSION=
   FM_SPAWN_RECOVERY_READY=
   FM_SPAWN_RECOVERY_STARTED=
+  FM_SPAWN_RECOVERY_TRACEPARENT=
+  FM_SPAWN_RECOVERY_TRACEPARENT_PRESENT=0
   [ -f "$meta" ] && [ ! -L "$meta" ] || {
     echo "error: OMP recovery requires regular recorded metadata for task $id; preserving task state" >&2
     return 1
@@ -389,6 +392,23 @@ fm_spawn_recovery_prepare() { # <state> <data> <task-id>
     *) return 1 ;;
   esac
   FM_SPAWN_RECOVERY_ALLOW_PROJECT_OMP_EXTENSIONS=$allow_extensions
+  traceparent_count=$(fm_spawn_recovery_meta_count "$meta" traceparent)
+  case "$traceparent_count" in
+    0) ;;
+    1)
+      traceparent=$(fm_spawn_recovery_exact_meta_value "$meta" traceparent 2>/dev/null || true)
+      fm_trace_context_valid "$traceparent" || {
+        echo "error: OMP recovery found an invalid recorded trace context for task $id; preserving task state" >&2
+        return 1
+      }
+      FM_SPAWN_RECOVERY_TRACEPARENT=$traceparent
+      FM_SPAWN_RECOVERY_TRACEPARENT_PRESENT=1
+      ;;
+    *)
+      echo "error: OMP recovery found ambiguous recorded trace context for task $id; preserving task state" >&2
+      return 1
+      ;;
+  esac
   [ -f "$data/$id/brief.md" ] && [ ! -L "$data/$id/brief.md" ] || {
     echo "error: OMP recovery requires the preserved regular brief for task $id; preserving task state" >&2
     return 1

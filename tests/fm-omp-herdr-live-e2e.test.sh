@@ -484,8 +484,13 @@ spawn_task() { # <id> [--scout]
 }
 
 recover_task() { # <id>
-  fm_env FM_SPAWN_NO_GUARD=1 FM_OMP_LAUNCH_ACK_INTERVAL=0.25 \
-    "$ROOT/bin/fm-spawn.sh" "$1" --recover
+  if [ "${FM_OMP_HERDR_RECOVERY_ONLY:-0}" = 1 ]; then
+    fm_env env -u HERDR_SESSION FM_SPAWN_NO_GUARD=1 FM_OMP_LAUNCH_ACK_INTERVAL=0.25 \
+      "$ROOT/bin/fm-spawn.sh" "$1" --recover
+  else
+    fm_env FM_SPAWN_NO_GUARD=1 FM_OMP_LAUNCH_ACK_INTERVAL=0.25 \
+      "$ROOT/bin/fm-spawn.sh" "$1" --recover
+  fi
 }
 
 # --- real primary ------------------------------------------------------------
@@ -574,8 +579,6 @@ file_has "$WORKER_SESSION" 'Herdr worker is ready.' || fail "worker launch brief
 # This narrow lane proves the guarded Herdr recovery lifecycle independently of
 # the primary's asynchronous notification relay.
 if [ "${FM_OMP_HERDR_RECOVERY_ONLY:-0}" = 1 ]; then
-  git -C "$WORKER_WT" switch -c "fm/$WORKER_ID-recovery" >/dev/null \
-    || fail "Herdr recovery fixture could not create its isolated task branch"
   WORKER_BRANCH=$(git -C "$WORKER_WT" symbolic-ref --quiet --short HEAD) \
     || fail "Herdr worker recovery fixture lost its non-default branch"
   WORKER_BRIEF_BEFORE="$LAB/worker-brief-before.md"

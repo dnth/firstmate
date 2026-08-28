@@ -320,7 +320,7 @@ When a secondmate is launched on Pi or pi-signed, `fm-spawn.sh --secondmate` lau
 | Interrupt | Single Escape stops the active turn without exiting the session. |
 | Skill invocation | `/skill:<name>`, for example `/skill:no-mistakes`. |
 | Autonomy | `--auto-approve` |
-| Resume | Use the exact selected OMP binary with `--session-dir /tmp/fm-<id>/omp-sessions --resume <session-file> --auto-approve -e state/<id>.omp-ext.ts`. |
+| Resume | For an ordinary task, use only `bin/fm-spawn.sh <id> --recover`, which binds the durable `state/<id>.omp-session` pointer; never construct an OMP resume command by hand. |
 
 OMP is an exact harness identity and is never normalized to Pi.
 `bin/fm-omp-capabilities.sh` owns exact executable resolution and the selected OMP executable's launch and recovery capability checks that run before `fm-spawn` creates an endpoint.
@@ -328,7 +328,7 @@ A failed OMP preflight never launches another executable as a fallback.
 Workers and scouts receive one typed `launch-brief` positional argument and an external per-task extension under `state/`.
 The extension reports `session_start` readiness, acknowledges the initial instruction through `turn_start`, and touches the task's turn-completion marker on every `turn_end`.
 Firstmate waits for the first `turn_start` acknowledgement before reporting a successful spawn.
-OMP workers keep their sessions under the task temp root so recovery can resume the exact conversation and ordinary cleanup can remove the session files with the rest of the task temp.
+Ordinary OMP workers keep sessions under `state/<id>.omp-sessions` with `state/<id>.omp-session` naming the exact resumable conversation, while tasktmp remains recreatable launch scratch.
 
 [The tmux backend guide](../../../docs/tmux-backend.md#current-behavior-and-safety) owns OMP's launch identity, supported canonical paths, composer geometry, submission, and recovery behavior.
 [The Herdr backend guide](../../../docs/herdr-backend.md#composer-and-injection-safety) owns OMP's native identity, composer, busy steering, normal exit, and blocked-injection behavior on Herdr.

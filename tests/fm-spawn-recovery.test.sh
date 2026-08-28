@@ -32,6 +32,8 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$HOME_DIR/data/$ID" "$HOME_DIR/state" "$HOME_DIR/config" "$HOME_DIR/projects" "$WRAPPER_BIN"
+printf '%s\n' "$$" > "$HOME_DIR/state/.lock"
+printf '%s on\n' "$$" > "$HOME_DIR/state/.trace-context-effective"
 printf 'Recovery fixture: acknowledge the first turn.\n' > "$HOME_DIR/data/$ID/brief.md"
 mkdir -p "$PROJECT"
 printf 'fixture\n' > "$PROJECT/README.md"
@@ -102,14 +104,19 @@ const resume = value("--resume");
 const extension = value("-e", "--extension");
 if (!sessionDir || !extension) process.exit(2);
 if (process.env.GOTMPDIR) await Bun.write(`${process.env.GOTMPDIR}/fixture-build-artifact`, "fixture build artifact\n");
+if (process.env.GOTMPDIR) await Bun.write(`${process.env.GOTMPDIR}/traceparent`, process.env.TRACEPARENT ?? "");
 const sessionFile = `${sessionDir}/fixture-session.jsonl`;
 const prior = resume ? await Bun.file(sessionFile).text() : "";
 await Bun.write(sessionFile, `${prior}${resume ? "replacement-attempt\n" : "FIRSTMATE_OP: v1 launch-brief: fixture\n"}`);
-const source = await Bun.file(extension).text();
-const pointer = source.match(/const sessionPointer = "([^"]+)";/)?.[1];
-if (pointer) await Bun.write(pointer, `${sessionFile}\n`);
-const paths = [...source.matchAll(/execFile\("touch", \["([^"]+)"\]\)/g)].map((match) => match[1]);
-Bun.spawnSync({ cmd: ["touch", ...paths] });
+const handlers = new Map();
+const mod = await import(`${new URL(`file://${extension}`).href}?fixture=${process.pid}-${Date.now()}`);
+mod.default({ on(event, handler) { handlers.set(event, handler); } });
+const sessionStart = handlers.get("session_start");
+const turnStart = handlers.get("turn_start");
+if (!sessionStart || !turnStart) process.exit(3);
+await sessionStart({}, { sessionManager: { getSessionFile: () => sessionFile } });
+await turnStart();
+await new Promise((resolve) => setTimeout(resolve, 20));
 await new Promise(() => {});
 JS
 chmod +x "$WRAPPER_BIN/tmux" "$WRAPPER_BIN/treehouse" "$WRAPPER_BIN/omp"
@@ -164,6 +171,11 @@ wait_file "$SESSION_POINTER" || fail "initial worker did not publish its durable
 [ "$(cat "$SESSION_POINTER")" = "$SESSION_FILE" ] \
   || fail "initial worker durable OMP session pointer did not name its exact session"
 wait_file "$HOME_DIR/state/$ID.omp-started" || fail "initial worker did not acknowledge its launch"
+RECORDED_TRACEPARENT=$(sed -n 's/^traceparent=//p' "$META")
+[ -n "$RECORDED_TRACEPARENT" ] || fail "initial worker did not record trace context"
+[ "$(cat "$TASK_TMP/gotmp/traceparent")" = "$RECORDED_TRACEPARENT" ] \
+  || fail "initial worker did not receive its recorded trace context"
+printf '%s off\n' "$$" > "$HOME_DIR/state/.trace-context-effective"
 
 printf 'uncommitted recovery state\n' > "$WORKTREE/.recovery-preserved"
 printf 'signal: preserved fixture event\n' > "$HOME_DIR/state/$ID.status"
@@ -184,6 +196,8 @@ assert_contains "$POINTER_OUTPUT" "recovered $ID harness=omp" \
 wait_for_state alive || fail "authoritative-pointer recovery was not live"
 [ "$(cat "$SESSION_POINTER")" = "$SESSION_FILE" ] \
   || fail "authoritative-pointer recovery changed the selected exact session"
+[ "$(cat "$TASK_TMP/gotmp/traceparent")" = "$RECORDED_TRACEPARENT" ] \
+  || fail "recovery did not preserve the recorded trace context"
 PATH="$FIXTURE_PATH" tmux kill-window -t "$TARGET"
 wait_for_state missing || fail "authoritative-pointer fixture endpoint did not become missing"
 rm -f "$SESSION_DIR/retained-sibling.jsonl"
