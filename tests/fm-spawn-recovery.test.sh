@@ -243,6 +243,14 @@ assert_contains "$POSTPUBLISH_OUTPUT" "published its replacement endpoint" \
 wait_for_state missing || fail "post-publication cleanup failure retained replacement endpoint"
 cmp -s "$META" "$LAB/meta.before" || fail "post-publication cleanup failure retained replacement metadata"
 cmp -s "$SESSION_FILE" "$LAB/session.before" || fail "post-publication cleanup failure did not restore the exact session bytes"
+LATE_FINALIZATION_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_ROLLBACK_FINALIZATION=1 spawn "$ID" --recover 2>&1)
+LATE_FINALIZATION_STATUS=$?
+[ "$LATE_FINALIZATION_STATUS" -ne 0 ] || fail "late rollback finalization failure unexpectedly succeeded"
+assert_contains "$LATE_FINALIZATION_OUTPUT" "published its replacement endpoint" \
+  "late rollback finalization failure did not reach endpoint finalization"
+wait_for_state missing || fail "late rollback finalization failure retained replacement endpoint"
+cmp -s "$META" "$LAB/meta.before" || fail "late rollback finalization failure retained replacement metadata"
+cmp -s "$SESSION_FILE" "$LAB/session.before" || fail "late rollback finalization failure did not restore the exact session bytes"
 ln -s "$SESSION_FILE" "$SESSION_DIR/symlinked.jsonl"
 SYMLINK_OUTPUT=$(spawn "$ID" --recover 2>&1)
 SYMLINK_STATUS=$?

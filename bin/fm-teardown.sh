@@ -668,6 +668,20 @@ remove_hermes_turnend_auth() {
   hooks_dir="$hermes_home/fm-turn-end.d"
   rm -f "$hooks_dir/$token"
 }
+restore_ordinary_omp_session_state() {
+  local pointer=$1 session_dir=$2 pointer_backup=$3 session_backup=$4 pointer_present=$5 session_present=$6
+  if [ "$session_present" = 1 ]; then
+    mv -- "$session_backup" "$session_dir" || {
+      return 1
+    }
+  fi
+  if [ "$pointer_present" = 1 ]; then
+    mv -- "$pointer_backup" "$pointer" || {
+      [ "$session_present" != 1 ] || mv -- "$session_dir" "$session_backup" || return 1
+      return 1
+    }
+  fi
+}
 remove_ordinary_omp_session_state() {  # <state-dir> <task-id>
   local state_dir=$1 id=$2 pointer session_dir transaction rollback staged_pointer staged_session
   local pointer_backup session_backup pointer_present=0 session_present=0
@@ -730,17 +744,18 @@ remove_ordinary_omp_session_state() {  # <state-dir> <task-id>
   fi
   if [ "$session_present" = 1 ] && ! rm -rf -- "$staged_session"; then
     [ ! -e "$staged_session" ] && [ ! -L "$staged_session" ] || mv -- "$staged_session" "$transaction/sessions-partial" 2>/dev/null || true
-    mv -- "$session_backup" "$session_dir" 2>/dev/null || true
-    [ "$pointer_present" != 1 ] || mv -- "$pointer_backup" "$pointer" 2>/dev/null || true
+    restore_ordinary_omp_session_state "$pointer" "$session_dir" "$pointer_backup" "$session_backup" "$pointer_present" "$session_present" || return 1
     return 1
   fi
   if ! rmdir -- "$transaction"; then
-    [ "$session_present" != 1 ] || mv -- "$session_backup" "$session_dir" || return 1
-    [ "$pointer_present" != 1 ] || mv -- "$pointer_backup" "$pointer" || return 1
-    rm -rf -- "$rollback"
+    restore_ordinary_omp_session_state "$pointer" "$session_dir" "$pointer_backup" "$session_backup" "$pointer_present" "$session_present" || return 1
+    rmdir -- "$rollback" || return 1
     return 1
   fi
-  rm -rf -- "$rollback" || true
+  if ! rm -rf -- "$rollback"; then
+    restore_ordinary_omp_session_state "$pointer" "$session_dir" "$pointer_backup" "$session_backup" "$pointer_present" "$session_present" || return 1
+    return 1
+  fi
 }
 
 

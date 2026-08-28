@@ -690,22 +690,32 @@ fm_spawn_recovery_cleanup_artifacts() {
   FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT=
 }
 
-fm_spawn_recovery_complete() {
-  [ "${FM_SPAWN_RECOVERY_PUBLISHED:-0}" = 1 ] || return 1
-  fm_spawn_recovery_remove_launch_artifacts || return 1
-  FM_SPAWN_RECOVERY_FINALIZED=1
+fm_spawn_recovery_remove_rollback_artifacts() {
+  [ "${FM_SPAWN_RECOVERY_TEST_FAIL_ROLLBACK_FINALIZATION:-0}" != 1 ] || return 1
   rm -f -- "${FM_SPAWN_RECOVERY_SESSION_BACKUP:-}" \
     "${FM_SPAWN_RECOVERY_POINTER_BACKUP:-}" \
-    "${FM_SPAWN_RECOVERY_META_SNAPSHOT:-}"
+    "${FM_SPAWN_RECOVERY_META_SNAPSHOT:-}" || return 1
+  [ ! -e "${FM_SPAWN_RECOVERY_SESSION_BACKUP:-}" ] \
+    && [ ! -e "${FM_SPAWN_RECOVERY_POINTER_BACKUP:-}" ] \
+    && [ ! -e "${FM_SPAWN_RECOVERY_META_SNAPSHOT:-}" ] || return 1
   if [ -n "${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}" ] \
      && [ -d "$FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT" ] \
      && [ ! -L "$FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT" ]; then
-    rm -rf -- "$FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT" || true
+    rm -rf -- "$FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT" || return 1
   fi
+  [ ! -e "${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}" ] \
+    && [ ! -L "${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}" ] || return 1
   FM_SPAWN_RECOVERY_SESSION_BACKUP=
   FM_SPAWN_RECOVERY_POINTER_BACKUP=
   FM_SPAWN_RECOVERY_META_SNAPSHOT=
   FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT=
+}
+
+fm_spawn_recovery_complete() {
+  [ "${FM_SPAWN_RECOVERY_PUBLISHED:-0}" = 1 ] || return 1
+  fm_spawn_recovery_remove_launch_artifacts || return 1
+  fm_spawn_recovery_remove_rollback_artifacts || return 1
+  FM_SPAWN_RECOVERY_FINALIZED=1
 }
 
 fm_spawn_recovery_abort() { # <backend> <target>

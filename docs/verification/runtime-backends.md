@@ -821,7 +821,7 @@ FM_OMP_HERDR_LIVE_E2E=1 FM_OMP_HERDR_RECOVERY_ONLY=1 \
   tests/fm-omp-herdr-live-e2e.test.sh
 ```
 
-It proves a production-spawned OMP worker with an absent exact pane resumes its retained durable session in the same recorded lab session and isolated copy while preserving the recorded branch, brief, status, and uncommitted work.
+This opt-in entry point exercises a production-spawned OMP worker with an absent exact pane resuming its retained durable session in the same recorded lab session and isolated copy while preserving the recorded branch, brief, status, and uncommitted work.
 
 The focused Herdr submit guard ran on 2026-08-26 against OMP 18.0.4 and Herdr 0.8.2 in one guarded non-default lab session.
 It suppressed the native session-event confirmation inside the production submit function, required the real OMP composer plus current native `working` state to return `queued-unconfirmed`, and independently required the exact steering event to appear afterward.

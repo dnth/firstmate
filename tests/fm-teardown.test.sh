@@ -64,6 +64,8 @@ REAL_RM_FOR_TEST=$(command -v rm)
 export REAL_RM_FOR_TEST
 REAL_RMDIR_FOR_TEST=$(command -v rmdir)
 export REAL_RMDIR_FOR_TEST
+REAL_MV_FOR_TEST=$(command -v mv)
+export REAL_MV_FOR_TEST
 REAL_PS_FOR_TEST=$(command -v ps)
 export REAL_PS_FOR_TEST
 REAL_LSOF_FOR_TEST=$(command -v lsof)
@@ -845,6 +847,91 @@ SH
   [ -f "$pointer" ] || fail "durable-ordinary-omp-finalization-failure: failed finalization removed durable OMP pointer"
   [ -f "$session_file" ] || fail "durable-ordinary-omp-finalization-failure: failed finalization removed durable OMP session"
   pass "failed ordinary OMP finalization preserves durable session state"
+}
+
+test_teardown_preserves_session_when_ordinary_omp_rollback_finalization_fails() {
+  local case_dir rc session_dir session_file pointer
+  case_dir=$(make_case durable-ordinary-omp-rollback-finalization-failure)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'harness=omp' >> "$case_dir/state/task-x1.meta"
+  session_dir="$case_dir/state/task-x1.omp-sessions"
+  session_file="$session_dir/retained.jsonl"
+  pointer="$case_dir/state/task-x1.omp-session"
+  mkdir -p "$session_dir"
+  printf 'FIRSTMATE_OP: v1 launch-brief: retained\n' > "$session_file"
+  printf '%s\n' "$session_file" > "$pointer"
+  wt_commit "$case_dir" "shippable OMP work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  cat > "$case_dir/fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    */.fm-teardown-omp-rollback.*) exit 1 ;;
+  esac
+done
+exec "$REAL_RM_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/rm"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "durable-ordinary-omp-rollback-finalization-failure: teardown should refuse incomplete rollback finalization"
+  [ -f "$pointer" ] || fail "durable-ordinary-omp-rollback-finalization-failure: failed rollback finalization removed durable OMP pointer"
+  [ -f "$session_file" ] || fail "durable-ordinary-omp-rollback-finalization-failure: failed rollback finalization removed durable OMP session"
+  pass "failed ordinary OMP rollback finalization preserves durable session state"
+}
+
+test_teardown_rolls_back_session_restore_when_ordinary_omp_pointer_restore_fails() {
+  local case_dir rc session_dir session_file pointer rollback_pointer rollback_session
+  case_dir=$(make_case durable-ordinary-omp-pointer-restore-failure)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'harness=omp' >> "$case_dir/state/task-x1.meta"
+  session_dir="$case_dir/state/task-x1.omp-sessions"
+  session_file="$session_dir/retained.jsonl"
+  pointer="$case_dir/state/task-x1.omp-session"
+  mkdir -p "$session_dir"
+  printf 'FIRSTMATE_OP: v1 launch-brief: retained\n' > "$session_file"
+  printf '%s\n' "$session_file" > "$pointer"
+  wt_commit "$case_dir" "shippable OMP work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  cat > "$case_dir/fakebin/rmdir" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in */.fm-teardown-omp-session.*) exit 1 ;; esac
+done
+exec "$REAL_RMDIR_FOR_TEST" "$@"
+SH
+  cat > "$case_dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+previous=
+for arg in "$@"; do
+  case "$previous:$arg" in
+    */.fm-teardown-omp-rollback.*/pointer-backup:*/task-x1.omp-session) exit 1 ;;
+  esac
+  previous=$arg
+done
+exec "$REAL_MV_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/rmdir" "$case_dir/fakebin/mv"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "durable-ordinary-omp-pointer-restore-failure: teardown should refuse incomplete rollback restore"
+  [ ! -e "$pointer" ] && [ ! -L "$pointer" ] || fail "durable-ordinary-omp-pointer-restore-failure: rollback left a partial canonical pointer"
+  [ ! -e "$session_dir" ] && [ ! -L "$session_dir" ] || fail "durable-ordinary-omp-pointer-restore-failure: rollback left a partial canonical session"
+  rollback_pointer=$(find "$case_dir/state" -path '*/pointer-backup' -type f -print -quit)
+  rollback_session=$(find "$case_dir/state" -path '*/sessions-backup/retained.jsonl' -type f -print -quit)
+  [ -n "$rollback_pointer" ] || fail "durable-ordinary-omp-pointer-restore-failure: rollback lost the durable pointer backup"
+  [ -n "$rollback_session" ] || fail "durable-ordinary-omp-pointer-restore-failure: rollback lost the durable session backup"
+  pass "failed ordinary OMP pointer restore rolls back its partial session restoration"
 }
 
 
@@ -3704,6 +3791,8 @@ test_teardown_preserves_unlanded_ordinary_omp_sessions
 test_teardown_preserves_pointer_when_ordinary_omp_session_cleanup_fails
 test_teardown_preserves_session_when_ordinary_omp_pointer_cleanup_fails
 test_teardown_preserves_session_when_ordinary_omp_finalization_fails
+test_teardown_preserves_session_when_ordinary_omp_rollback_finalization_fails
+test_teardown_rolls_back_session_restore_when_ordinary_omp_pointer_restore_fails
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
