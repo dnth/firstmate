@@ -83,7 +83,7 @@ A backend spawn refusal from a missing dependency, version gate, or unauthentica
 Task meta records `backend=` only for a non-default backend; an absent `backend=` means `tmux`, preserving existing default-path meta files.
 Every new task records `endpoint_task_id=` as the cleanup binding between the metadata filename and its opaque runtime endpoint.
 An ordinary OMP task stores its canonical `omp_bin=` and `omp_bun=` launch identities plus its exact conversation under `state/<id>.omp-sessions/`, with `state/<id>.omp-session` atomically pointing to the one resumable direct-child session.
-For a confirmed-stopped or absent ordinary OMP worker or scout, `bin/fm-spawn.sh <id> --recover` is the only supported recovery entrypoint; it verifies the pointer or one legacy temporary session, resumes or starts in the durable task state, and atomically replaces the endpoint binding only after acknowledgement.
+For a confirmed-stopped or absent ordinary OMP worker or scout, `bin/fm-spawn.sh <id> --recover` is the only supported recovery entrypoint; it resumes the exact pointer, binds one unambiguous legacy temporary session, or starts in the durable task state when neither session survives, and atomically replaces the endpoint binding only after acknowledgement.
 Raw OMP launch commands are rejected because they cannot satisfy this session-publication contract; ordinary OMP work must use the verified harness path.
 A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
 A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.

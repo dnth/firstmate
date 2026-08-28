@@ -268,7 +268,7 @@ A structurally gone pane becomes `missing`, a restored agent-less shell becomes 
 Unlike tmux process-name inspection, native registration classifies exact Pi and OMP identities without guessing from a generic interpreter name.
 
 For an ordinary OMP worker or scout whose recorded endpoint is definitely dead or missing, `bin/fm-spawn.sh <id> --recover` is the only supported worker recovery path.
-It verifies the recorded isolated worktree, exact branch, lease, delivery mode, merge posture, Herdr identity, and durable exact session before resuming that session or creating one replacement session in the durable task state after acknowledgement.
+It verifies the recorded isolated worktree, exact branch, lease, delivery mode, merge posture, Herdr identity, and durable session state before resuming the exact pointed session or, when none survived, starting one new session directly in durable task state before acknowledgement.
 The recovery path operates through the recorded Herdr session and never selects a session from ambient state.
 
 The session-start sweep uses this probe.

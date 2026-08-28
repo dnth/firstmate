@@ -772,6 +772,10 @@ test_teardown_preserves_pointer_when_ordinary_omp_session_cleanup_fails() {
   rc=$?
   set -e
   chmod 700 "$session_dir"
+  # The failed transaction may have moved the read-only session directory into
+  # its rollback archive. Restore its owner write bit too so the test fixture's
+  # EXIT cleanup can remove the deliberately preserved rollback state.
+  chmod -R u+w "$case_dir/state"
 
   expect_code 1 "$rc" "durable-ordinary-omp-cleanup-failure: teardown should refuse incomplete session cleanup"
   [ -f "$pointer" ] || fail "durable-ordinary-omp-cleanup-failure: failed cleanup removed durable OMP pointer"
