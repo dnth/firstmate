@@ -683,7 +683,7 @@ restore_ordinary_omp_session_state() {
   fi
 }
 remove_ordinary_omp_session_state() {  # <state-dir> <task-id>
-  local state_dir=$1 id=$2 pointer session_dir transaction rollback staged_pointer staged_session
+  local state_dir=$1 id=$2 pointer session_dir transaction rollback finalization staged_pointer staged_session
   local pointer_backup session_backup pointer_present=0 session_present=0
   pointer="$state_dir/$id.omp-session"
   session_dir="$state_dir/$id.omp-sessions"
@@ -752,10 +752,22 @@ remove_ordinary_omp_session_state() {  # <state-dir> <task-id>
     rmdir -- "$rollback" || return 1
     return 1
   fi
-  if ! rm -rf -- "$rollback"; then
+  finalization=$(mktemp -d "$state_dir/.fm-teardown-omp-finalize.XXXXXX") || {
     restore_ordinary_omp_session_state "$pointer" "$session_dir" "$pointer_backup" "$session_backup" "$pointer_present" "$session_present" || return 1
+    rmdir -- "$rollback" || return 1
+    return 1
+  }
+  if ! cp -Rp -- "$rollback/." "$finalization"; then
+    restore_ordinary_omp_session_state "$pointer" "$session_dir" "$pointer_backup" "$session_backup" "$pointer_present" "$session_present" || return 1
+    rmdir -- "$rollback" || return 1
+    rm -rf -- "$finalization" 2>/dev/null || true
     return 1
   fi
+  if ! rm -rf -- "$rollback"; then
+    restore_ordinary_omp_session_state "$pointer" "$session_dir" "$finalization/pointer-backup" "$finalization/sessions-backup" "$pointer_present" "$session_present" || return 1
+    return 1
+  fi
+  rm -rf -- "$finalization" 2>/dev/null || true
 }
 
 

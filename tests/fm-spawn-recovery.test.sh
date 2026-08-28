@@ -251,6 +251,14 @@ assert_contains "$LATE_FINALIZATION_OUTPUT" "published its replacement endpoint"
 wait_for_state missing || fail "late rollback finalization failure retained replacement endpoint"
 cmp -s "$META" "$LAB/meta.before" || fail "late rollback finalization failure retained replacement metadata"
 cmp -s "$SESSION_FILE" "$LAB/session.before" || fail "late rollback finalization failure did not restore the exact session bytes"
+PARTIAL_FINALIZATION_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_PARTIAL_ROLLBACK_FINALIZATION=1 spawn "$ID" --recover 2>&1)
+PARTIAL_FINALIZATION_STATUS=$?
+[ "$PARTIAL_FINALIZATION_STATUS" -ne 0 ] || fail "partial rollback finalization failure unexpectedly succeeded"
+assert_contains "$PARTIAL_FINALIZATION_OUTPUT" "published its replacement endpoint" \
+  "partial rollback finalization failure did not reach endpoint finalization"
+wait_for_state missing || fail "partial rollback finalization failure retained replacement endpoint"
+cmp -s "$META" "$LAB/meta.before" || fail "partial rollback finalization failure retained replacement metadata"
+cmp -s "$SESSION_FILE" "$LAB/session.before" || fail "partial rollback finalization failure did not restore the exact session bytes"
 ln -s "$SESSION_FILE" "$SESSION_DIR/symlinked.jsonl"
 SYMLINK_OUTPUT=$(spawn "$ID" --recover 2>&1)
 SYMLINK_STATUS=$?
