@@ -62,6 +62,8 @@ REAL_GIT_FOR_TEST=$(command -v git)
 export REAL_GIT_FOR_TEST
 REAL_RM_FOR_TEST=$(command -v rm)
 export REAL_RM_FOR_TEST
+REAL_RMDIR_FOR_TEST=$(command -v rmdir)
+export REAL_RMDIR_FOR_TEST
 REAL_PS_FOR_TEST=$(command -v ps)
 export REAL_PS_FOR_TEST
 REAL_LSOF_FOR_TEST=$(command -v lsof)
@@ -823,17 +825,16 @@ test_teardown_preserves_session_when_ordinary_omp_finalization_fails() {
   wt_commit "$case_dir" "shippable OMP work"
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
-  cat > "$case_dir/fakebin/rm" <<'SH'
+  cat > "$case_dir/fakebin/rmdir" <<'SH'
 #!/usr/bin/env bash
 for arg in "$@"; do
   case "$arg" in
-    */.fm-teardown-omp-session.*/pointer|*/.fm-teardown-omp-session.*/sessions) ;;
     */.fm-teardown-omp-session.*) exit 1 ;;
   esac
 done
-exec "$REAL_RM_FOR_TEST" "$@"
+exec "$REAL_RMDIR_FOR_TEST" "$@"
 SH
-  chmod +x "$case_dir/fakebin/rm"
+  chmod +x "$case_dir/fakebin/rmdir"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"

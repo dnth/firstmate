@@ -355,8 +355,8 @@ fm_spawn_recovery_restore_worktree() {
     && git -C "$worktree" symbolic-ref HEAD "$branch_ref" \
     && git -C "$worktree" reset --hard "$head" >/dev/null \
     && git -C "$worktree" clean -fdx >/dev/null \
-    && git -C "$worktree" apply --index "$snapshot/index.patch" \
-    && git -C "$worktree" apply "$snapshot/worktree.patch" \
+    && { [ ! -s "$snapshot/index.patch" ] || git -C "$worktree" apply --index "$snapshot/index.patch"; } \
+    && { [ ! -s "$snapshot/worktree.patch" ] || git -C "$worktree" apply "$snapshot/worktree.patch"; } \
     && tar -xf "$snapshot/worktree.tar" -C "$worktree" || return 1
   rm -rf -- "$snapshot" || return 1
   FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT=
@@ -369,6 +369,7 @@ fm_spawn_recovery_prepare() { # <state> <data> <task-id>
   meta="$state/$id.meta"
   FM_SPAWN_RECOVERY_ACTIVE=1
   FM_SPAWN_RECOVERY_PUBLISHED=0
+  FM_SPAWN_RECOVERY_FINALIZED=0
   FM_SPAWN_RECOVERY_ENDPOINT_CREATED=0
   FM_SPAWN_RECOVERY_CANDIDATE_META=
   FM_SPAWN_RECOVERY_META_SNAPSHOT=
@@ -658,44 +659,59 @@ fm_spawn_recovery_restore_pointer() {
   rm -f -- "$pointer"
 }
 
-fm_spawn_recovery_cleanup_artifacts() {
+fm_spawn_recovery_remove_launch_artifacts() {
+  [ "${FM_SPAWN_RECOVERY_TEST_FAIL_FINALIZATION:-0}" != 1 ] || return 1
   rm -f -- "${FM_SPAWN_RECOVERY_CANDIDATE_META:-}" \
-    "${FM_SPAWN_RECOVERY_META_SNAPSHOT:-}" \
     "${FM_SPAWN_RECOVERY_NOTE:-}" \
     "${FM_SPAWN_RECOVERY_EXTENSION:-}" \
     "${FM_SPAWN_RECOVERY_READY:-}" \
     "${FM_SPAWN_RECOVERY_STARTED:-}"
+  [ ! -e "${FM_SPAWN_RECOVERY_CANDIDATE_META:-}" ] \
+    && [ ! -e "${FM_SPAWN_RECOVERY_NOTE:-}" ] \
+    && [ ! -e "${FM_SPAWN_RECOVERY_EXTENSION:-}" ] \
+    && [ ! -e "${FM_SPAWN_RECOVERY_READY:-}" ] \
+    && [ ! -e "${FM_SPAWN_RECOVERY_STARTED:-}" ] || return 1
+  FM_SPAWN_RECOVERY_CANDIDATE_META=
+  FM_SPAWN_RECOVERY_NOTE=
+  FM_SPAWN_RECOVERY_EXTENSION=
+  FM_SPAWN_RECOVERY_READY=
+  FM_SPAWN_RECOVERY_STARTED=
+}
+
+fm_spawn_recovery_cleanup_artifacts() {
+  fm_spawn_recovery_remove_launch_artifacts || return 1
+  rm -f -- "${FM_SPAWN_RECOVERY_META_SNAPSHOT:-}"
   if [ -n "${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}" ] \
      && [ -d "$FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT" ] \
      && [ ! -L "$FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT" ]; then
     rm -rf -- "$FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT"
   fi
-  FM_SPAWN_RECOVERY_CANDIDATE_META=
   FM_SPAWN_RECOVERY_META_SNAPSHOT=
-  FM_SPAWN_RECOVERY_NOTE=
-  FM_SPAWN_RECOVERY_EXTENSION=
-  FM_SPAWN_RECOVERY_READY=
-  FM_SPAWN_RECOVERY_STARTED=
   FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT=
 }
 
 fm_spawn_recovery_complete() {
   [ "${FM_SPAWN_RECOVERY_PUBLISHED:-0}" = 1 ] || return 1
+  fm_spawn_recovery_remove_launch_artifacts || return 1
+  FM_SPAWN_RECOVERY_FINALIZED=1
   rm -f -- "${FM_SPAWN_RECOVERY_SESSION_BACKUP:-}" \
-    "${FM_SPAWN_RECOVERY_POINTER_BACKUP:-}"
+    "${FM_SPAWN_RECOVERY_POINTER_BACKUP:-}" \
+    "${FM_SPAWN_RECOVERY_META_SNAPSHOT:-}"
+  if [ -n "${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}" ] \
+     && [ -d "$FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT" ] \
+     && [ ! -L "$FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT" ]; then
+    rm -rf -- "$FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT" || true
+  fi
   FM_SPAWN_RECOVERY_SESSION_BACKUP=
   FM_SPAWN_RECOVERY_POINTER_BACKUP=
-  fm_spawn_recovery_cleanup_artifacts
+  FM_SPAWN_RECOVERY_META_SNAPSHOT=
+  FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT=
 }
 
 fm_spawn_recovery_abort() { # <backend> <target>
   local backend=${1:-} target=${2:-} state
   [ "${FM_SPAWN_RECOVERY_ACTIVE:-0}" = 1 ] || return 0
-  if [ "${FM_SPAWN_RECOVERY_PUBLISHED:-0}" = 1 ]; then
-    rm -f -- "${FM_SPAWN_RECOVERY_SESSION_BACKUP:-}" \
-      "${FM_SPAWN_RECOVERY_POINTER_BACKUP:-}"
-    FM_SPAWN_RECOVERY_SESSION_BACKUP=
-    FM_SPAWN_RECOVERY_POINTER_BACKUP=
+  if [ "${FM_SPAWN_RECOVERY_FINALIZED:-0}" = 1 ]; then
     fm_spawn_recovery_cleanup_artifacts
     return 0
   fi
@@ -715,6 +731,14 @@ fm_spawn_recovery_abort() { # <backend> <target>
     echo "warning: OMP recovery could not restore the preserved isolated worktree snapshot; preserving recovery artifacts and task state" >&2
     return 1
   }
+  if [ "${FM_SPAWN_RECOVERY_PUBLISHED:-0}" = 1 ]; then
+    mv -f -- "$FM_SPAWN_RECOVERY_META_SNAPSHOT" "$FM_SPAWN_RECOVERY_META" || {
+      echo "warning: OMP recovery could not restore its prior endpoint metadata; preserving recovery artifacts and task state" >&2
+      return 1
+    }
+    FM_SPAWN_RECOVERY_META_SNAPSHOT=
+    FM_SPAWN_RECOVERY_PUBLISHED=0
+  fi
   if [ "${FM_SPAWN_RECOVERY_LEGACY_SESSION_BOUND:-0}" = 1 ]; then
     rm -f -- "${FM_SPAWN_RECOVERY_SESSION_BACKUP:-}"
     FM_SPAWN_RECOVERY_SESSION_BACKUP=

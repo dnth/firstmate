@@ -235,6 +235,14 @@ PATH="$FIXTURE_PATH" tmux kill-window -t "$TARGET"
 wait_for_state missing || fail "authoritative-pointer fixture endpoint did not become missing"
 rm -f "$SESSION_DIR/retained-sibling.jsonl"
 cp "$SESSION_FILE" "$LAB/session.before"
+POSTPUBLISH_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_FINALIZATION=1 spawn "$ID" --recover 2>&1)
+POSTPUBLISH_STATUS=$?
+[ "$POSTPUBLISH_STATUS" -ne 0 ] || fail "post-publication cleanup failure unexpectedly succeeded"
+assert_contains "$POSTPUBLISH_OUTPUT" "published its replacement endpoint" \
+  "post-publication cleanup failure did not reach endpoint finalization"
+wait_for_state missing || fail "post-publication cleanup failure retained replacement endpoint"
+cmp -s "$META" "$LAB/meta.before" || fail "post-publication cleanup failure retained replacement metadata"
+cmp -s "$SESSION_FILE" "$LAB/session.before" || fail "post-publication cleanup failure did not restore the exact session bytes"
 ln -s "$SESSION_FILE" "$SESSION_DIR/symlinked.jsonl"
 SYMLINK_OUTPUT=$(spawn "$ID" --recover 2>&1)
 SYMLINK_STATUS=$?

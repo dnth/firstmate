@@ -669,7 +669,7 @@ remove_hermes_turnend_auth() {
   rm -f "$hooks_dir/$token"
 }
 remove_ordinary_omp_session_state() {  # <state-dir> <task-id>
-  local state_dir=$1 id=$2 pointer session_dir transaction staged_pointer staged_session
+  local state_dir=$1 id=$2 pointer session_dir transaction rollback staged_pointer staged_session
   local pointer_backup session_backup pointer_present=0 session_present=0
   pointer="$state_dir/$id.omp-session"
   session_dir="$state_dir/$id.omp-sessions"
@@ -686,10 +686,14 @@ remove_ordinary_omp_session_state() {  # <state-dir> <task-id>
     }
   fi
   transaction=$(mktemp -d "$state_dir/.fm-teardown-omp-session.XXXXXX") || return 1
+  rollback=$(mktemp -d "$state_dir/.fm-teardown-omp-rollback.XXXXXX") || {
+    rmdir -- "$transaction" 2>/dev/null || true
+    return 1
+  }
   staged_pointer="$transaction/pointer"
   staged_session="$transaction/sessions"
-  pointer_backup="$transaction/pointer-backup"
-  session_backup="$transaction/sessions-backup"
+  pointer_backup="$rollback/pointer-backup"
+  session_backup="$rollback/sessions-backup"
   if [ -f "$pointer" ]; then
     mv -- "$pointer" "$staged_pointer" || {
       rmdir -- "$transaction" 2>/dev/null || true
@@ -701,6 +705,7 @@ remove_ordinary_omp_session_state() {  # <state-dir> <task-id>
     mv -- "$session_dir" "$staged_session" || {
       mv -- "$staged_pointer" "$pointer" 2>/dev/null || true
       rmdir -- "$transaction" 2>/dev/null || true
+      rmdir -- "$rollback" 2>/dev/null || true
       return 1
     }
     session_present=1
@@ -708,19 +713,19 @@ remove_ordinary_omp_session_state() {  # <state-dir> <task-id>
   if [ "$pointer_present" = 1 ] && ! cp -p -- "$staged_pointer" "$pointer_backup"; then
     [ "$session_present" != 1 ] || mv -- "$staged_session" "$session_dir" 2>/dev/null || true
     mv -- "$staged_pointer" "$pointer" 2>/dev/null || true
-    rm -rf -- "$transaction"
+    rm -rf -- "$transaction" "$rollback"
     return 1
   fi
   if [ "$session_present" = 1 ] && ! cp -Rp -- "$staged_session" "$session_backup"; then
     [ "$session_present" != 1 ] || mv -- "$staged_session" "$session_dir" 2>/dev/null || true
     [ "$pointer_present" != 1 ] || mv -- "$staged_pointer" "$pointer" 2>/dev/null || true
-    rm -rf -- "$transaction"
+    rm -rf -- "$transaction" "$rollback"
     return 1
   fi
   if [ "$pointer_present" = 1 ] && ! rm -f -- "$staged_pointer"; then
     [ "$session_present" != 1 ] || mv -- "$staged_session" "$session_dir" 2>/dev/null || true
     mv -- "$staged_pointer" "$pointer" 2>/dev/null || true
-    rm -rf -- "$transaction"
+    rm -rf -- "$transaction" "$rollback"
     return 1
   fi
   if [ "$session_present" = 1 ] && ! rm -rf -- "$staged_session"; then
@@ -729,12 +734,13 @@ remove_ordinary_omp_session_state() {  # <state-dir> <task-id>
     [ "$pointer_present" != 1 ] || mv -- "$pointer_backup" "$pointer" 2>/dev/null || true
     return 1
   fi
-  if ! rm -rf -- "$transaction"; then
+  if ! rmdir -- "$transaction"; then
     [ "$session_present" != 1 ] || mv -- "$session_backup" "$session_dir" || return 1
     [ "$pointer_present" != 1 ] || mv -- "$pointer_backup" "$pointer" || return 1
-    rmdir -- "$transaction" 2>/dev/null || true
+    rm -rf -- "$rollback"
     return 1
   fi
+  rm -rf -- "$rollback" || true
 }
 
 
