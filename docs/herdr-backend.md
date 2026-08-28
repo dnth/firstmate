@@ -121,7 +121,7 @@ Durable task records are erased only once the exact pane is confirmed gone throu
 Missing or malformed endpoint identity and missing confirmation machinery are ambiguity, never proof of a gone pane, and refuse record removal the same way.
 If lock, snapshot, pane identity, or restoration is ambiguous, cleanup warns and preserves the journal for manual inspection.
 
-Recovery is deliberately conservative and presentation-only.
+Presentation recovery is deliberately conservative.
 An existing journal suppresses another projected create.
 Before any recovery mutation, Firstmate holds both the task spawn lock and the named-session presentation lock.
 A same-identity version 2 binding may replace one exact agent-free restart husk in place only when the physical home, session, metadata endpoint, unique token match, workspace shape and labels, parent identity and placement, and non-target focus snapshot all agree.
@@ -266,6 +266,10 @@ This prevents closing the workspace's last tab before a replacement exists.
 The generic Herdr agent-liveness probe reuses the same classifier.
 A structurally gone pane becomes `missing`, a restored agent-less shell becomes `dead`, a registered agent becomes `alive`, and an unexpected read becomes `unreadable`.
 Unlike tmux process-name inspection, native registration classifies exact Pi and OMP identities without guessing from a generic interpreter name.
+
+For an ordinary OMP worker or scout whose recorded endpoint is definitely dead or missing, `bin/fm-spawn.sh <id> --recover` is the only supported worker recovery path.
+It verifies the recorded isolated worktree, exact branch, lease, delivery mode, merge posture, Herdr identity, and durable exact session before resuming that session or creating one replacement session in the durable task state after acknowledgement.
+The recovery path operates through the recorded Herdr session and never selects a session from ambient state.
 
 The session-start sweep uses this probe.
 Mid-session Herdr agent-identity probing remains session-start-only.

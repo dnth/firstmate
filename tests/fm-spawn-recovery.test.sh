@@ -171,6 +171,8 @@ cp "$HOME_DIR/data/$ID/brief.md" "$LAB/brief.before"
 cp "$SESSION_FILE" "$LAB/session.before"
 cp "$HOME_DIR/state/$ID.status" "$LAB/status.before"
 BRANCH=$(git -C "$WORKTREE" symbolic-ref --quiet --short HEAD) || fail "fixture worker is not on a branch"
+assert_contains "$(cat "$META")" "branch=$BRANCH" \
+  "initial worker did not record its exact branch identity"
 
 PATH="$FIXTURE_PATH" tmux kill-window -t "$TARGET"
 wait_for_state missing || fail "fixture endpoint did not become missing"
@@ -258,6 +260,22 @@ assert_contains "$(cat "$SESSION_FILE")" "FIRSTMATE_OP: v1 launch-brief:" \
 
 PATH="$FIXTURE_PATH" tmux kill-window -t "$TARGET"
 wait_for_state missing || fail "durable-session recovery did not leave a removable endpoint"
+rm -rf "$TASK_TMP"
+[ ! -e "$TASK_TMP" ] || fail "fixture could not remove volatile task scratch before failed retry"
+TASKTMP_ABORT_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_BEFORE_PUBLISH=1 spawn "$ID" --recover 2>&1)
+TASKTMP_ABORT_STATUS=$?
+[ "$TASKTMP_ABORT_STATUS" -ne 0 ] || fail "missing-tasktmp recovery injector unexpectedly published metadata"
+assert_contains "$TASKTMP_ABORT_OUTPUT" "stopped before endpoint publication" \
+  "missing-tasktmp recovery injector did not stop before publication"
+wait_for_state missing || fail "failed missing-tasktmp replacement endpoint was not removed"
+[ ! -e "$TASK_TMP" ] && [ ! -L "$TASK_TMP" ] \
+  || fail "failed missing-tasktmp recovery retained replacement scratch"
+DURABLE_RETRY_OUTPUT=$(spawn "$ID" --recover) || fail "recovery retry after failed missing-tasktmp attempt failed"
+assert_contains "$DURABLE_RETRY_OUTPUT" "recovered $ID harness=omp" \
+  "recovery retry after failed missing-tasktmp attempt did not report success"
+wait_for_state alive || fail "recovery retry after failed missing-tasktmp attempt was not live"
+PATH="$FIXTURE_PATH" tmux kill-window -t "$TARGET"
+wait_for_state missing || fail "missing-tasktmp retry did not leave a removable endpoint"
 rm -f "$SESSION_POINTER" "$SESSION_FILE"
 rmdir "$SESSION_DIR" || fail "fixture could not remove durable session state for fresh recovery coverage"
 FRESH_OUTPUT=$(spawn "$ID" --recover) || fail "guarded recovery from a lost durable session failed"
@@ -315,6 +333,28 @@ cmp -s "$HOME_DIR/state/$ID.status" "$LAB/status.before" \
   || fail "durable session recovery changed the branch"
 [ -f "$WORKTREE/.recovery-preserved" ] \
   || fail "durable session recovery discarded uncommitted work"
+PATH="$FIXTURE_PATH" tmux kill-window -t "$TARGET"
+wait_for_state missing || fail "legacy-session recovery did not leave a removable endpoint"
+git -C "$WORKTREE" switch -q -c "fm/$ID-branch-mismatch" \
+  || fail "fixture could not switch to a mismatched task branch"
+cp "$META" "$LAB/meta.before-branch-mismatch"
+BRANCH_MISMATCH_OUTPUT=$(spawn "$ID" --recover 2>&1)
+BRANCH_MISMATCH_STATUS=$?
+[ "$BRANCH_MISMATCH_STATUS" -ne 0 ] || fail "recovery accepted a mismatched task branch"
+assert_contains "$BRANCH_MISMATCH_OUTPUT" "exact recorded non-default branch" \
+  "branch-mismatch refusal did not name the exact branch boundary"
+cmp -s "$META" "$LAB/meta.before-branch-mismatch" \
+  || fail "branch-mismatch refusal rewrote metadata"
+git -C "$WORKTREE" switch -q "$BRANCH" || fail "fixture could not restore its recorded task branch"
+grep -v '^branch=' "$META" > "$LAB/meta.legacy-without-branch"
+cp "$LAB/meta.legacy-without-branch" "$META"
+LEGACY_BRANCH_OUTPUT=$(spawn "$ID" --recover 2>&1)
+LEGACY_BRANCH_STATUS=$?
+[ "$LEGACY_BRANCH_STATUS" -ne 0 ] || fail "recovery accepted legacy metadata without branch identity"
+assert_contains "$LEGACY_BRANCH_OUTPUT" "exact recorded non-default branch" \
+  "legacy-branch refusal did not name the exact branch boundary"
+cmp -s "$META" "$LAB/meta.legacy-without-branch" \
+  || fail "legacy-branch refusal rewrote metadata"
 NON_OMP_ID="recovery-non-omp-$$"
 cat > "$HOME_DIR/state/$NON_OMP_ID.meta" <<EOF
 window=firstmate:fm-$NON_OMP_ID

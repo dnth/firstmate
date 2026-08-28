@@ -76,8 +76,8 @@ fm_spawn_recovery_validate_delivery() { # <meta> <kind>
   esac
 }
 
-fm_spawn_recovery_validate_worktree() { # <project> <worktree> <task-id>
-  local project=$1 worktree=$2 id=$3 project_real wt_real wt_top branch default
+fm_spawn_recovery_validate_worktree() { # <project> <worktree> <task-id> <expected-branch>
+  local project=$1 worktree=$2 id=$3 expected_branch=$4 project_real wt_real wt_top branch default
   project_real=$(cd "$project" 2>/dev/null && pwd -P) || return 1
   wt_real=$(cd "$worktree" 2>/dev/null && pwd -P) || return 1
   wt_top=$(git -C "$worktree" rev-parse --show-toplevel 2>/dev/null || true)
@@ -89,8 +89,8 @@ fm_spawn_recovery_validate_worktree() { # <project> <worktree> <task-id>
   ' || return 1
   branch=$(git -C "$wt_real" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
   default=$(default_branch "$project_real" 2>/dev/null || true)
-  case "$branch" in ''|*$'\n'*|*$'\r'*|*$'\t'*) return 1 ;; esac
-  [ -n "$default" ] && [ "$branch" != "$default" ] || return 1
+  case "$branch$expected_branch" in ''|*$'\n'*|*$'\r'*|*$'\t'*) return 1 ;; esac
+  [ -n "$default" ] && [ "$branch" != "$default" ] && [ "$branch" = "$expected_branch" ] || return 1
   FM_SPAWN_RECOVERY_PROJECT=$project_real
   FM_SPAWN_RECOVERY_WORKTREE=$wt_real
   FM_SPAWN_RECOVERY_BRANCH=$branch
@@ -147,6 +147,9 @@ fm_spawn_recovery_select_session() { # <state> <tasktmp> <task-id>
   session_dir=$FM_SPAWN_RECOVERY_SESSION_DIR
   pointer=$FM_SPAWN_RECOVERY_SESSION_POINTER
   legacy_dir="$tasktmp/omp-sessions"
+  if [ ! -e "$tasktmp" ] && [ ! -L "$tasktmp" ]; then
+    FM_SPAWN_RECOVERY_TASKTMP_CREATED=1
+  fi
 
   if [ -e "$pointer" ] || [ -L "$pointer" ]; then
     [ -f "$pointer" ] && [ ! -L "$pointer" ] \
@@ -173,8 +176,7 @@ fm_spawn_recovery_select_session() { # <state> <tasktmp> <task-id>
     FM_SPAWN_RECOVERY_SESSION_DIR_CREATED=1
   fi
 
-  if [ ! -e "$tasktmp" ] && [ ! -L "$tasktmp" ]; then
-    FM_SPAWN_RECOVERY_TASKTMP_CREATED=1
+  if [ "$FM_SPAWN_RECOVERY_TASKTMP_CREATED" = 1 ]; then
     return 0
   fi
   [ -d "$tasktmp" ] && [ ! -L "$tasktmp" ] || return 1
@@ -293,7 +295,7 @@ fm_spawn_recovery_capture_fresh_session() {
 
 fm_spawn_recovery_prepare() { # <state> <data> <task-id>
   local state=$1 data=$2 id=$3 meta kind harness tasktmp model effort old_backend old_target endpoint_state
-  local project worktree expected_tmp prewalk prewalk_count allow_extensions allow_count
+  local project worktree branch expected_tmp prewalk prewalk_count allow_extensions allow_count
   meta="$state/$id.meta"
   FM_SPAWN_RECOVERY_ACTIVE=1
   FM_SPAWN_RECOVERY_PUBLISHED=0
@@ -338,8 +340,9 @@ fm_spawn_recovery_prepare() { # <state> <data> <task-id>
   fi
   project=$(fm_spawn_recovery_exact_meta_value "$meta" project 2>/dev/null || true)
   worktree=$(fm_spawn_recovery_exact_meta_value "$meta" worktree 2>/dev/null || true)
-  fm_spawn_recovery_validate_worktree "$project" "$worktree" "$id" || {
-    echo "error: OMP recovery could not bind task $id to one non-default branch in its recorded isolated worktree; preserving task state" >&2
+  branch=$(fm_spawn_recovery_exact_meta_value "$meta" branch 2>/dev/null || true)
+  fm_spawn_recovery_validate_worktree "$project" "$worktree" "$id" "$branch" || {
+    echo "error: OMP recovery could not bind task $id to its exact recorded non-default branch in the isolated worktree; preserving task state" >&2
     return 1
   }
   fm_spawn_recovery_validate_lease "$FM_SPAWN_RECOVERY_PROJECT" "$FM_SPAWN_RECOVERY_WORKTREE" "$id" || {
@@ -492,7 +495,7 @@ fm_spawn_recovery_publish_candidate() { # <state> <task-id> <backend> <target>
 }
 
 fm_spawn_recovery_remove_fresh_session_artifacts() {
-  local session_dir=${FM_SPAWN_RECOVERY_SESSION_DIR:-} tasktmp=${TASK_TMP:-} file
+  local session_dir=${FM_SPAWN_RECOVERY_SESSION_DIR:-} file
   [ "${FM_SPAWN_RECOVERY_SESSION_MODE:-}" = fresh ] || return 0
   file=${FM_SPAWN_RECOVERY_FRESH_SESSION_FILE:-}
   if [ -n "$file" ]; then
@@ -503,10 +506,14 @@ fm_spawn_recovery_remove_fresh_session_artifacts() {
   if [ "${FM_SPAWN_RECOVERY_SESSION_DIR_CREATED:-0}" = 1 ]; then
     rmdir -- "$session_dir" 2>/dev/null || true
   fi
-  if [ "${FM_SPAWN_RECOVERY_TASKTMP_CREATED:-0}" = 1 ]; then
-    rmdir -- "$tasktmp/gotmp" 2>/dev/null || true
-    rmdir -- "$tasktmp" 2>/dev/null || true
-  fi
+}
+
+fm_spawn_recovery_remove_replacement_scratch() {
+  local tasktmp=${FM_SPAWN_RECOVERY_TASKTMP:-}
+  [ "${FM_SPAWN_RECOVERY_TASKTMP_CREATED:-0}" = 1 ] || return 0
+  [ -n "$tasktmp" ] || return 1
+  rmdir -- "$tasktmp/gotmp" 2>/dev/null || true
+  rmdir -- "$tasktmp" 2>/dev/null || true
 }
 
 fm_spawn_recovery_remove_legacy_session_binding() {
@@ -610,6 +617,10 @@ fm_spawn_recovery_abort() { # <backend> <target>
   fi
   fm_spawn_recovery_restore_pointer || {
     echo "warning: OMP recovery could not restore its durable session pointer; preserving recovery artifacts and task state" >&2
+    return 1
+  }
+  fm_spawn_recovery_remove_replacement_scratch || {
+    echo "warning: OMP recovery could not remove its replacement scratch; preserving recovery artifacts and task state" >&2
     return 1
   }
   fm_spawn_recovery_cleanup_artifacts

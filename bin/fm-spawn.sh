@@ -3743,6 +3743,13 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+OMP_TASK_BRANCH=
+if [ "$RECOVER" -eq 0 ] && [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
+  OMP_TASK_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null) || {
+    echo "error: OMP ordinary-worker spawn requires one checked-out task branch" >&2
+    exit 1
+  }
+fi
 if [ "$RECOVER" -eq 0 ]; then
 {
   echo "window=$META_WINDOW"
@@ -3751,6 +3758,7 @@ if [ "$RECOVER" -eq 0 ]; then
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
   echo "kind=$KIND"
+  [ -z "$OMP_TASK_BRANCH" ] || echo "branch=$OMP_TASK_BRANCH"
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
   echo "tasktmp=$TASK_TMP"
