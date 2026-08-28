@@ -2,7 +2,7 @@
 name: stuck-crewmate-recovery
 description: >-
   Agent-only playbook for stuck or missing ordinary Firstmate direct reports.
-  Use when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, a failed steer, or a delivered-no-turn or delivered-no-turn-persistence-failed verdict.
+  Use when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, a failed inbox enqueue or typed steer, or a delivered-no-turn or delivered-no-turn-persistence-failed verdict.
   Reconciles recorded work before escalating from targeted inspection through safe relaunch or failure.
 user-invocable: false
 metadata:
@@ -11,7 +11,7 @@ metadata:
 
 # stuck-crewmate-recovery
 
-Use this playbook when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or when a direct report is stale, looping, repeatedly confused, asking a question its brief already answers, unresponsive, when a steer failed to land, or when `fm-send.sh` reports `delivered-no-turn` or `delivered-no-turn-persistence-failed`.
+Use this playbook when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or when a direct report is stale, looping, repeatedly confused, asking a question its brief already answers, unresponsive, when an inbox enqueue or typed steer fails, or when `fm-send.sh` reports `delivered-no-turn` or `delivered-no-turn-persistence-failed`.
 
 Load `harness-adapters` before sending an interrupt, exit command, resume command, or harness-specific skill invocation.
 The target window's harness is recorded as `harness=` in `state/<id>.meta`.
@@ -36,15 +36,15 @@ If the worktree or ownership cannot be reconciled safely, leave all state intact
 
 ## Live-endpoint escalation
 
-Both delivered-no-turn verdicts mean the message was submitted but OMP did not begin a turn, so never resend the same message as if delivery failed.
+Both delivered-no-turn verdicts mean a typed command was submitted but OMP or Hermes did not begin a turn, so never resend the same command as if delivery failed.
 Treat the synchronous verdict itself as the supervised-recovery trigger; use any persisted `failed:` status event and watcher wake as corroboration, then inspect the recorded worktree and current validation state and preserve every uncommitted change and commit before any endpoint lifecycle action.
 Do not automatically terminate an ordinary crewmate or scout on this verdict because its work may be unlanded.
 
 Escalate in order:
 
 1. Peek the pane and inspect `state/<id>.inbox/*.msg` for any durable instruction that survived without acknowledgement before re-steering or relaunching.
-2. If the crewmate is waiting on a question its brief already answers, answer in one line via `FM_HOME=<this-firstmate-home> bin/fm-send.sh` from an active firstmate session unless `FM_HOME` is already set to the active firstmate home; when that question is an open keyed decision or blocker, pass its key through `--resolve-key` as required by `bin/fm-send.sh`'s header contract.
-3. If the crewmate is confused or looping, interrupt with the adapter's interrupt key, then redirect with one corrective line.
+2. If the crewmate is waiting on a question its brief already answers, send a concise answer via `FM_HOME=<this-firstmate-home> bin/fm-send.sh` from an active firstmate session unless `FM_HOME` is already set to the active firstmate home; when that question is an open keyed decision or blocker, pass its key through `--resolve-key` as required by `bin/fm-send.sh`'s header contract.
+3. If the crewmate is confused or looping, interrupt with the adapter's interrupt key, then send a concise corrective steer.
    For example, for a single-Escape adapter: `FM_HOME=<this-firstmate-home> bin/fm-send.sh <window> --key Escape`.
 4. For a live OMP agent whose PROVIDER STREAM is wedged but whose composer still submits input, send `/fresh` via `fm-send` first and confirm it takes a fresh turn.
    `/fresh` rotates provider-stream state while retaining the local transcript, session file, and identity, and is rejected during active streaming, so abort the current turn first when needed.

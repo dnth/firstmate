@@ -302,7 +302,7 @@ After spawning, confirm the worker is processing the brief, handle any trust dia
 A persistent secondmate is recorded in the secondmate registry and runtime state, never as a backlog work item.
 
 Steer a local worker with ordinary text through fail-closed `fm-send`; it writes a multiline-safe durable inbox record and rings a constant doorbell, while the worker's move into `handled/` acknowledges action.
-Harness-native invocations, explicit backend targets, keys, and the current remote secondmate leg remain typed under `bin/fm-send.sh`'s plane selector.
+Slash commands, Codex dollar invocations, explicit backend targets, keys, and the current remote secondmate leg remain typed under `bin/fm-send.sh`'s plane selector.
 When a steer answers an open keyed decision or blocker, pass `fm-send`'s `--resolve-key` so inbox enqueue or confirmed typed delivery closes that decision record at answer time (contract: `bin/fm-send.sh` header).
 A secondmate's routed reply returns through status or a document pointer, not by firstmate peeking into its chat.
 For the parent-owned correlation, recovery, and escalation contract on marked secondmate requests, see `bin/fm-pending-reply-lib.sh`.

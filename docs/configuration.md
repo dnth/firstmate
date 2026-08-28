@@ -223,7 +223,7 @@ The full cmux home label also includes a short hash of the resolved `FM_ROOT` pa
 
 claude, codex, opencode, pi, pi-signed, omp, grok, and kimi are empirically verified harness identities for crewmate and secondmate launches on their documented backend combinations.
 Hermes is verified only for crewmate and scout launches and is refused for primary sessions and secondmates.
-Hermes runs as a persistent TUI; ordinary local text arrives through the durable steering inbox, while typed native commands use its composer on the verified tmux and Herdr backends, and Hermes spawns on other backends are refused before endpoint creation.
+Hermes runs as a persistent TUI; ordinary local text arrives through the durable steering inbox, while slash commands use its composer on the verified tmux and Herdr backends, and Hermes spawns on other backends are refused before endpoint creation.
 Hermes profiles accept the shared `low`, `medium`, `high`, `xhigh`, and `max` effort vocabulary and forward it as native reasoning effort.
 Each Hermes crew spawn surgically registers the guarded profile-global lifecycle bridge: session start binds the task session once, matching pre-LLM records busy before acknowledging the turn, and matching session end records idle.
 OMP is verified as a primary, crewmate, scout, and secondmate runtime only on tmux and Herdr; Zellij, Orca, and cmux reject OMP before endpoint creation and carry no live OMP claim.
@@ -619,7 +619,7 @@ FM_BACKEND_HERDR_BARE_PROMPT_RE='^(❯|›)'  # herdr-only: verified agent glyph
 FM_BACKEND_HERDR_PI_COMPOSER_MAX_LINES=8  # herdr-only: maximum rows admitted between Pi's native-identity-corroborated separator pair; taller or ambiguous candidates stay unknown (docs/herdr-backend.md "Composer and injection safety")
 FM_BACKEND_HERDR_SUBMIT_POLLS=6  # herdr-only: agent-state samples spread across each Enter attempt's budget when confirming a submit (docs/herdr-backend.md "Current transport behavior")
 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0.6  # herdr-only: minimum per-Enter confirmation budget before polling agent-state after an idle baseline
-FM_BACKEND_HERDR_OMP_EVENT_CONFIRM_SLEEP=6  # herdr+omp only: per-Enter budget for the native session-event proof of a busy OMP steer (docs/herdr-backend.md "Current transport behavior")
+FM_BACKEND_HERDR_OMP_EVENT_CONFIRM_SLEEP=6  # herdr+omp typed plane: per-Enter budget for the native session-event proof of a busy OMP steer (docs/herdr-backend.md "Current transport behavior")
 FM_BACKEND_HERDR_OMP_SNAPSHOT_POLLS=20  # herdr+omp only: polls waiting for a partial trailing session record before the pre-send offset snapshot refuses
 FM_BACKEND_HERDR_OMP_SNAPSHOT_INTERVAL=0.05  # herdr+omp only: seconds between those polls
 FM_BACKEND_ORCA_COMPOSER_LINES=200  # orca-only: terminal-read lines scanned to locate the composer row for submit verification
@@ -704,9 +704,9 @@ FM_TASK_INBOX_LOCK_WAIT_SECS=5 # bounded wait for inbox sequence allocation and 
 FM_SEND_RETRIES=3       # typed-plane fm-send Enter-retry attempts after typing the line once
 FM_SEND_SLEEP=0.4       # seconds between typed-plane fm-send submit checks
 FM_SEND_SETTLE=1        # seconds fm-send waits after a successful typed submit; 0 disables
-FM_SEND_TURNSTART_TIMEOUT=1  # OMP-only seconds to verify an idle submit started a turn; accepted range 0.1..3
-FM_SEND_TURNSTART_POLL=0.1   # OMP-only turn-start sampling interval; accepted range 0.02..timeout
-# Initially idle, non-/exit OMP text submission requires Perl Time::HiRes for its monotonic turn-start deadline.
+FM_SEND_TURNSTART_TIMEOUT=1  # OMP typed-plane seconds to verify an idle submit started a turn; accepted range 0.1..3
+FM_SEND_TURNSTART_POLL=0.1   # OMP typed-plane turn-start sampling interval; accepted range 0.02..timeout
+# An initially idle typed-plane OMP command other than /exit requires Perl Time::HiRes for its monotonic turn-start deadline.
 FM_HERMES_READY_POLLS=120      # hermes-only: fm-spawn samples waiting for the persistent TUI's ready footer and empty composer
 FM_HERMES_READY_INTERVAL=0.5   # hermes-only: seconds between those readiness samples
 FM_HERMES_SETTING_POLLS=120    # hermes-only: fm-spawn samples waiting for the session-scoped /reasoning value to be confirmed on the ready footer
@@ -715,8 +715,8 @@ FM_HERMES_SUBMIT_RETRIES=3     # hermes-only: fm-spawn Enter retries per compose
 FM_HERMES_SUBMIT_INTERVAL=0.4  # hermes-only: seconds between those submit checks
 FM_HERMES_LAUNCH_ACK_POLLS=120     # hermes-only: samples fm-spawn waits for the launch turn's lifecycle acknowledgement
 FM_HERMES_LAUNCH_ACK_INTERVAL=0.5  # hermes-only: seconds between those acknowledgement samples
-FM_SEND_HERMES_START_POLLS=        # hermes-only: fm-send turn-start acknowledgement samples; unset inherits FM_HERMES_LAUNCH_ACK_POLLS so a steer never gets a smaller budget than a launch
-FM_SEND_HERMES_START_INTERVAL=     # hermes-only: seconds between those samples; unset inherits FM_HERMES_LAUNCH_ACK_INTERVAL
+FM_SEND_HERMES_START_POLLS=        # hermes typed-plane: fm-send turn-start acknowledgement samples; unset inherits FM_HERMES_LAUNCH_ACK_POLLS so a typed command never gets a smaller budget than a launch
+FM_SEND_HERMES_START_INTERVAL=     # hermes typed-plane: seconds between those samples; unset inherits FM_HERMES_LAUNCH_ACK_INTERVAL
 FM_SEND_HERMES_EXIT_POLLS=120      # hermes-only: samples fm-send waits for the pane to leave the TUI after /exit
 FM_SEND_HERMES_EXIT_INTERVAL=0.5   # hermes-only: seconds between those exit samples
 FM_HERMES_DEBUG=0              # hermes-only: 1 prints fm-spawn's final reasoning-probe capture to stderr when the setting is never confirmed

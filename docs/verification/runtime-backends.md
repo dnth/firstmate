@@ -385,7 +385,7 @@ The deterministic composer, tmux, and Herdr fixtures reran on 2026-08-26 and pro
 The same fixtures proved that a pending OMP composer after native state becomes idle returns `pending`, Enter transport failure returns `send-failed`, and initially idle editable input fails closed.
 This is revision-bound source-fixture evidence for the source under review, using Bun 1.3.14 only for terminal-cell measurement; it does not invoke OMP or make an OMP runtime-version claim.
 
-The deterministic fm-send turn-start fixture ran on 2026-08-19 and proved that an initially idle OMP submit must become busy or advance its generated turn-start marker after the submit-time baseline before success, while `delivered-no-turn` exits distinctly, queues supervised recovery, and never kills the endpoint.
+The deterministic fm-send turn-start fixture ran on 2026-08-19 and proved that an initially idle typed-plane OMP submit must become busy or advance its generated turn-start marker after the submit-time baseline before success, while `delivered-no-turn` exits distinctly, queues supervised recovery, and never kills the endpoint.
 The same fixture proved bounded recovery wake-lock failure, required recovery-trigger persistence, distinct post-delivery persistence failure, the monotonic deadline, submit-time idle setup, Herdr post-submit check, confirmed busy and blocked compatibility, OMP exit compatibility, normal turn start, already-busy `queued-unconfirmed` exception, remote OMP routing, and unchanged non-OMP behavior.
 The tested source is Git revision `6c04b02de758deb82f2448bd258b5e1b72ff0743` plus binary patch SHA-256 `cc336b6d0dd73ca74adc28d665e3a29f28e064764441bda2c9f18c6a402360a5` over this exact file manifest and construction command:
 

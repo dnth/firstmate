@@ -9,8 +9,8 @@
 # Enter - the first sleep fm_tmux_submit_core makes. These tests pin the
 # settle-SELECTION matrix hermetically (stubbed tmux + sleep, no real agent):
 #
-# The settle matrix governs the TYPED plane (harness-native invocations and
-# explicit backend targets); a task-selector message that is not an invocation
+# The settle matrix governs the TYPED plane (slash commands, Codex dollar
+# invocations, and explicit backend targets); other task-selector text
 # rides the durable inbox instead, where only the constant doorbell (fixed
 # fast settle) touches the terminal:
 #   /...            -> 1.2  (universal; `/` only starts a command, never plain text)
@@ -114,7 +114,7 @@ first_settle() {  # <expected> <label> <harness|--explicit> <message> [selector-
 }
 
 # rides_inbox <label> <harness> <message>: a task-selector message that is NOT
-# a harness-native invocation no longer types its payload at all - it rides
+# a slash command or Codex dollar invocation no longer types its payload at all - it rides
 # the durable inbox, so no popup-settle question exists for it. Assert the
 # routing (record enqueued, payload never typed) and that the doorbell's own
 # fixed fast settle (0.3) is the first sleep, so the codex-scoped `$` rule can

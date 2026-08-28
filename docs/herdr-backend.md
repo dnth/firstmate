@@ -206,7 +206,7 @@ Enter, Escape, and Ctrl-C are supported.
 Typed-plane slash input, and dollar-prefixed skill input for Codex, uses the shared harness-aware settle before the first Enter so a completion popup cannot consume it.
 Typed-plane text is typed once; only Enter is retried.
 
-On an idle or done native baseline, ordinary submit confirmation first waits for `working` or `blocked` across a bounded polling window.
+On an idle or done native baseline, typed-plane submit confirmation first waits for `working` or `blocked` across a bounded polling window.
 If native status stays idle, the shared composer verdict is the next positive signal: a cleared composer confirms delivery, and proven pending text retries Enter.
 For every non-OMP harness, text that remains pending after the retry budget stays pending even when native status is `working`.
 For OMP only, `fm_composer_queued_enter_verdict` treats proven pending text plus native `working` as a queued delivered Enter and keeps an idle pending composer as a genuine swallow.
@@ -215,7 +215,7 @@ The two stages intentionally share signals rather than claiming perfect submit a
 On an already active or unreadable baseline, ordinary harnesses fall back to conservative composer clearance.
 OMP is stricter: the adapter binds the exact native OMP session path and pre-send byte offset before typing.
 That offset is always the end of a complete newline-terminated session record; when a partial record is still being appended the adapter waits a bounded time and then refuses rather than rewinding, because a mid-record offset would poison every later read and an earlier boundary could false-confirm an already-appended record.
-A busy OMP steer sends one Enter and normally succeeds after an appended exact-text user message carries native `steering:true`; an identical ordinary user message is not acknowledgement.
+A busy typed-plane OMP steer sends one Enter and normally succeeds after an appended exact-text user message carries native `steering:true`; an identical ordinary user message is not acknowledgement.
 If that native event is not observed within the bounded window, the adapter verifies the composer before considering the narrow fallback.
 A cleared composer or proven pending text plus a current native `working` state returns `queued-unconfirmed`, which `fm-send` accepts so OMP can consume the steer on its next turn.
 Pending text plus idle, done, blocked, or unreadable native state remains unsubmitted and makes `fm-send` fail.
