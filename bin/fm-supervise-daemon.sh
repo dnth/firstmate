@@ -364,8 +364,12 @@ classify_signal() {  # <reason-after-colon> <state>
     # single source of truth shared between the per-wake signal path and the
     # heartbeat scan. all_seen stays 1 only if EVERY relevant file was seen.
     task=$(basename "$f"); task="${task%.status}"
-    seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
-    [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] || all_seen=0
+    if [ "${FM_RECOVERY_RECLASSIFY_SIGNALS:-0}" = 1 ]; then
+      all_seen=0
+    else
+      seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
+      [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] || all_seen=0
+    fi
   done
   # strip a trailing " | " separator so the distilled line is clean
   distilled="${distilled% | }"
@@ -591,6 +595,15 @@ mark_status_seen() {  # <state> <task> <last-line>
   printf '%s' "$line" > "$state/.subsuper-seen-status-$(_stale_key "$task")"
 }
 
+stage_or_mark_status_seen() {  # <state> <task> <last-line>
+  local state=$1 task=$2 line=$3
+  if [ -n "${FM_RECOVERY_SEEN_SINK:-}" ]; then
+    printf '%s\t%s\n' "$task" "$line" >> "$FM_RECOVERY_SEEN_SINK"
+  else
+    mark_status_seen "$state" "$task" "$line"
+  fi
+}
+
 # Mark every captain-relevant status line a per-wake classification escalated as
 # seen, so the catch-all scan does not re-escalate the same line within
 # HEARTBEAT_SCAN_SECS. Mirrors classify_signal/classify_stale's relevance test.
@@ -604,14 +617,23 @@ mark_escalated_seen() {  # <kind> <arg> <state>
         [ -n "$last" ] || continue
         status_is_captain_relevant "$last" || continue
         task=$(basename "$f"); task="${task%.status}"
-        mark_status_seen "$state" "$task" "$last"
+        stage_or_mark_status_seen "$state" "$task" "$last"
       done ;;
     stale)
       task=$(window_to_task "$arg" "$state")
       last=$(last_status_line "$state/$task.status")
       [ -n "$last" ] && status_is_captain_relevant "$last" \
-        && mark_status_seen "$state" "$task" "$last" ;;
+        && stage_or_mark_status_seen "$state" "$task" "$last" ;;
   esac
+}
+
+commit_recovery_seen_statuses() {  # <state> <staged-statuses>
+  local state=$1 staged=$2 task line
+  [ -f "$staged" ] && [ ! -L "$staged" ] || return 1
+  while IFS="$(printf '\t')" read -r task line; do
+    [ -n "$task" ] && [ -n "$line" ] || return 1
+    mark_status_seen "$state" "$task" "$line" || return 1
+  done < "$staged"
 }
 
 # Busy and composer-empty detection form the injection boundary.
@@ -784,16 +806,72 @@ remote_stale_recheck() {  # <window> <state>
   esac
 }
 
+recovery_projection_path() {  # <state>
+  printf '%s/.subsuper-recovery-escalations' "$1"
+}
+
+recovery_projection_generation_path() {  # <state>
+  printf '%s/.subsuper-recovery-escalations.generation' "$1"
+}
+
+# Replace the current recovery generation's rendered projection atomically.
+# The recovery marker, queue, and status logs remain the retry authority.
+recovery_projection_replace() {  # <state> <generation> <new-projection>
+  local state=$1 generation=$2 source=$3 projection generation_file generation_tmp
+  case "$generation" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  projection=$(recovery_projection_path "$state")
+  generation_file=$(recovery_projection_generation_path "$state")
+  if { [ -e "$projection" ] && { [ ! -f "$projection" ] || [ -L "$projection" ]; }; } \
+    || { [ -e "$generation_file" ] && { [ ! -f "$generation_file" ] || [ -L "$generation_file" ]; }; }; then
+    return 1
+  fi
+  if [ ! -s "$source" ]; then
+    rm -f "$projection" "$generation_file"
+    return 0
+  fi
+  generation_tmp=$(mktemp "$state/.subsuper-recovery-generation.XXXXXX") || return 1
+  if ! printf '%s\n' "$generation" > "$generation_tmp"; then
+    rm -f "$generation_tmp"
+    return 1
+  fi
+  if ! mv -f "$source" "$projection"; then
+    rm -f "$generation_tmp"
+    return 1
+  fi
+  if ! mv -f "$generation_tmp" "$generation_file"; then
+    return 1
+  fi
+}
+
+recovery_projection_clear() {  # <state>
+  rm -f "$(recovery_projection_path "$1")" "$(recovery_projection_generation_path "$1")"
+}
+
+# Send the current recovery generation projection without merging it into the
+# unrelated asynchronous escalation buffer.
+recovery_projection_flush() {  # <state> <generation>
+  local state=$1 generation=$2 projection generation_file actual n msg
+  projection=$(recovery_projection_path "$state")
+  generation_file=$(recovery_projection_generation_path "$state")
+  [ -s "$projection" ] && [ -r "$generation_file" ] || return 0
+  actual=$(cat "$generation_file" 2>/dev/null || true)
+  [ "$actual" = "$generation" ] || return 1
+  n=$(wc -l < "$projection" 2>/dev/null || echo 0)
+  case "$n" in ''|*[!0-9]*|0) return 1 ;; esac
+  msg=$(awk 'NR>1{printf " | "} {printf "%s",$0} END{print ""}' "$projection" 2>/dev/null)
+  msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
+  inject_msg "$msg" "$state"
+}
+
 escalate_add() {  # <state> <distilled-item>
   local state=$1 item=$2 buf
-  buf="$state/.subsuper-escalations"
-  [ -s "$buf" ] || _now > "${buf}.since"
+  buf=${FM_ESCALATION_SINK:-"$state/.subsuper-escalations"}
+  [ -n "${FM_ESCALATION_SINK:-}" ] || { [ -s "$buf" ] || _now > "${buf}.since"; }
   printf '%s\n' "$item" >> "$buf"
 }
 
-# Flush the escalation buffer as ONE batched, single-line digest to the
-# supervisor pane. Returns 0 on successful inject (or empty buffer), non-zero on
-# inject failure (buffer preserved for retry / catch-up).
+# Flush the unrelated asynchronous escalation buffer as ONE batched,
+# single-line digest to the supervisor pane.
 escalate_flush() {  # <state>
   local state=$1 buf item n msg
   buf="$state/.subsuper-escalations"
@@ -1459,7 +1537,10 @@ handle_wake() {  # <reason> <state>
       # housekeeping re-escalates the same pane as a false wedge later.
       [ "$kind" = "stale" ] && stale_marker_remove "$arg" "$state"
       mark_escalated_seen "$kind" "$arg" "$state"
-      [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ] && { escalate_flush "$state" || true; }
+      if [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ] \
+        && [ "${FM_DEFER_ESCALATION_FLUSH:-0}" != 1 ]; then
+        escalate_flush "$state" || true
+      fi
       ;;
     pause)
       # Declared external-wait pause: record a pause marker (long re-surface
@@ -1511,17 +1592,38 @@ handle_wake() {  # <reason> <state>
 
 handle_durable_wakes() {  # <watcher-reason> <state>
   local fallback_reason=$1 state=$2 out err tab epoch sequence kind key payload rest line
-  local handled=0 ack_through ack_generation capture_before capture_after
+  local handled=0 ack_through ack_generation capture_before capture_after recovery_projection_tmp recovery_seen_tmp
   local capture_valid=false decision_parse_state=outside decision_lines='' decision_count=0
   local decisions_routed_completely=false
+  local FM_ESCALATION_SINK FM_DEFER_ESCALATION_FLUSH=1 FM_RECOVERY_SEEN_SINK FM_RECOVERY_RECLASSIFY_SIGNALS=0
   local decision_header='OPEN DECISIONS (still open, folded from the durable status logs - not just the latest line):'
   local decision_terminator="OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'"
-  out=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || return 1
-  err=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || { rm -f "$out"; return 1; }
+  recovery_projection_tmp=$(mktemp "$state/.subsuper-recovery-projection.XXXXXX") || return 1
+  recovery_seen_tmp=$(mktemp "$state/.subsuper-recovery-seen.XXXXXX") || {
+    rm -f "$recovery_projection_tmp"
+    return 1
+  }
+  FM_ESCALATION_SINK=$recovery_projection_tmp
+  FM_RECOVERY_SEEN_SINK=$recovery_seen_tmp
+  out=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || {
+    rm -f "$recovery_projection_tmp" "$recovery_seen_tmp"
+    return 1
+  }
+  err=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || {
+    rm -f "$out" "$recovery_projection_tmp" "$recovery_seen_tmp"
+    return 1
+  }
   if ! "$FM_DAEMON_DIR/fm-wake-drain.sh" > "$out" 2> "$err"; then
     cat "$err" >&2
-    rm -f "$out" "$err"
+    rm -f "$out" "$err" "$recovery_projection_tmp" "$recovery_seen_tmp"
     return 1
+  fi
+
+  ack_through=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err" | tail -1)
+  ack_generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err" | tail -1)
+  if [ -n "$ack_generation" ] \
+     && [ "$(cat "$(recovery_projection_generation_path "$state")" 2>/dev/null || true)" = "$ack_generation" ]; then
+    FM_RECOVERY_RECLASSIFY_SIGNALS=1
   fi
 
   if [ -f "$out" ] && [ ! -L "$out" ]; then
@@ -1537,7 +1639,6 @@ handle_durable_wakes() {  # <watcher-reason> <state>
       handled=$((handled + 1))
     done < "$out" || capture_valid=false
   fi
-  [ "$handled" -gt 0 ] || handle_wake "$fallback_reason" "$state"
 
   if [ "$capture_valid" = true ]; then
     while IFS= read -r line; do
@@ -1574,38 +1675,50 @@ handle_durable_wakes() {  # <watcher-reason> <state>
   fi
 
   if [ "$capture_valid" = true ] && [ "$decision_count" -gt 0 ]; then
-    decisions_routed_completely=true
     while IFS= read -r line; do
       [ -n "$line" ] || continue
-      escalate_add "$state" "$line" || decisions_routed_completely=false
+      escalate_add "$state" "$line" || capture_valid=false
     done <<EOF
 $decision_lines
 EOF
-    if [ "$decisions_routed_completely" = true ]; then
-      [ -s "$state/.subsuper-escalations" ] \
-        && escalate_flush "$state" \
-        || decisions_routed_completely=false
-    fi
-  elif [ "$capture_valid" = true ]; then
-    decisions_routed_completely=true
-    [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -gt 0 ] \
-      || { escalate_flush "$state" || true; }
+  elif [ "$capture_valid" = true ] && [ "$handled" -eq 0 ]; then
+    # A decision-only recovery is its own current digest, not a second generic
+    # check event; retain the fallback only when nothing durable was presented.
+    handle_wake "$fallback_reason" "$state"
   fi
 
-  ack_through=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err" | tail -1)
-  ack_generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err" | tail -1)
+  if [ "$capture_valid" = true ] && [ -n "$ack_through" ] && [ -n "$ack_generation" ]; then
+    if recovery_projection_replace "$state" "$ack_generation" "$recovery_projection_tmp"; then
+      recovery_projection_tmp=
+      recovery_projection_flush "$state" "$ack_generation" \
+        && decisions_routed_completely=true
+    fi
+  fi
+
   grep -v '^WAKE_ACK_REQUIRED:' "$err" >&2 || true
-  rm -f "$out" "$err"
+  rm -f "$out" "$err" "$recovery_projection_tmp"
   if [ "$decisions_routed_completely" != true ]; then
-    log "open decisions were not routed completely; retaining recovery episode"
+    rm -f "$recovery_seen_tmp"
+    log "current recovery projection was not delivered; retaining recovery episode"
     return 1
   fi
   if [ -z "$ack_through" ] || [ -z "$ack_generation" ]; then
+    rm -f "$recovery_seen_tmp"
     log "wake drain omitted its generation-bound acknowledgement; retaining durable wakes"
     return 1
   fi
-  "$FM_DAEMON_DIR/fm-wake-drain.sh" --ack-through "$ack_through" \
-    --recovery-generation "$ack_generation"
+  if "$FM_DAEMON_DIR/fm-wake-drain.sh" --ack-through "$ack_through" \
+    --recovery-generation "$ack_generation"; then
+    commit_recovery_seen_statuses "$state" "$recovery_seen_tmp" || {
+      rm -f "$recovery_seen_tmp"
+      return 1
+    }
+    rm -f "$recovery_seen_tmp"
+    recovery_projection_clear "$state"
+    return 0
+  fi
+  rm -f "$recovery_seen_tmp"
+  return 1
 }
 
 # --- log --------------------------------------------------------------------

@@ -34,7 +34,7 @@ if [ -n "${FM_TEST_OWNER_PID:-}" ] && [ "$pid" = "$FM_TEST_OWNER_PID" ]; then
   esac
   exit 0
 fi
-omp_pid=${FM_TEST_OMP_PID:-700}
+omp_pid=${FM_TEST_OMP_PID:-2147483647}
 if [ "$pid" = "$omp_pid" ]; then
   case "$field" in
     comm=) printf '%s\n' "${FM_TEST_OMP_COMM:-bun}" ;;
@@ -53,10 +53,10 @@ fi
 case "$pid:$field" in
   500:comm=) printf '%s\n' "${FM_TEST_NESTED_COMM:-claude}" ;;
   500:args=) printf '%s\n' "${FM_TEST_NESTED_COMM:-claude} --resume" ;;
-  500:ppid=) printf '%s\n' 700 ;;
+  500:ppid=) printf '%s\n' 2147483647 ;;
   *:comm=) printf '%s\n' bash ;;
   *:args=) printf '%s\n' 'bash -c firstmate-tool' ;;
-  *:ppid=) printf '%s\n' "${FM_TEST_HARNESS_PARENT:-700}" ;;
+  *:ppid=) printf '%s\n' "${FM_TEST_HARNESS_PARENT:-2147483647}" ;;
 esac
 SH
   chmod +x "$fakebin/ps"
@@ -99,9 +99,9 @@ test_exact_bun_omp_primary_identity() {
 
   got=$(PATH="$fakebin:$BASE_PATH" bash -c \
     '. "$0/bin/fm-session-lock-lib.sh"; fm_harness_ancestry_pid' "$ROOT")
-  [ "$got" = 700 ] || fail "exact bun-launched OMP ancestry resolved '$got', expected 700"
+  [ "$got" = 2147483647 ] || fail "exact bun-launched OMP ancestry resolved '$got', expected 2147483647"
   PATH="$fakebin:$BASE_PATH" bash -c \
-    '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 700' "$ROOT" \
+    '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 2147483647' "$ROOT" \
     || fail "exact bun-launched OMP lock owner was rejected"
 
   got=$(PATH="$fakebin:$BASE_PATH" PI_CODING_AGENT=true CLAUDECODE=1 "$ROOT/bin/fm-harness.sh")
@@ -109,21 +109,21 @@ test_exact_bun_omp_primary_identity() {
 
   got=$(PATH="$fakebin:$BASE_PATH" FM_TEST_OMP_COMM=omp bash -c \
     '. "$0/bin/fm-session-lock-lib.sh"; fm_harness_ancestry_pid' "$ROOT")
-  [ "$got" = 700 ] || fail "OMP process-title comm with exact Bun argv resolved '$got', expected 700"
+  [ "$got" = 2147483647 ] || fail "OMP process-title comm with exact Bun argv resolved '$got', expected 2147483647"
   PATH="$fakebin:$BASE_PATH" FM_TEST_OMP_COMM=omp bash -c \
-    '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 700' "$ROOT" \
+    '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 2147483647' "$ROOT" \
     || fail "OMP process-title comm with exact Bun argv was rejected"
 
   for shape in helper prefixed incidental; do
     if PATH="$fakebin:$BASE_PATH" FM_TEST_OMP_SHAPE="$shape" bash -c \
-      '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 700' "$ROOT"; then
+      '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 2147483647' "$ROOT"; then
       fail "inexact bun OMP shape was accepted: $shape"
     fi
     got=$(PATH="$fakebin:$BASE_PATH" FM_TEST_OMP_SHAPE="$shape" \
       PI_CODING_AGENT=true CLAUDECODE=1 "$ROOT/bin/fm-harness.sh")
     [ "$got" != omp ] || fail "inexact OMP ancestry was classified as OMP: $shape"
     if PATH="$fakebin:$BASE_PATH" FM_TEST_OMP_COMM=omp FM_TEST_OMP_SHAPE="$shape" bash -c \
-      '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 700' "$ROOT"; then
+      '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 2147483647' "$ROOT"; then
       fail "OMP process-title comm bypassed the Bun argv boundary: $shape"
     fi
   done
@@ -139,13 +139,13 @@ test_standalone_omp_primary_identity() {
 
   got=$(PATH="$fakebin:$BASE_PATH" FM_TEST_OMP_COMM=omp FM_TEST_EXPECTED_BUN="$fakebin/omp" \
     bash -c '. "$0/bin/fm-session-lock-lib.sh"; fm_harness_ancestry_pid' "$ROOT")
-  [ "$got" = 700 ] || fail "standalone OMP ancestry resolved '$got', expected 700"
+  [ "$got" = 2147483647 ] || fail "standalone OMP ancestry resolved '$got', expected 2147483647"
   PATH="$fakebin:$BASE_PATH" FM_TEST_OMP_COMM=omp FM_TEST_EXPECTED_BUN="$fakebin/omp" \
-    bash -c '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 700' "$ROOT" \
+    bash -c '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 2147483647' "$ROOT" \
     || fail "standalone OMP lock owner was rejected"
 
   if PATH="$fakebin:$BASE_PATH" FM_TEST_OMP_COMM=omp FM_TEST_EXPECTED_BUN="$fakebin/xomp" \
-    bash -c '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 700' "$ROOT"; then
+    bash -c '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 2147483647' "$ROOT"; then
     fail "standalone OMP accepted a PID running a different executable"
   fi
   if PATH="$fakebin:$BASE_PATH" FM_TEST_OMP_COMM=omp FM_TEST_EXPECTED_BUN="$fakebin/omp" \

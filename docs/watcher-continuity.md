@@ -37,7 +37,7 @@ This is deliberate Option B ordering: the fleet is protected before the model ha
 Claude's Stop hook starts the successor arm at the next Stop after the handling turn, rather than before notification as Pi, OMP, and OpenCode do.
 The durable wake queue preserves actionable events during the residual active-turn window, and the bounded turn-end guard enforces recovery at Stop when no watcher or auto-arm claim is present.
 For every supported arm path, a successor that observes an accepted down stretch emits `check: rearm-resurface` through the ordinary durable handling path before settling into its live wait.
-That recovery presentation includes all unacknowledged queue rows and the bounded view of the existing cursor-folded OPEN DECISIONS set, so a still-open decision reappears even when recovery has no queue row of its own.
+That recovery presentation rebuilds a bounded current projection from unacknowledged queue rows and the existing cursor-folded OPEN DECISIONS set on every retry, so a still-open decision reappears even when recovery has no queue row of its own and a later exact resolution cannot replay an older rendering.
 The drain fails closed without publishing a usable acknowledgement when the OPEN DECISIONS scan or output cannot complete, so a partial presentation cannot retire the recovery episode.
 The recovery-episode contract below owns once-per-generation announcement.
 A handling successor does not re-announce; it enters its poll loop immediately and keeps scanning signals, stale panes, and checks.

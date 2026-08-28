@@ -44,7 +44,7 @@ GLOBAL_CLEANUP() {
 trap GLOBAL_CLEANUP EXIT
 
 # ---------------------------------------------------------------------------
-# UNIT 1: fm_afk_clear_stale_artifacts removes exactly the three stale artifacts.
+# UNIT 1: fm_afk_clear_stale_artifacts removes stale delivery artifacts.
 # ---------------------------------------------------------------------------
 unit_clear_stale() {
   local st
@@ -52,6 +52,8 @@ unit_clear_stale() {
   mkdir -p "$st/state"
   : > "$st/state/.subsuper-escalations"
   : > "$st/state/.subsuper-escalations.since"
+  : > "$st/state/.subsuper-recovery-escalations"
+  : > "$st/state/.subsuper-recovery-escalations.generation"
   : > "$st/state/.subsuper-inject-wedged"
   : > "$st/state/.wake-queue"          # durable queue must be untouched
   # Source fm-afk-start.sh inside a child bash (it sets `set -eu` and would
@@ -60,8 +62,10 @@ unit_clear_stale() {
     bash -c '. "$1"; fm_afk_clear_stale_artifacts "$2"' _ "$START" "$st/state"
   if [ ! -e "$st/state/.subsuper-escalations" ] \
      && [ ! -e "$st/state/.subsuper-escalations.since" ] \
+     && [ ! -e "$st/state/.subsuper-recovery-escalations" ] \
+     && [ ! -e "$st/state/.subsuper-recovery-escalations.generation" ] \
      && [ ! -e "$st/state/.subsuper-inject-wedged" ]; then
-    pass "clear-stale: removes escalations buffer, sidecar, and wedge marker"
+    pass "clear-stale: removes asynchronous and recovery delivery artifacts"
   else
     fail "clear-stale: stale artifacts survived"
   fi
@@ -221,11 +225,15 @@ unit_failed_start_rolls_back_state() {
   mkdir -p "$st/state"
   printf 'pending\n' > "$st/state/.subsuper-escalations"
   printf 'wedged\n' > "$st/state/.subsuper-inject-wedged"
+  printf 'recovery\n' > "$st/state/.subsuper-recovery-escalations"
+  printf 'recover-one\n' > "$st/state/.subsuper-recovery-escalations.generation"
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
     FM_SUPERVISOR_BACKEND=unsupported "$LAUNCH" start >/dev/null 2>&1; then
     fail "failed start: unsupported backend unexpectedly succeeded"
   elif [ ! -e "$st/state/.afk" ] \
     && [ "$(cat "$st/state/.subsuper-escalations")" = pending ] \
+    && [ "$(cat "$st/state/.subsuper-recovery-escalations")" = recovery ] \
+    && [ "$(cat "$st/state/.subsuper-recovery-escalations.generation")" = recover-one ] \
     && [ "$(cat "$st/state/.subsuper-inject-wedged")" = wedged ]; then
     pass "failed start: away flag and delivery artifacts roll back"
   else

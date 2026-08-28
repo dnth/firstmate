@@ -123,6 +123,8 @@ clear_delivery_artifacts() {
   rm -f \
     "$STATE/.subsuper-escalations" \
     "$STATE/.subsuper-escalations.since" \
+    "$STATE/.subsuper-recovery-escalations" \
+    "$STATE/.subsuper-recovery-escalations.generation" \
     "$STATE/.subsuper-inject-wedged"
 }
 

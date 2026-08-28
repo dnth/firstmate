@@ -325,7 +325,7 @@ OMP binds that same core through `.omp/extensions/fm-primary-omp.ts` and is cove
 
 The once-per-generation recovery bound and immediate handling-successor poll were verified on 2026-08-21 at revision `549dd1e0ff05f96607c5e7457b4d8e3d7396bd16` with the tracked Pi extension, real watcher processes, and an isolated home.
 The regression forced handling confirmation to fail, observed one recovery follow-up across the former repeat window, confirmed the successor remained live, and then proved a separate handling successor durably queued a crew event within the bounded poll window.
-`tests/fm-wake-daemon-lifecycle-e2e.test.sh` additionally proves away-mode decision-only recovery routes before acknowledgement, and that routing failure, incomplete or changed drain capture, and unconfirmed injection all retain the episode for a successful retry.
+`tests/fm-wake-daemon-lifecycle-e2e.test.sh` additionally proves away-mode decision-only recovery routes its current projection before acknowledgement, retries rebuild that projection after an exact `captain-held` transition, and routing failure, incomplete or changed drain capture, and unconfirmed injection all retain the episode for a successful retry.
 
 ```sh
 bin/fm-test-run.sh tests/fm-watch-recovery-loop.test.sh
