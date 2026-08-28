@@ -250,6 +250,7 @@ A smaller crew-specific MCP profile remains a follow-up because no supported iso
 ### OMP lifecycle
 
 The complete tmux role matrix reran on 2026-07-31 against OMP 17.1.8 using separate private tmux sockets, temporary homes, and disposable git worktrees:
+The ordinary-text steering transport described in the dated OMP role-matrix records below was superseded by the local steering inbox; [Local steering inbox](#local-steering-inbox) owns the current record-to-ack proof, while slash commands, keys, explicit targets, and remote secondmates retain the typed transport those records exercise.
 
 ```sh
 omp --version
