@@ -538,6 +538,13 @@ wait_for_state missing || fail "recovered fixture endpoint did not stop"
 cp "$LAB/meta.before-branch-mismatch" "$META"
 rm -f "$SESSION_POINTER"
 rm -rf "$SESSION_DIR" "$TASK_TMP/omp-sessions"
+TEARDOWN_ARCHIVE=$(mktemp "$HOME_DIR/state/.fm-teardown-omp-state-$ID.XXXXXX.tar")
+TEARDOWN_ROLLBACK_OUTPUT=$(spawn "$ID" --recover 2>&1)
+TEARDOWN_ROLLBACK_STATUS=$?
+[ "$TEARDOWN_ROLLBACK_STATUS" -ne 0 ] || fail "recovery accepted unfinished ordinary-session teardown rollback state"
+assert_contains "$TEARDOWN_ROLLBACK_OUTPUT" "unfinished ordinary-session teardown rollback state" \
+  "recovery did not refuse unfinished ordinary-session teardown rollback state"
+rm -f "$TEARDOWN_ARCHIVE"
 FRESH_CLEANUP_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_FINALIZATION=1 \
   FM_SPAWN_RECOVERY_TEST_FAIL_FRESH_SESSION_CLEANUP=1 spawn "$ID" --recover 2>&1)
 FRESH_CLEANUP_STATUS=$?
@@ -545,4 +552,11 @@ FRESH_CLEANUP_STATUS=$?
 wait_for_state missing || fail "fresh-session cleanup failure retained replacement endpoint"
 FRESH_DIRECT_SESSIONS=$(find "$SESSION_DIR" -maxdepth 1 -type f -name '*.jsonl' -print)
 [ -z "$FRESH_DIRECT_SESSIONS" ] || fail "fresh-session cleanup failure stranded an unpointed durable session"
+[ -f "$SESSION_DIR/.fm-spawn-recovery-cleanup-pending" ] \
+  || fail "fresh-session cleanup failure did not retain its deterministic recovery guard"
+FRESH_RETRY_OUTPUT=$(spawn "$ID" --recover 2>&1)
+FRESH_RETRY_STATUS=$?
+[ "$FRESH_RETRY_STATUS" -ne 0 ] || fail "fresh-session cleanup failure allowed an unsafe retry"
+assert_contains "$FRESH_RETRY_OUTPUT" "could not select one exact prior task session" \
+  "fresh-session cleanup guard did not refuse a deterministic retry"
 pass "guarded OMP recovery preserves task state, restores failed attempts, and rejects unsafe records"

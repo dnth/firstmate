@@ -1034,6 +1034,59 @@ SH
   pass "failed final task-state cleanup restores durable ordinary OMP session state"
 }
 
+test_teardown_does_not_restore_metadata_before_session_state() {
+  local case_dir rc session_dir session_file pointer meta archive
+  case_dir=$(make_case durable-ordinary-omp-session-restore-before-meta)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'harness=omp' >> "$case_dir/state/task-x1.meta"
+  session_dir="$case_dir/state/task-x1.omp-sessions"
+  session_file="$session_dir/retained.jsonl"
+  pointer="$case_dir/state/task-x1.omp-session"
+  meta="$case_dir/state/task-x1.meta"
+  mkdir -p "$session_dir"
+  printf 'FIRSTMATE_OP: v1 launch-brief: retained\n' > "$session_file"
+  printf '%s\n' "$session_file" > "$pointer"
+  wt_commit "$case_dir" "shippable OMP work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  cat > "$case_dir/fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in */task-x1.meta) "$REAL_RM_FOR_TEST" "$@"; exit 1 ;; esac
+done
+exec "$REAL_RM_FOR_TEST" "$@"
+SH
+  cat > "$case_dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+previous=
+for arg in "$@"; do
+  case "$previous:$arg" in
+    */.fm-teardown-omp-state-restore.*/sessions-backup:*/task-x1.omp-sessions) exit 1 ;;
+  esac
+  previous=$arg
+done
+exec "$REAL_MV_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/rm" "$case_dir/fakebin/mv"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "durable-ordinary-omp-session-restore-before-meta: teardown should refuse incomplete restoration"
+  [ ! -e "$meta" ] && [ ! -L "$meta" ] || fail "durable-ordinary-omp-session-restore-before-meta: restored metadata before durable sessions"
+  [ ! -e "$pointer" ] && [ ! -L "$pointer" ] || fail "durable-ordinary-omp-session-restore-before-meta: left a partial canonical pointer"
+  [ ! -e "$session_dir" ] && [ ! -L "$session_dir" ] || fail "durable-ordinary-omp-session-restore-before-meta: left a partial canonical session"
+  archive=$(find "$case_dir/state" -maxdepth 1 -type f -name '.fm-teardown-omp-state-task-x1.*.tar' -print -quit)
+  [ -n "$archive" ] || fail "durable-ordinary-omp-session-restore-before-meta: lost the recovery archive"
+  tar -tf "$archive" | grep -Fx './meta' >/dev/null \
+    || fail "durable-ordinary-omp-session-restore-before-meta: archive lost task metadata"
+  tar -tf "$archive" | grep -Fx './sessions-backup/retained.jsonl' >/dev/null \
+    || fail "durable-ordinary-omp-session-restore-before-meta: archive lost the durable session"
+  pass "failed session restoration never publishes metadata before durable session state"
+}
+
 test_teardown_rolls_back_session_restore_when_ordinary_omp_pointer_restore_fails() {
   local case_dir rc session_dir session_file pointer rollback_pointer rollback_session
   case_dir=$(make_case durable-ordinary-omp-pointer-restore-failure)
@@ -3945,6 +3998,7 @@ test_teardown_preserves_session_when_ordinary_omp_rollback_finalization_partiall
 test_teardown_restores_session_when_ordinary_omp_finalization_backup_deletion_fails
 test_teardown_preserves_session_when_later_pr_cleanup_fails
 test_teardown_restores_session_when_final_state_cleanup_fails
+test_teardown_does_not_restore_metadata_before_session_state
 test_teardown_rolls_back_session_restore_when_ordinary_omp_pointer_restore_fails
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed

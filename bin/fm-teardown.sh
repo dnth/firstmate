@@ -721,7 +721,7 @@ snapshot_ordinary_omp_cleanup_state() {
     }
     session_present=1
   fi
-  archive=$(mktemp "$state_dir/.fm-teardown-omp-state.XXXXXX.tar") || {
+  archive=$(mktemp "$state_dir/.fm-teardown-omp-state-$id.XXXXXX.tar") || {
     rm -rf -- "$staged"
     return 1
   }
@@ -736,7 +736,7 @@ snapshot_ordinary_omp_cleanup_state() {
   TEARDOWN_OMP_CLEANUP_SESSION_PRESENT=$session_present
 }
 restore_ordinary_omp_cleanup_state() {
-  local state_dir=$1 id=$2 archive=${TEARDOWN_OMP_CLEANUP_ARCHIVE:-} restored meta
+  local state_dir=$1 id=$2 archive=${TEARDOWN_OMP_CLEANUP_ARCHIVE:-} restored meta pointer session_dir prior_meta=
   [ -f "$archive" ] && [ ! -L "$archive" ] || return 1
   restored=$(mktemp -d "$state_dir/.fm-teardown-omp-state-restore.XXXXXX") || return 1
   tar -xf "$archive" -C "$restored" || {
@@ -744,12 +744,34 @@ restore_ordinary_omp_cleanup_state() {
     return 1
   }
   meta="$state_dir/$id.meta"
-  [ -f "$restored/meta" ] && [ ! -L "$restored/meta" ] \
-    && mv -f -- "$restored/meta" "$meta" || return 1
-  restore_ordinary_omp_session_state "$state_dir/$id.omp-session" \
-    "$state_dir/$id.omp-sessions" "$restored/pointer-backup" \
+  pointer="$state_dir/$id.omp-session"
+  session_dir="$state_dir/$id.omp-sessions"
+  if [ -e "$meta" ] || [ -L "$meta" ]; then
+    [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+    prior_meta="$restored/prior-meta"
+    mv -- "$meta" "$prior_meta" || return 1
+  fi
+  restore_ordinary_omp_session_state "$pointer" "$session_dir" "$restored/pointer-backup" \
     "$restored/sessions-backup" "${TEARDOWN_OMP_CLEANUP_POINTER_PRESENT:-0}" \
-    "${TEARDOWN_OMP_CLEANUP_SESSION_PRESENT:-0}"
+    "${TEARDOWN_OMP_CLEANUP_SESSION_PRESENT:-0}" || return 1
+  if [ -n "$prior_meta" ]; then
+    mv -- "$prior_meta" "$meta"
+  else
+    [ -f "$restored/meta" ] && [ ! -L "$restored/meta" ] \
+      && mv -f -- "$restored/meta" "$meta"
+  fi || {
+      if [ "${TEARDOWN_OMP_CLEANUP_POINTER_PRESENT:-0}" = 1 ]; then
+        mv -- "$pointer" "$restored/pointer-backup" || return 1
+      fi
+      if [ "${TEARDOWN_OMP_CLEANUP_SESSION_PRESENT:-0}" = 1 ]; then
+        mv -- "$session_dir" "$restored/sessions-backup" || {
+          [ "${TEARDOWN_OMP_CLEANUP_POINTER_PRESENT:-0}" != 1 ] \
+            || mv -- "$restored/pointer-backup" "$pointer" || return 1
+          return 1
+        }
+      fi
+      return 1
+    }
 }
 remove_ordinary_omp_session_state() {  # <state-dir> <task-id>
   local state_dir=$1 id=$2 pointer session_dir transaction rollback finalization archive staged_pointer staged_session

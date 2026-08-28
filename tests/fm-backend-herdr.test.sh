@@ -564,6 +564,23 @@ test_container_ensure_starts_server_and_workspace() {
   pass "fm_backend_herdr_container_ensure: version-gates, starts the server, ensures the firstmate workspace, echoes session:workspace_id + the seeded default tab id"
 }
 
+test_container_ensure_honors_an_explicit_session() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/container-explicit-session"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"client":{"version":"0.7.1","protocol":14}}\n' > "$resp/1.out"
+  printf '{"server":{"running":true}}\n' > "$resp/2.out"
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"}]}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 HERDR_SESSION=ambient \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /tmp launcher-home recorded' "$ROOT" )
+  [ "$out" = $'recorded:w1\t' ] || fail "container_ensure did not honor its explicit session, got '$out'"
+  assert_contains "$(cat "$log")" "HERDR_SESSION=recorded"$'\x1f''status'$'\x1f''--json'$'\x1f''--session'$'\x1f''recorded' \
+    "container_ensure did not bind server inspection to its explicit session"
+  assert_contains "$(cat "$log")" "HERDR_SESSION=recorded"$'\x1f''workspace'$'\x1f''list' \
+    "container_ensure did not bind workspace lookup to its explicit session"
+  pass "fm_backend_herdr_container_ensure: explicit session overrides ambient selection"
+}
+
 test_container_ensure_reuses_existing_workspace() {
   local dir log resp fb out
   dir="$TMP_ROOT/container-reuse"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -4691,6 +4708,7 @@ test_workspace_ensure_refuses_an_ambiguous_label_with_no_launcher
 test_workspace_ensure_other_home_ignores_the_launcher_identity
 test_container_ensure_refuses_an_ambiguous_home_label
 test_container_ensure_starts_server_and_workspace
+test_container_ensure_honors_an_explicit_session
 test_container_ensure_reuses_existing_workspace
 test_container_ensure_creates_with_no_focus_flag
 test_container_ensure_uses_secondmate_home_label

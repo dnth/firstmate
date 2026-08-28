@@ -127,7 +127,7 @@ fm_spawn_recovery_collect_direct_sessions() { # <session-dir>
 }
 
 fm_spawn_recovery_select_session() { # <state> <tasktmp> <task-id>
-  local state=$1 tasktmp=$2 id=$3 session_dir pointer legacy_dir gotmp candidate
+  local state=$1 tasktmp=$2 id=$3 session_dir pointer legacy_dir gotmp candidate cleanup_guard
   state=$(cd "$state" 2>/dev/null && pwd -P) || return 1
   local -a candidates=()
   [ "${SPAWN_TASK_LOCK_HELD:-0}" = 1 ] \
@@ -148,8 +148,13 @@ fm_spawn_recovery_select_session() { # <state> <tasktmp> <task-id>
   FM_SPAWN_RECOVERY_POINTER_WAS_ABSENT=0
   session_dir=$FM_SPAWN_RECOVERY_SESSION_DIR
   pointer=$FM_SPAWN_RECOVERY_SESSION_POINTER
+  cleanup_guard="$session_dir/.fm-spawn-recovery-cleanup-pending"
   legacy_dir="$tasktmp/omp-sessions"
   gotmp="$tasktmp/gotmp"
+  if [ -e "$cleanup_guard" ] || [ -L "$cleanup_guard" ]; then
+    [ -f "$cleanup_guard" ] && [ ! -L "$cleanup_guard" ] || return 1
+    return 1
+  fi
   if [ ! -e "$tasktmp" ] && [ ! -L "$tasktmp" ]; then
     FM_SPAWN_RECOVERY_TASKTMP_CREATED=1
     FM_SPAWN_RECOVERY_GOTMP_CREATED=1
@@ -208,6 +213,18 @@ fm_spawn_recovery_select_session() { # <state> <tasktmp> <task-id>
       ;;
     *) return 1 ;;
   esac
+}
+
+fm_spawn_recovery_teardown_rollback_pending() { # <state> <task-id>
+  local state=$1 id=$2 archive nullglob_was_set=0
+  shopt -q nullglob && nullglob_was_set=1
+  shopt -s nullglob
+  for archive in "$state/.fm-teardown-omp-state-$id."*.tar; do
+    [ "$nullglob_was_set" -eq 1 ] || shopt -u nullglob
+    return 0
+  done
+  [ "$nullglob_was_set" -eq 1 ] || shopt -u nullglob
+  return 1
 }
 
 fm_spawn_recovery_bind_legacy_session() {
@@ -495,6 +512,10 @@ fm_spawn_recovery_prepare() { # <state> <data> <task-id>
       ;;
   esac
   FM_SPAWN_RECOVERY_ENDPOINT_STATE=$endpoint_state
+  if fm_spawn_recovery_teardown_rollback_pending "$state" "$id"; then
+    echo "error: OMP recovery found unfinished ordinary-session teardown rollback state for task $id; preserving task state" >&2
+    return 1
+  fi
   fm_spawn_recovery_select_session "$state" "$tasktmp" "$id" || {
     echo "error: OMP recovery could not select one exact prior task session for $id; preserving task state" >&2
     return 1
@@ -602,9 +623,31 @@ fm_spawn_recovery_publish_candidate() { # <state> <task-id> <backend> <target>
   FM_SPAWN_RECOVERY_PUBLISHED=1
 }
 
+fm_spawn_recovery_write_session_cleanup_guard() {
+  local session_dir=${FM_SPAWN_RECOVERY_SESSION_DIR:-} guard tmp
+  [ -d "$session_dir" ] && [ ! -L "$session_dir" ] || return 1
+  guard="$session_dir/.fm-spawn-recovery-cleanup-pending"
+  if [ -e "$guard" ] || [ -L "$guard" ]; then
+    [ -f "$guard" ] && [ ! -L "$guard" ] || return 1
+    return 0
+  fi
+  tmp=$(mktemp "$session_dir/.fm-spawn-recovery-cleanup-pending.XXXXXX") || return 1
+  printf '%s\n' pending > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -- "$tmp" "$guard"
+}
+
+fm_spawn_recovery_clear_session_cleanup_guard() {
+  local session_dir=${FM_SPAWN_RECOVERY_SESSION_DIR:-} guard
+  guard="$session_dir/.fm-spawn-recovery-cleanup-pending"
+  [ -e "$guard" ] || [ -L "$guard" ] || return 0
+  [ -f "$guard" ] && [ ! -L "$guard" ] || return 1
+  rm -f -- "$guard"
+}
+
 fm_spawn_recovery_remove_fresh_session_artifacts() {
   local session_dir=${FM_SPAWN_RECOVERY_SESSION_DIR:-} file quarantine
   [ "${FM_SPAWN_RECOVERY_SESSION_MODE:-}" = fresh ] || return 0
+  fm_spawn_recovery_write_session_cleanup_guard || return 1
   file=${FM_SPAWN_RECOVERY_FRESH_SESSION_FILE:-}
   if [ -n "$file" ]; then
     [ -f "$file" ] && [ ! -L "$file" ] \
@@ -617,6 +660,7 @@ fm_spawn_recovery_remove_fresh_session_artifacts() {
     fi
     [ ! -e "$file" ] && [ ! -L "$file" ] || return 1
   fi
+  fm_spawn_recovery_clear_session_cleanup_guard || return 1
   if [ "${FM_SPAWN_RECOVERY_SESSION_DIR_CREATED:-0}" = 1 ]; then
     rmdir -- "$session_dir" || return 1
   fi
@@ -641,6 +685,7 @@ fm_spawn_recovery_remove_replacement_scratch() {
 fm_spawn_recovery_remove_legacy_session_binding() {
   local session_dir=${FM_SPAWN_RECOVERY_SESSION_DIR:-} file=${FM_SPAWN_RECOVERY_RESUME_FILE:-} quarantine
   [ "${FM_SPAWN_RECOVERY_LEGACY_SESSION_BOUND:-0}" = 1 ] || return 0
+  fm_spawn_recovery_write_session_cleanup_guard || return 1
   [ -f "$file" ] && [ ! -L "$file" ] \
     && [ "$(cd "$(dirname "$file")" && pwd -P)" = "$(cd "$session_dir" && pwd -P)" ] || return 1
   if ! rm -f -- "$file"; then
@@ -650,6 +695,7 @@ fm_spawn_recovery_remove_legacy_session_binding() {
     return 1
   fi
   [ ! -e "$file" ] && [ ! -L "$file" ] || return 1
+  fm_spawn_recovery_clear_session_cleanup_guard
 }
 
 fm_spawn_recovery_restore_pointer() {
@@ -907,7 +953,10 @@ fm_spawn_recovery_abort() { # <backend> <target>
       echo "warning: OMP recovery could not identify one fresh failed-attempt session; preserving recovery artifacts and task state" >&2
       return 1
     }
-    fm_spawn_recovery_remove_fresh_session_artifacts
+    fm_spawn_recovery_remove_fresh_session_artifacts || {
+      echo "warning: OMP recovery could not remove its failed fresh session; preserving recovery artifacts and task state" >&2
+      return 1
+    }
   fi
   fm_spawn_recovery_restore_pointer || {
     echo "warning: OMP recovery could not restore its durable session pointer; preserving recovery artifacts and task state" >&2

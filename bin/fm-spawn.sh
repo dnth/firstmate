@@ -1208,9 +1208,6 @@ if [ "$RECOVER" -eq 1 ]; then
   YOLO=$FM_SPAWN_RECOVERY_YOLO
   PREWALK_INTO=$FM_SPAWN_RECOVERY_PREWALK_INTO
   ALLOW_PROJECT_OMP_EXTENSIONS=$FM_SPAWN_RECOVERY_ALLOW_PROJECT_OMP_EXTENSIONS
-  if [ "$BACKEND" = herdr ]; then
-    HERDR_SESSION=$FM_SPAWN_RECOVERY_HERDR_SESSION
-  fi
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
     ''|claude|codex|opencode|pi|pi-signed|omp|grok|kimi)
@@ -2857,7 +2854,11 @@ case "$BACKEND" in
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
     if [ "$KIND" != secondmate ] && fm_backend_herdr_presentation_enabled "$CONFIG"; then
-      HERDR_SES=$(fm_backend_herdr_session)
+      if [ "$RECOVER" -eq 1 ]; then
+        HERDR_SES=$FM_SPAWN_RECOVERY_HERDR_SESSION
+      else
+        HERDR_SES=$(fm_backend_herdr_session)
+      fi
       HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
       if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
         fm_backend_herdr_server_ensure "$HERDR_SES" || {
@@ -2984,7 +2985,11 @@ case "$BACKEND" in
       fi
     fi
     if [ "$HERDR_PROJECTED" -ne 1 ]; then
-      HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$PROJ_ABS" "$HERDR_LAUNCHER_RELATIONSHIP") || exit 1
+      if [ "$RECOVER" -eq 1 ]; then
+        HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$PROJ_ABS" "$HERDR_LAUNCHER_RELATIONSHIP" "$FM_SPAWN_RECOVERY_HERDR_SESSION") || exit 1
+      else
+        HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$PROJ_ABS" "$HERDR_LAUNCHER_RELATIONSHIP") || exit 1
+      fi
       # fm_backend_herdr_container_ensure echoes "<session>:<workspace_id>\t<seeded_default_tab_id>"
       # (the second field empty when this call ADOPTED a pre-existing workspace
       # rather than creating a fresh one). Split on the guaranteed single tab
