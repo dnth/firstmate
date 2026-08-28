@@ -379,6 +379,8 @@ fm_spawn_recovery_prepare() { # <state> <data> <task-id>
   FM_SPAWN_RECOVERY_STARTED=
   FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT=
   FM_SPAWN_RECOVERY_FINALIZATION_BACKUP=
+  FM_SPAWN_RECOVERY_FINALIZATION_ARCHIVE=
+  FM_SPAWN_RECOVERY_FINALIZATION_ORIGINAL=
   FM_SPAWN_RECOVERY_TRACEPARENT=
   FM_SPAWN_RECOVERY_TRACEPARENT_PRESENT=0
   [ -f "$meta" ] && [ ! -L "$meta" ] || {
@@ -694,7 +696,15 @@ fm_spawn_recovery_cleanup_artifacts() {
      && [ ! -L "$FM_SPAWN_RECOVERY_FINALIZATION_BACKUP" ]; then
     rm -rf -- "$FM_SPAWN_RECOVERY_FINALIZATION_BACKUP" 2>/dev/null || true
   fi
+  if [ -n "${FM_SPAWN_RECOVERY_FINALIZATION_ORIGINAL:-}" ] \
+     && [ -d "$FM_SPAWN_RECOVERY_FINALIZATION_ORIGINAL" ] \
+     && [ ! -L "$FM_SPAWN_RECOVERY_FINALIZATION_ORIGINAL" ]; then
+    rm -rf -- "$FM_SPAWN_RECOVERY_FINALIZATION_ORIGINAL" 2>/dev/null || true
+  fi
+  rm -f -- "${FM_SPAWN_RECOVERY_FINALIZATION_ARCHIVE:-}" 2>/dev/null || true
   FM_SPAWN_RECOVERY_FINALIZATION_BACKUP=
+  FM_SPAWN_RECOVERY_FINALIZATION_ARCHIVE=
+  FM_SPAWN_RECOVERY_FINALIZATION_ORIGINAL=
 }
 
 fm_spawn_recovery_backup_finalization_state() {
@@ -745,6 +755,32 @@ fm_spawn_recovery_restore_finalization_state() {
   fi
 }
 
+fm_spawn_recovery_archive_finalization_state() {
+  local tasktmp=${FM_SPAWN_RECOVERY_TASKTMP:-} backup=${FM_SPAWN_RECOVERY_FINALIZATION_BACKUP:-} archive
+  [ -d "$tasktmp" ] && [ ! -L "$tasktmp" ] \
+    && [ -d "$backup" ] && [ ! -L "$backup" ] || return 1
+  archive=$(mktemp "$tasktmp/.fm-spawn-recovery-finalize.XXXXXX.tar") || return 1
+  tar -C "$backup" -cf "$archive" . || {
+    rm -f -- "$archive"
+    return 1
+  }
+  FM_SPAWN_RECOVERY_FINALIZATION_ARCHIVE=$archive
+}
+
+fm_spawn_recovery_restore_finalization_archive() {
+  local tasktmp=${FM_SPAWN_RECOVERY_TASKTMP:-} archive=${FM_SPAWN_RECOVERY_FINALIZATION_ARCHIVE:-} backup
+  [ -d "$tasktmp" ] && [ ! -L "$tasktmp" ] \
+    && [ -f "$archive" ] && [ ! -L "$archive" ] || return 1
+  backup=$(mktemp -d "$tasktmp/.fm-spawn-recovery-finalize-restore.XXXXXX") || return 1
+  tar -xf "$archive" -C "$backup" || {
+    rm -rf -- "$backup"
+    return 1
+  }
+  FM_SPAWN_RECOVERY_FINALIZATION_ORIGINAL=${FM_SPAWN_RECOVERY_FINALIZATION_BACKUP:-}
+  FM_SPAWN_RECOVERY_FINALIZATION_BACKUP=$backup
+  fm_spawn_recovery_restore_finalization_state
+}
+
 fm_spawn_recovery_remove_rollback_artifacts() {
   [ "${FM_SPAWN_RECOVERY_TEST_FAIL_ROLLBACK_FINALIZATION:-0}" != 1 ] || return 1
   fm_spawn_recovery_backup_finalization_state || return 1
@@ -782,11 +818,20 @@ fm_spawn_recovery_complete() {
   [ "${FM_SPAWN_RECOVERY_PUBLISHED:-0}" = 1 ] || return 1
   fm_spawn_recovery_remove_launch_artifacts || return 1
   fm_spawn_recovery_remove_rollback_artifacts || return 1
-  FM_SPAWN_RECOVERY_FINALIZED=1
-  if [ -n "${FM_SPAWN_RECOVERY_FINALIZATION_BACKUP:-}" ]; then
-    rm -rf -- "$FM_SPAWN_RECOVERY_FINALIZATION_BACKUP" 2>/dev/null || true
-    FM_SPAWN_RECOVERY_FINALIZATION_BACKUP=
+  fm_spawn_recovery_archive_finalization_state || return 1
+  rm -rf -- "$FM_SPAWN_RECOVERY_FINALIZATION_BACKUP" || {
+    fm_spawn_recovery_restore_finalization_archive
+    return 1
+  }
+  if [ "${FM_SPAWN_RECOVERY_TEST_FAIL_FINALIZATION_ARCHIVE_DELETE:-0}" = 1 ] \
+     || ! rm -f -- "$FM_SPAWN_RECOVERY_FINALIZATION_ARCHIVE"; then
+    fm_spawn_recovery_restore_finalization_archive
+    return 1
   fi
+  FM_SPAWN_RECOVERY_FINALIZED=1
+  FM_SPAWN_RECOVERY_FINALIZATION_BACKUP=
+  FM_SPAWN_RECOVERY_FINALIZATION_ARCHIVE=
+  FM_SPAWN_RECOVERY_FINALIZATION_ORIGINAL=
   FM_SPAWN_RECOVERY_SESSION_BACKUP=
   FM_SPAWN_RECOVERY_POINTER_BACKUP=
   FM_SPAWN_RECOVERY_META_SNAPSHOT=

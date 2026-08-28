@@ -259,6 +259,14 @@ assert_contains "$PARTIAL_FINALIZATION_OUTPUT" "published its replacement endpoi
 wait_for_state missing || fail "partial rollback finalization failure retained replacement endpoint"
 cmp -s "$META" "$LAB/meta.before" || fail "partial rollback finalization failure retained replacement metadata"
 cmp -s "$SESSION_FILE" "$LAB/session.before" || fail "partial rollback finalization failure did not restore the exact session bytes"
+ARCHIVE_FINALIZATION_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_FINALIZATION_ARCHIVE_DELETE=1 spawn "$ID" --recover 2>&1)
+ARCHIVE_FINALIZATION_STATUS=$?
+[ "$ARCHIVE_FINALIZATION_STATUS" -ne 0 ] || fail "finalization archive deletion failure unexpectedly succeeded"
+assert_contains "$ARCHIVE_FINALIZATION_OUTPUT" "published its replacement endpoint" \
+  "finalization archive deletion failure did not reach endpoint finalization"
+wait_for_state missing || fail "finalization archive deletion failure retained replacement endpoint"
+cmp -s "$META" "$LAB/meta.before" || fail "finalization archive deletion failure retained replacement metadata"
+cmp -s "$SESSION_FILE" "$LAB/session.before" || fail "finalization archive deletion failure did not restore the exact session bytes"
 ln -s "$SESSION_FILE" "$SESSION_DIR/symlinked.jsonl"
 SYMLINK_OUTPUT=$(spawn "$ID" --recover 2>&1)
 SYMLINK_STATUS=$?

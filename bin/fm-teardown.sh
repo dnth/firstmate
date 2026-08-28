@@ -682,8 +682,20 @@ restore_ordinary_omp_session_state() {
     }
   fi
 }
+restore_ordinary_omp_session_archive() {
+  local state_dir=$1 archive=$2 pointer=$3 session_dir=$4 pointer_present=$5 session_present=$6 restored
+  [ -f "$archive" ] && [ ! -L "$archive" ] || return 1
+  restored=$(mktemp -d "$state_dir/.fm-teardown-omp-finalize-restore.XXXXXX") || return 1
+  tar -xf "$archive" -C "$restored" || {
+    rm -rf -- "$restored"
+    return 1
+  }
+  restore_ordinary_omp_session_state "$pointer" "$session_dir" \
+    "$restored/pointer-backup" "$restored/sessions-backup" \
+    "$pointer_present" "$session_present"
+}
 remove_ordinary_omp_session_state() {  # <state-dir> <task-id>
-  local state_dir=$1 id=$2 pointer session_dir transaction rollback finalization staged_pointer staged_session
+  local state_dir=$1 id=$2 pointer session_dir transaction rollback finalization archive staged_pointer staged_session
   local pointer_backup session_backup pointer_present=0 session_present=0
   pointer="$state_dir/$id.omp-session"
   session_dir="$state_dir/$id.omp-sessions"
@@ -763,11 +775,27 @@ remove_ordinary_omp_session_state() {  # <state-dir> <task-id>
     rm -rf -- "$finalization" 2>/dev/null || true
     return 1
   fi
-  if ! rm -rf -- "$rollback"; then
-    restore_ordinary_omp_session_state "$pointer" "$session_dir" "$finalization/pointer-backup" "$finalization/sessions-backup" "$pointer_present" "$session_present" || return 1
+  archive=$(mktemp "$state_dir/.fm-teardown-omp-finalize.XXXXXX.tar") || {
+    restore_ordinary_omp_session_state "$pointer" "$session_dir" "$pointer_backup" "$session_backup" "$pointer_present" "$session_present" || return 1
+    return 1
+  }
+  if ! tar -C "$finalization" -cf "$archive" .; then
+    rm -f -- "$archive"
+    restore_ordinary_omp_session_state "$pointer" "$session_dir" "$pointer_backup" "$session_backup" "$pointer_present" "$session_present" || return 1
     return 1
   fi
-  rm -rf -- "$finalization" 2>/dev/null || true
+  if ! rm -rf -- "$rollback"; then
+    restore_ordinary_omp_session_archive "$state_dir" "$archive" "$pointer" "$session_dir" "$pointer_present" "$session_present" || return 1
+    return 1
+  fi
+  if ! rm -rf -- "$finalization"; then
+    restore_ordinary_omp_session_archive "$state_dir" "$archive" "$pointer" "$session_dir" "$pointer_present" "$session_present" || return 1
+    return 1
+  fi
+  if ! rm -f -- "$archive"; then
+    restore_ordinary_omp_session_archive "$state_dir" "$archive" "$pointer" "$session_dir" "$pointer_present" "$session_present" || return 1
+    return 1
+  fi
 }
 
 
@@ -2815,16 +2843,16 @@ remove_grok_turnend_auth "$STATE" "$ID"
 remove_kimi_turnend_auth "$STATE" "$ID"
 remove_hermes_turnend_auth "$STATE" "$ID" "$META"
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
-case "$KIND:$HARNESS" in
-  ship:omp|scout:omp)
-    remove_ordinary_omp_session_state "$STATE" "$ID" || exit 1
-    ;;
-esac
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
+case "$KIND:$HARNESS" in
+  ship:omp|scout:omp)
+    remove_ordinary_omp_session_state "$STATE" "$ID" || exit 1
+    ;;
+esac
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" \
   "$STATE/$ID.omp-started" \

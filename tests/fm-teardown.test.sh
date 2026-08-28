@@ -924,6 +924,80 @@ SH
   pass "partial ordinary OMP rollback finalization preserves durable session state"
 }
 
+test_teardown_restores_session_when_ordinary_omp_finalization_backup_deletion_fails() {
+  local case_dir rc session_dir session_file pointer
+  case_dir=$(make_case durable-ordinary-omp-finalization-backup-deletion-failure)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'harness=omp' >> "$case_dir/state/task-x1.meta"
+  session_dir="$case_dir/state/task-x1.omp-sessions"
+  session_file="$session_dir/retained.jsonl"
+  pointer="$case_dir/state/task-x1.omp-session"
+  mkdir -p "$session_dir"
+  printf 'FIRSTMATE_OP: v1 launch-brief: retained\n' > "$session_file"
+  printf '%s\n' "$session_file" > "$pointer"
+  wt_commit "$case_dir" "shippable OMP work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  cat > "$case_dir/fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    */.fm-teardown-omp-finalize.*)
+      "$REAL_RM_FOR_TEST" -rf -- "$arg"
+      exit 1
+      ;;
+  esac
+done
+exec "$REAL_RM_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/rm"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "durable-ordinary-omp-finalization-backup-deletion-failure: teardown should refuse failed finalization backup deletion"
+  [ -f "$pointer" ] || fail "durable-ordinary-omp-finalization-backup-deletion-failure: failed finalization backup deletion removed durable OMP pointer"
+  [ -f "$session_file" ] || fail "durable-ordinary-omp-finalization-backup-deletion-failure: failed finalization backup deletion removed durable OMP session"
+  pass "failed ordinary OMP finalization backup deletion restores durable session state"
+}
+
+test_teardown_preserves_session_when_later_pr_cleanup_fails() {
+  local case_dir rc session_dir session_file pointer
+  case_dir=$(make_case durable-ordinary-omp-late-pr-cleanup-failure)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'harness=omp' >> "$case_dir/state/task-x1.meta"
+  session_dir="$case_dir/state/task-x1.omp-sessions"
+  session_file="$session_dir/retained.jsonl"
+  pointer="$case_dir/state/task-x1.omp-session"
+  mkdir -p "$session_dir"
+  printf 'FIRSTMATE_OP: v1 launch-brief: retained\n' > "$session_file"
+  printf '%s\n' "$session_file" > "$pointer"
+  printf 'registered\n' > "$case_dir/state/task-x1.pr-poll"
+  wt_commit "$case_dir" "shippable OMP work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  cat > "$case_dir/fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in */task-x1.pr-poll) exit 1 ;; esac
+done
+exec "$REAL_RM_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/rm"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "durable-ordinary-omp-late-pr-cleanup-failure: teardown should refuse failed PR cleanup"
+  [ -f "$pointer" ] || fail "durable-ordinary-omp-late-pr-cleanup-failure: late cleanup removed durable OMP pointer"
+  [ -f "$session_file" ] || fail "durable-ordinary-omp-late-pr-cleanup-failure: late cleanup removed durable OMP session"
+  pass "later PR cleanup failure preserves durable ordinary OMP session state"
+}
+
 test_teardown_rolls_back_session_restore_when_ordinary_omp_pointer_restore_fails() {
   local case_dir rc session_dir session_file pointer rollback_pointer rollback_session
   case_dir=$(make_case durable-ordinary-omp-pointer-restore-failure)
@@ -3832,6 +3906,8 @@ test_teardown_preserves_session_when_ordinary_omp_pointer_cleanup_fails
 test_teardown_preserves_session_when_ordinary_omp_finalization_fails
 test_teardown_preserves_session_when_ordinary_omp_rollback_finalization_fails
 test_teardown_preserves_session_when_ordinary_omp_rollback_finalization_partially_fails
+test_teardown_restores_session_when_ordinary_omp_finalization_backup_deletion_fails
+test_teardown_preserves_session_when_later_pr_cleanup_fails
 test_teardown_rolls_back_session_restore_when_ordinary_omp_pointer_restore_fails
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
