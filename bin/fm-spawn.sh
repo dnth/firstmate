@@ -3085,7 +3085,12 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
     printf -v accepted_local_base_quoted '%q' "$ACCEPTED_LOCAL_BASE"
     treehouse_get_command="$treehouse_get_command --accepted-local-base $accepted_local_base_quoted"
   fi
-  if [ "${IS_SANDBOX:-}" = 1 ]; then
+  # A Herdr pane restored after a server restart can keep reporting its stale
+  # foreground_cwd even after the guarded Treehouse shell has entered the new
+  # worktree. Use the acquisition command's atomic ready-file handoff there,
+  # just as the sandbox path already does, instead of treating a backend cwd
+  # projection as allocation authority.
+  if [ "${IS_SANDBOX:-}" = 1 ] || [ "$BACKEND" = herdr ]; then
     TREEHOUSE_READY_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-treehouse-ready.${ID}.XXXXXX") || {
       echo "error: could not create the guarded Treehouse ready directory" >&2
       exit 1
@@ -3099,7 +3104,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
     exit 1
   }
 
-  if [ "${IS_SANDBOX:-}" = 1 ]; then
+  if [ "${IS_SANDBOX:-}" = 1 ] || [ "$BACKEND" = herdr ]; then
     for _ in $(seq 1 60); do
       [ -s "$treehouse_ready_file" ] && break
       sleep 1

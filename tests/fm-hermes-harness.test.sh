@@ -325,7 +325,7 @@ PY
 }
 
 test_hermes_spawn_tui_skill_state_and_teardown() {
-  local rec out rc launch meta state_line token registry commands interrupt_state
+  local rec out rc launch meta state_line token registry commands interrupt_state inbox_record inbox_body
   TEST_ID=hermes-lifecycle-x1
   rec=$(make_case lifecycle "$TEST_ID")
   read_case "$rec"
@@ -381,7 +381,15 @@ test_hermes_spawn_tui_skill_state_and_teardown() {
   commands=$(cat "$CASE_DIR/commands.log")
   [ "$(grep -c 'hermes.*chat --tui' "$CASE_DIR/commands.log")" = 1 ] \
     || fail "Hermes steer launched another process instead of using the persistent composer"
-  assert_contains "$commands" "Continue with the adapter." "Hermes TUI steer lost its message"
+  inbox_record="$HOME_DIR/state/$TEST_ID.inbox/001.msg"
+  assert_present "$inbox_record" "Hermes ordinary steer did not publish its durable inbox record"
+  inbox_body=$(sed '1,/^--$/d' "$inbox_record")
+  [ "$inbox_body" = 'Continue with the adapter.' ] \
+    || fail "Hermes ordinary steer inbox record lost its exact message"
+  assert_not_contains "$commands" "Continue with the adapter." \
+    "Hermes ordinary steer leaked payload bytes into the terminal"
+  assert_contains "$commands" "Firstmate instruction waiting: list $HOME_DIR/state/$TEST_ID.inbox/*.msg" \
+    "Hermes ordinary steer did not ring the durable inbox doorbell"
   assert_contains "$commands" "Read the skill at $HOME_DIR/.agents/skills/no-mistakes/SKILL.md completely and follow it now." \
     "Hermes skill invocation did not use the validated Firstmate skill pointer"
   assert_contains "$commands" "/native-check" "Hermes native skill invocation did not stay a TUI slash command"
@@ -722,7 +730,7 @@ test_hermes_delivered_no_turn_persistence_failure_is_distinct() {
   ln -s "$CASE_DIR/status-target" "$HOME_DIR/state/$TEST_ID.status"
   rc=0
   out=$(fixture_env env FM_FAKE_HERMES_NO_PRE_LLM=1 "$SEND" "$TEST_ID" \
-    'Acknowledge failure probe.' 2>&1) || rc=$?
+    /native-check 2>&1) || rc=$?
   expect_code 5 "$rc" "Hermes recovery persistence failure should be distinct"
   assert_contains "$out" "delivered-no-turn-persistence-failed" "Hermes persistence failure lost its verdict"
   assert_contains "$out" "do not resend" "Hermes persistence failure did not forbid redelivery"
@@ -744,7 +752,7 @@ test_hermes_resume_inherits_launch_ack_budget() {
   rc=0
   out=$(fixture_env env -u FM_SEND_HERMES_START_POLLS -u FM_SEND_HERMES_START_INTERVAL \
     FM_HERMES_LAUNCH_ACK_POLLS=2 FM_HERMES_LAUNCH_ACK_INTERVAL=0.01 \
-    FM_FAKE_HERMES_NO_PRE_LLM=1 "$SEND" "$TEST_ID" 'Budget inheritance probe.' 2>&1) || rc=$?
+    FM_FAKE_HERMES_NO_PRE_LLM=1 "$SEND" "$TEST_ID" /native-check 2>&1) || rc=$?
   elapsed=$SECONDS
   expect_code 4 "$rc" "Hermes resume without acknowledgement should keep delivered-no-turn semantics"
   [ "$elapsed" -lt 10 ] || fail "Hermes resume did not inherit the bounded launch acknowledgement budget"
@@ -810,7 +818,7 @@ test_hermes_concurrent_sends_serialize_through_acknowledgement() {
     'needs-decision [key=second-send]: second answer' >> "$HOME_DIR/state/$TEST_ID.status"
 
   fixture_env env FM_FAKE_HERMES_BLOCK_DIR="$block" "$SEND" "$TEST_ID" \
-    --resolve-key first-send 'First concurrent answer.' > "$CASE_DIR/first.out" 2>&1 &
+    --resolve-key first-send /native-check > "$CASE_DIR/first.out" 2>&1 &
   first_pid=$!
   for _ in $(seq 1 500); do
     [ -f "$block/first-entered" ] && break
@@ -819,7 +827,7 @@ test_hermes_concurrent_sends_serialize_through_acknowledgement() {
   [ -f "$block/first-entered" ] || fail "first concurrent Hermes send did not reach the backend"
 
   fixture_env env FM_FAKE_HERMES_BLOCK_DIR="$block" "$SEND" "$TEST_ID" \
-    --resolve-key second-send 'Second concurrent answer.' > "$CASE_DIR/second.out" 2>&1 &
+    --resolve-key second-send /native-check > "$CASE_DIR/second.out" 2>&1 &
   second_pid=$!
   for _ in $(seq 1 200); do
     kill -0 "$second_pid" 2>/dev/null || break
@@ -838,8 +846,8 @@ test_hermes_concurrent_sends_serialize_through_acknowledgement() {
   expect_code 0 "$first_rc" "first concurrent Hermes send should succeed"
   expect_code 0 "$second_rc" "second concurrent Hermes send should succeed"
   commands=$(cat "$CASE_DIR/commands.log")
-  assert_contains "$commands" "First concurrent answer." "first concurrent Hermes send was not delivered"
-  assert_contains "$commands" "Second concurrent answer." "second concurrent Hermes send was not delivered"
+  [ "$(grep -c '^/native-check$' "$CASE_DIR/commands.log")" = 2 ] \
+    || fail "concurrent Hermes sends did not both deliver through the typed slash-command plane"
   status=$(cat "$HOME_DIR/state/$TEST_ID.status")
   assert_contains "$status" 'resolved [key=first-send]' "first decision did not close after acknowledgement"
   assert_contains "$status" 'resolved [key=second-send]' "second decision did not close after acknowledgement"
