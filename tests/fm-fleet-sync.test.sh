@@ -195,9 +195,9 @@ SH
   chmod +x "$1/lsof"
 }
 
-# git shim: fail the FIRST `fetch` with the packed-refs.lock signature and drop
-# the lock (simulating the dying ref-rewrite finishing), then delegate every
-# later call - including the retried fetch - to the real git so the sync completes.
+# git shim: fail fetches with the packed-refs.lock signature until the configured
+# attempt drops the lock (simulating the dying ref-rewrite finishing), then
+# delegate later calls to real git so the sync can complete.
 git_transient_packed_refs_lock() {
   cat > "$1/git" <<'SH'
 #!/usr/bin/env bash
@@ -209,10 +209,11 @@ for a in "$@"; do [ "$prev" = -C ] && dir=$a; prev=$a; done
 if [ "$is_fetch" = 1 ]; then
   n=$(cat "${GIT_FETCH_COUNTER:?}" 2>/dev/null || echo 0); n=$(( n + 1 ))
   printf '%s\n' "$n" > "$GIT_FETCH_COUNTER"
-  if [ "$n" -eq 1 ]; then
+  drop_at=${GIT_FETCH_DROP_LOCK_AT:-1}
+  if [ "$n" -le "$drop_at" ]; then
     lock="$dir/.git/packed-refs.lock"
     echo "error: could not delete reference refs/remotes/origin/feature: Unable to create '$lock': File exists." >&2
-    rm -f "$lock"
+    [ "$n" -ne "$drop_at" ] || rm -f "$lock"
     exit 1
   fi
 fi
@@ -622,6 +623,37 @@ test_transient_packed_refs_lock_self_clears() {
   pass "a transient packed-refs.lock that self-clears is retried without a force-remove"
 }
 
+test_packed_refs_lock_self_clears_after_final_retry() {
+  local home fakebin clone out err counter
+  home=$(new_home)
+  fakebin="$home/fb-lock-final-retry"; rm -rf "$fakebin"; mkdir -p "$fakebin"
+  clone=$(build_packed_prunable "$home" lockfinalretry)
+  plant_packed_refs_lock "$clone"
+  git_transient_packed_refs_lock "$fakebin"
+  counter="$home/git-fetch-count"; : > "$counter"
+  out="$home/out-lock-final-retry"; err="$home/err-lock-final-retry"
+
+  set +e
+  GIT_FETCH_COUNTER="$counter" \
+  GIT_FETCH_DROP_LOCK_AT=3 \
+  FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRIES=2 \
+  FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=0 \
+    run_sync_guarded "$home" "$fakebin" "$out" "$err" lockfinalretry
+  set -e
+
+  assert_grep "succeeded after the packed-refs lock disappeared on its own" "$err" \
+    "final-retry lock: guard did not retry after the lock disappeared"
+  assert_no_grep "removed provably-stale packed-refs lock" "$err" \
+    "final-retry lock: guard force-removed a lock that self-cleared"
+  assert_contains "$(cat "$out")" "lockfinalretry: synced" \
+    "final-retry lock: clone did not sync after the final-retry self-clear"
+  assert_grep "recovered: packed-refs lock cleared on its own after the final retry" "$out" \
+    "final-retry lock: recovery summary not emitted on stdout"
+  assert_absent "$clone/.git/packed-refs.lock" \
+    "final-retry lock: lock should be gone after self-clear"
+  pass "a packed-refs.lock that self-clears after the final retry is fetched without a force-remove"
+}
+
 test_non_clone_dir_never_syncs_the_enclosing_repo() {
   local home before out after
   home=$(build_enclosing_home nonclone)
@@ -715,6 +747,7 @@ test_orphaned_stale_packed_refs_lock_recovers
 test_live_packed_refs_lock_is_never_removed
 test_live_git_cwd_in_clone_dir_blocks_removal
 test_transient_packed_refs_lock_self_clears
+test_packed_refs_lock_self_clears_after_final_retry
 test_non_signature_fetch_failure_is_not_retried
 test_non_clone_dir_never_syncs_the_enclosing_repo
 test_non_clone_dir_named_directly_never_syncs_the_enclosing_repo

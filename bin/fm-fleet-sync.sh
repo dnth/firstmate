@@ -214,6 +214,15 @@ fetch_with_packed_refs_lock_guard() {
     echo "$label: fetch blocked by packed-refs lock $lock that persisted across ${FLEET_SYNC_PACKED_REFS_LOCK_RETRIES} retries and is not provably stale (may belong to a live process); leaving it in place" >&2
     return "$rc"
   fi
+  # The last failed retry can race the owner closing its lock: by the time we
+  # inspect it, there is nothing left to prove stale or remove.  Give that
+  # exact self-clear one final, non-destructive fetch before reporting failure.
+  FETCH_OUTPUT=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
+  if [ "$rc" -eq 0 ]; then
+    echo "$label: fetch succeeded after the packed-refs lock disappeared on its own" >&2
+    echo "$label: recovered: packed-refs lock cleared on its own after the final retry"
+    return 0
+  fi
   echo "$label: fetch packed-refs lock signature persisted across ${FLEET_SYNC_PACKED_REFS_LOCK_RETRIES} retries even after the lock file disappeared" >&2
   return "$rc"
 }
