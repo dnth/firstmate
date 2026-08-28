@@ -168,7 +168,7 @@ output: scout_persistent=yes turn_end=touched
 ok - Hermes Agent v0.20.0 (2026.8.3) persistent Hermes TUI: crew/scout launch, composer steer, native skill turn, busy->idle, turn-end, interrupt, exit, and exact-session resume
 ```
 
-The TUI remained as the foreground process across ordinary turns and accepted every steer through its bare `❯` composer.
+The persistent-TUI and lifecycle facts remain current, while the ordinary-text transport shown in this dated transcript was superseded by the local steering inbox; [Local steering inbox](#local-steering-inbox) below owns the current general live record-to-ack proof, `tests/fm-hermes-harness.test.sh` covers Hermes routing deterministically, and the native skill remains the typed-composer proof.
 The live busy surface had two independent positive signals: `Ctrl+C to interrupt…` in the composer and the status rule's `· <elapsed>` segment.
 The structural `─ ready │` rule proved idle after both normal completion and interruption.
 Those two rendered signals are what the missing-record fallback reads; they are not what the transcript above sampled. A valid trusted lifecycle record decides classification in both directions, and the rendered tail is captured only after the record read finds no valid record, so every sample above - taken once the bridge had already published a record - reports `hermes-hook` in both states. That ordering is what keeps a lagging busy redraw from letting `--key C-c` reach an already-idle TUI and exit it, and it is why no `hermes-tui` verdict appears in a record-backed sample.

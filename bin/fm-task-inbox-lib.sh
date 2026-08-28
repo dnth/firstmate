@@ -35,9 +35,10 @@
 #    its from-firstmate marker and corr token verbatim in this body>
 #
 # Sequence numbers are never reused within a task: allocation scans both the
-# inbox root and handled/, so a message is processed at most once per worker
-# lifetime even if every doorbell is duplicated. Concurrent writers serialize
-# on .seq.lock; the worst racing outcome is ordering, never loss.
+# inbox root and handled/, so duplicate doorbells continue to name one stable
+# record rather than reassigning its sequence to another message. Concurrent
+# writers serialize on .seq.lock; the worst racing outcome is ordering, never
+# loss.
 #
 # Re-ring ladder (fm_task_inbox_due_action): an unhandled message older than
 # FM_TASK_INBOX_GRACE_SECS is due one delivery attempt per grace period; an

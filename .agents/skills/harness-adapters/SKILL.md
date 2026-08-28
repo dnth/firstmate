@@ -481,7 +481,7 @@ Later lifecycle events must match that stable id, and `pre_llm_call` records bus
 The end event requires the same session id, touches `state/<id>.turn-ended`, and marks the turn idle.
 Hermes' `on_session_end` callback at the end of each TUI `run_conversation` call is the exact supervised turn boundary, including turns shorter than the watcher poll interval.
 
-`fm-send` refuses a composer injection unless the classified state is exactly idle, the task-bound session and profile metadata validate, and the structural composer is empty.
+On Hermes' typed plane, `fm-send` refuses a composer injection unless the classified state is exactly idle, the task-bound session and profile metadata validate, and the structural composer is empty; ordinary local text instead publishes a durable inbox record and treats the doorbell as advisory.
 Hermes spawns on backends other than tmux and Herdr are refused before endpoint creation.
 Hermes' busy-input behavior is profile-configurable and can interrupt rather than queue, so a busy send is refused until the turn settles or Firstmate interrupts it with `C-c`.
 After submitting through the composer, `fm-send` requires a newer `hermes-started` acknowledgement before it closes any `--resolve-key` decision.
