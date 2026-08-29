@@ -188,7 +188,7 @@ The primary records its own durable marker and watcher wake for either verdict, 
 
 Marked requests keep the existing correlation contract.
 The remote charter appends replies to `state/parent-replies.status` in the remote home.
-A process-event source performs a non-destructive, cursor-anchored delta read, validates bounded lifecycle status lines, resolves marked parent requests only from their exact correlated reports, fetches only referenced `data/*.md` documents through the confined reader, and appends each accepted line at most once to the primary status channel.
+A process-event source performs a non-destructive, cursor-anchored delta read, validates bounded lifecycle status lines, resolves marked parent requests only from status lines carrying their explicit exact correlation token, fetches only referenced `data/*.md` documents through the confined reader, and appends each accepted line at most once to the primary status channel.
 The source log is never truncated or consumed.
 A shortened or changed prefix stops the relay and surfaces a continuity failure instead of silently resetting the cursor.
 

@@ -17,9 +17,9 @@
 # cursor-anchored source. A continuity break is escalated and not re-armed.
 #
 # Ingest accepts only bounded, printable status lines with an allowed lifecycle
-# verb. Autonomous lifecycle reports need no correlation token, but only a
-# corr=<16hex> report can resolve a matching pending parent request. Exact lines
-# are appended at most once to the parent's state/<id>.status. A data/*.md
+# verb. Autonomous lifecycle reports need no correlation token, but only an
+# explicit exact correlation token can resolve a matching pending parent request.
+# Exact lines are appended at most once to the parent's state/<id>.status. A data/*.md
 # pointer is fetched through the path-confined remote file reader and rewritten
 # to its local private copy before append.
 set -u
