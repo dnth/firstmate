@@ -187,13 +187,13 @@ pass "later generations cannot invalidate an unacknowledged ingested result"
 AUTONOMOUS_CORR=$(fm_pending_reply_create "$PARENT" "$PARENT/state" ios "await autonomous report")
 fm_pending_reply_mark_delivered "$PARENT/state" "$AUTONOMOUS_CORR" \
   || fail "could not create autonomous reply expectation"
-printf 'blocked [key=remote-review]: waiting for external review\ndone: notcorr=%s is not a parent reply\ndone: not-corr=%s is not a parent reply\ndone: not.corr=%s is not a parent reply\n' "$AUTONOMOUS_CORR" "$AUTONOMOUS_CORR" "$AUTONOMOUS_CORR" \
+printf 'blocked [key=remote-review]: waiting for external review\ndone: notcorr=%s is not a parent reply\ndone: not-corr=%s is not a parent reply\ndone: not.corr=%s is not a parent reply\ndone: not[corr=%s] is not a parent reply\n' "$AUTONOMOUS_CORR" "$AUTONOMOUS_CORR" "$AUTONOMOUS_CORR" "$AUTONOMOUS_CORR" \
   >> "$REMOTE/state/parent-replies.status"
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
   || fail "autonomous reply generation was not captured"
 RESULT_FOUR="$PARENT/state/procevent-inbox/$SID.4.result"
 out=$(remote_env "$ADAPTER" handle ios 4 "$RESULT_FOUR")
-assert_contains "$out" 'ingested: ios appended=4' "autonomous reports were not ingested"
+assert_contains "$out" 'ingested: ios appended=5' "autonomous reports were not ingested"
 assert_contains "$out" 'handled: remote-reply-ios 4' "autonomous capture was not acknowledged"
 assert_grep 'blocked [key=remote-review]: waiting for external review' "$PARENT/state/ios.status" \
   "autonomous lifecycle report did not reach parent status"
@@ -203,6 +203,8 @@ assert_grep "done: not-corr=$AUTONOMOUS_CORR is not a parent reply" "$PARENT/sta
   "punctuated corr-like autonomous report did not reach parent status"
 assert_grep "done: not.corr=$AUTONOMOUS_CORR is not a parent reply" "$PARENT/state/ios.status" \
   "dotted corr-like autonomous report did not reach parent status"
+assert_grep "done: not[corr=$AUTONOMOUS_CORR] is not a parent reply" "$PARENT/state/ios.status" \
+  "embedded corr-like autonomous report did not reach parent status"
 [ "$(fm_pending_reply_get "$(fm_pending_reply_path "$PARENT/state" "$AUTONOMOUS_CORR")" phase)" = awaiting_report ] \
   || fail "corr-like autonomous lifecycle report resolved a marked parent request"
 assert_present "$PARENT/state/procevent/$SID.source" "autonomous handling did not re-arm the source"

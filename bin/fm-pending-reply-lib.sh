@@ -137,8 +137,11 @@ fm_pending_reply_extract_corr() {  # <text>
 fm_pending_reply_extract_status_corrs() {  # <text>
   local text=$1
   printf '%s\n' "$text" \
-    | tr $'\t []()' '\n' \
-    | grep -E "^${FM_PENDING_REPLY_CORR_RE}$" 2>/dev/null \
+    | tr $'\t ' '\n' \
+    | sed -nE \
+      -e 's/^(corr=[A-Fa-f0-9]{16})$/\1/p' \
+      -e 's/^\[(corr=[A-Fa-f0-9]{16})\]:?$/\1/p' \
+      -e 's/^\((corr=[A-Fa-f0-9]{16})\)$/\1/p' \
     | cut -d= -f2- \
     | tr 'A-F' 'a-f' || true
 }
