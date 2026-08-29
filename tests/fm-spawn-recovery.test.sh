@@ -14,7 +14,7 @@ REAL_RM=$(command -v rm)
 REAL_RMDIR=$(command -v rmdir)
 REAL_MV=$(command -v mv)
 REAL_GIT=$(command -v git)
-REAL_BUN=$(command -v bun) || fail "bun is required for the recovery fixture"
+REAL_NODE=$(command -v node) || fail "node is required for the recovery fixture"
 SOCKET="fm-spawn-recovery-$$"
 HOME_DIR="$LAB/home"
 PROJECT="$LAB/project"
@@ -264,14 +264,19 @@ tool_gate_attempt=
 tool_gate_release=
 [ ! -f .recovery-tool-gate-attempt ] || tool_gate_attempt=$(tr -d '\r\n' < .recovery-tool-gate-attempt)
 [ ! -f .recovery-tool-gate-release-check ] || tool_gate_release=$(tr -d '\r\n' < .recovery-tool-gate-release-check)
-"${OMP_FIXTURE_BUN:?}" "$(dirname "$0")/ack-extension.mjs" "$extension" "$session_file" "${OMP_FIXTURE_TURN_END:-0}" "$tool_gate_attempt" "$tool_gate_release" "${OMP_FIXTURE_REMOVE_TASKTMP_BEFORE_TOOL:-0}" || exit 1
+extension_module="${GOTMPDIR:-$session_dir}/fixture-extension.mjs"
+cp "$extension" "$extension_module" || exit 1
+"${OMP_FIXTURE_NODE:?}" "$(dirname "$0")/ack-extension.mjs" "$extension_module" "$session_file" "${OMP_FIXTURE_TURN_END:-0}" "$tool_gate_attempt" "$tool_gate_release" "${OMP_FIXTURE_REMOVE_TASKTMP_BEFORE_TOOL:-0}"
+extension_status=$?
+rm -f "$extension_module"
+[ "$extension_status" -eq 0 ] || exit "$extension_status"
 while :; do sleep 1; done
 SH
 chmod +x "$WRAPPER_BIN/tmux" "$WRAPPER_BIN/tar" "$WRAPPER_BIN/rm" "$WRAPPER_BIN/rmdir" "$WRAPPER_BIN/mv" "$WRAPPER_BIN/treehouse" "$WRAPPER_BIN/omp"
 
 FIXTURE_PATH="$WRAPPER_BIN:$PATH"
 export OMP_FIXTURE_LOG="$LAB/omp-launches"
-export OMP_FIXTURE_BUN="$REAL_BUN"
+export OMP_FIXTURE_NODE="$REAL_NODE"
 export OMP_FIXTURE_REAL_GIT="$REAL_GIT"
 PATH="$FIXTURE_PATH" tmux new-session -d -s firstmate -n fixture -c "$PROJECT"
 PATH="$FIXTURE_PATH" tmux set-option -g default-shell /bin/bash

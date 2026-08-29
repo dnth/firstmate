@@ -3595,12 +3595,12 @@ const sessionDir = "$OMP_SESSION_DIR";
 const sessionPointer = "$OMP_SESSION_POINTER";
 const recoveryToolGate = "${FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE:-}";
 const recoveryToolGateNonce = "${FM_SPAWN_RECOVERY_TOOL_GATE_NONCE:-}";
-function recoveryToolsBlocked(): boolean {
+function recoveryToolsBlocked() {
   if (!recoveryToolGate) return false;
   if (!existsSync(recoveryToolGate)) return true;
   try { return readFileSync(recoveryToolGate, "utf8").trim() !== "committed:" + recoveryToolGateNonce; } catch { return true; }
 }
-function publishSession(ctx: any): void {
+function publishSession(ctx) {
   const sessionFile = ctx?.sessionManager?.getSessionFile?.();
   if (!sessionFile || !isAbsolute(sessionFile) || dirname(sessionFile) !== sessionDir) return;
   const temp = sessionPointer + ".tmp." + process.pid;
@@ -3611,8 +3611,8 @@ function publishSession(ctx: any): void {
     try { unlinkSync(temp); } catch {}
   }
 }
-export default function (omp: any) {
-  omp.on("session_start", (_event: any, ctx: any) => {
+export default function (omp) {
+  omp.on("session_start", (_event, ctx) => {
     publishSession(ctx);
     execFile("touch", ["$OMP_READY"]);
   });
