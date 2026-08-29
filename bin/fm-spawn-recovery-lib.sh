@@ -251,6 +251,31 @@ fm_spawn_recovery_rollback_pending() { # <state> <task-id>
   [ -e "$manifest" ] || [ -L "$manifest" ]
 }
 
+fm_spawn_recovery_prepare_transaction() { # <state> <task-id>
+  local state=$1 id=$2 transaction nonce gate
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  transaction=$(mktemp -d "$state/.fm-spawn-recovery-$id.XXXXXX") || return 1
+  nonce=${transaction##*.}
+  gate="$transaction/tool-gate"
+  if ! chmod 0700 "$transaction" || ! printf 'pending:%s\n' "$nonce" > "$gate"; then
+    rm -rf -- "$transaction"
+    return 1
+  fi
+  FM_SPAWN_RECOVERY_TRANSACTION_DIR=$transaction
+  FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE=$gate
+  FM_SPAWN_RECOVERY_TOOL_GATE_NONCE=$nonce
+}
+
+fm_spawn_recovery_remove_transaction() {
+  local transaction=${FM_SPAWN_RECOVERY_TRANSACTION_DIR:-}
+  [ -n "$transaction" ] || return 0
+  [ -d "$transaction" ] && [ ! -L "$transaction" ] || return 1
+  rm -rf -- "$transaction" || return 1
+  FM_SPAWN_RECOVERY_TRANSACTION_DIR=
+  FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE=
+  FM_SPAWN_RECOVERY_TOOL_GATE_NONCE=
+}
+
 fm_spawn_recovery_bind_legacy_session() {
   local source=${FM_SPAWN_RECOVERY_LEGACY_SESSION_FILE:-} session_dir dest mode created=0
   [ -n "$source" ] || return 0
@@ -294,14 +319,15 @@ fm_spawn_recovery_prepare_session_storage() {
 
 
 fm_spawn_recovery_backup_session() {
-  local source dir mode pointer pointer_backup session_backup
+  local source mode pointer pointer_backup session_backup transaction
   source=${FM_SPAWN_RECOVERY_RESUME_FILE:-}
   pointer=${FM_SPAWN_RECOVERY_SESSION_POINTER:-}
+  transaction=${FM_SPAWN_RECOVERY_TRANSACTION_DIR:-}
   FM_SPAWN_RECOVERY_SESSION_BACKUP=
-  [ -n "$pointer" ] || return 1
+  [ -n "$pointer" ] && [ -d "$transaction" ] && [ ! -L "$transaction" ] || return 1
   if [ -e "$pointer" ] || [ -L "$pointer" ]; then
     [ -f "$pointer" ] && [ ! -L "$pointer" ] || return 1
-    pointer_backup=$(mktemp "$(dirname "$pointer")/.fm-spawn-recovery-pointer.XXXXXX") || return 1
+    pointer_backup="$transaction/pointer"
     if ! cat -- "$pointer" > "$pointer_backup"; then
       rm -f -- "$pointer_backup"
       return 1
@@ -312,9 +338,8 @@ fm_spawn_recovery_backup_session() {
   fi
   [ "$FM_SPAWN_RECOVERY_SESSION_MODE" = resume ] || return 0
   [ -f "$source" ] && [ ! -L "$source" ] || return 1
-  dir=$(dirname "$source")
   mode=$(stat -c %a "$source" 2>/dev/null || true)
-  session_backup=$(mktemp "$dir/.fm-spawn-recovery-session.XXXXXX") || return 1
+  session_backup="$transaction/session"
   if ! cat -- "$source" > "$session_backup"; then
     rm -f -- "$session_backup"
     return 1
@@ -345,18 +370,29 @@ fm_spawn_recovery_capture_fresh_session() {
   esac
 }
 
+fm_spawn_recovery_print_untracked_fingerprint() { # <worktree>
+  local worktree=$1 path object
+  while IFS= read -r -d '' path; do
+    object=$(git -C "$worktree" hash-object -- "$path") || return 1
+    printf '%s\0%s\0' "$path" "$object"
+  done < <(git -C "$worktree" ls-files --others --exclude-standard -z)
+}
+
+fm_spawn_recovery_worktree_unchanged() { # <snapshot> <worktree>
+  local snapshot=$1 worktree=$2
+  cmp -s "$snapshot/index.patch" <(git -C "$worktree" diff --cached --binary) \
+    && cmp -s "$snapshot/worktree.patch" <(git -C "$worktree" diff --binary) \
+    && cmp -s "$snapshot/untracked.fingerprint" <(fm_spawn_recovery_print_untracked_fingerprint "$worktree")
+}
+
 fm_spawn_recovery_snapshot_worktree() {
-  local tasktmp=${FM_SPAWN_RECOVERY_TASKTMP:-} worktree=${FM_SPAWN_RECOVERY_WORKTREE:-}
+  local transaction=${FM_SPAWN_RECOVERY_TRANSACTION_DIR:-} worktree=${FM_SPAWN_RECOVERY_WORKTREE:-}
   local snapshot head branch_ref
-  [ -n "$tasktmp" ] && [ -n "$worktree" ] || return 1
-  [ -d "$worktree" ] && [ ! -L "$worktree" ] || return 1
-  if [ "${FM_SPAWN_RECOVERY_TASKTMP_CREATED:-0}" = 1 ]; then
-    [ ! -e "$tasktmp" ] && [ ! -L "$tasktmp" ] || return 1
-    mkdir -m 700 -- "$tasktmp" || return 1
-  else
-    [ -d "$tasktmp" ] && [ ! -L "$tasktmp" ] || return 1
-  fi
-  snapshot=$(mktemp -d "$tasktmp/.fm-spawn-recovery-worktree.XXXXXX") || return 1
+  [ -n "$transaction" ] && [ -n "$worktree" ] || return 1
+  [ -d "$transaction" ] && [ ! -L "$transaction" ] \
+    && [ -d "$worktree" ] && [ ! -L "$worktree" ] || return 1
+  snapshot="$transaction/worktree"
+  mkdir "$snapshot" || return 1
   head=$(git -C "$worktree" rev-parse --verify HEAD 2>/dev/null) || {
     rm -rf -- "$snapshot"
     return 1
@@ -384,6 +420,10 @@ fm_spawn_recovery_snapshot_worktree() {
     return 1
   fi
   if ! git -C "$worktree" diff --binary > "$snapshot/worktree.patch"; then
+    rm -rf -- "$snapshot"
+    return 1
+  fi
+  if ! fm_spawn_recovery_print_untracked_fingerprint "$worktree" > "$snapshot/untracked.fingerprint"; then
     rm -rf -- "$snapshot"
     return 1
   fi
@@ -426,7 +466,8 @@ fm_spawn_recovery_validate_branch_refs() { # <snapshot> <worktree> <branch-ref> 
 }
 
 fm_spawn_recovery_snapshot_turnend() { # <state> <task-id>
-  local state=$1 id=$2 turnend backup mode
+  local state=$1 id=$2 turnend backup mode transaction
+  transaction=${FM_SPAWN_RECOVERY_TRANSACTION_DIR:-}
   turnend="$state/$id.turn-ended"
   FM_SPAWN_RECOVERY_TURNEND=$turnend
   FM_SPAWN_RECOVERY_TURNEND_BACKUP=
@@ -436,7 +477,8 @@ fm_spawn_recovery_snapshot_turnend() { # <state> <task-id>
     return 0
   fi
   [ -f "$turnend" ] && [ ! -L "$turnend" ] || return 1
-  backup=$(mktemp "$state/.fm-spawn-recovery-turnend.XXXXXX") || return 1
+  [ -d "$transaction" ] && [ ! -L "$transaction" ] || return 1
+  backup="$transaction/turnend"
   if ! cat -- "$turnend" > "$backup"; then
     rm -f -- "$backup"
     return 1
@@ -481,6 +523,7 @@ fm_spawn_recovery_restore_worktree() {
     && [ -f "$snapshot/branch-refs" ] && [ ! -L "$snapshot/branch-refs" ] \
     && [ -f "$snapshot/index.patch" ] && [ ! -L "$snapshot/index.patch" ] \
     && [ -f "$snapshot/worktree.patch" ] && [ ! -L "$snapshot/worktree.patch" ] \
+    && [ -f "$snapshot/untracked.fingerprint" ] && [ ! -L "$snapshot/untracked.fingerprint" ] \
     && [ -f "$snapshot/worktree.tar" ] && [ ! -L "$snapshot/worktree.tar" ] \
     && [ -d "$worktree" ] && [ ! -L "$worktree" ] || return 1
   IFS= read -r head < "$snapshot/head" || return 1
@@ -489,6 +532,10 @@ fm_spawn_recovery_restore_worktree() {
   [ "$(git -C "$worktree" rev-parse --verify "$head^{commit}" 2>/dev/null || true)" = "$head" ] || return 1
   if ! fm_spawn_recovery_validate_branch_refs "$snapshot" "$worktree" "$branch_ref" "$head"; then
     fm_spawn_recovery_mark_ref_rollback_pending || return 1
+    return 1
+  fi
+  if ! fm_spawn_recovery_worktree_unchanged "$snapshot" "$worktree"; then
+    FM_SPAWN_RECOVERY_WORKTREE_DIVERGED=1
     return 1
   fi
   git -C "$worktree" read-tree --reset -u "$head" \
@@ -536,6 +583,9 @@ fm_spawn_recovery_prepare() { # <state> <data> <task-id>
   FM_SPAWN_RECOVERY_TURNEND_WAS_ABSENT=0
   FM_SPAWN_RECOVERY_TOOL_GATE_DIR=
   FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE=
+  FM_SPAWN_RECOVERY_TOOL_GATE_NONCE=
+  FM_SPAWN_RECOVERY_TRANSACTION_DIR=
+  FM_SPAWN_RECOVERY_WORKTREE_DIVERGED=0
   FM_SPAWN_RECOVERY_ROLLBACK_MANIFEST="$state/$id.omp-recovery-rollback-pending"
   FM_SPAWN_RECOVERY_REF_ROLLBACK_GUARD="$state/$id.omp-ref-rollback-pending"
   FM_SPAWN_RECOVERY_FINALIZATION_BACKUP=
@@ -672,6 +722,10 @@ fm_spawn_recovery_prepare() { # <state> <data> <task-id>
   if [ "${FM_SPAWN_RECOVERY_PREFLIGHT_ONLY:-0}" = 1 ]; then
     return 0
   fi
+  fm_spawn_recovery_prepare_transaction "$state" "$id" || {
+    echo "error: OMP recovery could not prepare its durable transaction state for task $id; preserving task state" >&2
+    return 1
+  }
   fm_spawn_recovery_prepare_session_storage || {
     echo "error: OMP recovery could not prepare durable session storage for task $id; preserving task state" >&2
     return 1
@@ -680,7 +734,7 @@ fm_spawn_recovery_prepare() { # <state> <data> <task-id>
     echo "error: OMP recovery could not snapshot the exact prior session for task $id; preserving task state" >&2
     return 1
   }
-  FM_SPAWN_RECOVERY_META_SNAPSHOT=$(mktemp "$state/.fm-spawn-recovery-meta.XXXXXX") || return 1
+  FM_SPAWN_RECOVERY_META_SNAPSHOT="$FM_SPAWN_RECOVERY_TRANSACTION_DIR/meta"
   cat -- "$meta" > "$FM_SPAWN_RECOVERY_META_SNAPSHOT" || return 1
   FM_SPAWN_RECOVERY_TASKTMP=$tasktmp
   fm_spawn_recovery_snapshot_worktree || {
@@ -729,8 +783,14 @@ fm_spawn_recovery_rollback_snapshot_complete() {
     && [ ! -L "${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}/index.patch" ] \
     && [ -f "${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}/worktree.patch" ] \
     && [ ! -L "${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}/worktree.patch" ] \
+    && [ -f "${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}/untracked.fingerprint" ] \
+    && [ ! -L "${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}/untracked.fingerprint" ] \
     && [ -f "${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}/worktree.tar" ] \
-    && [ ! -L "${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}/worktree.tar" ] || return 1
+    && [ ! -L "${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}/worktree.tar" ] \
+    && [ -d "${FM_SPAWN_RECOVERY_TRANSACTION_DIR:-}" ] \
+    && [ ! -L "${FM_SPAWN_RECOVERY_TRANSACTION_DIR:-}" ] \
+    && [ -f "${FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE:-}" ] \
+    && [ ! -L "${FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE:-}" ] || return 1
   case "${FM_SPAWN_RECOVERY_SESSION_MODE:-}" in
     resume)
       [ -f "${FM_SPAWN_RECOVERY_SESSION_BACKUP:-}" ] \
@@ -758,29 +818,28 @@ fm_spawn_recovery_prepare_launch_artifacts() { # <tasktmp> <task-id> <brief>
   FM_SPAWN_RECOVERY_EXTENSION=$(mktemp "$tasktmp/.fm-spawn-recovery-ext.XXXXXX.ts") || { umask "$old_umask"; return 1; }
   FM_SPAWN_RECOVERY_READY=$(mktemp "$tasktmp/.fm-spawn-recovery-ready.XXXXXX") || { umask "$old_umask"; return 1; }
   FM_SPAWN_RECOVERY_STARTED=$(mktemp "$tasktmp/.fm-spawn-recovery-started.XXXXXX") || { umask "$old_umask"; return 1; }
-  FM_SPAWN_RECOVERY_TOOL_GATE_DIR=$(mktemp -d "$tasktmp/.fm-spawn-recovery-tool.XXXXXX") || { umask "$old_umask"; return 1; }
   rm -f -- "$FM_SPAWN_RECOVERY_READY" "$FM_SPAWN_RECOVERY_STARTED"
   umask "$old_umask"
-  FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE="$FM_SPAWN_RECOVERY_TOOL_GATE_DIR/active"
-  printf '%s\n' pending > "$FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE" || return 1
+  [ -f "${FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE:-}" ] \
+    && [ ! -L "$FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE" ] || return 1
   cat -- "$brief" > "$FM_SPAWN_RECOVERY_NOTE" || return 1
   printf '\n\nRecovery continuation: Firstmate restarted this proven-dead OMP worker in the preserved isolated copy. Re-read the brief above, inspect the current branch and uncommitted work, then continue the task without resetting, checking out another branch, or discarding work.\n' >> "$FM_SPAWN_RECOVERY_NOTE" || return 1
 }
 
 fm_spawn_recovery_tool_gate_committed() {
-  local active=${FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE:-} value
+  local active=${FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE:-} nonce=${FM_SPAWN_RECOVERY_TOOL_GATE_NONCE:-} value
   [ -f "$active" ] && [ ! -L "$active" ] || return 1
   IFS= read -r value < "$active" || value=
-  [ "$value" = committed ]
+  [ "$value" = "committed:$nonce" ]
 }
 
 fm_spawn_recovery_release_tool_gate() {
-  local active=${FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE:-} staged value
+  local active=${FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE:-} nonce=${FM_SPAWN_RECOVERY_TOOL_GATE_NONCE:-} staged value
   [ -f "$active" ] && [ ! -L "$active" ] || return 1
   IFS= read -r value < "$active" || value=
-  [ "$value" = pending ] || return 1
+  [ "$value" = "pending:$nonce" ] || return 1
   staged=$(mktemp "$(dirname "$active")/.fm-spawn-recovery-gate.XXXXXX") || return 1
-  if ! printf '%s\n' committed > "$staged"; then
+  if ! printf 'committed:%s\n' "$nonce" > "$staged"; then
     rm -f -- "$staged"
     return 1
   fi
@@ -808,6 +867,9 @@ fm_spawn_recovery_write_rollback_manifest() {
   if ! {
     printf '%s\n' 'version=1'
     printf '%s\n' 'phase=rollback'
+    printf 'transaction=%s\n' "${FM_SPAWN_RECOVERY_TRANSACTION_DIR:-}"
+    printf 'tool_gate=%s\n' "${FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE:-}"
+    printf 'tool_gate_nonce=%s\n' "${FM_SPAWN_RECOVERY_TOOL_GATE_NONCE:-}"
     printf 'tasktmp=%s\n' "${FM_SPAWN_RECOVERY_TASKTMP:-}"
     printf 'session_backup=%s\n' "${FM_SPAWN_RECOVERY_SESSION_BACKUP:-}"
     printf 'pointer_backup=%s\n' "${FM_SPAWN_RECOVERY_POINTER_BACKUP:-}"
@@ -848,13 +910,16 @@ fm_spawn_recovery_cleanup_prearm() {
     rmdir -- "$session_dir" || return 1
   fi
   fm_spawn_recovery_remove_replacement_scratch || return 1
-  FM_SPAWN_RECOVERY_TEST_FAIL_FINALIZATION=0 fm_spawn_recovery_cleanup_artifacts
+  FM_SPAWN_RECOVERY_TEST_FAIL_FINALIZATION=0 fm_spawn_recovery_cleanup_artifacts \
+    && fm_spawn_recovery_remove_transaction
 }
 
 fm_spawn_recovery_stage_candidate_meta() { # <state> <task-id> <backend> <target> <herdr-session> <herdr-workspace> <herdr-tab> <herdr-pane>
-  local state=$1 id=$2 backend=$3 target=$4 session=$5 workspace=$6 tab=$7 pane=$8 tmp
-  [ -n "${FM_SPAWN_RECOVERY_META_SNAPSHOT:-}" ] || return 1
-  tmp=$(mktemp "$state/.fm-spawn-recovery-candidate.XXXXXX") || return 1
+  local state=$1 id=$2 backend=$3 target=$4 session=$5 workspace=$6 tab=$7 pane=$8 transaction tmp
+  transaction=${FM_SPAWN_RECOVERY_TRANSACTION_DIR:-}
+  [ -n "${FM_SPAWN_RECOVERY_META_SNAPSHOT:-}" ] \
+    && [ -d "$transaction" ] && [ ! -L "$transaction" ] || return 1
+  tmp=$(mktemp "$transaction/.candidate.XXXXXX") || return 1
   if ! awk -v target="$target" -v id="$id" -v backend="$backend" \
       -v session="$session" -v workspace="$workspace" -v tab="$tab" -v pane="$pane" '
     /^window=/ { print "window=" target; next }
@@ -1032,13 +1097,6 @@ fm_spawn_recovery_cleanup_artifacts() {
   FM_SPAWN_RECOVERY_META_SNAPSHOT=
   FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT=
   FM_SPAWN_RECOVERY_TURNEND_BACKUP=
-  if [ -n "${FM_SPAWN_RECOVERY_TOOL_GATE_DIR:-}" ] \
-     && [ -d "$FM_SPAWN_RECOVERY_TOOL_GATE_DIR" ] \
-     && [ ! -L "$FM_SPAWN_RECOVERY_TOOL_GATE_DIR" ]; then
-    rm -rf -- "$FM_SPAWN_RECOVERY_TOOL_GATE_DIR"
-  fi
-  FM_SPAWN_RECOVERY_TOOL_GATE_DIR=
-  FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE=
   if [ -n "${FM_SPAWN_RECOVERY_FINALIZATION_BACKUP:-}" ] \
      && [ -d "$FM_SPAWN_RECOVERY_FINALIZATION_BACKUP" ] \
      && [ ! -L "$FM_SPAWN_RECOVERY_FINALIZATION_BACKUP" ]; then
@@ -1056,9 +1114,9 @@ fm_spawn_recovery_cleanup_artifacts() {
 }
 
 fm_spawn_recovery_backup_finalization_state() {
-  local tasktmp=${FM_SPAWN_RECOVERY_TASKTMP:-} backup
-  [ -d "$tasktmp" ] && [ ! -L "$tasktmp" ] || return 1
-  backup=$(mktemp -d "$tasktmp/.fm-spawn-recovery-finalize.XXXXXX") || return 1
+  local transaction=${FM_SPAWN_RECOVERY_TRANSACTION_DIR:-} backup
+  [ -d "$transaction" ] && [ ! -L "$transaction" ] || return 1
+  backup=$(mktemp -d "$transaction/.finalize.XXXXXX") || return 1
   if [ -n "${FM_SPAWN_RECOVERY_SESSION_BACKUP:-}" ] \
      && ! cp -p -- "$FM_SPAWN_RECOVERY_SESSION_BACKUP" "$backup/session"; then
     rm -rf -- "$backup"
@@ -1113,10 +1171,10 @@ fm_spawn_recovery_restore_finalization_state() {
 }
 
 fm_spawn_recovery_archive_finalization_state() {
-  local tasktmp=${FM_SPAWN_RECOVERY_TASKTMP:-} backup=${FM_SPAWN_RECOVERY_FINALIZATION_BACKUP:-} archive
-  [ -d "$tasktmp" ] && [ ! -L "$tasktmp" ] \
+  local transaction=${FM_SPAWN_RECOVERY_TRANSACTION_DIR:-} backup=${FM_SPAWN_RECOVERY_FINALIZATION_BACKUP:-} archive
+  [ -d "$transaction" ] && [ ! -L "$transaction" ] \
     && [ -d "$backup" ] && [ ! -L "$backup" ] || return 1
-  archive=$(mktemp "$tasktmp/.fm-spawn-recovery-finalize.XXXXXX.tar") || return 1
+  archive=$(mktemp "$transaction/.finalize.XXXXXX.tar") || return 1
   tar -C "$backup" -cf "$archive" . || {
     rm -f -- "$archive"
     return 1
@@ -1125,10 +1183,10 @@ fm_spawn_recovery_archive_finalization_state() {
 }
 
 fm_spawn_recovery_restore_finalization_archive() {
-  local tasktmp=${FM_SPAWN_RECOVERY_TASKTMP:-} archive=${FM_SPAWN_RECOVERY_FINALIZATION_ARCHIVE:-} backup
-  [ -d "$tasktmp" ] && [ ! -L "$tasktmp" ] \
+  local transaction=${FM_SPAWN_RECOVERY_TRANSACTION_DIR:-} archive=${FM_SPAWN_RECOVERY_FINALIZATION_ARCHIVE:-} backup
+  [ -d "$transaction" ] && [ ! -L "$transaction" ] \
     && [ -f "$archive" ] && [ ! -L "$archive" ] || return 1
-  backup=$(mktemp -d "$tasktmp/.fm-spawn-recovery-finalize-restore.XXXXXX") || return 1
+  backup=$(mktemp -d "$transaction/.finalize-restore.XXXXXX") || return 1
   tar -xf "$archive" -C "$backup" || {
     rm -rf -- "$backup"
     return 1
@@ -1234,7 +1292,11 @@ fm_spawn_recovery_abort() { # <backend> <target>
     fi
   fi
   fm_spawn_recovery_restore_worktree || {
-    echo "warning: OMP recovery could not restore the preserved isolated worktree snapshot; preserving recovery artifacts and task state" >&2
+    if [ "${FM_SPAWN_RECOVERY_WORKTREE_DIVERGED:-0}" = 1 ]; then
+      echo "warning: OMP recovery found concurrent isolated-worktree changes; preserving recovery artifacts and task state" >&2
+    else
+      echo "warning: OMP recovery could not restore the preserved isolated worktree snapshot; preserving recovery artifacts and task state" >&2
+    fi
     return 1
   }
   fm_spawn_recovery_restore_turnend || {
@@ -1321,6 +1383,10 @@ fm_spawn_recovery_abort() { # <backend> <target>
   }
   fm_spawn_recovery_remove_rollback_manifest || {
     echo "warning: OMP recovery could not retire its completed rollback manifest; preserving task state" >&2
+    return 1
+  }
+  fm_spawn_recovery_remove_transaction || {
+    echo "warning: OMP recovery could not retire its completed durable transaction; preserving task state" >&2
     return 1
   }
 }

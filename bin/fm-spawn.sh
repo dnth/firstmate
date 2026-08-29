@@ -3594,9 +3594,11 @@ import { dirname, isAbsolute } from "node:path";
 const sessionDir = "$OMP_SESSION_DIR";
 const sessionPointer = "$OMP_SESSION_POINTER";
 const recoveryToolGate = "${FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE:-}";
+const recoveryToolGateNonce = "${FM_SPAWN_RECOVERY_TOOL_GATE_NONCE:-}";
 function recoveryToolsBlocked(): boolean {
-  if (!recoveryToolGate || !existsSync(recoveryToolGate)) return false;
-  try { return readFileSync(recoveryToolGate, "utf8").trim() !== "committed"; } catch { return true; }
+  if (!recoveryToolGate) return false;
+  if (!existsSync(recoveryToolGate)) return true;
+  try { return readFileSync(recoveryToolGate, "utf8").trim() !== "committed:" + recoveryToolGateNonce; } catch { return true; }
 }
 function publishSession(ctx: any): void {
   const sessionFile = ctx?.sessionManager?.getSessionFile?.();

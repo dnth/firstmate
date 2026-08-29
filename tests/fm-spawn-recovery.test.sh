@@ -82,7 +82,7 @@ for arg in "\$@"; do
     exit 1
   fi
   case "\$arg" in
-    '$HOME_DIR/state/.fm-spawn-recovery-turnend.'*)
+    '$HOME_DIR/state/.fm-spawn-recovery-'*/turnend)
       [ "\${FM_SPAWN_RECOVERY_TEST_FAIL_TURNEND_BACKUP_CLEANUP:-0}" != 1 ] || exit 1
       ;;
   esac
@@ -103,7 +103,7 @@ cat > "$WRAPPER_BIN/mv" <<SH
 #!/usr/bin/env bash
 for arg in "\$@"; do
   case "\$arg" in
-    '$HOME_DIR/state/$ID.omp-sessions/.fm-spawn-recovery-session.'*|'$TASK_TMP/.fm-spawn-recovery-finalize.'*/session)
+    '$HOME_DIR/state/.fm-spawn-recovery-'*/session)
       [ "\${FM_SPAWN_RECOVERY_TEST_FAIL_SESSION_RESTORE:-0}" != 1 ] || exit 1
       ;;
   esac
@@ -152,10 +152,11 @@ SH
 ln -s /bin/bash "$WRAPPER_BIN/bun"
 cat > "$WRAPPER_BIN/ack-extension.mjs" <<'JS'
 import { execFileSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const [extension, sessionFile, triggerTurnEnd, attemptBranch, releaseMarker] = process.argv.slice(2);
+const [extension, sessionFile, triggerTurnEnd, attemptBranch, releaseMarker, removeTasktmp] = process.argv.slice(2);
 const handlers = new Map();
 const omp = {
   on(event, handler) {
@@ -172,6 +173,13 @@ const toolCall = async (command) => {
 handlers.get("session_start")?.({}, {
   sessionManager: { getSessionFile: () => sessionFile },
 });
+let turnStarted = false;
+if (removeTasktmp === "1" && process.env.GOTMPDIR) {
+  handlers.get("turn_start")?.();
+  turnStarted = true;
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  rmSync(dirname(process.env.GOTMPDIR), { recursive: true, force: true });
+}
 if (attemptBranch) {
   const command = `PATH=/tmp/recovery-path-override ${process.env.OMP_FIXTURE_REAL_GIT} switch -c ${attemptBranch}`;
   const result = await toolCall(command);
@@ -183,7 +191,7 @@ if (attemptBranch) {
     throw new Error("OMP recovery allowed an absolute Git mutation before authority committed");
   }
 }
-handlers.get("turn_start")?.();
+if (!turnStarted) handlers.get("turn_start")?.();
 if (triggerTurnEnd === "1") handlers.get("turn_end")?.();
 if (releaseMarker) {
   let released = false;
@@ -243,6 +251,10 @@ if [ -n "$resume" ]; then
     "${OMP_FIXTURE_REAL_GIT:?}" -C "$concurrent_worktree" -c user.name='Recovery Fixture' \
       -c user.email=recovery@example.invalid commit -m 'concurrent mutation' || exit 1
   fi
+  if [ -f .recovery-concurrent-uncommitted-on-launch ]; then
+    printf 'concurrent untracked worktree edit\n' > .recovery-concurrent-untracked
+    printf 'concurrent tracked worktree edit\n' > rollback-delete.txt
+  fi
 else
   printf 'FIRSTMATE_OP: v1 launch-brief: fixture\n' > "$session_file"
 fi
@@ -252,7 +264,7 @@ tool_gate_attempt=
 tool_gate_release=
 [ ! -f .recovery-tool-gate-attempt ] || tool_gate_attempt=$(tr -d '\r\n' < .recovery-tool-gate-attempt)
 [ ! -f .recovery-tool-gate-release-check ] || tool_gate_release=$(tr -d '\r\n' < .recovery-tool-gate-release-check)
-"${OMP_FIXTURE_BUN:?}" "$(dirname "$0")/ack-extension.mjs" "$extension" "$session_file" "${OMP_FIXTURE_TURN_END:-0}" "$tool_gate_attempt" "$tool_gate_release" || exit 1
+"${OMP_FIXTURE_BUN:?}" "$(dirname "$0")/ack-extension.mjs" "$extension" "$session_file" "${OMP_FIXTURE_TURN_END:-0}" "$tool_gate_attempt" "$tool_gate_release" "${OMP_FIXTURE_REMOVE_TASKTMP_BEFORE_TOOL:-0}" || exit 1
 while :; do sleep 1; done
 SH
 chmod +x "$WRAPPER_BIN/tmux" "$WRAPPER_BIN/tar" "$WRAPPER_BIN/rm" "$WRAPPER_BIN/rmdir" "$WRAPPER_BIN/mv" "$WRAPPER_BIN/treehouse" "$WRAPPER_BIN/omp"
@@ -572,6 +584,22 @@ git -C "$WORKTREE" show-ref --verify --quiet "refs/heads/$OWN_BRANCH" \
 [ ! -e "$WORKTREE/.recovery-own-branch-edit" ] \
   || fail "attempt-branch recovery failure retained its replacement commit"
 rm -f "$WORKTREE/.recovery-tool-gate-attempt"
+TASKTMP_GATE_BRANCH="fm/$ID-tasktmp-gate"
+cp "$META" "$LAB/tasktmp-gate-meta.before"
+cp "$SESSION_FILE" "$LAB/tasktmp-gate-session.before"
+printf '%s\n' "$TASKTMP_GATE_BRANCH" > "$WORKTREE/.recovery-tool-gate-attempt"
+TASKTMP_GATE_OUTPUT=$(OMP_FIXTURE_REMOVE_TASKTMP_BEFORE_TOOL=1 \
+  FM_SPAWN_RECOVERY_TEST_FAIL_BEFORE_PUBLISH=1 spawn "$ID" --recover 2>&1)
+TASKTMP_GATE_STATUS=$?
+[ "$TASKTMP_GATE_STATUS" -ne 0 ] || fail "tasktmp-removal recovery failure unexpectedly succeeded"
+wait_for_state missing || fail "tasktmp-removal recovery failure retained replacement endpoint"
+git -C "$WORKTREE" show-ref --verify --quiet "refs/heads/$TASKTMP_GATE_BRANCH" \
+  && fail "tasktmp-removal recovery failure authorized an OMP tool call"
+cmp -s "$META" "$LAB/tasktmp-gate-meta.before" \
+  || fail "tasktmp-removal recovery failure rewrote metadata"
+cmp -s "$SESSION_FILE" "$LAB/tasktmp-gate-session.before" \
+  || fail "tasktmp-removal recovery failure rewrote the durable session"
+rm -f "$WORKTREE/.recovery-tool-gate-attempt"
 rm -rf "$TASK_TMP"
 [ ! -e "$TASK_TMP" ] || fail "fixture could not remove volatile task scratch"
 STALE_SESSION_SNAPSHOT=$(find "$SESSION_DIR" -maxdepth 1 -type f -name '.fm-spawn-recovery-session.*' -print -quit)
@@ -809,6 +837,25 @@ rm -rf "$TASK_TMP"
 mkdir -p "$SESSION_DIR"
 printf 'FIRSTMATE_OP: v1 launch-brief: concurrent\n' > "$SESSION_FILE"
 printf '%s\n' "$SESSION_FILE" > "$SESSION_POINTER"
+cp "$SESSION_FILE" "$LAB/concurrent-worktree-session.before"
+touch "$WORKTREE/.recovery-concurrent-uncommitted-on-launch"
+LOCAL_CONCURRENT_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_BEFORE_PUBLISH=1 spawn "$ID" --recover 2>&1)
+LOCAL_CONCURRENT_STATUS=$?
+[ "$LOCAL_CONCURRENT_STATUS" -ne 0 ] || fail "concurrent-worktree recovery failure unexpectedly succeeded"
+assert_contains "$LOCAL_CONCURRENT_OUTPUT" "concurrent isolated-worktree changes" \
+  "concurrent-worktree recovery failure did not preserve external edits"
+wait_for_state missing || fail "concurrent-worktree recovery failure retained replacement endpoint"
+[ -f "$WORKTREE/.recovery-concurrent-untracked" ] \
+  || fail "concurrent-worktree recovery failure erased an untracked edit"
+[ "$(cat "$WORKTREE/rollback-delete.txt")" = "concurrent tracked worktree edit" ] \
+  || fail "concurrent-worktree recovery failure erased a tracked edit"
+[ -f "$HOME_DIR/state/$ID.omp-recovery-rollback-pending" ] \
+  || fail "concurrent-worktree recovery failure did not retain recovery authority"
+rm -f "$WORKTREE/.recovery-concurrent-uncommitted-on-launch" \
+  "$WORKTREE/.recovery-concurrent-untracked" \
+  "$WORKTREE/rollback-delete.txt" \
+  "$HOME_DIR/state/$ID.omp-recovery-rollback-pending"
+cp "$LAB/concurrent-worktree-session.before" "$SESSION_FILE"
 CONCURRENT_WORKTREE="$LAB/concurrent-worktree"
 CONCURRENT_BRANCH="$BRANCH"
 git -C "$PROJECT" worktree add -q --force "$CONCURRENT_WORKTREE" "$CONCURRENT_BRANCH" \
