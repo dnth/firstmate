@@ -520,6 +520,7 @@ fm_spawn_recovery_prepare() { # <state> <data> <task-id>
   local traceparent traceparent_count
   meta="$state/$id.meta"
   FM_SPAWN_RECOVERY_ACTIVE=1
+  FM_SPAWN_RECOVERY_ROLLBACK_ARMED=0
   FM_SPAWN_RECOVERY_PUBLISHED=0
   FM_SPAWN_RECOVERY_FINALIZED=0
   FM_SPAWN_RECOVERY_ENDPOINT_CREATED=0
@@ -690,6 +691,11 @@ fm_spawn_recovery_prepare() { # <state> <data> <task-id>
     echo "error: OMP recovery could not snapshot the preserved turn-end state for task $id; preserving task state" >&2
     return 1
   }
+  fm_spawn_recovery_rollback_snapshot_complete || {
+    echo "error: OMP recovery could not complete its rollback snapshot for task $id; preserving task state" >&2
+    return 1
+  }
+  FM_SPAWN_RECOVERY_ROLLBACK_ARMED=1
   FM_SPAWN_RECOVERY_META=$meta
   FM_SPAWN_RECOVERY_OLD_BACKEND=$old_backend
   FM_SPAWN_RECOVERY_OLD_TARGET=$old_target
@@ -706,6 +712,41 @@ fm_spawn_recovery_preflight() { # <state> <data> <task-id>
   fi
   FM_SPAWN_RECOVERY_PREFLIGHT_ONLY=0
   return 1
+}
+
+fm_spawn_recovery_rollback_snapshot_complete() {
+  [ -f "${FM_SPAWN_RECOVERY_META_SNAPSHOT:-}" ] \
+    && [ ! -L "${FM_SPAWN_RECOVERY_META_SNAPSHOT:-}" ] \
+    && [ -d "${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}" ] \
+    && [ ! -L "${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}" ] \
+    && [ -f "${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}/head" ] \
+    && [ ! -L "${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}/head" ] \
+    && [ -f "${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}/branch-ref" ] \
+    && [ ! -L "${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}/branch-ref" ] \
+    && [ -f "${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}/branch-refs" ] \
+    && [ ! -L "${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}/branch-refs" ] \
+    && [ -f "${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}/index.patch" ] \
+    && [ ! -L "${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}/index.patch" ] \
+    && [ -f "${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}/worktree.patch" ] \
+    && [ ! -L "${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}/worktree.patch" ] \
+    && [ -f "${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}/worktree.tar" ] \
+    && [ ! -L "${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}/worktree.tar" ] || return 1
+  case "${FM_SPAWN_RECOVERY_SESSION_MODE:-}" in
+    resume)
+      [ -f "${FM_SPAWN_RECOVERY_SESSION_BACKUP:-}" ] \
+        && [ ! -L "${FM_SPAWN_RECOVERY_SESSION_BACKUP:-}" ] || return 1
+      ;;
+    fresh) ;;
+    *) return 1 ;;
+  esac
+  if [ "${FM_SPAWN_RECOVERY_POINTER_WAS_ABSENT:-0}" != 1 ]; then
+    [ -f "${FM_SPAWN_RECOVERY_POINTER_BACKUP:-}" ] \
+      && [ ! -L "${FM_SPAWN_RECOVERY_POINTER_BACKUP:-}" ] || return 1
+  fi
+  if [ "${FM_SPAWN_RECOVERY_TURNEND_WAS_ABSENT:-0}" != 1 ]; then
+    [ -f "${FM_SPAWN_RECOVERY_TURNEND_BACKUP:-}" ] \
+      && [ ! -L "${FM_SPAWN_RECOVERY_TURNEND_BACKUP:-}" ] || return 1
+  fi
 }
 
 fm_spawn_recovery_prepare_launch_artifacts() { # <tasktmp> <task-id> <brief>
@@ -785,6 +826,32 @@ fm_spawn_recovery_remove_rollback_manifest() {
   [ ! -e "$manifest" ] && [ ! -L "$manifest" ] && return 0
   [ -f "$manifest" ] && [ ! -L "$manifest" ] || return 1
   rm -f -- "$manifest"
+}
+
+fm_spawn_recovery_cleanup_prearm() {
+  local session_dir=${FM_SPAWN_RECOVERY_SESSION_DIR:-} artifact
+  for artifact in \
+    "${FM_SPAWN_RECOVERY_SESSION_BACKUP:-}" \
+    "${FM_SPAWN_RECOVERY_POINTER_BACKUP:-}" \
+    "${FM_SPAWN_RECOVERY_META_SNAPSHOT:-}" \
+    "${FM_SPAWN_RECOVERY_TURNEND_BACKUP:-}"; do
+    [ -z "$artifact" ] || rm -f -- "$artifact" || return 1
+  done
+  if [ -n "${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}" ] \
+     && [ -d "$FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT" ] \
+     && [ ! -L "$FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT" ]; then
+    rm -rf -- "$FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT" || return 1
+  fi
+  if [ -d "$session_dir" ] && [ ! -L "$session_dir" ]; then
+    find "$session_dir" -maxdepth 1 -type f -name '.fm-spawn-recovery-session.*' -exec rm -f -- {} + || return 1
+  fi
+  fm_spawn_recovery_remove_legacy_session_binding || return 1
+  if [ "${FM_SPAWN_RECOVERY_SESSION_DIR_CREATED:-0}" = 1 ] \
+     && [ -d "$session_dir" ] && [ ! -L "$session_dir" ]; then
+    rmdir -- "$session_dir" || return 1
+  fi
+  fm_spawn_recovery_remove_replacement_scratch || return 1
+  FM_SPAWN_RECOVERY_TEST_FAIL_FINALIZATION=0 fm_spawn_recovery_cleanup_artifacts
 }
 
 fm_spawn_recovery_stage_candidate_meta() { # <state> <task-id> <backend> <target> <herdr-session> <herdr-workspace> <herdr-tab> <herdr-pane>
@@ -1144,6 +1211,13 @@ fm_spawn_recovery_abort() { # <backend> <target>
      || fm_spawn_recovery_tool_gate_committed; then
     FM_SPAWN_RECOVERY_FINALIZED=1
     fm_spawn_recovery_cleanup_artifacts
+    return 0
+  fi
+  if [ "${FM_SPAWN_RECOVERY_ROLLBACK_ARMED:-0}" != 1 ]; then
+    fm_spawn_recovery_cleanup_prearm || {
+      echo "warning: OMP recovery could not clean its incomplete pre-rollback artifacts; preserving task state" >&2
+      return 1
+    }
     return 0
   fi
   fm_spawn_recovery_write_rollback_manifest || {

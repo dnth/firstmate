@@ -133,6 +133,16 @@ case "\${1:-}" in
     ;;
   status)
     [ "\${2:-}" = --json ] || exit 1
+    if [ "\${FM_SPAWN_RECOVERY_TEST_ENDPOINT_LIVE_ON_PREPARE:-0}" = 1 ]; then
+      counter='$HOME_DIR/state/.recovery-prepare-status-count'
+      count=0
+      [ ! -f "\$counter" ] || count=\$(cat "\$counter")
+      count=\$((count + 1))
+      printf '%s\n' "\$count" > "\$counter"
+      if [ "\$count" -eq 2 ]; then
+        '$REAL_TMUX' -L '$SOCKET' new-session -d -s 'recovery-$ID' -n 'fm-$ID' -c '$WORKTREE' 'sleep 120'
+      fi
+    fi
     printf '[{"path":"%s","status":"leased","lease_holder":"fm-$ID","lease_id":"fixture-lease"}]\n' '$WORKTREE'
     ;;
   return) exit 0 ;;
@@ -323,6 +333,23 @@ BRANCH=$(git -C "$WORKTREE" symbolic-ref --quiet --short HEAD) || fail "fixture 
   || fail "initial OMP worker did not establish its task branch from a detached lease"
 assert_contains "$(cat "$META")" "branch=$BRANCH" \
   "initial worker did not record its exact branch identity"
+
+RACE_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_ENDPOINT_LIVE_ON_PREPARE=1 spawn "$ID" --recover 2>&1)
+RACE_STATUS=$?
+[ "$RACE_STATUS" -ne 0 ] || fail "revalidation race unexpectedly launched recovery"
+assert_contains "$RACE_OUTPUT" "definitely dead or missing endpoint" \
+  "revalidation race did not reject its newly live endpoint"
+wait_for_state ambiguous || fail "revalidation race did not make the recorded endpoint live"
+[ ! -e "$HOME_DIR/state/$ID.omp-recovery-rollback-pending" ] \
+  && [ ! -L "$HOME_DIR/state/$ID.omp-recovery-rollback-pending" ] \
+  || fail "revalidation race retained a rollback manifest before snapshots"
+RACE_ARTIFACT=$(find "$TASK_TMP" -maxdepth 1 -name '.fm-spawn-recovery*' -print -quit)
+[ -z "$RACE_ARTIFACT" ] || fail "revalidation race retained a recovery attempt artifact"
+cmp -s "$META" "$LAB/meta.before" || fail "revalidation race rewrote metadata"
+cmp -s "$SESSION_FILE" "$LAB/session.before" || fail "revalidation race changed durable session state"
+PATH="$FIXTURE_PATH" tmux kill-window -t "$TARGET"
+wait_for_state missing || fail "revalidation race fixture endpoint did not return to missing"
+rm -f "$HOME_DIR/state/.recovery-prepare-status-count"
 
 PRELAUNCH_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_GOTMPDIR_EXPORT=1 spawn "$ID" --recover 2>&1)
 PRELAUNCH_STATUS=$?
@@ -550,6 +577,8 @@ assert_contains "$SNAPSHOT_FAILURE_OUTPUT" "could not snapshot the preserved iso
 wait_for_state missing || fail "snapshot-failure recovery created an endpoint"
 [ ! -e "$TASK_TMP" ] && [ ! -L "$TASK_TMP" ] \
   || fail "snapshot-failure recovery retained attempt-owned task scratch"
+[ -z "$(find "$SESSION_DIR" -maxdepth 1 -type f -name '.fm-spawn-recovery-session.*' -print -quit)" ] \
+  || fail "snapshot-failure recovery retained an incomplete session snapshot"
 DURABLE_OUTPUT=$(spawn "$ID" --recover) || fail "recovery after task scratch removal failed"
 assert_contains "$DURABLE_OUTPUT" "recovered $ID harness=omp" \
   "durable-session recovery did not report success"
