@@ -389,38 +389,21 @@ fm_spawn_recovery_snapshot_branch_ref_value() { # <snapshot> <ref>
     "$1/branch-refs"
 }
 
-fm_spawn_recovery_ref_owned_by_worktree() { # <worktree> <ref>
-  local worktree=$1 ref=$2 canonical
-  canonical=$(cd "$worktree" && pwd -P) || return 1
-  git -C "$worktree" worktree list --porcelain | awk -v worktree="$canonical" -v ref="$ref" '
-    $1 == "worktree" { current = substr($0, 10) }
-    $1 == "branch" && $2 == ref {
-      if (current == worktree) matches += 1
-      else others += 1
-    }
-    END { exit matches == 1 && others == 0 ? 0 : 1 }
-  '
-}
-
-fm_spawn_recovery_branch_refs_unchanged() { # <snapshot> <worktree> <branch-ref> <attempt-ref>
-  local snapshot=$1 worktree=$2 branch_ref=$3 attempt_ref=${4:-}
+fm_spawn_recovery_branch_refs_unchanged() { # <snapshot> <worktree>
+  local snapshot=$1 worktree=$2
   local ref object extra current_ref current_object saved
   while IFS=' ' read -r ref object extra; do
-    [ "$ref" = "$branch_ref" ] && continue
-    [ "$ref" = "$attempt_ref" ] && continue
     current_object=$(git -C "$worktree" rev-parse --verify "$ref" 2>/dev/null || true)
     [ "$current_object" = "$object" ] || return 1
   done < "$snapshot/branch-refs"
   while IFS=' ' read -r current_ref current_object; do
-    [ "$current_ref" = "$branch_ref" ] && continue
-    [ "$current_ref" = "$attempt_ref" ] && continue
     saved=$(fm_spawn_recovery_snapshot_branch_ref_value "$snapshot" "$current_ref" 2>/dev/null || true)
     [ "$saved" = "$current_object" ] || return 1
   done < <(git -C "$worktree" for-each-ref --format='%(refname) %(objectname)' refs/heads)
 }
 
-fm_spawn_recovery_restore_branch_refs() { # <snapshot> <worktree> <branch-ref> <head>
-  local snapshot=$1 worktree=$2 branch_ref=$3 head=$4 ref object extra attempt_ref attempt_object
+fm_spawn_recovery_validate_branch_refs() { # <snapshot> <worktree> <branch-ref> <head>
+  local snapshot=$1 worktree=$2 branch_ref=$3 head=$4 ref object extra
   [ -f "$snapshot/branch-refs" ] && [ ! -L "$snapshot/branch-refs" ] || return 1
   grep -Fqx -- "$branch_ref $head" "$snapshot/branch-refs" || return 1
   while IFS=' ' read -r ref object extra; do
@@ -429,25 +412,7 @@ fm_spawn_recovery_restore_branch_refs() { # <snapshot> <worktree> <branch-ref> <
     case "$ref" in refs/heads/*) ;; *) return 1 ;; esac
     [ "$(git -C "$worktree" rev-parse --verify "$object^{commit}" 2>/dev/null || true)" = "$object" ] || return 1
   done < "$snapshot/branch-refs"
-  attempt_ref=$(git -C "$worktree" symbolic-ref -q HEAD 2>/dev/null || true)
-  case "$attempt_ref" in
-    '') ;;
-    refs/heads/*)
-      fm_spawn_recovery_ref_owned_by_worktree "$worktree" "$attempt_ref" || return 1
-      ;;
-    *) return 1 ;;
-  esac
-  fm_spawn_recovery_branch_refs_unchanged "$snapshot" "$worktree" "$branch_ref" "$attempt_ref" || return 1
-  git -C "$worktree" update-ref "$branch_ref" "$head" || return 1
-  git -C "$worktree" symbolic-ref HEAD "$branch_ref" || return 1
-  if [ -n "$attempt_ref" ] && [ "$attempt_ref" != "$branch_ref" ]; then
-    attempt_object=$(fm_spawn_recovery_snapshot_branch_ref_value "$snapshot" "$attempt_ref" 2>/dev/null || true)
-    if [ -n "$attempt_object" ]; then
-      git -C "$worktree" update-ref "$attempt_ref" "$attempt_object" || return 1
-    else
-      git -C "$worktree" update-ref -d "$attempt_ref" || return 1
-    fi
-  fi
+  fm_spawn_recovery_branch_refs_unchanged "$snapshot" "$worktree"
 }
 
 fm_spawn_recovery_snapshot_turnend() { # <state> <task-id>
@@ -481,13 +446,19 @@ fm_spawn_recovery_restore_turnend() {
       rm -f -- "$staged"
       return 1
     fi
-    rm -f -- "$backup" || return 1
-    FM_SPAWN_RECOVERY_TURNEND_BACKUP=
     return 0
   fi
   [ "${FM_SPAWN_RECOVERY_TURNEND_WAS_ABSENT:-0}" = 1 ] || return 1
   [ ! -L "$turnend" ] || return 1
   rm -f -- "$turnend"
+}
+
+fm_spawn_recovery_remove_turnend_backup() {
+  local backup=${FM_SPAWN_RECOVERY_TURNEND_BACKUP:-}
+  [ -n "$backup" ] || return 0
+  [ -f "$backup" ] && [ ! -L "$backup" ] || return 1
+  rm -f -- "$backup" || return 1
+  FM_SPAWN_RECOVERY_TURNEND_BACKUP=
 }
 
 fm_spawn_recovery_restore_worktree() {
@@ -506,15 +477,19 @@ fm_spawn_recovery_restore_worktree() {
   IFS= read -r branch_ref < "$snapshot/branch-ref" || return 1
   case "$branch_ref" in refs/heads/*) ;; *) return 1 ;; esac
   [ "$(git -C "$worktree" rev-parse --verify "$head^{commit}" 2>/dev/null || true)" = "$head" ] || return 1
-  if ! fm_spawn_recovery_restore_branch_refs "$snapshot" "$worktree" "$branch_ref" "$head"; then
+  if ! fm_spawn_recovery_validate_branch_refs "$snapshot" "$worktree" "$branch_ref" "$head"; then
     fm_spawn_recovery_mark_ref_rollback_pending || return 1
     return 1
   fi
-  git -C "$worktree" reset --hard "$head" >/dev/null \
+  git -C "$worktree" read-tree --reset -u "$head" \
     && git -C "$worktree" clean -fdx >/dev/null \
     && { [ ! -s "$snapshot/index.patch" ] || git -C "$worktree" apply --index "$snapshot/index.patch"; } \
     && { [ ! -s "$snapshot/worktree.patch" ] || git -C "$worktree" apply "$snapshot/worktree.patch"; } \
     && tar -xf "$snapshot/worktree.tar" -C "$worktree" || return 1
+  if ! fm_spawn_recovery_validate_branch_refs "$snapshot" "$worktree" "$branch_ref" "$head"; then
+    fm_spawn_recovery_mark_ref_rollback_pending || return 1
+    return 1
+  fi
   rm -rf -- "$snapshot" || return 1
   FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT=
 }
@@ -548,6 +523,8 @@ fm_spawn_recovery_prepare() { # <state> <data> <task-id>
   FM_SPAWN_RECOVERY_TURNEND=
   FM_SPAWN_RECOVERY_TURNEND_BACKUP=
   FM_SPAWN_RECOVERY_TURNEND_WAS_ABSENT=0
+  FM_SPAWN_RECOVERY_GIT_GATE_DIR=
+  FM_SPAWN_RECOVERY_GIT_GATE_ACTIVE=
   FM_SPAWN_RECOVERY_REF_ROLLBACK_GUARD="$state/$id.omp-ref-rollback-pending"
   FM_SPAWN_RECOVERY_FINALIZATION_BACKUP=
   FM_SPAWN_RECOVERY_FINALIZATION_ARCHIVE=
@@ -717,7 +694,7 @@ fm_spawn_recovery_preflight() { # <state> <data> <task-id>
 }
 
 fm_spawn_recovery_prepare_launch_artifacts() { # <tasktmp> <task-id> <brief>
-  local tasktmp=$1 id=$2 brief=$3 old_umask
+  local tasktmp=$1 id=$2 brief=$3 old_umask git_bin
   [ -d "$tasktmp" ] && [ ! -L "$tasktmp" ] || return 1
   old_umask=$(umask)
   umask 077
@@ -725,8 +702,34 @@ fm_spawn_recovery_prepare_launch_artifacts() { # <tasktmp> <task-id> <brief>
   FM_SPAWN_RECOVERY_EXTENSION=$(mktemp "$tasktmp/.fm-spawn-recovery-ext.XXXXXX.ts") || { umask "$old_umask"; return 1; }
   FM_SPAWN_RECOVERY_READY=$(mktemp "$tasktmp/.fm-spawn-recovery-ready.XXXXXX") || { umask "$old_umask"; return 1; }
   FM_SPAWN_RECOVERY_STARTED=$(mktemp "$tasktmp/.fm-spawn-recovery-started.XXXXXX") || { umask "$old_umask"; return 1; }
+  FM_SPAWN_RECOVERY_GIT_GATE_DIR=$(mktemp -d "$tasktmp/.fm-spawn-recovery-git.XXXXXX") || { umask "$old_umask"; return 1; }
   rm -f -- "$FM_SPAWN_RECOVERY_READY" "$FM_SPAWN_RECOVERY_STARTED"
   umask "$old_umask"
+  git_bin=$(command -v git) || return 1
+  case "$git_bin" in /*) ;; *) return 1 ;; esac
+  [ -x "$git_bin" ] || return 1
+  FM_SPAWN_RECOVERY_GIT_GATE_ACTIVE="$FM_SPAWN_RECOVERY_GIT_GATE_DIR/active"
+  printf '%s\n' pending > "$FM_SPAWN_RECOVERY_GIT_GATE_ACTIVE" || return 1
+  cat > "$FM_SPAWN_RECOVERY_GIT_GATE_DIR/git" <<EOF
+#!/usr/bin/env bash
+set -u
+if [ -e $(shell_quote "$FM_SPAWN_RECOVERY_GIT_GATE_ACTIVE") ]; then
+  while [ "\$#" -gt 0 ]; do
+    case "\$1" in
+      -C|-c|--git-dir|--work-tree|--namespace) shift 2 ;;
+      --no-pager|--paginate|--literal-pathspecs|--no-literal-pathspecs|--glob-pathspecs|--noglob-pathspecs|--icase-pathspecs) shift ;;
+      -*) shift ;;
+      *) break ;;
+    esac
+  done
+  case "\${1:-}" in
+    status|diff|show|log|rev-parse|symbolic-ref|for-each-ref|ls-files|ls-tree|cat-file|grep|describe|merge-base|show-ref|check-ignore) ;;
+    *) echo "error: OMP recovery blocks Git mutation until endpoint publication" >&2; exit 1 ;;
+  esac
+fi
+exec $(shell_quote "$git_bin") "\$@"
+EOF
+  chmod 700 "$FM_SPAWN_RECOVERY_GIT_GATE_DIR/git" || return 1
   cat -- "$brief" > "$FM_SPAWN_RECOVERY_NOTE" || return 1
   printf '\n\nRecovery continuation: Firstmate restarted this proven-dead OMP worker in the preserved isolated copy. Re-read the brief above, inspect the current branch and uncommitted work, then continue the task without resetting, checking out another branch, or discarding work.\n' >> "$FM_SPAWN_RECOVERY_NOTE" || return 1
 }
@@ -805,7 +808,6 @@ fm_spawn_recovery_clear_session_cleanup_guard() {
 fm_spawn_recovery_remove_fresh_session_artifacts() {
   local session_dir=${FM_SPAWN_RECOVERY_SESSION_DIR:-} file quarantine
   [ "${FM_SPAWN_RECOVERY_SESSION_MODE:-}" = fresh ] || return 0
-  fm_spawn_recovery_write_session_cleanup_guard || return 1
   file=${FM_SPAWN_RECOVERY_FRESH_SESSION_FILE:-}
   if [ -n "$file" ]; then
     [ -f "$file" ] && [ ! -L "$file" ] \
@@ -817,10 +819,6 @@ fm_spawn_recovery_remove_fresh_session_artifacts() {
       return 1
     fi
     [ ! -e "$file" ] && [ ! -L "$file" ] || return 1
-  fi
-  fm_spawn_recovery_clear_session_cleanup_guard || return 1
-  if [ "${FM_SPAWN_RECOVERY_SESSION_DIR_CREATED:-0}" = 1 ]; then
-    rmdir -- "$session_dir" || return 1
   fi
 }
 
@@ -843,7 +841,6 @@ fm_spawn_recovery_remove_replacement_scratch() {
 fm_spawn_recovery_remove_legacy_session_binding() {
   local session_dir=${FM_SPAWN_RECOVERY_SESSION_DIR:-} file=${FM_SPAWN_RECOVERY_RESUME_FILE:-} quarantine
   [ "${FM_SPAWN_RECOVERY_LEGACY_SESSION_BOUND:-0}" = 1 ] || return 0
-  fm_spawn_recovery_write_session_cleanup_guard || return 1
   [ -f "$file" ] && [ ! -L "$file" ] \
     && [ "$(cd "$(dirname "$file")" && pwd -P)" = "$(cd "$session_dir" && pwd -P)" ] || return 1
   if ! rm -f -- "$file"; then
@@ -853,6 +850,18 @@ fm_spawn_recovery_remove_legacy_session_binding() {
     return 1
   fi
   [ ! -e "$file" ] && [ ! -L "$file" ] || return 1
+}
+
+fm_spawn_recovery_finish_session_cleanup() {
+  local session_dir=${FM_SPAWN_RECOVERY_SESSION_DIR:-}
+  if [ "${FM_SPAWN_RECOVERY_SESSION_DIR_CREATED:-0}" = 1 ]; then
+    fm_spawn_recovery_clear_session_cleanup_guard || return 1
+    if ! rmdir -- "$session_dir"; then
+      fm_spawn_recovery_write_session_cleanup_guard || return 1
+      return 1
+    fi
+    return 0
+  fi
   fm_spawn_recovery_clear_session_cleanup_guard
 }
 
@@ -906,6 +915,13 @@ fm_spawn_recovery_cleanup_artifacts() {
   FM_SPAWN_RECOVERY_META_SNAPSHOT=
   FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT=
   FM_SPAWN_RECOVERY_TURNEND_BACKUP=
+  if [ -n "${FM_SPAWN_RECOVERY_GIT_GATE_DIR:-}" ] \
+     && [ -d "$FM_SPAWN_RECOVERY_GIT_GATE_DIR" ] \
+     && [ ! -L "$FM_SPAWN_RECOVERY_GIT_GATE_DIR" ]; then
+    rm -rf -- "$FM_SPAWN_RECOVERY_GIT_GATE_DIR"
+  fi
+  FM_SPAWN_RECOVERY_GIT_GATE_DIR=
+  FM_SPAWN_RECOVERY_GIT_GATE_ACTIVE=
   if [ -n "${FM_SPAWN_RECOVERY_FINALIZATION_BACKUP:-}" ] \
      && [ -d "$FM_SPAWN_RECOVERY_FINALIZATION_BACKUP" ] \
      && [ ! -L "$FM_SPAWN_RECOVERY_FINALIZATION_BACKUP" ]; then
@@ -1057,6 +1073,10 @@ fm_spawn_recovery_complete() {
     fm_spawn_recovery_restore_finalization_archive
     return 1
   fi
+  if [ -n "${FM_SPAWN_RECOVERY_GIT_GATE_ACTIVE:-}" ] \
+     && ! rm -f -- "$FM_SPAWN_RECOVERY_GIT_GATE_ACTIVE"; then
+    return 1
+  fi
   FM_SPAWN_RECOVERY_FINALIZED=1
   FM_SPAWN_RECOVERY_FINALIZATION_BACKUP=
   FM_SPAWN_RECOVERY_FINALIZATION_ARCHIVE=
@@ -1066,10 +1086,11 @@ fm_spawn_recovery_complete() {
   FM_SPAWN_RECOVERY_META_SNAPSHOT=
   FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT=
   FM_SPAWN_RECOVERY_TURNEND_BACKUP=
+  FM_SPAWN_RECOVERY_GIT_GATE_ACTIVE=
 }
 
 fm_spawn_recovery_abort() { # <backend> <target>
-  local backend=${1:-} target=${2:-} state
+  local backend=${1:-} target=${2:-} state pointer_restored=0
   [ "${FM_SPAWN_RECOVERY_ACTIVE:-0}" = 1 ] || return 0
   if [ "${FM_SPAWN_RECOVERY_FINALIZED:-0}" = 1 ]; then
     fm_spawn_recovery_cleanup_artifacts
@@ -1104,6 +1125,15 @@ fm_spawn_recovery_abort() { # <backend> <target>
     FM_SPAWN_RECOVERY_PUBLISHED=0
   fi
   if [ "${FM_SPAWN_RECOVERY_LEGACY_SESSION_BOUND:-0}" = 1 ]; then
+    fm_spawn_recovery_write_session_cleanup_guard || {
+      echo "warning: OMP recovery could not guard its failed legacy-session cleanup; preserving recovery artifacts and task state" >&2
+      return 1
+    }
+    fm_spawn_recovery_restore_pointer || {
+      echo "warning: OMP recovery could not restore its durable session pointer; preserving recovery artifacts and task state" >&2
+      return 1
+    }
+    pointer_restored=1
     fm_spawn_recovery_remove_legacy_session_binding || {
       echo "warning: OMP recovery could not remove its failed legacy-session binding; preserving recovery artifacts and task state" >&2
       return 1
@@ -1113,12 +1143,10 @@ fm_spawn_recovery_abort() { # <backend> <target>
       return 1
     }
     FM_SPAWN_RECOVERY_SESSION_BACKUP=
-    if [ "${FM_SPAWN_RECOVERY_SESSION_DIR_CREATED:-0}" = 1 ]; then
-      rmdir -- "$FM_SPAWN_RECOVERY_SESSION_DIR" || {
-        echo "warning: OMP recovery could not remove its failed legacy-session directory; preserving recovery artifacts and task state" >&2
-        return 1
-      }
-    fi
+    fm_spawn_recovery_finish_session_cleanup || {
+      echo "warning: OMP recovery could not remove its failed legacy-session directory; preserving recovery artifacts and task state" >&2
+      return 1
+    }
   elif [ -n "${FM_SPAWN_RECOVERY_SESSION_BACKUP:-}" ]; then
     mv -f -- "$FM_SPAWN_RECOVERY_SESSION_BACKUP" "$FM_SPAWN_RECOVERY_RESUME_FILE" || {
       echo "warning: OMP recovery could not restore its exact prior session snapshot; preserving recovery artifacts and task state" >&2
@@ -1126,8 +1154,15 @@ fm_spawn_recovery_abort() { # <backend> <target>
     }
     FM_SPAWN_RECOVERY_SESSION_BACKUP=
   else
-    # The task lock and empty pre-launch session directory bind at most one
-    # newly observed session file to this fresh replacement attempt.
+    fm_spawn_recovery_write_session_cleanup_guard || {
+      echo "warning: OMP recovery could not guard its failed fresh-session cleanup; preserving recovery artifacts and task state" >&2
+      return 1
+    }
+    fm_spawn_recovery_restore_pointer || {
+      echo "warning: OMP recovery could not restore its durable session pointer; preserving recovery artifacts and task state" >&2
+      return 1
+    }
+    pointer_restored=1
     fm_spawn_recovery_capture_fresh_session || {
       echo "warning: OMP recovery could not identify one fresh failed-attempt session; preserving recovery artifacts and task state" >&2
       return 1
@@ -1136,13 +1171,23 @@ fm_spawn_recovery_abort() { # <backend> <target>
       echo "warning: OMP recovery could not remove its failed fresh session; preserving recovery artifacts and task state" >&2
       return 1
     }
+    fm_spawn_recovery_finish_session_cleanup || {
+      echo "warning: OMP recovery could not remove its failed fresh-session directory; preserving recovery artifacts and task state" >&2
+      return 1
+    }
   fi
-  fm_spawn_recovery_restore_pointer || {
-    echo "warning: OMP recovery could not restore its durable session pointer; preserving recovery artifacts and task state" >&2
-    return 1
-  }
+  if [ "$pointer_restored" = 0 ]; then
+    fm_spawn_recovery_restore_pointer || {
+      echo "warning: OMP recovery could not restore its durable session pointer; preserving recovery artifacts and task state" >&2
+      return 1
+    }
+  fi
   fm_spawn_recovery_remove_replacement_scratch || {
     echo "warning: OMP recovery could not remove its replacement scratch; preserving recovery artifacts and task state" >&2
+    return 1
+  }
+  fm_spawn_recovery_remove_turnend_backup || {
+    echo "warning: OMP recovery could not retire its turn-end rollback backup; preserving recovery artifacts and task state" >&2
     return 1
   }
   fm_spawn_recovery_cleanup_artifacts

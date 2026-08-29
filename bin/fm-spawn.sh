@@ -15,9 +15,9 @@
 #   allocates, returns, freshens, or changes the preserved worktree before a failed
 #   replacement restores its exact snapshot.
 #   A valid exact durable session pointer disambiguates retained sibling sessions.
-#   Only multiple unpointed legacy task sessions refuse, because guessing can
-#   split a task transcript; an absent or empty task session directory starts a
-#   new OMP session with a continuation note.
+#   A nonempty unpointed durable directory and multiple legacy tasktmp sessions
+#   refuse, while one legacy tasktmp session is bound into durable state and
+#   resumed; a new session starts only when neither durable nor legacy state exists.
 #   Endpoint metadata remains unchanged until the replacement's first turn
 #   acknowledges, then one atomic replacement updates only endpoint fields while
 #   retaining every unrelated record line.
@@ -3903,7 +3903,11 @@ if [ "$OMP_LAUNCH_TEMPLATE" -eq 1 ] && [ -n "$OMP_BUN_LAUNCH_DIR" ]; then
       exit 1
       ;;
   esac
-  OMP_LAUNCH_PATH_GUARD="PATH=$(shell_quote "$OMP_BUN_LAUNCH_DIR${PATH:+:$PATH}"); export PATH; FM_OMP_BUN_LOOKUP=\$(command -v bun) || exit 1; FM_OMP_BUN_RESOLVED=\$(readlink -f \"\$FM_OMP_BUN_LOOKUP\" 2>/dev/null || node -e 'const { realpathSync } = require(\"node:fs\"); process.stdout.write(realpathSync(process.argv[1]));' \"\$FM_OMP_BUN_LOOKUP\") || exit 1; [ \"\$FM_OMP_BUN_RESOLVED\" = $(shell_quote "$OMP_BUN_CANON") ] || exit 1; "
+  OMP_LAUNCH_PATH=$OMP_BUN_LAUNCH_DIR${PATH:+:$PATH}
+  if [ "$RECOVER" -eq 1 ] && [ "$HARNESS" = omp ]; then
+    OMP_LAUNCH_PATH="$FM_SPAWN_RECOVERY_GIT_GATE_DIR:$OMP_LAUNCH_PATH"
+  fi
+  OMP_LAUNCH_PATH_GUARD="PATH=$(shell_quote "$OMP_LAUNCH_PATH"); export PATH; FM_OMP_BUN_LOOKUP=\$(command -v bun) || exit 1; FM_OMP_BUN_RESOLVED=\$(readlink -f \"\$FM_OMP_BUN_LOOKUP\" 2>/dev/null || node -e 'const { realpathSync } = require(\"node:fs\"); process.stdout.write(realpathSync(process.argv[1]));' \"\$FM_OMP_BUN_LOOKUP\") || exit 1; [ \"\$FM_OMP_BUN_RESOLVED\" = $(shell_quote "$OMP_BUN_CANON") ] || exit 1; "
 fi
 if [ "$OMP_LAUNCH_TEMPLATE" -eq 1 ] && [ "$HARNESS" = omp ] && [ -n "$OMP_BIN_CANON" ]; then
   LAUNCH="FM_OMP_BUN=$(shell_quote "$OMP_BUN_CANON") FM_OMP_BIN=$(shell_quote "$OMP_BIN_CANON") $LAUNCH"
@@ -4060,6 +4064,9 @@ fi
 sleep 0.3
 [ "$BACKEND" != herdr ] || LAUNCH="$HERDR_LAUNCH_ENV$LAUNCH"
 [ -z "$OMP_LAUNCH_PATH_GUARD" ] || LAUNCH="$OMP_LAUNCH_PATH_GUARD$LAUNCH"
+if [ "$RECOVER" -eq 1 ] && [ "$HARNESS" = omp ] && [ -z "$OMP_LAUNCH_PATH_GUARD" ]; then
+  LAUNCH="PATH=$(shell_quote "$FM_SPAWN_RECOVERY_GIT_GATE_DIR"):\$PATH; export PATH; $LAUNCH"
+fi
 if [ "$OMP_LAUNCH_TEMPLATE" -eq 1 ] && [ "$HARNESS" = omp ]; then
   LAUNCH="/bin/bash -c $(shell_quote "$LAUNCH")"
 fi

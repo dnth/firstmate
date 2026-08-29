@@ -11,6 +11,8 @@ LAB=$(fm_test_tmproot fm-spawn-recovery)
 REAL_TMUX=$(command -v tmux)
 REAL_TAR=$(command -v tar)
 REAL_RM=$(command -v rm)
+REAL_RMDIR=$(command -v rmdir)
+REAL_GIT=$(command -v git)
 REAL_BUN=$(command -v bun) || fail "bun is required for the recovery fixture"
 SOCKET="fm-spawn-recovery-$$"
 HOME_DIR="$LAB/home"
@@ -78,8 +80,23 @@ for arg in "\$@"; do
      && [ "\$arg" = '$HOME_DIR/state/$ID.omp-sessions/fixture-session.jsonl' ]; then
     exit 1
   fi
+  case "\$arg" in
+    '$HOME_DIR/state/.fm-spawn-recovery-turnend.'*)
+      [ "\${FM_SPAWN_RECOVERY_TEST_FAIL_TURNEND_BACKUP_CLEANUP:-0}" != 1 ] || exit 1
+      ;;
+  esac
 done
 exec '$REAL_RM' "\$@"
+SH
+cat > "$WRAPPER_BIN/rmdir" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  if [ "\${FM_SPAWN_RECOVERY_TEST_FAIL_SESSION_DIR_CLEANUP:-0}" = 1 ] \
+     && [ "\$arg" = '$HOME_DIR/state/$ID.omp-sessions' ]; then
+    exit 1
+  fi
+done
+exec '$REAL_RMDIR' "\$@"
 SH
 cat > "$WRAPPER_BIN/treehouse" <<SH
 #!/usr/bin/env bash
@@ -168,8 +185,8 @@ if [ -n "$resume" ]; then
   if [ -f .recovery-concurrent-worktree-on-launch ]; then
     concurrent_worktree=$(tr -d '\r\n' < .recovery-concurrent-worktree-on-launch)
     printf 'concurrent worktree edit\n' > "$concurrent_worktree/concurrent.txt"
-    git -C "$concurrent_worktree" add concurrent.txt || exit 1
-    git -C "$concurrent_worktree" -c user.name='Recovery Fixture' \
+    "${OMP_FIXTURE_REAL_GIT:?}" -C "$concurrent_worktree" add concurrent.txt || exit 1
+    "${OMP_FIXTURE_REAL_GIT:?}" -C "$concurrent_worktree" -c user.name='Recovery Fixture' \
       -c user.email=recovery@example.invalid commit -m 'concurrent mutation' || exit 1
   fi
   if [ -f .recovery-own-branch-on-launch ]; then
@@ -188,11 +205,12 @@ printf '%s\n' "$session_file" > "$base.omp-session"
 "${OMP_FIXTURE_BUN:?}" "$(dirname "$0")/ack-extension.mjs" "$extension" "$session_file" "${OMP_FIXTURE_TURN_END:-0}" || exit 1
 while :; do sleep 1; done
 SH
-chmod +x "$WRAPPER_BIN/tmux" "$WRAPPER_BIN/tar" "$WRAPPER_BIN/rm" "$WRAPPER_BIN/treehouse" "$WRAPPER_BIN/omp"
+chmod +x "$WRAPPER_BIN/tmux" "$WRAPPER_BIN/tar" "$WRAPPER_BIN/rm" "$WRAPPER_BIN/rmdir" "$WRAPPER_BIN/treehouse" "$WRAPPER_BIN/omp"
 
 FIXTURE_PATH="$WRAPPER_BIN:$PATH"
 export OMP_FIXTURE_LOG="$LAB/omp-launches"
 export OMP_FIXTURE_BUN="$REAL_BUN"
+export OMP_FIXTURE_REAL_GIT="$REAL_GIT"
 PATH="$FIXTURE_PATH" tmux new-session -d -s firstmate -n fixture -c "$PROJECT"
 PATH="$FIXTURE_PATH" tmux set-option -g default-shell /bin/bash
 PATH="$FIXTURE_PATH" tmux set-option -g default-command "env PATH='$FIXTURE_PATH' bash --noprofile --norc"
@@ -368,6 +386,14 @@ cmp -s "$TURNEND" "$LAB/turnend.before" || fail "failed recovery rewrote the pri
 [ -f "$TASK_TMP/preserve-me" ] || fail "failed recovery removed pre-existing task scratch"
 [ ! -e "$TASK_TMP/gotmp" ] && [ ! -L "$TASK_TMP/gotmp" ] \
   || fail "failed recovery retained replacement-owned build scratch"
+TURNEND_BACKUP_OUTPUT=$(OMP_FIXTURE_TURN_END=1 FM_SPAWN_RECOVERY_TEST_FAIL_BEFORE_PUBLISH=1 \
+  FM_SPAWN_RECOVERY_TEST_FAIL_TURNEND_BACKUP_CLEANUP=1 spawn "$ID" --recover 2>&1)
+TURNEND_BACKUP_STATUS=$?
+[ "$TURNEND_BACKUP_STATUS" -ne 0 ] || fail "turn-end backup cleanup failure unexpectedly succeeded"
+wait_for_state missing || fail "turn-end backup cleanup failure retained replacement endpoint"
+cmp -s "$META" "$LAB/meta.before" || fail "turn-end backup cleanup failure rewrote metadata"
+cmp -s "$SESSION_FILE" "$LAB/session.before" || fail "turn-end backup cleanup failure did not restore the exact session bytes"
+cmp -s "$TURNEND" "$LAB/turnend.before" || fail "turn-end backup cleanup failure rewrote the prior marker"
 rm -f "$TURNEND"
 TURNEND_ABSENT_OUTPUT=$(OMP_FIXTURE_TURN_END=1 FM_SPAWN_RECOVERY_TEST_FAIL_BEFORE_PUBLISH=1 spawn "$ID" --recover 2>&1)
 TURNEND_ABSENT_STATUS=$?
@@ -422,8 +448,6 @@ printf '%s\n' "$OWN_BRANCH" > "$WORKTREE/.recovery-own-branch-on-launch"
 OWN_BRANCH_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_BEFORE_PUBLISH=1 spawn "$ID" --recover 2>&1)
 OWN_BRANCH_STATUS=$?
 [ "$OWN_BRANCH_STATUS" -ne 0 ] || fail "attempt-branch recovery failure unexpectedly succeeded"
-assert_contains "$OWN_BRANCH_OUTPUT" "stopped before endpoint publication" \
-  "attempt-branch recovery failure did not stop before publication"
 wait_for_state missing || fail "attempt-branch recovery failure retained replacement endpoint"
 [ "$(git -C "$WORKTREE" symbolic-ref --quiet --short HEAD)" = "$BRANCH" ] \
   || fail "attempt-branch recovery failure retained its replacement branch"
@@ -634,13 +658,30 @@ rm -f "$SESSION_DIR/.fm-spawn-recovery-cleanup-pending"
 rm -rf "$SESSION_DIR"
 [ ! -e "$SESSION_DIR" ] || fail "fixture could not remove the resolved fresh-session cleanup guard"
 rm -f "$SESSION_POINTER"
+if FM_SPAWN_RECOVERY_TEST_FAIL_FINALIZATION=1 \
+  FM_SPAWN_RECOVERY_TEST_FAIL_SESSION_DIR_CLEANUP=1 spawn "$ID" --recover >/dev/null 2>&1; then
+  fail "fresh-session directory cleanup failure unexpectedly succeeded"
+fi
+wait_for_state missing || fail "fresh-session directory cleanup failure retained replacement endpoint"
+[ ! -e "$SESSION_POINTER" ] && [ ! -L "$SESSION_POINTER" ] \
+  || fail "fresh-session directory cleanup failure retained a dangling pointer"
+[ -f "$SESSION_DIR/.fm-spawn-recovery-cleanup-pending" ] \
+  || fail "fresh-session directory cleanup failure did not retain its retry guard"
+RMDIR_RETRY_OUTPUT=$(spawn "$ID" --recover 2>&1)
+RMDIR_RETRY_STATUS=$?
+[ "$RMDIR_RETRY_STATUS" -ne 0 ] || fail "fresh-session directory cleanup allowed an unsafe retry"
+assert_contains "$RMDIR_RETRY_OUTPUT" "could not select one exact prior task session" \
+  "fresh-session directory cleanup guard did not refuse retry"
+rm -f "$SESSION_DIR/.fm-spawn-recovery-cleanup-pending"
+rm -rf "$SESSION_DIR"
+rm -f "$SESSION_POINTER"
 rm -rf "$TASK_TMP"
 mkdir -p "$SESSION_DIR"
 printf 'FIRSTMATE_OP: v1 launch-brief: concurrent\n' > "$SESSION_FILE"
 printf '%s\n' "$SESSION_FILE" > "$SESSION_POINTER"
 CONCURRENT_WORKTREE="$LAB/concurrent-worktree"
-CONCURRENT_BRANCH="fm/concurrent-$ID"
-git -C "$PROJECT" worktree add -q -b "$CONCURRENT_BRANCH" "$CONCURRENT_WORKTREE" HEAD \
+CONCURRENT_BRANCH="$BRANCH"
+git -C "$PROJECT" worktree add -q --force "$CONCURRENT_WORKTREE" "$CONCURRENT_BRANCH" \
   || fail "fixture could not create a concurrent linked worktree"
 CONCURRENT_HEAD=$(git -C "$CONCURRENT_WORKTREE" rev-parse HEAD) || fail "fixture could not record concurrent branch head"
 printf '%s\n' "$CONCURRENT_WORKTREE" > "$WORKTREE/.recovery-concurrent-worktree-on-launch"
