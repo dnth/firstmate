@@ -991,6 +991,7 @@ families_for_changed_path() {
     bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-local-default.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge
+      [ "$path" != bin/fm-teardown.sh ] || printf '%s\n' session-bootstrap
       ;;
     bin/fm-nm-run-lib.sh)
       # Shared no-mistakes run-attribution primitives, sourced by both
@@ -1012,6 +1013,7 @@ families_for_changed_path() {
       if [ "$path" = bin/fm-spawn.sh ]; then
         printf '%s\n' secondmate
         printf '%s\n' live-harness-optin
+        printf '%s\n' session-bootstrap
       fi
       ;;
     bin/fm-bearings-snapshot.sh|bin/fm-fleet-snapshot.sh|bin/fm-fleet-view.sh)

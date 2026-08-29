@@ -99,6 +99,7 @@ init_changed_fixture_repo() {
     fm-cd-pretool-check.test.sh \
     fm-daemon.test.sh \
     fm-backend-herdr-smoke.test.sh \
+    fm-gate-refuse.test.sh \
     fm-secondmate-safety.test.sh \
     fm-session-start.test.sh \
     fm-afk-pi-herdr-return-e2e.test.sh \
@@ -129,6 +130,7 @@ init_changed_fixture_repo() {
   : >"$repo/bin/fm-pi-compatible-lib.sh"
   : >"$repo/bin/fm-pi-compatible-runtimes"
   : >"$repo/bin/fm-primary-watch-core.ts"
+  : >"$repo/bin/fm-teardown.sh"
   : >"$repo/bin/unmapped-source.sh"
   printf '# .claude/settings.json\n# .pi/extensions/fm-primary-turnend-guard.ts\n' \
     >>"$repo/tests/fm-cd-pretool-check.test.sh"
@@ -217,8 +219,16 @@ test_changed_dependency_selection_and_unmapped_failure() {
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
   assert_contains "$listed" "tests/fm-omp-secondmate.test.sh" "spawn source selects persistent secondmate coverage"
   assert_contains "$listed" "tests/fm-omp-secondmate-live-e2e.test.sh" "spawn source selects opt-in persistent lifecycle coverage"
+  assert_contains "$listed" "tests/fm-gate-refuse.test.sh" "spawn source selects metadata lifecycle-lock coverage"
   git -C "$repo" add bin/fm-spawn.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm spawn-change
+
+  printf '\n' >>"$repo/bin/fm-teardown.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-pr-merge.test.sh" "teardown source selects forge coverage"
+  assert_contains "$listed" "tests/fm-gate-refuse.test.sh" "teardown source selects metadata lifecycle-lock coverage"
+  git -C "$repo" add bin/fm-teardown.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm teardown-change
 
   printf '\n' >>"$repo/.agents/skills/example/SKILL.md"
   printf '\n' >>"$repo/.claude/settings.json"
