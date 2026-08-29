@@ -34,12 +34,6 @@ case "${1:-}" in
     [ "${FM_FAKE_TMUX_SEND_FAIL:-0}" = 1 ] && exit 1
     if [ "$literal" = 1 ]; then
       printf '%s' "${1:-}" >> "$FM_SEND_LOG"
-      if [ -n "${FM_FAKE_APPEND_FAILURE_STATUS:-}" ]; then
-        chmod 444 "$FM_FAKE_APPEND_FAILURE_STATUS"
-      fi
-      if [ -n "${FM_FAKE_PENDING_FAILURE_DIR:-}" ]; then
-        chmod 500 "$FM_FAKE_PENDING_FAILURE_DIR"
-      fi
     fi
     exit 0
     ;;
@@ -75,6 +69,23 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
+  cat > "$fb/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+source_arg=${@: -2:1}
+if [ -n "${FM_FAKE_APPEND_FAILURE_STATUS:-}" ] \
+  && [ -f "$FM_FAKE_APPEND_FAILURE_STATUS" ] \
+  && grep -q '^confirmed=' "$source_arg" 2>/dev/null; then
+  /bin/mv "$FM_FAKE_APPEND_FAILURE_STATUS" "$FM_FAKE_APPEND_FAILURE_STATUS.saved"
+  mkdir "$FM_FAKE_APPEND_FAILURE_STATUS"
+fi
+if [ -n "${FM_FAKE_PENDING_FAILURE_DIR:-}" ] \
+  && grep -q '^confirmed=' "$source_arg" 2>/dev/null; then
+  chmod 500 "$FM_FAKE_PENDING_FAILURE_DIR"
+fi
+exec /bin/mv "$@"
+SH
+  chmod +x "$fb/mv"
   cat > "$fb/ps" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
@@ -151,7 +162,9 @@ test_answer_send_closes_open_decision() {
   run_send "$fb" "$home" "$log" t1 --resolve-key api-shape "go with REST"
   rc=$?
   expect_code 0 "$rc" "an answer send with --resolve-key should succeed"
-  assert_contains "$(cat "$log")" "go with REST" "the answer text should reach the worker"
+  grep -qF "go with REST" "$home/state/t1.inbox/001.msg" \
+    || fail "the answer text should reach the worker's durable inbox record"
+  assert_contains "$(cat "$log")" "Firstmate instruction waiting" "the answer doorbell should be rung"
   assert_grep 'resolved [key=api-shape]: answered: go with REST' "$home/state/t1.status" \
     "fm-send did not append the closing resolved line"
 
@@ -247,7 +260,7 @@ test_failed_send_does_not_close() {
   : > "$log"
   env PATH="$fb:$PATH" FM_FAKE_TMUX_SEND_FAIL=1 \
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
-    "$SEND" t5 --resolve-key creds "token is in the vault now" >/dev/null 2>&1
+    "$SEND" t5 --resolve-key creds "/token-is-in-the-vault-now" >/dev/null 2>&1
   rc=$?
   [ "$rc" -ne 0 ] || fail "a failed backend send should exit nonzero"
   assert_no_grep 'resolved' "$home/state/t5.status" "a failed send still closed the decision"
@@ -267,7 +280,7 @@ test_unconfirmed_send_does_not_close() {
   fm_write_meta "$home/state/t6.meta" "window=sess:fm-t6" "kind=ship"
   printf 'needs-decision [key=confirm]: verify the release\n' > "$home/state/t6.status"
 
-  FM_FAKE_TMUX_UNCONFIRMED=1 run_send "$fb" "$home" "$log" t6 --resolve-key confirm "release is verified"
+  FM_FAKE_TMUX_UNCONFIRMED=1 run_send "$fb" "$home" "$log" t6 --resolve-key confirm "/release-is-verified"
   rc=$?
   [ "$rc" -ne 0 ] || fail "an unconfirmed backend send should exit nonzero"
   assert_no_grep 'resolved' "$home/state/t6.status" "an unconfirmed send still closed the decision"
@@ -302,7 +315,7 @@ test_busy_omp_queued_unconfirmed_does_not_close() {
     FM_FAKE_TMUX_WINDOW=fm-tq FM_FAKE_OMP_BUN="$runtime" FM_FAKE_OMP_BIN="$omp" \
     FM_SEND_ERR="$err" \
     run_send "$fb" "$home" "$log" \
-    tq --resolve-key queue-proof "answer may only be queued"
+    tq --resolve-key queue-proof "/answer-may-only-be-queued"
   rc=$?
   [ "$rc" -eq 0 ] \
     || fail "the existing busy OMP queued steer path should still succeed: $(cat "$err")"
@@ -377,7 +390,8 @@ test_local_secondmate_answer_is_marked_and_closed() {
   run_send "$fb" "$home" "$log" fm-domain --resolve-key fleet-split "shard by team"
   rc=$?
   expect_code 0 "$rc" "a local secondmate answer should succeed"
-  got=$(cat "$log")
+  got=$(bash -c '. "$1"; fm_task_inbox_body "$2"' _ \
+    "$ROOT/bin/fm-task-inbox-lib.sh" "$home/state/domain.inbox/001.msg")
   case "$got" in
     "$FM_FROMFIRST_MARK"corr=*) : ;;
     *) fail "the secondmate answer lost its marker/corr framing" ;;
@@ -540,7 +554,8 @@ test_append_failure_reports_every_safe_manual_close() {
     FM_FAKE_APPEND_FAILURE_STATUS="$home/state/t8.status" \
     "$SEND" t8 --resolve-key manual-one --resolve-key manual-two "ship Friday" >/dev/null 2>"$err"
   rc=$?
-  chmod 644 "$home/state/t8.status"
+  rmdir "$home/state/t8.status"
+  mv "$home/state/t8.status.saved" "$home/state/t8.status"
   [ "$rc" -ne 0 ] || fail "an append failure after delivery should exit nonzero"
   [ "$(grep -c '^manual close:' "$err")" -eq 2 ] \
     || fail "append failure did not report one command for every open key: $(cat "$err")"
@@ -581,9 +596,11 @@ test_secondmate_closes_before_pending_reply_commit_failure() {
     "$SEND" domain --resolve-key commit-order "use the confirmed answer" >/dev/null 2>"$err"
   rc=$?
   chmod 700 "$pending_dir"
-  [ "$rc" -ne 0 ] || fail "a pending-reply commit failure should still exit nonzero"
+  expect_code 0 "$rc" "a pending-reply commit failure must not invite an inbox resend"
   assert_grep 'pending-reply delivery commit' "$err" \
     "the fixture did not reach the pending-reply commit failure"
+  assert_grep 'do not resend' "$err" \
+    "the bookkeeping degradation omitted safe resend guidance"
   assert_grep 'resolved [key=commit-order]: answered: use the confirmed answer' \
     "$home/state/domain.status" \
     "confirmed delivery did not close before ancillary pending-reply bookkeeping failed"

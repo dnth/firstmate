@@ -155,7 +155,7 @@ family_for_basename() {
     fm-session-lock-ancestry.test.sh|\
     fm-supervision-events.test.sh|fm-turnend-guard.test.sh|fm-wake-daemon-lifecycle-e2e.test.sh|\
     fm-wake-queue.test.sh|fm-watch-arm.test.sh|fm-watch-checkpoint.test.sh|fm-watch-recovery-loop.test.sh|\
-    fm-watch-triage.test.sh|\
+    fm-watch-triage.test.sh|fm-task-inbox.test.sh|\
     fm-watcher-lock.test.sh|fm-omp-branch-supervision.test.sh)
       printf '%s\n' watcher-wake-lock
       ;;
@@ -191,12 +191,12 @@ family_for_basename() {
     fm-omp-secondmate-live-e2e.test.sh|fm-omp-worker-tmux-live-e2e.test.sh|\
     fm-omp-primary-live-e2e.test.sh|\
     fm-opencode-primary-live-e2e.test.sh|fm-pi-primary-live-e2e.test.sh|\
-    fm-quota-array-dispatch-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh|\
+    fm-quota-array-dispatch-live-e2e.test.sh|fm-send-inbox-doorbell-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh|\
     fm-omp-branch-live-e2e.test.sh)
       printf '%s\n' live-harness-optin
       ;;
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
-    fm-herdr-session-cleanup.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|fm-send-turn-start.test.sh|fm-spawn-batch.test.sh|\
+    fm-herdr-session-cleanup.test.sh|fm-send-inbox.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|fm-send-turn-start.test.sh|fm-spawn-batch.test.sh|\
     fm-spawn-dispatch-profile.test.sh|\
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|fm-treehouse-orphan-recovery.test.sh|\
     fm-teardown-endpoint-safety.test.sh)
@@ -991,6 +991,7 @@ families_for_changed_path() {
     bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-local-default.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge
+      [ "$path" != bin/fm-teardown.sh ] || printf '%s\n' session-bootstrap
       ;;
     bin/fm-nm-run-lib.sh)
       # Shared no-mistakes run-attribution primitives, sourced by both
@@ -1005,12 +1006,14 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       printf '%s\n' secondmate
       ;;
-    bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-peek.sh|bin/fm-composer*)
+    bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-peek.sh|bin/fm-composer*|bin/fm-task-inbox-lib.sh)
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
+      [ "$path" != bin/fm-task-inbox-lib.sh ] || printf '%s\n' watcher-wake-lock
       if [ "$path" = bin/fm-spawn.sh ]; then
         printf '%s\n' secondmate
         printf '%s\n' live-harness-optin
+        printf '%s\n' session-bootstrap
       fi
       ;;
     bin/fm-bearings-snapshot.sh|bin/fm-fleet-snapshot.sh|bin/fm-fleet-view.sh)

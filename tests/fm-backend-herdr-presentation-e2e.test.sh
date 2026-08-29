@@ -175,12 +175,30 @@ if [ "$status" -eq 0 ] && [ "$mutation" = tab-create ]; then
       ;;
   esac
 fi
-if [ "$status" -eq 0 ] && [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$POST_CREATE_ABORT_CONTROL" ]; then
+if [ "$status" -eq 0 ] && [ "${1:-} ${2:-}" = "pane run" ] \
+   && [ -d "$POST_CREATE_ABORT_CONTROL" ]; then
   for task_dir in "$POST_CREATE_ABORT_CONTROL"/abort-*; do
     [ -d "$task_dir" ] || continue
     [ "${3:-}" = "$(cat "$task_dir/task-pane" 2>/dev/null || true)" ] || continue
-    out=$(printf '%s' "$out" | jq --arg cwd "$POST_CREATE_ABORT_CONTROL/not-a-worktree" '.result.pane.foreground_cwd = $cwd')
-    break
+    case "${4:-}" in
+      *fm-treehouse-get.sh*--ready-file*)
+        ready_file=${4##* --ready-file }
+        for _ in $(seq 1 1200); do
+          [ -s "$ready_file" ] && break
+          sleep 0.05
+        done
+        acquired=$(sed -n '1p' "$ready_file" 2>/dev/null || true)
+        [ -n "$acquired" ] || exit 1
+        printf '\npost-create abort fixture\n' >> "$acquired/README.md"
+        touch "$task_dir/validation-armed"
+        if [ "$(basename "$task_dir")" = abort-a ]; then
+          for _ in $(seq 1 1000); do
+            [ -e "$POST_CREATE_ABORT_CONTROL/release-abort-a" ] && break
+            sleep 0.01
+          done
+        fi
+        ;;
+    esac
   done
 fi
 if [ -n "$mutation" ]; then
@@ -207,9 +225,6 @@ set -u
   done
   printf '\n'
 } >> "$TREEHOUSE_CALL_LOG"
-if [ -d "$POST_CREATE_ABORT_CONTROL" ] && [ "${1:-}" = get ]; then
-  exit 0
-fi
 exec "$REAL_TREEHOUSE" "$@"
 SH
 
@@ -696,9 +711,10 @@ normalize_meta "$ON_META" > "$TMP_ROOT/on.meta.normalized"
 cmp -s "$TMP_ROOT/off.meta.normalized" "$TMP_ROOT/on.meta.normalized" \
   || fail "metadata changed beyond Herdr container IDs between opted-out and projected paths"
 
-# Two real concurrent primary spawns share the bounded presentation-order lock.
-# Their final relative order must match Herdr's actual serialized create order,
-# rather than a task-name or priority guess.
+# Two real concurrent primary spawns contend for the bounded presentation-order
+# lock. Every spawn that acquires it must follow Herdr's actual serialized create
+# order; a slow host may legitimately send the other through the tested flat
+# fallback rather than waiting past the product's bounded contention policy.
 CONCURRENT_FOCUS_AUDIT_START=$(focus_audit_line_count)
 spawn_task order-a "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/order-a.out" 2> "$TMP_ROOT/order-a.err" &
 ORDER_A_PID=$!
@@ -727,15 +743,17 @@ MOVE_TARGETS=$(cut -f2 "$MOVE_CALL_LOG")
 [ "$MOVE_TARGETS" = "$PRIMARY_IDS" ] \
   || fail "workspace.move targeted something other than each exact current projected-create id"
 MOVE_INDEXES=$(cut -f3 "$MOVE_CALL_LOG")
-[ "$MOVE_INDEXES" = $'1\n2\n3' ] \
-  || fail "concurrent primary workers did not append stably to the contiguous block: $MOVE_INDEXES"
+printf '%s\n' "$MOVE_INDEXES" | awk '
+  NF { count += 1; if ($1 != count) exit 1 }
+  END { if (count == 0) exit 1 }
+' || fail "concurrent primary workers did not append each projected child stably to the contiguous block: $MOVE_INDEXES"
 SECOND_ORDER_AFTER=$(printf '%s' "$ORDER_LIST" | jq -r '.result.workspaces[] | select(.label | startswith("2ndmate-")) | .workspace_id')
 [ "$SECOND_ORDER_AFTER" = "$SECOND_ORDER_BEFORE" ] \
   || fail "primary workspace ordering changed secondmate relative order"
 [ "$(lab workspace get "$SECOND_TWO_WSID" | jq -r '.result.workspace.focused')" = true ] \
   || fail "concurrent primary workspace ordering stole focus"
 assert_no_ordering_lifecycle_calls_since "$PROJECTION_ORDER_START" "successful presentation ordering"
-pass "real Herdr lab: concurrent primary workers form one stable contiguous block without active workspace/tab drift"
+pass "real Herdr lab: concurrent primary workers keep every projected child in one stable contiguous block without active workspace/tab drift"
 
 # Force only the raw move transport to fail after a safe projected create.
 # The spawn must remain successful in Herdr's default appended order, with its
@@ -777,14 +795,26 @@ ABORT_START=$(log_line_count)
 ABORT_FOCUS_START=$(focus_audit_line_count)
 spawn_task abort-a "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/abort-a.out" 2> "$TMP_ROOT/abort-a.err" &
 ABORT_A_PID=$!
+for _ in $(seq 1 1200); do
+  [ -e "$POST_CREATE_ABORT_CONTROL/abort-a/validation-armed" ] && break
+  sleep 0.05
+done
+[ -e "$POST_CREATE_ABORT_CONTROL/abort-a/validation-armed" ] \
+  || fail "post-create abort fixture A did not arm its validation failure"
 spawn_task abort-b "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/abort-b.out" 2> "$TMP_ROOT/abort-b.err" &
 ABORT_B_PID=$!
-if wait "$ABORT_A_PID"; then fail "post-create abort fixture A unexpectedly succeeded"; fi
-if wait "$ABORT_B_PID"; then fail "post-create abort fixture B unexpectedly succeeded"; fi
-grep -F "did not yield an isolated worktree" "$TMP_ROOT/abort-a.err" >/dev/null 2>&1 \
-  || fail "post-create abort fixture A did not reach the armed validation failure"
-grep -F "did not yield an isolated worktree" "$TMP_ROOT/abort-b.err" >/dev/null 2>&1 \
-  || fail "post-create abort fixture B did not reach the armed validation failure"
+sleep 0.2
+touch "$POST_CREATE_ABORT_CONTROL/release-abort-a"
+ABORT_A_STATUS=0
+ABORT_B_STATUS=0
+wait "$ABORT_A_PID" || ABORT_A_STATUS=$?
+wait "$ABORT_B_PID" || ABORT_B_STATUS=$?
+[ "$ABORT_A_STATUS" -ne 0 ] || fail "post-create abort fixture A unexpectedly succeeded"
+[ "$ABORT_B_STATUS" -ne 0 ] || fail "post-create abort fixture B unexpectedly succeeded"
+grep -F "yielded a dirty pool worktree" "$TMP_ROOT/abort-a.err" >/dev/null 2>&1 \
+  || fail "post-create abort fixture A did not reach the armed validation failure: $(cat "$TMP_ROOT/abort-a.err")"
+grep -F "yielded a dirty pool worktree" "$TMP_ROOT/abort-b.err" >/dev/null 2>&1 \
+  || fail "post-create abort fixture B did not reach the armed validation failure: $(cat "$TMP_ROOT/abort-b.err")"
 ABORT_A_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-a/task-pane")
 ABORT_B_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-b/task-pane")
 ABORT_SEQUENCE=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '

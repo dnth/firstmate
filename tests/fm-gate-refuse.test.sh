@@ -201,6 +201,40 @@ test_spawn_refuses_and_admits() {
   pass "fm-spawn: refuses on marker and gate-worktree backstop; a normal crew spawn is unaffected"
 }
 
+test_spawn_metadata_publication_waits_for_lock() {
+  local home proj fakebin wt lock child rc=0 i
+  home="$TMP/spawn-meta-lock-home"; mkdir -p "$home/data" "$home/state"
+  proj=$(make_normal_repo "$TMP/spawn-meta-lock-proj")
+  fm_git_add_origin "$proj" "$TMP/spawn-meta-lock-origin.git"
+  fakebin=$(make_spawn_fakebin "$TMP/spawn-meta-lock-fake")
+  wt="$TMP/spawn-meta-lock-wt"
+  git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-wake-lib.sh"
+  lock=$(fm_meta_lock_path "$home/state/spawn-meta-lock.meta") \
+    || fail "spawn: could not derive the metadata lifecycle lock"
+  fm_lock_acquire_wait "$lock"
+  run_spawn "$NORMAL_CWD" "$home" spawn-meta-lock "$proj" "$wt" "$fakebin" \
+    > "$TMP/spawn-meta-lock.out" &
+  child=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -d "$home/state/.spawn-spawn-meta-lock.lock" ]; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  kill -0 "$child" 2>/dev/null \
+    || { fm_lock_release "$lock"; fail "spawn: metadata-lock contender exited before release"; }
+  assert_absent "$home/state/spawn-meta-lock.meta" \
+    "spawn: metadata was published while its lifecycle lock was held"
+  fm_lock_release "$lock"
+  wait "$child" || rc=$?
+  expect_code 0 "$rc" \
+    "spawn: metadata publication did not finish after lock release: $(cat "$TMP/spawn-meta-lock.out")"
+  assert_present "$home/state/spawn-meta-lock.meta" \
+    "spawn: metadata was not published after lifecycle-lock release"
+  pass "fm-spawn: metadata publication waits for the per-task lifecycle lock"
+}
+
 # --- fm-send ----------------------------------------------------------------
 
 # A fake tmux that logs send-keys to FM_TMUX_LOG and reports live endpoints
@@ -273,8 +307,14 @@ test_send_refuses_and_admits() {
   expect_code 0 "$rc" "send: a normal session must still send"
   assert_not_contains "$out" "$ENV_MSG" "send: normal send must not print the gate refusal"
   assert_not_contains "$out" "$PATH_MSG" "send: normal send must not print the backstop refusal"
-  assert_contains "$(cat "$log")" "target=sess:fm-lane-ok literal=1 arg=hello captain" "send: normal send should type the text"
-  pass "fm-send: refuses on marker and gate-worktree backstop; a normal steer is unaffected"
+  [ "$(bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" \
+      "$home/state/lane-ok.inbox/001.msg")" = "hello captain" ] \
+    || fail "send: normal steer was not durably enqueued"
+  assert_not_contains "$(cat "$log")" "literal=1 arg=hello captain" \
+    "send: normal steer payload must not be typed"
+  assert_contains "$(cat "$log")" "target=sess:fm-lane-ok literal=1 arg=Firstmate instruction waiting" \
+    "send: normal steer should ring the durable inbox doorbell"
+  pass "fm-send: refuses on marker and gate-worktree backstop; a normal steer uses the inbox"
 }
 
 # --- fm-teardown ------------------------------------------------------------
@@ -329,8 +369,9 @@ SH
 # run_teardown <cwd> <case_dir> [ASSIGN...] -> combined output
 run_teardown() {
   local cwd=$1 case_dir=$2; shift 2
+  mkdir -p "$case_dir/operator-home"
   ( cd "$cwd" && env -u NO_MISTAKES_GATE -u FM_GATE_REFUSE_BYPASS \
-      "FM_ROOT_OVERRIDE=$ROOT" "FM_STATE_OVERRIDE=$case_dir/state" \
+      "FM_HOME=$case_dir/operator-home" "FM_ROOT_OVERRIDE=$ROOT" "FM_STATE_OVERRIDE=$case_dir/state" \
       "FM_CONFIG_OVERRIDE=$case_dir/config" "PATH=$case_dir/fakebin:$PATH" "$@" \
       "$TEARDOWN" task-x1 ) 2>&1
 }
@@ -355,11 +396,47 @@ test_teardown_refuses_and_admits() {
   # no-regression: a normal session tears down the landed task.
   case_dir=$(make_teardown_case teardown-ok)
   out=$(run_teardown "$NORMAL_CWD" "$case_dir"); rc=$?
-  expect_code 0 "$rc" "teardown: a normal session must still tear down landed work"
+  expect_code 0 "$rc" "teardown: a normal session must still tear down landed work: $out"
   assert_not_contains "$out" "$ENV_MSG" "teardown: normal teardown must not print the gate refusal"
   assert_not_contains "$out" "$PATH_MSG" "teardown: normal teardown must not print the backstop refusal"
   assert_not_contains "$out" "REFUSED" "teardown: normal teardown of landed work must not refuse"
   pass "fm-teardown: refuses on marker and gate-worktree backstop; a normal teardown is unaffected"
+}
+
+test_teardown_waits_for_metadata_lock() {
+  local case_dir lock child rc=0 i
+  case_dir=$(make_teardown_case teardown-meta-lock)
+  mkdir -p "$case_dir/state/task-x1.inbox/handled"
+  printf 'schema=fm-task-inbox.v1\nat=2026-08-28T00:00:00Z\n--\nkeep until retirement\n' \
+    > "$case_dir/state/task-x1.inbox/001.msg"
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-wake-lib.sh"
+  lock=$(fm_meta_lock_path "$case_dir/state/task-x1.meta") \
+    || fail "teardown: could not derive the metadata lifecycle lock"
+  fm_lock_acquire_wait "$lock"
+  run_teardown "$NORMAL_CWD" "$case_dir" > "$case_dir/teardown-meta-lock.out" &
+  child=$!
+  i=0
+  while [ "$i" -lt 100 ] && kill -0 "$child" 2>/dev/null; do
+    [ -s "$case_dir/teardown-meta-lock.out" ] && break
+    sleep 0.02
+    i=$((i + 1))
+  done
+  kill -0 "$child" 2>/dev/null \
+    || { fm_lock_release "$lock"; fail "teardown: metadata-lock contender exited before release"; }
+  assert_present "$case_dir/state/task-x1.meta" \
+    "teardown: metadata was retired while its lifecycle lock was held"
+  assert_present "$case_dir/state/task-x1.inbox/001.msg" \
+    "teardown: inbox was retired while its lifecycle lock was held"
+  fm_lock_release "$lock"
+  wait "$child" || rc=$?
+  expect_code 0 "$rc" \
+    "teardown: retirement did not finish after lock release: $(cat "$case_dir/teardown-meta-lock.out")"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "teardown: metadata remained after lifecycle-lock release"
+  assert_absent "$case_dir/state/task-x1.inbox" \
+    "teardown: inbox remained after lifecycle-lock release"
+  pass "fm-teardown: metadata and inbox retirement wait for the per-task lifecycle lock"
 }
 
 test_helper_env_marker_refuses
@@ -367,5 +444,7 @@ test_helper_empty_env_marker_refuses
 test_helper_path_backstop_refuses
 test_helper_normal_is_noop
 test_spawn_refuses_and_admits
+test_spawn_metadata_publication_waits_for_lock
 test_send_refuses_and_admits
 test_teardown_refuses_and_admits
+test_teardown_waits_for_metadata_lock

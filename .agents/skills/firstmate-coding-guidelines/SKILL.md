@@ -93,7 +93,8 @@ Build the check on the most structural signal that answers the question, and pre
 When a rendered surface is genuinely the only source, read more than one independent signal and let any of them carry a positive verdict, so no single vendor string is load-bearing.
 Where a surface signal is unavoidable, back it with a guard that fails loudly naming the harness and version rather than degrading quietly.
 
-Every such check needs two tests, because they fail for different reasons:
+Feature-acceptance guards may prove only the harnesses named by that feature's acceptance contract when they state that bounded scope explicitly; each harness's existing adapter compatibility guard remains the owner of the full installed-harness matrix.
+Every adapter compatibility check needs two tests, because they fail for different reasons:
 
 - A portable regression in `tests/` that pins the logic with real processes and no harness, so CI enforces the classifier everywhere it runs tmux.
   Drive the signals apart deliberately and assert the verdict survives losing one; assert the divergence itself so the case cannot go quietly vacuous.

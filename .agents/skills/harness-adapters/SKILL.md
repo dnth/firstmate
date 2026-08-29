@@ -227,9 +227,9 @@ Claude Code's primary watcher protocol is Stop-owned: the auto-arm hook fires on
 | Skill invocation | `$<skill>` (e.g. `$no-mistakes`); `/<skill>` is claude-only and codex rejects it as "Unrecognized command" |
 
 A `$<skill>` invocation opens a `$`-autocomplete (skill) popup, the same hazard as the `/` slash popup: submitting too fast lets the popup swallow the Enter, so the invocation never lands.
-`fm-send` handles it the same way it handles `/` - it gives the popup a longer settle (1.2s) between typing and the first Enter, with the target backend's submit retry as the safety net - but the `$` settle is scoped to `harness=codex`, read from the target metadata for exact task ids or legacy `fm-<id>` labels.
-That scope matters because, unlike `/`, a leading `$` commonly starts ordinary text (`$5/month`, `$HOME`), so a universal `$` rule would needlessly slow plain steers to claude/opencode/pi; only a codex target receiving a `$...` message gets the popup-settle.
-An explicit `session:window` target has no meta, so its harness is unknown and treated as non-codex (the safe fast-path default).
+`fm-send` handles it the same way it handles `/` - it gives the popup a longer settle (1.2s) between typing and the first Enter, with the target backend's submit retry as the safety net - but the `$` settle is scoped to `harness=codex`, read from target metadata for task selectors or explicit endpoints that match a recorded task.
+That scope matters because, unlike `/`, a leading `$` commonly starts ordinary text (`$5/month`, `$HOME`); only a Codex target treats `$...` as a typed skill invocation, while ordinary local `$...` text for every other harness follows the durable inbox plane.
+An unmatched explicit `session:window` target has no metadata, so its harness is unknown and treated as non-Codex (the safe fast-path default); an explicit endpoint that matches task metadata stays on the typed plane but retains that recorded harness context.
 This is why the validation trigger (`$no-mistakes`) to a codex crew now lands on the first Enter instead of biting the popup.
 
 Directory trust dialog on first run per repo root: "Do you trust the contents of this directory?"
@@ -265,9 +265,7 @@ If a pane shows the exit banner, relaunch with `--continue` to resume the sessio
 While opencode is mid-turn, the composer accepts Enter as a "send when the turn
 ends" keystroke but does not clear the typed text from the composer until the
 turn actually finishes.
-Without a conversion, every `fm-send` to a busy opencode pane exits non-zero on a
-false "Enter swallowed", and every daemon escalation that lands while the
-primary is mid-turn is treated as wedged.
+Without a conversion, every typed-plane `fm-send` to a busy opencode pane exits non-zero on a false "Enter swallowed", and every daemon escalation that lands while the primary is mid-turn is treated as wedged.
 Tmux delegates this OpenCode exception to `fm_composer_queued_enter_verdict` in `bin/fm-composer-lib.sh`; herdr uses that policy only for its separate OMP path.
 The backend-specific signals and OMP's narrower `queued-unconfirmed` result are documented in `docs/tmux-backend.md` and `docs/herdr-backend.md`.
 Regression coverage is `tests/fm-tmux-submit-busy.test.sh`, `tests/fm-composer-lib.test.sh`, and `tests/fm-backend-herdr.test.sh`.
@@ -483,7 +481,7 @@ Later lifecycle events must match that stable id, and `pre_llm_call` records bus
 The end event requires the same session id, touches `state/<id>.turn-ended`, and marks the turn idle.
 Hermes' `on_session_end` callback at the end of each TUI `run_conversation` call is the exact supervised turn boundary, including turns shorter than the watcher poll interval.
 
-`fm-send` refuses a composer injection unless the classified state is exactly idle, the task-bound session and profile metadata validate, and the structural composer is empty.
+On Hermes' typed plane, `fm-send` refuses a composer injection unless the classified state is exactly idle, the task-bound session and profile metadata validate, and the structural composer is empty; ordinary local text instead publishes a durable inbox record and treats the doorbell as advisory.
 Hermes spawns on backends other than tmux and Herdr are refused before endpoint creation.
 Hermes' busy-input behavior is profile-configurable and can interrupt rather than queue, so a busy send is refused until the turn settles or Firstmate interrupts it with `C-c`.
 After submitting through the composer, `fm-send` requires a newer `hermes-started` acknowledgement before it closes any `--resolve-key` decision.

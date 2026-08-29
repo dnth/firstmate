@@ -47,11 +47,28 @@ LOOP_SCRIPT=
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
+stop_daemon_process() {
+  local pid=${DAEMON_PID:-} i=0
+  [ -n "$pid" ] || return 0
+  kill "$pid" 2>/dev/null || true
+  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    DAEMON_PID=
+    return 0
+  fi
+  wait "$pid" 2>/dev/null || true
+  DAEMON_PID=
+}
+
 cleanup_all() {
   if [ -n "${DAEMON_PID:-}" ]; then
     afk_exit "${STATE_DIR:-}" 2>/dev/null || true
-    kill "$DAEMON_PID" 2>/dev/null || true
-    wait "$DAEMON_PID" 2>/dev/null || true
+    stop_daemon_process
   fi
   if [ -n "${SOCKET:-}" ] && [ -n "${REAL_TMUX:-}" ]; then
     "$REAL_TMUX" -L "$SOCKET" kill-server 2>/dev/null || true
@@ -187,9 +204,7 @@ start_daemon() {
 stop_daemon() {
   [ -n "${DAEMON_PID:-}" ] || return 0
   afk_exit "$STATE_DIR" 2>/dev/null || true
-  kill "$DAEMON_PID" 2>/dev/null || true
-  wait "$DAEMON_PID" 2>/dev/null || true
-  DAEMON_PID=""
+  stop_daemon_process
   sleep 1
 }
 

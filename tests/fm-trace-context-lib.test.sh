@@ -202,6 +202,7 @@ pass "resolve yields exactly one carrier per logical task, so the recorded and i
 # --- entropy failure omits telemetry safely (never aborts) -------------------
 
 fm_trace_context_hex() { return 1; }
+fm_trace_context_hex 1 && fail "entropy fixture must reject direct reads"
 ef_mint=$(fm_trace_context_mint); ef_mint_rc=$?
 ef_res=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CFG_ON" "$NOMETA"); ef_res_rc=$?
 # Restore the real entropy source for any later use.
@@ -213,30 +214,82 @@ pass "entropy failure omits telemetry safely: mint reports failure, resolve retu
 
 # --- fail-independent timing: no hang source, always returns 0 ---------------
 
-assert_no_grep 'sleep' "$ROOT/bin/fm-trace-context-lib.sh" "trace-context lib must not sleep on the spawn path"
-assert_no_grep 'timeout' "$ROOT/bin/fm-trace-context-lib.sh" "trace-context lib must not depend on an external timeout"
-assert_no_grep 'command:' "$ROOT/bin/fm-trace-context-lib.sh" "trace-context lib must not run an arbitrary command provider"
+TRACE_TOOL_LOG="$WORK/trace-tools.log"
+TRACE_FAKEBIN="$WORK/trace-fakebin"
+mkdir -p "$TRACE_FAKEBIN"
+for tool in sleep timeout trace-context-provider; do
+  cat > "$TRACE_FAKEBIN/$tool" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${0##*/}" >> "${FM_TRACE_TOOL_LOG:?}"
+exit 70
+SH
+  chmod +x "$TRACE_FAKEBIN/$tool"
+done
+fm_trace_context_hex() {
+  case "$1" in
+    16) printf '%s' 11111111111111111111111111111111 ;;
+    8) printf '%s' 2222222222222222 ;;
+    *) return 1 ;;
+  esac
+}
+FIXED_TP='00-11111111111111111111111111111111-2222222222222222-01'
+TRACE_START_MS=$(node -e 'process.stdout.write(String(Date.now()))')
+for _attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  out=$(PATH="$TRACE_FAKEBIN:$PATH" FM_TRACE_TOOL_LOG="$TRACE_TOOL_LOG" \
+    FM_TRACE_CONTEXT_COMMAND="$TRACE_FAKEBIN/trace-context-provider" \
+    FM_TRACE_CONTEXT_PROVIDER="$TRACE_FAKEBIN/trace-context-provider" \
+    FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CFG_ON" "$NOMETA"); rc=$?
+done
+TRACE_END_MS=$(node -e 'process.stdout.write(String(Date.now()))')
+TRACE_ELAPSED_MS=$((TRACE_END_MS - TRACE_START_MS))
+fm_trace_context_valid "$out" || fail "resolve must mint without a sleep, timeout, or configurable provider (rc=$rc out='$out')"
+[ "$rc" -eq 0 ] || fail "resolve must return 0 when enabled"
+[ "$TRACE_ELAPSED_MS" -lt 500 ] \
+  || fail "20 fixed-entropy resolves must complete without delay (elapsed=${TRACE_ELAPSED_MS}ms)"
+[ ! -s "$TRACE_TOOL_LOG" ] || fail "resolve must not invoke a sleep, timeout, or configurable provider (called '$(tr '\n' ' ' < "$TRACE_TOOL_LOG")')"
 fm_trace_context_resolve "$CFG_OFF" "$NOMETA" >/dev/null || fail "resolve must return 0 when off"
-pass "the resolver has no sleep/timeout/command hang source and always returns success"
+pass "the resolver returns directly without sleep, timeout, or configurable-provider dependencies and always succeeds"
 
-# --- harness/backend/kind independence (code only, comments stripped) ---------
+# --- harness/backend/kind and task-prose independence ------------------------
 
-LIB_CODE=$(sed 's/#.*$//' "$ROOT/bin/fm-trace-context-lib.sh")
-for tok in harness backend tmux herdr zellij orca cmux claude codex opencode grok kind ship scout secondmate ; do
-  case "$LIB_CODE" in
-    *"$tok"*) fail "trace-context lib code must be harness/backend/kind agnostic, but references '$tok'" ;;
-  esac
+BRIEF_FILE="$WORK/brief"; PROMPT_FILE="$WORK/prompt"
+REPORT_FILE="$WORK/report"; STATUS_FILE="$WORK/status"
+mkfifo "$BRIEF_FILE" "$PROMPT_FILE" "$REPORT_FILE" "$STATUS_FILE"
+for axes in \
+  'claude tmux ship' \
+  'codex herdr scout' \
+  'opencode zellij secondmate' \
+  'grok orca ship' \
+  'kimi cmux scout'; do
+  IFS=' ' read -r harness backend kind <<EOF
+$axes
+EOF
+  TRACE_WRITER_PIDS=
+  for prose_file in "$BRIEF_FILE" "$PROMPT_FILE" "$REPORT_FILE" "$STATUS_FILE"; do
+    ( /bin/sleep 1; printf '%s\n' 'task-prose-read' > "$prose_file" ) &
+    TRACE_WRITER_PIDS="$TRACE_WRITER_PIDS $!"
+  done
+  TRACE_START_MS=$(node -e 'process.stdout.write(String(Date.now()))')
+  out=$(HARNESS="$harness" BACKEND="$backend" KIND="$kind" \
+    FM_CREW_HARNESS="$harness" FM_BACKEND="$backend" FM_TASK_KIND="$kind" \
+    BRIEF="$BRIEF_FILE" PROMPT="$PROMPT_FILE" REPORT="$REPORT_FILE" STATUS="$STATUS_FILE" \
+    FM_BRIEF="$BRIEF_FILE" FM_PROMPT="$PROMPT_FILE" FM_REPORT="$REPORT_FILE" FM_STATUS="$STATUS_FILE" \
+    FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CFG_ON" "$NOMETA")
+  TRACE_END_MS=$(node -e 'process.stdout.write(String(Date.now()))')
+  for writer_pid in $TRACE_WRITER_PIDS; do
+    kill "$writer_pid" 2>/dev/null || true
+    wait "$writer_pid" 2>/dev/null || true
+  done
+  TRACE_ELAPSED_MS=$((TRACE_END_MS - TRACE_START_MS))
+  [ "$TRACE_ELAPSED_MS" -lt 500 ] \
+    || fail "harness=$harness backend=$backend kind=$kind read a blocking task-prose fixture or delayed (elapsed=${TRACE_ELAPSED_MS}ms)"
+  [ "$out" = "$FIXED_TP" ] \
+    || fail "harness=$harness backend=$backend kind=$kind or task prose changed the fixed-entropy carrier (got '$out')"
 done
-pass "the carrier is minted identically for every harness, backend, and spawn kind (no such branching in the lib code)"
-
-# --- no prompt / task-prose reads (code only, comments stripped) --------------
-
-for tok in brief prompt report status ; do
-  case "$LIB_CODE" in
-    *"$tok"*) fail "trace-context lib code must never read task prose, but references '$tok'" ;;
-  esac
-done
-pass "the lib code never reads a brief, prompt, report, or status - it cannot leak content"
+# Restore the real entropy source for the launch fixture below.
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-trace-context-lib.sh"
+pass "controlled entropy yields the same carrier across harnesses, backends, spawn kinds, and task-prose fixtures"
 
 # --- executable Herdr launch wiring ------------------------------------------
 
@@ -311,7 +364,10 @@ case "${1:-} ${2:-}" in
     pane=${3:-}
     payload=${4:-}
     case "$payload" in
-      *fm-treehouse-get.sh*)
+      *fm-treehouse-get.sh*--ready-file*)
+        ready_file=${payload##* --ready-file }
+        ready_file=${ready_file%% *}
+        printf '%s\n' "$worktree" > "$ready_file"
         : > "$state/ready"
         ;;
       *)

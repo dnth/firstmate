@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Send one line of literal text to a crewmate endpoint, then Enter.
+# Steer a task through its durable inbox or a typed harness-native path.
 # Usage: fm-send.sh <target> [--resolve-key <key>]... <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
@@ -10,12 +10,18 @@
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
 # Orca currently supports Enter and C-c only, and rejects Escape.
 #
-# Text submission is verified: the line is typed ONCE, then Enter is sent and
-# retried (Enter only, never retyped) until the target backend confirms a
-# submit or reports an inconclusive send. If a swallowed Enter is positively
-# confirmed, fm-send exits NON-ZERO so the caller knows the steer did not land
-# instead of silently leaving an unsubmitted instruction.
-# For an OMP or Hermes target, a confirmed idle submit must also start a real
+# Ordinary text addressed through a local task selector is appended as a
+# sequenced state/<id>.inbox record. Immediately after publication and release
+# of the metadata lifecycle lock, fm-send attempts one constant self-describing
+# doorbell best-effort, before fallible pending-reply bookkeeping or decision
+# closure. The terminal never receives payload bytes on this plane; record
+# publication is delivery, and the worker's move into handled/ acknowledges
+# action. Remote text stays typed in this local-only leg.
+#
+# Harness-native slash commands, Codex dollar invocations, explicit backend
+# targets, and keys use the typed plane. The line is typed once and Enter is
+# retried without retyping until the backend confirms or stays inconclusive.
+# For an OMP or Hermes typed target, a confirmed idle submit must also start a real
 # turn before a bounded deadline. OMP uses the monotonic
 # FM_SEND_TURNSTART_TIMEOUT deadline (default 1 second, maximum 3 seconds),
 # sampled no more often than FM_SEND_TURNSTART_POLL (default 0.1 second), and
@@ -55,9 +61,9 @@
 # marked - their behavior is unchanged.
 # Decision closure (answerer-closes): pass --resolve-key <key> (repeatable,
 # before the message) when this send answers an open keyed needs-decision: or
-# blocked: record in the target task's state/<id>.status. After delivery is
-# confirmed and any required OMP turn-start verification succeeds, fm-send
-# itself appends the closing
+# blocked: record in the target task's state/<id>.status. After inbox enqueue,
+# or after confirmed typed submit and any required turn-start verification,
+# fm-send itself appends the closing
 # "resolved [key=<key>]: answered: <capped excerpt>" line to that status file,
 # so the captain-facing OPEN DECISIONS record closes at answer time and never
 # depends on the busy worker writing a matching resolved line. The close is a
@@ -79,12 +85,13 @@
 # Parent-owned pending-reply expectation: every newly marked secondmate request
 # also receives a privacy-safe correlation id and a durable parent record under
 # state/pending-replies/ before delivery (bin/fm-pending-reply-lib.sh). Delivery
-# success and reply success are separate facts: a successful submit never
-# resolves the expectation. Set FM_PENDING_REPLY_EXISTING_CORR=<id> when
+# success and reply success are separate facts: an inbox enqueue or successful
+# typed submit marks delivery but never resolves the expectation. Set
+# FM_PENDING_REPLY_EXISTING_CORR=<id> when
 # re-sending a recovery request for an already-open expectation so a second
 # record is not created. Direct unmarked captain input never creates one.
 #
-# After a successful text submit fm-send pauses FM_SEND_SETTLE seconds (default 1,
+# After a successful typed submit fm-send pauses FM_SEND_SETTLE seconds (default 1,
 # 0 disables) before returning: submit confirmation only proves the text was
 # accepted, but the harness needs a beat to spin up the turn before its busy
 # footer appears, so an immediate peek would otherwise see the stale idle pane.
@@ -131,6 +138,8 @@ fi
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-task-inbox-lib.sh
+. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 
@@ -138,6 +147,8 @@ RUNPOD_DELIVERY_LOCK=
 HERMES_DELIVERY_LOCK=
 TARGET_OMP_TURNSTART_REFERENCE=
 TARGET_HERMES_START_REFERENCE=
+INBOX_META_LOCK=
+INBOX_META_LOCK_HELD=0
 release_runpod_delivery_lock() {
   [ -n "$RUNPOD_DELIVERY_LOCK" ] || return 0
   fm_lock_release "$RUNPOD_DELIVERY_LOCK"
@@ -145,6 +156,10 @@ release_runpod_delivery_lock() {
 }
 fm_send_cleanup() {
   release_runpod_delivery_lock
+  if [ "$INBOX_META_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$INBOX_META_LOCK" || true
+    INBOX_META_LOCK_HELD=0
+  fi
   if [ -n "$HERMES_DELIVERY_LOCK" ]; then
     fm_lock_release "$HERMES_DELIVERY_LOCK"
     HERMES_DELIVERY_LOCK=
@@ -523,22 +538,6 @@ fi
 
 TARGET_OMP_BUN=
 TARGET_OMP_BIN=
-if [ "$TARGET_HARNESS" = omp ]; then
-  if [ "$TARGET_BACKEND" != remote ]; then
-    if [ -z "$TARGET_META" ] \
-       || ! fm_backend_agent_record_identity "$TARGET_BACKEND" "$T" "$TARGET_META"; then
-      echo "error: OMP target '$RAW_TARGET' lacks a valid task-bound Bun/OMP identity; refusing composer inspection and delivery" >&2
-      exit 1
-    fi
-    TARGET_OMP_STATE=$(fm_backend_agent_state "$TARGET_BACKEND" "$T" "$TARGET_META" 2>/dev/null)
-    if [ "$TARGET_OMP_STATE" != alive ]; then
-      echo "error: OMP target '$RAW_TARGET' does not match a live task-bound Bun/OMP process (state=${TARGET_OMP_STATE:-unreadable}); refusing delivery" >&2
-      exit 1
-    fi
-    TARGET_OMP_BUN=$FM_BACKEND_AGENT_OMP_BUN
-    TARGET_OMP_BIN=$FM_BACKEND_AGENT_OMP_BIN
-  fi
-fi
 
 # Classify a from-firstmate -> secondmate request. Only a task selector resolved
 # through this home's meta whose authoritative kind is secondmate is marked: the
@@ -549,8 +548,12 @@ MARK_FROM_FIRSTMATE=0
 PENDING_REPLY_CORR=
 PENDING_REPLY_CREATED=0
 TARGET_TASK_ID=
+TARGET_BUSY_GEN=
+TARGET_ENDPOINT_TASK_ID=
 if [ -n "$TARGET_META" ]; then
   TARGET_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
+  TARGET_BUSY_GEN=$(fm_meta_get "$TARGET_META" busy_gen)
+  TARGET_ENDPOINT_TASK_ID=$(fm_meta_get "$TARGET_META" endpoint_task_id)
   if [ -n "$TARGET_SELECTOR" ] && [ "$(fm_meta_get "$TARGET_META" kind)" = secondmate ]; then
     MARK_FROM_FIRSTMATE=1
   fi
@@ -777,6 +780,108 @@ else
       echo "error: failed to durably prepare pending-reply delivery for $TARGET_TASK_ID" >&2
       exit 1
     fi
+  fi
+
+  # Upstream PR #2856's local-plane selector, adapted around this fork's
+  # OMP/Hermes typed path. Classification uses the pre-marker answer text.
+  INBOX_PLANE=0
+  if [ "$TARGET_BACKEND" != remote ] && [ -n "$TARGET_SELECTOR" ]; then
+    case "$RESOLVE_ANSWER_TEXT" in
+      /*) ;;
+      \$*) [ "$TARGET_HARNESS" = codex ] || INBOX_PLANE=1 ;;
+      *) INBOX_PLANE=1 ;;
+    esac
+  fi
+  if [ "$INBOX_PLANE" = 1 ]; then
+    INBOX_META_LOCK=$(fm_meta_lock_path "$TARGET_META") || exit 1
+    if ! fm_task_inbox_lock_acquire "$INBOX_META_LOCK"; then
+      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      fi
+      echo "error: steer not sent to $TARGET_TASK_ID: its task metadata could not be locked for final delivery validation" >&2
+      exit 1
+    fi
+    INBOX_META_LOCK_HELD=1
+    CURRENT_INBOX_TARGET=
+    CURRENT_INBOX_BACKEND=
+    CURRENT_INBOX_HARNESS=
+    CURRENT_INBOX_BUSY_GEN=
+    CURRENT_INBOX_ENDPOINT_TASK_ID=
+    if [ -f "$TARGET_META" ] && [ ! -L "$TARGET_META" ]; then
+      CURRENT_INBOX_TARGET=$(fm_backend_target_of_meta "$TARGET_META")
+      CURRENT_INBOX_BACKEND=$(fm_backend_of_meta "$TARGET_META")
+      CURRENT_INBOX_HARNESS=$(fm_meta_get "$TARGET_META" harness)
+      CURRENT_INBOX_BUSY_GEN=$(fm_meta_get "$TARGET_META" busy_gen)
+      CURRENT_INBOX_ENDPOINT_TASK_ID=$(fm_meta_get "$TARGET_META" endpoint_task_id)
+    fi
+    if [ "$CURRENT_INBOX_TARGET" != "$T" ] \
+      || [ "$CURRENT_INBOX_BACKEND" != "$TARGET_BACKEND" ] \
+      || [ "$CURRENT_INBOX_HARNESS" != "$TARGET_HARNESS" ] \
+      || [ "$CURRENT_INBOX_BUSY_GEN" != "$TARGET_BUSY_GEN" ] \
+      || [ "$CURRENT_INBOX_ENDPOINT_TASK_ID" != "$TARGET_ENDPOINT_TASK_ID" ] \
+      || [ -n "$(fm_meta_get "$TARGET_META" remote_host)" ]; then
+      fm_lock_release "$INBOX_META_LOCK"
+      INBOX_META_LOCK_HELD=0
+      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      fi
+      echo "error: steer not sent to $TARGET_TASK_ID: the task retired or changed endpoint during target resolution" >&2
+      exit 1
+    fi
+    if ! INBOX_RECORD=$(fm_task_inbox_write "$STATE" "$TARGET_TASK_ID" "$MESSAGE"); then
+      fm_lock_release "$INBOX_META_LOCK"
+      INBOX_META_LOCK_HELD=0
+      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      fi
+      echo "error: steer not sent to $TARGET_TASK_ID: its inbox record could not be written under $STATE/$TARGET_TASK_ID.inbox" >&2
+      exit 1
+    fi
+    TARGET_OMP_BUN=$(fm_meta_get "$TARGET_META" omp_bun)
+    TARGET_OMP_BIN=$(fm_meta_get "$TARGET_META" omp_bin)
+    fm_lock_release "$INBOX_META_LOCK"
+    INBOX_META_LOCK_HELD=0
+
+    ring_rc=0
+    fm_task_inbox_ring "$TARGET_BACKEND" "$T" "$INBOX_RECORD" "$EXPECTED_LABEL" \
+      "$TARGET_HARNESS" "$TARGET_OMP_BUN" "$TARGET_OMP_BIN" || ring_rc=$?
+    case "$ring_rc" in
+      1) echo "fm-send: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
+      2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
+    esac
+
+    if [ -n "$PENDING_REPLY_CORR" ]; then
+      if fm_pending_reply_confirm_delivery "$STATE" "$PENDING_REPLY_CORR"; then
+        :
+      else
+        delivery_commit_status=$?
+        if [ "$delivery_commit_status" = 2 ]; then
+          echo "notice: the steer was recorded at $INBOX_RECORD, but its pending-reply delivery commit failed; a durable recovery marker was stored and the watcher will reconcile it. Do not resend." >&2
+        else
+          echo "warning: reply-tracking-degraded (steer delivered, do not resend): the steer was durably recorded at $INBOX_RECORD, but its pending-reply delivery commit and recovery marker both failed, so the reply expectation may not reconcile on its own. Inspect $STATE." >&2
+        fi
+      fi
+    fi
+    if [ -n "$RESOLVE_KEYS" ]; then
+      fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
+    fi
+    exit 0
+  fi
+
+  # Fork-only OMP/Hermes preparation remains a typed-plane backstop.
+  if [ "$TARGET_HARNESS" = omp ] && [ "$TARGET_BACKEND" != remote ]; then
+    if [ -z "$TARGET_META" ] \
+      || ! fm_backend_agent_record_identity "$TARGET_BACKEND" "$T" "$TARGET_META"; then
+      echo "error: OMP target '$RAW_TARGET' lacks a valid task-bound Bun/OMP identity; refusing composer inspection and delivery" >&2
+      exit 1
+    fi
+    TARGET_OMP_STATE=$(fm_backend_agent_state "$TARGET_BACKEND" "$T" "$TARGET_META" 2>/dev/null)
+    if [ "$TARGET_OMP_STATE" != alive ]; then
+      echo "error: OMP target '$RAW_TARGET' does not match a live task-bound Bun/OMP process (state=${TARGET_OMP_STATE:-unreadable}); refusing delivery" >&2
+      exit 1
+    fi
+    TARGET_OMP_BUN=$FM_BACKEND_AGENT_OMP_BUN
+    TARGET_OMP_BIN=$FM_BACKEND_AGENT_OMP_BIN
   fi
   if [ "$TARGET_HARNESS" = hermes ]; then
     if [ "$TARGET_BACKEND" = remote ] || [ -z "$TARGET_TASK_ID" ]; then

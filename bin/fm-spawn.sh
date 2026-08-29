@@ -784,6 +784,7 @@ spawn_remote_secondmate() {
     echo "remote_target=$remote_target"
     [ -z "$remote_recorded_traceparent" ] || echo "traceparent=$remote_recorded_traceparent"
   } > "$tmp"
+  # This out-of-scope remote-secondmate writer is intentionally excluded from fm_meta_lock_path in the local upstream port; fm-meta-lock-orca-remote-race-verify owns any republish-after-retirement follow-up.
   mv -f -- "$tmp" "$meta"
   fm_lock_release "$remote_lock" || true
   fm_lock_release "$registry_lock" || true
@@ -846,6 +847,8 @@ HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
+SPAWN_META_LOCK=
+SPAWN_META_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 TREEHOUSE_READY_DIR=
@@ -987,6 +990,7 @@ spawn_abort_cleanup() {
       if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
         mkdir -p "$STATE" 2>/dev/null || true
         if [ -d "$STATE" ]; then
+          # This fork-only Orca abort-recovery writer is intentionally excluded from fm_meta_lock_path in the upstream port; fm-meta-lock-orca-remote-race-verify owns any republish-after-retirement follow-up.
           {
             echo "window=$W"
             echo "worktree=${WT:-}"
@@ -1009,6 +1013,10 @@ spawn_abort_cleanup() {
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
+  fi
+  if [ "$SPAWN_META_LOCK_HELD" = 1 ]; then
+    SPAWN_META_LOCK_HELD=0
+    fm_lock_release "$SPAWN_META_LOCK" || true
   fi
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
@@ -3079,7 +3087,12 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
     printf -v accepted_local_base_quoted '%q' "$ACCEPTED_LOCAL_BASE"
     treehouse_get_command="$treehouse_get_command --accepted-local-base $accepted_local_base_quoted"
   fi
-  if [ "${IS_SANDBOX:-}" = 1 ]; then
+  # A Herdr pane restored after a server restart can keep reporting its stale
+  # foreground_cwd even after the guarded Treehouse shell has entered the new
+  # worktree. Use the acquisition command's atomic ready-file handoff there,
+  # just as the sandbox path already does, instead of treating a backend cwd
+  # projection as allocation authority.
+  if [ "${IS_SANDBOX:-}" = 1 ] || [ "$BACKEND" = herdr ]; then
     TREEHOUSE_READY_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-treehouse-ready.${ID}.XXXXXX") || {
       echo "error: could not create the guarded Treehouse ready directory" >&2
       exit 1
@@ -3093,7 +3106,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
     exit 1
   }
 
-  if [ "${IS_SANDBOX:-}" = 1 ]; then
+  if [ "${IS_SANDBOX:-}" = 1 ] || [ "$BACKEND" = herdr ]; then
     for _ in $(seq 1 60); do
       [ -s "$treehouse_ready_file" ] && break
       sleep 1
@@ -3550,6 +3563,9 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
+fm_lock_acquire_wait "$SPAWN_META_LOCK"
+SPAWN_META_LOCK_HELD=1
 {
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
@@ -3958,6 +3974,9 @@ if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
     fi
   fi
 fi
+
+fm_lock_release "$SPAWN_META_LOCK"
+SPAWN_META_LOCK_HELD=0
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"

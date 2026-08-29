@@ -7,7 +7,8 @@
 # its exact expected Git-unregistered numbered-slot target.
 # --accepted-local-base <full commit SHA> is restricted to a current local default-branch tip and is verified before guarded acquisition.
 # --ready-file writes the verified acquired path from this invocation before an
-# interactive shell starts, so RunPod relaunch cannot reuse a stale pane cwd.
+# interactive shell starts, so a relaunch or stale backend cwd projection cannot
+# substitute another path for the worktree this invocation actually acquired.
 set -u
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)

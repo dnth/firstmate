@@ -126,7 +126,7 @@ run_case() {  # <mode> <home> <fakebin> <bun> <omp> <log> <entered> [fm-send arg
   local mode=$1 home=$2 fb=$3 bun=$4 omp=$5 log=$6 entered=$7
   local -a command
   shift 7
-  [ $# -gt 0 ] || set -- 'steer now'
+  [ $# -gt 0 ] || set -- '/steer-now'
   command=("$SEND" turn-test "$@")
   if [ -n "${FM_TEST_COMMAND_TIMEOUT:-}" ]; then
     # shellcheck disable=SC2016 # Single quotes are deliberate: Perl expands its own variables.
@@ -246,7 +246,7 @@ test_no_turn_does_not_close_answered_decision() {
   IFS=$'\t' read -r home fb bun omp log entered < <(setup_case answer-wedge omp)
   printf 'blocked [key=turn-answer]: waiting for a steer\n' > "$home/state/turn-test.status"
   run_case wedge "$home" "$fb" "$bun" "$omp" "$log" "$entered" \
-    --resolve-key turn-answer 'use this answer' >/dev/null 2>&1; rc=$?
+    --resolve-key turn-answer '/use-this-answer' >/dev/null 2>&1; rc=$?
   expect_code 4 "$rc" "a delivered answer with no receiving turn should retain the no-turn verdict"
   status=$(cat "$home/state/turn-test.status")
   assert_not_contains "$status" 'resolved [key=turn-answer]:' \
@@ -462,7 +462,7 @@ SH
     FM_TEST_HERDR_ENTERED="$entered" FM_TEST_HERDR_WORKING_READ="$reads" \
     FM_TEST_HERDR_SESSION="$session" FM_SEND_RETRIES=1 FM_SEND_SLEEP=0 \
     FM_SEND_SETTLE=0 FM_SEND_TURNSTART_TIMEOUT=0.1 FM_SEND_TURNSTART_POLL=0.02 \
-    "$SEND" herdr-turn 'remote coarse check' >/dev/null 2>&1
+    "$SEND" herdr-turn '/remote-coarse-check' >/dev/null 2>&1
   rc=$?
   expect_code 4 "$rc" "a confirmed Herdr submit without post-submit turn proof should be delivered-no-turn"
   pass "fm-send: Herdr empty still requires post-submit OMP turn proof"
@@ -475,10 +475,10 @@ SH
     FM_TEST_TURNSTART_MARKER="$home/state/herdr-turn.omp-started" \
     FM_TEST_HERDR_ENTERED="$entered" FM_TEST_HERDR_WORKING_READ="$reads" \
     FM_TEST_HERDR_SESSION="$session" FM_TEST_HERDR_BASELINE=working \
-    FM_TEST_HERDR_EVENT=message FM_TEST_HERDR_TEXT='busy steer' \
+    FM_TEST_HERDR_EVENT=message FM_TEST_HERDR_TEXT='/busy-steer' \
     FM_SEND_RETRIES=1 FM_SEND_SLEEP=0 FM_SEND_SETTLE=0 \
     FM_SEND_TURNSTART_TIMEOUT=invalid FM_SEND_TURNSTART_POLL=0.02 \
-    "$SEND" herdr-turn 'busy steer' >/dev/null 2>&1
+    "$SEND" herdr-turn '/busy-steer' >/dev/null 2>&1
   rc=$?
   expect_code 0 "$rc" "a confirmed already-busy Herdr steer should skip idle turn-start verification"
 
@@ -491,14 +491,14 @@ SH
     FM_TEST_TURNSTART_MARKER="$home/state/herdr-turn.omp-started" \
     FM_TEST_HERDR_ENTERED="$entered" FM_TEST_HERDR_WORKING_READ="$reads" \
     FM_TEST_HERDR_SESSION="$session" FM_TEST_HERDR_BASELINE=blocked \
-    FM_TEST_HERDR_EVENT=answer FM_TEST_HERDR_TEXT='blocked answer' \
+    FM_TEST_HERDR_EVENT=answer FM_TEST_HERDR_TEXT='/blocked-answer' \
     FM_SEND_RETRIES=1 FM_SEND_SLEEP=0 FM_SEND_SETTLE=0 \
     FM_SEND_TURNSTART_TIMEOUT=invalid FM_SEND_TURNSTART_POLL=0.02 \
-    "$SEND" herdr-turn --resolve-key herdr-answer 'blocked answer' >/dev/null 2>&1
+    "$SEND" herdr-turn --resolve-key herdr-answer '/blocked-answer' >/dev/null 2>&1
   rc=$?
   expect_code 0 "$rc" "a confirmed blocked Herdr answer should skip idle turn-start verification"
   assert_contains "$(cat "$home/state/herdr-turn.status")" \
-    'resolved [key=herdr-answer]: answered: blocked answer' \
+    'resolved [key=herdr-answer]: answered: /blocked-answer' \
     "the confirmed blocked Herdr answer did not close its decision"
   pass "fm-send: busy and blocked Herdr ignore idle-only setup"
 }

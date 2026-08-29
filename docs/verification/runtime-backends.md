@@ -168,7 +168,7 @@ output: scout_persistent=yes turn_end=touched
 ok - Hermes Agent v0.20.0 (2026.8.3) persistent Hermes TUI: crew/scout launch, composer steer, native skill turn, busy->idle, turn-end, interrupt, exit, and exact-session resume
 ```
 
-The TUI remained as the foreground process across ordinary turns and accepted every steer through its bare `❯` composer.
+The persistent-TUI and lifecycle facts remain current, while the ordinary-text transport shown in this dated transcript was superseded by the local steering inbox; [Local steering inbox](#local-steering-inbox) below owns the current general live record-to-ack proof, `tests/fm-hermes-harness.test.sh` covers Hermes routing deterministically, and the native skill remains the typed-composer proof.
 The live busy surface had two independent positive signals: `Ctrl+C to interrupt…` in the composer and the status rule's `· <elapsed>` segment.
 The structural `─ ready │` rule proved idle after both normal completion and interruption.
 Those two rendered signals are what the missing-record fallback reads; they are not what the transcript above sampled. A valid trusted lifecycle record decides classification in both directions, and the rendered tail is captured only after the record read finds no valid record, so every sample above - taken once the bridge had already published a record - reports `hermes-hook` in both states. That ordering is what keeps a lagging busy redraw from letting `--key C-c` reach an already-idle TUI and exit it, and it is why no `hermes-tui` verdict appears in a record-backed sample.
@@ -250,6 +250,7 @@ A smaller crew-specific MCP profile remains a follow-up because no supported iso
 ### OMP lifecycle
 
 The complete tmux role matrix reran on 2026-07-31 against OMP 17.1.8 using separate private tmux sockets, temporary homes, and disposable git worktrees:
+The ordinary-text steering transport described in the dated OMP role-matrix records below was superseded by the local steering inbox; [Local steering inbox](#local-steering-inbox) owns the current record-to-ack proof, while slash commands, keys, explicit targets, and remote secondmates retain the typed transport those records exercise.
 
 ```sh
 omp --version
@@ -385,7 +386,7 @@ The deterministic composer, tmux, and Herdr fixtures reran on 2026-08-26 and pro
 The same fixtures proved that a pending OMP composer after native state becomes idle returns `pending`, Enter transport failure returns `send-failed`, and initially idle editable input fails closed.
 This is revision-bound source-fixture evidence for the source under review, using Bun 1.3.14 only for terminal-cell measurement; it does not invoke OMP or make an OMP runtime-version claim.
 
-The deterministic fm-send turn-start fixture ran on 2026-08-19 and proved that an initially idle OMP submit must become busy or advance its generated turn-start marker after the submit-time baseline before success, while `delivered-no-turn` exits distinctly, queues supervised recovery, and never kills the endpoint.
+The deterministic fm-send turn-start fixture ran on 2026-08-19 and proved that an initially idle typed-plane OMP submit must become busy or advance its generated turn-start marker after the submit-time baseline before success, while `delivered-no-turn` exits distinctly, queues supervised recovery, and never kills the endpoint.
 The same fixture proved bounded recovery wake-lock failure, required recovery-trigger persistence, distinct post-delivery persistence failure, the monotonic deadline, submit-time idle setup, Herdr post-submit check, confirmed busy and blocked compatibility, OMP exit compatibility, normal turn start, already-busy `queued-unconfirmed` exception, remote OMP routing, and unchanged non-OMP behavior.
 The tested source is Git revision `6c04b02de758deb82f2448bd258b5e1b72ff0743` plus binary patch SHA-256 `cc336b6d0dd73ca74adc28d665e3a29f28e064764441bda2c9f18c6a402360a5` over this exact file manifest and construction command:
 
@@ -536,8 +537,11 @@ Zellij has no verified recovery-grade agent process probe, while Orca and cmux d
 ### Guarded Treehouse entry
 
 The Treehouse-backed ordinary acquisition integration was inspected on 2026-08-12 against the pinned Treehouse v2.1.1 contract.
-Tmux, Herdr, Zellij, and cmux all submit the shared guarded acquisition command, then resolve the acquired worktree through their existing current-path adapter only after the wrapper enters its verified lease.
+Tmux, Zellij, and cmux submit the shared guarded acquisition command, then resolve the acquired worktree through their existing current-path adapter only after the wrapper enters its verified lease.
+Herdr now uses the acquisition-owned ready-file handoff described in [`herdr-backend.md`](../herdr-backend.md#watching-and-task-containers), with portable coverage in `tests/fm-spawn-dispatch-profile.test.sh` and real-Herdr coverage in `tests/fm-backend-herdr-presentation-e2e.test.sh`.
 Orca is not applicable because it owns task worktrees and never invokes Treehouse.
+
+The command and output below preserve the original 2026-08-12 cross-adapter inspection as dated evidence that each adapter exposed a current-path primitive; the Herdr line no longer describes its allocation-authority path.
 
 ```sh
 for backend in tmux herdr zellij cmux; do grep -q "fm_backend_${backend}_current_path" "bin/backends/$backend.sh" && printf '%s current-path adapter present\n' "$backend"; done
@@ -1095,6 +1099,28 @@ tests/fm-backend-cmux-smoke.test.sh
 ```
 
 The real smoke proves socket access, fresh readiness, current-path probing, send and keys, bounded capture, title identity, and guarded exact cleanup.
+
+## Local steering inbox
+
+The durable local steering-inbox path was verified live on 2026-08-28 against Codex CLI 0.149.1 and OMP 18.0.4 in isolated neutral-project tmux sessions.
+For each harness, `fm-send.sh` published an ordinary steer as a sequenced `state/<id>.inbox/*.msg` record and submitted only the constant doorbell to the terminal.
+The real worker read the record, performed the requested file action, and acknowledged delivery by moving the record into `state/<id>.inbox/handled/`.
+This acceptance guard is scoped to the required Codex and OMP proof; adapter-specific compatibility remains owned by each harness's existing live guard.
+
+```sh
+FM_SEND_INBOX_LIVE_E2E=1 \
+  FM_SEND_INBOX_LIVE_HARNESSES='codex omp' \
+  FM_SEND_INBOX_LIVE_TIMEOUT=180 \
+  bash tests/fm-send-inbox-doorbell-live-e2e.test.sh
+```
+
+Observed result:
+
+```text
+ok - codex (codex-cli 0.149.1): real worker acted on and acknowledged the durable record
+ok - omp (omp/18.0.4): real worker acted on and acknowledged the durable record
+ok - live steering-inbox doorbell guard: 2 harnesses verified
+```
 
 ## Codex App host tools
 

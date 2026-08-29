@@ -178,6 +178,13 @@ case "$cmd $sub" in
   "pane run")
     if printf '%s' "${4:-}" | grep -Fq 'fm-treehouse-get.sh'; then
       [ -z "${FM_FAKE_HERDR_NESTED_SHELL_FLAG:-}" ] || : > "$FM_FAKE_HERDR_NESTED_SHELL_FLAG"
+      case "${4:-}" in
+        *' --ready-file '*)
+          ready_file=${4##* --ready-file }
+          printf '%s\n' "${FM_FAKE_HERDR_READY_PATH:-$FM_FAKE_PANE_PATH}" > "$ready_file"
+          printf 'handoff\t%s\n' "${4:-}" >> "$FM_FAKE_TREEHOUSE_LOG"
+          ;;
+      esac
     fi
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       printf '%s\n' "${4:-}" >> "$FM_FAKE_LAUNCH_LOG"
@@ -421,6 +428,7 @@ run_spawn() {
     FM_FAKE_HERDR_RECLAIM_TASK_LABEL="${FM_TEST_HERDR_RECLAIM_TASK_LABEL:-}" \
     FM_FAKE_HERDR_PANE_FLAG="$herdrpaneflag" \
     FM_FAKE_HERDR_NESTED_SHELL_FLAG="$herdrshellflag" \
+    FM_FAKE_HERDR_READY_PATH="${FM_TEST_HERDR_READY_PATH:-}" \
     FM_FAKE_HERDR_REFUSE_NESTED_SHELL="${FM_TEST_HERDR_REFUSE_NESTED_SHELL:-0}" \
     FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS="${FM_TEST_HERDR_IDLE_SHELL_PROOF_POLLS:-}" \
     FM_FAKE_HERDR_REFUSE_CLOSE="${FM_TEST_HERDR_REFUSE_CLOSE:-0}" \
@@ -1636,9 +1644,33 @@ test_herdr_launch_refuses_after_nested_shell_timeout() {
     "Herdr nested-shell timeout did not identify the refused atomic launch"
   assert_contains "$(cat "$LAUNCH_LOG")" "fm-treehouse-get.sh" \
     "Herdr readiness fixture did not enter its nested Treehouse shell"
+  assert_contains "$(cat "$LAUNCH_LOG")" "fm-treehouse-get.sh --ready-file " \
+    "Herdr readiness fixture did not use the acquisition-owned worktree handoff"
   assert_not_contains "$(cat "$LAUNCH_LOG")" "claude --dangerously-skip-permissions" \
     "Herdr spawn launched the agent without a proven idle nested shell"
   pass "Herdr atomic launch refuses when the nested worktree shell never proves idle"
+}
+
+test_herdr_spawn_uses_acquisition_owned_worktree_handoff() {
+  local rec id out status stale
+  id=$(profile_id profile-herdr-stale-cwd-z8pj)
+  rec=$(make_spawn_case profile-herdr-stale-cwd claude "$id")
+  read_case_record "$rec"
+  stale="$CASE_DIR/stale-checkout"
+  fm_git_init_commit "$stale"
+
+  FM_TEST_HERDR_READY_PATH="$WT_DIR" \
+    out=$(run_ship_spawn "$HOME_DIR" "$stale" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --backend herdr)
+  status=$?
+  expect_code 0 "$status" "Herdr spawn should trust its own Treehouse acquisition over stale backend cwd"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "Herdr spawn did not record the acquisition-owned worktree"
+  assert_no_grep "worktree=$stale" "$HOME_DIR/state/$id.meta" \
+    "Herdr spawn recorded the stale backend cwd projection"
+  assert_contains "$(cat "$CASE_DIR/treehouse.log")" $'handoff\t' \
+    "Herdr spawn did not request the acquisition-owned ready-file handoff"
+  pass "Herdr spawn records its own Treehouse acquisition when backend cwd stays stale"
 }
 
 test_omp_refuses_unverified_backends_before_endpoint_creation() {
@@ -2359,6 +2391,7 @@ test_non_omp_prewalk_refuses_without_changing_normal_claude_launch
 test_omp_herdr_worker_and_scout_launch_with_exact_identity_and_ack
 test_omp_refuses_unverified_backends_before_endpoint_creation
 test_herdr_launch_refuses_after_nested_shell_timeout
+test_herdr_spawn_uses_acquisition_owned_worktree_handoff
 test_omp_scout_uses_external_turn_extension
 test_omp_whitespace_identity_paths_refuse_before_endpoint
 test_omp_missing_binary_or_capability_refuses_before_endpoint_and_metadata

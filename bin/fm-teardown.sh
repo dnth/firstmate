@@ -204,6 +204,10 @@ teardown_exit_cleanup() {
   if declare -F teardown_release_herdr_locks >/dev/null 2>&1; then
     teardown_release_herdr_locks || true
   fi
+  if [ "${META_LOCK_HELD:-0}" = 1 ]; then
+    fm_lock_release "$META_LOCK" || true
+    META_LOCK_HELD=0
+  fi
   fm_lease_guard_release || true
 }
 trap teardown_exit_cleanup EXIT
@@ -214,6 +218,10 @@ fm_refuse_if_gate_agent
 FM_LOCK_LOG_PREFIX=teardown
 
 META="$STATE/$ID.meta"
+META_LOCK=$(fm_meta_lock_path "$META") || exit 1
+META_LOCK_HELD=0
+fm_lock_acquire_wait "$META_LOCK"
+META_LOCK_HELD=1
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 
 REMOTE_HANDOFF_DIR_PRESENT=0
@@ -2714,6 +2722,7 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
+rm -rf -- "$STATE/$ID.inbox"
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" \
   "$STATE/$ID.omp-started" \
@@ -2721,6 +2730,8 @@ rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.hermes-turnend-token" "$STATE/$ID.hermes-session" \
   "$STATE/$ID.hermes-started" \
   "$STATE/.$ID.open-decisions-cursor"
+fm_lock_release "$META_LOCK"
+META_LOCK_HELD=0
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi

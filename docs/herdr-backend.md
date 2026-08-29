@@ -57,6 +57,7 @@ A `--secondmate` launch is the deliberate exception: it stands up that secondmat
 Before submitting any one-line spawn command, the adapter takes up to 200 strict samples of the exact pane's lone idle foreground shell, sleeping 0.1 seconds between unsuccessful samples.
 The proof accepts the pane-owned shell or one recognized descendant shell whose exact process ancestry, foreground process group, childless state, and sleeping or idle state agree; this covers Treehouse's guarded nested worktree shell without weakening the pane-owned proof used for destructive cleanup.
 It binds required `GOTMPDIR` and optional `TRACEPARENT` values directly to the complete launch and submits that single command atomically with `pane run`; a pane that never becomes provably idle stops the launch without typing, and no separately accepted shell command can masquerade as successful environment setup.
+For Treehouse-backed work, that acquisition command publishes its verified worktree through `fm-treehouse-get.sh --ready-file`, and `fm-spawn.sh` uses that publication as allocation authority instead of Herdr's `foreground_cwd` projection, which can remain stale after a server restart.
 
 A claimed parent identity that cannot be resolved exactly stops the spawn before any worker endpoint exists, rather than falling back to a label search.
 That covers a missing or unusable socket identity, a closed or unreadable launcher pane, a pane and tab that disagree about their workspace, a workspace missing from the session, and a pane belonging to another named session or Herdr server.
@@ -199,14 +200,14 @@ The adapter starts and polls a named server before workspace, tab, pane, or agen
 Every Herdr invocation goes through `fm_backend_herdr_cli`, which sets the environment and passes an explicit trailing `--session <name>`.
 An environment variable alone is not reliable when another Herdr server is running.
 
-Literal text and Enter are separate operations for ordinary steers.
+Literal text and Enter are separate operations on `fm-send.sh`'s typed plane; ordinary local text steers instead use the durable steering inbox and send only its best-effort constant doorbell through this adapter.
 Spawn-time fixed commands may use Herdr's atomic run primitive.
 The away launcher waits for the exact newly created pane to expose one proven idle foreground shell before submitting the daemon command, so terminal-startup work cannot consume or corrupt it.
 Enter, Escape, and Ctrl-C are supported.
-Slash and dollar-prefixed input uses the shared harness-aware settle before the first Enter so a completion popup cannot consume it.
-Text is typed once; only Enter is retried.
+Typed-plane slash input, and dollar-prefixed skill input for Codex, uses the shared harness-aware settle before the first Enter so a completion popup cannot consume it.
+Typed-plane text is typed once; only Enter is retried.
 
-On an idle or done native baseline, ordinary submit confirmation first waits for `working` or `blocked` across a bounded polling window.
+On an idle or done native baseline, typed-plane submit confirmation first waits for `working` or `blocked` across a bounded polling window.
 If native status stays idle, the shared composer verdict is the next positive signal: a cleared composer confirms delivery, and proven pending text retries Enter.
 For every non-OMP harness, text that remains pending after the retry budget stays pending even when native status is `working`.
 For OMP only, `fm_composer_queued_enter_verdict` treats proven pending text plus native `working` as a queued delivered Enter and keeps an idle pending composer as a genuine swallow.
@@ -215,7 +216,7 @@ The two stages intentionally share signals rather than claiming perfect submit a
 On an already active or unreadable baseline, ordinary harnesses fall back to conservative composer clearance.
 OMP is stricter: the adapter binds the exact native OMP session path and pre-send byte offset before typing.
 That offset is always the end of a complete newline-terminated session record; when a partial record is still being appended the adapter waits a bounded time and then refuses rather than rewinding, because a mid-record offset would poison every later read and an earlier boundary could false-confirm an already-appended record.
-A busy OMP steer sends one Enter and normally succeeds after an appended exact-text user message carries native `steering:true`; an identical ordinary user message is not acknowledgement.
+A busy typed-plane OMP steer sends one Enter and normally succeeds after an appended exact-text user message carries native `steering:true`; an identical ordinary user message is not acknowledgement.
 If that native event is not observed within the bounded window, the adapter verifies the composer before considering the narrow fallback.
 A cleared composer or proven pending text plus a current native `working` state returns `queued-unconfirmed`, which `fm-send` accepts so OMP can consume the steer on its next turn.
 Pending text plus idle, done, blocked, or unreadable native state remains unsubmitted and makes `fm-send` fail.
