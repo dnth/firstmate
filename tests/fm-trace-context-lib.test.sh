@@ -224,18 +224,6 @@ exit 70
 SH
   chmod +x "$TRACE_FAKEBIN/$tool"
 done
-out=$(PATH="$TRACE_FAKEBIN:$PATH" FM_TRACE_TOOL_LOG="$TRACE_TOOL_LOG" \
-  FM_TRACE_CONTEXT_COMMAND="$TRACE_FAKEBIN/trace-context-provider" \
-  FM_TRACE_CONTEXT_PROVIDER="$TRACE_FAKEBIN/trace-context-provider" \
-  FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CFG_ON" "$NOMETA"); rc=$?
-fm_trace_context_valid "$out" || fail "resolve must mint without a sleep, timeout, or configurable provider (rc=$rc out='$out')"
-[ "$rc" -eq 0 ] || fail "resolve must return 0 when enabled"
-[ ! -s "$TRACE_TOOL_LOG" ] || fail "resolve must not invoke a sleep, timeout, or configurable provider (called '$(tr '\n' ' ' < "$TRACE_TOOL_LOG")')"
-fm_trace_context_resolve "$CFG_OFF" "$NOMETA" >/dev/null || fail "resolve must return 0 when off"
-pass "the resolver returns directly without sleep, timeout, or configurable-provider dependencies and always succeeds"
-
-# --- harness/backend/kind and task-prose independence ------------------------
-
 fm_trace_context_hex() {
   case "$1" in
     16) printf '%s' 11111111111111111111111111111111 ;;
@@ -244,12 +232,28 @@ fm_trace_context_hex() {
   esac
 }
 FIXED_TP='00-11111111111111111111111111111111-2222222222222222-01'
+TRACE_START_MS=$(node -e 'process.stdout.write(String(Date.now()))')
+for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  out=$(PATH="$TRACE_FAKEBIN:$PATH" FM_TRACE_TOOL_LOG="$TRACE_TOOL_LOG" \
+    FM_TRACE_CONTEXT_COMMAND="$TRACE_FAKEBIN/trace-context-provider" \
+    FM_TRACE_CONTEXT_PROVIDER="$TRACE_FAKEBIN/trace-context-provider" \
+    FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CFG_ON" "$NOMETA"); rc=$?
+done
+TRACE_END_MS=$(node -e 'process.stdout.write(String(Date.now()))')
+TRACE_ELAPSED_MS=$((TRACE_END_MS - TRACE_START_MS))
+fm_trace_context_valid "$out" || fail "resolve must mint without a sleep, timeout, or configurable provider (rc=$rc out='$out')"
+[ "$rc" -eq 0 ] || fail "resolve must return 0 when enabled"
+[ "$TRACE_ELAPSED_MS" -lt 500 ] \
+  || fail "20 fixed-entropy resolves must complete without delay (elapsed=${TRACE_ELAPSED_MS}ms)"
+[ ! -s "$TRACE_TOOL_LOG" ] || fail "resolve must not invoke a sleep, timeout, or configurable provider (called '$(tr '\n' ' ' < "$TRACE_TOOL_LOG")')"
+fm_trace_context_resolve "$CFG_OFF" "$NOMETA" >/dev/null || fail "resolve must return 0 when off"
+pass "the resolver returns directly without sleep, timeout, or configurable-provider dependencies and always succeeds"
+
+# --- harness/backend/kind and task-prose independence ------------------------
+
 BRIEF_FILE="$WORK/brief"; PROMPT_FILE="$WORK/prompt"
 REPORT_FILE="$WORK/report"; STATUS_FILE="$WORK/status"
-printf '%s\n' 'brief-secret-must-not-enter-carrier' > "$BRIEF_FILE"
-printf '%s\n' 'prompt-secret-must-not-enter-carrier' > "$PROMPT_FILE"
-printf '%s\n' 'report-secret-must-not-enter-carrier' > "$REPORT_FILE"
-printf '%s\n' 'status-secret-must-not-enter-carrier' > "$STATUS_FILE"
+mkfifo "$BRIEF_FILE" "$PROMPT_FILE" "$REPORT_FILE" "$STATUS_FILE"
 for axes in \
   'claude tmux ship' \
   'codex herdr scout' \
@@ -259,11 +263,25 @@ for axes in \
   IFS=' ' read -r harness backend kind <<EOF
 $axes
 EOF
+  TRACE_WRITER_PIDS=
+  for prose_file in "$BRIEF_FILE" "$PROMPT_FILE" "$REPORT_FILE" "$STATUS_FILE"; do
+    ( /bin/sleep 1; printf '%s\n' 'task-prose-read' > "$prose_file" ) &
+    TRACE_WRITER_PIDS="$TRACE_WRITER_PIDS $!"
+  done
+  TRACE_START_MS=$(node -e 'process.stdout.write(String(Date.now()))')
   out=$(HARNESS="$harness" BACKEND="$backend" KIND="$kind" \
     FM_CREW_HARNESS="$harness" FM_BACKEND="$backend" FM_TASK_KIND="$kind" \
     BRIEF="$BRIEF_FILE" PROMPT="$PROMPT_FILE" REPORT="$REPORT_FILE" STATUS="$STATUS_FILE" \
     FM_BRIEF="$BRIEF_FILE" FM_PROMPT="$PROMPT_FILE" FM_REPORT="$REPORT_FILE" FM_STATUS="$STATUS_FILE" \
     FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CFG_ON" "$NOMETA")
+  TRACE_END_MS=$(node -e 'process.stdout.write(String(Date.now()))')
+  for writer_pid in $TRACE_WRITER_PIDS; do
+    kill "$writer_pid" 2>/dev/null || true
+    wait "$writer_pid" 2>/dev/null || true
+  done
+  TRACE_ELAPSED_MS=$((TRACE_END_MS - TRACE_START_MS))
+  [ "$TRACE_ELAPSED_MS" -lt 500 ] \
+    || fail "harness=$harness backend=$backend kind=$kind read a blocking task-prose fixture or delayed (elapsed=${TRACE_ELAPSED_MS}ms)"
   [ "$out" = "$FIXED_TP" ] \
     || fail "harness=$harness backend=$backend kind=$kind or task prose changed the fixed-entropy carrier (got '$out')"
 done
