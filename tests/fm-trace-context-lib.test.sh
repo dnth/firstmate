@@ -202,6 +202,7 @@ pass "resolve yields exactly one carrier per logical task, so the recorded and i
 # --- entropy failure omits telemetry safely (never aborts) -------------------
 
 fm_trace_context_hex() { return 1; }
+fm_trace_context_hex 1 && fail "entropy fixture must reject direct reads"
 ef_mint=$(fm_trace_context_mint); ef_mint_rc=$?
 ef_res=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CFG_ON" "$NOMETA"); ef_res_rc=$?
 # Restore the real entropy source for any later use.
@@ -233,7 +234,7 @@ fm_trace_context_hex() {
 }
 FIXED_TP='00-11111111111111111111111111111111-2222222222222222-01'
 TRACE_START_MS=$(node -e 'process.stdout.write(String(Date.now()))')
-for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+for _attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
   out=$(PATH="$TRACE_FAKEBIN:$PATH" FM_TRACE_TOOL_LOG="$TRACE_TOOL_LOG" \
     FM_TRACE_CONTEXT_COMMAND="$TRACE_FAKEBIN/trace-context-provider" \
     FM_TRACE_CONTEXT_PROVIDER="$TRACE_FAKEBIN/trace-context-provider" \
