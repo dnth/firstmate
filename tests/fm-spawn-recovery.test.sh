@@ -11,6 +11,7 @@ LAB=$(fm_test_tmproot fm-spawn-recovery)
 REAL_TMUX=$(command -v tmux)
 REAL_TAR=$(command -v tar)
 REAL_RM=$(command -v rm)
+REAL_BUN=$(command -v bun) || fail "bun is required for the recovery fixture"
 SOCKET="fm-spawn-recovery-$$"
 HOME_DIR="$LAB/home"
 PROJECT="$LAB/project"
@@ -56,6 +57,13 @@ TASK_TMP_OWNED=1
 
 cat > "$WRAPPER_BIN/tmux" <<SH
 #!/usr/bin/env bash
+if [ "\${FM_SPAWN_RECOVERY_TEST_FAIL_GOTMPDIR_EXPORT:-0}" = 1 ]; then
+  for arg in "\$@"; do
+    case "\$arg" in
+      'export GOTMPDIR='*) exit 1 ;;
+    esac
+  done
+fi
 exec '$REAL_TMUX' -L '$SOCKET' "\$@"
 SH
 cat > "$WRAPPER_BIN/tar" <<SH
@@ -103,6 +111,24 @@ case "\${1:-}" in
 esac
 SH
 ln -s /bin/bash "$WRAPPER_BIN/bun"
+cat > "$WRAPPER_BIN/ack-extension.mjs" <<'JS'
+import { pathToFileURL } from "node:url";
+
+const [extension, sessionFile] = process.argv.slice(2);
+const handlers = new Map();
+const omp = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+};
+const module = await import(`${pathToFileURL(extension).href}?fixture=${process.pid}`);
+module.default(omp);
+handlers.get("session_start")?.({}, {
+  sessionManager: { getSessionFile: () => sessionFile },
+});
+handlers.get("turn_start")?.();
+await new Promise((resolve) => setTimeout(resolve, 100));
+JS
 cat > "$WRAPPER_BIN/omp" <<'SH'
 #!/usr/bin/env bun
 case "${1:-}" in
@@ -151,14 +177,14 @@ else
 fi
 base=${session_dir%.omp-sessions}
 printf '%s\n' "$session_file" > "$base.omp-session"
-started=$(sed -n '/omp.on("turn_start"/s/.*\["\([^"]*\)".*/\1/p' "$extension")
-[ -n "$started" ] && : > "$started"
+"${OMP_FIXTURE_BUN:?}" "$(dirname "$0")/ack-extension.mjs" "$extension" "$session_file" || exit 1
 while :; do sleep 1; done
 SH
 chmod +x "$WRAPPER_BIN/tmux" "$WRAPPER_BIN/tar" "$WRAPPER_BIN/rm" "$WRAPPER_BIN/treehouse" "$WRAPPER_BIN/omp"
 
 FIXTURE_PATH="$WRAPPER_BIN:$PATH"
 export OMP_FIXTURE_LOG="$LAB/omp-launches"
+export OMP_FIXTURE_BUN="$REAL_BUN"
 PATH="$FIXTURE_PATH" tmux new-session -d -s firstmate -n fixture -c "$PROJECT"
 PATH="$FIXTURE_PATH" tmux set-option -g default-shell /bin/bash
 PATH="$FIXTURE_PATH" tmux set-option -g default-command "env PATH='$FIXTURE_PATH' bash --noprofile --norc"
@@ -231,6 +257,15 @@ BRANCH=$(git -C "$WORKTREE" symbolic-ref --quiet --short HEAD) || fail "fixture 
   || fail "initial OMP worker did not establish its task branch from a detached lease"
 assert_contains "$(cat "$META")" "branch=$BRANCH" \
   "initial worker did not record its exact branch identity"
+
+PRELAUNCH_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_GOTMPDIR_EXPORT=1 spawn "$ID" --recover 2>&1)
+PRELAUNCH_STATUS=$?
+[ "$PRELAUNCH_STATUS" -ne 0 ] || fail "pre-launch recovery failure unexpectedly succeeded"
+assert_contains "$PRELAUNCH_OUTPUT" "GOTMPDIR export could not be submitted" \
+  "pre-launch recovery failure did not reach the endpoint setup boundary"
+wait_for_state missing || fail "pre-launch recovery failure retained its replacement endpoint"
+cmp -s "$META" "$LAB/meta.before" || fail "pre-launch recovery failure rewrote metadata"
+cmp -s "$SESSION_FILE" "$LAB/session.before" || fail "pre-launch recovery failure changed the durable session"
 
 printf 'FIRSTMATE_OP: v1 launch-brief: retained-sibling\n' > "$SESSION_DIR/retained-sibling.jsonl"
 POINTER_OUTPUT=$(spawn "$ID" --recover) || fail "authoritative durable pointer did not disambiguate retained sessions"
