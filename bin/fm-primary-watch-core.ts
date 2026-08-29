@@ -221,6 +221,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     .update(readFileSync(coreFile));
   if (runtime === "omp") {
     extensionVersionHash.update(readFileSync(`${fmRoot}/.omp/extensions/lib/fm-branch-dispatch.ts`));
+    extensionVersionHash.update(readFileSync(`${fmRoot}/.omp/extensions/lib/fm-task-inbox-doorbell.ts`));
   }
   const extensionVersion = `sha256:${extensionVersionHash.digest("hex")}`;
   const retryBaseMs = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);

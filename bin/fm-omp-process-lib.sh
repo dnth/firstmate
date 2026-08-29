@@ -106,6 +106,16 @@ fm_omp_process_primary_marker_path() {
   printf '%s' "$state/.omp-primary-extension-loaded"
 }
 
+fm_omp_task_doorbell_marker_read() {  # <marker>; sets FM_OMP_TASK_DOORBELL_PID
+  local marker=$1
+  FM_OMP_TASK_DOORBELL_PID=
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  [ "$(wc -l < "$marker" 2>/dev/null | tr -d '[:space:]')" = 1 ] \
+    && [ "$(tail -c 1 "$marker" 2>/dev/null | od -An -tuC | tr -d '[:space:]')" = 10 ] || return 1
+  FM_OMP_TASK_DOORBELL_PID=$(cat "$marker" 2>/dev/null) || return 1
+  case "$FM_OMP_TASK_DOORBELL_PID" in ''|*[!0-9]*|0|1) return 1 ;; esac
+}
+
 # True when this home can produce OMP identity evidence at all: either the
 # caller supplied both expected launch paths, or a primary marker file exists.
 # Without one of those, fm_omp_process_matches can never match, so ancestry

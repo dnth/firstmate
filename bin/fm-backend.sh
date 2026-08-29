@@ -741,6 +741,20 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
   esac
 }
 
+# Ring an OMP worker extension through its task-bound process signal. A failure
+# means the programmatic surface is unavailable and licenses the caller's
+# composer fallback; a successful signal is the one doorbell attempt.
+fm_backend_omp_trigger_turn() {  # <backend> <target> <ready-marker> <omp-runtime> <omp-bin>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_omp_trigger_turn "$@" ;;
+    herdr) fm_backend_herdr_omp_trigger_turn "$@" ;;
+    *) return 1 ;;
+  esac
+}
+
 # fm_backend_kill: remove the task's session endpoint (best-effort; a
 # nonexistent/already-gone target is not an error - callers already swallow
 # failures here exactly as the inline `tmux kill-window ... || true` did).

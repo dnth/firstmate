@@ -674,6 +674,7 @@ install_omp_primary_extension_fixture() {
   cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$root/.omp/extensions/fm-primary-omp.ts"
   cp "$ROOT/.omp/extensions/fm-branch-supervision-omp.ts" "$root/.omp/extensions/fm-branch-supervision-omp.ts"
   cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$root/.omp/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" "$root/.omp/extensions/lib/fm-task-inbox-doorbell.ts"
   cp "$ROOT/.omp/extensions/lib/fm-branch-model-picker.ts" "$root/.omp/extensions/lib/fm-branch-model-picker.ts"
   install_primary_watch_core_fixture "$root"
 }

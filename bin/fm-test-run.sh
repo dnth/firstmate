@@ -921,7 +921,7 @@ families_for_changed_path() {
       printf '%s\n' backend-dispatch
       printf '%s\n' real-herdr-gated
       ;;
-    .omp/extensions/fm-primary-omp.ts)
+    .omp/extensions/fm-primary-omp.ts|.omp/extensions/lib/fm-task-inbox-doorbell.ts)
       printf '%s\n' watcher-wake-lock
       printf '%s\n' secondmate
       printf '%s\n' live-harness-optin

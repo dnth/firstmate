@@ -166,7 +166,8 @@
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __OMPEXT__   absolute path to state/<task-id>.omp-ext.ts (OMP turn-start
-#                  acknowledgement and turn-end extension, also outside the worktree)
+#                  acknowledgement, programmatic inbox doorbell, and turn-end
+#                  extension, also outside the worktree)
 #     __OMPSESSIONDIR__ task-local or secondmate-home OMP session directory for exact resume
 #     __OMPRESUMEFLAG__ empty for a fresh OMP launch or the exact retained secondmate session file
 #     __OMPPRIMARY__ absolute path to .omp/extensions/fm-primary-omp.ts in an OMP secondmate home
@@ -912,7 +913,8 @@ spawn_omp_abort_clean_unchanged_worktree() {  # <context>
   elif (cd "$PROJ_ABS" && "$SCRIPT_DIR/fm-treehouse-command.sh" return --force "$WT" >/dev/null 2>&1); then
     [ -z "${TASK_TMP:-}" ] || rm -rf "$TASK_TMP"
     rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
-      "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" "$STATE/$ID.omp-started"
+      "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" "$STATE/$ID.omp-started" \
+      "$STATE/$ID.omp-doorbell-ready"
   else
     echo "warning: $context could not return the unchanged worktree $WT" >&2
   fi
@@ -1706,7 +1708,7 @@ if [ "$HARNESS" = omp ]; then
   else
     for artifact in \
       "$STATE/$ID.meta" "$STATE/$ID.status" "$STATE/$ID.omp-ext.ts" \
-      "$STATE/$ID.omp-ready" "$STATE/$ID.omp-started" "/tmp/fm-$ID"; do
+      "$STATE/$ID.omp-ready" "$STATE/$ID.omp-started" "$STATE/$ID.omp-doorbell-ready" "/tmp/fm-$ID"; do
       if [ -e "$artifact" ] || [ -L "$artifact" ]; then
         echo "error: refusing OMP spawn because task $ID already has artifacts at $artifact; reconcile or clean the prior task before retrying" >&2
         exit 1
@@ -1943,7 +1945,8 @@ omp_secondmate_extension_matches_trusted_closure() {
     && cmp -s "$project/$path" "$trusted" || return 1
   case "$path" in
     .omp/extensions/fm-primary-omp.ts)
-      dependencies=.omp/extensions/lib/fm-branch-dispatch.ts
+      dependencies=".omp/extensions/lib/fm-branch-dispatch.ts
+.omp/extensions/lib/fm-task-inbox-doorbell.ts"
       ;;
     .omp/extensions/fm-branch-supervision-omp.ts)
       dependencies=".omp/extensions/lib/fm-branch-dispatch.ts
@@ -3219,6 +3222,9 @@ fi
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
+if [ "$HARNESS" = omp ]; then
+  rm -f "$STATE/$ID.omp-doorbell-ready"
+fi
 exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
@@ -3381,14 +3387,21 @@ EOF
     omp)
       OMP_READY="$STATE_REAL/$ID.omp-ready"
       OMP_STARTED="$STATE_REAL/$ID.omp-started"
-      rm -f "$OMP_READY" "$OMP_STARTED"
+      OMP_DOORBELL_READY="$STATE_REAL/$ID.omp-doorbell-ready"
+      rm -f "$OMP_READY" "$OMP_STARTED" "$OMP_DOORBELL_READY"
       cat > "$STATE/$ID.omp-ext.ts" <<EOF
-// Firstmate OMP launch acknowledgement and turn-end signal; written by fm-spawn.
+// Firstmate OMP launch acknowledgement, inbox doorbell, and turn-end signal; written by fm-spawn.
 import { execFile } from "node:child_process";
+import { installTaskInboxDoorbell } from "$FM_ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts";
 export default function (omp: any) {
+  const retireTaskInboxDoorbell = installTaskInboxDoorbell(omp, {
+    inboxDir: "$STATE_REAL/$ID.inbox",
+    readyMarker: "$OMP_DOORBELL_READY",
+  });
   omp.on("session_start", () => execFile("touch", ["$OMP_READY"]));
   omp.on("turn_start", () => execFile("touch", ["$OMP_STARTED"]));
   omp.on("turn_end", () => execFile("touch", ["$TURNEND"]));
+  omp.on("session_shutdown", retireTaskInboxDoorbell);
 }
 EOF
       ;;
@@ -3654,7 +3667,7 @@ if [ "$OMP_LAUNCH_TEMPLATE" -eq 1 ] && [ -n "$OMP_BUN_LAUNCH_DIR" ]; then
   OMP_LAUNCH_PATH_GUARD="PATH=$(shell_quote "$OMP_BUN_LAUNCH_DIR${PATH:+:$PATH}"); export PATH; FM_OMP_BUN_LOOKUP=\$(command -v bun) || exit 1; FM_OMP_BUN_RESOLVED=\$(readlink -f \"\$FM_OMP_BUN_LOOKUP\" 2>/dev/null || node -e 'const { realpathSync } = require(\"node:fs\"); process.stdout.write(realpathSync(process.argv[1]));' \"\$FM_OMP_BUN_LOOKUP\") || exit 1; [ \"\$FM_OMP_BUN_RESOLVED\" = $(shell_quote "$OMP_BUN_CANON") ] || exit 1; "
 fi
 if [ "$OMP_LAUNCH_TEMPLATE" -eq 1 ] && [ "$HARNESS" = omp ] && [ -n "$OMP_BIN_CANON" ]; then
-  LAUNCH="FM_OMP_BUN=$(shell_quote "$OMP_BUN_CANON") FM_OMP_BIN=$(shell_quote "$OMP_BIN_CANON") $LAUNCH"
+  LAUNCH="FM_OMP_TASK_INBOX_DIR=$(shell_quote "$STATE_REAL/$ID.inbox") FM_OMP_TASK_DOORBELL_READY=$(shell_quote "$STATE_REAL/$ID.omp-doorbell-ready") FM_OMP_BUN=$(shell_quote "$OMP_BUN_CANON") FM_OMP_BIN=$(shell_quote "$OMP_BIN_CANON") $LAUNCH"
 fi
 OMPRESUMEFLAG=
 [ -z "$OMP_RESUME_FILE" ] || OMPRESUMEFLAG="--resume $(shell_quote "$OMP_RESUME_FILE") "

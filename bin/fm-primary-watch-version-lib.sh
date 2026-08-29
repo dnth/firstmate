@@ -5,7 +5,8 @@
 # A primary watcher is its runtime adapter (.pi/extensions/fm-primary-pi-watch.ts
 # or .omp/extensions/fm-primary-omp.ts) plus the shared lifecycle core it binds
 # (bin/fm-primary-watch-core.ts).
-# OMP additionally routes through .omp/extensions/lib/fm-branch-dispatch.ts.
+# OMP additionally routes through .omp/extensions/lib/fm-branch-dispatch.ts and
+# .omp/extensions/lib/fm-task-inbox-doorbell.ts.
 # The version hashes those files in runtime order, exactly as the core does when
 # it publishes the marker, so no live session keeps stale loaded behavior behind
 # a still-matching marker.
@@ -33,18 +34,21 @@ fm_extension_version_hash() {
 }
 
 fm_primary_watch_version() {  # <extension-file> <fm-root> -> sha256:<hex>
-  local extension=${1:-} root=${2:-} core dispatch
+  local extension=${1:-} root=${2:-} core dispatch doorbell
   [ -n "$extension" ] && [ -f "$extension" ] || return 1
   [ -n "$root" ] || return 1
   core="$root/bin/fm-primary-watch-core.ts"
   [ -f "$core" ] || return 1
   dispatch=
+  doorbell=
   if [ "$extension" = "$root/.omp/extensions/fm-primary-omp.ts" ]; then
     dispatch="$root/.omp/extensions/lib/fm-branch-dispatch.ts"
-    [ -f "$dispatch" ] || return 1
+    doorbell="$root/.omp/extensions/lib/fm-task-inbox-doorbell.ts"
+    [ -f "$dispatch" ] && [ -f "$doorbell" ] || return 1
   fi
   set -- "$extension" "$core"
   [ -z "$dispatch" ] || set -- "$@" "$dispatch"
+  [ -z "$doorbell" ] || set -- "$@" "$doorbell"
   fm_extension_version_hash "$@"
 }
 
