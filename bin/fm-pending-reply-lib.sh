@@ -135,12 +135,10 @@ fm_pending_reply_extract_corr() {  # <text>
 
 # 0 if <text> carries the exact correlation token for <corr_id>.
 fm_pending_reply_text_has_corr() {  # <text> <corr_id>
-  local text=$1 corr=$2 token
-  token=$(fm_pending_reply_corr_token "$corr")
-  case "$text" in
-    *"$token"*) return 0 ;;
-  esac
-  return 1
+  local text=$1 corr=$2
+  printf '%s' "$corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
+  printf '%s\n' "$text" \
+    | LC_ALL=C grep -Eq "(^|[^[:alnum:]_])corr=${corr}([^[:alnum:]_]|$)"
 }
 
 # Sanitize a short request summary: single line, bounded, no control chars.
