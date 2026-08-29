@@ -164,17 +164,12 @@ if [ -n "$resume" ]; then
   printf 'replacement-attempt\n' >> "$session_file.next"
   mv "$session_file.next" "$session_file" || exit 1
   [ -z "${OMP_FIXTURE_LOG:-}" ] || printf '%s\n' "$extension" >> "$OMP_FIXTURE_LOG"
-  if [ -f .recovery-mutate-on-launch ]; then
-    replacement_branch=$(tr -d '\r\n' < .recovery-mutate-on-launch)
-    git switch "$replacement_branch" || exit 1
-    printf 'replacement edit\n' > .recovery-replacement-edit
-    git add .recovery-replacement-edit || exit 1
-    git -c user.name='Recovery Fixture' -c user.email=recovery@example.invalid \
-      commit -m 'replacement mutation' || exit 1
-  fi
-  if [ -f .recovery-create-branch-on-launch ]; then
-    created_branch=$(tr -d '\r\n' < .recovery-create-branch-on-launch)
-    git branch "$created_branch" || exit 1
+  if [ -f .recovery-concurrent-worktree-on-launch ]; then
+    concurrent_worktree=$(tr -d '\r\n' < .recovery-concurrent-worktree-on-launch)
+    printf 'concurrent worktree edit\n' > "$concurrent_worktree/concurrent.txt"
+    git -C "$concurrent_worktree" add concurrent.txt || exit 1
+    git -C "$concurrent_worktree" -c user.name='Recovery Fixture' \
+      -c user.email=recovery@example.invalid commit -m 'concurrent mutation' || exit 1
   fi
 else
   printf 'FIRSTMATE_OP: v1 launch-brief: fixture\n' > "$session_file"
@@ -338,12 +333,6 @@ printf 'staged recovery state\n' > "$WORKTREE/.recovery-staged"
 git -C "$WORKTREE" add .recovery-staged
 printf 'unstaged recovery state\n' >> "$WORKTREE/.recovery-staged"
 RECOVERY_HEAD=$(git -C "$WORKTREE" rev-parse HEAD) || fail "fixture could not record the pre-recovery worktree head"
-RECOVERY_ALT_BRANCH="$BRANCH-recovery-rollback"
-RECOVERY_CREATED_BRANCH="$BRANCH-recovery-attempt-created"
-git -C "$WORKTREE" branch "$RECOVERY_ALT_BRANCH" "$RECOVERY_HEAD" \
-  || fail "fixture could not create the alternate replacement branch"
-printf '%s\n' "$RECOVERY_ALT_BRANCH" > "$WORKTREE/.recovery-mutate-on-launch"
-printf '%s\n' "$RECOVERY_CREATED_BRANCH" > "$WORKTREE/.recovery-create-branch-on-launch"
 rm "$WORKTREE/rollback-delete.txt"
 INJECTED_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_BEFORE_PUBLISH=1 spawn "$ID" --recover 2>&1)
 INJECTED_STATUS=$?
@@ -356,13 +345,7 @@ cmp -s "$HOME_DIR/state/$ID.status" "$LAB/status.before" || fail "failed recover
 [ "$(git -C "$WORKTREE" symbolic-ref --quiet --short HEAD)" = "$BRANCH" ] || fail "failed recovery changed the branch"
 [ "$(git -C "$WORKTREE" rev-parse HEAD)" = "$RECOVERY_HEAD" ] || fail "failed recovery retained a replacement commit"
 [ "$(git -C "$WORKTREE" rev-parse "$BRANCH")" = "$RECOVERY_HEAD" ] || fail "failed recovery did not restore the recorded branch ref"
-[ "$(git -C "$WORKTREE" rev-parse "$RECOVERY_ALT_BRANCH")" = "$RECOVERY_HEAD" ] \
-  || fail "failed recovery did not restore the alternate branch ref"
-git -C "$WORKTREE" show-ref --verify --quiet "refs/heads/$RECOVERY_CREATED_BRANCH" \
-  && fail "failed recovery retained an attempt-created branch ref"
 [ -f "$WORKTREE/.recovery-preserved" ] || fail "failed recovery discarded uncommitted work"
-[ -f "$WORKTREE/.recovery-mutate-on-launch" ] || fail "failed recovery discarded pre-existing mutation marker"
-[ -f "$WORKTREE/.recovery-create-branch-on-launch" ] || fail "failed recovery discarded pre-existing branch marker"
 [ ! -e "$WORKTREE/.recovery-replacement-edit" ] || fail "failed recovery retained replacement worktree edits"
 [ ! -e "$WORKTREE/rollback-delete.txt" ] || fail "failed recovery restored an unstaged tracked deletion"
 [ "$(git -C "$WORKTREE" show :'.recovery-staged')" = 'staged recovery state' ] \
@@ -372,9 +355,6 @@ git -C "$WORKTREE" show-ref --verify --quiet "refs/heads/$RECOVERY_CREATED_BRANC
 [ -f "$TASK_TMP/preserve-me" ] || fail "failed recovery removed pre-existing task scratch"
 [ ! -e "$TASK_TMP/gotmp" ] && [ ! -L "$TASK_TMP/gotmp" ] \
   || fail "failed recovery retained replacement-owned build scratch"
-rm -f "$WORKTREE/.recovery-mutate-on-launch"
-rm -f "$WORKTREE/.recovery-create-branch-on-launch"
-
 RECOVERED_OUTPUT=$(spawn "$ID" --recover) || fail "guarded recovery from a missing endpoint failed"
 assert_contains "$RECOVERED_OUTPUT" "recovered $ID harness=omp" "recovery did not report success"
 wait_for_state alive || fail "recovered missing endpoint was not live"
@@ -613,4 +593,35 @@ FRESH_RETRY_STATUS=$?
 [ "$FRESH_RETRY_STATUS" -ne 0 ] || fail "fresh-session cleanup failure allowed an unsafe retry"
 assert_contains "$FRESH_RETRY_OUTPUT" "could not select one exact prior task session" \
   "fresh-session cleanup guard did not refuse a deterministic retry"
+rm -f "$SESSION_DIR/.fm-spawn-recovery-cleanup-pending"
+rm -rf "$SESSION_DIR"
+[ ! -e "$SESSION_DIR" ] || fail "fixture could not remove the resolved fresh-session cleanup guard"
+rm -f "$SESSION_POINTER"
+rm -rf "$TASK_TMP"
+mkdir -p "$SESSION_DIR"
+printf 'FIRSTMATE_OP: v1 launch-brief: concurrent\n' > "$SESSION_FILE"
+printf '%s\n' "$SESSION_FILE" > "$SESSION_POINTER"
+CONCURRENT_WORKTREE="$LAB/concurrent-worktree"
+CONCURRENT_BRANCH="fm/concurrent-$ID"
+git -C "$PROJECT" worktree add -q -b "$CONCURRENT_BRANCH" "$CONCURRENT_WORKTREE" HEAD \
+  || fail "fixture could not create a concurrent linked worktree"
+CONCURRENT_HEAD=$(git -C "$CONCURRENT_WORKTREE" rev-parse HEAD) || fail "fixture could not record concurrent branch head"
+printf '%s\n' "$CONCURRENT_WORKTREE" > "$WORKTREE/.recovery-concurrent-worktree-on-launch"
+CONCURRENT_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_BEFORE_PUBLISH=1 spawn "$ID" --recover 2>&1)
+CONCURRENT_STATUS=$?
+[ "$CONCURRENT_STATUS" -ne 0 ] || fail "concurrent-ref recovery failure unexpectedly succeeded"
+assert_contains "$CONCURRENT_OUTPUT" "could not restore the preserved isolated worktree snapshot" \
+  "concurrent-ref recovery failure did not retain rollback authority"
+wait_for_state missing || fail "concurrent-ref recovery failure retained replacement endpoint"
+CONCURRENT_AFTER=$(git -C "$CONCURRENT_WORKTREE" rev-parse "$CONCURRENT_BRANCH") \
+  || fail "concurrent-ref recovery failure removed the concurrent branch"
+[ "$CONCURRENT_AFTER" != "$CONCURRENT_HEAD" ] \
+  || fail "fixture did not advance the concurrent linked worktree branch"
+[ -f "$HOME_DIR/state/$ID.omp-ref-rollback-pending" ] \
+  || fail "concurrent-ref recovery failure did not retain its rollback guard"
+CONCURRENT_RETRY_OUTPUT=$(spawn "$ID" --recover 2>&1)
+CONCURRENT_RETRY_STATUS=$?
+[ "$CONCURRENT_RETRY_STATUS" -ne 0 ] || fail "concurrent-ref recovery guard allowed an unsafe retry"
+assert_contains "$CONCURRENT_RETRY_OUTPUT" "unresolved branch rollback state" \
+  "concurrent-ref recovery guard did not name the branch rollback boundary"
 pass "guarded OMP recovery preserves task state, restores failed attempts, and rejects unsafe records"

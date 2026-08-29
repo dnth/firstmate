@@ -29,6 +29,10 @@ fm_spawn_recovery_preselect() { # <state> <task-id>
     echo "error: OMP recovery found unfinished ordinary-session teardown rollback state for task $id; preserving task state" >&2
     return 1
   fi
+  if fm_spawn_recovery_ref_rollback_pending "$state" "$id"; then
+    echo "error: OMP recovery found unresolved branch rollback state for task $id; preserving task state" >&2
+    return 1
+  fi
   meta="$state/$id.meta"
   [ -f "$meta" ] && [ ! -L "$meta" ] || {
     echo "error: OMP recovery requires regular recorded metadata for task $id; preserving task state" >&2
@@ -231,6 +235,12 @@ fm_spawn_recovery_teardown_rollback_pending() { # <state> <task-id>
   return 1
 }
 
+fm_spawn_recovery_ref_rollback_pending() { # <state> <task-id>
+  local state=$1 id=$2 guard
+  guard="$state/$id.omp-ref-rollback-pending"
+  [ -f "$guard" ] && [ ! -L "$guard" ]
+}
+
 fm_spawn_recovery_bind_legacy_session() {
   local source=${FM_SPAWN_RECOVERY_LEGACY_SESSION_FILE:-} session_dir dest mode created=0
   [ -n "$source" ] || return 0
@@ -374,9 +384,27 @@ fm_spawn_recovery_snapshot_worktree() {
   FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT=$snapshot
 }
 
+fm_spawn_recovery_snapshot_branch_ref_value() { # <snapshot> <ref>
+  awk -v ref="$2" '$1 == ref { count += 1; value = $2 } END { if (count == 1) print value; else exit 1 }' \
+    "$1/branch-refs"
+}
+
+fm_spawn_recovery_branch_refs_unchanged() { # <snapshot> <worktree> <branch-ref>
+  local snapshot=$1 worktree=$2 branch_ref=$3 ref object extra current_ref current_object saved
+  while IFS=' ' read -r ref object extra; do
+    [ "$ref" = "$branch_ref" ] && continue
+    current_object=$(git -C "$worktree" rev-parse --verify "$ref" 2>/dev/null || true)
+    [ "$current_object" = "$object" ] || return 1
+  done < "$snapshot/branch-refs"
+  while IFS=' ' read -r current_ref current_object; do
+    [ "$current_ref" = "$branch_ref" ] && continue
+    saved=$(fm_spawn_recovery_snapshot_branch_ref_value "$snapshot" "$current_ref" 2>/dev/null || true)
+    [ "$saved" = "$current_object" ] || return 1
+  done < <(git -C "$worktree" for-each-ref --format='%(refname) %(objectname)' refs/heads)
+}
+
 fm_spawn_recovery_restore_branch_refs() { # <snapshot> <worktree> <branch-ref> <head>
-  local snapshot=$1 worktree=$2 branch_ref=$3 head=$4 ref object extra current_ref current_object
-  local saved_ref saved_object known
+  local snapshot=$1 worktree=$2 branch_ref=$3 head=$4 ref object extra
   [ -f "$snapshot/branch-refs" ] && [ ! -L "$snapshot/branch-refs" ] || return 1
   grep -Fqx -- "$branch_ref $head" "$snapshot/branch-refs" || return 1
   while IFS=' ' read -r ref object extra; do
@@ -385,21 +413,9 @@ fm_spawn_recovery_restore_branch_refs() { # <snapshot> <worktree> <branch-ref> <
     case "$ref" in refs/heads/*) ;; *) return 1 ;; esac
     [ "$(git -C "$worktree" rev-parse --verify "$object^{commit}" 2>/dev/null || true)" = "$object" ] || return 1
   done < "$snapshot/branch-refs"
+  fm_spawn_recovery_branch_refs_unchanged "$snapshot" "$worktree" "$branch_ref" || return 1
   git -C "$worktree" update-ref "$branch_ref" "$head" || return 1
   git -C "$worktree" symbolic-ref HEAD "$branch_ref" || return 1
-  while IFS=' ' read -r ref object extra; do
-    git -C "$worktree" update-ref "$ref" "$object" || return 1
-  done < "$snapshot/branch-refs"
-  while IFS=' ' read -r current_ref current_object; do
-    known=0
-    while IFS=' ' read -r saved_ref saved_object; do
-      if [ "$current_ref" = "$saved_ref" ]; then
-        known=1
-        break
-      fi
-    done < "$snapshot/branch-refs"
-    [ "$known" = 1 ] || git -C "$worktree" update-ref -d "$current_ref" || return 1
-  done < <(git -C "$worktree" for-each-ref --format='%(refname) %(objectname)' refs/heads)
 }
 
 fm_spawn_recovery_restore_worktree() {
@@ -418,14 +434,27 @@ fm_spawn_recovery_restore_worktree() {
   IFS= read -r branch_ref < "$snapshot/branch-ref" || return 1
   case "$branch_ref" in refs/heads/*) ;; *) return 1 ;; esac
   [ "$(git -C "$worktree" rev-parse --verify "$head^{commit}" 2>/dev/null || true)" = "$head" ] || return 1
-  fm_spawn_recovery_restore_branch_refs "$snapshot" "$worktree" "$branch_ref" "$head" \
-    && git -C "$worktree" reset --hard "$head" >/dev/null \
+  if ! fm_spawn_recovery_restore_branch_refs "$snapshot" "$worktree" "$branch_ref" "$head"; then
+    fm_spawn_recovery_mark_ref_rollback_pending || return 1
+    return 1
+  fi
+  git -C "$worktree" reset --hard "$head" >/dev/null \
     && git -C "$worktree" clean -fdx >/dev/null \
     && { [ ! -s "$snapshot/index.patch" ] || git -C "$worktree" apply --index "$snapshot/index.patch"; } \
     && { [ ! -s "$snapshot/worktree.patch" ] || git -C "$worktree" apply "$snapshot/worktree.patch"; } \
     && tar -xf "$snapshot/worktree.tar" -C "$worktree" || return 1
   rm -rf -- "$snapshot" || return 1
   FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT=
+}
+
+fm_spawn_recovery_mark_ref_rollback_pending() {
+  local guard=${FM_SPAWN_RECOVERY_REF_ROLLBACK_GUARD:-} staged
+  [ -n "$guard" ] || return 1
+  staged=$(mktemp "$guard.XXXXXX") || return 1
+  if ! printf '%s\n' pending > "$staged" || ! mv -f -- "$staged" "$guard"; then
+    rm -f -- "$staged"
+    return 1
+  fi
 }
 
 fm_spawn_recovery_prepare() { # <state> <data> <task-id>
@@ -444,6 +473,7 @@ fm_spawn_recovery_prepare() { # <state> <data> <task-id>
   FM_SPAWN_RECOVERY_READY=
   FM_SPAWN_RECOVERY_STARTED=
   FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT=
+  FM_SPAWN_RECOVERY_REF_ROLLBACK_GUARD="$state/$id.omp-ref-rollback-pending"
   FM_SPAWN_RECOVERY_FINALIZATION_BACKUP=
   FM_SPAWN_RECOVERY_FINALIZATION_ARCHIVE=
   FM_SPAWN_RECOVERY_FINALIZATION_ORIGINAL=
