@@ -1102,7 +1102,7 @@ The real smoke proves socket access, fresh readiness, current-path probing, send
 The durable local steering-inbox path was verified live on 2026-08-28 against Codex CLI 0.149.1 and OMP 18.0.4 in isolated neutral-project tmux sessions.
 For each harness, `fm-send.sh` published an ordinary steer as a sequenced `state/<id>.inbox/*.msg` record and submitted only the constant doorbell to the terminal.
 The real worker read the record, performed the requested file action, and acknowledged delivery by moving the record into `state/<id>.inbox/handled/`.
-That dated two-harness run used this command:
+This acceptance guard is scoped to the required Codex and OMP proof; adapter-specific compatibility remains owned by each harness's existing live guard.
 
 ```sh
 FM_SEND_INBOX_LIVE_E2E=1 \
@@ -1111,22 +1111,12 @@ FM_SEND_INBOX_LIVE_E2E=1 \
   bash tests/fm-send-inbox-doorbell-live-e2e.test.sh
 ```
 
-Dated observed result:
+Observed result:
 
 ```text
 ok - codex (codex-cli 0.149.1): real worker acted on and acknowledged the durable record
 ok - omp (omp/18.0.4): real worker acted on and acknowledged the durable record
 ok - live steering-inbox doorbell guard: 2 harnesses verified
-```
-
-The current guard discovers every supported local harness, runs each installed harness, and reports each absent harness explicitly.
-Codex and OMP remain mandatory.
-Refresh the evidence with:
-
-```sh
-FM_SEND_INBOX_LIVE_E2E=1 \
-  FM_SEND_INBOX_LIVE_TIMEOUT=180 \
-  bash tests/fm-send-inbox-doorbell-live-e2e.test.sh
 ```
 
 ## Codex App host tools
