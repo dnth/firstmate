@@ -4182,6 +4182,10 @@ if [ "$HARNESS" = omp ]; then
         esac
       fi
       if [ -f "$OMP_STARTED" ] && [ "$OMP_WORKER_SESSION_OK" -eq 1 ]; then
+        if [ "$RECOVER" -eq 1 ] \
+           && [ "${FM_SPAWN_RECOVERY_TEST_HARD_INTERRUPT_AFTER_SESSION:-0}" = 1 ]; then
+          kill -KILL "$$"
+        fi
         OMP_ACKED=1
         break
       fi

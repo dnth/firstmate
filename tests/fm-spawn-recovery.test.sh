@@ -376,6 +376,27 @@ assert_contains "$PRELAUNCH_OUTPUT" "GOTMPDIR export could not be submitted" \
 wait_for_state missing || fail "pre-launch recovery failure retained its replacement endpoint"
 cmp -s "$META" "$LAB/meta.before" || fail "pre-launch recovery failure rewrote metadata"
 cmp -s "$SESSION_FILE" "$LAB/session.before" || fail "pre-launch recovery failure changed the durable session"
+HARD_INTERRUPT_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_HARD_INTERRUPT_AFTER_SESSION=1 spawn "$ID" --recover 2>&1)
+HARD_INTERRUPT_STATUS=$?
+[ "$HARD_INTERRUPT_STATUS" -ne 0 ] || fail "hard-interrupted recovery unexpectedly succeeded"
+wait_for_state alive || fail "hard-interrupted recovery did not retain its replacement endpoint"
+cmp -s "$META" "$LAB/meta.before" || fail "hard-interrupted recovery rewrote metadata"
+[ -f "$HOME_DIR/state/$ID.omp-recovery-rollback-pending" ] \
+  || fail "hard-interrupted recovery did not retain its active rollback manifest"
+assert_contains "$(cat "$SESSION_FILE")" "replacement-attempt" \
+  "hard-interrupted recovery did not reproduce the durable-session mutation"
+HARD_RETRY_OUTPUT=$(spawn "$ID" --recover 2>&1)
+HARD_RETRY_STATUS=$?
+[ "$HARD_RETRY_STATUS" -ne 0 ] || fail "hard-interrupted recovery allowed an unsafe retry"
+assert_contains "$HARD_RETRY_OUTPUT" "unfinished recovery rollback state" \
+  "hard-interrupted recovery did not name its durable safety boundary"
+PATH="$FIXTURE_PATH" tmux kill-window -t "$TARGET"
+wait_for_state missing || fail "hard-interrupted recovery endpoint did not become missing"
+HARD_TRANSACTION=$(sed -n 's/^transaction=//p' "$HOME_DIR/state/$ID.omp-recovery-rollback-pending")
+case "$HARD_TRANSACTION" in "$HOME_DIR/state/.fm-spawn-recovery-$ID."*) ;; *) fail "hard-interrupted recovery recorded an unsafe transaction path" ;; esac
+cp "$LAB/session.before" "$SESSION_FILE"
+rm -f "$HOME_DIR/state/$ID.omp-recovery-rollback-pending"
+rm -rf "$HARD_TRANSACTION"
 
 printf 'FIRSTMATE_OP: v1 launch-brief: retained-sibling\n' > "$SESSION_DIR/retained-sibling.jsonl"
 POINTER_OUTPUT=$(spawn "$ID" --recover) || fail "authoritative durable pointer did not disambiguate retained sessions"
@@ -454,13 +475,44 @@ rm -f "$WORKTREE/.recovery-tool-gate-release-check"
 PATH="$FIXTURE_PATH" tmux kill-window -t "$TARGET"
 wait_for_state missing || fail "gate-commit interruption fixture endpoint did not stop"
 cp "$SESSION_FILE" "$LAB/session.before"
+BACKUP_FINALIZATION_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_FINALIZATION_BACKUP_DELETE=1 spawn "$ID" --recover 2>&1) \
+  || fail "post-commit backup cleanup failure reported a failed recovery"
+assert_contains "$BACKUP_FINALIZATION_OUTPUT" "recovered $ID harness=omp" \
+  "post-commit backup cleanup failure did not preserve committed recovery"
+wait_for_state alive || fail "post-commit backup cleanup failure did not retain replacement endpoint"
+[ -f "$HOME_DIR/state/$ID.omp-recovery-cleanup-pending" ] \
+  || fail "post-commit backup cleanup failure did not retain cleanup-pending state"
+PATH="$FIXTURE_PATH" tmux kill-window -t "$TARGET"
+wait_for_state missing || fail "post-commit backup cleanup fixture endpoint did not stop"
+CLEANUP_RETRY_OUTPUT=$(spawn "$ID" --recover) \
+  || fail "guarded cleanup retry after backup deletion failure failed"
+assert_contains "$CLEANUP_RETRY_OUTPUT" "recovered $ID harness=omp" \
+  "guarded cleanup retry did not report recovery"
+wait_for_state alive || fail "guarded cleanup retry did not retain replacement endpoint"
+[ ! -e "$HOME_DIR/state/$ID.omp-recovery-cleanup-pending" ] \
+  && [ ! -L "$HOME_DIR/state/$ID.omp-recovery-cleanup-pending" ] \
+  || fail "guarded cleanup retry retained cleanup-pending state"
+PATH="$FIXTURE_PATH" tmux kill-window -t "$TARGET"
+wait_for_state missing || fail "guarded cleanup retry fixture endpoint did not stop"
 ARCHIVE_FINALIZATION_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_FINALIZATION_ARCHIVE_DELETE=1 spawn "$ID" --recover 2>&1) \
   || fail "post-commit archive cleanup failure reported a failed recovery"
 assert_contains "$ARCHIVE_FINALIZATION_OUTPUT" "recovered $ID harness=omp" \
   "post-commit archive cleanup failure did not preserve committed recovery"
 wait_for_state alive || fail "post-commit archive cleanup failure did not retain replacement endpoint"
+[ -f "$HOME_DIR/state/$ID.omp-recovery-cleanup-pending" ] \
+  || fail "post-commit archive cleanup failure did not retain cleanup-pending state"
 PATH="$FIXTURE_PATH" tmux kill-window -t "$TARGET"
 wait_for_state missing || fail "post-commit archive cleanup fixture endpoint did not stop"
+ARCHIVE_CLEANUP_RETRY_OUTPUT=$(spawn "$ID" --recover) \
+  || fail "guarded cleanup retry after archive deletion failure failed"
+assert_contains "$ARCHIVE_CLEANUP_RETRY_OUTPUT" "recovered $ID harness=omp" \
+  "guarded archive cleanup retry did not report recovery"
+wait_for_state alive || fail "guarded archive cleanup retry did not retain replacement endpoint"
+[ ! -e "$HOME_DIR/state/$ID.omp-recovery-cleanup-pending" ] \
+  && [ ! -L "$HOME_DIR/state/$ID.omp-recovery-cleanup-pending" ] \
+  || fail "guarded archive cleanup retry retained cleanup-pending state"
+PATH="$FIXTURE_PATH" tmux kill-window -t "$TARGET"
+wait_for_state missing || fail "guarded archive cleanup retry fixture endpoint did not stop"
 cp "$SESSION_FILE" "$LAB/session.before"
 ln -s "$SESSION_FILE" "$SESSION_DIR/symlinked.jsonl"
 SYMLINK_OUTPUT=$(spawn "$ID" --recover 2>&1)

@@ -246,9 +246,30 @@ fm_spawn_recovery_ref_rollback_pending() { # <state> <task-id>
 }
 
 fm_spawn_recovery_rollback_pending() { # <state> <task-id>
-  local state=$1 id=$2 manifest
+  local state=$1 id=$2 manifest phase
   manifest="$state/$id.omp-recovery-rollback-pending"
-  [ -e "$manifest" ] || [ -L "$manifest" ]
+  [ -e "$manifest" ] || [ -L "$manifest" ] || return 1
+  [ -f "$manifest" ] && [ ! -L "$manifest" ] || return 0
+  phase=$(fm_spawn_recovery_exact_meta_value "$manifest" phase 2>/dev/null || true)
+  case "$phase" in
+    rollback|"") return 0 ;;
+    active)
+      fm_spawn_recovery_manifest_gate_committed "$manifest" || return 0
+      return 1
+      ;;
+    committed) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+fm_spawn_recovery_manifest_gate_committed() { # <manifest>
+  local manifest=$1 gate nonce value
+  [ -f "$manifest" ] && [ ! -L "$manifest" ] || return 1
+  gate=$(fm_spawn_recovery_exact_meta_value "$manifest" tool_gate 2>/dev/null || true)
+  nonce=$(fm_spawn_recovery_exact_meta_value "$manifest" tool_gate_nonce 2>/dev/null || true)
+  [ -n "$gate" ] && [ -n "$nonce" ] && [ -f "$gate" ] && [ ! -L "$gate" ] || return 1
+  IFS= read -r value < "$gate" || value=
+  [ "$value" = "committed:$nonce" ]
 }
 
 fm_spawn_recovery_prepare_transaction() { # <state> <task-id>
@@ -586,7 +607,9 @@ fm_spawn_recovery_prepare() { # <state> <data> <task-id>
   FM_SPAWN_RECOVERY_TOOL_GATE_NONCE=
   FM_SPAWN_RECOVERY_TRANSACTION_DIR=
   FM_SPAWN_RECOVERY_WORKTREE_DIVERGED=0
+  FM_SPAWN_RECOVERY_ID=$id
   FM_SPAWN_RECOVERY_ROLLBACK_MANIFEST="$state/$id.omp-recovery-rollback-pending"
+  FM_SPAWN_RECOVERY_CLEANUP_MANIFEST="$state/$id.omp-recovery-cleanup-pending"
   FM_SPAWN_RECOVERY_REF_ROLLBACK_GUARD="$state/$id.omp-ref-rollback-pending"
   FM_SPAWN_RECOVERY_FINALIZATION_BACKUP=
   FM_SPAWN_RECOVERY_FINALIZATION_ARCHIVE=
@@ -722,6 +745,10 @@ fm_spawn_recovery_prepare() { # <state> <data> <task-id>
   if [ "${FM_SPAWN_RECOVERY_PREFLIGHT_ONLY:-0}" = 1 ]; then
     return 0
   fi
+  fm_spawn_recovery_reconcile_cleanup_pending "$state" "$id" || {
+    echo "error: OMP recovery could not retire committed private cleanup for task $id; preserving task state" >&2
+    return 1
+  }
   fm_spawn_recovery_prepare_transaction "$state" "$id" || {
     echo "error: OMP recovery could not prepare its durable transaction state for task $id; preserving task state" >&2
     return 1
@@ -747,6 +774,10 @@ fm_spawn_recovery_prepare() { # <state> <data> <task-id>
   }
   fm_spawn_recovery_rollback_snapshot_complete || {
     echo "error: OMP recovery could not complete its rollback snapshot for task $id; preserving task state" >&2
+    return 1
+  }
+  fm_spawn_recovery_write_rollback_manifest active || {
+    echo "error: OMP recovery could not persist its active rollback state for task $id; preserving task state" >&2
     return 1
   }
   FM_SPAWN_RECOVERY_ROLLBACK_ARMED=1
@@ -854,19 +885,19 @@ fm_spawn_recovery_release_tool_gate() {
   fi
 }
 
-fm_spawn_recovery_write_rollback_manifest() {
-  local manifest=${FM_SPAWN_RECOVERY_ROLLBACK_MANIFEST:-} state staged
+fm_spawn_recovery_write_rollback_manifest() { # <phase>
+  local phase=${1:-rollback} manifest=${FM_SPAWN_RECOVERY_ROLLBACK_MANIFEST:-} state staged
+  case "$phase" in active|rollback|committed) ;; *) return 1 ;; esac
   [ -n "$manifest" ] || return 1
   state=$(dirname "$manifest")
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   if [ -e "$manifest" ] || [ -L "$manifest" ]; then
     [ -f "$manifest" ] && [ ! -L "$manifest" ] || return 1
-    return 0
   fi
   staged=$(mktemp "$state/.fm-spawn-recovery-rollback.XXXXXX") || return 1
   if ! {
     printf '%s\n' 'version=1'
-    printf '%s\n' 'phase=rollback'
+    printf 'phase=%s\n' "$phase"
     printf 'transaction=%s\n' "${FM_SPAWN_RECOVERY_TRANSACTION_DIR:-}"
     printf 'tool_gate=%s\n' "${FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE:-}"
     printf 'tool_gate_nonce=%s\n' "${FM_SPAWN_RECOVERY_TOOL_GATE_NONCE:-}"
@@ -876,10 +907,104 @@ fm_spawn_recovery_write_rollback_manifest() {
     printf 'metadata_snapshot=%s\n' "${FM_SPAWN_RECOVERY_META_SNAPSHOT:-}"
     printf 'worktree_snapshot=%s\n' "${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}"
     printf 'turnend_backup=%s\n' "${FM_SPAWN_RECOVERY_TURNEND_BACKUP:-}"
+    printf 'finalization_backup=%s\n' "${FM_SPAWN_RECOVERY_FINALIZATION_BACKUP:-}"
+    printf 'finalization_archive=%s\n' "${FM_SPAWN_RECOVERY_FINALIZATION_ARCHIVE:-}"
   } > "$staged" || ! mv -f -- "$staged" "$manifest"; then
     rm -f -- "$staged"
     return 1
   fi
+}
+
+fm_spawn_recovery_write_cleanup_pending() {
+  local manifest=${FM_SPAWN_RECOVERY_CLEANUP_MANIFEST:-} state staged
+  [ -n "$manifest" ] || return 1
+  state=$(dirname "$manifest")
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  staged=$(mktemp "$state/.fm-spawn-recovery-cleanup.XXXXXX") || return 1
+  if ! {
+    printf '%s\n' 'version=1'
+    printf '%s\n' 'phase=committed'
+    printf 'transaction=%s\n' "${FM_SPAWN_RECOVERY_TRANSACTION_DIR:-}"
+    printf 'tool_gate=%s\n' "${FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE:-}"
+    printf 'tool_gate_nonce=%s\n' "${FM_SPAWN_RECOVERY_TOOL_GATE_NONCE:-}"
+    printf 'finalization_backup=%s\n' "${FM_SPAWN_RECOVERY_FINALIZATION_BACKUP:-}"
+    printf 'finalization_archive=%s\n' "${FM_SPAWN_RECOVERY_FINALIZATION_ARCHIVE:-}"
+  } > "$staged" || ! mv -f -- "$staged" "$manifest"; then
+    rm -f -- "$staged"
+    return 1
+  fi
+}
+
+fm_spawn_recovery_cleanup_manifest_paths_valid() { # <state> <task-id> <manifest>
+  local state=$1 id=$2 manifest=$3 transaction gate nonce backup archive value
+  transaction=$(fm_spawn_recovery_exact_meta_value "$manifest" transaction 2>/dev/null || true)
+  gate=$(fm_spawn_recovery_exact_meta_value "$manifest" tool_gate 2>/dev/null || true)
+  nonce=$(fm_spawn_recovery_exact_meta_value "$manifest" tool_gate_nonce 2>/dev/null || true)
+  backup=$(fm_spawn_recovery_exact_meta_value "$manifest" finalization_backup 2>/dev/null || true)
+  archive=$(fm_spawn_recovery_exact_meta_value "$manifest" finalization_archive 2>/dev/null || true)
+  case "$transaction" in "$state"/.fm-spawn-recovery-"$id".*) ;; *) return 1 ;; esac
+  [ -d "$transaction" ] && [ ! -L "$transaction" ] || return 1
+  [ "$gate" = "$transaction/tool-gate" ] && [ -n "$nonce" ] || return 1
+  [ -f "$gate" ] && [ ! -L "$gate" ] || return 1
+  IFS= read -r value < "$gate" || value=
+  [ "$value" = "committed:$nonce" ] || return 1
+  case "$backup" in "$transaction"/.finalize.*) ;; *) return 1 ;; esac
+  case "$archive" in "$transaction"/.finalize.*.tar) ;; *) return 1 ;; esac
+  FM_SPAWN_RECOVERY_PENDING_TRANSACTION=$transaction
+  FM_SPAWN_RECOVERY_PENDING_BACKUP=$backup
+  FM_SPAWN_RECOVERY_PENDING_ARCHIVE=$archive
+}
+
+fm_spawn_recovery_remove_committed_rollback_manifest() { # <state> <task-id>
+  local state=$1 id=$2 manifest phase
+  manifest="$state/$id.omp-recovery-rollback-pending"
+  [ -e "$manifest" ] || [ -L "$manifest" ] || return 0
+  [ -f "$manifest" ] && [ ! -L "$manifest" ] || return 1
+  phase=$(fm_spawn_recovery_exact_meta_value "$manifest" phase 2>/dev/null || true)
+  case "$phase" in active|committed) ;; *) return 1 ;; esac
+  fm_spawn_recovery_manifest_gate_committed "$manifest" || return 1
+  rm -f -- "$manifest"
+}
+
+fm_spawn_recovery_cleanup_pending_exact() { # <state> <task-id> <manifest>
+  local state=$1 id=$2 manifest=$3 backup archive
+  [ -f "$manifest" ] && [ ! -L "$manifest" ] || return 1
+  [ "$(fm_spawn_recovery_exact_meta_value "$manifest" phase 2>/dev/null || true)" = committed ] || return 1
+  fm_spawn_recovery_cleanup_manifest_paths_valid "$state" "$id" "$manifest" || return 1
+  backup=$FM_SPAWN_RECOVERY_PENDING_BACKUP
+  archive=$FM_SPAWN_RECOVERY_PENDING_ARCHIVE
+  if [ -e "$backup" ] || [ -L "$backup" ]; then
+    [ -d "$backup" ] && [ ! -L "$backup" ] || return 1
+    [ "${FM_SPAWN_RECOVERY_TEST_FAIL_FINALIZATION_BACKUP_DELETE:-0}" != 1 ] || return 1
+    rm -rf -- "$backup" || return 1
+  fi
+  if [ -e "$archive" ] || [ -L "$archive" ]; then
+    [ -f "$archive" ] && [ ! -L "$archive" ] || return 1
+    [ "${FM_SPAWN_RECOVERY_TEST_FAIL_FINALIZATION_ARCHIVE_DELETE:-0}" != 1 ] || return 1
+    rm -f -- "$archive" || return 1
+  fi
+  rm -f -- "$manifest" || return 1
+  fm_spawn_recovery_remove_committed_rollback_manifest "$state" "$id"
+}
+
+fm_spawn_recovery_reconcile_cleanup_pending() { # <state> <task-id>
+  local state=$1 id=$2 cleanup rollback
+  cleanup="$state/$id.omp-recovery-cleanup-pending"
+  rollback="$state/$id.omp-recovery-rollback-pending"
+  if [ -e "$cleanup" ] || [ -L "$cleanup" ]; then
+    fm_spawn_recovery_cleanup_pending_exact "$state" "$id" "$cleanup"
+    return
+  fi
+  [ -e "$rollback" ] || [ -L "$rollback" ] || return 0
+  fm_spawn_recovery_manifest_gate_committed "$rollback" || return 0
+  FM_SPAWN_RECOVERY_CLEANUP_MANIFEST=$cleanup
+  FM_SPAWN_RECOVERY_TRANSACTION_DIR=$(fm_spawn_recovery_exact_meta_value "$rollback" transaction) || return 1
+  FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE=$(fm_spawn_recovery_exact_meta_value "$rollback" tool_gate) || return 1
+  FM_SPAWN_RECOVERY_TOOL_GATE_NONCE=$(fm_spawn_recovery_exact_meta_value "$rollback" tool_gate_nonce) || return 1
+  FM_SPAWN_RECOVERY_FINALIZATION_BACKUP=$(fm_spawn_recovery_exact_meta_value "$rollback" finalization_backup) || return 1
+  FM_SPAWN_RECOVERY_FINALIZATION_ARCHIVE=$(fm_spawn_recovery_exact_meta_value "$rollback" finalization_archive) || return 1
+  fm_spawn_recovery_write_cleanup_pending || return 1
+  fm_spawn_recovery_cleanup_pending_exact "$state" "$id" "$cleanup"
 }
 
 fm_spawn_recovery_remove_rollback_manifest() {
@@ -1143,6 +1268,11 @@ fm_spawn_recovery_backup_finalization_state() {
     return 1
   fi
   FM_SPAWN_RECOVERY_FINALIZATION_BACKUP=$backup
+  fm_spawn_recovery_write_rollback_manifest active || {
+    FM_SPAWN_RECOVERY_FINALIZATION_BACKUP=
+    rm -rf -- "$backup"
+    return 1
+  }
 }
 
 fm_spawn_recovery_restore_finalization_state() {
@@ -1180,6 +1310,11 @@ fm_spawn_recovery_archive_finalization_state() {
     return 1
   }
   FM_SPAWN_RECOVERY_FINALIZATION_ARCHIVE=$archive
+  fm_spawn_recovery_write_rollback_manifest active || {
+    FM_SPAWN_RECOVERY_FINALIZATION_ARCHIVE=
+    rm -f -- "$archive"
+    return 1
+  }
 }
 
 fm_spawn_recovery_restore_finalization_archive() {
@@ -1240,13 +1375,16 @@ fm_spawn_recovery_complete() {
   fm_spawn_recovery_remove_rollback_artifacts || return 1
   fm_spawn_recovery_archive_finalization_state || return 1
   fm_spawn_recovery_release_tool_gate || return 1
+  fm_spawn_recovery_write_rollback_manifest committed || return 1
+  fm_spawn_recovery_write_cleanup_pending || return 1
+  FM_SPAWN_RECOVERY_FINALIZED=1
   if [ "${FM_SPAWN_RECOVERY_TEST_INTERRUPT_AFTER_GATE_COMMIT:-0}" = 1 ]; then
     kill -TERM "$$"
   fi
-  FM_SPAWN_RECOVERY_FINALIZED=1
-  rm -rf -- "$FM_SPAWN_RECOVERY_FINALIZATION_BACKUP" 2>/dev/null || true
-  if [ "${FM_SPAWN_RECOVERY_TEST_FAIL_FINALIZATION_ARCHIVE_DELETE:-0}" != 1 ]; then
-    rm -f -- "$FM_SPAWN_RECOVERY_FINALIZATION_ARCHIVE" 2>/dev/null || true
+  if ! fm_spawn_recovery_cleanup_pending_exact "$(dirname "$FM_SPAWN_RECOVERY_ROLLBACK_MANIFEST")" \
+    "${FM_SPAWN_RECOVERY_ID:-}" "$FM_SPAWN_RECOVERY_CLEANUP_MANIFEST"; then
+    echo "warning: OMP recovery committed replacement authority but retained private cleanup for a later guarded retry" >&2
+    return 0
   fi
   FM_SPAWN_RECOVERY_FINALIZATION_BACKUP=
   FM_SPAWN_RECOVERY_FINALIZATION_ARCHIVE=
@@ -1265,7 +1403,7 @@ fm_spawn_recovery_abort() { # <backend> <target>
   if [ "${FM_SPAWN_RECOVERY_FINALIZED:-0}" = 1 ] \
      || fm_spawn_recovery_tool_gate_committed; then
     FM_SPAWN_RECOVERY_FINALIZED=1
-    fm_spawn_recovery_cleanup_artifacts
+    fm_spawn_recovery_reconcile_cleanup_pending "$(dirname "$FM_SPAWN_RECOVERY_ROLLBACK_MANIFEST")" "${FM_SPAWN_RECOVERY_ID:-}" || true
     return 0
   fi
   if [ "${FM_SPAWN_RECOVERY_ROLLBACK_ARMED:-0}" != 1 ]; then
@@ -1275,7 +1413,7 @@ fm_spawn_recovery_abort() { # <backend> <target>
     }
     return 0
   fi
-  fm_spawn_recovery_write_rollback_manifest || {
+  fm_spawn_recovery_write_rollback_manifest rollback || {
     echo "warning: OMP recovery could not persist its rollback state; preserving recovery artifacts and task state" >&2
     return 1
   }
