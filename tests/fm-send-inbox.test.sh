@@ -21,7 +21,9 @@
 #      body, and the pending-reply expectation is marked delivered at enqueue.
 #   9. Pending-reply bookkeeping failure after enqueue never reports a
 #      retryable send failure that could duplicate the durable instruction.
-#  10. An unwritable inbox is a real local failure: nonzero exit, nothing
+#  10. A resolve-key close failure after enqueue still receives exactly one
+#      immediate doorbell before the command reports the closure failure.
+#  11. An unwritable inbox is a real local failure: nonzero exit, nothing
 #      typed, and a just-created pending-reply expectation is discarded.
 # Every case below that passes a literal `$...` message quotes it on purpose
 # (the point is sending an unexpanded `$` line), so SC2016 is disabled.
@@ -61,6 +63,11 @@ case "${1:-}" in
     done
     if [ "$literal" = 1 ]; then
       printf '%s\n' "${1:-}" >> "$FM_SEND_LOG"
+      if [ -n "${FM_FAKE_RING_BREAK_STATUS:-}" ] \
+        && [ -f "$FM_FAKE_RING_BREAK_STATUS" ]; then
+        /bin/mv "$FM_FAKE_RING_BREAK_STATUS" "$FM_FAKE_RING_BREAK_STATUS.saved"
+        mkdir "$FM_FAKE_RING_BREAK_STATUS"
+      fi
     fi
     exit 0 ;;
   display-message)
@@ -315,6 +322,25 @@ SH
   pass "fm-send inbox: lost reply bookkeeping never invites a resend, and the delivered steer is never duplicated"
 }
 
+test_resolve_close_failure_still_rings_once() {
+  local dir err rc status doorbells
+  dir=$(setup_case resolve-close-failure); err="$dir/send.err"
+  status="$dir/home/state/t1.status"
+  printf '%s\n' 'needs-decision [key=delivery-order]: choose now' > "$status"
+
+  run_send "$dir" "$err" FM_FAKE_RING_BREAK_STATUS="$status" -- \
+    t1 --resolve-key delivery-order "use the durable path"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a decision closure failure should remain nonzero"
+  [ -f "$dir/home/state/t1.inbox/001.msg" ] \
+    || fail "the answer was not durably recorded before the closure failure"
+  doorbells=$(grep -cF 'Firstmate instruction waiting' "$dir/send.log" || true)
+  [ "$doorbells" = 1 ] \
+    || fail "the enqueued answer should ring exactly once before closure fails, got $doorbells"
+  assert_contains "$(cat "$err")" "could not be closed" \
+    "the post-ring resolve-key closure failure should stay explicit"
+  pass "fm-send inbox: resolve-key closure failure follows one immediate doorbell"
+}
+
 test_meta_lock_contention_fails_bounded() {
   local dir err rc holder marker lock i
   dir=$(setup_case meta-lock); err="$dir/send.err"
@@ -368,5 +394,6 @@ test_explicit_target_stays_typed
 test_key_path_never_touches_inbox
 test_secondmate_marker_and_enqueue_delivery
 test_post_enqueue_bookkeeping_failure_is_not_retryable
+test_resolve_close_failure_still_rings_once
 test_meta_lock_contention_fails_bounded
 test_unwritable_inbox_fails_loudly
