@@ -4,11 +4,11 @@
 # and acknowledge it by moving the record into handled/.
 #
 # Run with FM_SEND_INBOX_LIVE_E2E=1.
-# This spends one small model turn per requested harness and uses a private tmux
+# This spends one small model turn per installed supported harness and uses a private tmux
 # server only; it does not start, stop, or otherwise drive Herdr lifecycle.
-# Codex and OMP are mandatory. Select the optional harness set with
-# FM_SEND_INBOX_LIVE_HARNESSES and tune the per-harness wait with
-# FM_SEND_INBOX_LIVE_TIMEOUT (default 240 seconds).
+# Codex and OMP are mandatory. All supported local harnesses are always
+# discovered. Tune the per-harness wait with FM_SEND_INBOX_LIVE_TIMEOUT
+# (default 240 seconds).
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -261,22 +261,9 @@ check_harness() {  # <harness> <binary>
     || tmux -L "$SOCKET" kill-pane -t "$target" 2>/dev/null || true
 }
 
-HARNESSES='codex omp'
-OPTIONAL_HARNESSES=${FM_SEND_INBOX_LIVE_HARNESSES:-'claude opencode pi pi-signed grok kimi hermes'}
-for harness in $OPTIONAL_HARNESSES; do
-  case "$harness" in
-    codex|omp) continue ;;
-    claude|opencode|pi|pi-signed|grok|kimi|hermes) ;;
-    *)
-      echo "not ok - unsupported live harness selection: $harness" >&2
-      exit 1
-      ;;
-  esac
-  case " $HARNESSES " in
-    *" $harness "*) ;;
-    *) HARNESSES="$HARNESSES $harness" ;;
-  esac
-done
+HARNESSES='codex omp claude opencode pi pi-signed grok kimi hermes'
+[ -z "${FM_SEND_INBOX_LIVE_HARNESSES:-}" ] \
+  || note "FM_SEND_INBOX_LIVE_HARNESSES does not filter this guard; all supported local harnesses are checked"
 
 for harness in $HARNESSES; do
   if binary=$(harness_binary "$harness"); then
