@@ -98,10 +98,11 @@ assert_contains "$out" "armed: $SID offset=0" "remote reply source was not armed
 INITIAL_CORR=$(fm_pending_reply_create "$PARENT" "$PARENT/state" ios "await initial correlated report")
 fm_pending_reply_mark_delivered "$PARENT/state" "$INITIAL_CORR" \
   || fail "could not create initial reply expectation"
+INITIAL_CORR_UPPER=$(printf '%s' "$INITIAL_CORR" | tr 'a-f' 'A-F')
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/start-one.out" 2>&1 &
 RUNNER=$!
 wait_for "$CLAIMS/$SID.claim" || fail "process-event runner never claimed the remote reply source"
-printf 'done [corr=%s]: build verified (data/reply/report.md)\n' "$INITIAL_CORR" \
+printf 'done [corr=%s]: build verified (data/reply/report.md)\n' "$INITIAL_CORR_UPPER" \
   >> "$REMOTE/state/parent-replies.status"
 wait "$RUNNER" || fail "remote reply source failed to capture its first delta"
 RESULT=$(find "$PARENT/state/procevent-inbox" -name "$SID.1.result" -print -quit 2>/dev/null)
@@ -109,7 +110,7 @@ if [ -z "$RESULT" ]; then
   printf 'runner output:\n%s\n' "$(cat "$TMP_ROOT/start-one.out")" >&2
   fail "the remote reply delta was not durably captured"
 fi
-assert_grep "done [corr=$INITIAL_CORR]" "$RESULT" "captured delta lost the correlated status line"
+assert_grep "done [corr=$INITIAL_CORR_UPPER]" "$RESULT" "captured delta lost the correlated status line"
 assert_grep "procevent remote-reply $SID 1" "$PARENT/state/.wake-queue" "runner did not publish the normalized remote-reply event"
 assert_no_grep 'build verified' "$PARENT/state/.wake-queue" "reply payload leaked into the event queue"
 cmp -s "$SOURCE_BEFORE" "$REMOTE/state/parent-replies.status" \
@@ -125,7 +126,7 @@ remote_env "$ADAPTER" handle ios 1 "$RESULT" > "$TMP_ROOT/handle-arm-fail.out" 2
 handle_arm_rc=$?
 set -e
 [ "$handle_arm_rc" -ne 0 ] || fail "reply handling acknowledged a result whose re-arm failed"
-assert_grep "done [corr=$INITIAL_CORR]" "$PARENT/state/ios.status" "failed re-arm lost the ingested reply"
+assert_grep "done [corr=$INITIAL_CORR_UPPER]" "$PARENT/state/ios.status" "failed re-arm lost the ingested reply"
 assert_grep 'ingested: ios appended=1' "$TMP_ROOT/handle-arm-fail.out" "failed re-arm did not commit the reply before retry"
 rm -f "$PARENT/state/procevent"
 mkdir "$PARENT/state/procevent"
@@ -134,7 +135,7 @@ assert_contains "$reconcile_out" 'published=1' "failed re-arm did not leave the 
 out=$(remote_env "$ADAPTER" handle ios 1 "$RESULT")
 assert_contains "$out" 'ingested: ios appended=0' "retried reply ingest was not idempotent"
 assert_contains "$out" 'handled: remote-reply-ios 1' "captured generation was not acknowledged"
-assert_grep "done [corr=$INITIAL_CORR]" "$PARENT/state/ios.status" "parent status did not receive the correlated reply"
+assert_grep "done [corr=$INITIAL_CORR_UPPER]" "$PARENT/state/ios.status" "parent status did not receive the correlated reply"
 assert_grep 'data/remote-secondmates/ios/data/reply/report.md' "$PARENT/state/ios.status" "remote document pointer was not rewritten locally"
 [ "$(fm_pending_reply_get "$(fm_pending_reply_path "$PARENT/state" "$INITIAL_CORR")" phase)" = resolved ] \
   || fail "exact correlated report did not resolve its parent request"
@@ -149,7 +150,7 @@ pass "ingest appends one validated line, fetches its document, and advances the 
 out=$(remote_env "$ADAPTER" handle ios 1 "$RESULT")
 assert_contains "$out" 'ingested: ios appended=0' "replayed result was not deduplicated"
 assert_contains "$out" 'already-handled: remote-reply-ios 1' "replayed generation was not acknowledged idempotently"
-[ "$(grep -cF "done [corr=$INITIAL_CORR]" "$PARENT/state/ios.status")" -eq 1 ] \
+[ "$(grep -cF "done [corr=$INITIAL_CORR_UPPER]" "$PARENT/state/ios.status")" -eq 1 ] \
   || fail "replayed ingest duplicated the parent status line"
 pass "replayed capture has one deduplicated append and one durable handling identity"
 
@@ -186,18 +187,22 @@ pass "later generations cannot invalidate an unacknowledged ingested result"
 AUTONOMOUS_CORR=$(fm_pending_reply_create "$PARENT" "$PARENT/state" ios "await autonomous report")
 fm_pending_reply_mark_delivered "$PARENT/state" "$AUTONOMOUS_CORR" \
   || fail "could not create autonomous reply expectation"
-printf 'blocked [key=remote-review]: waiting for external review\ndone: notcorr=%s is not a parent reply\n' "$AUTONOMOUS_CORR" \
+printf 'blocked [key=remote-review]: waiting for external review\ndone: notcorr=%s is not a parent reply\ndone: not-corr=%s is not a parent reply\ndone: not.corr=%s is not a parent reply\n' "$AUTONOMOUS_CORR" "$AUTONOMOUS_CORR" "$AUTONOMOUS_CORR" \
   >> "$REMOTE/state/parent-replies.status"
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
   || fail "autonomous reply generation was not captured"
 RESULT_FOUR="$PARENT/state/procevent-inbox/$SID.4.result"
 out=$(remote_env "$ADAPTER" handle ios 4 "$RESULT_FOUR")
-assert_contains "$out" 'ingested: ios appended=2' "autonomous reports were not ingested"
+assert_contains "$out" 'ingested: ios appended=4' "autonomous reports were not ingested"
 assert_contains "$out" 'handled: remote-reply-ios 4' "autonomous capture was not acknowledged"
 assert_grep 'blocked [key=remote-review]: waiting for external review' "$PARENT/state/ios.status" \
   "autonomous lifecycle report did not reach parent status"
 assert_grep "done: notcorr=$AUTONOMOUS_CORR is not a parent reply" "$PARENT/state/ios.status" \
   "corr-like autonomous report did not reach parent status"
+assert_grep "done: not-corr=$AUTONOMOUS_CORR is not a parent reply" "$PARENT/state/ios.status" \
+  "punctuated corr-like autonomous report did not reach parent status"
+assert_grep "done: not.corr=$AUTONOMOUS_CORR is not a parent reply" "$PARENT/state/ios.status" \
+  "dotted corr-like autonomous report did not reach parent status"
 [ "$(fm_pending_reply_get "$(fm_pending_reply_path "$PARENT/state" "$AUTONOMOUS_CORR")" phase)" = awaiting_report ] \
   || fail "corr-like autonomous lifecycle report resolved a marked parent request"
 assert_present "$PARENT/state/procevent/$SID.source" "autonomous handling did not re-arm the source"
@@ -252,7 +257,7 @@ cat "$TMP_ROOT/bad.header" "$TMP_ROOT/bad.payload" > "$BAD_RESULT"
 if remote_env "$ADAPTER" ingest ios "$BAD_RESULT" >/dev/null 2>&1; then
   fail "ingest accepted a status line with an unknown lifecycle verb"
 fi
-[ "$(grep -cF "done [corr=$INITIAL_CORR]" "$PARENT/state/ios.status")" -eq 1 ] \
+[ "$(grep -cF "done [corr=$INITIAL_CORR_UPPER]" "$PARENT/state/ios.status")" -eq 1 ] \
   || fail "invalid ingest disturbed the accepted parent status line"
 pass "ingest rejects invalid lifecycle payloads even when their transport digest is valid"
 

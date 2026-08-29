@@ -133,12 +133,25 @@ fm_pending_reply_extract_corr() {  # <text>
   printf '%s' "$text" | grep -oE "$FM_PENDING_REPLY_CORR_RE" 2>/dev/null | head -1 | cut -d= -f2- | tr 'A-F' 'a-f' || true
 }
 
+# Print exact corr=<16hex> status tokens, canonicalized to lowercase.
+fm_pending_reply_extract_status_corrs() {  # <text>
+  local text=$1
+  printf '%s\n' "$text" \
+    | tr $'\t []()' '\n' \
+    | grep -E "^${FM_PENDING_REPLY_CORR_RE}$" 2>/dev/null \
+    | cut -d= -f2- \
+    | tr 'A-F' 'a-f' || true
+}
+
 # 0 if <text> carries the exact correlation token for <corr_id>.
 fm_pending_reply_text_has_corr() {  # <text> <corr_id>
-  local text=$1 corr=$2
+  local text=$1 corr=$2 candidate
   printf '%s' "$corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
-  printf '%s\n' "$text" \
-    | LC_ALL=C grep -Eq "(^|[^[:alnum:]_])corr=${corr}([^[:alnum:]_]|$)"
+  corr=$(printf '%s' "$corr" | tr 'A-F' 'a-f')
+  while IFS= read -r candidate; do
+    [ "$candidate" = "$corr" ] && return 0
+  done < <(fm_pending_reply_extract_status_corrs "$text")
+  return 1
 }
 
 # Sanitize a short request summary: single line, bounded, no control chars.
