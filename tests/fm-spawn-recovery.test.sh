@@ -12,6 +12,7 @@ REAL_TMUX=$(command -v tmux)
 REAL_TAR=$(command -v tar)
 REAL_RM=$(command -v rm)
 REAL_RMDIR=$(command -v rmdir)
+REAL_MV=$(command -v mv)
 REAL_GIT=$(command -v git)
 REAL_BUN=$(command -v bun) || fail "bun is required for the recovery fixture"
 SOCKET="fm-spawn-recovery-$$"
@@ -97,6 +98,17 @@ for arg in "\$@"; do
   fi
 done
 exec '$REAL_RMDIR' "\$@"
+SH
+cat > "$WRAPPER_BIN/mv" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  case "\$arg" in
+    '$HOME_DIR/state/$ID.omp-sessions/.fm-spawn-recovery-session.'*|'$TASK_TMP/.fm-spawn-recovery-finalize.'*/session)
+      [ "\${FM_SPAWN_RECOVERY_TEST_FAIL_SESSION_RESTORE:-0}" != 1 ] || exit 1
+      ;;
+  esac
+done
+exec '$REAL_MV' "\$@"
 SH
 cat > "$WRAPPER_BIN/treehouse" <<SH
 #!/usr/bin/env bash
@@ -233,7 +245,7 @@ tool_gate_release=
 "${OMP_FIXTURE_BUN:?}" "$(dirname "$0")/ack-extension.mjs" "$extension" "$session_file" "${OMP_FIXTURE_TURN_END:-0}" "$tool_gate_attempt" "$tool_gate_release" || exit 1
 while :; do sleep 1; done
 SH
-chmod +x "$WRAPPER_BIN/tmux" "$WRAPPER_BIN/tar" "$WRAPPER_BIN/rm" "$WRAPPER_BIN/rmdir" "$WRAPPER_BIN/treehouse" "$WRAPPER_BIN/omp"
+chmod +x "$WRAPPER_BIN/tmux" "$WRAPPER_BIN/tar" "$WRAPPER_BIN/rm" "$WRAPPER_BIN/rmdir" "$WRAPPER_BIN/mv" "$WRAPPER_BIN/treehouse" "$WRAPPER_BIN/omp"
 
 FIXTURE_PATH="$WRAPPER_BIN:$PATH"
 export OMP_FIXTURE_LOG="$LAB/omp-launches"
@@ -372,6 +384,32 @@ assert_contains "$GATE_RELEASE_OUTPUT" "published its replacement endpoint" \
 wait_for_state missing || fail "gate-release failure retained replacement endpoint"
 cmp -s "$META" "$LAB/meta.before" || fail "gate-release failure retained replacement metadata"
 cmp -s "$SESSION_FILE" "$LAB/session.before" || fail "gate-release failure did not restore the exact session bytes"
+SESSION_RESTORE_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_FINALIZATION=1 \
+  FM_SPAWN_RECOVERY_TEST_FAIL_SESSION_RESTORE=1 spawn "$ID" --recover 2>&1)
+SESSION_RESTORE_STATUS=$?
+[ "$SESSION_RESTORE_STATUS" -ne 0 ] || fail "session-restore failure unexpectedly succeeded"
+wait_for_state missing || fail "session-restore failure retained replacement endpoint"
+[ -f "$HOME_DIR/state/$ID.omp-recovery-rollback-pending" ] \
+  || fail "session-restore failure did not retain its durable rollback manifest"
+SESSION_RESTORE_RETRY_OUTPUT=$(spawn "$ID" --recover 2>&1)
+SESSION_RESTORE_RETRY_STATUS=$?
+[ "$SESSION_RESTORE_RETRY_STATUS" -ne 0 ] || fail "incomplete recovery rollback allowed a retry"
+assert_contains "$SESSION_RESTORE_RETRY_OUTPUT" "unfinished recovery rollback state" \
+  "incomplete recovery rollback did not name its durable safety boundary"
+cp "$LAB/session.before" "$SESSION_FILE"
+rm -f "$HOME_DIR/state/$ID.omp-recovery-rollback-pending"
+INTERRUPT_RELEASE_MARKER="$LAB/tool-gate-interrupt-released"
+printf '%s\n' "$INTERRUPT_RELEASE_MARKER" > "$WORKTREE/.recovery-tool-gate-release-check"
+INTERRUPT_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_INTERRUPT_AFTER_GATE_COMMIT=1 spawn "$ID" --recover 2>&1)
+INTERRUPT_STATUS=$?
+[ "$INTERRUPT_STATUS" -ne 0 ] || fail "gate-commit interruption unexpectedly succeeded"
+wait_for_state alive || fail "gate-commit interruption rolled back its committed replacement"
+wait_file "$INTERRUPT_RELEASE_MARKER" \
+  || fail "gate-commit interruption left committed replacement tools blocked"
+rm -f "$WORKTREE/.recovery-tool-gate-release-check"
+PATH="$FIXTURE_PATH" tmux kill-window -t "$TARGET"
+wait_for_state missing || fail "gate-commit interruption fixture endpoint did not stop"
+cp "$SESSION_FILE" "$LAB/session.before"
 ARCHIVE_FINALIZATION_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_FINALIZATION_ARCHIVE_DELETE=1 spawn "$ID" --recover 2>&1) \
   || fail "post-commit archive cleanup failure reported a failed recovery"
 assert_contains "$ARCHIVE_FINALIZATION_OUTPUT" "recovered $ID harness=omp" \
@@ -430,6 +468,12 @@ wait_for_state missing || fail "turn-end backup cleanup failure retained replace
 cmp -s "$META" "$LAB/meta.before" || fail "turn-end backup cleanup failure rewrote metadata"
 cmp -s "$SESSION_FILE" "$LAB/session.before" || fail "turn-end backup cleanup failure did not restore the exact session bytes"
 cmp -s "$TURNEND" "$LAB/turnend.before" || fail "turn-end backup cleanup failure rewrote the prior marker"
+TURNEND_BACKUP_RETRY_OUTPUT=$(spawn "$ID" --recover 2>&1)
+TURNEND_BACKUP_RETRY_STATUS=$?
+[ "$TURNEND_BACKUP_RETRY_STATUS" -ne 0 ] || fail "incomplete turn-end rollback allowed a retry"
+assert_contains "$TURNEND_BACKUP_RETRY_OUTPUT" "unfinished recovery rollback state" \
+  "turn-end rollback manifest did not block an unsafe retry"
+rm -f "$HOME_DIR/state/$ID.omp-recovery-rollback-pending"
 rm -f "$TURNEND"
 TURNEND_ABSENT_OUTPUT=$(OMP_FIXTURE_TURN_END=1 FM_SPAWN_RECOVERY_TEST_FAIL_BEFORE_PUBLISH=1 spawn "$ID" --recover 2>&1)
 TURNEND_ABSENT_STATUS=$?
@@ -692,8 +736,9 @@ FRESH_DIRECT_SESSIONS=$(find "$SESSION_DIR" -maxdepth 1 -type f -name '*.jsonl' 
 FRESH_RETRY_OUTPUT=$(spawn "$ID" --recover 2>&1)
 FRESH_RETRY_STATUS=$?
 [ "$FRESH_RETRY_STATUS" -ne 0 ] || fail "fresh-session cleanup failure allowed an unsafe retry"
-assert_contains "$FRESH_RETRY_OUTPUT" "could not select one exact prior task session" \
-  "fresh-session cleanup guard did not refuse a deterministic retry"
+assert_contains "$FRESH_RETRY_OUTPUT" "unfinished recovery rollback state" \
+  "fresh-session cleanup did not refuse a deterministic retry"
+rm -f "$HOME_DIR/state/$ID.omp-recovery-rollback-pending"
 rm -f "$SESSION_DIR/.fm-spawn-recovery-cleanup-pending"
 rm -rf "$SESSION_DIR"
 [ ! -e "$SESSION_DIR" ] || fail "fixture could not remove the resolved fresh-session cleanup guard"
@@ -710,8 +755,9 @@ wait_for_state missing || fail "fresh-session directory cleanup failure retained
 RMDIR_RETRY_OUTPUT=$(spawn "$ID" --recover 2>&1)
 RMDIR_RETRY_STATUS=$?
 [ "$RMDIR_RETRY_STATUS" -ne 0 ] || fail "fresh-session directory cleanup allowed an unsafe retry"
-assert_contains "$RMDIR_RETRY_OUTPUT" "could not select one exact prior task session" \
-  "fresh-session directory cleanup guard did not refuse retry"
+assert_contains "$RMDIR_RETRY_OUTPUT" "unfinished recovery rollback state" \
+  "fresh-session directory cleanup did not refuse retry"
+rm -f "$HOME_DIR/state/$ID.omp-recovery-rollback-pending"
 rm -f "$SESSION_DIR/.fm-spawn-recovery-cleanup-pending"
 rm -rf "$SESSION_DIR"
 rm -f "$SESSION_POINTER"

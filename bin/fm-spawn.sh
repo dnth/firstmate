@@ -3589,11 +3589,15 @@ EOF
       cat > "$OMP_EXTENSION_PATH" <<EOF
 // Firstmate OMP launch acknowledgement, durable session pointer, and turn-end signal; written by fm-spawn.
 import { execFile } from "node:child_process";
-import { existsSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute } from "node:path";
 const sessionDir = "$OMP_SESSION_DIR";
 const sessionPointer = "$OMP_SESSION_POINTER";
 const recoveryToolGate = "${FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE:-}";
+function recoveryToolsBlocked(): boolean {
+  if (!recoveryToolGate || !existsSync(recoveryToolGate)) return false;
+  try { return readFileSync(recoveryToolGate, "utf8").trim() !== "committed"; } catch { return true; }
+}
 function publishSession(ctx: any): void {
   const sessionFile = ctx?.sessionManager?.getSessionFile?.();
   if (!sessionFile || !isAbsolute(sessionFile) || dirname(sessionFile) !== sessionDir) return;
@@ -3613,7 +3617,7 @@ export default function (omp: any) {
   omp.on("turn_start", () => execFile("touch", ["$OMP_STARTED"]));
   omp.on("turn_end", () => execFile("touch", ["$TURNEND"]));
   omp.on("tool_call", () => {
-    if (recoveryToolGate && existsSync(recoveryToolGate)) {
+    if (recoveryToolsBlocked()) {
       return { block: true, reason: "Firstmate blocks OMP recovery tool calls until replacement authority commits" };
     }
   });

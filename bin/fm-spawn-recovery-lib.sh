@@ -33,6 +33,10 @@ fm_spawn_recovery_preselect() { # <state> <task-id>
     echo "error: OMP recovery found unresolved branch rollback state for task $id; preserving task state" >&2
     return 1
   fi
+  if fm_spawn_recovery_rollback_pending "$state" "$id"; then
+    echo "error: OMP recovery found unfinished recovery rollback state for task $id; preserving task state" >&2
+    return 1
+  fi
   meta="$state/$id.meta"
   [ -f "$meta" ] && [ ! -L "$meta" ] || {
     echo "error: OMP recovery requires regular recorded metadata for task $id; preserving task state" >&2
@@ -239,6 +243,12 @@ fm_spawn_recovery_ref_rollback_pending() { # <state> <task-id>
   local state=$1 id=$2 guard
   guard="$state/$id.omp-ref-rollback-pending"
   [ -f "$guard" ] && [ ! -L "$guard" ]
+}
+
+fm_spawn_recovery_rollback_pending() { # <state> <task-id>
+  local state=$1 id=$2 manifest
+  manifest="$state/$id.omp-recovery-rollback-pending"
+  [ -e "$manifest" ] || [ -L "$manifest" ]
 }
 
 fm_spawn_recovery_bind_legacy_session() {
@@ -525,6 +535,7 @@ fm_spawn_recovery_prepare() { # <state> <data> <task-id>
   FM_SPAWN_RECOVERY_TURNEND_WAS_ABSENT=0
   FM_SPAWN_RECOVERY_TOOL_GATE_DIR=
   FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE=
+  FM_SPAWN_RECOVERY_ROLLBACK_MANIFEST="$state/$id.omp-recovery-rollback-pending"
   FM_SPAWN_RECOVERY_REF_ROLLBACK_GUARD="$state/$id.omp-ref-rollback-pending"
   FM_SPAWN_RECOVERY_FINALIZATION_BACKUP=
   FM_SPAWN_RECOVERY_FINALIZATION_ARCHIVE=
@@ -535,6 +546,10 @@ fm_spawn_recovery_prepare() { # <state> <data> <task-id>
     echo "error: OMP recovery requires regular recorded metadata for task $id; preserving task state" >&2
     return 1
   }
+  if fm_spawn_recovery_rollback_pending "$state" "$id"; then
+    echo "error: OMP recovery found unfinished recovery rollback state for task $id; preserving task state" >&2
+    return 1
+  fi
   fm_backend_validate_task_endpoint "$meta" "$id" || return 1
   old_backend=$FM_BACKEND_VALIDATED_BACKEND
   old_target=$FM_BACKEND_VALIDATED_TARGET
@@ -709,6 +724,67 @@ fm_spawn_recovery_prepare_launch_artifacts() { # <tasktmp> <task-id> <brief>
   printf '%s\n' pending > "$FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE" || return 1
   cat -- "$brief" > "$FM_SPAWN_RECOVERY_NOTE" || return 1
   printf '\n\nRecovery continuation: Firstmate restarted this proven-dead OMP worker in the preserved isolated copy. Re-read the brief above, inspect the current branch and uncommitted work, then continue the task without resetting, checking out another branch, or discarding work.\n' >> "$FM_SPAWN_RECOVERY_NOTE" || return 1
+}
+
+fm_spawn_recovery_tool_gate_committed() {
+  local active=${FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE:-} value
+  [ -f "$active" ] && [ ! -L "$active" ] || return 1
+  IFS= read -r value < "$active" || value=
+  [ "$value" = committed ]
+}
+
+fm_spawn_recovery_release_tool_gate() {
+  local active=${FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE:-} staged value
+  [ -f "$active" ] && [ ! -L "$active" ] || return 1
+  IFS= read -r value < "$active" || value=
+  [ "$value" = pending ] || return 1
+  staged=$(mktemp "$(dirname "$active")/.fm-spawn-recovery-gate.XXXXXX") || return 1
+  if ! printf '%s\n' committed > "$staged"; then
+    rm -f -- "$staged"
+    return 1
+  fi
+  if [ "${FM_SPAWN_RECOVERY_TEST_FAIL_GATE_RELEASE:-0}" = 1 ]; then
+    rm -f -- "$staged"
+    return 1
+  fi
+  if ! mv -f -- "$staged" "$active"; then
+    rm -f -- "$staged"
+    fm_spawn_recovery_tool_gate_committed && return 0
+    return 1
+  fi
+}
+
+fm_spawn_recovery_write_rollback_manifest() {
+  local manifest=${FM_SPAWN_RECOVERY_ROLLBACK_MANIFEST:-} state staged
+  [ -n "$manifest" ] || return 1
+  state=$(dirname "$manifest")
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  if [ -e "$manifest" ] || [ -L "$manifest" ]; then
+    [ -f "$manifest" ] && [ ! -L "$manifest" ] || return 1
+    return 0
+  fi
+  staged=$(mktemp "$state/.fm-spawn-recovery-rollback.XXXXXX") || return 1
+  if ! {
+    printf '%s\n' 'version=1'
+    printf '%s\n' 'phase=rollback'
+    printf 'tasktmp=%s\n' "${FM_SPAWN_RECOVERY_TASKTMP:-}"
+    printf 'session_backup=%s\n' "${FM_SPAWN_RECOVERY_SESSION_BACKUP:-}"
+    printf 'pointer_backup=%s\n' "${FM_SPAWN_RECOVERY_POINTER_BACKUP:-}"
+    printf 'metadata_snapshot=%s\n' "${FM_SPAWN_RECOVERY_META_SNAPSHOT:-}"
+    printf 'worktree_snapshot=%s\n' "${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}"
+    printf 'turnend_backup=%s\n' "${FM_SPAWN_RECOVERY_TURNEND_BACKUP:-}"
+  } > "$staged" || ! mv -f -- "$staged" "$manifest"; then
+    rm -f -- "$staged"
+    return 1
+  fi
+}
+
+fm_spawn_recovery_remove_rollback_manifest() {
+  local manifest=${FM_SPAWN_RECOVERY_ROLLBACK_MANIFEST:-}
+  [ -n "$manifest" ] || return 1
+  [ ! -e "$manifest" ] && [ ! -L "$manifest" ] && return 0
+  [ -f "$manifest" ] && [ ! -L "$manifest" ] || return 1
+  rm -f -- "$manifest"
 }
 
 fm_spawn_recovery_stage_candidate_meta() { # <state> <task-id> <backend> <target> <herdr-session> <herdr-workspace> <herdr-tab> <herdr-pane>
@@ -1041,10 +1117,9 @@ fm_spawn_recovery_complete() {
   fm_spawn_recovery_remove_launch_artifacts || return 1
   fm_spawn_recovery_remove_rollback_artifacts || return 1
   fm_spawn_recovery_archive_finalization_state || return 1
-  if [ "${FM_SPAWN_RECOVERY_TEST_FAIL_GATE_RELEASE:-0}" = 1 ] \
-     || { [ -n "${FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE:-}" ] \
-          && ! rm -f -- "$FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE"; }; then
-    return 1
+  fm_spawn_recovery_release_tool_gate || return 1
+  if [ "${FM_SPAWN_RECOVERY_TEST_INTERRUPT_AFTER_GATE_COMMIT:-0}" = 1 ]; then
+    kill -TERM "$$"
   fi
   FM_SPAWN_RECOVERY_FINALIZED=1
   rm -rf -- "$FM_SPAWN_RECOVERY_FINALIZATION_BACKUP" 2>/dev/null || true
@@ -1065,10 +1140,16 @@ fm_spawn_recovery_complete() {
 fm_spawn_recovery_abort() { # <backend> <target>
   local backend=${1:-} target=${2:-} state pointer_restored=0
   [ "${FM_SPAWN_RECOVERY_ACTIVE:-0}" = 1 ] || return 0
-  if [ "${FM_SPAWN_RECOVERY_FINALIZED:-0}" = 1 ]; then
+  if [ "${FM_SPAWN_RECOVERY_FINALIZED:-0}" = 1 ] \
+     || fm_spawn_recovery_tool_gate_committed; then
+    FM_SPAWN_RECOVERY_FINALIZED=1
     fm_spawn_recovery_cleanup_artifacts
     return 0
   fi
+  fm_spawn_recovery_write_rollback_manifest || {
+    echo "warning: OMP recovery could not persist its rollback state; preserving recovery artifacts and task state" >&2
+    return 1
+  }
   if [ "${FM_SPAWN_RECOVERY_ENDPOINT_CREATED:-0}" = 1 ] \
      && [ -n "$backend" ] && [ -n "$target" ]; then
     # This target was either newly created after a missing endpoint or accepted
@@ -1163,5 +1244,12 @@ fm_spawn_recovery_abort() { # <backend> <target>
     echo "warning: OMP recovery could not retire its turn-end rollback backup; preserving recovery artifacts and task state" >&2
     return 1
   }
-  fm_spawn_recovery_cleanup_artifacts
+  FM_SPAWN_RECOVERY_TEST_FAIL_FINALIZATION=0 fm_spawn_recovery_cleanup_artifacts || {
+    echo "warning: OMP recovery could not clean its restored rollback artifacts; preserving recovery artifacts and task state" >&2
+    return 1
+  }
+  fm_spawn_recovery_remove_rollback_manifest || {
+    echo "warning: OMP recovery could not retire its completed rollback manifest; preserving task state" >&2
+    return 1
+  }
 }
