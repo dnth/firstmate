@@ -14,13 +14,14 @@
 #      with a notice, and the steer is still durably sent (exit 0).
 #   5. A failed doorbell is still a sent steer (exit 0, record durable): the
 #      watcher's re-ring ladder owns delivery from the record on.
-#   6. Carve-outs keep the typed plane: a leading "/" (any harness), a leading
+#   6. A provably busy task still receives one immediate doorbell after enqueue.
+#   7. Carve-outs keep the typed plane: a leading "/" (any harness), a leading
 #      "$" to codex, an explicit backend target, and the --key path.
-#   7. A marked secondmate steer carries its marker + corr token in the record
+#   8. A marked secondmate steer carries its marker + corr token in the record
 #      body, and the pending-reply expectation is marked delivered at enqueue.
-#   8. Pending-reply bookkeeping failure after enqueue never reports a
+#   9. Pending-reply bookkeeping failure after enqueue never reports a
 #      retryable send failure that could duplicate the durable instruction.
-#   9. An unwritable inbox is a real local failure: nonzero exit, nothing
+#  10. An unwritable inbox is a real local failure: nonzero exit, nothing
 #      typed, and a just-created pending-reply expectation is discarded.
 # Every case below that passes a literal `$...` message quotes it on purpose
 # (the point is sending an unexpanded `$` line), so SC2016 is disabled.
@@ -187,6 +188,24 @@ test_failed_ring_is_still_sent() {
   pass "fm-send inbox: a failed doorbell is still a durably sent steer"
 }
 
+test_busy_task_still_rings_immediately() {
+  local dir err rc doorbells
+  dir=$(setup_case busy-ring); err="$dir/send.err"
+  fm_write_meta "$dir/home/state/t1.meta" \
+    "window=sess:fm-t1" "kind=ship" "harness=claude" "busy_gen=busy-ring-gen"
+  printf '%s\n' 'busy-ring-gen' > "$dir/home/state/t1.busy-gen"
+  printf '%s\n' \
+    'v1 gen=busy-ring-gen seq=1 state=busy source=claude-hook event=prompt ts=1' \
+    > "$dir/home/state/t1.busy-state"
+  run_send "$dir" "$err" -- t1 "steer during the active turn"; rc=$?
+  expect_code 0 "$rc" "a busy task steer should exit 0 at enqueue"
+  [ -f "$dir/home/state/t1.inbox/001.msg" ] || fail "the busy task steer was not recorded"
+  doorbells=$(grep -cF 'Firstmate instruction waiting' "$dir/send.log" || true)
+  [ "$doorbells" = 1 ] \
+    || fail "a busy task should receive one immediate doorbell, got $doorbells:"$'\n'"$(cat "$dir/send.log")"
+  pass "fm-send inbox: a busy task still receives one immediate doorbell"
+}
+
 test_harness_invocations_stay_typed() {
   local dir err typed
   # A slash command must reach the harness's own parser, on any harness.
@@ -343,6 +362,7 @@ test_multiline_steer_is_legal
 test_resend_enqueues_new_sequence
 test_pending_composer_skips_ring_advisorily
 test_failed_ring_is_still_sent
+test_busy_task_still_rings_immediately
 test_harness_invocations_stay_typed
 test_explicit_target_stays_typed
 test_key_path_never_touches_inbox

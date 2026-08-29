@@ -856,20 +856,13 @@ else
       fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
     fi
 
-    INBOX_BUSY=$(fm_busy_classify \
-      "$TARGET_BACKEND" "$T" "$TARGET_HARNESS" "$TARGET_TASK_ID" "$STATE" 2>/dev/null) \
-      || INBOX_BUSY='unknown unavailable'
-    if [ "${INBOX_BUSY%% *}" = busy ]; then
-      echo "fm-send: doorbell deferred while $TARGET_TASK_ID is provably busy; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2
-    else
-      ring_rc=0
-      fm_task_inbox_ring "$TARGET_BACKEND" "$T" "$INBOX_RECORD" "$EXPECTED_LABEL" \
-        "$TARGET_HARNESS" "$TARGET_OMP_BUN" "$TARGET_OMP_BIN" || ring_rc=$?
-      case "$ring_rc" in
-        1) echo "fm-send: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
-        2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
-      esac
-    fi
+    ring_rc=0
+    fm_task_inbox_ring "$TARGET_BACKEND" "$T" "$INBOX_RECORD" "$EXPECTED_LABEL" \
+      "$TARGET_HARNESS" "$TARGET_OMP_BUN" "$TARGET_OMP_BIN" || ring_rc=$?
+    case "$ring_rc" in
+      1) echo "fm-send: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
+      2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
+    esac
     exit 0
   fi
 
