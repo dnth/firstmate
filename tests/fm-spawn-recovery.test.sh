@@ -376,7 +376,7 @@ assert_contains "$PRELAUNCH_OUTPUT" "GOTMPDIR export could not be submitted" \
 wait_for_state missing || fail "pre-launch recovery failure retained its replacement endpoint"
 cmp -s "$META" "$LAB/meta.before" || fail "pre-launch recovery failure rewrote metadata"
 cmp -s "$SESSION_FILE" "$LAB/session.before" || fail "pre-launch recovery failure changed the durable session"
-HARD_INTERRUPT_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_HARD_INTERRUPT_AFTER_SESSION=1 spawn "$ID" --recover 2>&1)
+FM_SPAWN_RECOVERY_TEST_HARD_INTERRUPT_AFTER_SESSION=1 spawn "$ID" --recover >/dev/null 2>&1
 HARD_INTERRUPT_STATUS=$?
 [ "$HARD_INTERRUPT_STATUS" -ne 0 ] || fail "hard-interrupted recovery unexpectedly succeeded"
 wait_for_state alive || fail "hard-interrupted recovery did not retain its replacement endpoint"
@@ -449,8 +449,8 @@ assert_contains "$GATE_RELEASE_OUTPUT" "published its replacement endpoint" \
 wait_for_state missing || fail "gate-release failure retained replacement endpoint"
 cmp -s "$META" "$LAB/meta.before" || fail "gate-release failure retained replacement metadata"
 cmp -s "$SESSION_FILE" "$LAB/session.before" || fail "gate-release failure did not restore the exact session bytes"
-SESSION_RESTORE_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_FINALIZATION=1 \
-  FM_SPAWN_RECOVERY_TEST_FAIL_SESSION_RESTORE=1 spawn "$ID" --recover 2>&1)
+FM_SPAWN_RECOVERY_TEST_FAIL_FINALIZATION=1 \
+  FM_SPAWN_RECOVERY_TEST_FAIL_SESSION_RESTORE=1 spawn "$ID" --recover >/dev/null 2>&1
 SESSION_RESTORE_STATUS=$?
 [ "$SESSION_RESTORE_STATUS" -ne 0 ] || fail "session-restore failure unexpectedly succeeded"
 wait_for_state missing || fail "session-restore failure retained replacement endpoint"
@@ -465,7 +465,7 @@ cp "$LAB/session.before" "$SESSION_FILE"
 rm -f "$HOME_DIR/state/$ID.omp-recovery-rollback-pending"
 INTERRUPT_RELEASE_MARKER="$LAB/tool-gate-interrupt-released"
 printf '%s\n' "$INTERRUPT_RELEASE_MARKER" > "$WORKTREE/.recovery-tool-gate-release-check"
-INTERRUPT_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_INTERRUPT_AFTER_GATE_COMMIT=1 spawn "$ID" --recover 2>&1)
+FM_SPAWN_RECOVERY_TEST_INTERRUPT_AFTER_GATE_COMMIT=1 spawn "$ID" --recover >/dev/null 2>&1
 INTERRUPT_STATUS=$?
 [ "$INTERRUPT_STATUS" -ne 0 ] || fail "gate-commit interruption unexpectedly succeeded"
 wait_for_state alive || fail "gate-commit interruption rolled back its committed replacement"
@@ -556,8 +556,8 @@ cmp -s "$TURNEND" "$LAB/turnend.before" || fail "failed recovery rewrote the pri
 [ -f "$TASK_TMP/preserve-me" ] || fail "failed recovery removed pre-existing task scratch"
 [ ! -e "$TASK_TMP/gotmp" ] && [ ! -L "$TASK_TMP/gotmp" ] \
   || fail "failed recovery retained replacement-owned build scratch"
-TURNEND_BACKUP_OUTPUT=$(OMP_FIXTURE_TURN_END=1 FM_SPAWN_RECOVERY_TEST_FAIL_BEFORE_PUBLISH=1 \
-  FM_SPAWN_RECOVERY_TEST_FAIL_TURNEND_BACKUP_CLEANUP=1 spawn "$ID" --recover 2>&1)
+OMP_FIXTURE_TURN_END=1 FM_SPAWN_RECOVERY_TEST_FAIL_BEFORE_PUBLISH=1 \
+  FM_SPAWN_RECOVERY_TEST_FAIL_TURNEND_BACKUP_CLEANUP=1 spawn "$ID" --recover >/dev/null 2>&1
 TURNEND_BACKUP_STATUS=$?
 [ "$TURNEND_BACKUP_STATUS" -ne 0 ] || fail "turn-end backup cleanup failure unexpectedly succeeded"
 wait_for_state missing || fail "turn-end backup cleanup failure retained replacement endpoint"
@@ -625,7 +625,7 @@ PATH="$FIXTURE_PATH" tmux kill-window -t "$TARGET"
 wait_for_state missing || fail "dead-endpoint recovery did not leave a removable endpoint"
 OWN_BRANCH="fm/$ID-replacement-attempt"
 printf '%s\n' "$OWN_BRANCH" > "$WORKTREE/.recovery-tool-gate-attempt"
-OWN_BRANCH_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_BEFORE_PUBLISH=1 spawn "$ID" --recover 2>&1)
+FM_SPAWN_RECOVERY_TEST_FAIL_BEFORE_PUBLISH=1 spawn "$ID" --recover >/dev/null 2>&1
 OWN_BRANCH_STATUS=$?
 [ "$OWN_BRANCH_STATUS" -ne 0 ] || fail "attempt-branch recovery failure unexpectedly succeeded"
 wait_for_state missing || fail "attempt-branch recovery failure retained replacement endpoint"
@@ -640,8 +640,8 @@ TASKTMP_GATE_BRANCH="fm/$ID-tasktmp-gate"
 cp "$META" "$LAB/tasktmp-gate-meta.before"
 cp "$SESSION_FILE" "$LAB/tasktmp-gate-session.before"
 printf '%s\n' "$TASKTMP_GATE_BRANCH" > "$WORKTREE/.recovery-tool-gate-attempt"
-TASKTMP_GATE_OUTPUT=$(OMP_FIXTURE_REMOVE_TASKTMP_BEFORE_TOOL=1 \
-  FM_SPAWN_RECOVERY_TEST_FAIL_BEFORE_PUBLISH=1 spawn "$ID" --recover 2>&1)
+OMP_FIXTURE_REMOVE_TASKTMP_BEFORE_TOOL=1 \
+  FM_SPAWN_RECOVERY_TEST_FAIL_BEFORE_PUBLISH=1 spawn "$ID" --recover >/dev/null 2>&1
 TASKTMP_GATE_STATUS=$?
 [ "$TASKTMP_GATE_STATUS" -ne 0 ] || fail "tasktmp-removal recovery failure unexpectedly succeeded"
 wait_for_state missing || fail "tasktmp-removal recovery failure retained replacement endpoint"
