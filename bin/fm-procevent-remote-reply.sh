@@ -17,9 +17,11 @@
 # cursor-anchored source. A continuity break is escalated and not re-armed.
 #
 # Ingest accepts only bounded, printable status lines with an allowed lifecycle
-# verb and corr=<16hex>. Exact lines are appended at most once to the parent's
-# state/<id>.status. A data/*.md pointer is fetched through the path-confined
-# remote file reader and rewritten to its local private copy before append.
+# verb. Autonomous lifecycle reports need no correlation token, but only a
+# corr=<16hex> report can resolve a matching pending parent request. Exact lines
+# are appended at most once to the parent's state/<id>.status. A data/*.md
+# pointer is fetched through the path-confined remote file reader and rewritten
+# to its local private copy before append.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -245,8 +247,14 @@ line_valid() { # <line>
   bytes=$(printf '%s' "$line" | LC_ALL=C wc -c | tr -d ' ')
   [ "$bytes" -le "$MAX_LINE_BYTES" ] || return 1
   [ -z "$(printf '%s' "$line" | LC_ALL=C tr -d '\11\40-\176')" ] || return 1
-  printf '%s' "$line" | grep -Eq '^(working|needs-decision|blocked|paused|done|failed|resolved)([[:space:]]+\[[^]]+\])?:' || return 1
-  printf '%s' "$line" | grep -Eq 'corr=[A-Fa-f0-9]{16}'
+  printf '%s' "$line" | grep -Eq '^(working|needs-decision|blocked|paused|done|failed|resolved)([[:space:]]+\[[^]]+\])?:'
+}
+
+payload_lines_valid() { # <payload>
+  local line
+  while IFS= read -r line || [ -n "$line" ]; do
+    line_valid "$line" || return 1
+  done < "$1"
 }
 
 cmd_ingest() {
@@ -303,8 +311,8 @@ cmd_ingest() {
     return 3
   fi
   [ "$status" = delta ] && [ "$payload_bytes" -gt 0 ] || { fm_lock_release "$lock"; die "delta result has no payload"; }
+  payload_lines_valid "$payload" || { fm_lock_release "$lock"; die "delta contains an invalid status line"; }
   while IFS= read -r line || [ -n "$line" ]; do
-    line_valid "$line" || { fm_lock_release "$lock"; die "delta contains an invalid or uncorrelated status line"; }
     rewritten=$line
     while IFS= read -r doc; do
       [ -n "$doc" ] || continue
