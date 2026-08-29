@@ -2016,6 +2016,8 @@ test_omp_root_symlink_uses_shared_opt_in_boundary() {
     "OMP root-symlink refusal omitted the shared opt-in guidance"
   assert_no_grep 'new-window|new-session' "$CASE_DIR/endpoint.log" \
     "OMP root-symlink refusal created an endpoint"
+  git -C "$WT_DIR" show-ref --verify --quiet "refs/heads/fm/$id" \
+    && fail "OMP root-symlink refusal created task branch fm/$id before opt-in"
 
   out=$(FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started" \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \

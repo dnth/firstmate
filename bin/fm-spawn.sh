@@ -132,8 +132,8 @@
 #   either kind. Hermes overrides only a crewmate or scout spawn and is refused for secondmates.
 #   For crewmates and scouts, a non-flag string containing whitespace is treated
 #   as a RAW launch command - the escape hatch for verifying new adapters.
-#   Raw OMP is refused because it cannot publish the durable exact-session pointer;
-#   secondmates likewise refuse every raw launch command and accept adapter identities only.
+#   Raw OMP is refused because it cannot publish the durable exact-session pointer.
+#   Secondmates refuse every raw launch command and accept adapter identities only.
 #   pi-signed launches that exact executable name from PATH and
 #   refuses before endpoint creation when it is unavailable; it never falls back to pi.
 #   omp resolves its exact executable and checks its required launch/recovery
@@ -2805,9 +2805,9 @@ elif [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
     exit 1
   fi
   freshen_spawn_worktree_base "$WT" || exit 1
-  bind_fresh_omp_task_branch "$WT" "$ID" || exit 1
   validate_omp_prewalk_for_launch_dir "$WT"
   omp_project_extension_preflight "$WT" || exit 1
+  bind_fresh_omp_task_branch "$WT" "$ID" || exit 1
   OMP_ABORT_INITIAL_HEAD=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || {
     echo "error: OMP spawn could not bind cleanup to the initial worktree HEAD" >&2
     exit 1

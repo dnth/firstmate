@@ -5,7 +5,6 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-command -v bun >/dev/null 2>&1 || fail "bun is required for the fake OMP fixture"
 command -v tmux >/dev/null 2>&1 || fail "tmux is required for the recovery fixture"
 
 LAB=$(fm_test_tmproot fm-spawn-recovery)
@@ -103,55 +102,59 @@ case "\${1:-}" in
   *) exit 1 ;;
 esac
 SH
-cat > "$WRAPPER_BIN/omp" <<'JS'
+ln -s /bin/bash "$WRAPPER_BIN/bun"
+cat > "$WRAPPER_BIN/omp" <<'SH'
 #!/usr/bin/env bun
-import { appendFileSync } from "node:fs";
-const args = process.argv.slice(2);
-if (args.includes("--help")) {
-  console.log("--model= --thinking= --auto-approve --session-dir= --extension= --resume= --max-time=");
-  process.exit(0);
-}
-const value = (...names) => {
-  for (let i = 0; i < args.length; i += 1) {
-    if (names.includes(args[i])) return args[i + 1];
-    for (const name of names) if (args[i].startsWith(`${name}=`)) return args[i].slice(name.length + 1);
-  }
-  return "";
-};
-const sessionDir = value("--session-dir");
-const resume = value("--resume");
-const extension = value("-e", "--extension");
-if (!sessionDir || !extension) process.exit(2);
-if (process.env.GOTMPDIR) await Bun.write(`${process.env.GOTMPDIR}/fixture-build-artifact`, "fixture build artifact\n");
-if (process.env.GOTMPDIR) await Bun.write(`${process.env.GOTMPDIR}/traceparent`, process.env.TRACEPARENT ?? "");
-const sessionFile = `${sessionDir}/fixture-session.jsonl`;
-const prior = resume ? await Bun.file(sessionFile).text() : "";
-await Bun.write(sessionFile, `${prior}${resume ? "replacement-attempt\n" : "FIRSTMATE_OP: v1 launch-brief: fixture\n"}`);
-if (resume && process.env.OMP_FIXTURE_LOG) appendFileSync(process.env.OMP_FIXTURE_LOG, `${extension}\n`);
-if (resume && await Bun.file(".recovery-mutate-on-launch").exists()) {
-  const replacementBranch = (await Bun.file(".recovery-mutate-on-launch").text()).trim();
-  const switchBranch = Bun.spawnSync(["git", "switch", replacementBranch]);
-  if (switchBranch.exitCode !== 0) process.exit(switchBranch.exitCode ?? 1);
-  await Bun.write(".recovery-replacement-edit", "replacement edit\n");
-  const add = Bun.spawnSync(["git", "add", ".recovery-replacement-edit"]);
-  if (add.exitCode !== 0) process.exit(add.exitCode ?? 1);
-  const commit = Bun.spawnSync([
-    "git", "-c", "user.name=Recovery Fixture", "-c", "user.email=recovery@example.invalid",
-    "commit", "-m", "replacement mutation",
-  ]);
-  if (commit.exitCode !== 0) process.exit(commit.exitCode ?? 1);
-}
-const handlers = new Map();
-const mod = await import(`${new URL(`file://${extension}`).href}?fixture=${process.pid}-${Date.now()}`);
-mod.default({ on(event, handler) { handlers.set(event, handler); } });
-const sessionStart = handlers.get("session_start");
-const turnStart = handlers.get("turn_start");
-if (!sessionStart || !turnStart) process.exit(3);
-await sessionStart({}, { sessionManager: { getSessionFile: () => sessionFile } });
-await turnStart();
-await new Promise((resolve) => setTimeout(resolve, 20));
-await new Promise(() => {});
-JS
+case "${1:-}" in
+  --help)
+    printf '%s\n' '--model= --thinking= --auto-approve --session-dir= --extension= --resume= --max-time='
+    exit 0
+    ;;
+esac
+session_dir=
+resume=
+extension=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --session-dir) session_dir=${2:-}; shift 2 ;;
+    --session-dir=*) session_dir=${1#*=}; shift ;;
+    -e|--extension) extension=${2:-}; shift 2 ;;
+    --extension=*) extension=${1#*=}; shift ;;
+    -r|--resume) resume=${2:-}; shift 2 ;;
+    --resume=*) resume=${1#*=}; shift ;;
+    *) shift ;;
+  esac
+done
+[ -n "$session_dir" ] && [ -n "$extension" ] || exit 2
+mkdir -p "$session_dir"
+if [ -n "${GOTMPDIR:-}" ]; then
+  mkdir -p "$GOTMPDIR"
+  printf 'fixture build artifact\n' > "$GOTMPDIR/fixture-build-artifact"
+  printf '%s' "${TRACEPARENT:-}" > "$GOTMPDIR/traceparent"
+fi
+session_file="$session_dir/fixture-session.jsonl"
+if [ -n "$resume" ]; then
+  cat "$session_file" > "$session_file.next" || exit 1
+  printf 'replacement-attempt\n' >> "$session_file.next"
+  mv "$session_file.next" "$session_file" || exit 1
+  [ -z "${OMP_FIXTURE_LOG:-}" ] || printf '%s\n' "$extension" >> "$OMP_FIXTURE_LOG"
+  if [ -f .recovery-mutate-on-launch ]; then
+    replacement_branch=$(tr -d '\r\n' < .recovery-mutate-on-launch)
+    git switch "$replacement_branch" || exit 1
+    printf 'replacement edit\n' > .recovery-replacement-edit
+    git add .recovery-replacement-edit || exit 1
+    git -c user.name='Recovery Fixture' -c user.email=recovery@example.invalid \
+      commit -m 'replacement mutation' || exit 1
+  fi
+else
+  printf 'FIRSTMATE_OP: v1 launch-brief: fixture\n' > "$session_file"
+fi
+base=${session_dir%.omp-sessions}
+printf '%s\n' "$session_file" > "$base.omp-session"
+started=$(sed -n '/omp.on("turn_start"/s/.*\["\([^"]*\)".*/\1/p' "$extension")
+[ -n "$started" ] && : > "$started"
+while :; do sleep 1; done
+SH
 chmod +x "$WRAPPER_BIN/tmux" "$WRAPPER_BIN/tar" "$WRAPPER_BIN/rm" "$WRAPPER_BIN/treehouse" "$WRAPPER_BIN/omp"
 
 FIXTURE_PATH="$WRAPPER_BIN:$PATH"
