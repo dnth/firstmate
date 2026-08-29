@@ -11,10 +11,12 @@
 # Orca currently supports Enter and C-c only, and rejects Escape.
 #
 # Ordinary text addressed through a local task selector is appended as a
-# sequenced state/<id>.inbox record, then one constant self-describing
-# doorbell is submitted best-effort. The terminal never receives payload bytes
-# on this plane; record publication is delivery, and the worker's move into
-# handled/ acknowledges action. Remote text stays typed in this local-only leg.
+# sequenced state/<id>.inbox record. Immediately after publication and release
+# of the metadata lifecycle lock, fm-send attempts one constant self-describing
+# doorbell best-effort, before fallible pending-reply bookkeeping or decision
+# closure. The terminal never receives payload bytes on this plane; record
+# publication is delivery, and the worker's move into handled/ acknowledges
+# action. Remote text stays typed in this local-only leg.
 #
 # Harness-native slash commands, Codex dollar invocations, explicit backend
 # targets, and keys use the typed plane. The line is typed once and Enter is
