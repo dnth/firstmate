@@ -389,22 +389,38 @@ fm_spawn_recovery_snapshot_branch_ref_value() { # <snapshot> <ref>
     "$1/branch-refs"
 }
 
-fm_spawn_recovery_branch_refs_unchanged() { # <snapshot> <worktree> <branch-ref>
-  local snapshot=$1 worktree=$2 branch_ref=$3 ref object extra current_ref current_object saved
+fm_spawn_recovery_ref_owned_by_worktree() { # <worktree> <ref>
+  local worktree=$1 ref=$2 canonical
+  canonical=$(cd "$worktree" && pwd -P) || return 1
+  git -C "$worktree" worktree list --porcelain | awk -v worktree="$canonical" -v ref="$ref" '
+    $1 == "worktree" { current = substr($0, 10) }
+    $1 == "branch" && $2 == ref {
+      if (current == worktree) matches += 1
+      else others += 1
+    }
+    END { exit matches == 1 && others == 0 ? 0 : 1 }
+  '
+}
+
+fm_spawn_recovery_branch_refs_unchanged() { # <snapshot> <worktree> <branch-ref> <attempt-ref>
+  local snapshot=$1 worktree=$2 branch_ref=$3 attempt_ref=${4:-}
+  local ref object extra current_ref current_object saved
   while IFS=' ' read -r ref object extra; do
     [ "$ref" = "$branch_ref" ] && continue
+    [ "$ref" = "$attempt_ref" ] && continue
     current_object=$(git -C "$worktree" rev-parse --verify "$ref" 2>/dev/null || true)
     [ "$current_object" = "$object" ] || return 1
   done < "$snapshot/branch-refs"
   while IFS=' ' read -r current_ref current_object; do
     [ "$current_ref" = "$branch_ref" ] && continue
+    [ "$current_ref" = "$attempt_ref" ] && continue
     saved=$(fm_spawn_recovery_snapshot_branch_ref_value "$snapshot" "$current_ref" 2>/dev/null || true)
     [ "$saved" = "$current_object" ] || return 1
   done < <(git -C "$worktree" for-each-ref --format='%(refname) %(objectname)' refs/heads)
 }
 
 fm_spawn_recovery_restore_branch_refs() { # <snapshot> <worktree> <branch-ref> <head>
-  local snapshot=$1 worktree=$2 branch_ref=$3 head=$4 ref object extra
+  local snapshot=$1 worktree=$2 branch_ref=$3 head=$4 ref object extra attempt_ref attempt_object
   [ -f "$snapshot/branch-refs" ] && [ ! -L "$snapshot/branch-refs" ] || return 1
   grep -Fqx -- "$branch_ref $head" "$snapshot/branch-refs" || return 1
   while IFS=' ' read -r ref object extra; do
@@ -413,9 +429,65 @@ fm_spawn_recovery_restore_branch_refs() { # <snapshot> <worktree> <branch-ref> <
     case "$ref" in refs/heads/*) ;; *) return 1 ;; esac
     [ "$(git -C "$worktree" rev-parse --verify "$object^{commit}" 2>/dev/null || true)" = "$object" ] || return 1
   done < "$snapshot/branch-refs"
-  fm_spawn_recovery_branch_refs_unchanged "$snapshot" "$worktree" "$branch_ref" || return 1
+  attempt_ref=$(git -C "$worktree" symbolic-ref -q HEAD 2>/dev/null || true)
+  case "$attempt_ref" in
+    '') ;;
+    refs/heads/*)
+      fm_spawn_recovery_ref_owned_by_worktree "$worktree" "$attempt_ref" || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  fm_spawn_recovery_branch_refs_unchanged "$snapshot" "$worktree" "$branch_ref" "$attempt_ref" || return 1
   git -C "$worktree" update-ref "$branch_ref" "$head" || return 1
   git -C "$worktree" symbolic-ref HEAD "$branch_ref" || return 1
+  if [ -n "$attempt_ref" ] && [ "$attempt_ref" != "$branch_ref" ]; then
+    attempt_object=$(fm_spawn_recovery_snapshot_branch_ref_value "$snapshot" "$attempt_ref" 2>/dev/null || true)
+    if [ -n "$attempt_object" ]; then
+      git -C "$worktree" update-ref "$attempt_ref" "$attempt_object" || return 1
+    else
+      git -C "$worktree" update-ref -d "$attempt_ref" || return 1
+    fi
+  fi
+}
+
+fm_spawn_recovery_snapshot_turnend() { # <state> <task-id>
+  local state=$1 id=$2 turnend backup mode
+  turnend="$state/$id.turn-ended"
+  FM_SPAWN_RECOVERY_TURNEND=$turnend
+  FM_SPAWN_RECOVERY_TURNEND_BACKUP=
+  FM_SPAWN_RECOVERY_TURNEND_WAS_ABSENT=0
+  if [ ! -e "$turnend" ] && [ ! -L "$turnend" ]; then
+    FM_SPAWN_RECOVERY_TURNEND_WAS_ABSENT=1
+    return 0
+  fi
+  [ -f "$turnend" ] && [ ! -L "$turnend" ] || return 1
+  backup=$(mktemp "$state/.fm-spawn-recovery-turnend.XXXXXX") || return 1
+  if ! cat -- "$turnend" > "$backup"; then
+    rm -f -- "$backup"
+    return 1
+  fi
+  mode=$(stat -c %a "$turnend" 2>/dev/null || true)
+  [ -z "$mode" ] || chmod "$mode" "$backup" 2>/dev/null || true
+  FM_SPAWN_RECOVERY_TURNEND_BACKUP=$backup
+}
+
+fm_spawn_recovery_restore_turnend() {
+  local turnend=${FM_SPAWN_RECOVERY_TURNEND:-} backup=${FM_SPAWN_RECOVERY_TURNEND_BACKUP:-} staged
+  [ -n "$turnend" ] || return 0
+  if [ -n "$backup" ]; then
+    [ -f "$backup" ] && [ ! -L "$backup" ] || return 1
+    staged=$(mktemp "$(dirname "$turnend")/.fm-spawn-recovery-turnend-restore.XXXXXX") || return 1
+    if ! cat -- "$backup" > "$staged" || ! mv -f -- "$staged" "$turnend"; then
+      rm -f -- "$staged"
+      return 1
+    fi
+    rm -f -- "$backup" || return 1
+    FM_SPAWN_RECOVERY_TURNEND_BACKUP=
+    return 0
+  fi
+  [ "${FM_SPAWN_RECOVERY_TURNEND_WAS_ABSENT:-0}" = 1 ] || return 1
+  [ ! -L "$turnend" ] || return 1
+  rm -f -- "$turnend"
 }
 
 fm_spawn_recovery_restore_worktree() {
@@ -473,6 +545,9 @@ fm_spawn_recovery_prepare() { # <state> <data> <task-id>
   FM_SPAWN_RECOVERY_READY=
   FM_SPAWN_RECOVERY_STARTED=
   FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT=
+  FM_SPAWN_RECOVERY_TURNEND=
+  FM_SPAWN_RECOVERY_TURNEND_BACKUP=
+  FM_SPAWN_RECOVERY_TURNEND_WAS_ABSENT=0
   FM_SPAWN_RECOVERY_REF_ROLLBACK_GUARD="$state/$id.omp-ref-rollback-pending"
   FM_SPAWN_RECOVERY_FINALIZATION_BACKUP=
   FM_SPAWN_RECOVERY_FINALIZATION_ARCHIVE=
@@ -617,6 +692,10 @@ fm_spawn_recovery_prepare() { # <state> <data> <task-id>
   FM_SPAWN_RECOVERY_TASKTMP=$tasktmp
   fm_spawn_recovery_snapshot_worktree || {
     echo "error: OMP recovery could not snapshot the preserved isolated worktree for task $id; preserving task state" >&2
+    return 1
+  }
+  fm_spawn_recovery_snapshot_turnend "$state" "$id" || {
+    echo "error: OMP recovery could not snapshot the preserved turn-end state for task $id; preserving task state" >&2
     return 1
   }
   FM_SPAWN_RECOVERY_META=$meta
@@ -818,6 +897,7 @@ fm_spawn_recovery_remove_launch_artifacts() {
 fm_spawn_recovery_cleanup_artifacts() {
   fm_spawn_recovery_remove_launch_artifacts || return 1
   rm -f -- "${FM_SPAWN_RECOVERY_META_SNAPSHOT:-}"
+  rm -f -- "${FM_SPAWN_RECOVERY_TURNEND_BACKUP:-}"
   if [ -n "${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}" ] \
      && [ -d "$FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT" ] \
      && [ ! -L "$FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT" ]; then
@@ -825,6 +905,7 @@ fm_spawn_recovery_cleanup_artifacts() {
   fi
   FM_SPAWN_RECOVERY_META_SNAPSHOT=
   FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT=
+  FM_SPAWN_RECOVERY_TURNEND_BACKUP=
   if [ -n "${FM_SPAWN_RECOVERY_FINALIZATION_BACKUP:-}" ] \
      && [ -d "$FM_SPAWN_RECOVERY_FINALIZATION_BACKUP" ] \
      && [ ! -L "$FM_SPAWN_RECOVERY_FINALIZATION_BACKUP" ]; then
@@ -865,6 +946,11 @@ fm_spawn_recovery_backup_finalization_state() {
     rm -rf -- "$backup"
     return 1
   fi
+  if [ -n "${FM_SPAWN_RECOVERY_TURNEND_BACKUP:-}" ] \
+     && ! cp -p -- "$FM_SPAWN_RECOVERY_TURNEND_BACKUP" "$backup/turnend"; then
+    rm -rf -- "$backup"
+    return 1
+  fi
   FM_SPAWN_RECOVERY_FINALIZATION_BACKUP=$backup
 }
 
@@ -886,6 +972,10 @@ fm_spawn_recovery_restore_finalization_state() {
   if [ -n "${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}" ]; then
     [ -d "$backup/worktree" ] && [ ! -L "$backup/worktree" ] || return 1
     FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT=$backup/worktree
+  fi
+  if [ -n "${FM_SPAWN_RECOVERY_TURNEND_BACKUP:-}" ]; then
+    [ -f "$backup/turnend" ] && [ ! -L "$backup/turnend" ] || return 1
+    FM_SPAWN_RECOVERY_TURNEND_BACKUP=$backup/turnend
   fi
 }
 
@@ -937,6 +1027,11 @@ fm_spawn_recovery_remove_rollback_artifacts() {
     fm_spawn_recovery_restore_finalization_state
     return 1
   fi
+  if [ -n "${FM_SPAWN_RECOVERY_TURNEND_BACKUP:-}" ] \
+     && ! rm -f -- "$FM_SPAWN_RECOVERY_TURNEND_BACKUP"; then
+    fm_spawn_recovery_restore_finalization_state
+    return 1
+  fi
   if [ -n "${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}" ] \
      && [ -d "$FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT" ] \
      && [ ! -L "$FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT" ]; then
@@ -970,6 +1065,7 @@ fm_spawn_recovery_complete() {
   FM_SPAWN_RECOVERY_POINTER_BACKUP=
   FM_SPAWN_RECOVERY_META_SNAPSHOT=
   FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT=
+  FM_SPAWN_RECOVERY_TURNEND_BACKUP=
 }
 
 fm_spawn_recovery_abort() { # <backend> <target>
@@ -993,6 +1089,10 @@ fm_spawn_recovery_abort() { # <backend> <target>
   fi
   fm_spawn_recovery_restore_worktree || {
     echo "warning: OMP recovery could not restore the preserved isolated worktree snapshot; preserving recovery artifacts and task state" >&2
+    return 1
+  }
+  fm_spawn_recovery_restore_turnend || {
+    echo "warning: OMP recovery could not restore its prior turn-end state; preserving recovery artifacts and task state" >&2
     return 1
   }
   if [ "${FM_SPAWN_RECOVERY_PUBLISHED:-0}" = 1 ]; then

@@ -114,7 +114,7 @@ ln -s /bin/bash "$WRAPPER_BIN/bun"
 cat > "$WRAPPER_BIN/ack-extension.mjs" <<'JS'
 import { pathToFileURL } from "node:url";
 
-const [extension, sessionFile] = process.argv.slice(2);
+const [extension, sessionFile, triggerTurnEnd] = process.argv.slice(2);
 const handlers = new Map();
 const omp = {
   on(event, handler) {
@@ -127,6 +127,7 @@ handlers.get("session_start")?.({}, {
   sessionManager: { getSessionFile: () => sessionFile },
 });
 handlers.get("turn_start")?.();
+if (triggerTurnEnd === "1") handlers.get("turn_end")?.();
 await new Promise((resolve) => setTimeout(resolve, 100));
 JS
 cat > "$WRAPPER_BIN/omp" <<'SH'
@@ -171,12 +172,20 @@ if [ -n "$resume" ]; then
     git -C "$concurrent_worktree" -c user.name='Recovery Fixture' \
       -c user.email=recovery@example.invalid commit -m 'concurrent mutation' || exit 1
   fi
+  if [ -f .recovery-own-branch-on-launch ]; then
+    own_branch=$(tr -d '\r\n' < .recovery-own-branch-on-launch)
+    git switch -q -c "$own_branch" || exit 1
+    printf 'replacement branch edit\n' > .recovery-own-branch-edit
+    git add .recovery-own-branch-edit || exit 1
+    git -c user.name='Recovery Fixture' \
+      -c user.email=recovery@example.invalid commit -m 'replacement branch mutation' || exit 1
+  fi
 else
   printf 'FIRSTMATE_OP: v1 launch-brief: fixture\n' > "$session_file"
 fi
 base=${session_dir%.omp-sessions}
 printf '%s\n' "$session_file" > "$base.omp-session"
-"${OMP_FIXTURE_BUN:?}" "$(dirname "$0")/ack-extension.mjs" "$extension" "$session_file" || exit 1
+"${OMP_FIXTURE_BUN:?}" "$(dirname "$0")/ack-extension.mjs" "$extension" "$session_file" "${OMP_FIXTURE_TURN_END:-0}" || exit 1
 while :; do sleep 1; done
 SH
 chmod +x "$WRAPPER_BIN/tmux" "$WRAPPER_BIN/tar" "$WRAPPER_BIN/rm" "$WRAPPER_BIN/treehouse" "$WRAPPER_BIN/omp"
@@ -334,7 +343,10 @@ git -C "$WORKTREE" add .recovery-staged
 printf 'unstaged recovery state\n' >> "$WORKTREE/.recovery-staged"
 RECOVERY_HEAD=$(git -C "$WORKTREE" rev-parse HEAD) || fail "fixture could not record the pre-recovery worktree head"
 rm "$WORKTREE/rollback-delete.txt"
-INJECTED_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_BEFORE_PUBLISH=1 spawn "$ID" --recover 2>&1)
+TURNEND="$HOME_DIR/state/$ID.turn-ended"
+printf 'preserved turn-end marker\n' > "$TURNEND"
+cp "$TURNEND" "$LAB/turnend.before"
+INJECTED_OUTPUT=$(OMP_FIXTURE_TURN_END=1 FM_SPAWN_RECOVERY_TEST_FAIL_BEFORE_PUBLISH=1 spawn "$ID" --recover 2>&1)
 INJECTED_STATUS=$?
 [ "$INJECTED_STATUS" -ne 0 ] || fail "recovery test injector unexpectedly published metadata"
 assert_contains "$INJECTED_OUTPUT" "stopped before endpoint publication" "recovery injector did not stop before publication"
@@ -342,6 +354,7 @@ wait_for_state missing || fail "failed replacement endpoint was not removed"
 cmp -s "$META" "$LAB/meta.before" || fail "failed recovery rewrote metadata"
 cmp -s "$SESSION_FILE" "$LAB/session.before" || fail "failed recovery did not restore the exact session bytes"
 cmp -s "$HOME_DIR/state/$ID.status" "$LAB/status.before" || fail "failed recovery rewrote task status"
+cmp -s "$TURNEND" "$LAB/turnend.before" || fail "failed recovery rewrote the prior turn-end marker"
 [ "$(git -C "$WORKTREE" symbolic-ref --quiet --short HEAD)" = "$BRANCH" ] || fail "failed recovery changed the branch"
 [ "$(git -C "$WORKTREE" rev-parse HEAD)" = "$RECOVERY_HEAD" ] || fail "failed recovery retained a replacement commit"
 [ "$(git -C "$WORKTREE" rev-parse "$BRANCH")" = "$RECOVERY_HEAD" ] || fail "failed recovery did not restore the recorded branch ref"
@@ -355,6 +368,15 @@ cmp -s "$HOME_DIR/state/$ID.status" "$LAB/status.before" || fail "failed recover
 [ -f "$TASK_TMP/preserve-me" ] || fail "failed recovery removed pre-existing task scratch"
 [ ! -e "$TASK_TMP/gotmp" ] && [ ! -L "$TASK_TMP/gotmp" ] \
   || fail "failed recovery retained replacement-owned build scratch"
+rm -f "$TURNEND"
+TURNEND_ABSENT_OUTPUT=$(OMP_FIXTURE_TURN_END=1 FM_SPAWN_RECOVERY_TEST_FAIL_BEFORE_PUBLISH=1 spawn "$ID" --recover 2>&1)
+TURNEND_ABSENT_STATUS=$?
+[ "$TURNEND_ABSENT_STATUS" -ne 0 ] || fail "absent turn-end marker injector unexpectedly published metadata"
+assert_contains "$TURNEND_ABSENT_OUTPUT" "stopped before endpoint publication" \
+  "absent turn-end marker injector did not stop before publication"
+wait_for_state missing || fail "absent turn-end marker failure retained replacement endpoint"
+[ ! -e "$TURNEND" ] && [ ! -L "$TURNEND" ] \
+  || fail "failed recovery retained an attempt-created turn-end marker"
 RECOVERED_OUTPUT=$(spawn "$ID" --recover) || fail "guarded recovery from a missing endpoint failed"
 assert_contains "$RECOVERED_OUTPUT" "recovered $ID harness=omp" "recovery did not report success"
 wait_for_state alive || fail "recovered missing endpoint was not live"
@@ -395,6 +417,21 @@ cmp -s "$META" "$LAB/meta.before-dead" || fail "dead endpoint recovery rewrote s
 
 PATH="$FIXTURE_PATH" tmux kill-window -t "$TARGET"
 wait_for_state missing || fail "dead-endpoint recovery did not leave a removable endpoint"
+OWN_BRANCH="fm/$ID-replacement-attempt"
+printf '%s\n' "$OWN_BRANCH" > "$WORKTREE/.recovery-own-branch-on-launch"
+OWN_BRANCH_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_BEFORE_PUBLISH=1 spawn "$ID" --recover 2>&1)
+OWN_BRANCH_STATUS=$?
+[ "$OWN_BRANCH_STATUS" -ne 0 ] || fail "attempt-branch recovery failure unexpectedly succeeded"
+assert_contains "$OWN_BRANCH_OUTPUT" "stopped before endpoint publication" \
+  "attempt-branch recovery failure did not stop before publication"
+wait_for_state missing || fail "attempt-branch recovery failure retained replacement endpoint"
+[ "$(git -C "$WORKTREE" symbolic-ref --quiet --short HEAD)" = "$BRANCH" ] \
+  || fail "attempt-branch recovery failure retained its replacement branch"
+git -C "$WORKTREE" show-ref --verify --quiet "refs/heads/$OWN_BRANCH" \
+  && fail "attempt-branch recovery failure retained its replacement ref"
+[ ! -e "$WORKTREE/.recovery-own-branch-edit" ] \
+  || fail "attempt-branch recovery failure retained its replacement commit"
+rm -f "$WORKTREE/.recovery-own-branch-on-launch"
 rm -rf "$TASK_TMP"
 [ ! -e "$TASK_TMP" ] || fail "fixture could not remove volatile task scratch"
 SNAPSHOT_FAILURE_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_SNAPSHOT=1 spawn "$ID" --recover 2>&1)
