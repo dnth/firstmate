@@ -57,6 +57,7 @@ A `--secondmate` launch is the deliberate exception: it stands up that secondmat
 Before submitting any one-line spawn command, the adapter takes up to 200 strict samples of the exact pane's lone idle foreground shell, sleeping 0.1 seconds between unsuccessful samples.
 The proof accepts the pane-owned shell or one recognized descendant shell whose exact process ancestry, foreground process group, childless state, and sleeping or idle state agree; this covers Treehouse's guarded nested worktree shell without weakening the pane-owned proof used for destructive cleanup.
 It binds required `GOTMPDIR` and optional `TRACEPARENT` values directly to the complete launch and submits that single command atomically with `pane run`; a pane that never becomes provably idle stops the launch without typing, and no separately accepted shell command can masquerade as successful environment setup.
+For Treehouse-backed work, that acquisition command publishes its verified worktree through `fm-treehouse-get.sh --ready-file`, and `fm-spawn.sh` uses that publication as allocation authority instead of Herdr's `foreground_cwd` projection, which can remain stale after a server restart.
 
 A claimed parent identity that cannot be resolved exactly stops the spawn before any worker endpoint exists, rather than falling back to a label search.
 That covers a missing or unusable socket identity, a closed or unreadable launcher pane, a pane and tab that disagree about their workspace, a workspace missing from the session, and a pane belonging to another named session or Herdr server.
