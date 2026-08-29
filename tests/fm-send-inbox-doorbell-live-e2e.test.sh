@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# tests/fm-send-inbox-doorbell-live-e2e.test.sh - live Codex and OMP proof
-# that a real worker follows the constant doorbell, acts on the durable record,
-# and acknowledges it by moving the record into handled/.
+# tests/fm-send-inbox-doorbell-live-e2e.test.sh - live installed-harness proof
+# that real workers follow the constant doorbell, act on the durable record,
+# and acknowledge it by moving the record into handled/.
 #
 # Run with FM_SEND_INBOX_LIVE_E2E=1.
 # This spends one small model turn per requested harness and uses a private tmux
 # server only; it does not start, stop, or otherwise drive Herdr lifecycle.
-# Restrict or extend with FM_SEND_INBOX_LIVE_HARNESSES and tune the per-harness
-# wait with FM_SEND_INBOX_LIVE_TIMEOUT (default 240 seconds).
+# Codex and OMP are mandatory. Select the optional harness set with
+# FM_SEND_INBOX_LIVE_HARNESSES and tune the per-harness wait with
+# FM_SEND_INBOX_LIVE_TIMEOUT (default 240 seconds).
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -62,14 +63,47 @@ PATH="$SHIM_DIR:$PATH"
 tmux -L "$SOCKET" new-session -d -s "$SESSION" -x 220 -y 50 -c "$LAB"
 tmux -L "$SOCKET" set-option -g remain-on-exit on
 
-harness_version() {
-  "$1" --version 2>/dev/null | head -1 || printf 'version-unknown'
+harness_binary() {
+  local harness=$1 selected
+  selected=$(command -v "$harness" 2>/dev/null) && {
+    printf '%s' "$selected"
+    return 0
+  }
+  case "$harness" in
+    kimi)
+      [ -x "$HOME/.kimi-code/bin/kimi" ] || return 1
+      printf '%s' "$HOME/.kimi-code/bin/kimi"
+      ;;
+    hermes)
+      [ -x "$HOME/.local/bin/hermes" ] || return 1
+      printf '%s' "$HOME/.local/bin/hermes"
+      ;;
+    *) return 1 ;;
+  esac
 }
 
-launch_command() {
-  case "$1" in
-    codex) printf '%s' 'codex -c check_for_update_on_startup=false --dangerously-bypass-approvals-and-sandbox' ;;
-    omp) printf '%s' 'omp --auto-approve' ;;
+harness_version() {
+  local version
+  version=$("$1" --version 2>/dev/null | head -1) || true
+  printf '%s' "${version:-version-unknown}"
+}
+
+launch_command() {  # <harness> <binary> <project>
+  local harness=$1 binary=$2 project=$3 binary_q project_q
+  printf -v binary_q '%q' "$binary"
+  printf -v project_q '%q' "$project"
+  case "$harness" in
+    claude) printf 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false %s --dangerously-skip-permissions' "$binary_q" ;;
+    codex) printf '%s -c check_for_update_on_startup=false --dangerously-bypass-approvals-and-sandbox' "$binary_q" ;;
+    opencode) printf 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' %s' "$binary_q" ;;
+    pi|pi-signed) printf '%s' "$binary_q" ;;
+    omp) printf '%s --auto-approve' "$binary_q" ;;
+    grok) printf '%s --always-approve' "$binary_q" ;;
+    kimi) printf '%s --auto' "$binary_q" ;;
+    hermes)
+      printf '%s chat --tui --in %s --no-restore-cwd --provider openai-codex --model gpt-5.6-sol --accept-hooks --yolo --pass-session-id' \
+        "$binary_q" "$project_q"
+      ;;
     *) return 1 ;;
   esac
 }
@@ -90,7 +124,8 @@ wait_ready() {  # <target> <harness> [omp-runtime] [omp-bin]
       || return 3
     screen=$(tmux -L "$SOCKET" capture-pane -e -p -t "$target" 2>/dev/null || true)
     plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
-    if [ "$trusted" -eq 0 ] && printf '%s\n' "$plain" | grep -qi 'Do you trust the contents'; then
+    if [ "$trusted" -eq 0 ] \
+      && printf '%s\n' "$plain" | grep -qiE 'do you trust|trust (this|the) (project|folder|directory)'; then
       tmux -L "$SOCKET" send-keys -t "$target" Enter
       trusted=1
       # Codex redraws the trust screen through a brief empty transition; wait
@@ -113,15 +148,10 @@ wait_ready() {  # <target> <harness> [omp-runtime] [omp-bin]
   return 2
 }
 
-check_harness() {  # <harness>
-  local harness=$1 version command_line window target home task project acted record handled
+check_harness() {  # <harness> <binary>
+  local harness=$1 binary=$2 version command_line window target home task project acted record handled
   local runtime='' omp_bin='' ready_rc index=0
-  version=$(harness_version "$harness")
-  command_line=$(launch_command "$harness") || {
-    FAILED=1
-    printf 'not ok - %s: no live launch recipe\n' "$harness" >&2
-    return
-  }
+  version=$(harness_version "$binary")
   if [ "$harness" = omp ]; then
     runtime=$(canonical_command bun) || {
       FAILED=1
@@ -141,6 +171,11 @@ check_harness() {  # <harness>
   acted="$LAB/acted-$harness"
   mkdir -p "$home/state" "$project"
   git -C "$project" init -q
+  command_line=$(launch_command "$harness" "$binary" "$project") || {
+    FAILED=1
+    printf 'not ok - %s: no live launch recipe\n' "$harness" >&2
+    return
+  }
   target=$(tmux -L "$SOCKET" new-window -d -P -F '#{pane_id}' \
     -t "$SESSION:" -n "$window" -c "$project" -- bash -lc "$command_line") || {
       FAILED=1
@@ -226,13 +261,34 @@ check_harness() {  # <harness>
     || tmux -L "$SOCKET" kill-pane -t "$target" 2>/dev/null || true
 }
 
-HARNESSES=${FM_SEND_INBOX_LIVE_HARNESSES:-'codex omp'}
+HARNESSES='codex omp'
+OPTIONAL_HARNESSES=${FM_SEND_INBOX_LIVE_HARNESSES:-'claude opencode pi pi-signed grok kimi hermes'}
+for harness in $OPTIONAL_HARNESSES; do
+  case "$harness" in
+    codex|omp) continue ;;
+    claude|opencode|pi|pi-signed|grok|kimi|hermes) ;;
+    *)
+      echo "not ok - unsupported live harness selection: $harness" >&2
+      exit 1
+      ;;
+  esac
+  case " $HARNESSES " in
+    *" $harness "*) ;;
+    *) HARNESSES="$HARNESSES $harness" ;;
+  esac
+done
+
 for harness in $HARNESSES; do
-  if command -v "$harness" >/dev/null 2>&1; then
-    check_harness "$harness"
+  if binary=$(harness_binary "$harness"); then
+    check_harness "$harness" "$binary"
   else
-    FAILED=1
-    printf 'not ok - required live harness is not installed: %s\n' "$harness" >&2
+    case "$harness" in
+      codex|omp)
+        FAILED=1
+        printf 'not ok - required live harness is not installed: %s\n' "$harness" >&2
+        ;;
+      *) note "$harness: not installed; live inbox guard skipped it" ;;
+    esac
   fi
 done
 
