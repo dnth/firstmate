@@ -25,6 +25,10 @@ fm_spawn_recovery_meta_count() { # <meta> <key>
 
 fm_spawn_recovery_preselect() { # <state> <task-id>
   local state=$1 id=$2 meta harness kind backend_count backend
+  if fm_spawn_recovery_teardown_rollback_pending "$state" "$id"; then
+    echo "error: OMP recovery found unfinished ordinary-session teardown rollback state for task $id; preserving task state" >&2
+    return 1
+  fi
   meta="$state/$id.meta"
   [ -f "$meta" ] && [ ! -L "$meta" ] || {
     echo "error: OMP recovery requires regular recorded metadata for task $id; preserving task state" >&2
@@ -350,6 +354,11 @@ fm_spawn_recovery_snapshot_worktree() {
     rm -rf -- "$snapshot"
     return 1
   fi
+  if ! git -C "$worktree" for-each-ref --format='%(refname) %(objectname)' refs/heads > "$snapshot/branch-refs" \
+     || [ ! -s "$snapshot/branch-refs" ]; then
+    rm -rf -- "$snapshot"
+    return 1
+  fi
   if ! git -C "$worktree" diff --cached --binary > "$snapshot/index.patch"; then
     rm -rf -- "$snapshot"
     return 1
@@ -365,6 +374,34 @@ fm_spawn_recovery_snapshot_worktree() {
   FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT=$snapshot
 }
 
+fm_spawn_recovery_restore_branch_refs() { # <snapshot> <worktree> <branch-ref> <head>
+  local snapshot=$1 worktree=$2 branch_ref=$3 head=$4 ref object extra current_ref current_object
+  local saved_ref saved_object known
+  [ -f "$snapshot/branch-refs" ] && [ ! -L "$snapshot/branch-refs" ] || return 1
+  grep -Fqx -- "$branch_ref $head" "$snapshot/branch-refs" || return 1
+  while IFS=' ' read -r ref object extra; do
+    [ -n "$ref" ] && [ -n "$object" ] && [ -z "$extra" ] || return 1
+    git check-ref-format "$ref" || return 1
+    case "$ref" in refs/heads/*) ;; *) return 1 ;; esac
+    [ "$(git -C "$worktree" rev-parse --verify "$object^{commit}" 2>/dev/null || true)" = "$object" ] || return 1
+  done < "$snapshot/branch-refs"
+  git -C "$worktree" update-ref "$branch_ref" "$head" || return 1
+  git -C "$worktree" symbolic-ref HEAD "$branch_ref" || return 1
+  while IFS=' ' read -r ref object extra; do
+    git -C "$worktree" update-ref "$ref" "$object" || return 1
+  done < "$snapshot/branch-refs"
+  while IFS=' ' read -r current_ref current_object; do
+    known=0
+    while IFS=' ' read -r saved_ref saved_object; do
+      if [ "$current_ref" = "$saved_ref" ]; then
+        known=1
+        break
+      fi
+    done < "$snapshot/branch-refs"
+    [ "$known" = 1 ] || git -C "$worktree" update-ref -d "$current_ref" || return 1
+  done < <(git -C "$worktree" for-each-ref --format='%(refname) %(objectname)' refs/heads)
+}
+
 fm_spawn_recovery_restore_worktree() {
   local snapshot=${FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT:-}
   local worktree=${FM_SPAWN_RECOVERY_WORKTREE:-} head branch_ref
@@ -372,6 +409,7 @@ fm_spawn_recovery_restore_worktree() {
   [ -d "$snapshot" ] && [ ! -L "$snapshot" ] \
     && [ -f "$snapshot/head" ] && [ ! -L "$snapshot/head" ] \
     && [ -f "$snapshot/branch-ref" ] && [ ! -L "$snapshot/branch-ref" ] \
+    && [ -f "$snapshot/branch-refs" ] && [ ! -L "$snapshot/branch-refs" ] \
     && [ -f "$snapshot/index.patch" ] && [ ! -L "$snapshot/index.patch" ] \
     && [ -f "$snapshot/worktree.patch" ] && [ ! -L "$snapshot/worktree.patch" ] \
     && [ -f "$snapshot/worktree.tar" ] && [ ! -L "$snapshot/worktree.tar" ] \
@@ -380,8 +418,7 @@ fm_spawn_recovery_restore_worktree() {
   IFS= read -r branch_ref < "$snapshot/branch-ref" || return 1
   case "$branch_ref" in refs/heads/*) ;; *) return 1 ;; esac
   [ "$(git -C "$worktree" rev-parse --verify "$head^{commit}" 2>/dev/null || true)" = "$head" ] || return 1
-  git -C "$worktree" update-ref "$branch_ref" "$head" \
-    && git -C "$worktree" symbolic-ref HEAD "$branch_ref" \
+  fm_spawn_recovery_restore_branch_refs "$snapshot" "$worktree" "$branch_ref" "$head" \
     && git -C "$worktree" reset --hard "$head" >/dev/null \
     && git -C "$worktree" clean -fdx >/dev/null \
     && { [ ! -s "$snapshot/index.patch" ] || git -C "$worktree" apply --index "$snapshot/index.patch"; } \

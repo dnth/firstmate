@@ -1091,6 +1091,73 @@ SH
   pass "failed session restoration retains existing metadata and the recovery archive"
 }
 
+test_teardown_blocks_recovery_after_partial_state_cleanup_and_restore_failure() {
+  local case_dir rc session_dir session_file pointer meta archive recovery_output recovery_rc
+  case_dir=$(make_case durable-ordinary-omp-partial-state-restore-failure)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'harness=omp' >> "$case_dir/state/task-x1.meta"
+  session_dir="$case_dir/state/task-x1.omp-sessions"
+  session_file="$session_dir/retained.jsonl"
+  pointer="$case_dir/state/task-x1.omp-session"
+  meta="$case_dir/state/task-x1.meta"
+  mkdir -p "$session_dir"
+  printf 'FIRSTMATE_OP: v1 launch-brief: retained\n' > "$session_file"
+  printf '%s\n' "$session_file" > "$pointer"
+  wt_commit "$case_dir" "shippable OMP work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  cat > "$case_dir/fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+deleted_meta=0
+for arg in "$@"; do
+  case "$arg" in
+    */task-x1.meta)
+      "$REAL_RM_FOR_TEST" -f -- "$arg"
+      deleted_meta=1
+      ;;
+    */task-x1.omp-ext.ts)
+      [ "$deleted_meta" = 1 ] && exit 1
+      ;;
+  esac
+done
+exec "$REAL_RM_FOR_TEST" "$@"
+SH
+  cat > "$case_dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+previous=
+for arg in "$@"; do
+  case "$previous:$arg" in
+    */.fm-teardown-omp-state-restore.*/sessions-backup:*/task-x1.omp-sessions) exit 1 ;;
+  esac
+  previous=$arg
+done
+exec "$REAL_MV_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/rm" "$case_dir/fakebin/mv"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "durable-ordinary-omp-partial-state-restore-failure: teardown should refuse incomplete restoration"
+  [ ! -e "$meta" ] && [ ! -L "$meta" ] || fail "durable-ordinary-omp-partial-state-restore-failure: partial cleanup retained metadata"
+  [ ! -e "$pointer" ] && [ ! -L "$pointer" ] || fail "durable-ordinary-omp-partial-state-restore-failure: partial cleanup retained pointer"
+  [ ! -e "$session_dir" ] && [ ! -L "$session_dir" ] || fail "durable-ordinary-omp-partial-state-restore-failure: partial cleanup retained session directory"
+  archive=$(find "$case_dir/state" -maxdepth 1 -type f -name '.fm-teardown-omp-state-task-x1.*.tar' -print -quit)
+  [ -n "$archive" ] || fail "durable-ordinary-omp-partial-state-restore-failure: lost recovery archive"
+  set +e
+  recovery_output=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_DATA_OVERRIDE="$case_dir/data" FM_CONFIG_OVERRIDE="$case_dir/config" FM_SPAWN_NO_GUARD=1 \
+    PATH="$case_dir/fakebin:$PATH" "$ROOT/bin/fm-spawn.sh" task-x1 --recover 2>&1)
+  recovery_rc=$?
+  set -e
+  expect_code 1 "$recovery_rc" "durable-ordinary-omp-partial-state-restore-failure: recovery must refuse pending rollback state"
+  assert_contains "$recovery_output" "unfinished ordinary-session teardown rollback state" \
+    "durable-ordinary-omp-partial-state-restore-failure: recovery did not name the rollback guard"
+  pass "partial ordinary OMP cleanup blocks recovery behind its rollback guard"
+}
+
 test_teardown_rolls_back_session_restore_when_ordinary_omp_pointer_restore_fails() {
   local case_dir rc session_dir session_file pointer rollback_pointer rollback_session
   case_dir=$(make_case durable-ordinary-omp-pointer-restore-failure)
@@ -4003,6 +4070,7 @@ test_teardown_restores_session_when_ordinary_omp_finalization_backup_deletion_fa
 test_teardown_preserves_session_when_later_pr_cleanup_fails
 test_teardown_restores_session_when_final_state_cleanup_fails
 test_teardown_retains_metadata_when_session_restoration_fails
+test_teardown_blocks_recovery_after_partial_state_cleanup_and_restore_failure
 test_teardown_rolls_back_session_restore_when_ordinary_omp_pointer_restore_fails
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed

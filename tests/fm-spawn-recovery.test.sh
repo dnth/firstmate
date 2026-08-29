@@ -172,6 +172,10 @@ if [ -n "$resume" ]; then
     git -c user.name='Recovery Fixture' -c user.email=recovery@example.invalid \
       commit -m 'replacement mutation' || exit 1
   fi
+  if [ -f .recovery-create-branch-on-launch ]; then
+    created_branch=$(tr -d '\r\n' < .recovery-create-branch-on-launch)
+    git branch "$created_branch" || exit 1
+  fi
 else
   printf 'FIRSTMATE_OP: v1 launch-brief: fixture\n' > "$session_file"
 fi
@@ -335,9 +339,11 @@ git -C "$WORKTREE" add .recovery-staged
 printf 'unstaged recovery state\n' >> "$WORKTREE/.recovery-staged"
 RECOVERY_HEAD=$(git -C "$WORKTREE" rev-parse HEAD) || fail "fixture could not record the pre-recovery worktree head"
 RECOVERY_ALT_BRANCH="$BRANCH-recovery-rollback"
+RECOVERY_CREATED_BRANCH="$BRANCH-recovery-attempt-created"
 git -C "$WORKTREE" branch "$RECOVERY_ALT_BRANCH" "$RECOVERY_HEAD" \
   || fail "fixture could not create the alternate replacement branch"
 printf '%s\n' "$RECOVERY_ALT_BRANCH" > "$WORKTREE/.recovery-mutate-on-launch"
+printf '%s\n' "$RECOVERY_CREATED_BRANCH" > "$WORKTREE/.recovery-create-branch-on-launch"
 rm "$WORKTREE/rollback-delete.txt"
 INJECTED_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_BEFORE_PUBLISH=1 spawn "$ID" --recover 2>&1)
 INJECTED_STATUS=$?
@@ -350,8 +356,13 @@ cmp -s "$HOME_DIR/state/$ID.status" "$LAB/status.before" || fail "failed recover
 [ "$(git -C "$WORKTREE" symbolic-ref --quiet --short HEAD)" = "$BRANCH" ] || fail "failed recovery changed the branch"
 [ "$(git -C "$WORKTREE" rev-parse HEAD)" = "$RECOVERY_HEAD" ] || fail "failed recovery retained a replacement commit"
 [ "$(git -C "$WORKTREE" rev-parse "$BRANCH")" = "$RECOVERY_HEAD" ] || fail "failed recovery did not restore the recorded branch ref"
+[ "$(git -C "$WORKTREE" rev-parse "$RECOVERY_ALT_BRANCH")" = "$RECOVERY_HEAD" ] \
+  || fail "failed recovery did not restore the alternate branch ref"
+git -C "$WORKTREE" show-ref --verify --quiet "refs/heads/$RECOVERY_CREATED_BRANCH" \
+  && fail "failed recovery retained an attempt-created branch ref"
 [ -f "$WORKTREE/.recovery-preserved" ] || fail "failed recovery discarded uncommitted work"
 [ -f "$WORKTREE/.recovery-mutate-on-launch" ] || fail "failed recovery discarded pre-existing mutation marker"
+[ -f "$WORKTREE/.recovery-create-branch-on-launch" ] || fail "failed recovery discarded pre-existing branch marker"
 [ ! -e "$WORKTREE/.recovery-replacement-edit" ] || fail "failed recovery retained replacement worktree edits"
 [ ! -e "$WORKTREE/rollback-delete.txt" ] || fail "failed recovery restored an unstaged tracked deletion"
 [ "$(git -C "$WORKTREE" show :'.recovery-staged')" = 'staged recovery state' ] \
@@ -362,6 +373,7 @@ cmp -s "$HOME_DIR/state/$ID.status" "$LAB/status.before" || fail "failed recover
 [ ! -e "$TASK_TMP/gotmp" ] && [ ! -L "$TASK_TMP/gotmp" ] \
   || fail "failed recovery retained replacement-owned build scratch"
 rm -f "$WORKTREE/.recovery-mutate-on-launch"
+rm -f "$WORKTREE/.recovery-create-branch-on-launch"
 
 RECOVERED_OUTPUT=$(spawn "$ID" --recover) || fail "guarded recovery from a missing endpoint failed"
 assert_contains "$RECOVERED_OUTPUT" "recovered $ID harness=omp" "recovery did not report success"
@@ -579,11 +591,13 @@ cp "$LAB/meta.before-branch-mismatch" "$META"
 rm -f "$SESSION_POINTER"
 rm -rf "$SESSION_DIR" "$TASK_TMP/omp-sessions"
 TEARDOWN_ARCHIVE=$(mktemp "$HOME_DIR/state/.fm-teardown-omp-state-$ID.XXXXXX.tar")
+mv "$META" "$LAB/meta.during-teardown-rollback"
 TEARDOWN_ROLLBACK_OUTPUT=$(spawn "$ID" --recover 2>&1)
 TEARDOWN_ROLLBACK_STATUS=$?
 [ "$TEARDOWN_ROLLBACK_STATUS" -ne 0 ] || fail "recovery accepted unfinished ordinary-session teardown rollback state"
 assert_contains "$TEARDOWN_ROLLBACK_OUTPUT" "unfinished ordinary-session teardown rollback state" \
   "recovery did not refuse unfinished ordinary-session teardown rollback state"
+mv "$LAB/meta.during-teardown-rollback" "$META"
 rm -f "$TEARDOWN_ARCHIVE"
 if FM_SPAWN_RECOVERY_TEST_FAIL_FINALIZATION=1 \
   FM_SPAWN_RECOVERY_TEST_FAIL_FRESH_SESSION_CLEANUP=1 spawn "$ID" --recover >/dev/null 2>&1; then
