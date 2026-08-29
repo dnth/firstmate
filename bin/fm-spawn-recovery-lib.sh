@@ -523,8 +523,8 @@ fm_spawn_recovery_prepare() { # <state> <data> <task-id>
   FM_SPAWN_RECOVERY_TURNEND=
   FM_SPAWN_RECOVERY_TURNEND_BACKUP=
   FM_SPAWN_RECOVERY_TURNEND_WAS_ABSENT=0
-  FM_SPAWN_RECOVERY_GIT_GATE_DIR=
-  FM_SPAWN_RECOVERY_GIT_GATE_ACTIVE=
+  FM_SPAWN_RECOVERY_TOOL_GATE_DIR=
+  FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE=
   FM_SPAWN_RECOVERY_REF_ROLLBACK_GUARD="$state/$id.omp-ref-rollback-pending"
   FM_SPAWN_RECOVERY_FINALIZATION_BACKUP=
   FM_SPAWN_RECOVERY_FINALIZATION_ARCHIVE=
@@ -694,7 +694,7 @@ fm_spawn_recovery_preflight() { # <state> <data> <task-id>
 }
 
 fm_spawn_recovery_prepare_launch_artifacts() { # <tasktmp> <task-id> <brief>
-  local tasktmp=$1 id=$2 brief=$3 old_umask git_bin
+  local tasktmp=$1 id=$2 brief=$3 old_umask
   [ -d "$tasktmp" ] && [ ! -L "$tasktmp" ] || return 1
   old_umask=$(umask)
   umask 077
@@ -702,34 +702,11 @@ fm_spawn_recovery_prepare_launch_artifacts() { # <tasktmp> <task-id> <brief>
   FM_SPAWN_RECOVERY_EXTENSION=$(mktemp "$tasktmp/.fm-spawn-recovery-ext.XXXXXX.ts") || { umask "$old_umask"; return 1; }
   FM_SPAWN_RECOVERY_READY=$(mktemp "$tasktmp/.fm-spawn-recovery-ready.XXXXXX") || { umask "$old_umask"; return 1; }
   FM_SPAWN_RECOVERY_STARTED=$(mktemp "$tasktmp/.fm-spawn-recovery-started.XXXXXX") || { umask "$old_umask"; return 1; }
-  FM_SPAWN_RECOVERY_GIT_GATE_DIR=$(mktemp -d "$tasktmp/.fm-spawn-recovery-git.XXXXXX") || { umask "$old_umask"; return 1; }
+  FM_SPAWN_RECOVERY_TOOL_GATE_DIR=$(mktemp -d "$tasktmp/.fm-spawn-recovery-tool.XXXXXX") || { umask "$old_umask"; return 1; }
   rm -f -- "$FM_SPAWN_RECOVERY_READY" "$FM_SPAWN_RECOVERY_STARTED"
   umask "$old_umask"
-  git_bin=$(command -v git) || return 1
-  case "$git_bin" in /*) ;; *) return 1 ;; esac
-  [ -x "$git_bin" ] || return 1
-  FM_SPAWN_RECOVERY_GIT_GATE_ACTIVE="$FM_SPAWN_RECOVERY_GIT_GATE_DIR/active"
-  printf '%s\n' pending > "$FM_SPAWN_RECOVERY_GIT_GATE_ACTIVE" || return 1
-  cat > "$FM_SPAWN_RECOVERY_GIT_GATE_DIR/git" <<EOF
-#!/usr/bin/env bash
-set -u
-if [ -e $(shell_quote "$FM_SPAWN_RECOVERY_GIT_GATE_ACTIVE") ]; then
-  while [ "\$#" -gt 0 ]; do
-    case "\$1" in
-      -C|-c|--git-dir|--work-tree|--namespace) shift 2 ;;
-      --no-pager|--paginate|--literal-pathspecs|--no-literal-pathspecs|--glob-pathspecs|--noglob-pathspecs|--icase-pathspecs) shift ;;
-      -*) shift ;;
-      *) break ;;
-    esac
-  done
-  case "\${1:-}" in
-    status|diff|show|log|rev-parse|symbolic-ref|for-each-ref|ls-files|ls-tree|cat-file|grep|describe|merge-base|show-ref|check-ignore) ;;
-    *) echo "error: OMP recovery blocks Git mutation until endpoint publication" >&2; exit 1 ;;
-  esac
-fi
-exec $(shell_quote "$git_bin") "\$@"
-EOF
-  chmod 700 "$FM_SPAWN_RECOVERY_GIT_GATE_DIR/git" || return 1
+  FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE="$FM_SPAWN_RECOVERY_TOOL_GATE_DIR/active"
+  printf '%s\n' pending > "$FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE" || return 1
   cat -- "$brief" > "$FM_SPAWN_RECOVERY_NOTE" || return 1
   printf '\n\nRecovery continuation: Firstmate restarted this proven-dead OMP worker in the preserved isolated copy. Re-read the brief above, inspect the current branch and uncommitted work, then continue the task without resetting, checking out another branch, or discarding work.\n' >> "$FM_SPAWN_RECOVERY_NOTE" || return 1
 }
@@ -915,13 +892,13 @@ fm_spawn_recovery_cleanup_artifacts() {
   FM_SPAWN_RECOVERY_META_SNAPSHOT=
   FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT=
   FM_SPAWN_RECOVERY_TURNEND_BACKUP=
-  if [ -n "${FM_SPAWN_RECOVERY_GIT_GATE_DIR:-}" ] \
-     && [ -d "$FM_SPAWN_RECOVERY_GIT_GATE_DIR" ] \
-     && [ ! -L "$FM_SPAWN_RECOVERY_GIT_GATE_DIR" ]; then
-    rm -rf -- "$FM_SPAWN_RECOVERY_GIT_GATE_DIR"
+  if [ -n "${FM_SPAWN_RECOVERY_TOOL_GATE_DIR:-}" ] \
+     && [ -d "$FM_SPAWN_RECOVERY_TOOL_GATE_DIR" ] \
+     && [ ! -L "$FM_SPAWN_RECOVERY_TOOL_GATE_DIR" ]; then
+    rm -rf -- "$FM_SPAWN_RECOVERY_TOOL_GATE_DIR"
   fi
-  FM_SPAWN_RECOVERY_GIT_GATE_DIR=
-  FM_SPAWN_RECOVERY_GIT_GATE_ACTIVE=
+  FM_SPAWN_RECOVERY_TOOL_GATE_DIR=
+  FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE=
   if [ -n "${FM_SPAWN_RECOVERY_FINALIZATION_BACKUP:-}" ] \
      && [ -d "$FM_SPAWN_RECOVERY_FINALIZATION_BACKUP" ] \
      && [ ! -L "$FM_SPAWN_RECOVERY_FINALIZATION_BACKUP" ]; then
@@ -1064,20 +1041,16 @@ fm_spawn_recovery_complete() {
   fm_spawn_recovery_remove_launch_artifacts || return 1
   fm_spawn_recovery_remove_rollback_artifacts || return 1
   fm_spawn_recovery_archive_finalization_state || return 1
-  rm -rf -- "$FM_SPAWN_RECOVERY_FINALIZATION_BACKUP" || {
-    fm_spawn_recovery_restore_finalization_archive
-    return 1
-  }
-  if [ "${FM_SPAWN_RECOVERY_TEST_FAIL_FINALIZATION_ARCHIVE_DELETE:-0}" = 1 ] \
-     || ! rm -f -- "$FM_SPAWN_RECOVERY_FINALIZATION_ARCHIVE"; then
-    fm_spawn_recovery_restore_finalization_archive
-    return 1
-  fi
-  if [ -n "${FM_SPAWN_RECOVERY_GIT_GATE_ACTIVE:-}" ] \
-     && ! rm -f -- "$FM_SPAWN_RECOVERY_GIT_GATE_ACTIVE"; then
+  if [ "${FM_SPAWN_RECOVERY_TEST_FAIL_GATE_RELEASE:-0}" = 1 ] \
+     || { [ -n "${FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE:-}" ] \
+          && ! rm -f -- "$FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE"; }; then
     return 1
   fi
   FM_SPAWN_RECOVERY_FINALIZED=1
+  rm -rf -- "$FM_SPAWN_RECOVERY_FINALIZATION_BACKUP" 2>/dev/null || true
+  if [ "${FM_SPAWN_RECOVERY_TEST_FAIL_FINALIZATION_ARCHIVE_DELETE:-0}" != 1 ]; then
+    rm -f -- "$FM_SPAWN_RECOVERY_FINALIZATION_ARCHIVE" 2>/dev/null || true
+  fi
   FM_SPAWN_RECOVERY_FINALIZATION_BACKUP=
   FM_SPAWN_RECOVERY_FINALIZATION_ARCHIVE=
   FM_SPAWN_RECOVERY_FINALIZATION_ORIGINAL=
@@ -1086,7 +1059,7 @@ fm_spawn_recovery_complete() {
   FM_SPAWN_RECOVERY_META_SNAPSHOT=
   FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT=
   FM_SPAWN_RECOVERY_TURNEND_BACKUP=
-  FM_SPAWN_RECOVERY_GIT_GATE_ACTIVE=
+  FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE=
 }
 
 fm_spawn_recovery_abort() { # <backend> <target>

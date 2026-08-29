@@ -3589,10 +3589,11 @@ EOF
       cat > "$OMP_EXTENSION_PATH" <<EOF
 // Firstmate OMP launch acknowledgement, durable session pointer, and turn-end signal; written by fm-spawn.
 import { execFile } from "node:child_process";
-import { renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute } from "node:path";
 const sessionDir = "$OMP_SESSION_DIR";
 const sessionPointer = "$OMP_SESSION_POINTER";
+const recoveryToolGate = "${FM_SPAWN_RECOVERY_TOOL_GATE_ACTIVE:-}";
 function publishSession(ctx: any): void {
   const sessionFile = ctx?.sessionManager?.getSessionFile?.();
   if (!sessionFile || !isAbsolute(sessionFile) || dirname(sessionFile) !== sessionDir) return;
@@ -3611,6 +3612,11 @@ export default function (omp: any) {
   });
   omp.on("turn_start", () => execFile("touch", ["$OMP_STARTED"]));
   omp.on("turn_end", () => execFile("touch", ["$TURNEND"]));
+  omp.on("tool_call", () => {
+    if (recoveryToolGate && existsSync(recoveryToolGate)) {
+      return { block: true, reason: "Firstmate blocks OMP recovery tool calls until replacement authority commits" };
+    }
+  });
 }
 EOF
       ;;
@@ -3904,9 +3910,6 @@ if [ "$OMP_LAUNCH_TEMPLATE" -eq 1 ] && [ -n "$OMP_BUN_LAUNCH_DIR" ]; then
       ;;
   esac
   OMP_LAUNCH_PATH=$OMP_BUN_LAUNCH_DIR${PATH:+:$PATH}
-  if [ "$RECOVER" -eq 1 ] && [ "$HARNESS" = omp ]; then
-    OMP_LAUNCH_PATH="$FM_SPAWN_RECOVERY_GIT_GATE_DIR:$OMP_LAUNCH_PATH"
-  fi
   OMP_LAUNCH_PATH_GUARD="PATH=$(shell_quote "$OMP_LAUNCH_PATH"); export PATH; FM_OMP_BUN_LOOKUP=\$(command -v bun) || exit 1; FM_OMP_BUN_RESOLVED=\$(readlink -f \"\$FM_OMP_BUN_LOOKUP\" 2>/dev/null || node -e 'const { realpathSync } = require(\"node:fs\"); process.stdout.write(realpathSync(process.argv[1]));' \"\$FM_OMP_BUN_LOOKUP\") || exit 1; [ \"\$FM_OMP_BUN_RESOLVED\" = $(shell_quote "$OMP_BUN_CANON") ] || exit 1; "
 fi
 if [ "$OMP_LAUNCH_TEMPLATE" -eq 1 ] && [ "$HARNESS" = omp ] && [ -n "$OMP_BIN_CANON" ]; then
@@ -4064,9 +4067,6 @@ fi
 sleep 0.3
 [ "$BACKEND" != herdr ] || LAUNCH="$HERDR_LAUNCH_ENV$LAUNCH"
 [ -z "$OMP_LAUNCH_PATH_GUARD" ] || LAUNCH="$OMP_LAUNCH_PATH_GUARD$LAUNCH"
-if [ "$RECOVER" -eq 1 ] && [ "$HARNESS" = omp ] && [ -z "$OMP_LAUNCH_PATH_GUARD" ]; then
-  LAUNCH="PATH=$(shell_quote "$FM_SPAWN_RECOVERY_GIT_GATE_DIR"):\$PATH; export PATH; $LAUNCH"
-fi
 if [ "$OMP_LAUNCH_TEMPLATE" -eq 1 ] && [ "$HARNESS" = omp ]; then
   LAUNCH="/bin/bash -c $(shell_quote "$LAUNCH")"
 fi

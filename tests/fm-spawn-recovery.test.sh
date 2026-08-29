@@ -129,9 +129,11 @@ esac
 SH
 ln -s /bin/bash "$WRAPPER_BIN/bun"
 cat > "$WRAPPER_BIN/ack-extension.mjs" <<'JS'
+import { execFileSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-const [extension, sessionFile, triggerTurnEnd] = process.argv.slice(2);
+const [extension, sessionFile, triggerTurnEnd, attemptBranch, releaseMarker] = process.argv.slice(2);
 const handlers = new Map();
 const omp = {
   on(event, handler) {
@@ -140,11 +142,41 @@ const omp = {
 };
 const module = await import(`${pathToFileURL(extension).href}?fixture=${process.pid}`);
 module.default(omp);
+const toolCall = async (command) => {
+  const handler = handlers.get("tool_call");
+  if (!handler) throw new Error("OMP extension did not register a recovery tool-call boundary");
+  return handler({ type: "tool_call", toolName: "bash", input: { command } });
+};
 handlers.get("session_start")?.({}, {
   sessionManager: { getSessionFile: () => sessionFile },
 });
+if (attemptBranch) {
+  const command = `PATH=/tmp/recovery-path-override ${process.env.OMP_FIXTURE_REAL_GIT} switch -c ${attemptBranch}`;
+  const result = await toolCall(command);
+  if (!result?.block) {
+    execFileSync(process.env.OMP_FIXTURE_REAL_GIT, ["switch", "-q", "-c", attemptBranch]);
+    writeFileSync(".recovery-own-branch-edit", "replacement branch edit\n");
+    execFileSync(process.env.OMP_FIXTURE_REAL_GIT, ["add", ".recovery-own-branch-edit"]);
+    execFileSync(process.env.OMP_FIXTURE_REAL_GIT, ["-c", "user.name=Recovery Fixture", "-c", "user.email=recovery@example.invalid", "commit", "-m", "replacement branch mutation"]);
+    throw new Error("OMP recovery allowed an absolute Git mutation before authority committed");
+  }
+}
 handlers.get("turn_start")?.();
 if (triggerTurnEnd === "1") handlers.get("turn_end")?.();
+if (releaseMarker) {
+  let released = false;
+  for (let attempt = 0; attempt < 300; attempt += 1) {
+    const result = await toolCall(`PATH=/tmp/recovery-path-override ${process.env.OMP_FIXTURE_REAL_GIT} status --short`);
+    if (!result?.block) {
+      execFileSync(process.env.OMP_FIXTURE_REAL_GIT, ["status", "--short"]);
+      writeFileSync(releaseMarker, "released\n");
+      released = true;
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  if (!released) throw new Error("OMP recovery tool-call boundary did not release after finalization");
+}
 await new Promise((resolve) => setTimeout(resolve, 100));
 JS
 cat > "$WRAPPER_BIN/omp" <<'SH'
@@ -189,20 +221,16 @@ if [ -n "$resume" ]; then
     "${OMP_FIXTURE_REAL_GIT:?}" -C "$concurrent_worktree" -c user.name='Recovery Fixture' \
       -c user.email=recovery@example.invalid commit -m 'concurrent mutation' || exit 1
   fi
-  if [ -f .recovery-own-branch-on-launch ]; then
-    own_branch=$(tr -d '\r\n' < .recovery-own-branch-on-launch)
-    git switch -q -c "$own_branch" || exit 1
-    printf 'replacement branch edit\n' > .recovery-own-branch-edit
-    git add .recovery-own-branch-edit || exit 1
-    git -c user.name='Recovery Fixture' \
-      -c user.email=recovery@example.invalid commit -m 'replacement branch mutation' || exit 1
-  fi
 else
   printf 'FIRSTMATE_OP: v1 launch-brief: fixture\n' > "$session_file"
 fi
 base=${session_dir%.omp-sessions}
 printf '%s\n' "$session_file" > "$base.omp-session"
-"${OMP_FIXTURE_BUN:?}" "$(dirname "$0")/ack-extension.mjs" "$extension" "$session_file" "${OMP_FIXTURE_TURN_END:-0}" || exit 1
+tool_gate_attempt=
+tool_gate_release=
+[ ! -f .recovery-tool-gate-attempt ] || tool_gate_attempt=$(tr -d '\r\n' < .recovery-tool-gate-attempt)
+[ ! -f .recovery-tool-gate-release-check ] || tool_gate_release=$(tr -d '\r\n' < .recovery-tool-gate-release-check)
+"${OMP_FIXTURE_BUN:?}" "$(dirname "$0")/ack-extension.mjs" "$extension" "$session_file" "${OMP_FIXTURE_TURN_END:-0}" "$tool_gate_attempt" "$tool_gate_release" || exit 1
 while :; do sleep 1; done
 SH
 chmod +x "$WRAPPER_BIN/tmux" "$WRAPPER_BIN/tar" "$WRAPPER_BIN/rm" "$WRAPPER_BIN/rmdir" "$WRAPPER_BIN/treehouse" "$WRAPPER_BIN/omp"
@@ -336,14 +364,22 @@ assert_contains "$PARTIAL_FINALIZATION_OUTPUT" "published its replacement endpoi
 wait_for_state missing || fail "partial rollback finalization failure retained replacement endpoint"
 cmp -s "$META" "$LAB/meta.before" || fail "partial rollback finalization failure retained replacement metadata"
 cmp -s "$SESSION_FILE" "$LAB/session.before" || fail "partial rollback finalization failure did not restore the exact session bytes"
-ARCHIVE_FINALIZATION_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_FINALIZATION_ARCHIVE_DELETE=1 spawn "$ID" --recover 2>&1)
-ARCHIVE_FINALIZATION_STATUS=$?
-[ "$ARCHIVE_FINALIZATION_STATUS" -ne 0 ] || fail "finalization archive deletion failure unexpectedly succeeded"
-assert_contains "$ARCHIVE_FINALIZATION_OUTPUT" "published its replacement endpoint" \
-  "finalization archive deletion failure did not reach endpoint finalization"
-wait_for_state missing || fail "finalization archive deletion failure retained replacement endpoint"
-cmp -s "$META" "$LAB/meta.before" || fail "finalization archive deletion failure retained replacement metadata"
-cmp -s "$SESSION_FILE" "$LAB/session.before" || fail "finalization archive deletion failure did not restore the exact session bytes"
+GATE_RELEASE_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_GATE_RELEASE=1 spawn "$ID" --recover 2>&1)
+GATE_RELEASE_STATUS=$?
+[ "$GATE_RELEASE_STATUS" -ne 0 ] || fail "recovery gate-release failure unexpectedly succeeded"
+assert_contains "$GATE_RELEASE_OUTPUT" "published its replacement endpoint" \
+  "gate-release failure did not reach endpoint finalization"
+wait_for_state missing || fail "gate-release failure retained replacement endpoint"
+cmp -s "$META" "$LAB/meta.before" || fail "gate-release failure retained replacement metadata"
+cmp -s "$SESSION_FILE" "$LAB/session.before" || fail "gate-release failure did not restore the exact session bytes"
+ARCHIVE_FINALIZATION_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_FINALIZATION_ARCHIVE_DELETE=1 spawn "$ID" --recover 2>&1) \
+  || fail "post-commit archive cleanup failure reported a failed recovery"
+assert_contains "$ARCHIVE_FINALIZATION_OUTPUT" "recovered $ID harness=omp" \
+  "post-commit archive cleanup failure did not preserve committed recovery"
+wait_for_state alive || fail "post-commit archive cleanup failure did not retain replacement endpoint"
+PATH="$FIXTURE_PATH" tmux kill-window -t "$TARGET"
+wait_for_state missing || fail "post-commit archive cleanup fixture endpoint did not stop"
+cp "$SESSION_FILE" "$LAB/session.before"
 ln -s "$SESSION_FILE" "$SESSION_DIR/symlinked.jsonl"
 SYMLINK_OUTPUT=$(spawn "$ID" --recover 2>&1)
 SYMLINK_STATUS=$?
@@ -403,9 +439,13 @@ assert_contains "$TURNEND_ABSENT_OUTPUT" "stopped before endpoint publication" \
 wait_for_state missing || fail "absent turn-end marker failure retained replacement endpoint"
 [ ! -e "$TURNEND" ] && [ ! -L "$TURNEND" ] \
   || fail "failed recovery retained an attempt-created turn-end marker"
+TOOL_GATE_RELEASE_MARKER="$LAB/tool-gate-released"
+printf '%s\n' "$TOOL_GATE_RELEASE_MARKER" > "$WORKTREE/.recovery-tool-gate-release-check"
 RECOVERED_OUTPUT=$(spawn "$ID" --recover) || fail "guarded recovery from a missing endpoint failed"
 assert_contains "$RECOVERED_OUTPUT" "recovered $ID harness=omp" "recovery did not report success"
 wait_for_state alive || fail "recovered missing endpoint was not live"
+wait_file "$TOOL_GATE_RELEASE_MARKER" || fail "OMP recovery tool-call boundary did not release after finalization"
+rm -f "$WORKTREE/.recovery-tool-gate-release-check"
 cmp -s "$HOME_DIR/data/$ID/brief.md" "$LAB/brief.before" || fail "successful recovery rewrote the preserved brief"
 cmp -s "$HOME_DIR/state/$ID.status" "$LAB/status.before" || fail "successful recovery rewrote task status"
 [ "$(git -C "$WORKTREE" symbolic-ref --quiet --short HEAD)" = "$BRANCH" ] || fail "successful recovery changed the branch"
@@ -444,7 +484,7 @@ cmp -s "$META" "$LAB/meta.before-dead" || fail "dead endpoint recovery rewrote s
 PATH="$FIXTURE_PATH" tmux kill-window -t "$TARGET"
 wait_for_state missing || fail "dead-endpoint recovery did not leave a removable endpoint"
 OWN_BRANCH="fm/$ID-replacement-attempt"
-printf '%s\n' "$OWN_BRANCH" > "$WORKTREE/.recovery-own-branch-on-launch"
+printf '%s\n' "$OWN_BRANCH" > "$WORKTREE/.recovery-tool-gate-attempt"
 OWN_BRANCH_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_BEFORE_PUBLISH=1 spawn "$ID" --recover 2>&1)
 OWN_BRANCH_STATUS=$?
 [ "$OWN_BRANCH_STATUS" -ne 0 ] || fail "attempt-branch recovery failure unexpectedly succeeded"
@@ -455,7 +495,7 @@ git -C "$WORKTREE" show-ref --verify --quiet "refs/heads/$OWN_BRANCH" \
   && fail "attempt-branch recovery failure retained its replacement ref"
 [ ! -e "$WORKTREE/.recovery-own-branch-edit" ] \
   || fail "attempt-branch recovery failure retained its replacement commit"
-rm -f "$WORKTREE/.recovery-own-branch-on-launch"
+rm -f "$WORKTREE/.recovery-tool-gate-attempt"
 rm -rf "$TASK_TMP"
 [ ! -e "$TASK_TMP" ] || fail "fixture could not remove volatile task scratch"
 SNAPSHOT_FAILURE_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_SNAPSHOT=1 spawn "$ID" --recover 2>&1)
