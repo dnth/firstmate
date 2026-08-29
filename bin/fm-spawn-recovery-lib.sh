@@ -842,9 +842,6 @@ fm_spawn_recovery_cleanup_prearm() {
      && [ ! -L "$FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT" ]; then
     rm -rf -- "$FM_SPAWN_RECOVERY_WORKTREE_SNAPSHOT" || return 1
   fi
-  if [ -d "$session_dir" ] && [ ! -L "$session_dir" ]; then
-    find "$session_dir" -maxdepth 1 -type f -name '.fm-spawn-recovery-session.*' -exec rm -f -- {} + || return 1
-  fi
   fm_spawn_recovery_remove_legacy_session_binding || return 1
   if [ "${FM_SPAWN_RECOVERY_SESSION_DIR_CREATED:-0}" = 1 ] \
      && [ -d "$session_dir" ] && [ ! -L "$session_dir" ]; then

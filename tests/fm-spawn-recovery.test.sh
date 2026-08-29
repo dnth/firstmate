@@ -334,6 +334,8 @@ BRANCH=$(git -C "$WORKTREE" symbolic-ref --quiet --short HEAD) || fail "fixture 
 assert_contains "$(cat "$META")" "branch=$BRANCH" \
   "initial worker did not record its exact branch identity"
 
+FOREIGN_SESSION_SNAPSHOT="$SESSION_DIR/.fm-spawn-recovery-session.foreign"
+printf 'foreign interrupted snapshot\n' > "$FOREIGN_SESSION_SNAPSHOT"
 RACE_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_ENDPOINT_LIVE_ON_PREPARE=1 spawn "$ID" --recover 2>&1)
 RACE_STATUS=$?
 [ "$RACE_STATUS" -ne 0 ] || fail "revalidation race unexpectedly launched recovery"
@@ -345,10 +347,13 @@ wait_for_state ambiguous || fail "revalidation race did not make the recorded en
   || fail "revalidation race retained a rollback manifest before snapshots"
 RACE_ARTIFACT=$(find "$TASK_TMP" -maxdepth 1 -name '.fm-spawn-recovery*' -print -quit)
 [ -z "$RACE_ARTIFACT" ] || fail "revalidation race retained a recovery attempt artifact"
+cmp -s "$FOREIGN_SESSION_SNAPSHOT" <(printf 'foreign interrupted snapshot\n') \
+  || fail "revalidation race deleted a foreign recovery snapshot"
 cmp -s "$META" "$LAB/meta.before" || fail "revalidation race rewrote metadata"
 cmp -s "$SESSION_FILE" "$LAB/session.before" || fail "revalidation race changed durable session state"
 PATH="$FIXTURE_PATH" tmux kill-window -t "$TARGET"
 wait_for_state missing || fail "revalidation race fixture endpoint did not return to missing"
+rm -f "$FOREIGN_SESSION_SNAPSHOT"
 rm -f "$HOME_DIR/state/.recovery-prepare-status-count"
 
 PRELAUNCH_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_GOTMPDIR_EXPORT=1 spawn "$ID" --recover 2>&1)
@@ -569,6 +574,10 @@ git -C "$WORKTREE" show-ref --verify --quiet "refs/heads/$OWN_BRANCH" \
 rm -f "$WORKTREE/.recovery-tool-gate-attempt"
 rm -rf "$TASK_TMP"
 [ ! -e "$TASK_TMP" ] || fail "fixture could not remove volatile task scratch"
+STALE_SESSION_SNAPSHOT=$(find "$SESSION_DIR" -maxdepth 1 -type f -name '.fm-spawn-recovery-session.*' -print -quit)
+if [ -n "$STALE_SESSION_SNAPSHOT" ]; then
+  cp "$STALE_SESSION_SNAPSHOT" "$LAB/stale-session-snapshot.before"
+fi
 SNAPSHOT_FAILURE_OUTPUT=$(FM_SPAWN_RECOVERY_TEST_FAIL_SNAPSHOT=1 spawn "$ID" --recover 2>&1)
 SNAPSHOT_FAILURE_STATUS=$?
 [ "$SNAPSHOT_FAILURE_STATUS" -ne 0 ] || fail "snapshot-failure recovery unexpectedly launched"
@@ -577,8 +586,14 @@ assert_contains "$SNAPSHOT_FAILURE_OUTPUT" "could not snapshot the preserved iso
 wait_for_state missing || fail "snapshot-failure recovery created an endpoint"
 [ ! -e "$TASK_TMP" ] && [ ! -L "$TASK_TMP" ] \
   || fail "snapshot-failure recovery retained attempt-owned task scratch"
-[ -z "$(find "$SESSION_DIR" -maxdepth 1 -type f -name '.fm-spawn-recovery-session.*' -print -quit)" ] \
-  || fail "snapshot-failure recovery retained an incomplete session snapshot"
+if [ -n "$STALE_SESSION_SNAPSHOT" ]; then
+  cmp -s "$STALE_SESSION_SNAPSHOT" "$LAB/stale-session-snapshot.before" \
+    || fail "snapshot-failure recovery changed a foreign session snapshot"
+fi
+REMAINING_SESSION_SNAPSHOT=$(find "$SESSION_DIR" -maxdepth 1 -type f -name '.fm-spawn-recovery-session.*' -print -quit)
+[ "$REMAINING_SESSION_SNAPSHOT" = "$STALE_SESSION_SNAPSHOT" ] \
+  || fail "snapshot-failure recovery retained its own incomplete session snapshot"
+[ -z "$STALE_SESSION_SNAPSHOT" ] || rm -f -- "$STALE_SESSION_SNAPSHOT"
 DURABLE_OUTPUT=$(spawn "$ID" --recover) || fail "recovery after task scratch removal failed"
 assert_contains "$DURABLE_OUTPUT" "recovered $ID harness=omp" \
   "durable-session recovery did not report success"
