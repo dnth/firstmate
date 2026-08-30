@@ -782,6 +782,10 @@ test_ambiguous_raw_omp_spellings_refuse_before_raw_execution() {
     '! omp --legacy'
     '?mp --legacy'
     'command -p ?mp --legacy'
+    'custom-agent `omp --legacy`'
+    'command command omp --legacy'
+    'bash -c omp --legacy'
+    './omp --legacy'
     "'omp --legacy"
   )
   for raw in "${cases[@]}"; do
@@ -790,7 +794,7 @@ test_ambiguous_raw_omp_spellings_refuse_before_raw_execution() {
     rec=$(make_spawn_case "profile-ambiguous-omp-$index" claude "$id")
     read_case_record "$rec"
     enable_dispatch_profile "$HOME_DIR"
-    if [ "$raw" = '?mp --legacy' ] || [ "$raw" = 'command -p ?mp --legacy' ]; then
+    if [ "$raw" = '?mp --legacy' ] || [ "$raw" = 'command -p ?mp --legacy' ] || [ "$raw" = './omp --legacy' ]; then
       ln -s "$FAKEBIN_DIR/omp" "$WT_DIR/omp"
     fi
     export FM_TEST_EXECUTE_RAW_LAUNCH=1

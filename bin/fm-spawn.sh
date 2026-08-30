@@ -1284,7 +1284,14 @@ refuse_crew_only_secondmate() {  # <harness>
 
 raw_launch_omp_word_has_shell_grammar() {  # <word>
   case "$1" in
-    '!'|time|coproc|if|then|elif|else|fi|for|while|until|do|done|case|esac|function|select|in|\[\[|\]\]|~*|*[\*\?\[]*) return 0 ;;
+    '!'|time|coproc|if|then|elif|else|fi|for|while|until|do|done|case|esac|function|select|in|bash|sh|zsh|fish|dash|ksh|csh|tcsh|eval|source|.|\[\[|\]\]|~*|*/*|*[\*\?\[]*) return 0 ;;
+  esac
+  return 1
+}
+
+raw_launch_omp_has_shell_expansion() {  # <raw command>
+  case "$1" in
+    *\$*|*\`*|*\\*|*\"*|*\'*) return 0 ;;
   esac
   return 1
 }
@@ -1299,6 +1306,7 @@ raw_launch_omp_classify() {  # <raw command>; sets RAW_LAUNCH_OMP_CLASS and RAW_
   local -a words
   RAW_LAUNCH_OMP_CLASS=ambiguous
   RAW_LAUNCH_HARNESS=
+  raw_launch_omp_has_shell_expansion "$raw" && return 0
   case "$raw" in
     *$'\n'*|*$'\r'*|*[\;\|\&\<\>\(\)\{\}]*) return 0 ;;
   esac
@@ -1335,6 +1343,7 @@ raw_launch_omp_classify() {  # <raw command>; sets RAW_LAUNCH_OMP_CLASS and RAW_
       [ "$index" -lt "${#words[@]}" ] || return 0
       word=${words[$index]}
       raw_launch_omp_word_has_shell_grammar "$word" && return 0
+      case "$word" in command|env|exec|builtin) return 0 ;; esac
       case "$word" in
         -*|*[\'\"\`\\\$]*) return 0 ;;
         omp) RAW_LAUNCH_OMP_CLASS=omp ;;
