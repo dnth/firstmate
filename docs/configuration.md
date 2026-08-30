@@ -112,8 +112,10 @@ Test cleanup must use the guarded path in [`docs/cmux-backend.md`](cmux-backend.
 
 ## Away-mode supervisor backend (FM_SUPERVISOR_BACKEND / FM_SUPERVISOR_TARGET)
 
-The `/afk` sub-supervisor injects escalation digests into firstmate's own pane independently of where new task endpoints are spawned.
-It currently supports only `tmux` and `herdr` supervisor panes.
+The `/afk` sub-supervisor buffers escalation digests for firstmate's own pane independently of where new task endpoints are spawned.
+It recognizes only `tmux` and `herdr` supervisor panes.
+Tmux can deliver a guarded digest, while Herdr preserves the escalation and safely defers typed delivery when atomic composer admission is unavailable.
+[`herdr-backend.md`](herdr-backend.md#composer-and-injection-safety) owns the Herdr admission contract.
 Set `FM_SUPERVISOR_BACKEND=tmux|herdr` and `FM_SUPERVISOR_TARGET=<target>` to override both axes explicitly; for herdr the target is `"<session>:<pane-id>"`.
 Without overrides, backend detection uses `$TMUX_PANE` first, then `HERDR_ENV=1` with `HERDR_PANE_ID`, then falls back to `tmux`.
 That keeps a tmux pane nested inside herdr on the tmux transport, matching the runtime backend's innermost-first rule.
@@ -122,7 +124,7 @@ Selecting any other supervisor backend, including `zellij`, `orca`, or `cmux`, r
 
 ## Away-mode wedge alarm channels (config/wedge-alarm)
 
-When away-mode injection wedges past `FM_MAX_DEFER_SECS`, the sub-supervisor raises a loud, rate-limited alarm.
+When away-mode delivery remains deferred past `FM_MAX_DEFER_SECS`, the sub-supervisor raises a loud, rate-limited alarm.
 Beyond the durable `state/.subsuper-inject-wedged` marker and the tmux status-line flash, it attempts a configured backend-independent active alert that can reach the captain even when every pane and its backend status-line is unreadable.
 `config/wedge-alarm` (local, gitignored) lists channel directives, one per non-empty, non-comment line; every listed non-`off` channel fires, best-effort.
 `FM_WEDGE_ALARM_CHANNEL` overrides the file with a single directive.
@@ -739,8 +741,8 @@ FM_WEDGE_ALARM_CHANNEL=            # override config/wedge-alarm with one active
 FM_WEDGE_ALARM_EXEC=              # notifier seam: route every channel (osascript, herdr, command:) through this command as `<cmd> <channel> <summary>`; "discard" fires nothing; unset in production; the daemon defaults it to "discard" when sourced so no test posts a real notification (docs/wedge-alarm.md)
 FM_WEDGE_ALARM_TIMEOUT_SECS=10    # maximum seconds for each osascript, herdr, override, or command: notifier before its watchdog terminates it and continues to the next channel; invalid or zero values use 10
 FM_INJECT_FAIL_SLEEP=30            # seconds to back off when the supervisor pane is unavailable
-FM_INJECT_CONFIRM_RETRIES=3        # daemon Enter-retry attempts after typing a digest once
-FM_INJECT_CONFIRM_SLEEP=0.5        # seconds between daemon submit checks
+FM_INJECT_CONFIRM_RETRIES=3        # tmux daemon Enter-retry attempts after typing a digest once
+FM_INJECT_CONFIRM_SLEEP=0.5        # seconds between tmux daemon submit checks
 FM_HEARTBEAT_SCAN_SECS=300         # cadence of the catch-all status scan for missed captain verbs
 FM_HOUSEKEEPING_TICK=15            # seconds between batch-flush, stale/pause-recheck, and scan passes
 FM_CRASH_THRESHOLD=10              # watcher crashes allowed inside FM_CRASH_WINDOW before daemon backoff

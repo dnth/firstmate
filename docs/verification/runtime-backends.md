@@ -961,7 +961,7 @@ Polling remained active and is covered as the fallback for capability, connect, 
 
 ### Away-mode transport
 
-The Pi/Herdr return and injection path was reverified on Herdr 0.7.3 and Pi 0.80.7:
+The Pi/Herdr return and preserved-escalation path was reverified on Herdr 0.7.3 and Pi 0.80.7:
 
 ```sh
 FM_AFK_PI_HERDR_E2E=1 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \

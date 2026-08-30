@@ -91,8 +91,9 @@
 #          FM_SUPERVISOR_HARNESS    exact supervisor harness identity. The
 #                                   detached launcher passes this explicitly;
 #                                   otherwise startup derives it with
-#                                   bin/fm-harness.sh. Herdr injection refuses
-#                                   when the identity is unknown.
+#                                   bin/fm-harness.sh. Herdr admission receives
+#                                   the identity but safely defers typed delivery
+#                                   when atomic composer admission is unavailable.
 #          FM_INJECT_SKIP           |-prefixes force-self-handle bypassing
 #                                   classification (default "heartbeat"); empty
 #                                   disables. Use sparingly: it overrides the
@@ -1385,18 +1386,19 @@ window_for_task() {  # <task-key> [state]
 # the buffer so the escalation survives for the next cycle or the catch-up flush.
 #
 # Submit model:
-#   - TYPE ONCE, then submit with Enter. Never retype the digest: a swallowed
-#     Enter leaves our text in the composer, and retyping would concatenate two
-#     sentinel-prefixed digests into one corrupted turn.
-#   - SUBMIT ACK = the backend submit primitive reports `empty` after Enter.
-#     For tmux that means a cleared composer; for herdr's normal idle-baseline
-#     path it means native agent-state observed a real turn start.
-#     Pending means Enter was swallowed; unknown is treated as undelivered by
-#     this strict daemon path.
-#   - COMPOSER GUARD before typing: if the cursor line already has real content
-#     after dim/faint ghost text and borders are ignored (a human's half-typed
-#     line, or a previous injection's unsent text), defer entirely - injecting
-#     would merge with the human's text.
+#   - TMUX TYPE ONCE, then submit with Enter. Never retype the digest: a
+#     swallowed Enter leaves our text in the composer, and retyping would
+#     concatenate two sentinel-prefixed digests into one corrupted turn.
+#   - TMUX SUBMIT ACK = a cleared composer after Enter. Pending means Enter was
+#     swallowed; unknown is treated as undelivered by this strict daemon path.
+#   - TMUX COMPOSER GUARD before typing: if the cursor line already has real
+#     content after dim/faint ghost text and borders are ignored (a human's
+#     half-typed line, or a previous injection's unsent text), defer entirely -
+#     injecting would merge with the human's text.
+#   - HERDR ADMISSION = fm_backend_herdr_away_supervisor_admit. Without a
+#     verified atomic composer admission primitive, it never types and returns
+#     a deferral so the durable escalation episode and non-composer alert path
+#     remain available.
 inject_msg() {  # <message> [state]
   local msg=$1 state target backend harness retries sleep_s verdict composer encoded omp_bun omp_bin identity
   state="${2:-$(_state_root)}"

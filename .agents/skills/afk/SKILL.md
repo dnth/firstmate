@@ -32,14 +32,14 @@ batched digest rather than per-wake injections.
      If the native launch fails, run `bin/fm-afk-launch.sh stop` to roll back the prepared lifecycle.
      Do not wrap it in `nohup ... &` (Codex/herdr can reap fire-and-forget shell children after a tool call returns).
    - **Harness WITHOUT one** (e.g. pi or omp): run `bin/fm-afk-launch.sh start`.
-     It is the single owner of the daemon terminal: it creates a NON-VISIBLE tracked terminal for the current backend (a herdr dedicated `--no-focus` workspace or a detached tmux session), records its exact id, and passes the captain pane in as `FM_SUPERVISOR_TARGET` so the daemon injects into the captain, not its own new pane.
+     It is the single owner of the daemon terminal: it creates a NON-VISIBLE tracked terminal for the current backend (a herdr dedicated `--no-focus` workspace or a detached tmux session), records its exact id, and passes the captain pane in as `FM_SUPERVISOR_TARGET` so any supported delivery addresses the captain, not its own new pane.
      It also resolves the exact primary harness and carries it plus the resolved state directory into that terminal, so the detached daemon keeps harness-specific delivery semantics and one lifecycle state; a harness identity outside the verified set refuses the start instead of launching a daemon that would guess.
      The Herdr pane-readiness proof and exact rollback contract live in [the Herdr backend guide](../../../docs/herdr-backend.md#away-mode-supervisor-support).
      **Never manufacture a terminal by splitting the captain's active pane** (`herdr pane split`): a split co-tenants the tab and visibly shrinks the captain's pane (docs/herdr-backend.md "Away-mode supervisor support").
    Both paths share `bin/fm-afk-start.sh` as the daemon entry.
    The native path tells it that the launcher already prepared lifecycle state; the terminal-backed path lets the entry perform its existing state setup inside the new terminal.
    It exits immediately if the identity-backed daemon lock already names a live process, otherwise it execs `bin/fm-supervise-daemon.sh` in the foreground.
-   The daemon is **presence-gated**: it injects escalations only while
+   The daemon is **presence-gated**: it attempts escalation delivery only while
    `state/.afk` exists, and stays quiet otherwise.
 
 3. **Do not separately arm `fm-watch.sh`.** The daemon manages the watcher as
@@ -81,11 +81,11 @@ The operational prefix travels with the message text; it does not rely on harnes
 
 ## Busy-guard and composer guard
 
-The daemon never injects into an in-use pane. Two checks run before every
-injection, dispatched through `bin/fm-backend.sh` for the supervisor's own
-backend (tmux or herdr; see "Auto-discovered supervisor pane" below):
+The daemon never injects into an in-use tmux pane. Two checks run before every
+tmux injection, dispatched through `bin/fm-backend.sh` for the supervisor's
+own backend (see "Auto-discovered supervisor pane" below):
 
-- **Primary-pane busy guard** - `pane_is_busy` trusts Herdr native `busy` when available, otherwise matches rendered output against only the detected primary harness's signature.
+- **Primary-pane busy guard** - `pane_is_busy` matches rendered output against only the detected primary harness's signature.
   This narrow delivery guard never classifies a recorded worker task and never uses a global union of vendor patterns.
 - **Composer-state guard** - `inject_msg` reads the full `empty`/`pending`/`unknown` verdict from `fm_backend_composer_state` and injects only when it is affirmatively `empty`.
   `pending` means real unsubmitted text, while `unknown` includes an unreadable pane and a bare shell prompt left after the agent exits, so both defer.
@@ -93,13 +93,15 @@ backend (tmux or herdr; see "Auto-discovered supervisor pane" below):
   It preserves idle bordered composers such as claude's `│ > … │` and bare agent glyphs as empty, but a bare shell glyph is unknown unless inside a genuine bordered composer box; see `docs/herdr-backend.md` "Composer and injection safety" for the complete contract.
   `pane_input_pending` remains the tested predicate for callers that only need to know whether real unsubmitted text is present, but it is insufficient for an injection-safety decision because it cannot distinguish `empty` from `unknown`.
 
-A busy primary pane, or any composer verdict other than `empty`, defers the injection; the buffered escalation survives in `state/.subsuper-escalations` and is retried on the next housekeeping tick.
+A busy primary pane, or any composer verdict other than `empty`, defers the tmux injection; the buffered escalation survives in `state/.subsuper-escalations` and is retried on the next housekeeping tick.
 In afk mode the composer guard is belt-and-suspenders (no human is typing), but it protects against the race window between the captain returning and their message landing, a dead shell, and the daemon's own previous injection sitting unsent.
+Herdr has one separate away-supervisor admission owner and never enters this generic typed path when atomic composer admission is unavailable.
+[`docs/herdr-backend.md`](../../../docs/herdr-backend.md#composer-and-injection-safety) owns that safety boundary.
 
 **Max-defer escape (the daemon must never silently wedge).**
 If anything stays buffered past `FM_MAX_DEFER_SECS` (default 300), the daemon
-attempts one normal flush, which still requires an idle pane and an affirmatively empty composer.
-The alarm is defense in depth rather than a substitute for keeping every genuinely idle supported composer injectable.
+attempts one normal flush, which on tmux still requires an idle pane and an affirmatively empty composer.
+Herdr remains deferred rather than making an unreserved typed attempt.
 If that submit cannot be confirmed, it raises a loud, rate-limited wedge alarm:
 an ERROR in the daemon log, a durable
 `state/.subsuper-inject-wedged` marker (surface it on the "while you were out"
@@ -109,21 +111,19 @@ So a guard false-positive becomes a visible stall, never an unbounded silent no-
 
 ## Submit model
 
-The digest is typed **once** (`send-keys -l` on tmux, `pane send-text` on
-herdr - both literal, non-submitting sends), then submitted with Enter and
-**verified** through the selected backend's submit primitive.
+On tmux, the digest is typed **once** (`send-keys -l`), then submitted with
+Enter and **verified** through the shared submit primitive.
 Enter is retried (Enter only, never a retype) until the backend confirms the
 submit landed.
 For tmux that confirmation is a cleared composer, using the same corrected,
 border-aware detector as the composer guard.
-For herdr, idle-baseline submits first seek native agent-state showing a real turn started, then use the shared composer verdict when native state stays idle.
-A cleared composer confirms delivery, while pending text retries Enter and remains pending except on Herdr's OMP-only queued path.
 A bordered-empty or ghost-only composer is recognized as empty where that backend uses composer confirmation, rather than mistaken for a swallowed Enter.
+Herdr's ordinary steering verifier remains separate from away-supervisor admission and is documented in [`docs/herdr-backend.md`](../../../docs/herdr-backend.md#current-transport-behavior).
 `fm-send.sh` uses the same primitive only on its typed plane and exits non-zero when that plane's Enter is positively swallowed; ordinary local text steers use the durable inbox and do not treat doorbell submission as delivery proof.
 
 **Busy-queued Enter exception (opencode 1.18.4 and OMP).**
 Some busy harnesses keep accepted queued text visible in the composer.
-Tmux uses `fm_composer_queued_enter_verdict` for its established non-OMP busy queue, while herdr uses it only for OMP.
+Tmux uses `fm_composer_queued_enter_verdict` for its established non-OMP busy queue.
 The daemon still clears its buffer only on the backend's success verdict.
 [`docs/tmux-backend.md`](../../../docs/tmux-backend.md) and [`docs/herdr-backend.md`](../../../docs/herdr-backend.md) own the backend-specific confirmation signals and OMP's narrower `queued-unconfirmed` result.
 
@@ -174,9 +174,10 @@ the operational prefix lets firstmate distinguish it from a real captain message
 - **Single-line digest** - embedded newlines are collapsed to a literal
   separator before injection, so submission is unambiguous regardless of
   harness.
-- **Busy and composer guards on the supervisor pane** - before injecting, the daemon runs the detected-primary-harness rendered busy guard and reads `fm_backend_composer_state` directly.
+- **Busy and composer guards on the tmux supervisor pane** - before injecting, the daemon runs the detected-primary-harness rendered busy guard and reads `fm_backend_composer_state` directly.
   Only `empty` permits injection; `pending` protects half-typed or swallowed input, and `unknown` protects unreadable panes and bare dead-shell prompts.
   Every other result preserves the buffer for retry, so the daemon never merges its digest into the captain's half-typed line or types it into a shell.
+  Herdr does not use this generic path: its admission owner safely defers instead of typing without an atomic composer reservation.
 - The shared composer classifier receives a candidate row only after the active backend performs its own capture and structural row recognition.
   tmux and herdr route their raw styled candidate rows through the shared `fm_composer_strip_ghost` extractor, which removes dim/faint and dark-TRUECOLOR ghost/placeholder text before classification.
   They read the composer shape from a separately ANSI-stripped plain row because a dark TRUECOLOR border can be stripped with ghost content.
@@ -184,20 +185,19 @@ the operational prefix lets firstmate distinguish it from a real captain message
   `FM_COMPOSER_IDLE_RE` still overrides tmux empty-composer matching after shared ghost and border stripping, and `FM_BUSY_REGEX` overrides the rendered delivery guards plus Grok's isolated task-state fallback.
 - **Max-defer escape** - the daemon must never silently wedge. If anything stays
   buffered past `FM_MAX_DEFER_SECS` (default 300s), the daemon attempts one
-  normal flush, which still requires an idle pane and an affirmatively empty composer. If that
+  normal tmux flush, which still requires an idle pane and an affirmatively empty composer. If that
   cannot confirm a submit, it raises a loud, rate-limited wedge alarm: ERROR log,
   durable `state/.subsuper-inject-wedged` marker, a tmux status-line flash when
   applicable, and a backend-independent active alert. A
   composer false-positive surfaces as a visible stall, never an unbounded silent
   no-op.
-- **Verified type-once submit model** - the digest is typed once (`send-keys -l`
-  on tmux, `pane send-text` on herdr), then submitted with Enter and verified.
+- **Verified type-once submit model** - on tmux, the digest is typed once (`send-keys -l`), then submitted with Enter and verified.
   Enter is retried, Enter only and never a retype, until the backend submit
   primitive reports `empty` as its caller-facing success verdict.
   For tmux that verdict means the shared-ghost-aware and border-aware composer
   cleared.
-  For herdr it means native agent-state observed a real turn start, the shared classifier proved the composer cleared, or the OMP-only queued-Enter verdict proved delivery while busy.
   This lets ghost-only or bordered-empty composers count as empty where a composer read is the active confirmation signal.
+  Herdr away-supervisor admission safely defers instead; its authoritative contract is in [`docs/herdr-backend.md`](../../../docs/herdr-backend.md#composer-and-injection-safety).
 - **Marker strip** - `strip_injection_marker` removes the current operational
   prefix or legacy bare marker before classification or relay, so the digest
   text firstmate sees is clean.

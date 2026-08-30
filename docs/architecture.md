@@ -85,12 +85,14 @@ The always-on watcher also uses that library's absorb classification on no-verb 
 In away mode, seen-status dedupe does not clear possible-wedge aging for nonterminal progress, so housekeeping still re-escalates an unchanged idle pane at the configured bound.
 The AFK-specific stale and captain-held recovery contract, including local liveness gates, remote owner rechecks, and duplicate-notification suppression, is owned by [the AFK skill](../.agents/skills/afk/SKILL.md#classification-policy).
 The daemon escalates captain-relevant events, plus bounded rechecks for a declared pause or a stale remote-owner result including unresolved remote captain-held recovery, as one batched, single-line digest using the canonical `away-supervisor` kind from `bin/fm-operational-input.sh` so firstmate can distinguish it structurally from real messages.
-Its supervisor injection path supports tmux and herdr panes, with `FM_SUPERVISOR_BACKEND` and `FM_SUPERVISOR_TARGET` resolved independently from the task-spawn backend.
-Pane existence, busy checks, composer checks, capture, and verified submit route through `bin/fm-backend.sh`: tmux keeps the same submit core used by the tmux send backend, while herdr prefers native agent-state confirmation and falls back to its ANSI-aware structural composer classifier.
+Its supervisor delivery path resolves tmux and Herdr panes independently from the task-spawn backend through `FM_SUPERVISOR_BACKEND` and `FM_SUPERVISOR_TARGET`.
+Tmux uses the shared guarded submit core, while Herdr sends every away-supervisor request through its own admission owner and safely defers rather than typing when atomic composer admission is unavailable.
+The [Herdr backend guide](herdr-backend.md#composer-and-injection-safety) owns that admission contract and fallback.
 The retries-exhausted queued-Enter decision is owned by `fm_composer_queued_enter_verdict` in `bin/fm-composer-lib.sh`; tmux supplies its established non-OMP busy signal, while herdr invokes the policy only for OMP.
 OMP's busy-submit decision remains backend-specific and fails closed outside its narrow queued verdict; the [tmux](tmux-backend.md#current-behavior-and-safety) and [Herdr](herdr-backend.md#current-transport-behavior) guides own the current contracts.
 Composer-content classification has one shared owner, `bin/fm-composer-lib.sh`, used by tmux, herdr, Orca, and cmux after each adapter performs its own capture and composer-row recognition.
-The daemon injects only into an affirmatively `empty` composer, so both `pending` and `unknown` defer and a bare dead-shell prompt cannot receive an escalation; the current boundary is in [Composer and injection safety](herdr-backend.md#composer-and-injection-safety).
+On tmux, the daemon injects only into an affirmatively `empty` composer, so both `pending` and `unknown` defer and a bare dead-shell prompt cannot receive an escalation.
+Herdr's no-type admission boundary is owned by [Composer and injection safety](herdr-backend.md#composer-and-injection-safety).
 Unsupported supervisor backends refuse at daemon startup.
 Stalled escalation delivery writes `state/.subsuper-inject-wedged` and attempts a configured backend-independent active alert after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
 On an unmarked return, `bin/fm-afk-return.sh` owns ordered shutdown, durable catch-up evidence, and the fail-closed gate that keeps ordinary work behind every live firstmate-actionable blocker.
@@ -99,7 +101,7 @@ Ordinary local task steering uses a durable sequenced record under `state/<id>.i
 Normal local metadata publication, inbox enqueue revalidation and record publication, and teardown share the per-task metadata lifecycle lock so endpoint birth, delivery, and retirement cannot cross; the remote-secondmate publisher and fork-only Orca abort-recovery publisher remain outside this local-leg seam.
 `fm-send.sh` owns the local selector that keeps slash commands and Codex dollar invocations typed while routing other task text through the inbox, plus enqueue-time decision closure.
 On the typed plane, `fm-send.sh` retains popup settle, OMP and Hermes post-submit turn-start checks, OMP's queued-busy exception, and supervised recovery.
-Successful typed text sends then receive the existing `FM_SEND_SETTLE` pause so immediate peeks catch the receiving turn, while the sub-supervisor uses only the shared submit core and pays neither fm-send-only step.
+Successful typed text sends then receive the existing `FM_SEND_SETTLE` pause so immediate peeks catch the receiving turn, while the sub-supervisor's tmux path uses only the shared submit core and pays neither fm-send-only step.
 
 ## Busy state is semantic, per adapter
 

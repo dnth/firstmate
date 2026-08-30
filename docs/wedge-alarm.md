@@ -1,7 +1,9 @@
 # Away-mode injection wedge alarm
 
-The away-mode sub-supervisor (`bin/fm-supervise-daemon.sh`) buffers escalations and injects them into Firstmate's own pane.
-When injection cannot confirm a submit past `FM_MAX_DEFER_SECS`, `inject_wedge_alarm` raises a loud, rate-limited alarm so the stall never stays invisible.
+The away-mode sub-supervisor (`bin/fm-supervise-daemon.sh`) buffers escalations for delivery to Firstmate's own pane.
+Tmux can inject a guarded digest, while Herdr safely defers typed away-supervisor delivery when its atomic admission contract is unavailable.
+When delivery remains deferred past `FM_MAX_DEFER_SECS`, `inject_wedge_alarm` raises a loud, rate-limited alarm so the stall never stays invisible.
+[`herdr-backend.md`](herdr-backend.md#composer-and-injection-safety) owns the Herdr admission boundary.
 The active alert is pane-independent because a tmux status-line flash has no cross-backend equivalent and cannot reach an unattended captain reliably.
 The durable marker and tmux flash remain as additional signals.
 
