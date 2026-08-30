@@ -7,11 +7,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HERDR_LAB_HELPER="$ROOT/bin/fm-herdr-lab.sh"
 HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-afk-atomic-admission)
-trap '"$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION"' EXIT
 
 command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
+trap '"$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION"' EXIT
 "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION"
 unset HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID HERDR_SOCKET_PATH
 export HERDR_SESSION="$HERDR_LAB_SESSION"

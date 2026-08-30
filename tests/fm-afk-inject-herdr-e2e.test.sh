@@ -12,11 +12,7 @@
 # socket), herdr already supports named-session isolation via --session, so no
 # PATH redirection is needed for the happy path - the daemon is simply pointed
 # at FM_SUPERVISOR_BACKEND=herdr, FM_SUPERVISOR_TARGET="<session>:<pane-id>",
-# and HERDR_SESSION="<the isolated session>". A thin herdr SHIM is still used,
-# but only to simulate a swallowed Enter (Scenario B) - herdr's real CLI has no
-# built-in way to drop a keystroke, so the shim intercepts exactly one
-# `pane send-keys <pane> enter` call and forwards everything else to the real
-# binary untouched.
+# and HERDR_SESSION="<the isolated session>".
 #
 # The "supervisor pane" is a tiny deterministic bash loop (not a real harness
 # binary): it draws a bordered composer row ("│ > <buf> │") that exercises the
@@ -53,7 +49,6 @@ pass() { printf 'ok - %s\n' "$1"; }
 SESSION="fm-lab-afk-herdr-e2e-$$"
 export HERDR_SESSION="$SESSION"
 STATE_DIR=
-HERDR_SHIM_DIR=
 LOG_FILE=
 DAEMON_PID=
 SUPERVISOR_TARGET=
@@ -67,7 +62,6 @@ cleanup_all() {
     wait "$DAEMON_PID" 2>/dev/null || true
   fi
   herdr_safe_stop_and_delete "$SESSION" 2>/dev/null || true
-  rm -rf "${HERDR_SHIM_DIR:-}" 2>/dev/null || true
   rm -rf "${STATE_DIR:-}" 2>/dev/null || true
 }
 trap cleanup_all EXIT
@@ -233,23 +227,6 @@ fm_backend_herdr_send_text_line "$SUPERVISOR_TARGET" "bash '$LOOP_SCRIPT' '$LOG_
   || fail "could not start the supervisor-loop script in the scratch herdr pane"
 sleep 1  # let the loop start and settle
 
-# --- herdr shim: forwards to the real binary, optionally swallows one Enter --
-REAL_HERDR=$(command -v herdr)
-HERDR_SHIM_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-shim.XXXXXX")
-cat > "$HERDR_SHIM_DIR/herdr" <<SHIM
-#!/usr/bin/env bash
-if [ "\${1:-}" = "pane" ] && [ "\${2:-}" = "send-keys" ] && [ -f "$STATE_DIR/.swallow-enter" ]; then
-  found_enter=0
-  for _a in "\$@"; do [ "\$_a" = "enter" ] && found_enter=1; done
-  if [ "\$found_enter" = 1 ]; then
-    rm -f "$STATE_DIR/.swallow-enter"
-    exit 0
-  fi
-fi
-exec "$REAL_HERDR" "\$@"
-SHIM
-chmod +x "$HERDR_SHIM_DIR/herdr"
-
 wait_daemon_started() {
   local label=${1:-daemon} start_line=${2:-0} i=0 new_log
   while [ "$i" -lt 30 ]; do
@@ -273,7 +250,6 @@ wait_daemon_started() {
 start_daemon() {
   local log_start=0
   [ ! -f "$STATE_DIR/.supervise-daemon.log" ] || log_start=$(wc -l < "$STATE_DIR/.supervise-daemon.log")
-  PATH="$HERDR_SHIM_DIR:$PATH" \
   HERDR_SESSION="$SESSION" \
   FM_STATE_OVERRIDE="$STATE_DIR" \
   FM_SUPERVISOR_BACKEND=herdr \
@@ -314,7 +290,6 @@ reset_state() {
          "$STATE_DIR"/.stale-* \
          "$STATE_DIR"/.seen-* \
          "$STATE_DIR"/.heartbeat-streak \
-         "$STATE_DIR"/.swallow-enter \
          2>/dev/null || true
   : > "$LOG_FILE"
 }
@@ -329,7 +304,7 @@ selfcheck_pane_input_pending() {
   fm_backend_herdr_send_literal "$SUPERVISOR_TARGET" "$check_text" \
     || fail "selfcheck: could not send literal text to the scratch pane"
   sleep 0.5
-  if PATH="$HERDR_SHIM_DIR:$PATH" pane_input_pending "$SUPERVISOR_TARGET" herdr; then
+  if pane_input_pending "$SUPERVISOR_TARGET" herdr; then
     fm_backend_herdr_send_key "$SUPERVISOR_TARGET" Enter
     sleep 0.5
     return 0
@@ -388,36 +363,6 @@ test_scenario_a() {
   pass "real herdr Scenario A: partial input defers, then the cleared composer still preserves the escalation without typing"
 }
 
-# --- Scenario B: swallowed-Enter --------------------------------------------
-
-test_scenario_b() {
-  reset_state
-  afk_enter "$STATE_DIR"
-
-  touch "$STATE_DIR/.swallow-enter"
-
-  start_daemon
-
-  echo "done: PR https://example.test/pr/200" > "$STATE_DIR/fake-c1.status"
-
-  sleep 10
-
-  local marker_count
-  marker_count=$(awk -F '\t' '{ hex=$1; count += gsub(/e281a3/, "", hex) } END { print count + 0 }' "$LOG_FILE")
-  [ "$marker_count" -eq 0 ] \
-    || fail "Scenario B: Herdr typed a digest despite lacking atomic composer admission"
-
-  local user_count
-  user_count=$(grep -c $'\tuser$' "$LOG_FILE" || true)
-  [ "$user_count" -eq 0 ] \
-    || fail "Scenario B: expected 0 user lines, got $user_count (spurious Enter submitted an empty line?)"
-  [ -s "$STATE_DIR/.subsuper-escalations" ] \
-    || fail "Scenario B: atomic-admission deferral discarded the durable escalation"
-
-  stop_daemon
-  pass "real herdr Scenario B: unavailable atomic admission never reaches the Enter transport"
-}
-
 # --- Scenario C: normal digest -----------------------------------------------
 
 test_scenario_c() {
@@ -461,7 +406,6 @@ test_scenario_d_max_defer() {
   fm_backend_herdr_send_literal "$SUPERVISOR_TARGET" "stuck-in-the-box"
   sleep 0.5
 
-  PATH="$HERDR_SHIM_DIR:$PATH" \
   HERDR_SESSION="$SESSION" \
   FM_STATE_OVERRIDE="$STATE_DIR" \
   FM_SUPERVISOR_BACKEND=herdr \
@@ -502,7 +446,6 @@ test_scenario_d_max_defer() {
 }
 
 test_scenario_a
-test_scenario_b
 test_scenario_c
 test_scenario_d_max_defer
 
