@@ -813,6 +813,8 @@ test_ambiguous_raw_omp_spellings_refuse_before_raw_execution() {
     'custom-agent *'
     'custom-agent --flag # ignored'
     'command FOO=bar omp --legacy'
+    'custom-agent=ignored omp --legacy'
+    'command -- custom-agent=ignored omp --legacy'
     "'omp --legacy"
   )
   for raw in "${cases[@]}"; do
@@ -930,7 +932,7 @@ test_raw_non_omp_command_p_preserves_path_assignment() {
   rec=$(make_spawn_case profile-raw-command-p-path claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
-  raw="PATH=$FAKEBIN_DIR FOO=command-p command -p -- custom-agent --flag"
+  raw='PATH=/custom command -p -- printenv PATH'
   export FM_TEST_EXECUTE_RAW_LAUNCH=1
   export FM_TEST_RAW_EXECUTION_LOG="$CASE_DIR/raw-execution.log"
 
@@ -939,8 +941,8 @@ test_raw_non_omp_command_p_preserves_path_assignment() {
   status=$?
   unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_EXECUTION_LOG
   expect_code 0 "$status" "raw command -p launch should preserve its PATH assignment"
-  [ "$(cat "$WT_DIR/custom-agent-executed")" = command-p ] \
-    || fail "raw command -p launch did not resolve with its assigned PATH: $(cat "$CASE_DIR/raw-execution.log")"
+  [ "$(cat "$CASE_DIR/raw-execution.log")" = /custom ] \
+    || fail "raw command -p launch did not preserve its child PATH: $(cat "$CASE_DIR/raw-execution.log")"
   pass "raw command -p preserves a plain PATH assignment"
 }
 
