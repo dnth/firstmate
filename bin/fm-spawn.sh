@@ -109,7 +109,8 @@
 #   either kind. Hermes overrides only a crewmate or scout spawn and is refused for secondmates.
 #   For crewmates and scouts, a non-flag string containing shell whitespace is
 #   treated as a RAW launch command - the escape hatch for verifying new adapters.
-#   Raw commands keep their direct non-OMP executable and arguments unchanged.
+#   Raw direct non-OMP commands preserve their executable and arguments while
+#   using `command --` to avoid pane-shell aliases and functions.
 #   Leading whitespace, plain environment assignments, and `command -p --` are
 #   normalized only to identify OMP, which raw launch never permits.
 #   Ambiguous shell syntax refuses before endpoint creation rather than bypassing
@@ -1284,7 +1285,7 @@ refuse_crew_only_secondmate() {  # <harness>
 
 raw_launch_omp_word_has_shell_grammar() {  # <word>
   case "$1" in
-    '!'|time|coproc|if|then|elif|else|fi|for|while|until|do|done|case|esac|function|select|in|bash|sh|zsh|fish|dash|ksh|csh|tcsh|eval|source|.|nohup|nice|timeout|stdbuf|setsid|chroot|runcon|unshare|taskset|ionice|sudo|doas|xargs|rlwrap|unbuffer|watch|strace|gdb|lldb|valgrind|\[\[|\]\]|~*|*/*|*[\*\?\[]*) return 0 ;;
+    '!'|time|coproc|if|then|elif|else|fi|for|while|until|do|done|case|esac|function|select|in|bash|sh|zsh|fish|dash|ksh|csh|tcsh|eval|source|.|nohup|nice|timeout|stdbuf|setsid|chroot|runcon|unshare|taskset|ionice|sudo|doas|xargs|rlwrap|unbuffer|watch|strace|gdb|lldb|valgrind|flock|\[\[|\]\]|~*|*/*|*[\*\?\[]*) return 0 ;;
   esac
   return 1
 }
@@ -1378,7 +1379,7 @@ case "$ARG3" in
         ;;
     esac
     RAW_LAUNCH=1
-    LAUNCH=$ARG3
+    LAUNCH="command -- $ARG3"
     HARNESS=$RAW_LAUNCH_HARNESS
     ;;
   '')

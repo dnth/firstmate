@@ -91,7 +91,7 @@ EOF
             launch=$(tail -n 1 "$FM_FAKE_LAUNCH_LOG")
             (
               cd "$FM_FAKE_PANE_PATH"
-              bash -c "$launch"
+              BASH_ENV="${FM_FAKE_PANE_BASH_ENV:-}" bash -c "$launch"
             )
           fi
           ;;
@@ -315,6 +315,19 @@ case "${1:-}" in
 esac
 SH
   chmod +x "$fakebin/omp"
+  cat > "$fakebin/custom-agent" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/custom-agent"
+  cat > "$fakebin/flock" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  [ "$arg" != omp ] || exec omp --legacy
+done
+exit 0
+SH
+  chmod +x "$fakebin/flock"
   cat > "$fakebin/bun" <<'SH'
 #!/usr/bin/env bash
 script=$1
@@ -445,6 +458,7 @@ run_spawn() {
     FM_FAKE_OMP_META_TAMPER="${FM_TEST_OMP_META_TAMPER:-}" \
     FM_FAKE_EXECUTE_RAW_LAUNCH="${FM_TEST_EXECUTE_RAW_LAUNCH:-0}" \
     FM_FAKE_RAW_OMP_EXECUTED="${FM_TEST_RAW_OMP_EXECUTED:-}" \
+    FM_FAKE_PANE_BASH_ENV="${FM_TEST_PANE_BASH_ENV:-}" \
     FM_HERDR_PS_BIN="$fakebin/herdr-ps" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
@@ -725,8 +739,8 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "custom-agent --flag __OMPMAXTIME__" ] || fail "raw launch command changed"$'\n'"actual: $launch"
-  pass "active crew-dispatch profile leaves the raw launch-command escape hatch unchanged"
+  [ "$launch" = "command -- custom-agent --flag __OMPMAXTIME__" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  pass "active crew-dispatch profile preserves raw direct non-OMP launch arguments"
 }
 
 test_raw_omp_spellings_refuse_before_raw_execution() {
@@ -788,6 +802,8 @@ test_ambiguous_raw_omp_spellings_refuse_before_raw_execution() {
     './omp --legacy'
     'nohup omp --legacy'
     'command nohup omp --legacy'
+    'flock /tmp/fm.lock omp --legacy'
+    'command flock /tmp/fm.lock omp --legacy'
     "'omp --legacy"
   )
   for raw in "${cases[@]}"; do
@@ -829,9 +845,34 @@ test_raw_non_omp_launches_keep_their_existing_escape_hatch() {
   expect_code 0 "$status" "lookalike non-OMP raw command should still launch"
   assert_contains "$out" "spawned $id harness=custom-omp-agent" \
     "lookalike non-OMP raw command lost its executable identity"
-  [ "$(cat "$LAUNCH_LOG")" = 'custom-omp-agent --legacy' ] \
+  [ "$(cat "$LAUNCH_LOG")" = 'command -- custom-omp-agent --legacy' ] \
     || fail "lookalike non-OMP raw launch changed"
   pass "lookalike non-OMP raw launches preserve the escape hatch"
+}
+
+test_raw_non_omp_launches_bypass_pane_aliases_and_functions() {
+  local rec id out status pane_env
+  id=$(profile_id profile-raw-pane-resolution-z15e)
+  rec=$(make_spawn_case profile-raw-pane-resolution claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  pane_env="$CASE_DIR/pane-env"
+  cat > "$pane_env" <<'SH'
+custom-agent() { omp "$@"; }
+SH
+  export FM_TEST_PANE_BASH_ENV="$pane_env"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" 'custom-agent --legacy')
+  status=$?
+  unset FM_TEST_PANE_BASH_ENV FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+  expect_code 0 "$status" "raw direct non-OMP launch should bypass an ambient pane function"
+  assert_absent "$CASE_DIR/raw-omp-executed" "ambient pane function executed the harmless fake OMP"
+  [ "$(cat "$LAUNCH_LOG")" = 'command -- custom-agent --legacy' ] \
+    || fail "raw direct non-OMP launch did not use the alias-safe command form"
+  pass "raw direct non-OMP launches bypass ambient pane aliases and functions"
 }
 
 test_claude_threads_model_and_effort() {
@@ -2458,6 +2499,7 @@ test_active_dispatch_profile_allows_raw_launch_command
 test_raw_omp_spellings_refuse_before_raw_execution
 test_ambiguous_raw_omp_spellings_refuse_before_raw_execution
 test_raw_non_omp_launches_keep_their_existing_escape_hatch
+test_raw_non_omp_launches_bypass_pane_aliases_and_functions
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
