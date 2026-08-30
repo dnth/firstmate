@@ -93,6 +93,8 @@ It types a message once and retries Enter only while the backend still permits a
 A proven empty composer is the ordinary positive delivery acknowledgement.
 Text left in established structure remains `pending`, text in ambiguous structure remains unproven, and unreadable or unsafe state remains unknown.
 An ordinary metadata-routed `fm-send.sh` text steer becomes a durable steering-inbox record plus a best-effort constant doorbell line (`bin/fm-task-inbox-lib.sh`).
+For a local OMP task, the backend first validates the ready marker owner against the pane foreground process and canonical launch identity before invoking the shared programmatic wake route.
+[`bin/fm-task-inbox-lib.sh`](../bin/fm-task-inbox-lib.sh) owns that route's request, fallback, retry, ambiguity, and handled-file processing contract.
 The verdicts above remain delivery-critical for the typed plane, where `fm-send.sh` preserves the fork's submit and OMP/Hermes turn-start verification.
 
 OpenCode 1.18.4 has one busy-queue exception.

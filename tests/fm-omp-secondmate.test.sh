@@ -40,6 +40,7 @@ setup_case() { # <name>
   : > "$HERDR_LOG"
   cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$HOME_DIR/.omp/extensions/fm-primary-omp.ts"
   cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$HOME_DIR/.omp/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" "$HOME_DIR/.omp/extensions/lib/fm-task-inbox-doorbell.ts"
   cp "$ROOT/AGENTS.md" "$HOME_DIR/AGENTS.md"
   ln -s "$ROOT/bin" "$HOME_DIR/bin"
   printf '%s\n' "$TASK_ID" > "$HOME_DIR/.fm-secondmate-home"
@@ -50,7 +51,8 @@ setup_case() { # <name>
   git -C "$HOME_DIR" config user.name fmtest
   git -C "$HOME_DIR" config user.email fmtest@example.com
   printf 'home\n' > "$HOME_DIR/README.md"
-  git -C "$HOME_DIR" add README.md .omp/extensions/fm-primary-omp.ts .omp/extensions/lib/fm-branch-dispatch.ts
+  git -C "$HOME_DIR" add README.md .omp/extensions/fm-primary-omp.ts \
+    .omp/extensions/lib/fm-branch-dispatch.ts .omp/extensions/lib/fm-task-inbox-doorbell.ts
   git -C "$HOME_DIR" commit -qm init
 
   cat > "$FAKEBIN/omp" <<'JS'

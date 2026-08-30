@@ -41,7 +41,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$PROJECT/.omp/extensions" "$PROJECT/.agents/skills" "$PROJECT/docs" \
+mkdir -p "$PROJECT/.omp/extensions/lib" "$PROJECT/.agents/skills" "$PROJECT/docs" \
   "$HOME_DIR/state" "$HOME_DIR/config" "$SESSION_DIR" "$WRAPPER_BIN"
 cp "$ROOT/AGENTS.md" "$ROOT/.tasks.toml" "$PROJECT/"
 cp -R "$ROOT/bin" "$PROJECT/bin"
@@ -49,6 +49,8 @@ cp -R "$ROOT/docs/supervision-protocols" "$PROJECT/docs/supervision-protocols"
 cp -R "$ROOT/.agents/skills/harness-adapters" "$PROJECT/.agents/skills/harness-adapters"
 cp -R "$ROOT/.agents/skills/afk" "$PROJECT/.agents/skills/afk"
 cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$PROJECT/.omp/extensions/fm-primary-omp.ts"
+cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$PROJECT/.omp/extensions/lib/fm-branch-dispatch.ts"
+cp "$ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" "$PROJECT/.omp/extensions/lib/fm-task-inbox-doorbell.ts"
 git init -q -b main "$PROJECT"
 fm_git_identity fmtest fmtest@example.invalid
 git -C "$PROJECT" add .
@@ -193,11 +195,15 @@ launch_omp() {
 FALLBACK_PROJECT="$LAB/fallback-project"
 FALLBACK_HOME="$FALLBACK_PROJECT"
 FALLBACK_SESSIONS="$LAB/fallback-sessions"
-mkdir -p "$FALLBACK_PROJECT/.omp/extensions" "$FALLBACK_HOME/config" "$FALLBACK_SESSIONS"
+mkdir -p "$FALLBACK_PROJECT/.omp/extensions/lib" "$FALLBACK_HOME/config" "$FALLBACK_SESSIONS"
 cp "$ROOT/AGENTS.md" "$FALLBACK_PROJECT/AGENTS.md"
 cp -R "$ROOT/bin" "$FALLBACK_PROJECT/bin"
 cp "$ROOT/.omp/extensions/fm-primary-omp.ts" \
   "$FALLBACK_PROJECT/.omp/extensions/fm-primary-omp.ts"
+cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" \
+  "$FALLBACK_PROJECT/.omp/extensions/lib/fm-branch-dispatch.ts"
+cp "$ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" \
+  "$FALLBACK_PROJECT/.omp/extensions/lib/fm-task-inbox-doorbell.ts"
 git init -q -b main "$FALLBACK_PROJECT"
 git -C "$FALLBACK_PROJECT" add .
 git -C "$FALLBACK_PROJECT" commit -qm init

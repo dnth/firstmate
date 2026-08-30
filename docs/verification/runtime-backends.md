@@ -1103,7 +1103,7 @@ The real smoke proves socket access, fresh readiness, current-path probing, send
 ## Local steering inbox
 
 The durable local steering-inbox path was verified live on 2026-08-28 against Codex CLI 0.149.1 and OMP 18.0.4 in isolated neutral-project tmux sessions.
-For each harness, `fm-send.sh` published an ordinary steer as a sequenced `state/<id>.inbox/*.msg` record and submitted only the constant doorbell to the terminal.
+For each harness, `fm-send.sh` published an ordinary steer as a sequenced `state/<id>.inbox/*.msg` record and submitted only the constant doorbell to the terminal at that revision.
 The real worker read the record, performed the requested file action, and acknowledged delivery by moving the record into `state/<id>.inbox/handled/`.
 This acceptance guard is scoped to the required Codex and OMP proof; adapter-specific compatibility remains owned by each harness's existing live guard.
 
@@ -1120,6 +1120,26 @@ Observed result:
 ok - codex (codex-cli 0.149.1): real worker acted on and acknowledged the durable record
 ok - omp (omp/18.0.4): real worker acted on and acknowledged the durable record
 ok - live steering-inbox doorbell guard: 2 harnesses verified
+```
+
+The OMP wake transport was changed on 2026-08-30 from terminal submission to an acknowledged programmatic extension request on tmux and Herdr.
+The deterministic extension and primary-adapter fixtures cover canonical counted requests, `triggerTurn=true`, post-retirement signal safety, exact-identity revalidation for pending retries, pre-call payload failure fallback, ambiguous-claim inbox anchoring without resend, ordinary non-OMP composer routing, ordinary worker wiring, and secondmate wiring through the primary extension.
+The required live OMP-under-Herdr smoke is intentionally deferred until after Firstmate updates; no live Herdr or OMP lifecycle was driven from this worktree.
+
+```sh
+set -o pipefail
+tests/fm-omp-task-inbox-doorbell.test.sh | grep -E '^ok - (OMP extension drains|doorbell routing selects|OMP pending retries|fm-send and both)'
+tests/fm-omp-primary.test.sh | grep -F 'ok - OMP primary extension binds secondmate doorbells after session readiness'
+```
+
+Observed result:
+
+```text
+ok - OMP extension drains canonical counted requests and safely retires signal readiness
+ok - doorbell routing selects OMP programmatic wake and preserves both composer branches
+ok - OMP pending retries revalidate identity while ambiguous claims suppress resend
+ok - fm-send and both tmux/Herdr adapters preserve task-bound OMP programmatic doorbells
+ok - OMP primary extension binds secondmate doorbells after session readiness
 ```
 
 ## Codex App host tools

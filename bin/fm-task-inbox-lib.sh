@@ -9,13 +9,15 @@
 # tells the worker how to read and acknowledge; none of them restates the
 # format.
 #
-# Design: the payload moves to the filesystem, which is reliable; the terminal
-# carries only a short constant doorbell line, which does not need to be
-# reliable because ringing it again is free. A duplicated doorbell is a no-op
-# by construction (the worker finds the inbox empty or already handled), a
-# swallowed doorbell is detected by the absence of the worker's acknowledgement
-# and re-rung on a bounded schedule, and a worker that never acknowledges
-# surfaces through the ordinary stale wake into stuck-crewmate-recovery.
+# Design: the durable inbox record and its handled-file move are the processing
+# boundary; doorbell transport is at-least-once and carries no instruction state.
+# OMP uses an acknowledged programmatic request, while every other harness and
+# an unavailable OMP extension use the terminal composer fallback. A claimed
+# programmatic request that may already have sent is anchored as ambiguous and
+# is never sent again; session recovery reconciles the instruction from the
+# durable inbox. Other swallowed doorbells are re-rung on a bounded schedule,
+# and a worker that never acknowledges surfaces through the ordinary stale wake
+# into stuck-crewmate-recovery.
 #
 # Layout under <state-dir>:
 #   <task>.inbox/NNN.msg       one durable steer, numeric sequence, atomic rename
@@ -182,8 +184,10 @@ fm_task_inbox_doorbell_line() {  # <record-path>
     "$abs" "$abs"
 }
 
-# Ring the doorbell, best-effort: one advisory composer pre-check, then the
-# backend's submit machinery with a minimal retry budget, verdict discarded.
+# Ring the doorbell, best-effort. OMP first asks its task-bound extension to
+# deliver the line as a programmatic steer with triggerTurn; when that surface
+# is unavailable, and for every non-OMP harness, the existing advisory composer
+# pre-check and backend submit machinery remain the fallback.
 # Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text
 # (the watcher re-rings later), 2 the backend send failed. No return value is
 # delivery proof; the acknowledgement move is the only delivery signal.
@@ -196,8 +200,19 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # Hermes doorbells intentionally do not take .hermes-delivery.lock in this faithful upstream port; fm-inbox-hermes-doorbell-serialize owns the serialization follow-up.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [harness] [omp-runtime] [omp-bin]
   local backend=$1 target=$2 rec=$3 label=${4:-}
-  local harness=${5:-} omp_runtime=${6:-} omp_bin=${7:-} line cstate verdict
+  local harness=${5:-} omp_runtime=${6:-} omp_bin=${7:-} line cstate verdict ready_marker request_id programmatic_rc
   line=$(fm_task_inbox_doorbell_line "$rec")
+  if [ "$harness" = omp ]; then
+    ready_marker="${rec%/*}"
+    ready_marker="${ready_marker%.inbox}.omp-doorbell-ready"
+    request_id=${rec##*/}
+    programmatic_rc=0
+    fm_backend_omp_trigger_turn "$backend" "$target" "$ready_marker" "$omp_runtime" "$omp_bin" "$request_id" "$line" \
+      || programmatic_rc=$?
+    if [ "$programmatic_rc" -eq 0 ] || [ "$programmatic_rc" -eq 2 ]; then
+      return 0
+    fi
+  fi
   cstate=$(fm_backend_composer_state "$backend" "$target" "$harness" "$omp_runtime" "$omp_bin" 2>/dev/null) || cstate=unknown
   case "$cstate" in
     pending) return 1 ;;

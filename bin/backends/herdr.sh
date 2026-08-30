@@ -2426,6 +2426,26 @@ fm_backend_herdr_send_key() {  # <target> <key>
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-keys "$FM_BACKEND_HERDR_PANE" "$key" >/dev/null 2>&1
 }
 
+# Wake an OMP task through its in-process extension without submitting the
+# Herdr composer. The extension PID must still be the exact pane's foreground
+# process-group owner and match the task's canonical OMP launch identity.
+fm_backend_herdr_omp_trigger_turn() {  # <target> <ready-marker> <omp-runtime> <omp-bin> <request-id> <doorbell-line>
+  local target=$1 marker=$2 expected_bun=$3 expected_omp=$4 request_id=$5 line=$6 info foreground_pid comm args
+  fm_omp_task_doorbell_marker_read "$marker" || return 1
+  fm_backend_herdr_parse_target "$target" || return 1
+  info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane process-info --pane "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -e --arg pane "$FM_BACKEND_HERDR_PANE" \
+    '.result.type == "pane_process_info" and .result.process_info.pane_id == $pane' >/dev/null 2>&1 || return 1
+  foreground_pid=$(printf '%s' "$info" | jq -er \
+    '.result.process_info.foreground_process_group_id | select(type == "number" and . > 1) | floor' 2>/dev/null) || return 1
+  [ "$foreground_pid" = "$FM_OMP_TASK_DOORBELL_PID" ] || return 1
+  comm=$(ps -p "$foreground_pid" -o comm= 2>/dev/null) || return 1
+  args=$(ps -p "$foreground_pid" -o args= 2>/dev/null) || return 1
+  FM_OMP_PROCESS_EXPECTED_BUN="$expected_bun" FM_OMP_PROCESS_EXPECTED_BIN="$expected_omp" \
+    fm_omp_process_matches "$comm" "$args" "$foreground_pid" || return 1
+  fm_omp_task_doorbell_request "$marker" "$foreground_pid" "$request_id" "$line"
+}
+
 # fm_backend_herdr_capture: bounded plain-text pane capture. Mirrors
 # fm-peek.sh's/fm-watch.sh's `tmux capture-pane -p -t T -S -N`. --source recent
 # is the closest herdr analogue to tmux's scrollback-bounded capture.

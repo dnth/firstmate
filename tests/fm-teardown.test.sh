@@ -674,7 +674,7 @@ test_no_mistakes_origin_remote_allows() {
   write_meta "$case_dir" no-mistakes ship
   wt_commit "$case_dir" "shippable work"
   touch "$case_dir/state/task-x1.omp-ext.ts" "$case_dir/state/task-x1.omp-ready" \
-    "$case_dir/state/task-x1.omp-started" \
+    "$case_dir/state/task-x1.omp-started" "$case_dir/state/task-x1.omp-doorbell-ready" \
     "$case_dir/state/.task-x1.open-decisions-cursor"
   # Push the task branch to origin and fetch so the worktree sees it.
   git -C "$case_dir/wt" push -q origin fm/task-x1
@@ -692,6 +692,8 @@ test_no_mistakes_origin_remote_allows() {
   assert_absent "$case_dir/state/task-x1.omp-ext.ts" "nm-origin: OMP extension survived teardown"
   assert_absent "$case_dir/state/task-x1.omp-ready" "nm-origin: OMP readiness marker survived teardown"
   assert_absent "$case_dir/state/task-x1.omp-started" "nm-origin: OMP launch marker survived teardown"
+  assert_absent "$case_dir/state/task-x1.omp-doorbell-ready" \
+    "nm-origin: OMP doorbell marker survived teardown"
   assert_absent "$case_dir/state/.task-x1.open-decisions-cursor" \
     "nm-origin: open-decisions cursor survived teardown"
   pass "no-mistakes worktree with HEAD on origin is torn down (no regression)"

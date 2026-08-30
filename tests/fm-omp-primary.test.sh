@@ -213,6 +213,7 @@ test_primary_scope_requires_canonical_state() {
   cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$fixture/.omp/extensions/fm-primary-omp.ts"
   mkdir -p "$fixture/.omp/extensions/lib"
   cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$fixture/.omp/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" "$fixture/.omp/extensions/lib/fm-task-inbox-doorbell.ts"
   cp "$ROOT/bin/fm-primary-watch-core.ts" "$fixture/bin/fm-primary-watch-core.ts"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$fixture/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-gate-refuse-lib.sh" "$fixture/bin/fm-gate-refuse-lib.sh"
@@ -257,6 +258,7 @@ test_native_omp_fresh_checkout_nudges_once() {
   cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$fixture/.omp/extensions/fm-primary-omp.ts"
   mkdir -p "$fixture/.omp/extensions/lib"
   cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$fixture/.omp/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" "$fixture/.omp/extensions/lib/fm-task-inbox-doorbell.ts"
   cp "$ROOT/bin/fm-primary-watch-core.ts" "$fixture/bin/fm-primary-watch-core.ts"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$fixture/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-gate-refuse-lib.sh" "$fixture/bin/fm-gate-refuse-lib.sh"
@@ -344,6 +346,7 @@ test_primary_marker_refuses_whitespace_identity() {
   cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$fixture/.omp/extensions/fm-primary-omp.ts"
   mkdir -p "$fixture/.omp/extensions/lib"
   cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$fixture/.omp/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" "$fixture/.omp/extensions/lib/fm-task-inbox-doorbell.ts"
   cp "$ROOT/bin/fm-primary-watch-core.ts" "$fixture/bin/fm-primary-watch-core.ts"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$fixture/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-gate-refuse-lib.sh" "$fixture/bin/fm-gate-refuse-lib.sh"
@@ -380,10 +383,11 @@ JS
 test_native_primary_extension_contract() {
   local fixture inert out status
   fixture="$TMP_ROOT/extension"
-  mkdir -p "$fixture/.omp/extensions" "$fixture/bin" "$fixture/home/state" "$fixture/home/config"
+  mkdir -p "$fixture/.omp/extensions" "$fixture/bin" "$fixture/home/state/secondmate.inbox" "$fixture/home/config"
   cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$fixture/.omp/extensions/fm-primary-omp.ts"
   mkdir -p "$fixture/.omp/extensions/lib"
   cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$fixture/.omp/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" "$fixture/.omp/extensions/lib/fm-task-inbox-doorbell.ts"
   chmod +x "$fixture/.omp/extensions/fm-primary-omp.ts"
   cp "$ROOT/bin/fm-primary-watch-core.ts" "$fixture/bin/fm-primary-watch-core.ts"
   cp "$ROOT/bin/fm-pi-compatible-runtimes" "$fixture/bin/fm-pi-compatible-runtimes"
@@ -450,6 +454,8 @@ SH
     FM_STATE_OVERRIDE="$fixture/home/state" FM_CONFIG_OVERRIDE="$fixture/home/config" \
     FM_TEST_GUARD_PAYLOADS="$fixture/guard-payloads" FM_OMP_ARM_READY_TIMEOUT_MS=500 \
     FM_OMP_SESSION_POINTER="$fixture/home/state/.omp-session" \
+    FM_OMP_TASK_INBOX_DIR="$fixture/home/state/secondmate.inbox" \
+    FM_OMP_TASK_DOORBELL_READY="$fixture/home/state/secondmate.omp-doorbell-ready" \
     node --input-type=module 2>&1 <<'JS'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
@@ -483,10 +489,29 @@ if (markerLines.length !== 4 || markerLines[1] !== String(process.pid)) {
   throw new Error(`invalid OMP primary marker ${markerLines.join("|")}`);
 }
 const extensionContext = { sessionManager: { getSessionFile: () => `${process.env.FIXTURE}/omp-session.jsonl` } };
+if (existsSync(process.env.FM_OMP_TASK_DOORBELL_READY)) {
+  throw new Error("OMP primary doorbell published readiness before session initialization");
+}
 await handlers.get("session_start")({ type: "session_start" }, extensionContext);
 if (readFileSync(process.env.FM_OMP_SESSION_POINTER, "utf8").trim() !== `${process.env.FIXTURE}/omp-session.jsonl`) {
   throw new Error("OMP primary integration did not publish the exact secondmate session pointer");
 }
+if (readFileSync(process.env.FM_OMP_TASK_DOORBELL_READY, "utf8") !== `${process.pid}\n`) {
+  throw new Error("OMP primary integration did not publish secondmate doorbell readiness at session start");
+}
+const primaryRequest = `${process.env.FM_OMP_TASK_DOORBELL_READY}.requests/primary.pending`;
+writeFileSync(primaryRequest, `Firstmate instruction waiting: list ${process.env.FM_OMP_TASK_INBOX_DIR}/*.msg and, in numeric order, read and act on each, then mv each handled file to ${process.env.FM_OMP_TASK_INBOX_DIR}/handled/.`);
+process.emit("SIGUSR2");
+if (
+  watcherMessages.length !== 1 ||
+  watcherMessages[0].message.customType !== "firstmate-task-inbox-doorbell" ||
+  watcherMessages[0].options?.deliverAs !== "steer" ||
+  watcherMessages[0].options?.triggerTurn !== true ||
+  !existsSync(`${primaryRequest}.delivered`)
+) {
+  throw new Error(`OMP primary secondmate doorbell was not acknowledged exactly once: ${JSON.stringify(watcherMessages)}`);
+}
+watcherMessages.length = 0;
 const startup = await handlers.get("before_agent_start")({ type: "before_agent_start" }, {});
 if (startup?.message?.customType !== "firstmate-sessionstart-nudge" || startup.message.content !== "OMP_PRIMARY_STARTUP_NUDGE" || startup.message.attribution !== "agent") {
   throw new Error(`startup nudge was not bound to the first provider turn: ${JSON.stringify(startup)}`);
@@ -704,7 +729,7 @@ JS
   status=$?
   expect_code 0 "$status" "OMP native extension gate-agent guard"
   assert_contains "$inert" "inert-gate-ok" "OMP gate-agent scope did not stay inert"
-  pass "OMP native extension binds startup, guarded stop, watcher, safety, marker, and shutdown surfaces"
+  pass "OMP primary extension binds secondmate doorbells after session readiness"
 }
 
 # The shared core delivers the recovery handshake for every runtime bound to it,
@@ -722,6 +747,7 @@ test_native_omp_confirms_recovery_handling_delivery() {
   cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$fixture/.omp/extensions/fm-primary-omp.ts"
   mkdir -p "$fixture/.omp/extensions/lib"
   cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$fixture/.omp/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" "$fixture/.omp/extensions/lib/fm-task-inbox-doorbell.ts"
   cp "$ROOT/bin/fm-primary-watch-core.ts" "$fixture/bin/fm-primary-watch-core.ts"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$fixture/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-gate-refuse-lib.sh" "$fixture/bin/fm-gate-refuse-lib.sh"
@@ -826,6 +852,7 @@ test_native_omp_refused_handling_delivery_is_typed_once() {
   cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$fixture/.omp/extensions/fm-primary-omp.ts"
   mkdir -p "$fixture/.omp/extensions/lib"
   cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$fixture/.omp/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" "$fixture/.omp/extensions/lib/fm-task-inbox-doorbell.ts"
   cp "$ROOT/bin/fm-primary-watch-core.ts" "$fixture/bin/fm-primary-watch-core.ts"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$fixture/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-gate-refuse-lib.sh" "$fixture/bin/fm-gate-refuse-lib.sh"

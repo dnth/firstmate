@@ -17,6 +17,7 @@ import {
   FM_BRANCH_DISPATCH_EVENT,
   scopeForUnreadWake,
 } from "./lib/fm-branch-dispatch.ts";
+import { installTaskInboxDoorbell } from "./lib/fm-task-inbox-doorbell.ts";
 
 const extensionFile = fileURLToPath(import.meta.url);
 const root = resolve(dirname(extensionFile), "../..");
@@ -181,6 +182,7 @@ function runGuard(event: SessionStopEvent): Promise<ProcessResult> {
 export default function (omp: ExtensionAPI) {
   if (!primaryIntegrationApplies()) return;
   publishNativeProcessIdentity();
+  const taskInboxDoorbell = installTaskInboxDoorbell(omp);
   let pendingStartupNudge = "";
 
   // Supervision-branch dispatch handshake (docs/omp-supervision-branch.md).
@@ -236,6 +238,7 @@ export default function (omp: ExtensionAPI) {
   };
 
   omp.on("session_start", (_event, ctx) => {
+    taskInboxDoorbell.activate();
     watch.sessionStart();
     publishSecondmateSession(ctx);
     deliverSessionstartNudge();
@@ -298,6 +301,7 @@ export default function (omp: ExtensionAPI) {
   });
 
   omp.on("session_shutdown", () => {
+    taskInboxDoorbell.retire();
     watch.sessionShutdown();
   });
 

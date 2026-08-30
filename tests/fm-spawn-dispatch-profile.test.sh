@@ -2130,6 +2130,7 @@ test_omp_secondmate_inspects_staged_live_extensions() {
   cp "$ROOT/.omp/extensions/fm-branch-supervision-omp.ts" "$sm/.omp/extensions/fm-branch-supervision-omp.ts"
   mkdir -p "$sm/.omp/extensions/lib"
   cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$sm/.omp/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" "$sm/.omp/extensions/lib/fm-task-inbox-doorbell.ts"
   cp "$ROOT/.omp/extensions/lib/fm-branch-model-picker.ts" "$sm/.omp/extensions/lib/fm-branch-model-picker.ts"
   git -C "$sm" init -q
   git -C "$sm" add .
@@ -2167,6 +2168,7 @@ test_omp_secondmate_rejects_modified_branch_helper() {
   cp "$ROOT/.omp/extensions/fm-fleet-hooks.ts" "$sm/.omp/extensions/fm-fleet-hooks.ts"
   cp "$ROOT/.omp/extensions/fm-branch-supervision-omp.ts" "$sm/.omp/extensions/fm-branch-supervision-omp.ts"
   cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$sm/.omp/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" "$sm/.omp/extensions/lib/fm-task-inbox-doorbell.ts"
   cp "$ROOT/.omp/extensions/lib/fm-branch-model-picker.ts" "$sm/.omp/extensions/lib/fm-branch-model-picker.ts"
   git -C "$sm" init -q
   git -C "$sm" add .

@@ -106,6 +106,109 @@ fm_omp_process_primary_marker_path() {
   printf '%s' "$state/.omp-primary-extension-loaded"
 }
 
+fm_omp_task_doorbell_marker_read() {  # <marker>; sets FM_OMP_TASK_DOORBELL_PID
+  local marker=$1
+  FM_OMP_TASK_DOORBELL_PID=
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  [ "$(wc -l < "$marker" 2>/dev/null | tr -d '[:space:]')" = 1 ] \
+    && [ "$(tail -c 1 "$marker" 2>/dev/null | od -An -tuC | tr -d '[:space:]')" = 10 ] || return 1
+  FM_OMP_TASK_DOORBELL_PID=$(cat "$marker" 2>/dev/null) || return 1
+  case "$FM_OMP_TASK_DOORBELL_PID" in ''|*[!0-9]*|0|1) return 1 ;; esac
+}
+
+fm_omp_task_doorbell_request_existing() {  # <marker> <request-id>
+  local marker=$1 request_id=$2 request_dir base processing
+  case "$request_id" in ''|.*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  request_dir="${marker}.requests"
+  [ -d "$request_dir" ] && [ ! -L "$request_dir" ] || return 3
+  base="$request_dir/request.$request_id"
+  if [ -f "${base}.pending.delivered" ]; then
+    rm -f "${base}.pending.delivered"
+    return 0
+  fi
+  if [ -f "${base}.pending.failed" ]; then
+    rm -f "${base}.pending.failed"
+    return 1
+  fi
+  [ ! -f "${base}.pending.ambiguous" ] || return 2
+  for processing in "${base}.pending.processing."*; do
+    [ -f "$processing" ] && return 2
+  done
+  [ -f "${base}.pending" ] && return 4
+  return 3
+}
+
+fm_omp_task_doorbell_request() {  # <marker> <verified-pid> <request-id> <doorbell-line>
+  local marker=$1 pid=$2 request_id=$3 line=$4 request_dir staged pending cancelled attempts i existing
+  fm_omp_task_doorbell_marker_read "$marker" || return 1
+  [ "$FM_OMP_TASK_DOORBELL_PID" = "$pid" ] || return 1
+  case "$request_id" in ''|.*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  request_dir="${marker}.requests"
+  [ -d "$request_dir" ] && [ ! -L "$request_dir" ] || return 1
+  pending="$request_dir/request.$request_id.pending"
+  existing=0
+  fm_omp_task_doorbell_request_existing "$marker" "$request_id" || existing=$?
+  case "$existing" in
+    0|1|2) return "$existing" ;;
+    4) ;;
+    3)
+      staged=$(mktemp "$request_dir/.request.XXXXXX") || return 1
+      if ! printf '%s' "$line" > "$staged" || ! chmod 0600 "$staged"; then
+        rm -f "$staged"
+        return 1
+      fi
+      if ! ln "$staged" "$pending" 2>/dev/null; then
+        rm -f "$staged"
+        existing=0
+        fm_omp_task_doorbell_request_existing "$marker" "$request_id" || existing=$?
+        case "$existing" in 4) ;; *) return "$existing" ;; esac
+      else
+        rm -f "$staged"
+      fi
+      ;;
+    *) return 1 ;;
+  esac
+  if ! kill -USR2 "$pid" 2>/dev/null; then
+    cancelled="${pending}.cancelled.$$"
+    if mv "$pending" "$cancelled" 2>/dev/null; then
+      rm -f "$cancelled"
+      return 1
+    fi
+    return 2
+  fi
+  attempts=${FM_OMP_TASK_DOORBELL_ACK_ATTEMPTS:-200}
+  case "$attempts" in ''|*[!0-9]*|0) attempts=200 ;; esac
+  i=0
+  while [ "$i" -lt "$attempts" ]; do
+    if [ -f "${pending}.delivered" ]; then
+      rm -f "${pending}.delivered"
+      return 0
+    fi
+    if [ -f "${pending}.failed" ]; then
+      rm -f "${pending}.failed"
+      return 1
+    fi
+    if [ ! -f "$marker" ]; then
+      cancelled="${pending}.cancelled.$$"
+      if mv "$pending" "$cancelled" 2>/dev/null; then
+        rm -f "$cancelled"
+        return 1
+      fi
+      existing=0
+      fm_omp_task_doorbell_request_existing "$marker" "$request_id" || existing=$?
+      [ "$existing" -ne 4 ] && return "$existing"
+      return 2
+    fi
+    sleep 0.01
+    i=$((i + 1))
+  done
+  existing=0
+  fm_omp_task_doorbell_request_existing "$marker" "$request_id" || existing=$?
+  [ "$existing" -eq 4 ] && return 2
+  [ "$existing" -ne 3 ] && return "$existing"
+  return 2
+}
+
 # True when this home can produce OMP identity evidence at all: either the
 # caller supplied both expected launch paths, or a primary marker file exists.
 # Without one of those, fm_omp_process_matches can never match, so ancestry
