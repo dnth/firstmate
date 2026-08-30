@@ -462,6 +462,7 @@ run_spawn() {
     FM_FAKE_RAW_OMP_EXECUTED="${FM_TEST_RAW_OMP_EXECUTED:-}" \
     FM_FAKE_PANE_BASH_ENV="${FM_TEST_PANE_BASH_ENV:-}" \
     FM_FAKE_RAW_EXECUTION_LOG="${FM_TEST_RAW_EXECUTION_LOG:-}" \
+    BASH_ENV="${FM_TEST_SPAWN_BASH_ENV:-}" \
     FM_HERDR_PS_BIN="$fakebin/herdr-ps" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
@@ -924,6 +925,52 @@ test_raw_non_omp_command_p_launches_its_direct_target() {
   assert_contains "$(cat "$CASE_DIR/raw-execution.log")" command-p-ok \
     "raw command -p launch did not execute its direct target"
   pass "raw command -p launches its direct non-OMP target"
+}
+
+test_raw_non_omp_command_p_launches_an_absolute_target() {
+  local rec id out status raw
+  id=$(profile_id profile-raw-command-p-absolute-z15i)
+  rec=$(make_spawn_case profile-raw-command-p-absolute claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  raw="command -p -- $FAKEBIN_DIR/custom-agent --flag"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_EXECUTION_LOG="$CASE_DIR/raw-execution.log"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "$raw")
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_EXECUTION_LOG
+  expect_code 0 "$status" "raw command -p launch should preserve an absolute direct target"
+  [ -f "$WT_DIR/custom-agent-executed" ] \
+    || fail "raw command -p launch did not execute its absolute direct target: $(cat "$CASE_DIR/raw-execution.log")"
+  pass "raw command -p launches an absolute direct non-OMP target"
+}
+
+test_raw_non_omp_command_p_ignores_imported_type_function() {
+  local rec id out status spawn_env
+  id=$(profile_id profile-raw-command-p-type-z15j)
+  rec=$(make_spawn_case profile-raw-command-p-type claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  spawn_env="$CASE_DIR/spawn-env"
+  cat > "$spawn_env" <<'SH'
+type() { printf '%s\n' '/usr/bin/env omp --legacy'; }
+SH
+  export FM_TEST_SPAWN_BASH_ENV="$spawn_env"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+  export FM_TEST_RAW_EXECUTION_LOG="$CASE_DIR/raw-execution.log"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" 'command -p -- printf type-safe')
+  status=$?
+  unset FM_TEST_SPAWN_BASH_ENV FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED FM_TEST_RAW_EXECUTION_LOG
+  expect_code 0 "$status" "raw command -p launch should ignore an imported type function"
+  assert_absent "$CASE_DIR/raw-omp-executed" "imported type function executed the harmless fake OMP"
+  assert_contains "$(cat "$CASE_DIR/raw-execution.log")" type-safe \
+    "raw command -p launch did not execute its resolved direct target"
+  pass "raw command -p ignores imported type functions"
 }
 
 test_raw_non_omp_command_p_preserves_path_assignment() {
@@ -2573,6 +2620,8 @@ test_raw_non_omp_launches_keep_their_existing_escape_hatch
 test_raw_non_omp_launches_bypass_pane_aliases_and_functions
 test_raw_non_omp_launches_preserve_plain_assignments
 test_raw_non_omp_command_p_launches_its_direct_target
+test_raw_non_omp_command_p_launches_an_absolute_target
+test_raw_non_omp_command_p_ignores_imported_type_function
 test_raw_non_omp_command_p_preserves_path_assignment
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort

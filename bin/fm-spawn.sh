@@ -1286,7 +1286,7 @@ refuse_crew_only_secondmate() {  # <harness>
 
 raw_launch_omp_word_has_shell_grammar() {  # <word>
   case "$1" in
-    -*|'!'|time|coproc|if|then|elif|else|fi|for|while|until|do|done|case|esac|function|select|in|bash|sh|zsh|fish|dash|ksh|csh|tcsh|eval|source|.|nohup|nice|timeout|stdbuf|setsid|chroot|runcon|unshare|taskset|ionice|sudo|doas|xargs|rlwrap|unbuffer|watch|strace|gdb|lldb|valgrind|flock|\[\[|\]\]|~*|*/*|*[\*\?\[]*) return 0 ;;
+    -*|'!'|time|coproc|if|then|elif|else|fi|for|while|until|do|done|case|esac|function|select|in|bash|sh|zsh|fish|dash|ksh|csh|tcsh|eval|source|.|nohup|nice|timeout|stdbuf|setsid|chroot|runcon|unshare|taskset|ionice|sudo|doas|xargs|rlwrap|unbuffer|watch|strace|gdb|lldb|valgrind|flock|\[\[|\]\]|~*|*[\*\?\[]*) return 0 ;;
   esac
   return 1
 }
@@ -1297,6 +1297,11 @@ raw_launch_omp_is_plain_assignment() {  # <word>
 
 raw_launch_omp_is_assignment_shaped() {  # <word>
   case "$1" in *=*) return 0 ;; esac
+  return 1
+}
+
+raw_launch_omp_is_omp_path() {  # <word>
+  case "$1" in */omp) return 0 ;; esac
   return 1
 }
 
@@ -1319,8 +1324,13 @@ raw_launch_omp_normalize() {  # <command -p flag> <assignment count> <target ind
   if [ "$command_p" = 1 ]; then
     default_path=$(getconf PATH) || return 1
     case "$default_path" in ''|*[!A-Za-z0-9_/:.-]*) return 1 ;; esac
-    target=$(PATH="$default_path" type -P "$target") || return 1
-    case "$target" in /*) ;; *) return 1 ;; esac
+    case "$target" in
+      /*) [ -x "$target" ] || return 1 ;;
+      *)
+        target=$(PATH="$default_path" builtin type -P "$target") || return 1
+        case "$target" in /*) ;; *) return 1 ;; esac
+        ;;
+    esac
   fi
   for ((index = target_index; index < ${#words[@]}; index++)); do
     if [ "$index" = "$target_index" ]; then
@@ -1364,6 +1374,7 @@ raw_launch_omp_classify() {  # <raw command>; sets RAW_LAUNCH_OMP_CLASS and RAW_
   word=${words[$index]}
   case "$word" in *[\'\"\`\\\$]*) return 0 ;; esac
   raw_launch_omp_is_assignment_shaped "$word" && return 0
+  raw_launch_omp_is_omp_path "$word" && return 0
   raw_launch_omp_word_has_shell_grammar "$word" && return 0
   case "$word" in
     omp)
@@ -1383,6 +1394,7 @@ raw_launch_omp_classify() {  # <raw command>; sets RAW_LAUNCH_OMP_CLASS and RAW_
       word=${words[$index]}
       raw_launch_omp_is_plain_assignment "$word" && return 0
       raw_launch_omp_is_assignment_shaped "$word" && return 0
+      raw_launch_omp_is_omp_path "$word" && return 0
       raw_launch_omp_word_has_shell_grammar "$word" && return 0
       case "$word" in command|env|exec|builtin) return 0 ;; esac
       case "$word" in
