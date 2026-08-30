@@ -22,7 +22,7 @@ test_extension_signal_uses_trigger_turn() {
   HELPER="$HELPER" INBOX="$dir/state/t1.inbox" READY="$dir/state/t1.omp-doorbell-ready" \
     node --input-type=module <<'JS'
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const { FM_TASK_INBOX_DOORBELL_SIGNAL, installTaskInboxDoorbell } =
@@ -33,16 +33,22 @@ const doorbell = installTaskInboxDoorbell(
   { inboxDir: process.env.INBOX, readyMarker: process.env.READY },
 );
 assert.equal(existsSync(process.env.READY), false);
+const requestDir = `${process.env.READY}.requests`;
+mkdirSync(requestDir, { recursive: true });
+writeFileSync(`${requestDir}/preexisting.pending`, "");
+writeFileSync(`${requestDir}/stale.pending.processing.2147483647`, "");
 doorbell.activate();
 assert.equal(readFileSync(process.env.READY, "utf8"), `${process.pid}\n`);
-const requestDir = `${process.env.READY}.requests`;
+assert.equal(sent.length, 2);
+assert.equal(existsSync(`${requestDir}/preexisting.pending.delivered`), true);
+assert.equal(existsSync(`${requestDir}/stale.pending.delivered`), true);
 writeFileSync(`${requestDir}/one.pending`, "");
 writeFileSync(`${requestDir}/two.pending`, "");
 process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
-assert.equal(sent.length, 2);
+assert.equal(sent.length, 4);
 assert.equal(sent[0].message.customType, "firstmate-task-inbox-doorbell");
 assert.match(sent[0].message.content, new RegExp(`${process.env.INBOX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/\\*\\.msg`));
-assert.deepEqual(sent[0].options, { deliverAs: "steer", triggerTurn: true });
+assert.deepEqual(sent[2].options, { deliverAs: "steer", triggerTurn: true });
 assert.equal(existsSync(`${requestDir}/one.pending.delivered`), true);
 assert.equal(existsSync(`${requestDir}/two.pending.delivered`), true);
 doorbell.retire();
@@ -136,7 +142,12 @@ set -u
 request_dir="${MARKER}.requests"
 
 printf '4242\n' > "$MARKER"
-kill() { return 0; }
+kill() {
+  case "$1:$2" in
+    -0:2147483647) return 1 ;;
+    *) return 0 ;;
+  esac
+}
 FM_OMP_TASK_DOORBELL_ACK_ATTEMPTS=1 \
   fm_omp_task_doorbell_request "$MARKER" 4242 timeout.msg
 [ "$?" = 2 ]
@@ -158,6 +169,16 @@ set -e
 [ "$rc" = 2 ]
 [ -f "$request_dir/request.claimed.msg.pending.processing.4242" ]
 
+printf '4242\n' > "$MARKER"
+: > "$request_dir/request.stale.msg.pending.processing.2147483647"
+set +e
+fm_omp_task_doorbell_request_existing "$MARKER" stale.msg
+rc=$?
+set -e
+[ "$rc" = 2 ]
+[ -f "$request_dir/request.stale.msg.pending" ]
+[ ! -e "$request_dir/request.stale.msg.pending.processing.2147483647" ]
+
 : > "$request_dir/request.failed.msg.pending.failed"
 set +e
 fm_omp_task_doorbell_request_existing "$MARKER" failed.msg
@@ -167,7 +188,7 @@ set -e
 [ ! -e "$request_dir/request.failed.msg.pending.failed" ]
 SH
   expect_code 0 "$?" "OMP request terminal-state boundary"
-  pass "OMP request timeout stays indeterminate while explicit unclaimed and failed outcomes fall back"
+  pass "OMP request timeout and dead claim recovery preserve terminal retries"
 }
 
 make_send_stubs() {  # <dir>

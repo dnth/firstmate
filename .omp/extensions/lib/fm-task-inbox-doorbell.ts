@@ -1,5 +1,7 @@
 import {
 	type FSWatcher,
+	existsSync,
+	linkSync,
 	mkdirSync,
 	readFileSync,
 	readdirSync,
@@ -69,6 +71,38 @@ function bestEffortRename(from: string, to: string): void {
 	}
 }
 
+function processIsAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function reconcileStaleClaims(requestDir: string): void {
+	for (const name of readdirSync(requestDir).sort()) {
+		const match = name.match(/^(.*\.pending)\.processing\.([0-9]+)$/);
+		if (!match) continue;
+		const owner = Number(match[2]);
+		if (!Number.isSafeInteger(owner) || owner <= 1 || processIsAlive(owner)) continue;
+		const processing = join(requestDir, name);
+		const pending = join(requestDir, match[1]);
+		try {
+			linkSync(processing, pending);
+			unlinkSync(processing);
+		} catch {
+			if (existsSync(pending)) {
+				try {
+					unlinkSync(processing);
+				} catch {
+					continue;
+				}
+			}
+		}
+	}
+}
+
 export function installTaskInboxDoorbell(
 	omp: OmpDoorbellApi,
 	options: TaskInboxDoorbellOptions = {},
@@ -129,10 +163,12 @@ export function installTaskInboxDoorbell(
 		if (active) return;
 		try {
 			mkdirSync(requestDir, { recursive: true, mode: 0o700 });
+			reconcileStaleClaims(requestDir);
 			watcher = watch(requestDir, drain);
 			active = true;
 			process.on(FM_TASK_INBOX_DOORBELL_SIGNAL, drain);
 			publishReadyMarker(configured.readyMarker);
+			drain();
 		} catch {
 			retire();
 		}

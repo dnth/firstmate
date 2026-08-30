@@ -1137,7 +1137,7 @@ Observed result:
 ```text
 ok - OMP extension drains every counted request and acknowledges delivery or failure
 ok - doorbell routing selects OMP programmatic wake and preserves both composer branches
-ok - OMP request timeout stays indeterminate while explicit unclaimed and failed outcomes fall back
+ok - OMP request timeout and dead claim recovery preserve terminal retries
 ok - fm-send and both tmux/Herdr adapters preserve task-bound OMP programmatic doorbells
 ok - OMP primary extension binds secondmate doorbells after session readiness
 ```

@@ -9,9 +9,10 @@
 # tells the worker how to read and acknowledge; none of them restates the
 # format.
 #
-# Design: the payload moves to the filesystem, which is reliable; the terminal
-# carries only a short constant doorbell line, which does not need to be
-# reliable because ringing it again is free. A duplicated doorbell is a no-op
+# Design: the payload moves to the filesystem, which is reliable; OMP carries
+# the constant doorbell through its acknowledged programmatic extension request,
+# while every other harness and an unavailable OMP extension use the terminal
+# composer fallback. Ringing again is safe. A duplicated doorbell is a no-op
 # by construction (the worker finds the inbox empty or already handled), a
 # swallowed doorbell is detected by the absence of the worker's acknowledgement
 # and re-rung on a bounded schedule, and a worker that never acknowledges
