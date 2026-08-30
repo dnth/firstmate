@@ -122,7 +122,9 @@ pass "arm binds, refuses duplicates, and retire cleans up"
 # --- protected lifecycle/reply entrypoints and carriers fail closed ----------
 H="$TMP_ROOT/h-policy"; new_home "$H"
 policy_case=0
-for protected in "$ROOT/bin/fm-runpod.sh" "$ROOT/bin/fm-x-reply.sh" \
+for protected in "$ROOT/bin/fm-runpod.sh" "$ROOT/bin/fm-on.sh" \
+  "$ROOT/bin/fm-remote-secondmate-control.sh" "$ROOT/bin/fm-pr-merge.sh" \
+  "$ROOT/bin/fm-teardown.sh" "$ROOT/bin/fm-x-reply.sh" \
   "$ROOT/bin/fm-public-followup.sh"; do
   policy_case=$((policy_case + 1))
   if when "$H" arm "protected-$policy_case" --stable 1 \
@@ -141,6 +143,15 @@ if when "$H" arm protected-condition --stable 1 \
 fi
 assert_grep "condition executable is not allowlisted" "$TMP_ROOT/protected-condition.err" \
   "protected conditions fail closed too"
+RENAMED_PROTECTED="$TMP_ROOT/renamed-protected.sh"
+cp "$ROOT/bin/fm-runpod.sh" "$RENAMED_PROTECTED"
+chmod +x "$RENAMED_PROTECTED"
+if when "$H" arm renamed-protected --stable 1 --condition true \
+  --action "$RENAMED_PROTECTED" status 2>"$TMP_ROOT/renamed-protected.err"; then
+  fail "a byte-identical alias of a protected entrypoint must not be armed"
+fi
+assert_grep "renamed protected" "$TMP_ROOT/renamed-protected.err" \
+  "byte-identical protected aliases fail closed"
 if when "$H" arm carrier --stable 1 --condition true \
   --action bash -c 'printf bypass' 2>"$TMP_ROOT/carrier.err"; then
   fail "a generic command carrier must not bypass executable eligibility"
@@ -153,7 +164,13 @@ if when "$H" arm destructive --stable 1 --condition true \
 fi
 assert_grep "destructive or remote-control" "$TMP_ROOT/destructive.err" \
   "the destructive-command refusal is explicit"
-pass "protected lifecycle, public-reply, destructive, and command-carrier entrypoints fail closed"
+if when "$H" arm forge --stable 1 --condition true \
+  --action git status 2>"$TMP_ROOT/forge.err"; then
+  fail "a source-control command must not be armed"
+fi
+assert_grep "destructive or remote-control" "$TMP_ROOT/forge.err" \
+  "the source-control refusal is explicit"
+pass "protected lifecycle, merge, teardown, public-reply, destructive, and command-carrier entrypoints fail closed"
 
 # --- concurrent arms publish exactly one complete registration ---------------
 H="$TMP_ROOT/h-concurrent-arm"; new_home "$H"

@@ -20,10 +20,11 @@
 #            condition poll and immediately before the fire is claimed. The
 #            runner refuses a mutated spec or executable without executing it.
 #            Both argv vectors are executed directly with no shell, so nothing
-#            is re-split or interpreted. Protected RunPod lifecycle, X-mode,
-#            public-followup, and generic command-carrier entrypoints are not
-#            eligible condition or action executables; they keep their existing
-#            trusted wake-and-decide paths and side-effect gates.
+#            is re-split or interpreted. Protected RunPod and remote lifecycle,
+#            PR merge and teardown, X-mode, public-followup, and generic
+#            command-carrier entrypoints are not eligible condition or action
+#            executables; they keep their existing trusted wake-and-decide paths
+#            and side-effect gates.
 #            Options, before --condition:
 #              --interval <secs>           poll cadence, decimals allowed (default 60)
 #              --stable <n>                consecutive true polls required to fire (default 2)
@@ -142,8 +143,12 @@ protected_entrypoint_reason() {  # <absolute-path> <sha256>: print rejection rea
   local path=$1 hash=$2 base candidate candidate_hash
   base=${path##*/}
   case "$base" in
-    fm-runpod*.sh)
-      printf 'RunPod lifecycle and remote-compute entrypoints stay on their guarded wake-and-decide path\n'
+    fm-runpod*.sh|fm-on.sh|fm-remote-*.sh)
+      printf 'RunPod and remote lifecycle or remote-compute entrypoints stay on their guarded wake-and-decide path\n'
+      return 0
+      ;;
+    fm-pr-merge.sh|fm-teardown.sh)
+      printf 'merge and teardown entrypoints require their ordinary captain-authority and landed-work gates\n'
       return 0
       ;;
     fm-x-*.sh|fm-public-followup*.sh)
@@ -154,13 +159,14 @@ protected_entrypoint_reason() {  # <absolute-path> <sha256>: print rejection rea
       printf 'generic command carriers cannot prove the eventual executable is eligible\n'
       return 0
       ;;
-    rm|rmdir|unlink|shred|dd|mkfs*|fdisk|parted|shutdown|reboot|halt|poweroff|kill|pkill|killall|systemctl|launchctl|docker|podman|kubectl|terraform|tofu)
+    rm|rmdir|unlink|shred|dd|mkfs*|fdisk|parted|shutdown|reboot|halt|poweroff|kill|pkill|killall|systemctl|launchctl|docker|podman|kubectl|terraform|tofu|git|gh|gh-axi|glab|hub|scp|rsync)
       printf 'destructive or remote-control entrypoints require their ordinary guarded path\n'
       return 0
       ;;
   esac
-  for candidate in "$SCRIPT_DIR"/fm-runpod*.sh "$SCRIPT_DIR"/fm-x-*.sh \
-    "$SCRIPT_DIR"/fm-public-followup*.sh; do
+  for candidate in "$SCRIPT_DIR"/fm-runpod*.sh "$SCRIPT_DIR"/fm-remote-*.sh \
+    "$SCRIPT_DIR"/fm-x-*.sh "$SCRIPT_DIR"/fm-public-followup*.sh \
+    "$SCRIPT_DIR"/fm-on.sh "$SCRIPT_DIR"/fm-pr-merge.sh "$SCRIPT_DIR"/fm-teardown.sh; do
     [ -f "$candidate" ] || continue
     candidate_hash=$(fm_pr_sha256 "$candidate") || {
       printf 'the protected-entrypoint identity could not be verified\n'
