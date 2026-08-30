@@ -317,7 +317,7 @@ esac
 SH
   chmod +x "$fakebin/omp"
   cat > "$fakebin/custom-agent" <<'SH'
-#!/usr/bin/env bash
+#!/bin/bash
 printf '%s\n' "${FOO:-}" > "$PWD/custom-agent-executed"
 exit 0
 SH
@@ -810,6 +810,9 @@ test_ambiguous_raw_omp_spellings_refuse_before_raw_execution() {
     '-i omp --legacy'
     '--ignore-environment omp --legacy'
     '-u OMP_HOME omp --legacy'
+    'custom-agent *'
+    'custom-agent --flag # ignored'
+    'command FOO=bar omp --legacy'
     "'omp --legacy"
   )
   for raw in "${cases[@]}"; do
@@ -919,6 +922,26 @@ test_raw_non_omp_command_p_launches_its_direct_target() {
   assert_contains "$(cat "$CASE_DIR/raw-execution.log")" command-p-ok \
     "raw command -p launch did not execute its direct target"
   pass "raw command -p launches its direct non-OMP target"
+}
+
+test_raw_non_omp_command_p_preserves_path_assignment() {
+  local rec id out status raw
+  id=$(profile_id profile-raw-command-p-path-z15h)
+  rec=$(make_spawn_case profile-raw-command-p-path claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  raw="PATH=$FAKEBIN_DIR FOO=command-p command -p -- custom-agent --flag"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_EXECUTION_LOG="$CASE_DIR/raw-execution.log"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "$raw")
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_EXECUTION_LOG
+  expect_code 0 "$status" "raw command -p launch should preserve its PATH assignment"
+  [ "$(cat "$WT_DIR/custom-agent-executed")" = command-p ] \
+    || fail "raw command -p launch did not resolve with its assigned PATH: $(cat "$CASE_DIR/raw-execution.log")"
+  pass "raw command -p preserves a plain PATH assignment"
 }
 
 test_claude_threads_model_and_effort() {
@@ -2548,6 +2571,7 @@ test_raw_non_omp_launches_keep_their_existing_escape_hatch
 test_raw_non_omp_launches_bypass_pane_aliases_and_functions
 test_raw_non_omp_launches_preserve_plain_assignments
 test_raw_non_omp_command_p_launches_its_direct_target
+test_raw_non_omp_command_p_preserves_path_assignment
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
