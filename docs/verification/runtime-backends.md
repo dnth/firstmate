@@ -971,14 +971,14 @@ FM_AFK_PI_HERDR_E2E=1 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 Observed guarantees: pending composer input refused injection and raised one alert; idle Pi accepted one marked escalation; the return gate refused ordinary work while a live blocker remained; resolving the blocker allowed the return flow.
 The dedicated Herdr daemon workspace topology is covered by `tests/fm-afk-launch.test.sh` and preserves the captain tab's pane count.
 
-On 2026-08-30, an isolated Herdr 0.8.2 protocol-20 lab found no conditional composer admission or reservation primitive: `pane send-text`, `pane send-keys`, and `agent prompt` remain separate operations.
+On 2026-08-30, an isolated Herdr 0.8.2 protocol-20 lab recorded the input-facing command surfaces below.
 The probe and shipped-path smoke used only named non-default lab sessions:
 
 ```sh
 lab=$(bin/fm-herdr-lab.sh name afk-atomic-admission-probe)
 trap 'bin/fm-herdr-lab.sh teardown "$lab"' EXIT
 bin/fm-herdr-lab.sh provision "$lab"
-bin/fm-herdr-lab.sh run "$lab" status --json
+bin/fm-herdr-lab.sh run "$lab" status --json | jq -r '"herdr=\(.client.version) protocol=\(.client.protocol)"'
 bin/fm-herdr-lab.sh run "$lab" pane send-text --help
 bin/fm-herdr-lab.sh run "$lab" pane send-keys --help
 bin/fm-herdr-lab.sh run "$lab" agent prompt --help
@@ -989,10 +989,28 @@ tests/fm-afk-herdr-atomic-admission-smoke.test.sh
 Observed output:
 
 ```text
+herdr=0.8.2 protocol=20
+Send literal text to a pane
+Usage: herdr pane send-text <PANE_ID> <TEXT>
+next: herdr pane run <PANE_ID> <COMMAND> sends text and Enter in one call
+Send key presses to a pane
+Usage: herdr pane send-keys <PANE_ID> <KEY>...
+Submit a prompt to an agent
+Usage: herdr agent prompt <TARGET> <TEXT> [OPTIONS]
+Options:
+      --wait
+      --until <STATUS>
+      --timeout <MS>
+Herdr API schema
+protocol: 20
+schema_version: 1
+schemas: error_response, event, request, subscription_event, success_response
+Use `herdr api schema --json` to print the full schema.
 ok - named Herdr lab smoke: the shipped atomic-admission path deferred without typing into its isolated composer (deferred-unknown)
 ```
 
-The adapter therefore preserves the durable escalation and returns a deferral instead of injecting typed supervisor text; it does not claim that a recheck or process-local lock is atomic.
+The documented input operations expose no composer-condition or reservation option, so the adapter preserves the durable escalation and returns a deferral instead of injecting typed supervisor text.
+It does not claim that a recheck or process-local lock is atomic.
 
 ## OMP applicability outside tmux and Herdr
 
