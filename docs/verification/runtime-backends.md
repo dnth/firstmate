@@ -971,6 +971,29 @@ FM_AFK_PI_HERDR_E2E=1 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 Observed guarantees: pending composer input refused injection and raised one alert; idle Pi accepted one marked escalation; the return gate refused ordinary work while a live blocker remained; resolving the blocker allowed the return flow.
 The dedicated Herdr daemon workspace topology is covered by `tests/fm-afk-launch.test.sh` and preserves the captain tab's pane count.
 
+On 2026-08-30, an isolated Herdr 0.8.2 protocol-20 lab found no conditional composer admission or reservation primitive: `pane send-text`, `pane send-keys`, and `agent prompt` remain separate operations.
+The probe and shipped-path smoke used only named non-default lab sessions:
+
+```sh
+lab=$(bin/fm-herdr-lab.sh name afk-atomic-admission-probe)
+trap 'bin/fm-herdr-lab.sh teardown "$lab"' EXIT
+bin/fm-herdr-lab.sh provision "$lab"
+bin/fm-herdr-lab.sh run "$lab" status --json
+bin/fm-herdr-lab.sh run "$lab" pane send-text --help
+bin/fm-herdr-lab.sh run "$lab" pane send-keys --help
+bin/fm-herdr-lab.sh run "$lab" agent prompt --help
+bin/fm-herdr-lab.sh run "$lab" api schema
+tests/fm-afk-herdr-atomic-admission-smoke.test.sh
+```
+
+Observed output:
+
+```text
+ok - named Herdr lab smoke: the shipped atomic-admission path deferred without typing into its isolated composer (deferred-unknown)
+```
+
+The adapter therefore preserves the durable escalation and returns a deferral instead of injecting typed supervisor text; it does not claim that a recheck or process-local lock is atomic.
+
 ## OMP applicability outside tmux and Herdr
 
 Zellij, Orca, and cmux were inspected on 2026-07-30 without claiming live OMP execution.

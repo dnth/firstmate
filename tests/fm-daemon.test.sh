@@ -2135,7 +2135,11 @@ test_inject_msg_herdr_refuses_unknown_harness_before_submit() {
   (
     fm_backend_target_exists() { return 0; }
     fm_backend_busy_state() { printf 'idle'; }
-    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_away_supervisor_admit() {
+      [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] && [ "$4" = unknown ] \
+        || fail "unexpected admission args for unknown harness"
+      printf 'deferred-unknown'
+    }
     fm_backend_send_text_submit() { fail "unknown-harness Herdr injection must not reach submit"; }
     if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" \
       FM_SUPERVISOR_HARNESS=unknown inject_msg "hello" "$state"; then
@@ -2191,7 +2195,7 @@ test_inject_msg_defers_on_dead_shell_unknown() {
   (
     fm_backend_target_exists() { return 0; }
     pane_is_busy() { return 1; }
-    fm_backend_composer_state() { printf 'unknown'; }
+    fm_backend_away_supervisor_admit() { printf 'deferred-unknown'; }
     fm_backend_send_text_submit() { fail "send_text_submit must NOT run when the composer is a dead shell (unknown)"; }
     if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state"; then
       fail "inject_msg should defer (never inject) when the composer reads unknown (dead shell / unreadable)"
@@ -2208,7 +2212,7 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
   (
     fm_backend_target_exists() { return 0; }
     pane_is_busy() { return 1; }
-    fm_backend_composer_state() { printf 'future-state'; }
+    fm_backend_away_supervisor_admit() { printf 'deferred-unknown'; }
     fm_backend_send_text_submit() { fail "send_text_submit must not run for an unrecognized composer state"; }
     if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state"; then
       fail "inject_msg should defer on an unrecognized composer state"
