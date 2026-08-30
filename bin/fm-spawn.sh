@@ -1312,36 +1312,61 @@ raw_launch_omp_is_omp_path() {  # <word>
 }
 
 raw_launch_canonical_executable() {  # <path> <relative root>
-  local path=$1 root=$2 directory link steps=0
+  local path=$1 root=$2
   case "$path" in
     /*) ;;
     */*) path="$root/$path" ;;
     *) return 1 ;;
   esac
-  while :; do
-    directory=${path%/*}
-    [ -n "$directory" ] || directory=/
-    directory=$(CDPATH='' builtin cd -P -- "$directory" 2>/dev/null && builtin pwd -P) || return 1
-    path="$directory/${path##*/}"
-    [ -L "$path" ] || break
-    steps=$((steps + 1))
-    [ "$steps" -le 40 ] || return 1
-    link=$(/usr/bin/readlink "$path") || return 1
-    case "$link" in
-      /*) path=$link ;;
-      *) path="${path%/*}/$link" ;;
-    esac
-  done
+  path=$(/usr/bin/realpath -e -- "$path") || return 1
   [ -f "$path" ] && [ -x "$path" ] || return 1
   printf '%s\n' "$path"
 }
 
-raw_launch_omp_canonical_executable() {  # <path> <relative root>
-  local path
+raw_launch_executable_identity() {  # <canonical executable>
+  /usr/bin/stat -Lc '%d:%i' -- "$1" 2>/dev/null \
+    || /usr/bin/stat -f '%d:%i' -- "$1" 2>/dev/null
+}
+
+raw_launch_find_executable() {  # <bare target> <lookup path> <relative root>
+  local target=$1 lookup_path=$2 root=$3 directory candidate
+  local -a directories
+  case "$target" in ''|*/*) return 1 ;; esac
+  IFS=: read -r -a directories <<< "$lookup_path"
+  for directory in "${directories[@]}"; do
+    candidate="$directory/$target"
+    [ -f "$candidate" ] && [ -x "$candidate" ] || continue
+    raw_launch_canonical_executable "$candidate" "$root" && return 0
+  done
+  return 1
+}
+
+raw_launch_omp_is_wrapper_executable() {  # <canonical executable>
+  case "${1##*/}" in
+    command|env|exec|builtin|ld.so*|ld-linux*|ld-musl*|ld-*.so*|dyld|python*|perl*|ruby*|node|deno|java|php|lua*|tclsh*|awk|gawk|mawk|nawk) return 0 ;;
+  esac
+  return 1
+}
+
+raw_launch_omp_canonical_executable() {  # <path> <relative root> <lookup path>
+  local path omp_path path_identity omp_identity omp_lookup_path path_entry
+  local -a omp_lookup_entries
   path=$(raw_launch_canonical_executable "$1" "$2") || return 1
-  [ "$path" != "${RAW_LAUNCH_OMP_CANON:-}" ] || return 1
-  case "${path##*/}" in command|env|exec|builtin) return 1 ;; esac
+  raw_launch_omp_is_wrapper_executable "$path" && return 1
   raw_launch_omp_word_has_shell_grammar "${path##*/}" && return 1
+  for omp_lookup_path in "$3" "${PATH:-}"; do
+    case "$omp_lookup_path" in ''|:*|*::|*:|*$'\n'*|*$'\r'*) continue ;; esac
+    IFS=: read -r -a omp_lookup_entries <<< "$omp_lookup_path"
+    for path_entry in "${omp_lookup_entries[@]}"; do
+      case "$path_entry" in /*) ;; *) continue 2 ;; esac
+    done
+    omp_path=$(raw_launch_find_executable omp "$omp_lookup_path" "$2" 2>/dev/null || true)
+    [ -n "$omp_path" ] || continue
+    [ "$path" != "$omp_path" ] || return 1
+    path_identity=$(raw_launch_executable_identity "$path") || return 1
+    omp_identity=$(raw_launch_executable_identity "$omp_path") || return 1
+    [ "$path_identity" != "$omp_identity" ] || return 1
+  done
   printf '%s\n' "$path"
 }
 
@@ -1360,32 +1385,32 @@ raw_launch_omp_normalize() {  # <command -p flag> <assignment count> <target ind
   for ((index = 0; index < assignment_count; index++)); do
     RAW_LAUNCH_NORMALIZED="$RAW_LAUNCH_NORMALIZED ${words[$index]}"
   done
+  if [ "$command_p" = 1 ]; then
+    lookup_path=$(/usr/bin/getconf PATH) || return 1
+  else
+    lookup_path=${PATH:-}
+    for ((index = 0; index < assignment_count; index++)); do
+      case "${words[$index]}" in PATH=*) lookup_path=${words[$index]#PATH=} ;; esac
+    done
+  fi
+  case "$lookup_path" in ''|:*|*::|*:|*$'\n'*|*$'\r'*) return 1 ;; esac
+  IFS=: read -r -a lookup_entries <<< "$lookup_path"
+  for path_entry in "${lookup_entries[@]}"; do
+    case "$path_entry" in /*) ;; *) return 1 ;; esac
+  done
   target=${words[$target_index]}
   case "$target" in
-    /*) target=$(raw_launch_omp_canonical_executable "$target" "$RAW_LAUNCH_PATH_ROOT") || return 1 ;;
+    /*) target=$(raw_launch_omp_canonical_executable "$target" "$RAW_LAUNCH_PATH_ROOT" "$lookup_path") || return 1 ;;
     */*)
       if [ "$RAW_LAUNCH_RESOLVE_RELATIVE" != 1 ]; then
         RAW_LAUNCH_NEEDS_WORKTREE=1
         return 0
       fi
-      target=$(raw_launch_omp_canonical_executable "$target" "$RAW_LAUNCH_PATH_ROOT") || return 1
+      target=$(raw_launch_omp_canonical_executable "$target" "$RAW_LAUNCH_PATH_ROOT" "$lookup_path") || return 1
       ;;
     *)
-      if [ "$command_p" = 1 ]; then
-        lookup_path=$(/usr/bin/getconf PATH) || return 1
-      else
-        lookup_path=${PATH:-}
-        for ((index = 0; index < assignment_count; index++)); do
-          case "${words[$index]}" in PATH=*) lookup_path=${words[$index]#PATH=} ;; esac
-        done
-      fi
-      case "$lookup_path" in ''|:*|*::|*:|*$'\n'*|*$'\r'*) return 1 ;; esac
-      IFS=: read -r -a lookup_entries <<< "$lookup_path"
-      for path_entry in "${lookup_entries[@]}"; do
-        case "$path_entry" in /*) ;; *) return 1 ;; esac
-      done
-      target=$(PATH="$lookup_path" builtin type -P "$target") || return 1
-      target=$(raw_launch_omp_canonical_executable "$target" "$RAW_LAUNCH_PATH_ROOT") || return 1
+      target=$(raw_launch_find_executable "$target" "$lookup_path" "$RAW_LAUNCH_PATH_ROOT") || return 1
+      target=$(raw_launch_omp_canonical_executable "$target" "$RAW_LAUNCH_PATH_ROOT" "$lookup_path") || return 1
       ;;
   esac
   for ((index = target_index; index < ${#words[@]}; index++)); do
@@ -1487,7 +1512,6 @@ raw_launch_omp_classify() {  # <raw command>; sets RAW_LAUNCH_OMP_CLASS and RAW_
 
 RAW_LAUNCH=0
 RAW_LAUNCH_PATH_ROOT=
-RAW_LAUNCH_OMP_CANON=
 RAW_LAUNCH_NEEDS_WORKTREE=0
 RAW_LAUNCH_RESOLVE_RELATIVE=0
 RAW_LAUNCH_WORKTREE_READY=0
@@ -1506,8 +1530,6 @@ case "$ARG3" in
       echo "error: raw launch project directory cannot be resolved: $PROJ" >&2
       exit 1
     }
-    raw_launch_omp_path=$(builtin type -P omp 2>/dev/null || true)
-    [ -z "$raw_launch_omp_path" ] || RAW_LAUNCH_OMP_CANON=$(raw_launch_canonical_executable "$raw_launch_omp_path" "$RAW_LAUNCH_PATH_ROOT" 2>/dev/null || true)
     raw_launch_omp_classify "$ARG3"
     case "$RAW_LAUNCH_OMP_CLASS" in
       omp|ambiguous)

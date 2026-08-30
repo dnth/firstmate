@@ -1048,6 +1048,83 @@ test_raw_bare_target_with_canonical_omp_identity_refuses_before_raw_execution() 
   pass "raw bare targets matching canonical OMP identity refuse before raw execution"
 }
 
+test_raw_bare_target_with_effective_path_omp_identity_refuses_before_raw_execution() {
+  local rec id out status raw_path
+  id=$(profile_id profile-raw-bare-effective-path-omp-z15p)
+  rec=$(make_spawn_case profile-raw-bare-effective-path-omp claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  raw_path="$CASE_DIR/raw-path"
+  mkdir -p "$raw_path"
+  cp "$FAKEBIN_DIR/omp" "$raw_path/omp"
+  ln -s omp "$raw_path/custom-agent-link"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "PATH=$raw_path custom-agent-link --legacy")
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+  expect_code 1 "$status" "raw target matching OMP only in its effective PATH must refuse before launch"
+  assert_contains "$out" "raw launch command could invoke omp" \
+    "effective PATH OMP identity refusal did not name its verified-harness boundary"
+  assert_absent "$CASE_DIR/raw-omp-executed" "effective PATH OMP identity executed the harmless fake OMP"
+  [ ! -s "$LAUNCH_LOG" ] || fail "effective PATH OMP identity typed a launch command"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "effective PATH OMP identity created an endpoint"
+  pass "raw targets matching OMP in their effective PATH refuse before raw execution"
+}
+
+test_raw_bare_target_hardlinked_to_omp_refuses_before_raw_execution() {
+  local rec id out status
+  id=$(profile_id profile-raw-bare-hardlink-omp-z15q)
+  rec=$(make_spawn_case profile-raw-bare-hardlink-omp claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  ln "$FAKEBIN_DIR/omp" "$FAKEBIN_DIR/custom-agent-hardlink"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" 'custom-agent-hardlink --legacy')
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+  expect_code 1 "$status" "raw target hardlinked to OMP must refuse before launch"
+  assert_contains "$out" "raw launch command could invoke omp" \
+    "hardlinked OMP identity refusal did not name its verified-harness boundary"
+  assert_absent "$CASE_DIR/raw-omp-executed" "hardlinked OMP identity executed the harmless fake OMP"
+  [ ! -s "$LAUNCH_LOG" ] || fail "hardlinked OMP identity typed a launch command"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "hardlinked OMP identity created an endpoint"
+  pass "raw targets hardlinked to OMP refuse before raw execution"
+}
+
+test_raw_dynamic_loader_wrapper_refuses_before_raw_execution() {
+  local rec id out status loader
+  id=$(profile_id profile-raw-loader-wrapper-z15r)
+  rec=$(make_spawn_case profile-raw-loader-wrapper claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  loader="$FAKEBIN_DIR/ld-linux-test.so"
+  cat > "$loader" <<'SH'
+#!/usr/bin/env bash
+exec "$@"
+SH
+  chmod +x "$loader"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "$loader $FAKEBIN_DIR/omp --legacy")
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+  expect_code 1 "$status" "raw dynamic loader wrapper must refuse before launch"
+  assert_contains "$out" "raw launch command could invoke omp" \
+    "dynamic loader wrapper refusal did not name its verified-harness boundary"
+  assert_absent "$CASE_DIR/raw-omp-executed" "dynamic loader wrapper executed the harmless fake OMP"
+  [ ! -s "$LAUNCH_LOG" ] || fail "dynamic loader wrapper typed a launch command"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "dynamic loader wrapper created an endpoint"
+  pass "raw dynamic loader wrappers refuse before raw execution"
+}
+
 test_raw_absolute_wrapper_refuses_before_raw_execution() {
   local rec id out status
   id=$(profile_id profile-raw-absolute-wrapper-z15o)
@@ -2748,6 +2825,9 @@ test_raw_non_omp_command_p_launches_a_relative_target
 test_raw_command_path_symlinked_to_omp_refuses_before_raw_execution
 test_raw_bare_target_symlinked_to_omp_refuses_before_raw_execution
 test_raw_bare_target_with_canonical_omp_identity_refuses_before_raw_execution
+test_raw_bare_target_with_effective_path_omp_identity_refuses_before_raw_execution
+test_raw_bare_target_hardlinked_to_omp_refuses_before_raw_execution
+test_raw_dynamic_loader_wrapper_refuses_before_raw_execution
 test_raw_absolute_wrapper_refuses_before_raw_execution
 test_raw_non_omp_command_p_ignores_imported_type_function
 test_raw_non_omp_command_p_preserves_path_assignment
