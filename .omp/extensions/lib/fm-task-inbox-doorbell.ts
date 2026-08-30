@@ -128,11 +128,12 @@ export function installTaskInboxDoorbell(
 				}
 				try {
 					if (typeof omp.sendMessage !== "function") throw new Error("OMP sendMessage unavailable");
+					const content = readFileSync(ambiguous, "utf8");
 					invoked = true;
 					omp.sendMessage(
 						{
 							customType: "firstmate-task-inbox-doorbell",
-							content: readFileSync(ambiguous, "utf8"),
+							content,
 							display: false,
 							attribution: "agent",
 							details: { kind: "task-inbox", runtime: "omp" },

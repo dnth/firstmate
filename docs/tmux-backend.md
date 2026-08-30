@@ -94,10 +94,7 @@ A proven empty composer is the ordinary positive delivery acknowledgement.
 Text left in established structure remains `pending`, text in ambiguous structure remains unproven, and unreadable or unsafe state remains unknown.
 An ordinary metadata-routed `fm-send.sh` text steer becomes a durable steering-inbox record plus a best-effort constant doorbell line (`bin/fm-task-inbox-lib.sh`).
 For a local OMP task, the backend first validates the ready marker owner against the pane foreground process and canonical launch identity, publishes one counted request, and waits for the task extension to acknowledge one `sendMessage` steer with `triggerTurn=true`.
-Coalesced process signals cannot merge those requests because the extension drains the request directory, and an absent marker, rejected identity, explicitly failed or cancelled request, or unavailable programmatic surface retains the composer doorbell fallback.
-A claimed request becomes ambiguous before `sendMessage`; if acknowledgement is lost, retries remain anchored to the durable inbox and never send that possibly-delivered wake again.
-The worker's handled-file move, not the doorbell transport, is the instruction-processing boundary.
-Every non-OMP harness uses the composer doorbell path unchanged.
+[`bin/fm-task-inbox-lib.sh`](../bin/fm-task-inbox-lib.sh) owns the shared request-state, fallback, retry, ambiguity, and handled-file processing contract used by both local backends.
 The verdicts above remain delivery-critical for the typed plane, where `fm-send.sh` preserves the fork's submit and OMP/Hermes turn-start verification.
 
 OpenCode 1.18.4 has one busy-queue exception.

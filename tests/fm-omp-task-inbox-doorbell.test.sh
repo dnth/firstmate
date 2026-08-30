@@ -22,7 +22,7 @@ test_extension_signal_uses_trigger_turn() {
   HELPER="$HELPER" INBOX="$dir/state/t1.inbox" READY="$dir/state/t1.omp-doorbell-ready" \
     node --input-type=module <<'JS'
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const { FM_TASK_INBOX_DOORBELL_SIGNAL, installTaskInboxDoorbell } =
@@ -96,6 +96,20 @@ process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
 assert.equal(existsSync(`${uncertain}.requests/one.pending.ambiguous`), true);
 assert.equal(existsSync(`${uncertain}.requests/one.pending.failed`), false);
 assert.equal(existsSync(uncertain), false);
+
+const unreadable = `${process.env.READY}.unreadable`;
+let unreadableSends = 0;
+const unreadableDoorbell = installTaskInboxDoorbell(
+  { sendMessage() { unreadableSends += 1; } },
+  { inboxDir: process.env.INBOX, readyMarker: unreadable },
+);
+unreadableDoorbell.activate();
+writeFileSync(`${unreadable}.requests/one.pending`, line);
+chmodSync(`${unreadable}.requests/one.pending`, 0o000);
+process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
+assert.equal(unreadableSends, 0);
+assert.equal(existsSync(`${unreadable}.requests/one.pending.failed`), true);
+assert.equal(existsSync(unreadable), false);
 JS
   pass "OMP extension drains canonical counted requests and safely retires signal readiness"
 }
