@@ -22,34 +22,53 @@ test_extension_signal_uses_trigger_turn() {
   HELPER="$HELPER" INBOX="$dir/state/t1.inbox" READY="$dir/state/t1.omp-doorbell-ready" \
     node --input-type=module <<'JS'
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const { FM_TASK_INBOX_DOORBELL_SIGNAL, installTaskInboxDoorbell } =
   await import(pathToFileURL(process.env.HELPER).href);
 const sent = [];
-const retire = installTaskInboxDoorbell(
+const doorbell = installTaskInboxDoorbell(
   { sendMessage(message, options) { sent.push({ message, options }); } },
   { inboxDir: process.env.INBOX, readyMarker: process.env.READY },
 );
+assert.equal(existsSync(process.env.READY), false);
+doorbell.activate();
 assert.equal(readFileSync(process.env.READY, "utf8"), `${process.pid}\n`);
+const requestDir = `${process.env.READY}.requests`;
+writeFileSync(`${requestDir}/one.pending`, "");
+writeFileSync(`${requestDir}/two.pending`, "");
 process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
-assert.equal(sent.length, 1);
+assert.equal(sent.length, 2);
 assert.equal(sent[0].message.customType, "firstmate-task-inbox-doorbell");
 assert.match(sent[0].message.content, new RegExp(`${process.env.INBOX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/\\*\\.msg`));
 assert.deepEqual(sent[0].options, { deliverAs: "steer", triggerTurn: true });
-retire();
+assert.equal(existsSync(`${requestDir}/one.pending.delivered`), true);
+assert.equal(existsSync(`${requestDir}/two.pending.delivered`), true);
+doorbell.retire();
 assert.equal(existsSync(process.env.READY), false);
 
 const unavailable = `${process.env.READY}.unavailable`;
-const retireUnavailable = installTaskInboxDoorbell({}, {
+const unavailableDoorbell = installTaskInboxDoorbell({}, {
   inboxDir: process.env.INBOX,
   readyMarker: unavailable,
 });
+unavailableDoorbell.activate();
 assert.equal(existsSync(unavailable), false);
-retireUnavailable();
+unavailableDoorbell.retire();
+
+const failing = `${process.env.READY}.failing`;
+const failingDoorbell = installTaskInboxDoorbell(
+  { sendMessage() { throw new Error("unavailable"); } },
+  { inboxDir: process.env.INBOX, readyMarker: failing },
+);
+failingDoorbell.activate();
+writeFileSync(`${failing}.requests/one.pending`, "");
+process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
+assert.equal(existsSync(`${failing}.requests/one.pending.failed`), true);
+assert.equal(existsSync(failing), false);
 JS
-  pass "OMP worker extension turns one task-bound signal into one programmatic triggerTurn steer"
+  pass "OMP extension drains every counted request and acknowledges delivery or failure"
 }
 
 test_ring_routing_matrix() {
@@ -146,9 +165,16 @@ test_fm_send_rings_one_programmatic_doorbell() {
   : > "$composer_log"
   node_bin=$(realpath "$(command -v node)")
 
-  SIGNAL_LOG="$signal_log" LISTENER_READY="$listener_ready" node --input-type=module <<'JS' &
+  HELPER="$HELPER" INBOX="$home/state/t1.inbox" READY="$home/state/t1.omp-doorbell-ready" \
+    SIGNAL_LOG="$signal_log" LISTENER_READY="$listener_ready" node --input-type=module <<'JS' &
 import { appendFileSync, writeFileSync } from "node:fs";
-process.on("SIGUSR2", () => appendFileSync(process.env.SIGNAL_LOG, "ring\n"));
+import { pathToFileURL } from "node:url";
+const { installTaskInboxDoorbell } = await import(pathToFileURL(process.env.HELPER).href);
+const doorbell = installTaskInboxDoorbell(
+  { sendMessage(_message, options) { appendFileSync(process.env.SIGNAL_LOG, `${JSON.stringify(options)}\n`); } },
+  { inboxDir: process.env.INBOX, readyMarker: process.env.READY },
+);
+doorbell.activate();
 writeFileSync(process.env.LISTENER_READY, `${process.pid}\n`);
 setInterval(() => {}, 1000);
 JS
@@ -158,7 +184,6 @@ JS
     /bin/sleep 0.01
   done
   [ -f "$listener_ready" ] || fail "signal listener did not start"
-  printf '%s\n' "$LISTENER_PID" > "$home/state/t1.omp-doorbell-ready"
   fm_write_meta "$home/state/t1.meta" \
     "window=sess:fm-t1" "endpoint_task_id=t1" "worktree=$dir/worktree" \
     "project=$dir/project" "harness=omp" "kind=ship" "mode=no-mistakes" \

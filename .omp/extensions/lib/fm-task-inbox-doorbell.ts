@@ -1,5 +1,14 @@
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import {
+	type FSWatcher,
+	mkdirSync,
+	readFileSync,
+	readdirSync,
+	renameSync,
+	unlinkSync,
+	watch,
+	writeFileSync,
+} from "node:fs";
+import { dirname, join } from "node:path";
 
 export const FM_TASK_INBOX_DOORBELL_SIGNAL = "SIGUSR2";
 
@@ -19,6 +28,11 @@ type OmpDoorbellApi = {
 export type TaskInboxDoorbellOptions = {
 	inboxDir?: string;
 	readyMarker?: string;
+};
+
+export type TaskInboxDoorbell = {
+	activate: () => void;
+	retire: () => void;
 };
 
 function configuredOptions(options: TaskInboxDoorbellOptions): Required<TaskInboxDoorbellOptions> | undefined {
@@ -47,44 +61,82 @@ function retireOwnedReadyMarker(marker: string): void {
 	}
 }
 
+function bestEffortRename(from: string, to: string): void {
+	try {
+		renameSync(from, to);
+	} catch {
+		return;
+	}
+}
+
 export function installTaskInboxDoorbell(
 	omp: OmpDoorbellApi,
 	options: TaskInboxDoorbellOptions = {},
-): () => void {
+): TaskInboxDoorbell {
 	const configured = configuredOptions(options);
-	if (!configured || typeof omp.sendMessage !== "function") return () => {};
+	if (!configured || typeof omp.sendMessage !== "function") {
+		return { activate: () => {}, retire: () => {} };
+	}
 
-	let active = true;
+	const requestDir = `${configured.readyMarker}.requests`;
+	let active = false;
+	let draining = false;
+	let watcher: FSWatcher | undefined;
 	const retire = (): void => {
 		if (!active) return;
 		active = false;
-		process.off(FM_TASK_INBOX_DOORBELL_SIGNAL, ring);
+		process.off(FM_TASK_INBOX_DOORBELL_SIGNAL, drain);
+		watcher?.close();
+		watcher = undefined;
 		retireOwnedReadyMarker(configured.readyMarker);
 	};
-	const ring = (): void => {
+	const drain = (): void => {
+		if (!active || draining) return;
+		draining = true;
 		try {
-			omp.sendMessage?.(
-				{
-					customType: "firstmate-task-inbox-doorbell",
-					content: doorbellLine(configured.inboxDir),
-					display: false,
-					attribution: "agent",
-					details: { kind: "task-inbox", runtime: "omp" },
-				},
-				{ deliverAs: "steer", triggerTurn: true },
-			);
+			for (const name of readdirSync(requestDir).filter((entry) => entry.endsWith(".pending")).sort()) {
+				const pending = join(requestDir, name);
+				const processing = `${pending}.processing.${process.pid}`;
+				try {
+					renameSync(pending, processing);
+				} catch {
+					continue;
+				}
+				try {
+					if (typeof omp.sendMessage !== "function") throw new Error("OMP sendMessage unavailable");
+					omp.sendMessage(
+						{
+							customType: "firstmate-task-inbox-doorbell",
+							content: doorbellLine(configured.inboxDir),
+							display: false,
+							attribution: "agent",
+							details: { kind: "task-inbox", runtime: "omp" },
+						},
+						{ deliverAs: "steer", triggerTurn: true },
+					);
+					renameSync(processing, `${pending}.delivered`);
+				} catch {
+					bestEffortRename(processing, `${pending}.failed`);
+					retire();
+					break;
+				}
+			}
+		} finally {
+			draining = false;
+		}
+	};
+	const activate = (): void => {
+		if (active) return;
+		try {
+			mkdirSync(requestDir, { recursive: true, mode: 0o700 });
+			watcher = watch(requestDir, drain);
+			active = true;
+			process.on(FM_TASK_INBOX_DOORBELL_SIGNAL, drain);
+			publishReadyMarker(configured.readyMarker);
 		} catch {
-			// Disable the programmatic surface so the next ring uses the composer fallback.
 			retire();
 		}
 	};
 
-	process.on(FM_TASK_INBOX_DOORBELL_SIGNAL, ring);
-	try {
-		publishReadyMarker(configured.readyMarker);
-	} catch {
-		process.off(FM_TASK_INBOX_DOORBELL_SIGNAL, ring);
-		active = false;
-	}
-	return retire;
+	return { activate, retire };
 }

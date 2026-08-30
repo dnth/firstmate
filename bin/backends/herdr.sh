@@ -2443,7 +2443,7 @@ fm_backend_herdr_omp_trigger_turn() {  # <target> <ready-marker> <omp-runtime> <
   args=$(ps -p "$foreground_pid" -o args= 2>/dev/null) || return 1
   FM_OMP_PROCESS_EXPECTED_BUN="$expected_bun" FM_OMP_PROCESS_EXPECTED_BIN="$expected_omp" \
     fm_omp_process_matches "$comm" "$args" "$foreground_pid" || return 1
-  kill -USR2 "$foreground_pid" 2>/dev/null
+  fm_omp_task_doorbell_request "$marker" "$foreground_pid"
 }
 
 # fm_backend_herdr_capture: bounded plain-text pane capture. Mirrors

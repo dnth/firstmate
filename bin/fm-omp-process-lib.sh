@@ -116,6 +116,40 @@ fm_omp_task_doorbell_marker_read() {  # <marker>; sets FM_OMP_TASK_DOORBELL_PID
   case "$FM_OMP_TASK_DOORBELL_PID" in ''|*[!0-9]*|0|1) return 1 ;; esac
 }
 
+fm_omp_task_doorbell_request() {  # <marker> <verified-pid>
+  local marker=$1 pid=$2 request_dir staged pending attempts i
+  fm_omp_task_doorbell_marker_read "$marker" || return 1
+  [ "$FM_OMP_TASK_DOORBELL_PID" = "$pid" ] || return 1
+  request_dir="${marker}.requests"
+  [ -d "$request_dir" ] && [ ! -L "$request_dir" ] || return 1
+  staged=$(mktemp "$request_dir/.request.XXXXXX") || return 1
+  chmod 0600 "$staged" || { rm -f "$staged"; return 1; }
+  pending="${staged}.pending"
+  mv "$staged" "$pending" || { rm -f "$staged"; return 1; }
+  if ! kill -USR2 "$pid" 2>/dev/null; then
+    rm -f "$pending"
+    return 1
+  fi
+  attempts=${FM_OMP_TASK_DOORBELL_ACK_ATTEMPTS:-200}
+  case "$attempts" in ''|*[!0-9]*|0) attempts=200 ;; esac
+  i=0
+  while [ "$i" -lt "$attempts" ]; do
+    if [ -f "${pending}.delivered" ]; then
+      rm -f "${pending}.delivered"
+      return 0
+    fi
+    if [ -f "${pending}.failed" ]; then
+      rm -f "${pending}.failed"
+      return 1
+    fi
+    [ -f "$marker" ] || return 1
+    sleep 0.01
+    i=$((i + 1))
+  done
+  rm -f "$pending"
+  return 1
+}
+
 # True when this home can produce OMP identity evidence at all: either the
 # caller supplied both expected launch paths, or a primary marker file exists.
 # Without one of those, fm_omp_process_matches can never match, so ancestry

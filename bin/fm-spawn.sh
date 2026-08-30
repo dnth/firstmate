@@ -912,6 +912,7 @@ spawn_omp_abort_clean_unchanged_worktree() {  # <context>
     echo "warning: $context found work to preserve in $WT" >&2
   elif (cd "$PROJ_ABS" && "$SCRIPT_DIR/fm-treehouse-command.sh" return --force "$WT" >/dev/null 2>&1); then
     [ -z "${TASK_TMP:-}" ] || rm -rf "$TASK_TMP"
+    rm -rf -- "$STATE/$ID.omp-doorbell-ready.requests"
     rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
       "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" "$STATE/$ID.omp-started" \
       "$STATE/$ID.omp-doorbell-ready"
@@ -1708,7 +1709,8 @@ if [ "$HARNESS" = omp ]; then
   else
     for artifact in \
       "$STATE/$ID.meta" "$STATE/$ID.status" "$STATE/$ID.omp-ext.ts" \
-      "$STATE/$ID.omp-ready" "$STATE/$ID.omp-started" "$STATE/$ID.omp-doorbell-ready" "/tmp/fm-$ID"; do
+      "$STATE/$ID.omp-ready" "$STATE/$ID.omp-started" "$STATE/$ID.omp-doorbell-ready" \
+      "$STATE/$ID.omp-doorbell-ready.requests" "/tmp/fm-$ID"; do
       if [ -e "$artifact" ] || [ -L "$artifact" ]; then
         echo "error: refusing OMP spawn because task $ID already has artifacts at $artifact; reconcile or clean the prior task before retrying" >&2
         exit 1
@@ -3394,14 +3396,17 @@ EOF
 import { execFile } from "node:child_process";
 import { installTaskInboxDoorbell } from "$FM_ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts";
 export default function (omp: any) {
-  const retireTaskInboxDoorbell = installTaskInboxDoorbell(omp, {
+  const taskInboxDoorbell = installTaskInboxDoorbell(omp, {
     inboxDir: "$STATE_REAL/$ID.inbox",
     readyMarker: "$OMP_DOORBELL_READY",
   });
-  omp.on("session_start", () => execFile("touch", ["$OMP_READY"]));
+  omp.on("session_start", () => {
+    taskInboxDoorbell.activate();
+    execFile("touch", ["$OMP_READY"]);
+  });
   omp.on("turn_start", () => execFile("touch", ["$OMP_STARTED"]));
   omp.on("turn_end", () => execFile("touch", ["$TURNEND"]));
-  omp.on("session_shutdown", retireTaskInboxDoorbell);
+  omp.on("session_shutdown", taskInboxDoorbell.retire);
 }
 EOF
       ;;

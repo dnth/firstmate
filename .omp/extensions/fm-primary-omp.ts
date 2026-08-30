@@ -182,7 +182,7 @@ function runGuard(event: SessionStopEvent): Promise<ProcessResult> {
 export default function (omp: ExtensionAPI) {
   if (!primaryIntegrationApplies()) return;
   publishNativeProcessIdentity();
-  const retireTaskInboxDoorbell = installTaskInboxDoorbell(omp);
+  const taskInboxDoorbell = installTaskInboxDoorbell(omp);
   let pendingStartupNudge = "";
 
   // Supervision-branch dispatch handshake (docs/omp-supervision-branch.md).
@@ -238,6 +238,7 @@ export default function (omp: ExtensionAPI) {
   };
 
   omp.on("session_start", (_event, ctx) => {
+    taskInboxDoorbell.activate();
     watch.sessionStart();
     publishSecondmateSession(ctx);
     deliverSessionstartNudge();
@@ -300,7 +301,7 @@ export default function (omp: ExtensionAPI) {
   });
 
   omp.on("session_shutdown", () => {
-    retireTaskInboxDoorbell();
+    taskInboxDoorbell.retire();
     watch.sessionShutdown();
   });
 
