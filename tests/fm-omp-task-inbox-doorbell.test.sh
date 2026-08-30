@@ -110,12 +110,64 @@ PROGRAMMATIC_AVAILABLE=0 fm_task_inbox_ring herdr target "$REC" fm-t1 omp /runti
 [ "$(grep -c '^composer-submit:' "$LOG")" = 1 ]
 
 : > "$LOG"
+fm_backend_omp_trigger_turn() {
+  printf 'programmatic-indeterminate\n' >> "$LOG"
+  return 2
+}
+fm_task_inbox_ring herdr target "$REC" fm-t1 omp /runtime/omp /bin/omp
+[ "$(grep -c '^programmatic-indeterminate' "$LOG")" = 1 ]
+! grep -q '^composer-' "$LOG"
+
+: > "$LOG"
 PROGRAMMATIC_AVAILABLE=1 fm_task_inbox_ring tmux target "$REC" fm-t1 claude
 ! grep -q '^programmatic:' "$LOG"
 [ "$(grep -c '^composer-submit:' "$LOG")" = 1 ]
 SH
   expect_code 0 "$?" "OMP/non-OMP doorbell routing matrix"
   pass "doorbell routing selects OMP programmatic wake and preserves both composer branches"
+}
+
+test_request_terminal_states() {
+  local dir="$TMP_ROOT/request-states"
+  mkdir -p "$dir/ready.requests"
+  ROOT="$ROOT" MARKER="$dir/ready" bash <<'SH'
+set -u
+. "$ROOT/bin/fm-omp-process-lib.sh"
+request_dir="${MARKER}.requests"
+
+printf '4242\n' > "$MARKER"
+kill() { return 0; }
+FM_OMP_TASK_DOORBELL_ACK_ATTEMPTS=1 \
+  fm_omp_task_doorbell_request "$MARKER" 4242 timeout.msg
+[ "$?" = 2 ]
+[ -f "$request_dir/request.timeout.msg.pending" ]
+
+rm -f "$MARKER"
+set +e
+fm_omp_task_doorbell_request_existing "$MARKER" timeout.msg
+rc=$?
+set -e
+[ "$rc" = 1 ]
+[ ! -e "$request_dir/request.timeout.msg.pending" ]
+
+: > "$request_dir/request.claimed.msg.pending.processing.4242"
+set +e
+fm_omp_task_doorbell_request_existing "$MARKER" claimed.msg
+rc=$?
+set -e
+[ "$rc" = 2 ]
+[ -f "$request_dir/request.claimed.msg.pending.processing.4242" ]
+
+: > "$request_dir/request.failed.msg.pending.failed"
+set +e
+fm_omp_task_doorbell_request_existing "$MARKER" failed.msg
+rc=$?
+set -e
+[ "$rc" = 1 ]
+[ ! -e "$request_dir/request.failed.msg.pending.failed" ]
+SH
+  expect_code 0 "$?" "OMP request terminal-state boundary"
+  pass "OMP request timeout stays indeterminate while explicit unclaimed and failed outcomes fall back"
 }
 
 make_send_stubs() {  # <dir>
@@ -211,7 +263,7 @@ fm_backend_source herdr
 fm_backend_herdr_cli() {
   printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","foreground_process_group_id":%s}}}\n' "$OMP_PID"
 }
-fm_backend_herdr_omp_trigger_turn default:w1:p2 "$MARKER" "$OMP_BIN" "$OMP_BIN"
+fm_backend_herdr_omp_trigger_turn default:w1:p2 "$MARKER" "$OMP_BIN" "$OMP_BIN" manual.msg
 SH
   expect_code 0 "$?" "Herdr OMP programmatic trigger adapter"
   for _ in $(seq 1 100); do
@@ -228,4 +280,5 @@ SH
 
 test_extension_signal_uses_trigger_turn
 test_ring_routing_matrix
+test_request_terminal_states
 test_fm_send_rings_one_programmatic_doorbell

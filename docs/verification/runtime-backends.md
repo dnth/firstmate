@@ -1128,7 +1128,7 @@ The required live OMP-under-Herdr smoke is intentionally deferred until after Fi
 
 ```sh
 set -o pipefail
-tests/fm-omp-task-inbox-doorbell.test.sh | grep -E '^ok - (OMP extension drains|doorbell routing selects|fm-send and both)'
+tests/fm-omp-task-inbox-doorbell.test.sh | grep -E '^ok - (OMP extension drains|doorbell routing selects|OMP request timeout|fm-send and both)'
 tests/fm-omp-primary.test.sh | grep -F 'ok - OMP primary extension binds secondmate doorbells after session readiness'
 ```
 
@@ -1137,6 +1137,7 @@ Observed result:
 ```text
 ok - OMP extension drains every counted request and acknowledges delivery or failure
 ok - doorbell routing selects OMP programmatic wake and preserves both composer branches
+ok - OMP request timeout stays indeterminate while explicit unclaimed and failed outcomes fall back
 ok - fm-send and both tmux/Herdr adapters preserve task-bound OMP programmatic doorbells
 ok - OMP primary extension binds secondmate doorbells after session readiness
 ```

@@ -741,11 +741,13 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
   esac
 }
 
-# Ring an OMP worker extension through its task-bound process signal. A failure
-# means the programmatic surface is unavailable and licenses the caller's
-# composer fallback; a successful signal is the one doorbell attempt.
-fm_backend_omp_trigger_turn() {  # <backend> <target> <ready-marker> <omp-runtime> <omp-bin>
-  local backend=$1
+# Ring an OMP worker extension through its task-bound process signal. Return 1
+# licenses composer fallback; return 2 preserves an outstanding programmatic
+# request without a second transport.
+fm_backend_omp_trigger_turn() {  # <backend> <target> <ready-marker> <omp-runtime> <omp-bin> <request-id>
+  local backend=$1 marker=$3 request_id=$6 existing=0
+  fm_omp_task_doorbell_request_existing "$marker" "$request_id" || existing=$?
+  [ "$existing" -eq 3 ] || return "$existing"
   shift
   fm_backend_source "$backend" || return 1
   case "$backend" in

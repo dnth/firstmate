@@ -198,12 +198,16 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # Hermes doorbells intentionally do not take .hermes-delivery.lock in this faithful upstream port; fm-inbox-hermes-doorbell-serialize owns the serialization follow-up.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [harness] [omp-runtime] [omp-bin]
   local backend=$1 target=$2 rec=$3 label=${4:-}
-  local harness=${5:-} omp_runtime=${6:-} omp_bin=${7:-} line cstate verdict ready_marker
+  local harness=${5:-} omp_runtime=${6:-} omp_bin=${7:-} line cstate verdict ready_marker request_id programmatic_rc
   line=$(fm_task_inbox_doorbell_line "$rec")
   if [ "$harness" = omp ]; then
     ready_marker="${rec%/*}"
     ready_marker="${ready_marker%.inbox}.omp-doorbell-ready"
-    if fm_backend_omp_trigger_turn "$backend" "$target" "$ready_marker" "$omp_runtime" "$omp_bin"; then
+    request_id=${rec##*/}
+    programmatic_rc=0
+    fm_backend_omp_trigger_turn "$backend" "$target" "$ready_marker" "$omp_runtime" "$omp_bin" "$request_id" \
+      || programmatic_rc=$?
+    if [ "$programmatic_rc" -eq 0 ] || [ "$programmatic_rc" -eq 2 ]; then
       return 0
     fi
   fi

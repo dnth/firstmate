@@ -63,8 +63,8 @@ fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
 # editable composer. The ready marker binds the extension's PID; the pane's
 # foreground process group and canonical OMP identity must independently agree
 # before the signal is delivered.
-fm_backend_tmux_omp_trigger_turn() {  # <target> <ready-marker> <omp-runtime> <omp-bin>
-  local target=$1 marker=$2 expected_bun=$3 expected_omp=$4 pane_pid foreground_pid comm args
+fm_backend_tmux_omp_trigger_turn() {  # <target> <ready-marker> <omp-runtime> <omp-bin> <request-id>
+  local target=$1 marker=$2 expected_bun=$3 expected_omp=$4 request_id=$5 pane_pid foreground_pid comm args
   fm_omp_task_doorbell_marker_read "$marker" || return 1
   pane_pid=$(tmux display-message -p -t "$target" '#{pane_pid}' 2>/dev/null) || return 1
   case "$pane_pid" in ''|*[!0-9]*|0|1) return 1 ;; esac
@@ -74,7 +74,7 @@ fm_backend_tmux_omp_trigger_turn() {  # <target> <ready-marker> <omp-runtime> <o
   args=$(ps -p "$foreground_pid" -o args= 2>/dev/null) || return 1
   FM_OMP_PROCESS_EXPECTED_BUN="$expected_bun" FM_OMP_PROCESS_EXPECTED_BIN="$expected_omp" \
     fm_omp_process_matches "$comm" "$args" "$foreground_pid" || return 1
-  fm_omp_task_doorbell_request "$marker" "$foreground_pid"
+  fm_omp_task_doorbell_request "$marker" "$foreground_pid" "$request_id"
 }
 
 # fm_backend_tmux_container_ensure: reuse the current tmux session when

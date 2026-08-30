@@ -116,19 +116,59 @@ fm_omp_task_doorbell_marker_read() {  # <marker>; sets FM_OMP_TASK_DOORBELL_PID
   case "$FM_OMP_TASK_DOORBELL_PID" in ''|*[!0-9]*|0|1) return 1 ;; esac
 }
 
-fm_omp_task_doorbell_request() {  # <marker> <verified-pid>
-  local marker=$1 pid=$2 request_dir staged pending attempts i
+fm_omp_task_doorbell_request_existing() {  # <marker> <request-id>
+  local marker=$1 request_id=$2 request_dir base processing cancelled
+  case "$request_id" in ''|.*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  request_dir="${marker}.requests"
+  [ -d "$request_dir" ] && [ ! -L "$request_dir" ] || return 3
+  base="$request_dir/request.$request_id"
+  if [ -f "${base}.pending.delivered" ]; then
+    rm -f "${base}.pending.delivered"
+    return 0
+  fi
+  if [ -f "${base}.pending.failed" ]; then
+    rm -f "${base}.pending.failed"
+    return 1
+  fi
+  for processing in "${base}.pending.processing."*; do
+    [ -f "$processing" ] && return 2
+  done
+  [ -f "${base}.pending" ] || return 3
+  if fm_omp_task_doorbell_marker_read "$marker" \
+    && kill -0 "$FM_OMP_TASK_DOORBELL_PID" 2>/dev/null; then
+    return 2
+  fi
+  cancelled="${base}.pending.cancelled.$$"
+  if mv "${base}.pending" "$cancelled" 2>/dev/null; then
+    rm -f "$cancelled"
+    return 1
+  fi
+  return 2
+}
+
+fm_omp_task_doorbell_request() {  # <marker> <verified-pid> <request-id>
+  local marker=$1 pid=$2 request_id=$3 request_dir staged pending cancelled attempts i existing
   fm_omp_task_doorbell_marker_read "$marker" || return 1
   [ "$FM_OMP_TASK_DOORBELL_PID" = "$pid" ] || return 1
+  case "$request_id" in ''|.*|*[!A-Za-z0-9._-]*) return 1 ;; esac
   request_dir="${marker}.requests"
   [ -d "$request_dir" ] && [ ! -L "$request_dir" ] || return 1
   staged=$(mktemp "$request_dir/.request.XXXXXX") || return 1
   chmod 0600 "$staged" || { rm -f "$staged"; return 1; }
-  pending="${staged}.pending"
-  mv "$staged" "$pending" || { rm -f "$staged"; return 1; }
+  pending="$request_dir/request.$request_id.pending"
+  if ! ln "$staged" "$pending" 2>/dev/null; then
+    rm -f "$staged"
+    fm_omp_task_doorbell_request_existing "$marker" "$request_id"
+    return $?
+  fi
+  rm -f "$staged"
   if ! kill -USR2 "$pid" 2>/dev/null; then
-    rm -f "$pending"
-    return 1
+    cancelled="${pending}.cancelled.$$"
+    if mv "$pending" "$cancelled" 2>/dev/null; then
+      rm -f "$cancelled"
+      return 1
+    fi
+    return 2
   fi
   attempts=${FM_OMP_TASK_DOORBELL_ACK_ATTEMPTS:-200}
   case "$attempts" in ''|*[!0-9]*|0) attempts=200 ;; esac
@@ -142,12 +182,17 @@ fm_omp_task_doorbell_request() {  # <marker> <verified-pid>
       rm -f "${pending}.failed"
       return 1
     fi
-    [ -f "$marker" ] || return 1
+    if [ ! -f "$marker" ]; then
+      fm_omp_task_doorbell_request_existing "$marker" "$request_id"
+      return $?
+    fi
     sleep 0.01
     i=$((i + 1))
   done
-  rm -f "$pending"
-  return 1
+  existing=0
+  fm_omp_task_doorbell_request_existing "$marker" "$request_id" || existing=$?
+  [ "$existing" -ne 3 ] && return "$existing"
+  return 2
 }
 
 # True when this home can produce OMP identity evidence at all: either the
