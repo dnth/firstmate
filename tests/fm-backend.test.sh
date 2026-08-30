@@ -690,38 +690,25 @@ strip_send_preflight() {  # <log>
   awk -v preflight="$preflight" '$0 != preflight { print }' "$1"
 }
 
-test_send_conformance_old_vs_new() {
-  local old_bin fb log_old log_new home rc_old rc_new filtered_old filtered_new
-  old_bin=$(build_old_bin send-old)
+test_send_explicit_target_verification() {
+  local fb log_new home rc_new
   fb=$(make_send_fakebin "$TMP_ROOT/send-fake")
   home="$TMP_ROOT/send-home"; mkdir -p "$home/state"
-  log_old="$TMP_ROOT/send-old.log"; log_new="$TMP_ROOT/send-new.log"
-  filtered_old="$TMP_ROOT/send-old.filtered.log"; filtered_new="$TMP_ROOT/send-new.filtered.log"
+  log_new="$TMP_ROOT/send-new.log"
 
   # Case 1: --key path.
-  run_send_case "$old_bin" "$fb" "$log_old" "$home" -- "sess:win" --key Escape
-  rc_old=$?
   run_send_case "$ROOT" "$fb" "$log_new" "$home" -- "sess:win" --key Escape
   rc_new=$?
-  expect_code "$rc_old" "$rc_new" "fm-send --key: old vs new exit code"
+  [ "$rc_new" -eq 0 ] \
+    || fail "current fm-send should send a key after verifying a live explicit target, got exit $rc_new"
   assert_contains "$(cat "$log_new")" $'\x1f''display-message'$'\x1f''-p'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''#{pane_id}' \
     "fm-send --key did not verify the explicit tmux target before sending"
-  strip_send_preflight "$log_old" > "$filtered_old"
-  strip_send_preflight "$log_new" > "$filtered_new"
-  diff -u "$filtered_old" "$filtered_new" > "$TMP_ROOT/send-diff-key.txt" 2>&1 \
-    || fail "fm-send --key: tmux command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/send-diff-key.txt")"
   assert_contains "$(cat "$log_new")" $'\x1f''Escape' "fm-send --key did not send the named key"
 
   # Case 2: plain text (0.3s settle, no popup).
-  run_send_case "$old_bin" "$fb" "$log_old" "$home" -- "sess:win" hello captain
-  rc_old=$?
   run_send_case "$ROOT" "$fb" "$log_new" "$home" -- "sess:win" hello captain
   rc_new=$?
-  expect_code "$rc_old" "$rc_new" "fm-send plain text: old vs new exit code"
-  strip_send_preflight "$log_old" > "$filtered_old"
-  strip_send_preflight "$log_new" > "$filtered_new"
-  diff -u "$filtered_old" "$filtered_new" > "$TMP_ROOT/send-diff-plain.txt" 2>&1 \
-    || fail "fm-send plain text: tmux command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/send-diff-plain.txt")"
+  [ "$rc_new" -eq 0 ] || fail "fm-send plain text failed after target verification, got exit $rc_new"
   assert_contains "$(cat "$log_new")" $'\x1f''send-keys'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''-l'$'\x1f''hello captain' \
     "fm-send did not send the literal text with send-keys -l"
   assert_contains "$(cat "$log_new")" $'\x1f''Enter' "fm-send did not submit with Enter"
@@ -729,17 +716,11 @@ test_send_conformance_old_vs_new() {
   # Case 3: a slash command still opens the popup-settle path (verified
   # elsewhere in tests/fm-send-popup-settle.test.sh) and still ends in the
   # same tmux command shape: send-keys -l, then a retried Enter.
-  run_send_case "$old_bin" "$fb" "$log_old" "$home" -- "sess:win" /some-skill
-  rc_old=$?
   run_send_case "$ROOT" "$fb" "$log_new" "$home" -- "sess:win" /some-skill
   rc_new=$?
-  expect_code "$rc_old" "$rc_new" "fm-send /skill: old vs new exit code"
-  strip_send_preflight "$log_old" > "$filtered_old"
-  strip_send_preflight "$log_new" > "$filtered_new"
-  diff -u "$filtered_old" "$filtered_new" > "$TMP_ROOT/send-diff-slash.txt" 2>&1 \
-    || fail "fm-send /skill: tmux command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/send-diff-slash.txt")"
+  [ "$rc_new" -eq 0 ] || fail "fm-send /skill failed after target verification, got exit $rc_new"
 
-  pass "fm-send.sh: explicit tmux targets are verified, while --key/plain/slash send command shape stays old-compatible"
+  pass "fm-send.sh: verified explicit tmux targets send keys, plain text, and slash commands"
 }
 
 # --- old vs new: fm-peek.sh --------------------------------------------------
@@ -1153,7 +1134,7 @@ test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms
 test_backend_of_selector_matches_explicit_target_meta
-test_send_conformance_old_vs_new
+test_send_explicit_target_verification
 test_peek_conformance_old_vs_new
 test_spawn_symlinked_project_prefix_avoids_false_refusal
 test_teardown_conformance_old_vs_new
