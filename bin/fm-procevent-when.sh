@@ -177,6 +177,10 @@ protected_entrypoint_reason() {  # <absolute-path> <sha256>: print rejection rea
       return 0
     fi
   done
+  if LC_ALL=C grep -Eq '(^|[^[:alnum:]_.-])(fm-runpod[^[:space:]]*\.sh|fm-on\.sh|fm-remote-[^[:space:]]*\.sh|fm-pr-merge\.sh|fm-teardown\.sh|fm-x-[^[:space:]]*\.sh|fm-public-followup[^[:space:]]*\.sh)([^[:alnum:]_.-]|$)' "$path" 2>/dev/null; then
+    printf 'the executable wraps or names a protected lifecycle or public-reply entrypoint\n'
+    return 0
+  fi
   return 1
 }
 
@@ -394,6 +398,30 @@ executable_trust_valid() {  # <condition|action> <path> <expected-sha256>
   return 0
 }
 
+stage_executable() {  # <role> <path> <expected-sha256>: print immutable run copy
+  local role=$1 path=$2 expected=$3 staged current
+  staged=$(umask 077; mktemp "$WHEN_DIR/.${role}.XXXXXX") || {
+    EXECUTABLE_ERROR="$role executable could not be staged"
+    return 1
+  }
+  if ! cp -- "$path" "$staged" || ! chmod 0700 "$staged"; then
+    rm -f -- "$staged"
+    EXECUTABLE_ERROR="$role executable could not be staged"
+    return 1
+  fi
+  current=$(fm_pr_sha256 "$staged") || {
+    rm -f -- "$staged"
+    EXECUTABLE_ERROR="$role executable staging could not be hashed"
+    return 1
+  }
+  if [ "$current" != "$expected" ]; then
+    rm -f -- "$staged"
+    EXECUTABLE_ERROR="$role executable changed while being staged"
+    return 1
+  fi
+  printf '%s\n' "$staged"
+}
+
 # --- run ---------------------------------------------------------------------
 
 # bounded_run <timeout-secs> <output-file> <argv>...
@@ -427,6 +455,12 @@ cmd_run() {
   fm_procevent_source_id_valid "$sid" || die "source id must be path-safe: $sid"
   fired=$(fired_file "$sid")
 
+  if [ -e "$fired" ] || [ -L "$fired" ]; then
+    emit_doc "$sid" ambiguous \
+      "the action was already claimed but its outcome was never captured; verify its effect manually before retiring" 0 '' ''
+    exit 0
+  fi
+
   if ! positive_int "$OUTPUT_TAIL_BYTES"; then
     emit_doc "$sid" rejected "FM_WHEN_OUTPUT_TAIL_BYTES must be a positive integer; nothing was executed" 0 '' ''
     exit 0
@@ -445,20 +479,15 @@ cmd_run() {
     exit 0
   fi
 
-  # A fired marker with this runner not mid-action means an earlier run claimed
-  # the fire and died before its outcome was durably captured. Never run the
-  # action again; report the ambiguity for manual verification instead.
-  if [ -e "$fired" ] || [ -L "$fired" ]; then
-    emit_doc "$sid" ambiguous \
-      "the action was already claimed but its outcome was never captured; verify its effect manually before retiring" 0 '' ''
-    exit 0
-  fi
-
   if ! out=$(umask 077; mktemp "$WHEN_DIR/.run-out.XXXXXX"); then
     emit_doc "$sid" rejected "cannot stage command output; nothing was executed" 0 '' ''
     exit 0
   fi
-  trap 'rm -f -- "$out"' EXIT
+  if ! condition_exec=$(stage_executable condition "${COND_ARGV[0]}" "$SPEC_CONDITION_SHA256"); then
+    emit_doc "$sid" rejected "refused without executing the condition: ${EXECUTABLE_ERROR:-executable staging failed}" 0 '' ''
+    exit 0
+  fi
+  trap 'rm -f -- "$out" "$condition_exec"' EXIT
 
   while :; do
     now=$(date +%s)
@@ -475,7 +504,7 @@ cmd_run() {
       emit_doc "$sid" rejected "refused before the next condition poll: $EXECUTABLE_ERROR" "$polls" '' ''
       exit 0
     fi
-    bounded_run "$SPEC_CONDITION_TIMEOUT" "$out" "${COND_ARGV[@]}"
+    bounded_run "$SPEC_CONDITION_TIMEOUT" "$out" "$condition_exec" "${COND_ARGV[@]:1}"
     rc=$?
     polls=$((polls + 1))
     now=$(date +%s)
@@ -524,10 +553,16 @@ cmd_run() {
   fi
   if ! executable_trust_valid condition "${COND_ARGV[0]}" "$SPEC_CONDITION_SHA256"; then
     emit_doc "$sid" rejected \
-      "refused without executing the action: $EXECUTABLE_ERROR" "$polls" '' ''
+      "refused without executing the action: ${EXECUTABLE_ERROR:-executable staging failed}" "$polls" '' ''
     exit 0
   fi
   if ! executable_trust_valid action "${ACT_ARGV[0]}" "$SPEC_ACTION_SHA256"; then
+    emit_doc "$sid" rejected \
+      "refused without executing the action: $EXECUTABLE_ERROR" "$polls" '' ''
+    exit 0
+  fi
+
+  if ! action_exec=$(stage_executable action "${ACT_ARGV[0]}" "$SPEC_ACTION_SHA256"); then
     emit_doc "$sid" rejected \
       "refused without executing the action: $EXECUTABLE_ERROR" "$polls" '' ''
     exit 0
@@ -541,8 +576,9 @@ cmd_run() {
     exit 0
   fi
 
-  bounded_run "$SPEC_ACTION_TIMEOUT" "$out" "${ACT_ARGV[@]}"
+  bounded_run "$SPEC_ACTION_TIMEOUT" "$out" "$action_exec" "${ACT_ARGV[@]:1}"
   rc=$?
+  rm -f -- "$action_exec"
   if [ "$rc" -eq 0 ]; then
     emit_doc "$sid" fired "the condition held and the action exited 0" "$polls" "$rc" "$out"
   else
