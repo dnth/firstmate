@@ -89,7 +89,10 @@ EOF
           fi
           if [ "${FM_FAKE_EXECUTE_RAW_LAUNCH:-0}" = 1 ]; then
             launch=$(tail -n 1 "$FM_FAKE_LAUNCH_LOG")
-            bash -c "$launch"
+            (
+              cd "$FM_FAKE_PANE_PATH"
+              bash -c "$launch"
+            )
           fi
           ;;
       esac
@@ -775,6 +778,10 @@ test_ambiguous_raw_omp_spellings_refuse_before_raw_execution() {
     'custom-agent; omp --legacy'
     'omp() { :; }; omp --legacy'
     'alias omp=custom-agent; omp --legacy'
+    'time omp --legacy'
+    '! omp --legacy'
+    '?mp --legacy'
+    'command -p ?mp --legacy'
     "'omp --legacy"
   )
   for raw in "${cases[@]}"; do
@@ -783,6 +790,9 @@ test_ambiguous_raw_omp_spellings_refuse_before_raw_execution() {
     rec=$(make_spawn_case "profile-ambiguous-omp-$index" claude "$id")
     read_case_record "$rec"
     enable_dispatch_profile "$HOME_DIR"
+    if [ "$raw" = '?mp --legacy' ] || [ "$raw" = 'command -p ?mp --legacy' ]; then
+      ln -s "$FAKEBIN_DIR/omp" "$WT_DIR/omp"
+    fi
     export FM_TEST_EXECUTE_RAW_LAUNCH=1
     export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
 

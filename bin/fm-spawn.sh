@@ -1282,6 +1282,13 @@ refuse_crew_only_secondmate() {  # <harness>
   esac
 }
 
+raw_launch_omp_word_has_shell_grammar() {  # <word>
+  case "$1" in
+    '!'|time|coproc|if|then|elif|else|fi|for|while|until|do|done|case|esac|function|select|in|\[\[|\]\]|~*|*[\*\?\[]*) return 0 ;;
+  esac
+  return 1
+}
+
 raw_launch_omp_classify() {  # <raw command>; sets RAW_LAUNCH_OMP_CLASS and RAW_LAUNCH_HARNESS
   # Raw commands are deliberately opaque to the pane shell.
   # This classifier recognizes only the tiny direct-command grammar that the old
@@ -1311,6 +1318,7 @@ raw_launch_omp_classify() {  # <raw command>; sets RAW_LAUNCH_OMP_CLASS and RAW_
   [ "$index" -lt "${#words[@]}" ] || return 0
   word=${words[$index]}
   case "$word" in *[\'\"\`\\\$]*) return 0 ;; esac
+  raw_launch_omp_word_has_shell_grammar "$word" && return 0
   case "$word" in
     omp)
       RAW_LAUNCH_OMP_CLASS=omp
@@ -1326,6 +1334,7 @@ raw_launch_omp_classify() {  # <raw command>; sets RAW_LAUNCH_OMP_CLASS and RAW_
       fi
       [ "$index" -lt "${#words[@]}" ] || return 0
       word=${words[$index]}
+      raw_launch_omp_word_has_shell_grammar "$word" && return 0
       case "$word" in
         -*|*[\'\"\`\\\$]*) return 0 ;;
         omp) RAW_LAUNCH_OMP_CLASS=omp ;;
