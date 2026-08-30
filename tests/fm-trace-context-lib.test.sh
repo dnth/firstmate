@@ -434,7 +434,7 @@ SH
     FM_FAKE_PROJECT="$project" FM_FAKE_WORKTREE="$worktree" \
     FM_HERDR_PS_BIN="$ps_bin" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
     FM_TRACE_SPAWN_OBSERVED="$dir/observed" PATH="$fakebin:$PATH" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$project" "env $side_effect" --backend herdr \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$project" "$side_effect run" --backend herdr \
     --mode no-mistakes --yolo off 2>&1)
   status=$?
   expect_code 0 "$status" "the Herdr-backed spawn should succeed"

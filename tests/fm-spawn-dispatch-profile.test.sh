@@ -949,21 +949,29 @@ test_raw_non_omp_command_p_launches_an_absolute_target() {
 }
 
 test_raw_non_omp_command_p_launches_a_relative_target() {
-  local rec id out status
+  local rec id out status marker
   id=$(profile_id profile-raw-command-p-relative-z15k)
   rec=$(make_spawn_case profile-raw-command-p-relative claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
-  ln -s "$FAKEBIN_DIR/custom-agent" "$PROJ_DIR/custom-agent"
+  marker="$CASE_DIR/relative-executed"
+  cat > "$PROJ_DIR/custom-agent" <<'SH'
+#!/usr/bin/env bash
+: > "${FM_TEST_RELATIVE_EXECUTED:?}"
+SH
+  chmod +x "$PROJ_DIR/custom-agent"
+  git -C "$PROJ_DIR" add custom-agent
+  sync_project_commit "$PROJ_DIR" "$WT_DIR" 'add raw relative executable'
   export FM_TEST_EXECUTE_RAW_LAUNCH=1
   export FM_TEST_RAW_EXECUTION_LOG="$CASE_DIR/raw-execution.log"
+  export FM_TEST_RELATIVE_EXECUTED="$marker"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" 'command -p -- ./custom-agent --flag')
   status=$?
-  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_EXECUTION_LOG
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_EXECUTION_LOG FM_TEST_RELATIVE_EXECUTED
   expect_code 0 "$status" "raw command -p launch should preserve a relative direct target"
-  [ -f "$WT_DIR/custom-agent-executed" ] \
+  [ -f "$marker" ] \
     || fail "raw command -p launch did not execute its relative direct target: $(cat "$CASE_DIR/raw-execution.log")"
   pass "raw command -p launches a relative direct non-OMP target"
 }
@@ -1013,6 +1021,53 @@ test_raw_bare_target_symlinked_to_omp_refuses_before_raw_execution() {
   [ ! -s "$LAUNCH_LOG" ] || fail "raw bare target symlink typed a launch command"
   [ ! -s "$CASE_DIR/endpoint.log" ] || fail "raw bare target symlink created an endpoint"
   pass "raw bare targets symlinked to OMP refuse before raw execution"
+}
+
+test_raw_bare_target_with_canonical_omp_identity_refuses_before_raw_execution() {
+  local rec id out status
+  id=$(profile_id profile-raw-bare-canonical-omp-z15n)
+  rec=$(make_spawn_case profile-raw-bare-canonical-omp claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  mv "$FAKEBIN_DIR/omp" "$FAKEBIN_DIR/omp-v17"
+  ln -s omp-v17 "$FAKEBIN_DIR/omp"
+  ln -s omp-v17 "$FAKEBIN_DIR/custom-agent-link"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" 'custom-agent-link --legacy')
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+  expect_code 1 "$status" "raw bare target matching canonical OMP identity must refuse before launch"
+  assert_contains "$out" "raw launch command could invoke omp" \
+    "canonical OMP identity refusal did not name its verified-harness boundary"
+  assert_absent "$CASE_DIR/raw-omp-executed" "canonical OMP identity executed the harmless fake OMP"
+  [ ! -s "$LAUNCH_LOG" ] || fail "canonical OMP identity typed a launch command"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "canonical OMP identity created an endpoint"
+  pass "raw bare targets matching canonical OMP identity refuse before raw execution"
+}
+
+test_raw_absolute_wrapper_refuses_before_raw_execution() {
+  local rec id out status
+  id=$(profile_id profile-raw-absolute-wrapper-z15o)
+  rec=$(make_spawn_case profile-raw-absolute-wrapper claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" '/usr/bin/env omp --legacy')
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+  expect_code 1 "$status" "raw absolute wrapper must refuse before launch"
+  assert_contains "$out" "raw launch command could invoke omp" \
+    "raw absolute wrapper refusal did not name its verified-harness boundary"
+  assert_absent "$CASE_DIR/raw-omp-executed" "raw absolute wrapper executed the harmless fake OMP"
+  [ ! -s "$LAUNCH_LOG" ] || fail "raw absolute wrapper typed a launch command"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "raw absolute wrapper created an endpoint"
+  pass "raw absolute wrappers refuse before raw execution"
 }
 
 test_raw_non_omp_command_p_ignores_imported_type_function() {
@@ -2692,6 +2747,8 @@ test_raw_non_omp_command_p_launches_an_absolute_target
 test_raw_non_omp_command_p_launches_a_relative_target
 test_raw_command_path_symlinked_to_omp_refuses_before_raw_execution
 test_raw_bare_target_symlinked_to_omp_refuses_before_raw_execution
+test_raw_bare_target_with_canonical_omp_identity_refuses_before_raw_execution
+test_raw_absolute_wrapper_refuses_before_raw_execution
 test_raw_non_omp_command_p_ignores_imported_type_function
 test_raw_non_omp_command_p_preserves_path_assignment
 test_claude_threads_model_and_effort

@@ -951,6 +951,12 @@ spawn_abort_cleanup() {
       echo "warning: OMP Prewalk spawn cleanup is preserving its leased worktree because prior occupant liveness was not disproven" >&2
       ;;
   esac
+  if [ "${RAW_LAUNCH_ABORT_LEASE:-0}" = 1 ]; then
+    RAW_LAUNCH_ABORT_LEASE=0
+    if ! (cd "$PROJ_ABS" && "$SCRIPT_DIR/fm-treehouse-command.sh" return "$WT" >/dev/null 2>&1); then
+      echo "warning: raw launch preflight could not return its leased worktree $WT" >&2
+    fi
+  fi
   if [ "$OMP_ABORT_CLEANUP" = 1 ]; then
     OMP_ABORT_CLEANUP=0
     meta="${STATE:-}/${ID:-}.meta"
@@ -1305,7 +1311,7 @@ raw_launch_omp_is_omp_path() {  # <word>
   return 1
 }
 
-raw_launch_omp_canonical_executable() {  # <path> <relative root>
+raw_launch_canonical_executable() {  # <path> <relative root>
   local path=$1 root=$2 directory link steps=0
   case "$path" in
     /*) ;;
@@ -1327,7 +1333,15 @@ raw_launch_omp_canonical_executable() {  # <path> <relative root>
     esac
   done
   [ -f "$path" ] && [ -x "$path" ] || return 1
-  raw_launch_omp_is_omp_path "$path" && return 1
+  printf '%s\n' "$path"
+}
+
+raw_launch_omp_canonical_executable() {  # <path> <relative root>
+  local path
+  path=$(raw_launch_canonical_executable "$1" "$2") || return 1
+  [ "$path" != "${RAW_LAUNCH_OMP_CANON:-}" ] || return 1
+  case "${path##*/}" in command|env|exec|builtin) return 1 ;; esac
+  raw_launch_omp_word_has_shell_grammar "${path##*/}" && return 1
   printf '%s\n' "$path"
 }
 
@@ -1348,7 +1362,14 @@ raw_launch_omp_normalize() {  # <command -p flag> <assignment count> <target ind
   done
   target=${words[$target_index]}
   case "$target" in
-    */*) target=$(raw_launch_omp_canonical_executable "$target" "$RAW_LAUNCH_PATH_ROOT") || return 1 ;;
+    /*) target=$(raw_launch_omp_canonical_executable "$target" "$RAW_LAUNCH_PATH_ROOT") || return 1 ;;
+    */*)
+      if [ "$RAW_LAUNCH_RESOLVE_RELATIVE" != 1 ]; then
+        RAW_LAUNCH_NEEDS_WORKTREE=1
+        return 0
+      fi
+      target=$(raw_launch_omp_canonical_executable "$target" "$RAW_LAUNCH_PATH_ROOT") || return 1
+      ;;
     *)
       if [ "$command_p" = 1 ]; then
         lookup_path=$(/usr/bin/getconf PATH) || return 1
@@ -1388,6 +1409,7 @@ raw_launch_omp_classify() {  # <raw command>; sets RAW_LAUNCH_OMP_CLASS and RAW_
   RAW_LAUNCH_OMP_CLASS=ambiguous
   RAW_LAUNCH_HARNESS=
   RAW_LAUNCH_NORMALIZED=
+  RAW_LAUNCH_NEEDS_WORKTREE=0
   raw_launch_omp_has_shell_expansion "$raw" && return 0
   case "$raw" in
     *$'\n'*|*$'\r'*|*[\;\|\&\<\>\(\)\{\}]*) return 0 ;;
@@ -1465,6 +1487,11 @@ raw_launch_omp_classify() {  # <raw command>; sets RAW_LAUNCH_OMP_CLASS and RAW_
 
 RAW_LAUNCH=0
 RAW_LAUNCH_PATH_ROOT=
+RAW_LAUNCH_OMP_CANON=
+RAW_LAUNCH_NEEDS_WORKTREE=0
+RAW_LAUNCH_RESOLVE_RELATIVE=0
+RAW_LAUNCH_WORKTREE_READY=0
+RAW_LAUNCH_ABORT_LEASE=0
 case "$ARG3" in
   *[[:space:]]*)  # raw launch command (unverified-adapter escape hatch)
     if [ "$KIND" = secondmate ]; then
@@ -1479,6 +1506,8 @@ case "$ARG3" in
       echo "error: raw launch project directory cannot be resolved: $PROJ" >&2
       exit 1
     }
+    raw_launch_omp_path=$(builtin type -P omp 2>/dev/null || true)
+    [ -z "$raw_launch_omp_path" ] || RAW_LAUNCH_OMP_CANON=$(raw_launch_canonical_executable "$raw_launch_omp_path" "$RAW_LAUNCH_PATH_ROOT" 2>/dev/null || true)
     raw_launch_omp_classify "$ARG3"
     case "$RAW_LAUNCH_OMP_CLASS" in
       omp|ambiguous)
@@ -2843,6 +2872,38 @@ freshen_spawn_worktree_base() {  # <worktree>
 
 W="fm-$ID"
 SPAWN_START_DIR=$PROJ_ABS
+if [ "$RAW_LAUNCH" = 1 ] && [ "$RAW_LAUNCH_NEEDS_WORKTREE" = 1 ] && [ "$KIND" != secondmate ]; then
+  case "$BACKEND" in
+    orca)
+      echo "error: raw relative launch paths are unavailable on backend=orca; use an absolute executable path" >&2
+      exit 1
+      ;;
+  esac
+  treehouse_lease_args=(--lease --lease-holder "$W")
+  [ -z "$ACCEPTED_LOCAL_BASE" ] || treehouse_lease_args+=(--accepted-local-base "$ACCEPTED_LOCAL_BASE")
+  WT=$(cd "$PROJ_ABS" && "$SCRIPT_DIR/fm-treehouse-get.sh" "${treehouse_lease_args[@]}") || {
+    echo "error: raw launch could not lease an authoritative pooled worktree before endpoint creation" >&2
+    exit 1
+  }
+  RAW_LAUNCH_ABORT_LEASE=1
+  validate_spawn_worktree "raw launch treehouse lease" "$W"
+  validate_spawn_pool_lease "raw launch treehouse lease" "$W" || exit 1
+  freshen_spawn_worktree_base "$WT" || exit 1
+  RAW_LAUNCH_PATH_ROOT=$WT
+  RAW_LAUNCH_RESOLVE_RELATIVE=1
+  raw_launch_omp_classify "$ARG3"
+  case "$RAW_LAUNCH_OMP_CLASS:$RAW_LAUNCH_NEEDS_WORKTREE" in
+    non-omp:0) ;;
+    *)
+      echo "error: raw launch command could invoke omp; pass --harness omp for the verified OMP template" >&2
+      exit 1
+      ;;
+  esac
+  LAUNCH=$RAW_LAUNCH_NORMALIZED
+  HARNESS=$RAW_LAUNCH_HARNESS
+  RAW_LAUNCH_WORKTREE_READY=1
+  SPAWN_START_DIR=$WT
+fi
 if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
   treehouse_lease_args=(--lease --lease-holder "$W")
   [ -z "$ACCEPTED_LOCAL_BASE" ] || treehouse_lease_args+=(--accepted-local-base "$ACCEPTED_LOCAL_BASE")
@@ -3120,6 +3181,7 @@ EOF
     ;;
 esac
 [ "$PREWALK_ABORT_PHASE" != lease ] || PREWALK_ABORT_PHASE=endpoint
+RAW_LAUNCH_ABORT_LEASE=0
 if [ "$KIND" = secondmate ]; then
   FM_INHERITABLE_CONFIG=trace-context \
     propagate_inheritable_config "$CONFIG" "$PROJ_ABS/config" \
@@ -3280,7 +3342,7 @@ hermes_wait_for_reasoning() {  # <effort>
 }
 
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
-  && [ "$PREWALK_WORKTREE_READY" != 1 ]; then
+  && [ "$PREWALK_WORKTREE_READY" != 1 ] && [ "$RAW_LAUNCH_WORKTREE_READY" != 1 ]; then
   printf -v treehouse_get_command '%q' "$SCRIPT_DIR/fm-treehouse-get.sh"
   if [ -n "$ACCEPTED_LOCAL_BASE" ]; then
     printf -v accepted_local_base_quoted '%q' "$ACCEPTED_LOCAL_BASE"
@@ -3368,7 +3430,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
   fi
 fi
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
-  && [ "$PREWALK_WORKTREE_READY" != 1 ]; then
+  && [ "$PREWALK_WORKTREE_READY" != 1 ] && [ "$RAW_LAUNCH_WORKTREE_READY" != 1 ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ] \

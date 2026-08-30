@@ -128,7 +128,7 @@ spawn_from_launcher() {
   # Workers still accept a raw launch command; a --secondmate spawn refuses one
   # and takes a verified harness identity instead (bin/fm-spawn.sh). Either way
   # this suite only needs an endpoint to exist so its workspace can be read.
-  launch="sh -c 'echo launcher-ws-ok'"
+  launch="printf launcher-ws-ok"
   for arg in "$@"; do
     [ "$arg" = --secondmate ] && launch=codex
   done
@@ -288,7 +288,7 @@ cat > "$TMP_ROOT/spawn-in-pane.sh" <<SPAWN
 #!/usr/bin/env bash
 set -u
 FM_SPAWN_NO_GUARD=1 FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" \\
-  "$ROOT/bin/fm-spawn.sh" dupC "$PROJ" "sh -c 'echo launcher-ws-ok'" --mode no-mistakes --yolo off --backend herdr \\
+  "$ROOT/bin/fm-spawn.sh" dupC "$PROJ" "printf launcher-ws-ok" --mode no-mistakes --yolo off --backend herdr \\
   > "$TMP_ROOT/dupC.out" 2> "$TMP_ROOT/dupC.err"
 echo \$? > "$TMP_ROOT/dupC.rc"
 SPAWN
