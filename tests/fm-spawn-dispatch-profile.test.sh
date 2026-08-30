@@ -807,6 +807,9 @@ test_ambiguous_raw_omp_spellings_refuse_before_raw_execution() {
     'command nohup omp --legacy'
     'flock /tmp/fm.lock omp --legacy'
     'command flock /tmp/fm.lock omp --legacy'
+    '-i omp --legacy'
+    '--ignore-environment omp --legacy'
+    '-u OMP_HOME omp --legacy'
     "'omp --legacy"
   )
   for raw in "${cases[@]}"; do
