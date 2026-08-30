@@ -9,14 +9,15 @@
 # tells the worker how to read and acknowledge; none of them restates the
 # format.
 #
-# Design: the payload moves to the filesystem, which is reliable; OMP carries
-# the constant doorbell through its acknowledged programmatic extension request,
-# while every other harness and an unavailable OMP extension use the terminal
-# composer fallback. Ringing again is safe. A duplicated doorbell is a no-op
-# by construction (the worker finds the inbox empty or already handled), a
-# swallowed doorbell is detected by the absence of the worker's acknowledgement
-# and re-rung on a bounded schedule, and a worker that never acknowledges
-# surfaces through the ordinary stale wake into stuck-crewmate-recovery.
+# Design: the durable inbox record and its handled-file move are the processing
+# boundary; doorbell transport is at-least-once and carries no instruction state.
+# OMP uses an acknowledged programmatic request, while every other harness and
+# an unavailable OMP extension use the terminal composer fallback. A claimed
+# programmatic request that may already have sent is anchored as ambiguous and
+# is never sent again; session recovery reconciles the instruction from the
+# durable inbox. Other swallowed doorbells are re-rung on a bounded schedule,
+# and a worker that never acknowledges surfaces through the ordinary stale wake
+# into stuck-crewmate-recovery.
 #
 # Layout under <state-dir>:
 #   <task>.inbox/NNN.msg       one durable steer, numeric sequence, atomic rename

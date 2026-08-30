@@ -117,7 +117,7 @@ fm_omp_task_doorbell_marker_read() {  # <marker>; sets FM_OMP_TASK_DOORBELL_PID
 }
 
 fm_omp_task_doorbell_request_existing() {  # <marker> <request-id>
-  local marker=$1 request_id=$2 request_dir base processing owner pending cancelled
+  local marker=$1 request_id=$2 request_dir base processing cancelled
   case "$request_id" in ''|.*|*[!A-Za-z0-9._-]*) return 1 ;; esac
   request_dir="${marker}.requests"
   [ -d "$request_dir" ] && [ ! -L "$request_dir" ] || return 3
@@ -130,19 +130,9 @@ fm_omp_task_doorbell_request_existing() {  # <marker> <request-id>
     rm -f "${base}.pending.failed"
     return 1
   fi
+  [ ! -f "${base}.pending.ambiguous" ] || return 2
   for processing in "${base}.pending.processing."*; do
-    [ -f "$processing" ] || continue
-    owner=${processing##*.processing.}
-    case "$owner" in ''|*[!0-9]*|0|1) return 2 ;; esac
-    kill -0 "$owner" 2>/dev/null && return 2
-    pending=${processing%.processing.*}
-    if ln "$processing" "$pending" 2>/dev/null; then
-      rm -f "$processing"
-    elif [ -f "$pending" ]; then
-      rm -f "$processing"
-    else
-      return 2
-    fi
+    [ -f "$processing" ] && return 2
   done
   [ -f "${base}.pending" ] || return 3
   if fm_omp_task_doorbell_marker_read "$marker" \

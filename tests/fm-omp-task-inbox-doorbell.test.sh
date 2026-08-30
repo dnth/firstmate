@@ -22,33 +22,39 @@ test_extension_signal_uses_trigger_turn() {
   HELPER="$HELPER" INBOX="$dir/state/t1.inbox" READY="$dir/state/t1.omp-doorbell-ready" \
     node --input-type=module <<'JS'
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const { FM_TASK_INBOX_DOORBELL_SIGNAL, installTaskInboxDoorbell } =
   await import(pathToFileURL(process.env.HELPER).href);
 const sent = [];
+const requestDir = `${process.env.READY}.requests`;
 const doorbell = installTaskInboxDoorbell(
-  { sendMessage(message, options) { sent.push({ message, options }); } },
+  {
+    sendMessage(message, options) {
+      assert.equal(readdirSync(requestDir).some((name) => name.endsWith(".pending.ambiguous")), true);
+      sent.push({ message, options });
+    },
+  },
   { inboxDir: process.env.INBOX, readyMarker: process.env.READY },
 );
 assert.equal(existsSync(process.env.READY), false);
-const requestDir = `${process.env.READY}.requests`;
 mkdirSync(requestDir, { recursive: true });
 writeFileSync(`${requestDir}/preexisting.pending`, "");
-writeFileSync(`${requestDir}/stale.pending.processing.2147483647`, "");
+writeFileSync(`${requestDir}/stale.pending.processing.${process.pid}`, "");
 doorbell.activate();
 assert.equal(readFileSync(process.env.READY, "utf8"), `${process.pid}\n`);
-assert.equal(sent.length, 2);
+assert.equal(sent.length, 1);
 assert.equal(existsSync(`${requestDir}/preexisting.pending.delivered`), true);
-assert.equal(existsSync(`${requestDir}/stale.pending.delivered`), true);
+assert.equal(existsSync(`${requestDir}/stale.pending.ambiguous`), true);
+assert.equal(existsSync(`${requestDir}/stale.pending.processing.${process.pid}`), false);
 writeFileSync(`${requestDir}/one.pending`, "");
 writeFileSync(`${requestDir}/two.pending`, "");
 process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
-assert.equal(sent.length, 4);
+assert.equal(sent.length, 3);
 assert.equal(sent[0].message.customType, "firstmate-task-inbox-doorbell");
 assert.match(sent[0].message.content, new RegExp(`${process.env.INBOX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/\\*\\.msg`));
-assert.deepEqual(sent[2].options, { deliverAs: "steer", triggerTurn: true });
+assert.deepEqual(sent[1].options, { deliverAs: "steer", triggerTurn: true });
 assert.equal(existsSync(`${requestDir}/one.pending.delivered`), true);
 assert.equal(existsSync(`${requestDir}/two.pending.delivered`), true);
 doorbell.retire();
@@ -64,15 +70,29 @@ assert.equal(existsSync(unavailable), false);
 unavailableDoorbell.retire();
 
 const failing = `${process.env.READY}.failing`;
+const failingApi = { sendMessage() {} };
 const failingDoorbell = installTaskInboxDoorbell(
-  { sendMessage() { throw new Error("unavailable"); } },
+  failingApi,
   { inboxDir: process.env.INBOX, readyMarker: failing },
 );
 failingDoorbell.activate();
+failingApi.sendMessage = undefined;
 writeFileSync(`${failing}.requests/one.pending`, "");
 process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
 assert.equal(existsSync(`${failing}.requests/one.pending.failed`), true);
 assert.equal(existsSync(failing), false);
+
+const uncertain = `${process.env.READY}.uncertain`;
+const uncertainDoorbell = installTaskInboxDoorbell(
+  { sendMessage() { throw new Error("uncertain"); } },
+  { inboxDir: process.env.INBOX, readyMarker: uncertain },
+);
+uncertainDoorbell.activate();
+writeFileSync(`${uncertain}.requests/one.pending`, "");
+process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
+assert.equal(existsSync(`${uncertain}.requests/one.pending.ambiguous`), true);
+assert.equal(existsSync(`${uncertain}.requests/one.pending.failed`), false);
+assert.equal(existsSync(uncertain), false);
 JS
   pass "OMP extension drains every counted request and acknowledges delivery or failure"
 }
@@ -169,15 +189,19 @@ set -e
 [ "$rc" = 2 ]
 [ -f "$request_dir/request.claimed.msg.pending.processing.4242" ]
 
-printf '4242\n' > "$MARKER"
-: > "$request_dir/request.stale.msg.pending.processing.2147483647"
+: > "$request_dir/request.ambiguous.msg.pending.ambiguous"
 set +e
-fm_omp_task_doorbell_request_existing "$MARKER" stale.msg
+fm_omp_task_doorbell_request_existing "$MARKER" ambiguous.msg
 rc=$?
 set -e
 [ "$rc" = 2 ]
-[ -f "$request_dir/request.stale.msg.pending" ]
-[ ! -e "$request_dir/request.stale.msg.pending.processing.2147483647" ]
+set +e
+fm_omp_task_doorbell_request_existing "$MARKER" ambiguous.msg
+rc=$?
+set -e
+[ "$rc" = 2 ]
+[ -f "$request_dir/request.ambiguous.msg.pending.ambiguous" ]
+[ ! -e "$request_dir/request.ambiguous.msg.pending" ]
 
 : > "$request_dir/request.failed.msg.pending.failed"
 set +e
@@ -188,7 +212,7 @@ set -e
 [ ! -e "$request_dir/request.failed.msg.pending.failed" ]
 SH
   expect_code 0 "$?" "OMP request terminal-state boundary"
-  pass "OMP request timeout and dead claim recovery preserve terminal retries"
+  pass "OMP ambiguous claims anchor retries without another programmatic send"
 }
 
 make_send_stubs() {  # <dir>

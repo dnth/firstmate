@@ -71,35 +71,28 @@ function bestEffortRename(from: string, to: string): void {
 	}
 }
 
-function processIsAlive(pid: number): boolean {
+function bestEffortUnlink(path: string): void {
 	try {
-		process.kill(pid, 0);
-		return true;
+		unlinkSync(path);
 	} catch {
-		return false;
+		return;
 	}
 }
 
-function reconcileStaleClaims(requestDir: string): void {
+function reconcileAmbiguousClaims(requestDir: string): void {
 	for (const name of readdirSync(requestDir).sort()) {
 		const match = name.match(/^(.*\.pending)\.processing\.([0-9]+)$/);
 		if (!match) continue;
-		const owner = Number(match[2]);
-		if (!Number.isSafeInteger(owner) || owner <= 1 || processIsAlive(owner)) continue;
 		const processing = join(requestDir, name);
 		const pending = join(requestDir, match[1]);
+		const ambiguous = `${pending}.ambiguous`;
 		try {
-			linkSync(processing, pending);
-			unlinkSync(processing);
+			linkSync(processing, ambiguous);
 		} catch {
-			if (existsSync(pending)) {
-				try {
-					unlinkSync(processing);
-				} catch {
-					continue;
-				}
-			}
+			if (!existsSync(ambiguous)) continue;
 		}
+		bestEffortUnlink(processing);
+		bestEffortUnlink(pending);
 	}
 }
 
@@ -130,14 +123,16 @@ export function installTaskInboxDoorbell(
 		try {
 			for (const name of readdirSync(requestDir).filter((entry) => entry.endsWith(".pending")).sort()) {
 				const pending = join(requestDir, name);
-				const processing = `${pending}.processing.${process.pid}`;
+				const ambiguous = `${pending}.ambiguous`;
+				let invoked = false;
 				try {
-					renameSync(pending, processing);
+					renameSync(pending, ambiguous);
 				} catch {
 					continue;
 				}
 				try {
 					if (typeof omp.sendMessage !== "function") throw new Error("OMP sendMessage unavailable");
+					invoked = true;
 					omp.sendMessage(
 						{
 							customType: "firstmate-task-inbox-doorbell",
@@ -148,9 +143,9 @@ export function installTaskInboxDoorbell(
 						},
 						{ deliverAs: "steer", triggerTurn: true },
 					);
-					renameSync(processing, `${pending}.delivered`);
+					renameSync(ambiguous, `${pending}.delivered`);
 				} catch {
-					bestEffortRename(processing, `${pending}.failed`);
+					if (!invoked) bestEffortRename(ambiguous, `${pending}.failed`);
 					retire();
 					break;
 				}
@@ -163,7 +158,7 @@ export function installTaskInboxDoorbell(
 		if (active) return;
 		try {
 			mkdirSync(requestDir, { recursive: true, mode: 0o700 });
-			reconcileStaleClaims(requestDir);
+			reconcileAmbiguousClaims(requestDir);
 			watcher = watch(requestDir, drain);
 			active = true;
 			process.on(FM_TASK_INBOX_DOORBELL_SIGNAL, drain);
