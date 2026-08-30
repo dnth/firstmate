@@ -377,6 +377,8 @@ ok - OMP secondmate launch and recovery use the isolated adapter and an exact ho
 ```
 
 The deterministic spawn checks prove that an OMP launch refuses a git-tracked project extension without the explicit override, records the override when passed, and leaves projects without tracked extensions unchanged.
+On 2026-08-31, `tests/fm-spawn-dispatch-profile.test.sh` used an inert fake `omp` executable to prove that direct raw OMP spellings, leading whitespace, supported `command` wrapper forms, assignments, quoting, expansion, and wrapper ambiguity refuse before endpoint or executable side effects.
+The same portable test proves that a lookalike direct non-OMP raw command remains unchanged and never executes a tracked OMP extension.
 The secondmate integration checks reran on 2026-08-27 and prove that the exact Firstmate primary and fleet-hook extensions remain permitted in the persistent home without allowing modified or unrelated tracked extension code.
 Live firing of the fleet hook's `tool_result`, `todo_reminder`, and `session.compacting` handlers is PENDING firstmate scratch OMP verification before merge; deterministic extension and spawn tests do not claim OMP event delivery.
 

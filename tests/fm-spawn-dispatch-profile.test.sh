@@ -87,6 +87,10 @@ EOF
               printf 'window=unrelated:retry\n' > "$FM_FAKE_OMP_META_TAMPER"
             fi
           fi
+          if [ "${FM_FAKE_EXECUTE_RAW_LAUNCH:-0}" = 1 ]; then
+            launch=$(tail -n 1 "$FM_FAKE_LAUNCH_LOG")
+            bash -c "$launch"
+          fi
           ;;
       esac
     fi
@@ -301,7 +305,10 @@ case "${1:-}" in
       printf '%s\n' '{"models":[{"provider":"openai-codex","id":"gpt-5.6-terra","selector":"openai-codex/gpt-5.6-terra","thinking":["low","medium","high","xhigh","max"]},{"provider":"openai-codex","id":"gpt-5.6-luna","selector":"openai-codex/gpt-5.6-luna","thinking":["low","medium","high","xhigh","max"]}]}'
     fi
     ;;
-  *) exit 0 ;;
+  *)
+    [ -z "${FM_FAKE_RAW_OMP_EXECUTED:-}" ] || : > "$FM_FAKE_RAW_OMP_EXECUTED"
+    exit 0
+    ;;
 esac
 SH
   chmod +x "$fakebin/omp"
@@ -433,6 +440,8 @@ run_spawn() {
     FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS="${FM_TEST_HERDR_IDLE_SHELL_PROOF_POLLS:-}" \
     FM_FAKE_HERDR_REFUSE_CLOSE="${FM_TEST_HERDR_REFUSE_CLOSE:-0}" \
     FM_FAKE_OMP_META_TAMPER="${FM_TEST_OMP_META_TAMPER:-}" \
+    FM_FAKE_EXECUTE_RAW_LAUNCH="${FM_TEST_EXECUTE_RAW_LAUNCH:-0}" \
+    FM_FAKE_RAW_OMP_EXECUTED="${FM_TEST_RAW_OMP_EXECUTED:-}" \
     FM_HERDR_PS_BIN="$fakebin/herdr-ps" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
@@ -717,25 +726,96 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   pass "active crew-dispatch profile leaves the raw launch-command escape hatch unchanged"
 }
 
-test_raw_omp_launch_does_not_require_max_time_capability() {
-  local rec id out status launch
-  id=$(profile_id profile-raw-omp-z15b)
-  rec=$(make_spawn_case profile-raw-omp claude "$id")
+test_raw_omp_spellings_refuse_before_raw_execution() {
+  local raw rec id out status index=0
+  local -a cases=(
+    'omp --legacy'
+    $' \tomp --legacy'
+    'command omp --legacy'
+    'command -p omp --legacy'
+    'command -- omp --legacy'
+    'command -p -- omp --legacy'
+    'OMP_HOME=/tmp omp --legacy'
+  )
+  for raw in "${cases[@]}"; do
+    index=$((index + 1))
+    id=$(profile_id "profile-raw-omp-z15b-$index")
+    rec=$(make_spawn_case "profile-raw-omp-$index" claude "$id")
+    read_case_record "$rec"
+    enable_dispatch_profile "$HOME_DIR"
+    export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
+    export FM_TEST_EXECUTE_RAW_LAUNCH=1
+    export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" "$raw")
+    status=$?
+    unset FM_TEST_OMP_ACK FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+    expect_code 1 "$status" "raw OMP spelling must refuse before launch: $raw"
+    assert_contains "$out" "raw launch command could invoke omp" \
+      "raw OMP refusal did not name its verified-harness boundary: $raw"
+    assert_absent "$CASE_DIR/raw-omp-executed" "raw OMP spelling executed its harmless fake: $raw"
+    [ ! -s "$LAUNCH_LOG" ] || fail "raw OMP spelling typed a launch command: $raw"
+    [ ! -s "$CASE_DIR/endpoint.log" ] || fail "raw OMP spelling created an endpoint: $raw"
+  done
+  pass "raw OMP spellings refuse before raw execution"
+}
+
+test_ambiguous_raw_omp_spellings_refuse_before_raw_execution() {
+  local raw rec id out status index=0
+  local -a cases=(
+    '"omp" --legacy'
+    "o'mp' --legacy"
+    '$OMP_BIN --legacy'
+    'OMP_BIN=omp "$OMP_BIN" --legacy'
+    '\\omp --legacy'
+    'command -v omp'
+    'command -x omp'
+    'env OMP_HOME=/tmp omp --legacy'
+    'custom-agent; omp --legacy'
+    'omp() { :; }; omp --legacy'
+    'alias omp=custom-agent; omp --legacy'
+    "'omp --legacy"
+  )
+  for raw in "${cases[@]}"; do
+    index=$((index + 1))
+    id=$(profile_id "profile-ambiguous-omp-z15c-$index")
+    rec=$(make_spawn_case "profile-ambiguous-omp-$index" claude "$id")
+    read_case_record "$rec"
+    enable_dispatch_profile "$HOME_DIR"
+    export FM_TEST_EXECUTE_RAW_LAUNCH=1
+    export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" "$raw")
+    status=$?
+    unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+    expect_code 1 "$status" "ambiguous raw OMP spelling must refuse before launch: $raw"
+    assert_contains "$out" "raw launch command could invoke omp" \
+      "ambiguous raw OMP refusal did not name its boundary: $raw"
+    assert_absent "$CASE_DIR/raw-omp-executed" "ambiguous raw OMP spelling executed its harmless fake: $raw"
+    [ ! -s "$LAUNCH_LOG" ] || fail "ambiguous raw OMP spelling typed a launch command: $raw"
+    [ ! -s "$CASE_DIR/endpoint.log" ] || fail "ambiguous raw OMP spelling created an endpoint: $raw"
+  done
+  pass "ambiguous raw OMP spellings refuse before raw execution"
+}
+
+test_raw_non_omp_launches_keep_their_existing_escape_hatch() {
+  local rec id out status
+  id=$(profile_id profile-raw-non-omp-z15d)
+  rec=$(make_spawn_case profile-raw-non-omp claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
-  printf 'invalid-for-omp\n' > "$HOME_DIR/config/omp-max-time"
-  sed -i "s/ '--max-time=<value>'//" "$FAKEBIN_DIR/omp"
-  export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "omp --legacy __OMPMAXTIME__")
+    "$id" "$PROJ_DIR" 'custom-omp-agent --legacy')
   status=$?
-  expect_code 0 "$status" "raw OMP launch should not require the max-time capability"
-  assert_contains "$out" "spawned $id harness=omp" "spawn did not retain raw OMP identity"
-  launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "FM_OMP_HARNESS=omp omp --legacy __OMPMAXTIME__" ] \
-    || fail "raw OMP launch changed"$'\n'"actual: $launch"
-  pass "raw OMP launches ignore max-time configuration and capability checks"
+  expect_code 0 "$status" "lookalike non-OMP raw command should still launch"
+  assert_contains "$out" "spawned $id harness=custom-omp-agent" \
+    "lookalike non-OMP raw command lost its executable identity"
+  [ "$(cat "$LAUNCH_LOG")" = 'custom-omp-agent --legacy' ] \
+    || fail "lookalike non-OMP raw launch changed"
+  pass "lookalike non-OMP raw launches preserve the escape hatch"
 }
 
 test_claude_threads_model_and_effort() {
@@ -2359,7 +2439,9 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
-test_raw_omp_launch_does_not_require_max_time_capability
+test_raw_omp_spellings_refuse_before_raw_execution
+test_ambiguous_raw_omp_spellings_refuse_before_raw_execution
+test_raw_non_omp_launches_keep_their_existing_escape_hatch
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort

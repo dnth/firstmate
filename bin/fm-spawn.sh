@@ -107,8 +107,13 @@
 #   /updatefirstmate, restart). A bare verified adapter name
 #   (claude|codex|opencode|pi|pi-signed|omp|grok|kimi) overrides selection for
 #   either kind. Hermes overrides only a crewmate or scout spawn and is refused for secondmates.
-#   For crewmates and scouts, a non-flag string containing whitespace is treated
-#   as a RAW launch command - the escape hatch for verifying new adapters.
+#   For crewmates and scouts, a non-flag string containing shell whitespace is
+#   treated as a RAW launch command - the escape hatch for verifying new adapters.
+#   Raw commands keep their direct non-OMP executable and arguments unchanged.
+#   Leading whitespace, plain environment assignments, and `command -p --` are
+#   normalized only to identify OMP, which raw launch never permits.
+#   Ambiguous shell syntax refuses before endpoint creation rather than bypassing
+#   the verified OMP template or its project-extension approval boundary.
 #   Secondmates refuse every raw launch command and accept adapter identities only.
 #   pi-signed launches that exact executable name from PATH and
 #   refuses before endpoint creation when it is unavailable; it never falls back to pi.
@@ -1277,19 +1282,86 @@ refuse_crew_only_secondmate() {  # <harness>
   esac
 }
 
+raw_launch_omp_classify() {  # <raw command>; sets RAW_LAUNCH_OMP_CLASS and RAW_LAUNCH_HARNESS
+  # Raw commands are deliberately opaque to the pane shell.
+  # This classifier recognizes only the tiny direct-command grammar that the old
+  # raw-command contract already exposed through whitespace splitting.
+  # It never evaluates or decodes shell syntax, so uncertainty fails closed before
+  # a raw command can bypass OMP's verified launch path.
+  local raw=$1 word index=0
+  local -a words
+  RAW_LAUNCH_OMP_CLASS=ambiguous
+  RAW_LAUNCH_HARNESS=
+  case "$raw" in
+    *$'\n'*|*$'\r'*|*[\;\|\&\<\>\(\)\{\}]*) return 0 ;;
+  esac
+  raw=${raw#"${raw%%[!$' \t']*}"}
+  raw=${raw%"${raw##*[!$' \t']}"}
+  [ -n "$raw" ] || return 0
+  IFS=$' \t' read -r -a words <<< "$raw"
+  while [ "$index" -lt "${#words[@]}" ]; do
+    word=${words[$index]}
+    if [[ "$word" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+      case "$word" in *[\'\"\`\\\$]*) return 0 ;; esac
+      index=$((index + 1))
+      continue
+    fi
+    break
+  done
+  [ "$index" -lt "${#words[@]}" ] || return 0
+  word=${words[$index]}
+  case "$word" in *[\'\"\`\\\$]*) return 0 ;; esac
+  case "$word" in
+    omp)
+      RAW_LAUNCH_OMP_CLASS=omp
+      return 0
+      ;;
+    command)
+      index=$((index + 1))
+      while [ "$index" -lt "${#words[@]}" ] && [ "${words[$index]}" = -p ]; do
+        index=$((index + 1))
+      done
+      if [ "$index" -lt "${#words[@]}" ] && [ "${words[$index]}" = -- ]; then
+        index=$((index + 1))
+      fi
+      [ "$index" -lt "${#words[@]}" ] || return 0
+      word=${words[$index]}
+      case "$word" in
+        -*|*[\'\"\`\\\$]*) return 0 ;;
+        omp) RAW_LAUNCH_OMP_CLASS=omp ;;
+        *) RAW_LAUNCH_OMP_CLASS=non-omp; RAW_LAUNCH_HARNESS=$(basename "$word") ;;
+      esac
+      return 0
+      ;;
+    env|exec|builtin)
+      # These wrappers can select a later executable without a shell evaluator.
+      return 0
+      ;;
+    *)
+      RAW_LAUNCH_OMP_CLASS=non-omp
+      RAW_LAUNCH_HARNESS=$(basename "$word")
+      return 0
+      ;;
+  esac
+}
+
 RAW_LAUNCH=0
 case "$ARG3" in
-  *' '*)  # raw launch command (unverified-adapter escape hatch)
+  *[[:space:]]*)  # raw launch command (unverified-adapter escape hatch)
     if [ "$KIND" = secondmate ]; then
       echo "error: raw launch commands are unavailable for secondmates; select a verified harness adapter" >&2
       exit 1
     fi
+    raw_launch_omp_classify "$ARG3"
+    case "$RAW_LAUNCH_OMP_CLASS" in
+      omp|ambiguous)
+        echo "error: raw launch command could invoke omp; pass --harness omp for the verified OMP template" >&2
+        exit 1
+        ;;
+    esac
     RAW_LAUNCH=1
     LAUNCH=$ARG3
-    HARNESS=""
-    for word in $LAUNCH; do
-      case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
-    done
+    HARNESS=$RAW_LAUNCH_HARNESS
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
