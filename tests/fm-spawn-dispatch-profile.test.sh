@@ -786,6 +786,8 @@ test_ambiguous_raw_omp_spellings_refuse_before_raw_execution() {
     'command command omp --legacy'
     'bash -c omp --legacy'
     './omp --legacy'
+    'nohup omp --legacy'
+    'command nohup omp --legacy'
     "'omp --legacy"
   )
   for raw in "${cases[@]}"; do

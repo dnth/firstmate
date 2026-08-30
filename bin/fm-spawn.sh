@@ -1284,7 +1284,7 @@ refuse_crew_only_secondmate() {  # <harness>
 
 raw_launch_omp_word_has_shell_grammar() {  # <word>
   case "$1" in
-    '!'|time|coproc|if|then|elif|else|fi|for|while|until|do|done|case|esac|function|select|in|bash|sh|zsh|fish|dash|ksh|csh|tcsh|eval|source|.|\[\[|\]\]|~*|*/*|*[\*\?\[]*) return 0 ;;
+    '!'|time|coproc|if|then|elif|else|fi|for|while|until|do|done|case|esac|function|select|in|bash|sh|zsh|fish|dash|ksh|csh|tcsh|eval|source|.|nohup|nice|timeout|stdbuf|setsid|chroot|runcon|unshare|taskset|ionice|sudo|doas|xargs|rlwrap|unbuffer|watch|strace|gdb|lldb|valgrind|\[\[|\]\]|~*|*/*|*[\*\?\[]*) return 0 ;;
   esac
   return 1
 }
