@@ -947,6 +947,50 @@ test_raw_non_omp_command_p_launches_an_absolute_target() {
   pass "raw command -p launches an absolute direct non-OMP target"
 }
 
+test_raw_non_omp_command_p_launches_a_relative_target() {
+  local rec id out status
+  id=$(profile_id profile-raw-command-p-relative-z15k)
+  rec=$(make_spawn_case profile-raw-command-p-relative claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  ln -s "$FAKEBIN_DIR/custom-agent" "$PROJ_DIR/custom-agent"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_EXECUTION_LOG="$CASE_DIR/raw-execution.log"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" 'command -p -- ./custom-agent --flag')
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_EXECUTION_LOG
+  expect_code 0 "$status" "raw command -p launch should preserve a relative direct target"
+  [ -f "$WT_DIR/custom-agent-executed" ] \
+    || fail "raw command -p launch did not execute its relative direct target: $(cat "$CASE_DIR/raw-execution.log")"
+  pass "raw command -p launches a relative direct non-OMP target"
+}
+
+test_raw_command_path_symlinked_to_omp_refuses_before_raw_execution() {
+  local rec id out status raw
+  id=$(profile_id profile-raw-command-p-symlink-z15l)
+  rec=$(make_spawn_case profile-raw-command-p-symlink claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  ln -s "$FAKEBIN_DIR/omp" "$PROJ_DIR/custom-agent"
+  raw="command -p -- $PROJ_DIR/custom-agent --legacy"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "$raw")
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+  expect_code 1 "$status" "raw command path symlinked to OMP must refuse before launch"
+  assert_contains "$out" "raw launch command could invoke omp" \
+    "raw command path symlink refusal did not name its verified-harness boundary"
+  assert_absent "$CASE_DIR/raw-omp-executed" "raw command path symlink executed the harmless fake OMP"
+  [ ! -s "$LAUNCH_LOG" ] || fail "raw command path symlink typed a launch command"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "raw command path symlink created an endpoint"
+  pass "raw command paths symlinked to OMP refuse before raw execution"
+}
+
 test_raw_non_omp_command_p_ignores_imported_type_function() {
   local rec id out status spawn_env
   id=$(profile_id profile-raw-command-p-type-z15j)
@@ -2621,6 +2665,8 @@ test_raw_non_omp_launches_bypass_pane_aliases_and_functions
 test_raw_non_omp_launches_preserve_plain_assignments
 test_raw_non_omp_command_p_launches_its_direct_target
 test_raw_non_omp_command_p_launches_an_absolute_target
+test_raw_non_omp_command_p_launches_a_relative_target
+test_raw_command_path_symlinked_to_omp_refuses_before_raw_execution
 test_raw_non_omp_command_p_ignores_imported_type_function
 test_raw_non_omp_command_p_preserves_path_assignment
 test_claude_threads_model_and_effort

@@ -1305,6 +1305,32 @@ raw_launch_omp_is_omp_path() {  # <word>
   return 1
 }
 
+raw_launch_omp_canonical_executable() {  # <path> <relative root>
+  local path=$1 root=$2 directory link steps=0
+  case "$path" in
+    /*) ;;
+    */*) path="$root/$path" ;;
+    *) return 1 ;;
+  esac
+  while :; do
+    directory=${path%/*}
+    [ -n "$directory" ] || directory=/
+    directory=$(CDPATH='' builtin cd -P -- "$directory" 2>/dev/null && builtin pwd -P) || return 1
+    path="$directory/${path##*/}"
+    [ -L "$path" ] || break
+    steps=$((steps + 1))
+    [ "$steps" -le 40 ] || return 1
+    link=$(/usr/bin/readlink "$path") || return 1
+    case "$link" in
+      /*) path=$link ;;
+      *) path="${path%/*}/$link" ;;
+    esac
+  done
+  [ -f "$path" ] && [ -x "$path" ] || return 1
+  raw_launch_omp_is_omp_path "$path" && return 1
+  printf '%s\n' "$path"
+}
+
 raw_launch_omp_has_shell_expansion() {  # <raw command>
   case "$1" in
     *\$*|*\`*|*\\*|*\"*|*\'*|*[\*\?\[]*|*~*|*#*) return 0 ;;
@@ -1313,7 +1339,7 @@ raw_launch_omp_has_shell_expansion() {  # <raw command>
 }
 
 raw_launch_omp_normalize() {  # <command -p flag> <assignment count> <target index> <words...>
-  local command_p=$1 assignment_count=$2 target_index=$3 default_path target index
+  local command_p=$1 assignment_count=$2 target_index=$3 default_path target target_quoted index
   shift 3
   local -a words=("$@")
   RAW_LAUNCH_NORMALIZED=/usr/bin/env
@@ -1321,20 +1347,21 @@ raw_launch_omp_normalize() {  # <command -p flag> <assignment count> <target ind
     RAW_LAUNCH_NORMALIZED="$RAW_LAUNCH_NORMALIZED ${words[$index]}"
   done
   target=${words[$target_index]}
-  if [ "$command_p" = 1 ]; then
-    default_path=$(getconf PATH) || return 1
-    case "$default_path" in ''|*[!A-Za-z0-9_/:.-]*) return 1 ;; esac
-    case "$target" in
-      /*) [ -x "$target" ] || return 1 ;;
-      *)
+  case "$target" in
+    */*) target=$(raw_launch_omp_canonical_executable "$target" "$RAW_LAUNCH_PATH_ROOT") || return 1 ;;
+    *)
+      if [ "$command_p" = 1 ]; then
+        default_path=$(/usr/bin/getconf PATH) || return 1
+        case "$default_path" in ''|*[!A-Za-z0-9_/:.-]*) return 1 ;; esac
         target=$(PATH="$default_path" builtin type -P "$target") || return 1
-        case "$target" in /*) ;; *) return 1 ;; esac
-        ;;
-    esac
-  fi
+        target=$(raw_launch_omp_canonical_executable "$target" "$RAW_LAUNCH_PATH_ROOT") || return 1
+      fi
+      ;;
+  esac
   for ((index = target_index; index < ${#words[@]}; index++)); do
     if [ "$index" = "$target_index" ]; then
-      RAW_LAUNCH_NORMALIZED="$RAW_LAUNCH_NORMALIZED $target"
+      printf -v target_quoted '%q' "$target"
+      RAW_LAUNCH_NORMALIZED="$RAW_LAUNCH_NORMALIZED $target_quoted"
     else
       RAW_LAUNCH_NORMALIZED="$RAW_LAUNCH_NORMALIZED ${words[$index]}"
     fi
@@ -1402,8 +1429,11 @@ raw_launch_omp_classify() {  # <raw command>; sets RAW_LAUNCH_OMP_CLASS and RAW_
         omp) RAW_LAUNCH_OMP_CLASS=omp ;;
         *)
           RAW_LAUNCH_OMP_CLASS=non-omp
-          RAW_LAUNCH_HARNESS=$(basename "$word")
-          raw_launch_omp_normalize "$command_p" "$assignment_count" "$index" "${words[@]}" || return 0
+          RAW_LAUNCH_HARNESS=${word##*/}
+          raw_launch_omp_normalize "$command_p" "$assignment_count" "$index" "${words[@]}" || {
+            RAW_LAUNCH_OMP_CLASS=ambiguous
+            return 0
+          }
           ;;
       esac
       return 0
@@ -1414,20 +1444,32 @@ raw_launch_omp_classify() {  # <raw command>; sets RAW_LAUNCH_OMP_CLASS and RAW_
       ;;
     *)
       RAW_LAUNCH_OMP_CLASS=non-omp
-      RAW_LAUNCH_HARNESS=$(basename "$word")
-      raw_launch_omp_normalize 0 "$assignment_count" "$index" "${words[@]}" || return 0
+      RAW_LAUNCH_HARNESS=${word##*/}
+      raw_launch_omp_normalize 0 "$assignment_count" "$index" "${words[@]}" || {
+        RAW_LAUNCH_OMP_CLASS=ambiguous
+        return 0
+      }
       return 0
       ;;
   esac
 }
 
 RAW_LAUNCH=0
+RAW_LAUNCH_PATH_ROOT=
 case "$ARG3" in
   *[[:space:]]*)  # raw launch command (unverified-adapter escape hatch)
     if [ "$KIND" = secondmate ]; then
       echo "error: raw launch commands are unavailable for secondmates; select a verified harness adapter" >&2
       exit 1
     fi
+    case "$PROJ" in
+      projects/*) RAW_LAUNCH_PATH_ROOT="$PROJECTS/${PROJ#projects/}" ;;
+      *) RAW_LAUNCH_PATH_ROOT=$PROJ ;;
+    esac
+    RAW_LAUNCH_PATH_ROOT=$(CDPATH='' builtin cd -P -- "$RAW_LAUNCH_PATH_ROOT" 2>/dev/null && builtin pwd -P) || {
+      echo "error: raw launch project directory cannot be resolved: $PROJ" >&2
+      exit 1
+    }
     raw_launch_omp_classify "$ARG3"
     case "$RAW_LAUNCH_OMP_CLASS" in
       omp|ambiguous)
