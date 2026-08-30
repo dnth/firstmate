@@ -2915,6 +2915,21 @@ test_composer_state_ghost_placeholder_is_empty() {
   pass "fm_backend_herdr_composer_state: the ghost placeholder text reads empty, not pending"
 }
 
+test_away_supervisor_admission_refuses_without_atomic_primitive() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/away-supervisor-atomic-deferral"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '  ╭────────────────────────╮\n  │ ❯                      │\n  ╰──────── Composer ─────╯\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_away_supervisor_admit default:w1:p2 "supervisor digest" claude' "$ROOT" )
+  [ "$out" = deferred-no-atomic-admission ] \
+    || fail "empty Herdr composer must refuse typed away admission without a conditional primitive, got '$out'"
+  if grep -Eq $'\x1f(pane\x1fsend-text|pane\x1fsend-keys)' "$log"; then
+    fail "atomic-admission deferral typed into the composer despite no conditional primitive"
+  fi
+  pass "fm_backend_herdr_away_supervisor_admit: an empty composer defers without send-text or Enter when Herdr lacks atomic admission"
+}
+
 test_composer_state_real_text_is_pending() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-pending"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -4778,6 +4793,7 @@ test_busy_state_done_and_blocked_map_to_idle
 test_busy_state_unknown_on_no_agent
 test_composer_state_bare_prompt_is_empty
 test_composer_state_ghost_placeholder_is_empty
+test_away_supervisor_admission_refuses_without_atomic_primitive
 test_composer_state_real_text_is_pending
 test_composer_state_popup_placeholder_fill_is_pending
 test_composer_state_unknown_on_capture_failure

@@ -250,8 +250,12 @@ ANSI capture preserves de-emphasized placeholder style.
 If a future Herdr version strips ANSI style, ghost suggestions become pending rather than empty, which safely defers injection and eventually raises the wedge alarm.
 
 A bare shell prompt is never an empty agent composer.
-Away-mode injection proceeds only on an affirmative `empty` result, never on unknown.
-This prevents a dead agent pane from receiving and possibly executing an escalation as shell input.
+Away-mode supervisor admission is owned by `fm_backend_herdr_away_supervisor_admit`.
+The installed Herdr CLI exposes only separate composer-read, `pane send-text`, and `pane send-keys` operations, not a compare-and-send or composer-reservation primitive.
+Therefore the adapter never types an away-supervisor escalation on Herdr, including when the conservative classifier returns `empty`.
+`pending` and `unknown` remain deferrals, while `empty` returns `deferred-no-atomic-admission`; the daemon preserves its durable escalation episode and can use the existing pane-independent wedge notification when configured.
+No second read or process-local lock is an admission boundary.
+This prevents a captain draft arriving after a guard read from being merged with or submitted alongside supervisor text.
 
 The current operational envelope starts with U+2063 and `FIRSTMATE_OP: `.
 The separate routed-request carrier uses `[fm-from-firstmate]` plus U+2063.
@@ -291,7 +295,8 @@ There is still one watcher process; the event reader is a bounded child of that 
 
 The away daemon supports tmux and Herdr supervisor panes only.
 It refuses Zellij, Orca, and cmux as supervisor backends rather than applying the wrong transport.
-For Herdr, target existence, native state, capture, composer state, and verified submit all route through the shared backend dispatcher and the explicit named-session CLI owner.
+For Herdr, target existence, native state, capture, composer state, verified submit, and away-supervisor admission all route through the shared backend dispatcher and the explicit named-session CLI owner.
+Generic verified submit remains available for ordinary steering and other established backend operations, but it is not an away-supervisor fallback because it cannot conditionally reserve a captain composer.
 The detached launcher preserves the exact supervisor harness and state directory; an OMP primary therefore reaches native session-event acknowledgement, while an unknown Herdr harness identity refuses before typing.
 The pane-independent max-defer alert is configured in [`wedge-alarm.md`](wedge-alarm.md).
 
@@ -347,6 +352,7 @@ tests/fm-omp-herdr-exit-live-e2e.test.sh
 tests/fm-herdr-session-cleanup.test.sh
 tests/fm-herdr-session-cleanup-e2e.test.sh
 tests/fm-afk-inject-herdr-e2e.test.sh
+tests/fm-afk-herdr-atomic-admission-smoke.test.sh
 tests/fm-afk-pi-herdr-return-e2e.test.sh
 ```
 

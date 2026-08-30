@@ -2102,7 +2102,7 @@ test_inject_msg_herdr_composer_guard_defers() {
   (
     fm_backend_target_exists() { return 0; }
     pane_is_busy() { return 1; }
-    fm_backend_composer_state() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected composer_state args: $1 $2"; printf 'pending'; }
+    fm_backend_away_supervisor_admit() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected admission args: $1 $2"; printf 'deferred-pending'; }
     fm_backend_send_text_submit() { fail "send_text_submit should not run when the composer-guard defers"; }
     if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state"; then
       fail "inject_msg should defer when the herdr composer has pending input"
@@ -2145,30 +2145,37 @@ test_inject_msg_herdr_refuses_unknown_harness_before_submit() {
   pass "inject_msg: Herdr injection refuses before typing when supervisor harness identity is unknown"
 }
 
-test_inject_msg_herdr_submits_through_backend_dispatch() {
+test_inject_msg_herdr_refuses_empty_composer_without_atomic_admission() {
   local dir state
-  dir=$(make_supercase inject-herdr-submit)
+  dir=$(make_supercase inject-herdr-atomic-deferral)
   state="$dir/state"
   afk_enter "$state"
   (
+    local captain_composer="$state/captain-composer"
+    printf 'empty\n' > "$captain_composer"
     fm_backend_target_exists() { return 0; }
     pane_is_busy() { return 1; }
-    fm_backend_composer_state() { printf 'empty'; }
-    fm_backend_send_text_submit() {
-      [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected send_text_submit args: $1 $2"
-      case "$3" in *"hello"*) : ;; *) fail "digest text missing from send_text_submit: $3" ;; esac
-      [ "$#" -eq 10 ] && [ "$7" = "" ] || fail "expected-label placeholder shifted the harness argument (argc=$#)"
-      [ "$8" = omp ] || fail "OMP Herdr injection did not forward exact harness identity: ${8:-missing}"
-      [ "$9" = /verified/bun ] || fail "OMP Herdr injection did not forward its bound Bun identity: ${9:-missing}"
-      [ "${10:-}" = /verified/omp ] || fail "OMP Herdr injection did not forward its bound entrypoint identity: ${10:-missing}"
-      printf 'empty'
+    fm_backend_away_supervisor_admit() {
+      [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected admission args: $1 $2"
+      case "$3" in *"hello"*) : ;; *) fail "digest text missing from atomic admission request: $3" ;; esac
+      [ "$#" -eq 6 ] || fail "atomic admission lost Herdr identity arguments (argc=$#)"
+      [ "$4" = omp ] && [ "$5" = /verified/bun ] && [ "$6" = /verified/omp ] \
+        || fail "atomic admission did not receive the exact OMP identity"
+      # Deterministically simulate captain input after the former empty guard
+      # and before the former separate send-text call.
+      printf 'captain draft in former check-to-send interval\n' > "$captain_composer"
+      printf 'deferred-no-atomic-admission'
     }
+    fm_backend_composer_state() { fail "Herdr away injection must not issue a separate composer recheck"; }
+    fm_backend_send_text_submit() { fail "Herdr away injection must not reach the generic typed transport"; }
     FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" \
       FM_SUPERVISOR_HARNESS=omp FM_SUPERVISOR_OMP_BUN=/verified/bun \
       FM_SUPERVISOR_OMP_BIN=/verified/omp inject_msg "hello" "$state" \
-      || fail "inject_msg should succeed when OMP-native confirmation reports delivery"
-  ) || fail "herdr successful-submit inject_msg subshell failed"
-  pass "inject_msg: OMP Herdr away delivery reaches the exact-runtime native confirmation path"
+      && fail "Herdr injection should defer when atomic admission is unavailable"
+    [ "$(cat "$captain_composer")" = 'captain draft in former check-to-send interval' ] \
+      || fail "the deterministic captain-input interleaving did not run"
+  ) || fail "herdr atomic-deferral inject_msg subshell failed"
+  pass "inject_msg: captain input in the former Herdr check-to-send interval cannot merge because typed admission is refused"
 }
 
 # Safety-critical (task fm-composer-shellglyph-safety): the away-mode injector
@@ -2318,6 +2325,6 @@ test_inject_msg_herdr_busy_guard_defers
 test_inject_msg_herdr_composer_guard_defers
 test_inject_msg_herdr_pane_gone_defers
 test_inject_msg_herdr_refuses_unknown_harness_before_submit
-test_inject_msg_herdr_submits_through_backend_dispatch
+test_inject_msg_herdr_refuses_empty_composer_without_atomic_admission
 test_inject_msg_defers_on_dead_shell_unknown
 test_inject_msg_defers_on_unrecognized_composer_state

@@ -2876,6 +2876,25 @@ EOF
   fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE"
 }
 
+# fm_backend_herdr_away_supervisor_admit: one owner for away-supervisor
+# admission to a Herdr composer. The installed Herdr CLI exposes separate read, literal
+# text, and key operations only; it has no compare-and-send or composer
+# reservation primitive. A second read or a process-local lock would leave
+# the captain-input race intact, so this operation deliberately refuses typed
+# admission on every state. It still reports the conservative classifier
+# result so the daemon can distinguish an existing captain draft from a clean
+# but unsupported empty composer. Future Herdr support for a verified atomic
+# primitive belongs here, and only here.
+fm_backend_herdr_away_supervisor_admit() {  # <target> <text> [harness] [runtime] [omp] -> deferred-pending|deferred-unknown|deferred-no-atomic-admission
+  local target=$1 _text=$2 harness=${3:-} bun=${4:-} omp=${5:-} composer
+  composer=$(fm_backend_herdr_composer_state "$target" "$harness" "$bun" "$omp" 2>/dev/null)
+  case "$composer" in
+    pending) printf 'deferred-pending' ;;
+    empty) printf 'deferred-no-atomic-admission' ;;
+    *) printf 'deferred-unknown' ;;
+  esac
+}
+
 
 
 # fm_backend_herdr_send_text_submit: type <text> into <target> once (raw,

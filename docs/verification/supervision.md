@@ -387,6 +387,14 @@ Observed output:
 
 The safe command-channel contract is covered without a notification by `tests/fm-daemon.test.sh`: the summary reaches both `$1` and stdin, every channel is process-group bounded, and a failed channel falls through.
 
+## Herdr away-supervisor atomic admission
+
+On 2026-08-30, Herdr 0.8.2 with protocol 20 exposed separate `pane send-text`, `pane send-keys`, and `agent prompt` commands but no conditional composer admission or reservation primitive.
+The named-lab probe used `bin/fm-herdr-lab.sh` for every Herdr call, including `status --json`, `pane send-text --help`, `pane send-keys --help`, `agent prompt --help`, and `api schema`.
+`tests/fm-backend-herdr.test.sh` passed its deterministic empty-composer deferral assertion, and `tests/fm-daemon.test.sh` passed its captain-input-in-the-former-check-to-send-interval regression.
+The shipped-path smoke `tests/fm-afk-herdr-atomic-admission-smoke.test.sh` passed with `ok - named Herdr lab smoke: the shipped atomic-admission path deferred without typing into its isolated composer (deferred-unknown)`.
+The current contract is therefore safe deferral with a preserved durable escalation episode, not a claim that a recheck or local lock is atomic.
+
 ## Secondmate supervision beacon
 
 The secondmate idle supervision poll observed on 2026-08-12 was 360 seconds, while `FM_STALE_ESCALATE_SECS` defaults to 240 seconds.

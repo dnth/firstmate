@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # tests/fm-afk-inject-herdr-e2e.test.sh - real-herdr end-to-end test for the
-# away-mode daemon's herdr transport (bin/fm-supervise-daemon.sh), the herdr
-# counterpart of tests/fm-afk-inject-e2e.test.sh's private-socket tmux e2e.
+# away-mode daemon's Herdr admission and durable-deferral behavior
+# (bin/fm-supervise-daemon.sh), the Herdr counterpart of
+# tests/fm-afk-inject-e2e.test.sh's private-socket tmux e2e.
 # Mirrors tests/fm-backend-herdr-smoke.test.sh and tests/herdr-test-safety.sh's
 # isolation patterns: everything runs on a throwaway, named, NEVER-default
 # HERDR_SESSION, torn down with herdr_safe_stop_and_delete. Skips cleanly when
@@ -370,12 +371,11 @@ test_scenario_a() {
 
   grep -q 'human draft text' "$LOG_FILE" \
     || fail "Scenario A: human text not in log after submit"
-  grep -q 'Supervisor escalate' "$LOG_FILE" \
-    || fail "Scenario A: digest not injected after the pane went idle"
-  if grep -q 'human draft text.*Supervisor escalate' "$LOG_FILE" || \
-     grep -q 'Supervisor escalate.*human draft text' "$LOG_FILE"; then
-    fail "Scenario A: human text and digest merged into one line (after idle)"
+  if grep -q 'Supervisor escalate' "$LOG_FILE"; then
+    fail "Scenario A: Herdr typed a supervisor digest after the captain draft cleared without atomic admission"
   fi
+  [ -s "$STATE_DIR/.subsuper-escalations" ] \
+    || fail "Scenario A: atomic-admission deferral discarded the durable escalation"
 
   local human_line
   human_line=$(grep 'human draft text' "$LOG_FILE" | head -1)
@@ -384,15 +384,8 @@ test_scenario_a() {
     *) fail "Scenario A: human text misclassified (expected user): $human_line" ;;
   esac
 
-  local digest_line
-  digest_line=$(grep 'Supervisor escalate' "$LOG_FILE" | head -1)
-  case "$digest_line" in
-    *injection) ;;
-    *) fail "Scenario A: digest misclassified (expected injection): $digest_line" ;;
-  esac
-
   stop_daemon
-  pass "real herdr Scenario A: partial input defers injection; digest arrives clean after idle"
+  pass "real herdr Scenario A: partial input defers, then the cleared composer still preserves the escalation without typing"
 }
 
 # --- Scenario B: swallowed-Enter --------------------------------------------
@@ -411,24 +404,18 @@ test_scenario_b() {
 
   local marker_count
   marker_count=$(awk -F '\t' '{ hex=$1; count += gsub(/e281a3/, "", hex) } END { print count + 0 }' "$LOG_FILE")
-  [ "$marker_count" -eq 1 ] \
-    || fail "Scenario B: expected exactly 1 U+2063 marker, got $marker_count (duplicate or lost)"
-
-  local digest_line digest_hex
-  digest_line=$(grep 'Supervisor escalate' "$LOG_FILE" | head -1)
-  digest_hex=$(printf '%s' "$digest_line" | cut -f1)
-  case "$digest_hex" in
-    e281a3*) ;;
-    *) fail "Scenario B: digest does not start with the terminal-safe sentinel marker (hex: $digest_hex)" ;;
-  esac
+  [ "$marker_count" -eq 0 ] \
+    || fail "Scenario B: Herdr typed a digest despite lacking atomic composer admission"
 
   local user_count
   user_count=$(grep -c $'\tuser$' "$LOG_FILE" || true)
   [ "$user_count" -eq 0 ] \
     || fail "Scenario B: expected 0 user lines, got $user_count (spurious Enter submitted an empty line?)"
+  [ -s "$STATE_DIR/.subsuper-escalations" ] \
+    || fail "Scenario B: atomic-admission deferral discarded the durable escalation"
 
   stop_daemon
-  pass "real herdr Scenario B: swallowed Enter (via the herdr shim) produces exactly one clean digest"
+  pass "real herdr Scenario B: unavailable atomic admission never reaches the Enter transport"
 }
 
 # --- Scenario C: normal digest -----------------------------------------------
@@ -443,28 +430,18 @@ test_scenario_c() {
 
   local marker_count
   marker_count=$(awk -F '\t' '{ hex=$1; count += gsub(/e281a3/, "", hex) } END { print count + 0 }' "$LOG_FILE")
-  [ "$marker_count" -eq 1 ] \
-    || fail "Scenario C: expected exactly 1 U+2063 marker, got $marker_count"
-
-  local digest_line digest_hex
-  digest_line=$(grep 'Supervisor escalate' "$LOG_FILE" | head -1)
-  case "$digest_line" in
-    *injection) ;;
-    *) fail "Scenario C: digest misclassified (expected injection): $digest_line" ;;
-  esac
-  digest_hex=$(printf '%s' "$digest_line" | cut -f1)
-  case "$digest_hex" in
-    e281a3*) ;;
-    *) fail "Scenario C: digest does not start with the terminal-safe sentinel marker (hex: $digest_hex)" ;;
-  esac
+  [ "$marker_count" -eq 0 ] \
+    || fail "Scenario C: Herdr typed a digest despite no atomic admission primitive"
 
   local user_count
   user_count=$(grep -c $'\tuser$' "$LOG_FILE" || true)
   [ "$user_count" -eq 0 ] \
     || fail "Scenario C: expected 0 user lines, got $user_count (spurious submission?)"
+  [ -s "$STATE_DIR/.subsuper-escalations" ] \
+    || fail "Scenario C: atomic-admission deferral discarded the durable escalation"
 
   stop_daemon
-  pass "real herdr Scenario C: a normal captain status injects exactly one clean single-line sentinel digest"
+  pass "real herdr Scenario C: a clean composer still defers typed delivery without atomic admission"
 }
 
 # --- Scenario D: max-defer alarm on a persistently non-clearing composer -----

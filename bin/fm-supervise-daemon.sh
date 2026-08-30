@@ -145,7 +145,11 @@
 #                                   it drops dim/faint ghost text and strips the
 #                                   harness's box borders before deciding, so a
 #                                   ghost-only or bordered-but-empty composer is
-#                                   not misread as pending input.
+#                                   not misread as pending input. Herdr away
+#                                   delivery is different: its adapter requires
+#                                   atomic composer admission and, when Herdr
+#                                   lacks that primitive, always defers
+#                                   typed delivery while preserving recovery.
 #          FM_INJECT_CONFIRM_SLEEP  seconds between daemon submit checks
 #                                   (default 0.5)
 #          FM_LOG_MAX_BYTES / FM_LOG_KEEP_LINES / FM_CRASH_*  log + crash guards
@@ -1433,6 +1437,26 @@ inject_msg() {  # <message> [state]
   IFS=$'\t' read -r omp_bun omp_bin <<EOF
 $identity
 EOF
+  # Herdr owns this composer channel through one admission operation. The
+  # installed API has no atomic conditional admission primitive, so its owner
+  # refuses typed delivery rather than treating this point-in-time read as a
+  # lease. Keep the durable episode for a later recovery and let the existing
+  # wedge alarm use its non-composer notification channels when configured.
+  if [ "$backend" = herdr ]; then
+    verdict=$(fm_backend_away_supervisor_admit herdr "$target" "$msg" "${FM_SUPERVISOR_HARNESS:-}" "$omp_bun" "$omp_bin")
+    case "$verdict" in
+      deferred-pending)
+        log "inject deferred: supervisor composer not confirmed-empty (state=pending: pending input, dead-shell prompt, or unreadable pane)"
+        ;;
+      deferred-no-atomic-admission)
+        log "inject deferred: herdr has no atomic composer admission primitive; typed away-supervisor delivery disabled"
+        ;;
+      *)
+        log "inject deferred: supervisor composer not confirmed-empty (state=unknown: pending input, dead-shell prompt, or unreadable pane)"
+        ;;
+    esac
+    return 1
+  fi
   composer=$(fm_backend_composer_state "$backend" "$target" "${FM_SUPERVISOR_HARNESS:-}" "$omp_bun" "$omp_bin" 2>/dev/null)
   if [ "$composer" != empty ]; then
     log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"

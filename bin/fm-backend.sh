@@ -757,6 +757,22 @@ fm_backend_omp_trigger_turn() {  # <backend> <target> <ready-marker> <omp-runtim
   esac
 }
 
+# fm_backend_away_supervisor_admit: ask a backend to atomically admit one
+# away-supervisor message to its composer. The verdict is backend-defined;
+# callers must treat every value other than "submitted" as a deferral and keep
+# the durable escalation episode. This is deliberately separate from generic
+# task steering because a captain composer needs an ownership boundary, not a
+# best-effort type-and-Enter transport.
+fm_backend_away_supervisor_admit() {  # <backend> <target> <text> [harness] [runtime] [omp]
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || { printf 'deferred-unknown'; return 0; }
+  case "$backend" in
+    herdr) fm_backend_herdr_away_supervisor_admit "$@" ;;
+    *) printf 'deferred-unsupported' ;;
+  esac
+}
+
 # fm_backend_kill: remove the task's session endpoint (best-effort; a
 # nonexistent/already-gone target is not an error - callers already swallow
 # failures here exactly as the inline `tmux kill-window ... || true` did).
