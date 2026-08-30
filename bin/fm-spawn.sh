@@ -109,8 +109,9 @@
 #   either kind. Hermes overrides only a crewmate or scout spawn and is refused for secondmates.
 #   For crewmates and scouts, a non-flag string containing shell whitespace is
 #   treated as a RAW launch command - the escape hatch for verifying new adapters.
-#   Raw direct non-OMP commands preserve their executable and arguments while
-#   using `command --` to avoid pane-shell aliases and functions.
+#   Raw direct non-OMP commands preserve their assignments, executable, and
+#   arguments through an absolute `env` launch form that bypasses pane aliases
+#   and functions.
 #   Leading whitespace, plain environment assignments, and `command -p --` are
 #   normalized only to identify OMP, which raw launch never permits.
 #   Ambiguous shell syntax refuses before endpoint creation rather than bypassing
@@ -1292,9 +1293,27 @@ raw_launch_omp_word_has_shell_grammar() {  # <word>
 
 raw_launch_omp_has_shell_expansion() {  # <raw command>
   case "$1" in
-    *\$*|*\`*|*\\*|*\"*|*\'*) return 0 ;;
+    *\$*|*\`*|*\\*|*\"*|*\'*|*\*\*|*\?*|*\[*|*~*) return 0 ;;
   esac
   return 1
+}
+
+raw_launch_omp_normalize() {  # <command -p flag> <target index> <words...>
+  local command_p=$1 target_index=$2 default_path index
+  shift 2
+  local -a words=("$@")
+  RAW_LAUNCH_NORMALIZED=/usr/bin/env
+  for ((index = 0; index < target_index; index++)); do
+    RAW_LAUNCH_NORMALIZED="$RAW_LAUNCH_NORMALIZED ${words[$index]}"
+  done
+  if [ "$command_p" = 1 ]; then
+    default_path=$(getconf PATH) || return 1
+    case "$default_path" in ''|*[!A-Za-z0-9_/:.-]*) return 1 ;; esac
+    RAW_LAUNCH_NORMALIZED="$RAW_LAUNCH_NORMALIZED PATH=$default_path"
+  fi
+  for ((index = target_index; index < ${#words[@]}; index++)); do
+    RAW_LAUNCH_NORMALIZED="$RAW_LAUNCH_NORMALIZED ${words[$index]}"
+  done
 }
 
 raw_launch_omp_classify() {  # <raw command>; sets RAW_LAUNCH_OMP_CLASS and RAW_LAUNCH_HARNESS
@@ -1303,10 +1322,11 @@ raw_launch_omp_classify() {  # <raw command>; sets RAW_LAUNCH_OMP_CLASS and RAW_
   # raw-command contract already exposed through whitespace splitting.
   # It never evaluates or decodes shell syntax, so uncertainty fails closed before
   # a raw command can bypass OMP's verified launch path.
-  local raw=$1 word index=0
+  local raw=$1 word index=0 command_p=0
   local -a words
   RAW_LAUNCH_OMP_CLASS=ambiguous
   RAW_LAUNCH_HARNESS=
+  RAW_LAUNCH_NORMALIZED=
   raw_launch_omp_has_shell_expansion "$raw" && return 0
   case "$raw" in
     *$'\n'*|*$'\r'*|*[\;\|\&\<\>\(\)\{\}]*) return 0 ;;
@@ -1336,6 +1356,7 @@ raw_launch_omp_classify() {  # <raw command>; sets RAW_LAUNCH_OMP_CLASS and RAW_
     command)
       index=$((index + 1))
       while [ "$index" -lt "${#words[@]}" ] && [ "${words[$index]}" = -p ]; do
+        command_p=1
         index=$((index + 1))
       done
       if [ "$index" -lt "${#words[@]}" ] && [ "${words[$index]}" = -- ]; then
@@ -1348,7 +1369,11 @@ raw_launch_omp_classify() {  # <raw command>; sets RAW_LAUNCH_OMP_CLASS and RAW_
       case "$word" in
         -*|*[\'\"\`\\\$]*) return 0 ;;
         omp) RAW_LAUNCH_OMP_CLASS=omp ;;
-        *) RAW_LAUNCH_OMP_CLASS=non-omp; RAW_LAUNCH_HARNESS=$(basename "$word") ;;
+        *)
+          RAW_LAUNCH_OMP_CLASS=non-omp
+          RAW_LAUNCH_HARNESS=$(basename "$word")
+          raw_launch_omp_normalize "$command_p" "$index" "${words[@]}" || return 0
+          ;;
       esac
       return 0
       ;;
@@ -1359,6 +1384,7 @@ raw_launch_omp_classify() {  # <raw command>; sets RAW_LAUNCH_OMP_CLASS and RAW_
     *)
       RAW_LAUNCH_OMP_CLASS=non-omp
       RAW_LAUNCH_HARNESS=$(basename "$word")
+      raw_launch_omp_normalize 0 "$index" "${words[@]}" || return 0
       return 0
       ;;
   esac
@@ -1379,7 +1405,7 @@ case "$ARG3" in
         ;;
     esac
     RAW_LAUNCH=1
-    LAUNCH="command -- $ARG3"
+    LAUNCH=$RAW_LAUNCH_NORMALIZED
     HARNESS=$RAW_LAUNCH_HARNESS
     ;;
   '')

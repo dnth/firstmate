@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Behavior tests for fm-spawn.sh concrete dispatch profile flags.
+# Behavior tests for fm-spawn.sh dispatch profile and raw-launch behavior.
 #
 # These tests drive fm-spawn through meta writing and launch construction with a
 # fake tmux pane and a real isolated git worktree. The fake tmux captures the
@@ -91,7 +91,8 @@ EOF
             launch=$(tail -n 1 "$FM_FAKE_LAUNCH_LOG")
             (
               cd "$FM_FAKE_PANE_PATH"
-              BASH_ENV="${FM_FAKE_PANE_BASH_ENV:-}" bash -c "$launch"
+              BASH_ENV="${FM_FAKE_PANE_BASH_ENV:-}" bash -c "$launch" \
+                > "${FM_FAKE_RAW_EXECUTION_LOG:-/dev/null}" 2>&1
             )
           fi
           ;;
@@ -317,6 +318,7 @@ SH
   chmod +x "$fakebin/omp"
   cat > "$fakebin/custom-agent" <<'SH'
 #!/usr/bin/env bash
+printf '%s\n' "${FOO:-}" > "$PWD/custom-agent-executed"
 exit 0
 SH
   chmod +x "$fakebin/custom-agent"
@@ -459,6 +461,7 @@ run_spawn() {
     FM_FAKE_EXECUTE_RAW_LAUNCH="${FM_TEST_EXECUTE_RAW_LAUNCH:-0}" \
     FM_FAKE_RAW_OMP_EXECUTED="${FM_TEST_RAW_OMP_EXECUTED:-}" \
     FM_FAKE_PANE_BASH_ENV="${FM_TEST_PANE_BASH_ENV:-}" \
+    FM_FAKE_RAW_EXECUTION_LOG="${FM_TEST_RAW_EXECUTION_LOG:-}" \
     FM_HERDR_PS_BIN="$fakebin/herdr-ps" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
@@ -739,7 +742,7 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "command -- custom-agent --flag __OMPMAXTIME__" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  [ "$launch" = "/usr/bin/env custom-agent --flag __OMPMAXTIME__" ] || fail "raw launch command changed"$'\n'"actual: $launch"
   pass "active crew-dispatch profile preserves raw direct non-OMP launch arguments"
 }
 
@@ -845,7 +848,7 @@ test_raw_non_omp_launches_keep_their_existing_escape_hatch() {
   expect_code 0 "$status" "lookalike non-OMP raw command should still launch"
   assert_contains "$out" "spawned $id harness=custom-omp-agent" \
     "lookalike non-OMP raw command lost its executable identity"
-  [ "$(cat "$LAUNCH_LOG")" = 'command -- custom-omp-agent --legacy' ] \
+  [ "$(cat "$LAUNCH_LOG")" = '/usr/bin/env custom-omp-agent --legacy' ] \
     || fail "lookalike non-OMP raw launch changed"
   pass "lookalike non-OMP raw launches preserve the escape hatch"
 }
@@ -858,7 +861,7 @@ test_raw_non_omp_launches_bypass_pane_aliases_and_functions() {
   enable_dispatch_profile "$HOME_DIR"
   pane_env="$CASE_DIR/pane-env"
   cat > "$pane_env" <<'SH'
-custom-agent() { omp "$@"; }
+command() { omp "$@"; }
 SH
   export FM_TEST_PANE_BASH_ENV="$pane_env"
   export FM_TEST_EXECUTE_RAW_LAUNCH=1
@@ -870,9 +873,30 @@ SH
   unset FM_TEST_PANE_BASH_ENV FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
   expect_code 0 "$status" "raw direct non-OMP launch should bypass an ambient pane function"
   assert_absent "$CASE_DIR/raw-omp-executed" "ambient pane function executed the harmless fake OMP"
-  [ "$(cat "$LAUNCH_LOG")" = 'command -- custom-agent --legacy' ] \
+  [ "$(cat "$LAUNCH_LOG")" = '/usr/bin/env custom-agent --legacy' ] \
     || fail "raw direct non-OMP launch did not use the alias-safe command form"
   pass "raw direct non-OMP launches bypass ambient pane aliases and functions"
+}
+
+test_raw_non_omp_launches_preserve_plain_assignments() {
+  local rec id out status
+  id=$(profile_id profile-raw-assignment-z15f)
+  rec=$(make_spawn_case profile-raw-assignment claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_EXECUTION_LOG="$CASE_DIR/raw-execution.log"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" 'FOO=bar custom-agent --flag')
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_EXECUTION_LOG
+  expect_code 0 "$status" "raw direct non-OMP launch should preserve a plain assignment"
+  [ "$(cat "$WT_DIR/custom-agent-executed")" = bar ] \
+    || fail "raw direct non-OMP launch did not pass its assignment to the executable: $(cat "$CASE_DIR/raw-execution.log")"
+  [ "$(cat "$LAUNCH_LOG")" = '/usr/bin/env FOO=bar custom-agent --flag' ] \
+    || fail "raw direct non-OMP assignment launch was not normalized safely"
+  pass "raw direct non-OMP launches preserve plain assignments"
 }
 
 test_claude_threads_model_and_effort() {
@@ -2500,6 +2524,7 @@ test_raw_omp_spellings_refuse_before_raw_execution
 test_ambiguous_raw_omp_spellings_refuse_before_raw_execution
 test_raw_non_omp_launches_keep_their_existing_escape_hatch
 test_raw_non_omp_launches_bypass_pane_aliases_and_functions
+test_raw_non_omp_launches_preserve_plain_assignments
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
