@@ -2162,6 +2162,7 @@ test_inject_msg_herdr_refuses_empty_composer_without_atomic_admission() {
     fm_backend_source herdr || fail "could not source Herdr adapter"
     fm_backend_target_exists() { return 0; }
     pane_is_busy() { return 1; }
+    # shellcheck disable=SC2329 # Invoked indirectly by fm_backend_herdr_composer_state below.
     fm_backend_herdr_capture_ansi() {
       [ "$1" = "$target" ] || fail "unexpected Herdr capture target: $1"
       case "$(cat "$composer_state")" in
