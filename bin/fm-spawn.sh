@@ -1339,9 +1339,9 @@ raw_launch_omp_has_shell_expansion() {  # <raw command>
 }
 
 raw_launch_omp_normalize() {  # <command -p flag> <assignment count> <target index> <words...>
-  local command_p=$1 assignment_count=$2 target_index=$3 default_path target target_quoted index
+  local command_p=$1 assignment_count=$2 target_index=$3 lookup_path path_entry target target_quoted index
   shift 3
-  local -a words=("$@")
+  local -a words=("$@") lookup_entries
   RAW_LAUNCH_NORMALIZED=/usr/bin/env
   for ((index = 0; index < assignment_count; index++)); do
     RAW_LAUNCH_NORMALIZED="$RAW_LAUNCH_NORMALIZED ${words[$index]}"
@@ -1351,11 +1351,20 @@ raw_launch_omp_normalize() {  # <command -p flag> <assignment count> <target ind
     */*) target=$(raw_launch_omp_canonical_executable "$target" "$RAW_LAUNCH_PATH_ROOT") || return 1 ;;
     *)
       if [ "$command_p" = 1 ]; then
-        default_path=$(/usr/bin/getconf PATH) || return 1
-        case "$default_path" in ''|*[!A-Za-z0-9_/:.-]*) return 1 ;; esac
-        target=$(PATH="$default_path" builtin type -P "$target") || return 1
-        target=$(raw_launch_omp_canonical_executable "$target" "$RAW_LAUNCH_PATH_ROOT") || return 1
+        lookup_path=$(/usr/bin/getconf PATH) || return 1
+      else
+        lookup_path=${PATH:-}
+        for ((index = 0; index < assignment_count; index++)); do
+          case "${words[$index]}" in PATH=*) lookup_path=${words[$index]#PATH=} ;; esac
+        done
       fi
+      case "$lookup_path" in ''|:*|*::|*:|*$'\n'*|*$'\r'*) return 1 ;; esac
+      IFS=: read -r -a lookup_entries <<< "$lookup_path"
+      for path_entry in "${lookup_entries[@]}"; do
+        case "$path_entry" in /*) ;; *) return 1 ;; esac
+      done
+      target=$(PATH="$lookup_path" builtin type -P "$target") || return 1
+      target=$(raw_launch_omp_canonical_executable "$target" "$RAW_LAUNCH_PATH_ROOT") || return 1
       ;;
   esac
   for ((index = target_index; index < ${#words[@]}; index++)); do
