@@ -2429,8 +2429,8 @@ fm_backend_herdr_send_key() {  # <target> <key>
 # Wake an OMP task through its in-process extension without submitting the
 # Herdr composer. The extension PID must still be the exact pane's foreground
 # process-group owner and match the task's canonical OMP launch identity.
-fm_backend_herdr_omp_trigger_turn() {  # <target> <ready-marker> <omp-runtime> <omp-bin> <request-id>
-  local target=$1 marker=$2 expected_bun=$3 expected_omp=$4 request_id=$5 info foreground_pid comm args
+fm_backend_herdr_omp_trigger_turn() {  # <target> <ready-marker> <omp-runtime> <omp-bin> <request-id> <doorbell-line>
+  local target=$1 marker=$2 expected_bun=$3 expected_omp=$4 request_id=$5 line=$6 info foreground_pid comm args
   fm_omp_task_doorbell_marker_read "$marker" || return 1
   fm_backend_herdr_parse_target "$target" || return 1
   info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane process-info --pane "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 1
@@ -2443,7 +2443,7 @@ fm_backend_herdr_omp_trigger_turn() {  # <target> <ready-marker> <omp-runtime> <
   args=$(ps -p "$foreground_pid" -o args= 2>/dev/null) || return 1
   FM_OMP_PROCESS_EXPECTED_BUN="$expected_bun" FM_OMP_PROCESS_EXPECTED_BIN="$expected_omp" \
     fm_omp_process_matches "$comm" "$args" "$foreground_pid" || return 1
-  fm_omp_task_doorbell_request "$marker" "$foreground_pid" "$request_id"
+  fm_omp_task_doorbell_request "$marker" "$foreground_pid" "$request_id" "$line"
 }
 
 # fm_backend_herdr_capture: bounded plain-text pane capture. Mirrors

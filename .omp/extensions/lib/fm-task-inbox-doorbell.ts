@@ -44,10 +44,6 @@ function configuredOptions(options: TaskInboxDoorbellOptions): Required<TaskInbo
 	return { inboxDir, readyMarker };
 }
 
-function doorbellLine(inboxDir: string): string {
-	return `Firstmate instruction waiting: list ${inboxDir}/*.msg and, in numeric order, read and act on each, then mv each handled file to ${inboxDir}/handled/.`;
-}
-
 function publishReadyMarker(marker: string): void {
 	mkdirSync(dirname(marker), { recursive: true });
 	const staged = `${marker}.staging.${process.pid}`;
@@ -108,14 +104,14 @@ export function installTaskInboxDoorbell(
 	const requestDir = `${configured.readyMarker}.requests`;
 	let active = false;
 	let draining = false;
+	let signalHandlerInstalled = false;
 	let watcher: FSWatcher | undefined;
 	const retire = (): void => {
 		if (!active) return;
+		retireOwnedReadyMarker(configured.readyMarker);
 		active = false;
-		process.off(FM_TASK_INBOX_DOORBELL_SIGNAL, drain);
 		watcher?.close();
 		watcher = undefined;
-		retireOwnedReadyMarker(configured.readyMarker);
 	};
 	const drain = (): void => {
 		if (!active || draining) return;
@@ -136,7 +132,7 @@ export function installTaskInboxDoorbell(
 					omp.sendMessage(
 						{
 							customType: "firstmate-task-inbox-doorbell",
-							content: doorbellLine(configured.inboxDir),
+							content: readFileSync(ambiguous, "utf8"),
 							display: false,
 							attribution: "agent",
 							details: { kind: "task-inbox", runtime: "omp" },
@@ -161,7 +157,10 @@ export function installTaskInboxDoorbell(
 			reconcileAmbiguousClaims(requestDir);
 			watcher = watch(requestDir, drain);
 			active = true;
-			process.on(FM_TASK_INBOX_DOORBELL_SIGNAL, drain);
+			if (!signalHandlerInstalled) {
+				process.on(FM_TASK_INBOX_DOORBELL_SIGNAL, drain);
+				signalHandlerInstalled = true;
+			}
 			publishReadyMarker(configured.readyMarker);
 			drain();
 		} catch {

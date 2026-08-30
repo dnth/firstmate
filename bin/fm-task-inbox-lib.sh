@@ -207,7 +207,7 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [har
     ready_marker="${ready_marker%.inbox}.omp-doorbell-ready"
     request_id=${rec##*/}
     programmatic_rc=0
-    fm_backend_omp_trigger_turn "$backend" "$target" "$ready_marker" "$omp_runtime" "$omp_bin" "$request_id" \
+    fm_backend_omp_trigger_turn "$backend" "$target" "$ready_marker" "$omp_runtime" "$omp_bin" "$request_id" "$line" \
       || programmatic_rc=$?
     if [ "$programmatic_rc" -eq 0 ] || [ "$programmatic_rc" -eq 2 ]; then
       return 0

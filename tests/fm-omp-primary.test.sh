@@ -500,7 +500,7 @@ if (readFileSync(process.env.FM_OMP_TASK_DOORBELL_READY, "utf8") !== `${process.
   throw new Error("OMP primary integration did not publish secondmate doorbell readiness at session start");
 }
 const primaryRequest = `${process.env.FM_OMP_TASK_DOORBELL_READY}.requests/primary.pending`;
-writeFileSync(primaryRequest, "");
+writeFileSync(primaryRequest, `Firstmate instruction waiting: list ${process.env.FM_OMP_TASK_INBOX_DIR}/*.msg and, in numeric order, read and act on each, then mv each handled file to ${process.env.FM_OMP_TASK_INBOX_DIR}/handled/.`);
 process.emit("SIGUSR2");
 if (
   watcherMessages.length !== 1 ||

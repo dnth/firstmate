@@ -1123,21 +1123,21 @@ ok - live steering-inbox doorbell guard: 2 harnesses verified
 ```
 
 The OMP wake transport was changed on 2026-08-30 from terminal submission to an acknowledged programmatic extension request on tmux and Herdr.
-The deterministic extension and primary-adapter fixtures cover counted concurrent requests, `triggerTurn=true`, programmatic failure fallback, ambiguous-claim inbox anchoring without resend, ordinary non-OMP composer routing, ordinary worker wiring, and secondmate wiring through the primary extension.
+The deterministic extension and primary-adapter fixtures cover canonical counted requests, `triggerTurn=true`, post-retirement signal safety, exact-identity revalidation for pending retries, programmatic failure fallback, ambiguous-claim inbox anchoring without resend, ordinary non-OMP composer routing, ordinary worker wiring, and secondmate wiring through the primary extension.
 The required live OMP-under-Herdr smoke is intentionally deferred until after Firstmate updates; no live Herdr or OMP lifecycle was driven from this worktree.
 
 ```sh
 set -o pipefail
-tests/fm-omp-task-inbox-doorbell.test.sh | grep -E '^ok - (OMP extension drains|doorbell routing selects|OMP ambiguous claims|fm-send and both)'
+tests/fm-omp-task-inbox-doorbell.test.sh | grep -E '^ok - (OMP extension drains|doorbell routing selects|OMP pending retries|fm-send and both)'
 tests/fm-omp-primary.test.sh | grep -F 'ok - OMP primary extension binds secondmate doorbells after session readiness'
 ```
 
 Observed result:
 
 ```text
-ok - OMP extension drains every counted request and acknowledges delivery or failure
+ok - OMP extension drains canonical counted requests and safely retires signal readiness
 ok - doorbell routing selects OMP programmatic wake and preserves both composer branches
-ok - OMP ambiguous claims anchor retries without another programmatic send
+ok - OMP pending retries revalidate identity while ambiguous claims suppress resend
 ok - fm-send and both tmux/Herdr adapters preserve task-bound OMP programmatic doorbells
 ok - OMP primary extension binds secondmate doorbells after session readiness
 ```

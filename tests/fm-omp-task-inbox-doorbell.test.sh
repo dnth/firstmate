@@ -29,6 +29,7 @@ const { FM_TASK_INBOX_DOORBELL_SIGNAL, installTaskInboxDoorbell } =
   await import(pathToFileURL(process.env.HELPER).href);
 const sent = [];
 const requestDir = `${process.env.READY}.requests`;
+const line = `Firstmate instruction waiting: list ${process.env.INBOX}/*.msg and, in numeric order, read and act on each, then mv each handled file to ${process.env.INBOX}/handled/.`;
 const doorbell = installTaskInboxDoorbell(
   {
     sendMessage(message, options) {
@@ -40,7 +41,7 @@ const doorbell = installTaskInboxDoorbell(
 );
 assert.equal(existsSync(process.env.READY), false);
 mkdirSync(requestDir, { recursive: true });
-writeFileSync(`${requestDir}/preexisting.pending`, "");
+writeFileSync(`${requestDir}/preexisting.pending`, line);
 writeFileSync(`${requestDir}/stale.pending.processing.${process.pid}`, "");
 doorbell.activate();
 assert.equal(readFileSync(process.env.READY, "utf8"), `${process.pid}\n`);
@@ -48,17 +49,19 @@ assert.equal(sent.length, 1);
 assert.equal(existsSync(`${requestDir}/preexisting.pending.delivered`), true);
 assert.equal(existsSync(`${requestDir}/stale.pending.ambiguous`), true);
 assert.equal(existsSync(`${requestDir}/stale.pending.processing.${process.pid}`), false);
-writeFileSync(`${requestDir}/one.pending`, "");
-writeFileSync(`${requestDir}/two.pending`, "");
+writeFileSync(`${requestDir}/one.pending`, line);
+writeFileSync(`${requestDir}/two.pending`, line);
 process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
 assert.equal(sent.length, 3);
 assert.equal(sent[0].message.customType, "firstmate-task-inbox-doorbell");
-assert.match(sent[0].message.content, new RegExp(`${process.env.INBOX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/\\*\\.msg`));
+assert.equal(sent[0].message.content, line);
 assert.deepEqual(sent[1].options, { deliverAs: "steer", triggerTurn: true });
 assert.equal(existsSync(`${requestDir}/one.pending.delivered`), true);
 assert.equal(existsSync(`${requestDir}/two.pending.delivered`), true);
 doorbell.retire();
 assert.equal(existsSync(process.env.READY), false);
+process.kill(process.pid, FM_TASK_INBOX_DOORBELL_SIGNAL);
+await new Promise((resolve) => setImmediate(resolve));
 
 const unavailable = `${process.env.READY}.unavailable`;
 const unavailableDoorbell = installTaskInboxDoorbell({}, {
@@ -77,7 +80,7 @@ const failingDoorbell = installTaskInboxDoorbell(
 );
 failingDoorbell.activate();
 failingApi.sendMessage = undefined;
-writeFileSync(`${failing}.requests/one.pending`, "");
+writeFileSync(`${failing}.requests/one.pending`, line);
 process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
 assert.equal(existsSync(`${failing}.requests/one.pending.failed`), true);
 assert.equal(existsSync(failing), false);
@@ -88,13 +91,13 @@ const uncertainDoorbell = installTaskInboxDoorbell(
   { inboxDir: process.env.INBOX, readyMarker: uncertain },
 );
 uncertainDoorbell.activate();
-writeFileSync(`${uncertain}.requests/one.pending`, "");
+writeFileSync(`${uncertain}.requests/one.pending`, line);
 process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
 assert.equal(existsSync(`${uncertain}.requests/one.pending.ambiguous`), true);
 assert.equal(existsSync(`${uncertain}.requests/one.pending.failed`), false);
 assert.equal(existsSync(uncertain), false);
 JS
-  pass "OMP extension drains every counted request and acknowledges delivery or failure"
+  pass "OMP extension drains canonical counted requests and safely retires signal readiness"
 }
 
 test_ring_routing_matrix() {
@@ -158,7 +161,7 @@ test_request_terminal_states() {
   mkdir -p "$dir/ready.requests"
   ROOT="$ROOT" MARKER="$dir/ready" bash <<'SH'
 set -u
-. "$ROOT/bin/fm-omp-process-lib.sh"
+. "$ROOT/bin/fm-backend.sh"
 request_dir="${MARKER}.requests"
 
 printf '4242\n' > "$MARKER"
@@ -169,17 +172,35 @@ kill() {
   esac
 }
 FM_OMP_TASK_DOORBELL_ACK_ATTEMPTS=1 \
-  fm_omp_task_doorbell_request "$MARKER" 4242 timeout.msg
+  fm_omp_task_doorbell_request "$MARKER" 4242 timeout.msg 'canonical doorbell'
 [ "$?" = 2 ]
 [ -f "$request_dir/request.timeout.msg.pending" ]
+[ "$(cat "$request_dir/request.timeout.msg.pending")" = 'canonical doorbell' ]
 
 rm -f "$MARKER"
 set +e
 fm_omp_task_doorbell_request_existing "$MARKER" timeout.msg
 rc=$?
 set -e
+[ "$rc" = 4 ]
+[ -e "$request_dir/request.timeout.msg.pending" ]
+rm -f "$request_dir/request.timeout.msg.pending"
+
+printf '4242\n' > "$MARKER"
+: > "$request_dir/request.revalidate.msg.pending"
+validated="$request_dir/validated"
+fm_backend_source() { return 0; }
+fm_backend_tmux_omp_trigger_turn() {
+  : > "$validated"
+  return 1
+}
+set +e
+fm_backend_omp_trigger_turn tmux target "$MARKER" /runtime/omp /bin/omp revalidate.msg 'canonical doorbell'
+rc=$?
+set -e
 [ "$rc" = 1 ]
-[ ! -e "$request_dir/request.timeout.msg.pending" ]
+[ -f "$validated" ]
+rm -f "$request_dir/request.revalidate.msg.pending"
 
 : > "$request_dir/request.claimed.msg.pending.processing.4242"
 set +e
@@ -212,7 +233,7 @@ set -e
 [ ! -e "$request_dir/request.failed.msg.pending.failed" ]
 SH
   expect_code 0 "$?" "OMP request terminal-state boundary"
-  pass "OMP ambiguous claims anchor retries without another programmatic send"
+  pass "OMP pending retries revalidate identity while ambiguous claims suppress resend"
 }
 
 make_send_stubs() {  # <dir>
@@ -308,7 +329,7 @@ fm_backend_source herdr
 fm_backend_herdr_cli() {
   printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","foreground_process_group_id":%s}}}\n' "$OMP_PID"
 }
-fm_backend_herdr_omp_trigger_turn default:w1:p2 "$MARKER" "$OMP_BIN" "$OMP_BIN" manual.msg
+fm_backend_herdr_omp_trigger_turn default:w1:p2 "$MARKER" "$OMP_BIN" "$OMP_BIN" manual.msg 'canonical doorbell'
 SH
   expect_code 0 "$?" "Herdr OMP programmatic trigger adapter"
   for _ in $(seq 1 100); do
