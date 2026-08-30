@@ -1298,12 +1298,12 @@ raw_launch_omp_has_shell_expansion() {  # <raw command>
   return 1
 }
 
-raw_launch_omp_normalize() {  # <command -p flag> <target index> <words...>
-  local command_p=$1 target_index=$2 default_path index
-  shift 2
+raw_launch_omp_normalize() {  # <command -p flag> <assignment count> <target index> <words...>
+  local command_p=$1 assignment_count=$2 target_index=$3 default_path index
+  shift 3
   local -a words=("$@")
   RAW_LAUNCH_NORMALIZED=/usr/bin/env
-  for ((index = 0; index < target_index; index++)); do
+  for ((index = 0; index < assignment_count; index++)); do
     RAW_LAUNCH_NORMALIZED="$RAW_LAUNCH_NORMALIZED ${words[$index]}"
   done
   if [ "$command_p" = 1 ]; then
@@ -1322,7 +1322,7 @@ raw_launch_omp_classify() {  # <raw command>; sets RAW_LAUNCH_OMP_CLASS and RAW_
   # raw-command contract already exposed through whitespace splitting.
   # It never evaluates or decodes shell syntax, so uncertainty fails closed before
   # a raw command can bypass OMP's verified launch path.
-  local raw=$1 word index=0 command_p=0
+  local raw=$1 word index=0 assignment_count command_p=0
   local -a words
   RAW_LAUNCH_OMP_CLASS=ambiguous
   RAW_LAUNCH_HARNESS=
@@ -1344,6 +1344,7 @@ raw_launch_omp_classify() {  # <raw command>; sets RAW_LAUNCH_OMP_CLASS and RAW_
     fi
     break
   done
+  assignment_count=$index
   [ "$index" -lt "${#words[@]}" ] || return 0
   word=${words[$index]}
   case "$word" in *[\'\"\`\\\$]*) return 0 ;; esac
@@ -1372,7 +1373,7 @@ raw_launch_omp_classify() {  # <raw command>; sets RAW_LAUNCH_OMP_CLASS and RAW_
         *)
           RAW_LAUNCH_OMP_CLASS=non-omp
           RAW_LAUNCH_HARNESS=$(basename "$word")
-          raw_launch_omp_normalize "$command_p" "$index" "${words[@]}" || return 0
+          raw_launch_omp_normalize "$command_p" "$assignment_count" "$index" "${words[@]}" || return 0
           ;;
       esac
       return 0
@@ -1384,7 +1385,7 @@ raw_launch_omp_classify() {  # <raw command>; sets RAW_LAUNCH_OMP_CLASS and RAW_
     *)
       RAW_LAUNCH_OMP_CLASS=non-omp
       RAW_LAUNCH_HARNESS=$(basename "$word")
-      raw_launch_omp_normalize 0 "$index" "${words[@]}" || return 0
+      raw_launch_omp_normalize 0 "$assignment_count" "$index" "${words[@]}" || return 0
       return 0
       ;;
   esac

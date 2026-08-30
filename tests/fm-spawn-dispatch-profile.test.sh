@@ -888,7 +888,7 @@ test_raw_non_omp_launches_preserve_plain_assignments() {
   export FM_TEST_RAW_EXECUTION_LOG="$CASE_DIR/raw-execution.log"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" 'FOO=bar custom-agent --flag')
+    "$id" "$PROJ_DIR" 'FOO=bar command -- custom-agent --flag')
   status=$?
   unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_EXECUTION_LOG
   expect_code 0 "$status" "raw direct non-OMP launch should preserve a plain assignment"
@@ -897,6 +897,25 @@ test_raw_non_omp_launches_preserve_plain_assignments() {
   [ "$(cat "$LAUNCH_LOG")" = '/usr/bin/env FOO=bar custom-agent --flag' ] \
     || fail "raw direct non-OMP assignment launch was not normalized safely"
   pass "raw direct non-OMP launches preserve plain assignments"
+}
+
+test_raw_non_omp_command_p_launches_its_direct_target() {
+  local rec id out status
+  id=$(profile_id profile-raw-command-p-z15g)
+  rec=$(make_spawn_case profile-raw-command-p claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_EXECUTION_LOG="$CASE_DIR/raw-execution.log"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" 'command -p -- printf command-p-ok')
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_EXECUTION_LOG
+  expect_code 0 "$status" "raw command -p launch should preserve its direct non-OMP target"
+  assert_contains "$(cat "$CASE_DIR/raw-execution.log")" command-p-ok \
+    "raw command -p launch did not execute its direct target"
+  pass "raw command -p launches its direct non-OMP target"
 }
 
 test_claude_threads_model_and_effort() {
@@ -2525,6 +2544,7 @@ test_ambiguous_raw_omp_spellings_refuse_before_raw_execution
 test_raw_non_omp_launches_keep_their_existing_escape_hatch
 test_raw_non_omp_launches_bypass_pane_aliases_and_functions
 test_raw_non_omp_launches_preserve_plain_assignments
+test_raw_non_omp_command_p_launches_its_direct_target
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
