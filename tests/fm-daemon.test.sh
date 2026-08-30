@@ -2150,34 +2150,38 @@ test_inject_msg_herdr_refuses_unknown_harness_before_submit() {
 }
 
 test_inject_msg_herdr_refuses_empty_composer_without_atomic_admission() {
-  local dir state
+  local dir state composer_state transport target observed
   dir=$(make_supercase inject-herdr-atomic-deferral)
   state="$dir/state"
   afk_enter "$state"
   (
-    local captain_composer="$state/captain-composer"
-    printf 'empty\n' > "$captain_composer"
+    composer_state="$state/composer-state"
+    transport="$state/typed-transport"
+    target="default:w1:p2"
+    printf 'empty\n' > "$composer_state"
+    fm_backend_source herdr || fail "could not source Herdr adapter"
     fm_backend_target_exists() { return 0; }
     pane_is_busy() { return 1; }
-    fm_backend_away_supervisor_admit() {
-      [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected admission args: $1 $2"
-      case "$3" in *"hello"*) : ;; *) fail "digest text missing from atomic admission request: $3" ;; esac
-      [ "$#" -eq 6 ] || fail "atomic admission lost Herdr identity arguments (argc=$#)"
-      [ "$4" = omp ] && [ "$5" = /verified/bun ] && [ "$6" = /verified/omp ] \
-        || fail "atomic admission did not receive the exact OMP identity"
-      # Deterministically simulate captain input after the former empty guard
-      # and before the former separate send-text call.
-      printf 'captain draft in former check-to-send interval\n' > "$captain_composer"
-      printf 'deferred-no-atomic-admission'
+    fm_backend_herdr_capture_ansi() {
+      [ "$1" = "$target" ] || fail "unexpected Herdr capture target: $1"
+      case "$(cat "$composer_state")" in
+        empty)
+          printf '  ╭────────────────────────╮\n  │ ❯                      │\n  ╰──────── Composer ─────╯\n'
+          printf 'captain draft\n' > "$composer_state"
+          ;;
+        'captain draft')
+          printf '  ╭────────────────────────╮\n  │ ❯ captain draft          │\n  ╰──────── Composer ─────╯\n'
+          ;;
+        *) fail "unexpected captured composer state" ;;
+      esac
     }
-    fm_backend_composer_state() { fail "Herdr away injection must not issue a separate composer recheck"; }
-    fm_backend_send_text_submit() { fail "Herdr away injection must not reach the generic typed transport"; }
-    FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" \
-      FM_SUPERVISOR_HARNESS=omp FM_SUPERVISOR_OMP_BUN=/verified/bun \
-      FM_SUPERVISOR_OMP_BIN=/verified/omp inject_msg "hello" "$state" \
+    fm_backend_send_text_submit() { printf '%s\n' "$*" >> "$transport"; }
+    FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="$target" \
+      FM_SUPERVISOR_HARNESS=claude inject_msg "hello" "$state" \
       && fail "Herdr injection should defer when atomic admission is unavailable"
-    [ "$(cat "$captain_composer")" = 'captain draft in former check-to-send interval' ] \
-      || fail "the deterministic captain-input interleaving did not run"
+    observed=$(fm_backend_herdr_composer_state "$target" claude)
+    [ "$observed" = pending ] || fail "captain draft was not preserved at the former check-to-send boundary: $observed"
+    [ ! -s "$transport" ] || fail "Herdr typed or submitted after captain input reached the composer"
   ) || fail "herdr atomic-deferral inject_msg subshell failed"
   pass "inject_msg: captain input in the former Herdr check-to-send interval cannot merge because typed admission is refused"
 }
