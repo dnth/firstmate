@@ -20,11 +20,11 @@
 #            condition poll and immediately before the fire is claimed. The
 #            runner refuses a mutated spec or executable without executing it.
 #            Both argv vectors are executed directly with no shell, so nothing
-#            is re-split or interpreted. Protected RunPod and remote lifecycle,
-#            PR merge and teardown, X-mode, public-followup, and generic
-#            command-carrier entrypoints are not eligible condition or action
-#            executables; they keep their existing trusted wake-and-decide paths
-#            and side-effect gates.
+#            is re-split or interpreted. Executables must be explicitly
+#            allowlisted through FM_WHEN_ALLOWLIST (a colon-separated list of
+#            trusted executable files); only true and false are allowed by
+#            default. Guarded entrypoint identities remain ineligible even when
+#            copied into an allowlisted directory.
 #            Options, before --condition:
 #              --interval <secs>           poll cadence, decimals allowed (default 60)
 #              --stable <n>                consecutive true polls required to fire (default 2)
@@ -139,59 +139,47 @@ command_executable() {  # <argv-zero>: print the executable's absolute path
   printf '%s\n' "$found"
 }
 
-protected_entrypoint_reason() {  # <absolute-path> <sha256>: print rejection reason
-  local path=$1 hash=$2 base candidate candidate_hash
-  base=${path##*/}
-  case "$base" in
-    fm-runpod*.sh|fm-on.sh|fm-remote-*.sh)
-      printf 'RunPod and remote lifecycle or remote-compute entrypoints stay on their guarded wake-and-decide path\n'
-      return 0
-      ;;
-    fm-pr-merge.sh|fm-teardown.sh)
-      printf 'merge and teardown entrypoints require their ordinary captain-authority and landed-work gates\n'
-      return 0
-      ;;
-    fm-x-*.sh|fm-public-followup*.sh)
-      printf 'X-mode and public-followup entrypoints stay on their consent-bound public-reply path\n'
-      return 0
-      ;;
-    sh|bash|dash|zsh|ksh|fish|env|xargs|nohup|sudo|ssh|curl|wget|nc|ncat|socat|node|nodejs|deno|bun|python|python[0-9]*|ruby|perl|php|pwsh|powershell|osascript|make|just|npm|npx|pnpm|yarn)
-      printf 'generic command carriers cannot prove the eventual executable is eligible\n'
-      return 0
-      ;;
-    rm|rmdir|unlink|shred|dd|mkfs*|fdisk|parted|shutdown|reboot|halt|poweroff|kill|pkill|killall|systemctl|launchctl|docker|podman|kubectl|terraform|tofu|git|gh|gh-axi|glab|hub|scp|rsync)
-      printf 'destructive or remote-control entrypoints require their ordinary guarded path\n'
-      return 0
-      ;;
+when_path_allowlisted() {  # <absolute-path>: true only for explicitly trusted paths
+  local path=$1 entry allowlist=${FM_WHEN_ALLOWLIST:-}
+  case "$path" in
+    /usr/bin/true|/bin/true|/usr/bin/false|/bin/false) return 0 ;;
   esac
+  [ -n "$allowlist" ] || return 1
+  IFS=: read -r -a _when_allowlist_entries <<< "$allowlist"
+  for entry in "${_when_allowlist_entries[@]}"; do
+    [ -n "$entry" ] || continue
+    [ -f "$entry" ] || continue
+    entry_dir=${entry%/*}
+    entry_base=${entry##*/}
+    [ "$entry_dir" != "$entry" ] || entry_dir=.
+    entry_dir=$(cd "$entry_dir" 2>/dev/null && pwd -P) || continue
+    [ "$path" = "$entry_dir/$entry_base" ] && return 0
+  done
+  return 1
+}
+
+when_protected_identity() {  # <sha256>: true when bytes match a guarded entrypoint
+  local hash=$1 candidate candidate_hash
   for candidate in "$SCRIPT_DIR"/fm-runpod*.sh "$SCRIPT_DIR"/fm-remote-*.sh \
     "$SCRIPT_DIR"/fm-x-*.sh "$SCRIPT_DIR"/fm-public-followup*.sh \
     "$SCRIPT_DIR"/fm-on.sh "$SCRIPT_DIR"/fm-pr-merge.sh "$SCRIPT_DIR"/fm-teardown.sh; do
     [ -f "$candidate" ] || continue
-    candidate_hash=$(fm_pr_sha256 "$candidate") || {
-      printf 'the protected-entrypoint identity could not be verified\n'
-      return 0
-    }
-    if [ "$candidate_hash" = "$hash" ]; then
-      printf 'a renamed protected lifecycle or public-reply entrypoint is not eligible\n'
-      return 0
-    fi
+    candidate_hash=$(fm_pr_sha256 "$candidate") || return 0
+    [ "$candidate_hash" = "$hash" ] && return 0
   done
-  if LC_ALL=C grep -Eq '(^|[^[:alnum:]_.-])(fm-runpod[^[:space:]]*\.sh|fm-on\.sh|fm-remote-[^[:space:]]*\.sh|fm-pr-merge\.sh|fm-teardown\.sh|fm-x-[^[:space:]]*\.sh|fm-public-followup[^[:space:]]*\.sh)([^[:alnum:]_.-]|$)' "$path" 2>/dev/null; then
-    printf 'the executable wraps or names a protected lifecycle or public-reply entrypoint\n'
-    return 0
-  fi
   return 1
 }
 
 execution_policy_valid() {  # <condition|action> <absolute-path> <sha256>
-  local role=$1 path=$2 hash=$3 reason
+  local role=$1 path=$2 hash=$3
   POLICY_ERROR=
-  if reason=$(protected_entrypoint_reason "$path" "$hash"); then
-    POLICY_ERROR="$role executable is not allowlisted: $reason"
+  if when_protected_identity "$hash"; then
+    POLICY_ERROR="$role executable is not allowlisted by FM_WHEN_ALLOWLIST"
     return 1
   fi
-  return 0
+  when_path_allowlisted "$path" && return 0
+  POLICY_ERROR="$role executable is not allowlisted by FM_WHEN_ALLOWLIST"
+  return 1
 }
 
 # --- arm ---------------------------------------------------------------------

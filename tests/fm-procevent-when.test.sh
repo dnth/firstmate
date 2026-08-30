@@ -19,7 +19,12 @@ TMP_ROOT=$(fm_test_tmproot fm-procevent-when-tests)
 export FM_PROCEVENT_CLAIM_ROOT="$TMP_ROOT/claims"
 
 pe()   { FM_HOME="$1" "$ROOT/bin/fm-procevent.sh" "${@:2}"; }
-when() { FM_HOME="$1" "$ROOT/bin/fm-procevent-when.sh" "${@:2}"; }
+when() {
+  local allowlist
+  allowlist=$(find "$TMP_ROOT" -type f -perm -111 -print | paste -sd: -)
+  export FM_WHEN_ALLOWLIST="$allowlist"
+  FM_HOME="$1" "$ROOT/bin/fm-procevent-when.sh" "${@:2}"
+}
 
 # Every home this suite arms is tracked so teardown can stop any runner still
 # blocked on a condition that never fires.
@@ -150,26 +155,40 @@ if when "$H" arm renamed-protected --stable 1 --condition true \
   --action "$RENAMED_PROTECTED" status 2>"$TMP_ROOT/renamed-protected.err"; then
   fail "a byte-identical alias of a protected entrypoint must not be armed"
 fi
-assert_grep "renamed protected" "$TMP_ROOT/renamed-protected.err" \
+assert_grep "not allowlisted" "$TMP_ROOT/renamed-protected.err" \
   "byte-identical protected aliases fail closed"
 if when "$H" arm carrier --stable 1 --condition true \
   --action bash -c 'printf bypass' 2>"$TMP_ROOT/carrier.err"; then
   fail "a generic command carrier must not bypass executable eligibility"
 fi
-assert_grep "generic command carriers" "$TMP_ROOT/carrier.err" \
-  "the generic command-carrier refusal is explicit"
+  assert_grep "not allowlisted" "$TMP_ROOT/carrier.err" \
+    "the generic command-carrier refusal is explicit"
 if when "$H" arm destructive --stable 1 --condition true \
   --action rm "$TMP_ROOT/never-delete" 2>"$TMP_ROOT/destructive.err"; then
   fail "a directly destructive command must not be armed"
 fi
-assert_grep "destructive or remote-control" "$TMP_ROOT/destructive.err" \
-  "the destructive-command refusal is explicit"
+  assert_grep "not allowlisted" "$TMP_ROOT/destructive.err" \
+    "the destructive-command refusal is explicit"
 if when "$H" arm forge --stable 1 --condition true \
   --action git status 2>"$TMP_ROOT/forge.err"; then
   fail "a source-control command must not be armed"
 fi
-assert_grep "destructive or remote-control" "$TMP_ROOT/forge.err" \
+assert_grep "not allowlisted" "$TMP_ROOT/forge.err" \
   "the source-control refusal is explicit"
+WRAPPER_DIR="${TMP_ROOT}-untrusted-wrapper"
+mkdir -p "$WRAPPER_DIR"
+WRAPPER="$WRAPPER_DIR/wrapper.sh"
+cat > "$WRAPPER" <<SH
+#!/usr/bin/env bash
+exec "$ROOT/bin/fm-teardown.sh" "\$@"
+SH
+chmod +x "$WRAPPER"
+if when "$H" arm wrapper --stable 1 --condition true \
+  --action "$WRAPPER" status 2>"$TMP_ROOT/wrapper.err"; then
+  fail "an unallowlisted wrapper around a protected entrypoint must not be armed"
+fi
+assert_grep "not allowlisted" "$TMP_ROOT/wrapper.err" \
+  "an arbitrary wrapper is rejected by the positive allowlist"
 pass "protected lifecycle, merge, teardown, public-reply, destructive, and command-carrier entrypoints fail closed"
 
 # --- concurrent arms publish exactly one complete registration ---------------
