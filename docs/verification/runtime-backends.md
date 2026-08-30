@@ -968,7 +968,7 @@ FM_AFK_PI_HERDR_E2E=1 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
   tests/fm-afk-pi-herdr-return-e2e.test.sh
 ```
 
-Observed guarantees: pending composer input refused injection and raised one alert; idle Pi accepted one marked escalation; the return gate refused ordinary work while a live blocker remained; resolving the blocker allowed the return flow.
+Observed guarantees: pending composer input refused injection and raised one alert; an idle Pi preserved the escalation and wedge state without typed delivery; the return gate refused ordinary work while a live blocker remained; resolving the blocker allowed the return flow.
 The dedicated Herdr daemon workspace topology is covered by `tests/fm-afk-launch.test.sh` and preserves the captain tab's pane count.
 
 On 2026-08-30, an isolated Herdr 0.8.2 protocol-20 lab recorded the input-facing command surfaces below.
@@ -982,7 +982,6 @@ bin/fm-herdr-lab.sh run "$lab" status --json | jq -r '"herdr=\(.client.version) 
 bin/fm-herdr-lab.sh run "$lab" pane send-text --help
 bin/fm-herdr-lab.sh run "$lab" pane send-keys --help
 bin/fm-herdr-lab.sh run "$lab" agent prompt --help
-bin/fm-herdr-lab.sh run "$lab" api schema
 tests/fm-afk-herdr-atomic-admission-smoke.test.sh
 ```
 
@@ -1001,15 +1000,11 @@ Options:
       --wait
       --until <STATUS>
       --timeout <MS>
-Herdr API schema
-protocol: 20
-schema_version: 1
-schemas: error_response, event, request, subscription_event, success_response
-Use `herdr api schema --json` to print the full schema.
 ok - named Herdr lab smoke: the shipped atomic-admission path deferred without typing into its isolated composer (deferred-unknown)
 ```
 
-The documented input operations expose no composer-condition or reservation option, so the adapter preserves the durable escalation and returns a deferral instead of injecting typed supervisor text.
+The displayed `pane send-text`, `pane send-keys`, and `agent prompt` options expose no composer-condition or reservation argument.
+The adapter therefore preserves the durable escalation and returns a deferral instead of injecting typed supervisor text.
 It does not claim that a recheck or process-local lock is atomic.
 
 ## OMP applicability outside tmux and Herdr

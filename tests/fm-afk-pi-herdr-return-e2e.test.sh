@@ -7,8 +7,8 @@
 #   - a live blocked status is classified and durably queued while away;
 #   - a pending Pi composer refuses injection and receives no forced Enter;
 #   - the existing wedge alarm remains observable and deduped;
-#   - clearing the draft makes the genuinely idle Pi composer injectable;
-#   - verified submit preserves the terminal-safe marker and clears delivery state;
+#   - clearing the draft preserves the queued escalation without typed delivery;
+#   - the durable wedge state remains observable while delivery is deferred;
 #   - an unmarked return request opens the catch-up gate before Bearings;
 #   - remediation/resolution clears the gate, and re-entry is idempotent.
 set -u
@@ -217,8 +217,6 @@ for _ in $(seq 1 50); do [ -s "$NOTIFY_LOG" ] && break; sleep 0.1; done
 assert_blocker_open 'while the Pi composer was pending'
 pass "real Pi/Herdr pending composer refuses injection without forced submit and raises one observable fallback"
 
-# Clear, never submit, the synthetic human draft. The same exact target now has
-# native idle state plus a complete Pi separator composer and must accept quickly.
 "$LAB_HELPER" run "$SESSION" pane send-keys "$PRIMARY_PANE" ctrl+c >/dev/null
 wait_for_idle || fail "real Pi did not return idle after clearing the draft"
 for _ in $(seq 1 80); do
@@ -227,23 +225,17 @@ for _ in $(seq 1 80); do
   sleep 0.1
 done
 [ "$composer" = empty ] || fail "genuinely idle Pi separator composer did not classify empty (got $composer)"
-wait_for_prompt 'any(.[]; .prompt | startswith("\u2063Supervisor escalate"))' \
-  || fail "real Pi did not receive the buffered escalation after becoming safely idle"
-INJECT_HEX=$(jq -r 'select(.prompt | startswith("\u2063Supervisor escalate")) | .hex' "$CAPTURE" | tail -1)
-case "$INJECT_HEX" in e281a3*) ;; *) fail "real Pi escalation lost the terminal-safe marker: $INJECT_HEX" ;; esac
-for _ in $(seq 1 80); do [ ! -s "$STATE/.subsuper-escalations" ] && break; sleep 0.1; done
-[ ! -s "$STATE/.subsuper-escalations" ] || fail "confirmed real Pi delivery did not clear the escalation buffer"
-[ ! -e "$STATE/.subsuper-inject-wedged" ] || fail "confirmed real Pi delivery did not clear the old wedge marker"
 sleep 4
-[ "$(wc -l < "$NOTIFY_LOG" | tr -d ' ')" -eq 1 ] || fail "successful delivery emitted a duplicate wedge alert"
-INJECT_PROMPT=$(jq -r 'select(.prompt | startswith("\u2063Supervisor escalate")) | .prompt' "$CAPTURE" | tail -1)
-message_is_injection "$INJECT_PROMPT" || fail "terminal-delivered Pi escalation was not recognized as an internal marker"
-assert_blocker_open 'after successful marked injection'
-pass "real idle Pi/Herdr accepts one marked escalation promptly, verifies submit, clears wedge state, and emits no duplicate alert"
+[ ! -s "$CAPTURE" ] || fail "real idle Pi received a typed supervisor escalation without atomic admission"
+[ -s "$STATE/.subsuper-escalations" ] || fail "atomic-admission deferral discarded the buffered blocker"
+[ -e "$STATE/.subsuper-inject-wedged" ] || fail "atomic-admission deferral cleared the durable wedge marker"
+[ "$(wc -l < "$NOTIFY_LOG" | tr -d ' ')" -eq 1 ] || fail "atomic-admission deferral emitted a duplicate wedge alert"
+assert_blocker_open 'after the idle Pi admission deferral'
+pass "real idle Pi/Herdr preserves escalation and wedge state without typed delivery"
 
 # The captain returns with an ordinary unmarked Bearings request. The request is
 # captured byte-exact, then the public return owner must gate it on the blocker.
-wait_for_idle || fail "real Pi did not settle after the injected catch-up"
+wait_for_idle || fail "real Pi did not settle after the admission deferral"
 for _ in $(seq 1 80); do
   composer=$(PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" fm_backend_composer_state herdr "$PRIMARY_TARGET")
   [ "$composer" = empty ] && break
@@ -293,5 +285,5 @@ DAEMON_STARTED=0
 [ "$(wc -l < "$NOTIFY_LOG" | tr -d ' ')" -eq 1 ] || fail "clean re-entry duplicated the historical wedge alert"
 pass "resolved return catch-up allows Bearings and a clean idempotent away re-entry"
 
-printf 'evidence: herdr=%s pi=%s target=%s inject-hex-prefix=%s notifier-count=1\n' \
-  "$(herdr --version)" "$(pi --version)" "$PRIMARY_TARGET" "${INJECT_HEX:0:6}"
+printf 'evidence: herdr=%s pi=%s target=%s escalation=preserved notifier-count=1\n' \
+  "$(herdr --version)" "$(pi --version)" "$PRIMARY_TARGET"
