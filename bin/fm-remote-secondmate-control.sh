@@ -66,10 +66,6 @@ FM_RUNPOD_OMP_AUTH_BROKER_URL=${FM_RUNPOD_OMP_AUTH_BROKER_URL:-http://127.0.0.1:
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-quota-axi-lib.sh
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
-# shellcheck source=bin/fm-marker-lib.sh
-. "$SCRIPT_DIR/fm-marker-lib.sh"
-# shellcheck source=bin/fm-primary-watch-version-lib.sh
-. "$SCRIPT_DIR/fm-primary-watch-version-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -155,9 +151,18 @@ remote_omp_delivery_refuse() { # <reason>
   exit 9
 }
 
+remote_omp_delivery_load_libs() {
+  # These helpers are only needed for an OMP text delivery, so ordinary remote lifecycle controls remain independent of that closure.
+  # shellcheck source=bin/fm-marker-lib.sh
+  . "$SCRIPT_DIR/fm-marker-lib.sh"
+  # shellcheck source=bin/fm-primary-watch-version-lib.sh
+  . "$SCRIPT_DIR/fm-primary-watch-version-lib.sh"
+}
+
 remote_omp_delivery_binding() { # <id>
   local id=$1 harness session_dir session_dir_real pointer session session_parent
   local primary_marker doorbell_marker expected_version path
+  remote_omp_delivery_load_libs
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
   [ "$harness" = omp ] || remote_omp_delivery_refuse "endpoint harness is '$harness', not omp"
   [ "$(fm_meta_get "$REMOTE_ENDPOINT_META" kind)" = secondmate ] \
