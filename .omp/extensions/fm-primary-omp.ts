@@ -1,6 +1,7 @@
 // Firstmate primary integration for OMP.
 // OMP-native session, stop, tool-call, and shutdown events stay in this adapter.
 import { spawn, spawnSync } from "node:child_process";
+import { Buffer } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync,
@@ -48,6 +49,7 @@ type WakeNotificationClaim = {
   pid: string;
   session: string;
   key: string;
+  content: string;
 };
 
 function encodeOperationalInput(kind: "session-start" | "watcher" | "turn-end-guard", content: string): string {
@@ -207,19 +209,21 @@ function readWakeNotificationClaim(): WakeNotificationClaim | undefined {
   }
   const lines = content.split("\n");
   if (
-    lines.length !== 5 ||
-    lines[0] !== "fm-omp-primary-nextturn-notification-v1" ||
+    lines.length !== 6 ||
+    lines[0] !== "fm-omp-primary-nextturn-notification-v2" ||
     !/^[0-9]+$/u.test(lines[1]) ||
     !/^[a-f0-9]{64}$/u.test(lines[2]) ||
     !/^[A-Za-z0-9._-]+$/u.test(lines[3]) ||
-    lines[4] !== ""
+    lines[5] !== ""
   ) {
     return undefined;
   }
-  return { pid: lines[1], session: lines[2], key: lines[3] };
+  const message = Buffer.from(lines[4], "base64").toString("utf8");
+  if (Buffer.from(message, "utf8").toString("base64") !== lines[4]) return undefined;
+  return { pid: lines[1], session: lines[2], key: lines[3], content: message };
 }
 
-function writeWakeNotificationClaim(session: string, key: string): void {
+function writeWakeNotificationClaim(claim: WakeNotificationClaim): void {
   mkdirSync(state, { recursive: true });
   const temporary = `${notificationClaim}.tmp.${process.pid}.${randomUUID()}`;
   let descriptor = -1;
@@ -227,7 +231,14 @@ function writeWakeNotificationClaim(session: string, key: string): void {
     descriptor = openSync(temporary, "wx", 0o600);
     writeFileSync(
       descriptor,
-      `fm-omp-primary-nextturn-notification-v1\n${process.pid}\n${session}\n${key}\n`,
+      [
+        "fm-omp-primary-nextturn-notification-v2",
+        claim.pid,
+        claim.session,
+        claim.key,
+        Buffer.from(claim.content, "utf8").toString("base64"),
+        "",
+      ].join("\n"),
       "utf8",
     );
     closeSync(descriptor);
@@ -262,6 +273,18 @@ export default function (omp: ExtensionAPI) {
     const sessionFile = ctx.sessionManager.getSessionFile() || "unknown";
     notificationSession = createHash("sha256").update(sessionFile).digest("hex");
   };
+  const sendWakeNotification = (content: string): void => {
+    omp.sendMessage(
+      {
+        customType: "firstmate-watcher-wake",
+        content,
+        display: false,
+        attribution: "agent",
+        details: { kind: "watcher", runtime: "omp" },
+      },
+      { deliverAs: "nextTurn", triggerTurn: true },
+    );
+  };
   const releaseWakeNotification = (): void => {
     const claim = readWakeNotificationClaim();
     if (!claim || claim.pid !== String(process.pid)) return;
@@ -271,7 +294,7 @@ export default function (omp: ExtensionAPI) {
       // A later durable wake reclaims any claim that this turn could not retire.
     }
   };
-  const claimWakeNotification = (key: string): boolean => {
+  const claimWakeNotification = (key: string, content: string): boolean => {
     const current = readWakeNotificationClaim();
     if (
       current?.pid === String(process.pid) &&
@@ -280,8 +303,33 @@ export default function (omp: ExtensionAPI) {
     ) {
       return false;
     }
-    writeWakeNotificationClaim(notificationSession, key);
+    writeWakeNotificationClaim({
+      pid: String(process.pid),
+      session: notificationSession,
+      key,
+      content,
+    });
     return true;
+  };
+  const replayWakeNotification = (): void => {
+    const pending = readWakeNotificationClaim();
+    if (
+      !pending ||
+      (pending.pid === String(process.pid) && pending.session === notificationSession)
+    ) {
+      return;
+    }
+    const replay = { ...pending, pid: String(process.pid), session: notificationSession };
+    try {
+      writeWakeNotificationClaim(replay);
+      sendWakeNotification(pending.content);
+    } catch {
+      try {
+        writeWakeNotificationClaim(pending);
+      } catch {
+        // Keep the replacement claim if restoring the former process claim also fails.
+      }
+    }
   };
 
   // Supervision-branch dispatch handshake (docs/omp-supervision-branch.md).
@@ -321,18 +369,9 @@ export default function (omp: ExtensionAPI) {
       // Reuse a claim from a same-session extension reload, but let a new
       // session or process replay the durable batch. The claim never retires
       // rows; only the drain acknowledgement owns that transition.
-      if (!claimWakeNotification(notificationKey)) return;
+      if (!claimWakeNotification(notificationKey, content)) return;
       try {
-        omp.sendMessage(
-          {
-            customType: "firstmate-watcher-wake",
-            content,
-            display: false,
-            attribution: "agent",
-            details: { kind: "watcher", runtime: "omp" },
-          },
-          { deliverAs: "nextTurn", triggerTurn: true },
-        );
+        sendWakeNotification(content);
       } catch (error) {
         releaseWakeNotification();
         throw error;
@@ -352,6 +391,7 @@ export default function (omp: ExtensionAPI) {
     watch.sessionStart();
     publishSecondmateSession(ctx);
     deliverSessionstartNudge();
+    replayWakeNotification();
   });
 
   omp.on("session_switch", (event, ctx) => {

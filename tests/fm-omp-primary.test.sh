@@ -936,9 +936,9 @@ JS
 # OMP's hidden next-turn queue retains custom messages while a prompt unwinds.
 # This fixture drives successive durable wake batches through the native primary
 # adapter and verifies the core contributes one continuation until OMP begins
-# that next turn. It also keeps the durable rows and a rejected recovery
-# generation intact, so neither notification delivery nor a failed handoff can
-# retire or strand replayable work.
+# that next turn.
+# It proves a same-session reload retains that continuation and a replacement
+# primary re-notifies the exact unacknowledged batch without retiring its rows.
 test_native_omp_coalesces_pending_next_turn_notifications() {
   local fixture out status=0
   fixture="$TMP_ROOT/native-next-turn-batching"
@@ -987,6 +987,7 @@ SH
     FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" \
     FM_ARM_LOG="$TMP_ROOT/native-next-turn-batching.log" \
     FM_WAKE_LIB="$ROOT/bin/fm-wake-lib.sh" \
+    FM_OMP_TASK_INBOX_DIR="" FM_OMP_TASK_DOORBELL_READY="" \
     node --input-type=module 2>&1 <<'JS'
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -1047,6 +1048,14 @@ if (deduped.status !== 0 || deduped.stdout.trim().split("\n").length !== 2) {
   throw new Error(`durable batch was not deduplicated: ${deduped.stderr || deduped.stdout}`);
 }
 
+const firstSession = `${state}/first-session.jsonl`;
+const replacementSession = `${state}/replacement-session.jsonl`;
+const startSession = async (sessionFile) => {
+  await handlers.get("session_start")(
+    { type: "session_start" },
+    { sessionManager: { getSessionFile: () => sessionFile } },
+  );
+};
 const startNextTurn = async () => {
   await handlers.get("before_agent_start")({ type: "before_agent_start" }, {});
 };
@@ -1057,15 +1066,17 @@ const trigger = async (count, messageCount) => {
     await waitFor(() => notifications.length >= messageCount, `notification ${messageCount}`);
   }
 };
-const reloadExtension = async (label) => {
+const reloadExtension = async (label, sessionFile, arm = true) => {
   const reloaded = await import(`${pathToFileURL(process.env.EXTENSION).href}?${label}=${Date.now()}`);
   reloaded.default(api);
   if (!tool) throw new Error(`OMP did not register its watcher arm tool after ${label}`);
-  await tool.execute();
+  await startSession(sessionFile);
+  if (arm) await tool.execute();
 };
 
 
 try {
+  await startSession(firstSession);
   await tool.execute();
   await waitFor(() => armCount() === 1, "initial watcher");
   await trigger(1, 1);
@@ -1082,7 +1093,7 @@ try {
     throw new Error(`first notification was not hidden next-turn delivery: ${JSON.stringify(first)}`);
   }
 
-  await reloadExtension("same-session-reload");
+  await reloadExtension("same-session-reload", firstSession);
   await waitFor(() => armCount() >= 3, "same-session reload watcher");
   await trigger(3);
   await new Promise((resolve) => setTimeout(resolve, 40));
@@ -1094,19 +1105,23 @@ try {
   const staleClaim = readFileSync(claimPath, "utf8").split("\n");
   staleClaim[1] = "1";
   writeFileSync(claimPath, staleClaim.join("\n"));
-  await reloadExtension("process-restart");
-  await waitFor(() => armCount() >= 5, "restart watcher");
-  await trigger(5, 2);
+  await reloadExtension("process-restart", replacementSession, false);
+  await waitFor(() => notifications.length >= 2, "original batch replay after restart");
   if (readFileSync(queue, "utf8") !== queueRows) {
     throw new Error("process-restart replay retired durable wake rows");
   }
-  if (!notifications[1].message.content.includes("signal: synthetic durable batch 5")) {
-    throw new Error("process restart did not replay the unacknowledged durable batch");
+  if (notifications[1].message.content !== first.message.content) {
+    throw new Error("process restart did not re-notify the exact unacknowledged durable batch");
+  }
+  if (sendAttempts !== 2) {
+    throw new Error(`process restart did not make exactly one original-batch replay attempt: ${sendAttempts}`);
   }
 
+  await tool.execute();
+  await waitFor(() => armCount() >= 5, "restart watcher");
   await startNextTurn();
   failNextNotification = true;
-  await trigger(6, 3);
+  await trigger(5, 3);
   if (sendAttempts !== 4 || !notifications[2].message.content.includes("could not deliver an actionable wake")) {
     throw new Error(`failed next-turn submission did not surface one replayable failure: ${JSON.stringify(notifications)}`);
   }
@@ -1115,14 +1130,14 @@ try {
   }
 
   await startNextTurn();
-  await trigger(7, 4);
-  if (!notifications[3].message.content.includes("signal: synthetic durable batch 7")) {
+  await trigger(6, 4);
+  if (!notifications[3].message.content.includes("signal: synthetic durable batch 6")) {
     throw new Error("durable wake did not replay after next-turn submission failure");
   }
 
   await startNextTurn();
   writeFileSync(`${state}/reject-confirmation`, "reject\n");
-  await trigger(8, 5);
+  await trigger(7, 5);
   const mismatch = notifications[4];
   if (!mismatch.message.content.includes("recovery generation mismatch")) {
     throw new Error(`generation-mismatched handoff was not surfaced: ${JSON.stringify(mismatch)}`);

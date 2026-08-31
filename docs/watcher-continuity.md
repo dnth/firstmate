@@ -26,7 +26,7 @@ While supervision is still needed and away mode remains inactive, an actionable 
 
 After an actionable Pi, OMP, or OpenCode child close, the adapter starts and verifies one singleton successor before it delivers the original wake.
 For OMP, the shared core confirms the recovery handoff before the adapter schedules at most one hidden custom `nextTurn` notification with `triggerTurn`; OMP consumes it on the next agent turn, including after prompt unwinding, without touching an editable TUI draft.
-The adapter preserves that pending session-and-recovery claim across an extension reload in the same live conversation, while a replacement session or process re-presents the unacknowledged durable batch instead of trusting a lost continuation.
+The adapter retains the exact batch payload in that pending session-and-recovery claim across an extension reload in the same live conversation, while a replacement session or process re-presents the unacknowledged durable batch instead of trusting a lost continuation.
 Notification delivery does not acknowledge durable wake rows; only the exact generation-bound `WAKE_ACK_REQUIRED` command printed by `bin/fm-wake-drain.sh` may retire them.
 A failed confirmation is never swallowed: the core retries once against the current generation and successor, then classifies the failure, retires a successor that is no longer alive, and surfaces exactly one typed message.
 It waits at most one readiness timeout per attempt, then sends TERM and waits a bounded retirement confirmation before the next lock-verified exponential retry.
