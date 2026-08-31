@@ -115,6 +115,18 @@ worktree_is_registered() {  # <repository> <worktree>
   return 1
 }
 
+worktree_is_task_owned() {  # <worktree>
+  local worktree=$1 meta recorded
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] || continue
+    recorded=$(meta_exact "$meta" worktree 2>/dev/null || true)
+    [ -n "$recorded" ] || continue
+    recorded=$(resolve_dir recorded-task-worktree "$recorded" 2>/dev/null || true)
+    [ "$recorded" != "$worktree" ] || return 0
+  done
+  return 1
+}
+
 destination_artifact_exists() {  # <destination>
   local destination=$1 artifact
   for artifact in \
@@ -122,7 +134,8 @@ destination_artifact_exists() {  # <destination>
     "$STATE/$destination.turn-ended" "$STATE/$destination.meta" \
     "$STATE/$destination.pi-ext.ts" "$STATE/$destination.omp-ext.ts" \
     "$STATE/$destination.omp-ready" "$STATE/$destination.omp-started" \
-    "$STATE/$destination.omp-doorbell-ready" "$STATE/$destination.grok-turnend-token" \
+    "$STATE/$destination.omp-doorbell-ready" "$STATE/$destination.omp-doorbell-ready.requests" \
+    "$STATE/$destination.grok-turnend-token" \
     "$STATE/$destination.kimi-turnend-token" "$STATE/$destination.hermes-turnend-token" \
     "$STATE/$destination.hermes-session" "$STATE/$destination.hermes-started" \
     "$STATE/$destination.busy-state" "$STATE/$destination.busy-gen" \
@@ -308,6 +321,14 @@ grep -Fxq "Delivery contract: mode=$MODE" "$DESTINATION_BRIEF" || {
   echo "error: destination brief delivery contract does not match source mode=$MODE" >&2
   exit 1
 }
+PR=$(meta_optional_exact "$SOURCE_META" pr) || { echo "error: source task $SOURCE has malformed PR metadata" >&2; exit 1; }
+if [ -n "$PR" ]; then
+  fm_pr_url_parse "$PR" && [ "$FM_PR_URL" = "$PR" ] || {
+    echo "error: source task $SOURCE has non-canonical PR metadata" >&2
+    exit 1
+  }
+  PR=$FM_PR_URL
+fi
 
 SOURCE_WORKTREE=$(resolve_dir source-worktree "$SOURCE_WORKTREE") || exit 1
 PROJECT=$(resolve_dir recorded-project "$PROJECT") || exit 1
@@ -394,7 +415,6 @@ ALLOCATED_WORKTREE=$(resolve_dir destination-worktree "$ALLOCATED_WORKTREE") || 
   exit 1
 }
 DESTINATION_WORKTREE=$ALLOCATED_WORKTREE
-DESTINATION_WORKTREE_OWNED=1
 DESTINATION_TOP=$(git -C "$DESTINATION_WORKTREE" rev-parse --show-toplevel 2>/dev/null || true)
 DESTINATION_TOP=$(resolve_dir destination-repository-root "$DESTINATION_TOP") || exit 1
 [ "$DESTINATION_TOP" = "$DESTINATION_WORKTREE" ] || {
@@ -407,14 +427,23 @@ DESTINATION_COMMON=$(resolve_dir destination-physical-repository "$DESTINATION_C
   echo "error: normal allocator returned a destination from another physical repository" >&2
   exit 1
 }
+[ "$DESTINATION_WORKTREE" != "$PROJECT" ] || {
+  echo "error: normal allocator returned the primary project worktree" >&2
+  exit 1
+}
 worktree_is_registered "$PROJECT" "$DESTINATION_WORKTREE" || {
   echo "error: normal allocator returned an unregistered destination worktree" >&2
+  exit 1
+}
+worktree_is_task_owned "$DESTINATION_WORKTREE" && {
+  echo "error: normal allocator returned an existing task worktree" >&2
   exit 1
 }
 if ! fm_pool_worktree_clean "$DESTINATION_WORKTREE" || path_has_git_operation "$DESTINATION_WORKTREE"; then
   echo "error: normal allocator returned an occupied destination worktree" >&2
   exit 1
 fi
+DESTINATION_WORKTREE_OWNED=1
 git -C "$DESTINATION_WORKTREE" checkout -b "$DESTINATION_BRANCH" "$SOURCE_COMMIT" >/dev/null || {
   echo "error: could not create the destination branch at the admitted source commit" >&2
   exit 1
@@ -429,14 +458,6 @@ DESTINATION_ATTACHED_BRANCH=$(git -C "$DESTINATION_WORKTREE" symbolic-ref --quie
 REPOSITORY_IDENTITY=$(sha256_text "$PROJECT_COMMON")
 SOURCE_BRIEF_IDENTITY=$(sha256_file "$SOURCE_BRIEF") || exit 1
 DESTINATION_BRIEF_IDENTITY=$(sha256_file "$DESTINATION_BRIEF") || exit 1
-PR=$(meta_optional_exact "$SOURCE_META" pr) || { echo "error: source task $SOURCE has malformed PR metadata" >&2; exit 1; }
-if [ -n "$PR" ]; then
-  fm_pr_url_parse "$PR" && [ "$FM_PR_URL" = "$PR" ] || {
-    echo "error: source task $SOURCE has non-canonical PR metadata" >&2
-    exit 1
-  }
-  PR=$FM_PR_URL
-fi
 HANDOFF_TMP=$(mktemp "$DATA/$DESTINATION/.relaunch-handoff.XXXXXX") || exit 1
 jq -n \
   --arg schema fm-clean-commit-relaunch.v1 \

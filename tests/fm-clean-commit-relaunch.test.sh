@@ -36,6 +36,8 @@ set -eu
 case "${FM_TEST_ALLOCATOR_MODE:-success}" in
   success) ;;
   source) printf '%s\n' "$FM_TEST_SOURCE_WORKTREE"; exit 0 ;;
+  project) printf '%s\n' "$FM_TEST_PROJECT"; exit 0 ;;
+  task) printf '%s\n' "$FM_TEST_TASK_WORKTREE"; exit 0 ;;
   *) exit 1 ;;
 esac
 [ -z "${FM_TEST_ALLOCATOR_DELAY:-}" ] || sleep "$FM_TEST_ALLOCATOR_DELAY"
@@ -156,12 +158,13 @@ EOF
 }
 
 new_case() {  # <name>
-  local name fixture project source destination home
+  local name fixture project source destination other home
   name=$1
   fixture="$TMP_ROOT/$name"
   project="$fixture/project"
   source="$fixture/source"
   destination="$fixture/destination"
+  other="$fixture/other"
   home="$fixture/home"
   mkdir -p "$fixture" "$fixture/tmp" "$home/state" "$home/data" "$home/config" "$project"
   git -C "$project" init -q
@@ -174,6 +177,7 @@ new_case() {  # <name>
   git -C "$source" add committed.txt
   git -C "$source" commit -qm committed-source
   git -C "$project" worktree add -q -b pool/destination "$destination" main
+  git -C "$project" worktree add -q -b fm/other "$other" main
   copy_runtime "$fixture"
   make_fakebin "$fixture"
   write_brief "$home/data/source/brief.md" no-mistakes
@@ -200,6 +204,7 @@ printf '%s\n' source-validation > "$home/state/source.pr-poll"
 printf '%s\n' source-inbox > "$home/state/source.inbox/001.msg"
 printf '%s\n' source-temp > "$fixture/tmp/fm-source/session"
 printf '%s\n' source-receipt > "$home/data/source/evidence.jsonl"
+printf 'worktree=%s\n' "$other" > "$home/state/other.meta"
   : > "$fixture/windows"
   : > "$fixture/allocator.log"
   : > "$fixture/tmux.log"
@@ -213,6 +218,7 @@ run_owner() {  # <fixture> [source] [destination]
     FM_TEST_HOME="$fixture/home" \
     FM_TEST_PROJECT="$fixture/project" \
     FM_TEST_SOURCE_WORKTREE="$fixture/source" \
+    FM_TEST_TASK_WORKTREE="$fixture/other" \
     FM_TEST_DESTINATION="$fixture/destination" \
     FM_TEST_DESTINATION_ID="$destination" \
     FM_TEST_WINDOWS="$fixture/windows" \
@@ -291,7 +297,7 @@ pass "clean relaunch: only an authoritatively missing endpoint passes admission"
 
 # Metadata identity, role, home, and durable occupancy all refuse before the
 # allocator can create a destination.
-for mutation in malformed wrong-kind secondmate endpoint-mismatch destination-occupied branch-collision; do
+for mutation in malformed wrong-kind secondmate endpoint-mismatch destination-occupied destination-doorbell-requests duplicate-pr noncanonical-pr branch-collision; do
   fixture=$(new_case "admission-$mutation")
   case "$mutation" in
     malformed) printf 'worktree=%s\n' "$fixture/source" >> "$fixture/home/state/source.meta" ;;
@@ -299,6 +305,9 @@ for mutation in malformed wrong-kind secondmate endpoint-mismatch destination-oc
     secondmate) printf 'home=%s\n' "$fixture/home" >> "$fixture/home/state/source.meta" ;;
     endpoint-mismatch) sed -i 's/^endpoint_task_id=source$/endpoint_task_id=other/' "$fixture/home/state/source.meta" ;;
     destination-occupied) : > "$fixture/home/state/destination.status" ;;
+    destination-doorbell-requests) : > "$fixture/home/state/destination.omp-doorbell-ready.requests" ;;
+    duplicate-pr) printf 'pr=https://github.com/example/repo/pull/2\n' >> "$fixture/home/state/source.meta" ;;
+    noncanonical-pr) sed -i 's#^pr=.*#pr=https://github.com/example/repo/pull/not-a-number#' "$fixture/home/state/source.meta" ;;
     branch-collision) git -C "$fixture/project" branch fm/destination main ;;
   esac
   before=$(source_snapshot "$fixture")
@@ -388,6 +397,19 @@ assert_contains "$out" 'reused the source worktree' "source-reusing allocator di
 [ -z "$(cat "$fixture/allocator.log")" ] || fail "source-reusing allocator tried to return the source worktree"
 pass "clean relaunch: source-reusing allocator cannot clean the source"
 
+# Only an unclaimed pool worktree may become cleanup-owned destination state.
+for allocator in project task; do
+  fixture=$(new_case "allocator-reuses-$allocator")
+  before=$(source_snapshot "$fixture")
+  out=$(FM_TEST_ALLOCATOR_MODE="$allocator" run_owner "$fixture" 2>&1)
+  expect_code 1 $? "$allocator-reusing allocator should refuse"
+  assert_contains "$out" 'error:' "$allocator-reusing allocator did not explain its refusal"
+  [ "$(source_snapshot "$fixture")" = "$before" ] || fail "$allocator-reusing allocator mutated source"
+  [ -z "$(cat "$fixture/allocator.log")" ] || fail "$allocator-reusing allocator tried to return an existing worktree"
+  git -C "$fixture/project" show-ref --verify --quiet refs/heads/fm/destination && fail "$allocator-reusing allocator created a destination branch"
+done
+pass "clean relaunch: allocator must not reuse existing project worktrees"
+
 # An interrupt after handoff publication exits through destination-only cleanup.
 fixture=$(new_case interrupted-publication)
 before=$(source_snapshot "$fixture")
@@ -407,6 +429,26 @@ assert_absent "$fixture/home/state/destination.meta" "interrupted publication re
 assert_absent "$fixture/home/data/destination/relaunch-handoff.json" "interrupted publication retained handoff"
 git -C "$fixture/project" show-ref --verify --quiet refs/heads/fm/destination && fail "interrupted publication retained destination branch"
 pass "clean relaunch: interrupted destination publication preserves source"
+
+# An interrupt while tmux creates the destination also cleans that new window.
+fixture=$(new_case interrupted-window-creation)
+before=$(source_snapshot "$fixture")
+FM_TEST_LAUNCH_DELAY=5 run_owner "$fixture" >"$fixture/interrupted.out" 2>&1 &
+pid=$!
+for _ in $(seq 1 100); do
+  [ -s "$fixture/tmux.log" ] && break
+  sleep 0.01
+done
+assert_present "$fixture/tmux.log" "window-creation interrupt fixture did not start tmux creation"
+kill -HUP "$pid"
+wait "$pid"
+status=$?
+expect_code 1 "$status" "interrupted window creation should fail"
+[ "$(source_snapshot "$fixture")" = "$before" ] || fail "interrupted window creation mutated source"
+assert_contains "$(cat "$fixture/tmux.log")" 'kill-window' "interrupted window creation did not clean the destination endpoint"
+assert_absent "$fixture/home/state/destination.meta" "interrupted window creation retained destination metadata"
+git -C "$fixture/project" show-ref --verify --quiet refs/heads/fm/destination && fail "interrupted window creation retained destination branch"
+pass "clean relaunch: interrupted window creation cleans destination endpoint"
 
 # The destination lock serializes two simultaneous attempts before a second
 # endpoint or branch can be created.

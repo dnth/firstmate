@@ -34,7 +34,8 @@ fm_clean_relaunch_launch_cleanup() {  # <destination-id>
   rm -f -- "$state/$id.meta" "$state/$id.status" "$state/$id.turn-ended" \
     "$state/$id.pi-ext.ts" "$state/$id.omp-ext.ts" "$state/$id.omp-ready" \
     "$state/$id.omp-started" "$state/$id.omp-doorbell-ready" "$state/$id.busy-state" \
-    "$state/$id.busy-gen" "$state/$id.grok-turnend-token" "$state/$id.kimi-turnend-token" \
+    "$state/$id.omp-doorbell-ready.requests" "$state/$id.busy-gen" \
+    "$state/$id.grok-turnend-token" "$state/$id.kimi-turnend-token" \
     "$state/$id.hermes-turnend-token" "$state/$id.hermes-session" "$state/$id.hermes-started"
 }
 
@@ -92,10 +93,10 @@ fm_clean_relaunch_launch_allocated() {
   session=$(fm_backend_tmux_container_ensure) || return 1
   window="fm-$id"
   target="$session:$window"
-  fm_backend_tmux_create_task "$session" "$window" "$worktree" >/dev/null || return 1
-
   FM_CLEAN_RELAUNCH_LAUNCH_TARGET=$target
   FM_CLEAN_RELAUNCH_LAUNCH_STATE=$state
+  fm_backend_tmux_create_task "$session" "$window" "$worktree" >/dev/null || return 1
+
   task_tmp="${TMPDIR:-/tmp}/fm-$id"
   if [ -L "$task_tmp" ]; then
     echo "error: destination task temp root must not be a symlink" >&2
