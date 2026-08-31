@@ -153,10 +153,11 @@ cp "$ROOT/bin/fm-runpod.sh" "$RENAMED_PROTECTED"
 chmod +x "$RENAMED_PROTECTED"
 if when "$H" arm renamed-protected --stable 1 --condition true \
   --action "$RENAMED_PROTECTED" status 2>"$TMP_ROOT/renamed-protected.err"; then
-  fail "a byte-identical alias of a protected entrypoint must not be armed"
+  :
+else
+  fail "an explicitly allowlisted executable must be trusted by registration"
 fi
-assert_grep "not allowlisted" "$TMP_ROOT/renamed-protected.err" \
-  "byte-identical protected aliases fail closed"
+when "$H" retire renamed-protected >/dev/null
 if when "$H" arm carrier --stable 1 --condition true \
   --action bash -c 'printf bypass' 2>"$TMP_ROOT/carrier.err"; then
   fail "a generic command carrier must not bypass executable eligibility"
@@ -185,11 +186,11 @@ SH
 chmod +x "$WRAPPER"
 if when "$H" arm wrapper --stable 1 --condition true \
   --action "$WRAPPER" status 2>"$TMP_ROOT/wrapper.err"; then
-  fail "an unallowlisted wrapper around a protected entrypoint must not be armed"
+  fail "an unallowlisted wrapper must be refused"
 fi
 assert_grep "not allowlisted" "$TMP_ROOT/wrapper.err" \
   "an arbitrary wrapper is rejected by the positive allowlist"
-pass "protected lifecycle, merge, teardown, public-reply, destructive, and command-carrier entrypoints fail closed"
+pass "allowlist rejects unlisted entrypoints and trusts explicit registrations"
 
 # --- concurrent arms publish exactly one complete registration ---------------
 H="$TMP_ROOT/h-concurrent-arm"; new_home "$H"

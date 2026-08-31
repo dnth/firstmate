@@ -558,7 +558,7 @@ The (condition, action) spec is stored privately under `state/when/` and hash-bo
 Every failure path - a mutated spec or executable, a condition error past its budget, an expired deadline, a failed action, or an earlier fire whose outcome was never captured - produces a terminal captured outcome that wakes firstmate rather than a silent retry, and a durable single-fire marker claimed before the action makes restarts and re-polls unable to fire it twice.
 The adapter automates only the exact deterministic subset: anything needing judgment, and anything destructive, irreversible, security-sensitive, remote-compute-affecting, or public-reply-affecting, keeps the ordinary check-fires-then-firstmate-decides flow, and the adapter's header and `--help` own its commands, flags, executable eligibility policy, and outcome document.
 Both executables must be explicitly listed as files in the colon-separated `FM_WHEN_ALLOWLIST` environment variable, with only `true` and `false` allowed when it is unset.
-Direct or byte-identical copies of this fork's guarded entrypoints remain ineligible regardless of allowlist location, so the allowlist must contain only reviewed executable provenance and must never contain a wrapper around a refused entrypoint.
+Only explicitly allowlisted executable paths are eligible, and allowlisted wrappers are trusted by registration without inspecting commands they invoke internally.
 
 This section is the single owner of the runner's operating contract.
 Registration writes one private record under `state/procevent/`, and a completed result plus its immutable adapter identity are captured under `state/procevent-inbox/` before it is published.

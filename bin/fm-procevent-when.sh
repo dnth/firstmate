@@ -23,8 +23,7 @@
 #            is re-split or interpreted. Executables must be explicitly
 #            allowlisted through FM_WHEN_ALLOWLIST (a colon-separated list of
 #            trusted executable files); only true and false are allowed by
-#            default. Guarded entrypoint identities remain ineligible even when
-#            copied into an allowlisted directory.
+#            default.
 #            Options, before --condition:
 #              --interval <secs>           poll cadence, decimals allowed (default 60)
 #              --stable <n>                consecutive true polls required to fire (default 2)
@@ -158,25 +157,9 @@ when_path_allowlisted() {  # <absolute-path>: true only for explicitly trusted p
   return 1
 }
 
-when_protected_identity() {  # <sha256>: true when bytes match a guarded entrypoint
-  local hash=$1 candidate candidate_hash
-  for candidate in "$SCRIPT_DIR"/fm-runpod*.sh "$SCRIPT_DIR"/fm-remote-*.sh \
-    "$SCRIPT_DIR"/fm-x-*.sh "$SCRIPT_DIR"/fm-public-followup*.sh \
-    "$SCRIPT_DIR"/fm-on.sh "$SCRIPT_DIR"/fm-pr-merge.sh "$SCRIPT_DIR"/fm-teardown.sh; do
-    [ -f "$candidate" ] || continue
-    candidate_hash=$(fm_pr_sha256 "$candidate") || return 0
-    [ "$candidate_hash" = "$hash" ] && return 0
-  done
-  return 1
-}
-
 execution_policy_valid() {  # <condition|action> <absolute-path> <sha256>
-  local role=$1 path=$2 hash=$3
+  local role=$1 path=$2
   POLICY_ERROR=
-  if when_protected_identity "$hash"; then
-    POLICY_ERROR="$role executable is not allowlisted by FM_WHEN_ALLOWLIST"
-    return 1
-  fi
   when_path_allowlisted "$path" && return 0
   POLICY_ERROR="$role executable is not allowlisted by FM_WHEN_ALLOWLIST"
   return 1
@@ -532,8 +515,7 @@ cmd_run() {
   fi
 
   # Revalidate the complete registered spec and both executable trust bindings
-  # immediately before claiming the fire. A changed or newly protected command
-  # must never run.
+  # immediately before claiming the fire. A changed command must never run.
   if ! spec_load "$sid"; then
     emit_doc "$sid" rejected \
       "refused without executing the action: $SPEC_ERROR" "$polls" '' ''
