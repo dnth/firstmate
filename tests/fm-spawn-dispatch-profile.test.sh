@@ -1398,7 +1398,8 @@ test_raw_untrusted_native_target_refuses_before_raw_execution() {
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
   target="$PROJ_DIR/custom-agent"
-  cp /usr/bin/printf "$target"
+  cp "$RAW_DIRECT_TRUE" "$target"
+  printf '\0' >> "$target"
   chmod +x "$target"
   export FM_TEST_EXECUTE_RAW_LAUNCH=1
   export FM_TEST_RAW_EXECUTION_LOG="$CASE_DIR/raw-execution.log"
