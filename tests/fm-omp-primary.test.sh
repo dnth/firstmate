@@ -282,7 +282,7 @@ const api = {
 process.argv[1] = process.env.EXTENSION;
 const extension = await import(`${pathToFileURL(process.env.EXTENSION).href}?fresh-native=${Date.now()}`);
 extension.default(api);
-const context = { sessionManager: { getSessionFile: () => "" } };
+const context = { sessionManager: { getSessionFile: () => "", getSessionId: () => "fresh-session" } };
 await handlers.get("session_start")({ type: "session_start" }, context);
 const first = await handlers.get("before_agent_start")({ type: "before_agent_start" }, {});
 const second = await handlers.get("before_agent_start")({ type: "before_agent_start" }, {});
@@ -488,7 +488,12 @@ let markerLines = readFileSync(marker, "utf8").trim().split("\n");
 if (markerLines.length !== 4 || markerLines[1] !== String(process.pid)) {
   throw new Error(`invalid OMP primary marker ${markerLines.join("|")}`);
 }
-const extensionContext = { sessionManager: { getSessionFile: () => `${process.env.FIXTURE}/omp-session.jsonl` } };
+const extensionContext = {
+  sessionManager: {
+    getSessionFile: () => `${process.env.FIXTURE}/omp-session.jsonl`,
+    getSessionId: () => "native-session",
+  },
+};
 if (existsSync(process.env.FM_OMP_TASK_DOORBELL_READY)) {
   throw new Error("OMP primary doorbell published readiness before session initialization");
 }
@@ -990,6 +995,7 @@ SH
     FM_WAKE_DRAIN="$ROOT/bin/fm-wake-drain.sh" \
     FM_OMP_TASK_INBOX_DIR="" FM_OMP_TASK_DOORBELL_READY="" \
     node --input-type=module 2>&1 <<'JS'
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
@@ -1063,12 +1069,19 @@ if (deduped.status !== 0 || deduped.stdout.trim().split("\n").length !== 2) {
   throw new Error(`durable batch was not deduplicated: ${deduped.stderr || deduped.stdout}`);
 }
 
-const firstSession = `${state}/first-session.jsonl`;
-const replacementSession = `${state}/replacement-session.jsonl`;
-const startSession = async (sessionFile) => {
+const firstSessionId = "first-session";
+const replacementSessionId = "replacement-session";
+const notificationClaim = `${state}/.omp-primary-nextturn-notification`;
+const claimSession = () => readFileSync(notificationClaim, "utf8").split("\n")[3];
+const startSession = async (sessionId) => {
   await handlers.get("session_start")(
     { type: "session_start" },
-    { sessionManager: { getSessionFile: () => sessionFile } },
+    {
+      sessionManager: {
+        getSessionFile: () => undefined,
+        getSessionId: () => sessionId,
+      },
+    },
   );
 };
 const startNextTurn = async () => {
@@ -1088,22 +1101,26 @@ const trigger = async (count, messageCount) => {
   }
 };
 const triggerCurrent = async (messageCount) => trigger(armCount(), messageCount);
-const reloadExtension = async (label, sessionFile, arm = true) => {
+const reloadExtension = async (label, sessionId, arm = true) => {
   const reloaded = await import(`${pathToFileURL(process.env.EXTENSION).href}?${label}=${Date.now()}`);
   reloaded.default(api);
   if (!tool) throw new Error(`OMP did not register its watcher arm tool after ${label}`);
-  await startSession(sessionFile);
+  await startSession(sessionId);
   if (arm) await tool.execute();
 };
 
-
 try {
-  await startSession(firstSession);
+  await startSession(firstSessionId);
   await tool.execute();
   await waitFor(() => armCount() === 1, "initial watcher");
   await trigger(1, 1);
+  const firstClaimSession = claimSession();
+  const expectedFirstClaimSession = createHash("sha256").update(firstSessionId).digest("hex");
   if (readFileSync(queue, "utf8") !== queueRows) {
     throw new Error("hidden notification acknowledged durable wake rows");
+  }
+  if (firstClaimSession !== expectedFirstClaimSession) {
+    throw new Error(`initial claim used the wrong fileless session identity: ${firstClaimSession}`);
   }
   const first = notifications[0];
   if (
@@ -1121,18 +1138,22 @@ try {
     throw new Error(`branch fallback did not share the pending next-turn notification: ${JSON.stringify(notifications)}`);
   }
 
-  await reloadExtension("same-session-reload", firstSession);
+  await reloadExtension("same-session-reload", firstSessionId);
   await waitFor(() => armCount() >= 3, "same-session reload watcher");
   await triggerCurrent();
   await new Promise((resolve) => setTimeout(resolve, 40));
-  if (notifications.length !== 1) {
-    throw new Error(`same-session reload duplicated a pending notification: ${JSON.stringify(notifications)}`);
+  if (notifications.length !== 1 || claimSession() !== firstClaimSession) {
+    throw new Error(`same-session reload duplicated or changed a pending notification: ${JSON.stringify(notifications)}`);
   }
 
-  await startNextTurn();
   await handlers.get("session_switch")(
     { type: "session_switch", reason: "new" },
-    { sessionManager: { getSessionFile: () => replacementSession } },
+    {
+      sessionManager: {
+        getSessionFile: () => undefined,
+        getSessionId: () => replacementSessionId,
+      },
+    },
   );
   await waitFor(() => notifications.length >= 2, "original batch replay after session switch");
   if (readFileSync(queue, "utf8") !== queueRows) {
@@ -1141,9 +1162,17 @@ try {
   if (notifications[1].message.content !== first.message.content) {
     throw new Error("session switch did not re-notify the exact unacknowledged durable batch");
   }
+  const replacementClaimSession = claimSession();
+  const expectedReplacementClaimSession = createHash("sha256").update(replacementSessionId).digest("hex");
+  if (
+    replacementClaimSession !== expectedReplacementClaimSession ||
+    replacementClaimSession === firstClaimSession
+  ) {
+    throw new Error(`session switch did not claim the replacement fileless session: ${replacementClaimSession}`);
+  }
 
   delete globalThis.firstmateOmpPrimaryNotificationInstance;
-  await reloadExtension("process-restart", replacementSession, false);
+  await reloadExtension("process-restart", replacementSessionId, false);
   await waitFor(() => notifications.length >= 3, "original batch replay after restart");
   if (readFileSync(queue, "utf8") !== queueRows) {
     throw new Error("process-restart replay retired durable wake rows");
@@ -1211,7 +1240,7 @@ try {
   const notificationsBeforeAcknowledgedSwitch = notifications.length;
   await handlers.get("session_switch")(
     { type: "session_switch", reason: "resume" },
-    { sessionManager: { getSessionFile: () => `${state}/acknowledged-session.jsonl` } },
+    { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "acknowledged-session" } },
   );
   await new Promise((resolve) => setTimeout(resolve, 40));
   if (notifications.length !== notificationsBeforeAcknowledgedSwitch) {

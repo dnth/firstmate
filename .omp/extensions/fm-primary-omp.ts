@@ -324,8 +324,8 @@ export default function (omp: ExtensionAPI) {
   };
 
   const setNotificationSession = (ctx: ExtensionContext): void => {
-    const sessionFile = ctx.sessionManager.getSessionFile() || "unknown";
-    notificationSession = createHash("sha256").update(sessionFile).digest("hex");
+    const sessionIdentity = ctx.sessionManager.getSessionId();
+    notificationSession = createHash("sha256").update(sessionIdentity).digest("hex");
   };
   const sendWakeNotification = (content: string): void => {
     omp.sendMessage(
