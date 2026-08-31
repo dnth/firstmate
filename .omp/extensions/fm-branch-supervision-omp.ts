@@ -851,7 +851,6 @@ ${context.command}
     const body = `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. (Supervision branch unavailable, falling back to main: ${detail})`;
     // Marked operational like every watcher injection, so the wake is never
     // mistaken for captain input (away-mode return semantics, mirror filter).
-    const content = encodeOperationalInput(body);
     const wake = createPrimaryWatcherWake(encodeOperationalInput(body), "branch-fallback");
     pi.events?.emit?.(FM_PRIMARY_WATCHER_WAKE_EVENT, wake);
     if (wake.accepted) return;

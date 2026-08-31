@@ -49,6 +49,7 @@ type ProcessResult = {
 
 type WakeNotificationClaim = {
   pid: string;
+  instance: string;
   session: string;
   key: string;
   content: string;
@@ -210,19 +211,23 @@ function readWakeNotificationClaim(): WakeNotificationClaim | undefined {
     return undefined;
   }
   const lines = content.split("\n");
+  const version = lines[0];
+  const v2 = version === "fm-omp-primary-nextturn-notification-v2" && lines.length === 6;
+  const v3 = version === "fm-omp-primary-nextturn-notification-v3" && lines.length === 7;
+  if (!v2 && !v3) return undefined;
+  const offset = v3 ? 1 : 0;
   if (
-    lines.length !== 6 ||
-    lines[0] !== "fm-omp-primary-nextturn-notification-v2" ||
     !/^[0-9]+$/u.test(lines[1]) ||
-    !/^[a-f0-9]{64}$/u.test(lines[2]) ||
-    !/^[A-Za-z0-9._-]+$/u.test(lines[3]) ||
-    lines[5] !== ""
+    (v3 && !/^[a-f0-9-]{36}$/u.test(lines[2])) ||
+    !/^[a-f0-9]{64}$/u.test(lines[2 + offset]) ||
+    !/^[A-Za-z0-9._-]+$/u.test(lines[3 + offset]) ||
+    lines[5 + offset] !== ""
   ) {
     return undefined;
   }
-  const message = Buffer.from(lines[4], "base64").toString("utf8");
-  if (Buffer.from(message, "utf8").toString("base64") !== lines[4]) return undefined;
-  return { pid: lines[1], session: lines[2], key: lines[3], content: message };
+  const message = Buffer.from(lines[4 + offset], "base64").toString("utf8");
+  if (Buffer.from(message, "utf8").toString("base64") !== lines[4 + offset]) return undefined;
+  return { pid: lines[1], instance: v3 ? lines[2] : "", session: lines[2 + offset], key: lines[3 + offset], content: message };
 }
 
 function writeWakeNotificationClaim(claim: WakeNotificationClaim): void {
@@ -234,8 +239,9 @@ function writeWakeNotificationClaim(claim: WakeNotificationClaim): void {
     writeFileSync(
       descriptor,
       [
-        "fm-omp-primary-nextturn-notification-v2",
+        "fm-omp-primary-nextturn-notification-v3",
         claim.pid,
+        claim.instance,
         claim.session,
         claim.key,
         Buffer.from(claim.content, "utf8").toString("base64"),
@@ -268,6 +274,8 @@ export default function (omp: ExtensionAPI) {
   publishNativeProcessIdentity();
   const taskInboxDoorbell = installTaskInboxDoorbell(omp);
   let pendingStartupNudge = "";
+  const runtime = globalThis as typeof globalThis & { firstmateOmpPrimaryNotificationInstance?: string };
+  const notificationInstance = runtime.firstmateOmpPrimaryNotificationInstance ??= randomUUID();
 
   let notificationSession = createHash("sha256").update("unknown").digest("hex");
 
@@ -289,7 +297,7 @@ export default function (omp: ExtensionAPI) {
   };
   const releaseWakeNotification = (): void => {
     const claim = readWakeNotificationClaim();
-    if (!claim || claim.pid !== String(process.pid)) return;
+    if (!claim || claim.instance !== notificationInstance) return;
     try {
       unlinkSync(notificationClaim);
     } catch {
@@ -298,15 +306,10 @@ export default function (omp: ExtensionAPI) {
   };
   const claimWakeNotification = (key: string, content: string): boolean => {
     const current = readWakeNotificationClaim();
-    if (
-      current?.pid === String(process.pid) &&
-      current.session === notificationSession &&
-      current.key === key
-    ) {
-      return false;
-    }
+    if (current) return false;
     writeWakeNotificationClaim({
       pid: String(process.pid),
+      instance: notificationInstance,
       session: notificationSession,
       key,
       content,
@@ -317,11 +320,16 @@ export default function (omp: ExtensionAPI) {
     const pending = readWakeNotificationClaim();
     if (
       !pending ||
-      (pending.pid === String(process.pid) && pending.session === notificationSession)
+      (pending.instance === notificationInstance && pending.session === notificationSession)
     ) {
       return;
     }
-    const replay = { ...pending, pid: String(process.pid), session: notificationSession };
+    const replay = {
+      ...pending,
+      pid: String(process.pid),
+      instance: notificationInstance,
+      session: notificationSession,
+    };
     try {
       writeWakeNotificationClaim(replay);
       sendWakeNotification(pending.content);
@@ -333,10 +341,11 @@ export default function (omp: ExtensionAPI) {
       }
     }
   };
-  const queueWakeNotification = (content: string, notificationKey: string): void => {
-    if (!claimWakeNotification(notificationKey, content)) return;
+  const queueWakeNotification = (content: string, notificationKey: string): boolean => {
+    if (!claimWakeNotification(notificationKey, content)) return true;
     try {
       sendWakeNotification(content);
+      return true;
     } catch (error) {
       releaseWakeNotification();
       throw error;
@@ -353,8 +362,8 @@ export default function (omp: ExtensionAPI) {
     ) {
       return;
     }
-    wake.accept();
     queueWakeNotification(wake.content, wake.notificationKey);
+    wake.accept();
   });
 
   // Supervision-branch dispatch handshake (docs/omp-supervision-branch.md).

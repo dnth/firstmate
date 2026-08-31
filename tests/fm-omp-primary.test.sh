@@ -994,6 +994,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const handlers = new Map();
+const eventHandlers = new Map();
 const notifications = [];
 let tool = null;
 let sendAttempts = 0;
@@ -1013,6 +1014,10 @@ const waitFor = async (predicate, description) => {
 const api = {
   zod: { object: () => ({}) },
   on(name, handler) { handlers.set(name, handler); },
+  events: {
+    on(name, handler) { eventHandlers.set(name, handler); },
+    emit(name, data) { eventHandlers.get(name)?.(data); },
+  },
   registerCommand() {},
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_omp") tool = candidate;
@@ -1031,6 +1036,7 @@ process.argv[1] = process.env.EXTENSION;
 const extension = await import(`${pathToFileURL(process.env.EXTENSION).href}?batching=${Date.now()}`);
 extension.default(api);
 if (!tool) throw new Error("OMP did not register its watcher arm tool");
+const dispatch = await import(new URL("./lib/fm-branch-dispatch.ts", pathToFileURL(process.env.EXTENSION)).href);
 
 const queue = `${state}/.wake-queue`;
 const queueRows = [
@@ -1093,6 +1099,11 @@ try {
   ) {
     throw new Error(`first notification was not hidden next-turn delivery: ${JSON.stringify(first)}`);
   }
+  const fallback = dispatch.createPrimaryWatcherWake("fallback batch", "branch-fallback");
+  api.events.emit(dispatch.FM_PRIMARY_WATCHER_WAKE_EVENT, fallback);
+  if (!fallback.accepted || notifications.length !== 1) {
+    throw new Error(`branch fallback did not share the pending next-turn notification: ${JSON.stringify(notifications)}`);
+  }
 
   await reloadExtension("same-session-reload", firstSession);
   await waitFor(() => armCount() >= 3, "same-session reload watcher");
@@ -1114,12 +1125,8 @@ try {
     throw new Error("session switch did not re-notify the exact unacknowledged durable batch");
   }
 
-  const claimPath = `${state}/.omp-primary-nextturn-notification`;
-  const staleClaim = readFileSync(claimPath, "utf8").split("\n");
-  staleClaim[1] = "1";
-  writeFileSync(claimPath, staleClaim.join("\n"));
-  const restartedSession = `${state}/restarted-session.jsonl`;
-  await reloadExtension("process-restart", restartedSession, false);
+  delete globalThis.firstmateOmpPrimaryNotificationInstance;
+  await reloadExtension("process-restart", replacementSession, false);
   await waitFor(() => notifications.length >= 3, "original batch replay after restart");
   if (readFileSync(queue, "utf8") !== queueRows) {
     throw new Error("process-restart replay retired durable wake rows");
