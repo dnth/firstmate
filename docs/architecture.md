@@ -337,6 +337,15 @@ The helper reuses the durable fleet records and recovery-grade backend liveness 
 Its `--check` mode delegates to `omp update --check`, reports the current and available versions, and changes neither the executable nor fleet state.
 The mechanics are owned by the `/updatefirstmate` skill and firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) (self-update).
 
+## Clean committed worker relaunch
+
+`bin/fm-clean-commit-relaunch.sh` is an explicit operator command, never an automatic recovery path.
+It alone admits a missing committed source task, leases a distinct normal worktree, creates the successor branch at the admitted commit, records evidence, and launches the fresh worker.
+The source branch, records, validation custody, session material, and presentation state remain read-only.
+The initial supported launch profile is Codex on the reference tmux backend.
+Generic `fm-spawn.sh` remains a fresh-task interface and does not carry relaunch source, commit, handoff, or allocated-worktree authority.
+The command header owns the exact admission and cleanup mechanics.
+
 ## Restart-proof
 
 Fleet state lives in each task's session-provider backend (tmux by hard default, herdr or cmux when selected or auto-detected, zellij/orca when explicitly selected), no-mistakes run records, status event logs, local markdown under `data/` including `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`, and persistent secondmate homes.
