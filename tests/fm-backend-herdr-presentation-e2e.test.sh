@@ -28,7 +28,8 @@ MOVE_CALL_LOG="$TMP_ROOT/workspace-move-calls.log"
 FOCUS_AUDIT_LOG="$TMP_ROOT/focus-audit.log"
 ACTIVE_SEEDED_CONTROL="$TMP_ROOT/active-seeded-control"
 POST_CREATE_ABORT_CONTROL="$TMP_ROOT/post-create-abort-control"
-RAW_SLEEP_AGENT=/usr/bin/sleep
+RAW_SLEEP_AGENT="$ROOT/.fm-raw-herdr-presentation-sleep-$$"
+/usr/bin/cp /usr/bin/sleep "$RAW_SLEEP_AGENT"
 mkdir -p "$FAKEBIN"
 : > "$HERDR_CALL_LOG"
 : > "$TREEHOUSE_CALL_LOG"
@@ -302,6 +303,7 @@ EOF
       "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" >/dev/null 2>&1 || true
     LAB_READY=0
   fi
+  rm -f "$RAW_SLEEP_AGENT"
   rm -rf "$TMP_ROOT"
 }
 trap cleanup_all EXIT

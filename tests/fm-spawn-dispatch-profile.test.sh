@@ -14,6 +14,12 @@ SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
 PROFILE_RUN_TOKEN="t$$-${RANDOM:-0}"
 profile_id() { printf '%s-%s' "$1" "$PROFILE_RUN_TOKEN"; }
+RAW_DIRECT_TRUE="$ROOT/.fm-raw-direct-true-$PROFILE_RUN_TOKEN"
+RAW_DIRECT_PRINTF="$ROOT/.fm-raw-direct-printf-$PROFILE_RUN_TOKEN"
+RAW_DIRECT_PRINTENV="$ROOT/.fm-raw-direct-printenv-$PROFILE_RUN_TOKEN"
+/usr/bin/cp /usr/bin/true "$RAW_DIRECT_TRUE"
+/usr/bin/cp /usr/bin/printf "$RAW_DIRECT_PRINTF"
+/usr/bin/cp /usr/bin/printenv "$RAW_DIRECT_PRINTENV"
 cleanup() {
   local data_dir id home meta tasktmp
   while IFS= read -r data_dir; do
@@ -26,6 +32,7 @@ cleanup() {
       profile-*:/tmp/fm-"$id") rm -rf "$tasktmp" ;;
     esac
   done < <(find "$TMP_ROOT" -type d -path '*/home/data/profile-*' 2>/dev/null)
+  rm -f "$RAW_DIRECT_TRUE" "$RAW_DIRECT_PRINTF" "$RAW_DIRECT_PRINTENV"
   rm -rf "$TMP_ROOT"
 }
 trap cleanup EXIT
@@ -316,7 +323,7 @@ case "${1:-}" in
 esac
 SH
   chmod +x "$fakebin/omp"
-  ln -s /usr/bin/true "$fakebin/custom-agent"
+  ln -s "$RAW_DIRECT_TRUE" "$fakebin/custom-agent"
   cat > "$fakebin/flock" <<'SH'
 #!/usr/bin/env bash
 for arg in "$@"; do
@@ -738,7 +745,7 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = '/usr/bin/env /usr/bin/true --flag __OMPMAXTIME__' ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  [ "$launch" = "/usr/bin/env $RAW_DIRECT_TRUE --flag __OMPMAXTIME__" ] || fail "raw launch command changed"$'\n'"actual: $launch"
   pass "active crew-dispatch profile preserves raw direct non-OMP launch arguments"
 }
 
@@ -854,7 +861,7 @@ test_raw_non_omp_launches_keep_their_existing_escape_hatch() {
   expect_code 0 "$status" "lookalike non-OMP raw command should still launch"
   assert_contains "$out" "spawned $id harness=custom-omp-agent" \
     "lookalike non-OMP raw command lost its executable identity"
-  [ "$(cat "$LAUNCH_LOG")" = '/usr/bin/env /usr/bin/true --legacy' ] \
+  [ "$(cat "$LAUNCH_LOG")" = "/usr/bin/env $RAW_DIRECT_TRUE --legacy" ] \
     || fail "lookalike non-OMP raw launch changed"
   pass "lookalike non-OMP raw launches preserve the escape hatch"
 }
@@ -867,7 +874,7 @@ test_raw_non_omp_launches_bypass_pane_aliases_and_functions() {
   enable_dispatch_profile "$HOME_DIR"
   pane_env="$CASE_DIR/pane-env"
   cat > "$pane_env" <<'SH'
-command() { omp "$@"; }
+custom-agent() { omp "$@"; }
 SH
   export FM_TEST_PANE_BASH_ENV="$pane_env"
   export FM_TEST_EXECUTE_RAW_LAUNCH=1
@@ -879,7 +886,7 @@ SH
   unset FM_TEST_PANE_BASH_ENV FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
   expect_code 0 "$status" "raw direct non-OMP launch should bypass an ambient pane function"
   assert_absent "$CASE_DIR/raw-omp-executed" "ambient pane function executed the harmless fake OMP"
-  [ "$(cat "$LAUNCH_LOG")" = '/usr/bin/env /usr/bin/true --legacy' ] \
+  [ "$(cat "$LAUNCH_LOG")" = "/usr/bin/env $RAW_DIRECT_TRUE --legacy" ] \
     || fail "raw direct non-OMP launch did not use the alias-safe command form"
   pass "raw direct non-OMP launches bypass ambient pane aliases and functions"
 }
@@ -894,13 +901,13 @@ test_raw_non_omp_launches_preserve_plain_assignments() {
   export FM_TEST_RAW_EXECUTION_LOG="$CASE_DIR/raw-execution.log"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" 'FOO=bar command -- printenv FOO')
+    "$id" "$PROJ_DIR" "FOO=bar command -- $RAW_DIRECT_PRINTENV FOO")
   status=$?
   unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_EXECUTION_LOG
   expect_code 0 "$status" "raw direct non-OMP launch should preserve a plain assignment"
   [ "$(cat "$CASE_DIR/raw-execution.log")" = bar ] \
     || fail "raw direct non-OMP launch did not pass its assignment to the executable: $(cat "$CASE_DIR/raw-execution.log")"
-  [ "$(cat "$LAUNCH_LOG")" = '/usr/bin/env FOO=bar /usr/bin/printenv FOO' ] \
+  [ "$(cat "$LAUNCH_LOG")" = "/usr/bin/env FOO=bar $RAW_DIRECT_PRINTENV FOO" ] \
     || fail "raw direct non-OMP assignment launch was not normalized safely"
   pass "raw direct non-OMP launches preserve plain assignments"
 }
@@ -915,7 +922,7 @@ test_raw_non_omp_command_p_launches_its_direct_target() {
   export FM_TEST_RAW_EXECUTION_LOG="$CASE_DIR/raw-execution.log"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" 'command -p -- printf command-p-ok')
+    "$id" "$PROJ_DIR" "command -p -- $RAW_DIRECT_PRINTF command-p-ok")
   status=$?
   unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_EXECUTION_LOG
   expect_code 0 "$status" "raw command -p launch should preserve its direct non-OMP target"
@@ -930,7 +937,7 @@ test_raw_non_omp_command_p_launches_an_absolute_target() {
   rec=$(make_spawn_case profile-raw-command-p-absolute claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
-  raw='command -p -- /usr/bin/printf absolute-target-ok'
+  raw="command -p -- $RAW_DIRECT_PRINTF absolute-target-ok"
   export FM_TEST_EXECUTE_RAW_LAUNCH=1
   export FM_TEST_RAW_EXECUTION_LOG="$CASE_DIR/raw-execution.log"
 
@@ -950,7 +957,7 @@ test_raw_non_omp_command_p_launches_a_relative_target() {
   rec=$(make_spawn_case profile-raw-command-p-relative claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
-  ln -s /usr/bin/printf "$PROJ_DIR/custom-agent"
+  ln -s "$RAW_DIRECT_PRINTF" "$PROJ_DIR/custom-agent"
   git -C "$PROJ_DIR" add custom-agent
   sync_project_commit "$PROJ_DIR" "$WT_DIR" 'add raw relative executable'
   export FM_TEST_EXECUTE_RAW_LAUNCH=1
@@ -1430,30 +1437,30 @@ test_raw_absolute_wrapper_refuses_before_raw_execution() {
   pass "raw absolute wrappers refuse before raw execution"
 }
 
-test_raw_non_omp_command_p_ignores_imported_type_function() {
-  local rec id out status spawn_env
-  id=$(profile_id profile-raw-command-p-type-z15j)
-  rec=$(make_spawn_case profile-raw-command-p-type claude "$id")
+test_raw_non_omp_command_p_bypasses_pane_command_function() {
+  local rec id out status pane_env
+  id=$(profile_id profile-raw-command-p-function-z15j)
+  rec=$(make_spawn_case profile-raw-command-p-function claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
-  spawn_env="$CASE_DIR/spawn-env"
-  cat > "$spawn_env" <<'SH'
-type() { printf '%s\n' '/usr/bin/env omp --legacy'; }
+  pane_env="$CASE_DIR/pane-env"
+  cat > "$pane_env" <<'SH'
+command() { omp "$@"; }
 SH
-  export FM_TEST_SPAWN_BASH_ENV="$spawn_env"
+  export FM_TEST_PANE_BASH_ENV="$pane_env"
   export FM_TEST_EXECUTE_RAW_LAUNCH=1
   export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
   export FM_TEST_RAW_EXECUTION_LOG="$CASE_DIR/raw-execution.log"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" 'command -p -- printf type-safe')
+    "$id" "$PROJ_DIR" "command -p -- $RAW_DIRECT_PRINTF command-safe")
   status=$?
-  unset FM_TEST_SPAWN_BASH_ENV FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED FM_TEST_RAW_EXECUTION_LOG
-  expect_code 0 "$status" "raw command -p launch should ignore an imported type function"
-  assert_absent "$CASE_DIR/raw-omp-executed" "imported type function executed the harmless fake OMP"
-  assert_contains "$(cat "$CASE_DIR/raw-execution.log")" type-safe \
+  unset FM_TEST_PANE_BASH_ENV FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED FM_TEST_RAW_EXECUTION_LOG
+  expect_code 0 "$status" "raw command -p launch should bypass a pane command function"
+  assert_absent "$CASE_DIR/raw-omp-executed" "pane command function executed the harmless fake OMP"
+  assert_contains "$(cat "$CASE_DIR/raw-execution.log")" command-safe \
     "raw command -p launch did not execute its resolved direct target"
-  pass "raw command -p ignores imported type functions"
+  pass "raw command -p bypasses pane command functions"
 }
 
 test_raw_non_omp_command_p_preserves_path_assignment() {
@@ -1462,7 +1469,7 @@ test_raw_non_omp_command_p_preserves_path_assignment() {
   rec=$(make_spawn_case profile-raw-command-p-path claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
-  raw='PATH=/custom command -p -- printenv PATH'
+  raw="PATH=/custom command -p -- $RAW_DIRECT_PRINTENV PATH"
   export FM_TEST_EXECUTE_RAW_LAUNCH=1
   export FM_TEST_RAW_EXECUTION_LOG="$CASE_DIR/raw-execution.log"
 
@@ -3122,7 +3129,7 @@ test_raw_command_p_effective_path_wrapper_refuses_before_raw_execution
 test_raw_shebang_wrapper_refuses_before_raw_execution
 test_raw_untrusted_native_target_refuses_before_raw_execution
 test_raw_absolute_wrapper_refuses_before_raw_execution
-test_raw_non_omp_command_p_ignores_imported_type_function
+test_raw_non_omp_command_p_bypasses_pane_command_function
 test_raw_non_omp_command_p_preserves_path_assignment
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
