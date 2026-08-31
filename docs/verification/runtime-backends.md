@@ -624,6 +624,15 @@ The branch session is built with the native prompt-cache options providerPromptC
 The committed live guard does not observe server-side cache-read token counts, which OMP does not expose to the extension surface, so no cache-hit-rate claim is made here.
 
 Mid-flight branch replacement, model/effort hot-swap, and hung-branch live takeover are deliberately out of scope for this port (docs/omp-supervision-branch.md), so the guard exercises only the shipped surface: a resident branch with clean-boundary and kill-restart transitions.
+#### OMP main-fallback re-entry
+
+The live OMP 18.0.10 observation on 2026-08-31 found the supervision branch unavailable while fallback notifications were handled by MAIN.
+The claimed sequences progressed from rows 11 and 12 with `--ack-through 12`, through rows 11, 14, 15, and 16 with `--ack-through 16`, to rows 11, 14, 15, 16, and 17 with `--ack-through 17`.
+The repeated drain command was `bin/fm-wake-drain.sh`, and the intervening report and current-state tools were skipped by pending operational input.
+No queue row was lost during this observation.
+Current coverage proves one fallback delivery but not a burst of current fallback notifications while MAIN owns an unacknowledged batch.
+The missing regression boundary is the issue [#82](https://github.com/dnth/firstmate/issues/82) burst scenario: coalesce one active MAIN fallback handling episode, preserve durable higher-sequence rows, and deliver zero or one successor after acknowledgement according to whether unread MAIN-owned rows remain.
+Issue [#82](https://github.com/dnth/firstmate/issues/82) is distinct from issue [#74](https://github.com/dnth/firstmate/issues/74), which covers stale advisory freshness after durable state supersedes prose rather than reentrant delivery of current valid operational notifications.
 
 ## Herdr
 
