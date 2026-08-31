@@ -110,9 +110,8 @@
 #   For crewmates and scouts, a non-flag string containing shell whitespace is
 #   treated as a RAW launch command - the escape hatch for verifying new adapters.
 #   Raw direct non-OMP commands preserve accepted assignments and arguments
-#   through an absolute `env` launch form only for canonical identities or exact
-#   file digests of true, false, printf, printenv, sleep, cat, echo, head, tail,
-#   wc, basename, dirname, and test, bypassing pane aliases and functions.
+#   through an absolute `env` launch form only for canonical executable
+#   identities, bypassing pane aliases and functions.
 #   Leading whitespace, plain environment assignments, and `command -p --` are
 #   normalized only to identify OMP, which raw launch never permits.
 #   Ambiguous shell syntax refuses before endpoint creation rather than bypassing
@@ -1334,12 +1333,10 @@ raw_launch_executable_identity() {  # <canonical executable>
     || /usr/bin/stat -f '%d:%i' -- "$1" 2>/dev/null
 }
 
-raw_launch_executable_digest() {  # <canonical executable>
-  local output
-  output=$(/usr/bin/sha256sum -- "$1" 2>/dev/null) \
-    || output=$(/usr/bin/shasum -a 256 -- "$1" 2>/dev/null) \
-    || return 1
-  printf '%s\n' "${output%% *}"
+raw_launch_omp_is_script_executable() {  # <canonical executable>
+  local prefix
+  IFS= read -r -n 2 prefix < "$1" || true
+  [ "$prefix" = '#!' ]
 }
 
 raw_launch_find_executable() {  # <bare target> <lookup path> <relative root>
@@ -1351,22 +1348,6 @@ raw_launch_find_executable() {  # <bare target> <lookup path> <relative root>
     candidate="$directory/$target"
     [ -f "$candidate" ] && [ -x "$candidate" ] || continue
     raw_launch_canonical_executable "$candidate" "$root" && return 0
-  done
-  return 1
-}
-
-raw_launch_omp_is_trusted_direct_executable() {  # <canonical executable>
-  local path=$1 path_identity path_digest trusted trusted_path trusted_digest
-  path_identity=$(raw_launch_executable_identity "$path") || return 1
-  path_digest=$(raw_launch_executable_digest "$path") || return 1
-  for trusted in true false printf printenv sleep cat echo head tail wc basename dirname test; do
-    for trusted_path in "/usr/bin/$trusted" "/bin/$trusted"; do
-      trusted_path=$(raw_launch_canonical_executable "$trusted_path" / 2>/dev/null || true)
-      [ -n "$trusted_path" ] || continue
-      [ "$(raw_launch_executable_identity "$trusted_path")" != "$path_identity" ] || return 0
-      trusted_digest=$(raw_launch_executable_digest "$trusted_path") || continue
-      [ "$trusted_digest" != "$path_digest" ] || return 0
-    done
   done
   return 1
 }
@@ -1403,8 +1384,8 @@ raw_launch_omp_canonical_executable() {  # <path> <relative root> <lookup path> 
   local -a omp_lookup_entries
   path=$(raw_launch_canonical_executable "$1" "$2") || return 1
   raw_launch_omp_is_wrapper_executable "$path" "$3" "$4" "$2" && return 1
+  raw_launch_omp_is_script_executable "$path" && return 1
   raw_launch_omp_word_has_shell_grammar "${path##*/}" && return 1
-  raw_launch_omp_is_trusted_direct_executable "$path" || return 1
   for omp_lookup_path in "$3" "$4" "${PATH:-}"; do
     case "$omp_lookup_path" in ''|:*|*::|*:|*$'\n'*|*$'\r'*) continue ;; esac
     IFS=: read -r -a omp_lookup_entries <<< "$omp_lookup_path"

@@ -1391,7 +1391,7 @@ SH
   pass "raw shebang wrappers refuse before raw execution"
 }
 
-test_raw_untrusted_native_target_refuses_before_raw_execution() {
+test_raw_native_non_omp_target_preserves_raw_compatibility() {
   local rec id out status target
   id=$(profile_id profile-raw-untrusted-native-z16b)
   rec=$(make_spawn_case profile-raw-untrusted-native claude "$id")
@@ -1402,18 +1402,16 @@ test_raw_untrusted_native_target_refuses_before_raw_execution() {
   printf '\0' >> "$target"
   chmod +x "$target"
   export FM_TEST_EXECUTE_RAW_LAUNCH=1
-  export FM_TEST_RAW_EXECUTION_LOG="$CASE_DIR/raw-execution.log"
-
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" "$target native-target-ok")
   status=$?
-  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_EXECUTION_LOG
-  expect_code 1 "$status" "raw untrusted native target must refuse before launch"
-  assert_contains "$out" "raw launch command could invoke omp" \
-    "untrusted native target refusal did not name its verified-harness boundary"
-  [ ! -s "$LAUNCH_LOG" ] || fail "untrusted native target typed a launch command"
-  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "untrusted native target created an endpoint"
-  pass "raw untrusted native targets refuse before raw execution"
+  unset FM_TEST_EXECUTE_RAW_LAUNCH
+  expect_code 0 "$status" "raw native non-OMP target should preserve raw compatibility"
+  assert_contains "$out" "spawned $id harness=custom-agent" \
+    "raw native non-OMP target lost its executable identity"
+  assert_contains "$(cat "$LAUNCH_LOG")" "$target native-target-ok" \
+    "raw native non-OMP target was not submitted"
+  pass "raw native non-OMP targets preserve raw compatibility"
 }
 
 test_raw_absolute_wrapper_refuses_before_raw_execution() {
@@ -3128,7 +3126,7 @@ test_raw_man_wrapper_refuses_before_raw_execution
 test_raw_terminal_multiplexer_wrapper_refuses_before_raw_execution
 test_raw_command_p_effective_path_wrapper_refuses_before_raw_execution
 test_raw_shebang_wrapper_refuses_before_raw_execution
-test_raw_untrusted_native_target_refuses_before_raw_execution
+test_raw_native_non_omp_target_preserves_raw_compatibility
 test_raw_absolute_wrapper_refuses_before_raw_execution
 test_raw_non_omp_command_p_bypasses_pane_command_function
 test_raw_non_omp_command_p_preserves_path_assignment
