@@ -157,6 +157,8 @@ remote_omp_delivery_load_libs() {
   . "$SCRIPT_DIR/fm-marker-lib.sh"
   # shellcheck source=bin/fm-primary-watch-version-lib.sh
   . "$SCRIPT_DIR/fm-primary-watch-version-lib.sh"
+  # shellcheck source=bin/fm-omp-process-lib.sh
+  . "$SCRIPT_DIR/fm-omp-process-lib.sh"
 }
 
 remote_omp_delivery_binding() { # <id>
@@ -369,6 +371,7 @@ cmd_send() {
   fi
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
   if [ "$harness" = omp ]; then
+    remote_omp_delivery_load_libs
     fm_message_from_firstmate "$message" \
       || remote_omp_delivery_refuse "relay request lacks the parent-owned from-firstmate carrier"
     fm_operational_input_body "$message" relay_body \
