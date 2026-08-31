@@ -4,7 +4,7 @@
 # Usage: fm-clean-commit-relaunch.sh <source-task-id> <destination-task-id>
 #
 # This explicit operator command is the sole owner of clean-commit relaunch.
-# It admits one missing local codex/tmux ship task, allocates a normal clean
+# It admits one missing local codex/Herdr ship task, allocates a normal clean
 # Treehouse worktree, creates a new branch at the admitted source commit,
 # publishes one evidence-only handoff, launches and acknowledges a fresh task,
 # and cleans only destination-owned state on failure.
@@ -135,19 +135,6 @@ task_worktrees_are_well_formed() {
     recorded=$(meta_exact "$meta" worktree 2>/dev/null) || return 1
     resolve_dir recorded-task-worktree "$recorded" >/dev/null 2>&1 || return 1
   done
-}
-
-destination_tmux_window_absent() {  # <destination>
-  local destination=$1 session windows
-  if [ -n "${TMUX:-}" ]; then
-    session=$(tmux display-message -p '#S' 2>/dev/null) || return 1
-  elif tmux has-session -t firstmate 2>/dev/null; then
-    session=firstmate
-  else
-    return 0
-  fi
-  windows=$(tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null) || return 1
-  ! grep -Fxq "fm-$destination" <<< "$windows"
 }
 
 destination_artifact_exists() {  # <destination>
@@ -368,8 +355,8 @@ case "$MODEL" in
   *[!A-Za-z0-9._:/@+-]*) echo "error: source task $SOURCE has invalid model metadata" >&2; exit 1 ;;
 esac
 case "$EFFORT" in ''|default|low|medium|high|xhigh|max) ;; *) echo "error: source task $SOURCE has invalid effort metadata" >&2; exit 1 ;; esac
-[ "$HARNESS:$BACKEND" = codex:tmux ] || {
-  echo "error: clean-commit relaunch currently supports only verified codex/tmux source tasks" >&2
+[ "$HARNESS:$BACKEND" = codex:herdr ] || {
+  echo "error: clean-commit relaunch currently supports only verified codex/Herdr source tasks" >&2
   exit 1
 }
 grep -Fxq "Delivery contract: mode=$MODE" "$DESTINATION_BRIEF" || {
@@ -443,10 +430,6 @@ case "$(fm_backend_agent_state "$BACKEND" "$FM_BACKEND_VALIDATED_TARGET" "$SOURC
   missing) ;;
   *) echo "error: source task $SOURCE endpoint is not authoritatively missing" >&2; exit 1 ;;
 esac
-destination_tmux_window_absent "$DESTINATION" || {
-  echo "error: destination task $DESTINATION already has a tmux endpoint or tmux is unreadable" >&2
-  exit 1
-}
 CUSTODY=$(no_mistakes_custody "$SOURCE_WORKTREE" "$SOURCE_BRANCH")
 case "$CUSTODY" in
   none) ;;

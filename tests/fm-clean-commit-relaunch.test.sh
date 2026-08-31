@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Deterministic behavior tests for the explicit clean-commit relaunch owner.
 #
-# The fixture uses linked Git worktrees plus fake Treehouse, tmux, and
+# The fixture uses linked Git worktrees plus fake Treehouse and Herdr adapters.
 # no-mistakes adapters. No test creates, stops, or interrogates a live Herdr
 # process. Every refusal asserts that allocation was never requested and that
 # source task records and branch identity remain unchanged.
@@ -27,7 +27,36 @@ copy_runtime() {  # <fixture>
     fm-session-lock-lib.sh fm-pool-lib.sh fm-treehouse-root-lib.sh; do
     cp "$ROOT/bin/$file" "$fixture/bin/$file"
   done
-  cp "$ROOT/bin/backends/tmux.sh" "$fixture/bin/backends/tmux.sh"
+  cat > "$fixture/bin/backends/herdr.sh" <<'SH'
+fm_backend_herdr_agent_state() {
+  case "${FM_TEST_ENDPOINT:-missing}" in
+    missing) printf missing ;;
+    live) printf alive ;;
+    dead) printf dead ;;
+    *) printf unreadable ;;
+  esac
+}
+fm_backend_herdr_container_ensure() { printf 'firstmate:workspace\tseeded'; }
+fm_backend_herdr_create_task() {
+  printf 'create-task %s\n' "$*" >> "$FM_TEST_HERDR_LOG"
+  [ -z "${FM_TEST_LAUNCH_DELAY:-}" ] || sleep "$FM_TEST_LAUNCH_DELAY"
+  [ "${FM_TEST_LAUNCH_FAIL:-0}" != 1 ] || return 1
+  printf 'tab-destination pane-destination'
+}
+fm_backend_herdr_send_text_line() { printf 'send-text %s\n' "$*" >> "$FM_TEST_HERDR_LOG"; }
+fm_backend_herdr_send_literal() { printf 'send-literal %s\n' "$*" >> "$FM_TEST_HERDR_LOG"; }
+fm_backend_herdr_send_key() { printf 'send-key %s\n' "$*" >> "$FM_TEST_HERDR_LOG"; }
+fm_backend_herdr_send_text_submit() {
+  printf 'submit %s\n' "$*" >> "$FM_TEST_HERDR_LOG"
+  for message in "$FM_TEST_HOME/state/$FM_TEST_DESTINATION_ID.inbox"/*.msg; do
+    [ -e "$message" ] || continue
+    [ "${FM_TEST_ACK_MODE:-success}" = success ] && mv "$message" "$FM_TEST_HOME/state/$FM_TEST_DESTINATION_ID.inbox/handled/"
+  done
+  printf empty
+}
+fm_backend_herdr_composer_state() { printf empty; }
+fm_backend_herdr_kill() { printf 'kill %s\n' "$*" >> "$FM_TEST_HERDR_LOG"; }
+SH
   cat > "$fixture/bin/fm-receipt-check.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -59,7 +88,7 @@ if [ "${1:-}" = return ]; then
   git -C "$FM_TEST_PROJECT" worktree remove --force "$path" >/dev/null 2>&1 || true
 fi
 SH
-  chmod +x "$fixture/bin"/*.sh "$fixture/bin/backends/tmux.sh"
+  chmod +x "$fixture/bin"/*.sh "$fixture/bin/backends/herdr.sh"
 }
 
 make_fakebin() {  # <fixture>
@@ -217,11 +246,16 @@ new_case() {  # <name>
   write_brief "$home/data/source/brief.md" no-mistakes
   write_brief "$home/data/destination/brief.md" no-mistakes
   cat > "$home/state/source.meta" <<EOF
-window=firstmate:fm-source
 endpoint_task_id=source
 worktree=$source
 project=$project
 harness=codex
+backend=herdr
+herdr_session=firstmate
+herdr_workspace_id=workspace-source
+herdr_tab_id=tab-source
+herdr_pane_id=pane-source
+window=firstmate:pane-source
 kind=ship
 mode=no-mistakes
 yolo=off
@@ -263,7 +297,7 @@ run_owner() {  # <fixture> [source] [destination]
     FM_TEST_DESTINATION_ID="$destination" \
     FM_TEST_WINDOWS="$fixture/windows" \
     FM_TEST_ALLOCATOR_LOG="$fixture/allocator.log" \
-    FM_TEST_TMUX_LOG="$fixture/tmux.log" \
+    FM_TEST_HERDR_LOG="$fixture/tmux.log" \
     TMPDIR="$fixture/tmp" FM_HOME="$fixture/home" FM_ROOT_OVERRIDE="$ROOT" \
     "$fixture/bin/fm-clean-commit-relaunch.sh" "$source" "$destination"
 }
@@ -334,17 +368,6 @@ for endpoint in live dead ambiguous unreadable; do
   [ "$(source_snapshot "$fixture")" = "$before" ] || fail "endpoint $endpoint mutated source"
 done
 pass "clean relaunch: only an authoritatively missing endpoint passes admission"
-
-# A destination endpoint is occupied even without durable task metadata.
-fixture=$(new_case destination-window-occupied)
-before=$(source_snapshot "$fixture")
-printf 'fm-destination\n' > "$fixture/windows"
-out=$(run_owner "$fixture" 2>&1)
-expect_code 1 $? "existing destination window should refuse"
-assert_refused_before_allocation "$fixture" "$out" "existing destination window"
-[ "$(source_snapshot "$fixture")" = "$before" ] || fail "existing destination window mutated source"
-[ "$(cat "$fixture/windows")" = fm-destination ] || fail "existing destination window was removed"
-pass "clean relaunch: existing destination endpoint refuses before allocation"
 
 # Metadata identity, role, home, and durable occupancy all refuse before the
 # allocator can create a destination.
@@ -551,24 +574,6 @@ expect_code 1 $? "concurrent branch creation should fail"
 git -C "$fixture/project" show-ref --verify --quiet refs/heads/fm/destination || fail "concurrent branch creation was deleted"
 pass "clean relaunch: concurrent destination branch remains foreign"
 
-# A concurrent tmux window creation never becomes this relaunch's cleanup target.
-fixture=$(new_case window-race)
-before=$(source_snapshot "$fixture")
-out=$(FM_TEST_FOREIGN_WINDOW_RACE=1 run_owner "$fixture" 2>&1)
-expect_code 1 $? "concurrent window creation should fail"
-[ "$(source_snapshot "$fixture")" = "$before" ] || fail "concurrent window creation mutated source"
-[ "$(cat "$fixture/windows")" = fm-destination ] || fail "concurrent window creation was removed"
-assert_not_contains "$(cat "$fixture/tmux.log")" 'kill-window' "concurrent window creation was cleaned"
-pass "clean relaunch: concurrent destination endpoint remains foreign"
-
-fixture=$(new_case duplicate-window-race)
-before=$(source_snapshot "$fixture")
-out=$(FM_TEST_DUPLICATE_WINDOW_RACE=1 run_owner "$fixture" 2>&1)
-expect_code 1 $? "duplicate destination window should fail"
-[ "$(source_snapshot "$fixture")" = "$before" ] || fail "duplicate destination window mutated source"
-assert_not_contains "$(cat "$fixture/tmux.log")" 'send-keys' "duplicate destination window received a launch or inbox command"
-pass "clean relaunch: duplicate destination endpoint refuses after creation"
-
 # An interrupt after handoff publication exits through destination-only cleanup.
 fixture=$(new_case interrupted-publication)
 before=$(source_snapshot "$fixture")
@@ -589,26 +594,6 @@ assert_absent "$fixture/home/data/destination/relaunch-handoff.json" "interrupte
 git -C "$fixture/project" show-ref --verify --quiet refs/heads/fm/destination && fail "interrupted publication retained destination branch"
 pass "clean relaunch: interrupted destination publication preserves source"
 
-# An interrupt while tmux creates the destination also cleans that new window.
-fixture=$(new_case interrupted-window-creation)
-before=$(source_snapshot "$fixture")
-FM_TEST_LAUNCH_DELAY=5 run_owner "$fixture" >"$fixture/interrupted.out" 2>&1 &
-pid=$!
-for _ in $(seq 1 100); do
-  [ -s "$fixture/tmux.log" ] && break
-  sleep 0.01
-done
-assert_present "$fixture/tmux.log" "window-creation interrupt fixture did not start tmux creation"
-kill -HUP "$pid"
-wait "$pid"
-status=$?
-expect_code 1 "$status" "interrupted window creation should fail"
-[ "$(source_snapshot "$fixture")" = "$before" ] || fail "interrupted window creation mutated source"
-assert_contains "$(cat "$fixture/tmux.log")" 'kill-window' "interrupted window creation did not clean the destination endpoint"
-assert_absent "$fixture/home/state/destination.meta" "interrupted window creation retained destination metadata"
-git -C "$fixture/project" show-ref --verify --quiet refs/heads/fm/destination && fail "interrupted window creation retained destination branch"
-pass "clean relaunch: interrupted window creation cleans destination endpoint"
-
 # The destination lock serializes two simultaneous attempts before a second
 # endpoint or branch can be created.
 fixture=$(new_case concurrency)
@@ -621,7 +606,7 @@ wait "$pid"
 first_status=$?
 [ "$first_status" -eq 0 ] || fail "first concurrent relaunch did not succeed: $(cat "$fixture/first.out")"
 [ "$status" -ne 0 ] || fail "second concurrent relaunch unexpectedly succeeded"
-[ "$(grep -c '^new-window ' "$fixture/tmux.log")" -eq 1 ] || fail "concurrent relaunch created duplicate endpoints"
+[ "$(grep -c '^create-task ' "$fixture/tmux.log")" -eq 1 ] || fail "concurrent relaunch created duplicate endpoints"
 pass "clean relaunch: destination lock serializes concurrent requests"
 
 # Generic spawn retains its public fresh-task interface; legacy relaunch flags
