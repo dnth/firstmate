@@ -343,7 +343,7 @@ The mechanics are owned by the `/updatefirstmate` skill and firstmate's operatin
 `bin/fm-clean-commit-relaunch.sh` is an explicit operator command, never an automatic recovery path.
 It alone admits a missing committed source task, leases a distinct normal worktree, creates the successor branch at the admitted commit, records evidence, and launches the fresh worker.
 The source branch, records, validation custody, session material, and presentation state remain read-only.
-The initial supported launch profile is Codex on the reference tmux backend.
+The initial supported launch profile is Codex on the Herdr backend.
 Generic `fm-spawn.sh` remains a fresh-task interface and does not carry relaunch source, commit, handoff, or allocated-worktree authority.
 The command header owns the exact admission and cleanup mechanics.
 
