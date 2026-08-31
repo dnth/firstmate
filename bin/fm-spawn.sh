@@ -1345,10 +1345,10 @@ raw_launch_omp_is_wrapper_executable() {  # <canonical executable> <lookup path>
   local path=$1 lookup_path=$2 root=$3 path_identity wrapper wrapper_path wrapper_lookup_path path_entry
   local -a wrapper_lookup_entries
   case "${path##*/}" in
-    command|env|exec|builtin|busybox|toybox|git|bash|sh|zsh|fish|dash|ksh|csh|tcsh|nohup|nice|timeout|stdbuf|setsid|chroot|runcon|unshare|taskset|ionice|sudo|doas|xargs|rlwrap|unbuffer|watch|strace|gdb|lldb|valgrind|flock|make|cmake|ninja|npm|npx|yarn|pnpm|pip|pip3|cargo|go|uv|poetry|docker|podman|ssh|scp|rsync|find|parallel|systemd-run|tar|gtar|bsdtar|star|cpio|pax|ar|7z|7za|7zr|zip|unzip|ld.so*|ld-linux*|ld-musl*|ld-*.so*|dyld|python*|perl*|ruby*|node|deno|java|php|lua*|tclsh*|awk|gawk|mawk|nawk) return 0 ;;
+    command|env|exec|builtin|busybox|toybox|git|bash|sh|zsh|fish|dash|ksh|csh|tcsh|nohup|nice|timeout|stdbuf|setsid|chroot|runcon|unshare|taskset|ionice|sudo|doas|xargs|rlwrap|unbuffer|watch|strace|gdb|lldb|valgrind|flock|make|cmake|ninja|npm|npx|yarn|pnpm|pip|pip3|cargo|go|uv|poetry|docker|podman|ssh|scp|rsync|find|parallel|systemd-run|tar|gtar|bsdtar|star|cpio|pax|ar|7z|7za|7zr|zip|unzip|sed|ed|ex|vi|vim|nvi|less|more|ld.so*|ld-linux*|ld-musl*|ld-*.so*|dyld|python*|perl*|ruby*|node|deno|java|php|lua*|tclsh*|awk|gawk|mawk|nawk) return 0 ;;
   esac
   path_identity=$(raw_launch_executable_identity "$path") || return 0
-  for wrapper in env busybox toybox git bash sh zsh fish dash ksh csh tcsh nohup nice timeout stdbuf setsid chroot runcon unshare taskset ionice sudo doas xargs rlwrap unbuffer watch strace gdb lldb valgrind flock make cmake ninja npm npx yarn pnpm pip pip3 cargo go uv poetry docker podman ssh scp rsync find parallel systemd-run tar gtar bsdtar star cpio pax ar 7z 7za 7zr zip unzip python python3 perl ruby node deno java php lua tclsh awk gawk mawk nawk; do
+  for wrapper in env busybox toybox git bash sh zsh fish dash ksh csh tcsh nohup nice timeout stdbuf setsid chroot runcon unshare taskset ionice sudo doas xargs rlwrap unbuffer watch strace gdb lldb valgrind flock make cmake ninja npm npx yarn pnpm pip pip3 cargo go uv poetry docker podman ssh scp rsync find parallel systemd-run tar gtar bsdtar star cpio pax ar 7z 7za 7zr zip unzip sed ed ex vi vim nvi less more python python3 perl ruby node deno java php lua tclsh awk gawk mawk nawk; do
     for wrapper_lookup_path in "$lookup_path" "${PATH:-}" "/usr/bin:/bin:/usr/sbin:/sbin"; do
       case "$wrapper_lookup_path" in ''|:*|*::|*:|*$'\n'*|*$'\r'*) continue ;; esac
       IFS=: read -r -a wrapper_lookup_entries <<< "$wrapper_lookup_path"
@@ -1359,6 +1359,11 @@ raw_launch_omp_is_wrapper_executable() {  # <canonical executable> <lookup path>
       [ -n "$wrapper_path" ] || continue
       [ "$(raw_launch_executable_identity "$wrapper_path")" != "$path_identity" ] || return 0
     done
+  done
+  for wrapper_path in /lib/ld.so* /lib/ld-linux* /lib/ld-musl* /lib/ld-*.so* /lib/*/ld.so* /lib/*/ld-linux* /lib/*/ld-musl* /lib/*/ld-*.so* /lib64/ld.so* /lib64/ld-linux* /lib64/ld-musl* /lib64/ld-*.so* /usr/lib/ld.so* /usr/lib/ld-linux* /usr/lib/ld-musl* /usr/lib/ld-*.so* /usr/lib/*/ld.so* /usr/lib/*/ld-linux* /usr/lib/*/ld-musl* /usr/lib/*/ld-*.so* /usr/lib64/ld.so* /usr/lib64/ld-linux* /usr/lib64/ld-musl* /usr/lib64/ld-*.so* /usr/lib/dyld /usr/libexec/dyld; do
+    wrapper_path=$(raw_launch_canonical_executable "$wrapper_path" "$root" 2>/dev/null || true)
+    [ -n "$wrapper_path" ] || continue
+    [ "$(raw_launch_executable_identity "$wrapper_path")" != "$path_identity" ] || return 0
   done
   return 1
 }

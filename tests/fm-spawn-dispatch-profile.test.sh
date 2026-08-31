@@ -1245,6 +1245,37 @@ SH
   pass "raw tar wrappers refuse before raw execution"
 }
 
+test_raw_sed_wrapper_refuses_before_raw_execution() {
+  local rec id out status sed
+  id=$(profile_id profile-raw-sed-wrapper-z15w)
+  rec=$(make_spawn_case profile-raw-sed-wrapper claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  sed="$FAKEBIN_DIR/sed"
+  cat > "$sed" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  [ "$arg" = eomp ] && exec omp
+done
+exit 1
+SH
+  chmod +x "$sed"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" 'sed -e eomp /dev/null')
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+  expect_code 1 "$status" "raw sed wrapper must refuse before launch"
+  assert_contains "$out" "raw launch command could invoke omp" \
+    "sed wrapper refusal did not name its verified-harness boundary"
+  assert_absent "$CASE_DIR/raw-omp-executed" "sed wrapper executed the harmless fake OMP"
+  [ ! -s "$LAUNCH_LOG" ] || fail "sed wrapper typed a launch command"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "sed wrapper created an endpoint"
+  pass "raw sed wrappers refuse before raw execution"
+}
+
 test_raw_absolute_wrapper_refuses_before_raw_execution() {
   local rec id out status
   id=$(profile_id profile-raw-absolute-wrapper-z15o)
@@ -2952,6 +2983,7 @@ test_raw_busybox_wrapper_refuses_before_raw_execution
 test_raw_hardlinked_wrapper_refuses_before_raw_execution
 test_raw_git_wrapper_refuses_before_raw_execution
 test_raw_tar_wrapper_refuses_before_raw_execution
+test_raw_sed_wrapper_refuses_before_raw_execution
 test_raw_absolute_wrapper_refuses_before_raw_execution
 test_raw_non_omp_command_p_ignores_imported_type_function
 test_raw_non_omp_command_p_preserves_path_assignment
