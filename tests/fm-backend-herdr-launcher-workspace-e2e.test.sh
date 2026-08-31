@@ -47,6 +47,8 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (requi
 herdr_forget_inherited_pane
 
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-launcher-e2e.XXXXXX")
+RAW_PRINT_AGENT="$TMP_ROOT/raw-print-agent"
+/usr/bin/cp /usr/bin/printf "$RAW_PRINT_AGENT"
 HERDR_LAB_HELPER="$ROOT/bin/fm-herdr-lab.sh"
 HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-herdr-launcher-ws) || {
   rm -rf "$TMP_ROOT"
@@ -128,7 +130,7 @@ spawn_from_launcher() {
   # Workers still accept a raw launch command; a --secondmate spawn refuses one
   # and takes a verified harness identity instead (bin/fm-spawn.sh). Either way
   # this suite only needs an endpoint to exist so its workspace can be read.
-  launch="printf launcher-ws-ok"
+  launch="$RAW_PRINT_AGENT launcher-ws-ok"
   for arg in "$@"; do
     [ "$arg" = --secondmate ] && launch=codex
   done
@@ -288,7 +290,7 @@ cat > "$TMP_ROOT/spawn-in-pane.sh" <<SPAWN
 #!/usr/bin/env bash
 set -u
 FM_SPAWN_NO_GUARD=1 FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" \\
-  "$ROOT/bin/fm-spawn.sh" dupC "$PROJ" "printf launcher-ws-ok" --mode no-mistakes --yolo off --backend herdr \\
+  "$ROOT/bin/fm-spawn.sh" dupC "$PROJ" "$RAW_PRINT_AGENT launcher-ws-ok" --mode no-mistakes --yolo off --backend herdr \\
   > "$TMP_ROOT/dupC.out" 2> "$TMP_ROOT/dupC.err"
 echo \$? > "$TMP_ROOT/dupC.rc"
 SPAWN
