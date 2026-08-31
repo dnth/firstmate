@@ -336,7 +336,7 @@ Before killing and respawning a live OMP agent for a wedged PROVIDER STREAM, fol
 **Primary-session integration fact (verified 2026-07-31, OMP 17.1.8).**
 Plain OMP started from the Firstmate root discovers `.omp/extensions/fm-primary-omp.ts` natively, including in a fresh checkout before canonical `state/` exists; `omp -e .omp/extensions/fm-primary-omp.ts` remains the explicit recovery fallback.
 The adapter publishes the OMP marker shape owned by [configuration](../../../docs/configuration.md#harness-support), delivers the session-start instruction on native `session_start` and `session_switch` events, and owns watcher generations through `fm_watch_arm_omp` plus `/new` and `/resume` continuity.
-It routes watcher follow-ups through OMP's `sendUserMessage(content)` with no explicit `deliverAs`, so OMP starts a turn when idle and steers while streaming instead of queueing the notification; it runs the shared turn-end predicate through native `session_stop`, and applies the shared watcher-arm, persistent-directory, and delegation-shaped tool safety checks before tool execution.
+Primary watcher notification delivery and durable wake acknowledgement boundaries are owned by [`docs/watcher-continuity.md`](../../../docs/watcher-continuity.md); the adapter also runs the shared turn-end predicate through native `session_stop` and applies the shared watcher-arm, persistent-directory, and delegation-shaped tool safety checks before tool execution.
 `bin/fm-session-start.sh` rejects a missing, stale, foreign-PID, or version-mismatched loaded marker and prints both native-discovery and explicit `-e` recovery commands.
 The authoritative operating procedure is `docs/supervision-protocols/omp.md`.
 

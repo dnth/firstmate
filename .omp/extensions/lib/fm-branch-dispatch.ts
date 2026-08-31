@@ -16,6 +16,26 @@ import { readdirSync, readFileSync } from "node:fs";
 // main can repair the watcher cycle (fm_watch_arm_pi lives on main).
 
 export const FM_BRANCH_DISPATCH_EVENT = "fm-branch-supervision:dispatch";
+export const FM_PRIMARY_WATCHER_WAKE_EVENT = "fm-branch-supervision:main-wake";
+
+export interface PrimaryWatcherWake {
+  content: string;
+  notificationKey: string;
+  accepted: boolean;
+  accept(): void;
+}
+
+export function createPrimaryWatcherWake(content: string, notificationKey: string): PrimaryWatcherWake {
+  const wake: PrimaryWatcherWake = {
+    content,
+    notificationKey,
+    accepted: false,
+    accept() {
+      wake.accepted = true;
+    },
+  };
+  return wake;
+}
 
 export type UnreadWakeScopeStatus = "safe" | "empty" | "unsafe";
 
