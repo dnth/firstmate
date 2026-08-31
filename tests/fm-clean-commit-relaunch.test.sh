@@ -460,7 +460,7 @@ expect_code 1 $? "source-reusing allocator should refuse"
 assert_contains "$out" 'reused the source worktree' "source-reusing allocator did not explain its refusal"
 [ "$(source_snapshot "$fixture")" = "$before" ] || fail "source-reusing allocator cleaned or mutated source"
 [ -d "$fixture/source" ] || fail "source-reusing allocator removed the source worktree"
-assert_not_contains '--force' "$(cat "$fixture/allocator.log")" "source-reusing allocator used unsafe cleanup"
+assert_not_contains "$(cat "$fixture/allocator.log")" '--force' "source-reusing allocator used unsafe cleanup"
 pass "clean relaunch: source-reusing allocator cannot clean the source"
 
 # Only an unclaimed pool worktree may become cleanup-owned destination state.
@@ -471,7 +471,7 @@ for allocator in project task; do
   expect_code 1 $? "$allocator-reusing allocator should refuse"
   assert_contains "$out" 'error:' "$allocator-reusing allocator did not explain its refusal"
   [ "$(source_snapshot "$fixture")" = "$before" ] || fail "$allocator-reusing allocator mutated source"
-  assert_not_contains '--force' "$(cat "$fixture/allocator.log")" "$allocator-reusing allocator used unsafe cleanup"
+  assert_not_contains "$(cat "$fixture/allocator.log")" '--force' "$allocator-reusing allocator used unsafe cleanup"
   git -C "$fixture/project" show-ref --verify --quiet refs/heads/fm/destination && fail "$allocator-reusing allocator created a destination branch"
 done
 pass "clean relaunch: allocator must not reuse existing project worktrees"
@@ -530,7 +530,7 @@ out=$(FM_TEST_FOREIGN_WINDOW_RACE=1 run_owner "$fixture" 2>&1)
 expect_code 1 $? "concurrent window creation should fail"
 [ "$(source_snapshot "$fixture")" = "$before" ] || fail "concurrent window creation mutated source"
 [ "$(cat "$fixture/windows")" = fm-destination ] || fail "concurrent window creation was removed"
-assert_not_contains 'kill-window' "$(cat "$fixture/tmux.log")" "concurrent window creation was cleaned"
+assert_not_contains "$(cat "$fixture/tmux.log")" 'kill-window' "concurrent window creation was cleaned"
 pass "clean relaunch: concurrent destination endpoint remains foreign"
 
 fixture=$(new_case duplicate-window-race)
@@ -538,7 +538,7 @@ before=$(source_snapshot "$fixture")
 out=$(FM_TEST_DUPLICATE_WINDOW_RACE=1 run_owner "$fixture" 2>&1)
 expect_code 1 $? "duplicate destination window should fail"
 [ "$(source_snapshot "$fixture")" = "$before" ] || fail "duplicate destination window mutated source"
-assert_not_contains 'send-keys' "$(cat "$fixture/tmux.log")" "duplicate destination window received a launch or inbox command"
+assert_not_contains "$(cat "$fixture/tmux.log")" 'send-keys' "duplicate destination window received a launch or inbox command"
 pass "clean relaunch: duplicate destination endpoint refuses after creation"
 
 # An interrupt after handoff publication exits through destination-only cleanup.

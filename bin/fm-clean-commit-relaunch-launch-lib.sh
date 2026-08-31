@@ -16,6 +16,8 @@ FM_CLEAN_RELAUNCH_LAUNCH_WINDOW_ID=
 FM_CLEAN_RELAUNCH_LAUNCH_CREATE_INTERRUPTED=0
 FM_CLEAN_RELAUNCH_LAUNCH_METADATA_OWNED=0
 FM_CLEAN_RELAUNCH_LAUNCH_METADATA_INTERRUPTED=0
+FM_CLEAN_RELAUNCH_LAUNCH_TEMP_OWNED=0
+FM_CLEAN_RELAUNCH_LAUNCH_INBOX_OWNED=0
 
 fm_clean_relaunch_defer_window_creation_signal() {
   FM_CLEAN_RELAUNCH_LAUNCH_CREATE_INTERRUPTED=1
@@ -41,15 +43,9 @@ fm_clean_relaunch_launch_cleanup() {  # <destination-id>
   local id=$1 state=${FM_CLEAN_RELAUNCH_LAUNCH_STATE:-} window_id=${FM_CLEAN_RELAUNCH_LAUNCH_WINDOW_ID:-}
   [ -n "$window_id" ] && fm_backend_kill tmux "$window_id" >/dev/null 2>&1 || true
   [ -n "$state" ] || return 0
-  rm -rf -- "${TMPDIR:-/tmp}/fm-$id"
-  rm -rf -- "$state/$id.inbox"
+  [ "$FM_CLEAN_RELAUNCH_LAUNCH_TEMP_OWNED" -eq 0 ] || rm -rf -- "${TMPDIR:-/tmp}/fm-$id"
+  [ "$FM_CLEAN_RELAUNCH_LAUNCH_INBOX_OWNED" -eq 0 ] || rm -rf -- "$state/$id.inbox"
   [ "$FM_CLEAN_RELAUNCH_LAUNCH_METADATA_OWNED" -eq 0 ] || rm -f -- "$state/$id.meta"
-  rm -f -- "$state/$id.status" "$state/$id.turn-ended" \
-    "$state/$id.pi-ext.ts" "$state/$id.omp-ext.ts" "$state/$id.omp-ready" \
-    "$state/$id.omp-started" "$state/$id.omp-doorbell-ready" "$state/$id.busy-state" \
-    "$state/$id.omp-doorbell-ready.requests" "$state/$id.busy-gen" \
-    "$state/$id.grok-turnend-token" "$state/$id.kimi-turnend-token" \
-    "$state/$id.hermes-turnend-token" "$state/$id.hermes-session" "$state/$id.hermes-started"
 }
 
 fm_clean_relaunch_wait_for_ack() {  # <state> <id> <record>
@@ -124,11 +120,19 @@ fm_clean_relaunch_launch_allocated() {
   target="$FM_CLEAN_RELAUNCH_LAUNCH_WINDOW_ID"
 
   task_tmp="${TMPDIR:-/tmp}/fm-$id"
-  if [ -L "$task_tmp" ]; then
-    echo "error: destination task temp root must not be a symlink" >&2
+  if ! mkdir "$task_tmp"; then
+    echo "error: destination task temp root is already occupied" >&2
     return 1
   fi
-  mkdir -p "$task_tmp/gotmp" || return 1
+  FM_CLEAN_RELAUNCH_LAUNCH_TEMP_OWNED=1
+  mkdir "$task_tmp/gotmp" || return 1
+
+  if ! mkdir "$state/$id.inbox"; then
+    echo "error: destination inbox is already occupied" >&2
+    return 1
+  fi
+  FM_CLEAN_RELAUNCH_LAUNCH_INBOX_OWNED=1
+  mkdir "$state/$id.inbox/handled" || return 1
 
   meta_tmp=$(mktemp "$state/.${id}.meta.XXXXXX") || return 1
   if ! {

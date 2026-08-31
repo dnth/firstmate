@@ -243,6 +243,7 @@ DESTINATION_PUBLISHED=0
 DESTINATION_CHECKOUT_INTERRUPTED=0
 DESTINATION_HANDOFF_OWNED=0
 DESTINATION_HANDOFF_INTERRUPTED=0
+DESTINATION_ALLOCATION_INTERRUPTED=0
 
 defer_destination_checkout_signal() {
   DESTINATION_CHECKOUT_INTERRUPTED=1
@@ -250,6 +251,10 @@ defer_destination_checkout_signal() {
 
 defer_destination_handoff_signal() {
   DESTINATION_HANDOFF_INTERRUPTED=1
+}
+
+defer_destination_allocation_signal() {
+  DESTINATION_ALLOCATION_INTERRUPTED=1
 }
 
 cleanup_destination() {
@@ -455,12 +460,13 @@ git -C "$PROJECT" show-ref --verify --quiet "refs/heads/$DESTINATION_BRANCH" && 
   exit 1
 }
 
+trap defer_destination_allocation_signal HUP INT TERM
 ALLOCATED_WORKTREE=$(cd "$PROJECT" && "$SCRIPT_DIR/fm-treehouse-get.sh" --lease --lease-holder "fm-$DESTINATION") || {
+  trap interrupted HUP INT TERM
   echo "error: normal allocator did not supply a destination worktree" >&2
   exit 1
 }
 DESTINATION_WORKTREE=$ALLOCATED_WORKTREE
-DESTINATION_WORKTREE_OWNED=1
 ALLOCATED_WORKTREE=$(resolve_dir destination-worktree "$ALLOCATED_WORKTREE") || exit 1
 DESTINATION_WORKTREE=$ALLOCATED_WORKTREE
 [ "$ALLOCATED_WORKTREE" != "$SOURCE_WORKTREE" ] || {
@@ -500,6 +506,9 @@ if ! fm_pool_worktree_clean "$DESTINATION_WORKTREE" || path_has_git_operation "$
   echo "error: normal allocator returned an occupied destination worktree" >&2
   exit 1
 fi
+DESTINATION_WORKTREE_OWNED=1
+trap interrupted HUP INT TERM
+[ "$DESTINATION_ALLOCATION_INTERRUPTED" -eq 0 ] || exit 1
 trap defer_destination_checkout_signal HUP INT TERM
 if git -C "$DESTINATION_WORKTREE" checkout -b "$DESTINATION_BRANCH" "$SOURCE_COMMIT" >/dev/null; then
   DESTINATION_BRANCH_CREATED=1
