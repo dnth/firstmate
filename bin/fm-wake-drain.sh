@@ -32,6 +32,25 @@ RECOVERY_ACK_REQUIRED=false
 RECOVERY_ACK_MOVED=false
 ACK_THROUGH=
 ACK_GENERATION=
+OMP_NOTIFICATION_CLAIM="$STATE/.omp-primary-nextturn-notification"
+OMP_NOTIFICATION_ACKNOWLEDGEMENT="$STATE/.omp-primary-nextturn-ack"
+
+publish_omp_notification_acknowledgement() {
+  local claim_id acknowledgement_tmp
+  [ "$ACTOR" = main ] || return 0
+  [ -f "$OMP_NOTIFICATION_CLAIM" ] && [ ! -L "$OMP_NOTIFICATION_CLAIM" ] || return 0
+  [ "$(sed -n '1p' "$OMP_NOTIFICATION_CLAIM" 2>/dev/null)" = fm-omp-primary-nextturn-notification-v5 ] || return 0
+  [ "$(sed -n '5p' "$OMP_NOTIFICATION_CLAIM" 2>/dev/null)" = inflight ] || return 0
+  claim_id=$(sed -n '6p' "$OMP_NOTIFICATION_CLAIM" 2>/dev/null) || return 1
+  case "$claim_id" in ''|*[!a-f0-9-]*) return 0 ;; esac
+  acknowledgement_tmp=$(mktemp "$STATE/.omp-primary-nextturn-ack.XXXXXX") || return 1
+  if ! chmod 0600 "$acknowledgement_tmp" \
+    || ! printf '%s\n' "$claim_id" > "$acknowledgement_tmp" \
+    || ! _fm_atomic_replace "$acknowledgement_tmp" "$OMP_NOTIFICATION_ACKNOWLEDGEMENT"; then
+    rm -f -- "$acknowledgement_tmp"
+    return 1
+  fi
+}
 
 # --- per-actor consume (docs/omp-supervision-branch.md "Per-actor acknowledgement") --
 # main (FM_SUPERVISION_ACTOR unset or "main", via fm-lease-lib.sh's fm_lease_actor
@@ -328,6 +347,7 @@ if [ -n "$ACK_THROUGH" ]; then
       consume_actor_rows_locked "$MAIN_ROWS_FILE" "$ACK_THROUGH" || exit 1
     fi
   fi
+  publish_omp_notification_acknowledgement || exit 1
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
   if [ "$RECOVERY_ACK_MOVED" = true ]; then

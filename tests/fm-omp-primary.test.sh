@@ -987,6 +987,7 @@ SH
     FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" \
     FM_ARM_LOG="$TMP_ROOT/native-next-turn-batching.log" \
     FM_WAKE_LIB="$ROOT/bin/fm-wake-lib.sh" \
+    FM_WAKE_DRAIN="$ROOT/bin/fm-wake-drain.sh" \
     FM_OMP_TASK_INBOX_DIR="" FM_OMP_TASK_DOORBELL_READY="" \
     node --input-type=module 2>&1 <<'JS'
 import { spawnSync } from "node:child_process";
@@ -1063,6 +1064,13 @@ const startSession = async (sessionFile) => {
   );
 };
 const startNextTurn = async () => {
+  const notification = notifications.at(-1);
+  if (notification) {
+    await handlers.get("message_start")(
+      { type: "message_start", message: { ...notification.message, role: "custom" } },
+      {},
+    );
+  }
   await handlers.get("before_agent_start")({ type: "before_agent_start" }, {});
 };
 const trigger = async (count, messageCount) => {
@@ -1099,6 +1107,7 @@ try {
   ) {
     throw new Error(`first notification was not hidden next-turn delivery: ${JSON.stringify(first)}`);
   }
+  await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: "unrelated turn" }, {});
   const fallback = dispatch.createPrimaryWatcherWake("fallback batch", "branch-fallback");
   api.events.emit(dispatch.FM_PRIMARY_WATCHER_WAKE_EVENT, fallback);
   if (!fallback.accepted || notifications.length !== 1) {
@@ -1177,6 +1186,24 @@ try {
   const handling = armRows().filter((row) => row.startsWith("handling "));
   if (!handling.every((row) => row.includes("generation=fixture-generation"))) {
     throw new Error(`handling confirmation lost its recovery generation: ${handling.join(" | ")}`);
+  }
+  await startNextTurn();
+  writeFileSync(`${state}/.watcher-down`, "pending:handling:fixture-generation\n");
+  const acknowledged = spawnSync(process.env.FM_WAKE_DRAIN, ["--ack-through", "3", "--recovery-generation", "fixture-generation"], {
+    encoding: "utf8",
+    env: { ...process.env, FM_HOME: process.env.FM_HOME, FM_STATE_OVERRIDE: state },
+  });
+  if (acknowledged.status !== 0 || !existsSync(`${state}/.omp-primary-nextturn-ack`)) {
+    throw new Error(`durable wake acknowledgement did not retire its notification claim: ${acknowledged.stderr}`);
+  }
+  const notificationsBeforeAcknowledgedSwitch = notifications.length;
+  await handlers.get("session_switch")(
+    { type: "session_switch", reason: "resume" },
+    { sessionManager: { getSessionFile: () => `${state}/acknowledged-session.jsonl` } },
+  );
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  if (notifications.length !== notificationsBeforeAcknowledgedSwitch) {
+    throw new Error(`acknowledged durable wake replayed after replacement: ${JSON.stringify(notifications)}`);
   }
   console.log("omp-next-turn-batching-ok");
 } finally {

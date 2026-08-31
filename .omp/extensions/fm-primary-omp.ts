@@ -41,6 +41,7 @@ const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
 const marker = `${state}/.omp-primary-extension-loaded`;
 const operationalInputScript = `${fmRoot}/bin/fm-operational-input.sh`;
 const notificationClaim = `${state}/.omp-primary-nextturn-notification`;
+const notificationAcknowledgement = `${state}/.omp-primary-nextturn-ack`;
 
 type ProcessResult = {
   code: number;
@@ -52,6 +53,7 @@ type WakeNotificationClaim = {
   instance: string;
   session: string;
   state: "pending" | "inflight";
+  id: string;
   key: string;
   content: string;
 };
@@ -216,16 +218,19 @@ function readWakeNotificationClaim(): WakeNotificationClaim | undefined {
   const v2 = version === "fm-omp-primary-nextturn-notification-v2" && lines.length === 6;
   const v3 = version === "fm-omp-primary-nextturn-notification-v3" && lines.length === 7;
   const v4 = version === "fm-omp-primary-nextturn-notification-v4" && lines.length === 8;
-  if (!v2 && !v3 && !v4) return undefined;
+  const v5 = version === "fm-omp-primary-nextturn-notification-v5" && lines.length === 9;
+  if (!v2 && !v3 && !v4 && !v5) return undefined;
   const claimState = v4 ? lines[4] : "pending";
+  const v5ClaimState = v5 ? lines[4] : claimState;
   const sessionIndex = v2 ? 2 : 3;
-  const keyIndex = v4 ? 5 : sessionIndex + 1;
+  const keyIndex = v5 ? 6 : v4 ? 5 : sessionIndex + 1;
   const contentIndex = keyIndex + 1;
   if (
     !/^[0-9]+$/u.test(lines[1]) ||
     (v3 && !/^[a-f0-9-]{36}$/u.test(lines[2])) ||
-    (v4 && !/^[a-f0-9-]{36}$/u.test(lines[2])) ||
-    (claimState !== "pending" && claimState !== "inflight") ||
+    ((v4 || v5) && !/^[a-f0-9-]{36}$/u.test(lines[2])) ||
+    (v5 && !/^[a-f0-9-]{36}$/u.test(lines[5])) ||
+    (v5ClaimState !== "pending" && v5ClaimState !== "inflight") ||
     !/^[a-f0-9]{64}$/u.test(lines[sessionIndex]) ||
     !/^[A-Za-z0-9._-]+$/u.test(lines[keyIndex]) ||
     lines[contentIndex + 1] !== ""
@@ -236,9 +241,10 @@ function readWakeNotificationClaim(): WakeNotificationClaim | undefined {
   if (Buffer.from(message, "utf8").toString("base64") !== lines[contentIndex]) return undefined;
   return {
     pid: lines[1],
-    instance: v3 || v4 ? lines[2] : "",
+    instance: v3 || v4 || v5 ? lines[2] : "",
     session: lines[sessionIndex],
-    state: claimState,
+    state: v5ClaimState,
+    id: v5 ? lines[5] : "",
     key: lines[keyIndex],
     content: message,
   };
@@ -253,11 +259,12 @@ function writeWakeNotificationClaim(claim: WakeNotificationClaim): void {
     writeFileSync(
       descriptor,
       [
-        "fm-omp-primary-nextturn-notification-v4",
+        "fm-omp-primary-nextturn-notification-v5",
         claim.pid,
         claim.instance,
         claim.session,
         claim.state,
+        claim.id,
         claim.key,
         Buffer.from(claim.content, "utf8").toString("base64"),
         "",
@@ -310,16 +317,35 @@ export default function (omp: ExtensionAPI) {
       { deliverAs: "nextTurn", triggerTurn: true },
     );
   };
-  const discardWakeNotification = (): void => {
+  const discardWakeNotification = (expectedId = ""): void => {
     const claim = readWakeNotificationClaim();
-    if (!claim || claim.instance !== notificationInstance) return;
+    if (!claim || (expectedId ? claim.id !== expectedId : claim.instance !== notificationInstance)) return;
     try {
       unlinkSync(notificationClaim);
     } catch {
       // A later durable wake reclaims any claim that this turn could not retire.
     }
   };
+  const reconcileWakeNotificationAcknowledgement = (): void => {
+    let acknowledged = "";
+    try {
+      const stats = lstatSync(notificationAcknowledgement);
+      if (!stats.isFile() || stats.isSymbolicLink()) return;
+      acknowledged = readFileSync(notificationAcknowledgement, "utf8");
+    } catch {
+      return;
+    }
+    const claim = readWakeNotificationClaim();
+    if (claim?.id === acknowledged.trim()) {
+      discardWakeNotification(claim.id);
+      if (readWakeNotificationClaim()?.id === claim.id) return;
+    }
+    try {
+      unlinkSync(notificationAcknowledgement);
+    } catch {}
+  };
   const claimWakeNotification = (key: string, content: string): boolean => {
+    reconcileWakeNotificationAcknowledgement();
     const current = readWakeNotificationClaim();
     if (
       current &&
@@ -334,12 +360,14 @@ export default function (omp: ExtensionAPI) {
       instance: notificationInstance,
       session: notificationSession,
       state: "pending",
+      id: randomUUID(),
       key,
       content,
     });
     return true;
   };
   const replayWakeNotification = (): void => {
+    reconcileWakeNotificationAcknowledgement();
     const pending = readWakeNotificationClaim();
     if (
       !pending ||
@@ -352,6 +380,8 @@ export default function (omp: ExtensionAPI) {
       pid: String(process.pid),
       instance: notificationInstance,
       session: notificationSession,
+      state: "pending",
+      id: randomUUID(),
     };
     try {
       writeWakeNotificationClaim(replay);
@@ -384,7 +414,7 @@ export default function (omp: ExtensionAPI) {
     ) {
       return;
     }
-    writeWakeNotificationClaim({ ...claim, state: "inflight" });
+    writeWakeNotificationClaim({ ...claim, state: "inflight", id: claim.id || randomUUID() });
   };
 
   omp.events?.on?.(FM_PRIMARY_WATCHER_WAKE_EVENT, (data) => {
@@ -466,9 +496,26 @@ export default function (omp: ExtensionAPI) {
     replayWakeNotification();
   });
 
-  omp.on("before_agent_start", (): BeforeAgentStartEventResult | undefined => {
+  omp.on("message_start", (event) => {
+    const message = event.message as { role?: unknown; customType?: unknown; content?: unknown };
+    const claim = readWakeNotificationClaim();
+    if (
+      message.role !== "custom" ||
+      message.customType !== "firstmate-watcher-wake" ||
+      typeof message.content !== "string" ||
+      !claim ||
+      claim.instance !== notificationInstance ||
+      claim.session !== notificationSession ||
+      claim.state !== "pending" ||
+      claim.content !== message.content
+    ) {
+      return;
+    }
     watch.notificationTurnStarted();
     markWakeNotificationInflight();
+  });
+
+  omp.on("before_agent_start", (): BeforeAgentStartEventResult | undefined => {
     if (!pendingStartupNudge) return undefined;
     const content = pendingStartupNudge;
     pendingStartupNudge = "";
