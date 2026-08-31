@@ -14,9 +14,15 @@ FM_CLEAN_RELAUNCH_LAUNCH_TARGET=
 FM_CLEAN_RELAUNCH_LAUNCH_STATE=
 FM_CLEAN_RELAUNCH_LAUNCH_WINDOW_ID=
 FM_CLEAN_RELAUNCH_LAUNCH_CREATE_INTERRUPTED=0
+FM_CLEAN_RELAUNCH_LAUNCH_METADATA_OWNED=0
+FM_CLEAN_RELAUNCH_LAUNCH_METADATA_INTERRUPTED=0
 
 fm_clean_relaunch_defer_window_creation_signal() {
   FM_CLEAN_RELAUNCH_LAUNCH_CREATE_INTERRUPTED=1
+}
+
+fm_clean_relaunch_defer_metadata_signal() {
+  FM_CLEAN_RELAUNCH_LAUNCH_METADATA_INTERRUPTED=1
 }
 
 fm_clean_relaunch_shell_quote() {  # <value>
@@ -37,7 +43,8 @@ fm_clean_relaunch_launch_cleanup() {  # <destination-id>
   [ -n "$state" ] || return 0
   rm -rf -- "${TMPDIR:-/tmp}/fm-$id"
   rm -rf -- "$state/$id.inbox"
-  rm -f -- "$state/$id.meta" "$state/$id.status" "$state/$id.turn-ended" \
+  [ "$FM_CLEAN_RELAUNCH_LAUNCH_METADATA_OWNED" -eq 0 ] || rm -f -- "$state/$id.meta"
+  rm -f -- "$state/$id.status" "$state/$id.turn-ended" \
     "$state/$id.pi-ext.ts" "$state/$id.omp-ext.ts" "$state/$id.omp-ready" \
     "$state/$id.omp-started" "$state/$id.omp-doorbell-ready" "$state/$id.busy-state" \
     "$state/$id.omp-doorbell-ready.requests" "$state/$id.busy-gen" \
@@ -73,7 +80,7 @@ fm_clean_relaunch_wait_for_ack() {  # <state> <id> <record>
 fm_clean_relaunch_launch_allocated() {
   local id=$1 project=$2 worktree=$3 brief=$4 harness=$5 backend=$6 mode=$7 yolo=$8 model=$9 effort=${10}
   local state=${STATE:?STATE must be set by the relaunch owner}
-  local session window target window_id task_tmp meta_tmp launch record handoff
+  local session window target window_id window_count task_tmp meta_tmp launch record handoff
 
   [ "$harness:$backend" = codex:tmux ] || {
     echo "error: allocated relaunch launch supports only codex/tmux" >&2
@@ -109,6 +116,12 @@ fm_clean_relaunch_launch_allocated() {
   fi
   trap interrupted HUP INT TERM
   [ "$FM_CLEAN_RELAUNCH_LAUNCH_CREATE_INTERRUPTED" -eq 0 ] || return 1
+  window_count=$(tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null | grep -Fxc "$window" || true)
+  [ "$window_count" -eq 1 ] || {
+    echo "error: destination tmux endpoint is ambiguous after creation" >&2
+    return 1
+  }
+  target="$FM_CLEAN_RELAUNCH_LAUNCH_WINDOW_ID"
 
   task_tmp="${TMPDIR:-/tmp}/fm-$id"
   if [ -L "$task_tmp" ]; then
@@ -134,10 +147,17 @@ fm_clean_relaunch_launch_allocated() {
     rm -f -- "$meta_tmp"
     return 1
   fi
-  if ! mv -f -- "$meta_tmp" "$state/$id.meta"; then
+  trap fm_clean_relaunch_defer_metadata_signal HUP INT TERM
+  if ln "$meta_tmp" "$state/$id.meta"; then
+    FM_CLEAN_RELAUNCH_LAUNCH_METADATA_OWNED=1
     rm -f -- "$meta_tmp"
+  else
+    rm -f -- "$meta_tmp"
+    trap interrupted HUP INT TERM
     return 1
   fi
+  trap interrupted HUP INT TERM
+  [ "$FM_CLEAN_RELAUNCH_LAUNCH_METADATA_INTERRUPTED" -eq 0 ] || return 1
 
   fm_backend_tmux_send_text_line "$target" "export GOTMPDIR=$(fm_clean_relaunch_shell_quote "$task_tmp/gotmp")" || return 1
   launch="codex"

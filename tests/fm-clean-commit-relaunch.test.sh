@@ -11,6 +11,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 REAL_GIT=$(command -v git)
+REAL_LN=$(command -v ln)
 
 TMP_ROOT=$(fm_test_tmproot fm-clean-commit-relaunch)
 fm_git_identity fmtest fmtest@example.invalid
@@ -99,6 +100,7 @@ case "$command" in
       printf 'fm-%s\n' "$FM_TEST_DESTINATION_ID" >> "$FM_TEST_WINDOWS"
       exit 1
     fi
+    [ "${FM_TEST_DUPLICATE_WINDOW_RACE:-0}" != 1 ] || printf 'fm-%s\n' "$FM_TEST_DESTINATION_ID" >> "$FM_TEST_WINDOWS"
     [ -z "${FM_TEST_LAUNCH_DELAY:-}" ] || sleep "$FM_TEST_LAUNCH_DELAY"
     [ "${FM_TEST_LAUNCH_FAIL:-0}" != 1 ] || exit 1
     printf 'fm-%s\n' "$FM_TEST_DESTINATION_ID" >> "$FM_TEST_WINDOWS"
@@ -149,6 +151,20 @@ if [ "$1" = -C ] && [ "${3:-}" = checkout ] && [ "${4:-}" = -b ]; then
   [ "${FM_TEST_CHECKOUT_FAIL:-0}" != 1 ] || exit 1
 fi
 exec "${FM_TEST_REAL_GIT}" "$@"
+SH
+  cat > "$fakebin/ln" <<'SH'
+#!/usr/bin/env bash
+set -u
+destination=${!#}
+case "$destination" in
+  */relaunch-handoff.json)
+    [ "${FM_TEST_HANDOFF_RACE:-0}" != 1 ] || printf 'foreign handoff\n' > "$destination"
+    ;;
+  */destination.meta)
+    [ "${FM_TEST_META_RACE:-0}" != 1 ] || printf 'foreign metadata\n' > "$destination"
+    ;;
+esac
+exec "$FM_TEST_REAL_LN" "$@"
 SH
   chmod +x "$fakebin"/*
 }
@@ -228,6 +244,7 @@ run_owner() {  # <fixture> [source] [destination]
   source_head=$(git -C "$fixture/source" rev-parse HEAD)
   PATH="$fixture/fakebin:$PATH" \
     FM_TEST_REAL_GIT="$REAL_GIT" \
+    FM_TEST_REAL_LN="$REAL_LN" \
     FM_TEST_HOME="$fixture/home" \
     FM_TEST_PROJECT="$fixture/project" \
     FM_TEST_SOURCE_WORKTREE="$fixture/source" \
@@ -393,6 +410,16 @@ assert_refused_before_allocation "$fixture" "$out" "malformed foreign worktree m
 [ "$(source_snapshot "$fixture")" = "$before" ] || fail "malformed foreign worktree metadata mutated source"
 pass "clean relaunch: malformed foreign worktree metadata refuses"
 
+fixture=$(new_case symlinked-other-worktree)
+rm -f -- "$fixture/home/state/other.meta"
+ln -s "$fixture/other" "$fixture/home/state/other.meta"
+before=$(source_snapshot "$fixture")
+out=$(run_owner "$fixture" 2>&1)
+expect_code 1 $? "symlinked foreign worktree metadata should refuse"
+assert_refused_before_allocation "$fixture" "$out" "symlinked foreign worktree metadata"
+[ "$(source_snapshot "$fixture")" = "$before" ] || fail "symlinked foreign worktree metadata mutated source"
+pass "clean relaunch: symlinked foreign worktree metadata refuses"
+
 # Failure after allocation leaves no source change and cleans only the new
 # destination's branch, endpoint, task data, and leased worktree.
 for failure in allocator checkout launch acknowledgement; do
@@ -460,6 +487,22 @@ assert_present "$fixture/destination" "return failure removed the destination wo
 git -C "$fixture/project" show-ref --verify --quiet refs/heads/fm/destination || fail "return failure removed attached destination branch"
 pass "clean relaunch: failed destination return remains actionable"
 
+fixture=$(new_case handoff-race)
+before=$(source_snapshot "$fixture")
+out=$(FM_TEST_HANDOFF_RACE=1 run_owner "$fixture" 2>&1)
+expect_code 1 $? "concurrent handoff creation should fail"
+[ "$(source_snapshot "$fixture")" = "$before" ] || fail "concurrent handoff creation mutated source"
+[ "$(cat "$fixture/home/data/destination/relaunch-handoff.json")" = 'foreign handoff' ] || fail "concurrent handoff was overwritten or removed"
+pass "clean relaunch: concurrent handoff remains foreign"
+
+fixture=$(new_case metadata-race)
+before=$(source_snapshot "$fixture")
+out=$(FM_TEST_META_RACE=1 run_owner "$fixture" 2>&1)
+expect_code 1 $? "concurrent metadata creation should fail"
+[ "$(source_snapshot "$fixture")" = "$before" ] || fail "concurrent metadata creation mutated source"
+[ "$(cat "$fixture/home/state/destination.meta")" = 'foreign metadata' ] || fail "concurrent metadata was overwritten or removed"
+pass "clean relaunch: concurrent metadata remains foreign"
+
 fixture=$(new_case published-output-failure)
 before=$(source_snapshot "$fixture")
 run_owner "$fixture" >/dev/full 2>"$fixture/published-output-failure.out"
@@ -489,6 +532,14 @@ expect_code 1 $? "concurrent window creation should fail"
 [ "$(cat "$fixture/windows")" = fm-destination ] || fail "concurrent window creation was removed"
 assert_not_contains 'kill-window' "$(cat "$fixture/tmux.log")" "concurrent window creation was cleaned"
 pass "clean relaunch: concurrent destination endpoint remains foreign"
+
+fixture=$(new_case duplicate-window-race)
+before=$(source_snapshot "$fixture")
+out=$(FM_TEST_DUPLICATE_WINDOW_RACE=1 run_owner "$fixture" 2>&1)
+expect_code 1 $? "duplicate destination window should fail"
+[ "$(source_snapshot "$fixture")" = "$before" ] || fail "duplicate destination window mutated source"
+assert_not_contains 'send-keys' "$(cat "$fixture/tmux.log")" "duplicate destination window received a launch or inbox command"
+pass "clean relaunch: duplicate destination endpoint refuses after creation"
 
 # An interrupt after handoff publication exits through destination-only cleanup.
 fixture=$(new_case interrupted-publication)

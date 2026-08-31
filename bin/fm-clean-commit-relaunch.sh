@@ -118,7 +118,8 @@ worktree_is_registered() {  # <repository> <worktree>
 worktree_is_task_owned() {  # <worktree>
   local worktree=$1 meta recorded
   for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] || continue
+    [ -e "$meta" ] || [ -L "$meta" ] || continue
+    [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] || return 2
     recorded=$(meta_exact "$meta" worktree 2>/dev/null) || return 2
     recorded=$(resolve_dir recorded-task-worktree "$recorded" 2>/dev/null) || return 2
     [ "$recorded" != "$worktree" ] || return 0
@@ -129,7 +130,8 @@ worktree_is_task_owned() {  # <worktree>
 task_worktrees_are_well_formed() {
   local meta recorded
   for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] || continue
+    [ -e "$meta" ] || [ -L "$meta" ] || continue
+    [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] || return 1
     recorded=$(meta_exact "$meta" worktree 2>/dev/null) || return 1
     resolve_dir recorded-task-worktree "$recorded" >/dev/null 2>&1 || return 1
   done
@@ -239,9 +241,15 @@ DESTINATION_BRANCH=
 DESTINATION_BRANCH_CREATED=0
 DESTINATION_PUBLISHED=0
 DESTINATION_CHECKOUT_INTERRUPTED=0
+DESTINATION_HANDOFF_OWNED=0
+DESTINATION_HANDOFF_INTERRUPTED=0
 
 defer_destination_checkout_signal() {
   DESTINATION_CHECKOUT_INTERRUPTED=1
+}
+
+defer_destination_handoff_signal() {
+  DESTINATION_HANDOFF_INTERRUPTED=1
 }
 
 cleanup_destination() {
@@ -257,7 +265,7 @@ cleanup_destination() {
       return 1
     fi
   fi
-  rm -f -- "$DESTINATION_HANDOFF"
+  [ "$DESTINATION_HANDOFF_OWNED" -eq 0 ] || rm -f -- "$DESTINATION_HANDOFF"
 }
 
 cleanup() {
@@ -529,7 +537,18 @@ jq -n \
   --arg pr "$PR" \
   '{schema:$schema,source:$source,destination:$destination,repository_identity:$repository_identity,source_commit:$source_commit,source_branch:$source_branch,destination_branch:$destination_branch,delivery:{mode:$mode,yolo:$yolo},source_brief_identity:$source_brief_identity,destination_brief_identity:$destination_brief_identity,no_mistakes_custody:{state:$custody,next_action:"proceed"}} + (if $pr == "" then {} else {pr:$pr} end)' \
   > "$HANDOFF_TMP" || exit 1
-mv -f -- "$HANDOFF_TMP" "$DESTINATION_HANDOFF"
+trap defer_destination_handoff_signal HUP INT TERM
+if ln "$HANDOFF_TMP" "$DESTINATION_HANDOFF"; then
+  DESTINATION_HANDOFF_OWNED=1
+  rm -f -- "$HANDOFF_TMP"
+else
+  rm -f -- "$HANDOFF_TMP"
+  trap interrupted HUP INT TERM
+  echo "error: destination task $DESTINATION already has a durable handoff" >&2
+  exit 1
+fi
+trap interrupted HUP INT TERM
+[ "$DESTINATION_HANDOFF_INTERRUPTED" -eq 0 ] || exit 1
 
 fm_clean_relaunch_launch_allocated \
   "$DESTINATION" "$PROJECT" "$DESTINATION_WORKTREE" "$DESTINATION_BRIEF" \
