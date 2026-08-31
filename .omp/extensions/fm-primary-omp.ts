@@ -1,7 +1,17 @@
 // Firstmate primary integration for OMP.
 // OMP-native session, stop, tool-call, and shutdown events stay in this adapter.
 import { spawn, spawnSync } from "node:child_process";
-import { renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  closeSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
@@ -27,10 +37,17 @@ const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
 const marker = `${state}/.omp-primary-extension-loaded`;
 const operationalInputScript = `${fmRoot}/bin/fm-operational-input.sh`;
+const notificationClaim = `${state}/.omp-primary-nextturn-notification`;
 
 type ProcessResult = {
   code: number;
   stderr: string;
+};
+
+type WakeNotificationClaim = {
+  pid: string;
+  session: string;
+  key: string;
 };
 
 function encodeOperationalInput(kind: "session-start" | "watcher" | "turn-end-guard", content: string): string {
@@ -179,11 +196,93 @@ function runGuard(event: SessionStopEvent): Promise<ProcessResult> {
   });
 }
 
+function readWakeNotificationClaim(): WakeNotificationClaim | undefined {
+  let content = "";
+  try {
+    const stats = lstatSync(notificationClaim);
+    if (!stats.isFile() || stats.isSymbolicLink()) return undefined;
+    content = readFileSync(notificationClaim, "utf8");
+  } catch {
+    return undefined;
+  }
+  const lines = content.split("\n");
+  if (
+    lines.length !== 5 ||
+    lines[0] !== "fm-omp-primary-nextturn-notification-v1" ||
+    !/^[0-9]+$/u.test(lines[1]) ||
+    !/^[a-f0-9]{64}$/u.test(lines[2]) ||
+    !/^[A-Za-z0-9._-]+$/u.test(lines[3]) ||
+    lines[4] !== ""
+  ) {
+    return undefined;
+  }
+  return { pid: lines[1], session: lines[2], key: lines[3] };
+}
+
+function writeWakeNotificationClaim(session: string, key: string): void {
+  mkdirSync(state, { recursive: true });
+  const temporary = `${notificationClaim}.tmp.${process.pid}.${randomUUID()}`;
+  let descriptor = -1;
+  try {
+    descriptor = openSync(temporary, "wx", 0o600);
+    writeFileSync(
+      descriptor,
+      `fm-omp-primary-nextturn-notification-v1\n${process.pid}\n${session}\n${key}\n`,
+      "utf8",
+    );
+    closeSync(descriptor);
+    descriptor = -1;
+    renameSync(temporary, notificationClaim);
+  } catch (error) {
+    if (descriptor >= 0) {
+      try {
+        closeSync(descriptor);
+      } catch {
+        // Preserve the publication error; the descriptor may already be closed.
+      }
+    }
+    try {
+      unlinkSync(temporary);
+    } catch {
+      // The temporary file may not have been created.
+    }
+    throw error;
+  }
+}
+
 export default function (omp: ExtensionAPI) {
   if (!primaryIntegrationApplies()) return;
   publishNativeProcessIdentity();
   const taskInboxDoorbell = installTaskInboxDoorbell(omp);
   let pendingStartupNudge = "";
+
+  let notificationSession = createHash("sha256").update("unknown").digest("hex");
+
+  const setNotificationSession = (ctx: ExtensionContext): void => {
+    const sessionFile = ctx.sessionManager.getSessionFile() || "unknown";
+    notificationSession = createHash("sha256").update(sessionFile).digest("hex");
+  };
+  const releaseWakeNotification = (): void => {
+    const claim = readWakeNotificationClaim();
+    if (!claim || claim.pid !== String(process.pid)) return;
+    try {
+      unlinkSync(notificationClaim);
+    } catch {
+      // A later durable wake reclaims any claim that this turn could not retire.
+    }
+  };
+  const claimWakeNotification = (key: string): boolean => {
+    const current = readWakeNotificationClaim();
+    if (
+      current?.pid === String(process.pid) &&
+      current.session === notificationSession &&
+      current.key === key
+    ) {
+      return false;
+    }
+    writeWakeNotificationClaim(notificationSession, key);
+    return true;
+  };
 
   // Supervision-branch dispatch handshake (docs/omp-supervision-branch.md).
   // Build one offer per ordinary actionable wake and emit it on the shared
@@ -217,20 +316,27 @@ export default function (omp: ExtensionAPI) {
     repairToolName: "fm_watch_arm_omp",
     encodeOperationalInput,
     coalesceWakeNotification: true,
-    sendFollowUp: async (content) => {
-      // Queue one hidden continuation after prompt unwinding without touching
-      // the editable draft. The shared core coalesces concurrent closes until
-      // before_agent_start observes this next turn.
-      omp.sendMessage(
-        {
-          customType: "firstmate-watcher-wake",
-          content,
-          display: false,
-          attribution: "agent",
-          details: { kind: "watcher", runtime: "omp" },
-        },
-        { deliverAs: "nextTurn", triggerTurn: true },
-      );
+    releaseWakeNotification,
+    sendFollowUp: async (content, notificationKey) => {
+      // Reuse a claim from a same-session extension reload, but let a new
+      // session or process replay the durable batch. The claim never retires
+      // rows; only the drain acknowledgement owns that transition.
+      if (!claimWakeNotification(notificationKey)) return;
+      try {
+        omp.sendMessage(
+          {
+            customType: "firstmate-watcher-wake",
+            content,
+            display: false,
+            attribution: "agent",
+            details: { kind: "watcher", runtime: "omp" },
+          },
+          { deliverAs: "nextTurn", triggerTurn: true },
+        );
+      } catch (error) {
+        releaseWakeNotification();
+        throw error;
+      }
     },
     offerWakeToBranch,
   });
@@ -241,6 +347,7 @@ export default function (omp: ExtensionAPI) {
   };
 
   omp.on("session_start", (_event, ctx) => {
+    setNotificationSession(ctx);
     taskInboxDoorbell.activate();
     watch.sessionStart();
     publishSecondmateSession(ctx);
@@ -248,6 +355,8 @@ export default function (omp: ExtensionAPI) {
   });
 
   omp.on("session_switch", (event, ctx) => {
+    releaseWakeNotification();
+    setNotificationSession(ctx);
     watch.sessionShutdown();
     watch.sessionStart();
     publishSecondmateSession(ctx);

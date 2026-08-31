@@ -1057,6 +1057,13 @@ const trigger = async (count, messageCount) => {
     await waitFor(() => notifications.length >= messageCount, `notification ${messageCount}`);
   }
 };
+const reloadExtension = async (label) => {
+  const reloaded = await import(`${pathToFileURL(process.env.EXTENSION).href}?${label}=${Date.now()}`);
+  reloaded.default(api);
+  if (!tool) throw new Error(`OMP did not register its watcher arm tool after ${label}`);
+  await tool.execute();
+};
+
 
 try {
   await tool.execute();
@@ -1075,21 +1082,31 @@ try {
     throw new Error(`first notification was not hidden next-turn delivery: ${JSON.stringify(first)}`);
   }
 
-  await trigger(2);
+  await reloadExtension("same-session-reload");
+  await waitFor(() => armCount() >= 3, "same-session reload watcher");
+  await trigger(3);
   await new Promise((resolve) => setTimeout(resolve, 40));
   if (notifications.length !== 1) {
-    throw new Error(`prompt-unwind activity created ${notifications.length} pending notifications`);
+    throw new Error(`same-session reload duplicated a pending notification: ${JSON.stringify(notifications)}`);
   }
 
-  await startNextTurn();
-  await trigger(3, 2);
-  if (notifications.length !== 2) {
-    throw new Error("next OMP turn did not release the pending notification latch");
+  const claimPath = `${state}/.omp-primary-nextturn-notification`;
+  const staleClaim = readFileSync(claimPath, "utf8").split("\n");
+  staleClaim[1] = "1";
+  writeFileSync(claimPath, staleClaim.join("\n"));
+  await reloadExtension("process-restart");
+  await waitFor(() => armCount() >= 5, "restart watcher");
+  await trigger(5, 2);
+  if (readFileSync(queue, "utf8") !== queueRows) {
+    throw new Error("process-restart replay retired durable wake rows");
+  }
+  if (!notifications[1].message.content.includes("signal: synthetic durable batch 5")) {
+    throw new Error("process restart did not replay the unacknowledged durable batch");
   }
 
   await startNextTurn();
   failNextNotification = true;
-  await trigger(4, 3);
+  await trigger(6, 3);
   if (sendAttempts !== 4 || !notifications[2].message.content.includes("could not deliver an actionable wake")) {
     throw new Error(`failed next-turn submission did not surface one replayable failure: ${JSON.stringify(notifications)}`);
   }
@@ -1098,14 +1115,14 @@ try {
   }
 
   await startNextTurn();
-  await trigger(5, 4);
-  if (!notifications[3].message.content.includes("signal: synthetic durable batch 5")) {
+  await trigger(7, 4);
+  if (!notifications[3].message.content.includes("signal: synthetic durable batch 7")) {
     throw new Error("durable wake did not replay after next-turn submission failure");
   }
 
   await startNextTurn();
   writeFileSync(`${state}/reject-confirmation`, "reject\n");
-  await trigger(6, 5);
+  await trigger(8, 5);
   const mismatch = notifications[4];
   if (!mismatch.message.content.includes("recovery generation mismatch")) {
     throw new Error(`generation-mismatched handoff was not surfaced: ${JSON.stringify(mismatch)}`);

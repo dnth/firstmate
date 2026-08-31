@@ -78,12 +78,13 @@ export type PrimaryWatchCoreOptions = {
   armReadyTimeoutEnv: string;
   repairToolName: string;
   encodeOperationalInput: (kind: "watcher", content: string) => string;
-  sendFollowUp: (content: string) => Promise<void>;
+  sendFollowUp: (content: string, notificationKey: string) => Promise<void>;
   // OMP's hidden next-turn transport can retain one pending continuation while
   // the current prompt unwinds. Its adapter resets this latch when the next
   // agent turn begins, so concurrent actionable closes coalesce without
   // changing the durable wake queue or its acknowledgement ownership.
   coalesceWakeNotification?: boolean;
+  releaseWakeNotification?: () => void;
   // Optional supervision-branch dispatch handshake. When supplied (the OMP
   // adapter with its branch extension loaded), the core offers each ordinary
   // actionable wake to the branch before delivering it to main; a synchronous
@@ -222,6 +223,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     encodeOperationalInput,
     sendFollowUp,
     coalesceWakeNotification = false,
+    releaseWakeNotification,
     offerWakeToBranch,
   } = options;
   const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
@@ -346,7 +348,11 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     };
   }
 
-  async function sendWake(owner: SessionGeneration, message: string): Promise<void> {
+  async function sendWake(
+    owner: SessionGeneration,
+    message: string,
+    notificationKey = "wake-queue",
+  ): Promise<void> {
     if (!generationIsLive(owner) || (coalesceWakeNotification && owner.notificationPending)) return;
     const content = encodeOperationalInput(
       "watcher",
@@ -354,7 +360,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     );
     if (coalesceWakeNotification) owner.notificationPending = true;
     try {
-      await sendFollowUp(content);
+      await sendFollowUp(content, notificationKey);
     } catch (error) {
       if (coalesceWakeNotification) owner.notificationPending = false;
       throw error;
@@ -419,7 +425,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       const confirmed = confirmHandlingDeliveryWithRetry(owner, recovery);
       if (!confirmed.ok) {
         if (!pidAlive(recovery.watcherPid)) await retireArm(owner.child);
-        await sendWake(owner, `${message}\n\n${confirmed.detail}`);
+        await sendWake(owner, `${message}\n\n${confirmed.detail}`, recovery.generation);
         return;
       }
     }
@@ -429,7 +435,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     // repair the watcher cycle. Absent a branch, this is a no-op and every wake
     // goes to main exactly as before.
     if (!repairFailed && offerWakeToBranch?.(message)) return;
-    await sendWake(owner, message);
+    await sendWake(owner, message, recovery?.generation ?? "wake-queue");
   }
 
   function surfaceFailure(owner: SessionGeneration, message: string): void {
@@ -712,6 +718,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
 
   function notificationTurnStarted(): void {
     if (coalesceWakeNotification) generation.notificationPending = false;
+    releaseWakeNotification?.();
   }
 
   function sessionStart(): void {
