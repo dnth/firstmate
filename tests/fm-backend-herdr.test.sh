@@ -4069,6 +4069,19 @@ test_send_text_submit_unknown_on_composer_capture_failure() {
   pass "fm_backend_herdr_send_text_submit: an unreadable composer stops Enter retries after native status stays idle"
 }
 
+test_away_supervisor_admission_refuses_without_atomic_api() {
+  local dir out
+  dir="$TMP_ROOT/away-supervisor-admission"
+  mkdir -p "$dir/empty-fakebin"
+  out=$(PATH="$dir/empty-fakebin:$PATH" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_admit_away_supervisor default:w1:p2 "supervisor text"' \
+      "$ROOT")
+  [ "$out" = atomic-unavailable ] \
+    || fail "Herdr away-supervisor admission must refuse without a verified atomic API, got '$out'"
+  pass "fm_backend_herdr_admit_away_supervisor: refuses typed admission without invoking a recheck or pane transport"
+}
+
+
 # --- fm-backend.sh dispatch wiring -------------------------------------------
 
 test_dispatch_routes_herdr_backend() {
@@ -4798,6 +4811,7 @@ test_composer_state_grok_bright_truecolor_real_text_is_pending
 test_composer_state_codex_bare_prompt_glyph_is_empty
 test_composer_state_codex_faint_suggestion_is_empty
 test_composer_state_codex_non_faint_same_text_is_pending
+test_away_supervisor_admission_refuses_without_atomic_api
 test_wait_for_working_returns_busy_on_first_poll
 test_wait_for_working_catches_a_slow_transition_mid_window
 test_wait_for_working_samples_budget_endpoint_without_final_sleep

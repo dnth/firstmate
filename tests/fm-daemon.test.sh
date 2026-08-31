@@ -2145,31 +2145,54 @@ test_inject_msg_herdr_refuses_unknown_harness_before_submit() {
   pass "inject_msg: Herdr injection refuses before typing when supervisor harness identity is unknown"
 }
 
-test_inject_msg_herdr_submits_through_backend_dispatch() {
-  local dir state
-  dir=$(make_supercase inject-herdr-submit)
+test_inject_msg_herdr_atomic_admission_defers_late_captain_input() {
+  local dir state captain_composer sent
+  dir=$(make_supercase inject-herdr-atomic-admission)
   state="$dir/state"
+  captain_composer="$dir/captain-composer"
+  sent="$dir/submitted"
+  : > "$captain_composer"
+  : > "$sent"
   afk_enter "$state"
+  printf 'done: PR https://example.test/pr/atomic-admission\n' > "$state/.subsuper-escalations"
   (
+    LOG="$state/.supervise-daemon.log"
     fm_backend_target_exists() { return 0; }
     pane_is_busy() { return 1; }
-    fm_backend_composer_state() { printf 'empty'; }
-    fm_backend_send_text_submit() {
-      [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected send_text_submit args: $1 $2"
-      case "$3" in *"hello"*) : ;; *) fail "digest text missing from send_text_submit: $3" ;; esac
-      [ "$#" -eq 10 ] && [ "$7" = "" ] || fail "expected-label placeholder shifted the harness argument (argc=$#)"
-      [ "$8" = omp ] || fail "OMP Herdr injection did not forward exact harness identity: ${8:-missing}"
-      [ "$9" = /verified/bun ] || fail "OMP Herdr injection did not forward its bound Bun identity: ${9:-missing}"
-      [ "${10:-}" = /verified/omp ] || fail "OMP Herdr injection did not forward its bound entrypoint identity: ${10:-missing}"
+    fm_backend_composer_state() {
+      [ ! -s "$captain_composer" ] \
+        || fail "the initial composer guard did not run before the simulated captain draft"
       printf 'empty'
     }
-    FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" \
-      FM_SUPERVISOR_HARNESS=omp FM_SUPERVISOR_OMP_BUN=/verified/bun \
-      FM_SUPERVISOR_OMP_BIN=/verified/omp inject_msg "hello" "$state" \
-      || fail "inject_msg should succeed when OMP-native confirmation reports delivery"
-  ) || fail "herdr successful-submit inject_msg subshell failed"
-  pass "inject_msg: OMP Herdr away delivery reaches the exact-runtime native confirmation path"
+    fm_backend_herdr_admit_away_supervisor() {
+      [ "$1" = "default:w1:p2" ] || fail "unexpected atomic-admission target: $1"
+      case "$2" in *"atomic-admission"*) : ;; *) fail "atomic admission lost the buffered escalation";; esac
+      # This is the former read-to-send interval: the human starts typing only
+      # after the daemon observed an empty composer, so a separate send would
+      # merge the two messages.
+      printf 'captain return draft' > "$captain_composer"
+      printf 'atomic-unavailable'
+    }
+    fm_backend_send_text_submit() {
+      printf '%s\n' "$*" >> "$sent"
+      printf 'empty'
+    }
+    if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" \
+      FM_SUPERVISOR_HARNESS=pi escalate_flush "$state"; then
+      fail "Herdr must not report delivery when atomic composer admission is unavailable"
+    fi
+    [ "$(cat "$captain_composer")" = "captain return draft" ] \
+      || fail "the deterministic captain draft was not placed after the initial guard"
+    [ ! -s "$sent" ] || fail "Herdr typed or submitted after the captain draft entered the former race interval"
+    [ -s "$state/.subsuper-escalations" ] \
+      || fail "atomic-admission deferral discarded the durable escalation"
+    grep -F "Herdr API has no verified atomic composer admission; no text typed" \
+      "$state/.supervise-daemon.log" >/dev/null \
+      || fail "atomic-admission deferral was not recorded truthfully"
+  ) || fail "Herdr atomic-admission race subshell failed"
+  pass "inject_msg: a captain draft entering after the empty guard defers Herdr delivery without typing or losing the escalation"
 }
+
 
 # Safety-critical (task fm-composer-shellglyph-safety): the away-mode injector
 # must NEVER type an escalation into a dead-shell pane. A bare shell prompt
@@ -2318,6 +2341,6 @@ test_inject_msg_herdr_busy_guard_defers
 test_inject_msg_herdr_composer_guard_defers
 test_inject_msg_herdr_pane_gone_defers
 test_inject_msg_herdr_refuses_unknown_harness_before_submit
-test_inject_msg_herdr_submits_through_backend_dispatch
+test_inject_msg_herdr_atomic_admission_defers_late_captain_input
 test_inject_msg_defers_on_dead_shell_unknown
 test_inject_msg_defers_on_unrecognized_composer_state

@@ -85,12 +85,17 @@ The always-on watcher also uses that library's absorb classification on no-verb 
 In away mode, seen-status dedupe does not clear possible-wedge aging for nonterminal progress, so housekeeping still re-escalates an unchanged idle pane at the configured bound.
 The AFK-specific stale and captain-held recovery contract, including local liveness gates, remote owner rechecks, and duplicate-notification suppression, is owned by [the AFK skill](../.agents/skills/afk/SKILL.md#classification-policy).
 The daemon escalates captain-relevant events, plus bounded rechecks for a declared pause or a stale remote-owner result including unresolved remote captain-held recovery, as one batched, single-line digest using the canonical `away-supervisor` kind from `bin/fm-operational-input.sh` so firstmate can distinguish it structurally from real messages.
-Its supervisor injection path supports tmux and herdr panes, with `FM_SUPERVISOR_BACKEND` and `FM_SUPERVISOR_TARGET` resolved independently from the task-spawn backend.
-Pane existence, busy checks, composer checks, capture, and verified submit route through `bin/fm-backend.sh`: tmux keeps the same submit core used by the tmux send backend, while herdr prefers native agent-state confirmation and falls back to its ANSI-aware structural composer classifier.
+Its supervisor injection path supports tmux and Herdr panes, with `FM_SUPERVISOR_BACKEND` and `FM_SUPERVISOR_TARGET` resolved independently from the task-spawn backend.
+Pane existence, busy checks, composer checks, capture, and verified submit route through `bin/fm-backend.sh`.
+The shared composer result is an early conservative rejection, not a lease on human input.
+Tmux retains its established type-once, Enter-only retry path.
+Herdr away delivery calls only `fm_backend_herdr_admit_away_supervisor`, whose `admitted` result requires one conditional operation to prove an empty composer and submit the digest from the same composer-channel boundary.
+Herdr exposes no verified conditional admission or reservation primitive today, so that owner returns `atomic-unavailable` without reading, typing, or sending a key, and the daemon preserves the buffered recovery episode.
+A second composer read or a process-local lock cannot make the independent Herdr `pane send-text` and `pane send-keys` operations atomic and is not a fallback.
 The retries-exhausted queued-Enter decision is owned by `fm_composer_queued_enter_verdict` in `bin/fm-composer-lib.sh`; tmux supplies its established non-OMP busy signal, while herdr invokes the policy only for OMP.
 OMP's busy-submit decision remains backend-specific and fails closed outside its narrow queued verdict; the [tmux](tmux-backend.md#current-behavior-and-safety) and [Herdr](herdr-backend.md#current-transport-behavior) guides own the current contracts.
 Composer-content classification has one shared owner, `bin/fm-composer-lib.sh`, used by tmux, herdr, Orca, and cmux after each adapter performs its own capture and composer-row recognition.
-The daemon injects only into an affirmatively `empty` composer, so both `pending` and `unknown` defer and a bare dead-shell prompt cannot receive an escalation; the current boundary is in [Composer and injection safety](herdr-backend.md#composer-and-injection-safety).
+The daemon rejects every pending or unknown composer state; [Herdr's composer and injection safety](herdr-backend.md#composer-and-injection-safety) adds the current atomic-admission deferral.
 Unsupported supervisor backends refuse at daemon startup.
 Stalled escalation delivery writes `state/.subsuper-inject-wedged` and attempts a configured backend-independent active alert after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
 On an unmarked return, `bin/fm-afk-return.sh` owns ordered shutdown, durable catch-up evidence, and the fail-closed gate that keeps ordinary work behind every live firstmate-actionable blocker.
