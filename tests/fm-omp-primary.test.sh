@@ -593,10 +593,11 @@ if (watcherMessages.length !== 1 || !watcherMessages[0].message.content.includes
 }
 if (
   watcherMessages[0].message.customType !== "firstmate-watcher-wake" ||
-  watcherMessages[0].options?.deliverAs !== "steer" ||
+  watcherMessages[0].message.display !== false ||
+  watcherMessages[0].options?.deliverAs !== "nextTurn" ||
   watcherMessages[0].options?.triggerTurn !== true
 ) {
-  throw new Error(`OMP watcher notification did not preserve the editable draft delivery mode: ${JSON.stringify(watcherMessages[0])}`);
+  throw new Error(`OMP watcher notification was not a hidden next-turn continuation: ${JSON.stringify(watcherMessages[0])}`);
 }
 if (!existsSync(`${process.env.FM_STATE_OVERRIDE}/watch-successor-ready`)) {
   throw new Error("OMP actionable notification arrived before successor readiness");
@@ -735,9 +736,9 @@ JS
 # The shared core delivers the recovery handshake for every runtime bound to it,
 # so OMP must confirm a handling delivery exactly like Pi and OpenCode do: start
 # and verify the successor, run fm-watch-arm.sh --handling-delivered for the
-# generation the successor reported, and only then deliver the wake steer.
-# Upstream covers Pi and OpenCode; this pins the fork's OMP binding of the same
-# contract so a future adapter change cannot silently drop it.
+# generation the successor reported, and only then schedule the hidden next-turn
+# notification. Upstream covers Pi and OpenCode; this pins the fork's OMP binding
+# of the same contract so a future adapter change cannot silently drop it.
 test_native_omp_confirms_recovery_handling_delivery() {
   local fixture out status=0
   fixture="$TMP_ROOT/native-handling-delivery"
@@ -814,9 +815,9 @@ for (let i = 0; i < 400 && !armRows().some((row) => row.startsWith("confirmed ")
 const rows = armRows();
 const arms = rows.filter((row) => row.startsWith("arm="));
 if (arms.length !== 2) throw new Error(`expected one successor arm, got ${arms.length}: ${rows.join(" | ")}`);
-if (steers !== 1) throw new Error(`expected exactly one wake steer, got ${steers}`);
-if (deliveryOptions?.deliverAs !== "steer" || deliveryOptions?.triggerTurn !== true) {
-  throw new Error(`wake was not delivered as a turn-triggering steer: ${JSON.stringify(deliveryOptions)}`);
+if (steers !== 1) throw new Error(`expected exactly one wake notification, got ${steers}`);
+if (deliveryOptions?.deliverAs !== "nextTurn" || deliveryOptions?.triggerTurn !== true) {
+  throw new Error(`wake was not delivered as a turn-triggering next-turn continuation: ${JSON.stringify(deliveryOptions)}`);
 }
 if (rowsAtDelivery !== 2) throw new Error(`wake delivery began before successor establishment (${rowsAtDelivery} arm rows)`);
 const confirmations = rows.filter((row) => row.startsWith("confirmed "));
@@ -835,8 +836,8 @@ JS
   ) || status=$?
   printf 'stop\n' > "$TMP_ROOT/native-handling-delivery.stop" 2>/dev/null || true
   expect_code 0 "$status" "OMP recovery handling delivery"
-  assert_contains "$out" omp-handling-delivery-ok "OMP did not confirm its recovery handling delivery after the wake steer"
-  pass "OMP confirms the recovery handling handshake after delivering its wake steer"
+  assert_contains "$out" omp-handling-delivery-ok "OMP did not confirm recovery handling before its next-turn notification"
+  pass "OMP confirms the recovery handling handshake before its hidden next-turn notification"
 }
 
 # A refused handling handshake must be classified and surfaced exactly once
@@ -920,7 +921,7 @@ if (!steer.includes("FIRSTMATE WATCHER WAKE")) throw new Error(`missing follow-u
 if (!steer.includes("handling delivery confirmation was rejected")) {
   throw new Error(`refused handshake was swallowed: ${steer}`);
 }
-if (steers !== 1) throw new Error(`refused handshake was not a single typed steer, got ${steers}`);
+if (steers !== 1) throw new Error(`refused handshake was not a single typed notification, got ${steers}`);
 const refusals = armRows().filter((row) => row.startsWith("refused "));
 if (refusals.length < 1) throw new Error(`handling-delivered was never attempted: ${armRows().join(" | ")}`);
 console.log("omp-refused-handshake-ok");
@@ -929,7 +930,210 @@ JS
   printf 'stop\n' > "$TMP_ROOT/native-handling-refused.stop" 2>/dev/null || true
   expect_code 0 "$status" "OMP refused handling delivery"
   assert_contains "$out" omp-refused-handshake-ok "OMP swallowed a refused handling handshake"
-  pass "OMP surfaces a refused handling handshake as one typed wake"
+  pass "OMP surfaces a refused handling handshake as one hidden notification"
+}
+
+# OMP's hidden next-turn queue retains custom messages while a prompt unwinds.
+# This fixture drives successive durable wake batches through the native primary
+# adapter and verifies the core contributes one continuation until OMP begins
+# that next turn. It also keeps the durable rows and a rejected recovery
+# generation intact, so neither notification delivery nor a failed handoff can
+# retire or strand replayable work.
+test_native_omp_coalesces_pending_next_turn_notifications() {
+  local fixture out status=0
+  fixture="$TMP_ROOT/native-next-turn-batching"
+  mkdir -p "$fixture/.omp/extensions" "$fixture/bin" "$fixture/config" "$fixture/state"
+  : > "$fixture/AGENTS.md"
+  git init -q -b main "$fixture"
+  cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$fixture/.omp/extensions/fm-primary-omp.ts"
+  mkdir -p "$fixture/.omp/extensions/lib"
+  cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$fixture/.omp/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" "$fixture/.omp/extensions/lib/fm-task-inbox-doorbell.ts"
+  cp "$ROOT/bin/fm-primary-watch-core.ts" "$fixture/bin/fm-primary-watch-core.ts"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$fixture/bin/fm-primary-scope-lib.sh"
+  cp "$ROOT/bin/fm-gate-refuse-lib.sh" "$fixture/bin/fm-gate-refuse-lib.sh"
+  cp "$ROOT/bin/fm-operational-input.sh" "$fixture/bin/fm-operational-input.sh"
+  cp "$ROOT/bin/fm-sessionstart-nudge.sh" "$fixture/bin/fm-sessionstart-nudge.sh"
+  cp "$ROOT/bin/fm-pi-compatible-runtimes" "$fixture/bin/fm-pi-compatible-runtimes"
+  cat > "$fixture/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+state=${FM_STATE_OVERRIDE:?}
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'handling generation=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
+  if [ -e "$state/reject-confirmation" ]; then
+    echo "watcher: recovery generation mismatch" >&2
+    exit 1
+  fi
+  exit 0
+fi
+count=$(cat "$state/arm-count" 2>/dev/null || printf 0)
+count=$((count + 1))
+printf '%s\n' "$count" > "$state/arm-count"
+printf 'arm=%s count=%s\n' "$$" "$count" >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$state/watch-trigger-$count" ]; do sleep 0.01; done
+rm -f "$state/watch-trigger-$count"
+printf 'signal: synthetic durable batch %s\n' "$count"
+SH
+  cat > "$fixture/bin/fm-sessionstart-nudge.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fixture/bin/"*.sh
+
+  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" \
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" \
+    FM_ARM_LOG="$TMP_ROOT/native-next-turn-batching.log" \
+    FM_WAKE_LIB="$ROOT/bin/fm-wake-lib.sh" \
+    node --input-type=module 2>&1 <<'JS'
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+const notifications = [];
+let tool = null;
+let sendAttempts = 0;
+let failNextNotification = false;
+const state = process.env.FM_STATE_OVERRIDE;
+const armRows = () => (existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+  : []);
+const armCount = () => armRows().filter((row) => row.startsWith("arm=")).length;
+const waitFor = async (predicate, description) => {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timed out waiting for ${description}`);
+};
+const api = {
+  zod: { object: () => ({}) },
+  on(name, handler) { handlers.set(name, handler); },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_omp") tool = candidate;
+  },
+  sendMessage(message, options) {
+    sendAttempts += 1;
+    if (failNextNotification) {
+      failNextNotification = false;
+      throw new Error("synthetic next-turn submission failure");
+    }
+    notifications.push({ message, options });
+  },
+};
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+process.argv[1] = process.env.EXTENSION;
+const extension = await import(`${pathToFileURL(process.env.EXTENSION).href}?batching=${Date.now()}`);
+extension.default(api);
+if (!tool) throw new Error("OMP did not register its watcher arm tool");
+
+const queue = `${state}/.wake-queue`;
+const queueRows = [
+  "1\t1\tsignal\tworker.status\tsignal: worker first",
+  "2\t2\tsignal\tworker.status\tsignal: worker latest",
+  "3\t3\tstale\tworker\tstale: worker",
+].join("\n") + "\n";
+writeFileSync(queue, queueRows);
+const deduped = spawnSync(
+  "bash",
+  ["-c", '. "$1"; fm_wake_print_deduped "$2"', "bash", process.env.FM_WAKE_LIB, queue],
+  { encoding: "utf8", env: { ...process.env, FM_STATE_OVERRIDE: state } },
+);
+if (deduped.status !== 0 || deduped.stdout.trim().split("\n").length !== 2) {
+  throw new Error(`durable batch was not deduplicated: ${deduped.stderr || deduped.stdout}`);
+}
+
+const startNextTurn = async () => {
+  await handlers.get("before_agent_start")({ type: "before_agent_start" }, {});
+};
+const trigger = async (count, messageCount) => {
+  writeFileSync(`${state}/watch-trigger-${count}`, "go\n");
+  await waitFor(() => armCount() >= count + 1, `successor ${count + 1}`);
+  if (messageCount !== undefined) {
+    await waitFor(() => notifications.length >= messageCount, `notification ${messageCount}`);
+  }
+};
+
+try {
+  await tool.execute();
+  await waitFor(() => armCount() === 1, "initial watcher");
+  await trigger(1, 1);
+  if (readFileSync(queue, "utf8") !== queueRows) {
+    throw new Error("hidden notification acknowledged durable wake rows");
+  }
+  const first = notifications[0];
+  if (
+    first?.message?.customType !== "firstmate-watcher-wake" ||
+    first.message?.display !== false ||
+    first.options?.deliverAs !== "nextTurn" ||
+    first.options?.triggerTurn !== true
+  ) {
+    throw new Error(`first notification was not hidden next-turn delivery: ${JSON.stringify(first)}`);
+  }
+
+  await trigger(2);
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  if (notifications.length !== 1) {
+    throw new Error(`prompt-unwind activity created ${notifications.length} pending notifications`);
+  }
+
+  await startNextTurn();
+  await trigger(3, 2);
+  if (notifications.length !== 2) {
+    throw new Error("next OMP turn did not release the pending notification latch");
+  }
+
+  await startNextTurn();
+  failNextNotification = true;
+  await trigger(4, 3);
+  if (sendAttempts !== 4 || !notifications[2].message.content.includes("could not deliver an actionable wake")) {
+    throw new Error(`failed next-turn submission did not surface one replayable failure: ${JSON.stringify(notifications)}`);
+  }
+  if (readFileSync(queue, "utf8") !== queueRows) {
+    throw new Error("failed next-turn submission retired durable wake rows");
+  }
+
+  await startNextTurn();
+  await trigger(5, 4);
+  if (!notifications[3].message.content.includes("signal: synthetic durable batch 5")) {
+    throw new Error("durable wake did not replay after next-turn submission failure");
+  }
+
+  await startNextTurn();
+  writeFileSync(`${state}/reject-confirmation`, "reject\n");
+  await trigger(6, 5);
+  const mismatch = notifications[4];
+  if (!mismatch.message.content.includes("recovery generation mismatch")) {
+    throw new Error(`generation-mismatched handoff was not surfaced: ${JSON.stringify(mismatch)}`);
+  }
+  if (readFileSync(queue, "utf8") !== queueRows) {
+    throw new Error("generation-mismatched handoff retired durable wake rows");
+  }
+  if (!notifications.every((notification) =>
+    notification.options?.deliverAs === "nextTurn" &&
+    notification.options?.triggerTurn === true &&
+    notification.message?.display === false,
+  )) {
+    throw new Error(`notification mode drifted across recovery: ${JSON.stringify(notifications)}`);
+  }
+  const handling = armRows().filter((row) => row.startsWith("handling "));
+  if (!handling.every((row) => row.includes("generation=fixture-generation"))) {
+    throw new Error(`handling confirmation lost its recovery generation: ${handling.join(" | ")}`);
+  }
+  console.log("omp-next-turn-batching-ok");
+} finally {
+  writeFileSync(`${state}/watch-trigger-${armCount()}`, "stop\n");
+  await handlers.get("session_shutdown")({ type: "session_shutdown" }, {});
+}
+JS
+  ) || status=$?
+  expect_code 0 "$status" "OMP next-turn durable wake batching"
+  assert_contains "$out" omp-next-turn-batching-ok "OMP did not coalesce hidden next-turn wake notifications"
+  pass "OMP batches durable wake rows into replayable hidden next-turn notifications"
 }
 
 test_resolve_path_uses_node_when_readlink_f_is_unavailable
@@ -943,3 +1147,4 @@ test_primary_marker_refuses_whitespace_identity
 test_native_primary_extension_contract
 test_native_omp_confirms_recovery_handling_delivery
 test_native_omp_refused_handling_delivery_is_typed_once
+test_native_omp_coalesces_pending_next_turn_notifications

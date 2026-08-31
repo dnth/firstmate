@@ -25,9 +25,9 @@ While supervision is still needed and away mode remains inactive, an actionable 
 ## Actionable wake ordering
 
 After an actionable Pi, OMP, or OpenCode child close, the adapter starts and verifies one singleton successor before it delivers the original wake.
-OMP delivers that follow-up through its host API as a hidden custom `steer` with `triggerTurn`, which starts an idle handling turn without touching an editable TUI draft.
-It confirms the handling handoff against that successor before scheduling the follow-up, retries once against the current generation and successor, and treats a failed confirmation as a restoration failure: it classifies the error, retires a successor that is no longer alive, and surfaces exactly one typed message.
-A failed confirmation is never swallowed.
+For OMP, the shared core confirms the recovery handoff before the adapter schedules at most one hidden custom `nextTurn` notification with `triggerTurn`; OMP consumes it on the next agent turn, including after prompt unwinding, without touching an editable TUI draft.
+Notification delivery does not acknowledge durable wake rows; only the exact generation-bound `WAKE_ACK_REQUIRED` command printed by `bin/fm-wake-drain.sh` may retire them.
+A failed confirmation is never swallowed: the core retries once against the current generation and successor, then classifies the failure, retires a successor that is no longer alive, and surfaces exactly one typed message.
 It waits at most one readiness timeout per attempt, then sends TERM and waits a bounded retirement confirmation before the next lock-verified exponential retry.
 If the unready arm does not retire within that bound, the adapter keeps ownership, starts no overlapping retry, and delivers the typed fallback immediately.
 When that retained arm later closes, its actual close is classified as a new supervised event without replaying the earlier fallback.

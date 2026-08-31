@@ -216,8 +216,11 @@ export default function (omp: ExtensionAPI) {
     armReadyTimeoutEnv: "FM_OMP_ARM_READY_TIMEOUT_MS",
     repairToolName: "fm_watch_arm_omp",
     encodeOperationalInput,
+    coalesceWakeNotification: true,
     sendFollowUp: async (content) => {
-      // Deliver a custom steer so OMP wakes idle sessions without touching the editable draft.
+      // Queue one hidden continuation after prompt unwinding without touching
+      // the editable draft. The shared core coalesces concurrent closes until
+      // before_agent_start observes this next turn.
       omp.sendMessage(
         {
           customType: "firstmate-watcher-wake",
@@ -226,7 +229,7 @@ export default function (omp: ExtensionAPI) {
           attribution: "agent",
           details: { kind: "watcher", runtime: "omp" },
         },
-        { deliverAs: "steer", triggerTurn: true },
+        { deliverAs: "nextTurn", triggerTurn: true },
       );
     },
     offerWakeToBranch,
@@ -253,6 +256,7 @@ export default function (omp: ExtensionAPI) {
   });
 
   omp.on("before_agent_start", (): BeforeAgentStartEventResult | undefined => {
+    watch.notificationTurnStarted();
     if (!pendingStartupNudge) return undefined;
     const content = pendingStartupNudge;
     pendingStartupNudge = "";
