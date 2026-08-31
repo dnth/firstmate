@@ -153,11 +153,31 @@ PROGRAMMATIC_AVAILABLE=0 fm_task_inbox_ring herdr target "$REC" fm-t1 omp /runti
 [ "$(grep -c '^composer-submit:' "$LOG")" = 1 ]
 
 : > "$LOG"
+set +e
+PROGRAMMATIC_AVAILABLE=0 FM_TASK_INBOX_OMP_REQUIRE_PROGRAMMATIC=1 \
+  fm_task_inbox_ring herdr target "$REC" fm-t1 omp /runtime/omp /bin/omp
+rc=$?
+set -e
+[ "$rc" = 3 ]
+[ "$(grep -c '^programmatic:' "$LOG")" = 1 ]
+! grep -q '^composer-' "$LOG"
+
+: > "$LOG"
 fm_backend_omp_trigger_turn() {
   printf 'programmatic-indeterminate\n' >> "$LOG"
   return 2
 }
 fm_task_inbox_ring herdr target "$REC" fm-t1 omp /runtime/omp /bin/omp
+[ "$(grep -c '^programmatic-indeterminate' "$LOG")" = 1 ]
+! grep -q '^composer-' "$LOG"
+
+: > "$LOG"
+set +e
+FM_TASK_INBOX_OMP_REQUIRE_PROGRAMMATIC=1 \
+  fm_task_inbox_ring herdr target "$REC" fm-t1 omp /runtime/omp /bin/omp
+rc=$?
+set -e
+[ "$rc" = 4 ]
 [ "$(grep -c '^programmatic-indeterminate' "$LOG")" = 1 ]
 ! grep -q '^composer-' "$LOG"
 

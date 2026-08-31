@@ -23,10 +23,16 @@ HERDR_STATE="$TMP_ROOT/remote-herdr.state"
 HERDR_LOG="$TMP_ROOT/remote-herdr.log"
 TMUX_LOG="$TMP_ROOT/remote-tmux.log"
 TMUX_STATE="$TMP_ROOT/remote-tmux.state"
+OMP_ACTIVE_PID="$TMP_ROOT/remote-omp-active.pid"
+HERDR_FORCE_IDLE="$TMP_ROOT/remote-herdr-force-idle"
+OMP_TYPED_INPUT="$TMP_ROOT/remote-omp-typed-input"
 CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects" "$REMOTE_ROOT" "$CLAIMS"
 cleanup() {
   local worker_pid='' supervisor_pid='' supervisor_command='' wait_attempt=0
+  [ -z "${OMP_LISTENER_PID:-}" ] || kill -TERM "$OMP_LISTENER_PID" 2>/dev/null || true
+  [ -z "${OMP_LISTENER_PID:-}" ] || wait "$OMP_LISTENER_PID" 2>/dev/null || true
+  rm -f "$OMP_ACTIVE_PID" "$HERDR_FORCE_IDLE"
   touch "$TMP_ROOT/provision.release" "$TMP_ROOT/seed.release" "$TMP_ROOT/handoff.release" \
     "$TMP_ROOT/inherit.release" "$TMP_ROOT/launch.release" 2>/dev/null || true
   FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" \
@@ -135,7 +141,8 @@ fi
 SH
 chmod +x "$REMOTE_ROOT/bin/quota-axi"
 install_remote_herdr_fixture "$REMOTE_ROOT" "$HERDR_STATE" "$HERDR_LOG" \
-  "$TMP_ROOT/herdr-send-fail" "$TMP_ROOT/herdr.sock" "$$" "$REMOTE_OMP_BUN" "$REMOTE_OMP_BIN"
+  "$TMP_ROOT/herdr-send-fail" "$TMP_ROOT/herdr.sock" "$$" "$REMOTE_OMP_BUN" "$REMOTE_OMP_BIN" \
+  "$OMP_ACTIVE_PID" "$HERDR_FORCE_IDLE" "$OMP_TYPED_INPUT"
 git -C "$REMOTE_ROOT" init -q -b main
 git -C "$REMOTE_ROOT" config user.email test@example.com
 git -C "$REMOTE_ROOT" config user.name Test
@@ -1140,11 +1147,150 @@ assert_not_contains "$OMP_REMOTE_LAUNCH" '${PATH:+' \
 assert_contains "$OMP_REMOTE_LAUNCH" \
   "FM_OMP_HARNESS=omp '\\''$REMOTE_OMP_BIN'\\''" \
   "remote OMP pane did not execute the canonical entrypoint directly"
-assert_not_contains "$OMP_REMOTE_LAUNCH" \
-  "'\\''$REMOTE_OMP_BUN'\\'' '\\''$REMOTE_OMP_BIN'\\''" \
-  "remote OMP pane retained the obsolete explicit Bun-plus-entrypoint invocation"
 assert_contains "$OMP_REMOTE_LAUNCH" "--session-dir '\\''$OMP_REMOTE_HOME/state/omp-sessions'\\''" \
   "remote OMP pane did not receive its home-owned durable session directory"
+assert_contains "$OMP_REMOTE_LAUNCH" \
+  "FM_OMP_TASK_INBOX_DIR='\\''$OMP_REMOTE_HOME/state/parent-route/remote-omp.inbox'\\''" \
+  "remote OMP extension did not receive its parent-route canonical inbox"
+assert_contains "$OMP_REMOTE_LAUNCH" \
+  "FM_OMP_TASK_DOORBELL_READY='\\''$OMP_REMOTE_HOME/state/parent-route/remote-omp.omp-doorbell-ready'\\''" \
+  "remote OMP extension did not receive its parent-route doorbell readiness marker"
+assert_contains "$OMP_REMOTE_LAUNCH" \
+  "FM_OMP_TASK_TURN_STARTED='\\''$OMP_REMOTE_HOME/state/parent-route/remote-omp.omp-started'\\''" \
+  "remote OMP extension did not receive its parent-route turn-start marker"
+
+# Reproduce the old explicit-pane transport with a real task-bound OMP listener
+cat > "$REMOTE_ROOT/bin/omp" <<'JS'
+import { appendFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const { installTaskInboxDoorbell } =
+  await import(pathToFileURL(process.env.FM_TEST_OMP_HELPER).href);
+const doorbell = installTaskInboxDoorbell(
+  {
+    sendMessage(message, options) {
+      appendFileSync(process.env.FM_TEST_OMP_SENT, `${JSON.stringify({ message, options })}\n`);
+      writeFileSync(process.env.FM_TEST_OMP_TURN_STARTED, `${process.pid}\n`);
+    },
+  },
+  {
+    inboxDir: process.env.FM_TEST_OMP_INBOX,
+    readyMarker: process.env.FM_TEST_OMP_READY,
+  },
+);
+doorbell.activate();
+writeFileSync(process.env.FM_TEST_OMP_PID, `${process.pid}\n`);
+const retire = () => {
+  doorbell.retire();
+  process.exit(0);
+};
+process.on("SIGTERM", retire);
+process.on("SIGINT", retire);
+setInterval(() => {}, 1_000);
+JS
+chmod +x "$REMOTE_ROOT/bin/omp"
+OMP_CONTROL_STATE="$OMP_REMOTE_HOME/state/parent-route"
+OMP_READY="$OMP_CONTROL_STATE/remote-omp.omp-doorbell-ready"
+OMP_INBOX="$OMP_CONTROL_STATE/remote-omp.inbox"
+OMP_TURN_STARTED="$OMP_CONTROL_STATE/remote-omp.omp-started"
+OMP_SENT="$TMP_ROOT/remote-omp-send-message.log"
+rm -f "$OMP_READY" "$OMP_TURN_STARTED" "$OMP_ACTIVE_PID" "$OMP_SENT"
+FM_TEST_OMP_HELPER="$REMOTE_ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" \
+  FM_TEST_OMP_SENT="$OMP_SENT" FM_TEST_OMP_TURN_STARTED="$OMP_TURN_STARTED" \
+  FM_TEST_OMP_INBOX="$OMP_INBOX" FM_TEST_OMP_READY="$OMP_READY" \
+  FM_TEST_OMP_PID="$OMP_ACTIVE_PID" bash -c 'exec -a bun "$1" "$2"' _ \
+    "$REMOTE_ROOT/bin/bun" "$REMOTE_ROOT/bin/omp" \
+  > "$TMP_ROOT/remote-omp-listener.out" 2>&1 &
+OMP_LISTENER_PID=$!
+listener_wait=0
+while [ ! -s "$OMP_READY" ] || [ ! -s "$OMP_ACTIVE_PID" ]; do
+  kill -0 "$OMP_LISTENER_PID" 2>/dev/null \
+    || fail "remote OMP listener exited before publishing its task-bound readiness"
+  listener_wait=$((listener_wait + 1))
+  [ "$listener_wait" -le 250 ] || fail "remote OMP listener never published task-bound readiness"
+  sleep 0.02
+done
+OMP_PROCESS=$(ps -o comm= -o args= -p "$OMP_LISTENER_PID")
+assert_contains "$OMP_PROCESS" "bun $REMOTE_OMP_BIN" \
+  "remote OMP listener did not retain the exact Bun-plus-entrypoint process shape"
+PATH="$REMOTE_ROOT/bin:$PATH" FM_OMP_PROCESS_EXPECTED_BUN="$REMOTE_OMP_BUN" \
+  FM_OMP_PROCESS_EXPECTED_BIN="$REMOTE_OMP_BIN" /bin/bash -c '
+    . "$1/bin/fm-omp-process-lib.sh"
+    comm=$(ps -p "$2" -o comm=)
+    args=$(ps -p "$2" -o args=)
+    fm_omp_process_matches "$comm" "$args" "$2"
+  ' _ "$REMOTE_ROOT" "$OMP_LISTENER_PID" \
+  || fail "remote OMP listener process did not satisfy the exact delivery identity:"$'\n'"$OMP_PROCESS"
+OMP_VERSION=$(bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_primary_watch_version "$2/.omp/extensions/fm-primary-omp.ts" "$2"' \
+  _ "$REMOTE_ROOT" "$OMP_REMOTE_HOME") \
+  || fail "could not derive the remote OMP primary extension version"
+printf '%s\n%s\n%s\n%s\n' "$OMP_VERSION" "$OMP_LISTENER_PID" "$REMOTE_OMP_BUN" "$REMOTE_OMP_BIN" \
+  > "$OMP_REMOTE_HOME/state/.omp-primary-extension-loaded"
+OMP_TARGET=$(FM_ROOT_OVERRIDE="$REMOTE_ROOT" /bin/bash -c \
+  '. "$1/bin/fm-backend.sh"; fm_backend_target_of_meta "$2"' _ "$REMOTE_ROOT" \
+  "$OMP_CONTROL_STATE/remote-omp.meta") \
+  || fail "could not recover the legacy explicit remote OMP target"
+OMP_PANE=$(sed -n 's/^herdr_pane_id=//p' "$OMP_CONTROL_STATE/remote-omp.meta")
+[ -n "$OMP_PANE" ] || fail "remote OMP endpoint metadata omitted its Herdr pane identity"
+"$REMOTE_ROOT/bin/herdr" agent get "$OMP_PANE" >/dev/null
+rm -f "$OMP_ACTIVE_PID"
+touch "$HERDR_FORCE_IDLE"
+: > "$HERDR_LOG"
+set +e
+FM_HOME="$OMP_REMOTE_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_STATE_OVERRIDE="$OMP_CONTROL_STATE" \
+  FM_SEND_SETTLE=0 FM_SEND_TURNSTART_TIMEOUT=0.1 FM_SEND_TURNSTART_POLL=0.02 \
+  PATH="$REMOTE_ROOT/bin:$PATH" "$REMOTE_ROOT/bin/fm-send.sh" "$OMP_TARGET" \
+  "legacy explicit remote OMP steer" > "$TMP_ROOT/remote-omp-legacy.out" 2>&1
+legacy_rc=$?
+set -e
+[ "$legacy_rc" = 4 ] || fail "legacy explicit OMP text did not expose its missing turn start (rc=$legacy_rc):"$'\n'"$(cat "$TMP_ROOT/remote-omp-legacy.out")"
+assert_grep 'pane send-text' "$HERDR_LOG" \
+  "legacy explicit OMP transport did not type the request into the remote pane"
+case "$(cat "$HERDR_LOG")" in
+  *' Enter'*|*' enter'*) ;;
+  *) fail "legacy explicit OMP transport did not submit Enter to the remote pane" ;;
+esac
+printf '%s\n' "$OMP_LISTENER_PID" > "$OMP_ACTIVE_PID"
+
+# A parent correlation prefixes ordinary relay text, so prove it cannot cause
+# /exit to fall through into the remote OMP inbox plane.
+: > "$HERDR_LOG"
+: > "$OMP_TYPED_INPUT"
+remote_env "$ROOT/bin/fm-send.sh" fm-remote-omp /exit \
+  > "$TMP_ROOT/remote-omp-exit.out" 2>&1 || true
+assert_grep 'pane send-text' "$HERDR_LOG" \
+  "remote OMP /exit stopped using the typed lifecycle path"
+[ "$(cat "$OMP_TYPED_INPUT")" = /exit ] \
+  || fail "remote OMP /exit was not typed as the exact harness command: $(cat "$OMP_TYPED_INPUT")"
+[ ! -e "$OMP_INBOX/001.msg" ] \
+  || fail "remote OMP /exit was converted into an ordinary inbox instruction"
+
+# The repaired route sends no payload to the pane. It binds the listener,
+# enqueues exactly once, programmatically triggers its turn, and leaves the
+# worker's durable handled move as the acknowledgement.
+: > "$HERDR_LOG"
+: > "$OMP_SENT"
+remote_env "$ROOT/bin/fm-send.sh" fm-remote-omp "ordinary remote OMP steer" \
+  > "$TMP_ROOT/remote-omp-delivery.out" 2>&1 \
+  || fail "bound remote OMP inbox delivery failed:"$'\n'"$(cat "$TMP_ROOT/remote-omp-delivery.out")"$'\n'"listener:"$'\n'"$(cat "$TMP_ROOT/remote-omp-listener.out")"$'\n'"programmatic sends:"$'\n'"$(cat "$OMP_SENT" 2>/dev/null)"
+OMP_RECORD="$OMP_INBOX/001.msg"
+[ -f "$OMP_RECORD" ] || fail "bound remote OMP delivery did not write its canonical inbox record"
+OMP_BODY=$(FM_ROOT_OVERRIDE="$REMOTE_ROOT" /bin/bash -c \
+  '. "$1/bin/fm-task-inbox-lib.sh"; fm_task_inbox_body "$2"' _ "$REMOTE_ROOT" "$OMP_RECORD")
+assert_contains "$OMP_BODY" "ordinary remote OMP steer" \
+  "bound remote OMP delivery did not preserve the payload in the canonical inbox"
+assert_grep '"deliverAs":"steer","triggerTurn":true' "$OMP_SENT" \
+  "bound remote OMP delivery did not use programmatic triggerTurn"
+assert_no_grep 'pane send-text' "$HERDR_LOG" \
+  "bound remote OMP delivery typed payload or doorbell into the remote composer"
+assert_no_grep 'pane send-keys' "$HERDR_LOG" \
+  "bound remote OMP delivery used Enter as a transport or receipt"
+[ -f "$OMP_TURN_STARTED" ] || fail "bound remote OMP delivery did not publish its task-bound turn start"
+mv "$OMP_RECORD" "$OMP_INBOX/handled/001.msg"
+[ -f "$OMP_INBOX/handled/001.msg" ] || fail "bound remote OMP inbox request lacked the durable handled acknowledgement"
+rm -f "$HERDR_FORCE_IDLE"
+pass "remote OMP delivery replaces the reproducible typed no-turn regression with one bound inbox request, programmatic turn, and handled acknowledgement"
+
 pass "remote OMP primary, fallback, result metadata, pane launch, and existing safety refusals hold end to end"
 
 echo "ALL TESTS PASSED"

@@ -96,6 +96,7 @@ test_exact_bun_omp_primary_identity() {
   fakebin=$(make_process_fakebin "$TMP_ROOT/process")
   export FM_OMP_PROCESS_EXPECTED_BUN="$fakebin/bun"
   export FM_OMP_PROCESS_EXPECTED_BIN="$fakebin/omp"
+  unset FM_OMP_BUN FM_OMP_BIN
 
   got=$(PATH="$fakebin:$BASE_PATH" bash -c \
     '. "$0/bin/fm-session-lock-lib.sh"; fm_harness_ancestry_pid' "$ROOT")
@@ -179,7 +180,9 @@ test_nested_foreign_harness_keeps_its_own_identity() {
 
   unset FM_OMP_PROCESS_EXPECTED_BUN FM_OMP_PROCESS_EXPECTED_BIN
   got=$(PATH="$fakebin:$BASE_PATH" FM_STATE_OVERRIDE="$TMP_ROOT/nested/no-state" \
-    env -u PI_CODING_AGENT -u GROK_AGENT CLAUDECODE=1 "$ROOT/bin/fm-harness.sh")
+    env -u FM_OMP_HARNESS -u FM_OMP_BUN -u FM_OMP_BIN \
+      -u FM_OMP_PROCESS_EXPECTED_BUN -u FM_OMP_PROCESS_EXPECTED_BIN \
+      -u PI_CODING_AGENT -u GROK_AGENT CLAUDECODE=1 "$ROOT/bin/fm-harness.sh")
   [ "$got" = claude ] \
     || fail "absent OMP identity evidence resolved '$got', expected claude"
   pass "exact-OMP ancestry stops at the innermost foreign harness ancestor"
@@ -456,6 +459,7 @@ SH
     FM_OMP_SESSION_POINTER="$fixture/home/state/.omp-session" \
     FM_OMP_TASK_INBOX_DIR="$fixture/home/state/secondmate.inbox" \
     FM_OMP_TASK_DOORBELL_READY="$fixture/home/state/secondmate.omp-doorbell-ready" \
+    FM_OMP_TASK_TURN_STARTED="$fixture/home/state/secondmate.omp-started" \
     node --input-type=module 2>&1 <<'JS'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
@@ -476,7 +480,7 @@ const api = {
 process.argv[1] = process.env.EXTENSION;
 const extension = await import(`${pathToFileURL(process.env.EXTENSION).href}?test=${Date.now()}`);
 await extension.default(api);
-for (const required of ["session_start", "session_switch", "before_agent_start", "session_stop", "tool_call", "session_shutdown"]) {
+for (const required of ["session_start", "turn_start", "session_switch", "before_agent_start", "session_stop", "tool_call", "session_shutdown"]) {
   if (!handlers.has(required)) throw new Error(`missing OMP native handler ${required}`);
 }
 if (!commands.has("fm-watch-arm-omp") || !tools.has("fm_watch_arm_omp")) {
@@ -498,6 +502,10 @@ if (readFileSync(process.env.FM_OMP_SESSION_POINTER, "utf8").trim() !== `${proce
 }
 if (readFileSync(process.env.FM_OMP_TASK_DOORBELL_READY, "utf8") !== `${process.pid}\n`) {
   throw new Error("OMP primary integration did not publish secondmate doorbell readiness at session start");
+}
+await handlers.get("turn_start")({ type: "turn_start" }, extensionContext);
+if (readFileSync(process.env.FM_OMP_TASK_TURN_STARTED, "utf8") !== `${process.pid}\n`) {
+  throw new Error("OMP primary integration did not publish the task-bound turn-start marker");
 }
 const primaryRequest = `${process.env.FM_OMP_TASK_DOORBELL_READY}.requests/primary.pending`;
 writeFileSync(primaryRequest, `Firstmate instruction waiting: list ${process.env.FM_OMP_TASK_INBOX_DIR}/*.msg and, in numeric order, read and act on each, then mv each handled file to ${process.env.FM_OMP_TASK_INBOX_DIR}/handled/.`);

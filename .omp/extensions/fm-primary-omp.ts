@@ -1,7 +1,8 @@
 // Firstmate primary integration for OMP.
 // OMP-native session, stop, tool-call, and shutdown events stay in this adapter.
 import { spawn, spawnSync } from "node:child_process";
-import { renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
@@ -92,6 +93,23 @@ function publishSecondmateSession(ctx: ExtensionContext): void {
       // The temporary file may not have been created.
     }
     // Session persistence must never break the live OMP conversation.
+  }
+}
+
+function publishTaskTurnStarted(): void {
+  const marker = process.env.FM_OMP_TASK_TURN_STARTED;
+  if (!marker || !isAbsolute(marker)) return;
+  const temporary = `${marker}.tmp.${process.pid}.${randomUUID()}`;
+  try {
+    mkdirSync(dirname(marker), { recursive: true });
+    writeFileSync(temporary, `${process.pid}\n`, { mode: 0o600 });
+    renameSync(temporary, marker);
+  } catch {
+    try {
+      unlinkSync(temporary);
+    } catch {
+      // The temporary file may not have been created.
+    }
   }
 }
 
@@ -242,6 +260,10 @@ export default function (omp: ExtensionAPI) {
     watch.sessionStart();
     publishSecondmateSession(ctx);
     deliverSessionstartNudge();
+  });
+
+  omp.on("turn_start", () => {
+    publishTaskTurnStarted();
   });
 
   omp.on("session_switch", (event, ctx) => {

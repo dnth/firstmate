@@ -20,7 +20,8 @@
 # Usage:
 #   . "$(dirname "${BASH_SOURCE[0]}")/remote-herdr-fixture.sh"
 #   install_remote_herdr_fixture <remote-root> <state-file> <log-file> \
-#     <send-fail-flag> <socket-path> [<omp-ack-pid> <omp-bun> <omp-bin>]
+#     <send-fail-flag> <socket-path> [<omp-ack-pid> <omp-bun> <omp-bin> \
+#     <omp-active-pid-file> <force-idle-file> <pane-text-log>]
 #
 # Every invocation is appended verbatim to <log-file>, so a test reads back what
 # the remote pane received. Creating <send-fail-flag> makes every pane write
@@ -28,10 +29,14 @@
 # Supplying the three OMP acknowledgement fields makes an OMP launch publish the
 # same home-owned integration marker, lock, and durable-session pointer that the
 # real primary extension publishes, while leaving every non-OMP launch unchanged.
+# An active-PID file replaces the fixture's inert foreground process with one
+# real listener process, while a force-idle file prevents typed submission from
+# manufacturing a turn-start acknowledgement.
 
 install_remote_herdr_fixture() { # <remote-root> <state> <log> <send-fail> <socket>
   local remote_root=$1 state=$2 log=$3 send_fail=$4 socket=$5 script="$1/bin/herdr"
-  local omp_ack_pid=${6:-} omp_bun=${7:-} omp_bin=${8:-} real_ps ps_fixture
+  local omp_ack_pid=${6:-} omp_bun=${7:-} omp_bin=${8:-} omp_active_pid_file=${9:-} force_idle_file=${10:-} pane_text_log=${11:-}
+  local real_ps ps_fixture
   mkdir -p "$remote_root/bin"
   cat > "$script" <<SH
 #!/usr/bin/env bash
@@ -41,8 +46,8 @@ LOG='$log'
 SEND_FAIL='$send_fail'
 SOCKET='$socket'
 SH
-  printf 'OMP_ACK_PID=%q\nOMP_BUN=%q\nOMP_BIN=%q\n' \
-    "$omp_ack_pid" "$omp_bun" "$omp_bin" >> "$script"
+  printf 'OMP_ACK_PID=%q\nOMP_BUN=%q\nOMP_BIN=%q\nOMP_ACTIVE_PID_FILE=%q\nFORCE_IDLE_FILE=%q\nPANE_TEXT_LOG=%q\n' \
+    "$omp_ack_pid" "$omp_bun" "$omp_bin" "$omp_active_pid_file" "$force_idle_file" "$pane_text_log" >> "$script"
   cat >> "$script" <<'SH'
 printf '%s\n' "$*" >> "$LOG"
 jq_state() { jq "$@" "$STATE"; }
@@ -62,6 +67,7 @@ publish_omp_ack() { # <pane> <launch>
       printf '%s\n%s\n%s\n%s\n' "$version" "$OMP_ACK_PID" "$OMP_BUN" "$OMP_BIN" \
         > "$cwd/state/.omp-primary-extension-loaded"
       printf '%s\n' "$OMP_ACK_PID" > "$cwd/state/.lock"
+      jq_state --arg p "$pane" --arg session "$session" '.omp_session[$p] = $session' | save
       ;;
   esac
 }
@@ -116,6 +122,7 @@ case "${1:-} ${2:-}" in
        | .working |= with_entries(select(.key != $p))' | save ;;
   "pane send-text")
     [ ! -f "$SEND_FAIL" ] || exit 1
+    [ -z "$PANE_TEXT_LOG" ] || printf '%s\n' "${4:-}" >> "$PANE_TEXT_LOG"
     jq_state --arg p "${3:-}" --arg text "${4:-}" \
       '.typed[$p] = true | .launch[$p] = $text' | save ;;
   "pane run")
@@ -130,23 +137,41 @@ case "${1:-} ${2:-}" in
     pane=${3:-}
     jq_state --arg p "$pane" '.typed[$p] = true | .working[$p] = true' | save
     launch=$(jq_state -r --arg p "$pane" '.launch[$p] // ""')
-    if [ "${4:-}" = enter ]; then
+    if [ "${4:-}" = enter ] && [ ! -f "$FORCE_IDLE_FILE" ]; then
       publish_omp_ack "$pane" "$launch"
     fi
     ;;
   "pane read") printf '\n' ;;
   "pane process-info")
-    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":987654,"foreground_process_group_id":987654,"foreground_processes":[{"pid":987654,"name":"fish","argv0":"fish"}]}}}\n' "${4:-${3:-}}"
+    pane_pid=987654
+    pane_name=fish
+    if [ -n "$OMP_ACTIVE_PID_FILE" ] && [ -f "$OMP_ACTIVE_PID_FILE" ]; then
+      IFS= read -r candidate < "$OMP_ACTIVE_PID_FILE" || candidate=
+      case "$candidate" in
+        ''|*[!0-9]*) ;;
+        *) pane_pid=$candidate; pane_name=bun ;;
+      esac
+    fi
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"%s","argv0":"%s"}]}}}\n' \
+      "${4:-${3:-}}" "$pane_pid" "$pane_pid" "$pane_pid" "$pane_name" "$pane_name"
     ;;
   "agent get")
     pane=${3:-}
+    omp_session=$(jq_state -r --arg p "$pane" '.omp_session[$p] // empty')
     if [ "$(jq_state -r --arg p "$pane" '.working[$p] // false')" = true ]; then
       jq_state --arg p "$pane" '.working |= with_entries(select(.key != $p))' | save
-      printf '{"result":{"agent":{"agent_status":"working"}}}\n'
+      agent_status=working
     elif [ "$(jq_state -r --arg p "$pane" '.typed[$p] // false')" = true ]; then
-      printf '{"result":{"agent":{"agent_status":"idle"}}}\n'
+      agent_status=idle
     else
       printf '{"error":{"code":"agent_not_found","message":"%s"}}\n' "$pane"
+      exit 0
+    fi
+    if [ -n "$omp_session" ]; then
+      printf '{"result":{"agent":{"agent":"omp","agent_status":"%s","agent_session":{"kind":"path","value":"%s"}}}}\n' \
+        "$agent_status" "$omp_session"
+    else
+      printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$agent_status"
     fi
     ;;
   "session list"*)
@@ -160,6 +185,16 @@ SH
   cat > "$ps_fixture" <<SH
 #!/usr/bin/env bash
 REAL_PS='$real_ps'
+ACTIVE_PID_FILE='$omp_active_pid_file'
+active_pid=
+if [ -n "\$ACTIVE_PID_FILE" ] && [ -f "\$ACTIVE_PID_FILE" ]; then
+  IFS= read -r active_pid < "\$ACTIVE_PID_FILE" || active_pid=
+fi
+if [ -n "\$active_pid" ] && [ "\${1:-}" = -p ] && [ "\${2:-}" = "\$active_pid" ] \
+   && [ "\${3:-}" = -o ] && [ "\${4:-}" = comm= ]; then
+  printf '%s\n' bun
+  exit 0
+fi
 case "\$*" in
   "-axo pid=,ppid=")
     "\$REAL_PS" "\$@"
@@ -176,5 +211,5 @@ SH
 # reset_remote_herdr_fixture <state>: return the fake host to "no workspaces,
 # tabs, or panes", which is what a test means by "the previous endpoint is gone".
 reset_remote_herdr_fixture() { # <state>
-  printf '{"next":1,"workspaces":[],"tabs":[],"typed":{},"working":{},"launch":{}}\n' > "$1"
+  printf '{"next":1,"workspaces":[],"tabs":[],"typed":{},"working":{},"launch":{},"omp_session":{}}\n' > "$1"
 }

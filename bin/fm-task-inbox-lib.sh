@@ -12,12 +12,15 @@
 # Design: the durable inbox record and its handled-file move are the processing
 # boundary; doorbell transport is at-least-once and carries no instruction state.
 # OMP uses an acknowledged programmatic request, while every other harness and
-# an unavailable OMP extension use the terminal composer fallback. A claimed
-# programmatic request that may already have sent is anchored as ambiguous and
-# is never sent again; session recovery reconciles the instruction from the
-# durable inbox. Other swallowed doorbells are re-rung on a bounded schedule,
-# and a worker that never acknowledges surfaces through the ordinary stale wake
-# into stuck-crewmate-recovery.
+# local callers that do not require the extension use the terminal composer
+# fallback. A caller that sets FM_TASK_INBOX_OMP_REQUIRE_PROGRAMMATIC=1 receives
+# 3 when the extension is unavailable and 4 when its request acknowledgement is
+# ambiguous; both verdicts leave the named inbox record intact and never use the
+# composer. A claimed programmatic request that may already have sent is anchored
+# as ambiguous and is never sent again; session recovery reconciles the
+# instruction from the durable inbox. Other swallowed doorbells are re-rung on a
+# bounded schedule, and a worker that never acknowledges surfaces through the
+# ordinary stale wake into stuck-crewmate-recovery.
 #
 # Layout under <state-dir>:
 #   <task>.inbox/NNN.msg       one durable steer, numeric sequence, atomic rename
@@ -185,22 +188,19 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 }
 
 # Ring the doorbell, best-effort. OMP first asks its task-bound extension to
-# deliver the line as a programmatic steer with triggerTurn; when that surface
-# is unavailable, and for every non-OMP harness, the existing advisory composer
-# pre-check and backend submit machinery remain the fallback.
-# Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text
-# (the watcher re-rings later), 2 the backend send failed. No return value is
-# delivery proof; the acknowledgement move is the only delivery signal.
-# The skip is deliberately narrow: only an exact `pending` verdict defers,
-# because there our Enter could submit someone's real half-typed content.
-# `pending-unproven` and `unknown` still ring - the worst outcome is a garbled
-# CONSTANT line the worker recovers semantically, while skipping on ambiguous
-# verdicts would starve a harness whose idle screen the classifier cannot
-# positively identify (that classifier is advisory here by design).
-# Hermes doorbells intentionally do not take .hermes-delivery.lock in this faithful upstream port; fm-inbox-hermes-doorbell-serialize owns the serialization follow-up.
+# deliver the line as a programmatic steer with triggerTurn. When
+# FM_TASK_INBOX_OMP_REQUIRE_PROGRAMMATIC=1, unavailable or unacknowledged
+# programmatic delivery returns 3 or 4 without touching the composer. Otherwise,
+# and for every non-OMP harness, the existing advisory composer pre-check and
+# backend submit machinery remain the fallback.
+# Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text,
+# 2 the backend send failed, 3 required programmatic delivery unavailable, or 4
+# required programmatic delivery ambiguously queued. No return value is delivery
+# proof; the acknowledgement move is the only delivery signal.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [harness] [omp-runtime] [omp-bin]
   local backend=$1 target=$2 rec=$3 label=${4:-}
   local harness=${5:-} omp_runtime=${6:-} omp_bin=${7:-} line cstate verdict ready_marker request_id programmatic_rc
+  local programmatic_required=${FM_TASK_INBOX_OMP_REQUIRE_PROGRAMMATIC:-0}
   line=$(fm_task_inbox_doorbell_line "$rec")
   if [ "$harness" = omp ]; then
     ready_marker="${rec%/*}"
@@ -209,9 +209,14 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [har
     programmatic_rc=0
     fm_backend_omp_trigger_turn "$backend" "$target" "$ready_marker" "$omp_runtime" "$omp_bin" "$request_id" "$line" \
       || programmatic_rc=$?
-    if [ "$programmatic_rc" -eq 0 ] || [ "$programmatic_rc" -eq 2 ]; then
-      return 0
-    fi
+    case "$programmatic_rc" in
+      0) return 0 ;;
+      2)
+        [ "$programmatic_required" = 1 ] && return 4
+        return 0
+        ;;
+    esac
+    [ "$programmatic_required" = 1 ] && return 3
   fi
   cstate=$(fm_backend_composer_state "$backend" "$target" "$harness" "$omp_runtime" "$omp_bin" 2>/dev/null) || cstate=unknown
   case "$cstate" in

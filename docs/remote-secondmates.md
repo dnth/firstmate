@@ -182,9 +182,12 @@ Send routed requests normally:
 FM_HOME=<primary-home> bin/fm-send.sh fm-<id> '<request>'
 ```
 
-For an OMP secondmate, the remote endpoint performs the same bounded turn-start verification beside its session.
-Both remote post-delivery verdicts propagate without retrying the request: `delivered-no-turn` exits 4, while `delivered-no-turn-persistence-failed` exits 5 when a required remote recovery trigger could not be persisted.
-The primary records its own durable marker and watcher wake for either verdict, and lifecycle recovery remains supervised.
+For an OMP secondmate, ordinary routed text reselects the exact remote task and writes only its canonical durable inbox.
+Before notification, the remote control binds the seeded home identity, endpoint task, retained OMP session, tracked primary-extension closure, loaded extension instance, canonical launch paths, and one inbox record identity.
+Payload text and handled acknowledgement remain in that inbox, while the loaded extension delivers only its constant doorbell through `sendMessage(..., { triggerTurn: true })`; neither composer text nor Enter transports or proves the request.
+An unavailable extension returns exit 6 with the request durably queued, an ambiguous programmatic request returns exit 7 without replay, and a missing bound turn-start returns exit 8 with the queue retained.
+An identity or extension mismatch returns exit 9 before notification and requires reconciliation rather than resend.
+The existing typed `/exit` path keeps its separate `delivered-no-turn` exit 4 and `delivered-no-turn-persistence-failed` exit 5 behavior.
 
 Marked requests keep the existing correlation contract.
 The remote charter appends replies to `state/parent-replies.status` in the remote home.

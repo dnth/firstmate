@@ -25,6 +25,8 @@
 #      immediate doorbell before the command reports the closure failure.
 #  11. An unwritable inbox is a real local failure: nonzero exit, nothing
 #      typed, and a just-created pending-reply expectation is discarded.
+#  12. A relayed existing secondmate carrier remains byte-preserved and does
+#      not create a second pending-reply expectation.
 # Every case below that passes a literal `$...` message quotes it on purpose
 # (the point is sending an unexpanded `$` line), so SC2016 is disabled.
 # shellcheck disable=SC2016
@@ -278,6 +280,23 @@ test_secondmate_marker_and_enqueue_delivery() {
   pass "fm-send inbox: a secondmate steer records marker+corr in the body and is delivered at enqueue"
 }
 
+test_preserved_secondmate_carrier_does_not_duplicate_tracking() {
+  local dir err carrier body
+  dir=$(setup_case preserved-carrier); err="$dir/send.err"
+  fm_write_secondmate_meta "$dir/home/state/domain.meta" "$dir/home" "sess:fm-domain"
+  carrier="${FM_FROMFIRST_MARK}corr=0123456789abcdef relay the exact original request"
+  run_send "$dir" "$err" FM_SEND_PRESERVE_INBOUND_FROM_FIRSTMATE=1 -- domain "$carrier" \
+    || fail "a preserved secondmate carrier should enqueue"
+  body=$(record_body _ "$dir/home/state/domain.inbox/001.msg")
+  [ "$body" = "$carrier" ] || fail "the relayed carrier was changed:"$'\n'"$body"
+  [ ! -d "$dir/home/state/pending-replies" ] \
+    || fail "a relayed carrier must not create a second pending-reply expectation"
+  case "$(cat "$dir/send.log")" in
+    *"relay the exact original request"*) fail "a relayed payload was typed" ;;
+  esac
+  pass "fm-send inbox: a relayed secondmate carrier preserves its one correlation without duplicate tracking"
+}
+
 test_post_enqueue_bookkeeping_failure_is_not_retryable() {
   local dir err rc rec body
   dir=$(setup_case bookkeeping-failure); err="$dir/send.err"
@@ -393,6 +412,7 @@ test_harness_invocations_stay_typed
 test_explicit_target_stays_typed
 test_key_path_never_touches_inbox
 test_secondmate_marker_and_enqueue_delivery
+test_preserved_secondmate_carrier_does_not_duplicate_tracking
 test_post_enqueue_bookkeeping_failure_is_not_retryable
 test_resolve_close_failure_still_rings_once
 test_meta_lock_contention_fails_bounded
