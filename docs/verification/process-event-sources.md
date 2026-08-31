@@ -129,7 +129,7 @@ A leader that died while its owned group kept running is not a stale generation,
 Signalling that group is safe precisely because only an absent leader reaches this state: a reused PID leaves the leader alive, which the identity comparison classifies as stale or uncertain, and no group signal follows.
 
 This was found by four orphaned runners, elapsed 6-13 minutes, left by a suite whose fixture source never completed.
-`tests/fm-procevent.test.sh` now covers both paths, and three consecutive suite runs leave zero runners, zero fixture children, and zero stray claims.
+`tests/fm-procevent.test.sh` and `tests/fm-procevent-when.test.sh` cover the runner and condition->action paths, and three consecutive suite runs leave zero runners, zero fixture children, and zero stray claims.
 
 ## Portability finding
 
