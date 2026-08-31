@@ -1125,6 +1125,37 @@ SH
   pass "raw dynamic loader wrappers refuse before raw execution"
 }
 
+test_raw_busybox_wrapper_refuses_before_raw_execution() {
+  local rec id out status busybox
+  id=$(profile_id profile-raw-busybox-wrapper-z15s)
+  rec=$(make_spawn_case profile-raw-busybox-wrapper claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  busybox="$FAKEBIN_DIR/busybox"
+  cat > "$busybox" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  sh) shift; [ "${1:-}" = -c ] && shift; exec bash -c "$1" ;;
+esac
+exit 1
+SH
+  chmod +x "$busybox"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" 'busybox sh -c omp')
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+  expect_code 1 "$status" "raw BusyBox wrapper must refuse before launch"
+  assert_contains "$out" "raw launch command could invoke omp" \
+    "BusyBox wrapper refusal did not name its verified-harness boundary"
+  assert_absent "$CASE_DIR/raw-omp-executed" "BusyBox wrapper executed the harmless fake OMP"
+  [ ! -s "$LAUNCH_LOG" ] || fail "BusyBox wrapper typed a launch command"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "BusyBox wrapper created an endpoint"
+  pass "raw BusyBox wrappers refuse before raw execution"
+}
+
 test_raw_absolute_wrapper_refuses_before_raw_execution() {
   local rec id out status
   id=$(profile_id profile-raw-absolute-wrapper-z15o)
@@ -2828,6 +2859,7 @@ test_raw_bare_target_with_canonical_omp_identity_refuses_before_raw_execution
 test_raw_bare_target_with_effective_path_omp_identity_refuses_before_raw_execution
 test_raw_bare_target_hardlinked_to_omp_refuses_before_raw_execution
 test_raw_dynamic_loader_wrapper_refuses_before_raw_execution
+test_raw_busybox_wrapper_refuses_before_raw_execution
 test_raw_absolute_wrapper_refuses_before_raw_execution
 test_raw_non_omp_command_p_ignores_imported_type_function
 test_raw_non_omp_command_p_preserves_path_assignment

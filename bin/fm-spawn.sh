@@ -1343,7 +1343,7 @@ raw_launch_find_executable() {  # <bare target> <lookup path> <relative root>
 
 raw_launch_omp_is_wrapper_executable() {  # <canonical executable>
   case "${1##*/}" in
-    command|env|exec|builtin|ld.so*|ld-linux*|ld-musl*|ld-*.so*|dyld|python*|perl*|ruby*|node|deno|java|php|lua*|tclsh*|awk|gawk|mawk|nawk) return 0 ;;
+    command|env|exec|builtin|busybox|toybox|ld.so*|ld-linux*|ld-musl*|ld-*.so*|dyld|python*|perl*|ruby*|node|deno|java|php|lua*|tclsh*|awk|gawk|mawk|nawk) return 0 ;;
   esac
   return 1
 }
