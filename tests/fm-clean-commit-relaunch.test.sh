@@ -460,6 +460,16 @@ for failure in allocator checkout launch acknowledgement; do
 done
 pass "clean relaunch: allocator, checkout, launch, and acknowledgement failure preserve source"
 
+fixture=$(new_case allocator-dirty-destination)
+before=$(source_snapshot "$fixture")
+out=$(FM_TEST_ALLOCATOR_DIRTY=1 run_owner "$fixture" 2>&1)
+expect_code 1 $? "dirty allocated destination should fail"
+[ "$(source_snapshot "$fixture")" = "$before" ] || fail "dirty allocated destination mutated source"
+assert_absent "$fixture/destination" "dirty allocated destination retained its lease"
+assert_contains "$(cat "$fixture/allocator.log")" 'return --if-lease-holder fm-destination' "dirty allocated destination was not returned"
+git -C "$fixture/project" show-ref --verify --quiet refs/heads/fm/destination && fail "dirty allocated destination retained destination branch"
+pass "clean relaunch: rejected allocated destination returns its lease"
+
 fixture=$(new_case handoff-staging-failure)
 before=$(source_snapshot "$fixture")
 out=$(FM_TEST_JQ_FAIL=1 run_owner "$fixture" 2>&1)

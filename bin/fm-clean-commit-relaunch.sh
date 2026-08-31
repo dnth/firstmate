@@ -237,6 +237,8 @@ SOURCE_LOCK_HELD=0
 DESTINATION_LOCK_HELD=0
 DESTINATION_WORKTREE=
 DESTINATION_WORKTREE_OWNED=0
+DESTINATION_LEASE_WORKTREE=
+DESTINATION_LEASE_OWNED=0
 DESTINATION_BRANCH=
 DESTINATION_BRANCH_CREATED=0
 DESTINATION_PUBLISHED=0
@@ -259,11 +261,15 @@ defer_destination_allocation_signal() {
 }
 
 cleanup_destination() {
-  [ "$DESTINATION_WORKTREE_OWNED" -eq 1 ] || return 0
-  fm_clean_relaunch_launch_cleanup "$DESTINATION" || true
-  if ! (cd "$PROJECT" && "$SCRIPT_DIR/fm-treehouse-command.sh" return --if-lease-holder "fm-$DESTINATION" "$DESTINATION_WORKTREE"); then
-    echo "error: could not return destination worktree $DESTINATION_WORKTREE" >&2
-    return 1
+  if [ "$DESTINATION_WORKTREE_OWNED" -eq 1 ]; then
+    fm_clean_relaunch_launch_cleanup "$DESTINATION" || true
+  fi
+  if [ "$DESTINATION_LEASE_OWNED" -eq 1 ]; then
+    if ! (cd "$PROJECT" && "$SCRIPT_DIR/fm-treehouse-command.sh" return --if-lease-holder "fm-$DESTINATION" "$DESTINATION_LEASE_WORKTREE"); then
+      echo "error: could not return destination worktree $DESTINATION_LEASE_WORKTREE" >&2
+      return 1
+    fi
+    DESTINATION_LEASE_OWNED=0
   fi
   if [ "$DESTINATION_BRANCH_CREATED" -eq 1 ]; then
     if ! git -C "$PROJECT" branch -D "$DESTINATION_BRANCH" >/dev/null; then
@@ -469,6 +475,8 @@ ALLOCATED_WORKTREE=$(cd "$PROJECT" && "$SCRIPT_DIR/fm-treehouse-get.sh" --lease 
   exit 1
 }
 DESTINATION_WORKTREE=$ALLOCATED_WORKTREE
+DESTINATION_LEASE_WORKTREE=$ALLOCATED_WORKTREE
+DESTINATION_LEASE_OWNED=1
 ALLOCATED_WORKTREE=$(resolve_dir destination-worktree "$ALLOCATED_WORKTREE") || exit 1
 DESTINATION_WORKTREE=$ALLOCATED_WORKTREE
 [ "$ALLOCATED_WORKTREE" != "$SOURCE_WORKTREE" ] || {
