@@ -579,11 +579,17 @@ fixture=$(new_case interrupted-publication)
 before=$(source_snapshot "$fixture")
 FM_TEST_LAUNCH_DELAY=5 run_owner "$fixture" >"$fixture/interrupted.out" 2>&1 &
 pid=$!
-for _ in $(seq 1 100); do
-  [ -f "$fixture/home/data/destination/relaunch-handoff.json" ] && break
+# Wait for both the published handoff and the delayed endpoint creation. The
+# latter is the fixture's observable barrier that the owner has entered the
+# post-publication launch window before this test interrupts it.
+for _ in $(seq 1 400); do
+  [ -f "$fixture/home/data/destination/relaunch-handoff.json" ] \
+    && grep -Fq 'create-task ' "$fixture/tmux.log" && break
   sleep 0.01
 done
 assert_present "$fixture/home/data/destination/relaunch-handoff.json" "interrupt fixture did not reach destination publication"
+grep -Fq 'create-task ' "$fixture/tmux.log" \
+  || fail "interrupt fixture did not enter the delayed destination launch"
 kill -HUP "$pid"
 wait "$pid"
 status=$?
