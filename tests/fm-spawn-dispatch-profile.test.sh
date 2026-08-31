@@ -316,7 +316,7 @@ case "${1:-}" in
 esac
 SH
   chmod +x "$fakebin/omp"
-  cp /usr/bin/true "$fakebin/custom-agent"
+  ln -s /usr/bin/true "$fakebin/custom-agent"
   cat > "$fakebin/flock" <<'SH'
 #!/usr/bin/env bash
 for arg in "$@"; do
@@ -738,7 +738,7 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "/usr/bin/env $FAKEBIN_DIR/custom-agent --flag __OMPMAXTIME__" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  [ "$launch" = '/usr/bin/env /usr/bin/true --flag __OMPMAXTIME__' ] || fail "raw launch command changed"$'\n'"actual: $launch"
   pass "active crew-dispatch profile preserves raw direct non-OMP launch arguments"
 }
 
@@ -811,6 +811,7 @@ test_ambiguous_raw_omp_spellings_refuse_before_raw_execution() {
     'command FOO=bar omp --legacy'
     'custom-agent=ignored omp --legacy'
     'command -- custom-agent=ignored omp --legacy'
+    'LD_PRELOAD=/tmp/launch-omp.so /usr/bin/true'
     "'omp --legacy"
   )
   for raw in "${cases[@]}"; do
@@ -853,7 +854,7 @@ test_raw_non_omp_launches_keep_their_existing_escape_hatch() {
   expect_code 0 "$status" "lookalike non-OMP raw command should still launch"
   assert_contains "$out" "spawned $id harness=custom-omp-agent" \
     "lookalike non-OMP raw command lost its executable identity"
-  [ "$(cat "$LAUNCH_LOG")" = "/usr/bin/env $FAKEBIN_DIR/custom-agent --legacy" ] \
+  [ "$(cat "$LAUNCH_LOG")" = '/usr/bin/env /usr/bin/true --legacy' ] \
     || fail "lookalike non-OMP raw launch changed"
   pass "lookalike non-OMP raw launches preserve the escape hatch"
 }
@@ -878,7 +879,7 @@ SH
   unset FM_TEST_PANE_BASH_ENV FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
   expect_code 0 "$status" "raw direct non-OMP launch should bypass an ambient pane function"
   assert_absent "$CASE_DIR/raw-omp-executed" "ambient pane function executed the harmless fake OMP"
-  [ "$(cat "$LAUNCH_LOG")" = "/usr/bin/env $FAKEBIN_DIR/custom-agent --legacy" ] \
+  [ "$(cat "$LAUNCH_LOG")" = '/usr/bin/env /usr/bin/true --legacy' ] \
     || fail "raw direct non-OMP launch did not use the alias-safe command form"
   pass "raw direct non-OMP launches bypass ambient pane aliases and functions"
 }
@@ -949,7 +950,7 @@ test_raw_non_omp_command_p_launches_a_relative_target() {
   rec=$(make_spawn_case profile-raw-command-p-relative claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
-  cp /usr/bin/printf "$PROJ_DIR/custom-agent"
+  ln -s /usr/bin/printf "$PROJ_DIR/custom-agent"
   git -C "$PROJ_DIR" add custom-agent
   sync_project_commit "$PROJ_DIR" "$WT_DIR" 'add raw relative executable'
   export FM_TEST_EXECUTE_RAW_LAUNCH=1
@@ -1381,6 +1382,30 @@ SH
   [ ! -s "$LAUNCH_LOG" ] || fail "shebang wrapper typed a launch command"
   [ ! -s "$CASE_DIR/endpoint.log" ] || fail "shebang wrapper created an endpoint"
   pass "raw shebang wrappers refuse before raw execution"
+}
+
+test_raw_untrusted_native_target_refuses_before_raw_execution() {
+  local rec id out status target
+  id=$(profile_id profile-raw-untrusted-native-z16b)
+  rec=$(make_spawn_case profile-raw-untrusted-native claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  target="$PROJ_DIR/custom-agent"
+  cp /usr/bin/printf "$target"
+  chmod +x "$target"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_EXECUTION_LOG="$CASE_DIR/raw-execution.log"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "$target native-target-ok")
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_EXECUTION_LOG
+  expect_code 1 "$status" "raw untrusted native target must refuse before launch"
+  assert_contains "$out" "raw launch command could invoke omp" \
+    "untrusted native target refusal did not name its verified-harness boundary"
+  [ ! -s "$LAUNCH_LOG" ] || fail "untrusted native target typed a launch command"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "untrusted native target created an endpoint"
+  pass "raw untrusted native targets refuse before raw execution"
 }
 
 test_raw_absolute_wrapper_refuses_before_raw_execution() {
@@ -3095,6 +3120,7 @@ test_raw_man_wrapper_refuses_before_raw_execution
 test_raw_terminal_multiplexer_wrapper_refuses_before_raw_execution
 test_raw_command_p_effective_path_wrapper_refuses_before_raw_execution
 test_raw_shebang_wrapper_refuses_before_raw_execution
+test_raw_untrusted_native_target_refuses_before_raw_execution
 test_raw_absolute_wrapper_refuses_before_raw_execution
 test_raw_non_omp_command_p_ignores_imported_type_function
 test_raw_non_omp_command_p_preserves_path_assignment

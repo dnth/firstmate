@@ -109,9 +109,10 @@
 #   either kind. Hermes overrides only a crewmate or scout spawn and is refused for secondmates.
 #   For crewmates and scouts, a non-flag string containing shell whitespace is
 #   treated as a RAW launch command - the escape hatch for verifying new adapters.
-#   Raw direct non-OMP commands preserve their assignments, executable, and
-#   arguments through an absolute `env` launch form that bypasses pane aliases
-#   and functions.
+#   Raw direct non-OMP commands preserve accepted assignments and arguments
+#   through an absolute `env` launch form only for canonical identities of true,
+#   false, printf, printenv, sleep, cat, echo, head, tail, wc, basename, dirname,
+#   and test, bypassing pane aliases and functions.
 #   Leading whitespace, plain environment assignments, and `command -p --` are
 #   normalized only to identify OMP, which raw launch never permits.
 #   Ambiguous shell syntax refuses before endpoint creation rather than bypassing
@@ -1306,6 +1307,11 @@ raw_launch_omp_is_assignment_shaped() {  # <word>
   return 1
 }
 
+raw_launch_omp_is_loader_assignment() {  # <word>
+  case "$1" in LD_*=*|DYLD_*=*|LDR_*=*|LIBPATH=*|SHLIB_PATH=*) return 0 ;; esac
+  return 1
+}
+
 raw_launch_omp_is_omp_path() {  # <word>
   case "$1" in */omp) return 0 ;; esac
   return 1
@@ -1341,12 +1347,16 @@ raw_launch_find_executable() {  # <bare target> <lookup path> <relative root>
   return 1
 }
 
-raw_launch_omp_is_static_direct_executable() {  # <canonical executable>
-  local magic
-  magic=$(/usr/bin/od -An -N4 -tx1 -- "$1" 2>/dev/null | /usr/bin/tr -d '[:space:]') || return 1
-  case "$magic" in
-    7f454c46|feedface|feedfacf|cefaedfe|cffaedfe|cafebabe|cafebabf|bebafeca|bfbafeca) return 0 ;;
-  esac
+raw_launch_omp_is_trusted_direct_executable() {  # <canonical executable>
+  local path=$1 path_identity trusted trusted_path
+  path_identity=$(raw_launch_executable_identity "$path") || return 1
+  for trusted in true false printf printenv sleep cat echo head tail wc basename dirname test; do
+    for trusted_path in "/usr/bin/$trusted" "/bin/$trusted"; do
+      trusted_path=$(raw_launch_canonical_executable "$trusted_path" / 2>/dev/null || true)
+      [ -n "$trusted_path" ] || continue
+      [ "$(raw_launch_executable_identity "$trusted_path")" != "$path_identity" ] || return 0
+    done
+  done
   return 1
 }
 
@@ -1383,7 +1393,7 @@ raw_launch_omp_canonical_executable() {  # <path> <relative root> <lookup path> 
   path=$(raw_launch_canonical_executable "$1" "$2") || return 1
   raw_launch_omp_is_wrapper_executable "$path" "$3" "$4" "$2" && return 1
   raw_launch_omp_word_has_shell_grammar "${path##*/}" && return 1
-  raw_launch_omp_is_static_direct_executable "$path" || return 1
+  raw_launch_omp_is_trusted_direct_executable "$path" || return 1
   for omp_lookup_path in "$3" "$4" "${PATH:-}"; do
     case "$omp_lookup_path" in ''|:*|*::|*:|*$'\n'*|*$'\r'*) continue ;; esac
     IFS=: read -r -a omp_lookup_entries <<< "$omp_lookup_path"
@@ -1480,6 +1490,7 @@ raw_launch_omp_classify() {  # <raw command>; sets RAW_LAUNCH_OMP_CLASS and RAW_
     word=${words[$index]}
     if raw_launch_omp_is_plain_assignment "$word"; then
       case "$word" in *[\'\"\`\\\$]*) return 0 ;; esac
+      raw_launch_omp_is_loader_assignment "$word" && return 0
       index=$((index + 1))
       continue
     fi
