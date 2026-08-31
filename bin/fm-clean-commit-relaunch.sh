@@ -119,12 +119,20 @@ worktree_is_task_owned() {  # <worktree>
   local worktree=$1 meta recorded
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] || continue
-    recorded=$(meta_exact "$meta" worktree 2>/dev/null || true)
-    [ -n "$recorded" ] || continue
-    recorded=$(resolve_dir recorded-task-worktree "$recorded" 2>/dev/null || true)
+    recorded=$(meta_exact "$meta" worktree 2>/dev/null) || return 2
+    recorded=$(resolve_dir recorded-task-worktree "$recorded" 2>/dev/null) || return 2
     [ "$recorded" != "$worktree" ] || return 0
   done
   return 1
+}
+
+task_worktrees_are_well_formed() {
+  local meta recorded
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] || continue
+    recorded=$(meta_exact "$meta" worktree 2>/dev/null) || return 1
+    resolve_dir recorded-task-worktree "$recorded" >/dev/null 2>&1 || return 1
+  done
 }
 
 destination_tmux_window_absent() {  # <destination>
@@ -254,7 +262,7 @@ cleanup_destination() {
 
 cleanup() {
   status=$?
-  if [ "$status" -ne 0 ] && [ "$DESTINATION_PUBLISHED" -eq 0 ]; then
+  if [ "$status" -ne 0 ]; then
     cleanup_destination || echo "error: destination cleanup is incomplete" >&2
   fi
   [ "$DESTINATION_LOCK_HELD" -eq 0 ] || fm_lock_release "$DESTINATION_LOCK" || true
@@ -424,6 +432,10 @@ case "$CUSTODY" in
   active|parked) echo "error: source task $SOURCE has active or parked No-Mistakes custody" >&2; exit 1 ;;
   *) echo "error: source task $SOURCE No-Mistakes custody is unreadable or malformed" >&2; exit 1 ;;
 esac
+task_worktrees_are_well_formed || {
+  echo "error: a local task metadata record has a malformed worktree identity" >&2
+  exit 1
+}
 
 DESTINATION_BRANCH="fm/$DESTINATION"
 [ "$SOURCE_BRANCH" != "$DESTINATION_BRANCH" ] || {
@@ -467,10 +479,15 @@ worktree_is_registered "$PROJECT" "$DESTINATION_WORKTREE" || {
   echo "error: normal allocator returned an unregistered destination worktree" >&2
   exit 1
 }
-worktree_is_task_owned "$DESTINATION_WORKTREE" && {
+if worktree_is_task_owned "$DESTINATION_WORKTREE"; then
   echo "error: normal allocator returned an existing task worktree" >&2
   exit 1
-}
+else
+  case "$?" in
+    1) ;;
+    *) echo "error: could not establish local task worktree ownership" >&2; exit 1 ;;
+  esac
+fi
 if ! fm_pool_worktree_clean "$DESTINATION_WORKTREE" || path_has_git_operation "$DESTINATION_WORKTREE"; then
   echo "error: normal allocator returned an occupied destination worktree" >&2
   exit 1

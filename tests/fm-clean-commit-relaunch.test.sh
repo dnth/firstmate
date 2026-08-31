@@ -223,12 +223,16 @@ printf 'worktree=%s\n' "$other" > "$home/state/other.meta"
 }
 
 run_owner() {  # <fixture> [source] [destination]
-  local fixture=$1 source=${2:-source} destination=${3:-destination}
+  local fixture=$1 source=${2:-source} destination=${3:-destination} source_branch source_head
+  source_branch=$(git -C "$fixture/source" symbolic-ref --short HEAD)
+  source_head=$(git -C "$fixture/source" rev-parse HEAD)
   PATH="$fixture/fakebin:$PATH" \
     FM_TEST_REAL_GIT="$REAL_GIT" \
     FM_TEST_HOME="$fixture/home" \
     FM_TEST_PROJECT="$fixture/project" \
     FM_TEST_SOURCE_WORKTREE="$fixture/source" \
+    FM_TEST_SOURCE_BRANCH="$source_branch" \
+    FM_TEST_SOURCE_HEAD="$source_head" \
     FM_TEST_TASK_WORKTREE="$fixture/other" \
     FM_TEST_DESTINATION="$fixture/destination" \
     FM_TEST_DESTINATION_ID="$destination" \
@@ -372,9 +376,22 @@ for custody in active parked unreadable; do
   out=$(FM_TEST_CUSTODY="$custody" run_owner "$fixture" 2>&1)
   expect_code 1 $? "custody $custody should refuse"
   assert_refused_before_allocation "$fixture" "$out" "custody $custody"
+  case "$custody" in
+    active|parked) assert_contains "$out" 'active or parked No-Mistakes custody' "$custody custody was not parsed" ;;
+    unreadable) assert_contains "$out" 'custody is unreadable or malformed' "unreadable custody was not parsed" ;;
+  esac
   [ "$(source_snapshot "$fixture")" = "$before" ] || fail "custody $custody mutated source"
 done
 pass "clean relaunch: active, parked, and unreadable No-Mistakes custody refuses"
+
+fixture=$(new_case malformed-other-worktree)
+printf 'worktree=%s\n' "$fixture/destination" >> "$fixture/home/state/other.meta"
+before=$(source_snapshot "$fixture")
+out=$(run_owner "$fixture" 2>&1)
+expect_code 1 $? "malformed foreign worktree metadata should refuse"
+assert_refused_before_allocation "$fixture" "$out" "malformed foreign worktree metadata"
+[ "$(source_snapshot "$fixture")" = "$before" ] || fail "malformed foreign worktree metadata mutated source"
+pass "clean relaunch: malformed foreign worktree metadata refuses"
 
 # Failure after allocation leaves no source change and cleans only the new
 # destination's branch, endpoint, task data, and leased worktree.
@@ -442,6 +459,17 @@ assert_contains "$out" 'destination cleanup is incomplete' "return failure was s
 assert_present "$fixture/destination" "return failure removed the destination worktree"
 git -C "$fixture/project" show-ref --verify --quiet refs/heads/fm/destination || fail "return failure removed attached destination branch"
 pass "clean relaunch: failed destination return remains actionable"
+
+fixture=$(new_case published-output-failure)
+before=$(source_snapshot "$fixture")
+run_owner "$fixture" >/dev/full 2>"$fixture/published-output-failure.out"
+status=$?
+expect_code 1 "$status" "published output failure should fail"
+[ "$(source_snapshot "$fixture")" = "$before" ] || fail "published output failure mutated source"
+assert_absent "$fixture/home/state/destination.meta" "published output failure retained destination metadata"
+assert_absent "$fixture/home/data/destination/relaunch-handoff.json" "published output failure retained destination handoff"
+git -C "$fixture/project" show-ref --verify --quiet refs/heads/fm/destination && fail "published output failure retained destination branch"
+pass "clean relaunch: published output failure cleans destination"
 
 # A concurrent branch creation never becomes this relaunch's cleanup target.
 fixture=$(new_case branch-race)
