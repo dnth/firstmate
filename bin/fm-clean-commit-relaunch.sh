@@ -127,6 +127,19 @@ worktree_is_task_owned() {  # <worktree>
   return 1
 }
 
+destination_tmux_window_absent() {  # <destination>
+  local destination=$1 session windows
+  if [ -n "${TMUX:-}" ]; then
+    session=$(tmux display-message -p '#S' 2>/dev/null) || return 1
+  elif tmux has-session -t firstmate 2>/dev/null; then
+    session=firstmate
+  else
+    return 0
+  fi
+  windows=$(tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null) || return 1
+  ! grep -Fxq "fm-$destination" <<< "$windows"
+}
+
 destination_artifact_exists() {  # <destination>
   local destination=$1 artifact
   for artifact in \
@@ -220,9 +233,15 @@ DESTINATION_PUBLISHED=0
 cleanup_destination() {
   [ "$DESTINATION_WORKTREE_OWNED" -eq 1 ] || return 0
   fm_clean_relaunch_launch_cleanup "$DESTINATION" || true
-  (cd "$PROJECT" && "$SCRIPT_DIR/fm-treehouse-command.sh" return --force "$DESTINATION_WORKTREE" >/dev/null 2>&1) || true
+  if ! (cd "$PROJECT" && "$SCRIPT_DIR/fm-treehouse-command.sh" return --if-lease-holder "fm-$DESTINATION" "$DESTINATION_WORKTREE"); then
+    echo "error: could not return destination worktree $DESTINATION_WORKTREE" >&2
+    return 1
+  fi
   if [ -n "$DESTINATION_BRANCH" ]; then
-    git -C "$PROJECT" branch -D "$DESTINATION_BRANCH" >/dev/null 2>&1 || true
+    if ! git -C "$PROJECT" branch -D "$DESTINATION_BRANCH" >/dev/null; then
+      echo "error: could not delete destination branch $DESTINATION_BRANCH" >&2
+      return 1
+    fi
   fi
   rm -f -- "$DESTINATION_HANDOFF"
 }
@@ -230,10 +249,11 @@ cleanup_destination() {
 cleanup() {
   status=$?
   if [ "$status" -ne 0 ] && [ "$DESTINATION_PUBLISHED" -eq 0 ]; then
-    cleanup_destination
+    cleanup_destination || echo "error: destination cleanup is incomplete" >&2
   fi
   [ "$DESTINATION_LOCK_HELD" -eq 0 ] || fm_lock_release "$DESTINATION_LOCK" || true
   [ "$SOURCE_LOCK_HELD" -eq 0 ] || fm_lock_release "$SOURCE_LOCK" || true
+  return "$status"
 }
 interrupted() {
   exit 1
@@ -388,6 +408,10 @@ case "$(fm_backend_agent_state "$BACKEND" "$FM_BACKEND_VALIDATED_TARGET" "$SOURC
   missing) ;;
   *) echo "error: source task $SOURCE endpoint is not authoritatively missing" >&2; exit 1 ;;
 esac
+destination_tmux_window_absent "$DESTINATION" || {
+  echo "error: destination task $DESTINATION already has a tmux endpoint or tmux is unreadable" >&2
+  exit 1
+}
 CUSTODY=$(no_mistakes_custody "$SOURCE_WORKTREE" "$SOURCE_BRANCH")
 case "$CUSTODY" in
   none) ;;
@@ -410,11 +434,12 @@ ALLOCATED_WORKTREE=$(cd "$PROJECT" && "$SCRIPT_DIR/fm-treehouse-get.sh" --lease 
   exit 1
 }
 ALLOCATED_WORKTREE=$(resolve_dir destination-worktree "$ALLOCATED_WORKTREE") || exit 1
+DESTINATION_WORKTREE=$ALLOCATED_WORKTREE
+DESTINATION_WORKTREE_OWNED=1
 [ "$ALLOCATED_WORKTREE" != "$SOURCE_WORKTREE" ] || {
   echo "error: normal allocator reused the source worktree" >&2
   exit 1
 }
-DESTINATION_WORKTREE=$ALLOCATED_WORKTREE
 DESTINATION_TOP=$(git -C "$DESTINATION_WORKTREE" rev-parse --show-toplevel 2>/dev/null || true)
 DESTINATION_TOP=$(resolve_dir destination-repository-root "$DESTINATION_TOP") || exit 1
 [ "$DESTINATION_TOP" = "$DESTINATION_WORKTREE" ] || {

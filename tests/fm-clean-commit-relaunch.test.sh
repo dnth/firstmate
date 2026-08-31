@@ -50,7 +50,10 @@ SH
 set -eu
 printf '%s\n' "$*" >> "$FM_TEST_ALLOCATOR_LOG"
 if [ "${1:-}" = return ]; then
+  [ "${FM_TEST_RETURN_FAIL:-0}" != 1 ] || exit 1
   path=${!#}
+  [ "${2:-}" = --if-lease-holder ] && [ "${3:-}" = "fm-$FM_TEST_DESTINATION_ID" ] \
+    && [ "$path" = "$FM_TEST_DESTINATION" ] || exit 1
   git -C "$FM_TEST_PROJECT" worktree remove --force "$path" >/dev/null 2>&1 || true
 fi
 SH
@@ -295,6 +298,17 @@ for endpoint in live dead ambiguous unreadable; do
 done
 pass "clean relaunch: only an authoritatively missing endpoint passes admission"
 
+# A destination endpoint is occupied even without durable task metadata.
+fixture=$(new_case destination-window-occupied)
+before=$(source_snapshot "$fixture")
+printf 'fm-destination\n' > "$fixture/windows"
+out=$(run_owner "$fixture" 2>&1)
+expect_code 1 $? "existing destination window should refuse"
+assert_refused_before_allocation "$fixture" "$out" "existing destination window"
+[ "$(source_snapshot "$fixture")" = "$before" ] || fail "existing destination window mutated source"
+[ "$(cat "$fixture/windows")" = fm-destination ] || fail "existing destination window was removed"
+pass "clean relaunch: existing destination endpoint refuses before allocation"
+
 # Metadata identity, role, home, and durable occupancy all refuse before the
 # allocator can create a destination.
 for mutation in malformed wrong-kind secondmate endpoint-mismatch destination-occupied destination-doorbell-requests duplicate-pr noncanonical-pr branch-collision; do
@@ -394,7 +408,7 @@ expect_code 1 $? "source-reusing allocator should refuse"
 assert_contains "$out" 'reused the source worktree' "source-reusing allocator did not explain its refusal"
 [ "$(source_snapshot "$fixture")" = "$before" ] || fail "source-reusing allocator cleaned or mutated source"
 [ -d "$fixture/source" ] || fail "source-reusing allocator removed the source worktree"
-[ -z "$(cat "$fixture/allocator.log")" ] || fail "source-reusing allocator tried to return the source worktree"
+assert_not_contains '--force' "$(cat "$fixture/allocator.log")" "source-reusing allocator used unsafe cleanup"
 pass "clean relaunch: source-reusing allocator cannot clean the source"
 
 # Only an unclaimed pool worktree may become cleanup-owned destination state.
@@ -405,10 +419,21 @@ for allocator in project task; do
   expect_code 1 $? "$allocator-reusing allocator should refuse"
   assert_contains "$out" 'error:' "$allocator-reusing allocator did not explain its refusal"
   [ "$(source_snapshot "$fixture")" = "$before" ] || fail "$allocator-reusing allocator mutated source"
-  [ -z "$(cat "$fixture/allocator.log")" ] || fail "$allocator-reusing allocator tried to return an existing worktree"
+  assert_not_contains '--force' "$(cat "$fixture/allocator.log")" "$allocator-reusing allocator used unsafe cleanup"
   git -C "$fixture/project" show-ref --verify --quiet refs/heads/fm/destination && fail "$allocator-reusing allocator created a destination branch"
 done
 pass "clean relaunch: allocator must not reuse existing project worktrees"
+
+# A return failure stays visible and leaves the lease-bound destination intact.
+fixture=$(new_case return-failure)
+before=$(source_snapshot "$fixture")
+out=$(FM_TEST_LAUNCH_FAIL=1 FM_TEST_RETURN_FAIL=1 run_owner "$fixture" 2>&1)
+expect_code 1 $? "return failure should fail"
+assert_contains "$out" 'destination cleanup is incomplete' "return failure was suppressed"
+[ "$(source_snapshot "$fixture")" = "$before" ] || fail "return failure mutated source"
+assert_present "$fixture/destination" "return failure removed the destination worktree"
+git -C "$fixture/project" show-ref --verify --quiet refs/heads/fm/destination || fail "return failure removed attached destination branch"
+pass "clean relaunch: failed destination return remains actionable"
 
 # An interrupt after handoff publication exits through destination-only cleanup.
 fixture=$(new_case interrupted-publication)
