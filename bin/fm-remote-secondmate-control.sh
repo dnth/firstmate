@@ -164,6 +164,8 @@ remote_omp_delivery_binding() { # <id>
     || remote_omp_delivery_refuse "endpoint metadata is not a persistent secondmate"
   fm_backend_agent_record_identity "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$REMOTE_ENDPOINT_META" \
     || remote_omp_delivery_refuse "endpoint task or OMP launch identity is stale or malformed"
+  [ "$(fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$REMOTE_ENDPOINT_META" 2>/dev/null)" = alive ] \
+    || remote_omp_delivery_refuse "exact remote OMP endpoint is not live"
 
   for path in \
     .omp/extensions/fm-primary-omp.ts \
@@ -350,17 +352,25 @@ cmd_launch() {
 }
 
 cmd_send() {
-  local id=$1 message=$2 harness relay_body
+  local id=$1 message=$2 harness relay_body meta
   validate_id "$id"
   validate_home "$id"
-  remote_endpoint_require "$id"
+  if ! remote_endpoint_load "$id"; then
+    meta=$(meta_path "$id")
+    if [ "$(fm_meta_get "$meta" harness)" = omp ]; then
+      remote_omp_delivery_refuse "$REMOTE_ENDPOINT_ERROR"
+    fi
+    die "$REMOTE_ENDPOINT_ERROR"
+  fi
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
   if [ "$harness" = omp ]; then
     fm_message_from_firstmate "$message" \
       || remote_omp_delivery_refuse "relay request lacks the parent-owned from-firstmate carrier"
     fm_operational_input_body "$message" relay_body \
       || remote_omp_delivery_refuse "relay request carrier cannot be parsed"
-    if [[ "$relay_body" =~ ^corr=[[:xdigit:]]{16}[[:space:]]+(/.*)$ ]]; then
+    if [[ "$relay_body" = /* ]]; then
+      remote_omp_delivery_refuse "relay request lacks the canonical parent correlation"
+    elif [[ "$relay_body" =~ ^corr=[[:xdigit:]]{16}[[:space:]]+(/.*)$ ]]; then
       relay_body=${BASH_REMATCH[1]}
     fi
     if [[ "$relay_body" = /* ]]; then
@@ -375,6 +385,7 @@ cmd_send() {
     FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$CONTROL_STATE" \
       FM_DATA_OVERRIDE="$CONTROL_DATA" FM_SEND_PRESERVE_INBOUND_FROM_FIRSTMATE=1 \
       FM_TASK_INBOX_OMP_REQUIRE_PROGRAMMATIC=1 FM_SEND_OMP_INBOX_REQUIRE_TURN_START=1 \
+      FM_SEND_OMP_INBOX_REQUIRE_HANDLED_ACK=1 \
       "$SCRIPT_DIR/fm-send.sh" "$id" "$message"
   else
     FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$TARGET_HOME/state" \

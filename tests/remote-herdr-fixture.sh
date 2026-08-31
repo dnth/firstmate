@@ -157,6 +157,10 @@ case "${1:-} ${2:-}" in
     ;;
   "agent get")
     pane=${3:-}
+    if [ "$(jq_state -r --arg p "$pane" '[.tabs[]|select(.pane_id==$p)]|length')" = 0 ]; then
+      printf '{"error":{"code":"agent_not_found","message":"%s"}}\n' "$pane"
+      exit 0
+    fi
     omp_session=$(jq_state -r --arg p "$pane" '.omp_session[$p] // empty')
     if [ "$(jq_state -r --arg p "$pane" '.working[$p] // false')" = true ]; then
       jq_state --arg p "$pane" '.working |= with_entries(select(.key != $p))' | save

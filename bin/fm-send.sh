@@ -313,6 +313,23 @@ fm_send_wait_for_omp_turn_start() {
   return 1
 }
 
+fm_send_wait_for_inbox_handled() { # <record-path>
+  local record=$1 handled now deadline remaining interval
+  handled="${record%/*}/handled/${record##*/}"
+  now=$(fm_send_monotonic_now) || return 1
+  deadline=$(awk -v now="$now" -v timeout="$FM_SEND_TURNSTART_TIMEOUT_VALUE" \
+    'BEGIN { printf "%.6f", now + timeout }')
+  while remaining=$(fm_send_monotonic_now) \
+    && remaining=$(awk -v now="$remaining" -v deadline="$deadline" \
+      'BEGIN { remaining = deadline - now; if (remaining <= 0) exit 1; printf "%.6f", remaining }'); do
+    [ -f "$handled" ] && [ ! -L "$handled" ] && return 0
+    interval=$(awk -v remaining="$remaining" -v poll="$FM_SEND_TURNSTART_POLL_VALUE" \
+      'BEGIN { if (poll < remaining) remaining = poll; printf "%.6f", remaining }')
+    sleep "$interval"
+  done
+  return 1
+}
+
 fm_send_prepare_omp_turnstart_reference() {
   TARGET_OMP_TURNSTART_MARKER=
   [ -n "$TARGET_TASK_ID" ] || return 0
@@ -845,12 +862,22 @@ else
       exit 1
     fi
     INBOX_OMP_TURNSTART_REQUIRED=${FM_SEND_OMP_INBOX_REQUIRE_TURN_START:-0}
+    INBOX_OMP_HANDLED_ACK_REQUIRED=${FM_SEND_OMP_INBOX_REQUIRE_HANDLED_ACK:-0}
     case "$INBOX_OMP_TURNSTART_REQUIRED" in
       0|1) ;;
       *)
         fm_lock_release "$INBOX_META_LOCK"
         INBOX_META_LOCK_HELD=0
         echo "error: FM_SEND_OMP_INBOX_REQUIRE_TURN_START must be 0 or 1" >&2
+        exit 1
+        ;;
+    esac
+    case "$INBOX_OMP_HANDLED_ACK_REQUIRED" in
+      0|1) ;;
+      *)
+        fm_lock_release "$INBOX_META_LOCK"
+        INBOX_META_LOCK_HELD=0
+        echo "error: FM_SEND_OMP_INBOX_REQUIRE_HANDLED_ACK must be 0 or 1" >&2
         exit 1
         ;;
     esac
@@ -894,6 +921,11 @@ else
     if [ "$TARGET_HARNESS" = omp ] && [ "$INBOX_OMP_TURNSTART_REQUIRED" = 1 ] \
        && ! fm_send_wait_for_omp_turn_start; then
       echo "error: remote-omp-inbox-queued: the programmatic OMP doorbell was accepted but did not start its bound turn; request remains at $INBOX_RECORD; do not resend" >&2
+      exit 8
+    fi
+    if [ "$TARGET_HARNESS" = omp ] && [ "$INBOX_OMP_HANDLED_ACK_REQUIRED" = 1 ] \
+       && ! fm_send_wait_for_inbox_handled "$INBOX_RECORD"; then
+      echo "error: remote-omp-inbox-queued: the bound OMP turn did not durably acknowledge the request; request remains at $INBOX_RECORD; do not resend" >&2
       exit 8
     fi
     if [ -n "$PENDING_REPLY_CORR" ]; then
