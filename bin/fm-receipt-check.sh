@@ -658,7 +658,7 @@ if [ "$ACTION" = bind-run ]; then
     running:*|fixing:*|ci:*|awaiting_approval:*) BIND_STATE_OK=1 ;;
   esac
   [ "$BIND_OBSERVED_ID" = "$RUN_ID_INPUT" ] \
-    && fm_nm_head_matches_worktree "$BIND_WORKTREE" "$BIND_OBSERVED_HEAD" \
+    && [ "$(fm_nm_resolve_head "$BIND_WORKTREE" "$BIND_OBSERVED_HEAD" || true)" = "$BIND_HEAD" ] \
     && [ "$BIND_STATE_OK" -eq 1 ] \
     || { echo "error: No-Mistakes run does not match the latest plan" >&2; exit 2; }
   [ -n "$BIND_GENERATION" ] || { echo "error: validation generation is missing" >&2; exit 2; }
@@ -705,7 +705,7 @@ if [ "$ACTION" = mechanical-ready ]; then
 fi
 
 record_validation_completed() {
-  local started path generation published_generation completed completed_head completed_path completed_evidence completed_generation now worktree validated_head current_head completion_head expected_evidence observed pr pr_head branch boundary new_receipts run_id run_path run_generation run_out observed_id observed_head observed_head_full outcome run_status default_ref default_branch ci_state run_ready changed_file completion_files validation_base run_branch current_branch
+  local started path generation published_generation completed completed_head completed_path completed_evidence completed_generation now worktree validated_head current_head completion_head expected_evidence observed pr pr_head branch boundary new_receipts run_id run_path run_generation run_out observed_id observed_head observed_head_full outcome run_status default_ref default_branch ci_state run_ready changed_file completion_files validation_base run_branch current_branch branch_sync_state
   VALIDATION_LOCK="$STATE/.$ID.validation-plan.lock"
   if ! mkdir "$VALIDATION_LOCK" 2>/dev/null; then
     VALIDATION_LOCK=
@@ -805,6 +805,9 @@ record_validation_completed() {
         fi
         fm_nm_run_is_active "$run_out" \
           || { release_validation_lock; echo "error: current head advanced without an active bound pipeline run" >&2; return 1; }
+        branch_sync_state=$(fm_nm_branch_sync_state "$run_out")
+        [ "$branch_sync_state" = pipeline_owned ] \
+          || { release_validation_lock; echo "error: current head advance lacks authoritative pipeline ownership" >&2; return 1; }
         completion_head=$current_head
       fi
       observed=bound-matching-no-mistakes-run

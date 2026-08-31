@@ -858,6 +858,15 @@ test_intent_records_are_exact_and_heads_resolve_authoritatively() {
     FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --bind-run RUN-identity --generation "$generation" >/dev/null \
     || fail "abbreviated run head or indented intent record was rejected"
+  printf 'descendant\n' >> "$project/src/app.sh"
+  git -C "$project" add src/app.sh
+  git -C "$project" commit -q -m 'descendant run head'
+  status=$(nm_status RUN-descendant "$(git -C "$project" rev-parse HEAD)" pending)
+  FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: $generation" \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-descendant --generation "$generation" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "bind accepted a strict descendant instead of the planned commit"
 
   id=receipt-binding-echo
   base=$(make_project "$id" no-mistakes localized)
@@ -923,7 +932,7 @@ test_completion_accepts_only_pipeline_owned_head_advance() {
   git -C "$project" add src/app.sh
   git -C "$project" commit -q -m unrelated
   current_head=$(git -C "$project" rev-parse HEAD)
-  status=$(nm_pipeline_status RUN-unproven "fm/$id" "$initial_head" ci '' manual)
+  status=$(nm_pipeline_status RUN-unproven "fm/$id" "$current_head" ci '' manual)
   FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_CI_LOG='all CI checks passed - still monitoring' \
     FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed >/dev/null 2>&1

@@ -105,6 +105,20 @@ fm_nm_branch_matches_worktree() {  # <worktree> <run-branch>
   [ "$run_branch" = "$hyphenated" ]
 }
 
+fm_nm_branch_sync_state() {  # <toon-output>
+  awk '
+    /^branch_sync:[[:space:]]*$/ { in_sync=1; next }
+    in_sync && /^[^[:space:]][^:]*:/ { in_sync=0 }
+    in_sync && /^[[:space:]]+state:[[:space:]]*/ {
+      value=$0
+      sub(/^[[:space:]]+state:[[:space:]]*/, "", value)
+      gsub(/^"|"$/, "", value)
+      print value
+      exit
+    }
+  ' <<<"$1"
+}
+
 # 0 when captured `axi logs --step intent` contains exactly one unmodified
 # generation record. The logs command wraps records in a TOON table and indents
 # them, so trim presentation whitespace but do not accept substring matches or
