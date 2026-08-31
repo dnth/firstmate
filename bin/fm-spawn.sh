@@ -1293,7 +1293,7 @@ refuse_crew_only_secondmate() {  # <harness>
 
 raw_launch_omp_word_has_shell_grammar() {  # <word>
   case "$1" in
-    -*|'!'|time|coproc|if|then|elif|else|fi|for|while|until|do|done|case|esac|function|select|in|bash|sh|zsh|fish|dash|ksh|csh|tcsh|eval|source|.|nohup|nice|timeout|stdbuf|setsid|chroot|runcon|unshare|taskset|ionice|sudo|doas|xargs|rlwrap|unbuffer|watch|strace|gdb|lldb|valgrind|flock|\[\[|\]\]|~*|*[\*\?\[]*) return 0 ;;
+    -*|'!'|time|coproc|if|then|elif|else|fi|for|while|until|do|done|case|'esac'|function|select|in|bash|sh|zsh|fish|dash|ksh|csh|tcsh|eval|source|.|nohup|nice|timeout|stdbuf|setsid|chroot|runcon|unshare|taskset|ionice|sudo|doas|xargs|rlwrap|unbuffer|watch|strace|gdb|lldb|valgrind|flock|\[\[|\]\]|~*|*[\*\?\[]*) return 0 ;;
   esac
   return 1
 }
@@ -1429,7 +1429,7 @@ raw_launch_omp_has_shell_expansion() {  # <raw command>
 }
 
 raw_launch_omp_normalize() {  # <command -p flag> <assignment count> <target index> <words...>
-  local command_p=$1 assignment_count=$2 target_index=$3 lookup_path execution_path path_entry target target_quoted index
+  local command_p=$1 assignment_count=$2 target_index=$3 lookup_path execution_path path_entry entry target target_quoted index
   shift 3
   local -a words=("$@") lookup_entries
   RAW_LAUNCH_NORMALIZED=/usr/bin/env
@@ -1448,8 +1448,8 @@ raw_launch_omp_normalize() {  # <command -p flag> <assignment count> <target ind
   for path_entry in "$lookup_path" "$execution_path"; do
     case "$path_entry" in ''|:*|*::|*:|*$'\n'*|*$'\r'*) return 1 ;; esac
     IFS=: read -r -a lookup_entries <<< "$path_entry"
-    for path_entry in "${lookup_entries[@]}"; do
-      case "$path_entry" in /*) ;; *) return 1 ;; esac
+    for entry in "${lookup_entries[@]}"; do
+      case "$entry" in /*) ;; *) return 1 ;; esac
     done
   done
   target=${words[$target_index]}

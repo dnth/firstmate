@@ -788,8 +788,8 @@ test_ambiguous_raw_omp_spellings_refuse_before_raw_execution() {
   local -a cases=(
     '"omp" --legacy'
     "o'mp' --legacy"
-    '$OMP_BIN --legacy'
-    'OMP_BIN=omp "$OMP_BIN" --legacy'
+    "\$OMP_BIN --legacy"
+    "OMP_BIN=omp \"\$OMP_BIN\" --legacy"
     '\\omp --legacy'
     'command -v omp'
     'command -x omp'
@@ -801,7 +801,7 @@ test_ambiguous_raw_omp_spellings_refuse_before_raw_execution() {
     '! omp --legacy'
     '?mp --legacy'
     'command -p ?mp --legacy'
-    'custom-agent `omp --legacy`'
+    "custom-agent \`omp --legacy\`"
     'command command omp --legacy'
     'bash -c omp --legacy'
     './omp --legacy'
