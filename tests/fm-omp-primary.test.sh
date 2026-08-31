@@ -1066,6 +1066,7 @@ const trigger = async (count, messageCount) => {
     await waitFor(() => notifications.length >= messageCount, `notification ${messageCount}`);
   }
 };
+const triggerCurrent = async (messageCount) => trigger(armCount(), messageCount);
 const reloadExtension = async (label, sessionFile, arm = true) => {
   const reloaded = await import(`${pathToFileURL(process.env.EXTENSION).href}?${label}=${Date.now()}`);
   reloaded.default(api);
@@ -1095,25 +1096,38 @@ try {
 
   await reloadExtension("same-session-reload", firstSession);
   await waitFor(() => armCount() >= 3, "same-session reload watcher");
-  await trigger(3);
+  await triggerCurrent();
   await new Promise((resolve) => setTimeout(resolve, 40));
   if (notifications.length !== 1) {
     throw new Error(`same-session reload duplicated a pending notification: ${JSON.stringify(notifications)}`);
+  }
+
+  await handlers.get("session_switch")(
+    { type: "session_switch", reason: "new" },
+    { sessionManager: { getSessionFile: () => replacementSession } },
+  );
+  await waitFor(() => notifications.length >= 2, "original batch replay after session switch");
+  if (readFileSync(queue, "utf8") !== queueRows) {
+    throw new Error("session-switch replay retired durable wake rows");
+  }
+  if (notifications[1].message.content !== first.message.content) {
+    throw new Error("session switch did not re-notify the exact unacknowledged durable batch");
   }
 
   const claimPath = `${state}/.omp-primary-nextturn-notification`;
   const staleClaim = readFileSync(claimPath, "utf8").split("\n");
   staleClaim[1] = "1";
   writeFileSync(claimPath, staleClaim.join("\n"));
-  await reloadExtension("process-restart", replacementSession, false);
-  await waitFor(() => notifications.length >= 2, "original batch replay after restart");
+  const restartedSession = `${state}/restarted-session.jsonl`;
+  await reloadExtension("process-restart", restartedSession, false);
+  await waitFor(() => notifications.length >= 3, "original batch replay after restart");
   if (readFileSync(queue, "utf8") !== queueRows) {
     throw new Error("process-restart replay retired durable wake rows");
   }
-  if (notifications[1].message.content !== first.message.content) {
+  if (notifications[2].message.content !== first.message.content) {
     throw new Error("process restart did not re-notify the exact unacknowledged durable batch");
   }
-  if (sendAttempts !== 2) {
+  if (sendAttempts !== 3) {
     throw new Error(`process restart did not make exactly one original-batch replay attempt: ${sendAttempts}`);
   }
 
@@ -1121,8 +1135,8 @@ try {
   await waitFor(() => armCount() >= 5, "restart watcher");
   await startNextTurn();
   failNextNotification = true;
-  await trigger(5, 3);
-  if (sendAttempts !== 4 || !notifications[2].message.content.includes("could not deliver an actionable wake")) {
+  await triggerCurrent(4);
+  if (sendAttempts !== 5 || !notifications[3].message.content.includes("could not deliver an actionable wake")) {
     throw new Error(`failed next-turn submission did not surface one replayable failure: ${JSON.stringify(notifications)}`);
   }
   if (readFileSync(queue, "utf8") !== queueRows) {
@@ -1130,15 +1144,15 @@ try {
   }
 
   await startNextTurn();
-  await trigger(6, 4);
-  if (!notifications[3].message.content.includes("signal: synthetic durable batch 6")) {
+  await triggerCurrent(5);
+  if (!notifications[4].message.content.includes("signal: synthetic durable batch")) {
     throw new Error("durable wake did not replay after next-turn submission failure");
   }
 
   await startNextTurn();
   writeFileSync(`${state}/reject-confirmation`, "reject\n");
-  await trigger(7, 5);
-  const mismatch = notifications[4];
+  await triggerCurrent(6);
+  const mismatch = notifications[5];
   if (!mismatch.message.content.includes("recovery generation mismatch")) {
     throw new Error(`generation-mismatched handoff was not surfaced: ${JSON.stringify(mismatch)}`);
   }

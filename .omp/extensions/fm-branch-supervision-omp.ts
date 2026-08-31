@@ -83,7 +83,9 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import {
   activateEligibleRowsOwner,
+  createPrimaryWatcherWake,
   FM_BRANCH_DISPATCH_EVENT,
+  FM_PRIMARY_WATCHER_WAKE_EVENT,
   releaseEligibleRowsSnapshot,
   rollbackEligibleRowsOwnerActivation,
   scopeForUnreadWake,
@@ -850,20 +852,18 @@ ${context.command}
     // Marked operational like every watcher injection, so the wake is never
     // mistaken for captain input (away-mode return semantics, mirror filter).
     const content = encodeOperationalInput(body);
-    // Deliver through the exact main-wake mechanism the primary OMP adapter uses
-    // (fm-primary-omp.ts sendFollowUp): a custom watcher-wake message delivered
-    // as a steer with triggerTurn. Unlike sendUserMessage/followUp, this
-    // reliably wakes an idle or interrupted main under OMP steer/continuation
-    // semantics, so a broken branch never strands the wake.
+    const wake = createPrimaryWatcherWake(encodeOperationalInput(body), "branch-fallback");
+    pi.events?.emit?.(FM_PRIMARY_WATCHER_WAKE_EVENT, wake);
+    if (wake.accepted) return;
     pi.sendMessage(
       {
         customType: "firstmate-watcher-wake",
-        content,
+        content: wake.content,
         display: false,
         attribution: "agent",
         details: { kind: "watcher", runtime: "omp" },
       },
-      { deliverAs: "steer", triggerTurn: true },
+      { deliverAs: "nextTurn", triggerTurn: true },
     );
   }
 

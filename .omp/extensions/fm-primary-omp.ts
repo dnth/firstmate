@@ -26,7 +26,9 @@ import { createPrimaryWatchCore, ompNativeProcessIdentity } from "../../bin/fm-p
 import {
   createBranchDispatchOffer,
   FM_BRANCH_DISPATCH_EVENT,
+  FM_PRIMARY_WATCHER_WAKE_EVENT,
   scopeForUnreadWake,
+  type PrimaryWatcherWake,
 } from "./lib/fm-branch-dispatch.ts";
 import { installTaskInboxDoorbell } from "./lib/fm-task-inbox-doorbell.ts";
 
@@ -331,6 +333,29 @@ export default function (omp: ExtensionAPI) {
       }
     }
   };
+  const queueWakeNotification = (content: string, notificationKey: string): void => {
+    if (!claimWakeNotification(notificationKey, content)) return;
+    try {
+      sendWakeNotification(content);
+    } catch (error) {
+      releaseWakeNotification();
+      throw error;
+    }
+  };
+
+  omp.events?.on?.(FM_PRIMARY_WATCHER_WAKE_EVENT, (data) => {
+    const wake = data as PrimaryWatcherWake;
+    if (
+      !wake ||
+      typeof wake.accept !== "function" ||
+      typeof wake.content !== "string" ||
+      typeof wake.notificationKey !== "string"
+    ) {
+      return;
+    }
+    wake.accept();
+    queueWakeNotification(wake.content, wake.notificationKey);
+  });
 
   // Supervision-branch dispatch handshake (docs/omp-supervision-branch.md).
   // Build one offer per ordinary actionable wake and emit it on the shared
@@ -369,13 +394,7 @@ export default function (omp: ExtensionAPI) {
       // Reuse a claim from a same-session extension reload, but let a new
       // session or process replay the durable batch. The claim never retires
       // rows; only the drain acknowledgement owns that transition.
-      if (!claimWakeNotification(notificationKey, content)) return;
-      try {
-        sendWakeNotification(content);
-      } catch (error) {
-        releaseWakeNotification();
-        throw error;
-      }
+      queueWakeNotification(content, notificationKey);
     },
     offerWakeToBranch,
   });
@@ -395,13 +414,13 @@ export default function (omp: ExtensionAPI) {
   });
 
   omp.on("session_switch", (event, ctx) => {
-    releaseWakeNotification();
     setNotificationSession(ctx);
     watch.sessionShutdown();
     watch.sessionStart();
     publishSecondmateSession(ctx);
     deliverSessionstartNudge(event.reason === "new" || event.reason === "resume");
     watch.arm();
+    replayWakeNotification();
   });
 
   omp.on("before_agent_start", (): BeforeAgentStartEventResult | undefined => {
