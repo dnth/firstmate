@@ -101,6 +101,8 @@ ok - authoritative documentation remains high
 ok - terminal delivery paths record one completion timestamp at their boundary
 ok - completion signals release the validation lock for retry
 ok - replanning invalidates prior run and completion bindings
+ok - intent binding accepts one exact record and resolves abbreviated heads
+ok - completion accepts only active pipeline-owned descendant heads
 ok - dirty worktrees cannot be planned or completed
 ok - git status errors fail implementation, planning, and completion cleanliness gates
 ok - shared cleanliness inspects ignored submodules
