@@ -1113,6 +1113,7 @@ try {
     throw new Error(`same-session reload duplicated a pending notification: ${JSON.stringify(notifications)}`);
   }
 
+  await startNextTurn();
   await handlers.get("session_switch")(
     { type: "session_switch", reason: "new" },
     { sessionManager: { getSessionFile: () => replacementSession } },

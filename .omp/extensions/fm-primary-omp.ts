@@ -51,6 +51,7 @@ type WakeNotificationClaim = {
   pid: string;
   instance: string;
   session: string;
+  state: "pending" | "inflight";
   key: string;
   content: string;
 };
@@ -214,20 +215,33 @@ function readWakeNotificationClaim(): WakeNotificationClaim | undefined {
   const version = lines[0];
   const v2 = version === "fm-omp-primary-nextturn-notification-v2" && lines.length === 6;
   const v3 = version === "fm-omp-primary-nextturn-notification-v3" && lines.length === 7;
-  if (!v2 && !v3) return undefined;
-  const offset = v3 ? 1 : 0;
+  const v4 = version === "fm-omp-primary-nextturn-notification-v4" && lines.length === 8;
+  if (!v2 && !v3 && !v4) return undefined;
+  const claimState = v4 ? lines[4] : "pending";
+  const sessionIndex = v2 ? 2 : 3;
+  const keyIndex = v4 ? 5 : sessionIndex + 1;
+  const contentIndex = keyIndex + 1;
   if (
     !/^[0-9]+$/u.test(lines[1]) ||
     (v3 && !/^[a-f0-9-]{36}$/u.test(lines[2])) ||
-    !/^[a-f0-9]{64}$/u.test(lines[2 + offset]) ||
-    !/^[A-Za-z0-9._-]+$/u.test(lines[3 + offset]) ||
-    lines[5 + offset] !== ""
+    (v4 && !/^[a-f0-9-]{36}$/u.test(lines[2])) ||
+    (claimState !== "pending" && claimState !== "inflight") ||
+    !/^[a-f0-9]{64}$/u.test(lines[sessionIndex]) ||
+    !/^[A-Za-z0-9._-]+$/u.test(lines[keyIndex]) ||
+    lines[contentIndex + 1] !== ""
   ) {
     return undefined;
   }
-  const message = Buffer.from(lines[4 + offset], "base64").toString("utf8");
-  if (Buffer.from(message, "utf8").toString("base64") !== lines[4 + offset]) return undefined;
-  return { pid: lines[1], instance: v3 ? lines[2] : "", session: lines[2 + offset], key: lines[3 + offset], content: message };
+  const message = Buffer.from(lines[contentIndex], "base64").toString("utf8");
+  if (Buffer.from(message, "utf8").toString("base64") !== lines[contentIndex]) return undefined;
+  return {
+    pid: lines[1],
+    instance: v3 || v4 ? lines[2] : "",
+    session: lines[sessionIndex],
+    state: claimState,
+    key: lines[keyIndex],
+    content: message,
+  };
 }
 
 function writeWakeNotificationClaim(claim: WakeNotificationClaim): void {
@@ -239,10 +253,11 @@ function writeWakeNotificationClaim(claim: WakeNotificationClaim): void {
     writeFileSync(
       descriptor,
       [
-        "fm-omp-primary-nextturn-notification-v3",
+        "fm-omp-primary-nextturn-notification-v4",
         claim.pid,
         claim.instance,
         claim.session,
+        claim.state,
         claim.key,
         Buffer.from(claim.content, "utf8").toString("base64"),
         "",
@@ -295,7 +310,7 @@ export default function (omp: ExtensionAPI) {
       { deliverAs: "nextTurn", triggerTurn: true },
     );
   };
-  const releaseWakeNotification = (): void => {
+  const discardWakeNotification = (): void => {
     const claim = readWakeNotificationClaim();
     if (!claim || claim.instance !== notificationInstance) return;
     try {
@@ -306,11 +321,19 @@ export default function (omp: ExtensionAPI) {
   };
   const claimWakeNotification = (key: string, content: string): boolean => {
     const current = readWakeNotificationClaim();
-    if (current) return false;
+    if (
+      current &&
+      (current.instance !== notificationInstance ||
+        current.session !== notificationSession ||
+        current.state === "pending")
+    ) {
+      return false;
+    }
     writeWakeNotificationClaim({
       pid: String(process.pid),
       instance: notificationInstance,
       session: notificationSession,
+      state: "pending",
       key,
       content,
     });
@@ -347,9 +370,21 @@ export default function (omp: ExtensionAPI) {
       sendWakeNotification(content);
       return true;
     } catch (error) {
-      releaseWakeNotification();
+      discardWakeNotification();
       throw error;
     }
+  };
+  const markWakeNotificationInflight = (): void => {
+    const claim = readWakeNotificationClaim();
+    if (
+      !claim ||
+      claim.instance !== notificationInstance ||
+      claim.session !== notificationSession ||
+      claim.state === "inflight"
+    ) {
+      return;
+    }
+    writeWakeNotificationClaim({ ...claim, state: "inflight" });
   };
 
   omp.events?.on?.(FM_PRIMARY_WATCHER_WAKE_EVENT, (data) => {
@@ -398,7 +433,6 @@ export default function (omp: ExtensionAPI) {
     repairToolName: "fm_watch_arm_omp",
     encodeOperationalInput,
     coalesceWakeNotification: true,
-    releaseWakeNotification,
     sendFollowUp: async (content, notificationKey) => {
       // Reuse a claim from a same-session extension reload, but let a new
       // session or process replay the durable batch. The claim never retires
@@ -434,6 +468,7 @@ export default function (omp: ExtensionAPI) {
 
   omp.on("before_agent_start", (): BeforeAgentStartEventResult | undefined => {
     watch.notificationTurnStarted();
+    markWakeNotificationInflight();
     if (!pendingStartupNudge) return undefined;
     const content = pendingStartupNudge;
     pendingStartupNudge = "";

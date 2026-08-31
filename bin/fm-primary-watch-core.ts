@@ -84,7 +84,6 @@ export type PrimaryWatchCoreOptions = {
   // agent turn begins, so concurrent actionable closes coalesce without
   // changing the durable wake queue or its acknowledgement ownership.
   coalesceWakeNotification?: boolean;
-  releaseWakeNotification?: () => void;
   // Optional supervision-branch dispatch handshake. When supplied (the OMP
   // adapter with its branch extension loaded), the core offers each ordinary
   // actionable wake to the branch before delivering it to main; a synchronous
@@ -223,7 +222,6 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     encodeOperationalInput,
     sendFollowUp,
     coalesceWakeNotification = false,
-    releaseWakeNotification,
     offerWakeToBranch,
   } = options;
   const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
@@ -718,7 +716,6 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
 
   function notificationTurnStarted(): void {
     if (coalesceWakeNotification) generation.notificationPending = false;
-    releaseWakeNotification?.();
   }
 
   function sessionStart(): void {
