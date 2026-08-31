@@ -316,12 +316,7 @@ case "${1:-}" in
 esac
 SH
   chmod +x "$fakebin/omp"
-  cat > "$fakebin/custom-agent" <<'SH'
-#!/bin/bash
-printf '%s\n' "${FOO:-}" > "$PWD/custom-agent-executed"
-exit 0
-SH
-  chmod +x "$fakebin/custom-agent"
+  cp /usr/bin/true "$fakebin/custom-agent"
   cat > "$fakebin/flock" <<'SH'
 #!/usr/bin/env bash
 for arg in "$@"; do
@@ -898,13 +893,13 @@ test_raw_non_omp_launches_preserve_plain_assignments() {
   export FM_TEST_RAW_EXECUTION_LOG="$CASE_DIR/raw-execution.log"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" 'FOO=bar command -- custom-agent --flag')
+    "$id" "$PROJ_DIR" 'FOO=bar command -- printenv FOO')
   status=$?
   unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_EXECUTION_LOG
   expect_code 0 "$status" "raw direct non-OMP launch should preserve a plain assignment"
-  [ "$(cat "$WT_DIR/custom-agent-executed")" = bar ] \
+  [ "$(cat "$CASE_DIR/raw-execution.log")" = bar ] \
     || fail "raw direct non-OMP launch did not pass its assignment to the executable: $(cat "$CASE_DIR/raw-execution.log")"
-  [ "$(cat "$LAUNCH_LOG")" = "/usr/bin/env FOO=bar $FAKEBIN_DIR/custom-agent --flag" ] \
+  [ "$(cat "$LAUNCH_LOG")" = '/usr/bin/env FOO=bar /usr/bin/printenv FOO' ] \
     || fail "raw direct non-OMP assignment launch was not normalized safely"
   pass "raw direct non-OMP launches preserve plain assignments"
 }
@@ -934,7 +929,7 @@ test_raw_non_omp_command_p_launches_an_absolute_target() {
   rec=$(make_spawn_case profile-raw-command-p-absolute claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
-  raw="command -p -- $FAKEBIN_DIR/custom-agent --flag"
+  raw='command -p -- /usr/bin/printf absolute-target-ok'
   export FM_TEST_EXECUTE_RAW_LAUNCH=1
   export FM_TEST_RAW_EXECUTION_LOG="$CASE_DIR/raw-execution.log"
 
@@ -943,36 +938,30 @@ test_raw_non_omp_command_p_launches_an_absolute_target() {
   status=$?
   unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_EXECUTION_LOG
   expect_code 0 "$status" "raw command -p launch should preserve an absolute direct target"
-  [ -f "$WT_DIR/custom-agent-executed" ] \
-    || fail "raw command -p launch did not execute its absolute direct target: $(cat "$CASE_DIR/raw-execution.log")"
+  assert_contains "$(cat "$CASE_DIR/raw-execution.log")" absolute-target-ok \
+    "raw command -p launch did not execute its absolute direct target"
   pass "raw command -p launches an absolute direct non-OMP target"
 }
 
 test_raw_non_omp_command_p_launches_a_relative_target() {
-  local rec id out status marker
+  local rec id out status
   id=$(profile_id profile-raw-command-p-relative-z15k)
   rec=$(make_spawn_case profile-raw-command-p-relative claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
-  marker="$CASE_DIR/relative-executed"
-  cat > "$PROJ_DIR/custom-agent" <<'SH'
-#!/usr/bin/env bash
-: > "${FM_TEST_RELATIVE_EXECUTED:?}"
-SH
-  chmod +x "$PROJ_DIR/custom-agent"
+  cp /usr/bin/printf "$PROJ_DIR/custom-agent"
   git -C "$PROJ_DIR" add custom-agent
   sync_project_commit "$PROJ_DIR" "$WT_DIR" 'add raw relative executable'
   export FM_TEST_EXECUTE_RAW_LAUNCH=1
   export FM_TEST_RAW_EXECUTION_LOG="$CASE_DIR/raw-execution.log"
-  export FM_TEST_RELATIVE_EXECUTED="$marker"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" 'command -p -- ./custom-agent --flag')
+    "$id" "$PROJ_DIR" 'command -p -- ./custom-agent relative-target-ok')
   status=$?
-  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_EXECUTION_LOG FM_TEST_RELATIVE_EXECUTED
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_EXECUTION_LOG
   expect_code 0 "$status" "raw command -p launch should preserve a relative direct target"
-  [ -f "$marker" ] \
-    || fail "raw command -p launch did not execute its relative direct target: $(cat "$CASE_DIR/raw-execution.log")"
+  assert_contains "$(cat "$CASE_DIR/raw-execution.log")" relative-target-ok \
+    "raw command -p launch did not execute its relative direct target"
   pass "raw command -p launches a relative direct non-OMP target"
 }
 
@@ -1303,6 +1292,95 @@ SH
   [ ! -s "$LAUNCH_LOG" ] || fail "man wrapper typed a launch command"
   [ ! -s "$CASE_DIR/endpoint.log" ] || fail "man wrapper created an endpoint"
   pass "raw man wrappers refuse before raw execution"
+}
+
+test_raw_terminal_multiplexer_wrapper_refuses_before_raw_execution() {
+  local rec id out status screen
+  id=$(profile_id profile-raw-screen-wrapper-z15y)
+  rec=$(make_spawn_case profile-raw-screen-wrapper claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  screen="$FAKEBIN_DIR/screen"
+  cat > "$screen" <<'SH'
+#!/usr/bin/env bash
+exec omp "$@"
+SH
+  chmod +x "$screen"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" 'screen omp --legacy')
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+  expect_code 1 "$status" "raw terminal multiplexer must refuse before launch"
+  assert_contains "$out" "raw launch command could invoke omp" \
+    "terminal multiplexer refusal did not name its verified-harness boundary"
+  assert_absent "$CASE_DIR/raw-omp-executed" "terminal multiplexer executed the harmless fake OMP"
+  [ ! -s "$LAUNCH_LOG" ] || fail "terminal multiplexer typed a launch command"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "terminal multiplexer created an endpoint"
+  pass "raw terminal multiplexers refuse before raw execution"
+}
+
+test_raw_command_p_effective_path_wrapper_refuses_before_raw_execution() {
+  local rec id out status custom_path wrapper raw
+  id=$(profile_id profile-raw-command-p-effective-path-z15z)
+  rec=$(make_spawn_case profile-raw-command-p-effective-path claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  custom_path="$CASE_DIR/custom-path"
+  mkdir -p "$custom_path"
+  cat > "$custom_path/env" <<'SH'
+#!/usr/bin/env bash
+exec "$@"
+SH
+  chmod +x "$custom_path/env"
+  wrapper="$custom_path/custom-wrapper"
+  ln "$custom_path/env" "$wrapper"
+  cp "$FAKEBIN_DIR/omp" "$custom_path/omp"
+  raw="PATH=$custom_path command -p -- $wrapper omp --legacy"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "$raw")
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+  expect_code 1 "$status" "raw command -p wrapper under its child PATH must refuse before launch"
+  assert_contains "$out" "raw launch command could invoke omp" \
+    "command -p child-PATH wrapper refusal did not name its verified-harness boundary"
+  assert_absent "$CASE_DIR/raw-omp-executed" "command -p child-PATH wrapper executed the harmless fake OMP"
+  [ ! -s "$LAUNCH_LOG" ] || fail "command -p child-PATH wrapper typed a launch command"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "command -p child-PATH wrapper created an endpoint"
+  pass "raw command -p validates wrappers under its child PATH"
+}
+
+test_raw_shebang_wrapper_refuses_before_raw_execution() {
+  local rec id out status
+  id=$(profile_id profile-raw-shebang-wrapper-z16a)
+  rec=$(make_spawn_case profile-raw-shebang-wrapper claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  cat > "$PROJ_DIR/custom-agent" <<'SH'
+#!/usr/bin/env omp
+SH
+  chmod +x "$PROJ_DIR/custom-agent"
+  git -C "$PROJ_DIR" add custom-agent
+  sync_project_commit "$PROJ_DIR" "$WT_DIR" 'add raw shebang wrapper'
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" './custom-agent --legacy')
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+  expect_code 1 "$status" "raw shebang wrapper must refuse before launch"
+  assert_contains "$out" "raw launch command could invoke omp" \
+    "shebang wrapper refusal did not name its verified-harness boundary"
+  assert_absent "$CASE_DIR/raw-omp-executed" "shebang wrapper executed the harmless fake OMP"
+  [ ! -s "$LAUNCH_LOG" ] || fail "shebang wrapper typed a launch command"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "shebang wrapper created an endpoint"
+  pass "raw shebang wrappers refuse before raw execution"
 }
 
 test_raw_absolute_wrapper_refuses_before_raw_execution() {
@@ -3014,6 +3092,9 @@ test_raw_git_wrapper_refuses_before_raw_execution
 test_raw_tar_wrapper_refuses_before_raw_execution
 test_raw_sed_wrapper_refuses_before_raw_execution
 test_raw_man_wrapper_refuses_before_raw_execution
+test_raw_terminal_multiplexer_wrapper_refuses_before_raw_execution
+test_raw_command_p_effective_path_wrapper_refuses_before_raw_execution
+test_raw_shebang_wrapper_refuses_before_raw_execution
 test_raw_absolute_wrapper_refuses_before_raw_execution
 test_raw_non_omp_command_p_ignores_imported_type_function
 test_raw_non_omp_command_p_preserves_path_assignment
