@@ -38,7 +38,8 @@ The exact receipt key and type schema is owned by the header and `--help` output
 - PR registration publishes canonical PR identity and its validation publication generation through one compare-bound pinned metadata replacement after the watcher artifacts publish, and revokes those artifacts if that replacement fails.
 - Successful exact-head runs can bind after reaching checks-passed or passed, while failed and cancelled runs remain ineligible.
 - No-Mistakes status, intent, and CI-log observations use the shared bounded call boundary.
-- Every completion requires path-specific terminal evidence, records its plan path and validated head, invalidates stale completion metadata when the worktree head changes, and refuses completion until the change is replanned or revalidated.
+- Every completion requires path-specific terminal evidence and records its plan path and authoritative completed head.
+- A changed worktree head invalidates completion unless the bound active No-Mistakes run proves a pipeline-owned descendant of the planned head; unrelated, missing, or ambiguous drift remains refused.
 - Local-only readiness and guarded landing consume one fail-closed executable default-branch resolver.
 - Planning and completion refuse tracked, staged, or untracked worktree changes.
 - Initial planning accepts a caller base only when it equals the repository's authoritative merge boundary, so a later ancestor cannot hide earlier task commits.

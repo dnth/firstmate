@@ -40,6 +40,11 @@ nm_status() {  # <run-id> <head> <outcome>
   printf 'run:\n  id: "%s"\n  status: %s\n  head: "%s"\noutcome: %s\n' "$1" "$status" "$2" "$3"
 }
 
+nm_pipeline_status() {  # <run-id> <branch> <head> <status> <outcome> <sync-state>
+  printf 'run:\n  id: "%s"\n  branch: %s\n  status: %s\n  head: "%s"\noutcome: %s\nbranch_sync:\n  state: %s\n' \
+    "$1" "$2" "$4" "$3" "$5" "$6"
+}
+
 test_help_advertises_generation_bound_run_binding() {
   local out
   out=$("$CHECK" --help) || fail "receipt checker help failed"
@@ -837,6 +842,96 @@ test_terminal_and_failed_runs_bind_by_current_plan() {
   pass "successful terminal runs bind while failed runs remain rejected"
 }
 
+test_intent_records_are_exact_and_heads_resolve_authoritatively() {
+  local id=receipt-binding-identity base project head short generation status rc
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint passed
+  FM_FAKE_NM_STATUS='' FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "identity fixture plan failed"
+  project="$TMP_ROOT/project-$id"
+  head=$(git -C "$project" rev-parse HEAD)
+  short=${head:0:8}
+  generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
+  status=$(nm_status RUN-identity "$short" pending)
+  FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_INTENT="$(printf 'log[1]{line}:\n  Firstmate-Validation-Generation: %s' "$generation")" \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-identity --generation "$generation" >/dev/null \
+    || fail "abbreviated run head or indented intent record was rejected"
+
+  id=receipt-binding-echo
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint passed
+  FM_FAKE_NM_STATUS='' FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "echo fixture plan failed"
+  project="$TMP_ROOT/project-$id"
+  head=$(git -C "$project" rev-parse HEAD)
+  generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
+  status=$(nm_status RUN-echo "$head" pending)
+  FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_INTENT="$(printf 'Firstmate-Validation-Generation: %s\nFirstmate-Validation-Generation: %s' "$generation" "$generation")" \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-echo --generation "$generation" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "duplicated intent record was accepted"
+  pass "intent binding accepts one exact record and resolves abbreviated heads"
+}
+
+test_completion_accepts_only_pipeline_owned_head_advance() {
+  local id=receipt-pipeline-advance base project initial_head current_head short generation status out rc
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint passed
+  FM_FAKE_NM_STATUS='' FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "pipeline advance plan failed"
+  project="$TMP_ROOT/project-$id"
+  initial_head=$(git -C "$project" rev-parse HEAD)
+  generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
+  status=$(nm_status RUN-advance "$initial_head" pending)
+  FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: $generation" \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-advance --generation "$generation" >/dev/null \
+    || fail "pipeline advance run binding failed"
+  printf 'pipeline fix\n' >> "$project/src/app.sh"
+  git -C "$project" add src/app.sh
+  git -C "$project" commit -q -m 'no-mistakes: apply CI fixes'
+  current_head=$(git -C "$project" rev-parse HEAD)
+  short=${current_head:0:8}
+  status=$(nm_pipeline_status RUN-advance "fm/$id" "$short" ci '' pipeline_owned)
+  out=$(FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_CI_LOG='all CI checks passed - still monitoring' \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed) \
+    || fail "pipeline-owned post-plan head was not accepted"
+  printf '%s' "$out" | jq -e --arg head "$current_head" '.status == "completed" and .completed_head == $head' >/dev/null \
+    || fail "pipeline-owned completion did not bind current head"
+
+  id=receipt-unproven-advance
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint passed
+  FM_FAKE_NM_STATUS='' FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "unproven advance plan failed"
+  project="$TMP_ROOT/project-$id"
+  initial_head=$(git -C "$project" rev-parse HEAD)
+  generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
+  status=$(nm_status RUN-unproven "$initial_head" pending)
+  FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: $generation" \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-unproven --generation "$generation" >/dev/null \
+    || fail "unproven fixture run binding failed"
+  printf 'unrelated\n' >> "$project/src/app.sh"
+  git -C "$project" add src/app.sh
+  git -C "$project" commit -q -m unrelated
+  current_head=$(git -C "$project" rev-parse HEAD)
+  status=$(nm_pipeline_status RUN-unproven "fm/$id" "$initial_head" ci '' manual)
+  FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_CI_LOG='all CI checks passed - still monitoring' \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "unproven head advance was accepted"
+  pass "completion accepts only active pipeline-owned descendant heads"
+}
+
 test_no_mistakes_observations_are_bounded() {
   local hang_nm id base project head generation running ci_status rc
   hang_nm="$TMP_ROOT/hang-no-mistakes"
@@ -1331,6 +1426,8 @@ test_pinned_checker_rejects_redirected_and_linked_evidence
 test_shared_criterion_parser_drives_append_and_check
 test_ci_green_log_allows_exact_bound_run_completion
 test_claim_invalidation_marker_is_append_only_and_idempotent
+test_intent_records_are_exact_and_heads_resolve_authoritatively
+test_completion_accepts_only_pipeline_owned_head_advance
 test_low_risk_skips_no_mistakes_under_explicit_policy
 test_low_risk_requires_safe_prose_and_applicable_evidence
 test_implementation_completion_precedes_planning

@@ -43,8 +43,9 @@
 # change with file-bound strong mechanical evidence for every changed file.
 # The resolved validation_tier, validation_path, reason code, base, head, size,
 # and start time are appended to state/<task-id>.meta for durable inspection.
-# Every completion records validation_completed_head and refuses a current
-# worktree HEAD that differs from the latest validation_head.
+# Every completion records validation_completed_head and refuses current head
+# drift unless the bound active No-Mistakes run proves a pipeline-owned
+# descendant of the latest validation_head.
 # When --plan returns path=receipts-mechanical, append fresh successful mechanical
 # evidence for every changed file with:
 #
@@ -648,7 +649,7 @@ if [ "$ACTION" = bind-run ]; then
   BIND_OUTCOME=$(fm_nm_field "$BIND_OUT" outcome)
   [ "$RUN_ID_INPUT" != "$BIND_PREPLAN_RUN" ] || { echo "error: No-Mistakes run predates the latest plan" >&2; exit 2; }
   [ "$RUN_GENERATION_INPUT" = "$BIND_GENERATION" ] || { echo "error: run generation does not match the latest plan" >&2; exit 2; }
-  printf '%s\n' "$BIND_INTENT" | grep -Fqx "Firstmate-Validation-Generation: $BIND_GENERATION" \
+  fm_nm_intent_has_generation "$BIND_INTENT" "$BIND_GENERATION" \
     || { echo "error: No-Mistakes run was not created for the latest plan generation" >&2; exit 2; }
   BIND_STATE_OK=0
   case "$BIND_STATUS:$BIND_OUTCOME" in
@@ -656,7 +657,8 @@ if [ "$ACTION" = bind-run ]; then
     passed:*|checks-passed:*|*:passed|*:checks-passed) BIND_STATE_OK=1 ;;
     running:*|fixing:*|ci:*|awaiting_approval:*) BIND_STATE_OK=1 ;;
   esac
-  [ "$BIND_OBSERVED_ID" = "$RUN_ID_INPUT" ] && [ "$BIND_OBSERVED_HEAD" = "$BIND_HEAD" ] \
+  [ "$BIND_OBSERVED_ID" = "$RUN_ID_INPUT" ] \
+    && fm_nm_head_matches_worktree "$BIND_WORKTREE" "$BIND_OBSERVED_HEAD" \
     && [ "$BIND_STATE_OK" -eq 1 ] \
     || { echo "error: No-Mistakes run does not match the latest plan" >&2; exit 2; }
   [ -n "$BIND_GENERATION" ] || { echo "error: validation generation is missing" >&2; exit 2; }
@@ -703,7 +705,7 @@ if [ "$ACTION" = mechanical-ready ]; then
 fi
 
 record_validation_completed() {
-  local started path generation published_generation completed completed_head completed_path completed_evidence completed_generation now worktree validated_head current_head expected_evidence observed pr pr_head branch boundary new_receipts run_id run_path run_generation run_out observed_id observed_head outcome run_status default_ref default_branch ci_state run_ready changed_file completion_files validation_base
+  local started path generation published_generation completed completed_head completed_path completed_evidence completed_generation now worktree validated_head current_head completion_head expected_evidence observed pr pr_head branch boundary new_receipts run_id run_path run_generation run_out observed_id observed_head observed_head_full outcome run_status default_ref default_branch ci_state run_ready changed_file completion_files validation_base run_branch current_branch
   VALIDATION_LOCK="$STATE/.$ID.validation-plan.lock"
   if ! mkdir "$VALIDATION_LOCK" 2>/dev/null; then
     VALIDATION_LOCK=
@@ -735,7 +737,8 @@ record_validation_completed() {
     || { release_validation_lock; echo "error: current worktree head is unavailable" >&2; return 1; }
   fm_worktree_is_clean "$worktree" \
     || { release_validation_lock; echo "error: validation worktree is dirty; commit or remove all changes" >&2; return 1; }
-  if [ "$current_head" != "$validated_head" ]; then
+  completion_head=$validated_head
+  if [ "$current_head" != "$validated_head" ] && [ "$path" != full-no-mistakes ]; then
     printf 'validation_completed_at=\nvalidation_completed_head=\nvalidation_completed_path=\nvalidation_completed_evidence=\nvalidation_completed_generation=\n' | append_meta_records \
       || { release_validation_lock; echo "error: could not invalidate stale validation completion" >&2; return 1; }
     release_validation_lock
@@ -767,7 +770,7 @@ record_validation_completed() {
       run_path=$(grep '^validation_run_path=' "$META" | tail -1 | cut -d= -f2- || true)
       run_generation=$(grep '^validation_run_generation=' "$META" | tail -1 | cut -d= -f2- || true)
       observed_head=$(grep '^validation_run_head=' "$META" | tail -1 | cut -d= -f2- || true)
-      [ -n "$run_id" ] && [ "$run_path" = "$path" ] && [ "$run_generation" = "$generation" ] && [ "$observed_head" = "$validated_head" ] \
+      [ -n "$run_id" ] && [ "$run_path" = "$path" ] && [ "$run_generation" = "$generation" ] && [ -n "$observed_head" ] \
         || { release_validation_lock; echo "error: no No-Mistakes run is bound to the latest plan" >&2; return 1; }
       run_out=$(fm_nm_run_checked "$worktree" "$NM_TIMEOUT" axi status --run "$run_id") \
         || { release_validation_lock; echo "error: bound No-Mistakes run could not be observed" >&2; return 1; }
@@ -782,10 +785,27 @@ record_validation_completed() {
         ci_state=$(fm_nm_ci_checks_state "$worktree" "$NM_TIMEOUT" "$run_id")
         [ "$ci_state" != green ] || run_ready=1
       fi
-      if [ "$observed_id" != "$run_id" ] || [ "$observed_head" != "$validated_head" ] || [ "$run_ready" -ne 1 ]; then
+      observed_head_full=$(fm_nm_resolve_head "$worktree" "$observed_head" || true)
+      if [ -z "$observed_head_full" ] || [ "$observed_id" != "$run_id" ] || [ "$run_ready" -ne 1 ]; then
         release_validation_lock
         echo "error: bound No-Mistakes run did not pass checks at the exact validated head" >&2
         return 1
+      fi
+      [ "$observed_head_full" = "$current_head" ] \
+        || { release_validation_lock; echo "error: bound No-Mistakes run head is not the current worktree head" >&2; return 1; }
+      if [ "$current_head" != "$validated_head" ]; then
+        run_branch=$(fm_nm_field "$run_out" branch)
+        current_branch=$(git -C "$worktree" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+        fm_nm_head_descends_from "$worktree" "$validated_head" "$current_head" \
+          || { release_validation_lock; echo "error: current head is not a descendant of the implementation head" >&2; return 1; }
+        if [ -z "$current_branch" ] || ! fm_nm_branch_matches_worktree "$worktree" "$run_branch"; then
+          release_validation_lock
+          echo "error: pipeline run branch is not the current worktree branch" >&2
+          return 1
+        fi
+        fm_nm_run_is_active "$run_out" \
+          || { release_validation_lock; echo "error: current head advanced without an active bound pipeline run" >&2; return 1; }
+        completion_head=$current_head
       fi
       observed=bound-matching-no-mistakes-run
       ;;
@@ -835,13 +855,13 @@ record_validation_completed() {
     completed_head=$(git -C "$worktree" rev-parse --verify "$completed_head^{commit}" 2>/dev/null) \
       || { release_validation_lock; echo "error: validation completed head is invalid" >&2; return 1; }
   fi
-  if [ "$completed_head:$completed_path:$completed_evidence:$completed_generation" != "$validated_head:$path:$observed:$generation" ]; then
+  if [ "$completed_head:$completed_path:$completed_evidence:$completed_generation" != "$completion_head:$path:$observed:$generation" ]; then
     now=$(date +%s)
     printf 'validation_completed_at=%s\nvalidation_completed_head=%s\nvalidation_completed_path=%s\nvalidation_completed_evidence=%s\nvalidation_completed_generation=%s\n' \
-      "$now" "$validated_head" "$path" "$observed" "$generation" | append_meta_records \
+      "$now" "$completion_head" "$path" "$observed" "$generation" | append_meta_records \
       || { release_validation_lock; echo "error: could not record validation completion" >&2; return 1; }
     completed=$now
-    completed_head=$validated_head
+    completed_head=$completion_head
   fi
   release_validation_lock
   VALIDATION_COMPLETED=$completed

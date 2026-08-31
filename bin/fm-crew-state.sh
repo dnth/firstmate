@@ -10,8 +10,9 @@
 # re-validates. This helper never infers the current state from a tail of the log:
 # it reads the authoritative source (a
 # no-mistakes run-step attributed to this crew's branch and current code
-# identity, else the pane busy-signature) and reconciles the possibly-stale log
-# against it.
+# identity, with a completed receipt allowing a proven pipeline descendant,
+# else the pane busy-signature) and reconciles the possibly-stale log against
+# it.
 #
 # The determinism lives entirely here - only run-step / pane / log reads plus
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
@@ -105,6 +106,7 @@ emit() {  # <state> <source> [detail]
   if [ "$state" = 'done' ] && [ "${KIND:-}" = ship ]; then
     implementation_completed=$(grep '^implementation_completed_at=' "$META" | tail -1 | cut -d= -f2- || true)
     implementation_head=$(grep '^implementation_completed_head=' "$META" | tail -1 | cut -d= -f2- || true)
+    mode=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
     current_head=$(git -C "${WT:-}" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
     case "$implementation_completed" in
       ''|*[!0-9]*)
@@ -113,7 +115,15 @@ emit() {  # <state> <source> [detail]
         detail='implementation completion is missing or invalid for the current head'
         ;;
       *)
-        if [ -z "$current_head" ] || [ "$implementation_head" != "$current_head" ]; then
+        implementation_head_ok=0
+        if [ -n "$current_head" ] && [ "$implementation_head" = "$current_head" ]; then
+          implementation_head_ok=1
+        elif [ "$mode" = no-mistakes ] && [ -n "$current_head" ] \
+          && fm_nm_head_descends_from "${WT:-}" "$implementation_head" "$current_head" \
+          && [ "$(grep '^validation_completed_head=' "$META" | tail -1 | cut -d= -f2- || true)" = "$current_head" ]; then
+          implementation_head_ok=1
+        fi
+        if [ "$implementation_head_ok" -ne 1 ]; then
           state=parked
           source=implementation-gate
           detail='implementation completion is missing or stale for the current head'
@@ -132,9 +142,16 @@ emit() {  # <state> <source> [detail]
     completed_head=$(grep '^validation_completed_head=' "$META" | tail -1 | cut -d= -f2- || true)
     validation_path=$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)
     completed_path=$(grep '^validation_completed_path=' "$META" | tail -1 | cut -d= -f2- || true)
+    validation_head_ok=0
+    if [ "$completed_head" = "$validation_head" ] && [ "$current_head" = "$validation_head" ]; then
+      validation_head_ok=1
+    elif [ "$mode" = no-mistakes ] && [ -n "$validation_head" ] && [ -n "$current_head" ] \
+      && fm_nm_head_descends_from "${WT:-}" "$validation_head" "$current_head" \
+      && [ "$completed_head" = "$current_head" ]; then
+      validation_head_ok=1
+    fi
     if [ "$requires_validation" -eq 1 ] && { [ -z "$generation" ] || [ "$completed_generation" != "$generation" ] \
-      || [ "$completed_head" != "$validation_head" ] || [ "$current_head" != "$validation_head" ] \
-      || [ "$completed_path" != "$validation_path" ]; }; then
+      || [ "$validation_head_ok" -ne 1 ] || [ "$completed_path" != "$validation_path" ]; }; then
       state=parked
       source=validation-gate
       detail='validation completion is missing or stale for the current plan'
