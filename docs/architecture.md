@@ -148,7 +148,7 @@ That poll loop is still the default event source for backends with no native pus
 For capable Herdr sessions, the same watcher replaces its terminal sleep with a bounded native event wait that immediately surfaces `blocked`; [Push events and polling fallback](herdr-backend.md#push-events-and-polling-fallback) owns the current mechanism and capability gates, while [runtime backend verification](verification/runtime-backends.md#native-blocked-event) owns the active evidence.
 The deeper session-start agent-process liveness probe is separate from that busy-state poll: tmux and Herdr have verified classifiers for secondmate recovery, Zellij remains unverified, and Orca and cmux do not support secondmate spawns.
 Herdr is experimental and can be selected explicitly or by runtime auto-detection: Treehouse remains its worktree provider, [`herdr-backend.md`](herdr-backend.md) owns current setup and safety limits, and [`verification/runtime-backends.md`](verification/runtime-backends.md#herdr) owns active empirical evidence.
-`fm-clean-commit-relaunch.sh` is manual-only and currently accepts only a missing Codex/Herdr ship endpoint, with its source-only launch helper owning the resulting private relaunch lifecycle.
+The manual [clean committed worker relaunch](#clean-committed-worker-relaunch) is a narrowly scoped Herdr integration.
 Herdr uses one tab per task; [Watching and task containers](herdr-backend.md#watching-and-task-containers) owns launcher-bound workspace placement, the label-only fallback, and recovery scope.
 Its default-on presentation projection may place one clean new task in a disposable workspace without changing endpoint authority or lifecycle ownership; [Presentation spaces](herdr-backend.md#presentation-spaces) owns that conditional design and its narrow home-local restored-shell cleanup at locked session start.
 Zellij is experimental and selected only explicitly: Treehouse remains its worktree provider, [`zellij-backend.md`](zellij-backend.md) owns current setup and limits, and [`verification/runtime-backends.md`](verification/runtime-backends.md#zellij) owns active empirical evidence.
@@ -341,7 +341,8 @@ The mechanics are owned by the `/updatefirstmate` skill and firstmate's operatin
 ## Clean committed worker relaunch
 
 `bin/fm-clean-commit-relaunch.sh` is an explicit operator command, never an automatic recovery path.
-It alone admits a missing committed source task, leases a distinct normal worktree, creates the successor branch at the admitted commit, records evidence, and launches the fresh worker.
+It alone admits an ordinary local Codex/Herdr ship task whose recorded endpoint is authoritatively missing and whose committed source is outside No-Mistakes custody.
+It leases a distinct normal worktree in the same physical repository, creates the successor branch at the admitted commit, records evidence, and launches the fresh worker.
 The source branch, records, validation custody, session material, and presentation state remain read-only.
 The initial supported launch profile is Codex on the Herdr backend.
 Generic `fm-spawn.sh` remains a fresh-task interface and does not carry relaunch source, commit, handoff, or allocated-worktree authority.
