@@ -852,7 +852,9 @@ ${context.command}
     // Marked operational like every watcher injection, so the wake is never
     // mistaken for captain input (away-mode return semantics, mirror filter).
     const wake = createPrimaryWatcherWake(encodeOperationalInput(body), "branch-fallback");
-    pi.events?.emit?.(FM_PRIMARY_WATCHER_WAKE_EVENT, wake);
+    try {
+      pi.events?.emit?.(FM_PRIMARY_WATCHER_WAKE_EVENT, wake);
+    } catch {}
     if (wake.accepted) return;
     pi.sendMessage(
       {

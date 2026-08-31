@@ -36,13 +36,19 @@ OMP_NOTIFICATION_CLAIM="$STATE/.omp-primary-nextturn-notification"
 OMP_NOTIFICATION_ACKNOWLEDGEMENT="$STATE/.omp-primary-nextturn-ack"
 
 publish_omp_notification_acknowledgement() {
-  local claim_id acknowledgement_tmp
+  local claim_id claim_through acknowledgement_tmp
   [ "$ACTOR" = main ] || return 0
   [ -f "$OMP_NOTIFICATION_CLAIM" ] && [ ! -L "$OMP_NOTIFICATION_CLAIM" ] || return 0
-  [ "$(sed -n '1p' "$OMP_NOTIFICATION_CLAIM" 2>/dev/null)" = fm-omp-primary-nextturn-notification-v5 ] || return 0
-  [ "$(sed -n '5p' "$OMP_NOTIFICATION_CLAIM" 2>/dev/null)" = inflight ] || return 0
+  [ "$(sed -n '1p' "$OMP_NOTIFICATION_CLAIM" 2>/dev/null)" = fm-omp-primary-nextturn-notification-v6 ] || return 0
+  case "$(sed -n '5p' "$OMP_NOTIFICATION_CLAIM" 2>/dev/null)" in pending|inflight) ;; *) return 0 ;; esac
   claim_id=$(sed -n '6p' "$OMP_NOTIFICATION_CLAIM" 2>/dev/null) || return 1
+  claim_through=$(sed -n '7p' "$OMP_NOTIFICATION_CLAIM" 2>/dev/null) || return 1
   case "$claim_id" in ''|*[!a-f0-9-]*) return 0 ;; esac
+  case "$claim_through" in ''|*[!0-9]*) return 0 ;; esac
+  if [ "${#claim_through}" -gt "${#ACK_THROUGH}" ] \
+    || { [ "${#claim_through}" -eq "${#ACK_THROUGH}" ] && [[ "$claim_through" > "$ACK_THROUGH" ]]; }; then
+    return 0
+  fi
   acknowledgement_tmp=$(mktemp "$STATE/.omp-primary-nextturn-ack.XXXXXX") || return 1
   if ! chmod 0600 "$acknowledgement_tmp" \
     || ! printf '%s\n' "$claim_id" > "$acknowledgement_tmp" \

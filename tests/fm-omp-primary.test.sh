@@ -1188,6 +1188,11 @@ try {
     throw new Error(`handling confirmation lost its recovery generation: ${handling.join(" | ")}`);
   }
   await startNextTurn();
+  const acknowledgedFollowUp = dispatch.createPrimaryWatcherWake("acknowledged follow-up", "branch-fallback");
+  api.events.emit(dispatch.FM_PRIMARY_WATCHER_WAKE_EVENT, acknowledgedFollowUp);
+  if (!acknowledgedFollowUp.accepted || notifications.length !== 7) {
+    throw new Error(`in-flight wake did not accept one pending follow-up: ${JSON.stringify(notifications)}`);
+  }
   writeFileSync(`${state}/.watcher-down`, "pending:handling:fixture-generation\n");
   const acknowledged = spawnSync(process.env.FM_WAKE_DRAIN, ["--ack-through", "3", "--recovery-generation", "fixture-generation"], {
     encoding: "utf8",

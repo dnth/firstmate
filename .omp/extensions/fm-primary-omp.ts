@@ -54,6 +54,7 @@ type WakeNotificationClaim = {
   session: string;
   state: "pending" | "inflight";
   id: string;
+  through: string;
   key: string;
   content: string;
 };
@@ -219,18 +220,19 @@ function readWakeNotificationClaim(): WakeNotificationClaim | undefined {
   const v3 = version === "fm-omp-primary-nextturn-notification-v3" && lines.length === 7;
   const v4 = version === "fm-omp-primary-nextturn-notification-v4" && lines.length === 8;
   const v5 = version === "fm-omp-primary-nextturn-notification-v5" && lines.length === 9;
-  if (!v2 && !v3 && !v4 && !v5) return undefined;
-  const claimState = v4 ? lines[4] : "pending";
-  const v5ClaimState = v5 ? lines[4] : claimState;
+  const v6 = version === "fm-omp-primary-nextturn-notification-v6" && lines.length === 10;
+  if (!v2 && !v3 && !v4 && !v5 && !v6) return undefined;
+  const claimState = v4 || v5 || v6 ? lines[4] : "pending";
   const sessionIndex = v2 ? 2 : 3;
-  const keyIndex = v5 ? 6 : v4 ? 5 : sessionIndex + 1;
+  const keyIndex = v6 ? 7 : v5 ? 6 : v4 ? 5 : sessionIndex + 1;
   const contentIndex = keyIndex + 1;
   if (
     !/^[0-9]+$/u.test(lines[1]) ||
     (v3 && !/^[a-f0-9-]{36}$/u.test(lines[2])) ||
-    ((v4 || v5) && !/^[a-f0-9-]{36}$/u.test(lines[2])) ||
-    (v5 && !/^[a-f0-9-]{36}$/u.test(lines[5])) ||
-    (v5ClaimState !== "pending" && v5ClaimState !== "inflight") ||
+    ((v4 || v5 || v6) && !/^[a-f0-9-]{36}$/u.test(lines[2])) ||
+    ((v5 || v6) && !/^[a-f0-9-]{36}$/u.test(lines[5])) ||
+    (v6 && !/^[0-9]+$/u.test(lines[6])) ||
+    (claimState !== "pending" && claimState !== "inflight") ||
     !/^[a-f0-9]{64}$/u.test(lines[sessionIndex]) ||
     !/^[A-Za-z0-9._-]+$/u.test(lines[keyIndex]) ||
     lines[contentIndex + 1] !== ""
@@ -241,10 +243,11 @@ function readWakeNotificationClaim(): WakeNotificationClaim | undefined {
   if (Buffer.from(message, "utf8").toString("base64") !== lines[contentIndex]) return undefined;
   return {
     pid: lines[1],
-    instance: v3 || v4 || v5 ? lines[2] : "",
+    instance: v3 || v4 || v5 || v6 ? lines[2] : "",
     session: lines[sessionIndex],
-    state: v5ClaimState,
-    id: v5 ? lines[5] : "",
+    state: claimState,
+    id: v5 || v6 ? lines[5] : "",
+    through: v6 ? lines[6] : "0",
     key: lines[keyIndex],
     content: message,
   };
@@ -259,12 +262,13 @@ function writeWakeNotificationClaim(claim: WakeNotificationClaim): void {
     writeFileSync(
       descriptor,
       [
-        "fm-omp-primary-nextturn-notification-v5",
+        "fm-omp-primary-nextturn-notification-v6",
         claim.pid,
         claim.instance,
         claim.session,
         claim.state,
         claim.id,
+        claim.through,
         claim.key,
         Buffer.from(claim.content, "utf8").toString("base64"),
         "",
@@ -300,6 +304,19 @@ export default function (omp: ExtensionAPI) {
   const notificationInstance = runtime.firstmateOmpPrimaryNotificationInstance ??= randomUUID();
 
   let notificationSession = createHash("sha256").update("unknown").digest("hex");
+
+  const queuedWakeSequence = (): string => {
+    let maximum = "0";
+    try {
+      for (const line of readFileSync(`${state}/.wake-queue`, "utf8").split("\n")) {
+        const sequence = line.split("\t")[1] || "";
+        if (/^[0-9]+$/u.test(sequence) && (sequence.length > maximum.length || sequence.length === maximum.length && sequence > maximum)) {
+          maximum = sequence;
+        }
+      }
+    } catch {}
+    return maximum;
+  };
 
   const setNotificationSession = (ctx: ExtensionContext): void => {
     const sessionFile = ctx.sessionManager.getSessionFile() || "unknown";
@@ -361,6 +378,7 @@ export default function (omp: ExtensionAPI) {
       session: notificationSession,
       state: "pending",
       id: randomUUID(),
+      through: queuedWakeSequence(),
       key,
       content,
     });
@@ -414,7 +432,7 @@ export default function (omp: ExtensionAPI) {
     ) {
       return;
     }
-    writeWakeNotificationClaim({ ...claim, state: "inflight", id: claim.id || randomUUID() });
+    writeWakeNotificationClaim({ ...claim, state: "inflight", id: claim.id || randomUUID(), through: claim.through || queuedWakeSequence() });
   };
 
   omp.events?.on?.(FM_PRIMARY_WATCHER_WAKE_EVENT, (data) => {
