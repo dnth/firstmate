@@ -14,9 +14,9 @@ SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
 PROFILE_RUN_TOKEN="t$$-${RANDOM:-0}"
 profile_id() { printf '%s-%s' "$1" "$PROFILE_RUN_TOKEN"; }
-RAW_DIRECT_TRUE="$ROOT/.fm-raw-direct-true-$PROFILE_RUN_TOKEN"
-RAW_DIRECT_PRINTF="$ROOT/.fm-raw-direct-printf-$PROFILE_RUN_TOKEN"
-RAW_DIRECT_PRINTENV="$ROOT/.fm-raw-direct-printenv-$PROFILE_RUN_TOKEN"
+RAW_DIRECT_TRUE="$TMP_ROOT/raw-direct-true"
+RAW_DIRECT_PRINTF="$TMP_ROOT/raw-direct-printf"
+RAW_DIRECT_PRINTENV="$TMP_ROOT/raw-direct-printenv"
 /usr/bin/cp /usr/bin/true "$RAW_DIRECT_TRUE"
 /usr/bin/cp /usr/bin/printf "$RAW_DIRECT_PRINTF"
 /usr/bin/cp /usr/bin/printenv "$RAW_DIRECT_PRINTENV"
@@ -32,7 +32,6 @@ cleanup() {
       profile-*:/tmp/fm-"$id") rm -rf "$tasktmp" ;;
     esac
   done < <(find "$TMP_ROOT" -type d -path '*/home/data/profile-*' 2>/dev/null)
-  rm -f "$RAW_DIRECT_TRUE" "$RAW_DIRECT_PRINTF" "$RAW_DIRECT_PRINTENV"
   rm -rf "$TMP_ROOT"
 }
 trap cleanup EXIT
@@ -819,6 +818,7 @@ test_ambiguous_raw_omp_spellings_refuse_before_raw_execution() {
     'custom-agent=ignored omp --legacy'
     'command -- custom-agent=ignored omp --legacy'
     'LD_PRELOAD=/tmp/launch-omp.so /usr/bin/true'
+    "$RAW_DIRECT_PRINTF !42"
     "'omp --legacy"
   )
   for raw in "${cases[@]}"; do

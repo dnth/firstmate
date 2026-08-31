@@ -1423,7 +1423,7 @@ raw_launch_omp_canonical_executable() {  # <path> <relative root> <lookup path> 
 
 raw_launch_omp_has_shell_expansion() {  # <raw command>
   case "$1" in
-    *\$*|*\`*|*\\*|*\"*|*\'*|*[\*\?\[]*|*~*|*#*) return 0 ;;
+    *\$*|*\`*|*\\*|*\"*|*\'*|*[\*\?\[]*|*~*|*#*|*\!*) return 0 ;;
   esac
   return 1
 }

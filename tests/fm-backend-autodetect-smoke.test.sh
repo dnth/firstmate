@@ -67,13 +67,12 @@ HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-autodetect-smoke-concurrency-h3)
 export HERDR_SESSION="$HERDR_LAB_SESSION"
 ID="autodetectsmoke1"
 WT=
-RAW_PRINT_AGENT="$ROOT/.fm-raw-autodetect-print-$$"
+RAW_PRINT_AGENT="$TMP_ROOT/raw-print-agent"
 /usr/bin/cp /usr/bin/printf "$RAW_PRINT_AGENT"
 cleanup_all() {
   local cleanup_status=0
   [ -n "$WT" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT" >/dev/null 2>&1
   "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" || cleanup_status=$?
-  rm -f "$RAW_PRINT_AGENT"
   rm -rf "$TMP_ROOT"
   return "$cleanup_status"
 }
