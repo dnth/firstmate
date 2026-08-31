@@ -12,6 +12,7 @@ set -u
 
 REAL_GIT=$(command -v git)
 REAL_LN=$(command -v ln)
+REAL_JQ=$(command -v jq)
 
 TMP_ROOT=$(fm_test_tmproot fm-clean-commit-relaunch)
 fm_git_identity fmtest fmtest@example.invalid
@@ -166,6 +167,12 @@ case "$destination" in
 esac
 exec "$FM_TEST_REAL_LN" "$@"
 SH
+  cat > "$fakebin/jq" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${FM_TEST_JQ_FAIL:-0}" != 1 ] || exit 1
+exec "$FM_TEST_REAL_JQ" "$@"
+SH
   chmod +x "$fakebin"/*
 }
 
@@ -245,6 +252,7 @@ run_owner() {  # <fixture> [source] [destination]
   PATH="$fixture/fakebin:$PATH" \
     FM_TEST_REAL_GIT="$REAL_GIT" \
     FM_TEST_REAL_LN="$REAL_LN" \
+    FM_TEST_REAL_JQ="$REAL_JQ" \
     FM_TEST_HOME="$fixture/home" \
     FM_TEST_PROJECT="$fixture/project" \
     FM_TEST_SOURCE_WORKTREE="$fixture/source" \
@@ -451,6 +459,16 @@ for failure in allocator checkout launch acknowledgement; do
   git -C "$fixture/project" show-ref --verify --quiet refs/heads/fm/destination && fail "$failure retained destination branch"
 done
 pass "clean relaunch: allocator, checkout, launch, and acknowledgement failure preserve source"
+
+fixture=$(new_case handoff-staging-failure)
+before=$(source_snapshot "$fixture")
+out=$(FM_TEST_JQ_FAIL=1 run_owner "$fixture" 2>&1)
+expect_code 1 $? "handoff rendering failure should fail"
+[ "$(source_snapshot "$fixture")" = "$before" ] || fail "handoff rendering failure mutated source"
+[ -z "$(find "$fixture/home/data/destination" -maxdepth 1 -name '.relaunch-handoff.*' -print -quit)" ] || fail "handoff rendering failure retained staging file"
+assert_absent "$fixture/home/data/destination/relaunch-handoff.json" "handoff rendering failure published handoff"
+git -C "$fixture/project" show-ref --verify --quiet refs/heads/fm/destination && fail "handoff rendering failure retained destination branch"
+pass "clean relaunch: handoff rendering failure removes staging state"
 
 # A malicious or faulty allocator cannot turn source preservation into cleanup.
 fixture=$(new_case allocator-reuses-source)

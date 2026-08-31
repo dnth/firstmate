@@ -153,8 +153,14 @@ fm_clean_relaunch_launch_allocated() {
   [ "$FM_CLEAN_RELAUNCH_LAUNCH_STATE_CLAIM_INTERRUPTED" -eq 0 ] || return 1
   mkdir "$state/$id.inbox/handled" || return 1
 
-  meta_tmp=$(mktemp "$state/.${id}.meta.XXXXXX") || return 1
-  FM_CLEAN_RELAUNCH_LAUNCH_METADATA_TMP=$meta_tmp
+  FM_CLEAN_RELAUNCH_LAUNCH_METADATA_INTERRUPTED=0
+  trap fm_clean_relaunch_defer_metadata_signal HUP INT TERM
+  if meta_tmp=$(mktemp "$state/.${id}.meta.XXXXXX"); then
+    FM_CLEAN_RELAUNCH_LAUNCH_METADATA_TMP=$meta_tmp
+  else
+    trap interrupted HUP INT TERM
+    return 1
+  fi
   if ! {
     printf 'window=%s\n' "$canonical_target"
     printf 'endpoint_task_id=%s\n' "$id"
@@ -169,9 +175,10 @@ fm_clean_relaunch_launch_allocated() {
     printf 'effort=%s\n' "$effort"
   } > "$meta_tmp"; then
     rm -f -- "$meta_tmp"
+    FM_CLEAN_RELAUNCH_LAUNCH_METADATA_TMP=
+    trap interrupted HUP INT TERM
     return 1
   fi
-  trap fm_clean_relaunch_defer_metadata_signal HUP INT TERM
   if ln "$meta_tmp" "$state/$id.meta"; then
     FM_CLEAN_RELAUNCH_LAUNCH_METADATA_OWNED=1
     rm -f -- "$meta_tmp"

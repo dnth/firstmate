@@ -243,6 +243,7 @@ DESTINATION_PUBLISHED=0
 DESTINATION_CHECKOUT_INTERRUPTED=0
 DESTINATION_HANDOFF_OWNED=0
 DESTINATION_HANDOFF_INTERRUPTED=0
+DESTINATION_HANDOFF_TMP=
 DESTINATION_ALLOCATION_INTERRUPTED=0
 
 defer_destination_checkout_signal() {
@@ -275,6 +276,7 @@ cleanup_destination() {
 
 cleanup() {
   status=$?
+  [ -z "$DESTINATION_HANDOFF_TMP" ] || rm -f -- "$DESTINATION_HANDOFF_TMP"
   if [ "$status" -ne 0 ]; then
     cleanup_destination || echo "error: destination cleanup is incomplete" >&2
   fi
@@ -529,7 +531,13 @@ DESTINATION_ATTACHED_BRANCH=$(git -C "$DESTINATION_WORKTREE" symbolic-ref --quie
 REPOSITORY_IDENTITY=$(sha256_text "$PROJECT_COMMON")
 SOURCE_BRIEF_IDENTITY=$(sha256_file "$SOURCE_BRIEF") || exit 1
 DESTINATION_BRIEF_IDENTITY=$(sha256_file "$DESTINATION_BRIEF") || exit 1
-HANDOFF_TMP=$(mktemp "$DATA/$DESTINATION/.relaunch-handoff.XXXXXX") || exit 1
+trap defer_destination_handoff_signal HUP INT TERM
+if HANDOFF_TMP=$(mktemp "$DATA/$DESTINATION/.relaunch-handoff.XXXXXX"); then
+  DESTINATION_HANDOFF_TMP=$HANDOFF_TMP
+else
+  trap interrupted HUP INT TERM
+  exit 1
+fi
 jq -n \
   --arg schema fm-clean-commit-relaunch.v1 \
   --arg source "$SOURCE" \
@@ -546,12 +554,13 @@ jq -n \
   --arg pr "$PR" \
   '{schema:$schema,source:$source,destination:$destination,repository_identity:$repository_identity,source_commit:$source_commit,source_branch:$source_branch,destination_branch:$destination_branch,delivery:{mode:$mode,yolo:$yolo},source_brief_identity:$source_brief_identity,destination_brief_identity:$destination_brief_identity,no_mistakes_custody:{state:$custody,next_action:"proceed"}} + (if $pr == "" then {} else {pr:$pr} end)' \
   > "$HANDOFF_TMP" || exit 1
-trap defer_destination_handoff_signal HUP INT TERM
 if ln "$HANDOFF_TMP" "$DESTINATION_HANDOFF"; then
   DESTINATION_HANDOFF_OWNED=1
   rm -f -- "$HANDOFF_TMP"
+  DESTINATION_HANDOFF_TMP=
 else
   rm -f -- "$HANDOFF_TMP"
+  DESTINATION_HANDOFF_TMP=
   trap interrupted HUP INT TERM
   echo "error: destination task $DESTINATION already has a durable handoff" >&2
   exit 1
