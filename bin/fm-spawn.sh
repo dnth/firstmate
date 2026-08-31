@@ -1341,10 +1341,25 @@ raw_launch_find_executable() {  # <bare target> <lookup path> <relative root>
   return 1
 }
 
-raw_launch_omp_is_wrapper_executable() {  # <canonical executable>
-  case "${1##*/}" in
-    command|env|exec|builtin|busybox|toybox|ld.so*|ld-linux*|ld-musl*|ld-*.so*|dyld|python*|perl*|ruby*|node|deno|java|php|lua*|tclsh*|awk|gawk|mawk|nawk) return 0 ;;
+raw_launch_omp_is_wrapper_executable() {  # <canonical executable> <lookup path> <relative root>
+  local path=$1 lookup_path=$2 root=$3 path_identity wrapper wrapper_path wrapper_lookup_path path_entry
+  local -a wrapper_lookup_entries
+  case "${path##*/}" in
+    command|env|exec|builtin|busybox|toybox|git|bash|sh|zsh|fish|dash|ksh|csh|tcsh|nohup|nice|timeout|stdbuf|setsid|chroot|runcon|unshare|taskset|ionice|sudo|doas|xargs|rlwrap|unbuffer|watch|strace|gdb|lldb|valgrind|flock|make|cmake|ninja|npm|npx|yarn|pnpm|pip|pip3|cargo|go|uv|poetry|docker|podman|ssh|scp|rsync|find|parallel|systemd-run|ld.so*|ld-linux*|ld-musl*|ld-*.so*|dyld|python*|perl*|ruby*|node|deno|java|php|lua*|tclsh*|awk|gawk|mawk|nawk) return 0 ;;
   esac
+  path_identity=$(raw_launch_executable_identity "$path") || return 0
+  for wrapper in env busybox toybox git bash sh zsh fish dash ksh csh tcsh nohup nice timeout stdbuf setsid chroot runcon unshare taskset ionice sudo doas xargs rlwrap unbuffer watch strace gdb lldb valgrind flock make cmake ninja npm npx yarn pnpm pip pip3 cargo go uv poetry docker podman ssh scp rsync find parallel systemd-run python python3 perl ruby node deno java php lua tclsh awk gawk mawk nawk; do
+    for wrapper_lookup_path in "$lookup_path" "${PATH:-}" "/usr/bin:/bin:/usr/sbin:/sbin"; do
+      case "$wrapper_lookup_path" in ''|:*|*::|*:|*$'\n'*|*$'\r'*) continue ;; esac
+      IFS=: read -r -a wrapper_lookup_entries <<< "$wrapper_lookup_path"
+      for path_entry in "${wrapper_lookup_entries[@]}"; do
+        case "$path_entry" in /*) ;; *) continue 2 ;; esac
+      done
+      wrapper_path=$(raw_launch_find_executable "$wrapper" "$wrapper_lookup_path" "$root" 2>/dev/null || true)
+      [ -n "$wrapper_path" ] || continue
+      [ "$(raw_launch_executable_identity "$wrapper_path")" != "$path_identity" ] || return 0
+    done
+  done
   return 1
 }
 
@@ -1352,7 +1367,7 @@ raw_launch_omp_canonical_executable() {  # <path> <relative root> <lookup path>
   local path omp_path path_identity omp_identity omp_lookup_path path_entry
   local -a omp_lookup_entries
   path=$(raw_launch_canonical_executable "$1" "$2") || return 1
-  raw_launch_omp_is_wrapper_executable "$path" && return 1
+  raw_launch_omp_is_wrapper_executable "$path" "$3" "$2" && return 1
   raw_launch_omp_word_has_shell_grammar "${path##*/}" && return 1
   for omp_lookup_path in "$3" "${PATH:-}"; do
     case "$omp_lookup_path" in ''|:*|*::|*:|*$'\n'*|*$'\r'*) continue ;; esac

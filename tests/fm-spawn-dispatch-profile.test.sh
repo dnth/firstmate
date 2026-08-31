@@ -1156,6 +1156,64 @@ SH
   pass "raw BusyBox wrappers refuse before raw execution"
 }
 
+test_raw_hardlinked_wrapper_refuses_before_raw_execution() {
+  local rec id out status wrapper
+  id=$(profile_id profile-raw-hardlinked-wrapper-z15t)
+  rec=$(make_spawn_case profile-raw-hardlinked-wrapper claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  cat > "$FAKEBIN_DIR/env" <<'SH'
+#!/usr/bin/env bash
+exec "$@"
+SH
+  chmod +x "$FAKEBIN_DIR/env"
+  wrapper="$FAKEBIN_DIR/custom-wrapper"
+  ln "$FAKEBIN_DIR/env" "$wrapper"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "$wrapper omp --legacy")
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+  expect_code 1 "$status" "raw wrapper hardlinked to env must refuse before launch"
+  assert_contains "$out" "raw launch command could invoke omp" \
+    "hardlinked wrapper refusal did not name its verified-harness boundary"
+  assert_absent "$CASE_DIR/raw-omp-executed" "hardlinked wrapper executed the harmless fake OMP"
+  [ ! -s "$LAUNCH_LOG" ] || fail "hardlinked wrapper typed a launch command"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "hardlinked wrapper created an endpoint"
+  pass "raw wrappers hardlinked to known dispatchers refuse before raw execution"
+}
+
+test_raw_git_wrapper_refuses_before_raw_execution() {
+  local rec id out status git
+  id=$(profile_id profile-raw-git-wrapper-z15u)
+  rec=$(make_spawn_case profile-raw-git-wrapper claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  git="$FAKEBIN_DIR/git"
+  cat > "$git" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in raw) exec omp ;; esac
+exit 1
+SH
+  chmod +x "$git"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" 'git raw')
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+  expect_code 1 "$status" "raw Git wrapper must refuse before launch"
+  assert_contains "$out" "raw launch command could invoke omp" \
+    "Git wrapper refusal did not name its verified-harness boundary"
+  assert_absent "$CASE_DIR/raw-omp-executed" "Git wrapper executed the harmless fake OMP"
+  [ ! -s "$LAUNCH_LOG" ] || fail "Git wrapper typed a launch command"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "Git wrapper created an endpoint"
+  pass "raw Git wrappers refuse before raw execution"
+}
+
 test_raw_absolute_wrapper_refuses_before_raw_execution() {
   local rec id out status
   id=$(profile_id profile-raw-absolute-wrapper-z15o)
@@ -2860,6 +2918,8 @@ test_raw_bare_target_with_effective_path_omp_identity_refuses_before_raw_executi
 test_raw_bare_target_hardlinked_to_omp_refuses_before_raw_execution
 test_raw_dynamic_loader_wrapper_refuses_before_raw_execution
 test_raw_busybox_wrapper_refuses_before_raw_execution
+test_raw_hardlinked_wrapper_refuses_before_raw_execution
+test_raw_git_wrapper_refuses_before_raw_execution
 test_raw_absolute_wrapper_refuses_before_raw_execution
 test_raw_non_omp_command_p_ignores_imported_type_function
 test_raw_non_omp_command_p_preserves_path_assignment
