@@ -37,7 +37,6 @@ OMP_NOTIFICATION_ACKNOWLEDGEMENT="$STATE/.omp-primary-nextturn-ack"
 
 publish_omp_notification_acknowledgement() {
   local claim_id claim_through acknowledgement_tmp
-  [ "$ACTOR" = main ] || return 0
   [ -f "$OMP_NOTIFICATION_CLAIM" ] && [ ! -L "$OMP_NOTIFICATION_CLAIM" ] || return 0
   [ "$(sed -n '1p' "$OMP_NOTIFICATION_CLAIM" 2>/dev/null)" = fm-omp-primary-nextturn-notification-v6 ] || return 0
   case "$(sed -n '5p' "$OMP_NOTIFICATION_CLAIM" 2>/dev/null)" in pending|inflight) ;; *) return 0 ;; esac
@@ -45,8 +44,13 @@ publish_omp_notification_acknowledgement() {
   claim_through=$(sed -n '7p' "$OMP_NOTIFICATION_CLAIM" 2>/dev/null) || return 1
   case "$claim_id" in ''|*[!a-f0-9-]*) return 0 ;; esac
   case "$claim_through" in ''|*[!0-9]*) return 0 ;; esac
-  if [ "${#claim_through}" -gt "${#ACK_THROUGH}" ] \
-    || { [ "${#claim_through}" -eq "${#ACK_THROUGH}" ] && [[ "$claim_through" > "$ACK_THROUGH" ]]; }; then
+  if awk -F '\t' -v cutoff="$claim_through" '
+    $2 ~ /^[0-9]+$/ && (length($2) < length(cutoff) || (length($2) == length(cutoff) && ("x" $2) <= ("x" cutoff))) {
+      outstanding=1
+      exit
+    }
+    END { exit outstanding ? 0 : 1 }
+  ' "$FM_WAKE_QUEUE"; then
     return 0
   fi
   acknowledgement_tmp=$(mktemp "$STATE/.omp-primary-nextturn-ack.XXXXXX") || return 1

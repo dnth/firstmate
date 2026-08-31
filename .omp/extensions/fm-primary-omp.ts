@@ -300,7 +300,12 @@ export default function (omp: ExtensionAPI) {
   publishNativeProcessIdentity();
   const taskInboxDoorbell = installTaskInboxDoorbell(omp);
   let pendingStartupNudge = "";
-  const runtime = globalThis as typeof globalThis & { firstmateOmpPrimaryNotificationInstance?: string };
+  const runtime = globalThis as typeof globalThis & {
+    firstmateOmpPrimaryNotificationBinding?: string;
+    firstmateOmpPrimaryNotificationInstance?: string;
+  };
+  const notificationBinding = randomUUID();
+  runtime.firstmateOmpPrimaryNotificationBinding = notificationBinding;
   const notificationInstance = runtime.firstmateOmpPrimaryNotificationInstance ??= randomUUID();
 
   let notificationSession = createHash("sha256").update("unknown").digest("hex");
@@ -412,13 +417,13 @@ export default function (omp: ExtensionAPI) {
       }
     }
   };
-  const queueWakeNotification = (content: string, notificationKey: string): boolean => {
+  const queueWakeNotification = (content: string, notificationKey: string, retainOnFailure = false): boolean => {
     if (!claimWakeNotification(notificationKey, content)) return true;
     try {
       sendWakeNotification(content);
       return true;
     } catch (error) {
-      discardWakeNotification();
+      if (!retainOnFailure) discardWakeNotification();
       throw error;
     }
   };
@@ -436,6 +441,7 @@ export default function (omp: ExtensionAPI) {
   };
 
   omp.events?.on?.(FM_PRIMARY_WATCHER_WAKE_EVENT, (data) => {
+    if (runtime.firstmateOmpPrimaryNotificationBinding !== notificationBinding) return;
     const wake = data as PrimaryWatcherWake;
     if (
       !wake ||
@@ -445,7 +451,7 @@ export default function (omp: ExtensionAPI) {
     ) {
       return;
     }
-    queueWakeNotification(wake.content, wake.notificationKey);
+    queueWakeNotification(wake.content, wake.notificationKey, true);
     wake.accept();
   });
 
@@ -515,6 +521,7 @@ export default function (omp: ExtensionAPI) {
   });
 
   omp.on("message_start", (event) => {
+    if (runtime.firstmateOmpPrimaryNotificationBinding !== notificationBinding) return;
     const message = event.message as { role?: unknown; customType?: unknown; content?: unknown };
     const claim = readWakeNotificationClaim();
     if (

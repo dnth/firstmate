@@ -887,6 +887,42 @@ test_main_drain_excludes_rows_already_granted_to_branch() {
   pass "a main drain excludes a branch-granted row and acknowledges only its own presented rows"
 }
 
+test_omp_claim_waits_for_all_scoped_rows() {
+  local dir state grant sequence generation
+  grant="$ROOT/bin/fm-wake-grant.sh"
+  dir=$(make_case omp-claim-scoped-rows)
+  state="$dir/state"
+  append_wake "$state" check "some-poll.check.sh" "check: some-poll" || fail "check append failed"
+  append_wake "$state" signal "task-a.status" "signal: task-a" || fail "signal append failed"
+  FM_STATE_OVERRIDE="$state" "$grant" activate "$$" omp-claim || fail "branch owner activation failed"
+  FM_STATE_OVERRIDE="$state" "$grant" publish omp-claim 2 || fail "branch grant publication failed"
+  printf '%s\n' \
+    fm-omp-primary-nextturn-notification-v6 \
+    1 \
+    11111111-1111-4111-8111-111111111111 \
+    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    pending \
+    22222222-2222-4222-8222-222222222222 \
+    2 \
+    wake-queue \
+    d2FrZQ== \
+    > "$state/.omp-primary-nextturn-notification"
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$dir/branch.out" 2> "$dir/branch.err" \
+    || fail "branch drain failed: $(cat "$dir/branch.err")"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/branch.err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/branch.err")
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "branch acknowledgement failed"
+  [ ! -e "$state/.omp-primary-nextturn-ack" ] || fail "branch acknowledgement retired a claim with main-owned rows remaining"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/main.out" 2> "$dir/main.err" || fail "main drain failed: $(cat "$dir/main.err")"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/main.err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/main.err")
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "main acknowledgement failed"
+  [ -e "$state/.omp-primary-nextturn-ack" ] || fail "acknowledging every claimed row did not retire the OMP notification claim"
+  pass "OMP notification acknowledgement waits for all scoped rows through its cutoff"
+}
+
 test_branch_owner_activation_rollback_stops_after_publication() {
   local dir state grant status=0
   grant="$ROOT/bin/fm-wake-grant.sh"
@@ -931,4 +967,5 @@ test_marker_transitions_survive_reentry_from_an_exiting_frame
 test_handling_confirmation_is_bounded_by_foreign_marker_lock
 test_branch_actor_scoped_ack_never_swallows_a_main_owned_row
 test_main_drain_excludes_rows_already_granted_to_branch
+test_omp_claim_waits_for_all_scoped_rows
 test_branch_owner_activation_rollback_stops_after_publication

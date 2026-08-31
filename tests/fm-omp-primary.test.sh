@@ -1014,7 +1014,15 @@ const waitFor = async (predicate, description) => {
 };
 const api = {
   zod: { object: () => ({}) },
-  on(name, handler) { handlers.set(name, handler); },
+  on(name, handler) {
+    if (name === "message_start") {
+      const registered = handlers.get(name) || [];
+      registered.push(handler);
+      handlers.set(name, registered);
+      return;
+    }
+    handlers.set(name, handler);
+  },
   events: {
     on(name, handler) { eventHandlers.set(name, handler); },
     emit(name, data) { eventHandlers.get(name)?.(data); },
@@ -1066,10 +1074,9 @@ const startSession = async (sessionFile) => {
 const startNextTurn = async () => {
   const notification = notifications.at(-1);
   if (notification) {
-    await handlers.get("message_start")(
-      { type: "message_start", message: { ...notification.message, role: "custom" } },
-      {},
-    );
+    for (const handler of handlers.get("message_start")) {
+      await handler({ type: "message_start", message: { ...notification.message, role: "custom" } }, {});
+    }
   }
   await handlers.get("before_agent_start")({ type: "before_agent_start" }, {});
 };
