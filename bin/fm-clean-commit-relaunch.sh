@@ -44,6 +44,8 @@ DATA=$(resolve_dir data "$DATA") || exit 1
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-pool-lib.sh
+. "$SCRIPT_DIR/fm-pool-lib.sh"
 # shellcheck source=bin/fm-clean-commit-relaunch-launch-lib.sh
 . "$SCRIPT_DIR/fm-clean-commit-relaunch-launch-lib.sh"
 
@@ -198,11 +200,12 @@ DESTINATION_LOCK=$STATE/.spawn-$DESTINATION.lock
 SOURCE_LOCK_HELD=0
 DESTINATION_LOCK_HELD=0
 DESTINATION_WORKTREE=
+DESTINATION_WORKTREE_OWNED=0
 DESTINATION_BRANCH=
 DESTINATION_PUBLISHED=0
 
 cleanup_destination() {
-  [ -n "$DESTINATION_WORKTREE" ] || return 0
+  [ "$DESTINATION_WORKTREE_OWNED" -eq 1 ] || return 0
   fm_clean_relaunch_launch_cleanup "$DESTINATION" || true
   (cd "$PROJECT" && "$SCRIPT_DIR/fm-treehouse-command.sh" return --force "$DESTINATION_WORKTREE" >/dev/null 2>&1) || true
   if [ -n "$DESTINATION_BRANCH" ]; then
@@ -381,15 +384,17 @@ git -C "$PROJECT" show-ref --verify --quiet "refs/heads/$DESTINATION_BRANCH" && 
   exit 1
 }
 
-DESTINATION_WORKTREE=$(cd "$PROJECT" && "$SCRIPT_DIR/fm-treehouse-get.sh" --lease --lease-holder "fm-$DESTINATION") || {
+ALLOCATED_WORKTREE=$(cd "$PROJECT" && "$SCRIPT_DIR/fm-treehouse-get.sh" --lease --lease-holder "fm-$DESTINATION") || {
   echo "error: normal allocator did not supply a destination worktree" >&2
   exit 1
 }
-DESTINATION_WORKTREE=$(resolve_dir destination-worktree "$DESTINATION_WORKTREE") || exit 1
-[ "$DESTINATION_WORKTREE" != "$SOURCE_WORKTREE" ] || {
+ALLOCATED_WORKTREE=$(resolve_dir destination-worktree "$ALLOCATED_WORKTREE") || exit 1
+[ "$ALLOCATED_WORKTREE" != "$SOURCE_WORKTREE" ] || {
   echo "error: normal allocator reused the source worktree" >&2
   exit 1
 }
+DESTINATION_WORKTREE=$ALLOCATED_WORKTREE
+DESTINATION_WORKTREE_OWNED=1
 DESTINATION_TOP=$(git -C "$DESTINATION_WORKTREE" rev-parse --show-toplevel 2>/dev/null || true)
 DESTINATION_TOP=$(resolve_dir destination-repository-root "$DESTINATION_TOP") || exit 1
 [ "$DESTINATION_TOP" = "$DESTINATION_WORKTREE" ] || {
@@ -406,11 +411,7 @@ worktree_is_registered "$PROJECT" "$DESTINATION_WORKTREE" || {
   echo "error: normal allocator returned an unregistered destination worktree" >&2
   exit 1
 }
-DESTINATION_STATUS=$(git -C "$DESTINATION_WORKTREE" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null) || {
-  echo "error: normal allocator returned an unreadable destination worktree" >&2
-  exit 1
-}
-if [ -n "$DESTINATION_STATUS" ] || path_has_git_operation "$DESTINATION_WORKTREE"; then
+if ! fm_pool_worktree_clean "$DESTINATION_WORKTREE" || path_has_git_operation "$DESTINATION_WORKTREE"; then
   echo "error: normal allocator returned an occupied destination worktree" >&2
   exit 1
 fi

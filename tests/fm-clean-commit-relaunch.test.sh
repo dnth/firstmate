@@ -22,7 +22,7 @@ copy_runtime() {  # <fixture>
     fm-clean-commit-relaunch.sh fm-clean-commit-relaunch-launch-lib.sh \
     fm-lock-lib.sh fm-nm-run-lib.sh fm-pr-lib.sh fm-task-inbox-lib.sh \
     fm-wake-lib.sh fm-backend.sh fm-omp-process-lib.sh fm-tmux-lib.sh \
-    fm-session-lock-lib.sh; do
+    fm-session-lock-lib.sh fm-pool-lib.sh fm-treehouse-root-lib.sh; do
     cp "$ROOT/bin/$file" "$fixture/bin/$file"
   done
   cp "$ROOT/bin/backends/tmux.sh" "$fixture/bin/backends/tmux.sh"
@@ -30,12 +30,17 @@ copy_runtime() {  # <fixture>
 #!/usr/bin/env bash
 exit 0
 SH
-  cat > "$fixture/bin/fm-treehouse-get.sh" <<'SH'
+cat > "$fixture/bin/fm-treehouse-get.sh" <<'SH'
 #!/usr/bin/env bash
 set -eu
-[ "${FM_TEST_ALLOCATOR_MODE:-success}" = success ] || exit 1
+case "${FM_TEST_ALLOCATOR_MODE:-success}" in
+  success) ;;
+  source) printf '%s\n' "$FM_TEST_SOURCE_WORKTREE"; exit 0 ;;
+  *) exit 1 ;;
+esac
 [ -z "${FM_TEST_ALLOCATOR_DELAY:-}" ] || sleep "$FM_TEST_ALLOCATOR_DELAY"
 [ -z "${FM_TEST_ALLOCATOR_DIRTY:-}" ] || : > "$FM_TEST_DESTINATION/allocator-dirty"
+[ "${FM_TEST_ALLOCATOR_TREEHOUSE_CONFIG:-0}" != 1 ] || : > "$FM_TEST_DESTINATION/treehouse.toml"
 printf '%s\n' "$FM_TEST_DESTINATION"
 SH
   cat > "$fixture/bin/fm-treehouse-command.sh" <<'SH'
@@ -207,6 +212,7 @@ run_owner() {  # <fixture> [source] [destination]
     FM_TEST_REAL_GIT="$REAL_GIT" \
     FM_TEST_HOME="$fixture/home" \
     FM_TEST_PROJECT="$fixture/project" \
+    FM_TEST_SOURCE_WORKTREE="$fixture/source" \
     FM_TEST_DESTINATION="$fixture/destination" \
     FM_TEST_DESTINATION_ID="$destination" \
     FM_TEST_WINDOWS="$fixture/windows" \
@@ -262,6 +268,15 @@ jq -e --arg commit "$source_head" '
 assert_no_grep "$fixture/source" "$fixture/home/data/destination/relaunch-handoff.json" "handoff captured mutable source path"
 assert_no_grep 'FM_CLEAN' "$fixture/home/data/destination/relaunch-handoff.json" "handoff captured caller environment"
 pass "clean relaunch: linked worktree success preserves source and binds exact destination identity"
+
+# The pool's untracked root configuration is normal allocator state, not work.
+fixture=$(new_case treehouse-config)
+before=$(source_snapshot "$fixture")
+out=$(FM_TEST_ALLOCATOR_TREEHOUSE_CONFIG=1 run_owner "$fixture" 2>&1)
+expect_code 0 $? "Treehouse-configured destination should succeed"
+[ "$(source_snapshot "$fixture")" = "$before" ] || fail "Treehouse-configured destination mutated source"
+[ -f "$fixture/destination/treehouse.toml" ] || fail "Treehouse-configured destination lost its pool configuration"
+pass "clean relaunch: lone Treehouse pool configuration remains admissible"
 
 # Endpoint state is admission, never a recovery guess.
 for endpoint in live dead ambiguous unreadable; do
@@ -361,6 +376,17 @@ for failure in allocator checkout launch acknowledgement; do
   git -C "$fixture/project" show-ref --verify --quiet refs/heads/fm/destination && fail "$failure retained destination branch"
 done
 pass "clean relaunch: allocator, checkout, launch, and acknowledgement failure preserve source"
+
+# A malicious or faulty allocator cannot turn source preservation into cleanup.
+fixture=$(new_case allocator-reuses-source)
+before=$(source_snapshot "$fixture")
+out=$(FM_TEST_ALLOCATOR_MODE=source run_owner "$fixture" 2>&1)
+expect_code 1 $? "source-reusing allocator should refuse"
+assert_contains "$out" 'reused the source worktree' "source-reusing allocator did not explain its refusal"
+[ "$(source_snapshot "$fixture")" = "$before" ] || fail "source-reusing allocator cleaned or mutated source"
+[ -d "$fixture/source" ] || fail "source-reusing allocator removed the source worktree"
+[ -z "$(cat "$fixture/allocator.log")" ] || fail "source-reusing allocator tried to return the source worktree"
+pass "clean relaunch: source-reusing allocator cannot clean the source"
 
 # An interrupt after handoff publication exits through destination-only cleanup.
 fixture=$(new_case interrupted-publication)
