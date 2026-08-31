@@ -95,6 +95,10 @@ case "$command" in
     ;;
   new-window)
     log "new-window $*"
+    if [ "${FM_TEST_FOREIGN_WINDOW_RACE:-0}" = 1 ]; then
+      printf 'fm-%s\n' "$FM_TEST_DESTINATION_ID" >> "$FM_TEST_WINDOWS"
+      exit 1
+    fi
     [ -z "${FM_TEST_LAUNCH_DELAY:-}" ] || sleep "$FM_TEST_LAUNCH_DELAY"
     [ "${FM_TEST_LAUNCH_FAIL:-0}" != 1 ] || exit 1
     printf 'fm-%s\n' "$FM_TEST_DESTINATION_ID" >> "$FM_TEST_WINDOWS"
@@ -137,8 +141,12 @@ SH
   cat > "$fakebin/git" <<'SH'
 #!/usr/bin/env bash
 set -u
-if [ "${FM_TEST_CHECKOUT_FAIL:-0}" = 1 ] && [ "$1" = -C ] && [ "${3:-}" = checkout ] && [ "${4:-}" = -b ]; then
-  exit 1
+if [ "$1" = -C ] && [ "${3:-}" = checkout ] && [ "${4:-}" = -b ]; then
+  if [ "${FM_TEST_CHECKOUT_RACE:-0}" = 1 ]; then
+    "${FM_TEST_REAL_GIT}" -C "$2" branch "$5" "$6"
+    exit 1
+  fi
+  [ "${FM_TEST_CHECKOUT_FAIL:-0}" != 1 ] || exit 1
 fi
 exec "${FM_TEST_REAL_GIT}" "$@"
 SH
@@ -434,6 +442,25 @@ assert_contains "$out" 'destination cleanup is incomplete' "return failure was s
 assert_present "$fixture/destination" "return failure removed the destination worktree"
 git -C "$fixture/project" show-ref --verify --quiet refs/heads/fm/destination || fail "return failure removed attached destination branch"
 pass "clean relaunch: failed destination return remains actionable"
+
+# A concurrent branch creation never becomes this relaunch's cleanup target.
+fixture=$(new_case branch-race)
+before=$(source_snapshot "$fixture")
+out=$(FM_TEST_CHECKOUT_RACE=1 run_owner "$fixture" 2>&1)
+expect_code 1 $? "concurrent branch creation should fail"
+[ "$(source_snapshot "$fixture")" = "$before" ] || fail "concurrent branch creation mutated source"
+git -C "$fixture/project" show-ref --verify --quiet refs/heads/fm/destination || fail "concurrent branch creation was deleted"
+pass "clean relaunch: concurrent destination branch remains foreign"
+
+# A concurrent tmux window creation never becomes this relaunch's cleanup target.
+fixture=$(new_case window-race)
+before=$(source_snapshot "$fixture")
+out=$(FM_TEST_FOREIGN_WINDOW_RACE=1 run_owner "$fixture" 2>&1)
+expect_code 1 $? "concurrent window creation should fail"
+[ "$(source_snapshot "$fixture")" = "$before" ] || fail "concurrent window creation mutated source"
+[ "$(cat "$fixture/windows")" = fm-destination ] || fail "concurrent window creation was removed"
+assert_not_contains 'kill-window' "$(cat "$fixture/tmux.log")" "concurrent window creation was cleaned"
+pass "clean relaunch: concurrent destination endpoint remains foreign"
 
 # An interrupt after handoff publication exits through destination-only cleanup.
 fixture=$(new_case interrupted-publication)

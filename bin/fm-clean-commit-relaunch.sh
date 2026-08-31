@@ -228,7 +228,13 @@ DESTINATION_LOCK_HELD=0
 DESTINATION_WORKTREE=
 DESTINATION_WORKTREE_OWNED=0
 DESTINATION_BRANCH=
+DESTINATION_BRANCH_CREATED=0
 DESTINATION_PUBLISHED=0
+DESTINATION_CHECKOUT_INTERRUPTED=0
+
+defer_destination_checkout_signal() {
+  DESTINATION_CHECKOUT_INTERRUPTED=1
+}
 
 cleanup_destination() {
   [ "$DESTINATION_WORKTREE_OWNED" -eq 1 ] || return 0
@@ -237,7 +243,7 @@ cleanup_destination() {
     echo "error: could not return destination worktree $DESTINATION_WORKTREE" >&2
     return 1
   fi
-  if [ -n "$DESTINATION_BRANCH" ]; then
+  if [ "$DESTINATION_BRANCH_CREATED" -eq 1 ]; then
     if ! git -C "$PROJECT" branch -D "$DESTINATION_BRANCH" >/dev/null; then
       echo "error: could not delete destination branch $DESTINATION_BRANCH" >&2
       return 1
@@ -433,9 +439,10 @@ ALLOCATED_WORKTREE=$(cd "$PROJECT" && "$SCRIPT_DIR/fm-treehouse-get.sh" --lease 
   echo "error: normal allocator did not supply a destination worktree" >&2
   exit 1
 }
-ALLOCATED_WORKTREE=$(resolve_dir destination-worktree "$ALLOCATED_WORKTREE") || exit 1
 DESTINATION_WORKTREE=$ALLOCATED_WORKTREE
 DESTINATION_WORKTREE_OWNED=1
+ALLOCATED_WORKTREE=$(resolve_dir destination-worktree "$ALLOCATED_WORKTREE") || exit 1
+DESTINATION_WORKTREE=$ALLOCATED_WORKTREE
 [ "$ALLOCATED_WORKTREE" != "$SOURCE_WORKTREE" ] || {
   echo "error: normal allocator reused the source worktree" >&2
   exit 1
@@ -468,11 +475,16 @@ if ! fm_pool_worktree_clean "$DESTINATION_WORKTREE" || path_has_git_operation "$
   echo "error: normal allocator returned an occupied destination worktree" >&2
   exit 1
 fi
-DESTINATION_WORKTREE_OWNED=1
-git -C "$DESTINATION_WORKTREE" checkout -b "$DESTINATION_BRANCH" "$SOURCE_COMMIT" >/dev/null || {
+trap defer_destination_checkout_signal HUP INT TERM
+if git -C "$DESTINATION_WORKTREE" checkout -b "$DESTINATION_BRANCH" "$SOURCE_COMMIT" >/dev/null; then
+  DESTINATION_BRANCH_CREATED=1
+else
+  trap interrupted HUP INT TERM
   echo "error: could not create the destination branch at the admitted source commit" >&2
   exit 1
-}
+fi
+trap interrupted HUP INT TERM
+[ "$DESTINATION_CHECKOUT_INTERRUPTED" -eq 0 ] || exit 1
 DESTINATION_HEAD=$(git -C "$DESTINATION_WORKTREE" rev-parse --verify --quiet 'HEAD^{commit}' 2>/dev/null || true)
 DESTINATION_ATTACHED_BRANCH=$(git -C "$DESTINATION_WORKTREE" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 [ "$DESTINATION_HEAD" = "$SOURCE_COMMIT" ] && [ "$DESTINATION_ATTACHED_BRANCH" = "$DESTINATION_BRANCH" ] || {

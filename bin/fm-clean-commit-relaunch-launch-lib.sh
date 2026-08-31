@@ -12,6 +12,12 @@ _FM_CLEAN_RELAUNCH_LAUNCH_LIB_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE
 
 FM_CLEAN_RELAUNCH_LAUNCH_TARGET=
 FM_CLEAN_RELAUNCH_LAUNCH_STATE=
+FM_CLEAN_RELAUNCH_LAUNCH_WINDOW_ID=
+FM_CLEAN_RELAUNCH_LAUNCH_CREATE_INTERRUPTED=0
+
+fm_clean_relaunch_defer_window_creation_signal() {
+  FM_CLEAN_RELAUNCH_LAUNCH_CREATE_INTERRUPTED=1
+}
 
 fm_clean_relaunch_shell_quote() {  # <value>
   local value=$1
@@ -26,8 +32,8 @@ fm_clean_relaunch_destination_meta_absent() {  # <state> <id>
 }
 
 fm_clean_relaunch_launch_cleanup() {  # <destination-id>
-  local id=$1 state=${FM_CLEAN_RELAUNCH_LAUNCH_STATE:-} target=${FM_CLEAN_RELAUNCH_LAUNCH_TARGET:-}
-  [ -n "$target" ] && fm_backend_kill tmux "$target" >/dev/null 2>&1 || true
+  local id=$1 state=${FM_CLEAN_RELAUNCH_LAUNCH_STATE:-} window_id=${FM_CLEAN_RELAUNCH_LAUNCH_WINDOW_ID:-}
+  [ -n "$window_id" ] && fm_backend_kill tmux "$window_id" >/dev/null 2>&1 || true
   [ -n "$state" ] || return 0
   rm -rf -- "${TMPDIR:-/tmp}/fm-$id"
   rm -rf -- "$state/$id.inbox"
@@ -67,7 +73,7 @@ fm_clean_relaunch_wait_for_ack() {  # <state> <id> <record>
 fm_clean_relaunch_launch_allocated() {
   local id=$1 project=$2 worktree=$3 brief=$4 harness=$5 backend=$6 mode=$7 yolo=$8 model=$9 effort=${10}
   local state=${STATE:?STATE must be set by the relaunch owner}
-  local session window target task_tmp meta_tmp launch record handoff
+  local session window target window_id task_tmp meta_tmp launch record handoff
 
   [ "$harness:$backend" = codex:tmux ] || {
     echo "error: allocated relaunch launch supports only codex/tmux" >&2
@@ -93,9 +99,16 @@ fm_clean_relaunch_launch_allocated() {
   session=$(fm_backend_tmux_container_ensure) || return 1
   window="fm-$id"
   target="$session:$window"
-  FM_CLEAN_RELAUNCH_LAUNCH_TARGET=$target
   FM_CLEAN_RELAUNCH_LAUNCH_STATE=$state
-  fm_backend_tmux_create_task "$session" "$window" "$worktree" >/dev/null || return 1
+  trap fm_clean_relaunch_defer_window_creation_signal HUP INT TERM
+  if window_id=$(fm_backend_tmux_create_task "$session" "$window" "$worktree"); then
+    FM_CLEAN_RELAUNCH_LAUNCH_WINDOW_ID="$session:$window_id"
+  else
+    trap interrupted HUP INT TERM
+    return 1
+  fi
+  trap interrupted HUP INT TERM
+  [ "$FM_CLEAN_RELAUNCH_LAUNCH_CREATE_INTERRUPTED" -eq 0 ] || return 1
 
   task_tmp="${TMPDIR:-/tmp}/fm-$id"
   if [ -L "$task_tmp" ]; then
