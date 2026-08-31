@@ -18,6 +18,8 @@ FM_CLEAN_RELAUNCH_LAUNCH_METADATA_OWNED=0
 FM_CLEAN_RELAUNCH_LAUNCH_METADATA_INTERRUPTED=0
 FM_CLEAN_RELAUNCH_LAUNCH_TEMP_OWNED=0
 FM_CLEAN_RELAUNCH_LAUNCH_INBOX_OWNED=0
+FM_CLEAN_RELAUNCH_LAUNCH_STATE_CLAIM_INTERRUPTED=0
+FM_CLEAN_RELAUNCH_LAUNCH_METADATA_TMP=
 
 fm_clean_relaunch_defer_window_creation_signal() {
   FM_CLEAN_RELAUNCH_LAUNCH_CREATE_INTERRUPTED=1
@@ -25,6 +27,10 @@ fm_clean_relaunch_defer_window_creation_signal() {
 
 fm_clean_relaunch_defer_metadata_signal() {
   FM_CLEAN_RELAUNCH_LAUNCH_METADATA_INTERRUPTED=1
+}
+
+fm_clean_relaunch_defer_state_claim_signal() {
+  FM_CLEAN_RELAUNCH_LAUNCH_STATE_CLAIM_INTERRUPTED=1
 }
 
 fm_clean_relaunch_shell_quote() {  # <value>
@@ -46,6 +52,7 @@ fm_clean_relaunch_launch_cleanup() {  # <destination-id>
   [ "$FM_CLEAN_RELAUNCH_LAUNCH_TEMP_OWNED" -eq 0 ] || rm -rf -- "${TMPDIR:-/tmp}/fm-$id"
   [ "$FM_CLEAN_RELAUNCH_LAUNCH_INBOX_OWNED" -eq 0 ] || rm -rf -- "$state/$id.inbox"
   [ "$FM_CLEAN_RELAUNCH_LAUNCH_METADATA_OWNED" -eq 0 ] || rm -f -- "$state/$id.meta"
+  [ -z "$FM_CLEAN_RELAUNCH_LAUNCH_METADATA_TMP" ] || rm -f -- "$FM_CLEAN_RELAUNCH_LAUNCH_METADATA_TMP"
 }
 
 fm_clean_relaunch_wait_for_ack() {  # <state> <id> <record>
@@ -76,7 +83,7 @@ fm_clean_relaunch_wait_for_ack() {  # <state> <id> <record>
 fm_clean_relaunch_launch_allocated() {
   local id=$1 project=$2 worktree=$3 brief=$4 harness=$5 backend=$6 mode=$7 yolo=$8 model=$9 effort=${10}
   local state=${STATE:?STATE must be set by the relaunch owner}
-  local session window target window_id window_count task_tmp meta_tmp launch record handoff
+  local session window canonical_target target window_id window_count task_tmp meta_tmp launch record handoff late_artifact
 
   [ "$harness:$backend" = codex:tmux ] || {
     echo "error: allocated relaunch launch supports only codex/tmux" >&2
@@ -94,14 +101,15 @@ fm_clean_relaunch_launch_allocated() {
     echo "error: allocated destination is not a worktree root" >&2
     return 1
   }
-  fm_clean_relaunch_destination_meta_absent "$state" "$id" || {
+  late_artifact=$(destination_artifact_exists "$id" || true)
+  if [ -n "$late_artifact" ] && { [ "$late_artifact" != "${DATA:?DATA must be set by the relaunch owner}/$id/relaunch-handoff.json" ] || [ "${DESTINATION_HANDOFF_OWNED:-0}" -ne 1 ]; }; then
     echo "error: destination state is already occupied" >&2
     return 1
-  }
+  fi
   fm_backend_source tmux || return 1
   session=$(fm_backend_tmux_container_ensure) || return 1
   window="fm-$id"
-  target="$session:$window"
+  canonical_target="$session:$window"
   FM_CLEAN_RELAUNCH_LAUNCH_STATE=$state
   trap fm_clean_relaunch_defer_window_creation_signal HUP INT TERM
   if window_id=$(fm_backend_tmux_create_task "$session" "$window" "$worktree"); then
@@ -120,23 +128,35 @@ fm_clean_relaunch_launch_allocated() {
   target="$FM_CLEAN_RELAUNCH_LAUNCH_WINDOW_ID"
 
   task_tmp="${TMPDIR:-/tmp}/fm-$id"
-  if ! mkdir "$task_tmp"; then
+  trap fm_clean_relaunch_defer_state_claim_signal HUP INT TERM
+  if mkdir "$task_tmp"; then
+    FM_CLEAN_RELAUNCH_LAUNCH_TEMP_OWNED=1
+  else
+    trap interrupted HUP INT TERM
     echo "error: destination task temp root is already occupied" >&2
     return 1
   fi
-  FM_CLEAN_RELAUNCH_LAUNCH_TEMP_OWNED=1
+  trap interrupted HUP INT TERM
+  [ "$FM_CLEAN_RELAUNCH_LAUNCH_STATE_CLAIM_INTERRUPTED" -eq 0 ] || return 1
   mkdir "$task_tmp/gotmp" || return 1
 
-  if ! mkdir "$state/$id.inbox"; then
+  FM_CLEAN_RELAUNCH_LAUNCH_STATE_CLAIM_INTERRUPTED=0
+  trap fm_clean_relaunch_defer_state_claim_signal HUP INT TERM
+  if mkdir "$state/$id.inbox"; then
+    FM_CLEAN_RELAUNCH_LAUNCH_INBOX_OWNED=1
+  else
+    trap interrupted HUP INT TERM
     echo "error: destination inbox is already occupied" >&2
     return 1
   fi
-  FM_CLEAN_RELAUNCH_LAUNCH_INBOX_OWNED=1
+  trap interrupted HUP INT TERM
+  [ "$FM_CLEAN_RELAUNCH_LAUNCH_STATE_CLAIM_INTERRUPTED" -eq 0 ] || return 1
   mkdir "$state/$id.inbox/handled" || return 1
 
   meta_tmp=$(mktemp "$state/.${id}.meta.XXXXXX") || return 1
+  FM_CLEAN_RELAUNCH_LAUNCH_METADATA_TMP=$meta_tmp
   if ! {
-    printf 'window=%s\n' "$target"
+    printf 'window=%s\n' "$canonical_target"
     printf 'endpoint_task_id=%s\n' "$id"
     printf 'worktree=%s\n' "$worktree"
     printf 'project=%s\n' "$project"
@@ -155,8 +175,10 @@ fm_clean_relaunch_launch_allocated() {
   if ln "$meta_tmp" "$state/$id.meta"; then
     FM_CLEAN_RELAUNCH_LAUNCH_METADATA_OWNED=1
     rm -f -- "$meta_tmp"
+    FM_CLEAN_RELAUNCH_LAUNCH_METADATA_TMP=
   else
     rm -f -- "$meta_tmp"
+    FM_CLEAN_RELAUNCH_LAUNCH_METADATA_TMP=
     trap interrupted HUP INT TERM
     return 1
   fi
