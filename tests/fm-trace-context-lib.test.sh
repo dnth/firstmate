@@ -383,6 +383,11 @@ case "${1:-} ${2:-}" in
 esac
 SH
   chmod +x "$fakebin/herdr"
+  cat > "$fakebin/claude" <<'SH'
+#!/usr/bin/env bash
+printf 'GOTMPDIR=%s\nTRACEPARENT=%s\n' "${GOTMPDIR:-}" "${TRACEPARENT:-}" > "${FM_TRACE_SPAWN_OBSERVED:?}"
+SH
+  chmod +x "$fakebin/claude"
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
@@ -395,7 +400,7 @@ SH
 }
 
 test_herdr_spawn_executes_one_atomic_launch_with_trace_context() {
-  local dir home project worktree fakebin state log ps_bin side_effect id out status meta tp observed run_count launch_payload unit_separator
+  local dir home project worktree fakebin state log ps_bin id out status meta tp observed run_count launch_payload unit_separator
   dir="$WORK/herdr-spawn"
   home="$dir/home"
   project="$dir/project"
@@ -403,7 +408,6 @@ test_herdr_spawn_executes_one_atomic_launch_with_trace_context() {
   state="$dir/herdr-state"
   log="$dir/herdr.log"
   ps_bin="$dir/ps-bin"
-  side_effect="$dir/launch-side-effect"
   id=trace-herdr
   mkdir -p "$home/data/$id" "$home/state" "$home/config" "$home/projects" "$state"
   printf '%s\n' "$$" > "$home/state/.lock"
@@ -413,12 +417,6 @@ test_herdr_spawn_executes_one_atomic_launch_with_trace_context() {
   printf '# fake firstmate home\n' > "$home/AGENTS.md"
   mkdir -p "$home/bin"
   fm_git_worktree "$project" "$worktree" trace-herdr
-  cat > "$side_effect" <<'SH'
-#!/usr/bin/env bash
-set -u
-printf 'GOTMPDIR=%s\nTRACEPARENT=%s\n' "${GOTMPDIR:-}" "${TRACEPARENT:-}" > "${FM_TRACE_SPAWN_OBSERVED:?}"
-SH
-  chmod +x "$side_effect"
   fakebin=$(make_trace_spawn_herdr_fixture "$dir")
   : > "$log"
   : > "$ps_bin"
@@ -434,7 +432,7 @@ SH
     FM_FAKE_PROJECT="$project" FM_FAKE_WORKTREE="$worktree" \
     FM_HERDR_PS_BIN="$ps_bin" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
     FM_TRACE_SPAWN_OBSERVED="$dir/observed" PATH="$fakebin:$PATH" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$project" "env $side_effect" --backend herdr \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$project" claude --backend herdr \
     --mode no-mistakes --yolo off 2>&1)
   status=$?
   expect_code 0 "$status" "the Herdr-backed spawn should succeed"

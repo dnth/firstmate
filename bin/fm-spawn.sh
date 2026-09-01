@@ -107,8 +107,15 @@
 #   /updatefirstmate, restart). A bare verified adapter name
 #   (claude|codex|opencode|pi|pi-signed|omp|grok|kimi) overrides selection for
 #   either kind. Hermes overrides only a crewmate or scout spawn and is refused for secondmates.
-#   For crewmates and scouts, a non-flag string containing whitespace is treated
-#   as a RAW launch command - the escape hatch for verifying new adapters.
+#   For crewmates and scouts, a non-flag string containing shell whitespace is
+#   treated as a RAW launch command - the escape hatch for verifying new adapters.
+#   Raw direct non-OMP commands preserve accepted assignments and arguments
+#   through an absolute `env` launch form only for canonical executable
+#   identities, bypassing pane aliases and functions.
+#   Leading whitespace, plain environment assignments, and `command -p --` are
+#   normalized only to identify OMP, which raw launch never permits.
+#   Ambiguous shell syntax refuses before endpoint creation rather than bypassing
+#   the verified OMP template or its project-extension approval boundary.
 #   Secondmates refuse every raw launch command and accept adapter identities only.
 #   pi-signed launches that exact executable name from PATH and
 #   refuses before endpoint creation when it is unavailable; it never falls back to pi.
@@ -947,6 +954,12 @@ spawn_abort_cleanup() {
       echo "warning: OMP Prewalk spawn cleanup is preserving its leased worktree because prior occupant liveness was not disproven" >&2
       ;;
   esac
+  if [ "${RAW_LAUNCH_ABORT_LEASE:-0}" = 1 ]; then
+    RAW_LAUNCH_ABORT_LEASE=0
+    if ! (cd "$PROJ_ABS" && "$SCRIPT_DIR/fm-treehouse-command.sh" return "$WT" >/dev/null 2>&1); then
+      echo "warning: raw launch preflight could not return its leased worktree $WT" >&2
+    fi
+  fi
   if [ "$OMP_ABORT_CLEANUP" = 1 ]; then
     OMP_ABORT_CLEANUP=0
     meta="${STATE:-}/${ID:-}.meta"
@@ -1280,19 +1293,292 @@ refuse_crew_only_secondmate() {  # <harness>
   esac
 }
 
+raw_launch_omp_word_has_shell_grammar() {  # <word>
+  case "$1" in
+    -*|'!'|time|coproc|if|then|elif|else|fi|for|while|until|do|done|case|'esac'|function|select|in|bash|sh|zsh|fish|dash|ksh|csh|tcsh|eval|source|.|nohup|nice|timeout|stdbuf|setsid|chroot|runcon|unshare|taskset|ionice|sudo|doas|xargs|rlwrap|unbuffer|watch|strace|gdb|lldb|valgrind|flock|\[\[|\]\]|~*|*[\*\?\[]*) return 0 ;;
+  esac
+  return 1
+}
+
+raw_launch_omp_is_plain_assignment() {  # <word>
+  [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]
+}
+
+raw_launch_omp_is_assignment_shaped() {  # <word>
+  case "$1" in *=*) return 0 ;; esac
+  return 1
+}
+
+raw_launch_omp_is_loader_assignment() {  # <word>
+  case "$1" in LD_*=*|DYLD_*=*|LDR_*=*|LIBPATH=*|SHLIB_PATH=*) return 0 ;; esac
+  return 1
+}
+
+raw_launch_omp_is_omp_path() {  # <word>
+  case "$1" in */omp) return 0 ;; esac
+  return 1
+}
+
+raw_launch_canonical_executable() {  # <path> <relative root>
+  local path=$1 root=$2
+  case "$path" in
+    /*) ;;
+    */*) path="$root/$path" ;;
+    *) return 1 ;;
+  esac
+  path=$(/usr/bin/realpath -e -- "$path") || return 1
+  [ -f "$path" ] && [ -x "$path" ] || return 1
+  printf '%s\n' "$path"
+}
+
+raw_launch_executable_identity() {  # <canonical executable>
+  /usr/bin/stat -Lc '%d:%i' -- "$1" 2>/dev/null \
+    || /usr/bin/stat -f '%d:%i' -- "$1" 2>/dev/null
+}
+
+raw_launch_omp_is_script_executable() {  # <canonical executable>
+  local prefix
+  IFS= read -r -n 2 prefix < "$1" || true
+  [ "$prefix" = '#!' ]
+}
+
+raw_launch_find_executable() {  # <bare target> <lookup path> <relative root>
+  local target=$1 lookup_path=$2 root=$3 directory candidate
+  local -a directories
+  case "$target" in ''|*/*) return 1 ;; esac
+  IFS=: read -r -a directories <<< "$lookup_path"
+  for directory in "${directories[@]}"; do
+    candidate="$directory/$target"
+    [ -f "$candidate" ] && [ -x "$candidate" ] || continue
+    raw_launch_canonical_executable "$candidate" "$root" && return 0
+  done
+  return 1
+}
+
+raw_launch_omp_is_wrapper_executable() {  # <canonical executable> <lookup path> <execution path> <relative root>
+  local path=$1 lookup_path=$2 execution_path=$3 root=$4 path_identity wrapper wrapper_path wrapper_lookup_path path_entry
+  local -a wrapper_lookup_entries
+  case "${path##*/}" in
+    command|env|exec|builtin|busybox|toybox|git|bash|sh|zsh|fish|dash|ksh|csh|tcsh|tmux|screen|byobu|zellij|dtach|abduco|dvtm|nohup|nice|timeout|stdbuf|setsid|chroot|runcon|unshare|taskset|ionice|sudo|doas|xargs|rlwrap|unbuffer|watch|strace|gdb|lldb|valgrind|flock|make|cmake|ninja|npm|npx|yarn|pnpm|pip|pip3|cargo|go|uv|poetry|docker|podman|ssh|scp|rsync|find|parallel|systemd-run|tar|gtar|bsdtar|star|cpio|pax|ar|7z|7za|7zr|zip|unzip|sed|ed|ex|vi|vim|nvi|less|more|man|info|pinfo|perldoc|pydoc|ld.so*|ld-linux*|ld-musl*|ld-*.so*|dyld|python*|perl*|ruby*|node|deno|java|php|lua*|tclsh*|awk|gawk|mawk|nawk) return 0 ;;
+  esac
+  path_identity=$(raw_launch_executable_identity "$path") || return 0
+  for wrapper in env busybox toybox git bash sh zsh fish dash ksh csh tcsh tmux screen byobu zellij dtach abduco dvtm nohup nice timeout stdbuf setsid chroot runcon unshare taskset ionice sudo doas xargs rlwrap unbuffer watch strace gdb lldb valgrind flock make cmake ninja npm npx yarn pnpm pip pip3 cargo go uv poetry docker podman ssh scp rsync find parallel systemd-run tar gtar bsdtar star cpio pax ar 7z 7za 7zr zip unzip sed ed ex vi vim nvi less more man info pinfo perldoc pydoc python python3 perl ruby node deno java php lua tclsh awk gawk mawk nawk; do
+    for wrapper_lookup_path in "$lookup_path" "$execution_path" "${PATH:-}" "/usr/bin:/bin:/usr/sbin:/sbin"; do
+      case "$wrapper_lookup_path" in ''|:*|*::|*:|*$'\n'*|*$'\r'*) continue ;; esac
+      IFS=: read -r -a wrapper_lookup_entries <<< "$wrapper_lookup_path"
+      for path_entry in "${wrapper_lookup_entries[@]}"; do
+        case "$path_entry" in /*) ;; *) continue 2 ;; esac
+      done
+      wrapper_path=$(raw_launch_find_executable "$wrapper" "$wrapper_lookup_path" "$root" 2>/dev/null || true)
+      [ -n "$wrapper_path" ] || continue
+      [ "$(raw_launch_executable_identity "$wrapper_path")" != "$path_identity" ] || return 0
+    done
+  done
+  for wrapper_path in /lib/ld.so* /lib/ld-linux* /lib/ld-musl* /lib/ld-*.so* /lib/*/ld.so* /lib/*/ld-linux* /lib/*/ld-musl* /lib/*/ld-*.so* /lib64/ld.so* /lib64/ld-linux* /lib64/ld-musl* /lib64/ld-*.so* /usr/lib/ld.so* /usr/lib/ld-linux* /usr/lib/ld-musl* /usr/lib/ld-*.so* /usr/lib/*/ld.so* /usr/lib/*/ld-linux* /usr/lib/*/ld-musl* /usr/lib/*/ld-*.so* /usr/lib64/ld.so* /usr/lib64/ld-linux* /usr/lib64/ld-musl* /usr/lib64/ld-*.so* /usr/lib/dyld /usr/libexec/dyld; do
+    wrapper_path=$(raw_launch_canonical_executable "$wrapper_path" "$root" 2>/dev/null || true)
+    [ -n "$wrapper_path" ] || continue
+    [ "$(raw_launch_executable_identity "$wrapper_path")" != "$path_identity" ] || return 0
+  done
+  return 1
+}
+
+raw_launch_omp_canonical_executable() {  # <path> <relative root> <lookup path> <execution path>
+  local path omp_path path_identity omp_identity omp_lookup_path path_entry
+  local -a omp_lookup_entries
+  path=$(raw_launch_canonical_executable "$1" "$2") || return 1
+  raw_launch_omp_is_wrapper_executable "$path" "$3" "$4" "$2" && return 1
+  raw_launch_omp_is_script_executable "$path" && return 1
+  raw_launch_omp_word_has_shell_grammar "${path##*/}" && return 1
+  for omp_lookup_path in "$3" "$4" "${PATH:-}"; do
+    case "$omp_lookup_path" in ''|:*|*::|*:|*$'\n'*|*$'\r'*) continue ;; esac
+    IFS=: read -r -a omp_lookup_entries <<< "$omp_lookup_path"
+    for path_entry in "${omp_lookup_entries[@]}"; do
+      case "$path_entry" in /*) ;; *) continue 2 ;; esac
+    done
+    omp_path=$(raw_launch_find_executable omp "$omp_lookup_path" "$2" 2>/dev/null || true)
+    [ -n "$omp_path" ] || continue
+    [ "$path" != "$omp_path" ] || return 1
+    path_identity=$(raw_launch_executable_identity "$path") || return 1
+    omp_identity=$(raw_launch_executable_identity "$omp_path") || return 1
+    [ "$path_identity" != "$omp_identity" ] || return 1
+  done
+  printf '%s\n' "$path"
+}
+
+raw_launch_omp_has_shell_expansion() {  # <raw command>
+  case "$1" in
+    *\$*|*\`*|*\\*|*\"*|*\'*|*[\*\?\[]*|*~*|*#*|*\!*) return 0 ;;
+  esac
+  return 1
+}
+
+raw_launch_omp_normalize() {  # <command -p flag> <assignment count> <target index> <words...>
+  local command_p=$1 assignment_count=$2 target_index=$3 lookup_path execution_path path_entry entry target target_quoted index
+  shift 3
+  local -a words=("$@") lookup_entries
+  RAW_LAUNCH_NORMALIZED=/usr/bin/env
+  for ((index = 0; index < assignment_count; index++)); do
+    RAW_LAUNCH_NORMALIZED="$RAW_LAUNCH_NORMALIZED ${words[$index]}"
+  done
+  execution_path=${PATH:-}
+  for ((index = 0; index < assignment_count; index++)); do
+    case "${words[$index]}" in PATH=*) execution_path=${words[$index]#PATH=} ;; esac
+  done
+  if [ "$command_p" = 1 ]; then
+    lookup_path=$(/usr/bin/getconf PATH) || return 1
+  else
+    lookup_path=$execution_path
+  fi
+  for path_entry in "$lookup_path" "$execution_path"; do
+    case "$path_entry" in ''|:*|*::|*:|*$'\n'*|*$'\r'*) return 1 ;; esac
+    IFS=: read -r -a lookup_entries <<< "$path_entry"
+    for entry in "${lookup_entries[@]}"; do
+      case "$entry" in /*) ;; *) return 1 ;; esac
+    done
+  done
+  target=${words[$target_index]}
+  case "$target" in
+    /*) target=$(raw_launch_omp_canonical_executable "$target" "$RAW_LAUNCH_PATH_ROOT" "$lookup_path" "$execution_path") || return 1 ;;
+    */*)
+      if [ "$RAW_LAUNCH_RESOLVE_RELATIVE" != 1 ]; then
+        RAW_LAUNCH_NEEDS_WORKTREE=1
+        return 0
+      fi
+      target=$(raw_launch_omp_canonical_executable "$target" "$RAW_LAUNCH_PATH_ROOT" "$lookup_path" "$execution_path") || return 1
+      ;;
+    *)
+      target=$(raw_launch_find_executable "$target" "$lookup_path" "$RAW_LAUNCH_PATH_ROOT") || return 1
+      target=$(raw_launch_omp_canonical_executable "$target" "$RAW_LAUNCH_PATH_ROOT" "$lookup_path" "$execution_path") || return 1
+      ;;
+  esac
+  for ((index = target_index; index < ${#words[@]}; index++)); do
+    if [ "$index" = "$target_index" ]; then
+      printf -v target_quoted '%q' "$target"
+      RAW_LAUNCH_NORMALIZED="$RAW_LAUNCH_NORMALIZED $target_quoted"
+    else
+      RAW_LAUNCH_NORMALIZED="$RAW_LAUNCH_NORMALIZED ${words[$index]}"
+    fi
+  done
+}
+
+raw_launch_omp_classify() {  # <raw command>; sets RAW_LAUNCH_OMP_CLASS and RAW_LAUNCH_HARNESS
+  # Raw commands are deliberately opaque to the pane shell.
+  # This classifier recognizes only the tiny direct-command grammar that the old
+  # raw-command contract already exposed through whitespace splitting.
+  # It never evaluates or decodes shell syntax, so uncertainty fails closed before
+  # a raw command can bypass OMP's verified launch path.
+  local raw=$1 word index=0 assignment_count command_p=0
+  local -a words
+  RAW_LAUNCH_OMP_CLASS=ambiguous
+  RAW_LAUNCH_HARNESS=
+  RAW_LAUNCH_NORMALIZED=
+  RAW_LAUNCH_NEEDS_WORKTREE=0
+  raw_launch_omp_has_shell_expansion "$raw" && return 0
+  case "$raw" in
+    *$'\n'*|*$'\r'*|*[\;\|\&\<\>\(\)\{\}]*) return 0 ;;
+  esac
+  raw=${raw#"${raw%%[!$' \t']*}"}
+  raw=${raw%"${raw##*[!$' \t']}"}
+  [ -n "$raw" ] || return 0
+  IFS=$' \t' read -r -a words <<< "$raw"
+  while [ "$index" -lt "${#words[@]}" ]; do
+    word=${words[$index]}
+    if raw_launch_omp_is_plain_assignment "$word"; then
+      case "$word" in *[\'\"\`\\\$]*) return 0 ;; esac
+      raw_launch_omp_is_loader_assignment "$word" && return 0
+      index=$((index + 1))
+      continue
+    fi
+    break
+  done
+  assignment_count=$index
+  [ "$index" -lt "${#words[@]}" ] || return 0
+  word=${words[$index]}
+  case "$word" in *[\'\"\`\\\$]*) return 0 ;; esac
+  raw_launch_omp_is_assignment_shaped "$word" && return 0
+  raw_launch_omp_is_omp_path "$word" && return 0
+  raw_launch_omp_word_has_shell_grammar "$word" && return 0
+  case "$word" in
+    omp)
+      RAW_LAUNCH_OMP_CLASS=omp
+      return 0
+      ;;
+    command)
+      index=$((index + 1))
+      while [ "$index" -lt "${#words[@]}" ] && [ "${words[$index]}" = -p ]; do
+        command_p=1
+        index=$((index + 1))
+      done
+      if [ "$index" -lt "${#words[@]}" ] && [ "${words[$index]}" = -- ]; then
+        index=$((index + 1))
+      fi
+      [ "$index" -lt "${#words[@]}" ] || return 0
+      word=${words[$index]}
+      raw_launch_omp_is_plain_assignment "$word" && return 0
+      raw_launch_omp_is_assignment_shaped "$word" && return 0
+      raw_launch_omp_is_omp_path "$word" && return 0
+      raw_launch_omp_word_has_shell_grammar "$word" && return 0
+      case "$word" in command|env|exec|builtin) return 0 ;; esac
+      case "$word" in
+        -*|*[\'\"\`\\\$]*) return 0 ;;
+        omp) RAW_LAUNCH_OMP_CLASS=omp ;;
+        *)
+          RAW_LAUNCH_OMP_CLASS=non-omp
+          RAW_LAUNCH_HARNESS=${word##*/}
+          raw_launch_omp_normalize "$command_p" "$assignment_count" "$index" "${words[@]}" || {
+            RAW_LAUNCH_OMP_CLASS=ambiguous
+            return 0
+          }
+          ;;
+      esac
+      return 0
+      ;;
+    env|exec|builtin)
+      # These wrappers can select a later executable without a shell evaluator.
+      return 0
+      ;;
+    *)
+      RAW_LAUNCH_OMP_CLASS=non-omp
+      RAW_LAUNCH_HARNESS=${word##*/}
+      raw_launch_omp_normalize 0 "$assignment_count" "$index" "${words[@]}" || {
+        RAW_LAUNCH_OMP_CLASS=ambiguous
+        return 0
+      }
+      return 0
+      ;;
+  esac
+}
+
 RAW_LAUNCH=0
+RAW_LAUNCH_PATH_ROOT=
+RAW_LAUNCH_NEEDS_WORKTREE=0
+RAW_LAUNCH_RESOLVE_RELATIVE=0
+RAW_LAUNCH_WORKTREE_READY=0
+RAW_LAUNCH_ABORT_LEASE=0
 case "$ARG3" in
-  *' '*)  # raw launch command (unverified-adapter escape hatch)
+  *[[:space:]]*)  # raw launch command (unverified-adapter escape hatch)
     if [ "$KIND" = secondmate ]; then
       echo "error: raw launch commands are unavailable for secondmates; select a verified harness adapter" >&2
       exit 1
     fi
+    case "$PROJ" in
+      projects/*) RAW_LAUNCH_PATH_ROOT="$PROJECTS/${PROJ#projects/}" ;;
+      *) RAW_LAUNCH_PATH_ROOT=$PROJ ;;
+    esac
+    RAW_LAUNCH_PATH_ROOT=$(CDPATH='' builtin cd -P -- "$RAW_LAUNCH_PATH_ROOT" 2>/dev/null && builtin pwd -P) || {
+      echo "error: raw launch project directory cannot be resolved: $PROJ" >&2
+      exit 1
+    }
+    raw_launch_omp_classify "$ARG3"
+    case "$RAW_LAUNCH_OMP_CLASS" in
+      omp|ambiguous)
+        echo "error: raw launch command could invoke omp; pass --harness omp for the verified OMP template" >&2
+        exit 1
+        ;;
+    esac
     RAW_LAUNCH=1
-    LAUNCH=$ARG3
-    HARNESS=""
-    for word in $LAUNCH; do
-      case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
-    done
+    LAUNCH=$RAW_LAUNCH_NORMALIZED
+    HARNESS=$RAW_LAUNCH_HARNESS
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
@@ -2649,6 +2935,38 @@ freshen_spawn_worktree_base() {  # <worktree>
 
 W="fm-$ID"
 SPAWN_START_DIR=$PROJ_ABS
+if [ "$RAW_LAUNCH" = 1 ] && [ "$RAW_LAUNCH_NEEDS_WORKTREE" = 1 ] && [ "$KIND" != secondmate ]; then
+  case "$BACKEND" in
+    orca)
+      echo "error: raw relative launch paths are unavailable on backend=orca; use an absolute executable path" >&2
+      exit 1
+      ;;
+  esac
+  treehouse_lease_args=(--lease --lease-holder "$W")
+  [ -z "$ACCEPTED_LOCAL_BASE" ] || treehouse_lease_args+=(--accepted-local-base "$ACCEPTED_LOCAL_BASE")
+  WT=$(cd "$PROJ_ABS" && "$SCRIPT_DIR/fm-treehouse-get.sh" "${treehouse_lease_args[@]}") || {
+    echo "error: raw launch could not lease an authoritative pooled worktree before endpoint creation" >&2
+    exit 1
+  }
+  RAW_LAUNCH_ABORT_LEASE=1
+  validate_spawn_worktree "raw launch treehouse lease" "$W"
+  validate_spawn_pool_lease "raw launch treehouse lease" "$W" || exit 1
+  freshen_spawn_worktree_base "$WT" || exit 1
+  RAW_LAUNCH_PATH_ROOT=$WT
+  RAW_LAUNCH_RESOLVE_RELATIVE=1
+  raw_launch_omp_classify "$ARG3"
+  case "$RAW_LAUNCH_OMP_CLASS:$RAW_LAUNCH_NEEDS_WORKTREE" in
+    non-omp:0) ;;
+    *)
+      echo "error: raw launch command could invoke omp; pass --harness omp for the verified OMP template" >&2
+      exit 1
+      ;;
+  esac
+  LAUNCH=$RAW_LAUNCH_NORMALIZED
+  HARNESS=$RAW_LAUNCH_HARNESS
+  RAW_LAUNCH_WORKTREE_READY=1
+  SPAWN_START_DIR=$WT
+fi
 if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
   treehouse_lease_args=(--lease --lease-holder "$W")
   [ -z "$ACCEPTED_LOCAL_BASE" ] || treehouse_lease_args+=(--accepted-local-base "$ACCEPTED_LOCAL_BASE")
@@ -2926,6 +3244,7 @@ EOF
     ;;
 esac
 [ "$PREWALK_ABORT_PHASE" != lease ] || PREWALK_ABORT_PHASE=endpoint
+RAW_LAUNCH_ABORT_LEASE=0
 if [ "$KIND" = secondmate ]; then
   FM_INHERITABLE_CONFIG=trace-context \
     propagate_inheritable_config "$CONFIG" "$PROJ_ABS/config" \
@@ -3086,7 +3405,7 @@ hermes_wait_for_reasoning() {  # <effort>
 }
 
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
-  && [ "$PREWALK_WORKTREE_READY" != 1 ]; then
+  && [ "$PREWALK_WORKTREE_READY" != 1 ] && [ "$RAW_LAUNCH_WORKTREE_READY" != 1 ]; then
   printf -v treehouse_get_command '%q' "$SCRIPT_DIR/fm-treehouse-get.sh"
   if [ -n "$ACCEPTED_LOCAL_BASE" ]; then
     printf -v accepted_local_base_quoted '%q' "$ACCEPTED_LOCAL_BASE"
@@ -3174,7 +3493,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
   fi
 fi
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
-  && [ "$PREWALK_WORKTREE_READY" != 1 ]; then
+  && [ "$PREWALK_WORKTREE_READY" != 1 ] && [ "$RAW_LAUNCH_WORKTREE_READY" != 1 ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ] \

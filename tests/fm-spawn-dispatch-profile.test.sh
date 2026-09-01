@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Behavior tests for fm-spawn.sh concrete dispatch profile flags.
+# Behavior tests for fm-spawn.sh dispatch profile and raw-launch behavior.
 #
 # These tests drive fm-spawn through meta writing and launch construction with a
 # fake tmux pane and a real isolated git worktree. The fake tmux captures the
@@ -14,6 +14,12 @@ SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
 PROFILE_RUN_TOKEN="t$$-${RANDOM:-0}"
 profile_id() { printf '%s-%s' "$1" "$PROFILE_RUN_TOKEN"; }
+RAW_DIRECT_TRUE="$TMP_ROOT/raw-direct-true"
+RAW_DIRECT_PRINTF="$TMP_ROOT/raw-direct-printf"
+RAW_DIRECT_PRINTENV="$TMP_ROOT/raw-direct-printenv"
+/usr/bin/cp /usr/bin/true "$RAW_DIRECT_TRUE"
+/usr/bin/cp /usr/bin/printf "$RAW_DIRECT_PRINTF"
+/usr/bin/cp /usr/bin/printenv "$RAW_DIRECT_PRINTENV"
 cleanup() {
   local data_dir id home meta tasktmp
   while IFS= read -r data_dir; do
@@ -86,6 +92,14 @@ EOF
               cp "$FM_FAKE_OMP_META_TAMPER" "$FM_FAKE_OMP_META_TAMPER.test-owner"
               printf 'window=unrelated:retry\n' > "$FM_FAKE_OMP_META_TAMPER"
             fi
+          fi
+          if [ "${FM_FAKE_EXECUTE_RAW_LAUNCH:-0}" = 1 ]; then
+            launch=$(tail -n 1 "$FM_FAKE_LAUNCH_LOG")
+            (
+              cd "$FM_FAKE_PANE_PATH"
+              BASH_ENV="${FM_FAKE_PANE_BASH_ENV:-}" bash -c "$launch" \
+                > "${FM_FAKE_RAW_EXECUTION_LOG:-/dev/null}" 2>&1
+            )
           fi
           ;;
       esac
@@ -301,10 +315,22 @@ case "${1:-}" in
       printf '%s\n' '{"models":[{"provider":"openai-codex","id":"gpt-5.6-terra","selector":"openai-codex/gpt-5.6-terra","thinking":["low","medium","high","xhigh","max"]},{"provider":"openai-codex","id":"gpt-5.6-luna","selector":"openai-codex/gpt-5.6-luna","thinking":["low","medium","high","xhigh","max"]}]}'
     fi
     ;;
-  *) exit 0 ;;
+  *)
+    [ -z "${FM_FAKE_RAW_OMP_EXECUTED:-}" ] || : > "$FM_FAKE_RAW_OMP_EXECUTED"
+    exit 0
+    ;;
 esac
 SH
   chmod +x "$fakebin/omp"
+  ln -s "$RAW_DIRECT_TRUE" "$fakebin/custom-agent"
+  cat > "$fakebin/flock" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  [ "$arg" != omp ] || exec omp --legacy
+done
+exit 0
+SH
+  chmod +x "$fakebin/flock"
   cat > "$fakebin/bun" <<'SH'
 #!/usr/bin/env bash
 script=$1
@@ -433,6 +459,11 @@ run_spawn() {
     FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS="${FM_TEST_HERDR_IDLE_SHELL_PROOF_POLLS:-}" \
     FM_FAKE_HERDR_REFUSE_CLOSE="${FM_TEST_HERDR_REFUSE_CLOSE:-0}" \
     FM_FAKE_OMP_META_TAMPER="${FM_TEST_OMP_META_TAMPER:-}" \
+    FM_FAKE_EXECUTE_RAW_LAUNCH="${FM_TEST_EXECUTE_RAW_LAUNCH:-0}" \
+    FM_FAKE_RAW_OMP_EXECUTED="${FM_TEST_RAW_OMP_EXECUTED:-}" \
+    FM_FAKE_PANE_BASH_ENV="${FM_TEST_PANE_BASH_ENV:-}" \
+    FM_FAKE_RAW_EXECUTION_LOG="${FM_TEST_RAW_EXECUTION_LOG:-}" \
+    BASH_ENV="${FM_TEST_SPAWN_BASH_ENV:-}" \
     FM_HERDR_PS_BIN="$fakebin/herdr-ps" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
@@ -713,29 +744,742 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "custom-agent --flag __OMPMAXTIME__" ] || fail "raw launch command changed"$'\n'"actual: $launch"
-  pass "active crew-dispatch profile leaves the raw launch-command escape hatch unchanged"
+  [ "$launch" = "/usr/bin/env $RAW_DIRECT_TRUE --flag __OMPMAXTIME__" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  pass "active crew-dispatch profile preserves raw direct non-OMP launch arguments"
 }
 
-test_raw_omp_launch_does_not_require_max_time_capability() {
-  local rec id out status launch
-  id=$(profile_id profile-raw-omp-z15b)
-  rec=$(make_spawn_case profile-raw-omp claude "$id")
+test_raw_omp_spellings_refuse_before_raw_execution() {
+  local raw rec id out status index=0
+  local -a cases=(
+    'omp --legacy'
+    $' \tomp --legacy'
+    'command omp --legacy'
+    'command -p omp --legacy'
+    'command -- omp --legacy'
+    'command -p -- omp --legacy'
+    'OMP_HOME=/tmp omp --legacy'
+  )
+  for raw in "${cases[@]}"; do
+    index=$((index + 1))
+    id=$(profile_id "profile-raw-omp-z15b-$index")
+    rec=$(make_spawn_case "profile-raw-omp-$index" claude "$id")
+    read_case_record "$rec"
+    enable_dispatch_profile "$HOME_DIR"
+    export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
+    export FM_TEST_EXECUTE_RAW_LAUNCH=1
+    export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" "$raw")
+    status=$?
+    unset FM_TEST_OMP_ACK FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+    expect_code 1 "$status" "raw OMP spelling must refuse before launch: $raw"
+    assert_contains "$out" "raw launch command could invoke omp" \
+      "raw OMP refusal did not name its verified-harness boundary: $raw"
+    assert_absent "$CASE_DIR/raw-omp-executed" "raw OMP spelling executed its harmless fake: $raw"
+    [ ! -s "$LAUNCH_LOG" ] || fail "raw OMP spelling typed a launch command: $raw"
+    [ ! -s "$CASE_DIR/endpoint.log" ] || fail "raw OMP spelling created an endpoint: $raw"
+  done
+  pass "raw OMP spellings refuse before raw execution"
+}
+
+test_ambiguous_raw_omp_spellings_refuse_before_raw_execution() {
+  local raw rec id out status index=0
+  local -a cases=(
+    '"omp" --legacy'
+    "o'mp' --legacy"
+    "\$OMP_BIN --legacy"
+    "OMP_BIN=omp \"\$OMP_BIN\" --legacy"
+    '\\omp --legacy'
+    'command -v omp'
+    'command -x omp'
+    'env OMP_HOME=/tmp omp --legacy'
+    'custom-agent; omp --legacy'
+    'omp() { :; }; omp --legacy'
+    'alias omp=custom-agent; omp --legacy'
+    'time omp --legacy'
+    '! omp --legacy'
+    '?mp --legacy'
+    'command -p ?mp --legacy'
+    "custom-agent \`omp --legacy\`"
+    'command command omp --legacy'
+    'bash -c omp --legacy'
+    './omp --legacy'
+    'nohup omp --legacy'
+    'command nohup omp --legacy'
+    'flock /tmp/fm.lock omp --legacy'
+    'command flock /tmp/fm.lock omp --legacy'
+    '-i omp --legacy'
+    '--ignore-environment omp --legacy'
+    '-u OMP_HOME omp --legacy'
+    'custom-agent *'
+    'custom-agent --flag # ignored'
+    'command FOO=bar omp --legacy'
+    'custom-agent=ignored omp --legacy'
+    'command -- custom-agent=ignored omp --legacy'
+    'LD_PRELOAD=/tmp/launch-omp.so /usr/bin/true'
+    "$RAW_DIRECT_PRINTF !42"
+    "'omp --legacy"
+  )
+  for raw in "${cases[@]}"; do
+    index=$((index + 1))
+    id=$(profile_id "profile-ambiguous-omp-z15c-$index")
+    rec=$(make_spawn_case "profile-ambiguous-omp-$index" claude "$id")
+    read_case_record "$rec"
+    enable_dispatch_profile "$HOME_DIR"
+    if [ "$raw" = '?mp --legacy' ] || [ "$raw" = 'command -p ?mp --legacy' ] || [ "$raw" = './omp --legacy' ]; then
+      ln -s "$FAKEBIN_DIR/omp" "$WT_DIR/omp"
+    fi
+    export FM_TEST_EXECUTE_RAW_LAUNCH=1
+    export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" "$raw")
+    status=$?
+    unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+    expect_code 1 "$status" "ambiguous raw OMP spelling must refuse before launch: $raw"
+    assert_contains "$out" "raw launch command could invoke omp" \
+      "ambiguous raw OMP refusal did not name its boundary: $raw"
+    assert_absent "$CASE_DIR/raw-omp-executed" "ambiguous raw OMP spelling executed its harmless fake: $raw"
+    [ ! -s "$LAUNCH_LOG" ] || fail "ambiguous raw OMP spelling typed a launch command: $raw"
+    [ ! -s "$CASE_DIR/endpoint.log" ] || fail "ambiguous raw OMP spelling created an endpoint: $raw"
+  done
+  pass "ambiguous raw OMP spellings refuse before raw execution"
+}
+
+test_raw_non_omp_launches_keep_their_existing_escape_hatch() {
+  local rec id out status
+  id=$(profile_id profile-raw-non-omp-z15d)
+  rec=$(make_spawn_case profile-raw-non-omp claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
-  printf 'invalid-for-omp\n' > "$HOME_DIR/config/omp-max-time"
-  sed -i "s/ '--max-time=<value>'//" "$FAKEBIN_DIR/omp"
-  export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
+  ln -s custom-agent "$FAKEBIN_DIR/custom-omp-agent"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "omp --legacy __OMPMAXTIME__")
+    "$id" "$PROJ_DIR" 'custom-omp-agent --legacy')
   status=$?
-  expect_code 0 "$status" "raw OMP launch should not require the max-time capability"
-  assert_contains "$out" "spawned $id harness=omp" "spawn did not retain raw OMP identity"
-  launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "FM_OMP_HARNESS=omp omp --legacy __OMPMAXTIME__" ] \
-    || fail "raw OMP launch changed"$'\n'"actual: $launch"
-  pass "raw OMP launches ignore max-time configuration and capability checks"
+  expect_code 0 "$status" "lookalike non-OMP raw command should still launch"
+  assert_contains "$out" "spawned $id harness=custom-omp-agent" \
+    "lookalike non-OMP raw command lost its executable identity"
+  [ "$(cat "$LAUNCH_LOG")" = "/usr/bin/env $RAW_DIRECT_TRUE --legacy" ] \
+    || fail "lookalike non-OMP raw launch changed"
+  pass "lookalike non-OMP raw launches preserve the escape hatch"
+}
+
+test_raw_non_omp_launches_bypass_pane_aliases_and_functions() {
+  local rec id out status pane_env
+  id=$(profile_id profile-raw-pane-resolution-z15e)
+  rec=$(make_spawn_case profile-raw-pane-resolution claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  pane_env="$CASE_DIR/pane-env"
+  cat > "$pane_env" <<'SH'
+custom-agent() { omp "$@"; }
+SH
+  export FM_TEST_PANE_BASH_ENV="$pane_env"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" 'custom-agent --legacy')
+  status=$?
+  unset FM_TEST_PANE_BASH_ENV FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+  expect_code 0 "$status" "raw direct non-OMP launch should bypass an ambient pane function"
+  assert_absent "$CASE_DIR/raw-omp-executed" "ambient pane function executed the harmless fake OMP"
+  [ "$(cat "$LAUNCH_LOG")" = "/usr/bin/env $RAW_DIRECT_TRUE --legacy" ] \
+    || fail "raw direct non-OMP launch did not use the alias-safe command form"
+  pass "raw direct non-OMP launches bypass ambient pane aliases and functions"
+}
+
+test_raw_non_omp_launches_preserve_plain_assignments() {
+  local rec id out status
+  id=$(profile_id profile-raw-assignment-z15f)
+  rec=$(make_spawn_case profile-raw-assignment claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_EXECUTION_LOG="$CASE_DIR/raw-execution.log"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "FOO=bar command -- $RAW_DIRECT_PRINTENV FOO")
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_EXECUTION_LOG
+  expect_code 0 "$status" "raw direct non-OMP launch should preserve a plain assignment"
+  [ "$(cat "$CASE_DIR/raw-execution.log")" = bar ] \
+    || fail "raw direct non-OMP launch did not pass its assignment to the executable: $(cat "$CASE_DIR/raw-execution.log")"
+  [ "$(cat "$LAUNCH_LOG")" = "/usr/bin/env FOO=bar $RAW_DIRECT_PRINTENV FOO" ] \
+    || fail "raw direct non-OMP assignment launch was not normalized safely"
+  pass "raw direct non-OMP launches preserve plain assignments"
+}
+
+test_raw_non_omp_command_p_launches_its_direct_target() {
+  local rec id out status
+  id=$(profile_id profile-raw-command-p-z15g)
+  rec=$(make_spawn_case profile-raw-command-p claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_EXECUTION_LOG="$CASE_DIR/raw-execution.log"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "command -p -- $RAW_DIRECT_PRINTF command-p-ok")
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_EXECUTION_LOG
+  expect_code 0 "$status" "raw command -p launch should preserve its direct non-OMP target"
+  assert_contains "$(cat "$CASE_DIR/raw-execution.log")" command-p-ok \
+    "raw command -p launch did not execute its direct target"
+  pass "raw command -p launches its direct non-OMP target"
+}
+
+test_raw_non_omp_command_p_launches_an_absolute_target() {
+  local rec id out status raw
+  id=$(profile_id profile-raw-command-p-absolute-z15i)
+  rec=$(make_spawn_case profile-raw-command-p-absolute claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  raw="command -p -- $RAW_DIRECT_PRINTF absolute-target-ok"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_EXECUTION_LOG="$CASE_DIR/raw-execution.log"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "$raw")
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_EXECUTION_LOG
+  expect_code 0 "$status" "raw command -p launch should preserve an absolute direct target"
+  assert_contains "$(cat "$CASE_DIR/raw-execution.log")" absolute-target-ok \
+    "raw command -p launch did not execute its absolute direct target"
+  pass "raw command -p launches an absolute direct non-OMP target"
+}
+
+test_raw_non_omp_command_p_launches_a_relative_target() {
+  local rec id out status
+  id=$(profile_id profile-raw-command-p-relative-z15k)
+  rec=$(make_spawn_case profile-raw-command-p-relative claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  ln -s "$RAW_DIRECT_PRINTF" "$PROJ_DIR/custom-agent"
+  git -C "$PROJ_DIR" add custom-agent
+  sync_project_commit "$PROJ_DIR" "$WT_DIR" 'add raw relative executable'
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_EXECUTION_LOG="$CASE_DIR/raw-execution.log"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" 'command -p -- ./custom-agent relative-target-ok')
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_EXECUTION_LOG
+  expect_code 0 "$status" "raw command -p launch should preserve a relative direct target"
+  assert_contains "$(cat "$CASE_DIR/raw-execution.log")" relative-target-ok \
+    "raw command -p launch did not execute its relative direct target"
+  pass "raw command -p launches a relative direct non-OMP target"
+}
+
+test_raw_command_path_symlinked_to_omp_refuses_before_raw_execution() {
+  local rec id out status raw
+  id=$(profile_id profile-raw-command-p-symlink-z15l)
+  rec=$(make_spawn_case profile-raw-command-p-symlink claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  ln -s "$FAKEBIN_DIR/omp" "$PROJ_DIR/custom-agent"
+  raw="command -p -- $PROJ_DIR/custom-agent --legacy"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "$raw")
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+  expect_code 1 "$status" "raw command path symlinked to OMP must refuse before launch"
+  assert_contains "$out" "raw launch command could invoke omp" \
+    "raw command path symlink refusal did not name its verified-harness boundary"
+  assert_absent "$CASE_DIR/raw-omp-executed" "raw command path symlink executed the harmless fake OMP"
+  [ ! -s "$LAUNCH_LOG" ] || fail "raw command path symlink typed a launch command"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "raw command path symlink created an endpoint"
+  pass "raw command paths symlinked to OMP refuse before raw execution"
+}
+
+test_raw_bare_target_symlinked_to_omp_refuses_before_raw_execution() {
+  local rec id out status
+  id=$(profile_id profile-raw-bare-symlink-z15m)
+  rec=$(make_spawn_case profile-raw-bare-symlink claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  ln -s omp "$FAKEBIN_DIR/custom-agent-link"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" 'custom-agent-link --legacy')
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+  expect_code 1 "$status" "raw bare target symlinked to OMP must refuse before launch"
+  assert_contains "$out" "raw launch command could invoke omp" \
+    "raw bare target symlink refusal did not name its verified-harness boundary"
+  assert_absent "$CASE_DIR/raw-omp-executed" "raw bare target symlink executed the harmless fake OMP"
+  [ ! -s "$LAUNCH_LOG" ] || fail "raw bare target symlink typed a launch command"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "raw bare target symlink created an endpoint"
+  pass "raw bare targets symlinked to OMP refuse before raw execution"
+}
+
+test_raw_bare_target_with_canonical_omp_identity_refuses_before_raw_execution() {
+  local rec id out status
+  id=$(profile_id profile-raw-bare-canonical-omp-z15n)
+  rec=$(make_spawn_case profile-raw-bare-canonical-omp claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  mv "$FAKEBIN_DIR/omp" "$FAKEBIN_DIR/omp-v17"
+  ln -s omp-v17 "$FAKEBIN_DIR/omp"
+  ln -s omp-v17 "$FAKEBIN_DIR/custom-agent-link"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" 'custom-agent-link --legacy')
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+  expect_code 1 "$status" "raw bare target matching canonical OMP identity must refuse before launch"
+  assert_contains "$out" "raw launch command could invoke omp" \
+    "canonical OMP identity refusal did not name its verified-harness boundary"
+  assert_absent "$CASE_DIR/raw-omp-executed" "canonical OMP identity executed the harmless fake OMP"
+  [ ! -s "$LAUNCH_LOG" ] || fail "canonical OMP identity typed a launch command"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "canonical OMP identity created an endpoint"
+  pass "raw bare targets matching canonical OMP identity refuse before raw execution"
+}
+
+test_raw_bare_target_with_effective_path_omp_identity_refuses_before_raw_execution() {
+  local rec id out status raw_path
+  id=$(profile_id profile-raw-bare-effective-path-omp-z15p)
+  rec=$(make_spawn_case profile-raw-bare-effective-path-omp claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  raw_path="$CASE_DIR/raw-path"
+  mkdir -p "$raw_path"
+  cp "$FAKEBIN_DIR/omp" "$raw_path/omp"
+  ln -s omp "$raw_path/custom-agent-link"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "PATH=$raw_path custom-agent-link --legacy")
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+  expect_code 1 "$status" "raw target matching OMP only in its effective PATH must refuse before launch"
+  assert_contains "$out" "raw launch command could invoke omp" \
+    "effective PATH OMP identity refusal did not name its verified-harness boundary"
+  assert_absent "$CASE_DIR/raw-omp-executed" "effective PATH OMP identity executed the harmless fake OMP"
+  [ ! -s "$LAUNCH_LOG" ] || fail "effective PATH OMP identity typed a launch command"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "effective PATH OMP identity created an endpoint"
+  pass "raw targets matching OMP in their effective PATH refuse before raw execution"
+}
+
+test_raw_bare_target_hardlinked_to_omp_refuses_before_raw_execution() {
+  local rec id out status
+  id=$(profile_id profile-raw-bare-hardlink-omp-z15q)
+  rec=$(make_spawn_case profile-raw-bare-hardlink-omp claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  ln "$FAKEBIN_DIR/omp" "$FAKEBIN_DIR/custom-agent-hardlink"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" 'custom-agent-hardlink --legacy')
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+  expect_code 1 "$status" "raw target hardlinked to OMP must refuse before launch"
+  assert_contains "$out" "raw launch command could invoke omp" \
+    "hardlinked OMP identity refusal did not name its verified-harness boundary"
+  assert_absent "$CASE_DIR/raw-omp-executed" "hardlinked OMP identity executed the harmless fake OMP"
+  [ ! -s "$LAUNCH_LOG" ] || fail "hardlinked OMP identity typed a launch command"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "hardlinked OMP identity created an endpoint"
+  pass "raw targets hardlinked to OMP refuse before raw execution"
+}
+
+test_raw_dynamic_loader_wrapper_refuses_before_raw_execution() {
+  local rec id out status loader
+  id=$(profile_id profile-raw-loader-wrapper-z15r)
+  rec=$(make_spawn_case profile-raw-loader-wrapper claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  loader="$FAKEBIN_DIR/ld-linux-test.so"
+  cat > "$loader" <<'SH'
+#!/usr/bin/env bash
+exec "$@"
+SH
+  chmod +x "$loader"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "$loader $FAKEBIN_DIR/omp --legacy")
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+  expect_code 1 "$status" "raw dynamic loader wrapper must refuse before launch"
+  assert_contains "$out" "raw launch command could invoke omp" \
+    "dynamic loader wrapper refusal did not name its verified-harness boundary"
+  assert_absent "$CASE_DIR/raw-omp-executed" "dynamic loader wrapper executed the harmless fake OMP"
+  [ ! -s "$LAUNCH_LOG" ] || fail "dynamic loader wrapper typed a launch command"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "dynamic loader wrapper created an endpoint"
+  pass "raw dynamic loader wrappers refuse before raw execution"
+}
+
+test_raw_busybox_wrapper_refuses_before_raw_execution() {
+  local rec id out status busybox
+  id=$(profile_id profile-raw-busybox-wrapper-z15s)
+  rec=$(make_spawn_case profile-raw-busybox-wrapper claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  busybox="$FAKEBIN_DIR/busybox"
+  cat > "$busybox" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  sh) shift; [ "${1:-}" = -c ] && shift; exec bash -c "$1" ;;
+esac
+exit 1
+SH
+  chmod +x "$busybox"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" 'busybox sh -c omp')
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+  expect_code 1 "$status" "raw BusyBox wrapper must refuse before launch"
+  assert_contains "$out" "raw launch command could invoke omp" \
+    "BusyBox wrapper refusal did not name its verified-harness boundary"
+  assert_absent "$CASE_DIR/raw-omp-executed" "BusyBox wrapper executed the harmless fake OMP"
+  [ ! -s "$LAUNCH_LOG" ] || fail "BusyBox wrapper typed a launch command"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "BusyBox wrapper created an endpoint"
+  pass "raw BusyBox wrappers refuse before raw execution"
+}
+
+test_raw_hardlinked_wrapper_refuses_before_raw_execution() {
+  local rec id out status wrapper
+  id=$(profile_id profile-raw-hardlinked-wrapper-z15t)
+  rec=$(make_spawn_case profile-raw-hardlinked-wrapper claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  cat > "$FAKEBIN_DIR/env" <<'SH'
+#!/usr/bin/env bash
+exec "$@"
+SH
+  chmod +x "$FAKEBIN_DIR/env"
+  wrapper="$FAKEBIN_DIR/custom-wrapper"
+  ln "$FAKEBIN_DIR/env" "$wrapper"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "$wrapper omp --legacy")
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+  expect_code 1 "$status" "raw wrapper hardlinked to env must refuse before launch"
+  assert_contains "$out" "raw launch command could invoke omp" \
+    "hardlinked wrapper refusal did not name its verified-harness boundary"
+  assert_absent "$CASE_DIR/raw-omp-executed" "hardlinked wrapper executed the harmless fake OMP"
+  [ ! -s "$LAUNCH_LOG" ] || fail "hardlinked wrapper typed a launch command"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "hardlinked wrapper created an endpoint"
+  pass "raw wrappers hardlinked to known dispatchers refuse before raw execution"
+}
+
+test_raw_git_wrapper_refuses_before_raw_execution() {
+  local rec id out status git
+  id=$(profile_id profile-raw-git-wrapper-z15u)
+  rec=$(make_spawn_case profile-raw-git-wrapper claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  git="$FAKEBIN_DIR/git"
+  cat > "$git" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in raw) exec omp ;; esac
+exit 1
+SH
+  chmod +x "$git"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" 'git raw')
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+  expect_code 1 "$status" "raw Git wrapper must refuse before launch"
+  assert_contains "$out" "raw launch command could invoke omp" \
+    "Git wrapper refusal did not name its verified-harness boundary"
+  assert_absent "$CASE_DIR/raw-omp-executed" "Git wrapper executed the harmless fake OMP"
+  [ ! -s "$LAUNCH_LOG" ] || fail "Git wrapper typed a launch command"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "Git wrapper created an endpoint"
+  pass "raw Git wrappers refuse before raw execution"
+}
+
+test_raw_tar_wrapper_refuses_before_raw_execution() {
+  local rec id out status tar
+  id=$(profile_id profile-raw-tar-wrapper-z15v)
+  rec=$(make_spawn_case profile-raw-tar-wrapper claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  tar="$FAKEBIN_DIR/tar"
+  cat > "$tar" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  [ "$arg" = --checkpoint-action=exec=omp ] && exec omp
+done
+exit 1
+SH
+  chmod +x "$tar"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" 'tar -cf /dev/null --checkpoint=1 --checkpoint-action=exec=omp /dev/null')
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+  expect_code 1 "$status" "raw tar wrapper must refuse before launch"
+  assert_contains "$out" "raw launch command could invoke omp" \
+    "tar wrapper refusal did not name its verified-harness boundary"
+  assert_absent "$CASE_DIR/raw-omp-executed" "tar wrapper executed the harmless fake OMP"
+  [ ! -s "$LAUNCH_LOG" ] || fail "tar wrapper typed a launch command"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "tar wrapper created an endpoint"
+  pass "raw tar wrappers refuse before raw execution"
+}
+
+test_raw_sed_wrapper_refuses_before_raw_execution() {
+  local rec id out status sed
+  id=$(profile_id profile-raw-sed-wrapper-z15w)
+  rec=$(make_spawn_case profile-raw-sed-wrapper claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  sed="$FAKEBIN_DIR/sed"
+  cat > "$sed" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  [ "$arg" = eomp ] && exec omp
+done
+exit 1
+SH
+  chmod +x "$sed"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" 'sed -e eomp /dev/null')
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+  expect_code 1 "$status" "raw sed wrapper must refuse before launch"
+  assert_contains "$out" "raw launch command could invoke omp" \
+    "sed wrapper refusal did not name its verified-harness boundary"
+  assert_absent "$CASE_DIR/raw-omp-executed" "sed wrapper executed the harmless fake OMP"
+  [ ! -s "$LAUNCH_LOG" ] || fail "sed wrapper typed a launch command"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "sed wrapper created an endpoint"
+  pass "raw sed wrappers refuse before raw execution"
+}
+
+test_raw_man_wrapper_refuses_before_raw_execution() {
+  local rec id out status man
+  id=$(profile_id profile-raw-man-wrapper-z15x)
+  rec=$(make_spawn_case profile-raw-man-wrapper claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  man="$FAKEBIN_DIR/man"
+  cat > "$man" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -P ] && [ "${2:-}" = omp ]; then exec omp; fi
+exit 1
+SH
+  chmod +x "$man"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" 'man -P omp bash')
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+  expect_code 1 "$status" "raw man wrapper must refuse before launch"
+  assert_contains "$out" "raw launch command could invoke omp" \
+    "man wrapper refusal did not name its verified-harness boundary"
+  assert_absent "$CASE_DIR/raw-omp-executed" "man wrapper executed the harmless fake OMP"
+  [ ! -s "$LAUNCH_LOG" ] || fail "man wrapper typed a launch command"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "man wrapper created an endpoint"
+  pass "raw man wrappers refuse before raw execution"
+}
+
+test_raw_terminal_multiplexer_wrapper_refuses_before_raw_execution() {
+  local rec id out status screen
+  id=$(profile_id profile-raw-screen-wrapper-z15y)
+  rec=$(make_spawn_case profile-raw-screen-wrapper claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  screen="$FAKEBIN_DIR/screen"
+  cat > "$screen" <<'SH'
+#!/usr/bin/env bash
+exec omp "$@"
+SH
+  chmod +x "$screen"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" 'screen omp --legacy')
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+  expect_code 1 "$status" "raw terminal multiplexer must refuse before launch"
+  assert_contains "$out" "raw launch command could invoke omp" \
+    "terminal multiplexer refusal did not name its verified-harness boundary"
+  assert_absent "$CASE_DIR/raw-omp-executed" "terminal multiplexer executed the harmless fake OMP"
+  [ ! -s "$LAUNCH_LOG" ] || fail "terminal multiplexer typed a launch command"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "terminal multiplexer created an endpoint"
+  pass "raw terminal multiplexers refuse before raw execution"
+}
+
+test_raw_command_p_effective_path_wrapper_refuses_before_raw_execution() {
+  local rec id out status custom_path wrapper raw
+  id=$(profile_id profile-raw-command-p-effective-path-z15z)
+  rec=$(make_spawn_case profile-raw-command-p-effective-path claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  custom_path="$CASE_DIR/custom-path"
+  mkdir -p "$custom_path"
+  cat > "$custom_path/env" <<'SH'
+#!/usr/bin/env bash
+exec "$@"
+SH
+  chmod +x "$custom_path/env"
+  wrapper="$custom_path/custom-wrapper"
+  ln "$custom_path/env" "$wrapper"
+  cp "$FAKEBIN_DIR/omp" "$custom_path/omp"
+  raw="PATH=$custom_path command -p -- $wrapper omp --legacy"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "$raw")
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+  expect_code 1 "$status" "raw command -p wrapper under its child PATH must refuse before launch"
+  assert_contains "$out" "raw launch command could invoke omp" \
+    "command -p child-PATH wrapper refusal did not name its verified-harness boundary"
+  assert_absent "$CASE_DIR/raw-omp-executed" "command -p child-PATH wrapper executed the harmless fake OMP"
+  [ ! -s "$LAUNCH_LOG" ] || fail "command -p child-PATH wrapper typed a launch command"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "command -p child-PATH wrapper created an endpoint"
+  pass "raw command -p validates wrappers under its child PATH"
+}
+
+test_raw_shebang_wrapper_refuses_before_raw_execution() {
+  local rec id out status
+  id=$(profile_id profile-raw-shebang-wrapper-z16a)
+  rec=$(make_spawn_case profile-raw-shebang-wrapper claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  cat > "$PROJ_DIR/custom-agent" <<'SH'
+#!/usr/bin/env omp
+SH
+  chmod +x "$PROJ_DIR/custom-agent"
+  git -C "$PROJ_DIR" add custom-agent
+  sync_project_commit "$PROJ_DIR" "$WT_DIR" 'add raw shebang wrapper'
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" './custom-agent --legacy')
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+  expect_code 1 "$status" "raw shebang wrapper must refuse before launch"
+  assert_contains "$out" "raw launch command could invoke omp" \
+    "shebang wrapper refusal did not name its verified-harness boundary"
+  assert_absent "$CASE_DIR/raw-omp-executed" "shebang wrapper executed the harmless fake OMP"
+  [ ! -s "$LAUNCH_LOG" ] || fail "shebang wrapper typed a launch command"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "shebang wrapper created an endpoint"
+  pass "raw shebang wrappers refuse before raw execution"
+}
+
+test_raw_native_non_omp_target_preserves_raw_compatibility() {
+  local rec id out status target
+  id=$(profile_id profile-raw-untrusted-native-z16b)
+  rec=$(make_spawn_case profile-raw-untrusted-native claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  target="$PROJ_DIR/custom-agent"
+  cp "$RAW_DIRECT_TRUE" "$target"
+  printf '\0' >> "$target"
+  chmod +x "$target"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "$target native-target-ok")
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH
+  expect_code 0 "$status" "raw native non-OMP target should preserve raw compatibility"
+  assert_contains "$out" "spawned $id harness=custom-agent" \
+    "raw native non-OMP target lost its executable identity"
+  assert_contains "$(cat "$LAUNCH_LOG")" "$target native-target-ok" \
+    "raw native non-OMP target was not submitted"
+  pass "raw native non-OMP targets preserve raw compatibility"
+}
+
+test_raw_absolute_wrapper_refuses_before_raw_execution() {
+  local rec id out status
+  id=$(profile_id profile-raw-absolute-wrapper-z15o)
+  rec=$(make_spawn_case profile-raw-absolute-wrapper claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" '/usr/bin/env omp --legacy')
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
+  expect_code 1 "$status" "raw absolute wrapper must refuse before launch"
+  assert_contains "$out" "raw launch command could invoke omp" \
+    "raw absolute wrapper refusal did not name its verified-harness boundary"
+  assert_absent "$CASE_DIR/raw-omp-executed" "raw absolute wrapper executed the harmless fake OMP"
+  [ ! -s "$LAUNCH_LOG" ] || fail "raw absolute wrapper typed a launch command"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "raw absolute wrapper created an endpoint"
+  pass "raw absolute wrappers refuse before raw execution"
+}
+
+test_raw_non_omp_command_p_bypasses_pane_command_function() {
+  local rec id out status pane_env
+  id=$(profile_id profile-raw-command-p-function-z15j)
+  rec=$(make_spawn_case profile-raw-command-p-function claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  pane_env="$CASE_DIR/pane-env"
+  cat > "$pane_env" <<'SH'
+command() { omp "$@"; }
+SH
+  export FM_TEST_PANE_BASH_ENV="$pane_env"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_OMP_EXECUTED="$CASE_DIR/raw-omp-executed"
+  export FM_TEST_RAW_EXECUTION_LOG="$CASE_DIR/raw-execution.log"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "command -p -- $RAW_DIRECT_PRINTF command-safe")
+  status=$?
+  unset FM_TEST_PANE_BASH_ENV FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED FM_TEST_RAW_EXECUTION_LOG
+  expect_code 0 "$status" "raw command -p launch should bypass a pane command function"
+  assert_absent "$CASE_DIR/raw-omp-executed" "pane command function executed the harmless fake OMP"
+  assert_contains "$(cat "$CASE_DIR/raw-execution.log")" command-safe \
+    "raw command -p launch did not execute its resolved direct target"
+  pass "raw command -p bypasses pane command functions"
+}
+
+test_raw_non_omp_command_p_preserves_path_assignment() {
+  local rec id out status raw
+  id=$(profile_id profile-raw-command-p-path-z15h)
+  rec=$(make_spawn_case profile-raw-command-p-path claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  raw="PATH=/custom command -p -- $RAW_DIRECT_PRINTENV PATH"
+  export FM_TEST_EXECUTE_RAW_LAUNCH=1
+  export FM_TEST_RAW_EXECUTION_LOG="$CASE_DIR/raw-execution.log"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "$raw")
+  status=$?
+  unset FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_EXECUTION_LOG
+  expect_code 0 "$status" "raw command -p launch should preserve its PATH assignment"
+  [ "$(cat "$CASE_DIR/raw-execution.log")" = /custom ] \
+    || fail "raw command -p launch did not preserve its child PATH: $(cat "$CASE_DIR/raw-execution.log")"
+  pass "raw command -p preserves a plain PATH assignment"
 }
 
 test_claude_threads_model_and_effort() {
@@ -2361,7 +3105,33 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
-test_raw_omp_launch_does_not_require_max_time_capability
+test_raw_omp_spellings_refuse_before_raw_execution
+test_ambiguous_raw_omp_spellings_refuse_before_raw_execution
+test_raw_non_omp_launches_keep_their_existing_escape_hatch
+test_raw_non_omp_launches_bypass_pane_aliases_and_functions
+test_raw_non_omp_launches_preserve_plain_assignments
+test_raw_non_omp_command_p_launches_its_direct_target
+test_raw_non_omp_command_p_launches_an_absolute_target
+test_raw_non_omp_command_p_launches_a_relative_target
+test_raw_command_path_symlinked_to_omp_refuses_before_raw_execution
+test_raw_bare_target_symlinked_to_omp_refuses_before_raw_execution
+test_raw_bare_target_with_canonical_omp_identity_refuses_before_raw_execution
+test_raw_bare_target_with_effective_path_omp_identity_refuses_before_raw_execution
+test_raw_bare_target_hardlinked_to_omp_refuses_before_raw_execution
+test_raw_dynamic_loader_wrapper_refuses_before_raw_execution
+test_raw_busybox_wrapper_refuses_before_raw_execution
+test_raw_hardlinked_wrapper_refuses_before_raw_execution
+test_raw_git_wrapper_refuses_before_raw_execution
+test_raw_tar_wrapper_refuses_before_raw_execution
+test_raw_sed_wrapper_refuses_before_raw_execution
+test_raw_man_wrapper_refuses_before_raw_execution
+test_raw_terminal_multiplexer_wrapper_refuses_before_raw_execution
+test_raw_command_p_effective_path_wrapper_refuses_before_raw_execution
+test_raw_shebang_wrapper_refuses_before_raw_execution
+test_raw_native_non_omp_target_preserves_raw_compatibility
+test_raw_absolute_wrapper_refuses_before_raw_execution
+test_raw_non_omp_command_p_bypasses_pane_command_function
+test_raw_non_omp_command_p_preserves_path_assignment
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort

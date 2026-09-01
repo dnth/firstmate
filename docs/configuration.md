@@ -287,6 +287,7 @@ The first non-empty, non-comment line may instead be a positive integer number o
 The literal `off` emits no `--max-time` flag and restores an unbounded OMP launch.
 Any other value or invalid config file refuses the OMP spawn before endpoint creation instead of silently ignoring the bound.
 Non-OMP harnesses and raw launch commands do not read or receive this OMP-only setting.
+The raw-command OMP boundary is owned by the `fm-spawn.sh` header, including the requirement to use `--harness omp` whenever its executable identity is not provably direct and non-OMP.
 [`bin/fm-spawn.sh`](../bin/fm-spawn.sh) owns launch construction, while [`bin/fm-omp-capabilities.sh`](../bin/fm-omp-capabilities.sh) refuses an installed OMP executable whose help does not advertise `--max-time=<value>`.
 
 ## OMP project extensions

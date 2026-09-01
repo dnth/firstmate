@@ -21,6 +21,7 @@ make_fakebin() {
   ln -s "$PYTHON_BIN" "$fakebin/python3"
   ln -s "$JQ_BIN" "$fakebin/jq"
   fm_fake_exit0 "$fakebin" treehouse gh-axi gh
+  cp /usr/bin/true "$fakebin/custom-agent"
   cat > "$fakebin/hermes" <<'SH'
 #!/usr/bin/env bash
 set -u
