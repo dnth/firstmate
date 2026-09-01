@@ -74,6 +74,77 @@ fm_nm_head_matches_worktree() {  # <worktree> <run_head>
   git -C "$wt" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null
 }
 
+# Print the authoritative full commit identity for a run head in worktree $1.
+# Git accepts abbreviated identities only after resolving them against the
+# repository object database; callers must never compare the presentation form
+# emitted by `axi status` directly with a full local SHA.
+fm_nm_resolve_head() {  # <worktree> <run-head>
+  [ -n "$2" ] || return 1
+  git -C "$1" rev-parse --verify "${2}^{commit}" 2>/dev/null
+}
+
+# 0 when $3 is a strict descendant of $2 after both identities are resolved by
+# Git in worktree $1.
+fm_nm_head_descends_from() {  # <worktree> <ancestor> <descendant>
+  local wt=$1 ancestor=$2 descendant=$3 ancestor_full descendant_full
+  ancestor_full=$(fm_nm_resolve_head "$wt" "$ancestor") || return 1
+  descendant_full=$(fm_nm_resolve_head "$wt" "$descendant") || return 1
+  [ "$ancestor_full" != "$descendant_full" ] \
+    && git -C "$wt" merge-base --is-ancestor "$ancestor_full" "$descendant_full" 2>/dev/null
+}
+
+# 0 when a run's branch presentation identifies the checked-out branch. The
+# no-mistakes CLI renders Firstmate's slash branch names with a hyphen, so both
+# authoritative spellings are accepted and no other branch is normalized.
+fm_nm_branch_matches_worktree() {  # <worktree> <run-branch>
+  local wt=$1 run_branch=$2 current_branch hyphenated
+  [ -n "$run_branch" ] || return 1
+  current_branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
+  [ "$run_branch" = "$current_branch" ] && return 0
+  hyphenated=${current_branch//\//-}
+  [ "$run_branch" = "$hyphenated" ]
+}
+
+fm_nm_branch_sync_state() {  # <toon-output>
+  awk '
+    /^branch_sync:[[:space:]]*$/ { in_sync=1; next }
+    in_sync && /^[^[:space:]][^:]*:/ { in_sync=0 }
+    in_sync && /^[[:space:]]+state:[[:space:]]*/ {
+      value=$0
+      sub(/^[[:space:]]+state:[[:space:]]*/, "", value)
+      gsub(/^"|"$/, "", value)
+      print value
+      exit
+    }
+  ' <<<"$1"
+}
+
+# 0 when captured `axi logs --step intent` contains exactly one unmodified
+# generation record. The logs command wraps records in a TOON table and indents
+# them, so trim presentation whitespace but do not accept substring matches or
+# echoed/duplicated records.
+fm_nm_intent_has_generation() {  # <intent-log> <generation>
+  local log=$1 generation=$2 line normalized expected count=0
+  expected="Firstmate-Validation-Generation: $generation"
+  while IFS= read -r line || [ -n "$line" ]; do
+    normalized=$(fm_nm_trim "$line")
+    [ "$normalized" = "$expected" ] || continue
+    count=$((count + 1))
+  done <<EOF
+$log
+EOF
+  [ "$count" -eq 1 ]
+}
+
+# 0 when captured `axi status` has not reached a terminal state.
+fm_nm_run_is_active() {  # <toon-output>
+  local status outcome
+  status=$(fm_nm_field "$1" status)
+  outcome=$(fm_nm_field "$1" outcome)
+  [ -z "$outcome" ] || return 1
+  case "$status" in completed|failed|cancelled) return 1 ;; esac
+}
+
 # During no-mistakes' ci monitor, top-level status and outcome stay running after
 # checks turn green until the PR merges, while the append-only ci log records the
 # transition. The most recent recognized log marker is therefore authoritative:
