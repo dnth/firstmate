@@ -24,6 +24,13 @@
 # fm-spawn/fm-send/fm-teardown keep owning the local endpoint mechanics.
 # The home's own workers keep their ordinary backend selection.
 # bin/fm-remote-doctor.sh owns that host's readiness for Herdr.
+# Remote OMP text delivery reselects the exact endpoint task, writes only that
+# task's canonical inbox, and requires the loaded primary extension to send its
+# programmatic doorbell with a bound turn-start marker. Exit 6 means that durable
+# inbox record could not notify an unavailable extension, 7 that its request
+# acknowledgement is ambiguous, 8 that no bound turn started, and 9 that an
+# exact home, task, session, extension, or process binding refused before
+# notification. Every nonzero result names a no-resend state.
 # docs/remote-secondmates.md owns why.
 # A private parent-route state directory stores only the remote secondmate
 # agent's endpoint record; the home's own
@@ -137,6 +144,82 @@ remote_endpoint_load() {
 
 remote_endpoint_require() {
   remote_endpoint_load "$1" || die "$REMOTE_ENDPOINT_ERROR"
+}
+
+remote_omp_delivery_refuse() { # <reason>
+  printf 'error: remote-omp-binding-refused: %s; no remote notification was sent; do not resend\n' "$1" >&2
+  exit 9
+}
+
+remote_omp_delivery_load_libs() {
+  # These helpers are only needed for an OMP text delivery, so ordinary remote lifecycle controls remain independent of that closure.
+  # shellcheck source=bin/fm-marker-lib.sh
+  . "$SCRIPT_DIR/fm-marker-lib.sh"
+  # shellcheck source=bin/fm-primary-watch-version-lib.sh
+  . "$SCRIPT_DIR/fm-primary-watch-version-lib.sh"
+  # shellcheck source=bin/fm-omp-process-lib.sh
+  . "$SCRIPT_DIR/fm-omp-process-lib.sh"
+}
+
+remote_omp_delivery_binding() { # <id>
+  local id=$1 harness session_dir session_dir_real pointer session session_parent
+  local primary_marker doorbell_marker expected_version path
+  remote_omp_delivery_load_libs
+  harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
+  [ "$harness" = omp ] || remote_omp_delivery_refuse "endpoint harness is '$harness', not omp"
+  [ "$(fm_meta_get "$REMOTE_ENDPOINT_META" kind)" = secondmate ] \
+    || remote_omp_delivery_refuse "endpoint metadata is not a persistent secondmate"
+  fm_backend_agent_record_identity "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$REMOTE_ENDPOINT_META" \
+    || remote_omp_delivery_refuse "endpoint task or OMP launch identity is stale or malformed"
+  [ "$(fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$REMOTE_ENDPOINT_META" 2>/dev/null)" = alive ] \
+    || remote_omp_delivery_refuse "exact remote OMP endpoint is not live"
+
+  for path in \
+    .omp/extensions/fm-primary-omp.ts \
+    .omp/extensions/lib/fm-branch-dispatch.ts \
+    .omp/extensions/lib/fm-task-inbox-doorbell.ts \
+    bin/fm-primary-watch-core.ts; do
+    if ! { [ -f "$TARGET_HOME/$path" ] && [ ! -L "$TARGET_HOME/$path" ] \
+      && [ -f "$FM_ROOT/$path" ] && [ ! -L "$FM_ROOT/$path" ] \
+      && cmp -s "$TARGET_HOME/$path" "$FM_ROOT/$path"; }; then
+      remote_omp_delivery_refuse "loaded OMP extension closure differs from the remote tracked code"
+    fi
+  done
+
+  session_dir="$TARGET_HOME/state/omp-sessions"
+  pointer="$TARGET_HOME/state/.omp-session"
+  [ -d "$session_dir" ] && [ ! -L "$session_dir" ] \
+    || remote_omp_delivery_refuse "OMP session directory is unavailable or unsafe"
+  session_dir_real=$(cd "$session_dir" && pwd -P) \
+    || remote_omp_delivery_refuse "OMP session directory cannot be resolved"
+  [ -f "$pointer" ] && [ ! -L "$pointer" ] \
+    && [ "$(wc -l < "$pointer" 2>/dev/null | tr -d '[:space:]')" = 1 ] \
+    || remote_omp_delivery_refuse "OMP session pointer is unavailable or malformed"
+  IFS= read -r session < "$pointer" || session=
+  case "$session" in "$session_dir_real"/*.jsonl) ;; *)
+    remote_omp_delivery_refuse "OMP session pointer is outside the exact secondmate session directory"
+    ;;
+  esac
+  session_parent=$(cd "$(dirname "$session")" 2>/dev/null && pwd -P || true)
+  [ "$session_parent" = "$session_dir_real" ] && [ -f "$session" ] && [ ! -L "$session" ] \
+    || remote_omp_delivery_refuse "OMP session pointer does not bind one regular direct-child session"
+
+  expected_version=$(fm_primary_watch_version "$TARGET_HOME/.omp/extensions/fm-primary-omp.ts" "$TARGET_HOME") \
+    || remote_omp_delivery_refuse "OMP primary extension version cannot be verified"
+  primary_marker="$TARGET_HOME/state/.omp-primary-extension-loaded"
+  fm_omp_primary_marker_read "$primary_marker" \
+    || remote_omp_delivery_refuse "OMP primary extension readiness is unavailable or malformed"
+  [ "$FM_OMP_MARKER_VERSION" = "$expected_version" ] \
+    || remote_omp_delivery_refuse "loaded OMP primary extension does not match its tracked closure"
+  [ "$FM_OMP_MARKER_BUN" = "$(fm_meta_get "$REMOTE_ENDPOINT_META" omp_bun)" ] \
+    && [ "$FM_OMP_MARKER_BIN" = "$(fm_meta_get "$REMOTE_ENDPOINT_META" omp_bin)" ] \
+    || remote_omp_delivery_refuse "loaded OMP primary extension does not match the endpoint launch identity"
+
+  doorbell_marker="$CONTROL_STATE/$id.omp-doorbell-ready"
+  fm_omp_task_doorbell_marker_read "$doorbell_marker" \
+    || remote_omp_delivery_refuse "OMP task doorbell extension is inactive"
+  [ "$FM_OMP_TASK_DOORBELL_PID" = "$FM_OMP_MARKER_PID" ] \
+    || remote_omp_delivery_refuse "OMP task doorbell and primary extension belong to different process instances"
 }
 
 state_value() { # <id>; prints recovery-grade state
@@ -276,14 +359,42 @@ cmd_launch() {
 }
 
 cmd_send() {
-  local id=$1 message=$2 harness
+  local id=$1 message=$2 harness relay_body meta
   validate_id "$id"
   validate_home "$id"
-  remote_endpoint_require "$id"
+  if ! remote_endpoint_load "$id"; then
+    meta=$(meta_path "$id")
+    if [ "$(fm_meta_get "$meta" harness)" = omp ]; then
+      remote_omp_delivery_refuse "$REMOTE_ENDPOINT_ERROR"
+    fi
+    die "$REMOTE_ENDPOINT_ERROR"
+  fi
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
   if [ "$harness" = omp ]; then
+    remote_omp_delivery_load_libs
+    fm_message_from_firstmate "$message" \
+      || remote_omp_delivery_refuse "relay request lacks the parent-owned from-firstmate carrier"
+    fm_operational_input_body "$message" relay_body \
+      || remote_omp_delivery_refuse "relay request carrier cannot be parsed"
+    if [[ "$relay_body" = /* ]]; then
+      remote_omp_delivery_refuse "relay request lacks the canonical parent correlation"
+    elif [[ "$relay_body" =~ ^corr=[[:xdigit:]]{16}[[:space:]]+(/.*)$ ]]; then
+      relay_body=${BASH_REMATCH[1]}
+    fi
+    if [[ "$relay_body" = /* ]]; then
+      # Slash commands retain the pre-inbox typed control path. In particular,
+      # /exit must not be converted into a durable ordinary-text steer or carry
+      # secondmate correlation syntax into the harness command parser.
+      FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$TARGET_HOME/state" \
+        "$SCRIPT_DIR/fm-send.sh" "$REMOTE_ENDPOINT_TARGET" "$relay_body"
+      return
+    fi
+    remote_omp_delivery_binding "$id"
     FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$CONTROL_STATE" \
-      FM_DATA_OVERRIDE="$CONTROL_DATA" "$SCRIPT_DIR/fm-send.sh" "$REMOTE_ENDPOINT_TARGET" "$message"
+      FM_DATA_OVERRIDE="$CONTROL_DATA" FM_SEND_PRESERVE_INBOUND_FROM_FIRSTMATE=1 \
+      FM_TASK_INBOX_OMP_REQUIRE_PROGRAMMATIC=1 FM_SEND_OMP_INBOX_REQUIRE_TURN_START=1 \
+      FM_SEND_OMP_INBOX_REQUIRE_HANDLED_ACK=1 \
+      "$SCRIPT_DIR/fm-send.sh" "$id" "$message"
   else
     FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$TARGET_HOME/state" \
       "$SCRIPT_DIR/fm-send.sh" "$REMOTE_ENDPOINT_TARGET" "$message"

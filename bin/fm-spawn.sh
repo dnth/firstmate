@@ -4084,7 +4084,7 @@ if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")
   if [ "$HARNESS" = omp ]; then
-    LAUNCH="FM_OMP_SESSION_POINTER=$(shell_quote "$OMP_SESSION_POINTER") $LAUNCH"
+    LAUNCH="FM_OMP_TASK_TURN_STARTED=$(shell_quote "$STATE_REAL/$ID.omp-started") FM_OMP_SESSION_POINTER=$(shell_quote "$OMP_SESSION_POINTER") $LAUNCH"
   fi
   if [ -n "${FM_OMP_AUTH_BROKER_URL:-}" ] && [ "$HARNESS" != omp ]; then
     LAUNCH="FM_OMP_AUTH_BROKER_URL=$sq_omp_auth_url FM_OMP_AUTH_BROKER_TOKEN_FILE=$sq_omp_auth_token_file $LAUNCH"

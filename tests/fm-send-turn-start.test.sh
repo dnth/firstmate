@@ -339,17 +339,31 @@ test_omp_exit_ignores_turnstart_configuration() {
 }
 
 test_remote_control_uses_task_bound_omp_route() {
-  local dir root home rc
+  local dir root home rc carrier version
   dir="$TMP_ROOT/remote-control-route"
   root="$dir/root"
   home="$dir/home"
-  mkdir -p "$root/bin" "$home/bin" "$home/state/parent-route" "$home/data/.parent-route"
+  mkdir -p "$root/bin" "$root/.omp/extensions/lib" "$home/bin" \
+    "$home/.omp/extensions/lib" "$home/state/parent-route" \
+    "$home/state/omp-sessions" "$home/data/.parent-route"
   cp "$ROOT/bin/fm-remote-secondmate-control.sh" "$root/bin/"
+  cp "$ROOT/bin/fm-marker-lib.sh" "$ROOT/bin/fm-operational-input.sh" \
+    "$ROOT/bin/fm-primary-watch-version-lib.sh" "$ROOT/bin/fm-omp-process-lib.sh" \
+    "$ROOT/bin/fm-primary-watch-core.ts" "$root/bin/"
+  cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$root/.omp/extensions/"
+  cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" \
+    "$ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" "$root/.omp/extensions/lib/"
+  cp "$root/bin/fm-primary-watch-core.ts" "$home/bin/"
+  cp "$root/.omp/extensions/fm-primary-omp.ts" "$home/.omp/extensions/"
+  cp "$root/.omp/extensions/lib/fm-branch-dispatch.ts" \
+    "$root/.omp/extensions/lib/fm-task-inbox-doorbell.ts" "$home/.omp/extensions/lib/"
   cat > "$root/bin/fm-backend.sh" <<'SH'
 fm_backend_validate_task_endpoint() {
   FM_BACKEND_VALIDATED_BACKEND=herdr
   FM_BACKEND_VALIDATED_TARGET='fm-remote:w1:p1'
 }
+fm_backend_agent_record_identity() { return 0; }
+fm_backend_agent_state() { printf 'alive'; }
 fm_backend_meta_exact_value() {
   sed -n "s/^$2=//p" "$1"
 }
@@ -362,33 +376,46 @@ SH
   cat > "$root/bin/fm-send.sh" <<'SH'
 #!/usr/bin/env bash
 case "$2" in
-  'remote steer')
-    [ "$1" = 'fm-remote:w1:p1' ] || exit 81
-    [ "$FM_STATE_OVERRIDE" = "$FM_HOME/state/parent-route" ] || exit 82
-    [ "$FM_DATA_OVERRIDE" = "$FM_HOME/data/.parent-route" ] || exit 83
-    [ "$(sed -n 's/^harness=//p' "$FM_STATE_OVERRIDE/remote-turn.meta")" = omp ] || exit 84
-    exit 4
-    ;;
   'non-OMP steer')
     [ "$FM_STATE_OVERRIDE" = "$FM_HOME/state" ] || exit 85
     [ -z "${FM_DATA_OVERRIDE+x}" ] || exit 86
     exit 0
     ;;
+  *)
+    [ "$1" = remote-turn ] || exit 81
+    [ "$FM_STATE_OVERRIDE" = "$FM_HOME/state/parent-route" ] || exit 82
+    [ "$FM_DATA_OVERRIDE" = "$FM_HOME/data/.parent-route" ] || exit 83
+    [ "$(sed -n 's/^harness=//p' "$FM_STATE_OVERRIDE/remote-turn.meta")" = omp ] || exit 84
+    exit 4
+    ;;
 esac
 exit 87
 SH
   chmod +x "$root/bin/fm-remote-secondmate-control.sh" "$root/bin/fm-send.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$home/bin/bun"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$home/bin/omp"
+  chmod +x "$home/bin/bun" "$home/bin/omp"
   : > "$home/AGENTS.md"
   printf 'remote-turn\n' > "$home/.fm-secondmate-home"
+  printf '{"type":"session"}\n' > "$home/state/omp-sessions/remote-turn.jsonl"
+  printf '%s\n' "$home/state/omp-sessions/remote-turn.jsonl" > "$home/state/.omp-session"
+  version=$(bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_primary_watch_version "$2/.omp/extensions/fm-primary-omp.ts" "$2"' \
+    _ "$root" "$home") || fail "could not derive the remote OMP extension version"
+  printf '%s\n4242\n%s\n%s\n' "$version" "$home/bin/bun" "$home/bin/omp" \
+    > "$home/state/.omp-primary-extension-loaded"
+  printf '4242\n' > "$home/state/parent-route/remote-turn.omp-doorbell-ready"
   fm_write_meta "$home/state/parent-route/remote-turn.meta" \
     'window=fm-remote:w1:p1' 'endpoint_task_id=remote-turn' 'backend=herdr' \
-    'worktree=/remote/worktree' 'project=/remote/project' 'harness=omp' \
+    'worktree=/remote/worktree' 'project=/remote/project' 'harness=omp' 'kind=secondmate' \
+    "omp_bun=$home/bin/bun" "omp_bin=$home/bin/omp" \
     'herdr_session=fm-remote' 'herdr_workspace_id=w1' 'herdr_tab_id=w1:t1' \
     'herdr_pane_id=w1:p1'
+  . "$ROOT/bin/fm-marker-lib.sh"
+  fm_message_mark_from_firstmate 'corr=0123456789abcdef remote steer' carrier
   FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
-    "$root/bin/fm-remote-secondmate-control.sh" send remote-turn 'remote steer' >/dev/null 2>&1
+    "$root/bin/fm-remote-secondmate-control.sh" send remote-turn "$carrier" > "$dir/omp.out" 2>&1
   rc=$?
-  expect_code 4 "$rc" "remote control should preserve the host-local OMP no-turn verdict"
+  expect_code 4 "$rc" "remote control should preserve the host-local OMP no-turn verdict: $(cat "$dir/omp.out")"
   perl -pi -e 's/^harness=omp$/harness=codex/' "$home/state/parent-route/remote-turn.meta"
   FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
     "$root/bin/fm-remote-secondmate-control.sh" send remote-turn 'non-OMP steer' >/dev/null 2>&1

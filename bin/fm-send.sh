@@ -10,19 +10,20 @@
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
 # Orca currently supports Enter and C-c only, and rejects Escape.
 #
-# Ordinary text addressed through a local task selector is appended as a
-# sequenced state/<id>.inbox record. Immediately after publication and release
-# of the metadata lifecycle lock, fm-send attempts one constant self-describing
-# doorbell best-effort, before fallible pending-reply bookkeeping or decision
-# closure. The terminal never receives payload bytes on this plane; record
-# publication is delivery, and the worker's move into handled/ acknowledges
-# action. Remote text stays typed in this local-only leg.
+# Ordinary text addressed through a task selector is appended as a sequenced
+# state/<id>.inbox record. Immediately after publication and release of the
+# metadata lifecycle lock, fm-send attempts one constant self-describing doorbell
+# best-effort, before fallible pending-reply bookkeeping or decision closure. The
+# terminal never receives payload bytes on this plane; record publication is
+# delivery, and the worker's move into handled/ acknowledges action. Remote OMP
+# control reselects its exact remote task before this branch, so it shares the
+# canonical inbox rather than falling through to an explicit endpoint.
 #
 # Harness-native slash commands, Codex dollar invocations, explicit backend
 # targets, and keys use the typed plane. The line is typed once and Enter is
 # retried without retyping until the backend confirms or stays inconclusive.
-# For an OMP or Hermes typed target, a confirmed idle submit must also start a real
-# turn before a bounded deadline. OMP uses the monotonic
+# For an OMP or Hermes typed target, a confirmed idle submit must also start a
+# real turn before a bounded deadline. OMP uses the monotonic
 # FM_SEND_TURNSTART_TIMEOUT deadline (default 1 second, maximum 3 seconds),
 # sampled no more often than FM_SEND_TURNSTART_POLL (default 0.1 second), and
 # proves the turn through the existing backend busy reader or advancement of
@@ -31,13 +32,14 @@
 # from its lifecycle bridge, polled FM_SEND_HERMES_START_POLLS times at
 # FM_SEND_HERMES_START_INTERVAL seconds (unset inherits the launch budget,
 # default 120 x 0.5 second), so a steer never gets a smaller budget than a
-# launch. A confirmed submit with no proof returns `delivered-no-turn` on
-# stderr and exits 4. A task-bound target also receives an actionable status event and durable
-# watcher wake so supervised recovery starts promptly without an automatic
-# terminate or relaunch. Failure to persist either required recovery trigger
-# exits 5 as `delivered-no-turn-persistence-failed` after warning that delivery
-# already landed and must not be resent. Remote OMP control propagates both
-# post-delivery verdicts without redelivery.
+# launch. A confirmed submit with no proof returns `delivered-no-turn` on stderr
+# and exits 4. A task-bound target also receives an actionable status event and
+# durable watcher wake so supervised recovery starts promptly without an
+# automatic terminate or relaunch. Failure to persist either required recovery
+# trigger exits 5 as `delivered-no-turn-persistence-failed` after warning that
+# delivery already landed and must not be resent. Remote OMP control propagates
+# those typed-plane verdicts without redelivery, and reports a canonical inbox
+# queue or binding refusal with its own specific non-resend verdict.
 # An already-busy OMP pane has one narrow exception: a successfully transported
 # Enter may return `queued-unconfirmed`, which fm-send accepts as queued delivery
 # while preserving failures for transport errors and non-busy pending input.
@@ -311,6 +313,23 @@ fm_send_wait_for_omp_turn_start() {
   return 1
 }
 
+fm_send_wait_for_inbox_handled() { # <record-path>
+  local record=$1 handled now deadline remaining interval
+  handled="${record%/*}/handled/${record##*/}"
+  now=$(fm_send_monotonic_now) || return 1
+  deadline=$(awk -v now="$now" -v timeout="$FM_SEND_TURNSTART_TIMEOUT_VALUE" \
+    'BEGIN { printf "%.6f", now + timeout }')
+  while remaining=$(fm_send_monotonic_now) \
+    && remaining=$(awk -v now="$remaining" -v deadline="$deadline" \
+      'BEGIN { remaining = deadline - now; if (remaining <= 0) exit 1; printf "%.6f", remaining }'); do
+    [ -f "$handled" ] && [ ! -L "$handled" ] && return 0
+    interval=$(awk -v remaining="$remaining" -v poll="$FM_SEND_TURNSTART_POLL_VALUE" \
+      'BEGIN { if (poll < remaining) remaining = poll; printf "%.6f", remaining }')
+    sleep "$interval"
+  done
+  return 1
+}
+
 fm_send_prepare_omp_turnstart_reference() {
   TARGET_OMP_TURNSTART_MARKER=
   [ -n "$TARGET_TASK_ID" ] || return 0
@@ -550,6 +569,14 @@ PENDING_REPLY_CREATED=0
 TARGET_TASK_ID=
 TARGET_BUSY_GEN=
 TARGET_ENDPOINT_TASK_ID=
+PRESERVE_INBOUND_FROM_FIRSTMATE=${FM_SEND_PRESERVE_INBOUND_FROM_FIRSTMATE:-0}
+case "$PRESERVE_INBOUND_FROM_FIRSTMATE" in
+  0|1) ;;
+  *)
+    echo "error: FM_SEND_PRESERVE_INBOUND_FROM_FIRSTMATE must be 0 or 1" >&2
+    exit 1
+    ;;
+esac
 if [ -n "$TARGET_META" ]; then
   TARGET_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
   TARGET_BUSY_GEN=$(fm_meta_get "$TARGET_META" busy_gen)
@@ -756,7 +783,13 @@ if [ "${1:-}" = "--key" ]; then
 else
   MESSAGE=$*
   RESOLVE_ANSWER_TEXT=$MESSAGE
-  if [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
+  if [ "$MARK_FROM_FIRSTMATE" = 1 ] && [ "$PRESERVE_INBOUND_FROM_FIRSTMATE" = 1 ]; then
+    if ! fm_message_from_firstmate "$MESSAGE"; then
+      echo "error: preserved secondmate relay delivery requires an existing from-firstmate carrier" >&2
+      exit 1
+    fi
+  fi
+  if [ "$MARK_FROM_FIRSTMATE" = 1 ] && [ "$PRESERVE_INBOUND_FROM_FIRSTMATE" != 1 ]; then
     # Reuse an existing correlation id for recovery resends; otherwise create a
     # durable parent expectation before delivery. Transport success never
     # resolves that expectation (see fm-pending-reply-lib.sh).
@@ -828,6 +861,34 @@ else
       echo "error: steer not sent to $TARGET_TASK_ID: the task retired or changed endpoint during target resolution" >&2
       exit 1
     fi
+    INBOX_OMP_TURNSTART_REQUIRED=${FM_SEND_OMP_INBOX_REQUIRE_TURN_START:-0}
+    INBOX_OMP_HANDLED_ACK_REQUIRED=${FM_SEND_OMP_INBOX_REQUIRE_HANDLED_ACK:-0}
+    case "$INBOX_OMP_TURNSTART_REQUIRED" in
+      0|1) ;;
+      *)
+        fm_lock_release "$INBOX_META_LOCK"
+        INBOX_META_LOCK_HELD=0
+        echo "error: FM_SEND_OMP_INBOX_REQUIRE_TURN_START must be 0 or 1" >&2
+        exit 1
+        ;;
+    esac
+    case "$INBOX_OMP_HANDLED_ACK_REQUIRED" in
+      0|1) ;;
+      *)
+        fm_lock_release "$INBOX_META_LOCK"
+        INBOX_META_LOCK_HELD=0
+        echo "error: FM_SEND_OMP_INBOX_REQUIRE_HANDLED_ACK must be 0 or 1" >&2
+        exit 1
+        ;;
+    esac
+    if [ "$TARGET_HARNESS" = omp ] && [ "$INBOX_OMP_TURNSTART_REQUIRED" = 1 ]; then
+      if ! fm_send_setup_omp_turnstart; then
+        fm_lock_release "$INBOX_META_LOCK"
+        INBOX_META_LOCK_HELD=0
+        echo "error: remote OMP inbox turn-start verification could not be prepared; nothing was delivered" >&2
+        exit 1
+      fi
+    fi
     if ! INBOX_RECORD=$(fm_task_inbox_write "$STATE" "$TARGET_TASK_ID" "$MESSAGE"); then
       fm_lock_release "$INBOX_META_LOCK"
       INBOX_META_LOCK_HELD=0
@@ -848,8 +909,25 @@ else
     case "$ring_rc" in
       1) echo "fm-send: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
       2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
+      3)
+        echo "error: remote-omp-inbox-queued: the exact programmatic OMP extension is unavailable; request remains at $INBOX_RECORD; do not resend" >&2
+        exit 6
+        ;;
+      4)
+        echo "error: remote-omp-inbox-ambiguous: the exact programmatic OMP request may have reached the session; request remains at $INBOX_RECORD; do not resend" >&2
+        exit 7
+        ;;
     esac
-
+    if [ "$TARGET_HARNESS" = omp ] && [ "$INBOX_OMP_TURNSTART_REQUIRED" = 1 ] \
+       && ! fm_send_wait_for_omp_turn_start; then
+      echo "error: remote-omp-inbox-queued: the programmatic OMP doorbell was accepted but did not start its bound turn; request remains at $INBOX_RECORD; do not resend" >&2
+      exit 8
+    fi
+    if [ "$TARGET_HARNESS" = omp ] && [ "$INBOX_OMP_HANDLED_ACK_REQUIRED" = 1 ] \
+       && ! fm_send_wait_for_inbox_handled "$INBOX_RECORD"; then
+      echo "error: remote-omp-inbox-queued: the bound OMP turn did not durably acknowledge the request; request remains at $INBOX_RECORD; do not resend" >&2
+      exit 8
+    fi
     if [ -n "$PENDING_REPLY_CORR" ]; then
       if fm_pending_reply_confirm_delivery "$STATE" "$PENDING_REPLY_CORR"; then
         :
@@ -944,13 +1022,19 @@ else
   # busy-confirmed and queued-unconfirmed retain the two OMP busy paths.
   send_rc=0
   if [ "$TARGET_BACKEND" = remote ]; then
-    if "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send "$TARGET_REMOTE_ID" "$MESSAGE" < /dev/null >/dev/null; then
+    remote_out=
+    if remote_out=$("$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send "$TARGET_REMOTE_ID" "$MESSAGE" < /dev/null 2>&1); then
       verdict=empty
     else
       send_rc=$?
+      [ -z "$remote_out" ] || printf '%s\n' "$remote_out" >&2
       case "$send_rc:$TARGET_HARNESS" in
         4:omp) verdict='delivered-no-turn'; send_rc=0 ;;
         5:omp) verdict='delivered-no-turn-persistence-failed'; send_rc=0 ;;
+        6:omp) verdict='remote-omp-inbox-unavailable'; send_rc=0 ;;
+        7:omp) verdict='remote-omp-inbox-ambiguous'; send_rc=0 ;;
+        8:omp) verdict='remote-omp-inbox-no-turn'; send_rc=0 ;;
+        9:omp) verdict='remote-omp-binding-refused'; send_rc=0 ;;
         *) verdict=send-failed ;;
       esac
     fi
@@ -1029,6 +1113,17 @@ else
       ;;
     delivered-no-turn-persistence-failed)
       ;;
+    remote-omp-inbox-unavailable|remote-omp-inbox-ambiguous|remote-omp-inbox-no-turn)
+      # The exact remote inbox record is durable, but the caller receives the
+      # named non-resend verdict below rather than a generic success.
+      ;;
+    remote-omp-binding-refused)
+      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      fi
+      echo "error: remote-omp-binding-refused: no remote payload or notification was accepted; do not resend until the named binding mismatch is reconciled" >&2
+      exit 9
+      ;;
     send-failed)
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
@@ -1077,6 +1172,21 @@ else
       fi
       echo "error: delivered-no-turn: text was submitted to $T, but $TARGET_HARNESS did not start a turn $turnstart_window; do not resend; supervised recovery is required" >&2
       exit 4
+      ;;
+    remote-omp-inbox-unavailable)
+      [ "$post_delivery_failed" -eq 0 ] || exit 1
+      echo "error: remote-omp-inbox-queued: the remote request is durable but its exact extension is unavailable; do not resend" >&2
+      exit 6
+      ;;
+    remote-omp-inbox-ambiguous)
+      [ "$post_delivery_failed" -eq 0 ] || exit 1
+      echo "error: remote-omp-inbox-ambiguous: the remote programmatic request remains durable and may already be active; do not resend" >&2
+      exit 7
+      ;;
+    remote-omp-inbox-no-turn)
+      [ "$post_delivery_failed" -eq 0 ] || exit 1
+      echo "error: remote-omp-inbox-queued: the remote request is durable but no bound turn started; do not resend" >&2
+      exit 8
       ;;
   esac
   [ "$post_delivery_failed" -eq 0 ] || exit 1
