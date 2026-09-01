@@ -641,16 +641,21 @@ if [ "$ACTION" = bind-run ]; then
     || { echo "error: validation worktree is dirty" >&2; exit 2; }
   BIND_OUT=$(fm_nm_run_checked "$BIND_WORKTREE" "$NM_TIMEOUT" axi status --run "$RUN_ID_INPUT") \
     || { echo "error: No-Mistakes run could not be observed" >&2; exit 2; }
-  BIND_INTENT=$(fm_nm_run_checked "$BIND_WORKTREE" "$NM_TIMEOUT" axi logs --step intent --run "$RUN_ID_INPUT") \
-    || { echo "error: No-Mistakes run intent could not be observed" >&2; exit 2; }
   BIND_OBSERVED_ID=$(fm_nm_field "$BIND_OUT" id)
   BIND_OBSERVED_HEAD=$(fm_nm_field "$BIND_OUT" head)
   BIND_STATUS=$(fm_nm_field "$BIND_OUT" status)
   BIND_OUTCOME=$(fm_nm_field "$BIND_OUT" outcome)
   [ "$RUN_ID_INPUT" != "$BIND_PREPLAN_RUN" ] || { echo "error: No-Mistakes run predates the latest plan" >&2; exit 2; }
+  # The generation is Firstmate's own plan-side nonce, recorded authoritatively
+  # in this task's metadata as validation_generation. Real no-mistakes does not
+  # echo the agent-supplied --intent body back through `axi logs --step intent`
+  # (it reports only "using intent supplied by the agent"), so the run is bound
+  # to its plan through what no-mistakes DOES report authoritatively - the run id
+  # and head from `axi status --run` (checked below) plus the created-after-plan
+  # boundary above - cross-checked against the plan metadata's generation. A
+  # superseded plan mints a new generation and clears validation_run_*, so a run
+  # bound under an old generation can never satisfy completion's generation check.
   [ "$RUN_GENERATION_INPUT" = "$BIND_GENERATION" ] || { echo "error: run generation does not match the latest plan" >&2; exit 2; }
-  fm_nm_intent_has_generation "$BIND_INTENT" "$BIND_GENERATION" \
-    || { echo "error: No-Mistakes run was not created for the latest plan generation" >&2; exit 2; }
   BIND_STATE_OK=0
   case "$BIND_STATUS:$BIND_OUTCOME" in
     failed:*|cancelled:*|*:failed|*:cancelled) ;;

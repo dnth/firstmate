@@ -842,7 +842,7 @@ test_terminal_and_failed_runs_bind_by_current_plan() {
   pass "successful terminal runs bind while failed runs remain rejected"
 }
 
-test_intent_records_are_exact_and_heads_resolve_authoritatively() {
+test_run_heads_resolve_authoritatively() {
   local id=receipt-binding-identity base project head short generation status rc
   base=$(make_project "$id" no-mistakes localized)
   add_receipt "$id" AC1 test "2 passed"
@@ -854,36 +854,20 @@ test_intent_records_are_exact_and_heads_resolve_authoritatively() {
   short=${head:0:8}
   generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
   status=$(nm_status RUN-identity "$short" pending)
-  FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_INTENT="$(printf 'log[1]{line}:\n  Firstmate-Validation-Generation: %s' "$generation")" \
+  FM_FAKE_NM_STATUS="$status" \
     FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --bind-run RUN-identity --generation "$generation" >/dev/null \
-    || fail "abbreviated run head or indented intent record was rejected"
+    || fail "abbreviated run head was rejected instead of resolved authoritatively"
   printf 'descendant\n' >> "$project/src/app.sh"
   git -C "$project" add src/app.sh
   git -C "$project" commit -q -m 'descendant run head'
   status=$(nm_status RUN-descendant "$(git -C "$project" rev-parse HEAD)" pending)
-  FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: $generation" \
+  FM_FAKE_NM_STATUS="$status" \
     FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --bind-run RUN-descendant --generation "$generation" >/dev/null 2>&1
   rc=$?
   expect_code 2 "$rc" "bind accepted a strict descendant instead of the planned commit"
-
-  id=receipt-binding-echo
-  base=$(make_project "$id" no-mistakes localized)
-  add_receipt "$id" AC1 test "2 passed"
-  add_receipt "$id" AC2 lint passed
-  FM_FAKE_NM_STATUS='' FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
-    "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "echo fixture plan failed"
-  project="$TMP_ROOT/project-$id"
-  head=$(git -C "$project" rev-parse HEAD)
-  generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
-  status=$(nm_status RUN-echo "$head" pending)
-  FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_INTENT="$(printf 'Firstmate-Validation-Generation: %s\nFirstmate-Validation-Generation: %s' "$generation" "$generation")" \
-    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
-    "$CHECK" "$id" --bind-run RUN-echo --generation "$generation" >/dev/null 2>&1
-  rc=$?
-  expect_code 2 "$rc" "duplicated intent record was accepted"
-  pass "intent binding accepts one exact record and resolves abbreviated heads"
+  pass "run binding resolves abbreviated heads and rejects non-planned commits"
 }
 
 test_completion_accepts_only_pipeline_owned_head_advance() {
@@ -972,13 +956,7 @@ EOF
   head=$(git -C "$project" rev-parse HEAD)
   generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
   running=$(nm_status RUN-bounded "$head" pending)
-  FM_HANG_ON='axi logs --step intent' FM_RECEIPT_NM_TIMEOUT=1 FM_FAKE_NM_STATUS="$running" \
-    FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: $generation" FM_NO_MISTAKES_BIN="$hang_nm" FM_HOME="$HOME_DIR" \
-    "$CHECK" "$id" --bind-run RUN-bounded --generation "$generation" >/dev/null 2>&1
-  rc=$?
-  expect_code 2 "$rc" "run binding bounds No-Mistakes intent observation"
-
-  FM_FAKE_NM_STATUS="$running" FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: $generation" \
+  FM_FAKE_NM_STATUS="$running" \
     FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --bind-run RUN-bounded --generation "$generation" >/dev/null \
     || fail "bounded observation fixture binding failed"
@@ -988,7 +966,7 @@ EOF
     "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed >/dev/null 2>&1
   rc=$?
   expect_code 2 "$rc" "completion bounds No-Mistakes CI-log observation"
-  pass "No-Mistakes status, intent, and CI-log observations are bounded"
+  pass "No-Mistakes status and CI-log observations are bounded"
 }
 
 test_authoritative_docs_remain_high() {
@@ -1371,12 +1349,12 @@ test_high_risk_and_uncertain_inputs_fail_safe() {
   expect_code 2 "$rc" "run active before planning cannot bind to the new plan"
   generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
   other_status=$(nm_status OTHER-RUN "$current_head" pending)
-  FM_FAKE_NM_STATUS="$other_status" FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: stale" \
+  FM_FAKE_NM_STATUS="$other_status" \
     FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
-    "$CHECK" "$id" --bind-run OTHER-RUN --generation "$generation" >/dev/null 2>&1
+    "$CHECK" "$id" --bind-run OTHER-RUN --generation "stale-generation" >/dev/null 2>&1
   rc=$?
-  expect_code 2 "$rc" "another pre-existing run cannot claim the new generation"
-  FM_FAKE_NM_STATUS="$other_status" FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: $generation" \
+  expect_code 2 "$rc" "a generation that does not match the current plan cannot bind"
+  FM_FAKE_NM_STATUS="$other_status" \
     FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --bind-run OTHER-RUN --generation "$generation" >/dev/null \
     || fail "run carrying the authoritative plan generation could not bind"
@@ -1399,6 +1377,66 @@ test_high_risk_and_uncertain_inputs_fail_safe() {
   rc=$?
   expect_code 2 "$rc" "dangling origin HEAD cannot publish a plan"
   pass "security and uncertain changes retain full No-Mistakes validation"
+}
+
+test_agent_supplied_intent_log_binds_and_completes() {
+  local id base project head generation running ci_status rc
+  # Real no-mistakes never echoes the agent-supplied --intent body back through
+  # `axi logs --step intent`; it reports only this generic line. Binding and
+  # completion must therefore work from the authoritative run id and head plus the
+  # plan-metadata generation, never from an inline generation record in the log.
+  id=agent-supplied-intent
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint passed
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null \
+    || fail "agent-supplied-intent fixture plan failed"
+  project="$TMP_ROOT/project-$id"
+  head=$(git -C "$project" rev-parse HEAD)
+  generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
+  running=$(nm_status RUN-agent-intent "$head" pending)
+  FM_FAKE_NM_STATUS="$running" FM_FAKE_NM_INTENT='using intent supplied by the agent' \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-agent-intent --generation "$generation" >/dev/null \
+    || fail "binding failed against the real agent-supplied intent-log shape"
+  ci_status=$(printf 'run:\n  id: "RUN-agent-intent"\n  status: ci\n  head: "%s"\noutcome: pending\n' "$head")
+  FM_FAKE_NM_STATUS="$ci_status" FM_FAKE_NM_CI_LOG='all CI checks passed - still monitoring until merged or closed' \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed >/dev/null \
+    || fail "CI-green bound run could not complete against the agent-supplied intent-log shape"
+
+  # A genuinely wrong generation still fails closed without the intent log.
+  id=agent-supplied-intent-wrong-generation
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint passed
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null \
+    || fail "wrong-generation fixture plan failed"
+  project="$TMP_ROOT/project-$id"
+  head=$(git -C "$project" rev-parse HEAD)
+  running=$(nm_status RUN-wrong-gen "$head" pending)
+  FM_FAKE_NM_STATUS="$running" FM_FAKE_NM_INTENT='using intent supplied by the agent' \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-wrong-gen --generation "not-the-plan-generation" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "a mismatched generation still fails closed without the intent log"
+
+  # A genuinely wrong head still fails closed: the run's observed head must resolve
+  # to the exact validated head.
+  id=agent-supplied-intent-wrong-head
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint passed
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null \
+    || fail "wrong-head fixture plan failed"
+  generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
+  running=$(nm_status RUN-wrong-head "$base" pending)
+  FM_FAKE_NM_STATUS="$running" FM_FAKE_NM_INTENT='using intent supplied by the agent' \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-wrong-head --generation "$generation" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "a run at the wrong head still fails closed without the intent log"
+  pass "binding and completion work against the real agent-supplied intent-log shape while wrong runs fail closed"
 }
 
 test_direct_and_local_modes_never_invoke_no_mistakes() {
@@ -1435,7 +1473,8 @@ test_pinned_checker_rejects_redirected_and_linked_evidence
 test_shared_criterion_parser_drives_append_and_check
 test_ci_green_log_allows_exact_bound_run_completion
 test_claim_invalidation_marker_is_append_only_and_idempotent
-test_intent_records_are_exact_and_heads_resolve_authoritatively
+test_run_heads_resolve_authoritatively
+test_agent_supplied_intent_log_binds_and_completes
 test_completion_accepts_only_pipeline_owned_head_advance
 test_low_risk_skips_no_mistakes_under_explicit_policy
 test_low_risk_requires_safe_prose_and_applicable_evidence

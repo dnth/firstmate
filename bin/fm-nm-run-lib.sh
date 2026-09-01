@@ -119,23 +119,6 @@ fm_nm_branch_sync_state() {  # <toon-output>
   ' <<<"$1"
 }
 
-# 0 when captured `axi logs --step intent` contains exactly one unmodified
-# generation record. The logs command wraps records in a TOON table and indents
-# them, so trim presentation whitespace but do not accept substring matches or
-# echoed/duplicated records.
-fm_nm_intent_has_generation() {  # <intent-log> <generation>
-  local log=$1 generation=$2 line normalized expected count=0
-  expected="Firstmate-Validation-Generation: $generation"
-  while IFS= read -r line || [ -n "$line" ]; do
-    normalized=$(fm_nm_trim "$line")
-    [ "$normalized" = "$expected" ] || continue
-    count=$((count + 1))
-  done <<EOF
-$log
-EOF
-  [ "$count" -eq 1 ]
-}
-
 # 0 when captured `axi status` has not reached a terminal state.
 fm_nm_run_is_active() {  # <toon-output>
   local status outcome
