@@ -62,6 +62,29 @@ The branch drains and acknowledges only the exact row set the extension granted 
 A row whose sequence number is not in the branch's snapshot is left completely untouched by a branch-actor drain or acknowledgement, no matter its sequence number, so the branch can never swallow a main-owned row still waiting for main.
 This scoping engages only while a branch grant is, or recently was, in play: a home that never runs the branch has none of the actor files, so the drain takes its byte-behavior-identical pre-branch path and writes no actor state.
 
+## Main-fallback re-entry limitation
+
+When the supervision branch is unavailable, the primary adapter falls eligible wakes back to MAIN through the ordinary operational notification path.
+Per-actor queue ownership prevents MAIN and the branch from double-consuming a row, but it does not serialize fallback notifications while MAIN handles a claimed, unacknowledged row set.
+Each valid higher-sequence signal or stale row can therefore inject another priority operational notification during the same handling episode.
+OMP can preempt or skip the report reads, current-state reconciliation, cleanup, or generation-bound acknowledgement that would finish the active episode.
+The durable queue preserves every row, but that no-loss property does not guarantee forward progress, so a burst can create a re-entry loop until attended recovery breaks it.
+
+The required coalescing invariant is that MAIN has at most one accepted fallback notification in flight for one active handling episode.
+Rows appended during that episode remain durable without injecting another operational turn, and the next drain handles them as one aggregate.
+After acknowledgement, exactly one successor notification is delivered only when unread MAIN-owned rows remain, while no successor is delivered when the final acknowledgement consumes them.
+Real captain messages retain priority and are never coalesced with operational notifications.
+Delivery that fails or has indeterminate acceptance remains replayable without losing a row or duplicating an accepted MAIN turn.
+
+Any fix must preserve per-actor row ownership, branch grants, recovery generations, interruption replay, branch-unavailable fallback, and every existing no-lost-wake boundary.
+The bounded attended recovery for the current defect is to interrupt the re-entry episode once, drain the durable notifications, reconcile current state, and execute the printed generation-bound `--ack-through` command.
+If unread MAIN-owned rows remain after that acknowledgement, allow the single successor notification and stop repeated manual retries rather than extending the loop.
+
+Issue [#82](https://github.com/dnth/firstmate/issues/82) owns this current-notification re-entry defect and its coalescing regression boundary.
+Issue [#74](https://github.com/dnth/firstmate/issues/74) instead owns stale advisory freshness after durable state supersedes prose, where delivery-time reconciliation decides whether an advisory is still current.
+Suppressing stale prose for #74 does not prevent a current valid signal or stale row from re-entering MAIN, so the two issues require separate invariants and regression scenarios.
+The live observation and missing burst regression are recorded in [runtime-backends.md](verification/runtime-backends.md#omp-main-fallback-re-entry).
+
 ## How the branch knows what the captain said
 
 Main's captain and assistant text - never tool calls, tool results, operational injections, or the branch's own merged notes - is mirrored into the branch as read-only `fm-main-mirror` messages at main's turn end, before the next wake is handed over.
