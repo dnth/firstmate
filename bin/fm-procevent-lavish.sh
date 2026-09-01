@@ -5,6 +5,7 @@
 #   fm-procevent-lavish.sh arm <artifact.html>
 #   fm-procevent-lavish.sh classify <result-file>
 #   fm-procevent-lavish.sh terminal <result-file>
+#   fm-procevent-lavish.sh read <result-file>
 #   fm-procevent-lavish.sh source-id <artifact.html>
 #   fm-procevent-lavish.sh retire <artifact.html>
 #
@@ -14,6 +15,9 @@
 #            produce another result, so the runner may retire it; any other exit
 #            keeps it armed. This is the generic adapter contract bin/fm-procevent.sh
 #            calls, and the only place Lavish's notion of "ended" is decided.
+# read       Print a structured, read-only presentation of a captured result.
+#            It enumerates every item, separates session-ending messages from
+#            annotations, reports completeness, and preserves non-choice comments.
 #
 # This adapter is deliberately thin. It owns only what is specific to Lavish:
 # canonical source identity, the argv for the currently published poll command,
@@ -47,7 +51,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,35p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,39p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 # Canonical identity is physical, not the path string: Lavish itself keys a
 # session on the realpath of the artifact, so two names for one file are one
@@ -145,12 +149,72 @@ cmd_terminal() {
   return 1
 }
 
+# Present one captured result without requiring a handler to parse the raw file.
+cmd_read() {
+  local file=${1-} lifecycle session_ended
+  [ -n "$file" ] || usage
+  [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
+  lifecycle=$(cmd_classify "$file")
+  session_ended=$(session_field "$file" session_ended)
+  perl -e '
+    use strict; use warnings;
+    my ($path, $life, $ended) = @ARGV;
+    open my $fh, "<", $path or exit 1;
+    my (@fields, $want, @rows);
+    while (my $line = <$fh>) {
+      if (!@fields) {
+        next unless $line =~ /^(?:prompts|feedback)\[(\d+)\]\{([^}]*)\}:\s*$/;
+        ($want, @fields) = ($1, split /,/, $2); next;
+      }
+      last unless $line =~ /^\s/;
+      last if @rows >= $want;
+      chomp $line; $line =~ s/^\s+//; push @rows, $line;
+    }
+    close $fh; $want //= 0;
+    my (@items, $bad);
+    for my $row (@rows) {
+      my @v;
+      while (length $row) {
+        if ($row =~ s/^"((?:[^"\\]|\\.)*)"//) { push @v, $1 }
+        else { $row =~ s/^([^,]*)//; push @v, $1 }
+        last unless $row =~ s/^,//;
+      }
+      if (@v > @fields) {
+        my ($i) = grep { $fields[$_] eq "prompt" } 0..$#fields;
+        ($i) = grep { $fields[$_] eq "text" } 0..$#fields unless defined $i;
+        if (defined $i) { my @p = splice @v, $i, @v-@fields+1; splice @v, $i, 0, join(",", @p) }
+      }
+      if (@v != @fields) { $bad++; next }
+      s/\\(.)/$1 eq "n" ? "\n" : $1 eq "t" ? "\t" : $1 eq "r" ? "\r" : $1/ge for @v;
+      my %f; @f{@fields} = @v; push @items, \%f;
+    }
+    my (@msg, @ann);
+    for my $f (@items) { if (($f->{tag}//"") eq "message") { push @msg, $f } else { push @ann, $f } }
+    sub body { my ($s)=@_; $s //= ""; $s =~ s/\r\n?/\n/g; print "| $_\n" for grep { length } split /\n/, $s }
+    if (@msg) { print "SESSION-ENDING MESSAGE\n"; for my $f (@msg) { body(length($f->{prompt}//"") ? $f->{prompt} : $f->{text}) } print "END SESSION-ENDING MESSAGE\n" }
+    else { print "SESSION-ENDING MESSAGE: (none)\n" }
+    print "\ndeclared_items: $want\npresented_items: ", scalar(@items), "\nmalformed_items: ", ($bad//0), "\ncomplete: ", (@items == $want && !$bad ? "yes" : "no"), "\nlifecycle: $life\nsession_ended: ", (length($ended//"") ? $ended : "(unset)"), "\nannotation_count: ", scalar(@ann), "\nsession_ending_message_count: ", scalar(@msg), "\n\n";
+    if (@ann) {
+      print "ANNOTATIONS\n"; my $n=0;
+      for my $f (@ann) {
+        print "ANNOTATION ", ++$n, " of ", scalar(@ann), "\n";
+        print "element_uid: ", ($f->{uid}//""), "\nelement_selector: ", ($f->{selector}//""), "\ntag: ", ($f->{tag}//""), "\ntext:\n";
+        body(length($f->{text}//"") ? $f->{text} : ($f->{prompt}//""));
+        if (($f->{tag}//"") ne "choice" && length($f->{prompt}//"")) { print "prompt:\n"; body($f->{prompt}) }
+      }
+      print "END ANNOTATIONS\n";
+    } else { print "ANNOTATIONS: (none)\n" }
+    print "END LAVISH RESULT (", scalar(@items), " of $want)\n";
+  ' "$file" "$lifecycle" "$session_ended"
+}
+
 case "${1-}" in
   arm)       shift; cmd_arm "$@" ;;
   retire)    shift; cmd_retire "$@" ;;
   source-id) shift; cmd_source_id "$@" ;;
   classify)  shift; cmd_classify "$@" ;;
   terminal)  shift; cmd_terminal "$@" ;;
+  read)      shift; cmd_read "$@" ;;
   ''|-h|--help|help) usage ;;
   *) die "unknown command: $1" ;;
 esac
