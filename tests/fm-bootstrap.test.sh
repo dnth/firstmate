@@ -1109,7 +1109,7 @@ test_bootstrap_does_not_emit_retired_path() {
   mkdir -p "$case_dir/home"
   fakebin=$(make_fake_toolchain "$case_dir")
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" \
-    FM_ROOT_OVERRIDE="$ROOT" FM_BOOTSTRAP_DETECT_ONLY=1 "$ROOT/bin/fm-bootstrap.sh")
+    FM_ROOT_OVERRIDE="$ROOT" FM_BOOTSTRAP_DETECT_ONLY=1 "$ROOT/bin/fm-bootstrap.sh" 2>&1)
   ! printf '%s\n' "$out" | grep -F "$retired_prefix" >/dev/null \
     || fail "bootstrap emitted the retired PR-check migration diagnostic"
   pass "bootstrap no longer emits the retired PR-check migration diagnostic"
