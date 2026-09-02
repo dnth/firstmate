@@ -284,7 +284,6 @@ test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
   kill -KILL "$watcher_pid" 2>/dev/null || fail "could not abruptly stop pre-outage watcher"
   wait "$ARM_PID" 2>/dev/null || true
   [ ! -e "$state/.watcher-down" ] || fail "abrupt watcher exit unexpectedly ran cleanup"
-  rm -f "$state/.pr-check-migration-v1" "$state/.pr-check-migration-scan-v1"
 
   # Two independent durable wakes arrive while no watcher exists. Neither gets
   # a later status change to rescue it, which is the down-window loss shape.
@@ -294,7 +293,7 @@ test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
 
   start_rearm_arm "$home" "$state" "$fakebin" "$armout"
   # Bound the wait rather than sampling liveness at one instant: this fork's
-  # watcher runs the PR-check migration, pending-reply, and process-event work
+  # watcher runs pending-reply and process-event work
   # before its first poll, so a fixed sub-second sample would read a healthy
   # re-arm as a stayed-live failure. wait_for_exit stops the child on timeout,
   # so the never-surfacing path still leaves nothing behind.

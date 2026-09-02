@@ -23,13 +23,6 @@ case "$FM_ROOT_OVERRIDE" in
   "${TMPDIR:-/tmp}"/fm-wake-tangle-root.*) FM_TEST_CLEANUP_DIRS+=("$FM_ROOT_OVERRIDE") ;;
 esac
 
-mark_pr_check_migration_complete() {
-  local state=$1
-  printf '%s\n' fm-pr-check-migration-scan-v1 > "$state/.pr-check-migration-scan-v1"
-  printf '%s\n' fm-pr-check-migration-v1 > "$state/.pr-check-migration-v1"
-  chmod 0600 "$state/.pr-check-migration-scan-v1" "$state/.pr-check-migration-v1"
-}
-
 drain_and_ack() {  # <state>
   local state=$1 err sequence generation
   err="$state/.test-drain.err"
@@ -49,7 +42,6 @@ test_singleton_start() {
   fakebin="$dir/fakebin"
   out1="$dir/watch-one.out"
   out2="$dir/watch-two.out"
-  mark_pr_check_migration_complete "$state"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out1" &
   pid1=$!
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out2" &
@@ -115,7 +107,6 @@ test_live_stale_watch_lock_is_actionable() {
   fakebin="$dir/fakebin"
   out="$dir/watch.out"
   err="$dir/watch.err"
-  mark_pr_check_migration_complete "$state"
   mkdir "$state/.watch.lock"
   printf '%s\n' "$$" > "$state/.watch.lock/pid"
   touch -t 200001010000 "$state/.last-watcher-beat"
@@ -434,7 +425,6 @@ test_watch_restart_rejects_reused_pid() {
   state="$dir/state"
   fakebin="$dir/fakebin"
   out="$dir/restart.out"
-  mark_pr_check_migration_complete "$state"
   sleep 300 &
   live=$!
   mkdir "$state/.watch.lock"
@@ -482,7 +472,6 @@ test_watch_restart_attaches_to_healthy_peer() (
     [ -z "$peer" ] || wait "$peer" 2>/dev/null || true
   }
   trap cleanup_restart_healthy_peer EXIT
-  mark_pr_check_migration_complete "$state"
   node -e 'const fs = require("node:fs"); process.on("SIGTERM", () => {}); fs.writeFileSync(process.argv[1], "ready\n"); setTimeout(() => {}, 300000)' "$peer_ready" &
   peer=$!
   i=0
@@ -558,7 +547,6 @@ test_arm_self_eviction_is_loud_without_successor() {
   state="$dir/state"
   fakebin="$dir/fakebin"
   armout="$dir/arm.out"
-  mark_pr_check_migration_complete "$state"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$armout" &
   armpid=$!
   i=0
@@ -754,9 +742,6 @@ test_arm_propagates_immediate_wake_before_confirmation() {
   armout="$dir/arm.out"
   drain_out="$dir/drain.out"
   check_file="$state/task.check.sh"
-  printf '%s\n' fm-pr-check-migration-scan-v1 > "$state/.pr-check-migration-scan-v1"
-  printf '%s\n' fm-pr-check-migration-v1 > "$state/.pr-check-migration-v1"
-  chmod 0600 "$state/.pr-check-migration-scan-v1" "$state/.pr-check-migration-v1"
   cat > "$check_file" <<'SH'
 #!/usr/bin/env bash
 printf 'merged: https://example.test/pr/7\n'
@@ -780,7 +765,6 @@ test_arm_waits_for_peer_beacon_after_child_stands_down() {
   state="$dir/state"
   fakebin="$dir/fakebin"
   armout="$dir/arm.out"
-  mark_pr_check_migration_complete "$state"
   sleep 300 &
   peer=$!
   identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify peer pid"
@@ -829,7 +813,6 @@ test_arm_fails_loud_when_no_fresh_watcher_confirmable() {
   state="$dir/state"
   fakebin="$dir/fakebin"
   armout="$dir/arm.out"
-  mark_pr_check_migration_complete "$state"
   sleep 300 &
   live=$!
   # A live process holds the lock but is NOT a confirmable watcher (no identity),
@@ -860,7 +843,6 @@ test_cycle_exit_ledger_links_successor_and_stays_bounded() {
   fakebin="$dir/fakebin"
   armout="$dir/first-arm.out"
   check_file="$state/task.check.sh"
-  mark_pr_check_migration_complete "$state"
   cat > "$check_file" <<'SH'
 #!/usr/bin/env bash
 printf 'done: synthetic cycle\n'
@@ -931,7 +913,6 @@ test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
   state="$dir/state"
   fakebin="$dir/fakebin"
   armout="$dir/arm.out"
-  mark_pr_check_migration_complete "$state"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
   armpid=$!
   i=0

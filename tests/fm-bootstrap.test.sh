@@ -1102,7 +1102,21 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
+test_bootstrap_does_not_emit_retired_path() {
+  local case_dir fakebin out retired_prefix
+  case_dir="$TMP_ROOT/no-retired-pr-check-path"
+  retired_prefix="PR_CHECK_${suffix:-MIGRATION}:"
+  mkdir -p "$case_dir/home"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_BOOTSTRAP_DETECT_ONLY=1 "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+  ! printf '%s\n' "$out" | grep -F "$retired_prefix" >/dev/null \
+    || fail "bootstrap emitted the retired PR-check migration diagnostic"
+  pass "bootstrap no longer emits the retired PR-check migration diagnostic"
+}
+
 test_bootstrap_reporting
+test_bootstrap_does_not_emit_retired_path
 test_no_mistakes_min_version
 test_gh_axi_min_version
 test_lavish_axi_min_version
