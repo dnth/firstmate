@@ -1069,4 +1069,30 @@ assert_not_contains "$runner_help" "exactly-once" \
   "the runner's help claims no exactly-once delivery"
 pass "the published interfaces state the loss limitation and claim no lossless delivery"
 
+# Structured reads must preserve freeform comments independently of element text.
+READ="$TMP_ROOT/lavish-read"
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+prompts[5]{uid,prompt,selector,tag,text}:
+  "el-a","same words","#a",note,"same words"
+  "el-b","typed comment","#b",note,"element text"
+  "el-c","","#c",note,"pure annotation"
+  "","Context data: {\"answer\":\"x\"}","",choice,"Ship it"
+  "","final captain comment","","message",""
+EOF
+read_out=$("$ROOT/bin/fm-procevent-lavish.sh" read "$READ") || fail "structured Lavish read failed"
+assert_contains "$read_out" "SESSION-ENDING MESSAGE" "session-ending message section missing"
+assert_contains "$read_out" "| final captain comment" "session-ending freeform message was dropped"
+assert_contains "$read_out" "| same words" "annotation text missing"
+assert_contains "$read_out" "prompt:" "non-choice freeform comment field missing"
+assert_contains "$read_out" "| typed comment" "selector-bearing comment was dropped"
+assert_not_contains "$read_out" "| Context data:" "choice Context data leaked as a comment"
+assert_contains "$read_out" "declared_items: 5" "declared item count missing"
+assert_contains "$read_out" "presented_items: 5" "presented item count missing"
+assert_contains "$read_out" "complete: yes" "complete capture not certified"
+pass "structured read surfaces comments and preserves choice Context filtering"
+
 printf '\nall procevent tests passed\n'
