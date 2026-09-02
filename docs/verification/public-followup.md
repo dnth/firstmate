@@ -70,13 +70,11 @@ diff state-before.txt state-after.txt | grep '^>'
 0
 0
 > <home>/state/.lock
-> <home>/state/.pr-check-migration-scan-v1
-> <home>/state/.pr-check-migration-v1
 > <home>/state/.wake-queue
 ```
 
 No `tasks-axi public-followup` invocation, no public-commitments output, and no `state/public-followup` directory.
-The four created paths are session-start's pre-existing session lock, PR-check migration markers, and wake queue, none of which this work touches.
+The two created paths are session-start's pre-existing session lock and wake queue, none of which this work touches.
 
 The whole added cost in that home is the activation predicate, measured over 1000 in-process calls including loop overhead:
 

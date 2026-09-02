@@ -11,7 +11,6 @@
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
-#                 "PR_CHECK_MIGRATION: <private remediation>",
 #                 "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
@@ -80,15 +79,15 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
-#          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the five MUTATING sweeps
+#          (secondmate_sync, secondmate_liveness_sweep,
 #          secondmate_handoff_resume, x_mode_setup, fleet_sync) while still
 #          printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
 #          fm-session-start.sh's read-only path when another live session holds
 #          the fleet lock, so a second concurrent session never race-mutates
-#          PR-check artifacts, secondmate homes, pending handoff outboxes,
+#          secondmate homes, pending handoff outboxes,
 #          X-mode artifacts, project clones, or repair instructions.
 #          Unset/0 (the default) runs every sweep exactly as before - this flag
 #          is purely additive.
@@ -1139,12 +1138,9 @@ if [ "${1:-}" = "install" ]; then
   exit 0
 fi
 
-# This is the first mutating sweep at a locked session boundary. It pauses an
-# identity-matched watcher, holds its lock, and neutralizes legacy PR checks
-# before any tool detection or later bootstrap mutation can leave old artifacts
-# runnable. Detect-only sessions never touch state.
+# This is the first mutating sweep at a locked session boundary. Detect-only
+# sessions never touch state.
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
-  "$SCRIPT_DIR/fm-pr-check-migrate.sh" || true
   startup_memory_budget_setup
 fi
 
