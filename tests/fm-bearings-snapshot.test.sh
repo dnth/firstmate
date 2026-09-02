@@ -323,11 +323,11 @@ EOF
     "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary)
   printf '%s' "$summary" | jq -e '
     .valid == false
-      and .state == "unknown"
+      and .state == "no_active_work"
       and (.reason | contains("working-child=working"))
       and .invalidity == {kind:"unowned_current",ids:["working-child"]}
-  ' >/dev/null || fail "an unowned working child was treated as safe stale state: $summary"
-  pass "an unowned working child state remains strict-invalid"
+  ' >/dev/null || fail "an unowned working child lost its readable classification: $summary"
+  pass "an unowned working child stays a readable inventory mismatch, not unknown"
 }
 
 test_backlog_records_override_stale_child_holds() {
@@ -371,6 +371,94 @@ EOF
       and (.landed | any(.id == "stale-done-blocked"))
   ' >/dev/null || fail "authoritative queued or done backlog rows did not suppress stale child holds: $canonical"
   pass "authoritative queued and done backlog rows override stale child holds"
+}
+
+# Regression for upstream #3129. A backlog-vs-metadata inventory mismatch inside a
+# secondmate home must not discard that home's open captain decisions, landed work,
+# and live workers, while a genuinely untrustworthy backlog (unstructured current
+# row) must still fail closed and drop all of its projected surfaces.
+test_inventory_mismatch_preserves_projections_and_corruption_fails_closed() {
+  local home mismatch corrupt fakebin canonical
+  home=$(make_home inventory-mismatch)
+
+  # Mismatch home: an orphan in-flight ship item (no child metadata) sits beside a
+  # real live worker, an open captain decision, and landed work.
+  mismatch="$TMP_ROOT/inventory-mismatch-home"
+  make_valid_secondmate_home mismatch-mate "$mismatch"
+  append_secondmate_registry "$home" mismatch-mate "$mismatch"
+  fm_write_secondmate_meta "$home/state/mismatch-mate.meta" "$mismatch" "firstmate:fm-mismatch-mate" sample
+  mkdir -p "$mismatch/projects/live-ship"
+  cat > "$mismatch/data/backlog.md" <<'EOF'
+## In flight
+- [ ] orphan-ship - Orphaned ship task (repo: sample) (kind: ship) (since 2026-07-11)
+- [ ] live-ship - Live ship task (repo: sample) (kind: ship) (since 2026-07-11)
+
+## Queued
+- [ ] captain-call - Approve the release (repo: sample) (kind: captain) (hold: captain approves the release) (hold-kind: captain)
+
+## Done
+- [x] shipped - Shipped feature https://github.com/kunchenguid/firstmate/pull/5 (repo: sample) (kind: ship) (merged 2026-07-10)
+EOF
+  fm_write_meta "$mismatch/state/live-ship.meta" \
+    "window=firstmate:fm-live-ship" "worktree=$mismatch/projects/live-ship" \
+    "project=sample" "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mismatch/state" live-ship busy
+  printf 'working: building the live ship\n' > "$mismatch/state/live-ship.status"
+
+  # Corrupt home: an unstructured current backlog row makes the backlog itself
+  # untrustworthy, so its captain decision and landed work must not be projected.
+  corrupt="$TMP_ROOT/inventory-corrupt-home"
+  make_valid_secondmate_home corrupt-mate "$corrupt"
+  append_secondmate_registry "$home" corrupt-mate "$corrupt"
+  fm_write_secondmate_meta "$home/state/corrupt-mate.meta" "$corrupt" "firstmate:fm-corrupt-mate" sample
+  cat > "$corrupt/data/backlog.md" <<'EOF'
+## In flight
+free-form corrupt current line that is not a task row
+
+## Queued
+- [ ] captain-call-corrupt - Approve the other release (repo: sample) (kind: captain) (hold: captain approves) (hold-kind: captain)
+
+## Done
+- [x] shipped-corrupt - Shipped https://github.com/kunchenguid/firstmate/pull/6 (repo: sample) (kind: ship) (merged 2026-07-10)
+EOF
+
+  fakebin=$(make_fakebin "$home")
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+
+  # AC1: the mismatch home keeps its real classification, its open captain
+  # decision, landed work, and live worker, and surfaces the mismatch distinctly.
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "mismatch-mate")
+    | .current.state == "captain_decision"
+      and .provenance.selected == "structured-home"
+      and .provenance.trust == "partial-structured"
+      and .invalidity == {kind:"orphan_in_flight",ids:["orphan-ship"]}
+      and [.decisions_open[].id] == ["captain-call"]
+      and (.decisions_open[0].verb == "captain-hold")
+      and [.landed[].id] == ["shipped"]
+      and [.active_children[].id] == ["live-ship"]
+  ' >/dev/null || fail "inventory mismatch discarded the readable home's decisions or work: $canonical"
+
+  # AC2: the corrupt home fails closed - unknown state, no projected surfaces.
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "corrupt-mate")
+    | .current.state == "unknown"
+      and .provenance.selected != "structured-home"
+      and .invalidity == null
+      and .decisions_open == []
+      and .landed == []
+      and .active_children == []
+  ' >/dev/null || fail "an untrustworthy backlog projected fabricated surfaces: $canonical"
+
+  # The roll-up separates the two classes: mismatch is partial, corruption is unreadable.
+  printf '%s' "$canonical" | jq -e '
+    (.secondmate_landed.partial | length) == 1
+      and (.secondmate_landed.partial[0] | endswith("/inventory-mismatch-home"))
+      and (.secondmate_landed.unreadable | length) == 1
+      and (.secondmate_landed.unreadable[0] | endswith("/inventory-corrupt-home"))
+  ' >/dev/null || fail "landed roll-up conflated the mismatch and corrupt homes: $canonical"
+  pass "an inventory mismatch keeps projections while an untrustworthy backlog fails closed"
 }
 
 
@@ -882,11 +970,14 @@ EOF
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
     .secondmate_current.records[] | select(.id == "states")
-    | .current.state == "unknown"
+    | .current.state == "externally_held"
       and (.current.reason | contains("terminal child state"))
       and (.current.reason | contains("failed=failed"))
       and ((.current.reason | contains("done=done")) | not)
-  ' >/dev/null || fail "terminal in-flight child states were silently dropped: $canonical"
+      and .provenance.selected == "structured-home"
+      and .provenance.trust == "partial-structured"
+      and .invalidity == {kind:"terminal_in_flight",ids:["failed"]}
+  ' >/dev/null || fail "terminal in-flight rows discarded the readable home: $canonical"
   pass "evidence-gated done is nonterminal while an inconsistent failed row invalidates"
 }
 
@@ -1824,15 +1915,15 @@ EOF
     .secondmate_current.records[] | select(.id == "sshhip")
     | .current.state == "unknown"
       and (.current.reason | contains("in-flight backlog item has no child metadata: ordinary-orphan"))
-      and .provenance.selected != "structured-home"
-      and .invalidity == null
-      and .active_children == []
-      and .decisions_open == []
-      and .holds == []
-      and .queued == []
-      and .landed == []
-      and .endpoints == []
-  ' >/dev/null || fail "an unknown child masked a simultaneous ordinary orphan: $canonical"
+      and .provenance.selected == "structured-home"
+      and .provenance.trust == "partial-structured"
+      and .invalidity == {kind:"orphan_in_flight",ids:["ordinary-orphan"]}
+      and [.decisions_open[].id] == ["reviewer-decision"]
+      and [.holds[].id] == ["reviewer-decision"]
+      and [.queued[].id] == ["reviewer-decision"]
+      and [.landed[].id] == ["prior-release"]
+      and [.endpoints[].id] == ["unreadable-child"]
+  ' >/dev/null || fail "an ordinary orphan discarded a readable home alongside an unknown child: $canonical"
   sed '/ordinary-orphan/d' "$sshhip/data/backlog.md" > "$sshhip/data/backlog.next"
   mv "$sshhip/data/backlog.next" "$sshhip/data/backlog.md"
 
@@ -1842,17 +1933,16 @@ EOF
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
     .secondmate_current.records[] | select(.id == "sshhip")
-    | .current.state == "unknown"
+    | .current.state == "captain_decision"
       and (.current.reason | contains("live child state has no in-flight backlog item: unreadable-child=unknown"))
-      and .provenance.selected != "structured-home"
-      and .invalidity == null
-      and .active_children == []
-      and .decisions_open == []
-      and .holds == []
-      and .queued == []
-      and .landed == []
-      and .endpoints == []
-  ' >/dev/null || fail "an unowned unknown child received partial structured projection: $canonical"
+      and .provenance.selected == "structured-home"
+      and .provenance.trust == "partial-structured"
+      and .invalidity == {kind:"unowned_current",ids:["unreadable-child"]}
+      and [.decisions_open[].id] == ["reviewer-decision"]
+      and [.holds[].id] == ["reviewer-decision"]
+      and [.queued[].id] == ["reviewer-decision"]
+      and [.landed[].id] == ["prior-release"]
+  ' >/dev/null || fail "an unowned unknown child discarded the readable home: $canonical"
   sed '/## In flight/a\
 - [ ] unreadable-child - Submit App Store build (repo: sshhip) (kind: ship)' \
     "$sshhip/data/backlog.md" > "$sshhip/data/backlog.next"
@@ -1930,16 +2020,14 @@ EOF
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
     .secondmate_current.records[] | select(.id == "hibit")
-    | .current.state == "unknown"
+    | .current.state == "active_child_work"
       and (.current.reason | contains("in-flight backlog item has no child metadata: dogfood-program"))
-      and .provenance.selected != "structured-home"
-      and .active_children == []
-      and .decisions_open == []
-      and .holds == []
-      and .queued == []
-      and .landed == []
-      and .endpoints == []
-  ' >/dev/null || fail "an unrecognized worker kind no longer stayed strict: $canonical"
+      and .provenance.selected == "structured-home"
+      and .provenance.trust == "partial-structured"
+      and .invalidity == {kind:"orphan_in_flight",ids:["dogfood-program"]}
+      and [.active_children[].id] == ["hibit-worker"]
+      and [.endpoints[].id] == ["hibit-worker"]
+  ' >/dev/null || fail "an unrecognized worker kind hid the home's live work: $canonical"
   pass "mixed secondmate roles, partial state, and captain readiness project independently"
 }
 
@@ -2017,6 +2105,7 @@ test_domain_alpha_stale_parent_event_does_not_become_current_work
 test_stale_child_metadata_preserves_queued_holds_and_decisions
 test_unowned_working_child_state_is_invalid
 test_backlog_records_override_stale_child_holds
+test_inventory_mismatch_preserves_projections_and_corruption_fails_closed
 test_gnu_stat_uses_file_formats_without_bsd_fallback_pollution
 test_parent_activity_evidence_is_bounded_and_disclosed
 test_active_child_overrides_old_parent_event
