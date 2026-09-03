@@ -224,6 +224,33 @@ changed_instr() {
   printf '%s' "$out"
 }
 
+# Whether a changed_instr list names a surface a RUNNING agent still holds from
+# its launch, so picking the new bytes up needs a fresh conversation rather than
+# just the next command. AGENTS.md is read once at startup and a loaded skill
+# under .agents/skills/ is frozen for the rest of that conversation, while every
+# helper under bin/ is executed fresh on each call and therefore reloads itself.
+# This is deliberately STRICTER than "changed_instr found something": a bin/-only
+# advance changes the tooling without changing anything the agent is holding.
+ff_instr_needs_reload() {  # <changed_instr-list>
+  case "$1" in
+    *AGENTS.md*|*.agents/skills*) return 0 ;;
+  esac
+  return 1
+}
+
+# Translate one remote home sync leg's failure into an operator-actionable
+# reason. The remote leg refuses a command shape it does not recognize with this
+# status, which on this leg can only mean that host's Firstmate copy predates the
+# parent-targeted sync it was just asked for; every other failure already carries
+# its own diagnostic.
+REMOTE_SYNC_UNSUPPORTED_STATUS=2
+remote_sync_failure_reason() { # <exit-status> <output>
+  if [ "$1" = "$REMOTE_SYNC_UNSUPPORTED_STATUS" ]; then
+    printf '%s\n' "the Firstmate copy on that host is too old to sync to this primary's commit; run /updatefirstmate"
+    return 0
+  fi
+  first_line "$2"
+}
 dirty_status() {
   local dir=$1 ignore_seed_marker=${2:-no}
   if [ "$ignore_seed_marker" = yes ]; then

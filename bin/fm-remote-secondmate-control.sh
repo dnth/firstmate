@@ -3,6 +3,7 @@
 #
 # Usage:
 #   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> herdr <fallback-harness|-> <fallback-model|-> <fallback-effort|-> [traceparent]
+#   fm-remote-secondmate-control.sh relaunch <id> <harness> <model|default|-> <effort|default|->
 #   fm-remote-secondmate-control.sh state <id>
 #   fm-remote-secondmate-control.sh beacon-age <id>
 #   fm-remote-secondmate-control.sh route <id>
@@ -377,6 +378,33 @@ cmd_launch() {
   print_route "$id"
 }
 
+# Relaunch through the ordinary host-local control plane.  The remote mate is
+# local from this host's perspective, while the explicit profile comes from the
+# parent because config/secondmate-harness belongs to a different home here.
+cmd_relaunch() {
+  local id=$1 harness=$2 model=$3 effort=$4
+  validate_id "$id"
+  validate_home "$id"
+  case "$harness" in
+    claude|codex|opencode|pi|pi-signed|grok|kimi|omp|cursor) ;;
+    *) die "unverified remote secondmate harness: $harness" ;;
+  esac
+  case "$effort" in
+    -|default|low|medium|high|xhigh|max) ;;
+    *) die "invalid remote secondmate effort: $effort" ;;
+  esac
+  case "$model" in *[[:space:]]*) die "invalid remote secondmate model: $model" ;; esac
+  remote_endpoint_require "$id"
+  [ "$model" != - ] || model=default
+  [ "$effort" != - ] || effort=default
+  HERDR_SESSION="$REMOTE_HERDR_SESSION" FM_HOME="$FM_ROOT" \
+    FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$CONTROL_STATE" \
+    FM_DATA_OVERRIDE="$CONTROL_DATA" FM_CONFIG_OVERRIDE="$TARGET_HOME/config" \
+    FM_SKIP_SECONDMATE_INHERIT=1 FM_SKIP_SECONDMATE_SYNC=1 \
+    "$SCRIPT_DIR/fm-control.sh" "$id" relaunch \
+      --harness "$harness" --model "$model" --effort "$effort"
+}
+
 cmd_send() {
   local id=$1 message=$2 _delivery_mode=${3:-} reconcile_mode=${4:-} reconcile_id=${5:-} harness relay_body meta
   local send_args=()
@@ -629,6 +657,7 @@ cmd_retire() {
 
 case "${1:-}" in
   launch) shift; [ "$#" -ge 8 ] && [ "$#" -le 9 ] || usage; cmd_launch "$@" ;;
+  relaunch) shift; [ "$#" -eq 4 ] || usage; cmd_relaunch "$@" ;;
   state) shift; [ "$#" -eq 1 ] || usage; validate_id "$1"; validate_home "$1" allow-markerless; state_value "$1" ;;
   beacon-age) shift; [ "$#" -eq 1 ] || usage; beacon_age "$1" ;;
   route) shift; [ "$#" -eq 1 ] || usage; cmd_route "$1" ;;
