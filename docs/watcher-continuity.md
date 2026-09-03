@@ -12,6 +12,7 @@ Editing only the core therefore makes a running session's marker stale, and `bin
 Each adapter starts the next arm before delivering the wake prompt, checks current session-lock ownership at launch, preserves one child or scheduled retry at a time, and applies bounded exponential retry after an unexpected or failed close.
 A failed follow-up never cancels continuity restoration.
 Same-process session replacement on Pi and OMP follows the generation-owner contract stated once in `bin/fm-primary-watch-core.ts`: an owning replacement activation arms without a model turn, and a state-scoped handoff carries every actionable close whose delivery overlaps replacement, including a follow-up not yet consumed and a retiring child that reports during shutdown.
+Compaction remains inside the active generation and does not trigger replacement shutdown, re-arm, or actionable handoff.
 Claude's `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns routine tokenless re-arm.
 The hook fires on every Stop, and an eligible primary with supervision need admits one home-scoped owner that foregrounds `bin/fm-watch-arm.sh` inside the hook-owned process tree.
 A numeric session-lock owner that fails the shared `fm_harness_pid_alive` predicate is reclaimed through `bin/fm-lock.sh` before auto-arm state changes, while a live owner, absent lock, or malformed lock keeps the competing hook inert.
