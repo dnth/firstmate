@@ -8,7 +8,7 @@
 # unverified semantic data is UNKNOWN - never idle. Endpoint death is the only
 # process-level override and yields dead, never busy. Child processes, CPU,
 # process sleep state, marker mtimes, and the old global UI-regex OR are not
-# state signals here; state/<id>.turn-ended files remain wake NOTIFICATIONS
+# state signals here; per-generation state/<id>.turn-ended.<spawn_gen> files remain wake NOTIFICATIONS
 # owned by the watcher, not current-state truth.
 #
 # Record file: state/<id>.busy-state - exactly one line, atomically replaced
