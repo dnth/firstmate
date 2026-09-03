@@ -311,18 +311,38 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 
 Pi 0.81.1 repeated the continuity and clean-exit lifecycle on 2026-07-23 after the Calm presentation changes.
 
-Pi same-process session-transition ownership was verified on 2026-07-27 against the tracked extension with a faithful in-process factory rebind (module cache retained, real arm children):
+Pi and OMP same-process session-transition ownership was verified on 2026-09-03 against the tracked adapters and shared core with provider-free public lifecycle events and real watcher child processes under Node v25.2.1:
 
 ```sh
-pi --version
-tests/fm-pi-watch-extension.test.sh
-tests/fm-pi-primary-types.test.sh
+bin/fm-test-run.sh tests/fm-pi-watch-extension.test.sh
+bin/fm-test-run.sh tests/fm-omp-primary.test.sh
 ```
 
-Observed guarantee: after ordinary `session_shutdown` for `/new`, `/resume`, and `/fork`, plus same-instance shutdown-plus-start, the replacement generation armed again without a Pi restart and without the `watcher: not armed - Pi session is shutting down` refusal.
+```text
+ok - Pi session transitions auto-arm through a generation owner across /new /resume /fork/reload, stale callbacks, and quit
+ok - Pi session replacement auto-arms and carries its in-flight actionable close
+ok - OMP /new /resume /fork and reload session_switch paths auto-arm and carry an in-flight actionable close
+```
+
+For Pi, ordinary `session_shutdown` for `/new`, `/resume`, `/fork`, and reload plus same-instance shutdown-plus-start is followed by an owning `session_start` that arms before any model turn and without the `watcher: not armed - Pi session is shutting down` refusal.
+The replacement consumed exactly once the actionable close whose first follow-up had begun but was not consumed before shutdown, while retaining one live successor.
 Stale prior-generation tool callbacks could not mutate the active child, repeated transitions kept exactly one live arm cycle, and terminal `quit` still refused late rearm.
 Plain Pi and pi-signed share the same tracked `.pi/extensions/fm-primary-pi-watch.ts` path, so both inherit the generation owner stated once in `bin/fm-primary-watch-core.ts`.
-OMP binds that same core through `.omp/extensions/fm-primary-omp.ts` and is covered by its own `tests/fm-omp-primary.test.sh` and the OMP row above; the remaining primary harnesses are not applicable because they do not use this extension generation lifecycle.
+For OMP, the 18.1.5 SDK source at `src/session/agent-session.ts` shows `newSession()` emitting `session_switch` with `reason: "new"`, `switchSession()` emitting `reason: "resume"`, `fork()` emitting `reason: "fork"`, and `reload()` delegating to `switchSession()`; none of those paths emits `session_shutdown`.
+The portable OMP regression invokes only those `session_switch` shapes, including a second `resume` event for reload, and proves each replacement arms a new real child while carrying one unconsumed actionable close exactly once.
+A 2026-09-03 differential check against installed OMP 18.1.5 ran the opt-in CLI guard on both the watcher-continuity port and pristine `origin/main`:
+
+```sh
+FM_OMP_PRIMARY_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-omp-primary-live-e2e.test.sh
+```
+
+```text
+not ok - OMP /new did not inject exactly one startup instruction for the new session
+```
+
+The identical pre-port failure establishes a pre-existing OMP 18.1.5 session-start-nudge compatibility finding rather than a watcher-continuity regression.
+The provider-free adapter regression remains the current proof that its `/new` and `/resume` replacement handlers each stage one nudge while re-arming, and the live guard remains intentionally red until that separate compatibility finding is resolved.
+The remaining primary harnesses are not applicable because they do not bind the shared Pi-compatible extension generation lifecycle.
 
 The once-per-generation recovery bound and immediate handling-successor poll were verified on 2026-08-21 at revision `549dd1e0ff05f96607c5e7457b4d8e3d7396bd16` with the tracked Pi extension, real watcher processes, and an isolated home.
 The regression forced handling confirmation to fail, observed one recovery follow-up across the former repeat window, confirmed the successor remained live, and then proved a separate handling successor durably queued a crew event within the bounded poll window.

@@ -4,12 +4,14 @@
 //
 // Session-generation ownership (stated once here): one generation is bound per
 // runtime session activation. Only the active live generation may start, stop,
-// rearm, or clear the arm child. A runtime-specific replacement event or a
-// fresh factory bind activates a new live generation so monitoring can arm
-// without restarting the process. Terminal shutdown leaves the final generation
-// stopped so late callbacks cannot rearm. Stale callbacks from an earlier
-// generation, including callbacks retained by a superseded core instance, are
-// no-ops against the active replacement. The active generation and the
+// rearm, or clear the arm child. An owning replacement activation arms its new
+// generation without a model turn. A replacement handoff carries actionable
+// closes that were still pending delivery; its durable state lives below
+// state/extensions/<runtime>-primary-watch/. Terminal shutdown leaves the final
+// generation stopped so late callbacks cannot rearm. Stale callbacks from an
+// earlier generation, including callbacks retained by a superseded core instance,
+// are no-ops against the active replacement. Compaction is not a session
+// replacement and never enters this lifecycle. The active generation and the
 // process-exit fallback are process-wide, not per-core-instance.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -37,6 +39,19 @@ type CloseClassification = {
   message: string;
 };
 
+type PendingActionableClose = {
+  version: 1;
+  token: string;
+  message: string;
+  predecessorArmPid: string;
+  delivered?: true;
+};
+
+type ReplacementActionableHandoff = {
+  version: 2;
+  pending: PendingActionableClose[];
+};
+
 // One outstanding watcher recovery episode, as reported by an established
 // successor arm. bin/fm-wake-lib.sh owns the marker grammar; this adapter only
 // carries the generation back so the handling handshake can name it.
@@ -53,11 +68,16 @@ type RestorationResult = {
 type SessionGeneration = {
   id: number;
   stopping: boolean;
+  replacement: boolean;
   child: ChildProcess | null;
   retryTimer: ReturnType<typeof setTimeout> | null;
+  cleanupTimer: ReturnType<typeof setTimeout> | null;
   retryFailures: number;
   restoring: boolean;
   seq: number;
+  pendingActionables: PendingActionableClose[];
+  cleanupFailure: string;
+  wakeAcknowledgements: Map<string, { content: string; settle: (consumed: boolean) => void }>;
 };
 
 export type ArmResult = {
@@ -78,22 +98,20 @@ export type PrimaryWatchCoreOptions = {
   repairToolName: string;
   encodeOperationalInput: (kind: "watcher", content: string) => string;
   sendFollowUp: (content: string) => Promise<void>;
-  // Optional supervision-branch dispatch handshake. When supplied (the OMP
-  // adapter with its branch extension loaded), the core offers each ordinary
-  // actionable wake to the branch before delivering it to main; a synchronous
-  // true means the branch now owns handling the wake and main is not woken. An
-  // adapter without a supervision branch omits this, and every wake goes to
-  // main exactly as before (docs/omp-supervision-branch.md). Never offered for
-  // a repair-failed delivery: only main can repair the watcher cycle.
-  offerWakeToBranch?: (message: string) => boolean;
+  // Optional supervision-branch dispatch handshake. A synchronous non-null
+  // settlement means the branch accepted handling, while rejection returns
+  // delivery ownership to the core's consumption-acknowledged main path.
+  // Never offered for repair-failed delivery: only main can repair the cycle.
+  offerWakeToBranch?: (message: string) => Promise<void> | null;
 };
 
 export type PrimaryWatchCore = {
   readonly runtime: "pi" | "omp";
   arm: () => ArmResult;
   armAndWait: () => Promise<ArmResult>;
+  acknowledgeWake: (content: string) => void;
   markLoaded: () => void;
-  sessionShutdown: () => void;
+  sessionShutdown: (replacement?: boolean) => Promise<void>;
   sessionStart: () => void;
 };
 
@@ -152,6 +170,35 @@ function actionableLine(output: string): string {
   const lines = output.split(/\r?\n/);
   return lines.find((line) => /^(signal:|stale:|check:|heartbeat($|:))/.test(line)) || "";
 }
+
+function completedActionableLine(output: string): string {
+  const newline = output.lastIndexOf("\n");
+  return newline < 0 ? "" : actionableLine(output.slice(0, newline + 1));
+}
+
+function nodeErrorCode(error: unknown): string {
+  return typeof error === "object" && error !== null && "code" in error
+    ? String((error as { code?: unknown }).code ?? "")
+    : "";
+}
+
+type ReplacementActionableReceiver = (pending: PendingActionableClose) => void;
+type ActionableDeliveryClaim = {
+  owner: SessionGeneration;
+  settlement: Promise<"delivered" | "failed">;
+};
+type ReplacementCoordinator = {
+  receiver: ReplacementActionableReceiver | null;
+  pending: PendingActionableClose[];
+  nextTokenId: number;
+  deliveries: Map<string, ActionableDeliveryClaim>;
+};
+type ReplacementCoordinatorGlobal = typeof globalThis & {
+  __firstmatePrimaryWatchReplacements?: Map<string, ReplacementCoordinator>;
+};
+const replacementCoordinatorGlobal = globalThis as ReplacementCoordinatorGlobal;
+const replacementCoordinators = replacementCoordinatorGlobal.__firstmatePrimaryWatchReplacements ??= new Map();
+
 let nextGenerationId = 0;
 let activeGeneration: SessionGeneration | null = null;
 let activeBinding: symbol | null = null;
@@ -161,11 +208,16 @@ function createGeneration(): SessionGeneration {
   return {
     id: ++nextGenerationId,
     stopping: false,
+    replacement: false,
     child: null,
     retryTimer: null,
+    cleanupTimer: null,
     retryFailures: 0,
     restoring: false,
     seq: 0,
+    pendingActionables: [],
+    cleanupFailure: "",
+    wakeAcknowledgements: new Map(),
   };
 }
 
@@ -178,12 +230,16 @@ function generationIsLive(owner: SessionGeneration): boolean {
   return activeGeneration === owner && !owner.stopping;
 }
 
-function stopGeneration(owner: SessionGeneration): void {
+function stopGeneration(owner: SessionGeneration): ChildProcess | null {
   owner.stopping = true;
   clearTimeout(owner.retryTimer ?? undefined);
+  clearTimeout(owner.cleanupTimer ?? undefined);
   owner.retryTimer = null;
-  if (owner.child) owner.child.kill("SIGTERM");
+  owner.cleanupTimer = null;
+  const child = owner.child;
+  if (child) child.kill("SIGTERM");
   owner.child = null;
+  return child;
 }
 
 function cleanupOnProcessExit(): void {
@@ -216,6 +272,20 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     offerWakeToBranch,
   } = options;
   const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
+  const handoffDir = `${state}/extensions/${runtime}-primary-watch`;
+  const actionableHandoff = `${handoffDir}/session-replacement-actionable.json`;
+  let nextHandoffId = 0;
+  let replacementHandoff: PendingActionableClose[] | null = null;
+  let replacementCoordinator = replacementCoordinators.get(actionableHandoff);
+  if (!replacementCoordinator) {
+    replacementCoordinator = {
+      receiver: null,
+      pending: [],
+      nextTokenId: 0,
+      deliveries: new Map(),
+    };
+    replacementCoordinators.set(actionableHandoff, replacementCoordinator);
+  }
   const extensionVersionHash = createHash("sha256")
     .update(readFileSync(extensionFile))
     .update(readFileSync(coreFile));
@@ -240,11 +310,119 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
   let generation = createGeneration();
   const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
   const armClose = new WeakMap<ChildProcess, Promise<void>>();
+  const armPendingActionable = new WeakMap<ChildProcess, PendingActionableClose>();
   // The recovery generation an established successor arm reported, keyed by the
   // arm child that reported it. bin/fm-watch-arm.sh only prints it while a
   // recovery episode is outstanding, so its absence means there is nothing to
   // hand off and the ordinary wake path applies unchanged.
   const armRecovery = new WeakMap<ChildProcess, RecoveryHandoff>();
+
+  function createPendingActionable(message: string, predecessorArmPid: string): PendingActionableClose {
+    return {
+      version: 1,
+      token: `${process.pid}-${Date.now()}-${++replacementCoordinator.nextTokenId}`,
+      message,
+      predecessorArmPid,
+    };
+  }
+
+  function validatePendingActionable(value: unknown): PendingActionableClose {
+    if (
+      typeof value !== "object" || value === null ||
+      (value as { version?: unknown }).version !== 1 ||
+      typeof (value as { token?: unknown }).token !== "string" ||
+      !/^[0-9]+-[0-9]+-[0-9]+$/.test((value as { token: string }).token) ||
+      typeof (value as { message?: unknown }).message !== "string" ||
+      !actionableLine((value as { message: string }).message) ||
+      typeof (value as { predecessorArmPid?: unknown }).predecessorArmPid !== "string" ||
+      !/^[0-9]*$/.test((value as { predecessorArmPid: string }).predecessorArmPid) ||
+      ((value as { delivered?: unknown }).delivered !== undefined &&
+        (value as { delivered?: unknown }).delivered !== true)
+    ) {
+      throw new Error(`invalid ${runtimeLabel} replacement actionable handoff at ${actionableHandoff}`);
+    }
+    return value as PendingActionableClose;
+  }
+
+  function validateReplacementHandoff(value: unknown): PendingActionableClose[] {
+    if (
+      typeof value !== "object" || value === null ||
+      (value as { version?: unknown }).version !== 2 ||
+      !Array.isArray((value as { pending?: unknown }).pending) ||
+      (value as { pending: unknown[] }).pending.length === 0
+    ) {
+      throw new Error(`invalid ${runtimeLabel} replacement actionable handoff at ${actionableHandoff}`);
+    }
+    const pending = (value as { pending: unknown[] }).pending.map(validatePendingActionable);
+    if (new Set(pending.map((item) => item.token)).size !== pending.length) {
+      throw new Error(`invalid ${runtimeLabel} replacement actionable handoff at ${actionableHandoff}`);
+    }
+    return pending;
+  }
+
+  function writeReplacementHandoff(pending: PendingActionableClose[]): void {
+    replacementHandoff = [...pending];
+    mkdirSync(handoffDir, { recursive: true });
+    const temporary = `${actionableHandoff}.tmp-${process.pid}-${++nextHandoffId}`;
+    const handoff: ReplacementActionableHandoff = { version: 2, pending };
+    try {
+      writeFileSync(temporary, `${JSON.stringify(handoff)}\n`, { mode: 0o600 });
+      renameSync(temporary, actionableHandoff);
+    } catch (error) {
+      try {
+        unlinkSync(temporary);
+      } catch {
+        // Preserve the original handoff publication error.
+      }
+      throw error;
+    }
+  }
+
+  function persistReplacementHandoff(pending: PendingActionableClose[]): void {
+    if (pending.length === 0) return;
+    writeReplacementHandoff(pending);
+  }
+
+  function loadReplacementHandoff(): PendingActionableClose[] {
+    try {
+      const pending = validateReplacementHandoff(JSON.parse(readFileSync(actionableHandoff, "utf8")));
+      replacementHandoff = pending;
+      return [...pending];
+    } catch (error) {
+      if (nodeErrorCode(error) === "ENOENT") {
+        replacementHandoff = null;
+        return [];
+      }
+      throw error;
+    }
+  }
+
+  function mergeReplacementHandoff(pending: PendingActionableClose): void {
+    let stored: PendingActionableClose[] = [];
+    try {
+      stored = validateReplacementHandoff(JSON.parse(readFileSync(actionableHandoff, "utf8")));
+    } catch (error) {
+      if (nodeErrorCode(error) !== "ENOENT") throw error;
+    }
+    if (!stored.some((item) => item.token === pending.token)) stored.push(pending);
+    writeReplacementHandoff(stored);
+  }
+
+  function clearReplacementHandoff(pending: PendingActionableClose): void {
+    try {
+      const stored = validateReplacementHandoff(JSON.parse(readFileSync(actionableHandoff, "utf8")));
+      const remaining = stored.filter((item) => item.token !== pending.token);
+      if (remaining.length === stored.length) return;
+      if (remaining.length > 0) {
+        writeReplacementHandoff(remaining);
+      } else {
+        replacementHandoff = null;
+        unlinkSync(actionableHandoff);
+      }
+    } catch (error) {
+      if (nodeErrorCode(error) !== "ENOENT") throw error;
+    }
+  }
 
   function lockOwnership(): LockOwnership {
     let lockPid = "";
@@ -261,6 +439,49 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       if (!pid || pid === "1") break;
     }
     return pidAlive(lockPid) ? "other" : "missing";
+  }
+
+  async function waitForGenerationChildClose(armChild: ChildProcess | null): Promise<void> {
+    if (!armChild) return;
+    const closed = armClose.get(armChild);
+    if (!closed) return;
+    await new Promise<void>((resolveWait) => {
+      const timer = setTimeout(resolveWait, armRetireTimeoutMs);
+      void closed.then(() => {
+        clearTimeout(timer);
+        resolveWait();
+      });
+    });
+  }
+
+  async function stopSessionGeneration(owner: SessionGeneration, replacement: boolean): Promise<void> {
+    owner.replacement = replacement;
+    let persistedTokens = "";
+    try {
+      if (replacement && owner.pendingActionables.length > 0) {
+        persistReplacementHandoff(owner.pendingActionables);
+        persistedTokens = owner.pendingActionables.map((pending) => pending.token).join("\n");
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      for (const pending of owner.pendingActionables) {
+        if (replacementCoordinator.pending.some((item: PendingActionableClose) => item.token === pending.token)) continue;
+        replacementCoordinator.pending.push({
+          ...pending,
+          message:
+            `${pending.message}\n\nwatcher: FAILED - ${runtimeLabel} extension could not persist ` +
+            `a replacement-session actionable wake\n${detail}`,
+        });
+      }
+      throw error;
+    } finally {
+      const child = stopGeneration(owner);
+      await waitForGenerationChildClose(child);
+    }
+    const currentTokens = owner.pendingActionables.map((pending) => pending.token).join("\n");
+    if (replacement && currentTokens && currentTokens !== persistedTokens) {
+      persistReplacementHandoff(owner.pendingActionables);
+    }
   }
 
   function markLoaded(): void {
@@ -337,13 +558,29 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     };
   }
 
-  async function sendWake(owner: SessionGeneration, message: string): Promise<void> {
-    if (!generationIsLive(owner)) return;
+  async function sendWake(owner: SessionGeneration, message: string, token?: string): Promise<boolean> {
+    if (!generationIsLive(owner)) return false;
     const content = encodeOperationalInput(
       "watcher",
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
     );
-    await sendFollowUp(content);
+    if (!token) {
+      await sendFollowUp(content);
+      return generationIsLive(owner);
+    }
+    let settleConsumption: (consumed: boolean) => void = () => {};
+    const consumption = new Promise<boolean>((resolveConsumption) => {
+      settleConsumption = resolveConsumption;
+    });
+    owner.wakeAcknowledgements.set(token, { content, settle: settleConsumption });
+    try {
+      await sendFollowUp(content);
+      return await consumption;
+    } catch (error) {
+      owner.wakeAcknowledgements.delete(token);
+      settleConsumption(false);
+      throw error;
+    }
   }
 
   function confirmHandlingDelivery(recovery: RecoveryHandoff): { ok: boolean; detail: string } {
@@ -397,24 +634,29 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     owner: SessionGeneration,
     message: string,
     repairFailed: boolean,
+    token: string,
     recovery?: RecoveryHandoff,
-  ): Promise<void> {
-    if (!generationIsLive(owner)) return;
+  ): Promise<boolean> {
+    if (!generationIsLive(owner)) return false;
     if (recovery) {
       const confirmed = confirmHandlingDeliveryWithRetry(owner, recovery);
       if (!confirmed.ok) {
         if (!pidAlive(recovery.watcherPid)) await retireArm(owner.child);
-        await sendWake(owner, `${message}\n\n${confirmed.detail}`);
-        return;
+        return await sendWake(owner, `${message}\n\n${confirmed.detail}`, token);
       }
     }
-    // Offer an ordinary actionable wake to the supervision branch when one is
-    // wired in; a synchronous accept means the branch owns handling it and main
-    // stays quiet. A repair-failed delivery is never offered - only main can
-    // repair the watcher cycle. Absent a branch, this is a no-op and every wake
-    // goes to main exactly as before.
-    if (!repairFailed && offerWakeToBranch?.(message)) return;
-    await sendWake(owner, message);
+    if (!repairFailed && offerWakeToBranch) {
+      const branchDelivery = offerWakeToBranch(message);
+      if (branchDelivery) {
+        try {
+          await branchDelivery;
+          return true;
+        } catch {
+          // The core retains delivery ownership when branch settlement rejects.
+        }
+      }
+    }
+    return await sendWake(owner, message, token);
   }
 
   function surfaceFailure(owner: SessionGeneration, message: string): void {
@@ -422,6 +664,152 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       // The runtime adapter owns delivery errors; continuity restoration never waits on prompting.
     });
   }
+
+  function enqueuePendingActionable(owner: SessionGeneration, pending: PendingActionableClose): void {
+    if (owner.pendingActionables.some((item) => item.token === pending.token)) return;
+    owner.pendingActionables.push(pending);
+    if (owner.stopping && owner.replacement) {
+      let replacementPending = pending;
+      try {
+        mergeReplacementHandoff(pending);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        replacementPending = {
+          ...pending,
+          message:
+            `${pending.message}\n\nwatcher: FAILED - ${runtimeLabel} extension could not persist ` +
+            `a late replacement-session actionable wake\n${detail}`,
+        };
+      }
+      if (replacementCoordinator.receiver) {
+        replacementCoordinator.receiver(replacementPending);
+      } else if (replacementPending !== pending) {
+        replacementCoordinator.pending.push(replacementPending);
+      }
+    }
+  }
+
+  function finishPendingActionable(owner: SessionGeneration, pending: PendingActionableClose): void {
+    clearReplacementHandoff(pending);
+    const index = owner.pendingActionables.findIndex((item) => item.token === pending.token);
+    if (index >= 0) owner.pendingActionables.splice(index, 1);
+    owner.cleanupFailure = "";
+  }
+
+  function surfaceCleanupFailure(owner: SessionGeneration, error: unknown): void {
+    const detail = error instanceof Error ? error.message : String(error);
+    if (owner.cleanupFailure === detail) return;
+    owner.cleanupFailure = detail;
+    surfaceFailure(
+      owner,
+      `watcher: FAILED - ${runtimeLabel} extension could not clear a delivered replacement-session actionable wake\n${detail}`,
+    );
+  }
+
+  function schedulePendingCleanup(owner: SessionGeneration): void {
+    if (!generationIsLive(owner) || owner.cleanupTimer) return;
+    const timer = setTimeout(() => {
+      if (owner.cleanupTimer === timer) owner.cleanupTimer = null;
+      void processPendingActionables(owner);
+    }, retryDelay(1));
+    timer.unref();
+    owner.cleanupTimer = timer;
+  }
+
+  async function processPendingActionables(owner: SessionGeneration): Promise<void> {
+    if (!generationIsLive(owner) || owner.restoring || owner.pendingActionables.length === 0) return;
+    owner.restoring = true;
+    const attemptedCleanup = new Set<string>();
+    try {
+      while (generationIsLive(owner) && owner.pendingActionables.length > 0) {
+        for (const delivered of owner.pendingActionables.filter(
+          (item) => item.delivered && !attemptedCleanup.has(item.token),
+        )) {
+          attemptedCleanup.add(delivered.token);
+          try {
+            finishPendingActionable(owner, delivered);
+          } catch (error) {
+            surfaceCleanupFailure(owner, error);
+          }
+        }
+        const pending = owner.pendingActionables.find((item) => !item.delivered);
+        if (!pending) break;
+        const existingClaim = replacementCoordinator.deliveries.get(pending.token);
+        if (existingClaim && existingClaim.owner !== owner) {
+          const settlement = await existingClaim.settlement;
+          if (!generationIsLive(owner)) return;
+          if (settlement === "delivered") {
+            pending.delivered = true;
+            continue;
+          }
+          if (replacementCoordinator.deliveries.get(pending.token) === existingClaim) {
+            replacementCoordinator.deliveries.delete(pending.token);
+          }
+        }
+        let settleClaim: (settlement: "delivered" | "failed") => void = () => {};
+        const settlement = new Promise<"delivered" | "failed">((resolveSettlement) => {
+          settleClaim = resolveSettlement;
+        });
+        const deliveryClaim = { owner, settlement };
+        replacementCoordinator.deliveries.set(pending.token, deliveryClaim);
+        const releaseClaim = (): void => {
+          if (replacementCoordinator.deliveries.get(pending.token) === deliveryClaim) {
+            replacementCoordinator.deliveries.delete(pending.token);
+          }
+        };
+        try {
+          const restoration = await restoreAfterActionableClose(owner, pending.predecessorArmPid);
+          if (!generationIsLive(owner)) {
+            settleClaim("failed");
+            releaseClaim();
+            return;
+          }
+          const message = restoration.failure
+            ? `${pending.message}\n\n${restoration.failure}`
+            : pending.message;
+          const delivered = await deliverActionableWake(
+            owner,
+            message,
+            Boolean(restoration.failure),
+            pending.token,
+            restoration.recovery,
+          );
+          if (!delivered) {
+            settleClaim("failed");
+            releaseClaim();
+            return;
+          }
+          pending.delivered = true;
+          settleClaim("delivered");
+          try {
+            finishPendingActionable(owner, pending);
+          } catch (error) {
+            surfaceCleanupFailure(owner, error);
+          }
+          releaseClaim();
+        } catch (error) {
+          settleClaim("failed");
+          releaseClaim();
+          throw error;
+        }
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      surfaceFailure(owner, `watcher: FAILED - ${runtimeLabel} extension could not deliver an actionable wake\n${detail}`);
+    } finally {
+      if (generationIsLive(owner)) {
+        owner.restoring = false;
+        if (owner.pendingActionables.some((pending) => pending.delivered)) schedulePendingCleanup(owner);
+        if (!owner.child && !owner.retryTimer) startArm(owner);
+      }
+    }
+  }
+
+  const receiveReplacementActionable: ReplacementActionableReceiver = (pending) => {
+    if (!generationIsLive(generation)) return;
+    enqueuePendingActionable(generation, pending);
+    void processPendingActionables(generation);
+  };
 
   function retryDelay(attempt: number): number {
     return Math.min(retryMaxMs, retryBaseMs * 2 ** Math.max(0, attempt - 1));
@@ -611,6 +999,12 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       if (/^watcher: (?:started|attached)\b/m.test(combined)) {
         settleReadiness(true);
       }
+      const reason = completedActionableLine(stdout) || completedActionableLine(stderr);
+      if (reason && !armPendingActionable.has(armChild)) {
+        const pending = createPendingActionable(reason, String(armChild.pid ?? ""));
+        armPendingActionable.set(armChild, pending);
+        enqueuePendingActionable(owner, pending);
+      }
     };
     const releaseChild = (): void => {
       if (owner.child === armChild) owner.child = null;
@@ -629,34 +1023,18 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       resolveClosed();
       settleReadiness(false);
       releaseChild();
-      if (!generationIsLive(owner)) return;
       const classification = classifyClose(stdout, stderr, code, signal);
       const predecessor = String(armChild.pid ?? "");
       if (classification.kind === "actionable") {
-        if (owner.restoring) return;
+        const pending = armPendingActionable.get(armChild) ??
+          createPendingActionable(classification.message, predecessor);
+        enqueuePendingActionable(owner, pending);
+        if (!generationIsLive(owner)) return;
         owner.retryFailures = 0;
-        owner.restoring = true;
-        void (async () => {
-          try {
-            const restoration = await restoreAfterActionableClose(owner, predecessor);
-            if (!generationIsLive(owner)) return;
-            const message = restoration.failure
-              ? `${classification.message}\n\n${restoration.failure}`
-              : classification.message;
-            await deliverActionableWake(owner, message, Boolean(restoration.failure), restoration.recovery);
-          } catch (error) {
-            const detail = error instanceof Error ? error.message : String(error);
-            surfaceFailure(
-              owner,
-              `watcher: FAILED - ${runtimeLabel} extension could not deliver an actionable wake\n${detail}`,
-            );
-          } finally {
-            if (generationIsLive(owner)) owner.restoring = false;
-          }
-        })();
+        void processPendingActionables(owner);
         return;
       }
-      if (owner.restoring) return;
+      if (!generationIsLive(owner) || owner.restoring) return;
       scheduleRetry(owner, classification.message, predecessor);
     });
     armChild.on("error", (error: Error) => {
@@ -683,7 +1061,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
 
   async function armAndWait(): Promise<ArmResult> {
     const owner = generation;
-    const result = startArm(owner);
+    const result = activateOwnedWatch(owner);
     if (!result.ok) return result;
     const armChild = owner.child;
     if (!armChild || await waitForReadiness(armChild)) return result;
@@ -695,16 +1073,63 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     };
   }
 
+  function activateOwnedWatch(owner: SessionGeneration): ArmResult {
+    if (!generationIsLive(owner)) return { ok: false, message: shuttingDownMessage };
+    if (lockOwnership() !== "owned") return startArm(owner);
+    replacementCoordinator.receiver = receiveReplacementActionable;
+    let pending: PendingActionableClose[] = [];
+    let loadFailure = "";
+    try {
+      pending = loadReplacementHandoff();
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      loadFailure =
+        `watcher: FAILED - ${runtimeLabel} extension could not load a replacement-session actionable wake\n${detail}`;
+    }
+    const inProcessPending = replacementCoordinator.pending.splice(0);
+    for (const actionable of [...pending, ...inProcessPending]) {
+      enqueuePendingActionable(owner, actionable);
+    }
+    if (owner.pendingActionables.length > 0) {
+      if (loadFailure) surfaceFailure(owner, loadFailure);
+      const armResult = startArm(owner, owner.pendingActionables[0].predecessorArmPid);
+      if (!armResult.ok) {
+        surfaceFailure(
+          owner,
+          `watcher: FAILED - ${runtimeLabel} extension could not arm before replacement wake delivery\n${armResult.message}`,
+        );
+      }
+      void processPendingActionables(owner);
+      return armResult;
+    }
+    const result = startArm(owner);
+    if (loadFailure) surfaceFailure(owner, `${loadFailure}\n${result.message}`);
+    return result;
+  }
+
+  function acknowledgeWake(content: string): void {
+    for (const [token, acknowledgement] of generation.wakeAcknowledgements) {
+      if (acknowledgement.content !== content) continue;
+      generation.wakeAcknowledgements.delete(token);
+      acknowledgement.settle(true);
+      break;
+    }
+  }
+
   function sessionStart(): void {
     if (activeBinding !== binding) return;
     if (generation.stopping) generation = createGeneration();
     activateGeneration(generation);
     markLoaded();
+    if (lockOwnership() === "owned") activateOwnedWatch(generation);
   }
 
-  function sessionShutdown(): void {
+  async function sessionShutdown(replacement = false): Promise<void> {
     if (activeBinding !== binding) return;
-    stopGeneration(generation);
+    for (const acknowledgement of generation.wakeAcknowledgements.values()) acknowledgement.settle(false);
+    generation.wakeAcknowledgements.clear();
+    if (replacementCoordinator.receiver === receiveReplacementActionable) replacementCoordinator.receiver = null;
+    await stopSessionGeneration(generation, replacement);
   }
 
   activeBinding = binding;
@@ -713,8 +1138,9 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
 
   return {
     runtime,
-    arm: () => startArm(generation),
+    arm: () => activateOwnedWatch(generation),
     armAndWait,
+    acknowledgeWake,
     markLoaded,
     sessionShutdown,
     sessionStart,

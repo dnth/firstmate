@@ -662,14 +662,18 @@ import { pathToFileURL } from "node:url";
 
 let tool = null;
 const prompts = [];
+const handlers = new Map();
 const pi = {
-  on() {},
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
   registerCommand() {},
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
   sendUserMessage: async (message) => {
     prompts.push(message);
+    handlers.get("before_agent_start")?.({ prompt: message }, {});
   },
 };
 const rows = () => existsSync(process.env.FM_ARM_LOG)
@@ -1048,10 +1052,6 @@ const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const startup = makePi();
 mod.default(startup.pi);
 await startup.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
-const first = await startup.getTool().execute("startup", {}, undefined, undefined, {});
-if (!first.details?.ok || !String(first.details.message).includes("started Pi extension arm child")) {
-  throw new Error(`startup arm failed: ${JSON.stringify(first.details)}`);
-}
 await waitFor(() => existsSync(process.env.FM_CHILD_PID_FILE), "startup child");
 const startupChild = readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim();
 if (!pidAlive(startupChild)) throw new Error("startup child was not alive");
@@ -1072,13 +1072,6 @@ async function replaceSession(previous, reason) {
     reason,
     previousSessionFile: `/tmp/previous-${reason}.jsonl`,
   }, {});
-  const armed = await next.getTool().execute(`arm-${reason}`, {}, undefined, undefined, {});
-  if (!armed.details?.ok) {
-    throw new Error(`${reason} replacement arm failed: ${JSON.stringify(armed.details)}`);
-  }
-  if (String(armed.details.message).includes("shutting down")) {
-    throw new Error(`${reason} replacement still refused with shutting-down latch`);
-  }
   await waitFor(() => {
     if (!existsSync(process.env.FM_CHILD_PID_FILE)) return false;
     const child = readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim();
@@ -1094,15 +1087,12 @@ async function replaceSession(previous, reason) {
 let current = await replaceSession(startup, "new");
 current = await replaceSession(current, "resume");
 current = await replaceSession(current, "fork");
+current = await replaceSession(current, "reload");
 
 // Same bound instance: ordinary shutdown then session_start without a fresh factory.
 const sameInstanceChild = readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim();
 await current.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
 await current.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
-const sameInstanceArm = await current.getTool().execute("same-instance", {}, undefined, undefined, {});
-if (!sameInstanceArm.details?.ok || String(sameInstanceArm.details.message).includes("shutting down")) {
-  throw new Error(`same-instance replacement arm failed: ${JSON.stringify(sameInstanceArm.details)}`);
-}
 await waitFor(() => {
   if (!existsSync(process.env.FM_CHILD_PID_FILE)) return false;
   const child = readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim();
@@ -1150,8 +1140,123 @@ EOF
   status=$?
   expect_code 0 "$status" "Pi session transitions must rearm through an explicit generation owner (output: $out)"
   [ -z "$out" ] || fail "Pi session-transition generation owner test printed output: $out"
-  pass "Pi session transitions use a generation owner across /new /resume /fork, stale callbacks, and quit"
+  pass "Pi session transitions auto-arm through a generation owner across /new /resume /fork/reload, stale callbacks, and quit"
 }
+
+test_pi_session_replacement_carries_inflight_actionable_close() {
+  local repo home plugin log trigger stop out status
+  repo="$TMP_ROOT/pi-session-replacement-handoff-root"
+  home="$TMP_ROOT/pi-session-replacement-handoff-home"
+  log="$TMP_ROOT/pi-session-replacement-handoff.log"
+  trigger="$TMP_ROOT/pi-session-replacement-handoff.trigger"
+  stop="$TMP_ROOT/pi-session-replacement-handoff.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+if [ "$count" -eq 1 ]; then
+  while [ ! -e "$FM_TRIGGER_FILE" ]; do sleep 0.02; done
+  printf 'signal: replacement in-flight actionable close\n'
+  exit 0
+fi
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" \
+    FM_TRIGGER_FILE="$trigger" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let releaseOldDelivery = () => {};
+const oldDeliveryRelease = new Promise((resolve) => {
+  releaseOldDelivery = resolve;
+});
+let oldDeliveryStarted = false;
+
+function makePi(blockDelivery = false) {
+  const handlers = new Map();
+  let tool = null;
+  const prompts = [];
+  const pi = {
+    on(event, handler) {
+      handlers.set(event, handler);
+    },
+    registerCommand() {},
+    registerTool(candidate) {
+      if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+    },
+    sendUserMessage: async (message) => {
+      prompts.push(message);
+      if (blockDelivery) {
+        oldDeliveryStarted = true;
+        await oldDeliveryRelease;
+        return;
+      }
+      handlers.get("before_agent_start")?.({ prompt: message }, {});
+    },
+    events: { on() {}, emit() {} },
+  };
+  return { pi, handlers, prompts, getTool: () => tool };
+}
+
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (pred()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+
+const armCount = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean).length
+  : 0;
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const originalMod = await import(pathToFileURL(process.env.PLUGIN).href);
+const original = makePi(true);
+originalMod.default(original.pi);
+await original.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+await waitFor(() => armCount() === 1, "initial automatic arm");
+writeFileSync(process.env.FM_TRIGGER_FILE, "trigger\n");
+await waitFor(() => oldDeliveryStarted && armCount() >= 2, "blocked old delivery and successor arm");
+await original.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+
+const replacementMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=inflight`);
+const replacement = makePi(false);
+replacementMod.default(replacement.pi);
+await replacement.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
+await waitFor(() => armCount() >= 3, "replacement automatic arm");
+releaseOldDelivery();
+await waitFor(
+  () => replacement.prompts.some((message) => message.includes("signal: replacement in-flight actionable close")),
+  "replacement actionable replay",
+);
+if (original.prompts.filter((message) => message.includes("signal: replacement in-flight actionable close")).length !== 1) {
+  throw new Error(`old session did not hold exactly one in-flight delivery: ${original.prompts.join(" | ")}`);
+}
+if (replacement.prompts.filter((message) => message.includes("signal: replacement in-flight actionable close")).length !== 1) {
+  throw new Error(`replacement did not consume exactly one replay: ${replacement.prompts.join(" | ")}`);
+}
+const handoff = `${process.env.FM_HOME}/state/extensions/pi-primary-watch/session-replacement-actionable.json`;
+await waitFor(() => !existsSync(handoff), "replacement handoff cleanup");
+const redundant = await replacement.getTool().execute("replacement-redundant", {}, undefined, undefined, {});
+if (!redundant.details?.ok || !String(redundant.details.message).includes("unchanged")) {
+  throw new Error(`replacement lost automatic arm ownership: ${JSON.stringify(redundant.details)}`);
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+await replacement.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, {});
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi replacement must auto-arm and carry an in-flight actionable close"
+  [ -z "$out" ] || fail "Pi session-replacement handoff test printed output: $out"
+  pass "Pi session replacement auto-arms and carries its in-flight actionable close"
+}
+
 test_pi_rebind_without_shutdown_supersedes_prior_binding() {
   local repo home plugin child_pid_file arm_log out status
   repo="$TMP_ROOT/pi-rebind-root"
@@ -2405,6 +2510,7 @@ test_pi_established_empty_close_honors_retry_limit
 test_pi_actionable_close_rechecks_session_lock
 test_pi_arm_distinguishes_session_lock_ownership
 test_pi_session_transition_generation_owner
+test_pi_session_replacement_carries_inflight_actionable_close
 test_pi_rebind_without_shutdown_supersedes_prior_binding
 test_pi_process_exit_cleanup_listener_lifecycle
 test_pi_process_exit_cleanup_stops_arm_child
