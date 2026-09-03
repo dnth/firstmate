@@ -254,15 +254,6 @@ cmd_notify() {
     last=
     if [ -f "$path" ] && [ ! -L "$path" ]; then last=$(cat "$path" 2>/dev/null || true); fi
     case "$last" in ''|*[!0-9]*) last= ;; esac
-    if [ -n "$last" ]; then
-      age=$((now - last))
-      # A clock that moved backwards must not silence the home forever.
-      if [ "$age" -ge 0 ] && [ "$age" -lt "$FM_RECONCILE_COOLDOWN_SECONDS" ]; then
-        printf 'cooldown: %s %s\n' "$id" "$age"
-        release_active_locks
-        continue
-      fi
-    fi
     control_lock="$STATE/.control-$id.lock"
     if ! fm_lock_try_acquire "$control_lock"; then
       printf 'skipped: %s lock\n' "$id"
@@ -291,6 +282,14 @@ cmd_notify() {
       fi
       release_active_locks
       continue
+    fi
+    if [ -n "$last" ]; then
+      age=$((now - last))
+      if [ "$age" -ge 0 ] && [ "$age" -lt "$FM_RECONCILE_COOLDOWN_SECONDS" ]; then
+        printf 'cooldown: %s %s\n' "$id" "$age"
+        release_active_locks
+        continue
+      fi
     fi
     did=$(delivery_id "$id:$sampled_spawn_gen:${last:-none}") || {
       printf 'failed: %s %s\n' "$id" "$kind"
