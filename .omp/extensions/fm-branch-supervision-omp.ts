@@ -939,14 +939,13 @@ ${context.command}
     enqueueMirrorFlush();
   });
 
-  // session_start arms this generation at a cold start (a fresh process). It is
-  // the sole clean-boundary transition: the branch is persistent across main's
-  // own /new, /resume, and /fork navigation and is never displaced by a
-  // synchronous live handoff (that path, and hung-branch takeover, are out of
-  // scope - see docs/omp-supervision-branch.md). The mirror re-anchors on its
-  // own when the session file changes (collectMainDialog compares the file), and
-  // mainModel/mainModelRegistry refresh at every turn_end, so no session_switch
-  // handling is needed. Terminal quit fires session_shutdown and never a start.
+  // session_start arms this generation at a cold start (a fresh process). Main
+  // session replacements are handled by the primary OMP adapter's
+  // session_switch watcher re-arm; this branch remains resident and the mirror
+  // re-anchors when the session file changes (collectMainDialog compares the
+  // file). A synchronous live handoff from a branch, or hung-branch takeover,
+  // remains out of scope (see docs/omp-supervision-branch.md). Terminal quit
+  // fires session_shutdown and never a start.
   pi.on?.("session_start", (_event, ctx) => {
     rememberMainContext(ctx);
     shuttingDown = false;
