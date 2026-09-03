@@ -612,6 +612,12 @@ markerless_unreachable_rc=$?
 set -e
 [ "$markerless_unreachable_rc" = 255 ] \
   || fail "an unreachable markerless route was not preserved as unknown (rc=$markerless_unreachable_rc)"
+rm -f "$PARENT/state/ios.reconcile-nudged"
+set +e
+markerless_reconcile_unreachable=$(FM_HOME="$PARENT" FM_STATE_OVERRIDE="$PARENT/state" FM_DATA_OVERRIDE="$PARENT/data" \
+  FM_FAKE_SSH_MODE=unreachable "$ROOT/bin/fm-secondmate-reconcile.sh" notify --snapshot "$remote_reconcile_snapshot" 2>&1)
+set -e
+assert_contains "$markerless_reconcile_unreachable" 'failed: ios orphan_in_flight' "unreachable reconciliation did not remain visible"
 reset_remote_herdr_fixture "$HERDR_STATE"
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = missing ] \
   || fail "a markerless remote home with no endpoint was not classified missing"
