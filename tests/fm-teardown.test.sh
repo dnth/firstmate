@@ -3617,3 +3617,37 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+
+test_turnend_registry_cleanup_uses_persisted_owner() {
+  local case_dir state persisted wrong script id token
+  case_dir="$TMP_ROOT/turnend-registry-owner"
+  state="$case_dir/state"
+  persisted="$case_dir/persisted"
+  wrong="$case_dir/wrong"
+  script="$case_dir/remove-functions.sh"
+  id=task-owner
+  token=fm.aaaaaaaaaaaa
+  mkdir -p "$state" "$persisted/fm-turn-end.d" "$wrong/hooks/fm-turn-end.d"
+  printf '%s\n' "$token" > "$state/$id.grok-turnend-token"
+  printf '%s\n' "$token" > "$persisted/fm-turn-end.d/$token"
+  printf 'grok_turnend_dir=%s\n' "$persisted/fm-turn-end.d" > "$state/$id.meta"
+  printf '%s\n' "$token" > "$state/$id.kimi-turnend-token"
+  mkdir -p "$persisted/kimi-turn-end.d"
+  printf '%s\n' "$token" > "$persisted/kimi-turn-end.d/$token"
+  printf 'kimi_turnend_dir=%s\n' "$persisted/kimi-turn-end.d" >> "$state/$id.meta"
+  {
+    printf '%s\n' 'meta_value() {'
+    printf '%s\n' "  local meta=\$1 key=\$2 line"
+    printf '%s\n' "  while IFS= read -r line; do case \"\$line\" in \"\$key=\"*) printf \"%s\" \"\${line#*=}\"; return 0;; esac; done < \"\$meta\""
+    printf '%s\n' '}'
+    sed -n '/^remove_grok_turnend_auth() {/,/^}/p' "$TEARDOWN"
+    sed -n '/^remove_kimi_turnend_auth() {/,/^}/p' "$TEARDOWN"
+  } > "$script"
+  GROK_HOME="$wrong" HOME="$wrong" bash -c 'source "$1"; remove_grok_turnend_auth "$2" "$3" "$4"; remove_kimi_turnend_auth "$2" "$3" "$4"' _ "$script" "$state" "$id" "$state/$id.meta"
+  assert_absent "$persisted/fm-turn-end.d/$token" "grok teardown did not remove persisted registry token"
+  assert_absent "$persisted/kimi-turn-end.d/$token" "kimi teardown did not remove persisted registry token"
+  assert_absent "$wrong/hooks/fm-turn-end.d/$token" "grok teardown touched wrong environment registry"
+  assert_absent "$wrong/.kimi-code/fm-turn-end.d/$token" "kimi teardown touched wrong environment registry"
+}
+
+test_turnend_registry_cleanup_uses_persisted_owner

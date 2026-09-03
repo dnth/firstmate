@@ -653,18 +653,20 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
 fi
 
 remove_grok_turnend_auth() {
-  local state_dir=$1 id=$2 token hooks_dir
+  local state_dir=$1 id=$2 meta=${3:-} token hooks_dir
   token=$(cat "$state_dir/$id.grok-turnend-token" 2>/dev/null || true)
   case "$token" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
-  hooks_dir="${GROK_HOME:-$HOME/.grok}/hooks/fm-turn-end.d"
+  hooks_dir=$(meta_value "$meta" grok_turnend_dir)
+  case "$hooks_dir" in /*) ;; *) hooks_dir="${GROK_HOME:-$HOME/.grok}/hooks/fm-turn-end.d" ;; esac
   rm -f "$hooks_dir/$token"
 }
 
 remove_kimi_turnend_auth() {
-  local state_dir=$1 id=$2 token hooks_dir
+  local state_dir=$1 id=$2 meta=${3:-} token hooks_dir
   token=$(cat "$state_dir/$id.kimi-turnend-token" 2>/dev/null || true)
   case "$token" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
-  hooks_dir="$HOME/.kimi-code/fm-turn-end.d"
+  hooks_dir=$(meta_value "$meta" kimi_turnend_dir)
+  case "$hooks_dir" in /*) ;; *) hooks_dir="$HOME/.kimi-code/fm-turn-end.d" ;; esac
   rm -f "$hooks_dir/$token"
 }
 
@@ -2387,8 +2389,8 @@ cleanup_firstmate_home_children() {
         safe_rm_rf_child_worktree "$child_wt" "$child_proj"
       fi
     fi
-    remove_grok_turnend_auth "$sub_state" "$child_id"
-    remove_kimi_turnend_auth "$sub_state" "$child_id"
+    remove_grok_turnend_auth "$sub_state" "$child_id" "$child_meta"
+    remove_kimi_turnend_auth "$sub_state" "$child_id" "$child_meta"
     remove_hermes_turnend_auth "$sub_state" "$child_id" "$child_meta"
     remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
     child_busy_gen=$(meta_value "$child_meta" busy_gen)
@@ -2684,8 +2686,8 @@ if [ "$KIND" = secondmate ]; then
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit $?
   remove_secondmate_registry_entry "$ID"
 fi
-remove_grok_turnend_auth "$STATE" "$ID"
-remove_kimi_turnend_auth "$STATE" "$ID"
+remove_grok_turnend_auth "$STATE" "$ID" "$META"
+remove_kimi_turnend_auth "$STATE" "$ID" "$META"
 remove_hermes_turnend_auth "$STATE" "$ID" "$META"
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.

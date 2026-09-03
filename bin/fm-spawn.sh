@@ -196,6 +196,7 @@
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
+# When these registries are enabled, state/<id>.meta records grok_turnend_dir= and kimi_turnend_dir= so teardown removes tokens through their owning directories.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
@@ -3952,6 +3953,8 @@ SPAWN_META_LOCK_HELD=1
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   echo "spawn_gen=$SPAWN_GEN"
+  [ -z "${GROK_AUTH_DIR:-}" ] || echo "grok_turnend_dir=$GROK_AUTH_DIR"
+  [ -z "${KIMI_AUTH_DIR:-}" ] || echo "kimi_turnend_dir=$KIMI_AUTH_DIR"
   if [ "$HARNESS" = omp ] && [ "$ALLOW_PROJECT_OMP_EXTENSIONS" -eq 1 ]; then
     echo "allow_project_omp_extensions=1"
   fi
