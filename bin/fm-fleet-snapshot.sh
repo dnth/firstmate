@@ -136,6 +136,9 @@ validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIME
 # shellcheck source=bin/fm-ff-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-ff-lib.sh"  # validate_secondmate_home: shared seeded-home boundary checks
+# shellcheck source=bin/fm-runpod-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-runpod-lib.sh"
 
 usage() {
   cat <<'EOF'
@@ -483,24 +486,32 @@ task_json_lines() {
     endpoint_exists=null
     agent_alive=not_checked
     if [ -n "$remote_host" ]; then
-      if remote_state=$(run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" \
-        "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null); then
-        remote_rc=0
-      else
-        remote_rc=$?
-      fi
-      if [ "$remote_rc" -eq 0 ]; then
-        remote_home_present=true
-        remote_state=$(printf '%s\n' "$remote_state" | tail -1)
-        case "$remote_state" in
-          alive) endpoint_exists=true; agent_alive=alive ;;
-          dead) endpoint_exists=true; agent_alive=dead ;;
-          missing) endpoint_exists=false; agent_alive=dead ;;
-          *) endpoint_exists=null; agent_alive=unknown ;;
-        esac
-      else
+      # RunPod scale-to-zero routes are deliberate no-host lifecycle states.
+      # Keep the snapshot read-only and avoid probing their absent SSH endpoint.
+      if fm_runpod_is_dormant "$DATA" "$id"; then
+        remote_home_present=false
         endpoint_exists=null
         agent_alive=unknown
+      else
+        if remote_state=$(run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" \
+          "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null); then
+          remote_rc=0
+        else
+          remote_rc=$?
+        fi
+        if [ "$remote_rc" -eq 0 ]; then
+          remote_home_present=true
+          remote_state=$(printf '%s\n' "$remote_state" | tail -1)
+          case "$remote_state" in
+            alive) endpoint_exists=true; agent_alive=alive ;;
+            dead) endpoint_exists=true; agent_alive=dead ;;
+            missing) endpoint_exists=false; agent_alive=dead ;;
+            *) endpoint_exists=null; agent_alive=unknown ;;
+          esac
+        else
+          endpoint_exists=null
+          agent_alive=unknown
+        fi
       fi
     else
       if [ -n "$target" ]; then

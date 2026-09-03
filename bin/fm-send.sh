@@ -1067,7 +1067,7 @@ else
       send_rc=$?
     fi
     fm_lock_release "$REMOTE_META_LOCK"
-    if [ -n "$RECONCILE_DELIVERY_ID" ] && [ "${send_rc:-0}" -eq 0 ]; then
+    if [ "${send_rc:-0}" -eq 0 ]; then
       verdict=empty
     elif [ "${send_rc:-0}" -ne 0 ]; then
       [ -z "$remote_out" ] || printf '%s\n' "$remote_out" >&2
