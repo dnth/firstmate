@@ -123,8 +123,7 @@ validate_positive_bound FM_SNAPSHOT_PARENT_ACTIVITY_LINES "$FM_SNAPSHOT_PARENT_A
 validate_positive_bound FM_SNAPSHOT_PARENT_ACTIVITY_BYTES "$FM_SNAPSHOT_PARENT_ACTIVITY_BYTES"
 validate_positive_bound FM_SNAPSHOT_PARENT_ACTIVITIES "$FM_SNAPSHOT_PARENT_ACTIVITIES"
 validate_positive_bound FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT "$FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT"
-validate_positive_bound FM_SNAPSHOT_REGISTRY_LINES "$FM_SNAPSHOT_REGISTRY_LINES"
-validate_positive_bound FM_SNAPSHOT_REGISTRY_BYTES "$FM_SNAPSHOT_REGISTRY_BYTES"
+case "$FM_SNAPSHOT_REGISTRY_LINES:$FM_SNAPSHOT_REGISTRY_BYTES" in *[!0-9:]*|:) echo "fm-fleet-snapshot: registry bounds must be non-negative" >&2; exit 2 ;; esac
 case "$FM_SNAPSHOT_REGISTRY_RECORDS" in ''|*[!0-9]*) echo "fm-fleet-snapshot: FM_SNAPSHOT_REGISTRY_RECORDS must be nonnegative" >&2; exit 2 ;; esac
 validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIMEOUT"
 
@@ -864,7 +863,7 @@ registry_secondmates_json() {
     observed=$6
     parse_filter=$7
     output_filter=$8
-    content=$(LC_ALL=C head -c "$((max_bytes + 1))" "$f" || exit 3; printf "\036") || exit 3
+    if [ "$max_bytes" -eq 0 ]; then content=$(cat "$f" || exit 3; printf "\036"); else content=$(LC_ALL=C head -c "$((max_bytes + 1))" "$f" || exit 3; printf "\036"); fi
     content=${content%$'\036'}
     bytes=$(printf "%s" "$content" | LC_ALL=C wc -c | tr -d " ")
     byte_truncated=false
@@ -885,7 +884,7 @@ registry_secondmates_json() {
     fi
     line_truncated=false
     if [ "$lines" -gt "$max_lines" ]; then line_truncated=true; fi
-    window=$(printf "%s\n" "$content" | LC_ALL=C head -n "$max_lines") || exit 3
+    if [ "$max_lines" -eq 0 ]; then window=$content; else window=$(printf "%s\n" "$content" | LC_ALL=C head -n "$max_lines") || exit 3; fi
     if [ -n "$window" ]; then
       lines_in_window=$(printf "%s\n" "$window" | awk "END {print NR}")
     else

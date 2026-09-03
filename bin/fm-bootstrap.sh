@@ -751,7 +751,7 @@ secondmate_liveness_sweep() {
 secondmate_reconcile_sweep() {
   [ -x "$SCRIPT_DIR/fm-secondmate-reconcile.sh" ] || return 0
   local snapshot out
-  snapshot=$(FM_SNAPSHOT_SECONDMATES=0 "$SCRIPT_DIR/fm-fleet-snapshot.sh" --json 2>/dev/null) || return 0
+  snapshot=$(FM_SNAPSHOT_SECONDMATES=0 FM_SNAPSHOT_REGISTRY_LINES=0 FM_SNAPSHOT_REGISTRY_BYTES=0 "$SCRIPT_DIR/fm-fleet-snapshot.sh" --json 2>/dev/null) || return 0
   out=$(printf '%s' "$snapshot" | "$SCRIPT_DIR/fm-secondmate-reconcile.sh" notify --snapshot - 2>/dev/null) || true
   [ -z "$out" ] || printf '%s\n' "$out"
 }

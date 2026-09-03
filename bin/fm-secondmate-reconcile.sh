@@ -312,6 +312,7 @@ cmd_notify() {
       *)
       printf 'failed: %s %s\n' "$id" "$kind"
       rc=1
+      release_active_locks
       continue
       ;;
     esac
