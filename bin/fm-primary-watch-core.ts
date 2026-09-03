@@ -800,7 +800,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     } finally {
       if (generationIsLive(owner)) {
         owner.restoring = false;
-        if (owner.pendingActionables.some((pending) => pending.delivered)) schedulePendingCleanup(owner);
+        if (owner.pendingActionables.length > 0) schedulePendingCleanup(owner);
         if (!owner.child && !owner.retryTimer) startArm(owner);
       }
     }
