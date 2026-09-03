@@ -94,7 +94,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
 projects/            cloned repos; gitignored; read-only except under hard rule 1's concrete captain-approved project operation exception
 state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
-  <id>.turn-ended    touched by turn-end hooks
+  <id>.turn-ended.<spawn_gen>  per-generation turn-end wake notification, written lock-free by bin/fm-turnend-signal.sh; the consumer (bin/fm-wake-lib.sh, via the watcher) fires only the live incarnation's gen and ignores the rest; teardown removes all gens
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
   <id>.kimi-turnend-token   firstmate-owned Kimi hook registry token for the task; removed by teardown
   <id>.hermes-turnend-token <id>.hermes-session <id>.hermes-started   firstmate-owned Hermes hook registry token plus the task's stable session id and per-turn start acknowledgement; removed by teardown

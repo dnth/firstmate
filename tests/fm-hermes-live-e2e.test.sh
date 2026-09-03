@@ -375,6 +375,27 @@ wait_file() {  # <file> [polls]
   return 1
 }
 
+# Turn-end markers are per generation (state/<id>.turn-ended.<spawn_gen>); the live
+# Hermes TUI is a single incarnation, so match its one gen.
+wait_turnend() {  # <state-dir> <id> [polls]
+  local sd=$1 id=$2 polls=${3:-240} i=0 g
+  while [ "$i" -lt "$polls" ]; do
+    for g in "$sd/$id".turn-ended.*; do
+      [ -f "$g" ] && return 0
+    done
+    sleep 0.25
+    i=$((i + 1))
+  done
+  return 1
+}
+turnend_marker() {  # <state-dir> <id> -> prints the single gen marker path
+  local sd=$1 id=$2 g
+  for g in "$sd/$id".turn-ended.*; do
+    [ -e "$g" ] && { printf '%s' "$g"; return 0; }
+  done
+  return 1
+}
+
 busy_state() {  # <id>
   local id=$1
   # shellcheck disable=SC2016 # Positional parameters expand inside the probe shell.
@@ -410,42 +431,42 @@ printf 'command: fm-spawn %s --harness hermes --backend tmux --model gpt-5.6-sol
 run_tmux_env env FM_SPAWN_NO_GUARD=1 "$ROOT/bin/fm-spawn.sh" "$WORKER" "$PROJECT" \
   --harness hermes --backend tmux --model gpt-5.6-sol --effort low \
   --mode local-only --yolo off
-wait_file "$FM_LIVE_HOME/state/$WORKER.turn-ended" || fail "initial Hermes TUI turn did not end"
+wait_turnend "$FM_LIVE_HOME/state" "$WORKER" || fail "initial Hermes TUI turn did not end"
 wait_capture "$WORKER_TARGET" HERMES-TUI-SPAWN-OK || fail "initial Hermes TUI response missing"
 SESSION_ID=$(cat "$FM_LIVE_HOME/state/$WORKER.hermes-session")
 [ -n "$SESSION_ID" ] || fail "Hermes TUI session id is empty"
 printf 'output: persistent=yes session=%s turn_end=touched busy=%s\n' "$SESSION_ID" "$(busy_state "$WORKER")"
 
-mv "$FM_LIVE_HOME/state/$WORKER.turn-ended" "$FM_LIVE_HOME/state/$WORKER.initial-turn-ended"
+mv -- "$(turnend_marker "$FM_LIVE_HOME/state" "$WORKER")" "$FM_LIVE_HOME/state/$WORKER.initial-turn-ended"
 printf 'command: fm-send %s "Use terminal_tool to run sleep 5 ..."\n' "$WORKER"
 run_tmux_env env FM_SEND_SETTLE=0 "$ROOT/bin/fm-send.sh" "$WORKER" \
   'Use terminal_tool to run sleep 5, then reply exactly HERMES-TUI-STEER-OK.'
 BUSY=$(wait_state "$WORKER" busy) || fail "Hermes TUI never reported busy"
-wait_file "$FM_LIVE_HOME/state/$WORKER.turn-ended" || fail "steered Hermes TUI turn did not end"
+wait_turnend "$FM_LIVE_HOME/state" "$WORKER" || fail "steered Hermes TUI turn did not end"
 IDLE=$(wait_state "$WORKER" idle) || fail "Hermes TUI did not return idle"
 wait_capture "$WORKER_TARGET" HERMES-TUI-STEER-OK || fail "Hermes TUI steer response missing"
 printf 'output: submit=verified busy=%s idle=%s turn_end=touched\n' "$BUSY" "$IDLE"
 
-mv "$FM_LIVE_HOME/state/$WORKER.turn-ended" "$FM_LIVE_HOME/state/$WORKER.steer-turn-ended"
+mv -- "$(turnend_marker "$FM_LIVE_HOME/state" "$WORKER")" "$FM_LIVE_HOME/state/$WORKER.steer-turn-ended"
 printf 'command: fm-send %s /fmnative\n' "$WORKER"
 run_tmux_env env FM_SEND_SETTLE=0 "$ROOT/bin/fm-send.sh" "$WORKER" /fmnative \
   || fail "native Hermes skill send was not accepted as a proven model turn"
 NATIVE_BUSY=$(wait_state "$WORKER" busy) || fail "native Hermes skill never reported busy"
-wait_file "$FM_LIVE_HOME/state/$WORKER.turn-ended" || fail "native Hermes skill turn did not end"
+wait_turnend "$FM_LIVE_HOME/state" "$WORKER" || fail "native Hermes skill turn did not end"
 NATIVE_IDLE=$(wait_state "$WORKER" idle) || fail "native Hermes skill turn did not return idle"
 wait_capture "$WORKER_TARGET" HERMES-TUI-NATIVE-SKILL-OK \
   || fail "native Hermes skill did not produce its model reply"
 printf 'output: native_skill=/fmnative send=0 busy=%s idle=%s turn_end=touched\n' \
   "$NATIVE_BUSY" "$NATIVE_IDLE"
 
-mv "$FM_LIVE_HOME/state/$WORKER.turn-ended" "$FM_LIVE_HOME/state/$WORKER.native-turn-ended"
+mv -- "$(turnend_marker "$FM_LIVE_HOME/state" "$WORKER")" "$FM_LIVE_HOME/state/$WORKER.native-turn-ended"
 printf 'command: fm-send %s "sleep 20"; fm-send %s --key C-c\n' "$WORKER" "$WORKER"
 run_tmux_env env FM_SEND_SETTLE=0 "$ROOT/bin/fm-send.sh" "$WORKER" \
   'Use terminal_tool to run sleep 20, then reply SHOULD-NOT-COMPLETE.'
 wait_state "$WORKER" busy >/dev/null || fail "Hermes interrupt probe never became busy"
 run_tmux_env "$ROOT/bin/fm-send.sh" "$WORKER" --key C-c
 INTERRUPTED=$(wait_state "$WORKER" idle) || fail "Hermes TUI did not settle after Ctrl+C"
-wait_file "$FM_LIVE_HOME/state/$WORKER.turn-ended" || fail "Hermes interrupt did not fire turn-end"
+wait_turnend "$FM_LIVE_HOME/state" "$WORKER" || fail "Hermes interrupt did not fire turn-end"
 wait_capture "$WORKER_TARGET" interrupted || fail "Hermes TUI did not render its interrupt result"
 printf 'output: interrupt=C-c state=%s turn_end=touched\n' "$INTERRUPTED"
 

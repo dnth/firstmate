@@ -57,7 +57,7 @@ run_grok_spawn() {
 }
 
 test_grok_hook_requires_registered_token() {
-  local rec case_dir home proj wt fakebin grok_home id out status hook token target evil evil_target
+  local rec case_dir home proj wt fakebin grok_home id out status hook token target target_gen gen registry registry_content evil evil_target
   rec=$(make_spawn_case hook-auth)
   IFS='|' read -r case_dir home proj wt fakebin grok_home id <<EOF
 $rec
@@ -73,7 +73,12 @@ EOF
   target="$home/state/$id.turn-ended"
   assert_no_grep "$target" "$wt/.fm-grok-turnend" "grok pointer exposed the turn-end path"
   token=$(sed -n 's/^token=//p' "$wt/.fm-grok-turnend")
-  assert_present "$grok_home/hooks/fm-turn-end.d/$token" "grok auth registry entry was not written"
+  registry="$grok_home/hooks/fm-turn-end.d/$token"
+  assert_present "$registry" "grok auth registry entry was not written"
+  # The hook resolves the registry's spawn_gen and publishes the per-generation
+  # marker state/<id>.turn-ended.<spawn_gen>.
+  gen=$(sed -n 's/^spawn_gen=//p' "$registry")
+  target_gen="$home/state/$id.turn-ended.$gen"
 
   evil="$case_dir/evil"
   evil_target="$case_dir/evil-target.turn-ended"
@@ -87,11 +92,25 @@ EOF
     printf 'token=%s\n' "$token"
   } > "$wt/.fm-grok-turnend"
   GROK_WORKSPACE_ROOT="$wt" bash "$hook"
-  assert_absent "$target" "grok pointer accepted token outside the first line"
+  assert_absent "$target_gen" "grok pointer accepted token outside the first line"
 
   printf 'token=%s\n' "$token" > "$wt/.fm-grok-turnend"
   GROK_WORKSPACE_ROOT="$wt" bash "$hook"
-  assert_present "$target" "registered grok pointer did not touch the task turn-end file"
+  assert_present "$target_gen" "registered grok pointer did not publish the per-generation turn-end marker"
+
+  rm -f -- "$target_gen"
+  registry_content=$(cat "$registry")
+  printf '%s\n' "$target" > "$registry"
+  GROK_WORKSPACE_ROOT="$wt" bash "$hook"
+  assert_absent "$target_gen" "a legacy one-line grok registry entry remained active"
+  printf '%s\n' "$registry_content" > "$registry"
+
+  # The publisher is unconditional (incarnation gating is the consumer's job), so a
+  # registered hook publishes even with the meta gone. The consumer discards the
+  # marker against the missing/superseded incarnation (covered in fm-wake-queue.test.sh).
+  rm -f -- "$target_gen" "$home/state/$id.meta"
+  GROK_WORKSPACE_ROOT="$wt" bash "$hook"
+  assert_present "$target_gen" "a registered grok hook must publish a per-generation marker even with the meta gone"
   pass "grok global hook requires a firstmate registry token"
 }
 

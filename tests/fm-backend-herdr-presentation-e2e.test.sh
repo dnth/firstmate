@@ -423,6 +423,7 @@ normalize_meta() {  # <meta>
   sed -E \
     -e 's|^worktree=.*$|worktree=<treehouse-worktree>|' \
     -e 's|^window=.*$|window=<herdr-container-id>|' \
+    -e 's|^spawn_gen=.*$|spawn_gen=<spawn-gen>|' \
     -e 's|^herdr_workspace_id=.*$|herdr_workspace_id=<herdr-container-id>|' \
     -e 's|^herdr_tab_id=.*$|herdr_tab_id=<herdr-container-id>|' \
     -e 's|^herdr_pane_id=.*$|herdr_pane_id=<herdr-container-id>|' \

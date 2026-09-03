@@ -902,6 +902,49 @@ test_branch_owner_activation_rollback_stops_after_publication() {
   pass "branch activation rollback succeeds before publication and preserves every active grant"
 }
 
+# Consumer-side incarnation gate for turn-end markers (fm-wake-lib.sh).
+# bin/fm-turnend-signal.sh writes state/<id>.turn-ended lock-free and
+# unconditionally, stamped with the firing spawn_gen. The consumer discards a
+# marker whose stamp is not the live incarnation's, so a torn-down or relaunched
+# id never re-fires even though a stale marker exists.
+test_turnend_marker_consumer_incarnation_gate() {
+  local T id state meta
+  T="$TMP_ROOT/turnend-consumer" id=cons-x1
+  state="$T/state" meta="$state/$id.meta"
+  mkdir -p "$state"
+
+  # Gate the per-generation marker <state>/<id>.turn-ended.<gen> for one gen.
+  gate() {  # <gen> -> STALE (ignore) or FIRE (surface)
+    ( . "$ROOT/bin/fm-wake-lib.sh" && fm_wake_turnend_marker_is_stale "$state" "$id" "$1" ) \
+      && printf 'STALE' || printf 'FIRE'
+  }
+
+  # Live incarnation g2 publishes; a DELAYED older-incarnation g1 hook then publishes
+  # into its OWN gen file (no clobber). The consumer FIRES only the live gen and
+  # IGNORES the stale gen - the delayed-old-gen-vs-live-gen regression.
+  printf 'endpoint_task_id=%s\nspawn_gen=g2\n' "$id" > "$meta"
+  "$ROOT/bin/fm-turnend-signal.sh" "$state" "$id" g2
+  "$ROOT/bin/fm-turnend-signal.sh" "$state" "$id" g1
+  assert_present "$state/$id.turn-ended.g2" "the live incarnation's marker is missing"
+  assert_present "$state/$id.turn-ended.g1" "the delayed old incarnation clobbered the live marker"
+  [ "$(gate g2)" = FIRE ] || fail "the consumer discarded the live incarnation's completion"
+  [ "$(gate g1)" = STALE ] || fail "the consumer surfaced a superseded incarnation's stale marker"
+
+  # Torn down: meta gone, every gen marker remains -> all STALE (never re-fires).
+  rm -f -- "$meta"
+  [ "$(gate g2)" = STALE ] || fail "a torn-down id's marker was surfaced"
+  [ "$(gate g1)" = STALE ] || fail "a torn-down id's marker was surfaced"
+
+  # Metadata that records no gen yet cannot gate -> FIRE rather than drop a completion.
+  printf 'endpoint_task_id=%s\n' "$id" > "$meta"
+  [ "$(gate g2)" = FIRE ] || fail "the consumer dropped a completion for metadata with no recorded gen"
+
+  unset -f gate
+  rm -rf -- "$T"
+  pass "consumer fires only the live gen marker and ignores stale gens, so a delayed old gen never overwrites or drops a live completion"
+}
+
+test_turnend_marker_consumer_incarnation_gate
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor

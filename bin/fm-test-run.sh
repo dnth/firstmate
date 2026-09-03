@@ -197,6 +197,7 @@ family_for_basename() {
       printf '%s\n' live-harness-optin
       ;;
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
+    fm-busy-adapter-wiring.test.sh|\
     fm-herdr-session-cleanup.test.sh|fm-send-inbox.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|fm-send-turn-start.test.sh|fm-spawn-batch.test.sh|\
     fm-spawn-dispatch-profile.test.sh|\
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|fm-treehouse-orphan-recovery.test.sh|\
@@ -1008,7 +1009,7 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       printf '%s\n' secondmate
       ;;
-    bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-peek.sh|bin/fm-composer*|bin/fm-task-inbox-lib.sh)
+    bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-peek.sh|bin/fm-composer*|bin/fm-task-inbox-lib.sh|bin/fm-turnend-signal.sh)
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
       [ "$path" != bin/fm-task-inbox-lib.sh ] || printf '%s\n' watcher-wake-lock

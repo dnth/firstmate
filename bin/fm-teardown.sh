@@ -401,6 +401,10 @@ remote_secondmate_teardown() {
   mv -f -- "$tmp" "$SECONDMATE_REG"
   status_retire_presentation_task "$STATE" "$ID" || return 1
   rm -f -- "$STATE/$ID.meta" "$STATE/$ID.turn-ended"
+  for _turnend_marker in "$STATE/$ID".turn-ended.*; do
+    [ -e "$_turnend_marker" ] || continue
+    rm -f -- "$_turnend_marker"
+  done
   printf 'teardown %s complete (remote %s:%s)\n' "$ID" "$remote_host" "$remote_home"
   return 0
 }
@@ -2401,6 +2405,10 @@ cleanup_firstmate_home_children() {
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.hermes-turnend-token" "$sub_state/$child_id.hermes-session" \
       "$sub_state/$child_id.hermes-started"
+    for _child_turnend in "$sub_state/$child_id".turn-ended.*; do
+      [ -e "$_child_turnend" ] || continue
+      rm -f -- "$_child_turnend"
+    done
   done
 }
 
@@ -2694,6 +2702,11 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.hermes-turnend-token" "$STATE/$ID.hermes-session" \
   "$STATE/$ID.hermes-started" \
   "$STATE/.$ID.open-decisions-cursor"
+# Per-generation turn-end markers (state/<id>.turn-ended.<spawn_gen>) for every gen.
+for _turnend_marker in "$STATE/$ID".turn-ended.*; do
+  [ -e "$_turnend_marker" ] || continue
+  rm -f -- "$_turnend_marker"
+done
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then

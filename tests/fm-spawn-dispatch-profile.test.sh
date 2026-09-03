@@ -2440,7 +2440,7 @@ test_omp_refuses_unverified_backends_before_endpoint_creation() {
 }
 
 test_omp_scout_uses_external_turn_extension() {
-  local rec id out status
+  local rec id out status omp_gen
   id=$(profile_id profile-omp-scout-z8p)
   rec=$(make_spawn_case profile-omp-scout omp "$id")
   read_case_record "$rec"
@@ -2452,9 +2452,11 @@ test_omp_scout_uses_external_turn_extension() {
   assert_contains "$out" "spawned $id harness=omp kind=scout" "OMP scout did not preserve exact identity"
   assert_grep 'kind=scout' "$HOME_DIR/state/$id.meta" "OMP scout metadata lost delivery semantics"
   assert_present "$HOME_DIR/state/$id.omp-ext.ts" "OMP scout did not receive the external turn extension"
-  rm -f "$HOME_DIR/state/$id.omp-ready" "$HOME_DIR/state/$id.omp-started" "$HOME_DIR/state/$id.turn-ended"
+  # The OMP extension publishes the per-generation marker state/<id>.turn-ended.<spawn_gen>.
+  omp_gen=$(sed -n 's/^spawn_gen=//p' "$HOME_DIR/state/$id.meta" | tail -1)
+  rm -f "$HOME_DIR/state/$id.omp-ready" "$HOME_DIR/state/$id.omp-started" "$HOME_DIR/state/$id.turn-ended.$omp_gen"
   PLUGIN="$HOME_DIR/state/$id.omp-ext.ts" READY="$HOME_DIR/state/$id.omp-ready" \
-    STARTED="$HOME_DIR/state/$id.omp-started" TURNENDED="$HOME_DIR/state/$id.turn-ended" \
+    STARTED="$HOME_DIR/state/$id.omp-started" TURNENDED="$HOME_DIR/state/$id.turn-ended.$omp_gen" \
     node --input-type=module <<'JS'
 import { existsSync } from "node:fs";
 import { pathToFileURL } from "node:url";

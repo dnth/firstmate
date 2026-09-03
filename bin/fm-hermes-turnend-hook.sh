@@ -13,7 +13,13 @@
 # while classic/headless Hermes can invoke the same handler through config
 # hooks. on_session_start records a new resumable session id, pre_llm_call
 # acknowledges every initial or resumed turn and marks semantic busy state,
-# and on_session_end marks semantic idle and touches state/<id>.turn-ended.
+# and on_session_end marks semantic idle and publishes the turn-end marker
+# through the shared stamped publisher (bin/fm-turnend-signal.sh), like every
+# other harness surface. It stays gated on the live task incarnation two ways:
+# session_matches (the session id captured at on_session_start must still own the
+# sidecar, which teardown removes) guards the call, and the publisher stamps the
+# marker with the spawn_gen so the consumer discards it if the task is torn down
+# or relaunched.
 # A worktree token must resolve through the profile-private Firstmate registry
 # before any event can act.
 #
@@ -142,6 +148,7 @@ root=$(jq -er '.root | strings' "$registry" 2>/dev/null) || exit 0
 state=$(jq -er '.state | strings' "$registry" 2>/dev/null) || exit 0
 id=$(jq -er '.id | strings | select(test("^[A-Za-z0-9][A-Za-z0-9._-]*$"))' "$registry" 2>/dev/null) || exit 0
 gen=$(jq -er '.gen | strings | select(test("^[A-Za-z0-9._-]+$"))' "$registry" 2>/dev/null) || exit 0
+spawn_gen=$(jq -er '.spawn_gen | strings | select(test("^[A-Za-z0-9._-]+$"))' "$registry" 2>/dev/null) || exit 0
 [ "$turnend" = "$state/$id.turn-ended" ] || exit 0
 [ "$session_file" = "$state/$id.hermes-session" ] || exit 0
 [ "$started" = "$state/$id.hermes-started" ] || exit 0
@@ -196,7 +203,7 @@ case "$event" in
     ;;
   on_session_end)
     session_matches || exit 0
-    touch -- "$turnend" 2>/dev/null || true
+    "$root/bin/fm-turnend-signal.sh" "$state" "$id" "$spawn_gen" >/dev/null 2>&1 || true
     "$root/bin/fm-busy-event.sh" apply "$state" "$id" idle --gen "$gen" --source hermes-hook --event session-end >/dev/null 2>&1 || true
     ;;
 esac

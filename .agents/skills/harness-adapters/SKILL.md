@@ -391,7 +391,7 @@ grok loads PROJECT hooks (`<worktree>/.grok/hooks/`, `<worktree>/.claude/setting
 GLOBAL hooks in `~/.grok/hooks/` are always trusted and load on first launch.
 So `fm-spawn` installs ONE firstmate-owned global hook, `~/.grok/hooks/fm-turn-end.json`, plus the companion `~/.grok/hooks/fm-turn-end.sh`, guarded as a no-op for every non-firstmate grok session.
 Its `Stop` command fires only when the current workspace holds a `.fm-grok-turnend` token pointer that matches the firstmate-owned hook registry under `~/.grok/hooks/fm-turn-end.d/`.
-`fm-spawn` writes that per-task pointer (`<worktree>/.fm-grok-turnend`, gitignored via git info/exclude like the other harnesses' worktree hook files) and a matching registry entry naming this task's `state/<id>.turn-ended`.
+`fm-spawn` writes that per-task pointer (`<worktree>/.fm-grok-turnend`, gitignored via git info/exclude like the other harnesses' worktree hook files) and a matching registry entry that resolves to the per-generation turn-end publisher under the contract owned by [`docs/configuration.md`](../../../docs/configuration.md) "Harness support".
 The hook reads `$GROK_WORKSPACE_ROOT`, which is always set for hooks and equals the worktree.
 This keeps the hook outside the worktree, needs no trust grant, and writes only firstmate-owned files.
 `fm-teardown` removes the worktree pointer before returning a pooled worktree.
@@ -442,7 +442,7 @@ The delivery-only spinner match covers the full moon-phase glyph set rather than
 
 [`docs/turnend-guard.md`](../../../docs/turnend-guard.md) owns Kimi's verified global hook surface and captain-approved crew wake integration.
 `fm-spawn.sh` installs one marker-delimited Firstmate entry in `$HOME/.kimi-code/config.toml`, one silent always-zero hook script, and one private token registry under `$HOME/.kimi-code/fm-turn-end.d/`.
-Each Kimi crew worktree receives a gitignored `.fm-kimi-turnend` token pointer, and the global hook touches that task's `state/<id>.turn-ended` only when the Stop payload's `cwd`, pointer, and registry entry all agree.
+Each Kimi crew worktree receives a gitignored `.fm-kimi-turnend` token pointer, and the global hook resolves the Stop payload's `cwd`, pointer, and registry entry, then publishes through the per-generation turn-end contract owned by [`docs/configuration.md`](../../../docs/configuration.md) "Harness support" whose consumer fires only the live incarnation's generation marker.
 A guarded silent hook cannot be verified from absence of effect, so prove invocation with an unguarded probe before concluding that the hook did not fire.
 The guarded turn-end signal remains a wake notification; standalone Kimi has no busy-state source until one is live-verified.
 
@@ -478,7 +478,7 @@ This bridge is necessary because v0.20.0 logs config shell hooks as registered i
 Each Hermes crew worktree receives a gitignored `.fm-hermes-turnend` pointer; the global hook acts only when that token resolves to the exact task state paths and busy-state generation.
 `on_session_start` binds the newly created task session only while the sidecar is absent.
 Later lifecycle events must match that stable id, and `pre_llm_call` records busy successfully before touching `state/<id>.hermes-started` for an initial or resumed turn.
-The end event requires the same session id, touches `state/<id>.turn-ended`, and marks the turn idle.
+The end event requires the same session id, publishes `state/<id>.turn-ended.<spawn_gen>` through the per-generation turn-end publisher (`bin/fm-turnend-signal.sh`), and marks the turn idle.
 Hermes' `on_session_end` callback at the end of each TUI `run_conversation` call is the exact supervised turn boundary, including turns shorter than the watcher poll interval.
 
 On Hermes' typed plane, `fm-send` refuses a composer injection unless the classified state is exactly idle, the task-bound session and profile metadata validate, and the structural composer is empty; ordinary local text instead publishes a durable inbox record and treats the doorbell as advisory.

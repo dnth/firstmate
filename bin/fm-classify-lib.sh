@@ -1209,9 +1209,10 @@ signal_crew_provably_working() {  # <file> ...
   for f in "$@"; do
     base=${f##*/}
     case "$base" in
-      *.status)     task=${base%.status} ;;
-      *.turn-ended) task=${base%.turn-ended} ;;
-      *)            continue ;;
+      *.status)        task=${base%.status} ;;
+      *.turn-ended.*)  task=${base%.turn-ended.*} ;;
+      *.turn-ended)    task=${base%.turn-ended} ;;
+      *)               continue ;;
     esac
     [ -n "$task" ] || continue
     case " $seen " in *" $task "*) continue ;; esac

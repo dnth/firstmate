@@ -1399,6 +1399,10 @@ fm_wake_status_key_map() {  # <queue-key>
     *.status)
       id=${key%.status}
       ;;
+    *.turn-ended.*)
+      id=${key%.turn-ended.*}
+      FM_WAKE_STATUS_HISTORICAL=true
+      ;;
     *.turn-ended)
       id=${key%.turn-ended}
       FM_WAKE_STATUS_HISTORICAL=true
@@ -1412,6 +1416,46 @@ fm_wake_status_key_map() {  # <queue-key>
   esac
   [ "${#id}" -le 64 ] || return 1
   FM_WAKE_STATUS_KEY="$id.status"
+}
+
+# Incarnation gate for a per-generation turn-end marker, applied at wake-handling
+# time. bin/fm-turnend-signal.sh writes state/<id>.turn-ended.<spawn_gen> lock-free
+# - each incarnation into its OWN gen file, so a delayed older-incarnation hook can
+# never clobber a newer live incarnation's marker. This gate, driven by the
+# watcher, compares the marker's gen (taken from its filename) to the live
+# incarnation's spawn_gen in the task metadata: only the live gen's marker fires,
+# and every other gen - a superseded relaunch, or any gen once the task is torn
+# down - is stale and simply never surfaced, so no stale marker ever re-fires.
+# Returns 0 when the <gen> marker is STALE (must be ignored), 1 when it must FIRE
+# (the gen matches the live incarnation, or the metadata records no gen yet -
+# preferring a spurious wake over a lost completion). No lock is needed: the
+# per-gen files remove the shared-slot race, and a plain metadata read is correct
+# for every case (a mid-relaunch read at worst delays the new gen one turn, which
+# the next turn re-fires, and never drops a committed live completion).
+fm_wake_turnend_marker_is_stale() {  # <state-dir> <id> <gen>
+  local state=$1 id=$2 gen=$3 meta meta_gen
+  case "$id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  case "$gen" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  meta="$state/$id.meta"
+  # No meta: the task is torn down (or not yet spawned) - stale.
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
+  meta_gen=$(sed -n 's/^spawn_gen=//p' "$meta" | tail -1)
+  # Metadata that records no gen yet cannot gate: surface rather than drop.
+  [ -n "$meta_gen" ] || return 1
+  [ "$meta_gen" = "$gen" ] && return 1 || return 0
+}
+
+# The live incarnation's turn-end marker path for a task (state/<id>.turn-ended.<gen>
+# for the spawn_gen recorded in metadata), or non-zero when the metadata is gone or
+# records no gen. Used to age the latest completed turn without scanning every gen.
+fm_wake_turnend_live_marker() {  # <state-dir> <id>
+  local state=$1 id=$2 meta meta_gen
+  case "$id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  meta="$state/$id.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  meta_gen=$(sed -n 's/^spawn_gen=//p' "$meta" | tail -1)
+  case "$meta_gen" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  printf '%s/%s.turn-ended.%s\n' "$state" "$id" "$meta_gen"
 }
 
 fm_wake_annotation_manifest() {  # <deduped-raw-rows>
