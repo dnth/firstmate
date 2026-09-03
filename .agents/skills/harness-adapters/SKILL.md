@@ -324,7 +324,7 @@ OMP is an exact harness identity and is never normalized to Pi.
 `bin/fm-omp-capabilities.sh` owns exact executable resolution and the selected OMP executable's launch and recovery capability checks that run before `fm-spawn` creates an endpoint.
 A failed OMP preflight never launches another executable as a fallback.
 Workers and scouts receive one typed `launch-brief` positional argument and an external per-task extension under `state/`.
-The extension reports `session_start` readiness, acknowledges the initial instruction through `turn_start`, and touches the task's turn-completion marker on every `turn_end`.
+The extension reports `session_start` readiness, acknowledges the initial instruction through `turn_start`, and publishes turn-end through the per-generation signal contract on every `turn_end`.
 Firstmate waits for the first `turn_start` acknowledgement before reporting a successful spawn.
 OMP workers keep their sessions under the task temp root so recovery can resume the exact conversation and ordinary cleanup can remove the session files with the rest of the task temp.
 

@@ -3858,8 +3858,8 @@ EOF
             fm.????????????)
               prior_auth="$HERMES_AUTH_DIR/$prior_token"
               if [ -f "$prior_auth" ] && [ ! -L "$prior_auth" ] \
-                && jq -e --arg id "$ID" --arg state "$STATE_REAL" \
-                  '.id == $id and .state == $state' "$prior_auth" >/dev/null 2>&1; then
+                && jq -e --arg id "$ID" --arg state "$STATE_REAL" --arg spawn_gen "$SPAWN_GEN" \
+                  '.id == $id and .state == $state and .spawn_gen == $spawn_gen' "$prior_auth" >/dev/null 2>&1; then
                 auth_file=$prior_auth
               fi
               ;;

@@ -3619,35 +3619,26 @@ test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
 
 test_turnend_registry_cleanup_uses_persisted_owner() {
-  local case_dir state persisted wrong script id token
-  case_dir="$TMP_ROOT/turnend-registry-owner"
-  state="$case_dir/state"
-  persisted="$case_dir/persisted"
-  wrong="$case_dir/wrong"
-  script="$case_dir/remove-functions.sh"
-  id=task-owner
+  local case_dir persisted_grok persisted_kimi wrong_grok wrong_kimi token
+  case_dir=$(make_case turnend-registry-owner)
+  persisted_grok="$case_dir/persisted-grok"
+  persisted_kimi="$case_dir/persisted-kimi"
+  wrong_grok="$case_dir/wrong-grok"
+  wrong_kimi="$case_dir/wrong-kimi"
   token=fm.aaaaaaaaaaaa
-  mkdir -p "$state" "$persisted/fm-turn-end.d" "$wrong/hooks/fm-turn-end.d"
-  printf '%s\n' "$token" > "$state/$id.grok-turnend-token"
-  printf '%s\n' "$token" > "$persisted/fm-turn-end.d/$token"
-  printf 'grok_turnend_dir=%s\n' "$persisted/fm-turn-end.d" > "$state/$id.meta"
-  printf '%s\n' "$token" > "$state/$id.kimi-turnend-token"
-  mkdir -p "$persisted/kimi-turn-end.d"
-  printf '%s\n' "$token" > "$persisted/kimi-turn-end.d/$token"
-  printf 'kimi_turnend_dir=%s\n' "$persisted/kimi-turn-end.d" >> "$state/$id.meta"
-  {
-    printf '%s\n' 'meta_value() {'
-    printf '%s\n' "  local meta=\$1 key=\$2 line"
-    printf '%s\n' "  while IFS= read -r line; do case \"\$line\" in \"\$key=\"*) printf \"%s\" \"\${line#*=}\"; return 0;; esac; done < \"\$meta\""
-    printf '%s\n' '}'
-    sed -n '/^remove_grok_turnend_auth() {/,/^}/p' "$TEARDOWN"
-    sed -n '/^remove_kimi_turnend_auth() {/,/^}/p' "$TEARDOWN"
-  } > "$script"
-  GROK_HOME="$wrong" HOME="$wrong" bash -c 'source "$1"; remove_grok_turnend_auth "$2" "$3" "$4"; remove_kimi_turnend_auth "$2" "$3" "$4"' _ "$script" "$state" "$id" "$state/$id.meta"
-  assert_absent "$persisted/fm-turn-end.d/$token" "grok teardown did not remove persisted registry token"
-  assert_absent "$persisted/kimi-turn-end.d/$token" "kimi teardown did not remove persisted registry token"
-  assert_absent "$wrong/hooks/fm-turn-end.d/$token" "grok teardown touched wrong environment registry"
-  assert_absent "$wrong/.kimi-code/fm-turn-end.d/$token" "kimi teardown touched wrong environment registry"
+  write_meta "$case_dir" local-only ship
+  printf 'grok_turnend_dir=%s\n' "$persisted_grok" >> "$case_dir/state/task-x1.meta"
+  printf 'kimi_turnend_dir=%s\n' "$persisted_kimi" >> "$case_dir/state/task-x1.meta"
+  mkdir -p "$persisted_grok" "$persisted_kimi" "$wrong_grok/hooks/fm-turn-end.d" "$wrong_kimi/.kimi-code/fm-turn-end.d"
+  printf '%s\n' "$token" > "$case_dir/state/task-x1.grok-turnend-token"
+  printf '%s\n' "$token" > "$case_dir/state/task-x1.kimi-turnend-token"
+  : > "$persisted_grok/$token"
+  : > "$persisted_kimi/$token"
+  GROK_HOME="$wrong_grok" HOME="$wrong_kimi" run_teardown "$case_dir" --force >/dev/null || fail "teardown failed in persisted registry ownership regression"
+  assert_absent "$persisted_grok/$token" "grok teardown did not remove persisted registry token"
+  assert_absent "$persisted_kimi/$token" "kimi teardown did not remove persisted registry token"
+  assert_absent "$wrong_grok/hooks/fm-turn-end.d/$token" "grok teardown touched wrong environment registry"
+  assert_absent "$wrong_kimi/.kimi-code/fm-turn-end.d/$token" "kimi teardown touched wrong environment registry"
 }
 
 test_turnend_registry_cleanup_uses_persisted_owner

@@ -9,7 +9,7 @@
 #
 # The installed Stop hook always exits 0 and stays silent. It reads cwd from the
 # hook payload, checks for a .fm-kimi-turnend pointer before registry work, and
-# touches a task turn-end marker only when the pointer names a Firstmate-created
+# publishes through the per-generation signal only when the pointer names a Firstmate-created
 # token in $HOME/.kimi-code/fm-turn-end.d/.
 #
 # Usage:

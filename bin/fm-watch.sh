@@ -709,7 +709,7 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 # swallows a signal.
 scan_signals() {
   local f sig sf
-  for f in "$STATE"/*.status "$STATE"/*.turn-ended.*; do
+  for f in "$STATE"/*.status "$STATE"/*.turn-ended.* "$STATE"/*.turn-ended; do
     [ -e "$f" ] || continue
     sig=$(stat_sig "$f") || continue
     sf="$STATE/.seen-$(basename "$f" | tr '.' '_')"
@@ -740,6 +740,14 @@ filter_stale_turnend_markers() {  # <pending-tsv>
         rest=${base#"$id".turn-ended.}
         gen=$rest
         if fm_wake_turnend_marker_is_stale "$STATE" "$id" "$gen"; then
+          printf '%s' "$sig" > "$sf"
+          continue
+        fi
+        ;;
+      *.turn-ended)
+        base=$(basename "$f")
+        id=${base%.turn-ended}
+        if fm_wake_turnend_bare_marker_is_stale "$STATE" "$id"; then
           printf '%s' "$sig" > "$sf"
           continue
         fi

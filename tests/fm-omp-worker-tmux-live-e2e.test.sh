@@ -340,26 +340,27 @@ done
 
 spawn_omp "$SCOUT_ID" scout >/dev/null || fail "real OMP scout spawn failed"
 SCOUT_META="$HOME_DIR/state/$SCOUT_ID.meta"
+SCOUT_GEN=$(sed -n 's/^spawn_gen=//p' "$SCOUT_META" | tail -1)
 SCOUT_WT=$(sed -n 's/^worktree=//p' "$SCOUT_META")
 SCOUT_TARGET=$(sed -n 's/^window=//p' "$SCOUT_META")
 assert_grep 'harness=omp' "$SCOUT_META" "scout metadata lost exact OMP identity"
 assert_grep 'kind=scout' "$SCOUT_META" "OMP scout changed delivery semantics"
 wait_file "$HOME_DIR/state/$SCOUT_ID.omp-ready" || fail "OMP scout extension did not report session readiness"
-wait_file "$HOME_DIR/state/$SCOUT_ID.turn-ended" || fail "initial OMP scout turn did not complete"
+wait_file "$HOME_DIR/state/$SCOUT_ID.turn-ended.$SCOUT_GEN" || fail "initial OMP scout turn did not complete"
 wait_text_count "$SCOUT_TARGET" OMP_SCOUT_INITIAL_DONE 2 || fail "OMP scout response was not observed"
 [ "$(agent_state "$SCOUT_TARGET")" = alive ] || fail "idle OMP scout was not classified alive"
-rm -f "$HOME_DIR/state/$SCOUT_ID.turn-ended"
+clear_turnend "$HOME_DIR/state" "$SCOUT_ID"
 run_send "$SCOUT_ID" 'Respond exactly OMP_SCOUT_IDLE_STEER_DONE.' || fail "idle OMP scout steer was not acknowledged"
-wait_file "$HOME_DIR/state/$SCOUT_ID.turn-ended" || fail "idle OMP scout steer did not complete"
+wait_file "$HOME_DIR/state/$SCOUT_ID.turn-ended.$SCOUT_GEN" || fail "idle OMP scout steer did not complete"
 wait_text_count "$SCOUT_TARGET" OMP_SCOUT_IDLE_STEER_DONE 2 || fail "idle OMP scout steer response was not observed"
-rm -f "$HOME_DIR/state/$SCOUT_ID.turn-ended"
+clear_turnend "$HOME_DIR/state" "$SCOUT_ID"
 run_send "$SCOUT_ID" 'Run this exact command with bash: sleep 5. Then respond exactly OMP_SCOUT_BUSY_FIRST_DONE.' \
   || fail "OMP scout busy-turn setup was not submitted"
 wait_busy "$SCOUT_TARGET" || fail "OMP scout busy indicator was not observed"
 run_send "$SCOUT_ID" 'After the current tool finishes, respond exactly OMP_SCOUT_BUSY_STEER_DONE.' \
   || fail "busy OMP scout steer was not acknowledged"
 assert_contains "$(capture "$SCOUT_TARGET")" 'Steering · 1' "busy OMP scout steer did not enter the verified queue"
-wait_file "$HOME_DIR/state/$SCOUT_ID.turn-ended" 400 || fail "busy OMP scout turn did not complete"
+wait_file "$HOME_DIR/state/$SCOUT_ID.turn-ended.$SCOUT_GEN" 400 || fail "busy OMP scout turn did not complete"
 wait_idle "$SCOUT_TARGET" 400 || fail "OMP scout did not return idle after busy steering"
 wait_text_count "$SCOUT_TARGET" OMP_SCOUT_BUSY_STEER_DONE 2 || fail "busy OMP scout steer response was not observed"
 run_send "$SCOUT_ID" /exit || fail "OMP scout did not exit cleanly"

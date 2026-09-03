@@ -1445,6 +1445,15 @@ fm_wake_turnend_marker_is_stale() {  # <state-dir> <id> <gen>
   [ "$meta_gen" = "$gen" ] && return 1 || return 0
 }
 
+# Legacy compat gate; new code writes only per-generation markers and fires only while metadata is present.
+fm_wake_turnend_bare_marker_is_stale() {  # <state-dir> <id>
+  local state=$1 id=$2 meta
+  case "$id" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
+  meta="$state/$id.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] && return 1
+  return 0
+}
+
 # The live incarnation's turn-end marker path for a task (state/<id>.turn-ended.<gen>
 # for the spawn_gen recorded in metadata), or non-zero when the metadata is gone or
 # records no gen. Used to age the latest completed turn without scanning every gen.
