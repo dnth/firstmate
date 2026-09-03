@@ -477,6 +477,14 @@ const api = {
   sendMessage(message, options) { watcherMessages.push({ message, options }); },
   sendUserMessage(content, options) { customMessages.push({ content, options }); },
 };
+async function waitForWatchCount(expected, label) {
+  const file = `${process.env.FM_STATE_OVERRIDE}/watch-count`;
+  for (let i = 0; i < 100; i += 1) {
+    if (existsSync(file) && Number(readFileSync(file, "utf8").trim()) === expected) return;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
 process.argv[1] = process.env.EXTENSION;
 const extension = await import(`${pathToFileURL(process.env.EXTENSION).href}?test=${Date.now()}`);
 await extension.default(api);
@@ -529,6 +537,7 @@ if (await handlers.get("before_agent_start")({ type: "before_agent_start" }, {})
 }
 writeFileSync(`${process.env.FM_STATE_OVERRIDE}/.lock`, `${process.pid}\n`);
 await handlers.get("session_switch")({ type: "session_switch", reason: "new" }, extensionContext);
+await waitForWatchCount(1, "in-process OMP /new automatic watcher arm");
 const newStartup = await handlers.get("before_agent_start")({ type: "before_agent_start" }, {});
 if (newStartup?.message?.customType !== "firstmate-sessionstart-nudge" || newStartup.message.attribution !== "agent") {
   throw new Error(`in-process OMP /new lost its once-only startup instruction: ${JSON.stringify(newStartup)}`);
@@ -537,6 +546,7 @@ if (await handlers.get("before_agent_start")({ type: "before_agent_start" }, {})
   throw new Error("in-process OMP /new repeated its startup instruction");
 }
 await handlers.get("session_switch")({ type: "session_switch", reason: "resume" }, extensionContext);
+await waitForWatchCount(2, "in-process OMP /resume automatic watcher arm");
 const resumeStartup = await handlers.get("before_agent_start")({ type: "before_agent_start" }, {});
 if (resumeStartup?.message?.customType !== "firstmate-sessionstart-nudge" || resumeStartup.message.attribution !== "agent") {
   throw new Error(`in-process OMP /resume lost its once-only startup instruction: ${JSON.stringify(resumeStartup)}`);
@@ -940,6 +950,137 @@ JS
   pass "OMP surfaces a refused handling handshake as one typed wake"
 }
 
+test_native_omp_session_switch_carries_inflight_actionable_close() {
+  local fixture out status=0
+  fixture="$TMP_ROOT/native-session-replacement"
+  mkdir -p "$fixture/.omp/extensions/lib" "$fixture/bin" "$fixture/state" "$fixture/config"
+  cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$fixture/.omp/extensions/fm-primary-omp.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$fixture/.omp/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" "$fixture/.omp/extensions/lib/fm-task-inbox-doorbell.ts"
+  cp "$ROOT/bin/fm-primary-watch-core.ts" "$fixture/bin/fm-primary-watch-core.ts"
+  cp "$ROOT/bin/fm-pi-compatible-runtimes" "$fixture/bin/fm-pi-compatible-runtimes"
+  : > "$fixture/AGENTS.md"
+  git init -q -b main "$fixture"
+  cat > "$fixture/bin/fm-gate-refuse-lib.sh" <<'SH'
+fm_is_gate_agent() { return 1; }
+SH
+  cat > "$fixture/bin/fm-primary-scope-lib.sh" <<'SH'
+fm_primary_scope_matches() { return 0; }
+SH
+  cat > "$fixture/bin/fm-operational-input.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'encoded:%s:%s' "$2" "$(cat)"
+SH
+  cat > "$fixture/bin/fm-sessionstart-nudge.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$fixture/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+state=${FM_STATE_OVERRIDE:?}
+count=$(cat "$state/watch-count" 2>/dev/null || printf 0)
+count=$((count + 1))
+printf '%s\n' "$count" > "$state/watch-count"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+if [ "$count" -eq 1 ]; then
+  while [ ! -e "$state/watch-trigger" ]; do sleep 0.02; done
+  printf 'signal: omp replacement in-flight actionable close\n'
+  exit 0
+fi
+while [ ! -e "$state/watch-stop" ]; do sleep 0.02; done
+SH
+  cat > "$fixture/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  for script in fm-subagent-pretool-check.sh fm-cd-pretool-check.sh fm-arm-pretool-check.sh; do
+    cat > "$fixture/bin/$script" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  done
+  chmod +x "$fixture/bin/"*.sh
+
+  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
+    FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    node --input-type=module 2>&1 <<'JS'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+const steers = [];
+let withholdConsumption = true;
+let rejectNextBranchOffer = true;
+const api = {
+  zod: { object: () => ({}) },
+  events: {
+    emit(name, offer) {
+      if (name !== "fm-branch-supervision:dispatch" || !rejectNextBranchOffer) return;
+      rejectNextBranchOffer = false;
+      offer.accept(Promise.reject(new Error("synthetic branch settlement rejection")));
+    },
+  },
+  on(name, handler) { handlers.set(name, handler); },
+  registerCommand() {},
+  registerTool() {},
+  sendMessage(message) {
+    steers.push(String(message?.content ?? ""));
+    if (withholdConsumption) {
+      withholdConsumption = false;
+      return;
+    }
+    handlers.get("before_agent_start")?.({ type: "before_agent_start", prompt: message.content }, {});
+  },
+};
+const count = () => existsSync(`${process.env.FM_STATE_OVERRIDE}/watch-count`)
+  ? Number(readFileSync(`${process.env.FM_STATE_OVERRIDE}/watch-count`, "utf8").trim())
+  : 0;
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (pred()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+
+writeFileSync(`${process.env.FM_STATE_OVERRIDE}/.lock`, `${process.pid}\n`);
+process.argv[1] = process.env.EXTENSION;
+const extension = await import(`${pathToFileURL(process.env.EXTENSION).href}?replacement=${Date.now()}`);
+extension.default(api);
+const context = { sessionManager: { getSessionFile: () => undefined } };
+await handlers.get("session_start")({ type: "session_start" }, context);
+await waitFor(() => count() === 1, "initial automatic OMP arm");
+writeFileSync(`${process.env.FM_STATE_OVERRIDE}/watch-trigger`, "trigger\n");
+await waitFor(() => steers.length === 1 && count() >= 2, "in-flight OMP delivery and successor");
+
+await handlers.get("session_switch")({ type: "session_switch", reason: "new" }, context);
+await waitFor(() => count() >= 3, "OMP /new replacement arm");
+await waitFor(
+  () => steers.filter((message) => message.includes("signal: omp replacement in-flight actionable close")).length === 2,
+  "OMP replacement actionable replay",
+);
+const handoff = `${process.env.FM_STATE_OVERRIDE}/extensions/omp-primary-watch/session-replacement-actionable.json`;
+await waitFor(() => !existsSync(handoff), "OMP replacement handoff cleanup");
+
+for (const [reason, label] of [["resume", "/resume"], ["fork", "/fork"], ["resume", "reload"]]) {
+  const before = count();
+  await handlers.get("session_switch")({ type: "session_switch", reason }, context);
+  await waitFor(() => count() > before, `OMP ${label} replacement arm`);
+}
+if (steers.filter((message) => message.includes("signal: omp replacement in-flight actionable close")).length !== 2) {
+  throw new Error(`OMP replacement did not replay exactly once: ${steers.join(" | ")}`);
+}
+writeFileSync(`${process.env.FM_STATE_OVERRIDE}/watch-stop`, "stop\n");
+await handlers.get("session_shutdown")({ type: "session_shutdown" }, context);
+console.log("omp-session-replacement-ok");
+JS
+  ) || status=$?
+  expect_code 0 "$status" "OMP session-switch replacement continuity"
+  assert_contains "$out" omp-session-replacement-ok "OMP replacement continuity test did not complete"
+  pass "OMP /new /resume /fork and reload session_switch paths auto-arm and carry an in-flight actionable close"
+}
+
 test_resolve_path_uses_node_when_readlink_f_is_unavailable
 test_exact_bun_omp_primary_identity
 test_standalone_omp_primary_identity
@@ -951,3 +1092,4 @@ test_primary_marker_refuses_whitespace_identity
 test_native_primary_extension_contract
 test_native_omp_confirms_recovery_handling_delivery
 test_native_omp_refused_handling_delivery_is_typed_once
+test_native_omp_session_switch_carries_inflight_actionable_close

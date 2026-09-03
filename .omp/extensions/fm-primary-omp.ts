@@ -212,14 +212,14 @@ export default function (omp: ExtensionAPI) {
   // credential/auth failures) is never offered - it stays main-owned - and with
   // no branch extension loaded no one accepts, so every wake falls through to
   // main exactly as before.
-  const offerWakeToBranch = (message: string): boolean => {
+  const offerWakeToBranch = (message: string): Promise<void> | null => {
     const heartbeat = /^heartbeat($|:)/.test(message);
     const isCheckTrigger = /^check:/.test(message);
     const scope = scopeForUnreadWake(state, heartbeat);
     const eligible = !isCheckTrigger && scope.eligible;
     const offer = createBranchDispatchOffer(message, scope.projects, heartbeat, eligible);
     omp.events?.emit?.(FM_BRANCH_DISPATCH_EVENT, offer);
-    return offer.accepted;
+    return offer.accepted ? offer.settlement : null;
   };
 
   const watch = createPrimaryWatchCore({
@@ -266,15 +266,15 @@ export default function (omp: ExtensionAPI) {
     publishTaskTurnStarted();
   });
 
-  omp.on("session_switch", (event, ctx) => {
-    watch.sessionShutdown();
-    watch.sessionStart();
+  omp.on("session_switch", async (event, ctx) => {
+    await watch.sessionShutdown(true);
     publishSecondmateSession(ctx);
     deliverSessionstartNudge(event.reason === "new" || event.reason === "resume");
-    watch.arm();
+    watch.sessionStart();
   });
 
-  omp.on("before_agent_start", (): BeforeAgentStartEventResult | undefined => {
+  omp.on("before_agent_start", (event): BeforeAgentStartEventResult | undefined => {
+    watch.acknowledgeWake(event.prompt);
     if (!pendingStartupNudge) return undefined;
     const content = pendingStartupNudge;
     pendingStartupNudge = "";
@@ -322,9 +322,9 @@ export default function (omp: ExtensionAPI) {
     return {};
   });
 
-  omp.on("session_shutdown", () => {
+  omp.on("session_shutdown", async () => {
     taskInboxDoorbell.retire();
-    watch.sessionShutdown();
+    await watch.sessionShutdown(false);
   });
 
   omp.registerCommand("fm-watch-arm-omp", {

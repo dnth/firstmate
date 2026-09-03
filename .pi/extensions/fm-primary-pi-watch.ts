@@ -89,11 +89,16 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  pi.on?.("before_agent_start", (event) => {
+    watch.acknowledgeWake(event.prompt);
+  });
+
   pi.on?.("session_start", () => {
     watch.sessionStart();
   });
-  pi.on?.("session_shutdown", () => {
-    watch.sessionShutdown();
+  pi.on?.("session_shutdown", async (event) => {
+    const replacement = ["reload", "new", "resume", "fork"].includes(String(event.reason ?? ""));
+    await watch.sessionShutdown(replacement);
   });
 
   pi.registerCommand?.("fm-watch-arm-pi", {

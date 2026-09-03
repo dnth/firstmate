@@ -117,6 +117,20 @@ wait_pid_dead() {
   return 1
 }
 
+wait_pid_change() {
+  local file=$1 old=$2 i=0 pid
+  while [ "$i" -lt 120 ]; do
+    pid=$(sed -n '1p' "$file" 2>/dev/null || true)
+    if [ -n "$pid" ] && [ "$pid" != "$old" ] && kill -0 "$pid" 2>/dev/null; then
+      printf '%s\n' "$pid"
+      return 0
+    fi
+    sleep 0.5
+    i=$((i + 1))
+  done
+  return 1
+}
+
 run_ahoy_case() {
   local label=$1 preceding=$2 expected=$3 out status=0
   out=$(
@@ -307,7 +321,7 @@ sleep 0.2
 
 : > "$HOME_DIR/state/pi-e2e.meta"
 send_prompt "Start supervision with fm_watch_arm_pi and never use bash to arm supervision. After the watcher wake arrives, run bin/fm-wake-drain.sh and reply exactly HANDLED."
-wait_for_text "watcher: started Pi extension arm child 1" || fail "Pi did not render the initial watcher tool result"
+wait_for_text "Pi extension already owns an arm child" || fail "Pi did not render the startup-owned watcher tool result"
 
 printf 'done: pi live e2e watcher fire\n' > "$HOME_DIR/state/pi-e2e.status"
 i=0
@@ -336,6 +350,21 @@ watcher_pid=$(sed -n '1p' "$pid_file")
 arm_pid=$(ps -p "$watcher_pid" -o ppid= | tr -d ' ')
 [ -n "$arm_pid" ] || fail "re-armed watcher parent was not live"
 
+send_prompt "/new"
+replacement_watcher_pid=$(wait_pid_change "$pid_file" "$watcher_pid") \
+  || fail "Pi /new did not auto-arm a replacement watcher generation"
+replacement_arm_pid=$(ps -p "$replacement_watcher_pid" -o ppid= | tr -d ' ')
+[ -n "$replacement_arm_pid" ] || fail "Pi /new replacement watcher parent was not live"
+wait_pid_dead "$watcher_pid" || fail "Pi /new left the prior watcher alive"
+wait_pid_dead "$arm_pid" || fail "Pi /new left the prior arm child alive"
+send_prompt "Reply exactly PI_REPLACEMENT_READY."
+wait_for_exact_line "PI_REPLACEMENT_READY" 120 || fail "Pi replacement session did not accept a prompt"
+pane=$(capture)
+arm_tool_result_count=$(printf '%s\n' "$pane" | grep -Ec 'watcher: (started|unchanged|not armed|read-only)' || true)
+[ "$arm_tool_result_count" -eq 1 ] || fail "Pi /new required a model-owned watcher re-arm (tool-result count $arm_tool_result_count)"
+watcher_pid=$replacement_watcher_pid
+arm_pid=$replacement_arm_pid
+
 "$TMUX" -L "$SOCKET" send-keys -t "$SESSION" -l '/quit'
 sleep 1
 "$TMUX" -L "$SOCKET" send-keys -t "$SESSION" Enter
@@ -343,4 +372,4 @@ wait_for_text "PI_EXIT=0" 60 || fail "Pi did not exit cleanly"
 wait_pid_dead "$watcher_pid" || fail "watcher child survived clean Pi exit"
 wait_pid_dead "$arm_pid" || fail "arm child survived clean Pi exit"
 
-printf 'ok - Pi %s live E2E covered the Calm working ship, Ahoy first/later messages, legacy transcripts, near misses, and watcher continuity\n' "$PI_VERSION"
+printf 'ok - Pi %s live E2E covered the Calm working ship, Ahoy first/later messages, legacy transcripts, near misses, watcher continuity, and automatic /new re-arm\n' "$PI_VERSION"

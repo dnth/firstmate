@@ -22,8 +22,8 @@ This feature is OMP-only by construction and changes nothing anywhere else:
   A fleet-wide heartbeat keeps its own all-or-nothing rule (see "Heartbeat routing" below): it takes every branch-ownable unread row or none of them.
 - The branch itself: `.omp/extensions/fm-branch-supervision-omp.ts` creates and reopens the persistent branch session, serializes wakes, mirrors dialog, and merges outcomes.
   It checks the current extension generation and `state/.lock` ownership before each guarded branch side effect, so a lost lock or a cold-start re-arm cannot let an old continuation mutate the fleet.
-  The branch conversation is persistent across main's own `/new`, `/resume`, and `/fork` navigation: the mirror re-anchors on its own when main's session file changes, so no live re-arm runs, and `session_shutdown` only latches shutdown.
-  Every path that cannot reach a working branch falls back to delivering the wake to main - a broken branch degrades to today's behavior, never to a lost wake.
+  The branch conversation remains resident across ordinary main turns. When main performs `/new`, `/resume`, `/fork`, or reload, OMP emits `session_switch`; the primary watcher retires the prior generation and re-arms its replacement before the next model turn. The mirror re-anchors when main's session file changes, and any actionable close whose delivery overlaps the replacement is carried to the new generation exactly once. `session_shutdown` remains the terminal-process boundary rather than a replacement signal.
+  Every accepted path that cannot reach a working branch rejects its settlement to the shared watcher core, which retains delivery ownership until main consumes the follow-up; a broken branch declines later offers so they take that same watcher-owned path directly.
 - Branch model and effort selection: the same extension registers `/supervision-model`, which picks the branch's model and then its reasoning effort over OMP's portable select dialog, and saves both as pins applied at the next branch build, never to the branch already running; [configuration.md](configuration.md#omp-supervision-branch-model-and-effort-configsupervision-branch-model-configsupervision-branch-effort) owns the full activation boundary, operator-facing schema, and behavior.
   Model resolution reads OMP's live `ModelRegistry` (available models and their configured credentials) with pure lookups, so pinning the branch never moves main's own conversation; effort uses OMP's `Effort` catalog and the shim's `clampThinkingLevel`.
 - Branch system prompt: `bin/fm-branch-prompt.sh`; its header owns the byte-stable-prefix contract (no timestamps, no fleet snapshot, no per-wake content).
@@ -37,20 +37,20 @@ This feature is OMP-only by construction and changes nothing anywhere else:
 
 ## Transitions and what is out of scope
 
-Ownership transitions happen only at a clean boundary or by killing the process and letting a fresh one re-arm - never by a synchronous handoff from a live or hung branch.
+Ownership transitions happen at a clean boundary: a cold `session_start`, an OMP `session_switch` replacement, or killing the process and letting a fresh one re-arm - never by a synchronous handoff from a live or hung branch.
 A branch generation serializes each wake through a clean completion boundary, and the next wake re-prompts the same resident conversation; only the first wake in a fresh process reopens the durable branch conversation.
-`session_start` (a cold start of a fresh process) is the sole clean-boundary arm; the branch is otherwise persistent across main's own session navigation.
+`session_start` and `session_switch` are the clean-boundary arm points. A `session_switch` replacement re-arms automatically without a foreground watcher command or a model turn; the branch itself remains resident unless the process is restarted.
 
 Three capabilities are deliberately out of scope for this port and are a future iteration:
 
-- Mid-flight branch replacement - displacing a live branch and re-arming a replacement inside the same process.
+- Mid-flight branch replacement - displacing a live branch and re-arming a replacement inside the same process. This is distinct from the supported main-session `session_switch` replacement above.
 - Mid-branch model or effort hot-swap - the branch keeps its model and effort until a fresh process rebuilds it; a `/supervision-model` change is a pin applied at the next branch build, not to the running branch.
 - Hung-branch live takeover - a branch stuck inside a model call is recovered by killing the process (its leases and wake-grant rows go stale on death and are swept), not by main taking ownership away from it.
 
 The reason is structural: OMP coordinates the two in-process actors through shared filesystem locks (the wake-queue lock and the lease-command lock) acquired by synchronous subprocess calls with no timeout.
 A settlement that tried to displace a live or hung branch would have to acquire the very locks that branch's own in-flight work may hold, and on OMP's single-threaded event loop that can stall the whole process.
 Making mid-flight handoff safe needs a fenced, nonblocking rework of that shared lock substrate (which Pi and the rest of the fleet also use), so it is tracked separately rather than shipped here.
-A broken or unreachable branch still degrades to the wake-to-main path with no lost wake; a hung branch stalls its own wake queue until the process is killed, and the durable rows survive to be re-presented on the next start.
+A broken or unreachable branch still rejects to the watcher-owned main path with no lost wake; a hung branch stalls its own wake queue until the process is killed, and the durable rows survive to be re-presented on the next start.
 
 ## Per-actor acknowledgement
 
@@ -64,7 +64,7 @@ This scoping engages only while a branch grant is, or recently was, in play: a h
 
 ## Main-fallback re-entry limitation
 
-When the supervision branch is unavailable, the primary adapter falls eligible wakes back to MAIN through the ordinary operational notification path.
+When the supervision branch is unavailable or rejects settlement, the shared watcher core retains eligible wakes and delivers them to MAIN through the ordinary consumption-acknowledged operational notification path.
 Per-actor queue ownership prevents MAIN and the branch from double-consuming a row, but it does not serialize fallback notifications while MAIN handles a claimed, unacknowledged row set.
 Each valid higher-sequence signal or stale row can therefore inject another priority operational notification during the same handling episode.
 OMP can preempt or skip the report reads, current-state reconciliation, cleanup, or generation-bound acknowledgement that would finish the active episode.
@@ -123,7 +123,7 @@ What is new is only the attended path: outside away mode, the branch absorbs the
 
 ## Verification
 
-Portable regressions: `tests/fm-omp-branch-supervision.test.sh` (prompt byte-stability, outcome store append-only, lease actor partition and guards, wake-grant lifecycle, non-branch-home invariance) and the per-actor consume regression in `tests/fm-wake-queue.test.sh` (branch-scoped acknowledgement never swallows a main-owned row, main excludes branch-granted rows, and the inert pre-branch path).
+Portable regressions: `tests/fm-omp-branch-supervision.test.sh` covers prompt byte-stability, outcome store append-only, lease actor partition and guards, wake-grant lifecycle, and non-branch-home invariance; `tests/fm-omp-primary.test.sh` rejects an accepted branch settlement into the watcher-owned main path across replacement; and the per-actor consume regression in `tests/fm-wake-queue.test.sh` proves branch-scoped acknowledgement never swallows a main-owned row, main excludes branch-granted rows, and the inert pre-branch path.
 The versioned branch-marker closure is covered through `tests/fm-session-start.test.sh`, and the secondmate imported-helper trust boundary is covered through `tests/fm-spawn-dispatch-profile.test.sh`.
 The strict typecheck in `tests/fm-omp-branch-types.test.sh` pins the extension against the installed `@oh-my-pi/pi-coding-agent` package and fails on any renamed or removed named export or effort-level drift.
 Live guard: `FM_OMP_BRANCH_LIVE_E2E=1 tests/fm-omp-branch-live-e2e.test.sh` exercises the real installed OMP SDK; run it after every OMP upgrade and record the dated result in [docs/verification/runtime-backends.md](verification/runtime-backends.md).

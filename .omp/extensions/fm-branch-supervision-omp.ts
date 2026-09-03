@@ -43,10 +43,11 @@
 // process; and a secondary read-only OMP session that never owns the lock must
 // never write markers, clean leases, or accept wakes.
 //
-// Failure direction: every path that cannot reach a working branch falls back
-// to delivering the wake to MAIN exactly as before the branch existed - a
-// broken branch degrades to today's behavior, never to a lost wake. The wake
-// queue itself stays durable until the handler runs the drain's
+// Failure direction: every accepted path that cannot reach a working branch
+// rejects its settlement to the watcher, which retains delivery ownership and
+// routes the wake to MAIN through its consumption-acknowledged path. A broken
+// branch declines later offers, so they take that same watcher path directly.
+// The wake queue itself stays durable until the handler runs the drain's
 // acknowledgement, so a branch that dies mid-handling re-presents its rows at
 // the next drain exactly as a mid-handling main crash always has.
 //
@@ -845,30 +846,8 @@ ${context.command}
     }
   }
 
-  function fallbackToMain(message: string, detail: string): void {
-    const body = `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. (Supervision branch unavailable, falling back to main: ${detail})`;
-    // Marked operational like every watcher injection, so the wake is never
-    // mistaken for captain input (away-mode return semantics, mirror filter).
-    const content = encodeOperationalInput(body);
-    // Deliver through the exact main-wake mechanism the primary OMP adapter uses
-    // (fm-primary-omp.ts sendFollowUp): a custom watcher-wake message delivered
-    // as a steer with triggerTurn. Unlike sendUserMessage/followUp, this
-    // reliably wakes an idle or interrupted main under OMP steer/continuation
-    // semantics, so a broken branch never strands the wake.
-    pi.sendMessage(
-      {
-        customType: "firstmate-watcher-wake",
-        content,
-        display: false,
-        attribution: "agent",
-        details: { kind: "watcher", runtime: "omp" },
-      },
-      { deliverAs: "steer", triggerTurn: true },
-    );
-  }
-
-  function enqueueWake(message: string, acceptedGeneration: number): void {
-    branchChain = branchChain
+  function enqueueWake(message: string, acceptedGeneration: number): Promise<void> {
+    const delivery = branchChain
       .then(async () => {
         if (shuttingDown || acceptedGeneration !== generation) {
           throw new Error("supervision session was replaced before handling the accepted wake");
@@ -902,20 +881,12 @@ ${context.command}
           throw new Error("could not release the branch's settled wake-row grant");
         }
       })
-      .catch(async (error: unknown) => {
+      .catch((error: unknown) => {
         releaseEligibleRowsSnapshot(state, wakeGrantScript, String(acceptedGeneration));
-        // Only fall the wake back to main when this generation still owns the
-        // fleet lock and is not shutting down. If the session lost ownership or a
-        // cold-start re-arm advanced the generation, the durable row stays queued
-        // for the owning session to reclaim - the row is never lost - and falling
-        // back here would risk a stale extra main turn for a row a fresh arm may
-        // already handle.
-        if (shuttingDown || acceptedGeneration !== generation) return;
-        if (!actingAsOwner(acceptedGeneration)) return;
-        try {
-          fallbackToMain(message, error instanceof Error ? error.message : String(error));
-        } catch {}
+        throw error;
       });
+    branchChain = delivery.catch(() => {});
+    return delivery;
   }
 
   function enqueueMirrorFlush(): void {
@@ -943,8 +914,7 @@ ${context.command}
     if (!actingAsOwner()) return; // cold start pre-lock, secondary session, or shutdown
     if (afkActive()) return; // the away daemon owns supervision while afk
     if (branchBroken) return; // fail back to today's wake-to-main path
-    offer.accept();
-    enqueueWake(offer.message, generation);
+    offer.accept(enqueueWake(offer.message, generation));
   });
 
   pi.on?.("agent_start", () => {
@@ -969,14 +939,13 @@ ${context.command}
     enqueueMirrorFlush();
   });
 
-  // session_start arms this generation at a cold start (a fresh process). It is
-  // the sole clean-boundary transition: the branch is persistent across main's
-  // own /new, /resume, and /fork navigation and is never displaced by a
-  // synchronous live handoff (that path, and hung-branch takeover, are out of
-  // scope - see docs/omp-supervision-branch.md). The mirror re-anchors on its
-  // own when the session file changes (collectMainDialog compares the file), and
-  // mainModel/mainModelRegistry refresh at every turn_end, so no session_switch
-  // handling is needed. Terminal quit fires session_shutdown and never a start.
+  // session_start arms this generation at a cold start (a fresh process). Main
+  // session replacements are handled by the primary OMP adapter's
+  // session_switch watcher re-arm; this branch remains resident and the mirror
+  // re-anchors when the session file changes (collectMainDialog compares the
+  // file). A synchronous live handoff from a branch, or hung-branch takeover,
+  // remains out of scope (see docs/omp-supervision-branch.md). Terminal quit
+  // fires session_shutdown and never a start.
   pi.on?.("session_start", (_event, ctx) => {
     rememberMainContext(ctx);
     shuttingDown = false;
