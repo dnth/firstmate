@@ -374,7 +374,9 @@ cmd_launch() {
 }
 
 cmd_send() {
-  local id=$1 message=$2 delivery_mode=${3:-} reconcile_mode=${4:-} harness relay_body meta
+  local id=$1 message=$2 delivery_mode=${3:-} reconcile_mode=${4:-} reconcile_id=${5:-} harness relay_body meta
+  local send_args=()
+  if [ "$reconcile_mode" = reconcile ]; then send_args=(--fire-and-forget "$reconcile_id"); fi
   validate_id "$id"
   if [ "$reconcile_mode" = reconcile ]; then validate_home "$id" allow-markerless; else validate_home "$id"; fi
   if ! remote_endpoint_load "$id"; then
@@ -401,7 +403,7 @@ cmd_send() {
       # /exit must not be converted into a durable ordinary-text steer or carry
       # secondmate correlation syntax into the harness command parser.
       FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$TARGET_HOME/state" \
-        "$SCRIPT_DIR/fm-send.sh" "$REMOTE_ENDPOINT_TARGET" "$relay_body"
+        "$SCRIPT_DIR/fm-send.sh" "$REMOTE_ENDPOINT_TARGET" "${send_args[@]}" "$relay_body"
       return
     fi
     remote_omp_delivery_binding "$id"
@@ -409,17 +411,19 @@ cmd_send() {
       FM_DATA_OVERRIDE="$CONTROL_DATA" FM_SEND_PRESERVE_INBOUND_FROM_FIRSTMATE=1 \
       FM_TASK_INBOX_OMP_REQUIRE_PROGRAMMATIC=1 FM_SEND_OMP_INBOX_REQUIRE_TURN_START=1 \
       FM_SEND_OMP_INBOX_REQUIRE_HANDLED_ACK=1 \
-      "$SCRIPT_DIR/fm-send.sh" "$id" "$message"
+      "$SCRIPT_DIR/fm-send.sh" "$id" "${send_args[@]}" "$message"
   else
     FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$TARGET_HOME/state" \
-      "$SCRIPT_DIR/fm-send.sh" "$REMOTE_ENDPOINT_TARGET" "$message"
+      "$SCRIPT_DIR/fm-send.sh" "$REMOTE_ENDPOINT_TARGET" "${send_args[@]}" "$message"
   fi
 }
 
 cmd_reconcile_send() {
-  local id=$1 message=$2
+  local id=$1 message=$2 delivery_id=$3
   validate_id "$id"
-  cmd_send "$id" "$message" fire-and-forget reconcile
+  fm_message_mark_from_firstmate "$message" message || die "reconcile payload could not be wrapped"
+  [ -n "$delivery_id" ] || die "reconcile delivery id is required"
+  cmd_send "$id" "$message" fire-and-forget reconcile "$delivery_id"
 }
 
 cmd_key() {
@@ -619,7 +623,7 @@ case "${1:-}" in
   beacon-age) shift; [ "$#" -eq 1 ] || usage; beacon_age "$1" ;;
   route) shift; [ "$#" -eq 1 ] || usage; cmd_route "$1" ;;
   send) shift; [ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage; cmd_send "$@" ;;
-  reconcile-send) shift; [ "$#" -eq 2 ] || usage; cmd_reconcile_send "$@" ;;
+  reconcile-send) shift; [ "$#" -eq 3 ] || usage; cmd_reconcile_send "$@" ;;
   key) shift; [ "$#" -eq 2 ] || usage; cmd_key "$@" ;;
   capture) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_capture "$@" ;;
   observe) shift; [ "$#" -eq 1 ] || usage; cmd_observe "$@" ;;

@@ -1056,7 +1056,7 @@ else
     fi
     remote_out=
     if [ -n "$FIRE_AND_FORGET_ID" ]; then
-      remote_out=$("$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh reconcile-send "$TARGET_REMOTE_ID" "$MESSAGE" < /dev/null 2>&1) || send_rc=$?
+      remote_out=$("$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh reconcile-send "$TARGET_REMOTE_ID" "$MESSAGE" "$FIRE_AND_FORGET_ID" < /dev/null 2>&1) || send_rc=$?
     elif remote_out=$("$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send "$TARGET_REMOTE_ID" "$MESSAGE" < /dev/null 2>&1); then
       :
     else
