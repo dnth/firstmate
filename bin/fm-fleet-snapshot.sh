@@ -404,7 +404,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 
 task_json_lines() {
   local meta id kind harness mode yolo project worktree home projects backend target status_log report_path
-  local remote_host remote_root spawn_gen remote_state remote_rc remote_home_present
+  local remote_host task_remote_root spawn_gen remote_state remote_rc remote_home_present
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
@@ -422,7 +422,7 @@ task_json_lines() {
     home=$(meta_value "$meta" home)
     projects=$(meta_value "$meta" projects)
     remote_host=$(meta_value "$meta" remote_host)
-    remote_root=$(meta_value "$meta" remote_root)
+    task_remote_root=$(meta_value "$meta" remote_root)
     spawn_gen=$(meta_value "$meta" spawn_gen)
     remote_home_present=null
     if [ -n "$remote_host" ]; then
@@ -552,7 +552,7 @@ task_json_lines() {
       --arg backend "$backend" \
       --arg target "$target" \
       --arg remote_host "$remote_host" \
-      --arg remote_root "$remote_root" \
+      --arg remote_root "$task_remote_root" \
       --arg spawn_gen "$spawn_gen" \
       --arg pr "$pr" \
       --arg pr_source "$pr_source" \
@@ -1341,7 +1341,7 @@ secondmate_current_json() {  # <parent-tasks-json>
           '{provenance:"parent-direct-report-terminal",trust:"untrusted-supplement",captured:false,observed_at:$observed,freshness:"not-collected",reason:"no parent event to compare",lines:0,bytes:0,event_note_seen:false,contradiction:false}')
       fi
       record=$(jq -n \
-        --arg id "$id" --arg home "$home" --arg host "$host" --arg remote_root "$remote_root" --argjson remote "$remote" --arg reason "$reason" --arg observed "$SNAPSHOT_NOW" \
+        --arg id "$id" --arg home "$home" --arg host "$host" --arg remote_root "$root" --argjson remote "$remote" --arg reason "$reason" --arg observed "$SNAPSHOT_NOW" \
         --arg provenance "$provenance" --arg freshness "$freshness" --arg event_raw "$event_raw" --arg event_note "$event_note" \
         --argjson registered "$registered" --argjson event_age "$event_age" --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
         --argjson decisions "$decisions" --argjson terminal "$terminal" '

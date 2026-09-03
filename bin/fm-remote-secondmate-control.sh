@@ -374,7 +374,7 @@ cmd_launch() {
 }
 
 cmd_send() {
-  local id=$1 message=$2 delivery_mode=${3:-} reconcile_mode=${4:-} reconcile_id=${5:-} harness relay_body meta
+  local id=$1 message=$2 _delivery_mode=${3:-} reconcile_mode=${4:-} reconcile_id=${5:-} harness relay_body meta
   local send_args=()
   if [ "$reconcile_mode" = reconcile ]; then send_args=(--reconcile-delivery "$reconcile_id"); fi
   validate_id "$id"

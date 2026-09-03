@@ -635,10 +635,7 @@ rm -f "$PARENT/state/ios.reconcile-nudged"
 markerless_reconcile_dead=$(FM_HOME="$PARENT" FM_STATE_OVERRIDE="$PARENT/state" FM_DATA_OVERRIDE="$PARENT/data" \
   "$ROOT/bin/fm-secondmate-reconcile.sh" notify --snapshot "$remote_reconcile_snapshot" 2>&1) || fail "dead markerless reconciliation notify failed: $markerless_reconcile_dead"
 assert_contains "$markerless_reconcile_dead" 'sent: ios orphan_in_flight' "dead markerless reconciliation was not durably recorded"
-set +e
-markerless_dead_out=$(remote_env "$ROOT/bin/fm-bootstrap.sh" 2>&1)
-markerless_dead_rc=$?
-set -e
+markerless_dead_out=$(remote_env "$ROOT/bin/fm-bootstrap.sh" 2>&1) || true
 assert_contains "$markerless_dead_out" 'respawn failed after remote endpoint missing' \
   "the liveness sweep did not preserve a dead markerless route as a failed recovery"
 cp "$markerless_state_backup" "$HERDR_STATE"
