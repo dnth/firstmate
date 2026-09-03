@@ -414,7 +414,7 @@ cmd_send() {
       "$SCRIPT_DIR/fm-send.sh" "$id" "${send_args[@]}" "$message"
   else
     FM_SEND_RECONCILE_AUTH=1 FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$TARGET_HOME/state" \
-      "$SCRIPT_DIR/fm-send.sh" "$REMOTE_ENDPOINT_TARGET" "${send_args[@]}" "$message"
+      "$SCRIPT_DIR/fm-send.sh" "$id" "${send_args[@]}" "$message"
   fi
 }
 
