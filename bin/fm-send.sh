@@ -830,7 +830,8 @@ else
   # Upstream PR #2856's local-plane selector, adapted around this fork's
   # OMP/Hermes typed path. Classification uses the pre-marker answer text.
   INBOX_PLANE=0
-  if [ "$TARGET_BACKEND" != remote ] && [ -n "$TARGET_SELECTOR" ]; then
+  if [ "$TARGET_BACKEND" != remote ] && [ -n "$TARGET_SELECTOR" ] \
+    && [ "${FM_SEND_REMOTE_TYPED:-0}" != 1 ]; then
     case "$RESOLVE_ANSWER_TEXT" in
       /*) ;;
       \$*) [ "$TARGET_HARNESS" = codex ] || INBOX_PLANE=1 ;;
@@ -1091,7 +1092,7 @@ else
       echo "error: reconcile-delivery delivery to remote secondmate $TARGET_REMOTE_ID is unconfirmed (delivery-id=$RECONCILE_DELIVERY_ID); retry only with the same delivery id" >&2
       exit 3
     fi
-    if [ "$TARGET_BACKEND" = remote ] && [ "$send_rc" -eq 255 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+    if [ "$TARGET_BACKEND" = remote ] && [ -n "$PENDING_REPLY_CORR" ]; then
       fm_pending_reply_mark_delivery_unknown "$STATE" "$PENDING_REPLY_CORR" || true
       echo "error: text delivery to remote secondmate $TARGET_REMOTE_ID is unknown; do not resend - same-host reconciliation is required" >&2
       exit 1
