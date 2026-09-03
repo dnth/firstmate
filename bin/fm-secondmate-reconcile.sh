@@ -298,9 +298,10 @@ cmd_notify() {
       continue
     }
     expected_remote_host=$sampled_host
-    release_active_locks
+    [ -z "$ACTIVE_META_LOCK" ] || fm_lock_release "$ACTIVE_META_LOCK"; ACTIVE_META_LOCK=
+    [ -z "$ACTIVE_CONTROL_LOCK" ] || fm_lock_release "$ACTIVE_CONTROL_LOCK"; ACTIVE_CONTROL_LOCK=
     send_rc=0
-    FM_TASK_INBOX_LOCK_WAIT_SECS=0 FM_SEND_EXPECTED_SPAWN_GEN="$sampled_spawn_gen" \
+    FM_SEND_RECONCILE_AUTH=1 FM_TASK_INBOX_LOCK_WAIT_SECS=0 FM_SEND_EXPECTED_SPAWN_GEN="$sampled_spawn_gen" \
       FM_SEND_EXPECTED_REMOTE_HOST="$expected_remote_host" FM_SEND_EXPECTED_REMOTE_ROOT="$sampled_root" \
       "$SCRIPT_DIR/fm-send.sh" "$id" --fire-and-forget "$did" \
       "$(reconcile_text)" >/dev/null 2>&1 || send_rc=$?
@@ -315,19 +316,7 @@ cmd_notify() {
       ;;
     esac
     delivered_at=$(date +%s)
-    if ! fm_lock_try_acquire "$reconcile_lock"; then
-      printf 'sent-unrecorded: %s %s\n' "$id" "$kind"
-      rc=1
-      continue
-    fi
     ACTIVE_RECONCILE_LOCK=$reconcile_lock
-    if ! fm_lock_try_acquire "$control_lock"; then
-      printf 'sent-unrecorded: %s %s\n' "$id" "$kind"
-      rc=1
-      release_active_locks
-      continue
-    fi
-    ACTIVE_CONTROL_LOCK=$control_lock
     if ! fm_lock_try_acquire "$meta_lock"; then
       printf 'sent-unrecorded: %s %s\n' "$id" "$kind"
       rc=1

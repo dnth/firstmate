@@ -524,6 +524,7 @@ fm_send_add_resolve_key() {  # <key>
 while :; do
   case "${1:-}" in
     --fire-and-forget)
+      [ "${FM_SEND_RECONCILE_AUTH:-0}" = 1 ] || { echo "error: fire-and-forget is reserved for reconciliation" >&2; exit 1; }
       [ $# -ge 2 ] || { echo "error: --fire-and-forget requires a delivery id" >&2; exit 1; }
       FIRE_AND_FORGET_ID=$2
       shift 2

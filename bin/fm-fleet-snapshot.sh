@@ -95,7 +95,7 @@ FM_SNAPSHOT_PARENT_ACTIVITIES=${FM_SNAPSHOT_PARENT_ACTIVITIES:-20}
 FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT=${FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT:-2}
 FM_SNAPSHOT_REGISTRY_LINES=${FM_SNAPSHOT_REGISTRY_LINES:-256}
 FM_SNAPSHOT_REGISTRY_BYTES=${FM_SNAPSHOT_REGISTRY_BYTES:-65536}
-FM_SNAPSHOT_REGISTRY_RECORDS=${FM_SNAPSHOT_REGISTRY_RECORDS:-40}
+FM_SNAPSHOT_REGISTRY_RECORDS=${FM_SNAPSHOT_REGISTRY_RECORDS:-0}
 FM_SNAPSHOT_REGISTRY_TIMEOUT=${FM_SNAPSHOT_REGISTRY_TIMEOUT:-2}
 validate_positive_bound() {  # <name> <value>
   case "$2" in
@@ -125,7 +125,7 @@ validate_positive_bound FM_SNAPSHOT_PARENT_ACTIVITIES "$FM_SNAPSHOT_PARENT_ACTIV
 validate_positive_bound FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT "$FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT"
 validate_positive_bound FM_SNAPSHOT_REGISTRY_LINES "$FM_SNAPSHOT_REGISTRY_LINES"
 validate_positive_bound FM_SNAPSHOT_REGISTRY_BYTES "$FM_SNAPSHOT_REGISTRY_BYTES"
-validate_positive_bound FM_SNAPSHOT_REGISTRY_RECORDS "$FM_SNAPSHOT_REGISTRY_RECORDS"
+case "$FM_SNAPSHOT_REGISTRY_RECORDS" in ''|*[!0-9]*) echo "fm-fleet-snapshot: FM_SNAPSHOT_REGISTRY_RECORDS must be nonnegative" >&2; exit 2 ;; esac
 validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIMEOUT"
 
 # shellcheck source=bin/fm-backend.sh
@@ -894,7 +894,7 @@ registry_secondmates_json() {
     records=$(printf "%s\n" "$window" | jq -Rn "$parse_filter") || exit 3
     records_in_window=$(printf "%s" "$records" | jq "length") || exit 3
     records_truncated=false
-    if [ "$records_in_window" -gt "$max_records" ]; then records_truncated=true; fi
+    if [ "$max_records" -gt 0 ] && [ "$records_in_window" -gt "$max_records" ]; then records_truncated=true; fi
     printf "%s" "$records" | jq \
       --arg path "$path" --arg observed "$observed" \
       --argjson byte_truncated "$byte_truncated" \
@@ -924,7 +924,7 @@ JQ
   output_filter=$(cat <<'JQ'
       {present:true,available:true,reason:null,provenance:"registered-table",path:$path,
        freshness:{status:"fresh",observed_at:$observed},
-       records:(if length > $max_records then .[:$max_records] else . end),
+       records:(if $max_records == 0 or length <= $max_records then . else .[:$max_records] end),
        input_truncated:($byte_truncated or $line_truncated),records_truncated:$records_truncated,
        complete:(($byte_truncated or $line_truncated or $records_truncated) | not),
        reasons:[

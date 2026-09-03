@@ -402,18 +402,18 @@ cmd_send() {
       # Slash commands retain the pre-inbox typed control path. In particular,
       # /exit must not be converted into a durable ordinary-text steer or carry
       # secondmate correlation syntax into the harness command parser.
-      FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$TARGET_HOME/state" \
+      FM_SEND_RECONCILE_AUTH=1 FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$TARGET_HOME/state" \
         "$SCRIPT_DIR/fm-send.sh" "$REMOTE_ENDPOINT_TARGET" "${send_args[@]}" "$relay_body"
       return
     fi
     remote_omp_delivery_binding "$id"
-    FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$CONTROL_STATE" \
+    FM_SEND_RECONCILE_AUTH=1 FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$CONTROL_STATE" \
       FM_DATA_OVERRIDE="$CONTROL_DATA" FM_SEND_PRESERVE_INBOUND_FROM_FIRSTMATE=1 \
       FM_TASK_INBOX_OMP_REQUIRE_PROGRAMMATIC=1 FM_SEND_OMP_INBOX_REQUIRE_TURN_START=1 \
       FM_SEND_OMP_INBOX_REQUIRE_HANDLED_ACK=1 \
       "$SCRIPT_DIR/fm-send.sh" "$id" "${send_args[@]}" "$message"
   else
-    FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$TARGET_HOME/state" \
+    FM_SEND_RECONCILE_AUTH=1 FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$TARGET_HOME/state" \
       "$SCRIPT_DIR/fm-send.sh" "$REMOTE_ENDPOINT_TARGET" "${send_args[@]}" "$message"
   fi
 }
