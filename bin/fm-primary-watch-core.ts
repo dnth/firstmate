@@ -457,6 +457,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
   async function stopSessionGeneration(owner: SessionGeneration, replacement: boolean): Promise<void> {
     owner.replacement = replacement;
     let persistedTokens = "";
+    let persistenceFailed = false;
     try {
       if (replacement && owner.pendingActionables.length > 0) {
         persistReplacementHandoff(owner.pendingActionables);
@@ -473,13 +474,13 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
             `a replacement-session actionable wake\n${detail}`,
         });
       }
-      throw error;
+      persistenceFailed = true;
     } finally {
       const child = stopGeneration(owner);
       await waitForGenerationChildClose(child);
     }
     const currentTokens = owner.pendingActionables.map((pending) => pending.token).join("\n");
-    if (replacement && currentTokens && currentTokens !== persistedTokens) {
+    if (replacement && !persistenceFailed && currentTokens && currentTokens !== persistedTokens) {
       persistReplacementHandoff(owner.pendingActionables);
     }
   }
