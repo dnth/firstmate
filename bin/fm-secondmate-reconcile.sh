@@ -69,6 +69,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-operational-input.sh
+. "$SCRIPT_DIR/fm-operational-input.sh"
 
 # One nudge per home per four hours.
 FM_RECONCILE_COOLDOWN_SECONDS=${FM_RECONCILE_COOLDOWN_SECONDS:-14400}
@@ -240,7 +242,7 @@ cmd_notify() {
     | [.id, .spawn_gen, .host, .root, $kind]
     | join($sep)')
 
-  local id sampled_spawn_gen sampled_host sampled_root expected_remote_host kind path last age now delivered_at reconcile_lock control_lock meta meta_lock did send_rc
+  local id sampled_spawn_gen sampled_host sampled_root expected_remote_host kind path last age now delivered_at reconcile_lock control_lock meta meta_lock did send_rc reconcile_message
   while IFS=$'\037' read -r id sampled_spawn_gen sampled_host sampled_root kind; do
     [ -n "${id:-}" ] || continue
     path=$(nudge_path "$id")
@@ -298,13 +300,14 @@ cmd_notify() {
       continue
     }
     expected_remote_host=$sampled_host
+    fm_message_mark_from_firstmate "$(reconcile_text)" reconcile_message
     [ -z "$ACTIVE_META_LOCK" ] || fm_lock_release "$ACTIVE_META_LOCK"; ACTIVE_META_LOCK=
     [ -z "$ACTIVE_CONTROL_LOCK" ] || fm_lock_release "$ACTIVE_CONTROL_LOCK"; ACTIVE_CONTROL_LOCK=
     send_rc=0
     FM_SEND_RECONCILE_AUTH=1 FM_TASK_INBOX_LOCK_WAIT_SECS=0 FM_SEND_EXPECTED_SPAWN_GEN="$sampled_spawn_gen" \
       FM_SEND_EXPECTED_REMOTE_HOST="$expected_remote_host" FM_SEND_EXPECTED_REMOTE_ROOT="$sampled_root" \
       "$SCRIPT_DIR/fm-send.sh" "$id" --fire-and-forget "$did" \
-      "$(reconcile_text)" >/dev/null 2>&1 || send_rc=$?
+      "$reconcile_message" >/dev/null 2>&1 || send_rc=$?
     # exit 3 is "typed but unconfirmed": the mate may already hold the ask, so
     # record the nudge rather than risk asking twice.
     case "$send_rc" in

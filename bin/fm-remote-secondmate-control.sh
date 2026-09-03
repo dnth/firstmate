@@ -421,7 +421,7 @@ cmd_send() {
 cmd_reconcile_send() {
   local id=$1 message=$2 delivery_id=$3
   validate_id "$id"
-  fm_message_mark_from_firstmate "$message" message || die "reconcile payload could not be wrapped"
+  fm_message_from_firstmate "$message" || die "reconcile payload lacks the from-firstmate carrier"
   [ -n "$delivery_id" ] || die "reconcile delivery id is required"
   cmd_send "$id" "$message" fire-and-forget reconcile "$delivery_id"
 }
