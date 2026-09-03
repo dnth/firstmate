@@ -308,10 +308,17 @@ cmd_notify() {
       FM_SEND_EXPECTED_REMOTE_HOST="$expected_remote_host" FM_SEND_EXPECTED_REMOTE_ROOT="$sampled_root" \
       "$SCRIPT_DIR/fm-send.sh" "$id" --reconcile-delivery "$did" \
       "$reconcile_message" >/dev/null 2>&1 || send_rc=$?
-    # exit 3 is "typed but unconfirmed": the mate may already hold the ask, so
-    # record the nudge rather than risk asking twice.
+    # Exit 3 means the remote delivery is unconfirmed (normally SSH 255).
+    # Probe the read-only state route to distinguish an unreachable endpoint
+    # from a live endpoint whose delivery result is merely unknown.
+    if [ "$send_rc" -eq 3 ]; then
+      probe_rc=0
+      "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" \
+        </dev/null >/dev/null 2>&1 || probe_rc=$?
+      [ "$probe_rc" -eq 255 ] || send_rc=0
+    fi
     case "$send_rc" in
-      0|3|4|5|6|7|8) ;;
+      0|4|5|6|7|8) ;;
       *)
       printf 'failed: %s %s\n' "$id" "$kind"
       rc=1
