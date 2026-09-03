@@ -690,7 +690,10 @@ test_provably_working_signal_absorbed() {
 test_turn_ended_provably_working_absorbed() {
   local dir state fakebin out pid
   dir=$(make_case turn-ended-working); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
-  : > "$state/task.turn-ended"
+  # Turn-end markers are per generation; the consumer fires only the marker whose
+  # gen matches the live task metadata.
+  printf 'spawn_gen=g1\n' > "$state/task.meta"
+  : > "$state/task.turn-ended.g1"
   # A busy pane is the second form of positive evidence (covers a queued
   # continuation right after the turn-end).
   export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
@@ -714,16 +717,17 @@ test_turn_ended_not_working_surfaced() {
   local dir state fakebin out drain_out pid
   dir=$(make_case turn-ended-stopped); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"
-  : > "$state/task.turn-ended"
+  printf 'spawn_gen=g1\n' > "$state/task.meta"
+  : > "$state/task.turn-ended.g1"
   # No running pipeline, no busy pane: the crew has stopped (e.g. it finished via
   # an interactive menu and wrote no done: status). Default unknown verdict.
   export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 40 || fail "watcher did not surface a turn-end whose crew is not provably working"
-  grep -F "signal: $state/task.turn-ended" "$out" >/dev/null || fail "watcher did not print the surfaced turn-end signal"
+  grep -F "signal: $state/task.turn-ended.g1" "$out" >/dev/null || fail "watcher did not print the surfaced turn-end signal"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the surfaced turn-end failed"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/task.turn-ended" >/dev/null || fail "surfaced turn-end was not queued"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/task.turn-ended.g1" >/dev/null || fail "surfaced turn-end was not queued"
   pass "a bare turn-end whose crew is not provably working is surfaced (the swallowed-finish fix)"
 }
 
@@ -737,7 +741,8 @@ test_turn_ended_recreated_same_second_surfaced() {
   local dir state fakebin out drain_out marker before after pid
   dir=$(make_case turn-ended-same-second); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"
-  marker="$state/task.turn-ended"
+  printf 'spawn_gen=g1\n' > "$state/task.meta"
+  marker="$state/task.turn-ended.g1"
   # First turn-end, already seen and absorbed by an earlier cycle; then the next
   # turn's marker recreated inside the same epoch second (retry across a second
   # boundary so the same-second condition under test always holds).
@@ -1928,13 +1933,13 @@ test_busy_pane_below_turn_age_bound_is_absorbed() {
   dir=$(make_case busy-below-turn-age); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-fresh"
   printf 'Working... (12.3s)' > "$capture_file"
-  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-fresh.meta"
+  printf 'window=%s\nkind=ship\nharness=pi\nspawn_gen=g1\n' "$window" > "$state/busy-fresh.meta"
   record_pi_busy "$state" busy-fresh
   printf 'working: setup complete\n' > "$state/busy-fresh.status"
   sig=$(seen_sig "$state/busy-fresh.status"); printf '%s' "$sig" > "$state/.seen-busy-fresh_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
-  touch "$state/busy-fresh.turn-ended"
-  prime_turnend_seen "$state/busy-fresh.turn-ended"
+  touch "$state/busy-fresh.turn-ended.g1"
+  prime_turnend_seen "$state/busy-fresh.turn-ended.g1"
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=999 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
@@ -2118,7 +2123,7 @@ test_busy_pane_turn_end_touch_resets_age() {
   dir=$(make_case busy-turn-end-resets-age); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-reset"
   printf 'Working...' > "$capture_file"
-  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-reset.meta"
+  printf 'window=%s\nkind=ship\nharness=pi\nspawn_gen=g1\n' "$window" > "$state/busy-reset.meta"
   record_pi_busy "$state" busy-reset
   printf 'working: setup complete\n' > "$state/busy-reset.status"
   sig=$(seen_sig "$state/busy-reset.status"); printf '%s' "$sig" > "$state/.seen-busy-reset_status"
@@ -2130,8 +2135,8 @@ test_busy_pane_turn_end_touch_resets_age() {
   echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   printf '1\n' > "$state/.wedge-escalations-$key"
   # The worker's most recent turn just completed: touching turn-ended resets age.
-  touch "$state/busy-reset.turn-ended"
-  prime_turnend_seen "$state/busy-reset.turn-ended"
+  touch "$state/busy-reset.turn-ended.g1"
+  prime_turnend_seen "$state/busy-reset.turn-ended.g1"
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=3600 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
@@ -2152,7 +2157,7 @@ test_busy_pane_repeated_escalation_reaches_demand_deep_inspection() {
   dir=$(make_case busy-turn-age-demand-inspect); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-demand-inspect"
   printf 'Working...' > "$capture_file"
-  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-demand.meta"
+  printf 'window=%s\nkind=ship\nharness=pi\nspawn_gen=g1\n' "$window" > "$state/busy-demand.meta"
   record_pi_busy "$state" busy-demand
   printf 'working: setup complete\n' > "$state/busy-demand.status"
   sig=$(seen_sig "$state/busy-demand.status"); printf '%s' "$sig" > "$state/.seen-busy-demand_status"
@@ -2160,8 +2165,8 @@ test_busy_pane_repeated_escalation_reaches_demand_deep_inspection() {
   pane_hash=$(hash_text "Working...")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
-  touch -t 200001010000 "$state/busy-demand.turn-ended"
-  prime_turnend_seen "$state/busy-demand.turn-ended"
+  touch -t 200001010000 "$state/busy-demand.turn-ended.g1"
+  prime_turnend_seen "$state/busy-demand.turn-ended.g1"
 
   # Priming round: first sighting past the turn-age bound absorbs and starts
   # the wedge timer, mirroring the existing provably-working wedge tests.
@@ -2206,7 +2211,7 @@ test_busy_pane_default_turn_age_bound_is_3600s() {
   dir=$(make_case busy-default-turn-age); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-default"
   printf 'Working...' > "$capture_file"
-  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-default.meta"
+  printf 'window=%s\nkind=ship\nharness=pi\nspawn_gen=g1\n' "$window" > "$state/busy-default.meta"
   record_pi_busy "$state" busy-default
   printf 'working: setup complete\n' > "$state/busy-default.status"
   sig=$(seen_sig "$state/busy-default.status"); printf '%s' "$sig" > "$state/.seen-busy-default_status"
@@ -2215,8 +2220,8 @@ test_busy_pane_default_turn_age_bound_is_3600s() {
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
 
-  set_mtime $(( $(date +%s) - 300 )) "$state/busy-default.turn-ended"
-  prime_turnend_seen "$state/busy-default.turn-ended"
+  set_mtime $(( $(date +%s) - 300 )) "$state/busy-default.turn-ended.g1"
+  prime_turnend_seen "$state/busy-default.turn-ended.g1"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
@@ -2228,8 +2233,8 @@ test_busy_pane_default_turn_age_bound_is_3600s() {
   reap "$pid"
   ack_stopped_cycle "$state" || fail "could not acknowledge the intentional five-minute-bound stop"
 
-  set_mtime $(( $(date +%s) - 4000 )) "$state/busy-default.turn-ended"
-  prime_turnend_seen "$state/busy-default.turn-ended"
+  set_mtime $(( $(date +%s) - 4000 )) "$state/busy-default.turn-ended.g1"
+  prime_turnend_seen "$state/busy-default.turn-ended.g1"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \

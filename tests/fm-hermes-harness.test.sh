@@ -326,7 +326,7 @@ PY
 }
 
 test_hermes_spawn_tui_skill_state_and_teardown() {
-  local rec out rc launch meta state_line token registry commands interrupt_state inbox_record inbox_body
+  local rec out rc launch meta state_line token registry commands interrupt_state inbox_record inbox_body hermes_gen
   TEST_ID=hermes-lifecycle-x1
   rec=$(make_case lifecycle "$TEST_ID")
   read_case "$rec"
@@ -358,7 +358,11 @@ test_hermes_spawn_tui_skill_state_and_teardown() {
   assert_grep 'effort=xhigh' "$meta" "Hermes metadata lost its effort"
   assert_grep 'hermes_owner_token=fm.' "$meta" "Hermes metadata lost its process owner token"
   assert_present "$HOME_DIR/state/$TEST_ID.hermes-session" "Hermes start hook did not record a session"
-  assert_present "$HOME_DIR/state/$TEST_ID.turn-ended" "Hermes end hook did not touch the turn marker"
+  # Hermes publishes through the shared per-generation publisher like every other
+  # surface: the marker is state/<id>.turn-ended.<launch spawn_gen>, which the
+  # consumer gates on.
+  hermes_gen=$(sed -n 's/^spawn_gen=//p' "$meta" | tail -1)
+  assert_present "$HOME_DIR/state/$TEST_ID.turn-ended.$hermes_gen" "Hermes end hook did not publish the live-generation turn marker"
   assert_present "$HOME_DIR/state/$TEST_ID.hermes-started" "Hermes start hook did not acknowledge launch"
   [ "$(cat "$HOME_DIR/state/$TEST_ID.hermes-session")" = hermes-session-test ] \
     || fail "Hermes hook recorded the wrong session id"
@@ -575,7 +579,7 @@ test_hermes_spawn_refuses_unusable_session_sidecar() {
 }
 
 test_hermes_session_binding_and_busy_ack_order() {
-  local rec stable gen busy
+  local rec stable gen busy _hm
   TEST_ID=hermes-session-binding-x9
   rec=$(make_case session-binding "$TEST_ID")
   read_case "$rec"
@@ -583,14 +587,19 @@ test_hermes_session_binding_and_busy_ack_order() {
     --model gpt-5.6-sol --effort high --mode no-mistakes --yolo off >/dev/null \
     || fail "Hermes session-binding fixture spawn failed"
   stable=$(cat "$HOME_DIR/state/$TEST_ID.hermes-session")
-  rm -f "$HOME_DIR/state/$TEST_ID.hermes-started" "$HOME_DIR/state/$TEST_ID.turn-ended"
+  rm -f "$HOME_DIR/state/$TEST_ID.hermes-started"
+  for _hm in "$HOME_DIR/state/$TEST_ID".turn-ended.*; do
+    [ -e "$_hm" ] && rm -f -- "$_hm"
+  done
   fixture_hook on_session_start nested-session
   fixture_hook pre_llm_call nested-session
   fixture_hook on_session_end nested-session
   [ "$(cat "$HOME_DIR/state/$TEST_ID.hermes-session")" = "$stable" ] \
     || fail "nested Hermes session replaced the task-bound session"
   assert_absent "$HOME_DIR/state/$TEST_ID.hermes-started" "nested Hermes session acknowledged a task turn"
-  assert_absent "$HOME_DIR/state/$TEST_ID.turn-ended" "nested Hermes session ended the task turn"
+  for _hm in "$HOME_DIR/state/$TEST_ID".turn-ended.*; do
+    [ -e "$_hm" ] && fail "nested Hermes session ended the task turn"
+  done
 
   gen=$(jq -r '.gen' "$HERMES_HOME_DIR/fm-turn-end.d/$(cat "$HOME_DIR/state/$TEST_ID.hermes-turnend-token")")
   printf '%s\n' foreign-generation > "$HOME_DIR/state/$TEST_ID.busy-gen"

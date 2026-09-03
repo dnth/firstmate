@@ -165,6 +165,26 @@ wait_file() {
   return 1
 }
 
+# Turn-end markers are per generation (state/<id>.turn-ended.<spawn_gen>); a live
+# worker has a single incarnation, so match any gen.
+wait_turnend() {  # <state-dir> <id> [attempts]
+  local sd=$1 id=$2 attempts=${3:-320} i=0 g
+  while [ "$i" -lt "$attempts" ]; do
+    for g in "$sd/$id".turn-ended.*; do
+      [ -f "$g" ] && return 0
+    done
+    sleep 0.25
+    i=$((i + 1))
+  done
+  return 1
+}
+clear_turnend() {  # <state-dir> <id>
+  local sd=$1 id=$2 g
+  for g in "$sd/$id".turn-ended.*; do
+    [ -e "$g" ] && rm -f -- "$g"
+  done
+}
+
 wait_text_count() {
   local target=$1 text=$2 count=$3 attempts=${4:-320} pane i=0
   while [ "$i" -lt "$attempts" ]; do
@@ -247,30 +267,30 @@ assert_grep 'kind=ship' "$WORKER_META" "worker metadata lost ship kind"
 assert_grep 'model=openai-codex/gpt-5.6-luna' "$WORKER_META" "worker metadata lost selected model"
 assert_grep 'effort=low' "$WORKER_META" "worker metadata lost selected thinking level"
 wait_file "$HOME_DIR/state/$WORKER_ID.omp-ready" || fail "OMP worker extension did not report session readiness"
-wait_file "$HOME_DIR/state/$WORKER_ID.turn-ended" || fail "initial OMP worker turn did not complete"
+wait_turnend "$HOME_DIR/state" "$WORKER_ID" || fail "initial OMP worker turn did not complete"
 wait_text_count "$WORKER_TARGET" OMP_INITIAL_DONE 2 || fail "initial OMP worker response was not observed"
 wait_launch_brief_once || fail "OMP worker initial launch brief was not persisted exactly once"
 assert_contains "$(capture "$WORKER_TARGET")" 'GPT-5.6-Luna' "OMP worker did not display the selected model"
 assert_contains "$(capture "$WORKER_TARGET")" 'low' "OMP worker did not display the selected thinking level"
 [ "$(agent_state "$WORKER_TARGET")" = alive ] || fail "idle OMP worker was not classified alive"
 
-rm -f "$HOME_DIR/state/$WORKER_ID.turn-ended"
+clear_turnend "$HOME_DIR/state" "$WORKER_ID"
 run_send "$WORKER_ID" 'Respond exactly OMP_IDLE_STEER_DONE.' || fail "idle OMP steer was not acknowledged"
-wait_file "$HOME_DIR/state/$WORKER_ID.turn-ended" || fail "idle OMP steer did not complete a turn"
+wait_turnend "$HOME_DIR/state" "$WORKER_ID" || fail "idle OMP steer did not complete a turn"
 wait_text_count "$WORKER_TARGET" OMP_IDLE_STEER_DONE 2 || fail "idle OMP steer response was not observed"
 
-rm -f "$HOME_DIR/state/$WORKER_ID.turn-ended"
+clear_turnend "$HOME_DIR/state" "$WORKER_ID"
 run_send "$WORKER_ID" 'Run this exact command with bash: sleep 5. Then respond exactly OMP_BUSY_FIRST_DONE.' \
   || fail "OMP busy-turn setup was not submitted"
 wait_busy "$WORKER_TARGET" || fail "OMP busy indicator was not observed"
 run_send "$WORKER_ID" 'After the current tool finishes, respond exactly OMP_BUSY_STEER_DONE.' \
   || fail "busy OMP steer was not acknowledged"
 assert_contains "$(capture "$WORKER_TARGET")" 'Steering · 1' "busy OMP steer did not enter the verified steering queue"
-wait_file "$HOME_DIR/state/$WORKER_ID.turn-ended" 400 || fail "busy OMP turn did not complete"
+wait_turnend "$HOME_DIR/state" "$WORKER_ID" 400 || fail "busy OMP turn did not complete"
 wait_idle "$WORKER_TARGET" 400 || fail "OMP did not return idle after busy steering"
 wait_text_count "$WORKER_TARGET" OMP_BUSY_STEER_DONE 2 || fail "busy OMP steer response was not observed"
 
-rm -f "$HOME_DIR/state/$WORKER_ID.turn-ended"
+clear_turnend "$HOME_DIR/state" "$WORKER_ID"
 run_send "$WORKER_ID" 'Run this exact command with bash: sleep 30. Then respond exactly OMP_INTERRUPT_SHOULD_NOT_COMPLETE.' \
   || fail "OMP interrupt setup was not submitted"
 wait_busy "$WORKER_TARGET" || fail "OMP interrupt setup never became busy"
@@ -278,9 +298,9 @@ run_send "$WORKER_ID" --key Escape || fail "OMP interrupt key failed"
 wait_idle "$WORKER_TARGET" || fail "OMP interrupt did not stop the active turn"
 [ "$(agent_state "$WORKER_TARGET")" = alive ] || fail "OMP interrupt exited the session"
 
-rm -f "$HOME_DIR/state/$WORKER_ID.turn-ended"
+clear_turnend "$HOME_DIR/state" "$WORKER_ID"
 run_send "$WORKER_ID" /skill:fm-omp-probe || fail "OMP skill command was not submitted"
-wait_file "$HOME_DIR/state/$WORKER_ID.turn-ended" || fail "OMP skill command did not complete a turn"
+wait_turnend "$HOME_DIR/state" "$WORKER_ID" || fail "OMP skill command did not complete a turn"
 wait_text_count "$WORKER_TARGET" OMP_SKILL_DONE 1 || fail "OMP skill invocation did not reach the model"
 
 run_send "$WORKER_ID" /exit || fail "OMP clean exit command was not acknowledged"
@@ -307,9 +327,9 @@ PATH="$WRAPPER_BIN:$PATH" tmux send-keys -t "$WORKER_TARGET" Enter
 wait_file "$HOME_DIR/state/$WORKER_ID.omp-ready" 160 || fail "OMP resume extension did not report readiness"
 wait_idle "$WORKER_TARGET" 160 || fail "OMP resume did not restore an idle composer"
 [ "$(agent_state "$WORKER_TARGET")" = alive ] || fail "OMP resume did not restore the live agent"
-rm -f "$HOME_DIR/state/$WORKER_ID.turn-ended"
+clear_turnend "$HOME_DIR/state" "$WORKER_ID"
 run_send "$WORKER_ID" 'Reply with the remembered session token only.' || fail "resumed OMP session did not accept input"
-wait_file "$HOME_DIR/state/$WORKER_ID.turn-ended" || fail "resumed OMP session did not complete a turn"
+wait_turnend "$HOME_DIR/state" "$WORKER_ID" || fail "resumed OMP session did not complete a turn"
 wait_text_count "$WORKER_TARGET" OMP_CONTEXT_TOKEN_73 2 || fail "OMP resume did not preserve conversation context"
 run_send "$WORKER_ID" /exit || fail "resumed OMP session did not exit cleanly"
 for _ in $(seq 1 120); do
@@ -320,26 +340,27 @@ done
 
 spawn_omp "$SCOUT_ID" scout >/dev/null || fail "real OMP scout spawn failed"
 SCOUT_META="$HOME_DIR/state/$SCOUT_ID.meta"
+SCOUT_GEN=$(sed -n 's/^spawn_gen=//p' "$SCOUT_META" | tail -1)
 SCOUT_WT=$(sed -n 's/^worktree=//p' "$SCOUT_META")
 SCOUT_TARGET=$(sed -n 's/^window=//p' "$SCOUT_META")
 assert_grep 'harness=omp' "$SCOUT_META" "scout metadata lost exact OMP identity"
 assert_grep 'kind=scout' "$SCOUT_META" "OMP scout changed delivery semantics"
 wait_file "$HOME_DIR/state/$SCOUT_ID.omp-ready" || fail "OMP scout extension did not report session readiness"
-wait_file "$HOME_DIR/state/$SCOUT_ID.turn-ended" || fail "initial OMP scout turn did not complete"
+wait_file "$HOME_DIR/state/$SCOUT_ID.turn-ended.$SCOUT_GEN" || fail "initial OMP scout turn did not complete"
 wait_text_count "$SCOUT_TARGET" OMP_SCOUT_INITIAL_DONE 2 || fail "OMP scout response was not observed"
 [ "$(agent_state "$SCOUT_TARGET")" = alive ] || fail "idle OMP scout was not classified alive"
-rm -f "$HOME_DIR/state/$SCOUT_ID.turn-ended"
+clear_turnend "$HOME_DIR/state" "$SCOUT_ID"
 run_send "$SCOUT_ID" 'Respond exactly OMP_SCOUT_IDLE_STEER_DONE.' || fail "idle OMP scout steer was not acknowledged"
-wait_file "$HOME_DIR/state/$SCOUT_ID.turn-ended" || fail "idle OMP scout steer did not complete"
+wait_file "$HOME_DIR/state/$SCOUT_ID.turn-ended.$SCOUT_GEN" || fail "idle OMP scout steer did not complete"
 wait_text_count "$SCOUT_TARGET" OMP_SCOUT_IDLE_STEER_DONE 2 || fail "idle OMP scout steer response was not observed"
-rm -f "$HOME_DIR/state/$SCOUT_ID.turn-ended"
+clear_turnend "$HOME_DIR/state" "$SCOUT_ID"
 run_send "$SCOUT_ID" 'Run this exact command with bash: sleep 5. Then respond exactly OMP_SCOUT_BUSY_FIRST_DONE.' \
   || fail "OMP scout busy-turn setup was not submitted"
 wait_busy "$SCOUT_TARGET" || fail "OMP scout busy indicator was not observed"
 run_send "$SCOUT_ID" 'After the current tool finishes, respond exactly OMP_SCOUT_BUSY_STEER_DONE.' \
   || fail "busy OMP scout steer was not acknowledged"
 assert_contains "$(capture "$SCOUT_TARGET")" 'Steering · 1' "busy OMP scout steer did not enter the verified queue"
-wait_file "$HOME_DIR/state/$SCOUT_ID.turn-ended" 400 || fail "busy OMP scout turn did not complete"
+wait_file "$HOME_DIR/state/$SCOUT_ID.turn-ended.$SCOUT_GEN" 400 || fail "busy OMP scout turn did not complete"
 wait_idle "$SCOUT_TARGET" 400 || fail "OMP scout did not return idle after busy steering"
 wait_text_count "$SCOUT_TARGET" OMP_SCOUT_BUSY_STEER_DONE 2 || fail "busy OMP scout steer response was not observed"
 run_send "$SCOUT_ID" /exit || fail "OMP scout did not exit cleanly"

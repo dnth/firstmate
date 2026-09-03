@@ -41,7 +41,8 @@
 #                          A genuinely busy pane
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
-#                          (state/<id>.turn-ended, or the spawn record before any
+#                          (the live generation's state/<id>.turn-ended.<spawn_gen>,
+#                          or the spawn record before any
 #                          turn completes). Past that bound, a declared external
 #                          wait or verified captain-held transfer uses the long
 #                          pause recheck cadence; every other pane goes through
@@ -190,15 +191,15 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # so a hung foreground call can remain hidden even while its rendered busy
 # footer changes every poll. BUSY_TURN_MAX_SECS bounds how long any busy pane
 # may go with no completed turn: once its task's
-# state/<id>.turn-ended marker (or, before any turn has completed, the task's
+# live-generation state/<id>.turn-ended.<spawn_gen> marker (or, before any turn has completed, the task's
 # spawn record) is this old, busy_turn_over_age routes the pane through
 # busy_turn_bound_check, which hands a crossed bound to the same
 # STALE_ESCALATE_SECS-paced wedge_timer_check used for a provably-working
 # non-busy stale - so it escalates via the existing stale reason, escalation
 # counter, and demand-deep-inspection marker for human inspection only, never an
 # automatic interrupt, signal, or restart - unless the crew declared the wait
-# itself, which takes the long pause cadence instead. A completed turn touches
-# turn-ended and resets the age. Set generously above any legitimate interval
+# itself, which takes the long pause cadence instead. A completed turn publishes
+# the live-generation turn-ended marker and resets the age. Set generously above any legitimate interval
 # between completed turns, including long tool calls, builds, or test runs.
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # A crew that declared a pause is idling on a known external wait, so its stale
@@ -480,15 +481,15 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 }
 
 # busy_turn_over_age: 0 iff <task>'s latest completed-turn marker is at least
-# BUSY_TURN_MAX_SECS old. Ages the per-task turn-ended marker, the harness-neutral
-# signal every verified harness's turn-end hook touches; before any turn has
+# BUSY_TURN_MAX_SECS old. Ages the per-task live-generation turn-ended marker,
+# the harness-neutral signal every verified harness's turn-end hook publishes; before any turn has
 # completed, ages the task's spawn record instead so a fresh task still gets a
 # bound. The caller checks that the pane is busy and routes a crossed bound
 # through busy_turn_bound_check, never anything that touches the worker itself.
 busy_turn_over_age() {  # <task>
   local task=$1 f
-  f="$STATE/$task.turn-ended"
-  [ -e "$f" ] || f="$STATE/$task.meta"
+  f=$(fm_wake_turnend_live_marker "$STATE" "$task" 2>/dev/null || true)
+  { [ -n "$f" ] && [ -e "$f" ]; } || f="$STATE/$task.meta"
   [ "$(age_of "$f")" -ge "$BUSY_TURN_MAX_SECS" ]
 }
 
@@ -709,7 +710,7 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 # swallows a signal.
 scan_signals() {
   local f sig sf
-  for f in "$STATE"/*.status "$STATE"/*.turn-ended; do
+  for f in "$STATE"/*.status "$STATE"/*.turn-ended.* "$STATE"/*.turn-ended; do
     [ -e "$f" ] || continue
     sig=$(stat_sig "$f") || continue
     sf="$STATE/.seen-$(basename "$f" | tr '.' '_')"
@@ -718,6 +719,45 @@ scan_signals() {
     fi
   done
   return 0
+}
+
+# Consumer-side incarnation gate. Turn-end markers are per generation
+# (state/<id>.turn-ended.<spawn_gen>), written by bin/fm-turnend-signal.sh; a
+# torn-down or relaunched id can leave stale-gen markers behind. Fire only the
+# live incarnation's gen marker (fm-wake-lib.sh's fm_wake_turnend_marker_is_stale,
+# comparing the marker's gen against live metadata); for any other-gen marker,
+# advance its .seen signature so it is not re-scanned and drop it from this cycle -
+# .seen is per-file, so ignoring an old gen never advances the live gen's seen
+# state. Status files and the live gen's marker pass through unchanged. Reads the
+# pending TSV on its argument and prints the survivors.
+filter_stale_turnend_markers() {  # <pending-tsv>
+  local pending=$1 sf sig f base rest id gen
+  while IFS=$(printf '\t') read -r sf sig f; do
+    [ -n "$sf" ] || continue
+    case "$f" in
+      *.turn-ended.*)
+        base=$(basename "$f")
+        id=${base%.turn-ended.*}
+        rest=${base#"$id".turn-ended.}
+        gen=$rest
+        if fm_wake_turnend_marker_is_stale "$STATE" "$id" "$gen"; then
+          printf '%s' "$sig" > "$sf"
+          continue
+        fi
+        ;;
+      *.turn-ended)
+        base=$(basename "$f")
+        id=${base%.turn-ended}
+        if fm_wake_turnend_bare_marker_is_stale "$STATE" "$id"; then
+          printf '%s' "$sig" > "$sf"
+          continue
+        fi
+        ;;
+    esac
+    printf '%s\t%s\t%s\n' "$sf" "$sig" "$f"
+  done <<EOF
+$pending
+EOF
 }
 
 # Deliver a durably queued process-event result to firstmate. Publication is
@@ -1190,6 +1230,13 @@ while :; do
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
+    # Gate turn-end markers to the live incarnation before they can wake firstmate:
+    # a stale (torn-down or relaunched) marker is discarded here, with its .seen
+    # advanced so it never re-fires. If every pending signal was a stale marker,
+    # there is nothing left to surface.
+    pending=$(filter_stale_turnend_markers "$pending")
+  fi
+  if [ -n "$pending" ]; then
     files=""
     while IFS=$(printf '\t') read -r sf sig f; do
       [ -n "$sf" ] || continue

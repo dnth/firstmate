@@ -168,8 +168,13 @@
 #   $vars and silently breaks ad-hoc `for ... in $pairs` loops).
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
-#     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
-#                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
+#     __TURNEND_SIGNAL__ absolute path to bin/fm-turnend-signal.sh (the lock-free
+#                  publisher of the per-generation marker state/<task-id>.turn-ended.<spawn_gen>,
+#                  for harnesses whose turn-end signal rides the launch command,
+#                  e.g. codex -c notify=[...])
+#     __STATE__     absolute path to the task's state directory
+#     __TASK_ID__   canonical task id
+#     __SPAWN_GEN__ per-launch incarnation bound to the task's metadata
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __OMPEXT__   absolute path to state/<task-id>.omp-ext.ts (OMP turn-start
@@ -191,6 +196,7 @@
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
+# When these registries are enabled, state/<id>.meta records grok_turnend_dir= and kimi_turnend_dir= so teardown removes tokens through their owning directories.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
@@ -923,6 +929,10 @@ spawn_omp_abort_clean_unchanged_worktree() {  # <context>
     rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
       "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" "$STATE/$ID.omp-started" \
       "$STATE/$ID.omp-doorbell-ready"
+    for _turnend_marker in "$STATE/$ID".turn-ended.*; do
+      [ -e "$_turnend_marker" ] || continue
+      rm -f -- "$_turnend_marker"
+    done
   else
     echo "warning: $context could not return the unchanged worktree $WT" >&2
   fi
@@ -1233,7 +1243,7 @@ launch_template() {
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"__TURNEND_SIGNAL__ __STATE__ __TASK_ID__ __SPAWN_GEN__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -3536,13 +3546,20 @@ if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
   mkdir -p "$OMP_SESSION_DIR"
 fi
 
-# Per-harness turn-end hook where enabled: a file that touches
-# state/<id>.turn-ended when the agent finishes a turn. Worktree-resident hooks
-# and token pointers stay out of git's view so they never block teardown's dirty
-# check or leak into a commit.
+# Per-harness turn-end hook where enabled: every surface calls fm-turnend-signal.sh
+# with this task's SPAWN_GEN, which writes the per-generation marker
+# state/<id>.turn-ended.<SPAWN_GEN> when the agent finishes a turn. Worktree-resident
+# hooks and token pointers stay out of git's view so they never block teardown's
+# dirty check or leak into a commit. Because each incarnation writes only its own
+# gen file, a hook retained in harness memory after teardown or a same-id relaunch
+# cannot clobber a live marker, and the consumer (bin/fm-wake-lib.sh) never surfaces
+# a stale gen. TURNEND below is the marker BASE path, from which the Grok/Kimi
+# registries derive the state dir and id; the signal appends the gen suffix.
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
+TURNEND_SIGNAL="$FM_ROOT/bin/fm-turnend-signal.sh"
+SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 if [ "$HARNESS" = omp ]; then
   rm -f "$STATE/$ID.omp-doorbell-ready"
 fi
@@ -3604,14 +3621,15 @@ if [ "$KIND" != secondmate ]; then
       # never leave a stale busy record. Claude fires no hook for a manual
       # interrupt, so the firstmate-controlled interruption procedure
       # (harness-adapters) records idle/fm-interrupt itself. Stop keeps the
-      # turn-ended NOTIFICATION touch for the watcher. Every hook command
-      # tolerates a refused event (|| true) so a stale-gen writer can never
-      # break Claude's own lifecycle.
+      # generation-bound turn-ended NOTIFICATION for the watcher. Every hook
+      # command tolerates a refused event (|| true) so a stale-gen writer can
+      # never break Claude's own lifecycle.
       mkdir -p "$WT/.claude"
       busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
       busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source claude-hook"
+      turnend_cmd="$(shell_quote "$TURNEND_SIGNAL") $(shell_quote "$STATE_REAL") $(shell_quote "$ID") $(shell_quote "$SPAWN_GEN")"
       j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit 2>/dev/null || true")
-      j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
+      j_stop=$(json_escape "$turnend_cmd; $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
       j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
       j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
       cat > "$WT/.claude/settings.local.json" <<EOF
@@ -3629,7 +3647,7 @@ EOF
 // reports activity (the worker's main session - a subagent child session can
 // only start while the main session is already busy) and ignores other
 // sessions' status until the latched session settles, so a child's idle can
-// never clear the worker's busy state. The session.idle touch stays the
+// never clear the worker's busy state. The session.idle publication stays the
 // watcher's wake NOTIFICATION, never current-state truth.
 import { execFile } from "node:child_process";
 const busyEvent = (state, event) =>
@@ -3663,7 +3681,7 @@ export const FmBusyState = async () => {
           await busyEvent("idle", "session-idle");
         }
         await new Promise((resolve) => {
-          execFile("touch", ["$TURNEND"], () => resolve());
+          execFile("$TURNEND_SIGNAL", ["$STATE_REAL", "$ID", "$SPAWN_GEN"], () => resolve());
         });
       }
     },
@@ -3685,7 +3703,7 @@ EOF
 // loops, and queued continuations all keep the run un-settled, and a settle
 // that raced another extension's fresh run keeps state busy via isIdle().
 // "turn_end" fires at every inner turn boundary (one LLM response plus its
-// tool calls) and stays a wake NOTIFICATION touch for the watcher, never
+// tool calls) and stays a wake NOTIFICATION publication for the watcher, never
 // current-state truth.
 import { execFile } from "node:child_process";
 const busyEvent = (state: string, event: string) =>
@@ -3701,7 +3719,7 @@ export default function (pi: any) {
     if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
     return busyEvent("idle", "agent-settled");
   });
-  pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
+  pi.on("turn_end", () => execFile("$TURNEND_SIGNAL", ["$STATE_REAL", "$ID", "$SPAWN_GEN"]));
 }
 EOF
       ;;
@@ -3724,7 +3742,7 @@ export default function (omp: any) {
     execFile("touch", ["$OMP_READY"]);
   });
   omp.on("turn_start", () => execFile("touch", ["$OMP_STARTED"]));
-  omp.on("turn_end", () => execFile("touch", ["$TURNEND"]));
+  omp.on("turn_end", () => execFile("$TURNEND_SIGNAL", ["$STATE_REAL", "$ID", "$SPAWN_GEN"]));
   omp.on("session_shutdown", taskInboxDoorbell.retire);
 }
 EOF
@@ -3737,7 +3755,8 @@ EOF
       # firstmate-launched worker. Codex therefore classifies unknown with
       # an explicit reason rather than falling back to idle, and no busy
       # wiring is installed. The turn-end NOTIFICATION marker still rides
-      # the launch command via -c notify=[...] and __TURNEND__.
+      # the launch command via -c notify=[...] and the generation-bound
+      # fm-turnend-signal.sh command.
       ;;
     grok*)
       # grok fires a Stop hook at every turn boundary (verified, grok 0.2.73), the
@@ -3761,7 +3780,8 @@ EOF
       umask 077
       auth_file=$(mktemp "$GROK_AUTH_DIR/fm.XXXXXXXXXXXX")
       umask "$old_umask"
-      printf '%s\n' "$TURNEND" > "$auth_file"
+      printf 'target=%s\nspawn_gen=%s\nsignal=%s\n' \
+        "$TURNEND" "$SPAWN_GEN" "$TURNEND_SIGNAL" > "$auth_file"
       printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.grok-turnend-token"
       sq_grok_auth_dir=$(shell_quote "$GROK_AUTH_DIR")
       cat > "$GROK_HOOKS_DIR/fm-turn-end.sh" <<EOF
@@ -3777,9 +3797,20 @@ IFS= read -r -n 256 first < "\$p" 2>/dev/null || [ -n "\$first" ] || exit 0
 case "\$first" in token=*) token=\${first#token=} ;; *) exit 0 ;; esac
 case "\$token" in fm.????????????) : ;; *) exit 0 ;; esac
 case "\$token" in *[!A-Za-z0-9._-]*) exit 0 ;; esac
-t=\$(cat "\$auth_dir/\$token" 2>/dev/null) || exit 0
-case "\$t" in /*.turn-ended) : ;; *) exit 0 ;; esac
-touch "\$t" 2>/dev/null || true
+registry="\$auth_dir/\$token"
+target= spawn_gen= signal= extra=
+IFS= read -r target < "\$registry" 2>/dev/null || exit 0
+IFS= read -r spawn_gen < <(sed -n '2p' "\$registry") || exit 0
+IFS= read -r signal < <(sed -n '3p' "\$registry") || exit 0
+IFS= read -r extra < <(sed -n '4p' "\$registry") || true
+case "\$target" in target=/*.turn-ended) target=\${target#target=} ;; *) exit 0 ;; esac
+case "\$spawn_gen" in spawn_gen=*) spawn_gen=\${spawn_gen#spawn_gen=} ;; *) exit 0 ;; esac
+case "\$signal" in signal=/*/bin/fm-turnend-signal.sh) signal=\${signal#signal=} ;; *) exit 0 ;; esac
+[ -z "\$extra" ] || exit 0
+state=\${target%/*}
+name=\${target##*/}
+id=\${name%.turn-ended}
+"\$signal" "\$state" "\$id" "\$spawn_gen" >/dev/null 2>&1 || true
 exit 0
 EOF
       chmod +x "$GROK_HOOKS_DIR/fm-turn-end.sh"
@@ -3798,7 +3829,8 @@ EOF
       umask 077
       auth_file=$(mktemp "$KIMI_AUTH_DIR/fm.XXXXXXXXXXXX")
       umask "$old_umask"
-      printf '%s\n' "$TURNEND" > "$auth_file"
+      printf 'target=%s\nspawn_gen=%s\nsignal=%s\n' \
+        "$TURNEND" "$SPAWN_GEN" "$TURNEND_SIGNAL" > "$auth_file"
       printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.kimi-turnend-token"
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-kimi-turnend"
       exclude_path '.fm-kimi-turnend'
@@ -3808,8 +3840,12 @@ EOF
       # plugin forwards each gateway turn into the same guarded shell handler
       # used by compatible classic/headless runs. on_session_start captures a
       # new session id, pre_llm_call acknowledges the initial or resumed turn,
-      # and on_session_end closes the semantic turn and touches the watcher
-      # notification without polling away a short turn.
+      # and on_session_end closes the semantic turn and publishes the watcher
+      # notification through the shared stamped publisher (fm-turnend-signal.sh),
+      # like every other harness surface. The turn-end stays gated on the live
+      # incarnation by the captured session sidecar (which teardown removes with
+      # the registry token) and by the spawn_gen the publisher stamps, so the
+      # consumer discards it for a torn-down or relaunched task.
       if [ "$HERMES_LAUNCH_TEMPLATE" -eq 1 ]; then
         HERMES_AUTH_DIR="$HERMES_HOME_DIR/fm-turn-end.d"
         HERMES_SESSION_FILE="$STATE_REAL/$ID.hermes-session"
@@ -3822,8 +3858,8 @@ EOF
             fm.????????????)
               prior_auth="$HERMES_AUTH_DIR/$prior_token"
               if [ -f "$prior_auth" ] && [ ! -L "$prior_auth" ] \
-                && jq -e --arg id "$ID" --arg state "$STATE_REAL" \
-                  '.id == $id and .state == $state' "$prior_auth" >/dev/null 2>&1; then
+                && jq -e --arg id "$ID" --arg state "$STATE_REAL" --arg spawn_gen "$SPAWN_GEN" \
+                  '.id == $id and .state == $state and .spawn_gen == $spawn_gen' "$prior_auth" >/dev/null 2>&1; then
                 auth_file=$prior_auth
               fi
               ;;
@@ -3843,7 +3879,8 @@ EOF
           --arg state "$STATE_REAL" \
           --arg id "$ID" \
           --arg gen "$BUSY_GEN" \
-          '{turnend:$turnend,session_file:$session_file,started:$started,root:$root,state:$state,id:$id,gen:$gen}' \
+          --arg spawn_gen "$SPAWN_GEN" \
+          '{turnend:$turnend,session_file:$session_file,started:$started,root:$root,state:$state,id:$id,gen:$gen,spawn_gen:$spawn_gen}' \
           > "$auth_file"
         printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.hermes-turnend-token"
         HERMES_OWNER_TOKEN=${auth_file##*/}
@@ -3915,6 +3952,9 @@ SPAWN_META_LOCK_HELD=1
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  echo "spawn_gen=$SPAWN_GEN"
+  [ -z "${GROK_AUTH_DIR:-}" ] || echo "grok_turnend_dir=$GROK_AUTH_DIR"
+  [ -z "${KIMI_AUTH_DIR:-}" ] || echo "kimi_turnend_dir=$KIMI_AUTH_DIR"
   if [ "$HARNESS" = omp ] && [ "$ALLOW_PROJECT_OMP_EXTENSIONS" -eq 1 ]; then
     echo "allow_project_omp_extensions=1"
   fi
@@ -3975,7 +4015,10 @@ if [ "$HARNESS" = omp ]; then
 fi
 
 sq_brief=$(shell_quote "$BRIEF")
-sq_turnend=$(shell_quote "$TURNEND")
+sq_turnend_signal=$(shell_quote "$TURNEND_SIGNAL")
+sq_state=$(shell_quote "$STATE_REAL")
+sq_task_id=$(shell_quote "$ID")
+sq_spawn_gen=$(shell_quote "$SPAWN_GEN")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
 sq_ompprimary=$(shell_quote "$OMP_PRIMARY_EXTENSION")
@@ -4009,7 +4052,10 @@ LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__PREWALKFLAG__/$PREWALKFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
-LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
+LAUNCH=${LAUNCH//__TURNEND_SIGNAL__/$sq_turnend_signal}
+LAUNCH=${LAUNCH//__STATE__/$sq_state}
+LAUNCH=${LAUNCH//__TASK_ID__/$sq_task_id}
+LAUNCH=${LAUNCH//__SPAWN_GEN__/$sq_spawn_gen}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__OMPEXT__/$sq_ompext}
 LAUNCH=${LAUNCH//__OMPPRIMARY__/$sq_ompprimary}

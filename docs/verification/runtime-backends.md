@@ -112,7 +112,7 @@ pi-launcher
 state: done ...
 ```
 
-Both launches executed a submitted tool instruction and touched the generated `turn_end` marker.
+Both launches executed a submitted tool instruction and published the generated `turn_end` notification.
 The pi-signed launch retained `harness=pi-signed`, while the plain comparison retained `harness=pi`.
 The exact wrapper ancestry was `pi-signed` parent to Pi engine child, and the plain Pi Launcher path also traversed the signed wrapper on this installation.
 That shared plain-Pi path is retained as disconfirming evidence against using ancestry as runtime-selection authority.
@@ -152,19 +152,19 @@ Observed bounded output:
 
 ```text
 command: fm-spawn hermes-live-worker --harness hermes --backend tmux --model gpt-5.6-sol --effort low
-output: persistent=yes session=20260825_022814_bd8c33 turn_end=touched busy=idle hermes-hook
+output: persistent=yes session=20260825_022814_bd8c33 turn_end=published busy=idle hermes-hook
 command: fm-send hermes-live-worker "Use terminal_tool to run sleep 5 ..."
-output: submit=verified busy=busy hermes-hook idle=idle hermes-hook turn_end=touched
+output: submit=verified busy=busy hermes-hook idle=idle hermes-hook turn_end=published
 command: fm-send hermes-live-worker /fmnative
-output: native_skill=/fmnative send=0 busy=busy hermes-hook idle=idle hermes-hook turn_end=touched
+output: native_skill=/fmnative send=0 busy=busy hermes-hook idle=idle hermes-hook turn_end=published
 command: fm-send hermes-live-worker "sleep 20"; fm-send hermes-live-worker --key C-c
-output: interrupt=C-c state=idle fm-interrupt turn_end=touched
+output: interrupt=C-c state=idle fm-interrupt turn_end=published
 command: fm-send hermes-live-worker /exit
 output: exit=0 foreground=shell
 command: fm-spawn hermes-live-worker ... --resume 20260825_022814_bd8c33 (from task state)
 output: same_session=yes context=HERMES-TUI-RESUME-825
 command: fm-spawn hermes-live-scout --scout --harness hermes --backend tmux
-output: scout_persistent=yes turn_end=touched
+output: scout_persistent=yes turn_end=published
 ok - Hermes Agent v0.20.0 (2026.8.3) persistent Hermes TUI: crew/scout launch, composer steer, native skill turn, busy->idle, turn-end, interrupt, exit, and exact-session resume
 ```
 
@@ -172,9 +172,9 @@ The persistent-TUI and lifecycle facts remain current, while the ordinary-text t
 The live busy surface had two independent positive signals: `Ctrl+C to interrupt…` in the composer and the status rule's `· <elapsed>` segment.
 The structural `─ ready │` rule proved idle after both normal completion and interruption.
 Those two rendered signals are what the missing-record fallback reads; they are not what the transcript above sampled. A valid trusted lifecycle record decides classification in both directions, and the rendered tail is captured only after the record read finds no valid record, so every sample above - taken once the bridge had already published a record - reports `hermes-hook` in both states. That ordering is what keeps a lagging busy redraw from letting `--key C-c` reach an already-idle TUI and exit it, and it is why no `hermes-tui` verdict appears in a record-backed sample.
-A native profile skill (`$HERMES_HOME/skills/fmnative/SKILL.md`, typed as the bare `/fmnative`) started a real model turn: `fm-send` exited 0 on its `pre_llm_call` turn-start proof, the busy surface appeared, the turn-end marker fired, and the model spoke the skill's token.
+A native profile skill (`$HERMES_HOME/skills/fmnative/SKILL.md`, typed as the bare `/fmnative`) started a real model turn: `fm-send` exited 0 on its `pre_llm_call` turn-start proof, the busy surface appeared, the per-generation turn-end notification fired, and the model spoke the skill's token.
 That is the fail-closed contract holding for the native branch - a slash command that Hermes handled locally instead would have produced a `delivered-no-turn` failure rather than success.
-The `firstmate-lifecycle` profile plugin forwarded `on_session_start`, `pre_llm_call`, and `on_session_end` from the TUI gateway worker into the guarded shell handler, which captured the exact durable session and touched every turn-end marker.
+The `firstmate-lifecycle` profile plugin forwarded `on_session_start`, `pre_llm_call`, and `on_session_end` from the TUI gateway worker into the guarded shell handler, which captured the exact durable session and published each turn-end notification through the per-generation contract.
 Direct config shell hooks were disconfirming evidence for the TUI path: v0.20.0 logged them as registered in the wrapper process but did not invoke them from gateway turns.
 The CLI `--reasoning low` value was also disconfirming by itself because v0.20.0's Python TUI launcher dropped it and initially rendered the profile's `high` value.
 The session-scoped `/reasoning low` setup command changed the live footer to `gpt 5.6 sol low` without changing the global reasoning setting.

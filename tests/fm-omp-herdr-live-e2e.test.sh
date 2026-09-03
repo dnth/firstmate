@@ -557,17 +557,21 @@ WORKER_WORKSPACE=$(sed -n 's/^herdr_workspace_id=//p' "$WORKER_META")
 [ -n "$WORKER_WORKSPACE" ] && [ "$WORKER_WORKSPACE" = "$PRIMARY_WORKSPACE" ] \
   || fail "Herdr worker workspace '$WORKER_WORKSPACE' did not match primary live workspace '$PRIMARY_WORKSPACE'"
 assert_grep "worktree=$WORKER_WT" "$WORKER_META" "Herdr worker did not enter its isolated worktree"
+# Turn-end markers are per generation (state/<id>.turn-ended.<spawn_gen>).
+WORKER_GEN=$(sed -n 's/^spawn_gen=//p' "$WORKER_META" | tail -1)
+[ -n "$WORKER_GEN" ] || fail "worker metadata lost its spawn_gen"
+WORKER_TURNEND="$HOME_DIR/state/$WORKER_ID.turn-ended.$WORKER_GEN"
 wait_for "worker extension readiness" file_exists "$HOME_DIR/state/$WORKER_ID.omp-ready"
-wait_for "worker first turn" file_exists "$HOME_DIR/state/$WORKER_ID.turn-ended"
+wait_for "worker first turn" file_exists "$WORKER_TURNEND"
 wait_for "exact idle worker identity" agent_is "$WORKER_TARGET" omp 'idle done'
 WORKER_SESSION=$(session_file_for "$WORKER_TARGET")
 case "$WORKER_SESSION" in "/tmp/fm-$WORKER_ID/omp-sessions/"*.jsonl) ;; *) fail "worker Herdr identity did not bind its task-owned session" ;; esac
 file_has "$WORKER_SESSION" 'Herdr worker is ready.' || fail "worker launch brief did not complete"
 await_primary_wake_and_drain "worker startup turn-end delivery" "$worker_start_wake_offset" \
   "FIRSTMATE WATCHER WAKE: signal: $HOME_DIR/state/$WORKER_ID.turn-ended" \
-  "$HOME_DIR/state/$WORKER_ID.turn-ended"
+  "$WORKER_TURNEND"
 
-rm -f "$HOME_DIR/state/$WORKER_ID.turn-ended"
+rm -f "$WORKER_TURNEND"
 worker_busy_wake_offset=$(session_offset "$PRIMARY_SESSION") || exit 1
 send_task "$WORKER_ID" 'Run this exact bash command: sleep 10. Then reply exactly: The worker completed its timed command.' \
   || fail "worker busy-turn setup was not submitted"
@@ -585,12 +589,12 @@ fallback_verdict=$(
   || fail "real working OMP composer fallback returned '$fallback_verdict' without its native event"
 wait_for "worker exact native steering event" session_has_exact_steer_after \
   "$WORKER_SESSION" "$steer_offset" "$fallback_steer"
-wait_for "worker busy turn completion" file_exists "$HOME_DIR/state/$WORKER_ID.turn-ended"
+wait_for "worker busy turn completion" file_exists "$WORKER_TURNEND"
 wait_for "worker busy response" file_has "$WORKER_SESSION" 'The busy worker message was processed.'
 wait_for "worker return to idle" agent_is "$WORKER_TARGET" omp 'idle done'
 await_primary_wake_and_drain "worker busy turn-end delivery" "$worker_busy_wake_offset" \
   "FIRSTMATE WATCHER WAKE: signal: $HOME_DIR/state/$WORKER_ID.turn-ended" \
-  "$HOME_DIR/state/$WORKER_ID.turn-ended"
+  "$WORKER_TURNEND"
 
 if [ "$SUBMIT_ONLY" = 1 ]; then
   send_task "$WORKER_ID" /exit || fail "submit-fallback worker /exit was not event-confirmed"
@@ -602,7 +606,7 @@ if [ "$SUBMIT_ONLY" = 1 ]; then
   exit 0
 fi
 
-rm -f "$HOME_DIR/state/$WORKER_ID.turn-ended"
+rm -f "$WORKER_TURNEND"
 blocked_prompt="Before continuing, use the ask tool for one single-choice question: 'Which audience should the report focus on?' Offer exactly two options, 'Operators' and 'Maintainers', and wait for my selection."
 blocked_wake_offset=$(session_offset "$PRIMARY_SESSION") || exit 1
 send_task "$WORKER_ID" "$blocked_prompt" || fail "worker question-induced blocked-state setup was not submitted"
@@ -637,26 +641,26 @@ if ! session_has_exact_choice_after "$WORKER_SESSION" "$worker_answer_offset" Op
 fi
 wait_for "exact routed captain choice on the worker" session_has_exact_choice_after \
   "$WORKER_SESSION" "$worker_answer_offset" Operators
-wait_for "question-induced worker turn completion" file_exists "$HOME_DIR/state/$WORKER_ID.turn-ended"
+wait_for "question-induced worker turn completion" file_exists "$WORKER_TURNEND"
 wait_for "question-induced worker return to idle" agent_is "$WORKER_TARGET" omp 'idle done'
 wait_for "exact native primary idle after the captain decision" agent_is "$PRIMARY_TARGET" omp 'idle done'
 await_primary_wake_and_drain "question turn-end delivery" "$question_wake_offset" \
   "FIRSTMATE WATCHER WAKE: signal: $HOME_DIR/state/$WORKER_ID.turn-ended" \
-  "$HOME_DIR/state/$WORKER_ID.turn-ended"
+  "$WORKER_TURNEND"
 
-rm -f "$HOME_DIR/state/$WORKER_ID.turn-ended"
+rm -f "$WORKER_TURNEND"
 worker_idle_text='Reply exactly: The idle worker message was processed.'
 worker_idle_offset=$(session_offset "$WORKER_SESSION") || exit 1
 worker_idle_wake_offset=$(session_offset "$PRIMARY_SESSION") || exit 1
 send_task "$WORKER_ID" "$worker_idle_text" || fail "worker idle steering was not submitted"
 wait_for "worker exact native idle user event" session_has_exact_user_after \
   "$WORKER_SESSION" "$worker_idle_offset" "$worker_idle_text" false
-wait_for "worker idle turn completion" file_exists "$HOME_DIR/state/$WORKER_ID.turn-ended"
+wait_for "worker idle turn completion" file_exists "$WORKER_TURNEND"
 wait_for "worker idle response" file_has "$WORKER_SESSION" 'The idle worker message was processed.'
 wait_for "worker idle steering return" agent_is "$WORKER_TARGET" omp 'idle done'
 await_primary_wake_and_drain "worker idle turn-end delivery" "$worker_idle_wake_offset" \
   "FIRSTMATE WATCHER WAKE: signal: $HOME_DIR/state/$WORKER_ID.turn-ended" \
-  "$HOME_DIR/state/$WORKER_ID.turn-ended"
+  "$WORKER_TURNEND"
 
 worker_exit_offset=$(session_offset "$WORKER_SESSION") || exit 1
 send_task "$WORKER_ID" /exit || fail "production worker /exit was not event-confirmed"

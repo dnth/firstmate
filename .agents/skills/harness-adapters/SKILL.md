@@ -210,7 +210,7 @@ That styled capture is internal to the boolean detector only.
 `fm-peek` and every other human or LLM-facing capture path stays plain `tmux capture-pane` with no escape codes.
 
 **Primary-session guard fact (verified 2026-07-04, Claude Code 2.1.201; preserved 2026-07-08, Claude Code 2.1.204; Stop-owned auto-arm revalidated 2026-07-24, Claude Code 2.1.219).**
-This is separate from the per-task crewmate turn-end hook above (that one just `touch`es a marker file in a task's own `.claude/settings.local.json`).
+This is separate from the per-task crewmate turn-end hook above (that one publishes through the per-generation signal contract owned by [`docs/configuration.md`](../../../docs/configuration.md) "Harness support").
 The firstmate PRIMARY's own `.claude/settings.json` registers two Stop hooks: `bin/fm-turnend-guard.sh --claude` and the Stop-owned auto-arm `bin/fm-claude-stop-autoarm.sh` (`asyncRewake: true`, `timeout: 28800`), and exiting the guard with status 2 plus stderr reliably forces the model to continue.
 Claude Code's stdin payload to a Stop hook carries a `stop_hook_active` boolean that is `true` when the current stop attempt follows ANY stop-hook-driven continuation, including `asyncRewake` rewakes; the primary guard therefore ignores it in `--claude` mode and uses the cooperative claim/epoch check plus a bounded re-block budget instead, while the codex-mode default still treats it as a one-block loop guard.
 A project-level `.claude/settings.json` only takes effect when Claude Code's project root is that exact directory - it does not walk up from a subdirectory looking for one, so firstmate launches the primary from the repo root.
@@ -324,7 +324,7 @@ OMP is an exact harness identity and is never normalized to Pi.
 `bin/fm-omp-capabilities.sh` owns exact executable resolution and the selected OMP executable's launch and recovery capability checks that run before `fm-spawn` creates an endpoint.
 A failed OMP preflight never launches another executable as a fallback.
 Workers and scouts receive one typed `launch-brief` positional argument and an external per-task extension under `state/`.
-The extension reports `session_start` readiness, acknowledges the initial instruction through `turn_start`, and touches the task's turn-completion marker on every `turn_end`.
+The extension reports `session_start` readiness, acknowledges the initial instruction through `turn_start`, and publishes turn-end through the per-generation signal contract on every `turn_end`.
 Firstmate waits for the first `turn_start` acknowledgement before reporting a successful spawn.
 OMP workers keep their sessions under the task temp root so recovery can resume the exact conversation and ordinary cleanup can remove the session files with the rest of the task temp.
 
@@ -391,7 +391,7 @@ grok loads PROJECT hooks (`<worktree>/.grok/hooks/`, `<worktree>/.claude/setting
 GLOBAL hooks in `~/.grok/hooks/` are always trusted and load on first launch.
 So `fm-spawn` installs ONE firstmate-owned global hook, `~/.grok/hooks/fm-turn-end.json`, plus the companion `~/.grok/hooks/fm-turn-end.sh`, guarded as a no-op for every non-firstmate grok session.
 Its `Stop` command fires only when the current workspace holds a `.fm-grok-turnend` token pointer that matches the firstmate-owned hook registry under `~/.grok/hooks/fm-turn-end.d/`.
-`fm-spawn` writes that per-task pointer (`<worktree>/.fm-grok-turnend`, gitignored via git info/exclude like the other harnesses' worktree hook files) and a matching registry entry naming this task's `state/<id>.turn-ended`.
+`fm-spawn` writes that per-task pointer (`<worktree>/.fm-grok-turnend`, gitignored via git info/exclude like the other harnesses' worktree hook files) and a matching registry entry that resolves to the per-generation turn-end publisher under the contract owned by [`docs/configuration.md`](../../../docs/configuration.md) "Harness support".
 The hook reads `$GROK_WORKSPACE_ROOT`, which is always set for hooks and equals the worktree.
 This keeps the hook outside the worktree, needs no trust grant, and writes only firstmate-owned files.
 `fm-teardown` removes the worktree pointer before returning a pooled worktree.
@@ -442,7 +442,7 @@ The delivery-only spinner match covers the full moon-phase glyph set rather than
 
 [`docs/turnend-guard.md`](../../../docs/turnend-guard.md) owns Kimi's verified global hook surface and captain-approved crew wake integration.
 `fm-spawn.sh` installs one marker-delimited Firstmate entry in `$HOME/.kimi-code/config.toml`, one silent always-zero hook script, and one private token registry under `$HOME/.kimi-code/fm-turn-end.d/`.
-Each Kimi crew worktree receives a gitignored `.fm-kimi-turnend` token pointer, and the global hook touches that task's `state/<id>.turn-ended` only when the Stop payload's `cwd`, pointer, and registry entry all agree.
+Each Kimi crew worktree receives a gitignored `.fm-kimi-turnend` token pointer, and the global hook resolves the Stop payload's `cwd`, pointer, and registry entry, then publishes through the per-generation turn-end contract owned by [`docs/configuration.md`](../../../docs/configuration.md) "Harness support" whose consumer fires only the live incarnation's generation marker.
 A guarded silent hook cannot be verified from absence of effect, so prove invocation with an unguarded probe before concluding that the hook did not fire.
 The guarded turn-end signal remains a wake notification; standalone Kimi has no busy-state source until one is live-verified.
 
@@ -478,7 +478,7 @@ This bridge is necessary because v0.20.0 logs config shell hooks as registered i
 Each Hermes crew worktree receives a gitignored `.fm-hermes-turnend` pointer; the global hook acts only when that token resolves to the exact task state paths and busy-state generation.
 `on_session_start` binds the newly created task session only while the sidecar is absent.
 Later lifecycle events must match that stable id, and `pre_llm_call` records busy successfully before touching `state/<id>.hermes-started` for an initial or resumed turn.
-The end event requires the same session id, touches `state/<id>.turn-ended`, and marks the turn idle.
+The end event requires the same session id, publishes `state/<id>.turn-ended.<spawn_gen>` through the per-generation turn-end publisher (`bin/fm-turnend-signal.sh`), and marks the turn idle.
 Hermes' `on_session_end` callback at the end of each TUI `run_conversation` call is the exact supervised turn boundary, including turns shorter than the watcher poll interval.
 
 On Hermes' typed plane, `fm-send` refuses a composer injection unless the classified state is exactly idle, the task-bound session and profile metadata validate, and the structural composer is empty; ordinary local text instead publishes a durable inbox record and treats the doorbell as advisory.
