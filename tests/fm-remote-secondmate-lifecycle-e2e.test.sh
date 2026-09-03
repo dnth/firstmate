@@ -612,6 +612,11 @@ markerless_unreachable_rc=$?
 set -e
 [ "$markerless_unreachable_rc" = 255 ] \
   || fail "an unreachable markerless route was not preserved as unknown (rc=$markerless_unreachable_rc)"
+remote_root=$(sed -n 's/^remote_root=//p' "$PARENT/state/ios.meta")
+remote_reconcile_snapshot="$TMP_ROOT/markerless-reconcile.json"
+jq -n --arg id ios --arg host remote-mac --arg root "$remote_root" \
+  '{schema:"fm-fleet-snapshot.v1",secondmate_current:{records:[{id:$id,host:$host,remote_root:$root,remote:true,reconcile_inventory:{kind:"orphan_in_flight",ids:["ios"]}}]}}' \
+  > "$remote_reconcile_snapshot"
 rm -f "$PARENT/state/ios.reconcile-nudged"
 set +e
 markerless_reconcile_unreachable=$(FM_HOME="$PARENT" FM_STATE_OVERRIDE="$PARENT/state" FM_DATA_OVERRIDE="$PARENT/data" \
@@ -628,11 +633,6 @@ set -e
 assert_contains "$markerless_dead_out" 'respawn failed after remote endpoint missing' \
   "the liveness sweep did not preserve a dead markerless route as a failed recovery"
 cp "$markerless_state_backup" "$HERDR_STATE"
-remote_root=$(sed -n 's/^remote_root=//p' "$PARENT/state/ios.meta")
-remote_reconcile_snapshot="$TMP_ROOT/markerless-reconcile.json"
-jq -n --arg id ios --arg host remote-mac --arg root "$remote_root" \
-  '{schema:"fm-fleet-snapshot.v1",secondmate_current:{records:[{id:$id,host:$host,remote_root:$root,remote:true,reconcile_inventory:{kind:"orphan_in_flight",ids:["ios"]}}]}}' \
-  > "$remote_reconcile_snapshot"
 reconcile_out=$(FM_HOME="$PARENT" FM_STATE_OVERRIDE="$PARENT/state" FM_DATA_OVERRIDE="$PARENT/data" \
   "$ROOT/bin/fm-secondmate-reconcile.sh" notify --snapshot "$remote_reconcile_snapshot" 2>&1) || fail "markerless reconciliation notify failed: $reconcile_out"
 assert_contains "$reconcile_out" 'sent: ios orphan_in_flight' "markerless remote reconciliation did not deliver"
