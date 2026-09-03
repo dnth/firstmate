@@ -569,6 +569,7 @@ task_json_lines() {
         project:($project // ""),
         backend:$backend,
         spawn_gen:($spawn_gen | if . == "" then null else . end),
+        remote_root:($remote_root | if . == "" then null else . end),
         remote:(if $remote_host == "" then null else {host:$remote_host,root:$remote_root} end),
         paths:{
           meta:$meta_path,
@@ -1302,7 +1303,7 @@ secondmate_current_json() {  # <parent-tasks-json>
         --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
         --argjson reconciliation "$reconciliation" --argjson terminal "$terminal" --argjson contradiction "$contradiction" \
         --arg event_raw "$event_raw" --arg event_note "$event_note" --argjson event_age "$event_age" '
-        {id:$id,home:$home,host:($host | if . == "" then null else . end),remote:$remote,registered:$registered,
+        {id:$id,home:$home,host:($host | if . == "" then null else . end),remote_root:($remote_root | if . == "" then null else . end),remote:$remote,registered:$registered,
          current:{state:$state,reason:($current_reason | if . == "" then null else . end)},invalidity:$summary.invalidity,
          provenance:{selected:"structured-home",structured_home:$home,summary_valid:$summary_valid,
            trust:(if $summary_valid then "complete" else "partial-structured" end),parent_event_role:"historical-only"},
@@ -1328,7 +1329,7 @@ secondmate_current_json() {  # <parent-tasks-json>
           '{provenance:"parent-direct-report-terminal",trust:"untrusted-supplement",captured:false,observed_at:$observed,freshness:"not-collected",reason:"no parent event to compare",lines:0,bytes:0,event_note_seen:false,contradiction:false}')
       fi
       record=$(jq -n \
-        --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg reason "$reason" --arg observed "$SNAPSHOT_NOW" \
+        --arg id "$id" --arg home "$home" --arg host "$host" --arg remote_root "$remote_root" --argjson remote "$remote" --arg reason "$reason" --arg observed "$SNAPSHOT_NOW" \
         --arg provenance "$provenance" --arg freshness "$freshness" --arg event_raw "$event_raw" --arg event_note "$event_note" \
         --argjson registered "$registered" --argjson event_age "$event_age" --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
         --argjson decisions "$decisions" --argjson terminal "$terminal" '

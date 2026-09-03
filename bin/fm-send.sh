@@ -386,6 +386,7 @@ fm_send_resolve_target() {  # <raw-target>
   TARGET_SELECTOR=""
   TARGET_REMOTE_ID=""
   TARGET_REMOTE_HOST=""
+  TARGET_REMOTE_ROOT=""
   RESOLUTION_TRIED=""
 
   meta=$(fm_backend_meta_for_selector "$raw" "$STATE" 2>/dev/null || true)
@@ -400,6 +401,7 @@ fm_send_resolve_target() {  # <raw-target>
       TARGET_SELECTOR=1
       TARGET_REMOTE_ID=$id
       TARGET_REMOTE_HOST=$(fm_meta_get "$meta" remote_host)
+      TARGET_REMOTE_ROOT=$(fm_meta_get "$meta" remote_root)
       RESOLUTION_TRIED="meta=$meta; placement=remote"
       return 0
     fi
@@ -1038,8 +1040,11 @@ else
     }
     CURRENT_REMOTE_HOST=$(fm_meta_get "$TARGET_META" remote_host)
     CURRENT_REMOTE_SPAWN_GEN=$(fm_meta_get "$TARGET_META" spawn_gen)
+    CURRENT_REMOTE_ROOT=$(fm_meta_get "$TARGET_META" remote_root)
     if [ -z "$CURRENT_REMOTE_HOST" ] || [ "$CURRENT_REMOTE_HOST" != "$TARGET_REMOTE_HOST" ] \
-      || { [ -n "${FM_SEND_EXPECTED_REMOTE_HOST:-}" ] && [ "$CURRENT_REMOTE_HOST" != "$FM_SEND_EXPECTED_REMOTE_HOST" ]; }; then
+      || [ "$CURRENT_REMOTE_ROOT" != "$TARGET_REMOTE_ROOT" ] \
+      || { [ -n "${FM_SEND_EXPECTED_REMOTE_HOST:-}" ] && [ "$CURRENT_REMOTE_HOST" != "$FM_SEND_EXPECTED_REMOTE_HOST" ]; } \
+      || { [ -n "${FM_SEND_EXPECTED_REMOTE_ROOT:-}" ] && [ "$CURRENT_REMOTE_ROOT" != "$FM_SEND_EXPECTED_REMOTE_ROOT" ]; }; then
       fm_lock_release "$REMOTE_META_LOCK"
       echo "error: steer not sent to remote secondmate $TARGET_REMOTE_ID: route changed during target resolution" >&2
       exit 1

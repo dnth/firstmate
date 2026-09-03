@@ -131,20 +131,21 @@ meta_remote_host() {
 # Sets REVALIDATE_REASON to "no-identity" (nothing here can be safely
 # identified; report failed) or "stale" (identified, but changed; report
 # stale) on any non-zero return.
-revalidate_identity() {  # <meta> <sampled_spawn_gen> <sampled_host>
-  local meta=$1 sampled_gen=$2 sampled_host=$3 cur_gen='' cur_host=''
+revalidate_identity() {  # <meta> <sampled_spawn_gen> <sampled_host> <sampled_root>
+  local meta=$1 sampled_gen=$2 sampled_host=$3 sampled_root=$4 cur_gen='' cur_host='' cur_root=''
   if [ -f "$meta" ] && [ ! -L "$meta" ]; then
     cur_gen=$(meta_spawn_gen "$meta")
     cur_host=$(meta_remote_host "$meta")
+    cur_root=$(meta_field "$meta" remote_root)
   fi
   if [ -n "$sampled_gen" ]; then
     if [ -z "$cur_gen" ]; then REVALIDATE_REASON=no-identity; return 1; fi
     if [ "$cur_gen" != "$sampled_gen" ]; then REVALIDATE_REASON=stale; return 1; fi
     return 0
   fi
-  if [ -z "$sampled_host" ]; then REVALIDATE_REASON=no-identity; return 1; fi
+  if [ -z "$sampled_host" ] || [ -z "$sampled_root" ]; then REVALIDATE_REASON=no-identity; return 1; fi
   if [ -n "$cur_gen" ]; then REVALIDATE_REASON=stale; return 1; fi
-  if [ -z "$cur_host" ] || [ "$cur_host" != "$sampled_host" ]; then REVALIDATE_REASON=stale; return 1; fi
+  if [ -z "$cur_host" ] || [ "$cur_host" != "$sampled_host" ] || [ "$cur_root" != "$sampled_root" ]; then REVALIDATE_REASON=stale; return 1; fi
   return 0
 }
 
@@ -224,22 +225,22 @@ cmd_notify() {
   rows=$(printf '%s' "$snapshot" | jq -r --arg sep "$row_sep" '
     (if .schema == "fm-bearings.v1" then
        (.secondmate_reconcile // [])[]
-       | {id, spawn_gen:(.spawn_gen // ""), host:(.host // ""), kind:(.kind // ""), ids:(.ids // [])}
+       | {id, spawn_gen:(.spawn_gen // ""), host:(.host // ""), root:(.remote_root // ""), kind:(.kind // ""), ids:(.ids // [])}
      else
        (.secondmate_current.records // [])[]
        | select(.reconcile_inventory != null)
-       | {id, spawn_gen:(.spawn_gen // ""), host:(.host // ""), kind:(.reconcile_inventory.kind // ""), ids:(.reconcile_inventory.ids // [])}
+       | {id, spawn_gen:(.spawn_gen // ""), host:(.host // ""), root:(.remote_root // ""), kind:(.reconcile_inventory.kind // ""), ids:(.reconcile_inventory.ids // [])}
      end)
     | select((.id | type) == "string" and (.id | test("^[A-Za-z0-9._-]+$")))
     | select((.spawn_gen | type) == "string" and (.spawn_gen | test("^[A-Za-z0-9._-]*$")))
     | select((.host | type) == "string" and (.host | test("[[:cntrl:]]") | not))
     | .kind as $kind
     | select(["orphan_in_flight","unowned_current","terminal_in_flight"] | index($kind))
-    | [.id, .spawn_gen, .host, $kind]
+    | [.id, .spawn_gen, .host, .root, $kind]
     | join($sep)')
 
-  local id sampled_spawn_gen sampled_host expected_remote_host kind path last age now delivered_at reconcile_lock control_lock meta meta_lock did send_rc
-  while IFS=$'\037' read -r id sampled_spawn_gen sampled_host kind; do
+  local id sampled_spawn_gen sampled_host sampled_root expected_remote_host kind path last age now delivered_at reconcile_lock control_lock meta meta_lock did send_rc
+  while IFS=$'\037' read -r id sampled_spawn_gen sampled_host sampled_root kind; do
     [ -n "${id:-}" ] || continue
     path=$(nudge_path "$id")
     reconcile_lock="$STATE/.$id.reconcile.lock"
@@ -280,7 +281,7 @@ cmd_notify() {
       continue
     fi
     ACTIVE_META_LOCK=$meta_lock
-    if ! revalidate_identity "$meta" "$sampled_spawn_gen" "$sampled_host"; then
+    if ! revalidate_identity "$meta" "$sampled_spawn_gen" "$sampled_host" "$sampled_root"; then
       if [ "$REVALIDATE_REASON" = stale ]; then
         printf 'stale: %s %s\n' "$id" "$kind"
       else
@@ -301,7 +302,7 @@ cmd_notify() {
     release_active_locks
     send_rc=0
     FM_TASK_INBOX_LOCK_WAIT_SECS=0 FM_SEND_EXPECTED_SPAWN_GEN="$sampled_spawn_gen" \
-      FM_SEND_EXPECTED_REMOTE_HOST="$expected_remote_host" \
+      FM_SEND_EXPECTED_REMOTE_HOST="$expected_remote_host" FM_SEND_EXPECTED_REMOTE_ROOT="$sampled_root" \
       "$SCRIPT_DIR/fm-send.sh" "$id" --fire-and-forget "$did" \
       "$(reconcile_text)" >/dev/null 2>&1 || send_rc=$?
     # exit 3 is "typed but unconfirmed": the mate may already hold the ask, so
@@ -336,7 +337,7 @@ cmd_notify() {
     if [ -f "$path" ] && [ ! -L "$path" ]; then last=$(cat "$path" 2>/dev/null || true); fi
     case "$last" in ''|*[!0-9]*) last= ;; esac
     if [ -n "$last" ] && [ "$last" -gt "$delivered_at" ]; then delivered_at=$last; fi
-    if revalidate_identity "$meta" "$sampled_spawn_gen" "$sampled_host" \
+    if revalidate_identity "$meta" "$sampled_spawn_gen" "$sampled_host" "$sampled_root" \
       && (umask 077; printf '%s\n' "$delivered_at" > "$path.tmp") \
       && mv -f -- "$path.tmp" "$path"; then
       printf 'sent: %s %s\n' "$id" "$kind"
