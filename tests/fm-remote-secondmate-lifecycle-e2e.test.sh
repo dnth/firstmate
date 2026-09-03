@@ -589,6 +589,70 @@ publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.s
   || fail "remote endpoint delivery observation did not execute on its own host"
 pass "remote spawn launches on the remote-local backend and records a host-qualified route"
 
+# A missing durable home marker must not make the liveness read lose a route
+# whose host-local endpoint record still binds the exact secondmate id.
+markerless_state_backup="$TMP_ROOT/herdr-before-markerless-probe.state"
+cp "$HERDR_STATE" "$markerless_state_backup"
+rm -f "$REMOTE_HOME/.fm-secondmate-home"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
+  || fail "a markerless remote home was not classified from its live endpoint"
+assert_contains "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios)" \
+  'backend=herdr' "a markerless live route could not be read without its home marker"
+markerless_liveness_before=$(grep -c '^tab create' "$HERDR_LOG" || true)
+markerless_liveness_out=$(remote_env "$ROOT/bin/fm-bootstrap.sh")
+assert_not_contains "$markerless_liveness_out" 'SECONDMATE_LIVENESS: secondmate ios:' \
+  "the liveness sweep treated a live markerless route as a recovery gap"
+markerless_liveness_after=$(grep -c '^tab create' "$HERDR_LOG" || true)
+[ "$markerless_liveness_before" -eq "$markerless_liveness_after" ] \
+  || fail "the liveness sweep relaunched a live markerless remote endpoint"
+set +e
+FM_FAKE_SSH_MODE=unreachable remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios \
+  > "$TMP_ROOT/markerless-unreachable.out" 2>&1
+markerless_unreachable_rc=$?
+set -e
+[ "$markerless_unreachable_rc" = 255 ] \
+  || fail "an unreachable markerless route was not preserved as unknown (rc=$markerless_unreachable_rc)"
+remote_root=$(sed -n 's/^remote_root=//p' "$PARENT/state/ios.meta")
+remote_reconcile_snapshot="$TMP_ROOT/markerless-reconcile.json"
+# Direct reconciliation calls use the same deterministic SSH boundary as
+# remote_env; otherwise the host probe would fall back to the real ssh binary.
+export FM_SSH_BIN="$FAKEBIN/fake-ssh" FM_FAKE_REMOTE_CWD="$TMP_ROOT" \
+  FM_FAKE_REMOTE_ENTRYPOINT="$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" \
+  FM_FAKE_SSH_COUNT="$SSH_COUNT"
+jq -n --arg id ios --arg host remote-mac --arg root "$remote_root" \
+  '{schema:"fm-fleet-snapshot.v1",secondmate_current:{records:[{id:$id,host:$host,remote_root:$root,remote:true,reconcile_inventory:{kind:"orphan_in_flight",ids:["ios"]}}]}}' \
+  > "$remote_reconcile_snapshot"
+rm -f "$PARENT/state/ios.reconcile-nudged"
+set +e
+markerless_reconcile_unreachable=$(FM_HOME="$PARENT" FM_STATE_OVERRIDE="$PARENT/state" FM_DATA_OVERRIDE="$PARENT/data" \
+  FM_FAKE_SSH_MODE=unreachable "$ROOT/bin/fm-secondmate-reconcile.sh" notify --snapshot "$remote_reconcile_snapshot" 2>&1)
+set -e
+assert_contains "$markerless_reconcile_unreachable" 'failed: ios orphan_in_flight' "unreachable reconciliation did not remain visible"
+reset_remote_herdr_fixture "$HERDR_STATE"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = missing ] \
+  || fail "a markerless remote home with no endpoint was not classified missing"
+rm -f "$PARENT/state/ios.reconcile-nudged"
+markerless_reconcile_dead=$(FM_HOME="$PARENT" FM_STATE_OVERRIDE="$PARENT/state" FM_DATA_OVERRIDE="$PARENT/data" \
+  "$ROOT/bin/fm-secondmate-reconcile.sh" notify --snapshot "$remote_reconcile_snapshot" 2>&1) || fail "dead markerless reconciliation notify failed: $markerless_reconcile_dead"
+assert_contains "$markerless_reconcile_dead" 'sent: ios orphan_in_flight' "dead markerless reconciliation was not durably recorded"
+markerless_dead_out=$(remote_env "$ROOT/bin/fm-bootstrap.sh" 2>&1) || true
+assert_contains "$markerless_dead_out" 'respawn failed after remote endpoint missing' \
+  "the liveness sweep did not preserve a dead markerless route as a failed recovery"
+cp "$markerless_state_backup" "$HERDR_STATE"
+rm -f "$PARENT/state/ios.reconcile-nudged"
+reconcile_out=$(FM_HOME="$PARENT" FM_STATE_OVERRIDE="$PARENT/state" FM_DATA_OVERRIDE="$PARENT/data" \
+  "$ROOT/bin/fm-secondmate-reconcile.sh" notify --snapshot "$remote_reconcile_snapshot" 2>&1) || fail "markerless reconciliation notify failed: $reconcile_out"
+assert_contains "$reconcile_out" 'sent: ios orphan_in_flight' "markerless remote reconciliation did not deliver"
+reconcile_again=$(FM_HOME="$PARENT" FM_STATE_OVERRIDE="$PARENT/state" FM_DATA_OVERRIDE="$PARENT/data" \
+  "$ROOT/bin/fm-secondmate-reconcile.sh" notify --snapshot "$remote_reconcile_snapshot" 2>&1) || fail "markerless reconciliation cooldown failed: $reconcile_again"
+assert_contains "$reconcile_again" 'cooldown: ios' "markerless reconciliation cooldown did not suppress repeat"
+printf '%s\n' ios > "$REMOTE_HOME/.fm-secondmate-home"
+pass "markerless remote liveness distinguishes live, unreachable, and missing endpoints without route loss"
+if [ "${FM_TEST_MARKERLESS_ONLY:-0}" = 1 ]; then
+  echo "ALL TESTS PASSED"
+  exit 0
+fi
+
 remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
 cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-default-session.meta"
 legacy_pane=$(sed -n 's/^herdr_pane_id=//p' "$remote_route_meta")

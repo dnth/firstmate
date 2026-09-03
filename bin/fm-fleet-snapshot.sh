@@ -95,7 +95,7 @@ FM_SNAPSHOT_PARENT_ACTIVITIES=${FM_SNAPSHOT_PARENT_ACTIVITIES:-20}
 FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT=${FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT:-2}
 FM_SNAPSHOT_REGISTRY_LINES=${FM_SNAPSHOT_REGISTRY_LINES:-256}
 FM_SNAPSHOT_REGISTRY_BYTES=${FM_SNAPSHOT_REGISTRY_BYTES:-65536}
-FM_SNAPSHOT_REGISTRY_RECORDS=${FM_SNAPSHOT_REGISTRY_RECORDS:-40}
+FM_SNAPSHOT_REGISTRY_RECORDS=${FM_SNAPSHOT_REGISTRY_RECORDS:-0}
 FM_SNAPSHOT_REGISTRY_TIMEOUT=${FM_SNAPSHOT_REGISTRY_TIMEOUT:-2}
 validate_positive_bound() {  # <name> <value>
   case "$2" in
@@ -123,9 +123,8 @@ validate_positive_bound FM_SNAPSHOT_PARENT_ACTIVITY_LINES "$FM_SNAPSHOT_PARENT_A
 validate_positive_bound FM_SNAPSHOT_PARENT_ACTIVITY_BYTES "$FM_SNAPSHOT_PARENT_ACTIVITY_BYTES"
 validate_positive_bound FM_SNAPSHOT_PARENT_ACTIVITIES "$FM_SNAPSHOT_PARENT_ACTIVITIES"
 validate_positive_bound FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT "$FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT"
-validate_positive_bound FM_SNAPSHOT_REGISTRY_LINES "$FM_SNAPSHOT_REGISTRY_LINES"
-validate_positive_bound FM_SNAPSHOT_REGISTRY_BYTES "$FM_SNAPSHOT_REGISTRY_BYTES"
-validate_positive_bound FM_SNAPSHOT_REGISTRY_RECORDS "$FM_SNAPSHOT_REGISTRY_RECORDS"
+case "$FM_SNAPSHOT_REGISTRY_LINES:$FM_SNAPSHOT_REGISTRY_BYTES" in *[!0-9:]*|:) echo "fm-fleet-snapshot: registry bounds must be non-negative" >&2; exit 2 ;; esac
+case "$FM_SNAPSHOT_REGISTRY_RECORDS" in ''|*[!0-9]*) echo "fm-fleet-snapshot: FM_SNAPSHOT_REGISTRY_RECORDS must be nonnegative" >&2; exit 2 ;; esac
 validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIMEOUT"
 
 # shellcheck source=bin/fm-backend.sh
@@ -137,6 +136,9 @@ validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIME
 # shellcheck source=bin/fm-ff-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-ff-lib.sh"  # validate_secondmate_home: shared seeded-home boundary checks
+# shellcheck source=bin/fm-runpod-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-runpod-lib.sh"
 
 usage() {
   cat <<'EOF'
@@ -402,7 +404,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 
 task_json_lines() {
   local meta id kind harness mode yolo project worktree home projects backend target status_log report_path
-  local remote_host remote_root remote_state remote_rc remote_home_present
+  local remote_host task_remote_root spawn_gen remote_state remote_rc remote_home_present
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
@@ -420,7 +422,8 @@ task_json_lines() {
     home=$(meta_value "$meta" home)
     projects=$(meta_value "$meta" projects)
     remote_host=$(meta_value "$meta" remote_host)
-    remote_root=$(meta_value "$meta" remote_root)
+    task_remote_root=$(meta_value "$meta" remote_root)
+    spawn_gen=$(meta_value "$meta" spawn_gen)
     remote_home_present=null
     if [ -n "$remote_host" ]; then
       backend=$(meta_value "$meta" remote_backend)
@@ -483,24 +486,32 @@ task_json_lines() {
     endpoint_exists=null
     agent_alive=not_checked
     if [ -n "$remote_host" ]; then
-      if remote_state=$(run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" \
-        "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null); then
-        remote_rc=0
-      else
-        remote_rc=$?
-      fi
-      if [ "$remote_rc" -eq 0 ]; then
-        remote_home_present=true
-        remote_state=$(printf '%s\n' "$remote_state" | tail -1)
-        case "$remote_state" in
-          alive) endpoint_exists=true; agent_alive=alive ;;
-          dead) endpoint_exists=true; agent_alive=dead ;;
-          missing) endpoint_exists=false; agent_alive=dead ;;
-          *) endpoint_exists=null; agent_alive=unknown ;;
-        esac
-      else
+      # RunPod scale-to-zero routes are deliberate no-host lifecycle states.
+      # Keep the snapshot read-only and avoid probing their absent SSH endpoint.
+      if fm_runpod_is_dormant "$DATA" "$id"; then
+        remote_home_present=false
         endpoint_exists=null
         agent_alive=unknown
+      else
+        if remote_state=$(run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" \
+          "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null); then
+          remote_rc=0
+        else
+          remote_rc=$?
+        fi
+        if [ "$remote_rc" -eq 0 ]; then
+          remote_home_present=true
+          remote_state=$(printf '%s\n' "$remote_state" | tail -1)
+          case "$remote_state" in
+            alive) endpoint_exists=true; agent_alive=alive ;;
+            dead) endpoint_exists=true; agent_alive=dead ;;
+            missing) endpoint_exists=false; agent_alive=dead ;;
+            *) endpoint_exists=null; agent_alive=unknown ;;
+          esac
+        else
+          endpoint_exists=null
+          agent_alive=unknown
+        fi
       fi
     else
       if [ -n "$target" ]; then
@@ -541,7 +552,8 @@ task_json_lines() {
       --arg backend "$backend" \
       --arg target "$target" \
       --arg remote_host "$remote_host" \
-      --arg remote_root "$remote_root" \
+      --arg remote_root "$task_remote_root" \
+      --arg spawn_gen "$spawn_gen" \
       --arg pr "$pr" \
       --arg pr_source "$pr_source" \
       --arg agent_alive "$agent_alive" \
@@ -566,6 +578,8 @@ task_json_lines() {
         yolo:($yolo // ""),
         project:($project // ""),
         backend:$backend,
+        spawn_gen:($spawn_gen | if . == "" then null else . end),
+        remote_root:($remote_root | if . == "" then null else . end),
         remote:(if $remote_host == "" then null else {host:$remote_host,root:$remote_root} end),
         paths:{
           meta:$meta_path,
@@ -860,7 +874,7 @@ registry_secondmates_json() {
     observed=$6
     parse_filter=$7
     output_filter=$8
-    content=$(LC_ALL=C head -c "$((max_bytes + 1))" "$f" || exit 3; printf "\036") || exit 3
+    if [ "$max_bytes" -eq 0 ]; then content=$(cat "$f" || exit 3; printf "\036"); else content=$(LC_ALL=C head -c "$((max_bytes + 1))" "$f" || exit 3; printf "\036"); fi
     content=${content%$'\036'}
     bytes=$(printf "%s" "$content" | LC_ALL=C wc -c | tr -d " ")
     byte_truncated=false
@@ -881,7 +895,7 @@ registry_secondmates_json() {
     fi
     line_truncated=false
     if [ "$lines" -gt "$max_lines" ]; then line_truncated=true; fi
-    window=$(printf "%s\n" "$content" | LC_ALL=C head -n "$max_lines") || exit 3
+    if [ "$max_lines" -eq 0 ]; then window=$content; else window=$(printf "%s\n" "$content" | LC_ALL=C head -n "$max_lines") || exit 3; fi
     if [ -n "$window" ]; then
       lines_in_window=$(printf "%s\n" "$window" | awk "END {print NR}")
     else
@@ -890,7 +904,7 @@ registry_secondmates_json() {
     records=$(printf "%s\n" "$window" | jq -Rn "$parse_filter") || exit 3
     records_in_window=$(printf "%s" "$records" | jq "length") || exit 3
     records_truncated=false
-    if [ "$records_in_window" -gt "$max_records" ]; then records_truncated=true; fi
+    if [ "$max_records" -gt 0 ] && [ "$records_in_window" -gt "$max_records" ]; then records_truncated=true; fi
     printf "%s" "$records" | jq \
       --arg path "$path" --arg observed "$observed" \
       --argjson byte_truncated "$byte_truncated" \
@@ -920,7 +934,7 @@ JQ
   output_filter=$(cat <<'JQ'
       {present:true,available:true,reason:null,provenance:"registered-table",path:$path,
        freshness:{status:"fresh",observed_at:$observed},
-       records:(if length > $max_records then .[:$max_records] else . end),
+       records:(if $max_records == 0 or length <= $max_records then . else .[:$max_records] end),
        input_truncated:($byte_truncated or $line_truncated),records_truncated:$records_truncated,
        complete:(($byte_truncated or $line_truncated or $records_truncated) | not),
        reasons:[
@@ -1149,7 +1163,7 @@ parent_evidence_reconciliation_json() {  # <summary-json> <activities-json> <dec
 
 secondmate_current_json() {  # <parent-tasks-json>
   local tasks=$1 registry union rows total_registered total shown truncated
-  local row id home host remote registered registry_error task status_file event_raw event_note event_epoch event_age
+  local row id home host root spawn_gen remote registered registry_error task status_file event_raw event_note event_epoch event_age
   local activity_scan activities decisions reconciliation provenance freshness reason summary summary_rc summary_bytes summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
   local records='[]' seen_homes=''
   registry=$(registry_secondmates_json) || return 1
@@ -1179,10 +1193,12 @@ secondmate_current_json() {  # <parent-tasks-json>
     id=$(printf '%s' "$row" | jq -r '.id')
     home=$(printf '%s' "$row" | jq -r '.home // ""')
     host=$(printf '%s' "$row" | jq -r '.host // ""')
+    root=$(printf '%s' "$row" | jq -r '.root // ""')
     remote=$(printf '%s' "$row" | jq -r '.remote // false')
     registered=$(printf '%s' "$row" | jq -r '.registered')
     registry_error=$(printf '%s' "$row" | jq -r '.registry_error // ""')
     task=$(printf '%s' "$row" | jq -c '.parent_task // {}')
+    spawn_gen=$(printf '%s' "$task" | jq -r '.spawn_gen // ""')
     status_file=$(printf '%s' "$task" | jq -r '.paths.status_log.path // ""')
     event_raw=$(printf '%s' "$task" | jq -r '.paths.status_log.last_event.raw // ""')
     event_note=$(printf '%s' "$task" | jq -r '.paths.status_log.last_event.note // ""')
@@ -1294,12 +1310,12 @@ secondmate_current_json() {  # <parent-tasks-json>
       fi
       if printf '%s' "$terminal" | jq -e '.contradiction == true' >/dev/null; then contradiction=true; fi
       record=$(jq -n \
-        --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg state "$state" --arg current_reason "$current_reason" --arg observed "$SNAPSHOT_NOW" \
+        --arg id "$id" --arg home "$home" --arg host "$host" --arg remote_root "$root" --arg spawn_gen "$spawn_gen" --argjson remote "$remote" --arg state "$state" --arg current_reason "$current_reason" --arg observed "$SNAPSHOT_NOW" \
         --argjson registered "$registered" --argjson summary "$summary" --argjson summary_valid "$summary_valid" --argjson decisions "$decisions" \
         --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
         --argjson reconciliation "$reconciliation" --argjson terminal "$terminal" --argjson contradiction "$contradiction" \
         --arg event_raw "$event_raw" --arg event_note "$event_note" --argjson event_age "$event_age" '
-        {id:$id,home:$home,host:($host | if . == "" then null else . end),remote:$remote,registered:$registered,
+        {id:$id,home:$home,host:($host | if . == "" then null else . end),remote_root:($remote_root | if . == "" then null else . end),spawn_gen:($spawn_gen | if . == "" then null else . end),remote:$remote,registered:$registered,
          current:{state:$state,reason:($current_reason | if . == "" then null else . end)},invalidity:$summary.invalidity,
          provenance:{selected:"structured-home",structured_home:$home,summary_valid:$summary_valid,
            trust:(if $summary_valid then "complete" else "partial-structured" end),parent_event_role:"historical-only"},
@@ -1307,6 +1323,7 @@ secondmate_current_json() {  # <parent-tasks-json>
          active_children:$summary.active_children,
          decisions_open:$summary.decisions_open,holds:$summary.holds,queued:$summary.queued,
          landed:$summary.landed,endpoints:$summary.endpoints,counts:$summary.counts,omitted:$summary.omitted,
+         reconcile_inventory:(if ($summary.invalidity.kind // "") == "" then null else {kind:$summary.invalidity.kind,ids:($summary.invalidity.ids // [])} end),
          parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan,reconciliation:$reconciliation},
          terminal_evidence:$terminal,contradiction:$contradiction}')
     else
@@ -1324,7 +1341,7 @@ secondmate_current_json() {  # <parent-tasks-json>
           '{provenance:"parent-direct-report-terminal",trust:"untrusted-supplement",captured:false,observed_at:$observed,freshness:"not-collected",reason:"no parent event to compare",lines:0,bytes:0,event_note_seen:false,contradiction:false}')
       fi
       record=$(jq -n \
-        --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg reason "$reason" --arg observed "$SNAPSHOT_NOW" \
+        --arg id "$id" --arg home "$home" --arg host "$host" --arg remote_root "$root" --argjson remote "$remote" --arg reason "$reason" --arg observed "$SNAPSHOT_NOW" \
         --arg provenance "$provenance" --arg freshness "$freshness" --arg event_raw "$event_raw" --arg event_note "$event_note" \
         --argjson registered "$registered" --argjson event_age "$event_age" --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
         --argjson decisions "$decisions" --argjson terminal "$terminal" '

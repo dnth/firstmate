@@ -140,18 +140,28 @@ fm_task_inbox_lock_acquire() {  # <lock-path>
 
 # Durably enqueue one steer: temp-write, then atomic rename into the next
 # sequence slot. Prints the record path. Fails without a partial record.
-fm_task_inbox_write() {  # <state-dir> <task-id> <text>
-  local state=$1 task=$2 text=$3 dir lock seq tmp rec status=0
+fm_task_inbox_write() {  # <state-dir> <task-id> <text> [delivery-id]
+  local state=$1 task=$2 text=$3 delivery_id=${4:-} dir lock seq tmp rec status=0 existing
+  case "$delivery_id" in *[!A-Za-z0-9._-]*) return 1 ;; esac
   dir=$(fm_task_inbox_dir "$state" "$task")
   mkdir -p "$dir/handled" || return 1
   lock="$dir/.seq.lock"
   fm_task_inbox_lock_acquire "$lock" || return 1
+  if [ -n "$delivery_id" ]; then
+    existing=$(awk -v want="$delivery_id" '$0 == "delivery_id=" want { print FILENAME; exit }' "$dir"/*.msg "$dir/handled"/*.msg 2>/dev/null || true)
+    if [ -n "$existing" ]; then
+      fm_lock_release "$lock"
+      printf '%s' "$existing"
+      return 0
+    fi
+  fi
   seq=$(fm_task_inbox_next_seq "$dir")
   rec="$dir/$seq.msg"
   if tmp=$(mktemp "$dir/.staging.XXXXXX"); then
     {
       printf 'schema=%s\n' "$FM_TASK_INBOX_SCHEMA"
       printf 'at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      [ -z "$delivery_id" ] || printf 'delivery_id=%s\n' "$delivery_id"
       printf -- '--\n'
       printf '%s' "$text"
     } > "$tmp" && mv "$tmp" "$rec" || status=1

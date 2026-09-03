@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Steer a task through its durable inbox or a typed harness-native path.
-# Usage: fm-send.sh <target> [--resolve-key <key>]... <text...>
+# Usage: fm-send.sh <target> [--reconcile-delivery <delivery-id>] [--resolve-key <key>]... <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
@@ -385,6 +385,8 @@ fm_send_resolve_target() {  # <raw-target>
   TARGET_META=""
   TARGET_SELECTOR=""
   TARGET_REMOTE_ID=""
+  TARGET_REMOTE_HOST=""
+  TARGET_REMOTE_ROOT=""
   RESOLUTION_TRIED=""
 
   meta=$(fm_backend_meta_for_selector "$raw" "$STATE" 2>/dev/null || true)
@@ -398,6 +400,8 @@ fm_send_resolve_target() {  # <raw-target>
       EXPECTED_LABEL="fm-$id"
       TARGET_SELECTOR=1
       TARGET_REMOTE_ID=$id
+      TARGET_REMOTE_HOST=$(fm_meta_get "$meta" remote_host)
+      TARGET_REMOTE_ROOT=$(fm_meta_get "$meta" remote_root)
       RESOLUTION_TRIED="meta=$meta; placement=remote"
       return 0
     fi
@@ -500,6 +504,7 @@ fi
 # must precede --key or the message text; everything after the last flag is the
 # message exactly as before, so ordinary sends are byte-identical.
 RESOLVE_KEYS=
+RECONCILE_DELIVERY_ID=
 fm_send_add_resolve_key() {  # <key>
   local k=$1
   case "$k" in
@@ -518,6 +523,12 @@ fm_send_add_resolve_key() {  # <key>
 }
 while :; do
   case "${1:-}" in
+    --reconcile-delivery)
+      [ "${FM_SEND_RECONCILE_AUTH:-0}" = 1 ] || { echo "error: reconcile-delivery is reserved for reconciliation" >&2; exit 1; }
+      [ $# -ge 2 ] || { echo "error: --reconcile-delivery requires a delivery id" >&2; exit 1; }
+      RECONCILE_DELIVERY_ID=$2
+      shift 2
+      ;;
     --resolve-key)
       [ $# -ge 2 ] || { echo "error: --resolve-key requires a key" >&2; exit 1; }
       fm_send_add_resolve_key "$2" || exit 1
@@ -789,7 +800,8 @@ else
       exit 1
     fi
   fi
-  if [ "$MARK_FROM_FIRSTMATE" = 1 ] && [ "$PRESERVE_INBOUND_FROM_FIRSTMATE" != 1 ]; then
+  if [ "$MARK_FROM_FIRSTMATE" = 1 ] && [ "$PRESERVE_INBOUND_FROM_FIRSTMATE" != 1 ] \
+    && [ -z "$RECONCILE_DELIVERY_ID" ]; then
     # Reuse an existing correlation id for recovery resends; otherwise create a
     # durable parent expectation before delivery. Transport success never
     # resolves that expectation (see fm-pending-reply-lib.sh).
@@ -818,14 +830,15 @@ else
   # Upstream PR #2856's local-plane selector, adapted around this fork's
   # OMP/Hermes typed path. Classification uses the pre-marker answer text.
   INBOX_PLANE=0
-  if [ "$TARGET_BACKEND" != remote ] && [ -n "$TARGET_SELECTOR" ]; then
+  if [ "$TARGET_BACKEND" != remote ] && [ -n "$TARGET_SELECTOR" ] \
+    && [ "${FM_SEND_REMOTE_TYPED:-0}" != 1 ]; then
     case "$RESOLVE_ANSWER_TEXT" in
       /*) ;;
       \$*) [ "$TARGET_HARNESS" = codex ] || INBOX_PLANE=1 ;;
       *) INBOX_PLANE=1 ;;
     esac
   fi
-  if [ "$INBOX_PLANE" = 1 ]; then
+  if [ "$INBOX_PLANE" = 1 ] || { [ -n "$RECONCILE_DELIVERY_ID" ] && [ "$TARGET_BACKEND" != remote ]; }; then
     INBOX_META_LOCK=$(fm_meta_lock_path "$TARGET_META") || exit 1
     if ! fm_task_inbox_lock_acquire "$INBOX_META_LOCK"; then
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
@@ -889,7 +902,7 @@ else
         exit 1
       fi
     fi
-    if ! INBOX_RECORD=$(fm_task_inbox_write "$STATE" "$TARGET_TASK_ID" "$MESSAGE"); then
+    if ! INBOX_RECORD=$(fm_task_inbox_write "$STATE" "$TARGET_TASK_ID" "$MESSAGE" "$RECONCILE_DELIVERY_ID"); then
       fm_lock_release "$INBOX_META_LOCK"
       INBOX_META_LOCK_HELD=0
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
@@ -904,8 +917,11 @@ else
     INBOX_META_LOCK_HELD=0
 
     ring_rc=0
-    fm_task_inbox_ring "$TARGET_BACKEND" "$T" "$INBOX_RECORD" "$EXPECTED_LABEL" \
-      "$TARGET_HARNESS" "$TARGET_OMP_BUN" "$TARGET_OMP_BIN" || ring_rc=$?
+    case "$INBOX_RECORD" in
+      */handled/*) ring_rc=0 ;;
+      *) fm_task_inbox_ring "$TARGET_BACKEND" "$T" "$INBOX_RECORD" "$EXPECTED_LABEL" \
+        "$TARGET_HARNESS" "$TARGET_OMP_BUN" "$TARGET_OMP_BIN" || ring_rc=$? ;;
+    esac
     case "$ring_rc" in
       1) echo "fm-send: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
       2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
@@ -1022,11 +1038,39 @@ else
   # busy-confirmed and queued-unconfirmed retain the two OMP busy paths.
   send_rc=0
   if [ "$TARGET_BACKEND" = remote ]; then
+    REMOTE_META_LOCK=$(fm_meta_lock_path "$TARGET_META") || exit 1
+    fm_task_inbox_lock_acquire "$REMOTE_META_LOCK" || {
+      echo "error: steer not sent to remote secondmate $TARGET_REMOTE_ID: metadata lock unavailable" >&2
+      exit 1
+    }
+    CURRENT_REMOTE_HOST=$(fm_meta_get "$TARGET_META" remote_host)
+    CURRENT_REMOTE_SPAWN_GEN=$(fm_meta_get "$TARGET_META" spawn_gen)
+    CURRENT_REMOTE_ROOT=$(fm_meta_get "$TARGET_META" remote_root)
+    if [ -z "$CURRENT_REMOTE_HOST" ] || [ "$CURRENT_REMOTE_HOST" != "$TARGET_REMOTE_HOST" ] \
+      || [ "$CURRENT_REMOTE_ROOT" != "$TARGET_REMOTE_ROOT" ] \
+      || { [ -n "${FM_SEND_EXPECTED_REMOTE_HOST:-}" ] && [ "$CURRENT_REMOTE_HOST" != "$FM_SEND_EXPECTED_REMOTE_HOST" ]; } \
+      || { [ -n "${FM_SEND_EXPECTED_REMOTE_ROOT:-}" ] && [ "$CURRENT_REMOTE_ROOT" != "$FM_SEND_EXPECTED_REMOTE_ROOT" ]; }; then
+      fm_lock_release "$REMOTE_META_LOCK"
+      echo "error: steer not sent to remote secondmate $TARGET_REMOTE_ID: route changed during target resolution" >&2
+      exit 1
+    fi
+    if [ -n "${FM_SEND_EXPECTED_SPAWN_GEN:-}" ] && [ "$CURRENT_REMOTE_SPAWN_GEN" != "$FM_SEND_EXPECTED_SPAWN_GEN" ]; then
+      fm_lock_release "$REMOTE_META_LOCK"
+      echo "error: steer not sent to remote secondmate $TARGET_REMOTE_ID: endpoint generation changed during target resolution" >&2
+      exit 1
+    fi
     remote_out=
-    if remote_out=$("$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send "$TARGET_REMOTE_ID" "$MESSAGE" < /dev/null 2>&1); then
-      verdict=empty
+    if [ -n "$RECONCILE_DELIVERY_ID" ]; then
+      remote_out=$("$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh reconcile-send "$TARGET_REMOTE_ID" "$MESSAGE" "$RECONCILE_DELIVERY_ID" < /dev/null 2>&1) || send_rc=$?
+    elif remote_out=$("$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send "$TARGET_REMOTE_ID" "$MESSAGE" < /dev/null 2>&1); then
+      :
     else
       send_rc=$?
+    fi
+    fm_lock_release "$REMOTE_META_LOCK"
+    if [ "${send_rc:-0}" -eq 0 ]; then
+      verdict=empty
+    elif [ "${send_rc:-0}" -ne 0 ]; then
       [ -z "$remote_out" ] || printf '%s\n' "$remote_out" >&2
       case "$send_rc:$TARGET_HARNESS" in
         4:omp) verdict='delivered-no-turn'; send_rc=0 ;;
@@ -1044,7 +1088,11 @@ else
     send_rc=$?
   fi
   if [ "$send_rc" -ne 0 ]; then
-    if [ "$TARGET_BACKEND" = remote ] && [ "$send_rc" -eq 255 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+    if [ "$TARGET_BACKEND" = remote ] && [ "$send_rc" -eq 255 ] && [ -n "$RECONCILE_DELIVERY_ID" ]; then
+      echo "error: reconcile-delivery delivery to remote secondmate $TARGET_REMOTE_ID is unconfirmed (delivery-id=$RECONCILE_DELIVERY_ID); retry only with the same delivery id" >&2
+      exit 3
+    fi
+    if [ "$TARGET_BACKEND" = remote ] && [ -n "$PENDING_REPLY_CORR" ]; then
       fm_pending_reply_mark_delivery_unknown "$STATE" "$PENDING_REPLY_CORR" || true
       echo "error: text delivery to remote secondmate $TARGET_REMOTE_ID is unknown; do not resend - same-host reconciliation is required" >&2
       exit 1

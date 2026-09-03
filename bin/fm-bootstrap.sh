@@ -748,6 +748,14 @@ secondmate_liveness_sweep() {
   return 0
 }
 
+secondmate_reconcile_sweep() {
+  [ -x "$SCRIPT_DIR/fm-secondmate-reconcile.sh" ] || return 0
+  local snapshot out
+  snapshot=$(FM_SNAPSHOT_SECONDMATES=0 FM_SNAPSHOT_REGISTRY_LINES=0 FM_SNAPSHOT_REGISTRY_BYTES=0 "$SCRIPT_DIR/fm-fleet-snapshot.sh" --json 2>/dev/null) || return 0
+  out=$(printf '%s' "$snapshot" | "$SCRIPT_DIR/fm-secondmate-reconcile.sh" notify --snapshot - 2>/dev/null) || true
+  [ -z "$out" ] || printf '%s\n' "$out"
+}
+
 secondmate_handoff_resume() {
   [ -d "$DATA/handoff" ] || return 0
   "$SCRIPT_DIR/fm-backlog-handoff.sh" --resume-pending >/dev/null 2>&1 || true
@@ -1202,6 +1210,7 @@ if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
 fi
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_liveness_sweep
+  secondmate_reconcile_sweep
   secondmate_sync
   secondmate_handoff_resume
   x_mode_setup
