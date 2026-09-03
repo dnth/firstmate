@@ -67,7 +67,9 @@ FM_RUNPOD_OMP_AUTH_BROKER_URL=${FM_RUNPOD_OMP_AUTH_BROKER_URL:-http://127.0.0.1:
 # shellcheck source=bin/fm-quota-axi-lib.sh
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 # shellcheck source=bin/fm-task-inbox-lib.sh
-. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
+if [ -f "$SCRIPT_DIR/fm-task-inbox-lib.sh" ]; then
+  . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
+fi
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
