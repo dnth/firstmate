@@ -101,14 +101,29 @@ configure_runpod_omp_auth_launch() {
   export FM_OMP_AUTH_BROKER_URL FM_OMP_AUTH_BROKER_TOKEN_FILE
 }
 
-validate_home() { # <id> [allow-absent]
-  local id=$1 allow_absent=${2:-no} marker
-  if [ ! -e "$TARGET_HOME" ] && [ ! -L "$TARGET_HOME" ] && [ "$allow_absent" = yes ]; then return 2; fi
+validate_home() { # <id> [allow-absent|allow-markerless]
+  local id=$1 mode=${2:-no} marker marker_path
+  if [ ! -e "$TARGET_HOME" ] && [ ! -L "$TARGET_HOME" ] && [ "$mode" = yes ]; then return 2; fi
   [ -d "$TARGET_HOME" ] && [ ! -L "$TARGET_HOME" ] || die "remote secondmate home is unavailable or unsafe"
-  [ -f "$TARGET_HOME/.fm-secondmate-home" ] && [ ! -L "$TARGET_HOME/.fm-secondmate-home" ] \
-    || die "remote home is not a seeded secondmate home"
-  marker=$(cat "$TARGET_HOME/.fm-secondmate-home")
-  [ "$marker" = "$id" ] || die "remote home belongs to $marker, not $id"
+  marker_path="$TARGET_HOME/.fm-secondmate-home"
+  if [ -e "$marker_path" ] || [ -L "$marker_path" ]; then
+    [ -f "$marker_path" ] && [ ! -L "$marker_path" ] \
+      || die "remote home identity marker is unavailable or unsafe"
+    marker=$(cat "$marker_path")
+    [ "$marker" = "$id" ] || die "remote home belongs to $marker, not $id"
+  else
+    [ "$mode" = allow-markerless ] \
+      || die "remote home is not a seeded secondmate home"
+    # A markerless read-only probe may proceed only when the endpoint record
+    # itself supplies the exact task binding that the missing home marker would
+    # otherwise establish. Mutating commands never use this mode.
+    marker=$(meta_path "$id")
+    [ -f "$marker" ] && [ ! -L "$marker" ] \
+      || die "markerless remote home has no endpoint identity for $id"
+    [ "$(grep -c '^endpoint_task_id=' "$marker" 2>/dev/null || true)" -eq 1 ] \
+      && [ "$(fm_meta_get "$marker" endpoint_task_id)" = "$id" ] \
+      || die "markerless remote home endpoint identity does not belong to $id"
+  fi
   [ -f "$TARGET_HOME/AGENTS.md" ] && [ -d "$TARGET_HOME/bin" ] || die "remote home is not a Firstmate checkout"
 }
 
@@ -275,7 +290,7 @@ print_route() { # <id>
 cmd_route() {
   local id=$1 meta
   validate_id "$id"
-  validate_home "$id"
+  validate_home "$id" allow-markerless
   meta=$(meta_path "$id")
   if [ ! -f "$meta" ] || [ -L "$meta" ]; then
     die "remote secondmate has no endpoint metadata"
@@ -594,7 +609,7 @@ cmd_retire() {
 
 case "${1:-}" in
   launch) shift; [ "$#" -ge 8 ] && [ "$#" -le 9 ] || usage; cmd_launch "$@" ;;
-  state) shift; [ "$#" -eq 1 ] || usage; validate_id "$1"; validate_home "$1"; state_value "$1" ;;
+  state) shift; [ "$#" -eq 1 ] || usage; validate_id "$1"; validate_home "$1" allow-markerless; state_value "$1" ;;
   beacon-age) shift; [ "$#" -eq 1 ] || usage; beacon_age "$1" ;;
   route) shift; [ "$#" -eq 1 ] || usage; cmd_route "$1" ;;
   send) shift; [ "$#" -eq 2 ] || usage; cmd_send "$@" ;;

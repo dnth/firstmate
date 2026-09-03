@@ -589,6 +589,46 @@ publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.s
   || fail "remote endpoint delivery observation did not execute on its own host"
 pass "remote spawn launches on the remote-local backend and records a host-qualified route"
 
+# A missing durable home marker must not make the liveness read lose a route
+# whose host-local endpoint record still binds the exact secondmate id.
+markerless_state_backup="$TMP_ROOT/herdr-before-markerless-probe.state"
+cp "$HERDR_STATE" "$markerless_state_backup"
+rm -f "$REMOTE_HOME/.fm-secondmate-home"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
+  || fail "a markerless remote home was not classified from its live endpoint"
+assert_contains "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios)" \
+  'backend=herdr' "a markerless live route could not be read without its home marker"
+markerless_liveness_before=$(grep -c '^tab create' "$HERDR_LOG" || true)
+markerless_liveness_out=$(remote_env "$ROOT/bin/fm-bootstrap.sh")
+assert_not_contains "$markerless_liveness_out" 'SECONDMATE_LIVENESS: secondmate ios:' \
+  "the liveness sweep treated a live markerless route as a recovery gap"
+markerless_liveness_after=$(grep -c '^tab create' "$HERDR_LOG" || true)
+[ "$markerless_liveness_before" -eq "$markerless_liveness_after" ] \
+  || fail "the liveness sweep relaunched a live markerless remote endpoint"
+set +e
+FM_FAKE_SSH_MODE=unreachable remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios \
+  > "$TMP_ROOT/markerless-unreachable.out" 2>&1
+markerless_unreachable_rc=$?
+set -e
+[ "$markerless_unreachable_rc" = 255 ] \
+  || fail "an unreachable markerless route was not preserved as unknown (rc=$markerless_unreachable_rc)"
+reset_remote_herdr_fixture "$HERDR_STATE"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = missing ] \
+  || fail "a markerless remote home with no endpoint was not classified missing"
+set +e
+markerless_dead_out=$(remote_env "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+markerless_dead_rc=$?
+set -e
+assert_contains "$markerless_dead_out" 'respawn failed after remote endpoint missing' \
+  "the liveness sweep did not preserve a dead markerless route as a failed recovery"
+cp "$markerless_state_backup" "$HERDR_STATE"
+printf '%s\n' ios > "$REMOTE_HOME/.fm-secondmate-home"
+pass "markerless remote liveness distinguishes live, unreachable, and missing endpoints without route loss"
+if [ "${FM_TEST_MARKERLESS_ONLY:-0}" = 1 ]; then
+  echo "ALL TESTS PASSED"
+  exit 0
+fi
+
 remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
 cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-default-session.meta"
 legacy_pane=$(sed -n 's/^herdr_pane_id=//p' "$remote_route_meta")
