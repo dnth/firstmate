@@ -797,7 +797,8 @@ else
       exit 1
     fi
   fi
-  if [ "$MARK_FROM_FIRSTMATE" = 1 ] && [ "$PRESERVE_INBOUND_FROM_FIRSTMATE" != 1 ]; then
+  if [ "$MARK_FROM_FIRSTMATE" = 1 ] && [ "$PRESERVE_INBOUND_FROM_FIRSTMATE" != 1 ] \
+    && [ -z "$FIRE_AND_FORGET_ID" ]; then
     # Reuse an existing correlation id for recovery resends; otherwise create a
     # durable parent expectation before delivery. Transport success never
     # resolves that expectation (see fm-pending-reply-lib.sh).
