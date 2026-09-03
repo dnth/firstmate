@@ -141,6 +141,7 @@ revalidate_identity() {  # <meta> <sampled_spawn_gen> <sampled_host> <sampled_ro
   if [ -n "$sampled_gen" ]; then
     if [ -z "$cur_gen" ]; then REVALIDATE_REASON=no-identity; return 1; fi
     if [ "$cur_gen" != "$sampled_gen" ]; then REVALIDATE_REASON=stale; return 1; fi
+    if [ -n "$sampled_host" ] && { [ "$cur_host" != "$sampled_host" ] || [ "$cur_root" != "$sampled_root" ]; }; then REVALIDATE_REASON=stale; return 1; fi
     return 0
   fi
   if [ -z "$sampled_host" ] || [ -z "$sampled_root" ]; then REVALIDATE_REASON=no-identity; return 1; fi
@@ -297,8 +298,7 @@ cmd_notify() {
       release_active_locks
       continue
     }
-    expected_remote_host=
-    [ -n "$sampled_spawn_gen" ] || expected_remote_host=$sampled_host
+    expected_remote_host=$sampled_host
     release_active_locks
     send_rc=0
     FM_TASK_INBOX_LOCK_WAIT_SECS=0 FM_SEND_EXPECTED_SPAWN_GEN="$sampled_spawn_gen" \
