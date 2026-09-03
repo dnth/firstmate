@@ -66,6 +66,8 @@ FM_RUNPOD_OMP_AUTH_BROKER_URL=${FM_RUNPOD_OMP_AUTH_BROKER_URL:-http://127.0.0.1:
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-quota-axi-lib.sh
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
+# shellcheck source=bin/fm-task-inbox-lib.sh
+. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -413,6 +415,12 @@ cmd_send() {
       FM_SEND_OMP_INBOX_REQUIRE_HANDLED_ACK=1 \
       "$SCRIPT_DIR/fm-send.sh" "$id" "${send_args[@]}" "$message"
   else
+    if [ "$reconcile_mode" = reconcile ] \
+      && [ "$(fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$REMOTE_ENDPOINT_META" 2>/dev/null || printf 'unreadable')" = missing ]; then
+      fm_task_inbox_write "$TARGET_HOME/state" "$id" "$message" "$reconcile_id" \
+        || die "could not record reconcile instruction in the remote home"
+      return
+    fi
     FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$TARGET_HOME/state" \
       "$SCRIPT_DIR/fm-send.sh" "$REMOTE_ENDPOINT_TARGET" "$message"
   fi
