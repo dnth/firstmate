@@ -308,7 +308,7 @@ cmd_notify() {
     # exit 3 is "typed but unconfirmed": the mate may already hold the ask, so
     # record the nudge rather than risk asking twice.
     case "$send_rc" in
-      0|3|4|6|7|8) ;;
+      0|3|4|5|6|7|8) ;;
       *)
       printf 'failed: %s %s\n' "$id" "$kind"
       rc=1
