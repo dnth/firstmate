@@ -142,12 +142,13 @@ fm_task_inbox_lock_acquire() {  # <lock-path>
 # sequence slot. Prints the record path. Fails without a partial record.
 fm_task_inbox_write() {  # <state-dir> <task-id> <text> [delivery-id]
   local state=$1 task=$2 text=$3 delivery_id=${4:-} dir lock seq tmp rec status=0 existing
+  case "$delivery_id" in *[!A-Za-z0-9._-]*) return 1 ;; esac
   dir=$(fm_task_inbox_dir "$state" "$task")
   mkdir -p "$dir/handled" || return 1
   lock="$dir/.seq.lock"
   fm_task_inbox_lock_acquire "$lock" || return 1
   if [ -n "$delivery_id" ]; then
-    existing=$(grep -l "^delivery_id=$delivery_id$" "$dir"/*.msg "$dir/handled"/*.msg 2>/dev/null | head -1 || true)
+    existing=$(awk -v want="$delivery_id" '$0 == "delivery_id=" want { print FILENAME; exit }' "$dir"/*.msg "$dir/handled"/*.msg 2>/dev/null || true)
     if [ -n "$existing" ]; then
       fm_lock_release "$lock"
       printf '%s' "$existing"
