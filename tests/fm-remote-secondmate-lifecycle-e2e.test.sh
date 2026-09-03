@@ -625,7 +625,7 @@ cp "$markerless_state_backup" "$HERDR_STATE"
 remote_root=$(sed -n 's/^remote_root=//p' "$PARENT/state/ios.meta")
 remote_reconcile_snapshot="$TMP_ROOT/markerless-reconcile.json"
 jq -n --arg id ios --arg host remote-mac --arg root "$remote_root" \
-  '{schema:"fm-fleet-snapshot.v1",secondmate_current:{records:[{id:$id,host:$host,root:$root,remote:true,reconcile_inventory:{kind:"orphan_in_flight",ids:["ios"]}}]}}' \
+  '{schema:"fm-fleet-snapshot.v1",secondmate_current:{records:[{id:$id,host:$host,remote_root:$root,remote:true,reconcile_inventory:{kind:"orphan_in_flight",ids:["ios"]}}]}}' \
   > "$remote_reconcile_snapshot"
 reconcile_out=$(FM_HOME="$PARENT" FM_STATE_OVERRIDE="$PARENT/state" FM_DATA_OVERRIDE="$PARENT/data" \
   "$ROOT/bin/fm-secondmate-reconcile.sh" notify --snapshot "$remote_reconcile_snapshot" 2>&1) || fail "markerless reconciliation notify failed: $reconcile_out"
