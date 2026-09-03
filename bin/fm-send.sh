@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Steer a task through its durable inbox or a typed harness-native path.
-# Usage: fm-send.sh <target> [--resolve-key <key>]... <text...>
+# Usage: fm-send.sh <target> [--fire-and-forget <delivery-id>] [--resolve-key <key>]... <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
@@ -385,6 +385,7 @@ fm_send_resolve_target() {  # <raw-target>
   TARGET_META=""
   TARGET_SELECTOR=""
   TARGET_REMOTE_ID=""
+  TARGET_REMOTE_HOST=""
   RESOLUTION_TRIED=""
 
   meta=$(fm_backend_meta_for_selector "$raw" "$STATE" 2>/dev/null || true)
@@ -398,6 +399,7 @@ fm_send_resolve_target() {  # <raw-target>
       EXPECTED_LABEL="fm-$id"
       TARGET_SELECTOR=1
       TARGET_REMOTE_ID=$id
+      TARGET_REMOTE_HOST=$(fm_meta_get "$meta" remote_host)
       RESOLUTION_TRIED="meta=$meta; placement=remote"
       return 0
     fi
@@ -500,6 +502,7 @@ fi
 # must precede --key or the message text; everything after the last flag is the
 # message exactly as before, so ordinary sends are byte-identical.
 RESOLVE_KEYS=
+FIRE_AND_FORGET_ID=
 fm_send_add_resolve_key() {  # <key>
   local k=$1
   case "$k" in
@@ -518,6 +521,11 @@ fm_send_add_resolve_key() {  # <key>
 }
 while :; do
   case "${1:-}" in
+    --fire-and-forget)
+      [ $# -ge 2 ] || { echo "error: --fire-and-forget requires a delivery id" >&2; exit 1; }
+      FIRE_AND_FORGET_ID=$2
+      shift 2
+      ;;
     --resolve-key)
       [ $# -ge 2 ] || { echo "error: --resolve-key requires a key" >&2; exit 1; }
       fm_send_add_resolve_key "$2" || exit 1
@@ -825,7 +833,7 @@ else
       *) INBOX_PLANE=1 ;;
     esac
   fi
-  if [ "$INBOX_PLANE" = 1 ]; then
+  if [ "$INBOX_PLANE" = 1 ] || { [ -n "$FIRE_AND_FORGET_ID" ] && [ "$TARGET_BACKEND" != remote ]; }; then
     INBOX_META_LOCK=$(fm_meta_lock_path "$TARGET_META") || exit 1
     if ! fm_task_inbox_lock_acquire "$INBOX_META_LOCK"; then
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
@@ -1022,11 +1030,36 @@ else
   # busy-confirmed and queued-unconfirmed retain the two OMP busy paths.
   send_rc=0
   if [ "$TARGET_BACKEND" = remote ]; then
+    REMOTE_META_LOCK=$(fm_meta_lock_path "$TARGET_META") || exit 1
+    fm_task_inbox_lock_acquire "$REMOTE_META_LOCK" || {
+      echo "error: steer not sent to remote secondmate $TARGET_REMOTE_ID: metadata lock unavailable" >&2
+      exit 1
+    }
+    CURRENT_REMOTE_HOST=$(fm_meta_get "$TARGET_META" remote_host)
+    CURRENT_REMOTE_SPAWN_GEN=$(fm_meta_get "$TARGET_META" spawn_gen)
+    if [ -z "$CURRENT_REMOTE_HOST" ] || [ "$CURRENT_REMOTE_HOST" != "$TARGET_REMOTE_HOST" ] \
+      || { [ -n "${FM_SEND_EXPECTED_REMOTE_HOST:-}" ] && [ "$CURRENT_REMOTE_HOST" != "$FM_SEND_EXPECTED_REMOTE_HOST" ]; }; then
+      fm_lock_release "$REMOTE_META_LOCK"
+      echo "error: steer not sent to remote secondmate $TARGET_REMOTE_ID: route changed during target resolution" >&2
+      exit 1
+    fi
+    if [ -n "${FM_SEND_EXPECTED_SPAWN_GEN:-}" ] && [ "$CURRENT_REMOTE_SPAWN_GEN" != "$FM_SEND_EXPECTED_SPAWN_GEN" ]; then
+      fm_lock_release "$REMOTE_META_LOCK"
+      echo "error: steer not sent to remote secondmate $TARGET_REMOTE_ID: endpoint generation changed during target resolution" >&2
+      exit 1
+    fi
     remote_out=
-    if remote_out=$("$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send "$TARGET_REMOTE_ID" "$MESSAGE" < /dev/null 2>&1); then
-      verdict=empty
+    if [ -n "$FIRE_AND_FORGET_ID" ]; then
+      remote_out=$("$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send "$TARGET_REMOTE_ID" "$MESSAGE" fire-and-forget < /dev/null 2>&1) || send_rc=$?
+    elif remote_out=$("$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send "$TARGET_REMOTE_ID" "$MESSAGE" < /dev/null 2>&1); then
+      :
     else
       send_rc=$?
+    fi
+    fm_lock_release "$REMOTE_META_LOCK"
+    if [ -n "$FIRE_AND_FORGET_ID" ] && [ "${send_rc:-0}" -eq 0 ]; then
+      verdict=empty
+    elif [ "${send_rc:-0}" -ne 0 ]; then
       [ -z "$remote_out" ] || printf '%s\n' "$remote_out" >&2
       case "$send_rc:$TARGET_HARNESS" in
         4:omp) verdict='delivered-no-turn'; send_rc=0 ;;
