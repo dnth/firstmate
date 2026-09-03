@@ -22,7 +22,7 @@ This feature is OMP-only by construction and changes nothing anywhere else:
   A fleet-wide heartbeat keeps its own all-or-nothing rule (see "Heartbeat routing" below): it takes every branch-ownable unread row or none of them.
 - The branch itself: `.omp/extensions/fm-branch-supervision-omp.ts` creates and reopens the persistent branch session, serializes wakes, mirrors dialog, and merges outcomes.
   It checks the current extension generation and `state/.lock` ownership before each guarded branch side effect, so a lost lock or a cold-start re-arm cannot let an old continuation mutate the fleet.
-  The branch conversation is persistent across main's own `/new`, `/resume`, and `/fork` navigation: the mirror re-anchors on its own when main's session file changes, so no live re-arm runs, and `session_shutdown` only latches shutdown.
+  The branch conversation remains resident across ordinary main turns. When main performs `/new`, `/resume`, `/fork`, or reload, OMP emits `session_switch`; the primary watcher retires the prior generation and re-arms its replacement before the next model turn. The mirror re-anchors when main's session file changes, and any actionable close whose delivery overlaps the replacement is carried to the new generation exactly once. `session_shutdown` remains the terminal-process boundary rather than a replacement signal.
   Every accepted path that cannot reach a working branch rejects its settlement to the shared watcher core, which retains delivery ownership until main consumes the follow-up; a broken branch declines later offers so they take that same watcher-owned path directly.
 - Branch model and effort selection: the same extension registers `/supervision-model`, which picks the branch's model and then its reasoning effort over OMP's portable select dialog, and saves both as pins applied at the next branch build, never to the branch already running; [configuration.md](configuration.md#omp-supervision-branch-model-and-effort-configsupervision-branch-model-configsupervision-branch-effort) owns the full activation boundary, operator-facing schema, and behavior.
   Model resolution reads OMP's live `ModelRegistry` (available models and their configured credentials) with pure lookups, so pinning the branch never moves main's own conversation; effort uses OMP's `Effort` catalog and the shim's `clampThinkingLevel`.
@@ -37,13 +37,13 @@ This feature is OMP-only by construction and changes nothing anywhere else:
 
 ## Transitions and what is out of scope
 
-Ownership transitions happen only at a clean boundary or by killing the process and letting a fresh one re-arm - never by a synchronous handoff from a live or hung branch.
+Ownership transitions happen at a clean boundary: a cold `session_start`, an OMP `session_switch` replacement, or killing the process and letting a fresh one re-arm - never by a synchronous handoff from a live or hung branch.
 A branch generation serializes each wake through a clean completion boundary, and the next wake re-prompts the same resident conversation; only the first wake in a fresh process reopens the durable branch conversation.
-`session_start` (a cold start of a fresh process) is the sole clean-boundary arm; the branch is otherwise persistent across main's own session navigation.
+`session_start` and `session_switch` are the clean-boundary arm points. A `session_switch` replacement re-arms automatically without a foreground watcher command or a model turn; the branch itself remains resident unless the process is restarted.
 
 Three capabilities are deliberately out of scope for this port and are a future iteration:
 
-- Mid-flight branch replacement - displacing a live branch and re-arming a replacement inside the same process.
+- Mid-flight branch replacement - displacing a live branch and re-arming a replacement inside the same process. This is distinct from the supported main-session `session_switch` replacement above.
 - Mid-branch model or effort hot-swap - the branch keeps its model and effort until a fresh process rebuilds it; a `/supervision-model` change is a pin applied at the next branch build, not to the running branch.
 - Hung-branch live takeover - a branch stuck inside a model call is recovered by killing the process (its leases and wake-grant rows go stale on death and are swept), not by main taking ownership away from it.
 
