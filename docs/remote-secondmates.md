@@ -177,7 +177,7 @@ Backends that already refuse secondmate launch, currently Orca and cmux, remain 
 Startup liveness recovery relaunches a dead or missing remote second mate through this same command, so recovery passes the same readiness gate rather than a weaker one.
 
 The startup state and route probes also tolerate a missing `.fm-secondmate-home` marker when the remote endpoint metadata still binds the requested id, so a markerless route is classified from its Herdr endpoint instead of being mistaken for an unreadable host.
-This exception is read-only: launch, send, and retirement still require the seeded-home marker, and an unreachable host remains unknown with its route preserved.
+Ordinary launch, send, and retirement still require the seeded-home marker, while the dedicated reconcile-send path accepts a markerless home only after endpoint identity validation.
 A markerless remote route is also reconciled by `bin/fm-secondmate-reconcile.sh` using its sampled host as the identity guard, with final delivery and cooldown revalidation.
 
 Send routed requests normally:

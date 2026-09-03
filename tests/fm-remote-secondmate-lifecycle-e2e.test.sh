@@ -626,6 +626,10 @@ assert_contains "$markerless_reconcile_unreachable" 'failed: ios orphan_in_fligh
 reset_remote_herdr_fixture "$HERDR_STATE"
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = missing ] \
   || fail "a markerless remote home with no endpoint was not classified missing"
+rm -f "$PARENT/state/ios.reconcile-nudged"
+markerless_reconcile_dead=$(FM_HOME="$PARENT" FM_STATE_OVERRIDE="$PARENT/state" FM_DATA_OVERRIDE="$PARENT/data" \
+  "$ROOT/bin/fm-secondmate-reconcile.sh" notify --snapshot "$remote_reconcile_snapshot" 2>&1) || fail "dead markerless reconciliation notify failed: $markerless_reconcile_dead"
+assert_contains "$markerless_reconcile_dead" 'sent: ios orphan_in_flight' "dead markerless reconciliation was not durably recorded"
 set +e
 markerless_dead_out=$(remote_env "$ROOT/bin/fm-bootstrap.sh" 2>&1)
 markerless_dead_rc=$?
