@@ -307,11 +307,14 @@ cmd_notify() {
       "$(reconcile_text)" >/dev/null 2>&1 || send_rc=$?
     # exit 3 is "typed but unconfirmed": the mate may already hold the ask, so
     # record the nudge rather than risk asking twice.
-    if [ "$send_rc" -ne 0 ] && [ "$send_rc" -ne 3 ]; then
+    case "$send_rc" in
+      0|3|4|6|7|8) ;;
+      *)
       printf 'failed: %s %s\n' "$id" "$kind"
       rc=1
       continue
-    fi
+      ;;
+    esac
     delivered_at=$(date +%s)
     if ! fm_lock_try_acquire "$reconcile_lock"; then
       printf 'sent-unrecorded: %s %s\n' "$id" "$kind"
