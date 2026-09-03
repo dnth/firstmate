@@ -901,7 +901,7 @@ else
         exit 1
       fi
     fi
-    if ! INBOX_RECORD=$(fm_task_inbox_write "$STATE" "$TARGET_TASK_ID" "$MESSAGE"); then
+    if ! INBOX_RECORD=$(fm_task_inbox_write "$STATE" "$TARGET_TASK_ID" "$MESSAGE" "$FIRE_AND_FORGET_ID"); then
       fm_lock_release "$INBOX_META_LOCK"
       INBOX_META_LOCK_HELD=0
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
