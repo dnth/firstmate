@@ -374,9 +374,13 @@ cmd_launch() {
 }
 
 cmd_send() {
-  local id=$1 message=$2 harness relay_body meta
+  local id=$1 message=$2 delivery_mode=${3:-} reconcile_mode=${4:-} harness relay_body meta
   validate_id "$id"
-  validate_home "$id"
+  if [ "$reconcile_mode" = reconcile ] && [ "$delivery_mode" = fire-and-forget ]; then
+    validate_home "$id" allow-markerless
+  else
+    validate_home "$id"
+  fi
   if ! remote_endpoint_load "$id"; then
     meta=$(meta_path "$id")
     if [ "$(fm_meta_get "$meta" harness)" = omp ]; then
@@ -612,7 +616,7 @@ case "${1:-}" in
   state) shift; [ "$#" -eq 1 ] || usage; validate_id "$1"; validate_home "$1" allow-markerless; state_value "$1" ;;
   beacon-age) shift; [ "$#" -eq 1 ] || usage; beacon_age "$1" ;;
   route) shift; [ "$#" -eq 1 ] || usage; cmd_route "$1" ;;
-  send) shift; [ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage; cmd_send "$@" ;;
+  send) shift; [ "$#" -ge 2 ] && [ "$#" -le 4 ] || usage; cmd_send "$@" ;;
   key) shift; [ "$#" -eq 2 ] || usage; cmd_key "$@" ;;
   capture) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_capture "$@" ;;
   observe) shift; [ "$#" -eq 1 ] || usage; cmd_observe "$@" ;;
