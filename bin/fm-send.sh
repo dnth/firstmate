@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Steer a task through its durable inbox or a typed harness-native path.
-# Usage: fm-send.sh <target> [--fire-and-forget <delivery-id>] [--resolve-key <key>]... <text...>
+# Usage: fm-send.sh <target> [--reconcile-delivery <delivery-id>] [--resolve-key <key>]... <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
@@ -504,7 +504,7 @@ fi
 # must precede --key or the message text; everything after the last flag is the
 # message exactly as before, so ordinary sends are byte-identical.
 RESOLVE_KEYS=
-FIRE_AND_FORGET_ID=
+RECONCILE_DELIVERY_ID=
 fm_send_add_resolve_key() {  # <key>
   local k=$1
   case "$k" in
@@ -523,10 +523,10 @@ fm_send_add_resolve_key() {  # <key>
 }
 while :; do
   case "${1:-}" in
-    --fire-and-forget)
-      [ "${FM_SEND_RECONCILE_AUTH:-0}" = 1 ] || { echo "error: fire-and-forget is reserved for reconciliation" >&2; exit 1; }
-      [ $# -ge 2 ] || { echo "error: --fire-and-forget requires a delivery id" >&2; exit 1; }
-      FIRE_AND_FORGET_ID=$2
+    --reconcile-delivery)
+      [ "${FM_SEND_RECONCILE_AUTH:-0}" = 1 ] || { echo "error: reconcile-delivery is reserved for reconciliation" >&2; exit 1; }
+      [ $# -ge 2 ] || { echo "error: --reconcile-delivery requires a delivery id" >&2; exit 1; }
+      RECONCILE_DELIVERY_ID=$2
       shift 2
       ;;
     --resolve-key)
@@ -801,7 +801,7 @@ else
     fi
   fi
   if [ "$MARK_FROM_FIRSTMATE" = 1 ] && [ "$PRESERVE_INBOUND_FROM_FIRSTMATE" != 1 ] \
-    && [ -z "$FIRE_AND_FORGET_ID" ]; then
+    && [ -z "$RECONCILE_DELIVERY_ID" ]; then
     # Reuse an existing correlation id for recovery resends; otherwise create a
     # durable parent expectation before delivery. Transport success never
     # resolves that expectation (see fm-pending-reply-lib.sh).
@@ -837,7 +837,7 @@ else
       *) INBOX_PLANE=1 ;;
     esac
   fi
-  if [ "$INBOX_PLANE" = 1 ] || { [ -n "$FIRE_AND_FORGET_ID" ] && [ "$TARGET_BACKEND" != remote ]; }; then
+  if [ "$INBOX_PLANE" = 1 ] || { [ -n "$RECONCILE_DELIVERY_ID" ] && [ "$TARGET_BACKEND" != remote ]; }; then
     INBOX_META_LOCK=$(fm_meta_lock_path "$TARGET_META") || exit 1
     if ! fm_task_inbox_lock_acquire "$INBOX_META_LOCK"; then
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
@@ -901,7 +901,7 @@ else
         exit 1
       fi
     fi
-    if ! INBOX_RECORD=$(fm_task_inbox_write "$STATE" "$TARGET_TASK_ID" "$MESSAGE" "$FIRE_AND_FORGET_ID"); then
+    if ! INBOX_RECORD=$(fm_task_inbox_write "$STATE" "$TARGET_TASK_ID" "$MESSAGE" "$RECONCILE_DELIVERY_ID"); then
       fm_lock_release "$INBOX_META_LOCK"
       INBOX_META_LOCK_HELD=0
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
@@ -1059,15 +1059,15 @@ else
       exit 1
     fi
     remote_out=
-    if [ -n "$FIRE_AND_FORGET_ID" ]; then
-      remote_out=$("$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh reconcile-send "$TARGET_REMOTE_ID" "$MESSAGE" "$FIRE_AND_FORGET_ID" < /dev/null 2>&1) || send_rc=$?
+    if [ -n "$RECONCILE_DELIVERY_ID" ]; then
+      remote_out=$("$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh reconcile-send "$TARGET_REMOTE_ID" "$MESSAGE" "$RECONCILE_DELIVERY_ID" < /dev/null 2>&1) || send_rc=$?
     elif remote_out=$("$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send "$TARGET_REMOTE_ID" "$MESSAGE" < /dev/null 2>&1); then
       :
     else
       send_rc=$?
     fi
     fm_lock_release "$REMOTE_META_LOCK"
-    if [ -n "$FIRE_AND_FORGET_ID" ] && [ "${send_rc:-0}" -eq 0 ]; then
+    if [ -n "$RECONCILE_DELIVERY_ID" ] && [ "${send_rc:-0}" -eq 0 ]; then
       verdict=empty
     elif [ "${send_rc:-0}" -ne 0 ]; then
       [ -z "$remote_out" ] || printf '%s\n' "$remote_out" >&2
@@ -1087,8 +1087,8 @@ else
     send_rc=$?
   fi
   if [ "$send_rc" -ne 0 ]; then
-    if [ "$TARGET_BACKEND" = remote ] && [ "$send_rc" -eq 255 ] && [ -n "$FIRE_AND_FORGET_ID" ]; then
-      echo "error: fire-and-forget delivery to remote secondmate $TARGET_REMOTE_ID is unconfirmed (delivery-id=$FIRE_AND_FORGET_ID); retry only with the same delivery id" >&2
+    if [ "$TARGET_BACKEND" = remote ] && [ "$send_rc" -eq 255 ] && [ -n "$RECONCILE_DELIVERY_ID" ]; then
+      echo "error: reconcile-delivery delivery to remote secondmate $TARGET_REMOTE_ID is unconfirmed (delivery-id=$RECONCILE_DELIVERY_ID); retry only with the same delivery id" >&2
       exit 3
     fi
     if [ "$TARGET_BACKEND" = remote ] && [ "$send_rc" -eq 255 ] && [ -n "$PENDING_REPLY_CORR" ]; then

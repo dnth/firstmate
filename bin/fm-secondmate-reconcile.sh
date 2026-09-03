@@ -24,7 +24,7 @@
 #     stale, cannot mis-order against a concurrent snapshot, and cannot
 #     mis-classify a repair as a new problem, which an identity-precise record
 #     has to get right in every direction to avoid silently swallowing a nudge;
-#   - sending through bin/fm-send.sh's fire-and-forget plane, which records the
+#   - sending through bin/fm-send.sh's reconcile-delivery plane, which records the
 #     instruction durably for local and remote mates alike while staying out of
 #     the steering inbox's re-ring and escalation ladder: the parent expects no
 #     reply, so nothing should chase one.
@@ -306,7 +306,7 @@ cmd_notify() {
     send_rc=0
     FM_SEND_RECONCILE_AUTH=1 FM_TASK_INBOX_LOCK_WAIT_SECS=0 FM_SEND_EXPECTED_SPAWN_GEN="$sampled_spawn_gen" \
       FM_SEND_EXPECTED_REMOTE_HOST="$expected_remote_host" FM_SEND_EXPECTED_REMOTE_ROOT="$sampled_root" \
-      "$SCRIPT_DIR/fm-send.sh" "$id" --fire-and-forget "$did" \
+      "$SCRIPT_DIR/fm-send.sh" "$id" --reconcile-delivery "$did" \
       "$reconcile_message" >/dev/null 2>&1 || send_rc=$?
     # exit 3 is "typed but unconfirmed": the mate may already hold the ask, so
     # record the nudge rather than risk asking twice.

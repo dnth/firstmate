@@ -376,7 +376,7 @@ cmd_launch() {
 cmd_send() {
   local id=$1 message=$2 delivery_mode=${3:-} reconcile_mode=${4:-} reconcile_id=${5:-} harness relay_body meta
   local send_args=()
-  if [ "$reconcile_mode" = reconcile ]; then send_args=(--fire-and-forget "$reconcile_id"); fi
+  if [ "$reconcile_mode" = reconcile ]; then send_args=(--reconcile-delivery "$reconcile_id"); fi
   validate_id "$id"
   if [ "$reconcile_mode" = reconcile ]; then validate_home "$id" allow-markerless; else validate_home "$id"; fi
   if ! remote_endpoint_load "$id"; then
@@ -423,7 +423,7 @@ cmd_reconcile_send() {
   validate_id "$id"
   fm_message_from_firstmate "$message" || die "reconcile payload lacks the from-firstmate carrier"
   [ -n "$delivery_id" ] || die "reconcile delivery id is required"
-  cmd_send "$id" "$message" fire-and-forget reconcile "$delivery_id"
+  cmd_send "$id" "$message" reconcile-delivery reconcile "$delivery_id"
 }
 
 cmd_key() {
