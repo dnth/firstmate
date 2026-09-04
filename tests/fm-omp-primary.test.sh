@@ -1081,6 +1081,126 @@ JS
   pass "OMP /new /resume /fork and reload session_switch paths auto-arm and carry an in-flight actionable close"
 }
 
+# A wake that OMP queues into an already-running turn never starts a turn, so
+# before_agent_start never acknowledges it. The shared core must bound that wait:
+# the next actionable close still has to start its successor and deliver its own
+# wake exactly once instead of parking the whole chain behind the first
+# unacknowledged delivery.
+test_native_omp_unacknowledged_wake_keeps_successor_chain() {
+  local fixture out status=0
+  fixture="$TMP_ROOT/native-unacknowledged-wake"
+  mkdir -p "$fixture/.omp/extensions/lib" "$fixture/bin" "$fixture/state" "$fixture/config"
+  cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$fixture/.omp/extensions/fm-primary-omp.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$fixture/.omp/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" "$fixture/.omp/extensions/lib/fm-task-inbox-doorbell.ts"
+  cp "$ROOT/bin/fm-primary-watch-core.ts" "$fixture/bin/fm-primary-watch-core.ts"
+  cp "$ROOT/bin/fm-pi-compatible-runtimes" "$fixture/bin/fm-pi-compatible-runtimes"
+  : > "$fixture/AGENTS.md"
+  git init -q -b main "$fixture"
+  cat > "$fixture/bin/fm-gate-refuse-lib.sh" <<'SH'
+fm_is_gate_agent() { return 1; }
+SH
+  cat > "$fixture/bin/fm-primary-scope-lib.sh" <<'SH'
+fm_primary_scope_matches() { return 0; }
+SH
+  cat > "$fixture/bin/fm-operational-input.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'encoded:%s:%s' "$2" "$(cat)"
+SH
+  cat > "$fixture/bin/fm-sessionstart-nudge.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$fixture/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+state=${FM_STATE_OVERRIDE:?}
+count=$(cat "$state/watch-count" 2>/dev/null || printf 0)
+count=$((count + 1))
+printf '%s\n' "$count" > "$state/watch-count"
+printf 'arm=%s predecessor=%s\n' "$$" "${FM_WATCH_PREDECESSOR_ARM_PID:-none}" >> "$state/arm-log"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+if [ "$count" -le 2 ]; then
+  while [ ! -e "$state/watch-trigger-$count" ]; do sleep 0.02; done
+  printf 'signal: omp unacknowledged wake %s\n' "$count"
+  exit 0
+fi
+while [ ! -e "$state/watch-stop" ]; do sleep 0.02; done
+SH
+  cat > "$fixture/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  for script in fm-subagent-pretool-check.sh fm-cd-pretool-check.sh fm-arm-pretool-check.sh; do
+    cat > "$fixture/bin/$script" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  done
+  chmod +x "$fixture/bin/"*.sh
+
+  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
+    FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    FM_WATCH_WAKE_CONSUME_TIMEOUT_MS=300 node --input-type=module 2>&1 <<'JS'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+const steers = [];
+const api = {
+  zod: { object: () => ({}) },
+  on(name, handler) { handlers.set(name, handler); },
+  registerCommand() {},
+  registerTool() {},
+  // The runtime queues every wake as a steer into a running turn: delivery
+  // resolves, no turn starts, and before_agent_start is never invoked for it.
+  sendMessage(message) { steers.push(String(message?.content ?? "")); },
+};
+const state = process.env.FM_STATE_OVERRIDE;
+const bound = Number(process.env.FM_WATCH_WAKE_CONSUME_TIMEOUT_MS);
+const count = () => existsSync(`${state}/watch-count`) ? Number(readFileSync(`${state}/watch-count`, "utf8").trim()) : 0;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (pred()) return;
+    await sleep(10);
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+const queue = `${state}/.wake-queue`;
+const queueRow = "1\t1\tsignal\tcrew.turn-ended\tsignal: durable row\n";
+writeFileSync(queue, queueRow);
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+process.argv[1] = process.env.EXTENSION;
+const extension = await import(`${pathToFileURL(process.env.EXTENSION).href}?unacknowledged=${Date.now()}`);
+extension.default(api);
+const context = { sessionManager: { getSessionFile: () => undefined } };
+await handlers.get("session_start")({ type: "session_start" }, context);
+await waitFor(() => count() === 1, "initial automatic OMP arm");
+writeFileSync(`${state}/watch-trigger-1`, "trigger\n");
+await waitFor(() => steers.length === 1 && count() === 2, "first OMP delivery and its successor");
+writeFileSync(`${state}/watch-trigger-2`, "trigger\n");
+await waitFor(() => count() === 3, "third OMP arm after the unacknowledged delivery");
+await waitFor(() => steers.length === 2, "second OMP delivery");
+await sleep(bound * 3);
+if (count() !== 3) throw new Error(`expected exactly three arms, got ${count()}`);
+if (steers.length !== 2) throw new Error(`expected exactly one delivery per close, got ${steers.length}: ${steers.join(" | ")}`);
+if (!steers[0].includes("signal: omp unacknowledged wake 1") || !steers[1].includes("signal: omp unacknowledged wake 2")) {
+  throw new Error(`deliveries did not match their closes: ${steers.join(" | ")}`);
+}
+const armRows = readFileSync(`${state}/arm-log`, "utf8").trim().split("\n");
+if (!/predecessor=[0-9]+$/.test(armRows[2])) throw new Error(`third arm lost its predecessor identity: ${armRows.join(" | ")}`);
+if (readFileSync(queue, "utf8") !== queueRow) throw new Error("the durable wake queue row was altered by the bounded acknowledgement");
+writeFileSync(`${state}/watch-stop`, "stop\n");
+await handlers.get("session_shutdown")({ type: "session_shutdown" }, context);
+console.log("omp-unacknowledged-wake-ok");
+JS
+  ) || status=$?
+  expect_code 0 "$status" "OMP unacknowledged wake continuity"
+  assert_contains "$out" omp-unacknowledged-wake-ok "OMP unacknowledged-wake continuity test did not complete"
+  pass "OMP unacknowledged wake delivery keeps the successor chain and delivers once per close"
+}
+
 test_resolve_path_uses_node_when_readlink_f_is_unavailable
 test_exact_bun_omp_primary_identity
 test_standalone_omp_primary_identity
@@ -1093,3 +1213,4 @@ test_native_primary_extension_contract
 test_native_omp_confirms_recovery_handling_delivery
 test_native_omp_refused_handling_delivery_is_typed_once
 test_native_omp_session_switch_carries_inflight_actionable_close
+test_native_omp_unacknowledged_wake_keeps_successor_chain

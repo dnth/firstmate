@@ -297,6 +297,11 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
   const retryBaseMs = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
   const retryMaxMs = positiveInteger("FM_WATCH_REARM_RETRY_MAX_MS", 4000);
   const retryLimit = positiveInteger("FM_WATCH_REARM_RETRY_LIMIT", 5);
+  // A delivered wake is acknowledged when the runtime starts a turn whose prompt
+  // is that wake. A wake the runtime queues into an already-running turn never
+  // starts one, so that acknowledgement can never arrive; bound the wait so one
+  // unacknowledged delivery cannot hold the successor chain forever.
+  const wakeConsumeTimeoutMs = positiveInteger("FM_WATCH_WAKE_CONSUME_TIMEOUT_MS", 15000);
   const armReadyTimeoutMs = positiveInteger(
     armReadyTimeoutEnv,
     process.platform === "win32" ? 35000 : 12000,
@@ -576,7 +581,24 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     owner.wakeAcknowledgements.set(token, { content, settle: settleConsumption });
     try {
       await sendFollowUp(content);
-      return await consumption;
+      let consumeTimer: ReturnType<typeof setTimeout> | undefined;
+      const consumeTimeout = new Promise<"timeout">((resolveTimeout) => {
+        consumeTimer = setTimeout(() => resolveTimeout("timeout"), wakeConsumeTimeoutMs);
+        consumeTimer.unref();
+      });
+      try {
+        const consumed = await Promise.race([consumption, consumeTimeout]);
+        if (consumed !== "timeout") return consumed;
+      } finally {
+        clearTimeout(consumeTimer);
+      }
+      // The runtime accepted the wake without starting a turn for it: the message
+      // is already queued into the running conversation, so it counts as
+      // delivered. Returning true here (never false) keeps the pending loop from
+      // re-sending the same wake.
+      owner.wakeAcknowledgements.delete(token);
+      settleConsumption(true);
+      return generationIsLive(owner);
     } catch (error) {
       owner.wakeAcknowledgements.delete(token);
       settleConsumption(false);
