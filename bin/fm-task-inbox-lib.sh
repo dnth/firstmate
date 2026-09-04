@@ -218,9 +218,11 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [har
     ready_marker="${rec%/*}"
     ready_marker="${ready_marker%.inbox}.omp-doorbell-ready"
     request_id=${rec##*/}
+    # shellcheck disable=SC2034 # Public outcome binding read by the caller after sourcing (bin/fm-send.sh).
     FM_TASK_INBOX_RING_OMP_REQUEST="$ready_marker.requests/request.$request_id"
     FM_TASK_INBOX_RING_OMP_PID=
     if fm_omp_task_doorbell_marker_read "$ready_marker" 2>/dev/null; then
+      # shellcheck disable=SC2034 # Same: the bound session process the caller reports.
       FM_TASK_INBOX_RING_OMP_PID=$FM_OMP_TASK_DOORBELL_PID
     fi
     programmatic_rc=0
