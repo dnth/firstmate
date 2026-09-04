@@ -106,9 +106,10 @@ Stalled escalation delivery writes `state/.subsuper-inject-wedged` and attempts 
 On an unmarked return, `bin/fm-afk-return.sh` owns ordered shutdown, durable catch-up evidence, and the fail-closed gate that keeps ordinary work behind every live firstmate-actionable blocker.
 Ordinary local task steering uses a durable sequenced record under `state/<id>.inbox/`; the endpoint receives only a constant doorbell, and the worker acknowledges action by moving the record into `handled/`.
 `bin/fm-task-inbox-lib.sh` owns the record, sequence, doorbell, acknowledgement layout, and watcher retry ladder.
+An OMP worker is reached only through its task-bound native receive adapter, never the composer, because an already-streaming session cannot be steered through editable terminal text; `fm-send.sh` reports one bounded outcome per steer - native receipt, a named durable native queue entry, or an explicit refusal - each binding the exact session and message.
 Normal local metadata publication, inbox enqueue revalidation and record publication, and teardown share the per-task metadata lifecycle lock so endpoint birth, delivery, and retirement cannot cross; the remote-secondmate publisher and fork-only Orca abort-recovery publisher remain outside this local-leg seam.
 `fm-send.sh` owns the local selector that keeps slash commands and Codex dollar invocations typed while routing other task text through the inbox, plus enqueue-time decision closure.
-On the typed plane, `fm-send.sh` retains popup settle, OMP and Hermes post-submit turn-start checks, OMP's queued-busy exception, and supervised recovery.
+On the typed plane, `fm-send.sh` retains popup settle, OMP and Hermes post-submit turn-start checks, and supervised recovery; a busy OMP submit with no native session event is unproven delivery, not success.
 Successful typed text sends then receive the existing `FM_SEND_SETTLE` pause so immediate peeks catch the receiving turn, while the sub-supervisor uses only the shared submit core and pays neither fm-send-only step.
 
 ## Busy state is semantic, per adapter

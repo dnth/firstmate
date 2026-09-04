@@ -4,8 +4,9 @@
 # These tests drive the public fm-send executable through a stubbed tmux
 # backend and fake process identity, so no live OMP session is required.
 # They prove a confirmed submit does not count as success until an initially
-# idle OMP target becomes busy or advances its turn-start marker, while the
-# already-busy queued-Enter exception and non-OMP delivery keep their existing
+# idle OMP target becomes busy or advances its turn-start marker, that an
+# already-busy OMP Enter with no native session event is reported as unproven
+# delivery rather than success, and that non-OMP delivery keeps its existing
 # behavior.
 set -u
 
@@ -277,18 +278,24 @@ test_pre_submit_activity_does_not_prove_new_turn() {
   pass "fm-send: pre-submit activity cannot prove the submitted turn started"
 }
 
-test_busy_queued_enter_remains_success() {
-  local home fb bun omp log entered rc
+test_busy_enter_without_receipt_is_unproven() {
+  local home fb bun omp log entered rc err
   IFS=$'\t' read -r home fb bun omp log entered < <(setup_case queued omp)
+  err="$home/queued.err"
   FM_SEND_TURNSTART_TIMEOUT=invalid \
-    run_case queued "$home" "$fb" "$bun" "$omp" "$log" "$entered" >/dev/null 2>&1
+    run_case queued "$home" "$fb" "$bun" "$omp" "$log" "$entered" >/dev/null 2>"$err"
   rc=$?
-  expect_code 0 "$rc" "the already-busy OMP queued-Enter exception should remain accepted"
+  expect_code 4 "$rc" \
+    "a busy OMP Enter with no native session event must not be reported as delivery"
+  assert_contains "$(cat "$err")" 'delivered-no-turn' \
+    "the unreceipted busy OMP submit was not reported as unproven delivery"
+  assert_contains "$(cat "$err")" 'do not resend' \
+    "the unreceipted busy OMP submit invited a resend of already-transported text"
   [ "$(grep -c 'key=Enter' "$log")" -eq 1 ] \
-    || fail "the busy OMP queued-Enter path no longer transports exactly one Enter"
-  assert_absent "$home/state/turn-test.status" \
-    "the busy queued-Enter exception emitted a false no-turn recovery marker"
-  pass "fm-send: already-busy OMP ignores idle-only turn-start setup"
+    || fail "the busy OMP path no longer transports exactly one Enter"
+  assert_contains "$(cat "$home/state/turn-test.status")" 'failed: delivered-no-turn:' \
+    "the unreceipted busy OMP submit did not queue supervised recovery"
+  pass "fm-send: an already-busy OMP submit without a native receipt is unproven, never success"
 }
 
 test_non_omp_does_not_gain_turn_start_verification() {
@@ -538,7 +545,7 @@ test_turn_start_keeps_normal_success
 test_no_turn_does_not_close_answered_decision
 test_turn_activity_advance_keeps_fast_success
 test_pre_submit_activity_does_not_prove_new_turn
-test_busy_queued_enter_remains_success
+test_busy_enter_without_receipt_is_unproven
 test_non_omp_does_not_gain_turn_start_verification
 test_timeout_uses_monotonic_deadline
 test_omp_key_ignores_turnstart_configuration

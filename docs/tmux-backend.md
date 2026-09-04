@@ -93,8 +93,8 @@ It types a message once and retries Enter only while the backend still permits a
 A proven empty composer is the ordinary positive delivery acknowledgement.
 Text left in established structure remains `pending`, text in ambiguous structure remains unproven, and unreadable or unsafe state remains unknown.
 An ordinary metadata-routed `fm-send.sh` text steer becomes a durable steering-inbox record plus a best-effort constant doorbell line (`bin/fm-task-inbox-lib.sh`).
-For a local OMP task, the backend first validates the ready marker owner against the pane foreground process and canonical launch identity before invoking the shared programmatic wake route.
-[`bin/fm-task-inbox-lib.sh`](../bin/fm-task-inbox-lib.sh) owns that route's request, fallback, retry, ambiguity, and handled-file processing contract.
+For a local OMP task, the backend first validates the ready marker owner against the pane foreground process and canonical launch identity before invoking the shared native wake route, which is the only transport OMP steering uses.
+[`bin/fm-task-inbox-lib.sh`](../bin/fm-task-inbox-lib.sh) owns that route's request, retry, ambiguity, and handled-file processing contract.
 The verdicts above remain delivery-critical for the typed plane, where `fm-send.sh` preserves the fork's submit and OMP/Hermes turn-start verification.
 
 OpenCode 1.18.4 has one busy-queue exception.
@@ -104,7 +104,8 @@ Ambiguous pending text never receives the busy-queue conversion.
 
 OMP has one narrower exception, scoped to `harness=omp` alone.
 The submit core records whether the pane is busy before typing.
-For an already-busy worker, one successfully transported Enter followed by structurally proven pending or empty OMP input returns `queued-unconfirmed` without scraping the rendered steering queue; `fm-send` accepts only that narrow verdict as queued delivery.
+For an already-busy worker, one successfully transported Enter followed by structurally proven pending or empty OMP input returns `queued-unconfirmed` without scraping the rendered steering queue.
+That verdict records transport only: no native session event proved the worker received the line, so `fm-send` reports it as unproven delivery rather than success (`bin/fm-send.sh`).
 An Enter transport failure returns `send-failed`, while an initially idle pane with editable input left pending still fails closed.
 For an initially idle OMP pane, an `unknown` composer followed by the exact OMP busy signature remains positive proof that the ordinary turn started.
 Every other harness keeps the original behavior of returning `unknown` immediately without further Enter retries.

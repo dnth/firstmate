@@ -201,8 +201,8 @@ Every Herdr invocation goes through `fm_backend_herdr_cli`, which sets the envir
 An environment variable alone is not reliable when another Herdr server is running.
 
 Literal text and Enter are separate operations on `fm-send.sh`'s typed plane; ordinary local text steers instead use the durable steering inbox and send only its best-effort constant doorbell through this adapter.
-For a local OMP task, the adapter validates the ready marker owner against the exact Herdr pane foreground process and canonical launch identity before invoking the shared programmatic wake route.
-[`bin/fm-task-inbox-lib.sh`](../bin/fm-task-inbox-lib.sh) owns that route's request, fallback, retry, ambiguity, and handled-file processing contract.
+For a local OMP task, the adapter validates the ready marker owner against the exact Herdr pane foreground process and canonical launch identity before invoking the shared native wake route, which is the only transport OMP steering uses.
+[`bin/fm-task-inbox-lib.sh`](../bin/fm-task-inbox-lib.sh) owns that route's request, retry, ambiguity, and handled-file processing contract.
 Spawn-time fixed commands may use Herdr's atomic run primitive.
 The away launcher waits for the exact newly created pane to expose one proven idle foreground shell before submitting the daemon command, so terminal-startup work cannot consume or corrupt it.
 Enter, Escape, and Ctrl-C are supported.
@@ -220,7 +220,7 @@ OMP is stricter: the adapter binds the exact native OMP session path and pre-sen
 That offset is always the end of a complete newline-terminated session record; when a partial record is still being appended the adapter waits a bounded time and then refuses rather than rewinding, because a mid-record offset would poison every later read and an earlier boundary could false-confirm an already-appended record.
 A busy typed-plane OMP steer sends one Enter and normally succeeds after an appended exact-text user message carries native `steering:true`; an identical ordinary user message is not acknowledgement.
 If that native event is not observed within the bounded window, the adapter verifies the composer before considering the narrow fallback.
-A cleared composer or proven pending text plus a current native `working` state returns `queued-unconfirmed`, which `fm-send` accepts so OMP can consume the steer on its next turn.
+A cleared composer or proven pending text plus a current native `working` state returns `queued-unconfirmed`, which records Enter transport without a native receipt; `fm-send` reports it as unproven delivery rather than success (`bin/fm-send.sh`).
 Pending text plus idle, done, blocked, or unreadable native state remains unsubmitted and makes `fm-send` fail.
 An Enter transport failure returns `send-failed`, and every non-busy editable composer remains subject to the ordinary pending or unknown fail-closed behavior.
 A `blocked` OMP agent is parked on an open ask rather than generating, so its proof is instead a successful post-offset `ask` tool result whose structured `selectedOptions` is exactly the sent text; a steering user record is never accepted there, and an errored answer is a rejection, not delivery.

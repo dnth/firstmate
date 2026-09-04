@@ -290,7 +290,7 @@ test_unconfirmed_send_does_not_close() {
   pass "an unconfirmed send never closes the decision"
 }
 
-test_busy_omp_queued_unconfirmed_does_not_close() {
+test_busy_omp_without_receipt_does_not_close() {
   local dir fb log err home project worktree omp runtime rc out
   dir="$TMP_ROOT/queued-unconfirmed"
   mkdir -p "$dir"
@@ -317,14 +317,16 @@ test_busy_omp_queued_unconfirmed_does_not_close() {
     run_send "$fb" "$home" "$log" \
     tq --resolve-key queue-proof "/answer-may-only-be-queued"
   rc=$?
-  [ "$rc" -eq 0 ] \
-    || fail "the existing busy OMP queued steer path should still succeed: $(cat "$err")"
+  expect_code 4 "$rc" \
+    "a busy OMP steer with no native receipt must report unproven delivery, not success"
+  assert_contains "$(cat "$err")" 'delivered-no-turn' \
+    "the unproven busy OMP steer lost its distinct verdict"
   assert_no_grep 'resolved' "$home/state/tq.status" \
-    "a queued-unconfirmed OMP send closed the decision"
+    "an unreceipted busy OMP send closed the decision"
   out=$(drain_out "$home")
   printf '%s' "$out" | grep -F '[key=queue-proof]' >/dev/null \
-    || fail "the decision vanished after a queued-unconfirmed OMP send"
-  pass "a busy OMP queued-unconfirmed send leaves the decision open"
+    || fail "the decision vanished after an unreceipted busy OMP send"
+  pass "a busy OMP send without a native receipt leaves the decision open"
 }
 
 test_multiple_keys_close_together() {
@@ -617,7 +619,7 @@ test_send_without_flag_and_progress_never_closes
 test_not_open_key_refuses_before_send
 test_failed_send_does_not_close
 test_unconfirmed_send_does_not_close
-test_busy_omp_queued_unconfirmed_does_not_close
+test_busy_omp_without_receipt_does_not_close
 test_multiple_keys_close_together
 test_long_key_preserves_resolved_prefix
 test_local_secondmate_answer_is_marked_and_closed

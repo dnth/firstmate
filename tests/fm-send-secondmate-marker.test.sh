@@ -17,6 +17,8 @@
 #   4. The --key path never carries the marker and never enqueues a record.
 #   5. Direct captain text stays unmarked, and already-marked text is idempotent.
 #   6. The marker is the label plus terminal-safe U+2063 INVISIBLE SEPARATOR.
+#   7. An OMP secondmate steer with no native receipt is refused loudly and
+#      keeps its marked record and undelivered expectation.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -30,8 +32,8 @@ TMP_ROOT=$(fm_test_tmproot fm-send-marker)
 
 # A fake tmux that (a) records the literal text of every `send-keys -l` to
 # FM_SEND_LOG and (b) renders a captured busy OMP layout whose editable
-# composer remains visible after Enter. The submit path therefore exercises the
-# busy OMP queued-unconfirmed verdict without scraping a Steering list.
+# composer remains visible after Enter, so a case that asserts nothing was
+# typed cannot pass merely because the composer looked unusable.
 # display-message yields a numeric cursor_y; the non-OMP path returns an empty
 # bordered composer so fm_tmux_composer_state reads "empty" on the first Enter.
 # Only the literal (-l) text is logged; Enter retries and --key sends are not.
@@ -107,13 +109,20 @@ SH
 # exit code.
 run_send() {
   local fb=$1 home=$2 log=$3; shift 3
+  run_send_err "$fb" "$home" "$log" /dev/null "$@"
+}
+
+# run_send_err <fakebin> <home> <send-log> <err-file> -- <fm-send args...>
+# The same run, keeping fm-send's stderr for the cases that assert its verdict.
+run_send_err() {
+  local fb=$1 home=$2 log=$3 err=$4; shift 4
   : > "$log"
   env PATH="$fb:$PATH" \
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
     FM_SEND_OMP_BUSY="${FM_SEND_OMP_BUSY:-0}" FM_SEND_OMP="${FM_SEND_OMP:-0}" \
     FM_SEND_ENTERED="${FM_SEND_ENTERED:-}" FM_SEND_OMP_BEFORE="${FM_SEND_OMP_BEFORE:-}" \
     FM_SEND_OMP_AFTER="${FM_SEND_OMP_AFTER:-}" \
-    "$SEND" "$@" 2>/dev/null
+    "$SEND" "$@" 2>"$err"
 }
 
 # setup_home <name> -> echoes a fresh home dir with an empty state/.
@@ -158,59 +167,37 @@ test_secondmate_target_is_marked() {
     || fail "marked secondmate send should create a parent pending-reply record"
   pass "fm-send: a kind=secondmate target gets the from-firstmate marker and corr prepended"
 }
-test_queued_secondmate_target_confirms_delivery() {
-  local dir fb log home rc got corr rec actual_bun omp top width
-  if ! command -v bun >/dev/null 2>&1; then
-    pass "fm-send: queued OMP secondmate confirmation skipped because bun is unavailable"
-    return
-  fi
-  dir="$TMP_ROOT/sm-queued"
+test_unreceipted_omp_secondmate_steer_preserves_expectation() {
+  local dir fb log err home rc got corr rec omp
+  dir="$TMP_ROOT/sm-unreceipted"
   mkdir -p "$dir"
   fb=$(make_stubs "$dir")
   log="$dir/send.log"
-  home=$(setup_home sm-queued)
-  actual_bun=$(fm_test_realpath "$(command -v bun)")
+  err="$dir/send.err"
+  home=$(setup_home sm-unreceipted)
   omp="$dir/omp"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$omp"
   chmod +x "$omp"
   omp=$(fm_test_realpath "$omp")
-  top='╭── ⬢ GPT-5.6-Luna · ◔ low ▶ 🌳 project ▶ ⑂ branch ▶──╮'
-  width=$(fm_composer_terminal_width "$top" "$actual_bun") \
-    || fail "could not measure queued secondmate fixture"
-  {
-    printf 'transcript row\ntranscript row\ntranscript row\nWorking… ⟦esc⟧\n%s\n' "$top"
-    printf '╰─%-*s─╯\n' "$((width - 4))" ' queue the steer'
-  } > "$dir/before"
-  cp "$dir/before" "$dir/after"
-  cat > "$fb/ps" <<SH
-#!/usr/bin/env bash
-case "\$*" in
-  *tpgid=*) printf '999999\n' ;;
-  *comm=*) printf 'bun\n' ;;
-  *args=*) printf '%s %s --auto-approve\n' '$actual_bun' '$omp' ;;
-esac
-SH
-  cat > "$fb/lsof" <<SH
-#!/usr/bin/env bash
-printf 'n%s\n' '$actual_bun'
-SH
-  chmod +x "$fb/ps" "$fb/lsof"
   fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:fm-domain" alpha omp
-  printf 'omp_bin=%s\nomp_bun=%s\n' "$omp" "$actual_bun" >> "$home/state/domain.meta"
-  FM_SEND_OMP_BUSY=1 FM_SEND_OMP=1 FM_SEND_ENTERED="$dir/entered" \
-    FM_SEND_OMP_BEFORE="$dir/before" FM_SEND_OMP_AFTER="$dir/after" \
-    run_send "$fb" "$home" "$log" "domain" "queue the steer"; rc=$?
-  expect_code 0 "$rc" "a queued OMP secondmate steer should succeed"
+  printf 'omp_bin=%s\nomp_bun=%s\n' "$omp" "$omp" >> "$home/state/domain.meta"
+  FM_SEND_OMP=1 run_send_err "$fb" "$home" "$log" "$err" "domain" "queue the steer"; rc=$?
+  expect_code 6 "$rc" "an OMP secondmate steer with no native receive adapter must not report success"
+  assert_contains "$(cat "$err")" 'omp-native-refused:' \
+    "the unreachable OMP secondmate adapter did not produce an explicit refusal"
+  [ ! -s "$log" ] || fail "an unreceipted OMP secondmate steer typed into the composer: $(cat "$log")"
   got=$(record_body "$home/state/domain.inbox/001.msg")
   # shellcheck source=/dev/null
   . "$ROOT/bin/fm-pending-reply-lib.sh"
   corr=$(fm_pending_reply_extract_corr "$got")
+  [ -n "$corr" ] || fail "a refused OMP secondmate steer lost its durable marked record"
   rec=$(fm_pending_reply_path "$home/state" "$corr")
-  [ -n "$(fm_pending_reply_get "$rec" delivered_epoch)" ] \
-    || fail "a queued secondmate steer should confirm delivery in its pending-reply record"
+  [ -f "$rec" ] || fail "a refused OMP secondmate steer discarded its pending-reply expectation"
+  [ -z "$(fm_pending_reply_get "$rec" delivered_epoch)" ] \
+    || fail "an unreceipted OMP secondmate steer claimed confirmed delivery"
   [ "$(fm_pending_reply_get "$rec" phase)" = awaiting_report ] \
-    || fail "delivery confirmation must leave the queued secondmate expectation awaiting its correlated report"
-  pass "fm-send: a queued OMP secondmate steer confirms delivery without discarding the pending-reply expectation"
+    || fail "a refused OMP secondmate steer left its expectation in an unexpected phase"
+  pass "fm-send: an unreceipted OMP secondmate steer stays bounded and keeps its expectation undelivered"
 }
 
 test_exact_secondmate_task_id_is_marked() {
@@ -354,7 +341,7 @@ test_marked_send_preserves_trailing_newlines() {
 }
 
 test_secondmate_target_is_marked
-test_queued_secondmate_target_confirms_delivery
+test_unreceipted_omp_secondmate_steer_preserves_expectation
 test_exact_secondmate_task_id_is_marked
 test_crewmate_target_is_not_marked
 test_explicit_window_is_not_marked
