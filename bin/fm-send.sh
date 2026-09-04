@@ -947,11 +947,7 @@ else
       OMP_NATIVE_BINDING="task=$TARGET_TASK_ID endpoint=$TARGET_BACKEND:$T session-pid=${FM_TASK_INBOX_RING_OMP_PID:-unreadable} request=${FM_TASK_INBOX_RING_OMP_REQUEST:-none} record=$INBOX_RECORD message-bytes=$(printf '%s' "$MESSAGE" | wc -c | tr -d '[:space:]')"
     fi
     case "$ring_rc" in
-      0)
-        if [ "$TARGET_HARNESS" = omp ] && [ -n "$FM_TASK_INBOX_RING_OMP_REQUEST" ]; then
-          echo "fm-send: omp-native-received: the bound OMP session acknowledged the request ($OMP_NATIVE_BINDING)"
-        fi
-        ;;
+      0) ;;
       1) echo "fm-send: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
       2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
       3)
@@ -972,6 +968,9 @@ else
        && ! fm_send_wait_for_inbox_handled "$INBOX_RECORD"; then
       echo "error: omp-native-queued: the bound OMP turn did not durably acknowledge the request ($OMP_NATIVE_BINDING); do not resend" >&2
       exit 8
+    fi
+    if [ "$TARGET_HARNESS" = omp ] && [ -n "$FM_TASK_INBOX_RING_OMP_REQUEST" ]; then
+      echo "fm-send: omp-native-received: the bound OMP session acknowledged the request ($OMP_NATIVE_BINDING)"
     fi
     if [ -n "$PENDING_REPLY_CORR" ]; then
       if fm_pending_reply_confirm_delivery "$STATE" "$PENDING_REPLY_CORR"; then

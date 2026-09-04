@@ -512,6 +512,8 @@ test_omp_native_receive_reports_exact_binding() {
     request="$home/state/native.omp-doorbell-ready.requests/request.001.msg"
     assert_contains "$(cat "$out")" 'omp-native-received:' \
       "$backend OMP steer did not report a native receive acknowledgement"
+    [ "$(cat "$out" "$err" | grep -Ec 'omp-native-(received|queued|refused):' || true)" = 1 ] \
+      || fail "$backend OMP steer reported more than one bounded outcome"
     assert_contains "$(cat "$out")" "task=native" "$backend outcome did not bind the exact task"
     assert_contains "$(cat "$out")" "session-pid=$listener_pid" \
       "$backend outcome did not bind the exact OMP session process"
@@ -557,6 +559,8 @@ test_omp_native_refusal_and_queue_are_bounded() {
   expect_code 6 "$rc" "a steer to an OMP mate with no live receive adapter must not exit 0"
   assert_contains "$(cat "$err")" 'omp-native-refused:' \
     "the unreachable OMP adapter did not produce an explicit refusal"
+  [ "$(cat "$out" "$err" | grep -Ec 'omp-native-(received|queued|refused):' || true)" = 1 ] \
+    || fail "the refused OMP steer reported more than one bounded outcome"
   assert_contains "$(cat "$err")" 'do not resend' "the refusal invited a resend"
   assert_contains "$(cat "$err")" "record=$home/state/idle.inbox/001.msg" \
     "the refusal did not name the durable record holding the exact message"
@@ -590,6 +594,8 @@ test_omp_native_refusal_and_queue_are_bounded() {
   request="$home/state/quiet.omp-doorbell-ready.requests/request.001.msg"
   assert_contains "$(cat "$err")" 'omp-native-queued:' \
     "the unacknowledged request did not report a durable native queue outcome"
+  [ "$(cat "$out" "$err" | grep -Ec 'omp-native-(received|queued|refused):' || true)" = 1 ] \
+    || fail "the queued OMP steer reported more than one bounded outcome"
   assert_contains "$(cat "$err")" "request=$request" \
     "the queued outcome did not name its durable native queue identity"
   assert_contains "$(cat "$err")" 'do not resend' "the queued outcome invited a resend"
