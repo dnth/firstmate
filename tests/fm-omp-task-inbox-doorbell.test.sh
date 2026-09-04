@@ -597,6 +597,32 @@ test_omp_native_refusal_and_queue_are_bounded() {
   [ ! -s "$dir/composer.log" ] \
     || fail "handled OMP reconciliation replay touched the composer: $(cat "$dir/composer.log")"
 
+  dir="$TMP_ROOT/native-delivered"
+  home="$dir/home"
+  mkdir -p "$home/state"
+  make_send_stubs "$dir"
+  : > "$dir/composer.log"
+  silent_pid=$(start_silent_listener "$dir/delivered.ready")
+  LISTENER_PID=$silent_pid
+  write_native_meta "$home" delivered tmux "$node_bin"
+  handled=$(bash -c '. "$1"; fm_task_inbox_write "$2" delivered "replay this delivered steer" delivered-id' _ \
+    "$ROOT/bin/fm-task-inbox-lib.sh" "$home/state")
+  mkdir -p "$home/state/delivered.omp-doorbell-ready.requests"
+  printf '%s\n' "$silent_pid" > "$home/state/delivered.omp-doorbell-ready"
+  : > "$home/state/delivered.omp-doorbell-ready.requests/request.001.msg.pending.delivered"
+  out="$dir/out"; err="$dir/err"
+  FM_SEND_RECONCILE_AUTH=1 run_native_send "$dir" "$home" "$silent_pid" "$node_bin" "$out" "$err" \
+    delivered --reconcile-delivery delivered-id "replay this delivered steer" || fail "delivered OMP reconciliation replay failed: $(cat "$err")"
+  assert_contains "$(cat "$out")" 'omp-native-received:' \
+    "delivered OMP reconciliation replay did not report its receipt"
+  assert_contains "$(cat "$out")" "session-pid=$silent_pid" \
+    "delivered OMP reconciliation replay did not report its bound session"
+  [ "$(cat "$out" "$err" | grep -Ec 'omp-native-(received|queued|refused):' || true)" = 1 ] \
+    || fail "delivered OMP reconciliation replay reported more than one bounded outcome"
+  kill -TERM "$silent_pid" 2>/dev/null || true
+  wait "$silent_pid" 2>/dev/null || true
+  LISTENER_PID=
+
   # AC4: nothing appended /exit to resolve the unconfirmed steer, and an
   # explicit /exit stays its own typed operation instead of becoming a second
   # durable steer behind the first one.

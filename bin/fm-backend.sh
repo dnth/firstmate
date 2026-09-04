@@ -747,6 +747,10 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
 fm_backend_omp_trigger_turn() {  # <backend> <target> <ready-marker> <omp-runtime> <omp-bin> <request-id> <doorbell-line>
   local backend=$1 marker=$3 request_id=$6 existing=0
   fm_omp_task_doorbell_request_existing "$marker" "$request_id" || existing=$?
+  if [ "$existing" -eq 0 ]; then
+    fm_omp_task_doorbell_marker_read "$marker" || return 1
+    return 0
+  fi
   [ "$existing" -eq 3 ] || [ "$existing" -eq 4 ] || return "$existing"
   shift
   fm_backend_source "$backend" || return 1
