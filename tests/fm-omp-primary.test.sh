@@ -536,24 +536,49 @@ if (await handlers.get("before_agent_start")({ type: "before_agent_start" }, {})
   throw new Error("startup nudge repeated within one OMP session");
 }
 writeFileSync(`${process.env.FM_STATE_OVERRIDE}/.lock`, `${process.pid}\n`);
+// A native switch re-arms the watcher at once, and OMP starts its first wake as
+// an agent-initiated turn that never emits before_agent_start. The replacement
+// nudge therefore has to land in the new session's context at switch time,
+// through sendMessage, and nothing may stay staged for a later before_agent_start.
+const switchNudges = () => watcherMessages.filter((entry) => entry.message.customType === "firstmate-sessionstart-nudge");
+async function expectSwitchNudge(label, expectedTotal) {
+  const nudges = switchNudges();
+  if (nudges.length !== expectedTotal) {
+    throw new Error(`${label} did not append exactly one startup instruction (${nudges.length} total): ${JSON.stringify(nudges)}`);
+  }
+  const latest = nudges[nudges.length - 1];
+  if (
+    latest.message.content !== "encoded:session-start:Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions." ||
+    latest.message.attribution !== "agent" ||
+    latest.message.display !== false ||
+    latest.options?.deliverAs !== "nextTurn" ||
+    latest.options?.triggerTurn !== undefined
+  ) {
+    throw new Error(`${label} startup instruction was not appended as hidden agent context without a turn: ${JSON.stringify(latest)}`);
+  }
+  for (const attempt of [1, 2]) {
+    if (await handlers.get("before_agent_start")({ type: "before_agent_start" }, {}) !== undefined) {
+      throw new Error(`${label} staged its startup instruction for before_agent_start too (attempt ${attempt})`);
+    }
+  }
+}
 await handlers.get("session_switch")({ type: "session_switch", reason: "new" }, extensionContext);
 await waitForWatchCount(1, "in-process OMP /new automatic watcher arm");
-const newStartup = await handlers.get("before_agent_start")({ type: "before_agent_start" }, {});
-if (newStartup?.message?.customType !== "firstmate-sessionstart-nudge" || newStartup.message.attribution !== "agent") {
-  throw new Error(`in-process OMP /new lost its once-only startup instruction: ${JSON.stringify(newStartup)}`);
-}
-if (await handlers.get("before_agent_start")({ type: "before_agent_start" }, {}) !== undefined) {
-  throw new Error("in-process OMP /new repeated its startup instruction");
-}
+await expectSwitchNudge("in-process OMP /new", 1);
+// Regression: a second /new with no before_agent_start in between (the first
+// replacement's turn was agent-initiated) must still deliver its own nudge.
+await handlers.get("session_switch")({ type: "session_switch", reason: "new" }, extensionContext);
+await waitForWatchCount(2, "in-process OMP second /new automatic watcher arm");
+await expectSwitchNudge("in-process OMP second /new", 2);
 await handlers.get("session_switch")({ type: "session_switch", reason: "resume" }, extensionContext);
-await waitForWatchCount(2, "in-process OMP /resume automatic watcher arm");
-const resumeStartup = await handlers.get("before_agent_start")({ type: "before_agent_start" }, {});
-if (resumeStartup?.message?.customType !== "firstmate-sessionstart-nudge" || resumeStartup.message.attribution !== "agent") {
-  throw new Error(`in-process OMP /resume lost its once-only startup instruction: ${JSON.stringify(resumeStartup)}`);
+await waitForWatchCount(3, "in-process OMP /resume automatic watcher arm");
+await expectSwitchNudge("in-process OMP /resume", 3);
+await handlers.get("session_switch")({ type: "session_switch", reason: "fork" }, extensionContext);
+await waitForWatchCount(4, "in-process OMP /fork automatic watcher arm");
+if (switchNudges().length !== 3 || await handlers.get("before_agent_start")({ type: "before_agent_start" }, {}) !== undefined) {
+  throw new Error("in-process OMP /fork delivered a startup instruction while this session still holds the lock");
 }
-if (await handlers.get("before_agent_start")({ type: "before_agent_start" }, {}) !== undefined) {
-  throw new Error("in-process OMP /resume repeated its startup instruction");
-}
+watcherMessages.length = 0;
 
 const signal = new AbortController().signal;
 const stop = await handlers.get("session_stop")({

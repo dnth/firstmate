@@ -174,6 +174,28 @@ wait_pid_change() {
   return 1
 }
 
+# The replacement session's instruction must already be in context when its
+# first turn starts, whether the restored watcher's first wake or a captain
+# prompt starts that turn.
+session_nudge_precedes_first_assistant() {  # <session-file>
+  node -e '
+    const lines = require("node:fs").readFileSync(process.argv[1], "utf8").trimEnd().split("\n");
+    let nudge = -1;
+    let assistant = -1;
+    lines.forEach((line, index) => {
+      let entry;
+      try { entry = JSON.parse(line); } catch { return; }
+      if (nudge < 0 && entry.type === "custom_message" && entry.customType === "firstmate-sessionstart-nudge") nudge = index;
+      if (assistant < 0 && entry.message?.role === "assistant") assistant = index;
+    });
+    process.exit(nudge >= 0 && (assistant < 0 || nudge < assistant) ? 0 : 1);
+  ' "$1"
+}
+
+newest_session_file() {
+  find "$SESSION_DIR" -maxdepth 1 -type f -name '*.jsonl' -print | sort | tail -n 1
+}
+
 submit_omp() {
   local text=$1 bun bin
   bun=$(sed -n '3p' "$MARKER")
@@ -269,6 +291,29 @@ done
 [ "${sessions_after:-0}" -gt "$sessions_before" ] || fail "OMP /new did not create a native session"
 [ "$(grep -Rhc '"customType":"firstmate-sessionstart-nudge"' "$SESSION_DIR"/*.jsonl | awk '{s+=$1} END{print s+0}')" -eq 2 ] \
   || fail "OMP /new did not inject exactly one startup instruction for the new session"
+session_nudge_precedes_first_assistant "$(newest_session_file)" \
+  || fail "OMP /new startup instruction did not precede the new session's first assistant turn"
+
+# A second /new must deliver its own instruction even though the first
+# replacement's turn may have been started by the restored watcher rather than
+# by a captain prompt.
+sessions_before=$sessions_after
+submit_omp /new || fail "OMP second /new command was not submitted"
+third_watch_pid=$(wait_pid_change "$WATCH_LOCK" "$second_watch_pid") \
+  || fail "OMP second /new did not replace and restore the extension-owned watcher generation"
+submit_omp 'Reply exactly OMP_SECOND_NEW_READY.' || fail "second new OMP session did not accept a prompt"
+wait_text OMP_SECOND_NEW_READY || fail "second new OMP session did not complete its first turn"
+for _ in $(seq 1 240); do
+  sessions_after=$(find "$SESSION_DIR" -maxdepth 1 -type f -name '*.jsonl' | wc -l | tr -d ' ')
+  [ "$sessions_after" -gt "$sessions_before" ] && break
+  sleep 0.25
+done
+[ "${sessions_after:-0}" -gt "$sessions_before" ] || fail "OMP second /new did not create a native session"
+[ "$(grep -Rhc '"customType":"firstmate-sessionstart-nudge"' "$SESSION_DIR"/*.jsonl | awk '{s+=$1} END{print s+0}')" -eq 3 ] \
+  || fail "OMP second /new did not inject exactly one startup instruction for its new session"
+session_nudge_precedes_first_assistant "$(newest_session_file)" \
+  || fail "OMP second /new startup instruction did not precede its session's first assistant turn"
+second_watch_pid=$third_watch_pid
 
 submit_omp /exit || fail "OMP primary /exit was not submitted"
 for _ in $(seq 1 240); do
@@ -296,7 +341,7 @@ second_omp_pid=$(sed -n '2p' "$MARKER")
 [ "$second_omp_pid" = "$(cat "$LOCK")" ] || fail "OMP resume did not bind the lock to the new process"
 resume_watch_pid=$(wait_pid_change "$WATCH_LOCK" "$second_watch_pid") \
   || fail "OMP resume did not restore a live watcher generation"
-[ "$(grep -Rhc '"customType":"firstmate-sessionstart-nudge"' "$SESSION_DIR"/*.jsonl | awk '{s+=$1} END{print s+0}')" -eq 3 ] \
+[ "$(grep -Rhc '"customType":"firstmate-sessionstart-nudge"' "$SESSION_DIR"/*.jsonl | awk '{s+=$1} END{print s+0}')" -eq 4 ] \
   || fail "OMP process resume did not add exactly one fresh startup instruction"
 kill -0 "$resume_watch_pid" 2>/dev/null || fail "OMP resume watcher is not live"
 
@@ -322,7 +367,7 @@ grep -R -F 'OMP_AWAY_DELIVERY' "$SESSION_DIR"/*.jsonl >/dev/null 2>&1 \
 grep -R -F 'away-supervisor' "$SESSION_DIR"/*.jsonl >/dev/null 2>&1 \
   || fail "OMP away-mode notification lost its operational-input kind"
 wait_idle || fail "OMP $OMP_VERSION did not reach an idle boundary after away-mode delivery"
-printf 'ok - OMP %s primary E2E proved fresh no-state and ordinary native discovery, exact ownership, once-only startup, guarded watcher startup, /new continuity, shutdown, resume, and away-mode delivery\n' \
+printf 'ok - OMP %s primary E2E proved fresh no-state and ordinary native discovery, exact ownership, once-only startup, guarded watcher startup, repeated /new continuity, shutdown, resume, and away-mode delivery\n' \
   "$OMP_VERSION"
 draft="human-draft-survives-omp-watcher-wake"
 PATH="$WRAPPER_BIN:$PATH" tmux send-keys -t "$TARGET" -l "$draft"

@@ -252,7 +252,31 @@ export default function (omp: ExtensionAPI) {
 
   const deliverSessionstartNudge = (forceForNativeSwitch = false): void => {
     watch.markLoaded();
-    pendingStartupNudge = runSessionstartNudge(forceForNativeSwitch);
+    const nudge = runSessionstartNudge(forceForNativeSwitch);
+    if (!forceForNativeSwitch) {
+      pendingStartupNudge = nudge;
+      return;
+    }
+    // A native /new or /resume switch replaces the conversation while this
+    // process still owns the lock, so the watcher re-arms immediately and its
+    // first wake can start an agent-initiated turn. OMP never emits
+    // before_agent_start for such a turn, nor for a captain prompt queued into
+    // it, so a nudge staged for before_agent_start would stay parked past the
+    // new session's first turn. Append the instruction to the replacement
+    // session's context right now instead, ahead of any wake, and leave nothing
+    // staged so the next before_agent_start cannot deliver it a second time.
+    pendingStartupNudge = "";
+    if (!nudge) return;
+    omp.sendMessage(
+      {
+        customType: "firstmate-sessionstart-nudge",
+        content: nudge,
+        display: false,
+        attribution: "agent",
+        details: { kind: "session-start", runtime: "omp" },
+      },
+      { deliverAs: "nextTurn" },
+    );
   };
 
   omp.on("session_start", (_event, ctx) => {
