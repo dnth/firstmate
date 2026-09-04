@@ -19,6 +19,22 @@
 # control reselects its exact remote task before this branch, so it shares the
 # canonical inbox rather than falling through to an explicit endpoint.
 #
+# OMP worker steering on this plane goes through the task-bound native receive
+# adapter alone (bin/fm-task-inbox-lib.sh); nothing is typed and no Enter is
+# pressed, because an already-streaming session cannot be steered through its
+# editable composer. The command reports exactly one bounded outcome, each
+# binding the task, endpoint, session field, native queue entry and durable
+# record. Native acknowledgements prove the acknowledging session; an
+# already-handled replay uses session-pid=not-a-session-receipt because it
+# never signals a session:
+#   omp-native-received   the session acknowledged the request; exit 0
+#   omp-native-refused    the adapter was unavailable or refused; exit 6
+#   omp-native-queued     the named native request is queued without a
+#                         receipt; exit 7
+# Both failures are durable and non-resend-inviting: the exact message stays in
+# its inbox record and the watcher's re-ring ladder owns redelivery. `/exit`
+# stays an independent typed operation and is never appended to resolve one.
+#
 # Harness-native slash commands, Codex dollar invocations, explicit backend
 # targets, and keys use the typed plane. The line is typed once and Enter is
 # retried without retyping until the backend confirms or stays inconclusive.
@@ -40,9 +56,10 @@
 # delivery already landed and must not be resent. Remote OMP control propagates
 # those typed-plane verdicts without redelivery, and reports a canonical inbox
 # queue or binding refusal with its own specific non-resend verdict.
-# An already-busy OMP pane has one narrow exception: a successfully transported
-# Enter may return `queued-unconfirmed`, which fm-send accepts as queued delivery
-# while preserving failures for transport errors and non-busy pending input.
+# An already-busy OMP pane has no composer exception: a transported Enter with
+# no native session receipt is reported as `delivered-no-turn` (exit 4, do not
+# resend) exactly like any other unproven submit, so no OMP delivery ever exits
+# 0 on rendered composer state alone.
 # Submission dispatches through the target's recorded backend; the tmux adapter
 # shares its composer/submit core with the away-mode daemon via bin/fm-tmux-lib.sh.
 # Tune submit confirmation with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP
@@ -917,32 +934,55 @@ else
     INBOX_META_LOCK_HELD=0
 
     ring_rc=0
+    INBOX_RECORD_HANDLED=0
+    FM_TASK_INBOX_RING_OMP_REQUEST=
+    FM_TASK_INBOX_RING_OMP_PID=
     case "$INBOX_RECORD" in
-      */handled/*) ring_rc=0 ;;
+      */handled/*)
+        ring_rc=0
+        INBOX_RECORD_HANDLED=1
+        ;;
       *) fm_task_inbox_ring "$TARGET_BACKEND" "$T" "$INBOX_RECORD" "$EXPECTED_LABEL" \
         "$TARGET_HARNESS" "$TARGET_OMP_BUN" "$TARGET_OMP_BIN" || ring_rc=$? ;;
     esac
+    # One bounded, inspectable OMP outcome. Every one names the same binding, so
+    # a supervisor can check the exact session and the exact message it acted on
+    # instead of inferring delivery from rendered composer text.
+    OMP_NATIVE_BINDING=
+    if [ "$TARGET_HARNESS" = omp ]; then
+      OMP_NATIVE_SESSION_PID=${FM_TASK_INBOX_RING_OMP_PID:-unreadable}
+      [ "$INBOX_RECORD_HANDLED" = 1 ] && OMP_NATIVE_SESSION_PID=not-a-session-receipt
+      OMP_NATIVE_BINDING="task=$TARGET_TASK_ID endpoint=$TARGET_BACKEND:$T session-pid=$OMP_NATIVE_SESSION_PID request=${FM_TASK_INBOX_RING_OMP_REQUEST:-none} record=$INBOX_RECORD message-bytes=$(printf '%s' "$MESSAGE" | wc -c | tr -d '[:space:]')"
+    fi
     case "$ring_rc" in
+      0) ;;
       1) echo "fm-send: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
       2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
       3)
-        echo "error: remote-omp-inbox-queued: the exact programmatic OMP extension is unavailable; request remains at $INBOX_RECORD; do not resend" >&2
+        echo "error: omp-native-refused: the task-bound OMP receive adapter did not accept the request ($OMP_NATIVE_BINDING); nothing was typed and the exact message stays durable; do not resend" >&2
         exit 6
         ;;
       4)
-        echo "error: remote-omp-inbox-ambiguous: the exact programmatic OMP request may have reached the session; request remains at $INBOX_RECORD; do not resend" >&2
+        echo "error: omp-native-queued: the named native request is queued without a receipt and may already have reached the session ($OMP_NATIVE_BINDING); do not resend" >&2
         exit 7
         ;;
     esac
     if [ "$TARGET_HARNESS" = omp ] && [ "$INBOX_OMP_TURNSTART_REQUIRED" = 1 ] \
        && ! fm_send_wait_for_omp_turn_start; then
-      echo "error: remote-omp-inbox-queued: the programmatic OMP doorbell was accepted but did not start its bound turn; request remains at $INBOX_RECORD; do not resend" >&2
+      echo "error: omp-native-queued: the request was acknowledged but no bound turn started ($OMP_NATIVE_BINDING); do not resend" >&2
       exit 8
     fi
     if [ "$TARGET_HARNESS" = omp ] && [ "$INBOX_OMP_HANDLED_ACK_REQUIRED" = 1 ] \
        && ! fm_send_wait_for_inbox_handled "$INBOX_RECORD"; then
-      echo "error: remote-omp-inbox-queued: the bound OMP turn did not durably acknowledge the request; request remains at $INBOX_RECORD; do not resend" >&2
+      echo "error: omp-native-queued: the bound OMP turn did not durably acknowledge the request ($OMP_NATIVE_BINDING); do not resend" >&2
       exit 8
+    fi
+    if [ "$TARGET_HARNESS" = omp ] && { [ -n "$FM_TASK_INBOX_RING_OMP_REQUEST" ] || [ "$INBOX_RECORD_HANDLED" = 1 ]; }; then
+      if [ "$INBOX_RECORD_HANDLED" = 1 ]; then
+        echo "fm-send: omp-native-received: the worker's handled/ acknowledgement is the receipt source ($OMP_NATIVE_BINDING)"
+      else
+        echo "fm-send: omp-native-received: the bound OMP session acknowledged the request ($OMP_NATIVE_BINDING)"
+      fi
     fi
     if [ -n "$PENDING_REPLY_CORR" ]; then
       if fm_pending_reply_confirm_delivery "$STATE" "$PENDING_REPLY_CORR"; then
@@ -1035,7 +1075,7 @@ else
     turnstart_setup=fm_send_setup_omp_turnstart
   fi
   # Type once, submit, verify. Exact empty confirms an ordinary submission;
-  # busy-confirmed and queued-unconfirmed retain the two OMP busy paths.
+  # busy-confirmed remains the one proven OMP busy path.
   send_rc=0
   if [ "$TARGET_BACKEND" = remote ]; then
     REMOTE_META_LOCK=$(fm_meta_lock_path "$TARGET_META") || exit 1
@@ -1131,6 +1171,13 @@ else
      && ! fm_send_wait_for_omp_turn_start; then
     verdict='delivered-no-turn'
   fi
+  if [ "$verdict" = queued-unconfirmed ]; then
+    # A transported Enter on an already-working OMP target is not a receipt: no
+    # native session event proved the line was received. Report it as the same
+    # unproven delivery as any other, rather than exiting 0 on composer state.
+    TARGET_OMP_QUEUED_UNCONFIRMED=1
+    verdict='delivered-no-turn'
+  fi
   if [ "$verdict" = empty ] && [ "$TARGET_HARNESS" = hermes ] && [ "$MESSAGE" != /exit ]; then
     if ! fm_send_wait_for_hermes_turn_start "$TARGET_HERMES_START_REFERENCE"; then
       verdict='delivered-no-turn'
@@ -1150,10 +1197,6 @@ else
       if [ -n "$RESOLVE_KEYS" ]; then
         fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || post_delivery_failed=1
       fi
-      ;;
-    queued-unconfirmed)
-      # The backend transported Enter to busy OMP without a native proof event.
-      # Continue through the common delivery-confirmation path.
       ;;
     delivered-no-turn)
       # Submission is durable, so pending-reply bookkeeping below still records
@@ -1211,6 +1254,10 @@ else
         echo "error: delivered-no-turn-persistence-failed: text was already submitted to $T, but one or more required recovery triggers could not be persisted; do not resend; start supervised recovery manually" >&2
         exit 5
       fi
+      if [ "${TARGET_OMP_QUEUED_UNCONFIRMED:-0}" = 1 ]; then
+        echo "error: delivered-no-turn: the harness-native line was transported to $T while OMP was already working, but no native session event proved it was received; do not resend; supervised recovery is required" >&2
+        exit 4
+      fi
       if [ -n "${FM_SEND_TURNSTART_TIMEOUT_VALUE:-}" ]; then
         turnstart_window="within ${FM_SEND_TURNSTART_TIMEOUT_VALUE}s"
       elif [ "$TARGET_HARNESS" = hermes ]; then
@@ -1238,8 +1285,7 @@ else
       ;;
   esac
   [ "$post_delivery_failed" -eq 0 ] || exit 1
-  # The submit was confirmed or accepted through the narrow busy-OMP queue
-  # verdict. The harness still needs a beat to spin up the
+  # The submit was confirmed. The harness still needs a beat to spin up the
   # turn before its busy footer shows. Pause so an immediate peek catches the
   # crewmate actually working instead of the stale idle pane. FM_SEND_SETTLE=0
   # disables it. Scoped to this path only, never the shared submit core.

@@ -267,7 +267,7 @@ ends" keystroke but does not clear the typed text from the composer until the
 turn actually finishes.
 Without a conversion, every typed-plane `fm-send` to a busy opencode pane exits non-zero on a false "Enter swallowed", and every daemon escalation that lands while the primary is mid-turn is treated as wedged.
 Tmux delegates this OpenCode exception to `fm_composer_queued_enter_verdict` in `bin/fm-composer-lib.sh`; herdr uses that policy only for its separate OMP path.
-The backend-specific signals and OMP's narrower `queued-unconfirmed` result are documented in `docs/tmux-backend.md` and `docs/herdr-backend.md`.
+The backend-specific signals and OMP's internal `queued-unconfirmed` result are documented in `docs/tmux-backend.md` and `docs/herdr-backend.md`; `fm-send.sh` maps that unproven typed-plane verdict to `delivered-no-turn` rather than public success.
 Regression coverage is `tests/fm-tmux-submit-busy.test.sh`, `tests/fm-composer-lib.test.sh`, and `tests/fm-backend-herdr.test.sh`.
 
 **Primary-session guard fact (verified 2026-07-08, OpenCode 1.17.6).**
@@ -331,6 +331,7 @@ OMP workers keep their sessions under the task temp root so recovery can resume 
 [The tmux backend guide](../../../docs/tmux-backend.md#current-behavior-and-safety) owns OMP's launch identity, supported canonical paths, composer geometry, submission, and recovery behavior.
 [The Herdr backend guide](../../../docs/herdr-backend.md#composer-and-injection-safety) owns OMP's native identity, composer, busy steering, normal exit, and blocked-injection behavior on Herdr.
 OMP is verified only on tmux and Herdr; the backend applicability rationale and inspection evidence live in [runtime-backends verification](../../../docs/verification/runtime-backends.md#omp-applicability-outside-tmux-and-herdr).
+An ordinary OMP steer reaches the worker through its task-bound native receive adapter alone and never the composer; `bin/fm-send.sh` owns the three bounded outcomes it reports, and its two nonzero ones are durable and must not be resent.
 Before killing and respawning a live OMP agent for a wedged PROVIDER STREAM, follow the `/fresh` step in [stuck-crewmate recovery](../stuck-crewmate-recovery/SKILL.md#live-endpoint-escalation); that recovery procedure owns its composer-submit precondition, retained state, active-stream rejection, and herdr composer-submit-freeze exception.
 
 **Primary-session integration fact (verified 2026-07-31, OMP 17.1.8).**

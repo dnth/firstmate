@@ -74,6 +74,8 @@ fm_backend_tmux_omp_trigger_turn() {  # <target> <ready-marker> <omp-runtime> <o
   args=$(ps -p "$foreground_pid" -o args= 2>/dev/null) || return 1
   FM_OMP_PROCESS_EXPECTED_BUN="$expected_bun" FM_OMP_PROCESS_EXPECTED_BIN="$expected_omp" \
     fm_omp_process_matches "$comm" "$args" "$foreground_pid" || return 1
+  # shellcheck disable=SC2034 # Public binding read by the inbox caller.
+  FM_OMP_TASK_DOORBELL_BOUND_PID=$foreground_pid
   fm_omp_task_doorbell_request "$marker" "$foreground_pid" "$request_id" "$line"
 }
 

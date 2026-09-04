@@ -383,16 +383,17 @@ Live firing of the fleet hook's `tool_result`, `todo_reminder`, and `session.com
 
 The Herdr role matrix required each expected turn-end or routed-reply notification to reach the durable queue or the primary follow-up transcript before the fixture drained it.
 
-The deterministic composer, tmux, and Herdr fixtures reran on 2026-08-26 and proved that an already-busy OMP send returns `queued-unconfirmed` only after Enter transport succeeds and the composer either clears or remains proven pending while native state is still working.
+The deterministic composer, tmux, and Herdr fixtures reran on 2026-08-26 and proved that the backend typed-submit primitive for an already-busy OMP target returns internal `queued-unconfirmed` only after Enter transport succeeds and the composer either clears or remains proven pending while native state is still working.
 The same fixtures proved that a pending OMP composer after native state becomes idle returns `pending`, Enter transport failure returns `send-failed`, and initially idle editable input fails closed.
 This is revision-bound source-fixture evidence for the source under review, using Bun 1.3.14 only for terminal-cell measurement; it does not invoke OMP or make an OMP runtime-version claim.
 
-The deterministic fm-send turn-start fixture ran on 2026-08-19 and proved that an initially idle typed-plane OMP submit must become busy or advance its generated turn-start marker after the submit-time baseline before success, while `delivered-no-turn` exits distinctly, queues supervised recovery, and never kills the endpoint.
-The same fixture proved bounded recovery wake-lock failure, required recovery-trigger persistence, distinct post-delivery persistence failure, the monotonic deadline, submit-time idle setup, Herdr post-submit check, confirmed busy and blocked compatibility, OMP exit compatibility, normal turn start, already-busy `queued-unconfirmed` exception, remote OMP routing, and unchanged non-OMP behavior.
-The tested source is Git revision `6c04b02de758deb82f2448bd258b5e1b72ff0743` plus binary patch SHA-256 `cc336b6d0dd73ca74adc28d665e3a29f28e064764441bda2c9f18c6a402360a5` over this exact file manifest and construction command:
+The deterministic fm-send turn-start fixture reran on 2026-09-04 and proved that an initially idle typed-plane OMP submit must become busy or advance its generated turn-start marker after the submit-time baseline before success, while `delivered-no-turn` exits distinctly, queues supervised recovery, and never kills the endpoint.
+The same fixture proved bounded recovery wake-lock failure, required recovery-trigger persistence, distinct post-delivery persistence failure, the monotonic deadline, submit-time idle setup, Herdr post-submit check, confirmed busy and blocked compatibility, OMP exit compatibility, normal turn start, remote OMP routing, and unchanged non-OMP behavior.
+It also proved that an already-busy OMP submit whose Enter transported with no native session event now exits 4 as unproven `delivered-no-turn` delivery, queues supervised recovery, and tells the caller not to resend, replacing the former zero-exit `queued-unconfirmed` acceptance.
+The tested source is Git revision `f0ec61a16dce8b4a404446e504d9409dbe39f7b4` plus binary patch SHA-256 `b14a48b9a5969a603c407a9af693f1053e6f85d461a5310c08797140dd04c20f` over this exact file manifest and construction command:
 
 ```sh
-git diff --binary 6c04b02de758deb82f2448bd258b5e1b72ff0743 -- bin/fm-send.sh bin/fm-wake-lib.sh tests/fm-send-turn-start.test.sh | sha256sum
+git diff --binary f0ec61a16dce8b4a404446e504d9409dbe39f7b4 -- bin/fm-send.sh bin/fm-wake-lib.sh tests/fm-send-turn-start.test.sh | sha256sum
 ```
 
 This evidence uses stubbed backend state and process identity only, does not invoke a live OMP runtime, and makes no live OMP claim.
@@ -412,7 +413,7 @@ ok - fm-send: a real OMP turn start preserves normal success
 ok - fm-send: delivered-no-turn never closes an answered decision
 ok - fm-send: OMP session activity advancement proves a fast turn start
 ok - fm-send: pre-submit activity cannot prove the submitted turn started
-ok - fm-send: already-busy OMP ignores idle-only turn-start setup
+ok - fm-send: an already-busy OMP submit without a native receipt is unproven, never success
 ok - fm-send: turn-start verification remains scoped to OMP targets
 ok - fm-send: the monotonic deadline prevents post-expiry backend probes
 ok - fm-send: OMP keys ignore text-only turn-start configuration
@@ -1132,13 +1133,14 @@ ok - omp (omp/18.0.4): real worker acted on and acknowledged the durable record
 ok - live steering-inbox doorbell guard: 2 harnesses verified
 ```
 
-The OMP wake transport was changed on 2026-08-30 from terminal submission to an acknowledged programmatic extension request on tmux and Herdr.
-The deterministic extension and primary-adapter fixtures cover canonical counted requests, `triggerTurn=true`, post-retirement signal safety, exact-identity revalidation for pending retries, pre-call payload failure fallback, ambiguous-claim inbox anchoring without resend, ordinary non-OMP composer routing, ordinary worker wiring, and secondmate wiring through the primary extension.
+The OMP wake transport was changed on 2026-08-30 from terminal submission to an acknowledged programmatic extension request on tmux and Herdr, and on 2026-09-04 that native request became OMP's only transport: the composer fallback was removed and every OMP steer now reports one bounded outcome.
+The deterministic fixtures reran on 2026-09-04 and cover canonical counted requests, `triggerTurn=true`, post-retirement signal safety, exact-identity revalidation for pending retries, ambiguous-claim inbox anchoring without resend, ordinary non-OMP composer routing, ordinary worker wiring, and secondmate wiring through the primary extension.
+They also drive the public `fm-send.sh` over tmux and Herdr against a real task-bound extension process and prove that a received steer reports `omp-native-received` with the exact task, endpoint, session process, native queue entry and durable record while nothing reaches the terminal; that a mate with no live adapter, an unproven session binding, and an unacknowledged request each exit nonzero with a named non-resend-inviting outcome; and that no `/exit` is appended to resolve one.
 The required live OMP-under-Herdr smoke is intentionally deferred until after Firstmate updates; no live Herdr or OMP lifecycle was driven from this worktree.
 
 ```sh
 set -o pipefail
-tests/fm-omp-task-inbox-doorbell.test.sh | grep -E '^ok - (OMP extension drains|doorbell routing selects|OMP pending retries|fm-send and both)'
+tests/fm-omp-task-inbox-doorbell.test.sh
 tests/fm-omp-primary.test.sh | grep -F 'ok - OMP primary extension binds secondmate doorbells after session readiness'
 ```
 
@@ -1146,9 +1148,12 @@ Observed result:
 
 ```text
 ok - OMP extension drains canonical counted requests and safely retires signal readiness
-ok - doorbell routing selects OMP programmatic wake and preserves both composer branches
+ok - doorbell routing keeps OMP on its native adapter and preserves the non-OMP composer branch
 ok - OMP pending retries revalidate identity while ambiguous claims suppress resend
 ok - fm-send and both tmux/Herdr adapters preserve task-bound OMP programmatic doorbells
+ok - fm-send: an OMP steer is received natively over tmux and Herdr with no composer transport
+ok - fm-send: refused and unacknowledged OMP steers stay bounded, durable and non-resend-inviting
+ok - fm-send: an unproven OMP session binding is refused, never redirected to the terminal
 ok - OMP primary extension binds secondmate doorbells after session readiness
 ```
 

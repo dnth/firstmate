@@ -11,16 +11,16 @@
 #
 # Design: the durable inbox record and its handled-file move are the processing
 # boundary; doorbell transport is at-least-once and carries no instruction state.
-# OMP uses an acknowledged programmatic request, while every other harness and
-# local callers that do not require the extension use the terminal composer
-# fallback. A caller that sets FM_TASK_INBOX_OMP_REQUIRE_PROGRAMMATIC=1 receives
-# 3 when the extension is unavailable and 4 when its request acknowledgement is
-# ambiguous; both verdicts leave the named inbox record intact and never use the
-# composer. A claimed programmatic request that may already have sent is anchored
-# as ambiguous and is never sent again; session recovery reconciles the
-# instruction from the durable inbox. Other swallowed doorbells are re-rung on a
-# bounded schedule, and a worker that never acknowledges surfaces through the
-# ordinary stale wake into stuck-crewmate-recovery.
+# OMP always uses its task-bound native receive adapter and never the composer:
+# the terminal is not a receipt mechanism for a session that may already be
+# streaming, so an unavailable adapter returns 3 and an unacknowledged request
+# returns 4 rather than typing anything. Both verdicts leave the named inbox
+# record intact. Every other harness keeps the advisory composer pre-check and
+# backend submit fallback. A claimed programmatic request that may already have
+# sent is anchored as ambiguous and is never sent again; session recovery
+# reconciles the instruction from the durable inbox. Other swallowed doorbells
+# are re-rung on a bounded schedule, and a worker that never acknowledges
+# surfaces through the ordinary stale wake into stuck-crewmate-recovery.
 #
 # Layout under <state-dir>:
 #   <task>.inbox/NNN.msg       one durable steer, numeric sequence, atomic rename
@@ -148,7 +148,14 @@ fm_task_inbox_write() {  # <state-dir> <task-id> <text> [delivery-id]
   lock="$dir/.seq.lock"
   fm_task_inbox_lock_acquire "$lock" || return 1
   if [ -n "$delivery_id" ]; then
-    existing=$(awk -v want="$delivery_id" '$0 == "delivery_id=" want { print FILENAME; exit }' "$dir"/*.msg "$dir/handled"/*.msg 2>/dev/null || true)
+    existing=
+    for candidate in "$dir"/*.msg "$dir/handled"/*.msg; do
+      [ -f "$candidate" ] || continue
+      if awk -v want="$delivery_id" '$0 == "delivery_id=" want { found=1; exit } END { exit !found }' "$candidate"; then
+        existing=$candidate
+        break
+      fi
+    done
     if [ -n "$existing" ]; then
       fm_lock_release "$lock"
       printf '%s' "$existing"
@@ -197,36 +204,43 @@ fm_task_inbox_doorbell_line() {  # <record-path>
     "$abs" "$abs"
 }
 
-# Ring the doorbell, best-effort. OMP first asks its task-bound extension to
-# deliver the line as a programmatic steer with triggerTurn. When
-# FM_TASK_INBOX_OMP_REQUIRE_PROGRAMMATIC=1, unavailable or unacknowledged
-# programmatic delivery returns 3 or 4 without touching the composer. Otherwise,
-# and for every non-OMP harness, the existing advisory composer pre-check and
-# backend submit machinery remain the fallback.
+# Ring the doorbell, best-effort. OMP asks its task-bound extension to deliver
+# the line as a programmatic steer with triggerTurn, and stops there: an
+# unavailable adapter returns 3 and an unacknowledged request returns 4, neither
+# of which touches the composer. Every non-OMP harness keeps the advisory
+# composer pre-check and backend submit machinery as its transport.
 # Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text,
-# 2 the backend send failed, 3 required programmatic delivery unavailable, or 4
-# required programmatic delivery ambiguously queued. No return value is delivery
-# proof; the acknowledgement move is the only delivery signal.
+# 2 the backend send failed, 3 the OMP native adapter refused or was
+# unavailable, or 4 the OMP native request is queued without an acknowledgement.
+# On an OMP target the call also publishes FM_TASK_INBOX_RING_OMP_REQUEST (the
+# named native queue entry for this record) and FM_TASK_INBOX_RING_OMP_PID (the
+# proven acknowledging session process) so the caller can report the exact
+# binding it acted on. A native success without that proof is refused; the
+# acknowledgement move remains the only proof the worker acted.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [harness] [omp-runtime] [omp-bin]
   local backend=$1 target=$2 rec=$3 label=${4:-}
   local harness=${5:-} omp_runtime=${6:-} omp_bin=${7:-} line cstate verdict ready_marker request_id programmatic_rc
-  local programmatic_required=${FM_TASK_INBOX_OMP_REQUIRE_PROGRAMMATIC:-0}
   line=$(fm_task_inbox_doorbell_line "$rec")
   if [ "$harness" = omp ]; then
     ready_marker="${rec%/*}"
     ready_marker="${ready_marker%.inbox}.omp-doorbell-ready"
     request_id=${rec##*/}
+    # shellcheck disable=SC2034 # Public outcome binding read by the caller after sourcing (bin/fm-send.sh).
+    FM_TASK_INBOX_RING_OMP_REQUEST="$ready_marker.requests/request.$request_id"
+    FM_TASK_INBOX_RING_OMP_PID=
+    FM_OMP_TASK_DOORBELL_BOUND_PID=
     programmatic_rc=0
     fm_backend_omp_trigger_turn "$backend" "$target" "$ready_marker" "$omp_runtime" "$omp_bin" "$request_id" "$line" \
       || programmatic_rc=$?
     case "$programmatic_rc" in
-      0) return 0 ;;
-      2)
-        [ "$programmatic_required" = 1 ] && return 4
-        return 0
+      0|2)
+        # shellcheck disable=SC2034 # Public outcome binding read by the caller after sourcing (bin/fm-send.sh).
+        FM_TASK_INBOX_RING_OMP_PID=${FM_OMP_TASK_DOORBELL_BOUND_PID:-}
+        [ "$programmatic_rc" = 0 ] && return 0
+        return 4
         ;;
+      *) return 3 ;;
     esac
-    [ "$programmatic_required" = 1 ] && return 3
   fi
   cstate=$(fm_backend_composer_state "$backend" "$target" "$harness" "$omp_runtime" "$omp_bin" 2>/dev/null) || cstate=unknown
   case "$cstate" in
