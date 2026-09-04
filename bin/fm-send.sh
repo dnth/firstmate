@@ -932,10 +932,14 @@ else
     INBOX_META_LOCK_HELD=0
 
     ring_rc=0
+    INBOX_RECORD_HANDLED=0
     FM_TASK_INBOX_RING_OMP_REQUEST=
     FM_TASK_INBOX_RING_OMP_PID=
     case "$INBOX_RECORD" in
-      */handled/*) ring_rc=0 ;;
+      */handled/*)
+        ring_rc=0
+        INBOX_RECORD_HANDLED=1
+        ;;
       *) fm_task_inbox_ring "$TARGET_BACKEND" "$T" "$INBOX_RECORD" "$EXPECTED_LABEL" \
         "$TARGET_HARNESS" "$TARGET_OMP_BUN" "$TARGET_OMP_BIN" || ring_rc=$? ;;
     esac
@@ -969,8 +973,12 @@ else
       echo "error: omp-native-queued: the bound OMP turn did not durably acknowledge the request ($OMP_NATIVE_BINDING); do not resend" >&2
       exit 8
     fi
-    if [ "$TARGET_HARNESS" = omp ] && [ -n "$FM_TASK_INBOX_RING_OMP_REQUEST" ]; then
-      echo "fm-send: omp-native-received: the bound OMP session acknowledged the request ($OMP_NATIVE_BINDING)"
+    if [ "$TARGET_HARNESS" = omp ] && { [ -n "$FM_TASK_INBOX_RING_OMP_REQUEST" ] || [ "$INBOX_RECORD_HANDLED" = 1 ]; }; then
+      if [ "$INBOX_RECORD_HANDLED" = 1 ]; then
+        echo "fm-send: omp-native-received: the worker's handled/ acknowledgement is the receipt source ($OMP_NATIVE_BINDING)"
+      else
+        echo "fm-send: omp-native-received: the bound OMP session acknowledged the request ($OMP_NATIVE_BINDING)"
+      fi
     fi
     if [ -n "$PENDING_REPLY_CORR" ]; then
       if fm_pending_reply_confirm_delivery "$STATE" "$PENDING_REPLY_CORR"; then

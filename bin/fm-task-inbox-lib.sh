@@ -148,7 +148,14 @@ fm_task_inbox_write() {  # <state-dir> <task-id> <text> [delivery-id]
   lock="$dir/.seq.lock"
   fm_task_inbox_lock_acquire "$lock" || return 1
   if [ -n "$delivery_id" ]; then
-    existing=$(awk -v want="$delivery_id" '$0 == "delivery_id=" want { print FILENAME; exit }' "$dir"/*.msg "$dir/handled"/*.msg 2>/dev/null || true)
+    existing=
+    for candidate in "$dir"/*.msg "$dir/handled"/*.msg; do
+      [ -f "$candidate" ] || continue
+      if awk -v want="$delivery_id" '$0 == "delivery_id=" want { found=1; exit } END { exit !found }' "$candidate"; then
+        existing=$candidate
+        break
+      fi
+    done
     if [ -n "$existing" ]; then
       fm_lock_release "$lock"
       printf '%s' "$existing"

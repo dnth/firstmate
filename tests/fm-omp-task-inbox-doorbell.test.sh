@@ -481,6 +481,7 @@ run_native_send() {  # <dir> <home> <omp-pid> <node-bin> <out> <err> <fm-send ar
   env PATH="$dir/fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_FAKE_OMP_PID="$omp_pid" FM_FAKE_NODE="$node_bin" \
     FM_FAKE_COMPOSER_LOG="$dir/composer.log" FM_SEND_SETTLE=0 \
+    FM_SEND_RECONCILE_AUTH="${FM_SEND_RECONCILE_AUTH:-0}" \
     FM_OMP_TASK_DOORBELL_ACK_ATTEMPTS="${FM_OMP_TASK_DOORBELL_ACK_ATTEMPTS:-200}" \
     "$SEND" "$@" >"$out" 2>"$err"
 }
@@ -545,7 +546,7 @@ test_omp_native_receive_reports_exact_binding() {
 # outcome. AC4: nothing appends /exit to resolve it, and an explicit /exit stays
 # an independent typed operation.
 test_omp_native_refusal_and_queue_are_bounded() {
-  local dir home node_bin out err rc silent_pid request
+  local dir home node_bin out err rc silent_pid request handled
   node_bin=$(realpath "$(command -v node)")
   dir="$TMP_ROOT/native-refused"
   home="$dir/home"
@@ -567,6 +568,34 @@ test_omp_native_refusal_and_queue_are_bounded() {
   [ -f "$home/state/idle.inbox/001.msg" ] || fail "the refused steer lost its durable record"
   [ ! -s "$dir/composer.log" ] \
     || fail "a refused OMP steer typed into the composer: $(cat "$dir/composer.log")"
+
+  dir="$TMP_ROOT/native-handled"
+  home="$dir/home"
+  mkdir -p "$home/state"
+  make_send_stubs "$dir"
+  : > "$dir/composer.log"
+  write_native_meta "$home" replay tmux "$node_bin"
+  handled=$(bash -c '. "$1"; fm_task_inbox_write "$2" replay "replay this exact steer" replay-id' _ \
+    "$ROOT/bin/fm-task-inbox-lib.sh" "$home/state")
+  mkdir -p "${handled%/*}/handled"
+  mv "$handled" "${handled%/*}/handled/${handled##*/}"
+  out="$dir/out"; err="$dir/err"
+  FM_SEND_RECONCILE_AUTH=1 run_native_send "$dir" "$home" 4242 "$node_bin" "$out" "$err" \
+    replay --reconcile-delivery replay-id "replay this exact steer" || fail "handled OMP reconciliation replay failed: $(cat "$err")"
+  assert_contains "$(cat "$out")" 'omp-native-received:' \
+    "handled OMP reconciliation replay did not report its receipt"
+  assert_contains "$(cat "$out")" 'receipt source' \
+    "handled OMP reconciliation replay did not identify its receipt source"
+  assert_contains "$(cat "$out")" 'request=none' \
+    "handled OMP reconciliation replay unexpectedly named a native request"
+  assert_contains "$(cat "$out")" "record=$home/state/replay.inbox/handled/001.msg" \
+    "handled OMP reconciliation replay did not name its handled record"
+  [ "$(cat "$out" "$err" | grep -Ec 'omp-native-(received|queued|refused):' || true)" = 1 ] \
+    || fail "handled OMP reconciliation replay reported more than one bounded outcome"
+  [ "$(find "$home/state/replay.inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d '[:space:]')" = 0 ] \
+    || fail "handled OMP reconciliation replay enqueued a second record"
+  [ ! -s "$dir/composer.log" ] \
+    || fail "handled OMP reconciliation replay touched the composer: $(cat "$dir/composer.log")"
 
   # AC4: nothing appended /exit to resolve the unconfirmed steer, and an
   # explicit /exit stays its own typed operation instead of becoming a second
