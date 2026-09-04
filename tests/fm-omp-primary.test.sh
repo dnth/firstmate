@@ -565,8 +565,8 @@ async function expectSwitchNudge(label, expectedTotal) {
 await handlers.get("session_switch")({ type: "session_switch", reason: "new" }, extensionContext);
 await waitForWatchCount(1, "in-process OMP /new automatic watcher arm");
 await expectSwitchNudge("in-process OMP /new", 1);
-// Regression: a second /new with no before_agent_start in between (the first
-// replacement's turn was agent-initiated) must still deliver its own nudge.
+// Regression: a second /new with no before_agent_start in between must still
+// deliver its own nudge because the replacement turn was agent-initiated.
 await handlers.get("session_switch")({ type: "session_switch", reason: "new" }, extensionContext);
 await waitForWatchCount(2, "in-process OMP second /new automatic watcher arm");
 await expectSwitchNudge("in-process OMP second /new", 2);
