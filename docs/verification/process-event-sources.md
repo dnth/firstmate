@@ -6,6 +6,7 @@ This record holds reusable version-scoped evidence for the runner's active guara
 `docs/configuration.md` owns the operating contract, each script's header and `--help` own its mechanics, and `.agents/skills/process-event-sources/SKILL.md` owns the handling procedure.
 
 Verified on 2026-07-31 on macOS (Darwin 25.5.0) with `lavish-axi` 0.1.45 installed.
+Generic keyed-answer feed verified on 2026-09-05 on Linux (6.17.9) against the same published poll response shape, with `lavish-axi` stubbed.
 
 ## The published Lavish poll interface the adapter wraps
 
@@ -80,6 +81,7 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | single delivery per source and sequence | after that first proactive wake, a still-unhandled result keeps being re-announced onto the durable queue but never wakes the watcher again; once existing records receive the drain's post-handling acknowledgement and the source result is acknowledged, it is neither re-announced nor reported |
 | proactive-delivery crash and drain boundaries | dotted and underscored source ids at the same sequence receive distinct markers; a concurrent drain cannot consume between queue revalidation and marker commit; failed output, failed marker commit, and a crash before marker commit leave replay available, while successful output still ends the actionable cycle and a crash after marker commit suppresses a duplicate |
 | adapter-owned terminal verdict | two fixture adapters - one that ends on any result, one with no terminal knowledge - decide the outcome alone: the first has its registration and claim retired automatically after one capture and is never restarted, the second stays armed |
+| generic keyed-answer feed | `tests/fm-decision-hold-lifecycle.test.sh` drives a bound source through the real runner with a FIXTURE adapter that only prints keyed answers, proving any adapter with an `answers` command reaches the one keyed-answer intake: the holds those answers name close at capture time, a key appearing only in freeform captain prose closes nothing, a hold still blocking routed work is skipped rather than forced and stays available to `resolve`, a replayed delivery is idempotent, a source with no binding closes nothing at all, and the capture is never acknowledged, so its `check` wake still reaches the handler |
 | terminal retirement preserves the result | the retired source's captured output, its announced event, its handled acknowledgement, and later explicit `retire` all still behave normally |
 | registration-generation retirement | an old terminal runner preserves a concurrently replaced registration and releases ownership so the replacement runs independently; injected registration-removal failure retains a terminal claim, performs no second poll, and completes idempotently once removal recovers |
 | one `Send & End`, one result | an armed Lavish source driven against a stand-in for the published poll, which delivers the final `session_ended` feedback once and empty ended sessions afterward, polls exactly once, captures exactly one result, publishes one distinct event, and retires itself |

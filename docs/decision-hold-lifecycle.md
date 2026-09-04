@@ -23,10 +23,47 @@ For an open keyed status decision, it appends a `captain-held [key=<key>]: ...` 
 Scout teardown calls the script's read-only `verify` subcommand after checking for the report and before removing any source state.
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
-The `resolve` subcommand requires a decision file and at least one existing dependent task whose structured `blocked-by` edge points to the hold.
-It records the decision digest and routed task identities as a retry identity in the hold body, clears each dependency edge through tasks-axi, and marks the hold Done only after those writes succeed.
-An exact retry can finish a partial routing operation, while a changed decision or routed-task set is rejected.
-A failed intermediate step leaves the hold open.
+The `resolve` and `answer` subcommands close active holds.
+Both require a non-empty captain decision file and record the same resolution block in the hold body with the decision digest, routed identities, and a `Resolution mode:` naming the path.
+An exact retry is idempotent, while a changed decision or, for `resolve`, a changed routed-task set is rejected.
+
+The `resolve` subcommand is the routed path and additionally requires at least one existing dependent task whose structured `blocked-by` edge points to the hold.
+It clears each dependency edge through tasks-axi and marks the hold Done only after those writes succeed.
+An exact retry can finish a partial routing operation, and a failed intermediate step leaves the hold open.
+
+The `answer` subcommand is the unrouted path, implemented once as a shared close parameterized only by the recorded `Resolution mode:`, so a later unrouted path such as upstream's `decline` cannot drift into a weaker close.
+It records `(none)` as the routed identities and refuses while any task in the same backlog is still blocked by the hold, because releasing routed work without recording it is `resolve`'s job.
+Every candidate found in the listing prefilter is confirmed against its own structured record before the refusal is reported.
+`answer` exists so the act carrying a captain answer can also be the act that closes its hold.
+
+## Answer-time closure
+
+The live status-log decision ledger has always had answer-time closure through `bin/fm-send.sh --resolve-key`: answering a keyed decision closes it in the same act.
+The durable hold ledger did not, so an answer could be captured, believed, and even implemented while its hold stayed open, and the captain could then be asked to re-answer a decision already on disk.
+
+"A keyed answer closes its matching hold" is now one capability with one owner.
+`answers` is its channel-agnostic entry point: it reads `<decision-key>`, answer, and label lines on stdin, maps each key to `<origin-id>-decision-<key>`, and closes it through the same `answer` path, so every guard applies identically no matter which channel the answer arrived on.
+`--source` is provenance text recorded in the durable decision, never a behavior switch, and the command carries no per-channel branch and no knowledge of chat, review decks, or any transport.
+A channel's only job is to turn whatever it received into those keyed lines and pipe them in; it never maps keys to holds, builds decision records, chooses between the close paths, or closes a hold itself.
+The decision text is a pure function of source, key, answer, and label, which is what makes a replayed delivery an idempotent no-op rather than a rejected different decision.
+A key whose hold is absent, already closed, or still blocking routed work is reported as skipped and left for `resolve`, and the command exits nonzero when any key was skipped.
+
+`bind`, `unbind`, and `binding` record which origin a captured-answer source belongs to, for a channel whose answers arrive detached from the origin.
+The binding is a private record under `state/decision-bindings/`, and a source with no binding feeds nothing, so the path is opt-in per source.
+`bind` deliberately does not require the source to exist yet, so a channel can be bound before it is armed and never produce an answer that has nowhere to go.
+
+Two channels feed that one intake today, and both are ordinary callers rather than special cases.
+
+`bin/fm-send.sh --resolve-key` is the chat channel.
+Its existing status-log close is unchanged for a key the status log still owns, and the status-log fold honors a stated `[key=<slug>]` token both before the verb colon and at the head of the note, so a worker's misplaced colon can no longer collapse a stated key into `default` and make the answer refuse.
+For a key the status log no longer owns it checks whether that key names an active captain hold on the target task, and feeds the answer as one keyed line if so, which is what lets chat answer a decision already transferred to its hold.
+A key open in neither ledger is still refused before anything is sent.
+Because `complete` closes the live status copy at the moment it transfers a decision to its hold, the two ledgers are the two sides of one transfer and never both own a key at once, so the common path still performs no backlog read.
+
+`bin/fm-procevent.sh` is the captured-result channel, and its wiring is generic.
+After capture, a bound source has its result passed to `bin/fm-procevent-<adapter>.sh answers <result-file>` and whatever that prints is piped into the intake, so any adapter with an `answers` command works and the runner names no adapter, parses no result, and carries no decision rule.
+Feeding is independent of handling: it never acknowledges a result and never suppresses a wake, so recording the captain's answer cannot retire the notification firstmate needs in order to act on it.
+`bin/fm-procevent-lavish.sh answers` is one such adapter command; it reports the structured choices a review captured and stops there, reading only rows tagged `choice` so freeform captain prose can never forge a decision key.
 
 ## Structured read surfaces
 
@@ -43,11 +80,20 @@ The projection remains read-only and does not inspect historical prose.
 Verification date: 2026-07-14.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
+Answer-time closure and colon-first decision-key verification date: 2026-09-05.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
 The initial Bearings snapshot correctly has no open decision, and the new teardown gate refuses to erase the source.
 A later regression covers tasks-axi's quoted multi-entry `blocked_by` output so `resolve` matches the first, middle, and last ids and rejects a genuinely absent id.
+
+Four answer-time closure regressions run against the published poll response shape, with synthetic `sample` identities.
+A bound source whose origin exposes six holds captures one review carrying five structured choices plus one freeform message, and the runner feeds it through a fixture adapter that is not the review adapter at all, so what is proven is that any bound channel with an `answers` command gets closure rather than that one channel is wired specially.
+Four holds whose answers route no work close, the one still blocking routed work is skipped and stays available to `resolve`, and the one whose key appears only inside the freeform prose never closes.
+The capture is left unacknowledged throughout, so the wake firstmate needs in order to act on the answers is never retired.
+A replayed delivery closes nothing new and is not rejected as a different decision, a source with no binding closes nothing at all, and the `answer` subcommand itself refuses an empty or missing decision file, an absent hold, and a drifted retry.
+A separate regression drives the real `fm-send` over a stubbed transport to prove the chat channel reaches the same intake for a decision already transferred to its hold, which the status ledger alone can no longer close.
+The status-log side is covered by `tests/fm-classify-decision-key.test.sh`, which drives the real full and incremental folds over a worker's colon-first `needs-decision: [key=<slug>]` line and pins that the stated key opens and closes under its own name in both positions, and by an end-to-end `fm-send --resolve-key` case for the same colon-first shape.
 
 The final verification commands and their exact summarized outputs follow.
 
@@ -62,6 +108,26 @@ ok - resolved findings and decision-like prose do not create false holds
 ok - terminal single-owner stale status decisions do not block empty inventory
 ok - main-home and secondmate-home captain holds remain correctly routed
 ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
+ok - a bound channel's captured answers close their captain holds at answer time
+ok - a channel source with no decision binding closes nothing
+ok - the answer path keeps every guard the unrouted close path already had
+ok - the chat channel feeds the same keyed-answer intake a captured review does
+
+$ bash tests/fm-classify-decision-key.test.sh
+ok - a stated [key=X] opens X whether it precedes or follows the verb colon
+ok - a keyless needs-decision still opens and closes the default key
+ok - a resolution closes its decision regardless of either line's key position
+ok - blocked [key=X] opens X in both key positions
+ok - two colon-form keyed decisions never collapse into one shared bucket
+ok - a [key=x] mentioned mid-note is prose, never an opened or closed key
+ok - a malformed stated key is rejected in both positions, never folded as default
+ok - the incremental fold matches the full fold across appends in both key positions
+
+$ bash tests/fm-send-resolve-key.test.sh
+ok - fm-send --resolve-key closes the open decision at answer time
+ok - fm-send --resolve-key: a colon-first stated key is open under that key and answerable
+ok - a key that is not open refuses before anything is sent
+(17 assertions total; the status-log ledger's behavior is otherwise unchanged)
 
 $ bash tests/fm-fleet-snapshot-view.test.sh
 ok - backlog normalization preserves strict roles and resolves every blocker compatibly
@@ -82,6 +148,9 @@ all teardown safety cases passed
 
 $ bin/fm-lint.sh
 fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+
+$ bin/fm-doc-audience-check.sh
+fm-doc-audience-check: ok surfaces=71 local_links=280
 
 $ git diff --check
 (no output)
