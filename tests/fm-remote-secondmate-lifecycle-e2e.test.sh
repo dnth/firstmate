@@ -1150,6 +1150,23 @@ assert_no_grep 'session stop' "$HERDR_LOG" "remote retirement stopped the shared
 assert_no_grep 'server stop' "$HERDR_LOG" "remote retirement stopped the shared fm-remote server"
 pass "remote retirement refuses child work, then removes only its own endpoint while a shared-session sibling survives"
 
+# The remote publisher's retirement seam is the registry lock plus its registry
+# re-read under that lock (bin/fm-spawn.sh spawn_remote_secondmate): the
+# serialized respawn above published before retirement could start, and a
+# launch attempted after retirement must refuse without republishing the
+# retired route's metadata or reaching the remote host.
+launches_before_retired=$(grep -c '^tab create' "$HERDR_LOG" || true)
+if remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate > "$TMP_ROOT/spawn-retired.out" 2>&1; then
+  fail "remote spawn relaunched a retired route"
+fi
+launches_after_retired=$(grep -c '^tab create' "$HERDR_LOG" || true)
+[ "$launches_before_retired" -eq "$launches_after_retired" ] \
+  || fail "remote spawn reached the remote host for a retired route"
+assert_absent "$PARENT/state/ios.meta" "remote spawn republished metadata for a retired route"
+assert_absent "$PARENT/state/.spawn-ios.lock" "remote spawn left its task lock behind after refusing a retired route"
+assert_no_grep '- ios ' "$PARENT/data/secondmates.md" "remote spawn re-registered a retired route"
+pass "remote spawn refuses a retired route without republishing its metadata"
+
 # The parent and remote host both accept OMP as an agent harness while keeping
 # the raw-command and remote-Prewalk refusals intact. The optional fallback is
 # accepted independently, then a second route drives the real OMP launch across

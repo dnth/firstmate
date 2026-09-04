@@ -665,6 +665,79 @@ test_spawn_preserves_orca_metadata_when_abort_cleanup_fails() {
   pass "fm-spawn.sh --backend orca: preserves metadata when abort cleanup fails"
 }
 
+test_spawn_orca_abort_recovery_metadata_waits_for_lock() {
+  # The abort-recovery publisher runs from the EXIT trap after a failure that
+  # happened BEFORE the ordinary publication took the per-task metadata
+  # lifecycle lock (here: terminal creation), so it must take that lock itself.
+  # Hold the lock from a live process, drive the same abort-cleanup-fails path
+  # in the background, and prove nothing is published until the lock is
+  # released, that the record then lands, and that the trap released the lock.
+  local proj wt data state config id lock entered release holder_pid child rc=0 i
+  id="orcaabortlockz1"
+  proj="$TMP_ROOT/abort-lock-project"
+  wt="$TMP_ROOT/abort-lock-wt"
+  data="$TMP_ROOT/abort-lock-data"
+  state="$TMP_ROOT/abort-lock-state"
+  config="$TMP_ROOT/abort-lock-config"
+  entered="$TMP_ROOT/abort-lock.entered"
+  release="$TMP_ROOT/abort-lock.release"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'brief\n' > "$data/$id/brief.md"
+  touch "$state/.last-watcher-beat"
+  orca_case abort-lock
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-abort-lock"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-abort-lock","path":"%s"}}}\n' "$wt" > "$RESP/3.out"
+  printf '1\n' > "$RESP/4.exit"
+  printf '1\n' > "$RESP/5.exit"
+  lock=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_meta_lock_path "$2"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$state/$id.meta") \
+    || fail "Orca abort lock: could not derive the metadata lifecycle lock"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2"
+    touch "$3"
+    while [ ! -f "$4" ]; do sleep 0.02; done
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$entered" "$release" &
+  holder_pid=$!
+  i=0
+  while [ ! -f "$entered" ]; do
+    kill -0 "$holder_pid" 2>/dev/null || fail "Orca abort lock: holder exited before acquiring the lock"
+    i=$((i + 1))
+    [ "$i" -le 250 ] || fail "Orca abort lock: holder never acquired the lock"
+    sleep 0.02
+  done
+  PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca \
+    > "$TMP_ROOT/abort-lock.out" 2>&1 &
+  child=$!
+  i=0
+  while ! grep -q $'orca\x1f''worktree'$'\x1f''rm' "$LOG" 2>/dev/null; do
+    kill -0 "$child" 2>/dev/null || { touch "$release"; fail "Orca abort lock: spawn exited before abort cleanup: $(cat "$TMP_ROOT/abort-lock.out")"; }
+    i=$((i + 1))
+    [ "$i" -le 1500 ] || { touch "$release"; fail "Orca abort lock: spawn never reached abort cleanup"; }
+    sleep 0.02
+  done
+  sleep 0.3
+  kill -0 "$child" 2>/dev/null \
+    || { touch "$release"; fail "Orca abort lock: aborting spawn finished while the metadata lock was held: $(cat "$TMP_ROOT/abort-lock.out")"; }
+  assert_absent "$state/$id.meta" "Orca abort recovery published metadata while its lifecycle lock was held"
+  touch "$release"
+  wait "$holder_pid" || { touch "$release"; fail "Orca abort lock: holder failed to release"; }
+  wait "$child" || rc=$?
+  [ "$rc" -ne 0 ] || fail "Orca spawn should still fail after abort recovery under the lock"
+  assert_present "$state/$id.meta" "Orca abort recovery did not publish metadata after lock release"
+  assert_grep "backend=orca" "$state/$id.meta" "recovered metadata missing backend=orca"
+  assert_grep "orca_worktree_id=wt-abort-lock" "$state/$id.meta" "recovered metadata missing Orca worktree id"
+  [ ! -e "$lock" ] && [ ! -L "$lock" ] \
+    || fail "Orca abort recovery left the metadata lifecycle lock held after exit"
+  pass "fm-spawn.sh --backend orca: abort-recovery metadata waits for the per-task lifecycle lock"
+}
+
 test_spawn_releases_orca_resources_when_metadata_write_fails() {
   local proj wt data state config id out status
   id="orcametafailz9"
@@ -1315,6 +1388,7 @@ test_spawn_refuses_orca_when_runtime_not_ready
 test_spawn_refuses_orca_nonisolated_worktree
 test_spawn_removes_orca_worktree_when_terminal_create_fails
 test_spawn_preserves_orca_metadata_when_abort_cleanup_fails
+test_spawn_orca_abort_recovery_metadata_waits_for_lock
 test_spawn_releases_orca_resources_when_metadata_write_fails
 test_peek_send_and_crew_state_route_through_orca_meta
 test_peek_and_crew_state_fail_closed_on_orca_error_json
