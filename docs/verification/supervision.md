@@ -330,6 +330,20 @@ Stale prior-generation tool callbacks could not mutate the active child, repeate
 Plain Pi and pi-signed share the same tracked `.pi/extensions/fm-primary-pi-watch.ts` path, so both inherit the generation owner stated once in `bin/fm-primary-watch-core.ts`.
 For OMP, the 18.1.5 SDK source at `src/session/agent-session.ts` shows `newSession()` emitting `session_switch` with `reason: "new"`, `switchSession()` emitting `reason: "resume"`, `fork()` emitting `reason: "fork"`, and `reload()` delegating to `switchSession()`; none of those paths emits `session_shutdown`.
 The portable OMP regression invokes only those `session_switch` shapes, including a second `resume` event for reload, and proves each replacement arms a new real child while carrying one unconsumed actionable close exactly once.
+A 2026-09-04 regression pins the bounded acknowledgement wait after a secondmate home lost its watcher chain behind a wake steered into its own recovery turn:
+
+```sh
+bin/fm-test-run.sh tests/fm-omp-primary.test.sh
+bin/fm-test-run.sh tests/fm-pi-watch-extension.test.sh
+```
+
+```text
+ok - OMP unacknowledged wake delivery keeps the successor chain and delivers once per close
+ok - Pi unacknowledged wake delivery keeps the successor chain and delivers once per close
+```
+
+Both cases drive two consecutive actionable closes whose deliveries never receive `before_agent_start` under `FM_WATCH_WAKE_CONSUME_TIMEOUT_MS=300`, and prove that a third real arm child starts, exactly one wake is delivered per close, and the durable queue row is untouched.
+Against the unbounded core the same cases time out waiting for the third arm.
 A 2026-09-03 differential check against installed OMP 18.1.5 ran the opt-in CLI guard on both the watcher-continuity port and pristine `origin/main`:
 
 ```sh

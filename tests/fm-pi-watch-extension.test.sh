@@ -1257,6 +1257,86 @@ EOF
   pass "Pi session replacement auto-arms and carries its in-flight actionable close"
 }
 
+# The Pi binding shares the core, so a delivery the runtime never acknowledges
+# through before_agent_start must not park its successor chain either.
+test_pi_unacknowledged_wake_keeps_successor_chain() {
+  local repo home plugin log stop out status
+  repo="$TMP_ROOT/pi-unacknowledged-wake-root"
+  home="$TMP_ROOT/pi-unacknowledged-wake-home"
+  log="$TMP_ROOT/pi-unacknowledged-wake.log"
+  stop="$TMP_ROOT/pi-unacknowledged-wake.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s predecessor=%s\n' "$$" "${FM_WATCH_PREDECESSOR_ARM_PID:-none}" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+if [ "$count" -le 2 ]; then
+  while [ ! -e "$FM_ARM_LOG.trigger-$count" ]; do sleep 0.02; done
+  printf 'signal: pi unacknowledged wake %s\n' "$count"
+  exit 0
+fi
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" \
+    FM_WATCH_WAKE_CONSUME_TIMEOUT_MS=300 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+const prompts = [];
+const pi = {
+  on(event, handler) { handlers.set(event, handler); },
+  registerCommand() {},
+  registerTool() {},
+  // Delivery resolves, but the runtime never starts a turn for it, so the
+  // before_agent_start acknowledgement never arrives.
+  sendUserMessage: async (message) => { prompts.push(String(message)); },
+  events: { on() {}, emit() {} },
+};
+const bound = Number(process.env.FM_WATCH_WAKE_CONSUME_TIMEOUT_MS);
+const armRows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter((row) => row.startsWith("arm="))
+  : [];
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (pred()) return;
+    await sleep(10);
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+await waitFor(() => armRows().length === 1, "initial automatic Pi arm");
+writeFileSync(`${process.env.FM_ARM_LOG}.trigger-1`, "trigger\n");
+await waitFor(() => prompts.length === 1 && armRows().length === 2, "first Pi delivery and its successor");
+writeFileSync(`${process.env.FM_ARM_LOG}.trigger-2`, "trigger\n");
+await waitFor(() => armRows().length === 3, "third Pi arm after the unacknowledged delivery");
+await waitFor(() => prompts.length === 2, "second Pi delivery");
+await sleep(bound * 3);
+if (armRows().length !== 3) throw new Error(`expected exactly three arms, got ${armRows().join(" | ")}`);
+if (prompts.length !== 2) throw new Error(`expected exactly one delivery per close, got ${prompts.length}: ${prompts.join(" | ")}`);
+if (!prompts[0].includes("signal: pi unacknowledged wake 1") || !prompts[1].includes("signal: pi unacknowledged wake 2")) {
+  throw new Error(`deliveries did not match their closes: ${prompts.join(" | ")}`);
+}
+if (!/predecessor=[0-9]+$/.test(armRows()[2])) throw new Error(`third arm lost its predecessor identity: ${armRows().join(" | ")}`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, {});
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "Pi unacknowledged wake must not park the successor chain"
+  [ -z "$out" ] || fail "Pi unacknowledged-wake test printed output: $out"
+  pass "Pi unacknowledged wake delivery keeps the successor chain and delivers once per close"
+}
+
 test_pi_rebind_without_shutdown_supersedes_prior_binding() {
   local repo home plugin child_pid_file arm_log out status
   repo="$TMP_ROOT/pi-rebind-root"
@@ -2511,6 +2591,7 @@ test_pi_actionable_close_rechecks_session_lock
 test_pi_arm_distinguishes_session_lock_ownership
 test_pi_session_transition_generation_owner
 test_pi_session_replacement_carries_inflight_actionable_close
+test_pi_unacknowledged_wake_keeps_successor_chain
 test_pi_rebind_without_shutdown_supersedes_prior_binding
 test_pi_process_exit_cleanup_listener_lifecycle
 test_pi_process_exit_cleanup_stops_arm_child
