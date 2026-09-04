@@ -214,9 +214,9 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # unavailable, or 4 the OMP native request is queued without an acknowledgement.
 # On an OMP target the call also publishes FM_TASK_INBOX_RING_OMP_REQUEST (the
 # named native queue entry for this record) and FM_TASK_INBOX_RING_OMP_PID (the
-# bound session process, empty when its readiness marker is unreadable) so the
-# caller can report the exact binding it acted on. Only 0 carries a native
-# receipt; the acknowledgement move remains the only proof the worker acted.
+# proven acknowledging session process) so the caller can report the exact
+# binding it acted on. A native success without that proof is refused; the
+# acknowledgement move remains the only proof the worker acted.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [harness] [omp-runtime] [omp-bin]
   local backend=$1 target=$2 rec=$3 label=${4:-}
   local harness=${5:-} omp_runtime=${6:-} omp_bin=${7:-} line cstate verdict ready_marker request_id programmatic_rc

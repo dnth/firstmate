@@ -125,7 +125,7 @@ A bordered-empty or ghost-only composer is recognized as empty where that backen
 Some busy harnesses keep accepted queued text visible in the composer.
 Tmux uses `fm_composer_queued_enter_verdict` for its established non-OMP busy queue, while herdr uses it only for OMP.
 The daemon still clears its buffer only on the backend's success verdict.
-[`docs/tmux-backend.md`](../../../docs/tmux-backend.md) and [`docs/herdr-backend.md`](../../../docs/herdr-backend.md) own the backend-specific confirmation signals and OMP's narrower `queued-unconfirmed` result.
+[`docs/tmux-backend.md`](../../../docs/tmux-backend.md) and [`docs/herdr-backend.md`](../../../docs/herdr-backend.md) own the backend-specific confirmation signals and OMP's internal `queued-unconfirmed` result; `fm-send.sh` maps that unproven typed-plane verdict to `delivered-no-turn` rather than public success.
 
 ## Classification policy
 

@@ -383,7 +383,7 @@ Live firing of the fleet hook's `tool_result`, `todo_reminder`, and `session.com
 
 The Herdr role matrix required each expected turn-end or routed-reply notification to reach the durable queue or the primary follow-up transcript before the fixture drained it.
 
-The deterministic composer, tmux, and Herdr fixtures reran on 2026-08-26 and proved that an already-busy OMP send returns `queued-unconfirmed` only after Enter transport succeeds and the composer either clears or remains proven pending while native state is still working.
+The deterministic composer, tmux, and Herdr fixtures reran on 2026-08-26 and proved that the backend typed-submit primitive for an already-busy OMP target returns internal `queued-unconfirmed` only after Enter transport succeeds and the composer either clears or remains proven pending while native state is still working.
 The same fixtures proved that a pending OMP composer after native state becomes idle returns `pending`, Enter transport failure returns `send-failed`, and initially idle editable input fails closed.
 This is revision-bound source-fixture evidence for the source under review, using Bun 1.3.14 only for terminal-cell measurement; it does not invoke OMP or make an OMP runtime-version claim.
 

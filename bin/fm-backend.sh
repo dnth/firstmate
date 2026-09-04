@@ -742,8 +742,8 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
 }
 
 # Ring an OMP worker extension through its task-bound process signal. Return 1
-# licenses composer fallback; return 2 preserves an outstanding programmatic
-# request without a second transport.
+# recognizes an already-delivered native request without a second transport;
+# return 2 reports a claimed request whose acknowledgement remains unresolved.
 fm_backend_omp_trigger_turn() {  # <backend> <target> <ready-marker> <omp-runtime> <omp-bin> <request-id> <doorbell-line>
   local backend=$1 marker=$3 request_id=$6 existing=0
   fm_omp_task_doorbell_request_existing "$marker" "$request_id" || existing=$?

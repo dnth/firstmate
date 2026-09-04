@@ -23,8 +23,10 @@
 # adapter alone (bin/fm-task-inbox-lib.sh); nothing is typed and no Enter is
 # pressed, because an already-streaming session cannot be steered through its
 # editable composer. The command reports exactly one bounded outcome, each
-# naming the bound task, endpoint, session process, native queue entry and
-# durable record:
+# binding the task, endpoint, session field, native queue entry and durable
+# record. Native acknowledgements prove the acknowledging session; an
+# already-handled replay uses session-pid=not-a-session-receipt because it
+# never signals a session:
 #   omp-native-received   the session acknowledged the request; exit 0
 #   omp-native-refused    the adapter was unavailable or refused; exit 6
 #   omp-native-queued     the named native request is queued without a
