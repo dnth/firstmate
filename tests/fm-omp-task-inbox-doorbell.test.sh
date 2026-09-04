@@ -588,6 +588,8 @@ test_omp_native_refusal_and_queue_are_bounded() {
     "handled OMP reconciliation replay did not identify its receipt source"
   assert_contains "$(cat "$out")" 'request=none' \
     "handled OMP reconciliation replay unexpectedly named a native request"
+  assert_contains "$(cat "$out")" 'session-pid=not-a-session-receipt' \
+    "handled OMP reconciliation replay named an unknown session"
   assert_contains "$(cat "$out")" "record=$home/state/replay.inbox/handled/001.msg" \
     "handled OMP reconciliation replay did not name its handled record"
   [ "$(cat "$out" "$err" | grep -Ec 'omp-native-(received|queued|refused):' || true)" = 1 ] \
