@@ -798,14 +798,21 @@ spawn_remote_secondmate() {
     echo "remote_target=$remote_target"
     [ -z "$remote_recorded_traceparent" ] || echo "traceparent=$remote_recorded_traceparent"
   } > "$tmp"
-  # This remote-secondmate writer stays outside fm_meta_lock_path on purpose:
-  # its retirement seam is the secondmate registry lock held above, which
-  # bin/fm-teardown.sh's remote path holds across removing the registry route
-  # and retiring this metadata, and the registry re-read at the top of this
-  # function under that same lock refuses once the route is gone. A publication
-  # therefore either completes before retirement starts or never happens; it
-  # cannot interleave with, or follow, a retirement. The parent-lock test in
-  # tests/fm-remote-secondmate-lifecycle-e2e.test.sh pins that ordering.
+  # This remote-secondmate writer stays outside fm_meta_lock_path on purpose.
+  # Its retirement seam is the secondmate registry lock held above, which
+  # bin/fm-teardown.sh's remote path acquires after the per-task metadata lock
+  # and holds across removing the registry route and retiring the metadata.
+  # The registry re-read at the top of this function under that same lock
+  # refuses once the route is gone, so a publication cannot survive a completed
+  # retirement and cannot interleave with the retirement body.
+  # A publication that lands after teardown has taken the metadata lock but
+  # before the retirement body runs is retired by that body, because teardown
+  # re-reads the metadata fresh after acquiring the registry lock and removes it.
+  # The serialized-respawn section in tests/fm-remote-secondmate-lifecycle-e2e.test.sh
+  # exercises exactly that concurrent ordering: spawn is blocked in launch while
+  # holding the registry lock, teardown starts and blocks, spawn publishes, and
+  # teardown then removes the route and metadata; its retired-route section
+  # covers a launch after retirement.
   mv -f -- "$tmp" "$meta"
   fm_lock_release "$remote_lock" || true
   fm_lock_release "$registry_lock" || true
