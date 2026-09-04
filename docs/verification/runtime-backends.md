@@ -390,10 +390,10 @@ This is revision-bound source-fixture evidence for the source under review, usin
 The deterministic fm-send turn-start fixture reran on 2026-09-04 and proved that an initially idle typed-plane OMP submit must become busy or advance its generated turn-start marker after the submit-time baseline before success, while `delivered-no-turn` exits distinctly, queues supervised recovery, and never kills the endpoint.
 The same fixture proved bounded recovery wake-lock failure, required recovery-trigger persistence, distinct post-delivery persistence failure, the monotonic deadline, submit-time idle setup, Herdr post-submit check, confirmed busy and blocked compatibility, OMP exit compatibility, normal turn start, remote OMP routing, and unchanged non-OMP behavior.
 It also proved that an already-busy OMP submit whose Enter transported with no native session event now exits 4 as unproven `delivered-no-turn` delivery, queues supervised recovery, and tells the caller not to resend, replacing the former zero-exit `queued-unconfirmed` acceptance.
-The tested source is Git revision `6c04b02de758deb82f2448bd258b5e1b72ff0743` plus binary patch SHA-256 `cc336b6d0dd73ca74adc28d665e3a29f28e064764441bda2c9f18c6a402360a5` over this exact file manifest and construction command:
+The tested source is Git revision `f0ec61a16dce8b4a404446e504d9409dbe39f7b4` plus binary patch SHA-256 `b14a48b9a5969a603c407a9af693f1053e6f85d461a5310c08797140dd04c20f` over this exact file manifest and construction command:
 
 ```sh
-git diff --binary 6c04b02de758deb82f2448bd258b5e1b72ff0743 -- bin/fm-send.sh bin/fm-wake-lib.sh tests/fm-send-turn-start.test.sh | sha256sum
+git diff --binary f0ec61a16dce8b4a404446e504d9409dbe39f7b4 -- bin/fm-send.sh bin/fm-wake-lib.sh tests/fm-send-turn-start.test.sh | sha256sum
 ```
 
 This evidence uses stubbed backend state and process identity only, does not invoke a live OMP runtime, and makes no live OMP claim.
