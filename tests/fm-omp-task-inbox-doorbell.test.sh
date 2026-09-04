@@ -611,14 +611,16 @@ test_omp_native_refusal_and_queue_are_bounded() {
   printf '%s\n' "$silent_pid" > "$home/state/delivered.omp-doorbell-ready"
   : > "$home/state/delivered.omp-doorbell-ready.requests/request.001.msg.pending.delivered"
   out="$dir/out"; err="$dir/err"
+  set +e
   FM_SEND_RECONCILE_AUTH=1 run_native_send "$dir" "$home" "$silent_pid" "$node_bin" "$out" "$err" \
-    delivered --reconcile-delivery delivered-id "replay this delivered steer" || fail "delivered OMP reconciliation replay failed: $(cat "$err")"
-  assert_contains "$(cat "$out")" 'omp-native-received:' \
-    "delivered OMP reconciliation replay did not report its receipt"
-  assert_contains "$(cat "$out")" "session-pid=$silent_pid" \
-    "delivered OMP reconciliation replay did not report its bound session"
-  [ "$(cat "$out" "$err" | grep -Ec 'omp-native-(received|queued|refused):' || true)" = 1 ] \
-    || fail "delivered OMP reconciliation replay reported more than one bounded outcome"
+    delivered --reconcile-delivery delivered-id "replay this delivered steer"
+  rc=$?
+  set -e
+  expect_code 6 "$rc" "delivered OMP reconciliation replay without historical binding must refuse"
+  assert_contains "$(cat "$err")" 'omp-native-refused:' \
+    "unbound delivered OMP reconciliation replay did not report refusal"
+  assert_contains "$(cat "$err")" 'session-pid=unreadable' \
+    "unbound delivered OMP reconciliation replay did not keep its session unproven"
   kill -TERM "$silent_pid" 2>/dev/null || true
   wait "$silent_pid" 2>/dev/null || true
   LISTENER_PID=
@@ -642,9 +644,12 @@ test_omp_native_refusal_and_queue_are_bounded() {
   write_native_meta "$home" quiet tmux "$node_bin"
   printf '%s\n' "$silent_pid" > "$home/state/quiet.omp-doorbell-ready"
   mkdir -p "$home/state/quiet.omp-doorbell-ready.requests"
+  out="$dir/out"; err="$dir/err"
+  set +e
   FM_OMP_TASK_DOORBELL_ACK_ATTEMPTS=1 \
     run_native_send "$dir" "$home" "$silent_pid" "$node_bin" "$out" "$err" \
     quiet "pick up the review findings"; rc=$?
+  set -e
   expect_code 7 "$rc" "an unacknowledged native request must not exit 0"
   request="$home/state/quiet.omp-doorbell-ready.requests/request.001.msg"
   assert_contains "$(cat "$err")" 'omp-native-queued:' \
@@ -679,8 +684,10 @@ test_omp_native_binding_mismatch_is_refused() {
   out="$dir/out"; err="$dir/err"
   # The pane's foreground process is not the process that published the
   # task-bound readiness marker.
+  set +e
   run_native_send "$dir" "$home" "$((listener_pid + 1))" "$node_bin" "$out" "$err" \
     bound "apply the accepted fix"; rc=$?
+  set -e
   expect_code 6 "$rc" "an unproven session binding must exit nonzero"
   assert_contains "$(cat "$err")" 'omp-native-refused:' \
     "an unproven session binding was not explicitly refused"
