@@ -1,35 +1,27 @@
 #!/usr/bin/env bash
-# tests/fm-afk-inject-herdr-e2e.test.sh - real-herdr end-to-end test for the
-# away-mode daemon's herdr transport (bin/fm-supervise-daemon.sh), the herdr
-# counterpart of tests/fm-afk-inject-e2e.test.sh's private-socket tmux e2e.
-# Mirrors tests/fm-backend-herdr-smoke.test.sh and tests/herdr-test-safety.sh's
-# isolation patterns: everything runs on a throwaway, named, NEVER-default
-# HERDR_SESSION, torn down with herdr_safe_stop_and_delete. Skips cleanly when
-# herdr or jq is not installed.
+# tests/fm-afk-inject-herdr-e2e.test.sh - real-Herdr end-to-end test for the
+# away-mode daemon's Herdr admission path. Every explicit and production-adapter
+# Herdr call is bound to one guarded named non-default lab through
+# bin/fm-herdr-lab.sh. The suite skips cleanly when Herdr or jq is absent.
 #
 # Unlike the tmux e2e (which redirects a bare `tmux` PATH shim to a private
-# socket), herdr already supports named-session isolation via --session, so no
-# PATH redirection is needed for the happy path - the daemon is simply pointed
-# at FM_SUPERVISOR_BACKEND=herdr, FM_SUPERVISOR_TARGET="<session>:<pane-id>",
-# and HERDR_SESSION="<the isolated session>". A thin herdr SHIM is still used,
-# but only to simulate a swallowed Enter (Scenario B) - herdr's real CLI has no
-# built-in way to drop a keystroke, so the shim intercepts exactly one
-# `pane send-keys <pane> enter` call and forwards everything else to the real
-# binary untouched.
+# socket), Herdr already supports named-session isolation via --session. The
+# daemon is pointed at FM_SUPERVISOR_BACKEND=herdr,
+# FM_SUPERVISOR_TARGET="<session>:<pane-id>", and HERDR_SESSION="<the isolated
+# session>". The current Herdr API has no atomic composer admission primitive,
+# so this suite proves that both a pre-existing draft and a newly idle composer
+# preserve the escalation without typing into the captain's input channel.
 #
 # The "supervisor pane" is a tiny deterministic bash loop (not a real harness
 # binary): it draws a bordered composer row ("│ > <buf> │") that exercises the
 # bordered branch of fm_backend_herdr_composer_state, and logs every submitted
 # line (hex + text + injection/user classification) - the same technique
 # tests/fm-afk-inject-e2e.test.sh uses for its tmux supervisor pane, so this
-# test asserts on submitted CONTENT, not pane appearance. It ALSO registers
-# itself as a real herdr agent via `herdr pane report-agent` and reports an
-# idle/working/idle cycle around each submission, because
-# fm_backend_herdr_send_text_submit's confirmation is native agent-state
-# (agent get), not composer content, since the 2026-07-07 incident fix
-# (docs/herdr-backend.md "Native agent-state submit confirmation") - a pane
-# that only draws composer text without being a registered agent would read
-# agent_not_found forever and never confirm a submission.
+# test asserts on submitted content, not pane appearance. It registers itself
+# as a real Herdr agent so the production busy and composer readers observe an
+# actual agent identity. The fixture submits only explicit human input; every
+# supervisor escalation must remain out of the composer until Herdr exposes a
+# verified atomic admission primitive.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -38,21 +30,17 @@ DAEMON="$ROOT/bin/fm-supervise-daemon.sh"
 command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 
-# shellcheck source=tests/herdr-test-safety.sh
-. "$ROOT/tests/herdr-test-safety.sh"
-
-# This suite runs against its own isolated lab session, so a Herdr pane
-# inherited from the terminal it was launched in must not follow spawn into it
-# as a cross-session parent identity (tests/herdr-test-safety.sh).
-herdr_forget_inherited_pane
+ORIGINAL_PATH=$PATH
+unset HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID HERDR_SOCKET_PATH HERDR_SESSION
+LAB_HELPER=${HERDR_LAB_HELPER:-"$ROOT/bin/fm-herdr-lab.sh"}
+SESSION=$(PATH="$ORIGINAL_PATH" "$LAB_HELPER" name fm-afk-inject-herdr-e2e)
+export HERDR_SESSION="$SESSION"
 
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
-SESSION="fm-lab-afk-herdr-e2e-$$"
-export HERDR_SESSION="$SESSION"
 STATE_DIR=
-HERDR_SHIM_DIR=
+HERDR_WRAPPER_DIR=
 LOG_FILE=
 DAEMON_PID=
 SUPERVISOR_TARGET=
@@ -60,19 +48,43 @@ PANE_ID=
 LOOP_SCRIPT=
 
 cleanup_all() {
+  local rc=$?
+  trap - EXIT
   if [ -n "${DAEMON_PID:-}" ]; then
     afk_exit "${STATE_DIR:-}" 2>/dev/null || true
     kill "$DAEMON_PID" 2>/dev/null || true
     wait "$DAEMON_PID" 2>/dev/null || true
   fi
-  herdr_safe_stop_and_delete "$SESSION" 2>/dev/null || true
-  rm -rf "${HERDR_SHIM_DIR:-}" 2>/dev/null || true
-  rm -rf "${STATE_DIR:-}" 2>/dev/null || true
+  if ! PATH="$ORIGINAL_PATH" "$LAB_HELPER" teardown "$SESSION"; then
+    printf 'not ok - guarded Herdr lab teardown failed\n' >&2
+    return 1
+  fi
+  rm -rf "${HERDR_WRAPPER_DIR:-}" "${STATE_DIR:-}" 2>/dev/null || true
+  return "$rc"
 }
 trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
+PATH="$ORIGINAL_PATH" "$LAB_HELPER" provision "$SESSION" || fail "could not provision isolated Herdr lab session"
 
-# --- source the daemon (for afk_enter/afk_exit/FM_INJECT_MARK) + the backend -
+HERDR_WRAPPER_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-wrapper.XXXXXX")
+cat > "$HERDR_WRAPPER_DIR/herdr" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+helper='$LAB_HELPER'
+session='$SESSION'
+real_path='$ORIGINAL_PATH'
+args=("\$@")
+n=\${#args[@]}
+if [ "\$n" -ge 2 ] && [ "\${args[\$((n-2))]}" = --session ]; then
+  [ "\${args[\$((n-1))]}" = "\$session" ] || { echo 'wrapper refused foreign session' >&2; exit 97; }
+  args=("\${args[@]:0:\$((n-2))}")
+else
+  [ "\${HERDR_SESSION:-}" = "\$session" ] || { echo 'wrapper requires isolated session' >&2; exit 98; }
+fi
+PATH="\$real_path" exec "\$helper" run "\$session" "\${args[@]}"
+EOF
+chmod +x "$HERDR_WRAPPER_DIR/herdr"
+PATH="$HERDR_WRAPPER_DIR:$ORIGINAL_PATH"
+export PATH
 # shellcheck source=/dev/null
 . "$DAEMON"
 fm_backend_source herdr || fail "fm_backend_source herdr failed"
@@ -232,22 +244,6 @@ fm_backend_herdr_send_text_line "$SUPERVISOR_TARGET" "bash '$LOOP_SCRIPT' '$LOG_
   || fail "could not start the supervisor-loop script in the scratch herdr pane"
 sleep 1  # let the loop start and settle
 
-# --- herdr shim: forwards to the real binary, optionally swallows one Enter --
-REAL_HERDR=$(command -v herdr)
-HERDR_SHIM_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-shim.XXXXXX")
-cat > "$HERDR_SHIM_DIR/herdr" <<SHIM
-#!/usr/bin/env bash
-if [ "\${1:-}" = "pane" ] && [ "\${2:-}" = "send-keys" ] && [ -f "$STATE_DIR/.swallow-enter" ]; then
-  found_enter=0
-  for _a in "\$@"; do [ "\$_a" = "enter" ] && found_enter=1; done
-  if [ "\$found_enter" = 1 ]; then
-    rm -f "$STATE_DIR/.swallow-enter"
-    exit 0
-  fi
-fi
-exec "$REAL_HERDR" "\$@"
-SHIM
-chmod +x "$HERDR_SHIM_DIR/herdr"
 
 wait_daemon_started() {
   local label=${1:-daemon} start_line=${2:-0} i=0 new_log
@@ -272,7 +268,6 @@ wait_daemon_started() {
 start_daemon() {
   local log_start=0
   [ ! -f "$STATE_DIR/.supervise-daemon.log" ] || log_start=$(wc -l < "$STATE_DIR/.supervise-daemon.log")
-  PATH="$HERDR_SHIM_DIR:$PATH" \
   HERDR_SESSION="$SESSION" \
   FM_STATE_OVERRIDE="$STATE_DIR" \
   FM_SUPERVISOR_BACKEND=herdr \
@@ -313,7 +308,6 @@ reset_state() {
          "$STATE_DIR"/.stale-* \
          "$STATE_DIR"/.seen-* \
          "$STATE_DIR"/.heartbeat-streak \
-         "$STATE_DIR"/.swallow-enter \
          2>/dev/null || true
   : > "$LOG_FILE"
 }
@@ -328,7 +322,7 @@ selfcheck_pane_input_pending() {
   fm_backend_herdr_send_literal "$SUPERVISOR_TARGET" "$check_text" \
     || fail "selfcheck: could not send literal text to the scratch pane"
   sleep 0.5
-  if PATH="$HERDR_SHIM_DIR:$PATH" pane_input_pending "$SUPERVISOR_TARGET" herdr; then
+  if HERDR_SESSION="$SESSION" pane_input_pending "$SUPERVISOR_TARGET" herdr; then
     fm_backend_herdr_send_key "$SUPERVISOR_TARGET" Enter
     sleep 0.5
     return 0
@@ -370,8 +364,11 @@ test_scenario_a() {
 
   grep -q 'human draft text' "$LOG_FILE" \
     || fail "Scenario A: human text not in log after submit"
-  grep -q 'Supervisor escalate' "$LOG_FILE" \
-    || fail "Scenario A: digest not injected after the pane went idle"
+  [ -s "$STATE_DIR/.subsuper-escalations" ] \
+    || fail "Scenario A: the pending-then-idle composer lost the deferred escalation"
+  if grep -q 'Supervisor escalate' "$LOG_FILE"; then
+    fail "Scenario A: daemon injected after the human draft was cleared"
+  fi
   if grep -q 'human draft text.*Supervisor escalate' "$LOG_FILE" || \
      grep -q 'Supervisor escalate.*human draft text' "$LOG_FILE"; then
     fail "Scenario A: human text and digest merged into one line (after idle)"
@@ -384,88 +381,32 @@ test_scenario_a() {
     *) fail "Scenario A: human text misclassified (expected user): $human_line" ;;
   esac
 
-  local digest_line
-  digest_line=$(grep 'Supervisor escalate' "$LOG_FILE" | head -1)
-  case "$digest_line" in
-    *injection) ;;
-    *) fail "Scenario A: digest misclassified (expected injection): $digest_line" ;;
-  esac
-
   stop_daemon
-  pass "real herdr Scenario A: partial input defers injection; digest arrives clean after idle"
+  pass "real herdr Scenario A: pending input defers, and a later empty composer still preserves the digest without typing"
 }
 
-# --- Scenario B: swallowed-Enter --------------------------------------------
+# --- Scenario B: empty composer without atomic admission ---------------------
 
-test_scenario_b() {
+test_scenario_b_atomic_admission_unavailable() {
   reset_state
   afk_enter "$STATE_DIR"
-
-  touch "$STATE_DIR/.swallow-enter"
-
   start_daemon
 
   echo "done: PR https://example.test/pr/200" > "$STATE_DIR/fake-c1.status"
-
-  sleep 10
-
-  local marker_count
-  marker_count=$(awk -F '\t' '{ hex=$1; count += gsub(/e281a3/, "", hex) } END { print count + 0 }' "$LOG_FILE")
-  [ "$marker_count" -eq 1 ] \
-    || fail "Scenario B: expected exactly 1 U+2063 marker, got $marker_count (duplicate or lost)"
-
-  local digest_line digest_hex
-  digest_line=$(grep 'Supervisor escalate' "$LOG_FILE" | head -1)
-  digest_hex=$(printf '%s' "$digest_line" | cut -f1)
-  case "$digest_hex" in
-    e281a3*) ;;
-    *) fail "Scenario B: digest does not start with the terminal-safe sentinel marker (hex: $digest_hex)" ;;
-  esac
-
-  local user_count
-  user_count=$(grep -c $'\tuser$' "$LOG_FILE" || true)
-  [ "$user_count" -eq 0 ] \
-    || fail "Scenario B: expected 0 user lines, got $user_count (spurious Enter submitted an empty line?)"
-
-  stop_daemon
-  pass "real herdr Scenario B: swallowed Enter (via the herdr shim) produces exactly one clean digest"
-}
-
-# --- Scenario C: normal digest -----------------------------------------------
-
-test_scenario_c() {
-  reset_state
-  afk_enter "$STATE_DIR"
-  start_daemon
-
-  echo "done: PR https://example.test/pr/300" > "$STATE_DIR/fake-c1.status"
   sleep 8
 
-  local marker_count
-  marker_count=$(awk -F '\t' '{ hex=$1; count += gsub(/e281a3/, "", hex) } END { print count + 0 }' "$LOG_FILE")
-  [ "$marker_count" -eq 1 ] \
-    || fail "Scenario C: expected exactly 1 U+2063 marker, got $marker_count"
-
-  local digest_line digest_hex
-  digest_line=$(grep 'Supervisor escalate' "$LOG_FILE" | head -1)
-  case "$digest_line" in
-    *injection) ;;
-    *) fail "Scenario C: digest misclassified (expected injection): $digest_line" ;;
-  esac
-  digest_hex=$(printf '%s' "$digest_line" | cut -f1)
-  case "$digest_hex" in
-    e281a3*) ;;
-    *) fail "Scenario C: digest does not start with the terminal-safe sentinel marker (hex: $digest_hex)" ;;
-  esac
-
-  local user_count
-  user_count=$(grep -c $'\tuser$' "$LOG_FILE" || true)
-  [ "$user_count" -eq 0 ] \
-    || fail "Scenario C: expected 0 user lines, got $user_count (spurious submission?)"
+  [ ! -s "$LOG_FILE" ] \
+    || fail "Scenario B: Herdr submitted text despite lacking atomic composer admission"
+  [ -s "$STATE_DIR/.subsuper-escalations" ] \
+    || fail "Scenario B: atomic-admission deferral lost the escalation"
+  grep -F "Herdr API has no verified atomic composer admission; no text typed" \
+    "$STATE_DIR/.supervise-daemon.log" >/dev/null \
+    || fail "Scenario B: atomic-admission deferral was not recorded truthfully"
 
   stop_daemon
-  pass "real herdr Scenario C: a normal captain status injects exactly one clean single-line sentinel digest"
+  pass "real herdr Scenario B: an idle composer has no typed supervisor injection without atomic admission"
 }
+
 
 # --- Scenario D: max-defer alarm on a persistently non-clearing composer -----
 # A pending composer that NEVER clears (every Enter attempt leaves real text
@@ -484,7 +425,6 @@ test_scenario_d_max_defer() {
   fm_backend_herdr_send_literal "$SUPERVISOR_TARGET" "stuck-in-the-box"
   sleep 0.5
 
-  PATH="$HERDR_SHIM_DIR:$PATH" \
   HERDR_SESSION="$SESSION" \
   FM_STATE_OVERRIDE="$STATE_DIR" \
   FM_SUPERVISOR_BACKEND=herdr \
@@ -525,13 +465,11 @@ test_scenario_d_max_defer() {
 }
 
 test_scenario_a
-test_scenario_b
-test_scenario_c
+test_scenario_b_atomic_admission_unavailable
 test_scenario_d_max_defer
 
 echo "all real-herdr afk injection e2e tests passed"
 
 fm_backend_herdr_kill "$SUPERVISOR_TARGET" 2>/dev/null || true
 fm_backend_herdr_kill "$SESSION:$FAKE_CREW_PANE_ID" 2>/dev/null || true
-cleanup_all
-trap - EXIT
+cleanup_all || exit 1

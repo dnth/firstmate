@@ -969,17 +969,25 @@ ok - real herdr: the watcher fast-path enqueues a stale wake naming the task win
 
 Polling remained active and is covered as the fallback for capability, connect, subscribe, and repeated reader failure.
 
-### Away-mode transport
+### Away-mode admission
 
-The Pi/Herdr return and injection path was reverified on Herdr 0.7.3 and Pi 0.80.7:
+The guarded runtime regression ran on 2026-08-31 in one named non-default Herdr lab.
 
 ```sh
-FM_AFK_PI_HERDR_E2E=1 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
-  tests/fm-afk-pi-herdr-return-e2e.test.sh
+HERDR_LAB_HELPER=/home/pranay/wd/firstmate/bin/fm-herdr-lab.sh \
+  tests/fm-afk-inject-herdr-e2e.test.sh
 ```
 
-Observed guarantees: pending composer input refused injection and raised one alert; idle Pi accepted one marked escalation; the return gate refused ordinary work while a live blocker remained; resolving the blocker allowed the return flow.
-The dedicated Herdr daemon workspace topology is covered by `tests/fm-afk-launch.test.sh` and preserves the captain tab's pane count.
+```text
+ok - real herdr Scenario A: pending input defers, and a later empty composer still preserves the digest without typing
+ok - real herdr Scenario B: an idle composer has no typed supervisor injection without atomic admission
+ok - real herdr Scenario D: a persistently pending composer raises the max-defer wedge alarm, preserves the buffer, and never crashes the daemon
+all real-herdr afk injection e2e tests passed
+```
+
+The default-session tripwire held through the lab teardown.
+The deterministic daemon regression in `tests/fm-daemon.test.sh` places captain input after the initial empty read and before the Herdr admission call, then proves no submit occurred, the durable escalation remained, and the deferral log named the unavailable atomic admission.
+`FM_AFK_PI_HERDR_E2E=1 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh tests/fm-afk-pi-herdr-return-e2e.test.sh` extends the same no-typed-admission guarantee through the real Pi return flow when Pi is installed.
 
 ## OMP applicability outside tmux and Herdr
 

@@ -2876,6 +2876,18 @@ EOF
   fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE"
 }
 
+# fm_backend_herdr_admit_away_supervisor: atomically admit and submit one
+# away-supervisor message, or refuse without changing the composer.
+# Herdr exposes no verified conditional composer admission or reservation API.
+# This fallback therefore performs no pane read, text send, or key send and
+# returns atomic-unavailable. A future implementation may return admitted only
+# after one Herdr-supported operation atomically proves an empty composer and
+# submits <text>; a re-read or process-local lock is not an admission primitive.
+fm_backend_herdr_admit_away_supervisor() {  # <target> <text> -> admitted|atomic-unavailable|unknown
+  printf 'atomic-unavailable'
+}
+
+
 
 
 # fm_backend_herdr_send_text_submit: type <text> into <target> once (raw,

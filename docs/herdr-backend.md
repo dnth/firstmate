@@ -253,6 +253,10 @@ A bare shell prompt is never an empty agent composer.
 Away-mode injection proceeds only on an affirmative `empty` result, never on unknown.
 This prevents a dead agent pane from receiving and possibly executing an escalation as shell input.
 
+Away-mode supervisor delivery has a stricter admission boundary than ordinary typed steering.
+The maintainer contract in [`docs/architecture.md`](architecture.md#event-driven-supervision) owns the atomic admission decision.
+Current Herdr releases expose no verified conditional composer admission or reservation primitive, so an otherwise empty composer defers the supervisor digest without changing the captain's input.
+
 The current operational envelope starts with U+2063 and `FIRSTMATE_OP: `.
 The separate routed-request carrier uses `[fm-from-firstmate]` plus U+2063.
 U+2063 survives Herdr terminal input as text, unlike the legacy ASCII control separator that could erase the visible routing label.

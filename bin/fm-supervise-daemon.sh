@@ -91,8 +91,9 @@
 #          FM_SUPERVISOR_HARNESS    exact supervisor harness identity. The
 #                                   detached launcher passes this explicitly;
 #                                   otherwise startup derives it with
-#                                   bin/fm-harness.sh. Herdr injection refuses
-#                                   when the identity is unknown.
+#                                   bin/fm-harness.sh. Herdr defers typed
+#                                   injection when its API cannot prove atomic
+#                                   composer admission.
 #          FM_INJECT_SKIP           |-prefixes force-self-handle bypassing
 #                                   classification (default "heartbeat"); empty
 #                                   disables. Use sparingly: it overrides the
@@ -138,16 +139,17 @@
 #                                   its watchdog terminates it and continues to the
 #                                   next channel (default 10; invalid/zero uses the
 #                                   default).
-#          FM_INJECT_CONFIRM_RETRIES Enter-retry attempts on a swallowed Enter
-#                                   (default 3); the digest is typed once, only
-#                                   Enter is retried. Composer-empty detection is
-#                                   structural and style-aware (bin/fm-tmux-lib.sh):
-#                                   it drops dim/faint ghost text and strips the
+#          FM_INJECT_CONFIRM_RETRIES tmux Enter-retry attempts on a swallowed
+#                                   Enter (default 3); the digest is typed once,
+#                                   only Enter is retried. Herdr uses its own
+#                                   atomic-admission contract and never treats
+#                                   this retry budget as permission to type.
+#                                   Composer-empty detection is structural and
+#                                   style-aware (bin/fm-tmux-lib.sh): it drops
+#                                   dim/faint ghost text and strips the
 #                                   harness's box borders before deciding, so a
 #                                   ghost-only or bordered-but-empty composer is
 #                                   not misread as pending input.
-#          FM_INJECT_CONFIRM_SLEEP  seconds between daemon submit checks
-#                                   (default 0.5)
 #          FM_LOG_MAX_BYTES / FM_LOG_KEEP_LINES / FM_CRASH_*  log + crash guards
 #          FM_STATE_OVERRIDE        alternate state dir (testing)
 #          Logs each wake to state/.supervise-daemon.log (size-capped). Single
@@ -1375,25 +1377,20 @@ window_for_task() {  # <task-key> [state]
 }
 
 # --- injection --------------------------------------------------------------
-# inject_msg: send one escalation digest to the supervisor pane.
-# Returns 0 on successful inject (or empty buffer), non-zero if the pane is
-# gone, the supervisor is busy, afk is inactive, or the verified submit cannot
-# be confirmed after bounded retries. On non-zero the caller preserves
-# the buffer so the escalation survives for the next cycle or the catch-up flush.
+# inject_msg: admit one escalation digest to the supervisor pane.
+# Returns 0 on successful admission (or empty buffer), non-zero if the pane is
+# gone, the supervisor is busy, afk is inactive, or the backend cannot safely
+# admit the digest. On non-zero the caller preserves the buffer so the
+# escalation survives for the next cycle or the catch-up flush.
 #
-# Submit model:
-#   - TYPE ONCE, then submit with Enter. Never retype the digest: a swallowed
-#     Enter leaves our text in the composer, and retyping would concatenate two
-#     sentinel-prefixed digests into one corrupted turn.
-#   - SUBMIT ACK = the backend submit primitive reports `empty` after Enter.
-#     For tmux that means a cleared composer; for herdr's normal idle-baseline
-#     path it means native agent-state observed a real turn start.
-#     Pending means Enter was swallowed; unknown is treated as undelivered by
-#     this strict daemon path.
-#   - COMPOSER GUARD before typing: if the cursor line already has real content
-#     after dim/faint ghost text and borders are ignored (a human's half-typed
-#     line, or a previous injection's unsent text), defer entirely - injecting
-#     would merge with the human's text.
+# Admission model:
+#   - The shared composer guard rejects every state except affirmative empty.
+#     It is an early conservative rejection, not a reservation of the human
+#     input channel.
+#   - tmux types once, then retries only Enter after a bounded confirmation.
+#   - Herdr delegates the complete empty-composer admission decision to
+#     fm_backend_herdr_admit_away_supervisor. Its current fallback refuses
+#     typed admission because Herdr has no verified conditional operation.
 inject_msg() {  # <message> [state]
   local msg=$1 state target backend harness retries sleep_s verdict composer encoded omp_bun omp_bin identity
   state="${2:-$(_state_root)}"
@@ -1421,15 +1418,15 @@ inject_msg() {  # <message> [state]
     log "inject deferred: supervisor pane busy (agent mid-turn)"
     return 1
   fi
-  #   b) Composer-guard: inject ONLY into a confirmed-empty GENUINE agent
-  #      composer. The shared classifier (fm_backend_composer_state ->
-  #      fm_composer_classify_content, bin/fm-composer-lib.sh) reports 'pending'
-  #      for real unsubmitted text (a human's half-typed line, or a swallowed
-  #      prior injection) and 'unknown' for a bare dead-shell prompt (the agent
-  #      exited to its login shell) or an unreadable pane. Neither is a safe
-  #      target - typing the escalation into a shell could execute it - so defer
-  #      on anything that is not affirmatively 'empty'. A deferred escalation
-  #      stays buffered for the next cycle or the catch-up flush.
+  #   b) Composer-guard: reject any composer that is not a confirmed-empty
+  #      GENUINE agent composer. The shared classifier
+  #      (fm_backend_composer_state -> fm_composer_classify_content,
+  #      bin/fm-composer-lib.sh) reports 'pending' for real unsubmitted text (a
+  #      human's half-typed line, or a swallowed prior injection) and 'unknown'
+  #      for a bare dead-shell prompt or an unreadable pane. Neither is safe.
+  #      This guard remains an early conservative rejection only. For Herdr,
+  #      `empty` never reserves the composer or authorizes a later typed send;
+  #      its backend admission operation owns that decision.
   identity=$(supervisor_omp_identity "$state")
   IFS=$'\t' read -r omp_bun omp_bin <<EOF
 $identity
@@ -1439,13 +1436,10 @@ EOF
     log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
     return 1
   fi
-  # (4) Type the digest ONCE, then submit with Enter (retry Enter only, never
-  # retype) via the shared submit primitive. Success = the backend confirms
-  # submit. An unconfirmed/unknown pane does NOT count as delivered, so the
-  # buffer is preserved (strict) rather than cleared.
-  # Dispatches through fm_backend_send_text_submit (bin/fm-backend.sh): for
-  # backend=tmux this calls fm_backend_tmux_send_text_submit, a verbatim
-  # re-export of fm_tmux_submit_core - byte-identical to calling it directly.
+  # (4) Herdr delegates admission to its backend owner below. tmux types the
+  # digest once, then submits via the shared primitive with Enter-only retries.
+  # Either backend must provide its own positive delivery proof before this
+  # function clears the durable escalation buffer.
   harness=${FM_SUPERVISOR_HARNESS:-}
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|omp|grok|kimi) ;;
@@ -1457,6 +1451,19 @@ EOF
       harness=
       ;;
   esac
+  if [ "$backend" = herdr ]; then
+    verdict=$(fm_backend_herdr_admit_away_supervisor "$target" "$msg")
+    case "$verdict" in
+      admitted) return 0 ;;
+      atomic-unavailable)
+        log "inject deferred: Herdr API has no verified atomic composer admission; no text typed"
+        ;;
+      *)
+        log "inject deferred: Herdr atomic composer admission not proven (verdict=${verdict:-unknown}); no text typed"
+        ;;
+    esac
+    return 1
+  fi
   retries=${FM_INJECT_CONFIRM_RETRIES:-$INJECT_CONFIRM_RETRIES_DEFAULT}
   sleep_s=${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}
   verdict=$(fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s" "" "$harness" "$omp_bun" "$omp_bin")
