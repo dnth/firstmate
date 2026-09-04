@@ -538,7 +538,7 @@ if (await handlers.get("before_agent_start")({ type: "before_agent_start" }, {})
 writeFileSync(`${process.env.FM_STATE_OVERRIDE}/.lock`, `${process.pid}\n`);
 // A native switch re-arms the watcher at once, and OMP starts its first wake as
 // an agent-initiated turn that never emits before_agent_start. The replacement
-// nudge therefore has to land in the new session's context at switch time,
+// nudge therefore has to land in the replacement session context at switch time,
 // through sendMessage, and nothing may stay staged for a later before_agent_start.
 const switchNudges = () => watcherMessages.filter((entry) => entry.message.customType === "firstmate-sessionstart-nudge");
 async function expectSwitchNudge(label, expectedTotal) {
