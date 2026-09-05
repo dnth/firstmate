@@ -370,4 +370,3 @@ Use `/stow` before an intentional reset when the conversation may hold durable k
 
 The current watcher reliability work combines always-on bash triage with a durable queue for actionable wakes, generation-bound post-handling acknowledgement, deterministic re-arm recovery after watcher downtime, a race-proof singleton lock, duplicate self-eviction, drain-time liveness assertion, and a self-verifying tracked-child arm wrapper.
 The presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) provides walk-away supervision via the `/afk` skill while reusing the same shared wake classifier as the always-on watcher.
-The upstream turn-end pane-churn absorb mode remains a deliberate future port; this fork currently relies on authoritative working proofs and the existing staleness cadence.
