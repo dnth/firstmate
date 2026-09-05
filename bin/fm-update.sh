@@ -95,20 +95,39 @@ FF_NUDGE_WINDOWS=""
 FF_SEEN_HOMES=""
 FF_RESTART_WINDOWS=""
 FF_STEER_WINDOWS=""
+FM_SECONDMATE_ENDPOINT_UNPROVABLE=0
 
 secondmate_agent_may_be_alive() {  # <id>
-  local id=$1 meta="$STATE/$1.meta" remote_host state=unreadable
+  local id=$1 meta="$STATE/$1.meta" remote_host state=unreadable validated=0 window binding
+  FM_SECONDMATE_ENDPOINT_UNPROVABLE=0
+  window=$(fm_meta_get "$meta" window)
+  binding=$(fm_meta_get "$meta" endpoint_task_id)
   remote_host=$(fm_meta_get "$meta" remote_host)
   if [ -n "$remote_host" ]; then
     state=$("$SCRIPT_DIR/fm-on.sh" "$id" \
       fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null) || state=unreadable
-  elif fm_backend_validate_task_endpoint "$meta" "$id" >/dev/null 2>&1; then
-    state=$(fm_backend_agent_state "$FM_BACKEND_VALIDATED_BACKEND" \
-      "$FM_BACKEND_VALIDATED_TARGET" 2>/dev/null) || state=unreadable
+    validated=1
+  else
+    case "$window" in *:"fm-$id") ;; *) FM_SECONDMATE_ENDPOINT_UNPROVABLE=1; return 0 ;; esac
+    if [ -n "$binding" ] && [ "$binding" != "$id" ]; then
+      FM_SECONDMATE_ENDPOINT_UNPROVABLE=1
+      return 0
+    fi
+    if fm_backend_validate_task_endpoint "$meta" "$id" >/dev/null 2>&1; then
+      validated=1
+      state=$(fm_backend_agent_state "$FM_BACKEND_VALIDATED_BACKEND" \
+        "$FM_BACKEND_VALIDATED_TARGET" "$meta" 2>/dev/null) || state=unreadable
+    fi
+  fi
+  if [ "$validated" -eq 0 ]; then
+    FM_SECONDMATE_ENDPOINT_UNPROVABLE=1
+    return 0
   fi
   case "$state" in
     dead|missing) return 1 ;;
-    *) return 0 ;;
+    unreadable|ambiguous) FM_SECONDMATE_ENDPOINT_UNPROVABLE=1; return 0 ;;
+    alive) return 0 ;;
+    *) FM_SECONDMATE_ENDPOINT_UNPROVABLE=1; return 0 ;;
   esac
 }
 
@@ -127,6 +146,10 @@ claim_settled_secondmate() {  # <id>
   local id=$1
   selector_claimed "fm-$id" && return 0
   secondmate_agent_may_be_alive "$id" || return 0
+  if [ "$FM_SECONDMATE_ENDPOINT_UNPROVABLE" -eq 1 ]; then
+    FF_STEER_WINDOWS="$FF_STEER_WINDOWS fm-$id"
+    return 0
+  fi
   if fm_secondmate_restart_capable "$STATE/$id.meta"; then
     FF_RESTART_WINDOWS="$FF_RESTART_WINDOWS fm-$id"
   else

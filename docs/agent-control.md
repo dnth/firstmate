@@ -54,7 +54,6 @@ It is not deterministic across the verified adapters: codex and grok resume only
 ## Transactional relaunch
 
 `relaunch` is the only verb that changes durable records, so it runs as a transaction with a journal at `state/<id>.control-relaunch`, the prior record preserved beside it, and a ship or scout's prior instructions preserved when a progress note is appended.
-A local `harness=omp` second mate is the one restart this plane does not perform: it owns session artifacts the launch owner refuses to launch over, so `bin/fm-omp-secondmate-restart-lib.sh` owns that sequence instead and its header is the single owner of it.
 
 1. **Resolve the profile.**
    An explicit `--harness`, `--model`, or `--effort` wins.
@@ -70,7 +69,9 @@ A local `harness=omp` second mate is the one restart this plane does not perform
    A ship or scout relaunch requires `--note`, because the replacement inherits the local copy but none of the conversation; the note is appended to the instructions it reads.
    A secondmate relaunch does not require one and never rewrites its standing charter.
 4. **Stop the old agent** through the `exit` verb, with its postcondition.
-5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded endpoint and worktree instead of creating either, clears the previous harness's per-task wiring, and arms a fresh busy generation.
+5. **Retire an OMP second mate's session artifacts**, only for that case, after both its endpoint and its home session owner are proven gone; `bin/fm-control-lib.sh`'s `fm_control_omp_secondmate_prepare_relaunch` owns that sequence and the two overrides that let a test drive it.
+   Without it the launch owner would refuse the replacement over its own predecessor's leftovers, so an OMP second mate launches fresh with `--secondmate` and its new endpoint is revalidated from the record the launch published rather than the retired one.
+6. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded endpoint and worktree instead of creating either, clears the previous harness's per-task wiring, and arms a fresh busy generation.
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
 
@@ -114,11 +115,11 @@ Backend capability comes from each adapter's real surface, not from a policy cho
 | cmux | yes | yes | yes | yes | no |
 | orca | no | yes | yes | no | no |
 
-Per-harness interrupt keys, repeat counts, composer clears, exit commands, and supported task kinds live in `bin/fm-control-lib.sh` and are exercised for every verified harness by `tests/fm-control.test.sh`.
+Per-harness interrupt keys, repeat counts, composer clears, exit commands, and supported task kinds live in `bin/fm-control-lib.sh`; the restart and update tests exercise the supported lifecycle contracts.
 The empirical basis for each adapter's value is the `harness-adapters` skill's verification record for that adapter.
 
 ## Verification
 
-- `tests/fm-control.test.sh` - the adapter contract for every verified harness, the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
-- `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, and rollback after a failed launch.
-- `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.
+- `tests/fm-secondmate-restart.test.sh` - the persist gate, restart capability routing, local and remote control-plane relaunches, and already-current versus unprovable runtime behavior.
+- `tests/fm-update.test.sh` - fast-forward classification, live secondmate restart/nudge sets, and stopped or malformed endpoint handling.
+- `tests/fm-remote-secondmate-lifecycle-e2e.test.sh` - host-local remote lifecycle control, including OMP endpoint binding and SSH unknown-state handling.

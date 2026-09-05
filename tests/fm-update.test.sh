@@ -227,6 +227,18 @@ test_unprovable_runtime_gets_fallback_nudge() {
   pass "T3c an unverifiable secondmate receives the fallback nudge"
 }
 
+test_malformed_endpoint_gets_fallback_nudge() {
+  local w out
+  w=$(new_world t3c-malformed)
+  add_sm "$w" sm1
+  sed -i 's/^window=main:fm-sm1$/window=malformed/' "$w/home/state/sm1.meta"
+  bump_origin "$w" instr
+  out=$(run_update "$w")
+  assert_contains "$out" "restart-secondmates: none" "a malformed endpoint must stay out of the restart set"
+  assert_contains "$out" "nudge-secondmates: fm-sm1" "a malformed endpoint must retain the fallback nudge"
+  pass "T3c malformed endpoint validation receives the fallback nudge"
+}
+
 # --- T3d: an already-stopped mate is left to startup recovery ---------------
 test_dead_secondmate_gets_no_action() {
   local w out
@@ -475,6 +487,7 @@ test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
 test_bin_only_advance_restarts
 test_unprovable_runtime_gets_fallback_nudge
+test_malformed_endpoint_gets_fallback_nudge
 test_dead_secondmate_gets_no_action
 test_legacy_remote_advance_restarts
 test_dirty_secondmate_skipped

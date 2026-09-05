@@ -2045,17 +2045,6 @@ if [ "$HARNESS" = omp ]; then
           ;;
       esac
     fi
-    if [ "$OMP_SECONDMATE_RELAUNCH" = 1 ] \
-      && { [ -e "$STATE/$ID.omp-started" ] || [ -L "$STATE/$ID.omp-started" ]; }; then
-      [ ! -L "$STATE/$ID.omp-started" ] || {
-        echo "error: refusing OMP secondmate relaunch because turn-start marker is a symlink: $STATE/$ID.omp-started" >&2
-        exit 1
-      }
-      rm -f "$STATE/$ID.omp-started" || {
-        echo "error: could not clear stale OMP secondmate turn-start marker: $STATE/$ID.omp-started" >&2
-        exit 1
-      }
-    fi
     for artifact in "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" "$STATE/$ID.omp-started"; do
       if [ -e "$artifact" ] || [ -L "$artifact" ]; then
         echo "error: refusing OMP secondmate launch because worker-only artifact exists at $artifact" >&2

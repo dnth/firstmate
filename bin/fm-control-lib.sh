@@ -63,7 +63,7 @@ fm_control_verb_allowed() {  # <verb>
 # than guessed at, exactly as a spawn on it would be.
 fm_control_harness_supported() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|omp) return 0 ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse) return 0 ;;
   esac
   return 1
 }
@@ -80,6 +80,7 @@ fm_control_harness_family() {  # <recorded-harness>
   case "${1-}" in
     pi) printf 'pi' ;;
     pi-signed) printf 'pi-signed' ;;
+    omp) printf 'omp' ;;
     claude*) printf 'claude' ;;
     codex*) printf 'codex' ;;
     opencode*) printf 'opencode' ;;
@@ -87,7 +88,6 @@ fm_control_harness_family() {  # <recorded-harness>
     kimi*) printf 'kimi' ;;
     cursor*) printf 'cursor' ;;
     gemini*) printf 'gemini' ;;
-    omp) printf 'omp' ;;
     muse*) printf 'muse' ;;
     *) return 1 ;;
   esac
@@ -114,7 +114,7 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
 # (`(esc to cancel, <n>s)`), and a single Escape was verified to cancel it.
 fm_control_interrupt_key() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|kimi|cursor|gemini|muse|omp) printf 'Escape' ;;
+    claude|codex|opencode|pi|pi-signed|omp|kimi|cursor|gemini|muse) printf 'Escape' ;;
     grok) printf 'C-c' ;;
     *) return 1 ;;
   esac
@@ -125,7 +125,7 @@ fm_control_interrupt_key() {  # <harness>
 fm_control_interrupt_repeat() {  # <harness>
   case "${1-}" in
     opencode) printf '2' ;;
-    claude|codex|pi|pi-signed|grok|kimi|cursor|gemini|muse|omp) printf '1' ;;
+    claude|codex|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse) printf '1' ;;
     *) return 1 ;;
   esac
 }
@@ -146,7 +146,7 @@ fm_control_interrupt_repeat() {  # <harness>
 fm_control_interrupt_clear_key() {  # <harness>
   case "${1-}" in
     muse) printf 'C-u' ;;
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|omp) ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini) ;;
     *) return 1 ;;
   esac
 }
@@ -158,7 +158,7 @@ fm_control_interrupt_ack_source() {  # <harness>
     # after an interrupt was measured as variable - sometimes seconds, sometimes
     # not within 20 - so a cancellation claim built on it would be unreliable.
     # Normal turn completion is prompt, which is what the busy fold depends on.
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini) printf 'none' ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini) printf 'none' ;;
     *) return 1 ;;
   esac
 }
@@ -170,6 +170,73 @@ fm_control_exit_command() {  # <harness>
     codex|pi|pi-signed|gemini) printf '/quit' ;;
     *) return 1 ;;
   esac
+}
+
+# The pid recorded as the owner of an OMP second mate's home session, or
+# nothing when the home names none. bin/fm-spawn.sh refuses a second mate launch
+# while that pid is still alive, so it is also the process whose absence has to
+# be proven before this function may retire anything.
+fm_control_omp_home_owner_pid() {  # <home-state>
+  local home_state=$1 pid=""
+  if [ -f "$home_state/.lock" ] && [ ! -L "$home_state/.lock" ]; then
+    IFS= read -r pid < "$home_state/.lock" || pid=""
+  fi
+  case "$pid" in
+    ''|*[!0-9]*|0|1) return 1 ;;
+  esac
+  printf '%s' "$pid"
+}
+
+# Retire the session artifacts an OMP second mate leaves behind, so its
+# replacement launch is not refused by its own predecessor's leftovers.
+#
+# The order is the contract. Both owners have to be proven gone FIRST - the
+# recorded endpoint, and the process holding the home session - because an
+# artifact removed under a live agent is indistinguishable from a fresh one, and
+# the launch owner would then accept a duplicate against a still-running mate.
+#
+# FM_RESTART_STOP_CMD replaces the signal and the liveness probe for the home
+# session owner (default: kill; invoked as "<cmd> <pid>" to stop it and
+# "<cmd> -0 <pid>" to probe it, so one override covers both halves). It exists so
+# tests/fm-secondmate-restart.test.sh can drive this sequence deterministically;
+# unset, this is an ordinary kill and the behavior is unchanged.
+#   FM_RESTART_STOP_WAIT  seconds to wait for the owner to go (default 30)
+#   FM_RESTART_STOP_POLL  seconds between absence probes (default 1)
+fm_control_omp_secondmate_prepare_relaunch() {  # <state> <id> <worktree> <backend> <target> <meta>
+  local state=$1 id=$2 worktree=$3 backend=$4 target=$5 meta=$6 omp_state
+  local stop_cmd stop_wait stop_poll owner_pid elapsed proven
+  omp_state=$(fm_backend_agent_state "$backend" "$target" "$meta" 2>/dev/null || printf 'unreadable')
+  case "$omp_state" in
+    missing) ;;
+    dead)
+      fm_backend_kill "$backend" "$target" || return 1
+      omp_state=$(fm_backend_agent_state "$backend" "$target" "$meta" 2>/dev/null || printf 'unreadable')
+      [ "$omp_state" = missing ] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  stop_cmd=${FM_RESTART_STOP_CMD:-kill}
+  stop_wait=${FM_RESTART_STOP_WAIT:-30}
+  stop_poll=${FM_RESTART_STOP_POLL:-1}
+  case "$stop_wait" in ''|*[!0-9]*) return 1 ;; esac
+  case "$stop_poll" in ''|*[!0-9]*|0) return 1 ;; esac
+  if owner_pid=$(fm_control_omp_home_owner_pid "$worktree/state"); then
+    "$stop_cmd" "$owner_pid" >/dev/null 2>&1 || true
+    proven=0
+    elapsed=0
+    while :; do
+      if ! "$stop_cmd" -0 "$owner_pid" >/dev/null 2>&1; then
+        proven=1
+        break
+      fi
+      [ "$elapsed" -lt "$stop_wait" ] || break
+      sleep "$stop_poll"
+      elapsed=$((elapsed + stop_poll))
+    done
+    [ "$proven" -eq 1 ] || return 1
+  fi
+  rm -f -- "$state/$id.omp-ext.ts" "$state/$id.omp-ready" \
+    "$state/$id.omp-started" "$worktree/state/.omp-primary-extension-loaded"
 }
 
 # Which named keys a backend adapter can deliver. Every session provider

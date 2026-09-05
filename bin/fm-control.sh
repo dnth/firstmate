@@ -315,8 +315,13 @@ fm_backend_validate "$BACKEND" || exit 1
 
 # --- shared helpers ---------------------------------------------------------
 
+# The durable record is part of the question for an adapter whose liveness is
+# proven from its own process identity: without it an OMP or Hermes endpoint
+# cannot be attributed and reads ambiguous, which would refuse every lifecycle
+# verb on a perfectly healthy agent. fm-control has already validated this
+# record, so passing it costs every other adapter nothing.
 agent_state() {
-  fm_backend_agent_state "$BACKEND" "$T"
+  fm_backend_agent_state "$BACKEND" "$T" "$META"
 }
 
 busy_verdict() {
@@ -825,20 +830,39 @@ do_relaunch() {
   exit_result=$(do_exit)
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
 
-  # The launch owner (fm-spawn --relaunch) clears the previous incarnation's
-  # per-task harness wiring before arming the new one, so nothing to do here.
+  if [ "$KIND" = secondmate ] && [ "$PRIOR_HARNESS" = omp ]; then
+    fm_control_omp_secondmate_prepare_relaunch "$STATE" "$ID" "$WT" "$BACKEND" "$T" "$META" \
+      || die "the OMP secondmate endpoint is not authoritatively absent after graceful exit"
+  fi
+
+  # The launch owner clears the previous incarnation's per-task harness wiring
+  # before arming the new one, so nothing to do here.
   RELAUNCH_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
   journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" "relaunch_tx=$RELAUNCH_TX"
-  spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
+  if [ "$KIND" = secondmate ] && [ "$PRIOR_HARNESS" = omp ]; then
+    spawn_args=("$ID" --secondmate --harness "$TARGET_HARNESS")
+  else
+    spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
+  fi
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
+  # FM_RESTART_SPAWN_CMD replaces the launch owner (default: bin/fm-spawn.sh) so
+  # tests/fm-secondmate-restart.test.sh can drive a relaunch without starting a
+  # real agent; unset, this is the ordinary launch and the behavior is unchanged.
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
-      "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
+      "${FM_RESTART_SPAWN_CMD:-$SCRIPT_DIR/fm-spawn.sh}" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1
   else
     [ "$(fm_meta_get "$META" control_relaunch_tx)" != "$RELAUNCH_TX" ] \
       || RELAUNCH_META_PUBLISHED=1
     die "the replacement agent for $ID could not be launched on $TARGET_HARNESS"
+  fi
+
+  if [ "$KIND" = secondmate ] && [ "$PRIOR_HARNESS" = omp ]; then
+    fm_backend_validate_task_endpoint "$META" "$ID" \
+      || die "the replacement agent for $ID published unusable endpoint metadata"
+    BACKEND=$FM_BACKEND_VALIDATED_BACKEND
+    T=$FM_BACKEND_VALIDATED_TARGET
   fi
 
   state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {

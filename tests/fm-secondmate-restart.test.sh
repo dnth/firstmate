@@ -22,10 +22,6 @@
 #      fast-forward is still named for restart and genuinely restarted, and one
 #      whose runtime cannot prove a restart keeps the honest re-read path with
 #      its agent left running.
-#   7. An OMP mate's restart runs its steps in the only safe order: stop the
-#      session owner, PROVE it gone, only then retire the session artifacts the
-#      launch owner refuses to launch over, then launch, then reconcile the
-#      durable record to the endpoint that launch actually published.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -110,6 +106,7 @@ case "${1:-}" in
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '> \n'; exit 0 ;;
   list-windows) [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
+  kill-window|kill-session) : > "$D/windows"; exit 0 ;;
 esac
 exit 0
 SH
@@ -766,12 +763,65 @@ test_already_current_unprovable_mate_stays_on_the_nudge_path() {
   pass "T16 an already-current mate with an unprovable runtime keeps the honest nudge path"
 }
 
+test_omp_secondmate_is_restart_capable() {
+  local dir meta
+  dir=$(new_case omp-capability)
+  meta="$dir/home/state/sm1.meta"
+  cat > "$meta" <<EOF
+window=fmses:fm-sm1
+endpoint_task_id=sm1
+worktree=$dir/sm1-home
+project=$dir/sm1-home
+harness=omp
+kind=secondmate
+mode=secondmate
+home=$dir/sm1-home
+EOF
+  mkdir -p "$dir/sm1-home/state"
+  if ! result=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" bash -c \
+    '. "$1/bin/fm-secondmate-restart-lib.sh"; fm_secondmate_restart_capable "$2"; printf "%s %s" "$FM_SECONDMATE_RESTART_HARNESS" "$FM_SECONDMATE_RESTART_PLACEMENT"' \
+    _ "$ROOT" "$meta"); then
+    fail "OMP secondmate capability was rejected"
+  fi
+  [ "$result" = "omp local" ] || fail "OMP secondmate did not resolve to a local restart: $result"
+  pass "OMP secondmate capability resolves to the restart path"
+}
+
+test_omp_secondmate_prepare_relaunch_clears_owned_markers() {
+  local dir smhome state meta log
+  dir=$(new_case omp-prepare)
+  smhome="$dir/omp-home"; state="$dir/home/state"; meta="$state/omp1.meta"; log="$dir/fake/omp-log"
+  mkdir -p "$smhome/state"
+  : > "$state/omp1.omp-ext.ts"; : > "$state/omp1.omp-ready"; : > "$state/omp1.omp-started"
+  : > "$smhome/state/.omp-primary-extension-loaded"
+  : > "$log"
+  cat > "$meta" <<EOF
+window=fm:omp1
+harness=omp
+kind=secondmate
+EOF
+  out=$(FAKE_OMP_ALIVE="$dir/fake/omp-alive" FAKE_OMP_LOG="$log" bash -c '
+    . "$1/bin/fm-control-lib.sh"
+    fm_backend_agent_state() { [ -e "$FAKE_OMP_ALIVE" ] && printf alive || printf missing; }
+    fm_backend_kill() { printf kill > "$FAKE_OMP_LOG"; rm -f "$FAKE_OMP_ALIVE"; }
+    fm_control_omp_secondmate_prepare_relaunch "$2" omp1 "$3" tmux fm:omp1 "$4"
+  ' _ "$ROOT" "$state" "$smhome" "$meta") || fail "OMP preparation rejected an absent endpoint"
+  [ "$out" = '' ] || fail "OMP preparation emitted unexpected output: $out"
+  [ ! -s "$log" ] || fail "OMP preparation killed an endpoint without a proven dead state"
+  [ ! -e "$state/omp1.omp-ext.ts" ] || fail "OMP extension artifact survived preparation"
+  [ ! -e "$state/omp1.omp-ready" ] || fail "OMP readiness artifact survived preparation"
+  [ ! -e "$state/omp1.omp-started" ] || fail "OMP started marker survived preparation"
+  [ ! -e "$smhome/state/.omp-primary-extension-loaded" ] || fail "OMP primary marker survived preparation"
+  pass "OMP relaunch preparation proves stop and clears owned markers"
+}
+
 # --- T17: an OMP mate's restart, driven end to end with both real side effects
 #          replaced -------------------------------------------------------------
-# The whole pass is real here - the capability decision, the persist gate, the
-# durable steering inbox, the parent-owned reply expectation, and the OMP restart
-# orchestration itself. Only the two things that would touch this machine are
-# replaced: the signal that stops the mate's session owner, and the launch owner.
+# The whole chain is real here - bin/fm-secondmate-restart.sh's capability
+# decision, real fm-send over the real OMP native doorbell, the parent-owned
+# persist gate, and bin/fm-control.sh's relaunch transaction with its OMP
+# preparation step. Only the two things that would touch this machine are
+# replaced: the signal that stops the home session owner, and the launch owner.
 # Both stubs record what the world looked like AT THE MOMENT they ran, which is
 # how the order below is asserted rather than assumed: the absence probe sees all
 # four session artifacts still on disk (so nothing was deleted while the owner
@@ -797,6 +847,8 @@ add_omp_mate() {  # <case-dir> <id>
   local dir=$1 id=$2 marker requests bash_bin i
   local home="$dir/home"
   add_local_mate "$dir" "$id" omp
+  printf 'omp' > "$dir/fake/command"
+  printf 'omp' > "$dir/fake/becomes"
   bash_bin=$(fm_test_realpath "$(command -v bash)")
   {
     echo "omp_bun=$bash_bin"
@@ -880,14 +932,16 @@ SH
   cat > "$sb/spawn" <<'SH'
 #!/usr/bin/env bash
 # Stands in for bin/fm-spawn.sh: records its argv and the world it was handed,
-# then publishes a fresh endpoint into the durable record the way a real launch
-# allocating a new pane would.
+# then publishes a fresh endpoint into the durable record and brings a pane up
+# on it, the way a real launch allocating a new pane would.
 set -u
 present=0
 while IFS= read -r m; do [ ! -e "$m" ] || present=$((present + 1)); done < "$FM_TEST_MARKERS"
 printf 'spawn %s markers_present=%d\n' "$*" "$present" >> "$FM_TEST_SPAWN_LOG"
 sed 's/^window=.*/window='"$FM_TEST_NEW_WINDOW"'/' "$FM_TEST_META" > "$FM_TEST_META.next"
 mv -f "$FM_TEST_META.next" "$FM_TEST_META"
+printf '%s\n' "${FM_TEST_NEW_WINDOW##*:}" > "$FM_FAKE_DIR/windows"
+printf 'omp' > "$FM_FAKE_DIR/command"
 exit 0
 SH
   chmod +x "$sb/stop" "$sb/spawn"
@@ -896,20 +950,23 @@ SH
   export FM_TEST_SPAWN_LOG="$dir/spawn.log"
   export FM_TEST_OWNER_GONE="$dir/owner-gone"
   export FM_TEST_META="$dir/home/state/$id.meta"
-  export FM_TEST_NEW_WINDOW="fmses:reborn-$id"
+  export FM_TEST_NEW_WINDOW="reborn:fm-$id"
   export FM_RESTART_STOP_CMD="$sb/stop"
   export FM_RESTART_SPAWN_CMD="$sb/spawn"
+  export FM_RESTART_STOP_POLL=1
   printf '%s\n' "$pid" > "$dir/$id-home/state/.lock"
 }
 
 clear_omp_restart_stubs() {
   unset FM_TEST_MARKERS FM_TEST_STOP_LOG FM_TEST_SPAWN_LOG FM_TEST_OWNER_GONE
   unset FM_TEST_META FM_TEST_NEW_WINDOW FM_RESTART_STOP_CMD FM_RESTART_SPAWN_CMD
+  unset FM_RESTART_STOP_POLL
 }
 
 test_omp_restart_stops_proves_cleans_then_relaunches() {
   local dir out rc owner marker stop_first stop_probe spawn_line
   dir=$(new_case omp)
+  printf 'omp\n' > "$dir/home/config/secondmate-harness"
   add_omp_mate "$dir" sm1
   owner=987654
   make_omp_restart_stubs "$dir" sm1 "$owner"
@@ -940,14 +997,14 @@ test_omp_restart_stops_proves_cleans_then_relaunches() {
 
   # 4. The replacement went to the launch owner, on a world it can accept.
   spawn_line=$(sed -n 1p "$dir/spawn.log")
-  [ "$spawn_line" = "spawn sm1 --secondmate markers_present=0" ] \
+  [ "$spawn_line" = "spawn sm1 --secondmate --harness omp markers_present=0" ] \
     || fail "the replacement launch was not invoked on a cleaned home: '$spawn_line'"$'\n'"$(cat "$dir/spawn.log")"
   [ "$(wc -l < "$dir/spawn.log" | tr -d '[:space:]')" = 1 ] \
     || fail "the restart launched more than one replacement"$'\n'"$(cat "$dir/spawn.log")"
 
   # 5. The durable record names the endpoint the launch published, and no longer
   # the retired one.
-  assert_grep "window=fmses:reborn-sm1" "$dir/home/state/sm1.meta" \
+  assert_grep "window=reborn:fm-sm1" "$dir/home/state/sm1.meta" \
     "the durable record was not reconciled to the endpoint the launch published"
   assert_no_grep "window=fmses:fm-sm1" "$dir/home/state/sm1.meta" \
     "the durable record still names the retired endpoint"
@@ -970,6 +1027,8 @@ test_unpublished_worker_result_is_accounted_for
 test_result_published_while_reaping_is_honored
 test_already_current_mate_restarts_end_to_end
 test_already_current_unprovable_mate_stays_on_the_nudge_path
+test_omp_secondmate_is_restart_capable
+test_omp_secondmate_prepare_relaunch_clears_owned_markers
 test_omp_restart_stops_proves_cleans_then_relaunches
 
 echo "# all fm-secondmate-restart tests passed"

@@ -48,15 +48,9 @@
 # profile, the request text, the bound, the failure vocabulary, and this report
 # are all computed here in the primary and are identical for both.
 #
-# A local OMP mate is the one restart whose mechanics differ, because it owns
-# session artifacts no other adapter has and the launch owner refuses to launch
-# over them; bin/fm-omp-secondmate-restart-lib.sh owns that sequence and reports
-# in this same shape. Everything above - candidacy, the persist gate, the bound,
-# and the vocabulary - is unchanged for it.
-#
 # Nothing here forces, stashes, or discards anything. bin/fm-control.sh owns the
-# generic restart transaction, its checkpoint, its journal, and its rollback; a
-# refusal before the agent is stopped leaves the mate running exactly as it was.
+# restart transaction, its checkpoint, its journal, and its rollback; a refusal
+# before the agent is stopped leaves the mate running exactly as it was.
 #
 # Restart candidacy itself belongs to bin/fm-update.sh, which knows which homes
 # the update pass actually left on the target commit; this command re-checks
@@ -75,7 +69,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 usage() {
-  sed -n '2,71{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,65{s/^# \{0,1\}//;p;}' "$0"
 }
 
 case "${1:-}" in
@@ -93,8 +87,6 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-secondmate-restart-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-restart-lib.sh"
-# shellcheck source=bin/fm-omp-secondmate-restart-lib.sh
-. "$SCRIPT_DIR/fm-omp-secondmate-restart-lib.sh"
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
@@ -174,13 +166,6 @@ restart_mate() {  # <array-index>
     restart_out=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-on.sh" "$id" \
       fm-remote-secondmate-control.sh relaunch \
       "$id" "${HARNESS[i]}" "${MODEL[i]:-default}" "${EFFORT[i]:-default}" < /dev/null 2>&1)
-    restart_rc=$?
-  elif [ "${HARNESS[i]}" = omp ]; then
-    # An OMP mate carries session artifacts the generic control-plane relaunch
-    # does not own, and bin/fm-spawn.sh refuses a second mate launch while any of
-    # them survives. bin/fm-omp-secondmate-restart-lib.sh owns that stop, absence
-    # proof, artifact retirement, and launch, and reports in this same shape.
-    restart_out=$(fm_omp_secondmate_restart "$id" 2>&1)
     restart_rc=$?
   else
     restart_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
@@ -360,15 +345,7 @@ while [ "$((pending_count + restart_active_count))" -gt 0 ]; do
       i=$((i + 1))
       continue
     fi
-    if [ "$now" -ge "${DEADLINE[i]}" ] && [ "$restart_active_count" -gt 0 ]; then
-      # Let an already-authorized replacement publish its stop/start outcome
-      # before sending a fallback steer for another mate.  This does not block
-      # persistence polling or the replacement worker; it only keeps the
-      # observable lifecycle order honest when a slow relaunch overlaps a
-      # timeout.
-      DEADLINE[i]=$((now + PERSIST_POLL))
-      [ "$next_wait" -le "$PERSIST_POLL" ] || next_wait=$PERSIST_POLL
-    elif [ "$now" -ge "${DEADLINE[i]}" ]; then
+    if [ "$now" -ge "${DEADLINE[i]}" ]; then
       fall_back_to_nudge "${IDS[$i]}" \
         "it did not confirm within ${PERSIST_WAIT}s that its open work is written down, so its conversation was not spent"
       PLAN[i]="done"
