@@ -35,8 +35,9 @@ The slash handler returns a fast ack without waiting for Firstmate to finish the
 
 An outbox watcher drains `state/ext-outbox/` through `bin/fm-ext-outbox.sh`.
 Unsent payloads retry after a gateway restart.
-A definite send failure before a successful Discord response deletes the posting marker so that generation can retry.
-A posting marker without a receipt is refused so an ambiguous crash after the post started cannot double-post.
+A transient definite send failure (HTTP 429 or 5xx) before a successful Discord response deletes the posting marker so that generation can retry.
+A permanent 4xx records a terminal failed marker so pending stops retrying that generation.
+A posting marker without a receipt is refused so an ambiguous crash or transport error after Discord may have accepted the post cannot double-post.
 Set `DISCORD_BOT_TOKEN` (or `HERMES_DISCORD_TOKEN`) for Discord REST delivery.
 Firstmate core has no Discord library.
 

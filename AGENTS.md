@@ -123,7 +123,7 @@ state/               volatile runtime signals; gitignored
   x-outbox/          generated X-mode dry-run reply and dismiss previews; inspect it when FMX_DRY_RUN is set (section 14)
   ext-inbox/         generated local Communication Officer pending request payloads; ext-respond drains it when the ext-bridge is on
   ext-context/       generated local Communication Officer destination context and one-wake offer markers, keyed by request slug
-  ext-outbox/        generated local Communication Officer outbound ack/answer/followup/final payloads plus posting markers and receipts
+  ext-outbox/        generated local Communication Officer outbound ack/answer/followup/final payloads plus posting markers, receipts, and terminal-failure markers
   public-followup/   generated private transport for promised public replies: commitment registrations, typed terminal-result inbox, accepted/rejected ledgers (section 14; bin/fm-public-followup.sh)
   x-poll.error x-poll.claim-error  generated X-mode relay and offer-claim diagnostic dedupe markers
   .wake-queue        durable queued wakes retained until post-handling acknowledgement: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload

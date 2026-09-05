@@ -449,6 +449,14 @@ fm_ext_outbox_receipt_basename() {
   printf '%s.%s.%s.receipt.json\n' "$slug" "$kind" "$generation"
 }
 
+fm_ext_outbox_failed_basename() {
+  local slug=$1 kind=$2 generation=$3
+  fm_ext_slug_valid "$slug" || return 1
+  fm_ext_kind_valid "$kind" || return 1
+  fm_ext_generation_valid "$generation" || return 1
+  printf '%s.%s.%s.failed.json\n' "$slug" "$kind" "$generation"
+}
+
 # fm_ext_outbox_schema_valid <file>: payload has required fields and matching slug.
 fm_ext_outbox_schema_valid() {
   local file=$1
@@ -470,16 +478,21 @@ fm_ext_outbox_schema_valid() {
 }
 
 # Begin delivery: CAS the posting marker. Returns 0 on claim, 1 when a valid
-# receipt already exists (idempotent success), 3 when a posting marker exists
-# without a receipt (mid-send refuse), 2 on validation/publication failure.
+# receipt already exists (idempotent success), 4 when a terminal failed marker
+# exists, 3 when a posting marker exists without a receipt (mid-send refuse),
+# 2 on validation/publication failure.
 fm_ext_outbox_begin() {
-  local dir=$1 slug=$2 kind=$3 generation=$4 payload posting receipt now rc
+  local dir=$1 slug=$2 kind=$3 generation=$4 payload posting receipt failed now rc
   payload=$(fm_ext_outbox_basename "$slug" "$kind" "$generation") || return 2
   posting=$(fm_ext_outbox_posting_basename "$slug" "$kind" "$generation") || return 2
   receipt=$(fm_ext_outbox_receipt_basename "$slug" "$kind" "$generation") || return 2
+  failed=$(fm_ext_outbox_failed_basename "$slug" "$kind" "$generation") || return 2
   fm_ext_private_artifact_file_valid "$dir" "$payload" 600 || return 2
   if fm_ext_private_artifact_file_valid "$dir" "$receipt" 600; then
     return 1
+  fi
+  if fm_ext_private_artifact_file_valid "$dir" "$failed" 600; then
+    return 4
   fi
   if fm_ext_private_artifact_file_valid "$dir" "$posting" 600; then
     return 3
@@ -498,6 +511,9 @@ fm_ext_outbox_begin() {
     1)
       if fm_ext_private_artifact_file_valid "$dir" "$receipt" 600; then
         return 1
+      fi
+      if fm_ext_private_artifact_file_valid "$dir" "$failed" 600; then
+        return 4
       fi
       return 3
       ;;
@@ -518,21 +534,63 @@ fm_ext_outbox_receipt() {
   return "$rc"
 }
 
-# Drop the posting marker after a definite send failure that happened before a
-# successful response. Returns 0 when the generation is retryable (no marker,
-# or this caller deleted a valid posting marker), 1 when a receipt already
-# exists (do not reopen), and 2 on validation or deletion failure. An
-# ambiguous crash after the post started keeps the marker; this helper is
-# only for the definite-failure path.
+# Drop the posting marker after a transient definite send failure (HTTP 429
+# or 5xx) that happened before a successful response. Returns 0 when the
+# generation is retryable (no marker, or this caller deleted a valid posting
+# marker), 1 when a receipt or terminal failed marker already exists (do not
+# reopen), and 2 on validation or deletion failure. An ambiguous crash or
+# transport error after the post started keeps the marker; this helper is
+# only for the transient definite-failure path.
 fm_ext_outbox_abort() {
-  local dir=$1 slug=$2 kind=$3 generation=$4 posting receipt
+  local dir=$1 slug=$2 kind=$3 generation=$4 posting receipt failed
   posting=$(fm_ext_outbox_posting_basename "$slug" "$kind" "$generation") || return 2
   receipt=$(fm_ext_outbox_receipt_basename "$slug" "$kind" "$generation") || return 2
+  failed=$(fm_ext_outbox_failed_basename "$slug" "$kind" "$generation") || return 2
   if fm_ext_private_artifact_file_valid "$dir" "$receipt" 600; then
+    return 1
+  fi
+  if fm_ext_private_artifact_file_valid "$dir" "$failed" 600; then
     return 1
   fi
   fm_ext_private_artifact_remove "$dir" "$posting" 600 || return 2
   return 0
+}
+
+# Record a terminal delivery failure so pending will not retry this generation.
+# Returns 0 on create, 1 when a valid receipt already exists (do not reopen),
+# 4 when a valid failed marker already exists (idempotent), and 2 on failure.
+# Removes the posting marker after a successful failed publication so a later
+# begin sees terminal-failed rather than mid-delivery.
+fm_ext_outbox_fail() {
+  local dir=$1 slug=$2 kind=$3 generation=$4 reason_json=$5 failed posting receipt rc
+  failed=$(fm_ext_outbox_failed_basename "$slug" "$kind" "$generation") || return 2
+  posting=$(fm_ext_outbox_posting_basename "$slug" "$kind" "$generation") || return 2
+  receipt=$(fm_ext_outbox_receipt_basename "$slug" "$kind" "$generation") || return 2
+  [ -n "$reason_json" ] || return 2
+  if fm_ext_private_artifact_file_valid "$dir" "$receipt" 600; then
+    return 1
+  fi
+  if fm_ext_private_artifact_file_valid "$dir" "$failed" 600; then
+    fm_ext_private_artifact_remove "$dir" "$posting" 600 || true
+    return 4
+  fi
+  printf '%s\n' "$reason_json" \
+    | fm_ext_private_artifact_publish_stdin_once "$dir" "$failed" 600
+  rc=$?
+  case "$rc" in
+    0)
+      fm_ext_private_artifact_remove "$dir" "$posting" 600 || true
+      return 0
+      ;;
+    1)
+      if fm_ext_private_artifact_file_valid "$dir" "$receipt" 600; then
+        return 1
+      fi
+      fm_ext_private_artifact_remove "$dir" "$posting" 600 || true
+      return 4
+      ;;
+    *) return 2 ;;
+  esac
 }
 
 # --- poll shim --------------------------------------------------------------

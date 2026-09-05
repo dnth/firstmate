@@ -2,11 +2,13 @@
 
 Posts pending ``state/ext-outbox`` payloads to the Discord destination stored
 in each payload and records receipts through ``bin/fm-ext-outbox.sh``.
-Unsent payloads (no posting marker, no receipt) are retried after restart.
-A definite send failure before a successful response deletes the posting
-marker so that generation can retry.
-A posting marker without a receipt is refused so an ambiguous crash after
-the post started cannot double-post.
+Unsent payloads (no posting marker, no receipt, no terminal failed marker)
+are retried after restart.
+A transient definite send failure (HTTP 429 or 5xx) before a successful
+response deletes the posting marker so that generation can retry.
+A permanent 4xx records a terminal failed marker so pending stops retrying.
+A posting marker without a receipt is refused so an ambiguous crash or
+transport error after Discord may have accepted the post cannot double-post.
 """
 
 from __future__ import annotations
@@ -30,6 +32,48 @@ SendFn = Callable[[dict], dict]
 
 _WATCHER_STARTED = False
 _WATCHER_LOCK = threading.Lock()
+_TRANSIENT_HTTP = {429, 500, 502, 503, 504}
+
+
+class DiscordSendError(Exception):
+    """Classified Discord send outcome for outbox delivery."""
+
+    def __init__(self, outcome: str, message: str = "", http_code: int | None = None):
+        super().__init__(message or outcome)
+        self.outcome = outcome
+        self.http_code = http_code
+
+
+def classify_http_code(code: int) -> str:
+    if code in _TRANSIENT_HTTP or code >= 500:
+        return "transient"
+    if code == 408:
+        return "ambiguous"
+    if 400 <= code < 500:
+        return "permanent"
+    return "ambiguous"
+
+
+def classify_send_failure(exc: BaseException) -> str:
+    if isinstance(exc, DiscordSendError):
+        return exc.outcome
+    if isinstance(exc, urllib.error.HTTPError):
+        return classify_http_code(exc.code)
+    if isinstance(exc, (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError)):
+        return "ambiguous"
+    if isinstance(exc, RuntimeError) and "missing DISCORD_BOT_TOKEN" in str(exc):
+        return "transient"
+    return "ambiguous"
+
+
+def failure_reason(exc: BaseException) -> dict:
+    http_code = getattr(exc, "http_code", None)
+    if http_code is None and isinstance(exc, urllib.error.HTTPError):
+        http_code = exc.code
+    reason = {"ok": False, "reason": str(exc)}
+    if http_code is not None:
+        reason["http_code"] = http_code
+    return reason
 
 
 def outbox_cli() -> Path:
@@ -86,6 +130,8 @@ def begin_delivery(payload: dict, home: Path | None = None) -> str:
         return "already-receipted"
     if result.returncode == 3:
         return "mid-delivery"
+    if result.returncode == 4:
+        return "terminal-failed"
     raise RuntimeError(result.stderr.strip() or "begin failed")
 
 
@@ -116,7 +162,7 @@ def abort_delivery(payload: dict, home: Path | None = None) -> str:
 
 def record_receipt(payload: dict, receipt: dict, home: Path | None = None) -> str:
     home = home or firstmate_home()
-    with _temp_receipt(receipt) as receipt_path:
+    with _temp_json(receipt) as receipt_path:
         result = subprocess.run(
             [
                 str(outbox_cli()),
@@ -140,15 +186,43 @@ def record_receipt(payload: dict, receipt: dict, home: Path | None = None) -> st
     raise RuntimeError(result.stderr.strip() or "receipt failed")
 
 
-class _temp_receipt:
-    def __init__(self, receipt: dict):
-        self.receipt = receipt
+def record_failed(payload: dict, reason: dict, home: Path | None = None) -> str:
+    home = home or firstmate_home()
+    with _temp_json(reason) as reason_path:
+        result = subprocess.run(
+            [
+                str(outbox_cli()),
+                "fail",
+                "--slug",
+                payload["slug"],
+                "--kind",
+                payload["kind"],
+                "--generation",
+                str(payload["generation"]),
+                "--reason-file",
+                reason_path,
+            ],
+            check=False,
+            env=_env_for(home),
+            capture_output=True,
+            text=True,
+        )
+    if result.returncode in (0, 4):
+        return "terminal-failed"
+    if result.returncode == 1:
+        return "already-receipted"
+    raise RuntimeError(result.stderr.strip() or "fail failed")
+
+
+class _temp_json:
+    def __init__(self, body: dict):
+        self.body = body
         self.path = ""
 
     def __enter__(self) -> str:
         fd, self.path = _mktemp()
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(self.receipt))
+            handle.write(json.dumps(self.body))
         return self.path
 
     def __exit__(self, *args) -> None:
@@ -169,7 +243,7 @@ def discord_send(payload: dict) -> dict:
     """Post one outbox payload to Discord REST. No Discord library."""
     token = os.environ.get("DISCORD_BOT_TOKEN") or os.environ.get("HERMES_DISCORD_TOKEN")
     if not token:
-        raise RuntimeError("missing DISCORD_BOT_TOKEN")
+        raise DiscordSendError("transient", "missing DISCORD_BOT_TOKEN")
     channel = payload["thread_id"] or payload["channel_id"]
     body = json.dumps({"content": payload["text"]}).encode("utf-8")
     request = urllib.request.Request(
@@ -183,9 +257,18 @@ def discord_send(payload: dict) -> dict:
     )
     try:
         with urllib.request.urlopen(request, timeout=15) as response:
-            data = json.loads(response.read().decode("utf-8") or "{}")
+            raw = response.read().decode("utf-8") or "{}"
     except urllib.error.HTTPError as err:
-        raise RuntimeError(f"discord HTTP {err.code}") from err
+        outcome = classify_http_code(err.code)
+        raise DiscordSendError(outcome, f"discord HTTP {err.code}", err.code) from err
+    except urllib.error.URLError as err:
+        raise DiscordSendError("ambiguous", f"discord transport: {err}") from err
+    except (TimeoutError, OSError) as err:
+        raise DiscordSendError("ambiguous", f"discord transport: {err}") from err
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as err:
+        raise DiscordSendError("ambiguous", "discord HTTP 200 with invalid JSON") from err
     return {
         "ok": True,
         "discord_message_id": str(data.get("id") or ""),
@@ -201,11 +284,19 @@ def deliver_one(path: Path, send: SendFn | None = None, home: Path | None = None
     sender = send or discord_send
     try:
         receipt = sender(payload)
-    except Exception:
-        abort_status = abort_delivery(payload, home=home)
-        if abort_status == "already-receipted":
-            return abort_status
-        return "failed"
+    except Exception as err:
+        outcome = classify_send_failure(err)
+        if outcome == "transient":
+            abort_status = abort_delivery(payload, home=home)
+            if abort_status == "already-receipted":
+                return abort_status
+            return "failed"
+        if outcome == "permanent":
+            fail_status = record_failed(payload, failure_reason(err), home=home)
+            if fail_status == "already-receipted":
+                return fail_status
+            return "terminal-failed"
+        return "mid-delivery"
     receipt.setdefault("ok", True)
     record_receipt(payload, receipt, home=home)
     return "sent"
