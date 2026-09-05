@@ -89,5 +89,7 @@ This touches only the firstmate repo and its own worktrees, never anything under
   It is the same sanctioned self-write as the fleet sync.
 - **Nothing with work in it is disrupted.**
   A local or remote second mate gets a tracked-files fast-forward only when its own checkout is safe to advance.
-  Restart replaces the agent in the same home and endpoint after open conversational work is persisted, and never forces or discards work.
+  Restart replaces the agent in the same home after open conversational work is persisted.
+  Backends normally retain the endpoint; OMP secondmates may receive a fresh endpoint, which is revalidated from the replacement metadata before success is reported.
+  Restart never forces or discards work.
   A skipped or unprovable target remains on the honest no-restart path.

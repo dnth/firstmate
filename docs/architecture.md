@@ -365,7 +365,7 @@ Upstream PR #3614 introduced persist-gated secondmate restarts for changed instr
 Upstream PR #3690 widened that action to every live secondmate left on the target commit, including already-current and bin-only homes, because launch-time wiring is not represented by a git diff.
 This fork already had guarded local and remote fast-forward convergence, inherited-material propagation, liveness classification, and SSH exit-255 unknown-state protection.
 The port keeps those fork-owned paths, adds the shared restart control plane and settled-home hook, and preserves remote routing by invoking the host-local control plane without local replacement on transport failure.
-The upstream one-time rollout note is retained in the update skill, while fork-specific OMP refresh and newer remote inheritance behavior remain unchanged.
+The update skill owns the operator procedure, while fork-specific OMP refresh and newer remote inheritance behavior remain unchanged.
 
 ## Restart-proof
 

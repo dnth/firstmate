@@ -32,7 +32,7 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | --- | --- | --- |
 | `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
 | `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. |
-| `relaunch` | Replace the running agent with a new one in the same endpoint and worktree, on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the recorded endpoint, and the durable record names the harness that is actually running. |
+| `relaunch` | Replace the running agent with a new one in the same worktree, reusing the endpoint when the backend supports it or allocating a fresh endpoint for OMP secondmates, on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the endpoint published by the replacement launch, and the durable record names the harness and endpoint that are actually running. |
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
 Interrupt never rewrites busy state as proof of its own success.
@@ -71,7 +71,7 @@ It is not deterministic across the verified adapters: codex and grok resume only
 4. **Stop the old agent** through the `exit` verb, with its postcondition.
 5. **Retire an OMP second mate's session artifacts**, only for that case, after both its endpoint and its home session owner are proven gone; `bin/fm-control-lib.sh`'s `fm_control_omp_secondmate_prepare_relaunch` owns that sequence and the two overrides that let a test drive it.
    Without it the launch owner would refuse the replacement over its own predecessor's leftovers, so an OMP second mate launches fresh with `--secondmate` and its new endpoint is revalidated from the record the launch published rather than the retired one.
-6. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded endpoint and worktree instead of creating either, clears the previous harness's per-task wiring, and arms a fresh busy generation.
+6. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded worktree and normally the endpoint, while allowing OMP secondmates to publish a fresh endpoint after clearing the previous harness's per-task wiring and arming a fresh busy generation.
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
 
