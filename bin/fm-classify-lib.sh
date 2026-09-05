@@ -718,8 +718,11 @@ EOF
 
 status_span_first_actionable() {  # <status-file> <start-offset>
   local record rc rest
-  record=$(status_span_first_actionable_record "$1" "${2:-0}")
-  rc=$?
+  if record=$(status_span_first_actionable_record "$1" "${2:-0}"); then
+    rc=0
+  else
+    rc=$?
+  fi
   if [ "$rc" -eq 0 ]; then
     rest=${record#*$'\t'}
     printf '%s' "${rest#*$'\t'}"
@@ -752,13 +755,13 @@ status_snapshot_latest_event() {  # <status-file> <captured-end> <captured-ident
     IFS= read -r line
     read_rc=$?
     [ "$read_rc" -eq 0 ] || [ -n "$line" ] || break
+    line_bytes=$(LC_ALL=C printf '%s' "$line" | wc -c) || { rm -f "$scratch"; return 1; }
+    line_bytes=${line_bytes//[[:space:]]/}
+    case "$line_bytes" in ''|*[!0-9]*) rm -f "$scratch"; return 1 ;; esac
+    line_end=$((line_end + line_bytes))
+    [ "$read_rc" -eq 0 ] && line_end=$((line_end + 1))
     case "$line" in
       *[![:space:]]*)
-        line_bytes=$(LC_ALL=C printf '%s' "$line" | wc -c) || { rm -f "$scratch"; return 1; }
-        line_bytes=${line_bytes//[[:space:]]/}
-        case "$line_bytes" in ''|*[!0-9]*) rm -f "$scratch"; return 1 ;; esac
-        line_end=$((line_end + line_bytes))
-        [ "$read_rc" -eq 0 ] && line_end=$((line_end + 1))
         if status_is_captain_relevant "$line"; then
           latest=$line
           latest_endpoint=$((start + line_end))

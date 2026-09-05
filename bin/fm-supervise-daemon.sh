@@ -351,13 +351,18 @@ _collapse_newlines() {  # <text>
 # summary firstmate would otherwise have to re-read.
 
 daemon_status_seen_offset() {  # <state> <status-file>
-  local state=$1 f=$2 raw size marker task
+  local state=$1 f=$2 raw size marker task stored_ident current_ident
   task=${f##*/}; task=${task%.status}
   marker="$state/.subsuper-seen-status-$(_stale_key "$task")"
   raw=$(cat "$marker.offset" 2>/dev/null || true)
   size=${raw%%@*}
   case "$raw" in *'@'*|'') ;; *) size=0 ;; esac
   case "$size" in ''|*[!0-9]*) size=0 ;; esac
+  case "$raw" in *'@'*) stored_ident=${raw#*@} ;; *) stored_ident= ;; esac
+  if [ -n "$stored_ident" ]; then
+    current_ident=$(_fm_open_decisions_file_ident "$f" 2>/dev/null || true)
+    [ -n "$current_ident" ] && [ "$stored_ident" = "$current_ident" ] || size=0
+  fi
   printf '%s' "$size"
 }
 
@@ -369,8 +374,11 @@ classify_signal() {  # <reason-after-colon> <state>
     case "$f" in
       *.status)
         start=$(daemon_status_seen_offset "$state" "$f")
-        record=$(status_span_first_actionable_record "$f" "$start")
-        rc=$?
+        if record=$(status_span_first_actionable_record "$f" "$start"); then
+          rc=0
+        else
+          rc=$?
+        fi
         last=$(last_status_line "$f")
         [ -n "$last" ] && distilled="${distilled}$(basename "$f"): ${last} | "
         task=${f##*/}; task=${task%.status}
@@ -657,9 +665,6 @@ mark_escalated_seen() {  # <kind> <arg> <state>
     signal)
       for f in $arg; do
         [ -e "$f" ] || continue
-        last=$(last_status_line "$f")
-        [ -n "$last" ] || continue
-        status_is_captain_relevant "$last" || continue
         task=$(basename "$f"); task="${task%.status}"
         endpoint=''; ident=''
         while IFS=$(printf '\t') read -r _f endpoint ident; do
@@ -667,8 +672,11 @@ mark_escalated_seen() {  # <kind> <arg> <state>
         done <<EOF
 ${FM_SIGNAL_SURFACE_ENDPOINTS:-}
 EOF
-        stage_or_mark_status_seen "$state" "$task" "$last"
         [ -n "$endpoint" ] && [ -n "$ident" ] && stage_or_mark_status_offset "$state" "$task" "$endpoint" "$ident"
+        last=$(last_status_line "$f")
+        [ -n "$last" ] || continue
+        status_is_captain_relevant "$last" || continue
+        stage_or_mark_status_seen "$state" "$task" "$last"
       done ;;
     stale)
       task=$(window_to_task "$arg" "$state")
@@ -701,8 +709,11 @@ capture_and_commit_signal_endpoints() {  # <state> <space-separated-status-files
   for f in $paths; do
     case "$f" in *.status) ;; *) continue ;; esac
     [ -e "$f" ] || continue
-    record=$(status_span_first_actionable_record "$f" "$(daemon_status_seen_offset "$state" "$f")")
-    rc=$?
+    if record=$(status_span_first_actionable_record "$f" "$(daemon_status_seen_offset "$state" "$f")"); then
+      rc=0
+    else
+      rc=$?
+    fi
     [ "$rc" -le 1 ] && [ -n "$record" ] || continue
     endpoint=${record%%$'\t'*}; rest=${record#*$'\t'}; ident=${rest%%$'\t'*}
     case "$endpoint" in ''|*[!0-9]*) continue ;; esac
@@ -1450,8 +1461,11 @@ housekeeping() {  # <state>
     for f in "$state"/*.status; do
       [ -e "$f" ] || continue
       task=$(basename "$f"); task=${task%.status}
-      record=$(status_span_first_actionable_record "$f" "$(daemon_status_seen_offset "$state" "$f")")
-      rc=$?
+      if record=$(status_span_first_actionable_record "$f" "$(daemon_status_seen_offset "$state" "$f")"); then
+        rc=0
+      else
+        rc=$?
+      fi
       if [ "$rc" -eq 2 ]; then
         escalate_add "$state" "$(basename "$f"): unreadable status span (catch-all scan)"
         continue

@@ -1503,12 +1503,17 @@ fm_wake_signal_offset_path() {  # <state> <status-file>
 }
 
 fm_wake_signal_seen_size() {  # <state> <file>
-  local marker raw size
+  local marker raw size stored_ident current_ident
   marker=$(fm_wake_signal_seen_path "$1" "$2")
   case "$2" in
     *.status)
       raw=$(cat "$(fm_wake_signal_offset_path "$1" "$2")" 2>/dev/null || true)
       case "$raw" in *'@'*) size=${raw%%@*} ;; *) size= ;; esac
+      case "$raw" in *'@'*) stored_ident=${raw#*@} ;; *) stored_ident= ;; esac
+      if [ -n "$stored_ident" ]; then
+        current_ident=$(_fm_open_decisions_file_ident "$2" 2>/dev/null || true)
+        [ -n "$current_ident" ] && [ "$stored_ident" = "$current_ident" ] || size=0
+      fi
       case "$size" in ''|*[!0-9]*)
         raw=$(cat "$marker" 2>/dev/null || true)
         # Legacy marker is inode:size:mtime (older tests also use that shape).

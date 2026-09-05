@@ -791,8 +791,11 @@ signal_files_actionable() {  # <status-file> ...
     case "$f" in *.status) ;; *) continue ;; esac
     [ -e "$f" ] || [ -L "$f" ] || continue
     start=$(fm_wake_signal_seen_size "$STATE" "$f")
-    record=$(status_span_first_actionable_record "$f" "$start")
-    rc=$?
+    if record=$(status_span_first_actionable_record "$f" "$start"); then
+      rc=0
+    else
+      rc=$?
+    fi
     [ "$rc" -eq 1 ] && [ -z "$record" ] && continue
     if [ "$rc" -eq 2 ]; then
       found=0
