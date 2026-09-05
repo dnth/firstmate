@@ -1467,6 +1467,76 @@ fm_wake_turnend_live_marker() {  # <state-dir> <id>
   printf '%s/%s.turn-ended.%s\n' "$state" "$id" "$meta_gen"
 }
 
+# Status signal signatures stay backward compatible with the fork's existing
+# inode:size:mtime .seen-* markers, while a sidecar records the byte endpoint
+# through which the append-only log was actually classified.  Keeping those
+# facts separate lets a later routine append coexist with an earlier actionable
+# event without replaying the whole history forever.
+_fm_wake_require_classify() {
+  command -v status_observed_signature >/dev/null 2>&1 && return 0
+  # shellcheck source=bin/fm-classify-lib.sh
+  . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-classify-lib.sh"
+}
+
+fm_wake_signal_sig() {  # <file>
+  case "$1" in
+    *.status)
+      _fm_wake_require_classify || return 1
+      status_observed_signature "$1"
+      ;;
+    *)
+      if [ "${_FM_UNAME:-$(uname)}" = Darwin ]; then
+        stat -f '%i:%z:%Fm' "$1" 2>/dev/null
+      else
+        stat -c '%i:%s:%.9Y' "$1" 2>/dev/null
+      fi
+      ;;
+  esac
+}
+
+fm_wake_signal_seen_path() {  # <state> <file>
+  printf '%s/.seen-%s' "$1" "$(basename "$2" | tr '.' '_')"
+}
+
+fm_wake_signal_offset_path() {  # <state> <status-file>
+  printf '%s.offset' "$(fm_wake_signal_seen_path "$1" "$2")"
+}
+
+fm_wake_signal_seen_size() {  # <state> <file>
+  local marker raw size stored_ident current_ident
+  marker=$(fm_wake_signal_seen_path "$1" "$2")
+  case "$2" in
+    *.status)
+      raw=$(cat "$(fm_wake_signal_offset_path "$1" "$2")" 2>/dev/null || true)
+      case "$raw" in *'@'*) size=${raw%%@*} ;; *) size= ;; esac
+      case "$raw" in *'@'*) stored_ident=${raw#*@} ;; *) stored_ident= ;; esac
+      if [ -n "$stored_ident" ]; then
+        current_ident=$(_fm_open_decisions_file_ident "$2" 2>/dev/null || true)
+        [ -n "$current_ident" ] && [ "$stored_ident" = "$current_ident" ] || size=0
+      fi
+      case "$size" in ''|*[!0-9]*)
+        raw=$(cat "$marker" 2>/dev/null || true)
+        # Legacy marker is inode:size:mtime (older tests also use that shape).
+        size=${raw#*:}; size=${size%%:*}
+        ;;
+      esac
+      case "$size" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$size" ;; esac
+      ;;
+    *)
+      raw=$(cat "$marker" 2>/dev/null || true)
+      size=${raw#*:}; size=${size%%:*}
+      case "$size" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$size" ;; esac
+      ;;
+  esac
+}
+
+fm_wake_status_seen_commit() {  # <state> <status-file> <captured-end> <identity>
+  local end=$3 ident=$4
+  case "$end" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$ident" ] || return 1
+  printf '%s@%s' "$end" "$ident" > "$(fm_wake_signal_offset_path "$1" "$2")"
+}
+
 fm_wake_annotation_manifest() {  # <deduped-raw-rows>
   local rows=$1 epoch seq kind key payload
   while IFS=$(printf '\t') read -r epoch seq kind key payload; do

@@ -25,6 +25,21 @@ TMP_ROOT=$(fm_test_tmproot fm-daemon-tests)
 FM_DAEMON_PRIMARY_HARNESS=claude
 export FM_DAEMON_PRIMARY_HARNESS
 
+test_recovery_marker_without_offset_remains_actionable() {
+  local dir state statusf marker
+  dir=$(make_case recovery-marker-partial)
+  state="$dir/state"
+  statusf="$state/partial.status"
+  marker="$state/.subsuper-seen-status-partial"
+  printf 'done: release still needs delivery\n' > "$statusf"
+  printf 'done: release still needs delivery' > "$marker"
+  : > "$marker.pending"
+  if ! classify_signal "$statusf" "$state" | grep -F 'escalate|' >/dev/null; then
+    fail "a recovery marker without its offset suppressed the actionable status"
+  fi
+  pass "a partial recovery marker remains actionable until its offset commits"
+}
+
 test_afk_start_refuses_when_flag_cannot_be_written() {
   local dir state out status
   dir=$(make_supercase afk-start-flag-unwritable)
@@ -1340,6 +1355,37 @@ test_classify_signal_dedup_against_scan() {
   pass "classify_signal dedupes against the catch-all scan seen marker"
 }
 
+test_classify_signal_legacy_marker_respects_status_replacement() {
+  local dir state statusf marker out
+  dir=$(make_supercase signal-legacy-replacement)
+  state="$dir/state"
+  statusf="$state/replaced-s1.status"
+  marker="$state/.subsuper-seen-status-replaced-s1"
+  printf 'done: release complete\n' > "$statusf"
+  printf 'done: release complete' > "$marker"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$statusf" "$state")
+  case "$out" in self\|*) ;; *) fail "matching legacy marker did not suppress unchanged status: $out" ;; esac
+  sleep 1
+  printf 'done: release complete\n' > "$dir/replacement.tmp"
+  mv -f "$dir/replacement.tmp" "$statusf"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$statusf" "$state")
+  case "$out" in escalate\|*) ;; *) fail "legacy marker suppressed replaced status file: $out" ;; esac
+  pass "legacy dedup resurfaces matching events after status replacement"
+}
+
+test_classify_signal_legacy_marker_suppresses_unchanged_duplicate() {
+  local dir state statusf marker out
+  dir=$(make_supercase signal-legacy-duplicate)
+  state="$dir/state"
+  statusf="$state/duplicate-s2.status"
+  marker="$state/.subsuper-seen-status-duplicate-s2"
+  printf 'done: release complete\n' > "$statusf"
+  printf 'done: release complete' > "$marker"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$statusf" "$state")
+  case "$out" in self\|*) ;; *) fail "unchanged legacy duplicate was re-escalated: $out" ;; esac
+  pass "legacy dedup suppresses unchanged duplicate"
+}
+
 test_classify_stale_dedup_against_signal() {
   # If the signal path already escalated a status (seen marker matches),
   # classify_stale must self-handle to avoid a duplicate in the digest.
@@ -2272,6 +2318,8 @@ test_tmux_composer_state_bordered_and_agent_rows_are_empty
 test_tmux_composer_state_requires_matching_box_borders
 test_pane_input_pending_honors_idle_override_after_border_strip
 test_classify_signal_dedup_against_scan
+test_classify_signal_legacy_marker_respects_status_replacement
+test_classify_signal_legacy_marker_suppresses_unchanged_duplicate
 test_classify_stale_dedup_against_signal
 test_afk_nonterminal_working_merged_keeps_wedge_aging
 test_afk_genuine_done_still_terminal_stale
@@ -2321,3 +2369,4 @@ test_inject_msg_herdr_refuses_unknown_harness_before_submit
 test_inject_msg_herdr_submits_through_backend_dispatch
 test_inject_msg_defers_on_dead_shell_unknown
 test_inject_msg_defers_on_unrecognized_composer_state
+test_recovery_marker_without_offset_remains_actionable

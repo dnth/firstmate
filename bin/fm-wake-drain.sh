@@ -230,6 +230,56 @@ EOF
 
   [ "$shown" -gt 0 ] || return 0
 }
+
+STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED=
+
+latest_branch_outcome_endpoint() {  # <task> <status-identity>
+  local store="$STATE/branch-outcomes.jsonl" task=$1 ident=$2 value max=0
+  [ -f "$store" ] && [ -r "$store" ] && [ ! -L "$store" ] || { printf '0'; return 0; }
+  while IFS= read -r value; do
+    case "$value" in ''|*[!0-9]*) continue ;; esac
+    [ "$value" -gt "$max" ] && max=$value
+  done < <(jq -r --arg task "$task" --arg ident "$ident" 'select(.task == $task and .statusIdent == $ident) | (.statusEndpoint // 0)' "$store" 2>/dev/null || true)
+  printf '%s' "$max"
+}
+
+print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
+  local snapshot=$1 task endpoint ident f receipt event outcome output='' shown=0 omitted=0
+  local line key item_bytes=220 global_bytes=4000 used=0 bytes
+  STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED=
+  [ "$ACTOR" = main ] || return 0
+  while IFS=$(printf '\t') read -r task endpoint ident; do
+    [ -n "$task" ] || continue
+    f="$STATE/$task.status"
+    receipt=$(status_outcome_backstop_cursor_offset "$f") || return 1
+    [ "$receipt" -lt "$endpoint" ] || continue
+    status_snapshot_latest_event "$f" "$endpoint" "$ident" "$receipt" || continue
+    event=$FM_STATUS_SNAPSHOT_EVENT_LINE
+    status_is_captain_relevant "$event" || continue
+    case "$(status_line_verb "$event")" in
+      needs-decision|blocked)
+        key=$(_fm_decision_key "$event") || key=
+        [ -z "$key" ] || continue
+        ;;
+    esac
+    outcome=$(latest_branch_outcome_endpoint "$task" "$ident")
+    [ "$outcome" -ge "$FM_STATUS_SNAPSHOT_EVENT_ENDPOINT" ] && continue
+    line="$task $event"
+    fm_cap_line_var "$line" $((item_bytes - 1)); line=$FM_LINE_CAP_LINE
+    bytes=$(( ${#line} + 1 ))
+    if [ $((used + bytes)) -gt "$global_bytes" ]; then omitted=$((omitted + 1)); continue; fi
+    output="${output}${line}"$'\n'
+    STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED="${STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED}${task}"$'\t'"${endpoint}"$'\n'
+    used=$((used + bytes)); shown=$((shown + 1))
+  done <<EOF
+$snapshot
+EOF
+  [ "$shown" -gt 0 ] || [ "$omitted" -gt 0 ] || return 0
+  printf 'STATUS OUTCOME BACKSTOP (newest captain-facing task event has no covering branch outcome):\n'
+  printf '%s' "$output"
+  [ "$omitted" -gt 0 ] && printf 'STATUS OUTCOME BACKSTOP: %d more omitted (byte cap)\n' "$omitted"
+  return 0
+}
 # Print the consolidated OPEN DECISIONS section: every still-open
 # needs-decision/blocked, fleet-wide, folded from the durable status logs by
 # fm-classify-lib.sh's status_open_decisions fold (via its cursor-backed
@@ -293,13 +343,22 @@ EOF
 }
 
 print_status_sections() {
-  local snapshot=${1:-} fully_presented=${2:-} acknowledged
+  local snapshot=${1:-} fully_presented=${2:-} acknowledged prepared
   if [ -z "$snapshot" ]; then snapshot=$(status_presentation_snapshot "$STATE") || return 1; fi
   [ -n "$snapshot" ] || return 0
   acknowledged=$(status_acknowledge_presented_snapshot "$STATE" "$snapshot" "$fully_presented") || return 1
-  print_unread_status_section "$snapshot" || return 1
-  print_open_decisions_section "$snapshot" || return 1
+  prepared=$(mktemp "$STATE/.status-presentation.prepared.XXXXXX") || return 1
+  if ! {
+    print_unread_status_section "$snapshot" \
+      && print_status_outcome_backstop_section "$snapshot" \
+      && print_open_decisions_section "$snapshot"
+  } > "$prepared"; then
+    rm -f -- "$prepared"
+    return 1
+  fi
+  command cat "$prepared" || { rm -f -- "$prepared"; return 1; }
   status_commit_presentation_snapshot "$STATE" "$acknowledged"
+  rm -f -- "$prepared"
 }
 
 print_status_presentation() {  # [<deduped-raw-rows>]
