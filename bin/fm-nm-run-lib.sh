@@ -97,6 +97,30 @@ fm_nm_head_descends_from() {  # <worktree> <ancestor> <descendant>
     && git -C "$wt" merge-base --is-ancestor "$ancestor_full" "$descendant_full" 2>/dev/null
 }
 
+# 0 when $3 is a faithful restamp of the validated chain from $2 in worktree $1.
+# The base must be an ancestor of both heads, their commit counts must match, and
+# each pair of commits in base-to-head order must carry the same tree object.
+fm_nm_head_is_faithful_restamp() {  # <worktree> <base> <validated-head> <candidate-head>
+  local wt=$1 base=$2 validated=$3 candidate=$4 base_full validated_full candidate_full
+  local validated_list candidate_list validated_trees candidate_trees commit
+  base_full=$(fm_nm_resolve_head "$wt" "$base") || return 1
+  validated_full=$(fm_nm_resolve_head "$wt" "$validated") || return 1
+  candidate_full=$(fm_nm_resolve_head "$wt" "$candidate") || return 1
+  git -C "$wt" merge-base --is-ancestor "$base_full" "$validated_full" 2>/dev/null || return 1
+  git -C "$wt" merge-base --is-ancestor "$base_full" "$candidate_full" 2>/dev/null || return 1
+  validated_list=$(git -C "$wt" rev-list --reverse "$base_full..$validated_full") || return 1
+  candidate_list=$(git -C "$wt" rev-list --reverse "$base_full..$candidate_full") || return 1
+  validated_trees=$(printf '%s\n' "$validated_list" | while IFS= read -r commit; do
+    [ -n "$commit" ] || continue
+    git -C "$wt" rev-parse --verify "${commit}^{tree}" || exit 1
+  done) || return 1
+  candidate_trees=$(printf '%s\n' "$candidate_list" | while IFS= read -r commit; do
+    [ -n "$commit" ] || continue
+    git -C "$wt" rev-parse --verify "${commit}^{tree}" || exit 1
+  done) || return 1
+  [ "$validated_trees" = "$candidate_trees" ]
+}
+
 # 0 when a run's branch presentation identifies the checked-out branch. The
 # no-mistakes CLI renders Firstmate's slash branch names with a hyphen, so both
 # authoritative spellings are accepted and no other branch is normalized.
