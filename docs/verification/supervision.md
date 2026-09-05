@@ -114,6 +114,18 @@ ok - OMP omp/17.2.10 primary E2E proved watcher delivery with an intact editable
 ```
 
 The live guard observed the watcher wake in the OMP session and found the exact draft unchanged after delivery.
+The OMP 18.1.5 repeated-`/new` delivery guard ran on 2026-09-05 after the adapter began appending the replacement instruction through `sendMessage` at switch time; the guard now drives two consecutive `/new` switches and requires each new session's instruction to precede its first assistant record.
+
+```sh
+FM_OMP_PRIMARY_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-omp-primary-live-e2e.test.sh
+```
+
+```text
+ok - OMP omp/18.1.5 primary E2E proved fresh no-state and ordinary native discovery, exact ownership, once-only startup, guarded watcher startup, repeated /new continuity, shutdown, resume, and away-mode delivery
+ok - OMP omp/18.1.5 primary E2E proved watcher delivery with an intact editable draft
+```
+
+Before that change the same guard failed on OMP 18.1.5 at the first `/new`: the restored watcher's first wake started an agent-initiated turn, and OMP emits `before_agent_start` neither for that turn nor for a captain prompt queued into it, so an instruction staged for `before_agent_start` never reached the replacement session.
 
 Standalone OMP executable compatibility is recorded in [runtime backend verification](runtime-backends.md#omp-lifecycle).
 
@@ -354,8 +366,8 @@ FM_OMP_PRIMARY_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-omp-primary-live-e2e.test.
 not ok - OMP /new did not inject exactly one startup instruction for the new session
 ```
 
-The identical pre-port failure establishes a pre-existing OMP 18.1.5 session-start-nudge compatibility finding rather than a watcher-continuity regression.
-The provider-free adapter regression remains the current proof that its `/new` and `/resume` replacement handlers each stage one nudge while re-arming, and the live guard remains intentionally red until that separate compatibility finding is resolved.
+The identical pre-port failure established a pre-existing OMP 18.1.5 session-start-nudge compatibility finding rather than a watcher-continuity regression.
+That finding was resolved on 2026-09-05; the [native session-start delivery](#native-session-start-delivery) section records the passing repeated-`/new` guard, and `tests/fm-omp-primary.test.sh` keeps the provider-free proof that each `/new` and `/resume` replacement handler appends exactly one instruction while re-arming, including a second `/new` with no `before_agent_start` in between.
 The remaining primary harnesses are not applicable because they do not bind the shared Pi-compatible extension generation lifecycle.
 
 The once-per-generation recovery bound and immediate handling-successor poll were verified on 2026-08-21 at revision `549dd1e0ff05f96607c5e7457b4d8e3d7396bd16` with the tracked Pi extension, real watcher processes, and an isolated home.

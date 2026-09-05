@@ -12,7 +12,7 @@ When this session owns supervision and away mode is not active:
 6. The extension starts `bin/fm-watch-arm.sh --restart`, keeps the child attached to the live OMP process, and owns every later successor launch.
    The tool and the fallback command return only after that child reports readiness, so a `watcher: FAILED` readiness timeout is a real failure to handle under step 11 rather than a slow success.
 7. OMP `/new`, `/resume`, `/fork`, and session reload emit `session_switch`, replace the prior extension generation, and restore the watcher without a foreground watcher command.
-   `/new` and `/resume` also inject the session-start instruction exactly once for the new conversation.
+   `/new` and `/resume` also append the session-start instruction exactly once to the new conversation, ahead of the restored watcher's first wake.
 8. After an actionable child close, the shared watcher core rechecks session-lock ownership and verifies one successor before it delivers the follow-up notification; a replacement generation receives an actionable close whose prior delivery was not yet consumed.
 9. Ordinary work, turn completion, and ordinary notification handling must not call `fm_watch_arm_omp` again because continuity is extension-owned.
 10. An unexpected child close enters bounded exponential retry, and an exhausted retry or lost session lock is surfaced as a watcher failure.
