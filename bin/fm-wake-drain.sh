@@ -233,13 +233,13 @@ EOF
 
 STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED=
 
-latest_branch_outcome_endpoint() {  # <task>
-  local store="$STATE/branch-outcomes.jsonl" task=$1 value max=0
+latest_branch_outcome_endpoint() {  # <task> <status-identity>
+  local store="$STATE/branch-outcomes.jsonl" task=$1 ident=$2 value max=0
   [ -f "$store" ] && [ -r "$store" ] && [ ! -L "$store" ] || { printf '0'; return 0; }
   while IFS= read -r value; do
     case "$value" in ''|*[!0-9]*) continue ;; esac
     [ "$value" -gt "$max" ] && max=$value
-  done < <(jq -r --arg task "$task" 'select(.task == $task) | (.statusEndpoint // 0)' "$store" 2>/dev/null || true)
+  done < <(jq -r --arg task "$task" --arg ident "$ident" 'select(.task == $task and .statusIdent == $ident) | (.statusEndpoint // 0)' "$store" 2>/dev/null || true)
   printf '%s' "$max"
 }
 
@@ -262,7 +262,7 @@ print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
         [ -z "$key" ] || continue
         ;;
     esac
-    outcome=$(latest_branch_outcome_endpoint "$task")
+    outcome=$(latest_branch_outcome_endpoint "$task" "$ident")
     [ "$outcome" -ge "$FM_STATUS_SNAPSHOT_EVENT_ENDPOINT" ] && continue
     line="$task $event"
     fm_cap_line_var "$line" $((item_bytes - 1)); line=$FM_LINE_CAP_LINE

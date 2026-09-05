@@ -97,6 +97,29 @@ test_no_open_decisions_prints_nothing() {
   pass "no open decisions across the fleet prints nothing when terminal status is branch-covered"
 }
 
+test_replaced_status_file_does_not_reuse_old_branch_outcome() {
+  local dir state out replacement
+  dir=$(make_case replaced-status)
+  state="$dir/state"
+  out="$dir/drain.out"
+  replacement="$state/task-replaced.status.new"
+  printf 'done: old release completed\n' > "$state/task-replaced.status"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-replaced --verdict captain --summary 'old release was handled' >/dev/null \
+    || fail "could not record the old branch outcome fixture"
+  printf 'done: new release completed\n' > "$replacement"
+  mv -f "$replacement" "$state/task-replaced.status" \
+    || fail "could not replace the status file fixture"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed after replacing the status file"
+  grep -F 'STATUS OUTCOME BACKSTOP' "$out" >/dev/null \
+    || fail "the replaced status event was treated as covered by an old outcome: $(cat "$out")"
+  grep -F 'task-replaced done: new release completed' "$out" >/dev/null \
+    || fail "the new terminal event was not resurfaced after status replacement: $(cat "$out")"
+  pass "a replaced status file does not reuse an old branch outcome identity"
+}
+
 test_open_decision_surfaces_even_with_an_unrelated_queued_wake() {
   local dir state out
   dir=$(make_case fleet-wide)
@@ -193,6 +216,7 @@ test_buried_decision_still_surfaces
 test_explicit_resolution_closes_it
 test_later_unrelated_terminal_line_does_not_close_it
 test_no_open_decisions_prints_nothing
+test_replaced_status_file_does_not_reuse_old_branch_outcome
 test_open_decision_surfaces_even_with_an_unrelated_queued_wake
 test_buried_decision_surfaces_on_the_empty_queue_fast_path
 test_status_symlink_is_not_followed
