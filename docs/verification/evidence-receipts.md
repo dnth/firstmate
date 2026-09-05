@@ -1,6 +1,6 @@
 # Evidence receipts and risk routing verification
 
-This record captures the active maintainer evidence for ship-task acceptance receipts and conservative validation routing as of 2026-08-26.
+This record captures the active maintainer evidence for ship-task acceptance receipts and conservative validation routing as of 2026-09-05.
 The exact receipt key and type schema is owned by the header and `--help` output of `bin/fm-receipt-schema.sh`; the criterion parser, classifier thresholds, metadata fields, and lifecycle commands are owned by the headers and help output of `bin/fm-receipt-check.sh`, `bin/fm-receipt.sh`, and `bin/fm-receipt-store.sh` at their respective executable boundaries.
 
 ## Guarantees under test
@@ -39,7 +39,8 @@ The exact receipt key and type schema is owned by the header and `--help` output
 - Successful exact-head runs can bind after reaching checks-passed or passed, while failed and cancelled runs remain ineligible.
 - No-Mistakes status, intent, and CI-log observations use the shared bounded call boundary.
 - Every completion requires path-specific terminal evidence and records its plan path and authoritative completed head.
-- A changed worktree head invalidates completion unless the bound active No-Mistakes run proves a pipeline-owned descendant of the planned head; unrelated, missing, or ambiguous drift remains refused.
+- A changed worktree head invalidates completion unless the bound No-Mistakes run proves a descendant of the planned head: an active run must currently own the branch, while a terminal passed run proves the advance through its own reported head.
+- Unrelated, missing, or ambiguous drift remains refused, and a terminal run that did not pass never seals an advance.
 - Local-only readiness and guarded landing consume one fail-closed executable default-branch resolver.
 - Planning and completion refuse tracked, staged, or untracked worktree changes.
 - Initial planning accepts a caller base only when it equals the repository's authoritative merge boundary, so a later ancestor cannot hide earlier task commits.
@@ -90,19 +91,21 @@ ok - fm-receipt-check pins task evidence and rejects hard-linked ledgers
 ok - receipt append and check consume one criterion grammar
 ok - exact bound runs complete from the shared current CI-log readiness predicate
 ok - finding-to-criterion invalidations remain inspectable in task metadata
+ok - run binding resolves abbreviated heads and rejects non-planned commits
+ok - binding and completion work against the real agent-supplied intent-log shape while wrong runs fail closed
+ok - completion accepts only active pipeline-owned descendant heads
+ok - terminal passed runs seal their own pipeline advance and refuse foreign drift
 ok - low-risk mechanical changes can skip a full No-Mistakes run
 ok - low risk requires safe changelog prose and file-bound mechanical evidence
 ok - implementation completion refreshes per head and remains idempotent
 ok - plan publication holds the pinned ledger boundary against concurrent receipts
 ok - diff summary errors fail closed before risk classification
 ok - successful terminal runs bind while failed runs remain rejected
-ok - No-Mistakes status, intent, and CI-log observations are bounded
+ok - No-Mistakes status and CI-log observations are bounded
 ok - authoritative documentation remains high
 ok - terminal delivery paths record one completion timestamp at their boundary
 ok - completion signals release the validation lock for retry
 ok - replanning invalidates prior run and completion bindings
-ok - intent binding accepts one exact record and resolves abbreviated heads
-ok - completion accepts only active pipeline-owned descendant heads
 ok - dirty worktrees cannot be planned or completed
 ok - git status errors fail implementation, planning, and completion cleanliness gates
 ok - shared cleanliness inspects ignored submodules

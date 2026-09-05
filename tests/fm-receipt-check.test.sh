@@ -925,6 +925,92 @@ test_completion_accepts_only_pipeline_owned_head_advance() {
   pass "completion accepts only active pipeline-owned descendant heads"
 }
 
+test_terminal_passed_run_seals_its_own_pipeline_head_advance() {
+  local id base project initial_head current_head generation status out rc
+
+  # The deadlock: the run's own review/doc commits advanced the branch head past
+  # the validated head and the run then reached a terminal PASSED state, so no
+  # active pipeline-owned run remains to prove the advance.
+  id=receipt-terminal-advance
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint passed
+  FM_FAKE_NM_STATUS='' FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "terminal advance plan failed"
+  project="$TMP_ROOT/project-$id"
+  initial_head=$(git -C "$project" rev-parse HEAD)
+  generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
+  status=$(nm_status RUN-terminal-advance "$initial_head" pending)
+  FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: $generation" \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-terminal-advance --generation "$generation" >/dev/null \
+    || fail "terminal advance run binding failed"
+  printf 'doc commit\n' >> "$project/src/app.sh"
+  git -C "$project" add src/app.sh
+  git -C "$project" commit -q -m 'no-mistakes: docs'
+  current_head=$(git -C "$project" rev-parse HEAD)
+  status=$(nm_pipeline_status RUN-terminal-advance "fm/$id" "$current_head" completed passed agent_owned)
+  out=$(FM_FAKE_NM_STATUS="$status" \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed) \
+    || fail "terminal passed run could not seal its own pipeline head advance"
+  printf '%s' "$out" | jq -e --arg head "$current_head" '.status == "completed" and .completed_head == $head' >/dev/null \
+    || fail "terminal passed completion did not bind the advanced head"
+
+  # Foreign drift: the terminal run still reports the validated head, so the
+  # commit that advanced the branch is not its own and must not be sealed.
+  id=receipt-terminal-foreign-drift
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint passed
+  FM_FAKE_NM_STATUS='' FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "foreign drift plan failed"
+  project="$TMP_ROOT/project-$id"
+  initial_head=$(git -C "$project" rev-parse HEAD)
+  generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
+  status=$(nm_status RUN-foreign-drift "$initial_head" pending)
+  FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: $generation" \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-foreign-drift --generation "$generation" >/dev/null \
+    || fail "foreign drift run binding failed"
+  printf 'hand edit\n' >> "$project/src/app.sh"
+  git -C "$project" add src/app.sh
+  git -C "$project" commit -q -m 'unvalidated hand edit'
+  status=$(nm_pipeline_status RUN-foreign-drift "fm/$id" "$initial_head" completed passed agent_owned)
+  FM_FAKE_NM_STATUS="$status" \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "terminal completion sealed foreign unvalidated drift"
+
+  # A terminal run that did not pass never seals an advance it produced.
+  id=receipt-terminal-failed-advance
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint passed
+  FM_FAKE_NM_STATUS='' FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "failed terminal advance plan failed"
+  project="$TMP_ROOT/project-$id"
+  initial_head=$(git -C "$project" rev-parse HEAD)
+  generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
+  status=$(nm_status RUN-failed-advance "$initial_head" pending)
+  FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: $generation" \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-failed-advance --generation "$generation" >/dev/null \
+    || fail "failed terminal advance run binding failed"
+  printf 'partial fix\n' >> "$project/src/app.sh"
+  git -C "$project" add src/app.sh
+  git -C "$project" commit -q -m 'no-mistakes: partial fix'
+  current_head=$(git -C "$project" rev-parse HEAD)
+  status=$(nm_pipeline_status RUN-failed-advance "fm/$id" "$current_head" failed failed agent_owned)
+  FM_FAKE_NM_STATUS="$status" \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "terminal completion sealed a run that did not pass"
+  pass "terminal passed runs seal their own pipeline advance and refuse foreign drift"
+}
+
 test_no_mistakes_observations_are_bounded() {
   local hang_nm id base project head generation running ci_status rc
   hang_nm="$TMP_ROOT/hang-no-mistakes"
@@ -1476,6 +1562,7 @@ test_claim_invalidation_marker_is_append_only_and_idempotent
 test_run_heads_resolve_authoritatively
 test_agent_supplied_intent_log_binds_and_completes
 test_completion_accepts_only_pipeline_owned_head_advance
+test_terminal_passed_run_seals_its_own_pipeline_head_advance
 test_low_risk_skips_no_mistakes_under_explicit_policy
 test_low_risk_requires_safe_prose_and_applicable_evidence
 test_implementation_completion_precedes_planning
