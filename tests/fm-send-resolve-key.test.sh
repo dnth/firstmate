@@ -174,6 +174,40 @@ test_answer_send_closes_open_decision() {
   fi
   pass "fm-send --resolve-key closes the open decision at answer time"
 }
+# The reported failure behind upstream issue #2109, seen here on 2026-08-30: a
+# worker that put the colon first (needs-decision: [key=X] ...) had its key
+# silently folded to "default", so the answer's --resolve-key X refused with "no
+# open decision or blocker with that key". The stated key must be honored in
+# that position too, end to end through the real send.
+test_colon_first_key_position_is_answerable() {
+  local dir fb log home rc out
+  dir="$TMP_ROOT/colon-first"
+  mkdir -p "$dir"
+  fb=$(make_stubs "$dir")
+  log="$dir/send.log"
+  home=$(setup_home colon-first)
+  fm_write_meta "$home/state/t8.meta" "window=sess:fm-t8" "kind=ship"
+  printf 'needs-decision: [key=seam-max-bound] cap the seam at 4 or 8\n' > "$home/state/t8.status"
+
+  out=$(drain_out "$home")
+  printf '%s' "$out" | grep -F '[key=seam-max-bound]' >/dev/null \
+    || fail "precondition: the colon-first decision should list as open under its stated key: $out"
+
+  run_send "$fb" "$home" "$log" t8 --resolve-key seam-max-bound "cap it at 4"
+  rc=$?
+  expect_code 0 "$rc" "answering a colon-first stated key should succeed, not refuse as unknown"
+  grep -qF "cap it at 4" "$home/state/t8.inbox/001.msg" \
+    || fail "the answer text should reach the worker's durable inbox record"
+  assert_grep 'resolved [key=seam-max-bound]: answered: cap it at 4' "$home/state/t8.status" \
+    "the closing resolved line is missing"
+
+  out=$(drain_out "$home")
+  if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then
+    fail "the answered colon-first decision still lists as open: $out"
+  fi
+  pass "fm-send --resolve-key: a colon-first stated key is open under that key and answerable"
+}
+
 test_answer_starts_work_never_orphans() {
   local dir fb log home rc out
   dir="$TMP_ROOT/starts-work"
@@ -614,6 +648,7 @@ test_secondmate_closes_before_pending_reply_commit_failure() {
 }
 
 test_answer_send_closes_open_decision
+test_colon_first_key_position_is_answerable
 test_answer_starts_work_never_orphans
 test_send_without_flag_and_progress_never_closes
 test_not_open_key_refuses_before_send
