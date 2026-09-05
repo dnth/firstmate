@@ -1194,8 +1194,10 @@ test_restamped_chains_refuse_foreign_content_and_unowned_rewrites() {
   newer_base=$(git -C "$project" rev-parse HEAD)
   git -C "$project" branch -f "fm/$id" "$newer_base"
   git -C "$project" checkout -q "fm/$id"
-  git -C "$project" cherry-pick $(git -C "$project" rev-list --reverse "$base..$validated_head") >/dev/null \
-    || fail "changed-base fixture could not replay the task chain"
+  while IFS= read -r commit; do
+    git -C "$project" cherry-pick "$commit" >/dev/null \
+      || fail "changed-base fixture could not replay the task chain"
+  done < <(git -C "$project" rev-list --reverse "$base..$validated_head")
   rebased=$(git -C "$project" rev-parse HEAD)
   status=$(nm_status RUN-restamp-changed-base "$rebased" pending)
   FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
