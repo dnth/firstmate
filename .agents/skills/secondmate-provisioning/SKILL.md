@@ -214,6 +214,7 @@ For a remote route, the same command probes and relaunches only on the configure
 An SSH transport failure or unreadable remote endpoint remains unknown and must be reconciled on that host; never launch a local replacement.
 Respawn re-resolves the secondmate harness from current config, uses the same guarded pre-launch sync, and re-propagates inherited local material, so recovered secondmates converge inherited config items and shared captain preferences whenever their home validates; tracked-file sync remains guarded separately.
 If the secondmate is already running and only inherited local material changed, prefer `bin/fm-config-push.sh` over respawning.
+An instruction-surface update restarts every eligible live second mate through `bin/fm-secondmate-restart.sh`, which persists open conversational records before relaunch; a runtime that cannot prove replacement receives only the fallback re-read nudge.
 
 Do not reconstruct a secondmate's whole tree from the main home.
 The main firstmate reconciles only direct reports.

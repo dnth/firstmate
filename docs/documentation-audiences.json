@@ -214,6 +214,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/agent-control.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/arm-pretool-check.md",
       "audience": "maintainer-architecture"
     },
