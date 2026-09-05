@@ -350,7 +350,7 @@ The refresh also prunes local branches whose remote is gone and that no worktree
 
 ## Self-updates stay safe
 
-`/updatefirstmate` fast-forwards the running firstmate repo and registered secondmate homes from `origin`, then re-reads updated instructions and nudges updated secondmates without touching project clones.
+`/updatefirstmate` fast-forwards the running firstmate repo and registered secondmate homes from `origin`, then re-reads updated instructions and restarts every live secondmate left on the target commit through the persist-gated path, with fallback nudges when replacement cannot be proven, without touching project clones.
 For a remote route, the configured code root updates from its own origin on that host before the persistent home fast-forwards to the code-root commit.
 The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
 Local homes share the guarded fast-forward helper, while remote updates delegate the same safety decision to the configured host through the generic transport.
@@ -358,6 +358,14 @@ After those repo updates, the attended path can refresh the installed machine-wi
 The helper reuses the durable fleet records and recovery-grade backend liveness classifier, and it refuses an install unless every worker in the active home and every registered local secondmate home is confirmed stopped.
 Its `--check` mode delegates to `omp update --check`, reports the current and available versions, and changes neither the executable nor fleet state.
 The mechanics are owned by the `/updatefirstmate` skill and firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) (self-update).
+
+## Upstream restart port reconciliation
+
+Upstream PR #3614 introduced persist-gated secondmate restarts for changed instruction surfaces, including a remote control-plane hop and an honest fallback nudge.
+Upstream PR #3690 widened that action to every live secondmate left on the target commit, including already-current and bin-only homes, because launch-time wiring is not represented by a git diff.
+This fork already had guarded local and remote fast-forward convergence, inherited-material propagation, liveness classification, and SSH exit-255 unknown-state protection.
+The port keeps those fork-owned paths, adds the shared restart control plane and settled-home hook, and preserves remote routing by invoking the host-local control plane without local replacement on transport failure.
+The update skill owns the operator procedure, while fork-specific OMP refresh and newer remote inheritance behavior remain unchanged.
 
 ## Restart-proof
 
