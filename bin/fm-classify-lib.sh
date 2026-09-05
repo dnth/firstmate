@@ -340,7 +340,13 @@ EOF
 
 _fm_decision_key_transition_allowed() {  # <key> <note>
   case "$1" in
-    pending-reply-*) case "$2" in pending-reply-*:*) return 0 ;; *) return 1 ;; esac ;;
+    pending-reply-*)
+      case "$2" in
+        pending-reply-*:*) return 0 ;;
+        correlated\ pending\ reply\ reconciled*) return 0 ;;
+        *) return 1 ;;
+      esac
+      ;;
   esac
   return 0
 }
