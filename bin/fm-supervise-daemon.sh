@@ -1612,7 +1612,13 @@ handle_wake() {  # <reason> <state>
     heartbeat|heartbeat:*) decision=$(classify_heartbeat) ;;
     *)        decision=$(classify_unknown "$reason") ;;
   esac
-  [ "$kind" = signal ] && capture_and_commit_signal_endpoints "$state" "$arg"
+  # A recovery replay must classify its signal against the current status span
+  # on every retry.  Do not advance the ordinary per-wake cursor before the
+  # recovery projection is actually delivered; the staged recovery seen-set is
+  # committed only after the generation-bound acknowledgement succeeds.
+  if [ "$kind" = signal ] && [ "${FM_RECOVERY_RECLASSIFY_SIGNALS:-0}" != 1 ]; then
+    capture_and_commit_signal_endpoints "$state" "$arg"
+  fi
   action=${decision%%|*}
   distilled=${decision#*|}
   [ "$kind" = signal ] && sync_pause_markers_from_signal "$state" "$arg"
@@ -1708,8 +1714,11 @@ handle_durable_wakes() {  # <watcher-reason> <state>
 
   ack_through=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err" | tail -1)
   ack_generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err" | tail -1)
-  if [ -n "$ack_generation" ] \
-     && [ "$(cat "$(recovery_projection_generation_path "$state")" 2>/dev/null || true)" = "$ack_generation" ]; then
+  # A generation-bound drain with an active watcher-down marker is a recovery
+  # replay.  Its signal rows must remain reclassifiable until delivery succeeds;
+  # the first attempt has no projection-generation file yet, so waiting for that
+  # file would advance the normal status cursor too early.
+  if [ -n "$ack_generation" ] && [ -e "$state/.watcher-down" ]; then
     # shellcheck disable=SC2034 # Retained for recovery reclassification signaling.
     FM_RECOVERY_RECLASSIFY_SIGNALS=1
   fi
