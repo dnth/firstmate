@@ -350,34 +350,72 @@ _collapse_newlines() {  # <text>
 # field for "self" is informational (logged); for "escalate" it is the pre-read
 # summary firstmate would otherwise have to re-read.
 
+daemon_status_seen_offset() {  # <state> <status-file>
+  local state=$1 f=$2 raw size marker task stored_ident current_ident
+  task=${f##*/}; task=${task%.status}
+  marker="$state/.subsuper-seen-status-$(_stale_key "$task")"
+  raw=$(cat "$marker.offset" 2>/dev/null || true)
+  size=${raw%%@*}
+  case "$raw" in *'@'*|'') ;; *) size=0 ;; esac
+  case "$size" in ''|*[!0-9]*) size=0 ;; esac
+  case "$raw" in *'@'*) stored_ident=${raw#*@} ;; *) stored_ident= ;; esac
+  if [ -n "$stored_ident" ]; then
+    current_ident=$(_fm_open_decisions_file_ident "$f" 2>/dev/null || true)
+    [ -n "$current_ident" ] && [ "$stored_ident" = "$current_ident" ] || size=0
+  fi
+  printf '%s' "$size"
+}
+
 classify_signal() {  # <reason-after-colon> <state>
-  local reason=$1 state=$2 f last distilled="" rel="" all_seen=1 task seen
+  local reason=$1 state=$2 f record rc start endpoint ident rest last distilled="" rel="" all_seen=1 seen_marker seen_line
+  FM_SIGNAL_SURFACE_ENDPOINTS=''
   for f in $reason; do
     [ -e "$f" ] || continue
-    last=$(last_status_line "$f")
-    [ -n "$last" ] || continue
-    distilled="${distilled}$(basename "$f"): ${last} | "
-    status_is_captain_relevant "$last" || continue
-    rel=1
-    # Dedupe against the catch-all scan: if this status was already escalated
-    # (seen marker matches), skip escalating again. The seen marker is the
-    # single source of truth shared between the per-wake signal path and the
-    # heartbeat scan. all_seen stays 1 only if EVERY relevant file was seen.
-    task=$(basename "$f"); task="${task%.status}"
-    if [ "${FM_RECOVERY_RECLASSIFY_SIGNALS:-0}" = 1 ]; then
-      all_seen=0
-    else
-      seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
-      [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] || all_seen=0
-    fi
+    case "$f" in
+      *.status)
+        start=$(daemon_status_seen_offset "$state" "$f")
+        if record=$(status_span_first_actionable_record "$f" "$start"); then
+          rc=0
+        else
+          rc=$?
+        fi
+        last=$(last_status_line "$f")
+        [ -n "$last" ] && distilled="${distilled}$(basename "$f"): ${last} | "
+        task=${f##*/}; task=${task%.status}
+        seen_marker="$state/.subsuper-seen-status-$(_stale_key "$task")"
+        seen_line=$(cat "$seen_marker" 2>/dev/null || true)
+        if [ "$rc" -eq 0 ] && [ -n "$seen_line" ]; then
+          rest=${record#*$'\t'}
+          if [ ! -e "$seen_marker.offset" ] && [ ! -e "$seen_marker.pending" ] \
+            && [ "${rest#*$'\t'}" = "$seen_line" ]; then
+            rc=1
+            record=
+          fi
+        fi
+        if [ "$rc" -eq 2 ]; then
+          rel=1; all_seen=0
+          distilled="${distilled}unreadable status span | "
+          continue
+        fi
+        if [ -n "$record" ]; then
+          endpoint=${record%%$'\t'*}; rest=${record#*$'\t'}; ident=${rest%%$'\t'*}
+          FM_SIGNAL_SURFACE_ENDPOINTS="${FM_SIGNAL_SURFACE_ENDPOINTS}${f}"$'\t'"${endpoint}"$'\t'"${ident}"$'\n'
+        fi
+        if [ "$rc" -eq 0 ]; then
+          rel=1; all_seen=0
+          distilled="${distilled}${rest#*$'\t'} | "
+        fi
+        ;;
+      *)
+        last=$(last_status_line "$f")
+        [ -n "$last" ] && distilled="${distilled}$(basename "$f"): ${last} | "
+        ;;
+    esac
   done
-  # strip a trailing " | " separator so the distilled line is clean
   distilled="${distilled% | }"
   if [ -z "$rel" ]; then
     printf 'self|routine signal: %s' "$distilled"
   elif [ "$all_seen" = "1" ]; then
-    # Every relevant status was already escalated by the catch-all scan;
-    # self-handle to avoid a duplicate entry in the digest.
     printf 'self|signal already escalated (catch-all scan): %s' "$distilled"
   else
     printf 'escalate|%s' "$distilled"
@@ -592,8 +630,12 @@ sync_pause_markers_from_signal() {  # <state> <signal files>
 # the .subsuper-seen-status-<task> dedup state: called from both the per-wake
 # escalate path and the catch-all scan.
 mark_status_seen() {  # <state> <task> <last-line>
-  local state=$1 task=$2 line=$3
-  printf '%s' "$line" > "$state/.subsuper-seen-status-$(_stale_key "$task")"
+  local state=$1 task=$2 line=$3 endpoint=${4:-} ident=${5:-} marker
+  marker="$state/.subsuper-seen-status-$(_stale_key "$task")"
+  printf '%s' "$line" > "$marker"
+  if [ -n "$endpoint" ] && [ -n "$ident" ]; then
+    printf '%s@%s' "$endpoint" "$ident" > "$marker.offset"
+  fi
 }
 
 stage_or_mark_status_seen() {  # <state> <task> <last-line>
@@ -605,35 +647,106 @@ stage_or_mark_status_seen() {  # <state> <task> <last-line>
   fi
 }
 
+stage_or_mark_status_offset() {  # <state> <task> <endpoint> <identity>
+  local state=$1 task=$2 endpoint=$3 ident=$4 marker
+  marker="$state/.subsuper-seen-status-$(_stale_key "$task").offset"
+  if [ -n "${FM_RECOVERY_OFFSET_SINK:-}" ]; then
+    printf '%s\t%s\t%s\n' "$task" "$endpoint" "$ident" >> "$FM_RECOVERY_OFFSET_SINK"
+  else
+    printf '%s@%s' "$endpoint" "$ident" > "$marker"
+  fi
+}
+
 # Mark every captain-relevant status line a per-wake classification escalated as
 # seen, so the catch-all scan does not re-escalate the same line within
 # HEARTBEAT_SCAN_SECS. Mirrors classify_signal/classify_stale's relevance test.
 mark_escalated_seen() {  # <kind> <arg> <state>
-  local kind=$1 arg=$2 state=$3 f last task
+  local kind=$1 arg=$2 state=$3 f last task endpoint ident rest
   case "$kind" in
     signal)
       for f in $arg; do
         [ -e "$f" ] || continue
+        task=$(basename "$f"); task="${task%.status}"
+        endpoint=''; ident=''
+        while IFS=$(printf '\t') read -r _f endpoint ident; do
+          [ "$_f" = "$f" ] && break
+        done <<EOF
+${FM_SIGNAL_SURFACE_ENDPOINTS:-}
+EOF
+        [ -n "$endpoint" ] && [ -n "$ident" ] && stage_or_mark_status_offset "$state" "$task" "$endpoint" "$ident"
         last=$(last_status_line "$f")
         [ -n "$last" ] || continue
         status_is_captain_relevant "$last" || continue
-        task=$(basename "$f"); task="${task%.status}"
         stage_or_mark_status_seen "$state" "$task" "$last"
       done ;;
     stale)
       task=$(window_to_task "$arg" "$state")
       last=$(last_status_line "$state/$task.status")
-      [ -n "$last" ] && status_is_captain_relevant "$last" \
-        && stage_or_mark_status_seen "$state" "$task" "$last" ;;
+      if [ -n "$last" ] && status_is_captain_relevant "$last"; then
+        stage_or_mark_status_seen "$state" "$task" "$last"
+        if endpoint=$(_fm_status_file_size "$state/$task.status" 2>/dev/null) \
+          && ident=$(_fm_open_decisions_file_ident "$state/$task.status" 2>/dev/null); then
+          endpoint=${endpoint//[[:space:]]/}
+          case "$endpoint" in ''|*[!0-9]*) ;; *) stage_or_mark_status_offset "$state" "$task" "$endpoint" "$ident" ;; esac
+        fi
+      fi ;;
   esac
 }
 
+commit_signal_classified_endpoints() {  # <state>
+  local state=$1 f endpoint ident task
+  while IFS=$(printf '\t') read -r f endpoint ident; do
+    [ -n "$f" ] || continue
+    [ -n "$endpoint" ] && [ -n "$ident" ] || continue
+    task=${f##*/}; task=${task%.status}
+    printf '%s@%s' "$endpoint" "$ident" > "$state/.subsuper-seen-status-$(_stale_key "$task")".offset
+  done <<EOF
+${FM_SIGNAL_SURFACE_ENDPOINTS:-}
+EOF
+}
+
+capture_and_commit_signal_endpoints() {  # <state> <space-separated-status-files>
+  local state=$1 paths=$2 f record rc rest endpoint ident task
+  for f in $paths; do
+    case "$f" in *.status) ;; *) continue ;; esac
+    [ -e "$f" ] || continue
+    if record=$(status_span_first_actionable_record "$f" "$(daemon_status_seen_offset "$state" "$f")"); then
+      rc=0
+    else
+      rc=$?
+    fi
+    [ "$rc" -le 1 ] && [ -n "$record" ] || continue
+    endpoint=${record%%$'\t'*}; rest=${record#*$'\t'}; ident=${rest%%$'\t'*}
+    case "$endpoint" in ''|*[!0-9]*) continue ;; esac
+    [ -n "$ident" ] || continue
+    task=${f##*/}; task=${task%.status}
+    printf '%s@%s' "$endpoint" "$ident" > "$state/.subsuper-seen-status-$(_stale_key "$task")".offset
+  done
+}
+
 commit_recovery_seen_statuses() {  # <state> <staged-statuses>
-  local state=$1 staged=$2 task line
+  local state=$1 staged=$2 task line pending
   [ -f "$staged" ] && [ ! -L "$staged" ] || return 1
   while IFS="$(printf '\t')" read -r task line; do
     [ -n "$task" ] && [ -n "$line" ] || return 1
+    pending="$state/.subsuper-seen-status-$(_stale_key "$task").pending"
+    : > "$pending" || return 1
+  done < "$staged"
+  while IFS="$(printf '\t')" read -r task line; do
+    [ -n "$task" ] && [ -n "$line" ] || return 1
     mark_status_seen "$state" "$task" "$line" || return 1
+  done < "$staged"
+}
+
+commit_recovery_seen_offsets() {  # <state> <staged-offsets>
+  local state=$1 staged=$2 task endpoint ident marker
+  [ -f "$staged" ] && [ ! -L "$staged" ] || return 1
+  while IFS="$(printf '\t')" read -r task endpoint ident; do
+    [ -n "$task" ] && [ -n "$endpoint" ] && [ -n "$ident" ] || return 1
+    case "$endpoint" in ''|*[!0-9]*) return 1 ;; esac
+    marker="$state/.subsuper-seen-status-$(_stale_key "$task")"
+    printf '%s@%s' "$endpoint" "$ident" > "$marker.offset" || return 1
+    rm -f -- "$marker.pending" || return 1
   done < "$staged"
 }
 
@@ -1341,19 +1454,34 @@ housekeeping() {  # <state>
   done
 
   # (3) heartbeat scan (catch-all for a captain-relevant status the per-wake
-  #     classifier may have missed). Cheap: status files only, no tmux. The
-  #     captain-relevant filtering is the shared classifier's
-  #     scan_captain_relevant_statuses; the daemon layers its digest dedup on top.
+  #     classifier may have missed). Read the append-only span after the daemon's
+  #     classified endpoint, rather than trusting only the latest line.
   if [ "$(_file_age "$state/.subsuper-last-scan")" -ge "${FM_HEARTBEAT_SCAN_SECS:-$HEARTBEAT_SCAN_SECS_DEFAULT}" ]; then
     _now > "$state/.subsuper-last-scan"
-    local seen
-    while IFS="$(printf '\t')" read -r f task last; do
-      [ -n "$f" ] || continue
-      seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
-      [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] && continue
-      escalate_add "$state" "$(basename "$f"): $last (catch-all scan)"
-      mark_status_seen "$state" "$task" "$last"
-    done < <(scan_captain_relevant_statuses "$state")
+    local f task last record rc endpoint ident rest event
+    for f in "$state"/*.status; do
+      [ -e "$f" ] || continue
+      task=$(basename "$f"); task=${task%.status}
+      if record=$(status_span_first_actionable_record "$f" "$(daemon_status_seen_offset "$state" "$f")"); then
+        rc=0
+      else
+        rc=$?
+      fi
+      if [ "$rc" -eq 2 ]; then
+        escalate_add "$state" "$(basename "$f"): unreadable status span (catch-all scan)"
+        continue
+      fi
+      endpoint=${record%%$'\t'*}; rest=${record#*$'\t'}; ident=${rest%%$'\t'*}
+      event=${rest#*$'\t'}
+      if [ "$rc" -eq 0 ]; then
+        while IFS= read -r event || [ -n "$event" ]; do
+          [ -n "$event" ] || continue
+          escalate_add "$state" "$(basename "$f"): $event (catch-all scan)"
+        done < <(printf '%s' "$event" | sed 's/ ; /\n/g')
+      fi
+      last=$(last_status_line "$f")
+      [ -n "$last" ] && mark_status_seen "$state" "$task" "$last" "$endpoint" "$ident"
+    done
   fi
 }
 
@@ -1498,7 +1626,7 @@ is_wake_reason() {  # <reason>
 # --- dispatch one wake reason to self-handle or escalate --------------------
 # Side effects: logging, marker records, escalation buffer appends.
 handle_wake() {  # <reason> <state>
-  local reason=$1 state=$2 decision action distilled task last stale_detail held_last
+  local reason=$1 state=$2 decision action distilled task last stale_detail held_last classify_tmp
   local kind="" arg=""
   if should_force_self "$reason"; then
     log "wake force-self (FM_INJECT_SKIP): $reason"
@@ -1506,7 +1634,18 @@ handle_wake() {  # <reason> <state>
   fi
   case "$reason" in
     signal:*) kind=signal; arg="${reason#signal: }"
-              decision=$(classify_signal "$arg" "$state") ;;
+              # Run classify_signal in this shell so its captured endpoint
+              # side-channel survives until the post-delivery commit. A
+              # command substitution would execute it in a subshell and lose
+              # FM_SIGNAL_SURFACE_ENDPOINTS, allowing the catch-all scan to
+              # re-escalate the same status.
+              classify_tmp=$(mktemp "${TMPDIR:-/tmp}/fm-classify-signal.XXXXXX") || return 1
+              if ! classify_signal "$arg" "$state" > "$classify_tmp"; then
+                rm -f "$classify_tmp"
+                return 1
+              fi
+              decision=$(cat "$classify_tmp")
+              rm -f "$classify_tmp" ;;
     stale:*)  kind=stale; arg="${reason#stale: }"; stale_detail="${arg#"$arg"}"
               case "$arg" in *" ("*) stale_detail="${arg#*" ("}"; arg="${arg%% \(*}" ;; esac
               decision=$(classify_stale "$arg" "$state")
@@ -1527,13 +1666,20 @@ handle_wake() {  # <reason> <state>
     heartbeat|heartbeat:*) decision=$(classify_heartbeat) ;;
     *)        decision=$(classify_unknown "$reason") ;;
   esac
+  # A recovery replay must classify its signal against the current status span
+  # on every retry.  Do not advance the ordinary per-wake cursor before the
+  # recovery projection is actually delivered; the staged recovery seen-set is
+  # committed only after the generation-bound acknowledgement succeeds.
   action=${decision%%|*}
   distilled=${decision#*|}
   [ "$kind" = signal ] && sync_pause_markers_from_signal "$state" "$arg"
   case "$action" in
     escalate)
       log "escalate: $reason -> $distilled"
-      escalate_add "$state" "$distilled"
+      escalate_add "$state" "$distilled" || return 1
+      if [ "$kind" = signal ] && [ "${FM_RECOVERY_RECLASSIFY_SIGNALS:-0}" != 1 ]; then
+        commit_signal_classified_endpoints "$state"
+      fi
       # A terminal-stale escalate must not leave a persistence marker behind, or
       # housekeeping re-escalates the same pane as a false wedge later.
       [ "$kind" = "stale" ] && stale_marker_remove "$arg" "$state"
@@ -1593,10 +1739,10 @@ handle_wake() {  # <reason> <state>
 
 handle_durable_wakes() {  # <watcher-reason> <state>
   local fallback_reason=$1 state=$2 out err tab epoch sequence kind key payload rest line
-  local handled=0 ack_through ack_generation capture_before capture_after recovery_projection_tmp recovery_seen_tmp
+  local handled=0 ack_through ack_generation capture_before capture_after recovery_projection_tmp recovery_seen_tmp recovery_offset_tmp
   local capture_valid=false decision_parse_state=outside decision_lines='' decision_count=0
   local decisions_routed_completely=false
-  local FM_ESCALATION_SINK FM_DEFER_ESCALATION_FLUSH=1 FM_RECOVERY_SEEN_SINK FM_RECOVERY_RECLASSIFY_SIGNALS=0
+  local FM_ESCALATION_SINK FM_DEFER_ESCALATION_FLUSH=1 FM_RECOVERY_SEEN_SINK FM_RECOVERY_OFFSET_SINK FM_RECOVERY_RECLASSIFY_SIGNALS=0
   local decision_header='OPEN DECISIONS (still open, folded from the durable status logs - not just the latest line):'
   local decision_terminator="OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'"
   recovery_projection_tmp=$(mktemp "$state/.subsuper-recovery-projection.XXXXXX") || return 1
@@ -1604,26 +1750,35 @@ handle_durable_wakes() {  # <watcher-reason> <state>
     rm -f "$recovery_projection_tmp"
     return 1
   }
-  FM_ESCALATION_SINK=$recovery_projection_tmp
-  FM_RECOVERY_SEEN_SINK=$recovery_seen_tmp
-  out=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || {
+  recovery_offset_tmp=$(mktemp "$state/.subsuper-recovery-offsets.XXXXXX") || {
     rm -f "$recovery_projection_tmp" "$recovery_seen_tmp"
     return 1
   }
+  FM_ESCALATION_SINK=$recovery_projection_tmp
+  FM_RECOVERY_SEEN_SINK=$recovery_seen_tmp
+  FM_RECOVERY_OFFSET_SINK=$recovery_offset_tmp
+  out=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || {
+    rm -f "$recovery_projection_tmp" "$recovery_seen_tmp" "$recovery_offset_tmp"
+    return 1
+  }
   err=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || {
-    rm -f "$out" "$recovery_projection_tmp" "$recovery_seen_tmp"
+    rm -f "$out" "$recovery_projection_tmp" "$recovery_seen_tmp" "$recovery_offset_tmp"
     return 1
   }
   if ! "$FM_DAEMON_DIR/fm-wake-drain.sh" > "$out" 2> "$err"; then
     cat "$err" >&2
-    rm -f "$out" "$err" "$recovery_projection_tmp" "$recovery_seen_tmp"
+    rm -f "$out" "$err" "$recovery_projection_tmp" "$recovery_seen_tmp" "$recovery_offset_tmp"
     return 1
   fi
 
   ack_through=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err" | tail -1)
   ack_generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err" | tail -1)
-  if [ -n "$ack_generation" ] \
-     && [ "$(cat "$(recovery_projection_generation_path "$state")" 2>/dev/null || true)" = "$ack_generation" ]; then
+  # A generation-bound drain with an active watcher-down marker is a recovery
+  # replay.  Its signal rows must remain reclassifiable until delivery succeeds;
+  # the first attempt has no projection-generation file yet, so waiting for that
+  # file would advance the normal status cursor too early.
+  if [ -n "$ack_generation" ] && [ -e "$state/.watcher-down" ]; then
+    # shellcheck disable=SC2034 # Retained for recovery reclassification signaling.
     FM_RECOVERY_RECLASSIFY_SIGNALS=1
   fi
 
@@ -1699,26 +1854,30 @@ EOF
   grep -v '^WAKE_ACK_REQUIRED:' "$err" >&2 || true
   rm -f "$out" "$err" "$recovery_projection_tmp"
   if [ "$decisions_routed_completely" != true ]; then
-    rm -f "$recovery_seen_tmp"
+    rm -f "$recovery_seen_tmp" "$recovery_offset_tmp"
     log "current recovery projection was not delivered; retaining recovery episode"
     return 1
   fi
   if [ -z "$ack_through" ] || [ -z "$ack_generation" ]; then
-    rm -f "$recovery_seen_tmp"
+    rm -f "$recovery_seen_tmp" "$recovery_offset_tmp"
     log "wake drain omitted its generation-bound acknowledgement; retaining durable wakes"
     return 1
   fi
   if "$FM_DAEMON_DIR/fm-wake-drain.sh" --ack-through "$ack_through" \
     --recovery-generation "$ack_generation"; then
     commit_recovery_seen_statuses "$state" "$recovery_seen_tmp" || {
-      rm -f "$recovery_seen_tmp"
+      rm -f "$recovery_seen_tmp" "$recovery_offset_tmp"
       return 1
     }
-    rm -f "$recovery_seen_tmp"
+    commit_recovery_seen_offsets "$state" "$recovery_offset_tmp" || {
+      rm -f "$recovery_seen_tmp" "$recovery_offset_tmp"
+      return 1
+    }
+    rm -f "$recovery_seen_tmp" "$recovery_offset_tmp"
     recovery_projection_clear "$state"
     return 0
   fi
-  rm -f "$recovery_seen_tmp"
+  rm -f "$recovery_seen_tmp" "$recovery_offset_tmp"
   return 1
 }
 

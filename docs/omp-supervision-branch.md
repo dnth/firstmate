@@ -7,12 +7,12 @@ An unresolvable row makes the scan unsafe and returns the whole wake to main, an
 Only captain-relevant branch outcomes open a turn on main - that follow-up turn is itself the captain-visible outcome, so OMP never separately prints or renders a captain-facing merge note.
 
 This is a focused fork of the Pi supervision branch onto OMP's coding-agent SDK.
-The bash layer and the dispatch handshake are harness-agnostic and shared with the Pi design unchanged; only the TypeScript extension differs, because OMP's model, effort, session-build, and prompt-cache surfaces differ from Pi's.
+The branch-facing bash interfaces and dispatch handshake are harness-agnostic and shared with the Pi design; shared status-span and drain backstop behavior is owned by the common classifier and drain, while only the TypeScript extension differs in model, effort, session-build, and prompt-cache surfaces.
 
-This feature is OMP-only by construction and changes nothing anywhere else:
+The supervision branch is OMP-only by construction, while the shared status-span and drain backstop improvements apply to every harness:
 
-- The branch lives in `.omp/extensions/fm-branch-supervision-omp.ts`, which only an OMP primary ever loads; no other harness gains or loses behavior.
-- The bash-side additions (leases, the outcome store, the per-actor wake consume) are inert in a home that never runs the branch: no lease files exist, no actor variable is set, every guard passes silently, and the wake drain takes its byte-behavior-identical pre-branch path with no actor state written.
+- The branch lives in `.omp/extensions/fm-branch-supervision-omp.ts`, which only an OMP primary ever loads; no other harness loads the branch.
+- The bash-side additions (leases, the outcome store, and per-actor wake consume) are inert in a home that never runs the branch: no lease files exist, no actor variable is set, every guard passes silently, and the shared wake drain runs without branch actor scoping or actor state writes.
 - It does not change which harness is primary and never moves a home to OMP.
 
 ## Components and their owners
@@ -62,7 +62,7 @@ The branch drains and acknowledges only the exact row set the extension granted 
 `.omp/extensions/lib/fm-branch-dispatch.ts`'s `scopeForUnreadWake` is the single owner of which rows are branch-eligible; the drain never reclassifies a row itself, it only consumes that already-computed snapshot.
 A row whose sequence number is not in the branch's snapshot is left completely untouched by a branch-actor drain or acknowledgement, no matter its sequence number, so the branch can never swallow a main-owned row still waiting for main.
 An acknowledgement that consumes none of the actor's presented rows reports that fact and names the exact current `--ack-through` and `--recovery-generation` command, so retrying an earlier wake cannot re-fire a stale loop.
-This scoping engages only while a branch grant is, or recently was, in play: a home that never runs the branch has none of the actor files, so the drain takes its byte-behavior-identical pre-branch path and writes no actor state.
+This scoping engages only while a branch grant is, or recently was, in play: a home that never runs the branch has none of the actor files, so the shared drain runs without branch actor scoping and writes no actor state.
 
 ## Main-fallback re-entry limitation
 
@@ -134,7 +134,7 @@ Pi-only processed-outcome reconciliation and Pi renderer/live-TUI guards have no
 
 ## Verification
 
-Portable regressions: `tests/fm-omp-branch-supervision.test.sh` covers prompt byte-stability, outcome store append-only, lease actor partition and guards, wake-grant lifecycle, non-branch-home invariance, and responsive ordered async outcome delivery; `tests/fm-omp-primary.test.sh` rejects an accepted branch settlement into the watcher-owned main path across replacement; and the per-actor consume regression in `tests/fm-wake-queue.test.sh` proves branch-scoped acknowledgement never swallows a main-owned row, main excludes branch-granted rows, and the inert pre-branch path.
+Portable regressions: `tests/fm-omp-branch-supervision.test.sh` covers prompt byte-stability, outcome store append-only, lease actor partition and guards, wake-grant lifecycle, non-branch-home invariance, and responsive ordered async outcome delivery; `tests/fm-omp-primary.test.sh` rejects an accepted branch settlement into the watcher-owned main path across replacement; and the per-actor consume regression in `tests/fm-wake-queue.test.sh` proves branch-scoped acknowledgement never swallows a main-owned row, main excludes branch-granted rows, and non-branch homes write no actor state.
 The versioned branch-marker closure is covered through `tests/fm-session-start.test.sh`, and the secondmate imported-helper trust boundary is covered through `tests/fm-spawn-dispatch-profile.test.sh`.
 The strict typecheck in `tests/fm-omp-branch-types.test.sh` pins the extension against the installed `@oh-my-pi/pi-coding-agent` package and fails on any renamed or removed named export or effort-level drift.
 Live guard: `FM_OMP_BRANCH_LIVE_E2E=1 tests/fm-omp-branch-live-e2e.test.sh` exercises the real installed OMP SDK; run it after every OMP upgrade and record the dated result in [docs/verification/runtime-backends.md](verification/runtime-backends.md).

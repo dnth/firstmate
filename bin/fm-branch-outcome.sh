@@ -50,6 +50,8 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 
 STORE="$STATE/branch-outcomes.jsonl"
 CURSOR="$STATE/.branch-outcomes-cursor"
@@ -88,12 +90,18 @@ normalize_record() { # <jsonl-line>
     | select(
         keys == ["epoch", "seq", "summary", "task", "verdict", "wake"]
         or (keys == ["epoch", "seq", "silent", "summary", "task", "verdict", "wake"] and (.silent | type) == "boolean")
+        or (keys == ["epoch", "seq", "silent", "statusEndpoint", "statusIdent", "summary", "task", "verdict", "wake"]
+          and (.silent | type) == "boolean"
+          and (.statusEndpoint | type) == "number" and .statusEndpoint >= 0 and .statusEndpoint == (.statusEndpoint | floor)
+          and (.statusIdent | type) == "string")
       )
     | select((.seq | type) == "number" and .seq >= 1 and .seq == (.seq | floor))
     | select((.epoch | type) == "number" and .epoch >= 0 and .epoch == (.epoch | floor))
     | select((.task | type) == "string" and (.wake | type) == "string")
     | select((.summary | type) == "string" and (.verdict == "routine" or .verdict == "captain"))
-    | if has("silent")
+    | if has("statusEndpoint")
+      then {seq, epoch, task, wake, verdict, summary, silent, statusEndpoint, statusIdent}
+      elif has("silent")
       then {seq, epoch, task, wake, verdict, summary, silent}
       else {seq, epoch, task, wake, verdict, summary}
       end
@@ -132,6 +140,21 @@ advance_cursor() { # <seq>
   mv -f -- "$tmp" "$CURSOR"
 }
 
+capture_status_position() { # <task>
+  local f="$STATE/$1.status" size ident size_after ident_after
+  CAPTURED_STATUS_ENDPOINT=0
+  CAPTURED_STATUS_IDENT=-
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
+  size=$(_fm_status_file_size "$f") || return 0; size=${size//[[:space:]]/}
+  ident=$(_fm_open_decisions_file_ident "$f") || return 0
+  size_after=$(_fm_status_file_size "$f") || return 0; size_after=${size_after//[[:space:]]/}
+  ident_after=$(_fm_open_decisions_file_ident "$f") || return 0
+  case "$size:$size_after" in *[!0-9:]*) return 0 ;; esac
+  [ "$size" = "$size_after" ] && [ "$ident" = "$ident_after" ] || return 0
+  CAPTURED_STATUS_ENDPOINT=$size
+  CAPTURED_STATUS_IDENT=$ident
+}
+
 CMD=${1:-}
 shift 2>/dev/null || true
 
@@ -163,9 +186,11 @@ case "$CMD" in
       exit 1
     fi
     SEQ=$(( LAST_SEQ + 1 ))
-    printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s}\n' \
+    capture_status_position "$TASK"
+    printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s,"statusEndpoint":%s,"statusIdent":"%s"}\n' \
       "$SEQ" "$(date +%s)" "$(json_escape "$TASK")" "$(json_escape "$WAKE")" \
-      "$VERDICT" "$(json_escape "$SUMMARY")" "$SILENT" >> "$STORE"
+      "$VERDICT" "$(json_escape "$SUMMARY")" "$SILENT" "$CAPTURED_STATUS_ENDPOINT" \
+      "$(json_escape "$CAPTURED_STATUS_IDENT")" >> "$STORE"
     fm_lock_release "$LOCK"
     printf '%s\n' "$SEQ"
     ;;

@@ -25,6 +25,21 @@ TMP_ROOT=$(fm_test_tmproot fm-daemon-tests)
 FM_DAEMON_PRIMARY_HARNESS=claude
 export FM_DAEMON_PRIMARY_HARNESS
 
+test_recovery_marker_without_offset_remains_actionable() {
+  local dir state statusf marker
+  dir=$(make_case recovery-marker-partial)
+  state="$dir/state"
+  statusf="$state/partial.status"
+  marker="$state/.subsuper-seen-status-partial"
+  printf 'done: release still needs delivery\n' > "$statusf"
+  printf 'done: release still needs delivery' > "$marker"
+  : > "$marker.pending"
+  if ! classify_signal "$statusf" "$state" | grep -F 'escalate|' >/dev/null; then
+    fail "a recovery marker without its offset suppressed the actionable status"
+  fi
+  pass "a partial recovery marker remains actionable until its offset commits"
+}
+
 test_afk_start_refuses_when_flag_cannot_be_written() {
   local dir state out status
   dir=$(make_supercase afk-start-flag-unwritable)
@@ -2321,3 +2336,4 @@ test_inject_msg_herdr_refuses_unknown_harness_before_submit
 test_inject_msg_herdr_submits_through_backend_dispatch
 test_inject_msg_defers_on_dead_shell_unknown
 test_inject_msg_defers_on_unrecognized_composer_state
+test_recovery_marker_without_offset_remains_actionable

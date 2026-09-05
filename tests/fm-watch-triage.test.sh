@@ -221,6 +221,24 @@ test_signal_reason_is_actionable_classifier() {
   pass "signal_reason_is_actionable: benign absorbed, captain verbs and coalesced batches surfaced"
 }
 
+test_signal_span_surfaces_actionable_before_later_routine() {
+  local dir state statusf record
+  dir=$(make_case signal-span-actionable)
+  state="$dir/state"
+  statusf="$state/span.status"
+  printf 'blocked: release approval required\nworking: collecting notes\n' > "$statusf"
+  # Exercise the public span classifier directly, then assert the actionable
+  # event is retained even though the latest line is routine.
+  if ! record=$(status_span_first_actionable_record "$statusf" 0); then
+    fail "the status span with a buried blocker was classified as routine"
+  fi
+  case "$record" in
+    *'blocked: release approval required'*) ;;
+    *) fail "the span classifier omitted the buried blocker: $record" ;;
+  esac
+  pass "an actionable status remains surfaced when a later routine append would hide it"
+}
+
 test_stale_is_terminal_classifier() {
   local dir state
   dir=$(make_case classify-stale); state="$dir/state"
@@ -3220,6 +3238,7 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
 
 test_stop_pid_ends_a_term_immune_child
 test_signal_reason_is_actionable_classifier
+test_signal_span_surfaces_actionable_before_later_routine
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives

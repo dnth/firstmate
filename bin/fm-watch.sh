@@ -780,6 +780,36 @@ scan_signals() {
   return 0
 }
 
+# Classify every newly appended status event, not only the latest line.  A
+# later working: note must not hide an earlier needs-decision/blocked/done event
+# in the same append span.  The offset sidecar is advanced only after the wake
+# has either been surfaced or deliberately absorbed.
+signal_files_actionable() {  # <status-file> ...
+  local f record rc start endpoint ident rest found=1
+  FM_SIGNAL_SURFACE_ENDPOINTS=''
+  for f in "$@"; do
+    case "$f" in *.status) ;; *) continue ;; esac
+    [ -e "$f" ] || [ -L "$f" ] || continue
+    start=$(fm_wake_signal_seen_size "$STATE" "$f")
+    if record=$(status_span_first_actionable_record "$f" "$start"); then
+      rc=0
+    else
+      rc=$?
+    fi
+    [ "$rc" -eq 1 ] && [ -z "$record" ] && continue
+    if [ "$rc" -eq 2 ]; then
+      found=0
+      continue
+    fi
+    endpoint=${record%%$'\t'*}
+    rest=${record#*$'\t'}
+    ident=${rest%%$'\t'*}
+    FM_SIGNAL_SURFACE_ENDPOINTS="${FM_SIGNAL_SURFACE_ENDPOINTS}${f}"$'\t'"${endpoint}"$'\t'"${ident}"$'\n'
+    [ "$rc" -eq 0 ] && found=0
+  done
+  return "$found"
+}
+
 # Consumer-side incarnation gate. Turn-end markers are per generation
 # (state/<id>.turn-ended.<spawn_gen>), written by bin/fm-turnend-signal.sh; a
 # torn-down or relaunched id can leave stale-gen markers behind. Fire only the
@@ -1326,7 +1356,8 @@ EOF
     reason="signal:$files"
     # Triage: a signal is ACTIONABLE when any of these holds (cheapest first):
     #   - the away-mode daemon owns triage (afk) and wants every wake;
-    #   - any status file carries a captain-relevant verb;
+    #   - any status file gained a captain-relevant event since its last
+    #     classified byte, even when a later routine line is now the latest;
     #   - or it is a no-verb wake (a bare turn-end, a working: note) whose crew is
     #     NOT provably working - the crew stopped its turn with no actively-running
     #     pipeline and no busy pane, so it may be done (even via an interactive menu
@@ -1337,8 +1368,11 @@ EOF
     # will not re-fire, log, and keep blocking without enqueuing. The provably-working
     # check is the only costly one (it may run a bounded no-mistakes call), so the ||
     # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
+    # shellcheck disable=SC2086 # files is the deliberate space-separated status-path list.
+    signal_files_actionable $files
+    signal_actionable=$?
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
-    if afk_present || signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
+    if afk_present || [ "$signal_actionable" -eq 0 ] || ! signal_crew_provably_working $files; then
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
@@ -1348,18 +1382,43 @@ EOF
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         printf '%s' "$sig" > "$sf"
-        mark_surfaced "$f"
       done <<EOF
 $pending
 EOF
+      while IFS=$(printf '\t') read -r f surface_end surface_ident; do
+        [ -n "$f" ] || continue
+        fm_wake_status_seen_commit "$STATE" "$f" "$surface_end" "$surface_ident" || true
+        mark_surfaced "$f"
+      done <<EOF
+$FM_SIGNAL_SURFACE_ENDPOINTS
+EOF
       wake "$reason"
     else
+      signal_commit_error=0
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         printf '%s' "$sig" > "$sf"
       done <<EOF
 $pending
 EOF
+      # Even an absorbed routine wake advances the classified endpoint.  This
+      # prevents a routine append from being replayed while preserving any
+      # actionable event already reported in the same captured span.
+      while IFS=$(printf '\t') read -r f surface_end surface_ident; do
+        [ -n "$f" ] || continue
+        fm_wake_status_seen_commit "$STATE" "$f" "$surface_end" "$surface_ident" || signal_commit_error=1
+      done <<EOF
+$FM_SIGNAL_SURFACE_ENDPOINTS
+EOF
+      if [ "${signal_commit_error:-0}" -ne 0 ]; then
+        while IFS=$(printf '\t') read -r sf sig f; do
+          [ -n "$sf" ] || continue
+          fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
+        done <<EOF
+$pending
+EOF
+        wake "$reason"
+      fi
       triage_log "absorbed benign $reason"
     fi
   fi
