@@ -47,8 +47,8 @@ Three capabilities are deliberately out of scope for this port and are a future 
 - Mid-branch model or effort hot-swap - the branch keeps its model and effort until a fresh process rebuilds it; a `/supervision-model` change is a pin applied at the next branch build, not to the running branch.
 - Hung-branch live takeover - a branch stuck inside a model call is recovered by killing the process (its leases and wake-grant rows go stale on death and are swept), not by main taking ownership away from it.
 
-The reason is structural: OMP coordinates the two in-process actors through shared filesystem locks (the wake-queue lock and the lease-command lock) acquired by synchronous subprocess calls with no timeout.
-A settlement that tried to displace a live or hung branch would have to acquire the very locks that branch's own in-flight work may hold, and on OMP's single-threaded event loop that can stall the whole process.
+The reason is structural: OMP coordinates the two in-process actors through shared filesystem locks (the wake-queue lock and the lease-command lock), and the offer handshake and shell-spawn hook still use synchronous subprocess calls with no timeout.
+A settlement that tried to displace a live or hung branch would have to acquire the very locks that branch's own in-flight work may hold, so it cannot safely perform a live takeover; the delivery path itself uses awaited subprocesses and does not block OMP's event loop.
 Making mid-flight handoff safe needs a fenced, nonblocking rework of that shared lock substrate (which Pi and the rest of the fleet also use), so it is tracked separately rather than shipped here.
 A broken or unreachable branch still rejects to the watcher-owned main path with no lost wake; a hung branch stalls its own wake queue until the process is killed, and the durable rows survive to be re-presented on the next start.
 
@@ -121,9 +121,18 @@ The branch can also run on a cheaper model and a shallower reasoning effort than
 Away mode carries over unchanged: while `state/.afk` exists the away daemon owns supervision, and the branch declines every wake offer for the duration.
 What is new is only the attended path: outside away mode, the branch absorbs the routine majority that previously interrupted the captain's conversation, applying the same escalation etiquette the daemon applies while away.
 
+## Responsiveness port reconciliation
+
+Upstream Pi change #3767 moves supervision outcome subprocesses off Pi's render thread and serializes delivery so durable append, cursor handoff, and visible delivery remain ordered.
+The shared bash contracts, including `bin/fm-supervise-daemon.sh`, did not change in #3767 because the away daemon already runs in its own process and does not block the OMP session event loop.
+This fork ports the mechanism into `.omp/extensions/lib/fm-async-exec.ts`, makes the OMP grant-script helpers awaitable, adds the OMP branch's `deliveryChain` around ownership checks, outcome append/handoff, and report delivery, and includes the new helper in `bin/fm-primary-watch-version-lib.sh`'s branch marker hash.
+OMP retains synchronous ownership reads only where its offer handshake and shell spawn hook must answer without waiting, while every delivery-side process call rechecks ownership through the awaited path.
+The existing watcher-continuity implementation in `bin/fm-primary-watch-core.ts` remains the delivery owner for rejected branch settlements and replacement handoffs; this port does not bypass or duplicate that PR #99 contract.
+Pi-only processed-outcome reconciliation and Pi renderer/live-TUI guards have no OMP equivalent and are deliberately omitted; OMP's direct append-and-handoff outcome store is covered by the portable OMP regression and strict OMP typecheck.
+
 ## Verification
 
-Portable regressions: `tests/fm-omp-branch-supervision.test.sh` covers prompt byte-stability, outcome store append-only, lease actor partition and guards, wake-grant lifecycle, and non-branch-home invariance; `tests/fm-omp-primary.test.sh` rejects an accepted branch settlement into the watcher-owned main path across replacement; and the per-actor consume regression in `tests/fm-wake-queue.test.sh` proves branch-scoped acknowledgement never swallows a main-owned row, main excludes branch-granted rows, and the inert pre-branch path.
+Portable regressions: `tests/fm-omp-branch-supervision.test.sh` covers prompt byte-stability, outcome store append-only, lease actor partition and guards, wake-grant lifecycle, non-branch-home invariance, and responsive ordered async outcome delivery; `tests/fm-omp-primary.test.sh` rejects an accepted branch settlement into the watcher-owned main path across replacement; and the per-actor consume regression in `tests/fm-wake-queue.test.sh` proves branch-scoped acknowledgement never swallows a main-owned row, main excludes branch-granted rows, and the inert pre-branch path.
 The versioned branch-marker closure is covered through `tests/fm-session-start.test.sh`, and the secondmate imported-helper trust boundary is covered through `tests/fm-spawn-dispatch-profile.test.sh`.
 The strict typecheck in `tests/fm-omp-branch-types.test.sh` pins the extension against the installed `@oh-my-pi/pi-coding-agent` package and fails on any renamed or removed named export or effort-level drift.
 Live guard: `FM_OMP_BRANCH_LIVE_E2E=1 tests/fm-omp-branch-live-e2e.test.sh` exercises the real installed OMP SDK; run it after every OMP upgrade and record the dated result in [docs/verification/runtime-backends.md](verification/runtime-backends.md).

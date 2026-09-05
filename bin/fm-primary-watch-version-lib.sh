@@ -17,7 +17,7 @@
 # caller already treats as "not loaded" rather than as a match.
 #
 # The OMP supervision branch marker hashes its extension followed by the branch
-# dispatch and model-picker helpers, matching its in-process producer.
+# dispatch, async-exec, and model-picker helpers, matching its in-process producer.
 # Missing files or a missing SHA-256 utility return nonzero, which callers treat
 # as "not loaded" rather than as a match.
 #
@@ -53,11 +53,12 @@ fm_primary_watch_version() {  # <extension-file> <fm-root> -> sha256:<hex>
 }
 
 fm_omp_branch_extension_version() {  # <extension-file> <fm-root> -> sha256:<hex>
-  local extension=${1:-} root=${2:-} dispatch picker
+  local extension=${1:-} root=${2:-} dispatch async_exec picker
   [ -n "$extension" ] && [ -f "$extension" ] || return 1
   [ -n "$root" ] || return 1
   dispatch="$root/.omp/extensions/lib/fm-branch-dispatch.ts"
+  async_exec="$root/.omp/extensions/lib/fm-async-exec.ts"
   picker="$root/.omp/extensions/lib/fm-branch-model-picker.ts"
-  [ -f "$dispatch" ] && [ -f "$picker" ] || return 1
-  fm_extension_version_hash "$extension" "$dispatch" "$picker"
+  [ -f "$dispatch" ] && [ -f "$async_exec" ] && [ -f "$picker" ] || return 1
+  fm_extension_version_hash "$extension" "$dispatch" "$async_exec" "$picker"
 }

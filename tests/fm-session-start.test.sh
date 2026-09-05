@@ -674,6 +674,7 @@ install_omp_primary_extension_fixture() {
   cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$root/.omp/extensions/fm-primary-omp.ts"
   cp "$ROOT/.omp/extensions/fm-branch-supervision-omp.ts" "$root/.omp/extensions/fm-branch-supervision-omp.ts"
   cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$root/.omp/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-async-exec.ts" "$root/.omp/extensions/lib/fm-async-exec.ts"
   cp "$ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" "$root/.omp/extensions/lib/fm-task-inbox-doorbell.ts"
   cp "$ROOT/.omp/extensions/lib/fm-branch-model-picker.ts" "$root/.omp/extensions/lib/fm-branch-model-picker.ts"
   install_primary_watch_core_fixture "$root"
@@ -1773,6 +1774,7 @@ JS
 
   branch_file="$root/.omp/extensions/fm-branch-supervision-omp.ts"
   dispatch_file="$root/.omp/extensions/lib/fm-branch-dispatch.ts"
+  async_exec_file="$root/.omp/extensions/lib/fm-async-exec.ts"
   picker_file="$root/.omp/extensions/lib/fm-branch-model-picker.ts"
   printf '\nexport const staleBranchExtensionFixture = true;\n' >> "$branch_file"
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
@@ -1788,6 +1790,7 @@ JS
     *) failure=${failure:-"session start trusted a branch marker after its dispatch helper changed"} ;;
   esac
   cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$dispatch_file"
+  cp "$ROOT/.omp/extensions/lib/fm-async-exec.ts" "$async_exec_file"
   printf '\nexport const staleBranchPickerFixture = true;\n' >> "$picker_file"
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   case "$out" in

@@ -40,6 +40,7 @@ cp "$ROOT/.omp/extensions/fm-branch-supervision-omp.ts" "$TMP_ROOT/.omp/extensio
 cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$TMP_ROOT/.omp/extensions/fm-primary-omp.ts"
 cp "$ROOT/.omp/extensions/fm-fleet-hooks.ts" "$TMP_ROOT/.omp/extensions/fm-fleet-hooks.ts"
 cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$TMP_ROOT/.omp/extensions/lib/fm-branch-dispatch.ts"
+cp "$ROOT/.omp/extensions/lib/fm-async-exec.ts" "$TMP_ROOT/.omp/extensions/lib/fm-async-exec.ts"
 cp "$ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" "$TMP_ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts"
 cp "$ROOT/.omp/extensions/lib/fm-branch-model-picker.ts" "$TMP_ROOT/.omp/extensions/lib/fm-branch-model-picker.ts"
 cp "$ROOT/bin/fm-primary-watch-core.ts" "$TMP_ROOT/bin/fm-primary-watch-core.ts"
