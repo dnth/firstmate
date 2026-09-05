@@ -411,6 +411,9 @@ function collectMainDialog(sessionManager: ReadonlyEntries, collection: MirrorCo
 export default function (pi: ExtensionAPI) {
   let branch: AgentSession | null = null;
   let branchBroken = "";
+  // During a signal or stale prompt, reports are restricted to the tasks named
+  // by that prompt's granted rows. Heartbeat reviews remain unscoped.
+  let wakeTaskScope: { rows: string[]; tasks: Set<string> } | null = null;
   let mainStreaming = false;
   let shuttingDown = false;
   // Advanced once per cold-start arm (session_start). There is no live-handoff
@@ -448,6 +451,13 @@ export default function (pi: ExtensionAPI) {
   // credentials this home already holds - reads only, so main never moves.
   let mainModel: { provider: string; id: string } | null = null;
   let mainModelRegistry: ModelRegistry | null = null;
+
+  function wakeScopeRefusal(task: string): string {
+    if (!wakeTaskScope || wakeTaskScope.tasks.has(task)) return "";
+    const named = [...wakeTaskScope.tasks].sort().join(", ");
+    const rows = wakeTaskScope.rows.join(", ");
+    return `report refused: the wake being handled (row ${rows}) names ${named}, not ${task}; report only that task, never fleet or a task from memory`;
+  }
 
   // Main's own current effort needs no such tracking: OMP answers it directly
   // on demand, including at wake time. A value that is not one of the branch's
@@ -688,6 +698,10 @@ export default function (pi: ExtensionAPI) {
           };
         }
         const verdict = verdictRaw as Verdict;
+        const scopeRefusal = wakeScopeRefusal(task);
+        if (scopeRefusal) {
+          return { content: [{ type: "text", text: scopeRefusal }], details: undefined, isError: true };
+        }
         const appendArgs = ["append", "--task", task, "--verdict", verdict, "--summary", summary, "--silent", String(silent)];
         if (wake) appendArgs.push("--wake", wake);
         return enqueueDelivery(async () => {
@@ -913,9 +927,14 @@ ${context.command}
         if (grant !== "published") throw new Error("could not record the branch's eligible row snapshot");
         // A row can still arrive between this re-check and the model starting
         // the drain; that residual is accepted by the confused-agent-grade boundary.
-        await session.prompt(
-          `FIRSTMATE SUPERVISION WAKE: ${message}\n\nHandle this per your operating procedure. Do not finish this turn until you have completed, in order: fm_branch_report, the exact WAKE_ACK_REQUIRED command, and release of every task lease you claimed.`,
-        );
+        wakeTaskScope = heartbeat ? null : { rows: [...scope.eligibleSeqs], tasks: new Set(scope.eligibleTasks) };
+        try {
+          await session.prompt(
+            `FIRSTMATE SUPERVISION WAKE: ${message}\n\nHandle this per your operating procedure. Do not finish this turn until you have completed, in order: fm_branch_report, the exact WAKE_ACK_REQUIRED command, and release of every task lease you claimed.`,
+          );
+        } finally {
+          wakeTaskScope = null;
+        }
         if (!(await releaseEligibleRowsSnapshot(state, wakeGrantScript, String(acceptedGeneration)))) {
           throw new Error("could not release the branch's settled wake-row grant");
         }
