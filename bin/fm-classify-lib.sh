@@ -338,12 +338,19 @@ EOF
   printf '%s' "$out"
 }
 
-_fm_decision_key_transition_allowed() {  # <key> <note>
-  case "$1" in
+_fm_decision_key_transition_allowed() {  # <key> <note> <verb> <resolve-verb>
+  local key=$1 note=$2 verb=${3-} resolve=${4:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  case "$key" in
     pending-reply-*)
-      case "$2" in
+      case "$note" in
         pending-reply-*:*) return 0 ;;
-        correlated\ pending\ reply\ reconciled*) return 0 ;;
+        # Older pending-reply status writers emitted this exact resolved
+        # wording. Keep it as a reserved-key closure without allowing it to
+        # open a pending-reply decision or accept arbitrary prose.
+        'correlated pending reply reconciled'*)
+          [ "$verb" = "$resolve" ] || return 1
+          return 0
+          ;;
         *) return 1 ;;
       esac
       ;;
@@ -366,7 +373,7 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
   note=$(status_line_note "$line")
   case "$verb" in
     needs-decision|blocked|"$resolve"|"$held")
-      _fm_decision_key_transition_allowed "$key" "$note" || { printf '%s' "$open"; return 0; }
+      _fm_decision_key_transition_allowed "$key" "$note" "$verb" "$resolve" || { printf '%s' "$open"; return 0; }
       ;;
   esac
   case "$verb" in

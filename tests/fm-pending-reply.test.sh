@@ -927,6 +927,9 @@ test_same_basename_self_home_reply_does_not_false_escalate() {
   fm_write_secondmate_meta "$state/hibit.meta" "$sm_home" "sess:fm-hibit"
   printf 'done [corr=%s]: answered in mate home\n' "$corr" > "$sm_home/state/hibit.status"
   rec=$(fm_pending_reply_path "$state" "$corr")
+  # Keep the recovery attempt on the test seam; invoking a real backend here
+  # would make this correlation-only regression depend on an available pane.
+  export FM_PENDING_REPLY_SEND_HOOK=true
   fm_pending_reply_mark_turn_completed "$state" "$corr" request
   fm_pending_reply_send_recovery "$state" "$corr" >/dev/null 2>&1 || true
   fm_pending_reply_mark_turn_completed "$state" "$corr" recovery
