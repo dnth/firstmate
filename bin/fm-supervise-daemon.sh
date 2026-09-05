@@ -378,7 +378,8 @@ classify_signal() {  # <reason-after-colon> <state>
         seen_line=$(cat "$seen_marker" 2>/dev/null || true)
         # Legacy homes recorded only the last escalated line.  Preserve that
         # deduplication until the endpoint sidecar is created by this build.
-        if [ ! -e "$seen_marker.offset" ] && [ -n "$seen_line" ] && [ "$seen_line" = "$last" ]; then
+        if [ ! -e "$seen_marker.offset" ] && [ ! -e "$seen_marker.pending" ] \
+          && [ -n "$seen_line" ] && [ "$seen_line" = "$last" ]; then
           rc=1
           record=
         fi
@@ -712,8 +713,13 @@ capture_and_commit_signal_endpoints() {  # <state> <space-separated-status-files
 }
 
 commit_recovery_seen_statuses() {  # <state> <staged-statuses>
-  local state=$1 staged=$2 task line
+  local state=$1 staged=$2 task line pending
   [ -f "$staged" ] && [ ! -L "$staged" ] || return 1
+  while IFS="$(printf '\t')" read -r task line; do
+    [ -n "$task" ] && [ -n "$line" ] || return 1
+    pending="$state/.subsuper-seen-status-$(_stale_key "$task").pending"
+    : > "$pending" || return 1
+  done < "$staged"
   while IFS="$(printf '\t')" read -r task line; do
     [ -n "$task" ] && [ -n "$line" ] || return 1
     mark_status_seen "$state" "$task" "$line" || return 1
@@ -721,12 +727,14 @@ commit_recovery_seen_statuses() {  # <state> <staged-statuses>
 }
 
 commit_recovery_seen_offsets() {  # <state> <staged-offsets>
-  local state=$1 staged=$2 task endpoint ident
+  local state=$1 staged=$2 task endpoint ident marker
   [ -f "$staged" ] && [ ! -L "$staged" ] || return 1
   while IFS="$(printf '\t')" read -r task endpoint ident; do
     [ -n "$task" ] && [ -n "$endpoint" ] && [ -n "$ident" ] || return 1
     case "$endpoint" in ''|*[!0-9]*) return 1 ;; esac
-    printf '%s@%s' "$endpoint" "$ident" > "$state/.subsuper-seen-status-$(_stale_key "$task").offset" || return 1
+    marker="$state/.subsuper-seen-status-$(_stale_key "$task")"
+    printf '%s@%s' "$endpoint" "$ident" > "$marker.offset" || return 1
+    rm -f -- "$marker.pending" || return 1
   done < "$staged"
 }
 
