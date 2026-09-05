@@ -354,6 +354,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/port-3696-3697-reconciliation.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/public-followup.md",
       "audience": "maintainer-verification"
     },

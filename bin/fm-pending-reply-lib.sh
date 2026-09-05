@@ -520,7 +520,8 @@ fm_pending_reply_close_decision() {  # <status-file> <corr_id> <task-id> <reques
 $open
 EOF
   [ "$keyed_open" -eq 0 ] \
-    || printf 'resolved [key=%s]: correlated pending reply reconciled\n' "$decision_key" >> "$status_file"
+    || printf 'resolved [key=%s]: %s\n' "$decision_key" \
+      "$(fm_pending_reply_resolved_note "$task_id" "$corr" "status")" >> "$status_file"
   [ "$legacy_open" -eq 0 ] \
     || printf 'resolved: correlated pending reply reconciled (pending-reply-id=%s)\n' "$corr" >> "$status_file"
 }
@@ -864,11 +865,24 @@ fm_pending_reply_reconcile_recovery() {  # <state-dir> <corr_id>
   fm_pending_reply_set "$rec" phase recovery_unknown || return 1
 }
 
+# Close-note body for a reserved pending-reply decision.
+fm_pending_reply_resolved_note() {  # <task-id> <corr_id> <via> [extra]
+  printf 'pending-reply-resolved: task=%s via=%s' "$1" "$3"
+  [ -z "${4:-}" ] || printf ' %s' "$4"
+}
+
+fm_pending_reply_close_note_for_key() {  # <key> <task-id> <via> [extra]
+  case "$1" in
+    pending-reply-*) fm_pending_reply_resolved_note "$2" "${1#pending-reply-}" "$3" "${4:-}" ;;
+    *) return 1 ;;
+  esac
+}
+
 # Escalate once after a missed recovery report or failed delivery outcome.
 # Retains the durable unresolved record. Never loops.
 fm_pending_reply_maybe_escalate() {  # <state-dir> <corr_id>
   local state=$1 corr=$2
-  local rec phase completed now task_id summary payload parent_status outcome decision_key
+  local rec phase completed now task_id summary payload parent_status outcome decision_key sm_home
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
@@ -885,11 +899,16 @@ fm_pending_reply_maybe_escalate() {  # <state-dir> <corr_id>
     delivery_unknown|recovery_failed|recovery_unknown) ;;
     *) return 1 ;;
   esac
+  # Repair a same-basename self-home report before deciding this is a miss.
+  task_id=$(fm_pending_reply_get "$rec" task_id)
+  if [ -f "$state/${task_id}.meta" ]; then
+    sm_home=$(fm_meta_get "$state/${task_id}.meta" home)
+    [ -z "$sm_home" ] || fm_pending_reply_restatement_copy_same_basename "$state" "$corr" "$sm_home" || true
+  fi
   # Resolve wins if a late report arrived between completion and this call.
   if fm_pending_reply_try_resolve "$state" "$corr"; then
     return 0
   fi
-  task_id=$(fm_pending_reply_get "$rec" task_id)
   summary=$(fm_pending_reply_get "$rec" request_summary)
   parent_status=$(fm_pending_reply_get "$rec" parent_status)
   # Use pending-reply-id= (not corr=) so this parent-written line cannot be
@@ -961,6 +980,20 @@ fm_pending_reply_detect_wrong_home() {  # <state-dir> <corr_id> <secondmate-home
   fi
   fm_pending_reply_set "$rec" wrong_home_scan_signature "$snapshot" || return 1
   return 0
+}
+
+fm_pending_reply_restatement_copy_same_basename() {  # <state-dir> <corr_id> <secondmate-home>
+  local state=$1 corr=$2 sm_home=$3 rec task_id parent_status stranded line
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ -f "$rec" ] || return 1
+  task_id=$(fm_pending_reply_get "$rec" task_id)
+  parent_status=$(fm_pending_reply_get "$rec" parent_status)
+  stranded="$sm_home/state/${task_id}.status"
+  [ -f "$stranded" ] && [ ! -L "$stranded" ] || return 1
+  [ "$stranded" != "$parent_status" ] || return 1
+  line=$(fm_pending_reply_find_resolve_line "$stranded" "$corr")
+  [ -n "$line" ] || return 1
+  grep -Fqx -- "$line" "$parent_status" 2>/dev/null || printf '%s\n' "$line" >> "$parent_status"
 }
 
 # One reconciliation tick for a single record: resolve, observe, recover, escalate.

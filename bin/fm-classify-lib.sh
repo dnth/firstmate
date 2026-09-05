@@ -337,6 +337,26 @@ $set
 EOF
   printf '%s' "$out"
 }
+
+_fm_decision_key_transition_allowed() {  # <key> <note> <verb> <resolve-verb>
+  local key=$1 note=$2 verb=${3-} resolve=${4:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  case "$key" in
+    pending-reply-*)
+      case "$note" in
+        pending-reply-*:*) return 0 ;;
+        # Older pending-reply status writers emitted this exact resolved
+        # wording. Keep it as a reserved-key closure without allowing it to
+        # open a pending-reply decision or accept arbitrary prose.
+        'correlated pending reply reconciled'*)
+          [ "$verb" = "$resolve" ] || return 1
+          return 0
+          ;;
+        *) return 1 ;;
+      esac
+      ;;
+  esac
+  return 0
+}
 # Fold ONE status line into an existing "<key>\t<verb>\t<note>\n"-per-line open
 # set, applying the same needs-decision/blocked-opens, resolved/captain-held-closes
 # rule status_open_decisions documents above. Pure text transform, no file I/O.
@@ -350,9 +370,14 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
   [ -n "$stripped" ] || { printf '%s' "$open"; return 0; }
   verb=$(status_line_verb "$line")
   key=$(_fm_decision_key "$line") || { printf '%s' "$open"; return 0; }
+  note=$(status_line_note "$line")
+  case "$verb" in
+    needs-decision|blocked|"$resolve"|"$held")
+      _fm_decision_key_transition_allowed "$key" "$note" "$verb" "$resolve" || { printf '%s' "$open"; return 0; }
+      ;;
+  esac
   case "$verb" in
     needs-decision|blocked)
-      note=$(status_line_note "$line")
       open=$(_fm_decision_drop "$open" "$key")
       [ -n "$open" ] && open="${open}"$'\n'
       open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'

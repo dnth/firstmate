@@ -647,6 +647,28 @@ test_secondmate_closes_before_pending_reply_commit_failure() {
   pass "confirmed secondmate delivery closes before pending-reply bookkeeping"
 }
 
+test_reserved_pending_reply_key_closes() {
+  local dir fb log home corr key out rc
+  dir="$TMP_ROOT/reserved-pending-reply"
+  mkdir -p "$dir"
+  fb=$(make_stubs "$dir")
+  log="$dir/send.log"
+  home=$(setup_home reserved-pending-reply)
+  corr=abcdef0123456789
+  key="pending-reply-$corr"
+  fm_write_meta "$home/state/mate.meta" "window=sess:fm-mate" "kind=ship"
+  printf 'blocked [key=%s]: pending-reply-missed: task=mate pending-reply-id=%s request=reply\n' "$key" "$corr" > "$home/state/mate.status"
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" mate --resolve-key "$key" "reply received" >/dev/null 2>"$dir/send.err"
+  rc=$?
+  expect_code 0 "$rc" "reserved pending-reply key should close through --resolve-key: $(cat "$dir/send.err" 2>/dev/null)"
+  out=$(FM_STATE_OVERRIDE="$home/state" "$DRAIN")
+  if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then
+    fail "reserved pending-reply key remained open: $out"
+  fi
+  pass "fm-send --resolve-key closes reserved pending-reply decisions"
+}
+
 test_answer_send_closes_open_decision
 test_colon_first_key_position_is_answerable
 test_answer_starts_work_never_orphans
@@ -664,3 +686,4 @@ test_remote_omp_persistence_failure_propagates_without_redelivery
 test_remote_transport_failure_does_not_close
 test_append_failure_reports_every_safe_manual_close
 test_secondmate_closes_before_pending_reply_commit_failure
+test_reserved_pending_reply_key_closes
