@@ -4,6 +4,7 @@
 # Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--accepted-local-base <full-commit-sha>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>] [--allow-project-omp-extensions]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>] [--allow-project-omp-extensions]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>] [--allow-project-omp-extensions] --secondmate
+#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -295,6 +296,7 @@ fm_refuse_if_gate_agent
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
 KIND=ship
+RELAUNCH=0
 HARNESS_ARG=
 MODEL=
 EFFORT=
@@ -354,6 +356,7 @@ for a in "$@"; do
   case "$a" in
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
+    --relaunch) RELAUNCH=1 ;;
     --harness) want_value=harness ;;
     --harness=*) HARNESS_ARG=${a#--harness=}; HARNESS_SET=1 ;;
     --model) want_value=model ;;
@@ -398,6 +401,15 @@ done
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
+
+if [ "$RELAUNCH" -eq 1 ]; then
+  RELAUNCH_ID=${POS[0]:-}
+  [ -n "$RELAUNCH_ID" ] || { echo "error: --relaunch requires a task id" >&2; exit 1; }
+  RELAUNCH_META="$STATE/$RELAUNCH_ID.meta"
+  [ -f "$RELAUNCH_META" ] || { echo "error: --relaunch needs existing metadata at $RELAUNCH_META" >&2; exit 1; }
+  KIND=$(fm_meta_get "$RELAUNCH_META" kind)
+  [ -n "$KIND" ] || KIND=ship
+fi
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -841,7 +853,14 @@ fi
 # recorded in meta only when it is NOT tmux (fm-teardown.sh and fm-watch.sh's
 # window_backend/fm_backend_of_meta already treat an absent backend= as tmux),
 # so the default path's meta stays byte-identical.
-if [ "$BACKEND_SET" -eq 1 ]; then
+if [ "$RELAUNCH" -eq 1 ]; then
+  RELAUNCH_ID=${POS[0]:-}
+  [ -n "$RELAUNCH_ID" ] || { echo "error: --relaunch requires a task id" >&2; exit 1; }
+  RELAUNCH_META="$STATE/$RELAUNCH_ID.meta"
+  [ -f "$RELAUNCH_META" ] || { echo "error: --relaunch needs existing metadata at $RELAUNCH_META" >&2; exit 1; }
+  BACKEND=$(fm_meta_get "$RELAUNCH_META" backend)
+  [ -n "$BACKEND" ] || BACKEND=tmux
+elif [ "$BACKEND_SET" -eq 1 ]; then
   BACKEND=$BACKEND_ARG
 else
   BACKEND=$(fm_backend_name)
@@ -3033,16 +3052,23 @@ if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
 fi
 case "$BACKEND" in
   tmux)
-    SES=$(fm_backend_tmux_container_ensure)
-    T="$SES:$W"
-    # #134 robustness (tmux): fm_backend_tmux_create_task captures a stable window
-    # id and pins the window name (automatic-rename/allow-rename off) so a captain's
-    # non-default tmux config cannot rename the window away from fm-<id> once
-    # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
-    # rename-critical worktree-detection steps below; the persisted window= handle
-    # stays $T (the name form), which is safe now that rename is disabled.
-    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$SPAWN_START_DIR") || exit 1
-    WT_TARGET="$WID"
+    if [ "$RELAUNCH" -eq 1 ]; then
+      T=$(fm_meta_get "$STATE/$ID.meta" window)
+      [ -n "$T" ] || { echo "error: relaunch has no recorded tmux endpoint for $ID" >&2; exit 1; }
+      WT_TARGET="$T"
+      SES=${T%%:*}
+    else
+      SES=$(fm_backend_tmux_container_ensure)
+      T="$SES:$W"
+      # #134 robustness (tmux): fm_backend_tmux_create_task captures a stable window
+      # id and pins the window name (automatic-rename/allow-rename off) so a captain's
+      # non-default tmux config cannot rename the window away from fm-<id> once
+      # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
+      # rename-critical worktree-detection steps below; the persisted window= handle
+      # stays $T (the name form), which is safe now that rename is disabled.
+      WID=$(fm_backend_tmux_create_task "$SES" "$W" "$SPAWN_START_DIR") || exit 1
+      WT_TARGET="$WID"
+    fi
     ;;
   herdr)
     # fm_backend_herdr_workspace_label resolves the target workspace from
@@ -3071,6 +3097,13 @@ case "$BACKEND" in
     fi
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
+    if [ "$RELAUNCH" -eq 1 ]; then
+      HERDR_PROJECTED=1
+      HERDR_SES=$(fm_meta_get "$STATE/$ID.meta" herdr_session)
+      HERDR_WORKSPACE_ID=$(fm_meta_get "$STATE/$ID.meta" herdr_workspace_id)
+      HERDR_TAB_ID=$(fm_meta_get "$STATE/$ID.meta" herdr_tab_id)
+      HERDR_PANE_ID=$(fm_meta_get "$STATE/$ID.meta" herdr_pane_id)
+    fi
     if [ "$KIND" != secondmate ] && fm_backend_herdr_presentation_enabled "$CONFIG"; then
       HERDR_SES=$(fm_backend_herdr_session)
       HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)

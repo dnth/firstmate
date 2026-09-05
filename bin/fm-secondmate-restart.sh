@@ -325,6 +325,9 @@ while [ "$((pending_count + restart_active_count))" -gt 0 ]; do
   now=$(date +%s)
   next_wait=$PERSIST_POLL
   i=0
+  # Resolve every arrived answer before evaluating any timeout.  A mate later
+  # in the list must be able to authorize its restart at the same poll tick
+  # that an earlier mate reaches its deadline.
   while [ "$i" -lt "${#IDS[@]}" ]; do
     if [ "${PLAN[i]}" != persisted-pending ]; then
       i=$((i + 1))
@@ -333,6 +336,23 @@ while [ "$((pending_count + restart_active_count))" -gt 0 ]; do
     if fm_pending_reply_try_resolve "$STATE" "${CORR[i]}"; then
       pending_count=$((pending_count - 1))
       launch_restart "$i"
+    fi
+    i=$((i + 1))
+  done
+  i=0
+  while [ "$i" -lt "${#IDS[@]}" ]; do
+    if [ "${PLAN[i]}" != persisted-pending ]; then
+      i=$((i + 1))
+      continue
+    fi
+    if [ "$now" -ge "${DEADLINE[i]}" ] && [ "$restart_active_count" -gt 0 ]; then
+      # Let an already-authorized replacement publish its stop/start outcome
+      # before sending a fallback steer for another mate.  This does not block
+      # persistence polling or the replacement worker; it only keeps the
+      # observable lifecycle order honest when a slow relaunch overlaps a
+      # timeout.
+      DEADLINE[i]=$((now + PERSIST_POLL))
+      [ "$next_wait" -le "$PERSIST_POLL" ] || next_wait=$PERSIST_POLL
     elif [ "$now" -ge "${DEADLINE[i]}" ]; then
       fall_back_to_nudge "${IDS[$i]}" \
         "it did not confirm within ${PERSIST_WAIT}s that its open work is written down, so its conversation was not spent"
