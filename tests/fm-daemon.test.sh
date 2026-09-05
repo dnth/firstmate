@@ -1355,6 +1355,37 @@ test_classify_signal_dedup_against_scan() {
   pass "classify_signal dedupes against the catch-all scan seen marker"
 }
 
+test_classify_signal_legacy_marker_respects_status_replacement() {
+  local dir state statusf marker out
+  dir=$(make_supercase signal-legacy-replacement)
+  state="$dir/state"
+  statusf="$state/replaced-s1.status"
+  marker="$state/.subsuper-seen-status-replaced-s1"
+  printf 'done: release complete\n' > "$statusf"
+  printf 'done: release complete' > "$marker"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$statusf" "$state")
+  case "$out" in self\|*) ;; *) fail "matching legacy marker did not suppress unchanged status: $out" ;; esac
+  sleep 1
+  printf 'done: release complete\n' > "$dir/replacement.tmp"
+  mv -f "$dir/replacement.tmp" "$statusf"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$statusf" "$state")
+  case "$out" in escalate\|*) ;; *) fail "legacy marker suppressed replaced status file: $out" ;; esac
+  pass "legacy dedup resurfaces matching events after status replacement"
+}
+
+test_classify_signal_legacy_marker_suppresses_unchanged_duplicate() {
+  local dir state statusf marker out
+  dir=$(make_supercase signal-legacy-duplicate)
+  state="$dir/state"
+  statusf="$state/duplicate-s2.status"
+  marker="$state/.subsuper-seen-status-duplicate-s2"
+  printf 'done: release complete\n' > "$statusf"
+  printf 'done: release complete' > "$marker"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$statusf" "$state")
+  case "$out" in self\|*) ;; *) fail "unchanged legacy duplicate was re-escalated: $out" ;; esac
+  pass "legacy dedup suppresses unchanged duplicate"
+}
+
 test_classify_stale_dedup_against_signal() {
   # If the signal path already escalated a status (seen marker matches),
   # classify_stale must self-handle to avoid a duplicate in the digest.
@@ -2287,6 +2318,8 @@ test_tmux_composer_state_bordered_and_agent_rows_are_empty
 test_tmux_composer_state_requires_matching_box_borders
 test_pane_input_pending_honors_idle_override_after_border_strip
 test_classify_signal_dedup_against_scan
+test_classify_signal_legacy_marker_respects_status_replacement
+test_classify_signal_legacy_marker_suppresses_unchanged_duplicate
 test_classify_stale_dedup_against_signal
 test_afk_nonterminal_working_merged_keeps_wedge_aging
 test_afk_genuine_done_still_terminal_stale

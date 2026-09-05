@@ -366,6 +366,13 @@ daemon_status_seen_offset() {  # <state> <status-file>
   printf '%s' "$size"
 }
 
+legacy_seen_marker_matches_status() {  # <marker> <status-file>
+  local marker=$1 statusf=$2 marker_mtime status_mtime
+  marker_mtime=$(_stat_file_mtime "$marker" 2>/dev/null) || return 1
+  status_mtime=$(_stat_file_mtime "$statusf" 2>/dev/null) || return 1
+  [ "$marker_mtime" -ge "$status_mtime" ]
+}
+
 classify_signal() {  # <reason-after-colon> <state>
   local reason=$1 state=$2 f record rc start endpoint ident rest last distilled="" rel="" all_seen=1 seen_marker seen_line
   FM_SIGNAL_SURFACE_ENDPOINTS=''
@@ -387,7 +394,8 @@ classify_signal() {  # <reason-after-colon> <state>
         if [ "$rc" -eq 0 ] && [ -n "$seen_line" ]; then
           rest=${record#*$'\t'}
           if [ ! -e "$seen_marker.offset" ] && [ ! -e "$seen_marker.pending" ] \
-            && [ "${rest#*$'\t'}" = "$seen_line" ]; then
+            && [ "${rest#*$'\t'}" = "$seen_line" ] \
+            && legacy_seen_marker_matches_status "$seen_marker" "$f"; then
             rc=1
             record=
           fi
