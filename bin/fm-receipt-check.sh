@@ -758,8 +758,10 @@ record_validation_completed() {
     || { release_validation_lock; echo "error: validation worktree is missing" >&2; return 1; }
   validated_head=$(git -C "$worktree" rev-parse --verify "$validated_head^{commit}" 2>/dev/null) \
     || { release_validation_lock; echo "error: validated head is missing or invalid" >&2; return 1; }
-  validation_base=$(git -C "$worktree" rev-parse --verify "$validation_base^{commit}" 2>/dev/null) \
-    || { release_validation_lock; echo "error: validation base is missing or invalid" >&2; return 1; }
+  if [ "$path" = full-no-mistakes ]; then
+    validation_base=$(git -C "$worktree" rev-parse --verify "$validation_base^{commit}" 2>/dev/null) \
+      || { release_validation_lock; echo "error: validation base is missing or invalid" >&2; return 1; }
+  fi
   current_head=$(git -C "$worktree" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) \
     || { release_validation_lock; echo "error: current worktree head is unavailable" >&2; return 1; }
   fm_worktree_is_clean "$worktree" \
