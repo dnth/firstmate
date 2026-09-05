@@ -64,26 +64,27 @@ Each shard is still strictly serial in itself, and separate runners mean no two 
 `.github/workflows/ci.yml` derives the same `n` from `strategy.job-total` rather than a literal, so changing the shard count in either file without the other fails the lane loudly instead of leaving part of the required suite unrun.
 
 Assignment is longest-processing-time bin packing over per-script duration hints embedded in `bin/fm-test-run.sh`.
-The hints came from the green main run [32817763096](https://github.com/dnth/firstmate/actions/runs/32817763096) on 2026-08-25, where the four shards measured all 110 scripts of the lane in 2585514 ms of serial work.
-The previous 2026-08-02 hints covered only 69 of them, so every later script carried the 20000 ms default and the packing went blind.
-Scored with the measured weights, that stale partition put 885053 ms (~14m45s) of work in `portable-serial-2of4` against a 15-minute tripwire, and shard 2 was duly killed at the cap in run [32826333048](https://github.com/dnth/firstmate/actions/runs/32826333048) while shards 1, 3, and 4 finished in 8m20s, 9m56s, and 10m31s.
+The hints came from the green run [33904204200](https://github.com/dnth/firstmate/actions/runs/33904204200) on 2026-09-04, where the four shards measured 123 of the lane's 124 scripts in 2914178 ms of serial work.
+The 2026-08-25 hints they replaced had gone stale the same way the 2026-08-02 hints did before them.
+Scored against the real timings, that stale partition predicted an even ~11.9 min per shard while `portable-serial-3of4` actually carried 888 s (~14m48s) against a 15-minute tripwire, and shard 3 was cancelled at the cap on main in run [33886329307](https://github.com/dnth/firstmate/actions/runs/33886329307) and again in runs [33902094771](https://github.com/dnth/firstmate/actions/runs/33902094771) and [33903723160](https://github.com/dnth/firstmate/actions/runs/33903723160), while shards 1, 2, and 4 finished in 635 s, 739 s, and 652 s.
+This is the second recurrence of stale hints producing a cancelled shard, so treat a shard creeping toward its cap as a signal to refresh the hints first.
 A script with no hint gets the conservative `PORTABLE_SERIAL_DEFAULT_WEIGHT_MS` default.
 Hints only affect balance: the coverage guard keeps the partition complete and disjoint whatever they say, so a stale hint costs a slower shard rather than lost coverage.
 
 | Lane | Script count | Estimated duration |
 |---|---:|---:|
-| `portable-serial-1of4` | 28 | 646379 ms (~646.4 s) |
-| `portable-serial-2of4` | 26 | 646369 ms (~646.4 s) |
-| `portable-serial-3of4` | 27 | 646380 ms (~646.4 s) |
-| `portable-serial-4of4` | 29 | 646386 ms (~646.4 s) |
-| imbalance | | 17 ms |
+| `portable-serial-1of4` | 29 | 733941 ms (~733.9 s) |
+| `portable-serial-2of4` | 31 | 733940 ms (~733.9 s) |
+| `portable-serial-3of4` | 32 | 733939 ms (~733.9 s) |
+| `portable-serial-4of4` | 32 | 733941 ms (~733.9 s) |
+| imbalance | | 2 ms |
 
-The single longest script, `tests/fm-pr-check-security.test.sh` at 241502 ms, is the floor for any shard count.
+The single longest script, `tests/fm-remote-secondmate-lifecycle-e2e.test.sh` at 268606 ms, is the floor for any shard count.
 
 Refresh the hints by downloading the per-shard timing artifacts from a green CI run, replacing the `portable_serial_weight_hints` table in `bin/fm-test-run.sh` with the measured `path`/`duration_ms` pairs, and updating the table above:
 
 ```sh
-gh run download <run-id> -R kunchenguid/firstmate --pattern 'fm-test-timing-portable-serial-*' -D /tmp/fm-serial
+gh run download <run-id> -R dnth/firstmate --pattern 'fm-test-timing-portable-serial-*' -D /tmp/fm-serial
 jq -r '.scripts[] | [.path, .duration_ms] | @tsv' /tmp/fm-serial/*.json | LC_ALL=C sort
 bin/fm-test-run.sh --check-coverage
 ```
@@ -110,7 +111,7 @@ Portable shards, each portable serial shard, and the Herdr lane upload runner-ge
 | Job | timeout-minutes | Rationale |
 |---|---:|---|
 | portable parallel 1/2 | 10 | The measured shard sums are about three minutes and the timeout is a hang tripwire. |
-| portable serial 1-4 | 15 | Each balanced shard is about eleven minutes, leaving hang-tripwire margin rather than an expected duration. |
+| portable serial 1-4 | 20 | Each rebalanced shard is about 12.2 minutes of script time and about 12.5 minutes of job wall, so the cap leaves roughly 60% margin for runner-load variance and still trips on a wedged test. |
 | Herdr | 40 | The real-Herdr lane keeps its dedicated timeout. |
 
 Timeouts are hang tripwires rather than expected healthy durations.
