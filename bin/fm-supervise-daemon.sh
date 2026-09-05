@@ -393,7 +393,7 @@ classify_signal() {  # <reason-after-colon> <state>
         fi
         if [ "$rc" -eq 0 ]; then
           rel=1; all_seen=0
-          distilled="${distilled}${record#*$'\t'*} | "
+          distilled="${distilled}${rest#*$'\t'} | "
         fi
         ;;
       *)
