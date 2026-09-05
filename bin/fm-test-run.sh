@@ -402,7 +402,7 @@ tests/fm-claude-stop-autoarm.test.sh 60630
 tests/fm-codex-continuity-live-e2e.test.sh 19
 tests/fm-daemon.test.sh 32136
 tests/fm-documentation-audiences.test.sh 708
-tests/fm-ext-bridge.test.sh 4000
+tests/fm-ext-bridge.test.sh 5000
 tests/fm-fleet-snapshot-view.test.sh 7565
 tests/fm-fleet-sync.test.sh 36367
 tests/fm-gate-refuse.test.sh 8943

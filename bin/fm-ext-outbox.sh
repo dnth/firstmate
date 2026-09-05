@@ -6,10 +6,14 @@
 #   fm-ext-outbox.sh begin --slug <slug> --kind <kind> --generation <n>
 #   fm-ext-outbox.sh receipt --slug <slug> --kind <kind> --generation <n>
 #     --receipt-file <path>
+#   fm-ext-outbox.sh abort --slug <slug> --kind <kind> --generation <n>
 #
 # begin CAS-claims the posting marker. Exit 0 on a new claim, 1 when a receipt
 # already exists (idempotent success), 3 on mid-delivery (posting without
 # receipt), 2 on validation failure. receipt writes the receipt once.
+# abort deletes the posting marker after a definite send failure before a
+# successful response so that generation can retry. It refuses when a receipt
+# already exists. An ambiguous crash after the post started keeps the marker.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -23,6 +27,7 @@ usage() {
 usage: fm-ext-outbox.sh pending
        fm-ext-outbox.sh begin --slug <slug> --kind <kind> --generation <n>
        fm-ext-outbox.sh receipt --slug <slug> --kind <kind> --generation <n> --receipt-file <path>
+       fm-ext-outbox.sh abort --slug <slug> --kind <kind> --generation <n>
 EOF
 }
 
@@ -106,6 +111,19 @@ case "$cmd" in
       0) printf 'receipted %s %s %s\n' "$SLUG" "$KIND" "$GENERATION" ;;
       1) printf 'already-receipted %s %s %s\n' "$SLUG" "$KIND" "$GENERATION" ;;
       *) die "could not record the receipt" 2 ;;
+    esac
+    exit "$rc"
+    ;;
+  abort)
+    fm_ext_slug_valid "$SLUG" || die "unsafe slug"
+    fm_ext_kind_valid "$KIND" || die "invalid kind"
+    fm_ext_generation_valid "$GENERATION" || die "invalid generation"
+    fm_ext_outbox_abort "$OUTBOX" "$SLUG" "$KIND" "$GENERATION"
+    rc=$?
+    case "$rc" in
+      0) printf 'aborted %s %s %s\n' "$SLUG" "$KIND" "$GENERATION" ;;
+      1) printf 'already-receipted %s %s %s\n' "$SLUG" "$KIND" "$GENERATION" ;;
+      *) die "could not abort delivery" 2 ;;
     esac
     exit "$rc"
     ;;

@@ -169,6 +169,28 @@ fm_ext_private_artifact_file_valid() {
   fm_ext_single_link_file_mode_valid "$dir/$base" "$mode" "$device"
 }
 
+# Remove a previously published private artifact. Returns 0 when the path is
+# absent or this caller deleted a valid artifact, and 1 when the path exists
+# but is not a safe private artifact or deletion failed.
+fm_ext_private_artifact_remove() {
+  local dir=$1 base=$2 mode=$3 dest
+  case "$base" in
+    ''|.*|*/*) return 1 ;;
+  esac
+  dest="$dir/$base"
+  if ! fm_ext_private_artifact_file_valid "$dir" "$base" "$mode"; then
+    if [ -e "$dest" ] || [ -L "$dest" ]; then
+      return 1
+    fi
+    return 0
+  fi
+  rm -f -- "$dest" || return 1
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    return 1
+  fi
+  return 0
+}
+
 # --- identifiers ------------------------------------------------------------
 
 fm_ext_sha256() {
@@ -392,6 +414,15 @@ fm_ext_offer_registry_claim() {
   return "$rc"
 }
 
+# Drop a claimed offer so a later intake or poll can retry the wake.
+# Returns 0 when the marker is absent or was a valid private artifact that this
+# caller deleted, and 1 when the path is unsafe or deletion failed.
+fm_ext_offer_registry_unclaim() {
+  local state=$1 slug=$2
+  fm_ext_slug_valid "$slug" || return 1
+  fm_ext_private_artifact_remove "$state/$FM_EXT_CONTEXT_DIRNAME" "$slug.offered.json" 600
+}
+
 # --- outbox schema ----------------------------------------------------------
 
 fm_ext_outbox_basename() {
@@ -485,6 +516,23 @@ fm_ext_outbox_receipt() {
     | fm_ext_private_artifact_publish_stdin_once "$dir" "$receipt" 600
   rc=$?
   return "$rc"
+}
+
+# Drop the posting marker after a definite send failure that happened before a
+# successful response. Returns 0 when the generation is retryable (no marker,
+# or this caller deleted a valid posting marker), 1 when a receipt already
+# exists (do not reopen), and 2 on validation or deletion failure. An
+# ambiguous crash after the post started keeps the marker; this helper is
+# only for the definite-failure path.
+fm_ext_outbox_abort() {
+  local dir=$1 slug=$2 kind=$3 generation=$4 posting receipt
+  posting=$(fm_ext_outbox_posting_basename "$slug" "$kind" "$generation") || return 2
+  receipt=$(fm_ext_outbox_receipt_basename "$slug" "$kind" "$generation") || return 2
+  if fm_ext_private_artifact_file_valid "$dir" "$receipt" 600; then
+    return 1
+  fi
+  fm_ext_private_artifact_remove "$dir" "$posting" 600 || return 2
+  return 0
 }
 
 # --- poll shim --------------------------------------------------------------

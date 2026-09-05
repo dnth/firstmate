@@ -2,7 +2,8 @@
 # Behavior tests for the sibling local Communication Officer bridge.
 #
 # Hermetic: no Discord network. The gateway plugin's Discord sender is injected.
-# Captain cases 1-12 plus bootstrap activation.
+# Captain cases 1-12 plus bootstrap activation, definite-send retry,
+# mid-delivery refuse, and wake-append offer recovery.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -404,6 +405,117 @@ test_12_hermes_refused_as_secondmate() {
   pass "12 hermes refused as secondmate"
 }
 
+# --- 13. definite send failure clears posting and allows retry --------------
+
+test_13_definite_send_failure_clears_posting_and_retries() {
+  local home slug posting receipt sent out
+  home="$TMP_ROOT/c13"
+  setup_home "$home"
+  slug=$(intake_ok "$home" "retry after discord blip")
+  write_text "$home/ans.txt" "retryable answer"
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+    --text-file "$home/ans.txt" >/dev/null
+  posting="$home/state/ext-outbox/${slug}.answer.1.posting"
+  receipt="$home/state/ext-outbox/${slug}.answer.1.receipt.json"
+  sent="$home/sent.log"
+  : > "$sent"
+  out=$(home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$sent" <<'PY'
+import os, sys
+from pathlib import Path
+sys.path.insert(0, os.environ["PYTHONPATH"])
+import outbox_poster
+home, sent = sys.argv[1], sys.argv[2]
+os.environ["FM_HOME"] = home
+def send(_payload):
+    raise RuntimeError("discord HTTP 503")
+print(",".join(outbox_poster.drain_outbox(send=send, home=Path(home))))
+PY
+  )
+  assert_contains "$out" "failed" "definite send failure must return failed"
+  assert_absent "$posting" "definite send failure must delete the posting marker"
+  assert_absent "$receipt" "definite send failure must not write a receipt"
+  out=$(home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$sent" <<'PY'
+import os, sys
+from pathlib import Path
+sys.path.insert(0, os.environ["PYTHONPATH"])
+import outbox_poster
+home, sent = sys.argv[1], sys.argv[2]
+os.environ["FM_HOME"] = home
+def send(payload):
+    with open(sent, "a", encoding="utf-8") as fh:
+        fh.write(payload["text"] + "\n")
+    return {"ok": True, "discord_message_id": "13"}
+print(",".join(outbox_poster.drain_outbox(send=send, home=Path(home))))
+PY
+  )
+  assert_contains "$out" "sent" "cleared posting marker must allow a later send"
+  assert_grep "retryable answer" "$sent" "retry after definite failure must deliver once"
+  assert_present "$receipt" "successful retry must write a receipt"
+  pass "13 definite send failure clears posting marker and allows retry"
+}
+
+# --- 14. mid-delivery still refuses automatic plugin repost -----------------
+
+test_14_mid_delivery_refuses_plugin_repost() {
+  local home slug posting sent out
+  home="$TMP_ROOT/c14"
+  setup_home "$home"
+  slug=$(intake_ok "$home" "do not double post")
+  write_text "$home/ans.txt" "ambiguous answer"
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+    --text-file "$home/ans.txt" >/dev/null
+  home_env "$home" "$OUTBOX" begin --slug "$slug" --kind answer --generation 1 >/dev/null
+  posting="$home/state/ext-outbox/${slug}.answer.1.posting"
+  sent="$home/sent.log"
+  : > "$sent"
+  out=$(home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$sent" \
+    "$home/state/ext-outbox/${slug}.answer.1.json" <<'PY'
+import os, sys
+from pathlib import Path
+sys.path.insert(0, os.environ["PYTHONPATH"])
+import outbox_poster
+home, sent, path = sys.argv[1], sys.argv[2], sys.argv[3]
+os.environ["FM_HOME"] = home
+def send(payload):
+    with open(sent, "a", encoding="utf-8") as fh:
+        fh.write("SHOULD_NOT_SEND\n")
+    raise RuntimeError("send must not run during mid-delivery")
+print(outbox_poster.deliver_one(Path(path), send=send, home=Path(home)))
+PY
+  )
+  assert_contains "$out" "mid-delivery" "plugin must refuse automatic repost while posting has no receipt"
+  [ ! -s "$sent" ] || fail "mid-delivery must not invoke send"
+  assert_present "$posting" "ambiguous mid-delivery must keep the posting marker"
+  pass "14 mid-delivery still refuses automatic plugin repost"
+}
+
+# --- 15. wake failure does not leave a silent offered marker ----------------
+
+test_15_wake_failure_does_not_leave_silent_offered() {
+  local home slug rc err offered inbox wakes
+  home="$TMP_ROOT/c15"
+  setup_home "$home"
+  slug=$(slug_of "$RID")
+  offered="$home/state/ext-context/${slug}.offered.json"
+  inbox="$home/state/ext-inbox/${slug}.json"
+  write_text "$home/text.txt" "wake me later"
+  err="$home/wake.err"
+  home_env "$home" env FM_WAKE_QUEUE=/dev/full "$INTAKE" \
+    --request-id "$RID" --guild-id "$GUILD" --channel-id "$CHANNEL" \
+    --thread-id "$THREAD" --message-id "$MESSAGE" --author "$AUTHOR" \
+    --secret-file "$home/config/ext-secret" --text-file "$home/text.txt" \
+    >/dev/null 2>"$err"; rc=$?
+  expect_code 1 "$rc" "intake must fail when the wake cannot be appended"
+  assert_grep "could not append the wake" "$err" "intake must name the wake failure"
+  assert_present "$inbox" "wake failure must keep the inbox so retry is possible"
+  assert_absent "$offered" "wake failure must not leave a claimed offer marker"
+  intake_ok "$home" "wake me later" >/dev/null
+  assert_present "$offered" "re-intake after wake failure must claim the offer"
+  wakes=$(grep -c "ext-request $slug" "$home/state/.wake-queue")
+  [ "$wakes" = 1 ] || fail "re-intake after wake failure must wake once, got $wakes"
+  pass "15 wake failure does not leave a permanently silent offered marker"
+}
+
 # --- bootstrap opt-in -------------------------------------------------------
 
 test_bootstrap_arms_ext_watch_shim() {
@@ -448,6 +560,9 @@ test_9_mid_send_refuse_and_cas_receipt
 test_10_unauthorized_and_missing_allowlist
 test_11_hermes_tui_launch_gating_unchanged
 test_12_hermes_refused_as_secondmate
+test_13_definite_send_failure_clears_posting_and_retries
+test_14_mid_delivery_refuses_plugin_repost
+test_15_wake_failure_does_not_leave_silent_offered
 test_bootstrap_arms_ext_watch_shim
 test_poll_noop_when_inactive
 test_plugin_has_no_terminal_dispatch

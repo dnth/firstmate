@@ -590,7 +590,8 @@ There is no 30-second cadence override; intake wakes immediately and the default
 `bin/fm-ext-emit.sh` writes idempotent `ack` / `answer` / `followup` / `final` payloads into `state/ext-outbox/<slug>.<kind>.<generation>.json`.
 Re-emitting the same identity is a no-op success.
 A posting marker without a receipt is refused as mid-delivery, matching public-follow-up delivery-posting behavior.
-`bin/fm-ext-outbox.sh begin` CAS-claims that posting marker; `receipt` writes the receipt once.
+That refuse covers an ambiguous crash after the post started; it is not a permanent drop after a definite send failure.
+`bin/fm-ext-outbox.sh begin` CAS-claims that posting marker; `receipt` writes the receipt once; `abort` deletes the posting marker after a definite send failure before a successful response so that generation can retry.
 Unsent payloads (no posting marker and no receipt) remain deliverable after a Hermes Gateway restart.
 `bin/fm-ext-link.sh` binds a spawned task to the canonical `request_id` as `ext_request=` / `ext_request_slug=` / `ext_request_ts=` / `ext_followups=`, never `x_request=`.
 

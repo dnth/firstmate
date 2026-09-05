@@ -3,8 +3,10 @@
 Posts pending ``state/ext-outbox`` payloads to the Discord destination stored
 in each payload and records receipts through ``bin/fm-ext-outbox.sh``.
 Unsent payloads (no posting marker, no receipt) are retried after restart.
-A posting marker without a receipt is refused so a crash mid-send cannot
-double-post.
+A definite send failure before a successful response deletes the posting
+marker so that generation can retry.
+A posting marker without a receipt is refused so an ambiguous crash after
+the post started cannot double-post.
 """
 
 from __future__ import annotations
@@ -85,6 +87,31 @@ def begin_delivery(payload: dict, home: Path | None = None) -> str:
     if result.returncode == 3:
         return "mid-delivery"
     raise RuntimeError(result.stderr.strip() or "begin failed")
+
+
+def abort_delivery(payload: dict, home: Path | None = None) -> str:
+    home = home or firstmate_home()
+    result = subprocess.run(
+        [
+            str(outbox_cli()),
+            "abort",
+            "--slug",
+            payload["slug"],
+            "--kind",
+            payload["kind"],
+            "--generation",
+            str(payload["generation"]),
+        ],
+        check=False,
+        env=_env_for(home),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        return "aborted"
+    if result.returncode == 1:
+        return "already-receipted"
+    raise RuntimeError(result.stderr.strip() or "abort failed")
 
 
 def record_receipt(payload: dict, receipt: dict, home: Path | None = None) -> str:
@@ -172,7 +199,13 @@ def deliver_one(path: Path, send: SendFn | None = None, home: Path | None = None
     if status != "claimed":
         return status
     sender = send or discord_send
-    receipt = sender(payload)
+    try:
+        receipt = sender(payload)
+    except Exception:
+        abort_status = abort_delivery(payload, home=home)
+        if abort_status == "already-receipted":
+            return abort_status
+        return "failed"
     receipt.setdefault("ok", True)
     record_receipt(payload, receipt, home=home)
     return "sent"

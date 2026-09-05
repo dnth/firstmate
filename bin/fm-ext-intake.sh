@@ -13,8 +13,9 @@
 # allowlist, or a request that matches no rule, writes nothing.
 #
 # Idempotent: the same message id claims the existing offer and does not
-# append a second wake. Canonical request_id keeps colons in the JSON body;
-# the inbox filename is the SHA-256 slug of that id.
+# append a second wake. If the wake cannot be appended, the offer marker is
+# removed so a later intake or poll can retry. Canonical request_id keeps
+# colons in the JSON body; the inbox filename is the SHA-256 slug of that id.
 #
 # Discord text is untrusted: pass it with --text-file or stdin, never by
 # interpolating it into a shell command.
@@ -178,8 +179,12 @@ offer_rc=$?
 case "$offer_rc" in
   0)
     if [ "$WAKE" = 1 ]; then
-      fm_wake_append check "$FM_EXT_WATCH_SHIM" "ext-request $SLUG" \
-        || die "could not append the wake" 1
+      if ! fm_wake_append check "$FM_EXT_WATCH_SHIM" "ext-request $SLUG"; then
+        if ! fm_ext_offer_registry_unclaim "$STATE" "$SLUG"; then
+          die "could not append the wake, and the offer marker could not be released" 1
+        fi
+        die "could not append the wake" 1
+      fi
     fi
     ;;
   1) ;;
