@@ -40,7 +40,7 @@ The exact receipt key and type schema is owned by the header and `--help` output
 - No-Mistakes status, intent, and CI-log observations use the shared bounded call boundary.
 - Every completion requires path-specific terminal evidence and records its plan path and authoritative completed head.
 - A changed worktree head invalidates completion unless the bound No-Mistakes run proves a descendant of the planned head: an active run must currently own the branch, while a terminal passed run proves the advance through its own reported head.
-- A chain the pipeline's rebase step restamped binds and completes only when it is a faithful restamp of the planned chain from the recorded validation base, so a genuinely passed run seals without a replan even though its head is neither the planned commit nor a descendant of it.
+- A chain the pipeline's rebase step restamped binds and completes only when it is a faithful restamp of the planned chain from the recorded validation base and passes the same branch and pipeline-ownership checks in either custody shape.
 - Unrelated, missing, or ambiguous drift remains refused, and a terminal run that did not pass never seals an advance.
 - Local-only readiness and guarded landing consume one fail-closed executable default-branch resolver.
 - Planning and completion refuse tracked, staged, or untracked worktree changes.
@@ -63,7 +63,7 @@ Three checks were relaxed to admit that shape, and no others.
 Chain provenance is the content-identity mechanism, stated once in `fm_nm_head_is_faithful_restamp` in `bin/fm-nm-run-lib.sh`.
 It resolves the recorded validation base, requires it to be an ancestor of both heads, requires equal commit counts, and compares each corresponding commit tree in base-to-head order.
 Foreign drift, unrelated same-tree tips, reverted foreign commits, and rebases onto changed bases stay refused because they break ancestry, count, or a pairwise tree comparison.
-Every other completion requirement is unchanged: the run must still be the bound run at the current generation, still be genuinely passed or checks-green, still report the current worktree branch while active with pipeline ownership, and still be terminal PASSED otherwise.
+Every other completion requirement is unchanged: the run must still be the bound run at the current generation, still be genuinely passed or checks-green, and still report the current worktree branch while active with pipeline ownership or be terminal PASSED otherwise.
 
 ## Known limitations
 

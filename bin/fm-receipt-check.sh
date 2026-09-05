@@ -729,7 +729,7 @@ if [ "$ACTION" = mechanical-ready ]; then
 fi
 
 record_validation_completed() {
-  local started path generation published_generation completed completed_head completed_path completed_evidence completed_generation now worktree validation_base validated_head current_head completion_head expected_evidence observed pr pr_head branch boundary new_receipts run_id run_path run_generation run_out observed_id observed_head observed_head_full outcome run_status default_ref default_branch ci_state run_ready changed_file completion_files run_branch current_branch branch_sync_state
+  local started path generation published_generation completed completed_head completed_path completed_evidence completed_generation now worktree validation_base validated_head current_head completion_head expected_evidence observed pr pr_head branch boundary new_receipts run_id run_path run_generation run_out observed_id observed_head observed_head_full outcome run_status default_ref default_branch ci_state run_ready changed_file completion_files run_branch current_branch branch_sync_state run_head_matches_current restamp_accounted
   VALIDATION_LOCK="$STATE/.$ID.validation-plan.lock"
   if ! mkdir "$VALIDATION_LOCK" 2>/dev/null; then
     VALIDATION_LOCK=
@@ -820,16 +820,27 @@ record_validation_completed() {
       fi
       # The run must account for the current head itself or both heads must be
       # faithful restamps of the validated chain from the recorded base.
-      [ "$observed_head_full" = "$current_head" ] \
-        || { fm_nm_head_is_faithful_restamp "$worktree" "$validation_base" "$validated_head" "$observed_head_full" \
-          && fm_nm_head_is_faithful_restamp "$worktree" "$validation_base" "$validated_head" "$current_head"; } \
+      restamp_accounted=0
+      if [ "$observed_head_full" = "$current_head" ]; then
+        run_head_matches_current=1
+      elif fm_nm_head_is_faithful_restamp "$worktree" "$validation_base" "$validated_head" "$observed_head_full" \
+        && fm_nm_head_is_faithful_restamp "$worktree" "$validation_base" "$validated_head" "$current_head"; then
+        run_head_matches_current=1
+        restamp_accounted=1
+      else
+        run_head_matches_current=0
+      fi
+      [ "$run_head_matches_current" -eq 1 ] \
         || { release_validation_lock; echo "error: bound No-Mistakes run head does not account for the current worktree content" >&2; return 1; }
       if [ "$current_head" != "$validated_head" ]; then
-        run_branch=$(fm_nm_field "$run_out" branch)
-        current_branch=$(git -C "$worktree" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
         fm_nm_head_descends_from "$worktree" "$validated_head" "$current_head" \
           || fm_nm_head_is_faithful_restamp "$worktree" "$validation_base" "$validated_head" "$current_head" \
           || { release_validation_lock; echo "error: current head neither descends from nor reproduces the implementation head" >&2; return 1; }
+        completion_head=$current_head
+      fi
+      if [ "$current_head" != "$validated_head" ] || [ "$restamp_accounted" -eq 1 ]; then
+        run_branch=$(fm_nm_field "$run_out" branch)
+        current_branch=$(git -C "$worktree" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
         if [ -z "$current_branch" ] || ! fm_nm_branch_matches_worktree "$worktree" "$run_branch"; then
           release_validation_lock
           echo "error: pipeline run branch is not the current worktree branch" >&2
@@ -846,13 +857,26 @@ record_validation_completed() {
         # neither that commit nor its content.
         if fm_nm_run_is_active "$run_out"; then
           branch_sync_state=$(fm_nm_branch_sync_state "$run_out")
-          [ "$branch_sync_state" = pipeline_owned ] \
-            || { release_validation_lock; echo "error: current head advance lacks authoritative pipeline ownership" >&2; return 1; }
+          if [ "$branch_sync_state" != pipeline_owned ]; then
+            release_validation_lock
+            if [ "$restamp_accounted" -eq 1 ]; then
+              echo "error: accepted restamp lacks authoritative pipeline ownership" >&2
+            else
+              echo "error: current head advance lacks authoritative pipeline ownership" >&2
+            fi
+            return 1
+          fi
         else
-          fm_nm_run_is_terminal_passed "$run_out" \
-            || { release_validation_lock; echo "error: current head advanced without a passing bound pipeline run" >&2; return 1; }
+          if ! fm_nm_run_is_terminal_passed "$run_out"; then
+            release_validation_lock
+            if [ "$restamp_accounted" -eq 1 ]; then
+              echo "error: accepted restamp lacks a passing bound pipeline run" >&2
+            else
+              echo "error: current head advanced without a passing bound pipeline run" >&2
+            fi
+            return 1
+          fi
         fi
-        completion_head=$current_head
       fi
       observed=bound-matching-no-mistakes-run
       ;;

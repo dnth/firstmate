@@ -1180,6 +1180,37 @@ test_restamped_chains_refuse_foreign_content_and_unowned_rewrites() {
     "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed >/dev/null 2>&1
   rc=$?
   expect_code 2 "$rc" "completion sealed a restamped chain without pipeline ownership"
+
+  # Custody-returned rewrite: equal current and validated heads still require
+  # branch ownership when the run reports a different faithful restamp.
+  id=receipt-restamp-custody-wrong-branch
+  read -r base project validated_head generation < <(plan_restamp_fixture "$id")
+  restamped=$(restamp_chain "$project" "$base")
+  git -C "$project" reset -q --hard "$validated_head"
+  status=$(nm_status RUN-restamp-wrong-branch "$restamped" pending)
+  FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-restamp-wrong-branch --generation "$generation" >/dev/null \
+    || fail "custody wrong-branch fixture binding failed"
+  status=$(nm_pipeline_status RUN-restamp-wrong-branch someone-elses-branch "$restamped" completed passed agent_owned)
+  FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "custody-returned restamp with another branch"
+
+  id=receipt-restamp-custody-unowned-active
+  read -r base project validated_head generation < <(plan_restamp_fixture "$id")
+  restamped=$(restamp_chain "$project" "$base")
+  git -C "$project" reset -q --hard "$validated_head"
+  status=$(nm_status RUN-restamp-custody-active "$restamped" pending)
+  FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-restamp-custody-active --generation "$generation" >/dev/null \
+    || fail "custody active fixture binding failed"
+  status=$(nm_pipeline_status RUN-restamp-custody-active "fm/$id" "$restamped" ci '' manual)
+  FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_CI_LOG='all CI checks passed - still monitoring' \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "custody-returned active restamp without ownership"
   pass "restamped chains refuse foreign content and rewrites the bound run does not own"
 }
 
