@@ -1,0 +1,217 @@
+#!/usr/bin/env bash
+# Private post-allocation launch implementation for fm-clean-commit-relaunch.
+#
+# This file is source-only implementation code, not an operator command.
+# Its interface accepts only a destination identity and an already allocated
+# worktree. It never receives, reads, or validates source relaunch authority,
+# an exact commit, a handoff path, or relaunch environment state.
+
+_FM_CLEAN_RELAUNCH_LAUNCH_LIB_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+# shellcheck source=bin/fm-task-inbox-lib.sh
+. "$_FM_CLEAN_RELAUNCH_LAUNCH_LIB_DIR/fm-task-inbox-lib.sh"
+
+FM_CLEAN_RELAUNCH_LAUNCH_STATE=
+FM_CLEAN_RELAUNCH_LAUNCH_WINDOW_ID=
+FM_CLEAN_RELAUNCH_LAUNCH_CREATE_INTERRUPTED=0
+FM_CLEAN_RELAUNCH_LAUNCH_METADATA_OWNED=0
+FM_CLEAN_RELAUNCH_LAUNCH_METADATA_INTERRUPTED=0
+FM_CLEAN_RELAUNCH_LAUNCH_TEMP_OWNED=0
+FM_CLEAN_RELAUNCH_LAUNCH_INBOX_OWNED=0
+FM_CLEAN_RELAUNCH_LAUNCH_STATE_CLAIM_INTERRUPTED=0
+FM_CLEAN_RELAUNCH_LAUNCH_METADATA_TMP=
+
+fm_clean_relaunch_defer_window_creation_signal() {
+  FM_CLEAN_RELAUNCH_LAUNCH_CREATE_INTERRUPTED=1
+}
+
+fm_clean_relaunch_defer_metadata_signal() {
+  FM_CLEAN_RELAUNCH_LAUNCH_METADATA_INTERRUPTED=1
+}
+
+fm_clean_relaunch_defer_state_claim_signal() {
+  FM_CLEAN_RELAUNCH_LAUNCH_STATE_CLAIM_INTERRUPTED=1
+}
+
+fm_clean_relaunch_shell_quote() {  # <value>
+  local value=$1
+  printf "'%s'" "${value//\'/\'\\\'\'}"
+}
+
+fm_clean_relaunch_destination_meta_absent() {  # <state> <id>
+  local state=$1 id=$2 artifact
+  for artifact in "$state/$id.meta" "$state/$id.inbox" "$state/$id.status" "${TMPDIR:-/tmp}/fm-$id"; do
+    [ ! -e "$artifact" ] && [ ! -L "$artifact" ] || return 1
+  done
+}
+
+fm_clean_relaunch_launch_cleanup() {  # <destination-id>
+  local id=$1 state=${FM_CLEAN_RELAUNCH_LAUNCH_STATE:-} window_id=${FM_CLEAN_RELAUNCH_LAUNCH_WINDOW_ID:-}
+  [ -n "$window_id" ] && fm_backend_kill herdr "$window_id" >/dev/null 2>&1 || true
+  [ -n "$state" ] || return 0
+  [ "$FM_CLEAN_RELAUNCH_LAUNCH_TEMP_OWNED" -eq 0 ] || rm -rf -- "${TMPDIR:-/tmp}/fm-$id"
+  [ "$FM_CLEAN_RELAUNCH_LAUNCH_INBOX_OWNED" -eq 0 ] || rm -rf -- "$state/$id.inbox"
+  [ "$FM_CLEAN_RELAUNCH_LAUNCH_METADATA_OWNED" -eq 0 ] || rm -f -- "$state/$id.meta"
+  [ -z "$FM_CLEAN_RELAUNCH_LAUNCH_METADATA_TMP" ] || rm -f -- "$FM_CLEAN_RELAUNCH_LAUNCH_METADATA_TMP"
+}
+
+fm_clean_relaunch_wait_for_ack() {  # <state> <id> <record>
+  local state=$1 id=$2 record=$3 polls=${FM_CLEAN_COMMIT_RELAUNCH_ACK_POLLS:-120}
+  local interval=${FM_CLEAN_COMMIT_RELAUNCH_ACK_INTERVAL:-0.5} handled
+  case "$polls" in ''|*[!0-9]*|0) polls=120 ;; esac
+  handled="$state/$id.inbox/handled/${record##*/}"
+  while [ "$polls" -gt 0 ]; do
+    [ -f "$handled" ] && return 0
+    sleep "$interval"
+    polls=$((polls - 1))
+  done
+  return 1
+}
+
+# fm_clean_relaunch_launch_allocated starts one fresh endpoint in an already
+# validated clean worktree. The relaunch owner alone decides whether that
+# worktree was allocated or which commit it contains.
+#
+# Interface:
+#   <destination-id> <project-root> <allocated-worktree> <brief>
+#   <harness> <backend> <mode> <yolo> <model> <effort>
+#
+# The supported profile is codex on the Herdr backend. Refusing
+# every other tuple before endpoint creation is deliberate. Their lifecycle
+# setup and acknowledgement semantics stay owned by generic fm-spawn until a
+# profile can share this helper without relaunch-specific input.
+fm_clean_relaunch_launch_allocated() {
+  local id=$1 project=$2 worktree=$3 brief=$4 harness=$5 backend=$6 mode=$7 yolo=$8 model=$9 effort=${10}
+  local state=${STATE:?STATE must be set by the relaunch owner}
+  local container session workspace seeded_tab task_ids tab_id pane_id target task_tmp meta_tmp launch record handoff late_artifact
+
+  [ "$harness:$backend" = codex:herdr ] || {
+    echo "error: allocated relaunch launch supports only codex/Herdr" >&2
+    return 1
+  }
+  [ -f "$brief" ] && [ ! -L "$brief" ] && [ -r "$brief" ] || {
+    echo "error: destination brief is unreadable" >&2
+    return 1
+  }
+  [ -d "$project" ] && [ -d "$worktree" ] && [ ! -L "$worktree" ] || {
+    echo "error: destination worktree is unreadable" >&2
+    return 1
+  }
+  [ "$(git -C "$worktree" rev-parse --show-toplevel 2>/dev/null || true)" = "$worktree" ] || {
+    echo "error: allocated destination is not a worktree root" >&2
+    return 1
+  }
+  late_artifact=$(destination_artifact_exists "$id" || true)
+  if [ -n "$late_artifact" ] && { [ "$late_artifact" != "${DATA:?DATA must be set by the relaunch owner}/$id/relaunch-handoff.json" ] || [ "${DESTINATION_HANDOFF_OWNED:-0}" -ne 1 ]; }; then
+    echo "error: destination state is already occupied" >&2
+    return 1
+  fi
+  fm_backend_source herdr || return 1
+  container=$(fm_backend_herdr_container_ensure "$project" other-home) || return 1
+  session=${container%%:*}
+  workspace=${container#*:}
+  seeded_tab=
+  case "$workspace" in *$'\t'*) seeded_tab=${workspace#*$'\t'}; workspace=${workspace%%$'\t'*} ;; esac
+  FM_CLEAN_RELAUNCH_LAUNCH_STATE=$state
+  trap fm_clean_relaunch_defer_window_creation_signal HUP INT TERM
+  if task_ids=$(fm_backend_herdr_create_task "$session:$workspace" "fm-$id" "$worktree" "$seeded_tab"); then
+    read -r tab_id pane_id <<EOF
+$task_ids
+EOF
+    [ -n "$tab_id" ] && [ -n "$pane_id" ] || return 1
+    FM_CLEAN_RELAUNCH_LAUNCH_WINDOW_ID="$session:$pane_id"
+  else
+    trap interrupted HUP INT TERM
+    return 1
+  fi
+  trap interrupted HUP INT TERM
+  [ "$FM_CLEAN_RELAUNCH_LAUNCH_CREATE_INTERRUPTED" -eq 0 ] || return 1
+  target="$FM_CLEAN_RELAUNCH_LAUNCH_WINDOW_ID"
+
+  task_tmp="${TMPDIR:-/tmp}/fm-$id"
+  trap fm_clean_relaunch_defer_state_claim_signal HUP INT TERM
+  if mkdir "$task_tmp"; then
+    FM_CLEAN_RELAUNCH_LAUNCH_TEMP_OWNED=1
+  else
+    trap interrupted HUP INT TERM
+    echo "error: destination task temp root is already occupied" >&2
+    return 1
+  fi
+  trap interrupted HUP INT TERM
+  [ "$FM_CLEAN_RELAUNCH_LAUNCH_STATE_CLAIM_INTERRUPTED" -eq 0 ] || return 1
+  mkdir "$task_tmp/gotmp" || return 1
+
+  FM_CLEAN_RELAUNCH_LAUNCH_STATE_CLAIM_INTERRUPTED=0
+  trap fm_clean_relaunch_defer_state_claim_signal HUP INT TERM
+  if mkdir "$state/$id.inbox"; then
+    FM_CLEAN_RELAUNCH_LAUNCH_INBOX_OWNED=1
+  else
+    trap interrupted HUP INT TERM
+    echo "error: destination inbox is already occupied" >&2
+    return 1
+  fi
+  trap interrupted HUP INT TERM
+  [ "$FM_CLEAN_RELAUNCH_LAUNCH_STATE_CLAIM_INTERRUPTED" -eq 0 ] || return 1
+  mkdir "$state/$id.inbox/handled" || return 1
+
+  FM_CLEAN_RELAUNCH_LAUNCH_METADATA_INTERRUPTED=0
+  trap fm_clean_relaunch_defer_metadata_signal HUP INT TERM
+  if meta_tmp=$(mktemp "$state/.${id}.meta.XXXXXX"); then
+    FM_CLEAN_RELAUNCH_LAUNCH_METADATA_TMP=$meta_tmp
+  else
+    trap interrupted HUP INT TERM
+    return 1
+  fi
+  if ! {
+    printf 'window=%s\n' "$target"
+    printf 'endpoint_task_id=%s\n' "$id"
+    printf 'backend=herdr\n'
+    printf 'herdr_session=%s\n' "$session"
+    printf 'herdr_workspace_id=%s\n' "$workspace"
+    printf 'herdr_tab_id=%s\n' "$tab_id"
+    printf 'herdr_pane_id=%s\n' "$pane_id"
+    printf 'worktree=%s\n' "$worktree"
+    printf 'project=%s\n' "$project"
+    printf 'harness=%s\n' "$harness"
+    printf 'kind=ship\n'
+    printf 'mode=%s\n' "$mode"
+    printf 'yolo=%s\n' "$yolo"
+    printf 'tasktmp=%s\n' "$task_tmp"
+    printf 'model=%s\n' "$model"
+    printf 'effort=%s\n' "$effort"
+  } > "$meta_tmp"; then
+    rm -f -- "$meta_tmp"
+    FM_CLEAN_RELAUNCH_LAUNCH_METADATA_TMP=
+    trap interrupted HUP INT TERM
+    return 1
+  fi
+  if ln "$meta_tmp" "$state/$id.meta"; then
+    FM_CLEAN_RELAUNCH_LAUNCH_METADATA_OWNED=1
+    rm -f -- "$meta_tmp"
+    FM_CLEAN_RELAUNCH_LAUNCH_METADATA_TMP=
+  else
+    rm -f -- "$meta_tmp"
+    FM_CLEAN_RELAUNCH_LAUNCH_METADATA_TMP=
+    trap interrupted HUP INT TERM
+    return 1
+  fi
+  trap interrupted HUP INT TERM
+  [ "$FM_CLEAN_RELAUNCH_LAUNCH_METADATA_INTERRUPTED" -eq 0 ] || return 1
+
+  fm_backend_herdr_send_text_line "$target" "export GOTMPDIR=$(fm_clean_relaunch_shell_quote "$task_tmp/gotmp")" || return 1
+  launch="codex"
+  [ "$model" = default ] || launch="$launch --model $(fm_clean_relaunch_shell_quote "$model")"
+  case "$effort" in
+    low|medium|high|xhigh) launch="$launch -c $(fm_clean_relaunch_shell_quote "model_reasoning_effort=\"$effort\"")" ;;
+  esac
+  launch="$launch --dangerously-bypass-approvals-and-sandbox \$( $(fm_clean_relaunch_shell_quote "$FM_ROOT/bin/fm-operational-input.sh") encode launch-brief < $(fm_clean_relaunch_shell_quote "$brief") )"
+  fm_backend_herdr_send_literal "$target" "$launch" || return 1
+  fm_backend_herdr_send_key "$target" Enter || return 1
+  handoff="${DATA:?DATA must be set by the relaunch owner}/$id/relaunch-handoff.json"
+
+  record=$(fm_task_inbox_write "$state" "$id" "Read the durable preserved-work handoff at $handoff before continuing the task.") || return 1
+  fm_task_inbox_ring herdr "$target" "$record" "fm-$id" codex || return 1
+  fm_clean_relaunch_wait_for_ack "$state" "$id" "$record" || {
+    echo "error: destination worker did not acknowledge the preserved-work handoff" >&2
+    return 1
+  }
+}
