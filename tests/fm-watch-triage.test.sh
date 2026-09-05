@@ -155,7 +155,7 @@ reap() { stop_pid "$1"; }
 # Every watcher test here ends by stopping a live fm-watch.sh, and a watcher
 # swallows HUP INT TERM while it is inside wake(). A stop that sends TERM and
 # then waits unconditionally therefore blocks forever on such a watcher, which
-# is how one wedged watcher consumed a whole 15-minute CI shard instead of
+# is how one wedged watcher consumed a whole CI shard timeout instead of
 # failing its own test. Stopping must stay bounded and must actually end the
 # process, so drive the helper against a child that ignores every stoppable
 # signal.
