@@ -192,10 +192,20 @@ jobs:
   tests-portable-serial:
     name: Behavior portable serial ${{ matrix.shard }}
     runs-on: ubuntu-latest
-    # Measured whole remainder is ~43 min of serial work; the balanced shards
-    # are ~10.8 min each. Cap is a hang tripwire above that, not the expected
-    # healthy end of the lane.
-    timeout-minutes: 15
+    # Measured whole remainder is ~48.6 min of serial work (run 33904204200);
+    # the shards rebalanced against those timings are ~12.2 min each, and job
+    # wall runs ~0.3 min above script time for checkout and tool installs.
+    # The prior 15-min cap was set against stale duration hints that predicted
+    # an even ~11.9 min split while shard 3 really carried ~14.8 min, so shard 3
+    # raced the cap and was cancelled under load on main and on several
+    # branches. Refreshing the hints removes that imbalance; this cap then adds
+    # ~60% margin over the ~12.5 min expected wall, comfortably above the ~28%
+    # run-to-run spread these shards show under runner load, while still
+    # tripping on a genuinely wedged watcher or daemon test. Cap is a hang
+    # tripwire, not the expected healthy end of the lane: if a shard starts
+    # approaching it again, refresh the hints per
+    # docs/fm-test-portable-shards.md rather than raising this number.
+    timeout-minutes: 20
     strategy:
       # Every shard reports so one failure never hides another shard's result.
       fail-fast: false
