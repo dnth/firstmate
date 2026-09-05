@@ -394,9 +394,11 @@ tests/fm-pi-primary-types.test.sh
 tests/fm-watcher-lock.test.sh
 tests/fm-watch-arm.test.sh
 tests/fm-watch-recovery-loop.test.sh
+tests/fm-watch-triage.test.sh
 tests/fm-wake-drain-unread-status.test.sh
 tests/fm-wake-queue.test.sh
 tests/fm-wake-daemon-lifecycle-e2e.test.sh
+tests/fm-omp-branch-supervision.test.sh
 tests/fm-subagent-pretool-check.test.sh
 tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh

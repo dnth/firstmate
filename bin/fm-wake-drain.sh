@@ -32,6 +32,8 @@ RECOVERY_ACK_REQUIRED=false
 RECOVERY_ACK_MOVED=false
 ACK_THROUGH=
 ACK_GENERATION=
+ACK_REMOVED=0
+PRESENTED_MAX=0
 
 # --- per-actor consume (docs/omp-supervision-branch.md "Per-actor acknowledgement") --
 # main (FM_SUPERVISION_ACTOR unset or "main", via fm-lease-lib.sh's fm_lease_actor
@@ -152,6 +154,19 @@ decide_scoped_locked() {
     || [ -e "$ELIGIBLE_OWNER_FILE" ] || [ -L "$ELIGIBLE_OWNER_FILE" ] \
     || [ -e "$MAIN_ROWS_FILE" ] || [ -L "$MAIN_ROWS_FILE" ]; then
     SCOPED=true
+  fi
+}
+
+# The highest sequence this actor has already been presented: the branch's
+# grant is exactly its current prompt's rows, and main's claim file is what its
+# last drain printed. Read BEFORE an ack re-claims, so a row that arrived since
+# presentation is never named as "the current wake" the caller may acknowledge
+# unseen. 0 when nothing is on record.
+presented_max_row() { # <rows-file>
+  if rows_file_valid "$1" 2>/dev/null; then
+    awk '$1 ~ /^[0-9]+$/ && $1 > max { max=$1 } END { print max + 0 }' "$1"
+  else
+    printf '0\n'
   fi
 }
 
@@ -329,6 +344,13 @@ if [ "$SCOPED" = true ]; then
 fi
 
 if [ -n "$ACK_THROUGH" ]; then
+  if [ "$SCOPED" = true ]; then
+    if [ "$ACTOR" = branch ]; then
+      PRESENTED_MAX=$(presented_max_row "$ELIGIBLE_ROWS_FILE") || exit 1
+    else
+      PRESENTED_MAX=$(presented_max_row "$MAIN_ROWS_FILE") || exit 1
+    fi
+  fi
   # Row consumption is bound to the monotonic sequence and always happens.
   # Only retiring the episode is bound to the generation, so a generation that
   # moved on names its own remedy instead of refusing and consuming nothing.
@@ -361,7 +383,10 @@ if [ -n "$ACK_THROUGH" ]; then
       NF < 5 || $2 !~ /^[0-9]+$/ || $2 > cutoff || !($2 in owned) { print }
     ' "$FM_WAKE_QUEUE" > "$DRAIN_TMP" || exit 1
   fi
+  ACK_REMOVED=$(( $(awk 'END { print NR }' "$FM_WAKE_QUEUE") - $(awk 'END { print NR }' "$DRAIN_TMP") ))
   if [ ! -s "$DRAIN_TMP" ]; then
+    fm_recovery_marker_snapshot "$RECOVERY_MARKER" || exit 1
+    RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
     fm_recovery_marker_ack "$RECOVERY_MARKER" "$ACK_GENERATION"
     RECOVERY_ACK_STATUS=$?
     case "$RECOVERY_ACK_STATUS" in
@@ -393,9 +418,27 @@ if [ -n "$ACK_THROUGH" ]; then
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
-  if [ "$RECOVERY_ACK_MOVED" = true ]; then
-    printf 'wake drain: acknowledged wakes through %s, but a newer recovery episode is pending; re-run bin/fm-wake-drain.sh and use the new WAKE_ACK_REQUIRED command\n' \
-      "$ACK_THROUGH" >&2
+  if [ "$ACK_REMOVED" -eq 0 ] && [ "$PRESENTED_MAX" -gt "$ACK_THROUGH" ]; then
+    # Nothing at or below the cutoff was this actor's to consume, while a
+    # presented row above it is still waiting: the caller acknowledged an
+    # earlier wake, not the one it is handling. Say so, and name the exact
+    # command for the current wake, so the remedy is never "drain again" (which
+    # re-presents the same row and invites the same stale acknowledgement).
+    # The generation is the marker's current one; only a retired marker cannot
+    # be named because the next drain opens a fresh generation for it.
+    case "$RECOVERY_MARKER_TOKEN" in
+      pending:*|announced:*)
+        printf 'wake drain: nothing was acknowledged through %s (none of your presented wake rows is at or below it); the current wake is row %s: run bin/fm-wake-drain.sh --ack-through %s --recovery-generation %s after handling it\n' \
+          "$ACK_THROUGH" "$PRESENTED_MAX" "$PRESENTED_MAX" "${RECOVERY_MARKER_TOKEN##*:}" >&2
+        ;;
+      *)
+        printf 'wake drain: nothing was acknowledged through %s (none of your presented wake rows is at or below it); the current wake is row %s: re-run bin/fm-wake-drain.sh and use the WAKE_ACK_REQUIRED command it prints\n' \
+          "$ACK_THROUGH" "$PRESENTED_MAX" >&2
+        ;;
+    esac
+  elif [ "$RECOVERY_ACK_MOVED" = true ]; then
+    printf 'wake drain: acknowledged wakes through %s (%s row(s) consumed), but a newer recovery episode is pending; re-run bin/fm-wake-drain.sh and use the new WAKE_ACK_REQUIRED command\n' \
+      "$ACK_THROUGH" "$ACK_REMOVED" >&2
   fi
   exit 0
 fi

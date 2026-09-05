@@ -902,6 +902,50 @@ test_branch_owner_activation_rollback_stops_after_publication() {
   pass "branch activation rollback succeeds before publication and preserves every active grant"
 }
 
+# A stale acknowledgement for an earlier presented wake must not re-feed the
+# same wake loop: it consumes nothing, names the current wake, and prints the
+# exact generation-bound command that closes that current presentation.
+test_stale_acknowledgement_names_current_presented_wake() {
+  local dir state grant first_seq first_gen second_seq second_gen
+  dir=$(make_case stale-ack-current-wake)
+  state="$dir/state"
+  grant="$ROOT/bin/fm-wake-grant.sh"
+  append_wake "$state" signal task-a.status "signal: first wake" || fail "first wake append failed"
+  FM_STATE_OVERRIDE="$state" "$grant" activate "$$" stale-ack || fail "branch owner activation failed"
+  FM_STATE_OVERRIDE="$state" "$grant" publish stale-ack 1 || fail "first grant publication failed"
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$dir/first.out" 2> "$dir/first.err" || fail "first drain failed"
+  first_seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p' "$dir/first.err")
+  first_gen=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/first.err")
+  [ -n "$first_seq" ] && [ -n "$first_gen" ] || fail "first drain omitted its acknowledgement command"
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" --ack-through "$first_seq" --recovery-generation "$first_gen" || fail "first acknowledgement failed"
+  FM_STATE_OVERRIDE="$state" "$grant" release stale-ack || fail "first grant release failed"
+
+  append_wake "$state" stale fm-window-b "stale: second wake" || fail "second wake append failed"
+  FM_STATE_OVERRIDE="$state" "$grant" publish stale-ack 2 || fail "second grant publication failed"
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$dir/second.out" 2> "$dir/second.err" || fail "second drain failed"
+  second_seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p' "$dir/second.err")
+  second_gen=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/second.err")
+  [ "$second_seq" -gt "$first_seq" ] || fail "second drain did not present a newer wake"
+
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" --ack-through "$first_seq" --recovery-generation "$first_gen" \
+    > "$dir/stale.out" 2> "$dir/stale.err" || fail "stale acknowledgement failed unsafely"
+  grep -F "nothing was acknowledged through $first_seq" "$dir/stale.err" >/dev/null \
+    || fail "stale acknowledgement did not report that it consumed nothing: $(cat "$dir/stale.err")"
+  grep -F "the current wake is row $second_seq" "$dir/stale.err" >/dev/null \
+    || fail "stale acknowledgement did not name the current wake: $(cat "$dir/stale.err")"
+  ! grep -F 're-run bin/fm-wake-drain.sh' "$dir/stale.err" >/dev/null \
+    || fail "stale acknowledgement invited the old drain loop: $(cat "$dir/stale.err")"
+  grep -F "run bin/fm-wake-drain.sh --ack-through $second_seq --recovery-generation $second_gen" "$dir/stale.err" >/dev/null \
+    || fail "stale acknowledgement omitted the exact current command: $(cat "$dir/stale.err")"
+  grep -F "$(printf '\tstale\tfm-window-b\t')" "$state/.wake-queue" >/dev/null \
+    || fail "stale acknowledgement consumed the current wake"
+
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" --ack-through "$second_seq" --recovery-generation "$second_gen" \
+    || fail "the printed current-wake command failed"
+  [ ! -s "$state/.wake-queue" ] || fail "the current wake remained queued after its exact acknowledgement"
+  pass "a stale acknowledgement is bounded and names the current presented wake"
+}
+
 # Consumer-side incarnation gate for turn-end markers (fm-wake-lib.sh).
 # bin/fm-turnend-signal.sh writes state/<id>.turn-ended lock-free and
 # unconditionally, stamped with the firing spawn_gen. The consumer discards a
@@ -947,6 +991,7 @@ test_turnend_marker_consumer_incarnation_gate() {
 }
 
 test_turnend_marker_consumer_incarnation_gate
+test_stale_acknowledgement_names_current_presented_wake
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor

@@ -406,6 +406,23 @@ JS
   pass "OMP outcome delivery yields to the event loop while preserving routine/captain order"
 }
 
+test_omp_scope_resolves_reportable_tasks_from_granted_rows() {
+  local state out
+  state="$TMP_ROOT/scope-task-resolution/state"
+  mkdir -p "$state"
+  printf 'project=project-a\nwindow=default:wA:p1\n' > "$state/task-a.meta"
+  printf '1\t1\tsignal\ttask-a.status\tsignal: task-a\n2\t2\tstale\tdefault:wA:p1\tstale: default:wA:p1\n3\t3\tcheck\tmerge-poll\tcheck: merged\n' > "$state/.wake-queue"
+  out=$(STATE_PATH="$state" DISPATCH_PATH="$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" node --experimental-strip-types --input-type=module -e '
+    const { scopeForUnreadWake } = await import(process.env.DISPATCH_PATH);
+    const scope = scopeForUnreadWake(process.env.STATE_PATH, false);
+    if (JSON.stringify(scope.eligibleSeqs) !== JSON.stringify(["1", "2"])) throw new Error(JSON.stringify(scope));
+    if (JSON.stringify([...scope.eligibleTasks].sort()) !== JSON.stringify(["task-a"])) throw new Error(JSON.stringify(scope));
+    console.log("scope resolved");
+  ' 2>&1) || fail "OMP dispatch scope failed: $out"
+  assert_contains "$out" "scope resolved" "OMP dispatch scope did not resolve reportable tasks"
+  pass "OMP dispatch resolves signal and stale rows to the branch report task and excludes checks"
+}
+
 test_branch_prompt_is_byte_stable_and_above_cache_floor
 test_outcome_store_is_append_only_with_cursor_reads
 test_outcome_startup_replay_preserves_silence
@@ -417,3 +434,4 @@ test_pr_check_lease_guard_serializes_task_metadata
 test_non_branch_home_is_untouched
 test_omp_extension_establishes_main_actor_context
 test_async_outcome_delivery_keeps_event_loop_responsive_and_ordered
+test_omp_scope_resolves_reportable_tasks_from_granted_rows

@@ -62,6 +62,7 @@ Every watcher close and every durable queue append publishes downtime, so a down
 That reuse keeps a watcher close inside the handling window from orphaning the acknowledgement already presented and trapping later arms in repeated recovery presentation.
 An acknowledgement carries two separable facts: queue-row consumption is bound to the monotonic `--ack-through` sequence, while only retiring the episode is bound to `--recovery-generation`.
 A generation mismatch therefore does not block consumption of rows through that sequence; it is a non-fatal result that names its own remedy - re-drain, then acknowledge the newer episode.
+When that cutoff consumes none of the actor's presented rows while a newer presented row remains, the drain instead says that nothing was acknowledged and prints the exact command for the current wake, preventing a stale acknowledgement from re-feeding the same loop.
 The acknowledgement retires the marker only when no rows remain after sequence-bound consumption.
 A concurrently appended wake has a higher sequence, remains queued, and keeps the episode pending for presentation.
 Consequently, an empty-queue downtime publication during handling can be retired by the outstanding acknowledgement without a dedicated recovery turn.
