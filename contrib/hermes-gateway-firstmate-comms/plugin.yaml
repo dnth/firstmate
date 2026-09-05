@@ -1,0 +1,7 @@
+name: firstmate-comms
+version: 0.1.0
+description: >-
+  Firstmate Communication Officer slash command and local outbox poster.
+  Install into a dedicated Hermes Gateway HERMES_HOME, never a crewmate TUI profile.
+author: firstmate
+provides_hooks: []

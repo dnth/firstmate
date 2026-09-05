@@ -18,7 +18,8 @@
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
 #                 "TREEHOUSE_POOL: dirty idle slot <slot> at <path> - inspect before cleanup; no changes made",
-#                 "FMX: X mode on ..." or "FMX: X mode off ...".
+#                 "FMX: X mode on ..." or "FMX: X mode off ...",
+#                 "EXT: local bridge on ..." or "EXT: local bridge off ...".
 #          When a RUNNING local secondmate worktree is fast-forwarded to
 #          firstmate's own current default-branch commit, that update is a
 #          purely local fast-forward and never an origin fetch. Remote routes
@@ -70,6 +71,10 @@
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
+#          The sibling local Communication Officer bridge is OPTIONAL and inert
+#          unless config/ext-bridge is present or FM_EXT_BRIDGE=1, plus a
+#          mode-0600 secret file. When opted in, bootstrap requires jq and
+#          writes state/ext-watch.check.sh, printing an EXT line.
 #          Fleet sync fetches, fast-forwards safe default-branch states, reports
 #          recovered and STUCK clone drift, and prunes gone local branches; it is
 #          bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT when it is a non-empty
@@ -79,16 +84,16 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the five MUTATING sweeps
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the MUTATING sweeps
 #          (secondmate_sync, secondmate_liveness_sweep,
-#          secondmate_handoff_resume, x_mode_setup, fleet_sync) while still
+#          secondmate_handoff_resume, x_mode_setup, ext_bridge_setup, fleet_sync) while still
 #          printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
 #          fm-session-start.sh's read-only path when another live session holds
 #          the fleet lock, so a second concurrent session never race-mutates
 #          secondmate homes, pending handoff outboxes,
-#          X-mode artifacts, project clones, or repair instructions.
+#          X-mode artifacts, local ext-bridge artifacts, project clones, or repair instructions.
 #          Unset/0 (the default) runs every sweep exactly as before - this flag
 #          is purely additive.
 #        fm-bootstrap.sh install <tool>...
@@ -118,6 +123,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-startup-memory-budget-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-x-lib.sh"
+# shellcheck source=bin/fm-ext-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-ext-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh disable=SC1091
@@ -1013,6 +1020,84 @@ EOF
   echo "FMX: X mode on - relay poll armed via state/x-watch.check.sh; 30s watcher cadence in config/x-mode.env"
 }
 
+# Local Communication Officer bridge (opt-in): config/ext-bridge or
+# FM_EXT_BRIDGE=1 plus a mode-0600 secret file. Writes one identity shim:
+#   state/ext-watch.check.sh - byte-static identity shim; the watcher validates
+#                            its bytes and invokes bin/fm-ext-poll.sh directly
+# There is no hosted relay, pairing token, or cadence override. Intake wakes
+# the primary immediately; the shim exists so restart recovery and the watcher
+# identity path match X mode.
+ext_bridge_setup() {
+  local shim shim_body shim_home secret
+
+  shim=$(fm_ext_watch_shim_path)
+
+  ext_bridge_remove_shim() {
+    x_mode_remove_artifact "$shim"
+  }
+
+  if ! fm_ext_bridge_opted_in "$FM_HOME"; then
+    if x_mode_artifact_present "$shim"; then
+      if ext_bridge_remove_shim; then
+        echo "EXT: local bridge off - removed inbox poll shim"
+      else
+        echo "EXT: local bridge off - failed to remove inbox poll shim"
+      fi
+    fi
+    return 0
+  fi
+
+  secret=$(fm_ext_secret_path "$FM_HOME")
+  if ! fm_ext_secret_valid "$secret"; then
+    if x_mode_artifact_present "$shim"; then
+      if ext_bridge_remove_shim; then
+        echo "EXT: local bridge off - secret file missing or not mode 0600; install it and rerun bootstrap"
+      else
+        echo "EXT: local bridge off - failed to remove inbox poll shim after a secret-file refusal"
+      fi
+    else
+      echo "EXT: local bridge off - secret file missing or not mode 0600"
+    fi
+    return 0
+  fi
+
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "MISSING: jq (install: $(install_cmd jq))"
+    if x_mode_artifact_present "$shim"; then
+      if ext_bridge_remove_shim; then
+        echo "EXT: local bridge off - missing jq; install it and rerun bootstrap"
+      else
+        echo "EXT: local bridge off - failed to remove inbox poll shim after missing jq"
+      fi
+    fi
+    return 0
+  fi
+
+  ext_arm_failed() {
+    if ext_bridge_remove_shim; then
+      echo "EXT: local bridge off - failed to arm inbox poll shim"
+    else
+      echo "EXT: local bridge off - failed to arm inbox poll shim; stale artifacts remain"
+    fi
+  }
+
+  mkdir -p "$STATE" 2>/dev/null || { ext_arm_failed; return 0; }
+
+  case "$FM_HOME" in
+    /*) shim_home=$FM_HOME ;;
+    *)
+      shim_home=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P) \
+        || { ext_arm_failed; return 0; }
+      ;;
+  esac
+  shim_body=$(fm_ext_poll_shim_content "$shim_home" "$FM_ROOT")
+  x_mode_write_if_changed "$shim" "$shim_body" 700 || { ext_arm_failed; return 0; }
+  fm_ext_poll_shim_valid "$shim" "$shim_home" "$FM_ROOT" \
+    || { ext_arm_failed; return 0; }
+
+  echo "EXT: local bridge on - inbox poll armed via state/ext-watch.check.sh"
+}
+
 crew_dispatch_validate() {
   local file err
   file="$CONFIG/crew-dispatch.json"
@@ -1214,6 +1299,7 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_sync
   secondmate_handoff_resume
   x_mode_setup
+  ext_bridge_setup
   fleet_sync
 fi
 secondmate_handoff_detect

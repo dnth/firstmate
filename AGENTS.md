@@ -79,6 +79,9 @@ config/trace-context  optional presence flag enabling default-off native W3C tra
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
 config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
 config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
+config/ext-bridge    optional presence flag enabling the sibling local Communication Officer bridge; LOCAL, gitignored, and not inherited; see docs/configuration.md "Local Communication Officer bridge"
+config/ext-secret    local ext-bridge shared secret; LOCAL, gitignored, mode 0600, not inherited
+config/ext-allowlist fail-closed Discord guild/channel/author allowlist for the local ext-bridge; LOCAL, gitignored, not inherited
 config/runpod.env    RUNPOD_API_KEY for the optional RunPod compute lifecycle beneath a remote secondmate; LOCAL, gitignored, parsed never sourced, not inherited; see docs/runpod-secondmates.md
 config/runpod/       generated SSH state plus the mode-600 workstation OMP broker bearer for RunPod-backed remote routes; LOCAL, gitignored, written only by bin/fm-runpod.sh and bin/fm-runpod-omp-auth.sh
 data/                personal fleet records; LOCAL, gitignored as a whole
@@ -109,6 +112,7 @@ state/               volatile runtime signals; gitignored
   <id>.pr-poll-retirement  private identity-bound crash-recovery receipt for one exact validated merged result; removed after its poll artifacts retire
   <id>.pr-poll-merge-notified  canonical PR identity of the last merge outcome delivered for this task; bin/fm-pr-lib.sh owns the marker format and identity mechanics, while bin/fm-merge-outcome-lib.sh owns locked publication, duplicate suppression, and replacement; removed by teardown
   x-watch.check.sh   generated X-mode relay poll shim; present only when opted in (section 14)
+  ext-watch.check.sh generated local Communication Officer poll shim; present only when the ext-bridge is opted in
   pending-replies/   parent-owned secondmate pending-reply records (correlation id, delivery vs reply, recovery, escalation); fm-pending-reply-lib.sh
   procevent/         registered process-to-event sources, one private record per canonical source id; written by bin/fm-procevent.sh or an adapter through the shared registration publisher, and their presence alone keeps supervision required (section 13)
   procevent-inbox/   private captured results and their durable handled-acknowledgement markers; source output lives here and never in an event line
@@ -117,6 +121,9 @@ state/               volatile runtime signals; gitignored
   x-inbox/           generated X-mode pending mention payloads; fmx-respond drains it (section 14)
   x-context/         generated X-mode durable per-request reply context and one-wake offer markers, keyed by request_id; survives inbox cleanup and expires within seven days (section 14; bin/fm-x-lib.sh)
   x-outbox/          generated X-mode dry-run reply and dismiss previews; inspect it when FMX_DRY_RUN is set (section 14)
+  ext-inbox/         generated local Communication Officer pending request payloads; ext-respond drains it when the ext-bridge is on
+  ext-context/       generated local Communication Officer destination context and one-wake offer markers, keyed by request slug
+  ext-outbox/        generated local Communication Officer outbound ack/answer/followup/final payloads plus posting markers and receipts
   public-followup/   generated private transport for promised public replies: commitment registrations, typed terminal-result inbox, accepted/rejected ledgers (section 14; bin/fm-public-followup.sh)
   x-poll.error x-poll.claim-error  generated X-mode relay and offer-claim diagnostic dedupe markers
   .wake-queue        durable queued wakes retained until post-handling acknowledgement: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
@@ -391,7 +398,7 @@ The promoted worker must inventory scratch state, return to a clean default-bran
 Fleet supervision is an always-loaded operational contract; `docs/architecture.md`, `docs/turnend-guard.md`, the emitted session-start block, and script help own mechanisms and harness-specific recipes.
 
 Whenever work is under way, keep exactly one live supervision cycle using the emitted protocol for this primary harness.
-X mode may require that same live cycle with no fleet work.
+X mode or the local Communication Officer bridge may require that same live cycle with no fleet work.
 Do not substitute another harness's wait shape, use shell `&`, or create a second cycle when a healthy one already exists.
 For every actionable wake, follow the ordinary-wake continuation in the emitted protocol; use its repair action only when the live cycle is missing or failed.
 No turn ends blind while work is under way, including turns described as holding or waiting.
@@ -408,7 +415,7 @@ Handle actionable wakes as follows:
 
 1. For `signal:`, read the listed event lines first, then reconcile current state only where action depends on it.
 2. For `stale:`, inspect the recorded endpoint and load `stuck-crewmate-recovery` for a stopped, looping, confused, or unresponsive worker; a deep-inspection reason also requires current-state and validation-log inspection.
-3. For `check:`, act on the named poll result, including merges, X-mode events, and process-to-event source results.
+3. For `check:`, act on the named poll result, including merges, X-mode events, local Communication Officer requests, and process-to-event source results.
 4. For `heartbeat:`, review the whole fleet from the structured fleet view, reconcile suspicious tasks and PR state, update the backlog, and never report an unchanged fleet as progress.
    Every lock-owning heartbeat also re-runs `bin/fm-todo-project.sh --check --reconcile`, reconciles what it flags, and re-projects the session todo from `--emit`.
 
@@ -416,6 +423,7 @@ On an exact merged-PR check with verified fleet-lock ownership, immediately run 
 
 When any wake reports a merged PR for a project cloned in this home, refresh that clone through the guarded fleet-sync path.
 When X-linked work reaches a milestone or terminal state, load `fmx-respond`; before terminal teardown, use its promised-final reconciliation when a typed public commitment exists, otherwise post the final completion follow-up so the link clears even if earlier follow-ups were spent.
+When ext-linked work reaches a milestone or terminal state, load `ext-respond` and emit follow-up or final into the local outbox.
 
 For a quiet persistent secondmate endpoint, rely on fresh home-watcher liveness rather than quietness or routed status; missing evidence enters ordinary stale handling.
 A secondmate placed on scale-to-zero compute can have a deliberate no-host lifecycle state, delivery wakes it automatically, and `docs/runpod-secondmates.md` owns that lifecycle; never escalate such a route as a failure.
@@ -542,7 +550,7 @@ The same attended path refreshes an installed machine-wide `omp` only after its 
 
 These skills are not captain-invocable; load them only at their precise triggers.
 
-- `bootstrap-diagnostics` - load whenever the session-start digest's bootstrap section prints an actionable diagnostic line (`MISSING:`, `MISSING_MANUAL:`, `BACKEND_INVALID:`, `NEEDS_GH_AUTH`, `TANGLE:`, `STARTUP_MEMORY_BUDGET:`, `CREW_DISPATCH: invalid`, `FLEET_SYNC:`, `SECONDMATE_SYNC:`, `SECONDMATE_LIVENESS:`, `SECONDMATE_HANDOFF:`, `NUDGE_SECONDMATES:`, `TREEHOUSE_POOL:`, or `FMX:`); silence and `BOOTSTRAP_INFO:` need no load.
+- `bootstrap-diagnostics` - load whenever the session-start digest's bootstrap section prints an actionable diagnostic line (`MISSING:`, `MISSING_MANUAL:`, `BACKEND_INVALID:`, `NEEDS_GH_AUTH`, `TANGLE:`, `STARTUP_MEMORY_BUDGET:`, `CREW_DISPATCH: invalid`, `FLEET_SYNC:`, `SECONDMATE_SYNC:`, `SECONDMATE_LIVENESS:`, `SECONDMATE_HANDOFF:`, `NUDGE_SECONDMATES:`, `TREEHOUSE_POOL:`, `FMX:`, or `EXT:`); silence and `BOOTSTRAP_INFO:` need no load.
 - `diagnostic-reasoning` - load before scoping a reported bug and before acting on a diagnostic report.
 - `ask-user-authority` - load before deciding any ask-user finding.
 - `quota-array-dispatch` - load before choosing among a matched crew-dispatch profile array from current quota-axi output.
@@ -556,6 +564,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `process-event-sources` - load before arming a long-polling source, before registering a deterministic condition->action watch (do X as soon as Y is true), and on any `procevent <adapter> <source-id> <sequence>` check wake.
   Never run a registered source's blocking command yourself in a conversational turn.
 - `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to handle the mention, on an `x-mode-error ...` `check:` wake to report the X-mode configuration blocker, on a `public-followup ...` `check:` wake or a startup-surfaced public commitment, and on any milestone or terminal wake for an X-mode-linked task before posting its completion follow-up; relevant only when X mode is on.
+- `ext-respond` - load on an `ext-request <slug>` `check:` wake to drain the local Communication Officer inbox, classify, act through the normal lifecycle, and emit follow-ups into the local outbox; relevant only when the local ext-bridge is on.
 - `firstmate-codexapp` - load before coordinating a visible Codex Desktop thread, evaluating a Codex App backend request, or reconciling Codex Desktop host-tool smoke evidence for Firstmate work.
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
 
@@ -572,6 +581,14 @@ For every X-linked terminal outcome, load that owner and use the promised-final 
 A promised final public reply is durable state, never conversation memory.
 Load `fmx-respond` before promising one, on a `public-followup ...` check wake, and whenever the session-start digest lists a public commitment awaiting delivery.
 Only the home holding the relay consent and thread binding ever posts it, so never ask a secondmate or crewmate to find the thread or send the reply, and never recover a terminal result by reading a `done:` sentence.
+
+## 15. Local Communication Officer bridge
+
+The sibling local Discord bridge ships inert until the home opts in with `config/ext-bridge` or `FM_EXT_BRIDGE=1` plus a mode-0600 secret file.
+That opt-in is consent for local inbox intake and Discord follow-ups through the Hermes Gateway plugin, not authority for destructive, irreversible, or security-sensitive action.
+`docs/configuration.md` owns activation, generated state, allowlist, outbox receipts, and opt-out mechanics.
+On an `ext-request <slug>` check wake, load `ext-respond`.
+Do not use the hosted X-mode relay, `FMX_PAIRING_TOKEN`, or pending-reply for this seam.
 
 ## Captain instruction precedence
 

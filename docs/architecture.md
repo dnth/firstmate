@@ -72,6 +72,7 @@ A bounded direct-report terminal tail can help diagnose a mismatch by showing th
 The snapshot strips control sequences, retains only capture metadata and literal event-corroboration flags, and never lets terminal evidence override a valid structured classification.
 The default path remains local-only; live GitHub enrichment exists only behind the bearings `--include-prs` opt-in.
 Optional X mode integrates with the watcher only after explicit opt-in; [configuration.md](configuration.md#x-mode-env) owns its generated-artifact and dispatch mechanics.
+The sibling local Communication Officer bridge is a separate opt-in that uses the same watcher identity-shim pattern without the hosted relay; [configuration.md](configuration.md#local-communication-officer-bridge-configext-bridge) owns its generated artifacts.
 
 At session start, `bin/fm-session-start.sh` emits exactly one primary-harness supervision block rendered by `bin/fm-supervision-instructions.sh` from `docs/supervision-protocols/`.
 That block owns the live wait shape for the running primary harness: Claude's Stop `asyncRewake` hook owns tokenless re-arm cycles, Grok uses background-notify cycles, Codex uses bounded foreground checkpoints, Pi and pi-signed use the same two tracked Pi extensions, OMP uses its native `.omp` primary extension, and OpenCode uses its TUI plugin.
@@ -317,6 +318,23 @@ Work routed to another home reports a *typed* terminal result through `bin/fm-pu
 Because a terminal event's id is derived from its identity tuple rather than generated, duplicate reports and restart replay converge without coordination.
 Reconciliation rides the existing relay poll and the session-start digest instead of a new watcher, daemon, or timer, and both are gated on the same `.env` activation contract so a home that never opted into the relay executes none of it.
 The [X mode configuration reference](configuration.md#promised-public-replies-statepublic-followup) owns the operator-facing contract, and the `fmx-respond` skill owns the procedure.
+
+## Optional local Communication Officer bridge
+
+The sibling local bridge is opt-in presence for a dedicated Hermes Gateway `/fm` plugin talking to this home over local files, not a hosted relay.
+A user enables it with `config/ext-bridge` or `FM_EXT_BRIDGE=1` plus a mode-0600 secret file and a fail-closed allowlist.
+That opt-in is standing authorization for firstmate to answer allowlisted Discord `/fm` requests and act autonomously on normal reversible work.
+Destructive, irreversible, or security-sensitive asks are escalated for trusted-channel confirmation.
+On the locked session-start bootstrap step, a valid opt-in creates `state/ext-watch.check.sh` as described in the [local Communication Officer configuration reference](configuration.md#local-communication-officer-bridge-configext-bridge).
+Without opt-in, that bootstrap step removes the shim on opt-out and otherwise stays silent.
+
+The gateway plugin calls `bin/fm-ext-intake.sh --text-file`, never `dispatch_tool("terminal", ...)`, and never interpolates Discord text into a shell command.
+Intake stores `state/ext-inbox/<slug>.json` and claims a one-wake offer marker; the canonical `request_id` keeps colons while filenames use the SHA-256 slug.
+The `ext-respond` skill drains that inbox, classifies each request, and emits `ack` / `answer` / `followup` / `final` payloads through `bin/fm-ext-emit.sh`.
+Spawned work is linked with `bin/fm-ext-link.sh` using `ext_request=`, not `x_request=`.
+The gateway outbox poster delivers those payloads to the Discord destination stored in context and writes receipts; a mid-send posting marker without a receipt refuses a second send.
+Crewmate Hermes remains a separate TUI profile (`hermes chat --tui`) and is still refused as a second mate.
+This bridge remains layered on the existing check mechanism without changing X-mode or crewmate Hermes behavior.
 
 ## Project memory belongs to projects
 

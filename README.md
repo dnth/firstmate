@@ -52,6 +52,7 @@ Launching a supported harness inside it instantiates your first mate - and makes
 - **Optional secondmates** - opt in to persistent second mates that run from isolated firstmate homes with their own `FM_HOME`, state, projects, and session lock, either locally or as a whole home on an SSH-reachable host, with guarded updates and recovery that never turns an unavailable remote route into a local replacement.
 - **Event-driven, zero-token supervision** - a bash watcher sleeps on the fleet and wakes the first mate only when something needs you; verified primary harnesses also get a turn-end backstop that blocks or follows up on a blind stop when work is under way and supervision is not live.
 - **Optional X mode** - opt in with one local `.env` token so firstmate can answer your public `@myfirstmate` mentions, act on normal reversible mention requests through the same lifecycle as chat requests, acknowledge spawned work, and post up to three public-safe completion follow-ups within seven days for genuine milestones and the final outcome without changing non-X behavior; a final reply promised in a thread becomes durable state that is reconciled from disk, so a restart or a compacted conversation cannot lose it; dry-run preview records would-be replies and dismissals locally before go-live.
+- **Optional local Communication Officer bridge** - opt in with `config/ext-bridge` or `FM_EXT_BRIDGE=1` plus a local secret so a dedicated Hermes Gateway `/fm` plugin can deliver allowlisted Discord requests into this home over sibling local files, not a hosted relay.
 - **Strict project boundary** - the first mate is read-only over your projects except for the narrow guarded and captain-approved operations authorized by [hard rule 1](AGENTS.md#1-identity-and-prime-directives), including fleet sync's guarded safe branch pruning; crewmates make every other project change behind the configured merge authority.
 - **Restart-proof** - all state lives on disk and in the active session backend (tmux by hard default, herdr or cmux when selected or auto-detected, zellij/orca when explicitly selected); kill the session anytime and the next one reconciles, including confirmed-dead secondmate agents, and carries on.
 
@@ -59,7 +60,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 ## What this fork adds over upstream
 
-`dnth/firstmate` carries four features that are not in [upstream](https://github.com/kunchenguid/firstmate).
+`dnth/firstmate` carries five features that are not in [upstream](https://github.com/kunchenguid/firstmate).
 
 - **RunPod remote secondmates** - run a persistent second mate on an on-demand CPU or GPU pod, with an explicit scale-to-zero lifecycle that drops compute cost after sleep and wakes the pod for the next delivery. See [RunPod second mates](docs/runpod-secondmates.md); the compute lifecycle lives in `bin/fm-runpod*.sh`.
 - **OMP harness with a read-only credential broker** - run OMP as a primary, crew, scout, or second-mate runtime, including on a remote pod through a [credential-read-only facade](bin/fm-omp-auth-broker-readonly-proxy.mjs) that keeps workstation subscription login and refresh credentials private. See the [OMP supervision protocol](docs/supervision-protocols/omp.md) and the [remote broker design](docs/runpod-secondmates.md#omp-subscription-auth-through-the-workstation).
@@ -68,6 +69,8 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
   It launches through the OpenAI Codex provider with `gpt-5.6-sol` as the default model and preserves Firstmate's low, medium, high, xhigh, and max reasoning settings.
   Hermes is verified for crew and scout work only, never as a primary session or second mate.
   See the [harness adapter reference](.agents/skills/harness-adapters/SKILL.md).
+- **Hermes Communication Officer** - a dedicated Hermes Gateway plugin, installed into its own gateway `HERMES_HOME` rather than the crewmate TUI profile, delivers Discord `/fm` into Firstmate over a sibling local-file bridge.
+  See [Local Communication Officer bridge](docs/configuration.md#local-communication-officer-bridge-configext-bridge) and `contrib/hermes-gateway-firstmate-comms/`.
 - **Pi-compatible runtimes** - use the [closed runtime allowlist](bin/fm-pi-compatible-runtimes) and [shared predicate](bin/fm-pi-compatible-lib.sh) to reuse proven Pi-compatible mechanics without losing each harness's identity. See the [Pi-compatible family architecture](docs/architecture.md#harness-identity-and-the-pi-compatible-family).
 
 Supporting these are extra treehouse pool helpers (`bin/fm-treehouse-*.sh`) and a TypeScript primary-watcher core (`bin/fm-primary-watch-core.ts`).
@@ -223,7 +226,7 @@ Firstmate's skills live in two separate places with different audiences:
 ## Documentation
 
 - [docs/architecture.md](docs/architecture.md) - maintainer architecture for the crew, supervision, worktrees, secondmates, and project modes.
-- [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, runtime backend selection, optional X mode, the files you set, and harness support.
+- [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, runtime backend selection, optional X mode, the local Communication Officer bridge, the files you set, and harness support.
 - [docs/remote-secondmates.md](docs/remote-secondmates.md) - current setup, routing, transfer, recovery, and safety behavior for whole-home remote second mates.
 - [docs/runpod-secondmates.md](docs/runpod-secondmates.md) - optional RunPod compute lifecycle beneath a remote second mate, so an idle domain can scale to zero and cost storage alone.
 - [docs/calm.md](docs/calm.md) - current Pi `/calm` behavior and supported presentation limits.

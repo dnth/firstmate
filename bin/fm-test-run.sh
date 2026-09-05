@@ -206,7 +206,7 @@ family_for_basename() {
       printf '%s\n' backend-dispatch
       ;;
     fm-check-unregister.test.sh|fm-pr-check-security.test.sh|fm-pr-merge.test.sh|\
-    fm-review-diff.test.sh|fm-teardown.test.sh|fm-x-mode.test.sh)
+    fm-review-diff.test.sh|fm-teardown.test.sh|fm-x-mode.test.sh|fm-ext-bridge.test.sh)
       printf '%s\n' pr-forge
       ;;
     fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh)
@@ -402,6 +402,7 @@ tests/fm-claude-stop-autoarm.test.sh 60630
 tests/fm-codex-continuity-live-e2e.test.sh 19
 tests/fm-daemon.test.sh 32136
 tests/fm-documentation-audiences.test.sh 708
+tests/fm-ext-bridge.test.sh 4000
 tests/fm-fleet-snapshot-view.test.sh 7565
 tests/fm-fleet-sync.test.sh 36367
 tests/fm-gate-refuse.test.sh 8943
@@ -1005,7 +1006,7 @@ families_for_changed_path() {
       [ "$path" != bin/fm-bootstrap.sh ] || printf '%s\n' secondmate
       ;;
     bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-local-default.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
-    bin/fm-x-*|bin/fm-check*)
+    bin/fm-x-*|bin/fm-ext-*|bin/fm-check*)
       printf '%s\n' pr-forge
       [ "$path" != bin/fm-teardown.sh ] || printf '%s\n' session-bootstrap
       ;;
@@ -1061,6 +1062,9 @@ families_for_changed_path() {
       ;;
     .agents/skills/*/SKILL.md)
       printf '%s\n' pure-contract-unit
+      ;;
+    contrib/hermes-gateway-firstmate-comms/*)
+      printf '%s\n' pr-forge
       ;;
     .github/workflows/ci.yml|.no-mistakes.yaml)
       printf '%s\n' pure-contract-unit
