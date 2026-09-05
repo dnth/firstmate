@@ -253,7 +253,7 @@ print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
     f="$STATE/$task.status"
     receipt=$(status_outcome_backstop_cursor_offset "$f") || return 1
     [ "$receipt" -lt "$endpoint" ] || continue
-    status_snapshot_latest_event "$f" "$endpoint" "$ident" || continue
+    status_snapshot_latest_event "$f" "$endpoint" "$ident" "$receipt" || continue
     event=$FM_STATUS_SNAPSHOT_EVENT_LINE
     status_is_captain_relevant "$event" || continue
     case "$(status_line_verb "$event")" in

@@ -339,6 +339,30 @@ test_outcome_backstop_resurfaces_missed_terminal_once() {
   pass "the wake drain resurfaces a parked terminal status once and records its receipt"
 }
 
+test_outcome_backstop_resurfaces_terminal_buried_under_routine_status() {
+  local dir state out retry
+  dir=$(make_case outcome-backstop-buried)
+  state="$dir/state"
+  out="$dir/first.out"
+  retry="$dir/retry.out"
+  {
+    printf 'done: release completed while the watcher was parked\n'
+    printf 'working: collecting notes\n'
+  } > "$state/parked.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "the buried-terminal backstop drain failed"
+  grep -F 'STATUS OUTCOME BACKSTOP' "$out" >/dev/null \
+    || fail "the buried terminal status was not resurfaced by the backstop: $(cat "$out")"
+  grep -F 'parked done: release completed while the watcher was parked' "$out" >/dev/null \
+    || fail "the buried terminal event was omitted from the backstop: $(cat "$out")"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$retry" \
+    || fail "the buried-terminal retry drain failed"
+  [ ! -s "$retry" ] || fail "an acknowledged buried terminal event repeated: $(cat "$retry")"
+  pass "the wake drain resurfaces a terminal status buried under routine work once"
+}
+
 test_incident_note_answer_buried_under_routine_note_surfaces_both
 test_already_presented_notes_are_not_replayed
 test_brand_new_note_after_presentation_is_surfaced
@@ -351,3 +375,4 @@ test_open_decisions_fold_is_unchanged
 test_empty_queue_does_not_swallow_later_signal_annotation
 test_routine_working_and_covered_done_stay_silent_on_the_empty_queue
 test_outcome_backstop_resurfaces_missed_terminal_once
+test_outcome_backstop_resurfaces_terminal_buried_under_routine_status
