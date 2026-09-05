@@ -384,12 +384,13 @@ classify_signal() {  # <reason-after-colon> <state>
         task=${f##*/}; task=${task%.status}
         seen_marker="$state/.subsuper-seen-status-$(_stale_key "$task")"
         seen_line=$(cat "$seen_marker" 2>/dev/null || true)
-        # Legacy homes recorded only the last escalated line.  Preserve that
-        # deduplication until the endpoint sidecar is created by this build.
-        if [ ! -e "$seen_marker.offset" ] && [ ! -e "$seen_marker.pending" ] \
-          && [ -n "$seen_line" ] && [ "$seen_line" = "$last" ]; then
-          rc=1
-          record=
+        if [ "$rc" -eq 0 ] && [ -n "$seen_line" ]; then
+          rest=${record#*$'\t'}
+          if [ ! -e "$seen_marker.offset" ] && [ ! -e "$seen_marker.pending" ] \
+            && [ "${rest#*$'\t'}" = "$seen_line" ]; then
+            rc=1
+            record=
+          fi
         fi
         if [ "$rc" -eq 2 ]; then
           rel=1; all_seen=0
