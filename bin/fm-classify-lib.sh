@@ -736,7 +736,7 @@ FM_STATUS_SNAPSHOT_EVENT_ENDPOINT=
 # shellcheck disable=SC2094 # Scratch file is written before, then read after the span scan.
 status_snapshot_latest_event() {  # <status-file> <captured-end> <captured-identity> [<start-offset>]
   local f=$1 endpoint=$2 expected_ident=$3 start=${4:-0}
-  local size ident scratch line latest='' line_end=0 latest_endpoint=0 line_bytes
+  local size ident scratch line latest='' line_end=0 latest_endpoint=0 line_bytes read_rc
   FM_STATUS_SNAPSHOT_EVENT_LINE=
   FM_STATUS_SNAPSHOT_EVENT_ENDPOINT=
   case "$endpoint" in ''|*[!0-9]*|0) return 1 ;; esac
@@ -748,13 +748,17 @@ status_snapshot_latest_event() {  # <status-file> <captured-end> <captured-ident
   [ "$size" = "$endpoint" ] && [ "$ident" = "$expected_ident" ] || return 1
   scratch="$(_fm_open_decisions_cursor_path "$f").latest.$$"
   _fm_status_read_span "$f" "$start" "$((endpoint - start))" > "$scratch" 2>/dev/null || { rm -f "$scratch"; return 1; }
-  while IFS= read -r line || [ -n "$line" ]; do
+  while :; do
+    IFS= read -r line
+    read_rc=$?
+    [ "$read_rc" -eq 0 ] || [ -n "$line" ] || break
     case "$line" in
       *[![:space:]]*)
-        line_bytes=$(LC_ALL=C wc -c <<< "$line") || { rm -f "$scratch"; return 1; }
+        line_bytes=$(LC_ALL=C printf '%s' "$line" | wc -c) || { rm -f "$scratch"; return 1; }
         line_bytes=${line_bytes//[[:space:]]/}
         case "$line_bytes" in ''|*[!0-9]*) rm -f "$scratch"; return 1 ;; esac
         line_end=$((line_end + line_bytes))
+        [ "$read_rc" -eq 0 ] && line_end=$((line_end + 1))
         if status_is_captain_relevant "$line"; then
           latest=$line
           latest_endpoint=$((start + line_end))
