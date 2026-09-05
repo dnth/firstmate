@@ -1652,7 +1652,7 @@ handle_wake() {  # <reason> <state>
       log "escalate: $reason -> $distilled"
       escalate_add "$state" "$distilled" || return 1
       if [ "$kind" = signal ] && [ "${FM_RECOVERY_RECLASSIFY_SIGNALS:-0}" != 1 ]; then
-        capture_and_commit_signal_endpoints "$state" "$arg"
+        commit_signal_classified_endpoints "$state"
       fi
       # A terminal-stale escalate must not leave a persistence marker behind, or
       # housekeeping re-escalates the same pane as a false wedge later.
