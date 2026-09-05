@@ -359,10 +359,12 @@ test_remote_control_uses_task_bound_omp_route() {
     "$ROOT/bin/fm-primary-watch-core.ts" "$root/bin/"
   cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$root/.omp/extensions/"
   cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" \
+    "$ROOT/.omp/extensions/lib/fm-async-exec.ts" \
     "$ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" "$root/.omp/extensions/lib/"
   cp "$root/bin/fm-primary-watch-core.ts" "$home/bin/"
   cp "$root/.omp/extensions/fm-primary-omp.ts" "$home/.omp/extensions/"
   cp "$root/.omp/extensions/lib/fm-branch-dispatch.ts" \
+    "$root/.omp/extensions/lib/fm-async-exec.ts" \
     "$root/.omp/extensions/lib/fm-task-inbox-doorbell.ts" "$home/.omp/extensions/lib/"
   cat > "$root/bin/fm-backend.sh" <<'SH'
 fm_backend_validate_task_endpoint() {

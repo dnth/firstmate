@@ -50,6 +50,7 @@ cp -R "$ROOT/.agents/skills/harness-adapters" "$PROJECT/.agents/skills/harness-a
 cp -R "$ROOT/.agents/skills/afk" "$PROJECT/.agents/skills/afk"
 cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$PROJECT/.omp/extensions/fm-primary-omp.ts"
 cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$PROJECT/.omp/extensions/lib/fm-branch-dispatch.ts"
+cp "$ROOT/.omp/extensions/lib/fm-async-exec.ts" "$PROJECT/.omp/extensions/lib/fm-async-exec.ts"
 cp "$ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" "$PROJECT/.omp/extensions/lib/fm-task-inbox-doorbell.ts"
 git init -q -b main "$PROJECT"
 fm_git_identity fmtest fmtest@example.invalid
@@ -224,6 +225,8 @@ cp "$ROOT/.omp/extensions/fm-primary-omp.ts" \
   "$FALLBACK_PROJECT/.omp/extensions/fm-primary-omp.ts"
 cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" \
   "$FALLBACK_PROJECT/.omp/extensions/lib/fm-branch-dispatch.ts"
+cp "$ROOT/.omp/extensions/lib/fm-async-exec.ts" \
+  "$FALLBACK_PROJECT/.omp/extensions/lib/fm-async-exec.ts"
 cp "$ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" \
   "$FALLBACK_PROJECT/.omp/extensions/lib/fm-task-inbox-doorbell.ts"
 git init -q -b main "$FALLBACK_PROJECT"

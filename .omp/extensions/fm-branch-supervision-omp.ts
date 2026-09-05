@@ -92,6 +92,7 @@ import {
   type BranchDispatchOffer,
 } from "./lib/fm-branch-dispatch.ts";
 import { buildBranchModelItems, FOLLOW_MAIN_VALUE } from "./lib/fm-branch-model-picker.ts";
+import { runCommandAsync } from "./lib/fm-async-exec.ts";
 
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
@@ -106,13 +107,13 @@ const sessionPointer = join(state, ".branch-session");
 const mirrorCursorFile = join(state, ".branch-mirror-cursor");
 const promptScript = join(fmRoot, "bin", "fm-branch-prompt.sh");
 const outcomeScript = join(fmRoot, "bin", "fm-branch-outcome.sh");
-const operationalInputScript = join(fmRoot, "bin", "fm-operational-input.sh");
 const leaseScript = join(fmRoot, "bin", "fm-lease.sh");
 const wakeGrantScript = join(fmRoot, "bin", "fm-wake-grant.sh");
 const loadedMarker = join(state, ".omp-branch-extension-loaded");
 const branchExtensionVersion = `sha256:${createHash("sha256")
   .update(readFileSync(extensionFile))
   .update(readFileSync(join(extensionDir, "lib", "fm-branch-dispatch.ts")))
+  .update(readFileSync(join(extensionDir, "lib", "fm-async-exec.ts")))
   .update(readFileSync(join(extensionDir, "lib", "fm-branch-model-picker.ts")))
   .digest("hex")}`;
 const modelPinFile = join(config, "supervision-branch-model");
@@ -248,7 +249,13 @@ function offerEligible(offer: BranchDispatchOffer): boolean {
   return offer.eligible === true;
 }
 
-function parentPid(pid: string): string {
+async function parentPid(pid: string): Promise<string> {
+  const result = await runCommandAsync("ps", ["-o", "ppid=", "-p", pid]);
+  if (result.status !== 0) return "";
+  return result.stdout.trim();
+}
+
+function parentPidSync(pid: string): string {
   const result = spawnSync("ps", ["-o", "ppid=", "-p", pid], { encoding: "utf8" });
   if (result.status !== 0) return "";
   return result.stdout.trim();
@@ -267,43 +274,57 @@ let ownedLockPid = "";
 
 // Same ownership read as the watcher adapter's lockOwnership(): the lock names
 // the harness pid, and this process owns it when that pid appears in its own
-// ancestry.
-function lockOwnership(): LockOwnership {
+// ancestry. The awaited form keeps delivery off OMP's event-loop thread; the
+// synchronous form is only for the offer handshake and shell spawn hook, both
+// of which must decide without waiting.
+const LOCK_ANCESTRY_DEPTH = 8;
+
+function readLockPid(): { lockPid: string; verdict: LockOwnership | null } {
   ownedLockPid = "";
   let lockPid = "";
   try {
     lockPid = readFileSync(`${state}/.lock`, "utf8").trim();
   } catch {
-    return "missing";
+    return { lockPid: "", verdict: "missing" };
   }
-  if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return "other";
-  let pid = String(process.pid);
-  for (let i = 0; i < 8; i += 1) {
-    if (pid === lockPid) {
-      ownedLockPid = lockPid;
-      return "owned";
-    }
-    pid = parentPid(pid);
-    if (!pid || pid === "1") break;
+  if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return { lockPid, verdict: "other" };
+  return { lockPid, verdict: null };
+}
+
+function ownershipVerdict(lockPid: string, ancestryMatched: boolean): LockOwnership {
+  if (ancestryMatched) {
+    ownedLockPid = lockPid;
+    return "owned";
   }
   return pidAlive(lockPid) ? "other" : "missing";
 }
 
-// Encode a watcher wake as a marked operational injection through the bash
-// owner, matching the primary OMP adapter's own fallback delivery. An encoding
-// failure must never lose a wake, so the raw body is returned unmarked.
-function encodeOperationalInput(content: string): string {
-  try {
-    const result = spawnSync(operationalInputScript, ["encode", "watcher"], {
-      encoding: "utf8",
-      input: content,
-      maxBuffer: 1024 * 1024,
-    });
-    if (result.status === 0 && result.stdout) return result.stdout;
-  } catch {
-    // fall through to the unmarked body
+async function lockOwnership(): Promise<LockOwnership> {
+  const { lockPid, verdict } = readLockPid();
+  if (verdict) return verdict;
+  let pid = String(process.pid);
+  for (let i = 0; i < LOCK_ANCESTRY_DEPTH; i += 1) {
+    if (pid === lockPid) {
+      const current = readLockPid();
+      if (current.verdict || current.lockPid !== lockPid) return current.verdict ?? "other";
+      return ownershipVerdict(lockPid, true);
+    }
+    pid = await parentPid(pid);
+    if (!pid || pid === "1") break;
   }
-  return content;
+  return ownershipVerdict(lockPid, false);
+}
+
+function lockOwnershipSync(): LockOwnership {
+  const { lockPid, verdict } = readLockPid();
+  if (verdict) return verdict;
+  let pid = String(process.pid);
+  for (let i = 0; i < LOCK_ANCESTRY_DEPTH; i += 1) {
+    if (pid === lockPid) return ownershipVerdict(lockPid, true);
+    pid = parentPidSync(pid);
+    if (!pid || pid === "1") break;
+  }
+  return ownershipVerdict(lockPid, false);
 }
 
 function textOfContent(content: unknown): string {
@@ -404,6 +425,20 @@ export default function (pi: ExtensionAPI) {
   // dispatch order, one at a time (the branch runs drain -> handle -> ack
   // serially by design).
   let branchChain: Promise<void> = Promise.resolve();
+  // Store writes, cursor advances, ownership reads, and visible merges are
+  // one ordered delivery stream. Awaiting subprocesses lets OMP repaint and
+  // accept input while a delivery runs; this queue preserves the ordering the
+  // old synchronous calls provided implicitly.
+  let deliveryChain: Promise<void> = Promise.resolve();
+
+  function enqueueDelivery<T>(unit: () => Promise<T>): Promise<T> {
+    const queued = deliveryChain.then(unit);
+    deliveryChain = queued.then(
+      () => {},
+      () => {},
+    );
+    return queued;
+  }
   const pendingMirror: MirrorItem[] = [];
   const mirrorCollection: MirrorCollectionState = { collectAnchor: null, pendingCursor: null };
   // Main's own current model and its live registry, tracked from the contexts
@@ -492,12 +527,19 @@ export default function (pi: ExtensionAPI) {
     return model ? clampThinkingLevel(model, chosen) : chosen;
   }
 
-  function generationOwnsLock(expectedGeneration: number): boolean {
-    return !shuttingDown && expectedGeneration === generation && lockOwnership() === "owned";
+  async function generationOwnsLock(expectedGeneration: number): Promise<boolean> {
+    if (shuttingDown || expectedGeneration !== generation) return false;
+    const ownership = await lockOwnership();
+    return !shuttingDown && expectedGeneration === generation && ownership === "owned";
   }
 
-  function markLoaded(): void {
-    if (lockOwnership() === "other") return;
+  function generationOwnsLockSync(expectedGeneration: number): boolean {
+    if (shuttingDown || expectedGeneration !== generation) return false;
+    return lockOwnershipSync() === "owned";
+  }
+
+  async function markLoaded(): Promise<void> {
+    if ((await lockOwnership()) === "other") return;
     const temporary = `${loadedMarker}.tmp.${process.pid}.${randomUUID()}`;
     try {
       mkdirSync(state, { recursive: true });
@@ -512,56 +554,48 @@ export default function (pi: ExtensionAPI) {
 
   // Clear any stray branch leases before a cold-start generation begins work.
   // One bulk release runs per generation, at activation.
-  function releaseBranchLeases(expectedGeneration: number): boolean {
-    if (!generationOwnsLock(expectedGeneration)) return false;
-    try {
-      const result = spawnSync("bash", [leaseScript, "release-actor", "--actor", "branch"], {
-        cwd: fmRoot,
-        encoding: "utf8",
-        env: { ...scriptEnv, FM_SUPERVISION_ACTOR: "branch" },
-      });
-      return result.status === 0;
-    } catch {
-      return false;
-    }
+  async function releaseBranchLeases(expectedGeneration: number): Promise<boolean> {
+    if (!(await generationOwnsLock(expectedGeneration))) return false;
+    const result = await runCommandAsync("bash", [leaseScript, "release-actor", "--actor", "branch"], {
+      cwd: fmRoot,
+      env: { ...scriptEnv, FM_SUPERVISION_ACTOR: "branch" },
+    });
+    return result.status === 0;
   }
 
   // Lazy, per-action ownership evaluation (see the header). Returns true only
   // when this session owns the fleet lock right now; the first true evaluation
   // of a generation also writes the diagnostic marker and clears stray branch
   // leases from a prior generation.
-  function actingAsOwner(expectedGeneration = generation): boolean {
-    if (!generationOwnsLock(expectedGeneration)) return false;
+  async function actingAsOwner(expectedGeneration = generation): Promise<boolean> {
+    if (!(await generationOwnsLock(expectedGeneration))) return false;
     if (activatedGeneration !== expectedGeneration) {
-      if (!releaseBranchLeases(expectedGeneration)) return false;
-      if (!generationOwnsLock(expectedGeneration)) return false;
-      if (!activateEligibleRowsOwner(state, wakeGrantScript, process.pid, String(expectedGeneration))) return false;
-      if (!generationOwnsLock(expectedGeneration)) {
-        rollbackEligibleRowsOwnerActivation(state, wakeGrantScript, process.pid, String(expectedGeneration));
+      if (!(await releaseBranchLeases(expectedGeneration))) return false;
+      if (!(await generationOwnsLock(expectedGeneration))) return false;
+      if (!(await activateEligibleRowsOwner(state, wakeGrantScript, process.pid, String(expectedGeneration)))) {
         return false;
       }
-      markLoaded();
+      if (!(await generationOwnsLock(expectedGeneration))) {
+        await rollbackEligibleRowsOwnerActivation(state, wakeGrantScript, process.pid, String(expectedGeneration));
+        return false;
+      }
+      await markLoaded();
       activatedGeneration = expectedGeneration;
     }
     return generationOwnsLock(expectedGeneration);
   }
 
-  function runOutcomeScript(args: string[]): { ok: boolean; stdout: string; detail: string } {
-    try {
-      const result = spawnSync("bash", [outcomeScript, ...args], {
-        cwd: fmRoot,
-        encoding: "utf8",
-        env: scriptEnv,
-      });
-      if (result.status === 0) return { ok: true, stdout: (result.stdout || "").trim(), detail: "" };
-      return {
-        ok: false,
-        stdout: "",
-        detail: `fm-branch-outcome.sh exited ${result.status ?? "none"}: ${(result.stderr || "").trim()}`,
-      };
-    } catch (error) {
-      return { ok: false, stdout: "", detail: error instanceof Error ? error.message : String(error) };
-    }
+  async function runOutcomeScript(args: string[]): Promise<{ ok: boolean; stdout: string; detail: string }> {
+    const result = await runCommandAsync("bash", [outcomeScript, ...args], {
+      cwd: fmRoot,
+      env: scriptEnv,
+    });
+    if (result.status === 0) return { ok: true, stdout: (result.stdout || "").trim(), detail: "" };
+    return {
+      ok: false,
+      stdout: "",
+      detail: `fm-branch-outcome.sh exited ${result.status ?? "none"}: ${(result.stderr || "").trim()}`,
+    };
   }
 
   // Append-only merge into main. The store row is already durable when this
@@ -581,17 +615,17 @@ export default function (pi: ExtensionAPI) {
   // the outcome durable in the store and recoverable through main's
   // fm_branch_outcomes tool, which is the strictly safer failure. The store row
   // is already durable when this runs (the report tool appends store-first).
-  function mergeIntoMain(
+  async function mergeIntoMain(
     expectedGeneration: number,
     seq: string,
     task: string,
     verdict: Verdict,
     summary: string,
     silent: boolean,
-  ): boolean {
-    if (!actingAsOwner(expectedGeneration)) return false;
+  ): Promise<boolean> {
+    if (!(await actingAsOwner(expectedGeneration))) return false;
     // Advance the cursor first so the outcome can never be delivered twice.
-    if (/^[0-9]+$/.test(seq) && !runOutcomeScript(["handoff-next", "--seq", seq]).ok) {
+    if (/^[0-9]+$/.test(seq) && !(await runOutcomeScript(["handoff-next", "--seq", seq])).ok) {
       return false;
     }
     if (verdict === "captain") {
@@ -656,32 +690,34 @@ export default function (pi: ExtensionAPI) {
         const verdict = verdictRaw as Verdict;
         const appendArgs = ["append", "--task", task, "--verdict", verdict, "--summary", summary, "--silent", String(silent)];
         if (wake) appendArgs.push("--wake", wake);
-        if (!actingAsOwner(toolGeneration)) {
+        return enqueueDelivery(async () => {
+          if (!(await actingAsOwner(toolGeneration))) {
+            return {
+              content: [{ type: "text", text: "report refused: supervision session was replaced or lost lock ownership" }],
+              details: undefined,
+              isError: true,
+            };
+          }
+          const appended = await runOutcomeScript(appendArgs);
+          if (!appended.ok) {
+            return {
+              content: [{ type: "text", text: `outcome store append failed (nothing merged): ${appended.detail}` }],
+              details: undefined,
+              isError: true,
+            };
+          }
+          if (!(await mergeIntoMain(toolGeneration, appended.stdout, task, verdict, summary, silent))) {
+            return {
+              content: [{ type: "text", text: `recorded seq ${appended.stdout}, but merge refused after supervision replacement or lock loss` }],
+              details: undefined,
+              isError: true,
+            };
+          }
           return {
-            content: [{ type: "text", text: "report refused: supervision session was replaced or lost lock ownership" }],
+            content: [{ type: "text", text: `recorded seq ${appended.stdout} and merged [${verdict}] into main` }],
             details: undefined,
-            isError: true,
           };
-        }
-        const appended = runOutcomeScript(appendArgs);
-        if (!appended.ok) {
-          return {
-            content: [{ type: "text", text: `outcome store append failed (nothing merged): ${appended.detail}` }],
-            details: undefined,
-            isError: true,
-          };
-        }
-        if (!mergeIntoMain(toolGeneration, appended.stdout, task, verdict, summary, silent)) {
-          return {
-            content: [{ type: "text", text: `recorded seq ${appended.stdout}, but merge refused after supervision replacement or lock loss` }],
-            details: undefined,
-            isError: true,
-          };
-        }
-        return {
-          content: [{ type: "text", text: `recorded seq ${appended.stdout} and merged [${verdict}] into main` }],
-          details: undefined,
-        };
+        });
       },
     };
   }
@@ -709,9 +745,8 @@ export default function (pi: ExtensionAPI) {
     // authoritative whenever a fresh process creates or reopens the branch.
     const pinned = branchModelSelection();
     const effort = branchEffortSelection(pinned?.model);
-    const prompt = spawnSync("bash", [promptScript], {
+    const prompt = await runCommandAsync("bash", [promptScript], {
       cwd: fmRoot,
-      encoding: "utf8",
       env: scriptEnv,
       maxBuffer: 4 * 1024 * 1024,
     });
@@ -720,7 +755,7 @@ export default function (pi: ExtensionAPI) {
         `fm-branch-prompt.sh did not produce a usable branch prompt (status=${prompt.status ?? "none"}): ${(prompt.stderr || "").trim()}`,
       );
     }
-    if (!actingAsOwner(branchGeneration)) throw new Error("supervision session was replaced or lost lock ownership");
+    if (!(await actingAsOwner(branchGeneration))) throw new Error("supervision session was replaced or lost lock ownership");
     mkdirSync(sessionsDir, { recursive: true });
     let sessionManager: SessionManager | null = null;
     try {
@@ -737,11 +772,11 @@ export default function (pi: ExtensionAPI) {
         suppressBreadcrumb: true,
       });
     }
-    if (!actingAsOwner(branchGeneration)) throw new Error("supervision session was replaced or lost lock ownership");
+    if (!(await actingAsOwner(branchGeneration))) throw new Error("supervision session was replaced or lost lock ownership");
     const leaseHolderPid = ownedLockPid;
     const bashTool = createBashToolDefinition(fmRoot, {
       spawnHook: (context) => {
-        if (!actingAsOwner(branchGeneration)) {
+        if (activatedGeneration !== branchGeneration || !generationOwnsLockSync(branchGeneration)) {
           throw new Error("bash refused: supervision session was replaced or lost lock ownership");
         }
         return {
@@ -791,7 +826,7 @@ ${context.command}
       ...(pinned ? { model: pinned.model } : {}),
       ...(effort === undefined ? {} : { thinkingLevel: effort }),
     });
-    if (!actingAsOwner(branchGeneration)) {
+    if (!(await actingAsOwner(branchGeneration))) {
       try {
         await created.session.dispose();
       } catch {}
@@ -806,12 +841,12 @@ ${context.command}
   }
 
   async function ensureBranch(expectedGeneration: number): Promise<AgentSession> {
-    if (!actingAsOwner(expectedGeneration)) throw new Error("supervision session was replaced or lost lock ownership");
+    if (!(await actingAsOwner(expectedGeneration))) throw new Error("supervision session was replaced or lost lock ownership");
     if (branch) return branch;
     if (branchBroken) throw new Error(branchBroken);
     try {
       const created = await createBranch(expectedGeneration);
-      if (!actingAsOwner(expectedGeneration)) {
+      if (!(await actingAsOwner(expectedGeneration))) {
         try {
           await created.dispose();
         } catch {}
@@ -828,19 +863,19 @@ ${context.command}
   }
 
   async function flushMirror(session: AgentSession, expectedGeneration: number): Promise<void> {
-    if (!actingAsOwner(expectedGeneration)) throw new Error("supervision session no longer owns the fleet lock");
+    if (!(await actingAsOwner(expectedGeneration))) throw new Error("supervision session no longer owns the fleet lock");
     while (pendingMirror.length > 0) {
       const item = pendingMirror[0];
-      if (!actingAsOwner(expectedGeneration)) throw new Error("supervision session no longer owns the fleet lock");
+      if (!(await actingAsOwner(expectedGeneration))) throw new Error("supervision session no longer owns the fleet lock");
       await session.sendCustomMessage(
         { customType: "fm-main-mirror", content: `[${item.tag}] ${item.text}`, display: false },
         {},
       );
-      if (!actingAsOwner(expectedGeneration)) throw new Error("supervision session was replaced during mirror delivery");
+      if (!(await actingAsOwner(expectedGeneration))) throw new Error("supervision session was replaced during mirror delivery");
       pendingMirror.shift();
     }
     if (mirrorCollection.pendingCursor) {
-      if (!actingAsOwner(expectedGeneration)) throw new Error("supervision session no longer owns the fleet lock");
+      if (!(await actingAsOwner(expectedGeneration))) throw new Error("supervision session no longer owns the fleet lock");
       writeMirrorCursor(mirrorCollection.pendingCursor);
       mirrorCollection.pendingCursor = null;
     }
@@ -852,10 +887,14 @@ ${context.command}
         if (shuttingDown || acceptedGeneration !== generation) {
           throw new Error("supervision session was replaced before handling the accepted wake");
         }
-        if (!actingAsOwner(acceptedGeneration)) throw new Error("supervision session no longer owns the fleet lock");
+        if (!(await enqueueDelivery(() => actingAsOwner(acceptedGeneration)))) {
+          throw new Error("supervision session no longer owns the fleet lock");
+        }
         const session = await ensureBranch(acceptedGeneration);
         await flushMirror(session, acceptedGeneration);
-        if (!actingAsOwner(acceptedGeneration)) throw new Error("supervision session no longer owns the fleet lock");
+        if (!(await enqueueDelivery(() => actingAsOwner(acceptedGeneration)))) {
+          throw new Error("supervision session no longer owns the fleet lock");
+        }
         const heartbeat = /^heartbeat($|:)/.test(message);
         const scope = scopeForUnreadWake(state, heartbeat);
         // A newly-arrived main-owned (check-kind) row never bounces this whole
@@ -869,7 +908,7 @@ ${context.command}
         if (scope.corrupted) {
           throw new Error("the unread wake queue could not be read safely");
         }
-        const grant = writeEligibleRowsSnapshot(state, scope.eligibleSeqs, wakeGrantScript, String(acceptedGeneration));
+        const grant = await writeEligibleRowsSnapshot(state, scope.eligibleSeqs, wakeGrantScript, String(acceptedGeneration));
         if (grant === "main-owned") throw new Error("the wake rows are already claimed by main");
         if (grant !== "published") throw new Error("could not record the branch's eligible row snapshot");
         // A row can still arrive between this re-check and the model starting
@@ -877,12 +916,12 @@ ${context.command}
         await session.prompt(
           `FIRSTMATE SUPERVISION WAKE: ${message}\n\nHandle this per your operating procedure. Do not finish this turn until you have completed, in order: fm_branch_report, the exact WAKE_ACK_REQUIRED command, and release of every task lease you claimed.`,
         );
-        if (!releaseEligibleRowsSnapshot(state, wakeGrantScript, String(acceptedGeneration))) {
+        if (!(await releaseEligibleRowsSnapshot(state, wakeGrantScript, String(acceptedGeneration)))) {
           throw new Error("could not release the branch's settled wake-row grant");
         }
       })
-      .catch((error: unknown) => {
-        releaseEligibleRowsSnapshot(state, wakeGrantScript, String(acceptedGeneration));
+      .catch(async (error: unknown) => {
+        await releaseEligibleRowsSnapshot(state, wakeGrantScript, String(acceptedGeneration));
         throw error;
       });
     branchChain = delivery.catch(() => {});
@@ -895,7 +934,7 @@ ${context.command}
     const flushSession = branch;
     branchChain = branchChain
       .then(async () => {
-        if (!actingAsOwner(flushGeneration)) return;
+        if (!(await actingAsOwner(flushGeneration))) return;
         await flushMirror(flushSession, flushGeneration);
       })
       .catch(() => {
@@ -911,7 +950,7 @@ ${context.command}
     // gets neither branch routing nor branch-owned state/lease cleanup side
     // effects.
     if (!offerEligible(offer)) return;
-    if (!actingAsOwner()) return; // cold start pre-lock, secondary session, or shutdown
+    if (!generationOwnsLockSync(generation)) return; // cold start pre-lock, secondary session, or shutdown
     if (afkActive()) return; // the away daemon owns supervision while afk
     if (branchBroken) return; // fail back to today's wake-to-main path
     offer.accept(enqueueWake(offer.message, generation));
@@ -928,9 +967,11 @@ ${context.command}
   // the volatile queue, then deliver it through the serialized chain so it
   // lands before any later wake. The durable cursor advances only in
   // flushMirror after the complete pending batch reaches the branch.
-  pi.on?.("turn_end", (_event, ctx) => {
+  pi.on?.("turn_end", async (_event, ctx) => {
     rememberMainContext(ctx);
-    if (!actingAsOwner()) return;
+    const turnGeneration = generation;
+    if (!(await enqueueDelivery(() => actingAsOwner(turnGeneration)))) return;
+    if (turnGeneration !== generation) return;
     try {
       pendingMirror.push(...collectMainDialog(ctx.sessionManager, mirrorCollection));
     } catch {
@@ -946,12 +987,13 @@ ${context.command}
   // file). A synchronous live handoff from a branch, or hung-branch takeover,
   // remains out of scope (see docs/omp-supervision-branch.md). Terminal quit
   // fires session_shutdown and never a start.
-  pi.on?.("session_start", (_event, ctx) => {
+  pi.on?.("session_start", async (_event, ctx) => {
     rememberMainContext(ctx);
     shuttingDown = false;
     branchBroken = "";
     generation += 1;
-    actingAsOwner(generation);
+    const startedGeneration = generation;
+    await enqueueDelivery(() => actingAsOwner(startedGeneration));
   });
 
   // Terminal quit: latch shutdown so no further wake or mirror turn starts. No
@@ -1132,7 +1174,7 @@ ${context.command}
     execute: async (_toolCallId, params) => {
       const recentRaw = (params as { recent?: unknown }).recent;
       const recent = typeof recentRaw === "number" && recentRaw >= 1 ? String(Math.floor(recentRaw)) : "20";
-      const listed = runOutcomeScript(["list", "--recent", recent]);
+      const listed = await enqueueDelivery(() => runOutcomeScript(["list", "--recent", recent]));
       if (!listed.ok) {
         return {
           content: [{ type: "text", text: `could not read the outcome store: ${listed.detail}` }],
@@ -1146,5 +1188,5 @@ ${context.command}
       };
     },
   });
-  markLoaded();
+  void markLoaded();
 }

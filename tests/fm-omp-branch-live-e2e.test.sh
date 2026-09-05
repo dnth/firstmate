@@ -39,6 +39,7 @@ repo="$TMP_ROOT/repo"
 mkdir -p "$repo/.omp/extensions/lib"
 cp "$ROOT/.omp/extensions/fm-branch-supervision-omp.ts" "$repo/.omp/extensions/fm-branch-supervision-omp.ts"
 cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$repo/.omp/extensions/lib/fm-branch-dispatch.ts"
+cp "$ROOT/.omp/extensions/lib/fm-async-exec.ts" "$repo/.omp/extensions/lib/fm-async-exec.ts"
 cp "$ROOT/.omp/extensions/lib/fm-branch-model-picker.ts" "$repo/.omp/extensions/lib/fm-branch-model-picker.ts"
 ln -s "$OMP_NODE_MODULES" "$repo/node_modules"
 

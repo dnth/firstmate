@@ -121,6 +121,15 @@ The branch can also run on a cheaper model and a shallower reasoning effort than
 Away mode carries over unchanged: while `state/.afk` exists the away daemon owns supervision, and the branch declines every wake offer for the duration.
 What is new is only the attended path: outside away mode, the branch absorbs the routine majority that previously interrupted the captain's conversation, applying the same escalation etiquette the daemon applies while away.
 
+## Responsiveness port reconciliation
+
+Upstream Pi change #3767 moves supervision outcome subprocesses off Pi's render thread and serializes delivery so durable append, cursor handoff, and visible delivery remain ordered.
+The shared bash contracts, including `bin/fm-supervise-daemon.sh`, did not change in #3767 because the away daemon already runs in its own process and does not block the OMP session event loop.
+This fork ports the mechanism into `.omp/extensions/lib/fm-async-exec.ts`, makes the OMP grant-script helpers awaitable, adds the OMP branch's `deliveryChain` around ownership checks, outcome append/handoff, and report delivery, and includes the new helper in `bin/fm-primary-watch-version-lib.sh`'s branch marker hash.
+OMP retains synchronous ownership reads only where its offer handshake and shell spawn hook must answer without waiting, while every delivery-side process call rechecks ownership through the awaited path.
+The existing watcher-continuity implementation in `bin/fm-primary-watch-core.ts` remains the delivery owner for rejected branch settlements and replacement handoffs; this port does not bypass or duplicate that PR #99 contract.
+Pi-only processed-outcome reconciliation and Pi renderer/live-TUI guards have no OMP equivalent and are deliberately omitted; OMP's direct append-and-handoff outcome store is covered by the portable OMP regression and strict OMP typecheck.
+
 ## Verification
 
 Portable regressions: `tests/fm-omp-branch-supervision.test.sh` covers prompt byte-stability, outcome store append-only, lease actor partition and guards, wake-grant lifecycle, and non-branch-home invariance; `tests/fm-omp-primary.test.sh` rejects an accepted branch settlement into the watcher-owned main path across replacement; and the per-actor consume regression in `tests/fm-wake-queue.test.sh` proves branch-scoped acknowledgement never swallows a main-owned row, main excludes branch-granted rows, and the inert pre-branch path.

@@ -354,6 +354,7 @@ test_omp_extension_establishes_main_actor_context() {
   mkdir -p "$fixture/.omp/extensions/lib" "$package_dir"
   cp "$ROOT/.omp/extensions/fm-branch-supervision-omp.ts" "$fixture/.omp/extensions/fm-branch-supervision-omp.ts"
   cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$fixture/.omp/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-async-exec.ts" "$fixture/.omp/extensions/lib/fm-async-exec.ts"
   cp "$ROOT/.omp/extensions/lib/fm-branch-model-picker.ts" "$fixture/.omp/extensions/lib/fm-branch-model-picker.ts"
   printf '%s\n' '{"type":"module","exports":{".":"./index.js","./extensibility/legacy-pi-coding-agent-shim":"./coding-shim.js","./extensibility/legacy-pi-ai-shim":"./ai-shim.js"}}' > "$package_dir/package.json"
   printf '%s\n' 'export function createAgentSession() {} export class SessionManager {}' > "$package_dir/index.js"
@@ -372,6 +373,39 @@ test_omp_extension_establishes_main_actor_context() {
   pass "OMP extension load establishes the main supervision actor context"
 }
 
+test_async_outcome_delivery_keeps_event_loop_responsive_and_ordered() {
+  command -v bun >/dev/null 2>&1 || { echo "skip: bun not found for OMP async delivery regression"; return 0; }
+  local out ticks deliveries
+  out=$(bun - "$ROOT/.omp/extensions/lib/fm-async-exec.ts" <<'JS'
+const { runCommandAsync } = await import(process.argv[2]);
+let deliveryChain = Promise.resolve();
+const deliveries = [];
+const enqueue = (label, delay) => {
+  const queued = deliveryChain.then(async () => {
+    const result = await runCommandAsync("bash", ["-c", `sleep ${delay}; printf '%s' '${label}'`]);
+    if (result.status !== 0) throw new Error(`delivery failed for ${label}`);
+    deliveries.push(result.stdout);
+  });
+  deliveryChain = queued.then(() => {}, () => {});
+  return queued;
+};
+let ticks = 0;
+const timer = setInterval(() => { ticks += 1; }, 5);
+await Promise.all([enqueue("routine", "0.12"), enqueue("captain", "0.02")]);
+clearInterval(timer);
+if (ticks < 10) throw new Error(`event loop stalled during async outcome delivery: only ${ticks} timer ticks`);
+if (deliveries.join(",") !== "routine,captain") throw new Error(`delivery order changed: ${deliveries.join(",")}`);
+console.log(`TICKS=${ticks}`);
+console.log(`DELIVERIES=${deliveries.join(",")}`);
+JS
+  ) || fail "async outcome delivery regression harness failed: $out"
+  ticks=$(printf '%s\n' "$out" | sed -n 's/^TICKS=//p')
+  deliveries=$(printf '%s\n' "$out" | sed -n 's/^DELIVERIES=//p')
+  [ "${ticks:-0}" -ge 10 ] || fail "async outcome delivery stalled the event loop: $out"
+  [ "$deliveries" = "routine,captain" ] || fail "async outcome delivery reordered outcomes: $out"
+  pass "OMP outcome delivery yields to the event loop while preserving routine/captain order"
+}
+
 test_branch_prompt_is_byte_stable_and_above_cache_floor
 test_outcome_store_is_append_only_with_cursor_reads
 test_outcome_startup_replay_preserves_silence
@@ -382,3 +416,4 @@ test_send_lease_guard_serializes_a_held_task
 test_pr_check_lease_guard_serializes_task_metadata
 test_non_branch_home_is_untouched
 test_omp_extension_establishes_main_actor_context
+test_async_outcome_delivery_keeps_event_loop_responsive_and_ordered

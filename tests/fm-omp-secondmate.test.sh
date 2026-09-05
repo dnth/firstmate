@@ -40,6 +40,7 @@ setup_case() { # <name>
   : > "$HERDR_LOG"
   cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$HOME_DIR/.omp/extensions/fm-primary-omp.ts"
   cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$HOME_DIR/.omp/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-async-exec.ts" "$HOME_DIR/.omp/extensions/lib/fm-async-exec.ts"
   cp "$ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" "$HOME_DIR/.omp/extensions/lib/fm-task-inbox-doorbell.ts"
   cp "$ROOT/AGENTS.md" "$HOME_DIR/AGENTS.md"
   ln -s "$ROOT/bin" "$HOME_DIR/bin"
@@ -52,7 +53,7 @@ setup_case() { # <name>
   git -C "$HOME_DIR" config user.email fmtest@example.com
   printf 'home\n' > "$HOME_DIR/README.md"
   git -C "$HOME_DIR" add README.md .omp/extensions/fm-primary-omp.ts \
-    .omp/extensions/lib/fm-branch-dispatch.ts .omp/extensions/lib/fm-task-inbox-doorbell.ts
+    .omp/extensions/lib/fm-branch-dispatch.ts .omp/extensions/lib/fm-async-exec.ts .omp/extensions/lib/fm-task-inbox-doorbell.ts
   git -C "$HOME_DIR" commit -qm init
 
   cat > "$FAKEBIN/omp" <<'JS'
