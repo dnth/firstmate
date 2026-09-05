@@ -1644,16 +1644,16 @@ handle_wake() {  # <reason> <state>
   # on every retry.  Do not advance the ordinary per-wake cursor before the
   # recovery projection is actually delivered; the staged recovery seen-set is
   # committed only after the generation-bound acknowledgement succeeds.
-  if [ "$kind" = signal ] && [ "${FM_RECOVERY_RECLASSIFY_SIGNALS:-0}" != 1 ]; then
-    capture_and_commit_signal_endpoints "$state" "$arg"
-  fi
   action=${decision%%|*}
   distilled=${decision#*|}
   [ "$kind" = signal ] && sync_pause_markers_from_signal "$state" "$arg"
   case "$action" in
     escalate)
       log "escalate: $reason -> $distilled"
-      escalate_add "$state" "$distilled"
+      escalate_add "$state" "$distilled" || return 1
+      if [ "$kind" = signal ] && [ "${FM_RECOVERY_RECLASSIFY_SIGNALS:-0}" != 1 ]; then
+        capture_and_commit_signal_endpoints "$state" "$arg"
+      fi
       # A terminal-stale escalate must not leave a persistence marker behind, or
       # housekeeping re-escalates the same pane as a false wedge later.
       [ "$kind" = "stale" ] && stale_marker_remove "$arg" "$state"
