@@ -915,6 +915,27 @@ test_failed_send_discards_undelivered_expectation() {
   pass "failed transport discards undelivered expectation only"
 }
 
+test_same_basename_self_home_reply_does_not_false_escalate() {
+  local home state sm_home corr rec
+  home=$(setup_parent self-home-reply)
+  state="$home/state"
+  sm_home="$TMP_ROOT/self-home-reply-mate"
+  mkdir -p "$sm_home/state"
+  export FM_PENDING_REPLY_NOW=9500
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "self-home answer")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_write_secondmate_meta "$state/hibit.meta" "$sm_home" "sess:fm-hibit"
+  printf 'done [corr=%s]: answered in mate home\n' "$corr" > "$sm_home/state/hibit.status"
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  fm_pending_reply_send_recovery "$state" "$corr" >/dev/null 2>&1 || true
+  fm_pending_reply_mark_turn_completed "$state" "$corr" recovery
+  fm_pending_reply_maybe_escalate "$state" "$corr" || fail "self-home answer should resolve before escalation"
+  [ "$(phase_of "$state" "$corr")" = resolved ] || fail "self-home answer was falsely escalated"
+  grep -Fq "done [corr=$corr]" "$state/hibit.status" || fail "self-home answer was not restated"
+  pass "same-basename self-home reply does not false-escalate"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
@@ -940,5 +961,6 @@ test_tick_skips_terminal_and_reuses_target_observation
 test_correlations_reuse_only_for_matching_open_task
 test_tick_end_to_end_missed_then_escalate
 test_failed_send_discards_undelivered_expectation
+test_same_basename_self_home_reply_does_not_false_escalate
 
 printf 'ok - all pending-reply tests passed\n'

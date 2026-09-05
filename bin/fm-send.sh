@@ -208,7 +208,10 @@ trap fm_send_cleanup EXIT
 # renderer without adding a second shared helper to this fork.
 fm_send_resolved_line() {  # <key> <note>
   local key=$1 note=$2 prefix suffix=' [truncated]' max=220 keep
-  prefix="resolved [key=$key]: answered: "
+  case "$note" in
+    pending-reply-resolved:*) prefix="resolved [key=$key]: " ;;
+    *) prefix="resolved [key=$key]: answered: " ;;
+  esac
   keep=$((max - ${#prefix}))
   [ "$keep" -ge 0 ] || keep=0
   if [ "${#note}" -gt "$keep" ]; then
@@ -219,6 +222,15 @@ fm_send_resolved_line() {  # <key> <note>
     fi
   fi
   FM_SEND_RESOLVED_LINE="$prefix$note"
+}
+
+fm_send_resolve_close_note() {  # <key> <excerpt>
+  local owned
+  if owned=$(fm_pending_reply_close_note_for_key "$1" "$RESOLVE_TASK_ID" operator-resolve-key "$2"); then
+    printf '%s' "$owned"
+  else
+    printf '%s' "$2"
+  fi
 }
 
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
@@ -708,16 +720,27 @@ fm_send_feed_resolved_holds() {  # <answer-text>
 # nonzero with the manual close command; the decision then stays open and
 # re-surfaces, never silently lost.
 fm_send_close_resolved_keys() {  # <answer-text>
-  local note=$1 k quoted_line quoted_status failed=0
+  local note=$1 k close_note quoted_line quoted_status failed=0 still
   note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
   for k in $RESOLVE_STATUS_KEYS; do
-    fm_send_resolved_line "$k" "$note"
+    close_note=$(fm_send_resolve_close_note "$k" "$note")
+    fm_send_resolved_line "$k" "$close_note"
     if ! printf '%s\n' "$FM_SEND_RESOLVED_LINE" >> "$RESOLVE_STATUS_FILE"; then
       printf -v quoted_line '%q' "$FM_SEND_RESOLVED_LINE"
       printf -v quoted_status '%q' "$RESOLVE_STATUS_FILE"
       echo "error: the answer was delivered to $T, but decision key '$k' could not be closed in $RESOLVE_STATUS_FILE." >&2
       printf '%s\n' "manual close: printf '%s\\n' $quoted_line >> $quoted_status" >&2
       failed=1
+    else
+      printf -v quoted_line '%q' "$FM_SEND_RESOLVED_LINE"
+      printf -v quoted_status '%q' "$RESOLVE_STATUS_FILE"
+      still=$(status_open_decisions "$RESOLVE_STATUS_FILE")
+      case "$still" in
+        "$k"$'\t'*|*$'\n'"$k"$'\t'*)
+          printf '%s\n' "error: the answer was delivered to $T, but decision key '$k' is still open in $RESOLVE_STATUS_FILE; close it manually with: printf '%s\\n' $quoted_line >> $quoted_status - do not resend the answer." >&2
+          failed=1
+          ;;
+      esac
     fi
   done
   if [ "$failed" -ne 0 ]; then
