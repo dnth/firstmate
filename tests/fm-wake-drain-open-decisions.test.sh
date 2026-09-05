@@ -72,20 +72,29 @@ test_later_unrelated_terminal_line_does_not_close_it() {
 }
 
 test_no_open_decisions_prints_nothing() {
-  local dir state out
+  local dir state out old
   dir=$(make_case none-open)
   state="$dir/state"
   out="$dir/drain.out"
   printf 'working: on it\n' > "$state/task4.status"
   printf 'done: shipped clean\n' > "$state/task5.status"
+  old=$(( $(date +%s) - 20 ))
+  perl -e 'utime($ARGV[0], $ARGV[0], $ARGV[1]) or exit 1' "$old" "$state/task5.status" \
+    || fail "could not age the covered done fixture"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task5 --verdict captain --summary 'shipped clean was handled' >/dev/null \
+    || fail "could not record the newer branch outcome fixture"
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed with no open decisions"
 
   if grep -F 'OPEN DECISIONS' "$out" >/dev/null; then
     fail "the empty case printed an OPEN DECISIONS section: $(cat "$out")"
   fi
+  if grep -F 'STATUS OUTCOME BACKSTOP' "$out" >/dev/null; then
+    fail "a covered terminal status printed the outcome backstop: $(cat "$out")"
+  fi
   [ ! -s "$out" ] || fail "the empty case with no queued wakes was not silent: $(cat "$out")"
-  pass "no open decisions across the fleet prints nothing"
+  pass "no open decisions across the fleet prints nothing when terminal status is branch-covered"
 }
 
 test_open_decision_surfaces_even_with_an_unrelated_queued_wake() {

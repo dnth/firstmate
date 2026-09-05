@@ -350,34 +350,62 @@ _collapse_newlines() {  # <text>
 # field for "self" is informational (logged); for "escalate" it is the pre-read
 # summary firstmate would otherwise have to re-read.
 
+daemon_status_seen_offset() {  # <state> <status-file>
+  local state=$1 f=$2 raw size marker task
+  task=${f##*/}; task=${task%.status}
+  marker="$state/.subsuper-seen-status-$(_stale_key "$task")"
+  raw=$(cat "$marker.offset" 2>/dev/null || true)
+  size=${raw%%@*}
+  case "$raw" in *'@'*|'') ;; *) size=0 ;; esac
+  case "$size" in ''|*[!0-9]*) size=0 ;; esac
+  printf '%s' "$size"
+}
+
 classify_signal() {  # <reason-after-colon> <state>
-  local reason=$1 state=$2 f last distilled="" rel="" all_seen=1 task seen
+  local reason=$1 state=$2 f record rc start endpoint ident rest last distilled="" rel="" all_seen=1 seen_marker seen_line
+  FM_SIGNAL_SURFACE_ENDPOINTS=''
   for f in $reason; do
     [ -e "$f" ] || continue
-    last=$(last_status_line "$f")
-    [ -n "$last" ] || continue
-    distilled="${distilled}$(basename "$f"): ${last} | "
-    status_is_captain_relevant "$last" || continue
-    rel=1
-    # Dedupe against the catch-all scan: if this status was already escalated
-    # (seen marker matches), skip escalating again. The seen marker is the
-    # single source of truth shared between the per-wake signal path and the
-    # heartbeat scan. all_seen stays 1 only if EVERY relevant file was seen.
-    task=$(basename "$f"); task="${task%.status}"
-    if [ "${FM_RECOVERY_RECLASSIFY_SIGNALS:-0}" = 1 ]; then
-      all_seen=0
-    else
-      seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
-      [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] || all_seen=0
-    fi
+    case "$f" in
+      *.status)
+        start=$(daemon_status_seen_offset "$state" "$f")
+        record=$(status_span_first_actionable_record "$f" "$start")
+        rc=$?
+        last=$(last_status_line "$f")
+        [ -n "$last" ] && distilled="${distilled}$(basename "$f"): ${last} | "
+        task=${f##*/}; task=${task%.status}
+        seen_marker="$state/.subsuper-seen-status-$(_stale_key "$task")"
+        seen_line=$(cat "$seen_marker" 2>/dev/null || true)
+        # Legacy homes recorded only the last escalated line.  Preserve that
+        # deduplication until the endpoint sidecar is created by this build.
+        if [ ! -e "$seen_marker.offset" ] && [ -n "$seen_line" ] && [ "$seen_line" = "$last" ]; then
+          rc=1
+          record=
+        fi
+        if [ "$rc" -eq 2 ]; then
+          rel=1; all_seen=0
+          distilled="${distilled}unreadable status span | "
+          continue
+        fi
+        if [ -n "$record" ]; then
+          endpoint=${record%%$'\t'*}; rest=${record#*$'\t'}; ident=${rest%%$'\t'*}
+          FM_SIGNAL_SURFACE_ENDPOINTS="${FM_SIGNAL_SURFACE_ENDPOINTS}${f}"$'\t'"${endpoint}"$'\t'"${ident}"$'\n'
+        fi
+        if [ "$rc" -eq 0 ]; then
+          rel=1; all_seen=0
+          distilled="${distilled}${record#*$'\t'*} | "
+        fi
+        ;;
+      *)
+        last=$(last_status_line "$f")
+        [ -n "$last" ] && distilled="${distilled}$(basename "$f"): ${last} | "
+        ;;
+    esac
   done
-  # strip a trailing " | " separator so the distilled line is clean
   distilled="${distilled% | }"
   if [ -z "$rel" ]; then
     printf 'self|routine signal: %s' "$distilled"
   elif [ "$all_seen" = "1" ]; then
-    # Every relevant status was already escalated by the catch-all scan;
-    # self-handle to avoid a duplicate entry in the digest.
     printf 'self|signal already escalated (catch-all scan): %s' "$distilled"
   else
     printf 'escalate|%s' "$distilled"
@@ -592,8 +620,12 @@ sync_pause_markers_from_signal() {  # <state> <signal files>
 # the .subsuper-seen-status-<task> dedup state: called from both the per-wake
 # escalate path and the catch-all scan.
 mark_status_seen() {  # <state> <task> <last-line>
-  local state=$1 task=$2 line=$3
-  printf '%s' "$line" > "$state/.subsuper-seen-status-$(_stale_key "$task")"
+  local state=$1 task=$2 line=$3 endpoint=${4:-} ident=${5:-} marker
+  marker="$state/.subsuper-seen-status-$(_stale_key "$task")"
+  printf '%s' "$line" > "$marker"
+  if [ -n "$endpoint" ] && [ -n "$ident" ]; then
+    printf '%s@%s' "$endpoint" "$ident" > "$marker.offset"
+  fi
 }
 
 stage_or_mark_status_seen() {  # <state> <task> <last-line>
@@ -609,7 +641,7 @@ stage_or_mark_status_seen() {  # <state> <task> <last-line>
 # seen, so the catch-all scan does not re-escalate the same line within
 # HEARTBEAT_SCAN_SECS. Mirrors classify_signal/classify_stale's relevance test.
 mark_escalated_seen() {  # <kind> <arg> <state>
-  local kind=$1 arg=$2 state=$3 f last task
+  local kind=$1 arg=$2 state=$3 f last task endpoint ident rest
   case "$kind" in
     signal)
       for f in $arg; do
@@ -618,14 +650,55 @@ mark_escalated_seen() {  # <kind> <arg> <state>
         [ -n "$last" ] || continue
         status_is_captain_relevant "$last" || continue
         task=$(basename "$f"); task="${task%.status}"
+        endpoint=''; ident=''
+        while IFS=$(printf '\t') read -r _f endpoint ident; do
+          [ "$_f" = "$f" ] && break
+        done <<EOF
+${FM_SIGNAL_SURFACE_ENDPOINTS:-}
+EOF
         stage_or_mark_status_seen "$state" "$task" "$last"
+        [ -n "$endpoint" ] && [ -n "$ident" ] && printf '%s@%s' "$endpoint" "$ident" > "$state/.subsuper-seen-status-$(_stale_key "$task").offset"
       done ;;
     stale)
       task=$(window_to_task "$arg" "$state")
       last=$(last_status_line "$state/$task.status")
-      [ -n "$last" ] && status_is_captain_relevant "$last" \
-        && stage_or_mark_status_seen "$state" "$task" "$last" ;;
+      if [ -n "$last" ] && status_is_captain_relevant "$last"; then
+        stage_or_mark_status_seen "$state" "$task" "$last"
+        if endpoint=$(_fm_status_file_size "$state/$task.status" 2>/dev/null) \
+          && ident=$(_fm_open_decisions_file_ident "$state/$task.status" 2>/dev/null); then
+          endpoint=${endpoint//[[:space:]]/}
+          case "$endpoint" in ''|*[!0-9]*) ;; *) printf '%s@%s' "$endpoint" "$ident" > "$state/.subsuper-seen-status-$(_stale_key "$task").offset" ;; esac
+        fi
+      fi ;;
   esac
+}
+
+commit_signal_classified_endpoints() {  # <state>
+  local state=$1 f endpoint ident task
+  while IFS=$(printf '\t') read -r f endpoint ident; do
+    [ -n "$f" ] || continue
+    [ -n "$endpoint" ] && [ -n "$ident" ] || continue
+    task=${f##*/}; task=${task%.status}
+    printf '%s@%s' "$endpoint" "$ident" > "$state/.subsuper-seen-status-$(_stale_key "$task")".offset
+  done <<EOF
+${FM_SIGNAL_SURFACE_ENDPOINTS:-}
+EOF
+}
+
+capture_and_commit_signal_endpoints() {  # <state> <space-separated-status-files>
+  local state=$1 paths=$2 f record rc rest endpoint ident task
+  for f in $paths; do
+    case "$f" in *.status) ;; *) continue ;; esac
+    [ -e "$f" ] || continue
+    record=$(status_span_first_actionable_record "$f" "$(daemon_status_seen_offset "$state" "$f")")
+    rc=$?
+    [ "$rc" -le 1 ] && [ -n "$record" ] || continue
+    endpoint=${record%%$'\t'*}; rest=${record#*$'\t'}; ident=${rest%%$'\t'*}
+    case "$endpoint" in ''|*[!0-9]*) continue ;; esac
+    [ -n "$ident" ] || continue
+    task=${f##*/}; task=${task%.status}
+    printf '%s@%s' "$endpoint" "$ident" > "$state/.subsuper-seen-status-$(_stale_key "$task")".offset
+  done
 }
 
 commit_recovery_seen_statuses() {  # <state> <staged-statuses>
@@ -1341,19 +1414,31 @@ housekeeping() {  # <state>
   done
 
   # (3) heartbeat scan (catch-all for a captain-relevant status the per-wake
-  #     classifier may have missed). Cheap: status files only, no tmux. The
-  #     captain-relevant filtering is the shared classifier's
-  #     scan_captain_relevant_statuses; the daemon layers its digest dedup on top.
+  #     classifier may have missed). Read the append-only span after the daemon's
+  #     classified endpoint, rather than trusting only the latest line.
   if [ "$(_file_age "$state/.subsuper-last-scan")" -ge "${FM_HEARTBEAT_SCAN_SECS:-$HEARTBEAT_SCAN_SECS_DEFAULT}" ]; then
     _now > "$state/.subsuper-last-scan"
-    local seen
-    while IFS="$(printf '\t')" read -r f task last; do
-      [ -n "$f" ] || continue
-      seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
-      [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] && continue
-      escalate_add "$state" "$(basename "$f"): $last (catch-all scan)"
-      mark_status_seen "$state" "$task" "$last"
-    done < <(scan_captain_relevant_statuses "$state")
+    local f task last record rc endpoint ident rest event
+    for f in "$state"/*.status; do
+      [ -e "$f" ] || continue
+      task=$(basename "$f"); task=${task%.status}
+      record=$(status_span_first_actionable_record "$f" "$(daemon_status_seen_offset "$state" "$f")")
+      rc=$?
+      if [ "$rc" -eq 2 ]; then
+        escalate_add "$state" "$(basename "$f"): unreadable status span (catch-all scan)"
+        continue
+      fi
+      endpoint=${record%%$'\t'*}; rest=${record#*$'\t'}; ident=${rest%%$'\t'*}
+      event=${rest#*$'\t'}
+      if [ "$rc" -eq 0 ]; then
+        while IFS= read -r event || [ -n "$event" ]; do
+          [ -n "$event" ] || continue
+          escalate_add "$state" "$(basename "$f"): $event (catch-all scan)"
+        done < <(printf '%s' "$event" | sed 's/ ; /\n/g')
+      fi
+      last=$(last_status_line "$f")
+      [ -n "$last" ] && mark_status_seen "$state" "$task" "$last" "$endpoint" "$ident"
+    done
   fi
 }
 
@@ -1527,6 +1612,7 @@ handle_wake() {  # <reason> <state>
     heartbeat|heartbeat:*) decision=$(classify_heartbeat) ;;
     *)        decision=$(classify_unknown "$reason") ;;
   esac
+  [ "$kind" = signal ] && capture_and_commit_signal_endpoints "$state" "$arg"
   action=${decision%%|*}
   distilled=${decision#*|}
   [ "$kind" = signal ] && sync_pause_markers_from_signal "$state" "$arg"
