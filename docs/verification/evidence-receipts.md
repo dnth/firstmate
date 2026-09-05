@@ -113,7 +113,7 @@ ok - run binding resolves abbreviated heads and rejects non-planned commits
 ok - binding and completion work against the real agent-supplied intent-log shape while wrong runs fail closed
 ok - terminal passed runs seal their own pipeline advance and refuse foreign drift
 ok - pipeline rebase restamps bind and seal their validated content
-ok - restamped chains refuse foreign content and rewrites the bound run does not own
+ok - restamped chains enforce provenance and ownership
 ok - low-risk mechanical changes can skip a full No-Mistakes run
 ok - low risk requires safe changelog prose and file-bound mechanical evidence
 ok - implementation completion refreshes per head and remains idempotent

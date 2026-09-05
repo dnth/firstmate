@@ -1150,6 +1150,59 @@ test_restamped_chains_refuse_foreign_content_and_unowned_rewrites() {
   rc=$?
   expect_code 2 "$rc" "completion sealed a rewritten chain carrying foreign content"
 
+  # Unrelated same-tree tip: matching only the final tree must not bypass the
+  # different-parent and chain-count checks.
+  id=receipt-restamp-unrelated-same-tree
+  read -r base project validated_head generation < <(plan_restamp_fixture "$id")
+  validated_tree=$(git -C "$project" rev-parse "$validated_head^{tree}")
+  foreign_parent=$(git -C "$project" commit-tree "$validated_tree" -p "$base" -m unrelated-parent)
+  unrelated=$(git -C "$project" commit-tree "$validated_tree" -p "$foreign_parent" -m unrelated-tip)
+  git -C "$project" reset -q --hard "$unrelated"
+  status=$(nm_status RUN-restamp-unrelated "$unrelated" pending)
+  FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-restamp-unrelated --generation "$generation" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "bind accepted an unrelated same-tree tip"
+
+  # Reverted foreign commit: the final tree matches, but the extra commits and
+  # their intermediate tree make the candidate chain unfaithful.
+  id=receipt-restamp-reverted-foreign
+  read -r base project validated_head generation < <(plan_restamp_fixture "$id")
+  printf 'foreign then reverted\n' > "$project/src/foreign.sh"
+  git -C "$project" add src/foreign.sh
+  git -C "$project" commit -q -m foreign-change
+  rm "$project/src/foreign.sh"
+  git -C "$project" add -u
+  git -C "$project" commit -q -m revert-foreign-change
+  reverted=$(git -C "$project" rev-parse HEAD)
+  [ "$(git -C "$project" rev-parse "$reverted^{tree}")" = "$(git -C "$project" rev-parse "$validated_head^{tree}")" ] \
+    || fail "reverted foreign fixture did not restore the tip tree"
+  status=$(nm_status RUN-restamp-reverted "$reverted" pending)
+  FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-restamp-reverted --generation "$generation" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "bind accepted a reverted foreign chain"
+
+  # Changed-base rebase: replay the task commits onto a newer base whose tree
+  # differs, which is new unvalidated content despite preserving commit count.
+  id=receipt-restamp-changed-base
+  read -r base project validated_head generation < <(plan_restamp_fixture "$id")
+  git -C "$project" checkout -q main
+  printf 'new base content\n' >> "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" commit -q -m newer-base
+  newer_base=$(git -C "$project" rev-parse HEAD)
+  git -C "$project" branch -f "fm/$id" "$newer_base"
+  git -C "$project" checkout -q "fm/$id"
+  git -C "$project" cherry-pick $(git -C "$project" rev-list --reverse "$base..$validated_head") >/dev/null \
+    || fail "changed-base fixture could not replay the task chain"
+  rebased=$(git -C "$project" rev-parse HEAD)
+  status=$(nm_status RUN-restamp-changed-base "$rebased" pending)
+  FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-restamp-changed-base --generation "$generation" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "bind accepted a chain rebased onto a changed base"
+
   # Unowned rewrite: the bound run reports another branch, so the rewritten
   # worktree chain is not the chain that run owns.
   id=receipt-restamp-unowned-branch
@@ -1211,7 +1264,7 @@ test_restamped_chains_refuse_foreign_content_and_unowned_rewrites() {
     "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed >/dev/null 2>&1
   rc=$?
   expect_code 2 "$rc" "custody-returned active restamp without ownership"
-  pass "restamped chains refuse foreign content and rewrites the bound run does not own"
+  pass "restamped chains enforce provenance and ownership"
 }
 
 test_no_mistakes_observations_are_bounded() {

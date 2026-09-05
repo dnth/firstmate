@@ -102,8 +102,7 @@ fm_nm_head_descends_from() {  # <worktree> <ancestor> <descendant>
 # each pair of commits in base-to-head order must carry the same tree object.
 fm_nm_head_is_faithful_restamp() {  # <worktree> <base> <validated-head> <candidate-head>
   local wt=$1 base=$2 validated=$3 candidate=$4 base_full validated_full candidate_full
-  local validated_list candidate_list validated_tree candidate_tree i
-  local -a validated_commits=() candidate_commits=()
+  local validated_list candidate_list validated_trees candidate_trees commit
   base_full=$(fm_nm_resolve_head "$wt" "$base") || return 1
   validated_full=$(fm_nm_resolve_head "$wt" "$validated") || return 1
   candidate_full=$(fm_nm_resolve_head "$wt" "$candidate") || return 1
@@ -111,14 +110,15 @@ fm_nm_head_is_faithful_restamp() {  # <worktree> <base> <validated-head> <candid
   git -C "$wt" merge-base --is-ancestor "$base_full" "$candidate_full" 2>/dev/null || return 1
   validated_list=$(git -C "$wt" rev-list --reverse "$base_full..$validated_full") || return 1
   candidate_list=$(git -C "$wt" rev-list --reverse "$base_full..$candidate_full") || return 1
-  if [ -n "$validated_list" ]; then mapfile -t validated_commits <<< "$validated_list"; fi
-  if [ -n "$candidate_list" ]; then mapfile -t candidate_commits <<< "$candidate_list"; fi
-  [ "${#validated_commits[@]}" -eq "${#candidate_commits[@]}" ] || return 1
-  for i in "${!validated_commits[@]}"; do
-    validated_tree=$(git -C "$wt" rev-parse --verify "${validated_commits[$i]}^{tree}") || return 1
-    candidate_tree=$(git -C "$wt" rev-parse --verify "${candidate_commits[$i]}^{tree}") || return 1
-    [ "$validated_tree" = "$candidate_tree" ] || return 1
-  done
+  validated_trees=$(printf '%s\n' "$validated_list" | while IFS= read -r commit; do
+    [ -n "$commit" ] || continue
+    git -C "$wt" rev-parse --verify "${commit}^{tree}" || exit 1
+  done) || return 1
+  candidate_trees=$(printf '%s\n' "$candidate_list" | while IFS= read -r commit; do
+    [ -n "$commit" ] || continue
+    git -C "$wt" rev-parse --verify "${commit}^{tree}" || exit 1
+  done) || return 1
+  [ "$validated_trees" = "$candidate_trees" ]
 }
 
 # 0 when a run's branch presentation identifies the checked-out branch. The
