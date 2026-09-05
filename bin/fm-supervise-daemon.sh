@@ -637,6 +637,16 @@ stage_or_mark_status_seen() {  # <state> <task> <last-line>
   fi
 }
 
+stage_or_mark_status_offset() {  # <state> <task> <endpoint> <identity>
+  local state=$1 task=$2 endpoint=$3 ident=$4 marker
+  marker="$state/.subsuper-seen-status-$(_stale_key "$task").offset"
+  if [ -n "${FM_RECOVERY_OFFSET_SINK:-}" ]; then
+    printf '%s\t%s\t%s\n' "$task" "$endpoint" "$ident" >> "$FM_RECOVERY_OFFSET_SINK"
+  else
+    printf '%s@%s' "$endpoint" "$ident" > "$marker"
+  fi
+}
+
 # Mark every captain-relevant status line a per-wake classification escalated as
 # seen, so the catch-all scan does not re-escalate the same line within
 # HEARTBEAT_SCAN_SECS. Mirrors classify_signal/classify_stale's relevance test.
@@ -657,7 +667,7 @@ mark_escalated_seen() {  # <kind> <arg> <state>
 ${FM_SIGNAL_SURFACE_ENDPOINTS:-}
 EOF
         stage_or_mark_status_seen "$state" "$task" "$last"
-        [ -n "$endpoint" ] && [ -n "$ident" ] && printf '%s@%s' "$endpoint" "$ident" > "$state/.subsuper-seen-status-$(_stale_key "$task").offset"
+        [ -n "$endpoint" ] && [ -n "$ident" ] && stage_or_mark_status_offset "$state" "$task" "$endpoint" "$ident"
       done ;;
     stale)
       task=$(window_to_task "$arg" "$state")
@@ -667,7 +677,7 @@ EOF
         if endpoint=$(_fm_status_file_size "$state/$task.status" 2>/dev/null) \
           && ident=$(_fm_open_decisions_file_ident "$state/$task.status" 2>/dev/null); then
           endpoint=${endpoint//[[:space:]]/}
-          case "$endpoint" in ''|*[!0-9]*) ;; *) printf '%s@%s' "$endpoint" "$ident" > "$state/.subsuper-seen-status-$(_stale_key "$task").offset" ;; esac
+          case "$endpoint" in ''|*[!0-9]*) ;; *) stage_or_mark_status_offset "$state" "$task" "$endpoint" "$ident" ;; esac
         fi
       fi ;;
   esac
@@ -707,6 +717,16 @@ commit_recovery_seen_statuses() {  # <state> <staged-statuses>
   while IFS="$(printf '\t')" read -r task line; do
     [ -n "$task" ] && [ -n "$line" ] || return 1
     mark_status_seen "$state" "$task" "$line" || return 1
+  done < "$staged"
+}
+
+commit_recovery_seen_offsets() {  # <state> <staged-offsets>
+  local state=$1 staged=$2 task endpoint ident
+  [ -f "$staged" ] && [ ! -L "$staged" ] || return 1
+  while IFS="$(printf '\t')" read -r task endpoint ident; do
+    [ -n "$task" ] && [ -n "$endpoint" ] && [ -n "$ident" ] || return 1
+    case "$endpoint" in ''|*[!0-9]*) return 1 ;; esac
+    printf '%s@%s' "$endpoint" "$ident" > "$state/.subsuper-seen-status-$(_stale_key "$task").offset" || return 1
   done < "$staged"
 }
 
@@ -1685,10 +1705,10 @@ handle_wake() {  # <reason> <state>
 
 handle_durable_wakes() {  # <watcher-reason> <state>
   local fallback_reason=$1 state=$2 out err tab epoch sequence kind key payload rest line
-  local handled=0 ack_through ack_generation capture_before capture_after recovery_projection_tmp recovery_seen_tmp
+  local handled=0 ack_through ack_generation capture_before capture_after recovery_projection_tmp recovery_seen_tmp recovery_offset_tmp
   local capture_valid=false decision_parse_state=outside decision_lines='' decision_count=0
   local decisions_routed_completely=false
-  local FM_ESCALATION_SINK FM_DEFER_ESCALATION_FLUSH=1 FM_RECOVERY_SEEN_SINK FM_RECOVERY_RECLASSIFY_SIGNALS=0
+  local FM_ESCALATION_SINK FM_DEFER_ESCALATION_FLUSH=1 FM_RECOVERY_SEEN_SINK FM_RECOVERY_OFFSET_SINK FM_RECOVERY_RECLASSIFY_SIGNALS=0
   local decision_header='OPEN DECISIONS (still open, folded from the durable status logs - not just the latest line):'
   local decision_terminator="OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'"
   recovery_projection_tmp=$(mktemp "$state/.subsuper-recovery-projection.XXXXXX") || return 1
@@ -1696,19 +1716,24 @@ handle_durable_wakes() {  # <watcher-reason> <state>
     rm -f "$recovery_projection_tmp"
     return 1
   }
-  FM_ESCALATION_SINK=$recovery_projection_tmp
-  FM_RECOVERY_SEEN_SINK=$recovery_seen_tmp
-  out=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || {
+  recovery_offset_tmp=$(mktemp "$state/.subsuper-recovery-offsets.XXXXXX") || {
     rm -f "$recovery_projection_tmp" "$recovery_seen_tmp"
     return 1
   }
+  FM_ESCALATION_SINK=$recovery_projection_tmp
+  FM_RECOVERY_SEEN_SINK=$recovery_seen_tmp
+  FM_RECOVERY_OFFSET_SINK=$recovery_offset_tmp
+  out=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || {
+    rm -f "$recovery_projection_tmp" "$recovery_seen_tmp" "$recovery_offset_tmp"
+    return 1
+  }
   err=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || {
-    rm -f "$out" "$recovery_projection_tmp" "$recovery_seen_tmp"
+    rm -f "$out" "$recovery_projection_tmp" "$recovery_seen_tmp" "$recovery_offset_tmp"
     return 1
   }
   if ! "$FM_DAEMON_DIR/fm-wake-drain.sh" > "$out" 2> "$err"; then
     cat "$err" >&2
-    rm -f "$out" "$err" "$recovery_projection_tmp" "$recovery_seen_tmp"
+    rm -f "$out" "$err" "$recovery_projection_tmp" "$recovery_seen_tmp" "$recovery_offset_tmp"
     return 1
   fi
 
@@ -1795,26 +1820,30 @@ EOF
   grep -v '^WAKE_ACK_REQUIRED:' "$err" >&2 || true
   rm -f "$out" "$err" "$recovery_projection_tmp"
   if [ "$decisions_routed_completely" != true ]; then
-    rm -f "$recovery_seen_tmp"
+    rm -f "$recovery_seen_tmp" "$recovery_offset_tmp"
     log "current recovery projection was not delivered; retaining recovery episode"
     return 1
   fi
   if [ -z "$ack_through" ] || [ -z "$ack_generation" ]; then
-    rm -f "$recovery_seen_tmp"
+    rm -f "$recovery_seen_tmp" "$recovery_offset_tmp"
     log "wake drain omitted its generation-bound acknowledgement; retaining durable wakes"
     return 1
   fi
   if "$FM_DAEMON_DIR/fm-wake-drain.sh" --ack-through "$ack_through" \
     --recovery-generation "$ack_generation"; then
     commit_recovery_seen_statuses "$state" "$recovery_seen_tmp" || {
-      rm -f "$recovery_seen_tmp"
+      rm -f "$recovery_seen_tmp" "$recovery_offset_tmp"
       return 1
     }
-    rm -f "$recovery_seen_tmp"
+    commit_recovery_seen_offsets "$state" "$recovery_offset_tmp" || {
+      rm -f "$recovery_seen_tmp" "$recovery_offset_tmp"
+      return 1
+    }
+    rm -f "$recovery_seen_tmp" "$recovery_offset_tmp"
     recovery_projection_clear "$state"
     return 0
   fi
-  rm -f "$recovery_seen_tmp"
+  rm -f "$recovery_seen_tmp" "$recovery_offset_tmp"
   return 1
 }
 
