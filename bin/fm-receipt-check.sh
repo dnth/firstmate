@@ -44,8 +44,11 @@
 # The resolved validation_tier, validation_path, reason code, base, head, size,
 # and start time are appended to state/<task-id>.meta for durable inspection.
 # Every completion records validation_completed_head and refuses current head
-# drift unless the bound active No-Mistakes run proves a pipeline-owned
-# descendant of the latest validation_head.
+# drift unless the bound No-Mistakes run proves a descendant of the latest
+# validation_head: an active run must currently own the branch, while a terminal
+# PASSED run proves the advance through its own reported head. A terminal run
+# therefore needs no replan and no fresh run to seal its own pipeline commits,
+# and foreign commits landed after the run still refuse completion.
 # When --plan returns path=receipts-mechanical, append fresh successful mechanical
 # evidence for every changed file with:
 #
@@ -808,11 +811,23 @@ record_validation_completed() {
           echo "error: pipeline run branch is not the current worktree branch" >&2
           return 1
         fi
-        fm_nm_run_is_active "$run_out" \
-          || { release_validation_lock; echo "error: current head advanced without an active bound pipeline run" >&2; return 1; }
-        branch_sync_state=$(fm_nm_branch_sync_state "$run_out")
-        [ "$branch_sync_state" = pipeline_owned ] \
-          || { release_validation_lock; echo "error: current head advance lacks authoritative pipeline ownership" >&2; return 1; }
+        # The advance is authoritative in exactly two shapes, and the head
+        # equality checked above is what keeps both honest. While the run is
+        # ACTIVE the pipeline must currently own the branch. Once the run is
+        # TERMINAL it has released the branch, so pipeline ownership is gone by
+        # construction and requiring it would refuse a genuinely passed run
+        # whose own review and doc commits advanced the head; there the run's
+        # own reported head is the authority, and a foreign commit landed after
+        # the run finished still fails the head-equality check because the run
+        # never reports it.
+        if fm_nm_run_is_active "$run_out"; then
+          branch_sync_state=$(fm_nm_branch_sync_state "$run_out")
+          [ "$branch_sync_state" = pipeline_owned ] \
+            || { release_validation_lock; echo "error: current head advance lacks authoritative pipeline ownership" >&2; return 1; }
+        else
+          fm_nm_run_is_terminal_passed "$run_out" \
+            || { release_validation_lock; echo "error: current head advanced without a passing bound pipeline run" >&2; return 1; }
+        fi
         completion_head=$current_head
       fi
       observed=bound-matching-no-mistakes-run

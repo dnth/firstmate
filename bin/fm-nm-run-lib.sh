@@ -160,6 +160,25 @@ fm_nm_run_is_pipeline_owned_active() {  # <toon-output>
   fm_nm_run_is_active "$1"
 }
 
+# 0 when captured `axi status` shows a run that reached a terminal PASSED state.
+# A terminal run has released the branch, so branch_sync no longer reports
+# pipeline_owned and fm_nm_run_is_pipeline_owned_active above correctly rejects
+# it. Its OWN reported head is then the authority for the commits that run
+# produced, including the review and doc commits its pipeline landed after the
+# validated head. Callers must therefore still require that reported head to be
+# the current worktree head: that is exactly what refuses foreign commits landed
+# after the run finished, which the run never reports as its head.
+fm_nm_run_is_terminal_passed() {  # <toon-output>
+  local status outcome
+  if fm_nm_run_is_active "$1"; then return 1; fi
+  status=$(fm_nm_field "$1" status)
+  outcome=$(fm_nm_field "$1" outcome)
+  case "$outcome:$status" in
+    passed:*|checks-passed:*|*:passed|*:checks-passed) return 0 ;;
+  esac
+  return 1
+}
+
 # During no-mistakes' ci monitor, top-level status and outcome stay running after
 # checks turn green until the PR merges, while the append-only ci log records the
 # transition. The most recent recognized log marker is therefore authoritative:
