@@ -36,10 +36,10 @@ The exact receipt key and type schema is owned by the header and `--help` output
 - Findings that invalidate a receipt or acceptance claim atomically bind one generation-scoped idempotent finding-to-criterion marker to the invalidation-time head and receipt boundary, then require a strict non-empty descendant delta and a later successful receipt bound to the new head before replanning or completion.
 - One pinned state-directory owner snapshots single-link no-follow metadata and performs compare-bound atomic replacements for every validation metadata update.
 - PR registration publishes canonical PR identity and its validation publication generation through one compare-bound pinned metadata replacement after the watcher artifacts publish, and revokes those artifacts if that replacement fails.
-- Successful exact-head runs can bind after reaching checks-passed or passed, while failed and cancelled runs remain ineligible.
+- Successful planned-head or faithful-restamp runs can bind after reaching checks-passed or passed, while failed and cancelled runs remain ineligible.
 - No-Mistakes status, intent, and CI-log observations use the shared bounded call boundary.
 - Every completion requires path-specific terminal evidence and records its plan path and authoritative completed head.
-- A changed worktree head invalidates completion unless the bound No-Mistakes run proves a descendant of the planned head: an active run must currently own the branch, while a terminal passed run proves the advance through its own reported head.
+- A changed worktree head invalidates completion unless the bound No-Mistakes run proves either a descendant of the planned head or a faithful restamp of its validation-base-to-planned chain: an active run must currently own the branch, while a terminal passed run proves the advance through its own reported head.
 - A chain the pipeline's rebase step restamped binds and completes only when it is a faithful restamp of the planned chain from the recorded validation base and passes the same branch and pipeline-ownership checks in either custody shape.
 - Unrelated, missing, or ambiguous drift remains refused, and a terminal run that did not pass never seals an advance.
 - Local-only readiness and guarded landing consume one fail-closed executable default-branch resolver.
