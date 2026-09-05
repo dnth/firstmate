@@ -97,23 +97,28 @@ fm_nm_head_descends_from() {  # <worktree> <ancestor> <descendant>
     && git -C "$wt" merge-base --is-ancestor "$ancestor_full" "$descendant_full" 2>/dev/null
 }
 
-# 0 when commits $2 and $3 both resolve in worktree $1 and record byte-identical
-# content, which Git states exactly once as their tree object identity.
-# The no-mistakes rebase step re-commits an entire branch with fresh committer
-# stamps, so the head it reports is neither the pre-rebase commit nor a
-# descendant of it while the content it validated is unchanged. Tree identity is
-# the authoritative content proof for that rewrite: it holds for a pure restamp
-# and breaks on any change to any tracked file, so a caller may accept a
-# rewritten chain without ever accepting foreign content. Identical commits are
-# trivially content identical and are accepted; a caller that also needs the two
-# commits to differ compares them itself.
-fm_nm_head_content_identical() {  # <worktree> <head-a> <head-b>
-  local wt=$1 a_full b_full a_tree b_tree
-  a_full=$(fm_nm_resolve_head "$wt" "$2") || return 1
-  b_full=$(fm_nm_resolve_head "$wt" "$3") || return 1
-  a_tree=$(git -C "$wt" rev-parse --verify "${a_full}^{tree}" 2>/dev/null) || return 1
-  b_tree=$(git -C "$wt" rev-parse --verify "${b_full}^{tree}" 2>/dev/null) || return 1
-  [ "$a_tree" = "$b_tree" ]
+# 0 when $3 is a faithful restamp of the validated chain from $2 in worktree $1.
+# The base must be an ancestor of both heads, their commit counts must match, and
+# each pair of commits in base-to-head order must carry the same tree object.
+fm_nm_head_is_faithful_restamp() {  # <worktree> <base> <validated-head> <candidate-head>
+  local wt=$1 base=$2 validated=$3 candidate=$4 base_full validated_full candidate_full
+  local validated_list candidate_list validated_tree candidate_tree i
+  local -a validated_commits=() candidate_commits=()
+  base_full=$(fm_nm_resolve_head "$wt" "$base") || return 1
+  validated_full=$(fm_nm_resolve_head "$wt" "$validated") || return 1
+  candidate_full=$(fm_nm_resolve_head "$wt" "$candidate") || return 1
+  git -C "$wt" merge-base --is-ancestor "$base_full" "$validated_full" 2>/dev/null || return 1
+  git -C "$wt" merge-base --is-ancestor "$base_full" "$candidate_full" 2>/dev/null || return 1
+  validated_list=$(git -C "$wt" rev-list --reverse "$base_full..$validated_full") || return 1
+  candidate_list=$(git -C "$wt" rev-list --reverse "$base_full..$candidate_full") || return 1
+  if [ -n "$validated_list" ]; then mapfile -t validated_commits <<< "$validated_list"; fi
+  if [ -n "$candidate_list" ]; then mapfile -t candidate_commits <<< "$candidate_list"; fi
+  [ "${#validated_commits[@]}" -eq "${#candidate_commits[@]}" ] || return 1
+  for i in "${!validated_commits[@]}"; do
+    validated_tree=$(git -C "$wt" rev-parse --verify "${validated_commits[$i]}^{tree}") || return 1
+    candidate_tree=$(git -C "$wt" rev-parse --verify "${candidate_commits[$i]}^{tree}") || return 1
+    [ "$validated_tree" = "$candidate_tree" ] || return 1
+  done
 }
 
 # 0 when a run's branch presentation identifies the checked-out branch. The

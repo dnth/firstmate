@@ -49,11 +49,12 @@
 # pipeline ownership while the run is active and by the run's own reported head
 # once it is terminal and PASSED, so a terminal run needs no replan and no fresh
 # run to seal its own pipeline commits. A chain the pipeline's rebase step
-# restamped is proved by tree identity with validation_head, because that step
-# re-commits every branch commit with a fresh committer stamp and so reports a
-# head that is neither validation_head nor a descendant of it; --bind-run
-# accepts and records that same restamped head. Foreign commits landed after the
-# run still refuse completion, because they change the tree the run reported.
+# restamped is proved as a faithful restamp of the validation-base-to-head
+# chain, because that step re-commits every branch commit with a fresh committer
+# stamp and so reports a head that is neither validation_head nor a descendant
+# of it; --bind-run accepts and records that same restamped head. Foreign
+# commits landed after the run still refuse completion because they break the
+# chain's ancestry, count, or pairwise tree identity.
 # When --plan returns path=receipts-mechanical, append fresh successful mechanical
 # evidence for every changed file with:
 #
@@ -638,6 +639,7 @@ mechanical_evidence_covers_file() {
 if [ "$ACTION" = bind-run ]; then
   BIND_WORKTREE=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
   BIND_PATH=$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)
+  BIND_BASE=$(grep '^validation_base=' "$META" | tail -1 | cut -d= -f2- || true)
   BIND_HEAD=$(grep '^validation_head=' "$META" | tail -1 | cut -d= -f2- || true)
   BIND_GENERATION=$(grep '^validation_generation=' "$META" | tail -1 | cut -d= -f2- || true)
   BIND_PREPLAN_RUN=$(grep '^validation_preplan_run_id=' "$META" | tail -1 | cut -d= -f2- || true)
@@ -645,6 +647,8 @@ if [ "$ACTION" = bind-run ]; then
   [ -n "$BIND_WORKTREE" ] && [ -d "$BIND_WORKTREE" ] || { echo "error: validation worktree is missing" >&2; exit 2; }
   BIND_HEAD=$(git -C "$BIND_WORKTREE" rev-parse --verify "$BIND_HEAD^{commit}" 2>/dev/null) \
     || { echo "error: validated head is missing" >&2; exit 2; }
+  BIND_BASE=$(git -C "$BIND_WORKTREE" rev-parse --verify "$BIND_BASE^{commit}" 2>/dev/null) \
+    || { echo "error: validation base is missing" >&2; exit 2; }
   fm_worktree_is_clean "$BIND_WORKTREE" \
     || { echo "error: validation worktree is dirty" >&2; exit 2; }
   BIND_OUT=$(fm_nm_run_checked "$BIND_WORKTREE" "$NM_TIMEOUT" axi status --run "$RUN_ID_INPUT") \
@@ -670,16 +674,11 @@ if [ "$ACTION" = bind-run ]; then
     passed:*|checks-passed:*|*:passed|*:checks-passed) BIND_STATE_OK=1 ;;
     running:*|fixing:*|ci:*|awaiting_approval:*) BIND_STATE_OK=1 ;;
   esac
-  # The run's head is the planned commit itself, or the same content re-committed
-  # by the pipeline's own rebase step, which restamps every branch commit and so
-  # reports a head that is neither the planned commit nor a descendant of it.
-  # Tree identity is what keeps that rewrite honest: it proves the run is
-  # validating exactly the planned change, while any foreign edit changes the
-  # tree and is still refused here. The bound head is the head the run actually
-  # reports, so completion below compares against the chain under validation.
+  # The run's head is the planned commit itself or a faithful restamp of its
+  # validated chain, proven from the recorded validation base.
   BIND_RUN_HEAD=$(fm_nm_resolve_head "$BIND_WORKTREE" "$BIND_OBSERVED_HEAD" || true)
   if [ -n "$BIND_RUN_HEAD" ] && [ "$BIND_RUN_HEAD" != "$BIND_HEAD" ] \
-    && ! fm_nm_head_content_identical "$BIND_WORKTREE" "$BIND_HEAD" "$BIND_RUN_HEAD"; then
+    && ! fm_nm_head_is_faithful_restamp "$BIND_WORKTREE" "$BIND_BASE" "$BIND_HEAD" "$BIND_RUN_HEAD"; then
     BIND_RUN_HEAD=
   fi
   [ "$BIND_OBSERVED_ID" = "$RUN_ID_INPUT" ] \
@@ -730,7 +729,7 @@ if [ "$ACTION" = mechanical-ready ]; then
 fi
 
 record_validation_completed() {
-  local started path generation published_generation completed completed_head completed_path completed_evidence completed_generation now worktree validated_head current_head completion_head expected_evidence observed pr pr_head branch boundary new_receipts run_id run_path run_generation run_out observed_id observed_head observed_head_full outcome run_status default_ref default_branch ci_state run_ready changed_file completion_files validation_base run_branch current_branch branch_sync_state
+  local started path generation published_generation completed completed_head completed_path completed_evidence completed_generation now worktree validation_base validated_head current_head completion_head expected_evidence observed pr pr_head branch boundary new_receipts run_id run_path run_generation run_out observed_id observed_head observed_head_full outcome run_status default_ref default_branch ci_state run_ready changed_file completion_files run_branch current_branch branch_sync_state
   VALIDATION_LOCK="$STATE/.$ID.validation-plan.lock"
   if ! mkdir "$VALIDATION_LOCK" 2>/dev/null; then
     VALIDATION_LOCK=
@@ -741,6 +740,7 @@ record_validation_completed() {
   path=$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)
   generation=$(grep '^validation_generation=' "$META" | tail -1 | cut -d= -f2- || true)
   worktree=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
+  validation_base=$(grep '^validation_base=' "$META" | tail -1 | cut -d= -f2- || true)
   validated_head=$(grep '^validation_head=' "$META" | tail -1 | cut -d= -f2- || true)
   case "$started" in
     ''|*[!0-9]*) release_validation_lock; echo "error: validation start timestamp is missing or invalid" >&2; return 1 ;;
@@ -758,6 +758,8 @@ record_validation_completed() {
     || { release_validation_lock; echo "error: validation worktree is missing" >&2; return 1; }
   validated_head=$(git -C "$worktree" rev-parse --verify "$validated_head^{commit}" 2>/dev/null) \
     || { release_validation_lock; echo "error: validated head is missing or invalid" >&2; return 1; }
+  validation_base=$(git -C "$worktree" rev-parse --verify "$validation_base^{commit}" 2>/dev/null) \
+    || { release_validation_lock; echo "error: validation base is missing or invalid" >&2; return 1; }
   current_head=$(git -C "$worktree" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) \
     || { release_validation_lock; echo "error: current worktree head is unavailable" >&2; return 1; }
   fm_worktree_is_clean "$worktree" \
@@ -816,21 +818,17 @@ record_validation_completed() {
         echo "error: bound No-Mistakes run did not pass checks at the exact validated head" >&2
         return 1
       fi
-      # The run must account for the content the worktree currently holds. It
-      # does that by reporting the current head itself, or by reporting a head
-      # its own rebase step restamped: the pipeline re-commits the whole branch
-      # with fresh committer stamps, so the run head and the worktree head are
-      # then different commits recording the same trees. Tree identity is the
-      # content proof for that shape, so a foreign change still refuses here
-      # because it changes the tree the run reported.
+      # The run must account for the current head itself or both heads must be
+      # faithful restamps of the validated chain from the recorded base.
       [ "$observed_head_full" = "$current_head" ] \
-        || fm_nm_head_content_identical "$worktree" "$observed_head_full" "$current_head" \
+        || { fm_nm_head_is_faithful_restamp "$worktree" "$validation_base" "$validated_head" "$observed_head_full" \
+          && fm_nm_head_is_faithful_restamp "$worktree" "$validation_base" "$validated_head" "$current_head"; } \
         || { release_validation_lock; echo "error: bound No-Mistakes run head does not account for the current worktree content" >&2; return 1; }
       if [ "$current_head" != "$validated_head" ]; then
         run_branch=$(fm_nm_field "$run_out" branch)
         current_branch=$(git -C "$worktree" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
         fm_nm_head_descends_from "$worktree" "$validated_head" "$current_head" \
-          || fm_nm_head_content_identical "$worktree" "$validated_head" "$current_head" \
+          || fm_nm_head_is_faithful_restamp "$worktree" "$validation_base" "$validated_head" "$current_head" \
           || { release_validation_lock; echo "error: current head neither descends from nor reproduces the implementation head" >&2; return 1; }
         if [ -z "$current_branch" ] || ! fm_nm_branch_matches_worktree "$worktree" "$run_branch"; then
           release_validation_lock
