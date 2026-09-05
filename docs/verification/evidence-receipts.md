@@ -54,7 +54,7 @@ The exact receipt key and type schema is owned by the header and `--help` output
 
 ## Verification environment
 
-- Date: 2026-08-26.
+- Date: 2026-09-05.
 - ShellCheck: 0.11.0.
 - Git: 2.34.1.
 
@@ -93,7 +93,6 @@ ok - exact bound runs complete from the shared current CI-log readiness predicat
 ok - finding-to-criterion invalidations remain inspectable in task metadata
 ok - run binding resolves abbreviated heads and rejects non-planned commits
 ok - binding and completion work against the real agent-supplied intent-log shape while wrong runs fail closed
-ok - completion accepts only active pipeline-owned descendant heads
 ok - terminal passed runs seal their own pipeline advance and refuse foreign drift
 ok - low-risk mechanical changes can skip a full No-Mistakes run
 ok - low risk requires safe changelog prose and file-bound mechanical evidence
