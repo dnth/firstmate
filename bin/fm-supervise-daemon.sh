@@ -1611,7 +1611,7 @@ is_wake_reason() {  # <reason>
 # --- dispatch one wake reason to self-handle or escalate --------------------
 # Side effects: logging, marker records, escalation buffer appends.
 handle_wake() {  # <reason> <state>
-  local reason=$1 state=$2 decision action distilled task last stale_detail held_last
+  local reason=$1 state=$2 decision action distilled task last stale_detail held_last classify_tmp
   local kind="" arg=""
   if should_force_self "$reason"; then
     log "wake force-self (FM_INJECT_SKIP): $reason"
@@ -1619,7 +1619,18 @@ handle_wake() {  # <reason> <state>
   fi
   case "$reason" in
     signal:*) kind=signal; arg="${reason#signal: }"
-              decision=$(classify_signal "$arg" "$state") ;;
+              # Run classify_signal in this shell so its captured endpoint
+              # side-channel survives until the post-delivery commit. A
+              # command substitution would execute it in a subshell and lose
+              # FM_SIGNAL_SURFACE_ENDPOINTS, allowing the catch-all scan to
+              # re-escalate the same status.
+              classify_tmp=$(mktemp "${TMPDIR:-/tmp}/fm-classify-signal.XXXXXX") || return 1
+              if ! classify_signal "$arg" "$state" > "$classify_tmp"; then
+                rm -f "$classify_tmp"
+                return 1
+              fi
+              decision=$(cat "$classify_tmp")
+              rm -f "$classify_tmp" ;;
     stale:*)  kind=stale; arg="${reason#stale: }"; stale_detail="${arg#"$arg"}"
               case "$arg" in *" ("*) stale_detail="${arg#*" ("}"; arg="${arg%% \(*}" ;; esac
               decision=$(classify_stale "$arg" "$state")
