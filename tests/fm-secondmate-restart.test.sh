@@ -22,6 +22,10 @@
 #      fast-forward is still named for restart and genuinely restarted, and one
 #      whose runtime cannot prove a restart keeps the honest re-read path with
 #      its agent left running.
+#   7. An OMP mate's restart runs its steps in the only safe order: stop the
+#      session owner, PROVE it gone, only then retire the session artifacts the
+#      launch owner refuses to launch over, then launch, then reconcile the
+#      durable record to the endpoint that launch actually published.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -100,6 +104,7 @@ case "${1:-}" in
         *cursor_y*) printf '1\n'; exit 0 ;;
         *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
         *pane_current_path*) cat "$D/cwd"; printf '\n'; exit 0 ;;
+        *pane_pid*) [ -f "$D/pane-pid" ] && cat "$D/pane-pid"; exit 0 ;;
       esac
     done
     printf 'fakepane\n'; exit 0 ;;
@@ -761,6 +766,193 @@ test_already_current_unprovable_mate_stays_on_the_nudge_path() {
   pass "T16 an already-current mate with an unprovable runtime keeps the honest nudge path"
 }
 
+# --- T17: an OMP mate's restart, driven end to end with both real side effects
+#          replaced -------------------------------------------------------------
+# The whole pass is real here - the capability decision, the persist gate, the
+# durable steering inbox, the parent-owned reply expectation, and the OMP restart
+# orchestration itself. Only the two things that would touch this machine are
+# replaced: the signal that stops the mate's session owner, and the launch owner.
+# Both stubs record what the world looked like AT THE MOMENT they ran, which is
+# how the order below is asserted rather than assumed: the absence probe sees all
+# four session artifacts still on disk (so nothing was deleted while the owner
+# might still have been running), and the launch sees none of them (so the launch
+# owner could never have accepted a duplicate).
+omp_marker_list() {  # <case-dir> <id>
+  local dir=$1 id=$2
+  printf '%s\n' \
+    "$dir/home/state/$id.omp-started" \
+    "$dir/home/state/$id.omp-ext.ts" \
+    "$dir/home/state/$id.omp-ready" \
+    "$dir/$id-home/state/.omp-primary-extension-loaded"
+}
+
+# A live OMP mate. Its session is a real process holding the real doorbell
+# contract - the pid-bound ready marker and the request directory - so fm-send
+# reaches it over the native receive adapter it actually uses for OMP, not over
+# the composer. The process receipts each request and then answers the persist
+# question on the parent channel, which is the same modelling the tmux stub does
+# for every other adapter in this file.
+OMP_LISTENER_PID=
+add_omp_mate() {  # <case-dir> <id>
+  local dir=$1 id=$2 marker requests bash_bin i
+  local home="$dir/home"
+  add_local_mate "$dir" "$id" omp
+  bash_bin=$(fm_test_realpath "$(command -v bash)")
+  {
+    echo "omp_bun=$bash_bin"
+    echo "omp_bin=$bash_bin"
+  } >> "$home/state/$id.meta"
+  marker="$home/state/$id.omp-doorbell-ready"
+  requests="$marker.requests"
+  mkdir -p "$requests"
+  cat > "$dir/omp-session" <<'SH'
+#!/usr/bin/env bash
+set -u
+# The doorbell wakes a real session with SIGUSR2; the real extension installs a
+# handler for it, so this stand-in must too or the wake would kill it.
+trap ':' USR2
+printf '%s\n' "$$" > "$FM_TEST_OMP_MARKER"
+while :; do
+  for pending in "$FM_TEST_OMP_REQUESTS"/request.*.pending; do
+    [ -f "$pending" ] || continue
+    corr=$(cat "$FM_TEST_OMP_INBOX"/*.msg 2>/dev/null | grep -oE 'corr=[0-9a-f]{16}' | head -1)
+    [ -z "$corr" ] || printf 'done [%s]: open records written down\n' "$corr" \
+      >> "$FM_TEST_OMP_STATUS"
+    mv -f "$pending" "$pending.delivered"
+  done
+  /bin/sleep 0.02
+done
+SH
+  chmod +x "$dir/omp-session"
+  FM_TEST_OMP_MARKER="$marker" FM_TEST_OMP_REQUESTS="$requests" \
+    FM_TEST_OMP_INBOX="$home/state/$id.inbox" FM_TEST_OMP_STATUS="$home/state/$id.status" \
+    "$bash_bin" "$dir/omp-session" &
+  OMP_LISTENER_PID=$!
+  i=0
+  while [ ! -s "$marker" ] && [ "$i" -lt 200 ]; do /bin/sleep 0.02; i=$((i + 1)); done
+  [ -s "$marker" ] || fail "the modelled OMP session did not publish its doorbell marker"
+  # The pane's foreground process group is what binds a doorbell to a session;
+  # only that mapping is faked, so every other process fact stays real.
+  cat > "$dir/fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *'-o tpgid='*) printf '%s\n' "$FM_FAKE_OMP_PID"; exit 0 ;;
+esac
+exec /bin/ps "$@"
+SH
+  chmod +x "$dir/fakebin/ps"
+  printf '%s\n' "$OMP_LISTENER_PID" > "$dir/fake/pane-pid"
+  export FM_FAKE_OMP_PID="$OMP_LISTENER_PID"
+}
+
+stop_omp_mate() {
+  [ -z "$OMP_LISTENER_PID" ] || kill -TERM "$OMP_LISTENER_PID" 2>/dev/null || true
+  OMP_LISTENER_PID=
+  unset FM_FAKE_OMP_PID
+}
+
+make_omp_restart_stubs() {  # <case-dir> <id> <owner-pid>
+  local dir=$1 id=$2 pid=$3
+  local sb="$dir/stub"
+  mkdir -p "$sb"
+  omp_marker_list "$dir" "$id" > "$dir/markers"
+  : > "$dir/stop.log"
+  : > "$dir/spawn.log"
+  cat > "$sb/stop" <<'SH'
+#!/usr/bin/env bash
+# Stands in for `kill`: "<cmd> <pid>" stops the owner, "<cmd> -0 <pid>" probes it.
+set -u
+present=0
+while IFS= read -r m; do [ ! -e "$m" ] || present=$((present + 1)); done < "$FM_TEST_MARKERS"
+if [ "${1:-}" = "-0" ]; then
+  if [ -e "$FM_TEST_OWNER_GONE" ]; then
+    printf 'probe %s absent markers_present=%d\n' "${2:-}" "$present" >> "$FM_TEST_STOP_LOG"
+    exit 1
+  fi
+  printf 'probe %s alive markers_present=%d\n' "${2:-}" "$present" >> "$FM_TEST_STOP_LOG"
+  exit 0
+fi
+printf 'stopped %s markers_present=%d\n' "${1:-}" "$present" >> "$FM_TEST_STOP_LOG"
+: > "$FM_TEST_OWNER_GONE"
+exit 0
+SH
+  cat > "$sb/spawn" <<'SH'
+#!/usr/bin/env bash
+# Stands in for bin/fm-spawn.sh: records its argv and the world it was handed,
+# then publishes a fresh endpoint into the durable record the way a real launch
+# allocating a new pane would.
+set -u
+present=0
+while IFS= read -r m; do [ ! -e "$m" ] || present=$((present + 1)); done < "$FM_TEST_MARKERS"
+printf 'spawn %s markers_present=%d\n' "$*" "$present" >> "$FM_TEST_SPAWN_LOG"
+sed 's/^window=.*/window='"$FM_TEST_NEW_WINDOW"'/' "$FM_TEST_META" > "$FM_TEST_META.next"
+mv -f "$FM_TEST_META.next" "$FM_TEST_META"
+exit 0
+SH
+  chmod +x "$sb/stop" "$sb/spawn"
+  export FM_TEST_MARKERS="$dir/markers"
+  export FM_TEST_STOP_LOG="$dir/stop.log"
+  export FM_TEST_SPAWN_LOG="$dir/spawn.log"
+  export FM_TEST_OWNER_GONE="$dir/owner-gone"
+  export FM_TEST_META="$dir/home/state/$id.meta"
+  export FM_TEST_NEW_WINDOW="fmses:reborn-$id"
+  export FM_RESTART_STOP_CMD="$sb/stop"
+  export FM_RESTART_SPAWN_CMD="$sb/spawn"
+  printf '%s\n' "$pid" > "$dir/$id-home/state/.lock"
+}
+
+clear_omp_restart_stubs() {
+  unset FM_TEST_MARKERS FM_TEST_STOP_LOG FM_TEST_SPAWN_LOG FM_TEST_OWNER_GONE
+  unset FM_TEST_META FM_TEST_NEW_WINDOW FM_RESTART_STOP_CMD FM_RESTART_SPAWN_CMD
+}
+
+test_omp_restart_stops_proves_cleans_then_relaunches() {
+  local dir out rc owner marker stop_first stop_probe spawn_line
+  dir=$(new_case omp)
+  add_omp_mate "$dir" sm1
+  owner=987654
+  make_omp_restart_stubs "$dir" sm1 "$owner"
+  # The session artifacts a live OMP mate is holding when the update lands.
+  while IFS= read -r marker; do printf 'live\n' > "$marker"; done < "$dir/markers"
+
+  out=$(run_restart "$dir" fm-sm1); rc=$?
+  stop_omp_mate
+  clear_omp_restart_stubs
+
+  expect_code 0 "$rc" "an OMP mate should restart cleanly"$'\n'"$out"
+  assert_contains "$out" "restarted: sm1 (omp)" \
+    "an OMP restart must be reported as a clean reload naming the runtime that came up"
+
+  # 1 + 2. The owner was stopped, and its absence was PROVEN while every session
+  # artifact was still on disk.
+  stop_first=$(sed -n 1p "$dir/stop.log")
+  stop_probe=$(sed -n 2p "$dir/stop.log")
+  [ "$stop_first" = "stopped $owner markers_present=4" ] \
+    || fail "the restart did not stop the mate's session owner first: '$stop_first'"$'\n'"$(cat "$dir/stop.log")"
+  [ "$stop_probe" = "probe $owner absent markers_present=4" ] \
+    || fail "owner absence was not proven before anything was cleaned up: '$stop_probe'"$'\n'"$(cat "$dir/stop.log")"
+
+  # 3. Every session artifact the launch owner refuses to launch over is gone.
+  while IFS= read -r marker; do
+    assert_absent "$marker" "an OMP session artifact survived the restart: $marker"
+  done < "$dir/markers"
+
+  # 4. The replacement went to the launch owner, on a world it can accept.
+  spawn_line=$(sed -n 1p "$dir/spawn.log")
+  [ "$spawn_line" = "spawn sm1 --secondmate markers_present=0" ] \
+    || fail "the replacement launch was not invoked on a cleaned home: '$spawn_line'"$'\n'"$(cat "$dir/spawn.log")"
+  [ "$(wc -l < "$dir/spawn.log" | tr -d '[:space:]')" = 1 ] \
+    || fail "the restart launched more than one replacement"$'\n'"$(cat "$dir/spawn.log")"
+
+  # 5. The durable record names the endpoint the launch published, and no longer
+  # the retired one.
+  assert_grep "window=fmses:reborn-sm1" "$dir/home/state/sm1.meta" \
+    "the durable record was not reconciled to the endpoint the launch published"
+  assert_no_grep "window=fmses:fm-sm1" "$dir/home/state/sm1.meta" \
+    "the durable record still names the retired endpoint"
+  pass "T17 an OMP restart stops the owner, proves it gone, retires its session artifacts, then relaunches"
+}
 test_persist_gates_and_asks_only_for_open_records
 test_persist_precedes_restart
 test_arrived_answer_precedes_deadline_check
@@ -778,5 +970,6 @@ test_unpublished_worker_result_is_accounted_for
 test_result_published_while_reaping_is_honored
 test_already_current_mate_restarts_end_to_end
 test_already_current_unprovable_mate_stays_on_the_nudge_path
+test_omp_restart_stops_proves_cleans_then_relaunches
 
 echo "# all fm-secondmate-restart tests passed"

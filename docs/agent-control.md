@@ -54,6 +54,7 @@ It is not deterministic across the verified adapters: codex and grok resume only
 ## Transactional relaunch
 
 `relaunch` is the only verb that changes durable records, so it runs as a transaction with a journal at `state/<id>.control-relaunch`, the prior record preserved beside it, and a ship or scout's prior instructions preserved when a progress note is appended.
+A local `harness=omp` second mate is the one restart this plane does not perform: it owns session artifacts the launch owner refuses to launch over, so `bin/fm-omp-secondmate-restart-lib.sh` owns that sequence instead and its header is the single owner of it.
 
 1. **Resolve the profile.**
    An explicit `--harness`, `--model`, or `--effort` wins.
