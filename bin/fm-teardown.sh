@@ -102,8 +102,8 @@
 #     crew's worktree, so they are not orphaned by removing the worktree.
 #     conclude_task_no_mistakes_run attributes the active-or-most-recent run to
 #     THIS task only when its branch AND code identity (bin/fm-nm-run-lib.sh's
-#     fm_nm_head_matches_worktree, the same rule bin/fm-crew-state.sh uses) both
-#     match this worktree, then runs `no-mistakes axi abort --run <id>` for
+#     strict fm_nm_head_matches_worktree rule) both match this worktree, then
+#     runs `no-mistakes axi abort --run <id>` for
 #     that verified run instance. A run already terminal
 #     (an outcome is set) or not parked at a gate is left untouched. Idempotent:
 #     an already-aborted run reads back terminal and is skipped on retry.
@@ -725,6 +725,7 @@ remove_pr_poll_artifacts() {
   local state_dir=$1 id=$2
   validate_pr_poll_cleanup "$state_dir" "$id" || return 1
   fm_pr_poll_retirement_recover_one "$state_dir" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" || return 1
+  fm_pr_poll_merge_notified_remove "$state_dir" "$id" || return 1
   rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
     "$state_dir/$id.check-trust" || return 1

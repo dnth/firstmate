@@ -93,7 +93,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-supervisor-target-lib.sh` | Resolve the shared supervisor target and backend for the daemon and launcher       |
 | `fm-supervise-daemon.sh` | Presence-gated away-mode sub-supervisor: self-handle routine wakes, guard injection by the detected primary harness, escalate batched digests, alert on failed delivery |
 | `fm-crew-state.sh`       | Print one deterministic current-state line for a crew                                |
-| `fm-nm-run-lib.sh`       | Shared branch-and-code-identity attribution for no-mistakes runs                    |
+| `fm-nm-run-lib.sh`       | Single owner of shared no-mistakes run-attribution primitives and rules             |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification          |
 | `fm-supervision-lib.sh`  | Shared in-flight-work-without-fresh-watcher-beacon predicate                         |
 | `fm-ff-lib.sh`           | Shared guarded fast-forward helper for origin pulls and local secondmate syncs       |
@@ -117,7 +117,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-pr-lib.sh`           | Own canonical task and PR validation plus private atomic PR-poll publication and identity-bound retirement |
 | `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated PR/MR-poll sidecars           |
 | `fm-pr-check.sh`         | Publish a static merge poll and atomically record validated PR-path metadata          |
-| `fm-pr-merge.sh`         | Record PR metadata, then merge a task's canonical full GitHub URL                    |
+| `fm-pr-merge.sh`         | Record PR metadata, merge a task's canonical full GitHub URL, and verify the real outcome |
+| `fm-merge-outcome-lib.sh` | Publish a confirmed merge's durable, role-routed supervision outcome                 |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task with an explicit delivery mode |
 | `fm-promote-transaction.sh` | Execute the pinned store's recoverable scout-to-ship promotion phases              |
 | `fm-worktree-clean-lib.sh` | Own the shared fail-closed worktree cleanliness predicate                          |
