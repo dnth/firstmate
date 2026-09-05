@@ -1011,6 +1011,178 @@ test_terminal_passed_run_seals_its_own_pipeline_head_advance() {
   pass "terminal passed runs seal their own pipeline advance and refuse foreign drift"
 }
 
+# Re-commit every commit in <base>..HEAD with the same tree under a fresh
+# committer stamp, exactly as the no-mistakes rebase step does, leave the branch
+# on the rewritten chain, and print the rewritten head. Every rewritten commit
+# gets a new object id, so the pre-rewrite head is not an ancestor of the result.
+restamp_chain() {  # <project> <base>
+  local project=$1 parent=$2 commit tree subject
+  while IFS= read -r commit; do
+    tree=$(git -C "$project" rev-parse "$commit^{tree}") || fail "could not read $commit tree"
+    subject=$(git -C "$project" log -1 --format=%s "$commit") || fail "could not read $commit subject"
+    parent=$(GIT_AUTHOR_DATE='@1000000000 +0000' GIT_COMMITTER_DATE='@1000000000 +0000' \
+      git -C "$project" commit-tree "$tree" -p "$parent" -m "$subject") \
+      || fail "could not restamp $commit"
+  done < <(git -C "$project" rev-list --reverse "$2..HEAD")
+  git -C "$project" reset -q --hard "$parent" || fail "could not check out the restamped chain"
+  printf '%s\n' "$parent"
+}
+
+# Set up one planned full-No-Mistakes task whose branch carries a multi-commit
+# chain, and print "<base> <project> <validated-head> <generation>".
+plan_restamp_fixture() {  # <id>
+  local id=$1 base project
+  base=$(make_project "$id" no-mistakes localized)
+  project="$TMP_ROOT/project-$id"
+  printf 'second change\n' >> "$project/tests/app.test.sh"
+  git -C "$project" add tests/app.test.sh
+  git -C "$project" commit -q -m 'second implementation commit'
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint passed
+  FM_FAKE_NM_STATUS='' FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "$id restamp fixture plan failed"
+  printf '%s %s %s %s\n' "$base" "$project" \
+    "$(git -C "$project" rev-parse HEAD)" \
+    "$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)"
+}
+
+test_pipeline_rebase_restamp_binds_and_seals_identical_content() {
+  local id base project validated_head restamped generation status out rc
+
+  # The deadlock: the pipeline's rebase step re-commits the whole branch with a
+  # fresh committer stamp, so the run reports a head that is neither the planned
+  # commit nor a descendant of it, while every tree it validated is unchanged.
+  id=receipt-restamp-seal
+  read -r base project validated_head generation < <(plan_restamp_fixture "$id")
+  restamped=$(restamp_chain "$project" "$base")
+  [ "$restamped" != "$validated_head" ] || fail "restamp fixture did not rewrite the chain"
+  git -C "$project" merge-base --is-ancestor "$validated_head" "$restamped" 2>/dev/null \
+    && fail "restamp fixture left the validated head an ancestor"
+  [ "$(git -C "$project" rev-parse "$restamped^{tree}")" = "$(git -C "$project" rev-parse "$validated_head^{tree}")" ] \
+    || fail "restamp fixture did not preserve the validated content"
+  status=$(nm_status RUN-restamp "$restamped" pending)
+  out=$(FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-restamp --generation "$generation") \
+    || fail "bind refused the pipeline's restamped head"
+  printf '%s' "$out" | jq -e --arg head "$restamped" '.status == "bound" and .head == $head' >/dev/null \
+    || fail "bind did not record the restamped head under validation"
+  [ "$(grep '^validation_run_head=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)" = "$restamped" ] \
+    || fail "bound run head metadata did not follow the restamped chain"
+  status=$(nm_pipeline_status RUN-restamp "fm/$id" "$restamped" completed passed agent_owned)
+  out=$(FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed) \
+    || fail "completion refused a passed run whose rebase restamped the chain"
+  printf '%s' "$out" | jq -e --arg head "$restamped" '.status == "completed" and .completed_head == $head' >/dev/null \
+    || fail "restamped completion did not bind the rewritten head"
+
+  # Custody returned: the branch is back on the validated chain while the passed
+  # run still reports the restamped head it validated.
+  id=receipt-restamp-custody-returned
+  read -r base project validated_head generation < <(plan_restamp_fixture "$id")
+  restamped=$(restamp_chain "$project" "$base")
+  git -C "$project" reset -q --hard "$validated_head"
+  status=$(nm_status RUN-custody "$restamped" pending)
+  FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-custody --generation "$generation" >/dev/null \
+    || fail "bind refused a restamped head after custody return"
+  status=$(nm_pipeline_status RUN-custody "fm/$id" "$restamped" completed passed agent_owned)
+  out=$(FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed) \
+    || fail "completion refused a restamped run after custody return"
+  printf '%s' "$out" | jq -e --arg head "$validated_head" '.completed_head == $head' >/dev/null \
+    || fail "custody-returned completion did not seal the validated head"
+
+  # A run that did not pass never seals a restamped chain.
+  id=receipt-restamp-not-passed
+  read -r base project validated_head generation < <(plan_restamp_fixture "$id")
+  restamped=$(restamp_chain "$project" "$base")
+  status=$(nm_status RUN-restamp-cancelled "$restamped" cancelled)
+  FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-restamp-cancelled --generation "$generation" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "bind accepted a cancelled run on a restamped chain"
+  status=$(nm_status RUN-restamp-pending "$restamped" pending)
+  FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-restamp-pending --generation "$generation" >/dev/null \
+    || fail "restamp not-passed fixture binding failed"
+  status=$(nm_pipeline_status RUN-restamp-pending "fm/$id" "$restamped" failed failed agent_owned)
+  FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "completion sealed a restamped chain from a run that did not pass"
+  pass "pipeline rebase restamps bind and seal their validated content"
+}
+
+test_restamped_chains_refuse_foreign_content_and_unowned_rewrites() {
+  local id base project validated_head restamped generation status rc
+
+  # Foreign content: the chain is rewritten AND carries an unvalidated edit, so
+  # its tree differs from the validated tree and neither bind nor complete may
+  # accept it.
+  id=receipt-restamp-foreign
+  read -r base project validated_head generation < <(plan_restamp_fixture "$id")
+  restamped=$(restamp_chain "$project" "$base")
+  printf 'unvalidated edit\n' >> "$project/src/app.sh"
+  git -C "$project" add src/app.sh
+  git -C "$project" commit -q --amend --no-edit
+  restamped=$(git -C "$project" rev-parse HEAD)
+  git -C "$project" merge-base --is-ancestor "$validated_head" "$restamped" 2>/dev/null \
+    && fail "foreign restamp fixture left the validated head an ancestor"
+  [ "$(git -C "$project" rev-parse "$restamped^{tree}")" != "$(git -C "$project" rev-parse "$validated_head^{tree}")" ] \
+    || fail "foreign restamp fixture did not change the validated content"
+  status=$(nm_status RUN-restamp-foreign "$restamped" pending)
+  FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-restamp-foreign --generation "$generation" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "bind accepted a rewritten chain carrying foreign content"
+  git -C "$project" reset -q --hard "$validated_head"
+  status=$(nm_status RUN-restamp-clean "$(restamp_chain "$project" "$base")" pending)
+  FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-restamp-clean --generation "$generation" >/dev/null \
+    || fail "foreign fixture control binding failed"
+  printf 'unvalidated edit\n' >> "$project/src/app.sh"
+  git -C "$project" add src/app.sh
+  git -C "$project" commit -q --amend --no-edit
+  restamped=$(git -C "$project" rev-parse HEAD)
+  status=$(nm_pipeline_status RUN-restamp-clean "fm/$id" "$restamped" completed passed agent_owned)
+  FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "completion sealed a rewritten chain carrying foreign content"
+
+  # Unowned rewrite: the bound run reports another branch, so the rewritten
+  # worktree chain is not the chain that run owns.
+  id=receipt-restamp-unowned-branch
+  read -r base project validated_head generation < <(plan_restamp_fixture "$id")
+  restamped=$(restamp_chain "$project" "$base")
+  status=$(nm_status RUN-restamp-branch "$restamped" pending)
+  FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-restamp-branch --generation "$generation" >/dev/null \
+    || fail "unowned-branch fixture binding failed"
+  status=$(nm_pipeline_status RUN-restamp-branch someone-elses-branch "$restamped" completed passed agent_owned)
+  FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "completion sealed a restamped chain owned by another branch"
+
+  # Unowned rewrite: an active run that does not currently own the branch never
+  # proves the rewrite it is credited with.
+  id=receipt-restamp-unowned-active
+  read -r base project validated_head generation < <(plan_restamp_fixture "$id")
+  restamped=$(restamp_chain "$project" "$base")
+  status=$(nm_status RUN-restamp-active "$restamped" pending)
+  FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-restamp-active --generation "$generation" >/dev/null \
+    || fail "unowned-active fixture binding failed"
+  status=$(nm_pipeline_status RUN-restamp-active "fm/$id" "$restamped" ci '' manual)
+  FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_CI_LOG='all CI checks passed - still monitoring' \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "completion sealed a restamped chain without pipeline ownership"
+  pass "restamped chains refuse foreign content and rewrites the bound run does not own"
+}
+
 test_no_mistakes_observations_are_bounded() {
   local hang_nm id base project head generation running ci_status rc
   hang_nm="$TMP_ROOT/hang-no-mistakes"
@@ -1563,6 +1735,8 @@ test_run_heads_resolve_authoritatively
 test_agent_supplied_intent_log_binds_and_completes
 test_completion_accepts_only_pipeline_owned_head_advance
 test_terminal_passed_run_seals_its_own_pipeline_head_advance
+test_pipeline_rebase_restamp_binds_and_seals_identical_content
+test_restamped_chains_refuse_foreign_content_and_unowned_rewrites
 test_low_risk_skips_no_mistakes_under_explicit_policy
 test_low_risk_requires_safe_prose_and_applicable_evidence
 test_implementation_completion_precedes_planning

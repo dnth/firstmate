@@ -97,6 +97,25 @@ fm_nm_head_descends_from() {  # <worktree> <ancestor> <descendant>
     && git -C "$wt" merge-base --is-ancestor "$ancestor_full" "$descendant_full" 2>/dev/null
 }
 
+# 0 when commits $2 and $3 both resolve in worktree $1 and record byte-identical
+# content, which Git states exactly once as their tree object identity.
+# The no-mistakes rebase step re-commits an entire branch with fresh committer
+# stamps, so the head it reports is neither the pre-rebase commit nor a
+# descendant of it while the content it validated is unchanged. Tree identity is
+# the authoritative content proof for that rewrite: it holds for a pure restamp
+# and breaks on any change to any tracked file, so a caller may accept a
+# rewritten chain without ever accepting foreign content. Identical commits are
+# trivially content identical and are accepted; a caller that also needs the two
+# commits to differ compares them itself.
+fm_nm_head_content_identical() {  # <worktree> <head-a> <head-b>
+  local wt=$1 a_full b_full a_tree b_tree
+  a_full=$(fm_nm_resolve_head "$wt" "$2") || return 1
+  b_full=$(fm_nm_resolve_head "$wt" "$3") || return 1
+  a_tree=$(git -C "$wt" rev-parse --verify "${a_full}^{tree}" 2>/dev/null) || return 1
+  b_tree=$(git -C "$wt" rev-parse --verify "${b_full}^{tree}" 2>/dev/null) || return 1
+  [ "$a_tree" = "$b_tree" ]
+}
+
 # 0 when a run's branch presentation identifies the checked-out branch. The
 # no-mistakes CLI renders Firstmate's slash branch names with a hyphen, so both
 # authoritative spellings are accepted and no other branch is normalized.

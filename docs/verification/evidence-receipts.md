@@ -40,12 +40,30 @@ The exact receipt key and type schema is owned by the header and `--help` output
 - No-Mistakes status, intent, and CI-log observations use the shared bounded call boundary.
 - Every completion requires path-specific terminal evidence and records its plan path and authoritative completed head.
 - A changed worktree head invalidates completion unless the bound No-Mistakes run proves a descendant of the planned head: an active run must currently own the branch, while a terminal passed run proves the advance through its own reported head.
+- A chain the pipeline's rebase step restamped binds and completes on tree identity with the planned head, so a genuinely passed run seals without a replan even though its head is neither the planned commit nor a descendant of it.
 - Unrelated, missing, or ambiguous drift remains refused, and a terminal run that did not pass never seals an advance.
 - Local-only readiness and guarded landing consume one fail-closed executable default-branch resolver.
 - Planning and completion refuse tracked, staged, or untracked worktree changes.
 - Initial planning accepts a caller base only when it equals the repository's authoritative merge boundary, so a later ancestor cannot hide earlier task commits.
 - Ordinary No-Mistakes findings return to the original worker through guarded custody return and then full revalidation.
 - Direct-PR registration publishes its watcher before recording completion, while other paths preserve their earlier path-specific completion boundary.
+
+## Reconciliation with the descendant-advance guarantee
+
+The descendant-advance guarantee above admits one shape of head change: new commits landed on top of the planned head, so the planned head stays an ancestor of the current head.
+The no-mistakes rebase step produces a second shape it does not admit.
+That step re-commits every commit on the branch with a fresh committer stamp, which mints a new object id for the whole chain while every tree stays byte-identical, so the planned head stops being an ancestor of anything the run reports.
+Observed on 2026-09-05 in run `01M1RW6JNH5C5VN15PPRYDW3J0`: planned head `874ce334` and run head `bd8aaff5` both carry tree `f7d8fa3a`, and `git merge-base --is-ancestor 874ce334 bd8aaff5` exits 1.
+
+Three checks were relaxed to admit that shape, and no others.
+`--bind-run` accepted only a run head that resolved to the planned head, and now also accepts a head recording the planned head's tree, which it then records as `validation_run_head`.
+`--complete` required the run's reported head to be the current worktree head, and now also accepts a run head recording the current head's tree, which is what a run reports after its custody return puts the branch back on the pre-rebase chain.
+`--complete` required the current head to descend from the planned head, and now also accepts a current head recording the planned head's tree.
+
+Tree identity is the content-identity mechanism, stated once in `fm_nm_head_content_identical` in `bin/fm-nm-run-lib.sh`.
+It was chosen over a cumulative `validation_base..head` diff comparison because Git already computes and names the content of a commit exactly once as its tree object, so the comparison needs no diff options, no rename policy, and no second base to resolve.
+Foreign drift stays refused because any change to any tracked file changes that tree, so the rewritten chain no longer matches the head the run reported.
+Every other completion requirement is unchanged: the run must still be the bound run at the current generation, still be genuinely passed or checks-green, still report the current worktree branch while active with pipeline ownership, and still be terminal PASSED otherwise.
 
 ## Known limitations
 
@@ -94,6 +112,8 @@ ok - finding-to-criterion invalidations remain inspectable in task metadata
 ok - run binding resolves abbreviated heads and rejects non-planned commits
 ok - binding and completion work against the real agent-supplied intent-log shape while wrong runs fail closed
 ok - terminal passed runs seal their own pipeline advance and refuse foreign drift
+ok - pipeline rebase restamps bind and seal their validated content
+ok - restamped chains refuse foreign content and rewrites the bound run does not own
 ok - low-risk mechanical changes can skip a full No-Mistakes run
 ok - low risk requires safe changelog prose and file-bound mechanical evidence
 ok - implementation completion refreshes per head and remains idempotent

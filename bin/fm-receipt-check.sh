@@ -44,11 +44,16 @@
 # The resolved validation_tier, validation_path, reason code, base, head, size,
 # and start time are appended to state/<task-id>.meta for durable inspection.
 # Every completion records validation_completed_head and refuses current head
-# drift unless the bound No-Mistakes run proves a descendant of the latest
-# validation_head: an active run must currently own the branch, while a terminal
-# PASSED run proves the advance through its own reported head. A terminal run
-# therefore needs no replan and no fresh run to seal its own pipeline commits,
-# and foreign commits landed after the run still refuse completion.
+# drift unless the bound No-Mistakes run accounts for the current content, in
+# one of two shapes. A descendant of the latest validation_head is proved by
+# pipeline ownership while the run is active and by the run's own reported head
+# once it is terminal and PASSED, so a terminal run needs no replan and no fresh
+# run to seal its own pipeline commits. A chain the pipeline's rebase step
+# restamped is proved by tree identity with validation_head, because that step
+# re-commits every branch commit with a fresh committer stamp and so reports a
+# head that is neither validation_head nor a descendant of it; --bind-run
+# accepts and records that same restamped head. Foreign commits landed after the
+# run still refuse completion, because they change the tree the run reported.
 # When --plan returns path=receipts-mechanical, append fresh successful mechanical
 # evidence for every changed file with:
 #
@@ -665,15 +670,27 @@ if [ "$ACTION" = bind-run ]; then
     passed:*|checks-passed:*|*:passed|*:checks-passed) BIND_STATE_OK=1 ;;
     running:*|fixing:*|ci:*|awaiting_approval:*) BIND_STATE_OK=1 ;;
   esac
+  # The run's head is the planned commit itself, or the same content re-committed
+  # by the pipeline's own rebase step, which restamps every branch commit and so
+  # reports a head that is neither the planned commit nor a descendant of it.
+  # Tree identity is what keeps that rewrite honest: it proves the run is
+  # validating exactly the planned change, while any foreign edit changes the
+  # tree and is still refused here. The bound head is the head the run actually
+  # reports, so completion below compares against the chain under validation.
+  BIND_RUN_HEAD=$(fm_nm_resolve_head "$BIND_WORKTREE" "$BIND_OBSERVED_HEAD" || true)
+  if [ -n "$BIND_RUN_HEAD" ] && [ "$BIND_RUN_HEAD" != "$BIND_HEAD" ] \
+    && ! fm_nm_head_content_identical "$BIND_WORKTREE" "$BIND_HEAD" "$BIND_RUN_HEAD"; then
+    BIND_RUN_HEAD=
+  fi
   [ "$BIND_OBSERVED_ID" = "$RUN_ID_INPUT" ] \
-    && [ "$(fm_nm_resolve_head "$BIND_WORKTREE" "$BIND_OBSERVED_HEAD" || true)" = "$BIND_HEAD" ] \
+    && [ -n "$BIND_RUN_HEAD" ] \
     && [ "$BIND_STATE_OK" -eq 1 ] \
     || { echo "error: No-Mistakes run does not match the latest plan" >&2; exit 2; }
   [ -n "$BIND_GENERATION" ] || { echo "error: validation generation is missing" >&2; exit 2; }
   printf 'validation_run_id=%s\nvalidation_run_path=%s\nvalidation_run_head=%s\nvalidation_run_generation=%s\n' \
-    "$RUN_ID_INPUT" "$BIND_PATH" "$BIND_HEAD" "$BIND_GENERATION" | append_meta_records \
+    "$RUN_ID_INPUT" "$BIND_PATH" "$BIND_RUN_HEAD" "$BIND_GENERATION" | append_meta_records \
     || { echo "error: could not bind the No-Mistakes run" >&2; exit 2; }
-  jq -cn --arg task "$ID" --arg run "$RUN_ID_INPUT" --arg path "$BIND_PATH" --arg head "$BIND_HEAD" \
+  jq -cn --arg task "$ID" --arg run "$RUN_ID_INPUT" --arg path "$BIND_PATH" --arg head "$BIND_RUN_HEAD" \
     '{schema:"fm-validation-run-binding.v1",task:$task,status:"bound",run:$run,path:$path,head:$head}'
   exit 0
 fi
@@ -799,27 +816,36 @@ record_validation_completed() {
         echo "error: bound No-Mistakes run did not pass checks at the exact validated head" >&2
         return 1
       fi
+      # The run must account for the content the worktree currently holds. It
+      # does that by reporting the current head itself, or by reporting a head
+      # its own rebase step restamped: the pipeline re-commits the whole branch
+      # with fresh committer stamps, so the run head and the worktree head are
+      # then different commits recording the same trees. Tree identity is the
+      # content proof for that shape, so a foreign change still refuses here
+      # because it changes the tree the run reported.
       [ "$observed_head_full" = "$current_head" ] \
-        || { release_validation_lock; echo "error: bound No-Mistakes run head is not the current worktree head" >&2; return 1; }
+        || fm_nm_head_content_identical "$worktree" "$observed_head_full" "$current_head" \
+        || { release_validation_lock; echo "error: bound No-Mistakes run head does not account for the current worktree content" >&2; return 1; }
       if [ "$current_head" != "$validated_head" ]; then
         run_branch=$(fm_nm_field "$run_out" branch)
         current_branch=$(git -C "$worktree" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
         fm_nm_head_descends_from "$worktree" "$validated_head" "$current_head" \
-          || { release_validation_lock; echo "error: current head is not a descendant of the implementation head" >&2; return 1; }
+          || fm_nm_head_content_identical "$worktree" "$validated_head" "$current_head" \
+          || { release_validation_lock; echo "error: current head neither descends from nor reproduces the implementation head" >&2; return 1; }
         if [ -z "$current_branch" ] || ! fm_nm_branch_matches_worktree "$worktree" "$run_branch"; then
           release_validation_lock
           echo "error: pipeline run branch is not the current worktree branch" >&2
           return 1
         fi
         # The advance is authoritative in exactly two shapes, and the head
-        # equality checked above is what keeps both honest. While the run is
+        # accounting checked above is what keeps both honest. While the run is
         # ACTIVE the pipeline must currently own the branch. Once the run is
         # TERMINAL it has released the branch, so pipeline ownership is gone by
         # construction and requiring it would refuse a genuinely passed run
         # whose own review and doc commits advanced the head; there the run's
         # own reported head is the authority, and a foreign commit landed after
-        # the run finished still fails the head-equality check because the run
-        # never reports it.
+        # the run finished still fails that accounting because the run reports
+        # neither that commit nor its content.
         if fm_nm_run_is_active "$run_out"; then
           branch_sync_state=$(fm_nm_branch_sync_state "$run_out")
           [ "$branch_sync_state" = pipeline_owned ] \
