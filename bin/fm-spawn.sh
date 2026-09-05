@@ -798,7 +798,21 @@ spawn_remote_secondmate() {
     echo "remote_target=$remote_target"
     [ -z "$remote_recorded_traceparent" ] || echo "traceparent=$remote_recorded_traceparent"
   } > "$tmp"
-  # This out-of-scope remote-secondmate writer is intentionally excluded from fm_meta_lock_path in the local upstream port; fm-meta-lock-orca-remote-race-verify owns any republish-after-retirement follow-up.
+  # This remote-secondmate writer stays outside fm_meta_lock_path on purpose.
+  # Its retirement seam is the secondmate registry lock held above, which
+  # bin/fm-teardown.sh's remote path acquires after the per-task metadata lock
+  # and holds across removing the registry route and retiring the metadata.
+  # The registry re-read at the top of this function under that same lock
+  # refuses once the route is gone, so a publication cannot survive a completed
+  # retirement and cannot interleave with the retirement body.
+  # A publication that lands after teardown has taken the metadata lock but
+  # before the retirement body runs is retired by that body, because teardown
+  # re-reads the metadata fresh after acquiring the registry lock and removes it.
+  # The serialized-respawn section in tests/fm-remote-secondmate-lifecycle-e2e.test.sh
+  # exercises exactly that concurrent ordering: spawn is blocked in launch while
+  # holding the registry lock, teardown starts and blocks, spawn publishes, and
+  # teardown then removes the route and metadata; its retired-route section
+  # covers a launch after retirement.
   mv -f -- "$tmp" "$meta"
   fm_lock_release "$remote_lock" || true
   fm_lock_release "$registry_lock" || true
@@ -1016,22 +1030,38 @@ spawn_abort_cleanup() {
       if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
         mkdir -p "$STATE" 2>/dev/null || true
         if [ -d "$STATE" ]; then
-          # This fork-only Orca abort-recovery writer is intentionally excluded from fm_meta_lock_path in the upstream port; fm-meta-lock-orca-remote-race-verify owns any republish-after-retirement follow-up.
-          {
-            echo "window=$W"
-            echo "worktree=${WT:-}"
-            echo "project=$PROJ_ABS"
-            echo "harness=$HARNESS"
-            echo "kind=$KIND"
-            [ -z "${MODE:-}" ] || echo "mode=$MODE"
-            [ -z "${YOLO:-}" ] || echo "yolo=$YOLO"
-            echo "tasktmp=${TASK_TMP:-}"
-            echo "model=${MODEL:-default}"
-            echo "effort=${EFFORT:-default}"
-            echo "backend=orca"
-            echo "orca_worktree_id=$ORCA_WORKTREE_ID"
-            [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
-          } > "$STATE/$ID.meta" 2>/dev/null || true
+          # This abort-recovery writer publishes the leaked Orca worktree's
+          # record so a later teardown can remove it. An abort before the
+          # ordinary publication above never took the per-task metadata
+          # lifecycle lock, so take it here; otherwise a relaunch abort could
+          # land this record inside a concurrent retirement of the previous
+          # incarnation, where teardown's removal either destroys the recovery
+          # record or the record resurrects a task retirement just closed.
+          # The lock is released with the ordinary publication's below.
+          if [ "$SPAWN_META_LOCK_HELD" != 1 ] \
+             && SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta"); then
+            fm_lock_acquire_wait "$SPAWN_META_LOCK"
+            SPAWN_META_LOCK_HELD=1
+          fi
+          if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
+            echo "warning: Orca abort cleanup could not lock task metadata; leaked Orca worktree $ORCA_WORKTREE_ID has no recovery record" >&2
+          else
+            {
+              echo "window=$W"
+              echo "worktree=${WT:-}"
+              echo "project=$PROJ_ABS"
+              echo "harness=$HARNESS"
+              echo "kind=$KIND"
+              [ -z "${MODE:-}" ] || echo "mode=$MODE"
+              [ -z "${YOLO:-}" ] || echo "yolo=$YOLO"
+              echo "tasktmp=${TASK_TMP:-}"
+              echo "model=${MODEL:-default}"
+              echo "effort=${EFFORT:-default}"
+              echo "backend=orca"
+              echo "orca_worktree_id=$ORCA_WORKTREE_ID"
+              [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
+            } > "$STATE/$ID.meta" 2>/dev/null || true
+          fi
         fi
       fi
     fi
