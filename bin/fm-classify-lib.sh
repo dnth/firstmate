@@ -733,6 +733,7 @@ status_span_has_actionable() {  # <status-file> <start-offset>
 
 FM_STATUS_SNAPSHOT_EVENT_LINE=
 FM_STATUS_SNAPSHOT_EVENT_ENDPOINT=
+# shellcheck disable=SC2094 # Scratch file is written before, then read after the span scan.
 status_snapshot_latest_event() {  # <status-file> <captured-end> <captured-identity> [<start-offset>]
   local f=$1 endpoint=$2 expected_ident=$3 start=${4:-0}
   local size ident scratch line latest='' line_end=0 latest_endpoint=0 line_bytes
@@ -750,7 +751,7 @@ status_snapshot_latest_event() {  # <status-file> <captured-end> <captured-ident
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       *[![:space:]]*)
-        line_bytes=$(printf '%s\n' "$line" | LC_ALL=C wc -c) || { rm -f "$scratch"; return 1; }
+        line_bytes=$(LC_ALL=C wc -c <<< "$line") || { rm -f "$scratch"; return 1; }
         line_bytes=${line_bytes//[[:space:]]/}
         case "$line_bytes" in ''|*[!0-9]*) rm -f "$scratch"; return 1 ;; esac
         line_end=$((line_end + line_bytes))
@@ -769,6 +770,7 @@ status_snapshot_latest_event() {  # <status-file> <captured-end> <captured-ident
   [ "$size" = "$endpoint" ] && [ "$ident" = "$expected_ident" ] || return 1
   # shellcheck disable=SC2034 # These globals are consumed by fm-wake-drain.sh.
   FM_STATUS_SNAPSHOT_EVENT_LINE=$latest
+  # shellcheck disable=SC2034 # These globals are consumed by fm-wake-drain.sh.
   FM_STATUS_SNAPSHOT_EVENT_ENDPOINT=$latest_endpoint
 }
 

@@ -1710,6 +1710,7 @@ handle_durable_wakes() {  # <watcher-reason> <state>
   ack_generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err" | tail -1)
   if [ -n "$ack_generation" ] \
      && [ "$(cat "$(recovery_projection_generation_path "$state")" 2>/dev/null || true)" = "$ack_generation" ]; then
+    # shellcheck disable=SC2034 # Retained for recovery reclassification signaling.
     FM_RECOVERY_RECLASSIFY_SIGNALS=1
   fi
 
