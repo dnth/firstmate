@@ -608,7 +608,7 @@ That refuse covers an ambiguous crash or transport error after Discord may have 
 The inflight claim records owner pid and `recorded_at`.
 A leftover claim is stolen only when it is older than `FM_EXT_INFLIGHT_TTL_SECS` (default 30) **and** its recorded owner pid is dead.
 Steal serialization keeps a 1-second floor even when that TTL is 0, so two stealers cannot both win.
-A live owner stays mid-delivery even after that TTL, including an ambiguous crash-after-post while the poster process is still alive.
+A live owner stays protected from TTL-based claim stealing, including an ambiguous crash-after-post while the poster process is still alive.
 `receipt` writes the receipt once.
 `abort` deletes the posting marker after a transient definite send failure (HTTP 429 or 5xx) so that generation can retry.
 `fail` records a terminal failed marker after a permanent 4xx so pending stops retrying that generation.
@@ -619,8 +619,8 @@ A later-chunk transient failure then releases the inflight marker so only one po
 An ambiguous failure after a chunk may have been accepted stays mid-delivery for that chunk, which is what stops a double post.
 
 That mid-delivery state is bounded rather than permanent.
-Once a generation has recorded the same in-flight chunk for longer than `FM_EXT_MIDDELIVERY_RECOVERY_SECS` (default 300), the next `begin` reopens exactly that chunk for one more attempt and records the attempt in chunk progress.
-The window sits far above the 15-second Discord send timeout, so a genuinely live send is never recovered out from under its sender.
+Once a generation has recorded the same in-flight chunk without a fresh claim or progress heartbeat for longer than `FM_EXT_MIDDELIVERY_RECOVERY_SECS` (default 300), the next `begin` reopens exactly that chunk for one more attempt and records the attempt in chunk progress.
+Each chunk attempt refreshes the progress artifact before sending, so a poster still making progress is never recovered out from under its sender regardless of the recovery window.
 After `FM_EXT_MIDDELIVERY_RECOVERY_MAX` (default 3) attempts, `begin` records a terminal failed marker, exits 5, and wakes Firstmate with `ext-delivery-failed <slug>`.
 So an ordinary network timeout costs at most a repeated chunk and, at worst, a surfaced failure - never a silently truncated reply that no shipped command can clear.
 
@@ -769,7 +769,7 @@ FM_EXT_ALLOWLIST_FILE=    # optional override of config/ext-allowlist for tests
 FM_EXT_DISCORD_REPLY_MAX_CHARS=1900   # local-bridge Discord per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900
 FM_EXT_DISCORD_THREAD_MAX=25   # maximum messages in one local-bridge auto-split Discord thread
 FM_EXT_INFLIGHT_TTL_SECS=30   # seconds a dead-owner exclusive send claim must age before another poster may steal it; live owners are never stolen from; steal serialization keeps a 1s floor even when this is 0
-FM_EXT_MIDDELIVERY_RECOVERY_SECS=300   # seconds a generation may hold the same in-flight chunk before the next begin reopens that chunk for another attempt
+FM_EXT_MIDDELIVERY_RECOVERY_SECS=300   # seconds without a claim or progress heartbeat before the next begin reopens the in-flight chunk for another attempt
 FM_EXT_MIDDELIVERY_RECOVERY_MAX=3   # reopen attempts before a stuck generation is failed terminally and surfaced as ext-delivery-failed
 FM_EXT_CONTEXT_MAX_AGE_SECS=604800   # local retention window for ext-context records and retired ext-outbox markers (7 days); larger values clamp back to it
 FM_EXT_OUTBOX_POLL_SECS=2   # gateway poster interval, in seconds, between local outbox delivery passes

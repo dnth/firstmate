@@ -550,12 +550,11 @@ fm_ext_inflight_ttl_secs() {
   printf '%s\n' "$raw"
 }
 
-# Absolute age after which a generation stuck mid-chunk is force-recovered.
+# Inactivity age after which a generation stuck mid-chunk is force-recovered.
 # The ambiguous-failure path deliberately keeps the in-flight chunk recorded so
 # no chunk is double-posted, but on its own nothing ever clears it: one network
-# timeout would wedge that reply forever. The default sits far above the
-# 15-second Discord send timeout, so a genuinely live send is never recovered
-# out from under its sender.
+# timeout would wedge that reply forever. Each chunk attempt refreshes progress,
+# so a genuinely active sender is never recovered out from under its sender.
 fm_ext_middelivery_recovery_secs() {
   local raw=${1:-${FM_EXT_MIDDELIVERY_RECOVERY_SECS-}}
   case "$raw" in
@@ -798,7 +797,7 @@ fm_ext_outbox_stuck_age() {
 
 # fm_ext_outbox_stuck_recover <dir> <slug> <kind> <generation>: bounded recovery
 # for a generation wedged by an ambiguous mid-chunk send failure. Once the
-# generation has recorded the same in-flight chunk for longer than
+# generation has recorded no fresh claim or progress heartbeat for longer than
 # FM_EXT_MIDDELIVERY_RECOVERY_SECS, this clears that chunk so the next claim
 # re-sends exactly it, and records the attempt in the progress artifact. After
 # FM_EXT_MIDDELIVERY_RECOVERY_MAX attempts it writes the terminal failed marker

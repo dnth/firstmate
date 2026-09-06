@@ -50,7 +50,7 @@ A permanent 4xx records a terminal failed marker so pending stops retrying that 
 A posting marker without a receipt is refused so an ambiguous crash or transport error after Discord may have accepted the post cannot double-post.
 An exclusive inflight send claim means two gateway processes cannot both post the same remaining chunk after a later-chunk resume.
 A dead owner's claim older than `FM_EXT_INFLIGHT_TTL_SECS` (default 30) may be stolen; a live owner is never stolen from.
-A generation left in-flight by an ambiguous send is reopened for another attempt once it has been stuck past `FM_EXT_MIDDELIVERY_RECOVERY_SECS` (default 300), and after `FM_EXT_MIDDELIVERY_RECOVERY_MAX` (default 3) attempts it is failed terminally and surfaced to Firstmate, so a network timeout cannot silently truncate a reply.
+A generation left in-flight by an ambiguous send is reopened for another attempt once it has had no claim or progress heartbeat for longer than `FM_EXT_MIDDELIVERY_RECOVERY_SECS` (default 300), and after `FM_EXT_MIDDELIVERY_RECOVERY_MAX` (default 3) attempts it is failed terminally and surfaced to Firstmate, so an active poster is not interrupted and a network timeout cannot silently truncate a reply.
 Delivered payloads are retired as soon as they have a receipt, so poll cost does not grow with the number of replies already sent, and leftover records expire after `FM_EXT_CONTEXT_MAX_AGE_SECS` (default and maximum 7 days).
 `FM_EXT_OUTBOX_POLL_SECS` (default 2) sets how often the watcher drains the outbox.
 Set `DISCORD_BOT_TOKEN` (or `HERMES_DISCORD_TOKEN`) for Discord REST delivery.
