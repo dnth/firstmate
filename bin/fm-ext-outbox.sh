@@ -9,17 +9,25 @@
 #   fm-ext-outbox.sh abort --slug <slug> --kind <kind> --generation <n>
 #   fm-ext-outbox.sh fail --slug <slug> --kind <kind> --generation <n>
 #     --reason-file <path>
+#   fm-ext-outbox.sh progress --slug <slug> --kind <kind> --generation <n>
+#     --progress-file <path>
+#   fm-ext-outbox.sh split [--max <n>] [--cap <n>]
 #
-# begin CAS-claims the posting marker. Exit 0 on a new claim, 1 when a receipt
+# begin CAS-claims the posting marker. Exit 0 on a new claim or a resumable
+# split (posting plus progress with no in-flight chunk), 1 when a receipt
 # already exists (idempotent success), 3 on mid-delivery (posting without
-# receipt), 4 when a terminal failed marker exists, 2 on validation failure.
-# receipt writes the receipt once.
-# abort deletes the posting marker after a transient definite send failure
-# (HTTP 429 or 5xx) before a successful response so that generation can retry.
-# It refuses when a receipt or terminal failed marker already exists.
-# An ambiguous crash or transport error after the post started keeps the marker.
-# fail records a terminal failed marker after a permanent 4xx so pending stops
-# retrying that generation.
+# a resumable progress record), 4 when a terminal failed marker exists, 2 on
+# validation failure. receipt writes the receipt once.
+# abort deletes the posting marker and chunk progress after a transient
+# definite send failure (HTTP 429 or 5xx) before any chunk succeeded so that
+# generation can retry. It refuses when a receipt or terminal failed marker
+# already exists. An ambiguous crash or transport error after a chunk post
+# started keeps the marker. fail records a terminal failed marker after a
+# permanent 4xx so pending stops retrying that generation.
+# progress replaces the durable per-chunk progress artifact.
+# split reads reply text on stdin and prints {limit,cap,texts} using
+# FM_EXT_DISCORD_REPLY_MAX_CHARS (default 1900) and FM_EXT_DISCORD_THREAD_MAX
+# (default 25). It does not require FMX_PAIRING_TOKEN or the hosted relay.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,6 +43,8 @@ usage: fm-ext-outbox.sh pending
        fm-ext-outbox.sh receipt --slug <slug> --kind <kind> --generation <n> --receipt-file <path>
        fm-ext-outbox.sh abort --slug <slug> --kind <kind> --generation <n>
        fm-ext-outbox.sh fail --slug <slug> --kind <kind> --generation <n> --reason-file <path>
+       fm-ext-outbox.sh progress --slug <slug> --kind <kind> --generation <n> --progress-file <path>
+       fm-ext-outbox.sh split [--max <n>] [--cap <n>]
 EOF
 }
 
@@ -56,6 +66,9 @@ KIND=
 GENERATION=
 RECEIPT_FILE=
 REASON_FILE=
+PROGRESS_FILE=
+MAX_CHARS=
+THREAD_CAP=
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -64,11 +77,27 @@ while [ "$#" -gt 0 ]; do
     --generation) shift; GENERATION=${1:-} ;;
     --receipt-file) shift; RECEIPT_FILE=${1:-} ;;
     --reason-file) shift; REASON_FILE=${1:-} ;;
+    --progress-file) shift; PROGRESS_FILE=${1:-} ;;
+    --max) shift; MAX_CHARS=${1:-} ;;
+    --cap) shift; THREAD_CAP=${1:-} ;;
     --help|-h) help; exit 0 ;;
     *) die "unknown argument '$1'" ;;
   esac
   shift || true
 done
+
+case "$cmd" in
+  split)
+    command -v jq >/dev/null 2>&1 || die "jq is required" 1
+    max=$(fm_ext_discord_reply_max_chars "$MAX_CHARS")
+    cap=$(fm_ext_discord_thread_max "$THREAD_CAP")
+    texts=$(fm_ext_split_thread "$max" "$cap") || die "could not split the reply" 2
+    jq -cn --argjson limit "$max" --argjson cap "$cap" --argjson texts "$texts" \
+      '{limit:$limit, cap:$cap, texts:$texts}' \
+      || die "could not encode the split result" 2
+    exit 0
+    ;;
+esac
 
 OUTBOX=$(fm_ext_outbox_dir)
 
@@ -80,7 +109,7 @@ case "$cmd" in
       [ -e "$file" ] || continue
       base=$(basename "$file")
       case "$base" in
-        *.receipt.json|*.failed.json) continue ;;
+        *.receipt.json|*.failed.json|*.progress.json) continue ;;
       esac
       fm_ext_outbox_schema_valid "$file" || continue
       slug=$(jq -r '.slug' "$file")
@@ -157,6 +186,17 @@ case "$cmd" in
       *) die "could not record the terminal failure" 2 ;;
     esac
     exit "$rc"
+    ;;
+  progress)
+    fm_ext_slug_valid "$SLUG" || die "unsafe slug"
+    fm_ext_kind_valid "$KIND" || die "invalid kind"
+    fm_ext_generation_valid "$GENERATION" || die "invalid generation"
+    [ -f "$PROGRESS_FILE" ] || die "progress file not found: $PROGRESS_FILE"
+    body=$(cat -- "$PROGRESS_FILE")
+    [ -n "$body" ] || die "progress file is empty"
+    fm_ext_outbox_progress "$OUTBOX" "$SLUG" "$KIND" "$GENERATION" "$body" \
+      || die "could not record chunk progress" 2
+    printf 'progress %s %s %s\n' "$SLUG" "$KIND" "$GENERATION"
     ;;
   *) usage; exit 2 ;;
 esac

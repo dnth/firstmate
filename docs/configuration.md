@@ -594,6 +594,10 @@ That refuse covers an ambiguous crash or transport error after Discord may have 
 `bin/fm-ext-outbox.sh begin` CAS-claims that posting marker; `receipt` writes the receipt once.
 `abort` deletes the posting marker after a transient definite send failure (HTTP 429 or 5xx) so that generation can retry.
 `fail` records a terminal failed marker after a permanent 4xx so pending stops retrying that generation.
+The gateway poster splits oversized Discord replies with the same numbered-thread algorithm X mode uses for Discord, driven by `FM_EXT_DISCORD_REPLY_MAX_CHARS` (default 1900, min 50, values above 2000 reset to 1900) and `FM_EXT_DISCORD_THREAD_MAX` (default 25).
+A reply that already fits is one unnumbered message; a longer reply is posted as ordered `(k/n)` chunks into the same thread.
+Chunk progress is recorded so a later-chunk retry does not send earlier chunks again; an ambiguous failure after a chunk may have been accepted stays mid-delivery for that chunk.
+This split does not use `FMX_PAIRING_TOKEN` or the hosted relay.
 Unsent payloads (no posting marker, no receipt, and no terminal failed marker) remain deliverable after a Hermes Gateway restart.
 `bin/fm-ext-link.sh` binds a spawned task to the canonical `request_id` as `ext_request=` / `ext_request_slug=` / `ext_request_ts=` / `ext_followups=`, never `x_request=`.
 
@@ -728,6 +732,8 @@ FMX_FOLLOWUP_MAX_COUNT=3   # local cap on X-mode completion follow-ups per linke
 FM_EXT_BRIDGE=            # optional local Communication Officer opt-in; truthy enables, explicit 0/false/no/off disables even when config/ext-bridge exists
 FM_EXT_SECRET_FILE=       # optional override of config/ext-secret for tests
 FM_EXT_ALLOWLIST_FILE=    # optional override of config/ext-allowlist for tests
+FM_EXT_DISCORD_REPLY_MAX_CHARS=1900   # local-bridge Discord per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900
+FM_EXT_DISCORD_THREAD_MAX=25   # maximum messages in one local-bridge auto-split Discord thread
 FM_PF_RETRY_BACKOFF_SECS=900   # seconds before the next attempt after a retryable promised-public-reply delivery error
 FM_LOCK_STALE_AFTER=2   # seconds before dead-pid lock records can be reclaimed; mid-acquire locks keep at least 2s grace
 FM_GUARD_GRACE=300      # seconds before guard warnings, arm health checks, and the primary turn-end guard treat a watcher beacon as stale

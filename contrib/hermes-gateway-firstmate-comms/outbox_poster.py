@@ -4,8 +4,12 @@ Posts pending ``state/ext-outbox`` payloads to the Discord destination stored
 in each payload and records receipts through ``bin/fm-ext-outbox.sh``.
 Unsent payloads (no posting marker, no receipt, no terminal failed marker)
 are retried after restart.
-A transient definite send failure (HTTP 429 or 5xx) before a successful
-response deletes the posting marker so that generation can retry.
+Oversized replies are split with the X-mode Discord budget pattern
+(``FM_EXT_DISCORD_REPLY_MAX_CHARS``, default 1900) and posted in order.
+A later-chunk transient failure records progress so earlier chunks are not
+sent again. An in-flight chunk without a confirmed post stays mid-delivery.
+A transient definite send failure (HTTP 429 or 5xx) before any chunk
+succeeds deletes the posting marker so that generation can retry.
 A permanent 4xx records a terminal failed marker so pending stops retrying.
 A posting marker without a receipt is refused so an ambiguous crash or
 transport error after Discord may have accepted the post cannot double-post.
@@ -214,6 +218,93 @@ def record_failed(payload: dict, reason: dict, home: Path | None = None) -> str:
     raise RuntimeError(result.stderr.strip() or "fail failed")
 
 
+def split_reply(
+    text: str,
+    home: Path | None = None,
+    limit: int | None = None,
+    cap: int | None = None,
+) -> dict:
+    home = home or firstmate_home()
+    args = [str(outbox_cli()), "split"]
+    if limit is not None:
+        args.extend(["--max", str(limit)])
+    if cap is not None:
+        args.extend(["--cap", str(cap)])
+    result = subprocess.run(
+        args,
+        check=False,
+        env=_env_for(home),
+        input=text,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "split failed")
+    data = json.loads(result.stdout)
+    texts = data.get("texts")
+    if not isinstance(texts, list) or not texts:
+        texts = [text]
+    return {
+        "limit": int(data.get("limit") or 1900),
+        "cap": int(data.get("cap") or 25),
+        "texts": [str(item) for item in texts],
+    }
+
+
+def progress_path(payload: dict, home: Path) -> Path:
+    name = f"{payload['slug']}.{payload['kind']}.{payload['generation']}.progress.json"
+    return home / "state" / "ext-outbox" / name
+
+
+def load_progress(payload: dict, home: Path) -> dict | None:
+    path = progress_path(payload, home)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def write_progress(payload: dict, progress: dict, home: Path) -> None:
+    with _temp_json(progress) as progress_file:
+        result = subprocess.run(
+            [
+                str(outbox_cli()),
+                "progress",
+                "--slug",
+                payload["slug"],
+                "--kind",
+                payload["kind"],
+                "--generation",
+                str(payload["generation"]),
+                "--progress-file",
+                progress_file,
+            ],
+            check=False,
+            env=_env_for(home),
+            capture_output=True,
+            text=True,
+        )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "progress failed")
+
+
+def _chunk_payload(payload: dict, text: str, index: int, total: int) -> dict:
+    chunk = dict(payload)
+    chunk["text"] = text
+    chunk["chunk_index"] = index
+    chunk["chunk_count"] = total
+    return chunk
+
+
+def _message_id(receipt: dict) -> str:
+    return str(receipt.get("discord_message_id") or "")
+
+
 class _temp_json:
     def __init__(self, body: dict):
         self.body = body
@@ -278,27 +369,78 @@ def discord_send(payload: dict) -> dict:
 
 def deliver_one(path: Path, send: SendFn | None = None, home: Path | None = None) -> str:
     payload = json.loads(path.read_text(encoding="utf-8"))
+    home = home or firstmate_home()
     status = begin_delivery(payload, home=home)
     if status != "claimed":
         return status
     sender = send or discord_send
+    stored = load_progress(payload, home)
     try:
-        receipt = sender(payload)
-    except Exception as err:
-        outcome = classify_send_failure(err)
-        if outcome == "transient":
-            abort_status = abort_delivery(payload, home=home)
-            if abort_status == "already-receipted":
-                return abort_status
-            return "failed"
-        if outcome == "permanent":
-            fail_status = record_failed(payload, failure_reason(err), home=home)
-            if fail_status == "already-receipted":
-                return fail_status
-            return "terminal-failed"
+        split = split_reply(
+            payload.get("text") or "",
+            home=home,
+            limit=stored.get("limit") if stored else None,
+            cap=stored.get("cap") if stored else None,
+        )
+    except Exception:
+        if stored and int(stored.get("posted_count") or 0) > 0:
+            return "mid-delivery"
+        abort_delivery(payload, home=home)
+        return "failed"
+    chunks = split["texts"]
+    progress = stored or {
+        "total": len(chunks),
+        "posted_count": 0,
+        "inflight": None,
+        "discord_message_ids": [],
+        "limit": split["limit"],
+        "cap": split["cap"],
+    }
+    if int(progress.get("total") or 0) != len(chunks):
         return "mid-delivery"
-    receipt.setdefault("ok", True)
-    record_receipt(payload, receipt, home=home)
+    write_progress(payload, progress, home)
+    start = int(progress.get("posted_count") or 0)
+    ids = list(progress.get("discord_message_ids") or [])
+    for index in range(start, len(chunks)):
+        progress["inflight"] = index
+        write_progress(payload, progress, home)
+        try:
+            receipt = sender(_chunk_payload(payload, chunks[index], index, len(chunks)))
+        except Exception as err:
+            outcome = classify_send_failure(err)
+            if outcome == "transient":
+                progress["inflight"] = None
+                write_progress(payload, progress, home)
+                if int(progress.get("posted_count") or 0) == 0:
+                    abort_status = abort_delivery(payload, home=home)
+                    if abort_status == "already-receipted":
+                        return abort_status
+                    return "failed"
+                return "failed"
+            if outcome == "permanent":
+                fail_status = record_failed(payload, failure_reason(err), home=home)
+                if fail_status == "already-receipted":
+                    return fail_status
+                return "terminal-failed"
+            return "mid-delivery"
+        if not isinstance(receipt, dict):
+            receipt = {}
+        ids.append(_message_id(receipt))
+        progress["discord_message_ids"] = ids
+        progress["posted_count"] = index + 1
+        progress["inflight"] = None
+        write_progress(payload, progress, home)
+    record_receipt(
+        payload,
+        {
+            "ok": True,
+            "discord_message_id": ids[0] if ids else "",
+            "discord_message_ids": ids,
+            "chunks": len(chunks),
+            "channel_id": str(payload.get("thread_id") or payload.get("channel_id") or ""),
+        },
+        home=home,
+    )
     return "sent"
 
 

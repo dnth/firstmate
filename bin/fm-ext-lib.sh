@@ -457,6 +457,116 @@ fm_ext_outbox_failed_basename() {
   printf '%s.%s.%s.failed.json\n' "$slug" "$kind" "$generation"
 }
 
+fm_ext_outbox_progress_basename() {
+  local slug=$1 kind=$2 generation=$3
+  fm_ext_slug_valid "$slug" || return 1
+  fm_ext_kind_valid "$kind" || return 1
+  fm_ext_generation_valid "$generation" || return 1
+  printf '%s.%s.%s.progress.json\n' "$slug" "$kind" "$generation"
+}
+
+# Discord per-message split budget. Copies the FMX_DISCORD_REPLY_MAX_CHARS
+# clamp (default 1900, min 50, values above 2000 reset to 1900) without
+# reading X-mode env or requiring FMX_PAIRING_TOKEN.
+fm_ext_discord_reply_max_chars() {
+  local raw=${1:-${FM_EXT_DISCORD_REPLY_MAX_CHARS-}}
+  case "$raw" in
+    ''|*[!0-9]*) raw=1900 ;;
+  esac
+  [ "$raw" -ge 50 ] 2>/dev/null || raw=50
+  [ "$raw" -le 2000 ] 2>/dev/null || raw=1900
+  printf '%s\n' "$raw"
+}
+
+# Maximum messages in one auto-split Discord thread. Copies FMX_X_THREAD_MAX
+# (default 25) without reading X-mode env.
+fm_ext_discord_thread_max() {
+  local raw=${1:-${FM_EXT_DISCORD_THREAD_MAX-}}
+  case "$raw" in
+    ''|*[!0-9]*) raw=25 ;;
+  esac
+  [ "$raw" -ge 1 ] 2>/dev/null || raw=25
+  printf '%s\n' "$raw"
+}
+
+# Split a reply into a numbered thread of <=<max>-codepoint chunks.
+# Copied from fmx_split_thread in bin/fm-x-lib.sh; do not source that file.
+# Reads the reply text on stdin and prints a compact JSON array of chunks.
+fm_ext_split_thread() {
+  jq -Rsc --argjson limit "$1" --argjson cap "$2" '
+    def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
+    def fence_marker: test("^[[:space:]]*```");
+    def fence_count: ((split("```") | length) - 1);
+    def numbered($i; $n):
+      "(\($i + 1)/\($n))" as $mark
+      | if ((fence_count % 2) == 0) and (split("\n")[-1] | fence_marker)
+        then . + "\n" + $mark
+        else . + " " + $mark
+        end;
+    def hardsplit($b): . as $s | [range(0; ($s|length); $b) as $i | $s[$i:$i+$b]];
+    def wordsplit($b):
+      (gsub("[[:space:]]+"; " ") | trim) as $norm
+      | if ($norm | length) == 0 then []
+        else
+          [ $norm | split(" ")[] | if (length > $b) then hardsplit($b)[] else . end ] as $words
+          | (reduce $words[] as $w ({chunks: [], cur: ""};
+              (if .cur == "" then $w else .cur + " " + $w end) as $cand
+              | if ($cand | length) <= $b then .cur = $cand
+                else .chunks += (if .cur == "" then [] else [.cur] end) | .cur = $w end
+            )) as $st
+          | $st.chunks + (if $st.cur != "" then [$st.cur] else [] end)
+        end;
+    def split_units:
+      split("\n") as $lines
+      | (reduce $lines[] as $line ({units: [], cur: "", fence: false};
+          if .fence then
+            .cur = (if .cur == "" then $line else .cur + "\n" + $line end)
+            | if ($line | fence_marker) then .units += [.cur] | .cur = "" | .fence = false else . end
+          elif ($line | fence_marker) then
+            (if .cur != "" then .units += [.cur] | .cur = "" else . end)
+            | .cur = $line
+            | .fence = true
+          elif ($line | test("^[[:space:]]*$")) then
+            if .cur != "" then .units += [.cur] | .cur = "" else . end
+          else
+            ($line | trim) as $clean
+            | .cur = (if .cur == "" then $clean else .cur + " " + $clean end)
+          end
+        )) as $st
+      | ($st.units + (if $st.cur != "" then [$st.cur] else [] end))
+      | map(select((trim | length) > 0));
+    def pack_units($units; $b):
+      (reduce $units[] as $u ({chunks: [], cur: ""};
+        if ($u | length) > $b then
+          (if .cur != "" then .chunks += [.cur] | .cur = "" else . end)
+          | .chunks += ($u | wordsplit($b))
+        else
+          (if .cur == "" then $u else .cur + "\n\n" + $u end) as $cand
+          | if ($cand | length) <= $b then .cur = $cand
+            else .chunks += (if .cur == "" then [] else [.cur] end) | .cur = $u end
+        end
+      )) as $st
+      | $st.chunks + (if $st.cur != "" then [$st.cur] else [] end);
+    def split_thread($limit; $cap):
+      trim as $norm
+      | if ($norm | length) == 0 then []
+        elif ($norm | length) <= $limit then [$norm]
+        else
+          ($cap | tostring | length) as $digits
+          | (4 + 2 * $digits) as $suffixw
+          | (if ($limit - $suffixw - 1) < 1 then 1 else ($limit - $suffixw - 1) end) as $budget
+          | ($norm | split_units) as $units
+          | pack_units($units; $budget) as $raw
+          | (if ($raw | length) > $cap
+              then ($raw[0:$cap] | (.[($cap - 1)] += "…"))
+              else $raw end) as $kept
+          | ($kept | length) as $n
+          | [ range(0; $n) as $i | $kept[$i] | numbered($i; $n) ]
+        end;
+    split_thread($limit; $cap)
+  '
+}
+
 # fm_ext_outbox_schema_valid <file>: payload has required fields and matching slug.
 fm_ext_outbox_schema_valid() {
   local file=$1
@@ -477,10 +587,11 @@ fm_ext_outbox_schema_valid() {
   ' "$file" >/dev/null 2>&1
 }
 
-# Begin delivery: CAS the posting marker. Returns 0 on claim, 1 when a valid
-# receipt already exists (idempotent success), 4 when a terminal failed marker
-# exists, 3 when a posting marker exists without a receipt (mid-send refuse),
-# 2 on validation/publication failure.
+# Begin delivery: CAS the posting marker. Returns 0 on a new claim or a
+# resumable in-progress split (posting plus progress with no in-flight chunk),
+# 1 when a valid receipt already exists (idempotent success), 4 when a terminal
+# failed marker exists, 3 when a posting marker exists without a receipt and
+# is not resumable (mid-send refuse), 2 on validation/publication failure.
 fm_ext_outbox_begin() {
   local dir=$1 slug=$2 kind=$3 generation=$4 payload posting receipt failed now rc
   payload=$(fm_ext_outbox_basename "$slug" "$kind" "$generation") || return 2
@@ -495,6 +606,9 @@ fm_ext_outbox_begin() {
     return 4
   fi
   if fm_ext_private_artifact_file_valid "$dir" "$posting" 600; then
+    if fm_ext_outbox_progress_resumable "$dir" "$slug" "$kind" "$generation"; then
+      return 0
+    fi
     return 3
   fi
   now=${FM_EXT_NOW_OVERRIDE:-$(date +%s)}
@@ -542,10 +656,11 @@ fm_ext_outbox_receipt() {
 # transport error after the post started keeps the marker; this helper is
 # only for the transient definite-failure path.
 fm_ext_outbox_abort() {
-  local dir=$1 slug=$2 kind=$3 generation=$4 posting receipt failed
+  local dir=$1 slug=$2 kind=$3 generation=$4 posting receipt failed progress
   posting=$(fm_ext_outbox_posting_basename "$slug" "$kind" "$generation") || return 2
   receipt=$(fm_ext_outbox_receipt_basename "$slug" "$kind" "$generation") || return 2
   failed=$(fm_ext_outbox_failed_basename "$slug" "$kind" "$generation") || return 2
+  progress=$(fm_ext_outbox_progress_basename "$slug" "$kind" "$generation") || return 2
   if fm_ext_private_artifact_file_valid "$dir" "$receipt" 600; then
     return 1
   fi
@@ -553,6 +668,7 @@ fm_ext_outbox_abort() {
     return 1
   fi
   fm_ext_private_artifact_remove "$dir" "$posting" 600 || return 2
+  fm_ext_private_artifact_remove "$dir" "$progress" 600 || return 2
   return 0
 }
 
@@ -591,6 +707,26 @@ fm_ext_outbox_fail() {
       ;;
     *) return 2 ;;
   esac
+}
+
+# True when a generation posting may resume remaining chunks: progress exists,
+# no chunk is in-flight, and posted_count/total are numbers.
+fm_ext_outbox_progress_resumable() {
+  local dir=$1 slug=$2 kind=$3 generation=$4 progress
+  progress=$(fm_ext_outbox_progress_basename "$slug" "$kind" "$generation") || return 1
+  fm_ext_private_artifact_file_valid "$dir" "$progress" 600 || return 1
+  jq -e '.inflight == null
+    and (.posted_count | type == "number")
+    and (.total | type == "number")' "$dir/$progress" >/dev/null 2>&1
+}
+
+# Replace the chunk-progress artifact. Returns 0 on write, 2 on failure.
+fm_ext_outbox_progress() {
+  local dir=$1 slug=$2 kind=$3 generation=$4 progress_json=$5 progress
+  progress=$(fm_ext_outbox_progress_basename "$slug" "$kind" "$generation") || return 2
+  [ -n "$progress_json" ] || return 2
+  printf '%s\n' "$progress_json" \
+    | fm_ext_private_artifact_publish_stdin "$dir" "$progress" 600
 }
 
 # --- poll shim --------------------------------------------------------------

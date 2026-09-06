@@ -35,6 +35,8 @@ The slash handler returns a fast ack without waiting for Firstmate to finish the
 
 An outbox watcher drains `state/ext-outbox/` through `bin/fm-ext-outbox.sh`.
 Unsent payloads retry after a gateway restart.
+Oversized replies split with `FM_EXT_DISCORD_REPLY_MAX_CHARS` (default 1900) and post as ordered Discord messages in the same thread.
+That split does not use `FMX_PAIRING_TOKEN` or the hosted relay.
 A transient definite send failure (HTTP 429 or 5xx) before a successful Discord response deletes the posting marker so that generation can retry.
 A permanent 4xx records a terminal failed marker so pending stops retrying that generation.
 A posting marker without a receipt is refused so an ambiguous crash or transport error after Discord may have accepted the post cannot double-post.

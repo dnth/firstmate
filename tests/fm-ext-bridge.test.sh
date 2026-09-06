@@ -2,8 +2,8 @@
 # Behavior tests for the sibling local Communication Officer bridge.
 #
 # Hermetic: no Discord network. The gateway plugin's Discord sender is injected.
-# Captain cases 1-12 plus bootstrap activation, transient-send retry,
-# mid-delivery refuse, permanent 4xx, and wake-append offer recovery.
+# Captain cases 1-12 plus bootstrap activation, send-failure classes,
+# wake-append offer recovery, and Discord reply splitting.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -674,6 +674,153 @@ PY
   pass "17 permanent 4xx is terminal failed, not endless retry"
 }
 
+# --- 18. text under the Discord budget posts once ---------------------------
+
+test_18_under_limit_is_one_post() {
+  local home slug sent out n
+  home="$TMP_ROOT/c18"
+  setup_home "$home"
+  slug=$(intake_ok "$home" "short reply")
+  write_text "$home/ans.txt" "Aye, all shipshape."
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+    --text-file "$home/ans.txt" >/dev/null
+  sent="$home/sent.log"
+  : > "$sent"
+  out=$(home_env "$home" env FM_EXT_DISCORD_REPLY_MAX_CHARS=50 \
+    PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$sent" <<'PY'
+import os, sys
+from pathlib import Path
+sys.path.insert(0, os.environ["PYTHONPATH"])
+import outbox_poster
+home, sent = sys.argv[1], sys.argv[2]
+os.environ["FM_HOME"] = home
+def send(payload):
+    with open(sent, "a", encoding="utf-8") as fh:
+        fh.write(payload["text"] + "\n")
+    return {"ok": True, "discord_message_id": "18"}
+print(",".join(outbox_poster.drain_outbox(send=send, home=Path(home))))
+PY
+  )
+  assert_contains "$out" "sent" "under-limit reply must send"
+  n=$(wc -l < "$sent" | tr -d ' ')
+  [ "$n" = 1 ] || fail "under-limit reply must be one post, got $n"
+  assert_grep "Aye, all shipshape." "$sent" "under-limit post must be the unnumbered text"
+  pass "18 text under the Discord budget is one post"
+}
+
+# --- 19. text over the budget posts ordered chunks without X pairing --------
+
+test_19_over_limit_posts_chunks_in_order_without_fmx_token() {
+  local home slug sent out n first last
+  home="$TMP_ROOT/c19"
+  setup_home "$home"
+  slug=$(intake_ok "$home" "long reply")
+  write_text "$home/ans.txt" \
+    "The captain has me on a sign-in redirect fix, a docs tidy, and keeping the build green while other jobs run in the background today."
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+    --text-file "$home/ans.txt" >/dev/null
+  sent="$home/sent.log"
+  : > "$sent"
+  out=$(home_env "$home" env -u FMX_PAIRING_TOKEN -u FMX_RELAY_URL \
+    FM_EXT_DISCORD_REPLY_MAX_CHARS=50 PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$sent" <<'PY'
+import os, sys
+from pathlib import Path
+sys.path.insert(0, os.environ["PYTHONPATH"])
+import outbox_poster
+home, sent = sys.argv[1], sys.argv[2]
+os.environ["FM_HOME"] = home
+os.environ.pop("FMX_PAIRING_TOKEN", None)
+os.environ.pop("FMX_RELAY_URL", None)
+def send(payload):
+    with open(sent, "a", encoding="utf-8") as fh:
+        fh.write(payload["text"] + "\n")
+    return {"ok": True, "discord_message_id": str(payload["chunk_index"])}
+print("token=" + os.environ.get("FMX_PAIRING_TOKEN", ""))
+print("result=" + ",".join(outbox_poster.drain_outbox(send=send, home=Path(home))))
+PY
+  )
+  assert_contains "$out" "token=" "token probe must print"
+  printf '%s\n' "$out" | awk -F= '/^token=/{print $2}' | grep -q . \
+    && fail "split must not require FMX_PAIRING_TOKEN"
+  assert_contains "$out" "result=sent" "over-limit reply must send after split"
+  n=$(wc -l < "$sent" | tr -d ' ')
+  [ "$n" -gt 1 ] || fail "over-limit reply must post more than one message, got $n"
+  first=$(sed -n '1p' "$sent")
+  last=$(tail -n 1 "$sent")
+  case "$first" in *" (1/$n)") : ;; *) fail "first chunk must be numbered (1/$n): $first" ;; esac
+  case "$last" in *" ($n/$n)") : ;; *) fail "last chunk must be numbered ($n/$n): $last" ;; esac
+  awk -v lim=50 'length($0)>lim{exit 1}' "$sent" \
+    || fail "every Discord chunk must stay within the 50-character budget"
+  assert_present "$home/state/ext-outbox/${slug}.answer.1.receipt.json" \
+    "split delivery must write one receipt for the generation"
+  pass "19 over-limit text posts ordered chunks without FMX_PAIRING_TOKEN"
+}
+
+# --- 20. later-chunk transient failure resumes without reposting ------------
+
+test_20_later_chunk_transient_resumes_without_repost() {
+  local home slug sent1 sent2 posting progress out first
+  home="$TMP_ROOT/c20"
+  setup_home "$home"
+  slug=$(intake_ok "$home" "resume split")
+  write_text "$home/ans.txt" \
+    "The captain has me on a sign-in redirect fix, a docs tidy, and keeping the build green while other jobs run in the background today."
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+    --text-file "$home/ans.txt" >/dev/null
+  sent1="$home/sent1.log"
+  sent2="$home/sent2.log"
+  posting="$home/state/ext-outbox/${slug}.answer.1.posting"
+  progress="$home/state/ext-outbox/${slug}.answer.1.progress.json"
+  : > "$sent1"
+  : > "$sent2"
+  out=$(home_env "$home" env FM_EXT_DISCORD_REPLY_MAX_CHARS=50 \
+    PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$sent1" <<'PY'
+import io, os, sys, urllib.error
+from email.message import EmailMessage
+from pathlib import Path
+sys.path.insert(0, os.environ["PYTHONPATH"])
+import outbox_poster
+home, sent = sys.argv[1], sys.argv[2]
+os.environ["FM_HOME"] = home
+def send(payload):
+    if payload["chunk_index"] > 0:
+        raise urllib.error.HTTPError(
+            "https://discord.test/messages", 503, "unavailable",
+            EmailMessage(), io.BytesIO(b""),
+        )
+    with open(sent, "a", encoding="utf-8") as fh:
+        fh.write(payload["text"] + "\n")
+    return {"ok": True, "discord_message_id": "20a"}
+print(",".join(outbox_poster.drain_outbox(send=send, home=Path(home))))
+PY
+  )
+  assert_contains "$out" "failed" "later-chunk 503 must return failed"
+  assert_present "$posting" "partial success must keep the posting marker for resume"
+  assert_present "$progress" "partial success must record chunk progress"
+  assert_grep '"posted_count": 1' "$progress" "progress must record the first posted chunk"
+  first=$(cat "$sent1")
+  [ -n "$first" ] || fail "first chunk must have posted before the later 503"
+  out=$(home_env "$home" env FM_EXT_DISCORD_REPLY_MAX_CHARS=50 \
+    PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$sent2" <<'PY'
+import os, sys
+from pathlib import Path
+sys.path.insert(0, os.environ["PYTHONPATH"])
+import outbox_poster
+home, sent = sys.argv[1], sys.argv[2]
+os.environ["FM_HOME"] = home
+def send(payload):
+    with open(sent, "a", encoding="utf-8") as fh:
+        fh.write(payload["text"] + "\n")
+    return {"ok": True, "discord_message_id": "20b"}
+print(",".join(outbox_poster.drain_outbox(send=send, home=Path(home))))
+PY
+  )
+  assert_contains "$out" "sent" "resume after later-chunk 503 must finish the remaining chunks"
+  grep -Fqx "$first" "$sent2" && fail "resume must not repost the already sent first chunk"
+  [ -s "$sent2" ] || fail "resume must post the remaining chunks"
+  pass "20 later-chunk transient failure resumes without reposting earlier chunks"
+}
+
 # --- bootstrap opt-in -------------------------------------------------------
 
 test_bootstrap_arms_ext_watch_shim() {
@@ -723,6 +870,9 @@ test_14_mid_delivery_refuses_plugin_repost
 test_15_wake_failure_does_not_leave_silent_offered
 test_16_ambiguous_urlerror_keeps_mid_delivery
 test_17_permanent_4xx_is_terminal_failed
+test_18_under_limit_is_one_post
+test_19_over_limit_posts_chunks_in_order_without_fmx_token
+test_20_later_chunk_transient_resumes_without_repost
 test_bootstrap_arms_ext_watch_shim
 test_poll_noop_when_inactive
 test_plugin_has_no_terminal_dispatch
