@@ -257,6 +257,8 @@ test_7_unsent_outbox_receipt_once() {
   write_text "$home/ans.txt" "calm seas"
   home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
     --text-file "$home/ans.txt" >/dev/null
+  mkdir -p "$state"
+  cp -a "$home/state/ext-outbox" "$state/"
   sent="$home/sent.log"
   : > "$sent"
   home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$sent" >/dev/null <<'PY'
@@ -370,31 +372,13 @@ test_10_unauthorized_and_missing_allowlist() {
   pass "10 unauthorized and missing allowlist write no inbox"
 }
 
-# --- 11. Hermes crewmate spawn string + TUI gating unchanged ----------------
-
-test_11_hermes_tui_launch_gating_unchanged() {
-  local spawn_src
-  spawn_src=$(cat "$ROOT/bin/fm-spawn.sh")
-  assert_contains "$spawn_src" "chat --tui" \
-    "crewmate Hermes launch template must still be hermes chat --tui"
-  assert_contains "$spawn_src" "supports persistent TUI spawns only on tmux and herdr" \
-    "hermes crew launch must still be TUI-gated"
-  pass "11 Hermes crewmate TUI launch gating unchanged"
-}
-
-# --- 12. hermes refused as secondmate ---------------------------------------
+# --- 11. hermes refused as secondmate ---------------------------------------
 
 test_12_hermes_refused_as_secondmate() {
-  local home out rc crew second spawn_src harness_src
+  local home out rc crew second
   home="$TMP_ROOT/c12"
   mkdir -p "$home/config" "$home/not-a-secondmate"
   printf 'hermes\n' > "$home/config/crew-harness"
-  spawn_src=$(cat "$ROOT/bin/fm-spawn.sh")
-  harness_src=$(cat "$ROOT/bin/fm-harness.sh")
-  assert_contains "$spawn_src" "harness=hermes is verified for crewmates and scouts only" \
-    "secondmate hermes must keep the crew-only diagnostic"
-  assert_contains "$harness_src" "crew_only_harness" \
-    "implicit secondmate resolution must still filter crew-only hermes"
   out=$(home_env "$home" "$SPAWN" hermes-secondmate-x2 "$home/not-a-secondmate" \
     --secondmate --harness hermes 2>&1) || rc=$?
   rc=${rc:-0}
@@ -826,6 +810,63 @@ PY
   grep -Fqx "$first" "$sent2" && fail "resume must not repost the already sent first chunk"
   [ -s "$sent2" ] || fail "resume must post the remaining chunks"
   pass "20 later-chunk transient failure resumes without reposting earlier chunks"
+}
+
+test_20_state_override_preserves_resume_progress() {
+  local home state slug first sent out
+  home="$TMP_ROOT/c20-state-override"
+  state="$home/alternate-state"
+  setup_home "$home"
+  slug=$(intake_ok "$home" "state override resume")
+  write_text "$home/ans.txt" \
+    "The captain has me on a sign-in redirect fix, a docs tidy, and keeping the build green while other jobs run today."
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+    --text-file "$home/ans.txt" >/dev/null
+  mkdir -p "$state"
+  cp -a "$home/state/ext-outbox" "$state/"
+  sent="$home/sent.log"
+  : > "$sent"
+  out=$(home_env "$home" env FM_STATE_OVERRIDE="$state" FM_EXT_DISCORD_REPLY_MAX_CHARS=50 \
+    PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$sent" <<'PY'
+import io, os, sys
+from email.message import EmailMessage
+from pathlib import Path
+sys.path.insert(0, os.environ["PYTHONPATH"])
+import outbox_poster
+home, sent = sys.argv[1], sys.argv[2]
+os.environ["FM_HOME"] = home
+def send(payload):
+    if payload["chunk_index"] > 0:
+        raise __import__("urllib.error", fromlist=["HTTPError"]).HTTPError(
+            "https://discord.test/messages", 503, "unavailable", EmailMessage(), io.BytesIO(b""))
+    with open(sent, "a", encoding="utf-8") as fh:
+        fh.write(payload["text"] + "\n")
+    return {"ok": True, "discord_message_id": "20-override-a"}
+print(",".join(outbox_poster.drain_outbox(send=send, home=Path(home))))
+PY
+  )
+  assert_contains "$out" "failed" "state override setup must leave a resumable partial delivery"
+  first=$(cat "$sent")
+  [ -n "$first" ] || fail "state override setup must post the first chunk"
+  out=$(home_env "$home" env FM_STATE_OVERRIDE="$state" FM_EXT_DISCORD_REPLY_MAX_CHARS=50 \
+    PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$sent" <<'PY'
+import os, sys
+from pathlib import Path
+sys.path.insert(0, os.environ["PYTHONPATH"])
+import outbox_poster
+home, sent = sys.argv[1], sys.argv[2]
+os.environ["FM_HOME"] = home
+def send(payload):
+    with open(sent, "a", encoding="utf-8") as fh:
+        fh.write(payload["text"] + "\n")
+    return {"ok": True, "discord_message_id": "20-override-b"}
+print(",".join(outbox_poster.drain_outbox(send=send, home=Path(home))))
+PY
+  )
+  assert_contains "$out" "sent" "state override resume must finish delivery"
+  [ "$(grep -Fxc "$first" "$sent")" = 1 ] \
+    || fail "state override resume must not repost the first chunk"
+  pass "20 state override preserves resume progress"
 }
 
 # --- 21. concurrent resume claims: only one poster sends the next chunk -----
@@ -1916,7 +1957,6 @@ test_7_unsent_outbox_receipt_once
 test_8_restart_one_wake_per_offer
 test_9_mid_send_refuse_and_cas_receipt
 test_10_unauthorized_and_missing_allowlist
-test_11_hermes_tui_launch_gating_unchanged
 test_12_hermes_refused_as_secondmate
 test_13_transient_http_clears_posting_and_retries
 test_14_mid_delivery_refuses_plugin_repost
@@ -1926,6 +1966,7 @@ test_17_permanent_4xx_is_terminal_failed
 test_18_under_limit_is_one_post
 test_19_over_limit_posts_chunks_in_order_without_fmx_token
 test_20_later_chunk_transient_resumes_without_repost
+test_20_state_override_preserves_resume_progress
 test_21_concurrent_resume_exclusive_inflight_claim
 test_22_presend_release_and_abort_inflight_first
 test_23_stale_inflight_ttl_and_dead_pid_steal

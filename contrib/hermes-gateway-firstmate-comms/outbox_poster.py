@@ -88,6 +88,11 @@ def outbox_cli() -> Path:
     return firstmate_root() / "bin" / "fm-ext-outbox.sh"
 
 
+def state_dir(home: Path) -> Path:
+    override = os.environ.get("FM_STATE_OVERRIDE")
+    return Path(override) if override else home / "state"
+
+
 def _env_for(home: Path) -> dict[str, str]:
     env = os.environ.copy()
     env["FM_HOME"] = str(home)
@@ -285,7 +290,7 @@ def split_reply(
 
 def progress_path(payload: dict, home: Path) -> Path:
     name = f"{payload['slug']}.{payload['kind']}.{payload['generation']}.progress.json"
-    return home / "state" / "ext-outbox" / name
+    return state_dir(home) / "ext-outbox" / name
 
 
 def load_progress(payload: dict, home: Path) -> dict | None:
