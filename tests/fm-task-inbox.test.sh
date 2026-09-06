@@ -67,10 +67,17 @@ case "${1:-}" in
       esac
     done
     if [ "$literal" = 1 ]; then
+      if [ -n "${FM_SEND_GATE:-}" ]; then
+        : > "$FM_SEND_GATE"
+        while [ ! -f "${FM_SEND_RELEASE:-}" ]; do sleep 0.02; done
+        exit 0
+      fi
       printf '%s\n' "${1:-}" >> "${FM_SEND_LOG:-/dev/null}"
       if [ -n "${FM_ACK_RECORD:-}" ] && [ -f "$FM_ACK_RECORD" ]; then
         mv "$FM_ACK_RECORD" "${FM_ACK_RECORD%/*}/handled/"
       fi
+    elif [ -n "${FM_ANY_SEND_LOG:-}" ]; then
+      printf '%s\n' "${1:-}" >> "$FM_ANY_SEND_LOG"
     fi
     exit 0 ;;
   display-message)
@@ -380,6 +387,56 @@ EOF
   pass "inbox: concurrent Hermes doorbells serialize into whole terminal lines"
 }
 
+test_hermes_ring_signal_releases_without_delivery() {
+  local state fb rec log anylog gate release ring_pid ring_child rc i=0
+  read -r state fb rec <<EOF
+$(setup_ring_case hermes-ring-signal)
+EOF
+  log="$TMP_ROOT/hermes-ring-signal/send.log"
+  anylog="$TMP_ROOT/hermes-ring-signal/any-send.log"
+  gate="$TMP_ROOT/hermes-ring-signal/send.gate"
+  release="$TMP_ROOT/hermes-ring-signal/send.release"
+  : > "$log"
+  : > "$anylog"
+  PATH="$fb:$PATH" FM_STATE_OVERRIDE="$state" FM_SEND_LOG="$log" \
+    FM_SEND_GATE="$gate" FM_SEND_RELEASE="$release" FM_ANY_SEND_LOG="$anylog" \
+    FM_TASK_INBOX_LOCK_WAIT_SECS=5 bash -c '
+      . "$1"
+      fm_task_inbox_ring tmux fakewin "$2" fm-t1 hermes
+    ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$rec" &
+  ring_pid=$!
+  while [ "$i" -lt 500 ]; do
+    [ -f "$gate" ] && break
+    kill -0 "$ring_pid" 2>/dev/null || break
+    sleep 0.02
+    i=$((i + 1))
+  done
+  [ -f "$gate" ] || { kill "$ring_pid" 2>/dev/null || true; wait "$ring_pid" 2>/dev/null || true; fail "the fake backend never entered the delivery critical section"; }
+  ring_child=$ring_pid
+  while :; do
+    next_child=$(pgrep -P "$ring_child" | while read -r pid; do
+      ps -o args= -p "$pid" 2>/dev/null | grep -qF 'fm-task-inbox-lib.sh' && printf '%s\n' "$pid"
+    done | tail -n 1)
+    [ -n "$next_child" ] || break
+    ring_child=$next_child
+  done
+  [ "$ring_child" != "$ring_pid" ] || ring_child=
+  [ -n "$ring_child" ] || { kill "$ring_pid" 2>/dev/null || true; wait "$ring_pid" 2>/dev/null || true; fail "the ring critical-section process could not be identified"; }
+  kill -TERM "$ring_child"
+  : > "$release"
+  rc=0
+  wait "$ring_pid" || rc=$?
+  expect_code 2 "$rc" "a signaled Hermes ring must fail without resuming delivery"
+  [ ! -s "$log" ] || fail "a signaled Hermes ring wrote a doorbell after releasing its lock"
+  [ ! -s "$anylog" ] || fail "a signaled Hermes ring resumed into a later terminal operation: $(cat "$anylog")"
+  rc=0
+  ring_lib "$state" "$fb" "$log" "$rec" hermes 1 || rc=$?
+  expect_code 0 "$rc" "the shared delivery lock must be free after a signaled ring"
+  assert_grep 'Firstmate instruction waiting' "$log" \
+    "the next Hermes ring should acquire the released lock and deliver"
+  pass "inbox: a signaled Hermes ring releases its lock and aborts before delivery"
+}
+
 setup_watch_case() {  # <name> -> echoes case dir; state in <dir>/state
   local name=$1 dir
   dir="$TMP_ROOT/$name"
@@ -550,6 +607,7 @@ test_ring_ladder_policy
 test_hermes_ring_refuses_while_delivery_lock_is_held
 test_hermes_ring_recovers_after_lock_holder_exits
 test_hermes_concurrent_rings_never_interleave
+test_hermes_ring_signal_releases_without_delivery
 test_watcher_rerings_idle_pane_quietly
 test_watcher_waits_on_busy_pane
 test_watcher_quiet_on_healthy_inbox

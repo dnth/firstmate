@@ -280,9 +280,9 @@ fm_task_inbox_ring_deliver() {  # <backend> <target> <record-path> [expected-lab
 # singleton lock, then this lock, and the inbox sequence and metadata locks are
 # both released before the ring), and fm_lock_try_acquire reclaims the lock from
 # a holder that exited, so no cycle and no stuck holder is reachable.
-# The subshell exists to release on the signal paths too: the trap is installed
-# only AFTER a proven acquisition, so a refusal never releases another owner's
-# lock.
+# The subshell releases the lock on signal paths and exits after doing so, and
+# installs that trap only AFTER a proven acquisition so a refusal never releases
+# another owner's lock.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [harness] [omp-runtime] [omp-bin]
   local rec=$3 harness=${5:-} inbox stem lock
   if [ "$harness" != hermes ]; then
@@ -294,7 +294,8 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [har
   lock=$(fm_task_inbox_hermes_delivery_lock_path "${stem%/*}" "${stem##*/}")
   (
     fm_task_inbox_lock_acquire "$lock" || exit 5
-    trap 'fm_lock_release "$lock" || true' EXIT HUP INT TERM
+    trap 'fm_lock_release "$lock" || true' EXIT
+    trap 'fm_lock_release "$lock" || true; exit 2' HUP INT TERM
     fm_task_inbox_ring_deliver "$@"
   )
 }
