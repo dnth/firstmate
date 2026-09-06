@@ -116,6 +116,16 @@ test_idle_placeholder_case_mode_is_explicit() {
   pass "fm_composer_classify_content: idle matching preserves the caller's case mode"
 }
 
+test_omc_empty_prompt_glyph_is_idle_but_typed_text_is_pending() {
+  local out idle=$FM_COMPOSER_IDLE_RE
+  # OMC's [OMC#...] Claude footer leaves a lone ✻ in the otherwise-empty composer.
+  out=$(classify 0 '✻' "$idle")
+  [ "$out" = empty ] || fail "the empty OMC prompt glyph should read empty, got '$out'"
+  out=$(classify 0 '✻ validate the findings' "$idle")
+  [ "$out" = pending ] || fail "typed text after the OMC prompt glyph should read pending, got '$out'"
+  pass "fm_composer_classify_content: OMC's empty prompt glyph is idle without hiding typed text"
+}
+
 # --- Real text is pending ---------------------------------------------------
 
 test_real_text_is_pending() {
@@ -245,6 +255,7 @@ test_agent_glyphs_are_empty_bordered_and_bare
 test_empty_content_is_empty
 test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit
+test_omc_empty_prompt_glyph_is_idle_but_typed_text_is_pending
 test_real_text_is_pending
 test_standalone_width_has_fixed_unicode_contract
 test_standalone_width_matches_bun_for_unicode_graphemes
