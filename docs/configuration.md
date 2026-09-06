@@ -591,12 +591,15 @@ There is no 30-second cadence override; intake wakes immediately and the default
 Re-emitting the same identity is a no-op success.
 A posting marker without a receipt is refused as mid-delivery, matching public-follow-up delivery-posting behavior.
 That refuse covers an ambiguous crash or transport error after Discord may have accepted the post.
-`bin/fm-ext-outbox.sh begin` CAS-claims that posting marker; `receipt` writes the receipt once.
+`bin/fm-ext-outbox.sh begin` CAS-claims that posting marker and an exclusive per-generation inflight send marker before any send, so two posters cannot both send the same chunk.
+`receipt` writes the receipt once.
 `abort` deletes the posting marker after a transient definite send failure (HTTP 429 or 5xx) so that generation can retry.
 `fail` records a terminal failed marker after a permanent 4xx so pending stops retrying that generation.
 The gateway poster splits oversized Discord replies with the same numbered-thread algorithm X mode uses for Discord, driven by `FM_EXT_DISCORD_REPLY_MAX_CHARS` (default 1900, min 50, values above 2000 reset to 1900) and `FM_EXT_DISCORD_THREAD_MAX` (default 25).
 A reply that already fits is one unnumbered message; a longer reply is posted as ordered `(k/n)` chunks into the same thread.
-Chunk progress is recorded so a later-chunk retry does not send earlier chunks again; an ambiguous failure after a chunk may have been accepted stays mid-delivery for that chunk.
+Chunk progress is recorded so a later-chunk retry does not send earlier chunks again.
+A later-chunk transient failure then releases the inflight marker so only one poster can resume the next chunk.
+An ambiguous failure after a chunk may have been accepted stays mid-delivery for that chunk.
 This split does not use `FMX_PAIRING_TOKEN` or the hosted relay.
 Unsent payloads (no posting marker, no receipt, and no terminal failed marker) remain deliverable after a Hermes Gateway restart.
 `bin/fm-ext-link.sh` binds a spawned task to the canonical `request_id` as `ext_request=` / `ext_request_slug=` / `ext_request_ts=` / `ext_followups=`, never `x_request=`.

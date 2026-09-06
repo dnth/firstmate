@@ -11,20 +11,28 @@
 #     --reason-file <path>
 #   fm-ext-outbox.sh progress --slug <slug> --kind <kind> --generation <n>
 #     --progress-file <path>
+#   fm-ext-outbox.sh release --slug <slug> --kind <kind> --generation <n>
 #   fm-ext-outbox.sh split [--max <n>] [--cap <n>]
 #
-# begin CAS-claims the posting marker. Exit 0 on a new claim or a resumable
-# split (posting plus progress with no in-flight chunk), 1 when a receipt
-# already exists (idempotent success), 3 on mid-delivery (posting without
-# a resumable progress record), 4 when a terminal failed marker exists, 2 on
-# validation failure. receipt writes the receipt once.
-# abort deletes the posting marker and chunk progress after a transient
-# definite send failure (HTTP 429 or 5xx) before any chunk succeeded so that
-# generation can retry. It refuses when a receipt or terminal failed marker
-# already exists. An ambiguous crash or transport error after a chunk post
-# started keeps the marker. fail records a terminal failed marker after a
-# permanent 4xx so pending stops retrying that generation.
+# begin CAS-claims the posting marker, then CAS-claims an exclusive inflight
+# send marker before returning a send right. Exit 0 on a new claim or a
+# resumable split this caller exclusively claimed, 1 when a receipt already
+# exists (idempotent success), 3 on mid-delivery (posting without this
+# caller owning the next send), 4 when a terminal failed marker exists, 2 on
+# validation failure. Two concurrent begins cannot both get the send right
+# for the same generation and chunk. receipt writes the receipt once and
+# releases a leftover inflight marker.
+# abort deletes the posting marker, chunk progress, and inflight marker after
+# a transient definite send failure (HTTP 429 or 5xx) before any chunk
+# succeeded so that generation can retry. It refuses when a receipt or
+# terminal failed marker already exists. An ambiguous crash or transport
+# error after a chunk post started keeps the posting and inflight markers.
+# fail records a terminal failed marker after a permanent 4xx so pending
+# stops retrying that generation, and drops posting plus inflight.
 # progress replaces the durable per-chunk progress artifact.
+# release drops the exclusive inflight send marker after a later-chunk
+# transient failure so another poster may resume remaining chunks. The
+# posting marker and progress stay in place.
 # split reads reply text on stdin and prints {limit,cap,texts} using
 # FM_EXT_DISCORD_REPLY_MAX_CHARS (default 1900) and FM_EXT_DISCORD_THREAD_MAX
 # (default 25). It does not require FMX_PAIRING_TOKEN or the hosted relay.
@@ -44,6 +52,7 @@ usage: fm-ext-outbox.sh pending
        fm-ext-outbox.sh abort --slug <slug> --kind <kind> --generation <n>
        fm-ext-outbox.sh fail --slug <slug> --kind <kind> --generation <n> --reason-file <path>
        fm-ext-outbox.sh progress --slug <slug> --kind <kind> --generation <n> --progress-file <path>
+       fm-ext-outbox.sh release --slug <slug> --kind <kind> --generation <n>
        fm-ext-outbox.sh split [--max <n>] [--cap <n>]
 EOF
 }
@@ -197,6 +206,14 @@ case "$cmd" in
     fm_ext_outbox_progress "$OUTBOX" "$SLUG" "$KIND" "$GENERATION" "$body" \
       || die "could not record chunk progress" 2
     printf 'progress %s %s %s\n' "$SLUG" "$KIND" "$GENERATION"
+    ;;
+  release)
+    fm_ext_slug_valid "$SLUG" || die "unsafe slug"
+    fm_ext_kind_valid "$KIND" || die "invalid kind"
+    fm_ext_generation_valid "$GENERATION" || die "invalid generation"
+    fm_ext_outbox_inflight_release "$OUTBOX" "$SLUG" "$KIND" "$GENERATION" \
+      || die "could not release the inflight send marker" 2
+    printf 'released %s %s %s\n' "$SLUG" "$KIND" "$GENERATION"
     ;;
   *) usage; exit 2 ;;
 esac

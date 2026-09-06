@@ -7,7 +7,9 @@ are retried after restart.
 Oversized replies are split with the X-mode Discord budget pattern
 (``FM_EXT_DISCORD_REPLY_MAX_CHARS``, default 1900) and posted in order.
 A later-chunk transient failure records progress so earlier chunks are not
-sent again. An in-flight chunk without a confirmed post stays mid-delivery.
+sent again, then releases the exclusive inflight send marker so only one
+poster can resume the next chunk. An in-flight chunk without a confirmed
+post stays mid-delivery.
 A transient definite send failure (HTTP 429 or 5xx) before any chunk
 succeeds deletes the posting marker so that generation can retry.
 A permanent 4xx records a terminal failed marker so pending stops retrying.
@@ -137,6 +139,29 @@ def begin_delivery(payload: dict, home: Path | None = None) -> str:
     if result.returncode == 4:
         return "terminal-failed"
     raise RuntimeError(result.stderr.strip() or "begin failed")
+
+
+def release_inflight(payload: dict, home: Path | None = None) -> str:
+    home = home or firstmate_home()
+    result = subprocess.run(
+        [
+            str(outbox_cli()),
+            "release",
+            "--slug",
+            payload["slug"],
+            "--kind",
+            payload["kind"],
+            "--generation",
+            str(payload["generation"]),
+        ],
+        check=False,
+        env=_env_for(home),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        return "released"
+    raise RuntimeError(result.stderr.strip() or "release failed")
 
 
 def abort_delivery(payload: dict, home: Path | None = None) -> str:
@@ -416,6 +441,7 @@ def deliver_one(path: Path, send: SendFn | None = None, home: Path | None = None
                     if abort_status == "already-receipted":
                         return abort_status
                     return "failed"
+                release_inflight(payload, home=home)
                 return "failed"
             if outcome == "permanent":
                 fail_status = record_failed(payload, failure_reason(err), home=home)

@@ -3,7 +3,8 @@
 #
 # Hermetic: no Discord network. The gateway plugin's Discord sender is injected.
 # Captain cases 1-12 plus bootstrap activation, send-failure classes,
-# wake-append offer recovery, and Discord reply splitting.
+# wake-append offer recovery, Discord reply splitting, and exclusive resume
+# claim.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -759,7 +760,7 @@ PY
 # --- 20. later-chunk transient failure resumes without reposting ------------
 
 test_20_later_chunk_transient_resumes_without_repost() {
-  local home slug sent1 sent2 posting progress out first
+  local home slug sent1 sent2 posting progress inflight out first
   home="$TMP_ROOT/c20"
   setup_home "$home"
   slug=$(intake_ok "$home" "resume split")
@@ -771,6 +772,7 @@ test_20_later_chunk_transient_resumes_without_repost() {
   sent2="$home/sent2.log"
   posting="$home/state/ext-outbox/${slug}.answer.1.posting"
   progress="$home/state/ext-outbox/${slug}.answer.1.progress.json"
+  inflight="$home/state/ext-outbox/${slug}.answer.1.inflight"
   : > "$sent1"
   : > "$sent2"
   out=$(home_env "$home" env FM_EXT_DISCORD_REPLY_MAX_CHARS=50 \
@@ -798,6 +800,7 @@ PY
   assert_present "$posting" "partial success must keep the posting marker for resume"
   assert_present "$progress" "partial success must record chunk progress"
   assert_grep '"posted_count": 1' "$progress" "progress must record the first posted chunk"
+  assert_absent "$inflight" "later-chunk 503 must release the exclusive inflight claim so resume can proceed"
   first=$(cat "$sent1")
   [ -n "$first" ] || fail "first chunk must have posted before the later 503"
   out=$(home_env "$home" env FM_EXT_DISCORD_REPLY_MAX_CHARS=50 \
@@ -819,6 +822,164 @@ PY
   grep -Fqx "$first" "$sent2" && fail "resume must not repost the already sent first chunk"
   [ -s "$sent2" ] || fail "resume must post the remaining chunks"
   pass "20 later-chunk transient failure resumes without reposting earlier chunks"
+}
+
+# --- 21. concurrent resume claims: only one poster sends the next chunk -----
+
+_test_21_setup_resumable() {
+  local home=$1 slug sent posting progress inflight out
+  slug=$(intake_ok "$home" "concurrent resume")
+  write_text "$home/ans.txt" \
+    "The captain has me on a sign-in redirect fix, a docs tidy, and keeping the build green while other jobs run in the background today."
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+    --text-file "$home/ans.txt" >/dev/null
+  sent="$home/setup-sent.log"
+  posting="$home/state/ext-outbox/${slug}.answer.1.posting"
+  progress="$home/state/ext-outbox/${slug}.answer.1.progress.json"
+  inflight="$home/state/ext-outbox/${slug}.answer.1.inflight"
+  : > "$sent"
+  out=$(home_env "$home" env FM_EXT_DISCORD_REPLY_MAX_CHARS=50 \
+    PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$sent" <<'PY'
+import io, os, sys, urllib.error
+from email.message import EmailMessage
+from pathlib import Path
+sys.path.insert(0, os.environ["PYTHONPATH"])
+import outbox_poster
+home, sent = sys.argv[1], sys.argv[2]
+os.environ["FM_HOME"] = home
+def send(payload):
+    if payload["chunk_index"] > 0:
+        raise urllib.error.HTTPError(
+            "https://discord.test/messages", 503, "unavailable",
+            EmailMessage(), io.BytesIO(b""),
+        )
+    with open(sent, "a", encoding="utf-8") as fh:
+        fh.write(payload["text"] + "\n")
+    return {"ok": True, "discord_message_id": "21a"}
+print(",".join(outbox_poster.drain_outbox(send=send, home=Path(home))))
+PY
+  )
+  assert_contains "$out" "failed" "setup later-chunk 503 must return failed"
+  assert_present "$posting" "setup must keep the posting marker for resume"
+  assert_present "$progress" "setup must record chunk progress"
+  assert_grep '"posted_count": 1' "$progress" "setup must leave posted_count 1"
+  assert_absent "$inflight" "setup must leave the inflight claim released"
+  printf '%s\n' "$slug" > "$home/setup.slug"
+}
+
+test_21_concurrent_resume_exclusive_inflight_claim() {
+  local home slug go inflight rc1 rc2 p1 p2 winner losers chunk1
+  home="$TMP_ROOT/c21begin"
+  setup_home "$home"
+  _test_21_setup_resumable "$home"
+  slug=$(cat "$home/setup.slug")
+  inflight="$home/state/ext-outbox/${slug}.answer.1.inflight"
+  go="$home/go"
+  rm -f "$go" "$home/rc1" "$home/rc2"
+  (
+    while [ ! -f "$go" ]; do sleep 0.01; done
+    home_env "$home" "$OUTBOX" begin --slug "$slug" --kind answer --generation 1 \
+      >/dev/null 2>"$home/begin1.err"
+    echo $? > "$home/rc1"
+  ) &
+  p1=$!
+  (
+    while [ ! -f "$go" ]; do sleep 0.01; done
+    home_env "$home" "$OUTBOX" begin --slug "$slug" --kind answer --generation 1 \
+      >/dev/null 2>"$home/begin2.err"
+    echo $? > "$home/rc2"
+  ) &
+  p2=$!
+  sleep 0.05
+  touch "$go"
+  wait "$p1" "$p2" || true
+  rc1=$(cat "$home/rc1")
+  rc2=$(cat "$home/rc2")
+  winner=0
+  losers=0
+  case "$rc1" in
+    0) winner=$((winner + 1)) ;;
+    3) losers=$((losers + 1)) ;;
+    *) fail "concurrent begin child 1 must exit 0 or 3, got $rc1" ;;
+  esac
+  case "$rc2" in
+    0) winner=$((winner + 1)) ;;
+    3) losers=$((losers + 1)) ;;
+    *) fail "concurrent begin child 2 must exit 0 or 3, got $rc2" ;;
+  esac
+  [ "$winner" = 1 ] || fail "exactly one concurrent begin must claim the send right (winners=$winner rc1=$rc1 rc2=$rc2)"
+  [ "$losers" = 1 ] || fail "the other concurrent begin must be mid-delivery (losers=$losers rc1=$rc1 rc2=$rc2)"
+  assert_present "$inflight" "the winning begin must hold the exclusive inflight marker"
+
+  home="$TMP_ROOT/c21send"
+  setup_home "$home"
+  _test_21_setup_resumable "$home"
+  slug=$(cat "$home/setup.slug")
+  go="$home/go"
+  rm -f "$go" "$home/ready1" "$home/ready2"
+  : > "$home/chunks.log"
+  home_env "$home" env FM_EXT_DISCORD_REPLY_MAX_CHARS=50 \
+    PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$home/chunks.log" "$go" \
+    "$home/ready1" "$home/out1" <<'PY' &
+import fcntl, os, sys, time
+from pathlib import Path
+sys.path.insert(0, os.environ["PYTHONPATH"])
+import outbox_poster
+home, sent, go, ready, out = sys.argv[1:6]
+os.environ["FM_HOME"] = home
+Path(ready).write_text("1")
+while not Path(go).is_file():
+    time.sleep(0.01)
+def send(payload):
+    time.sleep(0.2)
+    with open(sent, "a", encoding="utf-8") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        fh.write(str(payload["chunk_index"]) + "\n")
+        fcntl.flock(fh, fcntl.LOCK_UN)
+    return {"ok": True, "discord_message_id": "21b-%s" % payload["chunk_index"]}
+Path(out).write_text(",".join(outbox_poster.drain_outbox(send=send, home=Path(home))))
+PY
+  p1=$!
+  home_env "$home" env FM_EXT_DISCORD_REPLY_MAX_CHARS=50 \
+    PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$home/chunks.log" "$go" \
+    "$home/ready2" "$home/out2" <<'PY' &
+import fcntl, os, sys, time
+from pathlib import Path
+sys.path.insert(0, os.environ["PYTHONPATH"])
+import outbox_poster
+home, sent, go, ready, out = sys.argv[1:6]
+os.environ["FM_HOME"] = home
+Path(ready).write_text("1")
+while not Path(go).is_file():
+    time.sleep(0.01)
+def send(payload):
+    time.sleep(0.2)
+    with open(sent, "a", encoding="utf-8") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        fh.write(str(payload["chunk_index"]) + "\n")
+        fcntl.flock(fh, fcntl.LOCK_UN)
+    return {"ok": True, "discord_message_id": "21b-%s" % payload["chunk_index"]}
+Path(out).write_text(",".join(outbox_poster.drain_outbox(send=send, home=Path(home))))
+PY
+  p2=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    [ -f "$home/ready1" ] && [ -f "$home/ready2" ] && break
+    sleep 0.05
+  done
+  [ -f "$home/ready1" ] && [ -f "$home/ready2" ] \
+    || fail "both concurrent poster processes must reach the start gate"
+  touch "$go"
+  wait "$p1" "$p2" || true
+  [ -f "$home/out1" ] && [ -f "$home/out2" ] \
+    || fail "both concurrent poster processes must finish"
+  chunk1=$(grep -c '^1$' "$home/chunks.log" || true)
+  [ "$chunk1" = 1 ] || fail "exactly one poster must send the next chunk (chunk 1 count=$chunk1 log=$(tr '\n' ',' < "$home/chunks.log"))"
+  grep -q '^0$' "$home/chunks.log" && fail "resume must not repost chunk 0"
+  if grep -q . "$home/chunks.log"; then
+    sort "$home/chunks.log" | uniq -d | grep -q . \
+      && fail "no chunk index may be posted twice (log=$(tr '\n' ',' < "$home/chunks.log"))"
+  fi
+  pass "21 concurrent resume claims: only one poster sends the next chunk"
 }
 
 # --- bootstrap opt-in -------------------------------------------------------
@@ -873,6 +1034,7 @@ test_17_permanent_4xx_is_terminal_failed
 test_18_under_limit_is_one_post
 test_19_over_limit_posts_chunks_in_order_without_fmx_token
 test_20_later_chunk_transient_resumes_without_repost
+test_21_concurrent_resume_exclusive_inflight_claim
 test_bootstrap_arms_ext_watch_shim
 test_poll_noop_when_inactive
 test_plugin_has_no_terminal_dispatch

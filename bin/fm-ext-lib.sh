@@ -465,6 +465,40 @@ fm_ext_outbox_progress_basename() {
   printf '%s.%s.%s.progress.json\n' "$slug" "$kind" "$generation"
 }
 
+# Exclusive send claim. Not a .json basename so pending's payload glob skips it.
+fm_ext_outbox_inflight_basename() {
+  local slug=$1 kind=$2 generation=$3
+  fm_ext_slug_valid "$slug" || return 1
+  fm_ext_kind_valid "$kind" || return 1
+  fm_ext_generation_valid "$generation" || return 1
+  printf '%s.%s.%s.inflight\n' "$slug" "$kind" "$generation"
+}
+
+# CAS-claim the exclusive send marker. Returns 0 when this caller owns the
+# next send, 1 when another valid inflight marker already holds it, and 2
+# on validation or publication failure.
+fm_ext_outbox_inflight_claim() {
+  local dir=$1 slug=$2 kind=$3 generation=$4 inflight now
+  inflight=$(fm_ext_outbox_inflight_basename "$slug" "$kind" "$generation") || return 2
+  now=${FM_EXT_NOW_OVERRIDE:-$(date +%s)}
+  case "$now" in
+    ''|*[!0-9]*) return 2 ;;
+  esac
+  jq -cn --arg slug "$slug" --arg kind "$kind" --argjson generation "$generation" \
+    --argjson recorded_at "$now" \
+    '{slug:$slug, kind:$kind, generation:$generation, recorded_at:$recorded_at}' \
+    | fm_ext_private_artifact_publish_stdin_once "$dir" "$inflight" 600
+}
+
+# Drop the exclusive send marker. Returns 0 when the path is absent or this
+# caller deleted a valid inflight marker, 1 when the path exists but is not
+# a safe private artifact, and 2 on an unsafe identity.
+fm_ext_outbox_inflight_release() {
+  local dir=$1 slug=$2 kind=$3 generation=$4 inflight
+  inflight=$(fm_ext_outbox_inflight_basename "$slug" "$kind" "$generation") || return 2
+  fm_ext_private_artifact_remove "$dir" "$inflight" 600
+}
+
 # Discord per-message split budget. Copies the FMX_DISCORD_REPLY_MAX_CHARS
 # clamp (default 1900, min 50, values above 2000 reset to 1900) without
 # reading X-mode env or requiring FMX_PAIRING_TOKEN.
@@ -587,17 +621,20 @@ fm_ext_outbox_schema_valid() {
   ' "$file" >/dev/null 2>&1
 }
 
-# Begin delivery: CAS the posting marker. Returns 0 on a new claim or a
-# resumable in-progress split (posting plus progress with no in-flight chunk),
-# 1 when a valid receipt already exists (idempotent success), 4 when a terminal
-# failed marker exists, 3 when a posting marker exists without a receipt and
-# is not resumable (mid-send refuse), 2 on validation/publication failure.
+# Begin delivery: CAS the posting marker, then CAS an exclusive inflight
+# send marker before returning a send right. Returns 0 on a new claim or a
+# resumable split this caller exclusively claimed, 1 when a valid receipt
+# already exists (idempotent success), 4 when a terminal failed marker
+# exists, 3 when a posting marker exists without a receipt and this caller
+# does not own the next send (mid-send refuse), 2 on validation/publication
+# failure. JSON progress with inflight==null is not itself a shared claim.
 fm_ext_outbox_begin() {
-  local dir=$1 slug=$2 kind=$3 generation=$4 payload posting receipt failed now rc
+  local dir=$1 slug=$2 kind=$3 generation=$4 payload posting receipt failed progress now rc
   payload=$(fm_ext_outbox_basename "$slug" "$kind" "$generation") || return 2
   posting=$(fm_ext_outbox_posting_basename "$slug" "$kind" "$generation") || return 2
   receipt=$(fm_ext_outbox_receipt_basename "$slug" "$kind" "$generation") || return 2
   failed=$(fm_ext_outbox_failed_basename "$slug" "$kind" "$generation") || return 2
+  progress=$(fm_ext_outbox_progress_basename "$slug" "$kind" "$generation") || return 2
   fm_ext_private_artifact_file_valid "$dir" "$payload" 600 || return 2
   if fm_ext_private_artifact_file_valid "$dir" "$receipt" 600; then
     return 1
@@ -607,7 +644,16 @@ fm_ext_outbox_begin() {
   fi
   if fm_ext_private_artifact_file_valid "$dir" "$posting" 600; then
     if fm_ext_outbox_progress_resumable "$dir" "$slug" "$kind" "$generation"; then
-      return 0
+      if jq -e '.posted_count >= .total' "$dir/$progress" >/dev/null 2>&1; then
+        return 0
+      fi
+      fm_ext_outbox_inflight_claim "$dir" "$slug" "$kind" "$generation"
+      rc=$?
+      case "$rc" in
+        0) return 0 ;;
+        1) return 3 ;;
+        *) return 2 ;;
+      esac
     fi
     return 3
   fi
@@ -621,7 +667,15 @@ fm_ext_outbox_begin() {
     | fm_ext_private_artifact_publish_stdin_once "$dir" "$posting" 600
   rc=$?
   case "$rc" in
-    0) return 0 ;;
+    0)
+      fm_ext_outbox_inflight_claim "$dir" "$slug" "$kind" "$generation"
+      rc=$?
+      case "$rc" in
+        0) return 0 ;;
+        1) return 3 ;;
+        *) return 2 ;;
+      esac
+      ;;
     1)
       if fm_ext_private_artifact_file_valid "$dir" "$receipt" 600; then
         return 1
@@ -638,6 +692,8 @@ fm_ext_outbox_begin() {
 # Record a delivery receipt once. Returns 0 on create, 1 when a valid receipt
 # already exists, 2 on failure. The posting marker is left in place so a
 # later begin still sees mid-delivery-or-receipt and refuses a second send.
+# A leftover inflight send marker is released after a successful or already
+# present receipt.
 fm_ext_outbox_receipt() {
   local dir=$1 slug=$2 kind=$3 generation=$4 receipt_json=$5 receipt rc
   receipt=$(fm_ext_outbox_receipt_basename "$slug" "$kind" "$generation") || return 2
@@ -645,6 +701,9 @@ fm_ext_outbox_receipt() {
   printf '%s\n' "$receipt_json" \
     | fm_ext_private_artifact_publish_stdin_once "$dir" "$receipt" 600
   rc=$?
+  case "$rc" in
+    0|1) fm_ext_outbox_inflight_release "$dir" "$slug" "$kind" "$generation" || true ;;
+  esac
   return "$rc"
 }
 
@@ -669,6 +728,7 @@ fm_ext_outbox_abort() {
   fi
   fm_ext_private_artifact_remove "$dir" "$posting" 600 || return 2
   fm_ext_private_artifact_remove "$dir" "$progress" 600 || return 2
+  fm_ext_outbox_inflight_release "$dir" "$slug" "$kind" "$generation" || return 2
   return 0
 }
 
@@ -688,6 +748,7 @@ fm_ext_outbox_fail() {
   fi
   if fm_ext_private_artifact_file_valid "$dir" "$failed" 600; then
     fm_ext_private_artifact_remove "$dir" "$posting" 600 || true
+    fm_ext_outbox_inflight_release "$dir" "$slug" "$kind" "$generation" || true
     return 4
   fi
   printf '%s\n' "$reason_json" \
@@ -696,21 +757,25 @@ fm_ext_outbox_fail() {
   case "$rc" in
     0)
       fm_ext_private_artifact_remove "$dir" "$posting" 600 || true
+      fm_ext_outbox_inflight_release "$dir" "$slug" "$kind" "$generation" || true
       return 0
       ;;
     1)
       if fm_ext_private_artifact_file_valid "$dir" "$receipt" 600; then
+        fm_ext_outbox_inflight_release "$dir" "$slug" "$kind" "$generation" || true
         return 1
       fi
       fm_ext_private_artifact_remove "$dir" "$posting" 600 || true
+      fm_ext_outbox_inflight_release "$dir" "$slug" "$kind" "$generation" || true
       return 4
       ;;
     *) return 2 ;;
   esac
 }
 
-# True when a generation posting may resume remaining chunks: progress exists,
-# no chunk is in-flight, and posted_count/total are numbers.
+# True when JSON progress looks resumable: progress exists, no chunk is
+# recorded in-flight, and posted_count/total are numbers. Exclusive send
+# ownership is the inflight file CAS in begin, not this JSON check.
 fm_ext_outbox_progress_resumable() {
   local dir=$1 slug=$2 kind=$3 generation=$4 progress
   progress=$(fm_ext_outbox_progress_basename "$slug" "$kind" "$generation") || return 1
