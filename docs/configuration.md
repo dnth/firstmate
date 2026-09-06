@@ -555,6 +555,64 @@ The session-start digest separately prints an "Public commitments awaiting deliv
 `FM_PF_RETRY_BACKOFF_SECS` (default 900) sets the next-attempt time recorded with a retryable delivery error.
 See [verification/public-followup.md](verification/public-followup.md) for the current maintainer evidence behind the restart end-to-end and the relay-disabled zero-overhead guarantee.
 
+## Local Communication Officer bridge (config/ext-bridge)
+
+The sibling local bridge lets a dedicated Hermes Gateway plugin deliver Discord `/fm` requests into this firstmate home and post replies from a local outbox.
+It is a different seam from optional X mode.
+It does not use `FMX_PAIRING_TOKEN`, `https://myfirstmate.io`, hosted public-follow-up, or pending-reply.
+Firstmate core contains no Discord library.
+Discord text is untrusted and must enter through `--text-file` or stdin.
+
+The bridge is off unless `config/ext-bridge` is a regular non-symlink file or `FM_EXT_BRIDGE` is a truthy environment value, **and** `config/ext-secret` is a non-empty mode-0600 regular file.
+`FM_EXT_BRIDGE` wins when set: an explicit empty/`0`/`false`/`no`/`off` value opts out even if the presence file exists.
+`FM_EXT_SECRET_FILE` and `FM_EXT_ALLOWLIST_FILE` may redirect those two files for tests.
+The secret and allowlist are not inherited into secondmate homes.
+
+`config/ext-allowlist` is fail-closed.
+Missing, empty, unreadable, or symlink allowlists deny every request.
+Each non-comment line is `<guild>`, `<guild>:<channel>`, or `<guild>:<channel>:<author>`.
+A request is allowed when any rule matches every component it specifies.
+
+Canonical `request_id` is `discord:<guild>:<channel>:<thread>:<message>` and keeps those colons in JSON bodies.
+Filenames use the SHA-256 hex digest of that canonical id (`slug`).
+`bin/fm-ext-intake.sh` publishes `state/ext-inbox/<slug>.json` (mode 0600), durable destination context at `state/ext-context/<slug>.json`, and a one-wake offer marker at `state/ext-context/<slug>.offered.json`.
+The same message id claims the existing offer and does not append a second wake.
+New offers may append `ext-request <slug>` through the durable wake queue.
+State directories are mode 0700.
+
+The locked session-start bootstrap step turns a valid opt-in into `state/ext-watch.check.sh`, a byte-static identity shim for `bin/fm-ext-poll.sh`.
+The watcher accepts the shim only when its bytes match the expected generated content, then invokes the trusted repository poll script.
+The poll is a hard no-op until the bridge is active.
+It prints `ext-request <slug>` only when it claims a leftover inbox offer that intake did not claim; already claimed offers stay silent across Firstmate restart.
+Removing the opt-in or the secret removes the shim.
+There is no 30-second cadence override; intake wakes immediately and the default slow-check interval covers restart recovery.
+
+`bin/fm-ext-emit.sh` writes idempotent `ack` / `answer` / `followup` / `final` payloads into `state/ext-outbox/<slug>.<kind>.<generation>.json`.
+Re-emitting the same identity is a no-op success.
+A posting marker without a receipt is refused as mid-delivery, matching public-follow-up delivery-posting behavior.
+That refuse covers an ambiguous crash or transport error after Discord may have accepted the post.
+`bin/fm-ext-outbox.sh begin` CAS-claims that posting marker and an exclusive per-generation inflight send marker before any send, so two posters cannot both send the same chunk.
+The inflight claim records owner pid and `recorded_at`.
+A leftover claim is stolen only when it is older than `FM_EXT_INFLIGHT_TTL_SECS` (default 30) **and** its recorded owner pid is dead.
+Steal serialization keeps a 1-second floor even when that TTL is 0, so two stealers cannot both win.
+A live owner stays mid-delivery even after that TTL, including an ambiguous crash-after-post while the poster process is still alive.
+`receipt` writes the receipt once.
+`abort` deletes the posting marker after a transient definite send failure (HTTP 429 or 5xx) so that generation can retry.
+`fail` records a terminal failed marker after a permanent 4xx so pending stops retrying that generation.
+The gateway poster splits oversized Discord replies with the same numbered-thread algorithm X mode uses for Discord, driven by `FM_EXT_DISCORD_REPLY_MAX_CHARS` (default 1900, min 50, values above 2000 reset to 1900) and `FM_EXT_DISCORD_THREAD_MAX` (default 25).
+A reply that already fits is one unnumbered message; a longer reply is posted as ordered `(k/n)` chunks into the same thread.
+Chunk progress is recorded so a later-chunk retry does not send earlier chunks again.
+A later-chunk transient failure then releases the inflight marker so only one poster can resume the next chunk.
+An ambiguous failure after a chunk may have been accepted stays mid-delivery for that chunk.
+This split does not use `FMX_PAIRING_TOKEN` or the hosted relay.
+Unsent payloads (no posting marker, no receipt, and no terminal failed marker) remain deliverable after a Hermes Gateway restart.
+`bin/fm-ext-link.sh` binds a spawned task to the canonical `request_id` as `ext_request=` / `ext_request_slug=` / `ext_request_ts=` / `ext_followups=`, never `x_request=`.
+
+The Hermes Gateway plugin lives in `contrib/hermes-gateway-firstmate-comms/` and must be installed into a dedicated gateway `HERMES_HOME`, not the crewmate TUI profile.
+Crewmate Hermes still launches as `hermes chat --tui`.
+That launch string is not the Discord gateway.
+The `ext-respond` skill owns drain, classification, lifecycle action, and local emit.
+
 ## Process-to-event sources (state/procevent)
 
 A long-polling external process is registered as a *source* through its adapter, whose header and `--help` own the commands and flags.
@@ -678,6 +736,12 @@ FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; val
 FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting X-mode completion follow-ups (7 days)
 FMX_FOLLOWUP_MAX_COUNT=3   # local cap on X-mode completion follow-ups per linked mention
+FM_EXT_BRIDGE=            # optional local Communication Officer opt-in; truthy enables, explicit 0/false/no/off disables even when config/ext-bridge exists
+FM_EXT_SECRET_FILE=       # optional override of config/ext-secret for tests
+FM_EXT_ALLOWLIST_FILE=    # optional override of config/ext-allowlist for tests
+FM_EXT_DISCORD_REPLY_MAX_CHARS=1900   # local-bridge Discord per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900
+FM_EXT_DISCORD_THREAD_MAX=25   # maximum messages in one local-bridge auto-split Discord thread
+FM_EXT_INFLIGHT_TTL_SECS=30   # seconds a dead-owner exclusive send claim must age before another poster may steal it; live owners are never stolen from; steal serialization keeps a 1s floor even when this is 0
 FM_PF_RETRY_BACKOFF_SECS=900   # seconds before the next attempt after a retryable promised-public-reply delivery error
 FM_LOCK_STALE_AFTER=2   # seconds before dead-pid lock records can be reclaimed; mid-acquire locks keep at least 2s grace
 FM_GUARD_GRACE=300      # seconds before guard warnings, arm health checks, and the primary turn-end guard treat a watcher beacon as stale

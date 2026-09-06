@@ -19,7 +19,8 @@
 #     this hook exits 0 and NEVER rewakes the primary (checked again at
 #     translation time so a mid-cycle AFK transition is honored).
 #   - Need: arms only while work is in flight (state/*.meta) or X mode has a
-#     relay poll to run (state/x-watch.check.sh); an idle home exits 0.
+#     relay poll to run (state/x-watch.check.sh) or the local ext-bridge poll
+#     is armed (state/ext-watch.check.sh); an idle home exits 0.
 #   - Single-flight: Claude does not dedupe async hooks, so exactly one
 #     GENERATION owner arms per event epoch: the epoch ledger's monotonic
 #     sequence is the claim generation, every firing defers (exit 0) to a live
