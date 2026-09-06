@@ -474,29 +474,204 @@ fm_ext_outbox_inflight_basename() {
   printf '%s.%s.%s.inflight\n' "$slug" "$kind" "$generation"
 }
 
-# CAS-claim the exclusive send marker. Returns 0 when this caller owns the
-# next send, 1 when another valid inflight marker already holds it, and 2
-# on validation or publication failure.
-fm_ext_outbox_inflight_claim() {
-  local dir=$1 slug=$2 kind=$3 generation=$4 inflight now
+# Momentary directory used only to serialize a stale-claim steal. Not a
+# payload, and pending's *.json glob skips it.
+fm_ext_outbox_inflight_steallock_basename() {
+  local slug=$1 kind=$2 generation=$3
+  fm_ext_slug_valid "$slug" || return 1
+  fm_ext_kind_valid "$kind" || return 1
+  fm_ext_generation_valid "$generation" || return 1
+  printf '%s.%s.%s.inflight.lock\n' "$slug" "$kind" "$generation"
+}
+
+# Conservative short TTL before a dead-owner inflight claim may be stolen.
+# Default 30 seconds (above the 15s Discord send timeout). Non-numeric values
+# reset to 30. Zero is allowed so tests can expire immediately while live
+# owners still refuse steal.
+fm_ext_inflight_ttl_secs() {
+  local raw=${1:-${FM_EXT_INFLIGHT_TTL_SECS-}}
+  case "$raw" in
+    ''|*[!0-9]*) raw=30 ;;
+  esac
+  printf '%s\n' "$raw"
+}
+
+# Owner pid recorded in the inflight claim. The begin CLI is ephemeral, so
+# the default is PPID (the poster that will send). Override with
+# FM_EXT_INFLIGHT_OWNER_PID. Falls back to $$ when PPID is unusable.
+fm_ext_outbox_inflight_owner_pid() {
+  local owner=${FM_EXT_INFLIGHT_OWNER_PID:-${PPID:-}}
+  case "$owner" in
+    ''|*[!0-9]*|0) owner=$$ ;;
+  esac
+  printf '%s\n' "$owner"
+}
+
+fm_ext_pid_alive() {
+  local pid=$1
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  kill -0 "$pid" 2>/dev/null
+}
+
+fm_ext_file_mtime() {
+  local file=$1
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %m "$file" 2>/dev/null
+  else
+    stat -c %Y "$file" 2>/dev/null
+  fi
+}
+
+# True when an existing inflight file may be stolen: age >= TTL and the
+# recorded owner pid is dead and is not this claiming process. Live owners
+# never steal, even past TTL. Missing pid is fail-closed (not stealable).
+fm_ext_outbox_inflight_is_stale() {
+  local dir=$1 base=$2 dest ttl now pid recorded_at age owner
+  dest="$dir/$base"
+  fm_ext_private_artifact_file_valid "$dir" "$base" 600 || return 1
+  ttl=$(fm_ext_inflight_ttl_secs)
+  now=${FM_EXT_NOW_OVERRIDE:-$(date +%s)}
+  case "$now" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  pid=$(jq -er '.pid | select(type=="number")' "$dest" 2>/dev/null) || return 1
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  owner=$(fm_ext_outbox_inflight_owner_pid)
+  if [ "$pid" = "$$" ] || [ "$pid" = "$owner" ]; then
+    return 1
+  fi
+  if fm_ext_pid_alive "$pid"; then
+    return 1
+  fi
+  recorded_at=$(jq -er '.recorded_at | select(type=="number")' "$dest" 2>/dev/null) || recorded_at=
+  case "$recorded_at" in
+    ''|*[!0-9]*)
+      recorded_at=$(fm_ext_file_mtime "$dest") || return 1
+      case "$recorded_at" in
+        ''|*[!0-9]*) return 1 ;;
+      esac
+      ;;
+  esac
+  age=$((now - recorded_at))
+  [ "$age" -ge 0 ] 2>/dev/null || return 1
+  [ "$age" -ge "$ttl" ]
+}
+
+fm_ext_outbox_inflight_steallock_drop() {
+  local dir=$1 slug=$2 kind=$3 generation=$4 lock
+  lock=$(fm_ext_outbox_inflight_steallock_basename "$slug" "$kind" "$generation") || return 0
+  rmdir "$dir/$lock" 2>/dev/null || true
+}
+
+# Reclaim a leftover steal-lock directory whose mtime is at least the inflight
+# TTL. A live steal holds the directory only for the critical section.
+fm_ext_outbox_inflight_steallock_stale() {
+  local dir=$1 base=$2 dest ttl now mtime age
+  dest="$dir/$base"
+  [ -d "$dest" ] && [ ! -L "$dest" ] || return 1
+  ttl=$(fm_ext_inflight_ttl_secs)
+  now=${FM_EXT_NOW_OVERRIDE:-$(date +%s)}
+  case "$now" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  mtime=$(fm_ext_file_mtime "$dest") || return 1
+  case "$mtime" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  age=$((now - mtime))
+  [ "$age" -ge 0 ] 2>/dev/null || return 1
+  [ "$age" -ge "$ttl" ]
+}
+
+fm_ext_outbox_inflight_publish_once() {
+  local dir=$1 slug=$2 kind=$3 generation=$4 inflight now owner
   inflight=$(fm_ext_outbox_inflight_basename "$slug" "$kind" "$generation") || return 2
   now=${FM_EXT_NOW_OVERRIDE:-$(date +%s)}
   case "$now" in
     ''|*[!0-9]*) return 2 ;;
   esac
+  owner=$(fm_ext_outbox_inflight_owner_pid)
+  case "$owner" in
+    ''|*[!0-9]*) return 2 ;;
+  esac
   jq -cn --arg slug "$slug" --arg kind "$kind" --argjson generation "$generation" \
-    --argjson recorded_at "$now" \
-    '{slug:$slug, kind:$kind, generation:$generation, recorded_at:$recorded_at}' \
+    --argjson recorded_at "$now" --argjson pid "$owner" \
+    '{slug:$slug, kind:$kind, generation:$generation, recorded_at:$recorded_at, pid:$pid}' \
     | fm_ext_private_artifact_publish_stdin_once "$dir" "$inflight" 600
+}
+
+# CAS-claim the exclusive send marker. Returns 0 when this caller owns the
+# next send, 1 when another valid inflight marker already holds it (live
+# owner, or dead owner still inside the TTL), and 2 on validation or
+# publication failure. A dead owner whose claim is at least
+# FM_EXT_INFLIGHT_TTL_SECS (default 30) old may be stolen: the steal is
+# serialized with a momentary lock directory so two stealers still CAS to
+# one winner.
+fm_ext_outbox_inflight_claim() {
+  local dir=$1 slug=$2 kind=$3 generation=$4 inflight lock rc
+  inflight=$(fm_ext_outbox_inflight_basename "$slug" "$kind" "$generation") || return 2
+  lock=$(fm_ext_outbox_inflight_steallock_basename "$slug" "$kind" "$generation") || return 2
+  fm_ext_outbox_inflight_publish_once "$dir" "$slug" "$kind" "$generation"
+  rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1) ;;
+    *) return 2 ;;
+  esac
+  if ! fm_ext_outbox_inflight_is_stale "$dir" "$inflight"; then
+    return 1
+  fi
+  if ! mkdir "$dir/$lock" 2>/dev/null; then
+    if fm_ext_outbox_inflight_steallock_stale "$dir" "$lock"; then
+      rmdir "$dir/$lock" 2>/dev/null || return 1
+      mkdir "$dir/$lock" 2>/dev/null || return 1
+    else
+      return 1
+    fi
+  fi
+  if ! fm_ext_private_artifact_file_valid "$dir" "$inflight" 600; then
+    fm_ext_outbox_inflight_publish_once "$dir" "$slug" "$kind" "$generation"
+    rc=$?
+    rmdir "$dir/$lock" 2>/dev/null || true
+    case "$rc" in
+      0) return 0 ;;
+      1) return 1 ;;
+      *) return 2 ;;
+    esac
+  fi
+  if ! fm_ext_outbox_inflight_is_stale "$dir" "$inflight"; then
+    rmdir "$dir/$lock" 2>/dev/null || true
+    return 1
+  fi
+  if ! fm_ext_private_artifact_remove "$dir" "$inflight" 600; then
+    rmdir "$dir/$lock" 2>/dev/null || true
+    return 2
+  fi
+  fm_ext_outbox_inflight_publish_once "$dir" "$slug" "$kind" "$generation"
+  rc=$?
+  rmdir "$dir/$lock" 2>/dev/null || true
+  case "$rc" in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) return 2 ;;
+  esac
 }
 
 # Drop the exclusive send marker. Returns 0 when the path is absent or this
 # caller deleted a valid inflight marker, 1 when the path exists but is not
-# a safe private artifact, and 2 on an unsafe identity.
+# a safe private artifact, and 2 on an unsafe identity. Also drops a leftover
+# steal-lock directory.
 fm_ext_outbox_inflight_release() {
-  local dir=$1 slug=$2 kind=$3 generation=$4 inflight
+  local dir=$1 slug=$2 kind=$3 generation=$4 inflight rc
   inflight=$(fm_ext_outbox_inflight_basename "$slug" "$kind" "$generation") || return 2
   fm_ext_private_artifact_remove "$dir" "$inflight" 600
+  rc=$?
+  fm_ext_outbox_inflight_steallock_drop "$dir" "$slug" "$kind" "$generation"
+  return "$rc"
 }
 
 # Discord per-message split budget. Copies the FMX_DISCORD_REPLY_MAX_CHARS
@@ -622,12 +797,14 @@ fm_ext_outbox_schema_valid() {
 }
 
 # Begin delivery: CAS the posting marker, then CAS an exclusive inflight
-# send marker before returning a send right. Returns 0 on a new claim or a
-# resumable split this caller exclusively claimed, 1 when a valid receipt
-# already exists (idempotent success), 4 when a terminal failed marker
-# exists, 3 when a posting marker exists without a receipt and this caller
-# does not own the next send (mid-send refuse), 2 on validation/publication
-# failure. JSON progress with inflight==null is not itself a shared claim.
+# send marker before returning a send right. Returns 0 on a new claim, a
+# resumable split this caller exclusively claimed, or a steal of a dead
+# owner past FM_EXT_INFLIGHT_TTL_SECS, 1 when a valid receipt already
+# exists (idempotent success), 4 when a terminal failed marker exists, 3
+# when a posting marker exists without a receipt and this caller does not
+# own the next send (live owner, or dead owner still inside the TTL), 2
+# on validation/publication failure. JSON progress with inflight==null is
+# not itself a shared claim.
 fm_ext_outbox_begin() {
   local dir=$1 slug=$2 kind=$3 generation=$4 payload posting receipt failed progress now rc
   payload=$(fm_ext_outbox_basename "$slug" "$kind" "$generation") || return 2

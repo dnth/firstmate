@@ -4,7 +4,7 @@
 # Hermetic: no Discord network. The gateway plugin's Discord sender is injected.
 # Captain cases 1-12 plus bootstrap activation, send-failure classes,
 # wake-append offer recovery, Discord reply splitting, exclusive resume
-# claim, and pre-send inflight release.
+# claim, pre-send inflight release, and stale inflight steal.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1098,6 +1098,118 @@ PY
   pass "22 pre-send failures release inflight; abort drops inflight first"
 }
 
+# --- 23. stale inflight steal: dead+TTL only; live concurrent still one -----
+
+_dead_pid() {
+  local pid
+  true &
+  pid=$!
+  wait "$pid" || true
+  if kill -0 "$pid" 2>/dev/null; then
+    fail "could not obtain a dead pid for inflight steal tests"
+  fi
+  printf '%s\n' "$pid"
+}
+
+_rewrite_inflight() {
+  local file=$1 pid=$2 recorded_at=$3 tmp
+  tmp="${file}.rewrite.$$"
+  jq -c --argjson pid "$pid" --argjson recorded_at "$recorded_at" \
+    '.pid=$pid | .recorded_at=$recorded_at' "$file" > "$tmp" \
+    || fail "could not rewrite inflight claim"
+  cat "$tmp" > "$file" || fail "could not replace inflight claim"
+  rm -f -- "$tmp"
+  chmod 600 "$file" || true
+}
+
+test_23_stale_inflight_ttl_and_dead_pid_steal() {
+  local home slug inflight posting dead now ttl rc rc1 rc2 p1 p2 go winner losers owner
+  now=100000
+  ttl=30
+  home="$TMP_ROOT/c23steal"
+  setup_home "$home"
+  _test_21_setup_resumable "$home"
+  slug=$(cat "$home/setup.slug")
+  inflight="$home/state/ext-outbox/${slug}.answer.1.inflight"
+  home_env "$home" env FM_EXT_NOW_OVERRIDE="$now" FM_EXT_INFLIGHT_TTL_SECS="$ttl" \
+    "$OUTBOX" begin --slug "$slug" --kind answer --generation 1 >/dev/null
+  assert_present "$inflight" "begin must record an inflight claim"
+  assert_grep '"pid"' "$inflight" "inflight claim must record owner pid"
+  owner=$(jq -r '.pid' "$inflight")
+  [ "$owner" = "$$" ] || fail "inflight owner pid must be the claiming poster (got $owner want $$)"
+
+  _rewrite_inflight "$inflight" "$owner" "$((now - ttl - 10))"
+  home_env "$home" env FM_EXT_NOW_OVERRIDE="$now" FM_EXT_INFLIGHT_TTL_SECS="$ttl" \
+    "$OUTBOX" begin --slug "$slug" --kind answer --generation 1 >/dev/null; rc=$?
+  expect_code 3 "$rc" "live owner past TTL must still refuse steal"
+  assert_present "$inflight" "live-owner refuse must keep the inflight claim"
+
+  dead=$(_dead_pid)
+  _rewrite_inflight "$inflight" "$dead" "$now"
+  home_env "$home" env FM_EXT_NOW_OVERRIDE="$now" FM_EXT_INFLIGHT_TTL_SECS="$ttl" \
+    "$OUTBOX" begin --slug "$slug" --kind answer --generation 1 >/dev/null; rc=$?
+  expect_code 3 "$rc" "dead owner inside TTL must refuse steal"
+
+  _rewrite_inflight "$inflight" "$dead" "$((now - ttl - 10))"
+  home_env "$home" env FM_EXT_NOW_OVERRIDE="$now" FM_EXT_INFLIGHT_TTL_SECS="$ttl" \
+    "$OUTBOX" begin --slug "$slug" --kind answer --generation 1 >/dev/null; rc=$?
+  expect_code 0 "$rc" "dead owner past TTL must steal once"
+  owner=$(jq -r '.pid' "$inflight")
+  [ "$owner" = "$$" ] || fail "stolen inflight must record the new owner pid (got $owner want $$)"
+  home_env "$home" env FM_EXT_NOW_OVERRIDE="$now" FM_EXT_INFLIGHT_TTL_SECS="$ttl" \
+    "$OUTBOX" begin --slug "$slug" --kind answer --generation 1 >/dev/null; rc=$?
+  expect_code 3 "$rc" "after a successful steal, a second begin must refuse"
+
+  home="$TMP_ROOT/c23live"
+  setup_home "$home"
+  _test_21_setup_resumable "$home"
+  slug=$(cat "$home/setup.slug")
+  inflight="$home/state/ext-outbox/${slug}.answer.1.inflight"
+  posting="$home/state/ext-outbox/${slug}.answer.1.posting"
+  go="$home/go"
+  rm -f "$go" "$home/rc1" "$home/rc2"
+  (
+    while [ ! -f "$go" ]; do sleep 0.01; done
+    home_env "$home" env FM_EXT_INFLIGHT_TTL_SECS=0 \
+      "$OUTBOX" begin --slug "$slug" --kind answer --generation 1 \
+      >/dev/null 2>"$home/begin1.err"
+    echo $? > "$home/rc1"
+    sleep 1
+  ) &
+  p1=$!
+  (
+    while [ ! -f "$go" ]; do sleep 0.01; done
+    home_env "$home" env FM_EXT_INFLIGHT_TTL_SECS=0 \
+      "$OUTBOX" begin --slug "$slug" --kind answer --generation 1 \
+      >/dev/null 2>"$home/begin2.err"
+    echo $? > "$home/rc2"
+    sleep 1
+  ) &
+  p2=$!
+  sleep 0.05
+  touch "$go"
+  wait "$p1" "$p2" || true
+  rc1=$(cat "$home/rc1")
+  rc2=$(cat "$home/rc2")
+  winner=0
+  losers=0
+  case "$rc1" in
+    0) winner=$((winner + 1)) ;;
+    3) losers=$((losers + 1)) ;;
+    *) fail "TTL=0 concurrent begin child 1 must exit 0 or 3, got $rc1" ;;
+  esac
+  case "$rc2" in
+    0) winner=$((winner + 1)) ;;
+    3) losers=$((losers + 1)) ;;
+    *) fail "TTL=0 concurrent begin child 2 must exit 0 or 3, got $rc2" ;;
+  esac
+  [ "$winner" = 1 ] || fail "two live concurrent posters must still have one winner under TTL=0 (winners=$winner rc1=$rc1 rc2=$rc2)"
+  [ "$losers" = 1 ] || fail "two live concurrent posters must still have one mid-delivery loser under TTL=0 (losers=$losers rc1=$rc1 rc2=$rc2)"
+  assert_present "$inflight" "the live winner must still hold inflight"
+  assert_present "$posting" "concurrent live refuse must not drop posting"
+  pass "23 stale inflight steal requires dead pid and TTL; live concurrent still one winner"
+}
+
 # --- bootstrap opt-in -------------------------------------------------------
 
 test_bootstrap_arms_ext_watch_shim() {
@@ -1152,6 +1264,7 @@ test_19_over_limit_posts_chunks_in_order_without_fmx_token
 test_20_later_chunk_transient_resumes_without_repost
 test_21_concurrent_resume_exclusive_inflight_claim
 test_22_presend_release_and_abort_inflight_first
+test_23_stale_inflight_ttl_and_dead_pid_steal
 test_bootstrap_arms_ext_watch_shim
 test_poll_noop_when_inactive
 test_plugin_has_no_terminal_dispatch

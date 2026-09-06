@@ -592,6 +592,9 @@ Re-emitting the same identity is a no-op success.
 A posting marker without a receipt is refused as mid-delivery, matching public-follow-up delivery-posting behavior.
 That refuse covers an ambiguous crash or transport error after Discord may have accepted the post.
 `bin/fm-ext-outbox.sh begin` CAS-claims that posting marker and an exclusive per-generation inflight send marker before any send, so two posters cannot both send the same chunk.
+The inflight claim records owner pid and `recorded_at`.
+A leftover claim is stolen only when it is older than `FM_EXT_INFLIGHT_TTL_SECS` (default 30) **and** its recorded owner pid is dead.
+A live owner stays mid-delivery even after that TTL, including an ambiguous crash-after-post while the poster process is still alive.
 `receipt` writes the receipt once.
 `abort` deletes the posting marker after a transient definite send failure (HTTP 429 or 5xx) so that generation can retry.
 `fail` records a terminal failed marker after a permanent 4xx so pending stops retrying that generation.
@@ -737,6 +740,7 @@ FM_EXT_SECRET_FILE=       # optional override of config/ext-secret for tests
 FM_EXT_ALLOWLIST_FILE=    # optional override of config/ext-allowlist for tests
 FM_EXT_DISCORD_REPLY_MAX_CHARS=1900   # local-bridge Discord per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900
 FM_EXT_DISCORD_THREAD_MAX=25   # maximum messages in one local-bridge auto-split Discord thread
+FM_EXT_INFLIGHT_TTL_SECS=30   # seconds a dead-owner exclusive send claim must age before another poster may steal it; live owners are never stolen from
 FM_PF_RETRY_BACKOFF_SECS=900   # seconds before the next attempt after a retryable promised-public-reply delivery error
 FM_LOCK_STALE_AFTER=2   # seconds before dead-pid lock records can be reclaimed; mid-acquire locks keep at least 2s grace
 FM_GUARD_GRACE=300      # seconds before guard warnings, arm health checks, and the primary turn-end guard treat a watcher beacon as stale

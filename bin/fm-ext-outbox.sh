@@ -15,13 +15,16 @@
 #   fm-ext-outbox.sh split [--max <n>] [--cap <n>]
 #
 # begin CAS-claims the posting marker, then CAS-claims an exclusive inflight
-# send marker before returning a send right. Exit 0 on a new claim or a
-# resumable split this caller exclusively claimed, 1 when a receipt already
+# send marker (recording owner pid and recorded_at) before returning a send
+# right. Exit 0 on a new claim, a resumable split this caller exclusively
+# claimed, or a steal of a dead-owner claim older than
+# FM_EXT_INFLIGHT_TTL_SECS (default 30). Exit 1 when a receipt already
 # exists (idempotent success), 3 on mid-delivery (posting without this
-# caller owning the next send), 4 when a terminal failed marker exists, 2 on
-# validation failure. Two concurrent begins cannot both get the send right
-# for the same generation and chunk. receipt writes the receipt once and
-# releases a leftover inflight marker.
+# caller owning the next send, including a live owner inside or past the
+# TTL), 4 when a terminal failed marker exists, 2 on validation failure.
+# Two concurrent live posters cannot both get the send right for the same
+# generation and chunk. receipt writes the receipt once and releases a
+# leftover inflight marker.
 # abort releases the exclusive inflight send marker first, then deletes the
 # posting marker and chunk progress, after a transient definite send failure
 # (HTTP 429 or 5xx) before any chunk succeeded so that generation can retry.
