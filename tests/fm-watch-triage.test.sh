@@ -257,7 +257,11 @@ test_legacy_seen_marker_rejects_mtime_preserved_replacement() {
   statusf="$state/legacy.status"
   printf 'done: PR ready\n' > "$statusf"
   size=$(wc -c < "$statusf"); size=${size//[[:space:]]/}
-  inode=$(ls -i "$statusf" | awk '{print $1}')
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    inode=$(stat -f '%i' "$statusf")
+  else
+    inode=$(stat -c '%i' "$statusf")
+  fi
   # A pre-sidecar watcher marker: the inode:size:mtime signature of the log it
   # had already classified, with no endpoint sidecar beside it.
   marker="$state/.seen-legacy_status"
