@@ -17,6 +17,7 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync,
+  existsSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -110,6 +111,7 @@ export type PrimaryWatchCore = {
   arm: () => ArmResult;
   armAndWait: () => Promise<ArmResult>;
   acknowledgeWake: (content: string) => void;
+  hasPendingActionableHandoff: () => boolean;
   markLoaded: () => void;
   sessionShutdown: (replacement?: boolean) => Promise<void>;
   sessionStart: () => void;
@@ -1130,6 +1132,18 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     return result;
   }
 
+  // True while the core still owns an actionable wake it has not delivered.
+  function hasPendingActionableHandoff(): boolean {
+    if (replacementCoordinator.pending.length > 0) return true;
+    if (generation.pendingActionables.some((pending) => !pending.delivered)) return true;
+    try {
+      return validateReplacementHandoff(JSON.parse(readFileSync(actionableHandoff, "utf8")))
+        .some((pending) => !pending.delivered);
+    } catch {
+      return false;
+    }
+  }
+
   function acknowledgeWake(content: string): void {
     for (const [token, acknowledgement] of generation.wakeAcknowledgements) {
       if (acknowledgement.content !== content) continue;
@@ -1164,6 +1178,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     arm: () => activateOwnedWatch(generation),
     armAndWait,
     acknowledgeWake,
+    hasPendingActionableHandoff,
     markLoaded,
     sessionShutdown,
     sessionStart,

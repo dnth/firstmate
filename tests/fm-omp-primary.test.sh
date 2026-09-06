@@ -377,7 +377,10 @@ extension.default(api);
 JS
   )
   rc=$?
-  set -e
+  # Restore the suite's own mode. Leaving errexit on here would make every later
+  # test's command substitution abort the whole script silently instead of
+  # reporting its own "not ok" line.
+  set +e
   [ "$rc" -ne 0 ] || fail "OMP primary marker accepted a whitespace-bearing entrypoint"
   assert_contains "$out" 'OMP primary identity paths containing whitespace are unsupported' \
     "OMP primary whitespace refusal was not actionable"
@@ -640,10 +643,10 @@ if (watcherMessages.length !== 1 || !watcherMessages[0].message.content.includes
 }
 if (
   watcherMessages[0].message.customType !== "firstmate-watcher-wake" ||
-  watcherMessages[0].options?.deliverAs !== "steer" ||
+  watcherMessages[0].options?.deliverAs !== "nextTurn" ||
   watcherMessages[0].options?.triggerTurn !== true
 ) {
-  throw new Error(`OMP watcher notification did not preserve the editable draft delivery mode: ${JSON.stringify(watcherMessages[0])}`);
+  throw new Error(`OMP watcher notification did not use hidden next-turn delivery: ${JSON.stringify(watcherMessages[0])}`);
 }
 if (!existsSync(`${process.env.FM_STATE_OVERRIDE}/watch-successor-ready`)) {
   throw new Error("OMP actionable notification arrived before successor readiness");
@@ -782,7 +785,7 @@ JS
 # The shared core delivers the recovery handshake for every runtime bound to it,
 # so OMP must confirm a handling delivery exactly like Pi and OpenCode do: start
 # and verify the successor, run fm-watch-arm.sh --handling-delivered for the
-# generation the successor reported, and only then deliver the wake steer.
+# generation the successor reported, and only then deliver the wake notification.
 # Upstream covers Pi and OpenCode; this pins the fork's OMP binding of the same
 # contract so a future adapter change cannot silently drop it.
 test_native_omp_confirms_recovery_handling_delivery() {
@@ -863,8 +866,8 @@ const rows = armRows();
 const arms = rows.filter((row) => row.startsWith("arm="));
 if (arms.length !== 2) throw new Error(`expected one successor arm, got ${arms.length}: ${rows.join(" | ")}`);
 if (steers !== 1) throw new Error(`expected exactly one wake steer, got ${steers}`);
-if (deliveryOptions?.deliverAs !== "steer" || deliveryOptions?.triggerTurn !== true) {
-  throw new Error(`wake was not delivered as a turn-triggering steer: ${JSON.stringify(deliveryOptions)}`);
+if (deliveryOptions?.deliverAs !== "nextTurn" || deliveryOptions?.triggerTurn !== true) {
+  throw new Error(`wake was not delivered as a turn-triggering hidden next-turn message: ${JSON.stringify(deliveryOptions)}`);
 }
 if (rowsAtDelivery !== 2) throw new Error(`wake delivery began before successor establishment (${rowsAtDelivery} arm rows)`);
 const confirmations = rows.filter((row) => row.startsWith("confirmed "));
@@ -883,8 +886,8 @@ JS
   ) || status=$?
   printf 'stop\n' > "$TMP_ROOT/native-handling-delivery.stop" 2>/dev/null || true
   expect_code 0 "$status" "OMP recovery handling delivery"
-  assert_contains "$out" omp-handling-delivery-ok "OMP did not confirm its recovery handling delivery after the wake steer"
-  pass "OMP confirms the recovery handling handshake after delivering its wake steer"
+  assert_contains "$out" omp-handling-delivery-ok "OMP did not confirm its recovery handling delivery after the wake notification"
+  pass "OMP confirms the recovery handling handshake after delivering its hidden next-turn wake"
 }
 
 # A refused handling handshake must be classified and surfaced exactly once
@@ -1187,7 +1190,10 @@ const api = {
   registerTool() {},
   // The runtime queues every wake as a steer into a running turn: delivery
   // resolves, no turn starts, and before_agent_start is never invoked for it.
-  sendMessage(message) { steers.push(String(message?.content ?? "")); },
+  sendMessage(message) {
+    const content = String(message?.content ?? "");
+    if (content.includes("omp unacknowledged wake")) steers.push(content);
+  },
 };
 const state = process.env.FM_STATE_OVERRIDE;
 const bound = Number(process.env.FM_WATCH_WAKE_CONSUME_TIMEOUT_MS);
@@ -1234,6 +1240,218 @@ JS
   pass "OMP unacknowledged wake delivery keeps the successor chain and delivers once per close"
 }
 
+make_omp_queue_fixture() {  # <name>
+  local fixture=$TMP_ROOT/$1
+  mkdir -p "$fixture/.omp/extensions/lib" "$fixture/bin" "$fixture/state" "$fixture/config"
+  : > "$fixture/AGENTS.md"
+  git init -q -b main "$fixture"
+  cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$fixture/.omp/extensions/fm-primary-omp.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$fixture/.omp/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-async-exec.ts" "$fixture/.omp/extensions/lib/fm-async-exec.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" "$fixture/.omp/extensions/lib/fm-task-inbox-doorbell.ts"
+  cp "$ROOT/bin/fm-primary-watch-core.ts" "$fixture/bin/fm-primary-watch-core.ts"
+  cp "$ROOT/bin/fm-pi-compatible-runtimes" "$fixture/bin/fm-pi-compatible-runtimes"
+  cp "$ROOT/bin/fm-wake-lib.sh" "$fixture/bin/fm-wake-lib.sh"
+  cat > "$fixture/bin/fm-gate-refuse-lib.sh" <<'SH'
+fm_is_gate_agent() { return 1; }
+SH
+  cat > "$fixture/bin/fm-primary-scope-lib.sh" <<'SH'
+fm_primary_scope_matches() { return 0; }
+SH
+  cat > "$fixture/bin/fm-operational-input.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'encoded:%s:%s' "$2" "$(cat)"
+SH
+  cat > "$fixture/bin/fm-sessionstart-nudge.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$fixture/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  for script in fm-subagent-pretool-check.sh fm-cd-pretool-check.sh fm-arm-pretool-check.sh; do
+    cat > "$fixture/bin/$script" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  done
+  chmod +x "$fixture/bin/"*.sh
+  printf '%s\n' "$fixture"
+}
+
+write_queue_watcher() {  # <fixture>
+  cat > "$1/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+state=${FM_STATE_OVERRIDE:?}
+count=$(cat "$state/watch-count" 2>/dev/null || printf 0)
+count=$((count + 1))
+printf '%s\n' "$count" > "$state/watch-count"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$state/watch-stop" ]; do sleep 0.02; done
+SH
+  chmod +x "$1/bin/fm-watch-arm.sh"
+}
+
+test_native_omp_durable_queue_session_notifications() {
+  local fixture out status=0
+  fixture=$(make_omp_queue_fixture native-queue-session)
+  write_queue_watcher "$fixture"
+  FM_STATE_OVERRIDE="$fixture/state" bash -c \
+    '. "$1/bin/fm-wake-lib.sh"; fm_wake_append signal task-a.status "signal: task-a"' _ "$fixture" \
+    || fail "the OMP queue fixture could not seed a durable wake row"
+  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
+    FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    node --input-type=module 2>&1 <<'JS'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const state = process.env.FM_STATE_OVERRIDE;
+const wakes = [];
+const handlers = new Map();
+const api = {
+  zod: { object: () => ({}) },
+  on(name, handler) { handlers.set(name, handler); },
+  registerCommand() {},
+  registerTool() {},
+  sendMessage(message, options) {
+    if (message?.customType === "firstmate-watcher-wake") wakes.push({ message, options });
+  },
+};
+const count = () => existsSync(`${state}/watch-count`) ? Number(readFileSync(`${state}/watch-count`, "utf8")) : 0;
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) { if (pred()) return; await new Promise((r) => setTimeout(r, 10)); }
+  throw new Error(`timeout waiting for ${label}`);
+}
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+process.argv[1] = process.env.EXTENSION;
+const module = await import(`${pathToFileURL(process.env.EXTENSION).href}?queue-session=${Date.now()}`);
+module.default(api);
+const context = { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "sess-one" } };
+await handlers.get("session_start")({ type: "session_start" }, context);
+await waitFor(() => count() === 1, "initial arm");
+await waitFor(() => wakes.length === 1, "session-start durable wake");
+if (wakes[0].options?.deliverAs !== "nextTurn" || wakes[0].options?.triggerTurn !== true) throw new Error("session-start wake used the wrong delivery mode");
+await handlers.get("session_switch")({ type: "session_switch", reason: "new" }, context);
+await waitFor(() => wakes.length === 2, "session-switch durable wake");
+if (wakes.length !== 2) throw new Error(`expected two session-event notifications, got ${wakes.length}`);
+writeFileSync(`${state}/watch-stop`, "stop\n");
+await handlers.get("session_shutdown")({ type: "session_shutdown" }, {});
+console.log("omp-durable-queue-session-notifications-ok");
+JS
+  ) || status=$?
+  printf 'stop\n' > "$fixture/state/watch-stop" 2>/dev/null || true
+  expect_code 0 "$status" "OMP durable queue session notifications"
+  assert_contains "$out" omp-durable-queue-session-notifications-ok "session events did not re-notify queued durable wakes: $out"
+  pass "OMP re-notifies durable wakes once on session start and switch"
+}
+
+test_native_omp_empty_queue_suppresses_session_notifications() {
+  local fixture out status=0
+  fixture=$(make_omp_queue_fixture native-queue-empty)
+  write_queue_watcher "$fixture"
+  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
+    FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    node --input-type=module 2>&1 <<'JS'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const state = process.env.FM_STATE_OVERRIDE;
+let wakes = 0;
+const handlers = new Map();
+const api = { zod: { object: () => ({}) }, on(name, handler) { handlers.set(name, handler); }, registerCommand() {}, registerTool() {}, sendMessage(message) { if (message?.customType === "firstmate-watcher-wake") wakes += 1; } };
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+process.argv[1] = process.env.EXTENSION;
+const module = await import(`${pathToFileURL(process.env.EXTENSION).href}?queue-empty=${Date.now()}`);
+module.default(api);
+const context = { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "sess-one" } };
+await handlers.get("session_start")({ type: "session_start" }, context);
+await handlers.get("session_switch")({ type: "session_switch", reason: "new" }, context);
+await new Promise((r) => setTimeout(r, 100));
+if (wakes !== 0) throw new Error(`empty queue produced ${wakes} notifications`);
+writeFileSync(`${state}/watch-stop`, "stop\n");
+await handlers.get("session_shutdown")({ type: "session_shutdown" }, {});
+console.log("omp-empty-queue-session-notifications-ok");
+JS
+  ) || status=$?
+  printf 'stop\n' > "$fixture/state/watch-stop" 2>/dev/null || true
+  expect_code 0 "$status" "OMP empty queue session notifications"
+  assert_contains "$out" omp-empty-queue-session-notifications-ok "empty durable queue produced a session notification: $out"
+  pass "OMP suppresses session notifications when the durable queue is empty"
+}
+
+test_native_omp_core_handoff_suppresses_queue_notification() {
+  local fixture out status=0
+  fixture=$(make_omp_queue_fixture native-queue-core-handoff)
+  write_queue_watcher "$fixture"
+  mkdir -p "$fixture/state/extensions/omp-primary-watch"
+  printf '{"version":2,"pending":[{"version":1,"token":"1-2-3","message":"signal: core owned undelivered close","predecessorArmPid":""}]}\n' \
+    > "$fixture/state/extensions/omp-primary-watch/session-replacement-actionable.json"
+  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
+    FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    node --input-type=module 2>&1 <<'JS'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const state = process.env.FM_STATE_OVERRIDE;
+const wakes = [];
+const handlers = new Map();
+const api = { zod: { object: () => ({}) }, on(name, handler) { handlers.set(name, handler); }, registerCommand() {}, registerTool() {}, sendMessage(message, options) { if (message?.customType === "firstmate-watcher-wake") wakes.push({ message, options }); } };
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+process.argv[1] = process.env.EXTENSION;
+const module = await import(`${pathToFileURL(process.env.EXTENSION).href}?queue-core=${Date.now()}`);
+module.default(api);
+await handlers.get("session_start")({ type: "session_start" }, { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "sess-one" } });
+for (let i = 0; i < 300 && wakes.length === 0; i += 1) await new Promise((r) => setTimeout(r, 10));
+if (wakes.length !== 1 || !wakes[0].message.content.includes("core owned undelivered close")) throw new Error(`core handoff delivery was not exclusive: ${JSON.stringify(wakes)}`);
+if (wakes[0].options?.deliverAs !== "nextTurn" || wakes[0].options?.triggerTurn !== true) throw new Error("core handoff used the wrong delivery mode");
+writeFileSync(`${state}/watch-stop`, "stop\n");
+await handlers.get("session_shutdown")({ type: "session_shutdown" }, {});
+console.log("omp-core-handoff-queue-notification-ok");
+JS
+  ) || status=$?
+  printf 'stop\n' > "$fixture/state/watch-stop" 2>/dev/null || true
+  expect_code 0 "$status" "OMP core handoff queue notification"
+  assert_contains "$out" omp-core-handoff-queue-notification-ok "core handoff was duplicated by queue notification: $out"
+  pass "OMP core handoff suppresses duplicate durable queue notification"
+}
+
+test_native_omp_delivered_handoff_does_not_suppress_queue_notification() {
+  local fixture out status=0
+  fixture=$(make_omp_queue_fixture native-queue-delivered-handoff)
+  write_queue_watcher "$fixture"
+  mkdir -p "$fixture/state/extensions/omp-primary-watch"
+  printf '{"version":2,"pending":[{"version":1,"token":"1-2-3","message":"signal: already delivered","predecessorArmPid":"","delivered":true}]}\n' \
+    > "$fixture/state/extensions/omp-primary-watch/session-replacement-actionable.json"
+  FM_STATE_OVERRIDE="$fixture/state" bash -c \
+    '. "$1/bin/fm-wake-lib.sh"; fm_wake_append signal task-a.status "signal: task-a"' _ "$fixture" \
+    || fail "the delivered-handoff fixture could not seed a durable wake row"
+  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
+    FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    node --input-type=module 2>&1 <<'JS'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const state = process.env.FM_STATE_OVERRIDE;
+const wakes = [];
+const handlers = new Map();
+const api = { zod: { object: () => ({}) }, on(name, handler) { handlers.set(name, handler); }, registerCommand() {}, registerTool() {}, sendMessage(message, options) { if (message?.customType === "firstmate-watcher-wake") wakes.push({ message, options }); } };
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+process.argv[1] = process.env.EXTENSION;
+const module = await import(`${pathToFileURL(process.env.EXTENSION).href}?queue-delivered-handoff=${Date.now()}`);
+module.default(api);
+await handlers.get("session_start")({ type: "session_start" }, { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "sess-one" } });
+for (let i = 0; i < 300 && wakes.length === 0; i += 1) await new Promise((r) => setTimeout(r, 10));
+if (wakes.length !== 1) throw new Error(`delivered handoff suppressed or duplicated the queue wake: ${wakes.length}`);
+if (wakes[0].options?.deliverAs !== "nextTurn" || wakes[0].options?.triggerTurn !== true) throw new Error("queue wake used the wrong delivery mode");
+writeFileSync(`${state}/watch-stop`, "stop\n");
+await handlers.get("session_shutdown")({ type: "session_shutdown" }, {});
+console.log("omp-delivered-handoff-queue-notification-ok");
+JS
+  ) || status=$?
+  printf 'stop\n' > "$fixture/state/watch-stop" 2>/dev/null || true
+  expect_code 0 "$status" "OMP delivered handoff queue notification"
+  assert_contains "$out" omp-delivered-handoff-queue-notification-ok "delivered handoff suppressed durable queue notification: $out"
+  pass "OMP ignores already-delivered handoffs when notifying queued wakes"
+}
+
 test_resolve_path_uses_node_when_readlink_f_is_unavailable
 test_exact_bun_omp_primary_identity
 test_standalone_omp_primary_identity
@@ -1247,3 +1465,7 @@ test_native_omp_confirms_recovery_handling_delivery
 test_native_omp_refused_handling_delivery_is_typed_once
 test_native_omp_session_switch_carries_inflight_actionable_close
 test_native_omp_unacknowledged_wake_keeps_successor_chain
+test_native_omp_durable_queue_session_notifications
+test_native_omp_empty_queue_suppresses_session_notifications
+test_native_omp_core_handoff_suppresses_queue_notification
+test_native_omp_delivered_handoff_does_not_suppress_queue_notification

@@ -13,7 +13,6 @@ set -u
 
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
-
 TMP_ROOT=$(fm_test_tmproot fm-wake-tests)
 
 # Wait briefly for <file> to become non-empty.

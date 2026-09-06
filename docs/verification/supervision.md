@@ -127,6 +127,24 @@ ok - OMP omp/18.1.5 primary E2E proved watcher delivery with an intact editable 
 
 Before that change the same guard failed on OMP 18.1.5 at the first `/new`: the restored watcher's first wake started an agent-initiated turn, and OMP emits `before_agent_start` neither for that turn nor for a captain prompt queued into it, so an instruction staged for `before_agent_start` never reached the replacement session.
 
+The OMP 18.1.5 idle-wake guard ran on 2026-09-06 after the adapter moved its watcher wake from a custom steer to a hidden `nextTurn` message with `triggerTurn`.
+Delivery alone was already covered; this run adds the guarantee that the idle session runs the handling turn for that wake itself.
+
+```sh
+omp --version
+FM_OMP_PRIMARY_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh
+```
+
+```text
+omp/18.1.5
+ok - OMP omp/18.1.5 primary E2E proved fresh no-state and ordinary native discovery, exact ownership, once-only startup, guarded watcher startup, repeated /new continuity, shutdown, resume, and away-mode delivery
+ok - OMP omp/18.1.5 primary E2E proved an idle session runs the watcher wake turn itself with an intact editable draft
+```
+
+The session was idle with an unsent draft when the watcher fired and nobody typed anything: it started the handling turn on its own and reached a terminal assistant record with the exact draft unchanged.
+The same command refreshes this result.
+A live leg that fires the wake mid-turn was attempted and left out: driving a reliably long real turn from the composer was not dependable enough for a guard, so the mid-turn continuation rests on OMP's own `sendCustomMessage` contract - `nextTurn` with `triggerTurn` schedules a post-prompt continuation bound to that prompt generation - plus the deterministic delivery-mode assertions in `tests/fm-omp-primary.test.sh`.
+
 Standalone OMP executable compatibility is recorded in [runtime backend verification](runtime-backends.md#omp-lifecycle).
 
 Current deterministic and live entry points:

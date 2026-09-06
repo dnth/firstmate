@@ -106,6 +106,34 @@ wait_idle() {
   return 1
 }
 
+# True once the session actually ran a turn FOR the watcher wake: the hidden
+# watcher-wake entry carrying <marker> is followed by a terminal assistant
+# record. Delivery alone is not the guarantee - an idle session that accepts the
+# notification and never turns is exactly the failure this guard exists to
+# catch, and a persistent second mate is this same adapter running as the
+# primary of its own home.
+session_handled_watcher_wake_after() {  # <session-file> <offset> <marker>
+  local file=$1 offset=$2 marker=$3
+  tail -c "+$((offset + 1))" "$file" | node -e '
+    const marker = process.argv[1];
+    let input = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", chunk => { input += chunk; });
+    process.stdin.on("end", () => {
+      let seen = false;
+      for (const line of input.trimEnd().split("\n")) {
+        if (!line) continue;
+        if (line.includes("\"firstmate-watcher-wake\"") && line.includes(marker)) seen = true;
+        if (!seen) continue;
+        let entry;
+        try { entry = JSON.parse(line); } catch { continue; }
+        if (entry.message?.role === "assistant" && entry.message.stopReason === "stop") process.exit(0);
+      }
+      process.exit(1);
+    });
+  ' "$marker"
+}
+
 session_has_terminal_assistant_after() {
   local file=$1 offset=$2 marker=$3
   tail -c "+$((offset + 1))" "$file" | node -e '
@@ -374,7 +402,18 @@ printf 'ok - OMP %s primary E2E proved fresh no-state and ordinary native discov
   "$OMP_VERSION"
 draft="human-draft-survives-omp-watcher-wake"
 PATH="$WRAPPER_BIN:$PATH" tmux send-keys -t "$TARGET" -l "$draft"
-[ "$(composer_state)" = pending ] && [ "$(composer_text)" = "$draft" ] \
+# The TUI renders typed text asynchronously, so wait for the exact draft rather
+# than sampling once: the assertion is that this exact draft is what the wake
+# must leave alone, not how fast the terminal repaints it.
+draft_rendered=0
+for _ in $(seq 1 120); do
+  if [ "$(composer_state)" = pending ] && [ "$(composer_text)" = "$draft" ]; then
+    draft_rendered=1
+    break
+  fi
+  sleep 0.25
+done
+[ "$draft_rendered" -eq 1 ] \
   || { capture >&2; fail "OMP $OMP_VERSION did not render the exact editable draft before the watcher wake"; }
 wake_status="$HOME_DIR/state/omp-wake-preserve-$$.status"
 wake_offset=$(wc -c < "$session_file" | tr -d '[:space:]')
@@ -394,6 +433,20 @@ done
 [ "$(composer_state)" = pending ] && [ "$(composer_text)" = "$draft" ] \
   || { capture >&2; fail "OMP $OMP_VERSION watcher wake changed the exact editable draft"; }
 
-printf 'ok - OMP %s primary E2E proved watcher delivery with an intact editable draft\n' "$OMP_VERSION"
+# The session was idle with a pending draft when the watcher fired, and nobody
+# typed anything: hidden next-turn delivery with triggerTurn has to start the
+# handling turn by itself and carry it to a terminal assistant record.
+wake_handled=0
+for _ in $(seq 1 480); do
+  if session_handled_watcher_wake_after "$session_file" "$wake_offset" "$wake_status"; then
+    wake_handled=1
+    break
+  fi
+  sleep 0.25
+done
+[ "$wake_handled" -eq 1 ] \
+  || { capture >&2; fail "OMP $OMP_VERSION left an idle session holding the watcher wake without running a handling turn"; }
+
+printf 'ok - OMP %s primary E2E proved an idle session runs the watcher wake turn itself with an intact editable draft\n' "$OMP_VERSION"
 PATH="$WRAPPER_BIN:$PATH" tmux send-keys -t "$TARGET" Escape
 submit_omp /exit || fail "OMP $OMP_VERSION did not accept cleanup after draft preservation"

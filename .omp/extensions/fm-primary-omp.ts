@@ -2,7 +2,7 @@
 // OMP-native session, stop, tool-call, and shutdown events stay in this adapter.
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
@@ -135,6 +135,18 @@ function runSessionstartNudge(forceForNativeSwitch = false): string {
   return result.stdout.trim();
 }
 
+function durableWakeQueueHasRows(): boolean {
+  let queue = "";
+  try {
+    queue = readFileSync(`${state}/.wake-queue`, "utf8");
+  } catch {
+    return false;
+  }
+  return queue.split("\n").some((line) =>
+    /^(?:[^\t]*)\t[0-9]+\t(?:signal|stale|check|heartbeat)\t[^\t]*\t[^\t]*$/.test(line),
+  );
+}
+
 function runChecker(script: string, flag: "--command" | "--tool", value: string): Promise<ProcessResult> {
   return new Promise((resolveResult) => {
     const child = spawn(`${fmRoot}/bin/${script}`, [flag, value], {
@@ -203,6 +215,37 @@ export default function (omp: ExtensionAPI) {
   const taskInboxDoorbell = installTaskInboxDoorbell(omp);
   let pendingStartupNudge = "";
 
+  // Hidden next-turn delivery with triggerTurn. OMP schedules an internal
+  // continuation bound to the current prompt generation, so a wake that lands
+  // while a turn is still unwinding still starts its handling turn instead of
+  // stranding an idle session, and every notification queued during that turn
+  // is consumed by the one continuation. The message never enters the editable
+  // pending-message UI, so the captain's draft is untouched.
+  const sendWakeNotification = (content: string): void => {
+    omp.sendMessage(
+      {
+        customType: "firstmate-watcher-wake",
+        content,
+        display: false,
+        attribution: "agent",
+        details: { kind: "watcher", runtime: "omp" },
+      },
+      { deliverAs: "nextTurn", triggerTurn: true },
+    );
+  };
+
+  // Durable rows are the whole persistence: only fm-wake-drain acknowledgement
+  // removes them, so an interruption leaves the next session event able to
+  // re-notify. At most one notification is sent per session event, and the
+  // core remains the sole speaker while it owns an undelivered close.
+  const notifyQueuedWake = (coreOwnsDelivery: boolean): void => {
+    if (coreOwnsDelivery || !durableWakeQueueHasRows()) return;
+    sendWakeNotification(encodeOperationalInput(
+      "watcher",
+      "Durable watcher wakes are queued. Run `bin/fm-wake-drain.sh` first to present and acknowledge them.",
+    ));
+  };
+
   // Supervision-branch dispatch handshake (docs/omp-supervision-branch.md).
   // Build one offer per ordinary actionable wake and emit it on the shared
   // event bus; a live, enabled branch extension calls accept() synchronously
@@ -234,19 +277,7 @@ export default function (omp: ExtensionAPI) {
     armReadyTimeoutEnv: "FM_OMP_ARM_READY_TIMEOUT_MS",
     repairToolName: "fm_watch_arm_omp",
     encodeOperationalInput,
-    sendFollowUp: async (content) => {
-      // Deliver a custom steer so OMP wakes idle sessions without touching the editable draft.
-      omp.sendMessage(
-        {
-          customType: "firstmate-watcher-wake",
-          content,
-          display: false,
-          attribution: "agent",
-          details: { kind: "watcher", runtime: "omp" },
-        },
-        { deliverAs: "steer", triggerTurn: true },
-      );
-    },
+    sendFollowUp: async (content) => sendWakeNotification(content),
     offerWakeToBranch,
   });
 
@@ -281,9 +312,13 @@ export default function (omp: ExtensionAPI) {
 
   omp.on("session_start", (_event, ctx) => {
     taskInboxDoorbell.activate();
+    // Read before sessionStart: activating the watch consumes the core's own
+    // handoff, so asking afterwards could not tell who owns the redelivery.
+    const coreOwnsDelivery = watch.hasPendingActionableHandoff();
     watch.sessionStart();
     publishSecondmateSession(ctx);
     deliverSessionstartNudge();
+    notifyQueuedWake(coreOwnsDelivery);
   });
 
   omp.on("turn_start", () => {
@@ -294,7 +329,9 @@ export default function (omp: ExtensionAPI) {
     await watch.sessionShutdown(true);
     publishSecondmateSession(ctx);
     deliverSessionstartNudge(event.reason === "new" || event.reason === "resume");
+    const coreOwnsDelivery = watch.hasPendingActionableHandoff();
     watch.sessionStart();
+    notifyQueuedWake(coreOwnsDelivery);
   });
 
   omp.on("before_agent_start", (event): BeforeAgentStartEventResult | undefined => {
