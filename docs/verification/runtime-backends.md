@@ -527,7 +527,7 @@ FM_TEST_SUMMARY_FAMILY family=watcher-wake-lock count=2 duration_ms=97033 failed
 Every listed script ran at that head with no gate skip.
 The isolated Herdr role matrix emitted no queued-wake warning.
 The final run retained the fresh-beacon, pending-notification, queue-drain, and bounded-delivery assertions in the Herdr fixture.
-The focused OMP adapter contract now delivers watcher wakes as a hidden custom next-turn message with `triggerTurn`, preserving the editable draft while retaining idle wake and unwinding-turn continuation delivery.
+At this 2026-08-01 head, the focused OMP adapter contract delivered watcher wakes as a custom steer with `triggerTurn`, preserving the editable draft while retaining idle wake and streaming delivery.
 The tmux role fixtures emitted their expected task-copy worktree and missing-fixture-watcher notices.
 The Herdr exit fixture refused an unlocked presentation close after proving normal process exit, then completed its named guarded teardown.
 
@@ -618,7 +618,7 @@ ok - a captain-worthy wake opens exactly one follow-up turn on MAIN (real SDK)
 ok - OMP supervision branch live guard passed against @oh-my-pi/pi-coding-agent 17.3.4
 ```
 
-The guard proves a broken branch (an unresolvable model pin) falls the wake back to main through the primary adapter's hidden watcher-wake next-turn message with triggerTurn, not sendUserMessage, leaving the wake queue durable.
+The guard proves a broken branch (an unresolvable model pin) falls the wake back to main through the primary adapter's custom steer with triggerTurn, not sendUserMessage, leaving the wake queue durable.
 It proves a resident second AgentSession is created and remains re-promptable on a later wake without its turn output reaching main or replacing main's terminal resume breadcrumb, and that a routine verdict opens no new main turn while a captain verdict opens exactly one follow-up turn.
 The captain sub-check is skipped, not passed, on a run where the model judges the captain-worthy fixture routine.
 

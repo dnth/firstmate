@@ -158,8 +158,8 @@ decide_scoped_locked() {
 }
 
 # The highest sequence this actor has already been presented: the branch's
-# grant is exactly its current prompt's rows, and main's claim file is what its
-# last drain printed. Read BEFORE an ack re-claims, so a row that arrived since
+# grant is exactly its current prompt's rows, and main's eligible-row snapshot
+# is what its last drain printed. Read BEFORE an ack re-claims, so a row that arrived since
 # presentation is never named as "the current wake" the caller may acknowledge
 # unseen. 0 when nothing is on record.
 presented_max_row() { # <rows-file>
