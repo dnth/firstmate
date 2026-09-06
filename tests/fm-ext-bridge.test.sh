@@ -1452,7 +1452,58 @@ PY
   pass "25 an unrecoverable wedge is failed and surfaced, never silent"
 }
 
-# --- 26. pending stays flat as delivered replies accumulate -----------------
+# --- 26. pre-send crash with no progress is recoverable ---------------------
+
+test_26_presend_crash_without_progress_recovers() {
+  local home slug posting inflight rc future sent out
+  home="$TMP_ROOT/c26"
+  setup_home "$home"
+  slug=$(intake_ok "$home" "recover before first send")
+  write_text "$home/ans.txt" "one clean chunk"
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+    --text-file "$home/ans.txt" >/dev/null
+  posting="$home/state/ext-outbox/${slug}.answer.1.posting"
+  inflight="$home/state/ext-outbox/${slug}.answer.1.inflight"
+  home_env "$home" "$OUTBOX" begin --slug "$slug" --kind answer --generation 1 >/dev/null
+  assert_present "$posting" "pre-send crash fixture must keep posting marker"
+  assert_present "$inflight" "pre-send crash fixture must keep inflight claim"
+  [ ! -e "$home/state/ext-outbox/${slug}.answer.1.progress.json" ] \
+    || fail "pre-send crash fixture must have no progress artifact"
+
+  home_env "$home" "$OUTBOX" begin --slug "$slug" --kind answer --generation 1 \
+    >/dev/null 2>&1; rc=$?
+  expect_code 3 "$rc" "pre-send wedge must refuse inside recovery window"
+
+  future=$(( $(date +%s) + 4000 ))
+  home_env "$home" env FM_EXT_NOW_OVERRIDE="$future" "$OUTBOX" begin \
+    --slug "$slug" --kind answer --generation 1 >/dev/null 2>&1; rc=$?
+  expect_code 3 "$rc" "recovery pass must reopen generation for a fresh claim"
+  assert_absent "$posting" "pre-send recovery must remove posting marker"
+  assert_absent "$inflight" "pre-send recovery must release inflight claim"
+
+  sent="$home/sent.log"
+  : > "$sent"
+  out=$(home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$sent" <<'PY'
+import os, sys
+from pathlib import Path
+sys.path.insert(0, os.environ["PYTHONPATH"])
+import outbox_poster
+home, sent = sys.argv[1], sys.argv[2]
+os.environ["FM_HOME"] = home
+def send(payload):
+    with open(sent, "a", encoding="utf-8") as fh:
+        fh.write(payload["text"] + "\n")
+    return {"ok": True, "discord_message_id": "26"}
+print(",".join(outbox_poster.drain_outbox(send=send, home=Path(home))))
+PY
+  )
+  assert_contains "$out" "sent" "recovered pre-send generation must deliver"
+  [ "$(wc -l < "$sent" | tr -d ' ')" = 1 ] \
+    || fail "pre-send recovery must deliver exactly one chunk"
+  pass "26 pre-send crash without progress recovers and delivers once"
+}
+
+# --- 27. pending stays flat as delivered replies accumulate -----------------
 
 seed_delivered_outbox() {
   # Write <count> already-delivered generations straight into the outbox, the
@@ -1869,6 +1920,7 @@ test_poll_noop_when_inactive
 test_plugin_has_no_terminal_dispatch
 test_24_stuck_middelivery_recovers
 test_25_stuck_middelivery_surfaces_when_budget_spent
+test_26_presend_crash_without_progress_recovers
 test_26_pending_stays_flat_as_delivered_grows
 test_27_retention_expires_local_records
 test_28_allowlist_shell_and_plugin_agree

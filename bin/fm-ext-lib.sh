@@ -809,8 +809,34 @@ fm_ext_outbox_stuck_age() {
 # not yet eligible, and 2 on failure.
 fm_ext_outbox_stuck_recover() {
   local dir=$1 slug=$2 kind=$3 generation=$4
-  local progress age threshold attempts max now body reason rc
+  local progress inflight posting age threshold attempts max now body reason rc recorded_at
   progress=$(fm_ext_outbox_progress_basename "$slug" "$kind" "$generation") || return 2
+  inflight=$(fm_ext_outbox_inflight_basename "$slug" "$kind" "$generation") || return 2
+  posting=$(fm_ext_outbox_posting_basename "$slug" "$kind" "$generation") || return 2
+  if ! fm_ext_private_artifact_file_valid "$dir" "$progress" 600; then
+    fm_ext_private_artifact_file_valid "$dir" "$posting" 600 || return 1
+    fm_ext_private_artifact_file_valid "$dir" "$inflight" 600 || return 1
+    now=${FM_EXT_NOW_OVERRIDE:-$(date +%s)}
+    case "$now" in
+      ''|*[!0-9]*) return 2 ;;
+    esac
+    recorded_at=$(jq -er '.recorded_at | select(type=="number")' "$dir/$inflight" 2>/dev/null) || return 1
+    case "$recorded_at" in
+      ''|*[!0-9]*) return 1 ;;
+    esac
+    age=$((now - recorded_at))
+    [ "$age" -ge 0 ] 2>/dev/null || return 1
+    threshold=$(fm_ext_middelivery_recovery_secs)
+    [ "$age" -ge "$threshold" ] 2>/dev/null || return 1
+    # Progress is written before the first send, so no progress proves no post occurred.
+    fm_ext_outbox_abort "$dir" "$slug" "$kind" "$generation"
+    rc=$?
+    case "$rc" in
+      0) return 0 ;;
+      1) return 1 ;;
+      *) return 2 ;;
+    esac
+  fi
   age=$(fm_ext_outbox_stuck_age "$dir" "$slug" "$kind" "$generation") || return 1
   threshold=$(fm_ext_middelivery_recovery_secs)
   [ "$age" -ge "$threshold" ] 2>/dev/null || return 1
