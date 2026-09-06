@@ -1,7 +1,7 @@
 // Firstmate primary integration for OMP.
 // OMP-native session, stop, tool-call, and shutdown events stay in this adapter.
 import { spawn, spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,6 +28,15 @@ const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
 const marker = `${state}/.omp-primary-extension-loaded`;
 const operationalInputScript = `${fmRoot}/bin/fm-operational-input.sh`;
+const wakeClaimScript = `${fmRoot}/bin/fm-omp-wake-claim.sh`;
+
+// One identity per OMP process. A same-process extension reload re-evaluates
+// this module and must keep it, so it lives on the realm rather than in module
+// scope; a replacement process never inherits it, which is what separates a
+// reload from a restart even when the operating system reuses the former PID.
+type WakeClaimGlobal = typeof globalThis & { __firstmateOmpWakeClaimInstance?: string };
+const wakeClaimGlobal = globalThis as WakeClaimGlobal;
+const wakeClaimInstance = wakeClaimGlobal.__firstmateOmpWakeClaimInstance ??= randomUUID();
 
 type ProcessResult = {
   code: number;
@@ -135,6 +144,55 @@ function runSessionstartNudge(forceForNativeSwitch = false): string {
   return result.stdout.trim();
 }
 
+function claimEnv(): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    FM_HOME: fmHome,
+    FM_ROOT_OVERRIDE: fmRoot,
+    FM_STATE_OVERRIDE: state,
+    FM_CONFIG_OVERRIDE: config,
+  };
+}
+
+// Bind the durable claim for one outstanding wake notification. Never rejects:
+// the durable wake queue stays the authority for the batch itself, so a claim
+// that cannot be published costs a re-presentation after a replacement, while
+// failing here would either cancel the wake or make the core redeliver it.
+function publishWakeClaim(session: string, content: string): Promise<void> {
+  return new Promise((resolveClaim) => {
+    const child = spawn(
+      wakeClaimScript,
+      ["publish", "--instance", wakeClaimInstance, "--session", session],
+      { env: claimEnv(), stdio: ["pipe", "ignore", "ignore"] },
+    );
+    child.on("error", () => resolveClaim());
+    child.on("close", () => resolveClaim());
+    child.stdin.on("error", () => {
+      // The claim script may have exited before the body was written.
+    });
+    child.stdin.end(content);
+  });
+}
+
+// Take over an outstanding claim left by a replacement session or a replacement
+// process and return the exact body to re-present. Empty when nothing is
+// outstanding, when this process and session already own the claim (a
+// same-session extension reload), or when the handover could not complete - the
+// claim then keeps its previous owner and the next replay retries it.
+function takeOverWakeClaim(session: string): string {
+  const result = spawnSync(
+    wakeClaimScript,
+    ["replay", "--instance", wakeClaimInstance, "--session", session],
+    // Bounded: this runs inside a session event, so a wedged durable queue lock
+    // must cost one skipped re-presentation, never a hung OMP session. A
+    // nonzero or timed-out handover leaves the claim with its previous owner
+    // for the next session event to retry.
+    { encoding: "utf8", env: claimEnv(), maxBuffer: 4 * 1024 * 1024, timeout: 15000 },
+  );
+  if (result.status !== 0) return "";
+  return result.stdout || "";
+}
+
 function runChecker(script: string, flag: "--command" | "--tool", value: string): Promise<ProcessResult> {
   return new Promise((resolveResult) => {
     const child = spawn(`${fmRoot}/bin/${script}`, [flag, value], {
@@ -202,6 +260,50 @@ export default function (omp: ExtensionAPI) {
   publishNativeProcessIdentity();
   const taskInboxDoorbell = installTaskInboxDoorbell(omp);
   let pendingStartupNudge = "";
+  // Per-session half of the claim owner identity. "unbound" until a session
+  // event supplies one, so a claim written before any session can still be
+  // matched deterministically rather than looking like a foreign owner.
+  let wakeClaimSession = "unbound";
+
+  const bindWakeClaimSession = (ctx: ExtensionContext): void => {
+    let sessionId = "";
+    try {
+      sessionId = ctx.sessionManager?.getSessionId?.() ?? "";
+    } catch {
+      // A session without a readable identity keeps the unbound placeholder.
+    }
+    wakeClaimSession = sessionId ? createHash("sha256").update(sessionId).digest("hex") : "unbound";
+  };
+
+  // Hidden next-turn delivery with triggerTurn. OMP schedules an internal
+  // continuation bound to the current prompt generation, so a wake that lands
+  // while a turn is still unwinding still starts its handling turn instead of
+  // stranding an idle session, and every notification queued during that turn
+  // is consumed by the one continuation. The message never enters the editable
+  // pending-message UI, so the captain's draft is untouched.
+  const sendWakeNotification = (content: string): void => {
+    omp.sendMessage(
+      {
+        customType: "firstmate-watcher-wake",
+        content,
+        display: false,
+        attribution: "agent",
+        details: { kind: "watcher", runtime: "omp" },
+      },
+      { deliverAs: "nextTurn", triggerTurn: true },
+    );
+  };
+
+  // Re-present the durable batch a previous session or process notified but
+  // never got acknowledged. The core keeps its own handoff for a close it has
+  // not delivered yet and replays that itself, so this takes the claim over
+  // silently in that case: the handover still happens exactly once, and only
+  // one of the two mechanisms speaks.
+  const replayWakeClaim = (coreOwnsDelivery: boolean): void => {
+    const content = takeOverWakeClaim(wakeClaimSession);
+    if (!content || coreOwnsDelivery) return;
+    sendWakeNotification(content);
+  };
 
   // Supervision-branch dispatch handshake (docs/omp-supervision-branch.md).
   // Build one offer per ordinary actionable wake and emit it on the shared
@@ -235,17 +337,12 @@ export default function (omp: ExtensionAPI) {
     repairToolName: "fm_watch_arm_omp",
     encodeOperationalInput,
     sendFollowUp: async (content) => {
-      // Deliver a custom steer so OMP wakes idle sessions without touching the editable draft.
-      omp.sendMessage(
-        {
-          customType: "firstmate-watcher-wake",
-          content,
-          display: false,
-          attribution: "agent",
-          details: { kind: "watcher", runtime: "omp" },
-        },
-        { deliverAs: "steer", triggerTurn: true },
-      );
+      // Claim first, notify second: an interruption between the two leaves a
+      // replayable claim rather than a notification no successor can
+      // re-present. The claim retires only when bin/fm-wake-drain.sh
+      // acknowledges the durable rows it covers.
+      await publishWakeClaim(wakeClaimSession, content);
+      sendWakeNotification(content);
     },
     offerWakeToBranch,
   });
@@ -280,10 +377,15 @@ export default function (omp: ExtensionAPI) {
   };
 
   omp.on("session_start", (_event, ctx) => {
+    bindWakeClaimSession(ctx);
     taskInboxDoorbell.activate();
+    // Read before sessionStart: activating the watch consumes the core's own
+    // handoff, so asking afterwards could not tell who owns the redelivery.
+    const coreOwnsDelivery = watch.hasPendingActionableHandoff();
     watch.sessionStart();
     publishSecondmateSession(ctx);
     deliverSessionstartNudge();
+    replayWakeClaim(coreOwnsDelivery);
   });
 
   omp.on("turn_start", () => {
@@ -292,9 +394,12 @@ export default function (omp: ExtensionAPI) {
 
   omp.on("session_switch", async (event, ctx) => {
     await watch.sessionShutdown(true);
+    bindWakeClaimSession(ctx);
     publishSecondmateSession(ctx);
     deliverSessionstartNudge(event.reason === "new" || event.reason === "resume");
+    const coreOwnsDelivery = watch.hasPendingActionableHandoff();
     watch.sessionStart();
+    replayWakeClaim(coreOwnsDelivery);
   });
 
   omp.on("before_agent_start", (event): BeforeAgentStartEventResult | undefined => {

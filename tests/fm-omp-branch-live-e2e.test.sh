@@ -101,17 +101,17 @@ const sessionFile = () => { try { return readFileSync(`${HOME}/state/.branch-ses
 
 if (MODE === "degrade") {
   // The broken branch falls the wake back to main through the primary adapter's
-  // exact main-wake mechanism: a firstmate-watcher-wake steer with triggerTurn,
-  // captured in the sendMessage stream (not sendUserMessage).
+  // exact main-wake mechanism: a hidden firstmate-watcher-wake nextTurn message
+  // with triggerTurn, captured in the sendMessage stream (not sendUserMessage).
   const fallback = sent.filter((s) => s.m.customType === "firstmate-watcher-wake");
-  if (fallback.length < 1) fail("a broken branch did not fall the wake back to main via a watcher-wake steer");
-  if (fallback.some((s) => s.o.triggerTurn !== true || s.o.deliverAs !== "steer")) {
-    fail("fallback did not use the steer+triggerTurn main-wake mechanism");
+  if (fallback.length < 1) fail("a broken branch did not fall the wake back to main via a watcher-wake notification");
+  if (fallback.some((s) => s.o.triggerTurn !== true || s.o.deliverAs !== "nextTurn")) {
+    fail("fallback did not use the hidden nextTurn+triggerTurn main-wake mechanism");
   }
   if (sent.some((s) => s.m.customType === "fm-branch-merge")) fail("a broken branch merged into main instead of falling back");
-  if (userMsgs.length !== 0) fail("fallback used sendUserMessage instead of the watcher-wake steer");
+  if (userMsgs.length !== 0) fail("fallback used sendUserMessage instead of the watcher-wake notification");
   if (!(readFileSync(`${HOME}/state/.wake-queue`, "utf8").trim().length > 0)) fail("the wake queue was lost on degrade");
-  console.log("DRIVER_OK degrade: broken branch fell back to main via a watcher-wake steer with the wake queue intact");
+  console.log("DRIVER_OK degrade: broken branch fell back to main via a hidden watcher-wake nextTurn with the wake queue intact");
   process.exit(0);
 }
 

@@ -377,7 +377,10 @@ extension.default(api);
 JS
   )
   rc=$?
-  set -e
+  # Restore the suite's own mode. Leaving errexit on here would make every later
+  # test's command substitution abort the whole script silently instead of
+  # reporting its own "not ok" line.
+  set +e
   [ "$rc" -ne 0 ] || fail "OMP primary marker accepted a whitespace-bearing entrypoint"
   assert_contains "$out" 'OMP primary identity paths containing whitespace are unsupported' \
     "OMP primary whitespace refusal was not actionable"
@@ -640,10 +643,10 @@ if (watcherMessages.length !== 1 || !watcherMessages[0].message.content.includes
 }
 if (
   watcherMessages[0].message.customType !== "firstmate-watcher-wake" ||
-  watcherMessages[0].options?.deliverAs !== "steer" ||
+  watcherMessages[0].options?.deliverAs !== "nextTurn" ||
   watcherMessages[0].options?.triggerTurn !== true
 ) {
-  throw new Error(`OMP watcher notification did not preserve the editable draft delivery mode: ${JSON.stringify(watcherMessages[0])}`);
+  throw new Error(`OMP watcher notification did not use hidden next-turn delivery: ${JSON.stringify(watcherMessages[0])}`);
 }
 if (!existsSync(`${process.env.FM_STATE_OVERRIDE}/watch-successor-ready`)) {
   throw new Error("OMP actionable notification arrived before successor readiness");
@@ -782,7 +785,7 @@ JS
 # The shared core delivers the recovery handshake for every runtime bound to it,
 # so OMP must confirm a handling delivery exactly like Pi and OpenCode do: start
 # and verify the successor, run fm-watch-arm.sh --handling-delivered for the
-# generation the successor reported, and only then deliver the wake steer.
+# generation the successor reported, and only then deliver the wake notification.
 # Upstream covers Pi and OpenCode; this pins the fork's OMP binding of the same
 # contract so a future adapter change cannot silently drop it.
 test_native_omp_confirms_recovery_handling_delivery() {
@@ -863,8 +866,8 @@ const rows = armRows();
 const arms = rows.filter((row) => row.startsWith("arm="));
 if (arms.length !== 2) throw new Error(`expected one successor arm, got ${arms.length}: ${rows.join(" | ")}`);
 if (steers !== 1) throw new Error(`expected exactly one wake steer, got ${steers}`);
-if (deliveryOptions?.deliverAs !== "steer" || deliveryOptions?.triggerTurn !== true) {
-  throw new Error(`wake was not delivered as a turn-triggering steer: ${JSON.stringify(deliveryOptions)}`);
+if (deliveryOptions?.deliverAs !== "nextTurn" || deliveryOptions?.triggerTurn !== true) {
+  throw new Error(`wake was not delivered as a turn-triggering hidden next-turn message: ${JSON.stringify(deliveryOptions)}`);
 }
 if (rowsAtDelivery !== 2) throw new Error(`wake delivery began before successor establishment (${rowsAtDelivery} arm rows)`);
 const confirmations = rows.filter((row) => row.startsWith("confirmed "));
@@ -883,8 +886,8 @@ JS
   ) || status=$?
   printf 'stop\n' > "$TMP_ROOT/native-handling-delivery.stop" 2>/dev/null || true
   expect_code 0 "$status" "OMP recovery handling delivery"
-  assert_contains "$out" omp-handling-delivery-ok "OMP did not confirm its recovery handling delivery after the wake steer"
-  pass "OMP confirms the recovery handling handshake after delivering its wake steer"
+  assert_contains "$out" omp-handling-delivery-ok "OMP did not confirm its recovery handling delivery after the wake notification"
+  pass "OMP confirms the recovery handling handshake after delivering its hidden next-turn wake"
 }
 
 # A refused handling handshake must be classified and surfaced exactly once
@@ -1234,6 +1237,323 @@ JS
   pass "OMP unacknowledged wake delivery keeps the successor chain and delivers once per close"
 }
 
+# Build an OMP primary fixture whose adapter can drive the real durable wake
+# claim: the production claim scripts and wake library are copied in, so the
+# adapter exercises the same publication, handover, and format the drain reads.
+make_omp_claim_fixture() {  # <name>
+  local fixture=$TMP_ROOT/$1
+  mkdir -p "$fixture/.omp/extensions/lib" "$fixture/bin" "$fixture/state" "$fixture/config"
+  : > "$fixture/AGENTS.md"
+  git init -q -b main "$fixture"
+  cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$fixture/.omp/extensions/fm-primary-omp.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$fixture/.omp/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-async-exec.ts" "$fixture/.omp/extensions/lib/fm-async-exec.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" "$fixture/.omp/extensions/lib/fm-task-inbox-doorbell.ts"
+  cp "$ROOT/bin/fm-primary-watch-core.ts" "$fixture/bin/fm-primary-watch-core.ts"
+  cp "$ROOT/bin/fm-pi-compatible-runtimes" "$fixture/bin/fm-pi-compatible-runtimes"
+  cp "$ROOT/bin/fm-wake-lib.sh" "$fixture/bin/fm-wake-lib.sh"
+  cp "$ROOT/bin/fm-omp-wake-claim-lib.sh" "$fixture/bin/fm-omp-wake-claim-lib.sh"
+  cp "$ROOT/bin/fm-omp-wake-claim.sh" "$fixture/bin/fm-omp-wake-claim.sh"
+  cat > "$fixture/bin/fm-gate-refuse-lib.sh" <<'SH'
+fm_is_gate_agent() { return 1; }
+SH
+  cat > "$fixture/bin/fm-primary-scope-lib.sh" <<'SH'
+fm_primary_scope_matches() { return 0; }
+SH
+  cat > "$fixture/bin/fm-operational-input.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'encoded:%s:%s' "$2" "$(cat)"
+SH
+  cat > "$fixture/bin/fm-sessionstart-nudge.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$fixture/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  for script in fm-subagent-pretool-check.sh fm-cd-pretool-check.sh fm-arm-pretool-check.sh; do
+    cat > "$fixture/bin/$script" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  done
+  chmod +x "$fixture/bin/"*.sh
+  printf '%s\n' "$fixture"
+}
+
+# The durable claim is the only thing that can re-present a wake batch whose
+# notification a session or process never handled. Its handover therefore has to
+# be exactly-once per owner: a same-process extension reload must not repeat the
+# batch, while a replacement session and a replacement process each must.
+test_native_omp_wake_claim_replay_is_exactly_once() {
+  local fixture first second status=0
+  fixture=$(make_omp_claim_fixture native-wake-claim)
+  cat > "$fixture/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+state=${FM_STATE_OVERRIDE:?}
+count=$(cat "$state/watch-count" 2>/dev/null || printf 0)
+count=$((count + 1))
+printf '%s\n' "$count" > "$state/watch-count"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+if [ "$count" -eq 1 ]; then
+  while [ ! -e "$state/watch-trigger" ]; do sleep 0.02; done
+  printf 'signal: omp durable wake batch\n'
+  exit 0
+fi
+while [ ! -e "$state/watch-stop" ]; do sleep 0.02; done
+SH
+  chmod +x "$fixture/bin/fm-watch-arm.sh"
+  FM_STATE_OVERRIDE="$fixture/state" bash -c \
+    '. "$1/bin/fm-wake-lib.sh"; fm_wake_append signal task-a.status "signal: task-a"' _ "$fixture" \
+    || fail "the OMP claim fixture could not seed a durable wake row"
+
+  first=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
+    FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    node --input-type=module 2>&1 <<'JS'
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const state = process.env.FM_STATE_OVERRIDE;
+const claimScript = `${process.env.FM_ROOT_OVERRIDE}/bin/fm-omp-wake-claim.sh`;
+const showClaim = () => {
+  const result = spawnSync(claimScript, ["show"], { encoding: "utf8" });
+  return result.status === 0 ? result.stdout.trim() : "";
+};
+const wakes = [];
+const makeApi = () => ({
+  zod: { object: () => ({}) },
+  on(name, handler) { this.handlers.set(name, handler); },
+  handlers: new Map(),
+  registerCommand() {},
+  registerTool() {},
+  sendMessage(message, options) {
+    if (message?.customType !== "firstmate-watcher-wake") return;
+    wakes.push({ content: String(message.content ?? ""), options, claimAtSend: showClaim() });
+  },
+});
+const count = () => existsSync(`${state}/watch-count`)
+  ? Number(readFileSync(`${state}/watch-count`, "utf8").trim())
+  : 0;
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (pred()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+const context = (id) => ({ sessionManager: { getSessionFile: () => undefined, getSessionId: () => id } });
+
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+process.argv[1] = process.env.EXTENSION;
+const load = async (tag) => {
+  const module = await import(`${pathToFileURL(process.env.EXTENSION).href}?${tag}=${Date.now()}`);
+  const api = makeApi();
+  module.default(api);
+  return api;
+};
+
+const first = await load("claim");
+await first.handlers.get("session_start")({ type: "session_start" }, context("sess-one"));
+await waitFor(() => count() === 1, "initial automatic OMP arm");
+writeFileSync(`${state}/watch-trigger`, "trigger\n");
+await waitFor(() => wakes.length === 1 && count() >= 2, "the durable wake batch notification");
+
+const delivered = wakes[0];
+if (delivered.options?.deliverAs !== "nextTurn" || delivered.options?.triggerTurn !== true) {
+  throw new Error(`the wake batch was not delivered as a hidden next-turn message: ${JSON.stringify(delivered.options)}`);
+}
+if (!delivered.content.includes("signal: omp durable wake batch")) {
+  throw new Error(`the wake batch lost its reason line: ${delivered.content}`);
+}
+if (!delivered.claimAtSend) {
+  throw new Error("the durable claim was not published before the notification was delivered");
+}
+const [, instanceOne, sessionOne, cutoff] = delivered.claimAtSend.split("\t");
+if (!/^[0-9]+$/.test(cutoff) || Number(cutoff) < 1) {
+  throw new Error(`the claim did not cover the queued durable row: ${delivered.claimAtSend}`);
+}
+// Acknowledging consumption clears the core's own undelivered-close handoff, so
+// from here the claim is the only thing that can re-present this batch.
+first.handlers.get("before_agent_start")({ type: "before_agent_start", prompt: delivered.content }, {});
+
+// A same-session extension reload re-enters this process with the same session.
+const reloaded = await load("reload");
+await reloaded.handlers.get("session_start")({ type: "session_start" }, context("sess-one"));
+await new Promise((resolve) => setTimeout(resolve, 200));
+if (wakes.length !== 1) {
+  throw new Error(`a same-session extension reload repeated the batch: ${wakes.length} notifications`);
+}
+
+// A replacement session must re-present the exact batch once, and only once.
+await reloaded.handlers.get("session_switch")({ type: "session_switch", reason: "new" }, context("sess-two"));
+await waitFor(() => wakes.length === 2, "the replacement-session re-presentation");
+if (wakes[1].content !== delivered.content) {
+  throw new Error(`the replacement session re-presented a different batch: ${wakes[1].content}`);
+}
+if (wakes[1].options?.deliverAs !== "nextTurn" || wakes[1].options?.triggerTurn !== true) {
+  throw new Error(`the re-presentation changed delivery mode: ${JSON.stringify(wakes[1].options)}`);
+}
+await reloaded.handlers.get("session_switch")({ type: "session_switch", reason: "resume" }, context("sess-two"));
+await new Promise((resolve) => setTimeout(resolve, 200));
+if (wakes.length !== 2) {
+  throw new Error(`the same replacement session re-presented the batch twice: ${wakes.length} notifications`);
+}
+const rebound = showClaim().split("\t");
+if (rebound[1] !== instanceOne) throw new Error("a same-process replay changed the process identity");
+if (rebound[2] === sessionOne) throw new Error("the claim was not rebound to the replacement session");
+
+writeFileSync(`${state}/watch-stop`, "stop\n");
+await reloaded.handlers.get("session_shutdown")({ type: "session_shutdown" }, {});
+console.log(JSON.stringify({ ok: "omp-wake-claim-replay-ok", body: delivered.content }));
+JS
+  ) || status=$?
+  printf 'stop\n' > "$fixture/state/watch-stop" 2>/dev/null || true
+  expect_code 0 "$status" "OMP durable wake claim replay"
+  assert_contains "$first" omp-wake-claim-replay-ok "OMP wake claim replay did not complete: $first"
+
+  # A replacement PROCESS re-presents the same outstanding batch exactly once,
+  # even though it inherits the same session and may reuse the former PID.
+  rm -f "$fixture/state/watch-count" "$fixture/state/watch-trigger" "$fixture/state/watch-stop"
+  second=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
+    FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    node --input-type=module 2>&1 <<'JS'
+import { spawnSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const state = process.env.FM_STATE_OVERRIDE;
+const claimScript = `${process.env.FM_ROOT_OVERRIDE}/bin/fm-omp-wake-claim.sh`;
+const wakes = [];
+const handlers = new Map();
+const api = {
+  zod: { object: () => ({}) },
+  on(name, handler) { handlers.set(name, handler); },
+  registerCommand() {},
+  registerTool() {},
+  sendMessage(message) {
+    if (message?.customType === "firstmate-watcher-wake") wakes.push(String(message.content ?? ""));
+  },
+};
+const before = spawnSync(claimScript, ["show"], { encoding: "utf8" });
+if (before.status !== 0) throw new Error("the outstanding claim did not survive the previous process");
+const previousInstance = before.stdout.trim().split("\t")[1];
+
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+process.argv[1] = process.env.EXTENSION;
+const module = await import(`${pathToFileURL(process.env.EXTENSION).href}?replacementprocess=${Date.now()}`);
+module.default(api);
+const context = { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "sess-two" } };
+await handlers.get("session_start")({ type: "session_start" }, context);
+for (let i = 0; i < 200 && wakes.length === 0; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (wakes.length !== 1) {
+  throw new Error(`a replacement process re-presented the batch ${wakes.length} times`);
+}
+await new Promise((resolve) => setTimeout(resolve, 200));
+if (wakes.length !== 1) throw new Error("a replacement process kept re-presenting the batch");
+const after = spawnSync(claimScript, ["show"], { encoding: "utf8" });
+if (after.status !== 0) throw new Error("the replacement process retired the claim before acknowledgement");
+if (after.stdout.trim().split("\t")[1] === previousInstance) {
+  throw new Error("the claim was not rebound to the replacement process");
+}
+writeFileSync(`${state}/watch-stop`, "stop\n");
+await handlers.get("session_shutdown")({ type: "session_shutdown" }, {});
+console.log(JSON.stringify({ ok: "omp-wake-claim-process-replay-ok", body: wakes[0] }));
+JS
+  ) || status=$?
+  printf 'stop\n' > "$fixture/state/watch-stop" 2>/dev/null || true
+  expect_code 0 "$status" "OMP durable wake claim process replay"
+  assert_contains "$second" omp-wake-claim-process-replay-ok \
+    "a replacement OMP process did not re-present the outstanding batch exactly once: $second"
+  assert_contains "$second" "signal: omp durable wake batch" \
+    "the replacement process re-presented a different batch: $second"
+  pass "OMP re-presents an unacknowledged wake batch once per replacement session and process, never on a reload"
+}
+
+# Two mechanisms could re-present the same wake after a replacement: the shared
+# core's own handoff for a close it never delivered, and this adapter's durable
+# claim. Exactly one of them may speak, or the replacement receives the wake
+# twice.
+test_native_omp_wake_claim_defers_to_a_core_owned_close() {
+  local fixture out status=0
+  fixture=$(make_omp_claim_fixture native-wake-claim-interlock)
+  cat > "$fixture/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+state=${FM_STATE_OVERRIDE:?}
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$state/watch-stop" ]; do sleep 0.02; done
+SH
+  chmod +x "$fixture/bin/fm-watch-arm.sh"
+  mkdir -p "$fixture/state/extensions/omp-primary-watch"
+  printf '{"version":2,"pending":[{"version":1,"token":"1-2-3","message":"signal: core owned undelivered close","predecessorArmPid":""}]}\n' \
+    > "$fixture/state/extensions/omp-primary-watch/session-replacement-actionable.json"
+  printf '%s' 'encoded:watcher:FIRSTMATE WATCHER WAKE: signal: claimed batch' \
+    | FM_STATE_OVERRIDE="$fixture/state" "$fixture/bin/fm-omp-wake-claim.sh" \
+      publish --instance inst-previous --session sess-previous \
+    || fail "the interlock fixture could not publish an outstanding claim"
+
+  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
+    FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    node --input-type=module 2>&1 <<'JS'
+import { spawnSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const state = process.env.FM_STATE_OVERRIDE;
+const claimScript = `${process.env.FM_ROOT_OVERRIDE}/bin/fm-omp-wake-claim.sh`;
+const wakes = [];
+const handlers = new Map();
+const api = {
+  zod: { object: () => ({}) },
+  on(name, handler) { handlers.set(name, handler); },
+  registerCommand() {},
+  registerTool() {},
+  sendMessage(message) {
+    if (message?.customType === "firstmate-watcher-wake") wakes.push(String(message.content ?? ""));
+  },
+};
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+process.argv[1] = process.env.EXTENSION;
+const module = await import(`${pathToFileURL(process.env.EXTENSION).href}?interlock=${Date.now()}`);
+module.default(api);
+await handlers.get("session_start")({ type: "session_start" }, {
+  sessionManager: { getSessionFile: () => undefined, getSessionId: () => "sess-new" },
+});
+for (let i = 0; i < 300 && wakes.length === 0; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+await new Promise((resolve) => setTimeout(resolve, 300));
+if (wakes.length !== 1) {
+  throw new Error(`the replacement received ${wakes.length} wakes for one outstanding close: ${wakes.join(" | ")}`);
+}
+if (!wakes[0].includes("signal: core owned undelivered close")) {
+  throw new Error(`the core's undelivered close was not the wake that was delivered: ${wakes[0]}`);
+}
+if (wakes[0].includes("claimed batch")) {
+  throw new Error("the adapter re-presented its claim alongside the core's own redelivery");
+}
+const claim = spawnSync(claimScript, ["show"], { encoding: "utf8" });
+if (claim.status !== 0) throw new Error("the silent handover retired the claim before acknowledgement");
+if (claim.stdout.trim().split("\t")[1] === "inst-previous") {
+  throw new Error("the silent handover left the claim bound to the replaced process");
+}
+writeFileSync(`${state}/watch-stop`, "stop\n");
+await handlers.get("session_shutdown")({ type: "session_shutdown" }, {});
+console.log("omp-wake-claim-interlock-ok");
+JS
+  ) || status=$?
+  printf 'stop\n' > "$fixture/state/watch-stop" 2>/dev/null || true
+  expect_code 0 "$status" "OMP wake claim interlock"
+  assert_contains "$out" omp-wake-claim-interlock-ok \
+    "the OMP wake claim and the core's own handoff both re-presented one close: $out"
+  pass "OMP hands its wake claim over silently while the shared core still owes an undelivered close"
+}
+
 test_resolve_path_uses_node_when_readlink_f_is_unavailable
 test_exact_bun_omp_primary_identity
 test_standalone_omp_primary_identity
@@ -1247,3 +1567,5 @@ test_native_omp_confirms_recovery_handling_delivery
 test_native_omp_refused_handling_delivery_is_typed_once
 test_native_omp_session_switch_carries_inflight_actionable_close
 test_native_omp_unacknowledged_wake_keeps_successor_chain
+test_native_omp_wake_claim_replay_is_exactly_once
+test_native_omp_wake_claim_defers_to_a_core_owned_close

@@ -13,6 +13,21 @@ set -u
 
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
+OMP_WAKE_CLAIM="$ROOT/bin/fm-omp-wake-claim.sh"
+
+# Bind an OMP primary wake-notification claim for <state>, exactly as the OMP
+# adapter does before it notifies.
+publish_omp_wake_claim() {  # <state> <instance> <session> <body>
+  printf '%s' "$4" | FM_STATE_OVERRIDE="$1" "$OMP_WAKE_CLAIM" publish --instance "$2" --session "$3"
+}
+
+omp_wake_claim_cutoff() {  # <state>
+  FM_STATE_OVERRIDE="$1" "$OMP_WAKE_CLAIM" show | awk -F '\t' '{ print $4 }'
+}
+
+omp_wake_claim_outstanding() {  # <state>
+  FM_STATE_OVERRIDE="$1" "$OMP_WAKE_CLAIM" show > /dev/null 2>&1
+}
 
 TMP_ROOT=$(fm_test_tmproot fm-wake-tests)
 
@@ -990,6 +1005,145 @@ test_turnend_marker_consumer_incarnation_gate() {
   pass "consumer fires only the live gen marker and ignores stale gens, so a delayed old gen never overwrites or drops a live completion"
 }
 
+# The OMP primary's durable wake claim exists so a replacement session or
+# process can re-present an unacknowledged batch. Retirement must therefore be
+# bound to acknowledgement of the durable rows, never to their presentation:
+# only the acknowledgement that removes the last covered row may clear it, and a
+# wake appended after the claim is above its cutoff, so it neither holds the
+# claim open nor is swallowed by it.
+test_omp_wake_claim_retires_only_after_acknowledgement() {
+  local dir state sequence generation
+  dir=$(make_case omp-claim-ack)
+  state="$dir/state"
+  append_wake "$state" signal "task-a.status" "signal: task-a" || fail "first append failed"
+  append_wake "$state" heartbeat fleet "heartbeat" || fail "second append failed"
+  publish_omp_wake_claim "$state" inst-one sess-one 'FIRSTMATE WATCHER WAKE: signal: task-a' \
+    || fail "the OMP wake claim could not be published"
+  [ "$(omp_wake_claim_cutoff "$state")" = 2 ] \
+    || fail "the claim did not cover both queued rows: $(omp_wake_claim_cutoff "$state")"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/present.out" 2> "$dir/present.err" \
+    || fail "presentation drain failed: $(cat "$dir/present.err")"
+  omp_wake_claim_outstanding "$state" \
+    || fail "presenting the batch retired the claim before any acknowledgement"
+
+  generation=$(recovery_marker_generation "$state/.watcher-down")
+  [ -n "$generation" ] || fail "presentation left no recovery generation"
+
+  # A partial acknowledgement leaves a covered row queued, so the claim stays.
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through 1 --recovery-generation "$generation" \
+    > /dev/null 2>&1 || fail "partial acknowledgement failed"
+  grep -Fq "$(printf '\theartbeat\tfleet\t')" "$state/.wake-queue" \
+    || fail "the partial acknowledgement consumed a row above its cutoff"
+  omp_wake_claim_outstanding "$state" \
+    || fail "the claim was retired while a covered row was still queued"
+
+  # A wake appended after publication is above the cutoff: it must not hold the
+  # claim open once every covered row is acknowledged.
+  append_wake "$state" signal "task-b.status" "signal: task-b" || fail "late append failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > /dev/null 2> "$dir/second.err" || fail "second presentation failed"
+  generation=$(recovery_marker_generation "$state/.watcher-down")
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through 2 --recovery-generation "$generation" \
+    > /dev/null 2>&1 || fail "covered acknowledgement failed"
+  grep -Fq "$(printf '\tsignal\ttask-b.status\t')" "$state/.wake-queue" \
+    || fail "the acknowledgement consumed the later wake its cutoff never covered"
+  omp_wake_claim_outstanding "$state" \
+    && fail "the claim survived the acknowledgement of every row it covered"
+  pass "an OMP wake claim is retired only by the acknowledgement that consumes its last covered row"
+}
+
+# An interrupted handling turn must leave both halves durable: the queue rows
+# for idempotent re-presentation, and the claim so a replacement re-notifies
+# them. A second drain has to show exactly the same rows.
+test_omp_wake_claim_survives_interrupted_handling() {
+  local dir state before after
+  dir=$(make_case omp-claim-interrupted)
+  state="$dir/state"
+  append_wake "$state" signal "task-a.status" "signal: task-a" || fail "append failed"
+  publish_omp_wake_claim "$state" inst-one sess-one 'FIRSTMATE WATCHER WAKE: signal: task-a' \
+    || fail "the OMP wake claim could not be published"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/first.out" 2>/dev/null || fail "first drain failed"
+  before=$(awk -F '\t' 'NF == 5 { print $2 "|" $3 "|" $4 }' "$dir/first.out")
+  # No acknowledgement: this is the interrupted turn.
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/second.out" 2>/dev/null || fail "second drain failed"
+  after=$(awk -F '\t' 'NF == 5 { print $2 "|" $3 "|" $4 }' "$dir/second.out")
+  [ -n "$before" ] && [ "$before" = "$after" ] \
+    || fail "an interrupted handling turn changed the durable rows: [$before] vs [$after]"
+  omp_wake_claim_outstanding "$state" \
+    || fail "an interrupted handling turn retired the claim for rows still queued"
+  pass "an interruption before acknowledgement leaves the OMP wake claim and its durable rows intact"
+}
+
+# A mixed queue is acknowledged by two different actors. Retirement reads the
+# queue rather than an actor, so the claim has to outlive whichever
+# acknowledgement lands first: main's ack cannot retire a claim the supervision
+# branch still owes a covered row for.
+test_omp_wake_claim_waits_for_every_actor() {
+  local dir state grant sequence generation
+  grant="$ROOT/bin/fm-wake-grant.sh"
+  dir=$(make_case omp-claim-actors)
+  state="$dir/state"
+  append_wake "$state" check "some-poll.check.sh" "check: some-poll" || fail "check append failed"
+  append_wake "$state" signal "task-a.status" "signal: task-a" || fail "signal append failed"
+  publish_omp_wake_claim "$state" inst-one sess-one 'FIRSTMATE WATCHER WAKE: check: some-poll' \
+    || fail "the OMP wake claim could not be published"
+  FM_STATE_OVERRIDE="$state" "$grant" activate "$$" omp-claim-actors || fail "branch owner activation failed"
+  FM_STATE_OVERRIDE="$state" "$grant" publish omp-claim-actors 2 || fail "branch grant publication failed"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > /dev/null 2> "$dir/main.err" || fail "main drain failed"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/main.err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/main.err")
+  [ -n "$sequence" ] && [ -n "$generation" ] || fail "main drain omitted its acknowledgement boundary"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    > /dev/null 2>&1 || fail "main acknowledgement failed"
+  omp_wake_claim_outstanding "$state" \
+    || fail "main's acknowledgement retired a claim whose branch-owned row was still queued"
+
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" > /dev/null 2> "$dir/branch.err" \
+    || fail "branch drain failed"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/branch.err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/branch.err")
+  [ -n "$sequence" ] && [ -n "$generation" ] || fail "branch drain omitted its acknowledgement boundary"
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" \
+    --ack-through "$sequence" --recovery-generation "$generation" > /dev/null 2>&1 \
+    || fail "branch acknowledgement failed"
+  omp_wake_claim_outstanding "$state" \
+    && fail "the claim survived after both actors acknowledged every covered row"
+  pass "an OMP wake claim outlives a partial actor acknowledgement and retires on the one clearing its last row"
+}
+
+# Watcher appends and handling turns run concurrently. Publishing under the
+# queue lock must keep the cutoff monotonic against those appends, so no durable
+# row is lost, no claim is retired while a covered row is queued, and the full
+# acknowledgement still clears it.
+test_omp_wake_claim_holds_under_concurrent_appends() {
+  local dir state pids pid i cutoff queued
+  dir=$(make_case omp-claim-concurrent)
+  state="$dir/state"
+  pids=
+  i=1
+  while [ "$i" -le 12 ]; do
+    append_wake "$state" signal "task-$i.status" "signal: task-$i" &
+    pids="$pids $!"
+    publish_omp_wake_claim "$state" "inst-$i" sess-one "FIRSTMATE WATCHER WAKE: signal: task-$i" &
+    pids="$pids $!"
+    i=$((i + 1))
+  done
+  for pid in $pids; do
+    wait "$pid" || fail "a concurrent append or claim publication failed"
+  done
+  cutoff=$(omp_wake_claim_cutoff "$state")
+  case "$cutoff" in ''|*[!0-9]*) fail "concurrent publication left no readable claim cutoff" ;; esac
+  queued=$(awk -F '\t' 'NF == 5 && $2 ~ /^[0-9]+$/ && $2 > max { max = $2 } END { print max + 0 }' "$state/.wake-queue")
+  [ "$queued" -eq 12 ] || fail "concurrent appends lost a durable row: highest sequence $queued"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > /dev/null 2> "$dir/present.err" || fail "presentation drain failed"
+  omp_wake_claim_outstanding "$state" || fail "a claim was retired while its covered rows were queued"
+  ack_drain_err "$state" "$dir/present.err" > /dev/null 2>&1 || fail "acknowledgement failed"
+  [ ! -s "$state/.wake-queue" ] || fail "the acknowledgement left durable rows queued"
+  omp_wake_claim_outstanding "$state" && fail "the claim survived a full acknowledgement"
+  pass "concurrent watcher appends and claim publications lose no wake and keep retirement acknowledgement-bound"
+}
+
 test_turnend_marker_consumer_incarnation_gate
 test_stale_acknowledgement_names_current_presented_wake
 test_concurrent_append_and_drain
@@ -1013,3 +1167,7 @@ test_handling_confirmation_is_bounded_by_foreign_marker_lock
 test_branch_actor_scoped_ack_never_swallows_a_main_owned_row
 test_main_drain_excludes_rows_already_granted_to_branch
 test_branch_owner_activation_rollback_stops_after_publication
+test_omp_wake_claim_retires_only_after_acknowledgement
+test_omp_wake_claim_survives_interrupted_handling
+test_omp_wake_claim_waits_for_every_actor
+test_omp_wake_claim_holds_under_concurrent_appends

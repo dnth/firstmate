@@ -17,6 +17,7 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync,
+  existsSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -110,6 +111,7 @@ export type PrimaryWatchCore = {
   arm: () => ArmResult;
   armAndWait: () => Promise<ArmResult>;
   acknowledgeWake: (content: string) => void;
+  hasPendingActionableHandoff: () => boolean;
   markLoaded: () => void;
   sessionShutdown: (replacement?: boolean) => Promise<void>;
   sessionStart: () => void;
@@ -1130,6 +1132,17 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     return result;
   }
 
+  // True while the core still owns an actionable wake it has not delivered: an
+  // undelivered close on this generation, one handed over in process, or the
+  // durable replacement handoff on disk. A runtime adapter that keeps its own
+  // durable re-notification claim reads this before replaying that claim, so
+  // one wake is never delivered twice across a session replacement.
+  function hasPendingActionableHandoff(): boolean {
+    if (replacementCoordinator.pending.length > 0) return true;
+    if (generation.pendingActionables.some((pending) => !pending.delivered)) return true;
+    return existsSync(actionableHandoff);
+  }
+
   function acknowledgeWake(content: string): void {
     for (const [token, acknowledgement] of generation.wakeAcknowledgements) {
       if (acknowledgement.content !== content) continue;
@@ -1164,6 +1177,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     arm: () => activateOwnedWatch(generation),
     armAndWait,
     acknowledgeWake,
+    hasPendingActionableHandoff,
     markLoaded,
     sessionShutdown,
     sessionStart,
