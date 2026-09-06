@@ -1567,6 +1567,116 @@ JS
   pass "OMP claim publication failure falls back to the durable wake row"
 }
 
+test_native_omp_wake_claim_session_switch_cannot_split_owner() {
+  local fixture out status=0
+  fixture=$(make_omp_claim_fixture native-wake-claim-session-switch)
+  mv "$fixture/bin/fm-omp-wake-claim.sh" "$fixture/bin/fm-omp-wake-claim.real.sh"
+  cat > "$fixture/bin/fm-omp-wake-claim.sh" <<'SH'
+#!/usr/bin/env bash
+sleep 0.4
+exec "$(dirname "$0")/fm-omp-wake-claim.real.sh" "$@"
+SH
+  chmod +x "$fixture/bin/fm-omp-wake-claim.sh"
+  cat > "$fixture/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+state=${FM_STATE_OVERRIDE:?}
+printf '1\n' > "$state/watch-count"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$state/watch-trigger" ]; do sleep 0.02; done
+printf 'signal: omp session-switch race\n'
+exit 0
+SH
+  chmod +x "$fixture/bin/fm-watch-arm.sh"
+  FM_STATE_OVERRIDE="$fixture/state" bash -c \
+    '. "$1/bin/fm-wake-lib.sh"; fm_wake_append signal task-a.status "signal: task-a"' _ "$fixture" \
+    || fail "the OMP session-switch fixture could not seed a durable wake row"
+
+  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
+    FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    node --input-type=module 2>&1 <<'JS'
+import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const root = process.env.FM_ROOT_OVERRIDE;
+const state = process.env.FM_STATE_OVERRIDE;
+const claimScript = `${root}/bin/fm-omp-wake-claim.sh`;
+const wakes = [];
+const handlers = new Map();
+let currentSession = "sess-one";
+let interleaveAttempted = false;
+let timer;
+const api = {
+  zod: { object: () => ({}) },
+  on(name, handler) { handlers.set(name, handler); },
+  registerCommand() {},
+  registerTool() {},
+  sendMessage(message, options) {
+    if (message?.customType !== "firstmate-watcher-wake") return;
+    wakes.push({ message, options });
+    clearTimeout(timer);
+    const claim = spawnSync(claimScript, ["show"], {
+      encoding: "utf8",
+      env: { ...process.env, FM_STATE_OVERRIDE: state },
+    });
+    if (claim.status !== 0) throw new Error("the wake was delivered without a durable claim");
+    const owner = claim.stdout.trim().split("\t")[2];
+    if (!owner || owner !== createHash("sha256").update(currentSession).digest("hex")) {
+      throw new Error(`claim owner split from live session: ${owner} vs ${currentSession}`);
+    }
+  },
+};
+const count = () => existsSync(`${state}/watch-count`)
+  ? Number(readFileSync(`${state}/watch-count`, "utf8").trim())
+  : 0;
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (pred()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+process.argv[1] = process.env.EXTENSION;
+const module = await import(`${pathToFileURL(process.env.EXTENSION).href}?session-switch=${Date.now()}`);
+module.default(api);
+const context = (id) => ({ sessionManager: { getSessionFile: () => undefined, getSessionId: () => id } });
+await handlers.get("session_start")({ type: "session_start" }, context(currentSession));
+await waitFor(() => count() === 1, "initial automatic OMP arm");
+writeFileSync(`${state}/watch-trigger`, "trigger\n");
+timer = setTimeout(() => {
+  interleaveAttempted = true;
+  currentSession = "sess-two";
+  handlers.get("session_switch")({ type: "session_switch", reason: "new" }, context(currentSession));
+}, 200);
+await waitFor(() => wakes.length === 1, "one watcher wake");
+await new Promise((resolve) => setTimeout(resolve, 250));
+if (wakes.length !== 1) throw new Error(`the watcher wake was delivered ${wakes.length} times`);
+if (interleaveAttempted) throw new Error("session_switch interleaved despite synchronous publication");
+if (wakes[0].options?.deliverAs !== "nextTurn" || wakes[0].options?.triggerTurn !== true) {
+  throw new Error(`the watcher wake used the wrong delivery mode: ${JSON.stringify(wakes[0].options)}`);
+}
+const claim = spawnSync(claimScript, ["show"], {
+  encoding: "utf8",
+  env: { ...process.env, FM_STATE_OVERRIDE: state },
+});
+if (claim.status !== 0 || claim.stdout.trim().split("\t").length !== 5) {
+  throw new Error("the claim did not remain bound to exactly one owner");
+}
+writeFileSync(`${state}/watch-stop`, "stop\n");
+await handlers.get("session_shutdown")({ type: "session_shutdown" }, {});
+console.log("omp-wake-claim-session-switch-owner-ok");
+JS
+  ) || status=$?
+  printf 'stop\n' > "$fixture/state/watch-stop" 2>/dev/null || true
+  expect_code 0 "$status" "OMP wake claim session-switch ownership"
+  assert_contains "$out" omp-wake-claim-session-switch-owner-ok \
+    "session-switch interleaving split the wake claim owner: $out"
+  pass "OMP wake claim publication and notification keep one session owner"
+}
+
 # Two mechanisms could re-present the same wake after a replacement: the shared
 # core's own handoff for a close it never delivered, and this adapter's durable
 # claim. Exactly one of them may speak, or the replacement receives the wake
@@ -1662,4 +1772,5 @@ test_native_omp_session_switch_carries_inflight_actionable_close
 test_native_omp_unacknowledged_wake_keeps_successor_chain
 test_native_omp_wake_claim_replay_is_exactly_once
 test_native_omp_wake_claim_publication_failure_keeps_queue_authoritative
+test_native_omp_wake_claim_session_switch_cannot_split_owner
 test_native_omp_wake_claim_defers_to_a_core_owned_close

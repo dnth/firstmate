@@ -160,20 +160,17 @@ function claimEnv(): NodeJS.ProcessEnv {
 // replacement; claim replay is best-effort re-notification layered over that
 // durable-row backstop, not the loss-prevention mechanism. Failing here would
 // either cancel the wake or make the core redeliver it, which is a duplicate.
-function publishWakeClaim(session: string, content: string): Promise<void> {
-  return new Promise((resolveClaim) => {
-    const child = spawn(
-      wakeClaimScript,
-      ["publish", "--instance", wakeClaimInstance, "--session", session],
-      { env: claimEnv(), stdio: ["pipe", "ignore", "ignore"] },
-    );
-    child.on("error", () => resolveClaim());
-    child.on("close", () => resolveClaim());
-    child.stdin.on("error", () => {
-      // The claim script may have exited before the body was written.
-    });
-    child.stdin.end(content);
-  });
+function publishWakeClaim(session: string, content: string): void {
+  spawnSync(
+    wakeClaimScript,
+    ["publish", "--instance", wakeClaimInstance, "--session", session],
+    {
+      env: claimEnv(),
+      input: content,
+      stdio: ["pipe", "ignore", "ignore"],
+      timeout: 15000,
+    },
+  );
 }
 
 // Take over an outstanding claim left by a replacement session or a replacement
@@ -343,7 +340,7 @@ export default function (omp: ExtensionAPI) {
       // replayable claim rather than a notification no successor can
       // re-present. The claim retires only when bin/fm-wake-drain.sh
       // acknowledges the durable rows it covers.
-      await publishWakeClaim(wakeClaimSession, content);
+      publishWakeClaim(wakeClaimSession, content);
       sendWakeNotification(content);
     },
     offerWakeToBranch,
