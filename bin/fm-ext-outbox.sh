@@ -22,11 +22,12 @@
 # validation failure. Two concurrent begins cannot both get the send right
 # for the same generation and chunk. receipt writes the receipt once and
 # releases a leftover inflight marker.
-# abort deletes the posting marker, chunk progress, and inflight marker after
-# a transient definite send failure (HTTP 429 or 5xx) before any chunk
-# succeeded so that generation can retry. It refuses when a receipt or
-# terminal failed marker already exists. An ambiguous crash or transport
-# error after a chunk post started keeps the posting and inflight markers.
+# abort releases the exclusive inflight send marker first, then deletes the
+# posting marker and chunk progress, after a transient definite send failure
+# (HTTP 429 or 5xx) before any chunk succeeded so that generation can retry.
+# It refuses when a receipt or terminal failed marker already exists. An
+# ambiguous crash or transport error after a chunk post started keeps the
+# posting and inflight markers.
 # fail records a terminal failed marker after a permanent 4xx so pending
 # stops retrying that generation, and drops posting plus inflight.
 # progress replaces the durable per-chunk progress artifact.

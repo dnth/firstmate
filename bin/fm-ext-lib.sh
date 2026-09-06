@@ -726,9 +726,12 @@ fm_ext_outbox_abort() {
   if fm_ext_private_artifact_file_valid "$dir" "$failed" 600; then
     return 1
   fi
+  # Release inflight first: abort is pre-success-only, so dropping the send
+  # claim cannot reopen a confirmed post. A crash after posting/progress
+  # removal must not leave a stale inflight that makes the next begin stick.
+  fm_ext_outbox_inflight_release "$dir" "$slug" "$kind" "$generation" || return 2
   fm_ext_private_artifact_remove "$dir" "$posting" 600 || return 2
   fm_ext_private_artifact_remove "$dir" "$progress" 600 || return 2
-  fm_ext_outbox_inflight_release "$dir" "$slug" "$kind" "$generation" || return 2
   return 0
 }
 

@@ -8,8 +8,10 @@ Oversized replies are split with the X-mode Discord budget pattern
 (``FM_EXT_DISCORD_REPLY_MAX_CHARS``, default 1900) and posted in order.
 A later-chunk transient failure records progress so earlier chunks are not
 sent again, then releases the exclusive inflight send marker so only one
-poster can resume the next chunk. An in-flight chunk without a confirmed
-post stays mid-delivery.
+poster can resume the next chunk. A pre-send split failure or chunk-count
+mismatch after a successful begin also releases that marker; posted_count
+zero still aborts. An in-flight chunk without a confirmed post stays
+mid-delivery.
 A transient definite send failure (HTTP 429 or 5xx) before any chunk
 succeeds deletes the posting marker so that generation can retry.
 A permanent 4xx records a terminal failed marker so pending stops retrying.
@@ -409,6 +411,7 @@ def deliver_one(path: Path, send: SendFn | None = None, home: Path | None = None
         )
     except Exception:
         if stored and int(stored.get("posted_count") or 0) > 0:
+            release_inflight(payload, home=home)
             return "mid-delivery"
         abort_delivery(payload, home=home)
         return "failed"
@@ -422,6 +425,7 @@ def deliver_one(path: Path, send: SendFn | None = None, home: Path | None = None
         "cap": split["cap"],
     }
     if int(progress.get("total") or 0) != len(chunks):
+        release_inflight(payload, home=home)
         return "mid-delivery"
     write_progress(payload, progress, home)
     start = int(progress.get("posted_count") or 0)

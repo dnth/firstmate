@@ -3,8 +3,8 @@
 #
 # Hermetic: no Discord network. The gateway plugin's Discord sender is injected.
 # Captain cases 1-12 plus bootstrap activation, send-failure classes,
-# wake-append offer recovery, Discord reply splitting, and exclusive resume
-# claim.
+# wake-append offer recovery, Discord reply splitting, exclusive resume
+# claim, and pre-send inflight release.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -982,6 +982,122 @@ PY
   pass "21 concurrent resume claims: only one poster sends the next chunk"
 }
 
+# --- 22. pre-send failures release inflight; abort drops it first -----------
+
+test_22_presend_release_and_abort_inflight_first() {
+  local home slug posting progress inflight payload out rc order inflight_line posting_line
+  home="$TMP_ROOT/c22split"
+  setup_home "$home"
+  _test_21_setup_resumable "$home"
+  slug=$(cat "$home/setup.slug")
+  posting="$home/state/ext-outbox/${slug}.answer.1.posting"
+  progress="$home/state/ext-outbox/${slug}.answer.1.progress.json"
+  inflight="$home/state/ext-outbox/${slug}.answer.1.inflight"
+  payload="$home/state/ext-outbox/${slug}.answer.1.json"
+  out=$(home_env "$home" env FM_EXT_DISCORD_REPLY_MAX_CHARS=50 \
+    PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$payload" <<'PY'
+import os, sys
+from pathlib import Path
+sys.path.insert(0, os.environ["PYTHONPATH"])
+import outbox_poster
+home, path = sys.argv[1], sys.argv[2]
+os.environ["FM_HOME"] = home
+def boom(*_args, **_kwargs):
+    raise RuntimeError("forced split failure")
+outbox_poster.split_reply = boom
+def send(_payload):
+    raise AssertionError("send must not run after a pre-send split failure")
+print(outbox_poster.deliver_one(Path(path), send=send, home=Path(home)))
+PY
+  )
+  assert_contains "$out" "mid-delivery" "split failure after posted chunks must refuse without sending"
+  assert_absent "$inflight" "split failure after posted chunks must release the exclusive inflight claim"
+  assert_present "$posting" "split failure after posted chunks must keep posting for resume"
+  assert_present "$progress" "split failure after posted chunks must keep progress"
+  home_env "$home" "$OUTBOX" begin --slug "$slug" --kind answer --generation 1 \
+    >/dev/null; rc=$?
+  expect_code 0 "$rc" "begin after split-failure release"
+  assert_present "$inflight" "begin after split-failure release must be able to claim inflight"
+
+  home="$TMP_ROOT/c22mismatch"
+  setup_home "$home"
+  _test_21_setup_resumable "$home"
+  slug=$(cat "$home/setup.slug")
+  posting="$home/state/ext-outbox/${slug}.answer.1.posting"
+  progress="$home/state/ext-outbox/${slug}.answer.1.progress.json"
+  inflight="$home/state/ext-outbox/${slug}.answer.1.inflight"
+  payload="$home/state/ext-outbox/${slug}.answer.1.json"
+  jq '.total = 99' "$progress" > "$home/bad-progress.json"
+  home_env "$home" "$OUTBOX" progress --slug "$slug" --kind answer --generation 1 \
+    --progress-file "$home/bad-progress.json" >/dev/null
+  out=$(home_env "$home" env FM_EXT_DISCORD_REPLY_MAX_CHARS=50 \
+    PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$payload" <<'PY'
+import os, sys
+from pathlib import Path
+sys.path.insert(0, os.environ["PYTHONPATH"])
+import outbox_poster
+home, path = sys.argv[1], sys.argv[2]
+os.environ["FM_HOME"] = home
+def send(_payload):
+    raise AssertionError("send must not run after a chunk-count mismatch")
+print(outbox_poster.deliver_one(Path(path), send=send, home=Path(home)))
+PY
+  )
+  assert_contains "$out" "mid-delivery" "chunk-count mismatch must refuse without sending"
+  assert_absent "$inflight" "chunk-count mismatch must release the exclusive inflight claim"
+  assert_present "$posting" "chunk-count mismatch must keep posting for resume"
+  home_env "$home" "$OUTBOX" begin --slug "$slug" --kind answer --generation 1 \
+    >/dev/null; rc=$?
+  expect_code 0 "$rc" "begin after mismatch release"
+  assert_present "$inflight" "begin after mismatch release must be able to claim inflight"
+
+  home="$TMP_ROOT/c22abort"
+  setup_home "$home"
+  _test_21_setup_resumable "$home"
+  slug=$(cat "$home/setup.slug")
+  posting="$home/state/ext-outbox/${slug}.answer.1.posting"
+  progress="$home/state/ext-outbox/${slug}.answer.1.progress.json"
+  inflight="$home/state/ext-outbox/${slug}.answer.1.inflight"
+  home_env "$home" "$OUTBOX" begin --slug "$slug" --kind answer --generation 1 >/dev/null
+  assert_present "$inflight" "abort-order fixture must hold inflight before abort"
+  rm -f -- "$posting" "$progress"
+  assert_absent "$posting" "fixture must drop posting to simulate a mid-abort crash"
+  assert_absent "$progress" "fixture must drop progress to simulate a mid-abort crash"
+  assert_present "$inflight" "stale inflight must remain until abort runs"
+  home_env "$home" "$OUTBOX" abort --slug "$slug" --kind answer --generation 1 >/dev/null
+  assert_absent "$inflight" "abort must release leftover inflight even when posting is already gone"
+  home_env "$home" "$OUTBOX" begin --slug "$slug" --kind answer --generation 1 \
+    >/dev/null; rc=$?
+  expect_code 0 "$rc" "begin after abort cleared leftover inflight"
+
+  home="$TMP_ROOT/c22order"
+  setup_home "$home"
+  _test_21_setup_resumable "$home"
+  slug=$(cat "$home/setup.slug")
+  inflight="$home/state/ext-outbox/${slug}.answer.1.inflight"
+  home_env "$home" "$OUTBOX" begin --slug "$slug" --kind answer --generation 1 >/dev/null
+  assert_present "$inflight" "abort-order probe must start with a claimed inflight"
+  order="$home/abort-order.log"
+  (
+    # shellcheck source=bin/fm-ext-lib.sh
+    . "$ROOT/bin/fm-ext-lib.sh"
+    eval "$(declare -f fm_ext_private_artifact_remove | sed '1s/fm_ext_private_artifact_remove/_orig_remove/')"
+    fm_ext_private_artifact_remove() {
+      printf '%s\n' "$2" >> "$order"
+      _orig_remove "$@"
+    }
+    fm_ext_outbox_abort "$home/state/ext-outbox" "$slug" answer 1
+  )
+  [ -s "$order" ] || fail "abort must record artifact removals"
+  inflight_line=$(grep -n "\.inflight$" "$order" | head -1 | cut -d: -f1)
+  posting_line=$(grep -n "\.posting$" "$order" | head -1 | cut -d: -f1)
+  [ -n "$inflight_line" ] || fail "abort must remove inflight"
+  [ -n "$posting_line" ] || fail "abort must remove posting"
+  [ "$inflight_line" -lt "$posting_line" ] \
+    || fail "abort must release inflight before removing posting (order=$(tr '\n' ',' < "$order"))"
+  pass "22 pre-send failures release inflight; abort drops inflight first"
+}
+
 # --- bootstrap opt-in -------------------------------------------------------
 
 test_bootstrap_arms_ext_watch_shim() {
@@ -1035,6 +1151,7 @@ test_18_under_limit_is_one_post
 test_19_over_limit_posts_chunks_in_order_without_fmx_token
 test_20_later_chunk_transient_resumes_without_repost
 test_21_concurrent_resume_exclusive_inflight_claim
+test_22_presend_release_and_abort_inflight_first
 test_bootstrap_arms_ext_watch_shim
 test_poll_noop_when_inactive
 test_plugin_has_no_terminal_dispatch
