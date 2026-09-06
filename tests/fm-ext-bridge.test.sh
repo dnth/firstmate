@@ -1570,7 +1570,8 @@ test_26_pending_stays_flat_as_delivered_grows() {
 # --- 27. bridge records expire on the documented retention window -----------
 
 test_27_retention_expires_local_records() {
-  local home slug ctx offered stale_ctx stale_offered future kept_stem
+  local home slug ctx offered stale_ctx stale_offered invalid_ctx invalid_offered
+  local symlink_target symlink_inbox future kept_stem
   home="$TMP_ROOT/c27"
   setup_home "$home"
   slug=$(intake_ok "$home" "retain me")
@@ -1583,6 +1584,17 @@ test_27_retention_expires_local_records() {
   printf '{"request_id":"%s","slug":"x","recorded_at":1}\n' "$RID" > "$stale_ctx"
   printf '{"request_id":"%s","slug":"x","recorded_at":1}\n' "$RID" > "$stale_offered"
   chmod 600 "$stale_ctx" "$stale_offered"
+
+  invalid_ctx="$home/state/ext-context/$(printf 'b%.0s' $(seq 1 64)).json"
+  invalid_offered="$home/state/ext-context/$(printf 'b%.0s' $(seq 1 64)).offered.json"
+  symlink_target="$home/config/retention-target.json"
+  symlink_inbox="$home/state/ext-inbox/$(printf 'b%.0s' $(seq 1 64)).json"
+  printf '{"request_id":"%s","slug":"x","recorded_at":1}\n' "$RID" > "$invalid_ctx"
+  printf '{"request_id":"%s","slug":"x","recorded_at":1}\n' "$RID" > "$invalid_offered"
+  printf '{"not":"an inbox record"}\n' > "$symlink_target"
+  mkdir -p "$home/state/ext-inbox"
+  ln -s "$symlink_target" "$symlink_inbox"
+  chmod 600 "$invalid_ctx" "$invalid_offered" "$symlink_target"
 
   # A retired outbox generation's leftover marker, and a pending one's.
   kept_stem="$home/state/ext-outbox/${slug}.answer.9"
@@ -1599,6 +1611,8 @@ test_27_retention_expires_local_records() {
 
   assert_absent "$stale_ctx" "context past the retention window must expire"
   assert_absent "$stale_offered" "an offer record with no inbox file must expire"
+  assert_absent "$invalid_ctx" "a symlinked inbox must not pin expired context"
+  assert_absent "$invalid_offered" "a symlinked inbox must not pin expired offers"
   assert_absent "$home/state/ext-outbox/${slug}.answer.8.receipt.json" \
     "a retired generation's leftover marker must expire"
   assert_present "$offered" \

@@ -1252,7 +1252,7 @@ fm_ext_context_prune() {
       *.offered.json) slug=${base%.offered.json} ;;
       *) slug=${base%.json} ;;
     esac
-    if [ -e "$inbox/$slug.json" ]; then
+    if fm_ext_private_artifact_file_valid "$inbox" "$slug.json" 600; then
       continue
     fi
     recorded_at=$(jq -er '.recorded_at | select(type=="number")' "$file" 2>/dev/null) \
