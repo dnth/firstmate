@@ -767,12 +767,10 @@ fm_ext_outbox_inflight_release() {
 
 # fm_ext_outbox_stuck_age <dir> <slug> <kind> <generation>: print how long this
 # generation has recorded an in-flight chunk in its JSON progress. The age comes
-# from the exclusive inflight claim when that marker is present, and from the
-# progress artifact's own mtime when the claim was released without the chunk
-# ever being cleared. Returns 1 when the generation records no in-flight chunk
-# or the age cannot be established.
+# from the most recent exclusive claim or progress heartbeat. Returns 1 when the
+# generation records no in-flight chunk or the age cannot be established.
 fm_ext_outbox_stuck_age() {
-  local dir=$1 slug=$2 kind=$3 generation=$4 progress inflight now recorded_at age
+  local dir=$1 slug=$2 kind=$3 generation=$4 progress inflight now recorded_at inflight_recorded_at progress_mtime age
   progress=$(fm_ext_outbox_progress_basename "$slug" "$kind" "$generation") || return 1
   inflight=$(fm_ext_outbox_inflight_basename "$slug" "$kind" "$generation") || return 1
   fm_ext_private_artifact_file_valid "$dir" "$progress" 600 || return 1
@@ -781,17 +779,18 @@ fm_ext_outbox_stuck_age() {
   case "$now" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  recorded_at=
-  if fm_ext_private_artifact_file_valid "$dir" "$inflight" 600; then
-    recorded_at=$(jq -er '.recorded_at | select(type=="number")' "$dir/$inflight" 2>/dev/null) \
-      || recorded_at=
-  fi
-  if [ -z "$recorded_at" ]; then
-    recorded_at=$(fm_ext_file_mtime "$dir/$progress") || return 1
-  fi
-  case "$recorded_at" in
+  progress_mtime=$(fm_ext_file_mtime "$dir/$progress") || return 1
+  case "$progress_mtime" in
     ''|*[!0-9]*) return 1 ;;
   esac
+  recorded_at=$progress_mtime
+  if fm_ext_private_artifact_file_valid "$dir" "$inflight" 600; then
+    inflight_recorded_at=$(jq -er '.recorded_at | select(type=="number")' "$dir/$inflight" 2>/dev/null) || inflight_recorded_at=
+    case "$inflight_recorded_at" in
+      ''|*[!0-9]*) ;;
+      *) [ "$inflight_recorded_at" -gt "$recorded_at" ] && recorded_at=$inflight_recorded_at ;;
+    esac
+  fi
   age=$((now - recorded_at))
   [ "$age" -ge 0 ] 2>/dev/null || return 1
   printf '%s\n' "$age"
@@ -809,10 +808,20 @@ fm_ext_outbox_stuck_age() {
 # not yet eligible, and 2 on failure.
 fm_ext_outbox_stuck_recover() {
   local dir=$1 slug=$2 kind=$3 generation=$4
-  local progress inflight posting age threshold attempts max now body reason rc recorded_at
+  local progress inflight posting age threshold attempts max now body reason rc recorded_at owner_pid owner_dead
   progress=$(fm_ext_outbox_progress_basename "$slug" "$kind" "$generation") || return 2
   inflight=$(fm_ext_outbox_inflight_basename "$slug" "$kind" "$generation") || return 2
   posting=$(fm_ext_outbox_posting_basename "$slug" "$kind" "$generation") || return 2
+  owner_dead=0
+  if fm_ext_private_artifact_file_valid "$dir" "$inflight" 600; then
+    owner_pid=$(jq -er '.pid | select(type=="number")' "$dir/$inflight" 2>/dev/null) || owner_pid=
+    if [ -n "$owner_pid" ] \
+      && [ "$owner_pid" != "$$" ] \
+      && [ "$owner_pid" != "$(fm_ext_outbox_inflight_owner_pid)" ] \
+      && ! fm_ext_pid_alive "$owner_pid"; then
+      owner_dead=1
+    fi
+  fi
   if ! fm_ext_private_artifact_file_valid "$dir" "$progress" 600; then
     fm_ext_private_artifact_file_valid "$dir" "$posting" 600 || return 1
     fm_ext_private_artifact_file_valid "$dir" "$inflight" 600 || return 1
@@ -827,7 +836,7 @@ fm_ext_outbox_stuck_recover() {
     age=$((now - recorded_at))
     [ "$age" -ge 0 ] 2>/dev/null || return 1
     threshold=$(fm_ext_middelivery_recovery_secs)
-    [ "$age" -ge "$threshold" ] 2>/dev/null || return 1
+    [ "$age" -ge "$threshold" ] 2>/dev/null || [ "$owner_dead" = 1 ] || return 1
     # Progress is written before the first send, so no progress proves no post occurred.
     fm_ext_outbox_abort "$dir" "$slug" "$kind" "$generation"
     rc=$?
@@ -839,7 +848,7 @@ fm_ext_outbox_stuck_recover() {
   fi
   age=$(fm_ext_outbox_stuck_age "$dir" "$slug" "$kind" "$generation") || return 1
   threshold=$(fm_ext_middelivery_recovery_secs)
-  [ "$age" -ge "$threshold" ] 2>/dev/null || return 1
+  [ "$age" -ge "$threshold" ] 2>/dev/null || [ "$owner_dead" = 1 ] || return 1
   attempts=$(jq -r '.recovery_count // 0 | floor' "$dir/$progress" 2>/dev/null) || attempts=0
   case "$attempts" in
     ''|*[!0-9]*) attempts=0 ;;

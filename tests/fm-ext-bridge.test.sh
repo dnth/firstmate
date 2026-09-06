@@ -1398,7 +1398,7 @@ test_24_stuck_middelivery_recovers() {
   : > "$sent"
 
   # Wedge it exactly the way a routine network timeout does.
-  out=$(home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" <<'PY'
+  out=$(home_env "$home" env FM_EXT_INFLIGHT_OWNER_PID="$$" PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" <<'PY'
 import os, sys, urllib.error
 from pathlib import Path
 sys.path.insert(0, os.environ["PYTHONPATH"])
@@ -1416,13 +1416,13 @@ PY
     || fail "ambiguous send must record the in-flight chunk"
 
   # Inside the recovery window nothing reopens: the send may still be live.
-  home_env "$home" "$OUTBOX" begin --slug "$slug" --kind answer --generation 1 \
+  home_env "$home" env FM_EXT_INFLIGHT_OWNER_PID="$$" "$OUTBOX" begin --slug "$slug" --kind answer --generation 1 \
     >/dev/null 2>&1; rc=$?
   expect_code 3 "$rc" "inside the recovery window a wedged generation stays mid-delivery"
 
   # Past the window the next drain reopens exactly that chunk and delivers it.
   future=$(( $(date +%s) + 4000 ))
-  out=$(home_env "$home" env FM_EXT_NOW_OVERRIDE="$future" \
+  out=$(home_env "$home" env FM_EXT_INFLIGHT_OWNER_PID="$$" FM_EXT_NOW_OVERRIDE="$future" \
     PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$sent" <<'PY'
 import os, sys
 from pathlib import Path
