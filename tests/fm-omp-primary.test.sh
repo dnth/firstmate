@@ -1558,7 +1558,7 @@ JS
   expect_code 0 "$status" "OMP wake claim publication failure delivery"
   assert_contains "$out" omp-wake-claim-publication-failure-delivered-once \
     "claim publication failure did not preserve one watcher wake: $out"
-  if "$fixture/bin/fm-omp-wake-claim.sh" show >/dev/null 2>&1; then
+  if FM_STATE_OVERRIDE="$fixture/state" "$fixture/bin/fm-omp-wake-claim.sh" show >/dev/null 2>&1; then
     fail "a claim remained outstanding after publication failure"
   fi
   queued=$(FM_STATE_OVERRIDE="$fixture/state" bash -c \
