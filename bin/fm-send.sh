@@ -1040,6 +1040,7 @@ else
       0) ;;
       1) echo "fm-send: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
       2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
+      5) echo "fm-send: doorbell skipped (a concurrent Hermes delivery still holds the shared delivery lock); the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
       3)
         echo "error: omp-native-refused: the task-bound OMP receive adapter did not accept the request ($OMP_NATIVE_BINDING); nothing was typed and the exact message stays durable; do not resend" >&2
         exit 6
@@ -1109,7 +1110,7 @@ else
       echo "error: Hermes persistent TUI is not live (state=$HERMES_AGENT_STATE); refusing to type into its pane" >&2
       exit 1
     fi
-    HERMES_DELIVERY_LOCK="$STATE/.$TARGET_TASK_ID.hermes-delivery.lock"
+    HERMES_DELIVERY_LOCK=$(fm_task_inbox_hermes_delivery_lock_path "$STATE" "$TARGET_TASK_ID")
     fm_lock_acquire_wait "$HERMES_DELIVERY_LOCK" || {
       echo "error: cannot lock Hermes delivery for $TARGET_TASK_ID" >&2
       exit 1

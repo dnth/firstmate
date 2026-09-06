@@ -255,6 +255,131 @@ test_ring_ladder_policy() {
   pass "inbox: the re-ring ladder paces by grace, escalates once, and resets on ack"
 }
 
+# A ring fixture whose fake tmux logs every literal send-keys payload, so a
+# doorbell that reached the terminal is observable and one that did not is not.
+setup_ring_case() {  # <name> -> echoes "<state> <fakebin> <record>"
+  local name=$1 dir state fb rec
+  dir="$TMP_ROOT/$name"
+  state="$dir/state"
+  mkdir -p "$state"
+  fb=$(make_watch_stubs "$dir")
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "do the thing")
+  printf '%s %s %s\n' "$state" "$fb" "$rec"
+}
+
+# Run one fm_task_inbox_ring against the fixture through the production library.
+ring_lib() {  # <state> <fakebin> <sendlog> <record> <harness> <lock-wait-secs>
+  local state=$1 fb=$2 log=$3 rec=$4 harness=$5 lock_wait=$6
+  PATH="$fb:$PATH" FM_STATE_OVERRIDE="$state" FM_SEND_LOG="$log" \
+    FM_TASK_INBOX_LOCK_WAIT_SECS="$lock_wait" bash -c '
+      . "$1"
+      fm_task_inbox_ring tmux fakewin "$2" fm-t1 "$3"
+    ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$rec" "$harness"
+}
+
+# Hold the shared Hermes delivery lock in a live background process until the
+# caller creates <release>, and publish its pid as HERMES_LOCK_HOLDER_PID. The
+# holder must stay a child of the running test shell, so this sets a variable
+# instead of echoing a pid through a command substitution that would block on
+# the background process's inherited stdout.
+hold_hermes_lock() {  # <state> <task> <ready> <release>
+  local state=$1 task=$2 ready=$3 release=$4 i=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    lock=$(fm_task_inbox_hermes_delivery_lock_path "$2" "$3")
+    fm_lock_acquire_wait "$lock"
+    : > "$4"
+    while [ ! -f "$5" ]; do sleep 0.02; done
+  ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$state" "$task" "$ready" "$release" \
+    >/dev/null 2>&1 &
+  HERMES_LOCK_HOLDER_PID=$!
+  while [ "$i" -lt 500 ]; do
+    [ -f "$ready" ] && break
+    sleep 0.02
+    i=$((i + 1))
+  done
+  [ -f "$ready" ] || fail "the fixture never acquired the Hermes delivery lock"
+}
+
+test_hermes_ring_refuses_while_delivery_lock_is_held() {
+  local state fb rec log holder rc
+  read -r state fb rec <<EOF
+$(setup_ring_case hermes-ring-held)
+EOF
+  log="$TMP_ROOT/hermes-ring-held/send.log"
+  : > "$log"
+  hold_hermes_lock "$state" t1 "$TMP_ROOT/hermes-ring-held/ready" "$TMP_ROOT/hermes-ring-held/release"
+  holder=$HERMES_LOCK_HOLDER_PID
+  rc=0
+  ring_lib "$state" "$fb" "$log" "$rec" hermes 1 || rc=$?
+  expect_code 5 "$rc" "a Hermes doorbell must refuse rather than cross a held delivery lock"
+  [ ! -s "$log" ] \
+    || fail "a refused Hermes doorbell still wrote to the terminal: $(cat "$log")"
+  assert_present "$rec" "a refused doorbell must leave its durable record untouched"
+  assert_absent "$state/t1.inbox/handled/${rec##*/}" \
+    "a refused doorbell must not change the worker acknowledgement state"
+  # A non-Hermes harness shares neither the terminal nor the lock: it is unaffected.
+  rc=0
+  ring_lib "$state" "$fb" "$log" "$rec" claude 1 || rc=$?
+  expect_code 0 "$rc" "a held Hermes lock must not affect another harness"
+  assert_grep 'Firstmate instruction waiting' "$log" \
+    "the non-Hermes doorbell should have reached the terminal"
+  : > "$TMP_ROOT/hermes-ring-held/release"
+  wait "$holder" 2>/dev/null || true
+  pass "inbox: a held Hermes delivery lock refuses the doorbell without touching the terminal"
+}
+
+test_hermes_ring_recovers_after_lock_holder_exits() {
+  local state fb rec log holder rc
+  read -r state fb rec <<EOF
+$(setup_ring_case hermes-ring-recover)
+EOF
+  log="$TMP_ROOT/hermes-ring-recover/send.log"
+  : > "$log"
+  hold_hermes_lock "$state" t1 "$TMP_ROOT/hermes-ring-recover/ready" "$TMP_ROOT/hermes-ring-recover/release"
+  holder=$HERMES_LOCK_HOLDER_PID
+  kill -KILL "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  # The lock outlives the process that died holding it; the next ring must
+  # reclaim it rather than stay refused forever.
+  rc=0
+  ring_lib "$state" "$fb" "$log" "$rec" hermes 5 || rc=$?
+  expect_code 0 "$rc" "a doorbell must reclaim the delivery lock from a holder that exited"
+  assert_grep 'Firstmate instruction waiting' "$log" \
+    "the recovered doorbell should have reached the terminal"
+  pass "inbox: a Hermes doorbell reclaims the delivery lock after its holder exits"
+}
+
+test_hermes_concurrent_rings_never_interleave() {
+  local state fb rec log i pids rc bad whole
+  # One WHOLE doorbell line, pinned end to end: a spliced or truncated
+  # write cannot satisfy this, so the count below is real evidence.
+  whole='^Firstmate instruction waiting: list .*/[*]\.msg and, in numeric order, read and act on each, then mv each handled file to .*/handled/\.$'
+  read -r state fb rec <<EOF
+$(setup_ring_case hermes-ring-concurrent)
+EOF
+  log="$TMP_ROOT/hermes-ring-concurrent/send.log"
+  : > "$log"
+  pids=
+  for i in 1 2 3 4 5 6; do
+    ring_lib "$state" "$fb" "$log" "$rec" hermes 20 >/dev/null 2>&1 &
+    pids="$pids $!"
+  done
+  for i in $pids; do
+    rc=0
+    wait "$i" || rc=$?
+    expect_code 0 "$rc" "every concurrent Hermes doorbell should serialize and deliver"
+  done
+  # Six complete doorbell lines and nothing else: an unserialized write would
+  # split or splice a line, so any other content is proof of interleaving.
+  [ "$(grep -c "$whole" "$log")" = 6 ] \
+    || fail "concurrent Hermes doorbells did not each deliver one whole line: $(cat "$log")"
+  bad=$(grep -cv "$whole" "$log" || true)
+  [ "$bad" = 0 ] \
+    || fail "concurrent Hermes doorbells produced $bad spliced terminal line(s): $(cat "$log")"
+  pass "inbox: concurrent Hermes doorbells serialize into whole terminal lines"
+}
+
 setup_watch_case() {  # <name> -> echoes case dir; state in <dir>/state
   local name=$1 dir
   dir="$TMP_ROOT/$name"
@@ -422,6 +547,9 @@ test_handled_mv_dedups_by_sequence
 test_concurrent_writers_never_clobber
 test_ladder_writes_ignore_vanished_inbox
 test_ring_ladder_policy
+test_hermes_ring_refuses_while_delivery_lock_is_held
+test_hermes_ring_recovers_after_lock_holder_exits
+test_hermes_concurrent_rings_never_interleave
 test_watcher_rerings_idle_pane_quietly
 test_watcher_waits_on_busy_pane
 test_watcher_quiet_on_healthy_inbox
