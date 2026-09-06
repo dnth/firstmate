@@ -892,6 +892,70 @@ fm_meta_lock_path() {  # <state-dir>/<task-id>.meta
   printf '%s/.meta-%s.lock\n' "$dir" "$id"
 }
 
+# fm_task_set_lock_path: the per-home lock guarding WHICH tasks exist in a home,
+# as opposed to fm_meta_lock_path, which guards one task's record.
+#
+# A per-task lock cannot protect a task that does not exist yet. Forced
+# secondmate teardown enumerates a home's task set, locks what it found, and
+# then re-enumerates while removing; a fresh spawn publishing a record inside
+# that window is invisible to the first enumeration and visible to the second,
+# so it gets destructively processed while never lifecycle-locked (reproduced
+# with real agents: a record published 0.249s after teardown began was removed
+# and its worktree returned to the pool, with both commands reporting success).
+# Holding this lock from enumeration through cleanup makes the two operations
+# serialize: either the spawn publishes first and the teardown's preflight
+# covers it, or the teardown owns the set and the spawn refuses. Both directions
+# fail closed.
+fm_task_set_lock_path() {  # <state-dir>
+  local state=$1
+  [ -n "$state" ] || return 1
+  case "$state" in *[$'\n\r\t']*) return 1 ;; esac
+  printf '%s/.task-set.lock\n' "$state"
+}
+
+fm_firstmate_root_home() {
+  local home=${1:-$FM_HOME} marker parent seen="|" depth=0
+  home=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || return 1
+  while [ -e "$home/.fm-secondmate-parent" ] || [ -L "$home/.fm-secondmate-parent" ]; do
+    marker="$home/.fm-secondmate-parent"
+    if ! command -v fm_secondmate_parent_record_parse >/dev/null 2>&1; then
+      # shellcheck source=bin/fm-secondmate-parent-lib.sh
+      . "$FM_WAKE_LIB_DIR/fm-secondmate-parent-lib.sh"
+    fi
+    fm_secondmate_parent_record_parse "$marker" || return 1
+    [ "$FM_SECONDMATE_PARENT_ROUTE" = local ] || return 1
+    parent=$(CDPATH='' cd -- "$FM_SECONDMATE_PARENT_HOME" 2>/dev/null && pwd -P) || return 1
+    case "$seen" in *"|$parent|"*) return 1 ;; esac
+    seen="$seen$home|"
+    home=$parent
+    depth=$((depth + 1))
+    [ "$depth" -le 64 ] || return 1
+  done
+  printf '%s\n' "$home"
+}
+
+fm_treehouse_project_lock_path() {  # <project-dir>
+  local project=$1 root origin identity hash top
+  [ -d "$project" ] || return 1
+  root=$(fm_firstmate_root_home "$FM_HOME") || return 1
+  origin=$(git -C "$project" remote get-url origin 2>/dev/null || true)
+  if [ -n "$origin" ]; then
+    case "$origin" in
+      /*) [ ! -d "$origin" ] || origin=$(CDPATH='' cd -- "$origin" 2>/dev/null && pwd -P) || return 1 ;;
+      *://*|*:* ) ;;
+      *) [ ! -d "$project/$origin" ] || origin=$(CDPATH='' cd -- "$project/$origin" 2>/dev/null && pwd -P) || return 1 ;;
+    esac
+    identity=$origin
+  else
+    top=$(git -C "$project" rev-parse --show-toplevel 2>/dev/null) || return 1
+    top=$(CDPATH='' cd -- "$top" 2>/dev/null && pwd -P) || return 1
+    identity=$top
+  fi
+  hash=$(printf '%s' "$identity" | git hash-object --stdin 2>/dev/null) || return 1
+  [ -d "$root/state" ] || return 1
+  printf '%s/.treehouse-project-%s.lock\n' "$root/state" "$hash"
+}
+
 fm_failure_episode_reset() {
   local state=$1 mode=${2:-acquire} lock current pid acquired=0 path
   lock="$state/.turnend-claude-blocks.lock"
