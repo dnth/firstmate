@@ -837,12 +837,12 @@ fm_ext_outbox_stuck_recover() {
       *) return 2 ;;
     esac
   fi
-  fm_ext_outbox_inflight_release "$dir" "$slug" "$kind" "$generation" || return 2
   body=$(jq -c --argjson attempts "$((attempts + 1))" --argjson recovered_at "$now" \
     '.inflight = null | .recovery_count = $attempts | .recovered_at = $recovered_at' \
     "$dir/$progress" 2>/dev/null) || return 2
   [ -n "$body" ] || return 2
   fm_ext_outbox_progress "$dir" "$slug" "$kind" "$generation" "$body" || return 2
+  fm_ext_outbox_inflight_release "$dir" "$slug" "$kind" "$generation" || return 2
   return 0
 }
 
