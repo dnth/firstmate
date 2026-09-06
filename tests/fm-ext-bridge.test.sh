@@ -257,8 +257,6 @@ test_7_unsent_outbox_receipt_once() {
   write_text "$home/ans.txt" "calm seas"
   home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
     --text-file "$home/ans.txt" >/dev/null
-  mkdir -p "$state"
-  cp -a "$home/state/ext-outbox" "$state/"
   sent="$home/sent.log"
   : > "$sent"
   home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$sent" >/dev/null <<'PY'
@@ -549,10 +547,10 @@ test_15_wake_failure_does_not_leave_silent_offered() {
   pass "15 wake failure does not leave a permanently silent offered marker"
 }
 
-# --- 16. ambiguous timeout/URLError keeps posting and refuses retry ---------
+# --- 16. ambiguous timeout/URLError keeps posting until recovery -------------
 
 test_16_ambiguous_urlerror_keeps_mid_delivery() {
-  local home slug posting receipt failed sent out
+  local home slug posting receipt failed sent out future
   home="$TMP_ROOT/c16"
   setup_home "$home"
   slug=$(intake_ok "$home" "maybe it landed")
@@ -580,7 +578,8 @@ PY
   assert_present "$posting" "ambiguous URLError must keep the posting marker"
   assert_absent "$receipt" "ambiguous URLError must not write a receipt"
   assert_absent "$failed" "ambiguous URLError must not write a terminal failed marker"
-  out=$(home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$sent" <<'PY'
+  future=$(( $(date +%s) + 4000 ))
+  out=$(home_env "$home" env FM_EXT_NOW_OVERRIDE="$future" PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$sent" <<'PY'
 import os, sys
 from pathlib import Path
 sys.path.insert(0, os.environ["PYTHONPATH"])
@@ -594,10 +593,11 @@ def send(payload):
 print(",".join(outbox_poster.drain_outbox(send=send, home=Path(home))))
 PY
   )
-  assert_contains "$out" "mid-delivery" "later drain must refuse automatic retry"
-  [ ! -s "$sent" ] || fail "ambiguous mid-delivery must not invoke send again"
-  assert_present "$posting" "ambiguous mid-delivery must keep the posting marker after the second drain"
-  pass "16 ambiguous timeout/URLError keeps mid-delivery and refuses automatic retry"
+  assert_contains "$out" "sent" "later drain past recovery window must retry"
+  [ -s "$sent" ] || fail "recovered mid-delivery must invoke send again"
+  assert_present "$receipt" "recovered delivery must write a receipt"
+  assert_present "$posting" "recovered delivery keeps the posting marker with its receipt"
+  pass "16 ambiguous timeout/URLError recovers after the window"
 }
 
 # --- 17. permanent 4xx is terminal failed, not endless retry ----------------
@@ -1497,7 +1497,7 @@ PY
 
 test_26_presend_crash_without_progress_recovers() {
   local home slug posting inflight rc future sent out
-  home="$TMP_ROOT/c26"
+  home="$TMP_ROOT/c26-presend"
   setup_home "$home"
   slug=$(intake_ok "$home" "recover before first send")
   write_text "$home/ans.txt" "one clean chunk"
@@ -1574,7 +1574,7 @@ steady_pending_ms() {
 
 test_26_pending_stays_flat_as_delivered_grows() {
   local home slug small large listed leftover
-  home="$TMP_ROOT/c26"
+  home="$TMP_ROOT/c26-pending"
   setup_home "$home"
   slug=$(intake_ok "$home" "measure me")
   write_text "$home/ans.txt" "still pending"
