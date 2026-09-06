@@ -85,8 +85,6 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-timeout-lib.sh`       | Shared bounded command runner that terminates the entire process group on timeout |
 | `fm-gate-refuse-lib.sh`  | Shared no-mistakes gate-context refusal for fleet lifecycle entrypoints               |
 | `fm-primary-watch-core.ts` | Harness-neutral watcher lifecycle core bound by the Pi and OMP primary extensions (docs/watcher-continuity.md) |
-| `fm-omp-wake-claim.sh`    | Publish, hand over, or show the OMP primary's durable wake-notification claim under the durable wake-queue lock |
-| `fm-omp-wake-claim-lib.sh` | Shared format, publication, replay-handover, and acknowledgement-bound retirement of that claim |
 | `fm-primary-watch-version-lib.sh` | The one definition of a primary watcher marker version, hashing that adapter plus the shared core |
 | `fm-watch-arm.sh`        | Verified home-scoped watcher arm wrapper with loud cycle endings and bounded lifecycle ledger |
 | `fm-watch-checkpoint.sh` | Run one bounded foreground watcher checkpoint for Codex-style supervision            |

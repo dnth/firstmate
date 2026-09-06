@@ -21,8 +21,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
-# shellcheck source=bin/fm-omp-wake-claim-lib.sh
-. "$SCRIPT_DIR/fm-omp-wake-claim-lib.sh"
 
 DRAIN_TMP=
 DRAIN_VIEW_TMP=
@@ -379,17 +377,6 @@ print_status_presentation() {  # [<deduped-raw-rows>]
   return "$rc"
 }
 
-# The OMP primary keeps a durable claim naming the wake batch it notified, so a
-# replacement session or process can re-present that exact batch. Retirement is
-# bound to acknowledgement rather than delivery, which makes this drain its only
-# owner (bin/fm-omp-wake-claim-lib.sh). A claim that cannot be retired is a
-# stale re-presentation at worst, never a lost wake, so say so and let the drain
-# finish rather than failing the whole presentation.
-retire_settled_omp_wake_claim() {
-  fm_omp_wake_claim_reconcile_locked \
-    || echo "wake drain: an acknowledged OMP wake notification claim could not be retired at $FM_OMP_WAKE_CLAIM_FILE" >&2
-}
-
 # shellcheck disable=SC2317,SC2329 # Invoked by trap handlers below.
 cleanup() {
   local status=$?
@@ -407,11 +394,6 @@ trap 'exit 143' TERM
 
 fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
 DRAIN_LOCK_HELD=true
-# Retire an OMP primary wake claim whose durable rows are already gone. A claim
-# covering rows still queued survives here untouched, so this only clears one
-# whose batch a previous acknowledgement already consumed - or one that never
-# covered a durable row at all, such as an extension-internal failure wake.
-retire_settled_omp_wake_claim
 decide_scoped_locked
 if [ "$SCOPED" = true ]; then
   reclaim_stale_branch_grant_locked || exit 1
@@ -493,9 +475,6 @@ if [ -n "$ACK_THROUGH" ]; then
       consume_actor_rows_locked "$MAIN_ROWS_FILE" "$ACK_THROUGH" || exit 1
     fi
   fi
-  # Only this acknowledgement removes durable rows, so this is the one place a
-  # still-covered OMP primary wake claim can become settled.
-  retire_settled_omp_wake_claim
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
   if [ "$ACK_REMOVED" -eq 0 ] && [ "$PRESENTED_MAX" -gt "$ACK_THROUGH" ]; then

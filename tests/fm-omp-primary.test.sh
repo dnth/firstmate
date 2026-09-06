@@ -1190,7 +1190,10 @@ const api = {
   registerTool() {},
   // The runtime queues every wake as a steer into a running turn: delivery
   // resolves, no turn starts, and before_agent_start is never invoked for it.
-  sendMessage(message) { steers.push(String(message?.content ?? "")); },
+  sendMessage(message) {
+    const content = String(message?.content ?? "");
+    if (content.includes("omp unacknowledged wake")) steers.push(content);
+  },
 };
 const state = process.env.FM_STATE_OVERRIDE;
 const bound = Number(process.env.FM_WATCH_WAKE_CONSUME_TIMEOUT_MS);
@@ -1237,10 +1240,7 @@ JS
   pass "OMP unacknowledged wake delivery keeps the successor chain and delivers once per close"
 }
 
-# Build an OMP primary fixture whose adapter can drive the real durable wake
-# claim: the production claim scripts and wake library are copied in, so the
-# adapter exercises the same publication, handover, and format the drain reads.
-make_omp_claim_fixture() {  # <name>
+make_omp_queue_fixture() {  # <name>
   local fixture=$TMP_ROOT/$1
   mkdir -p "$fixture/.omp/extensions/lib" "$fixture/bin" "$fixture/state" "$fixture/config"
   : > "$fixture/AGENTS.md"
@@ -1252,8 +1252,6 @@ make_omp_claim_fixture() {  # <name>
   cp "$ROOT/bin/fm-primary-watch-core.ts" "$fixture/bin/fm-primary-watch-core.ts"
   cp "$ROOT/bin/fm-pi-compatible-runtimes" "$fixture/bin/fm-pi-compatible-runtimes"
   cp "$ROOT/bin/fm-wake-lib.sh" "$fixture/bin/fm-wake-lib.sh"
-  cp "$ROOT/bin/fm-omp-wake-claim-lib.sh" "$fixture/bin/fm-omp-wake-claim-lib.sh"
-  cp "$ROOT/bin/fm-omp-wake-claim.sh" "$fixture/bin/fm-omp-wake-claim.sh"
   cat > "$fixture/bin/fm-gate-refuse-lib.sh" <<'SH'
 fm_is_gate_agent() { return 1; }
 SH
@@ -1282,14 +1280,8 @@ SH
   printf '%s\n' "$fixture"
 }
 
-# The durable claim is the only thing that can re-present a wake batch whose
-# notification a session or process never handled. Its handover therefore has to
-# be exactly-once per owner: a same-process extension reload must not repeat the
-# batch, while a replacement session and a replacement process each must.
-test_native_omp_wake_claim_replay_is_exactly_once() {
-  local fixture first second status=0
-  fixture=$(make_omp_claim_fixture native-wake-claim)
-  cat > "$fixture/bin/fm-watch-arm.sh" <<'SH'
+write_queue_watcher() {  # <fixture>
+  cat > "$1/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 state=${FM_STATE_OVERRIDE:?}
 count=$(cat "$state/watch-count" 2>/dev/null || printf 0)
@@ -1297,219 +1289,24 @@ count=$((count + 1))
 printf '%s\n' "$count" > "$state/watch-count"
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 trap 'exit 0' TERM INT
-if [ "$count" -eq 1 ]; then
-  while [ ! -e "$state/watch-trigger" ]; do sleep 0.02; done
-  printf 'signal: omp durable wake batch\n'
-  exit 0
-fi
 while [ ! -e "$state/watch-stop" ]; do sleep 0.02; done
 SH
-  chmod +x "$fixture/bin/fm-watch-arm.sh"
-  FM_STATE_OVERRIDE="$fixture/state" bash -c \
-    '. "$1/bin/fm-wake-lib.sh"; fm_wake_append signal task-a.status "signal: task-a"' _ "$fixture" \
-    || fail "the OMP claim fixture could not seed a durable wake row"
-
-  first=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
-    FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
-    node --input-type=module 2>&1 <<'JS'
-import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
-
-const state = process.env.FM_STATE_OVERRIDE;
-const claimScript = `${process.env.FM_ROOT_OVERRIDE}/bin/fm-omp-wake-claim.sh`;
-const showClaim = () => {
-  const result = spawnSync(claimScript, ["show"], { encoding: "utf8" });
-  return result.status === 0 ? result.stdout.trim() : "";
-};
-const wakes = [];
-const makeApi = () => ({
-  zod: { object: () => ({}) },
-  on(name, handler) { this.handlers.set(name, handler); },
-  handlers: new Map(),
-  registerCommand() {},
-  registerTool() {},
-  sendMessage(message, options) {
-    if (message?.customType !== "firstmate-watcher-wake") return;
-    wakes.push({ content: String(message.content ?? ""), options, claimAtSend: showClaim() });
-  },
-});
-const count = () => existsSync(`${state}/watch-count`)
-  ? Number(readFileSync(`${state}/watch-count`, "utf8").trim())
-  : 0;
-async function waitFor(pred, label) {
-  for (let i = 0; i < 500; i += 1) {
-    if (pred()) return;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error(`timeout waiting for ${label}`);
-}
-const context = (id) => ({ sessionManager: { getSessionFile: () => undefined, getSessionId: () => id } });
-
-writeFileSync(`${state}/.lock`, `${process.pid}\n`);
-process.argv[1] = process.env.EXTENSION;
-const load = async (tag) => {
-  const module = await import(`${pathToFileURL(process.env.EXTENSION).href}?${tag}=${Date.now()}`);
-  const api = makeApi();
-  module.default(api);
-  return api;
-};
-
-const first = await load("claim");
-await first.handlers.get("session_start")({ type: "session_start" }, context("sess-one"));
-await waitFor(() => count() === 1, "initial automatic OMP arm");
-writeFileSync(`${state}/watch-trigger`, "trigger\n");
-await waitFor(() => wakes.length === 1 && count() >= 2, "the durable wake batch notification");
-
-const delivered = wakes[0];
-if (delivered.options?.deliverAs !== "nextTurn" || delivered.options?.triggerTurn !== true) {
-  throw new Error(`the wake batch was not delivered as a hidden next-turn message: ${JSON.stringify(delivered.options)}`);
-}
-if (!delivered.content.includes("signal: omp durable wake batch")) {
-  throw new Error(`the wake batch lost its reason line: ${delivered.content}`);
-}
-if (!delivered.claimAtSend) {
-  throw new Error("the durable claim was not published before the notification was delivered");
-}
-const [, instanceOne, sessionOne, cutoff] = delivered.claimAtSend.split("\t");
-if (!/^[0-9]+$/.test(cutoff) || Number(cutoff) < 1) {
-  throw new Error(`the claim did not cover the queued durable row: ${delivered.claimAtSend}`);
-}
-// Acknowledging consumption clears the core's own undelivered-close handoff, so
-// from here the claim is the only thing that can re-present this batch.
-first.handlers.get("before_agent_start")({ type: "before_agent_start", prompt: delivered.content }, {});
-
-// A same-session extension reload re-enters this process with the same session.
-const reloaded = await load("reload");
-await reloaded.handlers.get("session_start")({ type: "session_start" }, context("sess-one"));
-await new Promise((resolve) => setTimeout(resolve, 200));
-if (wakes.length !== 1) {
-  throw new Error(`a same-session extension reload repeated the batch: ${wakes.length} notifications`);
+  chmod +x "$1/bin/fm-watch-arm.sh"
 }
 
-// A replacement session must re-present the exact batch once, and only once.
-await reloaded.handlers.get("session_switch")({ type: "session_switch", reason: "new" }, context("sess-two"));
-await waitFor(() => wakes.length === 2, "the replacement-session re-presentation");
-if (wakes[1].content !== delivered.content) {
-  throw new Error(`the replacement session re-presented a different batch: ${wakes[1].content}`);
-}
-if (wakes[1].options?.deliverAs !== "nextTurn" || wakes[1].options?.triggerTurn !== true) {
-  throw new Error(`the re-presentation changed delivery mode: ${JSON.stringify(wakes[1].options)}`);
-}
-await reloaded.handlers.get("session_switch")({ type: "session_switch", reason: "resume" }, context("sess-two"));
-await new Promise((resolve) => setTimeout(resolve, 200));
-if (wakes.length !== 2) {
-  throw new Error(`the same replacement session re-presented the batch twice: ${wakes.length} notifications`);
-}
-const rebound = showClaim().split("\t");
-if (rebound[1] !== instanceOne) throw new Error("a same-process replay changed the process identity");
-if (rebound[2] === sessionOne) throw new Error("the claim was not rebound to the replacement session");
-
-writeFileSync(`${state}/watch-stop`, "stop\n");
-await reloaded.handlers.get("session_shutdown")({ type: "session_shutdown" }, {});
-console.log(JSON.stringify({ ok: "omp-wake-claim-replay-ok", body: delivered.content }));
-JS
-  ) || status=$?
-  printf 'stop\n' > "$fixture/state/watch-stop" 2>/dev/null || true
-  expect_code 0 "$status" "OMP durable wake claim replay"
-  assert_contains "$first" omp-wake-claim-replay-ok "OMP wake claim replay did not complete: $first"
-
-  # A replacement PROCESS re-presents the same outstanding batch exactly once,
-  # even though it inherits the same session and may reuse the former PID.
-  rm -f "$fixture/state/watch-count" "$fixture/state/watch-trigger" "$fixture/state/watch-stop"
-  second=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
-    FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
-    node --input-type=module 2>&1 <<'JS'
-import { spawnSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
-
-const state = process.env.FM_STATE_OVERRIDE;
-const claimScript = `${process.env.FM_ROOT_OVERRIDE}/bin/fm-omp-wake-claim.sh`;
-const wakes = [];
-const handlers = new Map();
-const api = {
-  zod: { object: () => ({}) },
-  on(name, handler) { handlers.set(name, handler); },
-  registerCommand() {},
-  registerTool() {},
-  sendMessage(message) {
-    if (message?.customType === "firstmate-watcher-wake") wakes.push(String(message.content ?? ""));
-  },
-};
-const before = spawnSync(claimScript, ["show"], { encoding: "utf8" });
-if (before.status !== 0) throw new Error("the outstanding claim did not survive the previous process");
-const previousInstance = before.stdout.trim().split("\t")[1];
-
-writeFileSync(`${state}/.lock`, `${process.pid}\n`);
-process.argv[1] = process.env.EXTENSION;
-const module = await import(`${pathToFileURL(process.env.EXTENSION).href}?replacementprocess=${Date.now()}`);
-module.default(api);
-const context = { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "sess-two" } };
-await handlers.get("session_start")({ type: "session_start" }, context);
-for (let i = 0; i < 200 && wakes.length === 0; i += 1) {
-  await new Promise((resolve) => setTimeout(resolve, 10));
-}
-if (wakes.length !== 1) {
-  throw new Error(`a replacement process re-presented the batch ${wakes.length} times`);
-}
-await new Promise((resolve) => setTimeout(resolve, 200));
-if (wakes.length !== 1) throw new Error("a replacement process kept re-presenting the batch");
-const after = spawnSync(claimScript, ["show"], { encoding: "utf8" });
-if (after.status !== 0) throw new Error("the replacement process retired the claim before acknowledgement");
-if (after.stdout.trim().split("\t")[1] === previousInstance) {
-  throw new Error("the claim was not rebound to the replacement process");
-}
-writeFileSync(`${state}/watch-stop`, "stop\n");
-await handlers.get("session_shutdown")({ type: "session_shutdown" }, {});
-console.log(JSON.stringify({ ok: "omp-wake-claim-process-replay-ok", body: wakes[0] }));
-JS
-  ) || status=$?
-  printf 'stop\n' > "$fixture/state/watch-stop" 2>/dev/null || true
-  expect_code 0 "$status" "OMP durable wake claim process replay"
-  assert_contains "$second" omp-wake-claim-process-replay-ok \
-    "a replacement OMP process did not re-present the outstanding batch exactly once: $second"
-  assert_contains "$second" "signal: omp durable wake batch" \
-    "the replacement process re-presented a different batch: $second"
-  pass "OMP re-presents an unacknowledged wake batch once per replacement session and process, never on a reload"
-}
-
-# Claim publication is best-effort: when its executable is unavailable, the
-# live session still receives the wake and the durable row remains for drain.
-test_native_omp_wake_claim_publication_failure_keeps_queue_authoritative() {
+test_native_omp_durable_queue_session_notifications() {
   local fixture out status=0
-  fixture=$(make_omp_claim_fixture native-wake-claim-publication-failure)
-  cat > "$fixture/bin/fm-watch-arm.sh" <<'SH'
-#!/usr/bin/env bash
-state=${FM_STATE_OVERRIDE:?}
-count=$(cat "$state/watch-count" 2>/dev/null || printf 0)
-count=$((count + 1))
-printf '%s\n' "$count" > "$state/watch-count"
-printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
-trap 'exit 0' TERM INT
-if [ "$count" -eq 1 ]; then
-  while [ ! -e "$state/watch-trigger" ]; do sleep 0.02; done
-  printf 'signal: omp claim publication failure\n'
-  exit 0
-fi
-while [ ! -e "$state/watch-stop" ]; do sleep 0.02; done
-SH
-  chmod +x "$fixture/bin/fm-watch-arm.sh"
+  fixture=$(make_omp_queue_fixture native-queue-session)
+  write_queue_watcher "$fixture"
   FM_STATE_OVERRIDE="$fixture/state" bash -c \
     '. "$1/bin/fm-wake-lib.sh"; fm_wake_append signal task-a.status "signal: task-a"' _ "$fixture" \
-    || fail "the OMP claim publication-failure fixture could not seed a durable wake row"
-  chmod a-x "$fixture/bin/fm-omp-wake-claim.sh"
-
+    || fail "the OMP queue fixture could not seed a durable wake row"
   out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
     FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
     node --input-type=module 2>&1 <<'JS'
-import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-
-const root = process.env.FM_ROOT_OVERRIDE;
 const state = process.env.FM_STATE_OVERRIDE;
-const claimScript = `${root}/bin/fm-omp-wake-claim.sh`;
 const wakes = [];
 const handlers = new Map();
 const api = {
@@ -1521,240 +1318,100 @@ const api = {
     if (message?.customType === "firstmate-watcher-wake") wakes.push({ message, options });
   },
 };
-const count = () => existsSync(`${state}/watch-count`)
-  ? Number(readFileSync(`${state}/watch-count`, "utf8").trim())
-  : 0;
+const count = () => existsSync(`${state}/watch-count`) ? Number(readFileSync(`${state}/watch-count`, "utf8")) : 0;
 async function waitFor(pred, label) {
-  for (let i = 0; i < 500; i += 1) {
-    if (pred()) return;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
+  for (let i = 0; i < 500; i += 1) { if (pred()) return; await new Promise((r) => setTimeout(r, 10)); }
   throw new Error(`timeout waiting for ${label}`);
 }
 writeFileSync(`${state}/.lock`, `${process.pid}\n`);
 process.argv[1] = process.env.EXTENSION;
-const module = await import(`${pathToFileURL(process.env.EXTENSION).href}?publication-failure=${Date.now()}`);
+const module = await import(`${pathToFileURL(process.env.EXTENSION).href}?queue-session=${Date.now()}`);
 module.default(api);
 const context = { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "sess-one" } };
 await handlers.get("session_start")({ type: "session_start" }, context);
-await waitFor(() => count() === 1, "initial automatic OMP arm");
-writeFileSync(`${state}/watch-trigger`, "trigger\n");
-await waitFor(() => wakes.length === 1, "watcher wake after claim publication failure");
-await new Promise((resolve) => setTimeout(resolve, 100));
-if (wakes.length !== 1) throw new Error(`the watcher wake was delivered ${wakes.length} times`);
-if (wakes[0].options?.deliverAs !== "nextTurn" || wakes[0].options?.triggerTurn !== true) {
-  throw new Error(`the watcher wake used the wrong delivery mode: ${JSON.stringify(wakes[0].options)}`);
-}
-if (!wakes[0].message.content.includes("signal: omp claim publication failure")) {
-  throw new Error(`the watcher wake lost its reason line: ${wakes[0].message.content}`);
-}
+await waitFor(() => count() === 1, "initial arm");
+await waitFor(() => wakes.length === 1, "session-start durable wake");
+if (wakes[0].options?.deliverAs !== "nextTurn" || wakes[0].options?.triggerTurn !== true) throw new Error("session-start wake used the wrong delivery mode");
+await handlers.get("session_switch")({ type: "session_switch", reason: "new" }, context);
+await waitFor(() => wakes.length === 2, "session-switch durable wake");
+if (wakes.length !== 2) throw new Error(`expected two session-event notifications, got ${wakes.length}`);
 writeFileSync(`${state}/watch-stop`, "stop\n");
 await handlers.get("session_shutdown")({ type: "session_shutdown" }, {});
-console.log("omp-wake-claim-publication-failure-delivered-once");
+console.log("omp-durable-queue-session-notifications-ok");
 JS
   ) || status=$?
   printf 'stop\n' > "$fixture/state/watch-stop" 2>/dev/null || true
-  chmod +x "$fixture/bin/fm-omp-wake-claim.sh"
-  expect_code 0 "$status" "OMP wake claim publication failure delivery"
-  assert_contains "$out" omp-wake-claim-publication-failure-delivered-once \
-    "claim publication failure did not preserve one watcher wake: $out"
-  if FM_STATE_OVERRIDE="$fixture/state" "$fixture/bin/fm-omp-wake-claim.sh" show >/dev/null 2>&1; then
-    fail "a claim remained outstanding after publication failure"
-  fi
-  queued=$(FM_STATE_OVERRIDE="$fixture/state" bash -c \
-    '. "$1/bin/fm-wake-lib.sh"; fm_wake_queued_keys signal' _ "$fixture")
-  [ "$queued" = task-a.status ] || fail "the durable wake row was not left queued: $queued"
-  pass "OMP claim publication failure falls back to the durable wake row"
+  expect_code 0 "$status" "OMP durable queue session notifications"
+  assert_contains "$out" omp-durable-queue-session-notifications-ok "session events did not re-notify queued durable wakes: $out"
+  pass "OMP re-notifies durable wakes once on session start and switch"
 }
 
-test_native_omp_wake_claim_session_switch_cannot_split_owner() {
+test_native_omp_empty_queue_suppresses_session_notifications() {
   local fixture out status=0
-  fixture=$(make_omp_claim_fixture native-wake-claim-session-switch)
-  mv "$fixture/bin/fm-omp-wake-claim.sh" "$fixture/bin/fm-omp-wake-claim.real.sh"
-  cat > "$fixture/bin/fm-omp-wake-claim.sh" <<'SH'
-#!/usr/bin/env bash
-sleep 0.4
-exec "$(dirname "$0")/fm-omp-wake-claim.real.sh" "$@"
-SH
-  chmod +x "$fixture/bin/fm-omp-wake-claim.sh"
-  cat > "$fixture/bin/fm-watch-arm.sh" <<'SH'
-#!/usr/bin/env bash
-state=${FM_STATE_OVERRIDE:?}
-printf '1\n' > "$state/watch-count"
-printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
-trap 'exit 0' TERM INT
-while [ ! -e "$state/watch-trigger" ]; do sleep 0.02; done
-printf 'signal: omp session-switch race\n'
-exit 0
-SH
-  chmod +x "$fixture/bin/fm-watch-arm.sh"
-  FM_STATE_OVERRIDE="$fixture/state" bash -c \
-    '. "$1/bin/fm-wake-lib.sh"; fm_wake_append signal task-a.status "signal: task-a"' _ "$fixture" \
-    || fail "the OMP session-switch fixture could not seed a durable wake row"
-
+  fixture=$(make_omp_queue_fixture native-queue-empty)
+  write_queue_watcher "$fixture"
   out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
     FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
     node --input-type=module 2>&1 <<'JS'
-import { createHash } from "node:crypto";
-import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-
-const root = process.env.FM_ROOT_OVERRIDE;
 const state = process.env.FM_STATE_OVERRIDE;
-const claimScript = `${root}/bin/fm-omp-wake-claim.sh`;
-const wakes = [];
+let wakes = 0;
 const handlers = new Map();
-let currentSession = "sess-one";
-let interleaveAttempted = false;
-let timer;
-const api = {
-  zod: { object: () => ({}) },
-  on(name, handler) { handlers.set(name, handler); },
-  registerCommand() {},
-  registerTool() {},
-  sendMessage(message, options) {
-    if (message?.customType !== "firstmate-watcher-wake") return;
-    wakes.push({ message, options });
-    clearTimeout(timer);
-    const claim = spawnSync(claimScript, ["show"], {
-      encoding: "utf8",
-      env: { ...process.env, FM_STATE_OVERRIDE: state },
-    });
-    if (claim.status !== 0) throw new Error("the wake was delivered without a durable claim");
-    const owner = claim.stdout.trim().split("\t")[2];
-    if (!owner || owner !== createHash("sha256").update(currentSession).digest("hex")) {
-      throw new Error(`claim owner split from live session: ${owner} vs ${currentSession}`);
-    }
-  },
-};
-const count = () => existsSync(`${state}/watch-count`)
-  ? Number(readFileSync(`${state}/watch-count`, "utf8").trim())
-  : 0;
-async function waitFor(pred, label) {
-  for (let i = 0; i < 500; i += 1) {
-    if (pred()) return;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error(`timeout waiting for ${label}`);
-}
+const api = { zod: { object: () => ({}) }, on(name, handler) { handlers.set(name, handler); }, registerCommand() {}, registerTool() {}, sendMessage(message) { if (message?.customType === "firstmate-watcher-wake") wakes += 1; } };
 writeFileSync(`${state}/.lock`, `${process.pid}\n`);
 process.argv[1] = process.env.EXTENSION;
-const module = await import(`${pathToFileURL(process.env.EXTENSION).href}?session-switch=${Date.now()}`);
+const module = await import(`${pathToFileURL(process.env.EXTENSION).href}?queue-empty=${Date.now()}`);
 module.default(api);
-const context = (id) => ({ sessionManager: { getSessionFile: () => undefined, getSessionId: () => id } });
-await handlers.get("session_start")({ type: "session_start" }, context(currentSession));
-await waitFor(() => count() === 1, "initial automatic OMP arm");
-writeFileSync(`${state}/watch-trigger`, "trigger\n");
-timer = setTimeout(() => {
-  interleaveAttempted = true;
-  currentSession = "sess-two";
-  handlers.get("session_switch")({ type: "session_switch", reason: "new" }, context(currentSession));
-}, 200);
-await waitFor(() => wakes.length === 1, "one watcher wake");
-await new Promise((resolve) => setTimeout(resolve, 250));
-if (wakes.length !== 1) throw new Error(`the watcher wake was delivered ${wakes.length} times`);
-if (interleaveAttempted) throw new Error("session_switch interleaved despite synchronous publication");
-if (wakes[0].options?.deliverAs !== "nextTurn" || wakes[0].options?.triggerTurn !== true) {
-  throw new Error(`the watcher wake used the wrong delivery mode: ${JSON.stringify(wakes[0].options)}`);
-}
-const claim = spawnSync(claimScript, ["show"], {
-  encoding: "utf8",
-  env: { ...process.env, FM_STATE_OVERRIDE: state },
-});
-if (claim.status !== 0 || claim.stdout.trim().split("\t").length !== 5) {
-  throw new Error("the claim did not remain bound to exactly one owner");
-}
+const context = { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "sess-one" } };
+await handlers.get("session_start")({ type: "session_start" }, context);
+await handlers.get("session_switch")({ type: "session_switch", reason: "new" }, context);
+await new Promise((r) => setTimeout(r, 100));
+if (wakes !== 0) throw new Error(`empty queue produced ${wakes} notifications`);
 writeFileSync(`${state}/watch-stop`, "stop\n");
 await handlers.get("session_shutdown")({ type: "session_shutdown" }, {});
-console.log("omp-wake-claim-session-switch-owner-ok");
+console.log("omp-empty-queue-session-notifications-ok");
 JS
   ) || status=$?
   printf 'stop\n' > "$fixture/state/watch-stop" 2>/dev/null || true
-  expect_code 0 "$status" "OMP wake claim session-switch ownership"
-  assert_contains "$out" omp-wake-claim-session-switch-owner-ok \
-    "session-switch interleaving split the wake claim owner: $out"
-  pass "OMP wake claim publication and notification keep one session owner"
+  expect_code 0 "$status" "OMP empty queue session notifications"
+  assert_contains "$out" omp-empty-queue-session-notifications-ok "empty durable queue produced a session notification: $out"
+  pass "OMP suppresses session notifications when the durable queue is empty"
 }
 
-# Two mechanisms could re-present the same wake after a replacement: the shared
-# core's own handoff for a close it never delivered, and this adapter's durable
-# claim. Exactly one of them may speak, or the replacement receives the wake
-# twice.
-test_native_omp_wake_claim_defers_to_a_core_owned_close() {
+test_native_omp_core_handoff_suppresses_queue_notification() {
   local fixture out status=0
-  fixture=$(make_omp_claim_fixture native-wake-claim-interlock)
-  cat > "$fixture/bin/fm-watch-arm.sh" <<'SH'
-#!/usr/bin/env bash
-state=${FM_STATE_OVERRIDE:?}
-printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
-trap 'exit 0' TERM INT
-while [ ! -e "$state/watch-stop" ]; do sleep 0.02; done
-SH
-  chmod +x "$fixture/bin/fm-watch-arm.sh"
+  fixture=$(make_omp_queue_fixture native-queue-core-handoff)
+  write_queue_watcher "$fixture"
   mkdir -p "$fixture/state/extensions/omp-primary-watch"
   printf '{"version":2,"pending":[{"version":1,"token":"1-2-3","message":"signal: core owned undelivered close","predecessorArmPid":""}]}\n' \
     > "$fixture/state/extensions/omp-primary-watch/session-replacement-actionable.json"
-  printf '%s' 'encoded:watcher:FIRSTMATE WATCHER WAKE: signal: claimed batch' \
-    | FM_STATE_OVERRIDE="$fixture/state" "$fixture/bin/fm-omp-wake-claim.sh" \
-      publish --instance inst-previous --session sess-previous \
-    || fail "the interlock fixture could not publish an outstanding claim"
-
   out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
     FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
     node --input-type=module 2>&1 <<'JS'
-import { spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-
 const state = process.env.FM_STATE_OVERRIDE;
-const claimScript = `${process.env.FM_ROOT_OVERRIDE}/bin/fm-omp-wake-claim.sh`;
 const wakes = [];
 const handlers = new Map();
-const api = {
-  zod: { object: () => ({}) },
-  on(name, handler) { handlers.set(name, handler); },
-  registerCommand() {},
-  registerTool() {},
-  sendMessage(message) {
-    if (message?.customType === "firstmate-watcher-wake") wakes.push(String(message.content ?? ""));
-  },
-};
+const api = { zod: { object: () => ({}) }, on(name, handler) { handlers.set(name, handler); }, registerCommand() {}, registerTool() {}, sendMessage(message, options) { if (message?.customType === "firstmate-watcher-wake") wakes.push({ message, options }); } };
 writeFileSync(`${state}/.lock`, `${process.pid}\n`);
 process.argv[1] = process.env.EXTENSION;
-const module = await import(`${pathToFileURL(process.env.EXTENSION).href}?interlock=${Date.now()}`);
+const module = await import(`${pathToFileURL(process.env.EXTENSION).href}?queue-core=${Date.now()}`);
 module.default(api);
-await handlers.get("session_start")({ type: "session_start" }, {
-  sessionManager: { getSessionFile: () => undefined, getSessionId: () => "sess-new" },
-});
-for (let i = 0; i < 300 && wakes.length === 0; i += 1) {
-  await new Promise((resolve) => setTimeout(resolve, 10));
-}
-await new Promise((resolve) => setTimeout(resolve, 300));
-if (wakes.length !== 1) {
-  throw new Error(`the replacement received ${wakes.length} wakes for one outstanding close: ${wakes.join(" | ")}`);
-}
-if (!wakes[0].includes("signal: core owned undelivered close")) {
-  throw new Error(`the core's undelivered close was not the wake that was delivered: ${wakes[0]}`);
-}
-if (wakes[0].includes("claimed batch")) {
-  throw new Error("the adapter re-presented its claim alongside the core's own redelivery");
-}
-const claim = spawnSync(claimScript, ["show"], { encoding: "utf8" });
-if (claim.status !== 0) throw new Error("the silent handover retired the claim before acknowledgement");
-if (claim.stdout.trim().split("\t")[1] === "inst-previous") {
-  throw new Error("the silent handover left the claim bound to the replaced process");
-}
+await handlers.get("session_start")({ type: "session_start" }, { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "sess-one" } });
+for (let i = 0; i < 300 && wakes.length === 0; i += 1) await new Promise((r) => setTimeout(r, 10));
+if (wakes.length !== 1 || !wakes[0].message.content.includes("core owned undelivered close")) throw new Error(`core handoff delivery was not exclusive: ${JSON.stringify(wakes)}`);
+if (wakes[0].options?.deliverAs !== "nextTurn" || wakes[0].options?.triggerTurn !== true) throw new Error("core handoff used the wrong delivery mode");
 writeFileSync(`${state}/watch-stop`, "stop\n");
 await handlers.get("session_shutdown")({ type: "session_shutdown" }, {});
-console.log("omp-wake-claim-interlock-ok");
+console.log("omp-core-handoff-queue-notification-ok");
 JS
   ) || status=$?
   printf 'stop\n' > "$fixture/state/watch-stop" 2>/dev/null || true
-  expect_code 0 "$status" "OMP wake claim interlock"
-  assert_contains "$out" omp-wake-claim-interlock-ok \
-    "the OMP wake claim and the core's own handoff both re-presented one close: $out"
-  pass "OMP hands its wake claim over silently while the shared core still owes an undelivered close"
+  expect_code 0 "$status" "OMP core handoff queue notification"
+  assert_contains "$out" omp-core-handoff-queue-notification-ok "core handoff was duplicated by queue notification: $out"
+  pass "OMP core handoff suppresses duplicate durable queue notification"
 }
 
 test_resolve_path_uses_node_when_readlink_f_is_unavailable
@@ -1770,7 +1427,6 @@ test_native_omp_confirms_recovery_handling_delivery
 test_native_omp_refused_handling_delivery_is_typed_once
 test_native_omp_session_switch_carries_inflight_actionable_close
 test_native_omp_unacknowledged_wake_keeps_successor_chain
-test_native_omp_wake_claim_replay_is_exactly_once
-test_native_omp_wake_claim_publication_failure_keeps_queue_authoritative
-test_native_omp_wake_claim_session_switch_cannot_split_owner
-test_native_omp_wake_claim_defers_to_a_core_owned_close
+test_native_omp_durable_queue_session_notifications
+test_native_omp_empty_queue_suppresses_session_notifications
+test_native_omp_core_handoff_suppresses_queue_notification
