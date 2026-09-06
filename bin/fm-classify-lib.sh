@@ -13,7 +13,7 @@
 # daemon keeps its escalation-digest seen-markers; the watcher keeps its .seen-*
 # signatures).
 #
-# There are three documented exceptions. The absorb classification
+# There are four documented exceptions. The absorb classification
 # (crew_absorb_class and its working/paused wrappers) is NOT a pure status-file
 # read: it reuses bin/fm-crew-state.sh, which may make a bounded no-mistakes call,
 # to decide whether a crew that just stopped its turn or went stale is working,
@@ -25,7 +25,10 @@
 # stays bounded by new appends instead of re-reading each task's whole lifetime
 # log every time. crew_worktree_written_since reads the task's meta file and walks
 # a bounded slice of its worktree instead of a status file, so callers run it only
-# at the moment they would otherwise escalate.
+# at the moment they would otherwise escalate. status_legacy_marker_bind (see
+# "legacy seen-marker identity" below) writes the identity binding a pre-cursor
+# dedup marker never recorded, so that marker is checked by identity from then on
+# instead of by a timestamp comparison a preserved mtime defeats.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
@@ -597,6 +600,103 @@ status_observed_signature() {  # <status-file> [size] [identity]
     "$size" "$ident" "$path_state" "$link_target" "$access" "$kind" \
     | LC_ALL=C od -An -v -tx1 | tr -d ' \n') || return 1
   printf 'r1:%s' "$encoded"
+}
+
+# --- legacy seen-marker identity -------------------------------------------
+#
+# Both supervisors still carry a dedup marker predating the cursors above: the
+# daemon's state/.subsuper-seen-status-<task>, whose content is the exact status
+# line it last escalated, and the watcher's state/.seen-<file>, whose content is
+# that file's "<inode>:<size>:<mtime>" stat signature. Neither records WHICH
+# status object it was written against, so the first reconciliation ordered
+# marker against status file by TIMESTAMP and treated a marker at least as new
+# as the file as still describing it.
+#
+# An mtime is not an identity. A status file replaced with its timestamp
+# preserved - a restored backup, a home copied with `cp -p`, `rsync -t`, or
+# `tar -p`, an explicit `touch -r` - keeps an mtime at or before the marker's,
+# so the replacement's newly-actionable event read as an already-escalated
+# duplicate and never reached the supervisor. The helpers below replace that
+# ordering with the same device+inode identity the cursors already use, recorded
+# in the "<endpoint>@<identity>" sidecar every current writer already commits, so
+# an upgraded home converges onto the one dedup convention instead of keeping a
+# weaker second one alive beside it.
+#
+# A marker that has never been bound carries no identity evidence at all, so
+# the first observation after an upgrade still has to trust its recorded line.
+# Binding it at that moment is exactly what makes every later observation
+# identity-checked; that single observation is the deliberate limit of what an
+# unbound marker can support, and it closes the moment the binding lands.
+
+# Print the "<endpoint>@<identity>" binding recording <status-file> as
+# classified through <endpoint>, in the same shape the escalate path commits.
+# Fails without printing when the file is not a readable regular status file,
+# when its identity or size cannot be read, or when <endpoint> is not a byte
+# offset within it - a caller that cannot prove the binding must surface the
+# event rather than suppress it. Pure read.
+status_seen_binding() {  # <status-file> <endpoint>
+  local f=$1 endpoint=$2 ident size
+  case "$endpoint" in ''|*[!0-9]*) return 1 ;; esac
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
+  ident=$(_fm_open_decisions_file_ident "$f") || return 1
+  [ -n "$ident" ] || return 1
+  size=$(_fm_status_file_size "$f") || return 1
+  size=${size//[[:space:]]/}
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$endpoint" -le "$size" ] || return 1
+  printf '%s@%s' "$endpoint" "$ident"
+}
+
+# 0 when <legacy-marker>'s recorded dedup provably still describes <status-file>,
+# 1 whenever that cannot be proven and the caller must therefore surface the
+# event instead of suppressing it as a duplicate.
+#
+# The proof is the marker's own "<endpoint>@<identity>" sidecar, at endpoint 0:
+# the marker is bound to one status object without claiming any of its bytes as
+# classified, which is exactly what a marker recording only an escalated line
+# can honestly assert. A marker with no sidecar has never been bound, so this
+# binds it and trusts it once; from then on a mismatched identity - the whole
+# point, since a restored or copied log keeps its timestamp but never its inode
+# - refuses the suppression. A sidecar that already carries a real classified
+# endpoint means the cursor path owns this file and the legacy marker must not
+# speak for it, and an unreadable or malformed one proves nothing.
+#
+# NOT a pure status-file read: binding writes <legacy-marker>.offset, the fourth
+# documented exception in this library. The write is what turns a marker that
+# could only be reasoned about by timestamp into one checked by identity, so it
+# has to land at the moment the marker is first trusted rather than at some later
+# commit the caller may never reach. A failed or torn write is not fatal - it
+# leaves no proof, so this refuses and the event surfaces.
+status_legacy_marker_bind() {  # <legacy-marker> <status-file>
+  local marker=$1 f=$2 sidecar recorded binding
+  binding=$(status_seen_binding "$f" 0) || return 1
+  sidecar="$marker.offset"
+  if [ -e "$sidecar" ] || [ -L "$sidecar" ]; then
+    [ -f "$sidecar" ] && [ -r "$sidecar" ] && [ ! -L "$sidecar" ] || return 1
+    recorded=$(LC_ALL=C command cat "$sidecar" 2>/dev/null) || return 1
+    [ "$recorded" = "$binding" ] || return 1
+    return 0
+  fi
+  printf '%s' "$binding" > "$sidecar" || return 1
+}
+
+# Print the classification offset an unbound "<inode>:<size>:<mtime>" stat
+# signature still supports for <status-file>: its recorded size when the
+# recorded inode is still this file's inode, and 0 whenever that cannot be
+# proven - a malformed signature, an unreadable file, or a replacement that
+# allocated a new inode. 0 means "classify from byte zero", so an unprovable
+# marker surfaces the whole log again instead of skipping past a replacement's
+# events. Pure read.
+status_legacy_signature_offset() {  # <status-file> <marker-content>
+  local f=$1 raw=$2 inode size ident
+  case "$raw" in *:*:*) ;; *) printf '0'; return 0 ;; esac
+  inode=${raw%%:*}
+  size=${raw#*:}; size=${size%%:*}
+  case "$inode" in ''|*[!0-9]*) printf '0'; return 0 ;; esac
+  case "$size" in ''|*[!0-9]*) printf '0'; return 0 ;; esac
+  ident=$(_fm_open_decisions_file_ident "$f" 2>/dev/null) || { printf '0'; return 0; }
+  [ "${ident#*:}" = "$inode" ] || { printf '0'; return 0; }
+  printf '%s' "$size"
 }
 
 _fm_decision_origin_drop() {  # <origins> <key>

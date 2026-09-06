@@ -1386,6 +1386,65 @@ test_classify_signal_legacy_marker_suppresses_unchanged_duplicate() {
   pass "legacy dedup suppresses unchanged duplicate"
 }
 
+test_classify_signal_legacy_marker_surfaces_mtime_preserved_replacement() {
+  local dir state statusf marker out
+  dir=$(make_supercase signal-legacy-mtime-preserved)
+  state="$dir/state"
+  statusf="$state/preserved-s3.status"
+  marker="$state/.subsuper-seen-status-preserved-s3"
+  printf 'done: release complete\n' > "$statusf"
+  printf 'done: release complete' > "$marker"
+
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$statusf" "$state")
+  case "$out" in self\|*) ;; *) fail "unchanged legacy duplicate was re-escalated: $out" ;; esac
+
+  # Replace the log the way a restored backup or a `cp -p` home copy does: a new
+  # file object at the same path with its timestamp preserved, so no marker-vs-
+  # file timestamp comparison can see the swap.
+  printf 'done: release complete\n' > "$dir/restored.tmp"
+  touch -r "$statusf" "$dir/restored.tmp"
+  mv -f "$dir/restored.tmp" "$statusf"
+  # Pin the divergence from the plain-replacement case above. If the swap ever
+  # bumped the log's timestamp past its marker's, a timestamp comparison would
+  # still catch it and this case would pass without proving anything.
+  [ "$(_stat_file_mtime "$statusf")" -le "$(_stat_file_mtime "$marker")" ] \
+    || fail "the fixture failed to preserve the replaced log's timestamp"
+
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$statusf" "$state")
+  case "$out" in
+    escalate\|*) ;;
+    *) fail "an mtime-preserved replacement suppressed its newly-actionable status: $out" ;;
+  esac
+  pass "an mtime-preserved status replacement still surfaces its actionable event"
+}
+
+test_classify_signal_binds_preexisting_legacy_marker() {
+  local dir state statusf marker out expected
+  dir=$(make_supercase signal-legacy-binding-upgrade)
+  state="$dir/state"
+  statusf="$state/upgraded-s4.status"
+  marker="$state/.subsuper-seen-status-upgraded-s4"
+  # Exactly what an older fork left on disk: the escalated line, no sidecar.
+  printf 'done: release complete\n' > "$statusf"
+  printf 'done: release complete' > "$marker"
+  [ ! -e "$marker.offset" ] || fail "the fixture already carried a binding"
+
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$statusf" "$state")
+  case "$out" in self\|*) ;; *) fail "the upgrade re-escalated a handled duplicate: $out" ;; esac
+  [ -f "$marker.offset" ] || fail "the upgrade left the pre-existing marker unbound"
+  # The binding names the status object only; it claims no classified bytes, so
+  # a genuinely new append after it is still classified from byte zero.
+  expected=$(status_seen_binding "$statusf" 0) \
+    || fail "could not build the expected binding for the status file"
+  [ "$(cat "$marker.offset")" = "$expected" ] \
+    || fail "the migrated binding does not describe the current status file: $(cat "$marker.offset")"
+
+  printf 'working: tidying up\n' >> "$statusf"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$statusf" "$state")
+  case "$out" in self\|*) ;; *) fail "a routine append re-escalated the bound duplicate: $out" ;; esac
+  pass "a pre-existing seen marker keeps its dedup and gains an identity binding"
+}
+
 test_classify_stale_dedup_against_signal() {
   # If the signal path already escalated a status (seen marker matches),
   # classify_stale must self-handle to avoid a duplicate in the digest.
@@ -2320,6 +2379,8 @@ test_pane_input_pending_honors_idle_override_after_border_strip
 test_classify_signal_dedup_against_scan
 test_classify_signal_legacy_marker_respects_status_replacement
 test_classify_signal_legacy_marker_suppresses_unchanged_duplicate
+test_classify_signal_legacy_marker_surfaces_mtime_preserved_replacement
+test_classify_signal_binds_preexisting_legacy_marker
 test_classify_stale_dedup_against_signal
 test_afk_nonterminal_working_merged_keeps_wedge_aging
 test_afk_genuine_done_still_terminal_stale

@@ -339,11 +339,15 @@ _collapse_newlines() {  # <text>
 # them exactly as before; the away launcher reuses the identical resolution to
 # pass the captain pane in as FM_SUPERVISOR_TARGET.
 
-# --- classification helpers (PURE: no side effects, testable) ---------------
+# --- classification helpers (testable) --------------------------------------
 # last_status_line, status_is_captain_relevant, window_to_task, and
 # scan_captain_relevant_statuses come from bin/fm-classify-lib.sh (sourced above),
 # the single classifier shared with bin/fm-watch.sh. The decision-string wrappers
 # and dedup state below layer the daemon's escalation-digest concerns on top.
+#
+# These helpers write nothing except the one identity binding classify_signal
+# records for a pre-cursor seen marker it trusts; every escalation marker is
+# still recorded by the caller after the decision, never here.
 #
 # Decision protocol: every classifier prints exactly one line on stdout of the
 # form "<action>|<distilled>" where action is "self" or "escalate". The distilled
@@ -366,13 +370,19 @@ daemon_status_seen_offset() {  # <state> <status-file>
   printf '%s' "$size"
 }
 
-legacy_seen_marker_matches_status() {  # <marker> <status-file>
-  local marker=$1 statusf=$2 marker_mtime status_mtime
-  marker_mtime=$(_stat_file_mtime "$marker" 2>/dev/null) || return 1
-  status_mtime=$(_stat_file_mtime "$statusf" 2>/dev/null) || return 1
-  [ "$marker_mtime" -ge "$status_mtime" ]
-}
-
+# A pre-cursor seen marker (state/.subsuper-seen-status-<task>, written by an
+# older fork) records only the status line it escalated, never which status
+# object that line came from, so the first reconciliation compared its timestamp
+# against the log's and treated a marker at least as new as the log as still
+# describing it. A log restored or copied with its timestamp preserved defeats
+# that comparison, so the replacement's newly-actionable event read as an
+# already-escalated duplicate and never reached the supervisor. Trusting such a
+# marker now binds it to the exact status object it was trusted for and checks
+# that identity on every later observation (bin/fm-classify-lib.sh's
+# status_legacy_marker_bind, which owns the binding and its safety). The binding
+# is a file, not a shell side channel, so it survives this classifier running in
+# a subshell; a marker that cannot be bound is not trusted and its event
+# surfaces.
 classify_signal() {  # <reason-after-colon> <state>
   local reason=$1 state=$2 f record rc start endpoint ident rest last distilled="" rel="" all_seen=1 seen_marker seen_line
   FM_SIGNAL_SURFACE_ENDPOINTS=''
@@ -393,9 +403,9 @@ classify_signal() {  # <reason-after-colon> <state>
         seen_line=$(cat "$seen_marker" 2>/dev/null || true)
         if [ "$rc" -eq 0 ] && [ -n "$seen_line" ]; then
           rest=${record#*$'\t'}
-          if [ ! -e "$seen_marker.offset" ] && [ ! -e "$seen_marker.pending" ] \
+          if [ ! -e "$seen_marker.pending" ] \
             && [ "${rest#*$'\t'}" = "$seen_line" ] \
-            && legacy_seen_marker_matches_status "$seen_marker" "$f"; then
+            && status_legacy_marker_bind "$seen_marker" "$f"; then
             rc=1
             record=
           fi
