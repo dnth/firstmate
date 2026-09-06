@@ -1140,14 +1140,16 @@ test_23_stale_inflight_ttl_and_dead_pid_steal() {
 
   _rewrite_inflight "$inflight" "$owner" "$((now - ttl - 10))"
   home_env "$home" env FM_EXT_NOW_OVERRIDE="$now" FM_EXT_INFLIGHT_TTL_SECS="$ttl" \
-    "$OUTBOX" begin --slug "$slug" --kind answer --generation 1 >/dev/null; rc=$?
+    "$OUTBOX" begin --slug "$slug" --kind answer --generation 1 \
+    >/dev/null 2>/dev/null; rc=$?
   expect_code 3 "$rc" "live owner past TTL must still refuse steal"
   assert_present "$inflight" "live-owner refuse must keep the inflight claim"
 
   dead=$(_dead_pid)
   _rewrite_inflight "$inflight" "$dead" "$now"
   home_env "$home" env FM_EXT_NOW_OVERRIDE="$now" FM_EXT_INFLIGHT_TTL_SECS="$ttl" \
-    "$OUTBOX" begin --slug "$slug" --kind answer --generation 1 >/dev/null; rc=$?
+    "$OUTBOX" begin --slug "$slug" --kind answer --generation 1 \
+    >/dev/null 2>/dev/null; rc=$?
   expect_code 3 "$rc" "dead owner inside TTL must refuse steal"
 
   _rewrite_inflight "$inflight" "$dead" "$((now - ttl - 10))"
@@ -1157,7 +1159,8 @@ test_23_stale_inflight_ttl_and_dead_pid_steal() {
   owner=$(jq -r '.pid' "$inflight")
   [ "$owner" = "$$" ] || fail "stolen inflight must record the new owner pid (got $owner want $$)"
   home_env "$home" env FM_EXT_NOW_OVERRIDE="$now" FM_EXT_INFLIGHT_TTL_SECS="$ttl" \
-    "$OUTBOX" begin --slug "$slug" --kind answer --generation 1 >/dev/null; rc=$?
+    "$OUTBOX" begin --slug "$slug" --kind answer --generation 1 \
+    >/dev/null 2>/dev/null; rc=$?
   expect_code 3 "$rc" "after a successful steal, a second begin must refuse"
 
   home="$TMP_ROOT/c23live"
