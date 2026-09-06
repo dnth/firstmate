@@ -1474,6 +1474,99 @@ JS
   pass "OMP re-presents an unacknowledged wake batch once per replacement session and process, never on a reload"
 }
 
+# Claim publication is best-effort: when its executable is unavailable, the
+# live session still receives the wake and the durable row remains for drain.
+test_native_omp_wake_claim_publication_failure_keeps_queue_authoritative() {
+  local fixture out status=0
+  fixture=$(make_omp_claim_fixture native-wake-claim-publication-failure)
+  cat > "$fixture/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+state=${FM_STATE_OVERRIDE:?}
+count=$(cat "$state/watch-count" 2>/dev/null || printf 0)
+count=$((count + 1))
+printf '%s\n' "$count" > "$state/watch-count"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+if [ "$count" -eq 1 ]; then
+  while [ ! -e "$state/watch-trigger" ]; do sleep 0.02; done
+  printf 'signal: omp claim publication failure\n'
+  exit 0
+fi
+while [ ! -e "$state/watch-stop" ]; do sleep 0.02; done
+SH
+  chmod +x "$fixture/bin/fm-watch-arm.sh"
+  FM_STATE_OVERRIDE="$fixture/state" bash -c \
+    '. "$1/bin/fm-wake-lib.sh"; fm_wake_append signal task-a.status "signal: task-a"' _ "$fixture" \
+    || fail "the OMP claim publication-failure fixture could not seed a durable wake row"
+  chmod a-x "$fixture/bin/fm-omp-wake-claim.sh"
+
+  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
+    FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    node --input-type=module 2>&1 <<'JS'
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const root = process.env.FM_ROOT_OVERRIDE;
+const state = process.env.FM_STATE_OVERRIDE;
+const claimScript = `${root}/bin/fm-omp-wake-claim.sh`;
+const wakes = [];
+const handlers = new Map();
+const api = {
+  zod: { object: () => ({}) },
+  on(name, handler) { handlers.set(name, handler); },
+  registerCommand() {},
+  registerTool() {},
+  sendMessage(message, options) {
+    if (message?.customType === "firstmate-watcher-wake") wakes.push({ message, options });
+  },
+};
+const count = () => existsSync(`${state}/watch-count`)
+  ? Number(readFileSync(`${state}/watch-count`, "utf8").trim())
+  : 0;
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (pred()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+process.argv[1] = process.env.EXTENSION;
+const module = await import(`${pathToFileURL(process.env.EXTENSION).href}?publication-failure=${Date.now()}`);
+module.default(api);
+const context = { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "sess-one" } };
+await handlers.get("session_start")({ type: "session_start" }, context);
+await waitFor(() => count() === 1, "initial automatic OMP arm");
+writeFileSync(`${state}/watch-trigger`, "trigger\n");
+await waitFor(() => wakes.length === 1, "watcher wake after claim publication failure");
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (wakes.length !== 1) throw new Error(`the watcher wake was delivered ${wakes.length} times`);
+if (wakes[0].options?.deliverAs !== "nextTurn" || wakes[0].options?.triggerTurn !== true) {
+  throw new Error(`the watcher wake used the wrong delivery mode: ${JSON.stringify(wakes[0].options)}`);
+}
+if (!wakes[0].message.content.includes("signal: omp claim publication failure")) {
+  throw new Error(`the watcher wake lost its reason line: ${wakes[0].message.content}`);
+}
+writeFileSync(`${state}/watch-stop`, "stop\n");
+await handlers.get("session_shutdown")({ type: "session_shutdown" }, {});
+console.log("omp-wake-claim-publication-failure-delivered-once");
+JS
+  ) || status=$?
+  printf 'stop\n' > "$fixture/state/watch-stop" 2>/dev/null || true
+  chmod +x "$fixture/bin/fm-omp-wake-claim.sh"
+  expect_code 0 "$status" "OMP wake claim publication failure delivery"
+  assert_contains "$out" omp-wake-claim-publication-failure-delivered-once \
+    "claim publication failure did not preserve one watcher wake: $out"
+  if "$fixture/bin/fm-omp-wake-claim.sh" show >/dev/null 2>&1; then
+    fail "a claim remained outstanding after publication failure"
+  fi
+  queued=$(FM_STATE_OVERRIDE="$fixture/state" bash -c \
+    '. "$1/bin/fm-wake-lib.sh"; fm_wake_queued_keys signal' _ "$fixture")
+  [ "$queued" = task-a.status ] || fail "the durable wake row was not left queued: $queued"
+  pass "OMP claim publication failure falls back to the durable wake row"
+}
+
 # Two mechanisms could re-present the same wake after a replacement: the shared
 # core's own handoff for a close it never delivered, and this adapter's durable
 # claim. Exactly one of them may speak, or the replacement receives the wake
@@ -1568,4 +1661,5 @@ test_native_omp_refused_handling_delivery_is_typed_once
 test_native_omp_session_switch_carries_inflight_actionable_close
 test_native_omp_unacknowledged_wake_keeps_successor_chain
 test_native_omp_wake_claim_replay_is_exactly_once
+test_native_omp_wake_claim_publication_failure_keeps_queue_authoritative
 test_native_omp_wake_claim_defers_to_a_core_owned_close

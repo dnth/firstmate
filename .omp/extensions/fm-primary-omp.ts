@@ -155,9 +155,11 @@ function claimEnv(): NodeJS.ProcessEnv {
 }
 
 // Bind the durable claim for one outstanding wake notification. Never rejects:
-// the durable wake queue stays the authority for the batch itself, so a claim
-// that cannot be published costs a re-presentation after a replacement, while
-// failing here would either cancel the wake or make the core redeliver it.
+// publication failure still delivers the wake and leaves the durable wake-queue
+// row queued as the authority, so session-start drain re-presents it after a
+// replacement; claim replay is best-effort re-notification layered over that
+// durable-row backstop, not the loss-prevention mechanism. Failing here would
+// either cancel the wake or make the core redeliver it, which is a duplicate.
 function publishWakeClaim(session: string, content: string): Promise<void> {
   return new Promise((resolveClaim) => {
     const child = spawn(
