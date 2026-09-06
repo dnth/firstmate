@@ -140,6 +140,11 @@ def begin_delivery(payload: dict, home: Path | None = None) -> str:
         return "mid-delivery"
     if result.returncode == 4:
         return "terminal-failed"
+    if result.returncode == 5:
+        # A generation left in-flight by an ambiguous send stayed stuck past its
+        # recovery budget: begin has recorded the terminal failure and woken
+        # Firstmate, so this reply stops here instead of retrying forever.
+        return "recovery-exhausted"
     raise RuntimeError(result.stderr.strip() or "begin failed")
 
 
@@ -395,7 +400,14 @@ def discord_send(payload: dict) -> dict:
 
 
 def deliver_one(path: Path, send: SendFn | None = None, home: Path | None = None) -> str:
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        # The generation reached a terminal outcome and its payload was retired
+        # so later polls stop re-scanning it. A sibling poster can retire it
+        # between list_pending and here, so this is an ordinary outcome rather
+        # than an error that would abort the whole drain pass.
+        return "retired"
     home = home or firstmate_home()
     status = begin_delivery(payload, home=home)
     if status != "claimed":

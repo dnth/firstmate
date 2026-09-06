@@ -72,8 +72,7 @@
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
 #          The sibling local Communication Officer bridge is OPTIONAL and inert
-#          unless config/ext-bridge is present or FM_EXT_BRIDGE=1, plus a
-#          mode-0600 secret file. When opted in, bootstrap requires jq and
+#          unless config/ext-bridge is present, plus a mode-0600 secret file. When opted in, bootstrap requires jq and
 #          writes state/ext-watch.check.sh, printing an EXT line.
 #          Fleet sync fetches, fast-forwards safe default-branch states, reports
 #          recovered and STUCK clone drift, and prunes gone local branches; it is
@@ -1020,8 +1019,9 @@ EOF
   echo "FMX: X mode on - relay poll armed via state/x-watch.check.sh; 30s watcher cadence in config/x-mode.env"
 }
 
-# Local Communication Officer bridge (opt-in): config/ext-bridge or
-# FM_EXT_BRIDGE=1 plus a mode-0600 secret file. Writes one identity shim:
+# Local Communication Officer bridge (opt-in): config/ext-bridge plus a
+# mode-0600 secret file. The presence file is the only activation authority;
+# FM_EXT_BRIDGE can disable a configured bridge but can never enable one. Writes one identity shim:
 #   state/ext-watch.check.sh - byte-static identity shim; the watcher validates
 #                            its bytes and invokes bin/fm-ext-poll.sh directly
 # There is no hosted relay, pairing token, or cadence override. Intake wakes

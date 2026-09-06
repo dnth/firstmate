@@ -14,6 +14,10 @@
 #   fm-ext-outbox.sh release --slug <slug> --kind <kind> --generation <n>
 #   fm-ext-outbox.sh split [--max <n>] [--cap <n>]
 #
+# pending lists only generations that are still genuinely pending: a payload
+# whose generation has reached a receipt or a terminal failed marker is retired
+# on sight, so the scan cost stays flat as delivered replies accumulate instead
+# of growing with every reply ever sent.
 # begin CAS-claims the posting marker, then CAS-claims an exclusive inflight
 # send marker (recording owner pid and recorded_at) before returning a send
 # right. Exit 0 on a new claim, a resumable split this caller exclusively
@@ -22,6 +26,13 @@
 # exists (idempotent success), 3 on mid-delivery (posting without this
 # caller owning the next send, including a live owner inside or past the
 # TTL), 4 when a terminal failed marker exists, 2 on validation failure.
+# Exit 5 when a generation left in-flight by an ambiguous send stayed stuck
+# past FM_EXT_MIDDELIVERY_RECOVERY_SECS (default 300) for more than
+# FM_EXT_MIDDELIVERY_RECOVERY_MAX (default 3) recovery attempts: begin records
+# the terminal failure and wakes firstmate rather than refusing forever. Inside
+# that budget begin reopens the ambiguous chunk for one more attempt, so an
+# ordinary network timeout costs at most a repeated chunk, never a silently
+# truncated reply.
 # Two concurrent live posters cannot both get the send right for the same
 # generation and chunk. Steal serialization keeps a 1-second floor so
 # FM_EXT_INFLIGHT_TTL_SECS=0 cannot let two stealers both win. receipt
@@ -48,6 +59,8 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-ext-lib.sh
 . "$SCRIPT_DIR/fm-ext-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 usage() {
   cat >&2 <<'EOF'
@@ -115,13 +128,24 @@ esac
 
 OUTBOX=$(fm_ext_outbox_dir)
 
+# Every subcommand below writes or reads state/ext-outbox, so all of them are
+# gated on the same activation the intake, emit, and poll paths use. Only
+# `split` runs ungated, because it is a pure text function over stdin.
+case "$cmd" in
+  pending) ;;
+  *) fm_ext_active "$FM_HOME" || die "local ext-bridge is not active" 1 ;;
+esac
+
 case "$cmd" in
   pending)
     fm_ext_active "$FM_HOME" || exit 0
     [ -d "$OUTBOX" ] && [ ! -L "$OUTBOX" ] || exit 0
     for file in "$OUTBOX"/*.json; do
       [ -e "$file" ] || continue
-      base=$(basename "$file")
+      # Marker names are matched with parameter expansion, not basename: this
+      # loop runs on every poll, and one process per marker is what made the
+      # scan cost grow with the number of replies already delivered.
+      base=${file##*/}
       case "$base" in
         *.receipt.json|*.failed.json|*.progress.json) continue ;;
       esac
@@ -131,10 +155,11 @@ case "$cmd" in
       generation=$(jq -r '.generation' "$file")
       receipt=$(fm_ext_outbox_receipt_basename "$slug" "$kind" "$generation") || continue
       failed=$(fm_ext_outbox_failed_basename "$slug" "$kind" "$generation") || continue
-      if fm_ext_private_artifact_file_valid "$OUTBOX" "$receipt" 600; then
-        continue
-      fi
-      if fm_ext_private_artifact_file_valid "$OUTBOX" "$failed" 600; then
+      if fm_ext_private_artifact_file_valid "$OUTBOX" "$receipt" 600 \
+        || fm_ext_private_artifact_file_valid "$OUTBOX" "$failed" 600; then
+        # Terminal: retire the payload so later polls never re-scan it. A
+        # generation whose payload predates retirement is caught here too.
+        fm_ext_outbox_retire "$OUTBOX" "$slug" "$kind" "$generation" || true
         continue
       fi
       printf '%s\n' "$file"
@@ -151,6 +176,15 @@ case "$cmd" in
       1) printf 'already-receipted %s %s %s\n' "$SLUG" "$KIND" "$GENERATION" ;;
       3) die "mid-delivery: $KIND generation $GENERATION is posting and has no receipt" 3 ;;
       4) printf 'terminal-failed %s %s %s\n' "$SLUG" "$KIND" "$GENERATION" ;;
+      5)
+        printf 'recovery-exhausted %s %s %s\n' "$SLUG" "$KIND" "$GENERATION"
+        # The terminal failure is already durable; this wake is what makes it
+        # visible to firstmate instead of leaving a silently undelivered reply.
+        if ! fm_wake_append check "$FM_EXT_WATCH_SHIM" "ext-delivery-failed $SLUG"; then
+          printf 'fm-ext-outbox: recorded the terminal failure for %s but could not append its wake\n' \
+            "$SLUG" >&2
+        fi
+        ;;
       *) die "could not begin delivery" 2 ;;
     esac
     exit "$rc"

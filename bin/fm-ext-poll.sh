@@ -2,13 +2,20 @@
 # One slow-check of the local Communication Officer inbox.
 #
 # Inert by default: a HARD no-op (exit 0, no output) unless the local
-# ext-bridge is active (config/ext-bridge or FM_EXT_BRIDGE=1 plus a valid
-# secret file). The watcher invokes this trusted repository script only after
+# ext-bridge is active (config/ext-bridge plus a valid secret file; no
+# environment value can activate a home that never opted in). The watcher invokes this trusted repository script only after
 # state/ext-watch.check.sh matches the expected byte-static identity shim.
 #
-# Prints one line `ext-request <slug>` for each newly claimed offer that still
-# has an inbox file. An already claimed offer stays silent, including after
-# Firstmate restart, so each offer wakes once.
+# Appends one durable `ext-request <slug>` wake record for each newly claimed
+# offer that still has an inbox file, and releases the claim again if that
+# append fails, so a request is never claimed without a wake that survives the
+# watcher dying. This mirrors fm-ext-intake.sh, which owns the same pattern.
+# The matching line is also printed so the watcher nudges Firstmate; the
+# watcher does not append a second record for this check.
+# An already claimed offer stays silent, including after Firstmate restart, so
+# each offer wakes once.
+# Each poll also expires local bridge records past the retention window, the
+# same way fm-x-poll.sh expires X-mode context.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,9 +24,14 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-ext-lib.sh
 . "$SCRIPT_DIR/fm-ext-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 fm_ext_active "$FM_HOME" || exit 0
 command -v jq >/dev/null 2>&1 || exit 0
+
+fm_ext_context_prune "$STATE"
+fm_ext_outbox_prune "$STATE"
 
 INBOX=$(fm_ext_inbox_dir)
 CONTEXT=$(fm_ext_context_dir)
@@ -40,10 +52,17 @@ for file in "$INBOX"/*.json; do
   fi
   fm_ext_offer_registry_claim "$STATE" "$slug" "$rid"
   case $? in
-    0) printf 'ext-request %s\n' "$slug" ;;
-    1) continue ;;
+    0) ;;
     *) continue ;;
   esac
+  # Make the wake durable here rather than leaving it to the watcher: the
+  # watcher can exit between this claim and its own append, and a claimed
+  # offer never surfaces again, so that window silently dropped the request.
+  if ! fm_wake_append check "$FM_EXT_WATCH_SHIM" "ext-request $slug"; then
+    fm_ext_offer_registry_unclaim "$STATE" "$slug" || true
+    continue
+  fi
+  printf 'ext-request %s\n' "$slug"
 done
 
 exit 0

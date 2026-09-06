@@ -328,9 +328,10 @@ The [X mode configuration reference](configuration.md#promised-public-replies-st
 ## Optional local Communication Officer bridge
 
 The sibling local bridge is opt-in presence for a dedicated Hermes Gateway `/fm` plugin talking to this home over local files, not a hosted relay.
-A user enables it with `config/ext-bridge` or `FM_EXT_BRIDGE=1` plus a mode-0600 secret file and a fail-closed allowlist.
-That opt-in is standing authorization for firstmate to answer allowlisted Discord `/fm` requests and act autonomously on normal reversible work.
-Destructive, irreversible, or security-sensitive asks are escalated for trusted-channel confirmation.
+A user enables it with `config/ext-bridge` plus a mode-0600 secret file and a fail-closed allowlist; the presence file is the only activation authority, so no caller's environment can switch on a home that never opted in.
+That opt-in is authorization for firstmate to answer allowlisted Discord `/fm` requests, and standing authorization to act autonomously on normal reversible work only for a request whose allowlist rule names guild, channel, and author.
+A request admitted by a broader guild-only or channel-only rule is answered, but anything that changes a project waits for the captain's confirmation, so adding a whole server to the allowlist never hands its members command authority.
+Destructive, irreversible, or security-sensitive asks are escalated for trusted-channel confirmation at every authority level.
 On the locked session-start bootstrap step, a valid opt-in creates `state/ext-watch.check.sh` as described in the [local Communication Officer configuration reference](configuration.md#local-communication-officer-bridge-configext-bridge).
 Without opt-in, that bootstrap step removes the shim on opt-out and otherwise stays silent.
 

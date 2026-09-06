@@ -7,8 +7,10 @@
 # without touching the hosted relay, FMX_PAIRING_TOKEN, myfirstmate.io, or
 # pending-reply.
 #
-# Opt-in is config/ext-bridge presence or FM_EXT_BRIDGE=1, plus a local
-# mode-0600 secret file. There is no hosted pairing token.
+# Opt-in is config/ext-bridge presence plus a local mode-0600 secret file.
+# The presence file is the only way to turn the bridge on, so no caller's
+# environment can activate a home that never opted in. There is no hosted
+# pairing token.
 #
 # Canonical request_id keeps colons in JSON bodies
 # (discord:<guild>:<channel>:<thread>:<message>). Filenames use the SHA-256
@@ -303,16 +305,19 @@ fm_ext_watch_shim_path() { printf '%s\n' "$(fm_ext_state_dir "${1:-}")/$FM_EXT_W
 
 # --- activation and secret --------------------------------------------------
 
-# fm_ext_bridge_opted_in [home]: config/ext-bridge presence or FM_EXT_BRIDGE=1.
-# Environment wins when set: a non-empty truthy FM_EXT_BRIDGE opts in, and an
-# explicit empty/0/false/no/off value opts out even if the file exists.
+# fm_ext_bridge_opted_in [home]: config/ext-bridge presence.
+# The presence file is the single activation authority, so the bootstrap, the
+# watcher, the poll, the intake, and the gateway plugin all reach the same
+# verdict in one home. FM_EXT_BRIDGE may only turn a configured bridge OFF
+# (empty/0/false/no/off); it can never turn one on. A caller that could set
+# the environment could otherwise activate the intake half of a home whose
+# supervision half still believed the bridge was off.
 fm_ext_bridge_opted_in() {
   local home=${1:-${FM_HOME:?}} flag file
   if [ -n "${FM_EXT_BRIDGE+x}" ]; then
     flag=$(printf '%s' "${FM_EXT_BRIDGE-}" | tr '[:upper:]' '[:lower:]')
     case "$flag" in
       ''|0|false|no|off) return 1 ;;
-      *) return 0 ;;
     esac
   fi
   file=$(fm_ext_bridge_path "$home")
@@ -348,14 +353,26 @@ fm_ext_active() {
   fm_ext_secret_valid "$secret"
 }
 
-# --- allowlist --------------------------------------------------------------
+# --- allowlist and authority ------------------------------------------------
 
 # Allowlist file: comments (#) and blank lines ignored. Each rule is one of:
-#   <guild>
-#   <guild>:<channel>
-#   <guild>:<channel>:<author>
-# A request is allowed when any rule matches every specified component.
-# Missing, empty, unreadable, or symlink allowlist denies every request.
+#   <guild>                      admits the request at "confirm" authority
+#   <guild>:<channel>            admits the request at "confirm" authority
+#   <guild>:<channel>:<author>   grants standing captain-level authority
+#
+# Least privilege: only the finest-grained three-component rule grants standing
+# authority. A guild-only or channel-only rule admits the request but leaves
+# every project-changing action from it needing captain confirmation first, so
+# no guild-wide standing grant exists at any setting.
+#
+# A rule is well formed only with one, two, or three non-empty colon-separated
+# components. Every other shape - a trailing or embedded empty component, or a
+# fourth component - is malformed and is ignored rather than guessed at, so a
+# typo can never widen a grant.
+#
+# Missing, empty, comments-only, unreadable, or symlink allowlist denies every
+# request. This file is the single owner of the decision: the gateway plugin
+# resolves through it instead of reimplementing the grammar.
 fm_ext_allowlist_read() {
   local file=$1 line
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
@@ -369,32 +386,69 @@ fm_ext_allowlist_read() {
   done < "$file"
 }
 
-fm_ext_allowlisted() {
-  local file=$1 guild=$2 channel=$3 author=$4 rule rguild rchannel rauthor rest
+# fm_ext_rule_authority <rule> <guild> <channel> <author>: print the authority
+# one allowlist rule grants this request ("standing" or "confirm"). Returns 1
+# when the rule is malformed or does not match.
+fm_ext_rule_authority() {
+  local rule=$1 guild=$2 channel=$3 author=$4 rest rguild rchannel rauthor
+  case "$rule" in
+    *:*:*:*) return 1 ;;
+  esac
+  rguild=${rule%%:*}
+  [ -n "$rguild" ] || return 1
+  case "$rule" in
+    *:*)
+      rest=${rule#*:}
+      rchannel=${rest%%:*}
+      [ -n "$rchannel" ] || return 1
+      case "$rest" in
+        *:*)
+          rauthor=${rest#*:}
+          [ -n "$rauthor" ] || return 1
+          [ "$rguild" = "$guild" ] || return 1
+          [ "$rchannel" = "$channel" ] || return 1
+          [ "$rauthor" = "$author" ] || return 1
+          printf 'standing\n'
+          return 0
+          ;;
+      esac
+      [ "$rguild" = "$guild" ] || return 1
+      [ "$rchannel" = "$channel" ] || return 1
+      printf 'confirm\n'
+      return 0
+      ;;
+  esac
+  [ "$rguild" = "$guild" ] || return 1
+  printf 'confirm\n'
+}
+
+# fm_ext_authority <allowlist> <guild> <channel> <author>: print the highest
+# authority this allowlist grants the request ("standing" or "confirm"), or
+# return 1 when nothing matches. Standing beats confirm, so an author-scoped
+# rule still grants standing authority alongside a broader admitting rule.
+fm_ext_authority() {
+  local file=$1 guild=$2 channel=$3 author=$4 rule granted best=
   [ -n "$guild" ] && [ -n "$channel" ] || return 1
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   while IFS= read -r rule || [ -n "$rule" ]; do
     [ -n "$rule" ] || continue
-    rguild=${rule%%:*}
-    rest=${rule#"$rguild"}
-    rest=${rest#:}
-    if [ -z "$rest" ] || [ "$rest" = "$rule" ]; then
-      [ "$rguild" = "$guild" ] && return 0
-      continue
-    fi
-    rchannel=${rest%%:*}
-    rauthor=${rest#"$rchannel"}
-    rauthor=${rauthor#:}
-    [ "$rguild" = "$guild" ] || continue
-    [ "$rchannel" = "$channel" ] || continue
-    if [ -z "$rauthor" ] || [ "$rauthor" = "$rest" ]; then
-      return 0
-    fi
-    [ "$rauthor" = "$author" ] && return 0
+    granted=$(fm_ext_rule_authority "$rule" "$guild" "$channel" "$author") || continue
+    case "$granted" in
+      standing) printf 'standing\n'; return 0 ;;
+      confirm) best=confirm ;;
+    esac
   done <<EOF
 $(fm_ext_allowlist_read "$file")
 EOF
-  return 1
+  [ -n "$best" ] || return 1
+  printf '%s\n' "$best"
+}
+
+# fm_ext_allowlisted <allowlist> <guild> <channel> <author>: true when the
+# request is admitted at any authority. The authority level itself comes from
+# fm_ext_authority; admission alone never implies standing authority.
+fm_ext_allowlisted() {
+  fm_ext_authority "$@" >/dev/null
 }
 
 # --- offer / context --------------------------------------------------------
@@ -492,6 +546,32 @@ fm_ext_inflight_ttl_secs() {
   local raw=${1:-${FM_EXT_INFLIGHT_TTL_SECS-}}
   case "$raw" in
     ''|*[!0-9]*) raw=30 ;;
+  esac
+  printf '%s\n' "$raw"
+}
+
+# Absolute age after which a generation stuck mid-chunk is force-recovered.
+# The ambiguous-failure path deliberately keeps the in-flight chunk recorded so
+# no chunk is double-posted, but on its own nothing ever clears it: one network
+# timeout would wedge that reply forever. The default sits far above the
+# 15-second Discord send timeout, so a genuinely live send is never recovered
+# out from under its sender.
+fm_ext_middelivery_recovery_secs() {
+  local raw=${1:-${FM_EXT_MIDDELIVERY_RECOVERY_SECS-}}
+  case "$raw" in
+    ''|*[!0-9]*) raw=300 ;;
+  esac
+  printf '%s\n' "$raw"
+}
+
+# How many times one generation may be force-recovered before it is failed
+# terminally. Each recovery re-sends the ambiguous chunk, which may duplicate a
+# single Discord message; a bounded number of duplicates beats silent
+# truncation, and an unbounded number would be its own defect.
+fm_ext_middelivery_recovery_max() {
+  local raw=${1:-${FM_EXT_MIDDELIVERY_RECOVERY_MAX-}}
+  case "$raw" in
+    ''|*[!0-9]*) raw=3 ;;
   esac
   printf '%s\n' "$raw"
 }
@@ -685,6 +765,87 @@ fm_ext_outbox_inflight_release() {
   return "$rc"
 }
 
+# fm_ext_outbox_stuck_age <dir> <slug> <kind> <generation>: print how long this
+# generation has recorded an in-flight chunk in its JSON progress. The age comes
+# from the exclusive inflight claim when that marker is present, and from the
+# progress artifact's own mtime when the claim was released without the chunk
+# ever being cleared. Returns 1 when the generation records no in-flight chunk
+# or the age cannot be established.
+fm_ext_outbox_stuck_age() {
+  local dir=$1 slug=$2 kind=$3 generation=$4 progress inflight now recorded_at age
+  progress=$(fm_ext_outbox_progress_basename "$slug" "$kind" "$generation") || return 1
+  inflight=$(fm_ext_outbox_inflight_basename "$slug" "$kind" "$generation") || return 1
+  fm_ext_private_artifact_file_valid "$dir" "$progress" 600 || return 1
+  jq -e '.inflight | type == "number"' "$dir/$progress" >/dev/null 2>&1 || return 1
+  now=${FM_EXT_NOW_OVERRIDE:-$(date +%s)}
+  case "$now" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  recorded_at=
+  if fm_ext_private_artifact_file_valid "$dir" "$inflight" 600; then
+    recorded_at=$(jq -er '.recorded_at | select(type=="number")' "$dir/$inflight" 2>/dev/null) \
+      || recorded_at=
+  fi
+  if [ -z "$recorded_at" ]; then
+    recorded_at=$(fm_ext_file_mtime "$dir/$progress") || return 1
+  fi
+  case "$recorded_at" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  age=$((now - recorded_at))
+  [ "$age" -ge 0 ] 2>/dev/null || return 1
+  printf '%s\n' "$age"
+}
+
+# fm_ext_outbox_stuck_recover <dir> <slug> <kind> <generation>: bounded recovery
+# for a generation wedged by an ambiguous mid-chunk send failure. Once the
+# generation has recorded the same in-flight chunk for longer than
+# FM_EXT_MIDDELIVERY_RECOVERY_SECS, this clears that chunk so the next claim
+# re-sends exactly it, and records the attempt in the progress artifact. After
+# FM_EXT_MIDDELIVERY_RECOVERY_MAX attempts it writes the terminal failed marker
+# instead, so the reply surfaces as a failure rather than retrying forever.
+# Returns 0 when this call cleared the chunk, 5 when the budget is spent and the
+# generation is now terminally failed, 1 when the generation is not stuck or is
+# not yet eligible, and 2 on failure.
+fm_ext_outbox_stuck_recover() {
+  local dir=$1 slug=$2 kind=$3 generation=$4
+  local progress age threshold attempts max now body reason rc
+  progress=$(fm_ext_outbox_progress_basename "$slug" "$kind" "$generation") || return 2
+  age=$(fm_ext_outbox_stuck_age "$dir" "$slug" "$kind" "$generation") || return 1
+  threshold=$(fm_ext_middelivery_recovery_secs)
+  [ "$age" -ge "$threshold" ] 2>/dev/null || return 1
+  attempts=$(jq -r '.recovery_count // 0 | floor' "$dir/$progress" 2>/dev/null) || attempts=0
+  case "$attempts" in
+    ''|*[!0-9]*) attempts=0 ;;
+  esac
+  max=$(fm_ext_middelivery_recovery_max)
+  now=${FM_EXT_NOW_OVERRIDE:-$(date +%s)}
+  case "$now" in
+    ''|*[!0-9]*) return 2 ;;
+  esac
+  if [ "$attempts" -ge "$max" ]; then
+    reason=$(jq -cn --argjson attempts "$attempts" --argjson stuck_secs "$age" \
+      --argjson recorded_at "$now" \
+      '{ok:false, outcome:"mid-delivery-unrecoverable", recovery_attempts:$attempts,
+        stuck_secs:$stuck_secs, recorded_at:$recorded_at,
+        detail:"ambiguous mid-chunk send never resolved"}') || return 2
+    fm_ext_outbox_fail "$dir" "$slug" "$kind" "$generation" "$reason"
+    rc=$?
+    case "$rc" in
+      0|4) return 5 ;;
+      1) return 1 ;;
+      *) return 2 ;;
+    esac
+  fi
+  fm_ext_outbox_inflight_release "$dir" "$slug" "$kind" "$generation" || return 2
+  body=$(jq -c --argjson attempts "$((attempts + 1))" --argjson recovered_at "$now" \
+    '.inflight = null | .recovery_count = $attempts | .recovered_at = $recovered_at' \
+    "$dir/$progress" 2>/dev/null) || return 2
+  [ -n "$body" ] || return 2
+  fm_ext_outbox_progress "$dir" "$slug" "$kind" "$generation" "$body" || return 2
+  return 0
+}
+
 # Discord per-message split budget. Copies the FMX_DISCORD_REPLY_MAX_CHARS
 # clamp (default 1900, min 50, values above 2000 reset to 1900) without
 # reading X-mode env or requiring FMX_PAIRING_TOKEN.
@@ -815,7 +976,8 @@ fm_ext_outbox_schema_valid() {
 # when a posting marker exists without a receipt and this caller does not
 # own the next send (live owner, or dead owner still inside the TTL), 2
 # on validation/publication failure. JSON progress with inflight==null is
-# not itself a shared claim.
+# not itself a shared claim. Returns 5 when the generation was stuck past the
+# mid-delivery recovery budget and is now terminally failed.
 fm_ext_outbox_begin() {
   local dir=$1 slug=$2 kind=$3 generation=$4 payload posting receipt failed progress now rc
   payload=$(fm_ext_outbox_basename "$slug" "$kind" "$generation") || return 2
@@ -823,14 +985,29 @@ fm_ext_outbox_begin() {
   receipt=$(fm_ext_outbox_receipt_basename "$slug" "$kind" "$generation") || return 2
   failed=$(fm_ext_outbox_failed_basename "$slug" "$kind" "$generation") || return 2
   progress=$(fm_ext_outbox_progress_basename "$slug" "$kind" "$generation") || return 2
-  fm_ext_private_artifact_file_valid "$dir" "$payload" 600 || return 2
+  # Terminal outcomes are answered before the payload is required. A delivered
+  # or terminally failed generation has had its payload retired, and a second
+  # begin for it must still report that idempotent outcome rather than a
+  # validation failure.
   if fm_ext_private_artifact_file_valid "$dir" "$receipt" 600; then
     return 1
   fi
   if fm_ext_private_artifact_file_valid "$dir" "$failed" 600; then
     return 4
   fi
+  fm_ext_private_artifact_file_valid "$dir" "$payload" 600 || return 2
   if fm_ext_private_artifact_file_valid "$dir" "$posting" 600; then
+    # An ambiguous mid-chunk send leaves the chunk recorded in-flight and the
+    # claim held, which is what stops a double post. Consult the bounded
+    # recovery first so that state cannot outlive its usefulness: past the
+    # recovery window it either reopens the chunk for one more attempt or
+    # turns into a terminal failure, instead of refusing forever.
+    fm_ext_outbox_stuck_recover "$dir" "$slug" "$kind" "$generation"
+    rc=$?
+    case "$rc" in
+      5) return 5 ;;
+      2) return 2 ;;
+    esac
     if fm_ext_outbox_progress_resumable "$dir" "$slug" "$kind" "$generation"; then
       if jq -e '.posted_count >= .total' "$dir/$progress" >/dev/null 2>&1; then
         return 0
@@ -890,7 +1067,10 @@ fm_ext_outbox_receipt() {
     | fm_ext_private_artifact_publish_stdin_once "$dir" "$receipt" 600
   rc=$?
   case "$rc" in
-    0|1) fm_ext_outbox_inflight_release "$dir" "$slug" "$kind" "$generation" || true ;;
+    0|1)
+      fm_ext_outbox_inflight_release "$dir" "$slug" "$kind" "$generation" || true
+      fm_ext_outbox_retire "$dir" "$slug" "$kind" "$generation" || true
+      ;;
   esac
   return "$rc"
 }
@@ -940,6 +1120,7 @@ fm_ext_outbox_fail() {
   if fm_ext_private_artifact_file_valid "$dir" "$failed" 600; then
     fm_ext_private_artifact_remove "$dir" "$posting" 600 || true
     fm_ext_outbox_inflight_release "$dir" "$slug" "$kind" "$generation" || true
+    fm_ext_outbox_retire "$dir" "$slug" "$kind" "$generation" || true
     return 4
   fi
   printf '%s\n' "$reason_json" \
@@ -949,6 +1130,7 @@ fm_ext_outbox_fail() {
     0)
       fm_ext_private_artifact_remove "$dir" "$posting" 600 || true
       fm_ext_outbox_inflight_release "$dir" "$slug" "$kind" "$generation" || true
+      fm_ext_outbox_retire "$dir" "$slug" "$kind" "$generation" || true
       return 0
       ;;
     1)
@@ -958,10 +1140,31 @@ fm_ext_outbox_fail() {
       fi
       fm_ext_private_artifact_remove "$dir" "$posting" 600 || true
       fm_ext_outbox_inflight_release "$dir" "$slug" "$kind" "$generation" || true
+      fm_ext_outbox_retire "$dir" "$slug" "$kind" "$generation" || true
       return 4
       ;;
     *) return 2 ;;
   esac
+}
+
+# fm_ext_outbox_retire <dir> <slug> <kind> <generation>: drop the payload of a
+# generation that has reached a terminal outcome, so `pending` scans only work
+# that is genuinely still pending instead of every reply ever sent. The terminal
+# marker itself stays in place, so a duplicate emit of the same generation is
+# still recognized as already delivered until retention expires it. Returns 0
+# when the generation is terminal and its payload is gone, 1 when it is not
+# terminal, and 2 on an unsafe path or a removal failure.
+fm_ext_outbox_retire() {
+  local dir=$1 slug=$2 kind=$3 generation=$4 payload receipt failed
+  payload=$(fm_ext_outbox_basename "$slug" "$kind" "$generation") || return 2
+  receipt=$(fm_ext_outbox_receipt_basename "$slug" "$kind" "$generation") || return 2
+  failed=$(fm_ext_outbox_failed_basename "$slug" "$kind" "$generation") || return 2
+  if ! fm_ext_private_artifact_file_valid "$dir" "$receipt" 600 \
+    && ! fm_ext_private_artifact_file_valid "$dir" "$failed" 600; then
+    return 1
+  fi
+  fm_ext_private_artifact_remove "$dir" "$payload" 600 || return 2
+  return 0
 }
 
 # True when JSON progress looks resumable: progress exists, no chunk is
@@ -983,6 +1186,101 @@ fm_ext_outbox_progress() {
   [ -n "$progress_json" ] || return 2
   printf '%s\n' "$progress_json" \
     | fm_ext_private_artifact_publish_stdin "$dir" "$progress" 600
+}
+
+# --- retention --------------------------------------------------------------
+
+# Retention window for local bridge records, mirroring X mode's seven-day cap
+# (FMX_FOLLOWUP_MAX_AGE_SECS). A larger request clamps back down to the cap, so
+# the bridge cannot be configured to keep durable Discord records indefinitely.
+fm_ext_retention_max_age_secs() {
+  local raw=${1:-${FM_EXT_CONTEXT_MAX_AGE_SECS-}}
+  case "$raw" in
+    ''|*[!0-9]*) raw=604800 ;;
+  esac
+  [ "${#raw}" -le 18 ] || raw=604800
+  [ "$raw" -le 604800 ] || raw=604800
+  printf '%s\n' "$raw"
+}
+
+# fm_ext_context_prune <state>: drop destination-context and offer records past
+# the retention window so state/ext-context stays bounded. Both record kinds are
+# kept while their request is still sitting unhandled in the inbox: expiring the
+# offer marker would re-offer queued work, and expiring the destination context
+# would leave a request that can no longer be replied to. Follow-ups after the
+# inbox is cleared are what the window itself bounds. Best effort: a record that
+# cannot be read or removed is left alone rather than failing the caller.
+fm_ext_context_prune() {
+  local state=$1 dir inbox now max_age file base slug recorded_at age
+  dir="$state/$FM_EXT_CONTEXT_DIRNAME"
+  inbox="$state/$FM_EXT_INBOX_DIRNAME"
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
+  now=${FM_EXT_NOW_OVERRIDE:-$(date +%s)}
+  case "$now" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  max_age=$(fm_ext_retention_max_age_secs)
+  while IFS= read -r -d '' file; do
+    base=${file##*/}
+    case "$base" in
+      *.offered.json) slug=${base%.offered.json} ;;
+      *) slug=${base%.json} ;;
+    esac
+    if [ -e "$inbox/$slug.json" ]; then
+      continue
+    fi
+    recorded_at=$(jq -er '.recorded_at | select(type=="number")' "$file" 2>/dev/null) \
+      || recorded_at=
+    if [ -z "$recorded_at" ]; then
+      recorded_at=$(fm_ext_file_mtime "$file") || continue
+    fi
+    case "$recorded_at" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    age=$((now - recorded_at))
+    [ "$age" -gt "$max_age" ] 2>/dev/null || continue
+    rm -f -- "$file" 2>/dev/null || true
+  done < <(find "$dir" -maxdepth 1 -type f -name '*.json' -print0 2>/dev/null)
+  return 0
+}
+
+# fm_ext_outbox_prune <state>: drop the leftover markers of retired generations
+# past the retention window so state/ext-outbox stays bounded too. A generation
+# whose payload is still present is pending or mid-delivery and is never touched,
+# so this can only ever remove the residue of work that already finished.
+fm_ext_outbox_prune() {
+  local state=$1 dir now max_age file base stem mtime age
+  dir="$state/$FM_EXT_OUTBOX_DIRNAME"
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
+  now=${FM_EXT_NOW_OVERRIDE:-$(date +%s)}
+  case "$now" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  max_age=$(fm_ext_retention_max_age_secs)
+  while IFS= read -r -d '' file; do
+    base=${file##*/}
+    # Only marker suffixes are pruned. A payload is <stem>.json and falls
+    # through to the default, so this can never delete undelivered work.
+    case "$base" in
+      *.receipt.json) stem=${base%.receipt.json} ;;
+      *.failed.json) stem=${base%.failed.json} ;;
+      *.progress.json) stem=${base%.progress.json} ;;
+      *.posting) stem=${base%.posting} ;;
+      *.inflight) stem=${base%.inflight} ;;
+      *) continue ;;
+    esac
+    if [ -e "$dir/$stem.json" ]; then
+      continue
+    fi
+    mtime=$(fm_ext_file_mtime "$file") || continue
+    case "$mtime" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    age=$((now - mtime))
+    [ "$age" -gt "$max_age" ] 2>/dev/null || continue
+    rm -f -- "$file" 2>/dev/null || true
+  done < <(find "$dir" -maxdepth 1 -type f -print0 2>/dev/null)
+  return 0
 }
 
 # --- poll shim --------------------------------------------------------------

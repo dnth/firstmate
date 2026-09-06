@@ -41,7 +41,9 @@ setup_home() {
   : > "$home/config/ext-bridge"
   printf 'test-secret\n' > "$home/config/ext-secret"
   chmod 600 "$home/config/ext-secret"
-  printf '%s\n' "$GUILD" > "$home/config/ext-allowlist"
+  # The recommended form: standing authority is author-scoped, so the default
+  # fixture models least privilege rather than a guild-wide grant.
+  printf '%s\n' "$GUILD:$CHANNEL:$AUTHOR" > "$home/config/ext-allowlist"
   [ -z "$extra_allow" ] || printf '%s\n' "$extra_allow" >> "$home/config/ext-allowlist"
 }
 
@@ -355,7 +357,7 @@ test_10_unauthorized_and_missing_allowlist() {
     --thread-id "$THREAD" --message-id "$MESSAGE" --author "$AUTHOR" \
     --secret-file "$home/config/ext-secret" --text-file "$home/text.txt" \
     >/dev/null 2>"$err"; rc=$?
-  expect_code 1 "$rc" "unauthorized intake"
+  expect_code 3 "$rc" "unauthorized intake"
   [ ! -d "$home/state/ext-inbox" ] || [ -z "$(ls -A "$home/state/ext-inbox" 2>/dev/null)" ] \
     || fail "unauthorized intake must not write inbox files"
   rm -f "$home/config/ext-allowlist"
@@ -364,7 +366,7 @@ test_10_unauthorized_and_missing_allowlist() {
     --thread-id "$THREAD" --message-id "$MESSAGE" --author "$AUTHOR" \
     --secret-file "$home/config/ext-secret" --text-file "$home/text.txt" \
     >/dev/null 2>"$err"; rc=$?
-  expect_code 1 "$rc" "missing allowlist"
+  expect_code 3 "$rc" "missing allowlist"
   pass "10 unauthorized and missing allowlist write no inbox"
 }
 
@@ -670,7 +672,9 @@ PY
   assert_contains "$out" "drain=" "second drain must run"
   [ "$(printf '%s\n' "$out" | awk -F= '/^drain=/{print $2}')" = "" ] \
     || fail "pending drain must not retry a terminal-failed payload"
-  assert_contains "$out" "one=terminal-failed" "direct deliver_one must refuse after terminal 4xx"
+  # The terminal failure retires the payload, so a stale path is a no-op rather
+  # than an exception that would abort a whole drain pass.
+  assert_contains "$out" "one=retired" "direct deliver_one must refuse after terminal 4xx"
   [ ! -s "$sent" ] || fail "permanent 4xx must not invoke send again"
   pass "17 permanent 4xx is terminal failed, not endless retry"
 }
@@ -1306,6 +1310,505 @@ test_plugin_has_no_terminal_dispatch() {
 }
 
 export GUILD CHANNEL THREAD AUTHOR
+# --- 24. a wedged ambiguous mid-chunk send is recovered, not stuck forever --
+
+test_24_stuck_middelivery_recovers() {
+  local home slug posting receipt failed progress sent out rc future
+  home="$TMP_ROOT/c24"
+  setup_home "$home"
+  slug=$(intake_ok "$home" "recover me")
+  write_text "$home/ans.txt" "ambiguous then delivered"
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+    --text-file "$home/ans.txt" >/dev/null
+  posting="$home/state/ext-outbox/${slug}.answer.1.posting"
+  receipt="$home/state/ext-outbox/${slug}.answer.1.receipt.json"
+  failed="$home/state/ext-outbox/${slug}.answer.1.failed.json"
+  progress="$home/state/ext-outbox/${slug}.answer.1.progress.json"
+  sent="$home/sent.log"
+  : > "$sent"
+
+  # Wedge it exactly the way a routine network timeout does.
+  out=$(home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" <<'PY'
+import os, sys, urllib.error
+from pathlib import Path
+sys.path.insert(0, os.environ["PYTHONPATH"])
+import outbox_poster
+home = sys.argv[1]
+os.environ["FM_HOME"] = home
+def send(_payload):
+    raise urllib.error.URLError("timed out")
+print(",".join(outbox_poster.drain_outbox(send=send, home=Path(home))))
+PY
+  )
+  assert_contains "$out" "mid-delivery" "ambiguous send must stay mid-delivery"
+  assert_present "$posting" "ambiguous send must keep the posting marker"
+  [ "$(jq -r '.inflight' "$progress")" = 0 ] \
+    || fail "ambiguous send must record the in-flight chunk"
+
+  # Inside the recovery window nothing reopens: the send may still be live.
+  home_env "$home" "$OUTBOX" begin --slug "$slug" --kind answer --generation 1 \
+    >/dev/null 2>&1; rc=$?
+  expect_code 3 "$rc" "inside the recovery window a wedged generation stays mid-delivery"
+
+  # Past the window the next drain reopens exactly that chunk and delivers it.
+  future=$(( $(date +%s) + 4000 ))
+  out=$(home_env "$home" env FM_EXT_NOW_OVERRIDE="$future" \
+    PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$sent" <<'PY'
+import os, sys
+from pathlib import Path
+sys.path.insert(0, os.environ["PYTHONPATH"])
+import outbox_poster
+home, sent = sys.argv[1], sys.argv[2]
+os.environ["FM_HOME"] = home
+def send(payload):
+    with open(sent, "a", encoding="utf-8") as fh:
+        fh.write(payload["text"] + "\n")
+    return {"ok": True, "discord_message_id": "24"}
+print(",".join(outbox_poster.drain_outbox(send=send, home=Path(home))))
+PY
+  )
+  assert_contains "$out" "sent" "a wedged generation must eventually be retried"
+  [ "$(wc -l < "$sent" | tr -d ' ')" = 1 ] \
+    || fail "recovery must re-send exactly the ambiguous chunk once"
+  assert_present "$receipt" "recovered delivery must record a receipt"
+  assert_absent "$failed" "a recovered delivery must not be marked terminally failed"
+  pass "24 a wedged ambiguous mid-chunk send is recovered and delivered"
+}
+
+# --- 25. an unrecoverable wedge is failed and surfaced, never silent --------
+
+test_25_stuck_middelivery_surfaces_when_budget_spent() {
+  local home slug posting failed out rc future wakes
+  home="$TMP_ROOT/c25"
+  setup_home "$home"
+  slug=$(intake_ok "$home" "never resolves")
+  write_text "$home/ans.txt" "permanently ambiguous"
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+    --text-file "$home/ans.txt" >/dev/null
+  posting="$home/state/ext-outbox/${slug}.answer.1.posting"
+  failed="$home/state/ext-outbox/${slug}.answer.1.failed.json"
+  out=$(home_env "$home" env PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" <<'PY'
+import os, sys, urllib.error
+from pathlib import Path
+sys.path.insert(0, os.environ["PYTHONPATH"])
+import outbox_poster
+home = sys.argv[1]
+os.environ["FM_HOME"] = home
+def send(_payload):
+    raise urllib.error.URLError("timed out")
+print(",".join(outbox_poster.drain_outbox(send=send, home=Path(home))))
+PY
+  )
+  assert_contains "$out" "mid-delivery" "ambiguous send must stay mid-delivery"
+
+  # Spend the budget: with no attempts left the next eligible begin must turn
+  # the wedge into a terminal, surfaced failure rather than refusing forever.
+  future=$(( $(date +%s) + 4000 ))
+  out=$(home_env "$home" env FM_EXT_NOW_OVERRIDE="$future" \
+    FM_EXT_MIDDELIVERY_RECOVERY_MAX=0 \
+    "$OUTBOX" begin --slug "$slug" --kind answer --generation 1 2>&1); rc=$?
+  expect_code 5 "$rc" "a spent recovery budget must report recovery-exhausted"
+  assert_contains "$out" "recovery-exhausted" "begin must name the exhausted recovery"
+  assert_present "$failed" "an unrecoverable wedge must record a terminal failure"
+  assert_absent "$posting" "a terminal failure must drop the posting marker"
+  assert_grep "mid-delivery-unrecoverable" "$failed" "the failure must record its cause"
+  wakes=$(grep -c "ext-delivery-failed $slug" "$home/state/.wake-queue")
+  [ "$wakes" = 1 ] \
+    || fail "an unrecoverable wedge must wake firstmate once, got $wakes"
+
+  # And it stays terminal instead of retrying forever.
+  home_env "$home" env FM_EXT_NOW_OVERRIDE="$future" "$OUTBOX" begin \
+    --slug "$slug" --kind answer --generation 1 >/dev/null 2>&1; rc=$?
+  expect_code 4 "$rc" "a terminally failed generation must stay terminal"
+  pass "25 an unrecoverable wedge is failed and surfaced, never silent"
+}
+
+# --- 26. pending stays flat as delivered replies accumulate -----------------
+
+seed_delivered_outbox() {
+  # Write <count> already-delivered generations straight into the outbox, the
+  # way a home looks after it has answered that many Discord requests.
+  local home=$1 slug=$2 count=$3 dir i stem
+  dir="$home/state/ext-outbox"
+  mkdir -p "$dir"
+  chmod 700 "$dir"
+  for i in $(seq 1 "$count"); do
+    stem="$dir/${slug}.followup.${i}"
+    printf '%s\n' "{\"schema_version\":1,\"request_id\":\"$RID\",\"slug\":\"$slug\",\"kind\":\"followup\",\"generation\":$i,\"platform\":\"discord\",\"source\":\"hermes-gateway\",\"guild_id\":\"$GUILD\",\"channel_id\":\"$CHANNEL\",\"thread_id\":\"$THREAD\",\"message_id\":\"$MESSAGE\",\"text\":\"delivered $i\",\"recorded_at\":1}" \
+      > "$stem.json"
+    printf '{"ok":true,"discord_message_id":"%s"}\n' "$i" > "$stem.receipt.json"
+    chmod 600 "$stem.json" "$stem.receipt.json"
+  done
+}
+
+steady_pending_ms() {
+  # Cost of one pending pass after retirement has settled.
+  local home=$1 start end
+  home_env "$home" "$OUTBOX" pending >/dev/null
+  start=$(date +%s%N)
+  home_env "$home" "$OUTBOX" pending >/dev/null
+  end=$(date +%s%N)
+  printf '%s\n' $(( (end - start) / 1000000 ))
+}
+
+test_26_pending_stays_flat_as_delivered_grows() {
+  local home slug small large listed leftover
+  home="$TMP_ROOT/c26"
+  setup_home "$home"
+  slug=$(intake_ok "$home" "measure me")
+  write_text "$home/ans.txt" "still pending"
+  home_env "$home" "$EMIT" --request-id "$RID" --kind answer --generation 1 \
+    --text-file "$home/ans.txt" >/dev/null
+
+  seed_delivered_outbox "$home" "$slug" 5
+  small=$(steady_pending_ms "$home")
+  seed_delivered_outbox "$home" "$slug" 60
+  large=$(steady_pending_ms "$home")
+
+  # Structural guarantee: delivered payloads are retired, so the scanned set is
+  # the pending work alone no matter how many replies were sent before it.
+  leftover=$(find "$home/state/ext-outbox" -maxdepth 1 -name '*.followup.*.json' \
+    ! -name '*.receipt.json' | wc -l | tr -d ' ')
+  [ "$leftover" = 0 ] \
+    || fail "delivered payloads must be retired from the scan, $leftover left"
+  listed=$(home_env "$home" "$OUTBOX" pending | wc -l | tr -d ' ')
+  [ "$listed" = 1 ] \
+    || fail "pending must list only genuinely pending work, got $listed"
+  assert_present "$home/state/ext-outbox/${slug}.followup.60.receipt.json" \
+    "retirement must keep the receipt so a duplicate emit stays idempotent"
+
+  # Measured: 12x the delivered count must not show up as growth. The old
+  # full rescan cost ~4 jq spawns per delivered reply on every poll.
+  printf 'pending steady-state: 5 delivered=%sms, 60 delivered=%sms\n' "$small" "$large"
+  [ "$large" -lt 1500 ] \
+    || fail "pending must stay well inside the 2s poll interval, got ${large}ms"
+  [ "$large" -lt $(( small * 3 + 400 )) ] \
+    || fail "pending cost must stay flat: 5->${small}ms but 60->${large}ms"
+  pass "26 pending stays flat as delivered replies accumulate"
+}
+
+# --- 27. bridge records expire on the documented retention window -----------
+
+test_27_retention_expires_local_records() {
+  local home slug ctx offered stale_ctx stale_offered future kept_stem
+  home="$TMP_ROOT/c27"
+  setup_home "$home"
+  slug=$(intake_ok "$home" "retain me")
+  ctx="$home/state/ext-context/${slug}.json"
+  offered="$home/state/ext-context/${slug}.offered.json"
+
+  # A second, older request whose inbox file is already handled and gone.
+  stale_ctx="$home/state/ext-context/$(printf 'a%.0s' $(seq 1 64)).json"
+  stale_offered="$home/state/ext-context/$(printf 'a%.0s' $(seq 1 64)).offered.json"
+  printf '{"request_id":"%s","slug":"x","recorded_at":1}\n' "$RID" > "$stale_ctx"
+  printf '{"request_id":"%s","slug":"x","recorded_at":1}\n' "$RID" > "$stale_offered"
+  chmod 600 "$stale_ctx" "$stale_offered"
+
+  # A retired outbox generation's leftover marker, and a pending one's.
+  kept_stem="$home/state/ext-outbox/${slug}.answer.9"
+  mkdir -p "$home/state/ext-outbox"
+  chmod 700 "$home/state/ext-outbox"
+  printf '{"ok":true}\n' > "$home/state/ext-outbox/${slug}.answer.8.receipt.json"
+  printf '{"schema_version":1}\n' > "$kept_stem.json"
+  printf '{"ok":true}\n' > "$kept_stem.receipt.json"
+  chmod 600 "$home/state/ext-outbox/${slug}.answer.8.receipt.json" \
+    "$kept_stem.json" "$kept_stem.receipt.json"
+
+  future=$(( $(date +%s) + 604800 + 86400 ))
+  home_env "$home" env FM_EXT_NOW_OVERRIDE="$future" "$POLL" >/dev/null
+
+  assert_absent "$stale_ctx" "context past the retention window must expire"
+  assert_absent "$stale_offered" "an offer record with no inbox file must expire"
+  assert_absent "$home/state/ext-outbox/${slug}.answer.8.receipt.json" \
+    "a retired generation's leftover marker must expire"
+  assert_present "$offered" \
+    "an offer whose request is still unhandled in the inbox must be kept"
+  assert_present "$kept_stem.receipt.json" \
+    "a generation whose payload is still present must never be pruned"
+  assert_present "$ctx" "the live request's destination context must be kept"
+  pass "27 bridge records expire on the documented retention window"
+}
+
+# --- 28. one allowlist decision: shell and plugin never disagree ------------
+
+shell_allows() {
+  # The shell verdict through its real executable interface: 0 admitted, 3 refused.
+  local home=$1 message=$2 rc
+  write_text "$home/text.txt" "shape probe"
+  home_env "$home" "$INTAKE" \
+    --request-id "discord:${GUILD}:${CHANNEL}:${THREAD}:${message}" \
+    --guild-id "$GUILD" --channel-id "$CHANNEL" --thread-id "$THREAD" \
+    --message-id "$message" --author "$AUTHOR" \
+    --secret-file "$home/config/ext-secret" --text-file "$home/text.txt" \
+    >/dev/null 2>&1; rc=$?
+  case "$rc" in
+    0) printf 'allow\n' ;;
+    3) printf 'deny\n' ;;
+    *) printf 'error:%s\n' "$rc" ;;
+  esac
+}
+
+plugin_allows() {
+  local home=$1 message=$2 out
+  out=$(
+    GUILD="$GUILD" CHANNEL="$CHANNEL" THREAD="$THREAD" AUTHOR="$AUTHOR" \
+    MESSAGE_ID="$message" PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$ROOT" <<'PY'
+import os, sys
+sys.path.insert(0, os.environ["PYTHONPATH"])
+import intake
+os.environ["FM_HOME"] = sys.argv[1]
+os.environ["FM_ROOT_OVERRIDE"] = sys.argv[2]
+ctx = {
+    "platform": "discord",
+    "guild_id": os.environ["GUILD"],
+    "channel_id": os.environ["CHANNEL"],
+    "thread_id": os.environ["THREAD"],
+    "message_id": os.environ["MESSAGE_ID"],
+    "user_id": os.environ["AUTHOR"],
+}
+reply = intake.handle_fm_command("shape probe", ctx)
+print("deny" if "not on the local allowlist" in reply else
+      ("allow" if reply.startswith("Aye, captain") else "error:" + reply))
+PY
+  )
+  printf '%s\n' "$out"
+}
+
+test_28_allowlist_shell_and_plugin_agree() {
+  local home rule shape shell_verdict plugin_verdict message=700000000000000000
+  home="$TMP_ROOT/c28"
+  setup_home "$home"
+  # Every rule shape the grammar can be written in, including the three the two
+  # implementations used to disagree on. Discord ids are numeric, so an exact
+  # -match probe stands in for a case variant: one character off must deny.
+  while IFS='|' read -r shape rule; do
+    [ -n "$shape" ] || continue
+    printf '%s\n' "$rule" > "$home/config/ext-allowlist"
+    message=$(( message + 1 ))
+    shell_verdict=$(shell_allows "$home" "$message")
+    message=$(( message + 1 ))
+    plugin_verdict=$(plugin_allows "$home" "$message")
+    [ "$shell_verdict" = "$plugin_verdict" ] \
+      || fail "allowlist shape $shape disagrees: shell=$shell_verdict plugin=$plugin_verdict"
+    case "$shell_verdict" in
+      allow|deny) ;;
+      *) fail "allowlist shape $shape produced $shell_verdict" ;;
+    esac
+    printf 'shape %s -> %s\n' "$shape" "$shell_verdict"
+  done <<EOF
+guild|$GUILD
+guild-channel|$GUILD:$CHANNEL
+guild-channel-author|$GUILD:$CHANNEL:$AUTHOR
+wrong-author|$GUILD:$CHANNEL:999999999999999999
+trailing-author-colon|$GUILD:$CHANNEL:
+trailing-channel-colon|$GUILD:
+four-components|$GUILD:$CHANNEL:$AUTHOR:extra
+one-character-off|${GUILD%?}9:$CHANNEL:$AUTHOR
+padded|  $GUILD:$CHANNEL:$AUTHOR
+commented|# $GUILD:$CHANNEL:$AUTHOR
+EOF
+  pass "28 shell and plugin reach one identical allowlist decision on every rule shape"
+}
+
+# --- 29. least privilege: standing authority needs an author-scoped rule ----
+
+authority_of() {
+  local home=$1 message=$2 slug
+  slug=$(slug_of "discord:${GUILD}:${CHANNEL}:${THREAD}:${message}")
+  jq -r '.authority' "$home/state/ext-inbox/${slug}.json"
+}
+
+test_29_least_privilege_authority() {
+  local home rc before message=800000000000000000
+  home="$TMP_ROOT/c29"
+  setup_home "$home"
+
+  printf '%s\n' "$GUILD" > "$home/config/ext-allowlist"
+  message=$(( message + 1 ))
+  intake_ok "$home" "guild scope" "$message" >/dev/null
+  [ "$(authority_of "$home" "$message")" = confirm ] \
+    || fail "a guild-wide rule must never grant standing authority"
+
+  printf '%s\n' "$GUILD:$CHANNEL" > "$home/config/ext-allowlist"
+  message=$(( message + 1 ))
+  intake_ok "$home" "channel scope" "$message" >/dev/null
+  [ "$(authority_of "$home" "$message")" = confirm ] \
+    || fail "a channel rule must never grant standing authority"
+
+  printf '%s\n' "$GUILD:$CHANNEL:$AUTHOR" > "$home/config/ext-allowlist"
+  message=$(( message + 1 ))
+  intake_ok "$home" "author scope" "$message" >/dev/null
+  [ "$(authority_of "$home" "$message")" = standing ] \
+    || fail "an author-scoped rule must grant standing authority"
+
+  # A broad rule alongside the author-scoped one still resolves to standing.
+  printf '%s\n%s\n' "$GUILD" "$GUILD:$CHANNEL:$AUTHOR" > "$home/config/ext-allowlist"
+  message=$(( message + 1 ))
+  intake_ok "$home" "both scopes" "$message" >/dev/null
+  [ "$(authority_of "$home" "$message")" = standing ] \
+    || fail "the finest-grained matching rule must win"
+
+  # Fail-closed shapes: each must deny outright.
+  before=$(find "$home/state/ext-inbox" -name '*.json' | wc -l | tr -d ' ')
+  write_text "$home/text.txt" "should not land"
+  : > "$home/config/ext-allowlist"
+  rc=$(shell_allows "$home" 810000000000000001)
+  [ "$rc" = deny ] || fail "an empty allowlist must deny, got $rc"
+  printf '# only comments\n\n' > "$home/config/ext-allowlist"
+  rc=$(shell_allows "$home" 810000000000000002)
+  [ "$rc" = deny ] || fail "a comments-only allowlist must deny, got $rc"
+  printf '%s\n' "$GUILD:$CHANNEL:$AUTHOR" > "$home/real-allowlist"
+  rm -f "$home/config/ext-allowlist"
+  ln -s "$home/real-allowlist" "$home/config/ext-allowlist"
+  rc=$(shell_allows "$home" 810000000000000003)
+  [ "$rc" = deny ] || fail "a symlinked allowlist must deny, got $rc"
+  rm -f "$home/config/ext-allowlist"
+  rc=$(shell_allows "$home" 810000000000000004)
+  [ "$rc" = deny ] || fail "a missing allowlist must deny, got $rc"
+  [ "$(find "$home/state/ext-inbox" -name '*.json' | wc -l | tr -d ' ')" = "$before" ] \
+    || fail "a denied request must never write an inbox file"
+  pass "29 standing authority needs an author-scoped rule; broad and broken allowlists deny"
+}
+
+try_secret() {
+  local home=$1 presented=$2 label=$3 code
+  home_env "$home" "$INTAKE" \
+    --request-id "$RID" --guild-id "$GUILD" --channel-id "$CHANNEL" \
+    --thread-id "$THREAD" --message-id "$MESSAGE" --author "$AUTHOR" \
+    --secret-file "$presented" --text-file "$home/text.txt" \
+    >/dev/null 2>&1; code=$?
+  expect_code 1 "$code" "$label"
+}
+
+# --- 30. the secret gate is closed on every bad shape, not just the good one -
+
+test_30_secret_gate_rejects_every_bad_shape() {
+  local home rc secret probe
+  home="$TMP_ROOT/c30"
+  setup_home "$home"
+  secret="$home/config/ext-secret"
+  probe="$home/presented"
+  write_text "$home/text.txt" "should not land"
+
+  printf 'not-the-secret\n' > "$probe"; chmod 600 "$probe"
+  try_secret "$home" "$probe" "a mismatched secret must be refused"
+
+  cp "$secret" "$probe"; chmod 644 "$probe"
+  try_secret "$home" "$probe" "a presented secret with mode 0644 must be refused"
+
+  rm -f "$probe"; ln -s "$secret" "$probe"
+  try_secret "$home" "$probe" "a symlinked presented secret must be refused"
+
+  rm -f "$probe"; : > "$probe"; chmod 600 "$probe"
+  try_secret "$home" "$probe" "an empty presented secret must be refused"
+
+  rm -f "$probe"
+  try_secret "$home" "$probe" "a missing presented secret must be refused"
+
+  # The home's own secret is the other half of the same gate.
+  cp "$secret" "$probe"; chmod 600 "$probe"
+  chmod 644 "$secret"
+  try_secret "$home" "$probe" "a home secret with mode 0644 must deactivate the bridge"
+  chmod 600 "$secret"
+  : > "$secret"
+  try_secret "$home" "$probe" "an empty home secret must deactivate the bridge"
+  rm -f "$secret"
+  try_secret "$home" "$probe" "a missing home secret must deactivate the bridge"
+
+  [ ! -d "$home/state/ext-inbox" ] || [ -z "$(ls -A "$home/state/ext-inbox" 2>/dev/null)" ] \
+    || fail "no secret failure may write an inbox file"
+  pass "30 the secret gate is closed on mismatched, wrong-mode, symlinked, empty and missing secrets"
+}
+
+# --- 31. one opt-in authority: the environment cannot activate a home -------
+
+test_31_optin_is_config_file_only() {
+  local home rc out slug
+  home="$TMP_ROOT/c31"
+  setup_home "$home"
+  rm -f "$home/config/ext-bridge"
+  write_text "$home/text.txt" "should not land"
+  slug=$(slug_of "$RID")
+
+  home_env "$home" "$INTAKE" \
+    --request-id "$RID" --guild-id "$GUILD" --channel-id "$CHANNEL" \
+    --thread-id "$THREAD" --message-id "$MESSAGE" --author "$AUTHOR" \
+    --secret-file "$home/config/ext-secret" --text-file "$home/text.txt" \
+    >/dev/null 2>&1; rc=$?
+  expect_code 1 "$rc" "a home without the opt-in file must refuse intake"
+
+  # The environment used to be able to switch the intake half on by itself,
+  # leaving the bootstrap and watcher halves believing the bridge was off.
+  home_env "$home" env FM_EXT_BRIDGE=1 "$INTAKE" \
+    --request-id "$RID" --guild-id "$GUILD" --channel-id "$CHANNEL" \
+    --thread-id "$THREAD" --message-id "$MESSAGE" --author "$AUTHOR" \
+    --secret-file "$home/config/ext-secret" --text-file "$home/text.txt" \
+    >/dev/null 2>&1; rc=$?
+  expect_code 1 "$rc" "the environment must not be able to activate the bridge"
+
+  out=$(plugin_allows "$home" 900000000000000001)
+  [ "$out" != allow ] \
+    || fail "the gateway plugin must not activate a home that never opted in"
+  assert_absent "$home/state/ext-inbox/${slug}.json" \
+    "an inactive home must record no request"
+  [ ! -s "$home/state/.wake-queue" ] 2>/dev/null \
+    || fail "an inactive home must queue no wake"
+
+  # The environment remains a working kill switch for a configured bridge.
+  : > "$home/config/ext-bridge"
+  home_env "$home" env FM_EXT_BRIDGE=0 "$INTAKE" \
+    --request-id "$RID" --guild-id "$GUILD" --channel-id "$CHANNEL" \
+    --thread-id "$THREAD" --message-id "$MESSAGE" --author "$AUTHOR" \
+    --secret-file "$home/config/ext-secret" --text-file "$home/text.txt" \
+    >/dev/null 2>&1; rc=$?
+  expect_code 1 "$rc" "FM_EXT_BRIDGE=0 must still disable a configured bridge"
+  intake_ok "$home" "now it works" >/dev/null
+  pass "31 config/ext-bridge is the only way to activate; the environment can only disable"
+}
+
+# --- 32. the poll never consumes a request without a durable wake -----------
+
+test_32_poll_unclaims_when_wake_fails() {
+  local home slug offered out wakes
+  home="$TMP_ROOT/c32"
+  setup_home "$home"
+  slug=$(intake_ok "$home" "poll must not lose me")
+  offered="$home/state/ext-context/${slug}.offered.json"
+  # A leftover offer is exactly what the poll exists to pick up.
+  rm -f "$offered"
+  : > "$home/state/.wake-queue"
+
+  out=$(home_env "$home" env FM_WAKE_QUEUE=/dev/full "$POLL" 2>/dev/null)
+  [ -z "$out" ] || fail "a poll whose wake cannot be appended must surface nothing"
+  assert_absent "$offered" \
+    "a poll that could not append its wake must not keep the offer claimed"
+
+  out=$(home_env "$home" "$POLL")
+  assert_contains "$out" "ext-request $slug" "the retried poll must surface the request"
+  assert_present "$offered" "a successful poll must claim the offer"
+  wakes=$(grep -c "ext-request $slug" "$home/state/.wake-queue")
+  [ "$wakes" = 1 ] || fail "the poll must make exactly one durable wake, got $wakes"
+  out=$(home_env "$home" "$POLL")
+  [ -z "$out" ] || fail "an already claimed offer must stay silent"
+  pass "32 the poll releases its claim when the wake cannot be made durable"
+}
+
+# --- 33. a home that never opts in is untouched -----------------------------
+
+test_33_home_without_optin_is_inert() {
+  local home out rc
+  home="$TMP_ROOT/c33"
+  mkdir -p "$home/config" "$home/state"
+  out=$(home_env "$home" "$POLL"); rc=$?
+  expect_code 0 "$rc" "the poll must exit 0 in a home with no bridge"
+  [ -z "$out" ] || fail "the poll must be silent in a home with no bridge"
+  home_env "$home" "$OUTBOX" pending >/dev/null; rc=$?
+  expect_code 0 "$rc" "pending must exit 0 in a home with no bridge"
+  [ -z "$(find "$home/state" -mindepth 1 2>/dev/null)" ] \
+    || fail "a home that never opted in must gain no bridge state"
+  pass "33 a home that never opts in gains no bridge state"
+}
+
 test_1_allowlisted_intake_and_non_fm
 test_2_correlation_persists
 test_3_immediate_ack
@@ -1332,5 +1835,15 @@ test_23_stale_inflight_ttl_and_dead_pid_steal
 test_bootstrap_arms_ext_watch_shim
 test_poll_noop_when_inactive
 test_plugin_has_no_terminal_dispatch
+test_24_stuck_middelivery_recovers
+test_25_stuck_middelivery_surfaces_when_budget_spent
+test_26_pending_stays_flat_as_delivered_grows
+test_27_retention_expires_local_records
+test_28_allowlist_shell_and_plugin_agree
+test_29_least_privilege_authority
+test_30_secret_gate_rejects_every_bad_shape
+test_31_optin_is_config_file_only
+test_32_poll_unclaims_when_wake_fails
+test_33_home_without_optin_is_inert
 
 echo "all fm-ext-bridge tests passed"

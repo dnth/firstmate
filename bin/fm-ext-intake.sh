@@ -8,9 +8,15 @@
 #     (--text-file <path> | --text-file -)
 #     [--platform discord] [--source hermes-gateway] [--no-wake]
 #
-# Opt-in is config/ext-bridge or FM_EXT_BRIDGE=1 plus a mode-0600 home secret.
-# The presented --secret-file must match that secret. Missing or empty
-# allowlist, or a request that matches no rule, writes nothing.
+# Opt-in is config/ext-bridge plus a mode-0600 home secret. FM_EXT_BRIDGE can
+# only turn a configured bridge off, never on. The presented --secret-file must
+# match that secret. Missing, empty, comments-only, symlinked, or unmatched
+# allowlist writes nothing and exits 3.
+#
+# The recorded request carries the authority its matching rule grants:
+# "standing" only from a <guild>:<channel>:<author> rule, and "confirm" from a
+# broader guild-only or channel-only rule, whose requests need the captain's
+# confirmation before any project-changing action.
 #
 # Idempotent: the same message id claims the existing offer and does not
 # append a second wake. If the wake cannot be appended, the offer marker is
@@ -98,14 +104,17 @@ EXPECTED_RID="discord:${GUILD_ID}:${CHANNEL_ID}:${THREAD_ID}:${MESSAGE_ID}"
 [ "$REQUEST_ID" = "$EXPECTED_RID" ] \
   || die "request_id does not match guild/channel/thread/message fields"
 
-fm_ext_active "$FM_HOME" || die "local ext-bridge is not active (need config/ext-bridge or FM_EXT_BRIDGE=1 plus a mode-0600 secret)" 1
+fm_ext_active "$FM_HOME" || die "local ext-bridge is not active (need config/ext-bridge plus a mode-0600 secret)" 1
 HOME_SECRET=$(fm_ext_secret_path "$FM_HOME")
 fm_ext_secret_matches "$HOME_SECRET" "$SECRET_FILE" \
   || die "presented secret does not match the home secret" 1
 
 ALLOWLIST=$(fm_ext_allowlist_path "$FM_HOME")
-fm_ext_allowlisted "$ALLOWLIST" "$GUILD_ID" "$CHANNEL_ID" "$AUTHOR" \
-  || die "request is not allowlisted" 1
+# Exit 3 is reserved for an allowlist refusal so the gateway can tell "not
+# allowed" apart from "the bridge is broken" without parsing a message, and
+# without keeping a second copy of the allowlist grammar.
+AUTHORITY=$(fm_ext_authority "$ALLOWLIST" "$GUILD_ID" "$CHANNEL_ID" "$AUTHOR") \
+  || die "request is not allowlisted" 3
 
 command -v jq >/dev/null 2>&1 || die "jq is required" 1
 
@@ -134,12 +143,13 @@ INBOX_JSON=$(jq -cn \
   --arg thread_id "$THREAD_ID" \
   --arg message_id "$MESSAGE_ID" \
   --arg author "$AUTHOR" \
+  --arg authority "$AUTHORITY" \
   --arg text "$TEXT" \
   --argjson recorded_at "$NOW" \
   '{schema_version:$schema_version, request_id:$request_id, slug:$slug,
     platform:$platform, source:$source, guild_id:$guild_id,
     channel_id:$channel_id, thread_id:$thread_id, message_id:$message_id,
-    author:$author, text:$text, recorded_at:$recorded_at}') \
+    author:$author, authority:$authority, text:$text, recorded_at:$recorded_at}') \
   || die "could not build the inbox record" 1
 
 CONTEXT_JSON=$(jq -cn \
@@ -152,10 +162,12 @@ CONTEXT_JSON=$(jq -cn \
   --arg thread_id "$THREAD_ID" \
   --arg message_id "$MESSAGE_ID" \
   --arg author "$AUTHOR" \
+  --arg authority "$AUTHORITY" \
   --argjson recorded_at "$NOW" \
   '{request_id:$request_id, slug:$slug, platform:$platform, source:$source,
     guild_id:$guild_id, channel_id:$channel_id, thread_id:$thread_id,
-    message_id:$message_id, author:$author, recorded_at:$recorded_at}') \
+    message_id:$message_id, author:$author, authority:$authority,
+    recorded_at:$recorded_at}') \
   || die "could not build the destination context" 1
 
 INBOX_DIR=$(fm_ext_inbox_dir)

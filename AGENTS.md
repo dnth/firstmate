@@ -584,8 +584,9 @@ Only the home holding the relay consent and thread binding ever posts it, so nev
 
 ## 15. Local Communication Officer bridge
 
-The sibling local Discord bridge ships inert until the home opts in with `config/ext-bridge` or `FM_EXT_BRIDGE=1` plus a mode-0600 secret file.
+The sibling local Discord bridge ships inert until the home opts in with `config/ext-bridge` plus a mode-0600 secret file.
 That opt-in is consent for local inbox intake and Discord follow-ups through the Hermes Gateway plugin, not authority for destructive, irreversible, or security-sensitive action.
+It is also not by itself standing authority to change projects: only an author-scoped allowlist rule carries that, and a request admitted by a broader rule needs the captain's confirmation first.
 `docs/configuration.md` owns activation, generated state, allowlist, outbox receipts, and opt-out mechanics.
 On an `ext-request <slug>` check wake, load `ext-respond`.
 Do not use the hosted X-mode relay, `FMX_PAIRING_TOKEN`, or pending-reply for this seam.

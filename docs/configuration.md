@@ -563,15 +563,27 @@ It does not use `FMX_PAIRING_TOKEN`, `https://myfirstmate.io`, hosted public-fol
 Firstmate core contains no Discord library.
 Discord text is untrusted and must enter through `--text-file` or stdin.
 
-The bridge is off unless `config/ext-bridge` is a regular non-symlink file or `FM_EXT_BRIDGE` is a truthy environment value, **and** `config/ext-secret` is a non-empty mode-0600 regular file.
-`FM_EXT_BRIDGE` wins when set: an explicit empty/`0`/`false`/`no`/`off` value opts out even if the presence file exists.
+The bridge is off unless `config/ext-bridge` is a regular non-symlink file **and** `config/ext-secret` is a non-empty mode-0600 regular file.
+That presence file is the single activation authority, so the bootstrap, the watcher, the poll, the intake, and the gateway plugin always reach the same verdict in one home.
+`FM_EXT_BRIDGE` can only turn a configured bridge off: an explicit empty/`0`/`false`/`no`/`off` value opts out even when the presence file exists, and no environment value can opt in.
+A caller that could set the environment could otherwise activate the intake half of a home whose supervision half still believed the bridge was off.
 `FM_EXT_SECRET_FILE` and `FM_EXT_ALLOWLIST_FILE` may redirect those two files for tests.
 The secret and allowlist are not inherited into secondmate homes.
 
 `config/ext-allowlist` is fail-closed.
-Missing, empty, unreadable, or symlink allowlists deny every request.
-Each non-comment line is `<guild>`, `<guild>:<channel>`, or `<guild>:<channel>:<author>`.
-A request is allowed when any rule matches every component it specifies.
+Missing, empty, comments-only, unreadable, or symlink allowlists deny every request.
+Each non-comment line is `<guild>`, `<guild>:<channel>`, or `<guild>:<channel>:<author>`, and a request is admitted when any rule matches every component it specifies.
+
+Admission and authority are separate, and the allowlist is least-privilege by construction.
+Only the finest-grained `<guild>:<channel>:<author>` rule grants **standing** authority, meaning Firstmate may act on that request through the normal lifecycle the way it acts on a captain instruction.
+A `<guild>` or `<guild>:<channel>` rule admits the request at **confirm** authority instead: Firstmate answers and investigates, but anything that changes a project waits for the captain's confirmation first.
+There is no guild-wide standing grant at any setting, so adding a whole Discord server to the allowlist can never hand every member of it captain-level command authority.
+Prefer the three-component form; use a broader rule only when you want a channel to be able to ask, not to command.
+
+A rule is well formed only with one, two, or three non-empty colon-separated components.
+Every other shape - a trailing or embedded empty component such as `<guild>:` or `<guild>:<channel>:`, or a fourth component - is malformed and is ignored rather than guessed at, so a typo can never widen a grant.
+`bin/fm-ext-lib.sh` owns this decision for every caller: the gateway plugin resolves through `bin/fm-ext-intake.sh` rather than keeping a second copy of the grammar, and that script exits 3 when the allowlist refuses a request.
+The recorded request and its destination context both carry the granted `authority`, which is what the `ext-respond` skill reads.
 
 Canonical `request_id` is `discord:<guild>:<channel>:<thread>:<message>` and keeps those colons in JSON bodies.
 Filenames use the SHA-256 hex digest of that canonical id (`slug`).
@@ -583,7 +595,8 @@ State directories are mode 0700.
 The locked session-start bootstrap step turns a valid opt-in into `state/ext-watch.check.sh`, a byte-static identity shim for `bin/fm-ext-poll.sh`.
 The watcher accepts the shim only when its bytes match the expected generated content, then invokes the trusted repository poll script.
 The poll is a hard no-op until the bridge is active.
-It prints `ext-request <slug>` only when it claims a leftover inbox offer that intake did not claim; already claimed offers stay silent across Firstmate restart.
+It surfaces `ext-request <slug>` only when it claims a leftover inbox offer that intake did not claim; already claimed offers stay silent across Firstmate restart.
+Like intake, the poll appends its own durable wake record for each claim and releases the claim again when that append fails, so no request is ever consumed without a wake that survives the watcher dying; the watcher nudges Firstmate for that check without appending a second record.
 Removing the opt-in or the secret removes the shim.
 There is no 30-second cadence override; intake wakes immediately and the default slow-check interval covers restart recovery.
 
@@ -603,7 +616,21 @@ The gateway poster splits oversized Discord replies with the same numbered-threa
 A reply that already fits is one unnumbered message; a longer reply is posted as ordered `(k/n)` chunks into the same thread.
 Chunk progress is recorded so a later-chunk retry does not send earlier chunks again.
 A later-chunk transient failure then releases the inflight marker so only one poster can resume the next chunk.
-An ambiguous failure after a chunk may have been accepted stays mid-delivery for that chunk.
+An ambiguous failure after a chunk may have been accepted stays mid-delivery for that chunk, which is what stops a double post.
+
+That mid-delivery state is bounded rather than permanent.
+Once a generation has recorded the same in-flight chunk for longer than `FM_EXT_MIDDELIVERY_RECOVERY_SECS` (default 300), the next `begin` reopens exactly that chunk for one more attempt and records the attempt in chunk progress.
+The window sits far above the 15-second Discord send timeout, so a genuinely live send is never recovered out from under its sender.
+After `FM_EXT_MIDDELIVERY_RECOVERY_MAX` (default 3) attempts, `begin` records a terminal failed marker, exits 5, and wakes Firstmate with `ext-delivery-failed <slug>`.
+So an ordinary network timeout costs at most a repeated chunk and, at worst, a surfaced failure - never a silently truncated reply that no shipped command can clear.
+
+`pending` lists only generations that are still genuinely pending.
+A payload whose generation has reached a receipt or a terminal failed marker is retired on sight, so poll cost stays flat as delivered replies accumulate instead of growing with every reply ever sent.
+The terminal marker itself stays, so a duplicate emit of the same generation is still recognized as already delivered.
+
+Local bridge records expire on the same seven-day window X mode uses for its own context, `FM_EXT_CONTEXT_MAX_AGE_SECS` (default and maximum 604800).
+Each poll drops `state/ext-context/` destination and offer records past that window, keeping an offer marker whose request is still sitting unhandled in the inbox, and drops the leftover markers of already retired outbox generations.
+A generation whose payload is still present is pending or mid-delivery and is never pruned.
 This split does not use `FMX_PAIRING_TOKEN` or the hosted relay.
 Unsent payloads (no posting marker, no receipt, and no terminal failed marker) remain deliverable after a Hermes Gateway restart.
 `bin/fm-ext-link.sh` binds a spawned task to the canonical `request_id` as `ext_request=` / `ext_request_slug=` / `ext_request_ts=` / `ext_followups=`, never `x_request=`.
@@ -736,12 +763,16 @@ FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; val
 FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting X-mode completion follow-ups (7 days)
 FMX_FOLLOWUP_MAX_COUNT=3   # local cap on X-mode completion follow-ups per linked mention
-FM_EXT_BRIDGE=            # optional local Communication Officer opt-in; truthy enables, explicit 0/false/no/off disables even when config/ext-bridge exists
+FM_EXT_BRIDGE=            # optional local Communication Officer kill switch; explicit 0/false/no/off disables even when config/ext-bridge exists, and no value can enable a home that lacks that file
 FM_EXT_SECRET_FILE=       # optional override of config/ext-secret for tests
 FM_EXT_ALLOWLIST_FILE=    # optional override of config/ext-allowlist for tests
 FM_EXT_DISCORD_REPLY_MAX_CHARS=1900   # local-bridge Discord per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900
 FM_EXT_DISCORD_THREAD_MAX=25   # maximum messages in one local-bridge auto-split Discord thread
 FM_EXT_INFLIGHT_TTL_SECS=30   # seconds a dead-owner exclusive send claim must age before another poster may steal it; live owners are never stolen from; steal serialization keeps a 1s floor even when this is 0
+FM_EXT_MIDDELIVERY_RECOVERY_SECS=300   # seconds a generation may hold the same in-flight chunk before the next begin reopens that chunk for another attempt
+FM_EXT_MIDDELIVERY_RECOVERY_MAX=3   # reopen attempts before a stuck generation is failed terminally and surfaced as ext-delivery-failed
+FM_EXT_CONTEXT_MAX_AGE_SECS=604800   # local retention window for ext-context records and retired ext-outbox markers (7 days); larger values clamp back to it
+FM_EXT_OUTBOX_POLL_SECS=2   # gateway poster interval, in seconds, between local outbox delivery passes
 FM_PF_RETRY_BACKOFF_SECS=900   # seconds before the next attempt after a retryable promised-public-reply delivery error
 FM_LOCK_STALE_AFTER=2   # seconds before dead-pid lock records can be reclaimed; mid-acquire locks keep at least 2s grace
 FM_GUARD_GRACE=300      # seconds before guard warnings, arm health checks, and the primary turn-end guard treat a watcher beacon as stale
