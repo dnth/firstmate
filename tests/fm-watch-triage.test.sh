@@ -749,12 +749,13 @@ test_turn_ended_not_working_surfaced() {
   pass "a bare turn-end whose crew is not provably working is surfaced (the swallowed-finish fix)"
 }
 
-# A crew reports every finished turn through the SAME 0-byte marker path: the
-# harness removes and recreates state/<id>.turn-ended per turn. Two such turns can
-# land inside one epoch second, so the scan's signature must separate them. Under
-# the former size:whole-second signature both markers read "0:<same second>", the
-# already-advanced .seen-* swallowed the second turn-end, and the crew's real
-# finish was never notified.
+# A crew reports every finished turn through its per-generation marker
+# state/<id>.turn-ended.<spawn_gen>. The production publisher touches that same
+# marker for each turn, while this fixture removes and recreates it to exercise
+# the inode path as well. Two turns can land inside one epoch second, so the
+# scan's signature must separate them. Under the former size:whole-second
+# signature both markers read "0:<same second>", the already-advanced .seen-*
+# swallowed the second turn-end, and the crew's real finish was never notified.
 test_turn_ended_recreated_same_second_surfaced() {
   local dir state fakebin out drain_out marker before after pid
   dir=$(make_case turn-ended-same-second); state="$dir/state"; fakebin="$dir/fakebin"
