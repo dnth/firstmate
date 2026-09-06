@@ -319,13 +319,3 @@ fm_control_harness_turnend_token_path() {  # <harness> <state-dir> <id>
     kimi) printf '%s\n' "$state/$id.kimi-turnend-token" ;;
   esac
 }
-
-fm_control_harness_turnend_auth_path() {  # <harness> <token>
-  local harness=${1-} token=${2-}
-  case "$token" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
-  case "$harness" in
-    grok) printf '%s\n' "${GROK_HOME:-$HOME/.grok}/hooks/fm-turn-end.d/$token" ;;
-    kimi) printf '%s\n' "$HOME/.kimi-code/fm-turn-end.d/$token" ;;
-    *) return 0 ;;
-  esac
-}
