@@ -1414,6 +1414,44 @@ JS
   pass "OMP core handoff suppresses duplicate durable queue notification"
 }
 
+test_native_omp_delivered_handoff_does_not_suppress_queue_notification() {
+  local fixture out status=0
+  fixture=$(make_omp_queue_fixture native-queue-delivered-handoff)
+  write_queue_watcher "$fixture"
+  mkdir -p "$fixture/state/extensions/omp-primary-watch"
+  printf '{"version":2,"pending":[{"version":1,"token":"1-2-3","message":"signal: already delivered","predecessorArmPid":"","delivered":true}]}\n' \
+    > "$fixture/state/extensions/omp-primary-watch/session-replacement-actionable.json"
+  FM_STATE_OVERRIDE="$fixture/state" bash -c \
+    '. "$1/bin/fm-wake-lib.sh"; fm_wake_append signal task-a.status "signal: task-a"' _ "$fixture" \
+    || fail "the delivered-handoff fixture could not seed a durable wake row"
+  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
+    FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    node --input-type=module 2>&1 <<'JS'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const state = process.env.FM_STATE_OVERRIDE;
+const wakes = [];
+const handlers = new Map();
+const api = { zod: { object: () => ({}) }, on(name, handler) { handlers.set(name, handler); }, registerCommand() {}, registerTool() {}, sendMessage(message, options) { if (message?.customType === "firstmate-watcher-wake") wakes.push({ message, options }); } };
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+process.argv[1] = process.env.EXTENSION;
+const module = await import(`${pathToFileURL(process.env.EXTENSION).href}?queue-delivered-handoff=${Date.now()}`);
+module.default(api);
+await handlers.get("session_start")({ type: "session_start" }, { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "sess-one" } });
+for (let i = 0; i < 300 && wakes.length === 0; i += 1) await new Promise((r) => setTimeout(r, 10));
+if (wakes.length !== 1) throw new Error(`delivered handoff suppressed or duplicated the queue wake: ${wakes.length}`);
+if (wakes[0].options?.deliverAs !== "nextTurn" || wakes[0].options?.triggerTurn !== true) throw new Error("queue wake used the wrong delivery mode");
+writeFileSync(`${state}/watch-stop`, "stop\n");
+await handlers.get("session_shutdown")({ type: "session_shutdown" }, {});
+console.log("omp-delivered-handoff-queue-notification-ok");
+JS
+  ) || status=$?
+  printf 'stop\n' > "$fixture/state/watch-stop" 2>/dev/null || true
+  expect_code 0 "$status" "OMP delivered handoff queue notification"
+  assert_contains "$out" omp-delivered-handoff-queue-notification-ok "delivered handoff suppressed durable queue notification: $out"
+  pass "OMP ignores already-delivered handoffs when notifying queued wakes"
+}
+
 test_resolve_path_uses_node_when_readlink_f_is_unavailable
 test_exact_bun_omp_primary_identity
 test_standalone_omp_primary_identity
@@ -1430,3 +1468,4 @@ test_native_omp_unacknowledged_wake_keeps_successor_chain
 test_native_omp_durable_queue_session_notifications
 test_native_omp_empty_queue_suppresses_session_notifications
 test_native_omp_core_handoff_suppresses_queue_notification
+test_native_omp_delivered_handoff_does_not_suppress_queue_notification

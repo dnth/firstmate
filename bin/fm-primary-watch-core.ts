@@ -1132,15 +1132,16 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     return result;
   }
 
-  // True while the core still owns an actionable wake it has not delivered: an
-  // undelivered close on this generation, one handed over in process, or the
-  // durable replacement handoff on disk. A runtime adapter that keeps its own
-  // durable re-notification claim reads this before replaying that claim, so
-  // one wake is never delivered twice across a session replacement.
+  // True while the core still owns an actionable wake it has not delivered.
   function hasPendingActionableHandoff(): boolean {
     if (replacementCoordinator.pending.length > 0) return true;
     if (generation.pendingActionables.some((pending) => !pending.delivered)) return true;
-    return existsSync(actionableHandoff);
+    try {
+      return validateReplacementHandoff(JSON.parse(readFileSync(actionableHandoff, "utf8")))
+        .some((pending) => !pending.delivered);
+    } catch {
+      return false;
+    }
   }
 
   function acknowledgeWake(content: string): void {
