@@ -239,6 +239,51 @@ test_signal_span_surfaces_actionable_before_later_routine() {
   pass "an actionable status remains surfaced when a later routine append would hide it"
 }
 
+# Resolve the watcher's classification start offset the way fm-watch.sh does,
+# through the production wake library rather than a copy of its marker parsing.
+seen_offset_through_wake_lib() {  # <state> <status-file>
+  FM_STATE_OVERRIDE="$1" bash -c '
+    set -u
+    . "$1/bin/fm-classify-lib.sh"
+    . "$1/bin/fm-wake-lib.sh"
+    fm_wake_signal_seen_size "$2" "$3"
+  ' _ "$ROOT" "$1" "$2"
+}
+
+test_legacy_seen_marker_rejects_mtime_preserved_replacement() {
+  local dir state statusf marker inode size before after
+  dir=$(make_case legacy-seen-offset)
+  state="$dir/state"
+  statusf="$state/legacy.status"
+  printf 'done: PR ready\n' > "$statusf"
+  size=$(wc -c < "$statusf"); size=${size//[[:space:]]/}
+  inode=$(ls -i "$statusf" | awk '{print $1}')
+  # A pre-sidecar watcher marker: the inode:size:mtime signature of the log it
+  # had already classified, with no endpoint sidecar beside it.
+  marker="$state/.seen-legacy_status"
+  printf '%s:%s:%s' "$inode" "$size" 1700000000 > "$marker"
+
+  before=$(seen_offset_through_wake_lib "$state" "$statusf")
+  [ "$before" = "$size" ] \
+    || fail "the marker for this exact log did not resolve its recorded offset: $before"
+  if status_span_first_actionable_record "$statusf" "$before" >/dev/null; then
+    fail "an already-classified span was replayed as actionable"
+  fi
+
+  # Restore a different log object over the same path with its timestamp
+  # preserved, so only identity distinguishes it from the classified one.
+  printf 'done: PR ready\n' > "$dir/restored.tmp"
+  touch -r "$statusf" "$dir/restored.tmp"
+  mv -f "$dir/restored.tmp" "$statusf"
+
+  after=$(seen_offset_through_wake_lib "$state" "$statusf")
+  [ "$after" = 0 ] \
+    || fail "a replaced status log kept the old marker's byte offset: $after"
+  status_span_first_actionable_record "$statusf" "$after" >/dev/null \
+    || fail "the replacement's actionable event stayed suppressed"
+  pass "a pre-sidecar seen marker is trusted only for the log it was written against"
+}
+
 test_stale_is_terminal_classifier() {
   local dir state
   dir=$(make_case classify-stale); state="$dir/state"
@@ -3239,6 +3284,7 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
 test_stop_pid_ends_a_term_immune_child
 test_signal_reason_is_actionable_classifier
 test_signal_span_surfaces_actionable_before_later_routine
+test_legacy_seen_marker_rejects_mtime_preserved_replacement
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives

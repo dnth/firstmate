@@ -1471,7 +1471,11 @@ fm_wake_turnend_live_marker() {  # <state-dir> <id>
 # inode:size:mtime .seen-* markers, while a sidecar records the byte endpoint
 # through which the append-only log was actually classified.  Keeping those
 # facts separate lets a later routine append coexist with an earlier actionable
-# event without replaying the whole history forever.
+# event without replaying the whole history forever.  Both forms are trusted
+# only against the status object they were written for: the sidecar carries its
+# identity outright, and bin/fm-classify-lib.sh's status_legacy_signature_offset
+# validates the older form's recorded inode before its size is used as an
+# offset, so a replaced log cannot skip past its own events.
 _fm_wake_require_classify() {
   command -v status_observed_signature >/dev/null 2>&1 && return 0
   # shellcheck source=bin/fm-classify-lib.sh
@@ -1507,6 +1511,9 @@ fm_wake_signal_seen_size() {  # <state> <file>
   marker=$(fm_wake_signal_seen_path "$1" "$2")
   case "$2" in
     *.status)
+      # Both branches below read status identity through the shared classifier;
+      # without it nothing can be proven, so classify from byte zero.
+      _fm_wake_require_classify || { printf '0'; return 0; }
       raw=$(cat "$(fm_wake_signal_offset_path "$1" "$2")" 2>/dev/null || true)
       case "$raw" in *'@'*) size=${raw%%@*} ;; *) size= ;; esac
       case "$raw" in *'@'*) stored_ident=${raw#*@} ;; *) stored_ident= ;; esac
@@ -1516,8 +1523,11 @@ fm_wake_signal_seen_size() {  # <state> <file>
       fi
       case "$size" in ''|*[!0-9]*)
         raw=$(cat "$marker" 2>/dev/null || true)
-        # Legacy marker is inode:size:mtime (older tests also use that shape).
-        size=${raw#*:}; size=${size%%:*}
+        # Pre-sidecar marker is inode:size:mtime (older tests also use that
+        # shape). Its recorded size is a byte offset into the file it was
+        # written against, so trust it only while its recorded inode still
+        # identifies this path; a replacement gets byte zero and reclassifies.
+        size=$(status_legacy_signature_offset "$2" "$raw")
         ;;
       esac
       case "$size" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$size" ;; esac
