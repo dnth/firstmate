@@ -1123,7 +1123,7 @@ _rewrite_inflight() {
 }
 
 test_23_stale_inflight_ttl_and_dead_pid_steal() {
-  local home slug inflight posting dead now ttl rc rc1 rc2 p1 p2 go winner losers owner
+  local home slug inflight posting dead now ttl rc rc1 rc2 p1 p2 go winner losers owner lockbase
   now=100000
   ttl=30
   home="$TMP_ROOT/c23steal"
@@ -1210,7 +1210,68 @@ test_23_stale_inflight_ttl_and_dead_pid_steal() {
   [ "$losers" = 1 ] || fail "two live concurrent posters must still have one mid-delivery loser under TTL=0 (losers=$losers rc1=$rc1 rc2=$rc2)"
   assert_present "$inflight" "the live winner must still hold inflight"
   assert_present "$posting" "concurrent live refuse must not drop posting"
-  pass "23 stale inflight steal requires dead pid and TTL; live concurrent still one winner"
+
+  home="$TMP_ROOT/c23lock"
+  mkdir -p "$home/state/ext-outbox"
+  lockbase="probe.answer.1.inflight.lock"
+  mkdir "$home/state/ext-outbox/$lockbase"
+  if (
+    # shellcheck source=bin/fm-ext-lib.sh
+    . "$ROOT/bin/fm-ext-lib.sh"
+    FM_EXT_INFLIGHT_TTL_SECS=0
+    fm_ext_outbox_inflight_steallock_stale "$home/state/ext-outbox" "$lockbase"
+  ); then
+    fail "a fresh steal-lock must not be reclaimable when claim TTL is 0"
+  fi
+
+  home="$TMP_ROOT/c23stealrace"
+  setup_home "$home"
+  _test_21_setup_resumable "$home"
+  slug=$(cat "$home/setup.slug")
+  inflight="$home/state/ext-outbox/${slug}.answer.1.inflight"
+  home_env "$home" "$OUTBOX" begin --slug "$slug" --kind answer --generation 1 >/dev/null
+  dead=$(_dead_pid)
+  _rewrite_inflight "$inflight" "$dead" "$(($(date +%s) - 10))"
+  go="$home/go"
+  rm -f "$go" "$home/rc1" "$home/rc2"
+  (
+    while [ ! -f "$go" ]; do sleep 0.01; done
+    home_env "$home" env FM_EXT_INFLIGHT_TTL_SECS=0 \
+      "$OUTBOX" begin --slug "$slug" --kind answer --generation 1 \
+      >/dev/null 2>"$home/begin1.err"
+    echo $? > "$home/rc1"
+    sleep 1
+  ) &
+  p1=$!
+  (
+    while [ ! -f "$go" ]; do sleep 0.01; done
+    home_env "$home" env FM_EXT_INFLIGHT_TTL_SECS=0 \
+      "$OUTBOX" begin --slug "$slug" --kind answer --generation 1 \
+      >/dev/null 2>"$home/begin2.err"
+    echo $? > "$home/rc2"
+    sleep 1
+  ) &
+  p2=$!
+  sleep 0.05
+  touch "$go"
+  wait "$p1" "$p2" || true
+  rc1=$(cat "$home/rc1")
+  rc2=$(cat "$home/rc2")
+  winner=0
+  losers=0
+  case "$rc1" in
+    0) winner=$((winner + 1)) ;;
+    3) losers=$((losers + 1)) ;;
+    *) fail "TTL=0 steal-vs-steal child 1 must exit 0 or 3, got $rc1" ;;
+  esac
+  case "$rc2" in
+    0) winner=$((winner + 1)) ;;
+    3) losers=$((losers + 1)) ;;
+    *) fail "TTL=0 steal-vs-steal child 2 must exit 0 or 3, got $rc2" ;;
+  esac
+  [ "$winner" = 1 ] || fail "two concurrent TTL=0 stealers must not both win (winners=$winner rc1=$rc1 rc2=$rc2)"
+  [ "$losers" = 1 ] || fail "two concurrent TTL=0 stealers must have one mid-delivery loser (losers=$losers rc1=$rc1 rc2=$rc2)"
+  pass "23 stale inflight steal requires dead pid and TTL; live concurrent and TTL=0 steal-vs-steal still one winner"
 }
 
 # --- bootstrap opt-in -------------------------------------------------------

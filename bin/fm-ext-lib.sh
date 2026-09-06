@@ -561,19 +561,30 @@ fm_ext_outbox_inflight_is_stale() {
   [ "$age" -ge "$ttl" ]
 }
 
+# Reclaim a leftover steal-lock directory whose mtime is at least
+# max(claim TTL, 1) seconds. A zero claim TTL must not make a live
+# steal-lock immediately reclaimable: two concurrent stealers would
+# otherwise rmdir each other's lock and both return a send right.
+fm_ext_inflight_steallock_ttl_secs() {
+  local ttl
+  ttl=$(fm_ext_inflight_ttl_secs)
+  if [ "$ttl" -lt 1 ]; then
+    ttl=1
+  fi
+  printf '%s\n' "$ttl"
+}
+
 fm_ext_outbox_inflight_steallock_drop() {
   local dir=$1 slug=$2 kind=$3 generation=$4 lock
   lock=$(fm_ext_outbox_inflight_steallock_basename "$slug" "$kind" "$generation") || return 0
   rmdir "$dir/$lock" 2>/dev/null || true
 }
 
-# Reclaim a leftover steal-lock directory whose mtime is at least the inflight
-# TTL. A live steal holds the directory only for the critical section.
 fm_ext_outbox_inflight_steallock_stale() {
   local dir=$1 base=$2 dest ttl now mtime age
   dest="$dir/$base"
   [ -d "$dest" ] && [ ! -L "$dest" ] || return 1
-  ttl=$(fm_ext_inflight_ttl_secs)
+  ttl=$(fm_ext_inflight_steallock_ttl_secs)
   now=${FM_EXT_NOW_OVERRIDE:-$(date +%s)}
   case "$now" in
     ''|*[!0-9]*) return 1 ;;
@@ -609,8 +620,8 @@ fm_ext_outbox_inflight_publish_once() {
 # owner, or dead owner still inside the TTL), and 2 on validation or
 # publication failure. A dead owner whose claim is at least
 # FM_EXT_INFLIGHT_TTL_SECS (default 30) old may be stolen: the steal is
-# serialized with a momentary lock directory so two stealers still CAS to
-# one winner.
+# serialized with a momentary lock directory whose reclaim floor is
+# max(TTL, 1) so TTL=0 cannot reopen dual claim.
 fm_ext_outbox_inflight_claim() {
   local dir=$1 slug=$2 kind=$3 generation=$4 inflight lock rc
   inflight=$(fm_ext_outbox_inflight_basename "$slug" "$kind" "$generation") || return 2

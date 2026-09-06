@@ -23,8 +23,9 @@
 # caller owning the next send, including a live owner inside or past the
 # TTL), 4 when a terminal failed marker exists, 2 on validation failure.
 # Two concurrent live posters cannot both get the send right for the same
-# generation and chunk. receipt writes the receipt once and releases a
-# leftover inflight marker.
+# generation and chunk. Steal serialization keeps a 1-second floor so
+# FM_EXT_INFLIGHT_TTL_SECS=0 cannot let two stealers both win. receipt
+# writes the receipt once and releases a leftover inflight marker.
 # abort releases the exclusive inflight send marker first, then deletes the
 # posting marker and chunk progress, after a transient definite send failure
 # (HTTP 429 or 5xx) before any chunk succeeded so that generation can retry.
