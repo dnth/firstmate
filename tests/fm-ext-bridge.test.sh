@@ -1303,10 +1303,39 @@ test_poll_noop_when_inactive() {
 
 # Plugin must not dispatch the terminal tool.
 test_plugin_has_no_terminal_dispatch() {
-  if grep -R -n --include='*.py' 'dispatch_tool(' "$PLUGIN" | grep -v 'never' >/dev/null 2>&1; then
-    fail "gateway plugin must not dispatch_tool(terminal)"
-  fi
-  pass "gateway plugin does not dispatch the terminal tool"
+  local home out
+  home="$TMP_ROOT/plugin-dispatch"
+  setup_home "$home"
+  out=$(
+    GUILD="$GUILD" CHANNEL="$CHANNEL" THREAD="$THREAD" AUTHOR="$AUTHOR" \
+    PYTHONPATH="$PLUGIN" "$PYTHON_BIN" - "$home" "$ROOT" <<'PY'
+import os, sys
+sys.path.insert(0, os.environ["PYTHONPATH"])
+import intake
+os.environ["FM_HOME"] = sys.argv[1]
+os.environ["FM_ROOT_OVERRIDE"] = sys.argv[2]
+
+dispatch_calls = []
+def dispatch_tool(*args, **kwargs):
+    dispatch_calls.append((args, kwargs))
+    raise AssertionError("terminal dispatch must not be attempted")
+
+ctx = {
+    "platform": "discord",
+    "guild_id": os.environ["GUILD"],
+    "channel_id": os.environ["CHANNEL"],
+    "thread_id": os.environ["THREAD"],
+    "message_id": "666666666666666666",
+    "user_id": os.environ["AUTHOR"],
+    "dispatch_tool": dispatch_tool,
+}
+print(intake.handle_fm_command("dispatch probe", ctx))
+print("dispatch_calls=%d" % len(dispatch_calls))
+PY
+  )
+  assert_contains "$out" "Aye, captain" "gateway /fm handler must acknowledge the request"
+  assert_contains "$out" "dispatch_calls=0" "gateway /fm handler must not dispatch terminal work"
+  pass "gateway /fm handler performs no terminal dispatch"
 }
 
 export GUILD CHANNEL THREAD AUTHOR
@@ -1579,8 +1608,9 @@ test_28_allowlist_shell_and_plugin_agree() {
   home="$TMP_ROOT/c28"
   setup_home "$home"
   # Every rule shape the grammar can be written in, including the three the two
-  # implementations used to disagree on. Discord ids are numeric, so an exact
-  # -match probe stands in for a case variant: one character off must deny.
+  # implementations used to disagree on. Discord snowflakes are numeric, so a
+  # matching case-variant rule cannot be expressed; these alphabetic rules still
+  # exercise both implementations on case-varied input and must deny identically.
   while IFS='|' read -r shape rule; do
     [ -n "$shape" ] || continue
     printf '%s\n' "$rule" > "$home/config/ext-allowlist"
@@ -1604,6 +1634,8 @@ trailing-author-colon|$GUILD:$CHANNEL:
 trailing-channel-colon|$GUILD:
 four-components|$GUILD:$CHANNEL:$AUTHOR:extra
 one-character-off|${GUILD%?}9:$CHANNEL:$AUTHOR
+mixed-case-upper|Abc:Def:Ghi
+mixed-case-lower|aBC:dEF:gHI
 padded|  $GUILD:$CHANNEL:$AUTHOR
 commented|# $GUILD:$CHANNEL:$AUTHOR
 EOF
