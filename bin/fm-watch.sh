@@ -152,12 +152,10 @@ VALIDATION_PLAN_LOCK_STALE_SECS=30
 # token (e.g. the word "File" read as an unset variable), which silently kills the
 # watcher mid-cycle. Detect the platform once and pick the right form.
 #
-# stat_sig must also distinguish two *different* signals written to the same path
-# within one epoch second. A whole-second size:mtime pair cannot: a 0-byte
-# turn-ended marker that is removed and recreated for the next turn keeps the
-# signature "0:<same second>", so the second real turn-end is never notified.
-# Include the inode (recreation allocates a new one) and sub-second mtime
-# (in-place re-touch keeps the inode) so both same-second forms differ.
+# stat_sig must distinguish consecutive in-place touches of the same per-generation
+# turn-ended marker (state/<id>.turn-ended.<spawn_gen>) within one epoch second;
+# whole-second inode:size:mtime is identical across touches, so sub-second mtime
+# must differ.
 if [ "$(uname)" = Darwin ]; then
   stat_mtime() { stat -f %m "$1" 2>/dev/null; }             # epoch seconds of mtime
   stat_sig()   { stat -f '%i:%z:%Fm' "$1" 2>/dev/null; }    # inode:size:mtime signature
