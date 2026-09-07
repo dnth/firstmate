@@ -162,7 +162,8 @@ Runtime auto-detection is innermost-first: `$TMUX` wins over `HERDR_ENV=1`, whic
 Unknown backend names fail loudly.
 For compatibility, default tmux tasks do not write `backend=tmux`; every reader treats a missing `backend=` field as `tmux`.
 `fm-watch.sh` decides each window's busy state through the semantic contract above, which includes the harness-scoped Hermes and Grok rendered-tail sources.
-Herdr's native `agent.get` verdict still participates, but only as evidence of activity: a native `busy` is accepted when the task has no record of its own, while a native `idle` is not, because `agent.get` reports generation state and reads idle while a worker blocks on its own long-running foreground tool call.
+Herdr's native `agent.get` verdict still participates, but for non-Devin harnesses it is only evidence of activity: a native `busy` is accepted when the task has no record of its own, while a native `idle` is not, because `agent.get` reports generation state and reads idle while a worker blocks on its own long-running foreground tool call.
+Devin crewmates and scouts are the verified exception: their exact Herdr identity plus `agent_status` supplies both busy and idle lifecycle state.
 Tmux, Zellij, Orca, and cmux expose no native busy primitive, so tasks on those backends use their adapter lifecycle record or an explicitly verified harness-scoped rendered source.
 That poll loop is still the default event source for backends with no native push events, so this stays an extraction of the abstraction rather than a watcher rewrite.
 For capable Herdr sessions, the same watcher replaces its terminal sleep with a bounded native event wait that immediately surfaces `blocked`; [Push events and polling fallback](herdr-backend.md#push-events-and-polling-fallback) owns the current mechanism and capability gates, while [runtime backend verification](verification/runtime-backends.md#native-blocked-event) owns the active evidence.
