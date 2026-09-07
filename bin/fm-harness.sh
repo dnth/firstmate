@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|omp|grok|kimi|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|omp|grok|kimi|devin|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness,
 #                                        including configured crew-only hermes
 #                                        (config/crew-harness; "default" resolves to own)
@@ -81,7 +81,7 @@ omp_ancestry_matches() {  # <exact|launch-shape>
         args=$(ps -o args= -p "$pid" 2>/dev/null)
         [ "$mode" = launch-shape ] && omp_launch_argv_shape "$args" && return 0
         ;;
-      *claude*|*codex*|*opencode*|*grok*|kimi|pi|pi-signed) return 1 ;;
+      *claude*|*codex*|*opencode*|*grok*|kimi|devin|pi|pi-signed) return 1 ;;
       node*|python*)
         args=$(ps -o args= -p "$pid" 2>/dev/null)
         case "$args" in
@@ -150,6 +150,7 @@ detect_own() {
       *codex*) echo codex; return ;;
       *opencode*) echo opencode; return ;;
       *grok*) echo grok; return ;;
+      devin) echo devin; return ;;
       kimi) echo kimi; return ;;
       pi-signed) echo pi; return ;;
       pi) echo pi; return ;;
@@ -292,7 +293,7 @@ secondmate_fallback_effort() {
 # diagnostic.
 crew_only_harness() {  # <harness>
   case "$1" in
-    hermes) return 0 ;;
+    hermes|devin) return 0 ;;
     *) return 1 ;;
   esac
 }

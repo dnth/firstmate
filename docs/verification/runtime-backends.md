@@ -666,7 +666,7 @@ The CLI matrix was checked directly:
 | Literal send | `herdr pane send-text <pane> <text> --session <name>` | Left text unsubmitted until Enter. |
 | Keys | `herdr pane send-keys <pane> enter|escape|ctrl+c --session <name>` | Enter and Escape worked; Ctrl-C interrupted foreground work. |
 | Capture | `herdr pane read <pane> --source recent --lines N` | Small N could return empty below viewport height; a 200-line request plus local trim was stable. |
-| Native state | `herdr agent get <pane>` | Working and done transitions were visible; native `busy` remains positive activity evidence, while native `idle` cannot close a turn and the adapter's semantic lifecycle decides worker state. |
+| Native state | `herdr agent get <pane>` | For non-Devin harnesses, working and done transitions were visible; native `busy` remains positive activity evidence, while native `idle` cannot close a turn and the adapter's semantic lifecycle decides worker state. Devin's crew-only adapter is covered separately below. |
 | Restart | guarded named-session stop then start | Workspace, tab, pane, and labels persisted; the agent process and registration did not. |
 | Close | `herdr pane close <pane> --session <name>` | The exact one-pane task tab closed; closing a final tab could remove the workspace. |
 
@@ -1177,3 +1177,14 @@ The host-tool sequence was:
 Observed guarantee: a Desktop-owned thread can write Firstmate lifecycle files when the prompt provides an authorized absolute path, and create, send, read, and archive work at the Desktop host-tool layer.
 The missing guarantee remains a supported shell-callable bridge that lets Firstmate perform those operations against the same visible Desktop endpoint.
 App-server partial methods and raw socket experiments do not satisfy that bridge contract.
+
+## Devin Herdr crew lifecycle
+
+The opt-in live guard [`tests/fm-devin-herdr-live-e2e.test.sh`](../../tests/fm-devin-herdr-live-e2e.test.sh) records a real Devin crew's Herdr-backed `working` and `done` states, verifies the native project-local Stop registration, and requires the generation-bound turn-end marker.
+Run it with `FM_DEVIN_LIVE_E2E=1 FM_DEVIN_LIVE_TASK=<task-id> tests/fm-devin-herdr-live-e2e.test.sh` after preparing a Devin scout task; the guard fails when Devin or Herdr is absent and never reports a skipped live check as evidence.
+Devin CLI 3000.6.14's bundled `extensibility/hooks/overview.mdx` identifies `.devin/hooks.v1.json`, `.devin/config.json`, and `.devin/config.local.json` as native project hook sources and does not list `~/.devin/hooks/*.json`.
+On 2026-09-08, a direct `devin --permission-mode dangerous --prompt-file <brief>` run loaded a probe from `.devin/hooks.v1.json` and emitted `SessionStart` followed by `Stop`; its Stop payload omitted `cwd`, while the hook environment set `DEVIN_PROJECT_DIR` to the project root.
+The same command with only the former `~/.devin/hooks/fm-turn-end.json` registration completed the turn without a marker, reproducing the hands-off failure.
+The corrected adapter was then installed into a scratch worktree and the same direct command returned `PROBE_DONE` between `CAPTURED_MARKER_ABSENT_BEFORE` and `CAPTURED_MARKER_PRESENT_AFTER`.
+The final stat line named the exact generation-bound `captured.turn-ended.captured` marker with size zero.
+Deterministic coverage on the same date passed `FM_GATE_REFUSE_BYPASS=1 bash tests/fm-devin-adapter.test.sh` and `FM_GATE_REFUSE_BYPASS=1 bash tests/fm-busy-state.test.sh`.

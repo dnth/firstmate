@@ -233,7 +233,8 @@ The capture owner requests at least 200 lines from Herdr and trims locally to th
 This generous floor is required for small composer and peek reads.
 
 Herdr's native agent state can read idle while a harness waits on its own long foreground tool.
-The shared crew-state path therefore accepts a native `busy` as evidence of activity but never a native `idle` as evidence that a worker has stopped; the task's own semantic busy state (`bin/fm-busy-lib.sh`) decides that.
+For non-Devin harnesses, the shared crew-state path therefore accepts a native `busy` as evidence of activity but never a native `idle` as evidence that a worker has stopped; the task's own semantic busy state (`bin/fm-busy-lib.sh`) decides that.
+Devin crewmates and scouts are the verified exception: the adapter requires exact Devin identity and uses Herdr's native `working`, `idle`, `done`, and `blocked` statuses as its lifecycle source.
 A human-blocked permission dialog has no busy banner and still surfaces.
 
 ## Composer and injection safety

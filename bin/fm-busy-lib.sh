@@ -54,8 +54,9 @@
 #      trusted busy beats a rendered ready footer, and a trusted idle beats a
 #      lagging rendered busy footer.
 #   4. no record at all: Hermes' rendered busy or ready footer -> hermes-tui,
-#      then herdr's native busy verdict is trusted as busy (generation state
-#      is sufficient for busy, not for idle), then the Grok-only temporary
+#      then Devin trusts Herdr's native busy and idle verdicts because that is
+#      its verified lifecycle source; other harnesses accept only native busy,
+#      then the Grok-only temporary
 #      regex fallback classifies a grok task from its rendered tail, then
 #      unknown missing
 #   5. malformed, stale, or untrusted records -> unknown, never a fallback
@@ -183,6 +184,7 @@ fm_busy_sources_for_harness() {  # <harness>
       fm_busy_kimi_verified || { printf ''; return 0; }
       adapter='kimi-wire kimi-hook'
       ;;
+    devin) adapter=herdr-native ;;
     *) printf ''; return 0 ;;
   esac
   printf '%s fm-spawn fm-interrupt fm-recovery' "$adapter"
@@ -350,9 +352,22 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       esac
     fi
   fi
-  # A native herdr busy verdict is semantic enough to trust for BUSY
-  # (streaming means a turn is running); native idle is narrower than turn
-  # state (a long foreground tool call reads idle) and stays unknown here.
+  # Devin exposes its lifecycle through Herdr rather than a readable pane.
+  # Its registered agent_status is the adapter's verified semantic source in
+  # both directions, so working maps to busy and idle/done/blocked map to idle.
+  if [ "$backend" = herdr ] && [ "$harness" = devin ] \
+      && command -v fm_backend_busy_state >/dev/null 2>&1; then
+    native=$(fm_backend_busy_state "$backend" "$target" "$harness" 2>/dev/null || true)
+    case "$native" in
+      busy|idle)
+        printf '%s herdr-native' "$native"
+        return 0
+        ;;
+    esac
+  fi
+  # For every other harness, a native Herdr busy verdict is semantic enough
+  # to trust because streaming proves a running turn.
+  # Native idle is narrower than turn state and stays unknown here.
   if [ "$backend" = herdr ] && command -v fm_backend_busy_state >/dev/null 2>&1; then
     native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
     if [ "$native" = busy ]; then

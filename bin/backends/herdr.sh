@@ -2743,6 +2743,19 @@ fm_backend_herdr_composer_state() {  # <target> [harness] [runtime] [omp] [submi
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   session=$FM_BACKEND_HERDR_SESSION
   pane=$FM_BACKEND_HERDR_PANE
+  # Devin exposes no readable pane composer; herdr's native agent_status is
+  # the verified idle/composer signal for this crew-only adapter.
+  if [ "$harness" = devin ]; then
+    identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null || true)
+    IFS=$'\t' read -r agent agent_status <<EOF
+$identity
+EOF
+    case "$agent:$agent_status" in
+      devin:idle|devin:done|devin:blocked) printf 'empty' ;;
+      *) printf 'unknown' ;;
+    esac
+    return 0
+  fi
   cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES" 2>/dev/null \
     || fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES") || { printf 'unknown'; return 0; }
 
@@ -3350,8 +3363,17 @@ fm_backend_herdr_agent_status_raw() {  # <session> <pane_id>
 # gets real semantics" per the design report. See
 # fm_backend_herdr_classify_agent_status for the status->busy/idle/unknown
 # mapping.
-fm_backend_herdr_busy_state() {  # <target>
-  fm_backend_herdr_target_ready "$1" || { printf 'unknown'; return 0; }
+fm_backend_herdr_busy_state() {  # <target> [harness]
+  local target=$1 harness=${2:-}
+  fm_backend_herdr_target_ready "$target" || { printf 'unknown'; return 0; }
+  if [ "$harness" = devin ]; then
+    local identity agent agent_status
+    identity=$(fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null || true)
+    IFS=$'\t' read -r agent agent_status <<EOF
+$identity
+EOF
+    [ "$agent" = devin ] || { printf 'unknown'; return 0; }
+  fi
   fm_backend_herdr_classify_agent_status \
     "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")"
 }

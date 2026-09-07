@@ -1134,6 +1134,66 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
   pass "C9 spawn: the harness fallback chain still resolves with no tokens; crew/scout launches are unaffected by this feature"
 }
 
+test_devin_primary_refusal_and_profile_composition() {
+  local w home proj wt fakebin launchlog id meta out rc fake_root f
+  w="$TMP_ROOT/devin-primary-boundary"
+  home="$w/home"; proj="$w/project"; wt="$w/wt"; launchlog="$w/launch.log"; id="devin-crew-z3"
+  mkdir -p "$home/config" "$home/data/$id" "$home/projects" "$home/state"
+  printf 'brief\n' > "$home/data/$id/brief.md"
+  fm_git_worktree "$proj" "$wt" devin-primary-boundary
+  fakebin=$(make_launch_capturing_tmux "$w/tmux")
+  fake_root="$w/root"; mkdir -p "$fake_root/bin"
+  for f in "$ROOT"/bin/*; do ln -s "$f" "$fake_root/bin/$(basename "$f")"; done
+  rm -f "$fake_root/bin/fm-harness.sh"
+  cat > "$fake_root/bin/fm-harness.sh" <<EOF
+#!/usr/bin/env bash
+case "\${1:-}" in
+  ""|crew) echo devin ;;
+  *) exec "$ROOT/bin/fm-harness.sh" "\$@" ;;
+esac
+EOF
+  chmod +x "$fake_root/bin/fm-harness.sh"
+  rc=0
+  PATH="$fakebin:$BASE_PATH" TMUX="fake,1,0" CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE="$fake_root" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" --mode no-mistakes --yolo off --model family --effort high \
+    >/dev/null 2>"$w/refusal.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "devin primary launch should be refused"
+  assert_contains "$(cat "$w/refusal.err")" "primary support is permanently refused" \
+    "devin primary refusal did not name the boundary"
+  [ ! -e "$home/state/$id.meta" ] || fail "devin primary refusal created metadata"
+
+  # The same adapter remains hard-refused for secondmates.
+  local sm="$w/secondmate"; make_seeded_home "$sm" sm
+  rc=0
+  PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 FM_ROOT_OVERRIDE="$fake_root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 "$ROOT/bin/fm-spawn.sh" sm "$sm" devin --secondmate \
+    >/dev/null 2>"$w/secondmate.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "devin secondmate launch should be refused"
+  assert_contains "$(cat "$w/secondmate.err")" "secondmate support is permanently refused" \
+    "devin secondmate refusal did not name the boundary"
+
+  # Scout launches remain supported and compose the Devin family-effort model token.
+  printf 'devin\n' > "$home/config/crew-harness"
+  id="devin-scout-z4"; mkdir -p "$home/data/$id"; printf 'brief\n' > "$home/data/$id/brief.md"; : > "$launchlog"
+  PATH="$fakebin:$BASE_PATH" TMUX="fake,1,0" CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" \
+    FM_FAKE_LAUNCH_LOG="$launchlog" "$ROOT/bin/fm-spawn.sh" "$id" "$proj" --scout \
+    --model family --effort high >/dev/null 2>&1
+  meta="$home/state/$id.meta"
+  [ "$(meta_field "$meta" harness)" = devin ] || fail "devin scout did not launch on Devin"
+  out=$(cat "$launchlog")
+  assert_contains "$out" "devin --permission-mode dangerous" "devin scout launch command missing dangerous mode"
+  assert_contains "$out" "--model 'family-high'" "devin model-effort composition was not applied"
+  assert_not_contains "$out" "--effort" "devin launch should compose effort into model"
+  pass "Devin primary/secondmate refusal and scout model-effort composition hold"
+}
+
 test_crew_primary_fallback_selection() {
   local w home proj wt fakebin launchlog id meta out status
   w="$TMP_ROOT/crew-primary-fallback"
@@ -2803,6 +2863,7 @@ test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens
 test_spawn_explicit_harness_uses_explicit_profile_axes
 test_spawned_secondmate_uses_its_harness_supervision_model
 test_spawn_fallback_chain_and_crew_scout_unaffected
+test_devin_primary_refusal_and_profile_composition
 test_crew_primary_fallback_selection
 test_crew_fallback_profile_validation
 test_bootstrap_sweep_propagates_and_reconverges
