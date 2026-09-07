@@ -2891,6 +2891,21 @@ test_busy_state_unknown_on_no_agent() {
   pass "fm_backend_herdr_busy_state: unparseable/absent agent state reports unknown, the regex-fallback cue"
 }
 
+test_devin_composer_requires_native_identity() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/devin-composer-identity"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"agent":{"agent":"devin","agent_status":"idle"}}}' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2 devin' "$ROOT")
+  [ "$out" = empty ] || fail "Devin identity should permit idle composer, got '$out'"
+  printf '%s\n' '{"result":{"agent":{"agent":"shell","agent_status":"idle"}}}' > "$resp/1.out"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2 devin' "$ROOT")
+  [ "$out" = unknown ] || fail "non-Devin identity should refuse idle composer, got '$out'"
+  pass "Devin composer accepts idle only with matching Herdr identity"
+}
+
 # --- composer_state: structural border-row classification --------------------
 
 test_composer_state_bare_prompt_is_empty() {
@@ -4776,6 +4791,7 @@ test_foreground_shell_proof_accepts_only_exact_idle_descendants
 test_busy_state_working_maps_to_busy
 test_busy_state_done_and_blocked_map_to_idle
 test_busy_state_unknown_on_no_agent
+test_devin_composer_requires_native_identity
 test_composer_state_bare_prompt_is_empty
 test_composer_state_ghost_placeholder_is_empty
 test_composer_state_real_text_is_pending

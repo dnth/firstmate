@@ -2750,7 +2750,10 @@ fm_backend_herdr_composer_state() {  # <target> [harness] [runtime] [omp] [submi
     IFS=$'\t' read -r agent agent_status <<EOF
 $identity
 EOF
-    case "$agent_status" in idle|done|blocked) printf 'empty' ;; *) printf 'unknown' ;; esac
+    case "$agent:$agent_status" in
+      devin:idle|devin:done|devin:blocked) printf 'empty' ;;
+      *) printf 'unknown' ;;
+    esac
     return 0
   fi
   cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES" 2>/dev/null \

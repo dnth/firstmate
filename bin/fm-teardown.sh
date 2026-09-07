@@ -2401,6 +2401,7 @@ cleanup_firstmate_home_children() {
     remove_grok_turnend_auth "$sub_state" "$child_id" "$child_meta"
     remove_kimi_turnend_auth "$sub_state" "$child_id" "$child_meta"
     remove_hermes_turnend_auth "$sub_state" "$child_id" "$child_meta"
+    remove_devin_turnend_auth "$sub_state" "$child_id" "$child_meta"
     remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
     child_busy_gen=$(meta_value "$child_meta" busy_gen)
     if [ -z "$child_busy_gen" ]; then
