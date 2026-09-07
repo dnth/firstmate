@@ -3423,6 +3423,12 @@ if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
     exit 1
   fi
   case "$BACKEND" in
+    tmux)
+      fm_backend_tmux_idle_foreground_shell_pid "$T" >/dev/null || {
+        echo "error: relaunch tmux endpoint is not proven idle; refusing to inject relaunch input into an active harness" >&2
+        exit 1
+      }
+      ;;
     zellij|cmux)
       echo "error: backend=$BACKEND relaunch cwd verification would inject a probe into the existing harness; refusing to relaunch an unverified endpoint" >&2
       exit 1
