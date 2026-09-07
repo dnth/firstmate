@@ -31,7 +31,7 @@ make_settle_fakebin() {
 #!/usr/bin/env bash
 set -u
 case "$*" in
-  *"#{pane_current_path}"*)
+  *pane_current_path*)
     countfile="${FM_FAKE_PANE_COUNTFILE:?FM_FAKE_PANE_COUNTFILE unset}"
     n=0
     [ -f "$countfile" ] && n=$(cat "$countfile")
@@ -46,10 +46,19 @@ case "$*" in
     ;;
 esac
 case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
+  display-message)
+    case "$*" in
+      *pane_current_path*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}" ;;
+      *pane_pid*) printf '4242\n' ;;
+      *) printf 'firstmate\n' ;;
+    esac
+    exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
+    if [ -n "${FM_FAKE_SEND_LOG:-}" ]; then
+      printf '%s\n' "$*" >> "$FM_FAKE_SEND_LOG"
+    fi
     if [ -n "${FM_FAKE_READY_PATH:-}" ]; then
       for arg in "$@"; do
         case "$arg" in
@@ -68,6 +77,22 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"-o tpgid="*) printf '4242\n' ;;
+  *"-p 4242 -o comm="*)
+    if [ "${FM_FAKE_TMUX_ACTIVE:-0}" = 1 ]; then printf 'codex\n'; else printf 'bash\n'; fi
+    ;;
+  *"-p 4242 -o args="*)
+    if [ "${FM_FAKE_TMUX_ACTIVE:-0}" = 1 ]; then printf 'codex --task\n'; else printf 'bash\n'; fi
+    ;;
+  *"-axo pid=,pgid=,ppid="*) printf '4242 4242 1\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
   fm_fake_exit0 "$fakebin" treehouse
   printf '%s\n' "$fakebin"
 }
@@ -134,6 +159,166 @@ test_sandbox_relaunch_records_fresh_ready_path() {
   pass "a sandbox relaunch records the isolated copy published by its own acquisition"
 }
 
+test_ship_relaunch_reuses_recorded_worktree_without_project_positional() {
+  local rec id out status marker
+  id=ship-relaunch-recorded-z4
+  rec=$(make_settle_case ship-relaunch-recorded "$id" 0)
+  read_settle_record "$rec"
+  marker="$WT_DIR/uncommitted-wip.txt"
+  printf 'preserve this WIP\n' > "$marker"
+  mkdir -p "$HOME_DIR/data/$id"
+  printf 'Delivery contract: mode=no-mistakes\nresume recorded worktree\n' > "$HOME_DIR/data/$id/brief.md"
+  {
+    printf 'window=firstmate:fm-%s\n' "$id"
+    printf 'endpoint_task_id=%s\n' "$id"
+    printf 'worktree=%s\n' "$WT_DIR"
+    printf 'project=%s\n' "$PROJ_DIR"
+    printf 'harness=codex\nkind=ship\nmode=no-mistakes\nyolo=off\n'
+    printf 'tasktmp=\nmodel=-\neffort=-\n'
+  } > "$HOME_DIR/state/$id.meta"
+
+  out=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' \
+    FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
+    PATH="$FAKEBIN_DIR:$PATH" "$SPAWN" "$id" --relaunch --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "bare ship relaunch should succeed"
+  assert_contains "$out" "spawned $id" "ship relaunch did not report success"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "ship relaunch did not preserve the recorded worktree"
+  [ -f "$marker" ] || fail "ship relaunch discarded uncommitted WIP"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "ship relaunch allocated a second worktree"
+  pass "a bare ship relaunch resumes the recorded worktree and preserves WIP"
+}
+
+test_ship_relaunch_restores_recorded_profile_without_flags() {
+  local rec id out status send_log
+  id=ship-relaunch-profile-z4b
+  rec=$(make_settle_case ship-relaunch-profile "$id" 0)
+  read_settle_record "$rec"
+  send_log="$(dirname "$HOME_DIR")/send-keys.log"
+  mkdir -p "$HOME_DIR/data/$id"
+  printf 'Delivery contract: mode=no-mistakes\nrestore recorded profile\n' > "$HOME_DIR/data/$id/brief.md"
+  printf 'claude\n' > "$HOME_DIR/config/crew-harness"
+  {
+    printf 'window=firstmate:fm-%s\n' "$id"
+    printf 'endpoint_task_id=%s\n' "$id"
+    printf 'worktree=%s\n' "$WT_DIR"
+    printf 'project=%s\n' "$PROJ_DIR"
+    printf 'harness=codex\nkind=ship\nmode=no-mistakes\nyolo=off\n'
+    printf 'tasktmp=\nmodel=recorded-model\neffort=high\n'
+  } > "$HOME_DIR/state/$id.meta"
+
+  out=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' \
+    FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
+    FM_FAKE_SEND_LOG="$send_log" PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" --relaunch --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "bare ship relaunch with recorded profile should succeed"
+  assert_contains "$(cat "$send_log")" "codex --model 'recorded-model'" \
+    "ship relaunch did not restore the recorded model"
+  assert_contains "$(cat "$send_log")" "model_reasoning_effort=\"high\"" \
+    "ship relaunch did not restore the recorded effort"
+  pass "a bare ship relaunch restores recorded harness, model, and effort"
+}
+
+test_ship_relaunch_refuses_raw_worktree_command() {
+  local rec id out status
+  id=ship-relaunch-raw-z5
+  rec=$(make_settle_case ship-relaunch-raw "$id" 0)
+  read_settle_record "$rec"
+  mkdir -p "$HOME_DIR/data/$id"
+  printf 'Delivery contract: mode=no-mistakes\nrefuse raw relaunch\n' > "$HOME_DIR/data/$id/brief.md"
+  {
+    printf 'window=firstmate:fm-%s\n' "$id"
+    printf 'endpoint_task_id=%s\n' "$id"
+    printf 'worktree=%s\n' "$WT_DIR"
+    printf 'project=%s\n' "$PROJ_DIR"
+    printf 'harness=codex\nkind=ship\nmode=no-mistakes\nyolo=off\n'
+    printf 'tasktmp=\nmodel=-\neffort=-\n'
+  } > "$HOME_DIR/state/$id.meta"
+
+  set +e
+  out=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' \
+    PATH="$FAKEBIN_DIR:$PATH" "$SPAWN" "$id" "$PROJ_DIR" \
+    --harness './worker --resume' --relaunch --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "raw ship relaunch unexpectedly succeeded"
+  assert_contains "$out" "raw relaunch commands that require a worktree are refused" \
+    "raw ship relaunch did not explain the refusal"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "raw ship relaunch changed the recorded worktree"
+  pass "a raw ship relaunch requiring a worktree is refused"
+}
+
+test_ship_relaunch_refuses_active_tmux_endpoint() {
+  local rec id out status
+  id=ship-relaunch-active-tmux-z6
+  rec=$(make_settle_case ship-relaunch-active-tmux "$id" 0)
+  read_settle_record "$rec"
+  mkdir -p "$HOME_DIR/data/$id"
+  printf 'Delivery contract: mode=no-mistakes\nrefuse active tmux\n' > "$HOME_DIR/data/$id/brief.md"
+  {
+    printf 'window=firstmate:fm-%s\n' "$id"
+    printf 'endpoint_task_id=%s\n' "$id"
+    printf 'worktree=%s\n' "$WT_DIR"
+    printf 'project=%s\n' "$PROJ_DIR"
+    printf 'harness=codex\nkind=ship\nmode=no-mistakes\nyolo=off\n'
+    printf 'tasktmp=\nmodel=-\neffort=-\n'
+  } > "$HOME_DIR/state/$id.meta"
+
+  set +e
+  out=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' \
+    FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
+    FM_FAKE_TMUX_ACTIVE=1 PATH="$FAKEBIN_DIR:$PATH" "$SPAWN" "$id" \
+    --relaunch --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "active tmux relaunch unexpectedly succeeded"
+  assert_contains "$out" "not proven idle" \
+    "active tmux relaunch did not explain the refusal"
+  pass "a ship relaunch refuses an active tmux endpoint before sending input"
+}
+
+test_ship_relaunch_refuses_unrelated_worktree() {
+  local rec id out status
+  id=ship-relaunch-unrelated-z7
+  rec=$(make_settle_case ship-relaunch-unrelated "$id" 0)
+  read_settle_record "$rec"
+  mkdir -p "$HOME_DIR/data/$id"
+  printf 'Delivery contract: mode=no-mistakes\nrefuse unrelated worktree\n' > "$HOME_DIR/data/$id/brief.md"
+  {
+    printf 'window=firstmate:fm-%s\n' "$id"
+    printf 'endpoint_task_id=%s\n' "$id"
+    printf 'worktree=%s\n' "$STALE_DIR"
+    printf 'project=%s\n' "$PROJ_DIR"
+    printf 'harness=codex\nkind=ship\nmode=no-mistakes\nyolo=off\n'
+    printf 'tasktmp=\nmodel=-\neffort=-\n'
+  } > "$HOME_DIR/state/$id.meta"
+
+  set +e
+  out=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' \
+    FM_FAKE_PANE_PATH="$STALE_DIR" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
+    PATH="$FAKEBIN_DIR:$PATH" "$SPAWN" "$id" --relaunch --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "unrelated worktree relaunch unexpectedly succeeded"
+  assert_contains "$out" "not a worktree belonging to recorded project" \
+    "unrelated worktree relaunch did not explain the refusal"
+  pass "a ship relaunch refuses a worktree from an unrelated repository"
+}
+
 # A single stale first read (the exact incident) must not be accepted: the
 # loop should keep polling until two consecutive reads agree, landing on the
 # real settled worktree instead.
@@ -178,5 +363,10 @@ test_already_settled_pane_costs_one_confirm_sleep() {
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
 test_sandbox_relaunch_records_fresh_ready_path
+test_ship_relaunch_reuses_recorded_worktree_without_project_positional
+test_ship_relaunch_restores_recorded_profile_without_flags
+test_ship_relaunch_refuses_raw_worktree_command
+test_ship_relaunch_refuses_active_tmux_endpoint
+test_ship_relaunch_refuses_unrelated_worktree
 
 echo "# all fm-spawn-worktree-settle tests passed"

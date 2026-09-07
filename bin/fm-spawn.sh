@@ -410,6 +410,20 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ -f "$RELAUNCH_META" ] || { echo "error: --relaunch needs existing metadata at $RELAUNCH_META" >&2; exit 1; }
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
+  if [ "$KIND" != secondmate ]; then
+    if [ "$HARNESS_SET" -eq 0 ]; then
+      HARNESS_ARG=$(fm_meta_get "$RELAUNCH_META" harness)
+      [ -n "$HARNESS_ARG" ] || { echo "error: relaunch metadata has no recorded harness for $RELAUNCH_ID" >&2; exit 1; }
+    fi
+    if [ "$MODEL_SET" -eq 0 ]; then
+      MODEL=$(fm_meta_get "$RELAUNCH_META" model)
+      case "$MODEL" in default|-) MODEL= ;; esac
+    fi
+    if [ "$EFFORT_SET" -eq 0 ]; then
+      EFFORT=$(fm_meta_get "$RELAUNCH_META" effort)
+      case "$EFFORT" in default|-) EFFORT= ;; esac
+    fi
+  fi
 fi
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
@@ -1218,7 +1232,7 @@ if [ "$KIND" = secondmate ]; then
       ;;
   esac
 else
-  PROJ=${POS[1]}
+  PROJ=${POS[1]:-}
   ARG3=${POS[2]:-}
 fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
@@ -1708,6 +1722,22 @@ case "$ARG3" in
     HARNESS=$ARG3
     [ "$KIND" != secondmate ] || refuse_crew_only_secondmate "$HARNESS"
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || {
+      # A relaunch with an unverified/raw recorded harness must still fail at
+      # the stronger presentation recovery boundary when its exact endpoint is
+      # journaled.  Otherwise the adapter lookup masks the safety refusal and
+      # the caller cannot distinguish "unsupported raw" from "unsafe endpoint
+      # recovery" (and, more importantly, future code could accidentally take
+      # the fresh-launch path before inspecting the journal).
+      if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" = ship ]; then
+        relaunch_backend=$(fm_meta_get "$RELAUNCH_META" backend)
+        [ -n "$relaunch_backend" ] || relaunch_backend=tmux
+        if [ "$relaunch_backend" = herdr ] \
+           && fm_backend_herdr_presentation_enabled "$CONFIG" \
+           && { [ -e "$STATE/$ID.herdr-presentation" ] || [ -L "$STATE/$ID.herdr-presentation" ]; }; then
+          echo "error: herdr presentation relaunch cannot safely reuse a journaled endpoint without replacing it; refusing to create a new pane" >&2
+          exit 1
+        fi
+      fi
       if [ "$KIND" = secondmate ]; then
         echo "error: unknown secondmate harness '$HARNESS'; secondmates require a verified harness adapter" >&2
       else
@@ -2781,8 +2811,20 @@ if [ "$KIND" = secondmate ]; then
     BRIEF="$DATA/$ID/brief.md"
   fi
 else
-  PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
-  WT=""
+  if [ "$RELAUNCH" -eq 1 ]; then
+    PROJ_ABS=$(fm_meta_get "$RELAUNCH_META" project)
+    WT=$(fm_meta_get "$RELAUNCH_META" worktree)
+    [ -n "$PROJ_ABS" ] || { echo "error: relaunch metadata has no recorded project for $ID" >&2; exit 1; }
+    [ -n "$WT" ] || { echo "error: relaunch metadata has no recorded worktree for $ID" >&2; exit 1; }
+    PROJ_ABS=$(cd "$PROJ_ABS" 2>/dev/null && pwd) || {
+      echo "error: relaunch recorded project cannot be resolved: $PROJ_ABS" >&2
+      exit 1
+    }
+    [ -d "$WT" ] || { echo "error: relaunch recorded worktree does not exist: $WT" >&2; exit 1; }
+  else
+    PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
+    WT=""
+  fi
   BRIEF="$DATA/$ID/brief.md"
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
@@ -2892,7 +2934,7 @@ real_path_or_raw() {  # <path>
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
 validate_spawn_worktree() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
+  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real project_common worktree_common
   wt_real=
   if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
     wt_real=
@@ -2906,6 +2948,22 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
+  fi
+  if [ "$RELAUNCH" -eq 1 ]; then
+    project_common=$(git -C "$PROJ_ABS" rev-parse --git-common-dir 2>/dev/null || true)
+    worktree_common=$(git -C "$WT" rev-parse --git-common-dir 2>/dev/null || true)
+    case "$project_common" in
+      /*) project_common=$(cd "$project_common" 2>/dev/null && pwd -P || true) ;;
+      *) project_common=$(cd "$PROJ_ABS/$project_common" 2>/dev/null && pwd -P || true) ;;
+    esac
+    case "$worktree_common" in
+      /*) worktree_common=$(cd "$worktree_common" 2>/dev/null && pwd -P || true) ;;
+      *) worktree_common=$(cd "$WT/$worktree_common" 2>/dev/null && pwd -P || true) ;;
+    esac
+    if [ -z "$project_common" ] || [ -z "$worktree_common" ] || [ "$project_common" != "$worktree_common" ]; then
+      echo "error: $source is not a worktree belonging to recorded project '$PROJ_ABS' (resolved '$WT'); refusing relaunch to avoid using an unrelated checkout. Inspect target $inspect_target" >&2
+      exit 1
+    fi
   fi
 }
 refuse_spawn_pool_lease() { # <reason> <inspect-target>
@@ -3011,7 +3069,14 @@ freshen_spawn_worktree_base() {  # <worktree>
 
 W="fm-$ID"
 SPAWN_START_DIR=$PROJ_ABS
+if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
+  SPAWN_START_DIR=$WT
+fi
 if [ "$RAW_LAUNCH" = 1 ] && [ "$RAW_LAUNCH_NEEDS_WORKTREE" = 1 ] && [ "$KIND" != secondmate ]; then
+  if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" = ship ]; then
+    echo "error: raw relaunch commands that require a worktree are refused; relaunch with a verified harness to reuse the recorded worktree" >&2
+    exit 1
+  fi
   case "$BACKEND" in
     orca)
       echo "error: raw relative launch paths are unavailable on backend=orca; use an absolute executable path" >&2
@@ -3043,7 +3108,7 @@ if [ "$RAW_LAUNCH" = 1 ] && [ "$RAW_LAUNCH_NEEDS_WORKTREE" = 1 ] && [ "$KIND" !=
   RAW_LAUNCH_WORKTREE_READY=1
   SPAWN_START_DIR=$WT
 fi
-if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
+if [ "$RELAUNCH" -eq 0 ] && [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
   treehouse_lease_args=(--lease --lease-holder "$W")
   [ -z "$ACCEPTED_LOCAL_BASE" ] || treehouse_lease_args+=(--accepted-local-base "$ACCEPTED_LOCAL_BASE")
   WT=$(cd "$PROJ_ABS" && "$SCRIPT_DIR/fm-treehouse-get.sh" "${treehouse_lease_args[@]}") || {
@@ -3122,9 +3187,20 @@ case "$BACKEND" in
       HERDR_PANE_ID=$(fm_meta_get "$STATE/$ID.meta" herdr_pane_id)
     fi
     if [ "$KIND" != secondmate ] && fm_backend_herdr_presentation_enabled "$CONFIG"; then
-      HERDR_SES=$(fm_backend_herdr_session)
+      if [ "$RELAUNCH" -eq 0 ]; then
+        HERDR_SES=$(fm_backend_herdr_session)
+      else
+        [ -n "$HERDR_SES" ] || {
+          echo "error: relaunch metadata has no recorded Herdr session binding; refusing to recover through presentation mode" >&2
+          exit 1
+        }
+      fi
       HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
       if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
+        if [ "$RELAUNCH" -eq 1 ]; then
+          echo "error: herdr presentation relaunch cannot safely reuse a journaled endpoint without replacing it; refusing to create a new pane" >&2
+          exit 1
+        fi
         fm_backend_herdr_server_ensure "$HERDR_SES" || {
           echo "error: herdr presentation recovery could not ensure its exact named session" >&2
           exit 1
@@ -3284,11 +3360,21 @@ EOF
     T="$HERDR_SES:$HERDR_PANE_ID"
     ;;
   zellij)
-    ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
-    ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$PROJ_ABS") || exit 1
-    read -r ZELLIJ_TAB_ID ZELLIJ_PANE_ID <<EOF
+    if [ "$RELAUNCH" -eq 1 ]; then
+      ZELLIJ_SES=$(fm_meta_get "$RELAUNCH_META" zellij_session)
+      ZELLIJ_TAB_ID=$(fm_meta_get "$RELAUNCH_META" zellij_tab_id)
+      ZELLIJ_PANE_ID=$(fm_meta_get "$RELAUNCH_META" zellij_pane_id)
+      [ -n "$ZELLIJ_SES" ] && [ -n "$ZELLIJ_PANE_ID" ] || {
+        echo "error: relaunch metadata has no recorded zellij endpoint for $ID" >&2
+        exit 1
+      }
+    else
+      ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
+      ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$PROJ_ABS") || exit 1
+      read -r ZELLIJ_TAB_ID ZELLIJ_PANE_ID <<EOF
 $ZELLIJ_TASK_IDS
 EOF
+    fi
     if [ -z "$ZELLIJ_TAB_ID" ] || [ -z "$ZELLIJ_PANE_ID" ]; then
       echo "error: zellij did not return a tab/pane id for $W" >&2
       exit 1
@@ -3296,11 +3382,20 @@ EOF
     T="$ZELLIJ_SES:$ZELLIJ_PANE_ID"
     ;;
   cmux)
-    fm_backend_cmux_container_ensure || exit 1
-    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS") || exit 1
-    read -r CMUX_WORKSPACE_ID CMUX_SURFACE_ID <<EOF
+    if [ "$RELAUNCH" -eq 1 ]; then
+      CMUX_WORKSPACE_ID=$(fm_meta_get "$RELAUNCH_META" cmux_workspace_id)
+      CMUX_SURFACE_ID=$(fm_meta_get "$RELAUNCH_META" cmux_surface_id)
+      [ -n "$CMUX_WORKSPACE_ID" ] && [ -n "$CMUX_SURFACE_ID" ] || {
+        echo "error: relaunch metadata has no recorded cmux endpoint for $ID" >&2
+        exit 1
+      }
+    else
+      fm_backend_cmux_container_ensure || exit 1
+      CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS") || exit 1
+      read -r CMUX_WORKSPACE_ID CMUX_SURFACE_ID <<EOF
 $CMUX_TASK_IDS
 EOF
+    fi
     if [ -z "$CMUX_WORKSPACE_ID" ] || [ -z "$CMUX_SURFACE_ID" ]; then
       echo "error: cmux did not return a workspace/surface id for $W" >&2
       exit 1
@@ -3308,6 +3403,16 @@ EOF
     T="$CMUX_WORKSPACE_ID:$CMUX_SURFACE_ID"
     ;;
   orca)
+    if [ "$RELAUNCH" -eq 1 ]; then
+      ORCA_WORKTREE_ID=$(fm_meta_get "$RELAUNCH_META" orca_worktree_id)
+      ORCA_TERMINAL=$(fm_meta_get "$RELAUNCH_META" terminal)
+      [ -n "$ORCA_WORKTREE_ID" ] && [ -n "$ORCA_TERMINAL" ] || {
+        echo "error: relaunch metadata has no recorded orca endpoint for $ID" >&2
+        exit 1
+      }
+      validate_spawn_worktree "orca relaunch" "$W"
+      T="$ORCA_TERMINAL"
+    else
     set +e
     ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W")
     ORCA_WT_STATUS=$?
@@ -3331,6 +3436,7 @@ EOF
       ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
     fi
     T="$ORCA_TERMINAL"
+    fi
     ;;
 esac
 [ "$PREWALK_ABORT_PHASE" != lease ] || PREWALK_ABORT_PHASE=endpoint
@@ -3363,6 +3469,32 @@ spawn_current_path() {  # <target>
     cmux) fm_backend_cmux_current_path "$1" "$W" ;;
   esac
 }
+if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
+  validate_spawn_worktree "relaunch metadata" "$ID"
+  if [ "$BACKEND" = orca ]; then
+    echo "error: backend=orca cannot prove the relaunch endpoint cwd; refusing to launch outside the recorded worktree" >&2
+    exit 1
+  fi
+  case "$BACKEND" in
+    tmux)
+      fm_backend_tmux_idle_foreground_shell_pid "$T" >/dev/null || {
+        echo "error: relaunch tmux endpoint is not proven idle; refusing to inject relaunch input into an active harness" >&2
+        exit 1
+      }
+      ;;
+    zellij|cmux)
+      echo "error: backend=$BACKEND relaunch cwd verification would inject a probe into the existing harness; refusing to relaunch an unverified endpoint" >&2
+      exit 1
+      ;;
+  esac
+  relaunch_endpoint_path=$(spawn_current_path "$T" || true)
+  relaunch_endpoint_real=$(real_path_or_raw "$relaunch_endpoint_path")
+  relaunch_worktree_real=$(real_path_or_raw "$WT")
+  [ -n "$relaunch_endpoint_path" ] && [ "$relaunch_endpoint_real" = "$relaunch_worktree_real" ] || {
+    echo "error: relaunch endpoint cwd does not match recorded worktree '$WT'; refusing to launch" >&2
+    exit 1
+  }
+fi
 spawn_send_literal() {  # <target> <text>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_literal "$1" "$2" ;;
@@ -3494,7 +3626,7 @@ hermes_wait_for_reasoning() {  # <effort>
   return 1
 }
 
-if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
   && [ "$PREWALK_WORKTREE_READY" != 1 ] && [ "$RAW_LAUNCH_WORKTREE_READY" != 1 ]; then
   printf -v treehouse_get_command '%q' "$SCRIPT_DIR/fm-treehouse-get.sh"
   if [ -n "$ACCEPTED_LOCAL_BASE" ]; then
@@ -3582,11 +3714,11 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
     fm_omp_clear_stale_runtime_markers "$WT" || exit 1
   fi
 fi
-if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
   && [ "$PREWALK_WORKTREE_READY" != 1 ] && [ "$RAW_LAUNCH_WORKTREE_READY" != 1 ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
-if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ] \
+if [ "$RELAUNCH" -eq 0 ] && [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ] \
   && [ "$PREWALK_WORKTREE_READY" != 1 ]; then
   validate_omp_prewalk_for_launch_dir "$WT"
   omp_project_extension_preflight "$WT" || exit 1

@@ -405,6 +405,14 @@ spawn_task() {  # <id> <home> <project>
     "$ROOT/bin/fm-spawn.sh" "$id" "$project" "$RAW_SLEEP_AGENT 120" --mode no-mistakes --yolo off --backend herdr
 }
 
+relaunch_task() {  # <id> <home>
+  local id=$1 home=$2
+  FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-spawn.sh" "$id" --relaunch --mode no-mistakes --yolo off --backend herdr
+}
+
 spawn_secondmate_task() {
   local id=$1 home=$2
   FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
@@ -1145,6 +1153,17 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
     "└ $EXPECTED_CONCISE · p:"*) ;;
     *) fail "$RESTART_ID fresh projection label did not apply concise prefix handling: $OLD_RESTART_LABEL" ;;
   esac
+  set +e
+  RELAUNCH_OUT=$(relaunch_task "$RESTART_ID" "$HOME_DIR" 2>&1)
+  RELAUNCH_STATUS=$?
+  set -e
+  [ "$RELAUNCH_STATUS" -ne 0 ] \
+    || fail "$RESTART_ID ship relaunch unexpectedly replaced its journaled Herdr endpoint"
+  printf '%s\n' "$RELAUNCH_OUT" \
+    | grep -Fq "cannot safely reuse a journaled endpoint" \
+    || fail "$RESTART_ID ship relaunch did not clearly refuse unsafe journaled endpoint recovery: $RELAUNCH_OUT"
+  [ "$(grep '^herdr_pane_id=' "$RESTART_META" | cut -d= -f2-)" = "$OLD_RESTART_PANE" ] \
+    || fail "$RESTART_ID refused relaunch changed the recorded Herdr pane"
   PATH="$HERDR_ORIGINAL_PATH" \
     "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
     || fail "could not stop the isolated session for $RESTART_ID validation"
