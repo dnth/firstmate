@@ -12,6 +12,7 @@ ok - an already-settled pane confirms via the existing inter-poll sleep, not an 
 ok - a sandbox relaunch records the isolated copy published by its own acquisition
 ok - a bare ship relaunch resumes the recorded worktree and preserves WIP
 ok - a raw ship relaunch requiring a worktree is refused
+ok - a ship relaunch refuses an active tmux endpoint before sending input
 # all fm-spawn-worktree-settle tests passed
 ShellCheck - shell script analysis tool
 version: 0.11.0
