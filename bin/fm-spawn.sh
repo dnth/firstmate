@@ -2901,7 +2901,7 @@ real_path_or_raw() {  # <path>
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
 validate_spawn_worktree() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
+  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real project_common worktree_common
   wt_real=
   if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
     wt_real=
@@ -2915,6 +2915,22 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
+  fi
+  if [ "$RELAUNCH" -eq 1 ]; then
+    project_common=$(git -C "$PROJ_ABS" rev-parse --git-common-dir 2>/dev/null || true)
+    worktree_common=$(git -C "$WT" rev-parse --git-common-dir 2>/dev/null || true)
+    case "$project_common" in
+      /*) project_common=$(cd "$project_common" 2>/dev/null && pwd -P || true) ;;
+      *) project_common=$(cd "$PROJ_ABS/$project_common" 2>/dev/null && pwd -P || true) ;;
+    esac
+    case "$worktree_common" in
+      /*) worktree_common=$(cd "$worktree_common" 2>/dev/null && pwd -P || true) ;;
+      *) worktree_common=$(cd "$WT/$worktree_common" 2>/dev/null && pwd -P || true) ;;
+    esac
+    if [ -z "$project_common" ] || [ -z "$worktree_common" ] || [ "$project_common" != "$worktree_common" ]; then
+      echo "error: $source is not a worktree belonging to recorded project '$PROJ_ABS' (resolved '$WT'); refusing relaunch to avoid using an unrelated checkout. Inspect target $inspect_target" >&2
+      exit 1
+    fi
   fi
 }
 refuse_spawn_pool_lease() { # <reason> <inspect-target>

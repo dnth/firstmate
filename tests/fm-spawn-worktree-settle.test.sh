@@ -253,6 +253,36 @@ test_ship_relaunch_refuses_active_tmux_endpoint() {
   pass "a ship relaunch refuses an active tmux endpoint before sending input"
 }
 
+test_ship_relaunch_refuses_unrelated_worktree() {
+  local rec id out status
+  id=ship-relaunch-unrelated-z7
+  rec=$(make_settle_case ship-relaunch-unrelated "$id" 0)
+  read_settle_record "$rec"
+  mkdir -p "$HOME_DIR/data/$id"
+  printf 'Delivery contract: mode=no-mistakes\nrefuse unrelated worktree\n' > "$HOME_DIR/data/$id/brief.md"
+  {
+    printf 'window=firstmate:fm-%s\n' "$id"
+    printf 'endpoint_task_id=%s\n' "$id"
+    printf 'worktree=%s\n' "$STALE_DIR"
+    printf 'project=%s\n' "$PROJ_DIR"
+    printf 'harness=codex\nkind=ship\nmode=no-mistakes\nyolo=off\n'
+    printf 'tasktmp=\nmodel=-\neffort=-\n'
+  } > "$HOME_DIR/state/$id.meta"
+
+  set +e
+  out=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' \
+    FM_FAKE_PANE_PATH="$STALE_DIR" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
+    PATH="$FAKEBIN_DIR:$PATH" "$SPAWN" "$id" --relaunch --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "unrelated worktree relaunch unexpectedly succeeded"
+  assert_contains "$out" "not a worktree belonging to recorded project" \
+    "unrelated worktree relaunch did not explain the refusal"
+  pass "a ship relaunch refuses a worktree from an unrelated repository"
+}
+
 # A single stale first read (the exact incident) must not be accepted: the
 # loop should keep polling until two consecutive reads agree, landing on the
 # real settled worktree instead.
@@ -300,5 +330,6 @@ test_sandbox_relaunch_records_fresh_ready_path
 test_ship_relaunch_reuses_recorded_worktree_without_project_positional
 test_ship_relaunch_refuses_raw_worktree_command
 test_ship_relaunch_refuses_active_tmux_endpoint
+test_ship_relaunch_refuses_unrelated_worktree
 
 echo "# all fm-spawn-worktree-settle tests passed"
