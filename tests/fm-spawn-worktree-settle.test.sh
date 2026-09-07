@@ -134,6 +134,39 @@ test_sandbox_relaunch_records_fresh_ready_path() {
   pass "a sandbox relaunch records the isolated copy published by its own acquisition"
 }
 
+test_ship_relaunch_reuses_recorded_worktree_without_project_positional() {
+  local rec id out status marker
+  id=ship-relaunch-recorded-z4
+  rec=$(make_settle_case ship-relaunch-recorded "$id" 0)
+  read_settle_record "$rec"
+  marker="$WT_DIR/uncommitted-wip.txt"
+  printf 'preserve this WIP\n' > "$marker"
+  mkdir -p "$HOME_DIR/data/$id"
+  printf 'Delivery contract: mode=no-mistakes\nresume recorded worktree\n' > "$HOME_DIR/data/$id/brief.md"
+  {
+    printf 'window=firstmate:fm-%s\n' "$id"
+    printf 'endpoint_task_id=%s\n' "$id"
+    printf 'worktree=%s\n' "$WT_DIR"
+    printf 'project=%s\n' "$PROJ_DIR"
+    printf 'harness=codex\nkind=ship\nmode=no-mistakes\nyolo=off\n'
+    printf 'tasktmp=\nmodel=-\neffort=-\n'
+  } > "$HOME_DIR/state/$id.meta"
+
+  out=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' \
+    PATH="$FAKEBIN_DIR:$PATH" "$SPAWN" "$id" --relaunch --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "bare ship relaunch should succeed"
+  assert_contains "$out" "spawned $id" "ship relaunch did not report success"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "ship relaunch did not preserve the recorded worktree"
+  [ -f "$marker" ] || fail "ship relaunch discarded uncommitted WIP"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "ship relaunch allocated a second worktree"
+  pass "a bare ship relaunch resumes the recorded worktree and preserves WIP"
+}
+
 # A single stale first read (the exact incident) must not be accepted: the
 # loop should keep polling until two consecutive reads agree, landing on the
 # real settled worktree instead.
@@ -178,5 +211,6 @@ test_already_settled_pane_costs_one_confirm_sleep() {
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
 test_sandbox_relaunch_records_fresh_ready_path
+test_ship_relaunch_reuses_recorded_worktree_without_project_positional
 
 echo "# all fm-spawn-worktree-settle tests passed"

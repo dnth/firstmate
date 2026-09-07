@@ -1217,7 +1217,7 @@ if [ "$KIND" = secondmate ]; then
       ;;
   esac
 else
-  PROJ=${POS[1]}
+  PROJ=${POS[1]:-}
   ARG3=${POS[2]:-}
 fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
@@ -2764,8 +2764,20 @@ if [ "$KIND" = secondmate ]; then
     BRIEF="$DATA/$ID/brief.md"
   fi
 else
-  PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
-  WT=""
+  if [ "$RELAUNCH" -eq 1 ]; then
+    PROJ_ABS=$(fm_meta_get "$RELAUNCH_META" project)
+    WT=$(fm_meta_get "$RELAUNCH_META" worktree)
+    [ -n "$PROJ_ABS" ] || { echo "error: relaunch metadata has no recorded project for $ID" >&2; exit 1; }
+    [ -n "$WT" ] || { echo "error: relaunch metadata has no recorded worktree for $ID" >&2; exit 1; }
+    PROJ_ABS=$(cd "$PROJ_ABS" 2>/dev/null && pwd) || {
+      echo "error: relaunch recorded project cannot be resolved: $PROJ_ABS" >&2
+      exit 1
+    }
+    [ -d "$WT" ] || { echo "error: relaunch recorded worktree does not exist: $WT" >&2; exit 1; }
+  else
+    PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
+    WT=""
+  fi
   BRIEF="$DATA/$ID/brief.md"
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
@@ -3026,7 +3038,7 @@ if [ "$RAW_LAUNCH" = 1 ] && [ "$RAW_LAUNCH_NEEDS_WORKTREE" = 1 ] && [ "$KIND" !=
   RAW_LAUNCH_WORKTREE_READY=1
   SPAWN_START_DIR=$WT
 fi
-if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
+if [ "$RELAUNCH" -eq 0 ] && [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
   treehouse_lease_args=(--lease --lease-holder "$W")
   [ -z "$ACCEPTED_LOCAL_BASE" ] || treehouse_lease_args+=(--accepted-local-base "$ACCEPTED_LOCAL_BASE")
   WT=$(cd "$PROJ_ABS" && "$SCRIPT_DIR/fm-treehouse-get.sh" "${treehouse_lease_args[@]}") || {
@@ -3477,7 +3489,7 @@ hermes_wait_for_reasoning() {  # <effort>
   return 1
 }
 
-if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
   && [ "$PREWALK_WORKTREE_READY" != 1 ] && [ "$RAW_LAUNCH_WORKTREE_READY" != 1 ]; then
   printf -v treehouse_get_command '%q' "$SCRIPT_DIR/fm-treehouse-get.sh"
   if [ -n "$ACCEPTED_LOCAL_BASE" ]; then
@@ -3565,11 +3577,11 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
     fm_omp_clear_stale_runtime_markers "$WT" || exit 1
   fi
 fi
-if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
   && [ "$PREWALK_WORKTREE_READY" != 1 ] && [ "$RAW_LAUNCH_WORKTREE_READY" != 1 ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
-if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ] \
+if [ "$RELAUNCH" -eq 0 ] && [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ] \
   && [ "$PREWALK_WORKTREE_READY" != 1 ]; then
   validate_omp_prewalk_for_launch_dir "$WT"
   omp_project_extension_preflight "$WT" || exit 1
