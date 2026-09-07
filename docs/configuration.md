@@ -222,7 +222,7 @@ The full cmux home label also includes a short hash of the resolved `FM_ROOT` pa
 ## Harness support
 
 claude, codex, opencode, pi, pi-signed, omp, grok, and kimi are empirically verified harness identities for crewmate and secondmate launches on their documented backend combinations.
-Hermes is verified only for crewmate and scout launches and is refused for primary sessions and secondmates.
+Devin and Hermes are empirically verified for crewmate and scout launches only; primary and secondmate launches are refused.
 Hermes runs as a persistent TUI; ordinary local text arrives through the durable steering inbox, while slash commands use its composer on the verified tmux and Herdr backends, and Hermes spawns on other backends are refused before endpoint creation.
 Hermes profiles accept the shared `low`, `medium`, `high`, `xhigh`, and `max` effort vocabulary and forward it as native reasoning effort.
 Each Hermes crew spawn surgically registers the guarded profile-global lifecycle bridge: session start binds the task session once, matching pre-LLM records busy before acknowledging the turn, and matching session end records idle.
@@ -269,11 +269,12 @@ Those inherited values are defaults and rules only; `fm-spawn` still permits a c
 `config/secondmate-harness` and `config/secondmate-harness-fallback` are not inherited because secondmates do not launch secondmates.
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
 For Kimi crews, `fm-spawn.sh` runs `fm-kimi-turnend-hook.sh install`, drops a per-task `.fm-kimi-turnend` pointer in the worktree, and records the matching private registry token for teardown.
-Every task turn-end surface - the Claude Stop hook, the OpenCode, Pi, and OMP extensions, the Codex notify command, the grok and Kimi global registries, and Hermes - emits its notification through `bin/fm-turnend-signal.sh`, which writes the per-generation marker `state/<id>.turn-ended.<spawn_gen>` lock-free and unconditionally, and takes no lock and makes no live/stale decision.
+For Devin crews, `fm-spawn.sh` installs the global Claude-format Stop hook, drops a per-task `.fm-devin-turnend` pointer in the worktree, and records the matching private registry token and directory for teardown.
+Every task turn-end surface - the Claude Stop hook, the OpenCode, Pi, and OMP extensions, the Codex notify command, the grok, Kimi, and Devin global registries, and Hermes - emits its notification through `bin/fm-turnend-signal.sh`, which writes the per-generation marker `state/<id>.turn-ended.<spawn_gen>` lock-free and unconditionally, and takes no lock and makes no live/stale decision.
 Because each incarnation writes only its own generation's file, a delayed older-incarnation hook can never clobber a newer live incarnation's marker, and the publisher is both non-blocking (a synchronous Stop/turn-end hook never waits on the metadata lock that teardown holds while stopping the harness) and non-dropping (a live worker's completion is always recorded).
-Incarnation gating is applied on the consumer side by `bin/fm-wake-lib.sh`'s `fm_wake_turnend_marker_is_stale`, which the watcher calls at wake-handling time: it fires only the marker whose generation matches the task's live metadata `spawn_gen`, and ignores every other-generation marker (a superseded relaunch, or any generation once the metadata is gone), so an in-memory hook, a recycled-worktree hook, the Codex notify command, or a persistent global grok/Kimi registry token can leave a marker yet never re-fire a wake for a torn-down or relaunched task.
+Incarnation gating is applied on the consumer side by `bin/fm-wake-lib.sh`'s `fm_wake_turnend_marker_is_stale`, which the watcher calls at wake-handling time: it fires only the marker whose generation matches the task's live metadata `spawn_gen`, and ignores every other-generation marker (a superseded relaunch, or any generation once the metadata is gone), so an in-memory hook, a recycled-worktree hook, the Codex notify command, or a persistent global grok/Kimi/Devin registry token can leave a marker yet never re-fire a wake for a torn-down or relaunched task.
 Teardown removes every `state/<id>.turn-ended.<gen>` for the id.
-The grok and Kimi registry entries record `target=`, `spawn_gen=`, and `signal=` lines; a legacy single-line entry naming only the marker path is treated as unrecognized and never reaches the publisher.
+The grok, Kimi, and Devin registry entries record `target=`, `spawn_gen=`, and `signal=` lines; a legacy single-line entry naming only the marker path is treated as unrecognized and never reaches the publisher.
 Hermes additionally guards its publish with the session id captured at `on_session_start`, and teardown removes that session sidecar and its registry token.
 Kimi continues to use the captain's normal Kimi home, including the existing config, skills, and memory; Firstmate does not create an isolated Kimi home.
 The Kimi installer requires an existing regular non-symlink `~/.kimi-code/config.toml`, `python3` with `tomllib`, and `jq`; it validates but never serializes the captain's TOML and refuses before writing when the config is missing, malformed, or surprising or when either tool requirement is unavailable.
@@ -380,7 +381,7 @@ Per rule, `when` and `use` are required.
 Both `use` and the optional top-level `default` accept either one profile object or a non-empty array of profile objects.
 The single-object form stays fully backward-compatible, and every profile needs `harness`.
 Profile `model`, `effort`, and `prewalk_into` fields and rule `why` are optional.
-The verified `harness` values for crew profiles are `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `omp`, `grok`, `kimi`, and `hermes`.
+The verified `harness` values for crew profiles are `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `omp`, `grok`, `kimi`, `hermes`, and `devin`.
 An omitted model or effort means the selected harness uses its own default for that axis.
 An omitted `prewalk_into` makes `fm-spawn.sh` add no Prewalk flags and preserves ordinary OMP-configured behavior byte-for-byte.
 `prewalk_into` is opt-in and valid only when the same profile selects `harness: "omp"`.
