@@ -126,8 +126,10 @@ hook_tmp=$(mktemp "$DEVIN_HOME_DIR/.fm-turn-end.sh.XXXXXXXX") || {
   printf 'fm-devin-turnend-hook: refused: could not stage the hook script.\n' >&2
   exit 1
 }
-cat > "$hook_tmp" <<'EOF'
-#!/usr/bin/env bash
+registry_literal=$(printf '%q' "$REGISTRY")
+{
+printf '#!/usr/bin/env bash\nregistry=%s\n' "$registry_literal"
+cat <<'EOF'
 # Firstmate Devin crew turn-end hook. Managed by fm-devin-turnend-hook.sh.
 # Every path is deliberately silent and exits zero.
 set +e
@@ -148,9 +150,7 @@ IFS= read -r -n 256 first < "$pointer" 2>/dev/null || [ -n "$first" ] || exit 0
 case "$first" in token=*) token=${first#token=} ;; *) exit 0 ;; esac
 case "$token" in fm.????????????) ;; *) exit 0 ;; esac
 case "$token" in *[!A-Za-z0-9._-]*) exit 0 ;; esac
-devin_config_home=${XDG_CONFIG_HOME:-${HOME:-}/.config}
-case "$devin_config_home" in /*) ;; *) exit 0 ;; esac
-registry="$devin_config_home/devin/fm-turn-end.d/$token"
+registry="$registry/$token"
 [ -f "$registry" ] && [ ! -L "$registry" ] || exit 0
 target= spawn_gen= signal= extra=
 IFS= read -r target < "$registry" 2>/dev/null || exit 0
@@ -167,6 +167,7 @@ id=${name%.turn-ended}
 "$signal" "$state" "$id" "$spawn_gen" || true
 exit 0
 EOF
+} > "$hook_tmp"
 chmod 700 "$hook_tmp"
 if [ -e "$HOOK" ] || [ -L "$HOOK" ]; then
   if [ ! -f "$HOOK" ] || [ -L "$HOOK" ] || ! cmp -s "$hook_tmp" "$HOOK"; then

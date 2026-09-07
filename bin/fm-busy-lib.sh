@@ -357,7 +357,7 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   # both directions, so working maps to busy and idle/done/blocked map to idle.
   if [ "$backend" = herdr ] && [ "$harness" = devin ] \
       && command -v fm_backend_busy_state >/dev/null 2>&1; then
-    native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
+    native=$(fm_backend_busy_state "$backend" "$target" "$harness" 2>/dev/null || true)
     case "$native" in
       busy|idle)
         printf '%s herdr-native' "$native"

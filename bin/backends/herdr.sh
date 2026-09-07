@@ -3363,8 +3363,17 @@ fm_backend_herdr_agent_status_raw() {  # <session> <pane_id>
 # gets real semantics" per the design report. See
 # fm_backend_herdr_classify_agent_status for the status->busy/idle/unknown
 # mapping.
-fm_backend_herdr_busy_state() {  # <target>
-  fm_backend_herdr_target_ready "$1" || { printf 'unknown'; return 0; }
+fm_backend_herdr_busy_state() {  # <target> [harness]
+  local target=$1 harness=${2:-}
+  fm_backend_herdr_target_ready "$target" || { printf 'unknown'; return 0; }
+  if [ "$harness" = devin ]; then
+    local identity agent agent_status
+    identity=$(fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null || true)
+    IFS=$'\t' read -r agent agent_status <<EOF
+$identity
+EOF
+    [ "$agent" = devin ] || { printf 'unknown'; return 0; }
+  fi
   fm_backend_herdr_classify_agent_status \
     "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")"
 }
