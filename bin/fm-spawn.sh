@@ -255,6 +255,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+PRIMARY_HARNESS=$("$FM_ROOT/bin/fm-harness.sh" 2>/dev/null || echo unknown)
 SUB_HOME_MARKER=".fm-secondmate-home"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
@@ -1354,13 +1355,9 @@ refuse_crew_only_secondmate() {  # <harness>
 }
 
 refuse_devin_primary() {  # <harness>
-  local configured=
-  if [ "$KIND" = ship ] && [ "$1" = devin ] && [ "$HARNESS_SET" -eq 0 ]; then
-    [ -f "$CONFIG/crew-harness" ] && configured=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
-    [ -n "$configured" ] && [ "$configured" != default ] || {
-    echo "error: harness=devin is verified for crewmates and scouts only; primary support is permanently refused" >&2
+  if [ "$PRIMARY_HARNESS" = devin ] && [ "$1" = devin ]; then
+    echo "error: Devin primary cannot launch Devin crewmates or secondmates; primary support is permanently refused" >&2
     exit 1
-    }
   fi
 }
 

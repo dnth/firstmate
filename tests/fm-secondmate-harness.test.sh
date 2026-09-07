@@ -1135,16 +1135,24 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
 }
 
 test_devin_primary_refusal_and_profile_composition() {
-  local w home proj wt fakebin launchlog id meta out rc
+  local w home proj wt fakebin launchlog id meta out rc fake_root f
   w="$TMP_ROOT/devin-primary-boundary"
   home="$w/home"; proj="$w/project"; wt="$w/wt"; launchlog="$w/launch.log"; id="devin-crew-z3"
   mkdir -p "$home/config" "$home/data/$id" "$home/projects" "$home/state"
   printf 'brief\n' > "$home/data/$id/brief.md"
   fm_git_worktree "$proj" "$wt" devin-primary-boundary
   fakebin=$(make_launch_capturing_tmux "$w/tmux")
+  fake_root="$w/root"; mkdir -p "$fake_root/bin"
+  for f in "$ROOT"/bin/*; do ln -s "$f" "$fake_root/bin/$(basename "$f")"; done
+  rm -f "$fake_root/bin/fm-harness.sh"
+  cat > "$fake_root/bin/fm-harness.sh" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = "" ]; then echo devin; else exec "$ROOT/bin/fm-harness.sh" "\$@"; fi
+EOF
+  chmod +x "$fake_root/bin/fm-harness.sh"
   rc=0
   PATH="$fakebin:$BASE_PATH" TMUX="fake,1,0" CLAUDECODE=1 \
-    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_ROOT_OVERRIDE="$fake_root" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
     FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" --mode no-mistakes --yolo off --model family --effort high \
@@ -1157,7 +1165,7 @@ test_devin_primary_refusal_and_profile_composition() {
   # The same adapter remains hard-refused for secondmates.
   local sm="$w/secondmate"; make_seeded_home "$sm" sm
   rc=0
-  PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+  PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 FM_ROOT_OVERRIDE="$fake_root" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
     FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 "$ROOT/bin/fm-spawn.sh" sm "$sm" devin --secondmate \
     >/dev/null 2>"$w/secondmate.err" || rc=$?

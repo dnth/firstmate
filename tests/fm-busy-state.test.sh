@@ -361,6 +361,12 @@ test_herdr_native_busy_only() {
   FAKE_NATIVE=idle
   out=$(fm_busy_classify herdr s:p claude t1 "$state")
   [ "$out" = "unknown missing" ] || fail "native idle must NOT classify idle, got '$out'"
+  FAKE_NATIVE=busy
+  out=$(fm_busy_classify herdr s:p devin t1 "$state")
+  [ "$out" = "busy herdr-native" ] || fail "Devin native busy must classify busy, got '$out'"
+  FAKE_NATIVE=idle
+  out=$(fm_busy_classify herdr s:p devin t1 "$state")
+  [ "$out" = "unknown missing" ] || fail "Devin native idle must remain unknown without a record, got '$out'"
   # A valid record outranks the native verdict.
   local gen
   gen=$("$EV" arm "$state" t1)

@@ -81,7 +81,7 @@ omp_ancestry_matches() {  # <exact|launch-shape>
         args=$(ps -o args= -p "$pid" 2>/dev/null)
         [ "$mode" = launch-shape ] && omp_launch_argv_shape "$args" && return 0
         ;;
-      *claude*|*codex*|*opencode*|*grok*|kimi|pi|pi-signed) return 1 ;;
+      *claude*|*codex*|*opencode*|*grok*|kimi|devin|pi|pi-signed) return 1 ;;
       node*|python*)
         args=$(ps -o args= -p "$pid" 2>/dev/null)
         case "$args" in

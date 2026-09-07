@@ -1182,3 +1182,5 @@ App-server partial methods and raw socket experiments do not satisfy that bridge
 
 The opt-in live guard [`tests/fm-devin-herdr-live-e2e.test.sh`](../../tests/fm-devin-herdr-live-e2e.test.sh) records a real Devin crew's Herdr `working`, `idle`, and `done` states and requires the generation-bound turn-end marker from the global Stop hook.
 Run it with `FM_DEVIN_LIVE_E2E=1 FM_DEVIN_LIVE_TASK=<task-id> tests/fm-devin-herdr-live-e2e.test.sh` after preparing a Devin scout task; the guard fails when Devin or Herdr is absent and never reports a skipped live check as evidence.
+Deterministic adapter evidence was rechecked on 2026-09-07 with `FM_GATE_REFUSE_BYPASS=1 bash tests/fm-devin-adapter.test.sh` (`ok - Devin Stop hook publishes generation-bound markers and tears down cleanly`) and `FM_GATE_REFUSE_BYPASS=1 bash tests/fm-busy-state.test.sh` (`all fm-busy-state tests passed`).
+No credentialed Devin live run was available in this review; the opt-in guard remains the acceptance command for capturing that external receipt.
