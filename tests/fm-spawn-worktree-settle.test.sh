@@ -56,6 +56,9 @@ case "${1:-}" in
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
+    if [ -n "${FM_FAKE_SEND_LOG:-}" ]; then
+      printf '%s\n' "$*" >> "$FM_FAKE_SEND_LOG"
+    fi
     if [ -n "${FM_FAKE_READY_PATH:-}" ]; then
       for arg in "$@"; do
         case "$arg" in
@@ -188,6 +191,39 @@ test_ship_relaunch_reuses_recorded_worktree_without_project_positional() {
   assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
     "ship relaunch allocated a second worktree"
   pass "a bare ship relaunch resumes the recorded worktree and preserves WIP"
+}
+
+test_ship_relaunch_restores_recorded_profile_without_flags() {
+  local rec id out status send_log
+  id=ship-relaunch-profile-z4b
+  rec=$(make_settle_case ship-relaunch-profile "$id" 0)
+  read_settle_record "$rec"
+  send_log="$(dirname "$HOME_DIR")/send-keys.log"
+  mkdir -p "$HOME_DIR/data/$id"
+  printf 'Delivery contract: mode=no-mistakes\nrestore recorded profile\n' > "$HOME_DIR/data/$id/brief.md"
+  printf 'claude\n' > "$HOME_DIR/config/crew-harness"
+  {
+    printf 'window=firstmate:fm-%s\n' "$id"
+    printf 'endpoint_task_id=%s\n' "$id"
+    printf 'worktree=%s\n' "$WT_DIR"
+    printf 'project=%s\n' "$PROJ_DIR"
+    printf 'harness=codex\nkind=ship\nmode=no-mistakes\nyolo=off\n'
+    printf 'tasktmp=\nmodel=recorded-model\neffort=high\n'
+  } > "$HOME_DIR/state/$id.meta"
+
+  out=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' \
+    FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
+    FM_FAKE_SEND_LOG="$send_log" PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" --relaunch --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "bare ship relaunch with recorded profile should succeed"
+  assert_contains "$(cat "$send_log")" "codex --model 'recorded-model'" \
+    "ship relaunch did not restore the recorded model"
+  assert_contains "$(cat "$send_log")" "model_reasoning_effort=\"high\"" \
+    "ship relaunch did not restore the recorded effort"
+  pass "a bare ship relaunch restores recorded harness, model, and effort"
 }
 
 test_ship_relaunch_refuses_raw_worktree_command() {
@@ -328,6 +364,7 @@ test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
 test_sandbox_relaunch_records_fresh_ready_path
 test_ship_relaunch_reuses_recorded_worktree_without_project_positional
+test_ship_relaunch_restores_recorded_profile_without_flags
 test_ship_relaunch_refuses_raw_worktree_command
 test_ship_relaunch_refuses_active_tmux_endpoint
 test_ship_relaunch_refuses_unrelated_worktree
