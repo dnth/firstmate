@@ -1177,3 +1177,8 @@ The host-tool sequence was:
 Observed guarantee: a Desktop-owned thread can write Firstmate lifecycle files when the prompt provides an authorized absolute path, and create, send, read, and archive work at the Desktop host-tool layer.
 The missing guarantee remains a supported shell-callable bridge that lets Firstmate perform those operations against the same visible Desktop endpoint.
 App-server partial methods and raw socket experiments do not satisfy that bridge contract.
+
+## Devin Herdr crew lifecycle
+
+The opt-in live guard [`tests/fm-devin-herdr-live-e2e.test.sh`](../../tests/fm-devin-herdr-live-e2e.test.sh) records a real Devin crew's Herdr `working`, `idle`, and `done` states and requires the generation-bound turn-end marker from the global Stop hook.
+Run it with `FM_DEVIN_LIVE_E2E=1 FM_DEVIN_LIVE_TASK=<task-id> tests/fm-devin-herdr-live-e2e.test.sh` after preparing a Devin scout task; the guard fails when Devin or Herdr is absent and never reports a skipped live check as evidence.

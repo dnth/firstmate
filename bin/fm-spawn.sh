@@ -1353,6 +1353,17 @@ refuse_crew_only_secondmate() {  # <harness>
   esac
 }
 
+refuse_devin_primary() {  # <harness>
+  local configured=
+  if [ "$KIND" = ship ] && [ "$1" = devin ] && [ "$HARNESS_SET" -eq 0 ]; then
+    [ -f "$CONFIG/crew-harness" ] && configured=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
+    [ -n "$configured" ] && [ "$configured" != default ] || {
+    echo "error: harness=devin is verified for crewmates and scouts only; primary support is permanently refused" >&2
+    exit 1
+    }
+  fi
+}
+
 raw_launch_omp_word_has_shell_grammar() {  # <word>
   case "$1" in
     -*|'!'|time|coproc|if|then|elif|else|fi|for|while|until|do|done|case|'esac'|function|select|in|bash|sh|zsh|fish|dash|ksh|csh|tcsh|eval|source|.|nohup|nice|timeout|stdbuf|setsid|chroot|runcon|unshare|taskset|ionice|sudo|doas|xargs|rlwrap|unbuffer|watch|strace|gdb|lldb|valgrind|flock|\[\[|\]\]|~*|*[\*\?\[]*) return 0 ;;
@@ -1709,6 +1720,8 @@ case "$ARG3" in
     }
     ;;
 esac
+
+refuse_devin_primary "$HARNESS"
 
 # config/secondmate-harness may carry optional model/effort tokens alongside the
 # harness ("<harness> [<model>] [<effort>]"). They apply only when this is a
