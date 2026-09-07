@@ -138,6 +138,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/ext-respond/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/firstmate-codexapp/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -200,6 +204,10 @@
     {
       "path": "CONTRIBUTING.md",
       "audience": "maintainer-architecture"
+    },
+    {
+      "path": "contrib/hermes-gateway-firstmate-comms/README.md",
+      "audience": "operator-current"
     },
     {
       "path": "README.md",

@@ -112,6 +112,8 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-merge-outcome-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh
 . "$SCRIPT_DIR/fm-x-lib.sh"
+# shellcheck source=bin/fm-ext-lib.sh
+. "$SCRIPT_DIR/fm-ext-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
 # Parent-owned secondmate missed-report guards: durable pending-reply
@@ -1241,11 +1243,24 @@ while :; do
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
       is_pr_poll=0
+      # A check that appends its own durable wake records before it consumes
+      # the work they describe; this loop then nudges without appending again.
+      check_owns_wake=0
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
           && [ -f "$FM_ROOT/bin/fm-x-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-x-poll.sh" ]; then
           FM_HOME="$FM_HOME" run_check_capture "$FM_ROOT/bin/fm-x-poll.sh" || exit 1
           out=$FM_CHECK_RESULT
+        else
+          rejected_checks="$rejected_checks $c"
+          continue
+        fi
+      elif [ "$(basename "$c")" = ext-watch.check.sh ]; then
+        if fm_ext_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
+          && [ -f "$FM_ROOT/bin/fm-ext-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-ext-poll.sh" ]; then
+          FM_HOME="$FM_HOME" run_check_capture "$FM_ROOT/bin/fm-ext-poll.sh" || exit 1
+          out=$FM_CHECK_RESULT
+          check_owns_wake=1
         else
           rejected_checks="$rejected_checks $c"
           continue
@@ -1313,6 +1328,14 @@ while :; do
             continue
           fi
           wake "$reason"
+        fi
+        if [ "$check_owns_wake" -eq 1 ]; then
+          # fm-ext-poll.sh already made one record durable per claimed request,
+          # and released the claim again for any record it could not append.
+          # Appending here as well would double every request.
+          touch "$STATE/.last-check"
+          wake "$reason"
+          continue
         fi
         fm_wake_append check "$c" "$reason" || exit 1
         touch "$STATE/.last-check"
