@@ -409,6 +409,20 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ -f "$RELAUNCH_META" ] || { echo "error: --relaunch needs existing metadata at $RELAUNCH_META" >&2; exit 1; }
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
+  if [ "$KIND" != secondmate ]; then
+    if [ "$HARNESS_SET" -eq 0 ]; then
+      HARNESS_ARG=$(fm_meta_get "$RELAUNCH_META" harness)
+      [ -n "$HARNESS_ARG" ] || { echo "error: relaunch metadata has no recorded harness for $RELAUNCH_ID" >&2; exit 1; }
+    fi
+    if [ "$MODEL_SET" -eq 0 ]; then
+      MODEL=$(fm_meta_get "$RELAUNCH_META" model)
+      case "$MODEL" in default|-) MODEL= ;; esac
+    fi
+    if [ "$EFFORT_SET" -eq 0 ]; then
+      EFFORT=$(fm_meta_get "$RELAUNCH_META" effort)
+      case "$EFFORT" in default|-) EFFORT= ;; esac
+    fi
+  fi
 fi
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
@@ -3006,6 +3020,9 @@ freshen_spawn_worktree_base() {  # <worktree>
 
 W="fm-$ID"
 SPAWN_START_DIR=$PROJ_ABS
+if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
+  SPAWN_START_DIR=$WT
+fi
 if [ "$RAW_LAUNCH" = 1 ] && [ "$RAW_LAUNCH_NEEDS_WORKTREE" = 1 ] && [ "$KIND" != secondmate ]; then
   case "$BACKEND" in
     orca)
@@ -3279,11 +3296,21 @@ EOF
     T="$HERDR_SES:$HERDR_PANE_ID"
     ;;
   zellij)
-    ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
-    ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$PROJ_ABS") || exit 1
-    read -r ZELLIJ_TAB_ID ZELLIJ_PANE_ID <<EOF
+    if [ "$RELAUNCH" -eq 1 ]; then
+      ZELLIJ_SES=$(fm_meta_get "$RELAUNCH_META" zellij_session)
+      ZELLIJ_TAB_ID=$(fm_meta_get "$RELAUNCH_META" zellij_tab_id)
+      ZELLIJ_PANE_ID=$(fm_meta_get "$RELAUNCH_META" zellij_pane_id)
+      [ -n "$ZELLIJ_SES" ] && [ -n "$ZELLIJ_PANE_ID" ] || {
+        echo "error: relaunch metadata has no recorded zellij endpoint for $ID" >&2
+        exit 1
+      }
+    else
+      ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
+      ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$PROJ_ABS") || exit 1
+      read -r ZELLIJ_TAB_ID ZELLIJ_PANE_ID <<EOF
 $ZELLIJ_TASK_IDS
 EOF
+    fi
     if [ -z "$ZELLIJ_TAB_ID" ] || [ -z "$ZELLIJ_PANE_ID" ]; then
       echo "error: zellij did not return a tab/pane id for $W" >&2
       exit 1
@@ -3291,11 +3318,20 @@ EOF
     T="$ZELLIJ_SES:$ZELLIJ_PANE_ID"
     ;;
   cmux)
-    fm_backend_cmux_container_ensure || exit 1
-    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS") || exit 1
-    read -r CMUX_WORKSPACE_ID CMUX_SURFACE_ID <<EOF
+    if [ "$RELAUNCH" -eq 1 ]; then
+      CMUX_WORKSPACE_ID=$(fm_meta_get "$RELAUNCH_META" cmux_workspace_id)
+      CMUX_SURFACE_ID=$(fm_meta_get "$RELAUNCH_META" cmux_surface_id)
+      [ -n "$CMUX_WORKSPACE_ID" ] && [ -n "$CMUX_SURFACE_ID" ] || {
+        echo "error: relaunch metadata has no recorded cmux endpoint for $ID" >&2
+        exit 1
+      }
+    else
+      fm_backend_cmux_container_ensure || exit 1
+      CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS") || exit 1
+      read -r CMUX_WORKSPACE_ID CMUX_SURFACE_ID <<EOF
 $CMUX_TASK_IDS
 EOF
+    fi
     if [ -z "$CMUX_WORKSPACE_ID" ] || [ -z "$CMUX_SURFACE_ID" ]; then
       echo "error: cmux did not return a workspace/surface id for $W" >&2
       exit 1
@@ -3303,6 +3339,16 @@ EOF
     T="$CMUX_WORKSPACE_ID:$CMUX_SURFACE_ID"
     ;;
   orca)
+    if [ "$RELAUNCH" -eq 1 ]; then
+      ORCA_WORKTREE_ID=$(fm_meta_get "$RELAUNCH_META" orca_worktree_id)
+      ORCA_TERMINAL=$(fm_meta_get "$RELAUNCH_META" terminal)
+      [ -n "$ORCA_WORKTREE_ID" ] && [ -n "$ORCA_TERMINAL" ] || {
+        echo "error: relaunch metadata has no recorded orca endpoint for $ID" >&2
+        exit 1
+      }
+      validate_spawn_worktree "orca relaunch" "$W"
+      T="$ORCA_TERMINAL"
+    else
     set +e
     ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W")
     ORCA_WT_STATUS=$?
@@ -3326,6 +3372,7 @@ EOF
       ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
     fi
     T="$ORCA_TERMINAL"
+    fi
     ;;
 esac
 [ "$PREWALK_ABORT_PHASE" != lease ] || PREWALK_ABORT_PHASE=endpoint
