@@ -1713,6 +1713,22 @@ case "$ARG3" in
     HARNESS=$ARG3
     [ "$KIND" != secondmate ] || refuse_crew_only_secondmate "$HARNESS"
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || {
+      # A relaunch with an unverified/raw recorded harness must still fail at
+      # the stronger presentation recovery boundary when its exact endpoint is
+      # journaled.  Otherwise the adapter lookup masks the safety refusal and
+      # the caller cannot distinguish "unsupported raw" from "unsafe endpoint
+      # recovery" (and, more importantly, future code could accidentally take
+      # the fresh-launch path before inspecting the journal).
+      if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" = ship ]; then
+        relaunch_backend=$(fm_meta_get "$RELAUNCH_META" backend)
+        [ -n "$relaunch_backend" ] || relaunch_backend=tmux
+        if [ "$relaunch_backend" = herdr ] \
+           && fm_backend_herdr_presentation_enabled "$CONFIG" \
+           && { [ -e "$STATE/$ID.herdr-presentation" ] || [ -L "$STATE/$ID.herdr-presentation" ]; }; then
+          echo "error: herdr presentation relaunch cannot safely reuse a journaled endpoint without replacing it; refusing to create a new pane" >&2
+          exit 1
+        fi
+      fi
       if [ "$KIND" = secondmate ]; then
         echo "error: unknown secondmate harness '$HARNESS'; secondmates require a verified harness adapter" >&2
       else
