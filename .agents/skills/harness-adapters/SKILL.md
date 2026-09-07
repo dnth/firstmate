@@ -448,6 +448,19 @@ Each Kimi crew worktree receives a gitignored `.fm-kimi-turnend` token pointer, 
 A guarded silent hook cannot be verified from absence of effect, so prove invocation with an unguarded probe before concluding that the hook did not fire.
 The guarded turn-end signal remains a wake notification; standalone Kimi has no busy-state source until one is live-verified.
 
+## devin (CREWMATE/SCOUT ONLY; VERIFIED 2026-09-07, Devin CLI 3000.6.14)
+
+| Fact | Value |
+|---|---|
+| Launch | `devin --permission-mode dangerous --prompt-file <brief>`; never `-p`, `--sandbox`, or `/handoff`. |
+| Model and effort | One model string: Firstmate composes `model=<family>` and `effort=<suffix>` as `--model <family>-<effort>`. There is no separate effort flag. |
+| Busy state | Herdr-native `agent_status` (`working` busy; `idle`/`done`/`blocked` idle). Devin pane text is not readable through `herdr pane read`, so no glyph classifier is used. |
+| Turn end | Global token-guarded Claude-format Stop hook publishes the generation-bound `state/<id>.turn-ended.<gen>` marker. |
+| Scope | Verified crewmates and scouts only. Primary and secondmate launches are hard-refused permanently. |
+| Quirk | Devin auto-reads `AGENTS.md`, but truncates injected rules at 16KB. |
+
+Devin runs fully unattended under `--permission-mode dangerous` and remains local; do not invoke `/handoff`.
+
 ## hermes (CREWMATE/SCOUT ONLY; VERIFIED 2026-08-25, Hermes Agent v0.20.0)
 
 Hermes is verified only as a crewmate or scout adapter.

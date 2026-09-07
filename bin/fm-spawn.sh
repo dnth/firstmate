@@ -586,10 +586,10 @@ spawn_remote_secondmate() {
   fi
   case "$harness" in
     omp|claude|codex|opencode|pi|pi-signed|grok|kimi) ;;
-    hermes)
+    hermes|devin)
       fm_lock_release "$registry_lock" || true
       fm_lock_release "$SPAWN_TASK_LOCK" || true
-      echo "error: harness=hermes is verified for crewmates and scouts only; secondmate support is not verified" >&2
+      echo "error: harness=$harness is verified for crewmates and scouts only; secondmate support is permanently refused" >&2
       return 1
       ;;
     *)
@@ -1200,7 +1200,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|omp|grok|kimi)
+    ''|claude|codex|opencode|pi|pi-signed|omp|grok|kimi|devin)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1325,6 +1325,7 @@ launch_template() {
     # Its turn-end signal is a globally configured Stop hook plus a guarded
     # per-task worktree token, so no launch placeholder belongs here.
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
+    devin) printf '%s' 'devin --permission-mode dangerous __MODELFLAG____EFFORTFLAG__--prompt-file __BRIEF__' ;;
     # Hermes v0.20.0's modern TUI is launched bare and receives the brief only
     # after its structural composer-ready gate below. The CLI --reasoning flag
     # is retained for forward compatibility, while the same launch gate also
@@ -1345,8 +1346,8 @@ launch_template() {
 # of the generic "unknown harness" / "no verified launch template" fallback.
 refuse_crew_only_secondmate() {  # <harness>
   case "$1" in
-    hermes)
-      echo "error: harness=hermes is verified for crewmates and scouts only; secondmate support is not verified" >&2
+    hermes|devin)
+      echo "error: harness=$1 is verified for crewmates and scouts only; secondmate support is permanently refused" >&2
       exit 1
       ;;
   esac
@@ -1671,7 +1672,7 @@ case "$ARG3" in
       fi
       if [ -n "$CREW_FALLBACK_HARNESS" ]; then
         case "$CREW_FALLBACK_HARNESS" in
-          claude|codex|opencode|pi|pi-signed|omp|grok|kimi|hermes) ;;
+          claude|codex|opencode|pi|pi-signed|omp|grok|kimi|hermes|devin) ;;
           *) echo "error: config/crew-harness-fallback names an unverified harness: $CREW_FALLBACK_HARNESS" >&2; exit 1 ;;
         esac
         CREW_MODEL_SOURCE=primary
@@ -2145,10 +2146,16 @@ resolve_hermes_home() {
 }
 
 model_flag_for_harness() {
-  local harness=$1 model=$2
+  local harness=$1 model=$2 effort=${3:-}
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|omp|grok|kimi|hermes)
+      printf -- '--model %s ' "$(shell_quote "$model")"
+      ;;
+    devin)
+      case "$effort" in
+        low|medium|high|xhigh|max) model="$model-$effort" ;;
+      esac
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -2215,6 +2222,12 @@ prewalk_flag_for_harness() {
 
 
 case "$LAUNCH" in
+  *devin\ --permission-mode*)
+    "$FM_ROOT/bin/fm-devin-turnend-hook.sh" install || {
+      echo "error: refusing Devin spawn because the global turn-end hook could not be installed safely" >&2
+      exit 1
+    }
+    ;;
   *__KIMIBIN__*)
     KIMI_BIN=$(resolve_kimi_binary) || exit 1
     LAUNCH=${LAUNCH//__KIMIBIN__/$(shell_quote "$KIMI_BIN")}
@@ -3882,6 +3895,17 @@ EOF
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-grok-turnend"
       exclude_path '.fm-grok-turnend'
       ;;
+    devin)
+      DEVIN_AUTH_DIR="${DEVIN_HOME:-$HOME/.devin}/hooks/fm-turn-end.d"
+      mkdir -p -- "$DEVIN_AUTH_DIR"
+      old_umask=$(umask); umask 077
+      auth_file=$(mktemp "$DEVIN_AUTH_DIR/fm.XXXXXXXXXXXX")
+      umask "$old_umask"
+      printf 'target=%s\nspawn_gen=%s\nsignal=%s\n' "$TURNEND" "$SPAWN_GEN" "$TURNEND_SIGNAL" > "$auth_file"
+      printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.devin-turnend-token"
+      printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-devin-turnend"
+      exclude_path '.fm-devin-turnend'
+      ;;
     kimi*)
       # Kimi's Stop hook is global, but it is inert unless cwd contains this
       # task's token pointer and the token resolves through Firstmate's private
@@ -4105,7 +4129,7 @@ sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_hermes_worktree=$(shell_quote "$WT")
-MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
+MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL" "$EFFORT")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 PREWALKFLAG=$(prewalk_flag_for_harness "$HARNESS" "$PREWALK_INTO" "$PREWALK_DISABLED" "$PREWALK_DISABLE_SUPPORTED")
 HERMESRESUMEFLAG=
