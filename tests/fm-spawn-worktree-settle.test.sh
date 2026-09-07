@@ -31,7 +31,7 @@ make_settle_fakebin() {
 #!/usr/bin/env bash
 set -u
 case "$*" in
-  *"#{pane_current_path}"*)
+  *pane_current_path*)
     countfile="${FM_FAKE_PANE_COUNTFILE:?FM_FAKE_PANE_COUNTFILE unset}"
     n=0
     [ -f "$countfile" ] && n=$(cat "$countfile")
@@ -46,7 +46,12 @@ case "$*" in
     ;;
 esac
 case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
+  display-message)
+    case "$*" in
+      *pane_current_path*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}" ;;
+      *) printf 'firstmate\n' ;;
+    esac
+    exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
@@ -155,6 +160,7 @@ test_ship_relaunch_reuses_recorded_worktree_without_project_positional() {
   out=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
     FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
     FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' \
+    FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
     PATH="$FAKEBIN_DIR:$PATH" "$SPAWN" "$id" --relaunch --mode no-mistakes --yolo off 2>&1)
   status=$?
   expect_code 0 "$status" "bare ship relaunch should succeed"

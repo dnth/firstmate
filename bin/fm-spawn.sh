@@ -3409,6 +3409,20 @@ spawn_current_path() {  # <target>
     cmux) fm_backend_cmux_current_path "$1" "$W" ;;
   esac
 }
+if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
+  validate_spawn_worktree "relaunch metadata" "$ID"
+  if [ "$BACKEND" = orca ]; then
+    echo "error: backend=orca cannot prove the relaunch endpoint cwd; refusing to launch outside the recorded worktree" >&2
+    exit 1
+  fi
+  relaunch_endpoint_path=$(spawn_current_path "$T" || true)
+  relaunch_endpoint_real=$(real_path_or_raw "$relaunch_endpoint_path")
+  relaunch_worktree_real=$(real_path_or_raw "$WT")
+  [ -n "$relaunch_endpoint_path" ] && [ "$relaunch_endpoint_real" = "$relaunch_worktree_real" ] || {
+    echo "error: relaunch endpoint cwd does not match recorded worktree '$WT'; refusing to launch" >&2
+    exit 1
+  }
+fi
 spawn_send_literal() {  # <target> <text>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_literal "$1" "$2" ;;
