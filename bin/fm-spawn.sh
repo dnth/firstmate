@@ -3148,6 +3148,10 @@ case "$BACKEND" in
       fi
       HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
       if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
+        if [ "$RELAUNCH" -eq 1 ]; then
+          echo "error: herdr presentation relaunch cannot safely reuse a journaled endpoint without replacing it; refusing to create a new pane" >&2
+          exit 1
+        fi
         fm_backend_herdr_server_ensure "$HERDR_SES" || {
           echo "error: herdr presentation recovery could not ensure its exact named session" >&2
           exit 1
