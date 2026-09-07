@@ -4052,6 +4052,7 @@ SPAWN_META_LOCK_HELD=1
   echo "spawn_gen=$SPAWN_GEN"
   [ -z "${GROK_AUTH_DIR:-}" ] || echo "grok_turnend_dir=$GROK_AUTH_DIR"
   [ -z "${KIMI_AUTH_DIR:-}" ] || echo "kimi_turnend_dir=$KIMI_AUTH_DIR"
+  [ -z "${DEVIN_AUTH_DIR:-}" ] || echo "devin_turnend_dir=$DEVIN_AUTH_DIR"
   if [ "$HARNESS" = omp ] && [ "$ALLOW_PROJECT_OMP_EXTENSIONS" -eq 1 ]; then
     echo "allow_project_omp_extensions=1"
   fi

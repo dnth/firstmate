@@ -674,7 +674,8 @@ remove_devin_turnend_auth() {
   local state_dir=$1 id=$2 meta=${3:-} token hooks_dir
   token=$(cat "$state_dir/$id.devin-turnend-token" 2>/dev/null || true)
   case "$token" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
-  hooks_dir="${DEVIN_HOME:-$HOME/.devin}/hooks/fm-turn-end.d"
+  hooks_dir=$(meta_value "$meta" devin_turnend_dir)
+  case "$hooks_dir" in /*) ;; *) hooks_dir="${DEVIN_HOME:-$HOME/.devin}/hooks/fm-turn-end.d" ;; esac
   rm -f -- "$hooks_dir/$token"
 }
 
