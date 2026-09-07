@@ -454,12 +454,17 @@ The guarded turn-end signal remains a wake notification; standalone Kimi has no 
 |---|---|
 | Launch | `devin --permission-mode dangerous --prompt-file <brief>`; never `-p`, `--sandbox`, or `/handoff`. |
 | Model and effort | One model string: Firstmate composes `model=<family>` and `effort=<suffix>` as `--model <family>-<effort>`. There is no separate effort flag. |
-| Busy state | Herdr-native `agent_status` (`working` busy; `idle`/`done`/`blocked` idle). Devin pane text is not readable through `herdr pane read`, so no glyph classifier is used. |
-| Turn end | Global token-guarded Claude-format Stop hook publishes the generation-bound `state/<id>.turn-ended.<gen>` marker. |
+| Busy state | Herdr-native `agent_status` (`working` busy; `idle`/`done`/`blocked` idle) in both directions. Devin pane text is not readable through `herdr pane read`, so no glyph classifier is used. |
+| Turn end | Native project-local `.devin/config.local.json` Stop hook publishes the generation-bound `state/<id>.turn-ended.<gen>` marker. |
 | Scope | Verified crewmates and scouts only. Primary and secondmate launches are hard-refused permanently. |
 | Quirk | Devin auto-reads `AGENTS.md`, but truncates injected rules at 16KB. |
 
 Devin runs fully unattended under `--permission-mode dangerous` and remains local; do not invoke `/handoff`.
+Devin 3000.6.14 does not discover standalone JSON files under `~/.devin/hooks/`.
+It loads native project hooks from `<project>/.devin/hooks.v1.json`, from the top-level `hooks` key in `.devin/config.json` or `.devin/config.local.json`, and from imported Claude settings when that import remains enabled.
+Firstmate owns the whole per-task `.devin/config.local.json` file and refuses a spawn rather than overwriting pre-existing local config.
+The Stop payload has no `cwd`; the hook resolves the task worktree from the documented `DEVIN_PROJECT_DIR` environment variable.
+The exact `devin --permission-mode dangerous --prompt-file <brief>` interactive mode does fire `SessionStart` and `Stop`; ACP is not needed for turn-end notification.
 
 ## hermes (CREWMATE/SCOUT ONLY; VERIFIED 2026-08-25, Hermes Agent v0.20.0)
 

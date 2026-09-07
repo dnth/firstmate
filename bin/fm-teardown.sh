@@ -675,8 +675,22 @@ remove_devin_turnend_auth() {
   token=$(cat "$state_dir/$id.devin-turnend-token" 2>/dev/null || true)
   case "$token" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
   hooks_dir=$(meta_value "$meta" devin_turnend_dir)
-  case "$hooks_dir" in /*) ;; *) hooks_dir="${DEVIN_HOME:-$HOME/.devin}/hooks/fm-turn-end.d" ;; esac
+  case "$hooks_dir" in /*) ;; *) hooks_dir="${XDG_CONFIG_HOME:-$HOME/.config}/devin/fm-turn-end.d" ;; esac
   rm -f -- "$hooks_dir/$token"
+}
+
+remove_devin_project_hook_config() {  # <worktree> <meta>
+  local wt=$1 meta=$2 harness hooks_dir config_home
+  harness=$(meta_value "$meta" harness)
+  [ "$harness" = devin ] || return 0
+  [ -e "$wt/.devin/config.local.json" ] || [ -L "$wt/.devin/config.local.json" ] || return 0
+  hooks_dir=$(meta_value "$meta" devin_turnend_dir)
+  case "$hooks_dir" in /*/devin/fm-turn-end.d) ;; *)
+    echo "error: refusing to remove Devin project-local hook config without its recorded registry: $wt/.devin/config.local.json" >&2
+    return 1
+  esac
+  config_home=${hooks_dir%/devin/fm-turn-end.d}
+  XDG_CONFIG_HOME="$config_home" "$SCRIPT_DIR/fm-devin-turnend-hook.sh" remove "$wt"
 }
 
 remove_hermes_turnend_auth() {
@@ -2374,6 +2388,7 @@ cleanup_firstmate_home_children() {
     elif [ "$child_backend" = orca ]; then
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+        remove_devin_project_hook_config "$child_wt" "$child_meta" || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend" "$child_wt/.fm-devin-turnend" \
           "$child_wt/.fm-hermes-turnend"
@@ -2381,6 +2396,7 @@ cleanup_firstmate_home_children() {
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+      remove_devin_project_hook_config "$child_wt" "$child_meta" || return 1
       rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
         "$child_wt/.opencode/plugins/fm-busy-state.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend" "$child_wt/.fm-devin-turnend" \
@@ -2596,6 +2612,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
         git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
       fi
     fi
+    remove_devin_project_hook_config "$WT" "$META" || exit 1
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
       "$WT/.opencode/plugins/fm-busy-state.js" \
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend" "$WT/.fm-hermes-turnend" "$WT/.fm-devin-turnend"
@@ -2610,6 +2627,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     fi
   fi
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
+  remove_devin_project_hook_config "$WT" "$META" || exit 1
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
     "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend" "$WT/.fm-hermes-turnend" "$WT/.fm-devin-turnend"
   # Kills remaining processes in the worktree (including the agent), resets, returns

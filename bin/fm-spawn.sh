@@ -2232,12 +2232,6 @@ prewalk_flag_for_harness() {
 
 
 case "$LAUNCH" in
-  *devin\ --permission-mode*)
-    "$FM_ROOT/bin/fm-devin-turnend-hook.sh" install || {
-      echo "error: refusing Devin spawn because the global turn-end hook could not be installed safely" >&2
-      exit 1
-    }
-    ;;
   *__KIMIBIN__*)
     KIMI_BIN=$(resolve_kimi_binary) || exit 1
     LAUNCH=${LAUNCH//__KIMIBIN__/$(shell_quote "$KIMI_BIN")}
@@ -3906,7 +3900,12 @@ EOF
       exclude_path '.fm-grok-turnend'
       ;;
     devin)
-      DEVIN_AUTH_DIR="${DEVIN_HOME:-$HOME/.devin}/hooks/fm-turn-end.d"
+      "$FM_ROOT/bin/fm-devin-turnend-hook.sh" install "$WT" || {
+        echo "error: refusing Devin spawn because the native project-local turn-end hook could not be installed safely" >&2
+        exit 1
+      }
+      exclude_path '.devin/config.local.json'
+      DEVIN_AUTH_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/devin/fm-turn-end.d"
       mkdir -p -- "$DEVIN_AUTH_DIR"
       old_umask=$(umask); umask 077
       auth_file=$(mktemp "$DEVIN_AUTH_DIR/fm.XXXXXXXXXXXX")

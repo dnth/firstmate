@@ -1180,7 +1180,11 @@ App-server partial methods and raw socket experiments do not satisfy that bridge
 
 ## Devin Herdr crew lifecycle
 
-The opt-in live guard [`tests/fm-devin-herdr-live-e2e.test.sh`](../../tests/fm-devin-herdr-live-e2e.test.sh) records a real Devin crew's Herdr `working`, `idle`, and `done` states and requires the generation-bound turn-end marker from the global Stop hook.
+The opt-in live guard [`tests/fm-devin-herdr-live-e2e.test.sh`](../../tests/fm-devin-herdr-live-e2e.test.sh) records a real Devin crew's Herdr-backed `working` and `done` states, verifies the native project-local Stop registration, and requires the generation-bound turn-end marker.
 Run it with `FM_DEVIN_LIVE_E2E=1 FM_DEVIN_LIVE_TASK=<task-id> tests/fm-devin-herdr-live-e2e.test.sh` after preparing a Devin scout task; the guard fails when Devin or Herdr is absent and never reports a skipped live check as evidence.
-Deterministic adapter evidence was rechecked on 2026-09-07 with `FM_GATE_REFUSE_BYPASS=1 bash tests/fm-devin-adapter.test.sh` (`ok - Devin Stop hook publishes generation-bound markers and tears down cleanly`) and `FM_GATE_REFUSE_BYPASS=1 bash tests/fm-busy-state.test.sh` (`all fm-busy-state tests passed`).
-No credentialed Devin live run was available in this review; the opt-in guard remains the acceptance command for capturing that external receipt.
+Devin CLI 3000.6.14's bundled `extensibility/hooks/overview.mdx` identifies `.devin/hooks.v1.json`, `.devin/config.json`, and `.devin/config.local.json` as native project hook sources and does not list `~/.devin/hooks/*.json`.
+On 2026-09-08, a direct `devin --permission-mode dangerous --prompt-file <brief>` run loaded a probe from `.devin/hooks.v1.json` and emitted `SessionStart` followed by `Stop`; its Stop payload omitted `cwd`, while the hook environment set `DEVIN_PROJECT_DIR` to the project root.
+The same command with only the former `~/.devin/hooks/fm-turn-end.json` registration completed the turn without a marker, reproducing the hands-off failure.
+The corrected adapter was then installed into a scratch worktree and the same direct command returned `PROBE_DONE` between `CAPTURED_MARKER_ABSENT_BEFORE` and `CAPTURED_MARKER_PRESENT_AFTER`.
+The final stat line named the exact generation-bound `captured.turn-ended.captured` marker with size zero.
+Deterministic coverage on the same date passed `FM_GATE_REFUSE_BYPASS=1 bash tests/fm-devin-adapter.test.sh` and `FM_GATE_REFUSE_BYPASS=1 bash tests/fm-busy-state.test.sh`.

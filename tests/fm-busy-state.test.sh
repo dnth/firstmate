@@ -350,7 +350,7 @@ test_dead_endpoint_overrides() {
   pass "endpoint death is the only process-level override and yields dead, never busy"
 }
 
-test_herdr_native_busy_only() {
+test_herdr_native_busy_and_devin_idle() {
   local state out
   state=$(new_state_dir herdr-native)
   # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
@@ -366,7 +366,7 @@ test_herdr_native_busy_only() {
   [ "$out" = "busy herdr-native" ] || fail "Devin native busy must classify busy, got '$out'"
   FAKE_NATIVE=idle
   out=$(fm_busy_classify herdr s:p devin t1 "$state")
-  [ "$out" = "unknown missing" ] || fail "Devin native idle must remain unknown without a record, got '$out'"
+  [ "$out" = "idle herdr-native" ] || fail "Devin native idle must classify idle, got '$out'"
   # A valid record outranks the native verdict.
   local gen
   gen=$("$EV" arm "$state" t1)
@@ -375,7 +375,7 @@ test_herdr_native_busy_only() {
   out=$(fm_busy_classify herdr s:p claude t1 "$state")
   [ "$out" = "idle claude-hook" ] || fail "the adapter record must outrank herdr's native verdict, got '$out'"
   unset -f fm_backend_busy_state
-  pass "herdr's native verdict is trusted for busy only, and records outrank it"
+  pass "Herdr native busy applies fleet-wide, Devin also trusts native idle, and records outrank native state"
 }
 
 # The record parser runs inside sourcing callers (the watcher, the daemon, the
@@ -438,7 +438,7 @@ test_grok_regex_isolated
 test_codex_unverified_gate
 test_kimi_unverified_gate
 test_dead_endpoint_overrides
-test_herdr_native_busy_only
+test_herdr_native_busy_and_devin_idle
 test_record_read_leaves_caller_shell_intact
 test_boolean_view_never_promotes_unknown
 

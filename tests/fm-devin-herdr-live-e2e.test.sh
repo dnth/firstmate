@@ -13,7 +13,16 @@ meta="$state/$id.meta"
 gen=$(sed -n 's/^spawn_gen=//p' "$meta" | tail -1)
 [ -n "$gen" ] || { echo "ERROR: task metadata has no spawn generation" >&2; exit 1; }
 marker="$state/$id.turn-ended.$gen"
-for expected in working idle 'done'; do
+worktree=$(sed -n 's/^worktree=//p' "$meta" | tail -1)
+registry=$(sed -n 's/^devin_turnend_dir=//p' "$meta" | tail -1)
+[ -n "$worktree" ] && [ -n "$registry" ] \
+  || { echo "ERROR: task metadata has no Devin hook paths" >&2; exit 1; }
+config="$worktree/.devin/config.local.json"
+hook="${registry%/fm-turn-end.d}/fm-turn-end.sh"
+jq -e --arg command "bash \"$hook\"" '
+  .hooks.Stop == [{matcher:"",hooks:[{type:"command",command:$command,timeout:5}]}]
+' "$config" >/dev/null || { echo "ERROR: Devin native project-local Stop hook is not installed" >&2; exit 1; }
+for expected in working 'done'; do
   found=0
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
     status=$(FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-crew-state.sh" "$id" 2>/dev/null || true)
@@ -23,4 +32,4 @@ for expected in working idle 'done'; do
   [ "$found" -eq 1 ] || { echo "ERROR: Devin crew state never reached $expected" >&2; exit 1; }
 done
 [ -f "$marker" ] || { echo "ERROR: Devin Stop hook did not publish $marker" >&2; exit 1; }
-echo "ok - Devin Herdr crew published turn-end marker and reached working/idle/done"
+echo "ok - Devin Herdr crew loaded its native project-local Stop hook, published the turn-end marker, and reached working/done"
