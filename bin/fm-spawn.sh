@@ -3138,7 +3138,14 @@ case "$BACKEND" in
       HERDR_PANE_ID=$(fm_meta_get "$STATE/$ID.meta" herdr_pane_id)
     fi
     if [ "$KIND" != secondmate ] && fm_backend_herdr_presentation_enabled "$CONFIG"; then
-      HERDR_SES=$(fm_backend_herdr_session)
+      if [ "$RELAUNCH" -eq 0 ]; then
+        HERDR_SES=$(fm_backend_herdr_session)
+      else
+        [ -n "$HERDR_SES" ] || {
+          echo "error: relaunch metadata has no recorded Herdr session binding; refusing to recover through presentation mode" >&2
+          exit 1
+        }
+      fi
       HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
       if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
         fm_backend_herdr_server_ensure "$HERDR_SES" || {
@@ -3415,6 +3422,12 @@ if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
     echo "error: backend=orca cannot prove the relaunch endpoint cwd; refusing to launch outside the recorded worktree" >&2
     exit 1
   fi
+  case "$BACKEND" in
+    zellij|cmux)
+      echo "error: backend=$BACKEND relaunch cwd verification would inject a probe into the existing harness; refusing to relaunch an unverified endpoint" >&2
+      exit 1
+      ;;
+  esac
   relaunch_endpoint_path=$(spawn_current_path "$T" || true)
   relaunch_endpoint_real=$(real_path_or_raw "$relaunch_endpoint_path")
   relaunch_worktree_real=$(real_path_or_raw "$WT")
