@@ -13,7 +13,7 @@ meta="$state/$id.meta"
 gen=$(sed -n 's/^spawn_gen=//p' "$meta" | tail -1)
 [ -n "$gen" ] || { echo "ERROR: task metadata has no spawn generation" >&2; exit 1; }
 marker="$state/$id.turn-ended.$gen"
-for expected in working idle done; do
+for expected in working idle 'done'; do
   found=0
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
     status=$(FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-crew-state.sh" "$id" 2>/dev/null || true)
