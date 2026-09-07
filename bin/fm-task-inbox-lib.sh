@@ -204,20 +204,16 @@ fm_task_inbox_doorbell_line() {  # <record-path>
     "$abs" "$abs"
 }
 
-# Ring the doorbell, best-effort. OMP asks its task-bound extension to deliver
-# the line as a programmatic steer with triggerTurn, and stops there: an
-# unavailable adapter returns 3 and an unacknowledged request returns 4, neither
-# of which touches the composer. Every non-OMP harness keeps the advisory
-# composer pre-check and backend submit machinery as its transport.
-# Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text,
-# 2 the backend send failed, 3 the OMP native adapter refused or was
-# unavailable, or 4 the OMP native request is queued without an acknowledgement.
-# On an OMP target the call also publishes FM_TASK_INBOX_RING_OMP_REQUEST (the
-# named native queue entry for this record) and FM_TASK_INBOX_RING_OMP_PID (the
-# proven acknowledging session process) so the caller can report the exact
-# binding it acted on. A native success without that proof is refused; the
-# acknowledgement move remains the only proof the worker acted.
-fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [harness] [omp-runtime] [omp-bin]
+# The one path of the per-task Hermes delivery lock. Hermes serializes its
+# typed plane (bin/fm-send.sh) and this doorbell ring through this single lock,
+# so both callers derive the path here instead of composing it a second time.
+fm_task_inbox_hermes_delivery_lock_path() {  # <state-dir> <task-id>
+  printf '%s/.%s.hermes-delivery.lock' "$1" "$2"
+}
+
+# Deliver one doorbell. Callers go through fm_task_inbox_ring, which owns the
+# Hermes delivery-lock critical section; this helper is the unserialized body.
+fm_task_inbox_ring_deliver() {  # <backend> <target> <record-path> [expected-label] [harness] [omp-runtime] [omp-bin]
   local backend=$1 target=$2 rec=$3 label=${4:-}
   local harness=${5:-} omp_runtime=${6:-} omp_bin=${7:-} line cstate verdict ready_marker request_id programmatic_rc
   line=$(fm_task_inbox_doorbell_line "$rec")
@@ -254,6 +250,54 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [har
   # (empty, pending, unknown, ...) is deliberately ignored, never proof.
   [ "$verdict" != send-failed ] || return 2
   return 0
+}
+
+# Ring the doorbell, best-effort. OMP asks its task-bound extension to deliver
+# the line as a programmatic steer with triggerTurn, and stops there: an
+# unavailable adapter returns 3 and an unacknowledged request returns 4, neither
+# of which touches the composer. Every non-OMP harness keeps the advisory
+# composer pre-check and backend submit machinery as its transport.
+# Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text,
+# 2 the backend send failed, 3 the OMP native adapter refused or was
+# unavailable, 4 the OMP native request is queued without an acknowledgement,
+# or 5 skipped because a concurrent Hermes delivery still holds the shared
+# delivery lock. On an OMP target the call also publishes
+# FM_TASK_INBOX_RING_OMP_REQUEST (the named native queue entry for this record)
+# and FM_TASK_INBOX_RING_OMP_PID (the proven acknowledging session process) so
+# the caller can report the exact binding it acted on. A native success without
+# that proof is refused; the acknowledgement move remains the only proof the
+# worker acted.
+#
+# Hermes is the one harness whose ordinary-text doorbell and typed slash
+# commands reach the SAME terminal, so both must cross one critical section or
+# their bytes interleave into a single corrupted line. This ring boundary is
+# where every doorbell-caused Hermes terminal write happens (bin/fm-send.sh's
+# first ring and bin/fm-watch.sh's re-ring both land here), so taking the typed
+# plane's lock here serializes both callers without a second lock owner.
+# The wait is bounded and the record stays durable, so a refusal (5) is an
+# ordinary skip the retry ladder re-rings, never a block: the watcher can never
+# be parked behind a long Hermes turn. Ordering is one-directional (the watcher
+# singleton lock, then this lock, and the inbox sequence and metadata locks are
+# both released before the ring), and fm_lock_try_acquire reclaims the lock from
+# a holder that exited, so no cycle and no stuck holder is reachable.
+# The subshell releases the lock on signal paths and exits after doing so, and
+# installs that trap only AFTER a proven acquisition so a refusal never releases
+# another owner's lock.
+fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [harness] [omp-runtime] [omp-bin]
+  local rec=$3 harness=${5:-} inbox stem lock
+  if [ "$harness" != hermes ]; then
+    fm_task_inbox_ring_deliver "$@"
+    return $?
+  fi
+  inbox=${rec%/*}
+  stem=${inbox%.inbox}
+  lock=$(fm_task_inbox_hermes_delivery_lock_path "${stem%/*}" "${stem##*/}")
+  (
+    fm_task_inbox_lock_acquire "$lock" || exit 5
+    trap 'fm_lock_release "$lock" || true' EXIT
+    trap 'fm_lock_release "$lock" || true; exit 2' HUP INT TERM
+    fm_task_inbox_ring_deliver "$@"
+  )
 }
 
 # Oldest unhandled record by sequence, or fail when the inbox is empty.

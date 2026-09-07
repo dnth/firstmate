@@ -161,6 +161,32 @@ SH
   printf '%s\n' "$fakebin"
 }
 
+# Small driver scripts that call the production inbox library directly, so the
+# tests exercise the real ring boundary under the fixture environment.
+make_inbox_drivers() {  # <case-dir>
+  cat > "$1/inbox-write.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+. "$1"
+fm_task_inbox_write "$2" "$3" "$4"
+SH
+  cat > "$1/inbox-ring.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+. "$1"
+fm_task_inbox_ring tmux "$2" "$3" "$2" "$4"
+SH
+}
+
+# Read one durable inbox record through the production library's public reader
+# rather than re-implementing the record format here.
+inbox_record_body() {  # <record-path>
+  bash -c '
+    . "$1"
+    fm_task_inbox_body "$2"
+  ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$1"
+}
+
 make_case() {
   local name=$1 id=$2 case_dir home hermes_home project worktree fakebin
   case_dir="$TMP_ROOT/$name"
@@ -864,6 +890,106 @@ test_hermes_concurrent_sends_serialize_through_acknowledgement() {
   pass "Hermes concurrent sends serialize through start acknowledgement"
 }
 
+# The ordinary-text plane and the typed slash-command plane reach the SAME
+# Hermes terminal, so their bytes must never be in flight together. This parks
+# a typed slash command inside the backend, which leaves it holding the shared
+# delivery lock, and then drives the real doorbell ring boundary against it.
+test_hermes_doorbell_cannot_interleave_with_typed_command() {
+  local rec block typed_pid typed_rc record ring_rc body handled win
+  TEST_ID=hermes-doorbell-race-x5
+  rec=$(make_case doorbell-race "$TEST_ID")
+  read_case "$rec"
+  fixture_env "$SPAWN" "$TEST_ID" "$PROJECT_DIR" --harness hermes \
+    --model gpt-5.6-sol --effort high --mode no-mistakes --yolo off >/dev/null \
+    || fail "Hermes doorbell-race fixture spawn failed"
+  block="$CASE_DIR/block"
+  mkdir -p "$block"
+  win="fm-$TEST_ID"
+  make_inbox_drivers "$CASE_DIR"
+
+  # The ordinary-text data plane is unchanged: the steer is a durable record.
+  record=$(fixture_env bash "$CASE_DIR/inbox-write.sh" \
+    "$ROOT/bin/fm-task-inbox-lib.sh" "$HOME_DIR/state" "$TEST_ID" 'ordinary inbox instruction')
+  assert_present "$record" "the ordinary steer should publish a durable inbox record"
+
+  # Park a typed slash command inside the backend. It holds the delivery lock
+  # for as long as it is in flight.
+  fixture_env env FM_FAKE_HERMES_BLOCK_DIR="$block" "$SEND" "$TEST_ID" \
+    /native-check > "$CASE_DIR/typed.out" 2>&1 &
+  typed_pid=$!
+  for _ in $(seq 1 500); do
+    [ -f "$block/first-entered" ] && break
+    sleep 0.01
+  done
+  [ -f "$block/first-entered" ] || fail "the typed Hermes command never reached the backend"
+
+  # The doorbell ring boundary must refuse rather than type into the same
+  # terminal. Without one shared lock this delivers and the two writes race.
+  ring_rc=0
+  fixture_env env FM_TASK_INBOX_LOCK_WAIT_SECS=1 bash "$CASE_DIR/inbox-ring.sh" \
+    "$ROOT/bin/fm-task-inbox-lib.sh" "$win" "$record" hermes \
+    > "$CASE_DIR/ring-blocked.out" 2>&1 || ring_rc=$?
+  expect_code 5 "$ring_rc" \
+    "the doorbell must refuse while a typed Hermes command holds the shared delivery lock"
+  assert_absent "$block/second-entered" \
+    "the refused doorbell still entered the Hermes backend"
+  [ "$(grep -c '^Firstmate instruction waiting:' "$CASE_DIR/commands.log")" = 0 ] \
+    || fail "the refused doorbell still wrote to the Hermes terminal: $(cat "$CASE_DIR/commands.log")"
+  # The refusal changes neither the durable record nor who acknowledges it.
+  body=$(inbox_record_body "$record")
+  [ "$body" = 'ordinary inbox instruction' ] \
+    || fail "the durable inbox record changed during the Hermes delivery race: '$body'"
+  assert_absent "$HOME_DIR/state/$TEST_ID.inbox/handled/${record##*/}" \
+    "the refused doorbell changed the worker acknowledgement state"
+
+  # Release the typed command; the lock clears with it.
+  touch "$block/release-first"
+  typed_rc=0
+  wait "$typed_pid" || typed_rc=$?
+  expect_code 0 "$typed_rc" "the typed Hermes command should succeed"
+  [ "$(grep -c '^/native-check$' "$CASE_DIR/commands.log")" = 1 ] \
+    || fail "the typed Hermes command was not delivered exactly once: $(cat "$CASE_DIR/commands.log")"
+
+  # The same doorbell now goes through, once, on the freed terminal.
+  ring_rc=0
+  fixture_env env FM_TASK_INBOX_LOCK_WAIT_SECS=10 bash "$CASE_DIR/inbox-ring.sh" \
+    "$ROOT/bin/fm-task-inbox-lib.sh" "$win" "$record" hermes \
+    > "$CASE_DIR/ring-freed.out" 2>&1 || ring_rc=$?
+  expect_code 0 "$ring_rc" "the doorbell should ring once the delivery lock is free"
+  [ "$(grep -c '^Firstmate instruction waiting:' "$CASE_DIR/commands.log")" = 1 ] \
+    || fail "the released doorbell was not delivered exactly once: $(cat "$CASE_DIR/commands.log")"
+  # The worker's mv is still the only acknowledgement.
+  assert_present "$record" "delivery must leave the durable record for the worker to acknowledge"
+  handled="$HOME_DIR/state/$TEST_ID.inbox/handled/${record##*/}"
+  mv "$record" "$handled" || fail "the durable inbox record could not be acknowledged after delivery"
+  assert_present "$handled" "the acknowledgement move should retire the record"
+  pass "Hermes doorbells and typed commands serialize at one delivery lock"
+}
+
+# An ordinary Hermes steer with no contention still travels the durable inbox
+# plane end to end through fm-send: a record plus one doorbell, and nothing typed.
+test_hermes_ordinary_steer_still_uses_the_inbox_plane() {
+  local rec record body
+  TEST_ID=hermes-inbox-plane-x6
+  rec=$(make_case inbox-plane "$TEST_ID")
+  read_case "$rec"
+  fixture_env "$SPAWN" "$TEST_ID" "$PROJECT_DIR" --harness hermes \
+    --model gpt-5.6-sol --effort high --mode no-mistakes --yolo off >/dev/null \
+    || fail "Hermes inbox-plane fixture spawn failed"
+  fixture_env "$SEND" "$TEST_ID" 'plain ordinary instruction' > "$CASE_DIR/send.out" 2>&1 \
+    || fail "an ordinary Hermes steer should succeed: $(cat "$CASE_DIR/send.out")"
+  record="$HOME_DIR/state/$TEST_ID.inbox/001.msg"
+  assert_present "$record" "an ordinary Hermes steer must publish a durable inbox record"
+  body=$(inbox_record_body "$record")
+  [ "$body" = 'plain ordinary instruction' ] \
+    || fail "the ordinary steer text did not round-trip: '$body'"
+  [ "$(grep -c '^Firstmate instruction waiting:' "$CASE_DIR/commands.log")" = 1 ] \
+    || fail "the ordinary steer did not ring exactly one doorbell: $(cat "$CASE_DIR/commands.log")"
+  assert_no_grep 'plain ordinary instruction' "$CASE_DIR/commands.log" \
+    "the ordinary steer payload must never be typed into the terminal"
+  pass "Hermes ordinary steers stay on the durable inbox plane"
+}
+
 test_hermes_static_crew_resolution() {
   local config out
   config="$TMP_ROOT/static-config"
@@ -1093,6 +1219,8 @@ test_hermes_refuses_nonresumable_backends
 test_hermes_help_states_kind_scope
 test_hermes_spawn_requires_pre_llm_acknowledgement
 test_hermes_concurrent_sends_serialize_through_acknowledgement
+test_hermes_doorbell_cannot_interleave_with_typed_command
+test_hermes_ordinary_steer_still_uses_the_inbox_plane
 test_hermes_static_crew_resolution
 test_hermes_crew_only_is_filtered_from_secondmate_fallback
 test_hermes_herdr_persistent_process_classifies_alive
