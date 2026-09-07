@@ -1147,7 +1147,10 @@ test_devin_primary_refusal_and_profile_composition() {
   rm -f "$fake_root/bin/fm-harness.sh"
   cat > "$fake_root/bin/fm-harness.sh" <<EOF
 #!/usr/bin/env bash
-if [ "\${1:-}" = "" ]; then echo devin; else exec "$ROOT/bin/fm-harness.sh" "\$@"; fi
+case "\${1:-}" in
+  ""|crew) echo devin ;;
+  *) exec "$ROOT/bin/fm-harness.sh" "\$@" ;;
+esac
 EOF
   chmod +x "$fake_root/bin/fm-harness.sh"
   rc=0
@@ -1186,7 +1189,7 @@ EOF
   [ "$(meta_field "$meta" harness)" = devin ] || fail "devin scout did not launch on Devin"
   out=$(cat "$launchlog")
   assert_contains "$out" "devin --permission-mode dangerous" "devin scout launch command missing dangerous mode"
-  assert_contains "$out" "--model family-high" "devin model-effort composition was not applied"
+  assert_contains "$out" "--model 'family-high'" "devin model-effort composition was not applied"
   assert_not_contains "$out" "--effort" "devin launch should compose effort into model"
   pass "Devin primary/secondmate refusal and scout model-effort composition hold"
 }
