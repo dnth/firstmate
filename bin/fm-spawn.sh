@@ -3024,6 +3024,10 @@ if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
   SPAWN_START_DIR=$WT
 fi
 if [ "$RAW_LAUNCH" = 1 ] && [ "$RAW_LAUNCH_NEEDS_WORKTREE" = 1 ] && [ "$KIND" != secondmate ]; then
+  if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" = ship ]; then
+    echo "error: raw relaunch commands that require a worktree are refused; relaunch with a verified harness to reuse the recorded worktree" >&2
+    exit 1
+  fi
   case "$BACKEND" in
     orca)
       echo "error: raw relative launch paths are unavailable on backend=orca; use an absolute executable path" >&2
