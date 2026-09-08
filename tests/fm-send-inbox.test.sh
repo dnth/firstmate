@@ -426,6 +426,23 @@ test_handoff_is_devin_only_and_secret_guarded() {
   run_send "$dir" "$err" -- sess:win "/handoff"; rc=$?
   [ "$rc" -ne 0 ] || fail "/handoff must be refused on an unverifiable explicit target"
   [ ! -s "$dir/send.log" ] || fail "the explicit-target refusal still typed /handoff"
+  dir=$(setup_case handoff-primary devin); err="$dir/send.err"
+  fm_write_meta "$dir/home/state/t1.meta" \
+    "window=sess:fm-t1" "kind=primary" "harness=devin"
+  run_send "$dir" "$err" -- t1 "/handoff"; rc=$?
+  [ "$rc" -ne 0 ] || fail "/handoff must be refused on a Devin primary task"
+  assert_contains "$(cat "$err")" "ship or scout" \
+    "the primary refusal should name the allowed task kinds"
+  [ ! -s "$dir/send.log" ] || fail "the primary refusal still typed /handoff"
+  dir=$(setup_case handoff-remote devin); err="$dir/send.err"
+  fm_write_meta "$dir/home/state/t1.meta" \
+    "window=sess:fm-t1" "kind=ship" "harness=devin" \
+    "remote_host=example.invalid" "remote_root=/srv/firstmate"
+  run_send "$dir" "$err" -- t1 "/handoff"; rc=$?
+  [ "$rc" -ne 0 ] || fail "/handoff must be refused on a remote Devin task"
+  assert_contains "$(cat "$err")" "local Devin CLI" \
+    "the remote refusal should name the local-only boundary"
+  [ ! -s "$dir/send.log" ] || fail "the remote refusal still typed /handoff"
   # A devin crew with a clean worktree gets the command typed literally on the
   # typed plane, and the confirmed send is recorded in the task status.
   dir=$(setup_case handoff-devin devin); err="$dir/send.err"

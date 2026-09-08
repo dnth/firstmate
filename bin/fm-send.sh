@@ -644,6 +644,18 @@ if [ "${1:-}" != "--key" ]; then
         echo "error: /handoff is a Cloud Devin handoff for a live harness=devin crew only; refusing to send it to target $RAW_TARGET (harness=${TARGET_HARNESS:-unknown})" >&2
         exit 1
       fi
+      if [ "$TARGET_BACKEND" = remote ]; then
+        echo "error: /handoff is only allowed for a local Devin CLI crew; refusing remote target $RAW_TARGET" >&2
+        exit 1
+      fi
+      target_kind=$(fm_meta_get "$TARGET_META" kind)
+      case "$target_kind" in
+        ship|scout) ;;
+        *)
+          echo "error: /handoff is only allowed for ship or scout Devin CLI crews; refusing target $RAW_TARGET (kind=${target_kind:-unknown})" >&2
+          exit 1
+          ;;
+      esac
       fm_send_devin_handoff_preflight || exit 1
       ;;
   esac
