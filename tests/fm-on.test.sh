@@ -56,10 +56,17 @@ case "\${1:-}:\${2:-}" in
   mv:--help) printf '%s\n' 'usage: tasks-axi mv <id> [<id>...]' ;;
 esac
 SH
-cp "$ROOT/bin/fm-remote-doctor.sh" "$ROOT/bin/fm-tasks-axi-lib.sh" \
-  "$ROOT/bin/fm-backend.sh" "$REMOTE_ROOT/bin/"
-mkdir -p "$REMOTE_ROOT/bin/backends"
-cp "$ROOT/bin/backends/herdr.sh" "$REMOTE_ROOT/bin/backends/herdr.sh"
+# This is a transport test, not a Herdr test: tests/fm-remote-doctor.test.sh
+# owns the doctor's Herdr-adapter behavior against a controlled fake herdr. The
+# fixture deliberately ships no fm-backend.sh or backends/herdr.sh so the
+# doctor's herdr_adapter_load returns cleanly on every host regardless of
+# whether herdr and jq resolve on the composed child PATH. Copying the adapter
+# without its own sourced libraries (fm-omp-process-lib.sh, fm-composer-lib.sh,
+# fm-transition-lib.sh) instead made this test abort under `set -u` on exactly
+# the hosts where herdr resolved, so its doctor assertions passed or failed by
+# accident of the runner's herdr install rather than by the transport's own
+# behavior.
+cp "$ROOT/bin/fm-remote-doctor.sh" "$ROOT/bin/fm-tasks-axi-lib.sh" "$REMOTE_ROOT/bin/"
 cat > "$REMOTE_ROOT/bin/fm-mutate.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'mutation\n' >> "$1"
