@@ -452,14 +452,22 @@ The guarded turn-end signal remains a wake notification; standalone Kimi has no 
 
 | Fact | Value |
 |---|---|
-| Launch | `devin --permission-mode dangerous --prompt-file <brief>`; never `-p`, `--sandbox`, or `/handoff`. |
+| Launch | `devin --permission-mode dangerous --prompt-file <brief>`; the launch command never uses `-p`, `--sandbox`, or `/handoff`. |
 | Model and effort | One model string: Firstmate composes `model=<family>` and `effort=<suffix>` as `--model <family>-<effort>`. There is no separate effort flag. |
 | Busy state | Herdr-native `agent_status` (`working` busy; `idle`/`done`/`blocked` idle) in both directions. Devin pane text is not readable through `herdr pane read`, so no glyph classifier is used. |
 | Turn end | Native project-local `.devin/config.local.json` Stop hook publishes the generation-bound `state/<id>.turn-ended.<gen>` marker. |
 | Scope | Verified crewmates and scouts only. Primary and secondmate launches are hard-refused permanently. |
+| Skill invocation | `/handoff` is on-demand through `fm-send`'s typed plane only - see below. |
 | Quirk | Devin auto-reads `AGENTS.md`, but truncates injected rules at 16KB. |
 
-Devin runs fully unattended under `--permission-mode dangerous` and remains local; do not invoke `/handoff`.
+Devin runs fully unattended under `--permission-mode dangerous` and stays local by default.
+Cloud Devin `/handoff` is an on-demand mid-task action on an already-running `harness=devin` crewmate or scout - never a spawn flag, never a `config/crew-dispatch.json` lane, and never the default runtime.
+Only after the captain explicitly asks, in the moment, to hand that live crew to Cloud Devin does firstmate send `FM_HOME=<home> bin/fm-send.sh <id> '/handoff <optional task description>'` through the typed plane.
+Bare `/handoff` is allowed - the cloud session continues from the local conversation - but include the description when the captain supplied one.
+`fm-send` enforces the boundary mechanically: it refuses `/handoff` on every non-devin harness (OMP `devin/<model>` workers are not Devin CLI and have no `/handoff`), and it refuses while the crew worktree's uncommitted diff carries secret-looking files, because Cloud Devin receives that diff - the captain must stash or commit those files first.
+After a confirmed send, `fm-send` appends a `working:` marker to `state/<id>.status`; when the worker surfaces the cloud session URL, record it in that same status file and report it to the captain.
+The local pane going idle after a handoff is not task completion, and the task is not torn down until the captain says the cloud work landed or the local ship/scout definition of done is otherwise met.
+A handoff that is destructive, irreversible, or security-sensitive still needs the captain's explicit word for that concrete action.
 Devin 3000.6.14 does not discover standalone JSON files under `~/.devin/hooks/`.
 It loads native project hooks from `<project>/.devin/hooks.v1.json`, from the top-level `hooks` key in `.devin/config.json` or `.devin/config.local.json`, and from imported Claude settings when that import remains enabled.
 Firstmate owns the whole per-task `.devin/config.local.json` file and refuses a spawn rather than overwriting pre-existing local config.

@@ -1191,6 +1191,11 @@ EOF
   assert_contains "$out" "devin --permission-mode dangerous" "devin scout launch command missing dangerous mode"
   assert_contains "$out" "--model 'family-high'" "devin model-effort composition was not applied"
   assert_not_contains "$out" "--effort" "devin launch should compose effort into model"
+  assert_not_contains "$out" "/handoff" "devin launch must never carry the Cloud Devin handoff command"
+  assert_not_contains "$out" "--sandbox" "devin launch must stay local without a sandbox flag"
+  case "$out" in
+    *" -p "*|*" -p") fail "devin launch must never carry a bare -p flag" ;;
+  esac
   pass "Devin primary/secondmate refusal and scout model-effort composition hold"
 }
 

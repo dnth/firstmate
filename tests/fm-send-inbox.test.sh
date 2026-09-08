@@ -27,6 +27,10 @@
 #      typed, and a just-created pending-reply expectation is discarded.
 #  12. A relayed existing secondmate carrier remains byte-preserved and does
 #      not create a second pending-reply expectation.
+#  13. /handoff is refused on every non-devin harness and on unverifiable
+#      targets, is typed only into a recorded harness=devin task, refuses while
+#      that task's worktree carries uncommitted secret-looking files, and
+#      leaves a handoff marker in the task status after a confirmed send.
 # Every case below that passes a literal `$...` message quotes it on purpose
 # (the point is sending an unexpanded `$` line), so SC2016 is disabled.
 # shellcheck disable=SC2016
@@ -402,6 +406,78 @@ test_unwritable_inbox_fails_loudly() {
   pass "fm-send inbox: an unwritable record is a loud local failure that leaves no false expectation"
 }
 
+test_handoff_is_devin_only_and_secret_guarded() {
+  local dir err rc wt
+  # /handoff is refused outright on every non-devin harness.
+  dir=$(setup_case handoff-claude claude); err="$dir/send.err"
+  run_send "$dir" "$err" -- t1 "/handoff"; rc=$?
+  [ "$rc" -ne 0 ] || fail "/handoff must be refused on a claude crew"
+  assert_contains "$(cat "$err")" "harness=devin" \
+    "the refusal should name the devin-only boundary"
+  [ ! -s "$dir/send.log" ] || fail "a refused /handoff must not be typed:"$'\n'"$(cat "$dir/send.log")"
+  [ ! -d "$dir/home/state/t1.inbox" ] || fail "a refused /handoff must not enqueue an inbox record"
+  # OMP is not Devin CLI either.
+  dir=$(setup_case handoff-omp omp); err="$dir/send.err"
+  run_send "$dir" "$err" -- t1 "/handoff move this to the cloud"; rc=$?
+  [ "$rc" -ne 0 ] || fail "/handoff must be refused on an OMP worker"
+  [ ! -s "$dir/send.log" ] || fail "the OMP refusal still typed /handoff:"$'\n'"$(cat "$dir/send.log")"
+  # An explicit endpoint with no recorded harness cannot prove it is Devin.
+  dir=$(setup_case handoff-explicit); err="$dir/send.err"
+  run_send "$dir" "$err" -- sess:win "/handoff"; rc=$?
+  [ "$rc" -ne 0 ] || fail "/handoff must be refused on an unverifiable explicit target"
+  [ ! -s "$dir/send.log" ] || fail "the explicit-target refusal still typed /handoff"
+  dir=$(setup_case handoff-primary devin); err="$dir/send.err"
+  fm_write_meta "$dir/home/state/t1.meta" \
+    "window=sess:fm-t1" "kind=primary" "harness=devin"
+  run_send "$dir" "$err" -- t1 "/handoff"; rc=$?
+  [ "$rc" -ne 0 ] || fail "/handoff must be refused on a Devin primary task"
+  assert_contains "$(cat "$err")" "ship or scout" \
+    "the primary refusal should name the allowed task kinds"
+  [ ! -s "$dir/send.log" ] || fail "the primary refusal still typed /handoff"
+  dir=$(setup_case handoff-remote devin); err="$dir/send.err"
+  fm_write_meta "$dir/home/state/t1.meta" \
+    "window=sess:fm-t1" "kind=ship" "harness=devin" \
+    "remote_host=example.invalid" "remote_root=/srv/firstmate"
+  run_send "$dir" "$err" -- t1 "/handoff"; rc=$?
+  [ "$rc" -ne 0 ] || fail "/handoff must be refused on a remote Devin task"
+  assert_contains "$(cat "$err")" "local Devin CLI" \
+    "the remote refusal should name the local-only boundary"
+  [ ! -s "$dir/send.log" ] || fail "the remote refusal still typed /handoff"
+  # A devin crew with a clean worktree gets the command typed literally on the
+  # typed plane, and the confirmed send is recorded in the task status.
+  dir=$(setup_case handoff-devin devin); err="$dir/send.err"
+  wt="$dir/wt"
+  fm_git_init_commit "$wt"
+  fm_write_meta "$dir/home/state/t1.meta" \
+    "window=sess:fm-t1" "kind=ship" "harness=devin" "worktree=$wt"
+  run_send "$dir" "$err" -- t1 "/handoff finish the refactor in the cloud" \
+    || fail "a devin /handoff should be sent:"$'\n'"$(cat "$err")"
+  assert_contains "$(cat "$dir/send.log")" "/handoff finish the refactor in the cloud" \
+    "the devin /handoff should be typed literally"
+  [ ! -d "$dir/home/state/t1.inbox" ] || fail "a devin /handoff must stay off the inbox plane"
+  assert_grep "/handoff sent" "$dir/home/state/t1.status" \
+    "a confirmed /handoff must be recorded in the task status"
+  # Uncommitted secret-looking files refuse the handoff: Cloud Devin receives
+  # the crew worktree's uncommitted diff.
+  printf 'SECRET=1\n' > "$wt/.env"
+  mkdir -p "$wt/data/secrets"
+  printf 'k\n' > "$wt/data/secrets/key.txt"
+  : > "$dir/send.log"
+  run_send "$dir" "$err" -- t1 "/handoff"; rc=$?
+  [ "$rc" -ne 0 ] || fail "/handoff must be refused while the worktree carries uncommitted secrets"
+  assert_contains "$(cat "$err")" "secret" "the refusal should name the secret-file reason"
+  assert_contains "$(cat "$err")" "stash or commit" \
+    "the refusal should tell the captain how to clear it"
+  [ ! -s "$dir/send.log" ] || fail "the secret-guarded /handoff still typed:"$'\n'"$(cat "$dir/send.log")"
+  # Once they are stashed or committed the same send goes through.
+  rm -f "$wt/.env" "$wt/data/secrets/key.txt"
+  run_send "$dir" "$err" -- t1 "/handoff" \
+    || fail "/handoff should be sent once the secrets are gone:"$'\n'"$(cat "$err")"
+  assert_contains "$(cat "$dir/send.log")" "/handoff" \
+    "the cleared /handoff should be typed"
+  pass "fm-send planes: /handoff is devin-only, typed, secret-guarded, and recorded"
+}
+
 test_text_steer_rides_inbox
 test_multiline_steer_is_legal
 test_resend_enqueues_new_sequence
@@ -417,3 +493,4 @@ test_post_enqueue_bookkeeping_failure_is_not_retryable
 test_resolve_close_failure_still_rings_once
 test_meta_lock_contention_fails_bounded
 test_unwritable_inbox_fails_loudly
+test_handoff_is_devin_only_and_secret_guarded
