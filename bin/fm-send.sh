@@ -70,6 +70,11 @@
 # through the same structural backend contract as the other pane TUIs. A
 # leading `/<skill>` stays a native Hermes skill command when installed in the
 # active profile, or becomes a validated Firstmate SKILL.md pointer message.
+# The Cloud Devin `/handoff` command stays on the typed plane and is refused
+# outright on any non-devin harness - OMP/claude/codex and the rest have no
+# /handoff - and refused while the task's recorded worktree carries
+# uncommitted secret-looking files, because Cloud Devin receives the crew's
+# uncommitted diff (fm_send_devin_handoff_preflight).
 #
 # From-firstmate marker: when the resolved target is a task selector whose meta
 # records kind=secondmate, the text uses the live-charter-compatible
@@ -416,6 +421,47 @@ fm_send_record_delivered_no_turn() {
   [ "$failed" -eq 0 ]
 }
 
+# Cloud Devin /handoff ships the crew worktree's uncommitted state to a cloud
+# session, so the typed send is refused while that worktree carries
+# uncommitted secret-looking files; the captain must stash or commit them
+# first. The scan covers the uncommitted set git reports - staged and unstaged
+# tracked changes plus untracked files that are not gitignored - and every
+# failure direction is a refusal because an unchecked diff must never ship.
+fm_send_devin_handoff_preflight() {
+  local wt paths hits
+  [ -n "$TARGET_META" ] || {
+    echo "error: /handoff requires a task-bound target with recorded metadata" >&2
+    return 1
+  }
+  wt=$(fm_meta_get "$TARGET_META" worktree)
+  case "$wt" in
+    /*) ;;
+    *)
+      echo "error: /handoff cannot verify the crew worktree (recorded worktree='$wt'); refusing the Cloud Devin handoff" >&2
+      return 1
+      ;;
+  esac
+  [ -d "$wt" ] && [ ! -L "$wt" ] || {
+    echo "error: /handoff cannot scan recorded worktree '$wt' (missing or unsafe); refusing" >&2
+    return 1
+  }
+  paths=$(git -C "$wt" status --porcelain=v1 --untracked-files=all 2>/dev/null) || {
+    echo "error: /handoff could not scan '$wt' for uncommitted secret files; refusing" >&2
+    return 1
+  }
+  [ -n "$paths" ] || return 0
+  hits=$(printf '%s\n' "$paths" \
+    | sed 's/^...//; s/.* -> //; s/^"//; s/"$//' \
+    | grep -iE '(^|/)\.env([./]|$)|(^|/)\.envrc$|(^|/)secrets?([./]|$)|credential|(^|/)id_(rsa|dsa|ecdsa|ed25519)(\.|$)|\.(pem|key|p12|pfx|jks|keystore|kdbx|ppk|gpg)$|(^|/)\.(netrc|npmrc|pypirc|dockercfg|git-credentials|pgpass|my\.cnf|s3cfg|boto)$|(^|/)\.docker/config\.json$|(^|/)\.aws/credentials$|(^|/)\.ssh/|service[-_]?account[^/]*\.json$' \
+    | grep -vE '\.pub$' \
+    | sort -u || true)
+  [ -z "$hits" ] && return 0
+  echo "error: refusing /handoff: worktree $wt has uncommitted secret-looking files that would ship in the Cloud Devin diff:" >&2
+  printf '%s\n' "$hits" | sed 's/^/  /' >&2
+  echo "error: stash or commit those files first, then resend /handoff" >&2
+  return 1
+}
+
 fm_send_resolve_target() {  # <raw-target>
   local raw=$1 meta pane_meta target backend assumed colons id session hint
 
@@ -582,6 +628,26 @@ while :; do
     *) break ;;
   esac
 done
+
+# /handoff is the on-demand Cloud Devin handoff command for a live
+# harness=devin crew, sent only on an explicit current captain request. The
+# refusal runs before any delivery machinery: /handoff is never a dispatch
+# lane and must never be typed at any other harness - OMP/claude/codex and the
+# rest have no /handoff - and an unverifiable target cannot prove it is a
+# Devin pane.
+FM_SEND_IS_HANDOFF=0
+if [ "${1:-}" != "--key" ]; then
+  case "$*" in
+    /handoff|/handoff[[:space:]]*)
+      FM_SEND_IS_HANDOFF=1
+      if [ "$TARGET_HARNESS" != devin ]; then
+        echo "error: /handoff is a Cloud Devin handoff for a live harness=devin crew only; refusing to send it to target $RAW_TARGET (harness=${TARGET_HARNESS:-unknown})" >&2
+        exit 1
+      fi
+      fm_send_devin_handoff_preflight || exit 1
+      ;;
+  esac
+fi
 
 if [ "$TARGET_BACKEND" != remote ]; then
   fm_backend_validate "$TARGET_BACKEND" || exit 1
@@ -1368,6 +1434,18 @@ else
       ;;
   esac
   [ "$post_delivery_failed" -eq 0 ] || exit 1
+  # A confirmed /handoff leaves a durable marker in the task's own status
+  # ledger so supervision knows a Cloud Devin handoff is in flight: the local
+  # pane going idle is the handoff, not task completion, and the cloud session
+  # URL still has to be recorded here when the worker surfaces it. The send
+  # already landed, so a failed append warns instead of inviting a resend.
+  if [ "$FM_SEND_IS_HANDOFF" = 1 ] && [ -n "$TARGET_TASK_ID" ]; then
+    if [ -L "$STATE/$TARGET_TASK_ID.status" ]; then
+      echo "warning: /handoff was delivered to $T, but $STATE/$TARGET_TASK_ID.status is a symlink; the handoff marker was not recorded - record it manually, do not resend" >&2
+    elif ! printf '%s\n' "working: /handoff sent - Cloud Devin handoff in flight for $TARGET_TASK_ID; an idle local pane is not task completion; record the cloud session URL in this status when the worker surfaces it" >> "$STATE/$TARGET_TASK_ID.status"; then
+      echo "warning: /handoff was delivered to $T, but its status marker could not be appended; record the handoff in $STATE/$TARGET_TASK_ID.status manually - do not resend" >&2
+    fi
+  fi
   # The submit was confirmed. The harness still needs a beat to spin up the
   # turn before its busy footer shows. Pause so an immediate peek catches the
   # crewmate actually working instead of the stale idle pane. FM_SEND_SETTLE=0

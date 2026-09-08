@@ -1079,6 +1079,10 @@ pi max effort is accepted^{"rules":[{"when":"deep coding","use":{"harness":"pi",
 pi-signed max effort is accepted^{"rules":[{"when":"signed coding","use":{"harness":"pi-signed","model":"openai-codex/gpt-5.6-luna","effort":"max"}}]}^empty^
 omp max effort is accepted^{"rules":[{"when":"OMP coding","use":{"harness":"omp","model":"openai-codex/gpt-5.6-luna","effort":"max"}}]}^empty^
 omp prewalk target is accepted^{"rules":[{"when":"well-scoped coding","use":{"harness":"omp","model":"openai-codex/gpt-5.6-luna","effort":"xhigh","prewalk_into":"openai-codex/gpt-5.6-luna:xhigh"}}]}^empty^
+devin profile is accepted^{"rules":[{"when":"cloud-capable crew work","use":{"harness":"devin","model":"swe","effort":"high"}}]}^empty^
+devin max effort is accepted^{"rules":[{"when":"deep devin work","use":{"harness":"devin","effort":"max"}}]}^empty^
+devin profile without effort is accepted^{"default":{"harness":"devin","model":"swe"}}^empty^
+unsupported devin effort is flagged^{"rules":[{"when":"devin work","use":{"harness":"devin","effort":"ultra"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: devin:ultra
 non-omp prewalk target is flagged^{"rules":[{"when":"Claude coding","use":{"harness":"claude","model":"sonnet","effort":"high","prewalk_into":"openai-codex/gpt-5.6-luna:xhigh"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - prewalk_into requires harness=omp, not: claude
 empty prewalk target is flagged^{"rules":[{"when":"OMP coding","use":{"harness":"omp","prewalk_into":""}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - use profile model, effort, and prewalk_into must be non-empty strings when present
 unsupported opencode effort is flagged^{"rules":[{"when":"opencode work","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: opencode:high

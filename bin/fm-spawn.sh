@@ -1340,6 +1340,10 @@ launch_template() {
     # Its turn-end signal is a globally configured Stop hook plus a guarded
     # per-task worktree token, so no launch placeholder belongs here.
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
+    # Devin CLI launches stay local: never -p, never --sandbox, and never a
+    # /handoff in the launch command. Cloud Devin /handoff is a mid-task typed
+    # command firstmate sends through fm-send on an explicit captain request
+    # for a live devin crew - it is not a spawn flag (harness-adapters skill).
     devin) printf '%s' 'devin --permission-mode dangerous __MODELFLAG____EFFORTFLAG__--prompt-file __BRIEF__' ;;
     # Hermes v0.20.0's modern TUI is launched bare and receives the brief only
     # after its structural composer-ready gate below. The CLI --reasoning flag
