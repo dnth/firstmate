@@ -461,6 +461,14 @@ test_hermes_secondmate_is_refused() {
     "a verified crew-only harness was reported as unknown"
   assert_not_contains "$(cat "$CASE_DIR/tmux.log")" "new-window" "Hermes secondmate refusal created an endpoint"
 
+  # A bare positional `hermes` is an adapter name, not a firstmate home path, so
+  # it must reach the same crew-only refusal instead of a home-path diagnostic.
+  rc=0
+  out=$(fixture_env "$SPAWN" "$TEST_ID" hermes --secondmate 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a positional Hermes secondmate was accepted"
+  assert_contains "$out" "harness=hermes is verified for crewmates and scouts only" \
+    "a positional Hermes secondmate did not report the crew/scout-only reason"
+
   printf 'hermes\n' > "$HOME_DIR/config/secondmate-harness"
   rc=0
   out=$(fixture_env "$SPAWN" "$TEST_ID" "$HOME_DIR/not-a-secondmate" --secondmate 2>&1) || rc=$?
@@ -817,8 +825,8 @@ test_hermes_refuses_nonresumable_backends() {
 test_hermes_help_states_kind_scope() {
   local out
   out=$($SPAWN --help)
-  assert_contains "$out" "Hermes overrides only a crewmate or scout spawn" \
-    "fm-spawn help did not state Hermes kind scope"
+  assert_contains "$out" "Hermes and Devin override only a crewmate or scout spawn" \
+    "fm-spawn help did not state crew-only kind scope"
   assert_contains "$out" "refused for secondmates" "fm-spawn help did not state the secondmate refusal"
   assert_contains "$out" "Secondmates refuse every raw launch command" \
     "fm-spawn help did not state the raw-command kind boundary"
