@@ -25,7 +25,13 @@
 # bounded). Independent alarms (queued wakes, worktree tangle) are never
 # suppressed by that dedup. Normal wake handling (watcher briefly down between a
 # wake and the next supervision resume) stays inside the grace window and stays
-# silent. The queued-wakes warning stays silent for the supervision branch
+# silent. The queued-wakes warning counts only the rows the calling actor can
+# itself present or retire (fm_wake_actor_pending_count), so it is never an
+# instruction to run a drain with nothing to present. A row reserved by a live
+# supervision-branch grant is never a drain instruction for main; instead of
+# going silent about a visibly non-empty queue, main gets a distinct advisory
+# naming the branch as the holder and saying not to drain those rows.
+# The ordinary warning also stays silent for the supervision branch
 # actor (FM_SUPERVISION_ACTOR=branch), because that actor runs guarded commands
 # while handling exactly the queued rows its grant covers and can drain nothing
 # else. Always exits 0: the guard warns, it never blocks.
@@ -39,6 +45,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 GRACE=${FM_GUARD_GRACE:-300}
 queue_pending=false
+queue_branch_held=false
 READ_ONLY=${FM_GUARD_READ_ONLY:-0}
 case "$READ_ONLY" in 1|true|TRUE|yes|YES) READ_ONLY=1 ;; *) READ_ONLY=0 ;; esac
 CONTINUE_LINE=${FM_GUARD_CONTINUE_LINE:-This is a supervision warning only; the guarded operation WILL still run.}
@@ -174,7 +181,18 @@ if [ "$needed" = false ]; then
   exit 0
 fi
 
-[ -s "$FM_WAKE_QUEUE" ] && queue_pending=true
+# Count only the rows this actor could actually present or retire, so the
+# warning never sends an actor to a drain that provably has nothing for it.
+# fm-wake-lib.sh owns that per-actor classification. A non-empty queue with
+# nothing for main is the branch-held case: keep the raw pending signal visible
+# there as its own advisory rather than dropping it.
+if [ -s "$FM_WAKE_QUEUE" ]; then
+  if [ "$(fm_wake_actor_pending_count "$GUARD_ACTOR")" -gt 0 ]; then
+    queue_pending=true
+  elif [ "$GUARD_ACTOR" != branch ] && [ "$(fm_wake_actor_pending_count branch)" -gt 0 ]; then
+    queue_branch_held=true
+  fi
+fi
 
 # No fresh watcher with tasks in flight is the dangerous state: emit a prominent,
 # bordered banner FIRST so it reads as an alarm, not a buried stderr line. Later
@@ -251,5 +269,7 @@ if "$queue_pending"; then
   elif [ "$GUARD_ACTOR" != branch ]; then
     echo "WARNING: queued wakes pending - drain them with bin/fm-wake-drain.sh before anything else." >&2
   fi
+elif "$queue_branch_held"; then
+  echo "NOTICE: wake rows held by the live supervision branch - it presents and acknowledges them; do not drain them from here." >&2
 fi
 exit 0
