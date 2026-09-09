@@ -146,6 +146,8 @@ export function installTaskInboxDoorbell(
 	let active = false;
 	let draining = false;
 	let signalHandlerInstalled = false;
+	let turnListenersInstalled = false;
+	let turnOpen = false;
 	const awaitingTurns = new Map<string, ReturnType<typeof setTimeout>>();
 	let watcher: FSWatcher | undefined;
 	const settleAwaiting = (awaitingPath: string, outcome: "delivered" | "failed"): void => {
@@ -163,7 +165,7 @@ export function installTaskInboxDoorbell(
 	// recovery channel the prior accept-only semantics stand.
 	const recoverUnprovenTurn = (awaitingPath: string): void => {
 		awaitingTurns.delete(awaitingPath);
-		if (!canReDrive) {
+		if (turnOpen || !canReDrive) {
 			settleAwaiting(awaitingPath, "delivered");
 			return;
 		}
@@ -184,6 +186,22 @@ export function installTaskInboxDoorbell(
 			() => settleAwaiting(awaitingPath, "delivered"),
 			() => settleAwaiting(awaitingPath, "failed"),
 		);
+	};
+	const onTurnOpen = (): void => {
+		turnOpen = true;
+		const awaitingPath = awaitingTurns.keys().next().value;
+		if (awaitingPath) settleAwaiting(awaitingPath, "delivered");
+	};
+	const onTurnClose = (): void => {
+		turnOpen = false;
+	};
+	const installTurnListeners = (): void => {
+		if (turnListenersInstalled || !canObserveTurns) return;
+		turnListenersInstalled = true;
+		omp.on!("turn_start", onTurnOpen);
+		omp.on!("agent_start", onTurnOpen);
+		omp.on!("turn_end", onTurnClose);
+		omp.on!("agent_end", onTurnClose);
 	};
 	const retire = (): void => {
 		if (!active) return;
@@ -230,6 +248,10 @@ export function installTaskInboxDoorbell(
 					}
 					const awaitingPath = `${pending}.awaiting-turn`;
 					renameSync(ambiguous, awaitingPath);
+					if (turnOpen) {
+						settleAwaiting(awaitingPath, "delivered");
+						continue;
+					}
 					awaitingTurns.set(
 						awaitingPath,
 						setTimeout(() => recoverUnprovenTurn(awaitingPath), turnGraceMs),
@@ -250,6 +272,7 @@ export function installTaskInboxDoorbell(
 			mkdirSync(requestDir, { recursive: true, mode: 0o700 });
 			reconcileAmbiguousClaims(requestDir);
 			reconcileAwaitingTurns(requestDir);
+			installTurnListeners();
 			watcher = watch(requestDir, drain);
 			active = true;
 			if (!signalHandlerInstalled) {
