@@ -1063,6 +1063,12 @@ ${context.command}
           await session.prompt(
             `FIRSTMATE SUPERVISION WAKE: ${message}\n\nHandle this per your operating procedure. Do not finish this turn until you have completed, in order: fm_branch_report, the exact WAKE_ACK_REQUIRED command, and release of every task lease you claimed.`,
           );
+        } catch (error) {
+          if (acceptedGeneration === generation) {
+            const detail = `supervision branch provider rejected prompt: ${error instanceof Error ? error.message : String(error)}`;
+            recordSettledProviderError(detail);
+          }
+          throw error;
         } finally {
           wakeTaskScope = null;
         }

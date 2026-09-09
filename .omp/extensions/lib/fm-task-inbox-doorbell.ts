@@ -32,8 +32,8 @@ type OmpDoorbellApi = {
 		content: string,
 		options?: { deliverAs?: "steer" | "followUp" },
 	) => void | Promise<void>;
-	// Turn events prove a triggered turn actually ran. Optional so installs on
-	// runtimes without an event surface keep the prior accept-only semantics.
+	// Optional turn observation enables downgrade recovery. Runtimes without an
+	// event surface keep the prior accept-only semantics.
 	// Method syntax keeps the parameter bivariant: the real extension API types
 	// `on` as per-event-name overloads, which a property signature could not
 	// accept.
@@ -146,11 +146,6 @@ export function installTaskInboxDoorbell(
 	let active = false;
 	let draining = false;
 	let signalHandlerInstalled = false;
-	let turnListenersInstalled = false;
-	// True while a run or turn is open for a steer to join. It starts false so
-	// the first doorbell after activation proves its turn rather than trusting
-	// an unknown prior state.
-	let turnOpen = false;
 	const awaitingTurns = new Map<string, ReturnType<typeof setTimeout>>();
 	let watcher: FSWatcher | undefined;
 	const settleAwaiting = (awaitingPath: string, outcome: "delivered" | "failed"): void => {
@@ -161,9 +156,6 @@ export function installTaskInboxDoorbell(
 		}
 		bestEffortRename(awaitingPath, awaitingPath.replace(/\.awaiting-turn$/, `.${outcome}`));
 	};
-	const settleAllAwaiting = (): void => {
-		for (const path of [...awaitingTurns.keys()]) settleAwaiting(path, "delivered");
-	};
 	// A delivered doorbell that produced no turn within the grace bound was
 	// downgraded by the runtime to append-only delivery. Re-drive the same
 	// instruction through the user-prompt channel, which an idle session cannot
@@ -171,7 +163,7 @@ export function installTaskInboxDoorbell(
 	// recovery channel the prior accept-only semantics stand.
 	const recoverUnprovenTurn = (awaitingPath: string): void => {
 		awaitingTurns.delete(awaitingPath);
-		if (turnOpen || !canReDrive) {
+		if (!canReDrive) {
 			settleAwaiting(awaitingPath, "delivered");
 			return;
 		}
@@ -192,21 +184,6 @@ export function installTaskInboxDoorbell(
 			() => settleAwaiting(awaitingPath, "delivered"),
 			() => settleAwaiting(awaitingPath, "failed"),
 		);
-	};
-	const onTurnOpen = (): void => {
-		turnOpen = true;
-		settleAllAwaiting();
-	};
-	const onTurnClose = (): void => {
-		turnOpen = false;
-	};
-	const installTurnListeners = (): void => {
-		if (turnListenersInstalled || !canObserveTurns) return;
-		turnListenersInstalled = true;
-		omp.on!("turn_start", onTurnOpen);
-		omp.on!("agent_start", onTurnOpen);
-		omp.on!("turn_end", onTurnClose);
-		omp.on!("agent_end", onTurnClose);
 	};
 	const retire = (): void => {
 		if (!active) return;
@@ -247,18 +224,12 @@ export function installTaskInboxDoorbell(
 					// A steer into an open turn is delivered by that turn. On an idle
 					// session, triggerTurn must start one; claiming delivered without
 					// that proof is the downgrade that strands an idle worker.
-					if (!canObserveTurns || turnOpen) {
+					if (!canObserveTurns) {
 						renameSync(ambiguous, `${pending}.delivered`);
 						continue;
 					}
 					const awaitingPath = `${pending}.awaiting-turn`;
 					renameSync(ambiguous, awaitingPath);
-					// A turn that started synchronously inside sendMessage already
-					// set turnOpen; the event fired before this entry was armed.
-					if (turnOpen) {
-						settleAwaiting(awaitingPath, "delivered");
-						continue;
-					}
 					awaitingTurns.set(
 						awaitingPath,
 						setTimeout(() => recoverUnprovenTurn(awaitingPath), turnGraceMs),
@@ -279,7 +250,6 @@ export function installTaskInboxDoorbell(
 			mkdirSync(requestDir, { recursive: true, mode: 0o700 });
 			reconcileAmbiguousClaims(requestDir);
 			reconcileAwaitingTurns(requestDir);
-			installTurnListeners();
 			watcher = watch(requestDir, drain);
 			active = true;
 			if (!signalHandlerInstalled) {
