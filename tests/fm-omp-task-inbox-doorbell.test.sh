@@ -119,6 +119,108 @@ JS
   pass "OMP extension drains canonical counted requests and safely retires signal readiness"
 }
 
+test_extension_requires_turn_proof_or_redrives() {
+  local dir="$TMP_ROOT/turn-proof"
+  mkdir -p "$dir/state/t1.inbox"
+  HELPER="$HELPER" INBOX="$dir/state/t1.inbox" READY="$dir/state/t1.omp-doorbell-ready" \
+    node --input-type=module <<'JS'
+import assert from "node:assert/strict";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const { FM_TASK_INBOX_DOORBELL_SIGNAL, installTaskInboxDoorbell } =
+  await import(pathToFileURL(process.env.HELPER).href);
+const requestDir = `${process.env.READY}.requests`;
+const line = `Firstmate instruction waiting: list ${process.env.INBOX}/*.msg`;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const sent = [];
+const userSent = [];
+const handlers = new Map();
+const api = {
+  sendMessage(message, options) { sent.push({ message, options }); },
+  sendUserMessage(content) { userSent.push(content); },
+  on(event, handler) { handlers.set(event, handler); },
+};
+const doorbell = installTaskInboxDoorbell(api, {
+  inboxDir: process.env.INBOX,
+  readyMarker: process.env.READY,
+  turnGraceMs: 150,
+});
+doorbell.activate();
+assert.equal(handlers.has("turn_start"), true);
+
+// The downgrade: sendMessage accepts but no turn ever starts. The request must
+// NOT be claimed delivered on the call alone.
+mkdirSync(requestDir, { recursive: true });
+writeFileSync(`${requestDir}/downgraded.pending`, line);
+process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
+assert.equal(sent.length, 1);
+assert.equal(existsSync(`${requestDir}/downgraded.pending.awaiting-turn`), true);
+assert.equal(existsSync(`${requestDir}/downgraded.pending.delivered`), false);
+
+await sleep(500);
+assert.equal(userSent.length, 1, "a downgraded triggerTurn must re-drive the instruction as a user prompt");
+assert.equal(userSent[0], line);
+assert.equal(existsSync(`${requestDir}/downgraded.pending.delivered`), true);
+
+// A turn_start settles a pending proof without any re-drive.
+writeFileSync(`${requestDir}/proved.pending`, line);
+process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
+assert.equal(sent.length, 2);
+assert.equal(existsSync(`${requestDir}/proved.pending.awaiting-turn`), true);
+handlers.get("turn_start")();
+assert.equal(existsSync(`${requestDir}/proved.pending.delivered`), true);
+assert.equal(userSent.length, 1, "a proven turn must not trigger the re-drive");
+
+// An open turn at send time is real delivery: the steer joins it.
+writeFileSync(`${requestDir}/steered.pending`, line);
+process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
+assert.equal(sent.length, 3);
+assert.equal(existsSync(`${requestDir}/steered.pending.delivered`), true);
+assert.equal(userSent.length, 1);
+handlers.get("turn_end")();
+
+// A failed re-drive reports failure, not silent stranding.
+const failingApi = {
+  sendMessage() {},
+  sendUserMessage() { throw new Error("no user channel"); },
+  on(_e, h) { handlers.set(`f:${_e}`, h); },
+};
+const failingReady = `${process.env.READY}.failing`;
+const failing = installTaskInboxDoorbell(failingApi, {
+  inboxDir: process.env.INBOX,
+  readyMarker: failingReady,
+  turnGraceMs: 150,
+});
+failing.activate();
+mkdirSync(`${failingReady}.requests`, { recursive: true });
+writeFileSync(`${failingReady}.requests/stuck.pending`, line);
+process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
+await sleep(500);
+assert.equal(existsSync(`${failingReady}.requests/stuck.pending.failed`), true);
+failing.retire();
+
+// A dead generation's unsettled proof re-queues on activate and re-enters
+// delivery immediately: re-sending is the only way to know the runtime's
+// deferred queue did not survive with it.
+const restartReady = `${process.env.READY}.restart`;
+const restartSent = [];
+mkdirSync(`${restartReady}.requests`, { recursive: true });
+writeFileSync(`${restartReady}.requests/orphaned.pending.awaiting-turn`, line);
+const restartDoorbell = installTaskInboxDoorbell(
+  { sendMessage(m) { restartSent.push(m); }, sendUserMessage() {}, on() {} },
+  { inboxDir: process.env.INBOX, readyMarker: restartReady, turnGraceMs: 60 },
+);
+restartDoorbell.activate();
+assert.equal(restartSent.length, 1, "an unsettled proof must re-enter the delivery path, not sit stranded");
+assert.equal(restartSent[0].content, line);
+restartDoorbell.retire();
+doorbell.retire();
+JS
+  pass "OMP extension requires turn proof and re-drives a deferred triggerTurn through the user channel"
+}
+
 test_ring_routing_matrix() {
   local dir="$TMP_ROOT/routing" rec log
   mkdir -p "$dir/state/t1.inbox/handled"
@@ -298,7 +400,7 @@ case "${1:-}" in
   capture-pane)
     printf '╭────╮\n│    │\n╰────╯\n'
     ;;
-  list-windows) exit 0 ;;
+  list-windows) sed -n 's/^window=[^:]*://p' "${FM_HOME:?}"/state/*.meta ;;
 esac
 SH
   chmod +x "$fb/tmux"
@@ -703,6 +805,7 @@ test_omp_native_binding_mismatch_is_refused() {
 }
 
 test_extension_signal_uses_trigger_turn
+test_extension_requires_turn_proof_or_redrives
 test_ring_routing_matrix
 test_request_terminal_states
 test_fm_send_rings_one_programmatic_doorbell
