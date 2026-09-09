@@ -25,6 +25,7 @@ test_extension_signal_uses_trigger_turn() {
   local dir="$TMP_ROOT/extension"
   mkdir -p "$dir/state/t1.inbox"
   HELPER="$HELPER" INBOX="$dir/state/t1.inbox" READY="$dir/state/t1.omp-doorbell-ready" \
+    FM_OMP_DOORBELL_TURN_ACK_MS=10 \
     node --input-type=module <<'JS'
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
@@ -40,7 +41,9 @@ const doorbell = installTaskInboxDoorbell(
     sendMessage(message, options) {
       assert.equal(readdirSync(requestDir).some((name) => name.endsWith(".pending.ambiguous")), true);
       sent.push({ message, options });
+      queueMicrotask(() => doorbell.turnStarted());
     },
+    sendUserMessage(content) { sent.push({ fallback: content }); queueMicrotask(() => doorbell.turnStarted()); },
   },
   { inboxDir: process.env.INBOX, readyMarker: process.env.READY },
 );
@@ -49,6 +52,7 @@ mkdirSync(requestDir, { recursive: true });
 writeFileSync(`${requestDir}/preexisting.pending`, line);
 writeFileSync(`${requestDir}/stale.pending.processing.${process.pid}`, "");
 doorbell.activate();
+await new Promise((resolve) => setImmediate(resolve));
 assert.equal(readFileSync(process.env.READY, "utf8"), `${process.pid}\n`);
 assert.equal(sent.length, 1);
 assert.equal(existsSync(`${requestDir}/preexisting.pending.delivered`), true);
@@ -57,6 +61,7 @@ assert.equal(existsSync(`${requestDir}/stale.pending.processing.${process.pid}`)
 writeFileSync(`${requestDir}/one.pending`, line);
 writeFileSync(`${requestDir}/two.pending`, line);
 process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
+await new Promise((resolve) => setImmediate(resolve));
 assert.equal(sent.length, 3);
 assert.equal(sent[0].message.customType, "firstmate-task-inbox-doorbell");
 assert.equal(sent[0].message.content, line);
@@ -87,6 +92,7 @@ failingDoorbell.activate();
 failingApi.sendMessage = undefined;
 writeFileSync(`${failing}.requests/one.pending`, line);
 process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
+await new Promise((resolve) => setImmediate(resolve));
 assert.equal(existsSync(`${failing}.requests/one.pending.failed`), true);
 assert.equal(existsSync(failing), false);
 
@@ -98,6 +104,7 @@ const uncertainDoorbell = installTaskInboxDoorbell(
 uncertainDoorbell.activate();
 writeFileSync(`${uncertain}.requests/one.pending`, line);
 process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
+await new Promise((resolve) => setImmediate(resolve));
 assert.equal(existsSync(`${uncertain}.requests/one.pending.ambiguous`), true);
 assert.equal(existsSync(`${uncertain}.requests/one.pending.failed`), false);
 assert.equal(existsSync(uncertain), false);
@@ -112,6 +119,7 @@ unreadableDoorbell.activate();
 writeFileSync(`${unreadable}.requests/one.pending`, line);
 chmodSync(`${unreadable}.requests/one.pending`, 0o000);
 process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
+await new Promise((resolve) => setImmediate(resolve));
 assert.equal(unreadableSends, 0);
 assert.equal(existsSync(`${unreadable}.requests/one.pending.failed`), true);
 assert.equal(existsSync(unreadable), false);
@@ -327,12 +335,19 @@ test_fm_send_rings_one_programmatic_doorbell() {
   node_bin=$(realpath "$(command -v node)")
 
   HELPER="$HELPER" INBOX="$home/state/t1.inbox" READY="$home/state/t1.omp-doorbell-ready" \
+    FM_OMP_DOORBELL_TURN_ACK_MS=50 \
     SIGNAL_LOG="$signal_log" LISTENER_READY="$listener_ready" node --input-type=module <<'JS' &
 import { appendFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 const { installTaskInboxDoorbell } = await import(pathToFileURL(process.env.HELPER).href);
 const doorbell = installTaskInboxDoorbell(
-  { sendMessage(_message, options) { appendFileSync(process.env.SIGNAL_LOG, `${JSON.stringify(options)}\n`); } },
+  {
+    sendMessage(_message, options) {
+      appendFileSync(process.env.SIGNAL_LOG, `${JSON.stringify(options)}\n`);
+      setImmediate(() => doorbell.turnStarted());
+    },
+    sendUserMessage(content) { appendFileSync(process.env.SIGNAL_LOG, `${JSON.stringify({ fallback: content })}\n`); setImmediate(() => doorbell.turnStarted()); },
+  },
   { inboxDir: process.env.INBOX, readyMarker: process.env.READY },
 );
 doorbell.activate();
@@ -392,6 +407,7 @@ SH
 start_native_listener() {  # <dir> <home> <task> <signal-log> <ready-flag>
   local dir=$1 home=$2 task=$3 signal_log=$4 ready=$5 pid
   HELPER="$HELPER" INBOX="$home/state/$task.inbox" READY="$home/state/$task.omp-doorbell-ready" \
+    FM_OMP_DOORBELL_TURN_ACK_MS=50 \
     SIGNAL_LOG="$signal_log" LISTENER_READY="$ready" node --input-type=module \
     > "$dir/native-listener.log" 2>&1 <<'JS' &
 import { appendFileSync, writeFileSync } from "node:fs";
@@ -401,6 +417,11 @@ const doorbell = installTaskInboxDoorbell(
   {
     sendMessage(message, options) {
       appendFileSync(process.env.SIGNAL_LOG, `${JSON.stringify({ content: message.content, options })}\n`);
+      setImmediate(() => doorbell.turnStarted());
+    },
+    sendUserMessage(content) {
+      appendFileSync(process.env.SIGNAL_LOG, `${JSON.stringify({ fallback: content })}\n`);
+      setImmediate(() => doorbell.turnStarted());
     },
   },
   { inboxDir: process.env.INBOX, readyMarker: process.env.READY },
@@ -702,7 +723,76 @@ test_omp_native_binding_mismatch_is_refused() {
   pass "fm-send: an unproven OMP session binding is refused, never redirected to the terminal"
 }
 
+# AC1: an idle OMP client that defers an agent-initiated turn must not strand
+# the doorbell. The extension detects the missing turn_start, falls back to a
+# forced user turn, and only then marks the request delivered. Without the
+# fallback the same request would have been silently renamed .delivered while
+# no turn ran.
+test_omp_idle_deferred_no_turn_forces_user_turn() {
+  local dir="$TMP_ROOT/no-turn"
+  mkdir -p "$dir/state/t1.inbox"
+  HELPER="$HELPER" INBOX="$dir/state/t1.inbox" READY="$dir/state/t1.omp-doorbell-ready" \
+    FM_OMP_DOORBELL_TURN_ACK_MS=10 \
+    node --input-type=module <<'JS'
+import assert from "node:assert/strict";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const { FM_TASK_INBOX_DOORBELL_SIGNAL, installTaskInboxDoorbell } =
+  await import(pathToFileURL(process.env.HELPER).href);
+const sent = [];
+const requestDir = `${process.env.READY}.requests`;
+const statusFile = `${process.env.READY.replace(/\.omp-doorbell-ready$/, "")}.status`;
+const line = "AC1: idle deferred no-turn must be forced";
+let forceTurnSucceeds = true;
+const doorbell = installTaskInboxDoorbell(
+  {
+    sendMessage(message, options) {
+      sent.push({ message, options });
+      // Simulate an ACP client that defers agent-initiated turns: no turn_start.
+    },
+    sendUserMessage(content) {
+      sent.push({ fallback: content });
+      if (forceTurnSucceeds) queueMicrotask(() => doorbell.turnStarted());
+    },
+  },
+  { inboxDir: process.env.INBOX, readyMarker: process.env.READY },
+);
+mkdirSync(requestDir, { recursive: true });
+writeFileSync(`${requestDir}/ac1.pending`, line);
+doorbell.activate();
+// The first request models the failing (deferred) sendMessage path.
+assert.equal(sent.length, 1);
+assert.equal(sent[0].message.customType, "firstmate-task-inbox-doorbell");
+assert.equal(existsSync(`${requestDir}/ac1.pending.ambiguous`), true);
+assert.equal(existsSync(`${requestDir}/ac1.pending.delivered`), false);
+// Wait for the doorbell to time out and force a user turn.
+await new Promise((resolve) => setTimeout(resolve, 60));
+assert.equal(sent.length, 2);
+assert.equal(sent[1].fallback, line);
+assert.equal(existsSync(`${requestDir}/ac1.pending.delivered`), true);
+// Return the session to idle so the second request sees an idle/deferred state again.
+doorbell.turnEnded();
+
+// A second request, again with sendMessage silently downgraded, shows that
+// the doorbell no longer falsely claims .delivered and correctly records the
+// escalation once the forced user turn is also exhausted.
+forceTurnSucceeds = false;
+writeFileSync(`${requestDir}/ac2.pending`, line);
+process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
+await new Promise((resolve) => setTimeout(resolve, 80));
+assert.equal(readdirSync(requestDir).filter((name) => name.endsWith(".delivered")).length, 1);
+assert.equal(existsSync(`${requestDir}/ac2.pending.failed`), true);
+assert.equal(existsSync(`${requestDir}/ac2.pending.delivered`), false);
+assert.equal(existsSync(statusFile), true);
+assert.match(readFileSync(statusFile, "utf8"), /forced-turn-failed/);
+doorbell.retire();
+JS
+  pass "OMP doorbell forces a user turn when the client defers an agent-initiated turn"
+}
+
 test_extension_signal_uses_trigger_turn
+test_omp_idle_deferred_no_turn_forces_user_turn
 test_ring_routing_matrix
 test_request_terminal_states
 test_fm_send_rings_one_programmatic_doorbell

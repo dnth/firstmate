@@ -11,20 +11,13 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 export const FM_TASK_INBOX_DOORBELL_SIGNAL = "SIGUSR2";
 
-type OmpDoorbellApi = {
-	sendMessage?: (
-		message: {
-			customType: string;
-			content: string;
-			display: boolean;
-			attribution: "agent";
-			details: { kind: "task-inbox"; runtime: "omp" };
-		},
-		options: { deliverAs: "steer"; triggerTurn: true },
-	) => void;
+export type OmpDoorbellApi = {
+	sendMessage?: ExtensionAPI["sendMessage"];
+	sendUserMessage?: ExtensionAPI["sendUserMessage"];
 };
 
 export type TaskInboxDoorbellOptions = {
@@ -35,6 +28,8 @@ export type TaskInboxDoorbellOptions = {
 export type TaskInboxDoorbell = {
 	activate: () => void;
 	retire: () => void;
+	turnStarted: () => void;
+	turnEnded: () => void;
 };
 
 function configuredOptions(options: TaskInboxDoorbellOptions): Required<TaskInboxDoorbellOptions> | undefined {
@@ -92,13 +87,19 @@ function reconcileAmbiguousClaims(requestDir: string): void {
 	}
 }
 
+type PendingAck = {
+	pending: string;
+	ambiguous: string;
+	content: string;
+};
+
 export function installTaskInboxDoorbell(
 	omp: OmpDoorbellApi,
 	options: TaskInboxDoorbellOptions = {},
 ): TaskInboxDoorbell {
 	const configured = configuredOptions(options);
 	if (!configured || typeof omp.sendMessage !== "function") {
-		return { activate: () => {}, retire: () => {} };
+		return { activate: () => {}, retire: () => {}, turnStarted: () => {}, turnEnded: () => {} };
 	}
 
 	const requestDir = `${configured.readyMarker}.requests`;
@@ -106,13 +107,106 @@ export function installTaskInboxDoorbell(
 	let draining = false;
 	let signalHandlerInstalled = false;
 	let watcher: FSWatcher | undefined;
+	const pendingAcks: PendingAck[] = [];
+	let sessionIdle = true;
+	let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
+	let forceTurnAttempted = false;
+
+	const turnAckMs = Math.max(10, Math.min(3000, Number(process.env.FM_OMP_DOORBELL_TURN_ACK_MS ?? 500)));
+
+	const clearFallbackTimer = (): void => {
+		if (fallbackTimer) {
+			clearTimeout(fallbackTimer);
+			fallbackTimer = undefined;
+		}
+	};
+
+	const acknowledgeAll = (): void => {
+		while (pendingAcks.length > 0) {
+			const ack = pendingAcks.shift();
+			if (!ack) continue;
+			bestEffortRename(ack.ambiguous, `${ack.pending}.delivered`);
+		}
+		clearFallbackTimer();
+		forceTurnAttempted = false;
+	};
+
+	const failAll = (reason: string): void => {
+		while (pendingAcks.length > 0) {
+			const ack = pendingAcks.shift();
+			if (!ack) continue;
+			bestEffortRename(ack.ambiguous, `${ack.pending}.failed`);
+		}
+		clearFallbackTimer();
+		forceTurnAttempted = false;
+		// Loud escalation: the ready marker is still owned by this process, so the
+		// mismatch will be noticed, but also drop a durable status note when state
+		// is addressable from the marker path.
+		if (configured) {
+			try {
+				const stateDir = dirname(configured.readyMarker);
+				const taskId = basenameWithoutSuffix(configured.readyMarker, ".omp-doorbell-ready");
+				if (taskId && stateDir.startsWith("/")) {
+					const statusFile = join(stateDir, `${taskId}.status`);
+					const note = `failed: ${reason}: ${new Date().toISOString()}; the doorbell could not start a bound turn; supervised recovery must relaunch or inspect the session`;
+					writeFileSync(statusFile, `${note}\n`, { flag: "a", mode: 0o600 });
+				}
+			} catch {
+				// Status escalation is best-effort; the failed marker is the primary signal.
+			}
+		}
+	};
+
+	const tryForceTurn = (): void => {
+		if (forceTurnAttempted) return;
+		forceTurnAttempted = true;
+		if (pendingAcks.length === 0) return;
+		if (typeof omp.sendUserMessage === "function") {
+			const content = pendingAcks[0].content;
+			try {
+				omp.sendUserMessage(content);
+				// Wait one more bounded beat for the forced user turn to emit turn_start.
+				fallbackTimer = setTimeout(() => {
+					fallbackTimer = undefined;
+					if (pendingAcks.length > 0) failAll("forced-turn-failed");
+				}, turnAckMs);
+				return;
+			} catch {
+				// Fall through to failAll.
+			}
+		}
+		failAll("no-turn");
+	};
+
+	const scheduleFallback = (): void => {
+		if (fallbackTimer || forceTurnAttempted) return;
+		fallbackTimer = setTimeout(() => {
+			fallbackTimer = undefined;
+			if (pendingAcks.length === 0) return;
+			tryForceTurn();
+		}, turnAckMs);
+	};
+
+	const turnStarted = (): void => {
+		sessionIdle = false;
+		if (pendingAcks.length > 0) acknowledgeAll();
+	};
+
+	const turnEnded = (): void => {
+		sessionIdle = true;
+	};
+
 	const retire = (): void => {
 		if (!active) return;
 		retireOwnedReadyMarker(configured.readyMarker);
 		active = false;
 		watcher?.close();
 		watcher = undefined;
+		clearFallbackTimer();
+		pendingAcks.length = 0;
+		forceTurnAttempted = false;
 	};
+
 	const drain = (): void => {
 		if (!active || draining) return;
 		draining = true;
@@ -140,7 +234,18 @@ export function installTaskInboxDoorbell(
 						},
 						{ deliverAs: "steer", triggerTurn: true },
 					);
-					renameSync(ambiguous, `${pending}.delivered`);
+					if (sessionIdle) {
+						// The session was idle when we called sendMessage. If the
+						// turn starts, turnStarted acknowledges; if the client
+						// defers agent-initiated turns, the fallback path will
+						// force a user turn or escalate instead of pretending.
+						pendingAcks.push({ pending, ambiguous, content });
+						scheduleFallback();
+					} else {
+						// A turn is already in progress, so the steer is queued for
+						// the running turn. Confirm delivery immediately.
+						bestEffortRename(ambiguous, `${pending}.delivered`);
+					}
 				} catch {
 					if (!invoked) bestEffortRename(ambiguous, `${pending}.failed`);
 					retire();
@@ -151,6 +256,7 @@ export function installTaskInboxDoorbell(
 			draining = false;
 		}
 	};
+
 	const activate = (): void => {
 		if (active) return;
 		try {
@@ -169,5 +275,10 @@ export function installTaskInboxDoorbell(
 		}
 	};
 
-	return { activate, retire };
+	return { activate, retire, turnStarted, turnEnded };
+}
+
+function basenameWithoutSuffix(path: string, suffix: string): string {
+	const base = path.slice(path.lastIndexOf("/") + 1);
+	return base.endsWith(suffix) ? base.slice(0, -suffix.length) : base;
 }

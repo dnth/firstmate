@@ -214,6 +214,26 @@ export default function (omp: ExtensionAPI) {
   publishNativeProcessIdentity();
   const taskInboxDoorbell = installTaskInboxDoorbell(omp);
   let pendingStartupNudge = "";
+  let sessionIdle = true;
+  let wakeFallbackTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const clearWakeFallbackTimer = (): void => {
+    if (wakeFallbackTimer) {
+      clearTimeout(wakeFallbackTimer);
+      wakeFallbackTimer = undefined;
+    }
+  };
+
+  const turnStarted = (): void => {
+    sessionIdle = false;
+    clearWakeFallbackTimer();
+    taskInboxDoorbell.turnStarted();
+  };
+
+  const turnEnded = (): void => {
+    sessionIdle = true;
+    taskInboxDoorbell.turnEnded();
+  };
 
   // Hidden next-turn delivery with triggerTurn. OMP schedules an internal
   // continuation bound to the current prompt generation, so a wake that lands
@@ -221,7 +241,27 @@ export default function (omp: ExtensionAPI) {
   // stranding an idle session, and every notification queued during that turn
   // is consumed by the one continuation. The message never enters the editable
   // pending-message UI, so the captain's draft is untouched.
+  //
+  // When the session is idle, the ACP client can defer an agent-initiated
+  // turn. The doorbell and the watcher share this boundary, so we use the same
+  // observable turn_start plus a bounded sendUserMessage fallback instead of
+  // assuming the hidden message started a turn.
+  const wakeAckMs = Math.max(10, Math.min(3000, Number(process.env.FM_OMP_WAKE_TURN_ACK_MS ?? 500)));
+
   const sendWakeNotification = (content: string): void => {
+    if (!sessionIdle) {
+      omp.sendMessage(
+        {
+          customType: "firstmate-watcher-wake",
+          content,
+          display: false,
+          attribution: "agent",
+          details: { kind: "watcher", runtime: "omp" },
+        },
+        { deliverAs: "nextTurn", triggerTurn: true },
+      );
+      return;
+    }
     omp.sendMessage(
       {
         customType: "firstmate-watcher-wake",
@@ -232,6 +272,18 @@ export default function (omp: ExtensionAPI) {
       },
       { deliverAs: "nextTurn", triggerTurn: true },
     );
+    wakeFallbackTimer = setTimeout(() => {
+      wakeFallbackTimer = undefined;
+      if (!sessionIdle) return;
+      if (typeof omp.sendUserMessage === "function") {
+        try {
+          omp.sendUserMessage(content);
+        } catch {
+          // The message is already durable in the wake queue; another session
+          // event will retry. Do not escalate here.
+        }
+      }
+    }, wakeAckMs);
   };
 
   // Durable rows are the whole persistence: only fm-wake-drain acknowledgement
@@ -323,6 +375,15 @@ export default function (omp: ExtensionAPI) {
 
   omp.on("turn_start", () => {
     publishTaskTurnStarted();
+    turnStarted();
+  });
+
+  omp.on("turn_end", () => {
+    turnEnded();
+  });
+
+  omp.on("agent_end", () => {
+    turnEnded();
   });
 
   omp.on("session_switch", async (event, ctx) => {
