@@ -352,6 +352,12 @@ cmd_start() {
       fm_procevent_source_lock_release "$CLAIM_ID" 2>/dev/null || true
       return 0
     fi
+    # If registration disappeared while this generation was running, keep
+    # the claim for reconcile/sweep to retire as a claim-only source.
+    if [ ! -f "$(source_file "$CLAIM_ID")" ] || [ -L "$(source_file "$CLAIM_ID")" ]; then
+      fm_procevent_source_lock_release "$CLAIM_ID" 2>/dev/null || true
+      return 0
+    fi
     fm_procevent_claim_release_locked "$CLAIM_ID" "$CLAIM_HOME" "$CLAIM_PID" "$CLAIM_TOKEN" 2>/dev/null || true
     fm_procevent_source_lock_release "$CLAIM_ID" 2>/dev/null || true
   }
