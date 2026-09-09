@@ -216,12 +216,14 @@ export default function (omp: ExtensionAPI) {
   let pendingStartupNudge = "";
   let sessionIdle = true;
   let wakeFallbackTimer: ReturnType<typeof setTimeout> | undefined;
+  let wakeFallbackContent = "";
 
   const clearWakeFallbackTimer = (): void => {
     if (wakeFallbackTimer) {
       clearTimeout(wakeFallbackTimer);
       wakeFallbackTimer = undefined;
     }
+    wakeFallbackContent = "";
   };
 
   const turnStarted = (): void => {
@@ -272,12 +274,16 @@ export default function (omp: ExtensionAPI) {
       },
       { deliverAs: "nextTurn", triggerTurn: true },
     );
+    wakeFallbackContent = wakeFallbackContent ? `${wakeFallbackContent}\n${content}` : content;
+    if (wakeFallbackTimer) return;
     wakeFallbackTimer = setTimeout(() => {
       wakeFallbackTimer = undefined;
       if (!sessionIdle) return;
+      const fallbackContent = wakeFallbackContent;
+      wakeFallbackContent = "";
       if (typeof omp.sendUserMessage === "function") {
         try {
-          omp.sendUserMessage(content);
+          omp.sendUserMessage(fallbackContent || content);
         } catch {
           // The message is already durable in the wake queue; another session
           // event will retry. Do not escalate here.

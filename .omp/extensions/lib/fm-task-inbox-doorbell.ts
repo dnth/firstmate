@@ -70,6 +70,21 @@ function bestEffortUnlink(path: string): void {
 	}
 }
 
+function requeueAmbiguousClaim(ack: PendingAck): void {
+	let target = ack.pending;
+	let suffix = 0;
+	while (existsSync(target)) {
+		suffix += 1;
+		target = `${ack.pending}.recovered.${suffix}.pending`;
+	}
+	try {
+		linkSync(ack.ambiguous, target);
+		bestEffortUnlink(ack.ambiguous);
+	} catch {
+		return;
+	}
+}
+
 function reconcileAmbiguousClaims(requestDir: string): void {
 	for (const name of readdirSync(requestDir).sort()) {
 		const match = name.match(/^(.*\.pending)\.processing\.([0-9]+)$/);
@@ -203,6 +218,7 @@ export function installTaskInboxDoorbell(
 		watcher?.close();
 		watcher = undefined;
 		clearFallbackTimer();
+		for (const ack of pendingAcks) requeueAmbiguousClaim(ack);
 		pendingAcks.length = 0;
 		forceTurnAttempted = false;
 	};
