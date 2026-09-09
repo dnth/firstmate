@@ -94,6 +94,24 @@ fm_watcher_lock_matches_pid() {
   FM_WATCHER_MATCHED_IDENTITY=$lock_identity
 }
 
+# fm_poll_derived_grace [poll-seconds]
+# The single owner of the max(300, poll + 60) staleness-grace derivation.
+# bin/fm-watch.sh touches the liveness beacon once per cycle, immediately
+# before its terminal wait, so a healthy watcher's beacon can legitimately age
+# up to FM_POLL seconds between touches; a fixed 300s default misreads a
+# long-poll home mid-wait as stale. Poll argument (or $FM_POLL) given, it
+# derives the same default fm-watch.sh itself would use.
+# docs/turnend-guard.md "Guard grace and the poll cadence" owns the rationale;
+# every FM_GUARD_GRACE default on a watcher-cycle boundary should derive from
+# this.
+fm_poll_derived_grace() {
+  local poll=${1:-${FM_POLL:-15}} margin=60 derived
+  case "$poll" in ''|*[!0-9]*) poll=15 ;; esac
+  derived=$((poll + margin))
+  [ "$derived" -ge 300 ] || derived=300
+  printf '%s\n' "$derived"
+}
+
 FM_WATCHER_HEALTHY_PID=
 FM_WATCHER_HEALTHY_IDENTITY=
 fm_watcher_healthy() {
