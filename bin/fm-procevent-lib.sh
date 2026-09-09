@@ -337,6 +337,7 @@ fm_procevent_claim_state_root_identity() {  # <state-root>
 
 fm_procevent_claim_owned_by_state() {  # <state-root> <legacy-home>
   if [ -n "${FM_PROCEVENT_CLAIM_STATE_ROOT:-}" ]; then
+    fm_procevent_claim_recorded_state_root_valid || return 1
     [ "$FM_PROCEVENT_CLAIM_STATE_ROOT" = "$1" ]
   else
     [ "$FM_PROCEVENT_CLAIM_HOME" = "$2" ]
@@ -507,6 +508,10 @@ fm_procevent_claim_state_locked() {
   claim=$(fm_procevent_claim_path "$1")
   [ -e "$claim" ] || return 1
   fm_procevent_claim_load_locked "$1" || return 2
+  if [ -n "$FM_PROCEVENT_CLAIM_STATE_ROOT" ] \
+    && ! fm_procevent_claim_recorded_state_root_valid; then
+    return 2
+  fi
   if [ "$FM_PROCEVENT_CLAIM_TERMINAL" = terminal ] && [ -n "$FM_PROCEVENT_CLAIM_REG_IDENTITY" ]; then
     registration="$FM_PROCEVENT_CLAIM_REG_DIR/$1.source"
     current_identity=$(fm_pr_file_identity "$registration" 2>/dev/null || true)
