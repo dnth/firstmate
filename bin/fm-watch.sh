@@ -327,9 +327,29 @@ window_label() {
   [ -n "$task" ] && printf 'fm-%s' "$task"
 }
 
+# Surface one stale wake for an unhandled steer whose endpoint is positively
+# dead or missing: the doorbell was never typed, so the record goes straight to
+# recovery instead of walking the re-ring ladder. The marker write happens after
+# the durable queue append, so a crash between them can only produce a rare
+# duplicate, never a lost wake.
+inbox_steer_escalate_unavailable() {  # <window> <task> <record>
+  local w=$1 task=$2 rec=$3 reason
+  reason="stale: $w (unread firstmate instruction: $rec is unhandled and the worker's agent has exited or its endpoint is missing, so the doorbell was not typed; recover the worker)"
+  if [ ! -d "${rec%/*}" ] || [ ! -f "$rec" ]; then
+    fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
+    return 0
+  fi
+  fm_wake_append stale "$w" "$reason" || exit 1
+  if ! fm_task_inbox_record_escalated "$STATE" "$task" "$rec"; then
+    echo "error: stale wake was queued for $task but its inbox escalation marker could not be written" >&2
+    exit 1
+  fi
+  wake "$reason"
+}
+
 inbox_steer_check() {  # <window> <task>
   local window=$1 task=$2 action verb record count tail40 reason ring_rc
-  local meta backend label harness omp_runtime omp_bin
+  local meta backend label harness omp_runtime omp_bin agent_state
   action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0
   verb=${action%% *}
   [ "$verb" != quiet ] || return 0
@@ -346,6 +366,13 @@ inbox_steer_check() {  # <window> <task>
   harness=$(fm_meta_get "$meta" harness)
   omp_runtime=$(fm_meta_get "$meta" omp_bun)
   omp_bin=$(fm_meta_get "$meta" omp_bin)
+  agent_state=$(fm_backend_agent_state "$backend" "$window" 2>/dev/null || true)
+  case "$agent_state" in
+    dead|missing)
+      inbox_steer_escalate_unavailable "$window" "$task" "$record"
+      return 0
+      ;;
+  esac
   tail40=$(fm_backend_capture "$backend" "$window" 40 "$label" 2>/dev/null) || tail40=
   window_is_busy "$window" "$tail40" && return 0
   case "$verb" in
@@ -353,6 +380,10 @@ inbox_steer_check() {  # <window> <task>
       ring_rc=0
       fm_task_inbox_ring "$backend" "$window" "$record" "$label" \
         "$harness" "$omp_runtime" "$omp_bin" || ring_rc=$?
+      if [ "$ring_rc" -eq 6 ]; then
+        inbox_steer_escalate_unavailable "$window" "$task" "$record"
+        return 0
+      fi
       if ! fm_task_inbox_record_ring "$STATE" "$task" "$record"; then
         if [ ! -f "$record" ]; then
           fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true

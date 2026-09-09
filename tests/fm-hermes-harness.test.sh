@@ -419,7 +419,7 @@ test_hermes_spawn_tui_skill_state_and_teardown() {
     || fail "Hermes ordinary steer inbox record lost its exact message"
   assert_not_contains "$commands" "Continue with the adapter." \
     "Hermes ordinary steer leaked payload bytes into the terminal"
-  assert_contains "$commands" "Firstmate instruction waiting: list $HOME_DIR/state/$TEST_ID.inbox/*.msg" \
+  assert_contains "$commands" "Firstmate instruction waiting: list '$HOME_DIR/state/$TEST_ID.inbox'/*.msg" \
     "Hermes ordinary steer did not ring the durable inbox doorbell"
   assert_contains "$commands" "Read the skill at $HOME_DIR/.agents/skills/no-mistakes/SKILL.md completely and follow it now." \
     "Hermes skill invocation did not use the validated Firstmate skill pointer"
@@ -933,7 +933,7 @@ test_hermes_doorbell_cannot_interleave_with_typed_command() {
     "the doorbell must refuse while a typed Hermes command holds the shared delivery lock"
   assert_absent "$block/second-entered" \
     "the refused doorbell still entered the Hermes backend"
-  [ "$(grep -c '^Firstmate instruction waiting:' "$CASE_DIR/commands.log")" = 0 ] \
+  [ "$(grep -c '^: Firstmate instruction waiting:' "$CASE_DIR/commands.log")" = 0 ] \
     || fail "the refused doorbell still wrote to the Hermes terminal: $(cat "$CASE_DIR/commands.log")"
   # The refusal changes neither the durable record nor who acknowledges it.
   body=$(inbox_record_body "$record")
@@ -956,7 +956,7 @@ test_hermes_doorbell_cannot_interleave_with_typed_command() {
     "$ROOT/bin/fm-task-inbox-lib.sh" "$win" "$record" hermes \
     > "$CASE_DIR/ring-freed.out" 2>&1 || ring_rc=$?
   expect_code 0 "$ring_rc" "the doorbell should ring once the delivery lock is free"
-  [ "$(grep -c '^Firstmate instruction waiting:' "$CASE_DIR/commands.log")" = 1 ] \
+  [ "$(grep -c '^: Firstmate instruction waiting:' "$CASE_DIR/commands.log")" = 1 ] \
     || fail "the released doorbell was not delivered exactly once: $(cat "$CASE_DIR/commands.log")"
   # The worker's mv is still the only acknowledgement.
   assert_present "$record" "delivery must leave the durable record for the worker to acknowledge"
@@ -983,7 +983,7 @@ test_hermes_ordinary_steer_still_uses_the_inbox_plane() {
   body=$(inbox_record_body "$record")
   [ "$body" = 'plain ordinary instruction' ] \
     || fail "the ordinary steer text did not round-trip: '$body'"
-  [ "$(grep -c '^Firstmate instruction waiting:' "$CASE_DIR/commands.log")" = 1 ] \
+  [ "$(grep -c '^: Firstmate instruction waiting:' "$CASE_DIR/commands.log")" = 1 ] \
     || fail "the ordinary steer did not ring exactly one doorbell: $(cat "$CASE_DIR/commands.log")"
   assert_no_grep 'plain ordinary instruction' "$CASE_DIR/commands.log" \
     "the ordinary steer payload must never be typed into the terminal"
