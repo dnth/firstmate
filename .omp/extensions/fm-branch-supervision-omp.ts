@@ -1,7 +1,13 @@
 // Firstmate supervision branch for OMP (docs/omp-supervision-branch.md).
 //
-// A persistent second AgentSession - the supervision BRANCH - inside the same
-// OMP process as the captain's MAIN session. The watcher adapter offers each
+// A second AgentSession - the supervision BRANCH - inside the same
+// OMP process as the captain's MAIN session, living for exactly one main
+// session: every main session boundary (cold start, /new, /resume, /fork,
+// reload) opens a NEW branch conversation, so the branch reasons from today's
+// generated prompt and the current main dialog instead of an older thread's
+// accumulated memory. The durable outcome store, not that conversation, is
+// what carries unacknowledged captain-facing outcomes across the boundary. The
+// watcher adapter offers each
 // actionable wake here (lib/fm-branch-dispatch.ts); the branch handles it with
 // real tools and reports through the fm_branch_report custom tool, which
 // writes the durable outcome store FIRST (bin/fm-branch-outcome.sh) and then
@@ -414,13 +420,23 @@ type ReadonlyEntries = {
 type MirrorCollectionState = {
   collectAnchor: MirrorCursor | null;
   pendingCursor: MirrorCursor | null;
+  // Set at every main session boundary (session_start, session_switch), where
+  // the branch conversation is replaced too (createBranch). The durable cursor
+  // records what the PREVIOUS branch conversation already received, so the
+  // first collection of a new main session ignores it and re-anchors to that
+  // session's start; otherwise a /resume or reload, which keeps main's own
+  // session file, would leave the fresh branch blind to dialog main itself
+  // still has. The reset is bounded by the current main session and costs only
+  // re-delivered read-only context, which is idempotent.
+  reanchor: boolean;
 };
 
 function collectMainDialog(sessionManager: ReadonlyEntries, collection: MirrorCollectionState): MirrorItem[] {
   const file = sessionManager.getSessionFile() ?? "";
   const entries = sessionManager.getEntries();
   const anchor = collection.collectAnchor ?? readMirrorCursor();
-  const start = anchor.file === file ? Math.min(anchor.index, entries.length) : 0;
+  const start = collection.reanchor || anchor.file !== file ? 0 : Math.min(anchor.index, entries.length);
+  collection.reanchor = false;
   const items: MirrorItem[] = [];
   for (const entry of entries.slice(start)) {
     if (entry.type !== "message") continue;
@@ -451,14 +467,23 @@ export default function (pi: ExtensionAPI) {
   let wakeTaskScope: { rows: string[]; tasks: Set<string> } | null = null;
   let mainStreaming = false;
   let shuttingDown = false;
-  // Advanced once per cold-start arm (session_start). There is no live-handoff
-  // replacement, so within a process the branch is persistent and the generation
-  // stays fixed; the guards below then reduce to the shutdown and lock-ownership
-  // checks. A fresh process re-arms from zero with fresh in-memory state.
+  // Advanced once per main session boundary (session_start and session_switch):
+  // a new main session means a new branch conversation (branchSessionGeneration),
+  // so anything in flight bound to the previous generation is cancelled by its
+  // own recheck. A fresh process re-arms from zero with fresh in-memory state.
   let generation = 0;
   // One-time per-generation activation work (marker write + stray branch
   // lease cleanup); ownership itself is re-read lazily at every boundary.
   let activatedGeneration = -1;
+  // The branch CONVERSATION is scoped to one main session. This records which
+  // extension generation the current branch conversation belongs to, and only
+  // a record from the CURRENT generation is ever reopened, so every main
+  // session boundary - cold start, /new, /resume, /fork, reload - starts the
+  // branch on a new conversation instead of dragging an older thread's memory
+  // into today's supervision rules. The starting -1 makes a process's first
+  // build new even if this instance never sees a session_start of its own.
+  let branchSessionGeneration = -1;
+  let branchSessionFile = "";
   // Serializes branch work: mirror appends and wake turns run strictly in
   // dispatch order, one at a time (the branch runs drain -> handle -> ack
   // serially by design).
@@ -478,7 +503,10 @@ export default function (pi: ExtensionAPI) {
     return queued;
   }
   const pendingMirror: MirrorItem[] = [];
-  const mirrorCollection: MirrorCollectionState = { collectAnchor: null, pendingCursor: null };
+  // The first branch conversation of a process is new (see
+  // branchSessionGeneration), so its first collection re-anchors too, even if
+  // this instance never sees a session_start of its own.
+  const mirrorCollection: MirrorCollectionState = { collectAnchor: null, pendingCursor: null, reanchor: true };
   // Main's own current model and its live registry, tracked from the contexts
   // OMP already hands this extension, because createBranch runs at wake time
   // with no context of its own. mainModel is what "follow main" applies;
@@ -859,13 +887,18 @@ export default function (pi: ExtensionAPI) {
     if (!(await actingAsOwner(branchGeneration))) throw new Error("supervision session was replaced or lost lock ownership");
     mkdirSync(sessionsDir, { recursive: true });
     let sessionManager: SessionManager | null = null;
-    try {
-      const recorded = readFileSync(sessionPointer, "utf8").trim();
-      if (recorded && existsSync(recorded)) {
-        sessionManager = await SessionManager.open(recorded, sessionsDir, undefined, { suppressBreadcrumb: true });
+    // Only this main session's own branch conversation is continued. The
+    // recorded pointer is never reopened across a session boundary, so a
+    // rebuild inside one session keeps today's thread while a new main
+    // session always opens a new one (branchSessionGeneration).
+    if (branchSessionGeneration === branchGeneration && branchSessionFile) {
+      try {
+        if (existsSync(branchSessionFile)) {
+          sessionManager = await SessionManager.open(branchSessionFile, sessionsDir, undefined, { suppressBreadcrumb: true });
+        }
+      } catch {
+        sessionManager = null;
       }
-    } catch {
-      sessionManager = null;
     }
     if (!sessionManager) {
       sessionManager = await SessionManager.inMemory(fmRoot).persistCopy({
@@ -873,6 +906,8 @@ export default function (pi: ExtensionAPI) {
         suppressBreadcrumb: true,
       });
     }
+    branchSessionGeneration = branchGeneration;
+    branchSessionFile = sessionManager.getSessionFile() ?? "";
     if (!(await actingAsOwner(branchGeneration))) throw new Error("supervision session was replaced or lost lock ownership");
     const leaseHolderPid = ownedLockPid;
     const bashTool = createBashToolDefinition(fmRoot, {
@@ -936,7 +971,10 @@ ${context.command}
     try {
       writeFileSync(sessionPointer, `${sessionManager.getSessionFile()}\n`);
     } catch {
-      // Pointer write failure only costs cross-restart session reuse.
+      // The pointer is a durable record of the branch's current conversation
+      // for operators and for the effort picker's last-resort model lookup;
+      // reopening reads the in-memory record above, so a failed write costs
+      // neither the live session nor its replacement.
     }
     return { session: created.session, sessionManager };
   }
@@ -1113,22 +1151,50 @@ ${context.command}
     enqueueMirrorFlush();
   });
 
-  // session_start arms this generation at a cold start (a fresh process). Main
-  // session replacements are handled by the primary OMP adapter's
-  // session_switch watcher re-arm; this branch remains resident and the mirror
-  // re-anchors when the session file changes (collectMainDialog compares the
-  // file). A synchronous live handoff from a branch, or hung-branch takeover,
-  // remains out of scope (see docs/omp-supervision-branch.md). Terminal quit
-  // fires session_shutdown and never a start.
-  pi.on?.("session_start", async (_event, ctx) => {
-    rememberMainContext(ctx);
+  // A synchronous live handoff from a branch, or hung-branch takeover, remains
+  // out of scope (see docs/omp-supervision-branch.md). Terminal quit fires
+  // session_shutdown and never a start.
+  // session_start arms a fresh process. session_switch is the OMP replacement
+  // boundary (/new, /resume, /fork, reload): the primary adapter retires and
+  // re-arms its watcher generation around it, and here the same boundary is
+  // what makes the branch conversation NEW for the new main session - the
+  // recorded branch session belongs to the previous generation, so the next
+  // wake builds a new one rather than reopening a thread whose accumulated
+  // memory would compete with today's supervision prompt. The mirror re-anchors
+  // with it, so the fresh branch receives the dialog of the main session it is
+  // supervising from that session's start.
+  const armSessionBoundary = (ctx?: ExtensionContext): void => {
+    if (ctx) rememberMainContext(ctx);
     shuttingDown = false;
     branchBroken = "";
     consecutiveProviderErrors = 0;
     providerRecovery = null;
     generation += 1;
+    pendingMirror.length = 0;
+    mirrorCollection.collectAnchor = null;
+    mirrorCollection.pendingCursor = null;
+    mirrorCollection.reanchor = true;
+    // The previous generation's branch conversation is never reopened; drop the
+    // live handle so nothing queued after this boundary can reuse it. In-flight
+    // chain work bound to the old generation cancels itself on its rechecks.
+    const stale = branch;
+    branch = null;
+    if (stale) {
+      stale.session.beginDispose();
+      void stale.session.dispose().catch(() => {
+        // Already gone.
+      });
+    }
+  };
+
+  pi.on?.("session_start", async (_event, ctx) => {
+    armSessionBoundary(ctx);
     const startedGeneration = generation;
     await enqueueDelivery(() => actingAsOwner(startedGeneration));
+  });
+
+  pi.on?.("session_switch", (_event, ctx) => {
+    armSessionBoundary(ctx);
   });
 
   // Terminal quit: latch shutdown so no further wake or mirror turn starts. No
@@ -1142,6 +1208,19 @@ ${context.command}
   // fresh one re-arm, never by a live takeover.
   pi.on?.("session_shutdown", () => {
     shuttingDown = true;
+    generation += 1;
+    pendingMirror.length = 0;
+    mirrorCollection.collectAnchor = null;
+    mirrorCollection.pendingCursor = null;
+    mirrorCollection.reanchor = true;
+    const stale = branch;
+    branch = null;
+    if (stale) {
+      stale.session.beginDispose();
+      void stale.session.dispose().catch(() => {
+        // Already gone.
+      });
+    }
   });
 
   // OMP keeps /model and its own thinking selector for the captain's own
