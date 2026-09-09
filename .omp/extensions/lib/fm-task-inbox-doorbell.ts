@@ -51,11 +51,13 @@ export type TaskInboxDoorbellOptions = {
 	// triggerTurn call is treated as downgraded to append-only and the
 	// instruction is re-driven through the user-prompt channel.
 	turnGraceMs?: number;
+	observeTurns?: boolean;
 };
 
 export type TaskInboxDoorbell = {
 	activate: () => void;
 	retire: () => void;
+	notifyTurnStart: () => void;
 };
 
 function configuredOptions(options: TaskInboxDoorbellOptions): Required<TaskInboxDoorbellOptions> | undefined {
@@ -67,7 +69,7 @@ function configuredOptions(options: TaskInboxDoorbellOptions): Required<TaskInbo
 	const turnGraceMs = Number.isFinite(configuredGrace)
 		? Math.min(Math.max(Math.trunc(configuredGrace), MIN_TURN_GRACE_MS), MAX_TURN_GRACE_MS)
 		: DEFAULT_TURN_GRACE_MS;
-	return { inboxDir, readyMarker, turnGraceMs };
+	return { inboxDir, readyMarker, turnGraceMs, observeTurns: options.observeTurns !== false };
 }
 
 function publishReadyMarker(marker: string): void {
@@ -136,12 +138,12 @@ export function installTaskInboxDoorbell(
 ): TaskInboxDoorbell {
 	const configured = configuredOptions(options);
 	if (!configured || typeof omp.sendMessage !== "function") {
-		return { activate: () => {}, retire: () => {} };
+		return { activate: () => {}, retire: () => {}, notifyTurnStart: () => {} };
 	}
 
 	const requestDir = `${configured.readyMarker}.requests`;
 	const turnGraceMs = configured.turnGraceMs;
-	const canObserveTurns = typeof omp.on === "function";
+	const canObserveTurns = options.observeTurns !== false && typeof omp.on === "function";
 	const canReDrive = typeof omp.sendUserMessage === "function";
 	let active = false;
 	let draining = false;
@@ -193,6 +195,7 @@ export function installTaskInboxDoorbell(
 		turnOpen = true;
 		if (dispatchingTurn) dispatchingTurnObserved = true;
 	};
+	const notifyTurnStart = (): void => onTurnOpen();
 	const onTurnClose = (): void => {
 		turnOpen = false;
 	};
@@ -293,5 +296,5 @@ export function installTaskInboxDoorbell(
 		}
 	};
 
-	return { activate, retire };
+	return { activate, retire, notifyTurnStart };
 }

@@ -847,14 +847,16 @@ cmd_sweep_home() {
   done
   for path in "$(fm_procevent_claim_root)"/*.claim; do
     [ -f "$path" ] && [ ! -L "$path" ] || continue
-    IFS= read -r owner < "$path" 2>/dev/null || continue
-    [ "$owner" = "$FM_HOME" ] || continue
     id=${path##*/}; id=${id%.claim}
-    if fm_procevent_source_id_valid "$id"; then
+    fm_procevent_source_id_valid "$id" || { failed=$((failed + 1)); continue; }
+    # Claims store canonical ownership metadata; load it under the source
+    # boundary so symlinked/aliased homes are compared by physical state root.
+    fm_procevent_source_lock_acquire "$id" || { failed=$((failed + 1)); continue; }
+    if fm_procevent_claim_load_locked "$id" 2>/dev/null \
+      && fm_procevent_claim_owned_by_state "$STATE" "$FM_HOME"; then
       sweep_add_id "$id"
-    else
-      failed=$((failed + 1))
     fi
+    fm_procevent_source_lock_release "$id"
   done
   for path in "$REG"/*.runner; do
     if [ -e "$path" ] || [ -L "$path" ]; then

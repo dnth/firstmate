@@ -212,7 +212,7 @@ function runGuard(event: SessionStopEvent): Promise<ProcessResult> {
 export default function (omp: ExtensionAPI) {
   if (!primaryIntegrationApplies()) return;
   publishNativeProcessIdentity();
-  const taskInboxDoorbell = installTaskInboxDoorbell(omp);
+  const taskInboxDoorbell = installTaskInboxDoorbell(omp, { observeTurns: false });
   let pendingStartupNudge = "";
 
   // Hidden next-turn delivery with triggerTurn. OMP schedules an internal
@@ -359,6 +359,7 @@ export default function (omp: ExtensionAPI) {
   });
 
   omp.on("turn_start", () => {
+    taskInboxDoorbell.notifyTurnStart();
     publishTaskTurnStarted();
   });
 
