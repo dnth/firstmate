@@ -384,10 +384,22 @@ pass "a source stays armed unless its own adapter classifies the result terminal
 HREPLACE="$TMP_ROOT/hreplace"; new_home "$HREPLACE"
 PE_TRACKED+=("$HREPLACE|replace-src")
 OLD_TRIGGER="$TMP_ROOT/replace-old-trigger"
-pe_adapter "$HREPLACE" register endnow replace-src -- "$BLOCKER" "$OLD_TRIGGER" "old terminal payload" >/dev/null
+OLD_STARTED="$TMP_ROOT/replace-old-started"
+REPLACE_BLOCKER="$TMP_ROOT/replace-blocker.sh"
+cat > "$REPLACE_BLOCKER" <<'SH'
+#!/usr/bin/env bash
+printf 'started\n' > "$1"
+shift
+exec "$@"
+SH
+chmod +x "$REPLACE_BLOCKER"
+pe_adapter "$HREPLACE" register endnow replace-src -- \
+  "$REPLACE_BLOCKER" "$OLD_STARTED" "$BLOCKER" "$OLD_TRIGGER" "old terminal payload" >/dev/null
 pe_adapter "$HREPLACE" start replace-src > "$TMP_ROOT/replace-old.out" 2>&1 &
 replace_old_pid=$!
-wait_for "$FM_PROCEVENT_CLAIM_ROOT/replace-src.claim" || fail "the old registration was never claimed"
+# The claim lands before the owner-guard handshake and launch floor, so the
+# re-registration must wait until the old generation's source is running.
+wait_for "$OLD_STARTED" || fail "the old registration never started"
 pe_adapter "$HREPLACE" register openended replace-src -- /bin/echo "replacement payload" >/dev/null
 touch "$OLD_TRIGGER"
 wait "$replace_old_pid" || fail "the old terminal runner failed"
@@ -667,13 +679,13 @@ sleep 0.5
 for race_pid in "${race_pids[@]}"; do wait "$race_pid" 2>/dev/null || true; done
 pass "concurrent stale-claim replacement starts exactly one runner"
 
-# --- a crashed runner leader must not make its live child group look stale ---
+# --- a crashed runner leader leaves an ambiguous group reconcile preserves ---
 # The runner is its own process group leader, so SIGKILL on the leader alone
-# leaves the blocking source child running in that group. Classifying the
-# missing leader as stale would release ownership and start a second poller
-# against one canonical source, which for a destructive source means two
-# concurrent long polls racing on the same session. The surviving group must be
-# stopped before ownership can move.
+# leaves the blocking source child running in that group. A numeric process
+# group can be reused once its leader is gone, so reconcile cannot prove the
+# surviving group is this generation's: it keeps the claim owned and reports
+# uncertain rather than signalling an unproven group or starting a replacement
+# alongside it.
 HG="$TMP_ROOT/hg"; new_home "$HG"
 ORPHAN_TRIGGER="$TMP_ROOT/orphan-trigger"
 ORPHAN_LOG="$TMP_ROOT/orphan-executions"
@@ -708,28 +720,19 @@ kill -0 "$orphan_leader" 2>/dev/null && fail "the runner leader survived SIGKILL
 kill -0 -"$orphan_leader" 2>/dev/null || fail "fixture invalid: the owned child group did not survive the leader"
 
 orphan_out=$(pe "$HG" reconcile)
+assert_contains "$orphan_out" "started=0" "reconcile never starts a replacement beside an unproven leaderless group"
 kill -0 -"$orphan_leader" 2>/dev/null \
-  && fail "reconcile left the crashed generation's process group alive: $orphan_out"
+  || fail "reconcile signalled a leaderless group it cannot prove is this generation's: $orphan_out"
+[ -e "$FM_PROCEVENT_CLAIM_ROOT/orphan-src.claim" ] \
+  || fail "an ambiguous leaderless group must keep its claim for later evaluation: $orphan_out"
 sleep 0.5
 assert_absent "$ORPHAN_OVERLAP" "no replacement source starts while the crashed generation remains alive"
-case "$orphan_out" in
-  *"started=1"*)
-    [ -e "$FM_PROCEVENT_CLAIM_ROOT/orphan-src.claim" ] \
-      || fail "a replacement runner started without recording its own claim"
-    [ "$(wc -l < "$ORPHAN_LOG" | tr -d ' ')" = 2 ] \
-      || fail "reconcile did not start exactly one replacement source: $(cat "$ORPHAN_LOG")"
-    ;;
-  *"started=0"*)
-    [ -e "$FM_PROCEVENT_CLAIM_ROOT/orphan-src.claim" ] \
-      || fail "refusing to replace must preserve the claim for retry: $orphan_out"
-    [ "$(wc -l < "$ORPHAN_LOG" | tr -d ' ')" = 1 ] \
-      || fail "reconcile started a source while refusing replacement: $(cat "$ORPHAN_LOG")"
-    ;;
-  *) fail "unexpected reconcile result for a crashed leader: $orphan_out" ;;
-esac
+# The fixture's group is deliberately left unproven, so the test owns its
+# cleanup before retiring the source.
+kill -KILL -"$orphan_leader" 2>/dev/null || true
 : > "$ORPHAN_TRIGGER"
 pe "$HG" retire orphan-src >/dev/null
-pass "a crashed runner leader never lets a live owned group be reclaimed as stale"
+pass "a crashed runner leader's ambiguous group is preserved, not signalled or replaced"
 
 # Counterexample: a genuinely dead generation - no leader and no surviving
 # group - must still be reclaimable, or crash recovery would deadlock.
@@ -1094,5 +1097,40 @@ assert_contains "$read_out" "declared_items: 5" "declared item count missing"
 assert_contains "$read_out" "presented_items: 5" "presented item count missing"
 assert_contains "$read_out" "complete: yes" "complete capture not certified"
 pass "structured read surfaces comments and preserves choice Context filtering"
+
+# --- an orphaned runner is bounded by its owner guard ------------------------
+# A runner detached from a removed or wedged home must not poll forever. The
+# public start keeps the home's lease fresh only while its caller stays
+# attached, so killing the caller leaves the lease to expire; the per-runner
+# owner guard then stops the runner's whole process group on the second
+# consecutive unproven check.
+HO="$TMP_ROOT/ho"; new_home "$HO"
+OWNER_TRIGGER="$TMP_ROOT/owner-trigger"
+pe_register "$HO" lavish owner-src -- "$BLOCKER" "$OWNER_TRIGGER" "orphan me" >/dev/null
+FM_PROCEVENT_OWNER_LEASE_SECONDS=1 FM_PROCEVENT_OWNER_CHECK_SECONDS=1 \
+  pe "$HO" start owner-src > "$TMP_ROOT/owner-start.out" 2>&1 &
+owner_start=$!
+wait_for "$FM_PROCEVENT_CLAIM_ROOT/owner-src.claim" \
+  || fail "owner-guard fixture runner never claimed its source"
+owner_leader=$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/owner-src.claim")
+case "$owner_leader" in ''|*[!0-9]*) fail "could not read the runner leader pid: $owner_leader" ;; esac
+for _ in $(seq 1 100); do
+  kill -0 "$owner_leader" 2>/dev/null && break
+  sleep 0.1
+done
+kill -0 "$owner_leader" 2>/dev/null || fail "fixture invalid: the runner never started"
+# Detach the attached caller so nothing refreshes this home's lease. The start
+# boundary and its keepalive subshell share this exact command line; the
+# detached runner's is `fm-procevent.sh _start`, which the pattern cannot hit.
+pkill -KILL -f 'fm-procevent\.sh start owner-src' 2>/dev/null || true
+kill -KILL "$owner_start" 2>/dev/null || true
+for _ in $(seq 1 200); do
+  kill -0 -"$owner_leader" 2>/dev/null || break
+  sleep 0.1
+done
+kill -0 -"$owner_leader" 2>/dev/null \
+  && fail "an orphaned runner's process group outlived its owner guard"
+pe "$HO" retire owner-src >/dev/null
+pass "an orphaned runner is stopped by its owner guard after the home's lease expires"
 
 printf '\nall procevent tests passed\n'

@@ -682,10 +682,15 @@ Claims live under `$XDG_STATE_HOME/firstmate/procevent-claims` (override with `F
 Each claim binds its home and runner PID to a process identity, unique claim generation, and exact registration-file generation.
 Registration, acquisition, replacement, retirement, and generation-bound release are serialized at one machine-wide boundary per source.
 A live identity-matched owner is never displaced, and release removes only the exact generation the caller acquired.
-Retirement and orphan reconciliation signal a runner process group only while its recorded process identity still matches, or when the recorded leader is gone and only its own owned group survives.
-A runner leads its own process group, so a claim counts as reclaimable only when that whole generation is gone: a crashed leader whose group still has members is not stale, and reconcile stops that surviving group and releases its generation before starting any replacement.
+Retirement and orphan reconciliation signal a runner process group only while its recorded leader is alive, identity-matched, and still leading that group.
+A runner leads its own process group, so a claim counts as reclaimable only when that whole generation is gone: a crashed leader whose numeric group still has members is ambiguous under PID/PGID reuse, and reconcile preserves that claim as uncertain without signalling the group or starting a replacement.
 If identity cannot be established for a live PID, or a surviving owned group cannot be proved stopped, the operation preserves the registration and claim for safe retry rather than adding a second owner.
 A live PID whose identity no longer matches is a reused PID, so it is treated as stale and its process group is never signalled.
+
+A detached runner can also outlive its whole home, so every claimed runner starts a detached owner guard in a separate process group.
+The claim records the physical state root - canonical path, device, inode, owner, and mode - and the guard re-reads that root's `.owner-lease` marker, which owner-presence operations (register, handled, reconcile, sweep, an attached `start`) refresh.
+The guard re-checks every `FM_PROCEVENT_OWNER_CHECK_SECONDS` (default 15); after two consecutive checks that cannot prove both the recorded root identity and a lease fresher than `FM_PROCEVENT_OWNER_LEASE_SECONDS` (default 600), it signals the runner's whole process group, while a leaderless or identity-mismatched runner ends the guard without signalling.
+Repeated runner launches are bounded by `FM_PROCEVENT_LAUNCH_FLOOR_SECONDS` (default 1) of pacing per registration generation, so a crash-looping source cannot relaunch faster than that floor.
 
 Supported secondmate retirement preflights each target home's bounded `sweep-home` command before destructive teardown, snapshots its registrations outside the target, then runs the sweep at that home's final deletion or return boundary.
 If deletion or return fails, teardown restores those registrations and reconciles them before returning the refusal.
@@ -747,6 +752,9 @@ FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event result
 FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; default $XDG_STATE_HOME/firstmate/procevent-claims
+FM_PROCEVENT_OWNER_LEASE_SECONDS=600    # seconds a detached runner may run without owner-presence activity in its home
+FM_PROCEVENT_OWNER_CHECK_SECONDS=15     # seconds between a runner owner guard's lease re-reads
+FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1     # minimum seconds between runner launches for one registration generation
 FM_WHEN_OUTPUT_TAIL_BYTES=8192          # bound on the command-output tail inside one condition->action outcome document
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
