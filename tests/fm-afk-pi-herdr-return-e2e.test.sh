@@ -6,9 +6,9 @@
 # Herdr call is routed through fm-herdr-lab.sh. The scenario proves:
 #   - a live blocked status is classified and durably queued while away;
 #   - a pending Pi composer refuses injection and receives no forced Enter;
+#   - clearing the draft retains the recovery episode because Herdr has no
+#     verified atomic composer-admission primitive;
 #   - the existing wedge alarm remains observable and deduped;
-#   - clearing the draft makes the genuinely idle Pi composer injectable;
-#   - verified submit preserves the terminal-safe marker and clears delivery state;
 #   - an unmarked return request opens the catch-up gate before Bearings;
 #   - remediation/resolution clears the gate, and re-entry is idempotent.
 set -u
@@ -218,7 +218,8 @@ assert_blocker_open 'while the Pi composer was pending'
 pass "real Pi/Herdr pending composer refuses injection without forced submit and raises one observable fallback"
 
 # Clear, never submit, the synthetic human draft. The same exact target now has
-# native idle state plus a complete Pi separator composer and must accept quickly.
+# native idle state plus a complete Pi separator composer, but Herdr must retain
+# the buffered escalation because its installed API cannot atomically admit text.
 "$LAB_HELPER" run "$SESSION" pane send-keys "$PRIMARY_PANE" ctrl+c >/dev/null
 wait_for_idle || fail "real Pi did not return idle after clearing the draft"
 for _ in $(seq 1 80); do
@@ -227,19 +228,14 @@ for _ in $(seq 1 80); do
   sleep 0.1
 done
 [ "$composer" = empty ] || fail "genuinely idle Pi separator composer did not classify empty (got $composer)"
-wait_for_prompt 'any(.[]; .prompt | startswith("\u2063Supervisor escalate"))' \
-  || fail "real Pi did not receive the buffered escalation after becoming safely idle"
-INJECT_HEX=$(jq -r 'select(.prompt | startswith("\u2063Supervisor escalate")) | .hex' "$CAPTURE" | tail -1)
-case "$INJECT_HEX" in e281a3*) ;; *) fail "real Pi escalation lost the terminal-safe marker: $INJECT_HEX" ;; esac
-for _ in $(seq 1 80); do [ ! -s "$STATE/.subsuper-escalations" ] && break; sleep 0.1; done
-[ ! -s "$STATE/.subsuper-escalations" ] || fail "confirmed real Pi delivery did not clear the escalation buffer"
-[ ! -e "$STATE/.subsuper-inject-wedged" ] || fail "confirmed real Pi delivery did not clear the old wedge marker"
 sleep 4
-[ "$(wc -l < "$NOTIFY_LOG" | tr -d ' ')" -eq 1 ] || fail "successful delivery emitted a duplicate wedge alert"
-INJECT_PROMPT=$(jq -r 'select(.prompt | startswith("\u2063Supervisor escalate")) | .prompt' "$CAPTURE" | tail -1)
-message_is_injection "$INJECT_PROMPT" || fail "terminal-delivered Pi escalation was not recognized as an internal marker"
-assert_blocker_open 'after successful marked injection'
-pass "real idle Pi/Herdr accepts one marked escalation promptly, verifies submit, clears wedge state, and emits no duplicate alert"
+[ ! -s "$CAPTURE" ] || fail "real idle Pi received a supervisor escalation without atomic admission"
+[ -s "$STATE/.subsuper-escalations" ] || fail "atomic-admission deferral cleared the buffered escalation"
+[ -s "$STATE/.subsuper-inject-wedged" ] || fail "atomic-admission deferral cleared the active wedge signal"
+NOTIFIER_COUNT=$(wc -l < "$NOTIFY_LOG" | tr -d ' ')
+[ "$NOTIFIER_COUNT" -ge 1 ] || fail "atomic-admission deferral lost the active wedge notification"
+assert_blocker_open 'after Herdr atomic-admission deferral'
+pass "real idle Pi/Herdr retains the marked escalation and types nothing when atomic admission is unavailable"
 
 # The captain returns with an ordinary unmarked Bearings request. The request is
 # captured byte-exact, then the public return owner must gate it on the blocker.
@@ -290,8 +286,8 @@ PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_ROOT_OVERRIDE="$PROJE
   FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="$PRIMARY_TARGET" "$ROOT/bin/fm-afk-return.sh" begin >/dev/null \
   || fail "clean away re-entry/return was not idempotent"
 DAEMON_STARTED=0
-[ "$(wc -l < "$NOTIFY_LOG" | tr -d ' ')" -eq 1 ] || fail "clean re-entry duplicated the historical wedge alert"
+[ "$(wc -l < "$NOTIFY_LOG" | tr -d ' ')" = "$NOTIFIER_COUNT" ] || fail "clean re-entry duplicated the historical wedge alert"
 pass "resolved return catch-up allows Bearings and a clean idempotent away re-entry"
 
-printf 'evidence: herdr=%s pi=%s target=%s inject-hex-prefix=%s notifier-count=1\n' \
-  "$(herdr --version)" "$(pi --version)" "$PRIMARY_TARGET" "${INJECT_HEX:0:6}"
+printf 'evidence: atomic-admission=unavailable target=%s notifier-count=%s\n' \
+  "$PRIMARY_TARGET" "$NOTIFIER_COUNT"
