@@ -972,18 +972,23 @@ scan_signals() {
 # later working: note must not hide an earlier needs-decision/blocked/done event
 # in the same append span.  The offset sidecar is advanced only after the wake
 # has either been surfaced or deliberately absorbed.
+# Also populates FM_SIGNAL_NEEDS_DECISION_FILES (space-separated status-file
+# paths) with exactly the files whose newly classified span carries one of the
+# decision-owned classes defined by the status-span contract, so the caller can
+# route those - and only those - signal rows as main-only
+# (docs/omp-supervision-branch.md). Stale and heartbeat rows retain their
+# existing eligibility rules.
 signal_files_actionable() {  # <status-file> ...
-  local f record rc start endpoint ident rest found=1
+  local f record needs_decision rc start endpoint ident rest found=1
   FM_SIGNAL_SURFACE_ENDPOINTS=''
+  FM_SIGNAL_NEEDS_DECISION_FILES=''
   for f in "$@"; do
     case "$f" in *.status) ;; *) continue ;; esac
     [ -e "$f" ] || [ -L "$f" ] || continue
     start=$(fm_wake_signal_seen_size "$STATE" "$f")
-    if record=$(status_span_first_actionable_record "$f" "$start"); then
-      rc=0
-    else
-      rc=$?
-    fi
+    record=''; needs_decision=0
+    status_span_first_actionable_record "$f" "$start" record needs_decision
+    rc=$?
     [ "$rc" -eq 1 ] && [ -z "$record" ] && continue
     if [ "$rc" -eq 2 ]; then
       found=0
@@ -993,7 +998,12 @@ signal_files_actionable() {  # <status-file> ...
     rest=${record#*$'\t'}
     ident=${rest%%$'\t'*}
     FM_SIGNAL_SURFACE_ENDPOINTS="${FM_SIGNAL_SURFACE_ENDPOINTS}${f}"$'\t'"${endpoint}"$'\t'"${ident}"$'\n'
-    [ "$rc" -eq 0 ] && found=0
+    if [ "$needs_decision" -eq 1 ]; then
+      FM_SIGNAL_NEEDS_DECISION_FILES="${FM_SIGNAL_NEEDS_DECISION_FILES} ${f}"
+    fi
+    if [ "$rc" -eq 0 ] || [ "$needs_decision" -eq 1 ]; then
+      found=0
+    fi
   done
   return "$found"
 }
@@ -1588,11 +1598,21 @@ EOF
     # shellcheck disable=SC2086 # files is the deliberate space-separated status-path list.
     signal_files_actionable $files
     signal_actionable=$?
+    # A decision-owned file's queued row payload is marked "needs-decision:"
+    # instead of the ordinary reason below (other files in the same batch keep
+    # the ordinary payload). The wake reason line itself, and every
+    # harness-arm consumer that pattern-matches it, stays byte-identical -
+    # only the per-row payload changes, which is what the supervision-branch
+    # dispatcher reads to keep a decision-owned row off the branch
+    # (fm-branch-dispatch.ts, fm-primary-omp.ts). Every other harness and
+    # script keeps seeing the exact same "signal:$files" wake it always has.
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
     if afk_present || [ "$signal_actionable" -eq 0 ] || ! signal_crew_provably_working $files; then
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
-        fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
+        file_reason="$reason"
+        case " $FM_SIGNAL_NEEDS_DECISION_FILES " in *" $f "*) file_reason="needs-decision:$files" ;; esac
+        fm_wake_append signal "$(basename "$f")" "$file_reason" || exit 1
       done <<EOF
 $pending
 EOF
