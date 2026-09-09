@@ -754,10 +754,12 @@ export default function (pi: ExtensionAPI) {
   function recordDurableBranchReport(reportGeneration: number): void {
     if (reportGeneration !== generation) return;
     consecutiveProviderErrors = 0;
-    if (!providerRecovery) return;
+    const wasRecovering = providerRecovery !== null;
     branchBroken = "";
     providerRecovery = null;
-    deliverBranchHealthNote("Supervision branch recovered after a successful cooldown probe.");
+    if (wasRecovering) {
+      deliverBranchHealthNote("Supervision branch recovered after a successful cooldown probe.");
+    }
   }
 
   function finishProviderProbe(probeGeneration: number): void {
@@ -992,22 +994,15 @@ ${context.command}
     if (!(await actingAsOwner(expectedGeneration))) throw new Error("supervision session was replaced or lost lock ownership");
     if (branch) return branch;
     if (branchBroken && !(recoveryProbe && providerRecovery?.probeInFlight)) throw new Error(branchBroken);
-    try {
-      const created = await createBranch(expectedGeneration);
-      if (!(await actingAsOwner(expectedGeneration))) {
-        try {
-          await created.session.dispose();
-        } catch {}
-        throw new Error("supervision session was replaced or lost lock ownership");
-      }
-      branch = created;
-      return created;
-    } catch (error) {
-      if (expectedGeneration === generation && !shuttingDown) {
-        branchBroken = error instanceof Error ? error.message : String(error);
-      }
-      throw error;
+    const created = await createBranch(expectedGeneration);
+    if (!(await actingAsOwner(expectedGeneration))) {
+      try {
+        await created.session.dispose();
+      } catch {}
+      throw new Error("supervision session was replaced or lost lock ownership");
     }
+    branch = created;
+    return created;
   }
 
   async function flushMirror(session: AgentSession, expectedGeneration: number): Promise<void> {
