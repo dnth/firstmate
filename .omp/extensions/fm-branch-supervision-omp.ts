@@ -959,6 +959,12 @@ ${context.command}
       customTools: [bashTool as unknown as ToolDefinition, createReportTool(branchGeneration)],
       providerPromptCacheKey: branchCacheKey,
       providerPromptCacheKeySource: "explicit",
+      // Main's live registry is the only read path to providers an extension
+      // registered at run time; without it a pin or follow on such a provider
+      // is invisible to a freshly discovered branch registry. The registry is
+      // shared read-only - the branch never installs, converts, or overwrites
+      // credentials or registrations.
+      ...(mainModelRegistry ? { modelRegistry: mainModelRegistry } : {}),
       ...(pinned ? { model: pinned.model } : {}),
       ...(effort === undefined ? {} : { thinkingLevel: effort }),
     });
