@@ -148,6 +148,8 @@ export function installTaskInboxDoorbell(
 	let signalHandlerInstalled = false;
 	let turnListenersInstalled = false;
 	let turnOpen = false;
+	let dispatchingTurn = false;
+	let dispatchingTurnObserved = false;
 	const awaitingTurns = new Map<string, ReturnType<typeof setTimeout>>();
 	let watcher: FSWatcher | undefined;
 	const settleAwaiting = (awaitingPath: string, outcome: "delivered" | "failed"): void => {
@@ -189,8 +191,7 @@ export function installTaskInboxDoorbell(
 	};
 	const onTurnOpen = (): void => {
 		turnOpen = true;
-		const awaitingPath = awaitingTurns.keys().next().value;
-		if (awaitingPath) settleAwaiting(awaitingPath, "delivered");
+		if (dispatchingTurn) dispatchingTurnObserved = true;
 	};
 	const onTurnClose = (): void => {
 		turnOpen = false;
@@ -229,6 +230,8 @@ export function installTaskInboxDoorbell(
 					if (typeof omp.sendMessage !== "function") throw new Error("OMP sendMessage unavailable");
 					const content = readFileSync(ambiguous, "utf8");
 					invoked = true;
+					dispatchingTurn = true;
+					dispatchingTurnObserved = false;
 					omp.sendMessage(
 						{
 							customType: "firstmate-task-inbox-doorbell",
@@ -239,6 +242,9 @@ export function installTaskInboxDoorbell(
 						},
 						{ deliverAs: "steer", triggerTurn: true },
 					);
+					const turnStartedDuringSend = dispatchingTurnObserved;
+					dispatchingTurn = false;
+					dispatchingTurnObserved = false;
 					// A steer into an open turn is delivered by that turn. On an idle
 					// session, triggerTurn must start one; claiming delivered without
 					// that proof is the downgrade that strands an idle worker.
@@ -248,7 +254,7 @@ export function installTaskInboxDoorbell(
 					}
 					const awaitingPath = `${pending}.awaiting-turn`;
 					renameSync(ambiguous, awaitingPath);
-					if (turnOpen) {
+					if (turnStartedDuringSend || turnOpen) {
 						settleAwaiting(awaitingPath, "delivered");
 						continue;
 					}
@@ -257,6 +263,7 @@ export function installTaskInboxDoorbell(
 						setTimeout(() => recoverUnprovenTurn(awaitingPath), turnGraceMs),
 					);
 				} catch {
+					dispatchingTurn = false;
 					if (!invoked) bestEffortRename(ambiguous, `${pending}.failed`);
 					retire();
 					break;
