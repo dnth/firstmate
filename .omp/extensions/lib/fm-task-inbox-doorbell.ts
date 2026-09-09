@@ -177,6 +177,7 @@ export function installTaskInboxDoorbell(
 		try {
 			content = readFileSync(awaitingPath, "utf8");
 		} catch {
+			bestEffortRename(awaitingPath, awaitingPath.replace(/\.awaiting-turn$/, ".pending"));
 			return;
 		}
 		let result: void | Promise<void>;
