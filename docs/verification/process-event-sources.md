@@ -96,7 +96,7 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | canonical physical identity | a final-component symlink and its target produce the same Lavish source id |
 | isolated public start boundary | direct `start` establishes a new runner-led process group before claiming the source, so retirement cannot signal an unrelated process inherited from the caller's group |
 | stale reclaim without displacement | concurrent contenders replacing one stale claim start exactly one runner, and cross-home replacement removes the old generation's staging file from its recorded state directory |
-| crashed leader with a live owned group | `SIGKILL` on only the runner leader leaves its blocking child group alive; reconcile then stops that surviving group before any replacement starts, never leaves two source processes running for one canonical source, and a generation with no leader and no surviving group is still reclaimed |
+| crashed leader with a live owned group | `SIGKILL` on only the runner leader leaves its blocking child group alive; because a numeric process group may have been reused, reconcile preserves that leaderless claim as uncertain without signalling or starting a replacement, while a generation with no leader and no surviving group is still reclaimed |
 | PID-reuse safety | retirement refuses to signal a live PID whose identity differs from the claim, and a reused PID never reaches the group-stop path because its leader is alive |
 | coherent ownership reads | a claim replacement held inside the source boundary blocks `list` until one complete generation is visible |
 | retire-start exclusion | a queued start revalidates registration after the serialized retirement boundary and executes no child |
@@ -127,8 +127,8 @@ Two paths therefore stop a runner, and both verify the runner-owned process grou
 - `reconcile` stops a runner this home owns whose source registration has been removed, and reports it as `stopped=N`.
 
 The same group rule decides when a claim may be reclaimed, not only when a runner may be signalled.
-A leader that died while its owned group kept running is not a stale generation, so `reconcile` stops that surviving group and releases its generation before starting any replacement, and preserves the claim for a later retry when it cannot prove the group stopped or another home owns it.
-Signalling that group is safe precisely because only an absent leader reaches this state: a reused PID leaves the leader alive, which the identity comparison classifies as stale or uncertain, and no group signal follows.
+A leader that died while its numeric process group kept running is not provably a stale generation, so `reconcile` preserves the claim as uncertain without signalling that group or starting a replacement; a later retry can re-evaluate it.
+Signalling a leaderless group would be unsafe because its numeric PGID may now belong to another process generation, so only an identity-matched live leader can authorize group signalling.
 
 This was found by four orphaned runners, elapsed 6-13 minutes, left by a suite whose fixture source never completed.
 `tests/fm-procevent.test.sh` and `tests/fm-procevent-when.test.sh` cover the runner and condition->action paths, and three consecutive suite runs leave zero runners, zero fixture children, and zero stray claims.
