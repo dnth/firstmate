@@ -28,6 +28,18 @@ wait_for_file_content() {  # <file>
   return 1
 }
 
+# Set <file>'s mtime to <now-epoch>-60 so a secondmate home's watcher beacon
+# reads fresh (inside STALE_ESCALATE_SECS) whether the fixture stubs `date +%s`
+# or runs on the real clock. GNU and BSD date/touch spellings both covered.
+touch_fresh_under_clock() {  # <file> <now-epoch>
+  local f=$1 now=$2 stamp
+  if stamp=$(date -d "@$((now - 60))" +%Y%m%d%H%M.%S 2>/dev/null); then
+    touch -t "$stamp" "$f"
+  else
+    touch -t "$(date -r "$((now - 60))" +%Y%m%d%H%M.%S)" "$f"
+  fi
+}
+
 
 test_concurrent_append_and_drain() {
   local dir state out1 out2 pids i pid count unique malformed sequence generation
@@ -267,6 +279,329 @@ test_drain_asserts_watcher_liveness() {
     fail "drain false-alarmed with a live watcher and fresh beacon"
   fi
   pass "drain asserts watcher liveness: warns on a lapse, stays silent for a live watcher with a fresh beacon"
+}
+
+test_secondmate_foreign_queue_stall_tracks_progress_and_alerts_once() {
+  local dir state sub fakebin out row_before row_after stall_count real_date
+  dir=$(make_case secondmate-foreign-stall)
+  state="$dir/state"
+  sub="$dir/secondmate"
+  mkdir -p "$sub/state" "$sub/data" "$sub/bin"
+  printf '# Firstmate\n' > "$sub/AGENTS.md"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+    "$sub" > "$state/mate.meta"
+  # Fork note: the parent watcher's beacon rule (secondmate_supervision_is_alive)
+  # still applies - give the fixture mate a fresh home beacon under its clock so
+  # the pane-stale scan skips it and only the ported stall detector is measured.
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
+  real_date=$(command -v date)
+  cat > "$fakebin/date" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = +%s ]; then
+  cat "\${FM_FAKE_NOW_FILE:?}"
+else
+  exec "$real_date" "\$@"
+fi
+SH
+  chmod +x "$fakebin/date"
+  touch_fresh_under_clock "$sub/state/.last-watcher-beat" 1000
+
+  # An already-old row starts an observation interval; its creation time alone
+  # cannot produce an alert.
+  printf '1000\n' > "$dir/now"
+  printf '100\t7\tcheck\trouted\tcheck: routed row\n' > "$sub/state/.wake-queue"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 > "$dir/watch-first.out" 2> "$dir/watch-first.err" || true
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "the first observation of an old foreign row produced an age-only alert"
+
+  # The oldest sequence advances after more than the threshold. This is healthy
+  # drain progress even though the replacement row is itself very old.
+  printf '1002\n' > "$dir/now"
+  printf '100\t8\tcheck\thealthy\tcheck: healthy progress\n' > "$sub/state/.wake-queue"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 > "$dir/watch-progress.out" 2> "$dir/watch-progress.err" || true
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "an advancing foreign queue produced a stall alert because its oldest row was old"
+
+  # With no further sequence progress, the same queue must still expose the real
+  # failure after the configured interval.
+  printf '1004\n' > "$dir/now"
+  row_before="$dir/foreign-before"
+  row_after="$dir/foreign-after"
+  cp "$sub/state/.wake-queue" "$row_before"
+  out="$dir/watch-stalled.out"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 > "$out" 2> "$dir/watch-stalled.err" || true
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=8 idle=2s' "$out" >/dev/null \
+    || fail "a foreign queue with no progress did not alert: $(cat "$out")"
+  stall_count=$(grep -c 'secondmate-wake-loop-mate-' "$state/.wake-queue" || true)
+  [ "$stall_count" -eq 1 ] || fail "the stalled episode did not publish exactly one parent notification"
+  cmp -s "$row_before" "$sub/state/.wake-queue" \
+    || fail "foreign queue row changed during read-only stall detection"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2> "$dir/drain.err" \
+    || fail "parent drain failed after the stall notification"
+  ack_drain_err "$state" "$dir/drain.err" \
+    || fail "parent stall notification could not be acknowledged"
+
+  # Partial draining changes the oldest row, ends the prior no-progress episode,
+  # and cannot produce an immediate notification cascade.
+  printf '1010\n' > "$dir/now"
+  printf '100\t9\tcheck\tnext\tcheck: next row\n' > "$sub/state/.wake-queue"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 > "$dir/watch-next.out" 2> "$dir/watch-next.err" || true
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "a newly-oldest row cascaded an immediate second alert after progress"
+  cp "$sub/state/.wake-queue" "$row_after"
+  grep -F $'\t9\t' "$row_after" >/dev/null || fail "foreign queue progress fixture changed during observation"
+
+  # If that new drain position then genuinely stops advancing, it is a new
+  # no-progress episode and must remain visible rather than being muted forever.
+  printf '1012\n' > "$dir/now"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 > "$dir/watch-refrozen.out" 2> "$dir/watch-refrozen.err" || true
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=9 idle=2s' "$dir/watch-refrozen.out" >/dev/null \
+    || fail "a genuine later no-progress episode was hidden after earlier progress"
+  stall_count=$(grep -c 'secondmate-wake-loop-mate-' "$state/.wake-queue" || true)
+  [ "$stall_count" -eq 1 ] || fail "the later no-progress episode did not publish exactly one notification"
+  pass "foreign secondmate queue alerts once per no-progress episode without age-only or cascade noise"
+}
+
+test_secondmate_declared_pause_rows_do_not_feed_stall_escalation() {
+  local dir state sub fakebin real_date
+  dir=$(make_case secondmate-declared-pause-queue)
+  state="$dir/state"
+  sub="$dir/secondmate"
+  mkdir -p "$sub/state"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nhome=%s\n' "$sub" > "$state/mate.meta"
+  # Fork note: the parent watcher's beacon rule (secondmate_supervision_is_alive)
+  # still applies - give the fixture mate a fresh home beacon under its clock so
+  # the pane-stale scan skips it and only the ported stall detector is measured.
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
+  real_date=$(command -v date)
+  cat > "$fakebin/date" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = +%s ]; then
+  cat "\${FM_FAKE_NOW_FILE:?}"
+else
+  exec "$real_date" "\$@"
+fi
+SH
+  chmod +x "$fakebin/date"
+  touch_fresh_under_clock "$sub/state/.last-watcher-beat" 1000
+  cat > "$sub/state/.wake-queue" <<'EOF'
+100	7	stale	fleet:w2:p4	stale: fleet:w2:p4 (paused 3613s, awaiting external - declared paused)
+100	8	stale	fleet:w2:p3	stale: fleet:w2:p3 (paused 3615s, awaiting external - declared pause, rechecked on a long cadence not a wedge)
+EOF
+  printf '1000\n' > "$dir/now"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 > "$dir/watch-first.out" 2> "$dir/watch-first.err" || true
+  printf '5000\n' > "$dir/now"
+  touch_fresh_under_clock "$sub/state/.last-watcher-beat" 5000
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 > "$dir/watch-second.out" 2> "$dir/watch-second.err" || true
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "declared external-wait rows fed the secondmate wake-loop escalation"
+  ! grep -F 'secondmate wake-loop stalled' "$dir/watch-first.out" "$dir/watch-second.out" >/dev/null \
+    || fail "a declared external wait was mislabeled as a stalled wake loop"
+  pass "declared external-wait pause rows do not feed secondmate wake-loop escalation"
+}
+
+# A retired mate reprovisioned under the same task id gets a fresh home, so its
+# wake-queue sequence restarts from scratch and can land on the very position the
+# parent last recorded for the retired generation. Those are different rows in
+# different queue generations, not the continuation of the previous generation's
+# no-progress interval: inheriting that interval fires a wake-loop stall against
+# a queue the mate has only just created.
+test_secondmate_reprovisioned_queue_starts_a_fresh_interval() {
+  local dir state sub fakebin real_date
+  dir=$(make_case secondmate-reprovisioned-queue)
+  state="$dir/state"
+  sub="$dir/secondmate"
+  mkdir -p "$sub/state"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+    "$sub" > "$state/mate.meta"
+  # Fork note: the parent watcher's beacon rule (secondmate_supervision_is_alive)
+  # still applies - give the fixture mate a fresh home beacon under its clock so
+  # the pane-stale scan skips it and only the ported stall detector is measured.
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
+  real_date=$(command -v date)
+  cat > "$fakebin/date" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = +%s ]; then
+  cat "\${FM_FAKE_NOW_FILE:?}"
+else
+  exec "$real_date" "\$@"
+fi
+SH
+  chmod +x "$fakebin/date"
+  touch_fresh_under_clock "$sub/state/.last-watcher-beat" 1000
+
+  # The retired generation's last observation records sequence 9.
+  printf '1000\n' > "$dir/now"
+  printf '100\t9\tcheck\told\tcheck: retired generation row\n' > "$sub/state/.wake-queue"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 > "$dir/watch-old.out" 2> "$dir/watch-old.err" || true
+  [ ! -s "$state/.wake-queue" ] || fail "the first observation of the retired generation alerted"
+
+  # Reprovisioning under the same task id restarts the sequence on 9 again, long
+  # after the recorded observation. That first sight of the new queue cannot
+  # inherit the old generation's idle interval.
+  printf '1010\n' > "$dir/now"
+  printf '200\t9\tcheck\tregen\tcheck: reprovisioned row\n' > "$sub/state/.wake-queue"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 > "$dir/watch-regen.out" 2> "$dir/watch-regen.err" || true
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "a reprovisioned queue generation inherited the retired generation's idle interval and alerted"
+
+  # The restarted generation still earns its own honest no-progress episode.
+  printf '1012\n' > "$dir/now"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 > "$dir/watch-regen-frozen.out" 2> "$dir/watch-regen-frozen.err" || true
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=9 idle=2s' "$dir/watch-regen-frozen.out" >/dev/null \
+    || fail "a frozen reprovisioned queue generation was hidden: $(cat "$dir/watch-regen-frozen.out")"
+  pass "a reprovisioned queue generation starts a fresh no-progress interval"
+}
+
+# A healthy mate drains its wake queue BETWEEN turns, not inside one, so a queue
+# that has not advanced while the mate is provably mid-turn is not a stalled wake
+# loop - it is the normal state of a busy mate, and the measured false alarms
+# (ages 63s, 75s, 70s) all landed here. The active-turn gate must DEFER that
+# escalation, not cancel it: the same frozen queue still has to surface once the
+# turn ends.
+test_secondmate_active_turn_defers_stall_until_the_turn_ends() {
+  local dir state sub fakebin stall_count
+  dir=$(make_case secondmate-active-turn)
+  state="$dir/state"
+  sub="$dir/secondmate"
+  mkdir -p "$sub/state"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+    "$sub" > "$state/mate.meta"
+  # Fork note: the parent watcher's beacon rule (secondmate_supervision_is_alive)
+  # still applies - give the fixture mate a fresh home beacon under its clock so
+  # the pane-stale scan skips it and only the ported stall detector is measured.
+  touch "$sub/state/.last-watcher-beat"
+  printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$(( $(date +%s) - 10 ))" \
+    > "$sub/state/.wake-queue"
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-windows) printf '%s\n' 'firstmate:fm-mate' ;;
+  capture-pane) printf 'working\n' ;;
+  display-message) printf '0\n' ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$fakebin/tmux"
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" mate >/dev/null \
+    || fail "could not arm the mate's busy contract"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 \
+    FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 4 \
+    > "$dir/watch-busy.out" 2> "$dir/watch-busy.err" || true
+  ! grep -F 'secondmate wake-loop stalled' "$dir/watch-busy.out" >/dev/null \
+    || fail "a mate inside an active turn was escalated as a stalled wake loop: $(cat "$dir/watch-busy.out")"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "a mate inside an active turn published a durable stall notification"
+
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" mate idle --current-gen \
+    --source claude-hook --event stop >/dev/null \
+    || fail "could not end the mate's turn"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 \
+    FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 4 \
+    > "$dir/watch-idle.out" 2> "$dir/watch-idle.err" || true
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=7' "$dir/watch-idle.out" >/dev/null \
+    || fail "the same frozen queue stayed hidden after the turn ended: $(cat "$dir/watch-idle.out")"
+  stall_count=$(grep -c 'secondmate-wake-loop-mate-' "$state/.wake-queue" || true)
+  [ "$stall_count" -eq 1 ] || fail "the deferred episode did not publish exactly one notification"
+  pass "an active turn defers the secondmate stall escalation without cancelling it"
+}
+
+test_secondmate_stall_marker_rejects_symlink() {
+  local dir state sub fakebin marker outside expected epoch
+  dir=$(make_case secondmate-stall-marker-symlink)
+  state="$dir/state"
+  sub="$dir/secondmate"
+  mkdir -p "$sub/state"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nhome=%s\n' "$sub" > "$state/mate.meta"
+  # Fork note: the parent watcher's beacon rule (secondmate_supervision_is_alive)
+  # still applies - give the fixture mate a fresh home beacon under its clock so
+  # the pane-stale scan skips it and only the ported stall detector is measured.
+  touch "$sub/state/.last-watcher-beat"
+  epoch=$(( $(date +%s) - 10 ))
+  printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$epoch" > "$sub/state/.wake-queue"
+  outside="$dir/outside"
+  expected='must remain unchanged'
+  printf '%s\n' "$expected" > "$outside"
+  marker="$state/.secondmate-wake-stall-mate"
+  printf '%s\t%s-7\n' "$(( $(date +%s) - 2 ))" "$epoch" > "$state/.secondmate-wake-progress-mate"
+  ln -s "$outside" "$marker"
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-windows) printf '%s\n' 'firstmate:fm-mate' ;;
+  capture-pane) : ;;
+  display-message) printf '0\n' ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$fakebin/tmux"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 \
+    FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 2 \
+    > "$dir/watch.out" 2> "$dir/watch.err" || true
+  [ "$(cat "$outside")" = "$expected" ] || fail "stall marker write followed an unsafe symlink"
+  [ -L "$marker" ] || fail "stall marker write replaced rather than rejected an unsafe path"
+  [ ! -s "$state/.wake-queue" ] || fail "unsafe stall marker path still published a parent notification"
+  pass "secondmate stall markers reject symlinks without touching their targets"
 }
 
 test_structural_signal_enrichment_preserves_raw_rows() {
@@ -1159,6 +1494,11 @@ test_check_output_is_queued
 test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates
 test_drain_asserts_watcher_liveness
+test_secondmate_foreign_queue_stall_tracks_progress_and_alerts_once
+test_secondmate_declared_pause_rows_do_not_feed_stall_escalation
+test_secondmate_reprovisioned_queue_starts_a_fresh_interval
+test_secondmate_active_turn_defers_stall_until_the_turn_ends
+test_secondmate_stall_marker_rejects_symlink
 test_structural_signal_enrichment_preserves_raw_rows
 test_enrichment_preserves_all_unread_lines_and_status_file_failures
 test_slow_annotation_does_not_block_append_and_deleted_file_fails_closed
