@@ -42,8 +42,8 @@ The supervision branch is OMP-only by construction, while the shared status-span
 ## Transitions and what is out of scope
 
 Ownership transitions happen at a clean boundary: a cold `session_start`, an OMP `session_switch` replacement, or killing the process and letting a fresh one re-arm - never by a synchronous handoff from a live or hung branch.
-A branch generation serializes each wake through a clean completion boundary, and the next wake re-prompts the same resident conversation; only the first wake in a fresh process reopens the durable branch conversation.
-`session_start` and `session_switch` are the clean-boundary arm points. A `session_switch` replacement re-arms automatically without a foreground watcher command or a model turn; the branch itself remains resident unless the process is restarted.
+A branch generation serializes each wake through a clean completion boundary, and the next wake re-prompts the same conversation within that main session.
+`session_start` and `session_switch` are the clean-boundary arm points. A `session_switch` replacement re-arms automatically without a foreground watcher command or a model turn; it starts a new branch conversation for the replacement main session.
 
 Three capabilities are deliberately out of scope for this port and are a future iteration:
 

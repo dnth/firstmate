@@ -331,8 +331,8 @@ The model file holds one `<provider>/<model-id>` line followed by one newline, s
 An absent, unreadable, or unparseable file means no pin, and the branch then follows main's own current model, applied explicitly on every branch build.
 A valid pin wins over main and remains unaffected by main's model changes.
 Picking "Follow main" removes the file, and the command writes a pin at mode `0600` and replaces it atomically so a failed write leaves the current choice unchanged rather than claiming persistence.
-The file's current state decides the branch model on every branch build - the first wake after a cold start, which reopens the persistent conversation recorded in `state/.branch-session` - and it overrides whatever model that reopened session recorded, so the choice survives a restart.
-That override is what keeps "Follow main" honest: a branch conversation that ran under an earlier pin still records that model, so clearing the file explicitly applies main's model rather than letting the reopened session restore the old one.
+The file's current state decides the branch model on every branch build, including the fresh conversation created for the first wake after a cold start or a main-session replacement, so the choice survives a restart.
+Within one main session, later wakes reuse that session's branch conversation; a fresh build always resolves the current pin or main model rather than inheriting model state from an older conversation.
 Only when main's own model is unknown, or this home's stored credentials cannot run it, does an unpinned build fall back to passing no override at all, which is the behavior from before this file existed; the wake is never lost over model choice, and the command says plainly when main's model could not be applied.
 A pin naming a model the registry cannot hand back, because the model is unknown or has no configured credentials, is never silently downgraded onto main's model: the branch refuses to build and the wake falls back to the captain-facing main path naming the unusable pin, exactly as any other unreachable branch does.
 A new pick does not rebuild the branch already running: mid-flight model or effort change is out of scope, so the pin takes effect at the next branch build (see [docs/omp-supervision-branch.md](omp-supervision-branch.md)).
@@ -343,7 +343,7 @@ The effort step runs after the model step because the effective branch model dec
 An absent, unreadable, or unrecognized file means no effort pin, and the branch then follows main's own current effort, applied explicitly on every branch build; a value OMP would not recognize is treated as no pin rather than passed to the clamp.
 A valid pin wins over main and remains unaffected by main's effort changes.
 Picking "Follow main" removes the file, and the command writes an effort pin at mode `0600` and replaces it atomically, exactly as it writes a model pin.
-The effort file's current state decides the branch effort on every branch build, on the same create-and-reopen contract as the model pin and for the same reason: a reopened branch conversation records the effort it last ran under, so only an explicit override keeps "Follow main" honest.
+The effort file's current state decides the branch effort on every branch build, using the same fresh-conversation and current-pin contract as the model setting.
 Only when main's own effort cannot be read either does an unpinned build fall back to passing no effort override at all, which is the behavior from before this file existed.
 
 Cancelling the model picker cancels the whole command and changes neither choice.
