@@ -107,7 +107,7 @@
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
 #   /updatefirstmate, restart). A bare verified adapter name
 #   (claude|codex|opencode|pi|pi-signed|omp|grok|kimi) overrides selection for
-#   either kind. Hermes overrides only a crewmate or scout spawn and is refused for secondmates.
+#   either kind. Hermes and Devin override only a crewmate or scout spawn and are refused for secondmates.
 #   For crewmates and scouts, a non-flag string containing shell whitespace is
 #   treated as a RAW launch command - the escape hatch for verifying new adapters.
 #   Raw direct non-OMP commands preserve accepted assignments and arguments
@@ -1215,7 +1215,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|omp|grok|kimi|devin)
+    ''|claude|codex|opencode|pi|pi-signed|omp|grok|kimi|hermes|devin)
       ARG3=${POS[1]:-}
       ;;
     *' '*)

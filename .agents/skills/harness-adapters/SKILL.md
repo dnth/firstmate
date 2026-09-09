@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, omp, grok, kimi, and the crewmate-only Hermes adapter.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, omp, grok, kimi, and the crew-only Hermes and Devin adapters.
 user-invocable: false
 metadata:
   internal: true
@@ -45,10 +45,10 @@ OMP primary detection and lock liveness follow the distinct launch-bound identit
 That probe stops at the innermost harness ancestor, so an agent of another harness started from OMP's bash tool keeps its own identity instead of inheriting the OMP primary's.
 Within the Pi family, only the exact launch-boundary marker `FM_PI_HARNESS=pi-signed` alongside `PI_CODING_AGENT=true` selects the signed identity; unmarked shared launcher ancestry remains `pi`.
 `bin/fm-harness.sh crew` resolves the effective crewmate harness from `config/crew-harness` (absent or `default` -> own).
-The configured crew-only `hermes` identity resolves through that same path, but it is not a verified primary or secondmate identity.
+The configured crew-only `hermes` and `devin` identities resolve through that same path, but neither is a verified primary or secondmate identity.
 `bin/fm-harness.sh secondmate` resolves the secondmate-launch harness through the chain `config/secondmate-harness` -> `config/crew-harness` -> own, so an unset `config/secondmate-harness` matches the crew harness.
-The one exception is a crew-only harness: `config/crew-harness: hermes` is filtered out of that implicit chain and resolution continues to own-harness detection, because no verified secondmate launch template serves it.
-An explicit `config/secondmate-harness: hermes` still resolves verbatim and is refused at the spawn kind boundary.
+The one exception is a crew-only harness: `config/crew-harness: hermes` or `devin` is filtered out of that implicit chain and resolution continues to own-harness detection, because no verified secondmate launch template serves it.
+An explicit `config/secondmate-harness: hermes` or `devin` still resolves verbatim and is refused at the spawn kind boundary.
 `bin/fm-spawn.sh` uses `crew` mode for a crewmate/scout launch and `secondmate` mode for a `--secondmate` launch, re-resolving on every spawn so the split is durable across respawns; an explicit per-spawn harness arg overrides either.
 On `unknown`, ask the captain instead of guessing.
 A captain override always beats detection.

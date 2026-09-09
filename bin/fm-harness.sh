@@ -2,7 +2,7 @@
 # Detect the agent harness this process tree runs on.
 # Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|omp|grok|kimi|devin|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness,
-#                                        including configured crew-only hermes
+#                                        including configured crew-only hermes/devin
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
 #                                        SECONDMATE agents: config/secondmate-harness ->
@@ -10,7 +10,7 @@
 #                                        defers to the crew resolution, so an unset
 #                                        secondmate-harness behaves exactly as the crew
 #                                        harness did before this knob existed, except
-#                                        that a crew-only harness (hermes) is skipped
+#                                        that a crew-only harness (hermes, devin) is skipped
 #                                        and resolution continues to own detection.
 #        fm-harness.sh secondmate-model    print the optional MODEL token from
 #                                        config/secondmate-harness, or empty when absent.
