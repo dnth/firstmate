@@ -211,6 +211,12 @@ export function installTaskInboxDoorbell(
 		sessionIdle = true;
 	};
 
+	const handledReceiptExists = (requestId: string): boolean => {
+		const record = requestId.startsWith("request.") ? requestId.slice("request.".length) : requestId;
+		const recordName = record.endsWith(".msg") ? record : `${record}.msg`;
+		return existsSync(join(configured.inboxDir, "handled", recordName));
+	};
+
 	const retire = (): void => {
 		if (!active) return;
 		retireOwnedReadyMarker(configured.readyMarker);
@@ -229,6 +235,7 @@ export function installTaskInboxDoorbell(
 		try {
 			for (const name of readdirSync(requestDir).filter((entry) => entry.endsWith(".pending")).sort()) {
 				const pending = join(requestDir, name);
+				const requestId = name.slice(0, -".pending".length);
 				const ambiguous = `${pending}.ambiguous`;
 				let invoked = false;
 				try {
@@ -250,7 +257,13 @@ export function installTaskInboxDoorbell(
 						},
 						{ deliverAs: "steer", triggerTurn: true },
 					);
-					if (sessionIdle) {
+					if (handledReceiptExists(requestId)) {
+						// A worker may consume the durable inbox record synchronously
+						// while handling sendMessage. That handled/ move is the
+						// strongest receipt and does not require a separate turn_start
+						// event from the host client.
+						bestEffortRename(ambiguous, `${pending}.delivered`);
+					} else if (sessionIdle) {
 						// The session was idle when we called sendMessage. If the
 						// turn starts, turnStarted acknowledges; if the client
 						// defers agent-initiated turns, the fallback path will
