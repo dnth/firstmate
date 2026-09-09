@@ -20,6 +20,10 @@ When this session owns supervision and away mode is not active:
 12. Never use shell `&` for watcher supervision.
 13. While the supervision branch is active, MAIN must claim the reserved backlog lease before every `tasks-axi` or direct `data/backlog.md` mutation, then release it after the mutation: `bin/fm-lease.sh claim backlog`, mutate, `bin/fm-lease.sh release backlog`.
 
+The task-inbox doorbell keeps a request ambiguous until the idle session emits `turn_start`.
+If an idle OMP client defers the agent-initiated turn, the extension uses a bounded `sendUserMessage` fallback and marks the request delivered only after that turn starts; an exhausted fallback is recorded as failed for supervised recovery.
+If the session retires while a request is still ambiguous, the extension requeues that claim so the next activation can deliver it again.
+
 For a persistent secondmate, the watcher in that secondmate home touches `state/.last-watcher-beat` at the start of every cycle.
 The parent watcher treats a fresh, non-future secondmate-home beacon as positive liveness evidence when the secondmate is neither paused nor captain-held and its pane is idle between child polls, reading remote beacon age through a short bounded call with a forced-kill grace on the configured host route.
 The parent watcher uses `FM_STALE_ESCALATE_SECS` (default 240 seconds) as the beacon-age bound, so a missing or stale beacon still enters normal stale and wedge detection.

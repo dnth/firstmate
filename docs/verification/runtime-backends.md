@@ -1134,8 +1134,9 @@ ok - omp (omp/18.0.4): real worker acted on and acknowledged the durable record
 ok - live steering-inbox doorbell guard: 2 harnesses verified
 ```
 
-The OMP wake transport was changed on 2026-08-30 from terminal submission to an acknowledged programmatic extension request on tmux and Herdr, and on 2026-09-04 that native request became OMP's only transport: the composer fallback was removed and every OMP steer now reports one bounded outcome.
-The deterministic fixtures reran on 2026-09-04 and cover canonical counted requests, `triggerTurn=true`, post-retirement signal safety, exact-identity revalidation for pending retries, ambiguous-claim inbox anchoring without resend, ordinary non-OMP composer routing, ordinary worker wiring, and secondmate wiring through the primary extension.
+The OMP wake transport was changed on 2026-08-30 from terminal submission to an acknowledged programmatic extension request on tmux and Herdr, and on 2026-09-04 that native request became the only normal transport: the terminal-composer fallback was removed and every OMP steer now reports one bounded outcome.
+The 2026-09-09 change keeps an idle client's deferred request ambiguous until `turn_start`, then uses a bounded programmatic `sendUserMessage` fallback; an exhausted fallback is marked failed and written to the task status log for supervised recovery.
+The deterministic fixtures reran on 2026-09-04 and cover canonical counted requests, `triggerTurn=true`, post-retirement signal safety, exact-identity revalidation for pending retries, active ambiguous-claim inbox anchoring without resend, ordinary non-OMP composer routing, ordinary worker wiring, and secondmate wiring through the primary extension.
 They also drive the public `fm-send.sh` over tmux and Herdr against a real task-bound extension process and prove that a received steer reports `omp-native-received` with the exact task, endpoint, session process, native queue entry and durable record while nothing reaches the terminal; that a mate with no live adapter, an unproven session binding, and an unacknowledged request each exit nonzero with a named non-resend-inviting outcome; and that no `/exit` is appended to resolve one.
 The required live OMP-under-Herdr smoke is intentionally deferred until after Firstmate updates; no live Herdr or OMP lifecycle was driven from this worktree.
 
