@@ -234,6 +234,24 @@ export default function (omp: ExtensionAPI) {
     );
   };
 
+  // The text OMP carries in a user message_start: sendMessage wraps a string
+  // as one text part, so the joined text parts equal the sent content.
+  function userMessageText(content: unknown): string {
+    if (typeof content === "string") return content;
+    if (!Array.isArray(content)) return "";
+    const parts: string[] = [];
+    for (const part of content) {
+      if (
+        typeof part === "object" && part !== null &&
+        (part as { type?: unknown }).type === "text" &&
+        typeof (part as { text?: unknown }).text === "string"
+      ) {
+        parts.push((part as { text: string }).text);
+      }
+    }
+    return parts.join("\n");
+  }
+
   // Durable rows are the whole persistence: only fm-wake-drain acknowledgement
   // removes them, so an interruption leaves the next session event able to
   // re-notify. At most one notification is sent per session event, and the
@@ -367,6 +385,11 @@ export default function (omp: ExtensionAPI) {
         details: { kind: "session-start", runtime: "omp" },
       },
     };
+  });
+
+  omp.on("message_start", (event) => {
+    if (event.message.role !== "user") return;
+    watch.acknowledgeWake(userMessageText(event.message.content));
   });
 
   omp.on("session_stop", async (event): Promise<SessionStopEventResult | undefined> => {
