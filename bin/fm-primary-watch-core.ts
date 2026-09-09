@@ -11,8 +11,21 @@
 // generation stopped so late callbacks cannot rearm. Stale callbacks from an
 // earlier generation, including callbacks retained by a superseded core instance,
 // are no-ops against the active replacement. Compaction is not a session
-// replacement and never enters this lifecycle. The active generation and the
-// process-exit fallback are process-wide, not per-core-instance.
+// replacement and never enters this lifecycle.
+//
+// Delivery versus consumption (stated once here):
+// A main follow-up is delivered once the runtime accepts it (sendFollowUp
+// resolves). The successor pipeline never waits for the model to read it: a
+// follow-up queued while main is streaming joins the running run without ever
+// raising before_agent_start, so waiting on that event stalls every later close.
+// Consumption is tracked only so a replacement can replay a follow-up the
+// runtime had not consumed. An idle main consumes at before_agent_start; a
+// streaming main consumes at the user message_start carrying the exact wake
+// text; either event finishes the pending record, and a still-unconsumed record
+// rides the replacement handoff.
+//
+// The active generation and the process-exit fallback are process-wide, not
+// per-core-instance.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -48,6 +61,11 @@ type PendingActionableClose = {
   delivered?: true;
 };
 
+type UnconsumedWake = {
+  content: string;
+  pending: PendingActionableClose;
+};
+
 type ReplacementActionableHandoff = {
   version: 2;
   pending: PendingActionableClose[];
@@ -78,7 +96,15 @@ type SessionGeneration = {
   seq: number;
   pendingActionables: PendingActionableClose[];
   cleanupFailure: string;
-  wakeAcknowledgements: Map<string, { content: string; settle: (consumed: boolean) => void }>;
+  // Main follow-ups the runtime has accepted but not yet consumed, by pending
+  // token. Never cleared at shutdown: a delivery continuation that runs after
+  // the replacement began reads it to tell a main-queued wake (replayed) from a
+  // branch-handled one (finished).
+  unconsumedWakes: Map<string, UnconsumedWake>;
+  // A verified successor's failure close that arrived while the pipeline was
+  // still delivering the wake it was started for; its bounded retry runs once
+  // that delivery settles instead of being skipped by the single-flight guard.
+  deferredClose: { message: string; predecessorArmPid: string } | null;
 };
 
 export type ArmResult = {
@@ -219,7 +245,8 @@ function createGeneration(): SessionGeneration {
     seq: 0,
     pendingActionables: [],
     cleanupFailure: "",
-    wakeAcknowledgements: new Map(),
+    unconsumedWakes: new Map(),
+    deferredClose: null,
   };
 }
 
@@ -299,11 +326,6 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
   const retryBaseMs = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
   const retryMaxMs = positiveInteger("FM_WATCH_REARM_RETRY_MAX_MS", 4000);
   const retryLimit = positiveInteger("FM_WATCH_REARM_RETRY_LIMIT", 5);
-  // A delivered wake is acknowledged when the runtime starts a turn whose prompt
-  // is that wake. A wake the runtime queues into an already-running turn never
-  // starts one, so that acknowledgement can never arrive; bound the wait so one
-  // unacknowledged delivery cannot hold the successor chain forever.
-  const wakeConsumeTimeoutMs = positiveInteger("FM_WATCH_WAKE_CONSUME_TIMEOUT_MS", 15000);
   const armReadyTimeoutMs = positiveInteger(
     armReadyTimeoutEnv,
     process.platform === "win32" ? 35000 : 12000,
@@ -317,6 +339,9 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
   let generation = createGeneration();
   const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
   const armClose = new WeakMap<ChildProcess, Promise<void>>();
+  // Children the core itself asked to exit; their close is not a failure of the
+  // successor and never earns a deferred retry.
+  const armRetired = new WeakSet<ChildProcess>();
   const armPendingActionable = new WeakMap<ChildProcess, PendingActionableClose>();
   // The recovery generation an established successor arm reported, keyed by the
   // arm child that reported it. bin/fm-watch-arm.sh only prints it while a
@@ -566,45 +591,45 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     };
   }
 
-  async function sendWake(owner: SessionGeneration, message: string, token?: string): Promise<boolean> {
+  // Deliver a wake to main. The runtime accepting the follow-up is the
+  // delivery; consumption is a separate event observed by the adapter at
+  // before_agent_start for an idle main and at the user message_start for a
+  // streaming main. Until consumption the pending record is kept in
+  // unconsumedWakes so a session replacement can replay it.
+  async function sendWake(owner: SessionGeneration, message: string, pending?: PendingActionableClose): Promise<boolean> {
     if (!generationIsLive(owner)) return false;
     const content = encodeOperationalInput(
       "watcher",
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
     );
-    if (!token) {
-      await sendFollowUp(content);
-      return generationIsLive(owner);
-    }
-    let settleConsumption: (consumed: boolean) => void = () => {};
-    const consumption = new Promise<boolean>((resolveConsumption) => {
-      settleConsumption = resolveConsumption;
-    });
-    owner.wakeAcknowledgements.set(token, { content, settle: settleConsumption });
+    if (pending) owner.unconsumedWakes.set(pending.token, { content, pending });
     try {
       await sendFollowUp(content);
-      let consumeTimer: ReturnType<typeof setTimeout> | undefined;
-      const consumeTimeout = new Promise<"timeout">((resolveTimeout) => {
-        consumeTimer = setTimeout(() => resolveTimeout("timeout"), wakeConsumeTimeoutMs);
-        consumeTimer.unref();
-      });
-      try {
-        const consumed = await Promise.race([consumption, consumeTimeout]);
-        if (consumed !== "timeout") return consumed;
-      } finally {
-        clearTimeout(consumeTimer);
-      }
-      // The runtime accepted the wake without starting a turn for it: the message
-      // is already queued into the running conversation, so it counts as
-      // delivered. Returning true here (never false) keeps the pending loop from
-      // re-sending the same wake.
-      owner.wakeAcknowledgements.delete(token);
-      settleConsumption(true);
-      return generationIsLive(owner);
     } catch (error) {
-      owner.wakeAcknowledgements.delete(token);
-      settleConsumption(false);
+      if (pending) owner.unconsumedWakes.delete(pending.token);
       throw error;
+    }
+    // Accepted by the runtime. A generation replaced while the runtime was
+    // accepting the follow-up may have lost the message with the old session,
+    // so report it undelivered and let the replacement replay the still-pending
+    // record.
+    return generationIsLive(owner);
+  }
+
+  // The runtime consumed a main follow-up: idle main at before_agent_start,
+  // streaming main at the user message_start carrying the exact wake text.
+  function consumeWake(owner: SessionGeneration, text: string): void {
+    for (const [token, wake] of owner.unconsumedWakes) {
+      if (wake.content !== text) continue;
+      owner.unconsumedWakes.delete(token);
+      wake.pending.delivered = true;
+      try {
+        finishPendingActionable(owner, wake.pending);
+      } catch (error) {
+        surfaceCleanupFailure(owner, error);
+        schedulePendingCleanup(owner);
+      }
+      return;
     }
   }
 
@@ -659,7 +684,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     owner: SessionGeneration,
     message: string,
     repairFailed: boolean,
-    token: string,
+    pending: PendingActionableClose,
     recovery?: RecoveryHandoff,
   ): Promise<boolean> {
     if (!generationIsLive(owner)) return false;
@@ -667,7 +692,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       const confirmed = confirmHandlingDeliveryWithRetry(owner, recovery);
       if (!confirmed.ok) {
         if (!pidAlive(recovery.watcherPid)) await retireArm(owner.child);
-        return await sendWake(owner, `${message}\n\n${confirmed.detail}`, token);
+        return await sendWake(owner, `${message}\n\n${confirmed.detail}`, pending);
       }
     }
     if (!repairFailed && offerWakeToBranch) {
@@ -681,7 +706,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
         }
       }
     }
-    return await sendWake(owner, message, token);
+    return await sendWake(owner, message, pending);
   }
 
   function surfaceFailure(owner: SessionGeneration, message: string): void {
@@ -757,7 +782,12 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
             surfaceCleanupFailure(owner, error);
           }
         }
-        const pending = owner.pendingActionables.find((item) => !item.delivered);
+        // A record the runtime has accepted but not consumed is neither
+        // redelivered nor finished here: consumption finishes it; replacement
+        // replays it.
+        const pending = owner.pendingActionables.find(
+          (item) => !item.delivered && !owner.unconsumedWakes.has(item.token),
+        );
         if (!pending) break;
         const existingClaim = replacementCoordinator.deliveries.get(pending.token);
         if (existingClaim && existingClaim.owner !== owner) {
@@ -783,6 +813,9 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
           }
         };
         try {
+          // A new restoration supersedes whatever became of the previous
+          // successor; only a failure during this delivery is retried after it.
+          owner.deferredClose = null;
           const restoration = await restoreAfterActionableClose(owner, pending.predecessorArmPid);
           if (!generationIsLive(owner)) {
             settleClaim("failed");
@@ -796,7 +829,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
             owner,
             message,
             Boolean(restoration.failure),
-            pending.token,
+            pending,
             restoration.recovery,
           );
           if (!delivered) {
@@ -804,12 +837,25 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
             releaseClaim();
             return;
           }
-          pending.delivered = true;
+          const awaitingConsumption = owner.unconsumedWakes.has(pending.token);
+          if (awaitingConsumption && !generationIsLive(owner)) {
+            // The runtime accepted the follow-up, then the session was replaced
+            // before this continuation ran: the shutdown persisted the still-
+            // pending record, so a replacement waiting on this claim must
+            // replay it.
+            settleClaim("failed");
+            releaseClaim();
+            return;
+          }
           settleClaim("delivered");
-          try {
-            finishPendingActionable(owner, pending);
-          } catch (error) {
-            surfaceCleanupFailure(owner, error);
+          if (!awaitingConsumption) {
+            // The branch handled it, or the runtime consumed it before this ran.
+            pending.delivered = true;
+            try {
+              finishPendingActionable(owner, pending);
+            } catch (error) {
+              surfaceCleanupFailure(owner, error);
+            }
           }
           releaseClaim();
         } catch (error) {
@@ -824,8 +870,19 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     } finally {
       if (generationIsLive(owner)) {
         owner.restoring = false;
-        if (owner.pendingActionables.length > 0) schedulePendingCleanup(owner);
-        if (!owner.child && !owner.retryTimer) startArm(owner);
+        if (owner.pendingActionables.some((pending) => pending.delivered)) schedulePendingCleanup(owner);
+        // No bare arm is launched here. A generation without a child at this
+        // point has either delivered a typed restoration failure after its
+        // bounded retries, which hands repair to main through fm_watch_arm_pi
+        // (one more silent launch past the bound could hold a hung child that
+        // the repair call would then report as "unchanged"), or lost a verified
+        // successor during the delivery, which takes the ordinary bounded,
+        // lock-checked retry it would have taken had the pipeline been idle.
+        const deferred = owner.deferredClose;
+        owner.deferredClose = null;
+        if (deferred && !owner.child && !owner.retryTimer) {
+          scheduleRetry(owner, deferred.message, deferred.predecessorArmPid);
+        }
       }
     }
   }
@@ -862,6 +919,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
 
   async function retireArm(armChild: ChildProcess | null): Promise<boolean> {
     if (!armChild) return true;
+    armRetired.add(armChild);
     armChild.kill("SIGTERM");
     const closed = armClose.get(armChild);
     if (!closed) return false;
@@ -1002,6 +1060,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     let stderr = "";
     let settled = false;
     let readinessSettled = false;
+    let verified = false;
     let resolveReadiness: (ready: boolean) => void = () => {};
     let resolveClosed: () => void = () => {};
     const readiness = new Promise<boolean>((resolveReady) => {
@@ -1015,6 +1074,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     const settleReadiness = (ready: boolean): void => {
       if (readinessSettled) return;
       readinessSettled = true;
+      verified = ready;
       resolveReadiness(ready);
     };
     const observeEstablishedArm = (): void => {
@@ -1059,7 +1119,17 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
         void processPendingActionables(owner);
         return;
       }
-      if (!generationIsLive(owner) || owner.restoring) return;
+      if (!generationIsLive(owner)) return;
+      if (owner.restoring) {
+        // The pipeline is still delivering the wake this successor was started
+        // for. A verified successor that failed on its own keeps its bounded
+        // retry for the end of that delivery; an unready child closing here was
+        // retired by the restoration itself.
+        if (verified && !armRetired.has(armChild)) {
+          owner.deferredClose = { message: classification.message, predecessorArmPid: predecessor };
+        }
+        return;
+      }
       scheduleRetry(owner, classification.message, predecessor);
     });
     armChild.on("error", (error: Error) => {
@@ -1069,7 +1139,12 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       settleReadiness(false);
       releaseChild();
       if (!generationIsLive(owner)) return;
-      if (owner.restoring) return;
+      if (owner.restoring) {
+        if (verified && !armRetired.has(armChild)) {
+          owner.deferredClose = { message: `watcher: FAILED - ${runtimeLabel} extension arm child ${id} failed: ${error.message}`, predecessorArmPid: String(armChild.pid ?? "") };
+        }
+        return;
+      }
       scheduleRetry(
         owner,
         `watcher: FAILED - ${runtimeLabel} extension arm child ${id} failed: ${error.message}`,
@@ -1145,12 +1220,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
   }
 
   function acknowledgeWake(content: string): void {
-    for (const [token, acknowledgement] of generation.wakeAcknowledgements) {
-      if (acknowledgement.content !== content) continue;
-      generation.wakeAcknowledgements.delete(token);
-      acknowledgement.settle(true);
-      break;
-    }
+    consumeWake(generation, content);
   }
 
   function sessionStart(): void {
@@ -1163,8 +1233,9 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
 
   async function sessionShutdown(replacement = false): Promise<void> {
     if (activeBinding !== binding) return;
-    for (const acknowledgement of generation.wakeAcknowledgements.values()) acknowledgement.settle(false);
-    generation.wakeAcknowledgements.clear();
+    // unconsumedWakes is intentionally not cleared here. A delivery continuation
+    // that runs after the replacement began uses it to decide whether a pending
+    // record still needs to be replayed.
     if (replacementCoordinator.receiver === receiveReplacementActionable) replacementCoordinator.receiver = null;
     await stopSessionGeneration(generation, replacement);
   }

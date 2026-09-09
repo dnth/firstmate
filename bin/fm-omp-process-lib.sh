@@ -131,6 +131,9 @@ fm_omp_task_doorbell_request_existing() {  # <marker> <request-id>
     return 1
   fi
   [ ! -f "${base}.pending.ambiguous" ] || return 2
+  # Awaiting turn proof: the extension delivered the steer but the runtime has
+  # not started a turn for it yet - still in flight, not a deliverable request.
+  [ ! -f "${base}.pending.awaiting-turn" ] || return 2
   for processing in "${base}.pending.processing."*; do
     [ -f "$processing" ] && return 2
   done

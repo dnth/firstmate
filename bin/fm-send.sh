@@ -32,7 +32,10 @@
 #   omp-native-queued     the named native request is queued without a
 #                         receipt; exit 7
 # Both failures are durable and non-resend-inviting: the exact message stays in
-# its inbox record and the watcher's re-ring ladder owns redelivery. `/exit`
+# its inbox record and the watcher's re-ring ladder owns redelivery. The watcher
+# re-rings an unacknowledged message while its endpoint remains available,
+# escalates after the bounded ladder, and instead routes a positively dead or
+# missing endpoint to recovery without typing. `/exit`
 # stays an independent typed operation and is never appended to resolve one.
 #
 # Harness-native slash commands, Codex dollar invocations, explicit backend
@@ -1119,6 +1122,7 @@ else
       1) echo "fm-send: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
       2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
       5) echo "fm-send: doorbell skipped (a concurrent Hermes delivery still holds the shared delivery lock); the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
+      6) echo "fm-send: doorbell not typed because the agent in $T has exited or its endpoint is missing; the steer is durably recorded at $INBOX_RECORD for recovery (stuck-crewmate-recovery), and the watcher will not re-ring a dead pane" >&2 ;;
       3)
         echo "error: omp-native-refused: the task-bound OMP receive adapter did not accept the request ($OMP_NATIVE_BINDING); nothing was typed and the exact message stays durable; do not resend" >&2
         exit 6

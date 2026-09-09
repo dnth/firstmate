@@ -19,8 +19,15 @@
 # backend submit fallback. A claimed programmatic request that may already have
 # sent is anchored as ambiguous and is never sent again; session recovery
 # reconciles the instruction from the durable inbox. Other swallowed doorbells
-# are re-rung on a bounded schedule, and a worker that never acknowledges
-# surfaces through the ordinary stale wake into stuck-crewmate-recovery.
+# are re-rung on a bounded schedule while the endpoint remains available, and a
+# worker that never acknowledges surfaces through the ordinary stale wake into
+# stuck-crewmate-recovery. A positively dead or missing endpoint bypasses that
+# schedule without being typed into - the doorbell line itself is a shell
+# no-op, so even a lost liveness race runs nothing in a bare shell - and its
+# unhandled record surfaces through the same stale wake into recovery.
+#
+# Inbox paths containing bytes outside printable ASCII are unsupported. The
+# doorbell refuses them rather than sending terminal control bytes to a pane.
 #
 # Layout under <state-dir>:
 #   <task>.inbox/NNN.msg       one durable steer, numeric sequence, atomic rename
@@ -48,9 +55,10 @@
 # FM_TASK_INBOX_GRACE_SECS is due one delivery attempt per grace period; an
 # attempt may ring or be skipped to protect proven pending composer text. After
 # FM_TASK_INBOX_RING_MAX attempts without an acknowledgement it escalates. The
-# caller owns the busy check (a busy pane just waits - the record is durable and
-# the worker reaches a turn boundary) and the wake emission; this library owns
-# only the schedule. If attempt bookkeeping cannot be persisted while the record
+# caller owns the busy and recovery-grade endpoint checks: a busy pane waits,
+# while a positively dead or missing endpoint skips delivery and the ladder and
+# escalates directly. This library owns only the schedule and escalation
+# marker. If attempt bookkeeping cannot be persisted while the record
 # remains unhandled, the caller surfaces that failure instead of retrying
 # silently; a concurrently removed inbox is a quiet no-op. Escalation
 # deliberately queues the wake before writing the
@@ -196,12 +204,20 @@ fm_task_inbox_body() {  # <record-path>
 
 # The constant self-describing doorbell line for the inbox containing a record.
 # Self-describing on purpose: a worker whose brief predates the inbox contract
-# still receives the complete instruction in the line itself.
+# still receives the complete instruction in the line itself. The leading `: `
+# is the POSIX shell no-op, so the same line typed into a pane whose agent has
+# exited (a bare shell) runs nothing; see the dead-pane note in the header.
+# A non-printable path fails without output so terminal controls never reach
+# the pane's line discipline.
 fm_task_inbox_doorbell_line() {  # <record-path>
-  local dir=${1%/*} abs
+  local dir=${1%/*} abs quoted LC_ALL=C
   abs=$(cd "$dir" 2>/dev/null && pwd) || abs=$dir
-  printf 'Firstmate instruction waiting: list %s/*.msg and, in numeric order, read and act on each, then mv each handled file to %s/handled/.' \
-    "$abs" "$abs"
+  case "$abs" in
+    *[![:print:]]*) return 1 ;;
+  esac
+  quoted=$(printf '%s' "$abs" | sed "s/'/'\\\\''/g")
+  printf ": Firstmate instruction waiting: list '%s'/*.msg and, in numeric order, read and act on each, then mv each handled file to '%s'/handled/." \
+    "$quoted" "$quoted"
 }
 
 # The one path of the per-task Hermes delivery lock. Hermes serializes its
@@ -213,10 +229,17 @@ fm_task_inbox_hermes_delivery_lock_path() {  # <state-dir> <task-id>
 
 # Deliver one doorbell. Callers go through fm_task_inbox_ring, which owns the
 # Hermes delivery-lock critical section; this helper is the unserialized body.
+# A positively dead or missing endpoint returns 6 without typing anything -
+# the caller routes the durable record to recovery instead of the ladder.
 fm_task_inbox_ring_deliver() {  # <backend> <target> <record-path> [expected-label] [harness] [omp-runtime] [omp-bin]
   local backend=$1 target=$2 rec=$3 label=${4:-}
   local harness=${5:-} omp_runtime=${6:-} omp_bin=${7:-} line cstate verdict ready_marker request_id programmatic_rc
-  line=$(fm_task_inbox_doorbell_line "$rec")
+  case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
+    dead|missing) return 6 ;;
+  esac
+  if ! line=$(fm_task_inbox_doorbell_line "$rec"); then
+    return 2
+  fi
   if [ "$harness" = omp ]; then
     ready_marker="${rec%/*}"
     ready_marker="${ready_marker%.inbox}.omp-doorbell-ready"
@@ -260,8 +283,9 @@ fm_task_inbox_ring_deliver() {  # <backend> <target> <record-path> [expected-lab
 # Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text,
 # 2 the backend send failed, 3 the OMP native adapter refused or was
 # unavailable, 4 the OMP native request is queued without an acknowledgement,
-# or 5 skipped because a concurrent Hermes delivery still holds the shared
-# delivery lock. On an OMP target the call also publishes
+# 5 skipped because a concurrent Hermes delivery still holds the shared
+# delivery lock, or 6 skipped because the endpoint is positively dead or
+# missing (nothing typed; recovery owns the record). On an OMP target the call also publishes
 # FM_TASK_INBOX_RING_OMP_REQUEST (the named native queue entry for this record)
 # and FM_TASK_INBOX_RING_OMP_PID (the proven acknowledging session process) so
 # the caller can report the exact binding it acted on. A native success without
@@ -343,8 +367,11 @@ fm_task_inbox_due_action() {  # <state-dir> <task-id>
   IFS=$(printf '\t') read -r rec_base count last <<EOF
 $ladder
 EOF
-  if [ "$rec_base" != "$base" ]; then
-    # A different (or first) oldest message: the previous ladder is stale.
+  if [ -n "$rec_base" ] && [ "$rec_base" != "$base" ]; then
+    # A different oldest message: the previous ladder is stale. An absent
+    # ladder is left alone so a dead-pane escalation, which never rings and so
+    # never writes one, keeps its marker (the marker check below still ignores
+    # a marker naming some other message).
     count=0
     last=0
     rm -f "$dir/.escalated" 2>/dev/null || true
@@ -369,8 +396,10 @@ EOF
 }
 
 # Advance the ladder after a delivery attempt. A failed ring or a composer-
-# protected skip still consumes budget so neither a dead pane nor permanently
-# blocked composer can retry silently forever. A concurrently removed inbox is
+# protected skip still consumes budget so neither an unreadable pane nor a
+# permanently blocked composer can retry silently forever. A positively dead or
+# missing endpoint never enters the ladder: the watcher escalates it directly.
+# A concurrently removed inbox is
 # a successful no-op; otherwise failure means the caller must surface the
 # unwritable ladder while the record remains unhandled.
 fm_task_inbox_record_ring() {  # <state-dir> <task-id> <record-path>

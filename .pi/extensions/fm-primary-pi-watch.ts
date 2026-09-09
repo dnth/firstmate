@@ -89,8 +89,31 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  // The text Pi carries in a user message_start: sendUserMessage wraps a string
+  // as one text part, so the joined text parts equal the sent content.
+  function userMessageText(content: unknown): string {
+    if (typeof content === "string") return content;
+    if (!Array.isArray(content)) return "";
+    const parts: string[] = [];
+    for (const part of content) {
+      if (
+        typeof part === "object" && part !== null &&
+        (part as { type?: unknown }).type === "text" &&
+        typeof (part as { text?: unknown }).text === "string"
+      ) {
+        parts.push((part as { text: string }).text);
+      }
+    }
+    return parts.join("\n");
+  }
+
   pi.on?.("before_agent_start", (event) => {
     watch.acknowledgeWake(event.prompt);
+  });
+
+  pi.on?.("message_start", (event) => {
+    if (event.message.role !== "user") return;
+    watch.acknowledgeWake(userMessageText(event.message.content));
   });
 
   pi.on?.("session_start", () => {

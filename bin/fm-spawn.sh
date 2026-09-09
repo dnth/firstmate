@@ -3952,6 +3952,10 @@ export default function (omp: any) {
   const taskInboxDoorbell = installTaskInboxDoorbell(omp, {
     inboxDir: "$STATE_REAL/$ID.inbox",
     readyMarker: "$OMP_DOORBELL_READY",
+    // OMP's native triggerTurn contract is the receipt for this generated
+    // worker extension; turn observation is reserved for runtimes that expose
+    // a reliable correlated event stream.
+    observeTurns: false,
   });
   omp.on("session_start", () => {
     taskInboxDoorbell.activate();

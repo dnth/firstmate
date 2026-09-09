@@ -96,7 +96,7 @@ Each record includes arm and watcher PIDs, start and end timestamps, exit code a
 The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYCLE_LOG_KEEP_LINES`.
 `state/.watch-triage.log` remains only the watcher's bounded absorbed-wake debug log and carries no lifecycle semantics.
 
-The default 300-second grace is unchanged.
+The historical 300-second grace remains the floor for short polls, while watcher and auto-arm paths derive a larger default from `FM_POLL` when a long poll would otherwise outrun that grace; [`turnend-guard.md`](turnend-guard.md#guard-grace-and-the-poll-cadence) owns the formula and reader-specific exceptions.
 Only the watcher process touches `state/.last-watcher-beat`; no helper process can make a wedged watcher appear healthy.
 
 ## Regression coverage

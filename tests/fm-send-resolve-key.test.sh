@@ -63,7 +63,7 @@ case "${1:-}" in
     exit 0
     ;;
   list-windows)
-    if [ -n "${FM_FAKE_TMUX_WINDOW:-}" ]; then printf '%s\n' "$FM_FAKE_TMUX_WINDOW"; fi
+    printf '%s\n' fm-t1 fm-t2 fm-t3 fm-t4 fm-t5 fm-t6 fm-t7 fm-t8 fm-tq fm-mate
     exit 0 ;;
 esac
 exit 0

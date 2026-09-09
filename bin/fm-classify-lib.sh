@@ -182,6 +182,14 @@ status_is_paused() {  # <status-line>
   [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]
 }
 
+# 0 if a status line declares a verified captain-held transfer.
+status_is_captain_held() {  # <status-line>
+  local line=$1 verb
+  [ -n "$line" ] || return 1
+  verb=$(status_line_verb "$line")
+  [ "$verb" = "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" ]
+}
+
 # 0 if a status line declares either an external-wait pause or a verified
 # captain-held transfer.
 # Both declarations can intentionally leave an exited crew's endpoint idle, so
@@ -359,6 +367,17 @@ _fm_decision_key_transition_allowed() {  # <key> <note> <verb> <resolve-verb>
       ;;
   esac
   return 0
+}
+
+# 0 when a pending-reply decision's note names one of the escalation classes a
+# second-mate's reply pipeline surfaces for the captain: a missed reply, an
+# unknown delivery outcome, or a recovery-path delivery failure.
+_fm_is_pending_reply_escalation() {  # <key> <note>
+  case "$1" in pending-reply-*) ;; *) return 1 ;; esac
+  case "$2" in
+    pending-reply-missed:*|pending-reply-delivery-unknown:*|pending-reply-recovery-delivery-failed:*|pending-reply-recovery-delivery-unknown:*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 # Fold ONE status line into an existing "<key>\t<verb>\t<note>\n"-per-line open
 # set, applying the same needs-decision/blocked-opens, resolved/captain-held-closes
@@ -748,9 +767,14 @@ _fm_status_open_decision_origins() {  # <status-file>
 # Keyed needs-decision/blocked events are reported only while their exact
 # opening remains live in the whole-file decision fold, so a resolved key is
 # never re-surfaced merely because it was followed by routine progress.
-status_span_first_actionable_record() {  # <status-file> <start-offset>
-  local f=$1 start=${2:-0} size ident cur_ident scratch chunk_file full_file prefix_file
-  local line verb key origins='' folded=0 rc=1 failed=0 prefix_lines=0 line_number=0 live_line='' events='' _line _key
+# With optional <record-var>, it assigns the record instead of printing it;
+# with optional <needs-decision-var>, it also assigns 1 when the span newly
+# surfaces a needs-decision, captain-held declaration, or pending-reply
+# escalation, otherwise 0. This side-band classification never changes the
+# event text.
+status_span_first_actionable_record() {  # <status-file> <start-offset> [record-var] [needs-decision-var]
+  local f=$1 start=${2:-0} output_var=${3-} needs_var=${4-} size ident cur_ident scratch chunk_file full_file prefix_file result
+  local line verb key origins='' folded=0 rc=1 failed=0 prefix_lines=0 line_number=0 live_line='' events='' _line _key _fm_span_needs_decision=0
   [ -e "$f" ] || { [ -L "$f" ] && return 2; return 1; }
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 2
   ident=$(_fm_open_decisions_file_ident "$f") || return 2
@@ -759,7 +783,16 @@ status_span_first_actionable_record() {  # <status-file> <start-offset>
   case "$size" in ''|*[!0-9]*) return 2 ;; esac
   case "$start" in ''|*[!0-9]*) start=0 ;; esac
   [ "$start" -le "$size" ] || start=0
-  [ "$start" -lt "$size" ] || { printf '%s\t%s' "$size" "$ident"; return 1; }
+  if [ "$start" -ge "$size" ]; then
+    result="${size}"$'\t'"${ident}"
+    if [ -n "$output_var" ]; then
+      printf -v "$output_var" '%s' "$result"
+      [ -z "$needs_var" ] || printf -v "$needs_var" '%s' 0
+    else
+      printf '%s' "$result"
+    fi
+    return 1
+  fi
   scratch="$(_fm_open_decisions_cursor_path "$f").span.$$"
   chunk_file="${scratch}.span"; full_file="${scratch}.full"; prefix_file="${scratch}.prefix"
   _fm_status_read_span "$f" "$start" "$((size - start))" > "$chunk_file" 2>/dev/null \
@@ -771,17 +804,28 @@ status_span_first_actionable_record() {  # <status-file> <start-offset>
   while IFS= read -r line || [ -n "$line" ]; do
     line_number=$((line_number + 1))
     case "$line" in *[![:space:]]*) ;; *) continue ;; esac
+    if status_is_captain_held "$line"; then
+      # A transfer closes the status-log decision and remains non-actionable to
+      # stale classification. The side-band marker lets signal routing surface
+      # the captain-owned hold without changing that established stale verdict.
+      _fm_span_needs_decision=1
+      continue
+    fi
     status_is_captain_relevant "$line" || continue
     verb=$(status_line_verb "$line")
     case "$verb" in
       needs-decision|blocked)
         key=$(_fm_decision_key "$line") || {
           [ -n "$events" ] && events="${events} ; "
-          events="${events}${line}"; rc=0; continue
+          events="${events}${line}"; rc=0
+          [ "$verb" = needs-decision ] && _fm_span_needs_decision=1
+          continue
         }
         _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" || {
           [ -n "$events" ] && events="${events} ; "
-          events="${events}reconciliation-required: ${line}"; rc=0; continue
+          events="${events}reconciliation-required: ${line}"; rc=0
+          [ "$verb" = needs-decision ] && _fm_span_needs_decision=1
+          continue
         }
         if [ "$folded" -eq 0 ]; then
           _fm_status_read_span "$f" 0 "$size" > "$full_file" 2>/dev/null \
@@ -802,7 +846,12 @@ EOF
         )
         [ -n "$live_line" ] && [ "$((prefix_lines + line_number))" -eq "$live_line" ] || continue
         [ -n "$events" ] && events="${events} ; "
-        events="${events}${line}"; rc=0
+        events="${events}${line}"
+        if [ "$verb" = needs-decision ] || { [ "$verb" = blocked ] &&
+          _fm_is_pending_reply_escalation "$key" "$(status_line_note "$line")"; }; then
+          _fm_span_needs_decision=1
+        fi
+        rc=0
         ;;
       *)
         [ -n "$events" ] && events="${events} ; "
@@ -812,7 +861,13 @@ EOF
   done < "$chunk_file"
   rm -f "$chunk_file" "$full_file" "$prefix_file"
   [ "$failed" -eq 0 ] || return 2
-  if [ "$rc" -eq 0 ]; then printf '%s\t%s\t%s' "$size" "$ident" "$events"; else printf '%s\t%s' "$size" "$ident"; fi
+  if [ "$rc" -eq 0 ]; then result="${size}"$'\t'"${ident}"$'\t'"${events}"; else result="${size}"$'\t'"${ident}"; fi
+  if [ -n "$output_var" ]; then
+    printf -v "$output_var" '%s' "$result"
+    [ -z "$needs_var" ] || printf -v "$needs_var" '%s' "$_fm_span_needs_decision"
+  else
+    printf '%s' "$result"
+  fi
   return "$rc"
 }
 

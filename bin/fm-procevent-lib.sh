@@ -67,6 +67,296 @@ fm_procevent_any_registered() {
   return 1
 }
 
+# --- owning-session lease ---------------------------------------------------
+# A runner is detached into its own process group so it survives the turn that
+# started it. That is what makes a persistent source work, and on its own it is
+# also what lets a runner outlive its whole home: once reparented to init,
+# nothing bounds its lifetime, so its blocking child - and everything that child
+# spawns - can keep running indefinitely.
+#
+# The bound is a lease on the OWNING STATE ROOT. Owner-presence operations
+# refresh it, an attached public start keeps it fresh while its caller remains
+# attached, and the watcher's reconcile cycle keeps it fresh in a live home.
+# A guard proves the runner's owner is still there by reading that lease from
+# the physical state root recorded in the claim. After two consecutive checks
+# cannot prove both the root identity and a fresh lease, it stops the runner's
+# process group. The lease is keyed by state root, so another home's live runner
+# is untouched: that home refreshes its own lease. Nothing here keys on a script
+# name, a command line, or a process name, all of which are shared across homes.
+
+fm_procevent_owner_lease_path() {  # <state-root>
+  printf '%s/.owner-lease\n' "$(fm_procevent_registry_dir "$1")"
+}
+
+# Record owner-presence activity in this home's process-event state. Best
+# effort by design: a home with no registry directory yet owns no runner.
+fm_procevent_owner_lease_touch() {  # <state-root>
+  local reg lease tmp now
+  reg=$(fm_procevent_registry_dir "$1")
+  [ -d "$reg" ] && [ ! -L "$reg" ] || return 1
+  lease=$(fm_procevent_owner_lease_path "$1")
+  now=$(perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e \
+    'printf "%.6f\n", clock_gettime(CLOCK_MONOTONIC)') || return 1
+  tmp=$(umask 077; mktemp "$reg/.owner-lease.XXXXXX") || return 1
+  if ! printf '%s\n' "$now" > "$tmp" || ! mv -f -- "$tmp" "$lease"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+# Seconds since the last refresh. Fails when the lease is absent or unreadable,
+# which is what a removed home looks like from inside a surviving runner.
+fm_procevent_owner_lease_age() {  # <state-root>
+  local lease value
+  lease=$(fm_procevent_owner_lease_path "$1")
+  [ -f "$lease" ] && [ ! -L "$lease" ] || return 1
+  IFS= read -r value < "$lease" || return 1
+  perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e '
+    use strict;
+    use warnings;
+    my $value = shift;
+    $value =~ /\A[0-9]+(?:\.[0-9]+)?\z/ or exit 1;
+    my $now = clock_gettime(CLOCK_MONOTONIC);
+    $now >= $value or exit 1;
+    printf "%d\n", int($now - $value);
+  ' "$value"
+}
+
+# How long a runner keeps going with no activity in its owning home. The default
+# is forty watcher cycles at the default poll interval, so an ordinary busy or
+# briefly wedged home never trips it, while a home that is simply gone stops
+# owning processes within the hour rather than within a day.
+FM_PROCEVENT_OWNER_LEASE_DEFAULT_SECONDS=600
+FM_PROCEVENT_OWNER_LEASE_MIN_SECONDS=1
+FM_PROCEVENT_OWNER_LEASE_MAX_SECONDS=86400
+
+fm_procevent_owner_lease_seconds() {
+  local value=${FM_PROCEVENT_OWNER_LEASE_SECONDS-}
+  if [ -z "$value" ]; then
+    printf '%s\n' "$FM_PROCEVENT_OWNER_LEASE_DEFAULT_SECONDS"
+    return 0
+  fi
+  case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$value" -ge "$FM_PROCEVENT_OWNER_LEASE_MIN_SECONDS" ] || return 1
+  [ "$value" -le "$FM_PROCEVENT_OWNER_LEASE_MAX_SECONDS" ] || return 1
+  printf '%s\n' "$value"
+}
+
+# How often a runner's guard re-reads that lease. One watcher cycle at the
+# default poll interval, so the guard costs about as much as the cycle that
+# refreshes what it reads.
+FM_PROCEVENT_OWNER_CHECK_DEFAULT_SECONDS=15
+FM_PROCEVENT_OWNER_CHECK_MIN_SECONDS=1
+FM_PROCEVENT_OWNER_CHECK_MAX_SECONDS=3600
+
+fm_procevent_owner_check_seconds() {
+  local value=${FM_PROCEVENT_OWNER_CHECK_SECONDS-}
+  if [ -z "$value" ]; then
+    printf '%s\n' "$FM_PROCEVENT_OWNER_CHECK_DEFAULT_SECONDS"
+    return 0
+  fi
+  case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$value" -ge "$FM_PROCEVENT_OWNER_CHECK_MIN_SECONDS" ] || return 1
+  [ "$value" -le "$FM_PROCEVENT_OWNER_CHECK_MAX_SECONDS" ] || return 1
+  printf '%s\n' "$value"
+}
+
+FM_PROCEVENT_LAUNCH_FLOOR_DEFAULT_SECONDS=1
+FM_PROCEVENT_LAUNCH_FLOOR_MIN_SECONDS=1
+FM_PROCEVENT_LAUNCH_FLOOR_MAX_SECONDS=3600
+
+fm_procevent_launch_floor_seconds() {
+  local value=${FM_PROCEVENT_LAUNCH_FLOOR_SECONDS-}
+  if [ -z "$value" ]; then
+    printf '%s\n' "$FM_PROCEVENT_LAUNCH_FLOOR_DEFAULT_SECONDS"
+    return 0
+  fi
+  case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$value" -ge "$FM_PROCEVENT_LAUNCH_FLOOR_MIN_SECONDS" ] || return 1
+  [ "$value" -le "$FM_PROCEVENT_LAUNCH_FLOOR_MAX_SECONDS" ] || return 1
+  printf '%s\n' "$value"
+}
+
+fm_procevent_launch_floor_reset_locked() {  # <state-root> <source-id> <registration-identity>
+  local reg identity
+  case "$3" in *:*) ;; *) return 1 ;; esac
+  case "$3" in ''|*[!0-9:]*) return 1 ;; esac
+  reg=$(fm_procevent_registry_dir "$1") || return 1
+  identity=${3//:/-}
+  rm -f -- "$reg/$2.$identity.last-launch"
+}
+
+fm_procevent_launch_floor_prune_locked() {  # <state-root> <source-id> <registration-identity>
+  local reg identity keep stamp
+  case "$3" in *:*) ;; *) return 1 ;; esac
+  case "$3" in ''|*[!0-9:]*) return 1 ;; esac
+  reg=$(fm_procevent_registry_dir "$1") || return 1
+  identity=${3//:/-}
+  keep="$reg/$2.$identity.last-launch"
+  for stamp in "$reg/$2".*.last-launch "$reg/$2.last-launch"; do
+    [ "$stamp" = "$keep" ] && continue
+    [ -e "$stamp" ] || [ -L "$stamp" ] || continue
+    rm -f -- "$stamp" || return 1
+  done
+}
+
+fm_procevent_launch_floor_wait() {  # <state-root> <source-id> <registration-identity> <seconds>
+  local state=$1 id=$2 expected=$3 floor=$4 reg stamp identity registration current_identity status=0
+  case "$expected" in *:*) ;; *) return 1 ;; esac
+  case "$expected" in ''|*[!0-9:]*) return 1 ;; esac
+  reg=$(fm_procevent_registry_dir "$state") || return 1
+  identity=${expected//:/-}
+  stamp="$reg/$id.$identity.last-launch"
+  [ ! -L "$stamp" ] || return 1
+  [ ! -e "$stamp" ] || [ -f "$stamp" ] || return 1
+  perl -MTime::HiRes=clock_gettime,sleep,CLOCK_MONOTONIC -e '
+    use strict;
+    use warnings;
+    my ($path, $floor) = @ARGV;
+    my $previous;
+    if (-e $path) {
+      open my $in, "<", $path or exit 1;
+      my $value = <$in>;
+      close $in or exit 1;
+      defined($value) && $value =~ /\A([0-9]+(?:\.[0-9]+)?)\n?\z/ or exit 1;
+      $previous = 0 + $1;
+    }
+    my $now = clock_gettime(CLOCK_MONOTONIC);
+    my $elapsed = defined($previous) && $now >= $previous ? $now - $previous : undef;
+    sleep($floor - $elapsed) if defined($elapsed) && $elapsed < $floor;
+  ' "$stamp" "$floor" || return 1
+
+  # Registration publication holds this same source lock while replacing and
+  # pruning pacing state, so a superseded sleeper cannot recreate its stamp.
+  fm_procevent_source_lock_acquire "$id" || return 1
+  registration="$reg/$id.source"
+  current_identity=$(fm_pr_file_identity "$registration" 2>/dev/null) || current_identity=
+  if [ "$current_identity" != "$expected" ]; then
+    fm_procevent_source_lock_release "$id" || return 1
+    return 2
+  fi
+  [ ! -L "$stamp" ] && { [ ! -e "$stamp" ] || [ -f "$stamp" ]; } || status=1
+  if [ "$status" -eq 0 ]; then
+    perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -MFcntl=:DEFAULT -e '
+      use strict;
+      use warnings;
+      my $path = shift;
+      my $now = clock_gettime(CLOCK_MONOTONIC);
+      my $tmp = "$path.$$";
+      sysopen(my $out, $tmp, O_WRONLY | O_CREAT | O_EXCL, 0600) or exit 1;
+      print {$out} "$now\n" or exit 1;
+      close $out or exit 1;
+      rename $tmp, $path or exit 1;
+    ' "$stamp" || status=1
+  fi
+  if [ "$status" -ne 0 ]; then
+    fm_procevent_source_lock_release "$id" || :
+    return "$status"
+  fi
+  # Upstream holds the lock past this point for its extension-capture sections;
+  # the fork's caller has no further locked work, so the serialized section
+  # ends with the stamp write.
+  fm_procevent_source_lock_release "$id" || return 1
+  return 0
+}
+
+# True while the owning home is provably still active.
+fm_procevent_owner_alive() {  # <state-root> <lease-seconds>
+  local age
+  age=$(fm_procevent_owner_lease_age "$1") || return 1
+  [ "$age" -le "$2" ]
+}
+
+# --- physical state-root identity -------------------------------------------
+# A runner bound to a home records the CANONICAL physical state root in its
+# claim, plus that directory's device, inode, owner, and mode. A home spelled
+# through a symlinked ancestor resolves to one physical path here, so every
+# later comparison - the owner guard's lease check, reconcile's ownership test -
+# speaks about the same directory. Device and inode are the proof a removed home
+# cannot fake: a recreated state directory is a different identity even at the
+# same path. The fork records and compares the mode but does not require it to
+# be private here - its operational homes legitimately use group-readable state
+# roots, so this boundary checks ownership and shape only.
+fm_procevent_path_normalize() {
+  local path=${1-} part
+  local -a parts normalized=()
+  [ -n "$path" ] || return 1
+  case "$path" in
+    /*) ;;
+    *) path="$(pwd -P)/$path" ;;
+  esac
+  IFS=/ read -r -a parts <<< "$path"
+  for part in "${parts[@]}"; do
+    case "$part" in
+      ''|.) ;;
+      ..) [ "${#normalized[@]}" -gt 0 ] && unset 'normalized[${#normalized[@]}-1]' ;;
+      *) normalized+=("$part") ;;
+    esac
+  done
+  printf '/%s\n' "$(IFS=/; printf '%s' "${normalized[*]}")"
+}
+
+fm_procevent_directory_owned_by_current_user() {
+  local owner
+  if [ "$(uname)" = Darwin ]; then
+    owner=$(/usr/bin/stat -f %u "$1" 2>/dev/null)
+  else
+    owner=$(stat -c %u "$1" 2>/dev/null)
+  fi
+  [ "$owner" = "$(id -u)" ]
+}
+
+# fm_procevent_state_root_resolve <state-root>
+# Print the physical directory this module operates on, or fail. The caller's
+# spelling is resolved exactly once here and every recorded claim identity uses
+# the physical root instead.
+fm_procevent_state_root_resolve() {  # <state-root>
+  local state=$1 canonical
+  canonical=$(CDPATH='' cd -P -- "$state" 2>/dev/null && pwd -P) || return 1
+  [ -d "$canonical" ] && [ ! -L "$canonical" ] || return 1
+  fm_procevent_directory_owned_by_current_user "$canonical" || return 1
+  printf '%s\n' "$canonical"
+}
+
+fm_procevent_claim_state_root_field_valid() {  # <canonical-state-root>
+  local value=$1 LC_ALL=C
+  case "$value" in *[[:cntrl:]]*) return 1 ;; esac
+  return 0
+}
+
+fm_procevent_claim_state_root_identity() {  # <state-root>
+  local state=$1 canonical device inode owner mode
+  canonical=$(fm_procevent_state_root_resolve "$state") || return 1
+  fm_procevent_claim_state_root_field_valid "$canonical" || return 1
+  device=$(fm_pr_file_device "$canonical") || return 1
+  inode=$(fm_pr_file_inode "$canonical") || return 1
+  owner=$(id -u) || return 1
+  mode=$(fm_pr_file_mode "$canonical") || return 1
+  printf '%s\t%s\t%s\t%s\t%s\n' "$canonical" "$device" "$inode" "$owner" "$mode"
+}
+
+fm_procevent_claim_owned_by_state() {  # <state-root> <legacy-home>
+  if [ -n "${FM_PROCEVENT_CLAIM_STATE_ROOT:-}" ]; then
+    fm_procevent_claim_recorded_state_root_valid || return 1
+    [ "$FM_PROCEVENT_CLAIM_STATE_ROOT" = "$1" ]
+  else
+    [ "$FM_PROCEVENT_CLAIM_HOME" = "$2" ]
+  fi
+}
+
+fm_procevent_claim_recorded_state_root_valid() {
+  local identity state_root state_device state_inode state_owner state_mode
+  state_root=${FM_PROCEVENT_CLAIM_STATE_ROOT:-}
+  [ -n "$state_root" ] || return 0
+  identity=$(fm_procevent_claim_state_root_identity "$state_root") || return 1
+  IFS=$'\t' read -r state_root state_device state_inode state_owner state_mode <<< "$identity"
+  [ "$state_root" = "$FM_PROCEVENT_CLAIM_STATE_ROOT" ] \
+    && [ "$state_device" = "$FM_PROCEVENT_CLAIM_STATE_DEVICE" ] \
+    && [ "$state_inode" = "$FM_PROCEVENT_CLAIM_STATE_INODE" ] \
+    && [ "$state_owner" = "$FM_PROCEVENT_CLAIM_STATE_OWNER" ] \
+    && [ "$state_mode" = "$FM_PROCEVENT_CLAIM_STATE_MODE" ]
+}
+
 # --- ownership --------------------------------------------------------------
 # A claim is a private file recording the home, runner pid, claim generation,
 # and process identity. Registration and every ownership transition are
@@ -94,7 +384,7 @@ fm_procevent_source_lock_release() {
 }
 
 fm_procevent_registration_publish_locked() {  # <state> <adapter> <source-id> <argv...>
-  local state=$1 adapter=$2 id=$3 reg dest tmp arg
+  local state=$1 adapter=$2 id=$3 reg dest tmp arg identity
   shift 3
   fm_procevent_adapter_valid "$adapter" || return 1
   fm_procevent_source_id_valid "$id" || return 1
@@ -112,7 +402,11 @@ fm_procevent_registration_publish_locked() {  # <state> <adapter> <source-id> <a
     printf 'argc=%s\n' "$#"
     printf 'argv:\n'
     printf '%s\n' "$@"
-  } > "$tmp" && chmod 0600 "$tmp" && mv -f -- "$tmp" "$dest"; then
+  } > "$tmp" && chmod 0600 "$tmp" \
+    && identity=$(fm_pr_file_identity "$tmp") \
+    && fm_procevent_launch_floor_reset_locked "$state" "$id" "$identity" \
+    && mv -f -- "$tmp" "$dest"; then
+    fm_procevent_launch_floor_prune_locked "$state" "$id" "$identity" 2>/dev/null || :
     return 0
   fi
   rm -f -- "$tmp"
@@ -120,7 +414,7 @@ fm_procevent_registration_publish_locked() {  # <state> <adapter> <source-id> <a
 }
 
 fm_procevent_claim_load_locked() {  # <source-id>
-  local claim home pid token identity reg_dir reg_identity terminal extra
+  local claim home pid token identity reg_dir reg_identity terminal state_root state_device state_inode state_owner state_mode extra
   claim=$(fm_procevent_claim_path "$1")
   [ -f "$claim" ] && [ ! -L "$claim" ] || return 1
   {
@@ -130,8 +424,20 @@ fm_procevent_claim_load_locked() {  # <source-id>
       && IFS= read -r identity \
       && { IFS= read -r reg_dir || reg_dir=; } \
       && { IFS= read -r reg_identity || reg_identity=; } \
-      && { IFS= read -r terminal || terminal=active; } \
-      && ! IFS= read -r extra
+      && { IFS= read -r terminal || terminal=active; }
+    if IFS= read -r state_root; then
+      IFS= read -r state_device \
+        && IFS= read -r state_inode \
+        && IFS= read -r state_owner \
+        && IFS= read -r state_mode \
+        && ! IFS= read -r extra
+    else
+      state_root=
+      state_device=
+      state_inode=
+      state_owner=
+      state_mode=
+    fi
   } < "$claim" || return 1
   [ -n "$home" ] || return 1
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
@@ -140,6 +446,16 @@ fm_procevent_claim_load_locked() {  # <source-id>
   case "$reg_dir" in ''|/*) ;; *) return 1 ;; esac
   case "$reg_identity" in ''|*:* ) ;; *) return 1 ;; esac
   case "$terminal" in active|terminal) ;; *) return 1 ;; esac
+  if [ -n "$state_root" ]; then
+    case "$state_root" in /*) ;; *) return 1 ;; esac
+    fm_procevent_claim_state_root_field_valid "$state_root" || return 1
+    case "$state_device" in ''|*[!0-9]*) return 1 ;; esac
+    case "$state_inode" in ''|*[!0-9]*) return 1 ;; esac
+    case "$state_owner" in ''|*[!0-9]*) return 1 ;; esac
+    case "$state_mode" in ''|*[!0-7]*) return 1 ;; esac
+  elif [ -n "$state_device$state_inode$state_owner$state_mode" ]; then
+    return 1
+  fi
   FM_PROCEVENT_CLAIM_HOME=$home
   FM_PROCEVENT_CLAIM_PID=$pid
   FM_PROCEVENT_CLAIM_TOKEN=$token
@@ -147,6 +463,11 @@ fm_procevent_claim_load_locked() {  # <source-id>
   FM_PROCEVENT_CLAIM_REG_DIR=$reg_dir
   FM_PROCEVENT_CLAIM_REG_IDENTITY=$reg_identity
   FM_PROCEVENT_CLAIM_TERMINAL=$terminal
+  FM_PROCEVENT_CLAIM_STATE_ROOT=$state_root
+  FM_PROCEVENT_CLAIM_STATE_DEVICE=$state_device
+  FM_PROCEVENT_CLAIM_STATE_INODE=$state_inode
+  FM_PROCEVENT_CLAIM_STATE_OWNER=$state_owner
+  FM_PROCEVENT_CLAIM_STATE_MODE=$state_mode
 }
 
 # fm_procevent_group_alive <pid>
@@ -160,16 +481,12 @@ fm_procevent_group_alive() {
 }
 
 # fm_procevent_pid_state <pid> <identity>
-# 0 live match, 1 stale, 2 uncertain, 3 orphaned group.
+# 0 live match, 1 stale, 2 uncertain, 3 ambiguous leaderless group.
 #
-# State 3 is the crash cut: the runner leader is gone, but its owned process
-# group still has members, so the old generation can still be consuming the
-# source. Treating that as stale would release ownership and let a second
-# poller start against one canonical source. Only the leader being absent
-# reaches state 3, which is also what makes signalling that group safe: if this
-# pid had been reused by an unrelated process the leader would be alive, so the
-# identity comparison below would classify it stale or uncertain and no group
-# signal would ever follow.
+# State 3 is the crash cut: the runner leader is gone, but a process group with
+# its numeric id still has members. That group may be the old generation or a
+# leaderless group created after PID/PGID reuse, so cleanup preserves the claim
+# without signalling the group or starting a replacement.
 fm_procevent_pid_state() {
   local pid=$1 expected=$2 actual
   if ! fm_pid_alive "$pid"; then
@@ -191,6 +508,10 @@ fm_procevent_claim_state_locked() {
   claim=$(fm_procevent_claim_path "$1")
   [ -e "$claim" ] || return 1
   fm_procevent_claim_load_locked "$1" || return 2
+  if [ -n "$FM_PROCEVENT_CLAIM_STATE_ROOT" ] \
+    && ! fm_procevent_claim_recorded_state_root_valid; then
+    return 2
+  fi
   if [ "$FM_PROCEVENT_CLAIM_TERMINAL" = terminal ] && [ -n "$FM_PROCEVENT_CLAIM_REG_IDENTITY" ]; then
     registration="$FM_PROCEVENT_CLAIM_REG_DIR/$1.source"
     current_identity=$(fm_pr_file_identity "$registration" 2>/dev/null || true)
@@ -199,10 +520,10 @@ fm_procevent_claim_state_locked() {
   fm_procevent_pid_state "$FM_PROCEVENT_CLAIM_PID" "$FM_PROCEVENT_CLAIM_IDENTITY"
 }
 
-# fm_procevent_claim_acquire_locked <source-id> <home> <pid> <registration>
+# fm_procevent_claim_acquire_locked <source-id> <home> <pid> <registration> <state-root>
 # 0 acquired, 1 error, 2 held by a live owner (possibly another home).
 fm_procevent_claim_acquire_locked() {
-  local id=$1 home=$2 pid=$3 registration=$4 root claim tmp identity token status claim_state old_home old_token old_reg_dir reg_dir reg_identity stage
+  local id=$1 home=$2 pid=$3 registration=$4 state=$5 root claim tmp identity token status claim_state old_home old_token old_reg_dir reg_dir reg_identity stage state_root state_device state_inode state_owner state_mode
   fm_procevent_source_id_valid "$id" || return 1
   [ -f "$registration" ] && [ ! -L "$registration" ] || return 1
   reg_dir=${registration%/*}
@@ -252,14 +573,24 @@ fm_procevent_claim_acquire_locked() {
     tmp=$(umask 077; mktemp "$root/.claim.XXXXXX") || status=1
   fi
   if [ "$status" -eq 0 ]; then
+    IFS=$'\t' read -r state_root state_device state_inode state_owner state_mode \
+      < <(fm_procevent_claim_state_root_identity "$state") || status=1
+  fi
+  if [ "$status" -eq 0 ]; then
     token=${tmp##*/}-$pid
-    printf '%s\n%s\n%s\n%s\n%s\n%s\nactive\n' \
-      "$home" "$pid" "$token" "$identity" "$reg_dir" "$reg_identity" > "$tmp" || status=1
+    printf '%s\n%s\n%s\n%s\n%s\n%s\nactive\n%s\n%s\n%s\n%s\n%s\n' \
+      "$home" "$pid" "$token" "$identity" "$reg_dir" "$reg_identity" \
+      "$state_root" "$state_device" "$state_inode" "$state_owner" "$state_mode" > "$tmp" || status=1
     [ "$status" -ne 0 ] || chmod 0600 "$tmp" || status=1
     [ "$status" -ne 0 ] || mv -f -- "$tmp" "$claim" || status=1
     if [ "$status" -eq 0 ]; then
       FM_PROCEVENT_CLAIM_TOKEN=$token
       FM_PROCEVENT_CLAIM_REG_IDENTITY=$reg_identity
+      FM_PROCEVENT_CLAIM_STATE_ROOT=$state_root
+      FM_PROCEVENT_CLAIM_STATE_DEVICE=$state_device
+      FM_PROCEVENT_CLAIM_STATE_INODE=$state_inode
+      FM_PROCEVENT_CLAIM_STATE_OWNER=$state_owner
+      FM_PROCEVENT_CLAIM_STATE_MODE=$state_mode
     else
       rm -f -- "$tmp"
     fi
@@ -277,6 +608,21 @@ fm_procevent_claim_mark_terminal_locked() {
     && [ -n "$FM_PROCEVENT_CLAIM_REG_IDENTITY" ] || return 1
   root=$(fm_procevent_claim_root)
   tmp=$(umask 077; mktemp "$root/.claim.XXXXXX") || return 1
+  if [ -n "$FM_PROCEVENT_CLAIM_STATE_ROOT" ]; then
+    if printf '%s\n%s\n%s\n%s\n%s\n%s\nterminal\n%s\n%s\n%s\n%s\n%s\n' \
+      "$FM_PROCEVENT_CLAIM_HOME" "$FM_PROCEVENT_CLAIM_PID" "$FM_PROCEVENT_CLAIM_TOKEN" \
+      "$FM_PROCEVENT_CLAIM_IDENTITY" "$FM_PROCEVENT_CLAIM_REG_DIR" \
+      "$FM_PROCEVENT_CLAIM_REG_IDENTITY" "$FM_PROCEVENT_CLAIM_STATE_ROOT" \
+      "$FM_PROCEVENT_CLAIM_STATE_DEVICE" "$FM_PROCEVENT_CLAIM_STATE_INODE" \
+      "$FM_PROCEVENT_CLAIM_STATE_OWNER" "$FM_PROCEVENT_CLAIM_STATE_MODE" > "$tmp" \
+      && chmod 0600 "$tmp" \
+      && mv -f -- "$tmp" "$claim"; then
+      return 0
+    else
+      rm -f -- "$tmp"
+      return 1
+    fi
+  fi
   if printf '%s\n%s\n%s\n%s\n%s\n%s\nterminal\n' \
     "$FM_PROCEVENT_CLAIM_HOME" "$FM_PROCEVENT_CLAIM_PID" "$FM_PROCEVENT_CLAIM_TOKEN" \
     "$FM_PROCEVENT_CLAIM_IDENTITY" "$FM_PROCEVENT_CLAIM_REG_DIR" \

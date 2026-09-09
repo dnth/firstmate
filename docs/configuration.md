@@ -331,8 +331,8 @@ The model file holds one `<provider>/<model-id>` line followed by one newline, s
 An absent, unreadable, or unparseable file means no pin, and the branch then follows main's own current model, applied explicitly on every branch build.
 A valid pin wins over main and remains unaffected by main's model changes.
 Picking "Follow main" removes the file, and the command writes a pin at mode `0600` and replaces it atomically so a failed write leaves the current choice unchanged rather than claiming persistence.
-The file's current state decides the branch model on every branch build - the first wake after a cold start, which reopens the persistent conversation recorded in `state/.branch-session` - and it overrides whatever model that reopened session recorded, so the choice survives a restart.
-That override is what keeps "Follow main" honest: a branch conversation that ran under an earlier pin still records that model, so clearing the file explicitly applies main's model rather than letting the reopened session restore the old one.
+The file's current state decides the branch model on every branch build, including the fresh conversation created for the first wake after a cold start or a main-session replacement, so the choice survives a restart.
+Within one main session, later wakes reuse that session's branch conversation; a fresh build always resolves the current pin or main model rather than inheriting model state from an older conversation.
 Only when main's own model is unknown, or this home's stored credentials cannot run it, does an unpinned build fall back to passing no override at all, which is the behavior from before this file existed; the wake is never lost over model choice, and the command says plainly when main's model could not be applied.
 A pin naming a model the registry cannot hand back, because the model is unknown or has no configured credentials, is never silently downgraded onto main's model: the branch refuses to build and the wake falls back to the captain-facing main path naming the unusable pin, exactly as any other unreachable branch does.
 A new pick does not rebuild the branch already running: mid-flight model or effort change is out of scope, so the pin takes effect at the next branch build (see [docs/omp-supervision-branch.md](omp-supervision-branch.md)).
@@ -343,7 +343,7 @@ The effort step runs after the model step because the effective branch model dec
 An absent, unreadable, or unrecognized file means no effort pin, and the branch then follows main's own current effort, applied explicitly on every branch build; a value OMP would not recognize is treated as no pin rather than passed to the clamp.
 A valid pin wins over main and remains unaffected by main's effort changes.
 Picking "Follow main" removes the file, and the command writes an effort pin at mode `0600` and replaces it atomically, exactly as it writes a model pin.
-The effort file's current state decides the branch effort on every branch build, on the same create-and-reopen contract as the model pin and for the same reason: a reopened branch conversation records the effort it last ran under, so only an explicit override keeps "Follow main" honest.
+The effort file's current state decides the branch effort on every branch build, using the same fresh-conversation and current-pin contract as the model setting.
 Only when main's own effort cannot be read either does an unpinned build fall back to passing no effort override at all, which is the behavior from before this file existed.
 
 Cancelling the model picker cancels the whole command and changes neither choice.
@@ -682,10 +682,15 @@ Claims live under `$XDG_STATE_HOME/firstmate/procevent-claims` (override with `F
 Each claim binds its home and runner PID to a process identity, unique claim generation, and exact registration-file generation.
 Registration, acquisition, replacement, retirement, and generation-bound release are serialized at one machine-wide boundary per source.
 A live identity-matched owner is never displaced, and release removes only the exact generation the caller acquired.
-Retirement and orphan reconciliation signal a runner process group only while its recorded process identity still matches, or when the recorded leader is gone and only its own owned group survives.
-A runner leads its own process group, so a claim counts as reclaimable only when that whole generation is gone: a crashed leader whose group still has members is not stale, and reconcile stops that surviving group and releases its generation before starting any replacement.
+Retirement and orphan reconciliation signal a runner process group only while its recorded leader is alive, identity-matched, and still leading that group.
+A runner leads its own process group, so a claim counts as reclaimable only when that whole generation is gone: a crashed leader whose numeric group still has members is ambiguous under PID/PGID reuse, and reconcile preserves that claim as uncertain without signalling the group or starting a replacement.
 If identity cannot be established for a live PID, or a surviving owned group cannot be proved stopped, the operation preserves the registration and claim for safe retry rather than adding a second owner.
 A live PID whose identity no longer matches is a reused PID, so it is treated as stale and its process group is never signalled.
+
+A detached runner can also outlive its whole home, so every claimed runner starts a detached owner guard in a separate process group.
+The claim records the physical state root - canonical path, device, inode, owner, and mode - and the guard re-reads that root's `.owner-lease` marker, which owner-presence operations (register, handled, reconcile, sweep, an attached `start`) refresh.
+The guard re-checks every `FM_PROCEVENT_OWNER_CHECK_SECONDS` (default 15); after two consecutive checks that cannot prove both the recorded root identity and a lease fresher than `FM_PROCEVENT_OWNER_LEASE_SECONDS` (default 600), it signals the runner's whole process group, while a leaderless or identity-mismatched runner ends the guard without signalling.
+Repeated runner launches are bounded by `FM_PROCEVENT_LAUNCH_FLOOR_SECONDS` (default 1) of pacing per registration generation, so a crash-looping source cannot relaunch faster than that floor.
 
 Supported secondmate retirement preflights each target home's bounded `sweep-home` command before destructive teardown, snapshots its registrations outside the target, then runs the sweep at that home's final deletion or return boundary.
 If deletion or return fails, teardown restores those registrations and reconciles them before returning the refusal.
@@ -747,6 +752,9 @@ FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event result
 FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; default $XDG_STATE_HOME/firstmate/procevent-claims
+FM_PROCEVENT_OWNER_LEASE_SECONDS=600    # seconds a detached runner may run without owner-presence activity in its home
+FM_PROCEVENT_OWNER_CHECK_SECONDS=15     # seconds between a runner owner guard's lease re-reads
+FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1     # minimum seconds between runner launches for one registration generation
 FM_WHEN_OUTPUT_TAIL_BYTES=8192          # bound on the command-output tail inside one condition->action outcome document
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
@@ -792,7 +800,7 @@ FM_WATCH_REARM_RETRY_LIMIT=5   # Pi/OpenCode adapter launch-failure retries befo
 FM_WATCH_WAKE_CONSUME_TIMEOUT_MS=15000   # milliseconds the shared Pi/OMP watcher core waits for a delivered wake to be acknowledged by a new turn before treating a wake queued into an already-running turn as consumed and continuing the successor chain
 FM_WATCH_CYCLE_LOG_MAX_BYTES=262144   # size cap for the arm-owned watcher lifecycle ledger
 FM_WATCH_CYCLE_LOG_KEEP_LINES=1000   # newest complete lifecycle rows considered when the ledger is capped
-FM_WATCHER_STALE_GRACE=300   # defaults to FM_GUARD_GRACE; seconds a live watcher lock may have a stale beacon before re-arm errors
+FM_WATCHER_STALE_GRACE=300   # defaults to FM_GUARD_GRACE if set, else the poll-derived grace (docs/turnend-guard.md "Guard grace and the poll cadence"); seconds a live watcher lock may have a stale beacon before re-arm errors
 FM_SIGNAL_GRACE=30      # seconds to coalesce nearby status and turn-end signals into one wake
 FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'   # captain-relevant status regex; nonterminal progress verbs remain excluded even when their prose matches
 FM_CLASSIFY_PAUSED_VERB=paused     # leading status verb for a declared external wait; excluded from FM_CAPTAIN_RE and distinct from blocked
@@ -800,6 +808,7 @@ FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working stal
 FM_REMOTE_STALE_RECHECK_SECS=60    # seconds between inconclusive remote stale-owner probes during away-mode recovery; invalid values use 60
 FM_BUSY_TURN_MAX_SECS=3600         # maximum age of a busy pane's live-generation state/<id>.turn-ended.<spawn_gen> marker, or its state/<id>.meta spawn record before any turn completes, before the same wedge escalation used for a provably-working non-busy stale takes over; inspection-only, never an automatic interrupt or restart; a declared external wait or verified captain-held transfer takes the FM_PAUSE_RESURFACE_SECS recheck below instead
 FM_PAUSE_RESURFACE_SECS=2700       # seconds between bounded rechecks of a declared external wait or verified captain-held transfer, including a live idle pane after its first inconclusive stale wake and a live busy pane past FM_BUSY_TURN_MAX_SECS; the away-mode daemon uses the same setting, ageing its window against the crew's own latest status line rather than pane busy state
+FM_SECONDMATE_WAKE_STALL_SECS=180  # minimum interval with no change of the oldest actionable foreign wake-queue row (it advances as the mate drains, and a queue reprovisioned under the same task id starts a fresh interval at whatever sequence it restarts) before an endpoint-recorded local secondmate produces one durable parent wake-loop-stall notification for that no-progress episode; a mate that is provably inside an active turn (an exact busy verdict, bounded by the same FM_BUSY_TURN_MAX_SECS above) never escalates whatever this interval says, declared external-wait pause rows are excluded, and zero or invalid values use 180
 FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalations on the same unchanged pane before demand-deep-inspection is added
 FM_WORKTREE_WRITE_PRUNE='.git node_modules .venv venv __pycache__ .mypy_cache .pytest_cache .ruff_cache .tox target dist build .next .cache vendor'   # directory names the wedge detector's task-worktree write probe skips; the default keeps .git out so a supervisor's own read-only git command can never look like crew progress; set it to the empty string to prune nothing, which widens the probe to the whole depth-bounded tree rather than disabling it
 FM_WORKTREE_WRITE_MAXDEPTH=6       # depth that same probe walks below the recorded worktree; it runs only at the moment a wedge escalation would otherwise fire, never on every poll; no probe knob applies to a secondmate, whose recorded worktree is a provisioned home the probe skips entirely
