@@ -164,22 +164,22 @@ assert.equal(userSent.length, 1, "a downgraded triggerTurn must re-drive the ins
 assert.equal(userSent[0], line);
 assert.equal(existsSync(`${requestDir}/downgraded.pending.delivered`), true);
 
-// A turn_start settles a pending proof without any re-drive.
 writeFileSync(`${requestDir}/proved.pending`, line);
 process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
 assert.equal(sent.length, 2);
 assert.equal(existsSync(`${requestDir}/proved.pending.awaiting-turn`), true);
 handlers.get("turn_start")();
+assert.equal(existsSync(`${requestDir}/proved.pending.awaiting-turn`), true);
+await sleep(500);
 assert.equal(existsSync(`${requestDir}/proved.pending.delivered`), true);
-assert.equal(userSent.length, 1, "a proven turn must not trigger the re-drive");
+assert.equal(userSent.length, 2, "an uncorrelated turn must trigger the re-drive");
 
 // An open turn at send time is real delivery: the steer joins it.
 writeFileSync(`${requestDir}/steered.pending`, line);
 process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
 assert.equal(sent.length, 3);
 assert.equal(existsSync(`${requestDir}/steered.pending.delivered`), true);
-assert.equal(userSent.length, 1);
-handlers.get("turn_end")();
+assert.equal(userSent.length, 2);
 
 // A failed re-drive reports failure, not silent stranding.
 const failingApi = {

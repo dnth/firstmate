@@ -167,7 +167,7 @@ export function installTaskInboxDoorbell(
 	// recovery channel the prior accept-only semantics stand.
 	const recoverUnprovenTurn = (awaitingPath: string): void => {
 		awaitingTurns.delete(awaitingPath);
-		if (turnOpen || !canReDrive) {
+		if (!canReDrive) {
 			settleAwaiting(awaitingPath, "delivered");
 			return;
 		}
