@@ -139,10 +139,39 @@ const branchCacheKey = `fm-branch-${createHash("sha256").update(fmHome).digest("
 
 const MIRROR_MESSAGE_CAP = 4000;
 const MERGE_NOTE_BOAT = "⛵";
+// One provider failure falls back immediately but leaves room for a transient
+// outage to recover on the next wake. A second consecutive provider failure
+// latches the branch off. While latched, main keeps every wake except one
+// branch recovery probe after each exponentially backed-off cooldown.
+const PROVIDER_ERROR_LATCH_THRESHOLD = 2;
+const PROVIDER_REPROBE_BASE_MS = 5 * 60 * 1000;
+const PROVIDER_REPROBE_MAX_MS = 60 * 60 * 1000;
 type MirrorItem = { tag: "captain" | "main"; text: string };
 type MirrorCursor = { file: string; index: number };
 type Verdict = "routine" | "captain";
 type LockOwnership = "owned" | "other" | "missing";
+type ProviderRecovery = {
+  cooldownMs: number;
+  retryNotBefore: number;
+  probeInFlight: boolean;
+};
+
+// A settled branch prompt whose last new assistant message carries stopReason
+// "error" is a provider failure the throw path never sees: OMP records the
+// error on the message and settles the turn instead of rejecting prompt().
+// Scan only the entries appended since the prompt began.
+function settledPromptProviderError(sessionManager: ReadonlyEntries, entryOffset: number): string | null {
+  const entries = sessionManager.getEntries();
+  for (let index = entries.length - 1; index >= entryOffset; index -= 1) {
+    const entry = entries[index];
+    if (entry.type !== "message") continue;
+    const message = (entry as { message?: { role?: string; stopReason?: string; errorMessage?: string } }).message;
+    if (message?.role !== "assistant") continue;
+    if (message.stopReason !== "error") return null;
+    return message.errorMessage?.trim() || "assistant settled with stopReason error";
+  }
+  return null;
+}
 
 const scriptEnv = {
   ...process.env,
@@ -409,8 +438,14 @@ function collectMainDialog(sessionManager: ReadonlyEntries, collection: MirrorCo
 }
 
 export default function (pi: ExtensionAPI) {
-  let branch: AgentSession | null = null;
+  let branch: { session: AgentSession; sessionManager: SessionManager } | null = null;
   let branchBroken = "";
+  let consecutiveProviderErrors = 0;
+  let providerRecovery: ProviderRecovery | null = null;
+  // A revision advances only after the report tool has appended and merged
+  // successfully, so a settled prompt can prove it produced a durable outcome
+  // for the wake rows it claimed.
+  let durableReportRevision = 0;
   // During a signal or stale prompt, reports are restricted to the tasks named
   // by that prompt's granted rows. Heartbeat reviews remain unscoped.
   let wakeTaskScope: { rows: string[]; tasks: Set<string> } | null = null;
@@ -656,6 +691,55 @@ export default function (pi: ExtensionAPI) {
     return true;
   }
 
+  // Branch health notes ride the same merge message the report tool uses, but
+  // carry no outcome seq - they describe the branch's own operating state.
+  function deliverBranchHealthNote(text: string): void {
+    const message = { customType: "fm-branch-merge", content: `${MERGE_NOTE_BOAT} ${text}`, display: true };
+    if (mainStreaming) {
+      pi.sendMessage(message, { deliverAs: "nextTurn" });
+    } else {
+      pi.sendMessage(message, {});
+    }
+  }
+
+  function recordSettledProviderError(detail: string): void {
+    consecutiveProviderErrors += 1;
+    if (consecutiveProviderErrors < PROVIDER_ERROR_LATCH_THRESHOLD && !providerRecovery) return;
+    const previousCooldownMs = providerRecovery?.cooldownMs;
+    const firstLatch = previousCooldownMs === undefined;
+    const cooldownMs = firstLatch
+      ? PROVIDER_REPROBE_BASE_MS
+      : Math.min(PROVIDER_REPROBE_MAX_MS, previousCooldownMs * 2);
+    branchBroken = detail;
+    providerRecovery = {
+      cooldownMs,
+      retryNotBefore: Date.now() + cooldownMs,
+      probeInFlight: false,
+    };
+    if (firstLatch) {
+      deliverBranchHealthNote(
+        "Supervision branch paused after repeated provider errors; main will handle wakes while it cools down.",
+      );
+    }
+  }
+
+  function recordDurableBranchReport(reportGeneration: number): void {
+    if (reportGeneration !== generation) return;
+    consecutiveProviderErrors = 0;
+    if (!providerRecovery) return;
+    branchBroken = "";
+    providerRecovery = null;
+    deliverBranchHealthNote("Supervision branch recovered after a successful cooldown probe.");
+  }
+
+  function finishProviderProbe(probeGeneration: number): void {
+    if (probeGeneration !== generation || !providerRecovery) return;
+    providerRecovery.probeInFlight = false;
+    if (branchBroken && providerRecovery.retryNotBefore <= Date.now()) {
+      providerRecovery.retryNotBefore = Date.now() + providerRecovery.cooldownMs;
+    }
+  }
+
   function createReportTool(toolGeneration: number): ToolDefinition {
     return {
       name: "fm_branch_report",
@@ -727,6 +811,7 @@ export default function (pi: ExtensionAPI) {
               isError: true,
             };
           }
+          durableReportRevision += 1;
           return {
             content: [{ type: "text", text: `recorded seq ${appended.stdout} and merged [${verdict}] into main` }],
             details: undefined,
@@ -751,7 +836,9 @@ export default function (pi: ExtensionAPI) {
     });
   };
 
-  async function createBranch(branchGeneration: number): Promise<AgentSession> {
+  async function createBranch(
+    branchGeneration: number,
+  ): Promise<{ session: AgentSession; sessionManager: SessionManager }> {
     // Resolved first, before any session file or prompt work: a model pin OMP
     // cannot honor must fail before this build leaves anything behind. Every
     // branch build goes through here on the first wake after a cold start, so
@@ -851,18 +938,21 @@ ${context.command}
     } catch {
       // Pointer write failure only costs cross-restart session reuse.
     }
-    return created.session;
+    return { session: created.session, sessionManager };
   }
 
-  async function ensureBranch(expectedGeneration: number): Promise<AgentSession> {
+  async function ensureBranch(
+    expectedGeneration: number,
+    recoveryProbe = false,
+  ): Promise<{ session: AgentSession; sessionManager: SessionManager }> {
     if (!(await actingAsOwner(expectedGeneration))) throw new Error("supervision session was replaced or lost lock ownership");
     if (branch) return branch;
-    if (branchBroken) throw new Error(branchBroken);
+    if (branchBroken && !(recoveryProbe && providerRecovery?.probeInFlight)) throw new Error(branchBroken);
     try {
       const created = await createBranch(expectedGeneration);
       if (!(await actingAsOwner(expectedGeneration))) {
         try {
-          await created.dispose();
+          await created.session.dispose();
         } catch {}
         throw new Error("supervision session was replaced or lost lock ownership");
       }
@@ -895,7 +985,7 @@ ${context.command}
     }
   }
 
-  function enqueueWake(message: string, acceptedGeneration: number): Promise<void> {
+  function enqueueWake(message: string, acceptedGeneration: number, recoveryProbe = false): Promise<void> {
     const delivery = branchChain
       .then(async () => {
         if (shuttingDown || acceptedGeneration !== generation) {
@@ -904,7 +994,7 @@ ${context.command}
         if (!(await enqueueDelivery(() => actingAsOwner(acceptedGeneration)))) {
           throw new Error("supervision session no longer owns the fleet lock");
         }
-        const session = await ensureBranch(acceptedGeneration);
+        const { session, sessionManager } = await ensureBranch(acceptedGeneration, recoveryProbe);
         await flushMirror(session, acceptedGeneration);
         if (!(await enqueueDelivery(() => actingAsOwner(acceptedGeneration)))) {
           throw new Error("supervision session no longer owns the fleet lock");
@@ -927,6 +1017,8 @@ ${context.command}
         if (grant !== "published") throw new Error("could not record the branch's eligible row snapshot");
         // A row can still arrive between this re-check and the model starting
         // the drain; that residual is accepted by the confused-agent-grade boundary.
+        const reportRevisionBeforePrompt = durableReportRevision;
+        const entryOffset = sessionManager.getEntries().length;
         wakeTaskScope = heartbeat ? null : { rows: [...scope.eligibleSeqs], tasks: new Set(scope.eligibleTasks) };
         try {
           await session.prompt(
@@ -935,6 +1027,18 @@ ${context.command}
         } finally {
           wakeTaskScope = null;
         }
+        const providerError = settledPromptProviderError(sessionManager, entryOffset);
+        if (providerError) {
+          const detail = `supervision branch provider failed after construction: ${providerError}`;
+          if (acceptedGeneration === generation) {
+            recordSettledProviderError(detail);
+          }
+          throw new Error(detail);
+        }
+        if (durableReportRevision <= reportRevisionBeforePrompt) {
+          throw new Error("supervision branch prompt settled but produced no durable outcome for its claimed wake rows");
+        }
+        recordDurableBranchReport(acceptedGeneration);
         if (!(await releaseEligibleRowsSnapshot(state, wakeGrantScript, String(acceptedGeneration)))) {
           throw new Error("could not release the branch's settled wake-row grant");
         }
@@ -942,6 +1046,9 @@ ${context.command}
       .catch(async (error: unknown) => {
         await releaseEligibleRowsSnapshot(state, wakeGrantScript, String(acceptedGeneration));
         throw error;
+      })
+      .finally(() => {
+        if (recoveryProbe) finishProviderProbe(acceptedGeneration);
       });
     branchChain = delivery.catch(() => {});
     return delivery;
@@ -950,7 +1057,7 @@ ${context.command}
   function enqueueMirrorFlush(): void {
     if (!branch || pendingMirror.length === 0) return;
     const flushGeneration = generation;
-    const flushSession = branch;
+    const flushSession = branch.session;
     branchChain = branchChain
       .then(async () => {
         if (!(await actingAsOwner(flushGeneration))) return;
@@ -971,8 +1078,15 @@ ${context.command}
     if (!offerEligible(offer)) return;
     if (!generationOwnsLockSync(generation)) return; // cold start pre-lock, secondary session, or shutdown
     if (afkActive()) return; // the away daemon owns supervision while afk
-    if (branchBroken) return; // fail back to today's wake-to-main path
-    offer.accept(enqueueWake(offer.message, generation));
+    const recoveryProbe = Boolean(
+      branchBroken &&
+        providerRecovery &&
+        !providerRecovery.probeInFlight &&
+        Date.now() >= providerRecovery.retryNotBefore,
+    );
+    if (branchBroken && !recoveryProbe) return; // main owns every wake inside the cooldown window
+    if (recoveryProbe && providerRecovery) providerRecovery.probeInFlight = true;
+    offer.accept(enqueueWake(offer.message, generation, recoveryProbe));
   });
 
   pi.on?.("agent_start", () => {
@@ -1010,6 +1124,8 @@ ${context.command}
     rememberMainContext(ctx);
     shuttingDown = false;
     branchBroken = "";
+    consecutiveProviderErrors = 0;
+    providerRecovery = null;
     generation += 1;
     const startedGeneration = generation;
     await enqueueDelivery(() => actingAsOwner(startedGeneration));

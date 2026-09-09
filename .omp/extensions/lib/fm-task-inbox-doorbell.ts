@@ -34,7 +34,10 @@ type OmpDoorbellApi = {
 	) => void | Promise<void>;
 	// Turn events prove a triggered turn actually ran. Optional so installs on
 	// runtimes without an event surface keep the prior accept-only semantics.
-	on?: (event: string, handler: () => void) => void;
+	// Method syntax keeps the parameter bivariant: the real extension API types
+	// `on` as per-event-name overloads, which a property signature could not
+	// accept.
+	on?(event: string, handler: () => void): void;
 };
 
 const DEFAULT_TURN_GRACE_MS = 8000;
@@ -59,7 +62,12 @@ function configuredOptions(options: TaskInboxDoorbellOptions): Required<TaskInbo
 	const inboxDir = options.inboxDir ?? process.env.FM_OMP_TASK_INBOX_DIR ?? "";
 	const readyMarker = options.readyMarker ?? process.env.FM_OMP_TASK_DOORBELL_READY ?? "";
 	if (!inboxDir.startsWith("/") || !readyMarker.startsWith("/")) return undefined;
-	return { inboxDir, readyMarker };
+	const configuredGrace = options.turnGraceMs
+		?? Number(process.env.FM_OMP_DOORBELL_TURN_GRACE_MS ?? DEFAULT_TURN_GRACE_MS);
+	const turnGraceMs = Number.isFinite(configuredGrace)
+		? Math.min(Math.max(Math.trunc(configuredGrace), MIN_TURN_GRACE_MS), MAX_TURN_GRACE_MS)
+		: DEFAULT_TURN_GRACE_MS;
+	return { inboxDir, readyMarker, turnGraceMs };
 }
 
 function publishReadyMarker(marker: string): void {
@@ -132,11 +140,7 @@ export function installTaskInboxDoorbell(
 	}
 
 	const requestDir = `${configured.readyMarker}.requests`;
-	const configuredGrace = options.turnGraceMs
-		?? Number(process.env.FM_OMP_DOORBELL_TURN_GRACE_MS ?? DEFAULT_TURN_GRACE_MS);
-	const turnGraceMs = Number.isFinite(configuredGrace)
-		? Math.min(Math.max(Math.trunc(configuredGrace), MIN_TURN_GRACE_MS), MAX_TURN_GRACE_MS)
-		: DEFAULT_TURN_GRACE_MS;
+	const turnGraceMs = configured.turnGraceMs;
 	const canObserveTurns = typeof omp.on === "function";
 	const canReDrive = typeof omp.sendUserMessage === "function";
 	let active = false;
