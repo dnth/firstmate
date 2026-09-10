@@ -4316,7 +4316,7 @@ if [ "$HARNESS" = omp ]; then
     OMP_MESSAGE='"$(printf '"'"'orchestrate\n\nRead the brief at %s and follow it exactly.'"'"' __BRIEF__ | __OPINPUT__ encode launch-brief)"'
   else
     # shellcheck disable=SC2016
-    OMP_MESSAGE='"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+    OMP_MESSAGE='"$(__OPINPUT__ encode launch-brief < __BRIEF__ | sed -E '\''s/(^|[^[:alnum:]_])orchestrate([^[:alnum:]_]|$)/\1<!-- orchestrate -->\2/g'\'')"'
   fi
   LAUNCH=${LAUNCH//__OMPMESSAGE__/$OMP_MESSAGE}
 fi
