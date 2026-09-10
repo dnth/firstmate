@@ -4,7 +4,7 @@
 # Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--accepted-local-base <full-commit-sha>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>] [--allow-project-omp-extensions]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>] [--allow-project-omp-extensions]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>] [--allow-project-omp-extensions] --secondmate
-#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
+#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>] [--mode <no-mistakes|direct-PR|local-only>] [--yolo <on|off>] [--prewalk-into <model-spec>] [--allow-project-omp-extensions]
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -17,6 +17,10 @@
 #   loud one-line deviation notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
+#   A ship relaunch recovers --mode and --yolo from the recorded task metadata
+#   when the caller does not repeat them, and a non-secondmate OMP relaunch also
+#   recovers --prewalk-into and --allow-project-omp-extensions so the replacement
+#   worker keeps the prior launch intent.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
@@ -422,6 +426,29 @@ if [ "$RELAUNCH" -eq 1 ]; then
     if [ "$EFFORT_SET" -eq 0 ]; then
       EFFORT=$(fm_meta_get "$RELAUNCH_META" effort)
       case "$EFFORT" in default|-) EFFORT= ;; esac
+    fi
+    if [ "$KIND" = ship ]; then
+      if [ "$MODE_SET" -eq 0 ]; then
+        MODE=$(fm_meta_get "$RELAUNCH_META" mode)
+        [ -n "$MODE" ] || { echo "error: relaunch metadata has no recorded mode for $RELAUNCH_ID" >&2; exit 1; }
+        MODE_SET=1
+      fi
+      if [ "$YOLO_SET" -eq 0 ]; then
+        YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
+        [ -n "$YOLO" ] || { echo "error: relaunch metadata has no recorded yolo for $RELAUNCH_ID" >&2; exit 1; }
+        YOLO_SET=1
+      fi
+    fi
+    if [ "$PREWALK_INTO_SET" -eq 0 ]; then
+      PRIOR_PREWALK_INTO=$(fm_meta_get "$RELAUNCH_META" prewalk_into)
+      if [ -n "$PRIOR_PREWALK_INTO" ]; then
+        PREWALK_INTO=$PRIOR_PREWALK_INTO
+        PREWALK_INTO_SET=1
+      fi
+    fi
+    if [ "$ALLOW_PROJECT_OMP_EXTENSIONS" -eq 0 ]; then
+      PRIOR_ALLOW_PROJECT_OMP=$(fm_meta_get "$RELAUNCH_META" allow_project_omp_extensions)
+      [ "$PRIOR_ALLOW_PROJECT_OMP" = 1 ] && ALLOW_PROJECT_OMP_EXTENSIONS=1
     fi
   fi
 fi
@@ -2097,15 +2124,60 @@ if [ "$HARNESS" = omp ]; then
       fi
     done
   else
-    for artifact in \
-      "$STATE/$ID.meta" "$STATE/$ID.status" "$STATE/$ID.omp-ext.ts" \
-      "$STATE/$ID.omp-ready" "$STATE/$ID.omp-started" "$STATE/$ID.omp-doorbell-ready" \
-      "$STATE/$ID.omp-doorbell-ready.requests" "/tmp/fm-$ID"; do
-      if [ -e "$artifact" ] || [ -L "$artifact" ]; then
-        echo "error: refusing OMP spawn because task $ID already has artifacts at $artifact; reconcile or clean the prior task before retrying" >&2
+    if [ "$RELAUNCH" -eq 1 ]; then
+      OMP_PRIOR_META=$RELAUNCH_META
+      if [ -L "$OMP_PRIOR_META" ]; then
+        echo "error: refusing OMP relaunch through symlinked metadata: $OMP_PRIOR_META" >&2
         exit 1
       fi
-    done
+      if [ -f "$OMP_PRIOR_META" ]; then
+        if ! fm_backend_validate_task_endpoint "$OMP_PRIOR_META" "$ID" >/dev/null 2>&1; then
+          echo "error: OMP relaunch $ID recorded endpoint identity is invalid or does not match this task; refusing to recover" >&2
+          exit 1
+        fi
+        OMP_PRIOR_BACKEND=$FM_BACKEND_VALIDATED_BACKEND
+        OMP_PRIOR_TARGET=$FM_BACKEND_VALIDATED_TARGET
+        OMP_PRIOR_WORKTREE=$(fm_meta_get "$OMP_PRIOR_META" worktree)
+        if [ -z "$OMP_PRIOR_WORKTREE" ] || [ ! -d "$OMP_PRIOR_WORKTREE" ]; then
+          echo "error: OMP relaunch $ID recorded worktree is missing or unreadable; refusing to recover" >&2
+          exit 1
+        fi
+        OMP_PRIOR_STATE=$(fm_backend_agent_state "$OMP_PRIOR_BACKEND" "$OMP_PRIOR_TARGET" "$OMP_PRIOR_META" 2>/dev/null) \
+          || OMP_PRIOR_STATE=unreadable
+        case "$OMP_PRIOR_STATE" in
+          missing|dead) ;;
+          alive)
+            echo "error: OMP relaunch $ID still has a live agent at $OMP_PRIOR_TARGET; refusing duplicate launch" >&2
+            exit 1
+            ;;
+          ambiguous)
+            echo "error: OMP relaunch $ID has an ambiguous agent process at $OMP_PRIOR_TARGET; refusing duplicate launch" >&2
+            exit 1
+            ;;
+          unverified)
+            echo "error: OMP relaunch $ID backend $OMP_PRIOR_BACKEND cannot prove its endpoint stopped; refusing duplicate launch" >&2
+            exit 1
+            ;;
+          unreadable|*)
+            echo "error: OMP relaunch $ID endpoint state is unreadable at $OMP_PRIOR_TARGET; refusing duplicate launch" >&2
+            exit 1
+            ;;
+        esac
+      else
+        echo "error: OMP relaunch $ID has no metadata to recover" >&2
+        exit 1
+      fi
+    else
+      for artifact in \
+        "$STATE/$ID.meta" "$STATE/$ID.status" "$STATE/$ID.omp-ext.ts" \
+        "$STATE/$ID.omp-ready" "$STATE/$ID.omp-started" "$STATE/$ID.omp-doorbell-ready" \
+        "$STATE/$ID.omp-doorbell-ready.requests" "/tmp/fm-$ID"; do
+        if [ -e "$artifact" ] || [ -L "$artifact" ]; then
+          echo "error: refusing OMP spawn because task $ID already has artifacts at $artifact; reconcile or clean the prior task before retrying" >&2
+          exit 1
+        fi
+      done
+    fi
   fi
 fi
 
