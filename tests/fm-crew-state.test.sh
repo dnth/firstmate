@@ -1456,7 +1456,7 @@ test_non_pipeline_owned_unresolvable_head_not_attributed() {
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-f10d.meta" "window=fm:fm-feat-f10d" "worktree=$d/wt" "kind=ship" "harness=claude"
   printf 'working: implementing\n' > "$d/state/feat-f10d.status"
-  FM_FAKE_AXI_STATUS="$(run_running_pipeline_owned fm/feat-f10d f0f0f0f0 synced)"
+  FM_FAKE_AXI_STATUS="$(run_running_pipeline_owned fm/feat-f10d f0f0f0f0 synchronized)"
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" feat-f10d

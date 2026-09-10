@@ -206,10 +206,7 @@ fm_nm_head_resolvable() {  # <worktree> <head>
 # is absent (no run on the current branch, another branch's run, or a CLI
 # without branch sync).
 fm_nm_run_is_pipeline_owned_active() {  # <toon-output>
-  case "$(fm_nm_branch_sync_state "$1")" in
-    pipeline_owned|synchronized) ;;
-    *) return 1 ;;
-  esac
+  [ "$(fm_nm_branch_sync_state "$1")" = pipeline_owned ] || return 1
   fm_nm_run_is_active "$1"
 }
 
