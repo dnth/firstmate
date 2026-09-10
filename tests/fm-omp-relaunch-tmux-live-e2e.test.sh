@@ -19,7 +19,7 @@ HOME_DIR="$LAB/home"
 PROJECT="$LAB/project"
 ORIGIN="$LAB/origin.git"
 WRAPPER_BIN="$LAB/bin"
-WORKER_ID=omp-relaunch-live
+WORKER_ID="omp-relaunch-live-${LAB##*/}"
 WORKER_WT="$LAB/worker-wt"
 
 wait_file() {
