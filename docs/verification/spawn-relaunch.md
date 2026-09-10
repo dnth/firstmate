@@ -1,4 +1,4 @@
-# Ship relaunch worktree recovery
+# Ship and OMP relaunch recovery
 
 Verified 2026-09-10 against the local Firstmate checkout and ShellCheck 0.11.0.
 
