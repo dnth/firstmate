@@ -5,8 +5,9 @@
 #        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>] [--allow-project-omp-extensions]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness] [--model <name>] [--effort <level>] [--prewalk-into <model-spec>] [--backend <name>] [--allow-project-omp-extensions] --secondmate
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>] [--mode <no-mistakes|direct-PR|local-only>] [--yolo <on|off>] [--prewalk-into <model-spec>] [--allow-project-omp-extensions]
-#   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
-#   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
+#   --mode and --yolo are this task's delivery contract, REQUIRED for every fresh
+#   ship spawn and refused on --scout and --secondmate spawns. A ship relaunch may
+#   recover them from recorded metadata when omitted. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
 #   standing posture as context, not as this task's answer, so a spawn never looks
 #   the mode up. A ship spawn additionally reads the brief's recorded
