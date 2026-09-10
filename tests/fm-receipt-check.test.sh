@@ -1369,7 +1369,7 @@ test_active_descendant_bind_via_axi_sync_fallback() {
   git -C "$project" commit -q -m 'no-mistakes: apply CI fixes'
   current_head=$(git -C "$project" rev-parse HEAD)
   status=$(nm_status RUN-axi-sync-fallback "$current_head" '')
-  sync=$(nm_sync_status RUN-axi-sync-fallback "fm/$id" "$initial_head" "$current_head" synchronized)
+  sync=$(nm_sync_status RUN-axi-sync-fallback "fm/$id" "$initial_head" "$current_head" pipeline_owned)
   FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_SYNC="$sync" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --bind-run RUN-axi-sync-fallback --generation "$generation" >/dev/null \
     || fail "active descendant was not bound via axi sync fallback"
@@ -1389,7 +1389,7 @@ test_unowned_active_descendant_bind_rejected() {
   git -C "$project" add src/app.sh
   git -C "$project" commit -q -m 'unproven'
   current_head=$(git -C "$project" rev-parse HEAD)
-  status=$(nm_pipeline_status RUN-unowned-descendant "fm/$id" "$current_head" ci '' manual)
+  status=$(nm_pipeline_status RUN-unowned-descendant "fm/$id" "$current_head" ci '' synchronized)
   FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --bind-run RUN-unowned-descendant --generation "$generation" >/dev/null 2>&1
   rc=$?
