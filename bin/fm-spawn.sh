@@ -4309,14 +4309,13 @@ LAUNCH=${LAUNCH//__PREWALKFLAG__/$PREWALKFLAG}
 if [ "$HARNESS" = omp ]; then
   # shellcheck disable=SC2016
   # Placeholders __BRIEF__ and __OPINPUT__ are substituted after shell-quoting;
-  # single quotes here keep the pane-side command literal. The encoded brief is
-  # passed as a separate positional argument so the full original task text is
-  # delivered unchanged. Opt-in adds the standalone `orchestrate` keyword as its
-  # own message before the brief.
+  # single quotes here keep the pane-side command literal. The launch message is
+  # a single task-bearing instruction to read the original brief before working;
+  # opted-in launches prepend the standalone `orchestrate` keyword.
   if [ "$ORCHESTRATE_BRIEF" -eq 1 ]; then
-    OMP_MESSAGE='"orchestrate" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+    OMP_MESSAGE='"$(printf '"'"'orchestrate\n\nRead the brief at %s and follow it exactly.'"'"' __BRIEF__ | __OPINPUT__ encode launch-brief)"'
   else
-    OMP_MESSAGE='"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+    OMP_MESSAGE='"$(printf '"'"'Read the brief at %s and follow it exactly.'"'"' __BRIEF__ | __OPINPUT__ encode launch-brief)"'
   fi
   LAUNCH=${LAUNCH//__OMPMESSAGE__/$OMP_MESSAGE}
 fi
