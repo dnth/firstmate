@@ -316,6 +316,35 @@ test_omp_relaunch_refuses_symlinked_request_directory() {
   pass "OMP relaunch refuses symlinked request directories"
 }
 
+test_omp_relaunch_refuses_symlinked_request_entry() {
+  local rec id out status target
+  id=omp-relaunch-request-entry-z9
+  rec=$(make_relaunch_case relaunch-request-entry "$id")
+  read_relaunch_record "$rec"
+  write_omp_meta "$HOME_DIR/state/$id.meta" "$id" "$WT_DIR" "$PROJ_DIR" "$FAKEBIN_DIR"
+  create_prior_artifacts "$HOME_DIR/state" "$id" "/tmp/fm-$id"
+  target="$HOME_DIR/request-content"
+  printf 'unsafe\n' > "$target"
+  : > "$HOME_DIR/state/$id.omp-doorbell-ready.requests/request.001.pending"
+  rm -f "$HOME_DIR/state/$id.omp-doorbell-ready.requests/request.001.pending"
+  ln -s "$target" "$HOME_DIR/state/$id.omp-doorbell-ready.requests/request.001.pending"
+
+  set +e
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' \
+    FM_FAKE_PANE_PATH="$WT_DIR" \
+    PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" --relaunch 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "symlinked OMP request entry relaunch unexpectedly succeeded"
+  assert_contains "$out" "unsafe request entry" \
+    "symlinked OMP request entry relaunch did not refuse the unsafe path"
+  pass "OMP relaunch refuses symlinked request entries"
+}
+
 test_omp_fresh_spawn_refuses_existing_artifacts() {
   local rec id out status
   id=omp-fresh-collision-z3
@@ -419,6 +448,7 @@ test_omp_ship_relaunch_accepts_existing_artifacts
 test_omp_ship_relaunch_preserves_prewalk_and_extension_opt_in
 test_omp_relaunch_refuses_symlinked_runtime_artifact
 test_omp_relaunch_refuses_symlinked_request_directory
+test_omp_relaunch_refuses_symlinked_request_entry
 test_omp_fresh_spawn_refuses_existing_artifacts
 test_omp_relaunch_refuses_active_tmux_endpoint
 test_omp_relaunch_refuses_mismatched_endpoint_identity

@@ -2143,6 +2143,13 @@ if [ "$HARNESS" = omp ]; then
         echo "error: refusing OMP relaunch through unsafe artifact path: $OMP_REQUESTS_DIR" >&2
         exit 1
       fi
+      for request_artifact in "$OMP_REQUESTS_DIR"/* "$OMP_REQUESTS_DIR"/.[!.]* "$OMP_REQUESTS_DIR"/..?*; do
+        [ -e "$request_artifact" ] || [ -L "$request_artifact" ] || continue
+        if [ -L "$request_artifact" ] || [ ! -f "$request_artifact" ]; then
+          echo "error: refusing OMP relaunch through unsafe request entry: $request_artifact" >&2
+          exit 1
+        fi
+      done
       if [ -f "$OMP_PRIOR_META" ]; then
         if ! fm_backend_validate_task_endpoint "$OMP_PRIOR_META" "$ID" >/dev/null 2>&1; then
           echo "error: OMP relaunch $ID recorded endpoint identity is invalid or does not match this task; refusing to recover" >&2
@@ -3841,6 +3848,16 @@ if [ -L "$TASK_TMP" ]; then
   echo "error: task temp root must not be a symlink: $TASK_TMP" >&2
   exit 1
 fi
+task_tmp_dirs=("$TASK_TMP/gotmp")
+if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
+  task_tmp_dirs+=("$TASK_TMP/omp-sessions")
+fi
+for task_tmp_dir in "${task_tmp_dirs[@]}"; do
+  if [ -L "$task_tmp_dir" ] || { [ -e "$task_tmp_dir" ] && [ ! -d "$task_tmp_dir" ]; }; then
+    echo "error: task temp path must be a non-symlink directory: $task_tmp_dir" >&2
+    exit 1
+  fi
+done
 mkdir -p "$TASK_TMP/gotmp"
 if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
   OMP_SESSION_DIR="$TASK_TMP/omp-sessions"
