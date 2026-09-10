@@ -1,6 +1,6 @@
 # Ship relaunch worktree recovery
 
-Verified 2026-09-07 against the local Firstmate checkout and ShellCheck 0.11.0.
+Verified 2026-09-10 against the local Firstmate checkout and ShellCheck 0.11.0.
 
 Commands: `tests/fm-spawn-worktree-settle.test.sh`; `tests/fm-omp-relaunch-guard.test.sh`; `FM_OMP_TMUX_LIVE_E2E=1 tests/fm-omp-relaunch-tmux-live-e2e.test.sh`; `shellcheck --version`.
 
