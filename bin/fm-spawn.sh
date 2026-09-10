@@ -2840,7 +2840,12 @@ fi
 # in its launch message while every other combination refuses before any endpoint
 # exists.
 ORCHESTRATE_BRIEF=0
-if grep -Fqx 'orchestration: enabled' "$BRIEF" 2>/dev/null; then
+if awk '
+  $0 == "# Orchestration" { section = 1; next }
+  section && $0 ~ /^#/ { section = 0 }
+  section && $0 == "orchestration: enabled" { found = 1 }
+  END { exit(found ? 0 : 1) }
+' "$BRIEF" 2>/dev/null; then
   ORCHESTRATE_BRIEF=1
 fi
 if [ "$ORCHESTRATE_BRIEF" -eq 1 ]; then

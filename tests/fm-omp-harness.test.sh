@@ -428,6 +428,27 @@ test_orchestrate_marker_refuses_non_omp_harness() {
   pass "fm-spawn: orchestration marker refuses non-omp harnesses"
 }
 
+test_task_text_marker_does_not_opt_in() {
+  local home proj brief out status
+  home="$TMP_ROOT/task-text-marker-home"
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  proj="$home/project"
+  fm_git_init_commit "$proj" || fail "could not create project for task marker regression"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-task-marker some-proj --mode direct-PR 2>&1)
+  status=$?
+  expect_code 0 "$status" "plain ship brief should scaffold for task marker regression"
+  brief="$home/data/brief-task-marker/brief.md"
+  sed -i '/^# Task$/a orchestration: enabled' "$brief"
+  sed -i 's/{TASK}/Complete the requested work/; s/{ACCEPTANCE CRITERION}/The task completes successfully/' "$brief"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-spawn.sh" brief-task-marker "$proj" --mode direct-PR --yolo off --harness claude --backend tmux 2>&1)
+  status=$?
+  case "$out" in
+    *"orchestration requires harness=omp"*) fail "task prose marker was misclassified as orchestration opt-in" ;;
+  esac
+  [ "$status" -ne 0 ] || fail "task marker regression unexpectedly launched a worker"
+  pass "fm-spawn: task prose marker does not opt into orchestration"
+}
+
 test_launch_boundary_marker_preserves_exact_omp_identity
 test_standalone_worker_uses_bound_identity
 test_standalone_primary_survives_executable_replacement
@@ -441,3 +462,4 @@ test_capability_probe_reports_every_missing_requirement
 test_capability_probe_scopes_exact_max_time_to_bounded_launches
 test_capability_probe_never_falls_back_when_omp_is_missing
 test_orchestrate_marker_refuses_non_omp_harness
+test_task_text_marker_does_not_opt_in
