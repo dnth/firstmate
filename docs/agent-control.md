@@ -72,6 +72,7 @@ It is not deterministic across the verified adapters: codex and grok resume only
 5. **Retire an OMP second mate's session artifacts**, only for that case, after both its endpoint and its home session owner are proven gone; `bin/fm-control-lib.sh`'s `fm_control_omp_secondmate_prepare_relaunch` owns that sequence and the two overrides that let a test drive it.
    Without it the launch owner would refuse the replacement over its own predecessor's leftovers, so an OMP second mate launches fresh with `--secondmate` and its new endpoint is revalidated from the record the launch published rather than the retired one.
 6. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded worktree and normally the endpoint, while allowing OMP secondmates to publish a fresh endpoint after clearing the previous harness's per-task wiring and arming a fresh busy generation.
+   A ship relaunch also recovers the recorded mode and yolo contract when the caller does not repeat them.
    For OMP ships and scouts, the launch owner accepts the prior task artifacts only after the recorded endpoint identity, worktree, and stopped state are proven, then restores the recorded OMP launch options for the replacement.
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
