@@ -185,6 +185,7 @@
 #     __OMPRESUMEFLAG__ empty for a fresh OMP launch or the exact retained secondmate session file
 #     __OMPPRIMARY__ absolute path to .omp/extensions/fm-primary-omp.ts in an OMP secondmate home
 #     __OMPMAXTIME__ OMP-only `--max-time=<duration>` fragment from config/omp-max-time
+#     __OMPMESSAGE__ OMP-only initial positional message: the encoded launch brief, or the `orchestrate` keyword plus the brief path when the brief opts in
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __HERMESBIN__ absolute resolved Hermes executable (PATH first, then $HOME/.local/bin/hermes)
@@ -1322,9 +1323,9 @@ launch_template() {
       if [ "$kind" = secondmate ]; then
         # The explicit path is the exact same tracked file native project discovery sees.
         # OMP 17.1.8's discoverExtensionPaths path-resolves and deduplicates before loading, so this guarantees the integration without registering it twice.
-        printf '%s' '__OMPENV____OMPBIN__ --session-dir __OMPSESSIONDIR__ __OMPRESUMEFLAG__--auto-approve __OMPMAXTIME____MODELFLAG____EFFORTFLAG____PREWALKFLAG__-e __OMPPRIMARY__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' '__OMPENV____OMPBIN__ --session-dir __OMPSESSIONDIR__ __OMPRESUMEFLAG__--auto-approve __OMPMAXTIME____MODELFLAG____EFFORTFLAG____PREWALKFLAG__-e __OMPPRIMARY__ __OMPMESSAGE__'
       else
-        printf '%s' '__OMPENV____OMPBIN__ --session-dir __OMPSESSIONDIR__ --auto-approve __OMPMAXTIME____MODELFLAG____EFFORTFLAG____PREWALKFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' '__OMPENV____OMPBIN__ --session-dir __OMPSESSIONDIR__ --auto-approve __OMPMAXTIME____MODELFLAG____EFFORTFLAG____PREWALKFLAG__-e __OMPEXT__ __OMPMESSAGE__'
       fi
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
@@ -2833,6 +2834,20 @@ else
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
+# Orchestration opt-in is explicit task data, never a keyword scan of prose:
+# fm-brief.sh --orchestrate records `orchestration: enabled` in the brief, and a
+# ship task launched with harness=omp then carries the exact `orchestrate` keyword
+# in its launch message while every other combination refuses before any endpoint
+# exists.
+ORCHESTRATE_BRIEF=0
+if grep -Fqx 'orchestration: enabled' "$BRIEF" 2>/dev/null; then
+  ORCHESTRATE_BRIEF=1
+fi
+if [ "$ORCHESTRATE_BRIEF" -eq 1 ]; then
+  [ "$KIND" = ship ] || { echo "error: orchestration applies only to ordinary ship tasks; the brief at $BRIEF records it but this spawn is kind=$KIND" >&2; exit 1; }
+  [ "$HARNESS" = omp ] || { echo "error: orchestration requires harness=omp; the brief at $BRIEF records it but this spawn resolved harness=$HARNESS" >&2; exit 1; }
+fi
+
 if [ "$HARNESS" = omp ] && [ "$KIND" = secondmate ]; then
   validate_omp_prewalk_for_launch_dir "$PROJ_ABS"
   omp_project_extension_preflight "$PROJ_ABS" || exit 1
@@ -4288,6 +4303,18 @@ HERMESRESUMEFLAG=
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__PREWALKFLAG__/$PREWALKFLAG}
+if [ "$HARNESS" = omp ]; then
+  if [ "$ORCHESTRATE_BRIEF" -eq 1 ]; then
+    # shellcheck disable=SC2016
+    # Placeholders __BRIEF__ and __OPINPUT__ are substituted after shell-quoting;
+    # single quotes here keep the pane-side command literal.
+    OMP_MESSAGE='"$(printf '"'"'orchestrate\n\nRead the brief at %s and follow it exactly.'"'"' __BRIEF__ | __OPINPUT__ encode launch-brief)"'
+  else
+    # shellcheck disable=SC2016
+    OMP_MESSAGE='"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+  fi
+  LAUNCH=${LAUNCH//__OMPMESSAGE__/$OMP_MESSAGE}
+fi
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND_SIGNAL__/$sq_turnend_signal}
 LAUNCH=${LAUNCH//__STATE__/$sq_state}

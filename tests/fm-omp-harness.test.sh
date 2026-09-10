@@ -408,6 +408,26 @@ test_capability_probe_never_falls_back_when_omp_is_missing() {
   pass "selected OMP refuses instead of falling back to another harness"
 }
 
+# An orchestrate opt-in is brief-level data, not a spawn flag. It must fail before
+# any endpoint exists if the selected harness is not OMP, so the keyword can never
+# be forced onto a different runtime.
+test_orchestrate_marker_refuses_non_omp_harness() {
+  local home proj id out status
+  home="$TMP_ROOT/orchestrate-refuse-home"
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  proj="$home/project"
+  fm_git_init_commit "$proj" || fail "could not create project for orchestrate refusal"
+  id=brief-orch-refuse
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$(basename "$proj")" --mode direct-PR --orchestrate 2>&1)
+  status=$?
+  expect_code 0 "$status" "orchestrate ship brief should scaffold"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-spawn.sh" "$id" "$proj" --mode direct-PR --yolo off --harness claude --backend tmux 2>&1)
+  status=$?
+  expect_code 1 "$status" "orchestration marker with a non-omp harness should refuse"
+  assert_contains "$out" "orchestration requires harness=omp" "non-omp harness refusal did not explain the required harness"
+  pass "fm-spawn: orchestration marker refuses non-omp harnesses"
+}
+
 test_launch_boundary_marker_preserves_exact_omp_identity
 test_standalone_worker_uses_bound_identity
 test_standalone_primary_survives_executable_replacement
@@ -420,3 +440,4 @@ test_capability_probe_rejects_non_bun_entrypoint
 test_capability_probe_reports_every_missing_requirement
 test_capability_probe_scopes_exact_max_time_to_bounded_launches
 test_capability_probe_never_falls_back_when_omp_is_missing
+test_orchestrate_marker_refuses_non_omp_harness

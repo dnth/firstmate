@@ -381,6 +381,35 @@ Raw-launch OMP refusals and direct non-OMP compatibility are covered by `tests/f
 The secondmate integration checks reran on 2026-08-27 and prove that the exact Firstmate primary and fleet-hook extensions remain permitted in the persistent home without allowing modified or unrelated tracked extension code.
 Live firing of the fleet hook's `tool_result`, `todo_reminder`, and `session.compacting` handlers is PENDING firstmate scratch OMP verification before merge; deterministic extension and spawn tests do not claim OMP event delivery.
 
+### OMP native orchestration opt-in
+
+OMP native orchestration is activated when the exact lowercase keyword `orchestrate` appears in the initial user message. The matcher is a Unicode word-boundary scan with fenced code, inline code spans, comments, and balanced tags masked out: `orchestrate`, `orchestrate,` and `path:orchestrate` fire; `Orchestrate`, `orchestration`, `orchestrate.ts`, `path/orchestrate`, `foo::orchestrate`, `orchestrate()`, and backtick-quoted forms do not. A keyword read later from a file does not activate orchestration because tool results are never scanned. The `orchestrate-notice` system prompt is then injected into the session.
+
+The default OMP launch message is the encoded full brief body (`fm-operational-input.sh encode launch-brief` emits `⁣FIRSTMATE_OP: v1 launch-brief: <body>`), so standalone `orchestrate` in a brief's own prose reaches the matcher even without the opt-in; the `orchestration: enabled` marker deliberately uses the non-matching noun, and brief authors should write `orchestration` or backtick `orchestrate` to discuss the mode without triggering it.
+
+`fm-brief.sh --orchestrate` records the opt-in for an ordinary ship task by writing `orchestration: enabled` in the brief. `fm-spawn.sh` detects that marker and, only when the resolved harness is `omp`, constructs an OMP-specific initial message containing the standalone keyword plus a pointer to the brief. Any other harness or task kind is refused before any endpoint exists. Nested `task` subagents stay inside the task worktree as implementation helpers; firstmate continues to own outer-task isolation, supervision, delivery, merge authority, receipts, and No-Mistakes branch custody. The `orchestrate` and `workflowz` keywords must not be combined, and the keyword is never added by default.
+
+The activation boundary was verified on 2026-09-10 against OMP 18.1.14. The live proof used an isolated `FM_HOME`, a disposable project, a private tmux socket, and the `tests/fm-omp-worker-tmux-live-e2e.test.sh` fixture shape:
+
+```sh
+omp --version
+FM_HOME="$fixture_home" bin/fm-brief.sh <id> <project> --mode local-only --orchestrate
+FM_HOME="$fixture_home" FM_BACKEND=tmux bin/fm-spawn.sh <id> <project> \
+  --mode local-only --yolo off --harness omp --model openai-codex/gpt-5.6-luna --effort low
+```
+
+Observed bounded output:
+
+```text
+omp/18.1.14
+spawned orch-live-worker harness=omp kind=ship mode=local-only yolo=off
+status: done: ready in branch fm/orch-live-worker
+session: orchestrate-notice injected; task toolCall dispatched CalcImplementation + GreetImplementation
+subagent sessions: CalcImplementation.jsonl, GreetImplementation.jsonl
+combined verification: python3 -m pytest tests/ 5 passed
+```
+
+The session file records one `orchestrate-notice` custom message, one `task` toolCall whose `tasks` array named two subagents (`CalcImplementation`, `GreetImplementation`), and the two corresponding `agent="task"` completion results. The worktree contains the committed `lib/calc.py` and `lib/greet.py` implementations, and the combined pytest suite passed.
 The Herdr role matrix required each expected turn-end or routed-reply notification to reach the durable queue or the primary follow-up transcript before the fixture drained it.
 
 The deterministic composer, tmux, and Herdr fixtures reran on 2026-08-26 and proved that the backend typed-submit primitive for an already-busy OMP target returns internal `queued-unconfirmed` only after Enter transport succeeds and the composer either clears or remains proven pending while native state is still working.
