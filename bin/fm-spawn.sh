@@ -439,7 +439,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
         YOLO_SET=1
       fi
     fi
-    if [ "$PREWALK_INTO_SET" -eq 0 ]; then
+    if [ "$PREWALK_INTO_SET" -eq 0 ] && [ "$HARNESS_ARG" = omp ]; then
       PRIOR_PREWALK_INTO=$(fm_meta_get "$RELAUNCH_META" prewalk_into)
       if [ -n "$PRIOR_PREWALK_INTO" ]; then
         PREWALK_INTO=$PRIOR_PREWALK_INTO
