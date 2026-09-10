@@ -256,6 +256,36 @@ test_omp_ship_relaunch_preserves_prewalk_and_extension_opt_in() {
   pass "OMP ship relaunch preserves explicit prewalk and extension opt-in"
 }
 
+test_omp_relaunch_refuses_symlinked_runtime_artifact() {
+  local rec id out status sentinel
+  id=omp-relaunch-symlink-z7
+  rec=$(make_relaunch_case relaunch-symlink "$id")
+  read_relaunch_record "$rec"
+  write_omp_meta "$HOME_DIR/state/$id.meta" "$id" "$WT_DIR" "$PROJ_DIR" "$FAKEBIN_DIR"
+  create_prior_artifacts "$HOME_DIR/state" "$id" "/tmp/fm-$id"
+  sentinel="$HOME_DIR/sentinel"
+  printf 'keep\n' > "$sentinel"
+  rm -f "$HOME_DIR/state/$id.omp-ext.ts"
+  ln -s "$sentinel" "$HOME_DIR/state/$id.omp-ext.ts"
+
+  set +e
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' \
+    FM_FAKE_PANE_PATH="$WT_DIR" \
+    PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" --relaunch 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "symlinked OMP artifact relaunch unexpectedly succeeded"
+  assert_contains "$out" "unsafe artifact path" \
+    "symlinked OMP artifact relaunch did not refuse the unsafe path"
+  assert_grep "keep" "$sentinel" \
+    "symlinked OMP artifact relaunch modified the symlink target"
+  pass "OMP relaunch refuses symlinked runtime artifacts"
+}
+
 test_omp_fresh_spawn_refuses_existing_artifacts() {
   local rec id out status
   id=omp-fresh-collision-z3
@@ -357,6 +387,7 @@ test_omp_relaunch_refuses_missing_worktree() {
 # Run tests in an order that lets each test own its isolated fixture.
 test_omp_ship_relaunch_accepts_existing_artifacts
 test_omp_ship_relaunch_preserves_prewalk_and_extension_opt_in
+test_omp_relaunch_refuses_symlinked_runtime_artifact
 test_omp_fresh_spawn_refuses_existing_artifacts
 test_omp_relaunch_refuses_active_tmux_endpoint
 test_omp_relaunch_refuses_mismatched_endpoint_identity

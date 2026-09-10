@@ -2130,6 +2130,14 @@ if [ "$HARNESS" = omp ]; then
         echo "error: refusing OMP relaunch through symlinked metadata: $OMP_PRIOR_META" >&2
         exit 1
       fi
+      for artifact in \
+        "$STATE/$ID.status" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" \
+        "$STATE/$ID.omp-started" "$STATE/$ID.omp-doorbell-ready"; do
+        if [ -L "$artifact" ] || { [ -e "$artifact" ] && [ ! -f "$artifact" ]; }; then
+          echo "error: refusing OMP relaunch through unsafe artifact path: $artifact" >&2
+          exit 1
+        fi
+      done
       if [ -f "$OMP_PRIOR_META" ]; then
         if ! fm_backend_validate_task_endpoint "$OMP_PRIOR_META" "$ID" >/dev/null 2>&1; then
           echo "error: OMP relaunch $ID recorded endpoint identity is invalid or does not match this task; refusing to recover" >&2
