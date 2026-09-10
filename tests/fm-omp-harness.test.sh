@@ -417,7 +417,7 @@ test_orchestrate_marker_refuses_non_omp_harness() {
   mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
   proj="$home/project"
   fm_git_init_commit "$proj" || fail "could not create project for orchestrate refusal"
-  id=brief-orch-refuse
+  id="brief-orch-refuse"
   out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$(basename "$proj")" --mode direct-PR --orchestrate 2>&1)
   status=$?
   expect_code 0 "$status" "orchestrate ship brief should scaffold"

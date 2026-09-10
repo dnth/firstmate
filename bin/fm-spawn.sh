@@ -2835,17 +2835,15 @@ fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
 # Orchestration opt-in is explicit task data, never a keyword scan of prose:
-# fm-brief.sh --orchestrate records `orchestration: enabled` in the brief, and a
-# ship task launched with harness=omp then carries the exact `orchestrate` keyword
-# in its launch message while every other combination refuses before any endpoint
-# exists.
+# fm-brief.sh --orchestrate records a front-matter marker `orchestration: enabled`
+# at the very top of the generated brief, and a ship task launched with
+# harness=omp then carries the exact `orchestrate` keyword in its launch message
+# while every other combination refuses before any endpoint exists.
+# The marker is only honored when it is the literal first three lines of the
+# brief, so ordinary task text, acceptance criteria, quoted examples, or code
+# blocks that happen to contain the words cannot spoof the opt-in.
 ORCHESTRATE_BRIEF=0
-if awk '
-  $0 == "# Orchestration" { section = 1; next }
-  section && $0 ~ /^#/ { section = 0 }
-  section && $0 == "orchestration: enabled" { found = 1 }
-  END { exit(found ? 0 : 1) }
-' "$BRIEF" 2>/dev/null; then
+if [ "$(head -n 3 "$BRIEF" 2>/dev/null)" = $'---\norchestration: enabled\n---' ]; then
   ORCHESTRATE_BRIEF=1
 fi
 if [ "$ORCHESTRATE_BRIEF" -eq 1 ]; then
@@ -4309,14 +4307,16 @@ LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__PREWALKFLAG__/$PREWALKFLAG}
 if [ "$HARNESS" = omp ]; then
+  # shellcheck disable=SC2016
+  # Placeholders __BRIEF__ and __OPINPUT__ are substituted after shell-quoting;
+  # single quotes here keep the pane-side command literal. The encoded brief is
+  # passed as a separate positional argument so the full original task text is
+  # delivered unchanged. Opt-in adds the standalone `orchestrate` keyword as its
+  # own message before the brief.
   if [ "$ORCHESTRATE_BRIEF" -eq 1 ]; then
-    # shellcheck disable=SC2016
-    # Placeholders __BRIEF__ and __OPINPUT__ are substituted after shell-quoting;
-    # single quotes here keep the pane-side command literal.
-    OMP_MESSAGE='"$(printf '"'"'orchestrate\n\nRead the brief at %s and follow it exactly.'"'"' __BRIEF__ | __OPINPUT__ encode launch-brief)"'
+    OMP_MESSAGE='"orchestrate" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
   else
-    # shellcheck disable=SC2016
-    OMP_MESSAGE='"$(__OPINPUT__ encode launch-brief < __BRIEF__ | sed -E '\''s/(^|[^[:alnum:]_])orchestrate([^[:alnum:]_]|$)/\1<!-- orchestrate -->\2/g'\'')"'
+    OMP_MESSAGE='"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
   fi
   LAUNCH=${LAUNCH//__OMPMESSAGE__/$OMP_MESSAGE}
 fi

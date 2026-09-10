@@ -18,10 +18,10 @@
 #   captain-relevant escalations and marked from-firstmate replies append to this
 #   home's status file.
 #   --orchestrate opts an ordinary ship task into native OMP orchestration: it
-#   records the validated `orchestration: enabled` marker in the brief and lets
-#   bin/fm-spawn.sh carry the exact lowercase `orchestrate` keyword in the OMP
-#   launch message. It is refused on scout and secondmate briefs, which are not
-#   ship tasks.
+#   records the `orchestration: enabled` marker as front-matter at the top of the
+#   brief and lets bin/fm-spawn.sh carry the exact lowercase `orchestrate` keyword
+#   as a separate OMP launch message before the unchanged encoded brief. It is
+#   refused on scout and secondmate briefs, which are not ship tasks.
 #   --no-projects writes a project-less charter for a domain whose subject is the
 #   firstmate repo itself (its home is a firstmate worktree, its crews take pooled
 #   worktrees of the same repo). It is mutually exclusive with a project list, and
@@ -504,18 +504,24 @@ case "$MODE" in
 esac
 DOD=$(render_ship_delivery "$ID" "$MODE")
 
+ORCHESTRATION_FRONTMATTER=""
 ORCHESTRATION_SECTION=""
 if [ "$ORCHESTRATE" -eq 1 ]; then
+  IFS= read -r -d '' ORCHESTRATION_FRONTMATTER <<'EOF' || true
+---
+orchestration: enabled
+---
+
+EOF
   IFS= read -r -d '' ORCHESTRATION_SECTION <<'EOF' || true
 # Orchestration
-orchestration: enabled
 This task may use native `task` subagents for independent workstreams; you remain accountable for integrating and verifying their output.
 
 EOF
 fi
 
 IFS= read -r -d '' SHIP_BRIEF <<EOF || true
-You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+${ORCHESTRATION_FRONTMATTER:+$ORCHESTRATION_FRONTMATTER}You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 # Task
 {TASK}

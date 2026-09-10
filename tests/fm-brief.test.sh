@@ -334,8 +334,8 @@ test_orchestrate_opt_in_adds_marker_only_on_ship() {
   brief="$home/data/brief-orch-c1/brief.md"
   assert_present "$brief" "orchestrate brief was not scaffolded"
   assert_grep "# Orchestration" "$brief" "orchestrate brief missing the Orchestration section"
-  grep -qx "orchestration: enabled" "$brief" \
-    || fail "orchestrate brief did not record the machine-readable orchestration marker"
+  [ "$(head -n 3 "$brief")" = $'---\norchestration: enabled\n---' ] \
+    || fail "orchestrate brief did not record the front-matter orchestration marker"
   # shellcheck disable=SC2016
   assert_grep 'native `task` subagents' "$brief" \
     "orchestrate brief missing the native subagent boundary statement"
