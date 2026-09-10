@@ -59,7 +59,7 @@ The third shape is a restamped chain followed by additional run-owned commits: t
 The relaxed checks use one shared content-identity predicate, `fm_nm_head_is_accounted` in `bin/fm-nm-run-lib.sh`.
 `--bind-run` accepts the planned head, a faithful restamp of the validation-base-to-planned chain, or a strict descendant of either, but only when the run is active and the pipeline owns the branch, or the run is terminal and passed.
 `--complete` accepts the same shapes, with the same branch and ownership requirements.
-A descendant is accepted only when the run reports the same task branch and, for active runs, `branch_sync.state` is `pipeline_owned` or `synchronized`; when `axi status` omits `branch_sync`, `axi sync --check` supplies the authoritative run-owned head evidence and `submitted_head`/`current_head` cross-check.
+A descendant is accepted only when the run reports the same task branch and, for active runs, `branch_sync.state` is `pipeline_owned`; when `axi status` omits `branch_sync`, `axi sync --check` supplies the authoritative run-owned head evidence and `submitted_head`/`current_head` cross-check.
 
 Chain provenance is the content-identity mechanism, stated in `fm_nm_head_is_faithful_restamp` in `bin/fm-nm-run-lib.sh`.
 It resolves the recorded validation base, requires it to be an ancestor of both heads, requires equal commit counts, and compares each corresponding commit tree in base-to-head order.

@@ -494,7 +494,7 @@ test_ci_green_log_allows_exact_bound_run_completion() {
     FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --bind-run RUN-ci-log --generation "$generation" >/dev/null \
     || fail "CI-log readiness fixture run binding failed"
-  ci_status=$(printf 'run:\n  id: "RUN-ci-log"\n  status: ci\n  head: "%s"\noutcome: pending\n' "$head")
+  ci_status=$(printf 'run:\n  id: "RUN-ci-log"\n  branch: fm/%s\n  status: ci\n  head: "%s"\noutcome: pending\n' "$id" "$head")
   FM_FAKE_NM_STATUS="$ci_status" FM_FAKE_NM_CI_LOG='CI checks running' \
     FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed >/dev/null 2>&1
@@ -824,7 +824,7 @@ test_terminal_and_failed_runs_bind_by_current_plan() {
   project="$TMP_ROOT/project-$id"
   head=$(git -C "$project" rev-parse HEAD)
   generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
-  terminal=$(printf 'run:\n  id: "RUN-terminal"\n  status: completed\n  head: "%s"\noutcome: checks-passed\n' "$head")
+  terminal=$(printf 'run:\n  id: "RUN-terminal"\n  branch: fm/%s\n  status: completed\n  head: "%s"\noutcome: checks-passed\n' "$id" "$head")
   FM_FAKE_NM_STATUS="$terminal" FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: $generation" \
     FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --bind-run RUN-terminal --generation "$generation" >/dev/null \
@@ -839,7 +839,7 @@ test_terminal_and_failed_runs_bind_by_current_plan() {
   project="$TMP_ROOT/project-$id"
   head=$(git -C "$project" rev-parse HEAD)
   generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
-  failed=$(printf 'run:\n  id: "RUN-failed"\n  status: failed\n  head: "%s"\noutcome: failed\n' "$head")
+  failed=$(printf 'run:\n  id: "RUN-failed"\n  branch: fm/%s\n  status: failed\n  head: "%s"\noutcome: failed\n' "$id" "$head")
   FM_FAKE_NM_STATUS="$failed" FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: $generation" \
     FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --bind-run RUN-failed --generation "$generation" >/dev/null 2>&1
@@ -1892,7 +1892,7 @@ test_agent_supplied_intent_log_binds_and_completes() {
     FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --bind-run RUN-agent-intent --generation "$generation" >/dev/null \
     || fail "binding failed against the real agent-supplied intent-log shape"
-  ci_status=$(printf 'run:\n  id: "RUN-agent-intent"\n  status: ci\n  head: "%s"\noutcome: pending\n' "$head")
+  ci_status=$(printf 'run:\n  id: "RUN-agent-intent"\n  branch: fm/%s\n  status: ci\n  head: "%s"\noutcome: pending\n' "$id" "$head")
   FM_FAKE_NM_STATUS="$ci_status" FM_FAKE_NM_CI_LOG='all CI checks passed - still monitoring until merged or closed' \
     FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed >/dev/null \

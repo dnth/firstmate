@@ -674,6 +674,11 @@ if [ "$ACTION" = bind-run ]; then
     passed:*|checks-passed:*|*:passed|*:checks-passed) BIND_STATE_OK=1 ;;
     running:*|fixing:*|ci:*|awaiting_approval:*) BIND_STATE_OK=1 ;;
   esac
+  BIND_RUN_BRANCH=$(fm_nm_field "$BIND_OUT" branch)
+  BIND_BRANCH_MATCH=0
+  if [ -n "$BIND_RUN_BRANCH" ] && fm_nm_branch_matches_worktree "$BIND_WORKTREE" "$BIND_RUN_BRANCH"; then
+    BIND_BRANCH_MATCH=1
+  fi
   # The run's head is the planned commit itself, a faithful restamp of the
   # validated chain, or a proven pipeline-owned descendant that advanced after
   # the plan was recorded (review/doc/lint fix commits). Allow descendants so
@@ -682,14 +687,13 @@ if [ "$ACTION" = bind-run ]; then
   BIND_HEAD_ACCOUNTED=0
   if [ -n "$BIND_RUN_HEAD" ]; then
     if [ "$BIND_RUN_HEAD" = "$BIND_HEAD" ]; then
-      BIND_HEAD_ACCOUNTED=1
+      [ "$BIND_BRANCH_MATCH" -eq 1 ] && BIND_HEAD_ACCOUNTED=1
     elif fm_nm_head_is_faithful_restamp "$BIND_WORKTREE" "$BIND_BASE" "$BIND_HEAD" "$BIND_RUN_HEAD"; then
-      BIND_HEAD_ACCOUNTED=1
+      [ "$BIND_BRANCH_MATCH" -eq 1 ] && BIND_HEAD_ACCOUNTED=1
     elif fm_nm_head_is_accounted "$BIND_WORKTREE" "$BIND_BASE" "$BIND_HEAD" "$BIND_RUN_HEAD"; then
       # The head advanced after the plan; require branch identity and active or
       # terminal passed ownership so an unrelated descendant cannot bind.
-      run_branch=$(fm_nm_field "$BIND_OUT" branch)
-      if [ -n "$run_branch" ] && fm_nm_branch_matches_worktree "$BIND_WORKTREE" "$run_branch"; then
+      if [ "$BIND_BRANCH_MATCH" -eq 1 ]; then
         if fm_nm_run_is_terminal_passed "$BIND_OUT"; then
           BIND_HEAD_ACCOUNTED=1
         elif fm_nm_run_is_active "$BIND_OUT"; then
