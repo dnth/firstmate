@@ -2138,6 +2138,11 @@ if [ "$HARNESS" = omp ]; then
           exit 1
         fi
       done
+      OMP_REQUESTS_DIR="$STATE/$ID.omp-doorbell-ready.requests"
+      if [ -L "$OMP_REQUESTS_DIR" ] || { [ -e "$OMP_REQUESTS_DIR" ] && [ ! -d "$OMP_REQUESTS_DIR" ]; }; then
+        echo "error: refusing OMP relaunch through unsafe artifact path: $OMP_REQUESTS_DIR" >&2
+        exit 1
+      fi
       if [ -f "$OMP_PRIOR_META" ]; then
         if ! fm_backend_validate_task_endpoint "$OMP_PRIOR_META" "$ID" >/dev/null 2>&1; then
           echo "error: OMP relaunch $ID recorded endpoint identity is invalid or does not match this task; refusing to recover" >&2

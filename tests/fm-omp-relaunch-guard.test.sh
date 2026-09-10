@@ -286,6 +286,36 @@ test_omp_relaunch_refuses_symlinked_runtime_artifact() {
   pass "OMP relaunch refuses symlinked runtime artifacts"
 }
 
+test_omp_relaunch_refuses_symlinked_request_directory() {
+  local rec id out status target_dir
+  id=omp-relaunch-request-symlink-z8
+  rec=$(make_relaunch_case relaunch-request-symlink "$id")
+  read_relaunch_record "$rec"
+  write_omp_meta "$HOME_DIR/state/$id.meta" "$id" "$WT_DIR" "$PROJ_DIR" "$FAKEBIN_DIR"
+  create_prior_artifacts "$HOME_DIR/state" "$id" "/tmp/fm-$id"
+  rm -rf "$HOME_DIR/state/$id.omp-doorbell-ready.requests"
+  target_dir="$HOME_DIR/request-target"
+  mkdir -p "$target_dir"
+  ln -s "$target_dir" "$HOME_DIR/state/$id.omp-doorbell-ready.requests"
+
+  set +e
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' \
+    FM_FAKE_PANE_PATH="$WT_DIR" \
+    PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" --relaunch 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "symlinked OMP request directory relaunch unexpectedly succeeded"
+  assert_contains "$out" "unsafe artifact path" \
+    "symlinked OMP request directory relaunch did not refuse the unsafe path"
+  [ -z "$(find "$target_dir" -mindepth 1 -print -quit)" ] || \
+    fail "symlinked OMP request directory relaunch wrote through the symlink"
+  pass "OMP relaunch refuses symlinked request directories"
+}
+
 test_omp_fresh_spawn_refuses_existing_artifacts() {
   local rec id out status
   id=omp-fresh-collision-z3
@@ -388,6 +418,7 @@ test_omp_relaunch_refuses_missing_worktree() {
 test_omp_ship_relaunch_accepts_existing_artifacts
 test_omp_ship_relaunch_preserves_prewalk_and_extension_opt_in
 test_omp_relaunch_refuses_symlinked_runtime_artifact
+test_omp_relaunch_refuses_symlinked_request_directory
 test_omp_fresh_spawn_refuses_existing_artifacts
 test_omp_relaunch_refuses_active_tmux_endpoint
 test_omp_relaunch_refuses_mismatched_endpoint_identity
