@@ -2848,6 +2848,10 @@ if [ "$(head -n 3 "$BRIEF" 2>/dev/null)" = $'---\norchestration: enabled\n---' ]
 fi
 if [ "$ORCHESTRATE_BRIEF" -eq 1 ]; then
   [ "$KIND" = ship ] || { echo "error: orchestration applies only to ordinary ship tasks; the brief at $BRIEF records it but this spawn is kind=$KIND" >&2; exit 1; }
+  if [ "$RAW_LAUNCH" -eq 1 ]; then
+    echo "error: orchestration requires the verified OMP launch template; this spawn is a raw launch command for a marked brief at $BRIEF. Pass --harness omp and a project or worktree path, not a raw command" >&2
+    exit 1
+  fi
   [ "$HARNESS" = omp ] || { echo "error: orchestration requires harness=omp; the brief at $BRIEF records it but this spawn resolved harness=$HARNESS" >&2; exit 1; }
 fi
 

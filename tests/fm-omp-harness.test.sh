@@ -428,6 +428,26 @@ test_orchestrate_marker_refuses_non_omp_harness() {
   pass "fm-spawn: orchestration marker refuses non-omp harnesses"
 }
 
+# An orchestrate opt-in is brief-level data. The verified OMP template is the only
+# launch path that injects the exact `orchestrate` keyword; a raw launch command
+# bypasses that template and must refuse a marked brief before endpoint creation.
+test_orchestrate_marker_refuses_raw_launch_command() {
+  local home proj id out status
+  home="$TMP_ROOT/orchestrate-raw-refuse-home"
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  proj="$home/project"
+  fm_git_init_commit "$proj" || fail "could not create project for raw launch refusal"
+  id="brief-orch-raw"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$(basename "$proj")" --mode direct-PR --orchestrate 2>&1)
+  status=$?
+  expect_code 0 "$status" "orchestrate ship brief should scaffold"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-spawn.sh" "$id" "$proj" "cat /dev/null" --mode direct-PR --yolo off --backend tmux 2>&1)
+  status=$?
+  expect_code 1 "$status" "orchestration marker with a raw launch command should refuse"
+  assert_contains "$out" "orchestration requires the verified OMP launch template" "raw launch refusal did not explain the required template"
+  pass "fm-spawn: orchestration marker refuses raw launch commands"
+}
+
 test_task_text_marker_does_not_opt_in() {
   local home proj brief out status
   home="$TMP_ROOT/task-text-marker-home"
@@ -462,4 +482,5 @@ test_capability_probe_reports_every_missing_requirement
 test_capability_probe_scopes_exact_max_time_to_bounded_launches
 test_capability_probe_never_falls_back_when_omp_is_missing
 test_orchestrate_marker_refuses_non_omp_harness
+test_orchestrate_marker_refuses_raw_launch_command
 test_task_text_marker_does_not_opt_in
