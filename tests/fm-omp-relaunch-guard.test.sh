@@ -194,12 +194,19 @@ create_prior_artifacts() {
   : > "$state/$id.omp-started"
   : > "$state/$id.omp-doorbell-ready"
   mkdir -p "$state/$id.omp-doorbell-ready.requests"
-  [ -z "$tasktmp" ] || mkdir -p "$tasktmp"
+  if [ -n "$tasktmp" ]; then
+    mkdir -p "$tasktmp"
+    FM_TEST_CLEANUP_DIRS+=("$tasktmp")
+  fi
+}
+
+case_id() {
+  printf 'omp-relaunch-%s-%s' "$1" "${TMP_ROOT##*.}"
 }
 
 test_omp_ship_relaunch_accepts_existing_artifacts() {
   local rec id out status
-  id=omp-relaunch-accept-z1
+  id=$(case_id accept)
   rec=$(make_relaunch_case relaunch-accept "$id")
   read_relaunch_record "$rec"
   write_omp_meta "$HOME_DIR/state/$id.meta" "$id" "$WT_DIR" "$PROJ_DIR" "$FAKEBIN_DIR"
@@ -228,7 +235,7 @@ test_omp_ship_relaunch_accepts_existing_artifacts() {
 
 test_omp_ship_relaunch_preserves_prewalk_and_extension_opt_in() {
   local rec id out status
-  id=omp-relaunch-prewalk-z2
+  id=$(case_id prewalk)
   rec=$(make_relaunch_case relaunch-prewalk "$id")
   read_relaunch_record "$rec"
   write_omp_meta "$HOME_DIR/state/$id.meta" "$id" "$WT_DIR" "$PROJ_DIR" "$FAKEBIN_DIR" \
@@ -258,7 +265,7 @@ test_omp_ship_relaunch_preserves_prewalk_and_extension_opt_in() {
 
 test_omp_relaunch_refuses_symlinked_runtime_artifact() {
   local rec id out status sentinel
-  id=omp-relaunch-symlink-z7
+  id=$(case_id symlink)
   rec=$(make_relaunch_case relaunch-symlink "$id")
   read_relaunch_record "$rec"
   write_omp_meta "$HOME_DIR/state/$id.meta" "$id" "$WT_DIR" "$PROJ_DIR" "$FAKEBIN_DIR"
@@ -288,7 +295,7 @@ test_omp_relaunch_refuses_symlinked_runtime_artifact() {
 
 test_omp_relaunch_refuses_symlinked_request_directory() {
   local rec id out status target_dir
-  id=omp-relaunch-request-symlink-z8
+  id=$(case_id request-symlink)
   rec=$(make_relaunch_case relaunch-request-symlink "$id")
   read_relaunch_record "$rec"
   write_omp_meta "$HOME_DIR/state/$id.meta" "$id" "$WT_DIR" "$PROJ_DIR" "$FAKEBIN_DIR"
@@ -318,7 +325,7 @@ test_omp_relaunch_refuses_symlinked_request_directory() {
 
 test_omp_relaunch_refuses_symlinked_request_entry() {
   local rec id out status target
-  id=omp-relaunch-request-entry-z9
+  id=$(case_id request-entry)
   rec=$(make_relaunch_case relaunch-request-entry "$id")
   read_relaunch_record "$rec"
   write_omp_meta "$HOME_DIR/state/$id.meta" "$id" "$WT_DIR" "$PROJ_DIR" "$FAKEBIN_DIR"
@@ -347,7 +354,7 @@ test_omp_relaunch_refuses_symlinked_request_entry() {
 
 test_omp_fresh_spawn_refuses_existing_artifacts() {
   local rec id out status
-  id=omp-fresh-collision-z3
+  id=$(case_id fresh-collision)
   rec=$(make_relaunch_case fresh-collision "$id")
   read_relaunch_record "$rec"
   write_omp_meta "$HOME_DIR/state/$id.meta" "$id" "$WT_DIR" "$PROJ_DIR" "$FAKEBIN_DIR"
@@ -371,7 +378,7 @@ test_omp_fresh_spawn_refuses_existing_artifacts() {
 
 test_omp_relaunch_refuses_active_tmux_endpoint() {
   local rec id out status
-  id=omp-relaunch-active-z4
+  id=$(case_id active)
   rec=$(make_relaunch_case relaunch-active "$id")
   read_relaunch_record "$rec"
   write_omp_meta "$HOME_DIR/state/$id.meta" "$id" "$WT_DIR" "$PROJ_DIR" "$FAKEBIN_DIR"
@@ -396,7 +403,7 @@ test_omp_relaunch_refuses_active_tmux_endpoint() {
 
 test_omp_relaunch_refuses_mismatched_endpoint_identity() {
   local rec id out status
-  id=omp-relaunch-identity-z5
+  id=$(case_id identity)
   rec=$(make_relaunch_case relaunch-identity "$id")
   read_relaunch_record "$rec"
   write_omp_meta "$HOME_DIR/state/$id.meta" "$id" "$WT_DIR" "$PROJ_DIR" "$FAKEBIN_DIR"
@@ -421,7 +428,7 @@ test_omp_relaunch_refuses_mismatched_endpoint_identity() {
 
 test_omp_relaunch_refuses_missing_worktree() {
   local rec id out status
-  id=omp-relaunch-missing-wt-z6
+  id=$(case_id missing-wt)
   rec=$(make_relaunch_case relaunch-missing-wt "$id")
   read_relaunch_record "$rec"
   write_omp_meta "$HOME_DIR/state/$id.meta" "$id" "/no/such/worktree" "$PROJ_DIR" "$FAKEBIN_DIR"
