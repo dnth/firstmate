@@ -291,7 +291,7 @@ A diagnostic request, report, recommendation, or implementation-ready finding is
 Load `diagnostic-reasoning` before scoping a reported bug and before acting on a diagnostic report.
 
 Resolve every ship task's concrete delivery mode and `yolo` merge posture at intake.
-Pass the mode explicitly to the brief, and pass both values explicitly to the spawn and any scout promotion; each command refuses to guess the values it consumes.
+Pass the mode explicitly to the brief, and pass both values explicitly to a fresh spawn and any scout promotion; a ship relaunch may recover mode and `yolo` from its recorded metadata when the caller omits them (see [`docs/agent-control.md`](docs/agent-control.md)).
 A current explicit captain instruction wins; otherwise the project's registry entry is the captain's standing posture, and dropping below its rigor needs a reason you can state.
 On a `no-mistakes-prod-only` project, classify the task's surface: internal-only tooling, automation, contributor or operator process, and release or submission work ships `direct-PR`, while product-facing, mixed, and uncertain work ships `no-mistakes`; never infer internal-only from file location or project name.
 For this repo's shared tracked documentation, pure prose in a CI-allowlisted non-authoritative document - typos, wording, formatting, README cleanup, or non-behavioral examples - ships `direct-PR`.
