@@ -44,17 +44,17 @@
 # The resolved validation_tier, validation_path, reason code, base, head, size,
 # and start time are appended to state/<task-id>.meta for durable inspection.
 # Every completion records validation_completed_head and refuses current head
-# drift unless the bound No-Mistakes run accounts for the current content, in
-# one of two shapes. A descendant of the latest validation_head is proved by
-# pipeline ownership while the run is active and by the run's own reported head
-# once it is terminal and PASSED, so a terminal run needs no replan and no fresh
-# run to seal its own pipeline commits. A chain the pipeline's rebase step
-# restamped is proved as a faithful restamp of the validation-base-to-head
-# chain, because that step re-commits every branch commit with a fresh committer
-# stamp and so reports a head that is neither validation_head nor a descendant
-# of it; --bind-run accepts and records that same restamped head. Foreign
-# commits landed after the run still refuse completion because they break the
-# chain's ancestry, count, or pairwise tree identity.
+# drift unless the bound No-Mistakes run accounts for the current content in one
+# of three shapes: a strict descendant of the latest validation_head, a faithful
+# restamp of the validation-base-to-head chain, or a strict descendant of such a
+# restamp. Active descendants require current pipeline ownership and terminal
+# passed runs prove the advance through their own reported head, so a terminal
+# run needs no replan or fresh run to seal its own pipeline commits. A chain the
+# pipeline's rebase step restamped is proved by matching every corresponding
+# commit tree, even though fresh committer stamps make the reported head neither
+# validation_head nor its descendant. Foreign commits still refuse completion
+# because they break ancestry, count, or pairwise tree identity, or lack the
+# required run-owned branch evidence.
 # When --plan returns path=receipts-mechanical, append fresh successful mechanical
 # evidence for every changed file with:
 #
