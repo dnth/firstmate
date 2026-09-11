@@ -36,10 +36,10 @@ The exact receipt key and type schema is owned by the header and `--help` output
 - Findings that invalidate a receipt or acceptance claim atomically bind one generation-scoped idempotent finding-to-criterion marker to the invalidation-time head and receipt boundary, then require a strict non-empty descendant delta and a later successful receipt bound to the new head before replanning or completion.
 - One pinned state-directory owner snapshots single-link no-follow metadata and performs compare-bound atomic replacements for every validation metadata update.
 - PR registration publishes canonical PR identity and its validation publication generation through one compare-bound pinned metadata replacement after the watcher artifacts publish, and revokes those artifacts if that replacement fails.
-- Successful planned-head and faithful-restamp runs can bind with checks-passed, passed, or eligible active status, while descendants require active pipeline ownership or a terminal passed run; failed and cancelled runs remain ineligible.
+- Successful planned-head and faithful-restamp runs can bind with checks-passed, passed, or eligible active status, while descendants require active run-owned branch evidence - pipeline ownership or the fully evidenced synchronized convergence - or a terminal passed run; failed and cancelled runs remain ineligible.
 - No-Mistakes status, intent, and CI-log observations use the shared bounded call boundary.
 - Every completion requires path-specific terminal evidence and records its plan path and authoritative completed head.
-- A changed worktree head invalidates completion unless the bound No-Mistakes run proves the current content is accounted for by the planned chain: a strict descendant of the planned head, a faithful restamp of the validation-base-to-planned chain, or a strict descendant of such a faithful restamp; active runs must prove pipeline ownership through branch_sync or `axi sync --check`, while terminal passed runs prove the advance through their own reported head.
+- A changed worktree head invalidates completion unless the bound No-Mistakes run proves the current content is accounted for by the planned chain: a strict descendant of the planned head, a faithful restamp of the validation-base-to-planned chain, or a strict descendant of such a faithful restamp; active runs must prove run-owned branch state through branch_sync or `axi sync --check`, while terminal passed runs prove the advance through their own reported head.
 - A chain the pipeline's rebase step restamped binds and completes only when it is a faithful restamp of the planned chain from the recorded validation base, and a restamped chain followed by additional run-owned commits binds and completes as a run-owned descendant that preserves the same branch and pipeline-ownership checks.
 - Unrelated, missing, or ambiguous drift remains refused, and a terminal run that did not pass never seals an advance.
 - Local-only readiness and guarded landing consume one fail-closed executable default-branch resolver.
@@ -57,15 +57,16 @@ Observed on 2026-09-05 in run `01M1RW6JNH5C5VN15PPRYDW3J0`: planned head `874ce3
 The third shape is a restamped chain followed by additional run-owned commits: the pipeline first restamps the planned chain, then adds review or document commits on top, so the current head is a strict descendant of a faithful restamp.
 
 The relaxed checks use one shared content-identity predicate, `fm_nm_head_is_accounted` in `bin/fm-nm-run-lib.sh`.
-`--bind-run` accepts the planned head or a faithful restamp when the run reports the task branch and has an eligible checks-passed or active status; a strict descendant of either additionally requires active pipeline ownership or a terminal passed run.
+`--bind-run` accepts the planned head or a faithful restamp when the run reports the task branch and has an eligible checks-passed or active status; a strict descendant of either additionally requires active run-owned branch evidence or a terminal passed run.
 `--complete` accepts the same shapes, with branch identity and ownership required whenever the run advanced beyond the planned head.
-A descendant is accepted only when the run reports the same task branch and, for active runs, `branch_sync.state` is `pipeline_owned`; when `axi status` omits `branch_sync`, `axi sync --check` supplies the authoritative run-owned head evidence and `submitted_head`/`current_head` cross-check.
+A descendant is accepted only when the run reports the same task branch and, for active runs, `fm_nm_run_branch_ownership` in `bin/fm-nm-run-lib.sh` proves the run-owned branch state: `branch_sync.state` `pipeline_owned`, either in `axi status` or `axi sync --check`, or the converged `synchronized` state once the pipeline pushed its head back and the run stays active only to monitor its PR.
+The synchronized acceptance requires the complete `axi sync --check` evidence - the same run id, `submitted_head` resolving to the validated head, `current_head` and the reported local head both resolving to the run's observed head, `relation` equal, and `safety` `already_synchronized` - so synchronized alone never proves a pass and foreign, stale, or incomplete readouts stay refused.
 
 Chain provenance is the content-identity mechanism, stated in `fm_nm_head_is_faithful_restamp` in `bin/fm-nm-run-lib.sh`.
 It resolves the recorded validation base, requires it to be an ancestor of both heads, requires equal commit counts, and compares each corresponding commit tree in base-to-head order.
 The descendant-of-restamp check extends this by taking the leading segment of the candidate's first-parent chain and requiring that segment to be a faithful restamp, with at least one additional commit after it.
 Foreign drift, unrelated same-tree tips, reverted foreign commits, rebases onto changed bases, and unowned or mismatched branches stay refused because they break ancestry, count, tree comparison, branch identity, or run ownership.
-Every other completion requirement is unchanged: the run must still be the bound run at the current generation, still be genuinely passed or checks-green, and still report the current worktree branch while active with pipeline ownership or be terminal PASSED otherwise.
+Every other completion requirement is unchanged: the run must still be the bound run at the current generation, still be genuinely passed or checks-green, and still report the current worktree branch while active with run-owned branch evidence or be terminal PASSED otherwise.
 
 ## Known limitations
 
@@ -121,6 +122,8 @@ ok - terminal pipeline-owned descendant binds and completes
 ok - restamp chain followed by pipeline doc commit binds and completes
 ok - active descendant binds using axi sync fallback when axi status omits branch_sync
 ok - unowned active descendant binding is rejected
+ok - converged synchronized run binds and completes while monitoring its PR
+ok - converged synchronized binding requires the full run-owned sync evidence
 ok - descendant bind rejects the wrong branch
 ok - low-risk mechanical changes can skip a full No-Mistakes run
 ok - low risk requires safe changelog prose and file-bound mechanical evidence
