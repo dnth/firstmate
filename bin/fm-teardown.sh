@@ -179,6 +179,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-secondmate-parent-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
+# shellcheck source=bin/fm-secondmate-nudge-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
@@ -405,6 +407,7 @@ remote_secondmate_teardown() {
     [ -e "$_turnend_marker" ] || continue
     rm -f -- "$_turnend_marker"
   done
+  rm -f -- "$(fm_secondmate_nudge_marker_path "$STATE" "$ID")"
   printf 'teardown %s complete (remote %s:%s)\n' "$ID" "$remote_host" "$remote_home"
   return 0
 }
@@ -2734,6 +2737,9 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.hermes-turnend-token" "$STATE/$ID.hermes-session" \
   "$STATE/$ID.hermes-started" \
   "$STATE/.$ID.open-decisions-cursor"
+if [ "$KIND" = secondmate ]; then
+  rm -f -- "$(fm_secondmate_nudge_marker_path "$STATE" "$ID")"
+fi
 # Per-generation turn-end markers (state/<id>.turn-ended.<spawn_gen>) for every gen.
 for _turnend_marker in "$STATE/$ID".turn-ended.*; do
   [ -e "$_turnend_marker" ] || continue
