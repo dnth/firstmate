@@ -121,6 +121,32 @@ fm_nm_head_is_faithful_restamp() {  # <worktree> <base> <validated-head> <candid
   [ "$validated_trees" = "$candidate_trees" ]
 }
 
+# 0 when $4 is accounted for by the validated chain in worktree $1.
+# It matches the validated head itself, a faithful restamp of the validated
+# chain from $2, a strict descendant of $3, or a strict descendant of a faithful
+# restamp of the validated chain.
+fm_nm_head_is_accounted() {  # <worktree> <base> <validated-head> <candidate-head>
+  local wt=$1 base=$2 validated=$3 candidate=$4
+  local base_full validated_full candidate_full validated_count prefix_head prefix_count
+  base_full=$(fm_nm_resolve_head "$wt" "$base") || return 1
+  validated_full=$(fm_nm_resolve_head "$wt" "$validated") || return 1
+  candidate_full=$(fm_nm_resolve_head "$wt" "$candidate") || return 1
+  [ "$candidate_full" = "$validated_full" ] && return 0
+  fm_nm_head_is_faithful_restamp "$wt" "$base_full" "$validated_full" "$candidate_full" && return 0
+  fm_nm_head_descends_from "$wt" "$validated_full" "$candidate_full" && return 0
+  # Pipeline restamps can be followed by additional owned commits; the leading
+  # segment must be a faithful restamp of the validated chain from the base.
+  validated_count=$(git -C "$wt" rev-list --count "$base_full..$validated_full" 2>/dev/null) || return 1
+  [ "$validated_count" -gt 0 ] || return 1
+  prefix_head=$(git -C "$wt" rev-list --first-parent --reverse "$base_full..$candidate_full" 2>/dev/null | head -n "$validated_count" | tail -1) || return 1
+  [ -n "$prefix_head" ] || return 1
+  prefix_count=$(git -C "$wt" rev-list --count "$base_full..$prefix_head" 2>/dev/null) || return 1
+  [ "$prefix_count" -eq "$validated_count" ] || return 1
+  fm_nm_head_is_faithful_restamp "$wt" "$base_full" "$validated_full" "$prefix_head" || return 1
+  git -C "$wt" merge-base --is-ancestor "$prefix_head" "$candidate_full" 2>/dev/null || return 1
+  [ "$prefix_head" != "$candidate_full" ] || return 1
+}
+
 # 0 when a run's branch presentation identifies the checked-out branch. The
 # no-mistakes CLI renders Firstmate's slash branch names with a hyphen, so both
 # authoritative spellings are accepted and no other branch is normalized.

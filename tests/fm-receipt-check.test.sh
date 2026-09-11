@@ -22,6 +22,7 @@ cat > "$FAKE_NO_MISTAKES" <<'EOF'
 case "$*" in
   *"axi logs --step intent --run "*) printf '%s\n' "${FM_FAKE_NM_INTENT:-}" ;;
   *"axi logs --step ci --run "*) printf '%s\n' "${FM_FAKE_NM_CI_LOG:-}" ;;
+  *"axi sync"*) printf '%s\n' "${FM_FAKE_NM_SYNC:-$FM_FAKE_NM_STATUS}" ;;
   *) printf '%s\n' "$FM_FAKE_NM_STATUS" ;;
 esac
 EOF
@@ -37,12 +38,17 @@ chmod +x "$FAIL_NO_MISTAKES"
 nm_status() {  # <run-id> <head> <outcome>
   local status
   if [ "$3" = passed ]; then status=completed; else status=running; fi
-  printf 'run:\n  id: "%s"\n  status: %s\n  head: "%s"\noutcome: %s\n' "$1" "$status" "$2" "$3"
+  printf 'run:\n  id: "%s"\n  branch: fm/%s\n  status: %s\n  head: "%s"\noutcome: %s\n' "$1" "${id:-}" "$status" "$2" "$3"
 }
 
 nm_pipeline_status() {  # <run-id> <branch> <head> <status> <outcome> <sync-state>
   printf 'run:\n  id: "%s"\n  branch: %s\n  status: %s\n  head: "%s"\noutcome: %s\nbranch_sync:\n  state: %s\n' \
     "$1" "$2" "$4" "$3" "$5" "$6"
+}
+
+nm_sync_status() {  # <run-id> <branch> <submitted-head> <current-head> <sync-state>
+  printf 'branch_sync:\n  state: %s\nlocal:\n  branch: %s\n  head: "%s"\npipeline:\n  run: "%s"\n  status: running\n  submitted_head: "%s"\n  current_head: "%s"\n' \
+    "$5" "$2" "$4" "$1" "$3" "$4"
 }
 
 test_help_advertises_generation_bound_run_binding() {
@@ -488,7 +494,7 @@ test_ci_green_log_allows_exact_bound_run_completion() {
     FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --bind-run RUN-ci-log --generation "$generation" >/dev/null \
     || fail "CI-log readiness fixture run binding failed"
-  ci_status=$(printf 'run:\n  id: "RUN-ci-log"\n  status: ci\n  head: "%s"\noutcome: pending\n' "$head")
+  ci_status=$(printf 'run:\n  id: "RUN-ci-log"\n  branch: fm/%s\n  status: ci\n  head: "%s"\noutcome: pending\n' "$id" "$head")
   FM_FAKE_NM_STATUS="$ci_status" FM_FAKE_NM_CI_LOG='CI checks running' \
     FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed >/dev/null 2>&1
@@ -818,7 +824,7 @@ test_terminal_and_failed_runs_bind_by_current_plan() {
   project="$TMP_ROOT/project-$id"
   head=$(git -C "$project" rev-parse HEAD)
   generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
-  terminal=$(printf 'run:\n  id: "RUN-terminal"\n  status: completed\n  head: "%s"\noutcome: checks-passed\n' "$head")
+  terminal=$(printf 'run:\n  id: "RUN-terminal"\n  branch: fm/%s\n  status: completed\n  head: "%s"\noutcome: checks-passed\n' "$id" "$head")
   FM_FAKE_NM_STATUS="$terminal" FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: $generation" \
     FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --bind-run RUN-terminal --generation "$generation" >/dev/null \
@@ -833,7 +839,7 @@ test_terminal_and_failed_runs_bind_by_current_plan() {
   project="$TMP_ROOT/project-$id"
   head=$(git -C "$project" rev-parse HEAD)
   generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
-  failed=$(printf 'run:\n  id: "RUN-failed"\n  status: failed\n  head: "%s"\noutcome: failed\n' "$head")
+  failed=$(printf 'run:\n  id: "RUN-failed"\n  branch: fm/%s\n  status: failed\n  head: "%s"\noutcome: failed\n' "$id" "$head")
   FM_FAKE_NM_STATUS="$failed" FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: $generation" \
     FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --bind-run RUN-failed --generation "$generation" >/dev/null 2>&1
@@ -1267,6 +1273,149 @@ test_restamped_chains_refuse_foreign_content_and_unowned_rewrites() {
   rc=$?
   expect_code 2 "$rc" "custody-returned active restamp without ownership"
   pass "restamped chains enforce provenance and ownership"
+}
+
+test_active_pipeline_owned_descendant_binds_without_replan() {
+  local id=receipt-active-descendant base project initial_head current_head generation status
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint passed
+  FM_FAKE_NM_STATUS='' FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "active descendant plan failed"
+  project="$TMP_ROOT/project-$id"
+  initial_head=$(git -C "$project" rev-parse HEAD)
+  generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
+  status=$(nm_pipeline_status RUN-active-descendant "fm/$id" "$initial_head" ci '' pipeline_owned)
+  FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-active-descendant --generation "$generation" >/dev/null \
+    || fail "active descendant initial binding failed"
+  printf 'pipeline fix\n' >> "$project/src/app.sh"
+  git -C "$project" add src/app.sh
+  git -C "$project" commit -q -m 'no-mistakes: apply CI fixes'
+  current_head=$(git -C "$project" rev-parse HEAD)
+  status=$(nm_pipeline_status RUN-active-descendant "fm/$id" "$current_head" ci '' pipeline_owned)
+  FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-active-descendant --generation "$generation" >/dev/null \
+    || fail "active pipeline-owned descendant was not bound without replanning"
+  pass "active pipeline-owned descendant binds without replan"
+}
+
+test_terminal_pipeline_owned_descendant_binds_and_completes() {
+  local id=receipt-terminal-descendant base project initial_head current_head generation status out
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint passed
+  FM_FAKE_NM_STATUS='' FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "terminal descendant plan failed"
+  project="$TMP_ROOT/project-$id"
+  initial_head=$(git -C "$project" rev-parse HEAD)
+  generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
+  status=$(nm_pipeline_status RUN-terminal-descendant "fm/$id" "$initial_head" ci '' pipeline_owned)
+  FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-terminal-descendant --generation "$generation" >/dev/null \
+    || fail "terminal descendant initial binding failed"
+  printf 'doc commit\n' >> "$project/src/app.sh"
+  git -C "$project" add src/app.sh
+  git -C "$project" commit -q -m 'no-mistakes: docs'
+  current_head=$(git -C "$project" rev-parse HEAD)
+  status=$(nm_pipeline_status RUN-terminal-descendant "fm/$id" "$current_head" completed passed agent_owned)
+  FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-terminal-descendant --generation "$generation" >/dev/null \
+    || fail "terminal descendant was not bound"
+  out=$(FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed) \
+    || fail "terminal descendant completion failed"
+  printf '%s' "$out" | jq -e --arg head "$current_head" '.status == "completed" and .completed_head == $head' >/dev/null \
+    || fail "terminal descendant completion did not record the advanced head"
+  pass "terminal pipeline-owned descendant binds and completes"
+}
+
+test_pipeline_rebase_restamp_plus_doc_commit_binds_and_completes() {
+  local id=receipt-restamp-doc base project validated_head restamped current_head generation status out
+  id=receipt-restamp-doc
+  read -r base project validated_head generation < <(plan_restamp_fixture "$id")
+  restamped=$(restamp_chain "$project" "$base")
+  [ "$(git -C "$project" rev-parse "$restamped^{tree}")" = "$(git -C "$project" rev-parse "$validated_head^{tree}")" ] \
+    || fail "restamp fixture did not preserve the validated content"
+  printf 'doc commit after rebase\n' >> "$project/src/app.sh"
+  git -C "$project" add src/app.sh
+  git -C "$project" commit -q -m 'no-mistakes: document the rebase'
+  current_head=$(git -C "$project" rev-parse HEAD)
+  status=$(nm_pipeline_status RUN-restamp-doc "fm/$id" "$current_head" ci '' pipeline_owned)
+  FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-restamp-doc --generation "$generation" >/dev/null \
+    || fail "restamp-plus-doc descendant binding failed"
+  out=$(FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_CI_LOG='all CI checks passed - still monitoring' \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed) \
+    || fail "restamp-plus-doc completion failed"
+  printf '%s' "$out" | jq -e --arg head "$current_head" '.status == "completed" and .completed_head == $head' >/dev/null \
+    || fail "restamp-plus-doc completion did not record the advanced head"
+  pass "restamp chain followed by pipeline doc commit binds and completes"
+}
+
+test_active_descendant_bind_via_axi_sync_fallback() {
+  local id=receipt-axi-sync-fallback base project initial_head current_head generation status sync
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint passed
+  FM_FAKE_NM_STATUS='' FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "axi sync fallback plan failed"
+  project="$TMP_ROOT/project-$id"
+  initial_head=$(git -C "$project" rev-parse HEAD)
+  generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
+  printf 'pipeline fix\n' >> "$project/src/app.sh"
+  git -C "$project" add src/app.sh
+  git -C "$project" commit -q -m 'no-mistakes: apply CI fixes'
+  current_head=$(git -C "$project" rev-parse HEAD)
+  status=$(nm_status RUN-axi-sync-fallback "$current_head" '')
+  sync=$(nm_sync_status RUN-axi-sync-fallback "fm/$id" "$initial_head" "$current_head" pipeline_owned)
+  FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_SYNC="$sync" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-axi-sync-fallback --generation "$generation" >/dev/null \
+    || fail "active descendant was not bound via axi sync fallback"
+  pass "active descendant binds using axi sync fallback when axi status omits branch_sync"
+}
+
+test_unowned_active_descendant_bind_rejected() {
+  local id=receipt-unowned-descendant base project current_head generation status rc
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint passed
+  FM_FAKE_NM_STATUS='' FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "unowned descendant plan failed"
+  project="$TMP_ROOT/project-$id"
+  generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
+  printf 'unproven change\n' >> "$project/src/app.sh"
+  git -C "$project" add src/app.sh
+  git -C "$project" commit -q -m 'unproven'
+  current_head=$(git -C "$project" rev-parse HEAD)
+  status=$(nm_pipeline_status RUN-unowned-descendant "fm/$id" "$current_head" ci '' synchronized)
+  FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-unowned-descendant --generation "$generation" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "bind accepted an unowned active descendant"
+  pass "unowned active descendant binding is rejected"
+}
+
+test_descendant_bind_rejects_wrong_branch() {
+  local id=receipt-descendant-wrong-branch base project current_head generation status rc
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint passed
+  FM_FAKE_NM_STATUS='' FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "wrong-branch descendant plan failed"
+  project="$TMP_ROOT/project-$id"
+  generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
+  printf 'other branch change\n' >> "$project/src/app.sh"
+  git -C "$project" add src/app.sh
+  git -C "$project" commit -q -m 'change'
+  current_head=$(git -C "$project" rev-parse HEAD)
+  status=$(nm_pipeline_status RUN-wrong-branch "someone-elses-branch" "$current_head" ci '' pipeline_owned)
+  FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-wrong-branch --generation "$generation" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "bind accepted a descendant on the wrong branch"
+  pass "descendant bind rejects the wrong branch"
 }
 
 test_no_mistakes_observations_are_bounded() {
@@ -1743,7 +1892,7 @@ test_agent_supplied_intent_log_binds_and_completes() {
     FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --bind-run RUN-agent-intent --generation "$generation" >/dev/null \
     || fail "binding failed against the real agent-supplied intent-log shape"
-  ci_status=$(printf 'run:\n  id: "RUN-agent-intent"\n  status: ci\n  head: "%s"\noutcome: pending\n' "$head")
+  ci_status=$(printf 'run:\n  id: "RUN-agent-intent"\n  branch: fm/%s\n  status: ci\n  head: "%s"\noutcome: pending\n' "$id" "$head")
   FM_FAKE_NM_STATUS="$ci_status" FM_FAKE_NM_CI_LOG='all CI checks passed - still monitoring until merged or closed' \
     FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed >/dev/null \
@@ -1823,6 +1972,12 @@ test_completion_accepts_only_pipeline_owned_head_advance
 test_terminal_passed_run_seals_its_own_pipeline_head_advance
 test_pipeline_rebase_restamp_binds_and_seals_identical_content
 test_restamped_chains_refuse_foreign_content_and_unowned_rewrites
+test_active_pipeline_owned_descendant_binds_without_replan
+test_terminal_pipeline_owned_descendant_binds_and_completes
+test_pipeline_rebase_restamp_plus_doc_commit_binds_and_completes
+test_active_descendant_bind_via_axi_sync_fallback
+test_unowned_active_descendant_bind_rejected
+test_descendant_bind_rejects_wrong_branch
 test_low_risk_skips_no_mistakes_under_explicit_policy
 test_low_risk_requires_safe_prose_and_applicable_evidence
 test_implementation_completion_precedes_planning

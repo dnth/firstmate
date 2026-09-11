@@ -44,17 +44,17 @@
 # The resolved validation_tier, validation_path, reason code, base, head, size,
 # and start time are appended to state/<task-id>.meta for durable inspection.
 # Every completion records validation_completed_head and refuses current head
-# drift unless the bound No-Mistakes run accounts for the current content, in
-# one of two shapes. A descendant of the latest validation_head is proved by
-# pipeline ownership while the run is active and by the run's own reported head
-# once it is terminal and PASSED, so a terminal run needs no replan and no fresh
-# run to seal its own pipeline commits. A chain the pipeline's rebase step
-# restamped is proved as a faithful restamp of the validation-base-to-head
-# chain, because that step re-commits every branch commit with a fresh committer
-# stamp and so reports a head that is neither validation_head nor a descendant
-# of it; --bind-run accepts and records that same restamped head. Foreign
-# commits landed after the run still refuse completion because they break the
-# chain's ancestry, count, or pairwise tree identity.
+# drift unless the bound No-Mistakes run accounts for the current content in one
+# of three shapes: a strict descendant of the latest validation_head, a faithful
+# restamp of the validation-base-to-head chain, or a strict descendant of such a
+# restamp. Active descendants require current pipeline ownership and terminal
+# passed runs prove the advance through their own reported head, so a terminal
+# run needs no replan or fresh run to seal its own pipeline commits. A chain the
+# pipeline's rebase step restamped is proved by matching every corresponding
+# commit tree, even though fresh committer stamps make the reported head neither
+# validation_head nor its descendant. Foreign commits still refuse completion
+# because they break ancestry, count, or pairwise tree identity, or lack the
+# required run-owned branch evidence.
 # When --plan returns path=receipts-mechanical, append fresh successful mechanical
 # evidence for every changed file with:
 #
@@ -674,15 +674,67 @@ if [ "$ACTION" = bind-run ]; then
     passed:*|checks-passed:*|*:passed|*:checks-passed) BIND_STATE_OK=1 ;;
     running:*|fixing:*|ci:*|awaiting_approval:*) BIND_STATE_OK=1 ;;
   esac
-  # The run's head is the planned commit itself or a faithful restamp of its
-  # validated chain, proven from the recorded validation base.
+  BIND_RUN_BRANCH=$(fm_nm_field "$BIND_OUT" branch)
+  BIND_BRANCH_MATCH=0
+  if [ -n "$BIND_RUN_BRANCH" ] && fm_nm_branch_matches_worktree "$BIND_WORKTREE" "$BIND_RUN_BRANCH"; then
+    BIND_BRANCH_MATCH=1
+  fi
+  # The run's head is the planned commit itself, a faithful restamp of the
+  # validated chain, or a proven pipeline-owned descendant that advanced after
+  # the plan was recorded (review/doc/lint fix commits). Allow descendants so
+  # binding does not require a fresh plan for every no-mistakes fix round.
   BIND_RUN_HEAD=$(fm_nm_resolve_head "$BIND_WORKTREE" "$BIND_OBSERVED_HEAD" || true)
-  if [ -n "$BIND_RUN_HEAD" ] && [ "$BIND_RUN_HEAD" != "$BIND_HEAD" ] \
-    && ! fm_nm_head_is_faithful_restamp "$BIND_WORKTREE" "$BIND_BASE" "$BIND_HEAD" "$BIND_RUN_HEAD"; then
-    BIND_RUN_HEAD=
+  BIND_HEAD_ACCOUNTED=0
+  if [ -n "$BIND_RUN_HEAD" ]; then
+    if [ "$BIND_RUN_HEAD" = "$BIND_HEAD" ]; then
+      [ "$BIND_BRANCH_MATCH" -eq 1 ] && BIND_HEAD_ACCOUNTED=1
+    elif fm_nm_head_is_faithful_restamp "$BIND_WORKTREE" "$BIND_BASE" "$BIND_HEAD" "$BIND_RUN_HEAD"; then
+      [ "$BIND_BRANCH_MATCH" -eq 1 ] && BIND_HEAD_ACCOUNTED=1
+    elif fm_nm_head_is_accounted "$BIND_WORKTREE" "$BIND_BASE" "$BIND_HEAD" "$BIND_RUN_HEAD"; then
+      # The head advanced after the plan; require branch identity and active or
+      # terminal passed ownership so an unrelated descendant cannot bind.
+      if [ "$BIND_BRANCH_MATCH" -eq 1 ]; then
+        if fm_nm_run_is_terminal_passed "$BIND_OUT"; then
+          BIND_HEAD_ACCOUNTED=1
+        elif fm_nm_run_is_active "$BIND_OUT"; then
+          branch_sync_state=$(fm_nm_branch_sync_state "$BIND_OUT")
+          if [ "$branch_sync_state" != pipeline_owned ]; then
+            # Real no-mistakes `axi status` for an active run does not include a
+            # branch_sync block; use `axi sync --check` to confirm pipeline ownership.
+            SYNC_OUT=$(fm_nm_run_checked "$BIND_WORKTREE" "$NM_TIMEOUT" axi sync --check) || SYNC_OUT=
+            if [ -n "$SYNC_OUT" ]; then
+              sync_state=$(fm_nm_branch_sync_state "$SYNC_OUT")
+              sync_run=$(fm_nm_field "$SYNC_OUT" run)
+              if [ "$sync_state" = pipeline_owned ]; then
+                if [ -n "$sync_run" ] && [ "$sync_run" = "$RUN_ID_INPUT" ]; then
+                  branch_sync_state=$sync_state
+                  # Cross-check the run's own submitted and current heads when axi
+                  # sync reports them; this is the authoritative run-owned evidence.
+                  sync_submitted=$(fm_nm_field "$SYNC_OUT" submitted_head)
+                  sync_current=$(fm_nm_field "$SYNC_OUT" current_head)
+                  if [ -n "$sync_submitted" ]; then
+                    if [ "$(fm_nm_resolve_head "$BIND_WORKTREE" "$sync_submitted" || true)" != "$BIND_HEAD" ]; then
+                      branch_sync_state=
+                    fi
+                  fi
+                  if [ -n "$sync_current" ]; then
+                    if [ "$(fm_nm_resolve_head "$BIND_WORKTREE" "$sync_current" || true)" != "$BIND_RUN_HEAD" ]; then
+                      branch_sync_state=
+                    fi
+                  fi
+                fi
+              fi
+            fi
+          fi
+          if [ "$branch_sync_state" = pipeline_owned ]; then
+            BIND_HEAD_ACCOUNTED=1
+          fi
+        fi
+      fi
+    fi
   fi
   [ "$BIND_OBSERVED_ID" = "$RUN_ID_INPUT" ] \
-    && [ -n "$BIND_RUN_HEAD" ] \
+    && [ "$BIND_HEAD_ACCOUNTED" -eq 1 ] \
     && [ "$BIND_STATE_OK" -eq 1 ] \
     || { echo "error: No-Mistakes run does not match the latest plan" >&2; exit 2; }
   [ -n "$BIND_GENERATION" ] || { echo "error: validation generation is missing" >&2; exit 2; }
@@ -729,7 +781,7 @@ if [ "$ACTION" = mechanical-ready ]; then
 fi
 
 record_validation_completed() {
-  local started path generation published_generation completed completed_head completed_path completed_evidence completed_generation now worktree validation_base validated_head current_head completion_head expected_evidence observed pr pr_head branch boundary new_receipts run_id run_path run_generation run_out observed_id observed_head observed_head_full outcome run_status default_ref default_branch ci_state run_ready changed_file completion_files run_branch current_branch branch_sync_state run_head_matches_current restamp_accounted
+  local started path generation published_generation completed completed_head completed_path completed_evidence completed_generation now worktree validation_base validated_head current_head completion_head expected_evidence observed pr pr_head branch boundary new_receipts run_id run_path run_generation run_out observed_id observed_head observed_head_full outcome run_status default_ref default_branch ci_state run_ready changed_file completion_files run_branch current_branch branch_sync_state run_head_matches_current restamp_accounted SYNC_OUT sync_state sync_run sync_submitted sync_current
   VALIDATION_LOCK="$STATE/.$ID.validation-plan.lock"
   if ! mkdir "$VALIDATION_LOCK" 2>/dev/null; then
     VALIDATION_LOCK=
@@ -835,8 +887,7 @@ record_validation_completed() {
       [ "$run_head_matches_current" -eq 1 ] \
         || { release_validation_lock; echo "error: bound No-Mistakes run head does not account for the current worktree content" >&2; return 1; }
       if [ "$current_head" != "$validated_head" ]; then
-        fm_nm_head_descends_from "$worktree" "$validated_head" "$current_head" \
-          || fm_nm_head_is_faithful_restamp "$worktree" "$validation_base" "$validated_head" "$current_head" \
+        fm_nm_head_is_accounted "$worktree" "$validation_base" "$validated_head" "$current_head" \
           || { release_validation_lock; echo "error: current head neither descends from nor reproduces the implementation head" >&2; return 1; }
         completion_head=$current_head
       fi
@@ -848,17 +899,39 @@ record_validation_completed() {
           echo "error: pipeline run branch is not the current worktree branch" >&2
           return 1
         fi
-        # The advance is authoritative in exactly two shapes, and the head
-        # accounting checked above is what keeps both honest. While the run is
-        # ACTIVE the pipeline must currently own the branch. Once the run is
-        # TERMINAL it has released the branch, so pipeline ownership is gone by
-        # construction and requiring it would refuse a genuinely passed run
-        # whose own review and doc commits advanced the head; there the run's
-        # own reported head is the authority, and a foreign commit landed after
-        # the run finished still fails that accounting because the run reports
-        # neither that commit nor its content.
+        # The advance is authoritative only while the run is ACTIVE and the
+        # pipeline owns the branch, or once the run has reached a terminal PASSED
+        # state and released the branch. Active ownership is shown by a
+        # branch_sync state of pipeline_owned, either directly in the axi status
+        # output or in `axi sync --check` for current no-mistakes.
         if fm_nm_run_is_active "$run_out"; then
           branch_sync_state=$(fm_nm_branch_sync_state "$run_out")
+          if [ "$branch_sync_state" != pipeline_owned ]; then
+            SYNC_OUT=$(fm_nm_run_checked "$worktree" "$NM_TIMEOUT" axi sync --check) || SYNC_OUT=
+            if [ -n "$SYNC_OUT" ]; then
+              sync_state=$(fm_nm_branch_sync_state "$SYNC_OUT")
+              sync_run=$(fm_nm_field "$SYNC_OUT" run)
+              if [ "$sync_state" = pipeline_owned ]; then
+                if [ -n "$sync_run" ] && [ "$sync_run" = "$run_id" ]; then
+                  branch_sync_state=$sync_state
+                  # Cross-check the run's own submitted and current heads when axi
+                  # sync reports them; this is the authoritative run-owned evidence.
+                  sync_submitted=$(fm_nm_field "$SYNC_OUT" submitted_head)
+                  sync_current=$(fm_nm_field "$SYNC_OUT" current_head)
+                  if [ -n "$sync_submitted" ]; then
+                    if [ "$(fm_nm_resolve_head "$worktree" "$sync_submitted" || true)" != "$validated_head" ]; then
+                      branch_sync_state=
+                    fi
+                  fi
+                  if [ -n "$sync_current" ]; then
+                    if [ "$(fm_nm_resolve_head "$worktree" "$sync_current" || true)" != "$observed_head_full" ]; then
+                      branch_sync_state=
+                    fi
+                  fi
+                fi
+              fi
+            fi
+          fi
           if [ "$branch_sync_state" != pipeline_owned ]; then
             release_validation_lock
             if [ "$restamp_accounted" -eq 1 ]; then
