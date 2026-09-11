@@ -312,8 +312,42 @@ yolo on a ship brief|brief-refused-b1 some-proj --mode direct-PR --yolo on|--yol
 yolo=value form on a ship brief|brief-refused-b2 some-proj --mode direct-PR --yolo=off|--yolo is not a brief input
 mode on a scout brief|brief-refused-b3 some-proj --scout --mode direct-PR|--mode applies only to ship briefs
 mode on a secondmate charter|brief-refused-b4 --secondmate --no-projects --mode no-mistakes|--mode applies only to ship briefs
+orchestrate on a scout brief|brief-refused-b5 some-proj --scout --orchestrate|--orchestrate applies only to ship briefs
+orchestrate on a secondmate charter|brief-refused-b6 --secondmate --no-projects --orchestrate|--orchestrate applies only to ship briefs
 ROWS
-  pass "fm-brief.sh: --yolo and scout/secondmate --mode are refused, never silently dropped"
+  pass "fm-brief.sh: --yolo, scout/secondmate --mode, and non-ship --orchestrate are refused, never silently dropped"
+}
+
+# The opt-in marker is explicit task data: a ship brief carries
+# `orchestration: enabled` only when --orchestrate was passed, and the same
+# scaffold without the flag stays byte-free of the marker.
+test_orchestrate_opt_in_adds_marker_only_on_ship() {
+  local home brief out status
+  home="$TMP_ROOT/orchestrate-home"
+  mkdir -p "$home/data"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-orch-c1 some-proj --mode direct-PR --orchestrate 2>&1)
+  status=$?
+  expect_code 0 "$status" "fm-brief.sh ship --orchestrate should exit 0"
+  assert_contains "$out" "replace {TASK} and every {ACCEPTANCE CRITERION}" \
+    "orchestrate scaffold success omitted required placeholder replacements"
+  brief="$home/data/brief-orch-c1/brief.md"
+  assert_present "$brief" "orchestrate brief was not scaffolded"
+  assert_grep "# Orchestration" "$brief" "orchestrate brief missing the Orchestration section"
+  [ "$(head -n 3 "$brief")" = $'---\norchestration: enabled\n---' ] \
+    || fail "orchestrate brief did not record the front-matter orchestration marker"
+  # shellcheck disable=SC2016
+  assert_grep 'native `task` subagents' "$brief" \
+    "orchestrate brief missing the native subagent boundary statement"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-plain-c2 some-proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "plain ship brief should scaffold"
+  brief="$home/data/brief-plain-c2/brief.md"
+  assert_no_grep "orchestration: enabled" "$brief" "plain ship brief leaked the orchestration marker"
+  assert_no_grep "# Orchestration" "$brief" "plain ship brief leaked the Orchestration section"
+  assert_no_grep "subagents" "$brief" "plain ship brief leaked the orchestration subagent statement"
+
+  pass "fm-brief.sh: --orchestrate adds the ship marker only when opted in"
 }
 
 test_faster_paths_use_configured_authority_without_stacked_review() {
@@ -860,6 +894,7 @@ test_ship_modes_generate_clean_briefs
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
+test_orchestrate_opt_in_adds_marker_only_on_ship
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording

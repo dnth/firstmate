@@ -408,6 +408,67 @@ test_capability_probe_never_falls_back_when_omp_is_missing() {
   pass "selected OMP refuses instead of falling back to another harness"
 }
 
+# An orchestrate opt-in is brief-level data, not a spawn flag. It must fail before
+# any endpoint exists if the selected harness is not OMP, so the keyword can never
+# be forced onto a different runtime.
+test_orchestrate_marker_refuses_non_omp_harness() {
+  local home proj id out status
+  home="$TMP_ROOT/orchestrate-refuse-home"
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  proj="$home/project"
+  fm_git_init_commit "$proj" || fail "could not create project for orchestrate refusal"
+  id="brief-orch-refuse"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$(basename "$proj")" --mode direct-PR --orchestrate 2>&1)
+  status=$?
+  expect_code 0 "$status" "orchestrate ship brief should scaffold"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-spawn.sh" "$id" "$proj" --mode direct-PR --yolo off --harness claude --backend tmux 2>&1)
+  status=$?
+  expect_code 1 "$status" "orchestration marker with a non-omp harness should refuse"
+  assert_contains "$out" "orchestration requires harness=omp" "non-omp harness refusal did not explain the required harness"
+  pass "fm-spawn: orchestration marker refuses non-omp harnesses"
+}
+
+# An orchestrate opt-in is brief-level data. The verified OMP template is the only
+# launch path that injects the exact `orchestrate` keyword; a raw launch command
+# bypasses that template and must refuse a marked brief before endpoint creation.
+test_orchestrate_marker_refuses_raw_launch_command() {
+  local home proj id out status
+  home="$TMP_ROOT/orchestrate-raw-refuse-home"
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  proj="$home/project"
+  fm_git_init_commit "$proj" || fail "could not create project for raw launch refusal"
+  id="brief-orch-raw"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$(basename "$proj")" --mode direct-PR --orchestrate 2>&1)
+  status=$?
+  expect_code 0 "$status" "orchestrate ship brief should scaffold"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-spawn.sh" "$id" "$proj" "cat /dev/null" --mode direct-PR --yolo off --backend tmux 2>&1)
+  status=$?
+  expect_code 1 "$status" "orchestration marker with a raw launch command should refuse"
+  assert_contains "$out" "orchestration requires the verified OMP launch template" "raw launch refusal did not explain the required template"
+  pass "fm-spawn: orchestration marker refuses raw launch commands"
+}
+
+test_task_text_marker_does_not_opt_in() {
+  local home proj brief out status
+  home="$TMP_ROOT/task-text-marker-home"
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  proj="$home/project"
+  fm_git_init_commit "$proj" || fail "could not create project for task marker regression"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-task-marker some-proj --mode direct-PR 2>&1)
+  status=$?
+  expect_code 0 "$status" "plain ship brief should scaffold for task marker regression"
+  brief="$home/data/brief-task-marker/brief.md"
+  sed -i '/^# Task$/a orchestration: enabled' "$brief"
+  sed -i 's/{TASK}/Complete the requested work/; s/{ACCEPTANCE CRITERION}/The task completes successfully/' "$brief"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-spawn.sh" brief-task-marker "$proj" --mode direct-PR --yolo off --harness claude --backend tmux 2>&1)
+  status=$?
+  case "$out" in
+    *"orchestration requires harness=omp"*) fail "task prose marker was misclassified as orchestration opt-in" ;;
+  esac
+  [ "$status" -ne 0 ] || fail "task marker regression unexpectedly launched a worker"
+  pass "fm-spawn: task prose marker does not opt into orchestration"
+}
+
 test_launch_boundary_marker_preserves_exact_omp_identity
 test_standalone_worker_uses_bound_identity
 test_standalone_primary_survives_executable_replacement
@@ -420,3 +481,6 @@ test_capability_probe_rejects_non_bun_entrypoint
 test_capability_probe_reports_every_missing_requirement
 test_capability_probe_scopes_exact_max_time_to_bounded_launches
 test_capability_probe_never_falls_back_when_omp_is_missing
+test_orchestrate_marker_refuses_non_omp_harness
+test_orchestrate_marker_refuses_raw_launch_command
+test_task_text_marker_does_not_opt_in

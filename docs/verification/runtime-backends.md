@@ -381,6 +381,31 @@ Raw-launch OMP refusals and direct non-OMP compatibility are covered by `tests/f
 The secondmate integration checks reran on 2026-08-27 and prove that the exact Firstmate primary and fleet-hook extensions remain permitted in the persistent home without allowing modified or unrelated tracked extension code.
 Live firing of the fleet hook's `tool_result`, `todo_reminder`, and `session.compacting` handlers is PENDING firstmate scratch OMP verification before merge; deterministic extension and spawn tests do not claim OMP event delivery.
 
+### OMP native orchestration opt-in
+
+The agent-runtime launch and activation contract is owned by the [harness-adapters skill](../../.agents/skills/harness-adapters/SKILL.md); this page records its verification evidence without restating that contract.
+
+The activation boundary was verified on 2026-09-10 against OMP 18.1.14. The live proof used an isolated `FM_HOME`, a disposable project, a private tmux socket, and the `tests/fm-omp-worker-tmux-live-e2e.test.sh` fixture shape:
+
+```sh
+omp --version
+FM_HOME="$fixture_home" bin/fm-brief.sh <id> <project> --mode local-only --orchestrate
+FM_HOME="$fixture_home" FM_BACKEND=tmux bin/fm-spawn.sh <id> <project> \
+  --mode local-only --yolo off --harness omp --model openai-codex/gpt-5.6-luna --effort low
+```
+
+Observed bounded output:
+
+```text
+omp/18.1.14
+spawned orch-live-worker harness=omp kind=ship mode=local-only yolo=off
+status: done: ready in branch fm/orch-live-worker
+session: orchestrate-notice injected; task toolCall dispatched CalcImplementation + GreetImplementation
+subagent sessions: CalcImplementation.jsonl, GreetImplementation.jsonl
+combined verification: python3 -m pytest tests/ 5 passed
+```
+
+The session file records one `orchestrate-notice` custom message, one `task` toolCall whose `tasks` array named two subagents (`CalcImplementation`, `GreetImplementation`), and the two corresponding `agent="task"` completion results. The worktree contains the committed `lib/calc.py` and `lib/greet.py` implementations, and the combined pytest suite passed.
 The Herdr role matrix required each expected turn-end or routed-reply notification to reach the durable queue or the primary follow-up transcript before the fixture drained it.
 
 The deterministic composer, tmux, and Herdr fixtures reran on 2026-08-26 and proved that the backend typed-submit primitive for an already-busy OMP target returns internal `queued-unconfirmed` only after Enter transport succeeds and the composer either clears or remains proven pending while native state is still working.

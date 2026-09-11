@@ -6,7 +6,7 @@
 # placeholder with the task description, concrete outcomes, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab] [--orchestrate]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #        fm-brief.sh --render-ship-delivery <task-id> <no-mistakes|direct-PR|local-only>
@@ -17,6 +17,11 @@
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
 #   captain-relevant escalations and marked from-firstmate replies append to this
 #   home's status file.
+#   --orchestrate opts an ordinary ship task into native OMP orchestration: it
+#   records the `orchestration: enabled` marker as front-matter at the top of the
+#   brief and lets bin/fm-spawn.sh carry the exact lowercase `orchestrate` keyword
+#   as a separate OMP launch message before the unchanged encoded brief. It is
+#   refused on scout and secondmate briefs, which are not ship tasks.
 #   --no-projects writes a project-less charter for a domain whose subject is the
 #   firstmate repo itself (its home is a firstmate worktree, its crews take pooled
 #   worktrees of the same repo). It is mutually exclusive with a project list, and
@@ -186,6 +191,7 @@ fi
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
+ORCHESTRATE=0
 MODE=
 MODE_SET=0
 POS=()
@@ -206,6 +212,7 @@ for a in "$@"; do
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
+    --orchestrate) ORCHESTRATE=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
@@ -240,6 +247,11 @@ ID=${POS[0]}
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
+  exit 1
+fi
+
+if [ "$ORCHESTRATE" -eq 1 ] && [ "$KIND" != ship ]; then
+  echo "error: --orchestrate applies only to ship briefs; a scout delivers a report and a secondmate is not a delivery task" >&2
   exit 1
 fi
 
@@ -492,8 +504,24 @@ case "$MODE" in
 esac
 DOD=$(render_ship_delivery "$ID" "$MODE")
 
+ORCHESTRATION_FRONTMATTER=""
+ORCHESTRATION_SECTION=""
+if [ "$ORCHESTRATE" -eq 1 ]; then
+  IFS= read -r -d '' ORCHESTRATION_FRONTMATTER <<'EOF' || true
+---
+orchestration: enabled
+---
+
+EOF
+  IFS= read -r -d '' ORCHESTRATION_SECTION <<'EOF' || true
+# Orchestration
+This task may use native `task` subagents for independent workstreams; you remain accountable for integrating and verifying their output.
+
+EOF
+fi
+
 IFS= read -r -d '' SHIP_BRIEF <<EOF || true
-You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+${ORCHESTRATION_FRONTMATTER:+$ORCHESTRATION_FRONTMATTER}You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 # Task
 {TASK}
@@ -501,7 +529,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 # Acceptance criteria
 - AC1: {ACCEPTANCE CRITERION}
 
-$HERDR_SECTION
+${ORCHESTRATION_SECTION:+$ORCHESTRATION_SECTION}$HERDR_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
