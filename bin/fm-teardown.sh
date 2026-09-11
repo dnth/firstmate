@@ -2723,7 +2723,6 @@ if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit $?
   remove_secondmate_registry_entry "$ID"
-  remove_secondmate_nudge_marker "$STATE" "$ID"
 fi
 remove_grok_turnend_auth "$STATE" "$ID" "$META"
 remove_kimi_turnend_auth "$STATE" "$ID" "$META"
@@ -2744,6 +2743,9 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.hermes-turnend-token" "$STATE/$ID.hermes-session" \
   "$STATE/$ID.hermes-started" \
   "$STATE/.$ID.open-decisions-cursor"
+if [ "$KIND" = secondmate ]; then
+  remove_secondmate_nudge_marker "$STATE" "$ID"
+fi
 # Per-generation turn-end markers (state/<id>.turn-ended.<spawn_gen>) for every gen.
 for _turnend_marker in "$STATE/$ID".turn-ended.*; do
   [ -e "$_turnend_marker" ] || continue
