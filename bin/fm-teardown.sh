@@ -183,8 +183,6 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
-# shellcheck source=bin/fm-secondmate-nudge-lib.sh
-. "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -414,7 +412,7 @@ remote_secondmate_teardown() {
 
 remove_secondmate_nudge_marker() {
   local state_dir=$1 id=$2 marker
-  marker=$(fm_secondmate_nudge_marker_path "$state_dir" "$id") || return 0
+  marker="$state_dir/.secondmate-nudge-pending/$id.pending"
   rm -f -- "$marker"
 }
 
