@@ -40,7 +40,7 @@ The exact receipt key and type schema is owned by the header and `--help` output
 - No-Mistakes status, intent, and CI-log observations use the shared bounded call boundary.
 - Every completion requires path-specific terminal evidence and records its plan path and authoritative completed head.
 - A changed worktree head invalidates completion unless the bound No-Mistakes run proves the current content is accounted for by the planned chain: a strict descendant of the planned head, a faithful restamp of the validation-base-to-planned chain, or a strict descendant of such a faithful restamp; active runs must prove run-owned branch state through branch_sync or `axi sync --check`, while terminal passed runs prove the advance through their own reported head.
-- A chain the pipeline's rebase step restamped binds and completes only when it is a faithful restamp of the planned chain from the recorded validation base, and a restamped chain followed by additional run-owned commits binds and completes as a run-owned descendant that preserves the same branch and pipeline-ownership checks.
+- A chain the pipeline's rebase step restamped binds and completes only when it is a faithful restamp of the planned chain from the recorded validation base, and a restamped chain followed by additional run-owned commits binds and completes as a run-owned descendant that preserves the same branch and run-owned branch checks.
 - Unrelated, missing, or ambiguous drift remains refused, and a terminal run that did not pass never seals an advance.
 - Local-only readiness and guarded landing consume one fail-closed executable default-branch resolver.
 - Planning and completion refuse tracked, staged, or untracked worktree changes.
