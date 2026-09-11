@@ -51,6 +51,14 @@ nm_sync_status() {  # <run-id> <branch> <submitted-head> <current-head> <sync-st
     "$5" "$2" "$4" "$1" "$3" "$4"
 }
 
+# The full `axi sync --check` shape a converged branch reports while its run
+# stays active only to monitor an open PR (observed 2026-09-11 on run
+# 01M25YRZ7NP7HVZ33K1XC94AYN, PR dnth/firstmate#131).
+nm_sync_converged() {  # <run-id> <branch> <submitted-head> <current-head>
+  printf 'branch_sync:\n  state: synchronized\n  changed: false\nlocal:\n  branch: %s\n  head: "%s"\n  clean: true\npipeline:\n  run: "%s"\n  status: running\n  phase: ""\n  submitted_head: "%s"\n  current_head: "%s"\n  pushed_head: "%s"\n  pushed_at: 1\n  push_generation: 1\nremote:\n  observed_head: "%s"\n  freshness: live\nrelation: equal\nsafety: already_synchronized\npr_state: open\n' \
+    "$2" "$4" "$1" "$3" "$4" "$4" "$4"
+}
+
 test_help_advertises_generation_bound_run_binding() {
   local out
   out=$("$CHECK" --help) || fail "receipt checker help failed"
@@ -1397,6 +1405,94 @@ test_unowned_active_descendant_bind_rejected() {
   pass "unowned active descendant binding is rejected"
 }
 
+test_synchronized_monitoring_run_binds_and_completes() {
+  local id=receipt-synchronized-monitor base project initial_head current_head generation status sync out rc
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint passed
+  FM_FAKE_NM_STATUS='' FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "synchronized monitor plan failed"
+  project="$TMP_ROOT/project-$id"
+  initial_head=$(git -C "$project" rev-parse HEAD)
+  generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
+  printf 'pipeline doc commit\n' >> "$project/src/app.sh"
+  git -C "$project" add src/app.sh
+  git -C "$project" commit -q -m 'no-mistakes: docs'
+  current_head=$(git -C "$project" rev-parse HEAD)
+  # The observed combination: `axi status --run` keeps the run running with no
+  # outcome and no branch_sync while `axi sync --check` reports the branch
+  # converged under the same run and heads.
+  status=$(printf 'run:\n  id: "RUN-sync-monitor"\n  branch: fm/%s\n  status: running\n  head: "%s"\n' "$id" "$current_head")
+  sync=$(nm_sync_converged RUN-sync-monitor "fm/$id" "$initial_head" "$current_head")
+  out=$(FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_SYNC="$sync" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-sync-monitor --generation "$generation") \
+    || fail "converged synchronized run was not bound"
+  printf '%s' "$out" | jq -e --arg head "$current_head" '.status == "bound" and .head == $head' >/dev/null \
+    || fail "synchronized bind did not record the converged head"
+  # Synchronized alone never proves a pass: pending CI still refuses completion.
+  FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_SYNC="$sync" FM_FAKE_NM_CI_LOG='CI checks running' \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "synchronized run with pending checks completed"
+  out=$(FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_SYNC="$sync" \
+    FM_FAKE_NM_CI_LOG='all CI checks passed - still monitoring until merged or closed' \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed) \
+    || fail "green synchronized monitoring run did not complete"
+  printf '%s' "$out" | jq -e --arg head "$current_head" '.status == "completed" and .completed_head == $head' >/dev/null \
+    || fail "synchronized completion did not record the converged head"
+  pass "converged synchronized run binds and completes while monitoring its PR"
+}
+
+test_synchronized_monitoring_requires_full_sync_evidence() {
+  local id=receipt-sync-evidence base project initial_head current_head generation status sync rc
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint passed
+  FM_FAKE_NM_STATUS='' FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "sync evidence plan failed"
+  project="$TMP_ROOT/project-$id"
+  initial_head=$(git -C "$project" rev-parse HEAD)
+  generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
+  printf 'pipeline doc commit\n' >> "$project/src/app.sh"
+  git -C "$project" add src/app.sh
+  git -C "$project" commit -q -m 'no-mistakes: docs'
+  current_head=$(git -C "$project" rev-parse HEAD)
+  status=$(printf 'run:\n  id: "RUN-sync-evidence"\n  branch: fm/%s\n  status: running\n  head: "%s"\n' "$id" "$current_head")
+
+  # A converged state naming another run never attributes this run's advance.
+  sync=$(nm_sync_converged RUN-foreign "fm/$id" "$initial_head" "$current_head")
+  FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_SYNC="$sync" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-sync-evidence --generation "$generation" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "synchronized bind accepted a foreign run id"
+
+  # A submitted head other than the validated head is not this plan's run.
+  sync=$(nm_sync_converged RUN-sync-evidence "fm/$id" "$current_head" "$current_head")
+  FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_SYNC="$sync" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-sync-evidence --generation "$generation" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "synchronized bind accepted a mismatched submitted head"
+
+  # A converged claim without the equality and safety fields stays refused.
+  sync=$(printf 'branch_sync:\n  state: synchronized\nlocal:\n  branch: fm/%s\n  head: "%s"\npipeline:\n  run: "RUN-sync-evidence"\n  submitted_head: "%s"\n  current_head: "%s"\n' \
+    "$id" "$current_head" "$initial_head" "$current_head")
+  FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_SYNC="$sync" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-sync-evidence --generation "$generation" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "synchronized bind accepted incomplete convergence evidence"
+
+  # A sync readout whose reported local head is stale stays refused.
+  sync=$(nm_sync_converged RUN-sync-evidence "fm/$id" "$initial_head" "$current_head" \
+    | sed "s/^  head: \"$current_head\"/  head: \"$initial_head\"/")
+  FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_SYNC="$sync" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-sync-evidence --generation "$generation" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "synchronized bind accepted a stale local head"
+  pass "converged synchronized binding requires the full run-owned sync evidence"
+}
+
 test_descendant_bind_rejects_wrong_branch() {
   local id=receipt-descendant-wrong-branch base project current_head generation status rc
   base=$(make_project "$id" no-mistakes localized)
@@ -1977,6 +2073,8 @@ test_terminal_pipeline_owned_descendant_binds_and_completes
 test_pipeline_rebase_restamp_plus_doc_commit_binds_and_completes
 test_active_descendant_bind_via_axi_sync_fallback
 test_unowned_active_descendant_bind_rejected
+test_synchronized_monitoring_run_binds_and_completes
+test_synchronized_monitoring_requires_full_sync_evidence
 test_descendant_bind_rejects_wrong_branch
 test_low_risk_skips_no_mistakes_under_explicit_policy
 test_low_risk_requires_safe_prose_and_applicable_evidence

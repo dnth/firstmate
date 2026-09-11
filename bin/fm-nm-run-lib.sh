@@ -6,7 +6,8 @@
 # (pre-teardown run abort, see its "Fix 1" header comment), and
 # fm-receipt-check.sh (bound-run completion). Teardown uses only strict
 # branch-and-head identity; crew-state additionally permits the active
-# pipeline-owned exemption defined below. Getting this wrong in either
+# pipeline-owned exemption defined below, and receipt-check's active-advance
+# ownership proof is fm_nm_run_branch_ownership. Getting this wrong in either
 # direction is unsafe: a false negative hides a genuinely parked run, and a
 # false positive lets teardown act on a run it does not own.
 #
@@ -208,6 +209,49 @@ fm_nm_head_resolvable() {  # <worktree> <head>
 fm_nm_run_is_pipeline_owned_active() {  # <toon-output>
   [ "$(fm_nm_branch_sync_state "$1")" = pipeline_owned ] || return 1
   fm_nm_run_is_active "$1"
+}
+
+# Print the proven branch-ownership state for an ACTIVE run, or nothing.
+# `pipeline_owned` in captured `axi status` output $3 means the pipeline still
+# holds the branch, so the head it reports is run-owned evidence. When `axi
+# status` omits branch_sync, `axi sync --check` supplies the same proof: state
+# pipeline_owned again, or state synchronized once the pipeline pushed its head
+# back and the branch converged while the run stays active only to monitor its
+# PR. The converged state is accepted only on the full sync evidence: the same
+# run id, submitted_head resolving to expected head $5, current_head and the
+# reported local head both resolving to the run's observed head $6, relation
+# equal, and safety already_synchronized. Anything missing, stale, or
+# mismatched prints nothing so callers keep refusing unproven advances.
+fm_nm_run_branch_ownership() {  # <worktree> <timeout-secs> <status-out> <run-id> <expected-submitted> <expected-current>
+  local wt=$1 timeout_secs=$2 status_out=$3 run_id=$4 submitted=$5 current=$6
+  local state sync_out sync_state sync_run sync_submitted sync_current sync_local
+  state=$(fm_nm_branch_sync_state "$status_out")
+  if [ "$state" = pipeline_owned ]; then
+    printf 'pipeline_owned'
+    return 0
+  fi
+  sync_out=$(fm_nm_run_checked "$wt" "$timeout_secs" axi sync --check) || sync_out=
+  [ -n "$sync_out" ] || return 1
+  sync_state=$(fm_nm_branch_sync_state "$sync_out")
+  case "$sync_state" in pipeline_owned|synchronized) ;; *) return 1 ;; esac
+  sync_run=$(fm_nm_field "$sync_out" run)
+  [ -n "$sync_run" ] && [ "$sync_run" = "$run_id" ] || return 1
+  sync_submitted=$(fm_nm_field "$sync_out" submitted_head)
+  sync_current=$(fm_nm_field "$sync_out" current_head)
+  if [ -n "$sync_submitted" ]; then
+    [ "$(fm_nm_resolve_head "$wt" "$sync_submitted" || true)" = "$submitted" ] || return 1
+  fi
+  if [ -n "$sync_current" ]; then
+    [ "$(fm_nm_resolve_head "$wt" "$sync_current" || true)" = "$current" ] || return 1
+  fi
+  if [ "$sync_state" = synchronized ]; then
+    [ "$(fm_nm_field "$sync_out" relation)" = equal ] || return 1
+    [ "$(fm_nm_field "$sync_out" safety)" = already_synchronized ] || return 1
+    [ -n "$sync_submitted" ] && [ -n "$sync_current" ] || return 1
+    sync_local=$(fm_nm_resolve_head "$wt" "$(fm_nm_field "$sync_out" head)" || true)
+    [ -n "$sync_local" ] && [ "$sync_local" = "$current" ] || return 1
+  fi
+  printf '%s' "$sync_state"
 }
 
 # 0 when captured `axi status` shows a run that reached a terminal PASSED state.

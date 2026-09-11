@@ -47,7 +47,10 @@
 # drift unless the bound No-Mistakes run accounts for the current content in one
 # of three shapes: a strict descendant of the latest validation_head, a faithful
 # restamp of the validation-base-to-head chain, or a strict descendant of such a
-# restamp. Active descendants require current pipeline ownership and terminal
+# restamp. Active descendants require run-owned branch evidence: current
+# pipeline ownership, or the fully evidenced synchronized state once the pushed
+# head converged and the run only monitors its PR, both decided by the shared
+# fm_nm_run_branch_ownership predicate in bin/fm-nm-run-lib.sh. Terminal
 # passed runs prove the advance through their own reported head, so a terminal
 # run needs no replan or fresh run to seal its own pipeline commits. A chain the
 # pipeline's rebase step restamped is proved by matching every corresponding
@@ -697,36 +700,13 @@ if [ "$ACTION" = bind-run ]; then
         if fm_nm_run_is_terminal_passed "$BIND_OUT"; then
           BIND_HEAD_ACCOUNTED=1
         elif fm_nm_run_is_active "$BIND_OUT"; then
-          branch_sync_state=$(fm_nm_branch_sync_state "$BIND_OUT")
-          if [ "$branch_sync_state" != pipeline_owned ]; then
-            # Real no-mistakes `axi status` for an active run does not include a
-            # branch_sync block; use `axi sync --check` to confirm pipeline ownership.
-            SYNC_OUT=$(fm_nm_run_checked "$BIND_WORKTREE" "$NM_TIMEOUT" axi sync --check) || SYNC_OUT=
-            if [ -n "$SYNC_OUT" ]; then
-              sync_state=$(fm_nm_branch_sync_state "$SYNC_OUT")
-              sync_run=$(fm_nm_field "$SYNC_OUT" run)
-              if [ "$sync_state" = pipeline_owned ]; then
-                if [ -n "$sync_run" ] && [ "$sync_run" = "$RUN_ID_INPUT" ]; then
-                  branch_sync_state=$sync_state
-                  # Cross-check the run's own submitted and current heads when axi
-                  # sync reports them; this is the authoritative run-owned evidence.
-                  sync_submitted=$(fm_nm_field "$SYNC_OUT" submitted_head)
-                  sync_current=$(fm_nm_field "$SYNC_OUT" current_head)
-                  if [ -n "$sync_submitted" ]; then
-                    if [ "$(fm_nm_resolve_head "$BIND_WORKTREE" "$sync_submitted" || true)" != "$BIND_HEAD" ]; then
-                      branch_sync_state=
-                    fi
-                  fi
-                  if [ -n "$sync_current" ]; then
-                    if [ "$(fm_nm_resolve_head "$BIND_WORKTREE" "$sync_current" || true)" != "$BIND_RUN_HEAD" ]; then
-                      branch_sync_state=
-                    fi
-                  fi
-                fi
-              fi
-            fi
-          fi
-          if [ "$branch_sync_state" = pipeline_owned ]; then
+          # Active ownership is proven by the shared predicate: pipeline_owned
+          # while the pipeline holds the branch, or the fully evidenced
+          # synchronized state once the pushed-back head converged and the run
+          # only monitors its PR (bin/fm-nm-run-lib.sh).
+          branch_sync_state=$(fm_nm_run_branch_ownership "$BIND_WORKTREE" "$NM_TIMEOUT" \
+            "$BIND_OUT" "$RUN_ID_INPUT" "$BIND_HEAD" "$BIND_RUN_HEAD" || true)
+          if [ -n "$branch_sync_state" ]; then
             BIND_HEAD_ACCOUNTED=1
           fi
         fi
@@ -781,7 +761,7 @@ if [ "$ACTION" = mechanical-ready ]; then
 fi
 
 record_validation_completed() {
-  local started path generation published_generation completed completed_head completed_path completed_evidence completed_generation now worktree validation_base validated_head current_head completion_head expected_evidence observed pr pr_head branch boundary new_receipts run_id run_path run_generation run_out observed_id observed_head observed_head_full outcome run_status default_ref default_branch ci_state run_ready changed_file completion_files run_branch current_branch branch_sync_state run_head_matches_current restamp_accounted SYNC_OUT sync_state sync_run sync_submitted sync_current
+  local started path generation published_generation completed completed_head completed_path completed_evidence completed_generation now worktree validation_base validated_head current_head completion_head expected_evidence observed pr pr_head branch boundary new_receipts run_id run_path run_generation run_out observed_id observed_head observed_head_full outcome run_status default_ref default_branch ci_state run_ready changed_file completion_files run_branch current_branch branch_sync_state run_head_matches_current restamp_accounted
   VALIDATION_LOCK="$STATE/.$ID.validation-plan.lock"
   if ! mkdir "$VALIDATION_LOCK" 2>/dev/null; then
     VALIDATION_LOCK=
@@ -901,38 +881,16 @@ record_validation_completed() {
         fi
         # The advance is authoritative only while the run is ACTIVE and the
         # pipeline owns the branch, or once the run has reached a terminal PASSED
-        # state and released the branch. Active ownership is shown by a
-        # branch_sync state of pipeline_owned, either directly in the axi status
-        # output or in `axi sync --check` for current no-mistakes.
+        # state and released the branch. Active ownership is proven by the shared
+        # fm_nm_run_branch_ownership predicate: a branch_sync state of
+        # pipeline_owned, either directly in the axi status output or in `axi
+        # sync --check` for current no-mistakes, or the fully evidenced
+        # synchronized state once the pushed-back head converged and the run
+        # only monitors its PR (bin/fm-nm-run-lib.sh).
         if fm_nm_run_is_active "$run_out"; then
-          branch_sync_state=$(fm_nm_branch_sync_state "$run_out")
-          if [ "$branch_sync_state" != pipeline_owned ]; then
-            SYNC_OUT=$(fm_nm_run_checked "$worktree" "$NM_TIMEOUT" axi sync --check) || SYNC_OUT=
-            if [ -n "$SYNC_OUT" ]; then
-              sync_state=$(fm_nm_branch_sync_state "$SYNC_OUT")
-              sync_run=$(fm_nm_field "$SYNC_OUT" run)
-              if [ "$sync_state" = pipeline_owned ]; then
-                if [ -n "$sync_run" ] && [ "$sync_run" = "$run_id" ]; then
-                  branch_sync_state=$sync_state
-                  # Cross-check the run's own submitted and current heads when axi
-                  # sync reports them; this is the authoritative run-owned evidence.
-                  sync_submitted=$(fm_nm_field "$SYNC_OUT" submitted_head)
-                  sync_current=$(fm_nm_field "$SYNC_OUT" current_head)
-                  if [ -n "$sync_submitted" ]; then
-                    if [ "$(fm_nm_resolve_head "$worktree" "$sync_submitted" || true)" != "$validated_head" ]; then
-                      branch_sync_state=
-                    fi
-                  fi
-                  if [ -n "$sync_current" ]; then
-                    if [ "$(fm_nm_resolve_head "$worktree" "$sync_current" || true)" != "$observed_head_full" ]; then
-                      branch_sync_state=
-                    fi
-                  fi
-                fi
-              fi
-            fi
-          fi
-          if [ "$branch_sync_state" != pipeline_owned ]; then
+          branch_sync_state=$(fm_nm_run_branch_ownership "$worktree" "$NM_TIMEOUT" \
+            "$run_out" "$run_id" "$validated_head" "$observed_head_full" || true)
+          if [ -z "$branch_sync_state" ]; then
             release_validation_lock
             if [ "$restamp_accounted" -eq 1 ]; then
               echo "error: accepted restamp lacks authoritative pipeline ownership" >&2
