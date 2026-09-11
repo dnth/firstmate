@@ -183,6 +183,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-secondmate-nudge-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -405,8 +407,15 @@ remote_secondmate_teardown() {
     [ -e "$_turnend_marker" ] || continue
     rm -f -- "$_turnend_marker"
   done
+  remove_secondmate_nudge_marker "$STATE" "$ID"
   printf 'teardown %s complete (remote %s:%s)\n' "$ID" "$remote_host" "$remote_home"
   return 0
+}
+
+remove_secondmate_nudge_marker() {
+  local state_dir=$1 id=$2 marker
+  marker=$(fm_secondmate_nudge_marker_path "$state_dir" "$id") || return 0
+  rm -f -- "$marker"
 }
 
 remote_secondmate_teardown_locked() {
@@ -2714,6 +2723,7 @@ if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit $?
   remove_secondmate_registry_entry "$ID"
+  remove_secondmate_nudge_marker "$STATE" "$ID"
 fi
 remove_grok_turnend_auth "$STATE" "$ID" "$META"
 remove_kimi_turnend_auth "$STATE" "$ID" "$META"

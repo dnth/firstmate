@@ -1587,6 +1587,48 @@ EOF
   pass "secondmate teardown retires empty homes and releases routing"
 }
 
+test_secondmate_teardown_clears_nudge_marker() {
+  local home subhome subhome_abs fakebin log lease fmroot marker live_marker
+  home="$TMP_ROOT/nudge-home"
+  subhome="$TMP_ROOT/nudge-subhome"
+  fmroot="$TMP_ROOT/nudge-fmroot"
+  make_firstmate_git_root "$fmroot"
+  git -C "$fmroot" worktree add --quiet --detach "$subhome" HEAD
+  mkdir -p "$home/state" "$home/data" "$subhome/state"
+  printf 'nudge-mate\n' > "$subhome/.fm-secondmate-home"
+  subhome_abs=$(cd "$subhome" && pwd -P)
+  cat > "$home/state/nudge-mate.meta" <<EOF
+window=firstmate:fm-nudge-mate
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$subhome
+projects=alpha
+EOF
+  printf '%s\n' '- nudge-mate - nudge marker test (home: '"$subhome"'; scope: nudge test; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  mkdir -p "$home/state/.secondmate-nudge-pending"
+  marker="$home/state/.secondmate-nudge-pending/nudge-mate.pending"
+  live_marker="$home/state/.secondmate-nudge-pending/live-mate.pending"
+  printf 'id=nudge-mate\n' > "$marker"
+  printf 'id=live-mate\n' > "$live_marker"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/nudge-fake")
+  log="$TMP_ROOT/nudge-fake/tmux.log"
+  lease="$TMP_ROOT/nudge-fake/lease"
+  printf 'nudge-mate\n' > "$lease"
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/nudge-fake/pane.txt" FM_FAKE_TREEHOUSE_LEASE_FILE="$lease" \
+    "$ROOT/bin/fm-teardown.sh" nudge-mate >/dev/null 2>/dev/null \
+    || fail "teardown failed for secondmate with nudge marker"
+  [ ! -e "$marker" ] || fail "teardown left the retired secondmate's nudge marker"
+  [ -f "$live_marker" ] || fail "teardown removed a live secondmate's nudge marker"
+  [ ! -e "$home/state/nudge-mate.meta" ] || fail "teardown did not clear parent meta"
+  grep -F -- '- nudge-mate ' "$home/data/secondmates.md" >/dev/null && fail "teardown did not remove secondmate registry route"
+  pass "secondmate teardown clears the retired secondmate's nudge marker and preserves live markers"
+}
+
 test_secondmate_teardown_refuses_ambiguous_and_mismatched_registry_bindings() {
   local case_name home sub other fakebin log err meta_before registry_before
   for case_name in duplicate-id duplicate-home home-mismatch; do
@@ -2680,6 +2722,7 @@ test_secondmate_spawn_requires_seeded_matching_home
 test_secondmate_spawn_refuses_operational_dirs_outside_subhome
 test_fm_send_refuses_bare_window_without_home_meta
 test_secondmate_teardown_retires_empty_home
+test_secondmate_teardown_clears_nudge_marker
 test_secondmate_teardown_refuses_ambiguous_and_mismatched_registry_bindings
 test_secondmate_teardown_sweeps_process_events_before_removal
 test_secondmate_teardown_refuses_process_events_without_sweep_script
