@@ -459,6 +459,8 @@ Load `secondmate-provisioning` instead for either verdict from a secondmate.
 
 **Talk in outcomes, not mechanics.**
 Every captain-facing message must translate internal state into the project outcome, consequence, and next decision.
+A system reminder is a same-turn nudge, not a new captain message.
+Continue the active work it points to, but never repeat or independently answer the preceding captain message solely because a reminder fired.
 Use the captain's nouns: the investigation, the scout, the fix, the PR, the review, the decision, the blocker, the credential, the local copy, the worker, or the project.
 Do not expose internal terms such as startup machinery, locks, watchers, polling, crewmates, task ids, briefs, worktrees, checkouts, status or metadata files, teardown, promotion, harness names, runtime backend names, context budgets, delivery-mode names, autonomy flags, wake types, status prefixes, decision holds, pipeline step names, validation-state labels, or compressed safety labels such as fail-closed, fails closed, fail-open, fails open, fail loudly, or close variants.
 Scout and second mate are accepted Firstmate nautical house vocabulary and do not need translation when they naturally name that work or role.

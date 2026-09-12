@@ -381,6 +381,22 @@ Raw-launch OMP refusals and direct non-OMP compatibility are covered by `tests/f
 The secondmate integration checks reran on 2026-08-27 and prove that the exact Firstmate primary and fleet-hook extensions remain permitted in the persistent home without allowing modified or unrelated tracked extension code.
 Live firing of the fleet hook's `tool_result`, `todo_reminder`, and `session.compacting` handlers is PENDING firstmate scratch OMP verification before merge; deterministic extension and spawn tests do not claim OMP event delivery.
 
+The Firstmate project todo policy was verified on 2026-09-12 against OMP 18.1.14 through OMP's effective-configuration interface:
+
+```sh
+omp --version
+omp config get todo.reminders --json | jq -c
+omp config get todo.enabled --json | jq -c
+tests/fm-omp-fleet-hooks.test.sh
+```
+
+```text
+omp/18.1.14
+{"key":"todo.reminders","value":false,"type":"boolean","description":"Remind the agent to complete todos before stopping"}
+{"key":"todo.enabled","value":true,"type":"boolean","description":"Enable the todo tool for task tracking"}
+ok - OMP keeps normal todo operation while suppressing reminder-initiated turns
+```
+
 ### OMP native orchestration opt-in
 
 The agent-runtime launch and activation contract is owned by the [harness-adapters skill](../../.agents/skills/harness-adapters/SKILL.md); this page records its verification evidence without restating that contract.

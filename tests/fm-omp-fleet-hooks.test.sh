@@ -8,6 +8,25 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-omp-fleet-hooks)
 HOME_FIXTURE="$TMP_ROOT/home"
 mkdir -p "$HOME_FIXTURE/state" "$HOME_FIXTURE/data"
+
+test_project_todo_policy() {
+  local reminders enabled
+  if ! command -v omp >/dev/null 2>&1; then
+    echo "skip: OMP not found for project todo-policy check"
+    return
+  fi
+  reminders=$(cd "$ROOT" && omp config get todo.reminders --json | jq -r '.value') \
+    || fail "OMP could not resolve the Firstmate project reminder policy"
+  enabled=$(cd "$ROOT" && omp config get todo.enabled --json | jq -r '.value') \
+    || fail "OMP could not resolve the Firstmate project todo-tool policy"
+  [ "$reminders" = false ] \
+    || fail "OMP end-of-turn todo reminders remain enabled for Firstmate's long-lived fleet projection"
+  [ "$enabled" = true ] \
+    || fail "the duplicate-response fix disabled OMP's todo tool"
+  pass "OMP keeps normal todo operation while suppressing reminder-initiated turns"
+}
+
+test_project_todo_policy
 cat > "$HOME_FIXTURE/state/ship-1.meta" <<'EOF'
 kind=ship
 window=crew:ship-1

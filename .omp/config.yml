@@ -3,3 +3,7 @@
 # No project-local model role is set, so OMP resolves the advisor role from higher-level configuration.
 advisor:
   enabled: true
+
+# Firstmate's todo list projects long-lived fleet work rather than one prompt's work.
+# End-of-turn reminders would start a second model turn after an answer to the captain.
+todo.reminders: false
