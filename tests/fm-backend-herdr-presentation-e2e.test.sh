@@ -38,6 +38,12 @@ mkdir -p "$FAKEBIN"
 REAL_MOVER="$ROOT/bin/backends/herdr-workspace-move.py"
 export REAL_HERDR REAL_TREEHOUSE REAL_MOVER HERDR_CALL_LOG TREEHOUSE_CALL_LOG MOVE_CALL_LOG FOCUS_AUDIT_LOG HERDR_ORIGINAL_PATH HERDR_LAB_HELPER
 export ACTIVE_SEEDED_CONTROL POST_CREATE_ABORT_CONTROL TMP_ROOT
+# The publication wait covers real pane shell startup, the guarded get wrapper,
+# and the acquisition itself. On a loaded CI runner that pipeline crossed the
+# default 60s at this suite's peak-load point twice (each ordinary get costs
+# ~4s there); 240s keeps the suite's publication proof bounded while leaving
+# production's 60s default untouched.
+export FM_TREEHOUSE_READY_POLLS=240
 
 # Log every production-adapter call, remove its already-validated trailing
 # session flag, and send the operation through the lab helper so that helper

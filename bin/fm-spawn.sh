@@ -3820,12 +3820,14 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] 
   }
 
   if [ "${IS_SANDBOX:-}" = 1 ] || [ "$BACKEND" = herdr ]; then
-    for _ in $(seq 1 60); do
+    treehouse_ready_polls=${FM_TREEHOUSE_READY_POLLS:-60}
+    case "$treehouse_ready_polls" in ''|*[!0-9]*|0) treehouse_ready_polls=60 ;; esac
+    for _ in $(seq 1 "$treehouse_ready_polls"); do
       [ -s "$treehouse_ready_file" ] && break
       sleep 1
     done
     if [ ! -s "$treehouse_ready_file" ]; then
-      echo "error: treehouse get did not publish its acquired worktree within 60s; inspect window $T" >&2
+      echo "error: treehouse get did not publish its acquired worktree within ${treehouse_ready_polls}s; inspect window $T" >&2
       exit 1
     fi
     WT=$(sed -n '1p' "$treehouse_ready_file")
