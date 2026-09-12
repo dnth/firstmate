@@ -17,7 +17,20 @@ REAL_GIT=$(command -v git 2>/dev/null) || {
   exit 1
 }
 GUARD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-treehouse-get.XXXXXX") || exit 1
-trap 'rm -rf "$GUARD_DIR"' EXIT
+# shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap.
+cleanup_guard_dir() {
+  local status=$?
+  if [ "$status" -ne 0 ] && [ -n "${ready_file:-}" ] \
+    && [ ! -e "$ready_file" ] && [ ! -L "$ready_file" ]; then
+    {
+      printf 'exit_status=%s\n' "$status"
+      [ -s "$GUARD_DIR/error" ] && sed -n '1p' "$GUARD_DIR/error"
+    } > "${ready_file}.failed" 2>/dev/null || true
+  fi
+  rm -rf -- "$GUARD_DIR"
+  return "$status"
+}
+trap cleanup_guard_dir EXIT
 # shellcheck source=bin/fm-pool-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-pool-lib.sh"
 

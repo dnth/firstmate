@@ -892,6 +892,205 @@ fm_meta_lock_path() {  # <state-dir>/<task-id>.meta
   printf '%s/.meta-%s.lock\n' "$dir" "$id"
 }
 
+# fm_task_set_lock_path: the per-home lock guarding WHICH tasks exist in a home,
+# as opposed to fm_meta_lock_path, which guards one task's record.
+#
+# A per-task lock cannot protect a task that does not exist yet. Forced
+# secondmate teardown enumerates a home's task set, locks what it found, and
+# then re-enumerates while removing; a fresh spawn publishing a record inside
+# that window is invisible to the first enumeration and visible to the second,
+# so it gets destructively processed while never lifecycle-locked (reproduced
+# with real agents: a record published 0.249s after teardown began was removed
+# and its worktree returned to the pool, with both commands reporting success).
+# Holding this lock from enumeration through cleanup makes the two operations
+# serialize: either the spawn publishes first and the teardown's preflight
+# covers it, or the teardown owns the set and the spawn refuses. Both directions
+# fail closed.
+fm_task_set_lock_path() {  # <state-dir>
+  local state=$1
+  [ -n "$state" ] || return 1
+  case "$state" in *[$'\n\r\t']*) return 1 ;; esac
+  printf '%s/.task-set.lock\n' "$state"
+}
+
+fm_firstmate_root_home() {
+  local home=${1:-$FM_HOME} marker parent seen="|" depth=0
+  home=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || return 1
+  while [ -e "$home/.fm-secondmate-parent" ] || [ -L "$home/.fm-secondmate-parent" ]; do
+    marker="$home/.fm-secondmate-parent"
+    if ! command -v fm_secondmate_parent_record_parse >/dev/null 2>&1; then
+      # shellcheck source=bin/fm-secondmate-parent-lib.sh
+      . "$FM_WAKE_LIB_DIR/fm-secondmate-parent-lib.sh"
+    fi
+    fm_secondmate_parent_record_parse "$marker" || return 1
+    case "$FM_SECONDMATE_PARENT_ROUTE" in
+      local) ;;
+      remote) break ;;
+      *) return 1 ;;
+    esac
+    parent=$(CDPATH='' cd -- "$FM_SECONDMATE_PARENT_HOME" 2>/dev/null && pwd -P) || return 1
+    case "$seen" in *"|$parent|"*) return 1 ;; esac
+    seen="$seen$home|"
+    home=$parent
+    depth=$((depth + 1))
+    [ "$depth" -le 64 ] || return 1
+  done
+  printf '%s\n' "$home"
+}
+
+fm_treehouse_project_lock_path() {  # <project-dir>
+  local project=$1 root origin identity hash top lock_state
+  [ -d "$project" ] || return 1
+  root=$(fm_firstmate_root_home "$FM_HOME") || return 1
+  origin=$(git -C "$project" remote get-url origin 2>/dev/null || true)
+  if [ -n "$origin" ]; then
+    case "$origin" in
+      /*) [ ! -d "$origin" ] || origin=$(CDPATH='' cd -- "$origin" 2>/dev/null && pwd -P) || return 1 ;;
+      *://*|*:* ) ;;
+      *) [ ! -d "$project/$origin" ] || origin=$(CDPATH='' cd -- "$project/$origin" 2>/dev/null && pwd -P) || return 1 ;;
+    esac
+    identity=$origin
+  else
+    top=$(git -C "$project" rev-parse --show-toplevel 2>/dev/null) || return 1
+    top=$(CDPATH='' cd -- "$top" 2>/dev/null && pwd -P) || return 1
+    identity=$top
+  fi
+  hash=$(printf '%s' "$identity" | git hash-object --stdin 2>/dev/null) || return 1
+  lock_state="$root/state"
+  # Test and embedding callers may override STATE without materializing a
+  # complete FM_HOME tree; keep the shared lock anchored to that explicit
+  # state directory in that case.
+  [ -d "$lock_state" ] || lock_state=$STATE
+  [ -d "$lock_state" ] || return 1
+  printf '%s/.treehouse-project-%s.lock\n' "$lock_state" "$hash"
+}
+
+# A Treehouse slot has the managed pool's fixed <pool>/<slot>/<repo> layout.
+# Require both its pool state and the same Git common directory as the recorded
+# project; an ordinary linked worktree is not evidence that Treehouse owns it.
+fm_treehouse_pool_slot() {  # <project-dir> <worktree>
+  local project=$1 worktree=$2 slot pool state project_common slot_common
+  [ -d "$project" ] && [ -d "$worktree" ] || return 1
+  slot=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 1
+  pool=$(dirname "$(dirname "$slot")")
+  state="$pool/treehouse-state.json"
+  [ -f "$state" ] && [ ! -L "$state" ] || return 1
+  project_common=$(git -C "$project" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  slot_common=$(git -C "$slot" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  project_common=$(CDPATH='' cd -- "$project_common" 2>/dev/null && pwd -P) || return 1
+  slot_common=$(CDPATH='' cd -- "$slot_common" 2>/dev/null && pwd -P) || return 1
+  [ "$project_common" = "$slot_common" ]
+}
+
+# Slot-owner claim: which task a Treehouse pool slot currently belongs to.
+#
+# Treehouse can record ownership durably: `treehouse get --lease --lease-holder`
+# reserves a slot under a label until `treehouse return --if-lease-holder`
+# releases it, and Firstmate uses exactly that for secondmate homes
+# (bin/fm-home-seed.sh). Crewmate spawns do not take that path: they acquire
+# their slot through the interactive pane-driven `treehouse get`, whose state
+# entry is a live process lease (owner_pid plus owner_started_at, and `treehouse
+# status` reports in-use from the processes actually running under the path).
+# That answers "is anything running here", never "which task owns this", and it
+# is released by the very event that makes a task record stale - the worker
+# exiting - so a slot whose lease has lapsed reads identical whether it is still
+# this task's or has since been handed to another one. Firstmate therefore keeps
+# its own claim on top: one file naming the task that took the slot, written by
+# bin/fm-spawn.sh under the same project lock that allocates the slot and
+# released by bin/fm-teardown.sh when the slot goes back to the pool. Moving
+# crewmate spawns onto the durable lease is separate follow-up work.
+#
+# The claim lives at <pool>/<slot>/.fm-slot-owner - a sibling of the repo
+# checkout rather than a file inside it - so claiming a slot can never dirty the
+# copy teardown's landed-work checks inspect, and a returned slot carries no
+# untracked leftover from it.
+fm_treehouse_slot_owner_marker() {  # <worktree>
+  local worktree=$1 slot
+  slot=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 1
+  printf '%s/.fm-slot-owner\n' "$(dirname "$slot")"
+}
+
+# Claim a pool slot for a task, replacing whatever the previous holder left.
+# The rename is atomic, so a reader either sees the old claim or the new one.
+fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home>
+  local worktree=$1 id=$2 home=$3 marker tmp
+  [ -n "$id" ] || return 1
+  marker=$(fm_treehouse_slot_owner_marker "$worktree") || return 1
+  # Only a plain claim file may be replaced: renaming onto a directory would
+  # move the new claim inside it and leave the slot reading as unclaimable.
+  if { [ -e "$marker" ] || [ -L "$marker" ]; } \
+     && { [ ! -f "$marker" ] || [ -L "$marker" ]; }; then
+    return 1
+  fi
+  tmp="$marker.tmp.${BASHPID:-$$}"
+  rm -f "$tmp" || return 1
+  {
+    printf 'task=%s\n' "$id"
+    printf 'home=%s\n' "$home"
+  } > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$marker" 2>/dev/null || { rm -f "$tmp"; return 1; }
+}
+
+# Read the claim on a pool slot and compare it with a task id.
+# Sets FM_TREEHOUSE_SLOT_OWNER to one of:
+#   mine   - the claim names this task
+#   other  - the claim names a different task, so the slot was reassigned
+#   absent - no claim: the slot was taken before claims existed, or returned since
+#   unsafe - a claim file exists but cannot be read as a claim
+# FM_TREEHOUSE_SLOT_OWNER_ID and FM_TREEHOUSE_SLOT_OWNER_HOME carry the recorded
+# claimant as evidence. The home is reported, never matched: a home that moved
+# must not turn a task's own slot into a refusal.
+fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
+  local worktree=$1 id=$2 marker line owner_id='' owner_home='' task_seen=0 home_seen=0
+  FM_TREEHOUSE_SLOT_OWNER=unsafe
+  FM_TREEHOUSE_SLOT_OWNER_ID=
+  FM_TREEHOUSE_SLOT_OWNER_HOME=
+  marker=$(fm_treehouse_slot_owner_marker "$worktree") || return 0
+  if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
+    FM_TREEHOUSE_SLOT_OWNER=absent
+    return 0
+  fi
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      task=*)
+        [ "$task_seen" -eq 0 ] || return 0
+        owner_id=${line#task=}
+        task_seen=1
+        ;;
+      home=*)
+        [ "$home_seen" -eq 0 ] || return 0
+        owner_home=${line#home=}
+        home_seen=1
+        ;;
+      *) return 0 ;;
+    esac
+  done < "$marker" || return 0
+  [ "$task_seen" -eq 1 ] && [ "$home_seen" -eq 1 ] || return 0
+  [ -n "$owner_id" ] && [ -n "$owner_home" ] || return 0
+  case "$owner_id" in *[!A-Za-z0-9._-]*) return 0 ;; esac
+  # shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
+  FM_TREEHOUSE_SLOT_OWNER_ID=$owner_id
+  # shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
+  FM_TREEHOUSE_SLOT_OWNER_HOME=$owner_home
+  if [ "$owner_id" = "$id" ]; then
+    FM_TREEHOUSE_SLOT_OWNER=mine
+  else
+    FM_TREEHOUSE_SLOT_OWNER=other
+  fi
+}
+
+# Drop a task's own claim once its slot is back in the pool. Never removes
+# another task's claim, so a misdirected release cannot strip the evidence that
+# protects the slot's real owner.
+fm_treehouse_slot_owner_release() {  # <worktree> <task-id>
+  local worktree=$1 id=$2 marker
+  fm_treehouse_slot_owner_state "$worktree" "$id"
+  [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] || return 0
+  marker=$(fm_treehouse_slot_owner_marker "$worktree") || return 0
+  rm -f "$marker" 2>/dev/null || true
+}
+
 fm_failure_episode_reset() {
   local state=$1 mode=${2:-acquire} lock current pid acquired=0 path
   lock="$state/.turnend-claude-blocks.lock"
