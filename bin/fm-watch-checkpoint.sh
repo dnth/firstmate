@@ -65,6 +65,11 @@ run_with_perl_timeout() {
       kill "TERM", -$pid;
       my $grace = $ENV{FM_SIGNAL_GRACE};
       $grace = 5 unless defined $grace && $grace =~ /^\d+$/;
+      if ($grace == 0) {
+        kill "KILL", -$pid;
+        waitpid $pid, 0;
+        exit 124;
+      }
       local $SIG{ALRM} = sub {
         kill "KILL", -$pid;
         waitpid $pid, 0;
