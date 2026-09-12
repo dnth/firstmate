@@ -939,7 +939,7 @@ fm_firstmate_root_home() {
 }
 
 fm_treehouse_project_lock_path() {  # <project-dir>
-  local project=$1 root origin identity hash top
+  local project=$1 root origin identity hash top lock_state
   [ -d "$project" ] || return 1
   root=$(fm_firstmate_root_home "$FM_HOME") || return 1
   origin=$(git -C "$project" remote get-url origin 2>/dev/null || true)
@@ -956,8 +956,13 @@ fm_treehouse_project_lock_path() {  # <project-dir>
     identity=$top
   fi
   hash=$(printf '%s' "$identity" | git hash-object --stdin 2>/dev/null) || return 1
-  [ -d "$root/state" ] || return 1
-  printf '%s/.treehouse-project-%s.lock\n' "$root/state" "$hash"
+  lock_state="$root/state"
+  # Test and embedding callers may override STATE without materializing a
+  # complete FM_HOME tree; keep the shared lock anchored to that explicit
+  # state directory in that case.
+  [ -d "$lock_state" ] || lock_state=$STATE
+  [ -d "$lock_state" ] || return 1
+  printf '%s/.treehouse-project-%s.lock\n' "$lock_state" "$hash"
 }
 
 # A Treehouse slot has the managed pool's fixed <pool>/<slot>/<repo> layout.

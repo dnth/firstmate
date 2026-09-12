@@ -2938,7 +2938,6 @@ if [ "$KIND" = secondmate ]; then
   if [ "$FORCE" = "--force" ]; then
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
     preflight_descendant_task_locks "$HOME_PATH" || exit 1
-    validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
     preflight_descendant_treehouse_slots || exit 1
     if [ "$BACKEND" = herdr ]; then
       teardown_herdr_preflight_target "$T" "$ID" || exit 1
