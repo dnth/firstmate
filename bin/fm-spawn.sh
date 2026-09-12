@@ -976,6 +976,7 @@ SPAWN_META_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
+SPAWN_POOL_LEASE_ABORT=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 TREEHOUSE_READY_DIR=
@@ -1081,6 +1082,13 @@ spawn_abort_cleanup() {
     RAW_LAUNCH_ABORT_LEASE=0
     if ! (cd "$PROJ_ABS" && "$SCRIPT_DIR/fm-treehouse-command.sh" return "$WT" >/dev/null 2>&1); then
       echo "warning: raw launch preflight could not return its leased worktree $WT" >&2
+    fi
+  fi
+  if [ "$SPAWN_POOL_LEASE_ABORT" = 1 ] && [ -n "${WT:-}" ] \
+     && [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+    SPAWN_POOL_LEASE_ABORT=0
+    if ! (cd "$PROJ_ABS" && "$SCRIPT_DIR/fm-treehouse-command.sh" return "$WT" >/dev/null 2>&1); then
+      echo "warning: spawn claim failure could not return its leased worktree $WT" >&2
     fi
   fi
   if [ "$OMP_ABORT_CLEANUP" = 1 ]; then
@@ -3912,6 +3920,7 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] 
 
   validate_spawn_worktree "treehouse get" "$T"
   validate_spawn_pool_lease "treehouse get" "$T" || exit 1
+  SPAWN_POOL_LEASE_ABORT=1
   if [ "$HARNESS" = omp ]; then
     fm_omp_clear_stale_runtime_markers "$WT" || exit 1
   fi
@@ -4473,6 +4482,7 @@ SPAWN_META_LOCK_HELD=1
     echo "projects=$SECONDMATE_PROJECTS"
   fi
 } > "$STATE/$ID.meta"
+SPAWN_POOL_LEASE_ABORT=0
 # The record is published, so a teardown's slot-ownership scan can now name this
 # task. The Treehouse project lock is only needed across slot allocation through
 # that publication.
