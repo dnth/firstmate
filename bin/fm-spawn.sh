@@ -3865,6 +3865,11 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] 
     case "$treehouse_ready_polls" in ''|*[!0-9]*|0) treehouse_ready_polls=60 ;; esac
     for _ in $(seq 1 "$treehouse_ready_polls"); do
       [ -s "$treehouse_ready_file" ] && break
+      if [ -s "${treehouse_ready_file}.failed" ]; then
+        cat "${treehouse_ready_file}.failed" >&2
+        echo "error: guarded Treehouse acquisition failed in pane $T" >&2
+        exit 1
+      fi
       if [ "$BACKEND" = herdr ] && ! fm_backend_target_exists "$BACKEND" "$T"; then
         echo "error: herdr pane $T disappeared during Treehouse worktree acquisition; the pane death, not treehouse, prevented publication" >&2
         exit 1
