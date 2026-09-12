@@ -4077,17 +4077,23 @@ export default function (omp: any) {
   const taskInboxDoorbell = installTaskInboxDoorbell(omp, {
     inboxDir: "$STATE_REAL/$ID.inbox",
     readyMarker: "$OMP_DOORBELL_READY",
-    // OMP's native triggerTurn contract is the receipt for this generated
-    // worker extension; turn observation is reserved for runtimes that expose
-    // a reliable correlated event stream.
+    // Turn proof rides this extension's own turn_start/turn_end handlers
+    // through notifyTurnStart/notifyTurnEnd, so the doorbell holds no omp.on
+    // subscription of its own.
     observeTurns: false,
   });
   omp.on("session_start", () => {
     taskInboxDoorbell.activate();
     execFile("touch", ["$OMP_READY"]);
   });
-  omp.on("turn_start", () => execFile("touch", ["$OMP_STARTED"]));
-  omp.on("turn_end", () => execFile("$TURNEND_SIGNAL", ["$STATE_REAL", "$ID", "$SPAWN_GEN"]));
+  omp.on("turn_start", () => {
+    taskInboxDoorbell.notifyTurnStart();
+    execFile("touch", ["$OMP_STARTED"]);
+  });
+  omp.on("turn_end", () => {
+    taskInboxDoorbell.notifyTurnEnd();
+    execFile("$TURNEND_SIGNAL", ["$STATE_REAL", "$ID", "$SPAWN_GEN"]);
+  });
   omp.on("session_shutdown", taskInboxDoorbell.retire);
 }
 EOF
