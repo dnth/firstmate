@@ -411,6 +411,52 @@ spawn_task() {  # <id> <home> <project>
     "$ROOT/bin/fm-spawn.sh" "$id" "$project" "$RAW_SLEEP_AGENT 120" --mode no-mistakes --yolo off --backend herdr
 }
 
+diagnose_spawn_failure() {  # <stderr-file>
+  local err_file=$1 target pane workspace session pane_dump pane_get ready_path
+  target=$(sed -nE 's/.*inspect window ([^[:space:]]+).*/\1/p' "$err_file" 2>/dev/null | tail -n 1 || true)
+  printf 'diagnostic: spawn stderr: %s\n' "$(cat "$err_file" 2>/dev/null || true)" >&2
+  [ -n "$target" ] || {
+    printf 'diagnostic: no Herdr inspect target found\n' >&2
+    return 0
+  }
+  pane=${target##*:}
+  workspace=${target%:*}
+  workspace=${workspace##*:}
+  session=${target%:*:*}
+  printf 'diagnostic: herdr target session=%s workspace=%s pane=%s\n' "$session" "$workspace" "$pane" >&2
+
+  pane_dump=$(PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$session" pane read "$pane" --source recent --lines 200 2>&1 || true)
+  printf 'diagnostic: pane read (recent):\n%s\n' "$pane_dump" >&2
+  pane_get=$(PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$session" pane get "$pane" 2>&1 || true)
+  printf 'diagnostic: pane get/process cwd: %s\n' "$pane_get" >&2
+  PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$session" pane process-info --pane "$pane" >&2 \
+    || printf 'diagnostic: pane process-info unavailable\n' >&2
+
+  ready_path=$(printf '%s\n%s\n' "$pane_dump" "$pane_get" \
+    | sed -nE 's/.*--ready-file[[:space:]]+([^[:space:]]+).*/\1/p' | tail -n 1 || true)
+  ready_path=${ready_path#\'}
+  ready_path=${ready_path%\'}
+  if [ -n "$ready_path" ]; then
+    printf 'diagnostic: ready-file path=%s dir=%s\n' "$ready_path" "$(dirname "$ready_path")" >&2
+    if [ -d "$(dirname "$ready_path")" ]; then
+      printf 'diagnostic: ready-file directory exists; entries:\n' >&2
+      ls -la "$(dirname "$ready_path")" >&2 || true
+    else
+      printf 'diagnostic: ready-file directory missing\n' >&2
+    fi
+    if [ -e "$ready_path" ]; then
+      printf 'diagnostic: ready-file exists; content:\n%s\n' "$(sed -n '1,5p' "$ready_path" 2>&1 || true)" >&2
+    else
+      printf 'diagnostic: ready-file missing\n' >&2
+    fi
+  else
+    printf 'diagnostic: ready-file path not visible in pane evidence; matching temp dirs:\n' >&2
+    find "${TMPDIR:-/tmp}" -maxdepth 1 -type d -name 'fm-treehouse-ready.*' -print 2>/dev/null >&2 || true
+  fi
+  printf 'diagnostic: live treehouse processes:\n' >&2
+  ps -eo pid,ppid,stat,etime,args 2>/dev/null | grep '[t]reehouse' >&2 || true
+}
+
 relaunch_task() {  # <id> <home>
   local id=$1 home=$2
   FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
@@ -1054,17 +1100,17 @@ printf 'Secondmate B fixture 2.\n' > "$SECOND_HOME_B/data/b2/brief.md"
 
 MULTI_FOCUS_START=$(focus_audit_line_count)
 spawn_task p1 "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/p1.out" 2> "$TMP_ROOT/p1.err" \
-  || fail "multi-home primary p1 failed: $(cat "$TMP_ROOT/p1.err")"
+  || { diagnose_spawn_failure "$TMP_ROOT/p1.err"; fail "multi-home primary p1 failed: $(cat "$TMP_ROOT/p1.err")"; }
 spawn_task p2 "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/p2.out" 2> "$TMP_ROOT/p2.err" \
-  || fail "multi-home primary p2 failed: $(cat "$TMP_ROOT/p2.err")"
+  || { diagnose_spawn_failure "$TMP_ROOT/p2.err"; fail "multi-home primary p2 failed: $(cat "$TMP_ROOT/p2.err")"; }
 spawn_task a1 "$SECOND_HOME_A" "$PROJECT_DIR" > "$TMP_ROOT/a1.out" 2> "$TMP_ROOT/a1.err" \
-  || fail "multi-home secondmate A a1 failed: $(cat "$TMP_ROOT/a1.err")"
+  || { diagnose_spawn_failure "$TMP_ROOT/a1.err"; fail "multi-home secondmate A a1 failed: $(cat "$TMP_ROOT/a1.err")"; }
 spawn_task a2 "$SECOND_HOME_A" "$PROJECT_DIR" > "$TMP_ROOT/a2.out" 2> "$TMP_ROOT/a2.err" \
-  || fail "multi-home secondmate A a2 failed: $(cat "$TMP_ROOT/a2.err")"
+  || { diagnose_spawn_failure "$TMP_ROOT/a2.err"; fail "multi-home secondmate A a2 failed: $(cat "$TMP_ROOT/a2.err")"; }
 spawn_task b1 "$SECOND_HOME_B" "$PROJECT_DIR" > "$TMP_ROOT/b1.out" 2> "$TMP_ROOT/b1.err" \
-  || fail "multi-home secondmate B b1 failed: $(cat "$TMP_ROOT/b1.err")"
+  || { diagnose_spawn_failure "$TMP_ROOT/b1.err"; fail "multi-home secondmate B b1 failed: $(cat "$TMP_ROOT/b1.err")"; }
 spawn_task b2 "$SECOND_HOME_B" "$PROJECT_DIR" > "$TMP_ROOT/b2.out" 2> "$TMP_ROOT/b2.err" \
-  || fail "multi-home secondmate B b2 failed: $(cat "$TMP_ROOT/b2.err")"
+  || { diagnose_spawn_failure "$TMP_ROOT/b2.err"; fail "multi-home secondmate B b2 failed: $(cat "$TMP_ROOT/b2.err")"; }
 for META_X in p1 p2 a1 a2 b1 b2; do
   case "$META_X" in
     p*) remember_meta_worktree "$HOME_DIR/state/$META_X.meta" >/dev/null ;;
