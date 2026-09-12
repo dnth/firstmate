@@ -290,8 +290,17 @@ export HERDR_SESSION="$HERDR_LAB_SESSION" HERDR_LAB_SESSION
 LAB_READY=0
 RECORDED_WORKTREES=""
 LOCK_CONTENTION_OWNER_PID=
+HERDR_SNAPSHOT_PID=
+HERDR_SNAPSHOT_CONTROL="$TMP_ROOT/herdr-snapshot.running"
+HERDR_SNAPSHOT_LOG="$TMP_ROOT/herdr-pane-snapshot.log"
 cleanup_all() {
   local wt
+  if [ -n "$HERDR_SNAPSHOT_PID" ]; then
+    rm -f "$HERDR_SNAPSHOT_CONTROL"
+    kill "$HERDR_SNAPSHOT_PID" 2>/dev/null || true
+    wait "$HERDR_SNAPSHOT_PID" 2>/dev/null || true
+    HERDR_SNAPSHOT_PID=
+  fi
   if [ -n "$LOCK_CONTENTION_OWNER_PID" ]; then
     kill "$LOCK_CONTENTION_OWNER_PID" 2>/dev/null || true
     wait "$LOCK_CONTENTION_OWNER_PID" 2>/dev/null || true
@@ -480,6 +489,58 @@ diagnose_spawn_failure() {  # <stderr-file>
   printf 'diagnostic: live treehouse processes:\n' >&2
   # shellcheck disable=SC2009 # Preserve the full ps snapshot in failure diagnostics.
   ps -eo pid,ppid,stat,etime,args 2>/dev/null | grep '[t]reehouse' >&2 || true
+  if [ -s "$HERDR_SNAPSHOT_LOG" ]; then
+    printf 'diagnostic: in-flight Herdr pane snapshot tail:\n' >&2
+    tail -n 240 "$HERDR_SNAPSHOT_LOG" >&2 || true
+  fi
+}
+
+start_herdr_snapshotter() {
+  : > "$HERDR_SNAPSHOT_LOG"
+  : > "$HERDR_SNAPSHOT_CONTROL"
+  snapshot_lab() {
+    timeout 10s env PATH="$HERDR_ORIGINAL_PATH" \
+      "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"
+  }
+  (
+    while [ -e "$HERDR_SNAPSHOT_CONTROL" ]; do
+      {
+        printf '\n=== herdr snapshot %s ===\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+        workspaces=$(snapshot_lab workspace list 2>&1 || true)
+        printf '%s\n' 'workspace list:' "$workspaces"
+        printf '%s\n' "$workspaces" | jq -r '.result.workspaces[]?.workspace_id // empty' 2>/dev/null \
+          | while IFS= read -r ws; do
+              [ -n "$ws" ] || continue
+              panes=$(snapshot_lab pane list --workspace "$ws" 2>&1 || true)
+              printf 'pane list workspace=%s:\n%s\n' "$ws" "$panes"
+              printf '%s\n' "$panes" | jq -r '.result.panes[]?.pane_id // empty' 2>/dev/null \
+                | while IFS= read -r pane; do
+                    [ -n "$pane" ] || continue
+                    pane_get=$(snapshot_lab pane get "$pane" 2>&1 || true)
+                    pane_fields=$(printf '%s' "$pane_get" | jq -c '
+                      {agent_status: (.result.agent.agent_status // .result.pane.agent_status // null),
+                       foreground_cwd: (.result.pane.foreground_cwd // null),
+                       cwd: (.result.pane.cwd // null)}
+                    ' 2>/dev/null || printf '%s\n' '{"agent_status":null,"foreground_cwd":null,"cwd":null}')
+                    printf 'pane get %s fields (agent_status/foreground_cwd/cwd): %s\n%s\n' "$pane" "$pane_fields" "$pane_get"
+                    pane_read=$(snapshot_lab pane read "$pane" --source recent --lines 40 2>&1 || true)
+                    printf 'pane read %s (recent):\n%s\n' "$pane" "$pane_read"
+                  done
+            done
+      } >> "$HERDR_SNAPSHOT_LOG" 2>&1
+      sleep 15
+    done
+  ) &
+  HERDR_SNAPSHOT_PID=$!
+}
+
+stop_herdr_snapshotter() {
+  rm -f "$HERDR_SNAPSHOT_CONTROL"
+  if [ -n "$HERDR_SNAPSHOT_PID" ]; then
+    kill "$HERDR_SNAPSHOT_PID" 2>/dev/null || true
+    wait "$HERDR_SNAPSHOT_PID" 2>/dev/null || true
+    HERDR_SNAPSHOT_PID=
+  fi
 }
 
 relaunch_task() {  # <id> <home>
@@ -1113,6 +1174,11 @@ pass "real Herdr lab: the primary presentation setting inherits into real second
 # Keep the pre-existing 2ndmate-alpha/bravo workspaces as owning parents and captain focus.
 assert_focus_is "$CAPTAIN_FOCUS" "multi-home captain focus"
 
+# Capture pane state during the high-load multi-home sequence. Herdr can queue
+# pane commands behind a busy foreground process, so post-teardown evidence is
+# insufficient for diagnosing a publication stall.
+start_herdr_snapshotter
+
 mkdir -p "$SECOND_HOME_A/data/a1" "$SECOND_HOME_A/data/a2" \
   "$SECOND_HOME_B/data/b1" "$SECOND_HOME_B/data/b2" \
   "$HOME_DIR/data/p1" "$HOME_DIR/data/p2"
@@ -1471,6 +1537,7 @@ do
 done
 assert_focus_is "$CAPTAIN_FOCUS" "multi-home teardown"
 pass "real Herdr lab: multi-home exact-pane teardowns restore captain focus without workspace close authority"
+stop_herdr_snapshotter
 
 # Missing, renamed, and duplicate tokens are read-only recovery diagnostics.
 # The duplicate case allows flat fallback only when every matching pane is
