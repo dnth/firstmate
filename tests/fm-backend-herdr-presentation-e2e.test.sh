@@ -425,23 +425,34 @@ spawn_task_with_pane_loss_retry() {  # <id> <home> <project> <stdout> <stderr>
 }
 
 diagnose_spawn_failure() {  # <stderr-file>
-  local err_file=$1 target pane workspace session pane_dump pane_get ready_path
+  local err_file=$1 target pane workspace session pane_dump pane_get pane_fields ready_path
   target=$(sed -nE 's/.*inspect window ([^[:space:]]+).*/\1/p' "$err_file" 2>/dev/null | tail -n 1 || true)
   printf 'diagnostic: spawn stderr: %s\n' "$(cat "$err_file" 2>/dev/null || true)" >&2
   [ -n "$target" ] || {
     printf 'diagnostic: no Herdr inspect target found\n' >&2
     return 0
   }
-  pane=${target##*:}
-  workspace=${target%:*}
-  workspace=${workspace##*:}
-  session=${target%:*:*}
+  # Herdr pane ids are workspace-qualified (for example, wJ:p2). Keep that
+  # qualification when querying the pane; stripping to p2 produces a false
+  # pane_not_found diagnostic even while the pane is alive.
+  session=${target%%:*}
+  pane=${target#*:}
+  workspace=${pane%:*}
   printf 'diagnostic: herdr target session=%s workspace=%s pane=%s\n' "$session" "$workspace" "$pane" >&2
 
   pane_dump=$(PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$session" pane read "$pane" --source recent --lines 200 2>&1 || true)
-  printf 'diagnostic: pane read (recent):\n%s\n' "$pane_dump" >&2
+  printf 'diagnostic: pane read (recent, qualified):\n%s\n' "$pane_dump" >&2
   pane_get=$(PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$session" pane get "$pane" 2>&1 || true)
-  printf 'diagnostic: pane get/process cwd: %s\n' "$pane_get" >&2
+  printf 'diagnostic: pane get (qualified): %s\n' "$pane_get" >&2
+  pane_fields=$(printf '%s' "$pane_get" | jq -c '
+    if (.result.pane? // null) == null and (.result.agent? // null) == null then
+      {agent_status: null, foreground_cwd: null}
+    else
+      {agent_status: (.result.agent.agent_status // .result.pane.agent_status // null),
+       foreground_cwd: (.result.pane.foreground_cwd // null)}
+    end
+  ' 2>/dev/null || printf '%s\n' '{"agent_status":null,"foreground_cwd":null}')
+  printf 'diagnostic: pane get fields (agent_status/foreground_cwd): %s\n' "$pane_fields" >&2
   PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$session" pane process-info --pane "$pane" >&2 \
     || printf 'diagnostic: pane process-info unavailable\n' >&2
 
