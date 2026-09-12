@@ -427,6 +427,25 @@ teardown_task() {  # <id> <home>
     "$ROOT/bin/fm-teardown.sh" "$id" --force
 }
 
+finish_concurrent_spawn() {  # <id> <status> <stdout> <stderr>
+  local id=$1 status=$2 out=$3 err=$4
+  [ "$status" -ne 0 ] || return 0
+  grep -F "another Treehouse slot allocation or return is in progress" "$err" >/dev/null 2>&1 \
+    || fail "concurrent projected spawn $id failed unexpectedly: $(cat "$err")"
+  spawn_task "$id" "$HOME_DIR" "$PROJECT_DIR" > "$out" 2> "$err" \
+    || fail "projected spawn $id retry failed after the Treehouse project lock cleared: $(cat "$err")"
+}
+
+finish_concurrent_expected_abort() {  # <id> <status> <stdout> <stderr>
+  local id=$1 status=$2 out=$3 err=$4
+  [ "$status" -ne 0 ] || fail "post-create abort fixture $id unexpectedly succeeded"
+  if grep -F "another Treehouse slot allocation or return is in progress" "$err" >/dev/null 2>&1; then
+    if spawn_task "$id" "$HOME_DIR" "$PROJECT_DIR" > "$out" 2> "$err"; then
+      fail "post-create abort fixture $id unexpectedly succeeded after the Treehouse project lock cleared"
+    fi
+  fi
+}
+
 finish_concurrent_teardown() {  # <id> <status> <stdout> <stderr>
   local id=$1 status=$2 out=$3 err=$4
   [ "$status" -ne 0 ] || return 0
@@ -734,16 +753,19 @@ cmp -s "$TMP_ROOT/off.meta.normalized" "$TMP_ROOT/on.meta.normalized" \
   || fail "metadata changed beyond Herdr container IDs between opted-out and projected paths"
 
 # Two real concurrent primary spawns contend for the bounded presentation-order
-# lock. Every spawn that acquires it must follow Herdr's actual serialized create
-# order; a slow host may legitimately send the other through the tested flat
-# fallback rather than waiting past the product's bounded contention policy.
+# lock and the shared Treehouse project lock. Every spawn that acquires them must
+# follow Herdr's actual serialized create order; a slow host may legitimately
+# send the other through the tested flat fallback, and the project-lock loser
+# refuses fast and is retried once the winner has published.
 CONCURRENT_FOCUS_AUDIT_START=$(focus_audit_line_count)
 spawn_task order-a "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/order-a.out" 2> "$TMP_ROOT/order-a.err" &
 ORDER_A_PID=$!
 spawn_task order-b "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/order-b.out" 2> "$TMP_ROOT/order-b.err" &
 ORDER_B_PID=$!
-wait "$ORDER_A_PID" || fail "concurrent projected spawn A failed: $(cat "$TMP_ROOT/order-a.err")"
-wait "$ORDER_B_PID" || fail "concurrent projected spawn B failed: $(cat "$TMP_ROOT/order-b.err")"
+if wait "$ORDER_A_PID"; then ORDER_A_STATUS=0; else ORDER_A_STATUS=$?; fi
+if wait "$ORDER_B_PID"; then ORDER_B_STATUS=0; else ORDER_B_STATUS=$?; fi
+finish_concurrent_spawn order-a "$ORDER_A_STATUS" "$TMP_ROOT/order-a.out" "$TMP_ROOT/order-a.err"
+finish_concurrent_spawn order-b "$ORDER_B_STATUS" "$TMP_ROOT/order-b.out" "$TMP_ROOT/order-b.err"
 assert_focus_is "$CAPTAIN_FOCUS" "concurrent projected spawns"
 assert_raw_presentation_mutations_preserved_since "$CONCURRENT_FOCUS_AUDIT_START" "concurrent projected spawns"
 ORDER_A_META="$HOME_DIR/state/order-a.meta"
@@ -831,8 +853,8 @@ ABORT_A_STATUS=0
 ABORT_B_STATUS=0
 wait "$ABORT_A_PID" || ABORT_A_STATUS=$?
 wait "$ABORT_B_PID" || ABORT_B_STATUS=$?
-[ "$ABORT_A_STATUS" -ne 0 ] || fail "post-create abort fixture A unexpectedly succeeded"
-[ "$ABORT_B_STATUS" -ne 0 ] || fail "post-create abort fixture B unexpectedly succeeded"
+finish_concurrent_expected_abort abort-a "$ABORT_A_STATUS" "$TMP_ROOT/abort-a.out" "$TMP_ROOT/abort-a.err"
+finish_concurrent_expected_abort abort-b "$ABORT_B_STATUS" "$TMP_ROOT/abort-b.out" "$TMP_ROOT/abort-b.err"
 grep -F "yielded a dirty pool worktree" "$TMP_ROOT/abort-a.err" >/dev/null 2>&1 \
   || fail "post-create abort fixture A did not reach the armed validation failure: $(cat "$TMP_ROOT/abort-a.err")"
 grep -F "yielded a dirty pool worktree" "$TMP_ROOT/abort-b.err" >/dev/null 2>&1 \
@@ -910,8 +932,10 @@ for ROUND in 1 2 3; do
   WAVE_A_PID=$!
   spawn_task "focus-$ROUND-b" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/focus-$ROUND-b.out" 2> "$TMP_ROOT/focus-$ROUND-b.err" &
   WAVE_B_PID=$!
-  wait "$WAVE_A_PID" || fail "focus wave $ROUND spawn A failed: $(cat "$TMP_ROOT/focus-$ROUND-a.err")"
-  wait "$WAVE_B_PID" || fail "focus wave $ROUND spawn B failed: $(cat "$TMP_ROOT/focus-$ROUND-b.err")"
+  if wait "$WAVE_A_PID"; then WAVE_A_STATUS=0; else WAVE_A_STATUS=$?; fi
+  if wait "$WAVE_B_PID"; then WAVE_B_STATUS=0; else WAVE_B_STATUS=$?; fi
+  finish_concurrent_spawn "focus-$ROUND-a" "$WAVE_A_STATUS" "$TMP_ROOT/focus-$ROUND-a.out" "$TMP_ROOT/focus-$ROUND-a.err"
+  finish_concurrent_spawn "focus-$ROUND-b" "$WAVE_B_STATUS" "$TMP_ROOT/focus-$ROUND-b.out" "$TMP_ROOT/focus-$ROUND-b.err"
   remember_meta_worktree "$HOME_DIR/state/focus-$ROUND-a.meta" >/dev/null
   remember_meta_worktree "$HOME_DIR/state/focus-$ROUND-b.meta" >/dev/null
   assert_focus_is "$CAPTAIN_FOCUS" "focus wave $ROUND concurrent spawns"
