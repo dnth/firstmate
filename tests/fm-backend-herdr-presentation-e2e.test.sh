@@ -454,6 +454,7 @@ diagnose_spawn_failure() {  # <stderr-file>
     find "${TMPDIR:-/tmp}" -maxdepth 1 -type d -name 'fm-treehouse-ready.*' -print 2>/dev/null >&2 || true
   fi
   printf 'diagnostic: live treehouse processes:\n' >&2
+  # shellcheck disable=SC2009 # Preserve the full ps snapshot in failure diagnostics.
   ps -eo pid,ppid,stat,etime,args 2>/dev/null | grep '[t]reehouse' >&2 || true
 }
 
