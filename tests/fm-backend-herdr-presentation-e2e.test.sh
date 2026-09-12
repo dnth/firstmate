@@ -38,6 +38,12 @@ mkdir -p "$FAKEBIN"
 REAL_MOVER="$ROOT/bin/backends/herdr-workspace-move.py"
 export REAL_HERDR REAL_TREEHOUSE REAL_MOVER HERDR_CALL_LOG TREEHOUSE_CALL_LOG MOVE_CALL_LOG FOCUS_AUDIT_LOG HERDR_ORIGINAL_PATH HERDR_LAB_HELPER
 export ACTIVE_SEEDED_CONTROL POST_CREATE_ABORT_CONTROL TMP_ROOT
+# The publication wait covers real pane shell startup, the guarded get wrapper,
+# and the acquisition itself. On a loaded CI runner that pipeline crossed the
+# default 60s at this suite's peak-load point twice (each ordinary get costs
+# ~4s there); 240s keeps the suite's publication proof bounded while leaving
+# production's 60s default untouched.
+export FM_TREEHOUSE_READY_POLLS=240
 
 # Log every production-adapter call, remove its already-validated trailing
 # session flag, and send the operation through the lab helper so that helper
@@ -284,8 +290,17 @@ export HERDR_SESSION="$HERDR_LAB_SESSION" HERDR_LAB_SESSION
 LAB_READY=0
 RECORDED_WORKTREES=""
 LOCK_CONTENTION_OWNER_PID=
+HERDR_SNAPSHOT_PID=
+HERDR_SNAPSHOT_CONTROL="$TMP_ROOT/herdr-snapshot.running"
+HERDR_SNAPSHOT_LOG="$TMP_ROOT/herdr-pane-snapshot.log"
 cleanup_all() {
   local wt
+  if [ -n "$HERDR_SNAPSHOT_PID" ]; then
+    rm -f "$HERDR_SNAPSHOT_CONTROL"
+    kill "$HERDR_SNAPSHOT_PID" 2>/dev/null || true
+    wait "$HERDR_SNAPSHOT_PID" 2>/dev/null || true
+    HERDR_SNAPSHOT_PID=
+  fi
   if [ -n "$LOCK_CONTENTION_OWNER_PID" ]; then
     kill "$LOCK_CONTENTION_OWNER_PID" 2>/dev/null || true
     wait "$LOCK_CONTENTION_OWNER_PID" 2>/dev/null || true
@@ -405,6 +420,129 @@ spawn_task() {  # <id> <home> <project>
     "$ROOT/bin/fm-spawn.sh" "$id" "$project" "$RAW_SLEEP_AGENT 120" --mode no-mistakes --yolo off --backend herdr
 }
 
+spawn_task_with_pane_loss_retry() {  # <id> <home> <project> <stdout> <stderr>
+  local id=$1 home=$2 project=$3 out=$4 err=$5
+  if spawn_task "$id" "$home" "$project" > "$out" 2> "$err"; then
+    return 0
+  fi
+  if grep -F "disappeared during Treehouse worktree acquisition" "$err" >/dev/null 2>&1; then
+    printf 'diagnostic: retrying %s once after Herdr pane loss\n' "$id" >&2
+    spawn_task "$id" "$home" "$project" > "$out" 2> "$err"
+    return $?
+  fi
+  return 1
+}
+
+diagnose_spawn_failure() {  # <stderr-file>
+  local err_file=$1 target pane workspace session pane_dump pane_get pane_fields ready_path
+  target=$(sed -nE 's/.*inspect window ([^[:space:]]+).*/\1/p' "$err_file" 2>/dev/null | tail -n 1 || true)
+  printf 'diagnostic: spawn stderr: %s\n' "$(cat "$err_file" 2>/dev/null || true)" >&2
+  [ -n "$target" ] || {
+    printf 'diagnostic: no Herdr inspect target found\n' >&2
+    return 0
+  }
+  # Herdr pane ids are workspace-qualified (for example, wJ:p2). Keep that
+  # qualification when querying the pane; stripping to p2 produces a false
+  # pane_not_found diagnostic even while the pane is alive.
+  session=${target%%:*}
+  pane=${target#*:}
+  workspace=${pane%:*}
+  printf 'diagnostic: herdr target session=%s workspace=%s pane=%s\n' "$session" "$workspace" "$pane" >&2
+
+  pane_dump=$(PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$session" pane read "$pane" --source recent --lines 200 2>&1 || true)
+  printf 'diagnostic: pane read (recent, qualified):\n%s\n' "$pane_dump" >&2
+  pane_get=$(PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$session" pane get "$pane" 2>&1 || true)
+  printf 'diagnostic: pane get (qualified): %s\n' "$pane_get" >&2
+  pane_fields=$(printf '%s' "$pane_get" | jq -c '
+    if (.result.pane? // null) == null and (.result.agent? // null) == null then
+      {agent_status: null, foreground_cwd: null}
+    else
+      {agent_status: (.result.agent.agent_status // .result.pane.agent_status // null),
+       foreground_cwd: (.result.pane.foreground_cwd // null)}
+    end
+  ' 2>/dev/null || printf '%s\n' '{"agent_status":null,"foreground_cwd":null}')
+  printf 'diagnostic: pane get fields (agent_status/foreground_cwd): %s\n' "$pane_fields" >&2
+  PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$session" pane process-info --pane "$pane" >&2 \
+    || printf 'diagnostic: pane process-info unavailable\n' >&2
+
+  ready_path=$(printf '%s\n%s\n' "$pane_dump" "$pane_get" \
+    | sed -nE 's/.*--ready-file[[:space:]]+([^[:space:]]+).*/\1/p' | tail -n 1 || true)
+  ready_path=${ready_path#\'}
+  ready_path=${ready_path%\'}
+  if [ -n "$ready_path" ]; then
+    printf 'diagnostic: ready-file path=%s dir=%s\n' "$ready_path" "$(dirname "$ready_path")" >&2
+    if [ -d "$(dirname "$ready_path")" ]; then
+      printf 'diagnostic: ready-file directory exists; entries:\n' >&2
+      ls -la "$(dirname "$ready_path")" >&2 || true
+    else
+      printf 'diagnostic: ready-file directory missing\n' >&2
+    fi
+    if [ -e "$ready_path" ]; then
+      printf 'diagnostic: ready-file exists; content:\n%s\n' "$(sed -n '1,5p' "$ready_path" 2>&1 || true)" >&2
+    else
+      printf 'diagnostic: ready-file missing\n' >&2
+    fi
+  else
+    printf 'diagnostic: ready-file path not visible in pane evidence; matching temp dirs:\n' >&2
+    find "${TMPDIR:-/tmp}" -maxdepth 1 -type d -name 'fm-treehouse-ready.*' -print 2>/dev/null >&2 || true
+  fi
+  printf 'diagnostic: live treehouse processes:\n' >&2
+  # shellcheck disable=SC2009 # Preserve the full ps snapshot in failure diagnostics.
+  ps -eo pid,ppid,stat,etime,args 2>/dev/null | grep '[t]reehouse' >&2 || true
+  if [ -s "$HERDR_SNAPSHOT_LOG" ]; then
+    printf 'diagnostic: in-flight Herdr pane snapshot tail:\n' >&2
+    tail -n 240 "$HERDR_SNAPSHOT_LOG" >&2 || true
+  fi
+}
+
+start_herdr_snapshotter() {
+  : > "$HERDR_SNAPSHOT_LOG"
+  : > "$HERDR_SNAPSHOT_CONTROL"
+  snapshot_lab() {
+    timeout 10s env PATH="$HERDR_ORIGINAL_PATH" \
+      "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"
+  }
+  (
+    while [ -e "$HERDR_SNAPSHOT_CONTROL" ]; do
+      {
+        printf '\n=== herdr snapshot %s ===\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+        workspaces=$(snapshot_lab workspace list 2>&1 || true)
+        printf '%s\n' 'workspace list:' "$workspaces"
+        printf '%s\n' "$workspaces" | jq -r '.result.workspaces[]?.workspace_id // empty' 2>/dev/null \
+          | while IFS= read -r ws; do
+              [ -n "$ws" ] || continue
+              panes=$(snapshot_lab pane list --workspace "$ws" 2>&1 || true)
+              printf 'pane list workspace=%s:\n%s\n' "$ws" "$panes"
+              printf '%s\n' "$panes" | jq -r '.result.panes[]?.pane_id // empty' 2>/dev/null \
+                | while IFS= read -r pane; do
+                    [ -n "$pane" ] || continue
+                    pane_get=$(snapshot_lab pane get "$pane" 2>&1 || true)
+                    pane_fields=$(printf '%s' "$pane_get" | jq -c '
+                      {agent_status: (.result.agent.agent_status // .result.pane.agent_status // null),
+                       foreground_cwd: (.result.pane.foreground_cwd // null),
+                       cwd: (.result.pane.cwd // null)}
+                    ' 2>/dev/null || printf '%s\n' '{"agent_status":null,"foreground_cwd":null,"cwd":null}')
+                    printf 'pane get %s fields (agent_status/foreground_cwd/cwd): %s\n%s\n' "$pane" "$pane_fields" "$pane_get"
+                    pane_read=$(snapshot_lab pane read "$pane" --source recent --lines 40 2>&1 || true)
+                    printf 'pane read %s (recent):\n%s\n' "$pane" "$pane_read"
+                  done
+            done
+      } >> "$HERDR_SNAPSHOT_LOG" 2>&1
+      sleep 15
+    done
+  ) &
+  HERDR_SNAPSHOT_PID=$!
+}
+
+stop_herdr_snapshotter() {
+  rm -f "$HERDR_SNAPSHOT_CONTROL"
+  if [ -n "$HERDR_SNAPSHOT_PID" ]; then
+    kill "$HERDR_SNAPSHOT_PID" 2>/dev/null || true
+    wait "$HERDR_SNAPSHOT_PID" 2>/dev/null || true
+    HERDR_SNAPSHOT_PID=
+  fi
+}
+
 relaunch_task() {  # <id> <home>
   local id=$1 home=$2
   FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
@@ -425,6 +563,40 @@ teardown_task() {  # <id> <home>
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" \
     "$ROOT/bin/fm-teardown.sh" "$id" --force
+}
+
+finish_concurrent_spawn() {  # <id> <status> <stdout> <stderr>
+  local id=$1 status=$2 out=$3 err=$4
+  [ "$status" -ne 0 ] || return 0
+  if grep -F "another Treehouse slot allocation or return is in progress" "$err" >/dev/null 2>&1 \
+     || grep -F "another task publication or forced teardown is in progress" "$err" >/dev/null 2>&1; then
+    spawn_task "$id" "$HOME_DIR" "$PROJECT_DIR" > "$out" 2> "$err" \
+      || fail "projected spawn $id retry failed after the contended lock cleared: $(cat "$err")"
+    return 0
+  fi
+  fail "concurrent projected spawn $id failed unexpectedly: $(cat "$err")"
+}
+
+finish_concurrent_expected_abort() {  # <id> <status> <stdout> <stderr>
+  local id=$1 status=$2 out=$3 err=$4
+  [ "$status" -ne 0 ] || fail "post-create abort fixture $id unexpectedly succeeded"
+  if grep -F "another Treehouse slot allocation or return is in progress" "$err" >/dev/null 2>&1 \
+     || grep -F "another task publication or forced teardown is in progress" "$err" >/dev/null 2>&1; then
+    if spawn_task "$id" "$HOME_DIR" "$PROJECT_DIR" > "$out" 2> "$err"; then
+      fail "post-create abort fixture $id unexpectedly succeeded after the contended lock cleared"
+    fi
+  fi
+}
+
+finish_concurrent_teardown() {  # <id> <status> <stdout> <stderr>
+  local id=$1 status=$2 out=$3 err=$4
+  [ "$status" -ne 0 ] || return 0
+  if ! grep -F "session presentation lock is contended" "$err" >/dev/null 2>&1 \
+     && ! grep -F "another Treehouse slot allocation or return is in progress" "$err" >/dev/null 2>&1; then
+    fail "projected teardown $id failed unexpectedly: $(cat "$err")"
+  fi
+  teardown_task "$id" "$HOME_DIR" > "$out" 2> "$err" \
+    || fail "projected teardown $id retry failed after presentation cleanup completed: $(cat "$err")"
 }
 
 normalize_meta() {  # <meta>
@@ -723,16 +895,19 @@ cmp -s "$TMP_ROOT/off.meta.normalized" "$TMP_ROOT/on.meta.normalized" \
   || fail "metadata changed beyond Herdr container IDs between opted-out and projected paths"
 
 # Two real concurrent primary spawns contend for the bounded presentation-order
-# lock. Every spawn that acquires it must follow Herdr's actual serialized create
-# order; a slow host may legitimately send the other through the tested flat
-# fallback rather than waiting past the product's bounded contention policy.
+# lock and the shared Treehouse project lock. Every spawn that acquires them must
+# follow Herdr's actual serialized create order; a slow host may legitimately
+# send the other through the tested flat fallback, and the project-lock loser
+# refuses fast and is retried once the winner has published.
 CONCURRENT_FOCUS_AUDIT_START=$(focus_audit_line_count)
 spawn_task order-a "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/order-a.out" 2> "$TMP_ROOT/order-a.err" &
 ORDER_A_PID=$!
 spawn_task order-b "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/order-b.out" 2> "$TMP_ROOT/order-b.err" &
 ORDER_B_PID=$!
-wait "$ORDER_A_PID" || fail "concurrent projected spawn A failed: $(cat "$TMP_ROOT/order-a.err")"
-wait "$ORDER_B_PID" || fail "concurrent projected spawn B failed: $(cat "$TMP_ROOT/order-b.err")"
+if wait "$ORDER_A_PID"; then ORDER_A_STATUS=0; else ORDER_A_STATUS=$?; fi
+if wait "$ORDER_B_PID"; then ORDER_B_STATUS=0; else ORDER_B_STATUS=$?; fi
+finish_concurrent_spawn order-a "$ORDER_A_STATUS" "$TMP_ROOT/order-a.out" "$TMP_ROOT/order-a.err"
+finish_concurrent_spawn order-b "$ORDER_B_STATUS" "$TMP_ROOT/order-b.out" "$TMP_ROOT/order-b.err"
 assert_focus_is "$CAPTAIN_FOCUS" "concurrent projected spawns"
 assert_raw_presentation_mutations_preserved_since "$CONCURRENT_FOCUS_AUDIT_START" "concurrent projected spawns"
 ORDER_A_META="$HOME_DIR/state/order-a.meta"
@@ -820,8 +995,8 @@ ABORT_A_STATUS=0
 ABORT_B_STATUS=0
 wait "$ABORT_A_PID" || ABORT_A_STATUS=$?
 wait "$ABORT_B_PID" || ABORT_B_STATUS=$?
-[ "$ABORT_A_STATUS" -ne 0 ] || fail "post-create abort fixture A unexpectedly succeeded"
-[ "$ABORT_B_STATUS" -ne 0 ] || fail "post-create abort fixture B unexpectedly succeeded"
+finish_concurrent_expected_abort abort-a "$ABORT_A_STATUS" "$TMP_ROOT/abort-a.out" "$TMP_ROOT/abort-a.err"
+finish_concurrent_expected_abort abort-b "$ABORT_B_STATUS" "$TMP_ROOT/abort-b.out" "$TMP_ROOT/abort-b.err"
 grep -F "yielded a dirty pool worktree" "$TMP_ROOT/abort-a.err" >/dev/null 2>&1 \
   || fail "post-create abort fixture A did not reach the armed validation failure: $(cat "$TMP_ROOT/abort-a.err")"
 grep -F "yielded a dirty pool worktree" "$TMP_ROOT/abort-b.err" >/dev/null 2>&1 \
@@ -876,8 +1051,10 @@ teardown_task order-a "$HOME_DIR" > "$TMP_ROOT/order-a-teardown.out" 2> "$TMP_RO
 ORDER_A_TEARDOWN_PID=$!
 teardown_task order-b "$HOME_DIR" > "$TMP_ROOT/order-b-teardown.out" 2> "$TMP_ROOT/order-b-teardown.err" &
 ORDER_B_TEARDOWN_PID=$!
-wait "$ORDER_A_TEARDOWN_PID" || fail "projected ordering fixture A teardown failed"
-wait "$ORDER_B_TEARDOWN_PID" || fail "projected ordering fixture B teardown failed"
+if wait "$ORDER_A_TEARDOWN_PID"; then ORDER_A_TEARDOWN_STATUS=0; else ORDER_A_TEARDOWN_STATUS=$?; fi
+if wait "$ORDER_B_TEARDOWN_PID"; then ORDER_B_TEARDOWN_STATUS=0; else ORDER_B_TEARDOWN_STATUS=$?; fi
+finish_concurrent_teardown order-a "$ORDER_A_TEARDOWN_STATUS" "$TMP_ROOT/order-a-teardown.out" "$TMP_ROOT/order-a-teardown.err"
+finish_concurrent_teardown order-b "$ORDER_B_TEARDOWN_STATUS" "$TMP_ROOT/order-b-teardown.out" "$TMP_ROOT/order-b-teardown.err"
 assert_focus_is "$CAPTAIN_FOCUS" "concurrent projected teardowns"
 teardown_task order-fail "$HOME_DIR" > "$TMP_ROOT/order-fail-teardown.out" 2> "$TMP_ROOT/order-fail-teardown.err" \
   || fail "projected ordering failure fixture teardown failed"
@@ -897,8 +1074,10 @@ for ROUND in 1 2 3; do
   WAVE_A_PID=$!
   spawn_task "focus-$ROUND-b" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/focus-$ROUND-b.out" 2> "$TMP_ROOT/focus-$ROUND-b.err" &
   WAVE_B_PID=$!
-  wait "$WAVE_A_PID" || fail "focus wave $ROUND spawn A failed: $(cat "$TMP_ROOT/focus-$ROUND-a.err")"
-  wait "$WAVE_B_PID" || fail "focus wave $ROUND spawn B failed: $(cat "$TMP_ROOT/focus-$ROUND-b.err")"
+  if wait "$WAVE_A_PID"; then WAVE_A_STATUS=0; else WAVE_A_STATUS=$?; fi
+  if wait "$WAVE_B_PID"; then WAVE_B_STATUS=0; else WAVE_B_STATUS=$?; fi
+  finish_concurrent_spawn "focus-$ROUND-a" "$WAVE_A_STATUS" "$TMP_ROOT/focus-$ROUND-a.out" "$TMP_ROOT/focus-$ROUND-a.err"
+  finish_concurrent_spawn "focus-$ROUND-b" "$WAVE_B_STATUS" "$TMP_ROOT/focus-$ROUND-b.out" "$TMP_ROOT/focus-$ROUND-b.err"
   remember_meta_worktree "$HOME_DIR/state/focus-$ROUND-a.meta" >/dev/null
   remember_meta_worktree "$HOME_DIR/state/focus-$ROUND-b.meta" >/dev/null
   assert_focus_is "$CAPTAIN_FOCUS" "focus wave $ROUND concurrent spawns"
@@ -916,8 +1095,10 @@ for ROUND in 1 2 3; do
   WAVE_A_TEARDOWN_PID=$!
   teardown_task "focus-$ROUND-b" "$HOME_DIR" > "$TMP_ROOT/focus-$ROUND-b-teardown.out" 2> "$TMP_ROOT/focus-$ROUND-b-teardown.err" &
   WAVE_B_TEARDOWN_PID=$!
-  wait "$WAVE_A_TEARDOWN_PID" || fail "focus wave $ROUND teardown A failed"
-  wait "$WAVE_B_TEARDOWN_PID" || fail "focus wave $ROUND teardown B failed"
+  if wait "$WAVE_A_TEARDOWN_PID"; then WAVE_A_TEARDOWN_STATUS=0; else WAVE_A_TEARDOWN_STATUS=$?; fi
+  if wait "$WAVE_B_TEARDOWN_PID"; then WAVE_B_TEARDOWN_STATUS=0; else WAVE_B_TEARDOWN_STATUS=$?; fi
+  finish_concurrent_teardown "focus-$ROUND-a" "$WAVE_A_TEARDOWN_STATUS" "$TMP_ROOT/focus-$ROUND-a-teardown.out" "$TMP_ROOT/focus-$ROUND-a-teardown.err"
+  finish_concurrent_teardown "focus-$ROUND-b" "$WAVE_B_TEARDOWN_STATUS" "$TMP_ROOT/focus-$ROUND-b-teardown.out" "$TMP_ROOT/focus-$ROUND-b-teardown.err"
   assert_focus_is "$CAPTAIN_FOCUS" "focus wave $ROUND concurrent teardowns"
   WAVE_REMAINING=$(lab workspace list | jq -r '.result.workspaces[].label')
   [ "$WAVE_REMAINING" = $'firstmate\n2ndmate-alpha\n2ndmate-bravo' ] \
@@ -993,6 +1174,11 @@ pass "real Herdr lab: the primary presentation setting inherits into real second
 # Keep the pre-existing 2ndmate-alpha/bravo workspaces as owning parents and captain focus.
 assert_focus_is "$CAPTAIN_FOCUS" "multi-home captain focus"
 
+# Capture pane state during the high-load multi-home sequence. Herdr can queue
+# pane commands behind a busy foreground process, so post-teardown evidence is
+# insufficient for diagnosing a publication stall.
+start_herdr_snapshotter
+
 mkdir -p "$SECOND_HOME_A/data/a1" "$SECOND_HOME_A/data/a2" \
   "$SECOND_HOME_B/data/b1" "$SECOND_HOME_B/data/b2" \
   "$HOME_DIR/data/p1" "$HOME_DIR/data/p2"
@@ -1004,18 +1190,18 @@ printf 'Secondmate B fixture 1.\n' > "$SECOND_HOME_B/data/b1/brief.md"
 printf 'Secondmate B fixture 2.\n' > "$SECOND_HOME_B/data/b2/brief.md"
 
 MULTI_FOCUS_START=$(focus_audit_line_count)
-spawn_task p1 "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/p1.out" 2> "$TMP_ROOT/p1.err" \
-  || fail "multi-home primary p1 failed: $(cat "$TMP_ROOT/p1.err")"
-spawn_task p2 "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/p2.out" 2> "$TMP_ROOT/p2.err" \
-  || fail "multi-home primary p2 failed: $(cat "$TMP_ROOT/p2.err")"
-spawn_task a1 "$SECOND_HOME_A" "$PROJECT_DIR" > "$TMP_ROOT/a1.out" 2> "$TMP_ROOT/a1.err" \
-  || fail "multi-home secondmate A a1 failed: $(cat "$TMP_ROOT/a1.err")"
-spawn_task a2 "$SECOND_HOME_A" "$PROJECT_DIR" > "$TMP_ROOT/a2.out" 2> "$TMP_ROOT/a2.err" \
-  || fail "multi-home secondmate A a2 failed: $(cat "$TMP_ROOT/a2.err")"
-spawn_task b1 "$SECOND_HOME_B" "$PROJECT_DIR" > "$TMP_ROOT/b1.out" 2> "$TMP_ROOT/b1.err" \
-  || fail "multi-home secondmate B b1 failed: $(cat "$TMP_ROOT/b1.err")"
-spawn_task b2 "$SECOND_HOME_B" "$PROJECT_DIR" > "$TMP_ROOT/b2.out" 2> "$TMP_ROOT/b2.err" \
-  || fail "multi-home secondmate B b2 failed: $(cat "$TMP_ROOT/b2.err")"
+spawn_task_with_pane_loss_retry p1 "$HOME_DIR" "$PROJECT_DIR" "$TMP_ROOT/p1.out" "$TMP_ROOT/p1.err" \
+  || { diagnose_spawn_failure "$TMP_ROOT/p1.err"; fail "multi-home primary p1 failed: $(cat "$TMP_ROOT/p1.err")"; }
+spawn_task_with_pane_loss_retry p2 "$HOME_DIR" "$PROJECT_DIR" "$TMP_ROOT/p2.out" "$TMP_ROOT/p2.err" \
+  || { diagnose_spawn_failure "$TMP_ROOT/p2.err"; fail "multi-home primary p2 failed: $(cat "$TMP_ROOT/p2.err")"; }
+spawn_task_with_pane_loss_retry a1 "$SECOND_HOME_A" "$PROJECT_DIR" "$TMP_ROOT/a1.out" "$TMP_ROOT/a1.err" \
+  || { diagnose_spawn_failure "$TMP_ROOT/a1.err"; fail "multi-home secondmate A a1 failed: $(cat "$TMP_ROOT/a1.err")"; }
+spawn_task_with_pane_loss_retry a2 "$SECOND_HOME_A" "$PROJECT_DIR" "$TMP_ROOT/a2.out" "$TMP_ROOT/a2.err" \
+  || { diagnose_spawn_failure "$TMP_ROOT/a2.err"; fail "multi-home secondmate A a2 failed: $(cat "$TMP_ROOT/a2.err")"; }
+spawn_task_with_pane_loss_retry b1 "$SECOND_HOME_B" "$PROJECT_DIR" "$TMP_ROOT/b1.out" "$TMP_ROOT/b1.err" \
+  || { diagnose_spawn_failure "$TMP_ROOT/b1.err"; fail "multi-home secondmate B b1 failed: $(cat "$TMP_ROOT/b1.err")"; }
+spawn_task_with_pane_loss_retry b2 "$SECOND_HOME_B" "$PROJECT_DIR" "$TMP_ROOT/b2.out" "$TMP_ROOT/b2.err" \
+  || { diagnose_spawn_failure "$TMP_ROOT/b2.err"; fail "multi-home secondmate B b2 failed: $(cat "$TMP_ROOT/b2.err")"; }
 for META_X in p1 p2 a1 a2 b1 b2; do
   case "$META_X" in
     p*) remember_meta_worktree "$HOME_DIR/state/$META_X.meta" >/dev/null ;;
@@ -1170,6 +1356,10 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
   PATH="$HERDR_ORIGINAL_PATH" \
     "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
     || fail "could not reprovision the isolated session for $RESTART_ID validation"
+  # Stopping the whole Herdr session also ends the anchor's agent. Its restored
+  # shell remains useful as the durable layout anchor, but its task record no
+  # longer represents a live slot owner and must not poison later slot reuse.
+  rm -f "$ANCHOR_META"
   lab pane get "$OLD_RESTART_PANE" >/dev/null 2>&1 \
     || fail "$RESTART_ID restart did not preserve the projected pane structurally"
   if lab agent get "$OLD_RESTART_PANE" >/dev/null 2>&1; then
@@ -1210,7 +1400,9 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
       || fail "$RESTART_ID repeated reclaim changed workspace identity"
     [ "$NEW_RESTART_PANE" != "$PRIOR_RESTART_PANE" ] \
       || fail "$RESTART_ID repeated reclaim reused the prior husk pane"
-    "$REAL_TREEHOUSE" return --force "$PRIOR_RESTART_WT" >/dev/null 2>&1 || true
+    if [ "$PRIOR_RESTART_WT" != "$NEW_RESTART_WT" ]; then
+      "$REAL_TREEHOUSE" return --force "$PRIOR_RESTART_WT" >/dev/null 2>&1 || true
+    fi
   fi
 
   teardown_task "$RESTART_ID" "$HOME_DIR" > "$TMP_ROOT/$RESTART_ID-teardown.out" 2> "$TMP_ROOT/$RESTART_ID-teardown.err" \
@@ -1303,9 +1495,9 @@ if lab pane get "$PRIMARY_WAVE_OLD_PANE" >/dev/null 2>&1 \
 fi
 assert_focus_is "$CONCURRENT_RECOVERY_FOCUS" "concurrent cross-home recovery"
 teardown_task "$PRIMARY_WAVE_ID" "$HOME_DIR" > "$TMP_ROOT/primary-wave-teardown.out" 2> "$TMP_ROOT/primary-wave-teardown.err" \
-  || fail "concurrent primary recovery teardown failed"
+  || fail "concurrent primary recovery teardown failed: $(cat "$TMP_ROOT/primary-wave-teardown.err")"
 teardown_task "$BRAVO_WAVE_ID" "$SECOND_HOME_B" > "$TMP_ROOT/bravo-wave-teardown.out" 2> "$TMP_ROOT/bravo-wave-teardown.err" \
-  || fail "concurrent secondmate recovery teardown failed"
+  || fail "concurrent secondmate recovery teardown failed: $(cat "$TMP_ROOT/bravo-wave-teardown.err")"
 "$REAL_TREEHOUSE" return --force "$PRIMARY_WAVE_OLD_WT" >/dev/null 2>&1 || true
 "$REAL_TREEHOUSE" return --force "$BRAVO_WAVE_OLD_WT" >/dev/null 2>&1 || true
 "$REAL_TREEHOUSE" return --force "$PRIMARY_WAVE_NEW_WT" >/dev/null 2>&1 || true
@@ -1345,6 +1537,7 @@ do
 done
 assert_focus_is "$CAPTAIN_FOCUS" "multi-home teardown"
 pass "real Herdr lab: multi-home exact-pane teardowns restore captain focus without workspace close authority"
+stop_herdr_snapshotter
 
 # Missing, renamed, and duplicate tokens are read-only recovery diagnostics.
 # The duplicate case allows flat fallback only when every matching pane is

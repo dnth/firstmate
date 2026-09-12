@@ -59,6 +59,37 @@ checkout|switch|reset)
   : > "$SAFE_FILE"
   exit 0
   ;;
+read-tree)
+  has_reset=0
+  ref=
+  for arg in "${@:2}"; do
+    [ "$arg" = --reset ] && has_reset=1
+    case "$arg" in
+      -*) ;;
+      *) [ -n "$ref" ] || ref=$arg ;;
+    esac
+  done
+  if [ "$has_reset" -ne 1 ]; then
+    printf "error: refusing pooled worktree acquisition at %s: unverified git read-tree boundary\n" \
+      "$PWD" >> "$ERROR_FILE"
+    exit 42
+  fi
+  case "$ref" in
+    ''|-*)
+      printf "error: refusing pooled worktree acquisition at %s: Treehouse did not supply a verifiable reset target\n" \
+        "$PWD" >> "$ERROR_FILE"
+      exit 42
+      ;;
+  esac
+  if ! "$REAL_GIT" merge-base --is-ancestor HEAD "$ref" 2>/dev/null; then
+    printf "error: refusing pooled worktree acquisition at %s: HEAD is not an ancestor of %s; local commits were preserved\n" \
+      "$PWD" "$ref" >> "$ERROR_FILE"
+    exit 42
+  fi
+  "$REAL_GIT" "$@" || exit $?
+  : > "$SAFE_FILE"
+  exit 0
+  ;;
 restore)
   printf "error: refusing pooled worktree acquisition at %s: unverified git restore boundary\n" \
     "$PWD" >> "$ERROR_FILE"

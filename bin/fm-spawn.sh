@@ -103,7 +103,20 @@
 #   focus-sensitive presentation mutation.
 #   Every single-task invocation holds one task-id-scoped lock across backend
 #   creation through metadata publication, so concurrent same-id spawns serialize
-#   even when they select different backends.
+#   even when they select different backends. A fresh Treehouse-backed spawn also
+#   takes the project-identity lock in the root Firstmate home's state directory
+#   before slot allocation and holds it through task metadata publication.
+#   Teardown holds that same lock while proving and returning a slot, so
+#   allocation cannot reuse a slot before its owner record is published. Under
+#   that same lock it writes the slot's owner claim, which is what lets teardown
+#   leave a slot reassigned since untouched; bin/fm-wake-lib.sh owns the claim
+#   and bin/fm-teardown.sh owns what it protects. A slot that cannot be claimed
+#   refuses the spawn rather than launching a worker whose slot could later be
+#   released out from under its successor. A spawn that aborts while it still
+#   holds the allocation lock drops its own claim; an abort after metadata
+#   publication has released that lock leaves the claim in place, and the next
+#   spawn's claim replaces it;
+#   contention refuses rather than waits.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -524,10 +537,17 @@ if [ "$ACCEPTED_LOCAL_BASE_SET" -eq 1 ]; then
 fi
 
 REMOTE_RUNPOD_DELIVERY_LOCK=
+REMOTE_TASK_SET_LOCK=
+REMOTE_TASK_SET_LOCK_HELD=0
 remote_runpod_delivery_cleanup() {
-  [ -n "$REMOTE_RUNPOD_DELIVERY_LOCK" ] || return 0
-  fm_lock_release "$REMOTE_RUNPOD_DELIVERY_LOCK" || true
-  REMOTE_RUNPOD_DELIVERY_LOCK=
+  if [ -n "$REMOTE_RUNPOD_DELIVERY_LOCK" ]; then
+    fm_lock_release "$REMOTE_RUNPOD_DELIVERY_LOCK" || true
+    REMOTE_RUNPOD_DELIVERY_LOCK=
+  fi
+  if [ "$REMOTE_TASK_SET_LOCK_HELD" = 1 ]; then
+    REMOTE_TASK_SET_LOCK_HELD=0
+    fm_lock_release "$REMOTE_TASK_SET_LOCK" || true
+  fi
 }
 trap remote_runpod_delivery_cleanup EXIT
 
@@ -541,6 +561,15 @@ spawn_remote_secondmate() {
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || { echo "error: invalid task id" >&2; return 2; }
   mkdir -p "$STATE" || { echo "error: could not create parent state directory" >&2; return 1; }
+  REMOTE_TASK_SET_LOCK=$(fm_task_set_lock_path "$STATE") || {
+    echo "error: could not resolve task-set lock for $STATE" >&2
+    return 1
+  }
+  if ! fm_lock_try_acquire "$REMOTE_TASK_SET_LOCK"; then
+    echo "error: another task publication or forced teardown is in progress for $STATE" >&2
+    return 1
+  fi
+  REMOTE_TASK_SET_LOCK_HELD=1
   SPAWN_TASK_LOCK="$STATE/.spawn-$id.lock"
   if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
     echo "error: another spawn is already creating task $id" >&2
@@ -554,6 +583,8 @@ spawn_remote_secondmate() {
   fi
   remote=$(secondmate_registry_field "$DATA/secondmates.md" "$id" remote 2>/dev/null || true)
   if [ "$remote" != 1 ]; then
+    REMOTE_TASK_SET_LOCK_HELD=0
+    fm_lock_release "$REMOTE_TASK_SET_LOCK" || true
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     return 3
@@ -938,8 +969,14 @@ HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
+SPAWN_TASK_SET_LOCK=
+SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_META_LOCK=
 SPAWN_META_LOCK_HELD=0
+SPAWN_TREEHOUSE_PROJECT_LOCK=
+SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
+SPAWN_SLOT_CLAIMED=0
+SPAWN_POOL_LEASE_ABORT=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 TREEHOUSE_READY_DIR=
@@ -1047,6 +1084,13 @@ spawn_abort_cleanup() {
       echo "warning: raw launch preflight could not return its leased worktree $WT" >&2
     fi
   fi
+  if [ "$SPAWN_POOL_LEASE_ABORT" = 1 ] && [ -n "${WT:-}" ] \
+     && [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+    SPAWN_POOL_LEASE_ABORT=0
+    if ! (cd "$PROJ_ABS" && "$SCRIPT_DIR/fm-treehouse-command.sh" return "$WT" >/dev/null 2>&1); then
+      echo "warning: spawn claim failure could not return its leased worktree $WT" >&2
+    fi
+  fi
   if [ "$OMP_ABORT_CLEANUP" = 1 ]; then
     OMP_ABORT_CLEANUP=0
     meta="${STATE:-}/${ID:-}.meta"
@@ -1136,6 +1180,31 @@ spawn_abort_cleanup() {
   if [ "$SPAWN_META_LOCK_HELD" = 1 ]; then
     SPAWN_META_LOCK_HELD=0
     fm_lock_release "$SPAWN_META_LOCK" || true
+  fi
+  # A spawn that aborts after claiming its slot but before its record survives
+  # must not leave a claim naming a task no record describes. The release is a
+  # read-then-remove, so it runs only while the project lock that wrote the
+  # claim is still held (aborts before metadata publication); a later abort has
+  # already released that lock and leaves the claim for the next spawn's
+  # atomic replacement rather than racing it. The release itself never removes
+  # another task's claim.
+  if [ "$SPAWN_SLOT_CLAIMED" = 1 ] && [ -n "${WT:-}" ] \
+     && [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ] \
+     && fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
+    SPAWN_SLOT_CLAIMED=0
+    if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
+      fm_treehouse_slot_owner_release "$WT" "$ID" || true
+    else
+      echo "warning: leaving task $ID's slot claim on $WT in place; the Treehouse project lock is no longer held, so the next spawn's claim replaces it" >&2
+    fi
+  fi
+  if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
+    SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
+    fm_lock_release "$SPAWN_TREEHOUSE_PROJECT_LOCK" || true
+  fi
+  if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
+    SPAWN_TASK_SET_LOCK_HELD=0
+    fm_lock_release "$SPAWN_TASK_SET_LOCK" || true
   fi
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
@@ -1232,6 +1301,15 @@ fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; 
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
 fm_lease_forbid_branch "new-task spawn (fm-spawn)"
+SPAWN_TASK_SET_LOCK=$(fm_task_set_lock_path "$STATE") || {
+  echo "error: could not resolve task-set lock for $STATE" >&2
+  exit 1
+}
+if ! fm_lock_try_acquire "$SPAWN_TASK_SET_LOCK"; then
+  echo "error: another task publication or forced teardown is in progress for $STATE" >&2
+  exit 1
+fi
+SPAWN_TASK_SET_LOCK_HELD=1
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
 if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   echo "error: another spawn is already creating task $ID" >&2
@@ -2925,6 +3003,17 @@ else
   fi
   BRIEF="$DATA/$ID/brief.md"
 fi
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
+    echo "error: could not resolve the shared Treehouse project lock for $PROJ_ABS" >&2
+    exit 1
+  }
+  if ! fm_lock_try_acquire "$SPAWN_TREEHOUSE_PROJECT_LOCK"; then
+    echo "error: another Treehouse slot allocation or return is in progress for $PROJ_ABS; refusing to race it" >&2
+    exit 1
+  fi
+  SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=1
+fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
 # Orchestration opt-in is explicit task data, never a keyword scan of prose:
@@ -3772,12 +3861,23 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] 
   }
 
   if [ "${IS_SANDBOX:-}" = 1 ] || [ "$BACKEND" = herdr ]; then
-    for _ in $(seq 1 60); do
+    treehouse_ready_polls=${FM_TREEHOUSE_READY_POLLS:-60}
+    case "$treehouse_ready_polls" in ''|*[!0-9]*|0) treehouse_ready_polls=60 ;; esac
+    for _ in $(seq 1 "$treehouse_ready_polls"); do
       [ -s "$treehouse_ready_file" ] && break
+      if [ -s "${treehouse_ready_file}.failed" ]; then
+        cat "${treehouse_ready_file}.failed" >&2
+        echo "error: guarded Treehouse acquisition failed in pane $T" >&2
+        exit 1
+      fi
+      if [ "$BACKEND" = herdr ] && ! fm_backend_target_exists "$BACKEND" "$T"; then
+        echo "error: herdr pane $T disappeared during Treehouse worktree acquisition; the pane death, not treehouse, prevented publication" >&2
+        exit 1
+      fi
       sleep 1
     done
     if [ ! -s "$treehouse_ready_file" ]; then
-      echo "error: treehouse get did not publish its acquired worktree within 60s; inspect window $T" >&2
+      echo "error: treehouse get did not publish its acquired worktree within ${treehouse_ready_polls}s; inspect window $T" >&2
       exit 1
     fi
     WT=$(sed -n '1p' "$treehouse_ready_file")
@@ -3829,8 +3929,29 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] 
 
   validate_spawn_worktree "treehouse get" "$T"
   validate_spawn_pool_lease "treehouse get" "$T" || exit 1
+  SPAWN_POOL_LEASE_ABORT=1
   if [ "$HARNESS" = omp ]; then
     fm_omp_clear_stale_runtime_markers "$WT" || exit 1
+  fi
+
+  # Claim the pool slot for this task. The interactive `treehouse get` sent to
+  # the pane above records only a process lease (Treehouse's durable
+  # `get --lease --lease-holder`, which bin/fm-home-seed.sh uses for secondmate
+  # homes, is not this path), so Treehouse cannot say which task a slot belongs
+  # to once that task's worker exits - and that is exactly when the slot is
+  # handed on and this task's worktree= line goes stale. The claim is what lets
+  # bin/fm-teardown.sh leave a slot that has since been reassigned untouched, so
+  # a slot that cannot be claimed is refused here, at the cheapest point, rather
+  # than launching a worker whose slot teardown could later release out from
+  # under its successor.
+  # Written under the Treehouse project lock held from before slot allocation
+  # through metadata publication, so no other spawn or return sees a half-claim.
+  if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
+    if ! fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME"; then
+      echo "error: could not claim Treehouse pool slot $WT for task $ID; refusing to launch a worker whose slot cannot later be proved to be its own; inspect window $T" >&2
+      exit 1
+    fi
+    SPAWN_SLOT_CLAIMED=1
   fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
@@ -4370,6 +4491,18 @@ SPAWN_META_LOCK_HELD=1
     echo "projects=$SECONDMATE_PROJECTS"
   fi
 } > "$STATE/$ID.meta"
+SPAWN_POOL_LEASE_ABORT=0
+# The record is published, so a teardown's slot-ownership scan can now name this
+# task. The Treehouse project lock is only needed across slot allocation through
+# that publication.
+if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
+  SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
+  fm_lock_release "$SPAWN_TREEHOUSE_PROJECT_LOCK"
+fi
+if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
+  SPAWN_TASK_SET_LOCK_HELD=0
+  fm_lock_release "$SPAWN_TASK_SET_LOCK"
+fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 if [ "$HARNESS" = omp ]; then
   OMP_ABORT_CLEANUP=1
