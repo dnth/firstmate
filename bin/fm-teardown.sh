@@ -255,6 +255,11 @@ if [ "$FORCE" = --force ] && [ "$TEARDOWN_ACTOR" = branch ]; then
   echo "error: forced teardown refused - the supervision branch cannot discard work" >&2
   exit "$FM_LEASE_REFUSE_EXIT"
 fi
+DESCENDANT_LOCK_PATHS=()
+TREEHOUSE_PROJECT_LOCK=
+TREEHOUSE_PROJECT_LOCK_HELD=0
+META_LOCK=
+META_LOCK_HELD=0
 teardown_exit_cleanup() {
   local status=$? i
   if declare -F teardown_release_herdr_locks >/dev/null 2>&1; then
@@ -279,8 +284,6 @@ trap teardown_exit_cleanup EXIT
 fm_lease_guard "$ID" "teardown"
 
 META="$STATE/$ID.meta"
-TREEHOUSE_PROJECT_LOCK=
-TREEHOUSE_PROJECT_LOCK_HELD=0
 TREEHOUSE_SLOT_LOCK_REQUIRED=0
 if [ -f "$META" ] && [ ! -L "$META" ]; then
   TEARDOWN_LOCK_KIND=$(fm_meta_get "$META" kind)
@@ -304,7 +307,6 @@ if [ -f "$META" ] && [ ! -L "$META" ]; then
     TREEHOUSE_PROJECT_LOCK_HELD=1
   fi
 fi
-DESCENDANT_LOCK_PATHS=()
 DESCENDANT_TASK_STATES=()
 DESCENDANT_TASK_IDS=()
 DESCENDANT_TASK_KINDS=()
@@ -316,7 +318,6 @@ fm_refuse_if_gate_agent
 FM_LOCK_LOG_PREFIX=teardown
 
 META_LOCK=$(fm_meta_lock_path "$META") || exit 1
-META_LOCK_HELD=0
 fm_lock_acquire_wait "$META_LOCK"
 META_LOCK_HELD=1
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
