@@ -32,8 +32,10 @@ type OmpDoorbellApi = {
 		content: string,
 		options?: { deliverAs?: "steer" | "followUp" },
 	) => void | Promise<void>;
-	// Optional turn observation enables downgrade recovery. Runtimes without an
-	// event surface keep the prior accept-only semantics.
+	// A turn-event surface enables downgrade recovery, whether the doorbell
+	// subscribes itself or the embedding extension forwards its own correlated
+	// turn_start/turn_end through notifyTurnStart/notifyTurnEnd. Runtimes
+	// without an event surface keep the prior accept-only semantics.
 	// Method syntax keeps the parameter bivariant: the real extension API types
 	// `on` as per-event-name overloads, which a property signature could not
 	// accept.
@@ -51,6 +53,10 @@ export type TaskInboxDoorbellOptions = {
 	// triggerTurn call is treated as downgraded to append-only and the
 	// instruction is re-driven through the user-prompt channel.
 	turnGraceMs?: number;
+	// false keeps the doorbell off the event surface: the embedding extension
+	// forwards its own correlated turn_start/turn_end through notifyTurnStart
+	// and notifyTurnEnd instead. Turn proof and downgrade re-drive apply
+	// either way whenever the runtime exposes an event surface.
 	observeTurns?: boolean;
 };
 
@@ -58,6 +64,7 @@ export type TaskInboxDoorbell = {
 	activate: () => void;
 	retire: () => void;
 	notifyTurnStart: () => void;
+	notifyTurnEnd: () => void;
 };
 
 function configuredOptions(options: TaskInboxDoorbellOptions): Required<TaskInboxDoorbellOptions> | undefined {
@@ -138,12 +145,13 @@ export function installTaskInboxDoorbell(
 ): TaskInboxDoorbell {
 	const configured = configuredOptions(options);
 	if (!configured || typeof omp.sendMessage !== "function") {
-		return { activate: () => {}, retire: () => {}, notifyTurnStart: () => {} };
+		return { activate: () => {}, retire: () => {}, notifyTurnStart: () => {}, notifyTurnEnd: () => {} };
 	}
 
 	const requestDir = `${configured.readyMarker}.requests`;
 	const turnGraceMs = configured.turnGraceMs;
-	const canObserveTurns = options.observeTurns !== false && typeof omp.on === "function";
+	const turnEventsReachable = typeof omp.on === "function";
+	const canObserveTurns = options.observeTurns !== false && turnEventsReachable;
 	const canReDrive = typeof omp.sendUserMessage === "function";
 	let active = false;
 	let draining = false;
@@ -200,6 +208,7 @@ export function installTaskInboxDoorbell(
 	const onTurnClose = (): void => {
 		turnOpen = false;
 	};
+	const notifyTurnEnd = (): void => onTurnClose();
 	const installTurnListeners = (): void => {
 		if (turnListenersInstalled || !canObserveTurns) return;
 		turnListenersInstalled = true;
@@ -252,7 +261,7 @@ export function installTaskInboxDoorbell(
 					// A steer into an open turn is delivered by that turn. On an idle
 					// session, triggerTurn must start one; claiming delivered without
 					// that proof is the downgrade that strands an idle worker.
-					if (!canObserveTurns) {
+					if (!turnEventsReachable) {
 						renameSync(ambiguous, `${pending}.delivered`);
 						continue;
 					}
@@ -297,5 +306,5 @@ export function installTaskInboxDoorbell(
 		}
 	};
 
-	return { activate, retire, notifyTurnStart };
+	return { activate, retire, notifyTurnStart, notifyTurnEnd };
 }

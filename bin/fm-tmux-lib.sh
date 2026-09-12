@@ -86,7 +86,7 @@ FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]
 FM_TMUX_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_TMUX_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
-FM_TMUX_OMP_BUSY_REGEX_DEFAULT='Working…[[:space:]]+⟦esc⟧|^[[:space:]]*(⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏)[[:space:]]+(Running|Waiting)[[:space:]].*[[:space:]]+⟦esc⟧[[:space:]]*$'
+FM_TMUX_OMP_BUSY_REGEX_DEFAULT='Working…[[:space:]]+⟦esc⟧|Executing[[:space:]].*command|waiting on [0-9]+ job|Waiting for requested command|^[[:space:]]*(⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏)[[:space:]]+(Running|Waiting)[[:space:]].*[[:space:]]+⟦esc⟧[[:space:]]*$'
 FM_TMUX_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
 FM_TMUX_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
 
