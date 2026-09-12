@@ -2438,8 +2438,24 @@ collect_descendant_task_locks() {
   local -a child_ids
   sub_state="$home/state"
   if [ -L "$sub_state" ]; then
-    echo "REFUSED: secondmate home $home has a symbolic-link state path at $sub_state; forced teardown changed nothing" >&2
-    return 1
+    # A state link that resolves inside its own home is an ordinary layout -
+    # the target is removed with the home - so only a link that escapes the
+    # home, or cannot be resolved at all, refuses.
+    local resolved_state resolved_home
+    resolved_state=$(removal_target_abs_path "$sub_state" 2>/dev/null || true)
+    resolved_home=$(removal_target_abs_path "$home" 2>/dev/null || true)
+    if [ -n "$resolved_state" ] && [ -n "$resolved_home" ]; then
+      case "$resolved_state" in
+        "$resolved_home"/*) ;;
+        *) resolved_state= ;;
+      esac
+    else
+      resolved_state=
+    fi
+    if [ -z "$resolved_state" ]; then
+      echo "REFUSED: secondmate home $home has a symbolic-link state path at $sub_state escaping the home; forced teardown changed nothing" >&2
+      return 1
+    fi
   fi
   if [ -e "$sub_state" ] && [ ! -d "$sub_state" ]; then
     echo "REFUSED: secondmate home $home has a non-directory state path at $sub_state; forced teardown changed nothing" >&2
@@ -2449,7 +2465,7 @@ collect_descendant_task_locks() {
     echo "REFUSED: secondmate home $home state directory could not be established at $sub_state; forced teardown changed nothing" >&2
     return 1
   fi
-  if [ -L "$sub_state" ] || [ ! -d "$sub_state" ]; then
+  if [ ! -d "$sub_state" ]; then
     echo "REFUSED: secondmate home $home state path is not a safe directory at $sub_state; forced teardown changed nothing" >&2
     return 1
   fi
