@@ -537,10 +537,17 @@ if [ "$ACCEPTED_LOCAL_BASE_SET" -eq 1 ]; then
 fi
 
 REMOTE_RUNPOD_DELIVERY_LOCK=
+REMOTE_TASK_SET_LOCK=
+REMOTE_TASK_SET_LOCK_HELD=0
 remote_runpod_delivery_cleanup() {
-  [ -n "$REMOTE_RUNPOD_DELIVERY_LOCK" ] || return 0
-  fm_lock_release "$REMOTE_RUNPOD_DELIVERY_LOCK" || true
-  REMOTE_RUNPOD_DELIVERY_LOCK=
+  if [ -n "$REMOTE_RUNPOD_DELIVERY_LOCK" ]; then
+    fm_lock_release "$REMOTE_RUNPOD_DELIVERY_LOCK" || true
+    REMOTE_RUNPOD_DELIVERY_LOCK=
+  fi
+  if [ "$REMOTE_TASK_SET_LOCK_HELD" = 1 ]; then
+    REMOTE_TASK_SET_LOCK_HELD=0
+    fm_lock_release "$REMOTE_TASK_SET_LOCK" || true
+  fi
 }
 trap remote_runpod_delivery_cleanup EXIT
 
@@ -554,6 +561,15 @@ spawn_remote_secondmate() {
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || { echo "error: invalid task id" >&2; return 2; }
   mkdir -p "$STATE" || { echo "error: could not create parent state directory" >&2; return 1; }
+  REMOTE_TASK_SET_LOCK=$(fm_task_set_lock_path "$STATE") || {
+    echo "error: could not resolve task-set lock for $STATE" >&2
+    return 1
+  }
+  if ! fm_lock_try_acquire "$REMOTE_TASK_SET_LOCK"; then
+    echo "error: another task publication or forced teardown is in progress for $STATE" >&2
+    return 1
+  fi
+  REMOTE_TASK_SET_LOCK_HELD=1
   SPAWN_TASK_LOCK="$STATE/.spawn-$id.lock"
   if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
     echo "error: another spawn is already creating task $id" >&2
@@ -567,6 +583,8 @@ spawn_remote_secondmate() {
   fi
   remote=$(secondmate_registry_field "$DATA/secondmates.md" "$id" remote 2>/dev/null || true)
   if [ "$remote" != 1 ]; then
+    REMOTE_TASK_SET_LOCK_HELD=0
+    fm_lock_release "$REMOTE_TASK_SET_LOCK" || true
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     return 3
@@ -951,6 +969,8 @@ HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
+SPAWN_TASK_SET_LOCK=
+SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_META_LOCK=
 SPAWN_META_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
@@ -1174,6 +1194,10 @@ spawn_abort_cleanup() {
     SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
     fm_lock_release "$SPAWN_TREEHOUSE_PROJECT_LOCK" || true
   fi
+  if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
+    SPAWN_TASK_SET_LOCK_HELD=0
+    fm_lock_release "$SPAWN_TASK_SET_LOCK" || true
+  fi
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
@@ -1269,6 +1293,15 @@ fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; 
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
 fm_lease_forbid_branch "new-task spawn (fm-spawn)"
+SPAWN_TASK_SET_LOCK=$(fm_task_set_lock_path "$STATE") || {
+  echo "error: could not resolve task-set lock for $STATE" >&2
+  exit 1
+}
+if ! fm_lock_try_acquire "$SPAWN_TASK_SET_LOCK"; then
+  echo "error: another task publication or forced teardown is in progress for $STATE" >&2
+  exit 1
+fi
+SPAWN_TASK_SET_LOCK_HELD=1
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
 if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   echo "error: another spawn is already creating task $ID" >&2
@@ -4446,6 +4479,10 @@ SPAWN_META_LOCK_HELD=1
 if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
   SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
   fm_lock_release "$SPAWN_TREEHOUSE_PROJECT_LOCK"
+fi
+if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
+  SPAWN_TASK_SET_LOCK_HELD=0
+  fm_lock_release "$SPAWN_TASK_SET_LOCK"
 fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 if [ "$HARNESS" = omp ]; then
