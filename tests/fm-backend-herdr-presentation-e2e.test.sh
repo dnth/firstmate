@@ -411,6 +411,19 @@ spawn_task() {  # <id> <home> <project>
     "$ROOT/bin/fm-spawn.sh" "$id" "$project" "$RAW_SLEEP_AGENT 120" --mode no-mistakes --yolo off --backend herdr
 }
 
+spawn_task_with_pane_loss_retry() {  # <id> <home> <project> <stdout> <stderr>
+  local id=$1 home=$2 project=$3 out=$4 err=$5
+  if spawn_task "$id" "$home" "$project" > "$out" 2> "$err"; then
+    return 0
+  fi
+  if grep -F "disappeared during Treehouse worktree acquisition" "$err" >/dev/null 2>&1; then
+    printf 'diagnostic: retrying %s once after Herdr pane loss\n' "$id" >&2
+    spawn_task "$id" "$home" "$project" > "$out" 2> "$err"
+    return $?
+  fi
+  return 1
+}
+
 diagnose_spawn_failure() {  # <stderr-file>
   local err_file=$1 target pane workspace session pane_dump pane_get ready_path
   target=$(sed -nE 's/.*inspect window ([^[:space:]]+).*/\1/p' "$err_file" 2>/dev/null | tail -n 1 || true)
@@ -1100,17 +1113,17 @@ printf 'Secondmate B fixture 1.\n' > "$SECOND_HOME_B/data/b1/brief.md"
 printf 'Secondmate B fixture 2.\n' > "$SECOND_HOME_B/data/b2/brief.md"
 
 MULTI_FOCUS_START=$(focus_audit_line_count)
-spawn_task p1 "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/p1.out" 2> "$TMP_ROOT/p1.err" \
+spawn_task_with_pane_loss_retry p1 "$HOME_DIR" "$PROJECT_DIR" "$TMP_ROOT/p1.out" "$TMP_ROOT/p1.err" \
   || { diagnose_spawn_failure "$TMP_ROOT/p1.err"; fail "multi-home primary p1 failed: $(cat "$TMP_ROOT/p1.err")"; }
-spawn_task p2 "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/p2.out" 2> "$TMP_ROOT/p2.err" \
+spawn_task_with_pane_loss_retry p2 "$HOME_DIR" "$PROJECT_DIR" "$TMP_ROOT/p2.out" "$TMP_ROOT/p2.err" \
   || { diagnose_spawn_failure "$TMP_ROOT/p2.err"; fail "multi-home primary p2 failed: $(cat "$TMP_ROOT/p2.err")"; }
-spawn_task a1 "$SECOND_HOME_A" "$PROJECT_DIR" > "$TMP_ROOT/a1.out" 2> "$TMP_ROOT/a1.err" \
+spawn_task_with_pane_loss_retry a1 "$SECOND_HOME_A" "$PROJECT_DIR" "$TMP_ROOT/a1.out" "$TMP_ROOT/a1.err" \
   || { diagnose_spawn_failure "$TMP_ROOT/a1.err"; fail "multi-home secondmate A a1 failed: $(cat "$TMP_ROOT/a1.err")"; }
-spawn_task a2 "$SECOND_HOME_A" "$PROJECT_DIR" > "$TMP_ROOT/a2.out" 2> "$TMP_ROOT/a2.err" \
+spawn_task_with_pane_loss_retry a2 "$SECOND_HOME_A" "$PROJECT_DIR" "$TMP_ROOT/a2.out" "$TMP_ROOT/a2.err" \
   || { diagnose_spawn_failure "$TMP_ROOT/a2.err"; fail "multi-home secondmate A a2 failed: $(cat "$TMP_ROOT/a2.err")"; }
-spawn_task b1 "$SECOND_HOME_B" "$PROJECT_DIR" > "$TMP_ROOT/b1.out" 2> "$TMP_ROOT/b1.err" \
+spawn_task_with_pane_loss_retry b1 "$SECOND_HOME_B" "$PROJECT_DIR" "$TMP_ROOT/b1.out" "$TMP_ROOT/b1.err" \
   || { diagnose_spawn_failure "$TMP_ROOT/b1.err"; fail "multi-home secondmate B b1 failed: $(cat "$TMP_ROOT/b1.err")"; }
-spawn_task b2 "$SECOND_HOME_B" "$PROJECT_DIR" > "$TMP_ROOT/b2.out" 2> "$TMP_ROOT/b2.err" \
+spawn_task_with_pane_loss_retry b2 "$SECOND_HOME_B" "$PROJECT_DIR" "$TMP_ROOT/b2.out" "$TMP_ROOT/b2.err" \
   || { diagnose_spawn_failure "$TMP_ROOT/b2.err"; fail "multi-home secondmate B b2 failed: $(cat "$TMP_ROOT/b2.err")"; }
 for META_X in p1 p2 a1 a2 b1 b2; do
   case "$META_X" in
