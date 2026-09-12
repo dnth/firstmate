@@ -923,7 +923,11 @@ fm_firstmate_root_home() {
       . "$FM_WAKE_LIB_DIR/fm-secondmate-parent-lib.sh"
     fi
     fm_secondmate_parent_record_parse "$marker" || return 1
-    [ "$FM_SECONDMATE_PARENT_ROUTE" = local ] || return 1
+    case "$FM_SECONDMATE_PARENT_ROUTE" in
+      local) ;;
+      remote) break ;;
+      *) return 1 ;;
+    esac
     parent=$(CDPATH='' cd -- "$FM_SECONDMATE_PARENT_HOME" 2>/dev/null && pwd -P) || return 1
     case "$seen" in *"|$parent|"*) return 1 ;; esac
     seen="$seen$home|"
