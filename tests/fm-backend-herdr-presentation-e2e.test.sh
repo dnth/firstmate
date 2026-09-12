@@ -436,18 +436,22 @@ teardown_task() {  # <id> <home>
 finish_concurrent_spawn() {  # <id> <status> <stdout> <stderr>
   local id=$1 status=$2 out=$3 err=$4
   [ "$status" -ne 0 ] || return 0
-  grep -F "another Treehouse slot allocation or return is in progress" "$err" >/dev/null 2>&1 \
-    || fail "concurrent projected spawn $id failed unexpectedly: $(cat "$err")"
-  spawn_task "$id" "$HOME_DIR" "$PROJECT_DIR" > "$out" 2> "$err" \
-    || fail "projected spawn $id retry failed after the Treehouse project lock cleared: $(cat "$err")"
+  if grep -F "another Treehouse slot allocation or return is in progress" "$err" >/dev/null 2>&1 \
+     || grep -F "another task publication or forced teardown is in progress" "$err" >/dev/null 2>&1; then
+    spawn_task "$id" "$HOME_DIR" "$PROJECT_DIR" > "$out" 2> "$err" \
+      || fail "projected spawn $id retry failed after the contended lock cleared: $(cat "$err")"
+    return 0
+  fi
+  fail "concurrent projected spawn $id failed unexpectedly: $(cat "$err")"
 }
 
 finish_concurrent_expected_abort() {  # <id> <status> <stdout> <stderr>
   local id=$1 status=$2 out=$3 err=$4
   [ "$status" -ne 0 ] || fail "post-create abort fixture $id unexpectedly succeeded"
-  if grep -F "another Treehouse slot allocation or return is in progress" "$err" >/dev/null 2>&1; then
+  if grep -F "another Treehouse slot allocation or return is in progress" "$err" >/dev/null 2>&1 \
+     || grep -F "another task publication or forced teardown is in progress" "$err" >/dev/null 2>&1; then
     if spawn_task "$id" "$HOME_DIR" "$PROJECT_DIR" > "$out" 2> "$err"; then
-      fail "post-create abort fixture $id unexpectedly succeeded after the Treehouse project lock cleared"
+      fail "post-create abort fixture $id unexpectedly succeeded after the contended lock cleared"
     fi
   fi
 }
