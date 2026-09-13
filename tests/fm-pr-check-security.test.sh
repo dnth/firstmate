@@ -2110,6 +2110,84 @@ test_watcher_surfaces_pre_metadata_poll_after_validation_lock_stales() {
   pass "watcher bounds pre-metadata deferral by validation lock freshness"
 }
 
+test_metadata_identity_parse_is_order_independent() {
+  local dir state head
+  dir=$(make_case meta-order)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  head=0123456789abcdef0123456789abcdef01234567
+  FM_TEST_GH_HEAD=$head run_check_entry "$dir" task-a https://github.com/o/r/pull/31 \
+    > "$dir/arm.out" 2> "$dir/arm.err" \
+    || fail "could not arm the canonical poll fixture"
+
+  # Lifecycle writers append their own fields after the canonical
+  # pr=/pr_head= record; the identity parse and the poll snapshot must still
+  # accept the metadata.
+  cat >> "$state/task-a.meta" <<'EOF'
+decisions_reviewed=1
+decision_keys=alpha,beta
+x_request=req-1
+x_request_ts=1787000000
+x_followups=0
+x_platform=x
+x_reply_max_chars=280
+traceparent=00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+validation_run_id=run-1
+validation_pr_published_generation=gen-1
+EOF
+  fm_pr_metadata_identity_parse "$state/task-a.meta" \
+    || fail "identity parse rejected fields appended after pr=/pr_head="
+  [ "$FM_PR_META_PROVIDER" = github ] && [ "$FM_PR_META_URL" = https://github.com/o/r/pull/31 ] \
+    && [ "$FM_PR_META_HOST" = github.com ] && [ "$FM_PR_META_PATH" = o/r ] \
+    && [ "$FM_PR_META_NUMBER" = 31 ] \
+    || fail "identity parse returned the wrong canonical identity"
+  fm_pr_poll_snapshot_capture "$state" task-a "$POLL" \
+    || fail "poll snapshot rejected metadata with fields after pr=/pr_head="
+
+  # The same identity parses when a later field sits between pr= and pr_head=.
+  fm_write_meta "$state/order.meta" \
+    "window=w" "pr=https://github.com/o/r/pull/31" "decisions_reviewed=1" \
+    "pr_head=$head" "kind=ship"
+  fm_pr_metadata_identity_parse "$state/order.meta" \
+    || fail "identity parse rejected a field between pr= and pr_head="
+  [ "$FM_PR_META_URL" = https://github.com/o/r/pull/31 ] \
+    || fail "interleaved identity parse returned the wrong URL"
+
+  # Duplicated or conflicting identity still fails closed.
+  fm_write_meta "$state/order.meta" \
+    "pr=https://github.com/o/r/pull/31" "pr=https://github.com/o/r/pull/32"
+  ! fm_pr_metadata_identity_parse "$state/order.meta" \
+    || fail "identity parse accepted conflicting duplicate pr= records"
+  fm_write_meta "$state/order.meta" \
+    "pr=https://github.com/o/r/pull/31" "decisions_reviewed=1" "pr=https://github.com/o/r/pull/31"
+  ! fm_pr_metadata_identity_parse "$state/order.meta" \
+    || fail "identity parse accepted a duplicated pr= record"
+  fm_write_meta "$state/order.meta" \
+    "pr=https://github.com/o/r/pull/31" "pr_head=notasha"
+  ! fm_pr_metadata_identity_parse "$state/order.meta" \
+    || fail "identity parse accepted a malformed pr_head= record"
+  fm_write_meta "$state/order.meta" \
+    "pr_head=notasha" "pr=https://github.com/o/r/pull/31"
+  ! fm_pr_metadata_identity_parse "$state/order.meta" \
+    || fail "identity parse accepted a malformed pr_head= record before pr="
+  fm_write_meta "$state/order.meta" \
+    "window=w" "decisions_reviewed=1" "kind=ship"
+  ! fm_pr_metadata_identity_parse "$state/order.meta" \
+    || fail "identity parse accepted metadata with no pr= record"
+  fm_write_meta "$state/order.meta" \
+    "pr=notaurl" "pr_head=$head"
+  ! fm_pr_metadata_identity_parse "$state/order.meta" \
+    || fail "identity parse accepted a malformed pr= record"
+
+  # The snapshot predicate itself still fails closed on a duplicated pr=.
+  printf 'pr=https://github.com/o/r/pull/31\n' >> "$state/task-a.meta"
+  ! fm_pr_metadata_identity_parse "$state/task-a.meta" \
+    || fail "identity parse accepted a duplicated pr= record on the armed task"
+  ! fm_pr_poll_snapshot_capture "$state" task-a "$POLL" \
+    || fail "poll snapshot accepted a duplicated pr= record"
+  pass "metadata identity parse is order-independent and still fails closed on duplicate identity"
+}
+
 test_parser_matrix
 test_gitlab_merge_watch
 test_merged_poll_retires_once
@@ -2127,6 +2205,7 @@ test_gitlab_merged_poll_retires
 test_validation_plan_lock_serializes_pr_registration
 test_fast_pr_path_records_completion_and_keeps_watcher
 test_pr_metadata_swap_after_snapshot_fails_closed
+test_metadata_identity_parse_is_order_independent
 test_watcher_defers_pre_metadata_poll_during_validation_lock
 test_watcher_surfaces_pre_metadata_poll_after_validation_lock_stales
 test_invalid_entrypoints_have_zero_side_effects

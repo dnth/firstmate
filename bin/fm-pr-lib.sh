@@ -12,6 +12,13 @@
 # consumer re-derives the identity from the stored URL and refuses any record
 # whose parts do not reconstruct that exact URL.
 #
+# The task-metadata identity contract is order-independent: state/<id>.meta
+# holds exactly one canonical pr=<url> record plus forge-observed pr_head=<sha>
+# records, and unrelated lifecycle writers append their own fields before and
+# after them. fm_pr_metadata_identity_parse recognizes pr= and pr_head=
+# wherever they appear, ignores every other key, and refuses a duplicated pr=
+# record or a malformed identity field.
+#
 # A validated exact merged result is retired through a private receipt only
 # after its durable wake is appended.
 # The receipt binds the terminal observation to the canonical registration and
@@ -285,8 +292,11 @@ fm_pr_regular_destination_on_device_or_absent() {
   [ ! -e "$path" ] || [ "$(fm_pr_file_device "$path")" = "$device" ]
 }
 
+# Reads the canonical PR identity out of state/<id>.meta under the
+# order-independent contract stated in this file's header: a second pr= line
+# or a malformed pr_head= field is the only content-level refusal.
 fm_pr_metadata_identity_parse() {
-  local file=$1 line value pr_count=0 seen_pr=0 post_pr_invalid=0
+  local file=$1 line value pr_count=0
   FM_PR_META_PROVIDER=
   FM_PR_META_URL=
   FM_PR_META_HOST=
@@ -307,24 +317,14 @@ fm_pr_metadata_identity_parse() {
           FM_PR_META_PATH=$FM_PR_PATH
           FM_PR_META_NUMBER=$FM_PR_NUMBER
         fi
-        seen_pr=1
         ;;
       pr_head=*)
-        if [ "$seen_pr" -eq 1 ]; then
-          value=${line#pr_head=}
-          fm_pr_head_valid "$value" || post_pr_invalid=1
-        fi
-        ;;
-      validation_pr_published_generation=*) ;;
-      x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
-        ;;
-      *)
-        [ "$seen_pr" -eq 0 ] || post_pr_invalid=1
+        value=${line#pr_head=}
+        fm_pr_head_valid "$value" || return 1
         ;;
     esac
   done < "$file"
   [ "$pr_count" -eq 1 ] || return 1
-  [ "$post_pr_invalid" -eq 0 ] || return 1
   [ -n "$FM_PR_META_URL" ]
 }
 
