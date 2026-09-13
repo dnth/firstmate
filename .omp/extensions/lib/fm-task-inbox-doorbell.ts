@@ -49,6 +49,12 @@ const MAX_TURN_GRACE_MS = 120000;
 export type TaskInboxDoorbellOptions = {
 	inboxDir?: string;
 	readyMarker?: string;
+	// Durable diagnosis for a refused handshake: a failure that retires the
+	// ready marker (activation, or a drain that takes the doorbell down) writes
+	// its reason here, so a missing marker is never ambiguous. Deliberately
+	// independent of the doorbell's own configuration - an unconfigured
+	// doorbell is itself an activation failure only this file can report.
+	failureJournal?: string;
 	// How long a delivered doorbell may go without a turn_start before the
 	// triggerTurn call is treated as downgraded to append-only and the
 	// instruction is re-driven through the user-prompt channel.
@@ -61,7 +67,11 @@ export type TaskInboxDoorbellOptions = {
 };
 
 export type TaskInboxDoorbell = {
-	activate: () => void;
+	// activate reports whether the doorbell is live after the call. A caller
+	// that publishes its own readiness marker (fm-spawn's generated extension
+	// touching .omp-ready) must gate that marker on this result, or readiness
+	// silently outlives a failed handshake.
+	activate: () => boolean;
 	retire: () => void;
 	notifyTurnStart: () => void;
 	notifyTurnEnd: () => void;
@@ -84,6 +94,23 @@ function publishReadyMarker(marker: string): void {
 	const staged = `${marker}.staging.${process.pid}`;
 	writeFileSync(staged, `${process.pid}\n`, { mode: 0o600 });
 	renameSync(staged, marker);
+}
+
+// Best-effort durable diagnosis for a lost handshake: "<iso> <phase>: <error>".
+// The write is staged and renamed like the ready marker so a concurrent reader
+// never sees a partial reason. A failed journal write is swallowed - the
+// journal explains failures, it must never become one.
+function journalDoorbellFailure(journal: string, phase: string, error: unknown): void {
+	if (!journal.startsWith("/")) return;
+	try {
+		const reason = error instanceof Error ? (error.stack ?? error.message) : String(error);
+		mkdirSync(dirname(journal), { recursive: true });
+		const staged = `${journal}.staging.${process.pid}`;
+		writeFileSync(staged, `${new Date().toISOString()} ${phase}: ${reason}\n`, { mode: 0o600 });
+		renameSync(staged, journal);
+	} catch {
+		return;
+	}
 }
 
 function retireOwnedReadyMarker(marker: string): void {
@@ -143,9 +170,21 @@ export function installTaskInboxDoorbell(
 	omp: OmpDoorbellApi,
 	options: TaskInboxDoorbellOptions = {},
 ): TaskInboxDoorbell {
+	const failureJournal = options.failureJournal ?? process.env.FM_OMP_TASK_DOORBELL_FAILED ?? "";
 	const configured = configuredOptions(options);
 	if (!configured || typeof omp.sendMessage !== "function") {
-		return { activate: () => {}, retire: () => {}, notifyTurnStart: () => {}, notifyTurnEnd: () => {} };
+		const unconfiguredWhy = !configured
+			? "task inbox doorbell is unconfigured (inboxDir/readyMarker unresolved)"
+			: "OMP sendMessage is unavailable";
+		return {
+			activate: () => {
+				journalDoorbellFailure(failureJournal, "activate", new Error(unconfiguredWhy));
+				return false;
+			},
+			retire: () => {},
+			notifyTurnStart: () => {},
+			notifyTurnEnd: () => {},
+		};
 	}
 
 	const requestDir = `${configured.readyMarker}.requests`;
@@ -282,9 +321,10 @@ export function installTaskInboxDoorbell(
 						awaitingPath,
 						setTimeout(() => recoverUnprovenTurn(awaitingPath), turnGraceMs),
 					);
-				} catch {
+				} catch (error) {
 					dispatchingTurn = false;
 					if (!invoked) bestEffortRename(ambiguous, `${pending}.failed`);
+					journalDoorbellFailure(failureJournal, "drain", error);
 					retire();
 					break;
 				}
@@ -293,8 +333,8 @@ export function installTaskInboxDoorbell(
 			draining = false;
 		}
 	};
-	const activate = (): void => {
-		if (active) return;
+	const activate = (): boolean => {
+		if (active) return true;
 		try {
 			mkdirSync(requestDir, { recursive: true, mode: 0o700 });
 			reconcileAmbiguousClaims(requestDir);
@@ -308,9 +348,16 @@ export function installTaskInboxDoorbell(
 			}
 			publishReadyMarker(configured.readyMarker);
 			drain();
-		} catch {
+		} catch (error) {
+			journalDoorbellFailure(failureJournal, "activate", error);
 			retire();
+			return false;
 		}
+		// A drain failure retires the doorbell without throwing; it already
+		// journaled its reason, so the activation reports the failure it caused.
+		if (!active) return false;
+		bestEffortUnlink(failureJournal);
+		return true;
 	};
 
 	return { activate, retire, notifyTurnStart, notifyTurnEnd };

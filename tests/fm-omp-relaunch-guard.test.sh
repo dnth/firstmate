@@ -20,6 +20,14 @@ make_relaunch_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+omp_doorbell_emulate() {  # <stem>: emulate the generated extension's session_start handshake
+  [ -f "$1.omp-ext.ts" ] || return 0
+  if [ -n "${FM_FAKE_OMP_DOORBELL_FAIL:-}" ]; then
+    printf '%s\n' "$FM_FAKE_OMP_DOORBELL_FAIL" > "$1.omp-doorbell-failed"
+    return 0
+  fi
+  [ "${FM_FAKE_OMP_NO_DOORBELL:-0}" = 1 ] || : > "$1.omp-doorbell-ready"
+}
 case "$*" in
   *"#{pane_current_path}"*)
     printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
@@ -63,9 +71,15 @@ case "${1:-}" in
       done
       if case "$*" in *Enter*) true ;; *) false ;; esac \
          && grep -Fq 'FM_OMP_HARNESS=omp' "$FM_FAKE_LAUNCH_LOG" 2>/dev/null; then
+        for extension in "${FM_FAKE_OMP_ACK_DIR:-/nonexistent}"/*.omp-ext.ts; do
+          [ -e "$extension" ] || continue
+          omp_doorbell_emulate "${extension%.omp-ext.ts}"
+        done
         if [ -n "${FM_FAKE_OMP_ACK:-}" ]; then
           while IFS= read -r ack; do
-            [ -z "$ack" ] || : > "$ack"
+            [ -z "$ack" ] && continue
+            : > "$ack"
+            case "$ack" in *.omp-started) omp_doorbell_emulate "${ack%.omp-started}" ;; esac
           done <<EOF
 $FM_FAKE_OMP_ACK
 EOF

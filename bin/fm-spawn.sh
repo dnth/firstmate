@@ -1042,7 +1042,7 @@ spawn_omp_abort_clean_unchanged_worktree() {  # <context>
     rm -rf -- "$STATE/$ID.omp-doorbell-ready.requests"
     rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
       "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" "$STATE/$ID.omp-started" \
-      "$STATE/$ID.omp-doorbell-ready"
+      "$STATE/$ID.omp-doorbell-ready" "$STATE/$ID.omp-doorbell-failed"
     for _turnend_marker in "$STATE/$ID".turn-ended.*; do
       [ -e "$_turnend_marker" ] || continue
       rm -f -- "$_turnend_marker"
@@ -2212,7 +2212,8 @@ if [ "$HARNESS" = omp ]; then
       fi
       for artifact in \
         "$STATE/$ID.status" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" \
-        "$STATE/$ID.omp-started" "$STATE/$ID.omp-doorbell-ready"; do
+        "$STATE/$ID.omp-started" "$STATE/$ID.omp-doorbell-ready" \
+        "$STATE/$ID.omp-doorbell-failed"; do
         if [ -L "$artifact" ] || { [ -e "$artifact" ] && [ ! -f "$artifact" ]; }; then
           echo "error: refusing OMP relaunch through unsafe artifact path: $artifact" >&2
           exit 1
@@ -2271,7 +2272,7 @@ if [ "$HARNESS" = omp ]; then
       for artifact in \
         "$STATE/$ID.meta" "$STATE/$ID.status" "$STATE/$ID.omp-ext.ts" \
         "$STATE/$ID.omp-ready" "$STATE/$ID.omp-started" "$STATE/$ID.omp-doorbell-ready" \
-        "$STATE/$ID.omp-doorbell-ready.requests" "/tmp/fm-$ID"; do
+        "$STATE/$ID.omp-doorbell-failed" "$STATE/$ID.omp-doorbell-ready.requests" "/tmp/fm-$ID"; do
         if [ -e "$artifact" ] || [ -L "$artifact" ]; then
           echo "error: refusing OMP spawn because task $ID already has artifacts at $artifact; reconcile or clean the prior task before retrying" >&2
           exit 1
@@ -4023,7 +4024,7 @@ TURNEND="$STATE_REAL/$ID.turn-ended"
 TURNEND_SIGNAL="$FM_ROOT/bin/fm-turnend-signal.sh"
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 if [ "$HARNESS" = omp ]; then
-  rm -f "$STATE/$ID.omp-doorbell-ready"
+  rm -f "$STATE/$ID.omp-doorbell-ready" "$STATE/$ID.omp-doorbell-failed"
 fi
 exclude_path() {
   local rel=$1 EXCL
@@ -4189,23 +4190,27 @@ EOF
       OMP_READY="$STATE_REAL/$ID.omp-ready"
       OMP_STARTED="$STATE_REAL/$ID.omp-started"
       OMP_DOORBELL_READY="$STATE_REAL/$ID.omp-doorbell-ready"
-      rm -f "$OMP_READY" "$OMP_STARTED" "$OMP_DOORBELL_READY"
+      OMP_DOORBELL_FAILED="$STATE_REAL/$ID.omp-doorbell-failed"
+      rm -f "$OMP_READY" "$OMP_STARTED" "$OMP_DOORBELL_READY" "$OMP_DOORBELL_FAILED"
       cat > "$STATE/$ID.omp-ext.ts" <<EOF
 // Firstmate OMP launch acknowledgement, inbox doorbell, and turn-end signal; written by fm-spawn.
+// .omp-ready publishes only after the inbox doorbell activates; a failed
+// activation journals its reason to .omp-doorbell-failed instead, so a missing
+// marker is always attributable.
 import { execFile } from "node:child_process";
 import { installTaskInboxDoorbell } from "$FM_ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts";
 export default function (omp: any) {
   const taskInboxDoorbell = installTaskInboxDoorbell(omp, {
     inboxDir: "$STATE_REAL/$ID.inbox",
     readyMarker: "$OMP_DOORBELL_READY",
+    failureJournal: "$OMP_DOORBELL_FAILED",
     // Turn proof rides this extension's own turn_start/turn_end handlers
     // through notifyTurnStart/notifyTurnEnd, so the doorbell holds no omp.on
     // subscription of its own.
     observeTurns: false,
   });
   omp.on("session_start", () => {
-    taskInboxDoorbell.activate();
-    execFile("touch", ["$OMP_READY"]);
+    if (taskInboxDoorbell.activate()) execFile("touch", ["$OMP_READY"]);
   });
   omp.on("turn_start", () => {
     taskInboxDoorbell.notifyTurnStart();
@@ -4535,7 +4540,7 @@ if [ "$OMP_LAUNCH_TEMPLATE" -eq 1 ] && [ -n "$OMP_BUN_LAUNCH_DIR" ]; then
   OMP_LAUNCH_PATH_GUARD="PATH=$(shell_quote "$OMP_BUN_LAUNCH_DIR${PATH:+:$PATH}"); export PATH; FM_OMP_BUN_LOOKUP=\$(command -v bun) || exit 1; FM_OMP_BUN_RESOLVED=\$(readlink -f \"\$FM_OMP_BUN_LOOKUP\" 2>/dev/null || node -e 'const { realpathSync } = require(\"node:fs\"); process.stdout.write(realpathSync(process.argv[1]));' \"\$FM_OMP_BUN_LOOKUP\") || exit 1; [ \"\$FM_OMP_BUN_RESOLVED\" = $(shell_quote "$OMP_BUN_CANON") ] || exit 1; "
 fi
 if [ "$OMP_LAUNCH_TEMPLATE" -eq 1 ] && [ "$HARNESS" = omp ] && [ -n "$OMP_BIN_CANON" ]; then
-  LAUNCH="FM_OMP_TASK_INBOX_DIR=$(shell_quote "$STATE_REAL/$ID.inbox") FM_OMP_TASK_DOORBELL_READY=$(shell_quote "$STATE_REAL/$ID.omp-doorbell-ready") FM_OMP_BUN=$(shell_quote "$OMP_BUN_CANON") FM_OMP_BIN=$(shell_quote "$OMP_BIN_CANON") $LAUNCH"
+  LAUNCH="FM_OMP_TASK_INBOX_DIR=$(shell_quote "$STATE_REAL/$ID.inbox") FM_OMP_TASK_DOORBELL_READY=$(shell_quote "$STATE_REAL/$ID.omp-doorbell-ready") FM_OMP_TASK_DOORBELL_FAILED=$(shell_quote "$STATE_REAL/$ID.omp-doorbell-failed") FM_OMP_BUN=$(shell_quote "$OMP_BUN_CANON") FM_OMP_BIN=$(shell_quote "$OMP_BIN_CANON") $LAUNCH"
 fi
 OMPRESUMEFLAG=
 [ -z "$OMP_RESUME_FILE" ] || OMPRESUMEFLAG="--resume $(shell_quote "$OMP_RESUME_FILE") "
@@ -4775,6 +4780,29 @@ if [ "$HARNESS" = omp ]; then
       exit 1
     fi
   else
+    # The doorbell handshake publishes during session_start, before the first
+    # turn: a ready marker that never appears means owned redelivery can never
+    # work, so fail the spawn loudly (naming the activation journal when the
+    # extension wrote one) instead of surfacing later as session-pid=unreadable.
+    OMP_DOORBELL_ACK_POLLS=${FM_OMP_DOORBELL_ACK_POLLS:-40}
+    OMP_DOORBELL_ACKED=0
+    for _ in $(seq 1 "$OMP_DOORBELL_ACK_POLLS"); do
+      if [ -f "$OMP_DOORBELL_READY" ]; then
+        OMP_DOORBELL_ACKED=1
+        break
+      fi
+      [ -f "$OMP_DOORBELL_FAILED" ] && break
+      sleep "$OMP_ACK_INTERVAL"
+    done
+    if [ "$OMP_DOORBELL_ACKED" -ne 1 ]; then
+      OMP_DOORBELL_DETAIL="the worker extension did not activate its inbox doorbell"
+      if [ -f "$OMP_DOORBELL_FAILED" ]; then
+        OMP_DOORBELL_DETAIL="doorbell activation failed: $(head -n 1 "$OMP_DOORBELL_FAILED" 2>/dev/null || printf 'unreadable journal') (journal: $OMP_DOORBELL_FAILED)"
+      fi
+      printf 'failed: OMP inbox doorbell marker %s never appeared; %s\n' "$OMP_DOORBELL_READY" "$OMP_DOORBELL_DETAIL" >> "$STATE/$ID.status"
+      echo "error: OMP inbox doorbell marker $OMP_DOORBELL_READY never appeared; $OMP_DOORBELL_DETAIL; cleaning the owned launch" >&2
+      exit 1
+    fi
     OMP_ACK_POLLS=${FM_OMP_LAUNCH_ACK_POLLS:-60}
     for _ in $(seq 1 "$OMP_ACK_POLLS"); do
       if [ -f "$OMP_STARTED" ]; then
