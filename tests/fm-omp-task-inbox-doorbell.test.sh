@@ -115,6 +115,30 @@ await new Promise((resolve) => setImmediate(resolve));
 assert.equal(existsSync(asyncFailure), false);
 assert.match(readFileSync(asyncFailureJournal, "utf8"), /drain: Error: async session channel closed/);
 
+const concurrent = `${process.env.READY}.concurrent`;
+const concurrentJournal = `${concurrent}.omp-doorbell-failed`;
+mkdirSync(`${concurrent}.requests`, { recursive: true });
+writeFileSync(`${concurrent}.requests/first.pending`, line);
+let releaseFirst;
+let concurrentSends = 0;
+const firstSend = new Promise((resolve) => { releaseFirst = resolve; });
+const concurrentDoorbell = installTaskInboxDoorbell(
+  { sendMessage() {
+      concurrentSends += 1;
+      if (concurrentSends === 1) return firstSend;
+      return Promise.reject(new Error("late concurrent channel closed"));
+    } },
+  { inboxDir: process.env.INBOX, readyMarker: concurrent, failureJournal: concurrentJournal },
+);
+const concurrentActivation = concurrentDoorbell.activate();
+assert.equal(typeof concurrentActivation.then, "function");
+writeFileSync(`${concurrent}.requests/late.pending`, line);
+process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
+releaseFirst();
+assert.equal(await concurrentActivation, false);
+assert.equal(existsSync(concurrent), false);
+assert.match(readFileSync(concurrentJournal, "utf8"), /drain: Error: late concurrent channel closed/);
+
 const initialAsyncFailure = `${process.env.READY}.initial-async-failure`;
 const initialAsyncJournal = `${initialAsyncFailure}.omp-doorbell-failed`;
 mkdirSync(`${initialAsyncFailure}.requests`, { recursive: true });

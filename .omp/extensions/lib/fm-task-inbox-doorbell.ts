@@ -362,7 +362,7 @@ export function installTaskInboxDoorbell(
 			draining = false;
 		}
 	};
-	const activate = (): boolean => {
+	const activate = (): boolean | Promise<boolean> => {
 		if (active) return true;
 		try {
 			mkdirSync(requestDir, { recursive: true, mode: 0o700 });
@@ -386,12 +386,14 @@ export function installTaskInboxDoorbell(
 		// journaled its reason, so the activation reports the failure it caused.
 		if (!active) return false;
 		if (activationSends.size > 0) {
-			const pending = [...activationSends];
-			return Promise.allSettled(pending).then(() => {
+			return (async (): Promise<boolean> => {
+				while (activationSends.size > 0) {
+					await Promise.allSettled([...activationSends]);
+				}
 				if (!active) return false;
 				bestEffortUnlink(failureJournal);
 				return true;
-			});
+			})();
 		}
 		bestEffortUnlink(failureJournal);
 		return true;
