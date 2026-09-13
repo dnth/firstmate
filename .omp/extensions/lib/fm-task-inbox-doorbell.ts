@@ -71,7 +71,7 @@ export type TaskInboxDoorbell = {
 	// that publishes its own readiness marker (fm-spawn's generated extension
 	// touching .omp-ready) must gate that marker on this result, or readiness
 	// silently outlives a failed handshake.
-	activate: () => boolean;
+	activate: () => boolean | Promise<boolean>;
 	retire: () => void;
 	notifyTurnStart: () => void;
 	notifyTurnEnd: () => void;
@@ -220,6 +220,7 @@ export function installTaskInboxDoorbell(
 	let dispatchingTurn = false;
 	let dispatchingTurnObserved = false;
 	const awaitingTurns = new Map<string, ReturnType<typeof setTimeout>>();
+	const activationSends = new Set<Promise<void>>();
 	let watcher: FSWatcher | undefined;
 	const settleAwaiting = (awaitingPath: string, outcome: "delivered" | "failed"): void => {
 		const timer = awaitingTurns.get(awaitingPath);
@@ -322,10 +323,12 @@ export function installTaskInboxDoorbell(
 						{ deliverAs: "steer", triggerTurn: true },
 					);
 					if (sendResult && typeof sendResult.then === "function") {
-						void sendResult.catch((error: unknown) => {
+						const delivery = Promise.resolve(sendResult);
+						activationSends.add(delivery);
+						void delivery.catch((error: unknown) => {
 							journalDoorbellFailure(failureJournal, "drain", error);
 							retire();
-						});
+						}).finally(() => activationSends.delete(delivery));
 					}
 					const turnStartedDuringSend = dispatchingTurnObserved;
 					dispatchingTurn = false;
@@ -382,6 +385,14 @@ export function installTaskInboxDoorbell(
 		// A drain failure retires the doorbell without throwing; it already
 		// journaled its reason, so the activation reports the failure it caused.
 		if (!active) return false;
+		if (activationSends.size > 0) {
+			const pending = [...activationSends];
+			return Promise.allSettled(pending).then(() => {
+				if (!active) return false;
+				bestEffortUnlink(failureJournal);
+				return true;
+			});
+		}
 		bestEffortUnlink(failureJournal);
 		return true;
 	};

@@ -115,6 +115,18 @@ await new Promise((resolve) => setImmediate(resolve));
 assert.equal(existsSync(asyncFailure), false);
 assert.match(readFileSync(asyncFailureJournal, "utf8"), /drain: Error: async session channel closed/);
 
+const initialAsyncFailure = `${process.env.READY}.initial-async-failure`;
+const initialAsyncJournal = `${initialAsyncFailure}.omp-doorbell-failed`;
+mkdirSync(`${initialAsyncFailure}.requests`, { recursive: true });
+writeFileSync(`${initialAsyncFailure}.requests/one.pending`, line);
+const initialAsync = installTaskInboxDoorbell(
+  { sendMessage() { return Promise.reject(new Error("initial async channel closed")); } },
+  { inboxDir: process.env.INBOX, readyMarker: initialAsyncFailure, failureJournal: initialAsyncJournal },
+);
+assert.equal(await initialAsync.activate(), false);
+assert.equal(existsSync(initialAsyncFailure), false);
+assert.match(readFileSync(initialAsyncJournal, "utf8"), /drain: Error: initial async channel closed/);
+
 const unreadable = `${process.env.READY}.unreadable`;
 let unreadableSends = 0;
 const unreadableDoorbell = installTaskInboxDoorbell(

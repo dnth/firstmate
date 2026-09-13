@@ -4210,7 +4210,9 @@ export default function (omp: any) {
     observeTurns: false,
   });
   omp.on("session_start", () => {
-    if (taskInboxDoorbell.activate()) execFile("touch", ["$OMP_READY"]);
+    Promise.resolve(taskInboxDoorbell.activate()).then((active) => {
+      if (active) execFile("touch", ["$OMP_READY"]);
+    });
   });
   omp.on("turn_start", () => {
     taskInboxDoorbell.notifyTurnStart();
