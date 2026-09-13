@@ -4721,7 +4721,7 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
-if [ "$HARNESS" = omp ]; then
+if [ "$HARNESS" = omp ] && [ "$OMP_LAUNCH_TEMPLATE" -eq 1 ]; then
   OMP_ACK_INTERVAL=${FM_OMP_LAUNCH_ACK_INTERVAL:-0.5}
   OMP_ACKED=0
   OMP_DOORBELL_ACK_POLLS=${FM_OMP_DOORBELL_ACK_POLLS:-40}
