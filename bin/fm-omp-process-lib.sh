@@ -195,6 +195,16 @@ fm_omp_task_doorbell_request() {  # <marker> <verified-pid> <request-id> <doorbe
       # 10ms and 200 attempts of margin cover the re-drive settle.
       ack_grace_ms=${FM_OMP_DOORBELL_TURN_GRACE_MS:-8000}
       case "$ack_grace_ms" in ''|*[!0-9]*) ack_grace_ms=8000 ;; esac
+      while [ "${ack_grace_ms#0}" != "$ack_grace_ms" ]; do
+        ack_grace_ms=${ack_grace_ms#0}
+      done
+      [ -n "$ack_grace_ms" ] || ack_grace_ms=0
+      if [ "${#ack_grace_ms}" -gt 6 ] \
+        || { [ "${#ack_grace_ms}" -eq 6 ] && [ "$ack_grace_ms" -gt 120000 ]; }; then
+        ack_grace_ms=120000
+      elif [ "$ack_grace_ms" -lt 100 ]; then
+        ack_grace_ms=100
+      fi
       attempts=$((ack_grace_ms / 10 + 200))
       ;;
   esac
