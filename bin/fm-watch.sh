@@ -1400,11 +1400,14 @@ resurface_after_downtime() {
     # the next cycle arm-check again, so an acknowledgement or a fresh episode
     # is still observed from inside this same watcher.
     WATCHER_RECOVERY_PENDING=0
-    reason="check: rearm-resurface (daemon scan stale + watcher in resurface loop: ${FM_RECOVERY_RESURFACE_COUNT} unacknowledged downtime announcements; resumed pane-loop supervision)"
-    fm_wake_append check rearm-resurface "$reason" || exit 1
-    triage_log "$reason"
-    watch_delivery_publish "$reason" || true
-    FM_WATCH_DELIVERED_REASON=$reason
+    if [ "${FM_RECOVERY_RESURFACE_SURFACED:-0}" != 1 ]; then
+      reason="check: rearm-resurface (daemon scan stale + watcher in resurface loop: ${FM_RECOVERY_RESURFACE_COUNT} unacknowledged downtime announcements; resumed pane-loop supervision)"
+      fm_wake_append check rearm-resurface "$reason" || exit 1
+      _fm_recovery_resurface_mark_surfaced "$WATCHER_DOWNTIME_MARKER" || exit 1
+      triage_log "$reason"
+      watch_delivery_publish "$reason" || true
+      FM_WATCH_DELIVERED_REASON=$reason
+    fi
     return 0
   fi
   wake "check: rearm-resurface"

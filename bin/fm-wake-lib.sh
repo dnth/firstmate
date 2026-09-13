@@ -405,6 +405,7 @@ FM_RECOVERY_MARKER_ACTION='none'
 # surfacing the resurface once instead of exiting on it.
 FM_RECOVERY_RESURFACE_BOUND=0
 FM_RECOVERY_RESURFACE_COUNT=0
+FM_RECOVERY_RESURFACE_SURFACED=0
 
 # Token grammar (one owner): <pending|announced|acked>:<handling|downtime>:<generation>
 # docs/watcher-continuity.md owns the recovery-episode contract, including the
@@ -625,7 +626,7 @@ _fm_recovery_resurface_bound_check() {  # <count> <first-epoch> <now-epoch>
 # lock, after the announced write, so the count and the announcement commit
 # together.
 _fm_recovery_resurface_note_announced() {  # <marker> <fresh:0|1>
-  local marker=$1 fresh=$2 sidecar line count=0 first now tmp
+  local marker=$1 fresh=$2 sidecar line count=0 first surfaced=0 now tmp
   sidecar="${marker}.resurface"
   now=$(date +%s)
   first=$now
@@ -634,22 +635,26 @@ _fm_recovery_resurface_note_announced() {  # <marker> <fresh:0|1>
     case "$line" in
       *$'\t'*)
         count=${line%%$'\t'*}
-        first=${line##*$'\t'}
+        first=${line#*$'\t'}
+        first=${first%%$'\t'*}
         ;;
     esac
     case "$count" in ''|*[!0-9]*) count=0 ;; esac
     case "$first" in ''|*[!0-9]*) first=$now ;; esac
     [ "$first" -le "$now" ] || first=$now
+    surfaced=${line##*$'\t'}
+    case "$surfaced" in 0|1) ;; *) surfaced=0 ;; esac
   fi
   count=$((count + 1))
   tmp=$(mktemp "${sidecar}.tmp.XXXXXX") || return 1
-  if ! printf '%s\t%s\n' "$count" "$first" > "$tmp" \
+  if ! printf '%s\t%s\t%s\n' "$count" "$first" "$surfaced" > "$tmp" \
     || ! chmod 0600 "$tmp" \
     || ! _fm_atomic_replace "$tmp" "$sidecar"; then
     rm -f -- "$tmp"
     return 1
   fi
   FM_RECOVERY_RESURFACE_COUNT=$count
+  FM_RECOVERY_RESURFACE_SURFACED=$surfaced
   _fm_recovery_resurface_bound_check "$count" "$first" "$now"
 }
 
@@ -659,7 +664,7 @@ _fm_recovery_resurface_note_announced() {  # <marker> <fresh:0|1>
 # the outputs here keeps every later pass of a tripped bound resuming
 # supervision instead of re-entering the resurface exit loop.
 _fm_recovery_resurface_eval() {  # <marker>
-  local sidecar=$1.resurface line count=0 first=0 now
+  local sidecar=$1.resurface line count=0 first=0 surfaced=0 now
   [ -f "$sidecar" ] && [ ! -L "$sidecar" ] || return 0
   IFS= read -r line < "$sidecar" || return 0
   case "$line" in
@@ -667,12 +672,39 @@ _fm_recovery_resurface_eval() {  # <marker>
     *) return 0 ;;
   esac
   count=${line%%$'\t'*}
-  first=${line##*$'\t'}
+  first=${line#*$'\t'}
+  first=${first%%$'\t'*}
   case "$count" in ''|*[!0-9]*|0) return 0 ;; esac
   case "$first" in ''|*[!0-9]*) first=0 ;; esac
+  surfaced=${line##*$'\t'}
+  case "$surfaced" in 0|1) ;; *) surfaced=0 ;; esac
   now=$(date +%s)
   FM_RECOVERY_RESURFACE_COUNT=$count
+  FM_RECOVERY_RESURFACE_SURFACED=$surfaced
   _fm_recovery_resurface_bound_check "$count" "$first" "$now"
+}
+
+_fm_recovery_resurface_mark_surfaced() {  # <marker>
+  local marker=$1 sidecar="${1}.resurface" lock line count first tmp
+  lock="${marker}.lock"
+  fm_lock_acquire_wait "$lock" || return 1
+  if [ ! -f "$sidecar" ] || [ -L "$sidecar" ]; then
+    fm_lock_release "$lock"
+    return 0
+  fi
+  IFS= read -r line < "$sidecar" || { fm_lock_release "$lock"; return 1; }
+  count=${line%%$'\t'*}; first=${line#*$'\t'}; first=${first%%$'\t'*}
+  case "$count" in ''|*[!0-9]*) fm_lock_release "$lock"; return 1 ;; esac
+  case "$first" in ''|*[!0-9]*) fm_lock_release "$lock"; return 1 ;; esac
+  tmp=$(mktemp "${sidecar}.tmp.XXXXXX") || { fm_lock_release "$lock"; return 1; }
+  if ! printf '%s\t%s\t1\n' "$count" "$first" > "$tmp" \
+    || ! chmod 0600 "$tmp" \
+    || ! _fm_atomic_replace "$tmp" "$sidecar"; then
+    rm -f -- "$tmp"
+    fm_lock_release "$lock"
+    return 1
+  fi
+  fm_lock_release "$lock"
 }
 
 _fm_recovery_marker_ack() {
@@ -709,7 +741,7 @@ _fm_recovery_marker_arm_check() {
   local marker=$1 lock line quarantine
   FM_RECOVERY_MARKER_ACTION='none'
   # shellcheck disable=SC2034 # Outputs read by callers after this function returns.
-  FM_RECOVERY_RESURFACE_BOUND=0 FM_RECOVERY_RESURFACE_COUNT=0
+  FM_RECOVERY_RESURFACE_BOUND=0 FM_RECOVERY_RESURFACE_COUNT=0 FM_RECOVERY_RESURFACE_SURFACED=0
   lock="${marker}.lock"
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
   if ! fm_lock_acquire_wait "$lock"; then
