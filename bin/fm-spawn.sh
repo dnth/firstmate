@@ -4024,6 +4024,10 @@ TURNEND="$STATE_REAL/$ID.turn-ended"
 TURNEND_SIGNAL="$FM_ROOT/bin/fm-turnend-signal.sh"
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 if [ "$HARNESS" = omp ]; then
+  OMP_READY="$STATE_REAL/$ID.omp-ready"
+  OMP_STARTED="$STATE_REAL/$ID.omp-started"
+  OMP_DOORBELL_READY="$STATE_REAL/$ID.omp-doorbell-ready"
+  OMP_DOORBELL_FAILED="$STATE_REAL/$ID.omp-doorbell-failed"
   rm -f "$STATE/$ID.omp-doorbell-ready" "$STATE/$ID.omp-doorbell-failed"
 fi
 exclude_path() {
@@ -4187,10 +4191,6 @@ export default function (pi: any) {
 EOF
       ;;
     omp)
-      OMP_READY="$STATE_REAL/$ID.omp-ready"
-      OMP_STARTED="$STATE_REAL/$ID.omp-started"
-      OMP_DOORBELL_READY="$STATE_REAL/$ID.omp-doorbell-ready"
-      OMP_DOORBELL_FAILED="$STATE_REAL/$ID.omp-doorbell-failed"
       rm -f "$OMP_READY" "$OMP_STARTED" "$OMP_DOORBELL_READY" "$OMP_DOORBELL_FAILED"
       cat > "$STATE/$ID.omp-ext.ts" <<EOF
 // Firstmate OMP launch acknowledgement, inbox doorbell, and turn-end signal; written by fm-spawn.
@@ -4724,6 +4724,25 @@ fi
 if [ "$HARNESS" = omp ]; then
   OMP_ACK_INTERVAL=${FM_OMP_LAUNCH_ACK_INTERVAL:-0.5}
   OMP_ACKED=0
+  OMP_DOORBELL_ACK_POLLS=${FM_OMP_DOORBELL_ACK_POLLS:-40}
+  OMP_DOORBELL_ACKED=0
+  for _ in $(seq 1 "$OMP_DOORBELL_ACK_POLLS"); do
+    if [ -f "$OMP_DOORBELL_READY" ]; then
+      OMP_DOORBELL_ACKED=1
+      break
+    fi
+    [ -f "$OMP_DOORBELL_FAILED" ] && break
+    sleep "$OMP_ACK_INTERVAL"
+  done
+  if [ "$OMP_DOORBELL_ACKED" -ne 1 ]; then
+    OMP_DOORBELL_DETAIL="the worker extension did not activate its inbox doorbell"
+    if [ -f "$OMP_DOORBELL_FAILED" ]; then
+      OMP_DOORBELL_DETAIL="doorbell activation failed: $(head -n 1 "$OMP_DOORBELL_FAILED" 2>/dev/null || printf 'unreadable journal') (journal: $OMP_DOORBELL_FAILED)"
+    fi
+    printf 'failed: OMP inbox doorbell marker %s never appeared; %s\n' "$OMP_DOORBELL_READY" "$OMP_DOORBELL_DETAIL" >> "$STATE/$ID.status"
+    echo "error: OMP inbox doorbell marker $OMP_DOORBELL_READY never appeared; $OMP_DOORBELL_DETAIL; cleaning the owned launch" >&2
+    exit 1
+  fi
   if [ "$KIND" = secondmate ]; then
     OMP_ACK_POLLS=${FM_OMP_SECONDMATE_ACK_POLLS:-120}
     OMP_PRIMARY_VERSION=$(fm_primary_watch_version "$OMP_PRIMARY_EXTENSION" "$PROJ_ABS" 2>/dev/null || true)
@@ -4780,29 +4799,6 @@ if [ "$HARNESS" = omp ]; then
       exit 1
     fi
   else
-    # The doorbell handshake publishes during session_start, before the first
-    # turn: a ready marker that never appears means owned redelivery can never
-    # work, so fail the spawn loudly (naming the activation journal when the
-    # extension wrote one) instead of surfacing later as session-pid=unreadable.
-    OMP_DOORBELL_ACK_POLLS=${FM_OMP_DOORBELL_ACK_POLLS:-40}
-    OMP_DOORBELL_ACKED=0
-    for _ in $(seq 1 "$OMP_DOORBELL_ACK_POLLS"); do
-      if [ -f "$OMP_DOORBELL_READY" ]; then
-        OMP_DOORBELL_ACKED=1
-        break
-      fi
-      [ -f "$OMP_DOORBELL_FAILED" ] && break
-      sleep "$OMP_ACK_INTERVAL"
-    done
-    if [ "$OMP_DOORBELL_ACKED" -ne 1 ]; then
-      OMP_DOORBELL_DETAIL="the worker extension did not activate its inbox doorbell"
-      if [ -f "$OMP_DOORBELL_FAILED" ]; then
-        OMP_DOORBELL_DETAIL="doorbell activation failed: $(head -n 1 "$OMP_DOORBELL_FAILED" 2>/dev/null || printf 'unreadable journal') (journal: $OMP_DOORBELL_FAILED)"
-      fi
-      printf 'failed: OMP inbox doorbell marker %s never appeared; %s\n' "$OMP_DOORBELL_READY" "$OMP_DOORBELL_DETAIL" >> "$STATE/$ID.status"
-      echo "error: OMP inbox doorbell marker $OMP_DOORBELL_READY never appeared; $OMP_DOORBELL_DETAIL; cleaning the owned launch" >&2
-      exit 1
-    fi
     OMP_ACK_POLLS=${FM_OMP_LAUNCH_ACK_POLLS:-60}
     for _ in $(seq 1 "$OMP_ACK_POLLS"); do
       if [ -f "$OMP_STARTED" ]; then
