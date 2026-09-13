@@ -102,6 +102,19 @@ assert.equal(existsSync(`${uncertain}.requests/one.pending.ambiguous`), true);
 assert.equal(existsSync(`${uncertain}.requests/one.pending.failed`), false);
 assert.equal(existsSync(uncertain), false);
 
+const asyncFailure = `${process.env.READY}.async-failure`;
+const asyncFailureJournal = `${asyncFailure}.omp-doorbell-failed`;
+const asyncFailing = installTaskInboxDoorbell(
+  { sendMessage() { return Promise.reject(new Error("async session channel closed")); } },
+  { inboxDir: process.env.INBOX, readyMarker: asyncFailure, failureJournal: asyncFailureJournal },
+);
+asyncFailing.activate();
+writeFileSync(`${asyncFailure}.requests/one.pending`, line);
+process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
+await new Promise((resolve) => setImmediate(resolve));
+assert.equal(existsSync(asyncFailure), false);
+assert.match(readFileSync(asyncFailureJournal, "utf8"), /drain: Error: async session channel closed/);
+
 const unreadable = `${process.env.READY}.unreadable`;
 let unreadableSends = 0;
 const unreadableDoorbell = installTaskInboxDoorbell(

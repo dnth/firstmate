@@ -24,7 +24,7 @@ type OmpDoorbellApi = {
 			details: { kind: "task-inbox"; runtime: "omp" };
 		},
 		options: { deliverAs: "steer"; triggerTurn: true },
-	) => void;
+	) => void | Promise<void>;
 	// The downgrade recovery channel: a user prompt starts a turn on an idle
 	// session, where the agent-initiated sendMessage path can be deferred into
 	// append-only delivery by the runtime's turn policy.
@@ -311,7 +311,7 @@ export function installTaskInboxDoorbell(
 					invoked = true;
 					dispatchingTurn = true;
 					dispatchingTurnObserved = false;
-					omp.sendMessage(
+					const sendResult = omp.sendMessage(
 						{
 							customType: "firstmate-task-inbox-doorbell",
 							content,
@@ -321,6 +321,12 @@ export function installTaskInboxDoorbell(
 						},
 						{ deliverAs: "steer", triggerTurn: true },
 					);
+					if (sendResult && typeof sendResult.then === "function") {
+						void sendResult.catch((error: unknown) => {
+							journalDoorbellFailure(failureJournal, "drain", error);
+							retire();
+						});
+					}
 					const turnStartedDuringSend = dispatchingTurnObserved;
 					dispatchingTurn = false;
 					dispatchingTurnObserved = false;
