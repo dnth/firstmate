@@ -774,13 +774,14 @@ idle_open_work_tick() {  # <window> <task>
   { [ -n "$anchor" ] && [ -e "$anchor" ]; } || anchor="$STATE/$task.meta"
   [ "$(age_of "$anchor")" -ge "$IDLE_OPEN_WORK_SECS" ] || return 0
   board_row_in_flight "$task" || return 0
-  touch "$probe"
   if ! afk_present && crew_is_provably_working "$task"; then
+    touch "$probe"
     triage_log "absorbed idle-with-open-work probe (provably working): $win"
     return 0
   fi
   reason="stale: $win (idle-with-open-work: pane idle, board row in flight, no status within ${IDLE_OPEN_WORK_SECS}s of turn-end)"
   fm_wake_append stale "$win" "$reason" || exit 1
+  touch "$probe"
   wake "$reason"
 }
 
