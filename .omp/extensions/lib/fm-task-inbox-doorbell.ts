@@ -326,7 +326,7 @@ export function installTaskInboxDoorbell(
 						const delivery = Promise.resolve(sendResult);
 						activationSends.add(delivery);
 						void delivery.catch((error: unknown) => {
-							if (!active) return;
+							if (!active && existsSync(configured.readyMarker)) return;
 							bestEffortRename(`${pending}.delivered`, pending);
 							bestEffortRename(`${pending}.awaiting-turn`, pending);
 							bestEffortRename(ambiguous, pending);

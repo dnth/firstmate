@@ -116,6 +116,30 @@ assert.equal(existsSync(asyncFailure), false);
 assert.match(readFileSync(asyncFailureJournal, "utf8"), /drain: Error: async session channel closed/);
 assert.equal(existsSync(`${asyncFailure}.requests/one.pending`), true);
 
+const multiAsync = `${process.env.READY}.multi-async`;
+const multiJournal = `${multiAsync}.omp-doorbell-failed`;
+mkdirSync(`${multiAsync}.requests`, { recursive: true });
+writeFileSync(`${multiAsync}.requests/first.pending`, line);
+writeFileSync(`${multiAsync}.requests/second.pending`, line);
+let rejectFirst;
+let rejectSecond;
+const firstRejection = new Promise((_, reject) => { rejectFirst = reject; });
+const secondRejection = new Promise((_, reject) => { rejectSecond = reject; });
+let multiSends = 0;
+const multiDoorbell = installTaskInboxDoorbell(
+  { sendMessage() {
+      multiSends += 1;
+      return multiSends === 1 ? firstRejection : secondRejection;
+    } },
+  { inboxDir: process.env.INBOX, readyMarker: multiAsync, failureJournal: multiJournal },
+);
+const multiActivation = multiDoorbell.activate();
+rejectFirst(new Error("first async channel closed"));
+rejectSecond(new Error("second async channel closed"));
+assert.equal(await multiActivation, false);
+assert.equal(existsSync(`${multiAsync}.requests/first.pending`), true);
+assert.equal(existsSync(`${multiAsync}.requests/second.pending`), true);
+
 const concurrent = `${process.env.READY}.concurrent`;
 const concurrentJournal = `${concurrent}.omp-doorbell-failed`;
 mkdirSync(`${concurrent}.requests`, { recursive: true });
