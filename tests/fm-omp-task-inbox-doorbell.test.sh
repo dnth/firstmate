@@ -168,18 +168,22 @@ writeFileSync(`${requestDir}/proved.pending`, line);
 process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
 assert.equal(sent.length, 2);
 assert.equal(existsSync(`${requestDir}/proved.pending.awaiting-turn`), true);
+// A turn opening while the steer is parked is proof of delivery: the steer
+// caused the turn or was absorbed into it, so the request settles delivered
+// and its grace timer is cancelled instead of re-driving the same
+// instruction through the user-prompt channel.
 handlers.get("turn_start")();
-assert.equal(existsSync(`${requestDir}/proved.pending.awaiting-turn`), true);
-await sleep(500);
 assert.equal(existsSync(`${requestDir}/proved.pending.delivered`), true);
-assert.equal(userSent.length, 2, "an uncorrelated turn must trigger the re-drive");
+assert.equal(existsSync(`${requestDir}/proved.pending.awaiting-turn`), false);
+await sleep(500);
+assert.equal(userSent.length, 1, "a proven turn must suppress the user-channel re-drive");
 
 // An open turn at send time is real delivery: the steer joins it.
 writeFileSync(`${requestDir}/steered.pending`, line);
 process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
 assert.equal(sent.length, 3);
 assert.equal(existsSync(`${requestDir}/steered.pending.delivered`), true);
-assert.equal(userSent.length, 2);
+assert.equal(userSent.length, 1);
 
 // A failed re-drive reports failure, not silent stranding.
 const failingApi = {
@@ -301,6 +305,19 @@ assert.equal(existsSync(`${requestDir}/reopened.pending.awaiting-turn`), true);
 await sleep(500);
 assert.equal(userSent.length, 2, "a closed turn must not keep proving later steers");
 assert.equal(existsSync(`${requestDir}/reopened.pending.delivered`), true);
+
+// A forwarded turn_start that lands after the steer is parked is still
+// proof: the content is already in the session, so the parked entry settles
+// delivered and never re-drives the same instruction as a user prompt.
+writeFileSync(`${requestDir}/async.pending`, line);
+process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
+assert.equal(sent.length, 5);
+assert.equal(existsSync(`${requestDir}/async.pending.awaiting-turn`), true);
+doorbell.notifyTurnStart();
+assert.equal(existsSync(`${requestDir}/async.pending.delivered`), true);
+await sleep(500);
+assert.equal(userSent.length, 2, "an asynchronously proven turn must suppress the re-drive");
+doorbell.notifyTurnEnd();
 doorbell.retire();
 JS
   pass "OMP doorbell driven by external turn notifications proves turns and unlatches on turn_end"
@@ -461,6 +478,30 @@ rc=$?
 set -e
 [ "$rc" = 1 ]
 [ ! -e "$request_dir/request.failed.msg.pending.failed" ]
+
+# A delivered receipt retires into a durable .acked tombstone on first read
+# and every later probe for the same record still reports delivered, so a
+# re-ring can never treat the consumed receipt as never-sent.
+: > "$request_dir/request.delivered.msg.pending.delivered"
+set +e
+fm_omp_task_doorbell_request_existing "$MARKER" delivered.msg
+rc=$?
+set -e
+[ "$rc" = 0 ]
+[ ! -e "$request_dir/request.delivered.msg.pending.delivered" ]
+[ -f "$request_dir/request.delivered.msg.pending.acked" ]
+set +e
+fm_omp_task_doorbell_request_existing "$MARKER" delivered.msg
+rc=$?
+set -e
+[ "$rc" = 5 ]
+[ -f "$request_dir/request.delivered.msg.pending.acked" ]
+fm_backend_tmux_omp_trigger_turn() { return 99; }
+set +e
+fm_backend_omp_trigger_turn tmux target "$MARKER" /runtime/omp /bin/omp delivered.msg 'canonical doorbell'
+rc=$?
+set -e
+[ "$rc" = 0 ]
 SH
   expect_code 0 "$?" "OMP request terminal-state boundary"
   pass "OMP pending retries revalidate identity while ambiguous claims suppress resend"
@@ -621,6 +662,39 @@ JS
     /bin/sleep 0.01
   done
   [ -f "$ready" ] || fail "silent OMP process did not start"
+  printf '%s' "$pid"
+}
+
+# A live task-bound extension whose runtime accepts the steer but never opens
+# a turn for it, so each request parks awaiting-turn until the turn-grace
+# re-drive lands it through the user-prompt channel. Echoes the listener PID.
+start_redriving_listener() {  # <dir> <home> <task> <signal-log> <ready-flag> <grace-ms>
+  local dir=$1 home=$2 task=$3 signal_log=$4 ready=$5 grace=$6 pid
+  HELPER="$HELPER" INBOX="$home/state/$task.inbox" READY="$home/state/$task.omp-doorbell-ready" \
+    SIGNAL_LOG="$signal_log" LISTENER_READY="$ready" \
+    FM_OMP_DOORBELL_TURN_GRACE_MS="$grace" node --input-type=module \
+    > "$dir/redrive-listener.log" 2>&1 <<'JS' &
+import { appendFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const { installTaskInboxDoorbell } = await import(pathToFileURL(process.env.HELPER).href);
+const doorbell = installTaskInboxDoorbell(
+  {
+    sendMessage() { appendFileSync(process.env.SIGNAL_LOG, "sendMessage\n"); },
+    sendUserMessage() { appendFileSync(process.env.SIGNAL_LOG, "sendUserMessage\n"); },
+    on() {},
+  },
+  { inboxDir: process.env.INBOX, readyMarker: process.env.READY },
+);
+doorbell.activate();
+writeFileSync(process.env.LISTENER_READY, `${process.pid}\n`);
+setInterval(() => {}, 1000);
+JS
+  pid=$!
+  for _ in $(seq 1 200); do
+    [ -f "$ready" ] && break
+    /bin/sleep 0.01
+  done
+  [ -f "$ready" ] || fail "redriving task-bound extension for $task did not start"
   printf '%s' "$pid"
 }
 
@@ -810,6 +884,8 @@ test_omp_native_refusal_and_queue_are_bounded() {
     "unbound delivered OMP reconciliation replay did not report refusal"
   assert_contains "$(cat "$err")" 'session-pid=unreadable' \
     "unbound delivered OMP reconciliation replay did not keep its session unproven"
+  [ -f "$home/state/delivered.omp-doorbell-ready.requests/request.001.msg.pending.acked" ] \
+    || fail "the consumed delivery receipt did not leave a durable suppression tombstone"
   kill -TERM "$silent_pid" 2>/dev/null || true
   wait "$silent_pid" 2>/dev/null || true
   LISTENER_PID=
@@ -889,6 +965,64 @@ test_omp_native_binding_mismatch_is_refused() {
   pass "fm-send: an unproven OMP session binding is refused, never redirected to the terminal"
 }
 
+# A requester with no explicit ack bound derives its window from the
+# doorbell's turn-grace setting, so a re-drive that lands inside the grace
+# bound reports delivered instead of a false queued verdict; an explicit
+# FM_OMP_TASK_DOORBELL_ACK_ATTEMPTS still wins. The consumed receipt leaves a
+# durable .acked tombstone, so a re-ring for the same record reports
+# delivered without ever sending the doorbell again.
+test_requester_window_tracks_turn_grace_and_acked_suppresses() {
+  local dir="$TMP_ROOT/ack-window" home signal_log listener_pid request_dir
+  home="$dir/home"
+  mkdir -p "$home/state"
+  signal_log="$dir/signals.log"
+  : > "$signal_log"
+  listener_pid=$(start_redriving_listener "$dir" "$home" t1 "$signal_log" "$dir/listener.ready" 2500)
+  LISTENER_PID=$listener_pid
+  request_dir="$home/state/t1.omp-doorbell-ready.requests"
+
+  ROOT="$ROOT" MARKER="$home/state/t1.omp-doorbell-ready" PID="$listener_pid" \
+    REQDIR="$request_dir" SIGNAL_LOG="$signal_log" bash <<'SH'
+set -u
+. "$ROOT/bin/fm-backend.sh"
+
+# Grace 2500ms: the derived window (~2.7s) outlasts the re-drive where the
+# former fixed 200-attempt window (~2s) expired first and reported queued.
+set +e
+FM_OMP_DOORBELL_TURN_GRACE_MS=2500 \
+  fm_omp_task_doorbell_request "$MARKER" "$PID" first.msg 'canonical doorbell'
+rc=$?
+set -e
+[ "$rc" = 0 ] || { echo "landed re-drive must report delivered, got rc=$rc" >&2; exit 1; }
+[ -f "$REQDIR/request.first.msg.pending.acked" ] \
+  || { echo "the consumed receipt left no .acked tombstone" >&2; exit 1; }
+
+# The tombstone suppresses a second ring for the same record entirely.
+set +e
+fm_omp_task_doorbell_request "$MARKER" "$PID" first.msg 'canonical doorbell'
+rc=$?
+set -e
+[ "$rc" = 0 ] || { echo "a re-ring of an acked request must report delivered, got rc=$rc" >&2; exit 1; }
+[ ! -e "$REQDIR/request.first.msg.pending" ] \
+  || { echo "a re-ring of an acked request re-published the pending request" >&2; exit 1; }
+[ "$(wc -l < "$SIGNAL_LOG" | tr -d '[:space:]')" = 2 ] \
+  || { echo "expected exactly one sendMessage plus one re-drive, got: $(cat "$SIGNAL_LOG")" >&2; exit 1; }
+
+# An explicit attempt bound still wins over the derivation.
+set +e
+FM_OMP_DOORBELL_TURN_GRACE_MS=2500 FM_OMP_TASK_DOORBELL_ACK_ATTEMPTS=5 \
+  fm_omp_task_doorbell_request "$MARKER" "$PID" second.msg 'canonical doorbell'
+rc=$?
+set -e
+[ "$rc" = 2 ] || { echo "an explicit short ack window must still report queued, got rc=$rc" >&2; exit 1; }
+SH
+  expect_code 0 "$?" "requester window and acked suppression"
+  kill -TERM "$listener_pid" 2>/dev/null || true
+  wait "$listener_pid" 2>/dev/null || true
+  LISTENER_PID=
+  pass "requester ack window tracks the turn grace and an acked receipt suppresses the re-ring"
+}
+
 test_extension_signal_uses_trigger_turn
 test_extension_requires_turn_proof_or_redrives
 test_extension_external_notify_drives_turn_proof
@@ -898,3 +1032,4 @@ test_fm_send_rings_one_programmatic_doorbell
 test_omp_native_receive_reports_exact_binding
 test_omp_native_refusal_and_queue_are_bounded
 test_omp_native_binding_mismatch_is_refused
+test_requester_window_tracks_turn_grace_and_acked_suppresses
