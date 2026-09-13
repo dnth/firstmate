@@ -221,6 +221,91 @@ JS
   pass "OMP extension requires turn proof and re-drives a deferred triggerTurn through the user channel"
 }
 
+# observeTurns:false keeps the doorbell off the event surface; the embedding
+# extension forwards its own correlated turn_start/turn_end through
+# notifyTurnStart/notifyTurnEnd. Turn proof and downgrade re-drive still apply.
+test_extension_external_notify_drives_turn_proof() {
+  local dir="$TMP_ROOT/external-notify"
+  mkdir -p "$dir/state/t1.inbox"
+  HELPER="$HELPER" INBOX="$dir/state/t1.inbox" READY="$dir/state/t1.omp-doorbell-ready" \
+    node --input-type=module <<'JS'
+import assert from "node:assert/strict";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const { FM_TASK_INBOX_DOORBELL_SIGNAL, installTaskInboxDoorbell } =
+  await import(pathToFileURL(process.env.HELPER).href);
+const requestDir = `${process.env.READY}.requests`;
+const line = `Firstmate instruction waiting: list ${process.env.INBOX}/*.msg`;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const sent = [];
+const userSent = [];
+const handlers = new Map();
+let fireTurnStartDuringSend = false;
+const doorbell = installTaskInboxDoorbell(
+  {
+    sendMessage(message, options) {
+      sent.push({ message, options });
+      if (fireTurnStartDuringSend) doorbell.notifyTurnStart();
+    },
+    sendUserMessage(content) { userSent.push(content); },
+    on(event, handler) { handlers.set(event, handler); },
+  },
+  {
+    inboxDir: process.env.INBOX,
+    readyMarker: process.env.READY,
+    observeTurns: false,
+    turnGraceMs: 150,
+  },
+);
+doorbell.activate();
+assert.equal(handlers.size, 0, "observeTurns:false must not subscribe to the event surface");
+
+mkdirSync(requestDir, { recursive: true });
+writeFileSync(`${requestDir}/downgraded.pending`, line);
+process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
+assert.equal(sent.length, 1);
+assert.equal(existsSync(`${requestDir}/downgraded.pending.awaiting-turn`), true);
+assert.equal(existsSync(`${requestDir}/downgraded.pending.delivered`), false);
+
+await sleep(500);
+assert.equal(userSent.length, 1, "an unproven steer must re-drive as a user prompt");
+assert.equal(userSent[0], line);
+assert.equal(existsSync(`${requestDir}/downgraded.pending.delivered`), true);
+
+// A turn_start forwarded inside the dispatch call is the correlated proof.
+fireTurnStartDuringSend = true;
+writeFileSync(`${requestDir}/proved.pending`, line);
+process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
+assert.equal(sent.length, 2);
+assert.equal(existsSync(`${requestDir}/proved.pending.delivered`), true);
+assert.equal(userSent.length, 1);
+
+// The forwarded turn stays open until notifyTurnEnd: a mid-turn steer joins it
+// without its own dispatch proof.
+fireTurnStartDuringSend = false;
+writeFileSync(`${requestDir}/open.pending`, line);
+process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
+assert.equal(sent.length, 3);
+assert.equal(existsSync(`${requestDir}/open.pending.delivered`), true);
+assert.equal(userSent.length, 1);
+doorbell.notifyTurnEnd();
+
+// A stale open flag must not prove the next idle steer: after notifyTurnEnd a
+// silent dispatch waits out the grace and re-drives again.
+writeFileSync(`${requestDir}/reopened.pending`, line);
+process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
+assert.equal(sent.length, 4);
+assert.equal(existsSync(`${requestDir}/reopened.pending.awaiting-turn`), true);
+await sleep(500);
+assert.equal(userSent.length, 2, "a closed turn must not keep proving later steers");
+assert.equal(existsSync(`${requestDir}/reopened.pending.delivered`), true);
+doorbell.retire();
+JS
+  pass "OMP doorbell driven by external turn notifications proves turns and unlatches on turn_end"
+}
+
 test_ring_routing_matrix() {
   local dir="$TMP_ROOT/routing" rec log
   mkdir -p "$dir/state/t1.inbox/handled"
@@ -806,6 +891,7 @@ test_omp_native_binding_mismatch_is_refused() {
 
 test_extension_signal_uses_trigger_turn
 test_extension_requires_turn_proof_or_redrives
+test_extension_external_notify_drives_turn_proof
 test_ring_routing_matrix
 test_request_terminal_states
 test_fm_send_rings_one_programmatic_doorbell

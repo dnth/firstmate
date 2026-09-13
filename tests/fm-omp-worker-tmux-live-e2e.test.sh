@@ -186,10 +186,15 @@ clear_turnend() {  # <state-dir> <id>
 }
 
 wait_text_count() {
-  local target=$1 text=$2 count=$3 attempts=${4:-320} pane i=0
+  local target=$1 text=$2 count=$3 attempts=${4:-320} pane i=0 observed=0
   while [ "$i" -lt "$attempts" ]; do
     pane=$(capture "$target")
-    [ "$(printf '%s\n' "$pane" | grep -Fc "$text")" -ge "$count" ] && return 0
+    if [ "$(printf '%s\n' "$pane" | grep -Fc "$text")" -ge 1 ]; then
+      observed=$((observed + 1))
+      [ "$observed" -ge "$count" ] && return 0
+    else
+      observed=0
+    fi
     sleep 0.25
     i=$((i + 1))
   done
@@ -240,7 +245,8 @@ run_send() {
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
     FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
     FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_BACKEND=tmux FM_SEND_SLEEP=0.2 \
-    FM_SEND_SETTLE=0 PATH="$WRAPPER_BIN:$PATH" "$ROOT/bin/fm-send.sh" "$@" >/dev/null
+    FM_SEND_SETTLE=0 FM_OMP_TASK_DOORBELL_ACK_ATTEMPTS=2000 \
+    PATH="$WRAPPER_BIN:$PATH" "$ROOT/bin/fm-send.sh" "$@" >/dev/null
 }
 
 spawn_omp() {
@@ -280,7 +286,7 @@ wait_turnend "$HOME_DIR/state" "$WORKER_ID" || fail "idle OMP steer did not comp
 wait_text_count "$WORKER_TARGET" OMP_IDLE_STEER_DONE 2 || fail "idle OMP steer response was not observed"
 
 clear_turnend "$HOME_DIR/state" "$WORKER_ID"
-run_send "$WORKER_ID" 'Run this exact command with bash: sleep 5. Then respond exactly OMP_BUSY_FIRST_DONE.' \
+run_send "$WORKER_ID" 'Run this exact command with bash: sleep 30. Then respond exactly OMP_BUSY_FIRST_DONE.' \
   || fail "OMP busy-turn setup was not submitted"
 wait_busy "$WORKER_TARGET" || fail "OMP busy indicator was not observed"
 run_send "$WORKER_ID" 'After the current tool finishes, respond exactly OMP_BUSY_STEER_DONE.' \
@@ -354,7 +360,7 @@ run_send "$SCOUT_ID" 'Respond exactly OMP_SCOUT_IDLE_STEER_DONE.' || fail "idle 
 wait_file "$HOME_DIR/state/$SCOUT_ID.turn-ended.$SCOUT_GEN" || fail "idle OMP scout steer did not complete"
 wait_text_count "$SCOUT_TARGET" OMP_SCOUT_IDLE_STEER_DONE 2 || fail "idle OMP scout steer response was not observed"
 clear_turnend "$HOME_DIR/state" "$SCOUT_ID"
-run_send "$SCOUT_ID" 'Run this exact command with bash: sleep 5. Then respond exactly OMP_SCOUT_BUSY_FIRST_DONE.' \
+run_send "$SCOUT_ID" 'Run this exact command with bash: sleep 30. Then respond exactly OMP_SCOUT_BUSY_FIRST_DONE.' \
   || fail "OMP scout busy-turn setup was not submitted"
 wait_busy "$SCOUT_TARGET" || fail "OMP scout busy indicator was not observed"
 run_send "$SCOUT_ID" 'After the current tool finishes, respond exactly OMP_SCOUT_BUSY_STEER_DONE.' \

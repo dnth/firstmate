@@ -2477,6 +2477,91 @@ JS
   pass "OMP scouts retain scout semantics and external per-turn notification"
 }
 
+# A generated worker extension must observe turns through its own
+# turn_start/turn_end handlers: a parked instruction holds for turn proof and
+# then re-drives through the user channel instead of claiming delivered.
+test_omp_worker_doorbell_observes_turns_and_recovers_parked_steer() {
+  local rec id out status
+  id=$(profile_id profile-omp-doorbell-z8w)
+  rec=$(make_spawn_case profile-omp-doorbell omp "$id")
+  read_case_record "$rec"
+  export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "OMP worker spawn should succeed"
+  assert_present "$HOME_DIR/state/$id.omp-ext.ts" "OMP worker did not receive the external turn extension"
+
+  rm -f "$HOME_DIR/state/$id.omp-ready" "$HOME_DIR/state/$id.omp-started" \
+    "$HOME_DIR/state/$id.omp-doorbell-ready"
+  PLUGIN="$HOME_DIR/state/$id.omp-ext.ts" READY="$HOME_DIR/state/$id.omp-doorbell-ready" \
+    FM_OMP_DOORBELL_TURN_GRACE_MS=150 \
+    node --input-type=module <<'JS'
+import assert from "node:assert/strict";
+import { existsSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const requestDir = `${process.env.READY}.requests`;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const handlers = new Map();
+const sent = [];
+const userSent = [];
+let fireTurnStartDuringSend = false;
+const extension = await import(pathToFileURL(process.env.PLUGIN).href);
+extension.default({
+  sendMessage(message, options) {
+    sent.push({ message, options });
+    if (fireTurnStartDuringSend) handlers.get("turn_start")();
+  },
+  sendUserMessage(content) { userSent.push(content); },
+  on(name, handler) { handlers.set(name, handler); },
+});
+for (const name of ["session_start", "turn_start", "turn_end", "session_shutdown"]) {
+  assert.ok(handlers.has(name), `generated ext did not register ${name}`);
+}
+await handlers.get("session_start")();
+assert.equal(existsSync(process.env.READY), true, "generated ext did not publish doorbell readiness");
+assert.equal(existsSync(requestDir), true, "generated ext did not create the doorbell request dir");
+
+// The freeze: sendMessage accepts but the runtime never starts a turn. The
+// generated ext must hold the request for proof, then recover the parked
+// instruction through the user channel.
+writeFileSync(`${requestDir}/parked.pending`, "act on inbox record 001");
+process.emit("SIGUSR2");
+assert.equal(sent.length, 1);
+assert.equal(existsSync(`${requestDir}/parked.pending.awaiting-turn`), true,
+  "a parked steer must await turn proof, not claim delivered");
+await sleep(500);
+assert.equal(userSent.length, 1, "the generated ext never re-drove the parked instruction");
+assert.equal(userSent[0], "act on inbox record 001");
+assert.equal(existsSync(`${requestDir}/parked.pending.delivered`), true);
+
+// A turn_start the ext's own handler forwards inside the dispatch is the
+// correlated proof: no re-drive needed. Its turn_end handler then closes the
+// proof window.
+fireTurnStartDuringSend = true;
+writeFileSync(`${requestDir}/proved.pending`, "act on inbox record 002");
+process.emit("SIGUSR2");
+assert.equal(sent.length, 2);
+assert.equal(existsSync(`${requestDir}/proved.pending.delivered`), true);
+assert.equal(userSent.length, 1);
+await handlers.get("turn_end")();
+
+fireTurnStartDuringSend = false;
+writeFileSync(`${requestDir}/reopened.pending`, "act on inbox record 003");
+process.emit("SIGUSR2");
+assert.equal(sent.length, 3);
+assert.equal(existsSync(`${requestDir}/reopened.pending.awaiting-turn`), true,
+  "a stale open turn must not prove a new steer");
+await sleep(500);
+assert.equal(userSent.length, 2, "the generated ext's turn_end wiring must unlatch the proof window");
+assert.equal(existsSync(`${requestDir}/reopened.pending.delivered`), true);
+await handlers.get("session_shutdown")();
+JS
+  unset FM_TEST_OMP_ACK
+  pass "generated OMP worker extension observes turns and recovers a parked steer through the user channel"
+}
+
 test_omp_whitespace_identity_paths_refuse_before_endpoint() {
   local mode rec id out status spaced path
   for mode in omp bun; do
@@ -3169,6 +3254,7 @@ test_omp_refuses_unverified_backends_before_endpoint_creation
 test_herdr_launch_refuses_after_nested_shell_timeout
 test_herdr_spawn_uses_acquisition_owned_worktree_handoff
 test_omp_scout_uses_external_turn_extension
+test_omp_worker_doorbell_observes_turns_and_recovers_parked_steer
 test_omp_whitespace_identity_paths_refuse_before_endpoint
 test_omp_missing_binary_or_capability_refuses_before_endpoint_and_metadata
 test_omp_launch_requires_observable_turn_start_acknowledgement

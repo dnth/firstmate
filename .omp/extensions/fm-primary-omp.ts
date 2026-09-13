@@ -363,6 +363,8 @@ export default function (omp: ExtensionAPI) {
     publishTaskTurnStarted();
   });
 
+  omp.on("turn_end", taskInboxDoorbell.notifyTurnEnd);
+
   omp.on("session_switch", async (event, ctx) => {
     await watch.sessionShutdown(true);
     publishSecondmateSession(ctx);
