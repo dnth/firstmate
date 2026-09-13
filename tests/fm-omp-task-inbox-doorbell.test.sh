@@ -114,6 +114,7 @@ process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
 await new Promise((resolve) => setImmediate(resolve));
 assert.equal(existsSync(asyncFailure), false);
 assert.match(readFileSync(asyncFailureJournal, "utf8"), /drain: Error: async session channel closed/);
+assert.equal(existsSync(`${asyncFailure}.requests/one.pending`), true);
 
 const concurrent = `${process.env.READY}.concurrent`;
 const concurrentJournal = `${concurrent}.omp-doorbell-failed`;

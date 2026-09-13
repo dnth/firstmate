@@ -327,6 +327,9 @@ export function installTaskInboxDoorbell(
 						activationSends.add(delivery);
 						void delivery.catch((error: unknown) => {
 							if (!active) return;
+							bestEffortRename(`${pending}.delivered`, pending);
+							bestEffortRename(`${pending}.awaiting-turn`, pending);
+							bestEffortRename(ambiguous, pending);
 							journalDoorbellFailure(failureJournal, "drain", error);
 							retire();
 						}).finally(() => activationSends.delete(delivery));
