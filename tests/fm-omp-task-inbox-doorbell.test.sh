@@ -139,6 +139,30 @@ assert.equal(await concurrentActivation, false);
 assert.equal(existsSync(concurrent), false);
 assert.match(readFileSync(concurrentJournal, "utf8"), /drain: Error: late concurrent channel closed/);
 
+const retiredGeneration = `${process.env.READY}.retired-generation`;
+const retiredJournal = `${retiredGeneration}.omp-doorbell-failed`;
+mkdirSync(`${retiredGeneration}.requests`, { recursive: true });
+writeFileSync(`${retiredGeneration}.requests/old.pending`, line);
+let rejectRetired;
+const retiredSend = new Promise((_, reject) => { rejectRetired = reject; });
+const retired = installTaskInboxDoorbell(
+  { sendMessage() { return retiredSend; } },
+  { inboxDir: process.env.INBOX, readyMarker: retiredGeneration, failureJournal: retiredJournal },
+);
+const retiredActivation = retired.activate();
+retired.retire();
+const successor = installTaskInboxDoorbell(
+  { sendMessage() {} },
+  { inboxDir: process.env.INBOX, readyMarker: retiredGeneration, failureJournal: retiredJournal },
+);
+assert.equal(successor.activate(), true);
+rejectRetired(new Error("retired channel closed"));
+assert.equal(await retiredActivation, false);
+await new Promise((resolve) => setImmediate(resolve));
+assert.equal(existsSync(retiredJournal), false);
+assert.equal(readFileSync(retiredGeneration, "utf8"), `${process.pid}\n`);
+successor.retire();
+
 const initialAsyncFailure = `${process.env.READY}.initial-async-failure`;
 const initialAsyncJournal = `${initialAsyncFailure}.omp-doorbell-failed`;
 mkdirSync(`${initialAsyncFailure}.requests`, { recursive: true });

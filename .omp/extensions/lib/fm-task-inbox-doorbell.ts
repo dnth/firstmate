@@ -326,6 +326,7 @@ export function installTaskInboxDoorbell(
 						const delivery = Promise.resolve(sendResult);
 						activationSends.add(delivery);
 						void delivery.catch((error: unknown) => {
+							if (!active) return;
 							journalDoorbellFailure(failureJournal, "drain", error);
 							retire();
 						}).finally(() => activationSends.delete(delivery));
