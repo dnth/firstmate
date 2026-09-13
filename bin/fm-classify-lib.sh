@@ -181,12 +181,23 @@ status_done_line_has_artifact() {  # <done-line> <kind> <mode> <id>
   local line=$1 kind=$2 mode=$3 id=$4 token urls
   case "$kind" in
     scout)
-      case "$line" in *"data/$id/report.md"*) return 0 ;; esac
+      while IFS= read -r token; do
+        while [ -n "$token" ]; do
+          case "$token" in
+            *[A-Za-z0-9/]) break ;;
+            *) token=${token%?} ;;
+          esac
+        done
+        [ "$token" = "data/$id/report.md" ] && return 0
+        case "$token" in */data/$id/report.md) return 0 ;; esac
+      done <<EOF
+$(printf '%s\n' "$line" | awk '{ for (i = 1; i <= NF; i++) print $i }')
+EOF
       return 1
       ;;
     ship)
       if [ "$mode" = local-only ]; then
-        case "$line" in *"ready in branch"*) return 0 ;; esac
+        case "$line" in done:\ ready\ in\ branch[[:space:]]*|done:\ ready\ in\ branch) return 0 ;; esac
         return 1
       fi
       _fm_classify_require_pr_lib

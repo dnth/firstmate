@@ -221,6 +221,18 @@ test_signal_reason_is_actionable_classifier() {
   pass "signal_reason_is_actionable: benign absorbed, captain verbs and coalesced batches surfaced"
 }
 
+test_done_artifact_requires_exact_markers() {
+  status_done_line_has_artifact "done: ready in branch fm/task" ship local-only task \
+    || fail "local-only delivery marker was rejected"
+  status_done_line_has_artifact "done: not ready in branch fm/task" ship local-only task \
+    && fail "local-only prose containing the marker was accepted"
+  status_done_line_has_artifact "done: conclusion - report at data/scout/report.md" scout scout scout \
+    || fail "scout report path was rejected"
+  status_done_line_has_artifact "done: conclusion - report at data/scout/report.md.bak" scout scout scout \
+    && fail "scout report lookalike suffix was accepted"
+  pass "done artifact checks require exact delivery markers"
+}
+
 test_signal_span_surfaces_actionable_before_later_routine() {
   local dir state statusf record
   dir=$(make_case signal-span-actionable)
@@ -3521,6 +3533,7 @@ test_idle_open_work_provably_working_is_absorbed() {
 
 test_stop_pid_ends_a_term_immune_child
 test_signal_reason_is_actionable_classifier
+test_done_artifact_requires_exact_markers
 test_signal_span_surfaces_actionable_before_later_routine
 test_legacy_seen_marker_rejects_mtime_preserved_replacement
 test_stale_is_terminal_classifier
