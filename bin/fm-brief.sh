@@ -93,7 +93,7 @@ PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 # enforces it as the idle-with-open-work escalation and fm-classify-lib.sh owns
 # the shared default.
 IDLE_OPEN_BOUND=${FM_IDLE_OPEN_WORK_SECS:-$FM_IDLE_OPEN_WORK_SECS_DEFAULT}
-case "$IDLE_OPEN_BOUND" in ''|*[!0-9]*) IDLE_OPEN_BOUND=$FM_IDLE_OPEN_WORK_SECS_DEFAULT ;; esac
+case "$IDLE_OPEN_BOUND" in ''|0|*[!0-9]*) IDLE_OPEN_BOUND=$FM_IDLE_OPEN_WORK_SECS_DEFAULT ;; esac
 
 resolve_directory_input() {
   local name=$1 path=$2 resolved

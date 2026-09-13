@@ -244,7 +244,7 @@ PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT
 # ticking idle pane whose hash changes every poll cannot dodge it the way it
 # dodges stable-hash staleness.
 IDLE_OPEN_WORK_SECS=${FM_IDLE_OPEN_WORK_SECS:-$FM_IDLE_OPEN_WORK_SECS_DEFAULT}
-case "$IDLE_OPEN_WORK_SECS" in ''|*[!0-9]*) IDLE_OPEN_WORK_SECS=$FM_IDLE_OPEN_WORK_SECS_DEFAULT ;; esac
+case "$IDLE_OPEN_WORK_SECS" in ''|0|*[!0-9]*) IDLE_OPEN_WORK_SECS=$FM_IDLE_OPEN_WORK_SECS_DEFAULT ;; esac
 # A local secondmate's foreign queue is checked on every poll, but only after this
 # bounded interval with no drain progress can it produce a parent notification.
 # A healthy mate drains its queue between turns, not inside one, so this default
