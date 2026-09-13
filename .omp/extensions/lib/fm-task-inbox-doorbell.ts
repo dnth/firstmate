@@ -166,11 +166,31 @@ function reconcileAwaitingTurns(requestDir: string): void {
 	}
 }
 
+function defaultFailureJournal(options: TaskInboxDoorbellOptions): string {
+	const explicit = options.failureJournal || process.env.FM_OMP_TASK_DOORBELL_FAILED || "";
+	if (explicit) return explicit;
+	const readyMarker = options.readyMarker || process.env.FM_OMP_TASK_DOORBELL_READY || "";
+	if (readyMarker.startsWith("/")) {
+		const suffix = ".omp-doorbell-ready";
+		const stem = readyMarker.endsWith(suffix)
+			? readyMarker.slice(0, -suffix.length)
+			: readyMarker;
+		return `${stem}.omp-doorbell-failed`;
+	}
+	const inboxDir = options.inboxDir || process.env.FM_OMP_TASK_INBOX_DIR || "";
+	const stateDir = inboxDir.startsWith("/")
+		? dirname(inboxDir)
+		: (process.env.FM_STATE_OVERRIDE?.startsWith("/")
+			? process.env.FM_STATE_OVERRIDE
+			: join(process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || process.cwd(), "state"));
+	return stateDir ? join(stateDir, `.omp-doorbell-failed.${process.pid}`) : "";
+}
+
 export function installTaskInboxDoorbell(
 	omp: OmpDoorbellApi,
 	options: TaskInboxDoorbellOptions = {},
 ): TaskInboxDoorbell {
-	const failureJournal = options.failureJournal ?? process.env.FM_OMP_TASK_DOORBELL_FAILED ?? "";
+	const failureJournal = defaultFailureJournal(options);
 	const configured = configuredOptions(options);
 	if (!configured || typeof omp.sendMessage !== "function") {
 		const unconfiguredWhy = !configured

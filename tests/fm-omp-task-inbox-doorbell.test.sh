@@ -375,6 +375,28 @@ assert.equal(existsSync(process.env.FAILED), false,
   "a live doorbell must clear the stale failure journal");
 recovered.retire();
 assert.equal(existsSync(process.env.READY), false);
+
+const derivedReady = `${process.env.READY}.derived`;
+const derivedJournal = `${derivedReady}.omp-doorbell-failed`;
+writeFileSync(`${derivedReady}.requests`, "not a directory");
+const derived = installTaskInboxDoorbell(
+  { sendMessage() {} },
+  { inboxDir: process.env.INBOX, readyMarker: derivedReady },
+);
+assert.equal(derived.activate(), false);
+assert.match(readFileSync(derivedJournal, "utf8"), /activate: Error: E/);
+derived.retire();
+rmSync(`${derivedReady}.requests`);
+
+const primaryState = `${process.env.INBOX}.primary-state`;
+mkdirSync(primaryState, { recursive: true });
+const previousState = process.env.FM_STATE_OVERRIDE;
+process.env.FM_STATE_OVERRIDE = primaryState;
+const primary = installTaskInboxDoorbell({}, {});
+assert.equal(primary.activate(), false);
+assert.match(readFileSync(`${primaryState}/.omp-doorbell-failed.${process.pid}`, "utf8"), /activate: Error:/);
+if (previousState === undefined) delete process.env.FM_STATE_OVERRIDE;
+else process.env.FM_STATE_OVERRIDE = previousState;
 JS
   pass "OMP extension activation reports failures, journals their reasons, and retires cleanly"
 }
