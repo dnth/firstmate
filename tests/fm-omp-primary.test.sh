@@ -522,6 +522,9 @@ await handlers.get("turn_start")({ type: "turn_start" }, extensionContext);
 if (readFileSync(process.env.FM_OMP_TASK_TURN_STARTED, "utf8") !== `${process.pid}\n`) {
   throw new Error("OMP primary integration did not publish the task-bound turn-start marker");
 }
+if (existsSync(`${process.env.FM_STATE_OVERRIDE}/watch-count`)) {
+  throw new Error("OMP turn_start armed the watcher before this session owned the lock");
+}
 const primaryRequest = `${process.env.FM_OMP_TASK_DOORBELL_READY}.requests/primary.pending`;
 writeFileSync(primaryRequest, `Firstmate instruction waiting: list ${process.env.FM_OMP_TASK_INBOX_DIR}/*.msg and, in numeric order, read and act on each, then mv each handled file to ${process.env.FM_OMP_TASK_INBOX_DIR}/handled/.`);
 process.emit("SIGUSR2");
@@ -543,6 +546,17 @@ if (await handlers.get("before_agent_start")({ type: "before_agent_start" }, {})
   throw new Error("startup nudge repeated within one OMP session");
 }
 writeFileSync(`${process.env.FM_STATE_OVERRIDE}/.lock`, `${process.pid}\n`);
+// A turn that starts while this session owns the lock but no arm child is live
+// re-asserts the watcher cycle at once rather than riding the whole turn
+// unsupervised. The re-arm is idempotent: a second turn_start while that arm
+// child is still live must not create a second cycle.
+await handlers.get("turn_start")({ type: "turn_start" }, extensionContext);
+await waitForWatchCount(1, "OMP turn_start watcher re-arm with no live arm child");
+await handlers.get("turn_start")({ type: "turn_start" }, extensionContext);
+await new Promise((resolve) => setTimeout(resolve, 80));
+if (Number(readFileSync(`${process.env.FM_STATE_OVERRIDE}/watch-count`, "utf8").trim()) !== 1) {
+  throw new Error("a second OMP turn_start created a second watcher cycle");
+}
 // A native switch re-arms the watcher at once, and OMP starts its first wake as
 // an agent-initiated turn that never emits before_agent_start. The replacement
 // nudge therefore has to land in the replacement session context at switch time,
@@ -570,18 +584,18 @@ async function expectSwitchNudge(label, expectedTotal) {
   }
 }
 await handlers.get("session_switch")({ type: "session_switch", reason: "new" }, extensionContext);
-await waitForWatchCount(1, "in-process OMP /new automatic watcher arm");
+await waitForWatchCount(2, "in-process OMP /new automatic watcher arm");
 await expectSwitchNudge("in-process OMP /new", 1);
 // Regression: a second /new with no before_agent_start in between must still
 // deliver its own nudge because the replacement turn was agent-initiated.
 await handlers.get("session_switch")({ type: "session_switch", reason: "new" }, extensionContext);
-await waitForWatchCount(2, "in-process OMP second /new automatic watcher arm");
+await waitForWatchCount(3, "in-process OMP second /new automatic watcher arm");
 await expectSwitchNudge("in-process OMP second /new", 2);
 await handlers.get("session_switch")({ type: "session_switch", reason: "resume" }, extensionContext);
-await waitForWatchCount(3, "in-process OMP /resume automatic watcher arm");
+await waitForWatchCount(4, "in-process OMP /resume automatic watcher arm");
 await expectSwitchNudge("in-process OMP /resume", 3);
 await handlers.get("session_switch")({ type: "session_switch", reason: "fork" }, extensionContext);
-await waitForWatchCount(4, "in-process OMP /fork automatic watcher arm");
+await waitForWatchCount(5, "in-process OMP /fork automatic watcher arm");
 if (switchNudges().length !== 3 || await handlers.get("before_agent_start")({ type: "before_agent_start" }, {}) !== undefined) {
   throw new Error("in-process OMP /fork delivered a startup instruction while this session still holds the lock");
 }
@@ -650,6 +664,14 @@ if (
 }
 if (!existsSync(`${process.env.FM_STATE_OVERRIDE}/watch-successor-ready`)) {
   throw new Error("OMP actionable notification arrived before successor readiness");
+}
+// The successor arm child restored by the actionable close is the one live
+// cycle; a turn_start arriving while it is still live must stay a no-op.
+const restoredCount = Number(readFileSync(`${process.env.FM_STATE_OVERRIDE}/watch-count`, "utf8").trim());
+await handlers.get("turn_start")({ type: "turn_start" }, extensionContext);
+await new Promise((resolve) => setTimeout(resolve, 80));
+if (Number(readFileSync(`${process.env.FM_STATE_OVERRIDE}/watch-count`, "utf8").trim()) !== restoredCount) {
+  throw new Error("OMP turn_start created a second watcher cycle alongside the restored successor");
 }
 await handlers.get("session_shutdown")({ type: "session_shutdown" }, {});
 await new Promise(resolve => setTimeout(resolve, 80));
@@ -780,6 +802,200 @@ JS
   expect_code 0 "$status" "OMP native extension gate-agent guard"
   assert_contains "$inert" "inert-gate-ok" "OMP gate-agent scope did not stay inert"
   pass "OMP primary extension binds secondmate doorbells after session readiness"
+}
+
+# A handling turn that begins with no live arm child used to ride the whole turn
+# unsupervised: the beacon aged past FM_GUARD_GRACE and fm-guard.sh reported
+# WATCHER DOWN on a session that was actively handling. turn_start now
+# re-asserts the extension-owned cycle. This test drives the REAL arm script,
+# watcher, and guard (only the arm entrypoint is wrapped, for a controllable
+# outage): session_start arms one cycle, a simulated arm outage plus a dead
+# watcher exhausts the continuity retries, the beacon goes stale and the guard
+# fires, and the next turn_start restores exactly one cycle that keeps the
+# beacon fresh through a turn lasting several grace windows - a >300s turn at
+# production scale.
+test_omp_turn_start_rearm_survives_long_turn() {
+  local fixture state out status=0
+  fixture="$TMP_ROOT/turn-start-long-turn"
+  state="$fixture/state"
+  mkdir -p "$fixture/bin" "$state" "$fixture/config" "$state/task.inbox" \
+    "$fixture/.omp/extensions/lib"
+  : > "$fixture/AGENTS.md"
+  git init -q -b main "$fixture"
+  cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$fixture/.omp/extensions/fm-primary-omp.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$fixture/.omp/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-async-exec.ts" "$fixture/.omp/extensions/lib/fm-async-exec.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" "$fixture/.omp/extensions/lib/fm-task-inbox-doorbell.ts"
+  local f base
+  for f in "$ROOT"/bin/*; do
+    base=$(basename "$f")
+    [ "$base" = fm-watch-arm.sh ] && continue
+    ln -s "$f" "$fixture/bin/$base"
+  done
+  # The outage shim wraps the real arm script through a fixture-local link so
+  # SCRIPT_DIR inside the real scripts resolves to this fixture's bin/ - the
+  # watcher then records watcher-path under the fixture, matching the path the
+  # extension's turn-end guard and the fm-guard.sh call below compare against.
+  ln -s "$ROOT/bin/fm-watch-arm.sh" "$fixture/bin/fm-watch-arm-real.sh"
+  cat > "$fixture/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+fm_state="${FM_STATE_OVERRIDE:-${FM_HOME:?}/state}"
+printf 'arm-invoked %s\n' "$*" >> "$fm_state/arm-invocations"
+if [ -f "$fm_state/.arm-fails" ]; then
+  printf 'watcher: FAILED - fixture arm outage\n' >&2
+  exit 1
+fi
+exec "$(dirname "$0")/fm-watch-arm-real.sh" "$@"
+SH
+  chmod +x "$fixture/bin/fm-watch-arm.sh"
+  # One in-flight task keeps FM_SUP_NEEDED true so the guard watches this home.
+  # Its window deliberately resolves nowhere: capture fails and the pane loop
+  # skips it, so the real watcher stays quiet for the test's whole run.
+  fm_write_meta "$state/fixturecrew.meta" \
+    "window=fmtest-nonexistent:fakecrew" \
+    "harness=omp" \
+    "kind=ship"
+
+  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" \
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" \
+    FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    FM_OMP_TASK_INBOX_DIR="$state/task.inbox" \
+    FM_OMP_TASK_DOORBELL_READY="$state/task.omp-doorbell-ready" \
+    FM_OMP_TASK_TURN_STARTED="$state/task.omp-started" \
+    FM_SUPERVISION_MODEL=persistent \
+    FM_GUARD_GRACE=8 FM_POLL=2 FM_SIGNAL_GRACE=1 \
+    FM_HEARTBEAT=9999 FM_CHECK_INTERVAL=9999 \
+    FM_ARM_CONFIRM_TIMEOUT=3 \
+    FM_WATCH_REARM_RETRY_BASE_MS=50 FM_WATCH_REARM_RETRY_MAX_MS=150 \
+    FM_OMP_ARM_READY_TIMEOUT_MS=30000 \
+    node --input-type=module 2>&1 <<'JS'
+import { existsSync, readFileSync, statSync, writeFileSync, unlinkSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
+
+const state = process.env.FM_STATE_OVERRIDE;
+const handlers = new Map();
+const wakes = [];
+const api = {
+  zod: { object: () => ({}) },
+  on(name, handler) { handlers.set(name, handler); },
+  registerCommand() {},
+  registerTool() {},
+  sendMessage(message) { wakes.push(String(message?.content ?? "")); },
+  sendUserMessage() {},
+};
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+async function waitFor(pred, label, tries = 600) {
+  for (let i = 0; i < tries; i += 1) {
+    if (pred()) return;
+    await sleep(100);
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+const lockPid = () => {
+  try { return readFileSync(`${state}/.watch.lock/pid`, "utf8").trim(); } catch { return ""; }
+};
+const pidAlive = (pid) => {
+  if (!/^[0-9]+$/.test(pid)) return false;
+  try { process.kill(Number(pid), 0); return true; } catch { return false; }
+};
+const beaconAgeMs = () => {
+  try { return Date.now() - statSync(`${state}/.last-watcher-beat`).mtimeMs; } catch { return Infinity; }
+};
+const watcherHealthy = () => pidAlive(lockPid()) && beaconAgeMs() < 6000;
+// Only the lock-holding watcher beats, so a fresh beacon means a live cycle
+// exists; it stays true across a lawful successor handoff while lockPid()
+// briefly reads empty between the old watcher's close and the successor's
+// lock acquisition.
+const beaconFresh = () => beaconAgeMs() < 6000;
+const guard = () => spawnSync(`${process.env.FM_ROOT_OVERRIDE}/bin/fm-guard.sh`, [], {
+  env: { ...process.env, FM_SUPERVISION_MODEL: "persistent" },
+  encoding: "utf8",
+});
+const guardSaysDown = () => /WATCHER DOWN|watcher still down/.test(guard().stderr || "");
+const armInvocations = () => existsSync(`${state}/arm-invocations`)
+  ? readFileSync(`${state}/arm-invocations`, "utf8").trim().split("\n").length
+  : 0;
+
+process.argv[1] = process.env.EXTENSION;
+const extension = await import(`${pathToFileURL(process.env.EXTENSION).href}?longturn=${Date.now()}`);
+extension.default(api);
+const context = { sessionManager: { getSessionFile: () => "" } };
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+await handlers.get("session_start")({ type: "session_start" }, context);
+await waitFor(watcherHealthy, "initial real watcher cycle");
+if (guardSaysDown()) throw new Error("guard reported WATCHER DOWN with a live fresh watcher");
+const firstWatcherPid = lockPid();
+
+// Simulate the arm outage the lapse needs: break the arm seam, kill the live
+// watcher, and let the bounded continuity retries all fail until the core
+// surfaces the failure and gives up - the terminal blind state that used to
+// last until the turn-end guard ran.
+writeFileSync(`${state}/.arm-fails`, "1\n");
+process.kill(Number(firstWatcherPid), "SIGKILL");
+await waitFor(
+  () => wakes.some((message) => message.includes("watcher: FAILED")),
+  "continuity failure surface after the arm outage",
+);
+if (watcherHealthy()) throw new Error("a watcher stayed healthy through the simulated arm outage");
+await waitFor(guardSaysDown, "fm-guard WATCHER DOWN during the blind window");
+
+// The turn that opens on this blind session re-arms once the outage clears.
+unlinkSync(`${state}/.arm-fails`);
+await handlers.get("turn_start")({ type: "turn_start" }, context);
+await waitFor(watcherHealthy, "turn_start watcher re-arm after the outage");
+const healedPid = lockPid();
+if (healedPid === firstWatcherPid) throw new Error("turn_start re-arm reported the dead watcher as the live cycle");
+
+// Ride a turn spanning several grace windows: a live watcher cycle must keep
+// the beacon advancing and the guard must never report WATCHER DOWN. The lock
+// pid may legitimately change once - the watcher exits to deliver an
+// actionable wake and the core instantly replaces it with a successor - but
+// the beacon keeps advancing through that handoff because exactly one cycle
+// is ever live.
+let firstBeat = 0;
+try { firstBeat = statSync(`${state}/.last-watcher-beat`).mtimeMs; } catch { firstBeat = 0; }
+for (let i = 0; i < 7; i += 1) {
+  await sleep(2000);
+  if (guardSaysDown()) throw new Error(`guard reported WATCHER DOWN ${i + 1} grace-fractions into the handling turn`);
+  if (!beaconFresh()) throw new Error("no live watcher cycle mid-turn");
+}
+if (statSync(`${state}/.last-watcher-beat`).mtimeMs <= firstBeat) {
+  throw new Error("the live watcher's beacon never advanced during the turn");
+}
+
+// Further turn_starts inside a live cycle must not create another arm or
+// watcher: the single-cycle invariant holds.
+const armsBeforeExtraTurns = armInvocations();
+await handlers.get("turn_start")({ type: "turn_start" }, context);
+await handlers.get("turn_start")({ type: "turn_start" }, context);
+await sleep(300);
+if (armInvocations() !== armsBeforeExtraTurns) throw new Error("extra turn_starts spawned more watcher arms");
+if (!watcherHealthy()) throw new Error("the live watcher cycle did not survive repeated turn_starts");
+
+// The turn-end guard stays the backstop: healthy supervision lets the turn end.
+const stop = await handlers.get("session_stop")({
+  type: "session_stop",
+  messages: [],
+  turn_id: 1,
+  session_id: "omp-session",
+  stop_hook_active: false,
+  signal: new AbortController().signal,
+});
+if (stop !== undefined) throw new Error(`a healthy turn end was blocked: ${JSON.stringify(stop)}`);
+const finalPid = lockPid();
+await handlers.get("session_shutdown")({ type: "session_shutdown" }, context);
+await waitFor(() => !pidAlive(finalPid), "watcher teardown at session shutdown", 100);
+console.log("omp-turn-start-rearm-ok");
+JS
+  ) || status=$?
+  # The fixture's watcher must not outlive the test even on a mid-run failure.
+  if [ -f "$state/.watch.lock/pid" ]; then
+    kill "$(cat "$state/.watch.lock/pid" 2>/dev/null)" 2>/dev/null || true
+  fi
+  expect_code 0 "$status" "OMP turn_start rearm across a long turn"
+  assert_contains "$out" omp-turn-start-rearm-ok "OMP turn_start did not restore single-cycle supervision through a long turn: $out"
+  pass "OMP turn_start re-arms a missing watcher and keeps the guard silent through a long turn"
 }
 
 # The shared core delivers the recovery handshake for every runtime bound to it,
@@ -1461,6 +1677,7 @@ test_native_identity_handles_virtual_entrypoint
 test_native_omp_fresh_checkout_nudges_once
 test_primary_marker_refuses_whitespace_identity
 test_native_primary_extension_contract
+test_omp_turn_start_rearm_survives_long_turn
 test_native_omp_confirms_recovery_handling_delivery
 test_native_omp_refused_handling_delivery_is_typed_once
 test_native_omp_session_switch_carries_inflight_actionable_close
