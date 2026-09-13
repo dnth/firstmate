@@ -67,6 +67,8 @@ publish_omp_ack() { # <pane> <launch>
       printf '%s\n%s\n%s\n%s\n' "$version" "$OMP_ACK_PID" "$OMP_BUN" "$OMP_BIN" \
         > "$cwd/state/.omp-primary-extension-loaded"
       printf '%s\n' "$OMP_ACK_PID" > "$cwd/state/.lock"
+      doorbell=$(printf '%s' "$launch" | sed -n "s/.*FM_OMP_TASK_DOORBELL_READY='\\([^']*\\)'.*/\\1/p")
+      [ -z "$doorbell" ] || : > "$doorbell"
       jq_state --arg p "$pane" --arg session "$session" '.omp_session[$p] = $session' | save
       ;;
   esac
