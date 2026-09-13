@@ -361,6 +361,16 @@ export default function (omp: ExtensionAPI) {
   omp.on("turn_start", () => {
     taskInboxDoorbell.notifyTurnStart();
     publishTaskTurnStarted();
+    // A turn can begin while no arm child is live - after an actionable close
+    // whose successor restore failed, an exhausted continuity retry, or a lock
+    // reclaimed without a follow-up arm - and only the turn-end guard would
+    // notice while the beacon ages past grace mid-turn and fm-guard.sh reports
+    // WATCHER DOWN on a session that is actually being handled. Re-asserting
+    // the extension-owned cycle here is the same idempotent ensure the repair
+    // tool performs: a live arm child or a scheduled retry returns
+    // "unchanged", a lock this session does not own is refused, and the
+    // home-scoped watcher singleton never lets a second cycle exist.
+    watch.arm();
   });
 
   omp.on("turn_end", taskInboxDoorbell.notifyTurnEnd);

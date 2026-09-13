@@ -10,15 +10,17 @@ When this session owns supervision and away mode is not active:
    Never run `bin/fm-watch-arm.sh` through OMP's bash tool because the primary safety check denies that foreground shape and extension-owned cleanup would be bypassed.
 5. If the extension says no live session holds the lock, run `bin/fm-session-start.sh` to reclaim the session lock, then call `fm_watch_arm_omp` again.
 6. The extension starts `bin/fm-watch-arm.sh --restart`, keeps the child attached to the live OMP process, and owns every later successor launch.
-   The tool and the fallback command return only after that child reports readiness, so a `watcher: FAILED` readiness timeout is a real failure to handle under step 11 rather than a slow success.
+   The tool and the fallback command return only after that child reports readiness, so a `watcher: FAILED` readiness timeout is a real failure to handle under step 12 rather than a slow success.
 7. OMP `/new`, `/resume`, `/fork`, and session reload emit `session_switch`, replace the prior extension generation, and restore the watcher without a foreground watcher command.
    `/new` and `/resume` also append the session-start instruction exactly once to the new conversation, ahead of the restored watcher's first wake.
 8. After an actionable child close, the shared watcher core rechecks session-lock ownership and verifies one successor before it delivers the follow-up notification; a replacement generation receives an actionable close whose prior delivery was not yet consumed.
-9. Ordinary work, turn completion, and ordinary notification handling must not call `fm_watch_arm_omp` again because continuity is extension-owned.
-10. An unexpected child close enters bounded exponential retry, and an exhausted retry or lost session lock is surfaced as a watcher failure.
-11. Missing, failed, or unhealthy cycle only: drain queued notifications, inspect the failure, call `fm_watch_arm_omp`, and restart with the explicit `-e` fallback if the integration is missing or stale.
-12. Never use shell `&` for watcher supervision.
-13. While the supervision branch is active, MAIN must claim the reserved backlog lease before every `tasks-axi` or direct `data/backlog.md` mutation, then release it after the mutation: `bin/fm-lease.sh claim backlog`, mutate, `bin/fm-lease.sh release backlog`.
+9. Every `turn_start` re-asserts the extension-owned watcher cycle, so a turn that begins while no arm child is live - after a failed successor restore, an exhausted continuity retry, or a lock reclaimed without a follow-up arm - stays supervised for its whole duration instead of tripping `fm-guard.sh` mid-turn and waiting for the turn-end guard.
+   The re-assertion is the same idempotent ensure the repair tool performs: a live arm child or a scheduled continuity retry is left unchanged, a lock this session does not own is refused, and the home-scoped watcher singleton prevents a second cycle.
+10. Ordinary work, turn completion, and ordinary notification handling must not call `fm_watch_arm_omp` again because continuity is extension-owned.
+11. An unexpected child close enters bounded exponential retry, and an exhausted retry or lost session lock is surfaced as a watcher failure.
+12. Missing, failed, or unhealthy cycle only: drain queued notifications, inspect the failure, call `fm_watch_arm_omp`, and restart with the explicit `-e` fallback if the integration is missing or stale.
+13. Never use shell `&` for watcher supervision.
+14. While the supervision branch is active, MAIN must claim the reserved backlog lease before every `tasks-axi` or direct `data/backlog.md` mutation, then release it after the mutation: `bin/fm-lease.sh claim backlog`, mutate, `bin/fm-lease.sh release backlog`.
 
 For a persistent secondmate, the watcher in that secondmate home touches `state/.last-watcher-beat` at the start of every cycle.
 The parent watcher treats a fresh, non-future secondmate-home beacon as positive liveness evidence when the secondmate is neither paused nor captain-held and its pane is idle between child polls, reading remote beacon age through a short bounded call with a forced-kill grace on the configured host route.
