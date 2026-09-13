@@ -399,6 +399,12 @@ fm_lock_recheck_stale_owner() {
 
 FM_RECOVERY_MARKER_TOKEN=
 FM_RECOVERY_MARKER_ACTION='none'
+# Outputs of the most recent arm check for the caller's resurface decision.
+# BOUND=1 means the just-announced downtime generation crossed the
+# unacknowledged-announcement bound, so the caller must resume supervision after
+# surfacing the resurface once instead of exiting on it.
+FM_RECOVERY_RESURFACE_BOUND=0
+FM_RECOVERY_RESURFACE_COUNT=0
 
 # Token grammar (one owner): <pending|announced|acked>:<handling|downtime>:<generation>
 # docs/watcher-continuity.md owns the recovery-episode contract, including the
@@ -583,6 +589,92 @@ fm_recovery_marker_snapshot() {
   fm_lock_release "$lock"
 }
 
+# Unacknowledged-announcement bound. Every arm check that marks a downtime
+# generation announced is one announcement; consecutive announcements with no
+# generation-bound acknowledgement in between are counted in
+# <marker>.resurface ("count<TAB>first-unacked-epoch"), and a successful
+# acknowledgement deletes the sidecar. Past either bound the caller must stop
+# exiting on the resurface wake, because the announcement's only consumer has
+# been absent the whole streak. docs/watcher-continuity.md owns the contract.
+fm_recovery_resurface_max_announcements() {
+  local n=${FM_WATCH_RESURFACE_MAX_ANNOUNCEMENTS:-3}
+  case "$n" in ''|*[!0-9]*) n=3 ;; esac
+  printf '%s' "$n"
+}
+
+fm_recovery_resurface_max_secs() {
+  local s=${FM_WATCH_RESURFACE_MAX_SECS:-900}
+  case "$s" in ''|*[!0-9]*) s=900 ;; esac
+  printf '%s' "$s"
+}
+
+# Bound check shared by both streak evaluators: a streak is past its bound when
+# its announcement count reaches the configured maximum or its first
+# unacknowledged announcement is older than the configured timeout.
+_fm_recovery_resurface_bound_check() {  # <count> <first-epoch> <now-epoch>
+  if [ "$1" -ge "$(fm_recovery_resurface_max_announcements)" ] \
+    || [ "$(($3 - $2))" -ge "$(fm_recovery_resurface_max_secs)" ]; then
+    FM_RECOVERY_RESURFACE_BOUND=1
+  fi
+}
+
+# Record one just-announced downtime generation in <marker>.resurface and set
+# the FM_RECOVERY_RESURFACE_* outputs. fresh=1 starts a new streak (no prior
+# marker, a corrupt one, or an acknowledged episode); fresh=0 continues the
+# streak an announced-but-unacked episode left behind. Call inside the marker
+# lock, after the announced write, so the count and the announcement commit
+# together.
+_fm_recovery_resurface_note_announced() {  # <marker> <fresh:0|1>
+  local marker=$1 fresh=$2 sidecar line count=0 first now tmp
+  sidecar="${marker}.resurface"
+  now=$(date +%s)
+  first=$now
+  if [ "$fresh" != 1 ] && [ -f "$sidecar" ] && [ ! -L "$sidecar" ]; then
+    IFS= read -r line < "$sidecar" || true
+    case "$line" in
+      *$'\t'*)
+        count=${line%%$'\t'*}
+        first=${line##*$'\t'}
+        ;;
+    esac
+    case "$count" in ''|*[!0-9]*) count=0 ;; esac
+    case "$first" in ''|*[!0-9]*) first=$now ;; esac
+    [ "$first" -le "$now" ] || first=$now
+  fi
+  count=$((count + 1))
+  tmp=$(mktemp "${sidecar}.tmp.XXXXXX") || return 1
+  if ! printf '%s\t%s\n' "$count" "$first" > "$tmp" \
+    || ! chmod 0600 "$tmp" \
+    || ! _fm_atomic_replace "$tmp" "$sidecar"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  FM_RECOVERY_RESURFACE_COUNT=$count
+  _fm_recovery_resurface_bound_check "$count" "$first" "$now"
+}
+
+# Re-evaluate a persisted streak without incrementing it. A marker that is
+# already announced reaches the arm check through the `wait` branch, so the
+# bound must come from the sidecar an earlier announcement left behind: setting
+# the outputs here keeps every later pass of a tripped bound resuming
+# supervision instead of re-entering the resurface exit loop.
+_fm_recovery_resurface_eval() {  # <marker>
+  local sidecar=$1.resurface line count=0 first=0 now
+  [ -f "$sidecar" ] && [ ! -L "$sidecar" ] || return 0
+  IFS= read -r line < "$sidecar" || return 0
+  case "$line" in
+    *$'\t'*) ;;
+    *) return 0 ;;
+  esac
+  count=${line%%$'\t'*}
+  first=${line##*$'\t'}
+  case "$count" in ''|*[!0-9]*|0) return 0 ;; esac
+  case "$first" in ''|*[!0-9]*) first=0 ;; esac
+  now=$(date +%s)
+  FM_RECOVERY_RESURFACE_COUNT=$count
+  _fm_recovery_resurface_bound_check "$count" "$first" "$now"
+}
+
 _fm_recovery_marker_ack() {
   local marker=$1 expected_generation=$2 lock tmp line
   [ -n "$expected_generation" ] || return 2
@@ -607,12 +699,17 @@ _fm_recovery_marker_ack() {
     fm_lock_release "$lock"
     return 1
   fi
+  # The episode is retired: the unacknowledged-announcement streak ends here so
+  # the next downtime episode counts from zero.
+  rm -f -- "${marker}.resurface" || true
   fm_lock_release "$lock"
 }
 
 _fm_recovery_marker_arm_check() {
   local marker=$1 lock line quarantine
   FM_RECOVERY_MARKER_ACTION='none'
+  # shellcheck disable=SC2034 # Outputs read by callers after this function returns.
+  FM_RECOVERY_RESURFACE_BOUND=0 FM_RECOVERY_RESURFACE_COUNT=0
   lock="${marker}.lock"
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
   if ! fm_lock_acquire_wait "$lock"; then
@@ -621,7 +718,8 @@ _fm_recovery_marker_arm_check() {
   fi
   if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
     if [ -s "$FM_WAKE_QUEUE" ]; then
-      if ! _fm_recovery_marker_write_locked "$marker" downtime "" announced; then
+      if ! _fm_recovery_marker_write_locked "$marker" downtime "" announced \
+        || ! _fm_recovery_resurface_note_announced "$marker" 1; then
         fm_lock_release "$lock"
         fm_lock_release "$FM_WAKE_QUEUE_LOCK"
         return 1
@@ -640,7 +738,8 @@ _fm_recovery_marker_arm_check() {
         return 1
       }
     if ! mv -- "$marker" "$quarantine/marker" \
-      || ! _fm_recovery_marker_write_locked "$marker" downtime "" announced; then
+      || ! _fm_recovery_marker_write_locked "$marker" downtime "" announced \
+      || ! _fm_recovery_resurface_note_announced "$marker" 1; then
       rmdir "$quarantine" 2>/dev/null || true
       fm_lock_release "$lock"
       fm_lock_release "$FM_WAKE_QUEUE_LOCK"
@@ -653,14 +752,22 @@ _fm_recovery_marker_arm_check() {
   fi
   line=$FM_RECOVERY_MARKER_TOKEN
   case "$line" in
-    pending:handling:*|announced:handling:*|announced:downtime:*)
+    announced:downtime:*)
+      _fm_recovery_resurface_eval "$marker"
+      FM_RECOVERY_MARKER_ACTION='wait'
+      fm_lock_release "$lock"
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      return 0
+      ;;
+    pending:handling:*|announced:handling:*)
       FM_RECOVERY_MARKER_ACTION='wait'
       fm_lock_release "$lock"
       fm_lock_release "$FM_WAKE_QUEUE_LOCK"
       return 0
       ;;
     pending:downtime:*)
-      if ! _fm_recovery_marker_write_locked "$marker" downtime "${line##*:}" announced; then
+      if ! _fm_recovery_marker_write_locked "$marker" downtime "${line##*:}" announced \
+        || ! _fm_recovery_resurface_note_announced "$marker" 0; then
         fm_lock_release "$lock"
         fm_lock_release "$FM_WAKE_QUEUE_LOCK"
         return 1
@@ -670,7 +777,8 @@ _fm_recovery_marker_arm_check() {
       ;;
     acked:*)
       if [ -s "$FM_WAKE_QUEUE" ]; then
-        if ! _fm_recovery_marker_write_locked "$marker" downtime "" announced; then
+        if ! _fm_recovery_marker_write_locked "$marker" downtime "" announced \
+          || ! _fm_recovery_resurface_note_announced "$marker" 1; then
           fm_lock_release "$lock"
           fm_lock_release "$FM_WAKE_QUEUE_LOCK"
           return 1

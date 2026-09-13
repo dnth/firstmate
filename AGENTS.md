@@ -129,6 +129,7 @@ state/               volatile runtime signals; gitignored
   x-poll.error x-poll.claim-error  generated X-mode relay and offer-claim diagnostic dedupe markers
   .wake-queue        durable queued wakes retained until post-handling acknowledgement: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .watcher-down      private generation-bound recovery state coupling watcher downtime, durable wake presentation, and post-handling acknowledgement; never touch
+  .watcher-down.resurface  private unacknowledged-announcement streak sidecar ("count<TAB>first-unacked-epoch") bounding the downtime resurface; deleted by the generation-bound acknowledgement; never touch
   .omp-primary-extension-loaded  this home's OMP primary adapter identity marker; published by the adapter, validated by fm-session-start.sh, never hand-edited (docs/configuration.md "Harness support")
   .<id>.open-decisions-cursor  per-task byte cursor and folded open-decision set bounding the OPEN DECISIONS scan's cost to new status-log appends; written only by fm-classify-lib.sh's status_open_decisions_incremental, removed by teardown, safe to delete (forces one full re-fold)
   .status-presentation-cursor .status-presentation-lock  fleet-wide per-task status identity/byte-offset manifest (including the separate STATUS OUTCOME BACKSTOP receipt offset) and serialization lock preventing already-presented status lines from being replayed as new; owned by fm-classify-lib.sh, with each task's row retired by teardown

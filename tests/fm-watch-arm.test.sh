@@ -144,8 +144,14 @@ drain_ack_pair() {  # <drain-stderr>
 
 start_rearm_arm() {  # <home> <state> <fakebin> <arm-out> [predecessor-arm-pid]
   local home=$1 state=$2 fakebin=$3 armout=$4 predecessor=${5:-} i
+  # This suite exercises the pre-bound resurface contract - every armed
+  # generation re-surfaces and exits. The bounded-resurface default would
+  # resume supervision after the third unacknowledged announcement, so pin the
+  # bound far above the streak these scenarios produce; the bound itself is
+  # covered by tests/fm-watch-recovery-loop.test.sh.
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
     FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_WATCH_RESURFACE_MAX_ANNOUNCEMENTS=1000000 FM_WATCH_RESURFACE_MAX_SECS=1000000 \
     FM_WATCH_PREDECESSOR_ARM_PID="$predecessor" \
     "$WATCH_ARM" --restart > "$armout" &
   ARM_PID=$!
