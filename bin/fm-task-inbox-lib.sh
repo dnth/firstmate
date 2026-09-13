@@ -241,8 +241,9 @@ fm_task_inbox_hermes_delivery_lock_path() {  # <state-dir> <task-id>
 # unproven. Callers splice it into the refusal binding so a supervisor sees WHY
 # the adapter refused rather than a bare session-pid=unreadable.
 fm_task_inbox_omp_doorbell_state() {  # <ready-marker>
-  local marker=$1 journal
+  local marker=$1 journal request_dir
   journal="${marker%.omp-doorbell-ready}.omp-doorbell-failed"
+  request_dir="${marker}.requests"
   if [ -f "$journal" ]; then
     printf 'doorbell-failure=%s' "$journal"
     return 0
@@ -253,6 +254,10 @@ fm_task_inbox_omp_doorbell_state() {  # <ready-marker>
   fi
   if ! fm_omp_task_doorbell_marker_read "$marker" 2>/dev/null; then
     printf 'doorbell-marker-unreadable=%s' "$marker"
+    return 0
+  fi
+  if [ ! -d "$request_dir" ]; then
+    printf 'doorbell-request-dir-missing=%s' "$request_dir"
     return 0
   fi
   printf 'doorbell-binding-unproven=%s' "$marker"

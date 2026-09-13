@@ -995,6 +995,15 @@ test_omp_native_refusal_and_queue_are_bounded() {
   assert_contains "$(cat "$err")" "doorbell-failure=$home/state/doomed.omp-doorbell-failed" \
     "the refusal did not name the doorbell failure journal"
 
+  dir="$TMP_ROOT/native-missing-request-dir"
+  home="$dir/home"
+  mkdir -p "$home/state"
+  printf '%s\n' "$$" > "$home/state/raced.omp-doorbell-ready"
+  state=$(bash -c '. "$1"; fm_task_inbox_omp_doorbell_state "$2"' _ \
+    "$ROOT/bin/fm-task-inbox-lib.sh" "$home/state/raced.omp-doorbell-ready")
+  [ "$state" = "doorbell-request-dir-missing=$home/state/raced.omp-doorbell-ready.requests" ] \
+    || fail "missing OMP request directory was misdiagnosed: $state"
+
   dir="$TMP_ROOT/native-handled"
   home="$dir/home"
   mkdir -p "$home/state"
