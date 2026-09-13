@@ -73,7 +73,7 @@ Consequently, an empty-queue downtime publication during handling can be retired
 An acknowledged episode does not freeze the generation, because the next downtime after it opens an episode of its own.
 
 Announcements that never reach a consumer are bounded so they cannot suspend pane supervision forever.
-Every arm check that turns a downtime generation announced adds one count to `state/.watcher-down.resurface`, which records the streak's size and the epoch of its first unacknowledged announcement.
+Every arm check that turns a downtime generation announced adds one count to `state/.watcher-down.resurface`, whose three tab-separated fields record the streak size, the epoch of its first unacknowledged announcement, and whether the bound diagnostic has already been surfaced.
 Once the streak reaches `FM_WATCH_RESURFACE_MAX_ANNOUNCEMENTS` (default 3) announcements or `FM_WATCH_RESURFACE_MAX_SECS` (default 900) seconds, the armed watcher still records the resurface once - a durable `check` row and a triage-log line carrying `daemon scan stale + watcher in resurface loop` - then resumes its full pane loop instead of exiting.
 The announced generation remains presented and ackable throughout, and the generation-bound acknowledgement retires the marker and deletes the sidecar together.
 
