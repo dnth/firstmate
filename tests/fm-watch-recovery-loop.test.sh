@@ -441,8 +441,52 @@ test_recovery_arm_check_counts_resurface_streak() {
   pass "the arm check bounds the unacknowledged-announcement streak and the ack resets it"
 }
 
+# T6: once the bound trips and the diagnostic row is durably queued, later
+# non-successor generations under the same unacknowledged episode resume
+# supervision without re-publishing it - the sidecar's surfaced flag makes the
+# resurface once-per-episode, not once-per-generation.
+test_resurface_diagnostic_once_per_episode() {
+  local dir state key pid i
+  dir=$(make_resurface_case resurface-once); state="$dir/state"
+  key=$(printf '%s' 'test:fm-resurface' | tr ':/.' '___')
+
+  run_resurface_watch "$dir" "$dir/watch1.out" FM_WATCH_RESURFACE_MAX_ANNOUNCEMENTS=3
+  run_resurface_watch "$dir" "$dir/watch2.out" FM_WATCH_RESURFACE_MAX_ANNOUNCEMENTS=3
+  run_resurface_watch "$dir" "$dir/watch3.out" FM_WATCH_RESURFACE_MAX_ANNOUNCEMENTS=3
+  [ "$(grep -cF 'daemon scan stale + watcher in resurface loop' "$state/.wake-queue")" -eq 1 ] \
+    || fail "bound generation did not enqueue exactly one diagnostic row: $(cat "$state/.wake-queue")"
+  [ "$(grep -cF 'daemon scan stale + watcher in resurface loop' "$state/.watch-triage.log")" -eq 1 ] \
+    || fail "bound trip did not record exactly one triage diagnostic"
+  assert_grep '001.msg' "$state/resurface.inbox/.escalated" \
+    "bound generation's pane loop did not escalate the unhandled inbox record"
+
+  # A fourth start under the still-unacked episode reopens, re-announces and
+  # extends the streak, but the surfaced flag suppresses the re-publish: it
+  # stays alive supervising instead of exiting on a replayed wake.
+  run_resurface_watch "$dir" "$dir/watch4.out" FM_WATCH_RESURFACE_MAX_ANNOUNCEMENTS=3 &
+  pid=$!
+  i=0
+  while [ ! -f "$state/.stale-$key" ] && [ "$i" -lt 40 ]; do
+    sleep 0.25
+    i=$((i + 1))
+  done
+  assert_present "$state/.stale-$key" \
+    "fourth generation never ran stale classification: $(cat "$dir/watch4.out")"
+  is_live_non_zombie "$pid" \
+    || fail "fourth generation exited instead of resuming supervision: $(cat "$dir/watch4.out")"
+  assert_grep "$(printf '4\t')" "$state/.watcher-down.resurface" \
+    "fourth generation did not extend the unacknowledged streak"
+  [ "$(grep -cF 'daemon scan stale + watcher in resurface loop' "$state/.wake-queue")" -eq 1 ] \
+    || fail "fourth generation replayed the diagnostic row: $(cat "$state/.wake-queue")"
+  [ "$(grep -cF 'daemon scan stale + watcher in resurface loop' "$state/.watch-triage.log")" -eq 1 ] \
+    || fail "fourth generation replayed the triage diagnostic"
+  stop_pid "$pid"
+  pass "the resurface diagnostic publishes once per unacknowledged episode across restarts"
+}
+
 test_handling_successor_does_not_go_blind
 test_recovery_arm_check_counts_resurface_streak
+test_resurface_diagnostic_once_per_episode
 test_resurface_time_bound_resumes_supervision
 test_resurface_bound_resumes_supervision
 test_unacknowledged_recovery_is_announced_once_per_generation
