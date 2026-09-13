@@ -494,8 +494,14 @@ set +e
 fm_omp_task_doorbell_request_existing "$MARKER" delivered.msg
 rc=$?
 set -e
-[ "$rc" = 0 ]
+[ "$rc" = 5 ]
 [ -f "$request_dir/request.delivered.msg.pending.acked" ]
+fm_backend_tmux_omp_trigger_turn() { return 99; }
+set +e
+fm_backend_omp_trigger_turn tmux target "$MARKER" /runtime/omp /bin/omp delivered.msg 'canonical doorbell'
+rc=$?
+set -e
+[ "$rc" = 0 ]
 SH
   expect_code 0 "$?" "OMP request terminal-state boundary"
   pass "OMP pending retries revalidate identity while ambiguous claims suppress resend"

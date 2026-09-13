@@ -130,7 +130,7 @@ fm_omp_task_doorbell_request_existing() {  # <marker> <request-id>
       || rm -f "${base}.pending.delivered"
     return 0
   fi
-  [ ! -f "${base}.pending.acked" ] || return 0
+  [ ! -f "${base}.pending.acked" ] || return 5
   if [ -f "${base}.pending.failed" ]; then
     rm -f "${base}.pending.failed"
     return 1
@@ -158,6 +158,7 @@ fm_omp_task_doorbell_request() {  # <marker> <verified-pid> <request-id> <doorbe
   fm_omp_task_doorbell_request_existing "$marker" "$request_id" || existing=$?
   case "$existing" in
     0|1|2) return "$existing" ;;
+    5) return 0 ;;
     4) ;;
     3)
       staged=$(mktemp "$request_dir/.request.XXXXXX") || return 1
