@@ -123,9 +123,14 @@ fm_omp_task_doorbell_request_existing() {  # <marker> <request-id>
   [ -d "$request_dir" ] && [ ! -L "$request_dir" ] || return 3
   base="$request_dir/request.$request_id"
   if [ -f "${base}.pending.delivered" ]; then
-    rm -f "${base}.pending.delivered"
+    # Retire the receipt into a durable tombstone rather than deleting it:
+    # the request provably reached the session, so every later ring for this
+    # record must report delivered without sending the doorbell again.
+    mv "${base}.pending.delivered" "${base}.pending.acked" 2>/dev/null \
+      || rm -f "${base}.pending.delivered"
     return 0
   fi
+  [ ! -f "${base}.pending.acked" ] || return 0
   if [ -f "${base}.pending.failed" ]; then
     rm -f "${base}.pending.failed"
     return 1
@@ -142,7 +147,7 @@ fm_omp_task_doorbell_request_existing() {  # <marker> <request-id>
 }
 
 fm_omp_task_doorbell_request() {  # <marker> <verified-pid> <request-id> <doorbell-line>
-  local marker=$1 pid=$2 request_id=$3 line=$4 request_dir staged pending cancelled attempts i existing
+  local marker=$1 pid=$2 request_id=$3 line=$4 request_dir staged pending cancelled attempts i existing ack_grace_ms
   fm_omp_task_doorbell_marker_read "$marker" || return 1
   [ "$FM_OMP_TASK_DOORBELL_PID" = "$pid" ] || return 1
   case "$request_id" in ''|.*|*[!A-Za-z0-9._-]*) return 1 ;; esac
@@ -179,14 +184,28 @@ fm_omp_task_doorbell_request() {  # <marker> <verified-pid> <request-id> <doorbe
     fi
     return 2
   fi
-  attempts=${FM_OMP_TASK_DOORBELL_ACK_ATTEMPTS:-200}
-  case "$attempts" in ''|*[!0-9]*|0) attempts=200 ;; esac
+  attempts=${FM_OMP_TASK_DOORBELL_ACK_ATTEMPTS:-}
+  case "$attempts" in
+    ''|*[!0-9]*|0)
+      # No explicit bound: derive the window from the doorbell's own
+      # turn-grace setting. The extension parks a dispatched steer for up to
+      # that bound before settling it through the re-drive, so a shorter
+      # poll reports queued while the delivery is still landing. The default
+      # mirrors the extension's DEFAULT_TURN_GRACE_MS; each attempt sleeps
+      # 10ms and 200 attempts of margin cover the re-drive settle.
+      ack_grace_ms=${FM_OMP_DOORBELL_TURN_GRACE_MS:-8000}
+      case "$ack_grace_ms" in ''|*[!0-9]*) ack_grace_ms=8000 ;; esac
+      attempts=$((ack_grace_ms / 10 + 200))
+      ;;
+  esac
   i=0
   while [ "$i" -lt "$attempts" ]; do
     if [ -f "${pending}.delivered" ]; then
-      rm -f "${pending}.delivered"
+      mv "${pending}.delivered" "${pending}.acked" 2>/dev/null \
+        || rm -f "${pending}.delivered"
       return 0
     fi
+    [ ! -f "${pending}.acked" ] || return 0
     if [ -f "${pending}.failed" ]; then
       rm -f "${pending}.failed"
       return 1

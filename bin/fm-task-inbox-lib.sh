@@ -17,7 +17,9 @@
 # returns 4 rather than typing anything. Both verdicts leave the named inbox
 # record intact. Every other harness keeps the advisory composer pre-check and
 # backend submit fallback. A claimed programmatic request that may already have
-# sent is anchored as ambiguous and is never sent again; session recovery
+# sent is anchored as ambiguous and is never sent again, and a request whose
+# delivery receipt was proven leaves a durable acked tombstone so no later ring
+# for that record can send the doorbell a second time; session recovery
 # reconciles the instruction from the durable inbox. Other swallowed doorbells
 # are re-rung on a bounded schedule while the endpoint remains available, and a
 # worker that never acknowledges surfaces through the ordinary stale wake into

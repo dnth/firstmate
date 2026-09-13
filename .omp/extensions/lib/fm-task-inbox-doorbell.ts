@@ -203,6 +203,13 @@ export function installTaskInboxDoorbell(
 	const onTurnOpen = (): void => {
 		turnOpen = true;
 		if (dispatchingTurn) dispatchingTurnObserved = true;
+		// A turn opening while a steer sits parked is proof the session took
+		// the work: the steer caused the turn or was absorbed into it, so
+		// settle every awaiting entry delivered and cancel its grace timer
+		// instead of re-driving the same instruction as a user prompt.
+		for (const awaitingPath of [...awaitingTurns.keys()]) {
+			settleAwaiting(awaitingPath, "delivered");
+		}
 	};
 	const notifyTurnStart = (): void => onTurnOpen();
 	const onTurnClose = (): void => {
