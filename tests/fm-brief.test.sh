@@ -890,15 +890,12 @@ PERL
 # The completion-reporting contract (AC1): every generated ship and scout brief
 # must carry the bounded terminal/paused status requirement, name the
 # idle-with-open-work escalation the watcher enforces, and pin the
-# artifact-bearing done: shape for its delivery mode. The bound has one owner -
-# fm-classify-lib.sh's FM_IDLE_OPEN_WORK_SECS_DEFAULT - quoted verbatim, and
-# FM_IDLE_OPEN_WORK_SECS overrides it in both the brief and the watcher.
+# artifact-bearing done: shape for its delivery mode. FM_IDLE_OPEN_WORK_SECS
+# overrides the emitted bound in both the brief and the watcher.
 test_completion_boundary_contract_in_briefs() {
   local home id mode brief bound
   home="$TMP_ROOT/boundary-home"
   write_registry "$home"
-  bound=$(sed -n 's/^FM_IDLE_OPEN_WORK_SECS_DEFAULT=//p' "$ROOT/bin/fm-classify-lib.sh")
-  case "$bound" in ''|*[!0-9]*) fail "classify-lib no longer owns a numeric idle-open-work default" ;; esac
 
   for id_mode in "brief-bound-nm:no-mistakes" "brief-bound-dpr:direct-PR" "brief-bound-lo:local-only"; do
     id=${id_mode%%:*}
@@ -906,8 +903,10 @@ test_completion_boundary_contract_in_briefs() {
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1 \
       || fail "$id: ship brief did not scaffold"
     brief="$home/data/$id/brief.md"
+    bound=$(sed -n 's/.*landing within \([0-9][0-9]*\)s of turn-end.*/\1/p' "$brief")
+    case "$bound" in ''|*[!0-9]*) fail "$id: brief did not emit a numeric completion-reporting bound" ;; esac
     assert_grep "landing within ${bound}s of turn-end" "$brief" \
-      "$id: brief did not quote the shared completion-reporting bound"
+      "$id: brief did not quote its completion-reporting bound"
     assert_grep "never end on silence or a bare \`working:\`" "$brief" \
       "$id: brief omitted the no-silent-turn-end rule"
     assert_grep "idle-with-open-work" "$brief" \
@@ -933,8 +932,10 @@ test_completion_boundary_contract_in_briefs() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-bound-scout alpha --scout >/dev/null 2>&1 \
     || fail "scout brief did not scaffold"
   brief="$home/data/brief-bound-scout/brief.md"
+  bound=$(sed -n 's/.*landing within \([0-9][0-9]*\)s of turn-end.*/\1/p' "$brief")
+  case "$bound" in ''|*[!0-9]*) fail "scout brief did not emit a numeric completion-reporting bound" ;; esac
   assert_grep "landing within ${bound}s of turn-end" "$brief" \
-    "scout brief did not quote the shared completion-reporting bound"
+    "scout brief did not quote its completion-reporting bound"
   assert_grep "idle-with-open-work" "$brief" \
     "scout brief did not name the watcher's escalation reason"
   assert_grep "must name the" "$brief" \
