@@ -612,9 +612,17 @@ SH
 run_watcher_bounded() {
   local home=$1 fakebin=$2 check_interval=${FM_TEST_CHECK_INTERVAL:-0} watch_root=${FM_TEST_WATCH_ROOT:-$ROOT}
   shift 2
+  # These callers predate the resurface bound: they assert the watcher exits
+  # within the alarm, which only holds while an unacknowledged downtime
+  # announcement still resolves to resurface-and-exit. Pin the bound high so a
+  # repeated unacked run cannot trip into stay-alive supervision; a test that
+  # wants the bound can lower it through FM_TEST_WATCH_RESURFACE_*.
   perl -e 'my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm 10; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
     env FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" FM_CHECK_TIMEOUT=1 \
-      FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 PATH="$fakebin:$BASE_PATH" "$WATCH" "$@"
+      FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 \
+      FM_WATCH_RESURFACE_MAX_ANNOUNCEMENTS="${FM_TEST_WATCH_RESURFACE_MAX_ANNOUNCEMENTS:-999999}" \
+      FM_WATCH_RESURFACE_MAX_SECS="${FM_TEST_WATCH_RESURFACE_MAX_SECS:-999999}" \
+      PATH="$fakebin:$BASE_PATH" "$WATCH" "$@"
 }
 
 test_rejected_metacharacter_bytes_are_inert() {
@@ -660,6 +668,36 @@ test_rejected_metacharacter_bytes_are_inert() {
   after=$(state_snapshot "$dir/home/state")
   [ "$after" = "$before" ] || fail "rejected replacement changed a prior valid static poll"
   pass "rejected metacharacter bytes remain inert at generation and watcher time"
+}
+
+test_bounded_watcher_polls_under_unacked_downtime() {
+  local dir state rc
+  dir=$(make_case bounded-under-unacked-downtime)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  write_poll_meta "$state" safe-check https://github.com/o/r/pull/99
+  fm_pr_poll_prepare "$state" safe-check github https://github.com/o/r/pull/99 github.com o/r 99 "$POLL" \
+    || fail "could not prepare bounded watcher poll"
+  fm_pr_poll_publish_prepared || fail "could not publish bounded watcher poll"
+  # An unacknowledged downtime announcement one announcement below the count
+  # bound: this run's announce trips the bound, so the watcher surfaces the
+  # resurface diagnostic once and resumes the pane loop instead of exiting.
+  printf 'pending:downtime:fm-test-generation\n' > "$state/.watcher-down"
+  printf '2\t%s\n' "$(date +%s)" > "$state/.watcher-down.resurface"
+  chmod 0600 "$state/.watcher-down" "$state/.watcher-down.resurface"
+  set +e
+  FM_TEST_WATCH_RESURFACE_MAX_ANNOUNCEMENTS=3 FM_TEST_GH_STATE=MERGED \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "bounded watcher under an unacked downtime announcement did not complete the poll: $(cat "$dir/watch.err")"
+  case "$(cat "$dir/watch.out")" in
+    check:*safe-check.check.sh:*merged) ;;
+    *) fail "bounded watcher under an unacked downtime announcement did not report the merge" ;;
+  esac
+  grep -F 'daemon scan stale + watcher in resurface loop' "$state/.watch-triage.log" >/dev/null \
+    || fail "bound trip did not record the resurface diagnostic"
+  pass "bounded watcher completes the authenticated poll under an unacked downtime announcement"
 }
 
 make_poll_fixture() {
@@ -2211,6 +2249,7 @@ test_watcher_surfaces_pre_metadata_poll_after_validation_lock_stales
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
+test_bounded_watcher_polls_under_unacked_downtime
 test_static_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication

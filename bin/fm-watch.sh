@@ -1377,6 +1377,7 @@ if ! fm_pr_poll_retirement_recover_all "$STATE" "$SCRIPT_DIR/fm-pr-poll.sh"; the
 fi
 
 resurface_after_downtime() {
+  local reason
   # Handling successors already have a predecessor-delivered wake on the way.
   # Re-announcing from this cycle is what turned a lost handshake into an
   # unbounded recovery loop; stay in the poll loop and supervise instead.
@@ -1389,6 +1390,25 @@ resurface_after_downtime() {
       exit 1
     fi
     [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || return 0
+  fi
+  if [ "${FM_RECOVERY_RESURFACE_BOUND:-0}" = 1 ]; then
+    # The announcement's only consumer has missed a whole unacknowledged streak
+    # (fm-wake-lib.sh's FM_WATCH_RESURFACE_* bound): exiting here again would
+    # suspend pane supervision forever. Surface the resurface once through the
+    # durable queue with the guard-level diagnostic, keep the announced marker
+    # ackable, and resume the pane loop. Clearing WATCHER_RECOVERY_PENDING lets
+    # the next cycle arm-check again, so an acknowledgement or a fresh episode
+    # is still observed from inside this same watcher.
+    WATCHER_RECOVERY_PENDING=0
+    if [ "${FM_RECOVERY_RESURFACE_SURFACED:-0}" != 1 ]; then
+      reason="check: rearm-resurface (daemon scan stale + watcher in resurface loop: ${FM_RECOVERY_RESURFACE_COUNT} unacknowledged downtime announcements; resumed pane-loop supervision)"
+      fm_wake_append check rearm-resurface "$reason" || exit 1
+      _fm_recovery_resurface_mark_surfaced "$WATCHER_DOWNTIME_MARKER" || exit 1
+      triage_log "$reason"
+      watch_delivery_publish "$reason" || true
+      FM_WATCH_DELIVERED_REASON=$reason
+    fi
+    return 0
   fi
   wake "check: rearm-resurface"
 }

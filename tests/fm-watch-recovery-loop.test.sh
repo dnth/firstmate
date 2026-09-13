@@ -223,5 +223,270 @@ test_handling_successor_does_not_go_blind() {
   pass "a resurfacing handling successor stays alive and supervises instead of going blind"
 }
 
+# --- bounded resurface ------------------------------------------------------
+#
+# Shared fixture for the bounded-resurface tests: one recorded window on an
+# idle pane plus an unhandled steering-inbox record already at the re-ring
+# bound, so the FIRST pane-loop pass escalates it through inbox_steer_check and
+# exits on its stale wake. A generation that still exits on
+# `wake "check: rearm-resurface"` never reaches that pass, which makes the
+# .escalated marker an exact pane-loop-ran signal.
+seen_sig() {
+  if [ "$(uname)" = Darwin ]; then stat -f '%i:%z:%Fm' "$1" 2>/dev/null; else stat -c '%i:%s:%.9Y' "$1" 2>/dev/null; fi
+}
+
+make_resurface_case() {  # <name> -> dir with state/, fakebin/, home/, capture
+  local name=$1 dir state key sig
+  dir=$(make_case "$name")
+  state="$dir/state"
+  mkdir -p "$dir/home/data" "$state/resurface.inbox"
+  printf 'idle crew pane\n' > "$dir/capture"
+  printf 'window=test:fm-resurface\nkind=ship\n' > "$state/resurface.meta"
+  printf 'working: mid-task\n' > "$state/resurface.status"
+  sig=$(seen_sig "$state/resurface.status")
+  printf '%s' "$sig" > "$state/.seen-resurface_status"
+  key=$(printf '%s' 'test:fm-resurface' | tr ':/.' '___')
+  printf '%s' "$(hash_text 'idle crew pane')" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf 'steer: pick up the resurface fix\n' > "$state/resurface.inbox/001.msg"
+  printf '001.msg\t3\t1\n' > "$state/resurface.inbox/.ring-state"
+  printf 'announced:downtime:seed.1.aaa\n' > "$state/.watcher-down"
+  chmod 600 "$state/.watcher-down"
+  printf '%s\n' "$dir"
+}
+
+run_resurface_watch() {  # <dir> <out> [env...] - run one watcher generation
+  local dir=$1 out=$2
+  shift 2
+  env \
+    PATH="$dir/fakebin:$PATH" \
+    FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_FAKE_TMUX_WINDOW='test:fm-resurface' \
+    FM_FAKE_TMUX_CAPTURE="$dir/capture" \
+    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · ci running' \
+    FM_TASK_INBOX_GRACE_SECS=0 \
+    "$@" \
+    "$WATCH" > "$out" 2>&1
+}
+
+# T3: with .watcher-down=announced:* and no ack, the first
+# FM_WATCH_RESURFACE_MAX_ANNOUNCEMENTS-1 generations still deliver
+# `check: rearm-resurface` and exit before the pane loop; the bound generation
+# surfaces the resurface once through the durable queue with the guard-level
+# diagnostic and RESUMES supervision - proven by the seeded inbox record
+# escalating through inbox_steer_check. The announcement stays ackable: a real
+# drain + generation-bound ack retires the marker and the streak sidecar, and
+# the next generation supervises normally.
+test_resurface_bound_resumes_supervision() {
+  local dir state key out1 out2 out3 out4 err pid i marker
+  dir=$(make_resurface_case resurface-bound); state="$dir/state"
+  key=$(printf '%s' 'test:fm-resurface' | tr ':/.' '___')
+  out1="$dir/watch1.out"; out2="$dir/watch2.out"; out3="$dir/watch3.out"
+  out4="$dir/watch4.out"; err="$dir/drain.err"
+
+  run_resurface_watch "$dir" "$out1" FM_WATCH_RESURFACE_MAX_ANNOUNCEMENTS=3
+  assert_grep 'check: rearm-resurface' "$out1" \
+    "generation 1 did not deliver the resurface wake: $(cat "$out1")"
+  assert_grep 'announced:downtime:' "$state/.watcher-down" \
+    "generation 1 did not leave an announced marker"
+  assert_grep "$(printf '1\t')" "$state/.watcher-down.resurface" \
+    "generation 1 did not record its announcement in the streak sidecar"
+  assert_absent "$state/resurface.inbox/.escalated" \
+    "generation 1 reached the pane loop before the bound"
+
+  run_resurface_watch "$dir" "$out2" FM_WATCH_RESURFACE_MAX_ANNOUNCEMENTS=3
+  assert_grep 'check: rearm-resurface' "$out2" \
+    "generation 2 did not deliver the resurface wake: $(cat "$out2")"
+  assert_grep "$(printf '2\t')" "$state/.watcher-down.resurface" \
+    "generation 2 did not extend the unacknowledged streak"
+  assert_absent "$state/resurface.inbox/.escalated" \
+    "generation 2 reached the pane loop before the bound"
+
+  run_resurface_watch "$dir" "$out3" FM_WATCH_RESURFACE_MAX_ANNOUNCEMENTS=3
+  assert_no_grep 'check: rearm-resurface' "$out3" \
+    "bound generation still exited on the resurface wake: $(cat "$out3")"
+  assert_grep 'unread firstmate instruction' "$out3" \
+    "bound generation never ran inbox_steer_check: $(cat "$out3")"
+  assert_grep '001.msg' "$state/resurface.inbox/.escalated" \
+    "bound generation's pane loop did not escalate the unhandled inbox record"
+  assert_grep 'daemon scan stale + watcher in resurface loop' "$state/.watch-triage.log" \
+    "bound trip did not record the guard-level diagnostic"
+  assert_grep 'daemon scan stale + watcher in resurface loop' "$state/.wake-queue" \
+    "bound trip did not enqueue a durable resurface record"
+  assert_grep 'announced:downtime:' "$state/.watcher-down" \
+    "bound trip lost the announced marker"
+  assert_grep "$(printf '3\t')" "$state/.watcher-down.resurface" \
+    "bound generation did not extend the streak"
+
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-drain.sh" > "$dir/drain.out" 2> "$err"
+  ack_drain_err "$state" "$err" \
+    || fail "wake drain did not acknowledge the announced downtime: $(cat "$err")"
+  # The drain's begin-handling step turns the announced downtime generation into
+  # a handling episode, so the generation-bound ack lands as acked:handling.
+  assert_grep 'acked:handling:' "$state/.watcher-down" \
+    "the generation-bound ack did not retire the downtime marker"
+  assert_absent "$state/.watcher-down.resurface" \
+    "the ack left the resurface streak sidecar behind"
+
+  env \
+    PATH="$dir/fakebin:$PATH" \
+    FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_FAKE_TMUX_WINDOW='test:fm-resurface' \
+    FM_FAKE_TMUX_CAPTURE="$dir/capture" \
+    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · ci running' \
+    FM_TASK_INBOX_GRACE_SECS=0 \
+    "$WATCH" > "$out4" 2>&1 &
+  pid=$!
+  i=0
+  while [ ! -f "$state/.stale-$key" ] && [ "$i" -lt 40 ]; do
+    sleep 0.25
+    i=$((i + 1))
+  done
+  assert_present "$state/.stale-$key" \
+    "post-ack generation never ran stale classification: $(cat "$out4")"
+  is_live_non_zombie "$pid" \
+    || fail "post-ack generation exited instead of supervising: $(cat "$out4")"
+  assert_no_grep 'check: rearm-resurface' "$out4" \
+    "post-ack generation replayed the resurface wake: $(cat "$out4")"
+  stop_pid "$pid"
+  pass "an unacknowledged downtime resurface is bounded: supervision resumes, the diagnostic is recorded, and the ack still clears the marker"
+}
+
+# T4: the elapsed-time bound trips even when the announcement count is below
+# its configured maximum, by re-evaluating the persisted streak.
+test_resurface_time_bound_resumes_supervision() {
+  local dir state out
+  dir=$(make_resurface_case resurface-time-bound); state="$dir/state"
+  printf '2\t%s\n' "$(( $(date +%s) - 1000 ))" > "$state/.watcher-down.resurface"
+  chmod 600 "$state/.watcher-down.resurface"
+  out="$dir/watch.out"
+  run_resurface_watch "$dir" "$out" \
+    FM_WATCH_RESURFACE_MAX_ANNOUNCEMENTS=50 FM_WATCH_RESURFACE_MAX_SECS=60
+  assert_no_grep 'check: rearm-resurface' "$out" \
+    "time-bound generation still exited on the resurface wake: $(cat "$out")"
+  assert_grep 'unread firstmate instruction' "$out" \
+    "time-bound generation never ran inbox_steer_check: $(cat "$out")"
+  assert_grep 'daemon scan stale + watcher in resurface loop' "$state/.watch-triage.log" \
+    "time-bound trip did not record the guard-level diagnostic"
+  assert_grep 'announced:downtime:' "$state/.watcher-down" \
+    "time-bound trip lost the announced marker"
+  pass "the elapsed-time resurface bound resumes supervision below the announcement bound"
+}
+
+# T5: the arm check counts one announcement per pending->announced transition,
+# holds an already-announced marker at wait without double-counting, trips the
+# count bound, keeps the bound visible on the wait path, and a generation-bound
+# ack retires the streak so a fresh episode counts from zero.
+resurface_arm_check() {  # <state> <max-announcements> <max-secs> -> "<action> <count> <bound>"
+  local state=$1
+  # shellcheck disable=SC2016 # The arm-check outputs expand inside the check shell.
+  env \
+    FM_STATE_OVERRIDE="$state" \
+    FM_WATCH_RESURFACE_MAX_ANNOUNCEMENTS="$2" \
+    FM_WATCH_RESURFACE_MAX_SECS="$3" \
+    bash -c '
+      # shellcheck disable=SC1090,SC1091
+      . "$1"
+      fm_recovery_marker_arm_check "$2" || exit 1
+      printf "%s %s %s\n" "$FM_RECOVERY_MARKER_ACTION" \
+        "$FM_RECOVERY_RESURFACE_COUNT" "$FM_RECOVERY_RESURFACE_BOUND"
+    ' _ "$ROOT/bin/fm-wake-lib.sh" "$state/.watcher-down"
+}
+
+resurface_ack() {  # <state> <generation>
+  local state=$1
+  # shellcheck disable=SC2016 # The marker path and generation expand inside the ack shell.
+  env FM_STATE_OVERRIDE="$state" bash -c '
+    # shellcheck disable=SC1090,SC1091
+    . "$1"
+    fm_recovery_marker_ack "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state/.watcher-down" "$2"
+}
+
+test_recovery_arm_check_counts_resurface_streak() {
+  local dir state out gen
+  dir=$(make_case resurface-streak); state="$dir/state"
+
+  printf 'pending:downtime:gen.a\n' > "$state/.watcher-down"
+  chmod 600 "$state/.watcher-down"
+  out=$(resurface_arm_check "$state" 3 900)
+  [ "$out" = 'recover 1 0' ] || fail "first announcement: expected 'recover 1 0', got '$out'"
+  out=$(resurface_arm_check "$state" 3 900)
+  [ "$out" = 'wait 1 0' ] || fail "an already-announced marker must wait without double-counting, got '$out'"
+
+  printf 'pending:downtime:gen.a\n' > "$state/.watcher-down"
+  chmod 600 "$state/.watcher-down"
+  out=$(resurface_arm_check "$state" 3 900)
+  [ "$out" = 'recover 2 0' ] || fail "second announcement: expected 'recover 2 0', got '$out'"
+  printf 'pending:downtime:gen.a\n' > "$state/.watcher-down"
+  chmod 600 "$state/.watcher-down"
+  out=$(resurface_arm_check "$state" 3 900)
+  [ "$out" = 'recover 3 1' ] || fail "third unacknowledged announcement must trip the bound, got '$out'"
+  out=$(resurface_arm_check "$state" 3 900)
+  [ "$out" = 'wait 3 1' ] || fail "a tripped streak must keep the bound set on the wait path, got '$out'"
+
+  gen=$(recovery_marker_generation "$state/.watcher-down")
+  resurface_ack "$state" "$gen" || fail "generation-bound ack failed"
+  assert_grep 'acked:downtime:' "$state/.watcher-down" "ack did not retire the marker"
+  assert_absent "$state/.watcher-down.resurface" "ack left the streak sidecar behind"
+
+  printf 'pending:downtime:gen.b\n' > "$state/.watcher-down"
+  chmod 600 "$state/.watcher-down"
+  out=$(resurface_arm_check "$state" 3 900)
+  [ "$out" = 'recover 1 0' ] || fail "a fresh episode must restart the streak, got '$out'"
+  pass "the arm check bounds the unacknowledged-announcement streak and the ack resets it"
+}
+
+# T6: once the bound trips and the diagnostic row is durably queued, later
+# non-successor generations under the same unacknowledged episode resume
+# supervision without re-publishing it - the sidecar's surfaced flag makes the
+# resurface once-per-episode, not once-per-generation.
+test_resurface_diagnostic_once_per_episode() {
+  local dir state key pid i
+  dir=$(make_resurface_case resurface-once); state="$dir/state"
+  key=$(printf '%s' 'test:fm-resurface' | tr ':/.' '___')
+
+  run_resurface_watch "$dir" "$dir/watch1.out" FM_WATCH_RESURFACE_MAX_ANNOUNCEMENTS=3
+  run_resurface_watch "$dir" "$dir/watch2.out" FM_WATCH_RESURFACE_MAX_ANNOUNCEMENTS=3
+  run_resurface_watch "$dir" "$dir/watch3.out" FM_WATCH_RESURFACE_MAX_ANNOUNCEMENTS=3
+  [ "$(grep -cF 'daemon scan stale + watcher in resurface loop' "$state/.wake-queue")" -eq 1 ] \
+    || fail "bound generation did not enqueue exactly one diagnostic row: $(cat "$state/.wake-queue")"
+  [ "$(grep -cF 'daemon scan stale + watcher in resurface loop' "$state/.watch-triage.log")" -eq 1 ] \
+    || fail "bound trip did not record exactly one triage diagnostic"
+  assert_grep '001.msg' "$state/resurface.inbox/.escalated" \
+    "bound generation's pane loop did not escalate the unhandled inbox record"
+
+  # A fourth start under the still-unacked episode reopens, re-announces and
+  # extends the streak, but the surfaced flag suppresses the re-publish: it
+  # stays alive supervising instead of exiting on a replayed wake.
+  run_resurface_watch "$dir" "$dir/watch4.out" FM_WATCH_RESURFACE_MAX_ANNOUNCEMENTS=3 &
+  pid=$!
+  i=0
+  while [ ! -f "$state/.stale-$key" ] && [ "$i" -lt 40 ]; do
+    sleep 0.25
+    i=$((i + 1))
+  done
+  assert_present "$state/.stale-$key" \
+    "fourth generation never ran stale classification: $(cat "$dir/watch4.out")"
+  is_live_non_zombie "$pid" \
+    || fail "fourth generation exited instead of resuming supervision: $(cat "$dir/watch4.out")"
+  assert_grep "$(printf '4\t')" "$state/.watcher-down.resurface" \
+    "fourth generation did not extend the unacknowledged streak"
+  [ "$(grep -cF 'daemon scan stale + watcher in resurface loop' "$state/.wake-queue")" -eq 1 ] \
+    || fail "fourth generation replayed the diagnostic row: $(cat "$state/.wake-queue")"
+  [ "$(grep -cF 'daemon scan stale + watcher in resurface loop' "$state/.watch-triage.log")" -eq 1 ] \
+    || fail "fourth generation replayed the triage diagnostic"
+  stop_pid "$pid"
+  pass "the resurface diagnostic publishes once per unacknowledged episode across restarts"
+}
+
 test_handling_successor_does_not_go_blind
+test_recovery_arm_check_counts_resurface_streak
+test_resurface_diagnostic_once_per_episode
+test_resurface_time_bound_resumes_supervision
+test_resurface_bound_resumes_supervision
 test_unacknowledged_recovery_is_announced_once_per_generation

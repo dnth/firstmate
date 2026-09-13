@@ -37,6 +37,7 @@ The turn-end guard needs that strict check because it fires at the turn boundary
 Under the Claude Stop auto-arm model a beacon fresh within grace is healthy even with no live watcher process, and only a beacon stale beyond grace (or absent) alarms.
 Under every persistent-watcher harness a live identity-matched watcher with a fresh beacon is still required, so the pull guard keeps the same strict semantics there.
 Its banner names the true failing condition, either a missing live watcher process or a genuinely stale beacon with its real age, and keys the once-per-episode dedup on that condition rather than the beacon mtime.
+An unacknowledged downtime resurface is bounded at the arm check, so a watcher trapped in that loop resumes its pane loop and its beacon instead of cycling forever - [`watcher-continuity.md`](watcher-continuity.md#recovery-episode-acknowledgement) owns that contract, including the `daemon scan stale + watcher in resurface loop` diagnostic it records when the bound trips.
 
 `FM_STATE_OVERRIDE` wins over `FM_HOME/state`, and `FM_HOME` wins over repository-root `state/`.
 `FM_GUARD_GRACE` controls beacon freshness and defaults to 300 seconds.

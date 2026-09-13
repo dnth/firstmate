@@ -42,7 +42,7 @@ This is deliberate Option B ordering: the fleet is protected before the model ha
 
 Claude's Stop hook starts the successor arm at the next Stop after the handling turn, rather than before notification as Pi, OMP, and OpenCode do.
 The durable wake queue preserves actionable events during the residual active-turn window, and the bounded turn-end guard enforces recovery at Stop when no watcher is live and no open generation claim is still deciding, so a finished, hung, or identity-mismatched claim cannot suppress it ([`turnend-guard.md`](turnend-guard.md#harness-integrations) owns that boundary).
-For every supported arm path, a successor that observes an accepted down stretch emits `check: rearm-resurface` through the ordinary durable handling path before settling into its live wait.
+For every supported arm path, a successor that observes an accepted down stretch emits `check: rearm-resurface` through the ordinary durable handling path before settling into its live wait or, once the resurface bound trips, resuming full pane supervision.
 That recovery presentation rebuilds a bounded current projection from unacknowledged queue rows, still-unread informational status lines, the existing cursor-folded OPEN DECISIONS set, and the STATUS OUTCOME BACKSTOP on every retry, so a still-open decision, buried `note:` answer, or uncovered captain-facing terminal event reappears even when recovery has no queue row of its own and a later exact resolution cannot replay an older rendering.
 The drain fails closed without publishing a usable acknowledgement when the OPEN DECISIONS scan or output cannot complete, so a partial presentation cannot retire the recovery episode.
 The recovery-episode contract below owns once-per-generation announcement.
@@ -71,6 +71,11 @@ The acknowledgement retires the marker only when no rows remain after sequence-b
 A concurrently appended wake has a higher sequence, remains queued, and keeps the episode pending for presentation.
 Consequently, an empty-queue downtime publication during handling can be retired by the outstanding acknowledgement without a dedicated recovery turn.
 An acknowledged episode does not freeze the generation, because the next downtime after it opens an episode of its own.
+
+Announcements that never reach a consumer are bounded so they cannot suspend pane supervision forever.
+Every arm check that turns a downtime generation announced adds one count to `state/.watcher-down.resurface`, whose three tab-separated fields record the streak size, the epoch of its first unacknowledged announcement, and whether the bound diagnostic has already been surfaced.
+Once the streak reaches `FM_WATCH_RESURFACE_MAX_ANNOUNCEMENTS` (default 3) announcements or `FM_WATCH_RESURFACE_MAX_SECS` (default 900) seconds, the armed watcher still records the resurface once - a durable `check` row and a triage-log line carrying `daemon scan stale + watcher in resurface loop` - then resumes its full pane loop instead of exiting.
+The announced generation remains presented and ackable throughout, and the generation-bound acknowledgement retires the marker and deletes the sidecar together.
 
 ## Recovery-marker lock reentrancy
 
@@ -112,7 +117,7 @@ It also covers durable-row re-notification on session events, acknowledgement ga
 The opt-in `tests/fm-omp-primary-live-e2e.test.sh` proves a real OMP watcher wake reaches the session while its exact pending draft remains intact, and that an idle OMP primary runs a handling turn for that wake with no manual intervention.
 `tests/fm-wake-queue.test.sh` covers durable-row acknowledgement and interrupted handling replay.
 `tests/fm-watch-arm.test.sh` covers durable queue replay, real remote parent-replies ingestion into the authoritative status log, decision-only OPEN DECISIONS recovery, interrupted handling replay, generation-bound acknowledgement, a persistent live successor after recovery, a watcher close inside the handling window that must leave the printed acknowledgement valid, and the self-healing moved-generation acknowledgement that consumes its handled rows and names its remedy.
-`tests/fm-watch-recovery-loop.test.sh` covers the once-per-generation announcement bound with the real Pi extension against a refused handling handshake, and a handling successor that must surface a real crew event instead of going blind.
+`tests/fm-watch-recovery-loop.test.sh` covers the once-per-generation announcement bound with the real Pi extension against a refused handling handshake, a handling successor that must surface a real crew event instead of going blind, and the bounded resurface: the arm-check streak counter, the count and elapsed-time bounds, the pane-loop resumption and diagnostic on a tripped bound, and the ack that retires the marker and sidecar together.
 Pi and OMP share `bin/fm-primary-watch-core.ts` here, so that Pi-driven coverage exercises the same confirmation, retry, and typed-failure code OMP runs.
 `tests/fm-watcher-lock.test.sh` covers verified-successor attach, recovery publication before stale-lock removal, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
 `tests/fm-subagent-pretool-check.test.sh` proves Claude retains only the non-status Bash seatbelts.
