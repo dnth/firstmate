@@ -98,8 +98,8 @@ const uncertainDoorbell = installTaskInboxDoorbell(
 uncertainDoorbell.activate();
 writeFileSync(`${uncertain}.requests/one.pending`, line);
 process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
-assert.equal(existsSync(`${uncertain}.requests/one.pending.ambiguous`), true);
-assert.equal(existsSync(`${uncertain}.requests/one.pending.failed`), false);
+assert.equal(existsSync(`${uncertain}.requests/one.pending.ambiguous`), false);
+assert.equal(existsSync(`${uncertain}.requests/one.pending`), true);
 assert.equal(existsSync(uncertain), false);
 
 const asyncFailure = `${process.env.READY}.async-failure`;
@@ -451,6 +451,7 @@ const draining = installTaskInboxDoorbell(
 assert.equal(draining.activate(), false, "an activation whose first drain fails must report failure");
 assert.equal(existsSync(process.env.READY), false, "a drain failure left the ready marker");
 assert.match(readFileSync(process.env.FAILED, "utf8"), /drain: Error: session channel closed/);
+assert.equal(existsSync(`${requestDir}/stuck.pending`), true, "a synchronous drain failure stranded the request");
 draining.retire();
 
 // A recovered activation clears a stale journal so the marker alone is truth.

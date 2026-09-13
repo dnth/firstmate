@@ -356,7 +356,8 @@ export function installTaskInboxDoorbell(
 					);
 				} catch (error) {
 					dispatchingTurn = false;
-					if (!invoked) bestEffortRename(ambiguous, `${pending}.failed`);
+					if (invoked) bestEffortRename(ambiguous, pending);
+					else bestEffortRename(ambiguous, `${pending}.failed`);
 					journalDoorbellFailure(failureJournal, "drain", error);
 					retire();
 					break;
