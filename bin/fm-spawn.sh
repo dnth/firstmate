@@ -1042,7 +1042,7 @@ spawn_omp_abort_clean_unchanged_worktree() {  # <context>
     rm -rf -- "$STATE/$ID.omp-doorbell-ready.requests"
     rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
       "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" "$STATE/$ID.omp-started" \
-      "$STATE/$ID.omp-doorbell-ready" "$STATE/$ID.omp-doorbell-failed"
+      "$STATE/$ID.omp-doorbell-ready"
     for _turnend_marker in "$STATE/$ID".turn-ended.*; do
       [ -e "$_turnend_marker" ] || continue
       rm -f -- "$_turnend_marker"
