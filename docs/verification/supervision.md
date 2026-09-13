@@ -389,20 +389,10 @@ That finding was resolved on 2026-09-05; the [native session-start delivery](#na
 The remaining primary harnesses are not applicable because they do not bind the shared Pi-compatible extension generation lifecycle.
 
 The once-per-generation recovery bound and immediate handling-successor poll were verified on 2026-08-21 at revision `549dd1e0ff05f96607c5e7457b4d8e3d7396bd16` with the tracked Pi extension, real watcher processes, and an isolated home.
-The regression forced handling confirmation to fail, observed one recovery follow-up across the former repeat window, confirmed the successor remained live, and then proved a separate handling successor durably queued a crew event within the bounded poll window.
+That historical run forced handling confirmation to fail, observed one recovery follow-up across the former repeat window, confirmed the successor remained live, and then proved a separate handling successor durably queued a crew event within the bounded poll window.
 `tests/fm-wake-daemon-lifecycle-e2e.test.sh` additionally proves away-mode decision-only recovery routes its current projection before acknowledgement, retries rebuild that projection after an exact `captain-held` transition, and routing failure, incomplete or changed drain capture, and unconfirmed injection all retain the episode for a successful retry.
 
-```sh
-bin/fm-test-run.sh tests/fm-watch-recovery-loop.test.sh
-```
-
-Observed output:
-
-```text
-ok - a resurfacing handling successor stays alive and supervises instead of going blind
-ok - unacknowledged recovery is announced at most once per generation and the successor stays alive
-FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=59357
-```
+The historical command was `bin/fm-test-run.sh tests/fm-watch-recovery-loop.test.sh`.
 
 Deterministic entry points:
 
