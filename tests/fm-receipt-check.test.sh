@@ -2047,7 +2047,58 @@ test_direct_and_local_modes_never_invoke_no_mistakes() {
   pass "direct-PR and local-only retain evidence gates without invoking No-Mistakes"
 }
 
+# AC3 (completion seam): when the task's STANDING status is a done: claim it
+# must carry the delivery artifact its mode requires - a canonical PR URL for
+# the PR paths or "ready in branch" for local-only - or --complete refuses. A
+# last line that is not a done: claim is untouched by this gate.
+test_complete_refuses_done_without_artifact() {
+  local id base meta out rc generation validated_head
 
+  # local-only: the delivery artifact is the "ready in branch" marker.
+  id=done-artifact-local
+  base=$(make_project "$id" local-only localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint "passed"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null \
+    || fail "artifact-gate local-only fixture did not plan"
+  printf 'done: finished the work\n' > "$HOME_DIR/state/$id.status"
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence branch-ready 2>&1)
+  rc=$?
+  expect_code 2 "$rc" "a bare local-only done: must not complete"
+  assert_contains "$out" "no delivery artifact" \
+    "bare local-only done: refusal did not name the missing artifact"
+  printf 'done: ready in branch fm/%s\n' "$id" > "$HOME_DIR/state/$id.status"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence branch-ready >/dev/null \
+    || fail "a local-only done: carrying the branch marker was refused"
+
+  # direct-PR: the delivery artifact is a canonical PR/MR URL; a missing or
+  # non-canonical one refuses identically.
+  id=done-artifact-pr
+  base=$(make_project "$id" direct-PR localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint "passed"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base" >/dev/null \
+    || fail "artifact-gate direct-PR fixture did not plan"
+  meta="$HOME_DIR/state/$id.meta"
+  generation=$(grep '^validation_generation=' "$meta" | tail -1 | cut -d= -f2-)
+  validated_head=$(git -C "$TMP_ROOT/project-$id" rev-parse HEAD)
+  printf 'pr=https://github.com/example/repo/pull/1\npr_head=%s\nvalidation_pr_published_generation=%s\n' \
+    "$validated_head" "$generation" >> "$meta"
+  printf 'done: shipped it\n' > "$HOME_DIR/state/$id.status"
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence pr-opened 2>&1)
+  rc=$?
+  expect_code 2 "$rc" "a bare direct-PR done: must not complete"
+  assert_contains "$out" "no delivery artifact" \
+    "bare direct-PR done: refusal did not name the missing artifact"
+  printf 'done: PR https://example.test/pr/3\n' > "$HOME_DIR/state/$id.status"
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence pr-opened 2>&1)
+  rc=$?
+  expect_code 2 "$rc" "a non-canonical URL must not satisfy the artifact check"
+  printf 'done: PR https://github.com/example/repo/pull/1 checks green\n' > "$HOME_DIR/state/$id.status"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence pr-opened >/dev/null \
+    || fail "a direct-PR done: carrying the canonical PR URL was refused"
+  pass "completion refuses a standing done: claim that carries no delivery artifact"
+}
 
 test_help_advertises_generation_bound_run_binding
 test_reports_missing_criteria_deterministically
@@ -2095,3 +2146,4 @@ test_local_completion_requires_fast_forward_readiness
 test_shared_local_default_resolver
 test_high_risk_and_uncertain_inputs_fail_safe
 test_direct_and_local_modes_never_invoke_no_mistakes
+test_complete_refuses_done_without_artifact

@@ -3544,7 +3544,107 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
+test_done_claim_requires_delivery_artifact() {
+  local case_dir rc wt_head
+
+  # (1) ship + local-only, work already landed on main: teardown would allow,
+  # but a standing bare done: claim carries no artifact and must refuse.
+  case_dir=$(make_case done-bare-local)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "landed work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  printf 'done: finished\n' > "$case_dir/state/task-x1.status"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "bare local-only done: teardown should refuse"
+  grep -q REFUSED "$case_dir/stderr" || fail "bare local-only done: no REFUSED line in stderr"
+  grep -F 'ready in branch' "$case_dir/stderr" >/dev/null \
+    || fail "bare local-only done: refusal did not name the branch marker"
+  # The marker-bearing done: claim satisfies the gate.
+  printf 'done: ready in branch fm/task-x1\n' > "$case_dir/state/task-x1.status"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "marker-bearing local-only done: teardown should succeed"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "marker-bearing local-only done: printed a REFUSED line"
+
+  # (2) ship + no-mistakes, HEAD reachable on origin: same refusal for a bare
+  # done:, and a canonical PR URL satisfies it.
+  case_dir=$(make_case done-bare-pr)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  printf 'done: all set\n' > "$case_dir/state/task-x1.status"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "bare PR-mode done: teardown should refuse"
+  grep -F 'must carry the delivery PR URL' "$case_dir/stderr" >/dev/null \
+    || fail "bare PR-mode done: refusal did not name the PR URL artifact"
+  printf 'done: PR https://github.com/example/repo/pull/1 checks green\n' > "$case_dir/state/task-x1.status"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "PR-URL-bearing done: teardown should succeed"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "PR-URL-bearing done: printed a REFUSED line"
+
+  # (3) scout: the report exists, the decision gate is satisfied, and a bare
+  # done: still refuses - the report path is the scout delivery artifact.
+  case_dir=$(make_case done-bare-scout)
+  write_meta "$case_dir" '' scout
+  printf 'decisions_reviewed=1\n' >> "$case_dir/state/task-x1.meta"
+  mkdir -p "$case_dir/data/task-x1"
+  printf 'findings\n' > "$case_dir/data/task-x1/report.md"
+  cat > "$case_dir/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then printf '0.2.4\n'; exit 0; fi
+if [ "${1:-}" = update ] && [ "${2:-}" = --help ]; then
+  printf 'usage: tasks-axi update <id> [flags]\n  --archive-body\n'
+  exit 0
+fi
+if [ "${1:-}" = mv ] && [ "${2:-}" = --help ]; then
+  printf 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>\n'
+  exit 0
+fi
+if [ "${1:-}" = hold ] && [ "${2:-}" = --help ]; then
+  printf 'usage: tasks-axi hold <id> --kind captain\n'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+  printf 'done: investigation wrapped\n' > "$case_dir/state/task-x1.status"
+  set +e
+  FM_DATA_OVERRIDE="$case_dir/data" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "bare scout done: teardown should refuse"
+  grep -F 'must name its report path' "$case_dir/stderr" >/dev/null \
+    || fail "bare scout done: refusal did not name the report path artifact"
+
+  # (4) --force remains the explicit discard escape hatch: the same bare done:
+  # does not block it.
+  case_dir=$(make_case done-bare-force)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "unpushed work"
+  printf 'done: finished\n' > "$case_dir/state/task-x1.status"
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "--force should still discard a bare done: claim"
+  pass "teardown refuses a standing done: claim that carries no delivery artifact"
+}
+
 test_local_only_fork_remote_allows
+test_done_claim_requires_delivery_artifact
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
