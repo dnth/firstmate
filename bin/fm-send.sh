@@ -1100,6 +1100,7 @@ else
     INBOX_RECORD_HANDLED=0
     FM_TASK_INBOX_RING_OMP_REQUEST=
     FM_TASK_INBOX_RING_OMP_PID=
+    FM_TASK_INBOX_RING_OMP_DOORBELL=
     case "$INBOX_RECORD" in
       */handled/*)
         ring_rc=0
@@ -1115,7 +1116,10 @@ else
     if [ "$TARGET_HARNESS" = omp ]; then
       OMP_NATIVE_SESSION_PID=${FM_TASK_INBOX_RING_OMP_PID:-unreadable}
       [ "$INBOX_RECORD_HANDLED" = 1 ] && OMP_NATIVE_SESSION_PID=not-a-session-receipt
-      OMP_NATIVE_BINDING="task=$TARGET_TASK_ID endpoint=$TARGET_BACKEND:$T session-pid=$OMP_NATIVE_SESSION_PID request=${FM_TASK_INBOX_RING_OMP_REQUEST:-none} record=$INBOX_RECORD message-bytes=$(printf '%s' "$MESSAGE" | wc -c | tr -d '[:space:]')"
+      OMP_NATIVE_BINDING="task=$TARGET_TASK_ID endpoint=$TARGET_BACKEND:$T session-pid=$OMP_NATIVE_SESSION_PID"
+      [ -z "${FM_TASK_INBOX_RING_OMP_DOORBELL:-}" ] \
+        || OMP_NATIVE_BINDING="$OMP_NATIVE_BINDING $FM_TASK_INBOX_RING_OMP_DOORBELL"
+      OMP_NATIVE_BINDING="$OMP_NATIVE_BINDING request=${FM_TASK_INBOX_RING_OMP_REQUEST:-none} record=$INBOX_RECORD message-bytes=$(printf '%s' "$MESSAGE" | wc -c | tr -d '[:space:]')"
     fi
     case "$ring_rc" in
       0) ;;

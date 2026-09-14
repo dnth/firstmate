@@ -42,6 +42,14 @@ make_spawn_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+omp_doorbell_emulate() {  # <stem>: emulate the generated extension's session_start handshake
+  [ -f "$1.omp-ext.ts" ] || return 0
+  if [ -n "${FM_FAKE_OMP_DOORBELL_FAIL:-}" ]; then
+    printf '%s\n' "$FM_FAKE_OMP_DOORBELL_FAIL" > "$1.omp-doorbell-failed"
+    return 0
+  fi
+  [ "${FM_FAKE_OMP_NO_DOORBELL:-0}" = 1 ] || : > "$1.omp-doorbell-ready"
+}
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
@@ -75,9 +83,17 @@ case "${1:-}" in
       case "$*" in
         *Enter*)
           if grep -Fq 'FM_OMP_HARNESS=omp' "$FM_FAKE_LAUNCH_LOG" 2>/dev/null; then
+            # session_start activates the doorbell for the generated extension,
+            # independently of whether the first turn ever acknowledges.
+            for extension in "${FM_FAKE_OMP_ACK_DIR:-/nonexistent}"/*.omp-ext.ts; do
+              [ -e "$extension" ] || continue
+              omp_doorbell_emulate "${extension%.omp-ext.ts}"
+            done
             if [ -n "${FM_FAKE_OMP_ACK:-}" ]; then
               while IFS= read -r ack; do
-                [ -z "$ack" ] || : > "$ack"
+                [ -z "$ack" ] && continue
+                : > "$ack"
+                case "$ack" in *.omp-started) omp_doorbell_emulate "${ack%.omp-started}" ;; esac
               done <<EOF
 $FM_FAKE_OMP_ACK
 EOF
@@ -86,6 +102,7 @@ EOF
               for extension in "$FM_FAKE_OMP_ACK_DIR"/*.omp-ext.ts; do
                 [ -e "$extension" ] || continue
                 : > "${extension%.omp-ext.ts}.omp-started"
+                omp_doorbell_emulate "${extension%.omp-ext.ts}"
               done
             fi
             if [ -n "${FM_FAKE_OMP_META_TAMPER:-}" ]; then
@@ -113,6 +130,14 @@ SH
   cat > "$fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
+omp_doorbell_emulate() {  # <stem>: emulate the generated extension's session_start handshake
+  [ -f "$1.omp-ext.ts" ] || return 0
+  if [ -n "${FM_FAKE_OMP_DOORBELL_FAIL:-}" ]; then
+    printf '%s\n' "$FM_FAKE_OMP_DOORBELL_FAIL" > "$1.omp-doorbell-failed"
+    return 0
+  fi
+  [ "${FM_FAKE_OMP_NO_DOORBELL:-0}" = 1 ] || : > "$1.omp-doorbell-ready"
+}
 cmd=${1:-}
 sub=${2:-}
 case "$cmd $sub" in
@@ -203,10 +228,17 @@ case "$cmd $sub" in
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       printf '%s\n' "${4:-}" >> "$FM_FAKE_LAUNCH_LOG"
       if printf '%s' "${4:-}" | grep -Fq 'FM_OMP_HARNESS=omp'; then
-        [ -z "${FM_FAKE_OMP_ACK:-}" ] || : > "$FM_FAKE_OMP_ACK"
+        for extension in "${FM_FAKE_OMP_ACK_DIR:-/nonexistent}"/*.omp-ext.ts; do
+          [ -e "$extension" ] || continue
+          omp_doorbell_emulate "${extension%.omp-ext.ts}"
+        done
+        if [ -n "${FM_FAKE_OMP_ACK:-}" ]; then
+          : > "$FM_FAKE_OMP_ACK"
+          omp_doorbell_emulate "${FM_FAKE_OMP_ACK%.omp-started}"
+        fi
         if [ "${FM_FAKE_OMP_DYNAMIC_ACK:-0}" = 1 ]; then
           ack=$(printf '%s\n' "${4:-}" | sed -n "s/.* -e '\([^']*\)\.omp-ext\.ts'.*/\1.omp-started/p")
-          [ -z "$ack" ] || : > "$ack"
+          [ -z "$ack" ] || { : > "$ack"; omp_doorbell_emulate "${ack%.omp-started}"; }
         fi
       fi
     fi
@@ -218,7 +250,14 @@ case "$cmd $sub" in
     case "${4:-}" in
       enter)
         if grep -Fq 'FM_OMP_HARNESS=omp' "${FM_FAKE_LAUNCH_LOG:-/dev/null}" 2>/dev/null; then
-          [ -z "${FM_FAKE_OMP_ACK:-}" ] || : > "$FM_FAKE_OMP_ACK"
+          for extension in "${FM_FAKE_OMP_ACK_DIR:-/nonexistent}"/*.omp-ext.ts; do
+            [ -e "$extension" ] || continue
+            omp_doorbell_emulate "${extension%.omp-ext.ts}"
+          done
+          if [ -n "${FM_FAKE_OMP_ACK:-}" ]; then
+            : > "$FM_FAKE_OMP_ACK"
+            omp_doorbell_emulate "${FM_FAKE_OMP_ACK%.omp-started}"
+          fi
         fi
         ;;
     esac
@@ -444,6 +483,9 @@ run_spawn() {
     FM_FAKE_TREEHOUSE_LOG="$treehouselog" FM_FAKE_OMP_ACK="${FM_TEST_OMP_ACK:-}" \
     FM_FAKE_OMP_DYNAMIC_ACK="${FM_TEST_OMP_DYNAMIC_ACK:-0}" FM_FAKE_OMP_ACK_DIR="$home/state" \
     FM_FAKE_OMP_NO_PREWALK="${FM_TEST_OMP_NO_PREWALK:-1}" \
+    FM_FAKE_OMP_NO_DOORBELL="${FM_TEST_OMP_NO_DOORBELL:-0}" \
+    FM_FAKE_OMP_DOORBELL_FAIL="${FM_TEST_OMP_DOORBELL_FAIL:-}" \
+    FM_OMP_DOORBELL_ACK_POLLS="${FM_TEST_OMP_DOORBELL_ACK_POLLS:-}" \
     FM_FAKE_OMP_PREWALK_ENABLED="${FM_TEST_OMP_PREWALK_ENABLED:-false}" \
     FM_FAKE_OMP_CATALOG_DIR="${FM_TEST_OMP_CATALOG_DIR:-}" \
     FM_FAKE_MKDIR_FAIL_PATH="${FM_TEST_MKDIR_FAIL_PATH:-}" \
@@ -2462,7 +2504,10 @@ import { existsSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 const handlers = new Map();
 const extension = await import(pathToFileURL(process.env.PLUGIN).href);
-extension.default({ on(name, handler) { handlers.set(name, handler); } });
+extension.default({
+  sendMessage() {},
+  on(name, handler) { handlers.set(name, handler); },
+});
 await handlers.get("session_start")?.();
 await handlers.get("turn_start")?.();
 await handlers.get("turn_end")?.();
@@ -2472,6 +2517,8 @@ for (let i = 0; i < 50 && (!existsSync(process.env.READY) || !existsSync(process
 if (!existsSync(process.env.READY)) throw new Error("OMP session_start did not report readiness");
 if (!existsSync(process.env.STARTED)) throw new Error("OMP turn_start did not acknowledge launch");
 if (!existsSync(process.env.TURNENDED)) throw new Error("OMP turn_end did not publish completion");
+// Retire the activated doorbell so its watcher does not pin the event loop.
+await handlers.get("session_shutdown")?.();
 JS
   unset FM_TEST_OMP_ACK
   pass "OMP scouts retain scout semantics and external per-turn notification"
@@ -2560,6 +2607,83 @@ await handlers.get("session_shutdown")();
 JS
   unset FM_TEST_OMP_ACK
   pass "generated OMP worker extension observes turns and recovers a parked steer through the user channel"
+}
+
+# The generated worker extension must not publish .omp-ready when its doorbell
+# cannot activate: that combination previously left a false-ready worker whose
+# fm-send refusals all surfaced as session-pid=unreadable with no diagnostic.
+test_omp_worker_extension_gates_ready_on_doorbell_activation() {
+  local rec id out status
+  id=$(profile_id profile-omp-doorbell-gate)
+  rec=$(make_spawn_case profile-omp-doorbell-gate omp "$id")
+  read_case_record "$rec"
+  export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "OMP worker spawn should succeed"
+  rm -f "$HOME_DIR/state/$id.omp-ready" "$HOME_DIR/state/$id.omp-started" \
+    "$HOME_DIR/state/$id.omp-doorbell-ready" "$HOME_DIR/state/$id.omp-doorbell-failed"
+  PLUGIN="$HOME_DIR/state/$id.omp-ext.ts" \
+    READY="$HOME_DIR/state/$id.omp-ready" \
+    DOORBELL_READY="$HOME_DIR/state/$id.omp-doorbell-ready" \
+    JOURNAL="$HOME_DIR/state/$id.omp-doorbell-failed" \
+    node --input-type=module <<'JS'
+import assert from "node:assert/strict";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const handlers = new Map();
+const extension = await import(pathToFileURL(process.env.PLUGIN).href);
+extension.default({
+  sendMessage() {},
+  on(name, handler) { handlers.set(name, handler); },
+});
+// Force activate() to fail: the request directory cannot be created over a file.
+writeFileSync(`${process.env.DOORBELL_READY}.requests`, "not a directory");
+await handlers.get("session_start")();
+await new Promise((resolve) => setTimeout(resolve, 100));
+assert.equal(existsSync(process.env.READY), false,
+  ".omp-ready published without a live doorbell");
+assert.equal(existsSync(process.env.DOORBELL_READY), false,
+  "doorbell marker published from a failed activation");
+assert.equal(existsSync(process.env.JOURNAL), true, "activation failure was not journaled");
+assert.match(readFileSync(process.env.JOURNAL, "utf8"), /activate: /);
+JS
+  unset FM_TEST_OMP_ACK
+  pass "generated OMP worker extension gates .omp-ready on doorbell activation and journals the failure"
+}
+
+# Spawn-time verification: fm-spawn bounded-waits for the doorbell handshake so
+# a worker whose activate() lost the race fails the spawn loudly instead of
+# idling as a false-ready endpoint that can never accept owned redelivery.
+test_omp_spawn_requires_doorbell_handshake() {
+  local rec id out status
+  id=$(profile_id profile-omp-no-doorbell)
+  rec=$(make_spawn_case profile-omp-no-doorbell omp "$id")
+  read_case_record "$rec"
+  export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
+  export FM_TEST_OMP_NO_DOORBELL=1
+  export FM_TEST_OMP_DOORBELL_ACK_POLLS=3
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "an OMP spawn whose doorbell never activates must fail"
+  assert_contains "$out" ".omp-doorbell-ready" \
+    "the spawn failure did not name the missing doorbell marker"
+  unset FM_TEST_OMP_ACK FM_TEST_OMP_NO_DOORBELL FM_TEST_OMP_DOORBELL_ACK_POLLS
+
+  id=$(profile_id profile-omp-doorbell-fail)
+  rec=$(make_spawn_case profile-omp-doorbell-fail omp "$id")
+  read_case_record "$rec"
+  export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
+  export FM_TEST_OMP_DOORBELL_FAIL="watcher fd exhausted"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "an OMP spawn whose doorbell activation fails must fail the spawn"
+  assert_contains "$out" ".omp-doorbell-failed" \
+    "the spawn failure did not name the doorbell failure journal"
+  assert_contains "$out" "watcher fd exhausted" \
+    "the spawn failure did not surface the journaled activation reason"
+  unset FM_TEST_OMP_ACK FM_TEST_OMP_DOORBELL_FAIL
+  pass "OMP spawn bounded-waits on .omp-doorbell-ready and fails loudly on absence or journaled failure"
 }
 
 test_omp_whitespace_identity_paths_refuse_before_endpoint() {
@@ -3255,6 +3379,8 @@ test_herdr_launch_refuses_after_nested_shell_timeout
 test_herdr_spawn_uses_acquisition_owned_worktree_handoff
 test_omp_scout_uses_external_turn_extension
 test_omp_worker_doorbell_observes_turns_and_recovers_parked_steer
+test_omp_worker_extension_gates_ready_on_doorbell_activation
+test_omp_spawn_requires_doorbell_handshake
 test_omp_whitespace_identity_paths_refuse_before_endpoint
 test_omp_missing_binary_or_capability_refuses_before_endpoint_and_metadata
 test_omp_launch_requires_observable_turn_start_acknowledgement

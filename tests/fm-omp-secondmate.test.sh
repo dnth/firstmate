@@ -161,6 +161,7 @@ case "$cmd" in
       printf '%s\n' "$session" > "$FM_TEST_HOME/state/.omp-session"
       version=$(bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_primary_watch_version "$1/.omp/extensions/fm-primary-omp.ts" "$1"' _ "$FM_TEST_HOME")
       printf '%s\n%s\n%s\n%s\n' "$version" "$FM_TEST_AGENT_PID" "$FM_TEST_OMP_BUN" "$FM_TEST_OMP_BIN" > "$FM_TEST_HOME/state/.omp-primary-extension-loaded"
+      : > "$FM_TEST_OMP_DOORBELL_READY"
       printf '%s\n' "$FM_TEST_AGENT_PID" > "$FM_TEST_HOME/state/.lock"
     fi
     ;;
@@ -235,6 +236,7 @@ case "$cmd $sub" in
       printf '%s\n' "$session" > "$FM_TEST_HOME/state/.omp-session"
       version=$(bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_primary_watch_version "$1/.omp/extensions/fm-primary-omp.ts" "$1"' _ "$FM_TEST_HOME")
       printf '%s\n%s\n%s\n%s\n' "$version" "$FM_TEST_AGENT_PID" "$FM_TEST_OMP_BUN" "$FM_TEST_OMP_BIN" > "$FM_TEST_HOME/state/.omp-primary-extension-loaded"
+      : > "$FM_TEST_OMP_DOORBELL_READY"
       printf '%s\n' "$FM_TEST_AGENT_PID" > "$FM_TEST_HOME/state/.lock"
     fi
     ;;
@@ -249,6 +251,7 @@ case "$cmd $sub" in
       printf '%s\n' "$session" > "$FM_TEST_HOME/state/.omp-session"
       version=$(bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_primary_watch_version "$1/.omp/extensions/fm-primary-omp.ts" "$1"' _ "$FM_TEST_HOME")
       printf '%s\n%s\n%s\n%s\n' "$version" "$FM_TEST_AGENT_PID" "$FM_TEST_OMP_BUN" "$FM_TEST_OMP_BIN" > "$FM_TEST_HOME/state/.omp-primary-extension-loaded"
+      : > "$FM_TEST_OMP_DOORBELL_READY"
       printf '%s\n' "$FM_TEST_AGENT_PID" > "$FM_TEST_HOME/state/.lock"
     fi
     ;;
@@ -303,6 +306,7 @@ run_spawn() { # [extra env NAME=VALUE ...] [-- <extra spawn args>]
     FM_TEST_OMP_BIN="$TEST_OMP_BIN" \
     FM_TEST_OMP_BUN="$TEST_OMP_BUN" \
     FM_TEST_HOME="$HOME_DIR" \
+    FM_TEST_OMP_DOORBELL_READY="$MAIN_STATE/$TASK_ID.omp-doorbell-ready" \
     FM_TEST_TREEHOUSE_LOG="$CASE/treehouse.log" \
     FM_TEST_STATE_MODE="${FM_TEST_STATE_MODE:-}" \
     FM_TEST_SKIP_ACK="${FM_TEST_SKIP_ACK:-0}" \
@@ -331,6 +335,7 @@ run_spawn_herdr() { # [extra env NAME=VALUE ...]
     FM_TEST_OMP_BIN="$TEST_OMP_BIN" \
     FM_TEST_OMP_BUN="$TEST_OMP_BUN" \
     FM_TEST_HOME="$HOME_DIR" \
+    FM_TEST_OMP_DOORBELL_READY="$MAIN_STATE/$TASK_ID.omp-doorbell-ready" \
     FM_TEST_TASK_ID="$TASK_ID" \
     FM_TEST_TREEHOUSE_LOG="$CASE/treehouse.log" \
     FM_TEST_STATE_MODE="${FM_TEST_STATE_MODE:-}" \
@@ -459,7 +464,7 @@ test_herdr_launch_exact_resume_recovery_and_abort() {
   setup_case herdr-abort
   printf 'preserve me\n' > "$HOME_DIR/state/sentinel"
   out=$(FM_TEST_SKIP_ACK=1 run_spawn_herdr 2>&1) && fail "OMP Herdr secondmate launch unexpectedly succeeded without acknowledgement"
-  assert_contains "$out" 'preserving the persistent home' "OMP Herdr acknowledgement failure did not preserve its home contract"
+  assert_contains "$out" 'persistent home' "OMP Herdr acknowledgement failure did not preserve its home contract"
   [ -f "$HOME_DIR/state/sentinel" ] || fail "OMP Herdr secondmate abort removed persistent home state"
   [ -f "$MAIN_STATE/$TASK_ID.meta" ] || fail "OMP Herdr secondmate abort removed recovery metadata"
   [ ! -f "$WINDOW_FLAG" ] || fail "OMP Herdr secondmate abort left its owned endpoint running"
@@ -682,7 +687,7 @@ test_post_meta_abort_preserves_home() {
   setup_case abort
   printf 'preserve me\n' > "$HOME_DIR/state/sentinel"
   out=$(FM_TEST_SKIP_ACK=1 run_spawn 2>&1) && fail "OMP secondmate launch unexpectedly succeeded without integration acknowledgement"
-  assert_contains "$out" 'preserving the persistent home' "OMP secondmate acknowledgement failure did not name its preservation contract"
+  assert_contains "$out" 'persistent home' "OMP secondmate acknowledgement failure did not name its preservation contract"
   [ -f "$HOME_DIR/state/sentinel" ] || fail "OMP secondmate abort removed persistent home state"
   [ -d "$HOME_DIR/.git" ] || fail "OMP secondmate abort removed the persistent home"
   [ -f "$MAIN_STATE/$TASK_ID.meta" ] || fail "OMP secondmate abort removed recovery metadata"

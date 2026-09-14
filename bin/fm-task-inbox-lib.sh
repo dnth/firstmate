@@ -39,6 +39,11 @@
 #   <task>.inbox/.ring-state   watcher re-ring ladder: "<msg>\t<count>\t<epoch>"
 #   <task>.inbox/.escalated    oldest-message name already surfaced as stale,
 #                              so later polls suppress another escalation
+#   <task>.omp-doorbell-ready  OMP doorbell handshake: the owning session PID,
+#                              published by the task extension only after the
+#                              doorbell activates (.omp-ready follows it)
+#   <task>.omp-doorbell-failed the reason a doorbell activation or drain retired
+#                              the ready marker, journaled by the extension
 #
 # Record format (fm_task_inbox_write / fm_task_inbox_body):
 #   schema=fm-task-inbox.v1
@@ -229,6 +234,35 @@ fm_task_inbox_hermes_delivery_lock_path() {  # <state-dir> <task-id>
   printf '%s/.%s.hermes-delivery.lock' "$1" "$2"
 }
 
+# Explain an OMP native refusal as one space-free key=value token naming the
+# durable artifact that carries the reason: the extension's failure journal
+# (written when activation or a drain retired the ready marker), the marker
+# that is missing or unreadable, or the marker whose session binding stayed
+# unproven. Callers splice it into the refusal binding so a supervisor sees WHY
+# the adapter refused rather than a bare session-pid=unreadable.
+fm_task_inbox_omp_doorbell_state() {  # <ready-marker>
+  local marker=$1 journal request_dir
+  journal="${marker%.omp-doorbell-ready}.omp-doorbell-failed"
+  request_dir="${marker}.requests"
+  if [ -f "$journal" ]; then
+    printf 'doorbell-failure=%s' "$journal"
+    return 0
+  fi
+  if [ ! -e "$marker" ]; then
+    printf 'doorbell-marker-missing=%s' "$marker"
+    return 0
+  fi
+  if ! fm_omp_task_doorbell_marker_read "$marker" 2>/dev/null; then
+    printf 'doorbell-marker-unreadable=%s' "$marker"
+    return 0
+  fi
+  if [ ! -d "$request_dir" ]; then
+    printf 'doorbell-request-dir-missing=%s' "$request_dir"
+    return 0
+  fi
+  printf 'doorbell-binding-unproven=%s' "$marker"
+}
+
 # Deliver one doorbell. Callers go through fm_task_inbox_ring, which owns the
 # Hermes delivery-lock critical section; this helper is the unserialized body.
 # A positively dead or missing endpoint returns 6 without typing anything -
@@ -249,6 +283,7 @@ fm_task_inbox_ring_deliver() {  # <backend> <target> <record-path> [expected-lab
     # shellcheck disable=SC2034 # Public outcome binding read by the caller after sourcing (bin/fm-send.sh).
     FM_TASK_INBOX_RING_OMP_REQUEST="$ready_marker.requests/request.$request_id"
     FM_TASK_INBOX_RING_OMP_PID=
+    FM_TASK_INBOX_RING_OMP_DOORBELL=
     FM_OMP_TASK_DOORBELL_BOUND_PID=
     programmatic_rc=0
     fm_backend_omp_trigger_turn "$backend" "$target" "$ready_marker" "$omp_runtime" "$omp_bin" "$request_id" "$line" \
@@ -260,7 +295,11 @@ fm_task_inbox_ring_deliver() {  # <backend> <target> <record-path> [expected-lab
         [ "$programmatic_rc" = 0 ] && return 0
         return 4
         ;;
-      *) return 3 ;;
+      *)
+        # shellcheck disable=SC2034 # Public outcome binding read by the caller after sourcing (bin/fm-send.sh).
+        FM_TASK_INBOX_RING_OMP_DOORBELL=$(fm_task_inbox_omp_doorbell_state "$ready_marker")
+        return 3
+        ;;
     esac
   fi
   cstate=$(fm_backend_composer_state "$backend" "$target" "$harness" "$omp_runtime" "$omp_bin" 2>/dev/null) || cstate=unknown
@@ -290,7 +329,9 @@ fm_task_inbox_ring_deliver() {  # <backend> <target> <record-path> [expected-lab
 # missing (nothing typed; recovery owns the record). On an OMP target the call also publishes
 # FM_TASK_INBOX_RING_OMP_REQUEST (the named native queue entry for this record)
 # and FM_TASK_INBOX_RING_OMP_PID (the proven acknowledging session process) so
-# the caller can report the exact binding it acted on. A native success without
+# the caller can report the exact binding it acted on; a refusal (3) also
+# publishes FM_TASK_INBOX_RING_OMP_DOORBELL, one token naming the durable
+# artifact that explains the refusal (fm_task_inbox_omp_doorbell_state). A native success without
 # that proof is refused; the acknowledgement move remains the only proof the
 # worker acted.
 #

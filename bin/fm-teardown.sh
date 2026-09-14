@@ -2905,6 +2905,7 @@ cleanup_firstmate_home_children() {
       "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
       "$sub_state/$child_id.omp-ext.ts" "$sub_state/$child_id.omp-ready" \
       "$sub_state/$child_id.omp-started" "$sub_state/$child_id.omp-doorbell-ready" \
+      "$sub_state/$child_id.omp-doorbell-failed" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.hermes-turnend-token" "$sub_state/$child_id.hermes-session" \
       "$sub_state/$child_id.hermes-started"
@@ -3218,6 +3219,7 @@ status_retire_presentation_task "$STATE" "$ID" || exit 1
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" \
   "$STATE/$ID.omp-started" "$STATE/$ID.omp-doorbell-ready" \
+  "$STATE/$ID.omp-doorbell-failed" \
   "$STATE/$ID.grok-turnend-token" "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.devin-turnend-token" \
   "$STATE/$ID.hermes-turnend-token" "$STATE/$ID.hermes-session" \
   "$STATE/$ID.hermes-started" \

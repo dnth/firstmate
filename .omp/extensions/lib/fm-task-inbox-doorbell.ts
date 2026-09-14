@@ -24,7 +24,7 @@ type OmpDoorbellApi = {
 			details: { kind: "task-inbox"; runtime: "omp" };
 		},
 		options: { deliverAs: "steer"; triggerTurn: true },
-	) => void;
+	) => void | Promise<void>;
 	// The downgrade recovery channel: a user prompt starts a turn on an idle
 	// session, where the agent-initiated sendMessage path can be deferred into
 	// append-only delivery by the runtime's turn policy.
@@ -49,6 +49,12 @@ const MAX_TURN_GRACE_MS = 120000;
 export type TaskInboxDoorbellOptions = {
 	inboxDir?: string;
 	readyMarker?: string;
+	// Durable diagnosis for a refused handshake: a failure that retires the
+	// ready marker (activation, or a drain that takes the doorbell down) writes
+	// its reason here, so a missing marker is never ambiguous. Deliberately
+	// independent of the doorbell's own configuration - an unconfigured
+	// doorbell is itself an activation failure only this file can report.
+	failureJournal?: string;
 	// How long a delivered doorbell may go without a turn_start before the
 	// triggerTurn call is treated as downgraded to append-only and the
 	// instruction is re-driven through the user-prompt channel.
@@ -61,7 +67,11 @@ export type TaskInboxDoorbellOptions = {
 };
 
 export type TaskInboxDoorbell = {
-	activate: () => void;
+	// activate reports whether the doorbell is live after the call. A caller
+	// that publishes its own readiness marker (fm-spawn's generated extension
+	// touching .omp-ready) must gate that marker on this result, or readiness
+	// silently outlives a failed handshake.
+	activate: () => boolean | Promise<boolean>;
 	retire: () => void;
 	notifyTurnStart: () => void;
 	notifyTurnEnd: () => void;
@@ -84,6 +94,23 @@ function publishReadyMarker(marker: string): void {
 	const staged = `${marker}.staging.${process.pid}`;
 	writeFileSync(staged, `${process.pid}\n`, { mode: 0o600 });
 	renameSync(staged, marker);
+}
+
+// Best-effort durable diagnosis for a lost handshake: "<iso> <phase>: <error>".
+// The write is staged and renamed like the ready marker so a concurrent reader
+// never sees a partial reason. A failed journal write is swallowed - the
+// journal explains failures, it must never become one.
+function journalDoorbellFailure(journal: string, phase: string, error: unknown): void {
+	if (!journal.startsWith("/")) return;
+	try {
+		const reason = error instanceof Error ? (error.stack ?? error.message) : String(error);
+		mkdirSync(dirname(journal), { recursive: true });
+		const staged = `${journal}.staging.${process.pid}`;
+		writeFileSync(staged, `${new Date().toISOString()} ${phase}: ${reason}\n`, { mode: 0o600 });
+		renameSync(staged, journal);
+	} catch {
+		return;
+	}
 }
 
 function retireOwnedReadyMarker(marker: string): void {
@@ -139,13 +166,45 @@ function reconcileAwaitingTurns(requestDir: string): void {
 	}
 }
 
+function defaultFailureJournal(options: TaskInboxDoorbellOptions): string {
+	const explicit = options.failureJournal || process.env.FM_OMP_TASK_DOORBELL_FAILED || "";
+	if (explicit) return explicit;
+	const readyMarker = options.readyMarker || process.env.FM_OMP_TASK_DOORBELL_READY || "";
+	if (readyMarker.startsWith("/")) {
+		const suffix = ".omp-doorbell-ready";
+		const stem = readyMarker.endsWith(suffix)
+			? readyMarker.slice(0, -suffix.length)
+			: readyMarker;
+		return `${stem}.omp-doorbell-failed`;
+	}
+	const inboxDir = options.inboxDir || process.env.FM_OMP_TASK_INBOX_DIR || "";
+	const stateDir = inboxDir.startsWith("/")
+		? dirname(inboxDir)
+		: (process.env.FM_STATE_OVERRIDE?.startsWith("/")
+			? process.env.FM_STATE_OVERRIDE
+			: join(process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || process.cwd(), "state"));
+	return stateDir ? join(stateDir, `.omp-doorbell-failed.${process.pid}`) : "";
+}
+
 export function installTaskInboxDoorbell(
 	omp: OmpDoorbellApi,
 	options: TaskInboxDoorbellOptions = {},
 ): TaskInboxDoorbell {
+	const failureJournal = defaultFailureJournal(options);
 	const configured = configuredOptions(options);
 	if (!configured || typeof omp.sendMessage !== "function") {
-		return { activate: () => {}, retire: () => {}, notifyTurnStart: () => {}, notifyTurnEnd: () => {} };
+		const unconfiguredWhy = !configured
+			? "task inbox doorbell is unconfigured (inboxDir/readyMarker unresolved)"
+			: "OMP sendMessage is unavailable";
+		return {
+			activate: () => {
+				journalDoorbellFailure(failureJournal, "activate", new Error(unconfiguredWhy));
+				return false;
+			},
+			retire: () => {},
+			notifyTurnStart: () => {},
+			notifyTurnEnd: () => {},
+		};
 	}
 
 	const requestDir = `${configured.readyMarker}.requests`;
@@ -161,6 +220,7 @@ export function installTaskInboxDoorbell(
 	let dispatchingTurn = false;
 	let dispatchingTurnObserved = false;
 	const awaitingTurns = new Map<string, ReturnType<typeof setTimeout>>();
+	const activationSends = new Set<Promise<void>>();
 	let watcher: FSWatcher | undefined;
 	const settleAwaiting = (awaitingPath: string, outcome: "delivered" | "failed"): void => {
 		const timer = awaitingTurns.get(awaitingPath);
@@ -252,7 +312,7 @@ export function installTaskInboxDoorbell(
 					invoked = true;
 					dispatchingTurn = true;
 					dispatchingTurnObserved = false;
-					omp.sendMessage(
+					const sendResult = omp.sendMessage(
 						{
 							customType: "firstmate-task-inbox-doorbell",
 							content,
@@ -262,6 +322,18 @@ export function installTaskInboxDoorbell(
 						},
 						{ deliverAs: "steer", triggerTurn: true },
 					);
+					if (sendResult && typeof sendResult.then === "function") {
+						const delivery = Promise.resolve(sendResult);
+						activationSends.add(delivery);
+						void delivery.catch((error: unknown) => {
+							if (!active && existsSync(configured.readyMarker)) return;
+							bestEffortRename(`${pending}.delivered`, pending);
+							bestEffortRename(`${pending}.awaiting-turn`, pending);
+							bestEffortRename(ambiguous, pending);
+							journalDoorbellFailure(failureJournal, "drain", error);
+							retire();
+						}).finally(() => activationSends.delete(delivery));
+					}
 					const turnStartedDuringSend = dispatchingTurnObserved;
 					dispatchingTurn = false;
 					dispatchingTurnObserved = false;
@@ -282,9 +354,11 @@ export function installTaskInboxDoorbell(
 						awaitingPath,
 						setTimeout(() => recoverUnprovenTurn(awaitingPath), turnGraceMs),
 					);
-				} catch {
+				} catch (error) {
 					dispatchingTurn = false;
-					if (!invoked) bestEffortRename(ambiguous, `${pending}.failed`);
+					if (invoked) bestEffortRename(ambiguous, pending);
+					else bestEffortRename(ambiguous, `${pending}.failed`);
+					journalDoorbellFailure(failureJournal, "drain", error);
 					retire();
 					break;
 				}
@@ -293,8 +367,8 @@ export function installTaskInboxDoorbell(
 			draining = false;
 		}
 	};
-	const activate = (): void => {
-		if (active) return;
+	const activate = (): boolean | Promise<boolean> => {
+		if (active) return true;
 		try {
 			mkdirSync(requestDir, { recursive: true, mode: 0o700 });
 			reconcileAmbiguousClaims(requestDir);
@@ -308,9 +382,26 @@ export function installTaskInboxDoorbell(
 			}
 			publishReadyMarker(configured.readyMarker);
 			drain();
-		} catch {
+		} catch (error) {
+			journalDoorbellFailure(failureJournal, "activate", error);
 			retire();
+			return false;
 		}
+		// A drain failure retires the doorbell without throwing; it already
+		// journaled its reason, so the activation reports the failure it caused.
+		if (!active) return false;
+		if (activationSends.size > 0) {
+			return (async (): Promise<boolean> => {
+				while (activationSends.size > 0) {
+					await Promise.allSettled([...activationSends]);
+				}
+				if (!active) return false;
+				bestEffortUnlink(failureJournal);
+				return true;
+			})();
+		}
+		bestEffortUnlink(failureJournal);
+		return true;
 	};
 
 	return { activate, retire, notifyTurnStart, notifyTurnEnd };

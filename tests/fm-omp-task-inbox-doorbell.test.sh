@@ -98,9 +98,107 @@ const uncertainDoorbell = installTaskInboxDoorbell(
 uncertainDoorbell.activate();
 writeFileSync(`${uncertain}.requests/one.pending`, line);
 process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
-assert.equal(existsSync(`${uncertain}.requests/one.pending.ambiguous`), true);
-assert.equal(existsSync(`${uncertain}.requests/one.pending.failed`), false);
+assert.equal(existsSync(`${uncertain}.requests/one.pending.ambiguous`), false);
+assert.equal(existsSync(`${uncertain}.requests/one.pending`), true);
 assert.equal(existsSync(uncertain), false);
+
+const asyncFailure = `${process.env.READY}.async-failure`;
+const asyncFailureJournal = `${asyncFailure}.omp-doorbell-failed`;
+const asyncFailing = installTaskInboxDoorbell(
+  { sendMessage() { return Promise.reject(new Error("async session channel closed")); } },
+  { inboxDir: process.env.INBOX, readyMarker: asyncFailure, failureJournal: asyncFailureJournal },
+);
+asyncFailing.activate();
+writeFileSync(`${asyncFailure}.requests/one.pending`, line);
+process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
+await new Promise((resolve) => setImmediate(resolve));
+assert.equal(existsSync(asyncFailure), false);
+assert.match(readFileSync(asyncFailureJournal, "utf8"), /drain: Error: async session channel closed/);
+assert.equal(existsSync(`${asyncFailure}.requests/one.pending`), true);
+
+const multiAsync = `${process.env.READY}.multi-async`;
+const multiJournal = `${multiAsync}.omp-doorbell-failed`;
+mkdirSync(`${multiAsync}.requests`, { recursive: true });
+writeFileSync(`${multiAsync}.requests/first.pending`, line);
+writeFileSync(`${multiAsync}.requests/second.pending`, line);
+let rejectFirst;
+let rejectSecond;
+const firstRejection = new Promise((_, reject) => { rejectFirst = reject; });
+const secondRejection = new Promise((_, reject) => { rejectSecond = reject; });
+let multiSends = 0;
+const multiDoorbell = installTaskInboxDoorbell(
+  { sendMessage() {
+      multiSends += 1;
+      return multiSends === 1 ? firstRejection : secondRejection;
+    } },
+  { inboxDir: process.env.INBOX, readyMarker: multiAsync, failureJournal: multiJournal },
+);
+const multiActivation = multiDoorbell.activate();
+rejectFirst(new Error("first async channel closed"));
+rejectSecond(new Error("second async channel closed"));
+assert.equal(await multiActivation, false);
+assert.equal(existsSync(`${multiAsync}.requests/first.pending`), true);
+assert.equal(existsSync(`${multiAsync}.requests/second.pending`), true);
+
+const concurrent = `${process.env.READY}.concurrent`;
+const concurrentJournal = `${concurrent}.omp-doorbell-failed`;
+mkdirSync(`${concurrent}.requests`, { recursive: true });
+writeFileSync(`${concurrent}.requests/first.pending`, line);
+let releaseFirst;
+let concurrentSends = 0;
+const firstSend = new Promise((resolve) => { releaseFirst = resolve; });
+const concurrentDoorbell = installTaskInboxDoorbell(
+  { sendMessage() {
+      concurrentSends += 1;
+      if (concurrentSends === 1) return firstSend;
+      return Promise.reject(new Error("late concurrent channel closed"));
+    } },
+  { inboxDir: process.env.INBOX, readyMarker: concurrent, failureJournal: concurrentJournal },
+);
+const concurrentActivation = concurrentDoorbell.activate();
+assert.equal(typeof concurrentActivation.then, "function");
+writeFileSync(`${concurrent}.requests/late.pending`, line);
+process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
+releaseFirst();
+assert.equal(await concurrentActivation, false);
+assert.equal(existsSync(concurrent), false);
+assert.match(readFileSync(concurrentJournal, "utf8"), /drain: Error: late concurrent channel closed/);
+
+const retiredGeneration = `${process.env.READY}.retired-generation`;
+const retiredJournal = `${retiredGeneration}.omp-doorbell-failed`;
+mkdirSync(`${retiredGeneration}.requests`, { recursive: true });
+writeFileSync(`${retiredGeneration}.requests/old.pending`, line);
+let rejectRetired;
+const retiredSend = new Promise((_, reject) => { rejectRetired = reject; });
+const retired = installTaskInboxDoorbell(
+  { sendMessage() { return retiredSend; } },
+  { inboxDir: process.env.INBOX, readyMarker: retiredGeneration, failureJournal: retiredJournal },
+);
+const retiredActivation = retired.activate();
+retired.retire();
+const successor = installTaskInboxDoorbell(
+  { sendMessage() {} },
+  { inboxDir: process.env.INBOX, readyMarker: retiredGeneration, failureJournal: retiredJournal },
+);
+assert.equal(successor.activate(), true);
+rejectRetired(new Error("retired channel closed"));
+assert.equal(await retiredActivation, false);
+await new Promise((resolve) => setImmediate(resolve));
+assert.equal(existsSync(retiredJournal), false);
+assert.equal(readFileSync(retiredGeneration, "utf8"), `${process.pid}\n`);
+successor.retire();
+
+const initialAsyncFailure = `${process.env.READY}.initial-async-failure`;
+const initialAsyncJournal = `${initialAsyncFailure}.omp-doorbell-failed`;
+mkdirSync(`${initialAsyncFailure}.requests`, { recursive: true });
+writeFileSync(`${initialAsyncFailure}.requests/one.pending`, line);
+const initialAsync = installTaskInboxDoorbell(
+  { sendMessage() { return Promise.reject(new Error("initial async channel closed")); } },
+  { inboxDir: process.env.INBOX, readyMarker: initialAsyncFailure, failureJournal: initialAsyncJournal },
+);
+assert.equal(await initialAsync.activate(), false);
+assert.equal(existsSync(initialAsyncFailure), false);
+assert.match(readFileSync(initialAsyncJournal, "utf8"), /drain: Error: initial async channel closed/);
 
 const unreadable = `${process.env.READY}.unreadable`;
 let unreadableSends = 0;
@@ -321,6 +419,102 @@ doorbell.notifyTurnEnd();
 doorbell.retire();
 JS
   pass "OMP doorbell driven by external turn notifications proves turns and unlatches on turn_end"
+}
+
+# activate() is the handshake contract fm-spawn's generated extension gates
+# .omp-ready on: it must report truthfully, journal every failure durably, and
+# leave no owned marker behind when the doorbell is not live.
+test_extension_activate_reports_and_journals_failures() {
+  local dir="$TMP_ROOT/activate-failure"
+  mkdir -p "$dir/state/t1.inbox"
+  HELPER="$HELPER" INBOX="$dir/state/t1.inbox" READY="$dir/state/t1.omp-doorbell-ready" \
+    FAILED="$dir/state/t1.omp-doorbell-failed" \
+    node --input-type=module <<'JS'
+import assert from "node:assert/strict";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const { installTaskInboxDoorbell } = await import(pathToFileURL(process.env.HELPER).href);
+const requestDir = `${process.env.READY}.requests`;
+const line = `Firstmate instruction waiting: list ${process.env.INBOX}/*.msg`;
+
+// An unconfigured doorbell cannot activate and must say so through the journal.
+const stub = installTaskInboxDoorbell({}, {
+  inboxDir: process.env.INBOX,
+  readyMarker: process.env.READY,
+  failureJournal: process.env.FAILED,
+});
+assert.equal(stub.activate(), false, "a doorbell without sendMessage must report failure");
+assert.match(readFileSync(process.env.FAILED, "utf8"), /activate: Error: OMP sendMessage is unavailable/);
+stub.retire();
+
+// A thrown activation journals the concrete reason and retires cleanly: no
+// ready marker survives to claim a handshake that never happened.
+writeFileSync(requestDir, "not a directory");
+const failing = installTaskInboxDoorbell(
+  { sendMessage() {} },
+  { inboxDir: process.env.INBOX, readyMarker: process.env.READY,
+    failureJournal: process.env.FAILED },
+);
+assert.equal(failing.activate(), false, "a failed activation must report failure");
+assert.equal(existsSync(process.env.READY), false, "a failed activation left its ready marker");
+assert.match(readFileSync(process.env.FAILED, "utf8"), /activate: Error: E/);
+failing.retire();
+assert.equal(existsSync(process.env.READY), false);
+rmSync(requestDir);
+
+// A drain-time failure during activation takes the doorbell down with a
+// journaled reason instead of leaving a marker for a dead watcher.
+mkdirSync(requestDir, { recursive: true });
+writeFileSync(`${requestDir}/stuck.pending`, line);
+const draining = installTaskInboxDoorbell(
+  { sendMessage() { throw new Error("session channel closed"); } },
+  { inboxDir: process.env.INBOX, readyMarker: process.env.READY,
+    failureJournal: process.env.FAILED },
+);
+assert.equal(draining.activate(), false, "an activation whose first drain fails must report failure");
+assert.equal(existsSync(process.env.READY), false, "a drain failure left the ready marker");
+assert.match(readFileSync(process.env.FAILED, "utf8"), /drain: Error: session channel closed/);
+assert.equal(existsSync(`${requestDir}/stuck.pending`), true, "a synchronous drain failure stranded the request");
+draining.retire();
+
+// A recovered activation clears a stale journal so the marker alone is truth.
+writeFileSync(process.env.FAILED, "stale reason\n");
+const recovered = installTaskInboxDoorbell(
+  { sendMessage() {} },
+  { inboxDir: process.env.INBOX, readyMarker: process.env.READY,
+    failureJournal: process.env.FAILED },
+);
+assert.equal(recovered.activate(), true);
+assert.equal(readFileSync(process.env.READY, "utf8"), `${process.pid}\n`);
+assert.equal(existsSync(process.env.FAILED), false,
+  "a live doorbell must clear the stale failure journal");
+recovered.retire();
+assert.equal(existsSync(process.env.READY), false);
+
+const derivedReady = `${process.env.READY}.derived`;
+const derivedJournal = `${derivedReady}.omp-doorbell-failed`;
+writeFileSync(`${derivedReady}.requests`, "not a directory");
+const derived = installTaskInboxDoorbell(
+  { sendMessage() {} },
+  { inboxDir: process.env.INBOX, readyMarker: derivedReady },
+);
+assert.equal(derived.activate(), false);
+assert.match(readFileSync(derivedJournal, "utf8"), /activate: Error: E/);
+derived.retire();
+rmSync(`${derivedReady}.requests`);
+
+const primaryState = `${process.env.INBOX}.primary-state`;
+mkdirSync(primaryState, { recursive: true });
+const previousState = process.env.FM_STATE_OVERRIDE;
+process.env.FM_STATE_OVERRIDE = primaryState;
+const primary = installTaskInboxDoorbell({}, {});
+assert.equal(primary.activate(), false);
+assert.match(readFileSync(`${primaryState}/.omp-doorbell-failed.${process.pid}`, "utf8"), /activate: Error:/);
+if (previousState === undefined) delete process.env.FM_STATE_OVERRIDE;
+else process.env.FM_STATE_OVERRIDE = previousState;
+JS
+  pass "OMP extension activation reports failures, journals their reasons, and retires cleanly"
 }
 
 test_ring_routing_matrix() {
@@ -826,9 +1020,39 @@ test_omp_native_refusal_and_queue_are_bounded() {
   assert_contains "$(cat "$err")" 'do not resend' "the refusal invited a resend"
   assert_contains "$(cat "$err")" "record=$home/state/idle.inbox/001.msg" \
     "the refusal did not name the durable record holding the exact message"
+  # The refusal names the concrete artifact explaining it, not just
+  # session-pid=unreadable: the handshake marker that never appeared.
+  assert_contains "$(cat "$err")" "doorbell-marker-missing=$home/state/idle.omp-doorbell-ready" \
+    "the refusal did not name the missing doorbell marker"
   [ -f "$home/state/idle.inbox/001.msg" ] || fail "the refused steer lost its durable record"
   [ ! -s "$dir/composer.log" ] \
     || fail "a refused OMP steer typed into the composer: $(cat "$dir/composer.log")"
+
+  dir="$TMP_ROOT/native-doorbell-failed"
+  home="$dir/home"
+  mkdir -p "$home/state"
+  make_send_stubs "$dir"
+  : > "$dir/composer.log"
+  write_native_meta "$home" doomed tmux "$node_bin"
+  printf '2026-09-01T00:00:00.000Z activate: Error: request directory creation failed\n' \
+    > "$home/state/doomed.omp-doorbell-failed"
+  out="$dir/out"; err="$dir/err"
+  run_native_send "$dir" "$home" 4242 "$node_bin" "$out" "$err" \
+    doomed "apply the queued fix"; rc=$?
+  expect_code 6 "$rc" "a steer to an OMP mate with a journaled doorbell failure must refuse"
+  assert_contains "$(cat "$err")" 'omp-native-refused:' \
+    "the journaled doorbell failure did not produce an explicit refusal"
+  assert_contains "$(cat "$err")" "doorbell-failure=$home/state/doomed.omp-doorbell-failed" \
+    "the refusal did not name the doorbell failure journal"
+
+  dir="$TMP_ROOT/native-missing-request-dir"
+  home="$dir/home"
+  mkdir -p "$home/state"
+  printf '%s\n' "$$" > "$home/state/raced.omp-doorbell-ready"
+  state=$(bash -c '. "$1"; fm_task_inbox_omp_doorbell_state "$2"' _ \
+    "$ROOT/bin/fm-task-inbox-lib.sh" "$home/state/raced.omp-doorbell-ready")
+  [ "$state" = "doorbell-request-dir-missing=$home/state/raced.omp-doorbell-ready.requests" ] \
+    || fail "missing OMP request directory was misdiagnosed: $state"
 
   dir="$TMP_ROOT/native-handled"
   home="$dir/home"
@@ -886,6 +1110,8 @@ test_omp_native_refusal_and_queue_are_bounded() {
     "unbound delivered OMP reconciliation replay did not keep its session unproven"
   [ -f "$home/state/delivered.omp-doorbell-ready.requests/request.001.msg.pending.acked" ] \
     || fail "the consumed delivery receipt did not leave a durable suppression tombstone"
+  assert_contains "$(cat "$err")" "doorbell-binding-unproven=$home/state/delivered.omp-doorbell-ready" \
+    "the refusal did not name the readable marker whose binding stayed unproven"
   kill -TERM "$silent_pid" 2>/dev/null || true
   wait "$silent_pid" 2>/dev/null || true
   LISTENER_PID=
@@ -956,6 +1182,8 @@ test_omp_native_binding_mismatch_is_refused() {
   expect_code 6 "$rc" "an unproven session binding must exit nonzero"
   assert_contains "$(cat "$err")" 'omp-native-refused:' \
     "an unproven session binding was not explicitly refused"
+  assert_contains "$(cat "$err")" "doorbell-binding-unproven=$home/state/bound.omp-doorbell-ready" \
+    "the refusal did not name the marker whose session binding stayed unproven"
   [ ! -s "$dir/composer.log" ] \
     || fail "a refused binding fell back to the composer: $(cat "$dir/composer.log")"
   [ ! -s "$dir/signals.log" ] || fail "a mismatched binding still reached a session: $(cat "$dir/signals.log")"
@@ -986,8 +1214,6 @@ test_requester_window_tracks_turn_grace_and_acked_suppresses() {
 set -u
 . "$ROOT/bin/fm-backend.sh"
 
-# Grace 2500ms: the derived window (~2.7s) outlasts the re-drive where the
-# former fixed 200-attempt window (~2s) expired first and reported queued.
 set +e
 FM_OMP_DOORBELL_TURN_GRACE_MS=2500 \
   fm_omp_task_doorbell_request "$MARKER" "$PID" first.msg 'canonical doorbell'
@@ -997,7 +1223,6 @@ set -e
 [ -f "$REQDIR/request.first.msg.pending.acked" ] \
   || { echo "the consumed receipt left no .acked tombstone" >&2; exit 1; }
 
-# The tombstone suppresses a second ring for the same record entirely.
 set +e
 fm_omp_task_doorbell_request "$MARKER" "$PID" first.msg 'canonical doorbell'
 rc=$?
@@ -1008,7 +1233,6 @@ set -e
 [ "$(wc -l < "$SIGNAL_LOG" | tr -d '[:space:]')" = 2 ] \
   || { echo "expected exactly one sendMessage plus one re-drive, got: $(cat "$SIGNAL_LOG")" >&2; exit 1; }
 
-# An explicit attempt bound still wins over the derivation.
 set +e
 FM_OMP_DOORBELL_TURN_GRACE_MS=2500 FM_OMP_TASK_DOORBELL_ACK_ATTEMPTS=5 \
   fm_omp_task_doorbell_request "$MARKER" "$PID" second.msg 'canonical doorbell'
@@ -1026,6 +1250,7 @@ SH
 test_extension_signal_uses_trigger_turn
 test_extension_requires_turn_proof_or_redrives
 test_extension_external_notify_drives_turn_proof
+test_extension_activate_reports_and_journals_failures
 test_ring_routing_matrix
 test_request_terminal_states
 test_fm_send_rings_one_programmatic_doorbell
