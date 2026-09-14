@@ -858,9 +858,6 @@ test_treehouse_audit_eacces_and_orphans() {
   proc_root="$case_dir/proc"
   mkdir -p "$proc_root/100" "$proc_root/200"
   ln -s "$wt_dirty" "$proc_root/100/cwd"
-  chmod 000 "$proc_root/100"
-  eacces_code=$(node -e 'try { require("fs").realpathSync(process.argv[1]); process.stdout.write("NO_ERROR"); } catch (error) { process.stdout.write(error.code || "UNKNOWN"); }' "$proc_root/100/cwd")
-  [ "$eacces_code" = EACCES ] || fail "fixture did not produce EACCES for a foreign-owned /proc cwd"
   ln -s "$wt_live" "$proc_root/200/cwd"
   orphan_repo="$case_dir/home/projects/orphan-repo"
   opool="$case_dir/orphan-pool"
@@ -879,6 +876,17 @@ test_treehouse_audit_eacces_and_orphans() {
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   fakebin=$(make_fake_toolchain "$case_dir")
   add_real_node "$fakebin"
+  control_out=$(PATH="$fakebin:$BASE_PATH" FM_PROC_ROOT_OVERRIDE="$proc_root" \
+    FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$repo" \
+    FM_FAKE_TREEHOUSE_STATUS_JSON="[{\"path\":\"$opool_orphan\"}]" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_TREEHOUSE_AUDIT_POOL_TIMEOUT=2 FM_TREEHOUSE_AUDIT_TIMEOUT=4 \
+    "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$control_out" "slot 7 at" \
+    "a readable process occupying the dirty slot did not suppress its diagnostic"
+  chmod 000 "$proc_root/100"
+  eacces_code=$(node -e 'try { require("fs").realpathSync(process.argv[1]); process.stdout.write("NO_ERROR"); } catch (error) { process.stdout.write(error.code || "UNKNOWN"); }' "$proc_root/100/cwd")
+  [ "$eacces_code" = EACCES ] || fail "fixture did not produce EACCES for a foreign-owned /proc cwd"
   out=$(PATH="$fakebin:$BASE_PATH" FM_PROC_ROOT_OVERRIDE="$proc_root" \
     FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$repo" \
     FM_FAKE_TREEHOUSE_STATUS_JSON="[{\"path\":\"$opool_orphan\"}]" \
