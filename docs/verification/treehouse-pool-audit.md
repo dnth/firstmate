@@ -41,5 +41,3 @@ Checked 2026-09-14 against the live pools documented in the `treehouse-hygiene-a
 
 Slot 21 is foreign-administered through a dead home's gitdir; slots 3 and 5 are damaged directories with no `.git` marker.
 Bootstrap renders each record as `TREEHOUSE_POOL: orphaned slot <slot> at <path> - no registered worktree; inspect before cleanup; no changes made` and takes no action.
-
-Known residual: a pool whose every slot is foreign-administered never reaches the state diff, because no listed worktree maps back to its `treehouse-state.json`.

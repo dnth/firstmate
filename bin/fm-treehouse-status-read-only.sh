@@ -103,6 +103,18 @@ function poolState(statePath) {
   }
   return poolStates.get(statePath);
 }
+if (mode !== "candidates") {
+  const status = spawnSync("treehouse", ["status", "--json"], {cwd: repo, encoding: "utf8"});
+  if (status.status === 0) {
+    try {
+      for (const item of JSON.parse(status.stdout || "[]")) {
+        if (item && typeof item.path === "string") {
+          poolState(path.join(path.dirname(path.dirname(item.path)), "treehouse-state.json"));
+        }
+      }
+    } catch {}
+  }
+}
 for (const field of result.stdout.toString("utf8").split("\n")) {
   if (!field.startsWith("worktree ")) continue;
   const worktree = field.slice(9);
@@ -123,8 +135,6 @@ for (const field of result.stdout.toString("utf8").split("\n")) {
 // worktree is a damaged or foreign-administered slot this repo cannot verify.
 // git worktree list never surfaces it, so diff discovered pool state against
 // the listed set and report each as a distinct read-only orphan diagnostic.
-// A pool whose every slot is foreign-administered stays invisible: no listed
-// worktree maps back to its state file.
 if (mode !== "candidates") {
   const seen = new Set();
   const orphans = [];
