@@ -12,14 +12,16 @@ trap 'rm -rf "$tmp"' EXIT
 # shellcheck source=bin/fm-pool-lib.sh disable=SC1091
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-pool-lib.sh"
 candidates="$tmp/candidates"
+orphans="$tmp/orphans"
 cwd_snapshot="$tmp/cwds"
 
-node - "$repo" "$mode" > "$candidates" <<'NODE'
+node - "$repo" "$mode" "$orphans" > "$candidates" <<'NODE'
 const fs = require("fs");
 const path = require("path");
 const { spawnSync } = require("child_process");
 const repo = process.argv[2];
 const mode = process.argv[3];
+const orphansPath = process.argv[4];
 const procRoot = process.env.FM_PROC_ROOT_OVERRIDE || "/proc";
 function processStartedAt(pid) {
   if (process.platform === "linux") {
@@ -77,6 +79,11 @@ function worktreeInUse(worktree) {
       if (cwd === root || cwd.startsWith(root + path.sep)) return true;
     } catch (error) {
       if (error.code === "ENOENT" || error.code === "ESRCH") continue;
+      // A foreign-owned process's cwd is unreadable (EACCES/EPERM) on any
+      // multi-user Linux host; the pid cannot be attributed to this worktree,
+      // so occupancy against foreign processes stays best effort, the same
+      // limit `treehouse status` accepts. Only other errors fail closed.
+      if (error.code === "EACCES" || error.code === "EPERM") continue;
       return true;
     }
   }
@@ -84,17 +91,36 @@ function worktreeInUse(worktree) {
 }
 const result = spawnSync("git", ["-C", repo, "worktree", "list", "--porcelain"]);
 if (result.status !== 0) process.exit(result.status || 1);
+const listed = new Set();
+const poolStates = new Map();
+function poolState(statePath) {
+  if (!poolStates.has(statePath)) {
+    let state = null;
+    try {
+      state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    } catch {}
+    poolStates.set(statePath, state);
+  }
+  return poolStates.get(statePath);
+}
+if (mode !== "candidates") {
+  const status = spawnSync("treehouse", ["status", "--json"], {cwd: repo, encoding: "utf8"});
+  if (status.status === 0) {
+    try {
+      for (const item of JSON.parse(status.stdout || "[]")) {
+        if (item && typeof item.path === "string") {
+          poolState(path.join(path.dirname(path.dirname(item.path)), "treehouse-state.json"));
+        }
+      }
+    } catch {}
+  }
+}
 for (const field of result.stdout.toString("utf8").split("\n")) {
   if (!field.startsWith("worktree ")) continue;
   const worktree = field.slice(9);
-  const statePath = path.join(path.dirname(path.dirname(worktree)), "treehouse-state.json");
-  if (!fs.existsSync(statePath)) continue;
-  let state;
-  try {
-    state = JSON.parse(fs.readFileSync(statePath, "utf8"));
-  } catch {
-    continue;
-  }
+  listed.add(worktree);
+  const state = poolState(path.join(path.dirname(path.dirname(worktree)), "treehouse-state.json"));
+  if (!state) continue;
   const entry = (state.worktrees || []).find(item => item.path === worktree);
   if (!entry || entry.leased || entry.destroying) continue;
   if (mode === "candidates") {
@@ -105,24 +131,50 @@ for (const field of result.stdout.toString("utf8").split("\n")) {
   if (worktreeInUse(worktree)) continue;
   process.stdout.write(String(entry.name || "unknown") + "\0" + worktree + "\0");
 }
+// Orphan pass (audit mode only): diff discovered pool state against the listed
+// set and report each unleased entry without a backing git worktree as a
+// distinct read-only diagnostic.
+if (mode !== "candidates") {
+  const seen = new Set();
+  const orphans = [];
+  for (const state of poolStates.values()) {
+    if (!state) continue;
+    for (const entry of state.worktrees || []) {
+      if (entry.leased || entry.destroying) continue;
+      if (typeof entry.path !== "string" || listed.has(entry.path)) continue;
+      if (seen.has(entry.path)) continue;
+      seen.add(entry.path);
+      orphans.push({slot: String(entry.name || "unknown"), path: entry.path, orphan: true});
+    }
+  }
+  if (orphans.length) {
+    fs.writeFileSync(orphansPath, orphans.map(item => JSON.stringify(item) + "\n").join(""));
+  }
+}
 NODE
 
-[ -s "$candidates" ] || exit 0
-if [ "$(uname 2>/dev/null)" = Linux ]; then
-  : > "$cwd_snapshot"
-else
-  command -v lsof >/dev/null 2>&1 || exit 1
-  lsof -a -d cwd -Fpn > "$cwd_snapshot" 2>/dev/null || exit 1
-fi
-export FM_POOL_LSOF_CWD_FILE="$cwd_snapshot"
-
-while IFS= read -r -d '' slot && IFS= read -r -d '' worktree; do
-  if [ "$mode" = candidates ]; then
-    printf '%s\0%s\0' "$slot" "$worktree"
-    continue
+if [ -s "$candidates" ]; then
+  if [ "$(uname 2>/dev/null)" = Linux ]; then
+    : > "$cwd_snapshot"
+  else
+    command -v lsof >/dev/null 2>&1 || exit 1
+    lsof -a -d cwd -Fpn > "$cwd_snapshot" 2>/dev/null || exit 1
   fi
-  fm_pool_worktree_idle "$worktree" || continue
-  fm_pool_worktree_clean "$worktree" && continue
-  node -e 'process.stdout.write(JSON.stringify({slot:process.argv[1],path:process.argv[2]}) + "\n")' \
-    "$slot" "$worktree"
-done < "$candidates"
+  export FM_POOL_LSOF_CWD_FILE="$cwd_snapshot"
+
+  while IFS= read -r -d '' slot && IFS= read -r -d '' worktree; do
+    if [ "$mode" = candidates ]; then
+      printf '%s\0%s\0' "$slot" "$worktree"
+      continue
+    fi
+    fm_pool_worktree_idle "$worktree" || continue
+    fm_pool_worktree_clean "$worktree" && continue
+    node -e 'process.stdout.write(JSON.stringify({slot:process.argv[1],path:process.argv[2]}) + "\n")' \
+      "$slot" "$worktree"
+  done < "$candidates"
+fi
+
+# Orphan records are complete diagnostics: no backing worktree exists to run
+# the git or occupancy predicates against, so they print verbatim.
+[ -s "$orphans" ] && cat "$orphans"
+exit 0

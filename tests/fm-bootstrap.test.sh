@@ -69,6 +69,10 @@ if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
   fi
   exit 0
 fi
+if [ "${1:-}" = status ] && [ "${2:-}" = --json ]; then
+  printf '%s\n' "${FM_FAKE_TREEHOUSE_STATUS_JSON:-[]}"
+  exit 0
+fi
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
@@ -825,8 +829,93 @@ test_treehouse_audit_runs_under_orca() {
   pass "bootstrap audits available Treehouse pools under Orca"
 }
 
+test_treehouse_audit_eacces_and_orphans() {
+  local case_dir fakebin out repo pool wt_dirty wt_live orphan_damaged orphan_foreign state proc_root \
+    orphan_repo opool opool_leased opool_orphan ostate
+  case_dir="$TMP_ROOT/treehouse-audit-eacces-orphans"
+  repo="$case_dir/audit-repo"
+  pool="$case_dir/My Pools/audit-pool"
+  wt_dirty="$pool/7/audit-repo"
+  wt_live="$pool/8/audit-repo"
+  orphan_damaged="$pool/42/audit-repo"
+  orphan_foreign="$pool/43/audit-repo"
+  state="$pool/treehouse-state.json"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/projects" "$case_dir/home/state" "$pool" \
+    "$orphan_damaged" "$orphan_foreign"
+  git init --quiet -b main "$repo"
+  printf 'base\n' > "$repo/README.md"
+  git -C "$repo" add README.md
+  git -C "$repo" -c user.name=Test -c user.email=test@example.invalid commit -qm base
+  git -C "$repo" remote add origin https://example.invalid/audit.git
+  git -C "$repo" worktree add --quiet --detach "$wt_dirty" HEAD
+  git -C "$repo" worktree add --quiet --detach "$wt_live" HEAD
+  printf 'dirty\n' > "$wt_dirty/dirty.txt"
+  printf 'live dirt\n' > "$wt_live/dirty.txt"
+  printf 'surviving content\n' > "$orphan_damaged/left-behind.txt"
+  printf 'gitdir: %s\n' "$case_dir/dead-home/.git/worktrees/audit-repo43" > "$orphan_foreign/.git"
+  node -e 'const fs=require("fs"); fs.writeFileSync(process.argv[1], JSON.stringify({worktrees:[{name:"7",path:process.argv[2]},{name:"8",path:process.argv[3]},{name:"42",path:process.argv[4]},{name:"43",path:process.argv[5]},{name:"44",path:process.argv[6],leased:true,lease_id:"x",lease_holder:"other-home"}]}))' \
+    "$state" "$wt_dirty" "$wt_live" "$orphan_damaged" "$orphan_foreign" "$pool/44/audit-repo"
+  proc_root="$case_dir/proc"
+  mkdir -p "$proc_root/100" "$proc_root/200"
+  ln -s "$wt_dirty" "$proc_root/100/cwd"
+  ln -s "$wt_live" "$proc_root/200/cwd"
+  orphan_repo="$case_dir/home/projects/orphan-repo"
+  opool="$case_dir/orphan-pool"
+  opool_leased="$opool/1/orphan-repo"
+  opool_orphan="$opool/9/orphan-repo"
+  ostate="$opool/treehouse-state.json"
+  mkdir -p "$opool" "$opool_orphan"
+  git init --quiet -b main "$orphan_repo"
+  printf 'base\n' > "$orphan_repo/README.md"
+  git -C "$orphan_repo" add README.md
+  git -C "$orphan_repo" -c user.name=Test -c user.email=test@example.invalid commit -qm base
+  git -C "$orphan_repo" worktree add --quiet --detach "$opool_leased" HEAD
+  printf 'orphan remains\n' > "$opool_orphan/kept.txt"
+  node -e 'const fs=require("fs"); fs.writeFileSync(process.argv[1], JSON.stringify({worktrees:[{name:"1",path:process.argv[2],leased:true,lease_id:"y",lease_holder:"other-home"},{name:"9",path:process.argv[3]}]}))' \
+    "$ostate" "$opool_leased" "$opool_orphan"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_node "$fakebin"
+  control_out=$(PATH="$fakebin:$BASE_PATH" FM_PROC_ROOT_OVERRIDE="$proc_root" \
+    FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$repo" \
+    FM_FAKE_TREEHOUSE_STATUS_JSON="[{\"path\":\"$opool_orphan\"}]" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_TREEHOUSE_AUDIT_POOL_TIMEOUT=2 FM_TREEHOUSE_AUDIT_TIMEOUT=4 \
+    "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$control_out" "slot 7 at" \
+    "a readable process occupying the dirty slot did not suppress its diagnostic"
+  chmod 000 "$proc_root/100"
+  eacces_code=$(node -e 'try { require("fs").realpathSync(process.argv[1]); process.stdout.write("NO_ERROR"); } catch (error) { process.stdout.write(error.code || "UNKNOWN"); }' "$proc_root/100/cwd")
+  [ "$eacces_code" = EACCES ] || fail "fixture did not produce EACCES for a foreign-owned /proc cwd"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_PROC_ROOT_OVERRIDE="$proc_root" \
+    FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$repo" \
+    FM_FAKE_TREEHOUSE_STATUS_JSON="[{\"path\":\"$opool_orphan\"}]" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_TREEHOUSE_AUDIT_POOL_TIMEOUT=2 FM_TREEHOUSE_AUDIT_TIMEOUT=4 \
+    "$ROOT/bin/fm-bootstrap.sh")
+  chmod 700 "$proc_root/100"
+  assert_contains "$out" \
+    "TREEHOUSE_POOL: dirty idle slot 7 at $wt_dirty - inspect before cleanup; no changes made" \
+    "a foreign-owned (EACCES) /proc entry blinded the pool audit"
+  assert_not_contains "$out" "slot 8 at" \
+    "the audit reported a slot still held by a live worktree process past the EACCES entry"
+  assert_contains "$out" \
+    "TREEHOUSE_POOL: orphaned slot 42 at $orphan_damaged - no registered worktree; inspect before cleanup; no changes made" \
+    "a damaged slot with no .git marker did not surface as an orphan"
+  assert_contains "$out" "TREEHOUSE_POOL: orphaned slot 43 at $orphan_foreign" \
+    "a foreign-administered slot with a dead gitdir did not surface as an orphan"
+  assert_not_contains "$out" "dirty idle slot 42" \
+    "an orphan was misclassified as a dirty idle slot"
+  assert_not_contains "$out" "slot 44" \
+    "the audit reported a leased orphan entry"
+  assert_contains "$out" "TREEHOUSE_POOL: orphaned slot 9 at $opool_orphan" \
+    "an orphan did not surface when the pool produced no candidates"
+  pass "bootstrap pool audit survives foreign-owned /proc entries and reports orphans"
+}
+
 test_treehouse_dirty_idle_audit_is_read_only
 test_treehouse_audit_runs_under_orca
+test_treehouse_audit_eacces_and_orphans
 
 test_treehouse_lease_check_follows_resolved_backend() {
   local case_dir fakebin out
