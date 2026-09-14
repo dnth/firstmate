@@ -745,7 +745,7 @@ board_row_in_flight() {  # <task>
 #   - a declared pause/captain-held last line already owns a bounded cadence;
 #   - a terminal last line already discharged the boundary contract, so a row
 #     still in flight then is a firstmate-side matter, not worker silence;
-#   - the .idle-open-work-probe-<key> marker caps this probe - and so the one
+#   - the .idle-open-work-probe-<window-key>-<task-key> marker caps this probe - and so the one
 #     costly crew-state read - at once per bound, whether it fires or absorbs;
 #   - the status file's mtime is the last-arrival time, so its age IS "no
 #     status line within the bound" (a missing file reads as infinitely old);
@@ -759,15 +759,16 @@ board_row_in_flight() {  # <task>
 # always-on, a provably-working crew absorbs the probe because a running
 # pipeline legitimately sits silent.
 idle_open_work_tick() {  # <window> <task>
-  local win=$1 task=$2 key probe statusf last anchor reason
+  local win=$1 task=$2 key task_key probe statusf last anchor reason
   key=$(window_key "$win")
+  task_key=$(window_key "$task")
   statusf="$STATE/$task.status"
   last=$(last_status_line "$statusf")
   status_is_paused_or_captain_held "$last" && return 0
   # A standing terminal status already discharged the boundary contract; a row
   # still in flight after that is a firstmate-side matter, not worker silence.
   status_is_terminal_verb "$last" && return 0
-  probe="$STATE/.idle-open-work-probe-$key"
+  probe="$STATE/.idle-open-work-probe-${key}-${task_key}"
   [ "$(age_of "$probe")" -ge "$IDLE_OPEN_WORK_SECS" ] || return 0
   [ "$(age_of "$statusf")" -ge "$IDLE_OPEN_WORK_SECS" ] || return 0
   anchor=$(fm_wake_turnend_live_marker "$STATE" "$task" 2>/dev/null || true)

@@ -3333,8 +3333,15 @@ write_backlog() {
   } > "$data/backlog.md"
 }
 
+idle_probe_marker() {  # <state> <window> <task>
+  local state=$1 window=$2 task=$3 key task_key
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  task_key=$(printf '%s' "$task" | tr ':/.' '___')
+  printf '%s/.idle-open-work-probe-%s-%s' "$state" "$key" "$task_key"
+}
+
 test_idle_open_work_ticking_pane_escalates() {
-  local dir state data fakebin out drain_out capture_file window key statusf pid tickpid sig
+  local dir state data fakebin out drain_out capture_file window statusf pid tickpid sig probe
   dir=$(make_case idle-open-work); state="$dir/state"; fakebin="$dir/fakebin"; data="$dir/data"
   out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
   window="test:fm-tick"
@@ -3349,7 +3356,7 @@ test_idle_open_work_ticking_pane_escalates() {
   set_mtime $(( $(date +%s) - 3600 )) "$statusf"
   set_mtime $(( $(date +%s) - 3600 )) "$state/tick.meta"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-tick_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  probe=$(idle_probe_marker "$state" "$window" tick)
 
   tick_pane "$capture_file" & tickpid=$!
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -3365,7 +3372,7 @@ test_idle_open_work_ticking_pane_escalates() {
   stop_pid "$tickpid"
   grep -F "idle-with-open-work" "$out" >/dev/null \
     || fail "the escalation did not carry the idle-with-open-work reason: $(cat "$out")"
-  [ -e "$state/.idle-open-work-probe-$key" ] || fail "the firing probe did not record its rate-limit marker"
+  [ -e "$probe" ] || fail "the firing probe did not record its rate-limit marker"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after idle-with-open-work failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "idle-with-open-work" >/dev/null \
     || fail "idle-with-open-work was not queued as a stale wake"
@@ -3373,7 +3380,7 @@ test_idle_open_work_ticking_pane_escalates() {
 }
 
 test_idle_open_work_queued_row_is_not_probed() {
-  local dir state data fakebin out capture_file window key statusf pid tickpid sig
+  local dir state data fakebin out capture_file window statusf pid tickpid sig probe
   dir=$(make_case idle-open-queued); state="$dir/state"; fakebin="$dir/fakebin"; data="$dir/data"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"
   window="test:fm-queued"
@@ -3387,7 +3394,7 @@ test_idle_open_work_queued_row_is_not_probed() {
   set_mtime $(( $(date +%s) - 3600 )) "$statusf"
   set_mtime $(( $(date +%s) - 3600 )) "$state/queued.meta"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-queued_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  probe=$(idle_probe_marker "$state" "$window" queued)
 
   tick_pane "$capture_file" & tickpid=$!
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -3402,12 +3409,12 @@ test_idle_open_work_queued_row_is_not_probed() {
   fi
   stop_pid "$tickpid"; reap "$pid"
   [ ! -s "$out" ] || fail "a queued row printed a wake reason"
-  [ ! -e "$state/.idle-open-work-probe-$key" ] || fail "the probe marker was written for a row not in flight"
+  [ ! -e "$probe" ] || fail "the probe marker was written for a row not in flight"
   pass "a pane whose board row is not in flight is never probed"
 }
 
 test_idle_open_work_recent_status_is_not_probed() {
-  local dir state data fakebin out capture_file window key statusf pid tickpid sig
+  local dir state data fakebin out capture_file window statusf pid tickpid sig probe
   dir=$(make_case idle-open-recent); state="$dir/state"; fakebin="$dir/fakebin"; data="$dir/data"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"
   window="test:fm-recent"
@@ -3420,7 +3427,7 @@ test_idle_open_work_recent_status_is_not_probed() {
   write_backlog "$data" recent
   set_mtime $(( $(date +%s) - 3600 )) "$state/recent.meta"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-recent_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  probe=$(idle_probe_marker "$state" "$window" recent)
 
   tick_pane "$capture_file" & tickpid=$!
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -3434,12 +3441,12 @@ test_idle_open_work_recent_status_is_not_probed() {
     fail "a fresh status inside the bound was probed as idle-with-open-work: $(cat "$out")"
   fi
   stop_pid "$tickpid"; reap "$pid"
-  [ ! -e "$state/.idle-open-work-probe-$key" ] || fail "the probe marker was written inside the reporting window"
+  [ ! -e "$probe" ] || fail "the probe marker was written inside the reporting window"
   pass "a status line inside the bound keeps the probe inert"
 }
 
 test_idle_open_work_paused_and_terminal_skip_the_probe() {
-  local dir state data fakebin out capture_file window key statusf pid tickpid sig
+  local dir state data fakebin out capture_file window statusf pid tickpid sig probe
   for pair in "held:paused: awaiting the upstream release" "finished:done: PR https://github.com/example/repo/pull/3"; do
     local id=${pair%%:*} lastline=${pair#*:}
     dir=$(make_case "idle-open-$id"); state="$dir/state"; fakebin="$dir/fakebin"; data="$dir/data"
@@ -3456,7 +3463,7 @@ test_idle_open_work_paused_and_terminal_skip_the_probe() {
     set_mtime $(( $(date +%s) - 3600 )) "$statusf"
     set_mtime $(( $(date +%s) - 3600 )) "$state/$id.meta"
     sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-${id}_status"
-    key=$(printf '%s' "$window" | tr ':/.' '___')
+    probe=$(idle_probe_marker "$state" "$window" "$id")
 
     tick_pane "$capture_file" & tickpid=$!
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -3470,14 +3477,14 @@ test_idle_open_work_paused_and_terminal_skip_the_probe() {
       fail "$id: a pane standing on '$lastline' was escalated as idle-with-open-work"
     fi
     stop_pid "$tickpid"; reap "$pid"
-    [ ! -e "$state/.idle-open-work-probe-$key" ] || fail "$id: the probe marker was written for a discharged boundary"
+    [ ! -e "$probe" ] || fail "$id: the probe marker was written for a discharged boundary"
     ack_stopped_cycle "$state" || fail "$id: could not acknowledge the intentional watcher stop"
   done
   pass "paused and terminal last status lines both skip the idle-with-open-work probe"
 }
 
 test_idle_open_work_provably_working_is_absorbed() {
-  local dir state data fakebin out capture_file window key statusf pid tickpid sig
+  local dir state data fakebin out capture_file window statusf pid tickpid sig probe
   dir=$(make_case idle-open-working); state="$dir/state"; fakebin="$dir/fakebin"; data="$dir/data"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"
   window="test:fm-pipeline"
@@ -3489,7 +3496,7 @@ test_idle_open_work_provably_working_is_absorbed() {
   set_mtime $(( $(date +%s) - 3600 )) "$statusf"
   set_mtime $(( $(date +%s) - 3600 )) "$state/pipeline.meta"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-pipeline_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  probe=$(idle_probe_marker "$state" "$window" pipeline)
   # A running pipeline legitimately sits silent at a completion boundary, so
   # the probe records its marker once and absorbs instead of waking.
   export FM_FAKE_CREW_STATE='state: working · source: run-step · ci running'
@@ -3507,7 +3514,7 @@ test_idle_open_work_provably_working_is_absorbed() {
   stop_pid "$tickpid"; reap "$pid"
   [ ! -s "$out" ] || fail "a provably-working crew printed a wake reason during absorb"
   [ ! -s "$state/.wake-queue" ] || fail "a provably-working crew enqueued a wake during absorb"
-  [ -e "$state/.idle-open-work-probe-$key" ] || fail "the absorbing probe did not record its rate-limit marker"
+  [ -e "$probe" ] || fail "the absorbing probe did not record its rate-limit marker"
   grep -F "absorbed idle-with-open-work probe" "$state/.watch-triage.log" >/dev/null \
     || fail "the absorb was not logged to the triage log"
   ack_stopped_cycle "$state" || fail "could not acknowledge the intentional watcher stop"
