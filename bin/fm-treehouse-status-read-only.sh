@@ -131,10 +131,9 @@ for (const field of result.stdout.toString("utf8").split("\n")) {
   if (worktreeInUse(worktree)) continue;
   process.stdout.write(String(entry.name || "unknown") + "\0" + worktree + "\0");
 }
-// Orphan pass (audit mode only): an unleased state entry with no backing git
-// worktree is a damaged or foreign-administered slot this repo cannot verify.
-// git worktree list never surfaces it, so diff discovered pool state against
-// the listed set and report each as a distinct read-only orphan diagnostic.
+// Orphan pass (audit mode only): diff discovered pool state against the listed
+// set and report each unleased entry without a backing git worktree as a
+// distinct read-only diagnostic.
 if (mode !== "candidates") {
   const seen = new Set();
   const orphans = [];

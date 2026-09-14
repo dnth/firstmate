@@ -440,7 +440,7 @@ In a read-only session that did not get the fleet lock, the same line is advisor
 When Treehouse is available, bootstrap also performs a bounded read-only audit of the Firstmate and registered project pools.
 It emits `TREEHOUSE_POOL: dirty idle slot <slot> at <path> - inspect before cleanup; no changes made` only for a dirty ownerless slot that has no observed process working inside it, and it never prunes, returns, resets, or cleans a slot.
 It emits `TREEHOUSE_POOL: orphaned slot <slot> at <path> - no registered worktree; inspect before cleanup; no changes made` for an unleased `treehouse-state.json` entry with no backing `git worktree list` registration, which is how damaged slots and slots administered by another clone or a dead home surface.
-On multi-user Linux the occupancy scan cannot read a foreign-owned process's cwd, so foreign processes inside a slot stay unattributable; a pool whose every slot is foreign-administered never reaches the state diff at all.
+On multi-user Linux the occupancy scan cannot read a foreign-owned process's cwd, so foreign processes inside a slot stay unattributable; orphan discovery also consults `treehouse status --json` so fully foreign-administered pools can surface unregistered entries.
 The audit is best effort and fail-silent when pool state or liveness cannot be established, so an absent diagnostic is not proof that every pool is clean.
 `FM_TREEHOUSE_AUDIT_POOL_TIMEOUT` bounds each pool scan and `FM_TREEHOUSE_AUDIT_TIMEOUT` bounds the whole audit; either value set to `0` disables the audit.
 The locked session-start bootstrap step also runs a best-effort project clone refresh through `fm-fleet-sync.sh`.
