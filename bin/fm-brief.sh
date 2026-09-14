@@ -89,6 +89,11 @@ esac
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
+# The completion-reporting bound quoted into every crewmate brief; fm-watch.sh
+# enforces it as the idle-with-open-work escalation and fm-classify-lib.sh owns
+# the shared default.
+IDLE_OPEN_BOUND=${FM_IDLE_OPEN_WORK_SECS:-$FM_IDLE_OPEN_WORK_SECS_DEFAULT}
+case "$IDLE_OPEN_BOUND" in ''|0|*[!0-9]*) IDLE_OPEN_BOUND=$FM_IDLE_OPEN_WORK_SECS_DEFAULT ;; esac
 
 resolve_directory_input() {
   local name=$1 path=$2 resolved
@@ -129,6 +134,7 @@ This task ships **direct-PR**: you raise the PR yourself, without the no-mistake
 The task is complete only when committed on your branch and every declared acceptance criterion has a receipt.
 When it is implemented and committed, run \`$FM_ROOT/bin/fm-receipt-check.sh $task_id --plan\`, then push your branch and open a PR with \`gh-axi\`.
 After the PR opens, append \`done: PR {url}\` to the status file and stop; Firstmate's canonical PR-ready helper records the observed completion.
+The \`done:\` line must carry the PR URL - it is the delivery artifact - and completion recording and teardown refuse a \`done:\` that names none.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
       ;;
@@ -139,8 +145,8 @@ Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$task_id\` and every declared acceptance criterion has a receipt. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-When it is implemented, committed, and ready in the branch, run \`$FM_ROOT/bin/fm-receipt-check.sh $task_id --plan\` followed by \`$FM_ROOT/bin/fm-receipt-check.sh $task_id --complete --terminal-evidence branch-ready\`.
-Then append \`done: ready in branch fm/$task_id\` to the status file and stop.
+When it is implemented, committed, and ready in the branch, run \`$FM_ROOT/bin/fm-receipt-check.sh $task_id --plan\`, then append \`done: ready in branch fm/$task_id\` to the status file, then run \`$FM_ROOT/bin/fm-receipt-check.sh $task_id --complete --terminal-evidence branch-ready\` and stop.
+The \`done:\` line must carry the \`ready in branch\` marker - it is the delivery artifact - and completion recording and teardown refuse a \`done:\` that names none.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
       ;;
@@ -164,7 +170,8 @@ Two firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), run \`$FM_ROOT/bin/fm-receipt-check.sh $task_id --complete --terminal-evidence no-mistakes-passed\`, append \`done: PR {url} checks green\`, and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` to the status file, then run \`$FM_ROOT/bin/fm-receipt-check.sh $task_id --complete --terminal-evidence no-mistakes-passed\`, and stop. You are finished.
+The \`done:\` line must carry the PR URL - it is the delivery artifact - and completion recording and teardown refuse a \`done:\` that names none.
 EOF
       ;;
   esac
@@ -456,6 +463,12 @@ The report is the only thing that survives, so anything worth keeping must be in
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on and the needs-decision/blocked/paused/done/failed states. No step-by-step
    FYI progress lines; firstmate reads your pane for that.
+   Whenever a turn ends while the task's board row is still in flight, the last status line
+   must be terminal (\`done:\`, \`failed:\`, \`needs-decision:\`, \`blocked:\`) or \`$PAUSED_VERB:\`,
+   landing within ${IDLE_OPEN_BOUND}s of turn-end - never end on silence or a bare \`working:\`.
+   Firstmate's watcher escalates a pane left idle past that bound with its row still in
+   flight as \`idle-with-open-work\`. A \`done:\` is the delivery claim and must name the
+   report path; teardown refuses a \`done:\` that carries none.
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset):
    firstmate then leaves your idle pane alone and rechecks it on a long cadence instead of
@@ -475,7 +488,7 @@ $INBOX_SECTION
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
-When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
+When the report is complete, append \`done: {one-line conclusion} - report at data/$ID/report.md\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF
 BRIEF_COMMITTED=1
@@ -553,6 +566,13 @@ $RULE1
    firstmate reads your pane for that.
    A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
    turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
+   Whenever a turn ends while the task's board row is still in flight, the last status line
+   must be terminal (\`done:\`, \`failed:\`, \`needs-decision:\`, \`blocked:\`) or \`$PAUSED_VERB:\`,
+   landing within ${IDLE_OPEN_BOUND}s of turn-end - never end on silence or a bare \`working:\`.
+   Firstmate's watcher escalates a pane left idle past that bound with its row still in
+   flight as \`idle-with-open-work\`. A \`done:\` is the delivery claim and must name the
+   artifact the Definition of done requires; completion recording and teardown refuse a
+   \`done:\` that carries none.
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset,
    a scheduled window): firstmate then leaves your idle pane alone and rechecks it on a long

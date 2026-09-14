@@ -887,9 +887,78 @@ PERL
   pass "fm-brief: ship evidence publication is atomic and retryable"
 }
 
+# The completion-reporting contract (AC1): every generated ship and scout brief
+# must carry the bounded terminal/paused status requirement, name the
+# idle-with-open-work escalation the watcher enforces, and pin the
+# artifact-bearing done: shape for its delivery mode. FM_IDLE_OPEN_WORK_SECS
+# overrides the emitted bound in both the brief and the watcher.
+test_completion_boundary_contract_in_briefs() {
+  local home id mode brief bound
+  home="$TMP_ROOT/boundary-home"
+  write_registry "$home"
+
+  for id_mode in "brief-bound-nm:no-mistakes" "brief-bound-dpr:direct-PR" "brief-bound-lo:local-only"; do
+    id=${id_mode%%:*}
+    mode=${id_mode##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1 \
+      || fail "$id: ship brief did not scaffold"
+    brief="$home/data/$id/brief.md"
+    bound=$(sed -n 's/.*landing within \([0-9][0-9]*\)s of turn-end.*/\1/p' "$brief")
+    case "$bound" in ''|*[!0-9]*) fail "$id: brief did not emit a numeric completion-reporting bound" ;; esac
+    assert_grep "landing within ${bound}s of turn-end" "$brief" \
+      "$id: brief did not quote its completion-reporting bound"
+    assert_grep "never end on silence or a bare \`working:\`" "$brief" \
+      "$id: brief omitted the no-silent-turn-end rule"
+    assert_grep "idle-with-open-work" "$brief" \
+      "$id: brief did not name the watcher's escalation reason"
+    assert_grep "teardown refuse a" "$brief" \
+      "$id: brief omitted the artifact enforcement consequence"
+    assert_grep "that carries none" "$brief" \
+      "$id: brief omitted the artifact enforcement consequence"
+    case "$mode" in
+      local-only)
+        assert_grep "must carry the \`ready in branch\` marker" "$brief" \
+          "$id: local-only brief did not pin the branch marker as the artifact"
+        ;;
+      *)
+        assert_grep "must carry the PR URL" "$brief" \
+          "$id: $mode brief did not pin the PR URL as the artifact"
+        ;;
+    esac
+  done
+
+  # The scout brief carries the same boundary contract, with the report path as
+  # its delivery artifact.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-bound-scout alpha --scout >/dev/null 2>&1 \
+    || fail "scout brief did not scaffold"
+  brief="$home/data/brief-bound-scout/brief.md"
+  bound=$(sed -n 's/.*landing within \([0-9][0-9]*\)s of turn-end.*/\1/p' "$brief")
+  case "$bound" in ''|*[!0-9]*) fail "scout brief did not emit a numeric completion-reporting bound" ;; esac
+  assert_grep "landing within ${bound}s of turn-end" "$brief" \
+    "scout brief did not quote its completion-reporting bound"
+  assert_grep "idle-with-open-work" "$brief" \
+    "scout brief did not name the watcher's escalation reason"
+  assert_grep "must name the" "$brief" \
+    "scout brief did not pin the report path as the artifact"
+  assert_grep "report path" "$brief" \
+    "scout brief did not pin the report path as the artifact"
+  assert_grep "done: {one-line conclusion} - report at data/brief-bound-scout/report.md" "$brief" \
+    "scout brief's done: instruction did not carry the report path"
+
+  # FM_IDLE_OPEN_WORK_SECS flows into the quoted bound so an operator-tuned
+  # watcher and its briefs cannot drift apart.
+  FM_HOME="$home" FM_IDLE_OPEN_WORK_SECS=432 "$ROOT/bin/fm-brief.sh" \
+    brief-bound-tuned some-proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "tuned-bound brief did not scaffold"
+  assert_grep "landing within 432s of turn-end" "$home/data/brief-bound-tuned/brief.md" \
+    "FM_IDLE_OPEN_WORK_SECS did not reach the generated brief"
+  pass "fm-brief.sh: ship and scout briefs carry the bounded completion contract"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
+test_completion_boundary_contract_in_briefs
 test_ship_modes_generate_clean_briefs
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry

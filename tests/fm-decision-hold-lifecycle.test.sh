@@ -352,7 +352,7 @@ test_visual_review_uses_shared_completion_owner() {
   mkdir -p "$home/data/$id"
   tasks_in "$home" add "$id" "Review the sample board" --kind scout --repo sample --start >/dev/null
   write_origin_meta "$home" "$id"
-  printf 'done: investigation complete\n' > "$home/state/$id.status"
+  printf 'done: investigation complete - report at data/%s/report.md\n' "$id" > "$home/state/$id.status"
   printf '# Sample board investigation\n\nThe initial findings need no captain choice.\n' > "$home/data/$id/report.md"
   run_decisions "$home" complete "$id" --none >/dev/null \
     || fail "initial investigation could not pass the shared completion owner"
@@ -408,8 +408,8 @@ test_terminal_single_owner_status_decision_does_not_block_empty_inventory() {
   mkdir -p "$home/data/$id"
   tasks_in "$home" add "$id" "Review a terminal sample finding" --kind scout --repo sample --start >/dev/null
   write_origin_meta "$home" "$id"
-  printf 'needs-decision [key=default]: choose route A or route B\ndone: report complete\n' \
-    > "$home/state/$id.status"
+  printf 'needs-decision [key=default]: choose route A or route B\ndone: report complete - report at data/%s/report.md\n' \
+    "$id" > "$home/state/$id.status"
   printf '# Terminal sample review\n\nNo unresolved captain choice remains.\n' > "$home/data/$id/report.md"
   open=$(bash -c '. "$1"; status_open_decisions "$2"' _ \
     "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
@@ -453,7 +453,7 @@ EOF
   mkdir -p "$mate/data/$origin"
   tasks_in "$mate" add "$origin" "Investigate secondmate sample" --kind scout --repo sample --start >/dev/null
   write_origin_meta "$mate" "$origin"
-  printf 'done: report and visual review complete\n' > "$mate/state/$origin.status"
+  printf 'done: report and visual review complete - report at data/%s/report.md\n' "$origin" > "$mate/state/$origin.status"
   printf '# Sample secondmate review\n\nOne captain choice remains.\n' > "$mate/data/$origin/report.md"
   hold=$(run_decisions "$mate" hold "$origin" release \
     --title "Choose the sample release" --reason "captain release choice pending" --repo sample) \
