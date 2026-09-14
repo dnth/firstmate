@@ -18,6 +18,7 @@
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
 #                 "TREEHOUSE_POOL: dirty idle slot <slot> at <path> - inspect before cleanup; no changes made",
+#                 "TREEHOUSE_POOL: orphaned slot <slot> at <path> - no registered worktree; inspect before cleanup; no changes made",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...",
 #                 "EXT: local bridge on ..." or "EXT: local bridge off ...".
 #          When a RUNNING local secondmate worktree is fast-forwarded to
@@ -256,17 +257,22 @@ treehouse_pool_dirty_idle_scan() {  # <repo>
 }
 
 treehouse_audit_report_slots() {  # <tmp>
-  local tmp=$1 line slot path path_key
+  local tmp=$1 line slot path orphan path_key
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     slot=$(node -e 'process.stdout.write(String(JSON.parse(process.argv[1]).slot))' "$line" 2>/dev/null) || continue
     path=$(node -e 'process.stdout.write(String(JSON.parse(process.argv[1]).path))' "$line" 2>/dev/null) || continue
+    orphan=$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).orphan === true ? "1" : "")' "$line" 2>/dev/null) || continue
     path_key=$line
     case $'\n'"$TREEHOUSE_AUDIT_SEEN_SLOTS"$'\n' in
       *$'\n'"$path_key"$'\n'*) continue ;;
     esac
     TREEHOUSE_AUDIT_SEEN_SLOTS="${TREEHOUSE_AUDIT_SEEN_SLOTS}${TREEHOUSE_AUDIT_SEEN_SLOTS:+$'\n'}$path_key"
-    echo "TREEHOUSE_POOL: dirty idle slot $slot at $path - inspect before cleanup; no changes made"
+    if [ -n "$orphan" ]; then
+      echo "TREEHOUSE_POOL: orphaned slot $slot at $path - no registered worktree; inspect before cleanup; no changes made"
+    else
+      echo "TREEHOUSE_POOL: dirty idle slot $slot at $path - inspect before cleanup; no changes made"
+    fi
   done < "$tmp"
 }
 
