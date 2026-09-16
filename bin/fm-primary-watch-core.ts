@@ -753,11 +753,17 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     // Open the episode before the awaited send so a turn boundary landing while
     // the runtime accepts the follow-up still sees this notification in flight.
     if (coalesceMainFallbackWakes) {
+      let baselineRows = owner.mainFallbackBaselineRows ?? mainOwnedWakeSnapshot();
+      if (!baselineRows && mainOwnedWakeRows() === 0) baselineRows = new Set();
+      if (!baselineRows) {
+        schedulePendingCleanup(owner);
+        return "failed";
+      }
       owner.mainFallbackEpisode = true;
       if (!owner.mainFallbackSuccessor && !owner.mainFallbackWakeInFlight) {
         owner.mainFallbackSuccessorGranted = false;
       }
-      if (!owner.mainFallbackBaselineRows) owner.mainFallbackBaselineRows = mainOwnedWakeSnapshot();
+      owner.mainFallbackBaselineRows = baselineRows;
       // A record actually being sent is no longer coalesced, so a failed send
       // can be retried by a later boundary grant instead of staying invisible.
       owner.episodeCoalesced.delete(pending.token);
@@ -941,11 +947,18 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
             : pending.message;
           let outcome: MainWakeOutcome;
           if (pending.fallbackOnly) {
-            owner.mainFallbackEpisode = true;
-            if (!owner.mainFallbackBaselineRows) owner.mainFallbackBaselineRows = mainOwnedWakeSnapshot();
-            outcome = (await sendWake(owner, message, pending, coalesceMainFallbackWakes))
-              ? "delivered"
-              : "failed";
+            let baselineRows = owner.mainFallbackBaselineRows ?? mainOwnedWakeSnapshot();
+            if (!baselineRows && mainOwnedWakeRows() === 0) baselineRows = new Set();
+            if (!baselineRows) {
+              schedulePendingCleanup(owner);
+              outcome = "failed";
+            } else {
+              owner.mainFallbackEpisode = true;
+              owner.mainFallbackBaselineRows = baselineRows;
+              outcome = (await sendWake(owner, message, pending, coalesceMainFallbackWakes))
+                ? "delivered"
+                : "failed";
+            }
           } else {
             outcome = await deliverActionableWake(
               owner,
