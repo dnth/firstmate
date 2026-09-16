@@ -771,7 +771,6 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       if (coalesceMainFallbackWakes) owner.mainFallbackSuccessor = false;
       if (coalesceMainFallbackWakes && !owner.mainFallbackWakeInFlight) {
         owner.mainFallbackSuccessorGranted = false;
-        owner.mainFallbackBaselineRows = null;
       }
     }
   }
@@ -967,7 +966,6 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
           if (outcome !== "delivered") {
             if (pending.fallbackOnly && !owner.mainFallbackWakeInFlight) {
               owner.mainFallbackSuccessorGranted = false;
-              owner.mainFallbackBaselineRows = null;
             }
             settleClaim("failed");
             releaseClaim();
@@ -1413,6 +1411,15 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     }
     const rowCount = mainOwnedWakeRows();
     if (rowCount > 0) {
+      const retry = owner.pendingActionables.find(
+        (pending) => !pending.delivered && !owner.unconsumedWakes.has(pending.token) &&
+          !owner.episodeCoalesced.has(pending.token),
+      );
+      if (retry && !owner.mainFallbackWakeInFlight) {
+        owner.mainFallbackSuccessor = true;
+        void processPendingActionables(owner);
+        return;
+      }
       const currentRows = owner.mainFallbackBaselineRows ? mainOwnedWakeSnapshot() : null;
       if (!owner.mainFallbackBaselineRows || !currentRows) return;
       if ([...owner.mainFallbackBaselineRows].some((row) => currentRows.has(row))) return;
