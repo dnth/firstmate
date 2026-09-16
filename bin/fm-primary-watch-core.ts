@@ -1365,7 +1365,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       const next = owner.pendingActionables
         .filter((pending) => !pending.delivered && !owner.unconsumedWakes.has(pending.token))
         .pop();
-      if (next) {
+      if (next && !owner.mainFallbackWakeInFlight) {
         owner.mainFallbackSuccessor = true;
         owner.episodeCoalesced.delete(next.token);
         void processPendingActionables(owner);

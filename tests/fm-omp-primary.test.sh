@@ -1440,10 +1440,11 @@ writeFileSync(`${state}/watch-trigger-2`, "trigger\n");
 await waitFor(() => count() === 3, "third OMP arm after the unacknowledged delivery");
 // The second close lands inside the first wake's open episode: it stays durable
 // and must not inject a second operational notification while the first remains
-// unacknowledged. The successor fires exactly once at the next turn boundary
-// because the queue row is still unread.
+// unacknowledged. Once the first wake is consumed, the successor fires exactly
+// once at the next turn boundary because the queue row is still unread.
 await sleep(bound * 3);
 if (steers.length !== 1) throw new Error(`the open episode was re-injected: ${steers.length} steers: ${steers.join(" | ")}`);
+await handlers.get("message_start")({ message: { role: "user", content: steers[0] } });
 await handlers.get("turn_end")({});
 await waitFor(() => steers.length === 2, "one successor delivery at the turn boundary");
 if (count() !== 3) throw new Error(`expected exactly three arms, got ${count()}`);
