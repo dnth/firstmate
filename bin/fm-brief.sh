@@ -62,6 +62,11 @@
 # Every scaffold also carries the steering-inbox receive-and-ack section:
 # process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
 # handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
+# Ship and scout scaffolds also carry the bounded read-only scouting
+# delegation contract: delegate file maps, call paths, evidence gathering, and
+# broad pattern searches to native read-only subagents (on OMP, the bundled
+# `scout` agent from `omp agents unpack`), while edits, verification, and
+# evidence receipts stay in the worker's main trajectory.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -313,6 +318,20 @@ The move IS the acknowledgement: without it firstmate rings again and eventually
 EOF
 INBOX_SECTION=${INBOX_SECTION%$'\n'}
 
+# The bounded read-only scouting delegation contract, stated once here and
+# carried by every ship and scout scaffold. OMP workers get the bundled
+# subagent names; other harnesses get honest wording that claims no surface
+# the harness may not have. Edits, verification, and receipts always stay in
+# the worker's own main trajectory.
+IFS= read -r -d '' SUBAGENT_SECTION <<'EOF' || true
+# Delegating read-only scouting
+When the task benefits from bounded read-only scouting - mapping files, tracing call paths, gathering evidence, or broad pattern searches - delegate that scouting to native subagents instead of grinding through it solo.
+On OMP, `omp agents unpack` ships the `scout`/`task`/`reviewer`/`security-reviewer`/`sonic` subagents; `scout` is read-only, `@smol`, and built for parallel search - prefer it for this work.
+On other harnesses, use the read-only subagent surface the harness provides; where it provides none, do the scouting yourself.
+Subagents scout only: keep every edit, verification run, and evidence receipt in your own main trajectory. You stay accountable for integrating and verifying their output and for recording the receipts your deliverable requires.
+EOF
+SUBAGENT_SECTION=${SUBAGENT_SECTION%$'\n'}
+
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
 idx=1
@@ -484,6 +503,8 @@ The report is the only thing that survives, so anything worth keeping must be in
 
 $INBOX_SECTION
 
+$SUBAGENT_SECTION
+
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
@@ -528,7 +549,12 @@ orchestration: enabled
 EOF
   IFS= read -r -d '' ORCHESTRATION_SECTION <<'EOF' || true
 # Orchestration
-This task may use native `task` subagents for independent workstreams; you remain accountable for integrating and verifying their output.
+This task was opted into native `task` subagent orchestration because it contains 2+ substantial independent workstreams that can execute in parallel, each worth roughly one meaningful agent assignment.
+Use orchestration ONLY for 2+ substantial independent workstreams that can execute in parallel, each worth roughly one meaningful agent assignment. Good candidates include multi-component features across separate areas, large refactors or migrations, research plus implementation plus validation, broad audits or reviews, and independent investigation that materially reduces wall-clock time.
+Do NOT orchestrate simple bug fixes, small or localized edits, mostly-sequential tasks, overlapping same-file work, or cases where delegation overhead exceeds direct work.
+Key question: can you identify at least two substantial pieces that can proceed independently right now? If yes, orchestrate; if no, do the work directly.
+Split the work into bounded, non-overlapping assignments and delegate them in parallel; keep integration in your own main trajectory, verify each subagent's results before accepting them, and run the final integration and tests after merging their output.
+You remain accountable for integrating and verifying their output.
 
 EOF
 fi
@@ -587,6 +613,8 @@ $RULE1
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
 
 $INBOX_SECTION
+
+$SUBAGENT_SECTION
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
