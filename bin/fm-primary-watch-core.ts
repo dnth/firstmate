@@ -805,7 +805,12 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
   }
 
   function surfaceFailure(owner: SessionGeneration, message: string): void {
-    if (coalesceMainFallbackWakes && (owner.mainFallbackWakeInFlight || owner.mainFallbackEpisode)) return;
+    if (coalesceMainFallbackWakes && (owner.mainFallbackWakeInFlight || owner.mainFallbackEpisode)) {
+      if (owner.pendingActionables.some((pending) => !pending.delivered && !owner.unconsumedWakes.has(pending.token))) {
+        schedulePendingCleanup(owner);
+      }
+      return;
+    }
     if (coalesceMainFallbackWakes) {
       owner.mainFallbackEpisode = true;
       if (!owner.mainFallbackBaselineRows) owner.mainFallbackBaselineRows = mainOwnedWakeSnapshot();
