@@ -745,7 +745,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       owner.episodeCoalesced.delete(pending.token);
     }
     try {
-      return (await sendWake(owner, message, pending)) ? "delivered" : "failed";
+      return (await sendWake(owner, message, pending, coalesceMainFallbackWakes)) ? "delivered" : "failed";
     } finally {
       // The grant pays for exactly one send attempt: a failure before confirmed
       // acceptance is replayed by a later boundary grant, never by letting a
