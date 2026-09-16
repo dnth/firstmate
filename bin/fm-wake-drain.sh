@@ -298,12 +298,12 @@ print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
       [ -n "$ev_endpoint" ] || continue
       if [ "$ev_endpoint" = bound ]; then bound=$ev_state; continue; fi
       seen_undelivered=1
+      hint_endpoint=$ev_endpoint
       line="$task $ev_line"
       fm_cap_line_var "$line" $((item_bytes - 1)); line=$FM_LINE_CAP_LINE
       bytes=$(( ${#line} + 1 ))
       if [ $((used + bytes)) -gt "$global_bytes" ]; then omitted=$((omitted + 1)); continue; fi
       output="${output}${line}"$'\n'
-      hint_endpoint=$ev_endpoint
       used=$((used + bytes)); shown=$((shown + 1))
     done <<EOF
 $completions
@@ -314,10 +314,8 @@ EOF
       line="STATUS OUTCOME BACKSTOP: after relaying these to the captain, record the delivery receipt: bin/fm-branch-outcome.sh deliver --task $task --status-ident $ident --through $hint_endpoint"
       fm_cap_line_var "$line" $((item_bytes - 1)); line=$FM_LINE_CAP_LINE
       bytes=$(( ${#line} + 1 ))
-      if [ $((used + bytes)) -le "$global_bytes" ]; then
-        output="${output}${line}"$'\n'
-        used=$((used + bytes))
-      fi
+      output="${output}${line}"$'\n'
+      used=$((used + bytes))
     fi
   done <<EOF
 $snapshot
