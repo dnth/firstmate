@@ -667,6 +667,9 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
         surfaceCleanupFailure(owner, error);
         schedulePendingCleanup(owner);
       }
+      if (owner.mainFallbackWakeInFlight === text) {
+        owner.mainFallbackWakeInFlight = null;
+      }
       return;
     }
     if (owner.mainFallbackWakeInFlight === text) {
