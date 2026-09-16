@@ -59,6 +59,7 @@ type PendingActionableClose = {
   message: string;
   predecessorArmPid: string;
   delivered?: true;
+  fallbackOnly?: true;
 };
 
 type UnconsumedWake = {
@@ -398,7 +399,9 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       typeof (value as { predecessorArmPid?: unknown }).predecessorArmPid !== "string" ||
       !/^[0-9]*$/.test((value as { predecessorArmPid: string }).predecessorArmPid) ||
       ((value as { delivered?: unknown }).delivered !== undefined &&
-        (value as { delivered?: unknown }).delivered !== true)
+        (value as { delivered?: unknown }).delivered !== true) ||
+      ((value as { fallbackOnly?: unknown }).fallbackOnly !== undefined &&
+        (value as { fallbackOnly?: unknown }).fallbackOnly !== true)
     ) {
       throw new Error(`invalid ${runtimeLabel} replacement actionable handoff at ${actionableHandoff}`);
     }
@@ -896,7 +899,9 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
           // A new restoration supersedes whatever became of the previous
           // successor; only a failure during this delivery is retried after it.
           owner.deferredClose = null;
-          const restoration = await restoreAfterActionableClose(owner, pending.predecessorArmPid);
+          const restoration = pending.fallbackOnly
+            ? { failure: "", recovery: undefined }
+            : await restoreAfterActionableClose(owner, pending.predecessorArmPid);
           if (!generationIsLive(owner)) {
             settleClaim("failed");
             releaseClaim();
@@ -905,13 +910,21 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
           const message = restoration.failure
             ? `${pending.message}\n\n${restoration.failure}`
             : pending.message;
-          const outcome = await deliverActionableWake(
-            owner,
-            message,
-            Boolean(restoration.failure),
-            pending,
-            restoration.recovery,
-          );
+          let outcome: MainWakeOutcome;
+          if (pending.fallbackOnly) {
+            owner.mainFallbackEpisode = true;
+            outcome = (await sendWake(owner, message, pending, coalesceMainFallbackWakes))
+              ? "delivered"
+              : "failed";
+          } else {
+            outcome = await deliverActionableWake(
+              owner,
+              message,
+              Boolean(restoration.failure),
+              pending,
+              restoration.recovery,
+            );
+          }
           if (outcome === "suppressed") {
             // The open main-fallback episode's drain covers this close's rows:
             // the record stays durable and undelivered until a turn boundary
@@ -1374,16 +1387,15 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
         !owner.mainFallbackWakeInFlight
       ) {
         // Rows outlived every close record (e.g. appended after the last
-        // actionable close): a pending-less wake re-presents them. The episode
+        // actionable close): a synthetic wake re-presents them. The episode
         // stays open so the next boundary re-evaluates.
-        void sendWake(
-          owner,
+        const successor = createPendingActionable(
           "watcher wakes remain queued after the acknowledged episode",
-          undefined,
-          true,
-        ).catch(() => {
-          // The durable queue retains the rows; the next boundary retries.
-        });
+          "",
+        );
+        successor.fallbackOnly = true;
+        enqueuePendingActionable(owner, successor);
+        void processPendingActionables(owner);
       }
       // Otherwise every undelivered record is an accepted-but-unconsumed wake:
       // that in-flight notification already covers the unread rows.
