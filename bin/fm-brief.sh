@@ -506,7 +506,6 @@ $INBOX_SECTION
 $SUBAGENT_SECTION
 
 # Definition of done
-# Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
@@ -551,6 +550,9 @@ EOF
   IFS= read -r -d '' ORCHESTRATION_SECTION <<'EOF' || true
 # Orchestration
 This task was opted into native `task` subagent orchestration because it contains 2+ substantial independent workstreams that can execute in parallel, each worth roughly one meaningful agent assignment.
+Use orchestration ONLY for 2+ substantial independent workstreams that can execute in parallel, each worth roughly one meaningful agent assignment. Good candidates include multi-component features across separate areas, large refactors or migrations, research plus implementation plus validation, broad audits or reviews, and independent investigation that materially reduces wall-clock time.
+Do NOT orchestrate simple bug fixes, small or localized edits, mostly-sequential tasks, overlapping same-file work, or cases where delegation overhead exceeds direct work.
+Key question: can you identify at least two substantial pieces that can proceed independently right now? If yes, orchestrate; if no, do the work directly.
 Split the work into bounded, non-overlapping assignments and delegate them in parallel; keep integration in your own main trajectory, verify each subagent's results before accepting them, and run the final integration and tests after merging their output.
 You remain accountable for integrating and verifying their output.
 
