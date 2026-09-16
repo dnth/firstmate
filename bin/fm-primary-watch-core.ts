@@ -771,6 +771,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       if (coalesceMainFallbackWakes) owner.mainFallbackSuccessor = false;
       if (coalesceMainFallbackWakes && !owner.mainFallbackWakeInFlight) {
         owner.mainFallbackSuccessorGranted = false;
+        owner.mainFallbackBaselineRows = null;
       }
     }
   }
