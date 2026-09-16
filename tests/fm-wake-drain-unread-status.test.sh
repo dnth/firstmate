@@ -290,7 +290,7 @@ test_empty_queue_does_not_swallow_later_signal_annotation() {
 }
 
 test_routine_working_and_covered_done_stay_silent_on_the_empty_queue() {
-  local dir state out old
+  local dir state out old ident
   dir=$(make_case silent-working)
   state="$dir/state"
   out="$dir/drain.out"
@@ -302,6 +302,10 @@ test_routine_working_and_covered_done_stay_silent_on_the_empty_queue() {
   FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-outcome.sh" append \
     --task task8 --verdict captain --summary 'shipped clean was handled' >/dev/null \
     || fail "could not record the newer branch outcome fixture"
+  ident=$(status_ident "$state/task8.status") || fail "could not read task8 status identity"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-outcome.sh" deliver \
+    --task task8 --status-ident "$ident" --through "$(wc -c < "$state/task8.status" | tr -d ' ')" >/dev/null \
+    || fail "could not record the task8 delivery receipt"
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed with routine working and covered done lines"
 
@@ -309,21 +313,22 @@ test_routine_working_and_covered_done_stay_silent_on_the_empty_queue() {
     fail "routine working/covered done lines printed an UNREAD STATUS section: $(cat "$out")"
   fi
   if grep -F 'STATUS OUTCOME BACKSTOP' "$out" >/dev/null; then
-    fail "a covered done line printed the outcome backstop: $(cat "$out")"
+    fail "a delivered done line printed the outcome backstop: $(cat "$out")"
   fi
   if grep -F 'OPEN DECISIONS' "$out" >/dev/null; then
     fail "routine working/covered done lines printed OPEN DECISIONS: $(cat "$out")"
   fi
   [ ! -s "$out" ] || fail "the empty-queue covered routine case was not silent: $(cat "$out")"
-  pass "routine working and branch-covered done lines print nothing on an empty-queue drain"
+  pass "routine working and delivered done lines print nothing on an empty-queue drain"
 }
 
-test_outcome_backstop_resurfaces_missed_terminal_once() {
-  local dir state out retry
+test_outcome_backstop_resurfaces_missed_terminal_until_delivered() {
+  local dir state out retry delivered ident
   dir=$(make_case outcome-backstop)
   state="$dir/state"
   out="$dir/first.out"
   retry="$dir/retry.out"
+  delivered="$dir/delivered.out"
   printf 'done: release completed while the watcher was parked\n' > "$state/parked.status"
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
@@ -332,19 +337,31 @@ test_outcome_backstop_resurfaces_missed_terminal_once() {
     || fail "the missed terminal status was not resurfaced by the backstop"
   grep -F 'parked done: release completed while the watcher was parked' "$out" >/dev/null \
     || fail "the backstop omitted the parked terminal event"
+  grep -F 'bin/fm-branch-outcome.sh deliver --task parked' "$out" >/dev/null \
+    || fail "the backstop omitted the printed delivery receipt command: $(cat "$out")"
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$retry" \
     || fail "the retry backstop drain failed"
-  [ ! -s "$retry" ] || fail "an acknowledged backstop terminal event repeated: $(cat "$retry")"
-  pass "the wake drain resurfaces a parked terminal status once and records its receipt"
+  grep -F 'parked done: release completed while the watcher was parked' "$retry" >/dev/null \
+    || fail "an undelivered terminal event was retired by presentation alone: $(cat "$retry")"
+
+  ident=$(status_ident "$state/parked.status") || fail "could not read parked status identity"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-outcome.sh" deliver \
+    --task parked --status-ident "$ident" --through "$(wc -c < "$state/parked.status" | tr -d ' ')" >/dev/null \
+    || fail "could not record the parked delivery receipt"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$delivered" \
+    || fail "the delivered backstop drain failed"
+  [ ! -s "$delivered" ] || fail "a delivered terminal event repeated: $(cat "$delivered")"
+  pass "the wake drain resurfaces a parked terminal status until its delivery receipt is recorded"
 }
 
 test_outcome_backstop_resurfaces_terminal_buried_under_routine_status() {
-  local dir state out retry
+  local dir state out retry delivered ident
   dir=$(make_case outcome-backstop-buried)
   state="$dir/state"
   out="$dir/first.out"
   retry="$dir/retry.out"
+  delivered="$dir/delivered.out"
   {
     printf 'done: release completed while the watcher was parked\n'
     printf 'working: collecting notes\n'
@@ -359,8 +376,55 @@ test_outcome_backstop_resurfaces_terminal_buried_under_routine_status() {
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$retry" \
     || fail "the buried-terminal retry drain failed"
-  [ ! -s "$retry" ] || fail "an acknowledged buried terminal event repeated: $(cat "$retry")"
-  pass "the wake drain resurfaces a terminal status buried under routine work once"
+  grep -F 'parked done: release completed while the watcher was parked' "$retry" >/dev/null \
+    || fail "an undelivered buried terminal event was retired by presentation alone: $(cat "$retry")"
+
+  ident=$(status_ident "$state/parked.status") || fail "could not read parked status identity"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-outcome.sh" deliver \
+    --task parked --status-ident "$ident" --through "$(wc -c < "$state/parked.status" | tr -d ' ')" >/dev/null \
+    || fail "could not record the buried delivery receipt"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$delivered" \
+    || fail "the delivered buried-terminal drain failed"
+  [ ! -s "$delivered" ] || fail "a delivered buried terminal event repeated: $(cat "$delivered")"
+  pass "the wake drain resurfaces a terminal status buried under routine work until delivered"
+}
+
+test_outcome_backstop_delivery_receipt_is_idempotent() {
+  local dir state out ident
+  dir=$(make_case outcome-backstop-idempotent)
+  state="$dir/state"
+  out="$dir/drain.out"
+  printf 'done: shipped once\n' > "$state/task9.status"
+  ident=$(status_ident "$state/task9.status") || fail "could not read task9 status identity"
+
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-outcome.sh" deliver \
+    --task task9 --status-ident "$ident" --through "$(wc -c < "$state/task9.status" | tr -d ' ')" >/dev/null \
+    || fail "the first delivery receipt failed"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-outcome.sh" deliver \
+    --task task9 --status-ident "$ident" --through "$(wc -c < "$state/task9.status" | tr -d ' ')" >/dev/null \
+    || fail "the duplicate delivery receipt failed"
+  [ "$(wc -l < "$state/completion-deliveries.jsonl" | tr -d ' ')" = "1" ] \
+    || fail "a duplicate delivery receipt was appended: $(cat "$state/completion-deliveries.jsonl")"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "the delivered drain failed"
+  [ ! -s "$out" ] || fail "a delivered event printed the backstop: $(cat "$out")"
+  pass "a delivery receipt is idempotent and retires the backstop entry"
+}
+
+test_outcome_backstop_surfaces_pending_completion_without_outcome() {
+  local dir state out
+  dir=$(make_case outcome-backstop-pending)
+  state="$dir/state"
+  out="$dir/drain.out"
+  printf 'done: completed with no outcome recorded\n' > "$state/task10.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "the pending-completion drain failed"
+  grep -F 'STATUS OUTCOME BACKSTOP' "$out" >/dev/null \
+    || fail "a completion with no outcome and no receipt was not surfaced: $(cat "$out")"
+  grep -F 'task10 done: completed with no outcome recorded' "$out" >/dev/null \
+    || fail "the pending completion was omitted from the backstop: $(cat "$out")"
+  pass "the wake drain surfaces a completion that has neither outcome nor delivery receipt"
 }
 
 test_incident_note_answer_buried_under_routine_note_surfaces_both
@@ -374,5 +438,7 @@ test_retired_task_id_starts_new_status_unread
 test_open_decisions_fold_is_unchanged
 test_empty_queue_does_not_swallow_later_signal_annotation
 test_routine_working_and_covered_done_stay_silent_on_the_empty_queue
-test_outcome_backstop_resurfaces_missed_terminal_once
+test_outcome_backstop_resurfaces_missed_terminal_until_delivered
 test_outcome_backstop_resurfaces_terminal_buried_under_routine_status
+test_outcome_backstop_delivery_receipt_is_idempotent
+test_outcome_backstop_surfaces_pending_completion_without_outcome

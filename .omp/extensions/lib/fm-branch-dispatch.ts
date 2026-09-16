@@ -1,4 +1,6 @@
-import { lstatSync, readdirSync, readFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { lstatSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { runCommandAsync } from "./fm-async-exec.ts";
 
 // Shared wake-dispatch handshake between the OMP watcher adapter (the
@@ -316,11 +318,44 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
 // branch prompt, by writeEligibleRowsSnapshot below.
 export const BRANCH_ELIGIBLE_ROWS_FILE = ".branch-eligible-rows";
 
+// The granting-time status identity snapshot bin/fm-branch-outcome.sh reads
+// when recording an outcome's covered event span: one
+// "task<TAB>endpoint<TAB>dev:inode" row per granted task, captured at publish
+// so an outcome can never stamp a fresh EOF over events the branch never saw.
+export const BRANCH_ELIGIBLE_STATUS_FILE = ".branch-eligible-status";
+
+// One granting-time status identity row: the task's status file identity and
+// the byte endpoint bounding the events this grant hands to the branch.
+export interface BranchStatusSnapshotEntry {
+  task: string;
+  endpoint: number;
+  ident: string;
+}
+
+// Capture the status identity and stable EOF for one granted task. The
+// double read rejects a file that rotated or grew between the two stats, so a
+// snapshot row never mixes identity from one file with an endpoint from
+// another. Returns null when the file is absent, unreadable, or unstable.
+export function captureTaskStatusSnapshot(state: string, task: string): BranchStatusSnapshotEntry | null {
+  const path = join(state, `${task}.status`);
+  try {
+    const first = lstatSync(path);
+    if (!first.isFile()) return null;
+    const second = lstatSync(path);
+    if (!second.isFile()) return null;
+    if (first.dev !== second.dev || first.ino !== second.ino || first.size !== second.size) return null;
+    return { task, endpoint: first.size, ident: `${first.dev}:${first.ino}` };
+  } catch {
+    return null;
+  }
+}
+
 // Atomically publish the exact row set a branch turn may drain and
 // acknowledge. One sequence number per line - an opaque handoff, never
 // reclassified by the consumer. A main-owned result means the competing main
 // turn won the queue-lock claim and already owns presentation; error means no
-// actor acquired the requested rows.
+// actor acquired the requested rows. statusSnapshot, when supplied, is
+// installed beside the rows as the granting-time identity contract.
 export type EligibleRowsSnapshotResult = "published" | "main-owned" | "error";
 
 async function runGrantScript(
@@ -353,12 +388,32 @@ export async function writeEligibleRowsSnapshot(
   seqs: readonly string[],
   grantScript: string,
   generation: string,
+  statusSnapshot: readonly BranchStatusSnapshotEntry[] = [],
 ): Promise<EligibleRowsSnapshotResult> {
   if (seqs.length === 0 || seqs.some((seq) => !/^[0-9]+$/.test(seq))) return "error";
-  const status = await runGrantScript(state, grantScript, ["publish", generation, ...seqs]);
-  if (status === 0) return "published";
-  if (status === 3) return "main-owned";
-  return "error";
+  let snapshotPath: string | null = null;
+  const args: string[] = ["publish", generation];
+  if (statusSnapshot.length > 0) {
+    snapshotPath = join(state, `.branch-eligible-status.in.${process.pid}.${randomUUID()}`);
+    try {
+      writeFileSync(
+        snapshotPath,
+        statusSnapshot.map((entry) => `${entry.task}\t${entry.endpoint}\t${entry.ident}`).join("\n") + "\n",
+        { mode: 0o600 },
+      );
+    } catch {
+      return "error";
+    }
+    args.push("--status-snapshot", snapshotPath);
+  }
+  try {
+    const status = await runGrantScript(state, grantScript, [...args, ...seqs]);
+    if (status === 0) return "published";
+    if (status === 3) return "main-owned";
+    return "error";
+  } finally {
+    if (snapshotPath) rmSync(snapshotPath, { force: true });
+  }
 }
 
 export async function releaseEligibleRowsSnapshot(

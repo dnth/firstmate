@@ -115,6 +115,16 @@ recovery_marker_generation() {  # <marker-file>
   sed -n 's/^[^:]*:[^:]*:\(.*\)$/\1/p' "$1"
 }
 
+# Print the "dev:inode" status identity fm-branch-outcome.sh deliver needs.
+status_ident() {  # <status-file>
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    LC_ALL=C stat -f '%d:%i' "$1" 2>/dev/null
+  else
+    LC_ALL=C stat -c '%d:%i' "$1" 2>/dev/null
+  fi
+}
+
+
 # Acknowledge a drain from its captured stderr (the WAKE_ACK_REQUIRED line).
 ack_drain_err() {  # <state> <stderr-file>
   local state=$1 err=$2 sequence generation

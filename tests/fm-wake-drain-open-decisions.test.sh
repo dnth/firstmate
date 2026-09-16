@@ -72,7 +72,7 @@ test_later_unrelated_terminal_line_does_not_close_it() {
 }
 
 test_no_open_decisions_prints_nothing() {
-  local dir state out old
+  local dir state out old ident
   dir=$(make_case none-open)
   state="$dir/state"
   out="$dir/drain.out"
@@ -84,6 +84,10 @@ test_no_open_decisions_prints_nothing() {
   FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-outcome.sh" append \
     --task task5 --verdict captain --summary 'shipped clean was handled' >/dev/null \
     || fail "could not record the newer branch outcome fixture"
+  ident=$(status_ident "$state/task5.status") || fail "could not read task5 status identity"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-outcome.sh" deliver \
+    --task task5 --status-ident "$ident" --through "$(wc -c < "$state/task5.status" | tr -d ' ')" >/dev/null \
+    || fail "could not record the task5 delivery receipt"
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed with no open decisions"
 
@@ -91,10 +95,10 @@ test_no_open_decisions_prints_nothing() {
     fail "the empty case printed an OPEN DECISIONS section: $(cat "$out")"
   fi
   if grep -F 'STATUS OUTCOME BACKSTOP' "$out" >/dev/null; then
-    fail "a covered terminal status printed the outcome backstop: $(cat "$out")"
+    fail "a delivered terminal status printed the outcome backstop: $(cat "$out")"
   fi
   [ ! -s "$out" ] || fail "the empty case with no queued wakes was not silent: $(cat "$out")"
-  pass "no open decisions across the fleet prints nothing when terminal status is branch-covered"
+  pass "no open decisions across the fleet prints nothing when terminal status is delivered"
 }
 
 test_replaced_status_file_does_not_reuse_old_branch_outcome() {
@@ -121,7 +125,7 @@ test_replaced_status_file_does_not_reuse_old_branch_outcome() {
 }
 
 test_unterminated_status_event_is_not_repeated_when_covered() {
-  local dir state out
+  local dir state out ident
   dir=$(make_case unterminated-covered)
   state="$dir/state"
   out="$dir/drain.out"
@@ -129,11 +133,15 @@ test_unterminated_status_event_is_not_repeated_when_covered() {
   FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-outcome.sh" append \
     --task task-unterminated --verdict captain --summary 'release was handled' >/dev/null \
     || fail "could not record the unterminated branch outcome fixture"
+  ident=$(status_ident "$state/task-unterminated.status") || fail "could not read the unterminated status identity"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-outcome.sh" deliver \
+    --task task-unterminated --status-ident "$ident" --through "$(wc -c < "$state/task-unterminated.status" | tr -d ' ')" >/dev/null \
+    || fail "could not record the unterminated delivery receipt"
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "drain failed for covered unterminated status"
-  [ ! -s "$out" ] || fail "covered unterminated status was resurfaced: $(cat "$out")"
-  pass "a covered unterminated status event is not repeated by the backstop"
+  [ ! -s "$out" ] || fail "delivered unterminated status was resurfaced: $(cat "$out")"
+  pass "a delivered unterminated status event is not repeated by the backstop"
 }
 
 test_open_decision_surfaces_even_with_an_unrelated_queued_wake() {

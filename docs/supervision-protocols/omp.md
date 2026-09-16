@@ -3,6 +3,7 @@ Mode: OMP native extension background wake.
 When this session owns supervision and away mode is not active:
 1. Drain first with `bin/fm-wake-drain.sh`.
    After handling all emitted wakes and reconciling open decisions, unread status lines, and any STATUS OUTCOME BACKSTOP entry, run the exact `--ack-through` command printed as `WAKE_ACK_REQUIRED`; until then the work remains durable for idempotent re-handling after interruption.
+   Every STATUS OUTCOME BACKSTOP entry stays pending until its printed `bin/fm-branch-outcome.sh deliver` receipt is recorded; relay the event to the captain, then run that exact command.
 2. Confirm plain `omp` auto-loaded `__FM_OMP_PRIMARY_EXT__` from the repository's native `.omp/extensions/` directory.
 3. If native discovery is unavailable, restart with `omp -e __FM_OMP_PRIMARY_EXT__`.
 4. First cycle only: make the one required `fm_watch_arm_omp` tool call.

@@ -153,6 +153,29 @@ out=$(run_driver working "signal: live probe wake")
 echo "$out" | grep -q "DRIVER_OK working" || fail "resident/non-leak/turn-accounting guard failed: $out"
 pass "a resident, re-promptable second session handles a wake without leaking into MAIN (real SDK)"
 
+# Completion-delivery contract against the real state the working run left
+# behind: a captain-facing event is an undelivered obligation until the
+# delivery receipt lands, and the receipt retires it.
+live_state="$TMP_ROOT/home-working/state"
+printf 'done: live probe finished\n' > "$live_state/live-probe.status"
+undelivered=$(FM_STATE_OVERRIDE="$live_state" "$ROOT/bin/fm-branch-outcome.sh" undelivered) \
+  || fail "undelivered scan failed against the live state"
+echo "$undelivered" | grep -q "live-probe" \
+  || fail "a completion with no receipt was not listed as undelivered: $undelivered"
+if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+  live_ident=$(LC_ALL=C stat -f '%d:%i' "$live_state/live-probe.status")
+else
+  live_ident=$(LC_ALL=C stat -c '%d:%i' "$live_state/live-probe.status")
+fi
+[ -n "$live_ident" ] || fail "could not read the live status identity"
+FM_STATE_OVERRIDE="$live_state" "$ROOT/bin/fm-branch-outcome.sh" deliver \
+  --task live-probe --status-ident "$live_ident" --through "$(wc -c < "$live_state/live-probe.status" | tr -d ' ')" >/dev/null \
+  || fail "the live delivery receipt failed"
+undelivered=$(FM_STATE_OVERRIDE="$live_state" "$ROOT/bin/fm-branch-outcome.sh" undelivered) \
+  || fail "the post-delivery undelivered scan failed"
+[ -z "$undelivered" ] || fail "a delivered completion still listed as undelivered: $undelivered"
+pass "a live completion stays an undelivered obligation until its delivery receipt retires it"
+
 out=$(run_driver working "signal: live-probe.status worker reports blocked: needs the captain to decide whether to rotate the production API key")
 if echo "$out" | grep -q "kind=captain newTurns=1"; then
   pass "a captain-worthy wake opens exactly one follow-up turn on MAIN (real SDK)"
