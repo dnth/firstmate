@@ -121,6 +121,7 @@ type SessionGeneration = {
   // reached its suppression point, so the boundary is replayed once the run
   // settles.
   pendingTurnEnd: boolean;
+  mainFallbackWakeInFlight: string | null;
 };
 
 export type ArmResult = {
@@ -273,6 +274,7 @@ function createGeneration(): SessionGeneration {
     mainFallbackSuccessor: false,
     episodeCoalesced: new Set(),
     pendingTurnEnd: false,
+    mainFallbackWakeInFlight: null,
   };
 }
 
@@ -623,17 +625,26 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
   // before_agent_start for an idle main and at the user message_start for a
   // streaming main. Until consumption the pending record is kept in
   // unconsumedWakes so a session replacement can replay it.
-  async function sendWake(owner: SessionGeneration, message: string, pending?: PendingActionableClose): Promise<boolean> {
+  async function sendWake(
+    owner: SessionGeneration,
+    message: string,
+    pending?: PendingActionableClose,
+    trackMainFallback = false,
+  ): Promise<boolean> {
     if (!generationIsLive(owner)) return false;
     const content = encodeOperationalInput(
       "watcher",
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
     );
     if (pending) owner.unconsumedWakes.set(pending.token, { content, pending });
+    if (trackMainFallback) owner.mainFallbackWakeInFlight = content;
     try {
       await sendFollowUp(content);
     } catch (error) {
       if (pending) owner.unconsumedWakes.delete(pending.token);
+      if (trackMainFallback && owner.mainFallbackWakeInFlight === content) {
+        owner.mainFallbackWakeInFlight = null;
+      }
       throw error;
     }
     // Accepted by the runtime. A generation replaced while the runtime was
@@ -657,6 +668,9 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
         schedulePendingCleanup(owner);
       }
       return;
+    }
+    if (owner.mainFallbackWakeInFlight === text) {
+      owner.mainFallbackWakeInFlight = null;
     }
   }
 
@@ -1352,13 +1366,18 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
         owner.mainFallbackSuccessor = true;
         owner.episodeCoalesced.delete(next.token);
         void processPendingActionables(owner);
-      } else if (owner.pendingActionables.every((pending) => pending.delivered)) {
+      } else if (
+        owner.pendingActionables.every((pending) => pending.delivered) &&
+        !owner.mainFallbackWakeInFlight
+      ) {
         // Rows outlived every close record (e.g. appended after the last
         // actionable close): a pending-less wake re-presents them. The episode
         // stays open so the next boundary re-evaluates.
         void sendWake(
           owner,
           "watcher wakes remain queued after the acknowledged episode",
+          undefined,
+          true,
         ).catch(() => {
           // The durable queue retains the rows; the next boundary retries.
         });
