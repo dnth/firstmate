@@ -773,7 +773,7 @@ export default function (pi: ExtensionAPI) {
       if (!(await actingAsOwner(expectedGeneration))) return;
       const pending = await runOutcomeScript(["undelivered"]);
       if (!pending.ok || !pending.stdout) return;
-      const rows = pending.stdout.split("\n").filter((line) => line.length > 0).slice(0, 20);
+      const rows = pending.stdout.split("\n").filter((line) => line.length > 0);
       const fresh = rows.filter((line) => {
         const [task, ident, endpoint] = line.split("\t");
         const id = `${task}|${ident}|${endpoint}`;
