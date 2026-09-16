@@ -336,7 +336,8 @@ For an opted-in OMP launch, `bin/fm-spawn.sh` passes a single message: the stand
 Marked briefs refuse raw launch commands before endpoint creation, so the verified OMP launch template cannot be bypassed and silently lose the opt-in keyword.
 Any other harness or task kind is refused before launch.
 Nested `task` subagents stay inside the task worktree as implementation helpers owned by the crewmate; they do not become independent Firstmate workers and do not gain merge or production authority, so Firstmate's registered-crewmate supervision, production/merge authority, receipt contract, and No-Mistakes branch custody are unchanged.
-Use the opt-in only for tasks with genuinely independent workstreams inside the same worktree: ordinary and sequential tasks launch unchanged, `orchestrate` and `workflowz` are never combined, and the keyword is never added by default or forced onto trivial work.
+The full worker decision policy for when orchestration is appropriate, including its explicit exclusions and overhead gate, is rendered in the generated brief's `# Orchestration` section by `bin/fm-brief.sh`; follow that section as the policy owner.
+The OMP keyword mechanics remain unchanged: ordinary and sequential tasks launch unchanged, `orchestrate` and `workflowz` are never combined, and the keyword is never added by default.
 The activation boundary was verified on OMP 18.1.14 (2026-09-10); `docs/verification/runtime-backends.md` owns the live commands and bounded output.
 
 [The tmux backend guide](../../../docs/tmux-backend.md#current-behavior-and-safety) owns OMP's launch identity, supported canonical paths, composer geometry, submission, and recovery behavior.
