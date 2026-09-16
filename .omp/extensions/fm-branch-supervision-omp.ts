@@ -929,12 +929,12 @@ export default function (pi: ExtensionAPI) {
             };
           }
           // The outcome's covered span is the granting snapshot's endpoint for
-          // a granted task, else the live stable EOF - the same binding
-          // fm-branch-outcome.sh append just recorded. Every undelivered
+          // the granted task - the same binding fm-branch-outcome.sh append
+          // just recorded. Every undelivered
           // captain-facing event inside it (state recorded or pending) owes a
           // main turn, so the merge below takes the captain delivery shape
           // whenever the completions scan returns any.
-          const span = grantStatusSnapshot?.get(task) ?? captureTaskStatusSnapshot(state, task);
+          const span = grantStatusSnapshot?.get(task);
           let completionIds: string[] = [];
           if (span) {
             const scan = await runOutcomeScript([
@@ -1170,19 +1170,21 @@ ${context.command}
         if (scope.corrupted) {
           throw new Error("the unread wake queue could not be read safely");
         }
-        const grantStatusEntries = scope.eligibleTasks
-          .map((task) => captureTaskStatusSnapshot(state, task))
-          .filter((entry): entry is BranchStatusSnapshotEntry => entry !== null);
+        const grantStatusEntries = scope.eligibleTasks.map((task) => captureTaskStatusSnapshot(state, task));
+        if (grantStatusEntries.some((entry) => entry === null)) {
+          throw new Error("could not capture a stable status snapshot for every granted task");
+        }
+        const stableGrantStatusEntries = grantStatusEntries as BranchStatusSnapshotEntry[];
         const grant = await writeEligibleRowsSnapshot(
           state,
           scope.eligibleSeqs,
           wakeGrantScript,
           String(acceptedGeneration),
-          grantStatusEntries,
+          stableGrantStatusEntries,
         );
         if (grant === "main-owned") throw new Error("the wake rows are already claimed by main");
         if (grant !== "published") throw new Error("could not record the branch's eligible row snapshot");
-        grantStatusSnapshot = new Map(grantStatusEntries.map((entry) => [entry.task, entry]));
+        grantStatusSnapshot = new Map(stableGrantStatusEntries.map((entry) => [entry.task, entry]));
         // A row can still arrive between this re-check and the model starting
         // the drain; that residual is accepted by the confused-agent-grade boundary.
         const reportRevisionBeforePrompt = durableReportRevision;

@@ -69,6 +69,24 @@ owner_matches() { # [<pid>] [<generation>]
   fm_wake_branch_owner_matches "$BRANCH_OWNER" "${1:-}" "${2:-}"
 }
 
+capture_locked_status_snapshot() {
+  local task path first second dev ino size
+  TMP_STATUS=$(mktemp "$STATE/.branch-eligible-status.tmp.XXXXXX") || return 1
+  while IFS=$'\t' read -r task _ _; do
+    [ -n "$task" ] || continue
+    case "$task" in *$'\t'*|*$'\n'*) return 1 ;; esac
+    path="$STATE/$task.status"
+    [ -f "$path" ] && [ ! -L "$path" ] && [ -r "$path" ] || return 1
+    first=$(stat -c '%d:%i:%s' -- "$path" 2>/dev/null || stat -f '%d:%i:%z' -- "$path" 2>/dev/null) || return 1
+    second=$(stat -c '%d:%i:%s' -- "$path" 2>/dev/null || stat -f '%d:%i:%z' -- "$path" 2>/dev/null) || return 1
+    [ "$first" = "$second" ] || return 1
+    dev=${first%%:*}; first=${first#*:}
+    ino=${first%%:*}; size=${first#*:}
+    printf '%s\t%s\t%s:%s\n' "$task" "$size" "$dev" "$ino" >> "$TMP_STATUS" || return 1
+  done < "$status_snapshot"
+  chmod 0600 "$TMP_STATUS" || return 1
+}
+
 case "${1:-}" in
   activate)
     pid=${2:-}
@@ -117,13 +135,13 @@ case "${1:-}" in
         $3 !~ /^[0-9]+:[0-9]+$/ { exit 1 }
         { print }
       ' "$status_snapshot" > /dev/null || exit 2
-      TMP_STATUS=$(mktemp "$STATE/.branch-eligible-status.tmp.XXXXXX") || exit 1
-      cat -- "$status_snapshot" > "$TMP_STATUS" || exit 1
-      chmod 0600 "$TMP_STATUS" || exit 1
     fi
     fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
     LOCK_HELD=true
     owner_matches '' "$generation" || exit 1
+    if [ -n "$status_snapshot" ]; then
+      capture_locked_status_snapshot || exit 1
+    fi
     replace=1
     if [ -e "$BRANCH_ROWS" ] || [ -L "$BRANCH_ROWS" ]; then
       rows_valid "$BRANCH_ROWS" && cmp -s "$TMP" "$BRANCH_ROWS" || exit 1
