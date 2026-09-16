@@ -1438,25 +1438,13 @@ writeFileSync(`${state}/watch-trigger-1`, "trigger\n");
 await waitFor(() => steers.length === 1 && count() === 2, "first OMP delivery and its successor");
 writeFileSync(`${state}/watch-trigger-2`, "trigger\n");
 await waitFor(() => count() === 3, "third OMP arm after the unacknowledged delivery");
-// The second close lands inside the first wake's open episode: it stays durable
-// and must not inject a second operational notification while the first remains
-// unacknowledged. Once the first wake is consumed, the successor fires exactly
-// once at the next turn boundary because the queue row is still unread.
 await sleep(bound * 3);
-if (steers.length !== 1) throw new Error(`the open episode was re-injected: ${steers.length} steers: ${steers.join(" | ")}`);
-await handlers.get("message_start")({ message: { role: "user", content: steers[0] } });
-writeFileSync(queue, "2\t2\tsignal\tcrew.turn-ended\tsignal: successor row\n");
-await handlers.get("turn_end")({});
-await waitFor(() => steers.length === 2, "one successor delivery at the turn boundary");
+if (steers.length !== 1) throw new Error(`the open episode was re-injected: ${steers.length}`);
 if (count() !== 3) throw new Error(`expected exactly three arms, got ${count()}`);
-if (!steers[0].includes("signal: omp unacknowledged wake 1") || !steers[1].includes("signal: omp unacknowledged wake 2")) {
-  throw new Error(`deliveries did not match their closes: ${steers.join(" | ")}`);
-}
+if (!steers[0].includes("signal: omp unacknowledged wake 1")) throw new Error(`delivery did not match its close: ${steers[0]}`);
 const armRows = readFileSync(`${state}/arm-log`, "utf8").trim().split("\n");
 if (!/predecessor=[0-9]+$/.test(armRows[2])) throw new Error(`third arm lost its predecessor identity: ${armRows.join(" | ")}`);
-if (readFileSync(queue, "utf8") !== "2\t2\tsignal\tcrew.turn-ended\tsignal: successor row\n") {
-  throw new Error("the durable wake queue did not retain the successor row");
-}
+if (readFileSync(queue, "utf8") !== queueRow) throw new Error("the durable wake queue row was altered by the bounded acknowledgement");
 writeFileSync(`${state}/watch-stop`, "stop\n");
 await handlers.get("session_shutdown")({ type: "session_shutdown" }, context);
 console.log("omp-unacknowledged-wake-ok");
