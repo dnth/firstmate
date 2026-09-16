@@ -1334,9 +1334,10 @@ JS
 
 # A wake that OMP queues into an already-running turn never starts a turn, so
 # before_agent_start never acknowledges it. The shared core must bound that wait:
-# the next actionable close still has to start its successor and deliver its own
-# wake exactly once instead of parking the whole chain behind the first
-# unacknowledged delivery.
+# the next actionable close still has to start its successor instead of parking
+# the whole chain behind the first unacknowledged delivery, and its wake is
+# coalesced into exactly one successor delivered at the next turn boundary
+# while the queue row stays unread.
 test_native_omp_unacknowledged_wake_keeps_successor_chain() {
   local fixture out status=0
   fixture="$TMP_ROOT/native-unacknowledged-wake"
@@ -1347,6 +1348,7 @@ test_native_omp_unacknowledged_wake_keeps_successor_chain() {
   cp "$ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" "$fixture/.omp/extensions/lib/fm-task-inbox-doorbell.ts"
   cp "$ROOT/bin/fm-primary-watch-core.ts" "$fixture/bin/fm-primary-watch-core.ts"
   cp "$ROOT/bin/fm-pi-compatible-runtimes" "$fixture/bin/fm-pi-compatible-runtimes"
+  cp "$ROOT/bin/fm-wake-lib.sh" "$fixture/bin/fm-wake-lib.sh"
   : > "$fixture/AGENTS.md"
   git init -q -b main "$fixture"
   cat > "$fixture/bin/fm-gate-refuse-lib.sh" <<'SH'
@@ -1436,10 +1438,15 @@ writeFileSync(`${state}/watch-trigger-1`, "trigger\n");
 await waitFor(() => steers.length === 1 && count() === 2, "first OMP delivery and its successor");
 writeFileSync(`${state}/watch-trigger-2`, "trigger\n");
 await waitFor(() => count() === 3, "third OMP arm after the unacknowledged delivery");
-await waitFor(() => steers.length === 2, "second OMP delivery");
+// The second close lands inside the first wake's open episode: it stays durable
+// and must not inject a second operational notification while the first remains
+// unacknowledged. The successor fires exactly once at the next turn boundary
+// because the queue row is still unread.
 await sleep(bound * 3);
+if (steers.length !== 1) throw new Error(`the open episode was re-injected: ${steers.length} steers: ${steers.join(" | ")}`);
+await handlers.get("turn_end")({});
+await waitFor(() => steers.length === 2, "one successor delivery at the turn boundary");
 if (count() !== 3) throw new Error(`expected exactly three arms, got ${count()}`);
-if (steers.length !== 2) throw new Error(`expected exactly one delivery per close, got ${steers.length}: ${steers.join(" | ")}`);
 if (!steers[0].includes("signal: omp unacknowledged wake 1") || !steers[1].includes("signal: omp unacknowledged wake 2")) {
   throw new Error(`deliveries did not match their closes: ${steers.join(" | ")}`);
 }
@@ -1630,6 +1637,148 @@ JS
   pass "OMP core handoff suppresses duplicate durable queue notification"
 }
 
+# Issue #82: with the supervision branch unavailable, a burst of actionable
+# closes during one claimed, unacknowledged main handling episode must not
+# re-inject operational wakes that preempt the handler. The episode ends at a
+# main turn boundary, which delivers zero or one successor depending on whether
+# unread main-owned queue rows remain.
+test_native_omp_main_fallback_coalesces_burst() {
+  local fixture out status=0
+  fixture=$(make_omp_queue_fixture native-fallback-coalesce)
+  cat > "$fixture/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+state=${FM_STATE_OVERRIDE:?}
+count=$(cat "$state/watch-count" 2>/dev/null || printf 0)
+count=$((count + 1))
+printf '%s\n' "$count" > "$state/watch-count"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$state/watch-stop" ]; do
+  if [ -e "$state/wake-now-$count" ]; then
+    printf 'signal: burst-close-%s\n' "$count"
+    exit 0
+  fi
+  sleep 0.02
+done
+SH
+  chmod +x "$fixture/bin/fm-watch-arm.sh"
+  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
+    FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    node --input-type=module 2>&1 <<'JS'
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const state = process.env.FM_STATE_OVERRIDE;
+const handlers = new Map();
+const wakes = [];
+const api = {
+  zod: { object: () => ({}) },
+  on(name, handler) { handlers.set(name, handler); },
+  registerCommand() {},
+  registerTool() {},
+  // The supervision branch is unavailable: no events surface accepts the offer,
+  // so every ordinary actionable wake falls back to main.
+  sendMessage(message) {
+    if (message?.customType === "firstmate-watcher-wake") wakes.push(String(message.content ?? ""));
+  },
+};
+const queue = `${state}/.wake-queue`;
+const seqFile = `${state}/.wake-queue.seq`;
+let seq = 0;
+const rows = new Map();
+const appendRow = (kind, key) => {
+  seq += 1;
+  const line = `0\t${seq}\t${kind}\t${key}\t${kind}: ${key}`;
+  rows.set(seq, line);
+  writeFileSync(seqFile, `${seq}\n`);
+  appendFileSync(queue, `${line}\n`);
+};
+const ackThrough = (cutoff) => {
+  for (const [s, line] of rows) if (s <= cutoff) rows.delete(s);
+  writeFileSync(queue, [...rows.values()].map((line) => `${line}\n`).join(""));
+};
+const count = () => existsSync(`${state}/watch-count`) ? Number(readFileSync(`${state}/watch-count`, "utf8").trim()) : 0;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) { if (pred()) return; await sleep(10); }
+  throw new Error(`timeout waiting for ${label}`);
+}
+const consumeWake = (content) => handlers.get("message_start")({ message: { role: "user", content } });
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+process.argv[1] = process.env.EXTENSION;
+const module = await import(`${pathToFileURL(process.env.EXTENSION).href}?coalesce=${Date.now()}`);
+module.default(api);
+const context = { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "sess-one" } };
+await handlers.get("session_start")({ type: "session_start" }, context);
+await waitFor(() => count() === 1, "initial arm");
+
+// Steps 1-2: one task-local row falls back to main; main claims and starts
+// handling it (consumes the wake) while the episode stays unacknowledged.
+appendRow("signal", "crew-one.turn-ended");
+writeFileSync(`${state}/wake-now-1`, "go\n");
+await waitFor(() => wakes.length === 1 && count() === 2, "first fallback wake and its successor");
+if (!wakes[0].includes("signal: burst-close-1")) throw new Error(`first wake mismatched its close: ${wakes[0]}`);
+consumeWake(wakes[0]);
+
+// Steps 3-4: two higher-sequence rows close their watcher cycles mid-episode.
+// Both stay durable in the queue and neither may inject a second notification.
+appendRow("signal", "crew-two.turn-ended");
+writeFileSync(`${state}/wake-now-2`, "go\n");
+await waitFor(() => count() === 3, "successor arm after the first burst row");
+appendRow("stale", "default:w1:p2");
+writeFileSync(`${state}/wake-now-3`, "go\n");
+await waitFor(() => count() === 4, "successor arm after the second burst row");
+await sleep(300);
+if (wakes.length !== 1) throw new Error(`burst re-injected during the open episode: ${wakes.length} wakes`);
+
+// Step 8: a real captain message during handling is not coalesced - it is a
+// normal user message, never matched against the wake text or the episode.
+consumeWake("captain: stop what you are doing and look at this");
+await sleep(150);
+if (wakes.length !== 1) throw new Error(`captain interjection produced an operational wake: ${wakes.length}`);
+
+// Steps 5-6: the handler drains the aggregate once and acknowledges the latest
+// sequence; with no unread main-owned rows the boundary delivers no successor.
+ackThrough(3);
+await handlers.get("turn_end")({});
+await sleep(300);
+if (wakes.length !== 1) throw new Error(`acknowledgement was followed by a redundant successor: ${wakes.length} wakes`);
+
+// Step 7: a new close opens a second episode; acknowledging through it while
+// leaving one higher-sequence row unread delivers exactly one successor.
+appendRow("signal", "crew-three.turn-ended");
+writeFileSync(`${state}/wake-now-4`, "go\n");
+await waitFor(() => wakes.length === 2 && count() === 5, "second-episode fallback wake");
+consumeWake(wakes[1]);
+appendRow("signal", "crew-four.turn-ended");
+writeFileSync(`${state}/wake-now-5`, "go\n");
+await waitFor(() => count() === 6, "successor arm after the leftover row's close");
+ackThrough(4);
+await handlers.get("turn_end")({});
+await waitFor(() => wakes.length === 3, "exactly one successor for the unread leftover row");
+if (!wakes[2].includes("signal: burst-close-5")) throw new Error(`successor wake mismatched its close: ${wakes[2]}`);
+await sleep(300);
+if (wakes.length !== 3) throw new Error(`the leftover row was notified more than once: ${wakes.length} wakes`);
+
+// Restart recovery: the granted successor is accepted but still unconsumed, so
+// a session replacement must persist it and replay it exactly once under the
+// new generation - no lost wake, no duplicate accepted turn.
+await handlers.get("session_switch")({ type: "session_switch", reason: "new" }, context);
+await waitFor(() => wakes.length === 4, "replacement replay of the unconsumed successor");
+if (!wakes[3].includes("signal: burst-close-5")) throw new Error(`replacement replayed the wrong close: ${wakes[3]}`);
+await sleep(300);
+if (wakes.length !== 4) throw new Error(`replacement duplicated the replayed wake: ${wakes.length} wakes`);
+
+writeFileSync(`${state}/watch-stop`, "stop\n");
+await handlers.get("session_shutdown")({ type: "session_shutdown" }, context);
+console.log("omp-fallback-coalesce-ok");
+JS
+  ) || status=$?
+  printf 'stop\n' > "$fixture/state/watch-stop" 2>/dev/null || true
+  expect_code 0 "$status" "OMP main-fallback burst coalescing"
+  assert_contains "$out" omp-fallback-coalesce-ok "OMP fallback burst was not coalesced: $out"
+  pass "OMP coalesces fallback wakes into one in-flight notification per handling episode"
+}
+
 test_native_omp_delivered_handoff_does_not_suppress_queue_notification() {
   local fixture out status=0
   fixture=$(make_omp_queue_fixture native-queue-delivered-handoff)
@@ -1685,4 +1834,5 @@ test_native_omp_unacknowledged_wake_keeps_successor_chain
 test_native_omp_durable_queue_session_notifications
 test_native_omp_empty_queue_suppresses_session_notifications
 test_native_omp_core_handoff_suppresses_queue_notification
+test_native_omp_main_fallback_coalesces_burst
 test_native_omp_delivered_handoff_does_not_suppress_queue_notification

@@ -674,8 +674,21 @@ The live OMP 18.0.10 observation on 2026-08-31 found the supervision branch unav
 The claimed sequences progressed from rows 11 and 12 with `--ack-through 12`, through rows 11, 14, 15, and 16 with `--ack-through 16`, to rows 11, 14, 15, 16, and 17 with `--ack-through 17`.
 The repeated drain command was `bin/fm-wake-drain.sh`, and the intervening report and current-state tools were skipped by pending operational input.
 No queue row was lost during this observation.
-Current coverage proves one fallback delivery but not a burst of current fallback notifications while MAIN owns an unacknowledged batch.
-The missing regression boundary is the issue [#82](https://github.com/dnth/firstmate/issues/82) burst scenario: coalesce one active MAIN fallback handling episode, preserve durable higher-sequence rows, and deliver zero or one successor after acknowledgement according to whether unread MAIN-owned rows remain.
+
+The issue [#82](https://github.com/dnth/firstmate/issues/82) coalescing contract is now implemented in `bin/fm-primary-watch-core.ts` (design owner: `docs/omp-supervision-branch.md`).
+On 2026-09-16 the deterministic burst regression ran under Node v25.2.1 against the tracked OMP primary extension, driving the real watcher-arm, delivery, consumption, and turn-boundary surfaces with the supervision branch absent:
+
+```sh
+bash tests/fm-omp-primary.test.sh
+```
+
+```text
+ok - OMP unacknowledged wake delivery keeps the successor chain and delivers once per close
+ok - OMP coalesces fallback wakes into one in-flight notification per handling episode
+```
+
+`test_native_omp_main_fallback_coalesces_burst` proves the branch-unavailable burst scenario: one fallback wake is injected, two higher-sequence rows (one signal, one stale) appended mid-handling stay durable without a second injection, a real captain message neither matches the wake text nor produces an operational wake, a drain that acknowledges through the latest sequence is followed by no successor, and an acknowledgement that leaves one higher-sequence row unread is followed by exactly one successor carrying that row's close.
+`test_native_omp_unacknowledged_wake_keeps_successor_chain` proves the boundary path for a wake the runtime queued without consumption: the next close is coalesced and its single successor is delivered at the turn boundary while the queue row stays unread.
 Issue [#82](https://github.com/dnth/firstmate/issues/82) is distinct from issue [#74](https://github.com/dnth/firstmate/issues/74), which covers stale advisory freshness after durable state supersedes prose rather than reentrant delivery of current valid operational notifications.
 
 ## Herdr
