@@ -967,6 +967,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
           if (outcome !== "delivered") {
             if (pending.fallbackOnly && !owner.mainFallbackWakeInFlight) {
               owner.mainFallbackSuccessorGranted = false;
+              owner.mainFallbackBaselineRows = null;
             }
             settleClaim("failed");
             releaseClaim();
