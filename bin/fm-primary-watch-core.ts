@@ -1395,7 +1395,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
         // actionable close): a synthetic wake re-presents them. The episode
         // stays open so the next boundary re-evaluates.
         const successor = createPendingActionable(
-          "watcher wakes remain queued after the acknowledged episode",
+          "signal: watcher wakes remain queued after the acknowledged episode",
           "",
         );
         successor.fallbackOnly = true;
