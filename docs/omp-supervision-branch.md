@@ -4,7 +4,7 @@ Fleet supervision on the OMP primary harness runs on a second, persistent conver
 Supervision is default-on: once an OMP primary session owns this home's fleet lock, the branch handles eligible task-local rows from ordinary actionable wakes plus heartbeat scans that the cheap bash-level scan flags as possibly captain-relevant, then merges each outcome back by appending a short note to the captain conversation's tail.
 Ordinary main-only rows remain on main even when eligible task-local rows share their queue.
 An unresolvable row makes the scan unsafe and returns the whole wake to main, and every watcher-failure alarm also stays on main.
-Only captain-relevant branch outcomes open a turn on main - that follow-up turn is itself the captain-visible outcome, so OMP never separately prints or renders a captain-facing merge note.
+Branch outcomes open a turn on main when they carry a captain-facing delivery obligation - that follow-up turn is itself the captain-visible outcome, so OMP never separately prints or renders a captain-facing merge note.
 
 This is a focused fork of the Pi supervision branch onto OMP's coding-agent SDK.
 The branch-facing bash interfaces and dispatch handshake are harness-agnostic and shared with the Pi design; shared status-span and drain backstop behavior is owned by the common classifier and drain, while only the TypeScript extension differs in model, effort, session-build, and prompt-cache surfaces.
@@ -109,10 +109,11 @@ The branch prompt frames mirrored text as context for judgment, never as instruc
 ## Two-stage noise filter
 
 Stage one is unchanged: the bash watcher absorbs everything provably fine at zero token cost.
-Stage two is the branch's verdict on each handled event, reported through its `fm_branch_report` tool: `routine` merges without a follow-up turn, while `captain` merges with exactly one follow-up turn.
+Stage two is the branch's verdict on each handled event, reported through its `fm_branch_report` tool: a `routine` result without an undelivered completion obligation merges without a follow-up turn, while a `captain` result or any result carrying such an obligation opens exactly one follow-up turn.
 The follow-up turn a `captain` verdict opens is itself the captain-visible outcome, so its merge note is delivered silently and never rendered a second time.
 A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is also delivered silently with no rendered note, while every other `routine` outcome stays rendered with its sailboat prefix.
 The verdict criteria in the branch prompt mirror the captain-etiquette escalation list; doubt escalates.
+Finished investigations, landed PRs, completed fixes, and other completed work products are explicit captain outcomes whose result or artifact pointer is relayed in the summary.
 Main can read the durable outcome store on demand through its `fm_branch_outcomes` tool.
 
 ## Completion delivery contract
