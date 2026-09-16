@@ -806,7 +806,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
   }
 
   function surfaceFailure(owner: SessionGeneration, message: string): void {
-    if (coalesceMainFallbackWakes && owner.mainFallbackWakeInFlight) return;
+    if (coalesceMainFallbackWakes && (owner.mainFallbackWakeInFlight || owner.mainFallbackEpisode)) return;
     if (coalesceMainFallbackWakes) {
       owner.mainFallbackEpisode = true;
       if (!owner.mainFallbackBaselineRows) owner.mainFallbackBaselineRows = mainOwnedWakeSnapshot();
