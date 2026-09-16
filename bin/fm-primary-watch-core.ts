@@ -116,6 +116,7 @@ type SessionGeneration = {
   // second injection.
   mainFallbackEpisode: boolean;
   mainFallbackSuccessor: boolean;
+  mainFallbackSuccessorGranted: boolean;
   episodeCoalesced: Set<string>;
   // A turn boundary that arrived while a delivery run was still in flight.
   // Evaluating then could retire the episode beneath a close that has not
@@ -274,6 +275,7 @@ function createGeneration(): SessionGeneration {
     deferredClose: null,
     mainFallbackEpisode: false,
     mainFallbackSuccessor: false,
+    mainFallbackSuccessorGranted: false,
     episodeCoalesced: new Set(),
     pendingTurnEnd: false,
     mainFallbackWakeInFlight: null,
@@ -752,6 +754,9 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     // the runtime accepts the follow-up still sees this notification in flight.
     if (coalesceMainFallbackWakes) {
       owner.mainFallbackEpisode = true;
+      if (!owner.mainFallbackSuccessor && !owner.mainFallbackWakeInFlight) {
+        owner.mainFallbackSuccessorGranted = false;
+      }
       if (!owner.mainFallbackBaselineRows) owner.mainFallbackBaselineRows = mainOwnedWakeSnapshot();
       // A record actually being sent is no longer coalesced, so a failed send
       // can be retried by a later boundary grant instead of staying invisible.
@@ -1405,8 +1410,9 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       const next = owner.pendingActionables
         .filter((pending) => !pending.delivered && !owner.unconsumedWakes.has(pending.token))
         .pop();
-      if (next && !owner.mainFallbackWakeInFlight) {
+      if (next && !owner.mainFallbackWakeInFlight && !owner.mainFallbackSuccessorGranted) {
         owner.mainFallbackSuccessor = true;
+        owner.mainFallbackSuccessorGranted = true;
         if (currentRows) owner.mainFallbackBaselineRows = currentRows;
         owner.episodeCoalesced.delete(next.token);
         void processPendingActionables(owner);
@@ -1432,6 +1438,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     if (owner.mainFallbackWakeInFlight) return;
     owner.mainFallbackEpisode = false;
     owner.mainFallbackSuccessor = false;
+    owner.mainFallbackSuccessorGranted = false;
     owner.mainFallbackBaselineRows = null;
     for (const pending of owner.pendingActionables.filter(
       (item) => !item.delivered && owner.episodeCoalesced.has(item.token),
