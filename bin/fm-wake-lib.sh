@@ -1845,6 +1845,28 @@ fm_wake_branch_grant_live() {  # <rows-file> <owner-file>
   fm_wake_grant_rows_valid "$1" && fm_wake_branch_owner_matches "$2"
 }
 
+fm_wake_actor_pending_rows() {  # <actor> [<rows-file> <owner-file>]
+  local actor=${1:-main} rows=${2:-$STATE/.branch-eligible-rows}
+  local owner=${3:-$STATE/.branch-eligible-owner} grant=''
+  [ -f "$FM_WAKE_QUEUE" ] || return 0
+  if fm_wake_branch_grant_live "$rows" "$owner"; then
+    grant=$rows
+  fi
+  if [ "$actor" = branch ]; then
+    [ -n "$grant" ] || return 0
+    awk -F '\t' -v seqs="$grant" '
+      BEGIN { while ((getline line < seqs) > 0) keep[line] = 1 }
+      NF >= 5 && $2 ~ /^[0-9]+$/ && ($2 in keep) { print }
+    ' "$FM_WAKE_QUEUE"
+  else
+    awk -F '\t' -v seqs="$grant" '
+      BEGIN { if (seqs != "") while ((getline line < seqs) > 0) reserved[line] = 1 }
+      NF < 5 || $2 !~ /^[0-9]+$/ { print; next }
+      !($2 in reserved) { print }
+    ' "$FM_WAKE_QUEUE"
+  fi
+}
+
 # How many queued rows <actor> can act on right now - exactly the rows a drain
 # by that actor would present or retire, and therefore the only rows worth
 # telling that actor to drain. Main owns every structurally valid row a live

@@ -316,6 +316,12 @@ export default function (omp: ExtensionAPI) {
     encodeOperationalInput,
     sendFollowUp: async (content) => sendWakeNotification(content),
     offerWakeToBranch,
+    // Main-fallback burst coalescing (docs/omp-supervision-branch.md
+    // "Main-fallback re-entry"): OMP reports main turn boundaries, so while one
+    // fallback wake's handling episode is open no second operational injection
+    // preempts the active handler, and each boundary delivers zero or one
+    // successor depending on unread main-owned rows.
+    coalesceMainFallbackWakes: true,
   });
 
   const deliverSessionstartNudge = (forceForNativeSwitch = false): void => {
@@ -373,7 +379,10 @@ export default function (omp: ExtensionAPI) {
     watch.arm();
   });
 
-  omp.on("turn_end", taskInboxDoorbell.notifyTurnEnd);
+  omp.on("turn_end", () => {
+    taskInboxDoorbell.notifyTurnEnd();
+    watch.turnEnd();
+  });
 
   omp.on("session_switch", async (event, ctx) => {
     await watch.sessionShutdown(true);

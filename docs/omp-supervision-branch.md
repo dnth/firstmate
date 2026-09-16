@@ -73,28 +73,32 @@ A row that lost the five appended fields or its numeric sequence can never be cl
 A retirement that cannot be read or written is reported and never fails the drain: the rows that remain usable are still presented with their acknowledgement command, the unusable ones stay queued for a later drain to retire, and failing the whole drain would strand the usable rows too.
 This scoping engages only while a branch grant is, or recently was, in play: a home that never runs the branch has none of the actor files, so the shared drain runs without branch actor scoping and writes no actor state.
 
-## Main-fallback re-entry limitation
+## Main-fallback re-entry coalescing
 
 When the supervision branch is unavailable or rejects settlement, the shared watcher core retains eligible wakes and delivers them to MAIN through the ordinary consumption-acknowledged operational notification path.
-Per-actor queue ownership prevents MAIN and the branch from double-consuming a row, but it does not serialize fallback notifications while MAIN handles a claimed, unacknowledged row set.
-Each valid higher-sequence signal or stale row can therefore inject another priority operational notification during the same handling episode.
-OMP can preempt or skip the report reads, current-state reconciliation, cleanup, or generation-bound acknowledgement that would finish the active episode.
-The durable queue preserves every row, but that no-loss property does not guarantee forward progress, so a burst can create a re-entry loop until attended recovery breaks it.
+Per-actor queue ownership prevents MAIN and the branch from double-consuming a row, and the core additionally serializes fallback notifications so a burst cannot re-enter MAIN while it handles a claimed, unacknowledged row set.
 
-The required coalescing invariant is that MAIN has at most one accepted fallback notification in flight for one active handling episode.
-Rows appended during that episode remain durable without injecting another operational turn, and the next drain handles them as one aggregate.
-After acknowledgement, exactly one successor notification is delivered only when unread MAIN-owned rows remain, while no successor is delivered when the final acknowledgement consumes them.
-Real captain messages retain priority and are never coalesced with operational notifications.
-Delivery that fails or has indeterminate acceptance remains replayable without losing a row or duplicating an accepted MAIN turn.
+The coalescing invariant, implemented for issue [#82](https://github.com/dnth/firstmate/issues/82), is that MAIN has at most one accepted fallback notification in flight for one active handling episode.
+The first accepted fallback wake opens a per-generation handling episode in `bin/fm-primary-watch-core.ts`.
+While that episode is open, further actionable closes still run their restore and earn their successor arm, but their main-bound injection is suppressed and marked coalesced instead of injecting another priority operational turn.
+The rows those closes represent remain durable in the queue and are presented by the next drain as one aggregate.
+Only OMP opts in (`coalesceMainFallbackWakes`), because the boundary that retires an episode must be a real turn boundary, which only the OMP adapter reports through its `turn_end` event.
 
-Any fix must preserve per-actor row ownership, branch grants, recovery generations, interruption replay, branch-unavailable fallback, and every existing no-lost-wake boundary.
-The bounded attended recovery for the current defect is to interrupt the re-entry episode once, drain the durable notifications, reconcile current state, and execute the printed generation-bound `--ack-through` command.
-If unread MAIN-owned rows remain after that acknowledgement, allow the single successor notification and stop repeated manual retries rather than extending the loop.
+The episode is evaluated at each main turn boundary, where the core counts unread MAIN-owned rows with `fm_wake_actor_pending_count main` from `bin/fm-wake-lib.sh`, the same per-actor count the drain and guard share.
+An empty count closes the episode and finishes every coalesced close record with no successor, because the acknowledgement that drained the queue already covered them.
+A nonzero count grants exactly one successor injection that delivers the newest still-undelivered close; older coalesced records stay covered by that same drain.
+A boundary that arrives while a delivery run is mid-flight is replayed when the run settles, so a close cannot slip between the row count and the suppression check.
+A queue that cannot be counted is treated as nonempty, so an episode is never retired early on unreadable state.
+Real captain messages retain priority and are never coalesced, because only the watcher fallback path reads the episode guard.
+A send that fails before confirmed acceptance stays undelivered and is retried by a later boundary grant, and an accepted-but-unconsumed wake remains in the generation's unconsumed set for replacement replay exactly as before.
+
+Per-actor row ownership, branch grants, recovery generations, interruption replay, branch-unavailable fallback, and every existing no-lost-wake boundary are unchanged.
+The bounded attended recovery remains: interrupt any re-entry residue once, drain the durable notifications, reconcile current state, and execute the printed generation-bound `--ack-through` command.
+If unread MAIN-owned rows remain after that acknowledgement, allow the single successor notification rather than repeating manual retries.
 
 Issue [#82](https://github.com/dnth/firstmate/issues/82) owns this current-notification re-entry defect and its coalescing regression boundary.
 Issue [#74](https://github.com/dnth/firstmate/issues/74) instead owns stale advisory freshness after durable state supersedes prose, where delivery-time reconciliation decides whether an advisory is still current.
-Suppressing stale prose for #74 does not prevent a current valid signal or stale row from re-entering MAIN, so the two issues require separate invariants and regression scenarios.
-The live observation and missing burst regression are recorded in [runtime-backends.md](verification/runtime-backends.md#omp-main-fallback-re-entry).
+The live observation and the burst regression record are kept in [runtime-backends.md](verification/runtime-backends.md#omp-main-fallback-re-entry).
 
 ## How the branch knows what the captain said
 

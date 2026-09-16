@@ -59,6 +59,7 @@ type PendingActionableClose = {
   message: string;
   predecessorArmPid: string;
   delivered?: true;
+  fallbackOnly?: true;
 };
 
 type UnconsumedWake = {
@@ -105,6 +106,25 @@ type SessionGeneration = {
   // still delivering the wake it was started for; its bounded retry runs once
   // that delivery settles instead of being skipped by the single-flight guard.
   deferredClose: { message: string; predecessorArmPid: string } | null;
+  // Main-fallback coalescing (docs/omp-supervision-branch.md "Main-fallback
+  // re-entry coalescing"): while a main fallback notification's handling
+  // episode is open, further main-bound injections are suppressed so a burst of
+  // actionable closes cannot preempt the active handler. mainFallbackSuccessor
+  // is a one-shot grant a turn boundary issues when unread main-owned rows
+  // remain; episodeCoalesced names the closes whose notification the in-flight
+  // episode covered, so an acknowledged boundary can finish them without a
+  // second injection.
+  mainFallbackEpisode: boolean;
+  mainFallbackSuccessor: boolean;
+  mainFallbackSuccessorGranted: boolean;
+  episodeCoalesced: Set<string>;
+  // A turn boundary that arrived while a delivery run was still in flight.
+  // Evaluating then could retire the episode beneath a close that has not
+  // reached its suppression point, so the boundary is replayed once the run
+  // settles.
+  pendingTurnEnd: boolean;
+  mainFallbackWakeInFlight: string | null;
+  mainFallbackBaselineRows: Set<string> | null;
 };
 
 export type ArmResult = {
@@ -130,6 +150,11 @@ export type PrimaryWatchCoreOptions = {
   // delivery ownership to the core's consumption-acknowledged main path.
   // Never offered for repair-failed delivery: only main can repair the cycle.
   offerWakeToBranch?: (message: string) => Promise<void> | null;
+  // Coalesce main-fallback wake injections behind the active handling episode.
+  // Only adapters that report main turn boundaries through turnEnd() may enable
+  // it: without that callback an episode could never close and suppressed wakes
+  // would starve.
+  coalesceMainFallbackWakes?: boolean;
 };
 
 export type PrimaryWatchCore = {
@@ -141,6 +166,7 @@ export type PrimaryWatchCore = {
   markLoaded: () => void;
   sessionShutdown: (replacement?: boolean) => Promise<void>;
   sessionStart: () => void;
+  turnEnd: () => void;
 };
 
 // Single producer of the OMP native process identity pair. Both the loaded
@@ -247,6 +273,13 @@ function createGeneration(): SessionGeneration {
     cleanupFailure: "",
     unconsumedWakes: new Map(),
     deferredClose: null,
+    mainFallbackEpisode: false,
+    mainFallbackSuccessor: false,
+    mainFallbackSuccessorGranted: false,
+    episodeCoalesced: new Set(),
+    pendingTurnEnd: false,
+    mainFallbackWakeInFlight: null,
+    mainFallbackBaselineRows: null,
   };
 }
 
@@ -299,6 +332,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     encodeOperationalInput,
     sendFollowUp,
     offerWakeToBranch,
+    coalesceMainFallbackWakes = false,
   } = options;
   const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
   const handoffDir = `${state}/extensions/${runtime}-primary-watch`;
@@ -369,7 +403,9 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       typeof (value as { predecessorArmPid?: unknown }).predecessorArmPid !== "string" ||
       !/^[0-9]*$/.test((value as { predecessorArmPid: string }).predecessorArmPid) ||
       ((value as { delivered?: unknown }).delivered !== undefined &&
-        (value as { delivered?: unknown }).delivered !== true)
+        (value as { delivered?: unknown }).delivered !== true) ||
+      ((value as { fallbackOnly?: unknown }).fallbackOnly !== undefined &&
+        (value as { fallbackOnly?: unknown }).fallbackOnly !== true)
     ) {
       throw new Error(`invalid ${runtimeLabel} replacement actionable handoff at ${actionableHandoff}`);
     }
@@ -596,17 +632,26 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
   // before_agent_start for an idle main and at the user message_start for a
   // streaming main. Until consumption the pending record is kept in
   // unconsumedWakes so a session replacement can replay it.
-  async function sendWake(owner: SessionGeneration, message: string, pending?: PendingActionableClose): Promise<boolean> {
+  async function sendWake(
+    owner: SessionGeneration,
+    message: string,
+    pending?: PendingActionableClose,
+    trackMainFallback = false,
+  ): Promise<boolean> {
     if (!generationIsLive(owner)) return false;
     const content = encodeOperationalInput(
       "watcher",
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
     );
     if (pending) owner.unconsumedWakes.set(pending.token, { content, pending });
+    if (trackMainFallback) owner.mainFallbackWakeInFlight = content;
     try {
       await sendFollowUp(content);
     } catch (error) {
       if (pending) owner.unconsumedWakes.delete(pending.token);
+      if (trackMainFallback && owner.mainFallbackWakeInFlight === content) {
+        owner.mainFallbackWakeInFlight = null;
+      }
       throw error;
     }
     // Accepted by the runtime. A generation replaced while the runtime was
@@ -629,7 +674,13 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
         surfaceCleanupFailure(owner, error);
         schedulePendingCleanup(owner);
       }
+      if (owner.mainFallbackWakeInFlight === text) {
+        owner.mainFallbackWakeInFlight = null;
+      }
       return;
+    }
+    if (owner.mainFallbackWakeInFlight === text) {
+      owner.mainFallbackWakeInFlight = null;
     }
   }
 
@@ -680,19 +731,69 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     return confirmHandlingDelivery(snapshot());
   }
 
+  // A wake bound for MAIN while its fallback episode is still open is
+  // suppressed instead of injected: the episode's drain already covers every
+  // queued row, and a second operational notification can only preempt the
+  // active handler. "delivered" is also the answer when the boundary pass has
+  // mooted main delivery (queue already drained) while a branch offer is still
+  // allowed to run.
+  type MainWakeOutcome = "delivered" | "suppressed" | "failed";
+  async function deliverMainWake(
+    owner: SessionGeneration,
+    message: string,
+    pending: PendingActionableClose,
+  ): Promise<MainWakeOutcome> {
+    if (coalesceMainFallbackWakes && owner.mainFallbackWakeInFlight) {
+      owner.mainFallbackEpisode = true;
+      return "suppressed";
+    }
+    if (coalesceMainFallbackWakes && owner.mainFallbackEpisode && !owner.mainFallbackSuccessor) {
+      return "suppressed";
+    }
+    // Open the episode before the awaited send so a turn boundary landing while
+    // the runtime accepts the follow-up still sees this notification in flight.
+    if (coalesceMainFallbackWakes) {
+      let baselineRows = owner.mainFallbackBaselineRows ?? mainOwnedWakeSnapshot();
+      if (!baselineRows && mainOwnedWakeRows() === 0) baselineRows = new Set();
+      if (!baselineRows) {
+        schedulePendingCleanup(owner);
+        return "failed";
+      }
+      owner.mainFallbackEpisode = true;
+      if (!owner.mainFallbackSuccessor && !owner.mainFallbackWakeInFlight) {
+        owner.mainFallbackSuccessorGranted = false;
+      }
+      owner.mainFallbackBaselineRows = baselineRows;
+      // A record actually being sent is no longer coalesced, so a failed send
+      // can be retried by a later boundary grant instead of staying invisible.
+      owner.episodeCoalesced.delete(pending.token);
+    }
+    try {
+      return (await sendWake(owner, message, pending, coalesceMainFallbackWakes)) ? "delivered" : "failed";
+    } finally {
+      // The grant pays for exactly one send attempt: a failure before confirmed
+      // acceptance is replayed by a later boundary grant, never by letting a
+      // mid-episode close inherit the unconsumed grant.
+      if (coalesceMainFallbackWakes) owner.mainFallbackSuccessor = false;
+      if (coalesceMainFallbackWakes && !owner.mainFallbackWakeInFlight) {
+        owner.mainFallbackSuccessorGranted = false;
+      }
+    }
+  }
+
   async function deliverActionableWake(
     owner: SessionGeneration,
     message: string,
     repairFailed: boolean,
     pending: PendingActionableClose,
     recovery?: RecoveryHandoff,
-  ): Promise<boolean> {
-    if (!generationIsLive(owner)) return false;
+  ): Promise<MainWakeOutcome> {
+    if (!generationIsLive(owner)) return "failed";
     if (recovery) {
       const confirmed = confirmHandlingDeliveryWithRetry(owner, recovery);
       if (!confirmed.ok) {
         if (!pidAlive(recovery.watcherPid)) await retireArm(owner.child);
-        return await sendWake(owner, `${message}\n\n${confirmed.detail}`, pending);
+        return await deliverMainWake(owner, `${message}\n\n${confirmed.detail}`, pending);
       }
     }
     if (!repairFailed && offerWakeToBranch) {
@@ -700,18 +801,32 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       if (branchDelivery) {
         try {
           await branchDelivery;
-          return true;
+          return "delivered";
         } catch {
           // The core retains delivery ownership when branch settlement rejects.
         }
       }
     }
-    return await sendWake(owner, message, pending);
+    return await deliverMainWake(owner, message, pending);
   }
 
   function surfaceFailure(owner: SessionGeneration, message: string): void {
-    void sendWake(owner, message).catch(() => {
-      // The runtime adapter owns delivery errors; continuity restoration never waits on prompting.
+    if (coalesceMainFallbackWakes && (owner.mainFallbackWakeInFlight || owner.mainFallbackEpisode)) {
+      if (owner.pendingActionables.some((pending) => !pending.delivered && !owner.unconsumedWakes.has(pending.token))) {
+        owner.mainFallbackSuccessor = true;
+        schedulePendingCleanup(owner);
+      }
+      return;
+    }
+    if (coalesceMainFallbackWakes) {
+      owner.mainFallbackEpisode = true;
+      if (!owner.mainFallbackBaselineRows) owner.mainFallbackBaselineRows = mainOwnedWakeSnapshot();
+    }
+    void sendWake(owner, message, undefined, coalesceMainFallbackWakes).catch(() => {
+      if (coalesceMainFallbackWakes && !owner.mainFallbackWakeInFlight) {
+        owner.mainFallbackEpisode = false;
+        owner.mainFallbackBaselineRows = null;
+      }
     });
   }
 
@@ -786,7 +901,10 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
         // redelivered nor finished here: consumption finishes it; replacement
         // replays it.
         const pending = owner.pendingActionables.find(
-          (item) => !item.delivered && !owner.unconsumedWakes.has(item.token),
+          (item) =>
+            !item.delivered &&
+            !owner.unconsumedWakes.has(item.token) &&
+            !owner.episodeCoalesced.has(item.token),
         );
         if (!pending) break;
         const existingClaim = replacementCoordinator.deliveries.get(pending.token);
@@ -816,7 +934,9 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
           // A new restoration supersedes whatever became of the previous
           // successor; only a failure during this delivery is retried after it.
           owner.deferredClose = null;
-          const restoration = await restoreAfterActionableClose(owner, pending.predecessorArmPid);
+          const restoration = pending.fallbackOnly
+            ? { failure: "", recovery: undefined }
+            : await restoreAfterActionableClose(owner, pending.predecessorArmPid);
           if (!generationIsLive(owner)) {
             settleClaim("failed");
             releaseClaim();
@@ -825,14 +945,50 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
           const message = restoration.failure
             ? `${pending.message}\n\n${restoration.failure}`
             : pending.message;
-          const delivered = await deliverActionableWake(
-            owner,
-            message,
-            Boolean(restoration.failure),
-            pending,
-            restoration.recovery,
-          );
-          if (!delivered) {
+          let outcome: MainWakeOutcome;
+          if (pending.fallbackOnly) {
+            let baselineRows = owner.mainFallbackBaselineRows ?? mainOwnedWakeSnapshot();
+            if (!baselineRows && mainOwnedWakeRows() === 0) baselineRows = new Set();
+            if (!baselineRows) {
+              schedulePendingCleanup(owner);
+              outcome = "failed";
+            } else {
+              owner.mainFallbackEpisode = true;
+              owner.mainFallbackBaselineRows = baselineRows;
+              outcome = (await sendWake(owner, message, pending, coalesceMainFallbackWakes))
+                ? "delivered"
+                : "failed";
+            }
+          } else {
+            outcome = await deliverActionableWake(
+              owner,
+              message,
+              Boolean(restoration.failure),
+              pending,
+              restoration.recovery,
+            );
+          }
+          if (outcome === "suppressed") {
+            if (restoration.failure) {
+              scheduleRetry(owner, restoration.failure, pending.predecessorArmPid);
+            }
+            // The open main-fallback episode's drain covers this close's rows:
+            // the record stays durable and undelivered until a turn boundary
+            // either retires it (queue drained) or grants it the one successor
+            // injection (rows remain). "failed" settles any cross-generation
+            // waiter into the replay path, which re-evaluates the same guard.
+            // Continue rather than break: the coalesced mark excludes this
+            // record from the next find, while closes queued behind it still
+            // earn their mark - and their successor arm - inside this run.
+            owner.episodeCoalesced.add(pending.token);
+            settleClaim("failed");
+            releaseClaim();
+            continue;
+          }
+          if (outcome !== "delivered") {
+            if (pending.fallbackOnly && !owner.mainFallbackWakeInFlight) {
+              owner.mainFallbackSuccessorGranted = false;
+            }
             settleClaim("failed");
             releaseClaim();
             return;
@@ -870,6 +1026,10 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     } finally {
       if (generationIsLive(owner)) {
         owner.restoring = false;
+        if (owner.pendingTurnEnd) {
+          owner.pendingTurnEnd = false;
+          turnEnd();
+        }
         if (owner.pendingActionables.some((pending) => pending.delivered)) schedulePendingCleanup(owner);
         // No bare arm is launched here. A generation without a child at this
         // point has either delivered a typed restoration failure after its
@@ -1223,6 +1383,127 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     consumeWake(generation, content);
   }
 
+  // Unread rows main can still present or retire - exactly the set a main drain
+  // would act on (bin/fm-wake-lib.sh's fm_wake_actor_pending_count owns the
+  // per-actor count, including live branch-grant exclusion). An uncountable
+  // queue is not evidence of an empty one: fail toward "rows remain" so an open
+  // episode is never closed early and a successor is retried at the next
+  // boundary.
+  function mainOwnedWakeRows(): number {
+    const result = spawnSync(
+      "bash",
+      ["-c", '. "$1/bin/fm-wake-lib.sh"; fm_wake_actor_pending_count main', "fm-main-wake-count", fmRoot],
+      {
+        encoding: "utf8",
+        env: { ...process.env, FM_HOME: fmHome, FM_ROOT_OVERRIDE: fmRoot, FM_STATE_OVERRIDE: state },
+      },
+    );
+    const count = Number((result.stdout || "").trim());
+    return Number.isFinite(count) && count >= 0 ? count : 1;
+  }
+
+  function mainOwnedWakeSnapshot(): Set<string> | null {
+    const result = spawnSync(
+      "bash",
+      ["-c", '. "$1/bin/fm-wake-lib.sh"; fm_wake_actor_pending_rows main', "fm-main-wake-rows", fmRoot],
+      {
+        encoding: "utf8",
+        env: { ...process.env, FM_HOME: fmHome, FM_ROOT_OVERRIDE: fmRoot, FM_STATE_OVERRIDE: state },
+      },
+    );
+    if (result.status !== 0) return null;
+    return new Set((result.stdout || "").split(/\r?\n/).filter(Boolean));
+  }
+
+  // Main turn boundary: the only safe point to evaluate a suppressed burst.
+  // While an episode is open, unread main-owned rows mean the acknowledged
+  // drain left work behind - grant exactly one successor injection. A fully
+  // drained queue retires the episode and finishes every close it covered, so
+  // no redundant notification follows an acknowledgement that consumed them.
+  function turnEnd(): void {
+    const owner = generation;
+    if (!coalesceMainFallbackWakes || !generationIsLive(owner) || !owner.mainFallbackEpisode) return;
+    if (owner.restoring) {
+      // A delivery run is mid-flight: a close in its restore phase has not
+      // reached the suppression point yet, so an empty queue here could retire
+      // the episode under it and let that close inject late. Re-evaluate the
+      // boundary when the run settles.
+      owner.pendingTurnEnd = true;
+      return;
+    }
+    const rowCount = mainOwnedWakeRows();
+    if (rowCount > 0) {
+      const retry = owner.pendingActionables.find(
+        (pending) => !pending.delivered && !owner.unconsumedWakes.has(pending.token) &&
+          !owner.episodeCoalesced.has(pending.token),
+      );
+      if (retry && !owner.mainFallbackWakeInFlight) {
+        owner.mainFallbackSuccessor = true;
+        void processPendingActionables(owner);
+        return;
+      }
+      if (!owner.mainFallbackBaselineRows) {
+        const recoveredRows = mainOwnedWakeSnapshot();
+        if (!recoveredRows) return;
+        owner.mainFallbackBaselineRows = recoveredRows;
+        return;
+      }
+      const currentRows = mainOwnedWakeSnapshot();
+      if (!currentRows) return;
+      if ([...owner.mainFallbackBaselineRows].some((row) => currentRows.has(row))) return;
+      // The successor is the newest close whose notification was never
+      // accepted: oldest-first would re-present rows the drain already
+      // acknowledged. Coalesced marks are cleared only for that record so the
+      // run loop delivers exactly it and re-suppresses the rest.
+      const next = owner.pendingActionables
+        .filter((pending) => !pending.delivered && !owner.unconsumedWakes.has(pending.token))
+        .pop();
+      if (next && !owner.mainFallbackWakeInFlight && !owner.mainFallbackSuccessorGranted) {
+        owner.mainFallbackSuccessor = true;
+        owner.mainFallbackSuccessorGranted = true;
+        if (currentRows) owner.mainFallbackBaselineRows = currentRows;
+        owner.episodeCoalesced.delete(next.token);
+        void processPendingActionables(owner);
+      } else if (
+        owner.pendingActionables.every((pending) => pending.delivered) &&
+        !owner.mainFallbackWakeInFlight &&
+        !owner.mainFallbackSuccessorGranted
+      ) {
+        // Rows outlived every close record (e.g. appended after the last
+        // actionable close): a synthetic wake re-presents them. The episode
+        // stays open so the next boundary re-evaluates.
+        const successor = createPendingActionable(
+          "signal: watcher wakes remain queued after the acknowledged episode",
+          "",
+        );
+        successor.fallbackOnly = true;
+        owner.mainFallbackSuccessorGranted = true;
+        enqueuePendingActionable(owner, successor);
+        void processPendingActionables(owner);
+      }
+      // Otherwise every undelivered record is an accepted-but-unconsumed wake:
+      // that in-flight notification already covers the unread rows.
+      return;
+    }
+    if (owner.mainFallbackWakeInFlight) return;
+    owner.mainFallbackEpisode = false;
+    owner.mainFallbackSuccessor = false;
+    owner.mainFallbackSuccessorGranted = false;
+    owner.mainFallbackBaselineRows = null;
+    for (const pending of owner.pendingActionables.filter(
+      (item) => !item.delivered && owner.episodeCoalesced.has(item.token),
+    )) {
+      pending.delivered = true;
+      owner.episodeCoalesced.delete(pending.token);
+      try {
+        finishPendingActionable(owner, pending);
+      } catch (error) {
+        surfaceCleanupFailure(owner, error);
+        schedulePendingCleanup(owner);
+      }
+    }
+  }
+
   function sessionStart(): void {
     if (activeBinding !== binding) return;
     if (generation.stopping) generation = createGeneration();
@@ -1253,5 +1534,6 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     markLoaded,
     sessionShutdown,
     sessionStart,
+    turnEnd,
   };
 }
