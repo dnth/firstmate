@@ -739,6 +739,10 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     message: string,
     pending: PendingActionableClose,
   ): Promise<MainWakeOutcome> {
+    if (coalesceMainFallbackWakes && owner.mainFallbackWakeInFlight) {
+      owner.mainFallbackEpisode = true;
+      return "suppressed";
+    }
     if (coalesceMainFallbackWakes && owner.mainFallbackEpisode && !owner.mainFallbackSuccessor) {
       return "suppressed";
     }
