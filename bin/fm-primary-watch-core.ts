@@ -950,6 +950,9 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
             );
           }
           if (outcome === "suppressed") {
+            if (restoration.failure) {
+              scheduleRetry(owner, restoration.failure, pending.predecessorArmPid);
+            }
             // The open main-fallback episode's drain covers this close's rows:
             // the record stays durable and undelivered until a turn boundary
             // either retires it (queue drained) or grants it the one successor
