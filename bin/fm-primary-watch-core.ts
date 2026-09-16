@@ -1420,8 +1420,14 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
         void processPendingActionables(owner);
         return;
       }
-      const currentRows = owner.mainFallbackBaselineRows ? mainOwnedWakeSnapshot() : null;
-      if (!owner.mainFallbackBaselineRows || !currentRows) return;
+      if (!owner.mainFallbackBaselineRows) {
+        const recoveredRows = mainOwnedWakeSnapshot();
+        if (!recoveredRows) return;
+        owner.mainFallbackBaselineRows = recoveredRows;
+        return;
+      }
+      const currentRows = mainOwnedWakeSnapshot();
+      if (!currentRows) return;
       if ([...owner.mainFallbackBaselineRows].some((row) => currentRows.has(row))) return;
       // The successor is the newest close whose notification was never
       // accepted: oldest-first would re-present rows the drain already
