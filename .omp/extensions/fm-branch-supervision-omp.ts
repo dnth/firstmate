@@ -91,6 +91,7 @@ import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import {
   activateEligibleRowsOwner,
   captureTaskStatusSnapshot,
+  BRANCH_ELIGIBLE_STATUS_FILE,
   FM_BRANCH_DISPATCH_EVENT,
   releaseEligibleRowsSnapshot,
   rollbackEligibleRowsOwnerActivation,
@@ -1184,7 +1185,20 @@ ${context.command}
         );
         if (grant === "main-owned") throw new Error("the wake rows are already claimed by main");
         if (grant !== "published") throw new Error("could not record the branch's eligible row snapshot");
-        grantStatusSnapshot = new Map(stableGrantStatusEntries.map((entry) => [entry.task, entry]));
+        try {
+          const publishedEntries = readFileSync(join(state, BRANCH_ELIGIBLE_STATUS_FILE), "utf8")
+            .split(/\r?\n/)
+            .filter(Boolean)
+            .map((line) => {
+              const [task, endpoint, ident] = line.split("\t");
+              if (!task || !/^\d+$/.test(endpoint ?? "") || !/^\d+:\d+$/.test(ident ?? "")) throw new Error("invalid published status snapshot");
+              return { task, endpoint: Number(endpoint), ident };
+            });
+          grantStatusSnapshot = new Map(publishedEntries.map((entry) => [entry.task, entry]));
+          if (grantStatusSnapshot.size !== stableGrantStatusEntries.length) throw new Error("published status snapshot is incomplete");
+        } catch {
+          throw new Error("could not read the published status snapshot");
+        }
         // A row can still arrive between this re-check and the model starting
         // the drain; that residual is accepted by the confused-agent-grade boundary.
         const reportRevisionBeforePrompt = durableReportRevision;

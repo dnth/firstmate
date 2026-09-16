@@ -209,23 +209,18 @@ capture_status_position() { # <task>
 # OPEN DECISIONS fold owns and which close by resolution rather than delivery.
 # Fails when the file cannot be read as a regular file.
 _fm_outcome_events() { # <status-file> <from> <through>
-  local f=$1 from=$2 through=$3 span line key pos
+  local f=$1 from=$2 through=$3 span_file line key pos
   local LC_ALL=C
   case "$from" in ''|*[!0-9]*) from=0 ;; esac
   [ "$through" -gt "$from" ] || return 0
-  span=$(_fm_status_read_span "$f" "$from" "$((through - from))") || return 1
+  span_file=$(mktemp "$STATE/.branch-outcome-span.XXXXXX") || return 1
+  if ! _fm_status_read_span "$f" "$from" "$((through - from))" > "$span_file"; then
+    rm -f -- "$span_file"
+    return 1
+  fi
   pos=$from
-  while :; do
-    if IFS= read -r line; then
-      pos=$((pos + ${#line} + 1))
-    elif [ -n "$line" ]; then
-      # An unterminated final line ends at the byte the file ends at; adding a
-      # phantom newline would invent an endpoint past EOF that --through then
-      # refuses.
-      pos=$((pos + ${#line}))
-    else
-      break
-    fi
+  while IFS= read -r line; do
+    pos=$((pos + ${#line} + 1))
     case "$line" in *[[:space:]]*[[:alnum:]]*) ;; *) continue ;; esac
     status_is_captain_relevant "$line" || continue
     case "$(status_line_verb "$line")" in
@@ -236,9 +231,21 @@ _fm_outcome_events() { # <status-file> <from> <through>
     esac
     line=$(printf '%s' "$line" | tr '\t\r' '  ')
     printf '%s\t%s\n' "$pos" "$line"
-  done <<EOF
-$span
-EOF
+  done < "$span_file"
+  if [ -n "$line" ] && [ "$(tail -c 1 "$span_file" | od -An -tx1 | tr -d '[:space:]')" != 0a ]; then
+    pos=$((pos + ${#line}))
+    case "$line" in *[[:space:]]*[[:alnum:]]*) ;; *) rm -f -- "$span_file"; return 0 ;; esac
+    status_is_captain_relevant "$line" || { rm -f -- "$span_file"; return 0; }
+    case "$(status_line_verb "$line")" in
+      needs-decision|blocked)
+        key=$(_fm_decision_key "$line") || { rm -f -- "$span_file"; return 0; }
+        [ "$key" = default ] || { rm -f -- "$span_file"; return 0; }
+        ;;
+    esac
+    line=$(printf '%s' "$line" | tr '\t\r' '  ')
+    printf '%s\t%s\n' "$pos" "$line"
+  fi
+  rm -f -- "$span_file"
 }
 
 # Print "<task><TAB><ident><TAB><endpoint>" for every delivered obligation
