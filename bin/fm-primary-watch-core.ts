@@ -794,7 +794,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
   }
 
   function surfaceFailure(owner: SessionGeneration, message: string): void {
-    if (coalesceMainFallbackWakes && owner.mainFallbackEpisode && owner.mainFallbackWakeInFlight) return;
+    if (coalesceMainFallbackWakes && owner.mainFallbackWakeInFlight) return;
     void sendWake(owner, message, undefined, coalesceMainFallbackWakes).catch(() => {
       // The runtime adapter owns delivery errors; continuity restoration never waits on prompting.
     });
