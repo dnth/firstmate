@@ -1445,6 +1445,7 @@ await waitFor(() => count() === 3, "third OMP arm after the unacknowledged deliv
 await sleep(bound * 3);
 if (steers.length !== 1) throw new Error(`the open episode was re-injected: ${steers.length} steers: ${steers.join(" | ")}`);
 await handlers.get("message_start")({ message: { role: "user", content: steers[0] } });
+writeFileSync(queue, "2\t2\tsignal\tcrew.turn-ended\tsignal: successor row\n");
 await handlers.get("turn_end")({});
 await waitFor(() => steers.length === 2, "one successor delivery at the turn boundary");
 if (count() !== 3) throw new Error(`expected exactly three arms, got ${count()}`);
@@ -1453,7 +1454,9 @@ if (!steers[0].includes("signal: omp unacknowledged wake 1") || !steers[1].inclu
 }
 const armRows = readFileSync(`${state}/arm-log`, "utf8").trim().split("\n");
 if (!/predecessor=[0-9]+$/.test(armRows[2])) throw new Error(`third arm lost its predecessor identity: ${armRows.join(" | ")}`);
-if (readFileSync(queue, "utf8") !== queueRow) throw new Error("the durable wake queue row was altered by the bounded acknowledgement");
+if (readFileSync(queue, "utf8") !== "2\t2\tsignal\tcrew.turn-ended\tsignal: successor row\n") {
+  throw new Error("the durable wake queue did not retain the successor row");
+}
 writeFileSync(`${state}/watch-stop`, "stop\n");
 await handlers.get("session_shutdown")({ type: "session_shutdown" }, context);
 console.log("omp-unacknowledged-wake-ok");

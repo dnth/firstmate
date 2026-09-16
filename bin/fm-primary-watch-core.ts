@@ -123,6 +123,7 @@ type SessionGeneration = {
   // settles.
   pendingTurnEnd: boolean;
   mainFallbackWakeInFlight: string | null;
+  mainFallbackBaselineRows: Set<string> | null;
 };
 
 export type ArmResult = {
@@ -276,6 +277,7 @@ function createGeneration(): SessionGeneration {
     episodeCoalesced: new Set(),
     pendingTurnEnd: false,
     mainFallbackWakeInFlight: null,
+    mainFallbackBaselineRows: null,
   };
 }
 
@@ -750,6 +752,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     // the runtime accepts the follow-up still sees this notification in flight.
     if (coalesceMainFallbackWakes) {
       owner.mainFallbackEpisode = true;
+      if (!owner.mainFallbackBaselineRows) owner.mainFallbackBaselineRows = mainOwnedWakeSnapshot();
       // A record actually being sent is no longer coalesced, so a failed send
       // can be retried by a later boundary grant instead of staying invisible.
       owner.episodeCoalesced.delete(pending.token);
@@ -918,6 +921,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
           let outcome: MainWakeOutcome;
           if (pending.fallbackOnly) {
             owner.mainFallbackEpisode = true;
+            if (!owner.mainFallbackBaselineRows) owner.mainFallbackBaselineRows = mainOwnedWakeSnapshot();
             outcome = (await sendWake(owner, message, pending, coalesceMainFallbackWakes))
               ? "delivered"
               : "failed";
@@ -1358,6 +1362,19 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     return Number.isFinite(count) && count >= 0 ? count : 1;
   }
 
+  function mainOwnedWakeSnapshot(): Set<string> | null {
+    const result = spawnSync(
+      "bash",
+      ["-c", '. "$1/bin/fm-wake-lib.sh"; fm_wake_actor_pending_rows main', "fm-main-wake-rows", fmRoot],
+      {
+        encoding: "utf8",
+        env: { ...process.env, FM_HOME: fmHome, FM_ROOT_OVERRIDE: fmRoot, FM_STATE_OVERRIDE: state },
+      },
+    );
+    if (result.status !== 0) return null;
+    return new Set((result.stdout || "").split(/\r?\n/).filter(Boolean));
+  }
+
   // Main turn boundary: the only safe point to evaluate a suppressed burst.
   // While an episode is open, unread main-owned rows mean the acknowledged
   // drain left work behind - grant exactly one successor injection. A fully
@@ -1376,6 +1393,11 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     }
     const rowCount = mainOwnedWakeRows();
     if (rowCount > 0) {
+      const currentRows = owner.mainFallbackBaselineRows ? mainOwnedWakeSnapshot() : null;
+      if (
+        owner.mainFallbackBaselineRows &&
+        (!currentRows || [...owner.mainFallbackBaselineRows].some((row) => currentRows.has(row)))
+      ) return;
       // The successor is the newest close whose notification was never
       // accepted: oldest-first would re-present rows the drain already
       // acknowledged. Coalesced marks are cleared only for that record so the
@@ -1385,6 +1407,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
         .pop();
       if (next && !owner.mainFallbackWakeInFlight) {
         owner.mainFallbackSuccessor = true;
+        if (currentRows) owner.mainFallbackBaselineRows = currentRows;
         owner.episodeCoalesced.delete(next.token);
         void processPendingActionables(owner);
       } else if (
@@ -1409,6 +1432,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     if (owner.mainFallbackWakeInFlight) return;
     owner.mainFallbackEpisode = false;
     owner.mainFallbackSuccessor = false;
+    owner.mainFallbackBaselineRows = null;
     for (const pending of owner.pendingActionables.filter(
       (item) => !item.delivered && owner.episodeCoalesced.has(item.token),
     )) {
