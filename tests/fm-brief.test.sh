@@ -337,7 +337,7 @@ test_orchestrate_opt_in_adds_marker_only_on_ship() {
   [ "$(head -n 3 "$brief")" = $'---\norchestration: enabled\n---' ] \
     || fail "orchestrate brief did not record the front-matter orchestration marker"
   # shellcheck disable=SC2016
-  assert_grep 'native `task` subagents' "$brief" \
+  assert_grep 'native `task` subagent orchestration' "$brief" \
     "orchestrate brief missing the native subagent boundary statement"
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-plain-c2 some-proj --mode direct-PR >/dev/null 2>&1 \
@@ -345,7 +345,9 @@ test_orchestrate_opt_in_adds_marker_only_on_ship() {
   brief="$home/data/brief-plain-c2/brief.md"
   assert_no_grep "orchestration: enabled" "$brief" "plain ship brief leaked the orchestration marker"
   assert_no_grep "# Orchestration" "$brief" "plain ship brief leaked the Orchestration section"
-  assert_no_grep "subagents" "$brief" "plain ship brief leaked the orchestration subagent statement"
+  # The standard scouting-delegation section is expected on every ship brief;
+  # only the orchestration opt-in wording must stay absent.
+  assert_no_grep "independent workstreams" "$brief" "plain ship brief leaked the orchestration opt-in wording"
 
   pass "fm-brief.sh: --orchestrate adds the ship marker only when opted in"
 }
@@ -810,6 +812,46 @@ test_scout_and_secondmate_scaffold() {
     "secondmate charter must declare its role"
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
+# The bounded read-only scouting delegation contract is standard on ship and
+# scout scaffolds (one shared section), names the bundled OMP scout agent, and
+# keeps edits, verification, and receipts in the worker's main trajectory. A
+# secondmate charter is not a task brief and stays free of it.
+test_scouting_delegation_section_in_ship_and_scout() {
+  local home brief
+  home="$TMP_ROOT/scouting-section/home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-scoutsec-s1 alpha --mode direct-PR >/dev/null 2>&1 \
+    || fail "ship scaffold for scouting section exited non-zero"
+  brief="$home/data/brief-scoutsec-s1/brief.md"
+  assert_grep "# Delegating read-only scouting" "$brief" \
+    "ship brief missing the scouting delegation section"
+  assert_grep "omp agents unpack" "$brief" \
+    "ship brief missing the bundled OMP subagent surface"
+  assert_grep "\`scout\` is read-only" "$brief" \
+    "ship brief missing the read-only scout agent name"
+  assert_grep "keep every edit, verification run, and evidence receipt in your own main trajectory" "$brief" \
+    "ship brief missing the main-trajectory accountability contract"
+  assert_grep "integrating and verifying their output" "$brief" \
+    "ship brief missing the worker-accountability statement"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-scoutsec-s2 alpha --scout >/dev/null 2>&1 \
+    || fail "scout scaffold for scouting section exited non-zero"
+  brief="$home/data/brief-scoutsec-s2/brief.md"
+  assert_grep "# Delegating read-only scouting" "$brief" \
+    "scout brief missing the scouting delegation section"
+  assert_grep "integrating and verifying their output" "$brief" \
+    "scout brief missing the worker-accountability statement"
+
+  FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-scoutsec-s3 --secondmate alpha >/dev/null 2>&1 \
+    || fail "secondmate scaffold for scouting section exited non-zero"
+  assert_no_grep "# Delegating read-only scouting" "$home/data/brief-scoutsec-s3/brief.md" \
+    "secondmate charter leaked the task scouting section"
+
+  pass "fm-brief: ship and scout briefs carry the scouting delegation contract; charters do not"
+}
+
 
 test_concurrent_ship_scaffold_has_one_owner() {
   local home id=brief-concurrent-owner target first second successes=0 leftovers
@@ -975,6 +1017,7 @@ test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
+test_scouting_delegation_section_in_ship_and_scout
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
