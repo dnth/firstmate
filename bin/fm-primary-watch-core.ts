@@ -769,6 +769,9 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       // acceptance is replayed by a later boundary grant, never by letting a
       // mid-episode close inherit the unconsumed grant.
       if (coalesceMainFallbackWakes) owner.mainFallbackSuccessor = false;
+      if (coalesceMainFallbackWakes && !owner.mainFallbackWakeInFlight) {
+        owner.mainFallbackSuccessorGranted = false;
+      }
     }
   }
 
@@ -954,6 +957,9 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
             continue;
           }
           if (outcome !== "delivered") {
+            if (pending.fallbackOnly && !owner.mainFallbackWakeInFlight) {
+              owner.mainFallbackSuccessorGranted = false;
+            }
             settleClaim("failed");
             releaseClaim();
             return;
@@ -1418,7 +1424,8 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
         void processPendingActionables(owner);
       } else if (
         owner.pendingActionables.every((pending) => pending.delivered) &&
-        !owner.mainFallbackWakeInFlight
+        !owner.mainFallbackWakeInFlight &&
+        !owner.mainFallbackSuccessorGranted
       ) {
         // Rows outlived every close record (e.g. appended after the last
         // actionable close): a synthetic wake re-presents them. The episode
@@ -1428,6 +1435,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
           "",
         );
         successor.fallbackOnly = true;
+        owner.mainFallbackSuccessorGranted = true;
         enqueuePendingActionable(owner, successor);
         void processPendingActionables(owner);
       }
