@@ -1414,9 +1414,10 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     const rowCount = mainOwnedWakeRows();
     if (rowCount > 0) {
       const currentRows = owner.mainFallbackBaselineRows ? mainOwnedWakeSnapshot() : null;
+      if (owner.mainFallbackBaselineRows && !currentRows) return;
       if (
         owner.mainFallbackBaselineRows &&
-        (!currentRows || [...owner.mainFallbackBaselineRows].some((row) => currentRows.has(row)))
+        [...owner.mainFallbackBaselineRows].some((row) => currentRows.has(row))
       ) return;
       // The successor is the newest close whose notification was never
       // accepted: oldest-first would re-present rows the drain already
