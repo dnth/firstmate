@@ -1389,6 +1389,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       // that in-flight notification already covers the unread rows.
       return;
     }
+    if (owner.mainFallbackWakeInFlight) return;
     owner.mainFallbackEpisode = false;
     owner.mainFallbackSuccessor = false;
     for (const pending of owner.pendingActionables.filter(
