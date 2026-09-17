@@ -181,6 +181,10 @@ NODE
 sweep_meta_names_slot() {  # <canonical-slot> → prints the naming task id
   local slot=$1 state_dir meta field value canon
   for state_dir in "${TREEHOUSE_OWNER_STATES[@]}"; do
+    [ -d "$state_dir" ] && [ -r "$state_dir" ] && [ -x "$state_dir" ] || {
+      SWEEP_UNSAFE_CLAIM=1
+      return 1
+    }
     for meta in "$state_dir"/*.meta; do
       [ -f "$meta" ] && [ ! -L "$meta" ] || continue
       for field in worktree home; do
@@ -350,6 +354,9 @@ sweep_classify_pool() {  # <repo> — fills the SWEEP_* arrays
         *)
           if meta_id=$(sweep_meta_names_slot "$canon"); then
             reason="task $meta_id's record names this slot"
+          elif [ "$SWEEP_UNSAFE_CLAIM" = 1 ]; then
+            class=refused
+            reason="a registered Firstmate state directory is unreadable; refuses any apply pass"
           elif [ "$status" = "in-use" ] || [ "$nprocs" -gt 0 ] 2>/dev/null; then
             reason="in use ($nprocs live processes reported by treehouse status)"
           else
