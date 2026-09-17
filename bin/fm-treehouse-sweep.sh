@@ -359,6 +359,7 @@ sweep_classify_pool() {  # <repo> — fills the SWEEP_* arrays
     warn "pool $repo: treehouse status --json contained invalid data; nothing classified"
     return 1
   }
+  [ -n "$parsed_entries" ] || return 0
   while IFS=$'\t' read -r name path status nprocs leased destroying holder; do
     name=$(printf '%s' "$name" | base64 -d) || return 1
     path=$(printf '%s' "$path" | base64 -d) || return 1

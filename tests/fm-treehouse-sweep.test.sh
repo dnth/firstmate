@@ -111,8 +111,18 @@ if grep -Eq 'destroy .*--yes|prune .*--yes' "$CALLS" 2>/dev/null; then
 fi
 pass "default pass classifies all tiers and runs nothing destructive"
 
-# Empty Treehouse state keeps reported worktrees inspect-only.
+# A real empty status response is a valid empty pool and must classify zero
+# slots successfully rather than entering the heredoc loop with empty fields.
+status_json=$(<"$FM_SWEEP_STATUS_JSON")
+printf '[]\n' > "$FM_SWEEP_STATUS_JSON"
 state_json=$(<"$POOL/treehouse-state.json")
+printf '{"worktrees":[]}\n' > "$POOL/treehouse-state.json"
+out=$(run_sweep --pool "$REPO") || fail "empty-status sweep failed: $out"
+printf '%s\n' "$status_json" > "$FM_SWEEP_STATUS_JSON"
+printf '%s\n' "$state_json" > "$POOL/treehouse-state.json"
+pass "empty status response succeeds with zero classifications"
+
+# Empty Treehouse state keeps reported worktrees inspect-only.
 printf '{"worktrees":[]}\n' > "$POOL/treehouse-state.json"
 out=$(run_sweep --pool "$REPO") || fail "empty-state sweep failed: $out"
 assert_contains "$out" "unregistered or orphaned worktree" "empty state did not keep slots inspect-only"
