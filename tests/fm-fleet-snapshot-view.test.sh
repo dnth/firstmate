@@ -824,6 +824,74 @@ test_parked_scout_decision_stays_pending() {
   pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
 }
 
+test_large_blobs_use_file_transport() {
+  # A structured backlog above Linux MAX_ARG_STRLEN (~128 KiB per exec argument)
+  # must still snapshot cleanly: fleet-sized JSON travels through private
+  # transport files, never through --argjson argv.
+  local home fakebin out suffix i mate parent mate_summary_bytes
+  home=$(make_home large-backlog)
+  suffix=$(printf 'i%.0s' $(seq 1 110))
+  {
+    printf '%s\n' '## In flight'
+    i=1
+    while [ "$i" -le 1200 ]; do
+      printf '%s\n' "- [ ] orphan-$i-$suffix - Missing metadata (repo: firstmate) (kind: ship)"
+      i=$((i + 1))
+    done
+    printf '%s\n' '' '## Queued' '' '## Done'
+  } > "$home/data/backlog.md"
+  [ "$(wc -c < "$home/data/backlog.md")" -gt 131072 ] \
+    || fail "large backlog fixture did not exceed the per-argument limit"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "fleet snapshot failed on a backlog above the per-argument limit"
+  printf '%s' "$out" | jq -e '
+    .schema == "fm-fleet-snapshot.v1"
+      and (.backlog.records | length) == 1200
+      and (.main_inventory.orphan_in_flight | length) == 1200
+  ' >/dev/null || fail "large snapshot lost the orphan inventory"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary) \
+    || fail "secondmate home summary failed on a backlog above the per-argument limit"
+  printf '%s' "$out" | jq -e '.schema == "fm-secondmate-home-summary.v1"' >/dev/null \
+    || fail "large secondmate home summary output was not valid"
+
+  # A registered secondmate whose bounded summary crosses the same limit must
+  # still reach the parent's aggregation whole.
+  parent=$(make_home large-parent)
+  mate="$TMP_ROOT/large-parent-mate-home"
+  mkdir -p "$mate/state" "$mate/data" "$mate/config" "$mate/projects" "$mate/bin"
+  printf '# Firstmate fixture\n' > "$mate/AGENTS.md"
+  printf 'large-mate\n' > "$mate/.fm-secondmate-home"
+  mate=$(cd "$mate" && pwd -P)
+  {
+    printf '%s\n' '## In flight'
+    i=1
+    while [ "$i" -le 600 ]; do
+      printf '%s\n' "- [ ] orphan-$i-$suffix - Missing metadata (repo: firstmate) (kind: ship)"
+      i=$((i + 1))
+    done
+    printf '%s\n' '' '## Queued' '' '## Done'
+  } > "$mate/data/backlog.md"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$mate" "$SNAPSHOT" --secondmate-home-summary) \
+    || fail "large child home summary failed"
+  mate_summary_bytes=$(printf '%s' "$out" | wc -c | tr -d ' ')
+  [ "$mate_summary_bytes" -gt 131072 ] && [ "$mate_summary_bytes" -le 262144 ] \
+    || fail "child summary did not cross only the per-argument limit: $mate_summary_bytes"
+  printf -- '- large-mate - fixture domain (home: %s; scope: fixture work; projects: firstmate; added 2026-07-11)\n' \
+    "$mate" > "$parent/data/secondmates.md"
+  fm_write_secondmate_meta "$parent/state/large-mate.meta" "$mate" "firstmate:fm-large-mate" firstmate
+  fakebin=$(make_fakebin "$parent")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$parent" "$SNAPSHOT" --json) \
+    || fail "parent fleet snapshot failed on a large secondmate summary"
+  printf '%s' "$out" | jq -e '
+    .secondmate_current.records[0]
+    | .provenance.selected == "structured-home"
+      and .invalidity.kind == "orphan_in_flight"
+      and (.invalidity.ids | length) == 600
+  ' >/dev/null || fail "parent snapshot did not preserve the large child inventory"
+  pass "fleet snapshot transports >128KiB blobs through files, not argv"
+}
+
 test_omp_secondmate_snapshot_uses_bound_identity
 test_empty_fleet_json
 test_fixture_snapshot_json
@@ -838,5 +906,7 @@ test_completed_scout_report_is_pointer_not_pending
 test_parked_scout_decision_stays_pending
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
+
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
+test_large_blobs_use_file_transport
