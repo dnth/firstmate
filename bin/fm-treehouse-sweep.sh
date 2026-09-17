@@ -257,7 +257,7 @@ SWEEP_UNSAFE_CLAIM=0
 SWEEP_UNPROVABLE=0
 
 sweep_classify_pool() {  # <repo> — fills the SWEEP_* arrays
-  local repo=$1 status_rc entries line name path status nprocs leased destroying holder
+  local repo=$1 status_rc entries parsed_entries parsed_rc line name path status nprocs leased destroying holder
   local canon meta_id reason class default_ref porcelain_head
   SWEEP_CLASSES=(); SWEEP_NAMES=(); SWEEP_PATHS=(); SWEEP_REASONS=()
   SWEEP_UNSAFE_CLAIM=0; SWEEP_UNPROVABLE=0
@@ -270,6 +270,12 @@ sweep_classify_pool() {  # <repo> — fills the SWEEP_* arrays
     return 1
   }
   default_ref=$(sweep_pool_default_ref "$repo" || true)
+  parsed_entries=$(sweep_pool_entries "$repo" "$entries")
+  parsed_rc=$?
+  [ "$parsed_rc" -eq 0 ] || {
+    warn "pool $repo: treehouse status --json contained invalid data; nothing classified"
+    return 1
+  }
   while IFS=$'\t' read -r name path status nprocs leased destroying holder; do
     [ -n "$path" ] || continue
     class=skipped; reason=
@@ -337,7 +343,7 @@ sweep_classify_pool() {  # <repo> — fills the SWEEP_* arrays
     SWEEP_PATHS+=("$path")
     SWEEP_REASONS+=("$reason")
   done <<EOF
-$(sweep_pool_entries "$repo" "$entries")
+${parsed_entries}
 EOF
   return 0
 }
@@ -425,6 +431,9 @@ fi
 # --- classify + report (default) ---------------------------------------------
 
 sweep_rc=0
+clean_repos=()
+clean_paths=()
+clean_names=()
 for repo in "${pools[@]}"; do
   sweep_classify_pool "$repo" || {
     [ "$apply_clean" = 0 ] || die "pool $repo could not be classified; nothing was changed"
@@ -437,15 +446,30 @@ for repo in "${pools[@]}"; do
       || die "an unreadable slot-owner claim exists in pool $repo; nothing was changed"
     [ "$SWEEP_UNPROVABLE" = 0 ] \
       || die "slot occupancy is unprovable in pool $repo; nothing was changed"
-    sweep_acquire_pool_lock "$repo"
     for i in "${!SWEEP_CLASSES[@]}"; do
       [ "${SWEEP_CLASSES[$i]}" = clean ] || continue
-      canon=$(canonical_existing_dir "${SWEEP_PATHS[$i]}") || continue
-      echo "sweep: removing clean slot ${SWEEP_NAMES[$i]} at $canon"
-      ( cd "$repo" && treehouse destroy "$canon" --yes ) \
-        || die "treehouse destroy failed for clean slot $canon"
+      canon=$(canonical_existing_dir "${SWEEP_PATHS[$i]}") \
+        || die "clean slot ${SWEEP_PATHS[$i]} disappeared during validation; nothing was changed"
+      clean_repos+=("$repo")
+      clean_paths+=("$canon")
+      clean_names+=("${SWEEP_NAMES[$i]}")
     done
-    sweep_release_pool_lock
   fi
 done
+
+if [ "$apply_clean" = 1 ]; then
+  for repo in "${pools[@]}"; do
+    sweep_acquire_pool_lock "$repo"
+    sweep_release_pool_lock
+  done
+  for i in "${!clean_paths[@]}"; do
+    repo=${clean_repos[$i]}
+    canon=${clean_paths[$i]}
+    sweep_acquire_pool_lock "$repo"
+    echo "sweep: removing clean slot ${clean_names[$i]} at $canon"
+    ( cd "$repo" && treehouse destroy "$canon" --yes ) \
+      || die "treehouse destroy failed for clean slot $canon"
+    sweep_release_pool_lock
+  done
+fi
 exit "$sweep_rc"
