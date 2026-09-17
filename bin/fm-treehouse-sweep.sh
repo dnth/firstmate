@@ -221,7 +221,7 @@ sweep_pool_path_registered() {  # <repo> <slot>
   pool=$(dirname "$(dirname "$canon")")
   state="$pool/treehouse-state.json"
   [ -f "$state" ] && [ ! -L "$state" ] || return 1
-  node - "$state" "$canon" <<'NODE'
+  if node - "$state" "$canon" <<'NODE'
 const fs = require("fs");
 const statePath = process.argv[2];
 const slotPath = process.argv[3];
@@ -238,7 +238,11 @@ if (!state.worktrees.some(entry => entry && entry.path === slotPath)) {
   process.exit(1);
 }
 NODE
-  [ "$?" -eq 0 ] || return 1
+  then
+    :
+  else
+    return 1
+  fi
   listed=$(git -C "$repo" -c core.quotePath=false worktree list --porcelain 2>/dev/null) || return 1
   while IFS= read -r line; do
     case "$line" in
@@ -469,6 +473,7 @@ sweep_acquire_pool_lock() {  # <repo> → sets SWEEP_POOL_LOCK
     || die "another Treehouse pool operation holds the project lock for $repo; nothing was changed"
 }
 
+# shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap.
 sweep_release_pool_lock() {
   [ -n "${SWEEP_POOL_LOCK:-}" ] && fm_lock_release "$SWEEP_POOL_LOCK" || true
   SWEEP_POOL_LOCK=
