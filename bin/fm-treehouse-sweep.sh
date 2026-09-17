@@ -219,6 +219,24 @@ sweep_pool_path_registered() {  # <repo> <slot>
   pool=$(dirname "$(dirname "$canon")")
   state="$pool/treehouse-state.json"
   [ -f "$state" ] && [ ! -L "$state" ] || return 1
+  node - "$state" "$canon" <<'NODE'
+const fs = require("fs");
+const statePath = process.argv[2];
+const slotPath = process.argv[3];
+let state;
+try {
+  state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+} catch {
+  process.exit(1);
+}
+if (!Array.isArray(state.worktrees)) {
+  process.exit(1);
+}
+if (state.worktrees.length > 0 && !state.worktrees.some(entry => entry && entry.path === slotPath)) {
+  process.exit(1);
+}
+NODE
+  [ "$?" -eq 0 ] || return 1
   listed=$(git -C "$repo" -c core.quotePath=false worktree list --porcelain 2>/dev/null) || return 1
   while IFS= read -r line; do
     case "$line" in
