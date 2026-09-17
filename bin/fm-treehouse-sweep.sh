@@ -180,6 +180,7 @@ NODE
 # 0 when some task record in any scanned home names this canonical slot.
 sweep_meta_names_slot() {  # <canonical-slot> → prints the naming task id
   local slot=$1 state_dir meta field value canon
+  SWEEP_META_MATCH=
   for state_dir in "${TREEHOUSE_OWNER_STATES[@]}"; do
     [ -d "$state_dir" ] && [ -r "$state_dir" ] && [ -x "$state_dir" ] || {
       SWEEP_UNSAFE_CLAIM=1
@@ -190,9 +191,9 @@ sweep_meta_names_slot() {  # <canonical-slot> → prints the naming task id
       for field in worktree home; do
         value=$(fm_meta_get "$meta" "$field")
         [ -n "$value" ] || continue
-        canon=$(canonical_existing_dir "$value") || continue
-        [ "$canon" = "$slot" ] || continue
-        basename "$meta" .meta
+      canon=$(canonical_existing_dir "$value") || continue
+      [ "$canon" = "$slot" ] || continue
+        SWEEP_META_MATCH=$(basename "$meta" .meta)
         return 0
       done
     done
@@ -308,7 +309,7 @@ SWEEP_UNPROVABLE=0
 
 sweep_classify_pool() {  # <repo> — fills the SWEEP_* arrays
   local repo=$1 status_rc entries parsed_entries parsed_rc line name path status nprocs leased destroying holder
-  local canon meta_id reason class default_ref porcelain_head
+  local canon reason class default_ref porcelain_head
   SWEEP_CLASSES=(); SWEEP_NAMES=(); SWEEP_PATHS=(); SWEEP_REASONS=()
   SWEEP_UNSAFE_CLAIM=0; SWEEP_UNPROVABLE=0
   entries=$(
@@ -352,8 +353,8 @@ sweep_classify_pool() {  # <repo> — fills the SWEEP_* arrays
           reason="claimed by task $FM_TREEHOUSE_SLOT_OWNER_ID${FM_TREEHOUSE_SLOT_OWNER_HOME:+ (home $FM_TREEHOUSE_SLOT_OWNER_HOME)}"
           ;;
         *)
-          if meta_id=$(sweep_meta_names_slot "$canon"); then
-            reason="task $meta_id's record names this slot"
+          if sweep_meta_names_slot "$canon"; then
+            reason="task $SWEEP_META_MATCH's record names this slot"
           elif [ "$SWEEP_UNSAFE_CLAIM" = 1 ]; then
             class=refused
             reason="a registered Firstmate state directory is unreadable; refuses any apply pass"
