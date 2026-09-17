@@ -1217,7 +1217,11 @@ test_perl_fallback_bounds_github_call() {
   fakebin=$(make_fakebin "$home")
   toolbin="$home/toolbin"
   mkdir -p "$toolbin"
-  for cmd in bash dirname basename jq date sed git grep tail cut tr head sort wc perl sleep cat find; do
+  for cmd in bash dirname basename jq date sed git grep tail cut tr head sort wc perl sleep cat find mktemp rm mkdir chmod mv cp awk; do
+    ln -s "$(command -v "$cmd")" "$toolbin/$cmd"
+  done
+  for cmd in shasum sha256sum; do
+    command -v "$cmd" >/dev/null 2>&1 || continue
     ln -s "$(command -v "$cmd")" "$toolbin/$cmd"
   done
   started=$(date +%s)
