@@ -39,7 +39,8 @@ mkdir -p "$(slot 5)"
 printf 'uncommitted\n' > "$(slot 2)/dirty-file"
 printf 'task=other-task\nhome=/elsewhere\n' > "$(dirname "$(slot 3)")/.fm-slot-owner"
 printf 'worktree=%s\n' "$(slot 4)" > "$HOME_DIR/state/other.meta"
-printf '{"worktrees": []}\n' > "$POOL/treehouse-state.json"
+printf '{"worktrees":[{"path":"%s"},{"path":"%s"},{"path":"%s"},{"path":"%s"}]}\n' \
+  "$(slot 1)" "$(slot 2)" "$(slot 3)" "$(slot 4)" > "$POOL/treehouse-state.json"
 
 json_entries() {
   node - "$POOL" <<'NODE'
@@ -109,6 +110,14 @@ if grep -Eq 'destroy .*--yes|prune .*--yes' "$CALLS" 2>/dev/null; then
   fail "the default pass executed a destructive treehouse verb: $(cat "$CALLS")"
 fi
 pass "default pass classifies all tiers and runs nothing destructive"
+
+# Empty Treehouse state keeps reported worktrees inspect-only.
+state_json=$(<"$POOL/treehouse-state.json")
+printf '{"worktrees":[]}\n' > "$POOL/treehouse-state.json"
+out=$(run_sweep --pool "$REPO") || fail "empty-state sweep failed: $out"
+assert_contains "$out" "unregistered or orphaned worktree" "empty state did not keep slots inspect-only"
+printf '%s\n' "$state_json" > "$POOL/treehouse-state.json"
+pass "empty state keeps unregistered slots inspect-only"
 
 # --- --apply-clean requires the config flag -----------------------------------
 

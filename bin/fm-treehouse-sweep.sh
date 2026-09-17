@@ -232,7 +232,7 @@ try {
 if (!Array.isArray(state.worktrees)) {
   process.exit(1);
 }
-if (state.worktrees.length > 0 && !state.worktrees.some(entry => entry && entry.path === slotPath)) {
+if (!state.worktrees.some(entry => entry && entry.path === slotPath)) {
   process.exit(1);
 }
 NODE
