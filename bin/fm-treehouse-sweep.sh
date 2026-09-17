@@ -212,6 +212,27 @@ sweep_pool_default_ref() {  # <repo> → prints a ref the slot HEAD must reach
   return 1
 }
 
+sweep_pool_path_registered() {  # <repo> <slot>
+  local repo=$1 slot=$2 canon listed line listed_abs pool state
+  canon=$(canonical_existing_dir "$slot") || return 1
+  [ "$canon" != "$(canonical_existing_dir "$repo")" ] || return 1
+  pool=$(dirname "$(dirname "$canon")")
+  state="$pool/treehouse-state.json"
+  [ -f "$state" ] && [ ! -L "$state" ] || return 1
+  listed=$(git -C "$repo" -c core.quotePath=false worktree list --porcelain 2>/dev/null) || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      worktree\ *)
+        listed_abs=$(canonical_existing_dir "${line#worktree }" 2>/dev/null || true)
+        [ "$listed_abs" = "$canon" ] && return 0
+        ;;
+    esac
+  done <<EOF
+$listed
+EOF
+  return 1
+}
+
 # Emit one "class|name|path|reason" line per managed entry via node so tab and
 # newline edge cases in paths stay exact.
 sweep_pool_entries() {  # <repo> <status-json>
@@ -287,6 +308,9 @@ sweep_classify_pool() {  # <repo> — fills the SWEEP_* arrays
       reason="leased${holder:+ to $holder}"
     elif [ "$destroying" = 1 ]; then
       reason="destroying"
+    elif ! sweep_pool_path_registered "$repo" "$path"; then
+      class=damaged
+      reason="unregistered or orphaned worktree; inspect-only, removal stays manual"
     elif ! canon=$(canonical_existing_dir "$path"); then
       class=damaged
       reason="worktree directory is gone; inspect-only, removal stays manual"
