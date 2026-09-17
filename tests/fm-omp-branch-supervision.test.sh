@@ -423,6 +423,228 @@ test_omp_scope_resolves_reportable_tasks_from_granted_rows() {
   pass "OMP dispatch resolves signal and stale rows to the branch report task and excludes checks"
 }
 
+# --- completion delivery contract ---------------------------------------------
+
+# Build a fixture home plus a Node driver that loads the real extension under a
+# stubbed OMP SDK, owns the fleet lock, fires session_start, then runs the
+# scenario's steps.json: each "wake" step emits a dispatch offer and awaits its
+# settlement, and the consume steps fire main's consumption events. The fake
+# branch session's prompt runs the scenario's prompt script, which drives the
+# real fm_branch_report tool exactly as a branch model would.
+make_omp_branch_driver_fixture() {  # <fixture-dir>
+  local fixture=$1 package_dir
+  package_dir="$fixture/node_modules/@oh-my-pi/pi-coding-agent"
+  mkdir -p "$fixture/.omp/extensions/lib" "$package_dir"
+  cp "$ROOT/.omp/extensions/fm-branch-supervision-omp.ts" "$fixture/.omp/extensions/fm-branch-supervision-omp.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$fixture/.omp/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-async-exec.ts" "$fixture/.omp/extensions/lib/fm-async-exec.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-branch-model-picker.ts" "$fixture/.omp/extensions/lib/fm-branch-model-picker.ts"
+  printf '%s\n' '{"type":"module","exports":{".":"./index.js","./extensibility/legacy-pi-coding-agent-shim":"./coding-shim.js","./extensibility/legacy-pi-ai-shim":"./ai-shim.js"}}' > "$package_dir/package.json"
+  cat > "$package_dir/index.js" <<'JS'
+export async function createAgentSession(opts) {
+  globalThis.__customTools = opts.customTools;
+  return {
+    session: {
+      async prompt() { await globalThis.__branchPrompt(); },
+      async sendCustomMessage() {},
+      beginDispose() {},
+      async dispose() {},
+    },
+  };
+}
+export class SessionManager {
+  static async open() { return new SessionManager(); }
+  static inMemory() { return new SessionManager(); }
+  async persistCopy() { return this; }
+  getSessionFile() { return ""; }
+  getEntries() { return []; }
+}
+JS
+  cat > "$package_dir/coding-shim.js" <<'JS'
+export function createBashToolDefinition() { return { name: "bash" }; }
+const passthrough = (x) => x;
+export const Type = { Object: passthrough, String: passthrough, Number: passthrough, Boolean: passthrough, Optional: passthrough, Union: passthrough, Literal: passthrough };
+JS
+  printf '%s\n' 'export function clampThinkingLevel(_model, level) { return level; }' > "$package_dir/ai-shim.js"
+  cat > "$fixture/driver.mjs" <<'JS'
+import { readFileSync, writeFileSync } from "node:fs";
+const state = process.env.FM_STATE_OVERRIDE;
+const scenario = JSON.parse(readFileSync(process.env.SCENARIO_PATH, "utf8"));
+const handlers = new Map();
+const sends = [];
+const results = [];
+const pi = {
+  on(name, fn) { handlers.set(name, fn); },
+  events: { on(name, fn) { handlers.set(`evt:${name}`, fn); } },
+  sendMessage(message, opts) { sends.push({ content: message.content, triggerTurn: opts?.triggerTurn === true }); },
+  registerCommand() {},
+  registerTool() {},
+};
+const { default: extension } = await import(process.env.EXTENSION_PATH);
+const { FM_BRANCH_DISPATCH_EVENT } = await import(process.env.DISPATCH_PATH);
+extension(pi);
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+await handlers.get("session_start")?.({}, {});
+globalThis.__branchPrompt = async () => {
+  const report = globalThis.__customTools.find((tool) => tool.name === "fm_branch_report");
+  const actions = globalThis.__promptActions ?? scenario.prompt ?? [];
+  for (const action of actions) {
+    if (action.report) {
+      const result = await report.execute("call-1", action.report);
+      results.push({ report: action.report.task, isError: result.isError === true, text: result.content?.[0]?.text ?? "" });
+    }
+  }
+};
+let seq = 0;
+for (const step of scenario.steps) {
+  if (step.wake) {
+    globalThis.__promptActions = step.report ? [{ report: step.report }] : (scenario.prompt ?? []);
+    seq += 1;
+    const offer = {
+      message: step.wake,
+      projects: [],
+      heartbeat: /^heartbeat($|:)/.test(step.wake),
+      eligible: true,
+      accepted: false,
+      settlement: Promise.resolve(),
+      accept(settlement = Promise.resolve()) { this.accepted = true; this.settlement = settlement; },
+    };
+    handlers.get(`evt:${FM_BRANCH_DISPATCH_EVENT}`)?.(offer);
+    let rejected = "";
+    try {
+      await offer.settlement;
+    } catch (error) {
+      rejected = error instanceof Error ? error.message : String(error);
+    }
+    results.push({ wake: step.wake, accepted: offer.accepted, rejected });
+  } else if (step.consume_all) {
+    handlers.get("before_agent_start")?.();
+    results.push({ consumed: "all" });
+  } else if (step.consume_content) {
+    handlers.get("message_start")?.({ message: { role: "user", content: step.consume_content } });
+    results.push({ consumed: "content" });
+  }
+}
+console.log(JSON.stringify({ results, sends }));
+JS
+}
+
+# A routine verdict on a granted completion still owes the captain a turn:
+# the merge takes the captain delivery shape (triggerTurn, silent display)
+# because the completion it covers has no delivery receipt yet.
+test_routine_verdict_on_granted_completion_opens_a_main_turn() {
+  local fixture state out
+  fixture="$TMP_ROOT/completion-turn"
+  state="$fixture/state"
+  make_omp_branch_driver_fixture "$fixture"
+  mkdir -p "$state"
+  printf 'done: task-a finished\n' > "$state/task-a.status"
+  printf 'project=project-a\nwindow=default:wA:p1\n' > "$state/task-a.meta"
+  printf '1\t1\tsignal\ttask-a.status\tsignal: task-a\n' > "$state/.wake-queue"
+  cat > "$fixture/steps.json" <<'JSON'
+{
+  "prompt": [{ "report": { "task": "task-a", "verdict": "routine", "summary": "task-a finished" } }],
+  "steps": [{ "wake": "signal: task-a" }]
+}
+JSON
+
+  out=$(env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    EXTENSION_PATH="$fixture/.omp/extensions/fm-branch-supervision-omp.ts" \
+    DISPATCH_PATH="$fixture/.omp/extensions/lib/fm-branch-dispatch.ts" \
+    SCENARIO_PATH="$fixture/steps.json" \
+    node --experimental-strip-types "$fixture/driver.mjs" 2>&1) \
+    || fail "routine-completion driver failed: $out"
+
+  assert_contains "$out" '"accepted":true' "the completion wake was not accepted by the branch"
+  assert_contains "$out" '"rejected":""' "the completion wake settlement rejected: $out"
+  assert_contains "$out" '"content":"task-a: task-a finished","triggerTurn":true' \
+    "a routine verdict on an undelivered completion did not open a captain turn: $out"
+  ! printf '%s' "$out" | grep -F 'Undelivered completions await relay' >/dev/null \
+    || fail "the just-merged completion was redundantly re-sent by the redelivery pass: $out"
+  [ ! -e "$state/.branch-eligible-rows" ] || fail "the settled wake left its eligible-rows grant behind"
+  [ ! -e "$state/.branch-eligible-status" ] || fail "the settled wake left its status snapshot behind"
+  pass "a routine verdict on a granted completion opens a captain turn and settles"
+}
+
+# The settle check is per granted task: reporting one granted completion while
+# a second granted completion stays unreported must reject the settlement and
+# release the grant, never settle silently.
+test_mixed_grant_settle_rejects_an_unreported_completion() {
+  local fixture state out
+  fixture="$TMP_ROOT/mixed-grant"
+  state="$fixture/state"
+  make_omp_branch_driver_fixture "$fixture"
+  mkdir -p "$state"
+  printf 'done: task-a finished\n' > "$state/task-a.status"
+  printf 'done: task-b finished\n' > "$state/task-b.status"
+  printf 'project=project-a\nwindow=default:wA:p1\n' > "$state/task-a.meta"
+  printf 'project=project-a\nwindow=default:wB:p1\n' > "$state/task-b.meta"
+  printf '1\t1\tsignal\ttask-a.status\tsignal: task-a\n2\t2\tsignal\ttask-b.status\tsignal: task-b\n' > "$state/.wake-queue"
+  cat > "$fixture/steps.json" <<'JSON'
+{
+  "prompt": [{ "report": { "task": "task-a", "verdict": "routine", "summary": "task-a finished" } }],
+  "steps": [{ "wake": "signal: task-a and task-b" }]
+}
+JSON
+
+  out=$(env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    EXTENSION_PATH="$fixture/.omp/extensions/fm-branch-supervision-omp.ts" \
+    DISPATCH_PATH="$fixture/.omp/extensions/lib/fm-branch-dispatch.ts" \
+    SCENARIO_PATH="$fixture/steps.json" \
+    node --experimental-strip-types "$fixture/driver.mjs" 2>&1) \
+    || fail "mixed-grant driver failed: $out"
+
+  assert_contains "$out" '"accepted":true' "the mixed-grant wake was not accepted by the branch"
+  assert_contains "$out" 'undelivered granted completion for task-b' \
+    "the settle check did not name the unreported granted completion: $out"
+  [ ! -e "$state/.branch-eligible-rows" ] || fail "a rejected settlement left its eligible-rows grant behind"
+  [ ! -e "$state/.branch-eligible-status" ] || fail "a rejected settlement left its status snapshot behind"
+  pass "a settled prompt that leaves a granted completion unreported rejects and releases the grant"
+}
+
+# The branch-side retry: a completion whose merge main already consumed is
+# re-sent once on the next wake's post-settle pass, then never again - the
+# durable receipt, not the send, is what discharges the obligation.
+test_consumed_completion_is_redelivered_once_per_generation() {
+  local fixture state out redeliveries
+  fixture="$TMP_ROOT/completion-redelivery"
+  state="$fixture/state"
+  make_omp_branch_driver_fixture "$fixture"
+  mkdir -p "$state"
+  printf 'done: task-a finished\n' > "$state/task-a.status"
+  printf 'done: task-b finished\n' > "$state/task-b.status"
+  printf 'done: task-c finished\n' > "$state/task-c.status"
+  printf 'project=project-a\nwindow=default:wA:p1\n' > "$state/task-a.meta"
+  printf 'project=project-a\nwindow=default:wB:p1\n' > "$state/task-b.meta"
+  printf 'project=project-a\nwindow=default:wC:p1\n' > "$state/task-c.meta"
+  printf '1\t1\tsignal\ttask-a.status\tsignal: task-a\n2\t2\tsignal\ttask-b.status\tsignal: task-b\n3\t3\tsignal\ttask-c.status\tsignal: task-c\n' > "$state/.wake-queue"
+  cat > "$fixture/steps.json" <<'JSON'
+{
+  "steps": [
+    { "wake": "signal: task-a", "report": { "task": "task-a", "verdict": "routine", "summary": "task-a finished" } },
+    { "consume_content": "task-a: task-a finished" },
+    { "wake": "signal: task-b", "report": { "task": "task-b", "verdict": "routine", "summary": "task-b finished" } },
+    { "wake": "signal: task-c", "report": { "task": "task-c", "verdict": "routine", "summary": "task-c finished" } }
+  ]
+}
+JSON
+
+  out=$(env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    EXTENSION_PATH="$fixture/.omp/extensions/fm-branch-supervision-omp.ts" \
+    DISPATCH_PATH="$fixture/.omp/extensions/lib/fm-branch-dispatch.ts" \
+    SCENARIO_PATH="$fixture/steps.json" \
+    node --experimental-strip-types "$fixture/driver.mjs" 2>&1) \
+    || fail "redelivery driver failed: $out"
+
+  redeliveries=$(printf '%s' "$out" | grep -o 'Undelivered completions await relay' | wc -l | tr -d ' ')
+  [ "$redeliveries" = "1" ] || fail "the consumed completion was re-sent $redeliveries times, expected exactly one: $out"
+  assert_contains "$out" 'task-a: done: task-a finished' "the redelivery omitted the consumed completion: $out"
+  pass "a consumed completion is re-sent exactly once on the next wake and never again"
+}
+
 test_branch_prompt_is_byte_stable_and_above_cache_floor
 test_outcome_store_is_append_only_with_cursor_reads
 test_outcome_startup_replay_preserves_silence
@@ -435,3 +657,6 @@ test_non_branch_home_is_untouched
 test_omp_extension_establishes_main_actor_context
 test_async_outcome_delivery_keeps_event_loop_responsive_and_ordered
 test_omp_scope_resolves_reportable_tasks_from_granted_rows
+test_routine_verdict_on_granted_completion_opens_a_main_turn
+test_mixed_grant_settle_rejects_an_unreported_completion
+test_consumed_completion_is_redelivered_once_per_generation

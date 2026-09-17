@@ -90,12 +90,15 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import {
   activateEligibleRowsOwner,
+  captureTaskStatusSnapshot,
+  BRANCH_ELIGIBLE_STATUS_FILE,
   FM_BRANCH_DISPATCH_EVENT,
   releaseEligibleRowsSnapshot,
   rollbackEligibleRowsOwnerActivation,
   scopeForUnreadWake,
   writeEligibleRowsSnapshot,
   type BranchDispatchOffer,
+  type BranchStatusSnapshotEntry,
 } from "./lib/fm-branch-dispatch.ts";
 import { buildBranchModelItems, FOLLOW_MAIN_VALUE } from "./lib/fm-branch-model-picker.ts";
 import { runCommandAsync } from "./lib/fm-async-exec.ts";
@@ -465,6 +468,20 @@ export default function (pi: ExtensionAPI) {
   // During a signal or stale prompt, reports are restricted to the tasks named
   // by that prompt's granted rows. Heartbeat reviews remain unscoped.
   let wakeTaskScope: { rows: string[]; tasks: Set<string> } | null = null;
+  // The granting-time status identity snapshot published beside the eligible
+  // rows: task -> {endpoint, ident}. Outcome appends bind their covered event
+  // span to it, and the settle check uses it to prove every granted
+  // completion is recorded or delivered before the wake may settle.
+  let grantStatusSnapshot: Map<string, BranchStatusSnapshotEntry> | null = null;
+  // Completion-delivery contract state. inflightCompletions holds
+  // "task|ident|endpoint" identities whose merge send is queued or in flight;
+  // pendingDeliveryContent maps each sent merge's exact content to those
+  // identities so main's consumption events can retire the in-flight marker;
+  // redeliveryAttempted bounds the post-settle re-delivery pass to one extra
+  // send per identity per generation.
+  const inflightCompletions = new Set<string>();
+  const pendingDeliveryContent = new Map<string, string[]>();
+  const redeliveryAttempted = new Set<string>();
   let mainStreaming = false;
   let shuttingDown = false;
   // Advanced once per main session boundary (session_start and session_switch):
@@ -686,8 +703,6 @@ export default function (pi: ExtensionAPI) {
   // re-surfaced by session-start replay - both would double-open a captain turn.
   // The opposite risk, a cursor that advanced but a delivery that failed, leaves
   // the outcome durable in the store and recoverable through main's
-  // fm_branch_outcomes tool, which is the strictly safer failure. The store row
-  // is already durable when this runs (the report tool appends store-first).
   async function mergeIntoMain(
     expectedGeneration: number,
     seq: string,
@@ -695,15 +710,33 @@ export default function (pi: ExtensionAPI) {
     verdict: Verdict,
     summary: string,
     silent: boolean,
+    completionIds: readonly string[] = [],
   ): Promise<boolean> {
     if (!(await actingAsOwner(expectedGeneration))) return false;
     // Advance the cursor first so the outcome can never be delivered twice.
     if (/^[0-9]+$/.test(seq) && !(await runOutcomeScript(["handoff-next", "--seq", seq])).ok) {
       return false;
     }
-    if (verdict === "captain") {
-      const message = { customType: "fm-branch-merge", content: `${task}: ${summary}`, display: false };
-      pi.sendMessage(message, { triggerTurn: true, deliverAs: "followUp" });
+    // The completion-delivery contract: an outcome covering an undelivered
+    // captain-facing event owes a main turn regardless of the model's verdict,
+    // so completionIds forces the captain delivery shape. The turn is the
+    // notification attempt; the obligation itself discharges only when main
+    // records the delivery receipt, and the redelivery pass plus the main
+    // drain backstop retry anything this send loses.
+    if (verdict === "captain" || completionIds.length > 0) {
+      const content = `${task}: ${summary}`;
+      const message = { customType: "fm-branch-merge", content, display: false };
+      try {
+        pi.sendMessage(message, { triggerTurn: true, deliverAs: "followUp" });
+      } catch {
+        return false;
+      }
+      for (const id of completionIds) inflightCompletions.add(id);
+      if (completionIds.length > 0) {
+        const bucket = pendingDeliveryContent.get(content) ?? [];
+        bucket.push(...completionIds);
+        pendingDeliveryContent.set(content, bucket);
+      }
     } else {
       const message = {
         customType: "fm-branch-merge",
@@ -728,6 +761,68 @@ export default function (pi: ExtensionAPI) {
     } else {
       pi.sendMessage(message, {});
     }
+  }
+
+  // The completion-delivery contract's branch-side retry: any obligation still
+  // without a delivery receipt is re-sent to main once per generation, batched
+  // into one turn. Identities already in flight are skipped; the durable
+  // receipt, not this send, is what discharges the obligation, so a lost send
+  // is retried by the next wake and by main's own drain backstop.
+  async function deliverPendingCompletions(expectedGeneration: number): Promise<void> {
+    try {
+      if (!(await actingAsOwner(expectedGeneration))) return;
+      const pending = await runOutcomeScript(["undelivered"]);
+      if (!pending.ok || !pending.stdout) return;
+      const rows = pending.stdout.split("\n").filter((line) => line.length > 0);
+      const fresh = rows.filter((line) => {
+        const [task, ident, endpoint] = line.split("\t");
+        const id = `${task}|${ident}|${endpoint}`;
+        return !inflightCompletions.has(id) && !redeliveryAttempted.has(id);
+      });
+      if (fresh.length === 0) return;
+      const ids = fresh.map((line) => {
+        const [task, ident, endpoint] = line.split("\t");
+        return `${task}|${ident}|${endpoint}`;
+      });
+      const content = `Undelivered completions await relay:\n${fresh
+        .map((line) => {
+          const [task, , , eventLine] = line.split("\t");
+          return `${task}: ${eventLine}`;
+        })
+        .join("\n")}`;
+      const message = { customType: "fm-branch-merge", content, display: false };
+      try {
+        pi.sendMessage(message, { triggerTurn: true, deliverAs: "followUp" });
+      } catch {
+        return;
+      }
+      for (const id of ids) {
+        inflightCompletions.add(id);
+        redeliveryAttempted.add(id);
+      }
+      const bucket = pendingDeliveryContent.get(content) ?? [];
+      bucket.push(...ids);
+      pendingDeliveryContent.set(content, bucket);
+    } catch {
+      // Redelivery is best-effort; the durable ledger and the main drain
+      // backstop retry anything this pass loses.
+    }
+  }
+
+  // Main's runtime consumed a queued merge: a new turn starting consumes every
+  // queued follow-up, and a user message streaming in consumes the one whose
+  // content matches. Consumption retires only the in-flight marker - the
+  // obligation itself discharges when main records the delivery receipt.
+  function noteMainConsumption(consumedContent?: string): void {
+    if (consumedContent === undefined) {
+      inflightCompletions.clear();
+      pendingDeliveryContent.clear();
+      return;
+    }
+    const ids = pendingDeliveryContent.get(consumedContent);
+    if (!ids) return;
+    for (const id of ids) inflightCompletions.delete(id);
+    pendingDeliveryContent.delete(consumedContent);
   }
 
   function recordSettledProviderError(detail: string): void {
@@ -834,7 +929,32 @@ export default function (pi: ExtensionAPI) {
               isError: true,
             };
           }
-          if (!(await mergeIntoMain(toolGeneration, appended.stdout, task, verdict, summary, silent))) {
+          // The outcome's covered span is the granting snapshot's endpoint for
+          // the granted task - the same binding fm-branch-outcome.sh append
+          // just recorded. Every undelivered
+          // captain-facing event inside it (state recorded or pending) owes a
+          // main turn, so the merge below takes the captain delivery shape
+          // whenever the completions scan returns any.
+          const span = grantStatusSnapshot?.get(task);
+          let completionIds: string[] = [];
+          if (span) {
+            const scan = await runOutcomeScript([
+              "completions",
+              "--task",
+              task,
+              "--status-ident",
+              span.ident,
+              "--through",
+              String(span.endpoint),
+            ]);
+            if (scan.ok && scan.stdout) {
+              completionIds = scan.stdout
+                .split("\n")
+                .filter((line) => /\t(?:pending|recorded)\t/.test(line))
+                .map((line) => `${task}|${span.ident}|${line.split("\t", 1)[0]}`);
+            }
+          }
+          if (!(await mergeIntoMain(toolGeneration, appended.stdout, task, verdict, summary, silent, completionIds))) {
             return {
               content: [{ type: "text", text: `recorded seq ${appended.stdout}, but merge refused after supervision replacement or lock loss` }],
               details: undefined,
@@ -1051,9 +1171,34 @@ ${context.command}
         if (scope.corrupted) {
           throw new Error("the unread wake queue could not be read safely");
         }
-        const grant = await writeEligibleRowsSnapshot(state, scope.eligibleSeqs, wakeGrantScript, String(acceptedGeneration));
+        const grantStatusEntries = scope.eligibleTasks.map((task) => captureTaskStatusSnapshot(state, task));
+        if (grantStatusEntries.some((entry) => entry === null)) {
+          throw new Error("could not capture a stable status snapshot for every granted task");
+        }
+        const stableGrantStatusEntries = grantStatusEntries as BranchStatusSnapshotEntry[];
+        const grant = await writeEligibleRowsSnapshot(
+          state,
+          scope.eligibleSeqs,
+          wakeGrantScript,
+          String(acceptedGeneration),
+          stableGrantStatusEntries,
+        );
         if (grant === "main-owned") throw new Error("the wake rows are already claimed by main");
         if (grant !== "published") throw new Error("could not record the branch's eligible row snapshot");
+        try {
+          const publishedEntries = readFileSync(join(state, BRANCH_ELIGIBLE_STATUS_FILE), "utf8")
+            .split(/\r?\n/)
+            .filter(Boolean)
+            .map((line) => {
+              const [task, endpoint, ident] = line.split("\t");
+              if (!task || !/^\d+$/.test(endpoint ?? "") || !/^\d+:\d+$/.test(ident ?? "")) throw new Error("invalid published status snapshot");
+              return { task, endpoint: Number(endpoint), ident };
+            });
+          grantStatusSnapshot = new Map(publishedEntries.map((entry) => [entry.task, entry]));
+          if (grantStatusSnapshot.size !== stableGrantStatusEntries.length) throw new Error("published status snapshot is incomplete");
+        } catch {
+          throw new Error("could not read the published status snapshot");
+        }
         // A row can still arrive between this re-check and the model starting
         // the drain; that residual is accepted by the confused-agent-grade boundary.
         const reportRevisionBeforePrompt = durableReportRevision;
@@ -1083,12 +1228,37 @@ ${context.command}
         if (durableReportRevision <= reportRevisionBeforePrompt) {
           throw new Error("supervision branch prompt settled but produced no durable outcome for its claimed wake rows");
         }
+        // Per-completion coverage: every granted completion must be discharged
+        // by a report (recorded) or a delivery receipt (delivered). A pending
+        // row means the branch acknowledged a completion it never reported and
+        // no receipt covers, so the wake can never settle silently.
+        for (const [task, entry] of grantStatusSnapshot ?? new Map<string, BranchStatusSnapshotEntry>()) {
+          const scan = await enqueueDelivery(() =>
+            runOutcomeScript([
+              "completions",
+              "--task",
+              task,
+              "--status-ident",
+              entry.ident,
+              "--through",
+              String(entry.endpoint),
+            ]),
+          );
+          if (!scan.ok || /\tpending\t/.test(scan.stdout)) {
+            throw new Error(
+              `supervision branch prompt settled but left an undelivered granted completion for ${task}: a report or delivery receipt is required before the wake can settle`,
+            );
+          }
+        }
         recordDurableBranchReport(acceptedGeneration);
         if (!(await releaseEligibleRowsSnapshot(state, wakeGrantScript, String(acceptedGeneration)))) {
           throw new Error("could not release the branch's settled wake-row grant");
         }
+        grantStatusSnapshot = null;
+        await deliverPendingCompletions(acceptedGeneration);
       })
       .catch(async (error: unknown) => {
+        grantStatusSnapshot = null;
         await releaseEligibleRowsSnapshot(state, wakeGrantScript, String(acceptedGeneration));
         throw error;
       })
@@ -1098,6 +1268,38 @@ ${context.command}
     branchChain = delivery.catch(() => {});
     return delivery;
   }
+
+  // A new main turn consumes every queued follow-up merge; a user message
+  // streaming in consumes the merge whose content matches. Either way the
+  // in-flight marker retires so the redelivery pass does not re-send a merge
+  // main already has.
+  pi.on?.("before_agent_start", () => {
+    noteMainConsumption();
+  });
+  pi.on?.("message_start", (event) => {
+    if (event.message.role !== "user") return;
+    const content = event.message.content;
+    let text = "";
+    if (typeof content === "string") {
+      text = content;
+    } else if (Array.isArray(content)) {
+      const parts: string[] = [];
+      for (const part of content) {
+        if (
+          typeof part === "object" &&
+          part !== null &&
+          "type" in part &&
+          part.type === "text" &&
+          "text" in part &&
+          typeof part.text === "string"
+        ) {
+          parts.push(part.text);
+        }
+      }
+      text = parts.join("\n");
+    }
+    if (text) noteMainConsumption(text);
+  });
 
   function enqueueMirrorFlush(): void {
     if (!branch || pendingMirror.length === 0) return;
@@ -1178,6 +1380,10 @@ ${context.command}
     providerRecovery = null;
     generation += 1;
     pendingMirror.length = 0;
+    grantStatusSnapshot = null;
+    inflightCompletions.clear();
+    pendingDeliveryContent.clear();
+    redeliveryAttempted.clear();
     mirrorCollection.collectAnchor = null;
     mirrorCollection.pendingCursor = null;
     mirrorCollection.reanchor = true;

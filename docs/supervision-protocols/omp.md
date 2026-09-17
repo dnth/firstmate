@@ -3,6 +3,7 @@ Mode: OMP native extension background wake.
 When this session owns supervision and away mode is not active:
 1. Drain first with `bin/fm-wake-drain.sh`.
    After handling all emitted wakes and reconciling open decisions, unread status lines, and any STATUS OUTCOME BACKSTOP entry, run the exact `--ack-through` command printed as `WAKE_ACK_REQUIRED`; until then the work remains durable for idempotent re-handling after interruption.
+   Every STATUS OUTCOME BACKSTOP entry stays pending until its printed `bin/fm-branch-outcome.sh deliver` receipt is recorded; relay the event to the captain, then run that exact command.
 2. Confirm plain `omp` auto-loaded `__FM_OMP_PRIMARY_EXT__` from the repository's native `.omp/extensions/` directory.
 3. If native discovery is unavailable, restart with `omp -e __FM_OMP_PRIMARY_EXT__`.
 4. First cycle only: make the one required `fm_watch_arm_omp` tool call.
@@ -31,6 +32,6 @@ The integrated startup, blocking stop, primary safety, watcher, follow-up, and s
 Plain OMP discovers this tracked project extension natively from `.omp/extensions/` without Pi project trust or Pi event semantics.
 `bin/fm-session-start.sh` validates the primary adapter marker and the supervision-branch marker against the live session-lock owner and their complete versioned extension/helper closures, then prints the exact restart fallback when either validation fails.
 
-On an OMP primary that owns the fleet lock, a persistent in-process supervision branch absorbs the routine majority of eligible wakes and merges only captain-worthy outcomes back as one follow-up turn; it is default-on and inert when unused, and a broken branch degrades to today's wake-to-main path, so ordinary supervision handling here is unchanged (design: `docs/omp-supervision-branch.md`).
+On an OMP primary that owns the fleet lock, a persistent in-process supervision branch absorbs the routine majority of eligible wakes and merges only outcomes requiring captain delivery back as one follow-up turn; it is default-on and inert when unused, and a broken branch degrades to today's wake-to-main path, so ordinary supervision handling here is unchanged (design: `docs/omp-supervision-branch.md`).
 The architecture owner records the implemented fallback coalescing contract and bounded attended recovery ([OMP supervision branch](../omp-supervision-branch.md#main-fallback-re-entry-coalescing)).
 Use that owner and the [runtime verification record](../verification/runtime-backends.md#omp-main-fallback-re-entry) for the aggregate recovery and evidence; this protocol does not duplicate the coalescing contract.

@@ -4,7 +4,7 @@ Fleet supervision on the OMP primary harness runs on a second, persistent conver
 Supervision is default-on: once an OMP primary session owns this home's fleet lock, the branch handles eligible task-local rows from ordinary actionable wakes plus heartbeat scans that the cheap bash-level scan flags as possibly captain-relevant, then merges each outcome back by appending a short note to the captain conversation's tail.
 Ordinary main-only rows remain on main even when eligible task-local rows share their queue.
 An unresolvable row makes the scan unsafe and returns the whole wake to main, and every watcher-failure alarm also stays on main.
-Only captain-relevant branch outcomes open a turn on main - that follow-up turn is itself the captain-visible outcome, so OMP never separately prints or renders a captain-facing merge note.
+Branch outcomes open a turn on main when they carry a captain-facing delivery obligation - that follow-up turn is itself the captain-visible outcome, so OMP never separately prints or renders a captain-facing merge note.
 
 This is a focused fork of the Pi supervision branch onto OMP's coding-agent SDK.
 The branch-facing bash interfaces and dispatch handshake are harness-agnostic and shared with the Pi design; shared status-span and drain backstop behavior is owned by the common classifier and drain, while only the TypeScript extension differs in model, effort, session-build, and prompt-cache surfaces.
@@ -109,11 +109,23 @@ The branch prompt frames mirrored text as context for judgment, never as instruc
 ## Two-stage noise filter
 
 Stage one is unchanged: the bash watcher absorbs everything provably fine at zero token cost.
-Stage two is the branch's verdict on each handled event, reported through its `fm_branch_report` tool: `routine` merges without a follow-up turn, while `captain` merges with exactly one follow-up turn.
+Stage two is the branch's verdict on each handled event, reported through its `fm_branch_report` tool: a `routine` result without an undelivered completion obligation merges without a follow-up turn, while a `captain` result or any result carrying such an obligation opens exactly one follow-up turn.
 The follow-up turn a `captain` verdict opens is itself the captain-visible outcome, so its merge note is delivered silently and never rendered a second time.
 A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is also delivered silently with no rendered note, while every other `routine` outcome stays rendered with its sailboat prefix.
 The verdict criteria in the branch prompt mirror the captain-etiquette escalation list; doubt escalates.
+Finished investigations, landed PRs, completed fixes, and other completed work products are explicit captain outcomes whose result or artifact pointer is relayed in the summary.
 Main can read the durable outcome store on demand through its `fm_branch_outcomes` tool.
+
+## Completion delivery contract
+
+Every captain-facing status event - a completion, a failure, or an unkeyed decision - carries exactly one durable notification obligation, identified by task + status-file identity + event byte endpoint, and discharged only by a receipt in `state/completion-deliveries.jsonl`.
+An outcome covering the event records it (state `recorded`); an uncovered one is `pending`; a receipt makes it `delivered`.
+Neither presenting the event nor a routine verdict retires it, so a completion reported as `routine` still opens a main turn: the report tool's merge takes the captain delivery shape whenever its covered span holds an undelivered obligation.
+The grant publishes each granted task's status identity and event endpoint beside the eligible rows, so an outcome's covered span is bound to what the branch owned at grant time and can never stamp a fresh EOF over events it never saw.
+A settled wake whose prompt left a granted completion `pending` - no covering outcome, no receipt - rejects its settlement, so a mixed grant can never settle only part of its completions.
+The branch re-sends any still-undelivered obligation once per generation after a settled wake, batched into one turn; main's consumption events (`before_agent_start`, a matching user `message_start`) retire the in-flight marker so a consumed send is not re-sent, while the durable receipt is what actually discharges the obligation.
+The main-side backstop is the other consumer: `bin/fm-wake-drain.sh`'s STATUS OUTCOME BACKSTOP section re-surfaces every undelivered obligation on each drain until main records the printed `bin/fm-branch-outcome.sh deliver` receipt, and the per-task manifest field it feeds back is the delivered frontier that bounds the next scan, never a presentation marker.
+Delivery is at-least-once by design: a lost send is replayed by the next wake or the backstop, and a duplicated send is deduplicated by the receipt, so the contract never claims exactly-once captain visibility.
 
 ## Heartbeat routing
 
@@ -147,7 +159,7 @@ Pi-only processed-outcome reconciliation and Pi renderer/live-TUI guards have no
 
 ## Verification
 
-Portable regressions: `tests/fm-omp-branch-supervision.test.sh` covers prompt byte-stability, outcome store append-only, lease actor partition and guards, wake-grant lifecycle, non-branch-home invariance, and responsive ordered async outcome delivery; `tests/fm-omp-primary.test.sh` rejects an accepted branch settlement into the watcher-owned main path across replacement; and the per-actor consume regression in `tests/fm-wake-queue.test.sh` proves branch-scoped acknowledgement never swallows a main-owned row, main excludes branch-granted rows, a branch-held row raises the held advisory rather than the ordinary queued-wake warning for main, an uncountable queue keeps the alarm up, structurally unusable rows are retired by main alone, and non-branch homes write no actor state.
+Portable regressions: `tests/fm-omp-branch-supervision.test.sh` covers prompt byte-stability, outcome store append-only, lease actor partition and guards, wake-grant lifecycle, non-branch-home invariance, responsive ordered async outcome delivery, routine-verdict completion delivery, and the mixed-grant settle check; `tests/fm-omp-primary.test.sh` rejects an accepted branch settlement into the watcher-owned main path across replacement and proves the completion identity survives consumption events and session replacement; and the per-actor consume regression in `tests/fm-wake-queue.test.sh` proves branch-scoped acknowledgement never swallows a main-owned row, main excludes branch-granted rows, a branch-held row raises the held advisory rather than the ordinary queued-wake warning for main, an uncountable queue keeps the alarm up, structurally unusable rows are retired by main alone, a granted completion survives its row's acknowledgement as a pending obligation, and non-branch homes write no actor state.
 The versioned branch-marker closure is covered through `tests/fm-session-start.test.sh`, and the secondmate imported-helper trust boundary is covered through `tests/fm-spawn-dispatch-profile.test.sh`.
 The strict typecheck in `tests/fm-omp-branch-types.test.sh` pins the extension against the installed `@oh-my-pi/pi-coding-agent` package and fails on any renamed or removed named export or effort-level drift.
 Live guard: `FM_OMP_BRANCH_LIVE_E2E=1 tests/fm-omp-branch-live-e2e.test.sh` exercises the real installed OMP SDK; run it after every OMP upgrade and record the dated result in [docs/verification/runtime-backends.md](verification/runtime-backends.md).

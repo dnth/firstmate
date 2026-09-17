@@ -960,52 +960,13 @@ status_span_has_actionable() {  # <status-file> <start-offset>
   status_span_first_actionable_record "$1" "${2:-0}" >/dev/null
 }
 
-FM_STATUS_SNAPSHOT_EVENT_LINE=
-FM_STATUS_SNAPSHOT_EVENT_ENDPOINT=
-# shellcheck disable=SC2094 # Scratch file is written before, then read after the span scan.
-status_snapshot_latest_event() {  # <status-file> <captured-end> <captured-identity> [<start-offset>]
-  local f=$1 endpoint=$2 expected_ident=$3 start=${4:-0}
-  local size ident scratch line latest='' line_end=0 latest_endpoint=0 line_bytes read_rc
-  FM_STATUS_SNAPSHOT_EVENT_LINE=
-  FM_STATUS_SNAPSHOT_EVENT_ENDPOINT=
-  case "$endpoint" in ''|*[!0-9]*|0) return 1 ;; esac
-  ident=$(_fm_open_decisions_file_ident "$f") || return 1
-  size=$(_fm_status_file_size "$f") || return 1
-  size=${size//[[:space:]]/}
-  case "$start" in ''|*[!0-9]*) start=0 ;; esac
-  [ "$start" -le "$endpoint" ] || return 1
-  [ "$size" = "$endpoint" ] && [ "$ident" = "$expected_ident" ] || return 1
-  scratch="$(_fm_open_decisions_cursor_path "$f").latest.$$"
-  _fm_status_read_span "$f" "$start" "$((endpoint - start))" > "$scratch" 2>/dev/null || { rm -f "$scratch"; return 1; }
-  while :; do
-    IFS= read -r line
-    read_rc=$?
-    [ "$read_rc" -eq 0 ] || [ -n "$line" ] || break
-    line_bytes=$(LC_ALL=C printf '%s' "$line" | wc -c) || { rm -f "$scratch"; return 1; }
-    line_bytes=${line_bytes//[[:space:]]/}
-    case "$line_bytes" in ''|*[!0-9]*) rm -f "$scratch"; return 1 ;; esac
-    line_end=$((line_end + line_bytes))
-    [ "$read_rc" -eq 0 ] && line_end=$((line_end + 1))
-    case "$line" in
-      *[![:space:]]*)
-        if status_is_captain_relevant "$line"; then
-          latest=$line
-          latest_endpoint=$((start + line_end))
-        fi
-        ;;
-    esac
-  done < "$scratch"
-  rm -f "$scratch"
-  [ -n "$latest" ] || return 1
-  ident=$(_fm_open_decisions_file_ident "$f") || return 1
-  size=$(_fm_status_file_size "$f") || return 1
-  size=${size//[[:space:]]/}
-  [ "$size" = "$endpoint" ] && [ "$ident" = "$expected_ident" ] || return 1
-  # shellcheck disable=SC2034 # These globals are consumed by fm-wake-drain.sh.
-  FM_STATUS_SNAPSHOT_EVENT_LINE=$latest
-  # shellcheck disable=SC2034 # These globals are consumed by fm-wake-drain.sh.
-  FM_STATUS_SNAPSHOT_EVENT_ENDPOINT=$latest_endpoint
-}
+# The fourth field of each .status-presentation-cursor row is the task's
+# delivered frontier for the completion-delivery contract: the greatest status
+# byte endpoint such that every captain-facing obligation event at or before
+# it has a receipt in completion-deliveries.jsonl. fm-wake-drain.sh's
+# STATUS OUTCOME BACKSTOP section computes it through fm-branch-outcome.sh's
+# completions scan and feeds it back through the commit below; it bounds the
+# next scan and is never a presentation marker.
 
 status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
   local f=$1 captured_end=${2:-} cf offset ident open='' trusted_open='' cursor_data first rest offset_line ident_line
@@ -1349,7 +1310,7 @@ status_commit_presentation_snapshot() {  # <state> <snapshot>
     while IFS=$(printf '\t') read -r acknowledged_task acknowledged_endpoint; do
       [ "$acknowledged_task" = "$task" ] && backstop=$acknowledged_endpoint
     done <<EOF
-${STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED:-}
+${STATUS_OUTCOME_BACKSTOP_DELIVERED:-}
 EOF
     case "$backstop" in ''|*[!0-9]*) rm -f "$tmp"; return 1 ;; esac
     [ "$backstop" -le "$size" ] || { rm -f "$tmp"; return 1; }

@@ -58,6 +58,7 @@ PRESENTED_MAX=0
 # test).
 ACTOR=$(fm_lease_actor) || exit 2
 ELIGIBLE_ROWS_FILE="$STATE/.branch-eligible-rows"
+ELIGIBLE_STATUS_FILE="$STATE/.branch-eligible-status"
 ELIGIBLE_OWNER_FILE="$STATE/.branch-eligible-owner"
 MAIN_ROWS_FILE="$STATE/.main-eligible-rows"
 SCOPED=false
@@ -67,7 +68,7 @@ rows_file_valid() { fm_wake_grant_rows_valid "$1"; }
 reclaim_stale_branch_grant_locked() {
   [ -e "$ELIGIBLE_ROWS_FILE" ] || [ -L "$ELIGIBLE_ROWS_FILE" ] || return 0
   if ! fm_wake_branch_grant_live "$ELIGIBLE_ROWS_FILE" "$ELIGIBLE_OWNER_FILE"; then
-    rm -f -- "$ELIGIBLE_ROWS_FILE" "$ELIGIBLE_OWNER_FILE"
+    rm -f -- "$ELIGIBLE_ROWS_FILE" "$ELIGIBLE_OWNER_FILE" "$ELIGIBLE_STATUS_FILE"
   fi
 }
 
@@ -265,51 +266,62 @@ EOF
   [ "$shown" -gt 0 ] || return 0
 }
 
-STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED=
+STATUS_OUTCOME_BACKSTOP_DELIVERED=
 
-latest_branch_outcome_endpoint() {  # <task> <status-identity>
-  local store="$STATE/branch-outcomes.jsonl" task=$1 ident=$2 value max=0
-  [ -f "$store" ] && [ -r "$store" ] && [ ! -L "$store" ] || { printf '0'; return 0; }
-  while IFS= read -r value; do
-    case "$value" in ''|*[!0-9]*) continue ;; esac
-    [ "$value" -gt "$max" ] && max=$value
-  done < <(jq -r --arg task "$task" --arg ident "$ident" 'select(.task == $task and .statusIdent == $ident) | (.statusEndpoint // 0)' "$store" 2>/dev/null || true)
-  printf '%s' "$max"
-}
-
+# The completion-delivery contract's main-side consumer: every captain-facing
+# status event carries one durable notification obligation that is discharged
+# only by a receipt in $STATE/completion-deliveries.jsonl. Neither presenting
+# the event here nor a covering branch outcome retires it, so this section
+# re-surfaces every undelivered event on each drain until main records the
+# delivery. fm-branch-outcome.sh owns the ledger and the scan; the per-task
+# manifest field this feeds back is the delivered frontier that bounds the
+# next scan, never a presentation marker.
 print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
-  local snapshot=$1 task endpoint ident f receipt event outcome output='' shown=0 omitted=0
-  local line key item_bytes=220 global_bytes=4000 used=0 bytes
-  STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED=
+  local snapshot=$1 task endpoint ident f receipt output='' shown=0 omitted=0
+  local line ev_endpoint ev_state ev_line bound seen_undelivered hint_endpoint
+  local completions item_bytes=220 global_bytes=4000 used=0 bytes
+  STATUS_OUTCOME_BACKSTOP_DELIVERED=
   [ "$ACTOR" = main ] || return 0
   while IFS=$(printf '\t') read -r task endpoint ident; do
     [ -n "$task" ] || continue
     f="$STATE/$task.status"
     receipt=$(status_outcome_backstop_cursor_offset "$f") || return 1
     [ "$receipt" -lt "$endpoint" ] || continue
-    status_snapshot_latest_event "$f" "$endpoint" "$ident" "$receipt" || continue
-    event=$FM_STATUS_SNAPSHOT_EVENT_LINE
-    status_is_captain_relevant "$event" || continue
-    case "$(status_line_verb "$event")" in
-      needs-decision|blocked)
-        key=$(_fm_decision_key "$event") || key=
-        [ -z "$key" ] || continue
-        ;;
-    esac
-    outcome=$(latest_branch_outcome_endpoint "$task" "$ident")
-    [ "$outcome" -ge "$FM_STATUS_SNAPSHOT_EVENT_ENDPOINT" ] && continue
-    line="$task $event"
-    fm_cap_line_var "$line" $((item_bytes - 1)); line=$FM_LINE_CAP_LINE
-    bytes=$(( ${#line} + 1 ))
-    if [ $((used + bytes)) -gt "$global_bytes" ]; then omitted=$((omitted + 1)); continue; fi
-    output="${output}${line}"$'\n'
-    STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED="${STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED}${task}"$'\t'"${endpoint}"$'\n'
-    used=$((used + bytes)); shown=$((shown + 1))
+    if ! completions=$("$SCRIPT_DIR/fm-branch-outcome.sh" completions \
+        --task "$task" --status-ident "$ident" --from "$receipt" --through "$endpoint" 2>/dev/null); then
+      continue
+    fi
+    bound=$receipt
+    seen_undelivered=0
+    hint_endpoint=
+    while IFS=$(printf '\t') read -r ev_endpoint ev_state ev_line; do
+      [ -n "$ev_endpoint" ] || continue
+      if [ "$ev_endpoint" = bound ]; then bound=$ev_state; continue; fi
+      seen_undelivered=1
+      hint_endpoint=$ev_endpoint
+      line="$task $ev_line"
+      fm_cap_line_var "$line" $((item_bytes - 1)); line=$FM_LINE_CAP_LINE
+      bytes=$(( ${#line} + 1 ))
+      if [ $((used + bytes)) -gt "$global_bytes" ]; then omitted=$((omitted + 1)); continue; fi
+      output="${output}${line}"$'\n'
+      used=$((used + bytes)); shown=$((shown + 1))
+    done <<EOF
+$completions
+EOF
+    [ "$seen_undelivered" -eq 0 ] && bound=$endpoint
+    STATUS_OUTCOME_BACKSTOP_DELIVERED="${STATUS_OUTCOME_BACKSTOP_DELIVERED}${task}"$'\t'"${bound}"$'\n'
+    if [ -n "$hint_endpoint" ]; then
+      line="STATUS OUTCOME BACKSTOP: after relaying these to the captain, record the delivery receipt: bin/fm-branch-outcome.sh deliver --task $task --status-ident $ident --through $hint_endpoint"
+      fm_cap_line_var "$line" $((item_bytes - 1)); line=$FM_LINE_CAP_LINE
+      bytes=$(( ${#line} + 1 ))
+      output="${output}${line}"$'\n'
+      used=$((used + bytes))
+    fi
   done <<EOF
 $snapshot
 EOF
   [ "$shown" -gt 0 ] || [ "$omitted" -gt 0 ] || return 0
-  printf 'STATUS OUTCOME BACKSTOP (newest captain-facing task event has no covering branch outcome):\n'
+  printf 'STATUS OUTCOME BACKSTOP (captain-facing task events without a recorded delivery receipt):\n'
   printf '%s' "$output"
   [ "$omitted" -gt 0 ] && printf 'STATUS OUTCOME BACKSTOP: %d more omitted (byte cap)\n' "$omitted"
   return 0

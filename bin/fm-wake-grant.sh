@@ -12,14 +12,18 @@
 #     Establish the branch grant owner for this session: write
 #     $STATE/.branch-eligible-owner (version, PID, the PID's live process
 #     identity, GENERATION) and clear any stale $STATE/.branch-eligible-rows.
-#   publish GENERATION SEQUENCE...
+#   publish GENERATION [--status-snapshot FILE] SEQUENCE...
 #     Publish the exact wake-queue sequence numbers the branch may consume to
 #     $STATE/.branch-eligible-rows, refusing (exit 3) any sequence already
 #     main-owned and (exit 1) any sequence absent from the queue; re-publishing
-#     the identical set is idempotent.
+#     the identical set is idempotent. --status-snapshot installs FILE's
+#     "task<TAB>endpoint<TAB>dev:inode" rows as $STATE/.branch-eligible-status,
+#     the granting-time status identity and event endpoint each granted task's
+#     outcome coverage is bound to (fm-branch-outcome.sh append reads it);
+#     omitting it clears the file so a stale snapshot never binds a new grant.
 #   release GENERATION
-#     Remove $STATE/.branch-eligible-rows, keeping the owner, after a settled
-#     prompt.
+#     Remove $STATE/.branch-eligible-rows and $STATE/.branch-eligible-status,
+#     keeping the owner, after a settled prompt.
 #   rollback-activation PID GENERATION
 #     Remove the caller-owned $STATE/.branch-eligible-owner only when activation
 #     has not published $STATE/.branch-eligible-rows; refuse once rows exist.
@@ -38,17 +42,19 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
-
 BRANCH_ROWS="$STATE/.branch-eligible-rows"
+BRANCH_STATUS="$STATE/.branch-eligible-status"
 BRANCH_OWNER="$STATE/.branch-eligible-owner"
 MAIN_ROWS="$STATE/.main-eligible-rows"
 TMP=
+TMP_STATUS=
 LOCK_HELD=false
 
 # shellcheck disable=SC2329 # Registered by the EXIT trap below.
 cleanup() {
   local status=$?
   [ -z "$TMP" ] || rm -f -- "$TMP" 2>/dev/null || true
+  [ -z "$TMP_STATUS" ] || rm -f -- "$TMP_STATUS" 2>/dev/null || true
   [ "$LOCK_HELD" = false ] || fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   exit "$status"
 }
@@ -61,6 +67,24 @@ rows_valid() { fm_wake_grant_rows_valid "$1"; }
 
 owner_matches() { # [<pid>] [<generation>]
   fm_wake_branch_owner_matches "$BRANCH_OWNER" "${1:-}" "${2:-}"
+}
+
+capture_locked_status_snapshot() {
+  local task path first second dev ino size
+  TMP_STATUS=$(mktemp "$STATE/.branch-eligible-status.tmp.XXXXXX") || return 1
+  while IFS=$'\t' read -r task _ _; do
+    [ -n "$task" ] || continue
+    case "$task" in *$'\t'*|*$'\n'*) return 1 ;; esac
+    path="$STATE/$task.status"
+    [ -f "$path" ] && [ ! -L "$path" ] && [ -r "$path" ] || return 1
+    first=$(stat -c '%d:%i:%s' -- "$path" 2>/dev/null || stat -f '%d:%i:%z' -- "$path" 2>/dev/null) || return 1
+    second=$(stat -c '%d:%i:%s' -- "$path" 2>/dev/null || stat -f '%d:%i:%z' -- "$path" 2>/dev/null) || return 1
+    [ "$first" = "$second" ] || return 1
+    dev=${first%%:*}; first=${first#*:}
+    ino=${first%%:*}; size=${first#*:}
+    printf '%s\t%s\t%s:%s\n' "$task" "$size" "$dev" "$ino" >> "$TMP_STATUS" || return 1
+  done < "$status_snapshot"
+  chmod 0600 "$TMP_STATUS" || return 1
 }
 
 case "${1:-}" in
@@ -77,8 +101,8 @@ case "${1:-}" in
     chmod 0600 "$TMP" || exit 1
     fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
     LOCK_HELD=true
-    [ "$(fm_pid_identity "$pid" 2>/dev/null || true)" = "$identity" ] || exit 1
     rm -f -- "$BRANCH_ROWS" || exit 1
+    rm -f -- "$BRANCH_STATUS" || exit 1
     _fm_atomic_replace "$TMP" "$BRANCH_OWNER" || exit 1
     TMP=
     ;;
@@ -87,13 +111,37 @@ case "${1:-}" in
     [ "$#" -gt 2 ] || exit 2
     case "$generation" in ''|*[!A-Za-z0-9._-]*) exit 2 ;; esac
     shift 2
+    status_snapshot=
+    if [ "${1:-}" = --status-snapshot ]; then
+      status_snapshot=${2:-}
+      [ -n "$status_snapshot" ] || exit 2
+      shift 2
+    fi
+    [ "$#" -gt 0 ] || exit 2
     TMP=$(mktemp "$STATE/.branch-eligible-rows.tmp.XXXXXX") || exit 1
     printf '%s\n' "$@" > "$TMP" || exit 1
     chmod 0600 "$TMP" || exit 1
     rows_valid "$TMP" || exit 2
+    if [ -n "$status_snapshot" ]; then
+      [ -f "$status_snapshot" ] && [ ! -L "$status_snapshot" ] && [ -r "$status_snapshot" ] || exit 2
+      # The snapshot binds each granted task to the exact status identity and
+      # event endpoint the branch owned at grant time; a malformed row is a
+      # caller bug and fails the publish rather than silently weakening the
+      # completion-delivery contract.
+      awk -F '\t' '
+        NF != 3 { exit 1 }
+        $1 == "" || $1 ~ /[\t]/ { exit 1 }
+        $2 !~ /^[0-9]+$/ { exit 1 }
+        $3 !~ /^[0-9]+:[0-9]+$/ { exit 1 }
+        { print }
+      ' "$status_snapshot" > /dev/null || exit 2
+    fi
     fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
     LOCK_HELD=true
     owner_matches '' "$generation" || exit 1
+    if [ -n "$status_snapshot" ]; then
+      capture_locked_status_snapshot || exit 1
+    fi
     replace=1
     if [ -e "$BRANCH_ROWS" ] || [ -L "$BRANCH_ROWS" ]; then
       rows_valid "$BRANCH_ROWS" && cmp -s "$TMP" "$BRANCH_ROWS" || exit 1
@@ -116,6 +164,12 @@ case "${1:-}" in
       _fm_atomic_replace "$TMP" "$BRANCH_ROWS" || exit 1
       TMP=
     fi
+    if [ -n "$TMP_STATUS" ]; then
+      _fm_atomic_replace "$TMP_STATUS" "$BRANCH_STATUS" || exit 1
+      TMP_STATUS=
+    else
+      rm -f -- "$BRANCH_STATUS" || exit 1
+    fi
     ;;
   release)
     generation=${2:-}
@@ -123,6 +177,7 @@ case "${1:-}" in
     fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
     LOCK_HELD=true
     owner_matches '' "$generation" || exit 1
+    rm -f -- "$BRANCH_STATUS" || exit 1
     rm -f -- "$BRANCH_ROWS" || exit 1
     ;;
   rollback-activation)
@@ -135,10 +190,11 @@ case "${1:-}" in
     if [ -e "$BRANCH_ROWS" ] || [ -L "$BRANCH_ROWS" ]; then
       exit 1
     fi
+    rm -f -- "$BRANCH_STATUS" || exit 1
     rm -f -- "$BRANCH_OWNER" || exit 1
     ;;
   *)
-    echo "usage: fm-wake-grant.sh activate PID GENERATION | publish GENERATION SEQUENCE... | release GENERATION | rollback-activation PID GENERATION" >&2
+    echo "usage: fm-wake-grant.sh activate PID GENERATION | publish GENERATION [--status-snapshot FILE] SEQUENCE... | release GENERATION | rollback-activation PID GENERATION" >&2
     exit 2
     ;;
 esac

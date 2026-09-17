@@ -1440,6 +1440,88 @@ test_stale_acknowledgement_names_current_presented_wake() {
   pass "a stale acknowledgement is bounded and names the current presented wake"
 }
 
+# The granting-time status snapshot binds each granted task's outcome coverage
+# to the exact identity and endpoint the branch owned at publish, so an
+# outcome can never stamp a fresh EOF over events the branch never saw.
+test_grant_status_snapshot_binds_outcome_coverage() {
+  local dir state grant snapshot ident endpoint
+  grant="$ROOT/bin/fm-wake-grant.sh"
+  dir=$(make_case grant-status-snapshot)
+  state="$dir/state"
+  printf 'done: granted work\n' > "$state/task-a.status"
+  ident=$(status_ident "$state/task-a.status") || fail "could not read task-a status identity"
+  endpoint=$(wc -c < "$state/task-a.status" | tr -d ' ')
+  append_wake "$state" signal "task-a.status" "signal: task-a" || fail "signal append failed"
+  snapshot="$dir/snapshot.tsv"
+  printf 'task-a\t%s\t%s\n' "$endpoint" "$ident" > "$snapshot"
+
+  FM_STATE_OVERRIDE="$state" "$grant" activate "$$" snapshot-scope || fail "branch owner activation failed"
+  FM_STATE_OVERRIDE="$state" "$grant" publish snapshot-scope --status-snapshot "$snapshot" 1 \
+    || fail "branch grant publication with status snapshot failed"
+  [ -f "$state/.branch-eligible-status" ] || fail "the status snapshot was not installed"
+  cmp -s "$snapshot" "$state/.branch-eligible-status" \
+    || fail "the installed status snapshot differs from the published one"
+
+  # An outcome appended while the grant is live records the snapshot's
+  # endpoint, not a fresh EOF read at append time.
+  printf 'working: post-grant progress\n' >> "$state/task-a.status"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-a --verdict routine --summary 'handled' >/dev/null \
+    || fail "outcome append failed"
+  grep -F "\"statusEndpoint\":$endpoint" "$state/branch-outcomes.jsonl" >/dev/null \
+    || fail "the outcome recorded a fresh EOF instead of the granted endpoint: $(cat "$state/branch-outcomes.jsonl")"
+  grep -F "\"statusIdent\":\"$ident\"" "$state/branch-outcomes.jsonl" >/dev/null \
+    || fail "the outcome recorded the wrong status identity: $(cat "$state/branch-outcomes.jsonl")"
+
+  FM_STATE_OVERRIDE="$state" "$grant" release snapshot-scope || fail "branch grant release failed"
+  [ ! -e "$state/.branch-eligible-status" ] || fail "the status snapshot survived release"
+  pass "the grant status snapshot binds outcome coverage to the granted endpoint and clears on release"
+}
+
+# A completion whose wake row the branch acknowledged is never lost: the
+# completion-delivery contract keeps it pending until a delivery receipt
+# exists, so the main drain's backstop surfaces it after the branch's ack.
+test_granted_completion_survives_its_rows_acknowledgement() {
+  local dir state grant sequence generation ident
+  grant="$ROOT/bin/fm-wake-grant.sh"
+  dir=$(make_case completion-survives-ack)
+  state="$dir/state"
+  printf 'done: branch-handled completion\n' > "$state/task-b.status"
+  ident=$(status_ident "$state/task-b.status") || fail "could not read task-b status identity"
+  append_wake "$state" signal "task-b.status" "signal: task-b" || fail "signal append failed"
+  printf 'task-b\t%s\t%s\n' "$(wc -c < "$state/task-b.status" | tr -d ' ')" "$ident" > "$dir/snapshot.tsv"
+
+  FM_STATE_OVERRIDE="$state" "$grant" activate "$$" completion-ack || fail "branch owner activation failed"
+  FM_STATE_OVERRIDE="$state" "$grant" publish completion-ack --status-snapshot "$dir/snapshot.tsv" 1 \
+    || fail "branch grant publication failed"
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$dir/branch.out" 2> "$dir/branch.err" \
+    || fail "branch-scoped drain failed: $(cat "$dir/branch.err")"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/branch.err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/branch.err")
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "branch-scoped ack failed"
+  FM_STATE_OVERRIDE="$state" "$grant" release completion-ack || fail "branch grant release failed"
+  [ ! -s "$state/.wake-queue" ] || fail "the branch's granted row survived its ack"
+
+  # The completion is pending - no outcome, no receipt - so the main drain's
+  # backstop must surface it rather than treating the acked row as handled.
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/main.out" 2> "$dir/main.err" \
+    || fail "main drain failed: $(cat "$dir/main.err")"
+  grep -F 'STATUS OUTCOME BACKSTOP' "$dir/main.out" >/dev/null \
+    || fail "the acknowledged completion was silently lost: $(cat "$dir/main.out")"
+  grep -F 'task-b done: branch-handled completion' "$dir/main.out" >/dev/null \
+    || fail "the backstop omitted the acknowledged completion: $(cat "$dir/main.out")"
+
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-outcome.sh" deliver \
+    --task task-b --status-ident "$ident" --through "$(wc -c < "$state/task-b.status" | tr -d ' ')" >/dev/null \
+    || fail "the delivery receipt failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/main-delivered.out" 2>/dev/null \
+    || fail "the delivered main drain failed"
+  [ ! -s "$dir/main-delivered.out" ] \
+    || fail "a delivered completion still printed the backstop: $(cat "$dir/main-delivered.out")"
+  pass "a granted completion survives its row's acknowledgement as a pending obligation until delivered"
+}
+
 # Consumer-side incarnation gate for turn-end markers (fm-wake-lib.sh).
 # bin/fm-turnend-signal.sh writes state/<id>.turn-ended lock-free and
 # unconditionally, stamped with the firing spawn_gen. The consumer discards a
@@ -1515,3 +1597,5 @@ test_main_is_never_told_to_drain_rows_only_the_branch_owns
 test_uncountable_queue_still_raises_the_pending_alarm
 test_unconsumable_rows_are_retired_instead_of_wedging_the_queue
 test_branch_owner_activation_rollback_stops_after_publication
+test_grant_status_snapshot_binds_outcome_coverage
+test_granted_completion_survives_its_rows_acknowledgement
