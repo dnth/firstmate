@@ -272,6 +272,10 @@ for (const item of status) {
     console.error("treehouse status entry is missing a string path");
     process.exit(3);
   }
+  if (seen.has(item.path)) {
+    console.error(`treehouse status contains duplicate path: ${item.path}`);
+    process.exit(4);
+  }
   seen.add(item.path);
   const entry = stateFor(item.path) || {};
   const leased = entry.leased || item.status === "leased" ? 1 : 0;
