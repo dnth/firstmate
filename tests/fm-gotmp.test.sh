@@ -65,6 +65,7 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-lease-lib.sh" "$fake/bin/fm-lease-lib.sh"
   # fm-pool-lib.sh: teardown sources the shared Treehouse cleanliness predicate.
   ln -s "$ROOT/bin/fm-pool-lib.sh" "$fake/bin/fm-pool-lib.sh"
+  ln -s "$ROOT/bin/fm-homes-lib.sh" "$fake/bin/fm-homes-lib.sh"
   ln -s "$ROOT/bin/fm-treehouse-root-lib.sh" "$fake/bin/fm-treehouse-root-lib.sh"
   # Status-presentation retirement is sourced by teardown.
   ln -s "$ROOT/bin/fm-classify-lib.sh" "$fake/bin/fm-classify-lib.sh"
@@ -149,6 +150,7 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
   ln -s "$ROOT/bin/fm-lease-lib.sh" "$fake/bin/fm-lease-lib.sh"
   ln -s "$ROOT/bin/fm-pool-lib.sh" "$fake/bin/fm-pool-lib.sh"
+  ln -s "$ROOT/bin/fm-homes-lib.sh" "$fake/bin/fm-homes-lib.sh"
   ln -s "$ROOT/bin/fm-treehouse-root-lib.sh" "$fake/bin/fm-treehouse-root-lib.sh"
   ln -s "$ROOT/bin/fm-classify-lib.sh" "$fake/bin/fm-classify-lib.sh"
   ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake/bin/fm-wake-lib.sh"

@@ -77,6 +77,7 @@ config/startup-memory-budget     primary-authoritative per-home startup-memory b
 config/herdr-presentation-spaces  optional "off" opt-out from Herdr's default-on disposable single-task visual projection; LOCAL, gitignored; inherited by secondmate homes; see docs/herdr-backend.md "Presentation spaces"
 config/trace-context  optional presence flag enabling default-off native W3C trace-context propagation to spawned agents; LOCAL, gitignored; inherited by secondmate homes; see docs/configuration.md "Trace context propagation" and docs/trace-context.md
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
+config/treehouse-sweep-clean  optional presence flag enabling bin/fm-treehouse-sweep.sh --apply-clean; LOCAL, gitignored, and not inherited; see docs/configuration.md "Treehouse pool sweep"
 config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
 config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
 config/ext-bridge    optional presence flag enabling the sibling local Communication Officer bridge; LOCAL, gitignored, and not inherited; see docs/configuration.md "Local Communication Officer bridge"

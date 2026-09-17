@@ -141,6 +141,14 @@ A Secondmate on a remote route is covered the same way: the primary resolves and
 The presence flag is session-scoped enablement, so it transfers at launch and is left unchanged by live convergence into a running home.
 See [`trace-context.md`](trace-context.md) for carrier semantics, supported routes, the manual fleet-restart requirement, the session boundary, and safety limits; `bin/fm-trace-context-lib.sh`'s header owns the exact mechanics, and [`verification/trace-context.md`](verification/trace-context.md) records repeatable evidence.
 
+## Treehouse pool sweep (config/treehouse-sweep-clean)
+
+`bin/fm-treehouse-sweep.sh` classifies every unleased Treehouse pool slot under the home's backing repos as clean, dirty, damaged, or skipped, using `treehouse status --json` plus the same `.fm-slot-owner` claim and cross-home `state/*.meta` ownership proof teardown applies.
+The default pass is classify + dry-run only and never executes `prune --yes` or `destroy`.
+The optional local, gitignored `config/treehouse-sweep-clean` presence flag opts the home into `--apply-clean`, which removes only the proven clean tier via per-slot `treehouse destroy <path> --yes`; it is default off because deleting warm slots is a resource-policy choice.
+Dirty, damaged, leased, claimed, meta-named, and live-occupied slots are never auto-removed; `--apply-slot <path> --captain-approved` destroys exactly one dirty-tier slot, and `--include-in-use`/`--include-leased`/claim removal are never forwarded.
+The script's header and `--help` own the exact flags, classification order, and refusal cases.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI.

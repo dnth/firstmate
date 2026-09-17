@@ -219,6 +219,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # shellcheck source=bin/fm-pool-lib.sh
 . "$SCRIPT_DIR/fm-pool-lib.sh"
+# shellcheck source=bin/fm-homes-lib.sh
+. "$SCRIPT_DIR/fm-homes-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
@@ -1080,13 +1082,6 @@ inspectable_git_worktree() {
   git -C "$top" rev-parse --git-dir >/dev/null 2>&1
 }
 
-canonical_existing_dir() {
-  local target=$1
-  [ -n "$target" ] || return 1
-  [ -d "$target" ] || return 1
-  ( cd "$target" && pwd -P )
-}
-
 retry_wait_secs_is_valid() {
   [[ "$1" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]]
 }
@@ -1941,52 +1936,6 @@ teardown_live_slot_path() {
   [ "$KIND" != secondmate ] || return 1
   fm_treehouse_pool_slot "$PROJ" "$WT" || return 1
   canonical_existing_dir "$WT"
-}
-
-collect_local_firstmate_states() {
-  local record_state=$1 root home reg line child known existing i=0
-  local -a homes
-  TREEHOUSE_OWNER_STATES=("$record_state")
-  root=$(fm_firstmate_root_home "$FM_HOME") || {
-    echo "REFUSED: cannot resolve the root Firstmate home; nothing was changed" >&2
-    return 1
-  }
-  homes=("$root")
-  while [ "$i" -lt "${#homes[@]}" ]; do
-    home=${homes[$i]}
-    i=$((i + 1))
-    known=0
-    for existing in "${TREEHOUSE_OWNER_STATES[@]}"; do
-      [ "$existing" != "$home/state" ] || known=1
-    done
-    [ "$known" = 1 ] || TREEHOUSE_OWNER_STATES+=("$home/state")
-    reg="$home/data/secondmates.md"
-    [ ! -e "$reg" ] && [ ! -L "$reg" ] && continue
-    [ -f "$reg" ] && [ ! -L "$reg" ] || {
-      echo "REFUSED: local Firstmate registry is unsafe at $reg; nothing was changed" >&2
-      return 1
-    }
-    while IFS= read -r line || [ -n "$line" ]; do
-      case "$line" in
-        "- "*)
-          secondmate_registry_parse_line "$line" || {
-            echo "REFUSED: malformed local Firstmate registry entry in $reg; nothing was changed" >&2
-            return 1
-          }
-          [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || continue
-          child=$(canonical_existing_dir "$SECONDMATE_REGISTRY_HOME") || {
-            echo "REFUSED: registered local Firstmate home is unavailable: $SECONDMATE_REGISTRY_HOME; nothing was changed" >&2
-            return 1
-          }
-          known=0
-          for existing in "${homes[@]}"; do
-            [ "$existing" != "$child" ] || known=1
-          done
-          [ "$known" = 1 ] || homes+=("$child")
-          ;;
-      esac
-    done < "$reg"
-  done
 }
 
 require_exclusive_worktree_slot_record() {
