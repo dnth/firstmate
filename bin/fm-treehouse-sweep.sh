@@ -265,7 +265,7 @@ sweep_classify_pool() {  # <repo> — fills the SWEEP_* arrays
     cd "$repo" 2>/dev/null && treehouse status --json 2>/dev/null
   )
   status_rc=$?
-  [ "$status_rc" -eq 0 ] && [ -n "$entries" ] || {
+  [ "$status_rc" -eq 0 ] || {
     warn "pool $repo: treehouse status --json failed; nothing classified"
     return 1
   }
@@ -386,40 +386,53 @@ if [ -n "$apply_slot" ]; then
   target=$(canonical_existing_dir "$apply_slot") \
     || die "--apply-slot target $apply_slot is not an existing directory"
   found=0
+  target_repo=
+  target_name=
+  target_class=
+  target_reason=
   for repo in "${pools[@]}"; do
-    sweep_classify_pool "$repo" || continue
+    sweep_classify_pool "$repo" \
+      || die "pool $repo could not be classified; nothing was changed"
+    [ "$SWEEP_UNSAFE_CLAIM" = 0 ] \
+      || die "an unreadable slot-owner claim exists in pool $repo; nothing was changed"
+    [ "$SWEEP_UNPROVABLE" = 0 ] \
+      || die "slot occupancy is unprovable in pool $repo; nothing was changed"
     for i in "${!SWEEP_PATHS[@]}"; do
       canon=$(canonical_existing_dir "${SWEEP_PATHS[$i]}") || continue
       [ "$canon" = "$target" ] || continue
       found=1
-      case "${SWEEP_CLASSES[$i]}" in
-        dirty)
-          [ "$SWEEP_UNSAFE_CLAIM" = 0 ] \
-            || die "an unreadable slot-owner claim exists in pool $repo; nothing was changed"
-          [ "$SWEEP_UNPROVABLE" = 0 ] \
-            || die "slot occupancy is unprovable in pool $repo; nothing was changed"
-          sweep_acquire_pool_lock "$repo"
-          echo "sweep: captain-approved destroy of dirty slot ${SWEEP_NAMES[$i]} at $canon"
-          ( cd "$repo" && treehouse destroy "$canon" --include-unlanded --yes ) \
-            || die "treehouse destroy failed for $canon"
-          exit 0
-          ;;
-        clean)
-          die "slot $canon is in the clean tier; use --apply-clean (never --include-unlanded on clean work)"
-          ;;
-        damaged)
-          die "slot $canon is damaged/orphaned; removal is a manual captain act, never the sweep's"
-          ;;
-        refused)
-          die "slot $canon cannot be proven safe: ${SWEEP_REASONS[$i]}"
-          ;;
-        *)
-          die "slot $canon is skipped (${SWEEP_REASONS[$i]}); nothing was changed"
-          ;;
-      esac
+      target_repo=$repo
+      target_name=${SWEEP_NAMES[$i]}
+      target_class=${SWEEP_CLASSES[$i]}
+      target_reason=${SWEEP_REASONS[$i]}
     done
   done
   [ "$found" = 1 ] || die "$apply_slot is not a managed unleased pool slot in scope"
+  case "$target_class" in
+    dirty) ;;
+    clean) die "slot $target is in the clean tier; use --apply-clean (never --include-unlanded on clean work)" ;;
+    damaged) die "slot $target is damaged/orphaned; removal is a manual captain act, never the sweep's" ;;
+    refused) die "slot $target cannot be proven safe: $target_reason" ;;
+    *) die "slot $target is skipped ($target_reason); nothing was changed" ;;
+  esac
+  sweep_acquire_pool_lock "$target_repo"
+  sweep_classify_pool "$target_repo" \
+    || die "pool $target_repo could not be revalidated; nothing was changed"
+  [ "$SWEEP_UNSAFE_CLAIM" = 0 ] \
+    || die "an unreadable slot-owner claim exists in pool $target_repo; nothing was changed"
+  [ "$SWEEP_UNPROVABLE" = 0 ] \
+    || die "slot occupancy is unprovable in pool $target_repo; nothing was changed"
+  for i in "${!SWEEP_PATHS[@]}"; do
+    canon=$(canonical_existing_dir "${SWEEP_PATHS[$i]}") || continue
+    [ "$canon" = "$target" ] || continue
+    [ "${SWEEP_CLASSES[$i]}" = dirty ] \
+      || die "slot $target changed tier during validation; nothing was changed"
+    echo "sweep: captain-approved destroy of dirty slot ${SWEEP_NAMES[$i]} at $canon"
+    ( cd "$target_repo" && treehouse destroy "$canon" --include-unlanded --yes ) \
+      || die "treehouse destroy failed for $canon"
+    exit 0
+  done
+  die "$apply_slot disappeared during validation; nothing was changed"
 fi
 
 if [ "$apply_clean" = 1 ]; then
@@ -458,14 +471,26 @@ for repo in "${pools[@]}"; do
 done
 
 if [ "$apply_clean" = 1 ]; then
-  for repo in "${pools[@]}"; do
-    sweep_acquire_pool_lock "$repo"
-    sweep_release_pool_lock
-  done
   for i in "${!clean_paths[@]}"; do
     repo=${clean_repos[$i]}
     canon=${clean_paths[$i]}
     sweep_acquire_pool_lock "$repo"
+    sweep_classify_pool "$repo" \
+      || die "pool $repo could not be revalidated; nothing was changed"
+    [ "$SWEEP_UNSAFE_CLAIM" = 0 ] \
+      || die "an unreadable slot-owner claim exists in pool $repo; nothing was changed"
+    [ "$SWEEP_UNPROVABLE" = 0 ] \
+      || die "slot occupancy is unprovable in pool $repo; nothing was changed"
+    still_clean=0
+    for j in "${!SWEEP_PATHS[@]}"; do
+      check=$(canonical_existing_dir "${SWEEP_PATHS[$j]}" 2>/dev/null || true)
+      if [ "$check" = "$canon" ] && [ "${SWEEP_CLASSES[$j]}" = clean ]; then
+        still_clean=1
+        break
+      fi
+    done
+    [ "$still_clean" = 1 ] \
+      || die "clean slot $canon changed state during validation; nothing was changed"
     echo "sweep: removing clean slot ${clean_names[$i]} at $canon"
     ( cd "$repo" && treehouse destroy "$canon" --yes ) \
       || die "treehouse destroy failed for clean slot $canon"
