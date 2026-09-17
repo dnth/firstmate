@@ -276,7 +276,13 @@ const stateFor = (p) => {
   const entries = stateListFor(p);
   return entries ? entries.find(e => e && e.path === p) || null : null;
 };
-for (const file of [path.join(poolRoot, "treehouse-state.json"), path.join(path.dirname(poolRoot), "treehouse-state.json")]) {
+const stateFiles = [path.join(poolRoot, "treehouse-state.json"), path.join(path.dirname(poolRoot), "treehouse-state.json")];
+try {
+  for (const child of fs.readdirSync(path.dirname(poolRoot))) {
+    stateFiles.push(path.join(path.dirname(poolRoot), child, "treehouse-state.json"));
+  }
+} catch { process.exit(5); }
+for (const file of stateFiles) {
   if (!fs.existsSync(file)) continue;
   let state;
   try { state = JSON.parse(fs.readFileSync(file, "utf8")); } catch { process.exit(5); }
