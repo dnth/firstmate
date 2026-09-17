@@ -229,7 +229,10 @@ const stateFor = (p) => {
   } catch { return null; }
 };
 for (const item of status) {
-  if (!item || typeof item.path !== "string") continue;
+  if (!item || typeof item.path !== "string") {
+    console.error("treehouse status entry is missing a string path");
+    process.exit(3);
+  }
   seen.add(item.path);
   const entry = stateFor(item.path) || {};
   const leased = entry.leased || item.status === "leased" ? 1 : 0;
@@ -372,7 +375,26 @@ sweep_release_pool_lock() {
   [ -n "${SWEEP_POOL_LOCK:-}" ] && fm_lock_release "$SWEEP_POOL_LOCK" || true
   SWEEP_POOL_LOCK=
 }
-trap sweep_release_pool_lock EXIT
+SWEEP_BATCH_LOCKS=()
+sweep_acquire_batch_lock() {
+  local repo=$1 lock existing
+  lock=$(fm_treehouse_project_lock_path "$repo") \
+    || die "cannot resolve the shared Treehouse project lock for $repo; nothing was changed"
+  for existing in "${SWEEP_BATCH_LOCKS[@]}"; do
+    [ "$existing" = "$lock" ] && return 0
+  done
+  fm_lock_try_acquire "$lock" \
+    || die "another Treehouse pool operation holds the project lock for $repo; nothing was changed"
+  SWEEP_BATCH_LOCKS+=("$lock")
+}
+sweep_release_batch_locks() {
+  local lock
+  for lock in "${SWEEP_BATCH_LOCKS[@]}"; do
+    fm_lock_release "$lock" || true
+  done
+  SWEEP_BATCH_LOCKS=()
+}
+trap 'sweep_release_pool_lock; sweep_release_batch_locks' EXIT
 
 # --- apply passes ------------------------------------------------------------
 
@@ -387,7 +409,6 @@ if [ -n "$apply_slot" ]; then
     || die "--apply-slot target $apply_slot is not an existing directory"
   found=0
   target_repo=
-  target_name=
   target_class=
   target_reason=
   for repo in "${pools[@]}"; do
@@ -402,7 +423,6 @@ if [ -n "$apply_slot" ]; then
       [ "$canon" = "$target" ] || continue
       found=1
       target_repo=$repo
-      target_name=${SWEEP_NAMES[$i]}
       target_class=${SWEEP_CLASSES[$i]}
       target_reason=${SWEEP_REASONS[$i]}
     done
@@ -471,10 +491,12 @@ for repo in "${pools[@]}"; do
 done
 
 if [ "$apply_clean" = 1 ]; then
+  for repo in "${pools[@]}"; do
+    sweep_acquire_batch_lock "$repo"
+  done
   for i in "${!clean_paths[@]}"; do
     repo=${clean_repos[$i]}
     canon=${clean_paths[$i]}
-    sweep_acquire_pool_lock "$repo"
     sweep_classify_pool "$repo" \
       || die "pool $repo could not be revalidated; nothing was changed"
     [ "$SWEEP_UNSAFE_CLAIM" = 0 ] \
@@ -491,10 +513,14 @@ if [ "$apply_clean" = 1 ]; then
     done
     [ "$still_clean" = 1 ] \
       || die "clean slot $canon changed state during validation; nothing was changed"
+  done
+  for i in "${!clean_paths[@]}"; do
+    repo=${clean_repos[$i]}
+    canon=${clean_paths[$i]}
     echo "sweep: removing clean slot ${clean_names[$i]} at $canon"
     ( cd "$repo" && treehouse destroy "$canon" --yes ) \
       || die "treehouse destroy failed for clean slot $canon"
-    sweep_release_pool_lock
   done
+  sweep_release_batch_locks
 fi
 exit "$sweep_rc"
