@@ -265,6 +265,7 @@ const path = require("path");
 const status = JSON.parse(process.argv[3]);
 const out = [];
 const seen = new Set();
+const enc = value => Buffer.from(String(value), "utf8").toString("base64");
 const stateFor = (p) => {
   try {
     const state = JSON.parse(fs.readFileSync(
@@ -293,7 +294,7 @@ for (const item of status) {
     String(leased),
     String(destroying),
     String(item.lease_holder || entry.lease_holder || ""),
-  ].join("\t"));
+  ].map(enc).join("\t"));
 }
 if (out.length) process.stdout.write(out.join("\n") + "\n");
 NODE
@@ -328,7 +329,14 @@ sweep_classify_pool() {  # <repo> — fills the SWEEP_* arrays
     return 1
   }
   while IFS=$'\t' read -r name path status nprocs leased destroying holder; do
-    [ -n "$path" ] || continue
+    name=$(printf '%s' "$name" | base64 -d) || return 1
+    path=$(printf '%s' "$path" | base64 -d) || return 1
+    status=$(printf '%s' "$status" | base64 -d) || return 1
+    nprocs=$(printf '%s' "$nprocs" | base64 -d) || return 1
+    leased=$(printf '%s' "$leased" | base64 -d) || return 1
+    destroying=$(printf '%s' "$destroying" | base64 -d) || return 1
+    holder=$(printf '%s' "$holder" | base64 -d) || return 1
+    [ -n "$path" ] || return 1
     class=skipped; reason=
     canon=
     if [ "$leased" = 1 ]; then
@@ -373,6 +381,10 @@ sweep_classify_pool() {  # <repo> — fills the SWEEP_* arrays
                    || ! git -C "$canon" rev-parse --git-dir >/dev/null 2>&1; then
                   class=damaged
                   reason="broken worktree admin link; inspect-only, removal stays manual"
+                elif ! git -C "$canon" status --porcelain --untracked-files=all >/dev/null 2>&1; then
+                  class=refused
+                  reason="git status failed; cleanliness cannot be proven"
+                  SWEEP_UNSAFE_CLAIM=1
                 elif porcelain_head=$(fm_pool_first_real_porcelain_line "$canon"); then
                   class=dirty
                   reason="uncommitted changes ($porcelain_head); captain may destroy by exact path"
