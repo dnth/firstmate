@@ -207,9 +207,6 @@ sweep_pool_default_ref() {  # <repo> → prints a ref the slot HEAD must reach
     && [ -n "$ref" ] && { printf '%s\n' "$ref"; return 0; }
   ref=$(git -C "$repo" rev-parse -q --verify origin/HEAD 2>/dev/null) \
     && { printf '%s\n' "origin/HEAD"; return 0; }
-  ref=$(git -C "$repo" symbolic-ref -q --short HEAD 2>/dev/null) \
-    && [ -n "$ref" ] && git -C "$repo" rev-parse -q --verify "$ref" >/dev/null 2>&1 \
-    && { printf '%s\n' "$ref"; return 0; }
   for ref in main master; do
     git -C "$repo" rev-parse -q --verify "$ref" >/dev/null 2>&1 \
       && { printf '%s\n' "$ref"; return 0; }
@@ -265,14 +262,29 @@ const path = require("path");
 const status = JSON.parse(process.argv[3]);
 const out = [];
 const seen = new Set();
+const stateEntries = new Map();
+const poolRoot = process.argv[2];
 const enc = value => Buffer.from(String(value), "utf8").toString("base64");
-const stateFor = (p) => {
+const stateListFor = (p) => {
   try {
     const state = JSON.parse(fs.readFileSync(
       path.join(path.dirname(path.dirname(p)), "treehouse-state.json"), "utf8"));
-    return (state.worktrees || []).find(e => e.path === p) || null;
+    return Array.isArray(state.worktrees) ? state.worktrees : null;
   } catch { return null; }
 };
+const stateFor = (p) => {
+  const entries = stateListFor(p);
+  return entries ? entries.find(e => e && e.path === p) || null : null;
+};
+for (const file of [path.join(poolRoot, "treehouse-state.json"), path.join(path.dirname(poolRoot), "treehouse-state.json")]) {
+  if (!fs.existsSync(file)) continue;
+  let state;
+  try { state = JSON.parse(fs.readFileSync(file, "utf8")); } catch { process.exit(5); }
+  if (!Array.isArray(state.worktrees)) process.exit(5);
+  for (const entry of state.worktrees) {
+    if (entry && typeof entry.path === "string") stateEntries.set(entry.path, entry);
+  }
+}
 for (const item of status) {
   if (!item || typeof item.path !== "string") {
     console.error("treehouse status entry is missing a string path");
@@ -284,6 +296,9 @@ for (const item of status) {
   }
   seen.add(item.path);
   const entry = stateFor(item.path) || {};
+  for (const stateEntry of stateListFor(item.path) || []) {
+    if (stateEntry && typeof stateEntry.path === "string") stateEntries.set(stateEntry.path, stateEntry);
+  }
   const leased = entry.leased || item.status === "leased" ? 1 : 0;
   const destroying = entry.destroying || item.status === "destroying" ? 1 : 0;
   out.push([
@@ -294,6 +309,16 @@ for (const item of status) {
     String(leased),
     String(destroying),
     String(item.lease_holder || entry.lease_holder || ""),
+  ].map(enc).join("\t"));
+}
+for (const entry of stateEntries.values()) {
+  if (seen.has(entry.path)) continue;
+  seen.add(entry.path);
+  out.push([
+    String(entry.name || "unknown"), entry.path, String(entry.status || "unknown"),
+    String(Array.isArray(entry.processes) ? entry.processes.length : 0),
+    String(entry.leased ? 1 : 0), String(entry.destroying ? 1 : 0),
+    String(entry.lease_holder || ""),
   ].map(enc).join("\t"));
 }
 if (out.length) process.stdout.write(out.join("\n") + "\n");
