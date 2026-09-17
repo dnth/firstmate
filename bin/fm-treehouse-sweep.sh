@@ -257,7 +257,7 @@ sweep_pool_entries() {  # <repo> <status-json>
   node - "$1" "$2" <<'NODE'
 const fs = require("fs");
 const path = require("path");
-const status = JSON.parse(process.argv[3] || "[]");
+const status = JSON.parse(process.argv[3]);
 const out = [];
 const seen = new Set();
 const stateFor = (p) => {
@@ -307,7 +307,7 @@ sweep_classify_pool() {  # <repo> — fills the SWEEP_* arrays
     cd "$repo" 2>/dev/null && treehouse status --json 2>/dev/null
   )
   status_rc=$?
-  [ "$status_rc" -eq 0 ] || {
+  [ "$status_rc" -eq 0 ] && [ -n "$entries" ] || {
     warn "pool $repo: treehouse status --json failed; nothing classified"
     return 1
   }
