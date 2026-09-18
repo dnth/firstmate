@@ -311,12 +311,12 @@ assert_contains "$out" 'candidate: hermes:-  provider=codex  scope=all_models  r
 assert_contains "$out" "  profile: --harness 'hermes'" "provider-less hermes rule resolves"
 
 OMP_RULE="$TMP_ROOT/omp-rule.json"
-printf '%s\n' '{"rules":[{"when":"OMP work.","use":{"harness":"omp","model":"openai-codex/gpt-5.6-sol","provider":"google"}}]}' > "$OMP_RULE"
+printf '%s\n' '{"rules":[{"when":"OMP work.","use":{"harness":"omp","model":"openai-codex/gpt-5.6-sol","prewalk_into":"openai-codex/gpt-5.6-luna:xhigh","provider":"google"}}]}' > "$OMP_RULE"
 cp "$OMP_RULE" "$RULES"
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" 'candidate: omp:openai-codex/gpt-5.6-sol  provider=google  scope=all_models  remaining=72%  spendPriority=0.3  runway=through_reset  -> eligible' "omp resolves through its explicit provider"
-assert_contains "$out" "  profile: --harness 'omp' --model 'openai-codex/gpt-5.6-sol'" "omp is a typed verified dispatch harness"
+assert_contains "$out" "  profile: --harness 'omp' --model 'openai-codex/gpt-5.6-sol' --prewalk-into 'openai-codex/gpt-5.6-luna:xhigh'" "omp preserves its prewalk target"
 
 cp "$ROOT/docs/examples/crew-dispatch.json" "$RULES"
 cat > "$RESPONSE" <<'JSON'
