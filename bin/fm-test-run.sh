@@ -198,7 +198,7 @@ family_for_basename() {
       printf '%s\n' live-harness-optin
       ;;
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
-    fm-busy-adapter-wiring.test.sh|\
+    fm-busy-adapter-wiring.test.sh|fm-dispatch-resolve.test.sh|\
     fm-herdr-session-cleanup.test.sh|fm-send-inbox.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|fm-send-turn-start.test.sh|fm-spawn-batch.test.sh|\
     fm-spawn-dispatch-profile.test.sh|\
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|fm-treehouse-orphan-recovery.test.sh|\
@@ -401,6 +401,7 @@ tests/fm-claude-stop-autoarm-live-e2e.test.sh 19
 tests/fm-claude-stop-autoarm.test.sh 60630
 tests/fm-codex-continuity-live-e2e.test.sh 19
 tests/fm-daemon.test.sh 32136
+tests/fm-dispatch-resolve.test.sh 2241
 tests/fm-documentation-audiences.test.sh 708
 tests/fm-ext-bridge.test.sh 44000
 tests/fm-fleet-snapshot-view.test.sh 7565
@@ -1003,7 +1004,16 @@ families_for_changed_path() {
     bin/fm-sessionstart-nudge.sh|bin/fm-tangle*|bin/fm-update.sh|bin/fm-omp-update.sh|\
     bin/fm-gate-refuse*|bin/fm-lock*|bin/fm-quota-axi-lib.sh)
       printf '%s\n' session-bootstrap
+      [ "$path" != bin/fm-quota-axi-lib.sh ] || printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
       [ "$path" != bin/fm-bootstrap.sh ] || printf '%s\n' secondmate
+      ;;
+    bin/fm-dispatch-resolve.sh)
+      printf '%s\n' backend-dispatch
+      printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
+      ;;
+    bin/fm-env-lib.sh)
+      printf '%s\n' pr-forge
+      printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
       ;;
     bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-local-default.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-ext-*|bin/fm-check*)

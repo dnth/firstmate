@@ -308,3 +308,8 @@ assert_absent() {
 assert_present() {
   [ -e "$1" ] || fail "$2"
 }
+
+# assert_equals <expected> <actual> <msg>
+assert_equals() {
+  [ "$1" = "$2" ] || fail "$3 (expected '$1', got '$2')"
+}

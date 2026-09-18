@@ -68,6 +68,24 @@ fm_control_harness_supported() {  # <harness>
   return 1
 }
 
+# The harnesses verified for crewmate and scout DISPATCH: AGENTS.md section 4's
+# verified-adapter list plus the crew-only hermes and devin adapters. This is a
+# different set than fm_control_harness_supported (control-plane mechanics):
+# cursor, gemini, and muse are spawn-capable but not dispatch-verified, while
+# hermes and devin dispatch but have no control-plane mechanics. An unverified
+# dispatch harness is refused rather than guessed at.
+fm_dispatch_harnesses() {
+  printf '%s\n' claude codex opencode pi pi-signed omp grok kimi hermes devin
+}
+
+fm_dispatch_harness_supported() {  # <harness>
+  local harness
+  while read -r harness; do
+    [ "$harness" = "${1-}" ] && return 0
+  done < <(fm_dispatch_harnesses)
+  return 1
+}
+
 # The verified adapter a RECORDED harness value belongs to. Every table below
 # is keyed by the exact verified adapter name, but a task launched from a raw
 # command records the command's basename instead (bin/fm-spawn.sh derives
