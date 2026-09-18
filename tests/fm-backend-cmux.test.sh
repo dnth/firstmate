@@ -1149,6 +1149,18 @@ test_endpoint_absent_pane_listing_failure_unverifiable() {
   pass "fm_backend_cmux_endpoint_absent: a failed pane listing is unverifiable"
 }
 
+test_endpoint_absent_malformed_pane_entry_unverifiable() {
+  local dir fb out
+  dir="$TMP_ROOT/ep-unverifiable-pane-entry"; mkdir -p "$dir/responses"
+  cmux_workspace_list_response "$dir" 1 "ws-1" "unrelated title"
+  printf '{"panes":[{}]}\n' > "$dir/responses/2.out"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_endpoint_absent "ws-1:sf-1" "fm-task"' "$ROOT" )
+  [ "$out" = unverifiable ] || fail "a malformed pane entry should be 'unverifiable', got '$out'"
+  pass "fm_backend_cmux_endpoint_absent: a malformed pane entry is unverifiable"
+}
+
 test_endpoint_absent_malformed_target_unverifiable() {
   local dir fb out
   dir="$TMP_ROOT/ep-unverifiable-target"; mkdir -p "$dir/responses"
@@ -1226,4 +1238,5 @@ test_endpoint_absent_surface_present
 test_endpoint_absent_stale_uuid_but_title_matches
 test_endpoint_absent_malformed_listing_unverifiable
 test_endpoint_absent_pane_listing_failure_unverifiable
+test_endpoint_absent_malformed_pane_entry_unverifiable
 test_endpoint_absent_malformed_target_unverifiable

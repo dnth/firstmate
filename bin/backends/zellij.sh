@@ -293,7 +293,7 @@ fm_backend_zellij_pane_exists() {  # <session> <pane_id>
 # proof - and zellij's own CLI returns exit 0 even on missing targets, so the
 # verdict keys on data (session list, parsed pane listing), never exit codes.
 fm_backend_zellij_endpoint_absent() {  # <session:pane> [expected-label] -> absent|present|unverifiable
-  local target=$1 expected_label=${2:-} panes tab_id sessions
+  local target=$1 expected_label=${2:-} panes tab_id sessions label_status
   fm_backend_zellij_parse_target "$target" || { printf 'unverifiable'; return 0; }
   case "$FM_BACKEND_ZELLIJ_PANE" in *[!0-9]*|'') printf 'unverifiable'; return 0 ;; esac
   if ! sessions=$(zellij list-sessions --short --no-formatting 2>/dev/null); then
@@ -309,6 +309,7 @@ fm_backend_zellij_endpoint_absent() {  # <session:pane> [expected-label] -> abse
     return 0
   }
   jq -e 'type == "array"' >/dev/null 2>&1 <<<"$panes" || { printf 'unverifiable'; return 0; }
+  jq -e 'all(.[]; type == "object" and (.id | type == "number") and (.tab_id | type == "number") and (.is_plugin | type == "boolean"))' >/dev/null 2>&1 <<<"$panes" || { printf 'unverifiable'; return 0; }
   if ! jq -e --argjson p "$FM_BACKEND_ZELLIJ_PANE" \
     '[.[]? | select(.id == $p and .is_plugin == false)] | length > 0' >/dev/null 2>&1 <<<"$panes"; then
     printf 'absent'
@@ -322,11 +323,13 @@ fm_backend_zellij_endpoint_absent() {  # <session:pane> [expected-label] -> abse
   tab_id=$(jq -r --argjson p "$FM_BACKEND_ZELLIJ_PANE" \
     '.[]? | select(.id == $p and .is_plugin == false) | .tab_id' <<<"$panes" 2>/dev/null | head -1)
   [ -n "$tab_id" ] || { printf 'unverifiable'; return 0; }
-  if fm_backend_zellij_tab_matches_label "$FM_BACKEND_ZELLIJ_SESSION" "$tab_id" "$expected_label"; then
-    printf 'present'
-  else
-    printf 'absent'
-  fi
+  fm_backend_zellij_tab_matches_label "$FM_BACKEND_ZELLIJ_SESSION" "$tab_id" "$expected_label"
+  label_status=$?
+  case "$label_status" in
+    0) printf 'present' ;;
+    1) printf 'absent' ;;
+    *) printf 'unverifiable' ;;
+  esac
 }
 
 # fm_backend_zellij_tab_matches_label: does <tab_id> in <session> carry the
@@ -347,7 +350,8 @@ fm_backend_zellij_endpoint_absent() {  # <session:pane> [expected-label] -> abse
 fm_backend_zellij_tab_matches_label() {  # <session> <tab_id> <label>
   local session=$1 tab_id=$2 label=$3 scoped tabs count
   scoped=$(fm_backend_zellij_scoped_title "$label")
-  tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null)
+  tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null) || return 2
+  printf '%s' "$tabs" | jq -e 'type == "array" and all(.[]; type == "object" and (.tab_id | type == "number") and (.name | type == "string"))' >/dev/null 2>&1 || return 2
   printf '%s' "$tabs" | jq -e --argjson t "$tab_id" --arg want "$scoped" \
     '[.[]? | select(.tab_id == $t and .name == $want)] | length > 0' >/dev/null 2>&1 && return 0
   printf '%s' "$tabs" | jq -e --argjson t "$tab_id" --arg want "$label" \

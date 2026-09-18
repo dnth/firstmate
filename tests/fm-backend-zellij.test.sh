@@ -1185,6 +1185,19 @@ test_endpoint_absent_nonarray_listing_unverifiable() {
   pass "fm_backend_zellij_endpoint_absent: a non-array pane listing is unverifiable"
 }
 
+test_endpoint_absent_malformed_tab_listing_unverifiable() {
+  local dir fb out
+  dir="$TMP_ROOT/ep-unverifiable-tabs"; mkdir -p "$dir/responses"
+  zellij_pane_response "$dir" 1 7 3
+  printf '{"oops":1}\n' > "$dir/responses/2.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="ses" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_endpoint_absent "ses:7" "fm-task"' "$ROOT" )
+  [ "$out" = unverifiable ] || fail "a malformed tab listing should be 'unverifiable', got '$out'"
+  pass "fm_backend_zellij_endpoint_absent: a malformed tab listing is unverifiable"
+}
+
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 
@@ -1250,3 +1263,4 @@ test_endpoint_absent_reused_pane_id_is_absent
 test_endpoint_absent_malformed_target_unverifiable
 test_endpoint_absent_pane_listing_failure_unverifiable
 test_endpoint_absent_nonarray_listing_unverifiable
+test_endpoint_absent_malformed_tab_listing_unverifiable
