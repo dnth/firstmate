@@ -10,6 +10,7 @@
 # what keeps an older build from reaching a dispatch intake at all.
 
 FM_QUOTA_AXI_MIN=0.1.17
+FM_QUOTA_PROVIDER_ID_RE='^[a-z0-9]+(-[a-z0-9]+)*\z'
 
 fm_quota_axi_compatible() {
   local timeout=${1:-} output parts major minor patch extra
@@ -177,4 +178,83 @@ fm_quota_profile_fallback_reason() {
 
 fm_quota_secondmate_fallback_reason() {
   fm_quota_profile_fallback_reason "$@"
+}
+
+# Validate one quota-axi --json snapshot against the schema-5 shape the typed
+# dispatch resolver consumes. stdin is the snapshot; exit 0 means usable.
+fm_quota_json_valid() {
+  jq -se --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" '
+    length == 1 and
+    (.[0] | type) == "object" and
+    (.[0] |
+      .schemaVersion == 5 and
+      (.providers | type) == "array" and
+      (([.providers[].provider] | length) == ([.providers[].provider] | unique | length)) and
+      all(.providers[];
+      (.provider | type) == "string" and
+      (.provider | test($provider_re)) and
+      (.quotaSemantics | type) == "object" and
+      (.quotaSemantics.status as $semantics_status |
+        (["known", "partial", "unknown"] | index($semantics_status)) != null and
+        (.quotaSemantics.effectiveAvailability | type) == "array" and
+        (if $semantics_status == "known" then
+           ((.quotaSemantics.effectiveAvailability | length) > 0 and
+            all(.quotaSemantics.effectiveAvailability[];
+              .status == "known" or .status == "unknown"
+            ))
+         elif $semantics_status == "unknown" then
+           all(.quotaSemantics.effectiveAvailability[]; .status == "unknown")
+         else true
+         end) and
+        all(.quotaSemantics.effectiveAvailability[];
+          type == "object" and
+          (.scope | type) == "string" and
+          (.scope | length) > 0 and
+          ((.scope | test("^\\s|\\s$")) | not) and
+          ((.status == "known" and
+            (.runway.status as $runway_status |
+            ((.effectivePercentRemaining | type) == "number" and
+             .effectivePercentRemaining >= 0 and
+             .effectivePercentRemaining <= 100 and
+             (.runway | type) == "object" and
+             ($runway_status | type) == "string" and
+             (["through_reset", "projected_exhaustion", "exhausted_now", "unknown"] |
+               index($runway_status)) != null))) or
+           (.status == "unknown" and
+            (has("effectivePercentRemaining") | not) and
+            ((has("runway") | not) or
+             ((.runway | type) == "object" and
+              (.runway.status as $unknown_runway_status |
+               (["unknown", "exhausted_now"] | index($unknown_runway_status)) != null)))))
+        )
+      )
+    )
+    )
+  ' >/dev/null 2>&1
+}
+
+# The dispatch-verified harnesses with exactly ONE authoritative quota-axi
+# provider family. hermes launches on the Codex plane (see
+# fm_quota_provider_for_profile), and devin has its own quota-axi provider.
+# Multi-provider harnesses (pi, pi-signed, omp, opencode) have no single
+# family and must declare provider on each dispatch profile.
+fm_quota_single_provider_table() {
+  printf '%s\n' \
+    'claude claude' \
+    'codex codex' \
+    'grok grok' \
+    'kimi kimi' \
+    'hermes codex' \
+    'devin devin'
+}
+
+fm_quota_single_provider_for_harness() {
+  local harness provider
+  while read -r harness provider; do
+    if [ "$harness" = "$1" ]; then
+      printf '%s\n' "$provider"
+      return 0
+    fi
+  done < <(fm_quota_single_provider_table)
+  return 1
 }
