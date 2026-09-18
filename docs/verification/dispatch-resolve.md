@@ -8,7 +8,7 @@ Task chronology, the captain's rules, and the briefs themselves stay in private 
 
 ## The API the tool depends on
 
-Verified upstream 2026-09-16 against `https://api.typesafe.ai` for upstream PR [#4692](https://github.com/kunchenguid/firstmate/pull/4692); this port uses the same endpoint, model, and request shape.
+Verified upstream 2026-09-16 against `https://api.typesafe.ai` for upstream PR [#4692](https://github.com/kunchenguid/firstmate/pull/4692). The observations below are upstream evidence only; fork-local live behavior has not been re-established.
 `GET /v1/models` listed `jev-latest` and `jev-preview`, both released 2026-09-10; a `jev-latest` request answered as `jev-1.13.0`.
 `POST /v1/systemone` takes `{model, state, questions}`; a `choice` question returns `{choice, probabilities, confidence}` with the probabilities summing to 1.
 Observed error shapes: 401 `authentication_error` for a bad key, 403 when the header is missing, 422 with a `detail[].loc` naming the offending field, 400 `api_usage_error` for an unknown model, 405 on GET.
@@ -28,8 +28,7 @@ Briefs: 15 real briefs plus 10 synthetic ones written to hit each rule.
 | API errors | 0 | 0 |
 
 A lean request that asks only the rule Choice matched the full request on all 25 briefs, which is why the shipped tool asks one question and keeps every gate in code.
-No live run has been repeated against this fork's port; the request contract is identical and the differences are confined to the fork's harness and effort tables, which the offline suite exercises.
-Rerun a live table by pointing the tool at a brief with the key injected for that one command.
+No fork-local live run is claimed here. Rerun a live table by pointing the tool at a brief with the key injected for that one command.
 
 ## Offline behavior
 

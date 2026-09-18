@@ -259,6 +259,7 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
 jq -e --slurpfile rules "$RULES" '
     (($rules[0].rules | to_entries | map("rule_" + ((.key + 1) | tostring))) + ["default"] | sort) as $choices |
     (.answers.rule.choice | type) == "string" and
+    ((.answers.rule.choice) as $choice | ($choices | index($choice)) != null) and
     (.answers.rule.confidence | type) == "number" and
     .answers.rule.confidence >= 0 and .answers.rule.confidence <= 1 and
     (.answers.rule.probabilities | type) == "object" and
