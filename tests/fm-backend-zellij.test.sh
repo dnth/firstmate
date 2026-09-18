@@ -48,7 +48,7 @@ if [ "${1:-}" = --version ]; then
 fi
 if [ "${1:-}" = list-sessions ]; then
   printf '%s\n' "${FM_ZELLIJ_SESSION_LIST:-}"
-  exit 0
+  exit "${FM_ZELLIJ_SESSION_LIST_EXIT:-0}"
 fi
 if [ "${1:-}" = attach ]; then
   exit "${FM_ZELLIJ_ATTACH_EXIT:-0}"
@@ -1084,6 +1084,19 @@ test_endpoint_absent_session_missing() {
   pass "fm_backend_zellij_endpoint_absent: an unlisted session is absent"
 }
 
+test_endpoint_absent_session_listing_failure_unverifiable() {
+  local dir fb out
+  dir="$TMP_ROOT/ep-unverifiable-session-list"; mkdir -p "$dir/responses"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="ses" FM_ZELLIJ_SESSION_LIST_EXIT=1 \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_endpoint_absent "ses:7" "fm-task"' "$ROOT" )
+  [ "$out" = unverifiable ] || fail "a failed session listing should be 'unverifiable', got '$out'"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''list-panes' \
+    "endpoint_absent should not read panes after an unreadable session listing"
+  pass "fm_backend_zellij_endpoint_absent: a failed session listing is unverifiable"
+}
+
 test_endpoint_absent_pane_missing() {
   local dir fb out
   dir="$TMP_ROOT/ep-absent-no-pane"; mkdir -p "$dir/responses"
@@ -1229,6 +1242,7 @@ test_scripts_route_explicit_target_through_meta_backend
 test_scripts_verify_label_for_fm_targets
 test_scripts_reject_fm_target_label_mismatch
 test_endpoint_absent_session_missing
+test_endpoint_absent_session_listing_failure_unverifiable
 test_endpoint_absent_pane_missing
 test_endpoint_absent_pane_present_no_label
 test_endpoint_absent_pane_present_label_matches

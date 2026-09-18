@@ -293,10 +293,17 @@ fm_backend_zellij_pane_exists() {  # <session> <pane_id>
 # proof - and zellij's own CLI returns exit 0 even on missing targets, so the
 # verdict keys on data (session list, parsed pane listing), never exit codes.
 fm_backend_zellij_endpoint_absent() {  # <session:pane> [expected-label] -> absent|present|unverifiable
-  local target=$1 expected_label=${2:-} panes tab_id
+  local target=$1 expected_label=${2:-} panes tab_id sessions
   fm_backend_zellij_parse_target "$target" || { printf 'unverifiable'; return 0; }
   case "$FM_BACKEND_ZELLIJ_PANE" in *[!0-9]*|'') printf 'unverifiable'; return 0 ;; esac
-  fm_backend_zellij_session_exists "$FM_BACKEND_ZELLIJ_SESSION" || { printf 'absent'; return 0; }
+  if ! sessions=$(zellij list-sessions --short --no-formatting 2>/dev/null); then
+    printf 'unverifiable'
+    return 0
+  fi
+  if ! grep -qxF "$FM_BACKEND_ZELLIJ_SESSION" <<<"$sessions"; then
+    printf 'absent'
+    return 0
+  fi
   panes=$(fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action list-panes --json 2>/dev/null) || {
     printf 'unverifiable'
     return 0

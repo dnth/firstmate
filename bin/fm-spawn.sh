@@ -3419,6 +3419,7 @@ fi
 # absence (no agent-process attribution), which is still enough to know the
 # recorded pane cannot answer a cwd read.
 RELAUNCH_ENDPOINT_GONE=0
+RELAUNCH_WORKTREE_VALIDATED=0
 if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fm_backend_validate_task_endpoint "$RELAUNCH_META" "$ID" >/dev/null 2>&1 || {
     echo "error: task $ID's recorded endpoint identity is invalid or does not match this task; refusing to relaunch" >&2
@@ -3458,6 +3459,8 @@ if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ];
   # A proven-gone endpoint licenses the recorded worktree only while the task
   # still owns it.
   if [ "$RELAUNCH_ENDPOINT_GONE" -eq 1 ]; then
+    validate_spawn_worktree "relaunch metadata" "$ID"
+    RELAUNCH_WORKTREE_VALIDATED=1
     relaunch_worktree_lease_proven || exit 1
   fi
 fi
@@ -3855,7 +3858,9 @@ spawn_current_path() {  # <target>
   esac
 }
 if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
-  validate_spawn_worktree "relaunch metadata" "$ID"
+  if [ "$RELAUNCH_WORKTREE_VALIDATED" -ne 1 ]; then
+    validate_spawn_worktree "relaunch metadata" "$ID"
+  fi
   if [ "$BACKEND" = orca ]; then
     echo "error: backend=orca cannot prove the relaunch endpoint cwd; refusing to launch outside the recorded worktree" >&2
     exit 1
