@@ -454,6 +454,7 @@ fm_backend_cmux_endpoint_absent() {  # <workspace:surface> [expected-label] -> a
     return 0
   }
   jq -e '.workspaces | type == "array"' >/dev/null 2>&1 <<<"$wss" || { printf 'unverifiable'; return 0; }
+  jq -e 'all(.workspaces[]; type == "object" and (.id | type == "string") and (.title | type == "string"))' >/dev/null 2>&1 <<<"$wss" || { printf 'unverifiable'; return 0; }
   if [ -n "$expected_label" ]; then
     expected_title=$(fm_backend_cmux_scoped_title "$expected_label")
     if jq -e --arg t "$expected_title" \
