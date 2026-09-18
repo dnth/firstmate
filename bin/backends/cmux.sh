@@ -472,6 +472,7 @@ fm_backend_cmux_endpoint_absent() {  # <workspace:surface> [expected-label] -> a
     return 0
   }
   [ -n "$panes" ] || { printf 'unverifiable'; return 0; }
+  jq -e '.panes | type == "array"' >/dev/null 2>&1 <<<"$panes" || { printf 'unverifiable'; return 0; }
   if printf '%s' "$panes" | jq -e --arg s "$FM_BACKEND_CMUX_SURFACE" \
     '[.panes[]? | select(.surface_ids // [] | index($s))] | length > 0' >/dev/null 2>&1; then
     printf 'present'

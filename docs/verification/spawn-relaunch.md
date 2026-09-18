@@ -70,7 +70,7 @@ fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0) - exit 0
 ```
 
 The e2e drives `bin/fm-spawn.sh <id> --relaunch` and `bin/fm-control.sh <id> relaunch` against fake tmux/herdr/zellij/cmux CLIs.
-A proven-gone endpoint - tmux `missing`, herdr `.server.running: false`, zellij or cmux structural absence - recreates the endpoint inside the recorded worktree only after pool-slot or durable-lease ownership is proven, preserving the same brief and progress note.
+A proven-gone endpoint - tmux `missing`, herdr `.server.running: false`, zellij or cmux structural absence - recreates the endpoint inside the recorded worktree only after the durable `fm-<id>` Treehouse lease is proven (a slot-owner claim alone is insufficient), preserving the same brief and progress note.
 A drifted live herdr shell receives exactly one `cd` back to the recorded worktree; a shell that will not go refuses.
 Live agents, ambiguous, unreadable, unverified, foreign-worktree, and unprovable-ownership outcomes all refuse unchanged, and orca remains refused.
 

@@ -27,8 +27,8 @@
 #   endpoint-absence verdict of `absent` (zellij, cmux) proves the recorded
 #   pane is gone, so the relaunch skips the live-pane cwd proof and recreates
 #   the endpoint inside the recorded worktree - but only once the worktree is
-#   proven to still belong to this task (a Treehouse pool slot carrying this
-#   task's slot-owner claim or its durable fm-<id> lease). Every other endpoint
+#   proven to still belong to this task through its durable fm-<id> lease.
+#   Every other endpoint
 #   state keeps the live-endpoint path: tmux requires a proven-idle shell whose
 #   cwd is the recorded worktree, herdr returns a drifted shell to the worktree
 #   with one cd before refusing, zellij and cmux refuse a live endpoint because
@@ -3188,14 +3188,12 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 }
 
 # The recorded worktree is only reusable for a proven-gone relaunch while this
-# task still owns it. Proof is one of: the firstmate slot-owner claim
-# (<pool>/<slot>/.fm-slot-owner, written at spawn) naming this task, or a
-# durable Treehouse lease held under this task's fm-<id> holder (the
-# get --lease --lease-holder acquisition path used by OMP prewalk and raw
-# launches). A recorded worktree that is not even a pool slot of the recorded
-# project, whose claim names another task, or whose ownership evidence cannot
-# be read refuses: a dead endpoint must never steer a replacement into a
-# checkout another task now owns.
+# task still owns it through a durable Treehouse lease held under this task's
+# fm-<id> holder (the get --lease --lease-holder acquisition path used by OMP
+# prewalk and raw launches). A recorded worktree that is not even a pool slot
+# of the recorded project, whose claim names another task, or whose ownership
+# evidence cannot be read refuses: a dead endpoint must never steer a
+# replacement into a checkout another task now owns.
 relaunch_worktree_lease_proven() {  # -> 0 owned; 1 refused (message printed)
   local pool_state holder
   fm_treehouse_pool_slot "$PROJ_ABS" "$WT" || {
@@ -3204,7 +3202,7 @@ relaunch_worktree_lease_proven() {  # -> 0 owned; 1 refused (message printed)
   }
   fm_treehouse_slot_owner_state "$WT" "$ID"
   case "$FM_TREEHOUSE_SLOT_OWNER" in
-    mine) return 0 ;;
+    mine) : ;;
     other)
       echo "error: task $ID's pool slot '$WT' is now claimed by task ${FM_TREEHOUSE_SLOT_OWNER_ID:-unknown}; refusing to relaunch into a reassigned slot" >&2
       return 1 ;;
@@ -3212,8 +3210,7 @@ relaunch_worktree_lease_proven() {  # -> 0 owned; 1 refused (message printed)
       echo "error: task $ID's slot-owner claim at '$WT' cannot be read safely; refusing to relaunch" >&2
       return 1 ;;
   esac
-  # absent claim: a --lease-acquired slot proves ownership through its durable
-  # Treehouse lease instead of the interactive-path claim file.
+  # A durable lease is required even when the slot-owner claim names this task.
   command -v jq >/dev/null 2>&1 || {
     echo "error: jq is required to verify task $ID's durable lease on recorded worktree '$WT'; refusing to relaunch" >&2
     return 1
@@ -3223,7 +3220,7 @@ relaunch_worktree_lease_proven() {  # -> 0 owned; 1 refused (message printed)
     '.worktrees[]? | select(.path == $p and .leased == true) | .lease_holder // empty' \
     "$pool_state" 2>/dev/null || true)
   [ "$holder" = "$W" ] && return 0
-  echo "error: task $ID's recorded worktree '$WT' carries no slot-owner claim naming it and no durable Treehouse lease held by $W; refusing to relaunch into a worktree it cannot prove it still owns" >&2
+  echo "error: task $ID's recorded worktree '$WT' has no durable Treehouse lease held by $W; refusing to relaunch into a worktree it cannot prove it still owns" >&2
   return 1
 }
 

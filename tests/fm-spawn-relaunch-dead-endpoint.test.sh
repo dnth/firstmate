@@ -4,9 +4,9 @@
 # bin/fm-spawn.sh and bin/fm-control.sh (2026-09-17 incident on
 # ic-prod-outage-astra-fix): when the recorded endpoint is authoritatively
 # absent, relaunch must skip the impossible live-pane cwd proof and recreate
-# the endpoint inside the recorded worktree - but only while the task still
-# owns that worktree (a firstmate slot-owner claim or a durable fm-<id>
-# Treehouse lease).
+# the endpoint inside the recorded worktree - but only while the task still owns
+# that worktree through a durable fm-<id> Treehouse lease; a slot-owner claim
+# alone is insufficient.
 #
 # These tests exercise the real executables through their public interfaces:
 # bin/fm-spawn.sh <id> --relaunch and bin/fm-control.sh <id> relaunch, against
@@ -781,6 +781,23 @@ test_tmux_gone_relaunch_durable_lease_ownership() {
   pass "fm-spawn --relaunch: a durable fm-<id> Treehouse lease proves worktree ownership"
 }
 
+test_tmux_gone_relaunch_claim_without_lease_refuses() {
+  local rec id
+  id=$(case_id claim-without-lease)
+  rec=$(make_case claim-without-lease "$id" pool)
+  read_case "$rec"
+  write_pool_state "$CASE_DIR" "$WT_DIR"
+  write_slot_marker "$SLOT_DIR" "$id" "$HOME_DIR"
+  write_meta "$HOME_DIR/state/$id.meta" "$id" tmux "$WT_DIR" "$PROJ_DIR"
+  create_prior_artifacts "$HOME_DIR/state" "$id"
+  : > "$CASE_DIR/fake/tmux-state/ses-$id.windows"
+
+  run_spawn "$CASE_DIR" "$HOME_DIR" "$id"
+  [ "$SPAWN_STATUS" -ne 0 ] || fail "a claim without a durable lease should refuse; got: $SPAWN_OUT"
+  assert_contains "$SPAWN_OUT" "no durable Treehouse lease" "claim-only relaunch did not refuse with the lease reason"
+  pass "fm-spawn --relaunch: a slot-owner claim without a durable lease refuses"
+}
+
 test_control_relaunch_treats_missing_endpoint_as_stopped() {
   local rec id journal
   id=$(case_id control-gone)
@@ -1113,6 +1130,7 @@ test_orca_relaunch_still_refuses() {
 
 test_tmux_gone_relaunch_recreates_in_worktree
 test_tmux_gone_relaunch_durable_lease_ownership
+test_tmux_gone_relaunch_claim_without_lease_refuses
 test_control_relaunch_treats_missing_endpoint_as_stopped
 test_tmux_live_endpoint_wrong_cwd_refuses
 test_tmux_live_agent_refuses
