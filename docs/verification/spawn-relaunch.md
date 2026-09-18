@@ -45,6 +45,7 @@ Output:
 ```text
 ok - fm-spawn --relaunch: proven-missing tmux endpoint recreates the window in the recorded worktree
 ok - fm-spawn --relaunch: a durable fm-<id> Treehouse lease proves worktree ownership
+ok - fm-spawn --relaunch: a slot-owner claim without a durable lease refuses
 ok - fm-control relaunch: a proven-missing endpoint counts as already stopped and the transaction completes
 ok - fm-spawn --relaunch: a live endpoint in a foreign cwd still refuses
 ok - fm-spawn --relaunch: a live agent at the recorded endpoint still refuses
