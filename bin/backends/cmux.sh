@@ -434,6 +434,52 @@ fm_backend_cmux_target_ready() {  # <target> [expected-label]
   fm_backend_cmux_surface_exists "$FM_BACKEND_CMUX_WORKSPACE" "$FM_BACKEND_CMUX_SURFACE"
 }
 
+# fm_backend_cmux_endpoint_absent: endpoint-absence verdict for relaunch,
+# where a proven-gone endpoint licenses recreating it in place. Unlike
+# fm_backend_cmux_target_ready (which only answers "is the endpoint live"),
+# this distinguishes positively-absent from unverifiable. When
+# <expected-label> is given, a live workspace carrying the task's scoped title
+# is `present` even when its recorded UUID went stale across an app relaunch
+# (workspace ids are not stable - finding owned by target_ready's header);
+# otherwise the recorded workspace id must be absent from the workspace list,
+# or present with the recorded surface absent from a readable pane listing, to
+# count as `absent`. A malformed target or an unreadable workspace/pane
+# listing is `unverifiable`. Only `absent` licenses skipping the live-pane cwd
+# proof.
+fm_backend_cmux_endpoint_absent() {  # <workspace:surface> [expected-label] -> absent|present|unverifiable
+  local target=$1 expected_label=${2:-} wss expected_title panes
+  fm_backend_cmux_parse_target "$target" || { printf 'unverifiable'; return 0; }
+  wss=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null) || {
+    printf 'unverifiable'
+    return 0
+  }
+  jq -e '.workspaces | type == "array"' >/dev/null 2>&1 <<<"$wss" || { printf 'unverifiable'; return 0; }
+  if [ -n "$expected_label" ]; then
+    expected_title=$(fm_backend_cmux_scoped_title "$expected_label")
+    if jq -e --arg t "$expected_title" \
+      '[.workspaces[]? | select(.title == $t)] | length > 0' >/dev/null 2>&1 <<<"$wss"; then
+      printf 'present'
+      return 0
+    fi
+  fi
+  if ! jq -e --arg id "$FM_BACKEND_CMUX_WORKSPACE" \
+    '[.workspaces[]? | select(.id == $id)] | length > 0' >/dev/null 2>&1 <<<"$wss"; then
+    printf 'absent'
+    return 0
+  fi
+  panes=$(fm_backend_cmux_cli list-panes --workspace "$FM_BACKEND_CMUX_WORKSPACE" --json --id-format uuids 2>/dev/null) || {
+    printf 'unverifiable'
+    return 0
+  }
+  [ -n "$panes" ] || { printf 'unverifiable'; return 0; }
+  if printf '%s' "$panes" | jq -e --arg s "$FM_BACKEND_CMUX_SURFACE" \
+    '[.panes[]? | select(.surface_ids // [] | index($s))] | length > 0' >/dev/null 2>&1; then
+    printf 'present'
+  else
+    printf 'absent'
+  fi
+}
+
 # fm_backend_cmux_current_path: the live foreground process's cwd, or empty on
 # any error. Mirrors fm_backend_zellij_current_path's active pwd-marker-probe
 # workaround (bin/backends/zellij.sh:306-347) verbatim in spirit.

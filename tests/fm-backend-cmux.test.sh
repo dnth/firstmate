@@ -1062,6 +1062,103 @@ test_secondmate_spawn_refuses_cmux_backend() {
   pass "fm-spawn.sh: refuses backend=cmux for --secondmate spawns (mirrors Orca's refusal; no secondmate launch design exists yet)"
 }
 
+# --- fm_backend_cmux_endpoint_absent: structural absence verdict -------------
+# The relaunch endpoint-absence classifier distinguishes positively-absent
+# from unverifiable: when an expected task label is given, a live workspace
+# carrying that task's scoped title is `present` even when the recorded
+# workspace UUID went stale across an app relaunch (cmux ids are not stable);
+# otherwise the recorded workspace must be absent from the workspace list, or
+# present with the recorded surface absent from a readable pane listing, to
+# count as `absent`. A malformed target or unreadable listing is
+# `unverifiable`. Only `absent` licenses skipping the live-pane cwd proof.
+
+test_endpoint_absent_workspace_missing() {
+  local dir fb out
+  dir="$TMP_ROOT/ep-absent-no-ws"; mkdir -p "$dir/responses"
+  # 1: workspace list --json --id-format uuids -> neither the recorded
+  #    workspace nor the task's scoped title is listed
+  cmux_workspace_list_response "$dir" 1 "other-ws" "unrelated title"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_endpoint_absent "ws-1:sf-1" "fm-task"' "$ROOT" )
+  [ "$out" = absent ] || fail "a workspace absent from the list should be 'absent', got '$out'"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''list-panes' \
+    "endpoint_absent should not read panes for a workspace that does not list"
+  pass "fm_backend_cmux_endpoint_absent: an unlisted workspace is absent"
+}
+
+test_endpoint_absent_surface_missing() {
+  local dir fb out
+  dir="$TMP_ROOT/ep-absent-no-sf"; mkdir -p "$dir/responses"
+  cmux_workspace_list_response "$dir" 1 "ws-1" "unrelated title"
+  # 2: list-panes -> the recorded surface is positively absent
+  cmux_panes_empty_response "$dir" 2
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_endpoint_absent "ws-1:sf-1" "fm-task"' "$ROOT" )
+  [ "$out" = absent ] || fail "a surface positively absent from a readable listing should be 'absent', got '$out'"
+  pass "fm_backend_cmux_endpoint_absent: a surface missing from a readable listing is absent"
+}
+
+test_endpoint_absent_surface_present() {
+  local dir fb out
+  dir="$TMP_ROOT/ep-present-sf"; mkdir -p "$dir/responses"
+  cmux_workspace_list_response "$dir" 1 "ws-1" "unrelated title"
+  cmux_panes_response "$dir" 2 "sf-1"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_endpoint_absent "ws-1:sf-1" "fm-task"' "$ROOT" )
+  [ "$out" = present ] || fail "a live workspace+surface should be 'present', got '$out'"
+  pass "fm_backend_cmux_endpoint_absent: a live workspace and surface is present"
+}
+
+test_endpoint_absent_stale_uuid_but_title_matches() {
+  local dir fb out title
+  dir="$TMP_ROOT/ep-present-stale"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-task)
+  # The recorded ws-1 went stale across an app restart, but a live workspace
+  # carries this task's scoped title - the endpoint is alive under a new id.
+  cmux_workspace_list_response "$dir" 1 "ws-2" "$title"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_endpoint_absent "ws-1:sf-1" "fm-task"' "$ROOT" )
+  [ "$out" = present ] || fail "a live workspace carrying the task's scoped title should be 'present', got '$out'"
+  pass "fm_backend_cmux_endpoint_absent: a stale UUID with a live task-titled workspace is present"
+}
+
+test_endpoint_absent_malformed_listing_unverifiable() {
+  local dir fb out
+  dir="$TMP_ROOT/ep-unverifiable-malformed"; mkdir -p "$dir/responses"
+  printf 'not json\n' > "$dir/responses/1.out"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_endpoint_absent "ws-1:sf-1" "fm-task"' "$ROOT" )
+  [ "$out" = unverifiable ] || fail "a malformed workspace listing should be 'unverifiable', got '$out'"
+  pass "fm_backend_cmux_endpoint_absent: a malformed workspace listing is unverifiable"
+}
+
+test_endpoint_absent_pane_listing_failure_unverifiable() {
+  local dir fb out
+  dir="$TMP_ROOT/ep-unverifiable-panes"; mkdir -p "$dir/responses"
+  cmux_workspace_list_response "$dir" 1 "ws-1" "unrelated title"
+  printf '1\n' > "$dir/responses/2.exit"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_endpoint_absent "ws-1:sf-1" "fm-task"' "$ROOT" )
+  [ "$out" = unverifiable ] || fail "a failed pane listing should be 'unverifiable', got '$out'"
+  pass "fm_backend_cmux_endpoint_absent: a failed pane listing is unverifiable"
+}
+
+test_endpoint_absent_malformed_target_unverifiable() {
+  local dir fb out
+  dir="$TMP_ROOT/ep-unverifiable-target"; mkdir -p "$dir/responses"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_endpoint_absent "ws-1" "fm-task"' "$ROOT" )
+  [ "$out" = unverifiable ] || fail "a target without a surface should be 'unverifiable', got '$out'"
+  pass "fm_backend_cmux_endpoint_absent: a malformed target is unverifiable"
+}
+
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 
@@ -1123,3 +1220,10 @@ test_kill_is_best_effort_when_close_workspace_fails
 test_kill_recovers_stale_target_by_label
 test_list_live_filters_by_title_prefix
 test_secondmate_spawn_refuses_cmux_backend
+test_endpoint_absent_workspace_missing
+test_endpoint_absent_surface_missing
+test_endpoint_absent_surface_present
+test_endpoint_absent_stale_uuid_but_title_matches
+test_endpoint_absent_malformed_listing_unverifiable
+test_endpoint_absent_pane_listing_failure_unverifiable
+test_endpoint_absent_malformed_target_unverifiable

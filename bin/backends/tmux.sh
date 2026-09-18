@@ -92,6 +92,17 @@ fm_backend_tmux_container_ensure() {
   fi
 }
 
+# fm_backend_tmux_session_ensure: ensure the session named by a proven-missing
+# relaunch endpoint exists, creating it detached when absent. Unlike
+# fm_backend_tmux_container_ensure this never resolves to firstmate's own
+# ambient session: the recorded endpoint named this session, so the recreated
+# window must land there even when firstmate itself runs inside tmux.
+fm_backend_tmux_session_ensure() {  # <session>
+  local session=$1
+  [ -n "$session" ] || return 1
+  tmux has-session -t "$session" 2>/dev/null || tmux new-session -d -s "$session"
+}
+
 # fm_backend_tmux_create_task: create the task's window in <proj-abs>,
 # refusing an existing <window-name> in <session>. Mirrors fm-spawn.sh's
 # duplicate-check-then-new-window sequence, including the exact error text

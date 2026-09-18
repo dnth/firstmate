@@ -4679,6 +4679,89 @@ test_wait_transition_clean_timeout_returns_1() {
   pass "fm_backend_herdr_wait_transition: stock macOS Bash clean timeout closes fd 9 and returns 1"
 }
 
+# --- fm_backend_herdr_agent_state: recovery-grade verdicts -------------------
+# The agent-state classifier maps the pane-level husk verdicts directly
+# (dead -> missing, no-agent -> dead, live -> alive). A pane read that does
+# not produce a husk verdict is `unreadable` UNLESS the session server
+# positively reports itself stopped (.server.running == false in
+# `herdr status --json`) - that is the recovery-grade `missing` a relaunch
+# needs to prove the endpoint is gone without trusting the version-fragile
+# pane-read error code (upstream 3e817d3f). A running server, or a status
+# call that itself cannot be read, keeps the verdict `unreadable`.
+
+test_agent_state_missing_on_pane_not_found() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/agent-state-pane-dead"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"error":{"code":"pane_not_found"}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state "default:w1:p1"' "$ROOT" )
+  [ "$out" = missing ] || fail "expected 'missing' for a pane_not_found pane, got '$out'"
+  pass "fm_backend_herdr_agent_state: a structurally gone pane is missing"
+}
+
+test_agent_state_missing_when_server_reports_stopped() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/agent-state-srv-stopped"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # 1: pane get -> uninterpretable server-side error (NOT pane_not_found)
+  printf '{"error":{"code":"server_not_running","message":"session server is not running"}}\n' > "$resp/1.out"
+  # 2: status --json -> the server positively reports itself stopped
+  printf '{"server":{"running":false}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state "default:w1:p1"' "$ROOT" )
+  [ "$out" = missing ] || fail "expected 'missing' for an uninterpretable pane read under a positively-stopped server, got '$out'"
+  pass "fm_backend_herdr_agent_state: uninterpretable pane read + stopped server = missing"
+}
+
+test_agent_state_unreadable_when_server_reports_running() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/agent-state-srv-running"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"error":{"code":"server_not_running","message":"stale client view"}}\n' > "$resp/1.out"
+  printf '{"server":{"running":true}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state "default:w1:p1"' "$ROOT" )
+  [ "$out" = unreadable ] || fail "expected 'unreadable' for an uninterpretable pane read under a running server, got '$out'"
+  pass "fm_backend_herdr_agent_state: uninterpretable pane read + running server = unreadable"
+}
+
+test_agent_state_unreadable_when_status_unreadable() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/agent-state-status-fail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"error":{"code":"server_not_running","message":"session server is not running"}}\n' > "$resp/1.out"
+  printf '1\n' > "$resp/2.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state "default:w1:p1"' "$ROOT" )
+  [ "$out" = unreadable ] || fail "expected 'unreadable' when the status call itself fails, got '$out'"
+  pass "fm_backend_herdr_agent_state: uninterpretable pane read + unreadable server state = unreadable"
+}
+
+test_agent_state_dead_on_agent_not_found() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/agent-state-no-agent"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p1"}}}\n' > "$resp/1.out"
+  printf '{"error":{"code":"agent_not_found","message":"agent target p1 not found"}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state "default:w1:p1"' "$ROOT" )
+  [ "$out" = dead ] || fail "expected 'dead' for a live pane holding no agent, got '$out'"
+  pass "fm_backend_herdr_agent_state: an agent-less pane is dead"
+}
+
+test_agent_state_alive_on_registered_agent() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/agent-state-live"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p1"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state "default:w1:p1"' "$ROOT" )
+  [ "$out" = alive ] || fail "expected 'alive' for a pane with a registered agent, got '$out'"
+  pass "fm_backend_herdr_agent_state: a registered agent pane is alive"
+}
+
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 
@@ -4871,3 +4954,9 @@ test_wait_transition_stream_absorb_clears_then_timeout
 test_wait_transition_reader_failure_returns_2
 test_wait_transition_bad_ack_returns_2_and_cleans_up
 test_wait_transition_clean_timeout_returns_1
+test_agent_state_missing_on_pane_not_found
+test_agent_state_missing_when_server_reports_stopped
+test_agent_state_unreadable_when_server_reports_running
+test_agent_state_unreadable_when_status_unreadable
+test_agent_state_dead_on_agent_not_found
+test_agent_state_alive_on_registered_agent

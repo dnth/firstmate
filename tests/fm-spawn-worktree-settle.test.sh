@@ -44,6 +44,10 @@ case "$*" in
     fi
     exit 0
     ;;
+  *pane_current_command*)
+    if [ "${FM_FAKE_TMUX_ACTIVE:-0}" = 1 ]; then printf 'codex\n'; else printf 'bash\n'; fi
+    exit 0
+    ;;
 esac
 case "${1:-}" in
   display-message)
@@ -53,7 +57,7 @@ case "${1:-}" in
       *) printf 'firstmate\n' ;;
     esac
     exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows) [ -n "${FM_FAKE_LIST_WINDOWS:-}" ] && printf '%s\n' "$FM_FAKE_LIST_WINDOWS"; exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_SEND_LOG:-}" ]; then
@@ -181,6 +185,7 @@ test_ship_relaunch_reuses_recorded_worktree_without_project_positional() {
     FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
     FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' \
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
+    FM_FAKE_LIST_WINDOWS="fm-$id" \
     PATH="$FAKEBIN_DIR:$PATH" "$SPAWN" "$id" --relaunch --mode no-mistakes --yolo off 2>&1)
   status=$?
   expect_code 0 "$status" "bare ship relaunch should succeed"
@@ -215,7 +220,8 @@ test_ship_relaunch_restores_recorded_profile_without_flags() {
     FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
     FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' \
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
-    FM_FAKE_SEND_LOG="$send_log" PATH="$FAKEBIN_DIR:$PATH" \
+    FM_FAKE_LIST_WINDOWS="fm-$id" FM_FAKE_SEND_LOG="$send_log" \
+    PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" --relaunch --mode no-mistakes --yolo off 2>&1)
   status=$?
   expect_code 0 "$status" "bare ship relaunch with recorded profile should succeed"
@@ -279,12 +285,13 @@ test_ship_relaunch_refuses_active_tmux_endpoint() {
     FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
     FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' \
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
-    FM_FAKE_TMUX_ACTIVE=1 PATH="$FAKEBIN_DIR:$PATH" "$SPAWN" "$id" \
+    FM_FAKE_LIST_WINDOWS="fm-$id" FM_FAKE_TMUX_ACTIVE=1 \
+    PATH="$FAKEBIN_DIR:$PATH" "$SPAWN" "$id" \
     --relaunch --mode no-mistakes --yolo off 2>&1)
   status=$?
   set -e
   [ "$status" -ne 0 ] || fail "active tmux relaunch unexpectedly succeeded"
-  assert_contains "$out" "not proven idle" \
+  assert_contains "$out" "live agent" \
     "active tmux relaunch did not explain the refusal"
   pass "a ship relaunch refuses an active tmux endpoint before sending input"
 }
@@ -310,6 +317,7 @@ test_ship_relaunch_refuses_unrelated_worktree() {
     FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
     FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' \
     FM_FAKE_PANE_PATH="$STALE_DIR" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
+    FM_FAKE_LIST_WINDOWS="fm-$id" \
     PATH="$FAKEBIN_DIR:$PATH" "$SPAWN" "$id" --relaunch --mode no-mistakes --yolo off 2>&1)
   status=$?
   set -e

@@ -52,6 +52,12 @@
 #              the prior durable record in place and reports the concrete
 #              state; it never leaves a half-transitioned task claiming to be
 #              running.
+#              A recorded endpoint the recovery-grade classifier proves
+#              MISSING counts as already stopped: there is no agent to exit,
+#              the transaction continues, and the launch owner recreates the
+#              endpoint inside the checkpointed worktree. `exit` on a missing
+#              endpoint still refuses - an absent agent is a reconciliation
+#              finding, not a stopped one.
 #
 # Teardown and discard are NOT verbs here and never will be. `exit` stops an
 # agent and preserves everything else; removing a worktree, killing an
@@ -827,7 +833,18 @@ do_relaunch() {
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
 
   journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
-  exit_result=$(do_exit)
+  state=$(agent_state)
+  if [ "$state" = missing ]; then
+    # The recorded endpoint is authoritatively absent, so there is no agent to
+    # stop: the exit phase is already complete and the launch below recreates
+    # the endpoint in the checkpointed worktree. Only a proven-missing endpoint
+    # skips do_exit - every other state still has a live or unprovable pane
+    # behind it, and `fm-control exit` on a missing endpoint still refuses.
+    retire_busy_incarnation
+    exit_result=already-stopped
+  else
+    exit_result=$(do_exit)
+  fi
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
 
   if [ "$KIND" = secondmate ] && [ "$PRIOR_HARNESS" = omp ]; then
@@ -858,12 +875,13 @@ do_relaunch() {
     die "the replacement agent for $ID could not be launched on $TARGET_HARNESS"
   fi
 
-  if [ "$KIND" = secondmate ] && [ "$PRIOR_HARNESS" = omp ]; then
-    fm_backend_validate_task_endpoint "$META" "$ID" \
-      || die "the replacement agent for $ID published unusable endpoint metadata"
-    BACKEND=$FM_BACKEND_VALIDATED_BACKEND
-    T=$FM_BACKEND_VALIDATED_TARGET
-  fi
+  # The launch owner republished the endpoint record; a relaunch that
+  # recreated a proven-missing endpoint carries fresh endpoint ids, and the
+  # aliveness wait below must poll the endpoint that actually exists now.
+  fm_backend_validate_task_endpoint "$META" "$ID" \
+    || die "the replacement agent for $ID published unusable endpoint metadata"
+  BACKEND=$FM_BACKEND_VALIDATED_BACKEND
+  T=$FM_BACKEND_VALIDATED_TARGET
 
   state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {
     die "the replacement agent for $ID did not come up within ${LAUNCH_WAIT}s (endpoint reads '$state')"

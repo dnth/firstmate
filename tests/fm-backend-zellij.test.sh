@@ -1062,6 +1062,116 @@ test_scripts_reject_fm_target_label_mismatch() {
   pass "fm-send: fm-id zellij targets reject pane ids whose tab label no longer matches"
 }
 
+# --- fm_backend_zellij_endpoint_absent: structural absence verdict -----------
+# The relaunch endpoint-absence classifier distinguishes positively-absent
+# from unverifiable: a session that does not list, or a live session whose
+# pane id is positively absent from a valid pane listing, is `absent`; a live
+# session still holding the pane in the task's own tab is `present`; a
+# malformed target or an unreadable pane listing is `unverifiable`. Zellij's
+# own CLI returns exit 0 on missing targets, so the verdict keys on data,
+# never exit codes.
+
+test_endpoint_absent_session_missing() {
+  local dir fb out
+  dir="$TMP_ROOT/ep-absent-no-session"; mkdir -p "$dir/responses"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="other" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_endpoint_absent "ses:7" "fm-task"' "$ROOT" )
+  [ "$out" = absent ] || fail "a session absent from list-sessions should be 'absent', got '$out'"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''list-panes' \
+    "endpoint_absent should not read panes for a session that does not exist"
+  pass "fm_backend_zellij_endpoint_absent: an unlisted session is absent"
+}
+
+test_endpoint_absent_pane_missing() {
+  local dir fb out
+  dir="$TMP_ROOT/ep-absent-no-pane"; mkdir -p "$dir/responses"
+  # 1: list-panes --json -> pane 7 positively absent (only pane 9 exists)
+  zellij_pane_response "$dir" 1 9 3
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="ses" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_endpoint_absent "ses:7" "fm-task"' "$ROOT" )
+  [ "$out" = absent ] || fail "a pane positively absent from a valid listing should be 'absent', got '$out'"
+  pass "fm_backend_zellij_endpoint_absent: a pane missing from a valid listing is absent"
+}
+
+test_endpoint_absent_pane_present_no_label() {
+  local dir fb out
+  dir="$TMP_ROOT/ep-present-nolabel"; mkdir -p "$dir/responses"
+  zellij_pane_response "$dir" 1 7 3
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="ses" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_endpoint_absent "ses:7"' "$ROOT" )
+  [ "$out" = present ] || fail "a live pane with no expected label should be 'present', got '$out'"
+  pass "fm_backend_zellij_endpoint_absent: a live pane is present without a label check"
+}
+
+test_endpoint_absent_pane_present_label_matches() {
+  local dir fb out
+  dir="$TMP_ROOT/ep-present-match"; mkdir -p "$dir/responses"
+  zellij_pane_response "$dir" 1 7 3
+  zellij_tab_response "$dir" 2 3 "$(zellij_expected_scoped_title fm-task)"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="ses" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_endpoint_absent "ses:7" "fm-task"' "$ROOT" )
+  [ "$out" = present ] || fail "a live pane in the task's own tab should be 'present', got '$out'"
+  pass "fm_backend_zellij_endpoint_absent: a live pane in the task's tab is present"
+}
+
+test_endpoint_absent_reused_pane_id_is_absent() {
+  local dir fb out
+  dir="$TMP_ROOT/ep-absent-reused"; mkdir -p "$dir/responses"
+  zellij_pane_response "$dir" 1 7 3
+  # The pane id survives but its tab belongs to a different task - the
+  # recorded endpoint itself is gone (zellij recycles sequential pane ids).
+  zellij_tab_response "$dir" 2 3 "$(zellij_expected_scoped_title fm-othertask)"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="ses" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_endpoint_absent "ses:7" "fm-task"' "$ROOT" )
+  [ "$out" = absent ] || fail "a recycled pane id in another task's tab should be 'absent', got '$out'"
+  pass "fm_backend_zellij_endpoint_absent: a pane id reused by another task's tab is absent"
+}
+
+test_endpoint_absent_malformed_target_unverifiable() {
+  local dir fb out
+  dir="$TMP_ROOT/ep-unverifiable-target"; mkdir -p "$dir/responses"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="ses" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_endpoint_absent "ses:abc" "fm-task"' "$ROOT" )
+  [ "$out" = unverifiable ] || fail "a non-numeric pane id should be 'unverifiable', got '$out'"
+  pass "fm_backend_zellij_endpoint_absent: a malformed target is unverifiable"
+}
+
+test_endpoint_absent_pane_listing_failure_unverifiable() {
+  local dir fb out
+  dir="$TMP_ROOT/ep-unverifiable-listfail"; mkdir -p "$dir/responses"
+  printf '1\n' > "$dir/responses/1.exit"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="ses" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_endpoint_absent "ses:7" "fm-task"' "$ROOT" )
+  [ "$out" = unverifiable ] || fail "a failed pane listing should be 'unverifiable', got '$out'"
+  pass "fm_backend_zellij_endpoint_absent: a failed pane listing is unverifiable"
+}
+
+test_endpoint_absent_nonarray_listing_unverifiable() {
+  local dir fb out
+  dir="$TMP_ROOT/ep-unverifiable-nonarray"; mkdir -p "$dir/responses"
+  printf '{"oops":1}\n' > "$dir/responses/1.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="ses" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_endpoint_absent "ses:7" "fm-task"' "$ROOT" )
+  [ "$out" = unverifiable ] || fail "a non-array pane listing should be 'unverifiable', got '$out'"
+  pass "fm_backend_zellij_endpoint_absent: a non-array pane listing is unverifiable"
+}
+
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 
@@ -1118,3 +1228,11 @@ test_send_text_submit_send_failed_when_pane_absent
 test_scripts_route_explicit_target_through_meta_backend
 test_scripts_verify_label_for_fm_targets
 test_scripts_reject_fm_target_label_mismatch
+test_endpoint_absent_session_missing
+test_endpoint_absent_pane_missing
+test_endpoint_absent_pane_present_no_label
+test_endpoint_absent_pane_present_label_matches
+test_endpoint_absent_reused_pane_id_is_absent
+test_endpoint_absent_malformed_target_unverifiable
+test_endpoint_absent_pane_listing_failure_unverifiable
+test_endpoint_absent_nonarray_listing_unverifiable

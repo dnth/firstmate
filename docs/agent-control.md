@@ -69,9 +69,10 @@ It is not deterministic across the verified adapters: codex and grok resume only
    A ship or scout relaunch requires `--note`, because the replacement inherits the local copy but none of the conversation; the note is appended to the instructions it reads.
    A secondmate relaunch does not require one and never rewrites its standing charter.
 4. **Stop the old agent** through the `exit` verb, with its postcondition.
+   An endpoint the backend authoritatively reports missing counts as already stopped - there is no agent to stop - so the transaction journals that verdict and continues instead of refusing.
 5. **Retire an OMP second mate's session artifacts**, only for that case, after both its endpoint and its home session owner are proven gone; `bin/fm-control-lib.sh`'s `fm_control_omp_secondmate_prepare_relaunch` owns that sequence and the two overrides that let a test drive it.
    Without it the launch owner would refuse the replacement over its own predecessor's leftovers, so an OMP second mate launches fresh with `--secondmate` and its new endpoint is revalidated from the record the launch published rather than the retired one.
-6. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded worktree and normally the endpoint, while allowing OMP secondmates to publish a fresh endpoint after clearing the previous harness's per-task wiring and arming a fresh busy generation.
+6. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded worktree and normally the endpoint - and recreates the endpoint inside that same worktree when the backend proves the recorded one gone - while allowing OMP secondmates to publish a fresh endpoint after clearing the previous harness's per-task wiring and arming a fresh busy generation.
    A ship relaunch also recovers the recorded mode and yolo contract when the caller does not repeat them.
    For OMP ships and scouts, the launch owner accepts the prior task artifacts only after the recorded endpoint identity, worktree, and stopped state are proven, then restores the recorded OMP launch options for the replacement.
 
@@ -104,6 +105,10 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
 - An ambiguous or unreadable endpoint state refuses.
   Only a positively classified state acts.
 - `fm-spawn --relaunch` independently refuses unless the recorded endpoint is positively agent-free and its shell is sitting in the recorded worktree, so a replacement can never join a live agent or start outside the copy holding the work.
+  When the backend authoritatively proves the recorded endpoint itself is gone - tmux `missing`, or a Herdr pane read that cannot be interpreted while `herdr status --json` reports `.server.running: false` - there is no live pane to ask for a cwd, so the cwd probe is skipped and the endpoint is recreated inside the recorded worktree instead, and only after the task proves it still owns that worktree through its slot-owner claim or its durable `fm-<id>` Treehouse lease.
+  zellij and cmux have no agent-state classifier, but `fm_backend_endpoint_absent` gives each a structural absence proof - the recorded session or workspace and its pane or surface are verifiably gone - which licenses the same recreate-in-recorded-worktree path, while a present endpoint on either backend still refuses because their only cwd read would inject a probe into the live harness.
+  A Herdr live endpoint whose foreground shell has drifted out of the recorded worktree gets exactly one `cd` back; only a shell that will not go refuses.
+  Every other outcome - a live agent, an ambiguous or unreadable endpoint state, an unverified backend verdict, a foreign or missing or unprovable worktree - refuses unchanged.
 
 ## Capability matrix
 
@@ -122,6 +127,7 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 
 ## Verification
 
+- `tests/fm-spawn-relaunch-dead-endpoint.test.sh` - proven-gone endpoint recreation in the recorded worktree across tmux, Herdr, zellij, and cmux for both `fm-spawn --relaunch` and `fm-control relaunch`, the lease-ownership gate, the Herdr drifted-shell `cd` recovery, and the live/ambiguous/unprovable refusal matrix.
 - `tests/fm-secondmate-restart.test.sh` - the persist gate, restart capability routing, local and remote control-plane relaunches, and already-current versus unprovable runtime behavior.
 - `tests/fm-update.test.sh` - fast-forward classification, live secondmate restart/nudge sets, and stopped or malformed endpoint handling.
 - `tests/fm-remote-secondmate-lifecycle-e2e.test.sh` - host-local remote lifecycle control, including OMP endpoint binding and SSH unknown-state handling.

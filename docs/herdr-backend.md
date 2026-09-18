@@ -269,6 +269,7 @@ This prevents closing the workspace's last tab before a replacement exists.
 
 The generic Herdr agent-liveness probe reuses the same classifier.
 A structurally gone pane becomes `missing`, a restored agent-less shell becomes `dead`, a registered agent becomes `alive`, and an unexpected read becomes `unreadable`.
+A pane read that produces no verdict at all is upgraded to `missing` only when `herdr status --json` positively reports `.server.running: false` for the session - the server is stopped, so the recorded pane cannot exist - while a server that still runs, or whose own state cannot be read, keeps `unreadable`; the per-pane `server_not_running` error code is not trusted for this because it has moved between server versions.
 Unlike tmux process-name inspection, native registration classifies exact Pi and OMP identities without guessing from a generic interpreter name.
 
 The session-start sweep uses this probe.
