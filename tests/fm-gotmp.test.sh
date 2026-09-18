@@ -81,6 +81,7 @@ make_fake_root() {
   # teardown now requires.
   ln -s "$ROOT/bin/fm-public-followup-lib.sh" "$fake/bin/fm-public-followup-lib.sh"
   ln -s "$ROOT/bin/fm-x-lib.sh" "$fake/bin/fm-x-lib.sh"
+  ln -s "$ROOT/bin/fm-env-lib.sh" "$fake/bin/fm-env-lib.sh"
   ln -s "$ROOT/bin/fm-secondmate-registry-lib.sh" "$fake/bin/fm-secondmate-registry-lib.sh"
   ln -s "$ROOT/bin/fm-secondmate-parent-lib.sh" "$fake/bin/fm-secondmate-parent-lib.sh"
   ln -s "$ROOT/bin/fm-secondmate-nudge-lib.sh" "$fake/bin/fm-secondmate-nudge-lib.sh"
@@ -164,6 +165,7 @@ test_teardown_skips_gracefully_without_tasktmp() {
   # teardown now requires.
   ln -s "$ROOT/bin/fm-public-followup-lib.sh" "$fake/bin/fm-public-followup-lib.sh"
   ln -s "$ROOT/bin/fm-x-lib.sh" "$fake/bin/fm-x-lib.sh"
+  ln -s "$ROOT/bin/fm-env-lib.sh" "$fake/bin/fm-env-lib.sh"
   ln -s "$ROOT/bin/fm-secondmate-registry-lib.sh" "$fake/bin/fm-secondmate-registry-lib.sh"
   ln -s "$ROOT/bin/fm-secondmate-parent-lib.sh" "$fake/bin/fm-secondmate-parent-lib.sh"
   ln -s "$ROOT/bin/fm-secondmate-nudge-lib.sh" "$fake/bin/fm-secondmate-nudge-lib.sh"
