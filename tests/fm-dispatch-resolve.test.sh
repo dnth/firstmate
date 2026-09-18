@@ -530,6 +530,10 @@ expect_code 0 "$code" "http 429 exits 0"
 assert_contains "$out" '  status: error' "http 429 is an error outcome"
 assert_contains "$out" '  reason: http 429 after' "http status is reported"
 assert_contains "$err" 'dispatch-resolve: error (http 429' "error also goes to stderr"
+printf '%s\n' "$KEY" > "$RESPONSE"
+TYPESAFE_API_KEY=$KEY FAKE_CURL_HTTP=429 run code out err "$BRIEF"
+assert_not_contains "$out" "$KEY" "HTTP error bodies never reach stdout"
+assert_not_contains "$err" "$KEY" "HTTP error bodies never reach stderr"
 reset_log
 TYPESAFE_API_KEY=$KEY FAKE_CURL_FAIL=1 run code out err "$BRIEF"
 expect_code 0 "$code" "curl failure exits 0"
@@ -571,6 +575,13 @@ write_response "$RESPONSE" rule_4 2
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "out-of-range confidence is an error outcome"
 assert_contains "$out" '  reason: response is not a rule Choice answer' "out-of-range confidence is a malformed answer"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+jq '.answers.rule.type = "freeform"' "$RESPONSE" > "$TMP_ROOT/malformed-type.json"
+mv "$TMP_ROOT/malformed-type.json" "$RESPONSE"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: error' "a non-Choice answer is an error outcome"
+assert_contains "$out" '  reason: response is not a rule Choice answer' "answer type must be choice"
 reset_log
 write_response "$RESPONSE" bogus 0.41
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
