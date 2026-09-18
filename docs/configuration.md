@@ -363,7 +363,8 @@ Both choices are local to each Firstmate home and are not part of secondmate inh
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
-The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its profile object or array under the operating contract in `AGENTS.md` section 4 and `quota-array-dispatch`, and passes only concrete `--harness`, `--model`, `--effort`, and optional `--prewalk-into` flags to `fm-spawn.sh`.
+In the ordinary intake, shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its profile object or array under the operating contract in `AGENTS.md` section 4 and `quota-array-dispatch`, and passes only concrete `--harness`, `--model`, `--effort`, and optional `--prewalk-into` flags to `fm-spawn.sh`.
+The opt-in `bin/fm-dispatch-resolve.sh` path is the exception: it asks Jev to select a rule, then applies the declared gates and quota evidence in code before emitting a profile for that same spawn path.
 When the file exists, `fm-spawn.sh` enforces that contract by refusing crewmate and scout spawns that lack an explicit harness (`--harness`, a positional adapter, or a raw launch command).
 Batch spawns satisfy the same requirement with a shared `--harness`.
 Secondmate spawns are exempt and still resolve through `config/secondmate-harness` and its optional model and effort tokens.
@@ -398,12 +399,12 @@ The resolver supplies the fixed neutral Choice option `No listed rule applies to
 `approval` accepts only `"captain"` and means a task the rule matches is never dispatched from the tool's answer alone.
 A rule `floor` names the quota-axi `provider` and `scope` whose `effectivePercentRemaining` must be at least `min_percent` for the rule's profiles to apply.
 A known percentage below it makes the tool resolve among `default` instead; an absent or unknown row or unmeasured provider makes the floor unverifiable and escalates without authorizing default routing.
-A profile `provider` optionally names the quota-axi provider family whose rows apply to that profile; when present, profile and rule-floor provider IDs must match the strict whole-string pattern `^[a-z0-9]+(-[a-z0-9]+)*\z`.
+A profile `provider` optionally names the quota-axi provider family whose rows apply to that profile; when present, its ID and any rule-floor provider ID must each match the strict whole-string pattern `^[a-z0-9]+(-[a-z0-9]+)*\z`.
 Bootstrap validates resolver-only `approval`, `floor`, and present `provider` values only while typed resolution is active; without the key those inert fields and the pre-existing verified-harness baseline preserve bootstrap behavior.
 The opted-in resolver has authoritative single-provider mappings for `claude`, `codex`, `grok`, `kimi`, `hermes`, and `devin`; every other dispatch-verified harness must declare `provider` explicitly on each profile: the multi-provider `pi`, `pi-signed`, `omp`, and `opencode`.
 Its single-provider table is owned by `bin/fm-quota-axi-lib.sh` and is separate from the model-prefix resolution in `fm_quota_provider_for_profile`, so typed-resolution additions cannot alter no-key routing.
 The resolver returns an actionable configuration error before any request when such a profile omits `provider`.
-A profile `floor` contains only `scope` and `min_percent`, always uses that profile's provider, and makes that one candidate ineligible below `min_percent` on the named scope.
+A profile `floor` contains `scope` and `min_percent`, always uses that profile's provider, and makes that one candidate ineligible below `min_percent` on the named scope.
 An absent or unknown named row also makes the candidate unrankable and is reported as an unverifiable floor, not as a known shortfall.
 The verified `harness` values for crew profiles are `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `omp`, `grok`, `kimi`, `hermes`, and `devin`.
 An omitted model or effort means the selected harness uses its own default for that axis.
