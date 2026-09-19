@@ -104,8 +104,7 @@ fm_inbox_note_is_envelope() {
 
 fm_inbox_note_is_structured() {
   local note=$1
-  command -v jq >/dev/null 2>&1 || return 1
-  jq -e '.schema? == "firstmate.inbox-note.v1"' "$note" >/dev/null 2>&1
+  grep -Eq '"schema"[[:space:]]*:[[:space:]]*"firstmate\.inbox-note\.v1"' "$note"
 }
 
 fm_inbox_validate_note_envelope() { # <path> <note-id>
