@@ -405,7 +405,7 @@ deliver_one() {
     release_delivery_lock "$id"
     die "reply target is not authorized"
   }
-  [ -f "$ADAPTER" ] && [ ! -L "$ADAPTER" ] && [ -x "$ADAPTER" ] || {
+  fm_inbox_artifact_safe "$ADAPTER" && [ -x "$ADAPTER" ] || {
     write_failure "$id" permanent "result adapter is unavailable"
     release_delivery_lock "$id"
     die "result adapter is unavailable"

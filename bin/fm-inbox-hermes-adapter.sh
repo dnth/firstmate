@@ -3,6 +3,10 @@
 # Reuses `hermes send`; it does not read platform credentials or call remote APIs.
 set -euo pipefail
 
+BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-inbox-result-lib.sh
+. "$BIN_DIR/fm-inbox-result-lib.sh"
+
 target=
 key=
 payload=
@@ -22,6 +26,10 @@ done
 [[ "$target" =~ ^hermes:[a-z][a-z0-9_-]*:[A-Za-z0-9@#%+._-]+(:[A-Za-z0-9@#%+._-]+)?$ ]] || usage
 [ -f "$payload" ] && [ ! -L "$payload" ] || usage
 command -v jq >/dev/null 2>&1 || usage
+fm_inbox_reply_target_authorized "$target" || {
+  printf 'reply target is not authorized\n' >&2
+  exit 64
+}
 jq -e --arg key "$key" \
   '.schema == "firstmate.inbox-result.v1" and .note_id == $key' "$payload" >/dev/null \
   || usage
