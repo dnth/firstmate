@@ -36,9 +36,13 @@ jq -e --arg key "$key" --arg target "$target" \
    (.correlation_id | type == "string") and
    .reply_target == $target and
    (.status == "completed" or .status == "failed" or .status == "needs-input") and
-   (.summary | type == "string") and (.artifacts | type == "array")' \
+   (.summary | type == "string") and
+   (.artifacts | type == "array" and length <= 20 and all(.[]; type == "string"))' \
   "$payload" >/dev/null \
   || usage
+while IFS= read -r artifact; do
+  fm_inbox_artifact_safe "$artifact" || usage
+done < <(jq -r '.artifacts[]' "$payload")
 
 HERMES_BIN=${HERMES_BIN:-hermes}
 command -v "$HERMES_BIN" >/dev/null 2>&1 || {

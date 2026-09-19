@@ -627,6 +627,71 @@ HERMES
   pass "adapter rejects payloads under symlinked parents"
 }
 
+test_result_artifact_pointers_fail_closed() {
+  local home id outside
+  home="$TMP_ROOT/result-artifact-pointer"
+  setup_home "$home"
+  write_adapter "$home"
+  id=$(new_linked_note "$home" result-artifact-pointer-1)
+  printf 'Summary.\n' > "$home/summary.txt"
+  publish_result "$home" "$id" --no-deliver >/dev/null
+  outside="$home/outside.txt"
+  printf 'secret\n' > "$outside"
+  ln -s "$outside" "$home/link-artifact"
+  jq --arg outside "$home/link-artifact" '.artifacts = [$outside]' \
+    "$home/state/inbox-results/$id.result.json" > "$home/tampered.json"
+  mv "$home/tampered.json" "$home/state/inbox-results/$id.result.json"
+  if FM_INBOX_RESULT_ADAPTER="$home/fakebin/result-adapter" FM_ADAPTER_LOG="$home/adapter.log" \
+      home_env "$home" "$RESULT" deliver --note-id "$id" >/dev/null 2>"$home/artifact.err"; then
+    fail "durable result delivery must reject unsafe artifact pointers"
+  fi
+  assert_grep 'invalid artifact pointer' "$home/artifact.err" \
+    "unsafe durable artifact rejection must be explicit"
+  assert_absent "$home/adapter.log" "unsafe durable artifacts must not reach the adapter"
+  pass "durable result delivery rejects unsafe artifact pointers"
+}
+
+test_allowlist_parent_symlink_fails_closed() {
+  local home outside payload
+  home="$TMP_ROOT/allowlist-parent-symlink"
+  setup_home "$home"
+  outside="$home/outside-config"
+  mkdir -p "$outside"
+  mv "$home/config/inbox-result-targets" "$outside/inbox-result-targets"
+  rmdir "$home/config"
+  ln -s "$outside" "$home/config"
+  payload="$home/result.json"
+  jq -n --arg target "$TARGET" \
+    '{schema:"firstmate.inbox-result.v1", note_id:"allowlist-parent-1", request_note_id:"allowlist-parent-1",
+      correlation_id:"allowlist-parent-1", reply_target:$target, status:"completed", summary:"no", artifacts:[]}' \
+    > "$payload"
+  if FM_HOME="$home" "$ROOT/bin/fm-inbox-hermes-adapter.sh" --target "$TARGET" \
+      --idempotency-key allowlist-parent-1 --payload-file "$payload" >/dev/null 2>"$home/allowlist.err"; then
+    fail "allowlists under symlinked parents must be rejected"
+  fi
+  pass "allowlist parent symlinks fail closed"
+}
+
+test_posting_marker_symlink_fails_closed() {
+  local home id outside posting
+  home="$TMP_ROOT/posting-marker-symlink"
+  setup_home "$home"
+  write_adapter "$home"
+  id=$(new_linked_note "$home" posting-marker-symlink-1)
+  publish_result "$home" "$id" --no-deliver >/dev/null
+  outside="$home/outside-posting"
+  printf untouched > "$outside"
+  posting="$home/state/inbox-results/$id.posting"
+  ln -s "$outside" "$posting"
+  if FM_INBOX_RESULT_ADAPTER="$home/fakebin/result-adapter" FM_ADAPTER_LOG="$home/adapter.log" \
+      home_env "$home" "$RESULT" deliver --note-id "$id" >/dev/null 2>"$home/posting.err"; then
+    fail "posting marker symlinks must be rejected"
+  fi
+  [ "$(cat "$outside")" = untouched ] || fail "posting marker symlink target was modified"
+  assert_absent "$home/adapter.log" "posting marker symlink must block adapter execution"
+  pass "posting marker symlinks fail closed"
+}
+
 test_restart_reclaims_a_dead_delivery_lock() {
   local home id lock
   home="$TMP_ROOT/dead-lock"
@@ -693,5 +758,8 @@ test_shipped_hermes_adapter_enforces_target_allowlist
 test_custom_adapter_rejects_symlinked_parent
 test_shipped_hermes_adapter_rejects_payload_target_mismatch
 test_shipped_hermes_adapter_rejects_symlinked_payload_parent
+test_result_artifact_pointers_fail_closed
+test_allowlist_parent_symlink_fails_closed
+test_posting_marker_symlink_fails_closed
 test_restart_reclaims_a_dead_delivery_lock
 test_ownerless_delivery_lock_fails_closed
