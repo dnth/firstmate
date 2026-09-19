@@ -79,14 +79,25 @@ note_command() {
   suffix=${tmp##*.incoming.}
   id="$(date +%s)-$$-$suffix"
   note="$INBOX_DIR/$id.note"
-  if ! printf '%s\n' "$message" > "$tmp" || ! chmod 0600 "$tmp" || ! mv "$tmp" "$note"; then
+  if ! printf '%s\n' "$message" > "$tmp" || ! chmod 0600 "$tmp"; then
     rm -f -- "$tmp"
     die "cannot persist note"
   fi
-  if ! fm_wake_append check "inbox-$id" \
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || {
+    rm -f -- "$tmp"
+    die "cannot lock wake queue"
+  }
+  if ! mv "$tmp" "$note"; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    rm -f -- "$tmp"
+    die "cannot persist note"
+  fi
+  if ! fm_wake_append_locked check "inbox-$id" \
     "captain inbox note $id: run bin/fm-inbox.sh drain; acknowledge after handling with bin/fm-inbox.sh drain --ack $id"; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     die "note $id persisted, but wake append failed"
   fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   printf 'noted %s\n' "$id"
 }
 

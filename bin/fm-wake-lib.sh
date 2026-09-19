@@ -1643,19 +1643,11 @@ fm_wake_clean_field() {
 }
 
 fm_wake_append() {
-  local kind=$1 key=$2 payload=$3 lock_attempts=${4:-} clean_key clean_payload epoch seq seq_file status attempt=0
-  local recovery_marker
+  local kind=$1 key=$2 payload=$3 lock_attempts=${4:-} attempt=0 status=0
   case "$kind" in
     signal|stale|check|heartbeat) ;;
     *) printf 'fm_wake_append: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
   esac
-
-  clean_key=$(printf '%s' "$key" | fm_wake_clean_field)
-  clean_payload=$(printf '%s' "$payload" | fm_wake_clean_field)
-  epoch=$(date +%s)
-  seq_file="$STATE/.wake-queue.seq"
-  recovery_marker="$STATE/.watcher-down"
-  status=0
 
   if [ -n "$lock_attempts" ]; then
     case "$lock_attempts" in ''|*[!0-9]*|0) return 2 ;; esac
@@ -1667,6 +1659,23 @@ fm_wake_append() {
   else
     fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
   fi
+  if fm_wake_append_locked "$kind" "$key" "$payload" "$lock_attempts"; then
+    :
+  else
+    status=$?
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$status"
+}
+
+fm_wake_append_locked() {
+  local kind=$1 key=$2 payload=$3 lock_attempts=${4:-} clean_key clean_payload epoch seq seq_file status=0
+  local recovery_marker
+  clean_key=$(printf '%s' "$key" | fm_wake_clean_field)
+  clean_payload=$(printf '%s' "$payload" | fm_wake_clean_field)
+  epoch=$(date +%s)
+  seq_file="$STATE/.wake-queue.seq"
+  recovery_marker="$STATE/.watcher-down"
   # Recovery evidence is published BEFORE the durable row commits, so a crash in
   # this window leaves the wake recoverable rather than silently orphaned. The
   # bounded caller keeps its whole-call bound: the marker lock is bounded too,
@@ -1683,7 +1692,6 @@ fm_wake_append() {
   if [ "$status" -eq 0 ]; then
     printf '%s\t%s\t%s\t%s\t%s\n' "$epoch" "$seq" "$kind" "$clean_key" "$clean_payload" >> "$FM_WAKE_QUEUE" || status=$?
   fi
-  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   return "$status"
 }
 
