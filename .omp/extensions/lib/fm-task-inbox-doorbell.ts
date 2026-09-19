@@ -266,6 +266,7 @@ export function installTaskInboxDoorbell(
 			settleAwaiting(awaitingPath, "failed");
 			return;
 		}
+		awaitingTurns.set(awaitingPath, setTimeout(settleUnproven, turnGraceMs));
 		void Promise.resolve(result).then(
 			() => {
 				if (!existsSync(awaitingPath)) return;
@@ -273,7 +274,6 @@ export function installTaskInboxDoorbell(
 					settleAwaiting(awaitingPath, "delivered");
 					return;
 				}
-				awaitingTurns.set(awaitingPath, setTimeout(settleUnproven, turnGraceMs));
 			},
 			() => settleAwaiting(awaitingPath, "failed"),
 		);
