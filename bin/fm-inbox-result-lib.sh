@@ -63,13 +63,30 @@ fm_inbox_private_regular_file() { # <path> [mode]
 }
 
 fm_inbox_reply_target_authorized() {
-  local target=$1 line
+  local target=$1 line fd fd_identity path_identity
   fm_inbox_valid_reply_target "$target" || return 1
   fm_inbox_private_regular_file "$FM_INBOX_RESULT_TARGETS_FILE" 600 || return 1
+  exec {fd}<"$FM_INBOX_RESULT_TARGETS_FILE" || return 1
+  fm_inbox_private_regular_file "$FM_INBOX_RESULT_TARGETS_FILE" 600 || {
+    exec {fd}<&-
+    return 1
+  }
+  if [ "$(uname)" = Darwin ]; then
+    fd_identity=$(stat -L -f '%d:%i' "/dev/fd/$fd") || { exec {fd}<&-; return 1; }
+    path_identity=$(stat -L -f '%d:%i' "$FM_INBOX_RESULT_TARGETS_FILE") || { exec {fd}<&-; return 1; }
+  else
+    fd_identity=$(stat -L -c '%d:%i' "/proc/$$/fd/$fd") || { exec {fd}<&-; return 1; }
+    path_identity=$(stat -L -c '%d:%i' "$FM_INBOX_RESULT_TARGETS_FILE") || { exec {fd}<&-; return 1; }
+  fi
+  [ "$fd_identity" = "$path_identity" ] || { exec {fd}<&-; return 1; }
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in ''|'#'*) continue ;; esac
-    [ "$line" = "$target" ] && return 0
-  done < "$FM_INBOX_RESULT_TARGETS_FILE"
+    if [ "$line" = "$target" ]; then
+      exec {fd}<&-
+      return 0
+    fi
+  done <&$fd
+  exec {fd}<&-
   return 1
 }
 
@@ -83,6 +100,27 @@ fm_inbox_note_is_envelope() {
          (.reply_target | type == "string") and
          (.message | type == "string") and
          (.created_at | type == "string")' "$note" >/dev/null 2>&1
+}
+
+fm_inbox_validate_note_envelope() { # <path> <note-id>
+  local note=$1 id=$2 correlation target created message_size
+  fm_inbox_valid_note_id "$id" || return 1
+  jq -e --arg id "$id" \
+    '.schema == "firstmate.inbox-note.v1" and .note_id == $id and
+     .request_note_id == $id and
+     (.correlation_id | type == "string") and
+     (.reply_target | type == "string") and
+     (.message | type == "string" and length > 0 and length <= 65536) and
+     (.created_at | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))' \
+    "$note" >/dev/null || return 1
+  correlation=$(jq -r '.correlation_id' "$note") || return 1
+  fm_inbox_valid_correlation_id "$correlation" || return 1
+  target=$(jq -r '.reply_target' "$note") || return 1
+  fm_inbox_valid_reply_target "$target" || return 1
+  created=$(jq -r '.created_at' "$note") || return 1
+  fm_inbox_valid_utc_timestamp "$created" || return 1
+  message_size=$(jq -j '.message' "$note" | wc -c | tr -d ' ') || return 1
+  [ "$message_size" -le 65536 ]
 }
 
 fm_inbox_validate_result_envelope() { # <path> <note-id>

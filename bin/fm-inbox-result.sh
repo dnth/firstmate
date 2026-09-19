@@ -207,10 +207,8 @@ publish_command() {
   require_jq
   validate_inbox_dirs
   note=$(find_note "$id")
-  fm_inbox_note_is_envelope "$note" \
+  fm_inbox_validate_note_envelope "$note" "$id" \
     || die "note has no supported reply metadata: $id"
-  jq -e --arg id "$id" '.note_id == $id and .request_note_id == $id' "$note" >/dev/null \
-    || die "note identity does not match its filename: $id"
   target=$(jq -r '.reply_target' "$note")
   correlation=$(jq -r '.correlation_id' "$note")
   request_id=$(jq -r '.request_note_id' "$note")

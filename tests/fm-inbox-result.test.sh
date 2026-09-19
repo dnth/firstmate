@@ -752,6 +752,25 @@ test_publish_rejects_empty_summary_without_persisting() {
   pass "empty summaries fail before durable publication"
 }
 
+test_malformed_note_timestamp_fails_closed() {
+  local home id
+  home="$TMP_ROOT/malformed-note-timestamp"
+  setup_home "$home"
+  id=$(new_linked_note "$home" malformed-note-timestamp-1)
+  jq '.created_at = "garbage"' "$home/state/inbox/$id.note" > "$home/tampered.json"
+  mv "$home/tampered.json" "$home/state/inbox/$id.note"
+  printf 'Must not publish.\n' > "$home/summary.txt"
+  if home_env "$home" "$RESULT" publish --note-id "$id" --status completed \
+      --summary-file "$home/summary.txt" --no-deliver >/dev/null 2>"$home/note.err"; then
+    fail "malformed note timestamps must be rejected"
+  fi
+  assert_grep 'no supported reply metadata' "$home/note.err" \
+    "malformed note timestamp rejection must be explicit"
+  assert_absent "$home/state/inbox-results/$id.result.json" \
+    "malformed note timestamps must not publish a result"
+  pass "malformed note timestamps fail closed"
+}
+
 test_malformed_delivery_timestamps_fail_closed() {
   local home id receipt failed
   home="$TMP_ROOT/malformed-delivery-timestamps"
@@ -854,6 +873,7 @@ test_posting_marker_symlink_fails_closed
 test_durable_result_envelope_identity_fails_closed
 test_standalone_adapter_rejects_malformed_envelope
 test_publish_rejects_empty_summary_without_persisting
+test_malformed_note_timestamp_fails_closed
 test_malformed_delivery_timestamps_fail_closed
 test_restart_reclaims_a_dead_delivery_lock
 test_ownerless_delivery_lock_fails_closed
