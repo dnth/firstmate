@@ -85,7 +85,8 @@ Optional X mode integrates with the watcher only after explicit opt-in; [configu
 The sibling local Communication Officer bridge is a separate opt-in that uses the same watcher identity-shim pattern without the hosted relay; [configuration.md](configuration.md#local-communication-officer-bridge-configext-bridge) owns its generated artifacts.
 
 The trusted-local orchestrator inbox is a smaller ingress for agents, humans, and scheduled jobs that already have filesystem access to the Firstmate home.
-`bin/fm-inbox.sh note` atomically publishes a mode-0600 record under `state/inbox/` before appending one `check` row through `fm_wake_append`; list, drain, acknowledgement, and status remain local and network-free.
+`bin/fm-inbox.sh note` publishes a mode-0600 record under `state/inbox/` and its one `check` row while holding the wake-queue lock; list, drain, acknowledgement, and status remain local and network-free.
+Acknowledgement holds that same lock while moving the note to `state/inbox/handled/` and consuming every matching `inbox-<id>` wake row, so note acknowledgement leaves no replayable doorbell.
 Handled notes move to `state/inbox/handled/`, while a failed wake append deliberately leaves the note durable for recovery.
 This path carries no sender authentication, authority grant, reply correlation, or delivery receipts, so it complements rather than replaces the authenticated Communication Officer bridge.
 The note is the doorbell; a referenced artifact is the brief.
