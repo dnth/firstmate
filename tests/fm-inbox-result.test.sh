@@ -529,6 +529,52 @@ HERMES
   pass "shipped adapter rejects skipped and malformed Hermes success output"
 }
 
+test_shipped_hermes_adapter_enforces_target_allowlist() {
+  local home payload
+  home="$TMP_ROOT/hermes-adapter-allowlist"
+  setup_home "$home"
+  payload="$home/result.json"
+  jq -n --arg target 'hermes:telegram:-999:1' \
+    '{schema:"firstmate.inbox-result.v1", note_id:"allowlist-1", request_note_id:"allowlist-1",
+      correlation_id:"allowlist-1", reply_target:$target, status:"completed", summary:"no", artifacts:[]}' \
+    > "$payload"
+  mkdir -p "$home/fakebin"
+  cat > "$home/fakebin/hermes" <<'HERMES'
+#!/usr/bin/env bash
+printf called > "$FM_HERMES_CALLED"
+HERMES
+  chmod +x "$home/fakebin/hermes"
+  if FM_HOME="$home" HERMES_BIN="$home/fakebin/hermes" FM_HERMES_CALLED="$home/called" \
+      "$ROOT/bin/fm-inbox-hermes-adapter.sh" --target 'hermes:telegram:-999:1' \
+      --idempotency-key allowlist-1 --payload-file "$payload" >/dev/null 2>"$home/adapter.err"; then
+    fail "direct Hermes adapter calls must enforce the target allowlist"
+  fi
+  assert_absent "$home/called" "unauthorized direct adapter calls must not reach Hermes"
+  pass "direct Hermes adapter calls enforce target authorization"
+}
+
+test_custom_adapter_rejects_symlinked_parent() {
+  local home id
+  home="$TMP_ROOT/custom-adapter-parent-symlink"
+  setup_home "$home"
+  write_adapter "$home"
+  id=$(new_linked_note "$home" custom-adapter-parent-1)
+  printf 'Must not deliver.\n' > "$home/summary.txt"
+  mkdir -p "$home/realbin"
+  cp "$home/fakebin/result-adapter" "$home/realbin/result-adapter"
+  ln -s "$home/realbin" "$home/linkbin"
+  if FM_INBOX_RESULT_ADAPTER="$home/linkbin/result-adapter" FM_ADAPTER_LOG="$home/adapter.log" \
+      home_env "$home" "$RESULT" publish --note-id "$id" --status completed \
+      --summary-file "$home/summary.txt" >/dev/null 2>"$home/adapter-parent.err"; then
+    fail "custom adapters under symlinked parents must be rejected"
+  fi
+  assert_grep 'result adapter is unavailable' "$home/adapter-parent.err" \
+    "symlinked custom adapter rejection must be explicit"
+  assert_absent "$home/adapter.log" \
+    "symlinked custom adapter must not execute"
+  pass "custom adapters reject symlinked parent paths"
+}
+
 test_restart_reclaims_a_dead_delivery_lock() {
   local home id lock
   home="$TMP_ROOT/dead-lock"
@@ -591,5 +637,7 @@ test_publish_rejects_symlinked_inbox_directory
 test_publish_rejects_symlinked_handled_directory
 test_shipped_hermes_adapter_returns_to_declared_session
 test_shipped_hermes_adapter_rejects_non_delivery_success
+test_shipped_hermes_adapter_enforces_target_allowlist
+test_custom_adapter_rejects_symlinked_parent
 test_restart_reclaims_a_dead_delivery_lock
 test_ownerless_delivery_lock_fails_closed
