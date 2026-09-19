@@ -145,6 +145,7 @@ write_failure() { # <id> <classification> <reason>
 publish_command() {
   local id='' status='' summary_file='' no_deliver=0 note target correlation request_id
   local result tmp artifacts_file created existing_cmp new_cmp artifact
+  local summary_fd summary_size_fd summary_size
   local -a artifacts=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -159,10 +160,15 @@ publish_command() {
   fm_inbox_valid_note_id "$id" || die "invalid note id"
   case "$status" in completed|failed|needs-input) ;; *) die "invalid result status" ;; esac
   [ -n "$summary_file" ] || usage
-  fm_inbox_artifact_safe "$summary_file" \
+  exec {summary_fd}<"$summary_file" \
     || die "summary file must be a regular non-symlink file"
-  [ "$(wc -c < "$summary_file" | tr -d ' ')" -le 16384 ] \
-    || die "summary must not exceed 16384 bytes"
+  fm_inbox_artifact_safe "$summary_file" \
+    || { exec {summary_fd}<&-; die "summary file must be a regular non-symlink file"; }
+  exec {summary_size_fd}<&$summary_fd
+  summary_size=$(wc -c <&$summary_size_fd | tr -d ' ')
+  exec {summary_size_fd}<&-
+  [ "$summary_size" -le 16384 ] \
+    || { exec {summary_fd}<&-; die "summary must not exceed 16384 bytes"; }
   [ "${#artifacts[@]}" -le 20 ] || die "at most 20 artifacts are supported"
   for artifact in "${artifacts[@]}"; do
     fm_inbox_artifact_safe "$artifact" || {
@@ -200,15 +206,17 @@ publish_command() {
   fi
   created=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   if ! jq -n --arg id "$id" --arg request "$request_id" --arg correlation "$correlation" \
-      --arg target "$target" --arg status "$status" --rawfile summary "$summary_file" \
+      --arg target "$target" --arg status "$status" --rawfile summary "/dev/fd/$summary_fd" \
       --arg created "$created" --slurpfile artifacts "$artifacts_file" \
       '{schema:"firstmate.inbox-result.v1", note_id:$id, request_note_id:$request,
         correlation_id:$correlation, reply_target:$target, status:$status,
         summary:($summary | sub("\\n$"; "")), artifacts:$artifacts[0], created_at:$created}' \
       > "$tmp"; then
+    exec {summary_fd}<&-
     rm -f -- "$tmp" "$artifacts_file"
     die "cannot encode result"
   fi
+  exec {summary_fd}<&-
   rm -f -- "$artifacts_file"
   chmod 0600 "$tmp"
 
