@@ -130,10 +130,6 @@ note_command() {
     rm -f -- "$tmp"
     die "cannot encode note"
   fi
-  elif ! printf '%s\n' "$message" > "$tmp"; then
-    rm -f -- "$tmp"
-    die "cannot encode note"
-  fi
   if ! chmod 0600 "$tmp"; then
     rm -f -- "$tmp"
     die "cannot persist note"

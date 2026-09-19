@@ -137,7 +137,7 @@ test_legacy_option_looking_message_remains_plain() {
 test_list_and_drain_reject_malformed_structured_note() {
   local home id
   home="$TMP_ROOT/malformed-structured-note"
-  id=malformed-structured-1
+  id='malformed-structured-1'
   mkdir -p "$home/state/inbox"
   jq -n --arg id "$id" \
     '{schema:"firstmate.inbox-note.v1", note_id:$id, request_note_id:$id,
