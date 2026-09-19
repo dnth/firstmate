@@ -109,6 +109,16 @@ validate_result_envelope() {
      (.status == "completed" or .status == "failed" or .status == "needs-input") and
      (.summary | type == "string") and (.artifacts | type == "array")' \
     "$path" >/dev/null || die "invalid result envelope: $id"
+  validate_result_artifacts "$path" "$id"
+}
+
+validate_result_artifacts() {
+  local path=$1 id=$2 artifact
+  jq -e '.artifacts | length <= 20 and all(.[]; type == "string")' "$path" >/dev/null \
+    || die "invalid artifact pointer: $id"
+  while IFS= read -r artifact; do
+    fm_inbox_artifact_safe "$artifact" || die "invalid artifact pointer: $id"
+  done < <(jq -r '.artifacts[]' "$path")
 }
 
 validate_receipt_envelope() {
@@ -140,6 +150,18 @@ write_failure() { # <id> <classification> <reason>
     '{schema:"firstmate.inbox-result-failure.v1", note_id:$id, classification:$classification,
       reason:$reason, failed_at:$at}' | atomic_json_private "$failed" \
     || die "cannot persist delivery failure"
+}
+
+persist_posting_marker() { # <path>
+  local marker=$1 tmp now
+  tmp=$(mktemp "$RESULT_DIR/.posting.XXXXXX") || return 1
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  if ! printf '%s\n' "$now" > "$tmp" || ! chmod 0600 "$tmp" \
+      || ! ln "$tmp" "$marker" 2>/dev/null; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  rm -f -- "$tmp"
 }
 
 publish_command() {
@@ -411,7 +433,7 @@ deliver_one() {
     die "result adapter is unavailable"
   }
 
-  if ! (umask 077; printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$posting"); then
+  if ! persist_posting_marker "$posting"; then
     release_delivery_lock "$id"
     die "cannot persist posting marker"
   fi

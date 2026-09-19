@@ -29,7 +29,7 @@ fm_inbox_valid_reply_target() {
 
 fm_inbox_private_regular_file() { # <path> [mode]
   local path=$1 expected=${2:-} mode
-  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  fm_inbox_artifact_safe "$path" || return 1
   if [ -n "$expected" ]; then
     if [ "$(uname)" = Darwin ]; then
       mode=$(stat -f %Lp "$path" 2>/dev/null) || return 1
