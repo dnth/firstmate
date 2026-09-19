@@ -801,6 +801,28 @@ test_malformed_delivery_timestamps_fail_closed() {
   pass "malformed receipt and failure timestamps fail closed"
 }
 
+test_confirmed_retry_marker_survives_restart_boundary() {
+  local home id confirmed
+  home="$TMP_ROOT/confirmed-retry-marker"
+  setup_home "$home"
+  write_adapter "$home"
+  id=$(new_linked_note "$home" confirmed-retry-marker-1)
+  publish_result "$home" "$id" --no-deliver >/dev/null
+  confirmed="$home/state/inbox-results/$id.confirmed"
+  printf '2026-01-01T00:00:00Z\n' > "$confirmed"
+  if FM_INBOX_RESULT_ADAPTER="$home/fakebin/result-adapter" FM_ADAPTER_LOG="$home/adapter.log" \
+      home_env "$home" "$RESULT" deliver --note-id "$id" >/dev/null 2>"$home/deliver.err"; then
+    fail "confirmed retry state must not auto-deliver after restart"
+  fi
+  assert_grep 'confirmed retry requires' "$home/deliver.err" \
+    "confirmed retry state must require operator confirmation"
+  FM_INBOX_RESULT_ADAPTER="$home/fakebin/result-adapter" FM_ADAPTER_LOG="$home/adapter.log" \
+    home_env "$home" "$RESULT" retry --note-id "$id" --confirm-ambiguous >/dev/null \
+    || fail "confirmed retry marker must permit explicitly confirmed delivery"
+  assert_absent "$confirmed" "confirmed retry marker must clear after successful delivery"
+  pass "confirmed retry state survives restart boundaries"
+}
+
 test_restart_reclaims_a_dead_delivery_lock() {
   local home id lock
   home="$TMP_ROOT/dead-lock"
@@ -875,5 +897,6 @@ test_standalone_adapter_rejects_malformed_envelope
 test_publish_rejects_empty_summary_without_persisting
 test_malformed_note_timestamp_fails_closed
 test_malformed_delivery_timestamps_fail_closed
+test_confirmed_retry_marker_survives_restart_boundary
 test_restart_reclaims_a_dead_delivery_lock
 test_ownerless_delivery_lock_fails_closed
