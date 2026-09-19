@@ -30,7 +30,7 @@ zsh
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
 Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-spawn.sh` launches.
 
-Dead-endpoint relaunch was reverified on 2026-09-18 for tmux: `tests/fm-spawn-relaunch-dead-endpoint.test.sh` proved that a structurally missing endpoint recreates in the recorded worktree only after ownership checks, while live, ambiguous, foreign-worktree, and unverified states refuse; the complete command list and bounded output are recorded in [`verification/spawn-relaunch.md`](spawn-relaunch.md#dead-endpoint-relaunch-recovery-2026-09-18).
+Dead-endpoint relaunch was reverified on 2026-09-19 for tmux: `tests/fm-spawn-relaunch-dead-endpoint.test.sh` proved that a structurally missing endpoint recreates in the recorded worktree only after ownership checks, while live, ambiguous, foreign-worktree, and unverified states refuse; the complete command list and bounded output are recorded in [`verification/spawn-relaunch.md`](spawn-relaunch.md#dead-endpoint-relaunch-recovery-2026-09-19).
 
 ### Agent liveness name sources
 
@@ -699,7 +699,7 @@ The compatibility floor is protocol 14.
 The presentation-projection suite's latest active verification uses Herdr 0.8.0 protocol 19 on macOS aarch64, every other section's latest uses Herdr 0.7.5 protocol 17 on macOS aarch64, and earlier 0.7.5 protocol-16, 0.7.4, protocol-14, and 0.7.3 evidence is retained where it defines current behavior or fallbacks.
 Protocol 17 keeps every protocol-16 feature gate satisfied; the event and workspace-move floors remain 16.
 
-Dead-endpoint relaunch was reverified on 2026-09-18 for Herdr: `tests/fm-spawn-relaunch-dead-endpoint.test.sh` covered `.server.running: false` recreation and one-shot drifted-shell `cd` recovery, with unreadable and non-returning shells refusing; the complete command list and bounded output are recorded in [`verification/spawn-relaunch.md`](spawn-relaunch.md#dead-endpoint-relaunch-recovery-2026-09-18).
+Dead-endpoint relaunch was reverified on 2026-09-19 for Herdr: `tests/fm-spawn-relaunch-dead-endpoint.test.sh` covered `.server.running: false` recreation and one-shot drifted-shell `cd` recovery, with unreadable and non-returning shells refusing; the complete command list and bounded output are recorded in [`verification/spawn-relaunch.md`](spawn-relaunch.md#dead-endpoint-relaunch-recovery-2026-09-19).
 
 Core read-only probes:
 
@@ -1065,7 +1065,7 @@ This is source and contract inspection only, not live OMP verification.
 The current compatibility floor and latest verification are Zellij 0.44.0 with `jq` on macOS aarch64.
 All real tests use a uniquely named session and `tests/zellij-test-safety.sh`; they never touch a session named `firstmate` or call all-session deletion.
 
-Dead-endpoint relaunch was reverified on 2026-09-18 for Zellij: `tests/fm-spawn-relaunch-dead-endpoint.test.sh` proved structural session-and-pane absence recreates the tab in the recorded worktree, while live or unreadable endpoint shapes refuse; the complete command list and bounded output are recorded in [`verification/spawn-relaunch.md`](spawn-relaunch.md#dead-endpoint-relaunch-recovery-2026-09-18).
+Dead-endpoint relaunch was reverified on 2026-09-19 for Zellij: `tests/fm-spawn-relaunch-dead-endpoint.test.sh` proved structural session-and-pane absence recreates the tab in the recorded worktree, while live or unreadable endpoint shapes refuse; the complete command list and bounded output are recorded in [`verification/spawn-relaunch.md`](spawn-relaunch.md#dead-endpoint-relaunch-recovery-2026-09-19).
 
 | Guarantee | Command shape | Result |
 | --- | --- | --- |
@@ -1122,7 +1122,7 @@ The fake-Orca suite covers readiness, registration, create response parsing, met
 The current compatibility floor is cmux 0.64, and the active live evidence uses 0.64.17 build 97 on macOS aarch64.
 Real tests use only exact `fm-test-` workspaces guarded by `tests/cmux-test-safety.sh` and never quit or relaunch the captain's app.
 
-Dead-endpoint relaunch was reverified on 2026-09-18 for cmux: `tests/fm-spawn-relaunch-dead-endpoint.test.sh` proved structural workspace-or-surface absence recreates inside the recorded worktree, while live or unreadable endpoint shapes refuse; the complete command list and bounded output are recorded in [`verification/spawn-relaunch.md`](spawn-relaunch.md#dead-endpoint-relaunch-recovery-2026-09-18).
+Dead-endpoint relaunch was reverified on 2026-09-19 for cmux: `tests/fm-spawn-relaunch-dead-endpoint.test.sh` proved structural workspace-or-surface absence recreates inside the recorded worktree, while live or unreadable endpoint shapes refuse; the complete command list and bounded output are recorded in [`verification/spawn-relaunch.md`](spawn-relaunch.md#dead-endpoint-relaunch-recovery-2026-09-19).
 
 ```sh
 cmux version

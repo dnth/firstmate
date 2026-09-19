@@ -34,9 +34,9 @@ The OMP relaunch guard test adds a fake-tmux/fake-omp fixture covering the same-
 
 The live lab runs a real OMP ship on a private tmux socket, exits it, then runs `bin/fm-spawn.sh <id> --relaunch`. It verifies the recorded worktree and a dirty sentinel and pending inbox survive, no second worktree is allocated, the `spawn_gen` changes, and the relaunched worker re-acknowledges.
 
-## Dead-endpoint relaunch recovery (2026-09-18)
+## Dead-endpoint relaunch recovery (2026-09-19)
 
-Verified 2026-09-18 against the local Firstmate checkout (detached HEAD at the `fm/fm-relaunch-dead-endpoint` work) and ShellCheck 0.11.0, porting upstream herdr commit `3e817d3f` (`recover gone and drifted worker endpoints`, upstream issue `#4091`).
+Verified 2026-09-19 against the local Firstmate checkout (detached HEAD at the `fm/fm-relaunch-dead-endpoint` work) and ShellCheck 0.11.0, porting upstream herdr commit `3e817d3f` (`recover gone and drifted worker endpoints`, upstream issue `#4091`).
 
 Commands: `tests/fm-spawn-relaunch-dead-endpoint.test.sh`; `tests/fm-backend-herdr.test.sh`; `tests/fm-backend-zellij.test.sh`; `tests/fm-backend-cmux.test.sh`; `tests/fm-spawn-worktree-settle.test.sh`; `tests/fm-omp-relaunch-guard.test.sh`; `tests/fm-secondmate-liveness.test.sh`; `bin/fm-lint.sh`.
 
