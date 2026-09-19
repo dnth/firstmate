@@ -98,6 +98,7 @@ Real test cleanup uses only an isolated non-`firstmate` session and the guard in
 - New-tab focus restoration has a narrow visible race.
 - CLI exit status is not meaningful; a target can still disappear after structural readiness checks.
 - Worktree cwd discovery requires the spawn-time marker probe.
+- `fm_backend_zellij_endpoint_absent` gives `fm-spawn --relaunch` a structural absence proof - session plus pane id verifiably gone, with a reused pane id in another task's tab counting as absent - which licenses recreating the tab inside the recorded worktree after the task's lease ownership is proven; a live endpoint still refuses because its only cwd read would inject a probe, and every unverifiable shape refuses.
 - An ambiguous unscoped legacy title requires manual cleanup and respawn.
 
 ## Regression entry points

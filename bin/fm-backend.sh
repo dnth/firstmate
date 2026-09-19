@@ -940,9 +940,10 @@ fm_backend_agent_record_identity() {  # <backend> <target> <meta>
 # Only `dead` and `missing` license recovery. The tmux adapter requires a
 # successful session inventory and returns `missing` only when it omits the
 # exact window; the Herdr adapter reuses its husk
-# classifier. Zellij remains unverified because its secondmate ghost-tab and
-# agent-process recovery path has not been empirically validated. Orca and cmux
-# do not support secondmate spawns.
+# classifier and falls back to the session server's own `.server.running`
+# field when the pane read is uninterpretable. Zellij remains unverified
+# because its secondmate ghost-tab and agent-process recovery path has not
+# been empirically validated. Orca and cmux do not support secondmate spawns.
 fm_backend_hermes_session_ready() {  # <task-meta>
   local meta=$1 id meta_dir expected session_file session_id
   case "$(basename "$meta")" in *.meta) id=$(basename "$meta" .meta) ;; *) return 1 ;; esac
@@ -993,6 +994,25 @@ fm_backend_agent_alive() {  # <backend> <target> [validated-meta]
     alive) printf 'alive' ;;
     dead|missing) printf 'dead' ;;
     *) printf 'unknown' ;;
+  esac
+}
+
+# fm_backend_endpoint_absent: structural endpoint-absence verdict for
+# relaunch, the weaker sibling of fm_backend_agent_state for backends that
+# have no recovery-grade agent classifier. Prints exactly one of:
+#   absent       - the recorded endpoint is authoritatively absent.
+#   present      - the recorded endpoint (or the task's labeled successor) is live.
+#   unverifiable - absence cannot be proven.
+# Only `absent` licenses a relaunch to skip the live-pane cwd proof and
+# recreate the endpoint in the recorded worktree. tmux and herdr need no entry
+# here: their agent_state already returns `missing` for this condition.
+fm_backend_endpoint_absent() {  # <backend> <target> [expected-label]
+  local backend=$1 target=$2 expected_label=${3:-}
+  fm_backend_source "$backend" || { printf 'unverifiable'; return 0; }
+  case "$backend" in
+    zellij) fm_backend_zellij_endpoint_absent "$target" "$expected_label" ;;
+    cmux) fm_backend_cmux_endpoint_absent "$target" "$expected_label" ;;
+    *) printf 'unverifiable' ;;
   esac
 }
 

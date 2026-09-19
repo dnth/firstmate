@@ -55,9 +55,7 @@ case "${1:-}" in
     esac
     exit 0 ;;
   list-windows)
-    if [ "${FM_FAKE_TMUX_ACTIVE:-0}" = 1 ] && [ -n "${FM_FAKE_LIST_WINDOWS:-}" ]; then
-      printf '%s\n' "$FM_FAKE_LIST_WINDOWS"
-    fi
+    [ -n "${FM_FAKE_LIST_WINDOWS:-}" ] && printf '%s\n' "$FM_FAKE_LIST_WINDOWS"
     exit 0 ;;
   has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
   send-keys)
@@ -233,6 +231,7 @@ test_omp_ship_relaunch_accepts_existing_artifacts() {
     FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' \
     FM_FAKE_PANE_PATH="$WT_DIR" \
     FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
+    FM_FAKE_LIST_WINDOWS="fm-$id" \
     FM_FAKE_OMP_ACK="$FM_TEST_OMP_ACK" \
     FM_FAKE_OMP_NO_PREWALK=1 \
     PATH="$FAKEBIN_DIR:$PATH" \
@@ -264,6 +263,7 @@ test_omp_ship_relaunch_preserves_prewalk_and_extension_opt_in() {
     FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' \
     FM_FAKE_PANE_PATH="$WT_DIR" \
     FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
+    FM_FAKE_LIST_WINDOWS="fm-$id" \
     FM_FAKE_OMP_ACK="$FM_TEST_OMP_ACK" \
     FM_FAKE_OMP_NO_PREWALK=1 \
     PATH="$FAKEBIN_DIR:$PATH" \

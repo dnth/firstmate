@@ -1740,11 +1740,37 @@ fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
   esac
 }
 
+# Whether the pane endpoint's own session server reports itself running. Reads
+# the server-owned .server.running field from `herdr status --json` rather than
+# the pane read's `server_not_running` error code, which the per-pane husk
+# classifier must keep treating as uninterpretable: a positive stopped answer
+# here is what upgrades an uninterpretable pane read into a recovery-grade
+# `missing` in fm_backend_herdr_agent_state.
+fm_backend_herdr_server_running_state() {  # <session> -> running|stopped|unknown
+  local session=$1 json running
+  json=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null) || {
+    printf 'unknown'
+    return 0
+  }
+  running=$(jq -r '.server.running' <<<"$json" 2>/dev/null) || {
+    printf 'unknown'
+    return 0
+  }
+  case "$running" in
+    true) printf 'running' ;;
+    false) printf 'stopped' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
 # fm_backend_herdr_agent_state: recovery-grade state for the same session-start
 # sweep as the tmux classifier. It reuses the husk classifier rather than
 # creating a second Herdr state machine: a structurally gone pane is `missing`,
 # a confirmed agent-less pane is `dead`, a registered agent is `alive`, and an
-# unexpected or failed API read is `unreadable`.
+# unexpected or failed API read is `unreadable`. A pane read that does not even
+# produce a husk verdict is `unreadable` unless the session server positively
+# reports itself stopped - a definitive missing endpoint - while a server that
+# still runs, or whose own state cannot be read, stays `unreadable`.
 fm_backend_herdr_agent_state() {  # <target>
   local target=$1
   fm_backend_herdr_parse_target "$target" || { printf 'unreadable'; return 0; }
@@ -1752,7 +1778,12 @@ fm_backend_herdr_agent_state() {  # <target>
     dead) printf 'missing' ;;
     no-agent) printf 'dead' ;;
     live) printf 'alive' ;;
-    *) printf 'unreadable' ;;
+    *)
+      case "$(fm_backend_herdr_server_running_state "$FM_BACKEND_HERDR_SESSION")" in
+        stopped) printf 'missing' ;;
+        *) printf 'unreadable' ;;
+      esac
+      ;;
   esac
 }
 

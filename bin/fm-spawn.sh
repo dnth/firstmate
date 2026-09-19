@@ -22,6 +22,17 @@
 #   when the caller does not repeat them, and a non-secondmate OMP relaunch also
 #   recovers --prewalk-into and --allow-project-omp-extensions so the replacement
 #   worker keeps the prior launch intent.
+#   A relaunch validates the recorded endpoint before reusing it. A
+#   recovery-grade agent_state of `missing` (tmux, herdr) or a structural
+#   endpoint-absence verdict of `absent` (zellij, cmux) proves the recorded
+#   pane is gone, so the relaunch skips the live-pane cwd proof and recreates
+#   the endpoint inside the recorded worktree - but only once the worktree is
+#   proven to still belong to this task through its durable fm-<id> lease.
+#   Every other endpoint
+#   state keeps the live-endpoint path: tmux requires a proven-idle shell whose
+#   cwd is the recorded worktree, herdr returns a drifted shell to the worktree
+#   with one cd before refusing, zellij and cmux refuse a live endpoint because
+#   probing its cwd would inject into the harness, and orca always refuses.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
@@ -3175,6 +3186,61 @@ validate_spawn_worktree() {  # <source> <inspect-target>
     fi
   fi
 }
+
+# The recorded worktree is only reusable for a proven-gone relaunch while this
+# task still owns it through a durable Treehouse lease held under this task's
+# fm-<id> holder (the get --lease --lease-holder acquisition path used by OMP
+# prewalk and raw launches). A recorded worktree that is not even a pool slot
+# of the recorded project, whose claim names another task, or whose ownership
+# evidence cannot be read refuses: a dead endpoint must never steer a
+# replacement into a checkout another task now owns.
+relaunch_worktree_lease_proven() {  # -> 0 owned; 1 refused (message printed)
+  local pool_state holder
+  fm_treehouse_pool_slot "$PROJ_ABS" "$WT" || {
+    echo "error: task $ID's recorded worktree '$WT' is not a Treehouse pool slot of recorded project '$PROJ_ABS'; refusing to relaunch into a checkout this task cannot prove it still owns" >&2
+    return 1
+  }
+  fm_treehouse_slot_owner_state "$WT" "$ID"
+  case "$FM_TREEHOUSE_SLOT_OWNER" in
+    mine) : ;;
+    other)
+      echo "error: task $ID's pool slot '$WT' is now claimed by task ${FM_TREEHOUSE_SLOT_OWNER_ID:-unknown}; refusing to relaunch into a reassigned slot" >&2
+      return 1 ;;
+    unsafe)
+      echo "error: task $ID's slot-owner claim at '$WT' cannot be read safely; refusing to relaunch" >&2
+      return 1 ;;
+  esac
+  # A durable lease is required even when the slot-owner claim names this task.
+  command -v jq >/dev/null 2>&1 || {
+    echo "error: jq is required to verify task $ID's durable lease on recorded worktree '$WT'; refusing to relaunch" >&2
+    return 1
+  }
+  pool_state="$(dirname "$(dirname "$(cd "$WT" && pwd -P)")")/treehouse-state.json"
+  holder=$(jq -r --arg p "$(cd "$WT" && pwd -P)" \
+    '.worktrees[]? | select(.path == $p and .leased == true) | .lease_holder // empty' \
+    "$pool_state" 2>/dev/null || true)
+  [ "$holder" = "$W" ] && return 0
+  echo "error: task $ID's recorded worktree '$WT' has no durable Treehouse lease held by $W; refusing to relaunch into a worktree it cannot prove it still owns" >&2
+  return 1
+}
+
+# Whether the endpoint's live cwd provably sits in the recorded worktree. Polls
+# briefly because a pane can still be settling into its launch directory; an
+# empty read or a read that never matches fails closed. Sets
+# RELAUNCH_ENDPOINT_SEEN to the last non-empty read for the refusal message.
+relaunch_endpoint_in_worktree() {  # <target> <worktree-real>
+  local target=$1 wt_real=$2 seen
+  RELAUNCH_ENDPOINT_SEEN=
+  for _ in $(seq 1 10); do
+    seen=$(spawn_current_path "$target" || true)
+    if [ -n "$seen" ]; then
+      RELAUNCH_ENDPOINT_SEEN=$seen
+      [ "$(real_path_or_raw "$seen")" = "$wt_real" ] && return 0
+    fi
+    sleep 0.5
+  done
+  return 1
+}
 refuse_spawn_pool_lease() { # <reason> <inspect-target>
   local reason=$1 inspect_target=$2
   echo "error: refusing pooled worktree lease: $reason; inspect target $inspect_target before retrying" >&2
@@ -3341,13 +3407,80 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; t
   }
   SPAWN_START_DIR=$WT
 fi
+# Proven-gone relaunch endpoints: when the recorded endpoint is authoritatively
+# absent, the cwd proof below cannot run - there is no live pane to ask - so it
+# is skipped and the endpoint is recreated in the recorded worktree instead.
+# Every non-gone outcome keeps the live-endpoint path and its cwd proof. The
+# backend verdicts differ in strength: tmux and herdr carry recovery-grade
+# agent_state classifiers, while zellij and cmux can only prove structural
+# absence (no agent-process attribution), which is still enough to know the
+# recorded pane cannot answer a cwd read.
+RELAUNCH_ENDPOINT_GONE=0
+RELAUNCH_WORKTREE_VALIDATED=0
+if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  fm_backend_validate_task_endpoint "$RELAUNCH_META" "$ID" >/dev/null 2>&1 || {
+    echo "error: task $ID's recorded endpoint identity is invalid or does not match this task; refusing to relaunch" >&2
+    exit 1
+  }
+  RELAUNCH_RECORDED_TARGET=$FM_BACKEND_VALIDATED_TARGET
+  case "$BACKEND" in
+    tmux|herdr)
+      RELAUNCH_AGENT_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_RECORDED_TARGET" "$RELAUNCH_META")
+      case "$RELAUNCH_AGENT_STATE" in
+        dead) ;;
+        missing) RELAUNCH_ENDPOINT_GONE=1 ;;
+        alive)
+          echo "error: task $ID's recorded endpoint $RELAUNCH_RECORDED_TARGET still holds a live agent; refusing a duplicate relaunch" >&2
+          exit 1 ;;
+        ambiguous)
+          echo "error: task $ID's recorded endpoint $RELAUNCH_RECORDED_TARGET holds a process that cannot be attributed; refusing to relaunch" >&2
+          exit 1 ;;
+        *)
+          echo "error: task $ID's recorded endpoint state is '$RELAUNCH_AGENT_STATE' at $RELAUNCH_RECORDED_TARGET; refusing to relaunch without a definitive endpoint verdict" >&2
+          exit 1 ;;
+      esac
+      ;;
+    zellij|cmux)
+      RELAUNCH_ENDPOINT_ABSENT=$(fm_backend_endpoint_absent "$BACKEND" "$RELAUNCH_RECORDED_TARGET" "$W")
+      case "$RELAUNCH_ENDPOINT_ABSENT" in
+        absent) RELAUNCH_ENDPOINT_GONE=1 ;;
+        present)
+          echo "error: backend=$BACKEND relaunch cwd verification would inject a probe into the existing harness; refusing to relaunch a live endpoint" >&2
+          exit 1 ;;
+        *)
+          echo "error: backend=$BACKEND cannot prove whether task $ID's recorded endpoint is gone; refusing to relaunch" >&2
+          exit 1 ;;
+      esac
+      ;;
+  esac
+  # A proven-gone endpoint licenses the recorded worktree only while the task
+  # still owns it.
+  if [ "$RELAUNCH_ENDPOINT_GONE" -eq 1 ]; then
+    validate_spawn_worktree "relaunch metadata" "$ID"
+    RELAUNCH_WORKTREE_VALIDATED=1
+    relaunch_worktree_lease_proven || exit 1
+  fi
+fi
 case "$BACKEND" in
   tmux)
     if [ "$RELAUNCH" -eq 1 ]; then
       T=$(fm_meta_get "$STATE/$ID.meta" window)
       [ -n "$T" ] || { echo "error: relaunch has no recorded tmux endpoint for $ID" >&2; exit 1; }
-      WT_TARGET="$T"
       SES=${T%%:*}
+      if [ "$RELAUNCH_ENDPOINT_GONE" -eq 1 ]; then
+        # The recorded window is proven absent: ensure its recorded session and
+        # recreate the task's window in the recorded worktree. T stays the
+        # recorded ses:fm-<id> handle, which the recreated window satisfies by
+        # name; WT_TARGET carries the fresh stable window id.
+        fm_backend_tmux_session_ensure "$SES" || {
+          echo "error: relaunch could not ensure tmux session '$SES' for $ID's proven-missing endpoint" >&2
+          exit 1
+        }
+        WID=$(fm_backend_tmux_create_task "$SES" "$W" "$SPAWN_START_DIR") || exit 1
+        WT_TARGET="$WID"
+      else
+        WT_TARGET="$T"
+      fi
     else
       SES=$(fm_backend_tmux_container_ensure)
       T="$SES:$W"
@@ -3389,11 +3522,31 @@ case "$BACKEND" in
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
     if [ "$RELAUNCH" -eq 1 ]; then
-      HERDR_PROJECTED=1
       HERDR_SES=$(fm_meta_get "$STATE/$ID.meta" herdr_session)
-      HERDR_WORKSPACE_ID=$(fm_meta_get "$STATE/$ID.meta" herdr_workspace_id)
-      HERDR_TAB_ID=$(fm_meta_get "$STATE/$ID.meta" herdr_tab_id)
-      HERDR_PANE_ID=$(fm_meta_get "$STATE/$ID.meta" herdr_pane_id)
+      if [ "$RELAUNCH_ENDPOINT_GONE" -eq 1 ]; then
+        # The recorded pane is proven gone: recreate the task's tab in the
+        # recorded session through the ordinary flat path instead of reusing
+        # the dead pane id. Pinning HERDR_SESSION makes container_ensure ensure
+        # the recorded session; create_task returns fresh workspace/tab/pane
+        # ids that replace the recorded ones in metadata below. The recorded
+        # pane/tab/workspace ids must NOT be installed into the HERDR_PANE_ID
+        # family here: fm_backend_herdr_launcher_identity reads HERDR_PANE_ID
+        # as this process's own injected launcher ancestry, and a dead
+        # recorded pane is never a valid launcher, so the recovery runs with
+        # no launcher ancestry exactly like a spawn with no herdr parent.
+        # A task that was presentation-projected still refuses at its journal
+        # check below.
+        # shellcheck disable=SC2034 # fm_backend_herdr_session reads this as the session pin inside container_ensure.
+        HERDR_SESSION=$HERDR_SES
+        HERDR_WORKSPACE_ID=""
+        HERDR_TAB_ID=""
+        HERDR_PANE_ID=""
+      else
+        HERDR_WORKSPACE_ID=$(fm_meta_get "$STATE/$ID.meta" herdr_workspace_id)
+        HERDR_TAB_ID=$(fm_meta_get "$STATE/$ID.meta" herdr_tab_id)
+        HERDR_PANE_ID=$(fm_meta_get "$STATE/$ID.meta" herdr_pane_id)
+        HERDR_PROJECTED=1
+      fi
     fi
     if [ "$KIND" != secondmate ] && fm_backend_herdr_presentation_enabled "$CONFIG"; then
       if [ "$RELAUNCH" -eq 0 ]; then
@@ -3577,6 +3730,19 @@ EOF
         echo "error: relaunch metadata has no recorded zellij endpoint for $ID" >&2
         exit 1
       }
+      if [ "$RELAUNCH_ENDPOINT_GONE" -eq 1 ]; then
+        # The recorded pane is proven absent: ensure its recorded session and
+        # recreate the task's tab in the recorded worktree. The relaunched
+        # pane is born in the worktree, so no cwd proof can or needs to run.
+        fm_backend_zellij_server_ensure "$ZELLIJ_SES" || {
+          echo "error: relaunch could not ensure zellij session '$ZELLIJ_SES' for $ID's proven-absent endpoint" >&2
+          exit 1
+        }
+        ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$SPAWN_START_DIR") || exit 1
+        read -r ZELLIJ_TAB_ID ZELLIJ_PANE_ID <<EOF
+$ZELLIJ_TASK_IDS
+EOF
+      fi
     else
       ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
       ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$PROJ_ABS") || exit 1
@@ -3598,6 +3764,16 @@ EOF
         echo "error: relaunch metadata has no recorded cmux endpoint for $ID" >&2
         exit 1
       }
+      if [ "$RELAUNCH_ENDPOINT_GONE" -eq 1 ]; then
+        # The recorded workspace/surface is proven absent: recreate the task's
+        # workspace in the recorded worktree. Fresh ids replace the recorded
+        # ones in metadata below; the new surface is born in the worktree.
+        fm_backend_cmux_container_ensure || exit 1
+        CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$SPAWN_START_DIR") || exit 1
+        read -r CMUX_WORKSPACE_ID CMUX_SURFACE_ID <<EOF
+$CMUX_TASK_IDS
+EOF
+      fi
     else
       fm_backend_cmux_container_ensure || exit 1
       CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS") || exit 1
@@ -3679,30 +3855,49 @@ spawn_current_path() {  # <target>
   esac
 }
 if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
-  validate_spawn_worktree "relaunch metadata" "$ID"
+  if [ "$RELAUNCH_WORKTREE_VALIDATED" -ne 1 ]; then
+    validate_spawn_worktree "relaunch metadata" "$ID"
+  fi
   if [ "$BACKEND" = orca ]; then
     echo "error: backend=orca cannot prove the relaunch endpoint cwd; refusing to launch outside the recorded worktree" >&2
     exit 1
   fi
-  case "$BACKEND" in
-    tmux)
-      fm_backend_tmux_idle_foreground_shell_pid "$T" >/dev/null || {
-        echo "error: relaunch tmux endpoint is not proven idle; refusing to inject relaunch input into an active harness" >&2
+  # A proven-gone endpoint was recreated in the recorded worktree by its arm
+  # above; there is no live pane to probe, and none is needed.
+  if [ "$RELAUNCH_ENDPOINT_GONE" -ne 1 ]; then
+    case "$BACKEND" in
+      tmux)
+        fm_backend_tmux_idle_foreground_shell_pid "$T" >/dev/null || {
+          echo "error: relaunch tmux endpoint is not proven idle; refusing to inject relaunch input into an active harness" >&2
+          exit 1
+        }
+        ;;
+      zellij|cmux)
+        echo "error: backend=$BACKEND relaunch cwd verification would inject a probe into the existing harness; refusing to relaunch an unverified endpoint" >&2
+        exit 1
+        ;;
+    esac
+    relaunch_worktree_real=$(real_path_or_raw "$WT")
+    if ! relaunch_endpoint_in_worktree "$T" "$relaunch_worktree_real"; then
+      # A live endpoint that drifted out of the recorded worktree refuses, so a
+      # replacement agent never starts outside the copy holding its work. Herdr
+      # is the one exception: its shell can be told to come back once, and only
+      # a shell that demonstrably lands in the worktree licenses the relaunch.
+      if [ "$BACKEND" != herdr ]; then
+        echo "error: task $ID's endpoint is in '${RELAUNCH_ENDPOINT_SEEN:-unknown}', not its recorded worktree '$WT'; refusing to relaunch an agent outside the copy holding its work" >&2
+        exit 1
+      fi
+      relaunch_cd=$(shell_quote "$WT")
+      spawn_send_text_line "$T" "cd -- $relaunch_cd" || {
+        echo "error: task $ID's endpoint could not be told to return to its recorded worktree '$WT'; refusing to relaunch" >&2
         exit 1
       }
-      ;;
-    zellij|cmux)
-      echo "error: backend=$BACKEND relaunch cwd verification would inject a probe into the existing harness; refusing to relaunch an unverified endpoint" >&2
-      exit 1
-      ;;
-  esac
-  relaunch_endpoint_path=$(spawn_current_path "$T" || true)
-  relaunch_endpoint_real=$(real_path_or_raw "$relaunch_endpoint_path")
-  relaunch_worktree_real=$(real_path_or_raw "$WT")
-  [ -n "$relaunch_endpoint_path" ] && [ "$relaunch_endpoint_real" = "$relaunch_worktree_real" ] || {
-    echo "error: relaunch endpoint cwd does not match recorded worktree '$WT'; refusing to launch" >&2
-    exit 1
-  }
+      relaunch_endpoint_in_worktree "$T" "$relaunch_worktree_real" || {
+        echo "error: task $ID's endpoint did not return to its recorded worktree '$WT' (still '${RELAUNCH_ENDPOINT_SEEN:-unknown}'); refusing to relaunch" >&2
+        exit 1
+      }
+    fi
+  fi
 fi
 spawn_send_literal() {  # <target> <text>
   case "$BACKEND" in
