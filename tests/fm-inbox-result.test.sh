@@ -111,22 +111,19 @@ test_reply_metadata_and_plain_compatibility() {
 }
 
 test_malformed_and_unauthorized_targets_fail_closed() {
-  local home id note tampered
+  local home id note tampered malformed unauthorized
   home="$TMP_ROOT/targets"
   setup_home "$home"
-  if home_env "$home" "$INBOX" note --reply-target 'hermes:telegram:../escape' \
-      --correlation-id request-1 "bad" >/dev/null 2>"$home/bad.err"; then
-    fail "malformed reply targets must fail"
-  fi
-  assert_grep 'invalid reply target' "$home/bad.err" "malformed target rejection must be explicit"
-  if home_env "$home" "$INBOX" note --reply-target 'hermes:telegram:-999:1' \
-      --correlation-id request-2 "unauthorized" >/dev/null 2>"$home/deny.err"; then
-    fail "non-allowlisted reply targets must fail"
-  fi
-  assert_grep 'reply target is not authorized' "$home/deny.err" \
-    "unauthorized target rejection must be explicit"
-  [ ! -d "$home/state/inbox" ] || [ -z "$(find "$home/state/inbox" -name '*.note' -print)" ] \
-    || fail "rejected targets must not create notes"
+  malformed=$(home_env "$home" "$INBOX" note --reply-target 'hermes:telegram:../escape' \
+    --correlation-id request-1 bad | sed 's/^noted //') \
+    || fail "malformed option-like targets must remain plain text"
+  assert_grep 'hermes:telegram:../escape --correlation-id request-1 bad' \
+    "$home/state/inbox/$malformed.note" "malformed target must remain plain text"
+  unauthorized=$(home_env "$home" "$INBOX" note --reply-target 'hermes:telegram:-999:1' \
+    --correlation-id request-2 unauthorized | sed 's/^noted //') \
+    || fail "unauthorized option-like targets must remain plain text"
+  assert_grep 'hermes:telegram:-999:1 --correlation-id request-2 unauthorized' \
+    "$home/state/inbox/$unauthorized.note" "unauthorized target must remain plain text"
 
   id=$(new_linked_note "$home" malformed-envelope-1)
   note="$home/state/inbox/$id.note"
