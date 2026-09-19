@@ -62,11 +62,22 @@ validate_inbox_dir() {
 }
 
 note_command() {
-  local reply_target='' correlation_id='' message tmp suffix id note created metadata=0
+  local reply_target='' correlation_id='' message tmp suffix id note created metadata=0 candidate_target candidate_correlation
   if [ "$#" -ge 4 ]; then
     if { [ "$1" = --reply-target ] && [ "$3" = --correlation-id ]; } \
         || { [ "$1" = --correlation-id ] && [ "$3" = --reply-target ]; }; then
-      metadata=1
+      if [ "$1" = --reply-target ]; then
+        candidate_target=$2
+        candidate_correlation=$4
+      else
+        candidate_correlation=$2
+        candidate_target=$4
+      fi
+      if fm_inbox_valid_reply_target "$candidate_target" \
+          && fm_inbox_valid_correlation_id "$candidate_correlation" \
+          && fm_inbox_reply_target_authorized "$candidate_target"; then
+        metadata=1
+      fi
     fi
   fi
   if [ "$metadata" -eq 1 ]; then

@@ -95,7 +95,7 @@ test_list_drain_and_idempotent_ack() {
 }
 
 test_legacy_option_looking_message_remains_plain() {
-  local home out id reversed missing explicit
+  local home out id reversed missing explicit malformed invalid unauthorized
   home="$TMP_ROOT/legacy-option-message"
   mkdir -p "$home"
   out=$(home_env "$home" "$INBOX" note --reply-target hello) \
@@ -115,6 +115,19 @@ test_legacy_option_looking_message_remains_plain() {
     || fail "explicit legacy separator must remain accepted"
   assert_grep '--reply-target hello' "$home/state/inbox/$explicit.note" \
     "explicit separator must preserve plain text"
+  malformed=$(home_env "$home" "$INBOX" note --reply-target --correlation-id foo | sed 's/^noted //') \
+    || fail "malformed option-like messages must remain accepted"
+  assert_grep '--reply-target --correlation-id foo' "$home/state/inbox/$malformed.note" \
+    "malformed option-like message must remain plain text"
+  invalid=$(home_env "$home" "$INBOX" note --reply-target invalid --correlation-id corr | sed 's/^noted //') \
+    || fail "invalid option-like messages must remain accepted"
+  assert_grep '--reply-target invalid --correlation-id corr' "$home/state/inbox/$invalid.note" \
+    "invalid option-like message must remain plain text"
+  unauthorized=$(home_env "$home" "$INBOX" note --reply-target 'hermes:telegram:-999:1' \
+    --correlation-id corr | sed 's/^noted //') \
+    || fail "unauthorized option-like messages must remain accepted"
+  assert_grep 'hermes:telegram:-999:1 --correlation-id corr' "$home/state/inbox/$unauthorized.note" \
+    "unauthorized option-like message must remain plain text"
   pass "legacy option-looking messages remain plain text"
 }
 
