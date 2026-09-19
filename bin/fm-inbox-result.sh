@@ -101,24 +101,8 @@ validate_result_envelope() {
   local path=$1 id=$2
   validate_owned_file_or_absent "$path" "result record"
   [ -f "$path" ] || die "result not found: $id"
-  jq -e --arg id "$id" \
-    '.schema == "firstmate.inbox-result.v1" and .note_id == $id and
-     (.request_note_id | type == "string") and
-     (.correlation_id | type == "string") and
-     (.reply_target | type == "string") and
-     (.status == "completed" or .status == "failed" or .status == "needs-input") and
-     (.summary | type == "string") and (.artifacts | type == "array")' \
-    "$path" >/dev/null || die "invalid result envelope: $id"
-  validate_result_artifacts "$path" "$id"
-}
-
-validate_result_artifacts() {
-  local path=$1 id=$2 artifact
-  jq -e '.artifacts | length <= 20 and all(.[]; type == "string")' "$path" >/dev/null \
-    || die "invalid artifact pointer: $id"
-  while IFS= read -r artifact; do
-    fm_inbox_artifact_safe "$artifact" || die "invalid artifact pointer: $id"
-  done < <(jq -r '.artifacts[]' "$path")
+  fm_inbox_validate_result_envelope "$path" "$id" \
+    || die "invalid result envelope: $id"
 }
 
 validate_receipt_envelope() {

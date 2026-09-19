@@ -63,6 +63,31 @@ fm_inbox_note_is_envelope() {
          (.created_at | type == "string")' "$note" >/dev/null 2>&1
 }
 
+fm_inbox_validate_result_envelope() { # <path> <note-id>
+  local path=$1 id=$2 correlation target summary_size artifact
+  fm_inbox_valid_note_id "$id" || return 1
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  jq -e --arg id "$id" \
+    '.schema == "firstmate.inbox-result.v1" and .note_id == $id and
+     .request_note_id == $id and
+     (.correlation_id | type == "string") and
+     (.reply_target | type == "string") and
+     (.status == "completed" or .status == "failed" or .status == "needs-input") and
+     (.summary | type == "string" and length > 0) and
+     (.created_at | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and
+     (.artifacts | type == "array" and length <= 20 and all(.[]; type == "string"))' \
+    "$path" >/dev/null || return 1
+  correlation=$(jq -r '.correlation_id' "$path") || return 1
+  fm_inbox_valid_correlation_id "$correlation" || return 1
+  target=$(jq -r '.reply_target' "$path") || return 1
+  fm_inbox_valid_reply_target "$target" || return 1
+  summary_size=$(jq -j '.summary' "$path" | wc -c | tr -d ' ') || return 1
+  [ "$summary_size" -le 16384 ] || return 1
+  while IFS= read -r artifact; do
+    fm_inbox_artifact_safe "$artifact" || return 1
+  done < <(jq -r '.artifacts[]' "$path")
+}
+
 fm_inbox_artifact_safe() {
   local path=$1 parent physical logical
   case "$path" in
