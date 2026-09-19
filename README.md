@@ -171,8 +171,7 @@ bin/fm-inbox.sh status
 `note` persists the message before appending one wake to Firstmate's existing durable queue.
 The inbox assumes trusted local access; it does not add sender authentication, grant captain authority, or replace the authenticated Hermes Communication Officer bridge for Discord request/reply workflows.
 
-For an asynchronous handoff that must return to a Hermes conversation, authorize the exact
-platform/chat/thread target in mode-0600 `config/inbox-result-targets`, then attach it to the note:
+For an asynchronous handoff that must return to a Hermes conversation, authorize the exact platform/chat/thread target in mode-0600 `config/inbox-result-targets`, then attach it to the note:
 
 ```sh
 bin/fm-inbox.sh note \
@@ -186,10 +185,9 @@ bin/fm-inbox-result.sh publish --note-id <note-id> --status completed \
 bin/fm-inbox-result.sh status --note-id <note-id>
 ```
 
-The result is persisted before delivery. The default adapter reuses `hermes send` and its
-configured platform adapters; receipts suppress duplicate replies, while ambiguous sends fail
-closed until an operator checks the destination and confirms a retry. See
-[configuration.md](docs/configuration.md#trusted-local-inbox-results-configinbox-result-targets).
+The result is persisted before delivery.
+The default adapter reuses `hermes send` and its configured platform adapters; receipts suppress duplicate replies, while ambiguous sends fail closed until an operator checks the destination and confirms a retry.
+See [configuration.md](docs/configuration.md#trusted-local-inbox-results-configinbox-result-targets).
 
 ### More backends
 

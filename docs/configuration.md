@@ -620,16 +620,13 @@ See [verification/public-followup.md](verification/public-followup.md) for the c
 
 ## Trusted-local inbox results (config/inbox-result-targets)
 
-The trusted-local inbox remains plain ingress unless a sender explicitly supplies both
-`--reply-target` and `--correlation-id`. A linked note is one mode-0600, versioned JSON record;
-legacy notes without those options remain plain text and keep the existing list, drain, and
-acknowledgement behavior.
+The trusted-local inbox remains plain ingress unless a sender explicitly supplies both `--reply-target` and `--correlation-id`.
+A linked note is one mode-0600, versioned JSON record; legacy notes without those options remain plain text and keep the existing list, drain, and acknowledgement behavior.
 
-Reply targets use `hermes:<platform>:<chat>[:<thread>]`. The Hermes sender should derive the
-target from its current session origin. For example, a Telegram topic session uses
-`hermes:telegram:-1001234567890:17585`. Firstmate accepts a target only when the exact string
-appears on a non-comment line in `config/inbox-result-targets`, which must be a regular,
-non-symlink, mode-0600 file:
+Reply targets use `hermes:<platform>:<chat>[:<thread>]`.
+The Hermes sender should derive the target from its current session origin.
+For example, a Telegram topic session uses `hermes:telegram:-1001234567890:17585`.
+Firstmate accepts a target only when the exact string appears on a non-comment line in `config/inbox-result-targets`, which must be a regular, non-symlink, mode-0600 file:
 
 ```sh
 install -m 0600 /dev/null config/inbox-result-targets
@@ -642,16 +639,14 @@ bin/fm-inbox.sh note \
   'Run the brief at /absolute/path/to/brief.md'
 ```
 
-The exact allowlist is the local cross-session authority boundary. Missing, unreadable,
-comments-only, wrong-mode, symlinked, malformed, or non-matching files deny the target. The same
-check runs again immediately before delivery, so revocation prevents a queued result from being
-sent without deleting that result.
+The exact allowlist is the local cross-session authority boundary.
+Missing, unreadable, comments-only, wrong-mode, symlinked, malformed, or non-matching files deny the target.
+The same check runs again immediately before delivery, so revocation prevents a queued result from being sent without deleting that result.
 
-Firstmate publishes one immutable result per note id. Status is `completed`, `failed`, or
-`needs-input`; the summary is read from a regular non-symlink file and is capped at 16 KiB.
-Up to 20 artifact references may be included. Each artifact must be an absolute, readable regular
-file whose path and parent path contain no symlink traversal; large content stays in those durable
-files rather than the result or wake message.
+Firstmate publishes one immutable result per note id.
+Status is `completed`, `failed`, or `needs-input`; the summary is read from a regular non-symlink file and is capped at 16 KiB.
+Up to 20 artifact references may be included.
+Each artifact must be an absolute, readable regular file whose path and parent path contain no symlink traversal; large content stays in those durable files rather than the result or wake message.
 
 ```sh
 bin/fm-inbox-result.sh publish --note-id <note-id> --status completed \
@@ -662,15 +657,13 @@ bin/fm-inbox-result.sh status
 bin/fm-inbox-result.sh status --note-id <note-id>
 ```
 
-`publish` atomically writes `state/inbox-results/<note-id>.result.json` before delivery. Repeating
-the exact publication reuses that record; different content for the same note id is refused.
-`--no-deliver` leaves the record pending for a later process or restart to deliver with
-`fm-inbox-result.sh deliver --note-id <note-id>`.
+`publish` atomically writes `state/inbox-results/<note-id>.result.json` before delivery.
+Repeating the exact publication reuses that record; different content for the same note id is refused.
+`--no-deliver` leaves the record pending for a later process or restart to deliver with `fm-inbox-result.sh deliver --note-id <note-id>`.
 
-Delivery creates a posting marker before invoking the adapter. A successful structured adapter
-response becomes `<note-id>.receipt.json`, and that receipt makes later publish/deliver calls
-no-op successes instead of duplicate user-visible replies. A definite no-send becomes
-`<note-id>.failed.json` and may be retried after the cause is fixed:
+Delivery creates a posting marker before invoking the adapter.
+A successful structured adapter response becomes `<note-id>.receipt.json`, and that receipt makes later publish/deliver calls no-op successes instead of duplicate user-visible replies.
+A definite no-send becomes `<note-id>.failed.json` and may be retried after the cause is fixed:
 
 ```sh
 # Retry a transient definite no-send.
@@ -680,26 +673,21 @@ bin/fm-inbox-result.sh retry --note-id <note-id>
 bin/fm-inbox-result.sh retry --note-id <note-id> --force
 ```
 
-An adapter crash, unclassified failure, provider/network error, or success without a valid receipt
-is ambiguous because the platform may already have accepted the message. The posting marker is
-retained and automatic retry is refused. Check the exact destination first; only when another
-reply is acceptable should an operator run:
+An adapter crash, unclassified failure, provider/network error, or success without a valid receipt is ambiguous because the platform may already have accepted the message.
+The posting marker is retained and automatic retry is refused.
+Check the exact destination first; only when another reply is acceptable should an operator run:
 
 ```sh
 bin/fm-inbox-result.sh retry --note-id <note-id> --confirm-ambiguous
 ```
 
-The default adapter, `bin/fm-inbox-hermes-adapter.sh`, strips the declarative `hermes:` prefix and
-calls `hermes send --to <platform:chat[:thread]> --json --file ...`. That reuses Hermes credentials,
-message formatting, and supported platform adapters; Firstmate does not read bot tokens or add a
-parallel network transport. `FM_INBOX_RESULT_ADAPTER` may point tests or an operator-approved local
-integration at another regular executable. The adapter receives `--target`, `--idempotency-key`,
-and `--payload-file`; exit 0 must print a JSON object with `ok: true`, exit 75 means transient
-definite no-send, exit 64 means permanent definite no-send, and all other exits are ambiguous.
+The default adapter, `bin/fm-inbox-hermes-adapter.sh`, strips the declarative `hermes:` prefix and calls `hermes send --to <platform:chat[:thread]> --json --file ...`.
+That reuses Hermes credentials, message formatting, and supported platform adapters; Firstmate does not read bot tokens or add a parallel network transport.
+`FM_INBOX_RESULT_ADAPTER` may point tests or an operator-approved local integration at another regular executable.
+The adapter receives `--target`, `--idempotency-key`, and `--payload-file`; exit 0 must print a JSON object with `ok: true`, exit 75 means transient definite no-send, exit 64 means permanent definite no-send, and all other exits are ambiguous.
 
-This result seam does not activate, replace, or weaken the authenticated Communication Officer
-bridge below. Its opt-in, request allowlist, authority levels, audit context, correlation, chunk
-progress, and receipts continue to apply unchanged.
+This result seam does not activate, replace, or weaken the authenticated Communication Officer bridge below.
+Its opt-in, request allowlist, authority levels, audit context, correlation, chunk progress, and receipts continue to apply unchanged.
 
 ## Local Communication Officer bridge (config/ext-bridge)
 
