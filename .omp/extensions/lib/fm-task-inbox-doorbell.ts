@@ -217,12 +217,13 @@ export function installTaskInboxDoorbell(
 	let signalHandlerInstalled = false;
 	let turnListenersInstalled = false;
 	let turnOpen = false;
+	let turnEpoch = 0;
 	let dispatchingTurn = false;
 	let dispatchingTurnObserved = false;
 	const awaitingTurns = new Map<string, ReturnType<typeof setTimeout>>();
 	const activationSends = new Set<Promise<void>>();
 	let watcher: FSWatcher | undefined;
-	const settleAwaiting = (awaitingPath: string, outcome: "delivered" | "failed"): void => {
+	const settleAwaiting = (awaitingPath: string, outcome: "delivered" | "failed" | "unproven"): void => {
 		const timer = awaitingTurns.get(awaitingPath);
 		if (timer !== undefined) {
 			clearTimeout(timer);
@@ -233,35 +234,52 @@ export function installTaskInboxDoorbell(
 	// A delivered doorbell that produced no turn within the grace bound was
 	// downgraded by the runtime to append-only delivery. Re-drive the same
 	// instruction through the user-prompt channel, which an idle session cannot
-	// defer; while streaming it queues as a steer into the open turn. Without a
-	// recovery channel the prior accept-only semantics stand.
+	// defer; while streaming it queues as a steer into the open turn. The
+	// re-drive is itself only a request: a nonthrowing return or resolved
+	// promise is never a receipt, so the entry re-parks for one more bounded
+	// proof window. A turn opening inside that window settles it delivered;
+	// expiry settles it unproven - a durable marker that is not a tombstone,
+	// so the next ring is a real delivery attempt rather than a suppressed
+	// false success. Without a recovery channel the request settles unproven
+	// at once - still unconfirmed, never delivered.
 	const recoverUnprovenTurn = (awaitingPath: string): void => {
 		awaitingTurns.delete(awaitingPath);
 		if (!canReDrive) {
-			settleAwaiting(awaitingPath, "delivered");
+			settleAwaiting(awaitingPath, "unproven");
 			return;
 		}
 		let content = "";
 		try {
 			content = readFileSync(awaitingPath, "utf8");
 		} catch {
-			bestEffortRename(awaitingPath, awaitingPath.replace(/\.awaiting-turn$/, ".pending"));
+			settleAwaiting(awaitingPath, "unproven");
 			return;
 		}
 		let result: void | Promise<void>;
+		const epochAtRedrive = turnEpoch;
 		try {
 			result = omp.sendUserMessage!(content);
 		} catch {
 			settleAwaiting(awaitingPath, "failed");
 			return;
 		}
+		awaitingTurns.set(awaitingPath, setTimeout(() => {
+			settleAwaiting(awaitingPath, turnEpoch !== epochAtRedrive ? "delivered" : "unproven");
+		}, turnGraceMs));
 		void Promise.resolve(result).then(
-			() => settleAwaiting(awaitingPath, "delivered"),
+			() => {
+				if (!existsSync(awaitingPath)) return;
+				if (turnEpoch !== epochAtRedrive) {
+					settleAwaiting(awaitingPath, "delivered");
+					return;
+				}
+			},
 			() => settleAwaiting(awaitingPath, "failed"),
 		);
 	};
 	const onTurnOpen = (): void => {
 		turnOpen = true;
+		turnEpoch += 1;
 		if (dispatchingTurn) dispatchingTurnObserved = true;
 		// A turn opening while a steer sits parked is proof the session took
 		// the work: the steer caused the turn or was absorbed into it, so
