@@ -52,6 +52,11 @@ count_note_files() {
   printf '%s\n' "$count"
 }
 
+validate_inbox_dir() {
+  [ ! -L "$INBOX_DIR" ] || die "inbox path must not be a symlink: ${INBOX_DIR##*/}"
+  [ ! -e "$INBOX_DIR" ] || [ -d "$INBOX_DIR" ] || die "inbox path must be a directory: ${INBOX_DIR##*/}"
+}
+
 note_command() {
   local message=$* tmp suffix id note
   [ -n "$message" ] || usage
@@ -73,7 +78,8 @@ note_command() {
 
 list_command() {
   local note id first found=0
-  [ -d "$INBOX_DIR" ] && [ ! -L "$INBOX_DIR" ] || { printf '(inbox empty)\n'; return; }
+  validate_inbox_dir
+  [ -d "$INBOX_DIR" ] || { printf '(inbox empty)\n'; return; }
   for note in "$INBOX_DIR"/*.note; do
     [ -e "$note" ] || [ -L "$note" ] || continue
     [ -f "$note" ] && [ ! -L "$note" ] || die "invalid pending note: ${note##*/}"
@@ -113,7 +119,8 @@ drain_command() {
     die "note not found: $id"
   fi
   [ "$#" -eq 0 ] || usage
-  [ -d "$INBOX_DIR" ] && [ ! -L "$INBOX_DIR" ] || { printf '(inbox empty)\n'; return; }
+  validate_inbox_dir
+  [ -d "$INBOX_DIR" ] || { printf '(inbox empty)\n'; return; }
   for note in "$INBOX_DIR"/*.note; do
     [ -e "$note" ] || [ -L "$note" ] || continue
     [ -f "$note" ] && [ ! -L "$note" ] || die "invalid pending note: ${note##*/}"

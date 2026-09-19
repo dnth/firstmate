@@ -193,6 +193,27 @@ test_status_rejects_symlink_directory() {
   pass "status fails closed on symlinked inbox directories"
 }
 
+test_list_and_drain_reject_symlink_directory() {
+  local home real_inbox
+  home="$TMP_ROOT/list-drain-directory-symlink"
+  real_inbox="$home/real-inbox"
+  mkdir -p "$real_inbox"
+  mkdir -p "$home/state"
+  ln -s "$real_inbox" "$home/state/inbox"
+
+  if home_env "$home" "$INBOX" list >"$home/out" 2>"$home/err"; then
+    fail "list must reject a symlinked inbox directory"
+  fi
+  assert_grep 'inbox path must not be a symlink' "$home/err" \
+    "list directory symlink rejection must be explicit"
+  if home_env "$home" "$INBOX" drain >"$home/drain-out" 2>"$home/drain-err"; then
+    fail "drain must reject a symlinked inbox directory"
+  fi
+  assert_grep 'inbox path must not be a symlink' "$home/drain-err" \
+    "drain directory symlink rejection must be explicit"
+  pass "list and drain fail closed on symlinked inbox directories"
+}
+
 test_note_persists_and_wakes
 test_list_drain_and_idempotent_ack
 test_status_is_read_only
@@ -201,3 +222,4 @@ test_wake_failure_preserves_note
 test_symlink_note_fails_closed
 test_status_rejects_symlink_note
 test_status_rejects_symlink_directory
+test_list_and_drain_reject_symlink_directory
