@@ -206,7 +206,16 @@ drain_command() {
         return 0
       fi
     fi
-    if [ -f "$HANDLED_DIR/$id.note" ] && [ ! -L "$HANDLED_DIR/$id.note" ]; then
+    if [ -L "$HANDLED_DIR/$id.note" ]; then
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      die "handled note must not be a symlink: $id"
+    fi
+    if [ -f "$HANDLED_DIR/$id.note" ]; then
+      if fm_inbox_note_is_structured "$HANDLED_DIR/$id.note" \
+          && ! fm_inbox_validate_note_envelope "$HANDLED_DIR/$id.note" "$id"; then
+        fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+        die "invalid handled note: $id"
+      fi
       if ! fm_wake_consume_key_locked check "inbox-$id" >/dev/null; then
         fm_lock_release "$FM_WAKE_QUEUE_LOCK"
         die "note $id is handled, but its wake row could not be consumed; re-run drain --ack $id"

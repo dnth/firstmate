@@ -185,6 +185,24 @@ test_truncated_structured_note_fails_closed() {
   pass "truncated structured notes fail closed"
 }
 
+test_ack_rejects_malformed_handled_note() {
+  local home id
+  home="$TMP_ROOT/malformed-handled-note"
+  id=malformed-handled-1
+  mkdir -p "$home/state/inbox/handled"
+  printf '{"schema":"firstmate.inbox-note.v1"' \
+    > "$home/state/inbox/handled/$id.note"
+  chmod 0600 "$home/state/inbox/handled/$id.note"
+  if home_env "$home" "$INBOX" drain --ack "$id" >"$home/out" 2>"$home/err"; then
+    fail "ack must reject malformed handled notes"
+  fi
+  assert_grep 'invalid handled note' "$home/err" \
+    "malformed handled-note rejection must be explicit"
+  assert_present "$home/state/inbox/handled/$id.note" \
+    "malformed handled note must remain untouched"
+  pass "ack rejects malformed handled notes"
+}
+
 test_status_is_read_only() {
   local home before after out
   home="$TMP_ROOT/status"
@@ -427,6 +445,7 @@ test_list_drain_and_idempotent_ack
 test_legacy_option_looking_message_remains_plain
 test_list_and_drain_reject_malformed_structured_note
 test_truncated_structured_note_fails_closed
+test_ack_rejects_malformed_handled_note
 test_status_is_read_only
 test_concurrent_notes_are_unique_and_woken
 test_wake_failure_preserves_note
