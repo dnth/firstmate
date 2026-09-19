@@ -6,13 +6,15 @@ set -euo pipefail
 BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$BIN_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-inbox-result-lib.sh
+. "$BIN_DIR/fm-inbox-result-lib.sh"
 
 INBOX_DIR="$STATE/inbox"
 HANDLED_DIR="$INBOX_DIR/handled"
 
 usage() {
   cat >&2 <<'EOF'
-usage: fm-inbox.sh note <message>
+usage: fm-inbox.sh note [--reply-target <hermes:platform:chat[:thread]> --correlation-id <id>] <message>
        fm-inbox.sh list
        fm-inbox.sh drain [--ack <id>]
        fm-inbox.sh status
@@ -34,10 +36,7 @@ ensure_inbox_dirs() {
 }
 
 valid_note_id() {
-  case "$1" in
-    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
-    *) return 0 ;;
-  esac
+  fm_inbox_valid_note_id "$1"
 }
 
 validate_note_dir() {
@@ -63,14 +62,57 @@ validate_inbox_dir() {
 }
 
 note_command() {
-  local message=$* tmp suffix id note
+  local reply_target='' correlation_id='' message tmp suffix id note created
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --reply-target)
+        [ "$#" -ge 2 ] || usage
+        reply_target=$2
+        shift 2
+        ;;
+      --correlation-id)
+        [ "$#" -ge 2 ] || usage
+        correlation_id=$2
+        shift 2
+        ;;
+      --)
+        shift
+        break
+        ;;
+      *) break ;;
+    esac
+  done
+  message=$*
   [ -n "$message" ] || usage
+  if [ -n "$reply_target" ] || [ -n "$correlation_id" ]; then
+    [ -n "$reply_target" ] && [ -n "$correlation_id" ] \
+      || die "reply target and correlation id must be provided together"
+    fm_inbox_valid_reply_target "$reply_target" || die "invalid reply target"
+    fm_inbox_valid_correlation_id "$correlation_id" || die "invalid correlation id"
+    fm_inbox_reply_target_authorized "$reply_target" \
+      || die "reply target is not authorized"
+    command -v jq >/dev/null 2>&1 || die "jq is required for reply metadata"
+  fi
   ensure_inbox_dirs
   tmp=$(mktemp "$INBOX_DIR/.incoming.XXXXXX") || die "cannot create note"
   suffix=${tmp##*.incoming.}
   id="$(date +%s)-$$-$suffix"
   note="$INBOX_DIR/$id.note"
-  if ! printf '%s\n' "$message" > "$tmp" || ! chmod 0600 "$tmp" || ! mv "$tmp" "$note"; then
+  if [ -n "$reply_target" ]; then
+    created=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    if ! jq -n --arg id "$id" --arg correlation "$correlation_id" \
+        --arg target "$reply_target" --arg message "$message" --arg created "$created" \
+        '{schema:"firstmate.inbox-note.v1", note_id:$id,
+          request_note_id:$id, correlation_id:$correlation,
+          reply_target:$target, message:$message, created_at:$created}' > "$tmp"; then
+      rm -f -- "$tmp"
+      die "cannot encode note"
+    fi
+  elif ! printf '%s\n' "$message" > "$tmp"; then
+    rm -f -- "$tmp"
+    die "cannot encode note"
+  fi
+  if ! chmod 0600 "$tmp" || ! mv "$tmp" "$note"; then
     rm -f -- "$tmp"
     die "cannot persist note"
   fi
@@ -92,7 +134,12 @@ list_command() {
     id=${note##*/}
     id=${id%.note}
     first=
-    IFS= read -r first < "$note" || true
+    if fm_inbox_note_is_envelope "$note"; then
+      first=$(jq -r '.message | split("\n")[0]' "$note") \
+        || die "cannot read note: $id"
+    else
+      IFS= read -r first < "$note" || true
+    fi
     printf '%s\t%s\n' "$id" "$first"
   done
   [ "$found" -eq 1 ] || printf '(inbox empty)\n'
@@ -133,7 +180,13 @@ drain_command() {
     id=${note##*/}
     id=${id%.note}
     printf '%s\n' "--- $id ---"
-    cat "$note"
+    if fm_inbox_note_is_envelope "$note"; then
+      printf 'correlation: %s\n' "$(jq -r '.correlation_id' "$note")"
+      printf 'reply-target: %s\n' "$(jq -r '.reply_target' "$note")"
+      jq -r '.message' "$note"
+    else
+      cat "$note"
+    fi
   done
   [ "$found" -eq 1 ] || printf '(inbox empty)\n'
 }
