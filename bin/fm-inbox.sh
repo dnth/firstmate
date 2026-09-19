@@ -142,7 +142,9 @@ status_command() {
   local pending handled wakes=0
   pending=$(count_note_files "$INBOX_DIR")
   handled=$(count_note_files "$HANDLED_DIR")
-  if [ -f "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ]; then
+  [ ! -L "$FM_WAKE_QUEUE" ] || die "wake queue must not be a symlink"
+  [ ! -e "$FM_WAKE_QUEUE" ] || [ -f "$FM_WAKE_QUEUE" ] || die "wake queue must be a regular file"
+  if [ -f "$FM_WAKE_QUEUE" ]; then
     wakes=$(awk 'END { print NR + 0 }' "$FM_WAKE_QUEUE")
   fi
   printf 'inbox pending: %s\n' "$pending"

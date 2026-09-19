@@ -228,6 +228,19 @@ test_status_rejects_nondirectory_path() {
   pass "status fails closed on non-directory inbox paths"
 }
 
+test_status_rejects_malformed_wake_queue() {
+  local home
+  home="$TMP_ROOT/status-wake-queue-directory"
+  mkdir -p "$home/state/inbox" "$home/state/inbox/handled" "$home/state/.wake-queue"
+
+  if home_env "$home" "$INBOX" status >"$home/out" 2>"$home/err"; then
+    fail "status must reject a non-file wake queue"
+  fi
+  assert_grep 'wake queue must be a regular file' "$home/err" \
+    "status wake queue rejection must be explicit"
+  pass "status fails closed on malformed wake queues"
+}
+
 test_note_persists_and_wakes
 test_list_drain_and_idempotent_ack
 test_status_is_read_only
@@ -238,3 +251,4 @@ test_status_rejects_symlink_note
 test_status_rejects_symlink_directory
 test_list_and_drain_reject_symlink_directory
 test_status_rejects_nondirectory_path
+test_status_rejects_malformed_wake_queue
