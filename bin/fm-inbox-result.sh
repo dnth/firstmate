@@ -106,24 +106,35 @@ validate_result_envelope() {
 }
 
 validate_receipt_envelope() {
-  local path=$1 id=$2
+  local path=$1 id=$2 delivered_at
   [ -f "$path" ] || return 0
   jq -e --arg id "$id" \
     '.schema == "firstmate.inbox-result-receipt.v1" and .note_id == $id and
-     (.delivered_at | type == "string") and
-     (.adapter_receipt | type == "object") and .adapter_receipt.ok == true' \
+     (.delivered_at | type == "string" and length > 0) and
+     (.adapter_receipt | type == "object" and length > 0) and .adapter_receipt.ok == true' \
     "$path" >/dev/null || die "invalid delivery receipt: $id"
+  delivered_at=$(jq -r '.delivered_at' "$path") || die "invalid delivery receipt: $id"
+  fm_inbox_valid_utc_timestamp "$delivered_at" || die "invalid delivery receipt: $id"
 }
 
 validate_failure_envelope() {
-  local path=$1 id=$2
+  local path=$1 id=$2 failed_at reason
   [ -f "$path" ] || return 0
   jq -e --arg id "$id" \
     '.schema == "firstmate.inbox-result-failure.v1" and .note_id == $id and
      (.classification == "transient" or .classification == "permanent" or
       .classification == "ambiguous") and
-     (.reason | type == "string") and (.failed_at | type == "string")' \
+     (.reason | type == "string" and length > 0) and (.failed_at | type == "string" and length > 0)' \
     "$path" >/dev/null || die "invalid delivery failure: $id"
+  failed_at=$(jq -r '.failed_at' "$path") || die "invalid delivery failure: $id"
+  fm_inbox_valid_utc_timestamp "$failed_at" || die "invalid delivery failure: $id"
+}
+
+validate_posting_marker() {
+  local path=$1 value
+  [ -f "$path" ] || return 0
+  value=$(cat "$path") || die "invalid posting marker"
+  fm_inbox_valid_utc_timestamp "$value" || die "invalid posting marker"
 }
 
 write_failure() { # <id> <classification> <reason>
@@ -235,6 +246,10 @@ publish_command() {
   exec {summary_fd}<&-
   rm -f -- "$artifacts_file"
   chmod 0600 "$tmp"
+  fm_inbox_validate_result_envelope "$tmp" "$id" || {
+    rm -f -- "$tmp"
+    die "invalid result envelope: $id"
+  }
 
   if [ -f "$result" ]; then
     validate_result_envelope "$result" "$id"
@@ -383,6 +398,7 @@ deliver_one() {
   validate_owned_file_or_absent "$posting" "posting marker"
   validate_receipt_envelope "$receipt" "$id"
   validate_failure_envelope "$failed" "$id"
+  validate_posting_marker "$posting"
   ensure_result_dir
   acquire_delivery_lock "$id"
 
@@ -488,6 +504,7 @@ retry_command() {
   validate_owned_file_or_absent "$receipt" "delivery receipt"
   validate_receipt_envelope "$receipt" "$id"
   validate_failure_envelope "$failed" "$id"
+  validate_posting_marker "$posting"
   [ ! -f "$receipt" ] || { printf 'already-delivered %s\n' "$id"; return 0; }
   if [ -f "$failed" ]; then
     classification=$(jq -r '.classification // "ambiguous"' "$failed")
@@ -523,6 +540,7 @@ status_one() {
   validate_owned_file_or_absent "$posting" "posting marker"
   validate_receipt_envelope "$receipt" "$id"
   validate_failure_envelope "$failed" "$id"
+  validate_posting_marker "$posting"
   if [ -f "$receipt" ]; then
     state=delivered
   elif [ -f "$failed" ]; then
