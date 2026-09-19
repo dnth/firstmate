@@ -145,7 +145,7 @@ write_failure() { # <id> <classification> <reason>
 publish_command() {
   local id='' status='' summary_file='' no_deliver=0 note target correlation request_id
   local result tmp artifacts_file created existing_cmp new_cmp artifact
-  local summary_fd summary_size
+  local summary_fd summary_size summary_fd_identity summary_path_identity
   local -a artifacts=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -167,10 +167,16 @@ publish_command() {
   fm_inbox_artifact_safe "$summary_file" \
     || { exec {summary_fd}<&-; die "summary file must be a regular non-symlink file"; }
   if [ "$(uname)" = Darwin ]; then
+    summary_fd_identity=$(stat -L -f '%d:%i' "/dev/fd/$summary_fd")
+    summary_path_identity=$(stat -L -f '%d:%i' "$summary_file")
     summary_size=$(stat -L -f %z "/dev/fd/$summary_fd")
   else
+    summary_fd_identity=$(stat -L -c '%d:%i' "/proc/$$/fd/$summary_fd")
+    summary_path_identity=$(stat -L -c '%d:%i' "$summary_file")
     summary_size=$(stat -L -c %s "/proc/$$/fd/$summary_fd")
   fi
+  [ -n "$summary_fd_identity" ] && [ "$summary_fd_identity" = "$summary_path_identity" ] \
+    || { exec {summary_fd}<&-; die "summary file changed during validation"; }
   [ "$summary_size" -le 16384 ] \
     || { exec {summary_fd}<&-; die "summary must not exceed 16384 bytes"; }
   [ "${#artifacts[@]}" -le 20 ] || die "at most 20 artifacts are supported"
