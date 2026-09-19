@@ -10,6 +10,10 @@ BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INBOX_DIR="$STATE/inbox"
 HANDLED_DIR="$INBOX_DIR/handled"
 
+# The note is the doorbell, not the brief: messages stay bounded and the full
+# handoff lives in the file the note references.
+FM_INBOX_NOTE_MAX_BYTES=4096
+
 usage() {
   cat >&2 <<'EOF'
 usage: fm-inbox.sh note <message>
@@ -65,6 +69,11 @@ validate_inbox_dir() {
 note_command() {
   local message=$* tmp suffix id note
   [ -n "$message" ] || usage
+  # The note is the doorbell, not the brief: a bounded message keeps the
+  # durable queue and its presentation cheap, and anything longer belongs in
+  # the referenced file the note points at.
+  [ "$(printf '%s' "$message" | wc -c | tr -d ' ')" -le "$FM_INBOX_NOTE_MAX_BYTES" ] \
+    || die "note message exceeds $FM_INBOX_NOTE_MAX_BYTES bytes; put the full brief in a file and note its path"
   ensure_inbox_dirs
   tmp=$(mktemp "$INBOX_DIR/.incoming.XXXXXX") || die "cannot create note"
   suffix=${tmp##*.incoming.}
@@ -113,11 +122,20 @@ drain_command() {
       [ ! -e "$HANDLED_DIR/$id.note" ] && [ ! -L "$HANDLED_DIR/$id.note" ] \
         || die "handled note already exists: $id"
       if mv "$note" "$HANDLED_DIR/$id.note"; then
+        # Atomic reconciliation: acknowledgement IS the handling of this
+        # note's wake, so its queue rows retire here rather than replaying
+        # until a separate fm-wake-drain --ack-through.
+        fm_wake_consume_key check "inbox-$id" >/dev/null \
+          || die "note $id handled, but its wake row could not be consumed; re-run drain --ack $id"
         printf 'acked %s\n' "$id"
         return 0
       fi
     fi
     if [ -f "$HANDLED_DIR/$id.note" ] && [ ! -L "$HANDLED_DIR/$id.note" ]; then
+      # A note handled before atomic reconciliation (or left behind by a
+      # failed consume) still retires its wake row here.
+      fm_wake_consume_key check "inbox-$id" >/dev/null \
+        || die "note $id is handled, but its wake row could not be consumed; re-run drain --ack $id"
       printf 'already-acked %s\n' "$id"
       return 0
     fi

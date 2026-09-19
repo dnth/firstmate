@@ -4,9 +4,12 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/wake-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-inbox)
 INBOX="$ROOT/bin/fm-inbox.sh"
+WATCH="$ROOT/bin/fm-watch.sh"
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 
 home_env() {
@@ -241,6 +244,96 @@ test_status_rejects_malformed_wake_queue() {
   pass "status fails closed on malformed wake queues"
 }
 
+test_ack_consumes_wake_row() {
+  local home first second wake drained
+  home="$TMP_ROOT/ack-reconcile"
+  mkdir -p "$home"
+  first=$(home_env "$home" "$INBOX" note "ack me first" | sed 's/^noted //')
+  second=$(home_env "$home" "$INBOX" note "keep me queued" | sed 's/^noted //')
+  wake="$home/state/.wake-queue"
+
+  home_env "$home" "$INBOX" drain --ack "$first" >/dev/null \
+    || fail "ack must succeed"
+  assert_no_grep "inbox-$first" "$wake" \
+    "ack must consume the handled note's wake row"
+  assert_grep "inbox-$second" "$wake" \
+    "ack must leave another note's wake row queued"
+
+  drained=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$ROOT/bin/fm-wake-drain.sh" 2>/dev/null) \
+    || fail "wake drain must succeed after note ack"
+  assert_not_contains "$drained" "inbox-$first" \
+    "wake drain must not re-present an acked note"
+  assert_contains "$drained" "inbox-$second" \
+    "wake drain must still present the unacked note"
+  pass "drain --ack retires the note's wake row so nothing replayable remains"
+}
+
+test_check_wake_needs_no_shim() {
+  local home state fakebin id out shims pid
+  home=$(make_case check-kind)
+  state="$home/state"
+  fakebin="$home/fakebin"
+  id=$(home_env "$home" "$INBOX" note "check-kind note" | sed 's/^noted //')
+  out="$home/watch.out"
+
+  # Steady-state watcher (handling successor): its check sweep scans only
+  # state/*.check.sh files, so a queued inbox check wake must never read as an
+  # unauthenticated state check.
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" 2>"$home/watch.err" &
+  pid=$!
+  sleep 3
+  stop_pid "$pid"
+  [ -e "$state/.last-check" ] || fail "the watcher check sweep did not run"
+  assert_no_grep 'rejected unauthenticated' "$out" \
+    "inbox check wake must not read as a rejected state check"
+  assert_no_grep 'unauthenticated-state-checks' "$state/.wake-queue" \
+    "inbox check wake must not enqueue an unauthenticated-check row"
+  assert_grep "inbox-$id" "$state/.wake-queue" \
+    "the watcher must leave the queued inbox wake untouched"
+  shims=$(find "$state" -name '*.check.sh' -print)
+  [ -z "$shims" ] || fail "note must not create an on-disk check shim: $shims"
+
+  # Positive control: the same watcher DOES reject a real unauthenticated
+  # shim, so the quiet inbox run above is evidence, not a dead code path.
+  rm -f "$out" "$state/.last-check"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$state/rogue.check.sh"
+  chmod 0700 "$state/rogue.check.sh"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" 2>"$home/watch-control.err" &
+  pid=$!
+  wait_for_exit "$pid" 40 >/dev/null || fail "watcher did not exit for the unauthenticated shim"
+  assert_grep 'rejected unauthenticated state checks' "$out" \
+    "control: watcher must reject a real unauthenticated shim"
+  pass "inbox check-kind wake survives the real watcher check cycle without rejection"
+}
+
+test_note_size_cap() {
+  local home exact over
+  home="$TMP_ROOT/note-cap"
+  mkdir -p "$home"
+  exact=$(printf 'x%.0s' $(seq 1 4096))
+  over=$(printf 'y%.0s' $(seq 1 4097))
+
+  home_env "$home" "$INBOX" note "$exact" >/dev/null \
+    || fail "a note at the byte cap must be accepted"
+  if home_env "$home" "$INBOX" note "$over" >"$home/out" 2>"$home/err"; then
+    fail "a note over the byte cap must be rejected"
+  fi
+  assert_grep 'exceeds 4096 bytes' "$home/err" \
+    "oversize rejection must name the cap"
+  assert_grep 'put the full brief in a file' "$home/err" \
+    "oversize rejection must name the remedy"
+  [ "$(pending_count "$home/state/inbox")" = 1 ] \
+    || fail "rejected oversize note must not persist"
+  pass "notes are capped at 4096 bytes with a clear error"
+}
+
 test_note_persists_and_wakes
 test_list_drain_and_idempotent_ack
 test_status_is_read_only
@@ -252,3 +345,6 @@ test_status_rejects_symlink_directory
 test_list_and_drain_reject_symlink_directory
 test_status_rejects_nondirectory_path
 test_status_rejects_malformed_wake_queue
+test_ack_consumes_wake_row
+test_check_wake_needs_no_shim
+test_note_size_cap
