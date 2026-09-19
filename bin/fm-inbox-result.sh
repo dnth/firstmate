@@ -60,6 +60,7 @@ result_path() { printf '%s/%s.result.json\n' "$RESULT_DIR" "$1"; }
 receipt_path() { printf '%s/%s.receipt.json\n' "$RESULT_DIR" "$1"; }
 failed_path() { printf '%s/%s.failed.json\n' "$RESULT_DIR" "$1"; }
 posting_path() { printf '%s/%s.posting\n' "$RESULT_DIR" "$1"; }
+confirmed_path() { printf '%s/%s.confirmed\n' "$RESULT_DIR" "$1"; }
 lock_path() { printf '%s/%s.delivery.lock\n' "$RESULT_DIR" "$1"; }
 publish_lock_path() { printf '%s/%s.publish.lock\n' "$RESULT_DIR" "$1"; }
 
@@ -157,6 +158,10 @@ persist_posting_marker() { # <path>
     return 1
   fi
   rm -f -- "$tmp"
+}
+
+persist_confirmed_retry_marker() { # <path>
+  persist_posting_marker "$1"
 }
 
 publish_command() {
@@ -382,7 +387,8 @@ release_delivery_lock() {
 }
 
 deliver_one() {
-  local id=$1 result receipt failed posting target output errfile rc classification reason
+  local id=$1 result receipt failed posting confirmed target output errfile rc classification reason
+  local confirmed_retry=${FM_INBOX_CONFIRMED_RETRY:-0}
   fm_inbox_valid_note_id "$id" || die "invalid note id"
   require_jq
   validate_result_dir
@@ -390,20 +396,28 @@ deliver_one() {
   receipt=$(receipt_path "$id")
   failed=$(failed_path "$id")
   posting=$(posting_path "$id")
+  confirmed=$(confirmed_path "$id")
   validate_result_envelope "$result" "$id"
   validate_owned_file_or_absent "$receipt" "delivery receipt"
   validate_owned_file_or_absent "$failed" "delivery failure"
   validate_owned_file_or_absent "$posting" "posting marker"
+  validate_owned_file_or_absent "$confirmed" "confirmed retry marker"
   validate_receipt_envelope "$receipt" "$id"
   validate_failure_envelope "$failed" "$id"
   validate_posting_marker "$posting"
+  validate_posting_marker "$confirmed"
   ensure_result_dir
   acquire_delivery_lock "$id"
 
   if [ -f "$receipt" ]; then
+    rm -f -- "$confirmed"
     printf 'already-delivered %s\n' "$id"
     release_delivery_lock "$id"
     return 0
+  fi
+  if [ -f "$confirmed" ] && [ "$confirmed_retry" -ne 1 ]; then
+    release_delivery_lock "$id"
+    die "confirmed retry requires retry --confirm-ambiguous"
   fi
   if [ -f "$posting" ]; then
     release_delivery_lock "$id"
@@ -459,6 +473,7 @@ deliver_one() {
         die "delivery may have succeeded but receipt persistence failed"
       }
     rm -f -- "$failed"
+    rm -f -- "$confirmed"
     printf 'delivered %s\n' "$id"
     release_delivery_lock "$id"
     return 0
@@ -481,7 +496,7 @@ deliver_command() {
 }
 
 retry_command() {
-  local id='' confirm=0 force=0 failed posting receipt classification
+  local id='' confirm=0 force=0 failed posting receipt confirmed classification
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --note-id) [ "$#" -ge 2 ] || usage; id=$2; shift 2 ;;
@@ -496,13 +511,16 @@ retry_command() {
   validate_result_envelope "$(result_path "$id")" "$id"
   failed=$(failed_path "$id")
   posting=$(posting_path "$id")
+  confirmed=$(confirmed_path "$id")
   receipt=$(receipt_path "$id")
   validate_owned_file_or_absent "$failed" "delivery failure"
   validate_owned_file_or_absent "$posting" "posting marker"
+  validate_owned_file_or_absent "$confirmed" "confirmed retry marker"
   validate_owned_file_or_absent "$receipt" "delivery receipt"
   validate_receipt_envelope "$receipt" "$id"
   validate_failure_envelope "$failed" "$id"
   validate_posting_marker "$posting"
+  validate_posting_marker "$confirmed"
   [ ! -f "$receipt" ] || { printf 'already-delivered %s\n' "$id"; return 0; }
   if [ -f "$failed" ]; then
     classification=$(jq -r '.classification // "ambiguous"' "$failed")
@@ -510,6 +528,8 @@ retry_command() {
     # A process may have exited after writing the pre-send marker but before it
     # could persist either a receipt or a failure. Treat that durable gap as an
     # ambiguous delivery, never as a safe automatic retry.
+    classification=ambiguous
+  elif [ -f "$confirmed" ]; then
     classification=ambiguous
   else
     die "no failed delivery to retry: $id"
@@ -521,30 +541,47 @@ retry_command() {
     *) die "invalid failure classification: $classification" ;;
   esac
   acquire_delivery_lock "$id"
+  if [ "$classification" = ambiguous ]; then
+    [ "$confirm" -eq 1 ] || {
+      release_delivery_lock "$id"
+      die "ambiguous delivery requires retry --confirm-ambiguous"
+    }
+    [ -f "$confirmed" ] || persist_confirmed_retry_marker "$confirmed" \
+      || { release_delivery_lock "$id"; die "cannot persist confirmed retry marker"; }
+  fi
   rm -f -- "$failed" "$posting"
   release_delivery_lock "$id"
-  deliver_one "$id"
+  if [ "$classification" = ambiguous ]; then
+    FM_INBOX_CONFIRMED_RETRY=1 deliver_one "$id"
+  else
+    deliver_one "$id"
+  fi
 }
 
 status_one() {
-  local id=$1 result receipt failed posting state status summary classification
+  local id=$1 result receipt failed posting confirmed state status summary classification
   result=$(result_path "$id")
   receipt=$(receipt_path "$id")
   failed=$(failed_path "$id")
   posting=$(posting_path "$id")
+  confirmed=$(confirmed_path "$id")
   validate_result_envelope "$result" "$id"
   validate_owned_file_or_absent "$receipt" "delivery receipt"
   validate_owned_file_or_absent "$failed" "delivery failure"
   validate_owned_file_or_absent "$posting" "posting marker"
+  validate_owned_file_or_absent "$confirmed" "confirmed retry marker"
   validate_receipt_envelope "$receipt" "$id"
   validate_failure_envelope "$failed" "$id"
   validate_posting_marker "$posting"
+  validate_posting_marker "$confirmed"
   if [ -f "$receipt" ]; then
     state=delivered
   elif [ -f "$failed" ]; then
     classification=$(jq -r '.classification // "failed"' "$failed")
     [ "$classification" = ambiguous ] && state=ambiguous || state=failed
   elif [ -f "$posting" ]; then
+    state=ambiguous
+  elif [ -f "$confirmed" ]; then
     state=ambiguous
   else
     state=pending

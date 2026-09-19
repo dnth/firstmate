@@ -62,26 +62,24 @@ validate_inbox_dir() {
 }
 
 note_command() {
-  local reply_target='' correlation_id='' message tmp suffix id note created
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      --reply-target)
-        [ "$#" -ge 2 ] || usage
-        reply_target=$2
-        shift 2
-        ;;
-      --correlation-id)
-        [ "$#" -ge 2 ] || usage
-        correlation_id=$2
-        shift 2
-        ;;
-      --)
-        shift
-        break
-        ;;
-      *) break ;;
-    esac
-  done
+  local reply_target='' correlation_id='' message tmp suffix id note created metadata=0
+  if [ "$#" -ge 4 ]; then
+    if { [ "$1" = --reply-target ] && [ "$3" = --correlation-id ]; } \
+        || { [ "$1" = --correlation-id ] && [ "$3" = --reply-target ]; }; then
+      metadata=1
+    fi
+  fi
+  if [ "$metadata" -eq 1 ]; then
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --reply-target) reply_target=$2; shift 2 ;;
+        --correlation-id) correlation_id=$2; shift 2 ;;
+        *) break ;;
+      esac
+    done
+  elif [ "${1:-}" = -- ]; then
+    shift
+  fi
   message=$*
   [ -n "$message" ] || usage
   if [ -n "$reply_target" ] || [ -n "$correlation_id" ]; then
@@ -134,7 +132,9 @@ list_command() {
     id=${note##*/}
     id=${id%.note}
     first=
-    if fm_inbox_note_is_envelope "$note"; then
+    if fm_inbox_note_is_structured "$note"; then
+      fm_inbox_validate_note_envelope "$note" "$id" \
+        || die "invalid pending note: ${note##*/}"
       first=$(jq -r '.message | split("\n")[0]' "$note") \
         || die "cannot read note: $id"
     else
@@ -157,6 +157,10 @@ drain_command() {
       die "note must not be a symlink: $id"
     fi
     if [ -f "$note" ]; then
+      if fm_inbox_note_is_structured "$note"; then
+        fm_inbox_validate_note_envelope "$note" "$id" \
+          || die "invalid pending note: ${note##*/}"
+      fi
       [ ! -e "$HANDLED_DIR/$id.note" ] && [ ! -L "$HANDLED_DIR/$id.note" ] \
         || die "handled note already exists: $id"
       if mv "$note" "$HANDLED_DIR/$id.note"; then
@@ -180,7 +184,9 @@ drain_command() {
     id=${note##*/}
     id=${id%.note}
     printf '%s\n' "--- $id ---"
-    if fm_inbox_note_is_envelope "$note"; then
+    if fm_inbox_note_is_structured "$note"; then
+      fm_inbox_validate_note_envelope "$note" "$id" \
+        || die "invalid pending note: ${note##*/}"
       printf 'correlation: %s\n' "$(jq -r '.correlation_id' "$note")"
       printf 'reply-target: %s\n' "$(jq -r '.reply_target' "$note")"
       jq -r '.message' "$note"

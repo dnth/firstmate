@@ -102,6 +102,12 @@ fm_inbox_note_is_envelope() {
          (.created_at | type == "string")' "$note" >/dev/null 2>&1
 }
 
+fm_inbox_note_is_structured() {
+  local note=$1
+  command -v jq >/dev/null 2>&1 || return 1
+  jq -e '.schema? == "firstmate.inbox-note.v1"' "$note" >/dev/null 2>&1
+}
+
 fm_inbox_validate_note_envelope() { # <path> <note-id>
   local note=$1 id=$2 correlation target created message_size
   fm_inbox_valid_note_id "$id" || return 1

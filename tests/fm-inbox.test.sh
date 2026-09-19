@@ -94,6 +94,48 @@ test_list_drain_and_idempotent_ack() {
   pass "list and drain expose notes; ack is retained, idempotent, and path-safe"
 }
 
+test_legacy_option_looking_message_remains_plain() {
+  local home out id
+  home="$TMP_ROOT/legacy-option-message"
+  mkdir -p "$home"
+  out=$(home_env "$home" "$INBOX" note --reply-target hello) \
+    || fail "legacy option-looking messages must remain accepted"
+  id=${out#noted }
+  assert_grep '--reply-target hello' "$home/state/inbox/$id.note" \
+    "legacy option-looking message must remain plain text"
+  pass "legacy option-looking messages remain plain text"
+}
+
+test_list_and_drain_reject_malformed_structured_note() {
+  local home id
+  home="$TMP_ROOT/malformed-structured-note"
+  id=malformed-structured-1
+  mkdir -p "$home/state/inbox"
+  jq -n --arg id "$id" \
+    '{schema:"firstmate.inbox-note.v1", note_id:$id, request_note_id:$id,
+      correlation_id:"corr", reply_target:"hermes:telegram:chat", message:"bad",
+      created_at:"garbage"}' > "$home/state/inbox/$id.note"
+  chmod 0600 "$home/state/inbox/$id.note"
+  if home_env "$home" "$INBOX" list >"$home/list.out" 2>"$home/list.err"; then
+    fail "list must reject malformed structured notes"
+  fi
+  assert_grep 'invalid pending note' "$home/list.err" \
+    "list malformed-note rejection must be explicit"
+  if home_env "$home" "$INBOX" drain >"$home/drain.out" 2>"$home/drain.err"; then
+    fail "drain must reject malformed structured notes"
+  fi
+  assert_grep 'invalid pending note' "$home/drain.err" \
+    "drain malformed-note rejection must be explicit"
+  if home_env "$home" "$INBOX" drain --ack "$id" >"$home/ack.out" 2>"$home/ack.err"; then
+    fail "ack must reject malformed structured notes"
+  fi
+  assert_grep 'invalid pending note' "$home/ack.err" \
+    "ack malformed-note rejection must be explicit"
+  assert_present "$home/state/inbox/$id.note" \
+    "malformed structured note must not be acknowledged"
+  pass "list and drain reject malformed structured notes"
+}
+
 test_status_is_read_only() {
   local home before after out
   home="$TMP_ROOT/status"
@@ -243,6 +285,8 @@ test_status_rejects_malformed_wake_queue() {
 
 test_note_persists_and_wakes
 test_list_drain_and_idempotent_ack
+test_legacy_option_looking_message_remains_plain
+test_list_and_drain_reject_malformed_structured_note
 test_status_is_read_only
 test_concurrent_notes_are_unique_and_woken
 test_wake_failure_preserves_note
