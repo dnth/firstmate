@@ -575,6 +575,58 @@ test_custom_adapter_rejects_symlinked_parent() {
   pass "custom adapters reject symlinked parent paths"
 }
 
+test_shipped_hermes_adapter_rejects_payload_target_mismatch() {
+  local home payload
+  home="$TMP_ROOT/hermes-adapter-payload-target"
+  setup_home "$home"
+  payload="$home/result.json"
+  jq -n --arg target 'hermes:telegram:-999:1' \
+    '{schema:"firstmate.inbox-result.v1", note_id:"payload-target-1", request_note_id:"payload-target-1",
+      correlation_id:"payload-target-1", reply_target:$target, status:"completed", summary:"no", artifacts:[]}' \
+    > "$payload"
+  mkdir -p "$home/fakebin"
+  cat > "$home/fakebin/hermes" <<'HERMES'
+#!/usr/bin/env bash
+printf called > "$FM_HERMES_CALLED"
+HERMES
+  chmod +x "$home/fakebin/hermes"
+  if FM_HOME="$home" HERMES_BIN="$home/fakebin/hermes" FM_HERMES_CALLED="$home/called" \
+      "$ROOT/bin/fm-inbox-hermes-adapter.sh" --target "$TARGET" \
+      --idempotency-key payload-target-1 --payload-file "$payload" >/dev/null 2>"$home/adapter.err"; then
+    fail "adapter must reject payloads targeting a different Hermes session"
+  fi
+  assert_absent "$home/called" "target-mismatched payloads must not reach Hermes"
+  pass "adapter rejects payload target mismatches"
+}
+
+test_shipped_hermes_adapter_rejects_symlinked_payload_parent() {
+  local home outside payload
+  home="$TMP_ROOT/hermes-adapter-payload-parent"
+  setup_home "$home"
+  outside="$home/outside"
+  mkdir -p "$outside"
+  payload="$outside/result.json"
+  jq -n --arg target "$TARGET" \
+    '{schema:"firstmate.inbox-result.v1", note_id:"payload-parent-1", request_note_id:"payload-parent-1",
+      correlation_id:"payload-parent-1", reply_target:$target, status:"completed", summary:"no", artifacts:[]}' \
+    > "$payload"
+  ln -s "$outside" "$home/payload-link"
+  mkdir -p "$home/fakebin"
+  cat > "$home/fakebin/hermes" <<'HERMES'
+#!/usr/bin/env bash
+printf called > "$FM_HERMES_CALLED"
+HERMES
+  chmod +x "$home/fakebin/hermes"
+  if FM_HOME="$home" HERMES_BIN="$home/fakebin/hermes" FM_HERMES_CALLED="$home/called" \
+      "$ROOT/bin/fm-inbox-hermes-adapter.sh" --target "$TARGET" \
+      --idempotency-key payload-parent-1 --payload-file "$home/payload-link/result.json" \
+      >/dev/null 2>"$home/adapter.err"; then
+    fail "adapter must reject payloads under symlinked parents"
+  fi
+  assert_absent "$home/called" "symlinked payload parents must not reach Hermes"
+  pass "adapter rejects payloads under symlinked parents"
+}
+
 test_restart_reclaims_a_dead_delivery_lock() {
   local home id lock
   home="$TMP_ROOT/dead-lock"
@@ -639,5 +691,7 @@ test_shipped_hermes_adapter_returns_to_declared_session
 test_shipped_hermes_adapter_rejects_non_delivery_success
 test_shipped_hermes_adapter_enforces_target_allowlist
 test_custom_adapter_rejects_symlinked_parent
+test_shipped_hermes_adapter_rejects_payload_target_mismatch
+test_shipped_hermes_adapter_rejects_symlinked_payload_parent
 test_restart_reclaims_a_dead_delivery_lock
 test_ownerless_delivery_lock_fails_closed
