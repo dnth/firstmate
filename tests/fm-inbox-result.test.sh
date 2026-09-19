@@ -364,6 +364,49 @@ test_publish_rejects_symlinked_summary_parent() {
   pass "publish rejects summaries under symlinked parents"
 }
 
+test_publish_preserves_summary_after_size_check() {
+  local home id
+  home="$TMP_ROOT/summary-size"
+  setup_home "$home"
+  write_adapter "$home"
+  id=$(new_linked_note "$home" summary-size-1)
+  printf 'Non-empty stable summary.\n' > "$home/summary.txt"
+  FM_INBOX_RESULT_ADAPTER="$home/fakebin/result-adapter" FM_ADAPTER_LOG="$home/adapter.log" \
+    home_env "$home" "$RESULT" publish --note-id "$id" --status completed \
+      --summary-file "$home/summary.txt" --no-deliver >/dev/null \
+    || fail "publication with a non-empty summary must succeed"
+  jq -e '.summary == "Non-empty stable summary."' \
+    "$home/state/inbox-results/$id.result.json" >/dev/null \
+    || fail "summary-size validation must not consume the summary descriptor"
+  pass "summary content survives stable descriptor size validation"
+}
+
+test_publish_rejects_fifo_summary_without_blocking() {
+  local home id pid rc
+  home="$TMP_ROOT/summary-fifo"
+  setup_home "$home"
+  id=$(new_linked_note "$home" summary-fifo-1)
+  mkfifo "$home/summary.fifo"
+  home_env "$home" "$RESULT" publish --note-id "$id" --status completed \
+    --summary-file "$home/summary.fifo" >/dev/null 2>"$home/fifo.err" &
+  pid=$!
+  sleep 1
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "FIFO summary validation must not block on open"
+  fi
+  if wait "$pid"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  [ "$rc" -ne 0 ] || fail "FIFO summaries must be rejected"
+  assert_grep 'summary file must be a regular non-symlink file' "$home/fifo.err" \
+    "FIFO summary rejection must be explicit"
+  pass "publish rejects FIFO summaries without blocking"
+}
+
 test_publish_rejects_symlinked_inbox_directory() {
   local home id outside
   home="$TMP_ROOT/inbox-directory-symlink"
@@ -542,6 +585,8 @@ test_ambiguous_failure_requires_confirmation
 test_restart_recovery_from_posting_gap
 test_unsafe_artifacts_and_revoked_target_fail_closed
 test_publish_rejects_symlinked_summary_parent
+test_publish_preserves_summary_after_size_check
+test_publish_rejects_fifo_summary_without_blocking
 test_publish_rejects_symlinked_inbox_directory
 test_publish_rejects_symlinked_handled_directory
 test_shipped_hermes_adapter_returns_to_declared_session
