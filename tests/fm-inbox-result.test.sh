@@ -281,7 +281,7 @@ test_restart_recovery_from_posting_gap() {
   id=$(new_linked_note "$home" posting-gap-1)
   publish_result "$home" "$id" --no-deliver >/dev/null \
     || fail "pending result setup must succeed"
-  printf 'interrupted-before-receipt\n' > "$home/state/inbox-results/$id.posting"
+  printf '2026-01-01T00:00:00Z\n' > "$home/state/inbox-results/$id.posting"
 
   status=$(home_env "$home" "$RESULT" status --note-id "$id")
   assert_contains "$status" "$id"$'\t'"ambiguous"$'\t'"completed" \
@@ -719,7 +719,8 @@ test_standalone_adapter_rejects_malformed_envelope() {
   payload="$home/result.json"
   jq -n --arg target "$TARGET" \
     '{schema:"firstmate.inbox-result.v1", note_id:"adapter-envelope-1", request_note_id:"adapter-envelope-1",
-      correlation_id:"adapter-envelope-1", reply_target:$target, status:"completed", summary:"", artifacts:[]}' \
+      correlation_id:"adapter-envelope-1", reply_target:$target, status:"completed", summary:"no",
+      artifacts:[], created_at:"2026-99-99T99:99:99Z"}' \
     > "$payload"
   mkdir -p "$home/fakebin"
   cat > "$home/fakebin/hermes" <<'HERMES'
@@ -734,6 +735,51 @@ HERMES
   fi
   assert_absent "$home/called" "malformed standalone envelopes must not reach Hermes"
   pass "standalone adapter validates complete result envelopes"
+}
+
+test_publish_rejects_empty_summary_without_persisting() {
+  local home id
+  home="$TMP_ROOT/empty-summary"
+  setup_home "$home"
+  id=$(new_linked_note "$home" empty-summary-1)
+  printf '\n' > "$home/summary.txt"
+  if home_env "$home" "$RESULT" publish --note-id "$id" --status completed \
+      --summary-file "$home/summary.txt" --no-deliver >/dev/null 2>"$home/summary.err"; then
+    fail "empty summaries must be rejected before publication"
+  fi
+  assert_absent "$home/state/inbox-results/$id.result.json" \
+    "empty summary rejection must not persist a result"
+  pass "empty summaries fail before durable publication"
+}
+
+test_malformed_delivery_timestamps_fail_closed() {
+  local home id receipt failed
+  home="$TMP_ROOT/malformed-delivery-timestamps"
+  setup_home "$home"
+  write_adapter "$home"
+  id=$(new_linked_note "$home" malformed-delivery-timestamps-1)
+  publish_result "$home" "$id" --no-deliver >/dev/null
+  receipt="$home/state/inbox-results/$id.receipt.json"
+  jq -n --arg id "$id" \
+    '{schema:"firstmate.inbox-result-receipt.v1", note_id:$id, delivered_at:"garbage",
+      adapter_receipt:{ok:true}}' > "$receipt"
+  if FM_INBOX_RESULT_ADAPTER="$home/fakebin/result-adapter" FM_ADAPTER_LOG="$home/adapter.log" \
+      home_env "$home" "$RESULT" deliver --note-id "$id" >/dev/null 2>"$home/receipt.err"; then
+    fail "malformed receipt timestamps must be rejected"
+  fi
+  assert_grep 'invalid delivery receipt' "$home/receipt.err" \
+    "malformed receipt timestamp rejection must be explicit"
+  rm -f "$receipt"
+  failed="$home/state/inbox-results/$id.failed.json"
+  jq -n --arg id "$id" \
+    '{schema:"firstmate.inbox-result-failure.v1", note_id:$id, classification:"transient",
+      reason:"retry", failed_at:"garbage"}' > "$failed"
+  if home_env "$home" "$RESULT" status --note-id "$id" >/dev/null 2>"$home/failure.err"; then
+    fail "malformed failure timestamps must be rejected"
+  fi
+  assert_grep 'invalid delivery failure' "$home/failure.err" \
+    "malformed failure timestamp rejection must be explicit"
+  pass "malformed receipt and failure timestamps fail closed"
 }
 
 test_restart_reclaims_a_dead_delivery_lock() {
@@ -807,5 +853,7 @@ test_allowlist_parent_symlink_fails_closed
 test_posting_marker_symlink_fails_closed
 test_durable_result_envelope_identity_fails_closed
 test_standalone_adapter_rejects_malformed_envelope
+test_publish_rejects_empty_summary_without_persisting
+test_malformed_delivery_timestamps_fail_closed
 test_restart_reclaims_a_dead_delivery_lock
 test_ownerless_delivery_lock_fails_closed
