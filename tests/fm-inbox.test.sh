@@ -161,6 +161,27 @@ test_list_and_drain_reject_malformed_structured_note() {
   pass "list and drain reject malformed structured notes"
 }
 
+test_truncated_structured_note_fails_closed() {
+  local home id
+  home="$TMP_ROOT/truncated-structured-note"
+  id=truncated-structured-1
+  mkdir -p "$home/state/inbox"
+  printf '{"schema":"firstmate.inbox-note.v1"' > "$home/state/inbox/$id.note"
+  chmod 0600 "$home/state/inbox/$id.note"
+  if home_env "$home" "$INBOX" list >"$home/list.out" 2>"$home/list.err"; then
+    fail "list must reject truncated structured notes"
+  fi
+  if home_env "$home" "$INBOX" drain >"$home/drain.out" 2>"$home/drain.err"; then
+    fail "drain must reject truncated structured notes"
+  fi
+  if home_env "$home" "$INBOX" drain --ack "$id" >"$home/ack.out" 2>"$home/ack.err"; then
+    fail "ack must reject truncated structured notes"
+  fi
+  assert_present "$home/state/inbox/$id.note" \
+    "truncated structured note must not be acknowledged"
+  pass "truncated structured notes fail closed"
+}
+
 test_status_is_read_only() {
   local home before after out
   home="$TMP_ROOT/status"
@@ -312,6 +333,7 @@ test_note_persists_and_wakes
 test_list_drain_and_idempotent_ack
 test_legacy_option_looking_message_remains_plain
 test_list_and_drain_reject_malformed_structured_note
+test_truncated_structured_note_fails_closed
 test_status_is_read_only
 test_concurrent_notes_are_unique_and_woken
 test_wake_failure_preserves_note
