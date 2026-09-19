@@ -95,7 +95,7 @@ test_list_drain_and_idempotent_ack() {
 }
 
 test_legacy_option_looking_message_remains_plain() {
-  local home out id
+  local home out id reversed missing explicit
   home="$TMP_ROOT/legacy-option-message"
   mkdir -p "$home"
   out=$(home_env "$home" "$INBOX" note --reply-target hello) \
@@ -103,6 +103,18 @@ test_legacy_option_looking_message_remains_plain() {
   id=${out#noted }
   assert_grep '--reply-target hello' "$home/state/inbox/$id.note" \
     "legacy option-looking message must remain plain text"
+  reversed=$(home_env "$home" "$INBOX" note --correlation-id hello --reply-target | sed 's/^noted //') \
+    || fail "reversed incomplete metadata must remain accepted as plain text"
+  assert_grep '--correlation-id hello --reply-target' "$home/state/inbox/$reversed.note" \
+    "reversed incomplete metadata must remain plain text"
+  missing=$(home_env "$home" "$INBOX" note --reply-target | sed 's/^noted //') \
+    || fail "missing metadata values must remain accepted as plain text"
+  assert_grep '--reply-target' "$home/state/inbox/$missing.note" \
+    "missing metadata value must remain plain text"
+  explicit=$(home_env "$home" "$INBOX" note -- --reply-target hello | sed 's/^noted //') \
+    || fail "explicit legacy separator must remain accepted"
+  assert_grep '--reply-target hello' "$home/state/inbox/$explicit.note" \
+    "explicit separator must preserve plain text"
   pass "legacy option-looking messages remain plain text"
 }
 
