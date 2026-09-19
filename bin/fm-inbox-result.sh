@@ -47,6 +47,15 @@ validate_result_dir() {
     || die "result path must be a directory"
 }
 
+validate_inbox_dirs() {
+  [ ! -L "$INBOX_DIR" ] || die "inbox directory must not be a symlink"
+  [ ! -e "$INBOX_DIR" ] || [ -d "$INBOX_DIR" ] \
+    || die "inbox path must be a directory"
+  [ ! -L "$HANDLED_DIR" ] || die "handled inbox directory must not be a symlink"
+  [ ! -e "$HANDLED_DIR" ] || [ -d "$HANDLED_DIR" ] \
+    || die "handled inbox path must be a directory"
+}
+
 result_path() { printf '%s/%s.result.json\n' "$RESULT_DIR" "$1"; }
 receipt_path() { printf '%s/%s.receipt.json\n' "$RESULT_DIR" "$1"; }
 failed_path() { printf '%s/%s.failed.json\n' "$RESULT_DIR" "$1"; }
@@ -150,9 +159,8 @@ publish_command() {
   fm_inbox_valid_note_id "$id" || die "invalid note id"
   case "$status" in completed|failed|needs-input) ;; *) die "invalid result status" ;; esac
   [ -n "$summary_file" ] || usage
-  [ -f "$summary_file" ] && [ ! -L "$summary_file" ] \
+  fm_inbox_artifact_safe "$summary_file" \
     || die "summary file must be a regular non-symlink file"
-  [ -r "$summary_file" ] || die "summary file must be readable"
   [ "$(wc -c < "$summary_file" | tr -d ' ')" -le 16384 ] \
     || die "summary must not exceed 16384 bytes"
   [ "${#artifacts[@]}" -le 20 ] || die "at most 20 artifacts are supported"
@@ -164,6 +172,7 @@ publish_command() {
   done
 
   require_jq
+  validate_inbox_dirs
   note=$(find_note "$id")
   fm_inbox_note_is_envelope "$note" \
     || die "note has no supported reply metadata: $id"
