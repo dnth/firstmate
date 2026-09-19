@@ -139,6 +139,9 @@ fm_omp_task_doorbell_request_existing() {  # <marker> <request-id>
   # Awaiting turn proof: the extension delivered the steer but the runtime has
   # not started a turn for it yet - still in flight, not a deliverable request.
   [ ! -f "${base}.pending.awaiting-turn" ] || return 2
+  # An unproven re-drive marker is not a tombstone: it falls through to the
+  # absent case so the next ring publishes a fresh pending request and signals
+  # a real delivery attempt instead of reporting a suppressed success.
   for processing in "${base}.pending.processing."*; do
     [ -f "$processing" ] && return 2
   done
@@ -190,10 +193,11 @@ fm_omp_task_doorbell_request() {  # <marker> <verified-pid> <request-id> <doorbe
     ''|*[!0-9]*|0)
       # No explicit bound: derive the window from the doorbell's own
       # turn-grace setting. The extension parks a dispatched steer for up to
-      # that bound before settling it through the re-drive, so a shorter
-      # poll reports queued while the delivery is still landing. The default
-      # mirrors the extension's DEFAULT_TURN_GRACE_MS; each attempt sleeps
-      # 10ms and 200 attempts of margin cover the re-drive settle.
+      # that bound before re-driving it through the user-prompt channel, so a
+      # shorter poll reports queued while the delivery is still landing. The
+      # default mirrors the extension's DEFAULT_TURN_GRACE_MS; the margin
+      # covers a prompt re-drive proof, while a still-unproven re-drive
+      # truthfully reports queued - it is never a receipt.
       ack_grace_ms=${FM_OMP_DOORBELL_TURN_GRACE_MS:-8000}
       case "$ack_grace_ms" in ''|*[!0-9]*) ack_grace_ms=8000 ;; esac
       while [ "${ack_grace_ms#0}" != "$ack_grace_ms" ]; do
