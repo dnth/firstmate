@@ -24,14 +24,20 @@ while [ "$#" -gt 0 ]; do
 done
 [ -n "$target" ] && [ -n "$key" ] && [ -n "$payload" ] || usage
 [[ "$target" =~ ^hermes:[a-z][a-z0-9_-]*:[A-Za-z0-9@#%+._-]+(:[A-Za-z0-9@#%+._-]+)?$ ]] || usage
-[ -f "$payload" ] && [ ! -L "$payload" ] || usage
+fm_inbox_artifact_safe "$payload" || usage
 command -v jq >/dev/null 2>&1 || usage
 fm_inbox_reply_target_authorized "$target" || {
   printf 'reply target is not authorized\n' >&2
   exit 64
 }
-jq -e --arg key "$key" \
-  '.schema == "firstmate.inbox-result.v1" and .note_id == $key' "$payload" >/dev/null \
+jq -e --arg key "$key" --arg target "$target" \
+  '.schema == "firstmate.inbox-result.v1" and .note_id == $key and
+   (.request_note_id | type == "string") and
+   (.correlation_id | type == "string") and
+   .reply_target == $target and
+   (.status == "completed" or .status == "failed" or .status == "needs-input") and
+   (.summary | type == "string") and (.artifacts | type == "array")' \
+  "$payload" >/dev/null \
   || usage
 
 HERMES_BIN=${HERMES_BIN:-hermes}
