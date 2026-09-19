@@ -158,8 +158,7 @@ The preference persists for the effective Firstmate home, and toggling it off re
 
 ### Hand off from another local agent
 
-Use the trusted-local inbox when Codex, Grok, Hermes, a human shell, or a
-scheduled job needs to leave Firstmate a durable asynchronous note:
+Use the trusted-local inbox when Codex, Grok, Hermes, a human shell, or a scheduled job needs to leave Firstmate a durable asynchronous note:
 
 ```sh
 bin/fm-inbox.sh note "Review the handoff at /absolute/path/to/handoff.md"
@@ -169,10 +168,8 @@ bin/fm-inbox.sh drain --ack <note-id>
 bin/fm-inbox.sh status
 ```
 
-`note` persists the message before appending one wake to Firstmate's existing
-durable queue. The inbox assumes trusted local access; it does not add sender
-authentication, grant captain authority, or replace the authenticated Hermes
-Communication Officer bridge for Discord request/reply workflows.
+`note` persists the message before appending one wake to Firstmate's existing durable queue.
+The inbox assumes trusted local access; it does not add sender authentication, grant captain authority, or replace the authenticated Hermes Communication Officer bridge for Discord request/reply workflows.
 
 ### More backends
 

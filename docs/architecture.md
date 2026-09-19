@@ -84,16 +84,11 @@ The default path remains local-only; live GitHub enrichment exists only behind t
 Optional X mode integrates with the watcher only after explicit opt-in; [configuration.md](configuration.md#x-mode-env) owns its generated-artifact and dispatch mechanics.
 The sibling local Communication Officer bridge is a separate opt-in that uses the same watcher identity-shim pattern without the hosted relay; [configuration.md](configuration.md#local-communication-officer-bridge-configext-bridge) owns its generated artifacts.
 
-The trusted-local orchestrator inbox is a smaller ingress for agents, humans,
-and scheduled jobs that already have filesystem access to the Firstmate home.
-`bin/fm-inbox.sh note` atomically publishes a mode-0600 record under
-`state/inbox/` before appending one `check` row through `fm_wake_append`; list,
-drain, acknowledgement, and status remain local and network-free. Handled notes
-move to `state/inbox/handled/`, while a failed wake append deliberately leaves
-the note durable for recovery. This path carries no sender authentication,
-authority grant, reply correlation, or delivery receipts, so it complements
-rather than replaces the authenticated Communication Officer bridge. The note
-is the doorbell; a referenced artifact is the brief.
+The trusted-local orchestrator inbox is a smaller ingress for agents, humans, and scheduled jobs that already have filesystem access to the Firstmate home.
+`bin/fm-inbox.sh note` atomically publishes a mode-0600 record under `state/inbox/` before appending one `check` row through `fm_wake_append`; list, drain, acknowledgement, and status remain local and network-free.
+Handled notes move to `state/inbox/handled/`, while a failed wake append deliberately leaves the note durable for recovery.
+This path carries no sender authentication, authority grant, reply correlation, or delivery receipts, so it complements rather than replaces the authenticated Communication Officer bridge.
+The note is the doorbell; a referenced artifact is the brief.
 
 At session start, `bin/fm-session-start.sh` emits exactly one primary-harness supervision block rendered by `bin/fm-supervision-instructions.sh` from `docs/supervision-protocols/`.
 That block owns the live wait shape for the running primary harness: Claude's Stop `asyncRewake` hook owns tokenless re-arm cycles, Grok uses background-notify cycles, Codex uses bounded foreground checkpoints, Pi and pi-signed use the same two tracked Pi extensions, OMP uses its native `.omp` primary extension, and OpenCode uses its TUI plugin.
