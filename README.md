@@ -53,6 +53,7 @@ Launching a supported harness inside it instantiates your first mate - and makes
 - **Event-driven, zero-token supervision** - a bash watcher sleeps on the fleet and wakes the first mate only when something needs you; verified primary harnesses also get a turn-end backstop that blocks or follows up on a blind stop when work is under way and supervision is not live.
 - **Optional X mode** - opt in with one local `.env` token so firstmate can answer your public `@myfirstmate` mentions, act on normal reversible mention requests through the same lifecycle as chat requests, acknowledge spawned work, and post up to three public-safe completion follow-ups within seven days for genuine milestones and the final outcome without changing non-X behavior; a final reply promised in a thread becomes durable state that is reconciled from disk, so a restart or a compacted conversation cannot lose it; dry-run preview records would-be replies and dismissals locally before go-live.
 - **Optional local Communication Officer bridge** - opt in with `config/ext-bridge` plus a local secret so a dedicated Hermes Gateway `/fm` plugin can deliver allowlisted Discord requests into this home over sibling local files, not a hosted relay.
+- **Trusted-local inbox** - any local agent, human, or scheduled job with filesystem access to this Firstmate home can persist a short orchestrator note and wake Firstmate without routing through Discord; the note is the doorbell and a referenced file should hold the full brief.
 - **Strict project boundary** - the first mate is read-only over your projects except for the narrow guarded and captain-approved operations authorized by [hard rule 1](AGENTS.md#1-identity-and-prime-directives), including fleet sync's guarded safe branch pruning; crewmates make every other project change behind the configured merge authority.
 - **Restart-proof** - all state lives on disk and in the active session backend (tmux by hard default, herdr or cmux when selected or auto-detected, zellij/orca when explicitly selected); kill the session anytime and the next one reconciles, including confirmed-dead secondmate agents, and carries on.
 
@@ -154,6 +155,41 @@ The preference persists for the effective Firstmate home, and toggling it off re
 
 > alright merge it
 ```
+
+### Hand off from another local agent
+
+Use the trusted-local inbox when Codex, Grok, Hermes, a human shell, or a scheduled job needs to leave Firstmate a durable asynchronous note:
+
+```sh
+bin/fm-inbox.sh note "Review the handoff at /absolute/path/to/handoff.md"
+bin/fm-inbox.sh list
+bin/fm-inbox.sh drain
+bin/fm-inbox.sh drain --ack <note-id>
+bin/fm-inbox.sh status
+```
+
+`note` persists the message before appending one wake to Firstmate's existing durable queue.
+The inbox assumes trusted local access; it does not add sender authentication, grant captain authority, or replace the authenticated Hermes Communication Officer bridge for Discord request/reply workflows.
+
+For an asynchronous handoff that must return to a Hermes conversation, authorize the exact
+platform/chat/thread target in mode-0600 `config/inbox-result-targets`, then attach it to the note:
+
+```sh
+bin/fm-inbox.sh note \
+  --reply-target 'hermes:telegram:-1001234567890:17585' \
+  --correlation-id 'request-42' \
+  "Review the handoff at /absolute/path/to/handoff.md"
+
+bin/fm-inbox-result.sh publish --note-id <note-id> --status completed \
+  --summary-file /absolute/path/to/summary.txt \
+  --artifact /absolute/path/to/report.md
+bin/fm-inbox-result.sh status --note-id <note-id>
+```
+
+The result is persisted before delivery. The default adapter reuses `hermes send` and its
+configured platform adapters; receipts suppress duplicate replies, while ambiguous sends fail
+closed until an operator checks the destination and confirms a retry. See
+[configuration.md](docs/configuration.md#trusted-local-inbox-results-configinbox-result-targets).
 
 ### More backends
 

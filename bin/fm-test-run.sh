@@ -156,7 +156,7 @@ family_for_basename() {
     fm-session-lock-ancestry.test.sh|\
     fm-supervision-events.test.sh|fm-turnend-guard.test.sh|fm-wake-daemon-lifecycle-e2e.test.sh|\
     fm-wake-drain-unread-status.test.sh|\
-    fm-wake-queue.test.sh|fm-watch-arm.test.sh|fm-watch-checkpoint.test.sh|fm-watch-recovery-loop.test.sh|\
+    fm-wake-queue.test.sh|fm-inbox.test.sh|fm-inbox-result.test.sh|fm-watch-arm.test.sh|fm-watch-checkpoint.test.sh|fm-watch-recovery-loop.test.sh|\
     fm-watch-triage.test.sh|fm-task-inbox.test.sh|\
     fm-watcher-lock.test.sh|fm-omp-branch-supervision.test.sh)
       printf '%s\n' watcher-wake-lock
@@ -404,6 +404,8 @@ tests/fm-daemon.test.sh 32136
 tests/fm-dispatch-resolve.test.sh 2241
 tests/fm-documentation-audiences.test.sh 708
 tests/fm-ext-bridge.test.sh 44000
+tests/fm-inbox.test.sh 3000
+tests/fm-inbox-result.test.sh 6000
 tests/fm-fleet-snapshot-view.test.sh 7565
 tests/fm-fleet-sync.test.sh 36367
 tests/fm-gate-refuse.test.sh 8943
@@ -968,6 +970,10 @@ families_for_changed_path() {
     bin/fm-classify-lib.sh)
       printf '%s\n' watcher-wake-lock
       printf '%s\n' pure-contract-unit
+      ;;
+    bin/fm-inbox.sh|bin/fm-inbox-result*|bin/fm-inbox-hermes-adapter.sh)
+      printf '%s\n' "__script__:fm-inbox.test.sh"
+      printf '%s\n' "__script__:fm-inbox-result.test.sh"
       ;;
     bin/fm-watch*|bin/fm-wake*|bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
       printf '%s\n' watcher-wake-lock
