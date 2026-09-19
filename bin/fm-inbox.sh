@@ -42,7 +42,8 @@ valid_note_id() {
 
 count_note_files() {
   local dir=$1 note count=0
-  [ -d "$dir" ] && [ ! -L "$dir" ] || { printf '0\n'; return; }
+  [ ! -L "$dir" ] || die "inbox path must not be a symlink: ${dir##*/}"
+  [ -d "$dir" ] || { printf '0\n'; return; }
   for note in "$dir"/*.note; do
     [ -e "$note" ] || [ -L "$note" ] || continue
     [ -f "$note" ] && [ ! -L "$note" ] || die "invalid note: ${note##*/}"

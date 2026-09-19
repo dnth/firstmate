@@ -177,6 +177,22 @@ test_status_rejects_symlink_note() {
   pass "status fails closed on symlinked notes"
 }
 
+test_status_rejects_symlink_directory() {
+  local home real_inbox
+  home="$TMP_ROOT/status-directory-symlink"
+  real_inbox="$home/real-inbox"
+  mkdir -p "$real_inbox"
+  mkdir -p "$home/state"
+  ln -s "$real_inbox" "$home/state/inbox"
+
+  if home_env "$home" "$INBOX" status >"$home/out" 2>"$home/err"; then
+    fail "status must reject a symlinked inbox directory"
+  fi
+  assert_grep 'inbox path must not be a symlink' "$home/err" \
+    "status directory symlink rejection must be explicit"
+  pass "status fails closed on symlinked inbox directories"
+}
+
 test_note_persists_and_wakes
 test_list_drain_and_idempotent_ack
 test_status_is_read_only
@@ -184,3 +200,4 @@ test_concurrent_notes_are_unique_and_woken
 test_wake_failure_preserves_note
 test_symlink_note_fails_closed
 test_status_rejects_symlink_note
+test_status_rejects_symlink_directory
