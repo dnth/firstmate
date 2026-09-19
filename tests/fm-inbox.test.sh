@@ -188,7 +188,7 @@ test_truncated_structured_note_fails_closed() {
 test_ack_rejects_malformed_handled_note() {
   local home id
   home="$TMP_ROOT/malformed-handled-note"
-  id=malformed-handled-1
+  id='malformed-handled-1'
   mkdir -p "$home/state/inbox/handled"
   printf '{"schema":"firstmate.inbox-note.v1"' \
     > "$home/state/inbox/handled/$id.note"
