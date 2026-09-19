@@ -161,9 +161,26 @@ test_symlink_note_fails_closed() {
   pass "list and drain fail closed on symlinked notes"
 }
 
+test_status_rejects_symlink_note() {
+  local home outside
+  home="$TMP_ROOT/status-symlink"
+  outside="$home/outside"
+  mkdir -p "$home/state/inbox"
+  printf 'must not hide\n' > "$outside"
+  ln -s "$outside" "$home/state/inbox/tampered.note"
+
+  if home_env "$home" "$INBOX" status >"$home/out" 2>"$home/err"; then
+    fail "status must reject a symlinked note"
+  fi
+  assert_grep 'invalid note: tampered.note' "$home/err" \
+    "status symlink rejection must be explicit"
+  pass "status fails closed on symlinked notes"
+}
+
 test_note_persists_and_wakes
 test_list_drain_and_idempotent_ack
 test_status_is_read_only
 test_concurrent_notes_are_unique_and_woken
 test_wake_failure_preserves_note
 test_symlink_note_fails_closed
+test_status_rejects_symlink_note
