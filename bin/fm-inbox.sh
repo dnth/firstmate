@@ -114,31 +114,35 @@ drain_command() {
     id=$2
     valid_note_id "$id" || die "invalid note id"
     ensure_inbox_dirs
+    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || die "cannot lock wake queue"
     note="$INBOX_DIR/$id.note"
     if [ -L "$note" ]; then
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
       die "note must not be a symlink: $id"
     fi
     if [ -f "$note" ]; then
       [ ! -e "$HANDLED_DIR/$id.note" ] && [ ! -L "$HANDLED_DIR/$id.note" ] \
-        || die "handled note already exists: $id"
+        || { fm_lock_release "$FM_WAKE_QUEUE_LOCK"; die "handled note already exists: $id"; }
       if mv "$note" "$HANDLED_DIR/$id.note"; then
-        # Atomic reconciliation: acknowledgement IS the handling of this
-        # note's wake, so its queue rows retire here rather than replaying
-        # until a separate fm-wake-drain --ack-through.
-        fm_wake_consume_key check "inbox-$id" >/dev/null \
-          || die "note $id handled, but its wake row could not be consumed; re-run drain --ack $id"
+        if ! fm_wake_consume_key_locked check "inbox-$id" >/dev/null; then
+          fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+          die "note $id handled, but its wake row could not be consumed; re-run drain --ack $id"
+        fi
+        fm_lock_release "$FM_WAKE_QUEUE_LOCK"
         printf 'acked %s\n' "$id"
         return 0
       fi
     fi
     if [ -f "$HANDLED_DIR/$id.note" ] && [ ! -L "$HANDLED_DIR/$id.note" ]; then
-      # A note handled before atomic reconciliation (or left behind by a
-      # failed consume) still retires its wake row here.
-      fm_wake_consume_key check "inbox-$id" >/dev/null \
-        || die "note $id is handled, but its wake row could not be consumed; re-run drain --ack $id"
+      if ! fm_wake_consume_key_locked check "inbox-$id" >/dev/null; then
+        fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+        die "note $id is handled, but its wake row could not be consumed; re-run drain --ack $id"
+      fi
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
       printf 'already-acked %s\n' "$id"
       return 0
     fi
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     die "note not found: $id"
   fi
   [ "$#" -eq 0 ] || usage

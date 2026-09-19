@@ -1721,59 +1721,61 @@ fm_wake_queued_keys_locked() {
 # consumed row is adopted and retired by the next ordinary drain, the same
 # path a drained-then-acked row already takes.
 fm_wake_consume_key() {
-  local kind=$1 key=$2 clean_key tmp before after
+  local kind=$1 key=$2
   case "$kind" in
     signal|stale|check|heartbeat) ;;
     *) printf 'fm_wake_consume_key: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
   esac
-  clean_key=$(printf '%s' "$key" | fm_wake_clean_field)
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+  local status=0
+  if fm_wake_consume_key_locked "$kind" "$key"; then
+    :
+  else
+    status=$?
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$status"
+}
+
+fm_wake_consume_key_locked() {
+  local kind=$1 key=$2 clean_key tmp before after
+  clean_key=$(printf '%s' "$key" | fm_wake_clean_field)
   if [ -L "$FM_WAKE_QUEUE" ]; then
-    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     printf 'fm_wake_consume_key: wake queue must not be a symlink\n' >&2
     return 1
   fi
   if [ ! -e "$FM_WAKE_QUEUE" ]; then
-    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     printf '0\n'
     return 0
   fi
   if [ ! -f "$FM_WAKE_QUEUE" ]; then
-    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     printf 'fm_wake_consume_key: wake queue must be a regular file\n' >&2
     return 1
   fi
   tmp=$(mktemp "$STATE/.wake-queue.consume.XXXXXX") || {
-    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 1
   }
   chmod 0600 "$tmp" || {
     rm -f -- "$tmp"
-    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 1
   }
   before=$(awk 'END { print NR + 0 }' "$FM_WAKE_QUEUE") || {
     rm -f -- "$tmp"
-    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 1
   }
   if ! awk -F '\t' -v kind="$kind" -v key="$clean_key" \
     '!(NF >= 5 && $3 == kind && $4 == key)' "$FM_WAKE_QUEUE" > "$tmp"; then
     rm -f -- "$tmp"
-    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 1
   fi
   after=$(awk 'END { print NR + 0 }' "$tmp") || {
     rm -f -- "$tmp"
-    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 1
   }
   if ! _fm_atomic_replace "$tmp" "$FM_WAKE_QUEUE"; then
     rm -f -- "$tmp"
-    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 1
   fi
-  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   printf '%s\n' "$((before - after))"
 }
 
