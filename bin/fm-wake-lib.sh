@@ -1643,19 +1643,11 @@ fm_wake_clean_field() {
 }
 
 fm_wake_append() {
-  local kind=$1 key=$2 payload=$3 lock_attempts=${4:-} clean_key clean_payload epoch seq seq_file status attempt=0
-  local recovery_marker
+  local kind=$1 key=$2 payload=$3 lock_attempts=${4:-} attempt=0 status=0
   case "$kind" in
     signal|stale|check|heartbeat) ;;
     *) printf 'fm_wake_append: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
   esac
-
-  clean_key=$(printf '%s' "$key" | fm_wake_clean_field)
-  clean_payload=$(printf '%s' "$payload" | fm_wake_clean_field)
-  epoch=$(date +%s)
-  seq_file="$STATE/.wake-queue.seq"
-  recovery_marker="$STATE/.watcher-down"
-  status=0
 
   if [ -n "$lock_attempts" ]; then
     case "$lock_attempts" in ''|*[!0-9]*|0) return 2 ;; esac
@@ -1667,6 +1659,23 @@ fm_wake_append() {
   else
     fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
   fi
+  if fm_wake_append_locked "$kind" "$key" "$payload" "$lock_attempts"; then
+    :
+  else
+    status=$?
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$status"
+}
+
+fm_wake_append_locked() {
+  local kind=$1 key=$2 payload=$3 lock_attempts=${4:-} clean_key clean_payload epoch seq seq_file status=0
+  local recovery_marker
+  clean_key=$(printf '%s' "$key" | fm_wake_clean_field)
+  clean_payload=$(printf '%s' "$payload" | fm_wake_clean_field)
+  epoch=$(date +%s)
+  seq_file="$STATE/.wake-queue.seq"
+  recovery_marker="$STATE/.watcher-down"
   # Recovery evidence is published BEFORE the durable row commits, so a crash in
   # this window leaves the wake recoverable rather than silently orphaned. The
   # bounded caller keeps its whole-call bound: the marker lock is bounded too,
@@ -1683,7 +1692,6 @@ fm_wake_append() {
   if [ "$status" -eq 0 ]; then
     printf '%s\t%s\t%s\t%s\t%s\n' "$epoch" "$seq" "$kind" "$clean_key" "$clean_payload" >> "$FM_WAKE_QUEUE" || status=$?
   fi
-  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   return "$status"
 }
 
@@ -1708,6 +1716,75 @@ fm_wake_queued_keys_locked() {
   local kind=$1
   awk -F '\t' -v kind="$kind" 'NF >= 5 && $3 == kind && !seen[$4]++ { print $4 }' \
     "$FM_WAKE_QUEUE" 2>/dev/null || true
+}
+
+# fm_wake_consume_key <kind> <key>
+# Consume every queued row for one <kind>/<key> pair under the append lock, so
+# an actor that retires the announced item itself (fm-inbox.sh drain --ack
+# moves its note to handled/) retires the item's own wake rows in the same
+# operation instead of leaving a replayable wake behind. Idempotent: a key
+# with no queued rows consumes nothing and still succeeds. Refuses a symlinked
+# or non-regular queue rather than rewriting it. Prints the consumed row
+# count. Recovery generations are not touched: a pending marker left by the
+# consumed row is adopted and retired by the next ordinary drain, the same
+# path a drained-then-acked row already takes.
+fm_wake_consume_key() {
+  local kind=$1 key=$2
+  case "$kind" in
+    signal|stale|check|heartbeat) ;;
+    *) printf 'fm_wake_consume_key: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
+  esac
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+  local status=0
+  if fm_wake_consume_key_locked "$kind" "$key"; then
+    :
+  else
+    status=$?
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$status"
+}
+
+fm_wake_consume_key_locked() {
+  local kind=$1 key=$2 clean_key tmp before after
+  clean_key=$(printf '%s' "$key" | fm_wake_clean_field)
+  if [ -L "$FM_WAKE_QUEUE" ]; then
+    printf 'fm_wake_consume_key: wake queue must not be a symlink\n' >&2
+    return 1
+  fi
+  if [ ! -e "$FM_WAKE_QUEUE" ]; then
+    printf '0\n'
+    return 0
+  fi
+  if [ ! -f "$FM_WAKE_QUEUE" ]; then
+    printf 'fm_wake_consume_key: wake queue must be a regular file\n' >&2
+    return 1
+  fi
+  tmp=$(mktemp "$STATE/.wake-queue.consume.XXXXXX") || {
+    return 1
+  }
+  chmod 0600 "$tmp" || {
+    rm -f -- "$tmp"
+    return 1
+  }
+  before=$(awk 'END { print NR + 0 }' "$FM_WAKE_QUEUE") || {
+    rm -f -- "$tmp"
+    return 1
+  }
+  if ! awk -F '\t' -v kind="$kind" -v key="$clean_key" \
+    '!(NF >= 5 && $3 == kind && $4 == key)' "$FM_WAKE_QUEUE" > "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  after=$(awk 'END { print NR + 0 }' "$tmp") || {
+    rm -f -- "$tmp"
+    return 1
+  }
+  if ! _fm_atomic_replace "$tmp" "$FM_WAKE_QUEUE"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  printf '%s\n' "$((before - after))"
 }
 
 fm_wake_secondmate_progress_marker_write() { # <task> <observed-at> <oldest-row-key>
