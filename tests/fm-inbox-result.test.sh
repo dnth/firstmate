@@ -645,7 +645,7 @@ test_result_artifact_pointers_fail_closed() {
       home_env "$home" "$RESULT" deliver --note-id "$id" >/dev/null 2>"$home/artifact.err"; then
     fail "durable result delivery must reject unsafe artifact pointers"
   fi
-  assert_grep 'invalid artifact pointer' "$home/artifact.err" \
+  assert_grep 'invalid result envelope' "$home/artifact.err" \
     "unsafe durable artifact rejection must be explicit"
   assert_absent "$home/adapter.log" "unsafe durable artifacts must not reach the adapter"
   pass "durable result delivery rejects unsafe artifact pointers"
@@ -690,6 +690,50 @@ test_posting_marker_symlink_fails_closed() {
   [ "$(cat "$outside")" = untouched ] || fail "posting marker symlink target was modified"
   assert_absent "$home/adapter.log" "posting marker symlink must block adapter execution"
   pass "posting marker symlinks fail closed"
+}
+
+test_durable_result_envelope_identity_fails_closed() {
+  local home id
+  home="$TMP_ROOT/result-envelope-identity"
+  setup_home "$home"
+  write_adapter "$home"
+  id=$(new_linked_note "$home" result-envelope-identity-1)
+  publish_result "$home" "$id" --no-deliver >/dev/null
+  jq '.request_note_id = "other-request"' \
+    "$home/state/inbox-results/$id.result.json" > "$home/tampered.json"
+  mv "$home/tampered.json" "$home/state/inbox-results/$id.result.json"
+  if FM_INBOX_RESULT_ADAPTER="$home/fakebin/result-adapter" FM_ADAPTER_LOG="$home/adapter.log" \
+      home_env "$home" "$RESULT" deliver --note-id "$id" >/dev/null 2>"$home/envelope.err"; then
+    fail "durable result request identity tampering must be rejected"
+  fi
+  assert_grep 'invalid result envelope' "$home/envelope.err" \
+    "durable envelope identity rejection must be explicit"
+  assert_absent "$home/adapter.log" "tampered durable envelopes must not reach the adapter"
+  pass "durable result envelope identity is validated"
+}
+
+test_standalone_adapter_rejects_malformed_envelope() {
+  local home payload
+  home="$TMP_ROOT/hermes-adapter-envelope"
+  setup_home "$home"
+  payload="$home/result.json"
+  jq -n --arg target "$TARGET" \
+    '{schema:"firstmate.inbox-result.v1", note_id:"adapter-envelope-1", request_note_id:"adapter-envelope-1",
+      correlation_id:"adapter-envelope-1", reply_target:$target, status:"completed", summary:"", artifacts:[]}' \
+    > "$payload"
+  mkdir -p "$home/fakebin"
+  cat > "$home/fakebin/hermes" <<'HERMES'
+#!/usr/bin/env bash
+printf called > "$FM_HERMES_CALLED"
+HERMES
+  chmod +x "$home/fakebin/hermes"
+  if FM_HOME="$home" HERMES_BIN="$home/fakebin/hermes" FM_HERMES_CALLED="$home/called" \
+      "$ROOT/bin/fm-inbox-hermes-adapter.sh" --target "$TARGET" \
+      --idempotency-key adapter-envelope-1 --payload-file "$payload" >/dev/null 2>"$home/adapter.err"; then
+    fail "standalone adapter must reject malformed envelopes"
+  fi
+  assert_absent "$home/called" "malformed standalone envelopes must not reach Hermes"
+  pass "standalone adapter validates complete result envelopes"
 }
 
 test_restart_reclaims_a_dead_delivery_lock() {
@@ -761,5 +805,7 @@ test_shipped_hermes_adapter_rejects_symlinked_payload_parent
 test_result_artifact_pointers_fail_closed
 test_allowlist_parent_symlink_fails_closed
 test_posting_marker_symlink_fails_closed
+test_durable_result_envelope_identity_fails_closed
+test_standalone_adapter_rejects_malformed_envelope
 test_restart_reclaims_a_dead_delivery_lock
 test_ownerless_delivery_lock_fails_closed
