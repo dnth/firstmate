@@ -343,6 +343,74 @@ test_unsafe_artifacts_and_revoked_target_fail_closed() {
   pass "unsafe artifacts and revoked recipients fail closed without data loss"
 }
 
+test_publish_rejects_symlinked_summary_parent() {
+  local home id outside
+  home="$TMP_ROOT/summary-parent-symlink"
+  setup_home "$home"
+  id=$(new_linked_note "$home" summary-parent-1)
+  outside="$home/outside"
+  mkdir -p "$outside"
+  printf 'outside summary\n' > "$outside/summary.txt"
+  ln -s "$outside" "$home/summary-link"
+  if FM_INBOX_RESULT_ADAPTER="$home/fakebin/result-adapter" \
+      home_env "$home" "$RESULT" publish --note-id "$id" --status completed \
+      --summary-file "$home/summary-link/summary.txt" >/dev/null 2>"$home/summary.err"; then
+    fail "summary files under symlinked parents must be rejected"
+  fi
+  assert_grep 'summary file must be a regular non-symlink file' "$home/summary.err" \
+    "symlinked summary parent rejection must be explicit"
+  assert_absent "$home/state/inbox-results/$id.result.json" \
+    "symlinked summary parent must not publish a result"
+  pass "publish rejects summaries under symlinked parents"
+}
+
+test_publish_rejects_symlinked_inbox_directory() {
+  local home id outside
+  home="$TMP_ROOT/inbox-directory-symlink"
+  setup_home "$home"
+  id=$(new_linked_note "$home" inbox-directory-1)
+  outside="$home/outside-inbox"
+  mkdir -p "$outside"
+  mv "$home/state/inbox/$id.note" "$outside/$id.note"
+  rmdir "$home/state/inbox/handled"
+  rmdir "$home/state/inbox"
+  ln -s "$outside" "$home/state/inbox"
+  printf 'Must not publish.\n' > "$home/summary.txt"
+  if home_env "$home" "$RESULT" publish --note-id "$id" --status completed \
+      --summary-file "$home/summary.txt" >/dev/null 2>"$home/inbox.err"; then
+    fail "symlinked inbox directories must be rejected"
+  fi
+  assert_grep 'inbox directory must not be a symlink' "$home/inbox.err" \
+    "symlinked inbox rejection must be explicit"
+  assert_absent "$home/state/inbox-results/$id.result.json" \
+    "symlinked inbox must not publish a result"
+  pass "publish rejects symlinked inbox directories"
+}
+
+test_publish_rejects_symlinked_handled_directory() {
+  local home id outside
+  home="$TMP_ROOT/handled-directory-symlink"
+  setup_home "$home"
+  id=$(new_linked_note "$home" handled-directory-1)
+  home_env "$home" "$INBOX" drain --ack "$id" >/dev/null \
+    || fail "handled note setup must succeed"
+  outside="$home/outside-handled"
+  mkdir -p "$outside"
+  mv "$home/state/inbox/handled/$id.note" "$outside/$id.note"
+  rmdir "$home/state/inbox/handled"
+  ln -s "$outside" "$home/state/inbox/handled"
+  printf 'Must not publish.\n' > "$home/summary.txt"
+  if home_env "$home" "$RESULT" publish --note-id "$id" --status completed \
+      --summary-file "$home/summary.txt" >/dev/null 2>"$home/handled.err"; then
+    fail "symlinked handled directories must be rejected"
+  fi
+  assert_grep 'handled inbox directory must not be a symlink' "$home/handled.err" \
+    "symlinked handled rejection must be explicit"
+  assert_absent "$home/state/inbox-results/$id.result.json" \
+    "symlinked handled directory must not publish a result"
+  pass "publish rejects symlinked handled directories"
+}
+
 test_shipped_hermes_adapter_returns_to_declared_session() {
   local home id
   home="$TMP_ROOT/hermes-adapter"
@@ -473,6 +541,9 @@ test_definite_failure_and_retry
 test_ambiguous_failure_requires_confirmation
 test_restart_recovery_from_posting_gap
 test_unsafe_artifacts_and_revoked_target_fail_closed
+test_publish_rejects_symlinked_summary_parent
+test_publish_rejects_symlinked_inbox_directory
+test_publish_rejects_symlinked_handled_directory
 test_shipped_hermes_adapter_returns_to_declared_session
 test_shipped_hermes_adapter_rejects_non_delivery_success
 test_restart_reclaims_a_dead_delivery_lock
