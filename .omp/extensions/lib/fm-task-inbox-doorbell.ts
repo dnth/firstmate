@@ -244,18 +244,15 @@ export function installTaskInboxDoorbell(
 	// at once - still unconfirmed, never delivered.
 	const recoverUnprovenTurn = (awaitingPath: string): void => {
 		awaitingTurns.delete(awaitingPath);
-		const settleUnproven = (): void => {
-			settleAwaiting(awaitingPath, "unproven");
-		};
 		if (!canReDrive) {
-			settleUnproven();
+			settleAwaiting(awaitingPath, "unproven");
 			return;
 		}
 		let content = "";
 		try {
 			content = readFileSync(awaitingPath, "utf8");
 		} catch {
-			settleUnproven();
+			settleAwaiting(awaitingPath, "unproven");
 			return;
 		}
 		let result: void | Promise<void>;
@@ -266,7 +263,9 @@ export function installTaskInboxDoorbell(
 			settleAwaiting(awaitingPath, "failed");
 			return;
 		}
-		awaitingTurns.set(awaitingPath, setTimeout(settleUnproven, turnGraceMs));
+		awaitingTurns.set(awaitingPath, setTimeout(() => {
+			settleAwaiting(awaitingPath, turnEpoch !== epochAtRedrive ? "delivered" : "unproven");
+		}, turnGraceMs));
 		void Promise.resolve(result).then(
 			() => {
 				if (!existsSync(awaitingPath)) return;
