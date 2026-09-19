@@ -10,6 +10,13 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# The suite must be hermetic: an OMP worker's own launch env carries
+# FM_OMP_TASK_* bindings that would redirect the doorbell's env-derived
+# defaults (journal, ready marker, inbox dir, grace, ack bound) at the real
+# task's state instead of the fixture's.
+unset FM_OMP_TASK_DOORBELL_FAILED FM_OMP_TASK_DOORBELL_READY FM_OMP_TASK_INBOX_DIR \
+  FM_OMP_DOORBELL_TURN_GRACE_MS FM_OMP_TASK_DOORBELL_ACK_ATTEMPTS FM_STATE_OVERRIDE
+
 TMP_ROOT=$(fm_test_tmproot fm-omp-task-inbox-doorbell)
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 HELPER="$ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts"
@@ -223,7 +230,7 @@ test_extension_requires_turn_proof_or_redrives() {
   HELPER="$HELPER" INBOX="$dir/state/t1.inbox" READY="$dir/state/t1.omp-doorbell-ready" \
     node --input-type=module <<'JS'
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const { FM_TASK_INBOX_DOORBELL_SIGNAL, installTaskInboxDoorbell } =
@@ -243,7 +250,7 @@ const api = {
 const doorbell = installTaskInboxDoorbell(api, {
   inboxDir: process.env.INBOX,
   readyMarker: process.env.READY,
-  turnGraceMs: 150,
+  turnGraceMs: 300,
 });
 doorbell.activate();
 assert.equal(handlers.has("turn_start"), true);
@@ -257,14 +264,42 @@ assert.equal(sent.length, 1);
 assert.equal(existsSync(`${requestDir}/downgraded.pending.awaiting-turn`), true);
 assert.equal(existsSync(`${requestDir}/downgraded.pending.delivered`), false);
 
-await sleep(500);
+// The grace expires and the instruction re-drives through the user channel,
+// but a nonthrowing return is still not a receipt: the entry re-parks for one
+// more bounded proof window instead of settling delivered.
+await sleep(450);
 assert.equal(userSent.length, 1, "a downgraded triggerTurn must re-drive the instruction as a user prompt");
 assert.equal(userSent[0], line);
+assert.equal(existsSync(`${requestDir}/downgraded.pending.awaiting-turn`), true,
+  "a returning re-drive without a turn must stay unconfirmed");
+assert.equal(existsSync(`${requestDir}/downgraded.pending.delivered`), false,
+  "a nonthrowing re-drive return must never be a receipt");
+
+// A turn opening inside the re-drive's proof window is the delayed success:
+// the parked fallback settles delivered.
+handlers.get("turn_start")();
 assert.equal(existsSync(`${requestDir}/downgraded.pending.delivered`), true);
+handlers.get("turn_end")();
+
+// An unproven re-drive settles unproven: no receipt, no tombstone, and the
+// next ring is a real delivery attempt rather than a suppressed success.
+writeFileSync(`${requestDir}/unproven.pending`, line);
+process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
+assert.equal(sent.length, 2);
+await sleep(450);
+assert.equal(userSent.length, 2);
+await sleep(400);
+assert.equal(existsSync(`${requestDir}/unproven.pending.unproven`), true,
+  "an unproven re-drive must settle unproven, not delivered");
+assert.equal(existsSync(`${requestDir}/unproven.pending`), false);
+assert.equal(existsSync(`${requestDir}/unproven.pending.delivered`), false);
+assert.equal(existsSync(`${requestDir}/unproven.pending.acked`), false);
+rmSync(`${requestDir}/unproven.pending.unproven`);
 
 writeFileSync(`${requestDir}/proved.pending`, line);
 process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
-assert.equal(sent.length, 2);
+assert.equal(sent.length, 3);
+
 assert.equal(existsSync(`${requestDir}/proved.pending.awaiting-turn`), true);
 // A turn opening while the steer is parked is proof of delivery: the steer
 // caused the turn or was absorbed into it, so the request settles delivered
@@ -273,15 +308,16 @@ assert.equal(existsSync(`${requestDir}/proved.pending.awaiting-turn`), true);
 handlers.get("turn_start")();
 assert.equal(existsSync(`${requestDir}/proved.pending.delivered`), true);
 assert.equal(existsSync(`${requestDir}/proved.pending.awaiting-turn`), false);
-await sleep(500);
-assert.equal(userSent.length, 1, "a proven turn must suppress the user-channel re-drive");
+await sleep(400);
+assert.equal(userSent.length, 2, "a proven turn must suppress the user-channel re-drive");
 
 // An open turn at send time is real delivery: the steer joins it.
 writeFileSync(`${requestDir}/steered.pending`, line);
 process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
-assert.equal(sent.length, 3);
+assert.equal(sent.length, 4);
 assert.equal(existsSync(`${requestDir}/steered.pending.delivered`), true);
-assert.equal(userSent.length, 1);
+assert.equal(userSent.length, 2);
+handlers.get("turn_end")();
 
 // A failed re-drive reports failure, not silent stranding.
 const failingApi = {
@@ -299,9 +335,44 @@ failing.activate();
 mkdirSync(`${failingReady}.requests`, { recursive: true });
 writeFileSync(`${failingReady}.requests/stuck.pending`, line);
 process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
-await sleep(500);
+await sleep(400);
 assert.equal(existsSync(`${failingReady}.requests/stuck.pending.failed`), true);
 failing.retire();
+
+// A rejected re-drive promise reports the same failure.
+const rejectingReady = `${process.env.READY}.rejecting`;
+const rejecting = installTaskInboxDoorbell(
+  {
+    sendMessage() {},
+    sendUserMessage() { return Promise.reject(new Error("user channel closed")); },
+    on() {},
+  },
+  { inboxDir: process.env.INBOX, readyMarker: rejectingReady, turnGraceMs: 150 },
+);
+rejecting.activate();
+mkdirSync(`${rejectingReady}.requests`, { recursive: true });
+writeFileSync(`${rejectingReady}.requests/stuck.pending`, line);
+process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
+await sleep(400);
+assert.equal(existsSync(`${rejectingReady}.requests/stuck.pending.failed`), true);
+rejecting.retire();
+
+// A runtime without a user-prompt channel cannot prove the downgrade either:
+// the request re-queues unproven instead of claiming accept-only delivery.
+const noRedriveReady = `${process.env.READY}.no-redrive`;
+const noRedrive = installTaskInboxDoorbell(
+  { sendMessage() {}, on() {} },
+  { inboxDir: process.env.INBOX, readyMarker: noRedriveReady, turnGraceMs: 150 },
+);
+noRedrive.activate();
+mkdirSync(`${noRedriveReady}.requests`, { recursive: true });
+writeFileSync(`${noRedriveReady}.requests/stuck.pending`, line);
+process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
+await sleep(400);
+assert.equal(existsSync(`${noRedriveReady}.requests/stuck.pending.unproven`), true,
+  "a missing re-drive channel must settle unproven, not claim delivery");
+assert.equal(existsSync(`${noRedriveReady}.requests/stuck.pending.delivered`), false);
+noRedrive.retire();
 
 // A dead generation's unsettled proof re-queues on activate and re-enters
 // delivery immediately: re-sending is the only way to know the runtime's
@@ -332,7 +403,7 @@ test_extension_external_notify_drives_turn_proof() {
   HELPER="$HELPER" INBOX="$dir/state/t1.inbox" READY="$dir/state/t1.omp-doorbell-ready" \
     node --input-type=module <<'JS'
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const { FM_TASK_INBOX_DOORBELL_SIGNAL, installTaskInboxDoorbell } =
@@ -373,8 +444,11 @@ assert.equal(existsSync(`${requestDir}/downgraded.pending.delivered`), false);
 
 await sleep(500);
 assert.equal(userSent.length, 1, "an unproven steer must re-drive as a user prompt");
-assert.equal(userSent[0], line);
-assert.equal(existsSync(`${requestDir}/downgraded.pending.delivered`), true);
+assert.equal(existsSync(`${requestDir}/downgraded.pending.delivered`), false,
+  "a returning re-drive without a forwarded turn must stay unconfirmed");
+assert.equal(existsSync(`${requestDir}/downgraded.pending.unproven`), true,
+  "an unproven re-drive must settle unproven, not delivered");
+rmSync(`${requestDir}/downgraded.pending.unproven`);
 
 // A turn_start forwarded inside the dispatch call is the correlated proof.
 fireTurnStartDuringSend = true;
@@ -401,8 +475,10 @@ process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
 assert.equal(sent.length, 4);
 assert.equal(existsSync(`${requestDir}/reopened.pending.awaiting-turn`), true);
 await sleep(500);
-assert.equal(userSent.length, 2, "a closed turn must not keep proving later steers");
-assert.equal(existsSync(`${requestDir}/reopened.pending.delivered`), true);
+assert.equal(existsSync(`${requestDir}/reopened.pending.unproven`), true,
+  "an unproven re-drive must settle unproven, not delivered");
+assert.equal(existsSync(`${requestDir}/reopened.pending.delivered`), false);
+rmSync(`${requestDir}/reopened.pending.unproven`);
 
 // A forwarded turn_start that lands after the steer is parked is still
 // proof: the content is already in the session, so the parked entry settles
@@ -859,9 +935,9 @@ JS
   printf '%s' "$pid"
 }
 
-# A live task-bound extension whose runtime accepts the steer but never opens
-# a turn for it, so each request parks awaiting-turn until the turn-grace
-# re-drive lands it through the user-prompt channel. Echoes the listener PID.
+# a turn for it, so each request parks awaiting-turn, re-drives through the
+# user-prompt channel, and settles unproven when the re-drive also returns
+# without a turn. Echoes the listener PID.
 start_redriving_listener() {  # <dir> <home> <task> <signal-log> <ready-flag> <grace-ms>
   local dir=$1 home=$2 task=$3 signal_log=$4 ready=$5 grace=$6 pid
   HELPER="$HELPER" INBOX="$home/state/$task.inbox" READY="$home/state/$task.omp-doorbell-ready" \
@@ -889,6 +965,43 @@ JS
     /bin/sleep 0.01
   done
   [ -f "$ready" ] || fail "redriving task-bound extension for $task did not start"
+  printf '%s' "$pid"
+}
+
+# A live task-bound extension whose user-prompt re-drive opens a turn, so a
+# downgraded steer parks awaiting-turn, re-drives, and settles delivered on
+# the forwarded turn proof. Echoes the listener PID.
+start_turn_proving_listener() {  # <dir> <home> <task> <signal-log> <ready-flag> <grace-ms>
+  local dir=$1 home=$2 task=$3 signal_log=$4 ready=$5 grace=$6 pid
+  HELPER="$HELPER" INBOX="$home/state/$task.inbox" READY="$home/state/$task.omp-doorbell-ready" \
+    SIGNAL_LOG="$signal_log" LISTENER_READY="$ready" \
+    FM_OMP_DOORBELL_TURN_GRACE_MS="$grace" node --input-type=module \
+    > "$dir/proving-listener.log" 2>&1 <<'JS' &
+import { appendFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const { installTaskInboxDoorbell } = await import(pathToFileURL(process.env.HELPER).href);
+const doorbell = installTaskInboxDoorbell(
+  {
+    sendMessage() { appendFileSync(process.env.SIGNAL_LOG, "sendMessage\n"); },
+    sendUserMessage() {
+      appendFileSync(process.env.SIGNAL_LOG, "sendUserMessage\n");
+      doorbell.notifyTurnStart();
+      doorbell.notifyTurnEnd();
+    },
+    on() {},
+  },
+  { inboxDir: process.env.INBOX, readyMarker: process.env.READY },
+);
+doorbell.activate();
+writeFileSync(process.env.LISTENER_READY, `${process.pid}\n`);
+setInterval(() => {}, 1000);
+JS
+  pid=$!
+  for _ in $(seq 1 200); do
+    [ -f "$ready" ] && break
+    /bin/sleep 0.01
+  done
+  [ -f "$ready" ] || fail "turn-proving task-bound extension for $task did not start"
   printf '%s' "$pid"
 }
 
@@ -1205,7 +1318,7 @@ test_requester_window_tracks_turn_grace_and_acked_suppresses() {
   mkdir -p "$home/state"
   signal_log="$dir/signals.log"
   : > "$signal_log"
-  listener_pid=$(start_redriving_listener "$dir" "$home" t1 "$signal_log" "$dir/listener.ready" 2500)
+  listener_pid=$(start_turn_proving_listener "$dir" "$home" t1 "$signal_log" "$dir/listener.ready" 2500)
   LISTENER_PID=$listener_pid
   request_dir="$home/state/t1.omp-doorbell-ready.requests"
 
@@ -1247,6 +1360,101 @@ SH
   pass "requester ack window tracks the turn grace and an acked receipt suppresses the re-ring"
 }
 
+# A re-drive that returns without a turn is never a receipt: the requester
+# reports queued, no .acked tombstone forms, and the recovery re-ring is a
+# real second delivery attempt rather than a suppressed success.
+test_unproven_redrive_reports_queued_and_rerings() {
+  local dir="$TMP_ROOT/unproven-redrive" home signal_log listener_pid request_dir
+  home="$dir/home"
+  mkdir -p "$home/state"
+  signal_log="$dir/signals.log"
+  : > "$signal_log"
+  listener_pid=$(start_redriving_listener "$dir" "$home" t1 "$signal_log" "$dir/listener.ready" 300)
+  LISTENER_PID=$listener_pid
+  request_dir="$home/state/t1.omp-doorbell-ready.requests"
+
+  ROOT="$ROOT" MARKER="$home/state/t1.omp-doorbell-ready" PID="$listener_pid" \
+    REQDIR="$request_dir" SIGNAL_LOG="$signal_log" bash <<'SH'
+set -u
+. "$ROOT/bin/fm-backend.sh"
+
+set +e
+FM_OMP_DOORBELL_TURN_GRACE_MS=300 \
+  fm_omp_task_doorbell_request "$MARKER" "$PID" first.msg 'canonical doorbell'
+rc=$?
+set -e
+[ "$rc" = 2 ] || { echo "an unproven re-drive must report queued, got rc=$rc" >&2; exit 1; }
+[ -f "$REQDIR/request.first.msg.pending.unproven" ] \
+  || { echo "an unproven re-drive must settle unproven, not delivered" >&2; exit 1; }
+[ ! -e "$REQDIR/request.first.msg.pending.acked" ] \
+  || { echo "a false receipt left a tombstone" >&2; exit 1; }
+[ ! -e "$REQDIR/request.first.msg.pending.delivered" ] \
+  || { echo "a returning re-drive without a turn claimed delivery" >&2; exit 1; }
+[ "$(wc -l < "$SIGNAL_LOG" | tr -d '[:space:]')" = 2 ] \
+  || { echo "expected one sendMessage plus one re-drive, got: $(cat "$SIGNAL_LOG")" >&2; exit 1; }
+
+# The recovery re-ring is a real second attempt: the unproven marker is not a
+# tombstone, so the request re-enters delivery and the session sees a second
+# sendMessage plus re-drive.
+set +e
+FM_OMP_DOORBELL_TURN_GRACE_MS=300 \
+  fm_omp_task_doorbell_request "$MARKER" "$PID" first.msg 'canonical doorbell'
+rc=$?
+set -e
+[ "$rc" = 2 ] || { echo "the recovery re-ring must report queued, got rc=$rc" >&2; exit 1; }
+[ "$(wc -l < "$SIGNAL_LOG" | tr -d '[:space:]')" = 4 ] \
+  || { echo "the re-ring did not re-drive the request, got: $(cat "$SIGNAL_LOG")" >&2; exit 1; }
+SH
+  expect_code 0 "$?" "unproven re-drive stays queued and re-rings"
+  kill -TERM "$listener_pid" 2>/dev/null || true
+  wait "$listener_pid" 2>/dev/null || true
+  LISTENER_PID=
+  pass "an unproven re-drive reports queued, leaves no tombstone, and re-rings for real"
+}
+
+# A wedged session whose user-prompt re-drive returns without a turn must not
+# produce omp-native-received: fm-send reports the durable queued outcome and
+# no tombstone suppresses the recovery ladder.
+test_omp_native_unproven_fallback_is_queued() {
+  local dir home node_bin listener_pid out err rc request
+  node_bin=$(realpath "$(command -v node)")
+  dir="$TMP_ROOT/native-unproven"
+  home="$dir/home"
+  mkdir -p "$home/state"
+  make_send_stubs "$dir"
+  : > "$dir/composer.log"
+  listener_pid=$(start_redriving_listener "$dir" "$home" wedged "$dir/signals.log" "$dir/listener.ready" 300)
+  LISTENER_PID=$listener_pid
+  write_native_meta "$home" wedged tmux "$node_bin"
+  out="$dir/out"; err="$dir/err"
+  set +e
+  run_native_send "$dir" "$home" "$listener_pid" "$node_bin" "$out" "$err" \
+    wedged "apply the queued review finding"; rc=$?
+  set -e
+  expect_code 7 "$rc" "an unproven fallback must not exit 0"
+  request="$home/state/wedged.omp-doorbell-ready.requests/request.001.msg"
+  assert_contains "$(cat "$err")" 'omp-native-queued:' \
+    "an unproven fallback did not report the durable queued outcome"
+  assert_contains "$(cat "$err")" "request=$request" \
+    "the queued outcome did not name its durable native queue identity"
+  [ "$(cat "$out" "$err" | grep -Ec 'omp-native-(received|queued|refused):' || true)" = 1 ] \
+    || fail "the unproven fallback reported more than one bounded outcome"
+  ! grep -q 'omp-native-received' "$out" \
+    || fail "a turn-unproven fallback was presented as a native receipt"
+  [ -f "$request.pending.unproven" ] \
+    || fail "the unproven fallback did not settle unproven"
+  [ ! -e "$request.pending.acked" ] \
+    || fail "a false receipt left a tombstone suppressing recovery"
+  [ ! -e "$request.pending.delivered" ] \
+    || fail "a returning re-drive without a turn claimed delivery"
+  [ ! -s "$dir/composer.log" ] \
+    || fail "an unproven fallback typed into the composer: $(cat "$dir/composer.log")"
+  kill -TERM "$listener_pid" 2>/dev/null || true
+  wait "$listener_pid" 2>/dev/null || true
+  LISTENER_PID=
+  pass "fm-send: a turn-unproven fallback reports queued, never received, and leaves no tombstone"
+}
+
 test_extension_signal_uses_trigger_turn
 test_extension_requires_turn_proof_or_redrives
 test_extension_external_notify_drives_turn_proof
@@ -1258,3 +1466,5 @@ test_omp_native_receive_reports_exact_binding
 test_omp_native_refusal_and_queue_are_bounded
 test_omp_native_binding_mismatch_is_refused
 test_requester_window_tracks_turn_grace_and_acked_suppresses
+test_unproven_redrive_reports_queued_and_rerings
+test_omp_native_unproven_fallback_is_queued
