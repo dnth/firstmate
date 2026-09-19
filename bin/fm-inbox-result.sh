@@ -481,8 +481,8 @@ deliver_one() {
 
   [ -n "$reason" ] || reason="adapter exited $rc"
   case "$rc" in
-    75) classification=transient; rm -f -- "$posting" ;;
-    64) classification=permanent; rm -f -- "$posting" ;;
+    75) classification=transient; rm -f -- "$posting" "$confirmed" ;;
+    64) classification=permanent; rm -f -- "$posting" "$confirmed" ;;
     *) classification=ambiguous ;;
   esac
   write_failure "$id" "$classification" "$reason"

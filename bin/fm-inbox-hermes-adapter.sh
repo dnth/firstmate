@@ -10,6 +10,17 @@ BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 target=
 key=
 payload=
+stable_payload=
+payload_fd=
+payload_fd_identity=
+payload_path_identity=
+message=
+# shellcheck disable=SC2329 # Invoked by the trap below.
+cleanup() {
+  [ -z "$message" ] || rm -f -- "$message"
+  [ -z "$stable_payload" ] || rm -f -- "$stable_payload"
+}
+trap cleanup EXIT INT TERM
 usage() {
   printf 'usage: fm-inbox-hermes-adapter.sh --target <hermes:platform:chat[:thread]> --idempotency-key <key> --payload-file <result.json>\n' >&2
   exit 64
@@ -26,6 +37,27 @@ done
 [[ "$target" =~ ^hermes:[a-z][a-z0-9_-]*:[A-Za-z0-9@#%+._-]+(:[A-Za-z0-9@#%+._-]+)?$ ]] || usage
 fm_inbox_artifact_safe "$payload" || usage
 command -v jq >/dev/null 2>&1 || usage
+exec {payload_fd}<"$payload" || usage
+fm_inbox_artifact_safe "$payload" || { exec {payload_fd}<&-; usage; }
+if [ "$(uname)" = Darwin ]; then
+  payload_fd_identity=$(stat -L -f '%d:%i' "/dev/fd/$payload_fd") || { exec {payload_fd}<&-; usage; }
+  payload_path_identity=$(stat -L -f '%d:%i' "$payload") || { exec {payload_fd}<&-; usage; }
+else
+  payload_fd_identity=$(stat -L -c '%d:%i' "/proc/$$/fd/$payload_fd") || { exec {payload_fd}<&-; usage; }
+  payload_path_identity=$(stat -L -c '%d:%i' "$payload") || { exec {payload_fd}<&-; usage; }
+fi
+[ "$payload_fd_identity" = "$payload_path_identity" ] || { exec {payload_fd}<&-; usage; }
+stable_payload=$(mktemp "${TMPDIR:-/tmp}/fm-inbox-payload.XXXXXX") || {
+  exec {payload_fd}<&-
+  exit 70
+}
+if ! cat <&$payload_fd > "$stable_payload" || ! chmod 0600 "$stable_payload"; then
+  exec {payload_fd}<&-
+  rm -f -- "$stable_payload"
+  exit 70
+fi
+exec {payload_fd}<&-
+payload=$stable_payload
 fm_inbox_reply_target_authorized "$target" || {
   printf 'reply target is not authorized\n' >&2
   exit 64
@@ -40,9 +72,6 @@ command -v "$HERMES_BIN" >/dev/null 2>&1 || {
 }
 destination=${target#hermes:}
 message=$(mktemp "${TMPDIR:-/tmp}/fm-inbox-result.XXXXXX") || exit 70
-# shellcheck disable=SC2329 # Invoked by the traps below.
-cleanup() { rm -f -- "$message"; }
-trap cleanup EXIT INT TERM
 chmod 0600 "$message"
 {
   printf 'FirstMate result: %s\n' "$(jq -r '.status' "$payload")"

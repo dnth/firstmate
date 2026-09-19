@@ -820,6 +820,29 @@ test_confirmed_retry_marker_survives_restart_boundary() {
   pass "confirmed retry state survives restart boundaries"
 }
 
+test_confirmed_retry_marker_clears_after_definite_failure() {
+  local home id
+  home="$TMP_ROOT/confirmed-retry-definite-failure"
+  setup_home "$home"
+  write_adapter "$home"
+  id=$(new_linked_note "$home" confirmed-retry-definite-1)
+  publish_result "$home" "$id" --no-deliver >/dev/null
+  printf '2026-01-01T00:00:00Z\n' > "$home/state/inbox-results/$id.posting"
+  set +e
+  FM_ADAPTER_MODE=transient FM_INBOX_RESULT_ADAPTER="$home/fakebin/result-adapter" \
+    FM_ADAPTER_LOG="$home/adapter.log" home_env "$home" "$RESULT" retry \
+    --note-id "$id" --confirm-ambiguous >/dev/null 2>"$home/retry.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "confirmed retry must report definite adapter failure"
+  assert_absent "$home/state/inbox-results/$id.confirmed" \
+    "definite failure must retire the confirmation marker"
+  FM_INBOX_RESULT_ADAPTER="$home/fakebin/result-adapter" FM_ADAPTER_LOG="$home/adapter.log" \
+    home_env "$home" "$RESULT" retry --note-id "$id" >/dev/null \
+    || fail "ordinary retry must proceed after a definite failure"
+  pass "confirmed retry markers clear after definite failures"
+}
+
 test_restart_reclaims_a_dead_delivery_lock() {
   local home id lock
   home="$TMP_ROOT/dead-lock"
@@ -895,5 +918,6 @@ test_publish_rejects_empty_summary_without_persisting
 test_malformed_note_timestamp_fails_closed
 test_malformed_delivery_timestamps_fail_closed
 test_confirmed_retry_marker_survives_restart_boundary
+test_confirmed_retry_marker_clears_after_definite_failure
 test_restart_reclaims_a_dead_delivery_lock
 test_ownerless_delivery_lock_fails_closed
