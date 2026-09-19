@@ -214,6 +214,20 @@ test_list_and_drain_reject_symlink_directory() {
   pass "list and drain fail closed on symlinked inbox directories"
 }
 
+test_status_rejects_nondirectory_path() {
+  local home
+  home="$TMP_ROOT/status-nondirectory"
+  mkdir -p "$home/state"
+  printf 'not a directory\n' > "$home/state/inbox"
+
+  if home_env "$home" "$INBOX" status >"$home/out" 2>"$home/err"; then
+    fail "status must reject a non-directory inbox path"
+  fi
+  assert_grep 'inbox path must be a directory' "$home/err" \
+    "status non-directory rejection must be explicit"
+  pass "status fails closed on non-directory inbox paths"
+}
+
 test_note_persists_and_wakes
 test_list_drain_and_idempotent_ack
 test_status_is_read_only
@@ -223,3 +237,4 @@ test_symlink_note_fails_closed
 test_status_rejects_symlink_note
 test_status_rejects_symlink_directory
 test_list_and_drain_reject_symlink_directory
+test_status_rejects_nondirectory_path

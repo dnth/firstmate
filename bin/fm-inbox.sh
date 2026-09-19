@@ -40,9 +40,15 @@ valid_note_id() {
   esac
 }
 
+validate_note_dir() {
+  local dir=$1
+  [ ! -L "$dir" ] || die "inbox path must not be a symlink: ${dir##*/}"
+  [ ! -e "$dir" ] || [ -d "$dir" ] || die "inbox path must be a directory: ${dir##*/}"
+}
+
 count_note_files() {
   local dir=$1 note count=0
-  [ ! -L "$dir" ] || die "inbox path must not be a symlink: ${dir##*/}"
+  validate_note_dir "$dir"
   [ -d "$dir" ] || { printf '0\n'; return; }
   for note in "$dir"/*.note; do
     [ -e "$note" ] || [ -L "$note" ] || continue
@@ -53,8 +59,7 @@ count_note_files() {
 }
 
 validate_inbox_dir() {
-  [ ! -L "$INBOX_DIR" ] || die "inbox path must not be a symlink: ${INBOX_DIR##*/}"
-  [ ! -e "$INBOX_DIR" ] || [ -d "$INBOX_DIR" ] || die "inbox path must be a directory: ${INBOX_DIR##*/}"
+  validate_note_dir "$INBOX_DIR"
 }
 
 note_command() {
