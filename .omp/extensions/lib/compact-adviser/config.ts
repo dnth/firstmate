@@ -19,7 +19,6 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { parseProfile } from "./profile.ts";
 
 export type Mode = "hint" | "off";
 export const MAX_SAVED_API_KEY_LENGTH = 1024;
@@ -29,7 +28,6 @@ export interface Config {
   minContextTokens: number;
   logRequests: boolean;
   typesafeApiKey?: string;
-  profile?: string;
 }
 export const DEFAULT_CONFIG: Readonly<Config> = Object.freeze({
   version: 1,
@@ -76,7 +74,6 @@ function validate(value: unknown): Config {
       'Invalid or unsupported settings. Restore a valid version-1 configuration; this port supports only "hint" and "off" modes.',
     );
   }
-  parseProfile(c.profile);
   const typesafeApiKey =
     typeof c.typesafeApiKey === "string" && c.typesafeApiKey.trim() !== ""
       ? c.typesafeApiKey.trim()
@@ -90,7 +87,6 @@ function validate(value: unknown): Config {
     minContextTokens: c.minContextTokens,
     logRequests: c.logRequests === true,
     ...(typesafeApiKey !== undefined ? { typesafeApiKey } : {}),
-    ...(c.profile !== undefined ? { profile: c.profile as string } : {}),
   };
 }
 export class ConfigStore {

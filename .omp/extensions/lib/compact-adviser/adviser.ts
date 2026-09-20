@@ -39,7 +39,6 @@ import {
   requestBody,
 } from "./judge.ts";
 import { appendErrorLog, appendRequestLog, appendResponseLog, requestLogPath } from "./log.ts";
-import { type JudgeProfile, parseProfile } from "./profile.ts";
 import {
   cooldownReason,
   initialState,
@@ -64,7 +63,6 @@ interface Options {
     state: unknown,
     key: string,
     signal: AbortSignal,
-    profile?: JudgeProfile,
   ) => Promise<Judgment>;
 }
 function savedApiKey(store: ConfigStore): string | undefined {
@@ -92,7 +90,7 @@ export function installAdviser(pi: ExtensionAPI, options: Options): void {
   const now = options.now ?? Date.now;
   const evaluate =
     options.evaluate ??
-    ((state, key, signal, profile) => judge(state, key, signal, undefined, undefined, profile));
+    ((state, key, signal) => judge(state, key, signal));
   let generation = 0;
   let lifetime = 0;
   let request: AbortController | undefined;
@@ -191,13 +189,12 @@ export function installAdviser(pi: ExtensionAPI, options: Options): void {
       return;
     }
     if (request || eligible(ctx, config, state) === undefined) return;
-    const profile = parseProfile(config.profile);
     const view = snapshot(ctx, [key(), savedApiKey(store)]);
     if (view.conversationTokens <= 20000 || view.checkpointKey === state.lastHintKey) return;
     let loggedBody: string | undefined;
     if (config.logRequests) {
       try {
-        loggedBody = requestBody(view.state, profile);
+        loggedBody = requestBody(view.state);
         appendRequestLog(options.logDir, loggedBody);
       } catch {
         // Request logging must not replace or delay the judgment.
@@ -211,16 +208,15 @@ export function installAdviser(pi: ExtensionAPI, options: Options): void {
     const current = () =>
       !controller.signal.aborted && generation === epoch && sessionIdentity(ctx) === identity;
     try {
-      const result = await evaluate(view.state, key()?.trim() ?? "", controller.signal, profile);
+      const result = await evaluate(view.state, key()?.trim() ?? "", controller.signal);
       if (!current()) return;
       if (config.logRequests) {
         try {
           appendResponseLog(
             options.logDir,
-            loggedBody ?? requestBody(view.state, profile),
+            loggedBody ?? requestBody(view.state),
             result,
             usageFraction(ctx),
-            profile,
           );
         } catch {
           // Response logging must not replace the gate decision.
@@ -231,7 +227,7 @@ export function installAdviser(pi: ExtensionAPI, options: Options): void {
       if (JSON.stringify(latest) !== configIdentity || eligible(ctx, latest, state) === undefined)
         return;
       state = { ...state, failures: 0, retryAfter: 0 };
-      if (!qualifies(result, usageFraction(ctx), profile)) {
+      if (!qualifies(result, usageFraction(ctx))) {
         persist(state);
         return;
       }
@@ -362,7 +358,7 @@ export function installAdviser(pi: ExtensionAPI, options: Options): void {
       t = ctx.getContextUsage()?.tokens,
       u = usageFraction(ctx);
     ctx.ui.notify(
-      `Mode: ${c.mode}. Minimum: ${c.minContextTokens.toLocaleString("en-US")} tokens. Context: ${t ?? "unknown"}${Number.isFinite(u) ? ` (${Math.round(u * 100)}% of the window; hint floor ${floorFor(u, parseProfile(c.profile)).toFixed(2)})` : ""}. ${formatKeyStatus(resolvedKey().source)}. ${typeof t === "number" ? (cooldownReason(s, t, now()) ?? "No cooldown; semantic checks still apply.") : "Waiting for fresh model usage."} Request log: ${c.logRequests ? requestLogPath(options.logDir) : "off"}. Settings: ${store.path}`,
+      `Mode: ${c.mode}. Minimum: ${c.minContextTokens.toLocaleString("en-US")} tokens. Context: ${t ?? "unknown"}${Number.isFinite(u) ? ` (${Math.round(u * 100)}% of the window; hint floor ${floorFor(u).toFixed(2)})` : ""}. ${formatKeyStatus(resolvedKey().source)}. ${typeof t === "number" ? (cooldownReason(s, t, now()) ?? "No cooldown; semantic checks still apply.") : "Waiting for fresh model usage."} Request log: ${c.logRequests ? requestLogPath(options.logDir) : "off"}. Settings: ${store.path}`,
       "info",
     );
   }

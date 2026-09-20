@@ -53,7 +53,6 @@ const { disabledByEnv } = await import(`${LIB}/disable.ts`);
 const { snapshot } = await import(`${LIB}/context.ts`);
 const { parseJudgment, requestBody, score, floorFor, qualifies, QUESTIONS, JudgeError } =
   await import(`${LIB}/judge.ts`);
-const { parseProfile } = await import(`${LIB}/profile.ts`);
 const { restoreState, initialState, STATE_TYPE } = await import(`${LIB}/state.ts`);
 
 function fakePi(appendedEntries = []) {
@@ -243,8 +242,8 @@ console.log("AC1 inert-by-default gates: ok");
   installAdviser(pi, {
     configDir, logDir,
     key: () => "ts-test-key",
-    evaluate: async (state, key, signal, profile) => {
-      judged.push({ state, key, body: requestBody(state, profile) });
+    evaluate: async (state, key, signal) => {
+      judged.push({ state, key, body: requestBody(state) });
       return qualifyingJudgment();
     },
   });
@@ -406,12 +405,6 @@ console.log("AC1 inert-by-default gates: ok");
   const coordinating = { ...finished, shape: { ...finished.shape, probabilities: { hands_on: 0, coordinating: 1, unclear: 0 } } };
   assert.equal(score(coordinating), 0.5, "finished+coordinating scores 0.5");
   assert.equal(qualifies(coordinating, 0.05), false, "0.5 below strict floor");
-  // Profile override.
-  const profile = parseProfile(JSON.stringify({
-    version: 1, coordinationWeight: 0.9, floors: [[0.1, 0.9], [0.9, 0.4]],
-  }));
-  assert.ok(Math.abs(score(coordinating, profile) - 0.1) < 1e-9, "profile weight scales score");
-  assert.throws(() => parseProfile('{"version":2}'), /Invalid compact-adviser profile/);
   console.log("judge lockstep semantics: ok");
 }
 

@@ -5,7 +5,6 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { floorFor, JudgeError, type Judgment, qualifies, score } from "./judge.ts";
 
-import type { JudgeProfile } from "./profile.ts";
 
 export const REQUEST_LOG_NAME = "compact-adviser-requests.jsonl";
 
@@ -36,7 +35,6 @@ export function responseLogLine(
   judgment: Judgment,
   usage: number,
   at = new Date().toISOString(),
-  profile?: JudgeProfile,
 ): string {
   return `${JSON.stringify({
     at,
@@ -46,10 +44,10 @@ export function responseLogLine(
       done: { choice: judgment.done.choice, probabilities: judgment.done.probabilities },
       shape: { choice: judgment.shape.choice, probabilities: judgment.shape.probabilities },
     },
-    score: score(judgment, profile),
+    score: score(judgment),
     usage: Number.isFinite(usage) ? usage : null,
-    floor: floorFor(usage, profile),
-    qualifies: qualifies(judgment, usage, profile),
+    floor: floorFor(usage),
+    qualifies: qualifies(judgment, usage),
   })}\n`;
 }
 
@@ -76,9 +74,8 @@ export function appendResponseLog(
   body: string,
   judgment: Judgment,
   usage: number,
-  profile?: JudgeProfile,
 ): void {
-  writeLog(agentDir, responseLogLine(body, judgment, usage, undefined, profile));
+  writeLog(agentDir, responseLogLine(body, judgment, usage));
 }
 
 export function appendErrorLog(agentDir: string, error: unknown, body?: string): void {

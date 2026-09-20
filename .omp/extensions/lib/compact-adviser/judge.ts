@@ -3,7 +3,6 @@
 // at pinned commit b2a27b59ce86af4dc8fb5141e169bfbed1e68cee.
 // The request body, question set, response validation, score, floor, and
 // qualification semantics are the upstream lockstep contract; do not drift.
-import type { JudgeProfile } from "./profile.ts";
 
 export const ENDPOINT = "https://api.typesafe.ai/v1/systemone";
 export const MAX_REQUEST_BYTES = 32000;
@@ -187,13 +186,9 @@ export const USAGE_LOOSE_AT = 0.9;
  * come from coordinating sessions, and no question sees them from the
  * stopping state, so the score keeps those below the strict floors.
  */
-export function score(j: Judgment, profile?: JudgeProfile): number {
+export function score(j: Judgment): number {
   const finished = j.done.probabilities.finished ?? 0;
   const handsOn = j.shape.probabilities.hands_on ?? 0;
-  if (profile) {
-    const weight = profile.coordinationWeight;
-    return finished * (1 - weight + weight * handsOn);
-  }
   return finished * (0.5 + 0.5 * handsOn);
 }
 
@@ -203,21 +198,7 @@ export function score(j: Judgment, profile?: JudgeProfile): number {
  * is imminent, so the floor is strict at low usage and relaxes as the window
  * fills. Unknown usage gets the strictest floor.
  */
-export function floorFor(usage: number, profile?: JudgeProfile): number {
-  if (profile) {
-    const points = profile.floors;
-    if (!Number.isFinite(usage) || usage <= points[0]![0]) return points[0]![1];
-    for (let i = 1; i < points.length; i++) {
-      const [rightUsage, rightFloor] = points[i]!;
-      const [leftUsage, leftFloor] = points[i - 1]!;
-      if (usage <= rightUsage) {
-        const raw =
-          leftFloor - (leftFloor - rightFloor) * ((usage - leftUsage) / (rightUsage - leftUsage));
-        return Math.round(raw * 1000) / 1000;
-      }
-    }
-    return points[points.length - 1]![1];
-  }
+export function floorFor(usage: number): number {
   if (!Number.isFinite(usage) || usage <= USAGE_STRICT_UNTIL) return FLOOR_MAX;
   if (usage >= USAGE_LOOSE_AT) return FLOOR_MIN;
   const raw =
@@ -231,14 +212,14 @@ export function floorFor(usage: number, profile?: JudgeProfile): number {
  * One judgment decides both hint and auto. Mode only chooses what to do after
  * this shared gate; auto is not a higher bar.
  */
-export function qualifies(j: Judgment, usage: number, profile?: JudgeProfile): boolean {
-  return score(j, profile) >= floorFor(usage, profile);
+export function qualifies(j: Judgment, usage: number): boolean {
+  return score(j) >= floorFor(usage);
 }
-export function requestBody(state: unknown, profile?: JudgeProfile): string {
+export function requestBody(state: unknown): string {
   const body = JSON.stringify({
     model: "jev-latest",
     state,
-    questions: profile?.questions ?? QUESTIONS,
+    questions: QUESTIONS,
   });
   if (Buffer.byteLength(body) > MAX_REQUEST_BYTES) throw new JudgeError("input");
   return body;
@@ -249,7 +230,6 @@ export async function judge(
   signal: AbortSignal,
   transport: typeof fetch = fetch,
   timeoutMs = 2000,
-  profile?: JudgeProfile,
 ): Promise<Judgment> {
   const timeout = AbortSignal.timeout(timeoutMs);
   try {
@@ -257,7 +237,7 @@ export async function judge(
       method: "POST",
       redirect: "error",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-      body: requestBody(state, profile),
+      body: requestBody(state),
       signal: AbortSignal.any([signal, timeout]),
     });
     if (!response.ok) {
