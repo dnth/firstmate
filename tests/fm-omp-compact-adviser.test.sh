@@ -50,7 +50,7 @@ const TMP = process.env.FM_TMP;
 const { installAdviser } = await import(`${LIB}/adviser.ts`);
 const { ConfigStore } = await import(`${LIB}/config.ts`);
 const { disabledByEnv } = await import(`${LIB}/disable.ts`);
-const { snapshot } = await import(`${LIB}/context.ts`);
+const { snapshot, clipMiddle } = await import(`${LIB}/context.ts`);
 const { parseJudgment, requestBody, score, floorFor, qualifies, QUESTIONS, JudgeError } =
   await import(`${LIB}/judge.ts`);
 const { restoreState, initialState, STATE_TYPE } = await import(`${LIB}/state.ts`);
@@ -229,6 +229,7 @@ assert.equal(disabledByEnv(" TRUE "), true);
 assert.equal(disabledByEnv("on"), true);
 assert.equal(disabledByEnv("0"), false);
 assert.equal(disabledByEnv(undefined), false);
+assert.ok(Buffer.byteLength(clipMiddle("é".repeat(1000), 512).text) <= 512);
 console.log("AC1 inert-by-default gates: ok");
 
 // ------------------------------------------------- AC2: opt-in end-to-end hint path

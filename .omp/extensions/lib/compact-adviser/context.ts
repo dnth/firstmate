@@ -55,12 +55,13 @@ export function clipMiddle(text: string, limit: number): { text: string; truncat
     omitted = Math.max(0, raw.byteLength - head - tail);
   }
   const marker = truncatedMarker(omitted);
+  const candidate = Buffer.concat([
+    raw.subarray(0, head),
+    Buffer.from(marker),
+    raw.subarray(raw.byteLength - tail),
+  ]).toString("utf8");
   return {
-    text: Buffer.concat([
-      raw.subarray(0, head),
-      Buffer.from(marker),
-      raw.subarray(raw.byteLength - tail),
-    ]).toString("utf8"),
+    text: Buffer.byteLength(candidate) <= limit ? candidate : clip(candidate, limit).text,
     truncated: true,
   };
 }
