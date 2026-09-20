@@ -44,6 +44,7 @@ function primaryIntegrationApplies(): boolean {
         . "$1/bin/fm-gate-refuse-lib.sh"
         . "$1/bin/fm-primary-scope-lib.sh"
         ! fm_is_gate_agent "$1" || exit 1
+        ! fm_root_is_secondmate_home "$1" || exit 1
         fm_primary_scope_matches "$1" "$2" && exit 0
         # Only the native OMP owner admits a first plain launch before its
         # canonical state directory exists. Generic hooks remain silent.

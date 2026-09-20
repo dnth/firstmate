@@ -17,6 +17,11 @@ mkdir -p "$PRIMARY_FIXTURE/bin" "$PRIMARY_FIXTURE/state" "$PRIMARY_FIXTURE/confi
 echo "# fixture" > "$PRIMARY_FIXTURE/AGENTS.md"
 git -C "$PRIMARY_FIXTURE" init -q
 
+SECONDMATE_FIXTURE="$TMP_ROOT/secondmate-home"
+mkdir -p "$SECONDMATE_FIXTURE/bin" "$SECONDMATE_FIXTURE/state" "$SECONDMATE_FIXTURE/config"
+echo "mate-1" > "$SECONDMATE_FIXTURE/.fm-secondmate-home"
+echo "# fixture" > "$SECONDMATE_FIXTURE/AGENTS.md"
+
 # A fixture "worker" home: a linked worktree of the fixture repo, so
 # git-dir != git-common-dir and the scope predicate refuses it.
 git -C "$PRIMARY_FIXTURE" -c user.email=t@t -c user.name=t commit -qm init --allow-empty
@@ -28,6 +33,7 @@ mkdir -p "$TMP_ROOT/worker-home/bin"
 run_node() {
   FM_LIB="$LIB" FM_ENTRY="$ENTRY" \
   FM_PRIMARY="$PRIMARY_FIXTURE" FM_WORKER="$TMP_ROOT/worker-home" FM_TMP="$TMP_ROOT" \
+  FM_SECONDMATE="$SECONDMATE_FIXTURE" \
   node --experimental-strip-types --input-type=module <<'JS'
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
@@ -38,6 +44,7 @@ const LIB = process.env.FM_LIB;
 const ENTRY = process.env.FM_ENTRY;
 const PRIMARY = process.env.FM_PRIMARY;
 const WORKER = process.env.FM_WORKER;
+const SECONDMATE = process.env.FM_SECONDMATE;
 const TMP = process.env.FM_TMP;
 
 const { installAdviser } = await import(`${LIB}/adviser.ts`);
@@ -198,6 +205,22 @@ async function flush() {
   mod.default(pi);
   assert.equal(pi.handlers.size, 0, "disable env must make the adapter inert");
   delete process.env.COMPACT_ADVISER_DISABLE;
+  process.env.FM_ROOT_OVERRIDE = prevRoot;
+  process.env.FM_STATE_OVERRIDE = prevState;
+  process.env.FM_CONFIG_OVERRIDE = prevConfig;
+}
+{
+  writeConfig(`${SECONDMATE}/config`, { mode: "hint", minContextTokens: 40000, logRequests: false });
+  const pi = fakePi();
+  const prevRoot = process.env.FM_ROOT_OVERRIDE;
+  const prevState = process.env.FM_STATE_OVERRIDE;
+  const prevConfig = process.env.FM_CONFIG_OVERRIDE;
+  process.env.FM_ROOT_OVERRIDE = SECONDMATE;
+  process.env.FM_STATE_OVERRIDE = `${SECONDMATE}/state`;
+  process.env.FM_CONFIG_OVERRIDE = `${SECONDMATE}/config`;
+  const mod = await import(`${ENTRY}?t=${Date.now()}-sm`);
+  mod.default(pi);
+  assert.equal(pi.handlers.size, 0, "secondmate sessions must never activate the adviser");
   process.env.FM_ROOT_OVERRIDE = prevRoot;
   process.env.FM_STATE_OVERRIDE = prevState;
   process.env.FM_CONFIG_OVERRIDE = prevConfig;
