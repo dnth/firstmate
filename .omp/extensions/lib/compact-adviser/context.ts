@@ -382,12 +382,5 @@ export function snapshot(ctx: ExtensionContext, secrets: readonly (string | unde
     state,
     conversationTokens,
     checkpointKey,
-    autoCoverage:
-      omittedUsers === 0 &&
-      !recentTruncated &&
-      !hasImages &&
-      !redacted &&
-      !unknownContext &&
-      recoveryAvailable,
   };
 }
