@@ -670,6 +670,13 @@ The branch session is built with the native prompt-cache options providerPromptC
 The committed live guard does not observe server-side cache-read token counts, which OMP does not expose to the extension surface, so no cache-hit-rate claim is made here.
 
 Mid-flight branch replacement, model/effort hot-swap, and hung-branch live takeover are deliberately out of scope for this port (docs/omp-supervision-branch.md), so the guard exercises only the shipped surface: a resident branch with clean-boundary and kill-restart transitions.
+
+#### OMP compact-adviser runtime API addendum
+
+The attended-primary, hint-only compact-adviser adapter was re-verified on 2026-09-20 against `@oh-my-pi/pi-coding-agent` 18.2.6.
+The verification covered the extension registration and event surface in `packages/coding-agent/src/extensibility/index.ts` and `packages/coding-agent/src/extensibility/types.ts`, the active transcript and session identity methods in `packages/coding-agent/src/session/session-manager.ts`, the context-usage and idle methods in `packages/coding-agent/src/extensibility/extension-context.ts`, and the person-only widget/status methods in `packages/coding-agent/src/ui/ui.ts`.
+These are the runtime APIs consumed by `.omp/extensions/fm-compact-adviser-omp.ts` and `.omp/extensions/lib/compact-adviser/{adviser,context}.ts`.
+The adapter's focused guard is `tests/fm-omp-compact-adviser.test.sh`; no `sendMessage` or compaction API is used for hints.
 #### OMP main-fallback re-entry
 
 The live OMP 18.0.10 observation on 2026-08-31 found the supervision branch unavailable while fallback notifications were handled by MAIN.
