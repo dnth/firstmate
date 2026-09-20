@@ -92,7 +92,6 @@ export function installAdviser(pi: ExtensionAPI, options: Options): void {
     options.evaluate ??
     ((state, key, signal) => judge(state, key, signal));
   let generation = 0;
-  let lifetime = 0;
   let request: AbortController | undefined;
   let compacting = false;
   let hintVisible = false;
@@ -268,7 +267,6 @@ export function installAdviser(pi: ExtensionAPI, options: Options): void {
     );
   });
   pi.on("session_start", (_event, ctx) => {
-    lifetime++;
     invalidate(ctx);
     compacting = false;
     clearStatus(ctx);
@@ -293,7 +291,6 @@ export function installAdviser(pi: ExtensionAPI, options: Options): void {
     refresh(ctx);
   });
   pi.on("session_before_switch", (_event, ctx) => {
-    lifetime++;
     invalidate(ctx);
   });
   pi.on("session_switch", (_event, ctx) => {
@@ -302,7 +299,6 @@ export function installAdviser(pi: ExtensionAPI, options: Options): void {
     refresh(ctx);
   });
   pi.on("session_before_branch", (_event, ctx) => {
-    lifetime++;
     invalidate(ctx);
   });
   pi.on("session_branch", (_event, ctx) => {
@@ -311,7 +307,6 @@ export function installAdviser(pi: ExtensionAPI, options: Options): void {
     refresh(ctx);
   });
   pi.on("session_before_tree", (_event, ctx) => {
-    lifetime++;
     invalidate(ctx);
   });
   pi.on("session_tree", (_event, ctx) => {
@@ -320,7 +315,6 @@ export function installAdviser(pi: ExtensionAPI, options: Options): void {
     refresh(ctx);
   });
   pi.on("session_shutdown", (_event, ctx) => {
-    lifetime++;
     invalidate(ctx);
     compacting = false;
     clearStatus(ctx);
