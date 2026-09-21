@@ -619,6 +619,17 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       }
       persistenceFailed = true;
     } finally {
+      if (coalesceMainFallbackWakes) {
+        owner.mainFallbackWakeInFlight = null;
+        owner.mainFallbackInFlightRows = null;
+        owner.mainFallbackInFlightTurnEnds = 0;
+        owner.mainFallbackWakeSentAtMs = null;
+        owner.mainFallbackEpisode = false;
+        owner.mainFallbackSuccessor = false;
+        owner.mainFallbackSuccessorGranted = false;
+        owner.mainFallbackBaselineRows = null;
+        persistEpisodeState(owner);
+      }
       const child = stopGeneration(owner);
       await waitForGenerationChildClose(child);
     }
@@ -736,10 +747,12 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
         owner.mainFallbackWakeInFlight = null;
         owner.mainFallbackInFlightRows = null;
         owner.mainFallbackWakeSentAtMs = null;
+        owner.mainFallbackInFlightTurnEnds = 0;
+        if (generationIsLive(owner)) persistEpisodeState(owner);
       }
       throw error;
     }
-    if (trackMainFallback) persistEpisodeState(owner);
+    if (trackMainFallback && generationIsLive(owner)) persistEpisodeState(owner);
     // Accepted by the runtime. A generation replaced while the runtime was
     // accepting the follow-up may have lost the message with the old session,
     // so report it undelivered and let the replacement replay the still-pending
