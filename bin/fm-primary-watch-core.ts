@@ -15,14 +15,18 @@
 //
 // Delivery versus consumption (stated once here):
 // A main follow-up is delivered once the runtime accepts it (sendFollowUp
-// resolves). The successor pipeline never waits for the model to read it: a
-// follow-up queued while main is streaming joins the running run without ever
-// raising before_agent_start, so waiting on that event stalls every later close.
-// Consumption is tracked only so a replacement can replay a follow-up the
-// runtime had not consumed. An idle main consumes at before_agent_start; a
-// streaming main consumes at the user message_start carrying the exact wake
-// text; either event finishes the pending record, and a still-unconsumed record
-// rides the replacement handoff.
+// resolves). Consumption is tracked so a replacement can replay a follow-up
+// the runtime had not consumed and so a coalescing episode can be retired.
+// Consumption evidence is whichever surface the runtime emits: a streaming
+// main consumes at before_agent_start or the user message_start carrying the
+// exact wake text, while an idle-main injection opens an agent-initiated turn
+// that never emits before_agent_start - there the first turn_start after the
+// accepted send, or the wake's own custom-role message_start, is the evidence.
+// Any of these finishes the pending record. An accepted wake whose in-flight
+// marker outlives a full turn boundary, or whose send-time queue rows were
+// drained, is also cleared as consumed at turn_end, so a missed consumption
+// signal can never suppress every later wake. A still-unconsumed record rides
+// the replacement handoff.
 //
 // The active generation and the process-exit fallback are process-wide, not
 // per-core-instance.
@@ -125,6 +129,17 @@ type SessionGeneration = {
   pendingTurnEnd: boolean;
   mainFallbackWakeInFlight: string | null;
   mainFallbackBaselineRows: Set<string> | null;
+  // Wedge evidence for an in-flight fallback wake whose consumption events the
+  // runtime may never emit (the idle-main injection path raises neither
+  // before_agent_start nor a user-role message_start): the queue rows pending
+  // when it was sent, the count of turn boundaries it has outlived, and the
+  // timestamps persisted for off-process diagnosis.
+  mainFallbackInFlightRows: Set<string> | null;
+  mainFallbackInFlightTurnEnds: number;
+  mainFallbackWakeSentAtMs: number | null;
+  mainFallbackWakeConsumedAtMs: number | null;
+  lastTurnStartAtMs: number | null;
+  lastTurnEndAtMs: number | null;
 };
 
 export type ArmResult = {
@@ -166,6 +181,9 @@ export type PrimaryWatchCore = {
   markLoaded: () => void;
   sessionShutdown: (replacement?: boolean) => Promise<void>;
   sessionStart: () => void;
+  // A main turn opened: positive consumption evidence for an accepted wake on
+  // runtimes where the injection path emits no before_agent_start.
+  turnStart: () => void;
   turnEnd: () => void;
 };
 
@@ -280,6 +298,12 @@ function createGeneration(): SessionGeneration {
     pendingTurnEnd: false,
     mainFallbackWakeInFlight: null,
     mainFallbackBaselineRows: null,
+    mainFallbackInFlightRows: null,
+    mainFallbackInFlightTurnEnds: 0,
+    mainFallbackWakeSentAtMs: null,
+    mainFallbackWakeConsumedAtMs: null,
+    lastTurnStartAtMs: null,
+    lastTurnEndAtMs: null,
   };
 }
 
@@ -337,6 +361,10 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
   const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
   const handoffDir = `${state}/extensions/${runtime}-primary-watch`;
   const actionableHandoff = `${handoffDir}/session-replacement-actionable.json`;
+  // Durable, diagnostic-only mirror of the main-fallback episode so a wedge is
+  // readable from disk (and fm-guard.sh can warn on an in-flight wake that has
+  // outlived a full turn boundary) instead of living only in this process.
+  const episodeStateFile = `${handoffDir}/main-fallback-episode.state`;
   let nextHandoffId = 0;
   let replacementHandoff: PendingActionableClose[] | null = null;
   let replacementCoordinator = replacementCoordinators.get(actionableHandoff);
@@ -492,6 +520,53 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     }
   }
 
+  // Best-effort atomic write of the episode mirror. Failures are swallowed:
+  // this file is diagnosis, never delivery authority. Nothing is written until
+  // an episode exists or a prior file needs its terminal state refreshed.
+  let episodeStateWrites = 0;
+  function persistEpisodeState(owner: SessionGeneration): void {
+    if (!coalesceMainFallbackWakes) return;
+    if (
+      !owner.mainFallbackEpisode &&
+      !owner.mainFallbackWakeInFlight &&
+      !existsSync(episodeStateFile)
+    ) {
+      return;
+    }
+    const temporary = `${episodeStateFile}.tmp-${process.pid}-${++episodeStateWrites}`;
+    try {
+      mkdirSync(handoffDir, { recursive: true });
+      const inFlightToken = owner.mainFallbackWakeInFlight
+        ? createHash("sha256").update(owner.mainFallbackWakeInFlight).digest("hex").slice(0, 16)
+        : "";
+      writeFileSync(
+        temporary,
+        [
+          "version=1",
+          `generation=${owner.id}`,
+          `episode=${owner.mainFallbackEpisode ? 1 : 0}`,
+          `in_flight=${owner.mainFallbackWakeInFlight ? 1 : 0}`,
+          `in_flight_token=${inFlightToken}`,
+          `in_flight_sent_at_ms=${owner.mainFallbackWakeSentAtMs ?? 0}`,
+          `in_flight_turn_ends=${owner.mainFallbackInFlightTurnEnds}`,
+          `last_consume_at_ms=${owner.mainFallbackWakeConsumedAtMs ?? 0}`,
+          `last_turn_start_at_ms=${owner.lastTurnStartAtMs ?? 0}`,
+          `last_turn_end_at_ms=${owner.lastTurnEndAtMs ?? 0}`,
+          `updated_at_ms=${Date.now()}`,
+          "",
+        ].join("\n"),
+        { mode: 0o600 },
+      );
+      renameSync(temporary, episodeStateFile);
+    } catch {
+      try {
+        unlinkSync(temporary);
+      } catch {
+        // The temp file may not have been created.
+      }
+    }
+  }
+
   function lockOwnership(): LockOwnership {
     let lockPid = "";
     try {
@@ -628,10 +703,10 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
   }
 
   // Deliver a wake to main. The runtime accepting the follow-up is the
-  // delivery; consumption is a separate event observed by the adapter at
-  // before_agent_start for an idle main and at the user message_start for a
-  // streaming main. Until consumption the pending record is kept in
-  // unconsumedWakes so a session replacement can replay it.
+  // delivery; consumption is a separate event observed by the adapter (see the
+  // delivery-versus-consumption contract at the top of this file). Until
+  // consumption the pending record is kept in unconsumedWakes so a session
+  // replacement can replay it.
   async function sendWake(
     owner: SessionGeneration,
     message: string,
@@ -644,16 +719,27 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
     );
     if (pending) owner.unconsumedWakes.set(pending.token, { content, pending });
-    if (trackMainFallback) owner.mainFallbackWakeInFlight = content;
+    if (trackMainFallback) {
+      owner.mainFallbackWakeInFlight = content;
+      owner.mainFallbackInFlightTurnEnds = 0;
+      owner.mainFallbackWakeSentAtMs = Date.now();
+      // Rows pending at send time are the drain-evidence baseline: if a later
+      // boundary finds every one retired, the wake was handled even though no
+      // consumption event ever surfaced.
+      owner.mainFallbackInFlightRows = owner.mainFallbackBaselineRows ?? mainOwnedWakeSnapshot();
+    }
     try {
       await sendFollowUp(content);
     } catch (error) {
       if (pending) owner.unconsumedWakes.delete(pending.token);
       if (trackMainFallback && owner.mainFallbackWakeInFlight === content) {
         owner.mainFallbackWakeInFlight = null;
+        owner.mainFallbackInFlightRows = null;
+        owner.mainFallbackWakeSentAtMs = null;
       }
       throw error;
     }
+    if (trackMainFallback) persistEpisodeState(owner);
     // Accepted by the runtime. A generation replaced while the runtime was
     // accepting the follow-up may have lost the message with the old session,
     // so report it undelivered and let the replacement replay the still-pending
@@ -661,8 +747,9 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     return generationIsLive(owner);
   }
 
-  // The runtime consumed a main follow-up: idle main at before_agent_start,
-  // streaming main at the user message_start carrying the exact wake text.
+  // The runtime consumed a main follow-up - or bookkeeping determined a
+  // still-in-flight wake was handled/wedged past its bound (turnEnd). Either
+  // way the pending record finishes and the in-flight marker clears.
   function consumeWake(owner: SessionGeneration, text: string): void {
     for (const [token, wake] of owner.unconsumedWakes) {
       if (wake.content !== text) continue;
@@ -674,13 +761,14 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
         surfaceCleanupFailure(owner, error);
         schedulePendingCleanup(owner);
       }
-      if (owner.mainFallbackWakeInFlight === text) {
-        owner.mainFallbackWakeInFlight = null;
-      }
-      return;
+      break;
     }
     if (owner.mainFallbackWakeInFlight === text) {
       owner.mainFallbackWakeInFlight = null;
+      owner.mainFallbackInFlightRows = null;
+      owner.mainFallbackInFlightTurnEnds = 0;
+      owner.mainFallbackWakeConsumedAtMs = Date.now();
+      persistEpisodeState(owner);
     }
   }
 
@@ -1415,60 +1503,111 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     return new Set((result.stdout || "").split(/\r?\n/).filter(Boolean));
   }
 
+  // A main turn opened. An idle-main injection drives agent.prompt() directly,
+  // which emits no before_agent_start and arrives as a custom-role message, so
+  // the first turn boundary after an accepted send is itself the consumption
+  // evidence: the runtime only starts a turn for a message it has accepted into
+  // the prompt. A turn that was already streaming when its wake was queued
+  // emitted its turn_start before the send, so this can only clear a marker
+  // whose own turn (or a later one) has actually begun.
+  function turnStart(): void {
+    const owner = generation;
+    owner.lastTurnStartAtMs = Date.now();
+    if (!coalesceMainFallbackWakes || !generationIsLive(owner)) return;
+    if (owner.mainFallbackWakeInFlight) consumeWake(owner, owner.mainFallbackWakeInFlight);
+    persistEpisodeState(owner);
+  }
+
   // Main turn boundary: the only safe point to evaluate a suppressed burst.
   // While an episode is open, unread main-owned rows mean the acknowledged
   // drain left work behind - grant exactly one successor injection. A fully
   // drained queue retires the episode and finishes every close it covered, so
   // no redundant notification follows an acknowledgement that consumed them.
+  // The in-flight marker is bounded here too: if every row pending at send
+  // time has been drained, or the marker has outlived a full turn boundary
+  // (two consecutive turn ends without consumption), the wake is treated as
+  // consumed instead of suppressing every later main-bound wake forever.
   function turnEnd(): void {
     const owner = generation;
-    if (!coalesceMainFallbackWakes || !generationIsLive(owner) || !owner.mainFallbackEpisode) return;
-    if (owner.restoring) {
-      // A delivery run is mid-flight: a close in its restore phase has not
-      // reached the suppression point yet, so an empty queue here could retire
-      // the episode under it and let that close inject late. Re-evaluate the
-      // boundary when the run settles.
-      owner.pendingTurnEnd = true;
-      return;
-    }
-    const rowCount = mainOwnedWakeRows();
-    if (rowCount > 0) {
-      const retry = owner.pendingActionables.find(
-        (pending) => !pending.delivered && !owner.unconsumedWakes.has(pending.token) &&
-          !owner.episodeCoalesced.has(pending.token),
-      );
-      if (retry && !owner.mainFallbackWakeInFlight) {
-        owner.mainFallbackSuccessor = true;
-        void processPendingActionables(owner);
+    if (!coalesceMainFallbackWakes || !generationIsLive(owner)) return;
+    owner.lastTurnEndAtMs = Date.now();
+    try {
+      if (!owner.mainFallbackEpisode) return;
+      if (owner.restoring) {
+        // A delivery run is mid-flight: a close in its restore phase has not
+        // reached the suppression point yet, so an empty queue here could
+        // retire the episode under it and let that close inject late.
+        // Re-evaluate the boundary when the run settles.
+        owner.pendingTurnEnd = true;
         return;
       }
-      if (!owner.mainFallbackBaselineRows) {
-        const recoveredRows = mainOwnedWakeSnapshot();
-        if (!recoveredRows) return;
-        owner.mainFallbackBaselineRows = recoveredRows;
-        return;
+      if (owner.mainFallbackWakeInFlight) {
+        owner.mainFallbackInFlightTurnEnds += 1;
+      } else {
+        owner.mainFallbackInFlightTurnEnds = 0;
       }
-      const currentRows = mainOwnedWakeSnapshot();
-      if (!currentRows) return;
-      if ([...owner.mainFallbackBaselineRows].some((row) => currentRows.has(row))) return;
-      // The successor is the newest close whose notification was never
-      // accepted: oldest-first would re-present rows the drain already
-      // acknowledged. Coalesced marks are cleared only for that record so the
-      // run loop delivers exactly it and re-suppresses the rest.
-      const next = owner.pendingActionables
-        .filter((pending) => !pending.delivered && !owner.unconsumedWakes.has(pending.token))
-        .pop();
-      if (next && !owner.mainFallbackWakeInFlight && !owner.mainFallbackSuccessorGranted) {
-        owner.mainFallbackSuccessor = true;
-        owner.mainFallbackSuccessorGranted = true;
-        if (currentRows) owner.mainFallbackBaselineRows = currentRows;
-        owner.episodeCoalesced.delete(next.token);
-        void processPendingActionables(owner);
-      } else if (
-        owner.pendingActionables.every((pending) => pending.delivered) &&
-        !owner.mainFallbackWakeInFlight &&
-        !owner.mainFallbackSuccessorGranted
-      ) {
+      const rowCount = mainOwnedWakeRows();
+      if (rowCount > 0) {
+        let clearedStaleInFlight = false;
+        if (owner.mainFallbackWakeInFlight) {
+          const sendRows = owner.mainFallbackInFlightRows;
+          const sendRowsDrained = sendRows !== null &&
+            ((): boolean => {
+              const currentRows = mainOwnedWakeSnapshot();
+              return currentRows !== null &&
+                ![...sendRows].some((row) => currentRows.has(row));
+            })();
+          // Two boundaries survived means the marker outlived one full turn
+          // interval without the runtime surfacing any consumption event.
+          if (sendRowsDrained || owner.mainFallbackInFlightTurnEnds >= 2) {
+            consumeWake(owner, owner.mainFallbackWakeInFlight);
+            clearedStaleInFlight = true;
+          }
+        }
+        const retry = owner.pendingActionables.find(
+          (pending) => !pending.delivered && !owner.unconsumedWakes.has(pending.token) &&
+            !owner.episodeCoalesced.has(pending.token),
+        );
+        if (retry && !owner.mainFallbackWakeInFlight) {
+          owner.mainFallbackSuccessor = true;
+          void processPendingActionables(owner);
+          return;
+        }
+        if (!owner.mainFallbackBaselineRows) {
+          const recoveredRows = mainOwnedWakeSnapshot();
+          if (!recoveredRows) return;
+          owner.mainFallbackBaselineRows = recoveredRows;
+          return;
+        }
+        const currentRows = mainOwnedWakeSnapshot();
+        if (!currentRows) return;
+        if (
+          !clearedStaleInFlight &&
+          [...owner.mainFallbackBaselineRows].some((row) => currentRows.has(row))
+        ) {
+          return;
+        }
+        // The successor is the newest close whose notification was never
+        // accepted: oldest-first would re-present rows the drain already
+        // acknowledged. Coalesced marks are cleared only for that record so
+        // the run loop delivers exactly it and re-suppresses the rest. A
+        // just-cleared stale marker skips the baseline early return above:
+        // its notification was never read, so the rows it covered still earn
+        // one successor injection.
+        const next = owner.pendingActionables
+          .filter((pending) => !pending.delivered && !owner.unconsumedWakes.has(pending.token))
+          .pop();
+        if (next && !owner.mainFallbackWakeInFlight && !owner.mainFallbackSuccessorGranted) {
+          owner.mainFallbackSuccessor = true;
+          owner.mainFallbackSuccessorGranted = true;
+          if (currentRows) owner.mainFallbackBaselineRows = currentRows;
+          owner.episodeCoalesced.delete(next.token);
+          void processPendingActionables(owner);
+        } else if (
+          owner.pendingActionables.every((pending) => pending.delivered) &&
+          !owner.mainFallbackWakeInFlight &&
+          !owner.mainFallbackSuccessorGranted
+        ) {
         // Rows outlived every close record (e.g. appended after the last
         // actionable close): a synthetic wake re-presents them. The episode
         // stays open so the next boundary re-evaluates.
@@ -1485,22 +1624,30 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       // that in-flight notification already covers the unread rows.
       return;
     }
-    if (owner.mainFallbackWakeInFlight) return;
-    owner.mainFallbackEpisode = false;
-    owner.mainFallbackSuccessor = false;
-    owner.mainFallbackSuccessorGranted = false;
-    owner.mainFallbackBaselineRows = null;
-    for (const pending of owner.pendingActionables.filter(
-      (item) => !item.delivered && owner.episodeCoalesced.has(item.token),
-    )) {
-      pending.delivered = true;
-      owner.episodeCoalesced.delete(pending.token);
-      try {
-        finishPendingActionable(owner, pending);
-      } catch (error) {
-        surfaceCleanupFailure(owner, error);
-        schedulePendingCleanup(owner);
+      // An empty queue under a still-set in-flight marker means the wake's own
+      // turn ran and drained everything while its consumption events never
+      // surfaced; keeping the marker would wedge every later wake behind it.
+      if (owner.mainFallbackWakeInFlight) consumeWake(owner, owner.mainFallbackWakeInFlight);
+      owner.mainFallbackEpisode = false;
+      owner.mainFallbackSuccessor = false;
+      owner.mainFallbackSuccessorGranted = false;
+      owner.mainFallbackBaselineRows = null;
+      owner.mainFallbackInFlightRows = null;
+      owner.mainFallbackInFlightTurnEnds = 0;
+      for (const pending of owner.pendingActionables.filter(
+        (item) => !item.delivered && owner.episodeCoalesced.has(item.token),
+      )) {
+        pending.delivered = true;
+        owner.episodeCoalesced.delete(pending.token);
+        try {
+          finishPendingActionable(owner, pending);
+        } catch (error) {
+          surfaceCleanupFailure(owner, error);
+          schedulePendingCleanup(owner);
+        }
       }
+    } finally {
+      persistEpisodeState(owner);
     }
   }
 
@@ -1534,6 +1681,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     markLoaded,
     sessionShutdown,
     sessionStart,
+    turnStart,
     turnEnd,
   };
 }

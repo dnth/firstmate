@@ -367,6 +367,9 @@ export default function (omp: ExtensionAPI) {
   omp.on("turn_start", () => {
     taskInboxDoorbell.notifyTurnStart();
     publishTaskTurnStarted();
+    // An idle-main wake injection opens an agent-initiated turn that emits no
+    // before_agent_start; this turn boundary is its consumption evidence.
+    watch.turnStart();
     // A turn can begin while no arm child is live - after an actionable close
     // whose successor restore failed, an exhausted continuity retry, or a lock
     // reclaimed without a follow-up arm - and only the turn-end guard would
@@ -410,8 +413,20 @@ export default function (omp: ExtensionAPI) {
   });
 
   omp.on("message_start", (event) => {
-    if (event.message.role !== "user") return;
-    watch.acknowledgeWake(userMessageText(event.message.content));
+    const message = event.message;
+    if (message.role === "user") {
+      watch.acknowledgeWake(userMessageText(message.content));
+      return;
+    }
+    // An idle-main injection is delivered as this custom message inside an
+    // agent-initiated turn that emits no before_agent_start, so its own
+    // message_start is the consumption evidence when the text matches a wake.
+    if (
+      message.role === "custom" &&
+      (message as { customType?: unknown }).customType === "firstmate-watcher-wake"
+    ) {
+      watch.acknowledgeWake(userMessageText(message.content));
+    }
   });
 
   omp.on("session_stop", async (event): Promise<SessionStopEventResult | undefined> => {
