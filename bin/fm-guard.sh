@@ -22,8 +22,8 @@
 # the beacon mtime, which a healthy between-turns watcher advances every poll);
 # later guarded commands in the same episode print a one-line reminder instead.
 # Episode state lives only under state/.guard-watcher-stale-banner (volatile,
-# bounded). Independent alarms (queued wakes, worktree tangle) are never
-# suppressed by that dedup. Normal wake handling (watcher briefly down between a
+# bounded). Independent alarms (queued wakes, worktree tangle, a stale
+# in-flight OMP fallback wake) are never suppressed by that dedup. Normal wake handling (watcher briefly down between a
 # wake and the next supervision resume) stays inside the grace window and stays
 # silent. The queued-wakes warning counts only the rows the calling actor can
 # itself present or retire (fm_wake_actor_pending_count), so it is never an
@@ -160,6 +160,23 @@ if [ -n "$tangle_branch" ]; then
     fi
     printf '●%s\n' "$trule"
   } >&2
+fi
+
+# A still in-flight OMP main-fallback wake that has outlived a full turn
+# boundary means the runtime never surfaced its consumption, so every later
+# main-bound wake is being suppressed. The extension mirrors that marker to
+# state/extensions/omp-primary-watch/main-fallback-episode.state; warn whenever
+# a turn end is recorded after the send with the marker still set.
+OMP_EPISODE_STATE="$STATE/extensions/omp-primary-watch/main-fallback-episode.state"
+if [ -f "$OMP_EPISODE_STATE" ]; then
+  omp_inflight=$(sed -n 's/^in_flight=//p' "$OMP_EPISODE_STATE" | head -1)
+  omp_sent_ms=$(sed -n 's/^in_flight_sent_at_ms=//p' "$OMP_EPISODE_STATE" | head -1)
+  omp_turn_end_ms=$(sed -n 's/^last_turn_end_at_ms=//p' "$OMP_EPISODE_STATE" | head -1)
+  if [ "$omp_inflight" = 1 ] \
+    && [[ "$omp_sent_ms" =~ ^[0-9]+$ ]] && [ "$omp_sent_ms" -gt 0 ] \
+    && [[ "$omp_turn_end_ms" =~ ^[0-9]+$ ]] && [ "$omp_turn_end_ms" -gt "$omp_sent_ms" ]; then
+    echo "WARNING: an OMP main-fallback wake stayed in-flight across a full turn boundary without consumption - later main-bound wakes are suppressed; a session replacement clears the marker." >&2
+  fi
 fi
 
 # Compute supervision need and watcher-beacon freshness via the shared

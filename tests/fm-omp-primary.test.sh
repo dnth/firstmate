@@ -1275,13 +1275,22 @@ const api = {
   on(name, handler) { handlers.set(name, handler); },
   registerCommand() {},
   registerTool() {},
+  // The runtime accepts each wake for an idle main: the injection opens an
+  // agent-initiated turn, which emits turn_start and the custom message_start
+  // message_start - never before_agent_start (see the switch-nudge note at the
+  // native contract test). Withheld consumption models the runtime dropping
+  // every one of those signals.
   sendMessage(message) {
     steers.push(String(message?.content ?? ""));
     if (withholdConsumption) {
       withholdConsumption = false;
       return;
     }
-    handlers.get("before_agent_start")?.({ type: "before_agent_start", prompt: message.content }, {});
+    handlers.get("turn_start")?.({ type: "turn_start" }, context);
+    handlers.get("message_start")?.({
+      type: "message_start",
+      message: { role: "custom", customType: message.customType, content: message.content },
+    });
   },
 };
 const count = () => existsSync(`${process.env.FM_STATE_OVERRIDE}/watch-count`)
@@ -1771,6 +1780,166 @@ JS
   pass "OMP coalesces fallback wakes into one in-flight notification per handling episode"
 }
 
+# An idle-main injection opens an agent-initiated turn that emits no
+# before_agent_start, so consumption must come from turn_start or the wake's
+# own custom-role message_start. Regression for the wedge where one such send
+# left mainFallbackWakeInFlight set forever and suppressed every later wake.
+test_native_omp_idle_main_wake_consumption_and_stale_bound() {
+  local fixture out status=0
+  fixture=$(make_omp_queue_fixture native-idle-wake-consume)
+  cat > "$fixture/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+state=${FM_STATE_OVERRIDE:?}
+count=$(cat "$state/watch-count" 2>/dev/null || printf 0)
+count=$((count + 1))
+printf '%s\n' "$count" > "$state/watch-count"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$state/watch-stop" ]; do
+  if [ -e "$state/wake-now-$count" ]; then
+    printf 'signal: idle-close-%s\n' "$count"
+    exit 0
+  fi
+  sleep 0.02
+done
+SH
+  chmod +x "$fixture/bin/fm-watch-arm.sh"
+  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
+    FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    node --input-type=module 2>&1 <<'JS'
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const state = process.env.FM_STATE_OVERRIDE;
+const episodeFile = `${state}/extensions/omp-primary-watch/main-fallback-episode.state`;
+const handlers = new Map();
+const wakes = [];
+// suppressConsume models the runtime surface that reports the wedge: the
+// injection is accepted but no turn_start, message_start, or
+// before_agent_start ever names it.
+let suppressConsume = false;
+const context = { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "sess-one" } };
+const api = {
+  zod: { object: () => ({}) },
+  on(name, handler) { handlers.set(name, handler); },
+  registerCommand() {},
+  registerTool() {},
+  sendMessage(message) {
+    if (message?.customType !== "firstmate-watcher-wake") return;
+    wakes.push(String(message.content ?? ""));
+    if (suppressConsume) return;
+    // An idle main starts an agent-initiated turn: turn_start and the injected
+    // custom-role message_start of that message fire, before_agent_start never
+    // does.
+    handlers.get("turn_start")?.({ type: "turn_start" }, context);
+    handlers.get("message_start")?.({
+      type: "message_start",
+      message: { role: "custom", customType: "firstmate-watcher-wake", content: message.content },
+    });
+  },
+};
+const queue = `${state}/.wake-queue`;
+const seqFile = `${state}/.wake-queue.seq`;
+let seq = 0;
+const rows = new Map();
+const appendRow = (kind, key) => {
+  seq += 1;
+  const line = `0\t${seq}\t${kind}\t${key}\t${kind}: ${key}`;
+  rows.set(seq, line);
+  writeFileSync(seqFile, `${seq}\n`);
+  appendFileSync(queue, `${line}\n`);
+};
+const drainAll = () => {
+  rows.clear();
+  writeFileSync(queue, "");
+};
+const count = () => existsSync(`${state}/watch-count`) ? Number(readFileSync(`${state}/watch-count`, "utf8").trim()) : 0;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) { if (pred()) return; await sleep(10); }
+  throw new Error(`timeout waiting for ${label}`);
+}
+const episodeState = () => existsSync(episodeFile) ? readFileSync(episodeFile, "utf8") : "";
+const episodeField = (name) => (episodeState().match(new RegExp(`^${name}=(.*)$`, "m")) || [])[1] ?? "";
+
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+process.argv[1] = process.env.EXTENSION;
+const module = await import(`${pathToFileURL(process.env.EXTENSION).href}?idle-consume=${Date.now()}`);
+module.default(api);
+await handlers.get("session_start")({ type: "session_start" }, context);
+await waitFor(() => count() === 1, "initial arm");
+
+// Leg 1: an idle-main wake is consumed by its own turn boundary signals alone
+// (no before_agent_start), and the episode mirror lands on disk.
+appendRow("signal", "crew-a.turn-ended");
+writeFileSync(`${state}/wake-now-1`, "go\n");
+await waitFor(() => wakes.length === 1 && count() === 2, "idle-main fallback wake and successor");
+if (!wakes[0].includes("signal: idle-close-1")) throw new Error(`first idle wake mismatched its close: ${wakes[0]}`);
+await waitFor(() => episodeState() !== "", "persisted episode state");
+if (episodeField("in_flight") !== "0") throw new Error(`idle wake was not consumed by turn_start: ${episodeState()}`);
+if (Number(episodeField("in_flight_sent_at_ms")) <= 0 || Number(episodeField("last_consume_at_ms")) <= 0) {
+  throw new Error(`episode state lost its send/consume timestamps: ${episodeState()}`);
+}
+drainAll();
+await handlers.get("turn_end")({ type: "turn_end" }, context);
+await sleep(100);
+
+// Leg 2: wedge - the next idle send is accepted but every consumption signal
+// is dropped. The first boundary counts it; the second must clear it and let
+// the rows-outlived successor fire.
+suppressConsume = true;
+appendRow("signal", "crew-b.turn-ended");
+writeFileSync(`${state}/wake-now-2`, "go\n");
+await waitFor(() => wakes.length === 2 && count() === 3, "wedged idle-main fallback wake");
+await sleep(50);
+if (episodeField("in_flight") !== "1") throw new Error(`wedged wake was not persisted in-flight: ${episodeState()}`);
+await handlers.get("turn_end")({ type: "turn_end" }, context);
+await sleep(150);
+if (wakes.length !== 2) throw new Error(`a successor fired before the stale bound: ${wakes.length}`);
+if (episodeField("in_flight_turn_ends") !== "1") throw new Error(`boundary count was not persisted: ${episodeState()}`);
+suppressConsume = false;
+await handlers.get("turn_end")({ type: "turn_end" }, context);
+await waitFor(() => wakes.length === 3, "stale in-flight bound did not release one successor");
+if (!wakes[2].includes("wakes remain queued")) throw new Error(`stale-bound successor carried the wrong wake: ${wakes[2]}`);
+drainAll();
+await handlers.get("turn_end")({ type: "turn_end" }, context);
+await sleep(150);
+if (episodeField("in_flight") !== "0") throw new Error(`cleared marker still persisted in-flight: ${episodeState()}`);
+
+// Leg 3: after the wedge clears, an ordinary close must inject again instead
+// of staying suppressed behind the stale marker.
+appendRow("signal", "crew-c.turn-ended");
+writeFileSync(`${state}/wake-now-3`, "go\n");
+await waitFor(() => wakes.length === 4 && count() === 4, "post-wedge close injection");
+if (!wakes[3].includes("signal: idle-close-3")) throw new Error(`post-wedge wake mismatched its close: ${wakes[3]}`);
+drainAll();
+await handlers.get("turn_end")({ type: "turn_end" }, context);
+await sleep(150);
+
+// Leg 4: a wedged marker over a fully drained queue clears at a single
+// boundary and the next close injects immediately.
+suppressConsume = true;
+appendRow("signal", "crew-d.turn-ended");
+writeFileSync(`${state}/wake-now-4`, "go\n");
+await waitFor(() => wakes.length === 5 && count() === 5, "second wedged idle-main wake");
+drainAll();
+await handlers.get("turn_end")({ type: "turn_end" }, context);
+await sleep(150);
+appendRow("signal", "crew-e.turn-ended");
+writeFileSync(`${state}/wake-now-5`, "go\n");
+await waitFor(() => wakes.length === 6, "close after a drained-queue wedge was still suppressed");
+if (!wakes[5].includes("signal: idle-close-5")) throw new Error(`post-drain wake mismatched its close: ${wakes[5]}`);
+
+writeFileSync(`${state}/watch-stop`, "stop\n");
+await handlers.get("session_shutdown")({ type: "session_shutdown" }, context);
+console.log("omp-idle-wake-consume-ok");
+JS
+  ) || status=$?
+  printf 'stop\n' > "$fixture/state/watch-stop" 2>/dev/null || true
+  expect_code 0 "$status" "OMP idle-main wake consumption"
+  assert_contains "$out" omp-idle-wake-consume-ok "OMP idle-main wake stayed suppressed or unbounded: $out"
+  pass "OMP idle-main wakes consume at turn_start and a stale in-flight marker is bounded"
+}
+
 test_native_omp_delivered_handoff_does_not_suppress_queue_notification() {
   local fixture out status=0
   fixture=$(make_omp_queue_fixture native-queue-delivered-handoff)
@@ -1809,6 +1978,58 @@ JS
   pass "OMP ignores already-delivered handoffs when notifying queued wakes"
 }
 
+# fm-guard.sh reads the persisted episode mirror and must warn exactly when an
+# in-flight wake has outlived a recorded turn boundary.
+test_fm_guard_warns_on_stale_omp_inflight_wake() {
+  local fixture state out
+  fixture="$TMP_ROOT/guard-stale-inflight"
+  state="$fixture/state"
+  mkdir -p "$fixture/bin" "$state/extensions/omp-primary-watch" "$fixture/config"
+  for f in "$ROOT"/bin/*; do ln -s "$f" "$fixture/bin/$(basename "$f")"; done
+  : > "$fixture/AGENTS.md"
+  git init -q -b main "$fixture"
+  fm_write_meta "$state/fixturecrew.meta" \
+    "window=fmtest-nonexistent:fakecrew" \
+    "harness=omp" \
+    "kind=ship"
+  local episode_state="$state/extensions/omp-primary-watch/main-fallback-episode.state"
+  printf '%s\n' \
+    'version=1' \
+    'generation=1' \
+    'episode=1' \
+    'in_flight=1' \
+    'in_flight_token=0123456789abcdef' \
+    'in_flight_sent_at_ms=1000' \
+    'in_flight_turn_ends=1' \
+    'last_consume_at_ms=0' \
+    'last_turn_start_at_ms=1500' \
+    'last_turn_end_at_ms=2000' \
+    'updated_at_ms=2000' > "$episode_state"
+  replace_episode_field() {
+    local field=$1 value=$2 tmp="${episode_state}.tmp"
+    awk -v field="$field" -v value="$value" \
+      "index(\$0, field \"=\") == 1 { print field \"=\" value; next } { print }" \
+      "$episode_state" > "$tmp" && mv "$tmp" "$episode_state"
+  }
+  out=$(FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$state" \
+    FM_CONFIG_OVERRIDE="$fixture/config" "$fixture/bin/fm-guard.sh" 2>&1)
+  assert_contains "$out" "main-fallback wake stayed in-flight" \
+    "fm-guard did not warn on an in-flight wake older than a turn"
+  # A marker with no turn boundary after its send is still within its bound.
+  replace_episode_field in_flight_sent_at_ms 3000
+  out=$(FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$state" \
+    FM_CONFIG_OVERRIDE="$fixture/config" "$fixture/bin/fm-guard.sh" 2>&1)
+  assert_not_contains "$out" "stayed in-flight" \
+    "fm-guard warned on an in-flight wake younger than a turn"
+  # A cleared marker never warns.
+  replace_episode_field in_flight 0
+  out=$(FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$state" \
+    FM_CONFIG_OVERRIDE="$fixture/config" "$fixture/bin/fm-guard.sh" 2>&1)
+  assert_not_contains "$out" "stayed in-flight" \
+    "fm-guard warned on a cleared in-flight marker"
+  pass "fm-guard warns only when an OMP in-flight wake outlives a turn boundary"
+}
+
 test_resolve_path_uses_node_when_readlink_f_is_unavailable
 test_exact_bun_omp_primary_identity
 test_standalone_omp_primary_identity
@@ -1827,4 +2048,6 @@ test_native_omp_durable_queue_session_notifications
 test_native_omp_empty_queue_suppresses_session_notifications
 test_native_omp_core_handoff_suppresses_queue_notification
 test_native_omp_main_fallback_coalesces_burst
+test_native_omp_idle_main_wake_consumption_and_stale_bound
 test_native_omp_delivered_handoff_does_not_suppress_queue_notification
+test_fm_guard_warns_on_stale_omp_inflight_wake
