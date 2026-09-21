@@ -495,7 +495,7 @@ run_tmux_env "$ROOT/bin/fm-teardown.sh" "$WORKER" >/dev/null
 printf 'command: fm-spawn %s --scout --harness hermes --backend tmux\n' "$SCOUT"
 run_tmux_env env FM_SPAWN_NO_GUARD=1 "$ROOT/bin/fm-spawn.sh" "$SCOUT" "$PROJECT" \
   --scout --harness hermes --backend tmux --model gpt-5.6-sol --effort medium
-wait_file "$FM_LIVE_HOME/state/$SCOUT.turn-ended" || fail "Hermes scout TUI turn did not end"
+wait_turnend "$FM_LIVE_HOME/state" "$SCOUT" || fail "Hermes scout TUI turn did not end"
 SCOUT_TARGET=$(sed -n 's/^window=//p' "$FM_LIVE_HOME/state/$SCOUT.meta")
 wait_capture "$SCOUT_TARGET" HERMES-TUI-SCOUT-OK || fail "Hermes scout TUI response missing"
 printf 'output: scout_persistent=yes turn_end=touched\n'
