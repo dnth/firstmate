@@ -659,7 +659,7 @@ bin/fm-inbox-result.sh status --note-id <note-id>
 
 `publish` atomically writes `state/inbox-results/<note-id>.result.json` before delivery.
 Repeating the exact publication reuses that record; different content for the same note id is refused.
-`--no-deliver` leaves the record pending for a later process or restart to deliver with `fm-inbox-result.sh deliver --note-id <note-id>`.
+`--no-deliver` leaves the record pending; a later process must explicitly run `fm-inbox-result.sh deliver --note-id <note-id>` (including after a restart).
 
 Delivery creates a posting marker before invoking the adapter.
 A successful structured adapter response becomes `<note-id>.receipt.json`, and that receipt makes later publish/deliver calls no-op successes instead of duplicate user-visible replies.
