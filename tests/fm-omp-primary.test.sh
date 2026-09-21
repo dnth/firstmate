@@ -1993,19 +1993,18 @@ test_fm_guard_warns_on_stale_omp_inflight_wake() {
     "harness=omp" \
     "kind=ship"
   local episode_state="$state/extensions/omp-primary-watch/main-fallback-episode.state"
-  cat > "$episode_state" <<'EOF'
-version=1
-generation=1
-episode=1
-in_flight=1
-in_flight_token=0123456789abcdef
-in_flight_sent_at_ms=1000
-in_flight_turn_ends=1
-last_consume_at_ms=0
-last_turn_start_at_ms=1500
-last_turn_end_at_ms=2000
-updated_at_ms=2000
-EOF
+  printf '%s\n' \
+    'version=1' \
+    'generation=1' \
+    'episode=1' \
+    'in_flight=1' \
+    'in_flight_token=0123456789abcdef' \
+    'in_flight_sent_at_ms=1000' \
+    'in_flight_turn_ends=1' \
+    'last_consume_at_ms=0' \
+    'last_turn_start_at_ms=1500' \
+    'last_turn_end_at_ms=2000' \
+    'updated_at_ms=2000' > "$episode_state"
   out=$(FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$state" \
     FM_CONFIG_OVERRIDE="$fixture/config" "$fixture/bin/fm-guard.sh" 2>&1)
   assert_contains "$out" "main-fallback wake stayed in-flight" \
