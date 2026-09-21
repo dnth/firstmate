@@ -2008,7 +2008,7 @@ test_fm_guard_warns_on_stale_omp_inflight_wake() {
   replace_episode_field() {
     local field=$1 value=$2 tmp="${episode_state}.tmp"
     awk -v field="$field" -v value="$value" \
-      'index($0, field "=") == 1 { print field "=" value; next } { print }' \
+      "index(\$0, field \"=\") == 1 { print field \"=\" value; next } { print }" \
       "$episode_state" > "$tmp" && mv "$tmp" "$episode_state"
   }
   out=$(FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$state" \
