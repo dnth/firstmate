@@ -1276,7 +1276,7 @@ const api = {
   registerCommand() {},
   registerTool() {},
   // The runtime accepts each wake for an idle main: the injection opens an
-  // agent-initiated turn, which emits turn_start and the custom message's own
+  // agent-initiated turn, which emits turn_start and the custom message_start
   // message_start - never before_agent_start (see the switch-nudge note at the
   // native contract test). Withheld consumption models the runtime dropping
   // every one of those signals.
@@ -1828,7 +1828,7 @@ const api = {
     wakes.push(String(message.content ?? ""));
     if (suppressConsume) return;
     // An idle main starts an agent-initiated turn: turn_start and the injected
-    // message's own custom-role message_start fire, before_agent_start never
+    // custom-role message_start of that message fire, before_agent_start never
     // does.
     handlers.get("turn_start")?.({ type: "turn_start" }, context);
     handlers.get("message_start")?.({
