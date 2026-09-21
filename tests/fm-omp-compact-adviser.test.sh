@@ -36,7 +36,7 @@ run_node() {
   FM_SECONDMATE="$SECONDMATE_FIXTURE" \
   node --experimental-strip-types --input-type=module <<'JS'
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -305,6 +305,24 @@ console.log("AC1 inert-by-default gates: ok");
   await pi.handlers.get("agent_end")({ type: "agent_end", messages: [] }, ctx);
   await flush();
   assert.equal(widgetCalls.length, 0, "non-qualifying judgment shows no hint");
+}
+{
+  // Removing consent after startup must revoke the data gate before a new evaluation.
+  const configDir = mkdtempSync(join(TMP, "cfg-revoke-"));
+  const logDir = mkdtempSync(join(TMP, "log-revoke-"));
+  writeConfig(configDir, { mode: "hint", minContextTokens: 40000, logRequests: false });
+  const pi = fakePi();
+  let calls = 0;
+  installAdviser(pi, {
+    configDir, logDir, key: () => "k",
+    evaluate: async () => { calls++; return qualifyingJudgment(); },
+  });
+  unlinkSync(join(configDir, "compact-adviser.json"));
+  const ctx = fakeCtx({ branch: settledBranch() });
+  await pi.handlers.get("agent_end")({ type: "agent_end", messages: [] }, ctx);
+  await flush();
+  assert.equal(calls, 0, "deleted consent must block TypeSafe evaluation");
+  assert.equal(widgetCalls.length, 0, "deleted consent must not show a hint");
 }
 {
   // Judge failure: no hint, backoff recorded, warning notified.

@@ -167,6 +167,7 @@ export function installAdviser(pi: ExtensionAPI, options: Options): void {
   }
   async function settled(ctx: ExtensionContext) {
     if (!active(ctx)) return;
+    if (!store.exists()) return;
     let state = restoreState(ctx.sessionManager.getBranch());
     const last = lastResponse(ctx.sessionManager.getBranch());
     if (last?.message.stopReason !== "stop" || state.lastSettled === last.id) return;
@@ -222,6 +223,7 @@ export function installAdviser(pi: ExtensionAPI, options: Options): void {
         }
       }
       // No await between this final cross-session configuration/state check and the hint.
+      if (!store.exists()) return;
       const latest = store.read();
       if (JSON.stringify(latest) !== configIdentity || eligible(ctx, latest, state) === undefined)
         return;
