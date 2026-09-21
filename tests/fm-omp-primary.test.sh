@@ -2005,18 +2005,24 @@ test_fm_guard_warns_on_stale_omp_inflight_wake() {
     'last_turn_start_at_ms=1500' \
     'last_turn_end_at_ms=2000' \
     'updated_at_ms=2000' > "$episode_state"
+  replace_episode_field() {
+    local field=$1 value=$2 tmp="${episode_state}.tmp"
+    awk -v field="$field" -v value="$value" \
+      'index($0, field "=") == 1 { print field "=" value; next } { print }' \
+      "$episode_state" > "$tmp" && mv "$tmp" "$episode_state"
+  }
   out=$(FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$state" \
     FM_CONFIG_OVERRIDE="$fixture/config" "$fixture/bin/fm-guard.sh" 2>&1)
   assert_contains "$out" "main-fallback wake stayed in-flight" \
     "fm-guard did not warn on an in-flight wake older than a turn"
   # A marker with no turn boundary after its send is still within its bound.
-  sed -i 's/^in_flight_sent_at_ms=1000/in_flight_sent_at_ms=3000/' "$episode_state"
+  replace_episode_field in_flight_sent_at_ms 3000
   out=$(FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$state" \
     FM_CONFIG_OVERRIDE="$fixture/config" "$fixture/bin/fm-guard.sh" 2>&1)
   assert_not_contains "$out" "stayed in-flight" \
     "fm-guard warned on an in-flight wake younger than a turn"
   # A cleared marker never warns.
-  sed -i 's/^in_flight=1/in_flight=0/' "$episode_state"
+  replace_episode_field in_flight 0
   out=$(FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$state" \
     FM_CONFIG_OVERRIDE="$fixture/config" "$fixture/bin/fm-guard.sh" 2>&1)
   assert_not_contains "$out" "stayed in-flight" \
