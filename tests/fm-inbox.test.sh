@@ -97,6 +97,112 @@ test_list_drain_and_idempotent_ack() {
   pass "list and drain expose notes; ack is retained, idempotent, and path-safe"
 }
 
+test_legacy_option_looking_message_remains_plain() {
+  local home out id reversed missing explicit malformed invalid unauthorized
+  home="$TMP_ROOT/legacy-option-message"
+  mkdir -p "$home"
+  out=$(home_env "$home" "$INBOX" note --reply-target hello) \
+    || fail "legacy option-looking messages must remain accepted"
+  id=${out#noted }
+  assert_grep '--reply-target hello' "$home/state/inbox/$id.note" \
+    "legacy option-looking message must remain plain text"
+  reversed=$(home_env "$home" "$INBOX" note --correlation-id hello --reply-target | sed 's/^noted //') \
+    || fail "reversed incomplete metadata must remain accepted as plain text"
+  assert_grep '--correlation-id hello --reply-target' "$home/state/inbox/$reversed.note" \
+    "reversed incomplete metadata must remain plain text"
+  missing=$(home_env "$home" "$INBOX" note --reply-target | sed 's/^noted //') \
+    || fail "missing metadata values must remain accepted as plain text"
+  assert_grep '--reply-target' "$home/state/inbox/$missing.note" \
+    "missing metadata value must remain plain text"
+  explicit=$(home_env "$home" "$INBOX" note -- --reply-target hello | sed 's/^noted //') \
+    || fail "explicit legacy separator must remain accepted"
+  assert_grep '--reply-target hello' "$home/state/inbox/$explicit.note" \
+    "explicit separator must preserve plain text"
+  malformed=$(home_env "$home" "$INBOX" note --reply-target --correlation-id foo | sed 's/^noted //') \
+    || fail "malformed option-like messages must remain accepted"
+  assert_grep '--reply-target --correlation-id foo' "$home/state/inbox/$malformed.note" \
+    "malformed option-like message must remain plain text"
+  invalid=$(home_env "$home" "$INBOX" note --reply-target invalid --correlation-id corr | sed 's/^noted //') \
+    || fail "invalid option-like messages must remain accepted"
+  assert_grep '--reply-target invalid --correlation-id corr' "$home/state/inbox/$invalid.note" \
+    "invalid option-like message must remain plain text"
+  unauthorized=$(home_env "$home" "$INBOX" note --reply-target 'hermes:telegram:-999:1' \
+    --correlation-id corr | sed 's/^noted //') \
+    || fail "unauthorized option-like messages must remain accepted"
+  assert_grep 'hermes:telegram:-999:1 --correlation-id corr' "$home/state/inbox/$unauthorized.note" \
+    "unauthorized option-like message must remain plain text"
+  pass "legacy option-looking messages remain plain text"
+}
+
+test_list_and_drain_reject_malformed_structured_note() {
+  local home id
+  home="$TMP_ROOT/malformed-structured-note"
+  id='malformed-structured-1'
+  mkdir -p "$home/state/inbox"
+  jq -n --arg id "$id" \
+    '{schema:"firstmate.inbox-note.v1", note_id:$id, request_note_id:$id,
+      correlation_id:"corr", reply_target:"hermes:telegram:chat", message:"bad",
+      created_at:"garbage"}' > "$home/state/inbox/$id.note"
+  chmod 0600 "$home/state/inbox/$id.note"
+  if home_env "$home" "$INBOX" list >"$home/list.out" 2>"$home/list.err"; then
+    fail "list must reject malformed structured notes"
+  fi
+  assert_grep 'invalid pending note' "$home/list.err" \
+    "list malformed-note rejection must be explicit"
+  if home_env "$home" "$INBOX" drain >"$home/drain.out" 2>"$home/drain.err"; then
+    fail "drain must reject malformed structured notes"
+  fi
+  assert_grep 'invalid pending note' "$home/drain.err" \
+    "drain malformed-note rejection must be explicit"
+  if home_env "$home" "$INBOX" drain --ack "$id" >"$home/ack.out" 2>"$home/ack.err"; then
+    fail "ack must reject malformed structured notes"
+  fi
+  assert_grep 'invalid pending note' "$home/ack.err" \
+    "ack malformed-note rejection must be explicit"
+  assert_present "$home/state/inbox/$id.note" \
+    "malformed structured note must not be acknowledged"
+  pass "list and drain reject malformed structured notes"
+}
+
+test_truncated_structured_note_fails_closed() {
+  local home id
+  home="$TMP_ROOT/truncated-structured-note"
+  id=truncated-structured-1
+  mkdir -p "$home/state/inbox"
+  printf '{"schema":"firstmate.inbox-note.v1"' > "$home/state/inbox/$id.note"
+  chmod 0600 "$home/state/inbox/$id.note"
+  if home_env "$home" "$INBOX" list >"$home/list.out" 2>"$home/list.err"; then
+    fail "list must reject truncated structured notes"
+  fi
+  if home_env "$home" "$INBOX" drain >"$home/drain.out" 2>"$home/drain.err"; then
+    fail "drain must reject truncated structured notes"
+  fi
+  if home_env "$home" "$INBOX" drain --ack "$id" >"$home/ack.out" 2>"$home/ack.err"; then
+    fail "ack must reject truncated structured notes"
+  fi
+  assert_present "$home/state/inbox/$id.note" \
+    "truncated structured note must not be acknowledged"
+  pass "truncated structured notes fail closed"
+}
+
+test_ack_rejects_malformed_handled_note() {
+  local home id
+  home="$TMP_ROOT/malformed-handled-note"
+  id='malformed-handled-1'
+  mkdir -p "$home/state/inbox/handled"
+  printf '{"schema":"firstmate.inbox-note.v1"' \
+    > "$home/state/inbox/handled/$id.note"
+  chmod 0600 "$home/state/inbox/handled/$id.note"
+  if home_env "$home" "$INBOX" drain --ack "$id" >"$home/out" 2>"$home/err"; then
+    fail "ack must reject malformed handled notes"
+  fi
+  assert_grep 'invalid handled note' "$home/err" \
+    "malformed handled-note rejection must be explicit"
+  assert_present "$home/state/inbox/handled/$id.note" \
+    "malformed handled note must remain untouched"
+  pass "ack rejects malformed handled notes"
+}
+
 test_status_is_read_only() {
   local home before after out
   home="$TMP_ROOT/status"
@@ -336,6 +442,10 @@ test_note_size_cap() {
 
 test_note_persists_and_wakes
 test_list_drain_and_idempotent_ack
+test_legacy_option_looking_message_remains_plain
+test_list_and_drain_reject_malformed_structured_note
+test_truncated_structured_note_fails_closed
+test_ack_rejects_malformed_handled_note
 test_status_is_read_only
 test_concurrent_notes_are_unique_and_woken
 test_wake_failure_preserves_note

@@ -6,6 +6,8 @@ set -euo pipefail
 BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$BIN_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-inbox-result-lib.sh
+. "$BIN_DIR/fm-inbox-result-lib.sh"
 
 INBOX_DIR="$STATE/inbox"
 HANDLED_DIR="$INBOX_DIR/handled"
@@ -16,7 +18,7 @@ FM_INBOX_NOTE_MAX_BYTES=4096
 
 usage() {
   cat >&2 <<'EOF'
-usage: fm-inbox.sh note <message>
+usage: fm-inbox.sh note [--reply-target <hermes:platform:chat[:thread]> --correlation-id <id>] <message>
        fm-inbox.sh list
        fm-inbox.sh drain [--ack <id>]
        fm-inbox.sh status
@@ -38,10 +40,7 @@ ensure_inbox_dirs() {
 }
 
 valid_note_id() {
-  case "$1" in
-    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
-    *) return 0 ;;
-  esac
+  fm_inbox_valid_note_id "$1"
 }
 
 validate_note_dir() {
@@ -67,19 +66,71 @@ validate_inbox_dir() {
 }
 
 note_command() {
-  local message=$* tmp suffix id note
+  local reply_target='' correlation_id='' message tmp suffix id note created metadata=0 candidate_target candidate_correlation
+  if [ "$#" -ge 4 ]; then
+    if { [ "$1" = --reply-target ] && [ "$3" = --correlation-id ]; } \
+        || { [ "$1" = --correlation-id ] && [ "$3" = --reply-target ]; }; then
+      if [ "$1" = --reply-target ]; then
+        candidate_target=$2
+        candidate_correlation=$4
+      else
+        candidate_correlation=$2
+        candidate_target=$4
+      fi
+      if fm_inbox_valid_reply_target "$candidate_target" \
+          && fm_inbox_valid_correlation_id "$candidate_correlation" \
+          && fm_inbox_reply_target_authorized "$candidate_target"; then
+        metadata=1
+      fi
+    fi
+  fi
+  if [ "$metadata" -eq 1 ]; then
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --reply-target) reply_target=$2; shift 2 ;;
+        --correlation-id) correlation_id=$2; shift 2 ;;
+        *) break ;;
+      esac
+    done
+  elif [ "${1:-}" = -- ]; then
+    shift
+  fi
+  message=$*
   [ -n "$message" ] || usage
   # The note is the doorbell, not the brief: a bounded message keeps the
   # durable queue and its presentation cheap, and anything longer belongs in
   # the referenced file the note points at.
   [ "$(printf '%s' "$message" | wc -c | tr -d ' ')" -le "$FM_INBOX_NOTE_MAX_BYTES" ] \
     || die "note message exceeds $FM_INBOX_NOTE_MAX_BYTES bytes; put the full brief in a file and note its path"
+  if [ -n "$reply_target" ] || [ -n "$correlation_id" ]; then
+    [ -n "$reply_target" ] && [ -n "$correlation_id" ] \
+      || die "reply target and correlation id must be provided together"
+    fm_inbox_valid_reply_target "$reply_target" || die "invalid reply target"
+    fm_inbox_valid_correlation_id "$correlation_id" || die "invalid correlation id"
+    fm_inbox_reply_target_authorized "$reply_target" \
+      || die "reply target is not authorized"
+    command -v jq >/dev/null 2>&1 || die "jq is required for reply metadata"
+  fi
   ensure_inbox_dirs
   tmp=$(mktemp "$INBOX_DIR/.incoming.XXXXXX") || die "cannot create note"
   suffix=${tmp##*.incoming.}
   id="$(date +%s)-$$-$suffix"
   note="$INBOX_DIR/$id.note"
-  if ! printf '%s\n' "$message" > "$tmp" || ! chmod 0600 "$tmp"; then
+  if [ -n "$reply_target" ]; then
+    created=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    if ! jq -n --arg id "$id" --arg correlation "$correlation_id" \
+        --arg target "$reply_target" --arg message "$message" --arg created "$created" \
+        '{schema:"firstmate.inbox-note.v1", note_id:$id,
+          request_note_id:$id, correlation_id:$correlation,
+          reply_target:$target, message:$message, created_at:$created}' > "$tmp"; then
+      rm -f -- "$tmp"
+      die "cannot encode note"
+    fi
+  elif ! printf '%s\n' "$message" > "$tmp"; then
+    rm -f -- "$tmp"
+    die "cannot encode note"
+  fi
+  if ! chmod 0600 "$tmp"; then
     rm -f -- "$tmp"
     die "cannot persist note"
   fi
@@ -112,7 +163,14 @@ list_command() {
     id=${note##*/}
     id=${id%.note}
     first=
-    IFS= read -r first < "$note" || true
+    if fm_inbox_note_is_structured "$note"; then
+      fm_inbox_validate_note_envelope "$note" "$id" \
+        || die "invalid pending note: ${note##*/}"
+      first=$(jq -r '.message | split("\n")[0]' "$note") \
+        || die "cannot read note: $id"
+    else
+      IFS= read -r first < "$note" || true
+    fi
     printf '%s\t%s\n' "$id" "$first"
   done
   [ "$found" -eq 1 ] || printf '(inbox empty)\n'
@@ -132,6 +190,10 @@ drain_command() {
       die "note must not be a symlink: $id"
     fi
     if [ -f "$note" ]; then
+      if fm_inbox_note_is_structured "$note"; then
+        fm_inbox_validate_note_envelope "$note" "$id" \
+          || die "invalid pending note: ${note##*/}"
+      fi
       [ ! -e "$HANDLED_DIR/$id.note" ] && [ ! -L "$HANDLED_DIR/$id.note" ] \
         || { fm_lock_release "$FM_WAKE_QUEUE_LOCK"; die "handled note already exists: $id"; }
       if mv "$note" "$HANDLED_DIR/$id.note"; then
@@ -144,7 +206,16 @@ drain_command() {
         return 0
       fi
     fi
-    if [ -f "$HANDLED_DIR/$id.note" ] && [ ! -L "$HANDLED_DIR/$id.note" ]; then
+    if [ -L "$HANDLED_DIR/$id.note" ]; then
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      die "handled note must not be a symlink: $id"
+    fi
+    if [ -f "$HANDLED_DIR/$id.note" ]; then
+      if fm_inbox_note_is_structured "$HANDLED_DIR/$id.note" \
+          && ! fm_inbox_validate_note_envelope "$HANDLED_DIR/$id.note" "$id"; then
+        fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+        die "invalid handled note: $id"
+      fi
       if ! fm_wake_consume_key_locked check "inbox-$id" >/dev/null; then
         fm_lock_release "$FM_WAKE_QUEUE_LOCK"
         die "note $id is handled, but its wake row could not be consumed; re-run drain --ack $id"
@@ -166,7 +237,15 @@ drain_command() {
     id=${note##*/}
     id=${id%.note}
     printf '%s\n' "--- $id ---"
-    cat "$note"
+    if fm_inbox_note_is_structured "$note"; then
+      fm_inbox_validate_note_envelope "$note" "$id" \
+        || die "invalid pending note: ${note##*/}"
+      printf 'correlation: %s\n' "$(jq -r '.correlation_id' "$note")"
+      printf 'reply-target: %s\n' "$(jq -r '.reply_target' "$note")"
+      jq -r '.message' "$note"
+    else
+      cat "$note"
+    fi
   done
   [ "$found" -eq 1 ] || printf '(inbox empty)\n'
 }

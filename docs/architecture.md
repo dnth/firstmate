@@ -88,8 +88,14 @@ The trusted-local orchestrator inbox is a smaller ingress for agents, humans, an
 `bin/fm-inbox.sh note` publishes a mode-0600 record under `state/inbox/` and its one `check` row while holding the wake-queue lock; list, drain, acknowledgement, and status remain local and network-free.
 Acknowledgement holds that same lock while moving the note to `state/inbox/handled/` and consuming every matching `inbox-<id>` wake row, so note acknowledgement leaves no replayable doorbell.
 Handled notes move to `state/inbox/handled/`, while a failed wake append deliberately leaves the note durable for recovery.
-This path carries no sender authentication, authority grant, reply correlation, or delivery receipts, so it complements rather than replaces the authenticated Communication Officer bridge.
-The note is the doorbell; a referenced artifact is the brief.
+A known ingress gap dates from 2026-09-20: two captain notes stayed durable but unpresented, the wake-queue trace showed no `inbox-*` rows, and the enqueue-versus-presentation cause is under diagnosis.
+Until that cause is closed, note durability does not by itself guarantee presentation, because presentation depends on the wake queue and no watcher-side scan of unacknowledged `state/inbox/` notes exists yet.
+The never-miss backstop that would surface such notes within one supervision heartbeat is tracked separately as task `fm-inbox-never-miss-backstop`.
+By default this path carries no sender authentication, authority grant, or reply behavior. An optional versioned note envelope may bind an immutable correlation id and an exact `hermes:platform:chat[:thread]` reply target authorized by mode-0600 `config/inbox-result-targets`.
+`bin/fm-inbox-result.sh` persists one immutable terminal result under `state/inbox-results/` before an explicit adapter can run; its posting, failure, and receipt records expose pending, failed/ambiguous, and delivered state across restarts.
+The shipped Hermes adapter delegates only to `hermes send`, so platform credentials and transport remain owned by Hermes rather than a second remote client in Firstmate. A receipt suppresses replay, a definite no-send may be retried, and an ambiguous send remains closed until an operator verifies the destination and confirms retry.
+Reply authorization is rechecked at delivery, artifact paths reject symlinks, and unlinked legacy notes retain their plain-text format. This trusted-local result seam still complements rather than replaces the authenticated Communication Officer bridge, whose allowlisting, authority, audit, correlation, and receipt contracts are unchanged.
+The note is the doorbell; a referenced file is the brief; the result envelope is the receipt.
 
 At session start, `bin/fm-session-start.sh` emits exactly one primary-harness supervision block rendered by `bin/fm-supervision-instructions.sh` from `docs/supervision-protocols/`.
 That block owns the live wait shape for the running primary harness: Claude's Stop `asyncRewake` hook owns tokenless re-arm cycles, Grok uses background-notify cycles, Codex uses bounded foreground checkpoints, Pi and pi-signed use the same two tracked Pi extensions, OMP uses its native `.omp` primary extension, and OpenCode uses its TUI plugin.
