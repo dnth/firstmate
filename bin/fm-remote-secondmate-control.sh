@@ -413,12 +413,34 @@ cmd_send() {
   if [ "$reconcile_mode" = reconcile ]; then validate_home "$id" allow-markerless; else validate_home "$id"; fi
   if ! remote_endpoint_load "$id"; then
     meta=$(meta_path "$id")
+    # Reconciliation is also the recovery path for a recorded endpoint whose
+    # process has already disappeared.  In that case endpoint validation
+    # quite correctly refuses normal steering, but the secondmate's own inbox
+    # remains the durable handoff point for the repair request.  Keep this
+    # fallback narrow: only the host-local Herdr route with an exact task
+    # binding may receive it, and only for reconcile delivery.
+    if [ "$reconcile_mode" = reconcile ] \
+      && [ ! -e "$TARGET_HOME/.fm-secondmate-home" ] \
+      && [ ! -L "$TARGET_HOME/.fm-secondmate-home" ]; then
+      fm_task_inbox_write "$TARGET_HOME/state" "$id" "$message" "$reconcile_id" \
+        || die "could not record reconcile instruction in the remote home"
+      return
+    fi
     if [ "$(fm_meta_get "$meta" harness)" = omp ]; then
       remote_omp_delivery_refuse "$REMOTE_ENDPOINT_ERROR"
     fi
     die "$REMOTE_ENDPOINT_ERROR"
   fi
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
+  if [ "$reconcile_mode" = reconcile ] \
+    && [ "$harness" != omp ] \
+    && [ ! -e "$TARGET_HOME/.fm-secondmate-home" ] \
+    && [ ! -L "$TARGET_HOME/.fm-secondmate-home" ] \
+    && [ "$(fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$REMOTE_ENDPOINT_META" 2>/dev/null || printf 'unreadable')" != alive ]; then
+    fm_task_inbox_write "$TARGET_HOME/state" "$id" "$message" "$reconcile_id" \
+      || die "could not record reconcile instruction in the remote home"
+    return
+  fi
   if [ "$harness" = omp ]; then
     remote_omp_delivery_load_libs
     fm_message_from_firstmate "$message" \
