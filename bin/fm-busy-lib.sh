@@ -31,6 +31,7 @@
 #   pi-ext           Pi/pi-signed per-task extension (agent_start/agent_settled)
 #   opencode-plugin  OpenCode per-task plugin (session.status)
 #   claude-hook      Claude lifecycle hooks (UserPromptSubmit/Stop/StopFailure/SessionEnd)
+#   omp-ext          OMP per-task extension (turn_start/turn_end/session_shutdown)
 #   hermes-hook      Hermes lifecycle bridge (plugin-forwarded TUI events,
 #                    plus compatible shell-hook events)
 #   codex-hook, codex-appserver  reserved: Codex, gated by
@@ -178,8 +179,8 @@ fm_busy_sources_for_harness() {  # <harness>
       adapter='codex-hook codex-appserver'
       ;;
     opencode*) adapter=opencode-plugin ;;
+    omp) adapter=omp-ext ;;
     pi|pi-signed) adapter=pi-ext ;;
-    hermes) adapter=hermes-hook ;;
     kimi*)
       fm_busy_kimi_verified || { printf ''; return 0; }
       adapter='kimi-wire kimi-hook'

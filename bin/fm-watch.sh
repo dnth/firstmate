@@ -347,12 +347,50 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
     fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
     return 0
   fi
+  if inbox_steer_attempt_recovery "$w" "$task" "$rec" "endpoint-unavailable"; then
+    return 0
+  fi
+  [ -z "$INBOX_RECOVERY_DETAIL" ] || reason="$reason [auto-recovery: $INBOX_RECOVERY_DETAIL]"
   fm_wake_append stale "$w" "$reason" || exit 1
   if ! fm_task_inbox_record_escalated "$STATE" "$task" "$rec"; then
     echo "error: stale wake was queued for $task but its inbox escalation marker could not be written" >&2
     exit 1
   fi
   wake "$reason"
+}
+
+# Custody-checked bounded auto-recovery for a stalled worker, owned by
+# bin/fm-stall-recovery.sh. Runs BEFORE the stale wake is published: a
+# deferred verdict (record handled meanwhile, worker provably busy, or a
+# relaunch just published with the episode still pending) suppresses the
+# escalation entirely, while an escalate verdict - including any helper
+# failure or missing verdict - keeps the ordinary stale wake with the
+# helper's reason appended. Returns 0 when the wake is suppressed, 1 when the
+# caller should escalate.
+FM_STALL_RECOVERY_BIN="${FM_STALL_RECOVERY_BIN:-$SCRIPT_DIR/fm-stall-recovery.sh}"
+INBOX_RECOVERY_DETAIL=
+inbox_steer_attempt_recovery() {  # <window> <task> <record> <trigger>
+  local task=$2 record=$3 trigger=$4 out rc=0
+  INBOX_RECOVERY_DETAIL=
+  [ -x "$FM_STALL_RECOVERY_BIN" ] || { INBOX_RECOVERY_DETAIL="recovery helper missing"; return 1; }
+  out=$(FM_HOME="$FM_HOME" "$FM_STALL_RECOVERY_BIN" "$task" "$record" "$trigger" 2>/dev/null) || rc=$?
+  case "$out" in
+    verdict=recovered*|verdict=deferred*)
+      INBOX_RECOVERY_DETAIL=${out#*detail=}
+      triage_log "steer-inbox stall recovery: $task ${record##*/} $out"
+      return 0
+      ;;
+    verdict=escalate*)
+      INBOX_RECOVERY_DETAIL=${out#*detail=}
+      triage_log "steer-inbox stall recovery escalates: $task ${record##*/} $out"
+      return 1
+      ;;
+    *)
+      INBOX_RECOVERY_DETAIL="recovery helper returned no verdict (rc=$rc)"
+      triage_log "steer-inbox stall recovery failed: $task ${record##*/} rc=$rc out=${out:-none}"
+      return 1
+      ;;
+  esac
 }
 
 inbox_steer_check() {  # <window> <task>
@@ -411,6 +449,10 @@ inbox_steer_check() {  # <window> <task>
         fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
         return 0
       fi
+      if inbox_steer_attempt_recovery "$window" "$task" "$record" "ladder-exhausted"; then
+        return 0
+      fi
+      [ -z "$INBOX_RECOVERY_DETAIL" ] || reason="$reason [auto-recovery: $INBOX_RECOVERY_DETAIL]"
       fm_wake_append stale "$window" "$reason" || exit 1
       if ! fm_task_inbox_record_escalated "$STATE" "$task" "$record"; then
         echo "error: stale wake was queued for $task but its inbox escalation marker could not be written" >&2

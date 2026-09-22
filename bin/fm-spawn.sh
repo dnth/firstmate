@@ -4261,7 +4261,7 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
-    claude*|opencode*|pi|pi-signed)
+    claude*|opencode*|pi|pi-signed|omp)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
@@ -4399,12 +4399,23 @@ EOF
     omp)
       rm -f "$OMP_READY" "$OMP_STARTED" "$OMP_DOORBELL_READY" "$OMP_DOORBELL_FAILED"
       cat > "$STATE/$ID.omp-ext.ts" <<EOF
-// Firstmate OMP launch acknowledgement, inbox doorbell, and turn-end signal; written by fm-spawn.
+// Firstmate OMP launch acknowledgement, inbox doorbell, turn-end signal, and
+// semantic busy-state events; written by fm-spawn.
 // .omp-ready publishes only after the inbox doorbell activates; a failed
 // activation journals its reason to .omp-doorbell-failed instead, so a missing
 // marker is always attributable.
+// Busy state rides the same turn boundary the doorbell already observes:
+// turn_start opens a turn (busy), turn_end and session_shutdown close it
+// (idle), under the omp-ext source bin/fm-busy-lib.sh trusts for this harness.
 import { execFile } from "node:child_process";
 import { installTaskInboxDoorbell } from "$FM_ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts";
+const busyEvent = (state: string, event: string) =>
+  new Promise((resolve) => {
+    execFile("$FM_ROOT/bin/fm-busy-event.sh", [
+      "apply", "$STATE_REAL", "$ID", state,
+      "--gen", "$BUSY_GEN", "--source", "omp-ext", "--event", event,
+    ], () => resolve(undefined));
+  });
 export default function (omp: any) {
   const taskInboxDoorbell = installTaskInboxDoorbell(omp, {
     inboxDir: "$STATE_REAL/$ID.inbox",
@@ -4423,12 +4434,17 @@ export default function (omp: any) {
   omp.on("turn_start", () => {
     taskInboxDoorbell.notifyTurnStart();
     execFile("touch", ["$OMP_STARTED"]);
+    busyEvent("busy", "turn-start");
   });
   omp.on("turn_end", () => {
     taskInboxDoorbell.notifyTurnEnd();
     execFile("$TURNEND_SIGNAL", ["$STATE_REAL", "$ID", "$SPAWN_GEN"]);
+    busyEvent("idle", "turn-end");
   });
-  omp.on("session_shutdown", taskInboxDoorbell.retire);
+  omp.on("session_shutdown", () => {
+    taskInboxDoorbell.retire();
+    busyEvent("idle", "session-shutdown");
+  });
 }
 EOF
       ;;
@@ -4921,6 +4937,32 @@ sleep 0.3
 [ -z "$OMP_LAUNCH_PATH_GUARD" ] || LAUNCH="$OMP_LAUNCH_PATH_GUARD$LAUNCH"
 if [ "$OMP_LAUNCH_TEMPLATE" -eq 1 ] && [ "$HARNESS" = omp ]; then
   LAUNCH="/bin/bash -c $(shell_quote "$LAUNCH")"
+fi
+if [ "$HARNESS" = omp ] && [ "$RELAUNCH" -eq 1 ]; then
+  # Generation reconciliation: every request.* receipt under the doorbell
+  # requests dir was written for the PRIOR incarnation's doorbell. The
+  # extension only reconciles .ambiguous/.awaiting-turn on activate, so a
+  # surviving .acked/.delivered/.unproven tombstone would suppress the
+  # replacement worker's doorbell for the same still-unhandled record - the
+  # exact delivered-no-turn stall this relaunch recovers from. This runs only
+  # here, after every refusal gate above has passed and immediately before
+  # the replacement launch is submitted, so a refused relaunch never deletes
+  # the prior generation's receipts; the inbox records themselves live under
+  # state/<id>.inbox and are untouched.
+  OMP_REQUESTS_DIR="$STATE/$ID.omp-doorbell-ready.requests"
+  if [ -d "$OMP_REQUESTS_DIR" ] && [ ! -L "$OMP_REQUESTS_DIR" ]; then
+    for request_artifact in "$OMP_REQUESTS_DIR"/request.*; do
+      [ -e "$request_artifact" ] || [ -L "$request_artifact" ] || continue
+      if [ -L "$request_artifact" ] || [ ! -f "$request_artifact" ]; then
+        echo "error: refusing OMP relaunch through unsafe request entry: $request_artifact" >&2
+        exit 1
+      fi
+      rm -f "$request_artifact" || {
+        echo "error: refusing OMP relaunch because a stale doorbell receipt could not be retired: $request_artifact" >&2
+        exit 1
+      }
+    done
+  fi
 fi
 if [ "$BACKEND" = herdr ]; then
   spawn_send_text_line "$T" "$LAUNCH" || {

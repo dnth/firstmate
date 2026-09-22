@@ -44,6 +44,10 @@
 #                              doorbell activates (.omp-ready follows it)
 #   <task>.omp-doorbell-failed the reason a doorbell activation or drain retired
 #                              the ready marker, journaled by the extension
+#   <task>.inbox/.recovery-attempts
+#                              stall auto-recovery bound: "<msg>\t<count>" -
+#                              one automatic relaunch per stalled record,
+#                              reset when the inbox empties (bin/fm-stall-recovery.sh)
 #
 # Record format (fm_task_inbox_write / fm_task_inbox_body):
 #   schema=fm-task-inbox.v1
@@ -394,7 +398,7 @@ fm_task_inbox_due_action() {  # <state-dir> <task-id>
   local dir oldest base now grace max ladder rec_base count last
   dir=$(fm_task_inbox_dir "$1" "$2")
   if ! oldest=$(fm_task_inbox_oldest_unhandled "$1" "$2"); then
-    rm -f "$dir/.ring-state" "$dir/.escalated" 2>/dev/null || true
+    rm -f "$dir/.ring-state" "$dir/.escalated" "$dir/.recovery-attempts" 2>/dev/null || true
     printf 'quiet'
     return 0
   fi
@@ -475,4 +479,23 @@ fm_task_inbox_record_escalated() {  # <state-dir> <task-id> <record-path>
     [ -d "$dir" ] || return 0
     return 1
   fi
+}
+
+# Reset the re-ring ladder for a task whose worker was just replaced by stall
+# auto-recovery: the new incarnation gets the full grace-and-retry budget for
+# the still-unhandled record instead of inheriting the wedged worker's spent
+# budget and escalation marker. The .recovery-attempts bound is deliberately
+# NOT cleared here - it is the per-record retry cap and resets only when the
+# inbox empties (fm_task_inbox_due_action). Returns non-zero when the ladder
+# files could not be cleared while the inbox still holds records, so the
+# caller escalates rather than reporting a pending relaunch with lost retry
+# bookkeeping.
+fm_task_inbox_ladder_reset() {  # <state-dir> <task-id>
+  local dir
+  dir=$(fm_task_inbox_dir "$1" "$2")
+  [ -d "$dir" ] || return 0
+  rm -f "$dir/.ring-state" "$dir/.escalated" 2>/dev/null || {
+    [ -d "$dir" ] || return 0
+    return 1
+  }
 }
