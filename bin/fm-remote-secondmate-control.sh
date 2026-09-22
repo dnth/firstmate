@@ -411,6 +411,18 @@ cmd_send() {
   if [ "$reconcile_mode" = reconcile ]; then send_args=(--reconcile-delivery "$reconcile_id"); fi
   validate_id "$id"
   if [ "$reconcile_mode" = reconcile ]; then validate_home "$id" allow-markerless; else validate_home "$id"; fi
+  # A markerless persistent remote home has no safe parent-side endpoint
+  # identity beyond its durable inbox. Reconciliation is deliberately a
+  # durable request, so enqueue it before probing the endpoint; this also
+  # keeps a dead or unreadable endpoint from turning a recoverable nudge into
+  # a transport failure.
+  if [ "$reconcile_mode" = reconcile ] \
+    && [ ! -e "$TARGET_HOME/.fm-secondmate-home" ] \
+    && [ ! -L "$TARGET_HOME/.fm-secondmate-home" ]; then
+    fm_task_inbox_write "$TARGET_HOME/state" "$id" "$message" "$reconcile_id" \
+      || die "could not record reconcile instruction in the remote home"
+    return
+  fi
   if ! remote_endpoint_load "$id"; then
     meta=$(meta_path "$id")
     # Reconciliation is also the recovery path for a recorded endpoint whose
@@ -419,28 +431,12 @@ cmd_send() {
     # remains the durable handoff point for the repair request.  Keep this
     # fallback narrow: only the host-local Herdr route with an exact task
     # binding may receive it, and only for reconcile delivery.
-    if [ "$reconcile_mode" = reconcile ] \
-      && [ ! -e "$TARGET_HOME/.fm-secondmate-home" ] \
-      && [ ! -L "$TARGET_HOME/.fm-secondmate-home" ]; then
-      fm_task_inbox_write "$TARGET_HOME/state" "$id" "$message" "$reconcile_id" \
-        || die "could not record reconcile instruction in the remote home"
-      return
-    fi
     if [ "$(fm_meta_get "$meta" harness)" = omp ]; then
       remote_omp_delivery_refuse "$REMOTE_ENDPOINT_ERROR"
     fi
     die "$REMOTE_ENDPOINT_ERROR"
   fi
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
-  if [ "$reconcile_mode" = reconcile ] \
-    && [ "$harness" != omp ] \
-    && [ ! -e "$TARGET_HOME/.fm-secondmate-home" ] \
-    && [ ! -L "$TARGET_HOME/.fm-secondmate-home" ] \
-    && [ "$(fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$REMOTE_ENDPOINT_META" 2>/dev/null || printf 'unreadable')" != alive ]; then
-    fm_task_inbox_write "$TARGET_HOME/state" "$id" "$message" "$reconcile_id" \
-      || die "could not record reconcile instruction in the remote home"
-    return
-  fi
   if [ "$harness" = omp ]; then
     remote_omp_delivery_load_libs
     fm_message_from_firstmate "$message" \

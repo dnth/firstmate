@@ -306,8 +306,17 @@ cmd_notify() {
     send_rc=0
     FM_SEND_RECONCILE_AUTH=1 FM_TASK_INBOX_LOCK_WAIT_SECS=0 FM_SEND_EXPECTED_SPAWN_GEN="$sampled_spawn_gen" \
       FM_SEND_EXPECTED_REMOTE_HOST="$expected_remote_host" FM_SEND_EXPECTED_REMOTE_ROOT="$sampled_root" \
-      "$SCRIPT_DIR/fm-send.sh" "$id" --reconcile-delivery "$did" \
+    "$SCRIPT_DIR/fm-send.sh" "$id" --reconcile-delivery "$did" \
       "$reconcile_message" >/dev/null 2>&1 || send_rc=$?
+    # A markerless remote mate may have no live endpoint for fm-send's normal
+    # resolution path, while its remote control plane can still enqueue the
+    # durable reconcile record. Retry that narrow transport directly; the
+    # delivery id makes the operation idempotent if the first attempt arrived.
+    if [ "$send_rc" -ne 0 ] && [ -z "$sampled_spawn_gen" ] && [ -n "$sampled_host" ]; then
+      send_rc=0
+      "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh reconcile-send \
+        "$id" "$reconcile_message" "$did" >/dev/null 2>&1 || send_rc=$?
+    fi
     # Exit 3 means the remote delivery is unconfirmed (normally SSH 255).
     # Probe the read-only state route to distinguish an unreachable endpoint
     # from a live endpoint whose delivery result is merely unknown.
