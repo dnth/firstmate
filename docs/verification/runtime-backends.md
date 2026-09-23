@@ -374,13 +374,13 @@ ok - OMP ignores hidden direct extension files
 ok - OMP ignores unusable settings extension entries
 ok - OMP ignores unsupported root extension manifests
 ok - OMP restricts the primary adapter exemption to secondmate homes
-ok - OMP secondmates trust exact primary and fleet extensions while inspecting staged code
+ok - OMP secondmates trust exact primary, fleet, supervision, and compact-adviser extensions while inspecting staged code
 ok - OMP secondmate launch and recovery use the isolated adapter and an exact home-owned session pointer
 ```
 
 The deterministic spawn checks prove that an OMP launch refuses a git-tracked project extension without the explicit override, records the override when passed, and leaves projects without tracked extensions unchanged.
 Raw-launch OMP refusals and direct non-OMP compatibility are covered by `tests/fm-spawn-dispatch-profile.test.sh`.
-The secondmate integration checks reran on 2026-08-27 and prove that the exact Firstmate primary and fleet-hook extensions remain permitted in the persistent home without allowing modified or unrelated tracked extension code.
+The secondmate integration checks prove that the exact Firstmate primary, fleet-hook, supervision-branch, and compact-adviser extensions remain permitted in the persistent home without allowing modified or unrelated tracked extension code.
 Live firing of the fleet hook's `tool_result`, `todo_reminder`, and `session.compacting` handlers is PENDING firstmate scratch OMP verification before merge; deterministic extension and spawn tests do not claim OMP event delivery.
 
 The Firstmate project todo policy was verified on 2026-09-12 against OMP 18.1.14 through OMP's effective-configuration interface:
