@@ -222,7 +222,7 @@ esac
 max_attempts=${FM_STALL_RECOVERY_MAX:-1}
 case "$max_attempts" in ''|*[!0-9]*) max_attempts=1 ;; esac
 attempts_file="$dir/.recovery-attempts"
-attempts_record= attempts_count=0
+attempts_record='' attempts_count=0
 IFS=$(printf '\t') read -r attempts_record attempts_count <<EOF
 $(cat "$attempts_file" 2>/dev/null || true)
 EOF
@@ -251,8 +251,9 @@ note="Stall auto-recovery ($TRIGGER, $PATH_KIND): the previous worker stopped ac
 printf '%s\t%s\n' "${RECORD##*/}" "$((attempts_count + 1))" > "$attempts_file" 2>/dev/null \
   || verdict escalate "cannot persist the recovery-attempt bound at $attempts_file"
 
+FM_CONFIG_OVERRIDE=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
 control_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
-  FM_CONFIG_OVERRIDE="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
+  FM_CONFIG_OVERRIDE="$FM_CONFIG_OVERRIDE" \
   "$FM_STALL_RECOVERY_CONTROL_BIN" "$ID" relaunch --note "$note" 2>&1) \
   || verdict escalate "fm-control relaunch refused or failed: $(printf '%s' "$control_out" | tail -1)"
 

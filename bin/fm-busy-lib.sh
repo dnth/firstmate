@@ -181,6 +181,7 @@ fm_busy_sources_for_harness() {  # <harness>
     opencode*) adapter=opencode-plugin ;;
     omp) adapter=omp-ext ;;
     pi|pi-signed) adapter=pi-ext ;;
+    hermes) adapter=hermes-hook ;;
     kimi*)
       fm_busy_kimi_verified || { printf ''; return 0; }
       adapter='kimi-wire kimi-hook'

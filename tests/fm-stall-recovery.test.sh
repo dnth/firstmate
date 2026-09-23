@@ -44,6 +44,7 @@ fm_stall_cleanup() {
 trap fm_stall_cleanup EXIT
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the lease proof)"; exit 0; }
+command -v bun >/dev/null 2>&1 || { echo "skip: bun not found (required by the OMP identity probe)"; exit 0; }
 
 # --- fake backend CLIs -------------------------------------------------------
 
@@ -274,7 +275,7 @@ SH
   # identity from `command -v bun` and rewrites omp_bun in the metadata, so
   # the recorded identity and the sleeper's /proc/<pid>/exe must both be the
   # real binary.
-  real_bun=$(command -v bun) || { echo "skip: bun not found"; exit 0; }
+  real_bun=$(command -v bun) || { echo "skip: bun not found"; exit 1; }
   ln -sf "$real_bun" "$fb/bun"
 
   # omp keeps its `#!/usr/bin/env bun` shebang (fm_omp_process_launch_identity
