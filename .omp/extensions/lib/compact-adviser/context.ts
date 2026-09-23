@@ -262,7 +262,9 @@ export function snapshot(ctx: ExtensionContext, secrets: readonly (string | unde
       messages.push(mapped);
     }
   }
-  const selectedMessages = messages.slice(-SNAPSHOT_MESSAGE_CAP);
+  const latestSummary = [...messages].reverse().find((m) => m.role === "summary");
+  const roleBearingMessages = messages.filter((m) => m.role !== "summary");
+  const selectedMessages = roleBearingMessages.slice(-SNAPSHOT_MESSAGE_CAP);
   const conversationTokens = messages.reduce(
     (sum, m) => sum + estimateTextTokens(m.text ?? m.summary ?? ""),
     0,
@@ -279,6 +281,11 @@ export function snapshot(ctx: ExtensionContext, secrets: readonly (string | unde
   const users: { role: string; text: string }[] = [];
   const recent: { role: string; text: string; tool?: string; error?: boolean }[] = [];
   let summary = "";
+  if (latestSummary) {
+    const s = sanitizeText(latestSummary.summary ?? "", secrets);
+    summary = clip(s.text, 1500).text;
+    redacted ||= s.redacted;
+  }
   for (const m of selectedMessages) {
     if (m.role === "assistant" && m.toolCalls)
       for (const c of m.toolCalls)
@@ -303,13 +310,6 @@ export function snapshot(ctx: ExtensionContext, secrets: readonly (string | unde
         raw = "[Sensitive file content excluded]";
         redacted = true;
       }
-    } else if (m.role === "summary") {
-      if (!summary) {
-        const s = sanitizeText(m.summary ?? "", secrets);
-        summary = clip(s.text, 1500).text;
-        redacted ||= s.redacted;
-      }
-      continue;
     } else if (m.role === "hidden_operational") {
       hiddenOperational++;
       continue;
@@ -351,7 +351,7 @@ export function snapshot(ctx: ExtensionContext, secrets: readonly (string | unde
     }),
     coverage: {
       omittedUserMessages: omittedUsers,
-      olderMessagesOmitted: Math.max(0, messages.length - SNAPSHOT_MESSAGE_CAP),
+      olderMessagesOmitted: Math.max(0, roleBearingMessages.length - SNAPSHOT_MESSAGE_CAP),
       recentTextTruncated: recentTruncated,
       hasImages,
       redacted,

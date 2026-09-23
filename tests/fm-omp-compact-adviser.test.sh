@@ -487,6 +487,13 @@ console.log("AC1 inert-by-default gates: ok");
     capped.state.userConstraints.length + capped.state.recent.length <= 64,
     "total transmitted conversation messages capped at 64",
   );
+  const summaryAndMessages = [
+    { type: "compaction", id: "summary", parentId: null, timestamp: "t", summary: "retain this summary" },
+    ...Array.from({ length: 64 }, (_, i) => msgEntry(`after-${i}`, userMsg(`after ${i}`))),
+  ];
+  const preservedSummary = snapshot(fakeCtx({ branch: summaryAndMessages }), []);
+  assert.equal(preservedSummary.state.previousSummary, "retain this summary",
+    "latest summary survives the message cap");
   console.log("snapshot budgets/privacy: ok");
 }
 
