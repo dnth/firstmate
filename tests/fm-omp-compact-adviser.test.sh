@@ -481,6 +481,12 @@ console.log("AC1 inert-by-default gates: ok");
   assert.equal(scrubbed.state.coverage.redacted, true);
   const withSecret = snapshot(fakeCtx({ branch: [msgEntry("u1", userMsg("token known-secret-xyz here"))] }), ["known-secret-xyz"]);
   assert.ok(!JSON.stringify(withSecret.state).includes("known-secret-xyz"), "known secrets scrubbed");
+  const manyUsers = Array.from({ length: 65 }, (_, i) => msgEntry(`many-${i}`, userMsg(`constraint ${i}`)));
+  const capped = snapshot(fakeCtx({ branch: manyUsers }), []);
+  assert.ok(
+    capped.state.userConstraints.length + capped.state.recent.length <= 64,
+    "total transmitted conversation messages capped at 64",
+  );
   console.log("snapshot budgets/privacy: ok");
 }
 

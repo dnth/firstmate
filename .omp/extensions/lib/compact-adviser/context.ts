@@ -21,6 +21,7 @@ import type { ExtensionContext, SessionEntry } from "@oh-my-pi/pi-coding-agent";
 
 /** Recent assistant and toolResult messages considered for the TypeSafe/Jev snapshot. */
 export const RECENT_TAIL_MESSAGES = 64;
+export const SNAPSHOT_MESSAGE_CAP = 64;
 /** Per-tool-result byte cap inside the recent tail; long results are middle-truncated. */
 export const TOOL_RESULT_BUDGET = 512;
 
@@ -261,6 +262,7 @@ export function snapshot(ctx: ExtensionContext, secrets: readonly (string | unde
       messages.push(mapped);
     }
   }
+  const selectedMessages = messages.slice(-SNAPSHOT_MESSAGE_CAP);
   const conversationTokens = messages.reduce(
     (sum, m) => sum + estimateTextTokens(m.text ?? m.summary ?? ""),
     0,
@@ -277,7 +279,7 @@ export function snapshot(ctx: ExtensionContext, secrets: readonly (string | unde
   const users: { role: string; text: string }[] = [];
   const recent: { role: string; text: string; tool?: string; error?: boolean }[] = [];
   let summary = "";
-  for (const m of messages) {
+  for (const m of selectedMessages) {
     if (m.role === "assistant" && m.toolCalls)
       for (const c of m.toolCalls)
         if (typeof c.path === "string") paths.set(c.id, { path: c.path, name: c.name });
@@ -289,8 +291,8 @@ export function snapshot(ctx: ExtensionContext, secrets: readonly (string | unde
       }
     }
   }
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
+  for (let i = selectedMessages.length - 1; i >= 0; i--) {
+    const m = selectedMessages[i];
     let raw = "";
     if (m.role === "user" || m.role === "assistant" || m.role === "toolResult") {
       hasImages ||= m.hasImage === true;
@@ -322,7 +324,7 @@ export function snapshot(ctx: ExtensionContext, secrets: readonly (string | unde
       if (part.truncated) omittedUsers++;
       if (part.text) users.unshift({ role: "user", text: part.text });
       userBudget = Math.max(0, userBudget - Buffer.byteLength(part.text));
-    } else if (i >= messages.length - RECENT_TAIL_MESSAGES) {
+    } else if (i >= selectedMessages.length - RECENT_TAIL_MESSAGES) {
       const part =
         m.role === "toolResult"
           ? clipMiddle(cleaned.text, Math.min(tailBudget, TOOL_RESULT_BUDGET))
@@ -349,7 +351,7 @@ export function snapshot(ctx: ExtensionContext, secrets: readonly (string | unde
     }),
     coverage: {
       omittedUserMessages: omittedUsers,
-      olderMessagesOmitted: Math.max(0, messages.length - RECENT_TAIL_MESSAGES),
+      olderMessagesOmitted: Math.max(0, messages.length - SNAPSHOT_MESSAGE_CAP),
       recentTextTruncated: recentTruncated,
       hasImages,
       redacted,
