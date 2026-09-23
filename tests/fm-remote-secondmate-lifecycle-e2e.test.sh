@@ -616,9 +616,14 @@ remote_root=$(sed -n 's/^remote_root=//p' "$PARENT/state/ios.meta")
 remote_reconcile_snapshot="$TMP_ROOT/markerless-reconcile.json"
 # Direct reconciliation calls use the same deterministic SSH boundary as
 # remote_env; otherwise the host probe would fall back to the real ssh binary.
+# They also need the fixture's remote-job state root and platform override:
+# without them the remote entrypoint stages reconcile jobs in the operator's
+# ambient remote-job queue instead of the fixture's isolated worker.
 export FM_SSH_BIN="$FAKEBIN/fake-ssh" FM_FAKE_REMOTE_CWD="$TMP_ROOT" \
   FM_FAKE_REMOTE_ENTRYPOINT="$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" \
-  FM_FAKE_SSH_COUNT="$SSH_COUNT"
+  FM_FAKE_SSH_COUNT="$SSH_COUNT" \
+  FM_REMOTE_JOB_STATE_ROOT="$TMP_ROOT/remote-jobs" \
+  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux
 jq -n --arg id ios --arg host remote-mac --arg root "$remote_root" \
   '{schema:"fm-fleet-snapshot.v1",secondmate_current:{records:[{id:$id,host:$host,remote_root:$root,remote:true,reconcile_inventory:{kind:"orphan_in_flight",ids:["ios"]}}]}}' \
   > "$remote_reconcile_snapshot"
