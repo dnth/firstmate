@@ -2518,7 +2518,7 @@ resolve_project_dir_arg() {
 omp_secondmate_extension_matches_trusted_closure() {
   local project=$1 path=$2 trusted dependency dependencies=
   case "$path" in
-    .omp/extensions/fm-primary-omp.ts|.omp/extensions/fm-fleet-hooks.ts|.omp/extensions/fm-branch-supervision-omp.ts) ;;
+    .omp/extensions/fm-primary-omp.ts|.omp/extensions/fm-fleet-hooks.ts|.omp/extensions/fm-branch-supervision-omp.ts|.omp/extensions/fm-compact-adviser-omp.ts) ;;
     *) return 1 ;;
   esac
   trusted="$FM_ROOT/$path"
@@ -2533,6 +2533,16 @@ omp_secondmate_extension_matches_trusted_closure() {
     .omp/extensions/fm-branch-supervision-omp.ts)
       dependencies=".omp/extensions/lib/fm-branch-dispatch.ts
 .omp/extensions/lib/fm-branch-model-picker.ts"
+      ;;
+    .omp/extensions/fm-compact-adviser-omp.ts)
+      dependencies=".omp/extensions/lib/compact-adviser/adviser.ts
+.omp/extensions/lib/compact-adviser/config.ts
+.omp/extensions/lib/compact-adviser/context.ts
+.omp/extensions/lib/compact-adviser/disable.ts
+.omp/extensions/lib/compact-adviser/env.ts
+.omp/extensions/lib/compact-adviser/judge.ts
+.omp/extensions/lib/compact-adviser/log.ts
+.omp/extensions/lib/compact-adviser/state.ts"
       ;;
   esac
   [ -n "$dependencies" ] || return 0
