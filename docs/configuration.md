@@ -310,7 +310,7 @@ The raw-command OMP boundary is owned by the `fm-spawn.sh` header, including the
 ## OMP project extensions
 
 OMP discovers native project extensions from the launch cwd's `.omp/extensions` directory and from non-empty string extension roots declared by `.omp/settings.json`, separately from its profile-scoped home extensions.
-The installed OMP 17.2.11 discovery surface loads non-hidden top-level `.ts` and `.js` files, one-level `index.ts` and `index.js` entries, and extension manifests that declare `omp.extensions` or `pi.extensions`.
+The verified OMP discovery surface loads non-hidden top-level `.ts` and `.js` files, one-level `index.ts` and `index.js` entries, and extension manifests that declare `omp.extensions` or `pi.extensions`.
 Those project files execute before the worker reasons about its brief, and Firstmate launches OMP with `--auto-approve`.
 `fm-spawn.sh` therefore refuses an OMP crewmate or secondmate launch when the final project worktree contains git-tracked auto-executed `.omp/extensions` entries or a tracked project settings extension selector.
 Only explicit captain approval for that project authorizes the per-spawn override described in `fm-spawn.sh`'s header.
