@@ -857,8 +857,8 @@ do_relaunch() {
   local -a spawn_args
 
   stall_relaunch_absence_guard() {
-    [ -n "$STALL_RECORD" ] || return 0
     state=$(agent_state)
+    [ -n "$STALL_RECORD" ] || return 0
     case "$state" in
       dead|missing) ;;
       *) die "supervised relaunch refused: endpoint state '$state' is not positively absent" ;;
@@ -923,8 +923,8 @@ do_relaunch() {
     fi
   fi
 
-  stall_relaunch_absence_guard
   journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
+  stall_relaunch_absence_guard
   if [ "$state" = dead ] || [ "$state" = missing ]; then
     # The recorded endpoint is authoritatively absent, so there is no agent to
     # stop: the exit phase is already complete and the launch below recreates
