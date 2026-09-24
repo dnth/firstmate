@@ -868,6 +868,7 @@ test_refused_relaunch_preserves_receipts() {
 # A lifecycle lock held by a live process means another lifecycle action is in
 # flight: recovery defers instead of racing it, and the watcher re-evaluates on
 # the next cycle.
+# shellcheck disable=SC2031 # This test intentionally coordinates with a background lock-holder subshell.
 test_held_lifecycle_lock_defers() {
   local rec id record lockdir holder n
   id=$(case_id lockheld)
