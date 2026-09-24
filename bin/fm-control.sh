@@ -56,7 +56,10 @@
 #              lock, immediately before the agent is touched, fm-control
 #              re-proves the named inbox record is still the oldest unhandled
 #              instruction and cancels with exit 3 when it was handled or
-#              superseded in flight. It requires --lock-preheld.
+#              superseded in flight, and cancels with exit 4 when the worker
+#              went provably busy during the checkpoint - a productive worker
+#              is deferred to, never interrupted, and an unproven busy verdict
+#              fails closed. It requires --lock-preheld.
 #              Records a durable checkpoint and that note, exits the old agent,
 #              then delegates the launch to its single owner,
 #              bin/fm-spawn.sh --relaunch. A failure before publication keeps
@@ -508,9 +511,21 @@ do_exit() {
     missing) die "task $ID's recorded endpoint is gone, so there is no agent to stop; reconcile the task before any further control action" ;;
     *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint" ;;
   esac
-  # A busy agent is interrupted first before the exit command is submitted.
+  # A busy agent is interrupted first before the exit command is submitted -
+  # except on the supervised --stall-record path, where busy means the stalled
+  # worker started acting on the instruction between the caller's custody
+  # proof and this last gate. Interrupting a now-productive worker is exactly
+  # the harm supervised recovery exists to avoid, so busy returns 4 for the
+  # caller to map to a deferred episode (with the instructions restored
+  # byte-exact), and any verdict that is not a proven idle fails closed
+  # rather than exiting an agent whose state cannot be proven. Manual
+  # relaunch and the plain exit verb keep the interrupt-first semantics.
   case "$(busy_verdict)" in
     busy*)
+      if [ -n "$STALL_RECORD" ]; then
+        printf 'busy-deferred'
+        return 4
+      fi
       cancel=$(deliver_interrupt) || return $?
       state=$(agent_state)
       case "$state" in
@@ -523,6 +538,11 @@ do_exit() {
         missing) die "task $ID's recorded endpoint disappeared after interrupt delivery, so exit cannot prove whether the agent stopped" ;;
         *) die "task $ID's endpoint reads '$state' after interrupt delivery rather than a positively classified state; exit cannot prove whether the agent stopped" ;;
       esac
+      ;;
+    idle*) ;;
+    *)
+      [ -z "$STALL_RECORD" ] \
+        || die "task $ID's busy verdict is not a proven idle, so supervised stall recovery cannot prove the worker is still non-turning; refusing to exit an agent whose state cannot be proven"
       ;;
   esac
   cmd=$(fm_control_exit_command "$HARNESS")
@@ -572,6 +592,26 @@ PRIOR_EFFORT=
 TARGET_HARNESS=$HARNESS
 TARGET_MODEL=
 TARGET_EFFORT=
+
+# stall_relaunch_cancel: cancel the supervised --stall-record relaunch cleanly
+# after the checkpoint/note work has run. Restores the worker's instructions
+# byte-exact (record_note appended the progress note), journals the named
+# cancellation phase, and exits with <code> for the supervised caller. Reads
+# do_relaunch's note_line through bash's dynamic scope; only ever called from
+# inside it. A restore failure is a hard error, not a clean cancel.
+stall_relaunch_cancel() {  # <phase> <message> <code>
+  local phase=$1 message=$2 code=$3
+  if [ -n "$RELAUNCH_BRIEF" ] && [ -f "$BRIEF_PRIOR" ]; then
+    if ! cp -p "$BRIEF_PRIOR" "$RELAUNCH_BRIEF" 2>/dev/null; then
+      RELAUNCH_ACTIVE=0
+      journal_write "failed:$phase" "rollback=instructions-restore-failed" "${CHECKPOINT_LINES[@]}" "$note_line" || true
+      die "relaunch cancelled ($phase), but restoring the original instructions failed"
+    fi
+  fi
+  journal_write "cancelled:$phase" "${CHECKPOINT_LINES[@]}" "$note_line" || true
+  echo "relaunch cancelled: $message" >&2
+  exit "$code"
+}
 
 journal_write() {  # <phase> [extra-line]...
   local phase=$1
@@ -833,7 +873,7 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line stall_oldest
+  local exit_result exit_rc state note_line stall_oldest
   local -a spawn_args
 
   require_state_verified_backend relaunch
@@ -880,21 +920,10 @@ do_relaunch() {
   # untouched when no relaunch happened.
   if [ -n "$STALL_RECORD" ]; then
     stall_oldest=$(fm_task_inbox_oldest_unhandled "$STATE" "$ID" 2>/dev/null || true)
-    if [ -z "$stall_oldest" ] || [ "${stall_oldest##*/}" != "$STALL_RECORD" ]; then
-      if [ -n "$RELAUNCH_BRIEF" ] && [ -f "$BRIEF_PRIOR" ]; then
-        if ! cp -p "$BRIEF_PRIOR" "$RELAUNCH_BRIEF" 2>/dev/null; then
-          RELAUNCH_ACTIVE=0
-          journal_write "failed:record-resolved" "rollback=instructions-restore-failed" "${CHECKPOINT_LINES[@]}" "$note_line" || true
-          die "relaunch cancelled for resolved stall record, but restoring the original instructions failed"
-        fi
-      fi
-      journal_write "cancelled:record-resolved" "${CHECKPOINT_LINES[@]}" "$note_line" || true
-      if [ -z "$stall_oldest" ]; then
-        echo "relaunch cancelled: stall record resolved (inbox empty; instruction handled)" >&2
-      else
-        echo "relaunch cancelled: stall record $STALL_RECORD handled or superseded (${stall_oldest##*/} is now oldest)" >&2
-      fi
-      exit 3
+    if [ -z "$stall_oldest" ]; then
+      stall_relaunch_cancel record-resolved "stall record resolved (inbox empty; instruction handled)" 3
+    elif [ "${stall_oldest##*/}" != "$STALL_RECORD" ]; then
+      stall_relaunch_cancel record-resolved "stall record $STALL_RECORD handled or superseded (${stall_oldest##*/} is now oldest)" 3
     fi
   fi
 
@@ -909,7 +938,20 @@ do_relaunch() {
     retire_busy_incarnation
     exit_result=already-stopped
   else
-    exit_result=$(do_exit)
+    exit_rc=0
+    exit_result=$(do_exit) || exit_rc=$?
+    case "$exit_rc" in
+      0) ;;
+      4)
+        # The worker went busy between the custody proof and the exit gate:
+        # it is acting on the instruction now, so the relaunch defers rather
+        # than interrupting a productive worker. Exit 4 is the dedicated
+        # "worker busy; episode stays pending" code the supervised caller maps
+        # to deferred. The instructions are restored byte-exact first.
+        stall_relaunch_cancel worker-busy "stall record $STALL_RECORD: worker went busy during the relaunch; deferring rather than interrupting a productive worker" 4
+        ;;
+      *) exit "$exit_rc" ;;
+    esac
   fi
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
 

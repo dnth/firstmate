@@ -43,7 +43,9 @@
 #     exists to keep, and the relaunch inherits the same worktree, branch,
 #     and commits untouched.
 #   - One automatic relaunch per stalled instruction: the per-record attempt
-#     marker under the inbox bounds retries, and an emptied inbox resets it.
+#     marker under the inbox bounds retries; an emptied inbox resets it, and
+#     a well-formed marker naming a record that was since handled starts the
+#     new oldest record's own count at zero.
 #   - The durable fm-<id> worktree lease, same-worktree/branch/commits
 #     preservation, and the no-shared-daemon boundary are enforced by
 #     bin/fm-control.sh relaunch itself; this script never moves inbox
@@ -259,11 +261,18 @@ if [ -e "$attempts_file" ] || [ -L "$attempts_file" ]; then
     || verdict escalate "cannot read the recovery-attempt bound at $attempts_file"
   IFS=$(printf '\t') read -r attempts_record attempts_count attempts_extra \
     <<< "$attempts_content"
-  [ "$attempts_record" = "${RECORD##*/}" ] \
+  # Structure is validated separately from record identity: a well-formed
+  # marker naming a different record is the spent bound of an instruction that
+  # was since handled (the watcher only clears it on an observed empty inbox,
+  # which a back-to-back queue never produces), so the current oldest record
+  # starts its own count at zero and the marker is replaced atomically below.
+  # Only a corrupt marker or a spent bound on THIS record escalates.
+  case "$attempts_record" in ''|*[!A-Za-z0-9._-]*) false ;; *) true ;; esac \
     && case "$attempts_count" in ''|*[!0-9]*) false ;; *) true ;; esac \
     && [ -z "$attempts_extra" ] \
     && [ "$attempts_content" = "${attempts_record}$(printf '\t')${attempts_count}" ] \
     || verdict escalate "malformed recovery-attempt marker at $attempts_file"
+  [ "$attempts_record" = "${RECORD##*/}" ] || attempts_count=0
 fi
 [ "$attempts_count" -lt 1 ] \
   || verdict escalate "automatic recovery already attempted for ${RECORD##*/}; escalating per bounded-retry policy"
@@ -287,7 +296,8 @@ fi
 # hands fm-control the record basename so it re-proves the instruction is
 # still the oldest unhandled record inside the lock, immediately before the
 # agent is touched - the check above cannot cover the gap to that point.
-# Exit 3 is fm-control's "record resolved; nothing to do" code.
+# Exit 3 is fm-control's "record resolved; nothing to do" code and exit 4 its
+# "worker went busy during the relaunch; defer" code.
 FM_CONFIG_OVERRIDE=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
 control_out_file=$(mktemp "$STATE/.stall-recovery-control-out.XXXXXX" 2>/dev/null) \
   || verdict escalate "cannot allocate the fm-control output capture"
@@ -305,6 +315,7 @@ rm -f "$control_out_file"
 case "$control_rc" in
   0) ;;
   3) verdict recovered "record ${RECORD##*/} resolved inside the lifecycle lock before the relaunch; instruction handled" ;;
+  4) verdict deferred "worker went busy inside the lifecycle lock before the relaunch; it is acting on ${RECORD##*/}, so the episode stays pending until the record is handled or the ladder re-escalates" ;;
   *) verdict escalate "fm-control relaunch refused or failed: $(printf '%s' "$control_out" | tail -1)" ;;
 esac
 

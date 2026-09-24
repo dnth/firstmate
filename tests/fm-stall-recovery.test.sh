@@ -329,18 +329,24 @@ exit "${FM_FAKE_CONTROL_RC:-0}"
 SH
   chmod +x "$fb/fm-control.sh"
 
-  # git forwards to the real binary, except when FM_FAKE_GIT_MOVE names an
-  # inbox record: the first `git -C <wt> status --porcelain` inside
-  # fm-control's safe_checkpoint moves that record to handled/, simulating a
+  # git forwards to the real binary, with two test hooks on the first
+  # `git -C <wt> status --porcelain` inside fm-control's safe_checkpoint:
+  # FM_FAKE_GIT_MOVE names an inbox record moved to handled/, simulating a
   # worker that acknowledges the instruction in the gap between the caller's
-  # pre-invocation check and fm-control's in-lock re-check.
+  # pre-invocation check and fm-control's in-lock re-check; FM_FAKE_GIT_BUSY
+  # names a busy-state file overwritten with a valid busy record, simulating
+  # a worker that starts a turn on the instruction during the checkpoint.
   cat > "$fb/git" <<'SH'
 #!/usr/bin/env bash
 set -u
-if [ -n "${FM_FAKE_GIT_MOVE:-}" ] && [ "${1:-}" = "-C" ] && [ "${3:-}" = "status" ]; then
-  if [ -f "$FM_FAKE_GIT_MOVE" ]; then
+if [ "${1:-}" = "-C" ] && [ "${3:-}" = "status" ]; then
+  if [ -n "${FM_FAKE_GIT_MOVE:-}" ] && [ -f "$FM_FAKE_GIT_MOVE" ]; then
     mkdir -p "${FM_FAKE_GIT_MOVE%/*}/handled"
     mv "$FM_FAKE_GIT_MOVE" "${FM_FAKE_GIT_MOVE%/*}/handled/"
+  fi
+  if [ -n "${FM_FAKE_GIT_BUSY:-}" ]; then
+    printf 'v1 gen=gentest seq=3 state=busy source=omp-ext event=turn-start ts=1\n' \
+      > "$FM_FAKE_GIT_BUSY"
   fi
 fi
 exec /usr/bin/git "$@"
@@ -996,6 +1002,97 @@ test_in_lock_handled_record_cancels_relaunch() {
   pass "in-lock handled record: fm-control cancels the relaunch before touching the agent"
 }
 
+# A worker that goes busy DURING the checkpoint - publishing a valid
+# turn-start busy record while its instruction stays unhandled - must never
+# be interrupted: the supervised relaunch cancels with the deferred verdict,
+# sends no interrupt or exit keys, creates no replacement window, and leaves
+# the worker's instructions byte-exact. The fake git publishes the busy
+# record inside fm-control's safe_checkpoint, after every earlier custody
+# proof already saw an idle worker.
+test_busy_during_checkpoint_defers() {
+  local rec id record
+  id=$(case_id checkpoint-busy)
+  rec=$(make_case checkpoint-busy "$id" pool)
+  read_case "$rec"
+  write_pool_state "$CASE_DIR" "$WT_DIR" "fm-$id"
+  write_slot_marker "$SLOT_DIR" "$id" "$HOME_DIR"
+  write_meta "$HOME_DIR/state/$id.meta" "$id" "$WT_DIR" "$PROJ_DIR"
+  create_prior_artifacts "$HOME_DIR/state" "$id"
+  write_inbox "$HOME_DIR/state" "$id" 001
+  record="$HOME_DIR/state/$id.inbox/001.msg"
+  write_busy "$HOME_DIR/state" "$id" idle
+  live_window "$CASE_DIR" "$id" bun
+  cp -p "$HOME_DIR/data/$id/brief.md" "$CASE_DIR/brief.orig"
+
+  FM_FAKE_GIT_BUSY="$HOME_DIR/state/$id.busy-state" \
+    FM_STALL_RECOVERY_CONTROL_BIN="$CONTROL" \
+    run_recovery "$CASE_DIR" "$HOME_DIR" "$id" "$record" ladder-exhausted
+  expect_code 0 "$RECOVERY_STATUS" "busy-during-checkpoint recovery should exit 0; got: $RECOVERY_OUT"
+  assert_contains "$RECOVERY_OUT" "verdict=deferred" "a worker that went busy during the checkpoint did not defer"
+  assert_no_grep "Escape" "$CASE_DIR/fake/tmux.log" "an interrupt key was sent to a worker that went busy during the checkpoint"
+  assert_no_grep "/exit" "$CASE_DIR/fake/tmux.log" "an exit command was sent to a worker that went busy during the checkpoint"
+  assert_no_grep "new-window" "$CASE_DIR/fake/tmux.log" "the relaunch created a window for a worker that went busy"
+  assert_grep "cancelled:worker-busy" "$HOME_DIR/state/$id.control-relaunch" "the journal did not record the busy-worker cancellation"
+  assert_present "$record" "the unhandled instruction record was moved or deleted"
+  assert_grep "001.msg" "$HOME_DIR/state/$id.inbox/.recovery-attempts" "the deferred episode did not record its attempt bound"
+  cmp -s "$CASE_DIR/brief.orig" "$HOME_DIR/data/$id/brief.md" \
+    || fail "a busy-cancelled relaunch left the worker's instructions modified"
+  pass "busy during checkpoint: recovery defers without interrupt, exit, or relaunch"
+}
+
+# A well-formed attempt marker naming a record that was since handled must
+# not deny the next queued record its own first attempt: structure is
+# validated separately from identity, so 002.msg recovers with a fresh count
+# even though the watcher never observed an empty inbox between the two.
+test_next_record_gets_own_attempt() {
+  local rec id record
+  id=$(case_id next-record)
+  rec=$(make_case next-record "$id" pool)
+  read_case "$rec"
+  write_pool_state "$CASE_DIR" "$WT_DIR" "fm-$id"
+  write_slot_marker "$SLOT_DIR" "$id" "$HOME_DIR"
+  write_meta "$HOME_DIR/state/$id.meta" "$id" "$WT_DIR" "$PROJ_DIR"
+  create_prior_artifacts "$HOME_DIR/state" "$id"
+  write_inbox "$HOME_DIR/state" "$id" 001
+  write_inbox "$HOME_DIR/state" "$id" 002
+  printf '001.msg\t1\n' > "$HOME_DIR/state/$id.inbox/.recovery-attempts"
+  mv "$HOME_DIR/state/$id.inbox/001.msg" "$HOME_DIR/state/$id.inbox/handled/"
+  record="$HOME_DIR/state/$id.inbox/002.msg"
+  missing_window "$CASE_DIR" "$id"
+
+  FM_STALL_RECOVERY_CONTROL_BIN="$CONTROL" \
+    run_recovery "$CASE_DIR" "$HOME_DIR" "$id" "$record" endpoint-unavailable
+  expect_code 0 "$RECOVERY_STATUS" "next-record recovery should exit 0; got: $RECOVERY_OUT"
+  assert_contains "$RECOVERY_OUT" "verdict=deferred" "the next queued record did not get its own recovery attempt"
+  assert_grep "phase=complete" "$HOME_DIR/state/$id.control-relaunch" "the relaunch transaction did not complete for the next record"
+  assert_grep "002.msg" "$HOME_DIR/state/$id.inbox/.recovery-attempts" "the new record's attempt bound was not recorded"
+  assert_no_grep "001.msg" "$HOME_DIR/state/$id.inbox/.recovery-attempts" "the prior record's spent marker survived the atomic replace"
+  pass "next record: a handled record's spent marker does not consume the next record's attempt"
+}
+
+# A corrupt attempt marker still fails closed: structure validation is
+# unchanged, so an unparseable marker escalates without any lifecycle action.
+test_malformed_attempt_marker_escalates() {
+  local rec id record
+  id=$(case_id bad-marker)
+  rec=$(make_case bad-marker "$id" pool)
+  read_case "$rec"
+  write_pool_state "$CASE_DIR" "$WT_DIR" "fm-$id"
+  write_slot_marker "$SLOT_DIR" "$id" "$HOME_DIR"
+  write_meta "$HOME_DIR/state/$id.meta" "$id" "$WT_DIR" "$PROJ_DIR"
+  create_prior_artifacts "$HOME_DIR/state" "$id"
+  write_inbox "$HOME_DIR/state" "$id" 001
+  record="$HOME_DIR/state/$id.inbox/001.msg"
+  printf 'garbage-no-tab\n' > "$HOME_DIR/state/$id.inbox/.recovery-attempts"
+  missing_window "$CASE_DIR" "$id"
+
+  run_recovery "$CASE_DIR" "$HOME_DIR" "$id" "$record" endpoint-unavailable
+  assert_contains "$RECOVERY_OUT" "verdict=escalate" "a corrupt attempt marker did not escalate"
+  assert_contains "$RECOVERY_OUT" "malformed recovery-attempt marker" "the escalation did not name the corrupt marker"
+  assert_absent "$CASE_DIR/control.log" "the lifecycle verb ran against a corrupt attempt marker"
+  pass "corrupt attempt marker: recovery escalates without a lifecycle action"
+}
+
 # --- run ---------------------------------------------------------------------
 
 test_missing_endpoint_recovers_via_control
@@ -1015,5 +1112,8 @@ test_refused_relaunch_preserves_receipts
 test_held_lifecycle_lock_defers
 test_in_lock_handled_record_cancels_relaunch
 test_omp_ext_serializes_busy_events
+test_busy_during_checkpoint_defers
+test_next_record_gets_own_attempt
+test_malformed_attempt_marker_escalates
 
 pass "all stall-recovery tests"
