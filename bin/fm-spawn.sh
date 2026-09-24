@@ -56,8 +56,9 @@
 #   Use it only after explicit captain approval:
 #   omp auto-executes those files before the model reasons about the task, and
 #   firstmate launches omp with --auto-approve. Firstmate's exact tracked primary,
-#   fleet-hook, and supervision-branch extensions, including their imported OMP
-#   helper closure, are allowlisted only for validated secondmate-home launches.
+#   fleet-hook, supervision-branch, and compact-adviser extensions, including
+#   their imported OMP helper closures, are allowlisted only for validated
+#   secondmate-home launches.
 #   This flag has no effect on other harnesses. Successful OMP spawns record
 #   allow_project_omp_extensions=1 in task metadata for auditability.
 #   --backend <name> is the explicit runtime session-provider backend for this
@@ -2518,7 +2519,7 @@ resolve_project_dir_arg() {
 omp_secondmate_extension_matches_trusted_closure() {
   local project=$1 path=$2 trusted dependency dependencies=
   case "$path" in
-    .omp/extensions/fm-primary-omp.ts|.omp/extensions/fm-fleet-hooks.ts|.omp/extensions/fm-branch-supervision-omp.ts) ;;
+    .omp/extensions/fm-primary-omp.ts|.omp/extensions/fm-fleet-hooks.ts|.omp/extensions/fm-branch-supervision-omp.ts|.omp/extensions/fm-compact-adviser-omp.ts) ;;
     *) return 1 ;;
   esac
   trusted="$FM_ROOT/$path"
@@ -2533,6 +2534,16 @@ omp_secondmate_extension_matches_trusted_closure() {
     .omp/extensions/fm-branch-supervision-omp.ts)
       dependencies=".omp/extensions/lib/fm-branch-dispatch.ts
 .omp/extensions/lib/fm-branch-model-picker.ts"
+      ;;
+    .omp/extensions/fm-compact-adviser-omp.ts)
+      dependencies=".omp/extensions/lib/compact-adviser/adviser.ts
+.omp/extensions/lib/compact-adviser/config.ts
+.omp/extensions/lib/compact-adviser/context.ts
+.omp/extensions/lib/compact-adviser/disable.ts
+.omp/extensions/lib/compact-adviser/env.ts
+.omp/extensions/lib/compact-adviser/judge.ts
+.omp/extensions/lib/compact-adviser/log.ts
+.omp/extensions/lib/compact-adviser/state.ts"
       ;;
   esac
   [ -n "$dependencies" ] || return 0
@@ -4863,6 +4874,13 @@ if [ "$KIND" = secondmate ]; then
   # Reuse the single frozen decision from the carrier resolution above so the
   # injected carrier and this on/off snapshot are guaranteed to agree.
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
+else
+  # Defense in depth for ordinary workers: an inherited FM_*_OVERRIDE set would
+  # let worker-resident code (e.g. project extensions discovered by ambient
+  # OMP loading) resolve the PRIMARY's operational directories and consent
+  # files instead of the worker's own. Workers resolve their home from
+  # FM_HOME, which stays inherited; only the override knobs are cleared.
+  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= $LAUNCH"
 fi
 # tmux-like backends configure the persistent pane shell before launch. Herdr
 # instead binds both values to the one atomic `pane run` command: acceptance of

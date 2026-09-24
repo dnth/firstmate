@@ -310,13 +310,19 @@ The raw-command OMP boundary is owned by the `fm-spawn.sh` header, including the
 ## OMP project extensions
 
 OMP discovers native project extensions from the launch cwd's `.omp/extensions` directory and from non-empty string extension roots declared by `.omp/settings.json`, separately from its profile-scoped home extensions.
-The installed OMP 17.2.11 discovery surface loads non-hidden top-level `.ts` and `.js` files, one-level `index.ts` and `index.js` entries, and extension manifests that declare `omp.extensions` or `pi.extensions`.
+The verified OMP discovery surface loads non-hidden top-level `.ts` and `.js` files, one-level `index.ts` and `index.js` entries, and extension manifests that declare `omp.extensions` or `pi.extensions`.
 Those project files execute before the worker reasons about its brief, and Firstmate launches OMP with `--auto-approve`.
 `fm-spawn.sh` therefore refuses an OMP crewmate or secondmate launch when the final project worktree contains git-tracked auto-executed `.omp/extensions` entries or a tracked project settings extension selector.
 Only explicit captain approval for that project authorizes the per-spawn override described in `fm-spawn.sh`'s header.
 The successful OMP task metadata records `allow_project_omp_extensions=1` whenever that override is passed.
-The exact tracked Firstmate extensions at `.omp/extensions/fm-primary-omp.ts`, `.omp/extensions/fm-fleet-hooks.ts`, and `.omp/extensions/fm-branch-supervision-omp.ts` are excluded only for a validated secondmate home when each file's live contents and every imported Firstmate helper in its trusted closure match Firstmate's own copies, so the primary integration can be loaded explicitly and the fleet hooks and supervision branch remain available to native discovery in that home's OMP session.
+The exact tracked Firstmate extensions at `.omp/extensions/fm-primary-omp.ts`, `.omp/extensions/fm-fleet-hooks.ts`, `.omp/extensions/fm-branch-supervision-omp.ts`, and `.omp/extensions/fm-compact-adviser-omp.ts` are excluded only for a validated secondmate home when each file's live contents and every imported Firstmate helper in its trusted closure match Firstmate's own copies, so the primary integration can be loaded explicitly and the fleet hooks and supervision branch remain available to native discovery in that home's OMP session.
+The compact-adviser closure is trusted for that launch but its attended-primary gate keeps the adapter inactive in every secondmate session.
 Other harnesses do not run this preflight because they do not auto-execute OMP project extensions.
+
+The tracked `.omp/extensions/fm-compact-adviser-omp.ts` is inert unless the attended primary has an explicit `config/compact-adviser.json` opt-in record.
+It never runs for spawned agents, never auto-compacts, and shows advice only through the person-facing OMP widget or status surface; it does not send a model-context message.
+The record's `mode` supports `hint` or `off`, and its TypeSafe request is bounded and redacted before transmission.
+The current runtime-API verification and focused regression command are recorded in [`docs/verification/runtime-backends.md`](verification/runtime-backends.md#omp-compact-adviser-runtime-api-addendum).
 
 ## OMP supervision branch
 

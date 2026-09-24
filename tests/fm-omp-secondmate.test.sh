@@ -727,6 +727,62 @@ test_stale_omp_runtime_cleanup() {
   pass "OMP runtime cleanup clears dead occupants and preserves live occupants"
 }
 
+# The compact-adviser adapter ships its own extension plus a lib/compact-adviser
+# import closure. fm-spawn trusts that exact set for OMP secondmates only while
+# every file is byte-identical to the primary's copy, so this fixture builds a
+# synthetic FM_ROOT holding the primary's bytes and a home tracking the same
+# files - the real adapter files land with the adapter itself.
+write_adviser_closure() { # <root-dir>
+  local root=$1 dep
+  mkdir -p "$root/.omp/extensions/lib/compact-adviser"
+  printf '// compact adviser entrypoint\n' > "$root/.omp/extensions/fm-compact-adviser-omp.ts"
+  for dep in adviser config context disable env judge log state; do
+    printf '// compact adviser %s\n' "$dep" > "$root/.omp/extensions/lib/compact-adviser/$dep.ts"
+  done
+}
+
+setup_adviser_case() { # <name>
+  setup_case "$1"
+  SYN_ROOT="$CASE/fm-root"
+  mkdir -p "$SYN_ROOT/.omp/extensions/lib"
+  ln -s "$ROOT/bin" "$SYN_ROOT/bin"
+  cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$SYN_ROOT/.omp/extensions/fm-primary-omp.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$SYN_ROOT/.omp/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-async-exec.ts" "$SYN_ROOT/.omp/extensions/lib/fm-async-exec.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" "$SYN_ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts"
+  write_adviser_closure "$SYN_ROOT"
+  write_adviser_closure "$HOME_DIR"
+  git -C "$HOME_DIR" add .omp/extensions/fm-compact-adviser-omp.ts .omp/extensions/lib/compact-adviser
+  git -C "$HOME_DIR" commit -qm adviser
+}
+
+test_adviser_extension_trusted_closure() {
+  local out
+  setup_adviser_case adviser-trusted
+  out=$(run_spawn FM_ROOT_OVERRIDE="$SYN_ROOT" 2>&1) \
+    || fail "OMP secondmate refused the trusted compact-adviser extension closure: $out"
+  assert_contains "$(cat "$TMUX_LOG")" 'new-window' "trusted compact-adviser closure did not launch"
+
+  setup_adviser_case adviser-modified
+  printf '// tampered\n' >> "$HOME_DIR/.omp/extensions/lib/compact-adviser/judge.ts"
+  out=$(run_spawn FM_ROOT_OVERRIDE="$SYN_ROOT" 2>&1) \
+    && fail "OMP secondmate launched with a modified compact-adviser closure file"
+  assert_contains "$out" 'refusing omp launch' "modified compact-adviser closure refusal was not actionable"
+  assert_contains "$out" 'fm-compact-adviser-omp.ts' "modified compact-adviser closure refusal did not name the extension"
+  [ "$(count_new_windows)" = 0 ] || fail "modified compact-adviser closure refusal created an endpoint"
+
+  setup_adviser_case adviser-missing
+  rm -f "$HOME_DIR/.omp/extensions/lib/compact-adviser/state.ts"
+  out=$(run_spawn FM_ROOT_OVERRIDE="$SYN_ROOT" 2>&1) \
+    && fail "OMP secondmate launched with a missing compact-adviser closure file"
+  assert_contains "$out" 'refusing omp launch' "missing compact-adviser closure refusal was not actionable"
+  [ "$(count_new_windows)" = 0 ] || fail "missing compact-adviser closure refusal created an endpoint"
+
+  pass "OMP secondmate trusts the compact-adviser closure only when every file is byte-identical to the primary"
+}
+
+test_adviser_extension_trusted_closure
+
 test_stale_omp_runtime_cleanup
 test_herdr_launch_exact_resume_recovery_and_abort
 test_launch_and_exact_resume

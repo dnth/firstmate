@@ -374,13 +374,13 @@ ok - OMP ignores hidden direct extension files
 ok - OMP ignores unusable settings extension entries
 ok - OMP ignores unsupported root extension manifests
 ok - OMP restricts the primary adapter exemption to secondmate homes
-ok - OMP secondmates trust exact primary and fleet extensions while inspecting staged code
+ok - OMP secondmates trust exact primary, fleet, supervision, and compact-adviser extensions while inspecting staged code
 ok - OMP secondmate launch and recovery use the isolated adapter and an exact home-owned session pointer
 ```
 
 The deterministic spawn checks prove that an OMP launch refuses a git-tracked project extension without the explicit override, records the override when passed, and leaves projects without tracked extensions unchanged.
 Raw-launch OMP refusals and direct non-OMP compatibility are covered by `tests/fm-spawn-dispatch-profile.test.sh`.
-The secondmate integration checks reran on 2026-08-27 and prove that the exact Firstmate primary and fleet-hook extensions remain permitted in the persistent home without allowing modified or unrelated tracked extension code.
+The secondmate integration checks prove that the exact Firstmate primary, fleet-hook, supervision-branch, and compact-adviser extensions remain permitted in the persistent home without allowing modified or unrelated tracked extension code.
 Live firing of the fleet hook's `tool_result`, `todo_reminder`, and `session.compacting` handlers is PENDING firstmate scratch OMP verification before merge; deterministic extension and spawn tests do not claim OMP event delivery.
 
 The Firstmate project todo policy was verified on 2026-09-12 against OMP 18.1.14 through OMP's effective-configuration interface:
@@ -670,6 +670,20 @@ The branch session is built with the native prompt-cache options providerPromptC
 The committed live guard does not observe server-side cache-read token counts, which OMP does not expose to the extension surface, so no cache-hit-rate claim is made here.
 
 Mid-flight branch replacement, model/effort hot-swap, and hung-branch live takeover are deliberately out of scope for this port (docs/omp-supervision-branch.md), so the guard exercises only the shipped surface: a resident branch with clean-boundary and kill-restart transitions.
+
+#### OMP compact-adviser runtime API addendum
+
+The attended-primary, hint-only compact-adviser adapter was re-verified on 2026-09-20 against `@oh-my-pi/pi-coding-agent` 18.2.6.
+The verification covered the extension registration and event surface in `packages/coding-agent/src/extensibility/index.ts` and `packages/coding-agent/src/extensibility/types.ts`, the active transcript and session identity methods in `packages/coding-agent/src/session/session-manager.ts`, the context-usage and idle methods in `packages/coding-agent/src/extensibility/extension-context.ts`, and the person-only widget/status methods in `packages/coding-agent/src/ui/ui.ts`.
+These are the runtime APIs consumed by `.omp/extensions/fm-compact-adviser-omp.ts` and `.omp/extensions/lib/compact-adviser/{adviser,context}.ts`.
+The adapter's focused guard is `tests/fm-omp-compact-adviser.test.sh`; no `sendMessage` or compaction API is used for hints.
+
+```sh
+bash tests/fm-omp-compact-adviser.test.sh
+```
+
+The bounded guard output was `ok - compact-adviser adapter: gates, judge contract, snapshot, lifecycle`.
+
 #### OMP main-fallback re-entry
 
 The live OMP 18.0.10 observation on 2026-08-31 found the supervision branch unavailable while fallback notifications were handled by MAIN.
