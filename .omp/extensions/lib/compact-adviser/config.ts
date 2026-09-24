@@ -43,20 +43,6 @@ export function parseMinimum(text: string): number {
   }
   return number;
 }
-export function parseSavedApiKey(text: string): string {
-  const value = text.trim();
-  if (!value) throw new Error("Enter a TypeSafe API key, or cancel to leave it unchanged.");
-  if (value.length > MAX_SAVED_API_KEY_LENGTH) {
-    throw new Error("That value is too long to save as a TypeSafe API key.");
-  }
-  for (let i = 0; i < value.length; i++) {
-    const code = value.charCodeAt(i);
-    if (code < 33 || code > 126) {
-      throw new Error("A TypeSafe API key is a single line of printable characters.");
-    }
-  }
-  return value;
-}
 function validate(value: unknown): Config {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new Error("Invalid settings.");
