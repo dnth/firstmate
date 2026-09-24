@@ -340,16 +340,28 @@ window_label() {
   [ -n "$task" ] && printf 'fm-%s' "$task"
 }
 
+inbox_steer_inbox_error() {  # <window> <task>
+  local w=$1 task=$2 reason
+  reason="stale: $w (the steering inbox for $task is unreadable; durable instructions cannot be verified, so inspect the inbox)"
+  fm_wake_append stale "$w" "$reason" || exit 1
+  wake "$reason"
+}
+
 # Surface one stale wake for an unhandled steer whose endpoint is positively
 # dead or missing: the doorbell was never typed, so the record goes straight to
 # recovery instead of walking the re-ring ladder. The marker write happens after
 # the durable queue append, so a crash between them can only produce a rare
 # duplicate, never a lost wake.
 inbox_steer_escalate_unavailable() {  # <window> <task> <record>
-  local w=$1 task=$2 rec=$3 reason
+  local w=$1 task=$2 rec=$3 reason rc
   reason="stale: $w (unread firstmate instruction: $rec is unhandled and the worker's agent has exited or its endpoint is missing, so the doorbell was not typed; recover the worker)"
   if [ ! -d "${rec%/*}" ] || [ ! -f "$rec" ]; then
-    fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
+    if fm_task_inbox_due_action "$STATE" "$task" >/dev/null; then
+      :
+    else
+      rc=$?
+      [ "$rc" -eq 2 ] && inbox_steer_inbox_error "$w" "$task"
+    fi
     return 0
   fi
   if inbox_steer_attempt_recovery "$w" "$task" "$rec" "endpoint-unavailable"; then
@@ -400,9 +412,15 @@ inbox_steer_attempt_recovery() {  # <window> <task> <record> <trigger>
 }
 
 inbox_steer_check() {  # <window> <task>
-  local window=$1 task=$2 action verb record count tail40 reason ring_rc
+  local window=$1 task=$2 action verb record count tail40 reason ring_rc rc
   local meta backend label harness omp_runtime omp_bin agent_state
-  action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0
+  if action=$(fm_task_inbox_due_action "$STATE" "$task" 2>/dev/null); then
+    :
+  else
+    rc=$?
+    [ "$rc" -eq 2 ] && inbox_steer_inbox_error "$window" "$task"
+    return 0
+  fi
   verb=${action%% *}
   [ "$verb" != quiet ] || return 0
   record=${action#* }
@@ -438,7 +456,12 @@ inbox_steer_check() {  # <window> <task>
       fi
       if ! fm_task_inbox_record_ring "$STATE" "$task" "$record"; then
         if [ ! -f "$record" ]; then
-          fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
+          if fm_task_inbox_due_action "$STATE" "$task" >/dev/null; then
+            :
+          else
+            rc=$?
+            [ "$rc" -eq 2 ] && inbox_steer_inbox_error "$window" "$task"
+          fi
           return 0
         fi
         if [ -d "${record%/*}" ]; then
@@ -452,7 +475,12 @@ inbox_steer_check() {  # <window> <task>
     escalate)
       reason="stale: $window (unread firstmate instruction: $record still unhandled after $count doorbell delivery attempts with an idle pane; inspect the worker)"
       if [ ! -d "${record%/*}" ] || [ ! -f "$record" ]; then
-        fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
+        if fm_task_inbox_due_action "$STATE" "$task" >/dev/null; then
+          :
+        else
+          rc=$?
+          [ "$rc" -eq 2 ] && inbox_steer_inbox_error "$window" "$task"
+        fi
         return 0
       fi
       if inbox_steer_attempt_recovery "$window" "$task" "$record" "ladder-exhausted"; then
