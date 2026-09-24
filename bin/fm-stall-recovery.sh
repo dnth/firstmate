@@ -137,9 +137,12 @@ case "$KIND" in ''|ship|scout) ;; *) verdict escalate "kind=$KIND is not an ordi
 # The named record must still be the oldest unhandled instruction. A record
 # that moved to handled/ (or an emptied inbox) ends the episode quietly.
 dir=$(fm_task_inbox_dir "$STATE" "$ID")
-oldest=$(fm_task_inbox_oldest_unhandled "$STATE" "$ID" 2>/dev/null || true)
-if [ -z "$oldest" ]; then
-  verdict recovered "inbox empty; instruction already handled"
+if oldest=$(fm_task_inbox_oldest_unhandled "$STATE" "$ID" 2>/dev/null); then
+  :
+else
+  oldest_rc=$?
+  [ "$oldest_rc" -eq 1 ] && verdict recovered "inbox empty; instruction already handled"
+  verdict escalate "inbox unreadable; refusing recovery"
 fi
 if [ "$oldest" != "$RECORD" ]; then
   verdict deferred "record ${RECORD##*/} no longer the oldest unhandled (${oldest##*/} is); late handling cancels this action"
@@ -236,8 +239,13 @@ STALL_LOCK_HELD=1
 # same way a live one does), then re-prove the record itself LAST so a
 # handled move during the custody probe still cancels the action.
 prove_custody || verdict escalate "$CUSTODY_DETAIL"
-oldest=$(fm_task_inbox_oldest_unhandled "$STATE" "$ID" 2>/dev/null || true)
-[ -n "$oldest" ] || verdict recovered "inbox emptied before relaunch; instruction handled"
+if oldest=$(fm_task_inbox_oldest_unhandled "$STATE" "$ID" 2>/dev/null); then
+  :
+else
+  oldest_rc=$?
+  [ "$oldest_rc" -eq 1 ] && verdict recovered "inbox emptied before relaunch; instruction handled"
+  verdict escalate "inbox unreadable inside lifecycle lock; refusing recovery"
+fi
 [ "$oldest" = "$RECORD" ] || verdict deferred "record ${RECORD##*/} handled or superseded before relaunch"
 
 # Bounded retry: exactly one automatic relaunch per stalled instruction

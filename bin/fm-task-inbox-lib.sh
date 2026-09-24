@@ -377,6 +377,8 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [har
 fm_task_inbox_oldest_unhandled() {  # <state-dir> <task-id>
   local dir best='' best_n=0 f n
   dir=$(fm_task_inbox_dir "$1" "$2")
+  [ -e "$dir" ] || return 1
+  [ -d "$dir" ] && [ -r "$dir" ] && [ -x "$dir" ] || return 2
   for f in "$dir"/*.msg; do
     [ -e "$f" ] || continue
     n=$(fm_task_inbox_seq_of "${f##*/}") || continue
@@ -397,9 +399,13 @@ fm_task_inbox_oldest_unhandled() {  # <state-dir> <task-id>
 # An empty inbox also resets the ladder bookkeeping so the next message starts
 # a fresh ladder.
 fm_task_inbox_due_action() {  # <state-dir> <task-id>
-  local dir oldest base now grace max ladder rec_base count last
+  local dir oldest base now grace max ladder rec_base count last oldest_rc
   dir=$(fm_task_inbox_dir "$1" "$2")
-  if ! oldest=$(fm_task_inbox_oldest_unhandled "$1" "$2"); then
+  if oldest=$(fm_task_inbox_oldest_unhandled "$1" "$2"); then
+    :
+  else
+    oldest_rc=$?
+    [ "$oldest_rc" -eq 1 ] || return "$oldest_rc"
     rm -f "$dir/.ring-state" "$dir/.escalated" "$dir/.recovery-attempts" 2>/dev/null || true
     printf 'quiet'
     return 0

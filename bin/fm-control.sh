@@ -899,7 +899,14 @@ do_relaunch() {
   # rollback trap has nothing left to do and the worker's instructions stay
   # untouched when no relaunch happened.
   if [ -n "$STALL_RECORD" ]; then
-    stall_oldest=$(fm_task_inbox_oldest_unhandled "$STATE" "$ID" 2>/dev/null || true)
+    if stall_oldest=$(fm_task_inbox_oldest_unhandled "$STATE" "$ID" 2>/dev/null); then
+      :
+    else
+      stall_oldest_rc=$?
+      [ "$stall_oldest_rc" -eq 1 ] \
+        && stall_relaunch_cancel record-resolved "stall record resolved (inbox empty; instruction handled)" 3
+      die "relaunch refused: stall inbox is unreadable inside the lifecycle lock"
+    fi
     if [ -z "$stall_oldest" ]; then
       stall_relaunch_cancel record-resolved "stall record resolved (inbox empty; instruction handled)" 3
     elif [ "${stall_oldest##*/}" != "$STALL_RECORD" ]; then
@@ -907,8 +914,11 @@ do_relaunch() {
     fi
   fi
 
-  journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
   state=$(agent_state)
+  if [ -n "$STALL_RECORD" ] && [ "$state" != missing ]; then
+    die "supervised relaunch refused: endpoint state '$state' is not positively absent"
+  fi
+  journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
   if [ "$state" = missing ]; then
     # The recorded endpoint is authoritatively absent, so there is no agent to
     # stop: the exit phase is already complete and the launch below recreates
