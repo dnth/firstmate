@@ -786,7 +786,7 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "/usr/bin/env $RAW_DIRECT_TRUE --flag __OMPMAXTIME__" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  [ "$launch" = "FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= /usr/bin/env $RAW_DIRECT_TRUE --flag __OMPMAXTIME__" ] || fail "raw launch command changed"$'\n'"actual: $launch"
   pass "active crew-dispatch profile preserves raw direct non-OMP launch arguments"
 }
 
