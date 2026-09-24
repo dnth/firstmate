@@ -1070,8 +1070,8 @@ test_next_record_gets_own_attempt() {
   pass "next record: a handled record's spent marker does not consume the next record's attempt"
 }
 
-# A corrupt attempt marker still fails closed: structure validation is
-# unchanged, so an unparseable marker escalates without any lifecycle action.
+# A corrupt attempt marker with an extra trailing line still fails closed,
+# without any lifecycle action.
 test_malformed_attempt_marker_escalates() {
   local rec id record
   id=$(case_id bad-marker)
@@ -1083,7 +1083,7 @@ test_malformed_attempt_marker_escalates() {
   create_prior_artifacts "$HOME_DIR/state" "$id"
   write_inbox "$HOME_DIR/state" "$id" 001
   record="$HOME_DIR/state/$id.inbox/001.msg"
-  printf 'garbage-no-tab\n' > "$HOME_DIR/state/$id.inbox/.recovery-attempts"
+  printf '001.msg\t0\n\n' > "$HOME_DIR/state/$id.inbox/.recovery-attempts"
   missing_window "$CASE_DIR" "$id"
 
   run_recovery "$CASE_DIR" "$HOME_DIR" "$id" "$record" endpoint-unavailable

@@ -257,7 +257,11 @@ attempts_record='' attempts_count=0
 if [ -e "$attempts_file" ] || [ -L "$attempts_file" ]; then
   [ -f "$attempts_file" ] && [ ! -L "$attempts_file" ] \
     || verdict escalate "recovery-attempt marker is not a regular file"
-  attempts_content=$(<"$attempts_file") \
+  attempts_line_count=$(wc -l < "$attempts_file") \
+    || verdict escalate "cannot read the recovery-attempt bound at $attempts_file"
+  [ "$attempts_line_count" -eq 1 ] \
+    || verdict escalate "malformed recovery-attempt marker at $attempts_file"
+  IFS= read -r attempts_content < "$attempts_file" \
     || verdict escalate "cannot read the recovery-attempt bound at $attempts_file"
   IFS=$(printf '\t') read -r attempts_record attempts_count attempts_extra \
     <<< "$attempts_content"
