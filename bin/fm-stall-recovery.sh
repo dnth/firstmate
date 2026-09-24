@@ -104,8 +104,7 @@ FM_STALL_RECOVERY_CONTROL_BIN="${FM_STALL_RECOVERY_CONTROL_BIN:-$SCRIPT_DIR/fm-c
 ID=${1:-}
 RECORD=${2:-}
 TRIGGER=${3:-}
-JOURNAL="$STATE/$ID.stall-recovery"
-STATUS_FILE="$STATE/$ID.status"
+JOURNAL="$STATE/stall-recovery-invalid"
 
 journal() {  # <detail...>
   {
@@ -127,6 +126,8 @@ status_note() {  # <line>
 
 # --- eligibility gates ------------------------------------------------------
 case "$ID" in ''|*[!A-Za-z0-9._-]*) verdict escalate "invalid task id" ;; esac
+JOURNAL="$STATE/$ID.stall-recovery"
+STATUS_FILE="$STATE/$ID.status"
 META="$STATE/$ID.meta"
 [ -f "$META" ] && [ ! -L "$META" ] || verdict escalate "no task metadata"
 KIND=$(fm_meta_get "$META" kind)
