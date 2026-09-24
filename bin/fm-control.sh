@@ -56,11 +56,7 @@
 #              lock, immediately before the agent is touched, fm-control
 #              re-proves the named inbox record is still the oldest unhandled
 #              instruction and cancels with exit 3 when it was handled or
-#              superseded in flight, cancels with exit 4 when the worker went
-#              provably busy during the checkpoint - a productive worker is
-#              deferred to, never interrupted - and cancels with exit 5 when
-#              custody can no longer be proven, which the supervised caller
-#              escalates. It requires --lock-preheld.
+#              superseded in flight. It requires --lock-preheld.
 #              Records a durable checkpoint and that note, exits the old agent,
 #              then delegates the launch to its single owner,
 #              bin/fm-spawn.sh --relaunch. A failure before publication keeps
@@ -512,21 +508,9 @@ do_exit() {
     missing) die "task $ID's recorded endpoint is gone, so there is no agent to stop; reconcile the task before any further control action" ;;
     *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint" ;;
   esac
-  # A busy agent is interrupted first before the exit command is submitted -
-  # except on the supervised --stall-record path, where busy means the stalled
-  # worker started acting on the instruction between the caller's custody
-  # proof and this last gate. Interrupting a now-productive worker is exactly
-  # the harm supervised recovery exists to avoid, so busy returns 4 for the
-  # caller to map to a deferred episode (with the instructions restored
-  # byte-exact), and any verdict that is not a proven idle fails closed
-  # rather than exiting an agent whose state cannot be proven. Manual
-  # relaunch and the plain exit verb keep the interrupt-first semantics.
+  # A busy agent is interrupted first before the exit command is submitted.
   case "$(busy_verdict)" in
     busy*)
-      if [ -n "$STALL_RECORD" ]; then
-        printf 'busy-deferred'
-        return 4
-      fi
       cancel=$(deliver_interrupt) || return $?
       state=$(agent_state)
       case "$state" in
@@ -539,18 +523,6 @@ do_exit() {
         missing) die "task $ID's recorded endpoint disappeared after interrupt delivery, so exit cannot prove whether the agent stopped" ;;
         *) die "task $ID's endpoint reads '$state' after interrupt delivery rather than a positively classified state; exit cannot prove whether the agent stopped" ;;
       esac
-      ;;
-    idle*) ;;
-    *)
-      if [ -n "$STALL_RECORD" ]; then
-        # Unproven custody on the supervised path fails closed BEFORE any
-        # transport: exit 5 is the dedicated "custody unproven; nothing was
-        # sent" code the caller maps to a clean cancellation that restores the
-        # instructions byte-exact, and the supervised caller escalates it -
-        # never a deferral and never an instruction-handled result.
-        printf 'custody-unproven'
-        return 5
-      fi
       ;;
   esac
   cmd=$(fm_control_exit_command "$HARNESS")
@@ -881,7 +853,7 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result exit_rc state note_line stall_oldest
+  local exit_result state note_line stall_oldest
   local -a spawn_args
 
   require_state_verified_backend relaunch
@@ -946,29 +918,7 @@ do_relaunch() {
     retire_busy_incarnation
     exit_result=already-stopped
   else
-    exit_rc=0
-    exit_result=$(do_exit) || exit_rc=$?
-    case "$exit_rc" in
-      0) ;;
-      4)
-        # The worker went busy between the custody proof and the exit gate:
-        # it is acting on the instruction now, so the relaunch defers rather
-        # than interrupting a productive worker. Exit 4 is the dedicated
-        # "worker busy; episode stays pending" code the supervised caller maps
-        # to deferred. The instructions are restored byte-exact first.
-        stall_relaunch_cancel worker-busy "stall record $STALL_RECORD: worker went busy during the relaunch; deferring rather than interrupting a productive worker" 4
-        ;;
-      5)
-        # Custody could not be proven at the last gate (the busy verdict went
-        # unknown during the checkpoint): nothing was sent to the agent, so
-        # this is the same clean pre-action cancellation as a resolved record
-        # - instructions restored byte-exact, journal cancelled - but exit 5
-        # tells the supervised caller to escalate rather than defer, because
-        # an unproven worker is not a productive one.
-        stall_relaunch_cancel custody-unproven "stall record $STALL_RECORD: worker custody could not be proven during the relaunch; nothing was sent to the agent" 5
-        ;;
-      *) exit "$exit_rc" ;;
-    esac
+    exit_result=$(do_exit)
   fi
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
 

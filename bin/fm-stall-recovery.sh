@@ -13,39 +13,40 @@
 #   recovered  - the instruction was already handled; nothing to do.
 #   deferred   - no lifecycle action taken and none needed right now: the
 #                record was handled between the watcher's decision and this
-#                check, the worker is provably busy, or a relaunch was just
-#                published and the episode stays pending until the record is
-#                handled or the ladder re-escalates.
-#   escalate   - recovery is unsafe, unproven, or exhausted; the caller keeps
-#                the ordinary stale wake. Any non-zero exit or missing verdict
-#                is also treated as escalate by the caller.
+#                check, or a relaunch was just published and the episode
+#                stays pending until the record is handled or the ladder
+#                re-escalates.
+#   escalate   - recovery is unsafe, unproven, exhausted, or the endpoint is
+#                LIVE: recovery never interrupts, exits, or relaunches a live
+#                worker, so a live-but-non-turning session is detected and
+#                escalated for firstmate and nothing is sent to it. Any
+#                non-zero exit or missing verdict is also treated as escalate
+#                by the caller.
 #
 # What "safe" means here (every check fails closed to escalate):
 #   - The named record is still the oldest UNHANDLED inbox record. Transport
 #     receipts (.acked/.unproven/.awaiting-turn under the doorbell request dir)
-#     are never consulted: a stale receipt neither triggers nor suppresses
-#     recovery, and a record moved to handled/ at any point cancels the action.
 #   - The endpoint is positively classified: dead/missing takes the
 #     missing-endpoint path (no exit is sent; the launch owner recreates the
-#     endpoint), alive takes the live-non-turning path (the old agent is
-#     exited first). Ambiguous, unreadable, or unverified states escalate.
-#   - A live endpoint must also read an explicit idle busy verdict; busy
-#     defers (the worker may be mid-turn on the instruction) and unknown
-#     escalates (a probe failure is not custody proof).
+#     endpoint, and no busy-state proof is required because there is no live
+#     worker to interrupt). A live endpoint escalates unconditionally -
+#     interrupting or relaunching a session that exists is never recovery's
+#     call. Ambiguous, unreadable, or unverified states escalate.
 #   - fm-crew-state must show no active validation run: working, parked,
 #     blocked, and declared-paused states all escalate (a parked gate, a
 #     declared external wait, and a worker-declared blocker are firstmate
-#     business, not stall recovery). Terminal done/failed may proceed, and
-#     unknown may proceed only on the missing-endpoint path.
+#     business, not stall recovery). Terminal done/failed may proceed on the
+#     missing-endpoint path; unknown or unreadable crew-state fails closed -
+#     missing, unknown, unproven, and stale custody all refuse and escalate.
 #   - The recorded worktree must exist and carry the durable fm-<id> lease;
 #     uncommitted changes and unpushed commits inside it are PRESERVED, not
 #     rejected: the stalled worker's unlanded work is exactly what recovery
 #     exists to keep, and the relaunch inherits the same worktree, branch,
 #     and commits untouched.
-#   - One automatic relaunch per stalled instruction: the per-record attempt
-#     marker under the inbox bounds retries; an emptied inbox resets it, and
-#     a well-formed marker naming a record that was since handled starts the
-#     new oldest record's own count at zero.
+#   - One automatic relaunch per stalled instruction on the missing-endpoint
+#     path: the per-record attempt marker under the inbox bounds retries; an
+#     emptied inbox resets it, and a well-formed marker naming a record that
+#     was since handled starts the new oldest record's own count at zero.
 #   - The durable fm-<id> worktree lease, same-worktree/branch/commits
 #     preservation, and the no-shared-daemon boundary are enforced by
 #     bin/fm-control.sh relaunch itself; this script never moves inbox
@@ -56,13 +57,12 @@
 # pending episode. The durable instruction's terminal outcome is either its
 # handled/ move (quiet) or the bounded re-escalation the reset ladder produces
 # when the replacement also fails to act.
-#
-# The final custody and inbox-record re-check runs INSIDE fm-control's
-# lifecycle lock (state/.control-<id>.lock), acquired by this process and held
-# across the fm-control invocation via --lock-preheld: a record handled in the
-# gap can never relaunch a now-productive worker, and a concurrent invocation
-# or manual lifecycle action can never double-relaunch. The per-record attempt
-# bound is checked and recorded under the same lock.
+# The final custody and inbox-record re-check on the missing-endpoint path
+# runs INSIDE fm-control's lifecycle lock (state/.control-<id>.lock), acquired
+# by this process and held across the fm-control invocation via
+# --lock-preheld: a record handled in the gap can never relaunch, and a
+# concurrent invocation or manual lifecycle action can never double-relaunch.
+# The per-record attempt bound is checked and recorded under the same lock.
 #
 # Audit: every verdict appends one line to state/<id>.stall-recovery; the
 # relaunch transaction itself journals to state/<id>.control-relaunch, and a
@@ -95,8 +95,6 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
-# shellcheck source=bin/fm-busy-lib.sh
-. "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 
@@ -148,20 +146,22 @@ if [ "$oldest" != "$RECORD" ]; then
 fi
 
 # prove_custody: re-prove every precondition for a lifecycle action against
-# CURRENT state - endpoint classification, busy verdict, crew/run state,
-# worktree existence, and the durable fm-<id> lease. Called directly (never in
-# a command substitution) so its PATH_KIND, WT, PROJ, BACKEND, and TARGET
+# CURRENT state - endpoint classification, crew/run state, worktree
+# existence, and the durable fm-<id> lease. Called directly (never in a
+# command substitution) so its PATH_KIND, WT, PROJ, BACKEND, and TARGET
 # bindings reach the caller; the refusal reason is published through the
-# CUSTODY_DETAIL global. Returns 1 on any failed or unprovable check, 2 when
-# the worker is provably busy (a defer, not an escalation), 0 on success. All
-# reads are local: no gh or fetch can ever stall the watcher.
+# CUSTODY_DETAIL global. Returns 1 on any failed or unprovable check -
+# including a LIVE endpoint, which escalates because recovery never
+# interrupts a session that exists - and 0 only on the missing-endpoint path
+# with every custody proof clean. All reads are local: no gh or fetch can
+# ever stall the watcher.
 #
 # Uncommitted changes and unpushed commits are deliberately NOT gates here:
 # recovery exists to preserve exactly that unlanded work, and the relaunch
 # inherits the same worktree, branch, and commits untouched (fm-control's
 # safe_checkpoint records head and dirty state for the journal).
 prove_custody() {
-  local state busy crew_line crew_state pool_state lease_holder
+  local state crew_line crew_state pool_state lease_holder
   PATH_KIND=
   CUSTODY_DETAIL=
   WT=$(fm_meta_get "$META" worktree)
@@ -172,33 +172,28 @@ prove_custody() {
   TARGET=$FM_BACKEND_VALIDATED_TARGET
   state=$(fm_backend_agent_state "$BACKEND" "$TARGET" "$META" 2>/dev/null || printf 'unreadable')
   case "$state" in
-    alive)        PATH_KIND=live-non-turning ;;
+    alive)
+      # A live worker is never interrupted, exited, or relaunched by
+      # recovery: the session exists, so the stall is firstmate's call.
+      PATH_KIND=live-non-turning
+      CUSTODY_DETAIL='endpoint is live; recovery never interrupts a live worker - escalating for firstmate'
+      return 1
+      ;;
     dead|missing) PATH_KIND=missing-endpoint ;;
     *) CUSTODY_DETAIL="endpoint state '$state' is not positively classified"; return 1 ;;
   esac
-  if [ "$PATH_KIND" = live-non-turning ]; then
-    busy=$(fm_busy_classify_meta "$META" "$ID" "$STATE" 2>/dev/null || printf 'unknown')
-    case "${busy%% *}" in
-      idle) ;;
-      busy) CUSTODY_DETAIL="worker is busy ($busy); it may be mid-turn on the instruction"; return 2 ;;
-      *)    CUSTODY_DETAIL="busy verdict '$busy' is not a custody proof"; return 1 ;;
-    esac
-  fi
   crew_line=$("$FM_CREW_STATE_BIN" "$ID" 2>/dev/null || true)
   crew_state=$(printf '%s' "$crew_line" | sed -n 's/^state: \([a-z-]*\).*/\1/p' | head -1)
   case "$crew_state" in
     working|parked|blocked|paused)
       CUSTODY_DETAIL="crew-state $crew_state needs firstmate, not auto-relaunch"; return 1 ;;
     done|failed) ;;
-    unknown)
-      [ "$PATH_KIND" = missing-endpoint ] \
-        || { CUSTODY_DETAIL='crew-state unknown with a live endpoint is ambiguous'; return 1; } ;;
-    *) CUSTODY_DETAIL="crew-state '${crew_state:-unreadable}' is not a clean non-run state"; return 1 ;;
+    *) CUSTODY_DETAIL="crew-state '${crew_state:-unreadable}' cannot prove a clean non-run state"; return 1 ;;
   esac
   [ -n "$WT" ] && [ -d "$WT" ] || { CUSTODY_DETAIL='recorded worktree missing'; return 1; }
   # The durable fm-<id> lease proof mirrors bin/fm-spawn.sh's
-  # relaunch_worktree_lease_proven, applied to BOTH paths here because the
-  # launch owner only re-proves it on the gone-endpoint path.
+  # relaunch_worktree_lease_proven, applied here because the launch owner
+  # only re-proves it on the gone-endpoint path.
   fm_treehouse_pool_slot "$PROJ" "$WT" \
     || { CUSTODY_DETAIL='recorded worktree is not a Treehouse pool slot of the recorded project'; return 1; }
   fm_treehouse_slot_owner_state "$WT" "$ID"
@@ -218,11 +213,9 @@ prove_custody() {
   return 0
 }
 
-# Gate proof: full custody chain before any lifecycle decision.
-prove_custody || case $? in
-  2) verdict deferred "$CUSTODY_DETAIL" ;;
-  *) verdict escalate "$CUSTODY_DETAIL" ;;
-esac
+# Gate proof: full custody chain before any lifecycle decision. A live
+# endpoint escalates here - recovery never interrupts a session that exists.
+prove_custody || verdict escalate "$CUSTODY_DETAIL"
 
 # --- bounded lifecycle action, under fm-control's lifecycle lock ------------
 #
@@ -238,20 +231,19 @@ fm_lock_try_acquire "$STALL_LOCK" \
 STALL_LOCK_HELD=1
 
 # Final re-check inside the lock, in strict order: re-prove the full custody
-# chain (a worker can become busy, enter a run, or lose its worktree between
-# the first proof and the relaunch), then re-prove the record itself LAST so
-# a handled move during the custody probe still cancels the action.
-prove_custody || case $? in
-  2) verdict deferred "$CUSTODY_DETAIL" ;;
-  *) verdict escalate "$CUSTODY_DETAIL" ;;
-esac
+# chain (a worker can come back, enter a run, or lose its worktree between
+# the first proof and the relaunch - a resurrected endpoint escalates the
+# same way a live one does), then re-prove the record itself LAST so a
+# handled move during the custody probe still cancels the action.
+prove_custody || verdict escalate "$CUSTODY_DETAIL"
 oldest=$(fm_task_inbox_oldest_unhandled "$STATE" "$ID" 2>/dev/null || true)
 [ -n "$oldest" ] || verdict recovered "inbox emptied before relaunch; instruction handled"
 [ "$oldest" = "$RECORD" ] || verdict deferred "record ${RECORD##*/} handled or superseded before relaunch"
 
 # Bounded retry: exactly one automatic relaunch per stalled instruction
-# record, checked and recorded under the lock so concurrent invocations
-# cannot both pass the bound. The bound is a fixed invariant - no override.
+# record on the missing-endpoint path, checked and recorded under the lock
+# so concurrent invocations cannot both pass the bound. The bound is a fixed
+# invariant - no override.
 attempts_file="$dir/.recovery-attempts"
 attempts_record='' attempts_count=0
 if [ -e "$attempts_file" ] || [ -L "$attempts_file" ]; then
@@ -304,9 +296,7 @@ fi
 # hands fm-control the record basename so it re-proves the instruction is
 # still the oldest unhandled record inside the lock, immediately before the
 # agent is touched - the check above cannot cover the gap to that point.
-# Exit 3 is fm-control's "record resolved; nothing to do" code, exit 4 its
-# "worker went busy during the relaunch; defer" code, and exit 5 its
-# "custody unproven; nothing was sent" code.
+# Exit 3 is fm-control's "record resolved; nothing to do" code.
 FM_CONFIG_OVERRIDE=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
 control_out_file=$(mktemp "$STATE/.stall-recovery-control-out.XXXXXX" 2>/dev/null) \
   || verdict escalate "cannot allocate the fm-control output capture"
@@ -324,8 +314,6 @@ rm -f "$control_out_file"
 case "$control_rc" in
   0) ;;
   3) verdict recovered "record ${RECORD##*/} resolved inside the lifecycle lock before the relaunch; instruction handled" ;;
-  4) verdict deferred "worker went busy inside the lifecycle lock before the relaunch; it is acting on ${RECORD##*/}, so the episode stays pending until the record is handled or the ladder re-escalates" ;;
-  5) verdict escalate "worker custody could not be proven inside the lifecycle lock before the relaunch; nothing was sent to the agent and the instruction stays unhandled" ;;
   *) verdict escalate "fm-control relaunch refused or failed: $(printf '%s' "$control_out" | tail -1)" ;;
 esac
 

@@ -54,7 +54,8 @@
 #                          The separate steering-inbox path invokes
 #                          fm-stall-recovery.sh before publishing its stale wake;
 #                          that helper owns its custody-checked, bounded relaunch
-#                          exception.
+#                          exception for a positively missing endpoint only - a
+#                          live worker is never interrupted and escalates here.
 #                          An idle secondmate that is neither paused nor captain-held
 #                          is also absorbed while its home watcher beacon is fresh
 #                          within the wedge threshold; missing, stale, future-dated,
@@ -365,10 +366,10 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
 
 # Custody-checked bounded auto-recovery for a stalled worker, owned by
 # bin/fm-stall-recovery.sh. Runs BEFORE the stale wake is published: a
-# deferred verdict (record handled meanwhile, worker provably busy, or a
-# relaunch just published with the episode still pending) suppresses the
-# escalation entirely, while an escalate verdict - including any helper
-# failure or missing verdict - keeps the ordinary stale wake with the
+# deferred verdict (record handled meanwhile, or a missing-endpoint relaunch
+# just published with the episode still pending) suppresses the escalation
+# entirely, while an escalate verdict - including a live endpoint, any helper
+# failure, or a missing verdict - keeps the ordinary stale wake with the
 # helper's reason appended. Returns 0 when the wake is suppressed, 1 when the
 # caller should escalate.
 FM_STALL_RECOVERY_BIN="${FM_STALL_RECOVERY_BIN:-$SCRIPT_DIR/fm-stall-recovery.sh}"

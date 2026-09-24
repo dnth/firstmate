@@ -6,9 +6,12 @@
 # bin/fm-spawn.sh's relaunch path that retires the prior incarnation's
 # doorbell receipts.
 #
-# Contract under test (data/fm-stalled-worker-astra-investigate/report.md):
+# Contract under test (captain ruling, inbox 031/036):
 #   - triggers on queued/unproven + persistent unhandled inbox records
-#   - distinguishes live-non-turning from missing-endpoint
+#   - distinguishes live-non-turning from missing-endpoint: a LIVE endpoint
+#     is detected and escalated only - recovery never interrupts, exits, or
+#     relaunches a session that exists - while a positively missing endpoint
+#     may relaunch with no busy-state proof at all
 #   - reconciles stale .acked tombstones against handled state and generation
 #   - re-checks inbox AND task/run state immediately before the lifecycle
 #     action
@@ -329,15 +332,11 @@ exit "${FM_FAKE_CONTROL_RC:-0}"
 SH
   chmod +x "$fb/fm-control.sh"
 
-  # git forwards to the real binary, with three test hooks on the first
+  # git forwards to the real binary, with one test hook on the first
   # `git -C <wt> status --porcelain` inside fm-control's safe_checkpoint:
   # FM_FAKE_GIT_MOVE names an inbox record moved to handled/, simulating a
   # worker that acknowledges the instruction in the gap between the caller's
-  # pre-invocation check and fm-control's in-lock re-check; FM_FAKE_GIT_BUSY
-  # names a busy-state file overwritten with a valid busy record, simulating
-  # a worker that starts a turn on the instruction during the checkpoint;
-  # FM_FAKE_GIT_RM names a file deleted outright, simulating the busy-state
-  # record becoming unavailable mid-checkpoint.
+  # pre-invocation check and fm-control's in-lock re-check.
   cat > "$fb/git" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -345,13 +344,6 @@ if [ "${1:-}" = "-C" ] && [ "${3:-}" = "status" ]; then
   if [ -n "${FM_FAKE_GIT_MOVE:-}" ] && [ -f "$FM_FAKE_GIT_MOVE" ]; then
     mkdir -p "${FM_FAKE_GIT_MOVE%/*}/handled"
     mv "$FM_FAKE_GIT_MOVE" "${FM_FAKE_GIT_MOVE%/*}/handled/"
-  fi
-  if [ -n "${FM_FAKE_GIT_BUSY:-}" ]; then
-    printf 'v1 gen=gentest seq=3 state=busy source=omp-ext event=turn-start ts=1\n' \
-      > "$FM_FAKE_GIT_BUSY"
-  fi
-  if [ -n "${FM_FAKE_GIT_RM:-}" ]; then
-    rm -f "$FM_FAKE_GIT_RM"
   fi
 fi
 exec /usr/bin/git "$@"
@@ -564,9 +556,10 @@ test_missing_endpoint_recovers_via_control() {
   pass "missing endpoint: real relaunch publishes, ladder resets, stale receipts retire, record stays unhandled"
 }
 
-# Live endpoint whose agent is idle (turn ended, record still unhandled): the
-# live-non-turning path invokes the lifecycle verb.
-test_live_non_turning_recovers() {
+# A live endpoint is detected and escalated only: recovery never interrupts,
+# exits, or relaunches a session that exists, whatever its busy state. The
+# lifecycle verb is never invoked and no transport is sent.
+test_live_idle_escalates() {
   local rec id record
   id=$(case_id live-idle)
   rec=$(make_case live-idle "$id" pool)
@@ -581,16 +574,20 @@ test_live_non_turning_recovers() {
   live_window "$CASE_DIR" "$id" bun
 
   run_recovery "$CASE_DIR" "$HOME_DIR" "$id" "$record" ladder-exhausted
-  expect_code 0 "$RECOVERY_STATUS" "live-non-turning recovery should exit 0; got: $RECOVERY_OUT"
-  assert_contains "$RECOVERY_OUT" "verdict=deferred" "live-non-turning recovery did not defer pending the episode"
-  assert_contains "$RECOVERY_OUT" "live-non-turning" "verdict did not name the live path"
-  assert_grep "relaunch" "$CASE_DIR/control.log" "the lifecycle verb was not invoked"
-  pass "live non-turning worker: idle verdict plus clean custody publishes the relaunch"
+  assert_contains "$RECOVERY_OUT" "verdict=escalate" "a live idle worker did not escalate"
+  assert_contains "$RECOVERY_OUT" "live" "the escalation did not name the live endpoint"
+  assert_absent "$CASE_DIR/control.log" "the lifecycle verb ran against a live worker"
+  assert_no_grep "Escape" "$CASE_DIR/fake/tmux.log" "an interrupt key was sent to a live worker"
+  assert_no_grep "/exit" "$CASE_DIR/fake/tmux.log" "an exit command was sent to a live worker"
+  assert_no_grep "new-window" "$CASE_DIR/fake/tmux.log" "a replacement window was created for a live worker"
+  assert_present "$record" "the unhandled instruction record was moved or deleted"
+  pass "live idle worker: recovery escalates without interrupt, exit, or relaunch"
 }
 
-# A live endpoint with a provably busy agent defers: the worker may be
-# mid-turn on the instruction.
-test_live_busy_defers() {
+# A live endpoint with a provably busy agent escalates the same way: the
+# busy verdict is never consulted because no lifecycle action is ever taken
+# on a live worker.
+test_live_busy_escalates() {
   local rec id record
   id=$(case_id live-busy)
   rec=$(make_case live-busy "$id" pool)
@@ -605,17 +602,19 @@ test_live_busy_defers() {
   live_window "$CASE_DIR" "$id" bun
 
   run_recovery "$CASE_DIR" "$HOME_DIR" "$id" "$record" ladder-exhausted
-  assert_contains "$RECOVERY_OUT" "verdict=deferred" "a busy worker did not defer"
-  assert_absent "$CASE_DIR/control.log" "the lifecycle verb ran against a busy worker"
-  pass "live busy worker: recovery defers without a lifecycle action"
+  assert_contains "$RECOVERY_OUT" "verdict=escalate" "a live busy worker did not escalate"
+  assert_absent "$CASE_DIR/control.log" "the lifecycle verb ran against a live worker"
+  assert_no_grep "Escape" "$CASE_DIR/fake/tmux.log" "an interrupt key was sent to a live worker"
+  assert_no_grep "new-window" "$CASE_DIR/fake/tmux.log" "a replacement window was created for a live worker"
+  pass "live busy worker: recovery escalates without any lifecycle action"
 }
 
-# A live endpoint with no semantic busy proof escalates: unknown is never a
-# custody proof.
-test_live_unknown_busy_escalates() {
+# Unknown crew-state fails closed on the missing-endpoint path: missing,
+# unknown, unproven, and stale custody all refuse and escalate.
+test_unknown_crew_state_escalates() {
   local rec id record
-  id=$(case_id live-unknown)
-  rec=$(make_case live-unknown "$id" pool)
+  id=$(case_id unknown-crew)
+  rec=$(make_case unknown-crew "$id" pool)
   read_case "$rec"
   write_pool_state "$CASE_DIR" "$WT_DIR" "fm-$id"
   write_slot_marker "$SLOT_DIR" "$id" "$HOME_DIR"
@@ -623,12 +622,13 @@ test_live_unknown_busy_escalates() {
   create_prior_artifacts "$HOME_DIR/state" "$id"
   write_inbox "$HOME_DIR/state" "$id" 001
   record="$HOME_DIR/state/$id.inbox/001.msg"
-  live_window "$CASE_DIR" "$id" bun
+  missing_window "$CASE_DIR" "$id"
 
-  run_recovery "$CASE_DIR" "$HOME_DIR" "$id" "$record" ladder-exhausted
-  assert_contains "$RECOVERY_OUT" "verdict=escalate" "an unprovable busy verdict did not escalate"
-  assert_absent "$CASE_DIR/control.log" "the lifecycle verb ran without a busy proof"
-  pass "live worker with no busy proof: recovery escalates"
+  FM_FAKE_CREW_STATE=unknown \
+    run_recovery "$CASE_DIR" "$HOME_DIR" "$id" "$record" endpoint-unavailable
+  assert_contains "$RECOVERY_OUT" "verdict=escalate" "unknown crew-state did not escalate"
+  assert_absent "$CASE_DIR/control.log" "the lifecycle verb ran with unproven crew-state"
+  pass "unknown crew-state: recovery escalates; unproven custody fails closed"
 }
 
 # A record already handled ends the episode quietly - no lifecycle action.
@@ -913,68 +913,6 @@ test_held_lifecycle_lock_defers() {
   pass "held lifecycle lock: recovery defers rather than racing another lifecycle action"
 }
 
-# The generated OMP extension must serialize busy-state writes: a turn_end's
-# idle can never land after a following turn_start's busy, or a live worker
-# reads falsely idle (and a dead one falsely busy suppresses recovery). The
-# fake FM_ROOT wraps fm-busy-event.sh with a delay on the turn-end write, so
-# an unserialized pair deterministically inverts.
-test_omp_ext_serializes_busy_events() {
-  local rec id record fakeroot ext out tool
-  id=$(case_id omp-order)
-  rec=$(make_case omp-order "$id" pool)
-  read_case "$rec"
-  write_pool_state "$CASE_DIR" "$WT_DIR" "fm-$id"
-  write_slot_marker "$SLOT_DIR" "$id" "$HOME_DIR"
-  write_meta "$HOME_DIR/state/$id.meta" "$id" "$WT_DIR" "$PROJ_DIR"
-  create_prior_artifacts "$HOME_DIR/state" "$id"
-  write_inbox "$HOME_DIR/state" "$id" 001
-  record="$HOME_DIR/state/$id.inbox/001.msg"
-  missing_window "$CASE_DIR" "$id"
-
-  # Fake FM_ROOT: every bin entry is the real script except fm-busy-event.sh,
-  # which delays the turn-end apply so an unserialized turn-start write would
-  # land first and leave the worker falsely busy.
-  fakeroot="$CASE_DIR/fakeroot"
-  mkdir -p "$fakeroot/bin" "$fakeroot/.omp/extensions"
-  for tool in "$ROOT"/bin/*; do
-    [ "$(basename "$tool")" = fm-busy-event.sh ] || ln -s "$tool" "$fakeroot/bin/$(basename "$tool")"
-  done
-  ln -s "$ROOT/.omp/extensions/lib" "$fakeroot/.omp/extensions/lib"
-  cat > "$fakeroot/bin/fm-busy-event.sh" <<SH
-#!/usr/bin/env bash
-for a in "\$@"; do
-  if [ "\$a" = "turn-end" ]; then sleep 0.4; fi
-done
-exec "$ROOT/bin/fm-busy-event.sh" "\$@"
-SH
-  chmod +x "$fakeroot/bin/fm-busy-event.sh"
-
-  FM_ROOT_OVERRIDE="$fakeroot" FM_STALL_RECOVERY_CONTROL_BIN="$CONTROL" \
-    run_recovery "$CASE_DIR" "$HOME_DIR" "$id" "$record" endpoint-unavailable
-  expect_code 0 "$RECOVERY_STATUS" "recovery under the fake root should exit 0; got: $RECOVERY_OUT"
-  assert_contains "$RECOVERY_OUT" "verdict=deferred" "recovery under the fake root did not publish the relaunch"
-  ext="$HOME_DIR/state/$id.omp-ext.ts"
-  assert_present "$ext" "the relaunch did not regenerate the OMP extension"
-
-  # Fire turn_end then turn_start concurrently (the runtime may dispatch
-
-  # handlers without awaiting them). The busy write must still land last.
-  EXT_PATH="$ext" bun -e '
-    const mod = await import(process.env.EXT_PATH);
-    const handlers = {};
-    mod.default({ on: (n, fn) => { handlers[n] = fn; } });
-    handlers["turn_end"]();
-    handlers["turn_start"]();
-    await new Promise((r) => setTimeout(r, 3000));
-  ' || fail "driving the generated OMP extension failed"
-  out=$(cat "$HOME_DIR/state/$id.busy-state" 2>/dev/null || true)
-  case "$out" in
-    *"state=busy"*"event=turn-start"*) ;;
-    *) fail "turn_end's idle write landed after turn_start's busy (final record: '${out:-missing}'); the extension does not serialize busy events" ;;
-  esac
-  pass "OMP extension serializes busy-state writes: turn-start busy lands after turn-end idle"
-}
-
 # A record handled in the gap between the caller's pre-invocation check and
 # fm-control's in-lock re-check must still cancel the relaunch: the fake git
 # moves the record to handled/ during safe_checkpoint, so fm-control's own
@@ -1005,44 +943,6 @@ test_in_lock_handled_record_cancels_relaunch() {
   cmp -s "$CASE_DIR/brief.orig" "$HOME_DIR/data/$id/brief.md" \
     || fail "a cancelled relaunch left the worker's instructions modified"
   pass "in-lock handled record: fm-control cancels the relaunch before touching the agent"
-}
-
-# A worker that goes busy DURING the checkpoint - publishing a valid
-# turn-start busy record while its instruction stays unhandled - must never
-# be interrupted: the supervised relaunch cancels with the deferred verdict,
-# sends no interrupt or exit keys, creates no replacement window, and leaves
-# the worker's instructions byte-exact. The fake git publishes the busy
-# record inside fm-control's safe_checkpoint, after every earlier custody
-# proof already saw an idle worker.
-test_busy_during_checkpoint_defers() {
-  local rec id record
-  id=$(case_id checkpoint-busy)
-  rec=$(make_case checkpoint-busy "$id" pool)
-  read_case "$rec"
-  write_pool_state "$CASE_DIR" "$WT_DIR" "fm-$id"
-  write_slot_marker "$SLOT_DIR" "$id" "$HOME_DIR"
-  write_meta "$HOME_DIR/state/$id.meta" "$id" "$WT_DIR" "$PROJ_DIR"
-  create_prior_artifacts "$HOME_DIR/state" "$id"
-  write_inbox "$HOME_DIR/state" "$id" 001
-  record="$HOME_DIR/state/$id.inbox/001.msg"
-  write_busy "$HOME_DIR/state" "$id" idle
-  live_window "$CASE_DIR" "$id" bun
-  cp -p "$HOME_DIR/data/$id/brief.md" "$CASE_DIR/brief.orig"
-
-  FM_FAKE_GIT_BUSY="$HOME_DIR/state/$id.busy-state" \
-    FM_STALL_RECOVERY_CONTROL_BIN="$CONTROL" \
-    run_recovery "$CASE_DIR" "$HOME_DIR" "$id" "$record" ladder-exhausted
-  expect_code 0 "$RECOVERY_STATUS" "busy-during-checkpoint recovery should exit 0; got: $RECOVERY_OUT"
-  assert_contains "$RECOVERY_OUT" "verdict=deferred" "a worker that went busy during the checkpoint did not defer"
-  assert_no_grep "Escape" "$CASE_DIR/fake/tmux.log" "an interrupt key was sent to a worker that went busy during the checkpoint"
-  assert_no_grep "/exit" "$CASE_DIR/fake/tmux.log" "an exit command was sent to a worker that went busy during the checkpoint"
-  assert_no_grep "new-window" "$CASE_DIR/fake/tmux.log" "the relaunch created a window for a worker that went busy"
-  assert_grep "cancelled:worker-busy" "$HOME_DIR/state/$id.control-relaunch" "the journal did not record the busy-worker cancellation"
-  assert_present "$record" "the unhandled instruction record was moved or deleted"
-  assert_grep "001.msg" "$HOME_DIR/state/$id.inbox/.recovery-attempts" "the deferred episode did not record its attempt bound"
-  cmp -s "$CASE_DIR/brief.orig" "$HOME_DIR/data/$id/brief.md" \
-    || fail "a busy-cancelled relaunch left the worker's instructions modified"
-  pass "busy during checkpoint: recovery defers without interrupt, exit, or relaunch"
 }
 
 # A well-formed attempt marker naming a record that was since handled must
@@ -1125,47 +1025,12 @@ test_unterminated_marker_suffix_escalates() {
   pass "unterminated marker suffix: recovery escalates instead of parsing the valid prefix"
 }
 
-# When the busy-state record becomes unavailable during the checkpoint, the
-# final gate can no longer prove custody: the supervised relaunch cancels
-# with escalation (not deferral), sends nothing to the agent, and restores
-# the worker's instructions byte-exact. The fake git deletes the busy-state
-# file inside fm-control's safe_checkpoint.
-test_unproven_custody_during_checkpoint_escalates() {
-  local rec id record
-  id=$(case_id custody-gone)
-  rec=$(make_case custody-gone "$id" pool)
-  read_case "$rec"
-  write_pool_state "$CASE_DIR" "$WT_DIR" "fm-$id"
-  write_slot_marker "$SLOT_DIR" "$id" "$HOME_DIR"
-  write_meta "$HOME_DIR/state/$id.meta" "$id" "$WT_DIR" "$PROJ_DIR"
-  create_prior_artifacts "$HOME_DIR/state" "$id"
-  write_inbox "$HOME_DIR/state" "$id" 001
-  record="$HOME_DIR/state/$id.inbox/001.msg"
-  write_busy "$HOME_DIR/state" "$id" idle
-  live_window "$CASE_DIR" "$id" bun
-  cp -p "$HOME_DIR/data/$id/brief.md" "$CASE_DIR/brief.orig"
-
-  FM_FAKE_GIT_RM="$HOME_DIR/state/$id.busy-state" \
-    FM_STALL_RECOVERY_CONTROL_BIN="$CONTROL" \
-    run_recovery "$CASE_DIR" "$HOME_DIR" "$id" "$record" ladder-exhausted
-  expect_code 0 "$RECOVERY_STATUS" "unproven-custody recovery should exit 0; got: $RECOVERY_OUT"
-  assert_contains "$RECOVERY_OUT" "verdict=escalate" "unproven custody during the checkpoint did not escalate"
-  assert_no_grep "Escape" "$CASE_DIR/fake/tmux.log" "an interrupt key was sent while custody was unproven"
-  assert_no_grep "/exit" "$CASE_DIR/fake/tmux.log" "an exit command was sent while custody was unproven"
-  assert_no_grep "new-window" "$CASE_DIR/fake/tmux.log" "the relaunch created a window while custody was unproven"
-  assert_grep "cancelled:custody-unproven" "$HOME_DIR/state/$id.control-relaunch" "the journal did not record the unproven-custody cancellation"
-  assert_present "$record" "the unhandled instruction record was moved or deleted"
-  cmp -s "$CASE_DIR/brief.orig" "$HOME_DIR/data/$id/brief.md" \
-    || fail "an unproven-custody cancellation left the worker's instructions modified"
-  pass "unproven custody during checkpoint: recovery escalates with no transport and restored instructions"
-}
-
 # --- run ---------------------------------------------------------------------
 
 test_missing_endpoint_recovers_via_control
-test_live_non_turning_recovers
-test_live_busy_defers
-test_live_unknown_busy_escalates
+test_live_idle_escalates
+test_live_busy_escalates
+test_unknown_crew_state_escalates
 test_handled_record_recovers_quietly
 test_late_handled_cancels_relaunch
 test_dirty_worktree_recovers_preserving_work
@@ -1178,11 +1043,8 @@ test_secondmate_kind_escalates
 test_refused_relaunch_preserves_receipts
 test_held_lifecycle_lock_defers
 test_in_lock_handled_record_cancels_relaunch
-test_omp_ext_serializes_busy_events
-test_busy_during_checkpoint_defers
 test_next_record_gets_own_attempt
 test_malformed_attempt_marker_escalates
 test_unterminated_marker_suffix_escalates
-test_unproven_custody_during_checkpoint_escalates
 
 pass "all stall-recovery tests"

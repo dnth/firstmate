@@ -78,7 +78,7 @@ It is not deterministic across the verified adapters: codex and grok resume only
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
 
-The watcher-triggered stall-recovery path uses the same transactional relaunch under its lifecycle lock, but its final checkpoint defers instead of interrupting when the worker has become provably busy; the custody and verdict contract lives in [`architecture.md`](architecture.md#event-driven-supervision).
+The watcher-triggered stall-recovery path uses the same transactional relaunch under its lifecycle lock, but only for a positively missing endpoint - a live worker is never interrupted and always escalates; the custody and verdict contract lives in [`architecture.md`](architecture.md#event-driven-supervision).
 
 ### Failure and rollback
 

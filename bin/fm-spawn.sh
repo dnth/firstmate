@@ -4269,7 +4269,7 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
-    claude*|opencode*|pi|pi-signed|omp)
+    claude*|opencode*|pi|pi-signed)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
@@ -4407,33 +4407,12 @@ EOF
     omp)
       rm -f "$OMP_READY" "$OMP_STARTED" "$OMP_DOORBELL_READY" "$OMP_DOORBELL_FAILED"
       cat > "$STATE/$ID.omp-ext.ts" <<EOF
-// Firstmate OMP launch acknowledgement, inbox doorbell, turn-end signal, and
-// semantic busy-state events; written by fm-spawn.
+// Firstmate OMP launch acknowledgement, inbox doorbell, and turn-end signal; written by fm-spawn.
 // .omp-ready publishes only after the inbox doorbell activates; a failed
 // activation journals its reason to .omp-doorbell-failed instead, so a missing
 // marker is always attributable.
-// Busy state rides the same turn boundary the doorbell already observes:
-// turn_start opens a turn (busy), turn_end and session_shutdown close it
-// (idle), under the omp-ext source bin/fm-busy-lib.sh trusts for this harness.
 import { execFile } from "node:child_process";
 import { installTaskInboxDoorbell } from "$FM_ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts";
-const busyEvent = (state: string, event: string) =>
-  new Promise((resolve) => {
-    execFile("$FM_ROOT/bin/fm-busy-event.sh", [
-      "apply", "$STATE_REAL", "$ID", state,
-      "--gen", "$BUSY_GEN", "--source", "omp-ext", "--event", event,
-    ], () => resolve(undefined));
-  });
-// Busy-state writes are serialized through one chain so a turn_end's idle can
-// never land after a following turn_start's busy: an out-of-order pair would
-// leave a live worker falsely busy (suppressing stall recovery forever) or a
-// dead one falsely idle. Handlers also await the chain so the runtime's own
-// event ordering is honored end to end.
-let busyChain: Promise<unknown> = Promise.resolve();
-const queueBusyEvent = (state: string, event: string) => {
-  busyChain = busyChain.then(() => busyEvent(state, event));
-  return busyChain;
-};
 export default function (omp: any) {
   const taskInboxDoorbell = installTaskInboxDoorbell(omp, {
     inboxDir: "$STATE_REAL/$ID.inbox",
@@ -4449,20 +4428,15 @@ export default function (omp: any) {
       if (active) execFile("touch", ["$OMP_READY"]);
     });
   });
-  omp.on("turn_start", async () => {
+  omp.on("turn_start", () => {
     taskInboxDoorbell.notifyTurnStart();
     execFile("touch", ["$OMP_STARTED"]);
-    await queueBusyEvent("busy", "turn-start");
   });
-  omp.on("turn_end", async () => {
+  omp.on("turn_end", () => {
     taskInboxDoorbell.notifyTurnEnd();
     execFile("$TURNEND_SIGNAL", ["$STATE_REAL", "$ID", "$SPAWN_GEN"]);
-    await queueBusyEvent("idle", "turn-end");
   });
-  omp.on("session_shutdown", async () => {
-    taskInboxDoorbell.retire();
-    await queueBusyEvent("idle", "session-shutdown");
-  });
+  omp.on("session_shutdown", taskInboxDoorbell.retire);
 }
 EOF
       ;;
