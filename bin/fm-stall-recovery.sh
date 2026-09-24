@@ -252,18 +252,34 @@ oldest=$(fm_task_inbox_oldest_unhandled "$STATE" "$ID" 2>/dev/null || true)
 # cannot both pass the bound. The bound is a fixed invariant - no override.
 attempts_file="$dir/.recovery-attempts"
 attempts_record='' attempts_count=0
-IFS=$(printf '\t') read -r attempts_record attempts_count <<EOF
-$(cat "$attempts_file" 2>/dev/null || true)
-EOF
-[ "$attempts_record" = "${RECORD##*/}" ] || attempts_count=0
-case "$attempts_count" in ''|*[!0-9]*) attempts_count=0 ;; esac
+if [ -e "$attempts_file" ] || [ -L "$attempts_file" ]; then
+  [ -f "$attempts_file" ] && [ ! -L "$attempts_file" ] \
+    || verdict escalate "recovery-attempt marker is not a regular file"
+  attempts_content=$(<"$attempts_file") \
+    || verdict escalate "cannot read the recovery-attempt bound at $attempts_file"
+  IFS=$(printf '\t') read -r attempts_record attempts_count attempts_extra \
+    <<< "$attempts_content"
+  [ "$attempts_record" = "${RECORD##*/}" ] \
+    && case "$attempts_count" in ''|*[!0-9]*) false ;; *) true ;; esac \
+    && [ -z "$attempts_extra" ] \
+    && [ "$attempts_content" = "${attempts_record}$(printf '\t')${attempts_count}" ] \
+    || verdict escalate "malformed recovery-attempt marker at $attempts_file"
+fi
 [ "$attempts_count" -lt 1 ] \
   || verdict escalate "automatic recovery already attempted for ${RECORD##*/}; escalating per bounded-retry policy"
 
 unhandled=$(cd "$dir" 2>/dev/null && printf '%s ' *.msg 2>/dev/null || true)
 note="Stall auto-recovery ($TRIGGER, $PATH_KIND): the previous worker stopped acting on doorbells while instruction(s) ${unhandled:-${RECORD##*/}} stayed unhandled. The worktree, branch, and commits are exactly as that worker left them; nothing was discarded. Read and act on the inbox first."
-printf '%s\t%s\n' "${RECORD##*/}" "$((attempts_count + 1))" > "$attempts_file" 2>/dev/null \
-  || verdict escalate "cannot persist the recovery-attempt bound at $attempts_file"
+attempts_tmp=$(mktemp "$dir/.recovery-attempts.XXXXXX" 2>/dev/null) \
+  || verdict escalate "cannot allocate the recovery-attempt bound at $attempts_file"
+if ! printf '%s\t%s\n' "${RECORD##*/}" "$((attempts_count + 1))" > "$attempts_tmp"; then
+  rm -f "$attempts_tmp"
+  verdict escalate "cannot persist the recovery-attempt bound at $attempts_file"
+fi
+if ! mv -f "$attempts_tmp" "$attempts_file" 2>/dev/null; then
+  rm -f "$attempts_tmp"
+  verdict escalate "cannot publish the recovery-attempt bound at $attempts_file"
+fi
 
 # fm-control must run as a direct child so --lock-preheld's owner check
 # ($PPID == the lock's recorded owner pid) binds to THIS process; a command
