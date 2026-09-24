@@ -329,6 +329,24 @@ exit "${FM_FAKE_CONTROL_RC:-0}"
 SH
   chmod +x "$fb/fm-control.sh"
 
+  # git forwards to the real binary, except when FM_FAKE_GIT_MOVE names an
+  # inbox record: the first `git -C <wt> status --porcelain` inside
+  # fm-control's safe_checkpoint moves that record to handled/, simulating a
+  # worker that acknowledges the instruction in the gap between the caller's
+  # pre-invocation check and fm-control's in-lock re-check.
+  cat > "$fb/git" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ -n "${FM_FAKE_GIT_MOVE:-}" ] && [ "${1:-}" = "-C" ] && [ "${3:-}" = "status" ]; then
+  if [ -f "$FM_FAKE_GIT_MOVE" ]; then
+    mkdir -p "${FM_FAKE_GIT_MOVE%/*}/handled"
+    mv "$FM_FAKE_GIT_MOVE" "${FM_FAKE_GIT_MOVE%/*}/handled/"
+  fi
+fi
+exec /usr/bin/git "$@"
+SH
+  chmod +x "$fb/git"
+
   printf '%s\n' "$fb"
 }
 
@@ -528,6 +546,8 @@ test_missing_endpoint_recovers_via_control() {
   assert_absent "$requests/request.1.pending.acked" "stale .acked tombstone survived the relaunch"
   assert_absent "$requests/request.2.pending.unproven" "stale .unproven receipt survived the relaunch"
   assert_grep "001.msg" "$HOME_DIR/state/$id.inbox/.recovery-attempts" "the per-record attempt bound was not recorded"
+  assert_grep "control_relaunch_tx=" "$HOME_DIR/state/$id.meta" "fm-spawn did not record the relaunch transaction id in the published metadata"
+  assert_grep "relaunch_tx=" "$HOME_DIR/state/$id.control-relaunch" "the relaunch journal did not record the transaction id"
   assert_present "$record" "the unhandled instruction record was moved or deleted"
   assert_grep "stall auto-recovery" "$HOME_DIR/state/$id.status" "no audit note was appended to the task status"
   pass "missing endpoint: real relaunch publishes, ladder resets, stale receipts retire, record stays unhandled"
@@ -645,9 +665,10 @@ test_late_handled_cancels_relaunch() {
   pass "late handled move during the custody probe cancels the relaunch"
 }
 
-# Uncommitted work in the worktree is unlanded evidence: escalate, never
-# relaunch into it.
-test_dirty_worktree_escalates() {
+# Uncommitted work in the worktree is exactly what recovery preserves: the
+# stalled worker's unlanded changes must NOT block the relaunch, and the
+# replacement inherits the same worktree, branch, and dirty state untouched.
+test_dirty_worktree_recovers_preserving_work() {
   local rec id record
   id=$(case_id dirty)
   rec=$(make_case dirty "$id" pool)
@@ -661,15 +682,21 @@ test_dirty_worktree_escalates() {
   missing_window "$CASE_DIR" "$id"
   printf 'uncommitted\n' > "$WT_DIR/scratch.txt"
 
-  run_recovery "$CASE_DIR" "$HOME_DIR" "$id" "$record" endpoint-unavailable
-  assert_contains "$RECOVERY_OUT" "verdict=escalate" "a dirty worktree did not escalate"
-  assert_absent "$CASE_DIR/control.log" "the lifecycle verb ran against a dirty worktree"
-  pass "dirty worktree: recovery escalates rather than discarding uncommitted work"
+  FM_STALL_RECOVERY_CONTROL_BIN="$CONTROL" \
+    run_recovery "$CASE_DIR" "$HOME_DIR" "$id" "$record" endpoint-unavailable
+  expect_code 0 "$RECOVERY_STATUS" "dirty-worktree recovery should exit 0; got: $RECOVERY_OUT"
+  assert_contains "$RECOVERY_OUT" "verdict=deferred" "a dirty worktree did not defer pending the episode"
+  assert_grep "new-window" "$CASE_DIR/fake/tmux.log" "relaunch did not create a replacement tmux window"
+  assert_grep "worktree_dirty=yes" "$HOME_DIR/state/$id.control-relaunch" "the relaunch checkpoint did not record the dirty state"
+  assert_grep "uncommitted" "$WT_DIR/scratch.txt" "the relaunch discarded uncommitted work"
+  assert_present "$record" "the unhandled instruction record was moved or deleted"
+  pass "dirty worktree: recovery relaunches and preserves uncommitted work in place"
 }
 
-# Commits not on any remote-tracking ref are unlanded work: escalate.
-test_unlanded_commits_escalate() {
-  local rec id record
+# Commits not on any remote-tracking ref are unlanded work the replacement
+# inherits: recovery must relaunch into the same branch, not escalate.
+test_unlanded_commits_recover_preserving_branch() {
+  local rec id record head_before
   id=$(case_id unlanded)
   rec=$(make_case unlanded "$id" pool)
   read_case "$rec"
@@ -683,15 +710,21 @@ test_unlanded_commits_escalate() {
   printf 'wip\n' > "$WT_DIR/wip.txt"
   git -C "$WT_DIR" add wip.txt
   git -C "$WT_DIR" -c user.email=t@t -c user.name=t commit -qm wip
+  head_before=$(git -C "$WT_DIR" rev-parse HEAD)
 
-  run_recovery "$CASE_DIR" "$HOME_DIR" "$id" "$record" endpoint-unavailable
-  assert_contains "$RECOVERY_OUT" "verdict=escalate" "unlanded commits did not escalate"
-  assert_absent "$CASE_DIR/control.log" "the lifecycle verb ran against unlanded commits"
-  pass "unlanded commits: recovery escalates rather than abandoning pushed-state proof"
+  FM_STALL_RECOVERY_CONTROL_BIN="$CONTROL" \
+    run_recovery "$CASE_DIR" "$HOME_DIR" "$id" "$record" endpoint-unavailable
+  expect_code 0 "$RECOVERY_STATUS" "unlanded-commits recovery should exit 0; got: $RECOVERY_OUT"
+  assert_contains "$RECOVERY_OUT" "verdict=deferred" "unlanded commits did not defer pending the episode"
+  assert_grep "new-window" "$CASE_DIR/fake/tmux.log" "relaunch did not create a replacement tmux window"
+  assert_equals "$head_before" "$(git -C "$WT_DIR" rev-parse HEAD)" "the relaunch moved the branch head"
+  assert_grep "worktree_head=$head_before" "$HOME_DIR/state/$id.control-relaunch" "the relaunch checkpoint did not record the preserved head"
+  pass "unlanded commits: recovery relaunches into the same branch and preserves every commit"
 }
 
 # The per-record bound: a second automatic attempt for the same record
-# escalates instead of looping relaunches.
+# escalates instead of looping relaunches. The bound is a fixed invariant -
+# FM_STALL_RECOVERY_MAX must not be able to raise it.
 test_attempt_cap_escalates() {
   local rec id record
   id=$(case_id capped)
@@ -706,7 +739,8 @@ test_attempt_cap_escalates() {
   printf '001.msg\t1\n' > "$HOME_DIR/state/$id.inbox/.recovery-attempts"
   missing_window "$CASE_DIR" "$id"
 
-  run_recovery "$CASE_DIR" "$HOME_DIR" "$id" "$record" endpoint-unavailable
+  FM_STALL_RECOVERY_MAX=5 \
+    run_recovery "$CASE_DIR" "$HOME_DIR" "$id" "$record" endpoint-unavailable
   assert_contains "$RECOVERY_OUT" "verdict=escalate" "a spent attempt bound did not escalate"
   assert_absent "$CASE_DIR/control.log" "the lifecycle verb ran past the attempt bound"
   pass "attempt bound: a second automatic relaunch for the same record escalates"
@@ -831,6 +865,130 @@ test_refused_relaunch_preserves_receipts() {
   pass "refused relaunch: prior doorbell receipts survive untouched"
 }
 
+# A lifecycle lock held by a live process means another lifecycle action is in
+# flight: recovery defers instead of racing it, and the watcher re-evaluates on
+# the next cycle.
+test_held_lifecycle_lock_defers() {
+  local rec id record lockdir holder n
+  id=$(case_id lockheld)
+  rec=$(make_case lockheld "$id" pool)
+  read_case "$rec"
+  write_pool_state "$CASE_DIR" "$WT_DIR" "fm-$id"
+  write_slot_marker "$SLOT_DIR" "$id" "$HOME_DIR"
+  write_meta "$HOME_DIR/state/$id.meta" "$id" "$WT_DIR" "$PROJ_DIR"
+  create_prior_artifacts "$HOME_DIR/state" "$id"
+  write_inbox "$HOME_DIR/state" "$id" 001
+  record="$HOME_DIR/state/$id.inbox/001.msg"
+  missing_window "$CASE_DIR" "$id"
+
+  lockdir="$HOME_DIR/state/.control-$id.lock"
+  ( . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$lockdir" || exit 1
+    : > "$HOME_DIR/state/.test-lock-ready"
+    sleep 60 ) &
+  holder=$!
+  n=0
+  while [ ! -e "$HOME_DIR/state/.test-lock-ready" ] && [ "$n" -lt 100 ]; do
+    sleep 0.05; n=$((n + 1))
+  done
+  [ -e "$HOME_DIR/state/.test-lock-ready" ] \
+    || { kill "$holder" 2>/dev/null; fail "the lock holder never acquired $lockdir"; }
+
+  run_recovery "$CASE_DIR" "$HOME_DIR" "$id" "$record" endpoint-unavailable
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
+  assert_contains "$RECOVERY_OUT" "verdict=deferred" "a held lifecycle lock did not defer recovery"
+  assert_absent "$CASE_DIR/control.log" "the lifecycle verb ran while the lock was held"
+  pass "held lifecycle lock: recovery defers rather than racing another lifecycle action"
+}
+
+# The generated OMP extension must serialize busy-state writes: a turn_end's
+# idle can never land after a following turn_start's busy, or a live worker
+# reads falsely idle (and a dead one falsely busy suppresses recovery). The
+# fake FM_ROOT wraps fm-busy-event.sh with a delay on the turn-end write, so
+# an unserialized pair deterministically inverts.
+test_omp_ext_serializes_busy_events() {
+  local rec id record fakeroot ext out tool
+  id=$(case_id omp-order)
+  rec=$(make_case omp-order "$id" pool)
+  read_case "$rec"
+  write_pool_state "$CASE_DIR" "$WT_DIR" "fm-$id"
+  write_slot_marker "$SLOT_DIR" "$id" "$HOME_DIR"
+  write_meta "$HOME_DIR/state/$id.meta" "$id" "$WT_DIR" "$PROJ_DIR"
+  create_prior_artifacts "$HOME_DIR/state" "$id"
+  write_inbox "$HOME_DIR/state" "$id" 001
+  record="$HOME_DIR/state/$id.inbox/001.msg"
+  missing_window "$CASE_DIR" "$id"
+
+  # Fake FM_ROOT: every bin entry is the real script except fm-busy-event.sh,
+  # which delays the turn-end apply so an unserialized turn-start write would
+  # land first and leave the worker falsely busy.
+  fakeroot="$CASE_DIR/fakeroot"
+  mkdir -p "$fakeroot/bin" "$fakeroot/.omp/extensions"
+  for tool in "$ROOT"/bin/*; do
+    [ "$(basename "$tool")" = fm-busy-event.sh ] || ln -s "$tool" "$fakeroot/bin/$(basename "$tool")"
+  done
+  ln -s "$ROOT/.omp/extensions/lib" "$fakeroot/.omp/extensions/lib"
+  cat > "$fakeroot/bin/fm-busy-event.sh" <<SH
+#!/usr/bin/env bash
+for a in "\$@"; do
+  if [ "\$a" = "turn-end" ]; then sleep 0.4; fi
+done
+exec "$ROOT/bin/fm-busy-event.sh" "\$@"
+SH
+  chmod +x "$fakeroot/bin/fm-busy-event.sh"
+
+  FM_ROOT_OVERRIDE="$fakeroot" FM_STALL_RECOVERY_CONTROL_BIN="$CONTROL" \
+    run_recovery "$CASE_DIR" "$HOME_DIR" "$id" "$record" endpoint-unavailable
+  expect_code 0 "$RECOVERY_STATUS" "recovery under the fake root should exit 0; got: $RECOVERY_OUT"
+  assert_contains "$RECOVERY_OUT" "verdict=deferred" "recovery under the fake root did not publish the relaunch"
+  ext="$HOME_DIR/state/$id.omp-ext.ts"
+  assert_present "$ext" "the relaunch did not regenerate the OMP extension"
+
+  # Fire turn_end then turn_start concurrently (the runtime may dispatch
+
+  # handlers without awaiting them). The busy write must still land last.
+  EXT_PATH="$ext" bun -e '
+    const mod = await import(process.env.EXT_PATH);
+    const handlers = {};
+    mod.default({ on: (n, fn) => { handlers[n] = fn; } });
+    handlers["turn_end"]();
+    handlers["turn_start"]();
+    await new Promise((r) => setTimeout(r, 3000));
+  ' || fail "driving the generated OMP extension failed"
+  out=$(cat "$HOME_DIR/state/$id.busy-state" 2>/dev/null || true)
+  case "$out" in
+    *"state=busy"*"event=turn-start"*) ;;
+    *) fail "turn_end's idle write landed after turn_start's busy (final record: '${out:-missing}'); the extension does not serialize busy events" ;;
+  esac
+  pass "OMP extension serializes busy-state writes: turn-start busy lands after turn-end idle"
+}
+# A record handled in the gap between the caller's pre-invocation check and
+# fm-control's in-lock re-check must still cancel the relaunch: the fake git
+# moves the record to handled/ during safe_checkpoint, so fm-control's own
+# stall-record proof sees it resolved and exits 3 before the agent is touched.
+test_in_lock_handled_record_cancels_relaunch() {
+  local rec id record
+  id=$(case_id inlock-ack)
+  rec=$(make_case inlock-ack "$id" pool)
+  read_case "$rec"
+  write_pool_state "$CASE_DIR" "$WT_DIR" "fm-$id"
+  write_slot_marker "$SLOT_DIR" "$id" "$HOME_DIR"
+  write_meta "$HOME_DIR/state/$id.meta" "$id" "$WT_DIR" "$PROJ_DIR"
+  create_prior_artifacts "$HOME_DIR/state" "$id"
+  write_inbox "$HOME_DIR/state" "$id" 001
+  record="$HOME_DIR/state/$id.inbox/001.msg"
+  missing_window "$CASE_DIR" "$id"
+
+  FM_FAKE_GIT_MOVE="$record" FM_STALL_RECOVERY_CONTROL_BIN="$CONTROL" \
+    run_recovery "$CASE_DIR" "$HOME_DIR" "$id" "$record" endpoint-unavailable
+  expect_code 0 "$RECOVERY_STATUS" "in-lock cancellation should exit 0; got: $RECOVERY_OUT"
+  assert_contains "$RECOVERY_OUT" "verdict=recovered" "a record resolved inside the lock did not report recovered"
+  assert_no_grep "new-window" "$CASE_DIR/fake/tmux.log" "the relaunch created a window for a resolved record"
+  assert_grep "cancelled:record-resolved" "$HOME_DIR/state/$id.control-relaunch" "the journal did not record the in-lock cancellation"
+  assert_present "$HOME_DIR/state/$id.inbox/handled/001.msg" "the handled record is not in handled/"
+  pass "in-lock handled record: fm-control cancels the relaunch before touching the agent"
+}
+
 # --- run ---------------------------------------------------------------------
 
 test_missing_endpoint_recovers_via_control
@@ -839,13 +997,16 @@ test_live_busy_defers
 test_live_unknown_busy_escalates
 test_handled_record_recovers_quietly
 test_late_handled_cancels_relaunch
-test_dirty_worktree_escalates
-test_unlanded_commits_escalate
+test_dirty_worktree_recovers_preserving_work
+test_unlanded_commits_recover_preserving_branch
 test_attempt_cap_escalates
 test_foreign_lease_escalates
 test_non_pool_worktree_escalates
 test_working_crew_state_escalates
 test_secondmate_kind_escalates
 test_refused_relaunch_preserves_receipts
+test_held_lifecycle_lock_defers
+test_in_lock_handled_record_cancels_relaunch
+test_omp_ext_serializes_busy_events
 
 pass "all stall-recovery tests"

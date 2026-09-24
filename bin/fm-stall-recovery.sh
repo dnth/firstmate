@@ -37,11 +37,11 @@
 #     declared external wait, and a worker-declared blocker are firstmate
 #     business, not stall recovery). Terminal done/failed may proceed, and
 #     unknown may proceed only on the missing-endpoint path.
-#   - The recorded worktree must be clean AND hold no commit absent from every
-#     remote-tracking ref (local-only mode instead requires every commit
-#     merged into the local default branch). Unlanded work blocks automatic
-#     action and escalates; the check is local-only - no gh or fetch - so the
-#     watcher can never hang on a remote.
+#   - The recorded worktree must exist and carry the durable fm-<id> lease;
+#     uncommitted changes and unpushed commits inside it are PRESERVED, not
+#     rejected: the stalled worker's unlanded work is exactly what recovery
+#     exists to keep, and the relaunch inherits the same worktree, branch,
+#     and commits untouched.
 #   - One automatic relaunch per stalled instruction: the per-record attempt
 #     marker under the inbox bounds retries, and an emptied inbox resets it.
 #   - The durable fm-<id> worktree lease, same-worktree/branch/commits
@@ -55,15 +55,35 @@
 # handled/ move (quiet) or the bounded re-escalation the reset ladder produces
 # when the replacement also fails to act.
 #
+# The final custody and inbox-record re-check runs INSIDE fm-control's
+# lifecycle lock (state/.control-<id>.lock), acquired by this process and held
+# across the fm-control invocation via --lock-preheld: a record handled in the
+# gap can never relaunch a now-productive worker, and a concurrent invocation
+# or manual lifecycle action can never double-relaunch. The per-record attempt
+# bound is checked and recorded under the same lock.
+#
 # Audit: every verdict appends one line to state/<id>.stall-recovery; the
 # relaunch transaction itself journals to state/<id>.control-relaunch, and a
 # note: line on state/<id>.status records the published recovery.
 #
 # Tunables (env):
-#   FM_STALL_RECOVERY_MAX      automatic relaunches per stalled record (1)
 #   FM_CREW_STATE_BIN          crew-state executable override (tests)
 #   FM_STALL_RECOVERY_CONTROL_BIN  lifecycle executable override (tests)
+#
+# The one-relaunch-per-record bound is a fixed invariant, not a tunable.
 set -u
+
+# Release the lifecycle lock on every exit path, including verdict exits.
+STALL_LOCK=
+STALL_LOCK_HELD=0
+# shellcheck disable=SC2329 # Registered by the EXIT trap below.
+stall_cleanup() {
+  if [ "$STALL_LOCK_HELD" = 1 ]; then
+    STALL_LOCK_HELD=0
+    fm_lock_release "$STALL_LOCK" 2>/dev/null || true
+  fi
+}
+trap stall_cleanup EXIT
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -75,8 +95,6 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
-# shellcheck source=bin/fm-worktree-clean-lib.sh
-. "$SCRIPT_DIR/fm-worktree-clean-lib.sh"
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 
@@ -128,19 +146,22 @@ fi
 
 # prove_custody: re-prove every precondition for a lifecycle action against
 # CURRENT state - endpoint classification, busy verdict, crew/run state,
-# worktree cleanliness, landed work, and the durable fm-<id> lease. Called
-# directly (never in a command substitution) so its PATH_KIND, WT, MODE,
-# PROJ, BACKEND, and TARGET bindings reach the caller; the refusal reason is
-# published through the CUSTODY_DETAIL global. Returns 1 on any failed or
-# unprovable check, 2 when the worker is provably busy (a defer, not an
-# escalation), 0 on success. All reads are local: no gh or fetch can ever
-# stall the watcher.
+# worktree existence, and the durable fm-<id> lease. Called directly (never in
+# a command substitution) so its PATH_KIND, WT, PROJ, BACKEND, and TARGET
+# bindings reach the caller; the refusal reason is published through the
+# CUSTODY_DETAIL global. Returns 1 on any failed or unprovable check, 2 when
+# the worker is provably busy (a defer, not an escalation), 0 on success. All
+# reads are local: no gh or fetch can ever stall the watcher.
+#
+# Uncommitted changes and unpushed commits are deliberately NOT gates here:
+# recovery exists to preserve exactly that unlanded work, and the relaunch
+# inherits the same worktree, branch, and commits untouched (fm-control's
+# safe_checkpoint records head and dirty state for the journal).
 prove_custody() {
-  local state busy crew_line crew_state unpushed unmerged default_ref cand pool_state lease_holder
+  local state busy crew_line crew_state pool_state lease_holder
   PATH_KIND=
   CUSTODY_DETAIL=
   WT=$(fm_meta_get "$META" worktree)
-  MODE=$(fm_meta_get "$META" mode)
   PROJ=$(fm_meta_get "$META" project)
   fm_backend_validate_task_endpoint "$META" "$ID" >/dev/null 2>&1 \
     || { CUSTODY_DETAIL='endpoint metadata failed validation'; return 1; }
@@ -172,24 +193,6 @@ prove_custody() {
     *) CUSTODY_DETAIL="crew-state '${crew_state:-unreadable}' is not a clean non-run state"; return 1 ;;
   esac
   [ -n "$WT" ] && [ -d "$WT" ] || { CUSTODY_DETAIL='recorded worktree missing'; return 1; }
-  fm_worktree_is_clean "$WT" || { CUSTODY_DETAIL='worktree has uncommitted changes'; return 1; }
-  if [ "$MODE" = local-only ]; then
-    default_ref=
-    for cand in main master; do
-      if git -C "$PROJ" show-ref --verify --quiet "refs/heads/$cand" 2>/dev/null; then
-        default_ref=$cand
-        break
-      fi
-    done
-    [ -n "$default_ref" ] || { CUSTODY_DETAIL='local-only task has no resolvable default branch'; return 1; }
-    unmerged=$(git -C "$WT" log --format=%H HEAD --not "$default_ref" -- 2>/dev/null) \
-      || { CUSTODY_DETAIL="cannot inspect worktree commits against $default_ref"; return 1; }
-    [ -z "$unmerged" ] || { CUSTODY_DETAIL="local-only worktree has commits not merged into $default_ref"; return 1; }
-  else
-    unpushed=$(git -C "$WT" log --format=%H HEAD --not --remotes -- 2>/dev/null) \
-      || { CUSTODY_DETAIL='cannot inspect worktree commits against remotes'; return 1; }
-    [ -z "$unpushed" ] || { CUSTODY_DETAIL='worktree has commits not on any remote-tracking ref'; return 1; }
-  fi
   # The durable fm-<id> lease proof mirrors bin/fm-spawn.sh's
   # relaunch_worktree_lease_proven, applied to BOTH paths here because the
   # launch owner only re-proves it on the gone-endpoint path.
@@ -218,24 +221,23 @@ prove_custody || case $? in
   *) verdict escalate "$CUSTODY_DETAIL" ;;
 esac
 
-# Bounded retry: one automatic relaunch per stalled instruction record.
-max_attempts=${FM_STALL_RECOVERY_MAX:-1}
-case "$max_attempts" in ''|*[!0-9]*) max_attempts=1 ;; esac
-attempts_file="$dir/.recovery-attempts"
-attempts_record='' attempts_count=0
-IFS=$(printf '\t') read -r attempts_record attempts_count <<EOF
-$(cat "$attempts_file" 2>/dev/null || true)
-EOF
-[ "$attempts_record" = "${RECORD##*/}" ] || attempts_count=0
-case "$attempts_count" in ''|*[!0-9]*) attempts_count=0 ;; esac
-[ "$attempts_count" -lt "$max_attempts" ] \
-  || verdict escalate "automatic recovery already attempted for ${RECORD##*/}; escalating per bounded-retry policy"
+# --- bounded lifecycle action, under fm-control's lifecycle lock ------------
+#
+# The lock is acquired BEFORE the final re-check and held across the
+# fm-control invocation (--lock-preheld proves the caller owns it), so a
+# record handled in the gap can never relaunch a now-productive worker and a
+# concurrent invocation or manual lifecycle action can never double-relaunch.
+# A live holder means another lifecycle action is in flight: defer, and the
+# watcher re-evaluates on the next cycle.
+STALL_LOCK="$STATE/.control-$ID.lock"
+fm_lock_try_acquire "$STALL_LOCK" \
+  || verdict deferred "lifecycle lock for $ID is held by pid ${FM_LOCK_HELD_PID:-unknown}; another lifecycle action is in flight"
+STALL_LOCK_HELD=1
 
-# Final re-check immediately before the lifecycle action, in strict order:
-# re-prove the full custody chain (a worker can become busy, enter a run, or
-# lose its worktree between the first proof and the relaunch), then re-prove
-# the record itself LAST so a handled move during the custody probe still
-# cancels the action.
+# Final re-check inside the lock, in strict order: re-prove the full custody
+# chain (a worker can become busy, enter a run, or lose its worktree between
+# the first proof and the relaunch), then re-prove the record itself LAST so
+# a handled move during the custody probe still cancels the action.
 prove_custody || case $? in
   2) verdict deferred "$CUSTODY_DETAIL" ;;
   *) verdict escalate "$CUSTODY_DETAIL" ;;
@@ -244,18 +246,50 @@ oldest=$(fm_task_inbox_oldest_unhandled "$STATE" "$ID" 2>/dev/null || true)
 [ -n "$oldest" ] || verdict recovered "inbox emptied before relaunch; instruction handled"
 [ "$oldest" = "$RECORD" ] || verdict deferred "record ${RECORD##*/} handled or superseded before relaunch"
 
-# --- bounded lifecycle action ------------------------------------------------
+# Bounded retry: exactly one automatic relaunch per stalled instruction
+# record, checked and recorded under the lock so concurrent invocations
+# cannot both pass the bound. The bound is a fixed invariant - no override.
+attempts_file="$dir/.recovery-attempts"
+attempts_record='' attempts_count=0
+IFS=$(printf '\t') read -r attempts_record attempts_count <<EOF
+$(cat "$attempts_file" 2>/dev/null || true)
+EOF
+[ "$attempts_record" = "${RECORD##*/}" ] || attempts_count=0
+case "$attempts_count" in ''|*[!0-9]*) attempts_count=0 ;; esac
+[ "$attempts_count" -lt 1 ] \
+  || verdict escalate "automatic recovery already attempted for ${RECORD##*/}; escalating per bounded-retry policy"
 
 unhandled=$(cd "$dir" 2>/dev/null && printf '%s ' *.msg 2>/dev/null || true)
 note="Stall auto-recovery ($TRIGGER, $PATH_KIND): the previous worker stopped acting on doorbells while instruction(s) ${unhandled:-${RECORD##*/}} stayed unhandled. The worktree, branch, and commits are exactly as that worker left them; nothing was discarded. Read and act on the inbox first."
 printf '%s\t%s\n' "${RECORD##*/}" "$((attempts_count + 1))" > "$attempts_file" 2>/dev/null \
   || verdict escalate "cannot persist the recovery-attempt bound at $attempts_file"
 
+# fm-control must run as a direct child so --lock-preheld's owner check
+# ($PPID == the lock's recorded owner pid) binds to THIS process; a command
+# substitution would interpose a subshell and fail the proof. --stall-record
+# hands fm-control the record basename so it re-proves the instruction is
+# still the oldest unhandled record inside the lock, immediately before the
+# agent is touched - the check above cannot cover the gap to that point.
+# Exit 3 is fm-control's "record resolved; nothing to do" code.
 FM_CONFIG_OVERRIDE=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
-control_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
-  FM_CONFIG_OVERRIDE="$FM_CONFIG_OVERRIDE" \
-  "$FM_STALL_RECOVERY_CONTROL_BIN" "$ID" relaunch --note "$note" 2>&1) \
-  || verdict escalate "fm-control relaunch refused or failed: $(printf '%s' "$control_out" | tail -1)"
+control_out_file=$(mktemp "$STATE/.stall-recovery-control-out.XXXXXX" 2>/dev/null) \
+  || verdict escalate "cannot allocate the fm-control output capture"
+if FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+   FM_CONFIG_OVERRIDE="$FM_CONFIG_OVERRIDE" \
+   "$FM_STALL_RECOVERY_CONTROL_BIN" "$ID" relaunch --lock-preheld \
+     --stall-record "${RECORD##*/}" --note "$note" \
+   > "$control_out_file" 2>&1; then
+  control_rc=0
+else
+  control_rc=$?
+fi
+control_out=$(cat "$control_out_file" 2>/dev/null || true)
+rm -f "$control_out_file"
+case "$control_rc" in
+  0) ;;
+  3) verdict recovered "record ${RECORD##*/} resolved inside the lifecycle lock before the relaunch; instruction handled" ;;
+  *) verdict escalate "fm-control relaunch refused or failed: $(printf '%s' "$control_out" | tail -1)" ;;
+esac
 
 # The replacement owns the instruction now. Reset the delivery ladder so the
 # new incarnation gets the full grace-and-retry budget before the bounded

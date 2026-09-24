@@ -435,6 +435,14 @@ done
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
 
 if [ "$RELAUNCH" -eq 1 ]; then
+  # A relaunch driven by fm-control carries its transaction id so a failure
+  # after this record is published still classifies the successor correctly.
+  # The value lands verbatim in the durable record, so a malformed token is
+  # refused rather than corrupting it.
+  case "${FM_CONTROL_RELAUNCH_TX:-}" in
+    '') ;;
+    *[!A-Za-z0-9._-]*) { echo "error: FM_CONTROL_RELAUNCH_TX is not a safe metadata token" >&2; exit 1; } ;;
+  esac
   RELAUNCH_ID=${POS[0]:-}
   [ -n "$RELAUNCH_ID" ] || { echo "error: --relaunch requires a task id" >&2; exit 1; }
   RELAUNCH_META="$STATE/$RELAUNCH_ID.meta"
@@ -4416,6 +4424,16 @@ const busyEvent = (state: string, event: string) =>
       "--gen", "$BUSY_GEN", "--source", "omp-ext", "--event", event,
     ], () => resolve(undefined));
   });
+// Busy-state writes are serialized through one chain so a turn_end's idle can
+// never land after a following turn_start's busy: an out-of-order pair would
+// leave a live worker falsely busy (suppressing stall recovery forever) or a
+// dead one falsely idle. Handlers also await the chain so the runtime's own
+// event ordering is honored end to end.
+let busyChain: Promise<unknown> = Promise.resolve();
+const queueBusyEvent = (state: string, event: string) => {
+  busyChain = busyChain.then(() => busyEvent(state, event));
+  return busyChain;
+};
 export default function (omp: any) {
   const taskInboxDoorbell = installTaskInboxDoorbell(omp, {
     inboxDir: "$STATE_REAL/$ID.inbox",
@@ -4431,19 +4449,19 @@ export default function (omp: any) {
       if (active) execFile("touch", ["$OMP_READY"]);
     });
   });
-  omp.on("turn_start", () => {
+  omp.on("turn_start", async () => {
     taskInboxDoorbell.notifyTurnStart();
     execFile("touch", ["$OMP_STARTED"]);
-    busyEvent("busy", "turn-start");
+    await queueBusyEvent("busy", "turn-start");
   });
-  omp.on("turn_end", () => {
+  omp.on("turn_end", async () => {
     taskInboxDoorbell.notifyTurnEnd();
     execFile("$TURNEND_SIGNAL", ["$STATE_REAL", "$ID", "$SPAWN_GEN"]);
-    busyEvent("idle", "turn-end");
+    await queueBusyEvent("idle", "turn-end");
   });
-  omp.on("session_shutdown", () => {
+  omp.on("session_shutdown", async () => {
     taskInboxDoorbell.retire();
-    busyEvent("idle", "session-shutdown");
+    await queueBusyEvent("idle", "session-shutdown");
   });
 }
 EOF
@@ -4670,6 +4688,10 @@ SPAWN_META_LOCK_HELD=1
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   echo "spawn_gen=$SPAWN_GEN"
+  # The relaunch transaction id lets fm-control classify a post-publish
+  # failure as "new record published" rather than "replacement never
+  # launched"; only a relaunch under fm-control writes it.
+  [ -z "${FM_CONTROL_RELAUNCH_TX:-}" ] || echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
   [ -z "${GROK_AUTH_DIR:-}" ] || echo "grok_turnend_dir=$GROK_AUTH_DIR"
   [ -z "${KIMI_AUTH_DIR:-}" ] || echo "kimi_turnend_dir=$KIMI_AUTH_DIR"
   [ -z "${DEVIN_AUTH_DIR:-}" ] || echo "devin_turnend_dir=$DEVIN_AUTH_DIR"

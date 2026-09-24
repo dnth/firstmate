@@ -5,7 +5,7 @@
 # Usage: fm-control.sh <task-id> interrupt
 #        fm-control.sh <task-id> exit
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
-#                                         [--effort <level>]
+#                                         [--effort <level>] [--lock-preheld]
 #                                         (--note <text> | --note-file <path>)
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
@@ -46,6 +46,17 @@
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its
 #              standing charter is never rewritten.
+#              --lock-preheld is the supervised-recovery handshake: the caller
+#              (bin/fm-stall-recovery.sh) already holds this task's lifecycle
+#              lock, so fm-control verifies the lock's recorded owner is its
+#              own parent process instead of acquiring it. The flag never
+#              bypasses the lock - without a live parent holding it, the
+#              command refuses.
+#              --stall-record <basename> rides the same handshake: inside the
+#              lock, immediately before the agent is touched, fm-control
+#              re-proves the named inbox record is still the oldest unhandled
+#              instruction and cancels with exit 3 when it was handled or
+#              superseded in flight. It requires --lock-preheld.
 #              Records a durable checkpoint and that note, exits the old agent,
 #              then delegates the launch to its single owner,
 #              bin/fm-spawn.sh --relaunch. A failure before publication keeps
@@ -142,6 +153,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-task-inbox-lib.sh
+. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
@@ -203,6 +216,8 @@ MODEL_SET=0
 EFFORT_SET=0
 NOTE=
 NOTE_SET=0
+LOCK_PREHELD=0
+STALL_RECORD=
 control_want_value=
 for control_arg in "$@"; do
   if [ -n "$control_want_value" ]; then
@@ -214,6 +229,7 @@ for control_arg in "$@"; do
       model) NEW_MODEL=$control_arg; MODEL_SET=1 ;;
       effort) NEW_EFFORT=$control_arg; EFFORT_SET=1 ;;
       note) NOTE=$control_arg; NOTE_SET=1 ;;
+      stall_record) STALL_RECORD=$control_arg ;;
       note_file)
         [ -f "$control_arg" ] || die "--note-file '$control_arg' is not a readable file"
         NOTE=$(cat "$control_arg")
@@ -238,6 +254,9 @@ for control_arg in "$@"; do
       NOTE=$(cat "${control_arg#--note-file=}")
       NOTE_SET=1
       ;;
+    --lock-preheld) LOCK_PREHELD=1 ;;
+    --stall-record) control_want_value=stall_record ;;
+    --stall-record=*) STALL_RECORD=${control_arg#--stall-record=} ;;
     *) die "unexpected argument '$control_arg'" ;;
   esac
 done
@@ -247,9 +266,14 @@ if [ -n "$control_want_value" ]; then
 fi
 
 if [ "$VERB" != relaunch ]; then
-  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
-    || die "--harness, --model, --effort, and --note apply to 'relaunch' only"
+  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] && [ "$LOCK_PREHELD" = 0 ] && [ -z "$STALL_RECORD" ] \
+    || die "--harness, --model, --effort, --note, --lock-preheld, and --stall-record apply to 'relaunch' only"
 fi
+# The stall-record re-check is only meaningful inside the supervised-recovery
+# handshake: without --lock-preheld there is no proof the caller serialized
+# its own custody checks with this invocation.
+[ -z "$STALL_RECORD" ] || [ "$LOCK_PREHELD" = 1 ] \
+  || die "--stall-record requires --lock-preheld"
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
 [ "$EFFORT_SET" = 0 ] || [ -n "$NEW_EFFORT" ] || die "--effort requires a non-empty value"
@@ -275,9 +299,23 @@ ID=$RAW_ID
 fm_lease_guard "$ID" "lifecycle control (fm-control)"
 CONTROL_LOCK="$STATE/.control-$ID.lock"
 trap control_cleanup EXIT
-fm_lock_try_acquire "$CONTROL_LOCK" \
-  || die "another lifecycle action is already running for task $ID"
-CONTROL_LOCK_HELD=1
+if [ "$LOCK_PREHELD" = 1 ]; then
+  # Supervised-recovery handshake: the direct parent (bin/fm-stall-recovery.sh)
+  # holds this task's lifecycle lock across this invocation, so its custody and
+  # inbox-record re-checks are serialized with the relaunch itself. The flag
+  # never bypasses the lock: it is honored only when the lock exists, its
+  # recorded owner pid is this process's own parent, and that parent is alive.
+  # CONTROL_LOCK_HELD stays 0 so the cleanup trap never releases a lock this
+  # process does not own.
+  lock_owner_pid=$(cat "$CONTROL_LOCK/pid" 2>/dev/null || true)
+  if [ -z "$lock_owner_pid" ] || [ "$lock_owner_pid" != "$PPID" ] || ! fm_pid_alive "$lock_owner_pid"; then
+    die "--lock-preheld requires the caller to hold $CONTROL_LOCK as this process's live parent (owner: ${lock_owner_pid:-none}, parent: $PPID)"
+  fi
+else
+  fm_lock_try_acquire "$CONTROL_LOCK" \
+    || die "another lifecycle action is already running for task $ID"
+  CONTROL_LOCK_HELD=1
+fi
 META="$STATE/$ID.meta"
 if [ ! -f "$META" ]; then
   case "$RAW_ID" in
@@ -795,7 +833,7 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result state note_line stall_oldest
   local -a spawn_args
 
   require_state_verified_backend relaunch
@@ -831,6 +869,27 @@ do_relaunch() {
 
   record_note
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
+
+  # Final stall-record re-check, inside the lifecycle lock and immediately
+  # before the agent is touched: the caller's own pre-invocation proof cannot
+  # cover the gap to this point, so a record handled or superseded in flight
+  # must still cancel the relaunch here. Exit 3 is the dedicated "instruction
+  # resolved; nothing to do" code the supervised caller maps to recovered. The
+  # cancelled phase is journaled first so the rollback trap leaves this record
+  # rather than a misleading failed:noted.
+  if [ -n "$STALL_RECORD" ]; then
+    stall_oldest=$(fm_task_inbox_oldest_unhandled "$STATE" "$ID" 2>/dev/null || true)
+    if [ -z "$stall_oldest" ]; then
+      journal_write "cancelled:record-resolved" "${CHECKPOINT_LINES[@]}" "$note_line" || true
+      echo "relaunch cancelled: stall record resolved (inbox empty; instruction handled)" >&2
+      exit 3
+    fi
+    if [ "${stall_oldest##*/}" != "$STALL_RECORD" ]; then
+      journal_write "cancelled:record-resolved" "${CHECKPOINT_LINES[@]}" "$note_line" || true
+      echo "relaunch cancelled: stall record $STALL_RECORD handled or superseded (${stall_oldest##*/} is now oldest)" >&2
+      exit 3
+    fi
+  fi
 
   journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
   state=$(agent_state)
@@ -888,7 +947,7 @@ do_relaunch() {
   }
   RELAUNCH_AGENT_CONFIRMED=1
 
-  journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
+  journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result" "relaunch_tx=$RELAUNCH_TX"
   RELAUNCH_ACTIVE=0
   echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
 }
