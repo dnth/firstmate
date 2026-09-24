@@ -435,6 +435,14 @@ done
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
 
 if [ "$RELAUNCH" -eq 1 ]; then
+  # A relaunch driven by fm-control carries its transaction id so a failure
+  # after this record is published still classifies the successor correctly.
+  # The value lands verbatim in the durable record, so a malformed token is
+  # refused rather than corrupting it.
+  case "${FM_CONTROL_RELAUNCH_TX:-}" in
+    '') ;;
+    *[!A-Za-z0-9._-]*) { echo "error: FM_CONTROL_RELAUNCH_TX is not a safe metadata token" >&2; exit 1; } ;;
+  esac
   RELAUNCH_ID=${POS[0]:-}
   [ -n "$RELAUNCH_ID" ] || { echo "error: --relaunch requires a task id" >&2; exit 1; }
   RELAUNCH_META="$STATE/$RELAUNCH_ID.meta"
@@ -4654,6 +4662,10 @@ SPAWN_META_LOCK_HELD=1
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   echo "spawn_gen=$SPAWN_GEN"
+  # The relaunch transaction id lets fm-control classify a post-publish
+  # failure as "new record published" rather than "replacement never
+  # launched"; only a relaunch under fm-control writes it.
+  [ -z "${FM_CONTROL_RELAUNCH_TX:-}" ] || echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
   [ -z "${GROK_AUTH_DIR:-}" ] || echo "grok_turnend_dir=$GROK_AUTH_DIR"
   [ -z "${KIMI_AUTH_DIR:-}" ] || echo "kimi_turnend_dir=$KIMI_AUTH_DIR"
   [ -z "${DEVIN_AUTH_DIR:-}" ] || echo "devin_turnend_dir=$DEVIN_AUTH_DIR"
@@ -4921,6 +4933,32 @@ sleep 0.3
 [ -z "$OMP_LAUNCH_PATH_GUARD" ] || LAUNCH="$OMP_LAUNCH_PATH_GUARD$LAUNCH"
 if [ "$OMP_LAUNCH_TEMPLATE" -eq 1 ] && [ "$HARNESS" = omp ]; then
   LAUNCH="/bin/bash -c $(shell_quote "$LAUNCH")"
+fi
+if [ "$HARNESS" = omp ] && [ "$RELAUNCH" -eq 1 ]; then
+  # Generation reconciliation: every request.* receipt under the doorbell
+  # requests dir was written for the PRIOR incarnation's doorbell. The
+  # extension only reconciles .ambiguous/.awaiting-turn on activate, so a
+  # surviving .acked/.delivered/.unproven tombstone would suppress the
+  # replacement worker's doorbell for the same still-unhandled record - the
+  # exact delivered-no-turn stall this relaunch recovers from. This runs only
+  # here, after every refusal gate above has passed and immediately before
+  # the replacement launch is submitted, so a refused relaunch never deletes
+  # the prior generation's receipts; the inbox records themselves live under
+  # state/<id>.inbox and are untouched.
+  OMP_REQUESTS_DIR="$STATE/$ID.omp-doorbell-ready.requests"
+  if [ -d "$OMP_REQUESTS_DIR" ] && [ ! -L "$OMP_REQUESTS_DIR" ]; then
+    for request_artifact in "$OMP_REQUESTS_DIR"/request.*; do
+      [ -e "$request_artifact" ] || [ -L "$request_artifact" ] || continue
+      if [ -L "$request_artifact" ] || [ ! -f "$request_artifact" ]; then
+        echo "error: refusing OMP relaunch through unsafe request entry: $request_artifact" >&2
+        exit 1
+      fi
+      rm -f "$request_artifact" || {
+        echo "error: refusing OMP relaunch because a stale doorbell receipt could not be retired: $request_artifact" >&2
+        exit 1
+      }
+    done
+  fi
 fi
 if [ "$BACKEND" = herdr ]; then
   spawn_send_text_line "$T" "$LAUNCH" || {

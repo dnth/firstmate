@@ -44,6 +44,11 @@
 #                              doorbell activates (.omp-ready follows it)
 #   <task>.omp-doorbell-failed the reason a doorbell activation or drain retired
 #                              the ready marker, journaled by the extension
+#   <task>.inbox/.recovery-attempts
+#                              stall auto-recovery bound: "<msg>\t<count>" -
+#                              one automatic relaunch per stalled record on the
+#                              missing-endpoint path, reset when the inbox
+#                              empties (bin/fm-stall-recovery.sh)
 #
 # Record format (fm_task_inbox_write / fm_task_inbox_body):
 #   schema=fm-task-inbox.v1
@@ -61,11 +66,12 @@
 # Re-ring ladder (fm_task_inbox_due_action): an unhandled message older than
 # FM_TASK_INBOX_GRACE_SECS is due one delivery attempt per grace period; an
 # attempt may ring or be skipped to protect proven pending composer text. After
-# FM_TASK_INBOX_RING_MAX attempts without an acknowledgement it escalates. The
-# caller owns the busy and recovery-grade endpoint checks: a busy pane waits,
-# while a positively dead or missing endpoint skips delivery and the ladder and
-# escalates directly. This library owns only the schedule and escalation
-# marker. If attempt bookkeeping cannot be persisted while the record
+# FM_TASK_INBOX_RING_MAX attempts without an acknowledgement it becomes due
+# for the caller's custody-checked stall-recovery helper before any stale wake
+# is published. The caller owns the busy and recovery-grade endpoint checks:
+# a busy pane waits, while a positively dead or missing endpoint skips delivery
+# and the ladder and enters that same helper. This library owns only the
+# schedule and escalation marker. If attempt bookkeeping cannot be persisted while the record
 # remains unhandled, the caller surfaces that failure instead of retrying
 # silently; a concurrently removed inbox is a quiet no-op. Escalation
 # deliberately queues the wake before writing the
@@ -371,6 +377,8 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [har
 fm_task_inbox_oldest_unhandled() {  # <state-dir> <task-id>
   local dir best='' best_n=0 f n
   dir=$(fm_task_inbox_dir "$1" "$2")
+  [ -e "$dir" ] || return 1
+  [ -d "$dir" ] && [ -r "$dir" ] && [ -x "$dir" ] || return 2
   for f in "$dir"/*.msg; do
     [ -e "$f" ] || continue
     n=$(fm_task_inbox_seq_of "${f##*/}") || continue
@@ -391,10 +399,14 @@ fm_task_inbox_oldest_unhandled() {  # <state-dir> <task-id>
 # An empty inbox also resets the ladder bookkeeping so the next message starts
 # a fresh ladder.
 fm_task_inbox_due_action() {  # <state-dir> <task-id>
-  local dir oldest base now grace max ladder rec_base count last
+  local dir oldest base now grace max ladder rec_base count last oldest_rc
   dir=$(fm_task_inbox_dir "$1" "$2")
-  if ! oldest=$(fm_task_inbox_oldest_unhandled "$1" "$2"); then
-    rm -f "$dir/.ring-state" "$dir/.escalated" 2>/dev/null || true
+  if oldest=$(fm_task_inbox_oldest_unhandled "$1" "$2"); then
+    :
+  else
+    oldest_rc=$?
+    [ "$oldest_rc" -eq 1 ] || return "$oldest_rc"
+    rm -f "$dir/.ring-state" "$dir/.escalated" "$dir/.recovery-attempts" 2>/dev/null || true
     printf 'quiet'
     return 0
   fi
@@ -475,4 +487,23 @@ fm_task_inbox_record_escalated() {  # <state-dir> <task-id> <record-path>
     [ -d "$dir" ] || return 0
     return 1
   fi
+}
+
+# Reset the re-ring ladder for a task whose worker was just replaced by stall
+# auto-recovery's missing-endpoint relaunch: the new incarnation gets the full
+# grace-and-retry budget for the still-unhandled record instead of inheriting
+# the wedged worker's spent budget and escalation marker. The
+# .recovery-attempts bound is deliberately NOT cleared here - it is the
+# per-record retry cap and resets only when the inbox empties
+# (fm_task_inbox_due_action). Returns non-zero when the ladder files could not
+# be cleared while the inbox still holds records, so the caller escalates
+# rather than reporting a pending relaunch with lost retry bookkeeping.
+fm_task_inbox_ladder_reset() {  # <state-dir> <task-id>
+  local dir
+  dir=$(fm_task_inbox_dir "$1" "$2")
+  [ -d "$dir" ] || return 0
+  rm -f "$dir/.ring-state" "$dir/.escalated" 2>/dev/null || {
+    [ -d "$dir" ] || return 0
+    return 1
+  }
 }

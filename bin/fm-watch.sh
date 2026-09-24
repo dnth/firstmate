@@ -51,6 +51,11 @@
 #                          demand-deep-inspection marker, for human inspection
 #                          only - never an automatic interrupt, signal, or restart
 #                          of the worker or its tool process.
+#                          The separate steering-inbox path invokes
+#                          fm-stall-recovery.sh before publishing its stale wake;
+#                          that helper owns its custody-checked, bounded relaunch
+#                          exception for a positively missing endpoint only - a
+#                          live worker is never interrupted and escalates here.
 #                          An idle secondmate that is neither paused nor captain-held
 #                          is also absorbed while its home watcher beacon is fresh
 #                          within the wedge threshold; missing, stale, future-dated,
@@ -335,18 +340,34 @@ window_label() {
   [ -n "$task" ] && printf 'fm-%s' "$task"
 }
 
+inbox_steer_inbox_error() {  # <window> <task>
+  local w=$1 task=$2 reason
+  reason="stale: $w (the steering inbox for $task is unreadable; durable instructions cannot be verified, so inspect the inbox)"
+  fm_wake_append stale "$w" "$reason" || exit 1
+  wake "$reason"
+}
+
 # Surface one stale wake for an unhandled steer whose endpoint is positively
 # dead or missing: the doorbell was never typed, so the record goes straight to
 # recovery instead of walking the re-ring ladder. The marker write happens after
 # the durable queue append, so a crash between them can only produce a rare
 # duplicate, never a lost wake.
 inbox_steer_escalate_unavailable() {  # <window> <task> <record>
-  local w=$1 task=$2 rec=$3 reason
+  local w=$1 task=$2 rec=$3 reason rc
   reason="stale: $w (unread firstmate instruction: $rec is unhandled and the worker's agent has exited or its endpoint is missing, so the doorbell was not typed; recover the worker)"
   if [ ! -d "${rec%/*}" ] || [ ! -f "$rec" ]; then
-    fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
+    if fm_task_inbox_due_action "$STATE" "$task" >/dev/null; then
+      :
+    else
+      rc=$?
+      [ "$rc" -eq 2 ] && inbox_steer_inbox_error "$w" "$task"
+    fi
     return 0
   fi
+  if inbox_steer_attempt_recovery "$w" "$task" "$rec" "endpoint-unavailable"; then
+    return 0
+  fi
+  [ -z "$INBOX_RECOVERY_DETAIL" ] || reason="$reason [auto-recovery: $INBOX_RECOVERY_DETAIL]"
   fm_wake_append stale "$w" "$reason" || exit 1
   if ! fm_task_inbox_record_escalated "$STATE" "$task" "$rec"; then
     echo "error: stale wake was queued for $task but its inbox escalation marker could not be written" >&2
@@ -355,10 +376,51 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
   wake "$reason"
 }
 
+# Custody-checked bounded auto-recovery for a stalled worker, owned by
+# bin/fm-stall-recovery.sh. Runs BEFORE the stale wake is published: a
+# deferred verdict (record handled meanwhile, or a missing-endpoint relaunch
+# just published with the episode still pending) suppresses the escalation
+# entirely, while an escalate verdict - including a live endpoint, any helper
+# failure, or a missing verdict - keeps the ordinary stale wake with the
+# helper's reason appended. Returns 0 when the wake is suppressed, 1 when the
+# caller should escalate.
+FM_STALL_RECOVERY_BIN="${FM_STALL_RECOVERY_BIN:-$SCRIPT_DIR/fm-stall-recovery.sh}"
+INBOX_RECOVERY_DETAIL=
+inbox_steer_attempt_recovery() {  # <window> <task> <record> <trigger>
+  local task=$2 record=$3 trigger=$4 out rc=0
+  INBOX_RECOVERY_DETAIL=
+  [ -x "$FM_STALL_RECOVERY_BIN" ] || { INBOX_RECOVERY_DETAIL="recovery helper missing"; return 1; }
+  out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    "$FM_STALL_RECOVERY_BIN" "$task" "$record" "$trigger" 2>/dev/null) || rc=$?
+  case "$out" in
+    verdict=recovered*|verdict=deferred*)
+      INBOX_RECOVERY_DETAIL=${out#*detail=}
+      triage_log "steer-inbox stall recovery: $task ${record##*/} $out"
+      return 0
+      ;;
+    verdict=escalate*)
+      INBOX_RECOVERY_DETAIL=${out#*detail=}
+      triage_log "steer-inbox stall recovery escalates: $task ${record##*/} $out"
+      return 1
+      ;;
+    *)
+      INBOX_RECOVERY_DETAIL="recovery helper returned no verdict (rc=$rc)"
+      triage_log "steer-inbox stall recovery failed: $task ${record##*/} rc=$rc out=${out:-none}"
+      return 1
+      ;;
+  esac
+}
+
 inbox_steer_check() {  # <window> <task>
-  local window=$1 task=$2 action verb record count tail40 reason ring_rc
+  local window=$1 task=$2 action verb record count tail40 reason ring_rc rc
   local meta backend label harness omp_runtime omp_bin agent_state
-  action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0
+  if action=$(fm_task_inbox_due_action "$STATE" "$task" 2>/dev/null); then
+    :
+  else
+    rc=$?
+    [ "$rc" -eq 2 ] && inbox_steer_inbox_error "$window" "$task"
+    return 0
+  fi
   verb=${action%% *}
   [ "$verb" != quiet ] || return 0
   record=${action#* }
@@ -394,7 +456,12 @@ inbox_steer_check() {  # <window> <task>
       fi
       if ! fm_task_inbox_record_ring "$STATE" "$task" "$record"; then
         if [ ! -f "$record" ]; then
-          fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
+          if fm_task_inbox_due_action "$STATE" "$task" >/dev/null; then
+            :
+          else
+            rc=$?
+            [ "$rc" -eq 2 ] && inbox_steer_inbox_error "$window" "$task"
+          fi
           return 0
         fi
         if [ -d "${record%/*}" ]; then
@@ -408,9 +475,18 @@ inbox_steer_check() {  # <window> <task>
     escalate)
       reason="stale: $window (unread firstmate instruction: $record still unhandled after $count doorbell delivery attempts with an idle pane; inspect the worker)"
       if [ ! -d "${record%/*}" ] || [ ! -f "$record" ]; then
-        fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
+        if fm_task_inbox_due_action "$STATE" "$task" >/dev/null; then
+          :
+        else
+          rc=$?
+          [ "$rc" -eq 2 ] && inbox_steer_inbox_error "$window" "$task"
+        fi
         return 0
       fi
+      if inbox_steer_attempt_recovery "$window" "$task" "$record" "ladder-exhausted"; then
+        return 0
+      fi
+      [ -z "$INBOX_RECOVERY_DETAIL" ] || reason="$reason [auto-recovery: $INBOX_RECOVERY_DETAIL]"
       fm_wake_append stale "$window" "$reason" || exit 1
       if ! fm_task_inbox_record_escalated "$STATE" "$task" "$record"; then
         echo "error: stale wake was queued for $task but its inbox escalation marker could not be written" >&2
