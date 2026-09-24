@@ -4874,6 +4874,13 @@ if [ "$KIND" = secondmate ]; then
   # Reuse the single frozen decision from the carrier resolution above so the
   # injected carrier and this on/off snapshot are guaranteed to agree.
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
+else
+  # Defense in depth for ordinary workers: an inherited FM_*_OVERRIDE set would
+  # let worker-resident code (e.g. project extensions discovered by ambient
+  # OMP loading) resolve the PRIMARY's operational directories and consent
+  # files instead of the worker's own. Workers resolve their home from
+  # FM_HOME, which stays inherited; only the override knobs are cleared.
+  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= $LAUNCH"
 fi
 # tmux-like backends configure the persistent pane shell before launch. Herdr
 # instead binds both values to the one atomic `pane run` command: acceptance of

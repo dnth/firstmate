@@ -286,10 +286,17 @@ export function snapshot(ctx: ExtensionContext, secrets: readonly (string | unde
     summary = clip(s.text, 1500).text;
     redacted ||= s.redacted;
   }
-  for (const m of selectedMessages) {
+  // Tool-call provenance is derived from the WHOLE active branch, not just the
+  // transmitted window: a tool result inside the 64-message cap whose
+  // initiating call fell outside it must still resolve its path so the
+  // sensitive-file exclusion below can fire. Only the conversation content
+  // selected for transmission is capped; the id->path map is metadata.
+  for (const m of messages) {
     if (m.role === "assistant" && m.toolCalls)
       for (const c of m.toolCalls)
         if (typeof c.path === "string") paths.set(c.id, { path: c.path, name: c.name });
+  }
+  for (const m of selectedMessages) {
     if (m.role === "toolResult" && m.toolCallId) {
       const p = paths.get(m.toolCallId);
       if (p && !m.isError && ["write", "edit"].includes(p.name) && !sensitivePath.test(p.path)) {

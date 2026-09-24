@@ -12,23 +12,41 @@ ENTRY="$ROOT/.omp/extensions/fm-compact-adviser-omp.ts"
 
 # A fixture "primary" home: plain git checkout (git-dir == git-common-dir) with
 # AGENTS.md, bin/, and a real state dir, so fm_primary_scope_matches accepts it.
+# The REAL scope libraries and a REAL copy of the extension tree are installed
+# so entrypoint tests exercise the actual gate chain, not a stubbed shell.
 PRIMARY_FIXTURE="$TMP_ROOT/primary-home"
 mkdir -p "$PRIMARY_FIXTURE/bin" "$PRIMARY_FIXTURE/state" "$PRIMARY_FIXTURE/config"
 echo "# fixture" > "$PRIMARY_FIXTURE/AGENTS.md"
 git -C "$PRIMARY_FIXTURE" init -q
 
+install_scope_libs() {  # <fixture-home>
+  cp "$ROOT/bin/fm-gate-refuse-lib.sh" "$ROOT/bin/fm-primary-scope-lib.sh" "$1/bin/"
+}
+install_extension() {  # <fixture-home>
+  mkdir -p "$1/.omp/extensions/lib"
+  cp "$ENTRY" "$1/.omp/extensions/"
+  cp -R "$LIB" "$1/.omp/extensions/lib/"
+}
+install_scope_libs "$PRIMARY_FIXTURE"
+install_extension "$PRIMARY_FIXTURE"
+
 SECONDMATE_FIXTURE="$TMP_ROOT/secondmate-home"
 mkdir -p "$SECONDMATE_FIXTURE/bin" "$SECONDMATE_FIXTURE/state" "$SECONDMATE_FIXTURE/config"
 echo "mate-1" > "$SECONDMATE_FIXTURE/.fm-secondmate-home"
 echo "# fixture" > "$SECONDMATE_FIXTURE/AGENTS.md"
+install_scope_libs "$SECONDMATE_FIXTURE"
+install_extension "$SECONDMATE_FIXTURE"
 
 # A fixture "worker" home: a linked worktree of the fixture repo, so
-# git-dir != git-common-dir and the scope predicate refuses it.
+# git-dir != git-common-dir and the module-root check refuses it even when
+# inherited overrides point at the primary.
 git -C "$PRIMARY_FIXTURE" -c user.email=t@t -c user.name=t commit -qm init --allow-empty
 git -C "$PRIMARY_FIXTURE" worktree add -q "$TMP_ROOT/worker-home" 2>/dev/null
 mkdir -p "$TMP_ROOT/worker-home/state" "$TMP_ROOT/worker-home/config"
 cp "$PRIMARY_FIXTURE/AGENTS.md" "$TMP_ROOT/worker-home/AGENTS.md"
 mkdir -p "$TMP_ROOT/worker-home/bin"
+install_scope_libs "$TMP_ROOT/worker-home"
+install_extension "$TMP_ROOT/worker-home"
 
 run_node() {
   FM_LIB="$LIB" FM_ENTRY="$ENTRY" \
@@ -154,75 +172,151 @@ async function flush() {
 }
 
 // ---------------------------------------------------------------- AC1: inert by default
+// Entrypoint tests run against the fixture copies of the extension so the
+// module root is a real plain checkout / linked worktree / secondmate home
+// regardless of where this suite itself executes (the repo under test may be
+// a linked worktree during validation).
+const PRIMARY_ENTRY = `${PRIMARY}/.omp/extensions/fm-compact-adviser-omp.ts`;
+const WORKER_ENTRY = `${WORKER}/.omp/extensions/fm-compact-adviser-omp.ts`;
+const SECONDMATE_ENTRY = `${SECONDMATE}/.omp/extensions/fm-compact-adviser-omp.ts`;
+const EXPECTED_EVENTS = ["agent_end", "turn_end", "session_start", "session_switch",
+  "session_before_switch", "session_compact", "session_before_compact",
+  "session_shutdown", "input", "before_agent_start", "session_branch",
+  "session_before_branch", "session_tree", "session_before_tree"];
+
+// Deterministic environment for entrypoint tests: clear every knob the
+// entrypoint consults, then apply the case's overrides.
+const ENTRY_ENV_KEYS = [
+  "FM_ROOT_OVERRIDE", "FM_STATE_OVERRIDE", "FM_CONFIG_OVERRIDE", "FM_HOME",
+  "FM_DATA_OVERRIDE", "FM_PROJECTS_OVERRIDE", "COMPACT_ADVISER_DISABLE",
+  "FM_OMP_HARNESS", "FM_OMP_TASK_INBOX_DIR", "FM_OMP_TASK_TURN_STARTED",
+  "FM_OMP_SESSION_POINTER", "NO_MISTAKES_GATE", "FM_GATE_REFUSE_BYPASS",
+];
+async function withEntryEnv(overrides, fn) {
+  const saved = {};
+  for (const k of ENTRY_ENV_KEYS) { saved[k] = process.env[k]; delete process.env[k]; }
+  Object.assign(process.env, overrides);
+  try { return await fn(); }
+  finally {
+    for (const k of ENTRY_ENV_KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  }
+}
+// The entrypoint captures FM_* constants at module evaluation, so the import
+// itself must run inside the scoped environment - not just mod.default(pi).
+async function runEntry(entry, tag, overrides, pi) {
+  await withEntryEnv(overrides, async () => {
+    const mod = await import(`${entry}?t=${Date.now()}-${tag}`);
+    mod.default(pi);
+  });
+}
+
+{
+  // Positive control FIRST: a genuine opted-in primary activates through the
+  // real entrypoint and real scope libraries, so the inert assertions below
+  // cannot pass vacuously.
+  writeConfig(`${PRIMARY}/config`, { mode: "hint", minContextTokens: 40000, logRequests: false });
+  const pi = fakePi();
+  await runEntry(PRIMARY_ENTRY, "primary-on", {
+    FM_ROOT_OVERRIDE: PRIMARY,
+    FM_STATE_OVERRIDE: `${PRIMARY}/state`,
+    FM_CONFIG_OVERRIDE: `${PRIMARY}/config`,
+  }, pi);
+  for (const ev of EXPECTED_EVENTS) assert.ok(pi.handlers.has(ev), `primary opt-in missing handler: ${ev}`);
+  assert.equal(pi.handlers.size, EXPECTED_EVENTS.length, "primary opt-in registers the full handler set");
+}
 {
   // No opt-in file: entry registers nothing even in a primary scope.
   const pi = fakePi();
-  const prevRoot = process.env.FM_ROOT_OVERRIDE;
-  const prevState = process.env.FM_STATE_OVERRIDE;
-  const prevConfig = process.env.FM_CONFIG_OVERRIDE;
-  process.env.FM_ROOT_OVERRIDE = PRIMARY;
-  process.env.FM_STATE_OVERRIDE = `${PRIMARY}/state`;
-  process.env.FM_CONFIG_OVERRIDE = `${TMP}/no-config-here`;
-  delete process.env.COMPACT_ADVISER_DISABLE;
-  const mod = await import(`${ENTRY}?t=${Date.now()}`);
-  mod.default(pi);
+  await runEntry(PRIMARY_ENTRY, "no-consent", {
+    FM_ROOT_OVERRIDE: PRIMARY,
+    FM_STATE_OVERRIDE: `${PRIMARY}/state`,
+    FM_CONFIG_OVERRIDE: `${TMP}/no-config-here`,
+  }, pi);
   assert.equal(pi.handlers.size, 0, "no handlers without opt-in config");
   assert.equal(pi.commands.size, 0, "no command without opt-in config");
-  process.env.FM_ROOT_OVERRIDE = prevRoot;
-  process.env.FM_STATE_OVERRIDE = prevState;
-  process.env.FM_CONFIG_OVERRIDE = prevConfig;
 }
 {
-  // Worker scope (linked worktree): even with config present, nothing registers.
+  // Worker scope (linked worktree module root): even with its own config
+  // present, nothing registers.
   writeConfig(`${WORKER}/config`, { mode: "hint", minContextTokens: 40000, logRequests: false });
   const pi = fakePi();
-  const prevRoot = process.env.FM_ROOT_OVERRIDE;
-  const prevState = process.env.FM_STATE_OVERRIDE;
-  const prevConfig = process.env.FM_CONFIG_OVERRIDE;
-  process.env.FM_ROOT_OVERRIDE = WORKER;
-  process.env.FM_STATE_OVERRIDE = `${WORKER}/state`;
-  process.env.FM_CONFIG_OVERRIDE = `${WORKER}/config`;
-  const mod = await import(`${ENTRY}?t=${Date.now()}-w`);
-  mod.default(pi);
+  await runEntry(WORKER_ENTRY, "worker-own", {
+    FM_ROOT_OVERRIDE: WORKER,
+    FM_STATE_OVERRIDE: `${WORKER}/state`,
+    FM_CONFIG_OVERRIDE: `${WORKER}/config`,
+  }, pi);
   assert.equal(pi.handlers.size, 0, "worker session must never activate the adviser");
-  process.env.FM_ROOT_OVERRIDE = prevRoot;
-  process.env.FM_STATE_OVERRIDE = prevState;
-  process.env.FM_CONFIG_OVERRIDE = prevConfig;
+}
+{
+  // F1 regression: a worker that INHERITS the primary's overrides must still
+  // be inert - the linked module root is rejected before overrides apply.
+  const pi = fakePi();
+  await runEntry(WORKER_ENTRY, "worker-inherited", {
+    FM_ROOT_OVERRIDE: PRIMARY,
+    FM_STATE_OVERRIDE: `${PRIMARY}/state`,
+    FM_CONFIG_OVERRIDE: `${PRIMARY}/config`,
+  }, pi);
+  assert.equal(pi.handlers.size, 0,
+    "inherited primary overrides must not activate a worker's adviser");
+}
+{
+  // Explicit spawned-worker identity: FM_OMP_HARNESS=omp (stamped at every
+  // worker/secondmate launch) refuses even on a primary module root.
+  const pi = fakePi();
+  await runEntry(PRIMARY_ENTRY, "worker-marker", {
+    FM_OMP_HARNESS: "omp",
+    FM_ROOT_OVERRIDE: PRIMARY,
+    FM_STATE_OVERRIDE: `${PRIMARY}/state`,
+    FM_CONFIG_OVERRIDE: `${PRIMARY}/config`,
+  }, pi);
+  assert.equal(pi.handlers.size, 0, "FM_OMP_HARNESS=omp identity must refuse");
+}
+{
+  // Task-marker variant of explicit worker identity.
+  const pi = fakePi();
+  await runEntry(PRIMARY_ENTRY, "worker-task-marker", {
+    FM_OMP_TASK_INBOX_DIR: `${TMP}/task.inbox`,
+    FM_ROOT_OVERRIDE: PRIMARY,
+    FM_STATE_OVERRIDE: `${PRIMARY}/state`,
+    FM_CONFIG_OVERRIDE: `${PRIMARY}/config`,
+  }, pi);
+  assert.equal(pi.handlers.size, 0, "FM_OMP_TASK_INBOX_DIR identity must refuse");
+}
+{
+  // Gate agent: NO_MISTAKES_GATE refuses through the real gate-refuse lib.
+  const pi = fakePi();
+  await runEntry(PRIMARY_ENTRY, "gate-agent", {
+    NO_MISTAKES_GATE: "1",
+    FM_ROOT_OVERRIDE: PRIMARY,
+    FM_STATE_OVERRIDE: `${PRIMARY}/state`,
+    FM_CONFIG_OVERRIDE: `${PRIMARY}/config`,
+  }, pi);
+  assert.equal(pi.handlers.size, 0, "gate agent must never activate the adviser");
 }
 {
   // COMPACT_ADVISER_DISABLE wins over everything.
-  writeConfig(`${PRIMARY}/config`, { mode: "hint", minContextTokens: 40000, logRequests: false });
   const pi = fakePi();
-  const prevRoot = process.env.FM_ROOT_OVERRIDE;
-  const prevState = process.env.FM_STATE_OVERRIDE;
-  const prevConfig = process.env.FM_CONFIG_OVERRIDE;
-  process.env.FM_ROOT_OVERRIDE = PRIMARY;
-  process.env.FM_STATE_OVERRIDE = `${PRIMARY}/state`;
-  process.env.FM_CONFIG_OVERRIDE = `${PRIMARY}/config`;
-  process.env.COMPACT_ADVISER_DISABLE = " yes ";
-  const mod = await import(`${ENTRY}?t=${Date.now()}-d`);
-  mod.default(pi);
+  await runEntry(PRIMARY_ENTRY, "disabled", {
+    COMPACT_ADVISER_DISABLE: " yes ",
+    FM_ROOT_OVERRIDE: PRIMARY,
+    FM_STATE_OVERRIDE: `${PRIMARY}/state`,
+    FM_CONFIG_OVERRIDE: `${PRIMARY}/config`,
+  }, pi);
   assert.equal(pi.handlers.size, 0, "disable env must make the adapter inert");
-  delete process.env.COMPACT_ADVISER_DISABLE;
-  process.env.FM_ROOT_OVERRIDE = prevRoot;
-  process.env.FM_STATE_OVERRIDE = prevState;
-  process.env.FM_CONFIG_OVERRIDE = prevConfig;
 }
 {
+  // Secondmate module root: refused by the marker check before overrides.
   writeConfig(`${SECONDMATE}/config`, { mode: "hint", minContextTokens: 40000, logRequests: false });
   const pi = fakePi();
-  const prevRoot = process.env.FM_ROOT_OVERRIDE;
-  const prevState = process.env.FM_STATE_OVERRIDE;
-  const prevConfig = process.env.FM_CONFIG_OVERRIDE;
-  process.env.FM_ROOT_OVERRIDE = SECONDMATE;
-  process.env.FM_STATE_OVERRIDE = `${SECONDMATE}/state`;
-  process.env.FM_CONFIG_OVERRIDE = `${SECONDMATE}/config`;
-  const mod = await import(`${ENTRY}?t=${Date.now()}-sm`);
-  mod.default(pi);
+  await runEntry(SECONDMATE_ENTRY, "secondmate", {
+    FM_ROOT_OVERRIDE: SECONDMATE,
+    FM_STATE_OVERRIDE: `${SECONDMATE}/state`,
+    FM_CONFIG_OVERRIDE: `${SECONDMATE}/config`,
+  }, pi);
   assert.equal(pi.handlers.size, 0, "secondmate sessions must never activate the adviser");
-  process.env.FM_ROOT_OVERRIDE = prevRoot;
-  process.env.FM_STATE_OVERRIDE = prevState;
-  process.env.FM_CONFIG_OVERRIDE = prevConfig;
 }
 assert.equal(disabledByEnv("1"), true);
 assert.equal(disabledByEnv(" TRUE "), true);
@@ -494,6 +588,25 @@ console.log("AC1 inert-by-default gates: ok");
   const preservedSummary = snapshot(fakeCtx({ branch: summaryAndMessages }), []);
   assert.equal(preservedSummary.state.previousSummary, "retain this summary",
     "latest summary survives the message cap");
+  // F4 regression: a sensitive tool RESULT inside the 64-message window whose
+  // initiating CALL fell outside it must still be excluded - provenance is
+  // derived from the whole branch, not the transmitted window.
+  const crossingBranch = [
+    msgEntry("call", {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "sensitive", name: "read", arguments: { path: ".env" } }],
+      api: "a", provider: "p", model: "m", usage: {}, stopReason: "toolUse", timestamp: 2,
+    }),
+    ...Array.from({ length: 63 }, (_, i) => msgEntry(`middle-${i}`, assistantMsg("ok"))),
+    msgEntry("result", toolResultMsg("INTERNAL_DATABASE_URL=postgres://alice:swordfish@private/db", "sensitive")),
+  ];
+  const crossing = snapshot(fakeCtx({ branch: crossingBranch }), []);
+  const crossingText = JSON.stringify(crossing.state);
+  assert.ok(!crossingText.includes("swordfish"),
+    "sensitive result must be excluded even when its call is outside the window");
+  assert.ok(crossingText.includes("[Sensitive file content excluded]"),
+    "excluded result keeps the redaction marker");
+  assert.equal(crossing.state.coverage.redacted, true);
   console.log("snapshot budgets/privacy: ok");
 }
 
