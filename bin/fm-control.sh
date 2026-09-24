@@ -856,6 +856,15 @@ do_relaunch() {
   local exit_result state note_line stall_oldest
   local -a spawn_args
 
+  stall_relaunch_absence_guard() {
+    [ -n "$STALL_RECORD" ] || return 0
+    state=$(agent_state)
+    case "$state" in
+      dead|missing) ;;
+      *) die "supervised relaunch refused: endpoint state '$state' is not positively absent" ;;
+    esac
+  }
+
   require_state_verified_backend relaunch
   resolve_relaunch_profile
 
@@ -914,12 +923,9 @@ do_relaunch() {
     fi
   fi
 
-  state=$(agent_state)
-  if [ -n "$STALL_RECORD" ] && [ "$state" != missing ]; then
-    die "supervised relaunch refused: endpoint state '$state' is not positively absent"
-  fi
+  stall_relaunch_absence_guard
   journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
-  if [ "$state" = missing ]; then
+  if [ "$state" = dead ] || [ "$state" = missing ]; then
     # The recorded endpoint is authoritatively absent, so there is no agent to
     # stop: the exit phase is already complete and the launch below recreates
     # the endpoint in the checkpointed worktree. Only a proven-missing endpoint
@@ -941,6 +947,7 @@ do_relaunch() {
   # before arming the new one, so nothing to do here.
   RELAUNCH_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
   journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" "relaunch_tx=$RELAUNCH_TX"
+  stall_relaunch_absence_guard
   if [ "$KIND" = secondmate ] && [ "$PRIOR_HARNESS" = omp ]; then
     spawn_args=("$ID" --secondmate --harness "$TARGET_HARNESS")
   else
