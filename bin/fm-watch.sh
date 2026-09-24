@@ -51,6 +51,10 @@
 #                          demand-deep-inspection marker, for human inspection
 #                          only - never an automatic interrupt, signal, or restart
 #                          of the worker or its tool process.
+#                          The separate steering-inbox path invokes
+#                          fm-stall-recovery.sh before publishing its stale wake;
+#                          that helper owns its custody-checked, bounded relaunch
+#                          exception.
 #                          An idle secondmate that is neither paused nor captain-held
 #                          is also absorbed while its home watcher beacon is fresh
 #                          within the wedge threshold; missing, stale, future-dated,

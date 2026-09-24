@@ -65,11 +65,12 @@
 # Re-ring ladder (fm_task_inbox_due_action): an unhandled message older than
 # FM_TASK_INBOX_GRACE_SECS is due one delivery attempt per grace period; an
 # attempt may ring or be skipped to protect proven pending composer text. After
-# FM_TASK_INBOX_RING_MAX attempts without an acknowledgement it escalates. The
-# caller owns the busy and recovery-grade endpoint checks: a busy pane waits,
-# while a positively dead or missing endpoint skips delivery and the ladder and
-# escalates directly. This library owns only the schedule and escalation
-# marker. If attempt bookkeeping cannot be persisted while the record
+# FM_TASK_INBOX_RING_MAX attempts without an acknowledgement it becomes due
+# for the caller's custody-checked stall-recovery helper before any stale wake
+# is published. The caller owns the busy and recovery-grade endpoint checks:
+# a busy pane waits, while a positively dead or missing endpoint skips delivery
+# and the ladder and enters that same helper. This library owns only the
+# schedule and escalation marker. If attempt bookkeeping cannot be persisted while the record
 # remains unhandled, the caller surfaces that failure instead of retrying
 # silently; a concurrently removed inbox is a quiet no-op. Escalation
 # deliberately queues the wake before writing the
