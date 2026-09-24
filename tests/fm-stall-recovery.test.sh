@@ -329,13 +329,15 @@ exit "${FM_FAKE_CONTROL_RC:-0}"
 SH
   chmod +x "$fb/fm-control.sh"
 
-  # git forwards to the real binary, with two test hooks on the first
+  # git forwards to the real binary, with three test hooks on the first
   # `git -C <wt> status --porcelain` inside fm-control's safe_checkpoint:
   # FM_FAKE_GIT_MOVE names an inbox record moved to handled/, simulating a
   # worker that acknowledges the instruction in the gap between the caller's
   # pre-invocation check and fm-control's in-lock re-check; FM_FAKE_GIT_BUSY
   # names a busy-state file overwritten with a valid busy record, simulating
-  # a worker that starts a turn on the instruction during the checkpoint.
+  # a worker that starts a turn on the instruction during the checkpoint;
+  # FM_FAKE_GIT_RM names a file deleted outright, simulating the busy-state
+  # record becoming unavailable mid-checkpoint.
   cat > "$fb/git" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -347,6 +349,9 @@ if [ "${1:-}" = "-C" ] && [ "${3:-}" = "status" ]; then
   if [ -n "${FM_FAKE_GIT_BUSY:-}" ]; then
     printf 'v1 gen=gentest seq=3 state=busy source=omp-ext event=turn-start ts=1\n' \
       > "$FM_FAKE_GIT_BUSY"
+  fi
+  if [ -n "${FM_FAKE_GIT_RM:-}" ]; then
+    rm -f "$FM_FAKE_GIT_RM"
   fi
 fi
 exec /usr/bin/git "$@"
@@ -1093,6 +1098,68 @@ test_malformed_attempt_marker_escalates() {
   pass "corrupt attempt marker: recovery escalates without a lifecycle action"
 }
 
+# A marker whose canonical line is followed by an unterminated suffix is
+# corrupt: the byte count exceeds one newline-terminated record, so recovery
+# escalates rather than parsing only the valid prefix and resetting the count.
+test_unterminated_marker_suffix_escalates() {
+  local rec id record
+  id=$(case_id marker-suffix)
+  rec=$(make_case marker-suffix "$id" pool)
+  read_case "$rec"
+  write_pool_state "$CASE_DIR" "$WT_DIR" "fm-$id"
+  write_slot_marker "$SLOT_DIR" "$id" "$HOME_DIR"
+  write_meta "$HOME_DIR/state/$id.meta" "$id" "$WT_DIR" "$PROJ_DIR"
+  create_prior_artifacts "$HOME_DIR/state" "$id"
+  write_inbox "$HOME_DIR/state" "$id" 001
+  write_inbox "$HOME_DIR/state" "$id" 002
+  printf '001.msg\t1\n' > "$HOME_DIR/state/$id.inbox/.recovery-attempts"
+  printf 'CORRUPT' >> "$HOME_DIR/state/$id.inbox/.recovery-attempts"
+  mv "$HOME_DIR/state/$id.inbox/001.msg" "$HOME_DIR/state/$id.inbox/handled/"
+  record="$HOME_DIR/state/$id.inbox/002.msg"
+  missing_window "$CASE_DIR" "$id"
+
+  run_recovery "$CASE_DIR" "$HOME_DIR" "$id" "$record" endpoint-unavailable
+  assert_contains "$RECOVERY_OUT" "verdict=escalate" "a marker with a trailing unterminated suffix did not escalate"
+  assert_contains "$RECOVERY_OUT" "malformed recovery-attempt marker" "the escalation did not name the corrupt marker"
+  assert_absent "$CASE_DIR/control.log" "the lifecycle verb ran against a corrupt attempt marker"
+  pass "unterminated marker suffix: recovery escalates instead of parsing the valid prefix"
+}
+
+# When the busy-state record becomes unavailable during the checkpoint, the
+# final gate can no longer prove custody: the supervised relaunch cancels
+# with escalation (not deferral), sends nothing to the agent, and restores
+# the worker's instructions byte-exact. The fake git deletes the busy-state
+# file inside fm-control's safe_checkpoint.
+test_unproven_custody_during_checkpoint_escalates() {
+  local rec id record
+  id=$(case_id custody-gone)
+  rec=$(make_case custody-gone "$id" pool)
+  read_case "$rec"
+  write_pool_state "$CASE_DIR" "$WT_DIR" "fm-$id"
+  write_slot_marker "$SLOT_DIR" "$id" "$HOME_DIR"
+  write_meta "$HOME_DIR/state/$id.meta" "$id" "$WT_DIR" "$PROJ_DIR"
+  create_prior_artifacts "$HOME_DIR/state" "$id"
+  write_inbox "$HOME_DIR/state" "$id" 001
+  record="$HOME_DIR/state/$id.inbox/001.msg"
+  write_busy "$HOME_DIR/state" "$id" idle
+  live_window "$CASE_DIR" "$id" bun
+  cp -p "$HOME_DIR/data/$id/brief.md" "$CASE_DIR/brief.orig"
+
+  FM_FAKE_GIT_RM="$HOME_DIR/state/$id.busy-state" \
+    FM_STALL_RECOVERY_CONTROL_BIN="$CONTROL" \
+    run_recovery "$CASE_DIR" "$HOME_DIR" "$id" "$record" ladder-exhausted
+  expect_code 0 "$RECOVERY_STATUS" "unproven-custody recovery should exit 0; got: $RECOVERY_OUT"
+  assert_contains "$RECOVERY_OUT" "verdict=escalate" "unproven custody during the checkpoint did not escalate"
+  assert_no_grep "Escape" "$CASE_DIR/fake/tmux.log" "an interrupt key was sent while custody was unproven"
+  assert_no_grep "/exit" "$CASE_DIR/fake/tmux.log" "an exit command was sent while custody was unproven"
+  assert_no_grep "new-window" "$CASE_DIR/fake/tmux.log" "the relaunch created a window while custody was unproven"
+  assert_grep "cancelled:custody-unproven" "$HOME_DIR/state/$id.control-relaunch" "the journal did not record the unproven-custody cancellation"
+  assert_present "$record" "the unhandled instruction record was moved or deleted"
+  cmp -s "$CASE_DIR/brief.orig" "$HOME_DIR/data/$id/brief.md" \
+    || fail "an unproven-custody cancellation left the worker's instructions modified"
+  pass "unproven custody during checkpoint: recovery escalates with no transport and restored instructions"
+}
+
 # --- run ---------------------------------------------------------------------
 
 test_missing_endpoint_recovers_via_control
@@ -1115,5 +1182,7 @@ test_omp_ext_serializes_busy_events
 test_busy_during_checkpoint_defers
 test_next_record_gets_own_attempt
 test_malformed_attempt_marker_escalates
+test_unterminated_marker_suffix_escalates
+test_unproven_custody_during_checkpoint_escalates
 
 pass "all stall-recovery tests"

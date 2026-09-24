@@ -257,12 +257,16 @@ attempts_record='' attempts_count=0
 if [ -e "$attempts_file" ] || [ -L "$attempts_file" ]; then
   [ -f "$attempts_file" ] && [ ! -L "$attempts_file" ] \
     || verdict escalate "recovery-attempt marker is not a regular file"
-  attempts_line_count=$(wc -l < "$attempts_file") \
-    || verdict escalate "cannot read the recovery-attempt bound at $attempts_file"
-  [ "$attempts_line_count" -eq 1 ] \
-    || verdict escalate "malformed recovery-attempt marker at $attempts_file"
+  # The marker is exactly one canonical newline-terminated record: the byte
+  # count must equal the first line's length plus its terminator, so a
+  # trailing unterminated suffix, a second line, or a missing terminator all
+  # fail closed rather than being silently normalized away by read.
   IFS= read -r attempts_content < "$attempts_file" \
     || verdict escalate "cannot read the recovery-attempt bound at $attempts_file"
+  attempts_bytes=$(wc -c < "$attempts_file") \
+    || verdict escalate "cannot read the recovery-attempt bound at $attempts_file"
+  [ "$attempts_bytes" -eq $(( ${#attempts_content} + 1 )) ] \
+    || verdict escalate "malformed recovery-attempt marker at $attempts_file"
   IFS=$(printf '\t') read -r attempts_record attempts_count attempts_extra \
     <<< "$attempts_content"
   # Structure is validated separately from record identity: a well-formed
@@ -300,8 +304,9 @@ fi
 # hands fm-control the record basename so it re-proves the instruction is
 # still the oldest unhandled record inside the lock, immediately before the
 # agent is touched - the check above cannot cover the gap to that point.
-# Exit 3 is fm-control's "record resolved; nothing to do" code and exit 4 its
-# "worker went busy during the relaunch; defer" code.
+# Exit 3 is fm-control's "record resolved; nothing to do" code, exit 4 its
+# "worker went busy during the relaunch; defer" code, and exit 5 its
+# "custody unproven; nothing was sent" code.
 FM_CONFIG_OVERRIDE=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
 control_out_file=$(mktemp "$STATE/.stall-recovery-control-out.XXXXXX" 2>/dev/null) \
   || verdict escalate "cannot allocate the fm-control output capture"
@@ -320,6 +325,7 @@ case "$control_rc" in
   0) ;;
   3) verdict recovered "record ${RECORD##*/} resolved inside the lifecycle lock before the relaunch; instruction handled" ;;
   4) verdict deferred "worker went busy inside the lifecycle lock before the relaunch; it is acting on ${RECORD##*/}, so the episode stays pending until the record is handled or the ladder re-escalates" ;;
+  5) verdict escalate "worker custody could not be proven inside the lifecycle lock before the relaunch; nothing was sent to the agent and the instruction stays unhandled" ;;
   *) verdict escalate "fm-control relaunch refused or failed: $(printf '%s' "$control_out" | tail -1)" ;;
 esac
 
