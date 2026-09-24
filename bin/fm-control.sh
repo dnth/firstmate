@@ -882,7 +882,11 @@ do_relaunch() {
     stall_oldest=$(fm_task_inbox_oldest_unhandled "$STATE" "$ID" 2>/dev/null || true)
     if [ -z "$stall_oldest" ] || [ "${stall_oldest##*/}" != "$STALL_RECORD" ]; then
       if [ -n "$RELAUNCH_BRIEF" ] && [ -f "$BRIEF_PRIOR" ]; then
-        cp -p "$BRIEF_PRIOR" "$RELAUNCH_BRIEF" 2>/dev/null || true
+        if ! cp -p "$BRIEF_PRIOR" "$RELAUNCH_BRIEF" 2>/dev/null; then
+          RELAUNCH_ACTIVE=0
+          journal_write "failed:record-resolved" "rollback=instructions-restore-failed" "${CHECKPOINT_LINES[@]}" "$note_line" || true
+          die "relaunch cancelled for resolved stall record, but restoring the original instructions failed"
+        fi
       fi
       journal_write "cancelled:record-resolved" "${CHECKPOINT_LINES[@]}" "$note_line" || true
       if [ -z "$stall_oldest" ]; then

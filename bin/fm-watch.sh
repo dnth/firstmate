@@ -373,7 +373,8 @@ inbox_steer_attempt_recovery() {  # <window> <task> <record> <trigger>
   local task=$2 record=$3 trigger=$4 out rc=0
   INBOX_RECOVERY_DETAIL=
   [ -x "$FM_STALL_RECOVERY_BIN" ] || { INBOX_RECOVERY_DETAIL="recovery helper missing"; return 1; }
-  out=$(FM_HOME="$FM_HOME" "$FM_STALL_RECOVERY_BIN" "$task" "$record" "$trigger" 2>/dev/null) || rc=$?
+  out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    "$FM_STALL_RECOVERY_BIN" "$task" "$record" "$trigger" 2>/dev/null) || rc=$?
   case "$out" in
     verdict=recovered*|verdict=deferred*)
       INBOX_RECOVERY_DETAIL=${out#*detail=}
