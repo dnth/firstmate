@@ -113,7 +113,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-classify-lib.sh`     | Shared wake and status-span classification, ship evidence gate, durable keyed-decision folds, status cursors, and unread informational status-line selection |
 | `fm-send.sh`             | Enqueue ordinary local task text durably, or type remote task text, slash commands, Codex dollar invocations, explicit targets, and keys through the recorded backend |
 | `fm-task-inbox-lib.sh`   | Own sequenced steering records, handled-file acknowledgement, the constant doorbell, and the watcher retry ladder |
-| `fm-stall-recovery.sh`   | Custody-checked bounded auto-recovery for a stalled worker before the watcher publishes a stale wake |
+| `fm-stall-recovery.sh`   | Custody-checked bounded auto-recovery before a stale wake: live endpoints escalate untouched, missing endpoints relaunch |
 | `fm-busy-lib.sh`         | Single owner of the semantic busy-state contract: verdicts, source attribution, and per-harness sources |
 | `fm-busy-event.sh`       | The only writer of a task's semantic busy-state record; arms an incarnation and applies lifecycle events |
 | `fm-tmux-lib.sh`         | Shared tmux pane primitives for composer capture, verified submit, and the submit-time busy check |
