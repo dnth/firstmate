@@ -875,18 +875,21 @@ do_relaunch() {
   # cover the gap to this point, so a record handled or superseded in flight
   # must still cancel the relaunch here. Exit 3 is the dedicated "instruction
   # resolved; nothing to do" code the supervised caller maps to recovered. The
-  # cancelled phase is journaled first so the rollback trap leaves this record
-  # rather than a misleading failed:noted.
+  # brief is restored byte-exact before the cancelled journal write so the
+  # rollback trap has nothing left to do and the worker's instructions stay
+  # untouched when no relaunch happened.
   if [ -n "$STALL_RECORD" ]; then
     stall_oldest=$(fm_task_inbox_oldest_unhandled "$STATE" "$ID" 2>/dev/null || true)
-    if [ -z "$stall_oldest" ]; then
+    if [ -z "$stall_oldest" ] || [ "${stall_oldest##*/}" != "$STALL_RECORD" ]; then
+      if [ -n "$RELAUNCH_BRIEF" ] && [ -f "$BRIEF_PRIOR" ]; then
+        cp -p "$BRIEF_PRIOR" "$RELAUNCH_BRIEF" 2>/dev/null || true
+      fi
       journal_write "cancelled:record-resolved" "${CHECKPOINT_LINES[@]}" "$note_line" || true
-      echo "relaunch cancelled: stall record resolved (inbox empty; instruction handled)" >&2
-      exit 3
-    fi
-    if [ "${stall_oldest##*/}" != "$STALL_RECORD" ]; then
-      journal_write "cancelled:record-resolved" "${CHECKPOINT_LINES[@]}" "$note_line" || true
-      echo "relaunch cancelled: stall record $STALL_RECORD handled or superseded (${stall_oldest##*/} is now oldest)" >&2
+      if [ -z "$stall_oldest" ]; then
+        echo "relaunch cancelled: stall record resolved (inbox empty; instruction handled)" >&2
+      else
+        echo "relaunch cancelled: stall record $STALL_RECORD handled or superseded (${stall_oldest##*/} is now oldest)" >&2
+      fi
       exit 3
     fi
   fi

@@ -962,10 +962,13 @@ SH
   esac
   pass "OMP extension serializes busy-state writes: turn-start busy lands after turn-end idle"
 }
+
 # A record handled in the gap between the caller's pre-invocation check and
 # fm-control's in-lock re-check must still cancel the relaunch: the fake git
 # moves the record to handled/ during safe_checkpoint, so fm-control's own
 # stall-record proof sees it resolved and exits 3 before the agent is touched.
+# The cancelled transaction must also leave the worker's instructions
+# byte-exact - no relaunch means no progress-note append survives.
 test_in_lock_handled_record_cancels_relaunch() {
   local rec id record
   id=$(case_id inlock-ack)
@@ -978,6 +981,7 @@ test_in_lock_handled_record_cancels_relaunch() {
   write_inbox "$HOME_DIR/state" "$id" 001
   record="$HOME_DIR/state/$id.inbox/001.msg"
   missing_window "$CASE_DIR" "$id"
+  cp -p "$HOME_DIR/data/$id/brief.md" "$CASE_DIR/brief.orig"
 
   FM_FAKE_GIT_MOVE="$record" FM_STALL_RECOVERY_CONTROL_BIN="$CONTROL" \
     run_recovery "$CASE_DIR" "$HOME_DIR" "$id" "$record" endpoint-unavailable
@@ -986,6 +990,8 @@ test_in_lock_handled_record_cancels_relaunch() {
   assert_no_grep "new-window" "$CASE_DIR/fake/tmux.log" "the relaunch created a window for a resolved record"
   assert_grep "cancelled:record-resolved" "$HOME_DIR/state/$id.control-relaunch" "the journal did not record the in-lock cancellation"
   assert_present "$HOME_DIR/state/$id.inbox/handled/001.msg" "the handled record is not in handled/"
+  cmp -s "$CASE_DIR/brief.orig" "$HOME_DIR/data/$id/brief.md" \
+    || fail "a cancelled relaunch left the worker's instructions modified"
   pass "in-lock handled record: fm-control cancels the relaunch before touching the agent"
 }
 
