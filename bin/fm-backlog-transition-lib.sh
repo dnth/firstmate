@@ -516,10 +516,18 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
 }
 
 fm_backlog_row_artifact_supported() {
-  local id=$1 flag=${2:-} value=${3:-}
+  local id=$1 flag=${2:-} value=${3:-} data=${4:-} data_relative
   case "$flag" in
     --pr) return 0 ;;
-    --report) [ "$value" = "data/$id/report.md" ] ;;
+    --report)
+      if [ -n "$data" ]; then
+        data_relative=$(fm_backlog_data_relative "$data") || return 1
+        [ "$data_relative" = . ] && data_relative=data
+      else
+        data_relative=data
+      fi
+      [ "$value" = "$data_relative/$id/report.md" ]
+      ;;
     *) return 1 ;;
   esac
 }
@@ -545,7 +553,7 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
     case "$previous_arg" in
       --report)
         deliverable="${deliverable:+$deliverable; }report $arg"
-        if fm_backlog_row_artifact_supported "$id" --report "$arg"; then
+        if fm_backlog_row_artifact_supported "$id" --report "$arg" "$data"; then
           row_args=(--report "$arg")
         fi
         ;;
