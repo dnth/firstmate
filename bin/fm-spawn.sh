@@ -1000,6 +1000,7 @@ SPAWN_POOL_LEASE_ABORT=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 TREEHOUSE_READY_DIR=
+DEVIN_CONFIG_PATH=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -1074,6 +1075,10 @@ spawn_omp_abort_clean_unchanged_worktree() {  # <context>
 
 spawn_abort_cleanup() {
   local status=$? meta
+  if [ -n "${DEVIN_CONFIG_PATH:-}" ]; then
+    rm -f -- "$DEVIN_CONFIG_PATH"
+    DEVIN_CONFIG_PATH=
+  fi
   case "$PREWALK_ABORT_PHASE" in
     lease)
       PREWALK_ABORT_PHASE=none
@@ -4526,6 +4531,7 @@ EOF
           echo "error: refusing Devin spawn because the per-worker Devin config could not be written" >&2
           exit 1
         }
+        DEVIN_CONFIG_PATH="$STATE_REAL/$ID.devin-config.json"
       fi
       "$FM_ROOT/bin/fm-devin-turnend-hook.sh" install "$WT" || {
         echo "error: refusing Devin spawn because the native project-local turn-end hook could not be installed safely" >&2
@@ -5169,4 +5175,5 @@ SPAWN_META_LOCK_HELD=0
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
+DEVIN_CONFIG_PATH=
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"
