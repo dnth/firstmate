@@ -380,10 +380,10 @@ axi_rows() {
 axi_list() {  # <state> [<extra-fields>]
   local state=$1 fields=${2:-}
   if [ -n "$fields" ]; then
-    FM_HOME="$FM_HOME" FM_DATA_OVERRIDE='' "$SCRIPT_DIR/fm-tasks-axi.sh" \
+    FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-tasks-axi.sh" \
       list --state "$state" --fields "$fields" 2>&1
   else
-    FM_HOME="$FM_HOME" FM_DATA_OVERRIDE='' "$SCRIPT_DIR/fm-tasks-axi.sh" \
+    FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-tasks-axi.sh" \
       list --state "$state" 2>&1
   fi
 }
@@ -412,7 +412,7 @@ run_emit() {
   [ -z "$reason" ] || fail "cannot project the todo: $reason"
 
   in_flight=$(axi_list in_flight) || fail "tasks-axi list --state in_flight failed: $in_flight"
-  ready=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE='' "$SCRIPT_DIR/fm-tasks-axi.sh" ready 2>&1) || fail "tasks-axi ready failed: $ready"
+  ready=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-tasks-axi.sh" ready 2>&1) || fail "tasks-axi ready failed: $ready"
   in_flight_rows=$(axi_rows tasks "$in_flight" items id title) \
     || fail "tasks-axi list --state in_flight returned an unrecognized listing"
   ready_rows=$(axi_rows ready "$ready" items id title) \
@@ -664,7 +664,7 @@ close_merged_board_item() {  # <id>
   if [ "$TASK_PR_PROVIDER" = github ]; then
     done_args+=(--pr "$TASK_PR_URL")
   fi
-  if ! FM_HOME="$FM_HOME" FM_DATA_OVERRIDE='' "$SCRIPT_DIR/fm-tasks-axi.sh" "${done_args[@]}" >/dev/null 2>&1; then
+  if ! FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-tasks-axi.sh" "${done_args[@]}" >/dev/null 2>&1; then
     printf 'DRIFT merged-pr-open: %s - teardown completed but the merged board item could not be closed\n' "$id"
     return 1
   fi
