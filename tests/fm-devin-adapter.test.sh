@@ -66,3 +66,34 @@ out=$(PATH="$fakebin:$PATH" FM_DEVIN_TEST_AGENT_STATUS="$agent_status" FM_STATE_
   "$ROOT/bin/fm-crew-state.sh" direct-state)
 case "$out" in 'state: done'*'source: status-log'*) ;; *) fail "finished Devin state was not done: $out" ;; esac
 pass "Devin native Stop hook publishes markers safely and crew-state reports working/done without unknown"
+
+# Per-worker Devin config (bin/fm-devin-config.sh): forced isolation settings,
+# preserved operator settings and hooks, embedded turn-end Stop hook, mode 600,
+# atomic output, and loud refusal on a malformed source.
+usercfg="$HOME/.config/devin/config.json"
+mkdir -p "$HOME/.config/devin"
+printf '%s\n' '{"model":"opus","read_config_from":{"claude":true,"other":true},"hooks":{"Stop":[{"matcher":"x","hooks":[{"type":"command","command":"user-hook","timeout":3}]}]}}' > "$usercfg"
+HOME="$HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" "$ROOT/bin/fm-devin-config.sh" "$state" "$id"
+workercfg="$state/$id.devin-config.json"
+[ -f "$workercfg" ] || fail "per-worker Devin config was not written"
+[ "$(stat -c %a "$workercfg")" = 600 ] || fail "per-worker Devin config is not mode 600"
+jq -e '
+  .attribution == false and
+  .read_config_from.claude == false and
+  .read_config_from.other == true and
+  .model == "opus" and
+  (.hooks.Stop | length == 2) and
+  (.hooks.Stop[0].hooks[0].command == "user-hook") and
+  (.hooks.Stop[1].hooks[0].command | test("fm-turn-end\\.sh"))
+' "$workercfg" >/dev/null || fail "per-worker Devin config lost user settings or missed the forced settings"
+jq -e '.model == "opus" and (.read_config_from.claude == true) and (.hooks.Stop | length == 1)' "$usercfg" >/dev/null \
+  || fail "per-worker Devin config write changed the operator's global config"
+printf '%s\n' 'not json' > "$usercfg"
+if HOME="$HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" "$ROOT/bin/fm-devin-config.sh" "$state" "$id" >/dev/null 2>&1; then
+  fail "per-worker Devin config accepted a malformed source config"
+fi
+rm -f "$usercfg"
+HOME="$HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" "$ROOT/bin/fm-devin-config.sh" "$state" "$id"
+jq -e '.attribution == false and .read_config_from.claude == false' "$workercfg" >/dev/null \
+  || fail "per-worker Devin config without a source lost the forced settings"
+pass "Devin per-worker config forces isolation settings, preserves operator config, and refuses malformed sources"

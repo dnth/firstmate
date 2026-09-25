@@ -3199,6 +3199,7 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.omp-started" "$STATE/$ID.omp-doorbell-ready" \
   "$STATE/$ID.omp-doorbell-failed" \
   "$STATE/$ID.grok-turnend-token" "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.devin-turnend-token" \
+  "$STATE/$ID.devin-config.json" \
   "$STATE/$ID.hermes-turnend-token" "$STATE/$ID.hermes-session" \
   "$STATE/$ID.hermes-started" \
   "$STATE/.$ID.open-decisions-cursor"
