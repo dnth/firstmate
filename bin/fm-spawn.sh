@@ -4513,23 +4513,25 @@ EOF
       exclude_path '.fm-grok-turnend'
       ;;
     devin)
-      "$FM_ROOT/bin/fm-devin-turnend-hook.sh" install "$WT" || {
-        echo "error: refusing Devin spawn because the native project-local turn-end hook could not be installed safely" >&2
-        exit 1
-      }
-      exclude_path '.devin/config.local.json'
       # Per-worker Devin config (bin/fm-devin-config.sh): written before the
       # agent starts, carried on the launch command via --config, and retired
       # by teardown. It forces read_config_from.claude=false so the worker
       # cannot inherit every Claude hook on the host, and attribution=false so
       # its commits carry no agent co-author trailer. A failed write refuses
-      # the launch rather than starting a polluting worker.
+      # the launch rather than starting a polluting worker. It runs before the
+      # hook install so a refused launch never abandons a leased worktree with
+      # the Firstmate hook left behind.
       if [ "$RAW_LAUNCH" -eq 0 ]; then
         "$FM_ROOT/bin/fm-devin-config.sh" "$STATE_REAL" "$ID" || {
           echo "error: refusing Devin spawn because the per-worker Devin config could not be written" >&2
           exit 1
         }
       fi
+      "$FM_ROOT/bin/fm-devin-turnend-hook.sh" install "$WT" || {
+        echo "error: refusing Devin spawn because the native project-local turn-end hook could not be installed safely" >&2
+        exit 1
+      }
+      exclude_path '.devin/config.local.json'
       DEVIN_AUTH_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/devin/fm-turn-end.d"
       mkdir -p -- "$DEVIN_AUTH_DIR"
       old_umask=$(umask); umask 077
