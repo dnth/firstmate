@@ -103,6 +103,7 @@ state/               volatile runtime signals; gitignored
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
   <id>.kimi-turnend-token   firstmate-owned Kimi hook registry token for the task; removed by teardown
   <id>.devin-turnend-token  firstmate-owned Devin hook registry token for the task; removed by teardown
+  <id>.devin-config.json  firstmate-owned per-worker Devin config written by bin/fm-devin-config.sh and passed via --config; removed by teardown
   <id>.hermes-turnend-token <id>.hermes-session <id>.hermes-started   firstmate-owned Hermes hook registry token plus the task's stable session id and per-turn start acknowledgement; removed by teardown
   <id>.omp-ext.ts <id>.omp-ready <id>.omp-started <id>.omp-doorbell-ready <id>.omp-doorbell-failed   firstmate-generated OMP task extension plus its session-start and first-turn acknowledgement markers; .omp-ready publishes only after the inbox doorbell activates, and a lost handshake journals its reason to .omp-doorbell-failed (docs/architecture.md; bin/fm-task-inbox-lib.sh); removed by teardown
   <id>.inbox/          durable steering inbox: sequenced firstmate instruction records the worker acknowledges by moving them into its handled/ subdirectory; written by fm-send, re-rung and escalated by the watcher, removed by teardown (bin/fm-task-inbox-lib.sh)

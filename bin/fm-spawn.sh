@@ -1471,7 +1471,7 @@ launch_template() {
     # /handoff in the launch command. Cloud Devin /handoff is a mid-task typed
     # command firstmate sends through fm-send on an explicit captain request
     # for a live devin crew - it is not a spawn flag (harness-adapters skill).
-    devin) printf '%s' 'devin --permission-mode dangerous __MODELFLAG____EFFORTFLAG__--prompt-file __BRIEF__' ;;
+    devin) printf '%s' 'devin --permission-mode dangerous --config __DEVINCONFIG__ __MODELFLAG____EFFORTFLAG__--prompt-file __BRIEF__' ;;
     # Hermes v0.20.0's modern TUI is launched bare and receives the brief only
     # after its structural composer-ready gate below. The CLI --reasoning flag
     # is retained for forward compatibility, while the same launch gate also
@@ -4518,6 +4518,18 @@ EOF
         exit 1
       }
       exclude_path '.devin/config.local.json'
+      # Per-worker Devin config (bin/fm-devin-config.sh): written before the
+      # agent starts, carried on the launch command via --config, and retired
+      # by teardown. It forces read_config_from.claude=false so the worker
+      # cannot inherit every Claude hook on the host, and attribution=false so
+      # its commits carry no agent co-author trailer. A failed write refuses
+      # the launch rather than starting a polluting worker.
+      if [ "$RAW_LAUNCH" -eq 0 ]; then
+        "$FM_ROOT/bin/fm-devin-config.sh" "$STATE_REAL" "$ID" || {
+          echo "error: refusing Devin spawn because the per-worker Devin config could not be written" >&2
+          exit 1
+        }
+      fi
       DEVIN_AUTH_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/devin/fm-turn-end.d"
       mkdir -p -- "$DEVIN_AUTH_DIR"
       old_umask=$(umask); umask 077
@@ -4805,6 +4817,7 @@ LAUNCH=${LAUNCH//__OMPRESUMEFLAG__/$OMPRESUMEFLAG}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
+LAUNCH=${LAUNCH//__DEVINCONFIG__/"$(shell_quote "$STATE_REAL/$ID.devin-config.json")"}
 LAUNCH=${LAUNCH//__HERMESWORKTREE__/$sq_hermes_worktree}
 LAUNCH=${LAUNCH//__HERMESRESUMEFLAG__/$HERMESRESUMEFLAG}
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
