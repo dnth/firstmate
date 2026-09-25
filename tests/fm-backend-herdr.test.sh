@@ -81,6 +81,102 @@ SH
   printf '%s\n' "$fb"
 }
 
+# herdr_submit_shift: move every canned response numbered >= <min> (default 1)
+# <by> slots later, so a fixture numbered for the old send-text-first sequence
+# can take new calls in front of it.
+herdr_submit_shift() {  # <resp-dir> <by> [min]
+  local resp=$1 by=$2 min=${3:-1} n ext f sorted
+  local -a found=()
+  shopt -s nullglob
+  for f in "$resp"/*.out "$resp"/*.exit; do
+    n=$(basename "$f")
+    n=${n%%.*}
+    [ "$n" -ge "$min" ] 2>/dev/null && found+=("$n")
+  done
+  shopt -u nullglob
+  [ "${#found[@]}" -gt 0 ] || return 0
+  sorted=$(printf '%s\n' "${found[@]}" | sort -rn -u)
+  while IFS= read -r n; do
+    [ -n "$n" ] || continue
+    for ext in out exit; do
+      f="$resp/$n.$ext"
+      if [ -f "$f" ]; then
+        mv "$f" "$resp/$((n + by)).$ext"
+      fi
+    done
+  done <<EOF
+$sorted
+EOF
+}
+
+# herdr_submit_identity_prefix: submit first asks `agent get` which harness
+# the pane runs. A pane whose native identity is neither Claude nor OMP skips
+# the payload proof, so a fixture numbered for the old send-text-first
+# sequence moves one slot later.
+herdr_submit_identity_prefix() {  # <resp-dir> <agent>
+  herdr_submit_shift "$1" 1
+  printf '{"result":{"agent":{"agent":"%s","agent_status":"idle"}}}\n' "$2" > "$1/1.out"
+}
+
+# herdr_framed_composer: Claude's real composer as Herdr captures it - the
+# input region framed by solid `─` rules, with harness footer furniture below
+# the closing rule that the proof must never read as typed content. Emits the
+# full pane tail; <content> lands on the `❯` row. Extra content rows may be
+# appended to model a wrapped payload.
+herdr_framed_composer() {  # <path> <content> [wrap-row ...]
+  local path=$1 content=$2 row
+  shift 2
+  {
+    printf '──────────\n'
+    printf '  \xe2\x9d\xaf %s\n' "$content"
+    for row in "$@"; do printf '    %s\n' "$row"; done
+    printf '──────────\n'
+    printf '  [model] status line furniture\n'
+    printf '  ⏵⏵ bypass permissions on\n'
+  } > "$path"
+}
+
+# herdr_submit_claude_prefix: a Claude pane adds the identity probe, an empty
+# composer read before the send, and a composer read after it. Call 1 is the
+# identity, call 2 the empty composer, call 3 the literal send, and call 4 the
+# composer holding <text>. Old call N (N >= 2) moves to N + 3. The composer
+# fixtures are the framed shape a real Claude pane draws.
+herdr_submit_claude_prefix() {  # <resp-dir> <typed-text>
+  local resp=$1 text=$2
+  herdr_submit_shift "$resp" 3
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/1.out"
+  herdr_framed_composer "$resp/2.out" ''
+  herdr_framed_composer "$resp/4.out" "$text"
+}
+
+# write_omp_proof_composer_response: an OMP composer fixture for the payload
+# proof tests that does not need a real bun: the test shell stubs
+# fm_composer_terminal_width (the Bun/Node terminal-cell dependency), so the
+# box only has to be structurally well-formed - a status top row, optional
+# content rows, and the closing input row carrying <content>.
+write_omp_proof_composer_response() {  # <path> <content> [content-row ...]
+  local path=$1 content=$2 row
+  shift 2
+  {
+    printf '╭── OMP test agent ▶──╮\n'
+    for row in "$@"; do printf '%s\n' "$row"; done
+    printf '╰─ %s ─╯\n' "$content"
+  } > "$path"
+}
+
+# herdr_submit_omp_prefix: an OMP-targeted send already proves native identity
+# through its submit snapshot, which stays call 1. The idle-baseline payload
+# proof adds a composer read before the literal send (call 2) and one after it
+# (call 4), so old call N (N >= 2) moves to N + 2 while call 1 is untouched.
+# Writes an empty OMP composer for call 2 and a composer holding <text> for
+# call 4.
+herdr_submit_omp_prefix() {  # <resp-dir> <typed-text>
+  local resp=$1 text=$2
+  herdr_submit_shift "$resp" 2 2
+  write_omp_proof_composer_response "$resp/2.out" ''
+  write_omp_proof_composer_response "$resp/4.out" "$text"
+}
+
 # make_herdr_statefake: a STATEFUL `herdr` stub that models the parts of herdr's
 # real container behavior the workspace-leak fix (and the default-tab-prune
 # safety fix) depend on, so a full spawn->teardown cycle can be replayed
@@ -3376,6 +3472,7 @@ test_send_text_submit_applies_herdr_minimum_confirm_budget() {
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/7.out"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/8.out"
   printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/9.out"
+  herdr_submit_identity_prefix "$resp" codex
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_SLEEP_LOG="$sleep_log" FM_BACKEND_HERDR_SUBMIT_POLLS=6 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0.6 \
     bash -c '. "$0/bin/backends/herdr.sh"; sleep() { printf "sleep:%s\n" "$1" >> "$FM_SLEEP_LOG"; }; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 1 0.4 0' "$ROOT" )
@@ -3559,13 +3656,14 @@ test_send_text_submit_omp_exit_requires_normal_session_event_and_closes_endpoint
   printf '{"result":{"agent":{"agent":"omp","agent_status":"done","agent_session":{"kind":"path","value":"%s"}}}}\n' "$session" > "$resp/1.out"
   printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/7.out"
   printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/8.out"
+  herdr_submit_omp_prefix "$resp" '/exit'
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     FM_HERDR_APPEND_SESSION_ON_ENTER="$session" \
     FM_HERDR_APPEND_SESSION_RECORD='{"type":"custom","customType":"session_exit","data":{"reason":"dispose","kind":"normal"}}' \
     FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0 \
     FM_BACKEND_HERDR_OMP_EVENT_CONFIRM_SLEEP=0 \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 /exit 3 0.01 0 "" omp' "$ROOT" )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_composer_terminal_width() { printf "80"; }; fm_backend_herdr_send_text_submit default:w1:p2 /exit 3 0.01 0 "" omp' "$ROOT" )
   [ "$out" = empty ] || fail "a normal post-offset OMP session_exit plus missing endpoint should confirm /exit, got '$out'"
   close_count=$(grep -c $'\x1f''pane'$'\x1f''close'$'\x1f''w1:p2' "$log")
   [ "$close_count" -eq 1 ] || fail "confirmed OMP /exit did not close exactly its task pane (count=$close_count)"
@@ -3851,6 +3949,7 @@ test_send_text_submit_detects_landed_send() {
   # 4: agent get - agent_status working (a real turn started: submitted)
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
   printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/4.out"
+  herdr_submit_identity_prefix "$resp" codex
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 3 0.01 0.01' "$ROOT" )
@@ -3873,6 +3972,7 @@ test_send_text_submit_detects_swallowed_enter() {
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/7.out"
   printf '  \xe2\x9d\xaf hello captain\n' > "$resp/8.out"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/9.out"
+  herdr_submit_identity_prefix "$resp" codex
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
@@ -3918,6 +4018,7 @@ test_send_text_submit_popup_autocomplete_requires_second_enter() {
   # 6: send-keys enter (#2) - actually submits
   # 7: agent get -> working (submitted)
   printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/7.out"
+  herdr_submit_identity_prefix "$resp" codex
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "/compact" 3 0.01 1.2' "$ROOT" )
@@ -3933,6 +4034,7 @@ test_send_text_submit_confirms_blocked_after_enter() {
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
   printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/3.out"
   printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/4.out"
+  herdr_submit_identity_prefix "$resp" codex
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "needs approval" 3 0.01 0.01' "$ROOT" )
@@ -3948,6 +4050,7 @@ test_send_text_submit_preexisting_working_pending_fails_closed_for_non_omp() {
   printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
   printf '  \xe2\x9d\xaf hello captain\n' > "$resp/4.out"
   printf '  \xe2\x9d\xaf hello captain\n' > "$resp/6.out"
+  herdr_submit_claude_prefix "$resp" 'hello captain'
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01 "" claude' "$ROOT" )
@@ -3955,7 +4058,7 @@ test_send_text_submit_preexisting_working_pending_fails_closed_for_non_omp() {
   enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
   [ "$enter_count" -eq 2 ] || fail "non-OMP pending input should retry Enter up to the configured count, sent $enter_count Enter(s)"
   read_count=$(grep -c $'\x1f''pane'$'\x1f''read' "$log")
-  [ "$read_count" -eq 2 ] || fail "non-OMP pending confirmation should read the composer twice, made $read_count read(s)"
+  [ "$read_count" -eq 4 ] || fail "non-OMP pending confirmation should read the composer twice plus the payload proof's two reads, made $read_count read(s)"
   pass "fm_backend_herdr_send_text_submit: non-OMP working + pending stays pending"
 }
 
@@ -3967,6 +4070,7 @@ test_send_text_submit_typed_idle_placeholder_stays_pending() {
   printf '  \xe2\x9d\xaf Type a message...\n' > "$resp/5.out"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/7.out"
   printf '  \xe2\x9d\xaf Type a message...\n' > "$resp/8.out"
+  herdr_submit_claude_prefix "$resp" 'Type a message...'
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "Type a message..." 2 0.01 0.01 "" claude' "$ROOT" )
@@ -3982,6 +4086,7 @@ test_send_text_submit_idle_native_empty_composer_confirms_delivery() {
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
   printf '  \xe2\x9d\xaf\n' > "$resp/5.out"
+  herdr_submit_identity_prefix "$resp" codex
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 3 0.01 0.01' "$ROOT" )
@@ -4000,6 +4105,7 @@ test_send_text_submit_confirms_despite_codex_idle_tip_composer() {
   dir="$TMP_ROOT/submit-codex-idle-tip"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
   printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/4.out"
+  herdr_submit_identity_prefix "$resp" codex
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "reply with just OK" 3 0.01 0.01' "$ROOT" )
@@ -4054,6 +4160,7 @@ test_send_text_submit_slow_transition_within_one_enter_needs_no_extra_enter() {
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/5.out"
   printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/6.out"
+  herdr_submit_identity_prefix "$resp" codex
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=3 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 3 0.03 0.01' "$ROOT" )
@@ -4067,6 +4174,7 @@ test_send_text_submit_send_failed() {
   local dir log resp fb out
   dir="$TMP_ROOT/submit-fail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '1\n' > "$resp/1.exit"
+  herdr_submit_identity_prefix "$resp" codex
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "x" 2 0.01 0.01' "$ROOT" )
@@ -4079,6 +4187,7 @@ test_send_text_submit_unknown_on_capture_failure() {
   dir="$TMP_ROOT/submit-read-fail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
   printf '1\n' > "$resp/4.exit"
+  herdr_submit_identity_prefix "$resp" codex
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "x" 2 0.01 0.01' "$ROOT" )
@@ -4094,6 +4203,7 @@ test_send_text_submit_unknown_on_composer_capture_failure() {
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
   printf '1\n' > "$resp/5.exit"
+  herdr_submit_identity_prefix "$resp" codex
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "x" 2 0.01 0.01' "$ROOT" )
@@ -4101,6 +4211,440 @@ test_send_text_submit_unknown_on_composer_capture_failure() {
   enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
   [ "$enter_count" -eq 1 ] || fail "send_text_submit must not retry Enter after composer verification becomes unreadable, sent $enter_count Enter(s)"
   pass "fm_backend_herdr_send_text_submit: an unreadable composer stops Enter retries after native status stays idle"
+}
+
+# --- send_text_submit: pre-Enter payload proof (Claude + idle OMP) -----------
+# On a Claude pane, a long payload the selected composer still holds is
+# submitted whole. A composer that kept only a suffix, a stale transcript head
+# above that suffix, or a paste placeholder plus a literal remainder does not
+# receive Enter, is cleared back to empty, and is not reported delivered.
+# The same proof covers an OMP-targeted send on an idle baseline - the
+# away-mode supervisor inject shape - while busy/blocked OMP keeps its exact
+# session-event confirmation.
+
+herdr_long_payload() {  # <middle-length>
+  awk -v n="$1" 'BEGIN { printf "HEAD"; for (i = 0; i < n; i++) printf "m"; printf "TAIL" }'
+}
+
+herdr_ctrl_u_count() {  # <log>
+  grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''ctrl+u' "$1"
+}
+
+# herdr_wrapped_composer: a framed Claude composer holding <text> wrapped at
+# <width> columns, with its first <drop> rows already deleted. Live Claude's
+# Ctrl+U deletes one wrapped screen row per press, so a stub that clears a
+# whole single-line draft with one press would hide an undercounted clear.
+herdr_wrapped_composer() {  # <text> <width> <drop>
+  local text=$1 width=$2 drop=$3 prefix='  \xe2\x9d\xaf '
+  text=${text:$((drop * width))}
+  printf '──────────\n'
+  if [ -z "$text" ]; then
+    printf '  \xe2\x9d\xaf\n'
+  else
+    while [ -n "$text" ]; do
+      printf "$prefix%s\n" "${text:0:$width}"
+      text=${text:$width}
+      prefix='    '
+    done
+  fi
+  printf '──────────\n'
+}
+
+test_send_text_submit_long_literal_submits_when_composer_holds_every_byte() {
+  local dir log resp fb out enter_count text
+  dir="$TMP_ROOT/submit-long-exact"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  text=$(herdr_long_payload 1492)
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/4.out"
+  herdr_submit_claude_prefix "$resp" "$text"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
+  [ "$out" = empty ] || fail "a composer holding the full long payload should confirm delivery, got '$out'"
+  [ "${#text}" -eq 1500 ] || fail "the long payload fixture was ${#text} chars, not 1500"
+  assert_contains "$(cat "$log")" $'\x1f'"$text" "send_text_submit did not type the full long payload"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "a fully observed long payload should be submitted once, sent $enter_count Enter(s)"
+  [ "$(herdr_ctrl_u_count "$log")" -eq 0 ] || fail "a proven payload must not be cleared"
+  pass "fm_backend_herdr_send_text_submit: a 1500-character payload a Claude composer still holds is submitted whole"
+}
+
+test_send_text_submit_refuses_enter_when_composer_holds_only_the_suffix() {
+  local dir log resp fb out enter_count text suffix
+  dir="$TMP_ROOT/submit-long-suffix"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  text=$(herdr_long_payload 1492)
+  suffix=${text: -480}
+  herdr_submit_claude_prefix "$resp" "$text"
+  herdr_framed_composer "$resp/4.out" "$suffix"
+  herdr_framed_composer "$resp/6.out" ''
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/7.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
+  [ "$out" = send-failed ] || fail "a composer holding only the payload suffix, cleared back to empty, should report send-failed, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 0 ] || fail "a suffix must not be submitted, sent $enter_count Enter(s)"
+  [ "$(herdr_ctrl_u_count "$log")" -eq 1 ] || fail "the refused suffix should be cleared with one Ctrl+U, sent $(herdr_ctrl_u_count "$log")"
+  [ "$(grep -c $'\x1f''agent'$'\x1f''get' "$log")" -eq 1 ] || fail "a refused suffix must not be confirmed by a later working status"
+  pass "fm_backend_herdr_send_text_submit: a long payload whose Claude composer kept only the tail is not submitted, is cleared, and reports send-failed"
+}
+
+test_send_text_submit_refused_suffix_that_will_not_clear_is_unknown() {
+  local dir log resp fb out enter_count text suffix cap n
+  dir="$TMP_ROOT/submit-long-suffix-stuck"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  text=$(herdr_long_payload 1492)
+  suffix=${text: -480}
+  herdr_submit_claude_prefix "$resp" "$text"
+  herdr_framed_composer "$resp/4.out" "$suffix"
+  cap=$(( 1500 / 40 + 8 ))
+  for ((n = 6; n <= 4 + 2 * cap; n += 2)); do
+    herdr_framed_composer "$resp/$n.out" "$suffix"
+  done
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
+  [ "$out" = unknown ] || fail "a refused suffix that stays in the composer must not claim nothing was typed, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 0 ] || fail "a suffix must not be submitted, sent $enter_count Enter(s)"
+  [ "$(herdr_ctrl_u_count "$log")" -eq "$cap" ] || fail "a leftover that will not clear should get a bounded $cap Ctrl+U presses, sent $(herdr_ctrl_u_count "$log")"
+  pass "fm_backend_herdr_send_text_submit: a refused suffix whose clear cannot be verified reports unknown, not send-failed"
+}
+
+test_send_text_submit_clears_a_wrapped_suffix_one_row_per_press() {
+  local dir log resp fb out enter_count text suffix drop
+  dir="$TMP_ROOT/submit-long-suffix-wrapped"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  text=$(herdr_long_payload 1492)
+  suffix=${text: -480}
+  herdr_submit_claude_prefix "$resp" "$text"
+  for drop in 0 1 2 3 4 5; do
+    herdr_wrapped_composer "$suffix" 96 "$drop" > "$resp/$((4 + 2 * drop)).out"
+  done
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
+  [ "$out" = send-failed ] || fail "a refused suffix wrapped over five rows, cleared row by row, should report send-failed, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 0 ] || fail "a suffix must not be submitted, sent $enter_count Enter(s)"
+  [ "$(herdr_ctrl_u_count "$log")" -eq 5 ] || fail "a five-row wrapped suffix should take five Ctrl+U presses, sent $(herdr_ctrl_u_count "$log")"
+  pass "fm_backend_herdr_send_text_submit: a refused 480-character suffix wrapped over five rows is cleared one row per Ctrl+U and reports send-failed"
+}
+
+test_send_text_submit_refused_suffix_then_clean_retry_submits_only_the_message() {
+  local dir log resp fb out enter_count text suffix
+  dir="$TMP_ROOT/submit-long-suffix-retry"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  text=$(herdr_long_payload 1492)
+  suffix=${text: -480}
+  herdr_submit_claude_prefix "$resp" "$text"
+  herdr_framed_composer "$resp/4.out" "$suffix"
+  herdr_framed_composer "$resp/6.out" ''
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/7.out"
+  herdr_framed_composer "$resp/8.out" ''
+  herdr_framed_composer "$resp/10.out" "$text"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/11.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/13.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"
+      first=$(fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01)
+      second=$(fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01)
+      printf "%s %s" "$first" "$second"' "$ROOT" "$text" )
+  [ "$out" = "send-failed empty" ] || fail "a refused send followed by a resend should report 'send-failed empty', got '$out'"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''send-text'$'\x1f''w1:p2'$'\x1f'"$text" "$log")" -eq 2 ] || fail "each attempt should type the full message exactly once"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "only the clean retry should be submitted, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: after a refused suffix is cleared, a resend starts from an empty Claude composer and submits only the message"
+}
+
+test_send_text_submit_claude_refuses_to_type_into_a_nonempty_composer() {
+  local dir log resp fb out text
+  dir="$TMP_ROOT/submit-claude-leftover"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  text=$(herdr_long_payload 1492)
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/1.out"
+  herdr_framed_composer "$resp/2.out" "${text: -480}"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
+  [ "$out" = send-failed ] || fail "a Claude composer that already holds text should refuse the send, got '$out'"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''send-text' "$log")" -eq 0 ] || fail "nothing may be typed after a leftover tail, or Enter would submit tail plus message"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''send-keys' "$log")" -eq 0 ] || fail "a refused pre-send composer must not receive any key"
+  pass "fm_backend_herdr_send_text_submit: a Claude composer holding leftover text is refused before anything is typed"
+}
+
+test_send_text_submit_refuses_suffix_when_transcript_still_shows_the_head() {
+  local dir log resp fb out enter_count text suffix
+  dir="$TMP_ROOT/submit-stale-head"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  text=$(herdr_long_payload 1492)
+  suffix=${text: -480}
+  herdr_submit_claude_prefix "$resp" "$text"
+  herdr_framed_composer "$resp/4.out" "$suffix"
+  {
+    printf '%s\n' "$text"
+    cat "$resp/4.out"
+  } > "$resp/4.tmp" && mv "$resp/4.tmp" "$resp/4.out"
+  herdr_framed_composer "$resp/6.out" ''
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
+  [ "$out" = send-failed ] || fail "a stale transcript head above a suffix composer should report send-failed, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 0 ] || fail "a transcript head must not authorize Enter for a suffix composer, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: a matching head in the transcript does not prove the current composer"
+}
+
+# Away-mode digests and marked firstmate steers carry U+2063, which Claude's
+# composer read-back on Herdr drops (verified live). The rest of the payload,
+# byte for byte, is still proof; a missing message head is still refused.
+test_send_text_submit_accepts_marked_payloads_whose_read_back_drops_u2063() {
+  local kind dir log resp fb out enter_count text shown
+  for kind in digest steer; do
+    dir="$TMP_ROOT/submit-u2063-$kind"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+    if [ "$kind" = digest ]; then
+      text=$(bash -c '. "$0/bin/fm-operational-input.sh"; fm_operational_input_encode away-supervisor "$1" out; printf "%s" "$out"' \
+        "$ROOT" "$(herdr_long_payload 1492)")
+    else
+      text=$(bash -c '. "$0/bin/fm-operational-input.sh"; printf "%s %s" "$FM_FROMFIRST_MARK" "$1"' "$ROOT" "please rebase onto main")
+    fi
+    shown=${text//$'\xe2\x81\xa3'/}
+    [ "$shown" != "$text" ] || fail "the $kind fixture did not carry U+2063"
+    printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
+    printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/4.out"
+    herdr_submit_claude_prefix "$resp" "$text"
+    herdr_framed_composer "$resp/4.out" "$(printf '\xc2\xa0%s' "$shown")"
+    fb=$(make_herdr_fakebin "$dir")
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
+    [ "$out" = empty ] || fail "a marked $kind whose read-back only lacks U+2063 should be submitted, got '$out'"
+    assert_contains "$(cat "$log")" $'\x1f'"$text" "the marked $kind was not typed with its U+2063"
+    enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+    [ "$enter_count" -eq 1 ] || fail "a marked $kind should be submitted once, sent $enter_count Enter(s)"
+    [ "$(herdr_ctrl_u_count "$log")" -eq 0 ] || fail "an accepted marked $kind must not be cleared"
+  done
+  pass "fm_backend_herdr_send_text_submit: an away-mode digest and a marked steer are submitted when Claude's read-back only drops U+2063"
+}
+
+test_send_text_submit_refuses_marked_digest_missing_its_head() {
+  local dir log resp fb out enter_count text shown
+  dir="$TMP_ROOT/submit-u2063-suffix"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  text=$(bash -c '. "$0/bin/fm-operational-input.sh"; fm_operational_input_encode away-supervisor "$1" out; printf "%s" "$out"' \
+    "$ROOT" "$(herdr_long_payload 1492)")
+  shown=${text//$'\xe2\x81\xa3'/}
+  herdr_submit_claude_prefix "$resp" "$text"
+  herdr_framed_composer "$resp/4.out" "$(printf '\xc2\xa0%s' "${shown: -480}")"
+  herdr_framed_composer "$resp/6.out" ''
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
+  [ "$out" = send-failed ] || fail "a marked digest whose composer kept only the tail should report send-failed, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 0 ] || fail "a marked digest tail must not be submitted, sent $enter_count Enter(s)"
+  [ "$(herdr_ctrl_u_count "$log")" -eq 1 ] || fail "the refused marked digest tail should be cleared"
+  pass "fm_backend_herdr_send_text_submit: dropping U+2063 does not let a marked digest missing its head be submitted"
+}
+
+test_send_text_submit_lone_paste_placeholder_submits_the_long_payload() {
+  local dir log resp fb out enter_count text
+  dir="$TMP_ROOT/submit-paste-placeholder"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  text=$(herdr_long_payload 1492)
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/4.out"
+  herdr_submit_claude_prefix "$resp" "$text"
+  herdr_framed_composer "$resp/4.out" '[Pasted text #1]'
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
+  [ "$out" = empty ] || fail "a lone paste placeholder for the whole burst should still be submitted, got '$out'"
+  assert_contains "$(cat "$log")" $'\x1f'"$text" "the typed payload was not the full long text"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "a lone paste placeholder should be submitted once, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: a lone paste placeholder still submits the full long payload"
+}
+
+# Live Claude 2.1.278 collapses a long multi-line paste into
+# `[Pasted text #N +M lines]` and expands it on submit, like the one-line form.
+test_send_text_submit_multiline_paste_placeholder_submits_the_long_payload() {
+  local dir log resp fb out enter_count text
+  dir="$TMP_ROOT/submit-multiline-placeholder"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  text=$(awk 'BEGIN { for (i = 1; i <= 42; i++) printf "steer line %02d with enough words to be a real instruction\n", i }')
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/4.out"
+  herdr_submit_claude_prefix "$resp" "$text"
+  herdr_framed_composer "$resp/4.out" '[Pasted text #4 +40 lines]'
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
+  [ "$out" = empty ] || fail "a lone multi-line paste placeholder for the whole burst should be submitted, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "a lone multi-line paste placeholder should be submitted once, sent $enter_count Enter(s)"
+  [ "$(herdr_ctrl_u_count "$log")" -eq 0 ] || fail "an accepted multi-line placeholder must not be cleared"
+  pass "fm_backend_herdr_send_text_submit: a lone multi-line paste placeholder still submits the long multi-line payload"
+}
+
+test_send_text_submit_refuses_placeholder_followed_by_a_literal_remainder() {
+  local dir log resp fb out enter_count text suffix
+  dir="$TMP_ROOT/submit-paste-remainder"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  text=$(herdr_long_payload 1492)
+  suffix=${text: -480}
+  herdr_submit_claude_prefix "$resp" "$text"
+  herdr_framed_composer "$resp/4.out" "[Pasted text #1]$suffix"
+  herdr_framed_composer "$resp/6.out" ''
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
+  [ "$out" = send-failed ] || fail "a paste placeholder followed by a literal remainder should report send-failed, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 0 ] || fail "a placeholder plus remainder must not be submitted, sent $enter_count Enter(s)"
+  [ "$(herdr_ctrl_u_count "$log")" -eq 1 ] || fail "the refused placeholder and remainder should be cleared"
+  pass "fm_backend_herdr_send_text_submit: a paste placeholder followed by a literal remainder is not submitted and is cleared"
+}
+
+test_send_text_submit_three_paste_placeholders_submit_the_long_payload() {
+  local dir log resp fb out enter_count text
+  dir="$TMP_ROOT/submit-three-placeholders"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  text=$(herdr_long_payload 2992)
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/4.out"
+  herdr_submit_claude_prefix "$resp" "$text"
+  herdr_framed_composer "$resp/4.out" '[Pasted text #1][Pasted text #2][Pasted text #3]'
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
+  [ "$out" = empty ] || fail "three paste placeholders with no literal remainder should be submitted, got '$out'"
+  [ "${#text}" -eq 3000 ] || fail "the 3000-character fixture was ${#text} chars"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "three placeholders should be submitted once, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: three paste placeholders with no literal remainder submit the long payload"
+}
+
+# A target whose native identity is neither Claude nor OMP keeps the unproven
+# type-then-Enter path: its composer is never read before Enter, so a
+# harness-specific placeholder or an unselectable composer cannot turn a
+# landed send into send-failed.
+test_send_text_submit_non_claude_skips_the_payload_proof() {
+  local agent dir log resp fb out enter_count text
+  text=$(herdr_long_payload 1492)
+  for agent in codex missing; do
+    dir="$TMP_ROOT/submit-non-claude-$agent"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+    printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/3.out"
+    printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/5.out"
+    if [ "$agent" = missing ]; then
+      printf '1\n' > "$resp/1.exit"
+    else
+      printf '{"result":{"agent":{"agent":"%s","agent_status":"idle"}}}\n' "$agent" > "$resp/1.out"
+    fi
+    fb=$(make_herdr_fakebin "$dir")
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
+    [ "$out" = empty ] || fail "a $agent pane should keep the type-then-Enter path and confirm from agent_status, got '$out'"
+    [ "$(grep -c $'\x1f''pane'$'\x1f''read' "$log")" -eq 0 ] || fail "a $agent pane must not have its composer read before Enter"
+    enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+    [ "$enter_count" -eq 1 ] || fail "a $agent pane should be submitted once, sent $enter_count Enter(s)"
+  done
+  pass "fm_backend_herdr_send_text_submit: non-Claude and unidentified panes keep the pre-proof type-then-Enter behavior"
+}
+
+# --- widened gate: the away-mode OMP supervisor inject ------------------------
+# FM_SUPERVISOR_HARNESS=omp reaches this function as the <harness> argument
+# (bin/fm-supervise-daemon.sh inject_msg); the OMP submit snapshot at the head
+# of the function has already proven the native identity is exactly omp. On an
+# idle baseline the same pre-Enter payload proof as Claude's applies, so a
+# human typing into the supervisor composer between the daemon's empty check
+# and the send cannot end up inside an injected digest. Busy and blocked OMP
+# baselines keep their existing exact session-event proof and never take this
+# path. The fixtures stub fm_composer_terminal_width - the Bun/Node
+# terminal-cell dependency - so they run anywhere.
+
+test_send_text_submit_omp_idle_supervisor_submits_a_proven_payload() {
+  local dir log resp fb out enter_count text session
+  dir="$TMP_ROOT/submit-omp-idle-proof"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  session="$dir/omp-session.jsonl"
+  text='Escalation digest: worker fm-x is done.'
+  printf '%s\n' '{"type":"session","version":3}' > "$session"
+  printf '{"result":{"agent":{"agent":"omp","agent_status":"idle","agent_session":{"kind":"path","value":"%s"}}}}\n' "$session" > "$resp/1.out"
+  herdr_submit_omp_prefix "$resp" "$text"
+  # 5: send-keys enter; 6: wait_for_working's agent get -> working (submitted)
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/6.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_composer_terminal_width() { printf "80"; }; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01 "" omp' "$ROOT" "$text" )
+  [ "$out" = empty ] || fail "an idle OMP supervisor composer holding the full digest should confirm delivery, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "a proven idle OMP payload should be submitted once, sent $enter_count Enter(s)"
+  [ "$(herdr_ctrl_u_count "$log")" -eq 0 ] || fail "a proven OMP payload must not be cleared"
+  pass "fm_backend_herdr_send_text_submit: an idle OMP supervisor submit presses Enter only after the composer proves the whole digest"
+}
+
+# The widened gate's reason to exist: a human types into the supervisor pane
+# after the daemon's empty-composer check but before (or during) the typed
+# digest, so the composer then holds text that is not the payload. The submit
+# must refuse, clear the composer, and report send-failed so inject_msg keeps
+# the escalation buffered for the next cycle instead of submitting a merge.
+test_send_text_submit_omp_supervisor_refuses_text_typed_between_check_and_send() {
+  local dir log resp fb out enter_count text session
+  dir="$TMP_ROOT/submit-omp-race"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  session="$dir/omp-session.jsonl"
+  text='Escalation digest: worker fm-x is done.'
+  printf '%s\n' '{"type":"session","version":3}' > "$session"
+  printf '{"result":{"agent":{"agent":"omp","agent_status":"idle","agent_session":{"kind":"path","value":"%s"}}}}\n' "$session" > "$resp/1.out"
+  # 2: pre-send composer read - empty (the human has not typed yet)
+  write_omp_proof_composer_response "$resp/2.out" ''
+  # 4: post-send composer read - the composer's input row now holds only the
+  #    human's text, not the payload we just typed.
+  write_omp_proof_composer_response "$resp/4.out" 'captain was here'
+  # 5: Ctrl+U (clear the refused composer); 6/7: composer_state read + identity
+  #    re-prove reporting the composer empty again.
+  write_omp_proof_composer_response "$resp/6.out" ''
+  printf '{"result":{"agent":{"agent":"omp","agent_status":"idle"}}}\n' > "$resp/7.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_composer_terminal_width() { printf "80"; }; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01 "" omp' "$ROOT" "$text" )
+  [ "$out" = send-failed ] || fail "an OMP composer holding a human's text instead of the digest must refuse with send-failed, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 0 ] || fail "a composer that does not hold the payload must never be submitted, sent $enter_count Enter(s)"
+  [ "$(herdr_ctrl_u_count "$log")" -ge 1 ] || fail "a refused OMP send should clear the composer back to empty"
+  pass "fm_backend_herdr_send_text_submit: an OMP supervisor send refuses when a human's text lands between the empty check and the proof"
+}
+
+# The other half of the race: the human's keystroke lands before the daemon's
+# own send starts. The composer read before send_literal sees a non-empty
+# composer and refuses without typing at all.
+test_send_text_submit_omp_supervisor_refuses_to_type_into_a_nonempty_composer() {
+  local dir log resp fb out text session
+  dir="$TMP_ROOT/submit-omp-nonempty"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  session="$dir/omp-session.jsonl"
+  text='Escalation digest: worker fm-x is done.'
+  printf '%s\n' '{"type":"session","version":3}' > "$session"
+  printf '{"result":{"agent":{"agent":"omp","agent_status":"idle","agent_session":{"kind":"path","value":"%s"}}}}\n' "$session" > "$resp/1.out"
+  write_omp_proof_composer_response "$resp/2.out" 'captain mid-thought'
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_composer_terminal_width() { printf "80"; }; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01 "" omp' "$ROOT" "$text" )
+  [ "$out" = send-failed ] || fail "an OMP composer already holding text should refuse the send, got '$out'"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''send-text' "$log")" -eq 0 ] || fail "nothing may be typed into a non-empty OMP supervisor composer"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''send-keys' "$log")" -eq 0 ] || fail "a refused pre-send OMP composer must not receive any key"
+  pass "fm_backend_herdr_send_text_submit: an OMP supervisor composer holding human text is refused before anything is typed"
+}
+
+# A long digest that lands in the OMP composer as only a tail is the reported
+# bug shape: the suffix must not be submitted and the composer is cleared.
+test_send_text_submit_omp_supervisor_refuses_a_suffix_only_composer() {
+  local dir log resp fb out enter_count text session suffix
+  dir="$TMP_ROOT/submit-omp-suffix"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  session="$dir/omp-session.jsonl"
+  text=$(herdr_long_payload 1492)
+  suffix=${text: -480}
+  printf '%s\n' '{"type":"session","version":3}' > "$session"
+  printf '{"result":{"agent":{"agent":"omp","agent_status":"idle","agent_session":{"kind":"path","value":"%s"}}}}\n' "$session" > "$resp/1.out"
+  herdr_submit_omp_prefix "$resp" "$text"
+  write_omp_proof_composer_response "$resp/4.out" "$suffix"
+  write_omp_proof_composer_response "$resp/6.out" ''
+  printf '{"result":{"agent":{"agent":"omp","agent_status":"idle"}}}\n' > "$resp/7.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_composer_terminal_width() { printf "80"; }; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01 "" omp' "$ROOT" "$text" )
+  [ "$out" = send-failed ] || fail "an OMP composer holding only the digest's tail must refuse with send-failed, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 0 ] || fail "a suffix-only OMP composer must not be submitted, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: an OMP supervisor digest that lands as only a tail is refused and cleared"
 }
 
 # --- fm-backend.sh dispatch wiring -------------------------------------------
@@ -4954,6 +5498,24 @@ test_send_text_submit_slow_transition_within_one_enter_needs_no_extra_enter
 test_send_text_submit_send_failed
 test_send_text_submit_unknown_on_capture_failure
 test_send_text_submit_unknown_on_composer_capture_failure
+test_send_text_submit_long_literal_submits_when_composer_holds_every_byte
+test_send_text_submit_refuses_enter_when_composer_holds_only_the_suffix
+test_send_text_submit_refused_suffix_that_will_not_clear_is_unknown
+test_send_text_submit_clears_a_wrapped_suffix_one_row_per_press
+test_send_text_submit_refused_suffix_then_clean_retry_submits_only_the_message
+test_send_text_submit_claude_refuses_to_type_into_a_nonempty_composer
+test_send_text_submit_refuses_suffix_when_transcript_still_shows_the_head
+test_send_text_submit_accepts_marked_payloads_whose_read_back_drops_u2063
+test_send_text_submit_refuses_marked_digest_missing_its_head
+test_send_text_submit_lone_paste_placeholder_submits_the_long_payload
+test_send_text_submit_multiline_paste_placeholder_submits_the_long_payload
+test_send_text_submit_refuses_placeholder_followed_by_a_literal_remainder
+test_send_text_submit_three_paste_placeholders_submit_the_long_payload
+test_send_text_submit_non_claude_skips_the_payload_proof
+test_send_text_submit_omp_idle_supervisor_submits_a_proven_payload
+test_send_text_submit_omp_supervisor_refuses_text_typed_between_check_and_send
+test_send_text_submit_omp_supervisor_refuses_to_type_into_a_nonempty_composer
+test_send_text_submit_omp_supervisor_refuses_a_suffix_only_composer
 test_dispatch_routes_herdr_backend
 test_dispatch_busy_state_unknown_for_tmux
 test_dispatch_composer_state_routes_by_backend
