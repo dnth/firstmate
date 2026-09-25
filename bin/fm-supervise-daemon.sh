@@ -1021,7 +1021,7 @@ recovery_projection_clear() {  # <state>
 # ESCALATE_FULL_DIR (the projection file itself is cleared on ack, so it cannot
 # stand in as the durable full text).
 recovery_projection_flush() {  # <state> <generation>
-  local state=$1 generation=$2 projection generation_file actual n msg full=''
+  local state=$1 generation=$2 projection generation_file actual n msg full='' fresh=0
   projection=$(recovery_projection_path "$state")
   generation_file=$(recovery_projection_generation_path "$state")
   [ -s "$projection" ] && [ -r "$generation_file" ] || return 0
@@ -1033,6 +1033,7 @@ recovery_projection_flush() {  # <state> <generation>
   msg=$ESCALATE_BODY
   if [ "$ESCALATE_BOUNDED" -eq 1 ]; then
     if full=$(escalate_full_text_save "$state" "$projection"); then
+      fresh=1
       msg="$msg (digest bounded; full text of every event: $full)"
     else
       INJECT_LAST_FAILURE="recovery projection full text could not be saved under $state/$ESCALATE_FULL_DIR"
@@ -1041,7 +1042,13 @@ recovery_projection_flush() {  # <state> <generation>
     fi
   fi
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
-  inject_msg "$msg" "$state"
+  if inject_msg "$msg" "$state"; then
+    return 0
+  fi
+  if [ "$INJECT_SUBMIT_ATTEMPTED" != 1 ] && [ "$fresh" = 1 ]; then
+    rm -f "$full"
+  fi
+  return 1
 }
 
 escalate_add() {  # <state> <distilled-item>
