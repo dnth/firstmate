@@ -369,13 +369,14 @@ fm_afk_launch_restore_backup() {  # <backup> <had-afk>
     "$FM_AFK_LAUNCH_STATE/.subsuper-escalations.since" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-recovery-escalations" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-recovery-escalations.generation" \
-    "$FM_AFK_LAUNCH_STATE/.subsuper-inject-wedged" || result=1
+    "$FM_AFK_LAUNCH_STATE/.subsuper-inject-wedged" \
+    "$FM_AFK_LAUNCH_STATE/.subsuper-unknown-acked" || result=1
   if [ "$had_afk" -eq 1 ]; then
     cp "$backup/.afk" "$FM_AFK_LAUNCH_STATE/.afk" || result=1
   fi
   for artifact in .subsuper-escalations .subsuper-escalations.since \
     .subsuper-recovery-escalations .subsuper-recovery-escalations.generation \
-    .subsuper-inject-wedged; do
+    .subsuper-inject-wedged .subsuper-unknown-acked; do
     if [ -e "$backup/$artifact" ]; then
       cp -p "$backup/$artifact" "$FM_AFK_LAUNCH_STATE/$artifact" || result=1
     fi
@@ -511,7 +512,7 @@ fm_afk_launch_start() {
   fi
   for artifact in .subsuper-escalations .subsuper-escalations.since \
     .subsuper-recovery-escalations .subsuper-recovery-escalations.generation \
-    .subsuper-inject-wedged; do
+    .subsuper-inject-wedged .subsuper-unknown-acked; do
     if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
       cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
     fi
@@ -571,7 +572,7 @@ fm_afk_launch_start_native() {
   fi
   for artifact in .subsuper-escalations .subsuper-escalations.since \
     .subsuper-recovery-escalations .subsuper-recovery-escalations.generation \
-    .subsuper-inject-wedged; do
+    .subsuper-inject-wedged .subsuper-unknown-acked; do
     if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
       cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
     fi
