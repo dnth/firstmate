@@ -178,7 +178,9 @@ if [ -d "$STATE/reconcile-requests" ] && [ ! -L "$STATE/reconcile-requests" ]; t
     for _req in "$STATE"/reconcile-requests/*.request; do
       [ -f "$_req" ] && [ ! -L "$_req" ] || continue
       _task=${_req##*/}; _task=${_task%.request}
-      case "$_task" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+      case "$_task" in
+        ''|*[!A-Za-z0-9._-]*) continue ;;
+      esac
       printf '%s\t%s\n' "$_task" "$(sed -n 's/^requested=//p' "$_req" | head -1)"
     done | jq -Rn '[inputs | split("\t") | select(length == 2) | {key: .[0], value: .[1]}] | from_entries'
   ) || RECONCILE_REQUESTS='{}'
