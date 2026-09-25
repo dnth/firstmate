@@ -136,7 +136,10 @@
 #   Prints the full ordered digest to stdout and always exits 0: this is a
 #   reporting command, not a gate. A lock refusal is reported as a loud
 #   banner inline, never a silent failure or a non-zero exit that would make
-#   an agent skip the rest of the digest.
+#   an agent skip the rest of the digest. The single nonzero exit is the
+#   task-worker refusal below: an fm-spawn worker environment (FM_TASK_ID)
+#   owns no firstmate home, so session start refuses before any state is
+#   touched.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -159,7 +162,18 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-primary-watch-version-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
+# shellcheck source=bin/fm-primary-scope-lib.sh
+. "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 
+# A process inside an fm-spawn task worker's launch environment is never a
+# firstmate home owner: refuse before any lock acquisition, bootstrap, or wake
+# drain touches a home the worker does not own. This is the backstop for the
+# tracked AGENTS.md session-start instruction when a worker reads it inside a
+# firstmate worktree.
+if fm_env_is_task_worker; then
+  echo "fm-session-start: refusing - FM_TASK_ID=$FM_TASK_ID marks an fm-spawn task worker's environment; a task worker owns no firstmate home and does not run session start" >&2
+  exit 3
+fi
 
 STATUS_TAIL=${FM_SESSION_START_STATUS_TAIL:-5}
 case "$STATUS_TAIL" in ''|*[!0-9]*) STATUS_TAIL=5 ;; esac

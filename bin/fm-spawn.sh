@@ -3307,6 +3307,17 @@ validate_spawn_worktree() {  # <source> <inspect-target>
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
+  # A reused Treehouse slot can still carry a retired secondmate's role markers
+  # (they are gitignored, so the slot reads clean to porcelain checks). Launching
+  # an ordinary task into it would let the worker read as a secondmate home to
+  # the shared primary-scope predicate (bin/fm-primary-scope-lib.sh). Secondmate
+  # launches are exempt: their seed writes the markers deliberately.
+  if [ "$KIND" != secondmate ] && { [ -e "$WT/.fm-secondmate-home" ] || [ -L "$WT/.fm-secondmate-home" ] \
+      || [ -e "$WT/.fm-secondmate-parent" ] || [ -L "$WT/.fm-secondmate-parent" ]; }; then
+    echo "error: $source resolved a worktree still carrying a secondmate-home marker; refusing to place ordinary task $ID in it" >&2
+    echo "error: remove $WT/.fm-secondmate-home and $WT/.fm-secondmate-parent only after the owning secondmate is verifiably retired (bin/fm-teardown.sh), or destroy the slot and retry" >&2
+    exit 1
+  fi
   if [ "$RELAUNCH" -eq 1 ]; then
     project_common=$(git -C "$PROJ_ABS" rev-parse --git-common-dir 2>/dev/null || true)
     worktree_common=$(git -C "$WT" rev-parse --git-common-dir 2>/dev/null || true)
@@ -5053,7 +5064,12 @@ else
   # OMP loading) resolve the PRIMARY's operational directories and consent
   # files instead of the worker's own. Workers resolve their home from
   # FM_HOME, which stays inherited; only the override knobs are cleared.
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= $LAUNCH"
+  # FM_TASK_ID stamps the launch command's environment as an ordinary task
+  # worker's. bin/fm-primary-scope-lib.sh treats it as the worker-identity
+  # boundary: the harness and every subprocess it starts inherit it, so a
+  # worktree still carrying a retired secondmate's marker can never make this
+  # process look like a firstmate home.
+  LAUNCH="FM_TASK_ID=$sq_task_id FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= $LAUNCH"
 fi
 # tmux-like backends configure the persistent pane shell before launch. Herdr
 # instead binds both values to the one atomic `pane run` command: acceptance of

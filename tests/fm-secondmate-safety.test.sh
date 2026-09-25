@@ -1587,6 +1587,68 @@ EOF
   pass "secondmate teardown retires empty homes and releases routing"
 }
 
+test_secondmate_teardown_strips_markers_from_returned_slot() {
+  # The real `treehouse return` keeps the pool slot directory - only the lease
+  # ends - so a retired secondmate home must not hand its role markers to the
+  # next slot occupant (they would read as a secondmate home to the shared
+  # primary-scope predicate). The shared fake removes the whole dir, so this
+  # case swaps in a preserving variant to make the marker contract observable.
+  local home subhome fmroot fakebin log lease err
+  home="$TMP_ROOT/marked-return-home"
+  subhome="$TMP_ROOT/marked-return-slot"
+  fmroot="$TMP_ROOT/marked-return-fmroot"
+  make_firstmate_git_root "$fmroot"
+  git -C "$fmroot" worktree add --quiet --detach "$subhome" HEAD
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$subhome/data" "$subhome/projects" "$subhome/config"
+  printf 'marked-mate\n' > "$subhome/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$home" > "$subhome/.fm-secondmate-parent"
+  printf 'keep\n' > "$subhome/data/keep.txt"
+  printf 'keep\n' > "$subhome/projects/keep.txt"
+  printf 'keep\n' > "$subhome/config/keep.txt"
+  cat > "$home/state/marked-mate.meta" <<EOF
+window=firstmate:fm-marked-mate
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$subhome
+projects=alpha
+EOF
+  printf '%s\n' "- marked-mate - marker strip test (home: $subhome; scope: strip; projects: alpha; added 2026-06-22)" > "$home/data/secondmates.md"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/marked-return-fake")
+  log="$TMP_ROOT/marked-return-fake/tmux.log"
+  lease="$TMP_ROOT/marked-return-fake/lease"
+  err="$TMP_ROOT/marked-return-fake/teardown.err"
+  printf 'marked-mate\n' > "$lease"
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf 'treehouse %s\n' "$*" >> "${FM_FAKE_TMUX_LOG:-/dev/null}"
+if [ "${1:-}" = return ]; then
+  [ -n "${FM_FAKE_TREEHOUSE_LEASE_FILE:-}" ] && rm -f "$FM_FAKE_TREEHOUSE_LEASE_FILE"
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" \
+    FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/marked-return-fake/pane.txt" \
+    FM_FAKE_TREEHOUSE_LEASE_FILE="$lease" \
+    "$ROOT/bin/fm-teardown.sh" marked-mate >/dev/null 2>"$err" \
+    || fail "teardown failed for a marked secondmate home: $(cat "$err")"
+  grep -F "treehouse return --force $(cd "$subhome" && pwd -P)" "$log" >/dev/null \
+    || fail "teardown did not return the secondmate home slot"
+  [ -d "$subhome" ] || fail "the returned pool slot was removed outright"
+  [ ! -e "$subhome/.fm-secondmate-home" ] || fail "the returned slot kept .fm-secondmate-home"
+  [ ! -e "$subhome/.fm-secondmate-parent" ] || fail "the returned slot kept .fm-secondmate-parent"
+  [ -f "$subhome/data/keep.txt" ] || fail "retirement deleted preserved data/ content"
+  [ -f "$subhome/projects/keep.txt" ] || fail "retirement deleted preserved projects/ content"
+  [ -f "$subhome/config/keep.txt" ] || fail "retirement deleted preserved config/ content"
+  [ ! -e "$lease" ] || fail "the slot lease stayed held after the return"
+  pass "secondmate teardown strips role markers from the returned pool slot"
+}
+
 test_secondmate_teardown_clears_nudge_marker() {
   local home subhome subhome_abs fakebin log lease fmroot marker live_marker
   home="$TMP_ROOT/nudge-home"
@@ -2778,6 +2840,7 @@ test_secondmate_spawn_requires_seeded_matching_home
 test_secondmate_spawn_refuses_operational_dirs_outside_subhome
 test_fm_send_refuses_bare_window_without_home_meta
 test_secondmate_teardown_retires_empty_home
+test_secondmate_teardown_strips_markers_from_returned_slot
 test_secondmate_teardown_clears_nudge_marker
 test_secondmate_teardown_refuses_ambiguous_and_mismatched_registry_bindings
 test_secondmate_teardown_sweeps_process_events_before_removal

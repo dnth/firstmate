@@ -22,6 +22,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
+# shellcheck source=bin/fm-primary-scope-lib.sh
+. "$SCRIPT_DIR/fm-primary-scope-lib.sh"
+
+# A process inside an fm-spawn task worker's launch environment (FM_TASK_ID,
+# set by bin/fm-spawn.sh for every non-secondmate kind) is never a firstmate
+# home owner: refuse before the actor claim or queue lock so a worker cannot
+# drain or acknowledge a wake queue it does not own.
+if fm_env_is_task_worker; then
+  echo "fm-wake-drain: refusing - FM_TASK_ID=$FM_TASK_ID marks an fm-spawn task worker's environment; a task worker owns no firstmate wake queue to drain" >&2
+  exit 3
+fi
 
 DRAIN_TMP=
 DRAIN_VIEW_TMP=

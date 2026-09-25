@@ -442,6 +442,21 @@ sweep_classify_pool() {  # <repo> — fills the SWEEP_* arrays
           fi
           ;;
       esac
+      # A retired secondmate's role markers are gitignored residue invisible
+      # to the porcelain check, so a slot still carrying them must never read
+      # clean: the marker would make an ordinary task placed there read as a
+      # secondmate home to bin/fm-primary-scope-lib.sh. Read-only reporting;
+      # leased slots (a live secondmate legitimately carries its marker) and
+      # damaged/unregistered slots never reach this branch.
+      if { [ -e "$canon/.fm-secondmate-home" ] || [ -L "$canon/.fm-secondmate-home" ] \
+           || [ -e "$canon/.fm-secondmate-parent" ] || [ -L "$canon/.fm-secondmate-parent" ]; }; then
+        if [ "$class" = clean ]; then
+          class=dirty
+          reason="carries a retired secondmate's .fm-secondmate-home/.fm-secondmate-parent marker; removal stays manual until reviewed"
+        else
+          reason="${reason:+$reason; }carries a secondmate-home marker"
+        fi
+      fi
     fi
     SWEEP_CLASSES+=("$class")
     SWEEP_NAMES+=("$name")

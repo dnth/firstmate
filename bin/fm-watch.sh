@@ -140,6 +140,8 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-runpod-lib.sh"
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
+# shellcheck source=bin/fm-primary-scope-lib.sh
+. "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -1454,6 +1456,14 @@ event_wait_or_sleep() {
 # before acquiring the singleton lock or entering the blocking loop.
 if [ "${BASH_SOURCE[0]}" != "$0" ]; then
   return 0
+fi
+
+# A process inside an fm-spawn task worker's launch environment (FM_TASK_ID)
+# is never a firstmate home owner: refuse before the singleton lock so a
+# worker cannot run supervision against a home it does not own.
+if fm_env_is_task_worker; then
+  echo "watcher: FAILED - refusing to run the watcher from an fm-spawn task worker environment (FM_TASK_ID=$FM_TASK_ID)" >&2
+  exit 1
 fi
 
 if ! fm_lock_try_acquire "$WATCH_LOCK"; then

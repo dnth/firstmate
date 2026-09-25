@@ -368,8 +368,29 @@ test_already_settled_pane_costs_one_confirm_sleep() {
   pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
 }
 
+# A Treehouse pool slot can retain a retired secondmate's .fm-secondmate-home
+# marker (gitignored, so the slot still reads clean). An ordinary task must
+# never launch into it: the marker would let the worker read as a secondmate
+# home to the shared primary-scope predicate.
+test_spawn_refuses_secondmate_marked_worktree() {
+  local rec id out status
+  id=marked-slot-refusal-z7
+  rec=$(make_settle_case marked-slot-refusal "$id" 0)
+  read_settle_record "$rec"
+  printf 'retired-mate\n' > "$WT_DIR/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=/nowhere\n' > "$WT_DIR/.fm-secondmate-parent"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched an ordinary task into a marked secondmate worktree"
+  assert_contains "$out" ".fm-secondmate-home" "the refusal did not name the marker file"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the refusal recorded durable task metadata"
+  pass "spawn refuses a worktree carrying a retired secondmate's marker"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
+test_spawn_refuses_secondmate_marked_worktree
 test_sandbox_relaunch_records_fresh_ready_path
 test_ship_relaunch_reuses_recorded_worktree_without_project_positional
 test_ship_relaunch_restores_recorded_profile_without_flags

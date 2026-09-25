@@ -45,6 +45,11 @@ function encodeOperationalInput(kind: "session-start" | "watcher" | "turn-end-gu
 }
 
 function primaryIntegrationApplies(): boolean {
+  // An fm-spawn ordinary task worker's launch env carries FM_TASK_ID (set on
+  // the launch command for every non-secondmate kind), so whatever the
+  // worktree's path-level scope answer is - including a reused pool slot still
+  // carrying a retired secondmate's marker - a worker is never a primary.
+  if (process.env.FM_TASK_ID) return false;
   const result = spawnSync(
     "bash",
     [

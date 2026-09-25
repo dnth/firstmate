@@ -552,7 +552,7 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="FM_TASK_ID='$id' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -786,7 +786,7 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= /usr/bin/env $RAW_DIRECT_TRUE --flag __OMPMAXTIME__" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  [ "$launch" = "FM_TASK_ID='$id' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= /usr/bin/env $RAW_DIRECT_TRUE --flag __OMPMAXTIME__" ] || fail "raw launch command changed"$'\n'"actual: $launch"
   pass "active crew-dispatch profile preserves raw direct non-OMP launch arguments"
 }
 
@@ -903,7 +903,7 @@ test_raw_non_omp_launches_keep_their_existing_escape_hatch() {
   expect_code 0 "$status" "lookalike non-OMP raw command should still launch"
   assert_contains "$out" "spawned $id harness=custom-omp-agent" \
     "lookalike non-OMP raw command lost its executable identity"
-  [ "$(cat "$LAUNCH_LOG")" = "FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= /usr/bin/env $RAW_DIRECT_TRUE --legacy" ] \
+  [ "$(cat "$LAUNCH_LOG")" = "FM_TASK_ID='$id' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= /usr/bin/env $RAW_DIRECT_TRUE --legacy" ] \
     || fail "lookalike non-OMP raw launch changed"
   pass "lookalike non-OMP raw launches preserve the escape hatch"
 }
@@ -928,7 +928,7 @@ SH
   unset FM_TEST_PANE_BASH_ENV FM_TEST_EXECUTE_RAW_LAUNCH FM_TEST_RAW_OMP_EXECUTED
   expect_code 0 "$status" "raw direct non-OMP launch should bypass an ambient pane function"
   assert_absent "$CASE_DIR/raw-omp-executed" "ambient pane function executed the harmless fake OMP"
-  [ "$(cat "$LAUNCH_LOG")" = "FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= /usr/bin/env $RAW_DIRECT_TRUE --legacy" ] \
+  [ "$(cat "$LAUNCH_LOG")" = "FM_TASK_ID='$id' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= /usr/bin/env $RAW_DIRECT_TRUE --legacy" ] \
     || fail "raw direct non-OMP launch did not use the alias-safe command form"
   pass "raw direct non-OMP launches bypass ambient pane aliases and functions"
 }
@@ -949,7 +949,7 @@ test_raw_non_omp_launches_preserve_plain_assignments() {
   expect_code 0 "$status" "raw direct non-OMP launch should preserve a plain assignment"
   [ "$(cat "$CASE_DIR/raw-execution.log")" = bar ] \
     || fail "raw direct non-OMP launch did not pass its assignment to the executable: $(cat "$CASE_DIR/raw-execution.log")"
-  [ "$(cat "$LAUNCH_LOG")" = "FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= /usr/bin/env FOO=bar $RAW_DIRECT_PRINTENV FOO" ] \
+  [ "$(cat "$LAUNCH_LOG")" = "FM_TASK_ID='$id' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= /usr/bin/env FOO=bar $RAW_DIRECT_PRINTENV FOO" ] \
     || fail "raw direct non-OMP assignment launch was not normalized safely"
   pass "raw direct non-OMP launches preserve plain assignments"
 }

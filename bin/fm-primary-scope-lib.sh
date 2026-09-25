@@ -18,11 +18,26 @@ fm_root_is_secondmate_home() {
   return 0
 }
 
+# Return 0 when this process runs inside an fm-spawn'd ordinary task worker's
+# launch environment. bin/fm-spawn.sh exports FM_TASK_ID=<id> on every
+# non-secondmate launch (ship, scout, prewalk, relaunch); a secondmate launch
+# never carries it. The variable is set on the launch command itself, so the
+# worker's harness and every tool it spawns inherit it. Whatever shape the
+# worktree happens to have - including a reused Treehouse pool slot still
+# carrying a retired secondmate's .fm-secondmate-home marker - a task worker is
+# never a firstmate home owner.
+fm_env_is_task_worker() {
+  [ -n "${FM_TASK_ID:-}" ]
+}
+
 # Return 0 when $1 is a genuine primary root whose effective state dir is $2.
 # A valid secondmate marker force-includes a linked secondmate home.
 # Otherwise only a plain checkout is primary, never a linked task worktree.
+# A task-worker launch environment (FM_TASK_ID) is never in scope.
 fm_primary_scope_matches() {
   local root=$1 state=$2 git_dir git_common_dir
+  # Launch-env identity wins over whatever markers the worktree carries.
+  fm_env_is_task_worker && return 1
   if ! fm_root_is_secondmate_home "$root"; then
     git_dir=$(git -C "$root" rev-parse --git-dir 2>/dev/null) || return 1
     git_common_dir=$(git -C "$root" rev-parse --git-common-dir 2>/dev/null) || return 1

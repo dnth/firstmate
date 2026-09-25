@@ -71,6 +71,16 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-primary-scope-lib.sh
+. "$SCRIPT_DIR/fm-primary-scope-lib.sh"
+
+# A process inside an fm-spawn task worker's launch environment (FM_TASK_ID)
+# is never a firstmate home owner: refuse before any watcher is forked or
+# attached so a worker cannot arm supervision against a home it does not own.
+if fm_env_is_task_worker; then
+  echo "watcher: FAILED - refusing to arm a watcher from an fm-spawn task worker environment (FM_TASK_ID=$FM_TASK_ID)" >&2
+  exit 1
+fi
 
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"

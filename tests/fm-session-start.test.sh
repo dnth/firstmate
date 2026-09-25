@@ -720,6 +720,27 @@ write_pi_loaded_markers() {
 
 # --- context digest: absent vs empty vs present -----------------------------
 
+test_task_worker_env_refuses_session_start() {
+  # An fm-spawn task worker's launch env carries FM_TASK_ID. A worker that
+  # follows the tracked AGENTS.md session-start instruction inside a Firstmate
+  # checkout must refuse rather than lock, bootstrap, or drain a home it does
+  # not own - the second contributing path to the worker-as-supervisor bug.
+  local rec root home fakebin out status=0
+  rec=$(new_world worker-env-refusal)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    FM_TASK_ID=ordinary-task FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    PATH="$fakebin:$BASE_PATH" "$SESSION_START" 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "a task worker's environment ran session start instead of refusing"
+  assert_contains "$out" "FM_TASK_ID" "the refusal did not name the worker identity"
+  assert_absent "$home/state/.lock" "the worker refusal created a session lock"
+  pass "session start refuses an fm-spawn task worker's environment"
+}
+
 test_context_digest_absent_empty_present() {
   local rec root home fakebin out
   rec=$(new_world context-digest)
@@ -1932,6 +1953,7 @@ EOF
   pass "session start rejects Pi loaded markers from previous sessions"
 }
 
+test_task_worker_env_refuses_session_start
 test_context_digest_absent_empty_present
 test_branch_outcome_replay_surfaces_torn_tail_after_valid_prefix
 test_lock_refusal_read_only_path
