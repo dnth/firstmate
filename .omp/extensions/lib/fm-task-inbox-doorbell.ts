@@ -220,6 +220,7 @@ export function installTaskInboxDoorbell(
 	let turnEpoch = 0;
 	let dispatchingTurn = false;
 	let dispatchingTurnObserved = false;
+	let drainAgain = false;
 	const awaitingTurns = new Map<string, ReturnType<typeof setTimeout>>();
 	const activationSends = new Set<Promise<void>>();
 	let watcher: FSWatcher | undefined;
@@ -312,7 +313,11 @@ export function installTaskInboxDoorbell(
 		watcher = undefined;
 	};
 	const drain = (): void => {
-		if (!active || draining) return;
+		if (!active) return;
+		if (draining) {
+			drainAgain = true;
+			return;
+		}
 		draining = true;
 		try {
 			for (const name of readdirSync(requestDir).filter((entry) => entry.endsWith(".pending")).sort()) {
@@ -383,6 +388,10 @@ export function installTaskInboxDoorbell(
 			}
 		} finally {
 			draining = false;
+			if (drainAgain) {
+				drainAgain = false;
+				queueMicrotask(drain);
+			}
 		}
 	};
 	const activate = (): boolean | Promise<boolean> => {
