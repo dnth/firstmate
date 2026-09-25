@@ -1001,6 +1001,7 @@ fi
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 OMP_ABORT_CLEANUP=0
 OMP_ABORT_INITIAL_HEAD=
 PREWALK_WORKTREE_READY=0
@@ -1253,6 +1254,7 @@ spawn_abort_cleanup() {
               echo "tasktmp=${TASK_TMP:-}"
               echo "model=${MODEL:-default}"
               echo "effort=${EFFORT:-default}"
+              echo "spawn_gen=$SPAWN_GEN"
               echo "backend=orca"
               echo "orca_worktree_id=$ORCA_WORKTREE_ID"
               [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
@@ -4353,7 +4355,6 @@ mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
 TURNEND_SIGNAL="$FM_ROOT/bin/fm-turnend-signal.sh"
-SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 if [ "$HARNESS" = omp ]; then
   OMP_READY="$STATE_REAL/$ID.omp-ready"
   OMP_STARTED="$STATE_REAL/$ID.omp-started"
