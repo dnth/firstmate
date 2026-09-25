@@ -35,6 +35,7 @@ trap cleanup_guard_dir EXIT
 . "$SCRIPT_DIR/fm-pool-lib.sh"
 
 lease_mode=0
+lease_holder=
 ready_file=
 accepted_local_base=
 accepted_local_base_set=0
@@ -44,6 +45,15 @@ while [ "$#" -gt 0 ]; do
     --lease)
       lease_mode=1
       treehouse_args+=("$1")
+      ;;
+    --lease-holder)
+      shift
+      [ "$#" -gt 0 ] || {
+        echo "error: --lease-holder requires a value" >&2
+        exit 2
+      }
+      lease_holder=$1
+      treehouse_args+=(--lease-holder "$1")
       ;;
     --ready-file)
       shift
@@ -272,6 +282,18 @@ acquired=$(sed -n '1p' "$GUARD_DIR/stdout")
   exit 1
 }
 synthetic_verified=1
+if [ "${FM_TREEHOUSE_REJECT_SECONDMATE_MARKERS:-0}" = 1 ]; then
+  if [ -e "$acquired/.fm-secondmate-home" ] || [ -L "$acquired/.fm-secondmate-home" ] \
+    || [ -e "$acquired/.fm-secondmate-parent" ] || [ -L "$acquired/.fm-secondmate-parent" ]; then
+    holder=${lease_holder:-$interactive_holder}
+    if ( cd "$repo" && "$SCRIPT_DIR/fm-treehouse-command.sh" return --if-lease-holder "$holder" "$acquired" ); then
+      echo "error: refusing ordinary task acquisition of $acquired: it still carries .fm-secondmate-home or .fm-secondmate-parent; remove the marker only after verified secondmate retirement" >&2
+    else
+      echo "error: refusing ordinary task acquisition of $acquired: it still carries a secondmate marker, and the lease could not be returned safely" >&2
+    fi
+    exit 1
+  fi
+fi
 if [ "$lease_mode" -eq 1 ]; then
   printf '%s\n' "$acquired"
   exit 0

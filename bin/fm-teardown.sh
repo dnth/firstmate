@@ -1264,9 +1264,8 @@ cleanup_stale_lock_for_safety_check() {
 # .fm-secondmate-parent pair would let the next ordinary task occupying the
 # slot read as a secondmate home to bin/fm-primary-scope-lib.sh. Only the two
 # role marker files are removed; the retirement contract's preserved data/,
-# projects/, and config/ content is untouched. Best-effort: a removal failure
-# is reported rather than failing the completed return, and the pool sweep
-# reports any slot still carrying a marker.
+# projects/, and config/ content is untouched. A removal failure keeps the
+# return unsuccessful, and the pool sweep reports any slot still carrying a marker.
 strip_returned_slot_role_markers() {  # <dir>
   local dir=$1 marker failed=
   for marker in .fm-secondmate-home .fm-secondmate-parent; do
@@ -1278,8 +1277,10 @@ strip_returned_slot_role_markers() {  # <dir>
       fi
     fi
   done
-  [ -z "$failed" ] \
-    || echo "teardown: WARNING - could not remove role marker(s)$failed; the returned slot still reads as a secondmate home" >&2
+  if [ -n "$failed" ]; then
+    echo "teardown: could not remove role marker(s)$failed; refusing to report the returned slot as reusable" >&2
+    return 1
+  fi
 }
 
 # Return a worktree/home via `treehouse return --force`, tolerating a transient or
@@ -1292,7 +1293,7 @@ teardown_treehouse_return() {
   # be matched by signature even when the lock file is already gone mid-check.
   if out=$( ( cd "$cd_dir" && "$SCRIPT_DIR/fm-treehouse-command.sh" return --force "$dir" ) 2>&1 ); then
     [ -n "$out" ] && printf '%s\n' "$out"
-    strip_returned_slot_role_markers "$dir"
+    strip_returned_slot_role_markers "$dir" || return 1
     return 0
   fi
   [ -n "$out" ] && printf '%s\n' "$out" >&2
@@ -1318,7 +1319,7 @@ teardown_treehouse_return() {
 
     if out=$( ( cd "$cd_dir" && "$SCRIPT_DIR/fm-treehouse-command.sh" return --force "$dir" ) 2>&1 ); then
       [ -n "$out" ] && printf '%s\n' "$out"
-      strip_returned_slot_role_markers "$dir"
+      strip_returned_slot_role_markers "$dir" || return 1
       echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
       return 0
     fi
@@ -1346,7 +1347,7 @@ teardown_treehouse_return() {
       fi
       if out=$( ( cd "$cd_dir" && "$SCRIPT_DIR/fm-treehouse-command.sh" return --force "$dir" ) 2>&1 ); then
         [ -n "$out" ] && printf '%s\n' "$out"
-        strip_returned_slot_role_markers "$dir"
+        strip_returned_slot_role_markers "$dir" || return 1
         echo "teardown: $label return succeeded after stale-lock cleanup" >&2
         return 0
       fi

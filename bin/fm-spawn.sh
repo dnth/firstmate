@@ -4182,6 +4182,7 @@ hermes_wait_for_reasoning() {  # <effort>
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
   && [ "$PREWALK_WORKTREE_READY" != 1 ] && [ "$RAW_LAUNCH_WORKTREE_READY" != 1 ]; then
   printf -v treehouse_get_command '%q' "$SCRIPT_DIR/fm-treehouse-get.sh"
+  treehouse_get_command="FM_TREEHOUSE_REJECT_SECONDMATE_MARKERS=1 $treehouse_get_command"
   if [ -n "$ACCEPTED_LOCAL_BASE" ]; then
     printf -v accepted_local_base_quoted '%q' "$ACCEPTED_LOCAL_BASE"
     treehouse_get_command="$treehouse_get_command --accepted-local-base $accepted_local_base_quoted"
