@@ -98,7 +98,7 @@ fm_lease_actor() {
 # state filename.
 fm_lease_valid_id() {
   case "${1:-}" in
-    '' | *[!A-Za-z0-9._-]*) return 1 ;;
+    ''|*[!A-Za-z0-9._-]*) return 1 ;;
     *) return 0 ;;
   esac
 }
@@ -128,7 +128,7 @@ fm_lease_read() {
     *) FM_LEASE_ACTOR= ;;
   esac
   case "$FM_LEASE_PID" in
-    '' | *[!0-9]*) FM_LEASE_PID= ;;
+    ''|*[!0-9]*) FM_LEASE_PID= ;;
   esac
   return 0
 }

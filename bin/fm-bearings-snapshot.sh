@@ -180,9 +180,7 @@ if [ -d "$STATE/reconcile-requests" ] && [ ! -L "$STATE/reconcile-requests" ]; t
       _task=${_req##*/}; _task=${_task%.request}
       _task_valid=1
       case "$_task" in
-        '' | *[!A-Za-z0-9._-]*)
-          _task_valid=0
-          ;;
+        ''|*[!A-Za-z0-9._-]*) _task_valid=0 ;;
       esac
       [ "$_task_valid" -eq 1 ] || continue
       printf '%s\t%s\n' "$_task" "$(sed -n 's/^requested=//p' "$_req" | head -1)"

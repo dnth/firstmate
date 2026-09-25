@@ -169,7 +169,7 @@ fm_run_timed() {  # <seconds> <command...>
 
 fm_timed_out() {  # <status>
   case ${1:-} in
-    124 | 137) return 0 ;;
+    124|137) return 0 ;;
   esac
   return 1
 }
@@ -183,7 +183,7 @@ fm_exec_timed() {  # <seconds> <grace-seconds> <command...>
   local seconds=${1:-} grace=${2:-} value
   for value in "$seconds" "$grace"; do
     case "$value" in
-      '' | 0* | *[!0-9]*)
+      ''|0*|*[!0-9]*)
         echo "fm_exec_timed: usage: fm_exec_timed <positive-seconds> <positive-grace-seconds> <command> [args...]" >&2
         exit 125
         ;;

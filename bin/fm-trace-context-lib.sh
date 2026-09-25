@@ -114,7 +114,7 @@ fm_trace_context_hex() {  # <byte-count>
   local bytes=$1 hex
   hex=$(LC_ALL=C od -An -v -tx1 -N "$bytes" /dev/urandom 2>/dev/null | tr -d ' \n') || return 1
   case "$hex" in
-    '' | *[!0-9a-f]*) return 1 ;;
+    ''|*[!0-9a-f]*) return 1 ;;
   esac
   [ "${#hex}" -eq "$((bytes * 2))" ] || return 1
   printf '%s' "$hex"
@@ -130,7 +130,7 @@ fm_trace_context_enabled() {  # <config-dir>
   if [ -n "${FM_TRACE_CONTEXT:-}" ]; then
     v=$(printf '%s' "$FM_TRACE_CONTEXT" | tr '[:upper:]' '[:lower:]')
     case "$v" in
-      1 | on | true | yes) return 0 ;;
+      1|on|true|yes) return 0 ;;
       *) return 1 ;;
     esac
   fi
@@ -150,7 +150,7 @@ fm_trace_context_session_lock() {  # <effective-state-file>
   # trailing 2>/dev/null on the bare read would still leak the open failure.
   { IFS= read -r lock_pid < "$state_dir/.lock"; } 2>/dev/null || return 1
   case "$lock_pid" in
-    '' | *[!0-9]*) return 1 ;;
+    ''|*[!0-9]*) return 1 ;;
   esac
   [ "$lock_pid" -gt 1 ] || return 1
   printf '%s' "$lock_pid"
