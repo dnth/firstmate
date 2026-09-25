@@ -265,6 +265,17 @@ wait_for_pane_input_pending() {
   return 1
 }
 
+wait_for_injection_marker() {
+  local i=0 marker_count
+  while [ "$i" -lt 30 ]; do
+    marker_count=$(awk -F '\t' '{ hex=$1; count += gsub(/e281a3/, "", hex) } END { print count + 0 }' "$LOG_FILE")
+    [ "$marker_count" -ge 1 ] && return 0
+    sleep 0.5
+    i=$((i + 1))
+  done
+  return 1
+}
+
 selfcheck_pane_input_pending
 
 # --- Scenario A: human-partial-input ----------------------------------------
@@ -355,7 +366,8 @@ test_scenario_b() {
 
   # Wait for the daemon to process the escalation and attempt inject (with the
   # swallowed Enter, the retry path fires).
-  sleep 8
+  wait_for_injection_marker \
+    || fail "Scenario B: digest marker was not delivered within timeout"
 
   # Assert: exactly ONE terminal-safe marker in the log (no duplicate, no loss).
   local marker_count
@@ -397,7 +409,8 @@ test_scenario_c() {
   start_daemon
 
   echo "done: PR https://example.test/pr/300" > "$STATE_DIR/fake-c1.status"
-  sleep 6
+  wait_for_injection_marker \
+    || fail "Scenario C: digest marker was not delivered within timeout"
 
   # Exactly one terminal-safe marker in the submitted log (no duplicate, no loss).
   local marker_count
