@@ -94,6 +94,18 @@ fm_backlog_bytes_of_string() {  # <string>
   perl -e 'print join(" ", unpack("C*", $ARGV[0])), "\n"' -- "$1"
 }
 
+# A pending-close record serializes each done flag as a raw `arg=` line, so a
+# --note value is percent-encoded at write time (every byte outside the
+# [A-Za-z0-9._-] set becomes %HH, matching the --pr argument's percent scheme)
+# and decoded back to the exact raw text when the marker is replayed. perl owns
+# both directions for the portability reason given on fm_backlog_bytes_of_string.
+fm_backlog_note_encode() {  # <raw-note>
+  perl -e 'my $s = $ARGV[0]; $s =~ s/([^A-Za-z0-9._-])/sprintf("%%%02X", ord($1))/ge; print $s' -- "$1"
+}
+fm_backlog_note_decode() {  # <encoded-note>
+  perl -e 'my $s = $ARGV[0]; $s =~ s/%([0-9A-Fa-f]{2})/chr(hex($1))/ge; print $s' -- "$1"
+}
+
 fm_backlog_bytes_of_file() {  # <path>
   perl -e 'open(my $f, "<", $ARGV[0]) or exit 1; binmode $f; local $/; my $c = <$f>; $c = "" unless defined $c; print join(" ", unpack("C*", $c)), "\n"' -- "$1"
 }
@@ -956,7 +968,24 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
     0) ;;
     2)
       case "${args[0]}" in
-        --note) [ "${args[1]}" = "local%20main" ] ;;
+        --note)
+          arg_value=${args[1]}
+          [ "${#arg_value}" -le 2048 ] \
+            && [ -n "$arg_value" ] \
+            && case "$arg_value" in *[!A-Za-z0-9%._-]*) false ;; *) true ;; esac \
+            && {
+              percent_tail=$arg_value
+              percent_valid=1
+              while case "$percent_tail" in *%*) true ;; *) false ;; esac; do
+                percent_tail=${percent_tail#*%}
+                case "$percent_tail" in
+                  [0-9A-Fa-f][0-9A-Fa-f]*) percent_tail=${percent_tail#??} ;;
+                  *) percent_valid=0; break ;;
+                esac
+              done
+              [ "$percent_valid" = 1 ]
+            }
+          ;;
         --pr)
           arg_value=${args[1]}
           [ "${#arg_value}" -le 2048 ] \
@@ -1054,8 +1083,8 @@ fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen
     shift
   fi
   for arg in "$@"; do
-    if [ "$previous_arg" = --note ] && [ "$arg" = "local main" ]; then
-      serialized_args+=("local%20main")
+    if [ "$previous_arg" = --note ]; then
+      serialized_args+=("$(fm_backlog_note_encode "$arg")")
     else
       serialized_args+=("$arg")
     fi
@@ -1131,7 +1160,7 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   [ "$mode" = close ] || mode_flags=(--retain)
   args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
   if [ "${args[0]-}" = --note ]; then
-    args[1]="local main"
+    args[1]=$(fm_backlog_note_decode "${args[1]}") || return 1
   fi
   meta="$state/$id.meta"
   if [ -e "$meta" ] || [ -L "$meta" ]; then

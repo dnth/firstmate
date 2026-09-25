@@ -49,6 +49,8 @@
 #   (w) index.lock mtime read failure                         -> lock kept, REFUSE
 #   (x) transient lock cleared after first failed return      -> retry ALLOW
 #   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
+#   (z) no-PR ship whose merged PR is discovered by branch    -> close row carries
+#       the landed branch and commit as its completion note
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -938,6 +940,34 @@ test_content_in_default_fallback_allows() {
   expect_code 0 "$rc" "content-landed: teardown should succeed when content is already in the default branch"
   ! grep -q REFUSED "$case_dir/stderr" || fail "content-landed: teardown printed a REFUSED line"
   pass "worktree whose content already landed in the default branch is torn down (content fallback)"
+}
+
+test_no_pr_landed_close_records_landed_note() {
+  local case_dir local_head pr_head
+  case_dir=$(make_case no-pr-landed-note)
+  write_meta "$case_dir" no-mistakes ship
+  # A merged PR discovered by branch name with NO pr= recorded (the
+  # yolo/no-CI flow): the landed-work gate proves landing, but the done row
+  # has no --pr to carry. The close must still link what landed - the
+  # worktree branch and commit that the gate verified.
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  pr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "no-mistakes auto-fix")
+  land_on_origin_main "$case_dir" feature.txt hello
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  seed_backlog_in_flight "$case_dir"
+
+  ! grep -qE '^(pr|pr_head)=' "$case_dir/state/task-x1.meta" \
+    || fail "no-pr-landed-note: test setup bug, meta unexpectedly has a pr= line"
+
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "no-pr-landed-note: teardown should succeed on a merged PR discovered by branch: $(cat "$case_dir/stderr")"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "no-pr-landed-note: teardown printed a REFUSED line"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "no-pr-landed-note: teardown returned success while its backlog item was still open: $(backlog_row_state "$case_dir")"
+  grep -F "landed branch fm/task-x1 commit $local_head" "$case_dir/data/backlog.md" >/dev/null \
+    || fail "no-pr-landed-note: closed backlog item did not record the landed branch and commit: $(cat "$case_dir/data/backlog.md")"
+  pass "no-PR teardown closes the row with the landed branch and commit"
 }
 
 test_content_fallback_refreshes_stale_origin_ref() {
@@ -3700,6 +3730,7 @@ test_merged_pr_with_later_local_commit_refuses
 test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
+test_no_pr_landed_close_records_landed_note
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses

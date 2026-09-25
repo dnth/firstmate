@@ -1062,11 +1062,13 @@ work_is_landed() {
 }
 
 # The completion links this teardown already holds locally. A scout's
-# deliverable is its report, a local-only ship lands on local main, and every
-# other ship carries the PR recorded on its own record.
+# deliverable is its report, a local-only ship lands on local main, every
+# other ship carries the PR recorded on its own record, and a PR-mode ship
+# whose record never gained pr= still proves its landing through the
+# worktree branch and commit the safety gate above just checked.
 BACKLOG_DONE_ARGS=()
 backlog_done_args() {
-  local data_relative
+  local data_relative landed_branch landed_commit
   BACKLOG_DONE_ARGS=()
   case "$KIND" in
     scout)
@@ -1078,6 +1080,25 @@ backlog_done_args() {
         BACKLOG_DONE_ARGS=(--note "local main")
       elif [ -n "$PR_URL" ]; then
         BACKLOG_DONE_ARGS=(--pr "$PR_URL")
+      elif [ "$FORCE" != "--force" ] && [ -d "$WT" ]; then
+        # A PR-mode ship whose PR was never recorded (merged before fm-pr-check
+        # ran, or a yolo/no-CI merge) has no --pr to attach: the done row would
+        # otherwise carry no completion link at all. Record what the landed-work
+        # gate above proved instead - the worktree branch and its landed commit.
+        # --force and a missing worktree prove nothing, so they keep the bare
+        # close rather than stamping an unproven landing on the row.
+        landed_branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
+        if [ -z "$landed_branch" ]; then
+          landed_branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+          [ "$landed_branch" = HEAD ] && landed_branch=
+        fi
+        landed_commit=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null || true)
+        [ -n "$landed_commit" ] || return 1
+        if [ -n "$landed_branch" ]; then
+          BACKLOG_DONE_ARGS=(--note "landed branch $landed_branch commit $landed_commit")
+        else
+          BACKLOG_DONE_ARGS=(--note "landed commit $landed_commit")
+        fi
       fi
       ;;
   esac
