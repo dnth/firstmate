@@ -345,7 +345,7 @@ SWEEP_UNPROVABLE=0
 
 sweep_classify_pool() {  # <repo> — fills the SWEEP_* arrays
   local repo=$1 status_rc entries parsed_entries parsed_rc line name path status nprocs leased destroying holder
-  local canon reason class default_ref porcelain_head
+  local canon reason class default_ref porcelain_head marker_reason
   SWEEP_CLASSES=(); SWEEP_NAMES=(); SWEEP_PATHS=(); SWEEP_REASONS=()
   SWEEP_UNSAFE_CLAIM=0; SWEEP_UNPROVABLE=0
   entries=$(
@@ -375,8 +375,14 @@ sweep_classify_pool() {  # <repo> — fills the SWEEP_* arrays
     [ -n "$path" ] || return 1
     class=skipped; reason=
     canon=
+    marker_reason=
+    if [ -e "$path/.fm-secondmate-home" ] || [ -L "$path/.fm-secondmate-home" ] \
+      || [ -e "$path/.fm-secondmate-parent" ] || [ -L "$path/.fm-secondmate-parent" ]; then
+      marker_reason="carries .fm-secondmate-home/.fm-secondmate-parent marker"
+    fi
     if [ "$leased" = 1 ]; then
       reason="leased${holder:+ to $holder}"
+      [ -z "$marker_reason" ] || reason="$reason; $marker_reason (possibly a live secondmate home)"
     elif [ "$destroying" = 1 ]; then
       reason="destroying"
     elif ! sweep_pool_path_registered "$repo" "$path"; then
@@ -442,21 +448,17 @@ sweep_classify_pool() {  # <repo> — fills the SWEEP_* arrays
           fi
           ;;
       esac
-      # A retired secondmate's role markers are gitignored residue invisible
-      # to the porcelain check, so a slot still carrying them must never read
-      # clean: the marker would make an ordinary task placed there read as a
-      # secondmate home to bin/fm-primary-scope-lib.sh. Read-only reporting;
-      # leased slots (a live secondmate legitimately carries its marker) and
-      # damaged/unregistered slots never reach this branch.
-      if { [ -e "$canon/.fm-secondmate-home" ] || [ -L "$canon/.fm-secondmate-home" ] \
-           || [ -e "$canon/.fm-secondmate-parent" ] || [ -L "$canon/.fm-secondmate-parent" ]; }; then
+      if [ -n "$marker_reason" ]; then
         if [ "$class" = clean ]; then
           class=dirty
-          reason="carries a retired secondmate's .fm-secondmate-home/.fm-secondmate-parent marker; removal stays manual until reviewed"
+          reason="$marker_reason; removal stays manual until reviewed"
         else
-          reason="${reason:+$reason; }carries a secondmate-home marker"
+          reason="${reason:+$reason; }$marker_reason"
         fi
       fi
+    fi
+    if [ -n "$marker_reason" ] && [ "$leased" != 1 ] && [ -z "$canon" ]; then
+      reason="${reason:+$reason; }$marker_reason"
     fi
     SWEEP_CLASSES+=("$class")
     SWEEP_NAMES+=("$name")

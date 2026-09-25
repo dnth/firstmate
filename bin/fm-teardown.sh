@@ -1289,11 +1289,12 @@ teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
   local out lock attempt=0 max_retries lock_desc
 
+  strip_returned_slot_role_markers "$dir" || return 1
+
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
   if out=$( ( cd "$cd_dir" && "$SCRIPT_DIR/fm-treehouse-command.sh" return --force "$dir" ) 2>&1 ); then
     [ -n "$out" ] && printf '%s\n' "$out"
-    strip_returned_slot_role_markers "$dir" || return 1
     return 0
   fi
   [ -n "$out" ] && printf '%s\n' "$out" >&2
@@ -1319,7 +1320,6 @@ teardown_treehouse_return() {
 
     if out=$( ( cd "$cd_dir" && "$SCRIPT_DIR/fm-treehouse-command.sh" return --force "$dir" ) 2>&1 ); then
       [ -n "$out" ] && printf '%s\n' "$out"
-      strip_returned_slot_role_markers "$dir" || return 1
       echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
       return 0
     fi
@@ -1347,7 +1347,6 @@ teardown_treehouse_return() {
       fi
       if out=$( ( cd "$cd_dir" && "$SCRIPT_DIR/fm-treehouse-command.sh" return --force "$dir" ) 2>&1 ); then
         [ -n "$out" ] && printf '%s\n' "$out"
-        strip_returned_slot_role_markers "$dir" || return 1
         echo "teardown: $label return succeeded after stale-lock cleanup" >&2
         return 0
       fi

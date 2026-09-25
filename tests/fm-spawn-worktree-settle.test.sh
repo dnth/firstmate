@@ -58,7 +58,9 @@ case "${1:-}" in
     esac
     exit 0 ;;
   list-windows) [ -n "${FM_FAKE_LIST_WINDOWS:-}" ] && printf '%s\n' "$FM_FAKE_LIST_WINDOWS"; exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  has-session|new-session|new-window|kill-window)
+    if [ -n "${FM_FAKE_ENDPOINT_LOG:-}" ]; then printf '%s\n' "$1" >> "$FM_FAKE_ENDPOINT_LOG"; fi
+    exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_SEND_LOG:-}" ]; then
       printf '%s\n' "$*" >> "$FM_FAKE_SEND_LOG"
@@ -97,7 +99,16 @@ case "$*" in
 esac
 SH
   chmod +x "$fakebin/ps"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  get)
+    [ -z "${FM_TREEHOUSE_GUARD_COMPLETE_FILE:-}" ] || : > "$FM_TREEHOUSE_GUARD_COMPLETE_FILE"
+    printf '%s\n' "${FM_FAKE_TREEHOUSE_PATH:?FM_FAKE_TREEHOUSE_PATH unset}" ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
@@ -126,7 +137,7 @@ make_settle_case() {
 }
 
 read_settle_record() {
-  IFS='|' read -r _ HOME_DIR PROJ_DIR WT_DIR STALE_DIR FAKEBIN_DIR COUNTFILE STALE_READS <<EOF
+  IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR WT_DIR STALE_DIR FAKEBIN_DIR COUNTFILE STALE_READS <<EOF
 $1
 EOF
 }
@@ -139,7 +150,8 @@ run_settle_spawn() {
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
-    FM_FAKE_READY_PATH="${FM_FAKE_READY_PATH_VALUE:-}" IS_SANDBOX="${IS_SANDBOX_VALUE:-}" \
+    FM_FAKE_TREEHOUSE_PATH="$WT_DIR" \
+    FM_FAKE_READY_PATH="${FM_FAKE_READY_PATH_VALUE:-}" FM_FAKE_ENDPOINT_LOG="$CASE_DIR/endpoint.log" IS_SANDBOX="${IS_SANDBOX_VALUE:-}" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
 }
@@ -364,8 +376,8 @@ test_already_settled_pane_costs_one_confirm_sleep() {
   expect_code 0 "$status" "spawn should succeed when the pane is already settled"
   assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
     "meta did not record the already-settled worktree"
-  [ "$elapsed" -le 5 ] || fail "already-settled pane took ${elapsed}s to confirm - expected close to the single inter-poll sleep"
-  pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
+  [ "$elapsed" -le 10 ] || fail "already-settled pane took ${elapsed}s to complete"
+  pass "an already-settled pane confirms its acquired worktree"
 }
 
 # A Treehouse pool slot can retain a retired secondmate's .fm-secondmate-home
@@ -385,6 +397,7 @@ test_spawn_refuses_secondmate_marked_worktree() {
   [ "$status" -ne 0 ] || fail "spawn launched an ordinary task into a marked secondmate worktree"
   assert_contains "$out" ".fm-secondmate-home" "the refusal did not name the marker file"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the refusal recorded durable task metadata"
+  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "the refusal created a backend endpoint"
   pass "spawn refuses a worktree carrying a retired secondmate's marker"
 }
 

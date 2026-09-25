@@ -1005,6 +1005,7 @@ SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 OMP_ABORT_CLEANUP=0
 OMP_ABORT_INITIAL_HEAD=
 PREWALK_WORKTREE_READY=0
+TREEHOUSE_WORKTREE_READY=0
 PREWALK_ABORT_PHASE=none
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
@@ -3556,6 +3557,30 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; t
   }
   SPAWN_START_DIR=$WT
 fi
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
+  && [ "$HARNESS" != omp ] && [ "$RAW_LAUNCH_WORKTREE_READY" != 1 ] \
+  && { [ "${IS_SANDBOX:-0}" != 1 ] || [ -n "${FM_TREEHOUSE_LOCAL_ROOT:-}" ]; }; then
+  treehouse_lease_args=(--lease --lease-holder "$W")
+  [ -z "$ACCEPTED_LOCAL_BASE" ] || treehouse_lease_args+=(--accepted-local-base "$ACCEPTED_LOCAL_BASE")
+  WT=$(cd "$PROJ_ABS" && FM_TREEHOUSE_REJECT_SECONDMATE_MARKERS=1 \
+    "$SCRIPT_DIR/fm-treehouse-get.sh" "${treehouse_lease_args[@]}") || {
+    echo "error: ordinary task could not lease an authoritative pooled worktree before endpoint creation" >&2
+    exit 1
+  }
+  validate_spawn_worktree "treehouse lease" "$W"
+  validate_spawn_pool_lease "treehouse lease" "$W" || exit 1
+  freshen_spawn_worktree_base "$WT" || exit 1
+  TREEHOUSE_WORKTREE_READY=1
+  SPAWN_POOL_LEASE_ABORT=1
+  SPAWN_START_DIR=$WT
+  if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
+    if ! fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME"; then
+      echo "error: could not claim Treehouse pool slot $WT for task $ID; refusing to launch a worker whose slot cannot later be proved to be its own" >&2
+      exit 1
+    fi
+    SPAWN_SLOT_CLAIMED=1
+  fi
+fi
 # Proven-gone relaunch endpoints: when the recorded endpoint is authoritatively
 # absent, the cwd proof below cannot run - there is no live pane to ask - so it
 # is skipped and the endpoint is recreated in the recorded worktree instead.
@@ -4180,7 +4205,8 @@ hermes_wait_for_reasoning() {  # <effort>
 }
 
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
-  && [ "$PREWALK_WORKTREE_READY" != 1 ] && [ "$RAW_LAUNCH_WORKTREE_READY" != 1 ]; then
+  && [ "$PREWALK_WORKTREE_READY" != 1 ] && [ "$RAW_LAUNCH_WORKTREE_READY" != 1 ] \
+  && [ "$TREEHOUSE_WORKTREE_READY" != 1 ]; then
   printf -v treehouse_get_command '%q' "$SCRIPT_DIR/fm-treehouse-get.sh"
   treehouse_get_command="FM_TREEHOUSE_REJECT_SECONDMATE_MARKERS=1 $treehouse_get_command"
   if [ -n "$ACCEPTED_LOCAL_BASE" ]; then
