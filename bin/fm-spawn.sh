@@ -229,6 +229,20 @@
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # When these registries are enabled, state/<id>.meta records grok_turnend_dir= and kimi_turnend_dir= so teardown removes tokens through their owning directories.
+# Publishing the record and moving this home's backlog item to In flight are one
+# step, not two: bin/fm-backlog-transition-lib.sh owns that invariant, and this
+# script performs the transition under the task's own meta lock before it reports
+# success. A ship or scout dispatch therefore REFUSES up front, before any
+# endpoint, worktree, or record exists, unless the home's backlog has an
+# unheld, unblocked Queued or In flight item for the id; a transition that fails
+# after publication removes the record it just wrote rather than leaving a
+# worker the backlog does not own. A relaunch re-reads the row instead of
+# re-running the transition, so an eligible In-flight item is left untouched.
+# The transition is skipped entirely for --secondmate spawns (persistent agents
+# are not work items), on a config/backlog-backend=manual home, and in a
+# markdown home that keeps no data/backlog.md. A configured non-markdown
+# adapter remains active without a markdown file; any active automatic backend
+# without compatible tasks-axi refuses before creating lifecycle state.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
@@ -263,8 +277,18 @@ esac
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
+# shellcheck source=bin/fm-tasks-axi-lib.sh
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-backlog-transition-lib.sh
+. "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+
 resolve_directory_input() {
-  local name=$1 path=$2 resolved
+  local name=$1 path=$2 resolved raw_bytes
+  raw_bytes=$(fm_backlog_bytes_of_string "$path") || return 1
+  if ! fm_backlog_control_bytes_valid 0 "$raw_bytes"; then
+    echo "error: $name directory contains an invalid control byte" >&2
+    return 1
+  fi
   case "$path" in
     /*) printf '%s\n' "$path"; return 0 ;;
   esac
@@ -993,6 +1017,12 @@ SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_META_LOCK=
 SPAWN_META_LOCK_HELD=0
+SPAWN_META_TMP=
+SPAWN_FRESH_COMMIT_PENDING=0
+# Set by abort branches that deliberately keep the endpoint, worktree, or task
+# artifacts for reconciliation; while set, the provisional-record rollback must
+# not remove the record those artifacts still need.
+SPAWN_ABORT_PRESERVED=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
@@ -1001,6 +1031,19 @@ CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 TREEHOUSE_READY_DIR=
 DEVIN_CONFIG_PATH=
+
+# Roll back a fresh dispatch whose backlog commit failed or whose run aborted
+# after the provisional record was published: remove the record and the busy
+# state it armed, so no worker is left that the backlog does not own.
+spawn_fresh_commit_rollback() {
+  if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
+    "$FM_ROOT/bin/fm-busy-event.sh" "$STATE" "$ID" "${BUSY_GEN:-}"; then
+    SPAWN_FRESH_COMMIT_PENDING=0
+    return 0
+  fi
+  echo "error: $FM_BACKLOG_TRANSITION_ERROR" >&2
+  return 1
+}
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -1057,6 +1100,9 @@ spawn_omp_abort_clean_unchanged_worktree() {  # <context>
   current_head=$(git -C "$WT" rev-parse HEAD 2>/dev/null || true)
   if [ -z "$OMP_ABORT_INITIAL_HEAD" ] || [ "$current_head" != "$OMP_ABORT_INITIAL_HEAD" ] \
     || ! fm_pool_worktree_clean "$WT"; then
+    # The worktree still holds work; keep the task record with it so
+    # reconciliation can account for what is still live.
+    SPAWN_ABORT_PRESERVED=1
     echo "warning: $context found work to preserve in $WT" >&2
   elif (cd "$PROJ_ABS" && "$SCRIPT_DIR/fm-treehouse-command.sh" return --force "$WT" >/dev/null 2>&1); then
     [ -z "${TASK_TMP:-}" ] || rm -rf "$TASK_TMP"
@@ -1069,6 +1115,7 @@ spawn_omp_abort_clean_unchanged_worktree() {  # <context>
       rm -f -- "$_turnend_marker"
     done
   else
+    SPAWN_ABORT_PRESERVED=1
     echo "warning: $context could not return the unchanged worktree $WT" >&2
   fi
 }
@@ -1089,6 +1136,7 @@ spawn_abort_cleanup() {
     endpoint)
       PREWALK_ABORT_PHASE=none
       if ! spawn_omp_abort_endpoint_stopped; then
+        SPAWN_ABORT_PRESERVED=1
         echo "warning: OMP spawn cleanup could not confirm its owned endpoint stopped; preserving its worktree and task artifacts" >&2
       else
         spawn_omp_abort_clean_unchanged_worktree "OMP spawn cleanup"
@@ -1096,10 +1144,12 @@ spawn_abort_cleanup() {
       ;;
     ambiguous)
       PREWALK_ABORT_PHASE=none
+      SPAWN_ABORT_PRESERVED=1
       echo "warning: OMP spawn cleanup is preserving its leased worktree because backend endpoint creation was ambiguous" >&2
       ;;
     occupant)
       PREWALK_ABORT_PHASE=none
+      SPAWN_ABORT_PRESERVED=1
       echo "warning: OMP Prewalk spawn cleanup is preserving its leased worktree because prior occupant liveness was not disproven" >&2
       ;;
   esac
@@ -1120,8 +1170,12 @@ spawn_abort_cleanup() {
     OMP_ABORT_CLEANUP=0
     meta="${STATE:-}/${ID:-}.meta"
     if ! spawn_omp_abort_ownership_proven "$meta"; then
+      SPAWN_ABORT_PRESERVED=1
       echo "warning: OMP spawn cleanup could not prove ownership; preserving its endpoint, worktree, and task artifacts" >&2
     elif [ "${KIND:-}" = secondmate ]; then
+      # A secondmate's home, metadata, and sessions are always preserved; the
+      # provisional-record rollback below must not remove them either.
+      SPAWN_ABORT_PRESERVED=1
       if ! grep -Fqx 'kind=secondmate' "$meta" || ! grep -Fqx "home=$WT" "$meta"; then
         echo "warning: OMP secondmate spawn cleanup could not prove persistent-home ownership; preserving its endpoint, home, metadata, and sessions" >&2
       elif ! spawn_omp_abort_endpoint_stopped "$meta"; then
@@ -1130,6 +1184,7 @@ spawn_abort_cleanup() {
         echo "warning: OMP secondmate launch failed after endpoint creation; stopped only its owned endpoint and preserved its persistent home, metadata, and sessions" >&2
       fi
     elif ! spawn_omp_abort_endpoint_stopped "$meta"; then
+      SPAWN_ABORT_PRESERVED=1
       echo "warning: OMP spawn cleanup could not confirm its owned endpoint stopped; preserving its worktree and task artifacts" >&2
     else
       spawn_omp_abort_clean_unchanged_worktree "OMP spawn cleanup stopped its endpoint but"
@@ -1160,6 +1215,15 @@ spawn_abort_cleanup() {
     fi
     if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
       if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
+        # The leaked Orca worktree gets a recovery record below, so the
+        # provisional dispatch record must be rolled back first - otherwise the
+        # recovery write would resurrect a record the rollback just removed.
+        if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ]; then
+          if ! spawn_fresh_commit_rollback; then
+            status=1
+          fi
+          SPAWN_FRESH_COMMIT_PENDING=0
+        fi
         mkdir -p "$STATE" 2>/dev/null || true
         if [ -d "$STATE" ]; then
           # This abort-recovery writer publishes the leaked Orca worktree's
@@ -1201,6 +1265,16 @@ spawn_abort_cleanup() {
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
+  fi
+  # A fresh spawn that published its provisional record but never reached the
+  # backlog commit must not leave a task record the backlog does not own - but
+  # only once cleanup is proven: when an abort branch deliberately preserved the
+  # endpoint, worktree, or artifacts (SPAWN_ABORT_PRESERVED), the record stays so
+  # reconciliation can still account for what is still live.
+  if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ] && [ "$SPAWN_ABORT_PRESERVED" != 1 ]; then
+    if ! spawn_fresh_commit_rollback; then
+      status=1
+    fi
   fi
   if [ "$SPAWN_META_LOCK_HELD" = 1 ]; then
     SPAWN_META_LOCK_HELD=0
@@ -1341,6 +1415,44 @@ if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   exit 1
 fi
 SPAWN_TASK_LOCK_HELD=1
+
+# Backlog preflight (bin/fm-backlog-transition-lib.sh). This spawn is about to
+# become the sole owner of the row's In-flight transition, so prove the row is
+# transitionable BEFORE any endpoint, worktree, or record exists: a refusal here
+# costs nothing to unwind, while the same refusal after publication would strand
+# a live pane. The authoritative mutation still runs under the meta lock below.
+BACKLOG_TRANSITION=0
+BACKLOG_ROW_STATE=
+if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
+  BACKLOG_TRANSITION=1
+  if fm_backlog_row_probe "$DATA" "$ID"; then
+    BACKLOG_ROW_STATE=$FM_BACKLOG_ROW_STATE
+  elif [ "$FM_BACKLOG_ROW_RESULT" = not_found ]; then
+    echo "error: task $ID has no backlog item in this home, so dispatching it would leave a worker no record owns; add it first (bin/fm-tasks-axi.sh add $ID '<title>' --kind $KIND) and re-run" >&2
+    exit 1
+  else
+    echo "error: task $ID's backlog item could not be read before dispatch ($FM_BACKLOG_ROW_ERROR)" >&2
+    exit 1
+  fi
+  if ! fm_backlog_row_dispatchable "$BACKLOG_ROW_STATE"; then
+    echo "error: this home's backlog item $ID is not dispatchable in state $BACKLOG_ROW_STATE; refusing before creating its endpoint or local copy" >&2
+    exit 1
+  fi
+else
+  BACKLOG_GATE_STATUS=$?
+  if [ "$BACKLOG_GATE_STATUS" -eq 2 ]; then
+    echo "error: task $ID cannot be dispatched because its backlog data directory is inaccessible: $DATA ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+    exit 1
+  fi
+fi
+# A pending authoritative close survives a crashed teardown and is replayed at
+# the next session start; dispatching over it would resurrect a task whose close
+# is already recorded. The same check repeats under the meta lock before the
+# record is published.
+if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
+  echo "error: task $ID has a pending authoritative backlog close at $STATE/$ID.backlog-close; finish or repair that close before dispatching a new worker" >&2
+  exit 1
+fi
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
@@ -4669,6 +4781,22 @@ META_WINDOW=$T
 SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
 fm_lock_acquire_wait "$SPAWN_META_LOCK"
 SPAWN_META_LOCK_HELD=1
+# The record is staged beside its target and published atomically, so an abort
+# mid-write can never leave a truncated meta that teardown would read as a live
+# task. A fresh spawn's published record is provisional until the backlog commit
+# below; SPAWN_FRESH_COMMIT_PENDING makes the abort path roll it back.
+if [ "$RELAUNCH" -eq 1 ]; then
+  SPAWN_META_TMP="$STATE/.$ID.meta.relaunch.${BASHPID:-$$}"
+else
+  SPAWN_META_TMP="$STATE/.$ID.meta.spawn.${BASHPID:-$$}"
+fi
+# The pending-close check repeats under the meta lock that serializes this
+# record against teardown: a close recorded between the preflight above and
+# this lock is still refused before the record is written.
+if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
+  echo "error: task $ID has a pending authoritative backlog close at $STATE/$ID.backlog-close; finish or repair that close before dispatching a new worker" >&2
+  exit 1
+fi
 {
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
@@ -4741,7 +4869,18 @@ SPAWN_META_LOCK_HELD=1
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-} > "$STATE/$ID.meta"
+} > "$SPAWN_META_TMP" || {
+  echo "error: task record for $ID could not be prepared at $SPAWN_META_TMP" >&2
+  exit 1
+}
+if [ "$RELAUNCH" -eq 0 ]; then
+  SPAWN_FRESH_COMMIT_PENDING=1
+fi
+if ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE"; then
+  echo "error: task record for $ID could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+  exit 1
+fi
+SPAWN_META_TMP=
 SPAWN_POOL_LEASE_ABORT=0
 # The record is published, so a teardown's slot-ownership scan can now name this
 # task. The Treehouse project lock is only needed across slot allocation through
@@ -5168,6 +5307,117 @@ if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
       echo "CONFIG_REREAD: secondmate $ID: cleanup failed; pre-relaunch generations were force-cleared where possible (destination=$PROJ_ABS source=$FM_HOME)" >&2
     fi
   fi
+fi
+
+# Fuse the backlog In-flight transition into the publication that created the
+# record (bin/fm-backlog-transition-lib.sh owns the invariant). It runs under
+# this task's own meta lock, so a steer or teardown racing the same id stays
+# serialized exactly as before, and it is deferred to this final commit point so
+# every earlier launch-delivery failure remains unwindable.
+spawn_commit_backlog_transition() {
+  [ "$BACKLOG_TRANSITION" = 1 ] || return 0
+  fm_backlog_atomic_transition dispatch "$STATE/$ID.meta" "$DATA" "$ID" "$STATE"
+}
+
+
+# The deferred-signal exit path's preservation report. A claim about preserved
+# state is only trustworthy if that state is read back after the commit, so
+# this re-reads the paired record and the backlog row under the same per-task
+# lock as the commit, repairs a row the commit believed it moved, and sets
+# SPAWN_PRESERVED_CLAIM to exactly what was verified or attempted - never
+# intent phrased as outcome.
+spawn_report_preserved_state() {
+  local repair_error=
+  if ! fm_backlog_record_present "$STATE/$ID.meta" "task record" "$STATE"; then
+    SPAWN_PRESERVED_CLAIM="preservation could not be verified: its paired task record is missing; close out its backlog item by hand"
+    return 1
+  fi
+  if ! fm_backlog_row_probe "$DATA" "$ID"; then
+    if [ "$FM_BACKLOG_ROW_RESULT" = not_found ]; then
+      SPAWN_PRESERVED_CLAIM="preservation could not be verified: its backlog item was not found; close out its paired task record by hand"
+    else
+      SPAWN_PRESERVED_CLAIM="preservation could not be verified: its backlog item state is unreadable (${FM_BACKLOG_ROW_ERROR:-no error recorded}); close out its paired task record and backlog item by hand"
+    fi
+    return 1
+  fi
+  if [ "$FM_BACKLOG_ROW_STATE" = "in_flight no no" ]; then
+    SPAWN_PRESERVED_CLAIM="verified preserved: its paired task record is present and its backlog item is In flight"
+    return 0
+  fi
+  # The commit reported success, but the row does not read back In flight:
+  # move it now under the same lock and verify the result before naming it.
+  fm_backlog_start "$DATA" "$ID" || repair_error=$FM_BACKLOG_TRANSITION_ERROR
+  if [ -z "$repair_error" ] &&
+    fm_backlog_row_probe "$DATA" "$ID" &&
+    [ "$FM_BACKLOG_ROW_STATE" = "in_flight no no" ]; then
+    SPAWN_PRESERVED_CLAIM="its backlog item did not read back In flight after the commit; it was moved to In flight now and verified, together with its paired task record"
+    return 0
+  fi
+  SPAWN_PRESERVED_CLAIM="preservation could not be verified: its backlog item reads ${FM_BACKLOG_ROW_STATE:-unreadable}${repair_error:+, and moving it to In flight failed ($repair_error)}; close out its paired task record and backlog item by hand"
+  return 1
+}
+
+# This is the commit point: all endpoint and harness delivery that can reject
+# the spawn has succeeded. Transition the row while holding the same per-task
+# lock as metadata publication, then and only then report success. Signals are
+# deferred across the commit so an interruption cannot split the record from
+# its row without the exit path reporting exactly what was preserved.
+SPAWN_DEFERRED_SIGNAL=
+if [ "$BACKLOG_TRANSITION" = 1 ]; then
+  trap 'SPAWN_DEFERRED_SIGNAL=HUP' HUP
+  trap 'SPAWN_DEFERRED_SIGNAL=INT' INT
+  trap 'SPAWN_DEFERRED_SIGNAL=TERM' TERM
+fi
+SPAWN_BACKLOG_COMMIT_STATUS=0
+# Both the commit and its preservation read-back run under this task's meta
+# lock, so an unresponsive tasks-axi there would hold the lock - and every
+# lifecycle operation waiting on it - open ended, with even the deferred
+# signals parked in a trap. Bound each invocation
+# (bin/fm-backlog-transition-lib.sh's fm_tasks_axi): a timed-out call fails
+# through the ordinary error plumbing, and the interrupted exit path reports
+# it as the reason the preservation could not be verified.
+FM_TASKS_AXI_TIMEOUT=${FM_TASKS_AXI_TIMEOUT:-30}
+if spawn_commit_backlog_transition; then
+  :
+else
+  SPAWN_BACKLOG_COMMIT_STATUS=$?
+  if spawn_commit_backlog_transition; then
+    SPAWN_BACKLOG_COMMIT_STATUS=0
+  fi
+fi
+if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -eq 0 ]; then
+  # The provisional record is now committed: the abort path must not roll it
+  # back, and teardown owns it from here.
+  SPAWN_FRESH_COMMIT_PENDING=0
+fi
+if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
+  if [ "$RELAUNCH" -eq 0 ]; then
+    if spawn_fresh_commit_rollback; then
+      echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); its record was removed so no worker is left that the backlog does not own - close out endpoint $T and local copy $WT by hand, then re-run the spawn" >&2
+    else
+      echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR), and failed-dispatch cleanup is incomplete; the provisional record may remain at $STATE/$ID.meta - close out endpoint $T and local copy $WT by hand, then remove the record and busy state before retrying" >&2
+    fi
+  fi
+fi
+trap - HUP INT TERM
+if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
+  exit "$SPAWN_BACKLOG_COMMIT_STATUS"
+fi
+if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
+  case "$SPAWN_DEFERRED_SIGNAL" in
+  HUP) SPAWN_DEFERRED_SIGNAL_STATUS=129 ;;
+  INT) SPAWN_DEFERRED_SIGNAL_STATUS=130 ;;
+  TERM) SPAWN_DEFERRED_SIGNAL_STATUS=143 ;;
+  esac
+  # Keep deferring further signals so the read-back below cannot itself be
+  # killed halfway through verifying or correcting the preserved state.
+  trap 'SPAWN_DEFERRED_SIGNAL=$SPAWN_DEFERRED_SIGNAL' HUP INT TERM
+  # Deliberately unguarded against errexit: a failed verification still set
+  # the honest attempted-preservation claim the exit below reports.
+  spawn_report_preserved_state || true
+  trap - HUP INT TERM
+  echo "error: spawn of $ID was interrupted after launch delivery began; $SPAWN_PRESERVED_CLAIM" >&2
+  exit "$SPAWN_DEFERRED_SIGNAL_STATUS"
 fi
 
 fm_lock_release "$SPAWN_META_LOCK"

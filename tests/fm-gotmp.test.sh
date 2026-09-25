@@ -47,7 +47,7 @@ TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-gotmp-tests.XXXXXX")
 make_fake_root() {
   local id=$1 tasktmp=$2
   local fake="$TMP_ROOT/$id"
-  mkdir -p "$fake/bin/backends" "$fake/state"
+  mkdir -p "$fake/bin/backends" "$fake/state" "$fake/data"
   # Symlink the REAL teardown so the test exercises actual code, not a copy.
   ln -s "$TEARDOWN" "$fake/bin/fm-teardown.sh"
   # fm-backend.sh + its OMP identity library + tmux adapter: symlink the REAL
@@ -85,6 +85,19 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-secondmate-registry-lib.sh" "$fake/bin/fm-secondmate-registry-lib.sh"
   ln -s "$ROOT/bin/fm-secondmate-parent-lib.sh" "$fake/bin/fm-secondmate-parent-lib.sh"
   ln -s "$ROOT/bin/fm-secondmate-nudge-lib.sh" "$fake/bin/fm-secondmate-nudge-lib.sh"
+  # fm-backlog-transition-lib.sh + fm-timeout-lib.sh: teardown sources the
+  # transition library for the fused backlog close; it sources the timeout
+  # library itself.
+  ln -s "$ROOT/bin/fm-backlog-transition-lib.sh" "$fake/bin/fm-backlog-transition-lib.sh"
+  ln -s "$ROOT/bin/fm-timeout-lib.sh" "$fake/bin/fm-timeout-lib.sh"
+  # fm-tasks-axi-lib.sh: stub (teardown sources it). Report no backend so
+  # backlog_refresh_reminder takes the plain-message path; no tasks-axi here.
+  cat > "$fake/bin/fm-tasks-axi-lib.sh" <<'SH'
+fm_tasks_axi_backend_available() { return 1; }
+fm_backlog_backend_value() { printf '%s\n' tasks-axi; }
+fm_backlog_backend_manual() { return 1; }
+fm_tasks_axi_backend() { printf '%s\n' markdown; }
+SH
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -97,11 +110,6 @@ SH
 exit 0
 SH
   chmod +x "$fake/bin/fm-fleet-sync.sh"
-  # fm-tasks-axi-lib.sh: stub (teardown sources it). Report no backend so
-  # backlog_refresh_reminder takes the plain-message path; no tasks-axi here.
-  cat > "$fake/bin/fm-tasks-axi-lib.sh" <<'SH'
-fm_tasks_axi_backend_available() { return 1; }
-SH
   # Meta with a nonexistent worktree so the dirty/treehouse blocks skip.
   cat > "$fake/state/$id.meta" <<META
 window=fakeses:fm-$id
@@ -140,7 +148,7 @@ test_teardown_skips_gracefully_without_tasktmp() {
   # not error and must not remove anything.
   local id=td-absent-z3
   local fake="$TMP_ROOT/$id-root"
-  mkdir -p "$fake/bin/backends" "$fake/state"
+  mkdir -p "$fake/bin/backends" "$fake/state" "$fake/data"
   ln -s "$TEARDOWN" "$fake/bin/fm-teardown.sh"
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
   ln -s "$ROOT/bin/fm-omp-process-lib.sh" "$fake/bin/fm-omp-process-lib.sh"
@@ -179,8 +187,13 @@ SH
 exit 0
 SH
   chmod +x "$fake/bin/fm-fleet-sync.sh"
+  ln -s "$ROOT/bin/fm-backlog-transition-lib.sh" "$fake/bin/fm-backlog-transition-lib.sh"
+  ln -s "$ROOT/bin/fm-timeout-lib.sh" "$fake/bin/fm-timeout-lib.sh"
   cat > "$fake/bin/fm-tasks-axi-lib.sh" <<'SH'
 fm_tasks_axi_backend_available() { return 1; }
+fm_backlog_backend_value() { printf '%s\n' tasks-axi; }
+fm_backlog_backend_manual() { return 1; }
+fm_tasks_axi_backend() { printf '%s\n' markdown; }
 SH
   # No tasktmp= line at all.
   cat > "$fake/state/$id.meta" <<META

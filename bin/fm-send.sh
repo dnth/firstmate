@@ -737,7 +737,7 @@ RESOLVE_HOLD_KEYS=
 fm_send_hold_is_active() {  # <task-id> <decision-key>
   local show
   command -v tasks-axi >/dev/null 2>&1 || return 1
-  show=$( (cd "$FM_HOME" && tasks-axi show "$1-decision-$2" --full) 2>/dev/null ) || return 1
+  show=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE='' "$SCRIPT_DIR/fm-tasks-axi.sh" show "$1-decision-$2" --full 2>/dev/null) || return 1
   case "$show" in *"held: yes"*) : ;; *) return 1 ;; esac
   case "$show" in *"hold_kind: captain"*) : ;; *) return 1 ;; esac
   case "$show" in *"state: queued"*) return 0 ;; esac

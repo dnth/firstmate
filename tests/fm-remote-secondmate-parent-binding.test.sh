@@ -225,9 +225,13 @@ write_child_meta() {
   fm_write_meta "$REMOTE_HOME/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
     "worktree=$CHILD_WT" "project=$CHILD_WT" "harness=codex" "kind=ship" \
-    "mode=local-only" "yolo=off"
+    "mode=local-only" "yolo=off" "spawn_gen=remote-binding-test-g1"
 }
 mkdir -p "$TMP_ROOT/childfake"
+# This test exercises parent-binding resolution, not backlog transitions; mark
+# the remote home's backlog manual so the lifecycle gate stays out of the way.
+mkdir -p "$REMOTE_HOME/config"
+printf 'manual\n' > "$REMOTE_HOME/config/backlog-backend"
 for t in tmux treehouse no-mistakes gh gh-axi tasks-axi; do
   printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP_ROOT/childfake/$t"
   chmod +x "$TMP_ROOT/childfake/$t"

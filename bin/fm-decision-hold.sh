@@ -171,8 +171,11 @@ load_decision() {  # <path>; sets DECISION_TEXT and DECISION_DIGEST
   DECISION_DIGEST=$(sha256_text "$decision")
 }
 
+# Every tasks-axi call addresses $FM_HOME/data through bin/fm-tasks-axi.sh. An
+# inherited FM_DATA_OVERRIDE is cleared so a caller's override cannot divert a
+# hold or answer to another home's backlog.
 tasks_axi() {
-  (cd "$FM_HOME" && tasks-axi "$@")
+  FM_HOME="$FM_HOME" FM_DATA_OVERRIDE='' "$SCRIPT_DIR/fm-tasks-axi.sh" "$@"
 }
 
 require_tasks_axi() {

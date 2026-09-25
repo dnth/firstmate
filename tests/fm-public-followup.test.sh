@@ -593,7 +593,7 @@ test_secondmate_teardown_requires_parent_binding() {
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
-    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    "worktree=$child" "project=$child" "kind=ship" "mode=local-only" "spawn_gen=pf-test-g1"
 
   PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
@@ -617,7 +617,7 @@ test_secondmate_teardown_requires_parent_binding() {
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
-    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    "worktree=$child" "project=$child" "kind=ship" "mode=local-only" "spawn_gen=pf-test-g1"
   assert_absent "$child/.fm-secondmate-parent" \
     "the legacy env-only binding case must not gain a durable parent record"
 
@@ -726,7 +726,7 @@ test_secondmate_teardown_resolves_parent_from_durable_record_when_env_lost() {
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
-    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    "worktree=$child" "project=$child" "kind=ship" "mode=local-only" "spawn_gen=pf-test-g1"
 
   # No FM_PUBLIC_FOLLOWUP_PRIMARY_HOME at all here: a restart of the secondmate
   # agent that drops the launch-time prefix must still find the real parent
@@ -759,7 +759,7 @@ test_secondmate_teardown_durable_record_missing_parent_registration_still_refuse
   assert_local_secondmate_parent_record "$child" "$parent_resolved"
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
-    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    "worktree=$child" "project=$child" "kind=ship" "mode=local-only" "spawn_gen=pf-test-g1"
   # No parent/state/mate.meta at all: the parent never recorded this secondmate's
   # own agent, so its side of the binding is genuinely missing. A durable LOCAL
   # record naming the real parent path must not be enough on its own to bypass
@@ -797,7 +797,7 @@ test_secondmate_teardown_durable_record_with_unknown_field_succeeds() {
   fm_write_meta "$child/state/work-clean.meta" \
     "window=firstmate:fm-work-clean" "endpoint_task_id=work-clean" \
     "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
-    "kind=ship" "mode=local-only"
+    "kind=ship" "mode=local-only" "spawn_gen=pf-test-g1"
 
   rc=0
   out=$(PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
@@ -829,7 +829,7 @@ test_secondmate_teardown_rejects_conflicting_live_and_durable_parent_bindings() 
   fm_write_meta "$child/state/work-conflict.meta" \
     "window=firstmate:fm-work-conflict" "endpoint_task_id=work-conflict" \
     "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
-    "kind=ship" "mode=local-only"
+    "kind=ship" "mode=local-only" "spawn_gen=pf-test-g1"
 
   PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
@@ -856,7 +856,7 @@ test_secondmate_teardown_rejects_unsafe_durable_parent_records() {
     fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
     fm_write_meta "$child/state/work-child.meta" \
       "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
-      "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+      "worktree=$child" "project=$child" "kind=ship" "mode=local-only" "spawn_gen=pf-test-g1"
     parent_record="$child/.fm-secondmate-parent"
     case "$case_name" in
       symlink)
@@ -923,7 +923,7 @@ test_secondmate_teardown_rejects_nul_bearing_durable_parent_record() {
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
     "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
-    "kind=ship" "mode=local-only"
+    "kind=ship" "mode=local-only" "spawn_gen=pf-test-g1"
   pre=${parent_resolved%??????}
   suf=${parent_resolved#"$pre"}
   record="$child/.fm-secondmate-parent"
@@ -961,7 +961,7 @@ SH
   fm_write_meta "$home/state/work-disabled.meta" \
     "window=firstmate:fm-work-disabled" "endpoint_task_id=work-disabled" \
     "worktree=$home/projects/worktree" "project=$home/projects/worktree" \
-    "kind=ship" "mode=local-only"
+    "kind=ship" "mode=local-only" "spawn_gen=pf-test-g1"
 
   rc=0
   out=$(PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
@@ -997,7 +997,7 @@ SH
   fm_write_meta "$child/state/work-disabled.meta" \
     "window=firstmate:fm-work-disabled" "endpoint_task_id=work-disabled" \
     "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
-    "kind=ship" "mode=local-only"
+    "kind=ship" "mode=local-only" "spawn_gen=pf-test-g1"
 
   rc=0
   out=$(PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
@@ -1025,7 +1025,7 @@ test_secondmate_parent_binding_matches_literal_id() {
   fm_write_meta "$parent/state/mate.id.meta" "kind=secondmate" "home=$child"
   fm_write_meta "$child/state/work-literal.meta" \
     "window=firstmate:fm-work-literal" "endpoint_task_id=work-literal" \
-    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    "worktree=$child" "project=$child" "kind=ship" "mode=local-only" "spawn_gen=pf-test-g1"
 
   PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
@@ -1116,7 +1116,12 @@ test_cleanup_refuses_while_a_public_reply_is_owed() {
     "project=$home/projects/sample" \
     "harness=codex" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=no-mistakes" \
+    "spawn_gen=pf-test-g1"
+  tasks_in "$home" add ship-task "ship guarded by its public follow-up" --kind ship >/dev/null \
+    || fail "could not add the guarded ship to its home's backlog"
+  tasks_in "$home" start ship-task >/dev/null \
+    || fail "could not mark the guarded ship In flight"
 
   rc=0
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
