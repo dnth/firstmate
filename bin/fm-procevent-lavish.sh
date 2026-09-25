@@ -31,7 +31,7 @@
 # `<decision-key>\t<answer>\t<label>` lines, and stops there. It maps nothing to a
 # hold, records no decision, and closes nothing: a captain answer is not special to
 # Lavish, so every rule about what a keyed answer DOES belongs to the one intake in
-# bin/fm-decision-hold.sh, which the runner feeds. A Lavish review is just an
+# bin/fm-captain-hold.sh, which the runner feeds. A Lavish review is just an
 # ephemeral discussion format that happens to carry answers.
 #
 # Only rows tagged `choice` are read. A freeform captain message is prose that may
