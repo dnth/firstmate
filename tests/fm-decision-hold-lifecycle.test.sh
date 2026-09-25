@@ -89,7 +89,8 @@ EOF
     "project=$home/projects/sample" \
     "harness=codex" \
     "kind=scout" \
-    "mode=scout"
+    "mode=scout" \
+    "spawn_gen=decision-hold-test-g1"
   printf 'done: report and visual review complete\n' > "$home/state/$id.status"
   cat > "$home/data/$id/report.md" <<'EOF'
 # Sample route review
@@ -137,7 +138,8 @@ write_origin_meta() {  # <home> <id> [kind]
     "project=$home/projects/sample" \
     "harness=codex" \
     "kind=$kind" \
-    "mode=$kind"
+    "mode=$kind" \
+    "spawn_gen=decision-hold-test-$id-g1"
 }
 
 test_structured_holds_survive_teardown_and_route_resolution() {

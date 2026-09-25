@@ -142,9 +142,10 @@ require_tools() {
   command -v tasks-axi >/dev/null 2>&1 || die "tasks-axi is required" 1
 }
 
-# Every tasks-axi call runs from the home whose backlog owns the obligation, the
-# same convention bin/fm-decision-hold.sh uses for typed backlog state.
-tx() { (cd "$FM_HOME" && tasks-axi "$@"); }
+# Every tasks-axi call addresses $FM_HOME/data, the home whose backlog owns the
+# obligation, through bin/fm-tasks-axi.sh. An inherited FM_DATA_OVERRIDE is
+# cleared so a caller's override cannot divert it to another home's backlog.
+tx() { FM_HOME="$FM_HOME" FM_DATA_OVERRIDE='' "$SCRIPT_DIR/fm-tasks-axi.sh" "$@"; }
 
 # obligation_json <id>: the complete typed obligation payload on stdout, empty
 # when the backlog simply has no such public-followup item, and a non-zero exit

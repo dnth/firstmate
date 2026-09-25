@@ -67,8 +67,8 @@ serve() {
   exit 0
 }
 require_file() {
-  case "$*" in *'--file '*) return 0 ;; esac
-  printf '%s\n' 'fake tasks-axi: every read must name an explicit --file board' >&2
+  [ "${TASKS_AXI_FILE:-}" = "$FM_HOME/data/backlog.md" ] && return 0
+  printf '%s\n' "fake tasks-axi: every call must address this home's board through TASKS_AXI_FILE (got '${TASKS_AXI_FILE:-unset}')" >&2
   exit 9
 }
 case "${1:-}" in
@@ -173,6 +173,8 @@ make_lifecycle_project() {  # <home> -> echoes executable path
   local home=$1 root="$1/todo-root"
   mkdir -p "$root/bin"
   cp "$ROOT/bin/fm-todo-project.sh" "$ROOT/bin/fm-tasks-axi-lib.sh" \
+    "$ROOT/bin/fm-tasks-axi.sh" "$ROOT/bin/fm-backlog-transition-lib.sh" \
+    "$ROOT/bin/fm-timeout-lib.sh" \
     "$ROOT/bin/fm-pr-lib.sh" "$ROOT/bin/fm-secondmate-registry-lib.sh" \
     "$ROOT/bin/fm-pr-poll.sh" "$root/bin/"
   cat > "$root/bin/fm-crew-state.sh" <<'SH'
@@ -572,7 +574,7 @@ assert_contains "$out" \
 [ "$(cat "$home/teardown.log")" = pr-task ] \
   || fail "the merged-PR path did not invoke guarded teardown without force"
 assert_contains "$(cat "$home/done.log")" \
-  "done pr-task --file $home/data/backlog.md --pr https://github.com/example/repo/pull/41" \
+  "done pr-task --pr https://github.com/example/repo/pull/41" \
   "the merged-PR path did not close the board item with its recorded PR"
 assert_absent "$home/state/pr-task.meta" \
   "the merged-PR path did not tear down the task"
@@ -754,7 +756,7 @@ assert_contains "$out" \
 [ "$(cat "$home/teardown.log")" = gitlab-merged ] \
   || fail "GitLab exact merge did not use ordinary teardown"
 assert_contains "$(cat "$home/done.log")" \
-  "done gitlab-merged --file $home/data/backlog.md" \
+  "done gitlab-merged" \
   "GitLab exact merge did not close its board row"
 assert_not_contains "$(cat "$home/done.log")" "--pr" \
   "GitLab closure attempted to persist an unsupported MR representation"
