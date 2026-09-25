@@ -3332,7 +3332,14 @@ if [ "$BACKLOG_CLOSED" = 1 ]; then
     exit 1
   fi
 else
-  if ! fm_backlog_atomic_transition remove "$STATE/$ID.meta" "task record" "$STATE"; then
+  # A host-local remote-secondmate teardown removes its route metadata as part
+  # of retiring the persistent home.  Once that home is gone, the authorized
+  # state directory no longer exists, so there is no second record-removal
+  # step to perform.  Local secondmates keep their parent state directory and
+  # still take the normal guarded removal path below.
+  if [ "$KIND" = secondmate ] && [ ! -d "$STATE" ]; then
+    :
+  elif ! fm_backlog_atomic_transition remove "$STATE/$ID.meta" "task record" "$STATE"; then
     fm_lock_release "$META_LOCK"
     META_LOCK_HELD=0
     echo "error: $ID's endpoint and local copy are cleaned up, but its task record could not be removed ($FM_BACKLOG_TRANSITION_ERROR)" >&2
