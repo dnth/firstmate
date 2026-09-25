@@ -109,7 +109,7 @@ FM_IDLE_OPEN_WORK_SECS_DEFAULT=600
 # The resolution verb and durable-backlog-transfer verb that CLOSE a keyed
 # status decision opened by needs-decision or blocked. See status_open_decisions
 # below for the status-fold contract. The transfer verb is written only after
-# fm-decision-hold.sh has verified the corresponding captain-held backlog item.
+# fm-captain-hold.sh has verified the corresponding captain-held backlog item.
 FM_CLASSIFY_RESOLVE_VERB_DEFAULT='resolved'
 FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT='captain-held'
 
@@ -502,6 +502,127 @@ _fm_open_set_verb() {  # <open-set> <key>
   done <<EOF
 $1
 EOF
+}
+
+# The structured task kind recorded beside a status file in its .meta, used to
+# scope which terminal declarations may supersede an open decision. Absent or
+# unreadable metadata, and any kind outside the three writers this rule knows,
+# reads as "unknown" rather than guessing. The optional explicit argument keeps
+# a caller that already knows the kind from re-reading the meta per line.
+_fm_status_kind() {  # <status-file> [known-kind]
+  local meta=${1%.status}.meta kind=${2:-} line
+  if [ -z "$kind" ]; then
+    [ -f "$meta" ] && [ -r "$meta" ] && [ ! -L "$meta" ] || { printf unknown; return 0; }
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in kind=*) kind=${line#kind=} ;; esac
+    done < "$meta"
+    kind=${kind:-ship}
+  fi
+  case "$kind" in ship|scout|secondmate) printf '%s' "$kind" ;; *) printf unknown ;; esac
+}
+
+# The one well-formed optional numeric time tag a writer may attach to a status
+# line head, "verb [at=<epoch>]:". This fork's writers do not stamp lines, but
+# readers still strip a tag when one appears so a worker-supplied tag can never
+# forge or hide the real verb boundary.
+_fm_status_at_epoch() {  # <status-line> <out-var> -> 0 and the epoch when known
+  local __fm_at_head __fm_at_value __fm_at_rest
+  printf -v "$2" '%s' ''
+  case "$1" in *:*) __fm_at_head=${1%%:*} ;; *) return 1 ;; esac
+  case "$__fm_at_head" in *\[at=*\]*) ;; *) return 1 ;; esac
+  __fm_at_rest=${__fm_at_head#*\[at=}
+  __fm_at_value=${__fm_at_rest%%\]*}
+  case "${__fm_at_rest#*\]}" in *\[at=*) return 1 ;; esac
+  case "$__fm_at_value" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac
+  [ "${#__fm_at_value}" -le 12 ] || return 1
+  printf -v "$2" '%s' "$__fm_at_value"
+}
+
+# Strip the one well-formed time tag _fm_status_at_epoch accepts, for readers
+# that need a stamped line as the exact bytes it carried before stamping -
+# retry-dedup identity here. Every other [at=...] byte run is ordinary line
+# bytes, so a retry of it stays a distinct event.
+_fm_status_untimed() {  # <status-line> <out-var> -> line without a time tag
+  local __fm_untimed_epoch __fm_untimed_head __fm_untimed_tag __fm_untimed_before
+  if _fm_status_at_epoch "$1" __fm_untimed_epoch; then
+    __fm_untimed_head=${1%%:*}
+    __fm_untimed_tag="[at=$__fm_untimed_epoch]"
+    __fm_untimed_before=${__fm_untimed_head%%"$__fm_untimed_tag"*}
+    printf -v "$2" '%s%s:%s' "${__fm_untimed_before% }" \
+      "${__fm_untimed_head#*"$__fm_untimed_tag"}" "${1#*:}"
+    return 0
+  fi
+  printf -v "$2" '%s' "$1"
+}
+
+# Retry deduplication ignores only a well-formed optional numeric time tag;
+# all other bytes, including correlation metadata, still identify the event.
+# Both sides normalize through _fm_status_untimed, so a stamped retry of an
+# already-recorded event can never read as a new one.
+status_event_recorded() {  # <status-file> <new-status-line>
+  local wanted line untimed
+  [ -f "$1" ] || return 1
+  _fm_status_untimed "$2" wanted
+  while IFS= read -r line || [ -n "$line" ]; do
+    _fm_status_untimed "$line" untimed
+    [ "$untimed" != "$wanted" ] || return 0
+  done < "$1"
+  return 1
+}
+
+# Per-key resolution-history probe for the "status said resolved, backlog still
+# held" contradiction: scans a status log through the same fold
+# status_open_decisions uses and reports which line last CLOSED <key>. Prints
+# nothing (exit 0) when the key never opened; when it is still open, prints its
+# current verb; when it closed, prints the verb that closed it. Callers use
+# this only to REPORT a divergence - the backlog record stays authoritative for
+# whether the captain still owes an answer (fm-captain-hold.sh's `diverged`).
+# A ship/scout terminal declaration supersedes an earlier open set, matching
+# bin/fm-send.sh's single-owner transfer rule; a secondmate's terminal event
+# does not. This fork's fold has no kind parameter, so the terminal supersede
+# is applied here rather than inside _fm_decision_fold_line.
+status_key_closing_verb() {  # <status-file> <key>
+  local f=$1 want=$2 line resolve held open='' was verb='' kind event candidates
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
+  [ -n "$want" ] || return 0
+  kind=$(_fm_status_kind "$f")
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  candidates=$(grep -E \
+    "^[[:space:]]*(needs-decision|blocked|done|failed|$resolve|$held)[[:space:]:[]" \
+    "$f") || [ "$?" -eq 1 ] || candidates=$(cat "$f")
+  while IFS= read -r line || [ -n "$line" ]; do
+    event=$(status_line_verb "$line")
+    case "$event:$kind" in
+      done:ship|done:scout|failed:ship|failed:scout)
+        _fm_open_set_has "$open" "$want" && verb=$event
+        open=''
+        continue
+        ;;
+      *)
+        case "$event" in
+          needs-decision|blocked|"$resolve"|"$held") ;;
+          *) continue ;;
+        esac
+        if [ "$want" != default ]; then
+          case "$line" in *"[key=$want]"*) ;; *) continue ;; esac
+        fi
+        ;;
+    esac
+    was=0
+    _fm_open_set_has "$open" "$want" && was=1
+    open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
+    if [ "$was" = 1 ] && ! _fm_open_set_has "$open" "$want"; then
+      verb=$event
+    fi
+  done <<EOF
+$candidates
+EOF
+  if _fm_open_set_has "$open" "$want"; then
+    _fm_open_set_verb "$open" "$want"
+    return 0
+  fi
+  printf '%s' "$verb"
 }
 
 # Fold the WHOLE status stream into the set of decisions still open. Prints one

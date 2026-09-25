@@ -29,7 +29,7 @@ This record is the concurrent isolation proof for the portable parallel candidat
 - `tests/fm-composer-ghost.test.sh`
 - `tests/fm-composer-lib.test.sh`
 - `tests/fm-crew-state.test.sh`
-- `tests/fm-decision-hold-lifecycle.test.sh`
+- `tests/fm-captain-hold-lifecycle.test.sh`
 - `tests/fm-ensure-agents-md.test.sh`
 - `tests/fm-grok-harness.test.sh`
 - `tests/fm-herdr-lab.test.sh`
@@ -55,7 +55,7 @@ This record is the concurrent isolation proof for the portable parallel candidat
 | 48294 | 0 | 2 | `tests/fm-backend-herdr.test.sh` |
 | 46788 | 0 | 1 | `tests/fm-arm-pretool-check.test.sh` |
 | 34207 | 0 | 4 | `tests/fm-cd-pretool-check.test.sh` |
-| 30771 | 0 | 8 | `tests/fm-decision-hold-lifecycle.test.sh` |
+| 30771 | 0 | 8 | `tests/fm-captain-hold-lifecycle.test.sh` |
 | 25365 | 0 | 7 | `tests/fm-crew-state.test.sh` |
 | 15674 | 0 | 21 | `tests/fm-test-run.test.sh` |
 | 15422 | 0 | 11 | `tests/fm-herdr-lab.test.sh` |

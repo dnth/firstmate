@@ -3,7 +3,8 @@ name: bearings
 description: >-
   Generate a "pick up where I left off" fleet digest from firstmate's live fleet state.
   Use when the captain invokes /bearings or asks for a bearings report, morning brief, status report, catch-up, "where did I leave off", or "what's in the works".
-  Plain /bearings is chat-only by default, while /bearings file explicitly writes the dated data/status-report-<YYYY-MM-DD>.md artifact; live PR enrichment remains opt-in and composes with file mode.
+  Plain /bearings is chat-only by default, /bearings file explicitly writes the dated data/status-report-<YYYY-MM-DD>.md artifact, and /bearings lavish additionally builds and arms the interactive fleet board; live PR enrichment remains opt-in and composes with the other modes.
+  Also load this skill's board-wake handling when a procevent lavish wake's source id matches the canonical source id of the stable bearings board path.
 user-invocable: true
 metadata:
   internal: true
@@ -14,18 +15,21 @@ metadata:
 Generate a complete current snapshot from the fleet's current state, so the captain can resume in one read after a break, a night, or a context reset.
 Plain `/bearings` returns only the concise four-section chat digest.
 Only `/bearings file` writes the dated markdown report artifact and then returns the concise four-section chat digest linked to that report.
-This skill is operationally read-only in both modes.
-It never tears down a task, merges a PR, dispatches new work, steers a worker, answers a decision, cleans up work, mutates backlog or task state, or writes any file except the single dated report in explicit file mode.
+Only `/bearings lavish` builds the interactive fleet board beside that digest, through `bin/fm-bearings-board.sh` (its header owns every board mechanic and the fm-bearings-board.v1 payload contract).
+A digest/build invocation is operationally read-only apart from the explicit per-mode artifacts: the dated report in file mode, and in lavish mode the board file plus the durable per-card store, answer binding, and source registration that `bin/fm-bearings-board.sh build` records through their own owners.
+During that invocation it never tears down a task, merges a PR, dispatches new work, steers a worker, answers a decision, cleans up work, or mutates backlog or task state.
+Board answers are acted on later under the normal authority rules; this skill's board-wake section explicitly owns the guarded routing at that time.
 
 ## Invocation modes
 
 - Plain `/bearings` gathers a fresh bounded snapshot and renders the four-section chat digest without creating, deleting, reading, or replacing `data/status-report-<YYYY-MM-DD>.md`.
 - `/bearings file` gathers a fresh bounded snapshot, replaces today's `data/status-report-<YYYY-MM-DD>.md` from scratch, and renders the four-section chat digest with a link or path to that report.
-- Treat `file` only as an explicit invocation option in the slash command.
-- Do not treat natural-language requests such as "write a report", "save this", "persist it", or "make a file" as file mode unless the invocation explicitly includes the standalone `file` option.
+- `/bearings lavish` gathers a fresh bounded snapshot, rebuilds and arms the interactive fleet board (the "Lavish board mode" section below), and renders the four-section chat digest with the board's URL inside it.
+- Treat `file` and `lavish` only as explicit invocation options in the slash command.
+- Do not treat natural-language requests such as "write a report", "save this", "persist it", "make a file", or "make a board" as file or lavish mode unless the invocation explicitly includes the standalone option.
 - When the captain asks to include PRs, pass the snapshot command's live-PR opt-in.
 - `/bearings include PRs` remains chat-only and makes the live-PR opt-in.
-- `/bearings file include PRs` writes the dated report and makes the live-PR opt-in.
+- `/bearings file include PRs` and `/bearings lavish include PRs` compose the same way.
 
 ## What it does
 
@@ -37,7 +41,9 @@ It never tears down a task, merges a PR, dispatches new work, steers a worker, a
    Keep the default local-only read unless the captain asks to include PRs.
    For registered secondmates, use the snapshot's structured-home classification and provenance.
    A parent event or bounded terminal contradiction is fallback evidence, never authority over readable structured home state.
-   Structured captain-held decisions come from `decision-hold-lifecycle` and appear under `decisions_open`.
+   A decision is simply a task held for the captain (`captain-hold-lifecycle`), whatever its kind.
+   A live captain hold appears in Captain's Call under `decisions_open`; a captain hold with a pending `state/reconcile-requests/` request, or a still-future `hold-until` deferral, leaves Captain's Call and appears as a Charted Next gate stating the reconcile request or the deferral date.
+   Never use hold-reason or body prose to classify or place a decision.
    Do not scrape reports, visual-review artifacts, raw status-event tails, or visible conversation history to supplement current state.
    A queued item under `gates` only becomes "next work" when its blocker is gone and its time/date gate has arrived.
    Until then it stays queued with the reason.
@@ -62,7 +68,57 @@ It never tears down a task, merges a PR, dispatches new work, steers a worker, a
    - **Underway** - each live direct report making progress, with its current state, and the plans or main pickup pointers worth reopening (`data/<id>/report.md` files, `.lavish/*.html` boards).
    - **Charted Next** - queued or gated work, including any main-inventory integrity warning, with each item's blocker, date, or integrity reason.
    After writing the file, return the concise four-section chat digest and include the report path or link without adding a fifth section.
-   For a richer review surface, optionally offer a Lavish board with `lavish-axi` when the report has enough structure to deserve one, but only after the required digest is ready.
+   For a richer review surface, offer `/bearings lavish` when the report has enough structure to deserve one, but only after the required digest is ready.
+
+## Lavish board mode
+
+`/bearings lavish` adds one deliverable beside the unchanged chat digest: the interactive fleet board, a Lavish page where the captain answers Captain's Call items directly instead of replying in chat.
+`bin/fm-bearings-board.sh` owns every board mechanic - the stable board path, fm-bearings-board.v1 payload validation, template injection, live Lavish session verification and ended-session reopening, the any-origin answer binding, the durable `state/decision-cards/` store, and listener registration - so the per-invocation work is composing the payload and running its `build`.
+
+Compose the payload from the same snapshot with the same ranking judgment as the chat digest, plus these board rules:
+
+- A Captain's Call decision key is the captain-held TASK ID from `decisions_open` (legacy `<origin>-decision-<key>` rows are already task ids); a merge card's key is `merge.<task-id>`; the Charted Next dispatch picker's key is `dispatch.charted`.
+- Before carding a hold, check that its SUBJECT has not already landed, and omit it when it has.
+  `build` drops a card whose task or PR appears in the payload's own landed rows, and one whose task is no longer an open captain call.
+  When a hold waits on one specific PR, put that PR in the card's `pr_url`.
+  When it concerns a published version, put the artifact and numeric three-part version in the card's structured `subject`; landed rows for releases carry the same identity, and a matching or newer version drops the card.
+  Identity matching is structured only, so verify any subject without one of these identities against current reality before carding it.
+- Never author a `reconcile` option on any card.
+  `build` gives every decision card the standard reconcile choice itself, and the payload validator reserves that value across all card types; recommendations must name an authored option.
+- Compose exactly one decision card per captain-held task id.
+  When one task carries multiple questions, consolidate all of them and their options into that card; never emit duplicate cards with the same task-id key.
+- Decision cards carry agent-authored copy: a short noun-phrase title, one-line `about` and `decide` context rows, and option labels with hints, with the recommended option marked.
+- Card `type` (decision, merge, credential) is your composing judgment from the row's content; no backlog field types a card for you.
+- When the card's task is a captain-gated WORK item (the answer should free it to proceed rather than complete it), set the card's `close: "release"` so the answer lifts the hold instead of closing the task; question-shaped items omit it.
+- Every Captain's Call item and every Underway, Recently Landed, and Charted Next row carries an explicit `repo` field.
+  Fill it from the snapshot and task records wherever known; use null or an empty string only as the deliberate genuinely-no-repo marker, in which case the template may show the internal id.
+
+Run `build` once after composing the payload.
+Its serve-first sequence publishes the board, writes the durable per-card store, establishes and verifies its Lavish session with `lavish-axi`, reopens an ended session when necessary, and only then binds the answer source and proves a live polling listener; use the session URL it prints in the chat digest.
+Never bind or arm the board before its session is listed open.
+Never run `lavish-axi poll` for the board yourself: the armed source's supervised runner owns the blocking poll, and both the build and the watcher's ordinary reconcile repair a missing listener, so no conversational turn ever blocks on the board.
+
+### Handling a board wake
+
+A board answer arrives as an ordinary `procevent lavish <source-id> <sequence>` check wake.
+Identify it by comparing the wake source id with `bin/fm-procevent-lavish.sh source-id "$(bin/fm-bearings-board.sh path)"`, regardless of which answer kinds the result contains; then load `process-event-sources` and follow its contract for the result read, adapter classification, and the handled acknowledgement.
+Decision answers need no routing from you: the runner feeds the board's binding into `bin/fm-captain-hold.sh`'s one keyed-answer intake, which closes or releases each answered captain-held task at answer time; reconcile any `skipped:` key yourself with a direct `answer`, and when the captain's answer is "later", record it as a deferral with `bin/fm-captain-hold.sh hold <id> --reason "<reason>" --until <date>` instead of a closure.
+A structured Reconcile selection closes nothing: the versioned board context carries its exact selected option separately from any typed note, and the adapter routes that selection only into a durable re-check request while preserving the note as provenance.
+Verify the call's latest state, then retire the request through `bin/fm-captain-hold.sh reconcile close <id> --evidence-file <path>` when it turns out to be moot, or `reconcile note <id> --note-file <path>` when it is genuinely still open.
+Both outcomes refuse without that pending board-created request, and `bin/fm-captain-hold.sh reconcile list` names every request still outstanding.
+`captain-hold-lifecycle` owns why a reconcile may never be recorded as the captain's answer.
+Route the non-decision keys yourself:
+
+- `merge.<task-id>` is the captain's explicit merge order; follow the merge ruling below.
+- `dispatch.charted` carries comma-separated task ids the captain picked to start now; verify each id against the current backlog - still queued, blocker and time gate actually clear - then dispatch through the normal lifecycle, and report any id that no longer qualifies instead of forcing it.
+
+After handling, rebuild the board from a fresh snapshot so acted-on items leave Captain's Call, and echo every action taken in chat so the board and chat never diverge silently.
+
+### The merge-click ruling (captain-decided)
+
+A board "Merge now" answer IS the captain's explicit merge word for that one exact PR; ask no second confirmation.
+The safeguards are mandatory, not optional: resolve the PR from the task's own `state/<task-id>.meta` `pr=` record, never from board bytes; re-verify at wake time that the PR is still open and CI-green; refuse and report a red or changed PR rather than merging it; record the exact `merge` answer through `bin/fm-captain-hold.sh answer <task-id> --decision-file <file> --release` before invoking the merge; proceed only when that release succeeds; merge only through `bin/fm-pr-merge.sh`; and echo every merge in chat with the full PR URL.
+Only the exact answer value `merge` authorizes a merge; an answer carrying a freeform note is the captain's instruction text to read and act on with judgment, never an auto-merge.
 
 ## Chat-response contract
 

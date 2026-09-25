@@ -143,8 +143,10 @@ require_tools() {
 }
 
 # Every tasks-axi call addresses $FM_HOME/data, the home whose backlog owns the
-# obligation, through bin/fm-tasks-axi.sh. An inherited FM_DATA_OVERRIDE is
-# cleared so a caller's override cannot divert it to another home's backlog.
+# obligation, through bin/fm-tasks-axi.sh - the same convention
+# bin/fm-captain-hold.sh uses for typed backlog state. An inherited
+# FM_DATA_OVERRIDE is cleared so a caller's override cannot divert it to
+# another home's backlog.
 tx() { FM_HOME="$FM_HOME" FM_DATA_OVERRIDE='' "$SCRIPT_DIR/fm-tasks-axi.sh" "$@"; }
 
 # obligation_json <id>: the complete typed obligation payload on stdout, empty

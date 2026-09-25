@@ -26,7 +26,10 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-todo-project.sh`     | Project the board into session-todo JSON (`--emit`) or check board drift (`--check`, optionally `--reconcile`); the script header owns mutation limits |
 | `fm-backlog-handoff.sh`  | Validate and delegate queued backlog-item moves into a secondmate home               |
 | `fm-backlog-receive.sh`  | Idempotently ingest one confined remote handoff outbox through tasks-axi             |
-| `fm-decision-hold.sh`    | Create, verify, complete, answer, and resolve durable captain-held decisions         |
+| `fm-captain-hold.sh`     | Create, verify, complete, answer, reconcile, and resolve captain-held backlog tasks  |
+| `fm-decision-hold.sh`    | Transitional compatibility shim mapping the retired decision verbs onto fm-captain-hold.sh |
+| `fm-bearings-board.sh`   | Build and arm the interactive Lavish fleet board; writes the durable state/decision-cards store |
+| `fm-tasks-axi.sh`        | Run tasks-axi against this home's backlog from any working directory                 |
 | `fm-brief.sh`            | Scaffold ship (explicit `--mode`), scout, secondmate-charter, and Herdr-lab briefs   |
 | `fm-herdr-lab.sh`        | Provision and guardedly operate an isolated, never-default Herdr lab session         |
 | `fm-install-herdr.sh`    | Install CI's exact-version Herdr pin with official asset URL, SHA-256, and protocol checks |
@@ -80,6 +83,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-marker-lib.sh`       | Compatibility entry point for the from-firstmate carrier owned by `fm-operational-input.sh` |
 | `fm-pending-reply-lib.sh` | Parent-owned secondmate pending-reply expectations, recovery, and one-shot escalation |
 | `fm-secondmate-parent-lib.sh` | Parse durable secondmate parent-route binding records                              |
+| `fm-parent-channel-lib.sh` | Resolve a secondmate home's parent channel and append a captain-facing outcome line to it at most once |
 | `fm-secondmate-report.sh` | Optional helper to append a correlated parent status or document-pointer report       |
 | `fm-procevent-remote-reply.sh` | Relay non-destructive remote-secondmate lifecycle deltas and resolve exact correlated pending replies through process events |
 | `fm-procevent-when.sh`   | Fire a trust-bound deterministic action at most once when its registered condition holds, then wake with the outcome |

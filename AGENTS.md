@@ -124,7 +124,10 @@ state/               volatile runtime signals; gitignored
   pending-replies/   parent-owned secondmate pending-reply records (correlation id, delivery vs reply, recovery, escalation); fm-pending-reply-lib.sh
   procevent/         registered process-to-event sources, one private record per canonical source id; written by bin/fm-procevent.sh or an adapter through the shared registration publisher, and their presence alone keeps supervision required (section 13)
   procevent-inbox/   private captured results and their durable handled-acknowledgement markers; source output lives here and never in an event line
-  decision-bindings/ private bindings from a captured-answer source id to the captain-hold origin its keyed answers close; written only by bin/fm-decision-hold.sh bind, dropped by unbind and by source retirement (section 13; docs/decision-hold-lifecycle.md)
+  decision-bindings/ private bindings from a captured-answer source id to the captain-hold origin its keyed answers close (or `(any)` for task-id-keyed channels); written only by bin/fm-captain-hold.sh bind, dropped by unbind and by source retirement (section 13; docs/captain-hold-lifecycle.md)
+  reconcile-requests/ private pending board-created reconcile requests, one record per captain-held task id; written only by bin/fm-captain-hold.sh reconcile-requests and retired by answer or reconcile close/note (docs/captain-hold-lifecycle.md)
+  decision-cards/    durable fm-decision-card.v1 board cards per captain-held task id; written only by bin/fm-bearings-board.sh build (docs/captain-hold-lifecycle.md)
+  captain-hold-steers/ private per-answer delivery markers deduping the keyed-answer intake's fm-send steer; written only by bin/fm-captain-hold.sh answers (docs/captain-hold-lifecycle.md)
   when/              private condition->action watch specs, their trust bindings, and single-fire markers; written only by bin/fm-procevent-when.sh (section 13's process-event-sources trigger)
   x-inbox/           generated X-mode pending mention payloads; fmx-respond drains it (section 14)
   x-context/         generated X-mode durable per-request reply context and one-wake offer markers, keyed by request_id; survives inbox cleanup and expires within seven days (section 14; bin/fm-x-lib.sh)
@@ -400,7 +403,7 @@ Retire one only on an explicit captain or main-firstmate decision, after loading
 
 A completed scout must leave a self-contained report before its scratch worktree can be discarded; read and relay its findings, record the report as the Done artifact, and re-evaluate the queue.
 A report may recommend implementation but does not authorize it.
-Before treating the investigation or any visual review as complete, load `decision-hold-lifecycle`; teardown enforces that shared completion gate.
+Before treating the investigation or any visual review as complete, load `captain-hold-lifecycle`; teardown enforces that shared completion gate.
 When implementation is separately authorized, promote the existing scout through `bin/fm-promote.sh` rather than creating a duplicate task.
 The promoted worker must inventory scratch state, return to a clean default-branch base, carry over only intended fix changes, create the ship branch, and follow the project's selected delivery path while leaving scratch commits and debug edits behind and turning a reproduced bug into the regression test.
 
@@ -520,8 +523,8 @@ The board is the single source of truth for fleet work, and the session todo lis
 Any durable operational thread worth tracking in that todo is therefore filed as a board item first, or the next projection loses it.
 Put deferred work on hold at deferral time; `bin/fm-todo-project.sh` owns why this keeps deferred rows out of the Ready projection.
 Work routed to a secondmate is recorded in that secondmate home's own backlog, not the main backlog.
-When a main-side thread such as a pending captain decision or relay reminder is worth durable tracking, file it as its own work item; use `bin/fm-tasks-axi.sh hold <id> --reason "<reason>" --kind captain` for a captain-gated thread.
-Unresolved decisions discovered by investigations or visual reviews follow `decision-hold-lifecycle`, which owns their mandatory backlog lifecycle.
+When a main-side thread such as a pending captain decision or relay reminder is worth durable tracking, file it as its own work item; use `bin/fm-captain-hold.sh hold <id> --reason "<reason>"` for a captain-gated thread.
+Unresolved decisions discovered by investigations or visual reviews follow `captain-hold-lifecycle`, which owns their mandatory backlog lifecycle.
 When the automatic transition gate applies, dispatch and completion move the item themselves - `bin/fm-spawn.sh` and `bin/fm-teardown.sh` own those transitions and refuse rather than report success without them - so what remains yours is filing the item before dispatch, recording decisions, and keeping notes current; `docs/configuration.md` owns gate applicability and the manual-backend exception.
 After every board-changing event - including dispatch, close, decision, successful teardown, and merge-wake reconciliation - run `bin/fm-todo-project.sh --emit` and re-initialize the session todo from its output.
 Re-evaluate queued work after every teardown and heartbeat, dispatching items only when dependencies and time gates have cleared.
@@ -572,7 +575,7 @@ These skills are not captain-invocable; load them only at their precise triggers
   Cloning or registering a project is add intake and uses the same trigger.
 - `stuck-crewmate-recovery` - load when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, a failed ordinary-worker steer, or an ordinary-worker `delivered-no-turn` or `delivered-no-turn-persistence-failed` verdict.
 - `secondmate-provisioning` - load before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a secondmate home, before editing `data/secondmates.md`, and on either verdict from a secondmate.
-- `decision-hold-lifecycle` - load before treating an investigation or visual review as complete, before ending a visual review that exposed a decision, and when recording or routing the captain's answer.
+- `captain-hold-lifecycle` - load before treating an investigation or visual review as complete, before ending a visual review that exposed a captain decision, when recording or routing the captain's answer, and on any RECORD DIVERGENCE line the wake drain prints (`decision-hold-lifecycle` is a one-release redirect stub to it).
 - `process-event-sources` - load before arming a long-polling source, before registering a deterministic condition->action watch (do X as soon as Y is true), and on any `procevent <adapter> <source-id> <sequence>` check wake.
   Never run a registered source's blocking command yourself in a conversational turn.
 - `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to handle the mention, on an `x-mode-error ...` `check:` wake to report the X-mode configuration blocker, on a `public-followup ...` `check:` wake or a startup-surfaced public commitment, and on any milestone or terminal wake for an X-mode-linked task before posting its completion follow-up; relevant only when X mode is on.

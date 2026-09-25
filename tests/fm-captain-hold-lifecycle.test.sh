@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# End-to-end tests for durable captain-held decisions discovered by investigations
-# and visual reviews.
+# End-to-end tests for durable captain-held tasks discovered by investigations
+# and visual reviews, covering both bin/fm-captain-hold.sh's collapsed surface
+# and the bin/fm-decision-hold.sh compatibility shim (run_decisions drives the
+# shim so every retired verb is exercised against the new owner).
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -64,6 +66,15 @@ run_teardown() {  # <home> <id>
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id"
+}
+
+# Count files matching a glob without ls|grep (SC2010): the glob expands
+# inside the function's own positional parameters.
+count_glob() {  # <glob-pattern>
+  # shellcheck disable=SC2086  # the pattern must expand as a glob here
+  set -- $1
+  [ -e "$1" ] || { printf '0\n'; return 0; }
+  printf '%s\n' "$#"
 }
 
 # Reproduces the loss exactly with privacy-safe synthetic names: the investigation
@@ -130,6 +141,16 @@ run_decisions() {  # <home> <command args...>
     FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-decision-hold.sh" "$@"
 }
 
+# The new owner, called directly with the collapsed surface (task ids, not
+# <origin> <key> pairs).
+run_captain() {  # <home> <command args...>
+  local home=$1
+  shift
+  PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" "$@"
+}
+
 write_origin_meta() {  # <home> <id> [kind]
   local home=$1 id=$2 kind=${3:-scout}
   fm_write_meta "$home/state/$id.meta" \
@@ -190,7 +211,8 @@ EOF
   run_decisions "$home" complete "$id" route access >/dev/null \
     || fail "shared investigation completion gate failed"
   assert_grep "decisions_reviewed=1" "$home/state/$id.meta" "completion attestation missing"
-  assert_grep "decision_keys=access,route" "$home/state/$id.meta" "decision inventory was not deterministic"
+  assert_grep "decision_keys=$id-decision-access,$id-decision-route" "$home/state/$id.meta" \
+    "decision inventory was not recorded as deterministic task ids"
   open=$(bash -c '. "$1"; status_open_decisions "$2"' _ \
     "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
   [ -z "$open" ] || fail "captain-held transfer did not close duplicate live status decisions: $open"
@@ -236,58 +258,27 @@ EOF
   tasks_in "$home" add sample-route-followup "Check the selected sample route" \
     --kind ship --repo sample --blocked-by "$route_hold" >/dev/null \
     || fail "could not create second dependent work fixture"
-  cat > "$home/fakebin/tasks-axi" <<'EOF'
-#!/usr/bin/env bash
-if [ "${1:-}" = unblock ] && [ "${2:-}" = sample-route-implementation ] \
-  && [ ! -f "$FM_HOME/unblock-failed-once" ]; then
-  : > "$FM_HOME/unblock-failed-once"
-  exit 1
-fi
-exec "$REAL_TASKS_AXI" "$@"
-EOF
-  chmod +x "$home/fakebin/tasks-axi"
-  if run_decisions "$home" resolve "$id" route --decision-file "$home/route-decision.txt" \
-    --routed-to sample-route-implementation --routed-to sample-route-followup \
-    > "$home/partial-route.out" 2> "$home/partial-route.err"; then
-    fail "resolution succeeded after a partial dependent-routing failure"
-  fi
-  show=$(tasks_in "$home" show "$route_hold" --full)
-  assert_contains "$show" "state: queued" "partial routing failure closed the hold"
-  show=$(tasks_in "$home" show sample-route-followup --full)
-  assert_contains "$show" "blocked: no" "partial routing fixture did not release its first dependent"
-  show=$(tasks_in "$home" show sample-route-implementation --full)
-  assert_contains "$show" "blocked: yes" "partial routing fixture unexpectedly released its second dependent"
-  if run_decisions "$home" resolve "$id" route --decision-file "$home/route-decision.txt" \
-    --routed-to sample-route-followup > "$home/reduced-retry.out" 2> "$home/reduced-retry.err"; then
-    fail "partial resolution retry accepted a reduced routed task set"
-  fi
-  printf 'Use route south for the sample system.\n' > "$home/changed-route-decision.txt"
-  if run_decisions "$home" resolve "$id" route --decision-file "$home/changed-route-decision.txt" \
-    --routed-to sample-route-implementation --routed-to sample-route-followup \
-    > "$home/partial-drifted-decision.out" 2> "$home/partial-drifted-decision.err"; then
-    fail "partial resolution retry accepted a different captain decision"
-  fi
-  tasks_in "$home" "done" sample-route-followup >/dev/null \
-    || fail "could not complete already-routed dependent work"
   run_decisions "$home" resolve "$id" route --decision-file "$home/route-decision.txt" \
     --routed-to sample-route-implementation --routed-to sample-route-followup >/dev/null \
-    || fail "could not resume and complete partial decision routing"
+    || fail "the routed close path failed with both edges in place"
+  # A done blocker never holds dependent work back, so closing the call released
+  # both routed edges with no separate unblock act.
+  show=$(tasks_in "$home" show sample-route-implementation --full)
+  assert_contains "$show" "blocked: no" "a resolved captain call did not release its routed work"
+  show=$(tasks_in "$home" show sample-route-followup --full)
+  assert_contains "$show" "blocked: no" "a resolved captain call did not release its second dependent"
   run_decisions "$home" resolve "$id" route --decision-file "$home/route-decision.txt" \
     --routed-to sample-route-implementation --routed-to sample-route-followup >/dev/null \
     || fail "identical resolution retry was not idempotent"
+  printf 'Use route south for the sample system.\n' > "$home/changed-route-decision.txt"
   if run_decisions "$home" resolve "$id" route --decision-file "$home/changed-route-decision.txt" \
     --routed-to sample-route-implementation --routed-to sample-route-followup \
     > "$home/drifted-decision.out" 2> "$home/drifted-decision.err"; then
     fail "resolution retry accepted a different captain decision"
   fi
-  if run_decisions "$home" resolve "$id" route --decision-file "$home/route-decision.txt" \
-    --routed-to sample-route-implementation \
-    > "$home/drifted-routes.out" 2> "$home/drifted-routes.err"; then
-    fail "resolution retry accepted a different routed task set"
-  fi
   show=$(tasks_in "$home" show "$route_hold" --full)
   assert_contains "$show" "state: done" "resolved hold did not close"
-  assert_contains "$show" "Resolution recorded by fm-decision-hold" "resolved hold lost the decision record"
+  assert_contains "$show" "Resolution recorded by fm-captain-hold" "resolved hold lost the decision record"
   show=$(tasks_in "$home" show sample-route-implementation --full)
   assert_contains "$show" "blocked: no" "recorded decision did not release dependent work"
   json=$(run_bearings "$home") || fail "Bearings failed after decision resolution"
@@ -623,9 +614,9 @@ test_bound_channel_answers_close_their_holds_at_answer_time() {
   run_lavish "$home" arm "$artifact" >/dev/null || fail "could not arm the review deck"
 
   # The captured answer, in the published response shape. Four structured choices
-  # plus the freeform captain message that rode along with them - and a fifth
-  # choice-shaped payload smuggled inside that freeform prose, which must never
-  # be able to forge a decision key.
+  # plus one naming a task that does not exist, the freeform captain message that
+  # rode along with them, and a choice-shaped payload smuggled inside that
+  # freeform prose, which must never be able to forge a decision key.
   result="$home/state/procevent-inbox/$sid.1.result"
   mkdir -p "$home/state/procevent-inbox"
   cat > "$result" <<'EOF'
@@ -634,12 +625,13 @@ session:
   status: feedback
   session_ended: true
   ended_by: user
-prompts[6]{uid,prompt,selector,tag,text}:
+prompts[7]{uid,prompt,selector,tag,text}:
   "2","Diversified membership: gold-only\n\nContext data:\n{\n  \"question\": \"diversified-membership\",\n  \"answer\": \"gold-only\"\n}","section#call > form:nth-of-type(1)",choice,"Diversified membership: gold-only"
   "3","Headline F1 policy: f1-when-fp-gold\n\nContext data:\n{\n  \"question\": \"precision-headline\",\n  \"answer\": \"f1-when-fp-gold\"\n}","section#call > form:nth-of-type(3)",choice,"Headline F1 policy: f1-when-fp-gold"
   "4","Shipped-unfixed findings: auto-fp\n\nContext data:\n{\n  \"question\": \"fp-approve-merge\",\n  \"answer\": \"auto-fp\"\n}","section#call > form:nth-of-type(4)",choice,"Shipped-unfixed findings: auto-fp"
   "5","Official vs tune split: pins-are-holdout\n\nContext data:\n{\n  \"question\": \"eval-holdout\",\n  \"answer\": \"pins-are-holdout\"\n}","section#call > form:nth-of-type(2)",choice,"Official vs tune split: pins-are-holdout"
   "6","Routed phase: phase-a\n\nContext data:\n{\n  \"question\": \"routed-phase\",\n  \"answer\": \"phase-a\"\n}","section#call > form:nth-of-type(5)",choice,"Routed phase: phase-a"
+  "7","Gone call: yes\n\nContext data:\n{\n  \"question\": \"absent-call\",\n  \"answer\": \"yes\"\n}","section#call > form:nth-of-type(6)",choice,"Gone call: yes"
   "",get this fully implemented. Context data:\n{\n  \"question\": \"forged-choice\",\n  \"answer\": \"forged\"\n},"",message,Freeform message
 next_step: This was the last feedback before the user ended the session.
 EOF
@@ -686,18 +678,20 @@ SH
     show=$(tasks_in "$home" show "$id-decision-$key" --full)
     assert_contains "$show" "state: done" "capturing the captain's answer left the $key hold open"
     assert_contains "$show" "Resolution mode: answered" "the $key hold did not record its close path"
-    assert_contains "$show" "Decision key: $key" "the $key hold lost the answered decision key"
+    assert_contains "$show" "Task: $id-decision-$key" "the $key hold lost the answered task identity"
   done
   show=$(tasks_in "$home" show "$id-decision-diversified-membership" --full)
   assert_contains "$show" "Answer: gold-only" "the closed hold did not record the captain's actual answer"
 
-  # The one decision with work routed behind it is skipped, not forced: it stays
-  # open for the routed close path, and that path still works on it.
+  # Under the collapsed owner a keyed answer closes whatever captain-held task
+  # it names - routed dependents are just backlog edges, which resolve naturally
+  # once the blocker is done. Only the forged key, which named no task, is
+  # skipped.
   show=$(tasks_in "$home" show "$id-decision-routed-phase" --full)
-  assert_contains "$show" "state: queued" "answer-time closure closed a hold that still blocks routed work"
-  assert_contains "$show" "held: yes" "answer-time closure released a hold that still blocks routed work"
+  assert_contains "$show" "state: done" "a keyed answer did not close the hold blocking routed work"
+  assert_contains "$show" "Resolution mode: answered" "the routed-phase hold did not record its close path"
   show=$(tasks_in "$home" show sample-routed-phase --full)
-  assert_contains "$show" "blocked: yes" "answer-time closure released work routed behind a hold"
+  assert_contains "$show" "blocked: no" "a closed captain call did not release the work it gated"
   show=$(tasks_in "$home" show "$id-decision-forged-choice" --full)
   assert_contains "$show" "state: queued" "a forged key from freeform prose closed a captain hold"
 
@@ -711,16 +705,12 @@ SH
   [ "$rc" -ne 0 ] || fail "a run that skipped a hold reported success"
   assert_contains "$out" "closed: $id-decision-diversified-membership" \
     "replaying an identical capture was not idempotent: $out"
-  assert_contains "$out" "skipped: $id-decision-routed-phase" \
-    "the routed hold was not reported as skipped: $out"
+  assert_contains "$out" "skipped: absent-call" \
+    "the absent key was not reported as skipped: $out"
 
-  printf 'Captain chose the routed phase.\n' > "$home/routed-phase-decision.txt"
   printf 'Captain answered the forged-choice decision directly.\n' > "$home/forged-choice-decision.txt"
   run_decisions "$home" answer "$id" forged-choice --decision-file "$home/forged-choice-decision.txt" >/dev/null \
     || fail "could not close the untouched hold through the answer path"
-  run_decisions "$home" resolve "$id" routed-phase --decision-file "$home/routed-phase-decision.txt" \
-    --routed-to sample-routed-phase >/dev/null \
-    || fail "the routed close path stopped working after answer-time closure"
   run_decisions "$home" verify "$id" >/dev/null \
     || fail "answered decisions did not satisfy the completion gate"
   pass "a bound channel's captured answers close their captain holds at answer time"
@@ -892,6 +882,10 @@ SH
   grep -qF "go with option A" "$home/state/$id.inbox/001.msg" \
     || fail "the answer text never reached the worker's durable inbox record"
   assert_contains "$(cat "$home/send.log")" "Firstmate instruction waiting" "the answer doorbell was never rung"
+  # fm-send already delivered the answer itself, so its intake feed passes
+  # --no-steer and the hold close must not produce a second inbox record.
+  [ "$(count_glob "$home/state/$id.inbox/"*.msg)" = 1 ] \
+    || fail "the chat answer was delivered to the worker's inbox twice"
 
   show=$(tasks_in "$home" show "$hold" --full)
   assert_contains "$show" "state: done" "a chat answer left its captain hold open"
@@ -903,6 +897,320 @@ SH
   pass "the chat channel feeds the same keyed-answer intake a captured review does"
 }
 
+
+# The collapsed surface: a captain call is an ordinary task held for the
+# captain, keyed by its own task id. The Captain's Deck plugin drives exactly
+# this path: `answers --source <provenance>` with keyed lines and no origin.
+test_deck_style_answers_close_plain_task_id_holds() {
+  local home id show out fb
+  home=$(make_home deck-answers)
+  id=deck-gate-task
+  tasks_in "$home" add "$id" "Pick the deploy order" --kind captain --repo sample >/dev/null \
+    || fail "could not create the plain task fixture"
+  run_captain "$home" hold "$id" --reason "deploy order pending" --repo sample >/dev/null \
+    || fail "could not hold the plain task for the captain"
+  run_captain "$home" open "$id" >/dev/null || fail "a held task did not report open"
+  [ "$(run_decisions "$home" id "$id" key)" = "$id-decision-key" ] \
+    || fail "the shim's id verb did not compose the legacy identity"
+
+  # The Deck's write path must also steer the owning task through fm-send:
+  # give the held task live metadata and a tmux double that records the
+  # doorbell, so the durable inbox record is observable.
+  write_origin_meta "$home" "$id" ship
+  fb="$home/fakebin"
+  cat > "$fb/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  send-keys)
+    shift
+    literal=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) shift 2 ;;
+        -l) literal=1; shift ;;
+        *) break ;;
+      esac
+    done
+    if [ "$literal" = 1 ]; then
+      printf '%s' "${1:-}" >> "$FM_SEND_LOG"
+    fi
+    exit 0 ;;
+  display-message)
+    for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
+    printf 'fakepane\n'; exit 0 ;;
+  capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
+  list-windows)
+    [ -n "${FM_HOME:-}" ] && sed -n 's/^window=[^:]*://p' "$FM_HOME"/state/*.meta 2>/dev/null
+    exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/tmux"
+  : > "$home/send.log"
+
+  printf '%s\t%s\t%s\n' "$id" "ship-api-first" "Ship API first" \
+    | FM_SEND_LOG="$home/send.log" FM_SEND_SETTLE=0 \
+      run_captain "$home" answers --source "herdr-firstmate-flow captain's deck" \
+      > "$home/answers.out" 2> "$home/answers.err" \
+    || fail "a Deck-style keyed answer did not close the plain task hold"
+  show=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$show" "state: done" "the Deck-style answer left the hold open"
+  assert_contains "$show" "Resolution mode: answered" "the Deck answer did not record its close path"
+  assert_contains "$show" "Answer: ship-api-first" "the Deck answer lost the captain's choice"
+  assert_contains "$show" "Answer as shown to the captain: Ship API first" "the Deck answer lost its label"
+  assert_contains "$show" "herdr-firstmate-flow" "the Deck answer lost its provenance"
+  assert_contains "$show" "Task: $id" "the Deck answer did not name its task id"
+  # The owning task was steered: the answer text reached its durable inbox
+  # record and the doorbell was rung through the recorded tmux endpoint.
+  assert_contains "$(cat "$home/answers.err")" "steered: $id -> $id" \
+    "the Deck answer did not report steering the owning task"
+  grep -qF "ship-api-first" "$home/state/$id.inbox/001.msg" \
+    || fail "the Deck answer never reached the owning task's durable inbox record"
+  assert_contains "$(cat "$home/send.log")" "Firstmate instruction waiting" \
+    "the Deck answer's doorbell was never rung"
+  # Idempotent replay of the identical answer does NOT re-steer: the durable
+  # delivery token inside the first inbox record dedupes it, so the inbox
+  # still holds exactly one record.
+  printf '%s\t%s\t%s\n' "$id" "ship-api-first" "Ship API first" \
+    | FM_SEND_LOG="$home/send.log" FM_SEND_SETTLE=0 \
+      run_captain "$home" answers --source "herdr-firstmate-flow captain's deck" \
+      > "$home/replay.out" 2> "$home/replay.err" \
+    || fail "an identical Deck answer replay was not idempotent"
+  assert_contains "$(cat "$home/replay.err")" "already delivered" \
+    "the replayed Deck answer did not report its deduped steer"
+  [ "$(count_glob "$home/state/$id.inbox/"*.msg)" = 1 ] \
+    || fail "a replayed Deck answer duplicated the owning task's inbox record"
+  # An absent key is skipped and the run reports nonzero.
+  if printf 'no-such-task\tyes\tYes\n' | run_captain "$home" answers --source herdr-firstmate-flow \
+      > "$home/absent.out" 2>&1; then
+    fail "an answer naming no task reported success"
+  fi
+  assert_contains "$(cat "$home/absent.out")" "skipped: no-such-task" "an absent key was not reported"
+  pass "Deck-style keyed answers close plain task-id holds with provenance and steer the owning task"
+}
+
+# The Deck's Reconcile path: a durable request under state/reconcile-requests/
+# that never closes the hold, plus the two evidence-backed outcomes that retire
+# it.
+test_reconcile_requests_and_outcomes() {
+  local home id sid show out json
+  home=$(make_home reconcile-flow)
+  id=reconcile-me
+  tasks_in "$home" add "$id" "Confirm the cached index is stale" --kind captain --repo sample >/dev/null \
+    || fail "could not create the reconcile fixture"
+  run_captain "$home" hold "$id" --reason "staleness check pending" >/dev/null \
+    || fail "could not hold the reconcile fixture"
+
+  sid=herdr-firstmate-flow
+  run_captain "$home" bind "$sid" >/dev/null || fail "could not bind the deck source"
+  [ "$(run_captain "$home" binding "$sid")" = "(any)" ] \
+    || fail "the deck binding did not resolve to the any-origin marker"
+
+  printf '%s\t%s\n' "$id" "re-check the published index" \
+    | run_captain "$home" reconcile-requests --source-id "$sid" \
+        --source "herdr-firstmate-flow captain's deck" >/dev/null \
+    || fail "reconcile-requests refused a bound source"
+  [ -f "$home/state/reconcile-requests/$id.request" ] \
+    || fail "no durable reconcile request was recorded"
+  show=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$show" "state: queued" "a reconcile request closed the hold"
+  assert_contains "$show" "held: yes" "a reconcile request released the hold"
+  out=$(run_captain "$home" reconcile list) || fail "reconcile list failed"
+  assert_contains "$out" "$id" "the pending request did not list"
+  # Idempotent: a second request keeps one record and its original timestamp.
+  printf '%s\n' "$id" | run_captain "$home" reconcile-requests --source-id "$sid" \
+      --source "herdr-firstmate-flow captain's deck" >/dev/null \
+    || fail "a repeated reconcile request was not idempotent"
+  [ "$(count_glob "$home/state/reconcile-requests/$id.request")" = 1 ] \
+    || fail "a repeated reconcile request duplicated the record"
+  # The request moved the hold out of Captain's Call into a disclosed gate.
+  json=$(run_bearings "$home") || fail "Bearings failed with a pending reconcile request"
+  printf '%s' "$json" | jq -e --arg id "$id" '
+    (.decisions_open | any(.id == $id) | not)
+      and (.gates | any(.id == $id and (.reason | test("reconcile requested"))))
+  ' >/dev/null || fail "a pending reconcile request did not move the hold to the gate bucket: $json"
+  # An unbound source cannot file one.
+  if printf '%s\n' "$id" | run_captain "$home" reconcile-requests --source-id stranger \
+      --source "unbound" > "$home/unbound.out" 2>&1; then
+    fail "reconcile-requests accepted an unbound source"
+  fi
+  # The reserved reconcile value can never ride the keyed-answer intake.
+  if printf '%s\treconcile\tReconcile\n' "$id" | run_captain "$home" answers \
+      --source test > "$home/rec-ans.out" 2>&1; then
+    fail "the keyed-answer intake accepted a reconcile value"
+  fi
+  show=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$show" "state: queued" "a reconcile value closed the hold through answers"
+
+  # Outcome one: genuinely still open - the note path retires the request and
+  # leaves the call the captain's.
+  printf 'Verified: the index is still stale and still needs the captain.\n' > "$home/note.txt"
+  run_captain "$home" reconcile note "$id" --note-file "$home/note.txt" >/dev/null \
+    || fail "reconcile note refused a pending request"
+  [ ! -e "$home/state/reconcile-requests/$id.request" ] \
+    || fail "the applied reconcile note left its request pending"
+  show=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$show" "state: queued" "a reconcile note closed the hold"
+  assert_contains "$show" "Captain hold reconciled:" "the note left no record"
+
+  # Outcome two: moot - the evidence close retires a fresh request and closes
+  # the task with the reconciled mode, never claiming a captain answer.
+  printf '%s\n' "$id" | run_captain "$home" reconcile-requests --source-id "$sid" \
+      --source "herdr-firstmate-flow captain's deck" >/dev/null \
+    || fail "could not file the second reconcile request"
+  printf 'The index regenerated cleanly at 2026-09-25T00:00Z; nothing to choose.\n' > "$home/evidence.txt"
+  run_captain "$home" reconcile close "$id" --evidence-file "$home/evidence.txt" >/dev/null \
+    || fail "reconcile close refused a pending request"
+  show=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$show" "state: done" "a reconcile close left the hold open"
+  assert_contains "$show" "Resolution mode: reconciled" "a reconcile close claimed a captain answer"
+  assert_contains "$show" "Reconciliation evidence:" "a reconcile close lost its evidence"
+  [ ! -e "$home/state/reconcile-requests/$id.request" ] \
+    || fail "the applied reconcile close left its request pending"
+  run_captain "$home" unbind "$sid" >/dev/null || fail "could not unbind the deck source"
+  pass "reconcile requests stay durable, never close, and retire through evidence or a note"
+}
+
+# The reserved reconcile selection also stays out of the adapter's keyed-answer
+# rows and reaches only the reconcile feed.
+test_lavish_reconcile_selections_split_from_answers() {
+  local home result out
+  home=$(make_home lavish-reconcile)
+  result="$home/result.txt"
+  cat > "$result" <<'EOF'
+session:
+  file: /board.html
+  status: feedback
+prompts[3]{uid,prompt,selector,tag,text}:
+  "1","Call one: option-a\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"call-one\",\n  \"selection\": \"option-a\",\n  \"note\": \"\"\n}","section#call > form",choice,"Call one"
+  "2","Call two: re-check\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"call-two\",\n  \"selection\": \"reconcile\",\n  \"note\": \"check the latest build\"\n}","section#call > form",choice,"Reconcile"
+  "3","Old call: reconcile - verify\n\nContext data:\n{\n  \"question\": \"call-three\",\n  \"answer\": \"reconcile - verify\"\n}","section#call > form",choice,"Old reconcile"
+EOF
+  out=$(run_lavish "$home" answers "$result") || fail "the adapter refused a versioned result"
+  assert_contains "$out" "call-one	option-a" "the versioned answer row was not emitted"
+  assert_not_contains "$out" "call-two" "a reconcile selection leaked into keyed answers"
+  assert_not_contains "$out" "call-three" "a legacy reconcile-shaped value reached keyed answers"
+  out=$(run_lavish "$home" reconciles "$result") || fail "the adapter refused reconciles"
+  [ "$out" = "$(printf 'call-two\tcheck the latest build')" ] \
+    || fail "the reconcile feed lost or invented a task id: $out"
+  pass "the adapter splits reconcile selections from keyed answers"
+}
+
+# A status-side resolved line over a still-open captain hold is the divergence
+# the wake drain surfaces without closing anything.
+test_diverged_reports_status_close_over_open_hold() {
+  local home id out home2 id2
+  home=$(make_home divergence)
+  id=div-call
+  tasks_in "$home" add "$id" "Two records disagree" --kind captain --repo sample >/dev/null \
+    || fail "could not create the divergence fixture"
+  run_captain "$home" hold "$id" --reason "pending" >/dev/null || fail "could not hold the fixture"
+  write_origin_meta "$home" "$id" ship
+  printf 'needs-decision [key=%s]: pick one\nworking: mid-flight\n' "$id" > "$home/state/$id.status"
+
+  out=$(run_captain "$home" diverged) || fail "diverged failed on a clean home"
+  [ -z "$out" ] || fail "diverged reported a contradiction on a clean home: $out"
+
+  printf 'resolved [key=%s]: the status log says the captain ruled\n' "$id" >> "$home/state/$id.status"
+  out=$(run_captain "$home" diverged) || fail "diverged failed on the contradictory home"
+  assert_contains "$out" "$id" "a resolved status line over an open hold was not flagged"
+
+  # A verified captain-held transfer close is NOT a divergence.
+  home2=$(make_home no-divergence)
+  id2=held-call
+  tasks_in "$home2" add "$id2" "Consistent records" --kind captain --repo sample >/dev/null \
+    || fail "could not create the agreement fixture"
+  run_captain "$home2" hold "$id2" --reason "pending" >/dev/null || fail "could not hold the fixture"
+  write_origin_meta "$home2" "$id2" ship
+  printf 'needs-decision [key=%s]: pick one\ncaptain-held [key=%s]: tracked by %s\n' \
+    "$id2" "$id2" "$id2" > "$home2/state/$id2.status"
+  out=$(run_captain "$home2" diverged) || fail "diverged failed on the agreeing home"
+  [ -z "$out" ] || fail "a captain-held transfer was misread as divergence: $out"
+  pass "a status close over an open hold surfaces through diverged"
+}
+
+# A --until deferral leaves Captain's Call until its date, then returns.
+test_deferred_hold_leaves_captains_call_until_due() {
+  local home id json
+  home=$(make_home deferred-call)
+  id=deferred-call
+  tasks_in "$home" add "$id" "Pick after the freeze" --kind captain --repo sample >/dev/null \
+    || fail "could not create the deferral fixture"
+  run_captain "$home" hold "$id" --reason "after the freeze" --until 2027-01-15 >/dev/null \
+    || fail "could not record a deferred hold"
+  json=$(run_bearings "$home") || fail "Bearings failed with a deferred hold"
+  printf '%s' "$json" | jq -e --arg id "$id" '
+    (.decisions_open | any(.id == $id) | not)
+      and (.gates | any(.id == $id and (.reason | test("deferred until 2027-01-15"))))
+  ' >/dev/null || fail "a deferred hold did not leave Captain's Call: $json"
+  json=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2027-01-16T00:00:00Z \
+      FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+      "$ROOT/bin/fm-bearings-snapshot.sh" --json) \
+    || fail "Bearings failed after the deferral date"
+  printf '%s' "$json" | jq -e --arg id "$id" '
+    (.decisions_open | any(.id == $id))
+      and (.gates | any(.id == $id) | not)
+  ' >/dev/null || fail "an expired deferral did not return to Captain's Call: $json"
+  pass "a --until deferral gates until its date and resurfaces after"
+}
+
+# The board build writes the durable per-card store beside the board payload.
+test_board_build_writes_decision_cards() {
+  local home card_id payload board
+  home=$(make_home board-cards)
+  card_id='board-call'
+  tasks_in "$home" add "$card_id" "Pick the board option" --kind captain --repo sample >/dev/null \
+    || fail "could not create the board fixture"
+  run_captain "$home" hold "$card_id" --reason "board pending" >/dev/null || fail "could not hold the fixture"
+  payload="$home/board.json"
+  cat > "$payload" <<EOF
+{"schema":"fm-bearings-board.v1","home":"board-cards","generated":"2026-09-25T00:00:00Z","prs_live":false,
+ "captains_call":[{"key":"$card_id","type":"decision","repo":"sample","title":"Pick the board option",
+   "about":"context","decide":"the option",
+   "options":[{"value":"a","label":"Option A"},{"value":"b","label":"Option B"}]}],
+ "underway":[],"landed":[],"charted":[]}
+EOF
+  fm_fake_exit0 "$home/fakebin" lavish-axi
+  # Whether or not lavish-axi exists on this host, the build must have published
+  # the board and the durable card store before the session step can fail.
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-bearings-board.sh" build "$payload" > "$home/build.out" 2>&1 || true
+  board="$home/.lavish/bearings-board.html"
+  [ -f "$board" ] || fail "the board file was not published: $(cat "$home/build.out")"
+  [ -f "$home/state/decision-cards/$card_id.json" ] \
+    || fail "the durable decision card was not written"
+  jq -e --arg id "$card_id" '
+    .schema == "fm-decision-card.v1" and .card.key == $id
+      and ([.card.options[].value] | index("reconcile") != null)
+  ' "$home/state/decision-cards/$card_id.json" >/dev/null \
+    || fail "the stored card is not a reconcile-carrying fm-decision-card.v1 record"
+  sed -n '/<script id="bearings-data" type="application\/json">/,/<\/script>/p' "$board" \
+    | sed '1d;$d' | jq -e --arg id "$card_id" '.captains_call | any(.key == $id)' >/dev/null \
+    || fail "the built board lost its decision card"
+  pass "the board build writes fm-bearings-board.v1 plus durable fm-decision-card.v1 records"
+}
+
+# Out-of-band closes stay recordable: when a held task was closed by hand, the
+# captain's words still land durably instead of being refused as absent.
+test_out_of_band_close_is_recordable() {
+  local home id show
+  home=$(make_home oob-close)
+  id=oob-call
+  tasks_in "$home" add "$id" "Call closed by hand" --kind captain --repo sample >/dev/null \
+    || fail "could not create the out-of-band fixture"
+  run_captain "$home" hold "$id" --reason "pending" >/dev/null || fail "could not hold the fixture"
+  tasks_in "$home" "done" "$id" >/dev/null || fail "could not close the fixture out of band"
+  printf 'Captain already said go.\n' > "$home/oob-decision.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/oob-decision.txt" >/dev/null \
+    || fail "an out-of-band close refused the captain's recorded words"
+  show=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$show" "state: done" "the recording pass reopened a closed task"
+  assert_contains "$show" "Resolution mode: repaired" "the out-of-band record lost its repair close path"
+  assert_contains "$show" "Captain already said go." "the out-of-band record lost the captain's words"
+  pass "an out-of-band close stays recordable through answer"
+}
 
 test_uninventoried_report_decision_refuses_completion
 
@@ -918,3 +1226,10 @@ test_bound_channel_answers_close_their_holds_at_answer_time
 test_unbound_source_closes_no_hold
 test_answer_preserves_every_unrouted_close_guard
 test_chat_channel_feeds_the_same_keyed_answer_intake
+test_deck_style_answers_close_plain_task_id_holds
+test_reconcile_requests_and_outcomes
+test_lavish_reconcile_selections_split_from_answers
+test_diverged_reports_status_close_over_open_hold
+test_deferred_hold_leaves_captains_call_until_due
+test_board_build_writes_decision_cards
+test_out_of_band_close_is_recordable
