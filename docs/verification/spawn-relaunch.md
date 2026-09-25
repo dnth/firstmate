@@ -75,4 +75,4 @@ A proven-gone endpoint - tmux `missing`, herdr `.server.running: false`, zellij 
 A drifted live herdr shell receives exactly one `cd` back to the recorded worktree; a shell that will not go refuses.
 Live agents, ambiguous, unreadable, unverified, foreign-worktree, and unprovable-ownership outcomes all refuse unchanged, and orca remains refused.
 
-Regression notes: `tests/fm-remote-secondmate-lifecycle-e2e.test.sh` fails at "dead markerless reconciliation notify" identically on the pristine `main` checkout (environmental fake-remote fixture, unrelated to this change); `tests/fm-omp-relaunch-tmux-live-e2e.test.sh` and `tests/fm-backend-cmux-smoke.test.sh` skip without their opt-in env or CLI.
+Regression notes: `tests/fm-omp-relaunch-tmux-live-e2e.test.sh` and `tests/fm-backend-cmux-smoke.test.sh` skip without their opt-in env or CLI.
