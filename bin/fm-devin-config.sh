@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Write a private per-worker Devin config for one Firstmate crew.
 # Usage: fm-devin-config.sh <state-dir> <task-id> [<user-config>]
-# The default source is ~/.config/devin/config.json (Devin's --config default).
+# The default source is ${XDG_CONFIG_HOME:-$HOME/.config}/devin/config.json (Devin's --config default).
 # An absent source starts from {}; unreadable or malformed sources refuse.
 # Output: <state-dir>/<task-id>.devin-config.json, mode 600, atomically replaced.
 # No project or user config is edited. fm-teardown.sh owns retirement.
@@ -26,7 +26,7 @@ case "${1:-}" in
 esac
 STATE=${1:?state directory required}
 ID=${2:?task id required}
-SOURCE=${3:-$HOME/.config/devin/config.json}
+SOURCE=${3:-${XDG_CONFIG_HOME:-$HOME/.config}/devin/config.json}
 case "$ID" in ''|*[!A-Za-z0-9._-]*) echo 'error: invalid task id' >&2; exit 1 ;; esac
 [ -d "$STATE" ] || { echo 'error: state directory missing' >&2; exit 1; }
 STATE=$(cd "$STATE" && pwd -P)
