@@ -229,6 +229,7 @@ the operational prefix lets firstmate distinguish it from a real captain message
 ## Stale-artifact lifecycle
 
 Treat `state/.subsuper-escalations`, its `.since` sidecar, the generation-bound `state/.subsuper-recovery-escalations` projection and `.generation` sidecar, `state/.subsuper-inject-wedged`, and `state/.subsuper-unknown-acked` as session-scoped delivery artifacts, not as the durable work record.
+When a digest is bounded, `state/.subsuper-digests/` contains the verbatim buffered events named by the injected digest; those full-text evidence files are retained separately from the transient delivery artifacts.
 Always enter through `bin/fm-afk-launch.sh`, which clears prior-session artifacts only for a fresh entry and preserves the current session's buffer on refresh.
 Always exit through `bin/fm-afk-launch.sh stop`, which keeps `state/.afk` present through the daemon's shutdown flush and clears it last.
 `docs/herdr-backend.md` "Away-mode supervisor support" owns the current mechanism, and `docs/verification/runtime-backends.md` "Away-mode transport" owns active evidence.
