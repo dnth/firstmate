@@ -1303,11 +1303,16 @@ snapshot_returned_slot_role_markers() {  # <dir>
         return 1
       }
     elif [ -e "$src" ]; then
-      [ -f "$src" ] && cp -p -- "$src" "$backup/$marker" || {
+      if [ -f "$src" ]; then
+        cp -p -- "$src" "$backup/$marker" || {
+          rm -rf -- "$backup"
+          return 1
+        }
+      else
         rm -rf -- "$backup"
         echo "teardown: refusing non-file secondmate role marker $src" >&2
         return 1
-      }
+      fi
     fi
   done
   printf '%s\n' "$backup"
