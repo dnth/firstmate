@@ -917,7 +917,7 @@ fm_lock_try_acquire() {
   # Locks are directories (or ownership symlinks); an ordinary file is an
   # invalid, unacquirable shape and must not enter stale-owner recovery.
   if [ -e "$lockdir" ] && [ ! -d "$lockdir" ] && [ ! -L "$lockdir" ]; then
-    return 1
+    return 2
   fi
 
   if fm_lock_try_create "$lockdir"; then

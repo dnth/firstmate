@@ -1249,8 +1249,12 @@ spawn_abort_cleanup() {
           # The lock is released with the ordinary publication's below.
           if [ "$SPAWN_META_LOCK_HELD" != 1 ] \
              && SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta"); then
-            fm_lock_acquire_wait "$SPAWN_META_LOCK"
-            SPAWN_META_LOCK_HELD=1
+            fm_lock_acquire_wait "$SPAWN_META_LOCK" || {
+              SPAWN_META_LOCK=
+            }
+            if [ -n "$SPAWN_META_LOCK" ]; then
+              SPAWN_META_LOCK_HELD=1
+            fi
           fi
           if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
             echo "warning: Orca abort cleanup could not lock task metadata; leaked Orca worktree $ORCA_WORKTREE_ID has no recovery record" >&2
@@ -4833,7 +4837,7 @@ fi
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
-fm_lock_acquire_wait "$SPAWN_META_LOCK"
+fm_lock_acquire_wait "$SPAWN_META_LOCK" || exit 1
 SPAWN_META_LOCK_HELD=1
 # The record is staged beside its target and published atomically, so an abort
 # mid-write can never leave a truncated meta that teardown would read as a live

@@ -367,7 +367,7 @@ case "$CMD" in
     [ -n "$SUMMARY" ] || usage
     case "$VERDICT" in routine|captain) ;; *) usage ;; esac
     case "$SILENT" in true|false) ;; *) usage ;; esac
-    fm_lock_acquire_wait "$LOCK"
+    fm_lock_acquire_wait "$LOCK" || exit 1
     if ! LAST_SEQ=$(last_seq); then
       fm_lock_release "$LOCK"
       echo "error: refusing append because the outcome store has a malformed final record" >&2
@@ -384,7 +384,7 @@ case "$CMD" in
     ;;
   unread)
     [ "$#" -eq 0 ] || usage
-    fm_lock_acquire_wait "$LOCK"
+    fm_lock_acquire_wait "$LOCK" || exit 1
     print_unread
     fm_lock_release "$LOCK"
     ;;
@@ -393,7 +393,7 @@ case "$CMD" in
     SEQ=${2:-}
     case "$SEQ" in ''|0|0*|*[!0-9]*) usage ;; esac
     [ "$#" -eq 2 ] || usage
-    fm_lock_acquire_wait "$LOCK"
+    fm_lock_acquire_wait "$LOCK" || exit 1
     CURSOR_VALUE=$(read_cursor)
     EXPECTED=$(( CURSOR_VALUE + 1 ))
     NEXT=$(print_unread | sed -n '1p')
@@ -420,7 +420,7 @@ case "$CMD" in
     ;;
   startup-replay)
     [ "$#" -eq 0 ] || usage
-    fm_lock_acquire_wait "$LOCK"
+    fm_lock_acquire_wait "$LOCK" || exit 1
     CURSOR_VALUE=$(read_cursor)
     EXPECTED=1
     VALID_UNREAD=
@@ -545,7 +545,7 @@ EOF
     [ -n "$ENDPOINT$THROUGH" ] || usage
     if [ -n "$ENDPOINT" ]; then case "$ENDPOINT" in *[!0-9]*) usage ;; esac; fi
     if [ -n "$THROUGH" ]; then case "$THROUGH" in *[!0-9]*) usage ;; esac; fi
-    fm_lock_acquire_wait "$LOCK"
+    fm_lock_acquire_wait "$LOCK" || exit 1
     # A torn ledger must refuse new receipts: appending a valid line after a
     # malformed one would leave every later read failing, so the receipt would
     # never discharge the obligation it records.
