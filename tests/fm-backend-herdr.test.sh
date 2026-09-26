@@ -3984,9 +3984,10 @@ test_send_text_submit_replays_literal_send_stderr() {
   local dir log resp fb out err
   dir="$TMP_ROOT/submit-send-stderr"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   err="$dir/stderr"
-  # 1: send-text fails the way an oversized argument does, before herdr runs
-  printf 'herdr: Argument list too long\n' > "$resp/1.err"
-  printf '126\n' > "$resp/1.exit"
+  # 1: identity probe; 2: send-text fails the way an oversized argument does.
+  printf '%s\n' '{"result":{"agent":{"agent":"codex","agent_status":"idle"}}}' > "$resp/1.out"
+  printf 'herdr: Argument list too long\n' > "$resp/2.err"
+  printf '126\n' > "$resp/2.exit"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 3 0.01 0.01' "$ROOT" 2>"$err" )

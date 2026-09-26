@@ -109,8 +109,9 @@ setup_case() {  # <name> <harness> -> echoes "home fakebin bun omp log entered"
   omp="$dir/omp"
   log="$dir/send.log"
   entered="$dir/entered"
-  # shellcheck disable=SC2016 # The generated stub must expand its own argv.
-  printf '#!/usr/bin/env bash\nprintf "%%s" "${!#}" | wc -L\n' > "$bun"
+  # Escape the generated stub's positional expansion while keeping this
+  # fixture free of a single-quoted `${!#}` ShellCheck warning.
+  printf "#!/usr/bin/env bash\nprintf \"%%s\" \"\${!#}\" | wc -L\n" > "$bun"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$omp"
   chmod +x "$bun" "$omp"
   bun=$(fm_test_realpath "$bun")
@@ -445,7 +446,10 @@ test_herdr_empty_requires_post_submit_turn_proof() {
   entered="$dir/herdr-entered"
   reads="$dir/herdr-working-read"
   mkdir -p "$home/state"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$bun"
+  # The widened Herdr payload proof asks the runtime for terminal-cell width.
+  # Keep this fixture executable while returning the measured row width that
+  # the OMP composer parser consumes.
+  printf '#!/usr/bin/env bash\nprintf "23\\n"\n' > "$bun"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$omp"
   chmod +x "$bun" "$omp"
   : > "$session"
@@ -457,11 +461,16 @@ case "${1:-} ${2:-}" in
   'pane get') printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p1"}}}' ;;
   'pane send-text') : > "$FM_TEST_HERDR_TYPED" ;;
   'pane read')
+    top='╭── OMP test agent ▶──╮'
+    width=${#top}
+    composer=''
     if [ -f "$FM_TEST_HERDR_TYPED" ]; then
-      printf '╭── OMP test agent ▶──╮\n╰─ %s ─╯\n' "$FM_TEST_HERDR_TEXT"
-    else
-      printf '╭── OMP test agent ▶──╮\n╰─                    ─╯\n'
+      composer=$FM_TEST_HERDR_TEXT
     fi
+    padding=$((width - 4 - ${#composer} - 2))
+    [ "$padding" -lt 0 ] && padding=0
+    spaces=$(printf '%*s' "$padding" '')
+    printf '%s\n╰─ %s%s ─╯\n' "$top" "$composer" "$spaces"
     ;;
   'pane send-keys')
     : > "$FM_TEST_HERDR_ENTERED"
@@ -505,6 +514,7 @@ SH
     FM_TEST_TURNSTART_MARKER="$home/state/herdr-turn.omp-started" \
     FM_TEST_HERDR_ENTERED="$entered" FM_TEST_HERDR_WORKING_READ="$reads" \
     FM_TEST_HERDR_TYPED="$dir/herdr-typed" \
+    FM_TEST_HERDR_TEXT='/remote-coarse-check' \
     FM_TEST_HERDR_SESSION="$session" FM_SEND_RETRIES=1 FM_SEND_SLEEP=0 \
     FM_SEND_SETTLE=0 FM_SEND_TURNSTART_TIMEOUT=0.1 FM_SEND_TURNSTART_POLL=0.02 \
     "$SEND" herdr-turn '/remote-coarse-check' >/dev/null 2>&1
