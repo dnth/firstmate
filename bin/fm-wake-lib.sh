@@ -487,7 +487,7 @@ _fm_recovery_lock_acquire() {
     return 0
   fi
   if [ -z "$attempts" ]; then
-    fm_lock_acquire_wait "$lock"
+    fm_lock_acquire_wait "$lock" || return $?
     return 0
   fi
   case "$attempts" in ''|*[!0-9]*|0) return 2 ;; esac
@@ -1676,7 +1676,7 @@ fm_wake_append() {
       sleep 0.05
     done
   else
-    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
   fi
   if fm_wake_append_locked "$kind" "$key" "$payload" "$lock_attempts"; then
     :
@@ -1734,7 +1734,7 @@ fm_wake_queued_keys() {
     && [ ! -L "$FM_WAKE_QUEUE_LOCK" ]; then
     return 1
   fi
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
   fm_wake_queued_keys_locked "$kind"
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 }
