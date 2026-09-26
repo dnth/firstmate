@@ -56,6 +56,11 @@
 #   -h,--help        usage
 #
 # Output contract: `fm-bearings.v1`. Read-only; no locks, no mutation, no reports.
+# Every `in_flight` row includes `repo` and a string `name` for card renderers.
+# Direct rows use the backlog title for `name` and an empty string when no structured
+# backlog record supplies a title; their `repo` comes from backlog `repo` or project.
+# Secondmate aggregate rows join active child names and report a `repo` only when
+# every active child has the same non-null repository.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -102,7 +107,7 @@ usage: fm-bearings-snapshot.sh [--json] [--include-prs] [--fields <list>]
 Compact bearings projection over fm-fleet-snapshot.sh. TOON by default.
 Default is LOCAL-ONLY (no network); --include-prs is the only path that fetches.
 
-Default fields: schema, home, generated, prs, in_flight{id,kind,state,doing},
+Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,doing},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   secondmate_reconcile{id,spawn_gen,host,remote_root,kind,ids},
   decisions_open{id,key,verb,title,reason,summary,owner}, landed{id,what,artifact,owner},
@@ -398,12 +403,22 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | select(.backlog.current_role != "held" or .current_state.state == "working")
        | {id, kind,
         state: .current_state.state,
+        repo:((.backlog.repo // .project) | if . == "" then null else . end),
+        name:((.backlog.title // "") | trunc(70)),
         doing: ((.current_state.detail // "") as $d
                 | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90))
       } ]
      + [ $secondmate_views[]
          | select(.bearings_state == "active_child_work")
          | {id,kind:"secondmate",state:.bearings_state,
+            repo:([.active_children[] | .repo] as $repos
+                  | if ($repos | length) > 0
+                     and (all($repos[]; . != null))
+                     and (($repos | unique | length) == 1)
+                    then $repos[0]
+                    else null
+                    end),
+            name:([.active_children[] | .name // "" | select(type == "string" and test("[^[:space:]]"))] | join("; ") | trunc(70)),
             doing:([.active_children[] | .id + ": " + (.doing // .state)] | join("; ") | trunc(90))} ]) as $in_flight_all
   | ([ .backlog.records[]
          | select(.structured and .captain_actionable == true)

@@ -1644,6 +1644,88 @@ test_captains_call_anti_leak() {
   pass "action-free items (working/done/queued/landed) do not leak into Captain's Call"
 }
 
+# Card renderers (Captain's Deck) key each Underway card on the durable task
+# identity, so every in_flight row must carry a string `name` - the backlog item
+# title, empty when the task has no structured backlog record - plus `repo`.
+test_in_flight_rows_carry_name_and_repo() {
+  local home fakebin json
+  home=$(make_home inflight-identity); write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.in_flight | length) > 0
+      and (.in_flight | all(.[]; ((.name | type) == "string") and has("repo")))
+      and (.in_flight | any(.id == "ship-task"
+        and .name == "Ship the thing" and .repo == "firstmate"))
+      and (.in_flight | any(.id == "external-wait" and .name == ""))
+  ' >/dev/null || fail "in_flight rows must carry name and repo: $json"
+  pass "every in_flight row carries the backlog name and repo"
+}
+
+test_secondmate_aggregate_repo_requires_unanimity() {
+  local home mixed shared fakebin json
+  home=$(make_home secondmate-aggregate-repo)
+  mixed="$TMP_ROOT/secondmate-aggregate-mixed-home"
+  shared="$TMP_ROOT/secondmate-aggregate-shared-home"
+  make_valid_secondmate_home mixed-mate "$mixed"
+  make_valid_secondmate_home shared-mate "$shared"
+  append_secondmate_registry "$home" mixed-mate "$mixed"
+  append_secondmate_registry "$home" shared-mate "$shared"
+  fm_write_secondmate_meta "$home/state/mixed-mate.meta" "$mixed" "firstmate:fm-mixed-mate" sample
+  fm_write_secondmate_meta "$home/state/shared-mate.meta" "$shared" "firstmate:fm-shared-mate" sample
+
+  cat > "$mixed/data/backlog.md" <<'EOF'
+## In flight
+- [ ] alpha-child - Alpha work (repo: alpha) (kind: ship) (since 2026-07-13)
+- [ ] beta-child - Beta work (repo: beta) (kind: ship) (since 2026-07-13)
+
+## Queued
+
+## Done
+EOF
+  cat > "$shared/data/backlog.md" <<'EOF'
+## In flight
+- [ ] one-child - First shared work (repo: shared) (kind: ship) (since 2026-07-13)
+- [ ] two-child - Second shared work (repo: shared) (kind: ship) (since 2026-07-13)
+
+## Queued
+
+## Done
+EOF
+
+  local child repo mate
+  for mate in "$mixed" "$shared"; do
+    if [ "$mate" = "$mixed" ]; then
+      for child in alpha-child beta-child; do repo=${child%-child};
+        mkdir -p "$mate/projects/$child"
+        fm_write_meta "$mate/state/$child.meta" \
+          "window=firstmate:fm-$child" "worktree=$mate/projects/$child" \
+          "project=$repo" "harness=claude" "kind=ship" "mode=no-mistakes"
+        record_claude_state "$mate/state" "$child" busy
+        printf 'working: %s\n' "$child" > "$mate/state/$child.status"
+      done
+    else
+      for child in one-child two-child; do
+        mkdir -p "$mate/projects/$child"
+        fm_write_meta "$mate/state/$child.meta" \
+          "window=firstmate:fm-$child" "worktree=$mate/projects/$child" \
+          "project=shared" "harness=claude" "kind=ship" "mode=no-mistakes"
+        record_claude_state "$mate/state" "$child" busy
+        printf 'working: %s\n' "$child" > "$mate/state/$child.status"
+      done
+    fi
+  done
+
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.in_flight | all(.[]; (.name | type) == "string"))
+      and (.in_flight | any(.id == "mixed-mate" and .repo == null))
+      and (.in_flight | any(.id == "shared-mate" and .repo == "shared"))
+  ' >/dev/null || fail "secondmate aggregate repo was not unanimous: $json"
+  pass "secondmate aggregate repo is emitted only for unanimous children"
+}
+
 # R1: main-home orphan in-flight and unstructured current rows must not vanish
 # silently. Meta remains the sole live-work inventory; disclosure is via
 # main_inventory + omitted[] + a Charted Next gate line, never fake Underway.
@@ -2134,6 +2216,8 @@ test_all_landed_keeps_complete_global_order
 test_landed_bounded_and_disclosed
 test_live_blocker_is_not_charted_queue_work
 test_captains_call_anti_leak
+test_in_flight_rows_carry_name_and_repo
+test_secondmate_aggregate_repo_requires_unanimity
 test_main_orphan_in_flight_is_disclosed_not_invented
 test_main_unstructured_current_is_disclosed_with_structured_sibling
 test_main_orphan_counterfactual_meta_clears_inventory_warning
