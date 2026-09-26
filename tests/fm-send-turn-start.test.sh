@@ -109,7 +109,7 @@ setup_case() {  # <name> <harness> -> echoes "home fakebin bun omp log entered"
   omp="$dir/omp"
   log="$dir/send.log"
   entered="$dir/entered"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$bun"
+  printf '#!/usr/bin/env bash\nprintf "%%s" "${!#}" | wc -L\n' > "$bun"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$omp"
   chmod +x "$bun" "$omp"
   bun=$(fm_test_realpath "$bun")
@@ -454,7 +454,14 @@ test_herdr_empty_requires_post_submit_turn_proof() {
 case "${1:-} ${2:-}" in
   'status --json') printf '%s\n' '{"client":{"version":"0.7.5","protocol":16},"server":{"running":true}}' ;;
   'pane get') printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p1"}}}' ;;
-  'pane send-text') : ;;
+  'pane send-text') : > "$FM_TEST_HERDR_TYPED" ;;
+  'pane read')
+    if [ -f "$FM_TEST_HERDR_TYPED" ]; then
+      printf '╭── OMP test agent ▶──╮\n╰─ %s ─╯\n' "$FM_TEST_HERDR_TEXT"
+    else
+      printf '╭── OMP test agent ▶──╮\n╰─                    ─╯\n'
+    fi
+    ;;
   'pane send-keys')
     : > "$FM_TEST_HERDR_ENTERED"
     case "${FM_TEST_HERDR_EVENT:-}" in
@@ -496,6 +503,7 @@ SH
     FM_TEST_SEND_LOG="$dir/send.log" FM_TEST_ENTERED="$dir/tmux-entered" \
     FM_TEST_TURNSTART_MARKER="$home/state/herdr-turn.omp-started" \
     FM_TEST_HERDR_ENTERED="$entered" FM_TEST_HERDR_WORKING_READ="$reads" \
+    FM_TEST_HERDR_TYPED="$dir/herdr-typed" \
     FM_TEST_HERDR_SESSION="$session" FM_SEND_RETRIES=1 FM_SEND_SLEEP=0 \
     FM_SEND_SETTLE=0 FM_SEND_TURNSTART_TIMEOUT=0.1 FM_SEND_TURNSTART_POLL=0.02 \
     "$SEND" herdr-turn '/remote-coarse-check' >/dev/null 2>&1
