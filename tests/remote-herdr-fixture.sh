@@ -147,7 +147,10 @@ case "${1:-} ${2:-}" in
       publish_omp_ack "$pane" "$launch"
     fi
     ;;
-  "pane read") printf '\n' ;;
+  "pane read")
+    launch=$(jq_state -r --arg p "${3:-}" '.launch[$p] // ""')
+    printf '╭── OMP test agent ▶──╮\n╰─ %s ─╯\n' "$launch"
+    ;;
   "pane process-info")
     pane_pid=987654
     pane_name=fish
