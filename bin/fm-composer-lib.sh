@@ -373,7 +373,7 @@ fm_composer_strip_ghost() {
 #              after a leading prompt glyph is stripped, so a pattern written
 #              with or without the glyph both land.
 fm_composer_idle_matches() {
-  local content=$1 idle_re=$2 idle_case=$3
+  local content=$1 idle_re=$2 idle_case=${3:-sensitive}
   [ -n "$idle_re" ] || return 1
   case "$idle_case" in
     insensitive) printf '%s' "$content" | grep -qiE "$idle_re" ;;
