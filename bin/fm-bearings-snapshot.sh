@@ -56,6 +56,11 @@
 #   -h,--help        usage
 #
 # Output contract: `fm-bearings.v1`. Read-only; no locks, no mutation, no reports.
+# Every `in_flight` row includes `repo` and a string `name` for card renderers.
+# Direct rows use the backlog title for `name` and an empty string when no structured
+# backlog record supplies a title; their `repo` comes from backlog `repo` or project.
+# Secondmate aggregate rows join active child names and report a `repo` only when
+# every active child has the same non-null repository.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
