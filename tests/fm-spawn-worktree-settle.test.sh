@@ -163,6 +163,7 @@ run_settle_spawn() {
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
     FM_FAKE_TREEHOUSE_PATH="$WT_DIR" \
+    FM_TREEHOUSE_LOCAL_ROOT="${FM_TREEHOUSE_LOCAL_ROOT_VALUE:-}" \
     FM_FAKE_READY_PATH="${FM_FAKE_READY_PATH_VALUE:-}" FM_FAKE_READY_FAILED="${FM_FAKE_READY_FAILED_VALUE:-}" FM_FAKE_ENDPOINT_LOG="$CASE_DIR/endpoint.log" IS_SANDBOX="${IS_SANDBOX_VALUE:-}" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
@@ -404,7 +405,7 @@ test_spawn_refuses_secondmate_marked_worktree() {
   printf 'retired-mate\n' > "$WT_DIR/.fm-secondmate-home"
   printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=/nowhere\n' > "$WT_DIR/.fm-secondmate-parent"
 
-  out=$(run_settle_spawn "$id")
+  FM_TREEHOUSE_LOCAL_ROOT_VALUE="$CASE_DIR" out=$(run_settle_spawn "$id")
   status=$?
   [ "$status" -ne 0 ] || fail "spawn launched an ordinary task into a marked secondmate worktree"
   assert_contains "$out" ".fm-secondmate-home" "the refusal did not name the marker file"
@@ -419,9 +420,9 @@ test_sandbox_marker_refusal_removes_endpoint() {
   rec=$(make_settle_case sandbox-marked-slot-refusal "$id" 0)
   read_settle_record "$rec"
   printf 'retired-mate\n' > "$WT_DIR/.fm-secondmate-home"
-  IS_SANDBOX_VALUE=1 FM_FAKE_READY_FAILED_VALUE=1 out=$(run_settle_spawn "$id")
+  IS_SANDBOX_VALUE=1 FM_TREEHOUSE_LOCAL_ROOT_VALUE="$CASE_DIR" FM_FAKE_READY_FAILED_VALUE=1 out=$(run_settle_spawn "$id")
   status=$?
-  unset IS_SANDBOX_VALUE FM_FAKE_READY_FAILED_VALUE
+  unset IS_SANDBOX_VALUE FM_TREEHOUSE_LOCAL_ROOT_VALUE FM_FAKE_READY_FAILED_VALUE
   [ "$status" -ne 0 ] || fail "sandbox spawn accepted a marked secondmate worktree"
   assert_grep 'kill-window' "$CASE_DIR/endpoint.log" \
     "sandbox marker refusal left its endpoint alive"

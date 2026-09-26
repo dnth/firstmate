@@ -3559,7 +3559,7 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; t
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
   && [ "$HARNESS" != omp ] && [ "$RAW_LAUNCH_WORKTREE_READY" != 1 ] \
-  && { [ "${IS_SANDBOX:-0}" != 1 ] || [ -n "${FM_TREEHOUSE_LOCAL_ROOT:-}" ]; }; then
+  && [ -n "${FM_TREEHOUSE_LOCAL_ROOT:-}" ]; then
   treehouse_lease_args=(--lease --lease-holder "$W")
   [ -z "$ACCEPTED_LOCAL_BASE" ] || treehouse_lease_args+=(--accepted-local-base "$ACCEPTED_LOCAL_BASE")
   WT=$(cd "$PROJ_ABS" && FM_TREEHOUSE_REJECT_SECONDMATE_MARKERS=1 \
