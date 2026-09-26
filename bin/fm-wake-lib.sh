@@ -1726,6 +1726,14 @@ fm_wake_queued_keys() {
     signal|stale|check|heartbeat) ;;
     *) printf 'fm_wake_queued_keys: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
   esac
+  # A malformed queue lock must not make read-only queue inspection wait
+  # forever.  Callers use this helper for guard/status checks, so reject an
+  # ordinary file just as bounded append does and let them report no queue.
+  if [ -e "$FM_WAKE_QUEUE_LOCK" ] \
+    && [ ! -d "$FM_WAKE_QUEUE_LOCK" ] \
+    && [ ! -L "$FM_WAKE_QUEUE_LOCK" ]; then
+    return 1
+  fi
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
   fm_wake_queued_keys_locked "$kind"
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
