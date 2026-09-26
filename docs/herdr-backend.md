@@ -295,6 +295,7 @@ The away daemon supports tmux and Herdr supervisor panes only.
 It refuses Zellij, Orca, and cmux as supervisor backends rather than applying the wrong transport.
 For Herdr, target existence, native state, capture, composer state, and verified submit all route through the shared backend dispatcher and the explicit named-session CLI owner.
 The detached launcher preserves the exact supervisor harness and state directory; an OMP primary therefore reaches native session-event acknowledgement, while an unknown Herdr harness identity refuses before typing.
+Every submit resolves to confirmed, failed, or indeterminate: an indeterminate payload (typed but unconfirmed) is recorded under `state/` so it is never re-typed identically, while its items stay buffered for the wedge alarm and return catch-up; the AFK skill's "Submit outcomes" owns the full contract.
 The pane-independent max-defer alert is configured in [`wedge-alarm.md`](wedge-alarm.md).
 
 Harnesses with native tracked background execution can run the daemon in their terminal.

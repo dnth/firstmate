@@ -96,6 +96,8 @@ backend (tmux or herdr; see "Auto-discovered supervisor pane" below):
 A busy primary pane, or any composer verdict other than `empty`, defers the injection; the buffered escalation survives in `state/.subsuper-escalations` and is retried on the next housekeeping tick.
 In afk mode the composer guard is belt-and-suspenders (no human is typing), but it protects against the race window between the captain returning and their message landing, a dead shell, and the daemon's own previous injection sitting unsent.
 
+A deferred or unconfirmed buffer is retried only until its items are provably unsent - see "Submit outcomes" below.
+
 **Max-defer escape (the daemon must never silently wedge).**
 If anything stays buffered past `FM_MAX_DEFER_SECS` (default 300), the daemon
 attempts one normal flush, which still requires an idle pane and an affirmatively empty composer.
@@ -121,6 +123,15 @@ For herdr, idle-baseline submits first seek native agent-state showing a real tu
 A cleared composer confirms delivery, while pending text retries Enter and remains pending except on Herdr's OMP-only queued path.
 A bordered-empty or ghost-only composer is recognized as empty where that backend uses composer confirmation, rather than mistaken for a swallowed Enter.
 `fm-send.sh` uses the same primitive only on its typed plane and exits non-zero when that plane's Enter is positively swallowed; ordinary local text steers use the durable inbox and do not treat doorbell submission as delivery proof.
+
+**Submit outcomes.**
+Every attempt resolves to one of three outcomes.
+`confirmed` (`empty`/`empty-turnstart`/`busy-confirmed`) clears the covered items.
+`failed` (`send-failed`, `turnstart-setup-failed`) means the pane provably accepted nothing, so the payload stays retryable.
+`indeterminate` (any other post-attempt verdict, including `unknown`, `pending`, and `queued-unconfirmed`) means the payload was typed into the pane but its Enter was never confirmed: the exact payload is appended to `state/.subsuper-inject-accepted`, the covered buffer items are appended to `state/.subsuper-inject-unconfirmed`, and no retry ever re-types them identically - a swallowed Enter could already have submitted them, so an identical resend can only duplicate.
+The items stay buffered (durable, never silently dropped): the wedge alarm keeps naming the suppressed re-type, and the afk return catch-up surfaces them as accepted-but-unconfirmed.
+Escalations that arrive afterwards still flush, as a digest containing only items not already accepted.
+Both records are session-scoped and are removed by the away-lifecycle cleanup on entry, rollback-restore, and return.
 
 **Busy-queued Enter exception (opencode 1.18.4 and OMP).**
 Some busy harnesses keep accepted queued text visible in the composer.
@@ -228,7 +239,7 @@ the operational prefix lets firstmate distinguish it from a real captain message
 
 ## Stale-artifact lifecycle
 
-Treat `state/.subsuper-escalations`, its `.since` sidecar, the generation-bound `state/.subsuper-recovery-escalations` projection and `.generation` sidecar, `state/.subsuper-inject-wedged`, and `state/.subsuper-unknown-acked` as session-scoped delivery artifacts, not as the durable work record.
+Treat `state/.subsuper-escalations`, its `.since` sidecar, the generation-bound `state/.subsuper-recovery-escalations` projection and `.generation` sidecar, `state/.subsuper-inject-wedged`, `state/.subsuper-inject-accepted`, `state/.subsuper-inject-unconfirmed`, and `state/.subsuper-unknown-acked` as session-scoped delivery artifacts, not as the durable work record.
 When a digest is bounded, `state/.subsuper-digests/` contains the verbatim buffered events named by the injected digest; those full-text evidence files are retained separately from the transient delivery artifacts.
 Always enter through `bin/fm-afk-launch.sh`, which clears prior-session artifacts only for a fresh entry and preserves the current session's buffer on refresh.
 Always exit through `bin/fm-afk-launch.sh stop`, which keeps `state/.afk` present through the daemon's shutdown flush and clears it last.

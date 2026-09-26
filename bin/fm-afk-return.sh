@@ -126,6 +126,8 @@ clear_delivery_artifacts() {
     "$STATE/.subsuper-recovery-escalations" \
     "$STATE/.subsuper-recovery-escalations.generation" \
     "$STATE/.subsuper-inject-wedged" \
+    "$STATE/.subsuper-inject-accepted" \
+    "$STATE/.subsuper-inject-unconfirmed" \
     "$STATE/.subsuper-unknown-acked"
 }
 
@@ -143,7 +145,7 @@ return_guard() {
 }
 
 return_reconcile() {
-  local evidence blockers drain_err drained wake_ack_line wake_ack_through wake_ack_generation wedge escalations lifecycle_ok=1
+  local evidence blockers drain_err drained wake_ack_line wake_ack_through wake_ack_generation wedge escalations unconfirmed lifecycle_ok=1
   evidence=$(mktemp "$STATE/.afk-return-evidence.XXXXXX") || return 1
   blockers=$(mktemp "$STATE/.afk-return-blockers.XXXXXX") || { rm -f "$evidence"; return 1; }
   drain_err=$(mktemp "$STATE/.afk-return-drain.XXXXXX") || { rm -f "$evidence" "$blockers"; return 1; }
@@ -178,6 +180,12 @@ return_reconcile() {
   if [ -s "$STATE/.subsuper-escalations" ]; then
     escalations=$(cat "$STATE/.subsuper-escalations" 2>/dev/null || true)
     append_evidence escalation "$escalations" "$evidence"
+  fi
+  if [ -s "$STATE/.subsuper-inject-unconfirmed" ]; then
+    unconfirmed=$(wc -l < "$STATE/.subsuper-inject-unconfirmed" 2>/dev/null | tr -d ' ')
+    append_evidence unconfirmed-submit \
+      "$unconfirmed buffered escalation(s) were accepted into the supervisor pane but never confirmed; they were not re-typed and may already have reached firstmate" \
+      "$evidence"
   fi
 
   scan_open_blockers > "$blockers"

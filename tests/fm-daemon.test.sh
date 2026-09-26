@@ -1930,6 +1930,219 @@ test_bounded_digest_full_text_kept_after_typing() {
   pass "a bounded digest's full-text file survives a failure after typing, and a deferral writes none"
 }
 
+# Issue #85: a digest accepted into the supervisor pane whose confirmation comes
+# back indeterminate must never be re-typed identically. The fake submit records
+# each payload it accepted and returns `unknown`, exactly the lost-acknowledge
+# shape from the incident: before the repair every retry resent a byte-identical
+# digest while the buffer stayed put.
+test_accepted_unconfirmed_digest_is_never_retyped() {
+  local dir state sent attempt
+  dir=$(make_supercase accepted-unconfirmed-replay)
+  state="$dir/state"
+  sent="$dir/sent.log"; : > "$sent"
+  afk_enter "$state"
+  escalate_add "$state" 'paused/held 100s (awaiting external recovery, recheck whether the wait still holds): default:w1:p3'
+  escalate_add "$state" 'task-a.status: done: PR https://example.test/pull/1 (catch-all scan)'
+  (
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
+    fm_backend_target_exists() { return 0; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
+    pane_is_busy() { return 1; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
+    fm_backend_composer_state() { printf 'empty'; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
+    fm_backend_send_text_submit() { printf '%s\n' "$3" >> "$sent"; printf 'unknown'; }
+    for attempt in 1 2 3; do
+      FM_INJECT_CONFIRM_RETRIES=3 FM_INJECT_CONFIRM_SLEEP=0 escalate_flush "$state" \
+        && fail "escalate_flush reported success on an unconfirmed submit"
+    done
+  )
+  [ "$(wc -l < "$sent" | tr -d ' ')" = 1 ] \
+    || fail "an accepted-but-unconfirmed digest was re-typed identically ($(wc -l < "$sent" | tr -d ' ') sends): $(cat "$sent")"
+  [ -s "$state/.subsuper-escalations" ] || fail "an unconfirmed escalation was silently dropped"
+  cmp -s "$state/.subsuper-inject-unconfirmed" "$state/.subsuper-escalations" \
+    || fail "the accepted-but-unconfirmed items were not recorded durably"
+  pass "an accepted-but-unconfirmed digest is never re-typed; its items stay durable"
+}
+
+# A send that provably failed before the pane accepted anything (send-failed)
+# records no accepted-payload identity and stays retryable: the next attempt
+# delivers and clears the buffer.
+test_send_failed_submit_stays_retryable() {
+  local dir state sent calls
+  dir=$(make_supercase send-failed-retry)
+  state="$dir/state"
+  sent="$dir/sent.log"; : > "$sent"
+  calls="$dir/calls"; printf '0\n' > "$calls"
+  afk_enter "$state"
+  escalate_add "$state" 'task-b.status: failed: transport probe (catch-all scan)'
+  (
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
+    fm_backend_target_exists() { return 0; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
+    pane_is_busy() { return 1; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
+    fm_backend_composer_state() { printf 'empty'; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
+    fm_backend_send_text_submit() {
+      local n
+      n=$(cat "$calls"); printf '%s\n' "$((n + 1))" > "$calls"
+      if [ "$n" -eq 0 ]; then
+        printf 'send-failed'
+      else
+        printf '%s\n' "$3" >> "$sent"
+        printf 'empty'
+      fi
+    }
+    FM_INJECT_CONFIRM_RETRIES=3 FM_INJECT_CONFIRM_SLEEP=0 escalate_flush "$state" \
+      && fail "escalate_flush reported success on send-failed"
+    FM_INJECT_CONFIRM_RETRIES=3 FM_INJECT_CONFIRM_SLEEP=0 escalate_flush "$state" \
+      || fail "a provably failed send was not retried"
+  )
+  [ "$(cat "$calls")" = 2 ] || fail "submit was not attempted on the retry: $(cat "$calls")"
+  grep -F 'task-b.status: failed: transport probe' "$sent" >/dev/null \
+    || fail "the failed send was not delivered on retry: $(cat "$sent")"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "delivered items stayed buffered"
+  [ ! -e "$state/.subsuper-inject-unconfirmed" ] \
+    || fail "a provably failed send was recorded as accepted-but-unconfirmed"
+  [ ! -e "$state/.subsuper-inject-accepted" ] \
+    || fail "a provably failed send recorded an accepted payload identity"
+  pass "a send that provably failed before acceptance stays retryable and delivers"
+}
+
+# An indeterminate escalation is never silently lost: the durable
+# unconfirmed record persists, the wedge alarm keeps naming the suppressed
+# re-type as its last failure, and the afk return catch-up surfaces the
+# buffered items with their reason.
+test_indeterminate_escalation_surfaces_through_alarm_and_catchup() {
+  local dir state sent
+  dir=$(make_supercase indeterminate-durable)
+  state="$dir/state"
+  sent="$dir/sent.log"; : > "$sent"
+  afk_enter "$state"
+  escalate_add "$state" 'task-c.status: needs-decision: pick A or B'
+  (
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
+    fm_backend_target_exists() { return 0; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
+    pane_is_busy() { return 1; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
+    fm_backend_composer_state() { printf 'empty'; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
+    fm_backend_send_text_submit() { printf '%s\n' "$3" >> "$sent"; printf 'unknown'; }
+    FM_INJECT_CONFIRM_RETRIES=3 FM_INJECT_CONFIRM_SLEEP=0 escalate_flush "$state" \
+      && fail "escalate_flush reported success on an unconfirmed submit"
+    FM_INJECT_CONFIRM_RETRIES=3 FM_INJECT_CONFIRM_SLEEP=0 escalate_flush "$state" \
+      && fail "escalate_flush reported success on a suppressed re-type"
+    WEDGE_ALARM_LAST_EPOCH=0
+    LOG="$dir/daemon.log" FM_WEDGE_ALARM_CHANNEL=off inject_wedge_alarm "$state" 600
+  )
+  grep -F 'task-c.status: needs-decision: pick A or B' "$state/.subsuper-inject-unconfirmed" >/dev/null \
+    || fail "the indeterminate item is not in the durable unconfirmed record"
+  grep -F 'accepted-but-unconfirmed' "$state/.subsuper-inject-wedged" >/dev/null \
+    || fail "the wedge marker does not name the suppressed re-type as the last failure"
+  grep -F 'task-c.status: needs-decision: pick A or B' "$state/.subsuper-inject-wedged" >/dev/null \
+    || fail "the wedge marker lost the buffered item itself"
+  pass "an indeterminate escalation stays durable and the wedge alarm names the suppression"
+}
+
+# Escalations arriving after an indeterminate submit are still delivered in a
+# later digest, but the digest carries only the new items - the already
+# accepted payload is never re-typed.
+test_new_items_deliver_without_resending_unconfirmed() {
+  local dir state sent calls digest
+  dir=$(make_supercase mixed-delivery)
+  state="$dir/state"
+  sent="$dir/sent.log"; : > "$sent"
+  calls="$dir/calls"; printf '0\n' > "$calls"
+  afk_enter "$state"
+  escalate_add "$state" 'task-d.status: blocked: waiting on review'
+  escalate_add "$state" 'task-e.status: done: shipped phase one'
+  (
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
+    fm_backend_target_exists() { return 0; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
+    pane_is_busy() { return 1; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
+    fm_backend_composer_state() { printf 'empty'; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
+    fm_backend_send_text_submit() {
+      local n
+      n=$(cat "$calls"); printf '%s\n' "$((n + 1))" > "$calls"
+      printf '%s\n' "$3" >> "$sent"
+      if [ "$n" -eq 0 ]; then printf 'unknown'; else printf 'empty'; fi
+    }
+    FM_INJECT_CONFIRM_RETRIES=3 FM_INJECT_CONFIRM_SLEEP=0 escalate_flush "$state" \
+      && fail "escalate_flush reported success on an unconfirmed submit"
+    escalate_add "$state" 'task-f.status: done: shipped phase two'
+    # Partial delivery reports non-zero: the new items landed but the
+    # unconfirmed ones stay buffered for the wedge alarm and catch-up.
+    FM_INJECT_CONFIRM_RETRIES=3 FM_INJECT_CONFIRM_SLEEP=0 escalate_flush "$state" \
+      && fail "escalate_flush reported full success while unconfirmed items remained"
+  )
+  [ "$(wc -l < "$sent" | tr -d ' ')" = 2 ] \
+    || fail "expected exactly two typed digests, got $(wc -l < "$sent" | tr -d ' ')"
+  digest=$(tail -1 "$sent")
+  printf '%s' "$digest" | grep -F 'task-f.status: done: shipped phase two' >/dev/null \
+    || fail "the second digest missed the new item: $digest"
+  if printf '%s' "$digest" | grep -F 'task-d.status' >/dev/null \
+    || printf '%s' "$digest" | grep -F 'task-e.status' >/dev/null; then
+    fail "the second digest re-typed accepted-but-unconfirmed items: $digest"
+  fi
+  grep -F 'task-d.status: blocked: waiting on review' "$state/.subsuper-escalations" >/dev/null \
+    || fail "the unconfirmed item was dropped from the durable buffer"
+  grep -F 'task-e.status: done: shipped phase one' "$state/.subsuper-escalations" >/dev/null \
+    || fail "the second unconfirmed item was dropped from the durable buffer"
+  pass "new escalations deliver while an accepted-but-unconfirmed payload is never re-typed"
+}
+
+# The fork-only recovery projection is a second digest path into inject_msg;
+# the accepted-payload identity suppresses its identical re-type the same way.
+test_recovery_projection_unconfirmed_never_retyped() {
+  local dir state sent
+  dir=$(make_supercase projection-unconfirmed)
+  state="$dir/state"
+  sent="$dir/sent.log"; : > "$sent"
+  afk_enter "$state"
+  printf 'recovery-a: needs-decision [key=r1]: still open\n' >> "$state/.subsuper-recovery-escalations"
+  printf 'gen-test\n' > "$state/.subsuper-recovery-escalations.generation"
+  (
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
+    fm_backend_target_exists() { return 0; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
+    pane_is_busy() { return 1; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
+    fm_backend_composer_state() { printf 'empty'; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
+    fm_backend_send_text_submit() { printf '%s\n' "$3" >> "$sent"; printf 'unknown'; }
+    recovery_projection_flush "$state" gen-test \
+      && fail "recovery_projection_flush reported success on an unconfirmed submit"
+    recovery_projection_flush "$state" gen-test \
+      && fail "recovery_projection_flush reported success on a suppressed re-type"
+  )
+  [ "$(wc -l < "$sent" | tr -d ' ')" = 1 ] \
+    || fail "an unconfirmed recovery projection was re-typed identically"
+  pass "an accepted-but-unconfirmed recovery projection is never re-typed"
+}
+
+# The accepted-payload and unconfirmed-item records are session-scoped: the
+# shared stale-artifact cleanup drops them with the rest of the away session's
+# delivery artifacts.
+test_inject_identity_artifacts_clear_with_session() {
+  local dir state
+  dir=$(make_supercase identity-artifact-clear)
+  state="$dir/state"
+  printf 'payload\n' > "$state/.subsuper-inject-accepted"
+  printf 'item\n' > "$state/.subsuper-inject-unconfirmed"
+  bash -c '. "$1"; fm_afk_clear_stale_artifacts "$2"' _ "$AFK_START" "$state" \
+    || fail "clearing the away-session artifacts failed"
+  [ ! -e "$state/.subsuper-inject-accepted" ] \
+    || fail "the accepted-payload record survived a new away session"
+  [ ! -e "$state/.subsuper-inject-unconfirmed" ] \
+    || fail "the unconfirmed-items record survived a new away session"
+  pass "accepted-payload and unconfirmed-item records clear with the away session"
+}
+
 test_below_max_defer_does_nothing() {
   local dir state fakebin sent capture
   dir=$(make_supercase below-maxdefer)
@@ -2439,6 +2652,7 @@ test_pane_input_pending_herdr_dispatch() {
     pane_input_pending "default:w1:p2" herdr || fail "pane_input_pending should report pending from herdr composer_state"
   ) || fail "herdr pane_input_pending (pending case) subshell failed"
   (
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     fm_backend_composer_state() { printf 'empty'; }
     if pane_input_pending "default:w1:p2" herdr; then
       fail "pane_input_pending should report not-pending for an empty herdr composer"
@@ -2475,7 +2689,9 @@ test_inject_msg_herdr_composer_guard_defers() {
   state="$dir/state"
   afk_enter "$state"
   (
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     fm_backend_target_exists() { return 0; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     pane_is_busy() { return 1; }
     fm_backend_composer_state() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected composer_state args: $1 $2"; printf 'pending'; }
     fm_backend_send_text_submit() { fail "send_text_submit should not run when the composer-guard defers"; }
@@ -2508,8 +2724,10 @@ test_inject_msg_herdr_refuses_unknown_harness_before_submit() {
   state="$dir/state"
   afk_enter "$state"
   (
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     fm_backend_target_exists() { return 0; }
     fm_backend_busy_state() { printf 'idle'; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     fm_backend_composer_state() { printf 'empty'; }
     fm_backend_send_text_submit() { fail "unknown-harness Herdr injection must not reach submit"; }
     if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" \
@@ -2526,8 +2744,11 @@ test_inject_msg_herdr_submits_through_backend_dispatch() {
   state="$dir/state"
   afk_enter "$state"
   (
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     fm_backend_target_exists() { return 0; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     pane_is_busy() { return 1; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     fm_backend_composer_state() { printf 'empty'; }
     fm_backend_send_text_submit() {
       [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected send_text_submit args: $1 $2"
@@ -2557,7 +2778,9 @@ test_inject_msg_defers_on_dead_shell_unknown() {
   state="$dir/state"
   afk_enter "$state"
   (
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     fm_backend_target_exists() { return 0; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     pane_is_busy() { return 1; }
     fm_backend_composer_state() { printf 'unknown'; }
     fm_backend_send_text_submit() { fail "send_text_submit must NOT run when the composer is a dead shell (unknown)"; }
@@ -2574,7 +2797,9 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
   state="$dir/state"
   afk_enter "$state"
   (
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     fm_backend_target_exists() { return 0; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     pane_is_busy() { return 1; }
     fm_backend_composer_state() { printf 'future-state'; }
     fm_backend_send_text_submit() { fail "send_text_submit must not run for an unrecognized composer state"; }
@@ -2670,6 +2895,12 @@ test_recovery_projection_digest_is_bounded_and_kept_durable
 test_inject_send_failure_logs_stage_stderr_and_bytes
 test_inject_enter_failure_logs_confirmation_stage
 test_bounded_digest_full_text_kept_after_typing
+test_accepted_unconfirmed_digest_is_never_retyped
+test_send_failed_submit_stays_retryable
+test_indeterminate_escalation_surfaces_through_alarm_and_catchup
+test_new_items_deliver_without_resending_unconfirmed
+test_recovery_projection_unconfirmed_never_retyped
+test_inject_identity_artifacts_clear_with_session
 test_below_max_defer_does_nothing
 test_max_defer_afk_inactive_does_not_flush_or_alarm
 test_wedge_alarm_library_mode_defaults_to_discard

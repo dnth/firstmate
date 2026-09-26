@@ -66,6 +66,8 @@ fm_afk_clear_stale_artifacts() {  # <state-dir>
         "$state/.subsuper-recovery-escalations" \
         "$state/.subsuper-recovery-escalations.generation" \
         "$state/.subsuper-inject-wedged" \
+        "$state/.subsuper-inject-accepted" \
+        "$state/.subsuper-inject-unconfirmed" \
         "$state/.subsuper-unknown-acked" 2>/dev/null
 }
 

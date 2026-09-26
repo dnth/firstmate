@@ -233,6 +233,8 @@ unit_failed_start_rolls_back_state() {
   printf 'recovery\n' > "$st/state/.subsuper-recovery-escalations"
   printf 'recover-one\n' > "$st/state/.subsuper-recovery-escalations.generation"
   printf 'acked\n' > "$st/state/.subsuper-unknown-acked"
+  printf 'payload\n' > "$st/state/.subsuper-inject-accepted"
+  printf 'item\n' > "$st/state/.subsuper-inject-unconfirmed"
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
     FM_SUPERVISOR_BACKEND=unsupported "$LAUNCH" start >/dev/null 2>&1; then
     fail "failed start: unsupported backend unexpectedly succeeded"
@@ -241,6 +243,8 @@ unit_failed_start_rolls_back_state() {
     && [ "$(cat "$st/state/.subsuper-recovery-escalations")" = recovery ] \
     && [ "$(cat "$st/state/.subsuper-recovery-escalations.generation")" = recover-one ] \
     && [ "$(cat "$st/state/.subsuper-unknown-acked")" = acked ] \
+    && [ "$(cat "$st/state/.subsuper-inject-accepted")" = payload ] \
+    && [ "$(cat "$st/state/.subsuper-inject-unconfirmed")" = item ] \
     && [ "$(cat "$st/state/.subsuper-inject-wedged")" = wedged ]; then
     pass "failed start: away flag and delivery artifacts roll back"
   else
