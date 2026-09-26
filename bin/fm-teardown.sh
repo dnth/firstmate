@@ -1283,24 +1283,93 @@ strip_returned_slot_role_markers() {  # <dir>
   fi
 }
 
+# Save the role markers before stripping them so a failed Treehouse return can
+# put the slot back in the exact identity state it had before this operation.
+snapshot_returned_slot_role_markers() {  # <dir>
+  local dir=$1 marker src backup target
+  backup=$(umask 077; mktemp -d "${dir%/*}/.fm-secondmate-markers.XXXXXX") || {
+    echo "teardown: could not stage secondmate role markers for $dir" >&2
+    return 1
+  }
+  for marker in .fm-secondmate-home .fm-secondmate-parent; do
+    src="$dir/$marker"
+    if [ -L "$src" ]; then
+      target=$(readlink -- "$src") || {
+        rm -rf -- "$backup"
+        return 1
+      }
+      ln -s -- "$target" "$backup/$marker" || {
+        rm -rf -- "$backup"
+        return 1
+      }
+    elif [ -e "$src" ]; then
+      [ -f "$src" ] && cp -p -- "$src" "$backup/$marker" || {
+        rm -rf -- "$backup"
+        echo "teardown: refusing non-file secondmate role marker $src" >&2
+        return 1
+      }
+    fi
+  done
+  printf '%s\n' "$backup"
+}
+
+restore_returned_slot_role_markers() {  # <dir> <backup>
+  local dir=$1 backup=$2 marker src saved tmp
+  [ -d "$backup" ] && [ ! -L "$backup" ] || return 1
+  for marker in .fm-secondmate-home .fm-secondmate-parent; do
+    src="$dir/$marker"
+    saved="$backup/$marker"
+    if [ -e "$saved" ] || [ -L "$saved" ]; then
+      rm -f -- "$src" || return 1
+      if [ -L "$saved" ]; then
+        ln -s -- "$(readlink -- "$saved")" "$src" || return 1
+      else
+        tmp=$(umask 077; mktemp "$dir/.${marker}.restore.XXXXXX") || return 1
+        if ! cp -p -- "$saved" "$tmp" || ! mv -f -- "$tmp" "$src"; then
+          rm -f -- "$tmp"
+          return 1
+        fi
+      fi
+    else
+      [ ! -e "$src" ] && [ ! -L "$src" ] || rm -f -- "$src" || return 1
+    fi
+  done
+}
+
+finish_failed_treehouse_return() {  # <dir> <marker-backup> <status>
+  local dir=$1 backup=$2 status=$3
+  if ! restore_returned_slot_role_markers "$dir" "$backup"; then
+    echo "teardown: failed to restore secondmate role markers for $dir after Treehouse return failure" >&2
+    status=1
+  fi
+  rm -rf -- "$backup"
+  return "$status"
+}
+
 # Return a worktree/home via `treehouse return --force`, tolerating a transient or
 # stale git index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
-  local out lock attempt=0 max_retries lock_desc
+  local out lock attempt=0 max_retries lock_desc marker_backup
 
-  strip_returned_slot_role_markers "$dir" || return 1
+  marker_backup=$(snapshot_returned_slot_role_markers "$dir") || return 1
+  if ! strip_returned_slot_role_markers "$dir"; then
+    finish_failed_treehouse_return "$dir" "$marker_backup" 1
+    return $?
+  fi
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
   if out=$( ( cd "$cd_dir" && "$SCRIPT_DIR/fm-treehouse-command.sh" return --force "$dir" ) 2>&1 ); then
     [ -n "$out" ] && printf '%s\n' "$out"
+    rm -rf -- "$marker_backup"
     return 0
   fi
   [ -n "$out" ] && printf '%s\n' "$out" >&2
 
   if ! treehouse_return_is_index_lock_error "$out"; then
-    return 1
+    finish_failed_treehouse_return "$dir" "$marker_backup" 1
+    return $?
   fi
 
   lock=$(worktree_git_lock_path "$dir") || lock=""
@@ -1321,13 +1390,15 @@ teardown_treehouse_return() {
     if out=$( ( cd "$cd_dir" && "$SCRIPT_DIR/fm-treehouse-command.sh" return --force "$dir" ) 2>&1 ); then
       [ -n "$out" ] && printf '%s\n' "$out"
       echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
+      rm -rf -- "$marker_backup"
       return 0
     fi
     [ -n "$out" ] && printf '%s\n' "$out" >&2
 
     if ! treehouse_return_is_index_lock_error "$out"; then
       echo "teardown: $label return failed with a non-lock error after retry; aborting" >&2
-      return 1
+      finish_failed_treehouse_return "$dir" "$marker_backup" 1
+      return $?
     fi
   done
 
@@ -1342,25 +1413,30 @@ teardown_treehouse_return() {
       if [ -n "$post_cleanup_check" ]; then
         if ! "$post_cleanup_check"; then
           echo "teardown: $label return aborted after stale-lock cleanup because safety checks failed" >&2
-          return 1
+          finish_failed_treehouse_return "$dir" "$marker_backup" 1
+          return $?
         fi
       fi
       if out=$( ( cd "$cd_dir" && "$SCRIPT_DIR/fm-treehouse-command.sh" return --force "$dir" ) 2>&1 ); then
         [ -n "$out" ] && printf '%s\n' "$out"
         echo "teardown: $label return succeeded after stale-lock cleanup" >&2
+        rm -rf -- "$marker_backup"
         return 0
       fi
       [ -n "$out" ] && printf '%s\n' "$out" >&2
       echo "teardown: $label return still failing after stale-lock cleanup" >&2
-      return 1
+      finish_failed_treehouse_return "$dir" "$marker_backup" 1
+      return $?
     fi
 
     echo "teardown: $label return failed: git lock $lock_desc persisted across ${max_retries} retries (waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s each) and is not provably stale (may belong to a live process); leaving it in place" >&2
-    return "$TEARDOWN_TREEHOUSE_LOCK_REFUSED"
+    finish_failed_treehouse_return "$dir" "$marker_backup" "$TEARDOWN_TREEHOUSE_LOCK_REFUSED"
+    return $?
   fi
 
   echo "teardown: $label return failed: git index.lock signature persisted across ${max_retries} retries (waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s each) even after the lock file disappeared" >&2
-  return 1
+  finish_failed_treehouse_return "$dir" "$marker_backup" 1
+  return $?
 }
 
 validate_worktree_teardown_safety() {
