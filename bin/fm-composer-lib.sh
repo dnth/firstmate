@@ -99,6 +99,26 @@ fm_composer_normalize_spaces_var() {  # <varname>
   printf -v "$__fmns_name" '%s' "$__fmns_text"
 }
 
+fm_composer_strip_braille() {
+  LC_ALL=C awk '
+    {
+      out = ""
+      for (i = 1; i <= length($0);) {
+        if (i + 2 <= length($0) \
+            && substr($0, i, 1) == "\342" \
+            && substr($0, i + 1, 1) ~ /^[\240-\243]$/ \
+            && substr($0, i + 2, 1) ~ /^[\200-\277]$/) {
+          i += 3
+        } else {
+          out = out substr($0, i, 1)
+          i++
+        }
+      }
+      print out
+    }
+  '
+}
+
 
 # Keep the Node program's heredoc outside command substitution: stock Bash
 # 3.2 misparses that nesting and reports a later, unrelated case terminator.

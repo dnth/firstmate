@@ -2625,12 +2625,13 @@ FM_BACKEND_HERDR_SEPARATED_COMPOSER_MAX_LINES=${FM_BACKEND_HERDR_SEPARATED_COMPO
 FM_BACKEND_HERDR_OMP_COMPOSER_MIN_WIDTH=${FM_BACKEND_HERDR_OMP_COMPOSER_MIN_WIDTH:-20}
 
 fm_backend_herdr_bare_boundary() {
-  local row=$1 compact
+  local row=$1 braille_remainder
   [[ "$row" =~ $FM_BACKEND_HERDR_BARE_MODE_HINT_RE ]] && return 0
   [[ "$row" =~ ^[[:space:]]*→ ]] && return 0
   printf '%s\n' "$row" | grep -qE "$FM_BACKEND_HERDR_BARE_OMP_STATUS_RE" && return 0
-  compact=${row//[[:space:]]/}
-  [[ -n "$compact" && "$compact" != *[!$'\u2800'-$'\u28ff']* ]] && return 0
+  braille_remainder=$(printf '%s\n' "$row" | fm_composer_strip_braille)
+  braille_remainder=${braille_remainder//[[:space:]]/}
+  [ -z "$braille_remainder" ] && return 0
   return 1
 }
 

@@ -935,12 +935,15 @@ fm_lock_try_acquire() {
   fi
 
   steal="$lockdir.steal"
-  if ! fm_lock_try_acquire "$steal"; then
+  if fm_lock_try_acquire "$steal"; then
+    steal_owner=${FM_LOCK_OWNER_DIR:-}
+  else
+    rc=$?
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
+    [ "$rc" -eq 1 ] || return "$rc"
     return 1
   fi
-  steal_owner=${FM_LOCK_OWNER_DIR:-}
 
   cur=$(cat "$lockdir/pid" 2>/dev/null || true)
   if fm_pid_alive "$cur"; then
