@@ -2450,6 +2450,9 @@ fm_backend_herdr_normalize_key() {  # <key>
     Enter|enter) printf 'enter' ;;
     Escape|escape|Esc|esc) printf 'escape' ;;
     C-c|c-c|ctrl+c|Ctrl+C) printf 'ctrl+c' ;;
+    # C-u clears a composer line: the payload-proof refusal path uses it to
+    # empty a composer that failed verification before Enter.
+    C-u|c-u|ctrl+u|Ctrl+U) printf 'ctrl+u' ;;
     *) printf '%s' "$1" ;;
   esac
 }
@@ -2612,6 +2615,11 @@ FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^(❯|›)'}
 # OMP's native composer is a status top row followed by a closing input row.
 # Pending multi-line input may add a bounded number of rows between them.
 FM_BACKEND_HERDR_OMP_COMPOSER_MAX_LINES=${FM_BACKEND_HERDR_OMP_COMPOSER_MAX_LINES:-8}
+# The framed (separator-enclosed) composer the payload proof extracts for a
+# bare agent-prompt identity may span at most this many content rows: any
+# wider and the enclosing rules are unrelated transcript, not the live
+# composer.
+FM_BACKEND_HERDR_SEPARATED_COMPOSER_MAX_LINES=${FM_BACKEND_HERDR_SEPARATED_COMPOSER_MAX_LINES:-8}
 FM_BACKEND_HERDR_OMP_COMPOSER_MIN_WIDTH=${FM_BACKEND_HERDR_OMP_COMPOSER_MIN_WIDTH:-20}
 
 # Find OMP's bottom-most structural candidate without borrowing Pi's separator
@@ -3127,13 +3135,227 @@ fm_backend_herdr_queued_enter_busy() {  # <target> -> busy|idle|unknown
   esac
 }
 
+# fm_backend_herdr_proof_lines: how many tail rows the pre-Enter payload proof
+# captures. A literal payload wraps, and a tail-only capture of a complete
+# wrap would look like the truncation this proof exists to refuse. The bound
+# stays inside the selected composer extraction; it is not a whole-pane search.
+fm_backend_herdr_proof_lines() {  # <text>
+  local text=$1 lines
+  lines=$(( (${#text} / 40) + 8 ))
+  if [ "$lines" -lt "$FM_BACKEND_HERDR_COMPOSER_LINES" ]; then
+    lines=$FM_BACKEND_HERDR_COMPOSER_LINES
+  fi
+  if [ "$lines" -gt 200 ]; then
+    lines=200
+  fi
+  printf '%s' "$lines"
+}
+
+# fm_backend_herdr_composer_content: the selected composer's whole visible
+# text on stdout; nonzero when the composer cannot be located or read. The
+# payload proof needs every composer row, not just the empty|pending|unknown
+# verdict of fm_backend_herdr_composer_state: a wrapped payload spans many
+# rows, and only the full content distinguishes a landed whole payload from a
+# landed tail.
+#
+# Styled capture is preferred; an empty or failed styled read falls through to
+# the plain capture so a missing ANSI format does not look like an empty draft.
+# Only the shapes the proof gates on are extracted:
+#   bare - the bottom-most bare agent-prompt row. Two forms are extracted:
+#          separated - the row sits between a `─` rule directly above and a `─`
+#          rule at most FM_BACKEND_HERDR_SEPARATED_COMPOSER_MAX_LINES below;
+#          the region between the rules is the composer (verified live: this
+#          is Claude Code's real framed composer on Herdr, whose footer rows
+#          sit below the closing rule and must never enter the proof).
+#          unframed  - the row plus its following contiguous non-empty rows up
+#          to the first bordered edge; a wrapped payload continues on rows
+#          with no prompt glyph. A solid `─` separator or a lone shell-glyph
+#          row below the bare row means the bare row is stale transcript or a
+#          dead shell follows, so the read fails.
+#   omp  - the native OMP box: fm_backend_herdr_omp_composer_find's bounded
+#          candidate rows plus the closing input row's inner text.
+# Anything else fails: unknown shapes are not proof targets, and failing is
+# the safe answer.
+# A separated region that opens but never closes, a lone `─` above the bare
+# row with nothing below, and a composer row that cannot be located at all
+# all fail the same way - unproven, never a silent pass.
+# Content extraction per row is fm_composer_strip_ghost plus a trim, so dim
+# ghost text never counts as typed content; on the OMP shape only, known idle
+# placeholder rows are also dropped (an OMP hint row in a degraded plain read
+# must not deadlock the daemon's inject on send-failed retries). One leading
+# agent-prompt glyph is stripped from the composer's first row and, for OMP,
+# its last row too (the closing input row can carry it).
+fm_backend_herdr_composer_content() {  # <target> [lines] [harness] [bun] [omp]
+  local target=$1 lines=${2:-$FM_BACKEND_HERDR_COMPOSER_LINES} harness=${3:-}
+  local bun=${4:-${FM_OMP_BUN:-}} omp=${5:-${FM_OMP_BIN:-}}
+  local cap line trimmed row=0 bare_row=0 stale=0 i n content='' stripped
+  local -a rows=() items=()
+  fm_backend_herdr_parse_target "$target" || return 1
+  if ! cap=$(fm_backend_herdr_capture_ansi "$target" "$lines" 2>/dev/null) || [ -z "$cap" ]; then
+    cap=$(fm_backend_herdr_capture "$target" "$lines") || return 1
+    [ -n "$cap" ] || return 1
+  fi
+  if [ "$harness" = omp ]; then
+    fm_backend_herdr_omp_composer_find "$cap" "$bun" "$omp"
+    { [ "$FM_BACKEND_HERDR_OMP_FOUND" = 1 ] && [ "$FM_BACKEND_HERDR_OMP_VALID" = 1 ]; } || return 1
+    while IFS= read -r line; do rows+=("$line"); done <<EOF
+$FM_BACKEND_HERDR_OMP_CONTENT
+EOF
+  else
+    local bare_open=0 bare_close=0 last_sep=0
+    while IFS= read -r line; do
+      row=$((row + 1))
+      trimmed=$(fm_backend_herdr_strip_ansi "$line")
+      trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
+      trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+      [ -n "$trimmed" ] || continue
+      if [ -z "${trimmed//─/}" ]; then
+        # A solid separator rule: above the bare row it may open the framed
+        # composer; below it, the first one may close the frame.
+        if [ "$bare_row" -gt 0 ] && [ "$bare_close" = 0 ]; then
+          bare_close=$row
+        fi
+        last_sep=$row
+      else
+        case "$trimmed" in
+          '❯'*|'›'*)
+            bare_row=$row
+            bare_open=$last_sep
+            bare_close=0
+            stale=0
+            ;;
+          '>'|'$'|'%'|'#')
+            # A lone shell glyph after an unframed bare row means the
+            # composer row is stale transcript and a dead shell follows.
+            [ "$bare_row" -gt 0 ] && [ "$bare_close" = 0 ] && stale=1
+            ;;
+        esac
+      fi
+      rows[row]=$line
+    done <<EOF
+$cap
+EOF
+    { [ "$bare_row" -gt 0 ] && [ "$stale" = 0 ]; } || return 1
+    {
+      local -a kept=()
+      if [ "$bare_close" -gt 0 ]; then
+        # Separated form: the enclosing pair must open above the bare row and
+        # span at most the bounded content region - otherwise the rules belong
+        # to unrelated transcript and the composer cannot be isolated.
+        [ "$bare_open" -gt 0 ] \
+          && [ $((bare_close - bare_open - 1)) -le "$FM_BACKEND_HERDR_SEPARATED_COMPOSER_MAX_LINES" ] \
+          || return 1
+        for ((i = bare_open + 1; i < bare_close; i++)); do
+          [ -n "${rows[$i]:-}" ] && kept+=("${rows[$i]}")
+        done
+      else
+        # Unframed form: the bare row plus contiguous rows up to the first
+        # bordered edge.
+        for ((i = bare_row; i <= row; i++)); do
+          line=${rows[$i]:-}
+          [ -n "$line" ] || break
+          trimmed=$(fm_backend_herdr_strip_ansi "$line")
+          trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
+          trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+          case "$trimmed" in
+            '│'*'│'|'┃'*'┃'|'|'*'|'|'╭'*'╮'|'╰'*'╯') break ;;
+          esac
+          kept+=("$line")
+        done
+      fi
+      rows=("${kept[@]}")
+    }
+  fi
+  items=()
+  for line in "${rows[@]}"; do
+    stripped=$(printf '%s\n' "$line" | fm_composer_strip_ghost)
+    fm_composer_normalize_spaces_var stripped
+    stripped="${stripped#"${stripped%%[![:space:]]*}"}"
+    stripped="${stripped%"${stripped##*[![:space:]]}"}"
+    [ -n "$stripped" ] || continue
+    if [ "$harness" = omp ] \
+       && fm_composer_idle_matches "$stripped" "$FM_BACKEND_HERDR_IDLE_RE"; then
+      continue
+    fi
+    items+=("$stripped")
+  done
+  n=${#items[@]}
+  [ "$n" -gt 0 ] || { printf ''; return 0; }
+  for i in 0 $((n - 1)); do
+    if [ "$harness" != omp ] && [ "$i" -ne 0 ]; then continue; fi
+    case "${items[$i]}" in
+      '❯ '*) items[i]=${items[$i]#'❯ '} ;;
+      '› '*) items[i]=${items[$i]#'› '} ;;
+      '▶ '*) items[i]=${items[$i]#'▶ '} ;;
+      '> '*) items[i]=${items[$i]#'> '} ;;
+      '$ '*) items[i]=${items[$i]#'$ '} ;;
+      '% '*) items[i]=${items[$i]#'% '} ;;
+      '# '*) items[i]=${items[$i]#'# '} ;;
+      '❯'|'›'|'▶'|'>'|'$'|'%'|'#') items[i]='' ;;
+    esac
+  done
+  for ((i = 0; i < n; i++)); do
+    [ -n "${items[$i]}" ] || continue
+    content="${content}${content:+$'\n'}${items[$i]}"
+  done
+  printf '%s' "$content"
+}
+
+# fm_backend_herdr_composer_payload_shown: 0 when <after>, read from a
+# composer that was empty before the send, shows <text>.
+# Literal equality ignores whitespace, the same comparison zellij uses, so a
+# wrapped payload still matches. It also ignores U+2063, the invisible mark
+# that starts operational inputs and separates the from-firstmate label:
+# Claude's composer read-back on Herdr never shows it (verified live), and it
+# carries no instruction text of its own. A composer that holds only
+# `[Pasted text #N]` or `[Pasted text #N +M lines]` placeholders (the
+# multi-line form, verified live on Claude 2.1.278), with no literal remainder,
+# is the same proof for one fast burst: Claude collapses that burst into the
+# placeholder and expands it on submit. A shorter literal suffix, or a
+# placeholder followed by a literal remainder, is the head-truncation shape
+# and is not proof.
+fm_backend_herdr_composer_payload_shown() {  # <text> <after>
+  local text=$1 after=$2 literal
+  fm_composer_normalize_spaces_var text
+  fm_composer_normalize_spaces_var after
+  text=${text//[$' \t\r\n\v\f']/}
+  text=${text//$'\xE2\x81\xA3'/}
+  after=${after//[$' \t\r\n\v\f']/}
+  after=${after//$'\xE2\x81\xA3'/}
+  [ -n "$text" ] && [ -n "$after" ] || return 1
+  [ "$after" = "$text" ] && return 0
+  literal=$after
+  while [[ $literal =~ \[Pastedtext#[0-9]+(\+[0-9]+lines?)?\] ]]; do
+    literal=${literal/"${BASH_REMATCH[0]}"/}
+  done
+  [ -z "$literal" ]
+}
+
+# fm_backend_herdr_composer_clear: after a refused proof, press Ctrl+U until
+# the shared classifier reads the composer as empty. Claude documents Ctrl+U
+# as delete-to-line-start, repeated across lines of a multiline draft; Ctrl+C
+# is not used because it interrupts a running turn. Live Claude deletes one
+# wrapped screen row per press, so a single-line leftover can need several
+# presses. The press count is bounded by the rows the proof capture covers.
+# 0 only when the composer is verified empty again.
+fm_backend_herdr_composer_clear() {  # <target> <text> [harness] [bun] [omp]
+  local target=$1 text=$2 harness=${3:-} bun=${4:-} omp=${5:-} presses i=0
+  presses=$(fm_backend_herdr_proof_lines "$text")
+  while [ "$i" -lt "$presses" ]; do
+    fm_backend_herdr_send_key "$target" C-u || return 1
+    i=$((i + 1))
+    [ "$(fm_backend_herdr_composer_state "$target" "$harness" "$bun" "$omp" 1)" = empty ] && return 0
+  done
+  return 1
+}
+
 # Echoes empty|busy-confirmed|queued-unconfirmed|pending|unknown|send-failed from the
 # proof-carrying submit vocabulary.
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [harness] [runtime] [omp] [turnstart-setup]
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${7:-} bun=${8:-} omp=${9:-} turnstart_setup=${10:-}
   local turnstart_reference=''
   local i=0 verdict baseline confirm_sleep omp_confirm_sleep omp_session='' omp_offset='' omp_status='' omp_event
-  local queued_verdict
+  local queued_verdict proof=0 proof_lines=0 content identity
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   if [ "$harness" = omp ]; then
     fm_backend_herdr_omp_submit_snapshot "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
@@ -3142,6 +3364,34 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
     omp_session=$FM_BACKEND_HERDR_OMP_SUBMIT_SESSION
     omp_offset=$FM_BACKEND_HERDR_OMP_SUBMIT_OFFSET
     omp_status=$FM_BACKEND_HERDR_OMP_SUBMIT_STATUS
+  fi
+  # Pre-Enter payload proof: the pane's native identity gates the check. For a
+  # non-OMP send that is `agent get`'s `.result.agent.agent` resolving to
+  # `claude` exactly - the identity Claude exposes itself, not firstmate's
+  # launch label. For an OMP send the submit snapshot above has already proven
+  # the same native identity is exactly `omp`, and the proof applies only on
+  # the idle/done baseline - the shape the away-mode daemon's supervisor
+  # inject takes (FM_SUPERVISOR_HARNESS=omp reaches here as <harness>). Busy
+  # and blocked OMP baselines keep their exact session-event proofs, which
+  # already refuse to confirm a merged or truncated payload, so they never
+  # take this path. A pane with no registered agent is unproven and keeps the
+  # legacy type-then-Enter behavior.
+  if [ "$harness" = omp ]; then
+    [ "${baseline:-}" = idle ] && proof=1
+  else
+    identity=$(fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null || true)
+    [ "${identity%%$'\t'*}" = claude ] && proof=1
+  fi
+  if [ "$proof" = 1 ]; then
+    # Do not type into a composer that already holds text: Enter there would
+    # submit leftover plus payload as one message. A composer that cannot be
+    # read, or a shape the extractor cannot isolate, refuses the same way.
+    proof_lines=$(fm_backend_herdr_proof_lines "$text")
+    if ! content=$(fm_backend_herdr_composer_content "$target" "$proof_lines" "$harness" "$bun" "$omp") \
+       || [ -n "${content//[$' \t\r\n\v\f']/}" ]; then
+      printf 'send-failed'
+      return 0
+    fi
   fi
   if [ "$harness" = omp ] && [ "$baseline" = idle ] && [ -n "$turnstart_setup" ]; then
     "$turnstart_setup" || { printf 'turnstart-setup-failed'; return 0; }
@@ -3153,6 +3403,25 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
     return 0
   }
   sleep "$settle"
+  if [ "$proof" = 1 ]; then
+    # Read the composer back before Enter: only a composer provably holding
+    # the whole payload - or pure paste placeholders standing in for the whole
+    # typed burst - may be submitted. A suffix, a stale transcript head above
+    # a suffix, a placeholder with a literal remainder, or an unreadable
+    # composer withholds Enter and clears the draft instead; send-failed only
+    # when the clear is itself verified, unknown otherwise.
+    if ! content=$(fm_backend_herdr_composer_content "$target" "$proof_lines" "$harness" "$bun" "$omp") \
+       || ! fm_backend_herdr_composer_payload_shown "$text" "$content"; then
+      if fm_backend_herdr_composer_clear "$target" "$text" "$harness" "$bun" "$omp"; then
+        verdict=send-failed
+      else
+        verdict=unknown
+      fi
+      [ -z "$turnstart_reference" ] || rm -f -- "$turnstart_reference"
+      printf '%s' "$verdict"
+      return 0
+    fi
+  fi
   if [ "$harness" != omp ]; then
     baseline=$(fm_backend_herdr_classify_submit_agent_status \
       "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")")

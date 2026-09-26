@@ -130,7 +130,7 @@ case "${1:-} ${2:-}" in
     [ ! -f "$SEND_FAIL" ] || exit 1
     [ -z "$PANE_TEXT_LOG" ] || printf '%s\n' "${4:-}" >> "$PANE_TEXT_LOG"
     jq_state --arg p "${3:-}" --arg text "${4:-}" \
-      '.typed[$p] = true | .launch[$p] = $text' | save ;;
+      '.typed[$p] = true | .composer[$p] = $text' | save ;;
   "pane run")
     [ ! -f "$SEND_FAIL" ] || exit 1
     pane=${3:-}; launch=${4:-}
@@ -147,7 +147,10 @@ case "${1:-} ${2:-}" in
       publish_omp_ack "$pane" "$launch"
     fi
     ;;
-  "pane read") printf '\n' ;;
+  "pane read")
+    composer=$(jq_state -r --arg p "${3:-}" '.composer[$p] // ""')
+    printf '╭── OMP test agent ▶──╮\n╰─ %s ─╯\n' "$composer"
+    ;;
   "pane process-info")
     pane_pid=987654
     pane_name=fish

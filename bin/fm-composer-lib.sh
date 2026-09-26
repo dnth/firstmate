@@ -59,6 +59,47 @@
 # are retained in this same owner.
 FM_COMPOSER_IDLE_RE=${FM_COMPOSER_IDLE_RE:-'^(Type a message\.\.\.|Ask me anything…|Try "explain this codebase"|Try "write a test for…"|Try "refactor the auth module"|Try "/help" for commands|Try "fix the lint errors"|Try "how does the config loader work\?"|Ctrl\+C to interrupt…|✻)$'}
 
+# FM_COMPOSER_UNICODE_SPACES: the Unicode whitespace a terminal capture can
+# carry that a byte-level ASCII comparison must still treat as space (the
+# pre-Enter payload proof in bin/backends/herdr.sh compares read-back composer
+# content against the typed payload). Built from octal escapes rather than
+# written literally so each entry stays reviewable in source instead of being
+# an invisible character:
+#   U+0085 NEXT LINE                  U+00A0 NO-BREAK SPACE
+#   U+1680 OGHAM SPACE MARK           U+2000..U+200A EN QUAD..HAIR SPACE
+#   U+2028 LINE SEPARATOR             U+2029 PARAGRAPH SEPARATOR
+#   U+202F NARROW NO-BREAK SPACE      U+205F MEDIUM MATHEMATICAL SPACE
+#   U+3000 IDEOGRAPHIC SPACE
+# ASCII whitespace is absent because POSIX `[[:space:]]` already covers it.
+# U+200B ZERO WIDTH SPACE is deliberately absent: Unicode gives it
+# White_Space=No (a format character), so listing it would substitute this
+# owner's own guess for the property it claims to follow.
+FM_COMPOSER_UNICODE_SPACES=()
+for _fm_composer_space_octal in \
+  '\0302\0205' '\0302\0240' '\0341\0232\0200' \
+  '\0342\0200\0200' '\0342\0200\0201' '\0342\0200\0202' '\0342\0200\0203' \
+  '\0342\0200\0204' '\0342\0200\0205' '\0342\0200\0206' '\0342\0200\0207' \
+  '\0342\0200\0210' '\0342\0200\0211' '\0342\0200\0212' \
+  '\0342\0200\0250' '\0342\0200\0251' '\0342\0200\0257' \
+  '\0342\0201\0237' '\0343\0200\0200'; do
+  printf -v _fm_composer_space_utf8 '%b' "$_fm_composer_space_octal"
+  FM_COMPOSER_UNICODE_SPACES+=("$_fm_composer_space_utf8")
+done
+unset -v _fm_composer_space_octal _fm_composer_space_utf8
+
+# fm_composer_normalize_spaces_var: the ONE Unicode-whitespace mapping.
+# Replaces in place through the named variable so no caller needs a subshell.
+# Substitution, never deletion: deleting would silently join "foo<NBSP>bar"
+# into one token, while a space preserves the separation the harness drew.
+fm_composer_normalize_spaces_var() {  # <varname>
+  local __fmns_name=$1 __fmns_text=${!1} __fmns_space
+  for __fmns_space in "${FM_COMPOSER_UNICODE_SPACES[@]}"; do
+    __fmns_text=${__fmns_text//"$__fmns_space"/ }
+  done
+  printf -v "$__fmns_name" '%s' "$__fmns_text"
+}
+
+
 # Keep the Node program's heredoc outside command substitution: stock Bash
 # 3.2 misparses that nesting and reports a later, unrelated case terminator.
 fm_composer_node_width() {  # <canonical-node> <row>

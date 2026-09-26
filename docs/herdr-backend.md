@@ -208,6 +208,16 @@ The away launcher waits for the exact newly created pane to expose one proven id
 Enter, Escape, and Ctrl-C are supported.
 Typed-plane slash input, and dollar-prefixed skill input for Codex, uses the shared harness-aware settle before the first Enter so a completion popup cannot consume it.
 Typed-plane text is typed once; only Enter is retried.
+When native `agent get` identity is Claude, the adapter types only into an empty composer and, before that Enter, continues only when the selected composer shows the typed payload, or only Claude paste placeholders with no literal remainder.
+The same proof applies to an OMP send on an idle or done baseline - the shape the away-mode daemon's supervisor inject takes when `FM_SUPERVISOR_HARNESS=omp` reaches the backend as the harness argument - where the OMP submit snapshot has already proven the native identity is exactly `omp`.
+Busy and blocked OMP baselines never take this path because their exact session-event and ask-answer proofs already refuse to confirm a merged or truncated payload.
+That comparison ignores whitespace and U+2063, the invisible mark that starts operational inputs and ends the from-firstmate label, because Claude's Herdr read-back never shows it.
+A composer that holds a shorter suffix, or a placeholder plus a literal remainder, does not receive Enter.
+The adapter presses Ctrl+U until the shared classifier reads the composer as empty, then reports `send-failed`, so a resend starts from a clean composer.
+Ctrl+C is not used for this, because Claude documents it as interrupting a running operation.
+If the composer cannot be verified empty again, the submit reports `unknown` instead, because text may still be in the composer.
+A gated composer that already holds text, or cannot be read, before the send is refused with nothing typed; for the away-mode supervisor inject that refusal leaves the escalation buffered for the next cycle.
+Other harnesses and panes with no native identity keep the type-then-Enter path, because their paste placeholders and composer shapes are not live-verified.
 
 On an idle or done native baseline, typed-plane submit confirmation first waits for `working` or `blocked` across a bounded polling window.
 If native status stays idle, the shared composer verdict is the next positive signal: a cleared composer confirms delivery, and proven pending text retries Enter.
@@ -253,6 +263,7 @@ If a future Herdr version strips ANSI style, ghost suggestions become pending ra
 A bare shell prompt is never an empty agent composer.
 Away-mode injection proceeds only on an affirmative `empty` result, never on unknown.
 This prevents a dead agent pane from receiving and possibly executing an escalation as shell input.
+That empty check is not the end of the guard: between it and the submit a human can still type into the supervisor pane, so on a Claude or idle OMP supervisor the send-time payload proof described above withholds Enter unless the composer provably holds exactly the digest, and the refusal leaves the escalation buffered.
 
 The current operational envelope starts with U+2063 and `FIRSTMATE_OP: `.
 The separate routed-request carrier uses `[fm-from-firstmate]` plus U+2063.
@@ -335,6 +346,7 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 
 ```sh
 tests/fm-backend-herdr.test.sh
+tests/fm-herdr-submit-confirm-live-e2e.test.sh
 tests/fm-composer-lib.test.sh
 tests/fm-backend-herdr-smoke.test.sh
 tests/fm-backend-herdr-prune-safety-e2e.test.sh
