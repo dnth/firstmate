@@ -420,7 +420,10 @@ test_sandbox_marker_refusal_removes_endpoint() {
   rec=$(make_settle_case sandbox-marked-slot-refusal "$id" 0)
   read_settle_record "$rec"
   printf 'retired-mate\n' > "$WT_DIR/.fm-secondmate-home"
-  IS_SANDBOX_VALUE=1 FM_TREEHOUSE_LOCAL_ROOT_VALUE="$CASE_DIR" FM_FAKE_READY_FAILED_VALUE=1 out=$(run_settle_spawn "$id")
+  # Leave the authoritative local-pool root unset so this exercises the
+  # sandbox-only endpoint-guarded refusal path (the local-pool path refuses
+  # before creating an endpoint and therefore has nothing to remove).
+  IS_SANDBOX_VALUE=1 FM_FAKE_READY_FAILED_VALUE=1 out=$(run_settle_spawn "$id")
   status=$?
   unset IS_SANDBOX_VALUE FM_TREEHOUSE_LOCAL_ROOT_VALUE FM_FAKE_READY_FAILED_VALUE
   [ "$status" -ne 0 ] || fail "sandbox spawn accepted a marked secondmate worktree"
