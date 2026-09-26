@@ -1944,9 +1944,13 @@ test_accepted_unconfirmed_digest_is_never_retyped() {
   escalate_add "$state" 'paused/held 100s (awaiting external recovery, recheck whether the wait still holds): default:w1:p3'
   escalate_add "$state" 'task-a.status: done: PR https://example.test/pull/1 (catch-all scan)'
   (
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     fm_backend_target_exists() { return 0; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     pane_is_busy() { return 1; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     fm_backend_composer_state() { printf 'empty'; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     fm_backend_send_text_submit() { printf '%s\n' "$3" >> "$sent"; printf 'unknown'; }
     for attempt in 1 2 3; do
       FM_INJECT_CONFIRM_RETRIES=3 FM_INJECT_CONFIRM_SLEEP=0 escalate_flush "$state" \
@@ -1973,9 +1977,13 @@ test_send_failed_submit_stays_retryable() {
   afk_enter "$state"
   escalate_add "$state" 'task-b.status: failed: transport probe (catch-all scan)'
   (
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     fm_backend_target_exists() { return 0; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     pane_is_busy() { return 1; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     fm_backend_composer_state() { printf 'empty'; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     fm_backend_send_text_submit() {
       local n
       n=$(cat "$calls"); printf '%s\n' "$((n + 1))" > "$calls"
@@ -2014,9 +2022,13 @@ test_indeterminate_escalation_surfaces_through_alarm_and_catchup() {
   afk_enter "$state"
   escalate_add "$state" 'task-c.status: needs-decision: pick A or B'
   (
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     fm_backend_target_exists() { return 0; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     pane_is_busy() { return 1; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     fm_backend_composer_state() { printf 'empty'; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     fm_backend_send_text_submit() { printf '%s\n' "$3" >> "$sent"; printf 'unknown'; }
     FM_INJECT_CONFIRM_RETRIES=3 FM_INJECT_CONFIRM_SLEEP=0 escalate_flush "$state" \
       && fail "escalate_flush reported success on an unconfirmed submit"
@@ -2047,9 +2059,13 @@ test_new_items_deliver_without_resending_unconfirmed() {
   escalate_add "$state" 'task-d.status: blocked: waiting on review'
   escalate_add "$state" 'task-e.status: done: shipped phase one'
   (
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     fm_backend_target_exists() { return 0; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     pane_is_busy() { return 1; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     fm_backend_composer_state() { printf 'empty'; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     fm_backend_send_text_submit() {
       local n
       n=$(cat "$calls"); printf '%s\n' "$((n + 1))" > "$calls"
@@ -2091,9 +2107,13 @@ test_recovery_projection_unconfirmed_never_retyped() {
   printf 'recovery-a: needs-decision [key=r1]: still open\n' >> "$state/.subsuper-recovery-escalations"
   printf 'gen-test\n' > "$state/.subsuper-recovery-escalations.generation"
   (
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     fm_backend_target_exists() { return 0; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     pane_is_busy() { return 1; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     fm_backend_composer_state() { printf 'empty'; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     fm_backend_send_text_submit() { printf '%s\n' "$3" >> "$sent"; printf 'unknown'; }
     recovery_projection_flush "$state" gen-test \
       && fail "recovery_projection_flush reported success on an unconfirmed submit"
@@ -2632,6 +2652,7 @@ test_pane_input_pending_herdr_dispatch() {
     pane_input_pending "default:w1:p2" herdr || fail "pane_input_pending should report pending from herdr composer_state"
   ) || fail "herdr pane_input_pending (pending case) subshell failed"
   (
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     fm_backend_composer_state() { printf 'empty'; }
     if pane_input_pending "default:w1:p2" herdr; then
       fail "pane_input_pending should report not-pending for an empty herdr composer"
@@ -2668,7 +2689,9 @@ test_inject_msg_herdr_composer_guard_defers() {
   state="$dir/state"
   afk_enter "$state"
   (
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     fm_backend_target_exists() { return 0; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     pane_is_busy() { return 1; }
     fm_backend_composer_state() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected composer_state args: $1 $2"; printf 'pending'; }
     fm_backend_send_text_submit() { fail "send_text_submit should not run when the composer-guard defers"; }
@@ -2701,8 +2724,10 @@ test_inject_msg_herdr_refuses_unknown_harness_before_submit() {
   state="$dir/state"
   afk_enter "$state"
   (
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     fm_backend_target_exists() { return 0; }
     fm_backend_busy_state() { printf 'idle'; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     fm_backend_composer_state() { printf 'empty'; }
     fm_backend_send_text_submit() { fail "unknown-harness Herdr injection must not reach submit"; }
     if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" \
@@ -2719,8 +2744,11 @@ test_inject_msg_herdr_submits_through_backend_dispatch() {
   state="$dir/state"
   afk_enter "$state"
   (
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     fm_backend_target_exists() { return 0; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     pane_is_busy() { return 1; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     fm_backend_composer_state() { printf 'empty'; }
     fm_backend_send_text_submit() {
       [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected send_text_submit args: $1 $2"
@@ -2750,7 +2778,9 @@ test_inject_msg_defers_on_dead_shell_unknown() {
   state="$dir/state"
   afk_enter "$state"
   (
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     fm_backend_target_exists() { return 0; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     pane_is_busy() { return 1; }
     fm_backend_composer_state() { printf 'unknown'; }
     fm_backend_send_text_submit() { fail "send_text_submit must NOT run when the composer is a dead shell (unknown)"; }
@@ -2767,7 +2797,9 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
   state="$dir/state"
   afk_enter "$state"
   (
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     fm_backend_target_exists() { return 0; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the daemon's inject path.
     pane_is_busy() { return 1; }
     fm_backend_composer_state() { printf 'future-state'; }
     fm_backend_send_text_submit() { fail "send_text_submit must not run for an unrecognized composer state"; }
