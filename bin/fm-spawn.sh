@@ -1122,6 +1122,17 @@ spawn_omp_abort_clean_unchanged_worktree() {  # <context>
   fi
 }
 
+# A sandbox task has no pre-endpoint marker screening, so its guarded
+# Treehouse acquisition is the first code that can reject a marked slot.  Any
+# failure in that guarded handoff must therefore retire the endpoint created
+# for this spawn before the refusal escapes; otherwise the failed worker can
+# remain alive with no task record.
+spawn_sandbox_abort_endpoint() {
+  [ "${IS_SANDBOX:-}" = 1 ] || return 0
+  [ -n "${BACKEND:-}" ] && [ -n "${T:-}" ] || return 0
+  fm_backend_kill "$BACKEND" "$T" >/dev/null 2>&1 || true
+}
+
 spawn_abort_cleanup() {
   local status=$? meta
   if [ -n "${DEVIN_CONFIG_PATH:-}" ]; then
@@ -4228,6 +4239,7 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] 
     treehouse_get_command="$treehouse_get_command --ready-file $treehouse_ready_quoted"
   fi
   spawn_send_text_line "$WT_TARGET" "$treehouse_get_command" || {
+    spawn_sandbox_abort_endpoint
     echo "error: worktree setup command could not be submitted safely for $W" >&2
     exit 1
   }
@@ -4239,19 +4251,19 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] 
       [ -s "$treehouse_ready_file" ] && break
       if [ -s "${treehouse_ready_file}.failed" ]; then
         cat "${treehouse_ready_file}.failed" >&2
-        if [ "${IS_SANDBOX:-}" = 1 ]; then
-          fm_backend_kill "$BACKEND" "$T" >/dev/null 2>&1 || true
-        fi
+        spawn_sandbox_abort_endpoint
         echo "error: guarded Treehouse acquisition failed in pane $T" >&2
         exit 1
       fi
       if [ "$BACKEND" = herdr ] && ! fm_backend_target_exists "$BACKEND" "$T"; then
+        spawn_sandbox_abort_endpoint
         echo "error: herdr pane $T disappeared during Treehouse worktree acquisition; the pane death, not treehouse, prevented publication" >&2
         exit 1
       fi
       sleep 1
     done
     if [ ! -s "$treehouse_ready_file" ]; then
+      spawn_sandbox_abort_endpoint
       echo "error: treehouse get did not publish its acquired worktree within ${treehouse_ready_polls}s; inspect window $T" >&2
       exit 1
     fi
