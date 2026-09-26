@@ -3290,20 +3290,27 @@ test_composer_state_claude_unbordered_prompt_is_pending() {
 
 test_composer_content_bare_footer_boundaries() {
   local dir log resp fb out case_id footer
-  for case_id in mode arrow braille wrap; do
+  for case_id in mode arrow braille wrap multi; do
     dir="$TMP_ROOT/composer-claude-bare-footer-$case_id"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
     case "$case_id" in
       mode) footer='⏵⏵ bypass permissions on' ;;
       arrow) footer='→ status text' ;;
       braille) footer='⣿⣿⣿⣿' ;;
       wrap) footer='continued typed text' ;;
+      multi) footer='' ;;
     esac
-    printf '  20\n\n❯\n%s\n' "$footer" > "$resp/1.out"
+    if [ "$case_id" = multi ]; then
+      printf '  20\n\n❯ foo\n\nbar\n' > "$resp/1.out"
+    else
+      printf '  20\n\n❯\n%s\n' "$footer" > "$resp/1.out"
+    fi
     fb=$(make_herdr_fakebin "$dir")
     out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
       bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_content default:w1:p2 20 claude' "$ROOT" )
     if [ "$case_id" = wrap ]; then
       [ -n "$out" ] || fail "a contiguous bare-composer wrap row was bounded as footer"
+    elif [ "$case_id" = multi ]; then
+      [ "$out" = $'foo\n\nbar' ] || fail "a blank payload row was truncated ($out)"
     else
       [ -z "$out" ] || fail "bare-composer $case_id footer leaked into empty composer ($out)"
     fi

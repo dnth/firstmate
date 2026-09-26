@@ -2626,6 +2626,7 @@ FM_BACKEND_HERDR_OMP_COMPOSER_MIN_WIDTH=${FM_BACKEND_HERDR_OMP_COMPOSER_MIN_WIDT
 
 fm_backend_herdr_bare_boundary() {
   local row=$1 braille_remainder
+  [ -n "$row" ] || return 1
   [[ "$row" =~ $FM_BACKEND_HERDR_BARE_MODE_HINT_RE ]] && return 0
   [[ "$row" =~ ^[[:space:]]*→ ]] && return 0
   printf '%s\n' "$row" | grep -qE "$FM_BACKEND_HERDR_BARE_OMP_STATUS_RE" && return 0
@@ -3201,7 +3202,7 @@ fm_backend_herdr_proof_lines() {  # <text>
 fm_backend_herdr_composer_content() {  # <target> [lines] [harness] [bun] [omp]
   local target=$1 lines=${2:-$FM_BACKEND_HERDR_COMPOSER_LINES} harness=${3:-}
   local bun=${4:-${FM_OMP_BUN:-}} omp=${5:-${FM_OMP_BIN:-}}
-  local cap line trimmed row=0 bare_row=0 stale=0 i n content='' stripped
+  local cap line trimmed row=0 bare_row=0 stale=0 i n content='' stripped saw_content=0
   local -a rows=() items=()
   fm_backend_herdr_parse_target "$target" || return 1
   if ! cap=$(fm_backend_herdr_capture_ansi "$target" "$lines" 2>/dev/null) || [ -z "$cap" ]; then
@@ -3266,7 +3267,6 @@ EOF
         # bordered edge.
         for ((i = bare_row; i <= row; i++)); do
           line=${rows[$i]:-}
-          [ -n "$line" ] || break
           trimmed=$(fm_backend_herdr_strip_ansi "$line")
           trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
           trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
@@ -3288,11 +3288,14 @@ EOF
     fm_composer_normalize_spaces_var stripped
     stripped="${stripped#"${stripped%%[![:space:]]*}"}"
     stripped="${stripped%"${stripped##*[![:space:]]}"}"
-    [ -n "$stripped" ] || continue
     if [ "$harness" = omp ] \
        && fm_composer_idle_matches "$stripped" "$FM_BACKEND_HERDR_IDLE_RE"; then
       continue
     fi
+    if [ -n "$stripped" ]; then
+      saw_content=1
+    fi
+    [ "$saw_content" -eq 1 ] || continue
     items+=("$stripped")
   done
   n=${#items[@]}
@@ -3311,8 +3314,8 @@ EOF
     esac
   done
   for ((i = 0; i < n; i++)); do
-    [ -n "${items[$i]}" ] || continue
-    content="${content}${content:+$'\n'}${items[$i]}"
+    [ "$i" -eq 0 ] || content+=$'\n'
+    content+="${items[$i]}"
   done
   printf '%s' "$content"
 }
