@@ -1644,6 +1644,24 @@ test_captains_call_anti_leak() {
   pass "action-free items (working/done/queued/landed) do not leak into Captain's Call"
 }
 
+# Card renderers (Captain's Deck) key each Underway card on the durable task
+# identity, so every in_flight row must carry a string `name` - the backlog item
+# title, empty when the task has no structured backlog record - plus `repo`.
+test_in_flight_rows_carry_name_and_repo() {
+  local home fakebin json
+  home=$(make_home inflight-identity); write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.in_flight | length) > 0
+      and (.in_flight | all(.[]; ((.name | type) == "string") and has("repo")))
+      and (.in_flight | any(.id == "ship-task"
+        and .name == "Ship the thing" and .repo == "firstmate"))
+      and (.in_flight | any(.id == "external-wait" and .name == ""))
+  ' >/dev/null || fail "in_flight rows must carry name and repo: $json"
+  pass "every in_flight row carries the backlog name and repo"
+}
+
 # R1: main-home orphan in-flight and unstructured current rows must not vanish
 # silently. Meta remains the sole live-work inventory; disclosure is via
 # main_inventory + omitted[] + a Charted Next gate line, never fake Underway.
@@ -2134,6 +2152,7 @@ test_all_landed_keeps_complete_global_order
 test_landed_bounded_and_disclosed
 test_live_blocker_is_not_charted_queue_work
 test_captains_call_anti_leak
+test_in_flight_rows_carry_name_and_repo
 test_main_orphan_in_flight_is_disclosed_not_invented
 test_main_unstructured_current_is_disclosed_with_structured_sibling
 test_main_orphan_counterfactual_meta_clears_inventory_warning
