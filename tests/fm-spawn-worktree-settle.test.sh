@@ -77,6 +77,18 @@ case "${1:-}" in
         esac
       done
     fi
+    if [ -n "${FM_FAKE_READY_FAILED:-}" ]; then
+      for arg in "$@"; do
+        case "$arg" in
+          *'--ready-file '*)
+            ready_file=${arg##*--ready-file }
+            ready_file=${ready_file%% *}
+            printf 'marker refusal\n' > "${ready_file}.failed"
+            break
+            ;;
+        esac
+      done
+    fi
     exit 0
     ;;
 esac
@@ -151,7 +163,7 @@ run_settle_spawn() {
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
     FM_FAKE_TREEHOUSE_PATH="$WT_DIR" \
-    FM_FAKE_READY_PATH="${FM_FAKE_READY_PATH_VALUE:-}" FM_FAKE_ENDPOINT_LOG="$CASE_DIR/endpoint.log" IS_SANDBOX="${IS_SANDBOX_VALUE:-}" \
+    FM_FAKE_READY_PATH="${FM_FAKE_READY_PATH_VALUE:-}" FM_FAKE_READY_FAILED="${FM_FAKE_READY_FAILED_VALUE:-}" FM_FAKE_ENDPOINT_LOG="$CASE_DIR/endpoint.log" IS_SANDBOX="${IS_SANDBOX_VALUE:-}" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
 }
@@ -401,9 +413,25 @@ test_spawn_refuses_secondmate_marked_worktree() {
   pass "spawn refuses a worktree carrying a retired secondmate's marker"
 }
 
+test_sandbox_marker_refusal_removes_endpoint() {
+  local rec id out status
+  id=sandbox-marked-slot-refusal-z8
+  rec=$(make_settle_case sandbox-marked-slot-refusal "$id" 0)
+  read_settle_record "$rec"
+  printf 'retired-mate\n' > "$WT_DIR/.fm-secondmate-home"
+  IS_SANDBOX_VALUE=1 FM_FAKE_READY_FAILED_VALUE=1 out=$(run_settle_spawn "$id")
+  status=$?
+  unset IS_SANDBOX_VALUE FM_FAKE_READY_FAILED_VALUE
+  [ "$status" -ne 0 ] || fail "sandbox spawn accepted a marked secondmate worktree"
+  assert_grep 'kill-window' "$CASE_DIR/endpoint.log" \
+    "sandbox marker refusal left its endpoint alive"
+  pass "sandbox marker refusal removes the endpoint before agent launch"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
 test_spawn_refuses_secondmate_marked_worktree
+test_sandbox_marker_refusal_removes_endpoint
 test_sandbox_relaunch_records_fresh_ready_path
 test_ship_relaunch_reuses_recorded_worktree_without_project_positional
 test_ship_relaunch_restores_recorded_profile_without_flags

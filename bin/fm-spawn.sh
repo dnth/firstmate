@@ -4239,6 +4239,9 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] 
       [ -s "$treehouse_ready_file" ] && break
       if [ -s "${treehouse_ready_file}.failed" ]; then
         cat "${treehouse_ready_file}.failed" >&2
+        if [ "${IS_SANDBOX:-}" = 1 ]; then
+          fm_backend_kill "$BACKEND" "$T" >/dev/null 2>&1 || true
+        fi
         echo "error: guarded Treehouse acquisition failed in pane $T" >&2
         exit 1
       fi
