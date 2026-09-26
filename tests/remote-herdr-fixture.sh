@@ -149,7 +149,16 @@ case "${1:-} ${2:-}" in
     ;;
   "pane read")
     composer=$(jq_state -r --arg p "${3:-}" '.composer[$p] // ""')
-    printf '╭── OMP test agent ▶──╮\n╰─ %s ─╯\n' "$composer"
+    # OMP's structural parser requires the top and bottom box rows to have
+    # the same terminal width. Keep the fixture's bottom row padded as the
+    # composer changes so payload proof exercises content, not a malformed
+    # box shape.
+    top='╭── OMP test agent ▶──╮'
+    width=${#top}
+    padding=$((width - 4 - ${#composer} - 2))
+    [ "$padding" -lt 0 ] && padding=0
+    spaces=$(printf '%*s' "$padding" '')
+    printf '%s\n╰─ %s%s ─╯\n' "$top" "$composer" "$spaces"
     ;;
   "pane process-info")
     pane_pid=987654
