@@ -3288,6 +3288,29 @@ test_composer_state_claude_unbordered_prompt_is_pending() {
   pass "fm_backend_herdr_composer_state: a real-claude unbordered '❯ <text>' prompt row reads pending"
 }
 
+test_composer_content_bare_footer_boundaries() {
+  local dir log resp fb out case_id footer
+  for case_id in mode arrow braille wrap; do
+    dir="$TMP_ROOT/composer-claude-bare-footer-$case_id"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+    case "$case_id" in
+      mode) footer='⏵⏵ bypass permissions on' ;;
+      arrow) footer='→ status text' ;;
+      braille) footer='⣿⣿⣿⣿' ;;
+      wrap) footer='continued typed text' ;;
+    esac
+    printf '  20\n\n❯\n%s\n' "$footer" > "$resp/1.out"
+    fb=$(make_herdr_fakebin "$dir")
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_content default:w1:p2 20 claude' "$ROOT" )
+    if [ "$case_id" = wrap ]; then
+      [ -n "$out" ] || fail "a contiguous bare-composer wrap row was bounded as footer"
+    else
+      [ -z "$out" ] || fail "bare-composer $case_id footer leaked into empty composer ($out)"
+    fi
+  done
+  pass "fm_backend_herdr_composer_state: bare composer extraction bounds known footer furniture"
+}
+
 # The exact incident shape: a bordered decorative box (claude's own startup
 # welcome banner) is STILL in the capture window, sitting ABOVE the live,
 # unbordered "❯" prompt. Before the fix, the bordered branch was the ONLY one
@@ -5453,6 +5476,7 @@ test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown
 test_composer_state_pi_separator_requires_safe_native_identity
 test_composer_state_claude_unbordered_prompt_is_empty
 test_composer_state_claude_unbordered_prompt_is_pending
+test_composer_content_bare_footer_boundaries
 test_composer_state_bare_prompt_below_stale_bordered_banner_wins
 test_composer_state_claude_dim_prompt_suggestion_ghost_is_empty
 test_composer_state_claude_dim_ghost_row_with_real_text_is_pending

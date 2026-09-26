@@ -2612,6 +2612,8 @@ FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-$FM_COMPOSER_IDLE_RE}
 # An alternation's branches are matched as whole literal byte sequences and
 # stay correct regardless of locale.
 FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^(❯|›)'}
+FM_BACKEND_HERDR_BARE_MODE_HINT_RE=${FM_BACKEND_HERDR_BARE_MODE_HINT_RE:-'^[[:space:]]*(⏵|⏸)'}
+FM_BACKEND_HERDR_BARE_OMP_STATUS_RE=${FM_BACKEND_HERDR_BARE_OMP_STATUS_RE:-'^[[:space:]]*(π|󰵗)[[:space:]]+·[[:space:]]|^[[:space:]]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏][[:space:]]+[0-9]+[smh]([[:space:]]|$)|[[:space:]]·[[:space:]].*[0-9]+(\.[0-9]+)?%/[0-9]+K'}
 # OMP's native composer is a status top row followed by a closing input row.
 # Pending multi-line input may add a bounded number of rows between them.
 FM_BACKEND_HERDR_OMP_COMPOSER_MAX_LINES=${FM_BACKEND_HERDR_OMP_COMPOSER_MAX_LINES:-8}
@@ -2621,6 +2623,16 @@ FM_BACKEND_HERDR_OMP_COMPOSER_MAX_LINES=${FM_BACKEND_HERDR_OMP_COMPOSER_MAX_LINE
 # composer.
 FM_BACKEND_HERDR_SEPARATED_COMPOSER_MAX_LINES=${FM_BACKEND_HERDR_SEPARATED_COMPOSER_MAX_LINES:-8}
 FM_BACKEND_HERDR_OMP_COMPOSER_MIN_WIDTH=${FM_BACKEND_HERDR_OMP_COMPOSER_MIN_WIDTH:-20}
+
+fm_backend_herdr_bare_boundary() {
+  local row=$1 compact
+  [[ "$row" =~ $FM_BACKEND_HERDR_BARE_MODE_HINT_RE ]] && return 0
+  [[ "$row" =~ ^[[:space:]]*→ ]] && return 0
+  printf '%s\n' "$row" | grep -qE "$FM_BACKEND_HERDR_BARE_OMP_STATUS_RE" && return 0
+  compact=${row//[[:space:]]/}
+  [[ -n "$compact" && "$compact" != *[!$'\u2800'-$'\u28ff']* ]] && return 0
+  return 1
+}
 
 # Find OMP's bottom-most structural candidate without borrowing Pi's separator
 # model or the generic bordered-row model.
@@ -3260,6 +3272,9 @@ EOF
           case "$trimmed" in
             '│'*'│'|'┃'*'┃'|'|'*'|'|'╭'*'╮'|'╰'*'╯') break ;;
           esac
+          if [ "$i" -ne "$bare_row" ] && fm_backend_herdr_bare_boundary "$trimmed"; then
+            break
+          fi
           kept+=("$line")
         done
       fi
