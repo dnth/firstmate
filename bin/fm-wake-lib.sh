@@ -914,6 +914,12 @@ fm_lock_try_acquire() {
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
 
+  # Locks are directories (or ownership symlinks); an ordinary file is an
+  # invalid, unacquirable shape and must not enter stale-owner recovery.
+  if [ -e "$lockdir" ] && [ ! -d "$lockdir" ] && [ ! -L "$lockdir" ]; then
+    return 2
+  fi
+
   if fm_lock_try_create "$lockdir"; then
     return 0
   fi
@@ -992,8 +998,12 @@ fm_lock_try_acquire() {
 }
 
 fm_lock_acquire_wait() {
-  local lockdir=$1
-  while ! fm_lock_try_acquire "$lockdir"; do
+  local lockdir=$1 status
+  while :; do
+    fm_lock_try_acquire "$lockdir"
+    status=$?
+    [ "$status" -eq 0 ] && return 0
+    [ "$status" -eq 2 ] && return 2
     sleep 0.1
   done
 }
@@ -1651,6 +1661,15 @@ fm_wake_append() {
 
   if [ -n "$lock_attempts" ]; then
     case "$lock_attempts" in ''|*[!0-9]*|0) return 2 ;; esac
+    # A queue lock is represented by a directory (or an ownership symlink).
+    # An ordinary file cannot be acquired or safely reclaimed; reject it
+    # immediately so bounded callers do not enter the expensive stale-owner
+    # proof for an invalid lock shape.
+    if [ -e "$FM_WAKE_QUEUE_LOCK" ] \
+      && [ ! -d "$FM_WAKE_QUEUE_LOCK" ] \
+      && [ ! -L "$FM_WAKE_QUEUE_LOCK" ]; then
+      return 3
+    fi
     while ! fm_lock_try_acquire "$FM_WAKE_QUEUE_LOCK"; do
       attempt=$((attempt + 1))
       [ "$attempt" -lt "$lock_attempts" ] || return 3

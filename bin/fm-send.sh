@@ -417,7 +417,10 @@ fm_send_record_delivered_no_turn() {
     echo "error: delivered-no-turn could not append its recovery marker to $status_file" >&2
     failed=1
   fi
-  if ! fm_wake_append signal "$wake_key" "delivered-no-turn: $TARGET_TASK_ID" 20; then
+  # Recovery persistence must stay within the caller's delivery bound.  A
+  # blocked queue lock is reported as persistence failure instead of spending
+  # the entire post-submit window retrying a lock that cannot be acquired.
+  if ! fm_wake_append signal "$wake_key" "delivered-no-turn: $TARGET_TASK_ID" 1; then
     echo "error: delivered-no-turn could not enqueue its watcher wake for $TARGET_TASK_ID" >&2
     failed=1
   fi
