@@ -52,6 +52,18 @@ export function runCommandAsync(
     let settled = false;
     let timer: NodeJS.Timeout | undefined;
     let child: ReturnType<typeof spawn>;
+    const terminateChildTree = (): void => {
+      const pid = child?.pid;
+      if (pid !== undefined) {
+        try {
+          process.kill(-pid, "SIGKILL");
+          return;
+        } catch {}
+      }
+      try {
+        child?.kill("SIGKILL");
+      } catch {}
+    };
     const finish = (status: number | null, detail = "", flags?: { timedOut?: boolean; aborted?: boolean }): void => {
       if (settled) return;
       settled = true;
@@ -66,9 +78,7 @@ export function runCommandAsync(
       });
     };
     const onAbort = (): void => {
-      try {
-        child?.kill();
-      } catch {}
+      terminateChildTree();
       finish(null, "", { aborted: true });
     };
     try {
@@ -76,6 +86,7 @@ export function runCommandAsync(
         cwd: options.cwd,
         env: options.env,
         stdio: ["pipe", "pipe", "pipe"],
+        detached: true,
       });
     } catch (error) {
       finish(null, error instanceof Error ? error.message : String(error));
@@ -92,7 +103,7 @@ export function runCommandAsync(
     }
     if (options.timeoutMs !== undefined) {
       timer = setTimeout(() => {
-        child.kill();
+        terminateChildTree();
         finish(null, "", { timedOut: true });
       }, options.timeoutMs);
     }
@@ -101,7 +112,7 @@ export function runCommandAsync(
       if (settled) return;
       const bytes = Buffer.byteLength(chunk, "utf8");
       if (stdoutBytes + bytes > maxBuffer) {
-        child.kill();
+        terminateChildTree();
         finish(null, `stdout exceeded ${maxBuffer} bytes`);
         return;
       }
@@ -114,7 +125,7 @@ export function runCommandAsync(
       if (settled) return;
       const bytes = Buffer.byteLength(chunk, "utf8");
       if (stderrBytes + bytes > maxBuffer) {
-        child.kill();
+        terminateChildTree();
         finish(null, `stderr exceeded ${maxBuffer} bytes`);
         return;
       }
@@ -144,22 +155,18 @@ export interface BashToolExecOptions {
   env?: NodeJS.ProcessEnv;
 }
 
-// The native bash tool's own default when the model passes no timeout; kept in
-// step so a timeout-less branch bash call bounds like the native path did.
-const BASH_TOOL_DEFAULT_TIMEOUT_SECONDS = 300;
-
 export async function execBashTool(
   command: string,
   cwd: string,
   options: BashToolExecOptions,
 ): Promise<{ exitCode: number | null }> {
-  const timeoutSeconds = options.timeout ?? BASH_TOOL_DEFAULT_TIMEOUT_SECONDS;
+  const timeoutSeconds = options.timeout;
   const result = await runCommandAsync("bash", ["-c", command], {
     cwd,
     env: options.env,
     onData: options.onData,
     signal: options.signal,
-    timeoutMs: timeoutSeconds * 1000,
+    ...(timeoutSeconds === undefined ? {} : { timeoutMs: timeoutSeconds * 1000 }),
   });
   if (result.aborted) throw new Error("aborted");
   if (result.timedOut) throw new Error(`timeout:${timeoutSeconds}`);
