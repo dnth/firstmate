@@ -405,7 +405,7 @@ test_spawn_refuses_secondmate_marked_worktree() {
   printf 'retired-mate\n' > "$WT_DIR/.fm-secondmate-home"
   printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=/nowhere\n' > "$WT_DIR/.fm-secondmate-parent"
 
-  FM_TREEHOUSE_LOCAL_ROOT_VALUE="$CASE_DIR" out=$(run_settle_spawn "$id")
+  out=$(FM_TREEHOUSE_LOCAL_ROOT_VALUE="$CASE_DIR" run_settle_spawn "$id")
   status=$?
   [ "$status" -ne 0 ] || fail "spawn launched an ordinary task into a marked secondmate worktree"
   assert_contains "$out" ".fm-secondmate-home" "the refusal did not name the marker file"
@@ -423,6 +423,9 @@ test_sandbox_marker_refusal_removes_endpoint() {
   # Leave the authoritative local-pool root unset so this exercises the
   # sandbox-only endpoint-guarded refusal path (the local-pool path refuses
   # before creating an endpoint and therefore has nothing to remove).
+  # Keep test-only acquisition inputs from the preceding fixture from
+  # redirecting this sandbox case into the pre-endpoint local-pool path.
+  unset FM_TREEHOUSE_LOCAL_ROOT_VALUE FM_FAKE_READY_PATH_VALUE
   IS_SANDBOX_VALUE=1 FM_FAKE_READY_FAILED_VALUE=1 out=$(run_settle_spawn "$id")
   status=$?
   unset IS_SANDBOX_VALUE FM_TREEHOUSE_LOCAL_ROOT_VALUE FM_FAKE_READY_FAILED_VALUE
