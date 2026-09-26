@@ -356,6 +356,9 @@ It runs the shared turn-end predicate through native `session_stop`, and applies
 `bin/fm-session-start.sh` rejects a missing, stale, foreign-PID, or version-mismatched loaded marker and prints both native-discovery and explicit `-e` recovery commands.
 The authoritative operating procedure is `docs/supervision-protocols/omp.md`.
 
+**Supervision-branch bash compatibility.**
+The OMP 18.3.x bash environment change and the branch's `operations.exec` actor-environment wiring are owned by the [OMP supervision-branch guide](../../../docs/omp-supervision-branch.md#components-and-their-owners).
+
 **Persistent-secondmate fact (verified 2026-07-30, OMP 17.1.8, tmux).**
 `config/secondmate-harness` accepts exact `omp` identity plus optional model and thinking-level pins, and `fm-spawn.sh --secondmate` preserves all three values without changing the primary's crew-harness selection.
 The launch runs in the isolated Firstmate home, explicitly passes that home's tracked `.omp/extensions/fm-primary-omp.ts`, stores sessions under `state/omp-sessions`, and binds `state/.omp-session` to the exact direct-child JSONL conversation selected for resume.

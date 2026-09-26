@@ -15,6 +15,10 @@ export interface AsyncExecResult {
   status: number | null;
   stdout: string;
   stderr: string;
+  /** The child was killed because options.timeoutMs elapsed. */
+  timedOut?: boolean;
+  /** The child was killed because options.signal aborted. */
+  aborted?: boolean;
 }
 
 export interface AsyncExecOptions {
@@ -24,6 +28,12 @@ export interface AsyncExecOptions {
   input?: string;
   /** Upper bound on each captured output stream. */
   maxBuffer?: number;
+  /** Receives each captured stdout and stderr chunk as the child emits it. */
+  onData?: (data: Buffer) => void;
+  /** Kills the child and settles when it fires. */
+  signal?: AbortSignal;
+  /** Kills the child after this many milliseconds. */
+  timeoutMs?: number;
 }
 
 const DEFAULT_MAX_BUFFER = 1024 * 1024;
@@ -40,45 +50,88 @@ export function runCommandAsync(
     let stderrBytes = 0;
     const maxBuffer = options.maxBuffer ?? DEFAULT_MAX_BUFFER;
     let settled = false;
-    const finish = (status: number | null, detail = ""): void => {
+    let timer: NodeJS.Timeout | undefined;
+    let child: ReturnType<typeof spawn>;
+    const terminateChildTree = (): void => {
+      const pid = child?.pid;
+      if (pid !== undefined) {
+        try {
+          process.kill(-pid, "SIGKILL");
+          return;
+        } catch {}
+      }
+      try {
+        child?.kill("SIGKILL");
+      } catch {}
+    };
+    const finish = (status: number | null, detail = "", flags?: { timedOut?: boolean; aborted?: boolean }): void => {
       if (settled) return;
       settled = true;
-      resolve({ status, stdout, stderr: detail ? `${stderr}${detail}` : stderr });
+      if (timer !== undefined) clearTimeout(timer);
+      options.signal?.removeEventListener("abort", onAbort);
+      resolve({
+        status,
+        stdout,
+        stderr: detail ? `${stderr}${detail}` : stderr,
+        ...(flags?.timedOut ? { timedOut: true } : {}),
+        ...(flags?.aborted ? { aborted: true } : {}),
+      });
     };
-    let child;
+    const onAbort = (): void => {
+      terminateChildTree();
+      finish(null, "", { aborted: true });
+    };
     try {
       child = spawn(command, [...args], {
         cwd: options.cwd,
         env: options.env,
         stdio: ["pipe", "pipe", "pipe"],
+        detached: true,
       });
     } catch (error) {
       finish(null, error instanceof Error ? error.message : String(error));
       return;
+    }
+    if (options.signal) {
+      options.signal.addEventListener("abort", onAbort);
+      // A signal that fired between spawn and the listener attach would never
+      // reach the listener, so the already-aborted state is applied directly.
+      if (options.signal.aborted) {
+        onAbort();
+        return;
+      }
+    }
+    if (options.timeoutMs !== undefined) {
+      timer = setTimeout(() => {
+        terminateChildTree();
+        finish(null, "", { timedOut: true });
+      }, options.timeoutMs);
     }
     child.stdout?.setEncoding("utf8");
     child.stdout?.on("data", (chunk: string) => {
       if (settled) return;
       const bytes = Buffer.byteLength(chunk, "utf8");
       if (stdoutBytes + bytes > maxBuffer) {
-        child.kill();
+        terminateChildTree();
         finish(null, `stdout exceeded ${maxBuffer} bytes`);
         return;
       }
       stdout += chunk;
       stdoutBytes += bytes;
+      options.onData?.(Buffer.from(chunk, "utf8"));
     });
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (chunk: string) => {
       if (settled) return;
       const bytes = Buffer.byteLength(chunk, "utf8");
       if (stderrBytes + bytes > maxBuffer) {
-        child.kill();
+        terminateChildTree();
         finish(null, `stderr exceeded ${maxBuffer} bytes`);
         return;
       }
       stderr += chunk;
       stderrBytes += bytes;
+      options.onData?.(Buffer.from(chunk, "utf8"));
     });
     child.on("close", (code) => finish(code));
     child.on("error", (error: Error) => finish(null, error.message));
@@ -88,3 +141,45 @@ export function runCommandAsync(
     }
   });
 }
+
+// The OMP legacy shim's BashOperations.exec contract
+// (extensibility/legacy-pi-coding-agent-shim.ts): a streaming onData callback,
+// an optional AbortSignal, and a timeout in SECONDS, resolving to the exit
+// code. The shim's executeLegacyBashOperations maps an "aborted" rejection onto
+// its aborted error and a "timeout:<seconds>" rejection onto its timeout error,
+// so those exact message shapes are the contract, not local choices.
+export interface BashToolExecOptions {
+  onData: (data: Buffer) => void;
+  signal?: AbortSignal;
+  timeout?: number;
+  env?: NodeJS.ProcessEnv;
+}
+
+export async function execBashTool(
+  command: string,
+  cwd: string,
+  options: BashToolExecOptions,
+): Promise<{ exitCode: number | null }> {
+  const timeoutSeconds = options.timeout;
+  const result = await runCommandAsync("bash", ["-c", command], {
+    cwd,
+    env: options.env,
+    onData: options.onData,
+    signal: options.signal,
+    ...(timeoutSeconds === undefined ? {} : { timeoutMs: timeoutSeconds * 1000 }),
+  });
+  if (result.aborted) throw new Error("aborted");
+  if (result.timedOut) throw new Error(`timeout:${timeoutSeconds}`);
+  if (result.status === null) {
+    const detail = (result.stderr || result.stdout).trim();
+    throw new Error(detail || "bash command could not be executed");
+  }
+  return { exitCode: result.status };
+}
+
+// Handed to createBashToolDefinition's operations seam so the branch bash tool
+// executes through this runner with the spawnHook's injected env instead of
+// the native execute, which since OMP 18.3.0 rejects env outside service mode
+// ("ready and env require a service name."). The seam predates that release, so
+// the same wiring is correct on every supported OMP version.
+export const bashToolOperations = { exec: execBashTool };

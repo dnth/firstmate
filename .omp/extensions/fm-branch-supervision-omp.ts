@@ -101,7 +101,7 @@ import {
   type BranchStatusSnapshotEntry,
 } from "./lib/fm-branch-dispatch.ts";
 import { buildBranchModelItems, FOLLOW_MAIN_VALUE } from "./lib/fm-branch-model-picker.ts";
-import { runCommandAsync } from "./lib/fm-async-exec.ts";
+import { bashToolOperations, runCommandAsync } from "./lib/fm-async-exec.ts";
 
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
@@ -1037,7 +1037,13 @@ export default function (pi: ExtensionAPI) {
     branchSessionFile = sessionManager.getSessionFile() ?? "";
     if (!(await actingAsOwner(branchGeneration))) throw new Error("supervision session was replaced or lost lock ownership");
     const leaseHolderPid = ownedLockPid;
+    // The operations seam is load-bearing: since OMP 18.3.0 the shim still
+    // forwards the spawnHook's env into the native bash tool's execute, which
+    // rejects it ("ready and env require a service name.") before spawning.
+    // Executing through this runner keeps the injected actor env working on
+    // 18.3.x and every earlier supported version alike.
     const bashTool = createBashToolDefinition(fmRoot, {
+      operations: bashToolOperations,
       spawnHook: (context) => {
         if (activatedGeneration !== branchGeneration || !generationOwnsLockSync(branchGeneration)) {
           throw new Error("bash refused: supervision session was replaced or lost lock ownership");
