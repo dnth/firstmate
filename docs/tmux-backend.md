@@ -96,6 +96,7 @@ An ordinary metadata-routed `fm-send.sh` text steer becomes a durable steering-i
 For a local OMP task, the backend first validates the ready marker owner against the pane foreground process and canonical launch identity before invoking the shared native wake route, which is the only transport OMP steering uses.
 [`bin/fm-task-inbox-lib.sh`](../bin/fm-task-inbox-lib.sh) owns that route's request, retry, ambiguity, and handled-file processing contract.
 The verdicts above remain delivery-critical for the typed plane, where `fm-send.sh` preserves the fork's submit and OMP/Hermes turn-start verification.
+The away daemon consumes them as three outcomes - confirmed, failed (retryable), or indeterminate (accepted-but-unconfirmed, never re-typed identically) - a contract the AFK skill's "Submit outcomes" owns.
 
 OpenCode 1.18.4 has one busy-queue exception.
 While OpenCode is mid-turn, Enter queues the message but leaves its text visible until the turn completes.

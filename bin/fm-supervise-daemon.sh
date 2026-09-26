@@ -222,6 +222,11 @@ WEDGE_ALARM_NOTIFIER_PID=
 INJECT_LAST_FAILURE=
 # 1 once the latest delivery attempt reached the submit primitive.
 INJECT_SUBMIT_ATTEMPTED=0
+# Tri-state outcome of the latest submit attempt: not-attempted (deferred
+# before the submit boundary), confirmed, failed (provably not accepted into
+# the pane, retryable), or indeterminate (typed into the pane but never
+# confirmed - the payload identity is recorded so it is never re-typed).
+INJECT_SUBMIT_OUTCOME=not-attempted
 # The captain-relevant verb set and the status classifiers (last_status_line,
 # status_is_captain_relevant, window_to_task, scan_captain_relevant_statuses) now
 # live in bin/fm-classify-lib.sh, shared with the always-on watcher.
@@ -1142,6 +1147,13 @@ escalate_full_text_save() {  # <state> <buf>
   printf '%s' "$file"
 }
 
+# escalate_unsent_items: print the lines of <buf> not already covered by the
+# accepted-but-unconfirmed record <unc>, as a multiset difference (a line
+# present twice in <buf> but once in <unc> still emits one copy).
+escalate_unsent_items() {  # <buf> <unc>
+  awk 'NR==FNR { seen[$0]++; next } seen[$0] > 0 { seen[$0]--; next } { print }' "$2" "$1"
+}
+
 # Flush the unrelated asynchronous escalation buffer as ONE batched,
 # single-line, bounded digest to the supervisor pane. Returns 0 on successful
 # inject (or empty buffer), non-zero on inject failure (buffer preserved for
@@ -1149,9 +1161,18 @@ escalate_full_text_save() {  # <state> <buf>
 # ran, because the digest naming it may have been typed; ESCALATE_KEPT_FULL
 # remembers it so a retry of the same buffer reuses it instead of writing
 # another copy.
+#
+# Accepted-but-unconfirmed identity (issue #85): a submit whose payload was
+# typed into the pane but whose confirmation is indeterminate is recorded in
+# two places - inject_msg appends the exact payload to
+# .subsuper-inject-accepted, and this flush appends the covered items to
+# .subsuper-inject-unconfirmed. A later flush sends only items still missing
+# from that record, so an accepted payload is never re-typed while a genuinely
+# failed send stays retryable. The items themselves remain in the buffer -
+# durable until the wedge alarm and the afk return catch-up surface them.
 ESCALATE_KEPT_FULL=
 escalate_flush() {  # <state>
-  local state=$1 buf msg full='' fresh=0
+  local state=$1 buf unc sendf msg full='' fresh=0
   buf="$state/.subsuper-escalations"
   [ -s "$buf" ] || return 0
   if [ ! -f "$buf" ] || [ ! -r "$buf" ]; then
@@ -1159,14 +1180,36 @@ escalate_flush() {  # <state>
     log "inject skipped: $INJECT_LAST_FAILURE"
     return 1
   fi
-  escalate_digest_body "$buf"
+  unc="$state/.subsuper-inject-unconfirmed"
+  sendf=$buf
+  if [ -s "$unc" ]; then
+    if ! sendf=$(mktemp "$state/.subsuper-escalations.send.XXXXXX"); then
+      INJECT_LAST_FAILURE="unsent escalation partition could not be written under $state"
+      log "inject skipped: $INJECT_LAST_FAILURE; buffer preserved"
+      return 1
+    fi
+    if ! escalate_unsent_items "$buf" "$unc" > "$sendf"; then
+      rm -f "$sendf"
+      INJECT_LAST_FAILURE="unsent escalation partition could not be computed"
+      log "inject skipped: $INJECT_LAST_FAILURE; buffer preserved"
+      return 1
+    fi
+    if [ ! -s "$sendf" ]; then
+      rm -f "$sendf"
+      INJECT_LAST_FAILURE="every buffered event was already accepted-but-unconfirmed (recorded in $unc); identical re-type suppressed"
+      log "inject suppressed: $INJECT_LAST_FAILURE"
+      return 1
+    fi
+  fi
+  escalate_digest_body "$sendf"
   msg=$ESCALATE_BODY
   if [ "$ESCALATE_BOUNDED" -eq 1 ]; then
-    if [ -n "$ESCALATE_KEPT_FULL" ] && cmp -s "$ESCALATE_KEPT_FULL" "$buf"; then
+    if [ -n "$ESCALATE_KEPT_FULL" ] && cmp -s "$ESCALATE_KEPT_FULL" "$sendf"; then
       full=$ESCALATE_KEPT_FULL
-    elif full=$(escalate_full_text_save "$state" "$buf"); then
+    elif full=$(escalate_full_text_save "$state" "$sendf"); then
       fresh=1
     else
+      [ "$sendf" = "$buf" ] || rm -f "$sendf"
       INJECT_LAST_FAILURE="digest full text could not be saved under $state/$ESCALATE_FULL_DIR"
       log "inject skipped: $INJECT_LAST_FAILURE; buffer preserved"
       return 1
@@ -1177,10 +1220,33 @@ escalate_flush() {  # <state>
   # safety net, but keeping the source single-line makes the intent explicit).
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$ESCALATE_EVENTS" "$msg")
   if inject_msg "$msg" "$state"; then
-    unknown_wake_acknowledge_flushed "$state" "$buf" \
+    unknown_wake_acknowledge_flushed "$state" "$sendf" \
       || log "unknown-wake acknowledgement write failed; a delivered unknown wake may escalate again"
-    : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"
+    if [ "$sendf" = "$buf" ]; then
+      : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"
+      ESCALATE_KEPT_FULL=
+      return 0
+    fi
+    # Partial delivery: retire only the confirmed items (multiset diff keeps
+    # every still-unconfirmed item plus anything appended mid-flush) and keep
+    # the batch timer so the retained items keep aging toward the wedge alarm.
+    if ! escalate_unsent_items "$buf" "$sendf" > "${buf}.partial" || ! mv -f "${buf}.partial" "$buf"; then
+      # Could not retire the confirmed items; suppress their re-type by
+      # recording them as covered rather than letting the next flush resend.
+      cat "$sendf" >> "$unc" 2>/dev/null || true
+      INJECT_LAST_FAILURE="delivered digest but could not retire confirmed items from $buf"
+      log "inject partial: $INJECT_LAST_FAILURE"
+      rm -f "$sendf" "${buf}.partial"
+      return 1
+    fi
     ESCALATE_KEPT_FULL=
+    rm -f "$sendf"
+    if [ -s "$buf" ]; then
+      INJECT_LAST_FAILURE="delivered new items; $(wc -l < "$buf" | tr -d ' ') accepted-but-unconfirmed item(s) retained without re-typing"
+      log "inject partial: $INJECT_LAST_FAILURE"
+      return 1
+    fi
+    rm -f "${buf}.since" "$state/.subsuper-inject-wedged"
     return 0
   fi
   if [ "$INJECT_SUBMIT_ATTEMPTED" = 1 ]; then
@@ -1188,6 +1254,17 @@ escalate_flush() {  # <state>
   elif [ "$fresh" = 1 ]; then
     rm -f "$full"
   fi
+  if [ "$INJECT_SUBMIT_OUTCOME" = indeterminate ]; then
+    # The sent items are covered by an accepted-but-never-confirmed payload:
+    # record them so no later flush re-types them, while they stay durable in
+    # the buffer for the wedge alarm and return catch-up. This also covers the
+    # payload-level suppression inside inject_msg (no new attempt ran, but an
+    # identical earlier payload already carried these items into the pane).
+    if ! cat "$sendf" >> "$unc"; then
+      log "inject warning: could not record accepted-but-unconfirmed items in $unc; a re-type is possible"
+    fi
+  fi
+  [ "$sendf" = "$buf" ] || rm -f "$sendf"
   return 1
 }
 
@@ -1711,6 +1788,13 @@ window_for_task() {  # <task-key> [state]
 #     path it means native agent-state observed a real turn start.
 #     Pending means Enter was swallowed; unknown is treated as undelivered by
 #     this strict daemon path.
+#   - OUTCOMES (INJECT_SUBMIT_OUTCOME): `confirmed` (empty/empty-turnstart/
+#     busy-confirmed), `failed` (send-failed/turnstart-setup-failed - provably
+#     not accepted into the pane, so retryable), and `indeterminate` (every
+#     other post-attempt verdict - the payload may already be submitted). An
+#     indeterminate payload is appended verbatim to
+#     state/.subsuper-inject-accepted, and an identical later payload is
+#     suppressed before typing rather than risk a duplicate turn.
 #   - COMPOSER GUARD before typing: if the cursor line already has real content
 #     after dim/faint ghost text and borders are ignored (a human's half-typed
 #     line, or a previous injection's unsent text), defer entirely - injecting
@@ -1723,6 +1807,7 @@ inject_msg() {  # <message> [state]
   # watcher triage. Escalations buffer and survive for the next catch-up flush.
   INJECT_LAST_FAILURE=
   INJECT_SUBMIT_ATTEMPTED=0
+  INJECT_SUBMIT_OUTCOME=not-attempted
   afk_active "$state" || { INJECT_LAST_FAILURE="deferred: afk inactive"; log "inject $INJECT_LAST_FAILURE"; return 1; }
   # (2) Single-line digest: collapse any embedded newlines so submission via
   # send-keys + Enter is unambiguous regardless of how the TUI composer treats
@@ -1732,6 +1817,17 @@ inject_msg() {  # <message> [state]
   fm_operational_input_encode away-supervisor "$msg" encoded \
     || { INJECT_LAST_FAILURE="the digest could not be encoded"; log "inject failed: $INJECT_LAST_FAILURE"; return 1; }
   msg=$encoded
+  # Accepted-payload identity (issue #85): a payload recorded as typed into the
+  # pane but never confirmed must never be re-typed identically - a swallowed
+  # Enter could already have submitted it, so a byte-identical retry can only
+  # duplicate. Its escalation stays buffered and durable instead.
+  if [ -s "$state/.subsuper-inject-accepted" ] \
+    && grep -Fqx "$msg" "$state/.subsuper-inject-accepted" 2>/dev/null; then
+    INJECT_SUBMIT_OUTCOME=indeterminate
+    INJECT_LAST_FAILURE="identical payload already accepted-but-unconfirmed (recorded in $state/.subsuper-inject-accepted); re-type suppressed"
+    log "inject suppressed: $INJECT_LAST_FAILURE"
+    return 1
+  fi
   target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
   # BACKEND-AWARE (previously a raw `tmux display-message` pane-exists probe):
   # dispatches through bin/fm-backend.sh so a herdr supervisor pane is checked
@@ -1799,14 +1895,32 @@ EOF
     err=$(cat "$errf" 2>/dev/null)
     rm -f "$errf"
   fi
-  if [ "$verdict" = empty ]; then
-    return 0  # Backend confirmed the submit.
-  fi
+  case "$verdict" in
+    empty|empty-turnstart:*|busy-confirmed)
+      INJECT_SUBMIT_OUTCOME=confirmed
+      return 0  # Backend confirmed the submit.
+      ;;
+  esac
   err=$(_collapse_newlines "$err")
   _utf8_prefix "$err" 512 err
-  if [ "$verdict" = send-failed ]; then
-    INJECT_LAST_FAILURE="initial send or Enter delivery (verdict=send-failed, bytes=$bytes; text may be in composer on backends that typed before Enter failed): ${err:-no transport error output}"
+  if [ "$verdict" = send-failed ] || [ "$verdict" = turnstart-setup-failed ]; then
+    # These are the only provably-unaccepted verdicts: either the literal
+    # send itself failed (nothing typed), the pre-typing turn-start setup
+    # failed, or Enter could never be delivered (the typed text sits in the
+    # composer, where the next attempt's composer guard defers rather than
+    # duplicating). The send stays retryable.
+    INJECT_SUBMIT_OUTCOME=failed
+    INJECT_LAST_FAILURE="initial send or Enter delivery (verdict=$verdict, bytes=$bytes; text may be in composer on backends that typed before Enter failed): ${err:-no transport error output}"
   else
+    # Every other non-empty verdict means the submit boundary was crossed but
+    # the outcome cannot be proven: record the exact payload so no retry ever
+    # re-types it identically, then let the caller keep its items durable.
+    INJECT_SUBMIT_OUTCOME=indeterminate
+    if [ -n "$state" ] \
+      && ! { [ -s "$state/.subsuper-inject-accepted" ] && grep -Fqx "$msg" "$state/.subsuper-inject-accepted" 2>/dev/null; }; then
+      printf '%s\n' "$msg" >> "$state/.subsuper-inject-accepted" 2>/dev/null \
+        || log "inject warning: could not record accepted-but-unconfirmed payload in $state/.subsuper-inject-accepted; a re-type is possible"
+    fi
     INJECT_LAST_FAILURE="Enter confirmation: submit unconfirmed after $retries retries (verdict=${verdict:-none}, bytes=$bytes, text may be in composer)${err:+: $err}"
   fi
   log "inject failed at $INJECT_LAST_FAILURE"

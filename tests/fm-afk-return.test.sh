@@ -278,7 +278,38 @@ test_check_retries_recorded_terminal_teardown() {
   pass "check retries recorded terminal teardown and keeps catch-up gated until success"
 }
 
+# Issue #85: an escalation accepted into the supervisor pane but never
+# confirmed stays durable in the buffer and the catch-up names it as
+# accepted-but-unconfirmed rather than presenting it as a plain new
+# escalation or dropping it.
+test_unconfirmed_submit_surfaces_in_return_catchup() {
+  local dir out
+  dir="$TMP_ROOT/unconfirmed-submit"
+  install_runner "$dir"
+  date +%s > "$dir/home/state/.afk"
+  printf 'repair-task.status: done: PR https://x/y/pull/7 (catch-all scan)\n' \
+    > "$dir/home/state/.subsuper-escalations"
+  printf 'repair-task.status: done: PR https://x/y/pull/7 (catch-all scan)\n' \
+    > "$dir/home/state/.subsuper-inject-unconfirmed"
+  printf 'payload-bytes\n' > "$dir/home/state/.subsuper-inject-accepted"
+
+  out=$(run_return "$dir" begin) || fail "return catch-up did not complete: $out"
+  assert_contains "$out" 'catch-up clear' "catch-up did not finish"
+  assert_contains "$out" 'catch-up escalation: repair-task.status: done: PR https://x/y/pull/7' \
+    "the durable unconfirmed item was not surfaced in catch-up"
+  assert_contains "$out" 'catch-up unconfirmed-submit: 1 buffered escalation(s) were accepted into the supervisor pane but never confirmed' \
+    "catch-up did not name the accepted-but-unconfirmed outcome"
+  [ ! -e "$dir/home/state/.subsuper-inject-unconfirmed" ] \
+    || fail "successful catch-up left the unconfirmed-items record behind"
+  [ ! -e "$dir/home/state/.subsuper-inject-accepted" ] \
+    || fail "successful catch-up left the accepted-payload record behind"
+  [ ! -e "$dir/home/state/.subsuper-escalations" ] \
+    || fail "successful catch-up left delivered escalation state behind"
+  pass "return catch-up surfaces an accepted-but-unconfirmed escalation with its reason, then clears it"
+}
+
 test_return_gate_orders_catchup_before_bearings
+test_unconfirmed_submit_surfaces_in_return_catchup
 test_explicit_reclassification_requires_durable_reason
 test_captain_decision_does_not_masquerade_as_firstmate_blocker
 test_evidence_publication_failure_preserves_wake_for_redrain
