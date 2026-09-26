@@ -10,7 +10,9 @@
 # daemon: routine signal/stale/heartbeat wakes cost zero firstmate context;
 # only done/needs-decision/blocked/failed/persistent-wedge/check-output events,
 # declared-pause rechecks, and unresolved remote stale-owner results reach the
-# LLM, and even then as one pre-read digest per batch window.
+# LLM, and even then as one pre-read digest per batch window. That digest is
+# byte-bounded (see escalate_flush); when it cuts or omits anything it names a
+# state/.subsuper-digests/ file holding every buffered event verbatim.
 #
 # PRESENCE-GATING (the /afk contract). The daemon is the away-mode engine: it
 # injects ONLY when the durable away-mode flag state/.afk is present. Invoking
@@ -216,6 +218,10 @@ MAX_DEFER_SECS_DEFAULT=300
 WEDGE_ALARM_TIMEOUT_SECS_DEFAULT=10
 WEDGE_ALARM_LAST_EPOCH=0
 WEDGE_ALARM_NOTIFIER_PID=
+# Why the latest delivery attempt did not land; the wedge alarm reports it.
+INJECT_LAST_FAILURE=
+# 1 once the latest delivery attempt reached the submit primitive.
+INJECT_SUBMIT_ATTEMPTED=0
 # The captain-relevant verb set and the status classifiers (last_status_line,
 # status_is_captain_relevant, window_to_task, scan_captain_relevant_statuses) now
 # live in bin/fm-classify-lib.sh, shared with the always-on watcher.
@@ -497,9 +503,38 @@ classify_heartbeat() {
   printf 'self|heartbeat (catch-all scan runs in housekeeping)'
 }
 
-# Anything unrecognized is escalated (fail-safe).
+# Anything unrecognized is escalated (fail-safe). A delivered unknown wake is
+# acknowledged by its exact distilled line in state/.subsuper-unknown-acked, so
+# that same identity does not escalate again in this away session; the away
+# entry and return paths clear that file. An identity still only buffered,
+# or never successfully flushed, is not acknowledged and still escalates.
 classify_unknown() {  # <reason>
   printf 'escalate|unknown wake: %s' "$1"
+}
+
+# Exact distilled line of an unknown-wake escalation, or nothing.
+unknown_wake_line() {  # <item>
+  case "$1" in
+    "unknown wake: "*) printf '%s' "$1"; return 0 ;;
+  esac
+  return 1
+}
+
+unknown_wake_acknowledged() {  # <state> <line>
+  local ack="$1/.subsuper-unknown-acked"
+  [ -f "$ack" ] || return 1
+  grep -Fxq -- "$2" "$ack"
+}
+
+# Record every unknown-wake line from a flush that already reached the supervisor.
+# Ordinary escalation lines are left alone.
+unknown_wake_acknowledge_flushed() {  # <state> <buffer>
+  local state=$1 buf=$2 line
+  while IFS= read -r line || [ -n "$line" ]; do
+    unknown_wake_line "$line" >/dev/null || continue
+    unknown_wake_acknowledged "$state" "$line" && continue
+    printf '%s\n' "$line" >> "$state/.subsuper-unknown-acked" || return 1
+  done < "$buf"
 }
 
 # --- stale marker + escalation buffer (stateful, but via explicit state dir) -
@@ -980,9 +1015,13 @@ recovery_projection_clear() {  # <state>
 }
 
 # Send the current recovery generation projection without merging it into the
-# unrelated asynchronous escalation buffer.
+# unrelated asynchronous escalation buffer. The projection is a second digest
+# path into inject_msg, so it obeys the same transport byte bound as
+# escalate_flush; when bounded it names a verbatim full-text copy under
+# ESCALATE_FULL_DIR (the projection file itself is cleared on ack, so it cannot
+# stand in as the durable full text).
 recovery_projection_flush() {  # <state> <generation>
-  local state=$1 generation=$2 projection generation_file actual n msg
+  local state=$1 generation=$2 projection generation_file actual n msg full='' fresh=0
   projection=$(recovery_projection_path "$state")
   generation_file=$(recovery_projection_generation_path "$state")
   [ -s "$projection" ] && [ -r "$generation_file" ] || return 0
@@ -990,31 +1029,165 @@ recovery_projection_flush() {  # <state> <generation>
   [ "$actual" = "$generation" ] || return 1
   n=$(wc -l < "$projection" 2>/dev/null || echo 0)
   case "$n" in ''|*[!0-9]*|0) return 1 ;; esac
-  msg=$(awk 'NR>1{printf " | "} {printf "%s",$0} END{print ""}' "$projection" 2>/dev/null)
+  escalate_digest_body "$projection"
+  msg=$ESCALATE_BODY
+  if [ "$ESCALATE_BOUNDED" -eq 1 ]; then
+    if full=$(escalate_full_text_save "$state" "$projection"); then
+      fresh=1
+      msg="$msg (digest bounded; full text of every event: $full)"
+    else
+      INJECT_LAST_FAILURE="recovery projection full text could not be saved under $state/$ESCALATE_FULL_DIR"
+      log "inject skipped: $INJECT_LAST_FAILURE"
+      return 1
+    fi
+  fi
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
-  inject_msg "$msg" "$state"
+  if inject_msg "$msg" "$state"; then
+    return 0
+  fi
+  if [ "$INJECT_SUBMIT_ATTEMPTED" != 1 ] && [ "$fresh" = 1 ]; then
+    rm -f "$full"
+  fi
+  return 1
 }
 
 escalate_add() {  # <state> <distilled-item>
-  local state=$1 item=$2 buf
+  local state=$1 item=$2 buf line
+  if line=$(unknown_wake_line "$item"); then
+    unknown_wake_acknowledged "$state" "$line" && return 0
+  fi
   buf=${FM_ESCALATION_SINK:-"$state/.subsuper-escalations"}
   [ -n "${FM_ESCALATION_SINK:-}" ] || { [ -s "$buf" ] || _now > "${buf}.since"; }
   printf '%s\n' "$item" >> "$buf"
 }
 
+# _utf8_prefix: the longest prefix of <text> that fits in <max-bytes> bytes
+# without splitting a UTF-8 sequence, stored in the named variable.
+_utf8_prefix() {  # <text> <max-bytes> <out-var>
+  local LC_ALL=C s=$1 max=$2 i k=0 need
+  if [ "${#s}" -gt "$max" ]; then
+    s=${s:0:$max}
+    i=${#s}
+    while [ "$k" -lt 3 ] && [ "$i" -gt 0 ]; do
+      case "${s:$((i - 1)):1}" in
+        [$'\x80'-$'\xbf']) i=$((i - 1)); k=$((k + 1)) ;;
+        *) break ;;
+      esac
+    done
+    if [ "$i" -gt 0 ]; then
+      case "${s:$((i - 1)):1}" in
+        [$'\xc0'-$'\xdf']) need=1 ;;
+        [$'\xe0'-$'\xef']) need=2 ;;
+        [$'\xf0'-$'\xf7']) need=3 ;;
+        *) need=$k ;;
+      esac
+      [ "$k" -ge "$need" ] || s=${s:0:$((i - 1))}
+    fi
+  fi
+  printf -v "$3" '%s' "$s"
+}
+
+# The injected digest is bounded so it always fits one transport argument:
+# tmux refuses an oversized `send-keys -l` command, and Linux refuses to exec
+# any single argument above 131,071 bytes (MAX_ARG_STRLEN), which is how the
+# herdr, zellij, orca, and cmux adapters pass text. Each item is cut to
+# ESCALATE_ITEM_BYTES at a UTF-8 boundary with an omitted-bytes marker, the
+# joined items stop at ESCALATE_DIGEST_BYTES with a "+K more event(s)" tail,
+# and a bounded digest names a full-text file under ESCALATE_FULL_DIR that
+# keeps every buffered item verbatim.
+ESCALATE_DIGEST_BYTES=8192
+ESCALATE_ITEM_BYTES=2048
+ESCALATE_ITEM_MIN_BYTES=128
+ESCALATE_FULL_DIR=.subsuper-digests
+
+# escalate_digest_body: join <buf>'s items with " | " inside the byte budget.
+# Sets ESCALATE_BODY, ESCALATE_EVENTS (every buffered item), and
+# ESCALATE_BOUNDED (1 when any item was cut or omitted).
+escalate_digest_body() {  # <buf>
+  local LC_ALL=C buf=$1 item='' sep cut remaining=$ESCALATE_DIGEST_BYTES room cap shown=0 total=0
+  ESCALATE_BODY=
+  ESCALATE_BOUNDED=0
+  while IFS= read -r item || [ -n "$item" ]; do
+    total=$((total + 1))
+    sep=
+    [ "$shown" -eq 0 ] || sep=' | '
+    room=$((remaining - ${#sep}))
+    [ "$room" -ge "$ESCALATE_ITEM_MIN_BYTES" ] || { ESCALATE_BOUNDED=1; continue; }
+    cap=$ESCALATE_ITEM_BYTES
+    [ "$room" -ge "$cap" ] || cap=$room
+    if [ "${#item}" -gt "$cap" ]; then
+      _utf8_prefix "$item" "$cap" cut
+      item="$cut [+$(( ${#item} - ${#cut} )) bytes]"
+      ESCALATE_BOUNDED=1
+    fi
+    ESCALATE_BODY+="$sep$item"
+    remaining=$((remaining - ${#sep} - ${#item}))
+    shown=$((shown + 1))
+  done < "$buf"
+  ESCALATE_EVENTS=$total
+  [ "$shown" -ge "$total" ] || ESCALATE_BODY+=" | +$((total - shown)) more event(s)"
+}
+
+# escalate_full_text_save: copy <buf> verbatim into a new full-text file and
+# print its path.
+escalate_full_text_save() {  # <state> <buf>
+  local state=$1 buf=$2 dir file
+  dir="$state/$ESCALATE_FULL_DIR"
+  mkdir -p "$dir" 2>/dev/null || return 1
+  file=$(mktemp "$dir/digest-$(date '+%Y%m%dT%H%M%S').XXXXXX" 2>/dev/null) || return 1
+  if ! cp "$buf" "$file" 2>/dev/null; then
+    rm -f "$file"
+    return 1
+  fi
+  printf '%s' "$file"
+}
+
 # Flush the unrelated asynchronous escalation buffer as ONE batched,
-# single-line digest to the supervisor pane.
+# single-line, bounded digest to the supervisor pane. Returns 0 on successful
+# inject (or empty buffer), non-zero on inject failure (buffer preserved for
+# retry / catch-up). A bounded digest's full-text file is kept once the submit
+# ran, because the digest naming it may have been typed; ESCALATE_KEPT_FULL
+# remembers it so a retry of the same buffer reuses it instead of writing
+# another copy.
+ESCALATE_KEPT_FULL=
 escalate_flush() {  # <state>
-  local state=$1 buf item n msg
+  local state=$1 buf msg full='' fresh=0
   buf="$state/.subsuper-escalations"
   [ -s "$buf" ] || return 0
-  n=$(wc -l < "$buf" 2>/dev/null || echo 0)
-  # Join buffered items with the literal " | " separator into one digest line.
-  msg=$(awk 'NR>1{printf " | "} {printf "%s",$0} END{print ""}' "$buf" 2>/dev/null)
+  if [ ! -f "$buf" ] || [ ! -r "$buf" ]; then
+    INJECT_LAST_FAILURE="escalation buffer $buf is not a readable file"
+    log "inject skipped: $INJECT_LAST_FAILURE"
+    return 1
+  fi
+  escalate_digest_body "$buf"
+  msg=$ESCALATE_BODY
+  if [ "$ESCALATE_BOUNDED" -eq 1 ]; then
+    if [ -n "$ESCALATE_KEPT_FULL" ] && cmp -s "$ESCALATE_KEPT_FULL" "$buf"; then
+      full=$ESCALATE_KEPT_FULL
+    elif full=$(escalate_full_text_save "$state" "$buf"); then
+      fresh=1
+    else
+      INJECT_LAST_FAILURE="digest full text could not be saved under $state/$ESCALATE_FULL_DIR"
+      log "inject skipped: $INJECT_LAST_FAILURE; buffer preserved"
+      return 1
+    fi
+    msg="$msg (digest bounded; full text of every event: $full)"
+  fi
   # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
   # safety net, but keeping the source single-line makes the intent explicit).
-  msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
-  if inject_msg "$msg" "$state"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
+  msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$ESCALATE_EVENTS" "$msg")
+  if inject_msg "$msg" "$state"; then
+    unknown_wake_acknowledge_flushed "$state" "$buf" \
+      || log "unknown-wake acknowledgement write failed; a delivered unknown wake may escalate again"
+    : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"
+    ESCALATE_KEPT_FULL=
+    return 0
+  fi
+  if [ "$INJECT_SUBMIT_ATTEMPTED" = 1 ]; then
+    [ -z "$full" ] || ESCALATE_KEPT_FULL=$full
+  elif [ "$fresh" = 1 ]; then
+    rm -f "$full"
+  fi
   return 1
 }
 
@@ -1249,9 +1422,10 @@ wedge_alarm_notify() {  # <summary> <marker>
 }
 
 # Raise a loud, rate-limited alarm when escalations cannot be delivered after
-# max-defer (the supervisor pane is genuinely busy/wedged, or the submit's Enter
-# is swallowed). The daemon must NEVER silently wedge: this logs
-# an ERROR, drops a durable marker firstmate/recovery can surface, flashes
+# max-defer (the supervisor pane is genuinely busy/wedged, the initial send
+# fails, or the submit's Enter is swallowed). The daemon must NEVER silently
+# wedge: this logs an ERROR naming the last delivery failure, drops a durable
+# marker firstmate/recovery can surface, flashes
 # the tmux supervisor client's status line when applicable, and attempts a
 # configurable backend-independent active alert (wedge_alarm_notify). Nothing
 # is lost - the buffer and the
@@ -1269,10 +1443,11 @@ inject_wedge_alarm() {  # <state> <age-seconds>
     notify=0
   else
     WEDGE_ALARM_LAST_EPOCH=$now
-    log "ERROR: away-mode escalation undelivered ${age}s; inject could not confirm a submit (supervisor pane busy or wedged). Buffer + wake-queue preserved; alarm marker written."
+    log "ERROR: away-mode escalation undelivered ${age}s; last delivery failure: ${INJECT_LAST_FAILURE:-not recorded}. Buffer + wake-queue preserved; alarm marker written."
   fi
   {
     printf 'fm away-mode inject WEDGED: %ss undelivered as of %s\n' "$age" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+    printf 'Last delivery failure: %s\n' "${INJECT_LAST_FAILURE:-not recorded}"
     printf 'The supervisor pane could not accept an escalation. Buffered items:\n'
     cat "$state/.subsuper-escalations" 2>/dev/null
   } 2>/dev/null > "$marker" || true
@@ -1541,18 +1716,21 @@ window_for_task() {  # <task-key> [state]
 #     line, or a previous injection's unsent text), defer entirely - injecting
 #     would merge with the human's text.
 inject_msg() {  # <message> [state]
-  local msg=$1 state target backend harness retries sleep_s verdict composer encoded omp_bun omp_bin identity
+  local msg=$1 state target backend harness retries sleep_s verdict composer encoded omp_bun omp_bin identity bytes errf err=''
   state="${2:-$(_state_root)}"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
   # watcher triage. Escalations buffer and survive for the next catch-up flush.
-  afk_active "$state" || { log "inject deferred: afk inactive"; return 1; }
+  INJECT_LAST_FAILURE=
+  INJECT_SUBMIT_ATTEMPTED=0
+  afk_active "$state" || { INJECT_LAST_FAILURE="deferred: afk inactive"; log "inject $INJECT_LAST_FAILURE"; return 1; }
   # (2) Single-line digest: collapse any embedded newlines so submission via
   # send-keys + Enter is unambiguous regardless of how the TUI composer treats
   # them. Then use the canonical typed envelope so downstream consumers retain
   # the exact away-supervisor kind without interpreting this payload's prose.
   msg=$(_collapse_newlines "$msg")
-  fm_operational_input_encode away-supervisor "$msg" encoded || return 1
+  fm_operational_input_encode away-supervisor "$msg" encoded \
+    || { INJECT_LAST_FAILURE="the digest could not be encoded"; log "inject failed: $INJECT_LAST_FAILURE"; return 1; }
   msg=$encoded
   target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
   # BACKEND-AWARE (previously a raw `tmux display-message` pane-exists probe):
@@ -1561,10 +1739,12 @@ inject_msg() {  # <message> [state]
   # when unset (sourced/test contexts that never ran fm_super_main's startup
   # discovery), matching this function's pre-existing default assumption.
   backend="${FM_SUPERVISOR_BACKEND:-tmux}"
-  fm_backend_target_exists "$backend" "$target" || return 1
+  fm_backend_target_exists "$backend" "$target" \
+    || { INJECT_LAST_FAILURE="supervisor target $target not found on $backend"; return 1; }
   # (3) Busy-guard: never inject into an in-use supervisor pane.
   if pane_is_busy "$target" "$backend"; then
-    log "inject deferred: supervisor pane busy (agent mid-turn)"
+    INJECT_LAST_FAILURE="deferred: supervisor pane busy (agent mid-turn)"
+    log "inject $INJECT_LAST_FAILURE"
     return 1
   fi
   #   b) Composer-guard: inject ONLY into a confirmed-empty GENUINE agent
@@ -1582,7 +1762,8 @@ $identity
 EOF
   composer=$(fm_backend_composer_state "$backend" "$target" "${FM_SUPERVISOR_HARNESS:-}" "$omp_bun" "$omp_bin" 2>/dev/null)
   if [ "$composer" != empty ]; then
-    log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
+    INJECT_LAST_FAILURE="deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
+    log "inject $INJECT_LAST_FAILURE"
     return 1
   fi
   # (4) Type the digest ONCE, then submit with Enter (retry Enter only, never
@@ -1592,12 +1773,17 @@ EOF
   # Dispatches through fm_backend_send_text_submit (bin/fm-backend.sh): for
   # backend=tmux this calls fm_backend_tmux_send_text_submit, a verbatim
   # re-export of fm_tmux_submit_core - byte-identical to calling it directly.
+  # The transport's stderr is kept so a failure names its cause. send-failed
+  # means the text was never confirmed typed, or (herdr) it was typed but no
+  # Enter could be sent, so no confirmation retry ran; every other non-empty
+  # verdict is an Enter-confirmation failure.
   harness=${FM_SUPERVISOR_HARNESS:-}
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|omp|grok|kimi) ;;
     *)
       if [ "$backend" = herdr ]; then
-        log "inject deferred: herdr supervisor harness is not a verified exact identity (harness=${harness:-unknown})"
+        INJECT_LAST_FAILURE="deferred: herdr supervisor harness is not a verified exact identity (harness=${harness:-unknown})"
+        log "inject $INJECT_LAST_FAILURE"
         return 1
       fi
       harness=
@@ -1605,11 +1791,25 @@ EOF
   esac
   retries=${FM_INJECT_CONFIRM_RETRIES:-$INJECT_CONFIRM_RETRIES_DEFAULT}
   sleep_s=${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}
-  verdict=$(fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s" "" "$harness" "$omp_bun" "$omp_bin")
+  bytes=$(LC_ALL=C; printf '%s' "${#msg}")
+  errf=$(mktemp "$state/.subsuper-inject-err.XXXXXX" 2>/dev/null) || errf=
+  INJECT_SUBMIT_ATTEMPTED=1
+  verdict=$(fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s" "" "$harness" "$omp_bun" "$omp_bin" 2>"${errf:-/dev/null}")
+  if [ -n "$errf" ]; then
+    err=$(cat "$errf" 2>/dev/null)
+    rm -f "$errf"
+  fi
   if [ "$verdict" = empty ]; then
     return 0  # Backend confirmed the submit.
   fi
-  log "inject failed: submit unconfirmed after $retries retries (verdict=$verdict, text may be in composer)"
+  err=$(_collapse_newlines "$err")
+  _utf8_prefix "$err" 512 err
+  if [ "$verdict" = send-failed ]; then
+    INJECT_LAST_FAILURE="initial send or Enter delivery (verdict=send-failed, bytes=$bytes; text may be in composer on backends that typed before Enter failed): ${err:-no transport error output}"
+  else
+    INJECT_LAST_FAILURE="Enter confirmation: submit unconfirmed after $retries retries (verdict=${verdict:-none}, bytes=$bytes, text may be in composer)${err:+: $err}"
+  fi
+  log "inject failed at $INJECT_LAST_FAILURE"
   return 1
 }
 

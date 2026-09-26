@@ -56,6 +56,7 @@ unit_clear_stale() {
   : > "$st/state/.subsuper-recovery-escalations"
   : > "$st/state/.subsuper-recovery-escalations.generation"
   : > "$st/state/.subsuper-inject-wedged"
+  : > "$st/state/.subsuper-unknown-acked"
   : > "$st/state/.wake-queue"          # durable queue must be untouched
   # Source fm-afk-start.sh inside a child bash (it sets `set -eu` and would
   # otherwise leak that into this test shell) and call the clear helper.
@@ -65,8 +66,9 @@ unit_clear_stale() {
      && [ ! -e "$st/state/.subsuper-escalations.since" ] \
      && [ ! -e "$st/state/.subsuper-recovery-escalations" ] \
      && [ ! -e "$st/state/.subsuper-recovery-escalations.generation" ] \
-     && [ ! -e "$st/state/.subsuper-inject-wedged" ]; then
-    pass "clear-stale: removes asynchronous and recovery delivery artifacts"
+     && [ ! -e "$st/state/.subsuper-inject-wedged" ] \
+     && [ ! -e "$st/state/.subsuper-unknown-acked" ]; then
+    pass "clear-stale: removes asynchronous and recovery delivery artifacts plus unknown-wake acknowledgements"
   else
     fail "clear-stale: stale artifacts survived"
   fi
@@ -136,6 +138,7 @@ unit_fresh_vs_refresh() {
   mkdir -p "$st/state"
   : > "$st/state/.subsuper-escalations"
   : > "$st/state/.subsuper-inject-wedged"
+  : > "$st/state/.subsuper-unknown-acked"
   # A live "daemon": a real process whose identity the lock records, so
   # daemon_lock_held_by_live_daemon returns true (a refresh).
   sleep 600 &
@@ -145,7 +148,8 @@ unit_fresh_vs_refresh() {
   printf '%s' "$sleep_pid" > "$lock/pid"
   ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleep_pid" > "$lock/pid-identity" 2>/dev/null ) || true
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$START" >/dev/null 2>&1
-  if [ -e "$st/state/.subsuper-escalations" ] && [ -e "$st/state/.subsuper-inject-wedged" ]; then
+  if [ -e "$st/state/.subsuper-escalations" ] && [ -e "$st/state/.subsuper-inject-wedged" ] \
+     && [ -e "$st/state/.subsuper-unknown-acked" ]; then
     pass "refresh: daemon already alive - stale artifacts preserved (current session's buffer kept)"
   else
     fail "refresh: incorrectly cleared the current session's buffered escalations"
@@ -228,6 +232,7 @@ unit_failed_start_rolls_back_state() {
   printf 'wedged\n' > "$st/state/.subsuper-inject-wedged"
   printf 'recovery\n' > "$st/state/.subsuper-recovery-escalations"
   printf 'recover-one\n' > "$st/state/.subsuper-recovery-escalations.generation"
+  printf 'acked\n' > "$st/state/.subsuper-unknown-acked"
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
     FM_SUPERVISOR_BACKEND=unsupported "$LAUNCH" start >/dev/null 2>&1; then
     fail "failed start: unsupported backend unexpectedly succeeded"
@@ -235,6 +240,7 @@ unit_failed_start_rolls_back_state() {
     && [ "$(cat "$st/state/.subsuper-escalations")" = pending ] \
     && [ "$(cat "$st/state/.subsuper-recovery-escalations")" = recovery ] \
     && [ "$(cat "$st/state/.subsuper-recovery-escalations.generation")" = recover-one ] \
+    && [ "$(cat "$st/state/.subsuper-unknown-acked")" = acked ] \
     && [ "$(cat "$st/state/.subsuper-inject-wedged")" = wedged ]; then
     pass "failed start: away flag and delivery artifacts roll back"
   else

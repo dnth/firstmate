@@ -485,7 +485,7 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [harness] [bas
 
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle> [harness] [runtime] [omp] [turnstart-setup]
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${6:-} bun=${7:-} omp=${8:-} turnstart_setup=${9:-}
-  local baseline_busy=0 turnstart_reference='' verdict
+  local baseline_busy=0 turnstart_reference='' verdict err
   if [ "$harness" = omp ] && fm_pane_is_busy "$target" omp; then
     baseline_busy=1
   fi
@@ -493,11 +493,14 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle> [har
     "$turnstart_setup" || { printf 'turnstart-setup-failed'; return 0; }
     turnstart_reference=${TARGET_OMP_TURNSTART_REFERENCE:-}
   fi
-  tmux send-keys -t "$target" -l "$text" 2>/dev/null || {
+  # A failed literal send replays tmux's stderr (for example "command too
+  # long") so the caller can log why nothing was typed.
+  if ! err=$(tmux send-keys -t "$target" -l "$text" 2>&1 >/dev/null); then
     [ -z "$turnstart_reference" ] || rm -f -- "$turnstart_reference"
+    [ -z "$err" ] || printf '%s\n' "$err" >&2
     printf 'send-failed'
     return 0
-  }
+  fi
   sleep "$settle"
   if [ -n "$turnstart_reference" ] && ! touch "$turnstart_reference"; then
     rm -f -- "$turnstart_reference"

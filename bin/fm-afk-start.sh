@@ -65,7 +65,8 @@ fm_afk_clear_stale_artifacts() {  # <state-dir>
         "$state/.subsuper-escalations.since" \
         "$state/.subsuper-recovery-escalations" \
         "$state/.subsuper-recovery-escalations.generation" \
-        "$state/.subsuper-inject-wedged" 2>/dev/null
+        "$state/.subsuper-inject-wedged" \
+        "$state/.subsuper-unknown-acked" 2>/dev/null
 }
 
 daemon_lock_owner() {

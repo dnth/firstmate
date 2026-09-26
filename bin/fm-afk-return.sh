@@ -125,7 +125,8 @@ clear_delivery_artifacts() {
     "$STATE/.subsuper-escalations.since" \
     "$STATE/.subsuper-recovery-escalations" \
     "$STATE/.subsuper-recovery-escalations.generation" \
-    "$STATE/.subsuper-inject-wedged"
+    "$STATE/.subsuper-inject-wedged" \
+    "$STATE/.subsuper-unknown-acked"
 }
 
 return_guard() {
