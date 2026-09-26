@@ -7,6 +7,7 @@
 #   fm-procevent-lavish.sh terminal <result-file>
 #   fm-procevent-lavish.sh read <result-file>
 #   fm-procevent-lavish.sh answers <result-file>
+#   fm-procevent-lavish.sh reconciles <result-file>
 #   fm-procevent-lavish.sh source-id <artifact.html>
 #   fm-procevent-lavish.sh retire <artifact.html>
 #
@@ -30,7 +31,7 @@
 # `<decision-key>\t<answer>\t<label>` lines, and stops there. It maps nothing to a
 # hold, records no decision, and closes nothing: a captain answer is not special to
 # Lavish, so every rule about what a keyed answer DOES belongs to the one intake in
-# bin/fm-decision-hold.sh, which the runner feeds. A Lavish review is just an
+# bin/fm-captain-hold.sh, which the runner feeds. A Lavish review is just an
 # ephemeral discussion format that happens to carry answers.
 #
 # Only rows tagged `choice` are read. A freeform captain message is prose that may
@@ -221,22 +222,28 @@ cmd_read() {
   ' "$file" "$lifecycle" "$session_ended"
 }
 
-# Print `key<TAB>answer<TAB>label` for every structured choice the captain
-# submitted in a captured result. The published response frames queued feedback as
+# Print `key<TAB>answer<TAB>label[<TAB>mode]` for each non-reconcile structured choice the
+# captain submitted in a captured result; the optional mode column relays the
+# card's declared close mode (`done` or `release`) to the keyed-answer intake. The published response frames queued feedback as
 # a `prompts[N]{field,...}:` header followed by exactly N indented CSV rows whose
 # quoted fields carry JSON-style escapes, so this reads the declared field ORDER
 # rather than assuming a fixed column, and takes only rows whose `tag` field is
 # `choice`. A freeform `message` row is captain prose and is deliberately never a
 # source of decision keys. A row that does not carry both a slug-shaped `question`
-# and an `answer` inside its `Context data:` block is skipped, so a deck that does
-# not key its forms by decision key simply yields nothing.
-cmd_answers() {
-  local file=${1-}
+# and the versioned `selection` and `note` fields inside its `Context data:` block
+# is skipped. A time-limited rollout branch accepts the old question/answer
+# shape only for ordinary answers and rejects its bare or annotated reconcile
+# values because old rows do not separate the selected option from its note.
+# The question cap is 128 so any task id fits, including the long legacy
+# `<origin>-decision-<key>` identities pre-collapse decks still carry; the
+# security property is the slug SHAPE, which is unchanged.
+cmd_choice_rows() {
+  local selection=$1 file=${2-}
   [ -n "$file" ] || usage
   [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
-  perl -e '
+  perl -MJSON::PP -e '
     use strict; use warnings;
-    my ($path) = @ARGV;
+    my ($selection, $path) = @ARGV;
     open my $fh, "<", $path or exit 1;
     my (@fields, $want, @rows);
     while (my $line = <$fh>) {
@@ -252,7 +259,7 @@ cmd_answers() {
     }
     close $fh;
     my %seen;
-    my @out;
+    my @choices;
     for my $row (@rows) {
       $row =~ s/^\s+//;
       my @vals;
@@ -273,24 +280,73 @@ cmd_answers() {
       my $prompt = $f{prompt};
       next unless defined $prompt && $prompt =~ /Context data:\s*(\{.*\})/s;
       my $ctx = $1;
-      next unless $ctx =~ /"question"\s*:\s*"((?:[^"\\]|\\.)*)"/;
-      my $key = $1;
-      next unless $ctx =~ /"answer"\s*:\s*"((?:[^"\\]|\\.)*)"/;
-      my $answer = $1;
-      $_ =~ s/\\(.)/$1/g for ($key, $answer);
-      next unless $key =~ /\A[A-Za-z0-9._-]{1,64}\z/;
-      next unless length $answer && length($answer) <= 512;
+      my $data = eval { decode_json($ctx) };
+      next unless ref($data) eq "HASH";
+      my ($key, $selected, $note, $answer, $legacy);
+      if (defined($data->{schema}) && !ref($data->{schema})
+          && $data->{schema} eq "fm-bearings-answer.v1") {
+        $key = $data->{question};
+        $selected = $data->{selection};
+        $note = $data->{note};
+        next if !defined($key) || ref($key) || !defined($selected) || ref($selected)
+          || !defined($note) || ref($note);
+        next unless $selected eq "" || $selected =~ /\A[A-Za-z0-9._-]{1,128}\z/;
+        next unless length($note) <= 512;
+        next unless length($selected) || length($note);
+        $answer = length($selected) ? $selected : $note;
+        $legacy = 0;
+      # Time-limited compatibility for captures from pre-change boards; remove
+      # once no board carrying the old question/answer context can remain armed.
+      } elsif (!exists($data->{schema}) && !exists($data->{selection})
+          && !exists($data->{note})) {
+        $key = $data->{question};
+        $answer = $data->{answer};
+        next if !defined($key) || ref($key) || !defined($answer) || ref($answer);
+        next unless length($answer) && length($answer) <= 512;
+        next if $answer eq "reconcile" || index($answer, "reconcile - ") == 0;
+        $selected = "";
+        $note = "";
+        $legacy = 1;
+      } else {
+        next;
+      }
+      next unless $key =~ /\A[A-Za-z0-9._-]{1,128}\z/;
+      my $mode = "";
+      if (exists $data->{close}) {
+        next if !defined($data->{close}) || ref($data->{close})
+          || ($data->{close} ne "done" && $data->{close} ne "release");
+        $mode = $data->{close};
+      }
       my $label = defined $f{text} ? $f{text} : "";
-      s/[\x00-\x1f\x7f]/ /g for ($answer, $label);
+      s/[\x00-\x1f\x7f]/ /g for ($answer, $note, $label);
       $label = substr($label, 0, 512);
-      # A re-answered form appears again later in the queue; the last submission wins.
-      if (defined $seen{$key}) { $out[$seen{$key}] = undef }
-      $seen{$key} = scalar @out;
-      push @out, "$key\t$answer\t$label";
+      if (defined $seen{$key}) { $choices[$seen{$key}] = undef }
+      $seen{$key} = scalar @choices;
+      push @choices, {
+        key => $key, selection => $selected, note => $note, legacy => $legacy,
+        answer => $answer, label => $label, mode => $mode
+      };
     }
-    print "$_\n" for grep { defined } @out;
-  ' "$file"
+    for my $choice (grep { defined } @choices) {
+      if ($selection eq "reconciles") {
+        next if $choice->{legacy};
+        if ($choice->{selection} eq "reconcile") {
+          print length($choice->{note})
+            ? "$choice->{key}\t$choice->{note}\n"
+            : "$choice->{key}\n";
+        }
+        next;
+      }
+      next if $choice->{selection} eq "reconcile";
+      print length $choice->{mode}
+        ? "$choice->{key}\t$choice->{answer}\t$choice->{label}\t$choice->{mode}\n"
+        : "$choice->{key}\t$choice->{answer}\t$choice->{label}\n";
+    }
+  ' "$selection" "$file"
 }
+
+cmd_answers() { cmd_choice_rows answers "$@"; }
+cmd_reconciles() { cmd_choice_rows reconciles "$@"; }
 
 case "${1-}" in
   arm)       shift; cmd_arm "$@" ;;
@@ -300,6 +356,7 @@ case "${1-}" in
   terminal)  shift; cmd_terminal "$@" ;;
   read)      shift; cmd_read "$@" ;;
   answers)   shift; cmd_answers "$@" ;;
+  reconciles) shift; cmd_reconciles "$@" ;;
   ''|-h|--help|help) usage ;;
   *) die "unknown command: $1" ;;
 esac

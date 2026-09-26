@@ -105,7 +105,7 @@ Default is LOCAL-ONLY (no network); --include-prs is the only path that fetches.
 Default fields: schema, home, generated, prs, in_flight{id,kind,state,doing},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   secondmate_reconcile{id,spawn_gen,host,remote_root,kind,ids},
-  decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
+  decisions_open{id,key,verb,title,reason,summary,owner}, landed{id,what,artifact,owner},
   gates{id,title,blocked_by,reason,owner}, reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
 landed merges this home's Done with registered secondmate homes' Done, bounded by
@@ -163,6 +163,27 @@ command -v jq >/dev/null 2>&1 || { echo "fm-bearings-snapshot: jq not found" >&2
 # ordinary captain request proceeds. Bearings does not reproduce that policy;
 # it only consults the shared read-only gate.
 "$SCRIPT_DIR/fm-afk-return.sh" guard || exit $?
+
+# Pending board-created reconcile requests (bin/fm-captain-hold.sh
+# reconcile-requests) never close a captain hold, but they move this home's
+# affected rows out of Captain's Call into a Charted Next gate that states the
+# request timestamp, so a re-check already asked for is not asked again. The
+# records live under this home's own state dir; a secondmate home's pending
+# requests stay scoped to that home's snapshot.
+FM_HOME="${FM_HOME:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+RECONCILE_REQUESTS='{}'
+if [ -d "$STATE/reconcile-requests" ] && [ ! -L "$STATE/reconcile-requests" ]; then
+  RECONCILE_REQUESTS=$(
+    for _req in "$STATE"/reconcile-requests/*.request; do
+      [ -f "$_req" ] && [ ! -L "$_req" ] || continue
+      _task=${_req##*/}; _task=${_task%.request}
+      [ -n "$_task" ] || continue
+      [ "${_task##*[!A-Za-z0-9._-]*}" = "$_task" ] || continue
+      printf '%s\t%s\n' "$_task" "$(sed -n 's/^requested=//p' "$_req" | head -1)"
+    done | jq -Rn '[inputs | split("\t") | select(length == 2) | {key: .[0], value: .[1]}] | from_entries'
+  ) || RECONCILE_REQUESTS='{}'
+fi
 
 NOW=${FM_BEARINGS_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 if [ "$ALL_LANDED" = 1 ] || [ "$ALL_SECONDMATES" = 1 ]; then
@@ -302,7 +323,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson pr_repos_shown "$PR_REPOS_SHOWN" \
   --argjson pr_rows_capped "$PR_ROWS_CAPPED" \
   --argjson pr_rows_min_total "$PR_ROWS_MIN_TOTAL" \
-  --argjson candidate_prs "$CANDIDATE_PRS" '
+  --argjson candidate_prs "$CANDIDATE_PRS" \
+  --argjson reconcile_requests "$RECONCILE_REQUESTS" '
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
   def round_robin_landed($n):
@@ -385,7 +407,10 @@ MODEL=$(printf '%s' "$SNAP" | jq \
             doing:([.active_children[] | .id + ": " + (.doing // .state)] | join("; ") | trunc(90))} ]) as $in_flight_all
   | ([ .backlog.records[]
          | select(.structured and .captain_actionable == true)
+         | select(($reconcile_requests[.id] // null) == null)
          | {id,key:.id,verb:"captain-hold",
+            title:(.title | trunc(90)),
+            reason:(.hold_reason | trunc(90)),
             summary:((.title + ": " + .hold_reason) | trunc(90)),owner:"(main)"} ]
      + [ (.secondmate_current.records // [])[] as $m | $m.decisions_open[]?
          | select(.source == "backlog" and .verb == "captain-hold")
@@ -408,7 +433,14 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                   or (((.body_excerpt // "") | test("SUPERSEDED|NOT REQUIRED|NOT-REQUIRED|DEFERRED"; "i")) | not))
          | {id, title:(.title | trunc(60)),
             blocked_by:((.unresolved_blocker_ids // []) | if length > 0 then join(",") else "-" end | trunc(120)),
-            reason:((.hold_reason // .blocked_reason // "-") | trunc(40)),owner:"(main)"} ]
+            reason:((if (.kind == "captain" and ((.hold_until // "") != "") and (.hold_until > ($now | .[0:10])))
+                     then "deferred until " + .hold_until
+                     else (.hold_reason // .blocked_reason // "-") end) | trunc(40)),owner:"(main)"} ]
+     + [ .backlog.records[]
+         | select(.structured and .captain_actionable == true and (($reconcile_requests[.id] // null) != null))
+         | {id, title:(.title | trunc(60)),
+            blocked_by:"-",
+            reason:(("reconcile requested " + $reconcile_requests[.id]) | trunc(40)),owner:"(main)"} ]
      + [ (.secondmate_current.records // [])[] as $m
          | select($m.provenance.selected == "structured-home")
          | $m.queued[]?

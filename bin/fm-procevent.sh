@@ -53,15 +53,17 @@
 #
 # Keyed captain answers are adapter-owned through one more seam of the same kind,
 # and this runner still decides nothing about them. Some sources carry the
-# captain's answer to a durable decision. What such an answer MEANS is owned once,
-# by bin/fm-decision-hold.sh's keyed-answer intake, and reaching it must not
-# depend on an agent remembering. So after capture, a source that has been bound
-# to a decision origin has its result passed to
+# captain's answer to a durable captain-held task. What such an answer MEANS is
+# owned once, by bin/fm-captain-hold.sh's keyed-answer intake, and reaching it
+# must not depend on an agent remembering. So after capture, a source that has
+# been bound to a decision origin has its result passed to
 # `bin/fm-procevent-<adapter>.sh answers <result-file>`, and whatever that prints
 # is piped straight into that one intake. The adapter reports only what the
 # captain chose; the intake owns every rule about what happens next. This runner
 # names no adapter, parses no result, and knows no decision rule, so a future
 # source needs nothing here beyond an `answers` command and a binding.
+# Reconcile selections use the parallel `reconciles` adapter command and the
+# binding-verified `reconcile-requests` intake, never the keyed-answer value.
 #
 # Feeding is deliberately independent of handling: it never acknowledges a result
 # and never suppresses a wake. Recording the captain's answer is transcription,
@@ -141,12 +143,31 @@ feed_keyed_answers() {  # <adapter> <source-id> <result-file>
   local adapter=$1 id=$2 result=$3 script origin seq
   script=$(adapter_script "$adapter")
   [ -f "$script" ] && [ ! -L "$script" ] || return 1
-  origin=$("$SCRIPT_DIR/fm-decision-hold.sh" binding "$id" 2>/dev/null) || return 1
+  origin=$("$SCRIPT_DIR/fm-captain-hold.sh" binding "$id" 2>/dev/null) || return 1
   [ -n "$origin" ] || return 1
   seq=$(fm_procevent_result_sequence "$result") || return 1
   "$script" answers "$result" 2>/dev/null \
-    | "$SCRIPT_DIR/fm-decision-hold.sh" answers "$origin" \
+    | "$SCRIPT_DIR/fm-captain-hold.sh" answers "$origin" \
         --source "the captured result $id sequence $seq" >/dev/null 2>&1
+}
+
+# Feed a bound source's reconcile selections to the binding-verified
+# reconcile-requests intake - the parallel seam to feed_keyed_answers. The
+# adapter's `reconciles` command emits only the task ids whose structured
+# selection was the reserved Reconcile option; the intake re-verifies the
+# binding before filing any durable request, and a reconcile never closes or
+# answers anything here.
+feed_reconcile_requests() {  # <adapter> <source-id> <result-file>
+  local adapter=$1 id=$2 result=$3 script origin seq rows
+  script=$(adapter_script "$adapter")
+  [ -f "$script" ] && [ ! -L "$script" ] || return 1
+  origin=$("$SCRIPT_DIR/fm-captain-hold.sh" binding "$id" 2>/dev/null) || return 1
+  [ -n "$origin" ] || return 1
+  seq=$(fm_procevent_result_sequence "$result") || return 1
+  rows=$("$script" reconciles "$result" 2>/dev/null) || return 1
+  printf '%s\n' "$rows" \
+    | "$SCRIPT_DIR/fm-captain-hold.sh" reconcile-requests \
+        --source-id "$id" --source "the captured result $id sequence $seq" >/dev/null 2>&1
 }
 
 read_adapter() {  # <source-id>
@@ -436,6 +457,9 @@ cmd_start() {
 
   # Independent of publication and acknowledgement, so it runs once per capture
   # for every adapter and cannot change what the handler receives.
+  if feed_reconcile_requests "$adapter" "$id" "$durable"; then
+    printf 'reconciles-fed: %s\n' "$id"
+  fi
   if feed_keyed_answers "$adapter" "$id" "$durable"; then
     printf 'answers-fed: %s\n' "$id"
   fi
@@ -789,7 +813,7 @@ cmd_retire() {
   # A retired source produces no further answer, so drop any decision binding it
   # carried. Generic and idempotent: the binding owner is asked to forget this
   # source id, and an unbound source is unaffected.
-  "$SCRIPT_DIR/fm-decision-hold.sh" unbind "$id" >/dev/null 2>&1 || true
+  "$SCRIPT_DIR/fm-captain-hold.sh" unbind "$id" >/dev/null 2>&1 || true
   printf 'retired: %s\n' "$id"
 }
 

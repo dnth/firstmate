@@ -13,7 +13,7 @@
     {"duration_ms": 9065, "exit": 0, "path": "tests/fm-composer-ghost.test.sh", "worker": 5},
     {"duration_ms": 64, "exit": 0, "path": "tests/fm-composer-lib.test.sh", "worker": 6},
     {"duration_ms": 25365, "exit": 0, "path": "tests/fm-crew-state.test.sh", "worker": 7},
-    {"duration_ms": 30771, "exit": 0, "path": "tests/fm-decision-hold-lifecycle.test.sh", "worker": 8},
+    {"duration_ms": 30771, "exit": 0, "path": "tests/fm-captain-hold-lifecycle.test.sh", "worker": 8},
     {"duration_ms": 581, "exit": 0, "path": "tests/fm-ensure-agents-md.test.sh", "worker": 9},
     {"duration_ms": 6251, "exit": 0, "path": "tests/fm-grok-harness.test.sh", "worker": 10},
     {"duration_ms": 15422, "exit": 0, "path": "tests/fm-herdr-lab.test.sh", "worker": 11},

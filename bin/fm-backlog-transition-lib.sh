@@ -14,7 +14,7 @@
 #   bin/fm-spawn.sh      meta published => `tasks-axi start`
 #   bin/fm-teardown.sh   meta removed => `tasks-axi done`, or `tasks-axi reopen`
 #                        with the deliverable recorded when the row is still an
-#                        open captain call (bin/fm-decision-hold.sh), so
+#                        open captain call (bin/fm-captain-hold.sh), so
 #                        cleanup never retires the captain's own question
 #   bin/fm-bootstrap.sh  replays whatever a crash left behind, THIS HOME ONLY.
 # bin/fm-fleet-snapshot.sh's classifier and bin/fm-secondmate-reconcile.sh's
@@ -550,7 +550,7 @@ fm_backlog_row_artifact_supported() {
 # artifacts on the row, and return it to Queued, the conventional post-cleanup
 # shape for an open captain call.
 # bin/fm-fleet-snapshot.sh classifies that retained hold from its structured
-# fields; only the captain's recorded answer (bin/fm-decision-hold.sh) resolves the call.
+# fields; only the captain's recorded answer (bin/fm-captain-hold.sh) resolves the call.
 fm_backlog_retain() {  # <data-dir> <id> [flag...]
   local data authorized_data=$1 id=$2 out command_status previous_arg=''
   local arg deliverable='' line body new_body tmp

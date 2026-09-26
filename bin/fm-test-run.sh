@@ -138,7 +138,7 @@ family_for_basename() {
     fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
     fm-classify-decision-key.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
-    fm-crew-state.test.sh|fm-decision-hold-lifecycle.test.sh|\
+    fm-crew-state.test.sh|fm-captain-hold-lifecycle.test.sh|\
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
     fm-hermes-harness.test.sh|fm-kimi-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
     fm-omp-fleet-hooks.test.sh|fm-omp-harness.test.sh|fm-operational-input.test.sh|\
@@ -284,7 +284,7 @@ tests/fm-cd-pretool-check.test.sh
 tests/fm-composer-ghost.test.sh
 tests/fm-composer-lib.test.sh
 tests/fm-crew-state.test.sh
-tests/fm-decision-hold-lifecycle.test.sh
+tests/fm-captain-hold-lifecycle.test.sh
 tests/fm-ensure-agents-md.test.sh
 tests/fm-grok-harness.test.sh
 tests/fm-herdr-lab.test.sh
@@ -311,7 +311,7 @@ list_portable_parallel_1() {
   cat <<'EOF'
 tests/fm-x-mode.test.sh
 tests/fm-cd-pretool-check.test.sh
-tests/fm-decision-hold-lifecycle.test.sh
+tests/fm-captain-hold-lifecycle.test.sh
 tests/fm-test-run.test.sh
 tests/fm-composer-ghost.test.sh
 tests/fm-grok-harness.test.sh
@@ -1071,10 +1071,30 @@ families_for_changed_path() {
     bin/fm-primary-scope-lib.sh|bin/fm-project-mode.sh|bin/fm-promote.sh|\
     bin/fm-ff-lib.sh|bin/fm-gotmp*|bin/*pretool*)
       printf '%s\n' pure-contract-unit
+      [ "$path" != bin/fm-decision-hold.sh ] \
+        || printf '%s\n' "__script__:fm-captain-hold-lifecycle.test.sh"
+      ;;
+    bin/fm-timeout-lib.sh|bin/fm-backlog-transition-lib.sh|bin/fm-tasks-axi.sh)
+      # The captain-hold suite exercises all three end to end: the backlog
+      # transition library's bounded tasks-axi calls run through the timeout
+      # library, and fm-tasks-axi.sh is the home-addressed wrapper the shim
+      # and owner share.
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' watcher-wake-lock
+      printf '%s\n' "__script__:fm-captain-hold-lifecycle.test.sh"
+      ;;
+    bin/fm-parent-channel-lib.sh)
+      printf '%s\n' secondmate
+      printf '%s\n' "__script__:fm-captain-hold-lifecycle.test.sh"
       ;;
     .agents/skills/quota-array-dispatch/SKILL.md)
       printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
+      ;;
+    .agents/skills/bearings/assets/*)
+      # The board template is exercised by the captain-hold suite's board
+      # build test, which injects a payload into a fresh copy of it.
+      printf '%s\n' "__script__:fm-captain-hold-lifecycle.test.sh"
       ;;
     .agents/skills/*/SKILL.md)
       printf '%s\n' pure-contract-unit

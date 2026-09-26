@@ -131,7 +131,7 @@ fm_test_reap_orphans() {
     owner_pid=$(sed -n '1p' "$marker" 2>/dev/null) || owner_pid=
     owner_identity=$(sed -n '2,$p' "$marker" 2>/dev/null) || owner_identity=
     case "$owner_pid" in
-      '' | *[!0-9]*) ;;
+      ''|*[!0-9]*) ;;
       *)
         current_identity=$(fm_test_pid_identity "$owner_pid" 2>/dev/null) || current_identity=
         if [ -n "$owner_identity" ] && [ "$current_identity" = "$owner_identity" ]; then

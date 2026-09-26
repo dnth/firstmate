@@ -159,7 +159,7 @@ fm_run_timed() {  # <seconds> <command...>
     timeout) fm_run_external_timeout timeout "$seconds" "$@" ;;
     gtimeout) fm_run_external_timeout gtimeout "$seconds" "$@" ;;
     perl)
-      perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; my $status = $?; exit(($status & 127) ? 128 + ($status & 127) : ($status >> 8))' \
+      perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' \
         "$seconds" "$@"
       ;;
     bash) fm_run_bash_timeout "$seconds" "$@" ;;
@@ -169,7 +169,7 @@ fm_run_timed() {  # <seconds> <command...>
 
 fm_timed_out() {  # <status>
   case ${1:-} in
-    124 | 137) return 0 ;;
+    124|137) return 0 ;;
   esac
   return 1
 }
@@ -183,7 +183,7 @@ fm_exec_timed() {  # <seconds> <grace-seconds> <command...>
   local seconds=${1:-} grace=${2:-} value
   for value in "$seconds" "$grace"; do
     case "$value" in
-      '' | 0* | *[!0-9]*)
+      ''|0*|*[!0-9]*)
         echo "fm_exec_timed: usage: fm_exec_timed <positive-seconds> <positive-grace-seconds> <command> [args...]" >&2
         exit 125
         ;;
