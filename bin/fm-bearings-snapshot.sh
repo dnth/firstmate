@@ -406,7 +406,13 @@ MODEL=$(printf '%s' "$SNAP" | jq \
      + [ $secondmate_views[]
          | select(.bearings_state == "active_child_work")
          | {id,kind:"secondmate",state:.bearings_state,
-            repo:([.active_children[] | .repo] | unique | if length == 1 and .[0] != null then .[0] else null end),
+            repo:([.active_children[] | .repo] as $repos
+                  | if ($repos | length) > 0
+                     and (all($repos[]; . != null))
+                     and (($repos | unique | length) == 1)
+                    then $repos[0]
+                    else null
+                    end),
             name:([.active_children[] | .name // "" | select(type == "string" and test("[^[:space:]]"))] | join("; ") | trunc(70)),
             doing:([.active_children[] | .id + ": " + (.doing // .state)] | join("; ") | trunc(90))} ]) as $in_flight_all
   | ([ .backlog.records[]
