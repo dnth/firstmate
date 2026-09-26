@@ -109,6 +109,7 @@ setup_case() {  # <name> <harness> -> echoes "home fakebin bun omp log entered"
   omp="$dir/omp"
   log="$dir/send.log"
   entered="$dir/entered"
+  # shellcheck disable=SC2016 # The generated stub must expand its own argv.
   printf '#!/usr/bin/env bash\nprintf "%%s" "${!#}" | wc -L\n' > "$bun"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$omp"
   chmod +x "$bun" "$omp"
