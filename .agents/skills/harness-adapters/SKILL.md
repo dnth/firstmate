@@ -356,6 +356,11 @@ It runs the shared turn-end predicate through native `session_stop`, and applies
 `bin/fm-session-start.sh` rejects a missing, stale, foreign-PID, or version-mismatched loaded marker and prints both native-discovery and explicit `-e` recovery commands.
 The authoritative operating procedure is `docs/supervision-protocols/omp.md`.
 
+**Supervision-branch bash fact (2026-09-26, OMP 18.3.0).**
+OMP 18.3.0 removed the bash tool's `env` parameter behind service mode, and the legacy `createBashToolDefinition` shim still forwards a spawnHook `env` into the native bash execute, which throws "ready and env require a service name." before spawning.
+`.omp/extensions/fm-branch-supervision-omp.ts` therefore builds the branch bash tool through the shim's `operations.exec` seam, so branch commands run through `.omp/extensions/lib/fm-async-exec.ts` under the spawnHook's injected actor environment (FM_SUPERVISION_ACTOR=branch, FM_LEASE_HOLDER_PID, and the scriptEnv home overrides) on 18.3.x and earlier supported versions alike; an older OMP that ignores the seam falls back to the env-forwarding path that works there.
+`tests/fm-omp-branch-bash.test.sh` covers it against the real installed binary.
+
 **Persistent-secondmate fact (verified 2026-07-30, OMP 17.1.8, tmux).**
 `config/secondmate-harness` accepts exact `omp` identity plus optional model and thinking-level pins, and `fm-spawn.sh --secondmate` preserves all three values without changing the primary's crew-harness selection.
 The launch runs in the isolated Firstmate home, explicitly passes that home's tracked `.omp/extensions/fm-primary-omp.ts`, stores sessions under `state/omp-sessions`, and binds `state/.omp-session` to the exact direct-child JSONL conversation selected for resume.
