@@ -20,7 +20,10 @@ git -C "$REPO" init -q -b main
 git -C "$REPO" config user.name "Firstmate Tests"
 git -C "$REPO" config user.email "tests@firstmate.invalid"
 printf 'fixture\n' > "$REPO/README.md"
-git -C "$REPO" add README.md
+# Mirror the real repo: secondmate role markers are gitignored, so a slot
+# carrying them is invisible to the porcelain cleanliness check.
+printf '.fm-secondmate-home\n.fm-secondmate-parent\n' > "$REPO/.gitignore"
+git -C "$REPO" add README.md .gitignore
 git -C "$REPO" commit -qm "initial fixture"
 
 # An origin remote lets the landedness proof resolve a default ref.
@@ -29,18 +32,23 @@ git -C "$REPO" remote add origin "$TMP_ROOT/origin.git"
 git -C "$REPO" push -q origin main
 git -C "$REPO" remote set-head origin main >/dev/null
 
-# Slots: 1 clean, 2 dirty, 3 claimed by another task, 4 meta-named, 5 damaged.
+# Slots: 1 clean, 2 dirty, 3 claimed by another task, 4 meta-named, 5 damaged,
+# 7 clean except for a retired secondmate's leftover role markers.
 slot() { printf '%s/%s/repo\n' "$POOL" "$1"; }
 git -C "$REPO" worktree add --detach "$(slot 1)" -q
 git -C "$REPO" worktree add --detach "$(slot 2)" -q
 git -C "$REPO" worktree add --detach "$(slot 3)" -q
 git -C "$REPO" worktree add --detach "$(slot 4)" -q
+git -C "$REPO" worktree add --detach "$(slot 7)" -q
 mkdir -p "$(slot 5)"
 printf 'uncommitted\n' > "$(slot 2)/dirty-file"
 printf 'task=other-task\nhome=/elsewhere\n' > "$(dirname "$(slot 3)")/.fm-slot-owner"
 printf 'worktree=%s\n' "$(slot 4)" > "$HOME_DIR/state/other.meta"
-printf '{"worktrees":[{"path":"%s"},{"path":"%s"},{"path":"%s"},{"path":"%s"}]}\n' \
-  "$(slot 1)" "$(slot 2)" "$(slot 3)" "$(slot 4)" > "$POOL/treehouse-state.json"
+# Role markers are gitignored: porcelain-clean slots can still carry them.
+printf 'retired-mate\n' > "$(slot 7)/.fm-secondmate-home"
+printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=/nowhere\n' > "$(slot 7)/.fm-secondmate-parent"
+printf '{"worktrees":[{"path":"%s"},{"path":"%s"},{"path":"%s"},{"path":"%s"},{"path":"%s"}]}\n' \
+  "$(slot 1)" "$(slot 2)" "$(slot 3)" "$(slot 4)" "$(slot 7)" > "$POOL/treehouse-state.json"
 
 json_entries() {
   node - "$POOL" <<'NODE'
@@ -56,6 +64,7 @@ process.stdout.write("[" + [
   mk("4", "available"),
   mk("5", "damaged"),
   mk("6", "leased", {lease_holder: "fm-interactive-1"}),
+  mk("7", "available"),
 ].join(",") + "]");
 NODE
 }
@@ -105,6 +114,9 @@ assert_contains "$out" "slot 4      skipped" "the meta-named slot was not skippe
 assert_contains "$out" "task other's record names this slot" "the meta-record reason is missing"
 assert_contains "$out" "slot 5      damaged" "the damaged slot was not classified damaged"
 assert_contains "$out" "slot 6      skipped" "the leased slot was not skipped"
+assert_contains "$out" "slot 7      dirty" "a slot carrying a retired secondmate's markers was not reported"
+assert_contains "$out" ".fm-secondmate-home" "the marker report did not name the marker file"
+assert_contains "$out" "secondmate" "the marker report did not explain the role residue"
 assert_contains "$out" "dry run" "the prune dry-run verdict is missing from the report"
 if grep -Eq 'destroy .*--yes|prune .*--yes' "$CALLS" 2>/dev/null; then
   fail "the default pass executed a destructive treehouse verb: $(cat "$CALLS")"

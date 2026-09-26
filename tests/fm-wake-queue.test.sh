@@ -41,6 +41,21 @@ touch_fresh_under_clock() {  # <file> <now-epoch>
 }
 
 
+test_task_worker_env_refuses_drain() {
+  # An fm-spawn task worker's launch env carries FM_TASK_ID; a drain from
+  # inside it would consume a wake queue the worker does not own.
+  local dir state out status=0
+  dir=$(make_case worker-env-drain)
+  state="$dir/state"
+  append_wake "$state" signal "worker-task" "signal: $state/worker-task.status"
+  out=$(FM_TASK_ID=worker-task FM_STATE_OVERRIDE="$state" "$DRAIN" 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "a task worker's environment drained a wake queue instead of refusing"
+  assert_contains "$out" "FM_TASK_ID" "the drain refusal did not name the worker identity"
+  assert_grep "signal: $state/worker-task.status" "$state/.wake-queue" \
+    "the worker refusal consumed a queued wake"
+  pass "fm-wake-drain refuses an fm-spawn task worker's environment"
+}
+
 test_concurrent_append_and_drain() {
   local dir state out1 out2 pids i pid count unique malformed sequence generation
   dir=$(make_case concurrent)
@@ -1568,6 +1583,7 @@ test_turnend_marker_consumer_incarnation_gate() {
 
 test_turnend_marker_consumer_incarnation_gate
 test_stale_acknowledgement_names_current_presented_wake
+test_task_worker_env_refuses_drain
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor

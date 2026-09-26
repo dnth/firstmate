@@ -253,6 +253,53 @@ JS
   pass "OMP fresh primary lifecycle creates canonical state and atomically replaces a marker symlink without following it"
 }
 
+test_primary_adapter_refuses_task_worker_env() {
+  # A linked worktree that still carries a retired secondmate's
+  # .fm-secondmate-home marker passes every path-level scope check; only the
+  # fm-spawn launch-env identity (FM_TASK_ID) keeps an ordinary OMP task worker
+  # from activating the primary integration.
+  local base fixture out status=0
+  base="$TMP_ROOT/worker-base"
+  fixture="$TMP_ROOT/worker-marked-wt"
+  fm_git_worktree "$base" "$fixture" fm/worker-marked-slot
+  mkdir -p "$fixture/.omp/extensions" "$fixture/.omp/extensions/lib" "$fixture/bin" "$fixture/state"
+  : > "$fixture/AGENTS.md"
+  printf 'retired-mate\n' > "$fixture/.fm-secondmate-home"
+  cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$fixture/.omp/extensions/fm-primary-omp.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$fixture/.omp/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-async-exec.ts" "$fixture/.omp/extensions/lib/fm-async-exec.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" "$fixture/.omp/extensions/lib/fm-task-inbox-doorbell.ts"
+  cp "$ROOT/bin/fm-primary-watch-core.ts" "$fixture/bin/fm-primary-watch-core.ts"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$fixture/bin/fm-primary-scope-lib.sh"
+  cp "$ROOT/bin/fm-gate-refuse-lib.sh" "$fixture/bin/fm-gate-refuse-lib.sh"
+  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" \
+    FM_TASK_ID=ordinary-task FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" \
+    FM_STATE_OVERRIDE="$fixture/state" node --input-type=module 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+import { existsSync } from "node:fs";
+let registrations = 0;
+const api = {
+  zod: { object: () => ({}) },
+  on() { registrations += 1; },
+  registerCommand() { registrations += 1; },
+  registerTool() { registrations += 1; },
+  sendUserMessage() {},
+};
+process.argv[1] = process.env.EXTENSION;
+const extension = await import(`${pathToFileURL(process.env.EXTENSION).href}?fresh-worker=${Date.now()}`);
+extension.default(api);
+if (registrations !== 0) throw new Error(`task-worker env registered ${registrations} primary lifecycle surfaces`);
+if (existsSync(`${process.env.FM_STATE_OVERRIDE}/.omp-primary-extension-loaded`)) {
+  throw new Error("task-worker env published the primary loaded marker");
+}
+console.log("worker-env-inert");
+JS
+  ) || status=$?
+  expect_code 0 "$status" "OMP adapter under a task-worker environment"
+  assert_contains "$out" worker-env-inert "OMP adapter activated the primary integration under FM_TASK_ID"
+  pass "OMP primary adapter stays inert for an fm-spawn task worker even in a marked worktree"
+}
+
 test_native_omp_fresh_checkout_nudges_once() {
   local fixture out status=0
   fixture="$TMP_ROOT/native-fresh"
@@ -2035,6 +2082,7 @@ test_exact_bun_omp_primary_identity
 test_standalone_omp_primary_identity
 test_nested_foreign_harness_keeps_its_own_identity
 test_primary_scope_requires_canonical_state
+test_primary_adapter_refuses_task_worker_env
 test_native_identity_handles_virtual_entrypoint
 test_native_omp_fresh_checkout_nudges_once
 test_primary_marker_refuses_whitespace_identity

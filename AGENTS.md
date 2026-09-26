@@ -161,6 +161,7 @@ Treat `data/captain.md` as the domain-local record of captain preferences, optio
 ## 3. Session start (run once at every session start)
 
 Run `bin/fm-session-start.sh` exactly once at session start.
+This applies to a firstmate home session, never to an fm-spawn task worker: the launch environment's `FM_TASK_ID` makes session start, the wake drain, and the watcher arm refuse, so a worker reading this file inside a firstmate worktree must not run them.
 Its header is the single owner of composed commands, ordering, and digest contents.
 `bin/fm-supervision-instructions.sh` renders the emitted supervision block from `docs/supervision-protocols/`.
 Do not reimplement it by separately running its lock, bootstrap, or initial wake-drain components.

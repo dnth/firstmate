@@ -165,6 +165,21 @@ start_rearm_arm() {  # <home> <state> <fakebin> <arm-out> [predecessor-arm-pid]
   return 0
 }
 
+test_task_worker_env_refuses_arm() {
+  # An fm-spawn task worker's launch env carries FM_TASK_ID; arming a watcher
+  # from inside it would start Firstmate supervision against a home the worker
+  # does not own (the reported role-contamination symptom).
+  local dir state out status=0
+  dir=$(make_case worker-env-arm)
+  state="$dir/state"
+  out=$(PATH="$dir/fakebin:$PATH" FM_TASK_ID=ordinary-task FM_HOME="$dir" \
+    FM_STATE_OVERRIDE="$state" "$WATCH_ARM" 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "a task worker's environment armed a watcher instead of refusing"
+  assert_contains "$out" "FM_TASK_ID" "the arm refusal did not name the worker identity"
+  assert_absent "$state/.watch.lock" "the worker refusal created a watcher lock"
+  pass "fm-watch-arm refuses an fm-spawn task worker's environment"
+}
+
 test_attached_arm_reports_the_delivered_wake() {
   local dir state fakebin out armout status
   dir=$(make_case attached-delivered-wake)
@@ -814,6 +829,7 @@ test_downtime_marker_does_not_follow_symlink() {
   pass "watch-arm: downtime marker publication does not follow symlinks"
 }
 
+test_task_worker_env_refuses_arm
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver

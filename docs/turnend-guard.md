@@ -20,6 +20,7 @@ The guard remains a backstop; [`watcher-continuity.md`](watcher-continuity.md) o
 ## Guard predicates
 
 The guard first calls the shared primary scope.
+The scope refuses outright inside an fm-spawn ordinary task worker's launch environment: `bin/fm-spawn.sh` stamps `FM_TASK_ID` on every non-secondmate launch, so a reused Treehouse slot still carrying a retired secondmate's marker can never make a worker read as a home owner.
 A secondmate home runs its own primary Firstmate session, so a genuine `.fm-secondmate-home` marker includes it whether the home is a linked worktree or plain clone.
 The marker must be a regular non-symlink file whose whitespace-stripped first line is a non-empty identifier containing only letters, digits, dots, underscores, and dashes.
 An unmarked checkout or invalid marker falls through to the git-dir check.

@@ -44,11 +44,14 @@ const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
 // Spawned-worker identity markers stamped by bin/fm-spawn.sh at launch. A
 // primary session never carries any of them; a worker or secondmate always
 // carries FM_OMP_HARNESS=omp, and the task markers cover the same boundary.
+// FM_TASK_ID is the harness-neutral launch-env identity bin/fm-spawn.sh sets
+// on every non-secondmate kind.
 const WORKER_IDENTITY_ENV = [
   "FM_OMP_HARNESS",
   "FM_OMP_TASK_INBOX_DIR",
   "FM_OMP_TASK_TURN_STARTED",
   "FM_OMP_SESSION_POINTER",
+  "FM_TASK_ID",
 ];
 
 function spawnedWorkerIdentity(): boolean {

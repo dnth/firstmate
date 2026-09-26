@@ -1005,6 +1005,7 @@ SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 OMP_ABORT_CLEANUP=0
 OMP_ABORT_INITIAL_HEAD=
 PREWALK_WORKTREE_READY=0
+TREEHOUSE_WORKTREE_READY=0
 PREWALK_ABORT_PHASE=none
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
@@ -1119,6 +1120,17 @@ spawn_omp_abort_clean_unchanged_worktree() {  # <context>
     SPAWN_ABORT_PRESERVED=1
     echo "warning: $context could not return the unchanged worktree $WT" >&2
   fi
+}
+
+# A sandbox task has no pre-endpoint marker screening, so its guarded
+# Treehouse acquisition is the first code that can reject a marked slot.  Any
+# failure in that guarded handoff must therefore retire the endpoint created
+# for this spawn before the refusal escapes; otherwise the failed worker can
+# remain alive with no task record.
+spawn_sandbox_abort_endpoint() {
+  [ "${IS_SANDBOX:-}" = 1 ] || return 0
+  [ -n "${BACKEND:-}" ] && [ -n "${T:-}" ] || return 0
+  fm_backend_kill "$BACKEND" "$T" >/dev/null 2>&1 || true
 }
 
 spawn_abort_cleanup() {
@@ -3307,6 +3319,17 @@ validate_spawn_worktree() {  # <source> <inspect-target>
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
+  # A reused Treehouse slot can still carry a retired secondmate's role markers
+  # (they are gitignored, so the slot reads clean to porcelain checks). Launching
+  # an ordinary task into it would let the worker read as a secondmate home to
+  # the shared primary-scope predicate (bin/fm-primary-scope-lib.sh). Secondmate
+  # launches are exempt: their seed writes the markers deliberately.
+  if [ "$KIND" != secondmate ] && { [ -e "$WT/.fm-secondmate-home" ] || [ -L "$WT/.fm-secondmate-home" ] \
+      || [ -e "$WT/.fm-secondmate-parent" ] || [ -L "$WT/.fm-secondmate-parent" ]; }; then
+    echo "error: $source resolved a worktree still carrying a secondmate-home marker; refusing to place ordinary task $ID in it" >&2
+    echo "error: remove $WT/.fm-secondmate-home and $WT/.fm-secondmate-parent only after the owning secondmate is verifiably retired (bin/fm-teardown.sh), or destroy the slot and retry" >&2
+    exit 1
+  fi
   if [ "$RELAUNCH" -eq 1 ]; then
     project_common=$(git -C "$PROJ_ABS" rev-parse --git-common-dir 2>/dev/null || true)
     worktree_common=$(git -C "$WT" rev-parse --git-common-dir 2>/dev/null || true)
@@ -3544,6 +3567,30 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; t
     exit 1
   }
   SPAWN_START_DIR=$WT
+fi
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
+  && [ "$HARNESS" != omp ] && [ "$RAW_LAUNCH_WORKTREE_READY" != 1 ] \
+  && [ -n "${FM_TREEHOUSE_LOCAL_ROOT:-}" ]; then
+  treehouse_lease_args=(--lease --lease-holder "$W")
+  [ -z "$ACCEPTED_LOCAL_BASE" ] || treehouse_lease_args+=(--accepted-local-base "$ACCEPTED_LOCAL_BASE")
+  WT=$(cd "$PROJ_ABS" && FM_TREEHOUSE_REJECT_SECONDMATE_MARKERS=1 \
+    "$SCRIPT_DIR/fm-treehouse-get.sh" "${treehouse_lease_args[@]}") || {
+    echo "error: ordinary task could not lease an authoritative pooled worktree before endpoint creation" >&2
+    exit 1
+  }
+  validate_spawn_worktree "treehouse lease" "$W"
+  validate_spawn_pool_lease "treehouse lease" "$W" || exit 1
+  freshen_spawn_worktree_base "$WT" || exit 1
+  TREEHOUSE_WORKTREE_READY=1
+  SPAWN_POOL_LEASE_ABORT=1
+  SPAWN_START_DIR=$WT
+  if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
+    if ! fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME"; then
+      echo "error: could not claim Treehouse pool slot $WT for task $ID; refusing to launch a worker whose slot cannot later be proved to be its own" >&2
+      exit 1
+    fi
+    SPAWN_SLOT_CLAIMED=1
+  fi
 fi
 # Proven-gone relaunch endpoints: when the recorded endpoint is authoritatively
 # absent, the cwd proof below cannot run - there is no live pane to ask - so it
@@ -4169,8 +4216,10 @@ hermes_wait_for_reasoning() {  # <effort>
 }
 
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
-  && [ "$PREWALK_WORKTREE_READY" != 1 ] && [ "$RAW_LAUNCH_WORKTREE_READY" != 1 ]; then
+  && [ "$PREWALK_WORKTREE_READY" != 1 ] && [ "$RAW_LAUNCH_WORKTREE_READY" != 1 ] \
+  && [ "$TREEHOUSE_WORKTREE_READY" != 1 ]; then
   printf -v treehouse_get_command '%q' "$SCRIPT_DIR/fm-treehouse-get.sh"
+  treehouse_get_command="FM_TREEHOUSE_REJECT_SECONDMATE_MARKERS=1 $treehouse_get_command"
   if [ -n "$ACCEPTED_LOCAL_BASE" ]; then
     printf -v accepted_local_base_quoted '%q' "$ACCEPTED_LOCAL_BASE"
     treehouse_get_command="$treehouse_get_command --accepted-local-base $accepted_local_base_quoted"
@@ -4190,6 +4239,7 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] 
     treehouse_get_command="$treehouse_get_command --ready-file $treehouse_ready_quoted"
   fi
   spawn_send_text_line "$WT_TARGET" "$treehouse_get_command" || {
+    spawn_sandbox_abort_endpoint
     echo "error: worktree setup command could not be submitted safely for $W" >&2
     exit 1
   }
@@ -4201,16 +4251,19 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] 
       [ -s "$treehouse_ready_file" ] && break
       if [ -s "${treehouse_ready_file}.failed" ]; then
         cat "${treehouse_ready_file}.failed" >&2
+        spawn_sandbox_abort_endpoint
         echo "error: guarded Treehouse acquisition failed in pane $T" >&2
         exit 1
       fi
       if [ "$BACKEND" = herdr ] && ! fm_backend_target_exists "$BACKEND" "$T"; then
+        spawn_sandbox_abort_endpoint
         echo "error: herdr pane $T disappeared during Treehouse worktree acquisition; the pane death, not treehouse, prevented publication" >&2
         exit 1
       fi
       sleep 1
     done
     if [ ! -s "$treehouse_ready_file" ]; then
+      spawn_sandbox_abort_endpoint
       echo "error: treehouse get did not publish its acquired worktree within ${treehouse_ready_polls}s; inspect window $T" >&2
       exit 1
     fi
@@ -5053,7 +5106,12 @@ else
   # OMP loading) resolve the PRIMARY's operational directories and consent
   # files instead of the worker's own. Workers resolve their home from
   # FM_HOME, which stays inherited; only the override knobs are cleared.
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= $LAUNCH"
+  # FM_TASK_ID stamps the launch command's environment as an ordinary task
+  # worker's. bin/fm-primary-scope-lib.sh treats it as the worker-identity
+  # boundary: the harness and every subprocess it starts inherit it, so a
+  # worktree still carrying a retired secondmate's marker can never make this
+  # process look like a firstmate home.
+  LAUNCH="FM_TASK_ID=$sq_task_id FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= $LAUNCH"
 fi
 # tmux-like backends configure the persistent pane shell before launch. Herdr
 # instead binds both values to the one atomic `pane run` command: acceptance of

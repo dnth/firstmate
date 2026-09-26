@@ -93,6 +93,31 @@ test_linked_secondmate_primary_nudges() {
   pass "fm-sessionstart-nudge: a marked linked secondmate home is a primary"
 }
 
+test_marked_task_worktree_silent_for_worker_env() {
+  # A Treehouse slot can retain a retired secondmate's .fm-secondmate-home
+  # marker; the marker then force-includes that linked worktree in primary
+  # scope. An fm-spawn task worker's launch environment carries FM_TASK_ID, so
+  # the wrapper must stay silent for it even when the marker is valid.
+  local base="$TMP_ROOT/worker-base" root="$TMP_ROOT/worker-worktree"
+  fm_git_worktree "$base" "$root" fm/sessionstart-worker
+  mkdir -p "$root/bin" "$root/state"
+  : > "$root/AGENTS.md"
+  printf 'retired-mate\n' > "$root/.fm-secondmate-home"
+  expect_silent_zero "task-worker nudge" env FM_TASK_ID=ordinary-task FM_GATE_REFUSE_BYPASS=0 \
+    FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$NUDGE"
+  pass "fm-sessionstart-nudge: FM_TASK_ID keeps a marked task worktree silent"
+}
+
+test_worker_env_alone_silences_plain_checkout() {
+  # The launch-env marker is the identity, not the worktree shape: a worker is
+  # never a firstmate home owner even in a plain checkout.
+  local root="$TMP_ROOT/worker-plain"
+  make_primary "$root"
+  expect_silent_zero "plain-checkout worker nudge" env FM_TASK_ID=ordinary-task FM_GATE_REFUSE_BYPASS=0 \
+    FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$NUDGE"
+  pass "fm-sessionstart-nudge: FM_TASK_ID is silent even in a plain checkout"
+}
+
 test_missing_state_is_silent() {
   local root="$TMP_ROOT/missing-state"
   make_primary "$root"
@@ -153,6 +178,8 @@ test_gate_env_is_silent
 test_gate_common_dir_is_silent
 test_unmarked_linked_worktree_is_silent
 test_linked_secondmate_primary_nudges
+test_marked_task_worktree_silent_for_worker_env
+test_worker_env_alone_silences_plain_checkout
 test_missing_state_is_silent
 test_owned_lock_is_silent
 test_opencode_plugin_delivers_exact_nudge_once

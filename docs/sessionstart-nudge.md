@@ -9,6 +9,7 @@ The Ahoy skill owns the rule that this marked operational input is never a capta
 
 `bin/fm-sessionstart-nudge.sh` is the single command every harness adapter invokes.
 It sources `bin/fm-gate-refuse-lib.sh` and stays silent for a no-mistakes gate agent identified by `NO_MISTAKES_GATE` or a `.no-mistakes/repos/*.git` git-common-dir.
+The shared scope predicate also keeps it silent inside an fm-spawn task worker's launch environment (`FM_TASK_ID`), so a worker never receives the session-start instruction even when its worktree carries a leftover `.fm-secondmate-home` marker.
 It shares `bin/fm-primary-scope-lib.sh` with `bin/fm-turnend-guard.sh`, so the hooks use one primary-detection owner.
 The Guard Predicates section of [`turnend-guard.md`](turnend-guard.md#guard-predicates) owns marker validation, plain-checkout detection, and required Firstmate-shaped paths.
 
@@ -35,7 +36,7 @@ That alternative expands trust and writes outside this repository, so Firstmate 
 
 ## Regression coverage
 
-`tests/fm-sessionstart-nudge.test.sh` proves wrapper silence for both gate signals, an unmarked linked worktree, a missing state directory, and an already-owned lock.
+`tests/fm-sessionstart-nudge.test.sh` proves wrapper silence for both gate signals, an unmarked linked worktree, an fm-spawn task worker's environment (with and without a stale secondmate marker), a missing state directory, and an already-owned lock.
 It proves exact U+2063 `FIRSTMATE_OP:`-prefixed, `session-start`-typed one-line output for a plain primary and a marked linked secondmate primary.
 `tests/fm-pi-primary-live-e2e.test.sh` and `tests/fm-opencode-primary-live-e2e.test.sh` exercise native startup paths with first-message and later-message Ahoy regressions.
 `tests/fm-omp-primary.test.sh` proves each in-process `/new` and `/resume` switch appends exactly one instruction without staging a second copy, including a second `/new` with no `before_agent_start` in between, while `/fork` stays silent under the held lock.

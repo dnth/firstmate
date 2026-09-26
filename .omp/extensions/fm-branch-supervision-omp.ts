@@ -457,6 +457,11 @@ function collectMainDialog(sessionManager: ReadonlyEntries, collection: MirrorCo
 }
 
 export default function (pi: ExtensionAPI) {
+  // A process inside an fm-spawn task worker's launch environment (FM_TASK_ID,
+  // set by bin/fm-spawn.sh for every non-secondmate kind) is never a firstmate
+  // home owner: the supervision branch is a primary-session component, so a
+  // project-loaded copy in a worker's worktree installs nothing.
+  if (process.env.FM_TASK_ID) return;
   let branch: { session: AgentSession; sessionManager: SessionManager } | null = null;
   let branchBroken = "";
   let consecutiveProviderErrors = 0;
