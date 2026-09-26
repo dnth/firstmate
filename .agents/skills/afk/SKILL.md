@@ -116,7 +116,7 @@ Enter is retried (Enter only, never a retype) until the backend confirms the
 submit landed.
 For tmux that confirmation is a cleared composer, using the same corrected,
 border-aware detector as the composer guard.
-For herdr, idle-baseline submits first seek native agent-state showing a real turn started, then use the shared composer verdict when native state stays idle.
+For herdr, Claude and idle/done OMP submits use the backend's send-time payload proof before Enter, then seek native agent-state or the shared composer verdict for confirmation; the complete contract lives in `docs/herdr-backend.md`.
 A cleared composer confirms delivery, while pending text retries Enter and remains pending except on Herdr's OMP-only queued path.
 A bordered-empty or ghost-only composer is recognized as empty where that backend uses composer confirmation, rather than mistaken for a swallowed Enter.
 `fm-send.sh` uses the same primitive only on its typed plane and exits non-zero when that plane's Enter is positively swallowed; ordinary local text steers use the durable inbox and do not treat doorbell submission as delivery proof.
@@ -197,6 +197,7 @@ the operational prefix lets firstmate distinguish it from a real captain message
   For tmux that verdict means the shared-ghost-aware and border-aware composer
   cleared.
   For herdr it means native agent-state observed a real turn start, the shared classifier proved the composer cleared, or the OMP-only queued-Enter verdict proved delivery while busy.
+  Claude and idle/done OMP Herdr sends additionally withhold Enter unless the composer proves it contains the complete digest (or only an accepted Claude paste placeholder); a failed proof clears the draft when possible and leaves the escalation buffered.
   This lets ghost-only or bordered-empty composers count as empty where a composer read is the active confirmation signal.
 - **Marker strip** - `strip_injection_marker` removes the current operational
   prefix or legacy bare marker before classification or relay, so the digest
