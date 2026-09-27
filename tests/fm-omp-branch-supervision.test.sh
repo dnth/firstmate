@@ -423,6 +423,35 @@ test_omp_scope_resolves_reportable_tasks_from_granted_rows() {
   pass "OMP dispatch resolves signal and stale rows to the branch report task and excludes checks"
 }
 
+# An unresolvable row vetoes the offer, but the scan still finishes: the
+# decision-owned keys and the task identity map the caller's main-routing
+# cross-reference needs are still returned alongside the veto.
+test_omp_scope_vetoed_scan_keeps_decision_owned_keys() {
+  local state out
+  state="$TMP_ROOT/scope-vetoed-decision/state"
+  mkdir -p "$state"
+  printf 'project=project-a\nwindow=default:wA:p1\n' > "$state/task-a.meta"
+  # Row 2 names no project and resolves to nothing - the offer veto. The
+  # decision-owned row AFTER it must still surface in needsDecisionKeys.
+  printf '1\t1\tsignal\ttask-a.status\tsignal: task-a\n2\t2\tsignal\tghost.status\tsignal: ghost\n3\t3\tsignal\ttask-d.status\tneeds-decision: task-d.status\n' \
+    > "$state/.wake-queue"
+  out=$(STATE_PATH="$state" DISPATCH_PATH="$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" node --experimental-strip-types --input-type=module -e '
+    const { scopeForUnreadWake } = await import(process.env.DISPATCH_PATH);
+    const scope = scopeForUnreadWake(process.env.STATE_PATH, false);
+    if (scope.eligible !== false) throw new Error("vetoed scan reported eligible: " + JSON.stringify(scope));
+    if (scope.corrupted !== true) throw new Error("vetoed scan reported clean: " + JSON.stringify(scope));
+    if (JSON.stringify(scope.needsDecisionKeys) !== JSON.stringify(["task-d.status"])) {
+      throw new Error("vetoed scan lost the decision-owned key: " + JSON.stringify(scope));
+    }
+    if (scope.taskByWakeKey["task-a.status"] !== "task-a") {
+      throw new Error("vetoed scan lost the task identity map: " + JSON.stringify(scope));
+    }
+    console.log("scope veto kept decision keys");
+  ' 2>&1) || fail "OMP vetoed dispatch scope failed: $out"
+  assert_contains "$out" "scope veto kept decision keys" "vetoed dispatch scope dropped its decision-owned keys"
+  pass "a vetoed dispatch scope still returns its decision-owned keys and task identity map"
+}
+
 # --- completion delivery contract ---------------------------------------------
 
 # Build a fixture home plus a Node driver that loads the real extension under a
@@ -645,6 +674,391 @@ JSON
   pass "a consumed completion is re-sent exactly once on the next wake and never again"
 }
 
+# --- decision-owned wakes reaching main ----------------------------------------
+
+# A fixture home that loads BOTH real extensions into one Node process sharing
+# one api object: the primary watcher adapter and the supervision branch. Every
+# $ROOT/bin entry is symlinked so the branch's real grant/outcome/lease/prompt
+# scripts run, then only the surfaces make_omp_queue_fixture stubs are replaced
+# (gate/scope libs, operational input, the session-start nudge, the turn-end
+# guard, the three pretool checks) plus the scripted watcher arm. FM_ROOT_OVERRIDE
+# stays unset so both extensions resolve fmRoot to the fixture root.
+make_omp_dual_driver_fixture() {  # <fixture-dir>
+  local fixture=$1 package_dir f
+  package_dir="$fixture/node_modules/@oh-my-pi/pi-coding-agent"
+  mkdir -p "$fixture/.omp/extensions/lib" "$fixture/bin" "$fixture/state" "$fixture/config" "$package_dir"
+  : > "$fixture/AGENTS.md"
+  git init -q -b main "$fixture"
+  cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$fixture/.omp/extensions/fm-primary-omp.ts"
+  cp "$ROOT/.omp/extensions/fm-branch-supervision-omp.ts" "$fixture/.omp/extensions/fm-branch-supervision-omp.ts"
+  for f in fm-branch-dispatch.ts fm-async-exec.ts fm-task-inbox-doorbell.ts fm-branch-model-picker.ts; do
+    cp "$ROOT/.omp/extensions/lib/$f" "$fixture/.omp/extensions/lib/$f"
+  done
+  # fm-branch-prompt.sh resolves the inlined recovery skill below its own root.
+  ln -s "$ROOT/.agents" "$fixture/.agents"
+  for f in "$ROOT"/bin/*; do ln -s "$f" "$fixture/bin/$(basename "$f")"; done
+  # Every stub below REPLACES its symlink first - writing through the link
+  # would overwrite the real tracked script.
+  rm -f "$fixture/bin/fm-gate-refuse-lib.sh"
+  cat > "$fixture/bin/fm-gate-refuse-lib.sh" <<'SH'
+fm_is_gate_agent() { return 1; }
+SH
+  rm -f "$fixture/bin/fm-primary-scope-lib.sh"
+  cat > "$fixture/bin/fm-primary-scope-lib.sh" <<'SH'
+fm_primary_scope_matches() { return 0; }
+SH
+  rm -f "$fixture/bin/fm-operational-input.sh"
+  cat > "$fixture/bin/fm-operational-input.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'encoded:%s:%s' "$2" "$(cat)"
+SH
+  rm -f "$fixture/bin/fm-sessionstart-nudge.sh"
+  cat > "$fixture/bin/fm-sessionstart-nudge.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  rm -f "$fixture/bin/fm-turnend-guard.sh"
+  cat > "$fixture/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  for script in fm-subagent-pretool-check.sh fm-cd-pretool-check.sh fm-arm-pretool-check.sh; do
+    rm -f "$fixture/bin/$script"
+    cat > "$fixture/bin/$script" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  done
+  rm -f "$fixture/bin/fm-watch-arm.sh"
+  cat > "$fixture/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+state=${FM_STATE_OVERRIDE:?}
+count=$(cat "$state/watch-count" 2>/dev/null || printf 0)
+count=$((count + 1))
+printf '%s\n' "$count" > "$state/watch-count"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$state/watch-stop" ]; do
+  if [ -e "$state/wake-now-$count" ]; then
+    cat "$state/wake-now-$count"
+    exit 0
+  fi
+  sleep 0.02
+done
+SH
+  chmod +x \
+    "$fixture/bin/fm-operational-input.sh" \
+    "$fixture/bin/fm-sessionstart-nudge.sh" \
+    "$fixture/bin/fm-turnend-guard.sh" \
+    "$fixture/bin/fm-subagent-pretool-check.sh" \
+    "$fixture/bin/fm-cd-pretool-check.sh" \
+    "$fixture/bin/fm-arm-pretool-check.sh" \
+    "$fixture/bin/fm-watch-arm.sh"
+  printf '%s\n' '{"type":"module","exports":{".":"./index.js","./extensibility/legacy-pi-coding-agent-shim":"./coding-shim.js","./extensibility/legacy-pi-ai-shim":"./ai-shim.js"}}' > "$package_dir/package.json"
+  cat > "$package_dir/index.js" <<'JS'
+export async function createAgentSession(opts) {
+  globalThis.__customTools = opts.customTools;
+  return {
+    session: {
+      async prompt() { await globalThis.__branchPrompt(); },
+      async sendCustomMessage() {},
+      beginDispose() {},
+      async dispose() {},
+    },
+  };
+}
+export class SessionManager {
+  static async open() { return new SessionManager(); }
+  static inMemory() { return new SessionManager(); }
+  async persistCopy() { return this; }
+  getSessionFile() { return ""; }
+  getEntries() { return []; }
+}
+JS
+  cat > "$package_dir/coding-shim.js" <<'JS'
+export function createBashToolDefinition() { return { name: "bash" }; }
+const passthrough = (x) => x;
+export const Type = { Object: passthrough, String: passthrough, Number: passthrough, Boolean: passthrough, Optional: passthrough, Union: passthrough, Literal: passthrough };
+JS
+  printf '%s\n' 'export function clampThinkingLevel(_model, level) { return level; }' > "$package_dir/ai-shim.js"
+  # The dual driver: one api object, multi-handler event registration for both
+  # extensions, and an events bus whose emit records every dispatch offer's
+  # message and final accepted flag. sendMessage records watcher wakes and
+  # branch merges but never emits turn events - a streaming main where the
+  # hidden next-turn wake is queued without a turn.
+  cat > "$fixture/driver.mjs" <<'JS'
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const state = process.env.FM_STATE_OVERRIDE;
+const scenario = JSON.parse(readFileSync(process.env.SCENARIO_PATH, "utf8"));
+const handlers = new Map();
+const eventHandlers = new Map();
+const offers = [];
+const wakes = [];
+const merges = [];
+const promptLog = [];
+const api = {
+  zod: { object: () => ({}) },
+  on(name, fn) {
+    const list = handlers.get(name) ?? [];
+    list.push(fn);
+    handlers.set(name, list);
+  },
+  events: {
+    on(name, fn) {
+      const list = eventHandlers.get(name) ?? [];
+      list.push(fn);
+      eventHandlers.set(name, list);
+    },
+    // Handlers run synchronously, so an offer's accepted flag is final when
+    // emit returns - exactly what the watcher adapter then reads.
+    emit(name, data) {
+      for (const fn of eventHandlers.get(name) ?? []) fn(data);
+      if (data && typeof data === "object" && "accepted" in data) {
+        offers.push({ message: String(data.message ?? ""), accepted: data.accepted === true });
+      }
+    },
+  },
+  sendMessage(message, options) {
+    if (message?.customType === "firstmate-watcher-wake") wakes.push({ content: String(message.content ?? ""), options });
+    else if (message?.customType === "fm-branch-merge") merges.push({ content: String(message.content ?? ""), options });
+  },
+  registerCommand() {},
+  registerTool() {},
+};
+const fire = async (name, event = {}, ctx = {}) => {
+  for (const fn of handlers.get(name) ?? []) await fn(event, ctx);
+};
+const count = () => existsSync(`${state}/watch-count`) ? Number(readFileSync(`${state}/watch-count`, "utf8").trim()) : 0;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) { if (pred()) return; await sleep(10); }
+  throw new Error(`timeout waiting for ${label}`);
+}
+const snapshot = () => JSON.stringify({ offers, wakes, merges, promptCalls, promptLog });
+let promptCalls = 0;
+globalThis.__branchPrompt = async () => {
+  promptCalls += 1;
+  let granted = "";
+  try { granted = readFileSync(`${state}/.branch-eligible-rows`, "utf8"); } catch {}
+  promptLog.push(granted);
+  const report = (globalThis.__customTools ?? []).find((tool) => tool.name === "fm_branch_report");
+  for (const action of globalThis.__promptActions ?? []) {
+    if (action.throw) throw new Error(action.throw);
+    if (action.report && report) {
+      const result = await report.execute("call-1", action.report);
+      if (result.isError === true) throw new Error(result.content?.[0]?.text ?? "report failed");
+    }
+  }
+};
+const queue = `${state}/.wake-queue`;
+let seq = 0;
+const appendRow = (kind, key, payload) => {
+  seq += 1;
+  writeFileSync(`${state}/.wake-queue.seq`, `${seq}\n`);
+  appendFileSync(queue, `0\t${seq}\t${kind}\t${key}\t${payload}\n`);
+  return seq;
+};
+process.argv[1] = process.env.PRIMARY_EXTENSION;
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+const primary = await import(`${pathToFileURL(process.env.PRIMARY_EXTENSION).href}?primary=${Date.now()}`);
+const branch = await import(`${pathToFileURL(process.env.BRANCH_EXTENSION).href}?branch=${Date.now()}`);
+primary.default(api);
+branch.default(api);
+const context = { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "sess-main" } };
+await fire("session_start", { type: "session_start" }, context);
+await waitFor(() => count() === 1, "initial arm");
+for (const [key, content] of Object.entries(scenario.statuses ?? {})) {
+  writeFileSync(`${state}/${key}.status`, `${content}\n`);
+}
+for (const [key, content] of Object.entries(scenario.metas ?? {})) {
+  writeFileSync(`${state}/${key}.meta`, `${content}\n`);
+}
+globalThis.__promptActions = scenario.promptActions ?? [];
+for (const step of scenario.steps) {
+  if (step.promptActions) globalThis.__promptActions = step.promptActions;
+  if (step.append) appendRow(step.append.kind, step.append.key, step.append.payload);
+  if (step.close) {
+    const arm = Number(readFileSync(`${state}/watch-count`, "utf8").trim());
+    writeFileSync(`${state}/wake-now-${arm}`, `${step.close}\n`);
+  }
+  if (step.expect) {
+    const want = step.expect;
+    await waitFor(
+      () =>
+        (want.arms === undefined || count() === want.arms) &&
+        (want.wakes === undefined || wakes.length === want.wakes) &&
+        (want.prompts === undefined || promptCalls === want.prompts) &&
+        (want.offers === undefined || offers.length === want.offers),
+      step.label ?? JSON.stringify(step),
+    );
+  }
+  if (step.sleepMs) await sleep(step.sleepMs);
+  console.log(`step: ${step.label ?? JSON.stringify(step)} :: ${snapshot()}`);
+}
+const fin = scenario.final ?? {};
+if (fin.promptCalls !== undefined && promptCalls !== fin.promptCalls) {
+  throw new Error(`expected ${fin.promptCalls} branch prompts, got ${promptCalls} :: ${snapshot()}`);
+}
+if (fin.wakeCount !== undefined && wakes.length !== fin.wakeCount) {
+  throw new Error(`expected ${fin.wakeCount} watcher wakes, got ${wakes.length} :: ${snapshot()}`);
+}
+if (fin.offerNotAccepted) {
+  const offer = offers.find((item) => item.message.includes(fin.offerNotAccepted));
+  if (!offer) throw new Error(`no dispatch offer names ${fin.offerNotAccepted} :: ${snapshot()}`);
+  if (offer.accepted) throw new Error(`the offer naming ${fin.offerNotAccepted} was accepted :: ${snapshot()}`);
+}
+if (fin.grantNeverContainedSeq !== undefined) {
+  const seq = String(fin.grantNeverContainedSeq);
+  if (promptLog.some((granted) => granted.split(/\r?\n/).map((line) => line.trim()).includes(seq))) {
+    throw new Error(`a branch prompt was granted the decision-owned seq ${seq} :: ${snapshot()}`);
+  }
+}
+if (fin.lastWakeFollowUpNames) {
+  const last = wakes[wakes.length - 1];
+  if (!last || !last.content.includes(fin.lastWakeFollowUpNames)) {
+    throw new Error(`the last watcher wake does not name ${fin.lastWakeFollowUpNames} :: ${snapshot()}`);
+  }
+  if (last.options?.deliverAs !== "followUp" || last.options?.triggerTurn !== true) {
+    throw new Error(`the decision-owned wake did not use forced follow-up delivery: ${JSON.stringify(last.options)}`);
+  }
+}
+writeFileSync(`${state}/watch-stop`, "stop\n");
+await fire("session_shutdown", { type: "session_shutdown" }, context);
+console.log("dual-driver-ok");
+JS
+}
+
+# A decision-owned wake - a needs-decision signal payload, or a stale row for a
+# task with an open needs-decision - is never granted to the branch and never
+# offered to it. On main it must also bypass the fallback coalescing episode:
+# coalescing it behind an accepted-but-unconsumed in-flight wake (or an open
+# episode) strands a captain-held task's only notification for hours.
+test_decision_owned_wake_reaches_main_past_branch_and_episode() {
+  local fixture state out status=0
+  fixture="$TMP_ROOT/decision-healthy"
+  state="$fixture/state"
+  make_omp_dual_driver_fixture "$fixture"
+  # Healthy branch: a routine signal wake is accepted and reported through the
+  # real fm_branch_report tool, proving the branch is live before the episode
+  # forms. The check-kind close then leaves main's hidden next-turn wake in
+  # flight (the mock never emits consumption events), and the decision-owned
+  # close must still force a main wake past it.
+  cat > "$fixture/scenario.json" <<'JSON'
+{
+  "statuses": {
+    "task-r": "done: task-r finished",
+    "task-d": "needs-decision: pick a route"
+  },
+  "metas": {
+    "task-r": "project=project-a\nwindow=default:wR:p1",
+    "task-d": "project=project-a\nwindow=default:wD:p1"
+  },
+  "steps": [
+    {
+      "promptActions": [{ "report": { "task": "task-r", "verdict": "routine", "summary": "task-r is fine" } }],
+      "append": { "kind": "signal", "key": "task-r.status", "payload": "signal: task-r.status" },
+      "close": "signal: task-r.status",
+      "expect": { "prompts": 1, "offers": 1, "wakes": 0 },
+      "label": "routine signal accepted by the live branch"
+    },
+    {
+      "append": { "kind": "check", "key": "merge-poll", "payload": "check: merge poll" },
+      "close": "check: merge poll",
+      "expect": { "wakes": 1, "offers": 2, "prompts": 1 },
+      "label": "check-kind close fell to main and stays in flight"
+    },
+    {
+      "append": { "kind": "signal", "key": "task-d.status", "payload": "needs-decision: task-d.status" },
+      "close": "signal: task-d.status",
+      "expect": { "wakes": 2, "offers": 3, "prompts": 1 },
+      "label": "decision-owned close forces a main wake past the in-flight episode"
+    },
+    { "sleepMs": 300, "note": "post-forced-wake settle" }
+  ],
+  "final": {
+    "promptCalls": 1,
+    "wakeCount": 2,
+    "offerNotAccepted": "task-d",
+    "grantNeverContainedSeq": 3,
+    "lastWakeFollowUpNames": "task-d"
+  }
+}
+JSON
+  out=$(env -u FM_TASK_ID -u FM_ROOT_OVERRIDE -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
+    FM_HOME="$fixture" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    PRIMARY_EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" \
+    BRANCH_EXTENSION="$fixture/.omp/extensions/fm-branch-supervision-omp.ts" \
+    SCENARIO_PATH="$fixture/scenario.json" \
+    node --experimental-strip-types "$fixture/driver.mjs" 2>&1) || status=$?
+  printf 'stop\n' > "$state/watch-stop" 2>/dev/null || true
+  expect_code 0 "$status" "decision-owned wake past a healthy branch and an in-flight episode: $out"
+  assert_contains "$out" dual-driver-ok "decision-owned wake did not reach main past the in-flight episode: $out"
+
+  # Latched branch: two routine signal wakes are each accepted, then their
+  # prompts reject with a provider error, so the second latches the branch off
+  # (PROVIDER_ERROR_LATCH_THRESHOLD=2). The first rejection falls back to main
+  # as the in-flight nextTurn wake, the second is suppressed behind it, and the
+  # decision-owned close still forces its own main wake.
+  fixture="$TMP_ROOT/decision-latched"
+  state="$fixture/state"
+  status=0
+  make_omp_dual_driver_fixture "$fixture"
+  cat > "$fixture/scenario.json" <<'JSON'
+{
+  "statuses": {
+    "task-r1": "done: task-r1 finished",
+    "task-r2": "done: task-r2 finished",
+    "task-d": "needs-decision: pick a route"
+  },
+  "metas": {
+    "task-r1": "project=project-a\nwindow=default:wR1:p1",
+    "task-r2": "project=project-a\nwindow=default:wR2:p1",
+    "task-d": "project=project-a\nwindow=default:wD:p1"
+  },
+  "promptActions": [{ "throw": "429 rate_limit_error" }],
+  "steps": [
+    {
+      "append": { "kind": "signal", "key": "task-r1.status", "payload": "signal: task-r1.status" },
+      "close": "signal: task-r1.status",
+      "expect": { "prompts": 1, "offers": 1, "wakes": 1 },
+      "label": "first provider rejection falls back to main in flight"
+    },
+    {
+      "append": { "kind": "signal", "key": "task-r2.status", "payload": "signal: task-r2.status" },
+      "close": "signal: task-r2.status",
+      "expect": { "prompts": 2, "offers": 2, "wakes": 1 },
+      "label": "second provider rejection latches and stays suppressed",
+      "sleepMs": 300
+    },
+    {
+      "append": { "kind": "signal", "key": "task-d.status", "payload": "needs-decision: task-d.status" },
+      "close": "signal: task-d.status",
+      "expect": { "wakes": 2, "offers": 3, "prompts": 2 },
+      "label": "decision-owned close forces a main wake past the latched branch"
+    }
+  ],
+  "final": {
+    "promptCalls": 2,
+    "wakeCount": 2,
+    "offerNotAccepted": "task-d",
+    "grantNeverContainedSeq": 3,
+    "lastWakeFollowUpNames": "task-d"
+  }
+}
+JSON
+  out=$(env -u FM_TASK_ID -u FM_ROOT_OVERRIDE -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
+    FM_HOME="$fixture" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    PRIMARY_EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" \
+    BRANCH_EXTENSION="$fixture/.omp/extensions/fm-branch-supervision-omp.ts" \
+    SCENARIO_PATH="$fixture/scenario.json" \
+    node --experimental-strip-types "$fixture/driver.mjs" 2>&1) || status=$?
+  printf 'stop\n' > "$state/watch-stop" 2>/dev/null || true
+  expect_code 0 "$status" "decision-owned wake past a latched branch and an in-flight episode: $out"
+  assert_contains "$out" dual-driver-ok "decision-owned wake did not reach main past the latched branch: $out"
+  pass "decision-owned wakes are never granted, never offered, and never coalesced behind a fallback episode"
+}
+
 test_branch_prompt_is_byte_stable_and_above_cache_floor
 test_outcome_store_is_append_only_with_cursor_reads
 test_outcome_startup_replay_preserves_silence
@@ -657,6 +1071,8 @@ test_non_branch_home_is_untouched
 test_omp_extension_establishes_main_actor_context
 test_async_outcome_delivery_keeps_event_loop_responsive_and_ordered
 test_omp_scope_resolves_reportable_tasks_from_granted_rows
+test_omp_scope_vetoed_scan_keeps_decision_owned_keys
 test_routine_verdict_on_granted_completion_opens_a_main_turn
 test_mixed_grant_settle_rejects_an_unreported_completion
 test_consumed_completion_is_redelivered_once_per_generation
+test_decision_owned_wake_reaches_main_past_branch_and_episode

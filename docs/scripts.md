@@ -113,6 +113,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-vendor-auth-probe.sh`| Run one hard-bounded, non-destructive authentication probe of a named vendor CLI and report the fact |
 | `fm-wake-drain.sh`       | Present durable watcher wakes, unread informational status lines, OPEN DECISIONS, and the main-actor status-outcome backstop, consume acknowledged rows through their sequence, retire only the matching recovery generation, then assert supervision health |
 | `fm-wake-lib.sh`         | Shared durable wake queue, recovery generations, portable locks, and watcher identity/health helpers |
+| `fm-wedge-alarm-lib.sh`  | Single owner of wedge-alarm channel resolution and bounded delivery for the away-mode injection wedge and the watcher's undelivered main-wake alarm |
 | `fm-inbox.sh`            | Persist, inspect, and acknowledge trusted-local orchestrator notes while appending one wake per note |
 | `fm-inbox-result-lib.sh`  | Own trusted-local note, target, timestamp, artifact, and terminal-result envelope validation |
 | `fm-inbox-result.sh`     | Publish immutable trusted-local result envelopes and deliver or retry them through an explicit adapter |

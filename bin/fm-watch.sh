@@ -84,6 +84,12 @@
 #                          covers each no-progress episode
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
+# One alert that is NOT a printed reason: main_wake_undelivered_tick fires a
+# wedge alarm through the channels in docs/wedge-alarm.md when the oldest
+# main-owned durable wake row stays unpresented for
+# FM_MAIN_WAKE_UNDELIVERED_ALARM_SECS (default 300s) - read-only, once per
+# oldest-row episode, and skipped while state/.afk hands delivery to the
+# away-mode daemon.
 # FM_WATCH_REMOTE_TIMEOUT bounds each remote beacon probe in seconds, accepts
 # integers from 1 through 15, defaults to 5, and falls back to 5 when invalid;
 # probes prefer timeout, then gtimeout, then a Perl fallback. The timeout tools
@@ -142,6 +148,10 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
+# Wedge-alarm channel resolution and delivery for the undelivered main-wake
+# alarm (docs/wedge-alarm.md).
+# shellcheck source=bin/fm-wedge-alarm-lib.sh
+. "$SCRIPT_DIR/fm-wedge-alarm-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -259,6 +269,12 @@ case "$IDLE_OPEN_WORK_SECS" in ''|0|*[!0-9]*) IDLE_OPEN_WORK_SECS=$FM_IDLE_OPEN_
 # secondmate_wake_stall_tick, never a substitute for it.
 SECONDMATE_WAKE_STALL_SECS=${FM_SECONDMATE_WAKE_STALL_SECS:-}
 case "$SECONDMATE_WAKE_STALL_SECS" in ''|*[!0-9]*|0) SECONDMATE_WAKE_STALL_SECS=180 ;; esac
+# Oldest age (seconds) an undelivered main-owned durable wake row may reach
+# before the watcher raises one wedge alarm per oldest-row episode
+# (docs/wedge-alarm.md). Empty, zero, or non-numeric falls back to 300.
+MAIN_WAKE_UNDELIVERED_ALARM_SECS=${FM_MAIN_WAKE_UNDELIVERED_ALARM_SECS:-}
+case "$MAIN_WAKE_UNDELIVERED_ALARM_SECS" in ''|*[!0-9]*|0) MAIN_WAKE_UNDELIVERED_ALARM_SECS=300 ;; esac
+MAIN_WAKE_UNDELIVERED_MARKER="$STATE/.main-wake-undelivered"
 # Consecutive event-path failures (fm_backend_wait_transition returning 2 -
 # connect/subscribe failure) before the push fast-path is disabled for the rest
 # of this watcher process and the loop reverts to pure polling (report section
@@ -660,6 +676,71 @@ EOF
     fm_wake_secondmate_stall_marker_write "$task" "$row_key" || return 1
     wake "$reason"
   done
+  return 0
+}
+
+# Undelivered main-wake alarm: the queue-layer backstop for the
+# accepted-but-unconsumed delivery wedge (a main-bound notification whose in-
+# flight marker outlives FM_WATCH_MAIN_WAKE_INFLIGHT_BOUND_MS - see
+# bin/fm-primary-watch-core.ts - and every later wake coalesced behind it).
+# While the oldest main-owned durable row sits unpresented past
+# FM_MAIN_WAKE_UNDELIVERED_ALARM_SECS, one wedge alarm fires per oldest-row
+# episode, strictly read-only against the queue and skipped while state/.afk
+# hands delivery to the away daemon (its own wedge alarm owns that interval).
+# The marker's first line records the alarmed sequence so a tick cannot re-fire
+# inside one episode, while a newer oldest row opens a fresh episode. The tick
+# never enqueues a wake and never prints a wake reason: the alarm channel is
+# the notification.
+main_wake_undelivered_tick() {
+  local rows candidate epoch seq row marker_seq age now marker_tmp
+  afk_present && return 0
+  rows=$(fm_wake_actor_pending_rows main 2>/dev/null) || return 0
+  row=
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    case "$candidate" in
+      *$'\t'*$'\t'*$'\t'*$'\t'*) ;;
+      *) continue ;;
+    esac
+    epoch=${candidate%%$'\t'*}
+    seq=${candidate#*$'\t'}
+    seq=${seq%%$'\t'*}
+    case "$epoch" in ''|*[!0-9]*|0) continue ;; esac
+    case "$seq" in ''|*[!0-9]*) continue ;; esac
+    row=$candidate
+    break
+  done <<EOF
+$rows
+EOF
+  if [ -z "$row" ]; then
+    rm -f -- "$MAIN_WAKE_UNDELIVERED_MARKER"
+    return 0
+  fi
+  marker_seq=
+  if [ -f "$MAIN_WAKE_UNDELIVERED_MARKER" ] && [ ! -L "$MAIN_WAKE_UNDELIVERED_MARKER" ]; then
+    marker_seq=$(head -n 1 "$MAIN_WAKE_UNDELIVERED_MARKER" 2>/dev/null || true)
+    case "$marker_seq" in ''|*[!0-9]*) marker_seq= ;; esac
+  fi
+  if [ -n "$marker_seq" ] && [ "$marker_seq" != "$seq" ]; then
+    rm -f -- "$MAIN_WAKE_UNDELIVERED_MARKER" || return 1
+    marker_seq=
+  fi
+  now=$(( $(date +%s) ))
+  age=$((now - epoch))
+  [ "$age" -ge "$MAIN_WAKE_UNDELIVERED_ALARM_SECS" ] || return 0
+  [ "$marker_seq" = "$seq" ] && return 0
+  marker_tmp=$(mktemp "$STATE/.main-wake-undelivered.tmp.XXXXXX") || return 1
+  if ! printf '%s\n%s\n' "$seq" \
+    "undelivered for ${age}s at $(date -u '+%Y-%m-%dT%H:%M:%SZ'); main has not drained its wake rows; see docs/wedge-alarm.md" \
+    > "$marker_tmp" \
+    || ! chmod 0600 "$marker_tmp" \
+    || ! mv -f -- "$marker_tmp" "$MAIN_WAKE_UNDELIVERED_MARKER"; then
+    rm -f -- "$marker_tmp"
+    return 1
+  fi
+  triage_log "main-owned wake row seq $seq undelivered for ${age}s; wedge alarm fired once - see $MAIN_WAKE_UNDELIVERED_MARKER"
+  WEDGE_ALARM_TITLE="firstmate: main wakes UNDELIVERED" \
+    wedge_alarm_notify "main-owned wake row seq $seq undelivered for ${age}s - see $MAIN_WAKE_UNDELIVERED_MARKER" "$MAIN_WAKE_UNDELIVERED_MARKER" || true
   return 0
 }
 
@@ -1613,6 +1694,10 @@ while :; do
     echo "watcher: secondmate wake-loop observation failed" >&2
     exit 1
   }
+
+  # Undelivered main-wake alarm: strictly read-only and best-effort, so a
+  # marker or channel failure can never interrupt the watch loop.
+  main_wake_undelivered_tick || true
 
   # Process-to-event liveness repair. This never discovers a result by polling:
   # each registered source has its own child blocking on that source, and this

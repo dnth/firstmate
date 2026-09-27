@@ -619,6 +619,98 @@ SH
   pass "secondmate stall markers reject symlinks without touching their targets"
 }
 
+# A main-owned durable wake row that no main drain has presented past
+# FM_MAIN_WAKE_UNDELIVERED_ALARM_SECS is the queue-layer wedge behind the
+# suppressed-notification class of incidents: the watcher raises one active
+# wedge alert per oldest-row episode, strictly read-only, and stays silent
+# while state/.afk hands delivery to the away daemon.
+test_watcher_alarms_once_on_undelivered_main_wake_rows() {
+  local dir state fakebin real_date
+  dir=$(make_case main-wake-undelivered)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  real_date=$(command -v date)
+  cat > "$fakebin/date" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = +%s ]; then
+  cat "\${FM_FAKE_NOW_FILE:?}"
+else
+  exec "$real_date" "\$@"
+fi
+SH
+  chmod +x "$fakebin/date"
+  : > "$dir/alarm.log"
+
+  checkpoint() {  # <now>
+    printf '%s\n' "$1" > "$dir/now"
+    PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+      FM_STATE_OVERRIDE="$state" FM_MAIN_WAKE_UNDELIVERED_ALARM_SECS=60 \
+      FM_WEDGE_ALARM_LOG="$dir/alarm.log" FM_WEDGE_ALARM_CHANNEL=herdr \
+      FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+      "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 > "$dir/watch-$1.out" 2> "$dir/watch-$1.err" || true
+  }
+
+  # An old main-owned row alarms exactly once, naming its sequence and age,
+  # and the durable queue it observed is never rewritten.
+  printf '100\t7\tsignal\ttask-a.status\tsignal: task-a\n' > "$state/.wake-queue"
+  cp "$state/.wake-queue" "$dir/queue-before"
+  checkpoint 1000
+  [ "$(wc -l < "$dir/alarm.log")" -eq 1 ] \
+    || fail "an old main-owned wake row did not raise exactly one alarm: $(cat "$dir/alarm.log")"
+  grep -F $'herdr\t' "$dir/alarm.log" >/dev/null \
+    || fail "the alarm did not route through the configured channel: $(cat "$dir/alarm.log")"
+  grep -F 'seq 7' "$dir/alarm.log" >/dev/null \
+    || fail "the alarm did not name the undelivered row: $(cat "$dir/alarm.log")"
+  grep -F '900' "$dir/alarm.log" >/dev/null \
+    || fail "the alarm did not name the row's undelivered age: $(cat "$dir/alarm.log")"
+  cmp -s "$dir/queue-before" "$state/.wake-queue" \
+    || fail "the undelivered-row alarm rewrote the durable queue"
+
+  # The same oldest row must not re-alarm while its episode is open.
+  checkpoint 1100
+  [ "$(wc -l < "$dir/alarm.log")" -eq 1 ] \
+    || fail "the same undelivered row re-alarmed inside one episode: $(cat "$dir/alarm.log")"
+
+  # A young row is no wedge, and the prior episode's marker retires with it.
+  printf '1090\t8\tsignal\ttask-b.status\tsignal: task-b\n' > "$state/.wake-queue"
+  checkpoint 1100
+  [ "$(wc -l < "$dir/alarm.log")" -eq 1 ] \
+    || fail "a young main-owned row raised an alarm: $(cat "$dir/alarm.log")"
+  [ ! -e "$state/.main-wake-undelivered" ] \
+    || fail "the episode marker survived its row leaving the oldest slot"
+
+  # A different old row becoming the oldest is a new episode: one more alarm.
+  printf '50\t9\tsignal\ttask-c.status\tsignal: task-c\n' > "$state/.wake-queue"
+  checkpoint 1100
+  [ "$(wc -l < "$dir/alarm.log")" -eq 2 ] \
+    || fail "a newly-oldest undelivered row did not open a second episode: $(cat "$dir/alarm.log")"
+  grep -F 'seq 9' "$dir/alarm.log" >/dev/null \
+    || fail "the second alarm did not name its row: $(cat "$dir/alarm.log")"
+
+  # While state/.afk exists the away daemon owns delivery and carries its own
+  # wedge alarm, so the watcher stays silent.
+  : > "$state/.afk"
+  checkpoint 1100
+  [ "$(wc -l < "$dir/alarm.log")" -eq 2 ] \
+    || fail "the watcher alarmed while the away daemon owns delivery: $(cat "$dir/alarm.log")"
+  rm -f "$state/.afk"
+
+  # A row reserved by a live branch grant is not main-owned, so it cannot feed
+  # this alarm; the second episode's marker retires too.
+  printf 'fm-branch-eligible-owner-v1\n%s\n%s\n%s\n' \
+    "$$" "$(fm_test_pid_identity "$$")" gen-main-undelivered > "$state/.branch-eligible-owner"
+  printf '10\n' > "$state/.branch-eligible-rows"
+  printf '10\t10\tsignal\ttask-d.status\tsignal: task-d\n' > "$state/.wake-queue"
+  checkpoint 1100
+  [ "$(wc -l < "$dir/alarm.log")" -eq 2 ] \
+    || fail "a branch-granted row counted as undelivered for main: $(cat "$dir/alarm.log")"
+  [ ! -e "$state/.main-wake-undelivered" ] \
+    || fail "the episode marker survived the queue losing its last main-owned row"
+  rm -f "$state/.branch-eligible-owner" "$state/.branch-eligible-rows"
+
+  pass "watcher alarms once per undelivered main-wake episode, read-only, afk-and-grant aware"
+}
+
 test_structural_signal_enrichment_preserves_raw_rows() {
   local dir state out expected actual annotation_count outside perl_bin
   dir=$(make_case enrichment)
@@ -1597,6 +1689,7 @@ test_secondmate_declared_pause_rows_do_not_feed_stall_escalation
 test_secondmate_reprovisioned_queue_starts_a_fresh_interval
 test_secondmate_active_turn_defers_stall_until_the_turn_ends
 test_secondmate_stall_marker_rejects_symlink
+test_watcher_alarms_once_on_undelivered_main_wake_rows
 test_structural_signal_enrichment_preserves_raw_rows
 test_enrichment_preserves_all_unread_lines_and_status_file_failures
 test_slow_annotation_does_not_block_append_and_deleted_file_fails_closed

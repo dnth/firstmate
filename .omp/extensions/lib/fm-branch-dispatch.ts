@@ -95,8 +95,10 @@ const UNSAFE_SCOPE: UnreadWakeScope = { status: "unsafe", eligible: false, proje
 // guarantees: a heartbeat review takes EVERY branch-ownable unread row or none
 // of them. An unresolvable signal/stale row (unmapped project) still vetoes the
 // whole scan in both modes, because that is a data/metadata problem this
-// function cannot safely reason past, not an ordinary main-only event. A row
-// this repo's fm_wake_append could never have produced (an unknown kind, or a
+// function cannot safely reason past, not an ordinary main-only event - though
+// that veto is recorded and the scan continues so the returned needsDecisionKeys
+// and taskByWakeKey stay complete for the caller's main-routing cross-reference.
+// A row this repo's fm_wake_append could never have produced (an unknown kind, or a
 // line that fails the structural tab-field check) also still vetoes the whole
 // scan - that is queue corruption, not an everyday mixed queue.
 function statusLineVerb(line: string): string {
@@ -204,6 +206,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
   const eligibleTasks = new Set<string>();
   const needsDecisionKeys: string[] = [];
   const staleDecisionOwnership = new Map<string, boolean>();
+  let vetoed = false;
   const resolveVerb = process.env.FM_CLASSIFY_RESOLVE_VERB || "resolved";
   const heldVerb = process.env.FM_CLASSIFY_CAPTAIN_HELD_VERB || "captain-held";
   const reservedPrefixes = (process.env.FM_CLASSIFY_RESERVED_KEY_PREFIXES || "pending-reply-")
@@ -234,7 +237,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
         // Main-owned exactly like a check-kind row above: a needs-decision
         // status append surfaced through the actionable signal path is
         // excluded from what the branch may claim without vetoing the scan
-        // (docs/omp-supervision-branch.md "Autonomy").
+        // (docs/omp-supervision-branch.md "Components and their owners").
         needsDecisionKeys.push(key);
         continue;
       }
@@ -287,10 +290,19 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
       // ordinary main-only row.
       return UNSAFE_SCOPE;
     }
-    if (!project || !task) return UNSAFE_SCOPE;
+    if (!project || !task) {
+      // An unresolvable signal/stale row vetoes the whole offer, but the veto
+      // is recorded and the scan continues: bailing here would hide every
+      // decision-owned row the caller's main-routing cross-reference needs.
+      vetoed = true;
+      continue;
+    }
     projects.add(project);
     eligibleTasks.add(task);
     eligibleSeqs.push(seq);
+  }
+  if (vetoed) {
+    return { ...UNSAFE_SCOPE, needsDecisionKeys, taskByWakeKey: Object.fromEntries(taskByKey) };
   }
   const eligible = eligibleSeqs.length > 0;
   // Reached only after every row passed classification without a veto. A scan

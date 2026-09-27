@@ -25,8 +25,13 @@
 // Any of these finishes the pending record. An accepted wake whose in-flight
 // marker outlives a full turn boundary, or whose send-time queue rows were
 // drained, is also cleared as consumed at turn_end, so a missed consumption
-// signal can never suppress every later wake. A still-unconsumed record rides
-// the replacement handoff.
+// signal can never suppress every later wake. A main-bound wake that arrives
+// after the marker outlives FM_WATCH_MAIN_WAKE_INFLIGHT_BOUND_MS (default
+// 120000 ms) likewise retires it and re-delivers through the runtime's
+// turn-forcing send, bounded to one forced delivery per interval, so an idle
+// or streaming main that never starts a turn for the hidden send is not deaf
+// for the rest of the session. Decision-owned wakes bypass coalescing and the
+// bound entirely. A still-unconsumed record rides the replacement handoff.
 //
 // The active generation and the process-exit fallback are process-wide, not
 // per-core-instance.
@@ -159,7 +164,11 @@ export type PrimaryWatchCoreOptions = {
   armReadyTimeoutEnv: string;
   repairToolName: string;
   encodeOperationalInput: (kind: "watcher", content: string) => string;
-  sendFollowUp: (content: string) => Promise<void>;
+  // A forceTurn option asks the runtime adapter to choose a transport that
+  // starts an agent-initiated turn even while the session is streaming or
+  // agent-initiated turns are deferred; the core requests it only for a stale
+  // in-flight re-delivery or a decision-owned wake.
+  sendFollowUp: (content: string, options?: { forceTurn?: boolean }) => Promise<void>;
   // Optional supervision-branch dispatch handshake. A synchronous non-null
   // settlement means the branch accepted handling, while rejection returns
   // delivery ownership to the core's consumption-acknowledged main path.
@@ -170,6 +179,9 @@ export type PrimaryWatchCoreOptions = {
   // it: without that callback an episode could never close and suppressed wakes
   // would starve.
   coalesceMainFallbackWakes?: boolean;
+  // A decision-owned main wake is never coalesced behind an in-flight fallback
+  // wake or an open episode; only meaningful with coalesceMainFallbackWakes.
+  isDecisionOwnedWake?: (message: string) => boolean;
 };
 
 export type PrimaryWatchCore = {
@@ -357,6 +369,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     sendFollowUp,
     offerWakeToBranch,
     coalesceMainFallbackWakes = false,
+    isDecisionOwnedWake,
   } = options;
   const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
   const handoffDir = `${state}/extensions/${runtime}-primary-watch`;
@@ -393,6 +406,10 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     process.platform === "win32" ? 35000 : 12000,
   );
   const armRetireTimeoutMs = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
+  // Wall-clock bound on an accepted-but-unconsumed main fallback wake: once the
+  // marker outlives this, the next main-bound wake may force one re-delivery
+  // per bound interval instead of suppressing forever (docs/omp-supervision-branch.md).
+  const mainFallbackWakeInFlightBoundMs = positiveInteger("FM_WATCH_MAIN_WAKE_INFLIGHT_BOUND_MS", 120000);
   const repairOnlyHint =
     `call ${repairToolName} again only after a later notification says the cycle is missing, failed, or unhealthy`;
   const shuttingDownMessage = `watcher: not armed - ${runtimeLabel} session is shutting down`;
@@ -723,6 +740,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     message: string,
     pending?: PendingActionableClose,
     trackMainFallback = false,
+    forceTurn = false,
   ): Promise<boolean> {
     if (!generationIsLive(owner)) return false;
     const content = encodeOperationalInput(
@@ -740,7 +758,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       owner.mainFallbackInFlightRows = owner.mainFallbackBaselineRows ?? mainOwnedWakeSnapshot();
     }
     try {
-      await sendFollowUp(content);
+      await sendFollowUp(content, { forceTurn });
     } catch (error) {
       if (pending) owner.unconsumedWakes.delete(pending.token);
       if (trackMainFallback && owner.mainFallbackWakeInFlight === content) {
@@ -839,16 +857,48 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
   // mooted main delivery (queue already drained) while a branch offer is still
   // allowed to run.
   type MainWakeOutcome = "delivered" | "suppressed" | "failed";
+  // Wall-clock stale check for an accepted-but-never-consumed in-flight wake:
+  // the runtime queued the hidden send without ever starting or consuming a
+  // turn for it. A turn that started after the send proves the runtime is
+  // draining instead, so only an in-flight marker with no post-send turn
+  // counts as stale. Retrying is bounded implicitly: one forced delivery per
+  // bound interval, driven by the next main-bound wake - never a timer.
+  function inFlightWakeUnconsumedPastBound(owner: SessionGeneration): boolean {
+    if (!owner.mainFallbackWakeInFlight) return false;
+    if (owner.mainFallbackWakeSentAtMs === null) return false;
+    if (Date.now() - owner.mainFallbackWakeSentAtMs < mainFallbackWakeInFlightBoundMs) return false;
+    return !(owner.lastTurnStartAtMs !== null && owner.lastTurnStartAtMs >= owner.mainFallbackWakeSentAtMs);
+  }
+
   async function deliverMainWake(
     owner: SessionGeneration,
     message: string,
     pending: PendingActionableClose,
   ): Promise<MainWakeOutcome> {
+    // Two bypasses ahead of ordinary episode coalescing. A stale in-flight
+    // marker - accepted but unconsumed past
+    // FM_WATCH_MAIN_WAKE_INFLIGHT_BOUND_MS - no longer earns suppression; the
+    // wake re-delivers through the runtime's turn-forcing send so a main that
+    // queued the hidden send without a turn hears the re-delivery out loud.
+    // A decision-owned wake is never coalesced either: it bypasses suppression
+    // behind an in-flight marker or an open episode and also forces the turn
+    // (docs/omp-supervision-branch.md). In both cases the superseded marker is
+    // retired exactly as the turnEnd stale bound does: its pending record
+    // finishes, while the durable rows stay until a drain acknowledges them.
+    const staleInFlight = coalesceMainFallbackWakes && inFlightWakeUnconsumedPastBound(owner);
+    const decisionBypass = coalesceMainFallbackWakes &&
+      !staleInFlight &&
+      Boolean(isDecisionOwnedWake?.(message)) &&
+      (Boolean(owner.mainFallbackWakeInFlight) || (owner.mainFallbackEpisode && !owner.mainFallbackSuccessor));
+    const forceTurn = staleInFlight || decisionBypass;
+    if (forceTurn && owner.mainFallbackWakeInFlight) {
+      consumeWake(owner, owner.mainFallbackWakeInFlight);
+    }
     if (coalesceMainFallbackWakes && owner.mainFallbackWakeInFlight) {
       owner.mainFallbackEpisode = true;
       return "suppressed";
     }
-    if (coalesceMainFallbackWakes && owner.mainFallbackEpisode && !owner.mainFallbackSuccessor) {
+    if (coalesceMainFallbackWakes && !forceTurn && owner.mainFallbackEpisode && !owner.mainFallbackSuccessor) {
       return "suppressed";
     }
     // Open the episode before the awaited send so a turn boundary landing while
@@ -870,7 +920,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
       owner.episodeCoalesced.delete(pending.token);
     }
     try {
-      return (await sendWake(owner, message, pending, coalesceMainFallbackWakes)) ? "delivered" : "failed";
+      return (await sendWake(owner, message, pending, coalesceMainFallbackWakes, forceTurn)) ? "delivered" : "failed";
     } finally {
       // The grant pays for exactly one send attempt: a failure before confirmed
       // acceptance is replayed by a later boundary grant, never by letting a
@@ -1540,6 +1590,10 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
   // time has been drained, or the marker has outlived a full turn boundary
   // (two consecutive turn ends without consumption), the wake is treated as
   // consumed instead of suppressing every later main-bound wake forever.
+  // Turn boundaries alone cannot help an idle or streaming main that never
+  // starts a turn, so deliverMainWake also enforces the wall-clock bound
+  // FM_WATCH_MAIN_WAKE_INFLIGHT_BOUND_MS and the decision-owned bypass (see
+  // the delivery-versus-consumption contract at the top of this file).
   function turnEnd(): void {
     const owner = generation;
     if (!coalesceMainFallbackWakes || !generationIsLive(owner)) return;

@@ -34,6 +34,10 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# No watcher or daemon a suite executes may post a real wedge-alarm
+# notification; wake-helpers overrides this default with its recorder.
+export FM_WEDGE_ALARM_EXEC="${FM_WEDGE_ALARM_EXEC:-discard}"
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
