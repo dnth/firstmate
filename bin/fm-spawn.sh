@@ -599,7 +599,7 @@ spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
   local fallback_harness fallback_model fallback_effort
   local remote_backend remote_target remote_harness remote_model remote_effort remote_model_source remote_fallback_reason
-  local remote_herdr_session registry_lock remote_lock remote_generation
+  local remote_herdr_session remote_omp_bun remote_omp_bin registry_lock remote_lock remote_generation
   local remote_traceparent remote_recorded_traceparent
   local -a launch_args
   id=${POS[0]:-}
@@ -868,6 +868,8 @@ spawn_remote_secondmate() {
   remote_model_source=$(printf '%s\n' "$out" | sed -n 's/^secondmate_model_source=//p' | tail -1)
   remote_fallback_reason=$(printf '%s\n' "$out" | sed -n 's/^secondmate_fallback_reason=//p' | tail -1)
   remote_herdr_session=$(printf '%s\n' "$out" | sed -n 's/^herdr_session=//p' | tail -1)
+  remote_omp_bun=$(printf '%s\n' "$out" | sed -n 's/^omp_bun=//p' | tail -1)
+  remote_omp_bin=$(printf '%s\n' "$out" | sed -n 's/^omp_bin=//p' | tail -1)
   if [ "$remote_backend" != herdr ]; then
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
@@ -896,6 +898,15 @@ spawn_remote_secondmate() {
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     echo "error: remote launch returned Herdr session '${remote_herdr_session:-missing}', expected 'fm-remote'; preserving the remote route for reconciliation" >&2
     return 1
+  fi
+  if [ "$remote_harness" = omp ]; then
+    [ -n "$remote_omp_bun" ] && [ -n "$remote_omp_bin" ] || {
+      fm_lock_release "$remote_lock" || true
+      fm_lock_release "$registry_lock" || true
+      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      echo "error: remote OMP launch returned incomplete runtime metadata; preserving the remote route for reconciliation" >&2
+      return 1
+    }
   fi
   # Record what the remote endpoint ACTUALLY carries, read back from its own
   # launch, rather than what this side hoped to deliver. That keeps the #995
@@ -927,6 +938,10 @@ spawn_remote_secondmate() {
     echo "remote_backend=$remote_backend"
     echo "remote_herdr_session=$remote_herdr_session"
     echo "remote_target=$remote_target"
+    if [ "$remote_harness" = omp ]; then
+      echo "omp_bun=$remote_omp_bun"
+      echo "omp_bin=$remote_omp_bin"
+    fi
     [ -z "$remote_recorded_traceparent" ] || echo "traceparent=$remote_recorded_traceparent"
   } > "$tmp"
   # This remote-secondmate writer stays outside fm_meta_lock_path on purpose.
