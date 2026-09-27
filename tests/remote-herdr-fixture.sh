@@ -142,6 +142,10 @@ case "${1:-} ${2:-}" in
   "pane send-keys")
     [ ! -f "$SEND_FAIL" ] || exit 1
     pane=${3:-}
+    if [ "${4:-}" = ctrl+u ]; then
+      jq_state --arg p "$pane" '.composer[$p] = ""' | save
+      exit 0
+    fi
     jq_state --arg p "$pane" '.typed[$p] = true | .working[$p] = true' | save
     launch=$(jq_state -r --arg p "$pane" '.launch[$p] // ""')
     if [ "${4:-}" = enter ] && [ ! -f "$FORCE_IDLE_FILE" ]; then
@@ -155,9 +159,16 @@ case "${1:-} ${2:-}" in
     # locale-sensitive character count, so the Unicode furniture and prompt
     # glyphs match the parser's canonical runtime semantics.
     . "$FM_ROOT/bin/fm-composer-lib.sh"
-    top='╭── OMP test agent ▶──╮'
-    width=$(fm_composer_terminal_width "$top" "$OMP_BUN" "$OMP_BIN" 2>/dev/null || printf '0')
+    top_prefix='╭── OMP test agent ▶'
+    top_suffix='──╮'
+    top_base=$(fm_composer_terminal_width "${top_prefix}${top_suffix}" "$OMP_BUN" "$OMP_BIN" 2>/dev/null || printf '0')
     composer_width=$(fm_composer_terminal_width "$composer" "$OMP_BUN" "$OMP_BIN" 2>/dev/null || printf '0')
+    width=$top_base
+    target_width=$((composer_width + 6))
+    [ "$target_width" -gt "$width" ] && width=$target_width
+    top_padding=$((width - top_base))
+    top_fill=$(printf '%*s' "$top_padding" '' | tr ' ' '─')
+    top="${top_prefix}${top_fill}${top_suffix}"
     padding=$((width - 6 - composer_width))
     [ "$padding" -lt 0 ] && padding=0
     spaces=$(printf '%*s' "$padding" '')
