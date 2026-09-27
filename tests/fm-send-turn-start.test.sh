@@ -529,6 +529,7 @@ SH
     FM_TEST_SEND_LOG="$dir/send.log" FM_TEST_ENTERED="$dir/tmux-entered" \
     FM_TEST_TURNSTART_MARKER="$home/state/herdr-turn.omp-started" \
     FM_TEST_HERDR_ENTERED="$entered" FM_TEST_HERDR_WORKING_READ="$reads" \
+    FM_TEST_HERDR_TYPED="$dir/herdr-typed" \
     FM_TEST_HERDR_SESSION="$session" FM_TEST_HERDR_BASELINE=working \
     FM_TEST_HERDR_EVENT=message FM_TEST_HERDR_TEXT='/busy-steer' \
     FM_SEND_RETRIES=1 FM_SEND_SLEEP=0 FM_SEND_SETTLE=0 \
@@ -545,6 +546,7 @@ SH
     FM_TEST_SEND_LOG="$dir/send.log" FM_TEST_ENTERED="$dir/tmux-entered" \
     FM_TEST_TURNSTART_MARKER="$home/state/herdr-turn.omp-started" \
     FM_TEST_HERDR_ENTERED="$entered" FM_TEST_HERDR_WORKING_READ="$reads" \
+    FM_TEST_HERDR_TYPED="$dir/herdr-typed" \
     FM_TEST_HERDR_SESSION="$session" FM_TEST_HERDR_BASELINE=blocked \
     FM_TEST_HERDR_EVENT=answer FM_TEST_HERDR_TEXT='/blocked-answer' \
     FM_SEND_RETRIES=1 FM_SEND_SLEEP=0 FM_SEND_SETTLE=0 \

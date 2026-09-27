@@ -240,14 +240,23 @@ fm_composer_terminal_width() {  # <row> [canonical-runtime] [canonical-omp]
   local bun=${2:-${FM_OMP_BUN:-}} omp=${3:-${FM_OMP_BIN:-}} out node_bin
   case "$bun" in /*) ;; *) return 1 ;; esac
   [ -x "$bun" ] || return 1
-  if [ -n "$omp" ] && [ "$bun" = "$omp" ]; then
-    node_bin=$(command -v node 2>/dev/null) || return 1
-    case "$node_bin" in /*) ;; *) return 1 ;; esac
-    [ -x "$node_bin" ] || return 1
-    out=$(fm_composer_node_width "$node_bin" "$1") || return 1
-  else
-    out=$("$bun" -e 'try { const width = Bun.stringWidth(process.argv[1]); if (!Number.isSafeInteger(width) || width < 0) process.exit(1); process.stdout.write(String(width)); } catch { process.exit(1); }' "$1" 2>/dev/null) || return 1
-  fi
+  # Standalone OMP records a Node-compatible runtime separately from its
+  # entrypoint in some remote launches.  Select the locale-independent Node
+  # width path for that canonical runtime too; only actual Bun runtimes use
+  # Bun.stringWidth.
+  case "${bun##*/}" in
+    node|nodejs) out=$(fm_composer_node_width "$bun" "$1") || return 1 ;;
+    *)
+      if [ -n "$omp" ] && [ "$bun" = "$omp" ]; then
+        node_bin=$(command -v node 2>/dev/null) || return 1
+        case "$node_bin" in /*) ;; *) return 1 ;; esac
+        [ -x "$node_bin" ] || return 1
+        out=$(fm_composer_node_width "$node_bin" "$1") || return 1
+      else
+        out=$("$bun" -e 'try { const width = Bun.stringWidth(process.argv[1]); if (!Number.isSafeInteger(width) || width < 0) process.exit(1); process.stdout.write(String(width)); } catch { process.exit(1); }' "$1" 2>/dev/null) || return 1
+      fi
+      ;;
+  esac
   case "$out" in ''|*[!0-9]*) return 1 ;; esac
   printf '%s' "$out"
 }
