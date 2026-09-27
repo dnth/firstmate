@@ -886,10 +886,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     // retired exactly as the turnEnd stale bound does: its pending record
     // finishes, while the durable rows stay until a drain acknowledges them.
     const staleInFlight = coalesceMainFallbackWakes && inFlightWakeUnconsumedPastBound(owner);
-    const decisionBypass = coalesceMainFallbackWakes &&
-      !staleInFlight &&
-      Boolean(isDecisionOwnedWake?.(message)) &&
-      (Boolean(owner.mainFallbackWakeInFlight) || (owner.mainFallbackEpisode && !owner.mainFallbackSuccessor));
+    const decisionBypass = coalesceMainFallbackWakes && Boolean(isDecisionOwnedWake?.(message));
     const forceTurn = staleInFlight || decisionBypass;
     if (forceTurn && owner.mainFallbackWakeInFlight) {
       consumeWake(owner, owner.mainFallbackWakeInFlight);

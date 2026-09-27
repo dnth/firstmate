@@ -98,7 +98,7 @@ An empty count closes the episode and finishes every coalesced close record with
 A nonzero count grants exactly one successor injection that delivers the newest still-undelivered close; older coalesced records stay covered by that same drain.
 A boundary that arrives while a delivery run is mid-flight is replayed when the run settles, so a close cannot slip between the row count and the suppression check.
 A queue that cannot be counted is treated as nonempty, so an episode is never retired early on unreadable state.
-Real captain messages retain priority and are never coalesced, because only the watcher fallback path reads the episode guard; decision-owned wakes are never coalesced either, because suppressing a needs-decision task behind a fallback episode would strand the only notification main can act on.
+Real captain messages retain priority and are never coalesced, because only the watcher fallback path reads the episode guard; decision-owned wakes are never coalesced either, and always use the turn-forcing send even when no fallback episode or in-flight marker exists, because suppressing a needs-decision task behind a fallback episode would strand the only notification main can act on.
 
 An in-flight marker is additionally bounded on the wall clock: `FM_WATCH_MAIN_WAKE_INFLIGHT_BOUND_MS` (default 120000) is the longest an accepted-but-unconsumed fallback wake may suppress later main-bound wakes.
 Once the marker outlives that bound with no post-send `turn_start`, the next main-bound wake retires it exactly as the `turn_end` stale bound does and re-delivers through OMP's turn-forcing send (`deliverAs: "followUp"`, `triggerTurn: true`), which joins the agent follow-up queue while main is streaming and starts an agent-initiated turn while idle.

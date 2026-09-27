@@ -215,7 +215,13 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
   const decisionConfig = `${resolveVerb}${heldVerb}${reservedPrefixes.join("")}`;
   for (const line of rows) {
     const fields = line.split("\t");
-    if (fields.length < 5 || !/^[0-9]+$/.test(fields[1])) return UNSAFE_SCOPE;
+    if (fields.length < 5 || !/^[0-9]+$/.test(fields[1])) {
+      if (fields[2] === "signal" && fields[3] && /^needs-decision:/.test(fields[4] ?? "")) {
+        needsDecisionKeys.push(fields[3]);
+      }
+      vetoed = true;
+      continue;
+    }
     const seq = fields[1];
     const kind = fields[2];
     const key = fields[3];
@@ -288,7 +294,9 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
     } else {
       // A kind fm_wake_append never emits: structural corruption, not an
       // ordinary main-only row.
-      return UNSAFE_SCOPE;
+      if (/^needs-decision:/.test(fields[4] ?? "")) needsDecisionKeys.push(key);
+      vetoed = true;
+      continue;
     }
     if (!project || !task) {
       // An unresolvable signal/stale row vetoes the whole offer, but the veto
