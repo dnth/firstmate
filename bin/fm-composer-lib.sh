@@ -237,15 +237,24 @@ JS
 # Missing, relative, non-executable, or malformed support returns nonzero so
 # callers classify the candidate as unknown.
 fm_composer_terminal_width() {  # <row> [canonical-runtime] [canonical-omp]
-  local bun=${2:-${FM_OMP_BUN:-}} omp=${3:-${FM_OMP_BIN:-}} out node_bin
+  local bun=${2:-${FM_OMP_BUN:-}} omp=${3:-${FM_OMP_BIN:-}} out node_bin runtime_kind
   case "$bun" in /*) ;; *) return 1 ;; esac
   [ -x "$bun" ] || return 1
   # Standalone OMP records a Node-compatible runtime separately from its
   # entrypoint in some remote launches.  Select the locale-independent Node
   # width path for that canonical runtime too; only actual Bun runtimes use
   # Bun.stringWidth.
+  runtime_kind=
   case "${bun##*/}" in
-    node|nodejs) out=$(fm_composer_node_width "$bun" "$1") || return 1 ;;
+    node|nodejs) runtime_kind=node ;;
+  esac
+  if [ -z "$runtime_kind" ]; then
+    runtime_kind=$(
+      "$bun" -e 'process.stdout.write(typeof Bun === "object" ? "bun" : "node")' 2>/dev/null
+    ) || runtime_kind=
+  fi
+  case "$runtime_kind" in
+    node) out=$(fm_composer_node_width "$bun" "$1") || return 1 ;;
     *)
       if [ -n "$omp" ] && [ "$bun" = "$omp" ]; then
         node_bin=$(command -v node 2>/dev/null) || return 1
