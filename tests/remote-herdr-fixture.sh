@@ -45,6 +45,7 @@ STATE='$state'
 LOG='$log'
 SEND_FAIL='$send_fail'
 SOCKET='$socket'
+FM_ROOT='$remote_root'
 SH
   printf 'OMP_ACK_PID=%q\nOMP_BUN=%q\nOMP_BIN=%q\nOMP_ACTIVE_PID_FILE=%q\nFORCE_IDLE_FILE=%q\nPANE_TEXT_LOG=%q\n' \
     "$omp_ack_pid" "$omp_bun" "$omp_bin" "$omp_active_pid_file" "$force_idle_file" "$pane_text_log" >> "$script"
@@ -150,12 +151,14 @@ case "${1:-} ${2:-}" in
   "pane read")
     composer=$(jq_state -r --arg p "${3:-}" '.composer[$p] // ""')
     # OMP's structural parser requires the top and bottom box rows to have
-    # the same terminal width. Keep the fixture's bottom row padded as the
-    # composer changes so payload proof exercises content, not a malformed
-    # box shape.
+    # the same terminal width. Use the shared width helper rather than Bash's
+    # locale-sensitive character count, so the Unicode furniture and prompt
+    # glyphs match the parser's canonical runtime semantics.
+    . "$FM_ROOT/bin/fm-composer-lib.sh"
     top='╭── OMP test agent ▶──╮'
-    width=${#top}
-    padding=$((width - 4 - ${#composer} - 2))
+    width=$(fm_composer_terminal_width "$top" "$OMP_BUN" "$OMP_BIN" 2>/dev/null || printf '0')
+    composer_width=$(fm_composer_terminal_width "$composer" "$OMP_BUN" "$OMP_BIN" 2>/dev/null || printf '0')
+    padding=$((width - 6 - composer_width))
     [ "$padding" -lt 0 ] && padding=0
     spaces=$(printf '%*s' "$padding" '')
     printf '%s\n╰─ %s%s ─╯\n' "$top" "$composer" "$spaces"
