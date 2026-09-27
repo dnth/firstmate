@@ -1575,7 +1575,7 @@ test_native_omp_durable_queue_session_notifications() {
   out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
     FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
     node --input-type=module 2>&1 <<'JS'
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 const state = process.env.FM_STATE_OVERRIDE;
 const wakes = [];
@@ -1603,9 +1603,12 @@ await handlers.get("session_start")({ type: "session_start" }, context);
 await waitFor(() => count() === 1, "initial arm");
 await waitFor(() => wakes.length === 1, "session-start durable wake");
 if (wakes[0].options?.deliverAs !== "nextTurn" || wakes[0].options?.triggerTurn !== true) throw new Error("session-start wake used the wrong delivery mode");
+writeFileSync(`${state}/.wake-queue.seq`, "2\n");
+appendFileSync(`${state}/.wake-queue`, "0\t2\tsignal\ttask-d.status\tneeds-decision: task-d.status\n");
 await handlers.get("session_switch")({ type: "session_switch", reason: "new" }, context);
 await waitFor(() => wakes.length === 2, "session-switch durable wake");
 if (wakes.length !== 2) throw new Error(`expected two session-event notifications, got ${wakes.length}`);
+if (wakes[1].options?.deliverAs !== "followUp" || wakes[1].options?.triggerTurn !== true) throw new Error("decision-owned session wake did not force a turn");
 writeFileSync(`${state}/watch-stop`, "stop\n");
 await handlers.get("session_shutdown")({ type: "session_shutdown" }, {});
 console.log("omp-durable-queue-session-notifications-ok");

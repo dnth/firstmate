@@ -270,10 +270,11 @@ export default function (omp: ExtensionAPI) {
   // core remains the sole speaker while it owns an undelivered close.
   const notifyQueuedWake = (coreOwnsDelivery: boolean): void => {
     if (coreOwnsDelivery || !durableWakeQueueHasRows()) return;
+    const queuedScope = scopeForUnreadWake(state, false);
     sendWakeNotification(encodeOperationalInput(
       "watcher",
       "Durable watcher wakes are queued. Run `bin/fm-wake-drain.sh` first to present and acknowledge them.",
-    ));
+    ), queuedScope.needsDecisionKeys.length > 0);
   };
 
   // Supervision-branch dispatch handshake (docs/omp-supervision-branch.md).

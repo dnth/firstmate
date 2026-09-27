@@ -431,9 +431,9 @@ test_omp_scope_vetoed_scan_keeps_decision_owned_keys() {
   state="$TMP_ROOT/scope-vetoed-decision/state"
   mkdir -p "$state"
   printf 'project=project-a\nwindow=default:wA:p1\n' > "$state/task-a.meta"
-  # Row 2 names no project and resolves to nothing - the offer veto. The
-  # decision-owned row AFTER it must still surface in needsDecisionKeys.
-  printf '1\t1\tsignal\ttask-a.status\tsignal: task-a\n2\t2\tsignal\tghost.status\tsignal: ghost\n3\t3\tsignal\ttask-d.status\tneeds-decision: task-d.status\n' \
+  # Structural and unknown-kind rows veto the offer. The decision-owned row
+  # AFTER them must still surface in needsDecisionKeys.
+  printf '1\t1\tsignal\ttask-a.status\tsignal: task-a\nbroken\n2\tX\tunknown\tghost\tneeds-decision: ghost\n3\t3\tsignal\ttask-d.status\tneeds-decision: task-d.status\n' \
     > "$state/.wake-queue"
   out=$(STATE_PATH="$state" DISPATCH_PATH="$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" node --experimental-strip-types --input-type=module -e '
     const { scopeForUnreadWake } = await import(process.env.DISPATCH_PATH);
@@ -1059,6 +1059,36 @@ JSON
   pass "decision-owned wakes are never granted, never offered, and never coalesced behind a fallback episode"
 }
 
+test_decision_owned_wake_forces_turn_without_episode() {
+  local fixture state out status=0
+  fixture="$TMP_ROOT/decision-no-episode"
+  state="$fixture/state"
+  make_omp_dual_driver_fixture "$fixture"
+  cat > "$fixture/scenario.json" <<'JSON'
+{
+  "statuses": { "task-d": "needs-decision: pick a route" },
+  "metas": { "task-d": "project=project-a\nwindow=default:wD:p1" },
+  "steps": [{
+    "append": { "kind": "signal", "key": "task-d.status", "payload": "needs-decision: task-d.status" },
+    "close": "signal: task-d.status",
+    "expect": { "wakes": 1, "offers": 1, "prompts": 0 },
+    "label": "decision-owned wake forces a turn without a fallback episode"
+  }],
+  "final": { "promptCalls": 0, "wakeCount": 1, "offerNotAccepted": "task-d", "grantNeverContainedSeq": 1, "lastWakeFollowUpNames": "task-d" }
+}
+JSON
+  out=$(env -u FM_TASK_ID -u FM_ROOT_OVERRIDE -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
+    FM_HOME="$fixture" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    PRIMARY_EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" \
+    BRANCH_EXTENSION="$fixture/.omp/extensions/fm-branch-supervision-omp.ts" \
+    SCENARIO_PATH="$fixture/scenario.json" \
+    node --experimental-strip-types "$fixture/driver.mjs" 2>&1) || status=$?
+  printf 'stop\n' > "$state/watch-stop" 2>/dev/null || true
+  expect_code 0 "$status" "decision-owned wake without an episode: $out"
+  assert_contains "$out" dual-driver-ok "decision-owned wake without an episode was not force-turned: $out"
+  pass "decision-owned wake forces a turn without an existing fallback episode"
+}
+
 test_branch_prompt_is_byte_stable_and_above_cache_floor
 test_outcome_store_is_append_only_with_cursor_reads
 test_outcome_startup_replay_preserves_silence
@@ -1076,3 +1106,4 @@ test_routine_verdict_on_granted_completion_opens_a_main_turn
 test_mixed_grant_settle_rejects_an_unreported_completion
 test_consumed_completion_is_redelivered_once_per_generation
 test_decision_owned_wake_reaches_main_past_branch_and_episode
+test_decision_owned_wake_forces_turn_without_episode
