@@ -26,11 +26,11 @@ While supervision is still needed and away mode remains inactive, an actionable 
 ## Actionable wake ordering
 
 After an actionable Pi, OMP, or OpenCode child close, the adapter starts and verifies one singleton successor before it delivers the original wake.
-OMP delivers that follow-up through its host API as a hidden custom `nextTurn` message with `triggerTurn`, which starts an idle handling turn without touching an editable TUI draft.
+OMP delivers an ordinary follow-up through its host API as a hidden custom `nextTurn` message with `triggerTurn`, which starts an idle handling turn without touching an editable TUI draft; stale or decision-owned main wakes use the turn-forcing `followUp` transport described in [`omp-supervision-branch.md`](omp-supervision-branch.md#main-fallback-re-entry-coalescing).
 That mode is what makes an idle session reachable from a turn boundary: a wake that lands while the current turn is still unwinding schedules a continuation bound to that prompt generation instead of relying on a steer the finishing turn may never poll, and every wake queued during that turn is consumed by the one continuation.
 The durable wake rows are the whole persistence: only `bin/fm-wake-drain.sh` acknowledgement removes them, so an interruption before acknowledgement leaves the rows queued for the next session event to re-notify.
-On `session_start` and `session_switch`, OMP sends at most one hidden next-turn notification when structurally valid durable rows remain and the core has no undelivered actionable handoff.
-The core remains the sole speaker while it owns an undelivered close, and OMP's hidden next-turn transport coalesces notifications queued during one turn into a single continuation.
+On `session_start` and `session_switch`, OMP sends at most one hidden notification when structurally valid durable rows remain and the core has no undelivered actionable handoff, using the turn-forcing transport when queued decision-owned rows require it.
+The core remains the sole speaker while it owns an undelivered close, and OMP's hidden next-turn transport coalesces ordinary notifications queued during one turn into a single continuation.
 A delivered follow-up is acknowledged when the runtime starts a turn whose prompt is that wake; a wake the runtime queues into an already-running turn never starts one, so the core waits at most `FM_WATCH_WAKE_CONSUME_TIMEOUT_MS` for that acknowledgement, then treats the wake as consumed and continues the successor chain instead of parking every later actionable close behind it.
 It confirms the handling handoff against that successor before scheduling the follow-up, retries once against the current generation and successor, and treats a failed confirmation as a restoration failure: it classifies the error, retires a successor that is no longer alive, and surfaces exactly one typed message.
 A failed confirmation is never swallowed.
