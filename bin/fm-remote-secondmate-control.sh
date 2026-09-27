@@ -272,7 +272,7 @@ beacon_age() {
 }
 
 print_route() { # <id>
-  local id=$1 harness model effort model_source fallback_reason traceparent
+  local id=$1 harness model effort model_source fallback_reason traceparent omp_bun omp_bin
   remote_endpoint_require "$id"
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
   model=$(fm_meta_get "$REMOTE_ENDPOINT_META" model)
@@ -280,6 +280,8 @@ print_route() { # <id>
   model_source=$(fm_meta_get "$REMOTE_ENDPOINT_META" secondmate_model_source)
   fallback_reason=$(fm_meta_get "$REMOTE_ENDPOINT_META" secondmate_fallback_reason)
   traceparent=$(fm_meta_get "$REMOTE_ENDPOINT_META" traceparent)
+  omp_bun=$(fm_meta_get "$REMOTE_ENDPOINT_META" omp_bun)
+  omp_bin=$(fm_meta_get "$REMOTE_ENDPOINT_META" omp_bin)
   printf 'schema=fm-remote-secondmate-control.v1\n'
   printf 'backend=%s\n' "$REMOTE_ENDPOINT_BACKEND"
   printf 'target=%s\n' "$REMOTE_ENDPOINT_TARGET"
@@ -290,6 +292,10 @@ print_route() { # <id>
   [ -z "$model_source" ] || printf 'secondmate_model_source=%s\n' "$model_source"
   [ -z "$fallback_reason" ] || printf 'secondmate_fallback_reason=%s\n' "$fallback_reason"
   [ -z "$traceparent" ] || printf 'traceparent=%s\n' "$traceparent"
+  if [ "$harness" = omp ]; then
+    [ -z "$omp_bun" ] || printf 'omp_bun=%s\n' "$omp_bun"
+    [ -z "$omp_bin" ] || printf 'omp_bin=%s\n' "$omp_bin"
+  fi
 }
 
 cmd_route() {

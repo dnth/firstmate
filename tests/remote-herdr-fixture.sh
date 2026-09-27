@@ -45,6 +45,7 @@ STATE='$state'
 LOG='$log'
 SEND_FAIL='$send_fail'
 SOCKET='$socket'
+FM_ROOT='$remote_root'
 SH
   printf 'OMP_ACK_PID=%q\nOMP_BUN=%q\nOMP_BIN=%q\nOMP_ACTIVE_PID_FILE=%q\nFORCE_IDLE_FILE=%q\nPANE_TEXT_LOG=%q\n' \
     "$omp_ack_pid" "$omp_bun" "$omp_bin" "$omp_active_pid_file" "$force_idle_file" "$pane_text_log" >> "$script"
@@ -130,7 +131,7 @@ case "${1:-} ${2:-}" in
     [ ! -f "$SEND_FAIL" ] || exit 1
     [ -z "$PANE_TEXT_LOG" ] || printf '%s\n' "${4:-}" >> "$PANE_TEXT_LOG"
     jq_state --arg p "${3:-}" --arg text "${4:-}" \
-      '.typed[$p] = true | .launch[$p] = $text' | save ;;
+      '.typed[$p] = true | .composer[$p] = $text' | save ;;
   "pane run")
     [ ! -f "$SEND_FAIL" ] || exit 1
     pane=${3:-}; launch=${4:-}
@@ -141,13 +142,38 @@ case "${1:-} ${2:-}" in
   "pane send-keys")
     [ ! -f "$SEND_FAIL" ] || exit 1
     pane=${3:-}
+    if [ "${4:-}" = ctrl+u ]; then
+      jq_state --arg p "$pane" '.composer[$p] = ""' | save
+      exit 0
+    fi
     jq_state --arg p "$pane" '.typed[$p] = true | .working[$p] = true' | save
     launch=$(jq_state -r --arg p "$pane" '.launch[$p] // ""')
     if [ "${4:-}" = enter ] && [ ! -f "$FORCE_IDLE_FILE" ]; then
       publish_omp_ack "$pane" "$launch"
     fi
     ;;
-  "pane read") printf '\n' ;;
+  "pane read")
+    composer=$(jq_state -r --arg p "${3:-}" '.composer[$p] // ""')
+    # OMP's structural parser requires the top and bottom box rows to have
+    # the same terminal width. Use the shared width helper rather than Bash's
+    # locale-sensitive character count, so the Unicode furniture and prompt
+    # glyphs match the parser's canonical runtime semantics.
+    . "$FM_ROOT/bin/fm-composer-lib.sh"
+    top_prefix='╭── OMP test agent ▶'
+    top_suffix='──╮'
+    top_base=$(fm_composer_terminal_width "${top_prefix}${top_suffix}" "$OMP_BUN" "$OMP_BIN" 2>/dev/null || printf '0')
+    composer_width=$(fm_composer_terminal_width "$composer" "$OMP_BUN" "$OMP_BIN" 2>/dev/null || printf '0')
+    width=$top_base
+    target_width=$((composer_width + 6))
+    [ "$target_width" -gt "$width" ] && width=$target_width
+    top_padding=$((width - top_base))
+    top_fill=$(printf '%*s' "$top_padding" '' | tr ' ' '─')
+    top="${top_prefix}${top_fill}${top_suffix}"
+    padding=$((width - 6 - composer_width))
+    [ "$padding" -lt 0 ] && padding=0
+    spaces=$(printf '%*s' "$padding" '')
+    printf '%s\n╰─ %s%s ─╯\n' "$top" "$composer" "$spaces"
+    ;;
   "pane process-info")
     pane_pid=987654
     pane_name=fish

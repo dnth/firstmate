@@ -54,7 +54,7 @@ release_claim_lock() {
 }
 trap release_claim_lock EXIT
 trap 'exit 1' HUP INT TERM
-fm_lock_acquire_wait "$CLAIM_LOCK"
+fm_lock_acquire_wait "$CLAIM_LOCK" || exit 1
 CLAIM_LOCK_HELD=1
 
 if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then

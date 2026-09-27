@@ -116,6 +116,13 @@ test_idle_placeholder_case_mode_is_explicit() {
   pass "fm_composer_classify_content: idle matching preserves the caller's case mode"
 }
 
+test_idle_placeholder_defaults_case_mode_under_nounset() {
+  bash -u -c '. "$1"; fm_composer_idle_matches "Type a message..." "^Type a message\\.\\.\\.$"' \
+    _ "$ROOT/bin/fm-composer-lib.sh" \
+    || fail "idle matching with an omitted case mode must not abort under nounset"
+  pass "fm_composer_idle_matches: omitted case mode defaults safely under nounset"
+}
+
 test_omc_empty_prompt_glyph_is_idle_but_typed_text_is_pending() {
   local out idle=$FM_COMPOSER_IDLE_RE
   # OMC's [OMC#...] Claude footer leaves a lone ✻ in the otherwise-empty composer.
@@ -255,6 +262,7 @@ test_agent_glyphs_are_empty_bordered_and_bare
 test_empty_content_is_empty
 test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit
+test_idle_placeholder_defaults_case_mode_under_nounset
 test_omc_empty_prompt_glyph_is_idle_but_typed_text_is_pending
 test_real_text_is_pending
 test_standalone_width_has_fixed_unicode_contract

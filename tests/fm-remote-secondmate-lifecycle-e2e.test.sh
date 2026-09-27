@@ -1243,6 +1243,10 @@ assert_grep 'harness=omp' "$PARENT/state/remote-omp.meta" \
   "parent metadata rejected the OMP harness returned by the remote launch"
 assert_grep 'harness=omp' "$OMP_REMOTE_HOME/state/parent-route/remote-omp.meta" \
   "remote endpoint metadata did not preserve its OMP harness"
+assert_grep "omp_bun=$REMOTE_OMP_BUN" "$PARENT/state/remote-omp.meta" \
+  "parent route metadata did not preserve the remote OMP runtime identity"
+assert_grep "omp_bin=$REMOTE_OMP_BIN" "$PARENT/state/remote-omp.meta" \
+  "parent route metadata did not preserve the remote OMP entrypoint identity"
 OMP_REMOTE_LAUNCH=$(grep -F 'FM_OMP_SESSION_POINTER=' "$HERDR_LOG" | tail -1 || true)
 assert_contains "$OMP_REMOTE_LAUNCH" \
   "FM_OMP_BUN='\\''$REMOTE_OMP_BUN'\\'' FM_OMP_BIN='\\''$REMOTE_OMP_BIN'\\''" \

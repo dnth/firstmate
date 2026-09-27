@@ -487,7 +487,7 @@ _fm_recovery_lock_acquire() {
     return 0
   fi
   if [ -z "$attempts" ]; then
-    fm_lock_acquire_wait "$lock"
+    fm_lock_acquire_wait "$lock" || return $?
     return 0
   fi
   case "$attempts" in ''|*[!0-9]*|0) return 2 ;; esac
@@ -914,6 +914,12 @@ fm_lock_try_acquire() {
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
 
+  # Locks are directories (or ownership symlinks); an ordinary file is an
+  # invalid, unacquirable shape and must not enter stale-owner recovery.
+  if [ -e "$lockdir" ] && [ ! -d "$lockdir" ] && [ ! -L "$lockdir" ]; then
+    return 2
+  fi
+
   if fm_lock_try_create "$lockdir"; then
     return 0
   fi
@@ -929,12 +935,15 @@ fm_lock_try_acquire() {
   fi
 
   steal="$lockdir.steal"
-  if ! fm_lock_try_acquire "$steal"; then
+  if fm_lock_try_acquire "$steal"; then
+    steal_owner=${FM_LOCK_OWNER_DIR:-}
+  else
+    rc=$?
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
+    [ "$rc" -eq 1 ] || return "$rc"
     return 1
   fi
-  steal_owner=${FM_LOCK_OWNER_DIR:-}
 
   cur=$(cat "$lockdir/pid" 2>/dev/null || true)
   if fm_pid_alive "$cur"; then
@@ -992,8 +1001,12 @@ fm_lock_try_acquire() {
 }
 
 fm_lock_acquire_wait() {
-  local lockdir=$1
-  while ! fm_lock_try_acquire "$lockdir"; do
+  local lockdir=$1 status
+  while :; do
+    fm_lock_try_acquire "$lockdir"
+    status=$?
+    [ "$status" -eq 0 ] && return 0
+    [ "$status" -eq 2 ] && return 2
     sleep 0.1
   done
 }
@@ -1649,6 +1662,12 @@ fm_wake_append() {
     *) printf 'fm_wake_append: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
   esac
 
+  if [ -e "$FM_WAKE_QUEUE_LOCK" ] \
+    && [ ! -d "$FM_WAKE_QUEUE_LOCK" ] \
+    && [ ! -L "$FM_WAKE_QUEUE_LOCK" ]; then
+    return 3
+  fi
+
   if [ -n "$lock_attempts" ]; then
     case "$lock_attempts" in ''|*[!0-9]*|0) return 2 ;; esac
     while ! fm_lock_try_acquire "$FM_WAKE_QUEUE_LOCK"; do
@@ -1657,7 +1676,7 @@ fm_wake_append() {
       sleep 0.05
     done
   else
-    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
   fi
   if fm_wake_append_locked "$kind" "$key" "$payload" "$lock_attempts"; then
     :
@@ -1707,7 +1726,15 @@ fm_wake_queued_keys() {
     signal|stale|check|heartbeat) ;;
     *) printf 'fm_wake_queued_keys: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
   esac
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  # A malformed queue lock must not make read-only queue inspection wait
+  # forever.  Callers use this helper for guard/status checks, so reject an
+  # ordinary file just as bounded append does and let them report no queue.
+  if [ -e "$FM_WAKE_QUEUE_LOCK" ] \
+    && [ ! -d "$FM_WAKE_QUEUE_LOCK" ] \
+    && [ ! -L "$FM_WAKE_QUEUE_LOCK" ]; then
+    return 1
+  fi
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
   fm_wake_queued_keys_locked "$kind"
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 }

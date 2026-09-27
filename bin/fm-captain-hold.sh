@@ -297,7 +297,7 @@ validate_one_line() {  # <label> <value>
 
 acquire_task_control_lock() {  # <task-id>
   CAPTAIN_CONTROL_LOCK="$STATE/.control-$1.lock"
-  fm_lock_acquire_wait "$CAPTAIN_CONTROL_LOCK"
+  fm_lock_acquire_wait "$CAPTAIN_CONTROL_LOCK" || return 1
   CAPTAIN_CONTROL_LOCK_HELD=1
 }
 
@@ -1792,7 +1792,7 @@ command_complete() {
   [ -f "$meta" ] && has_meta=1
   if [ "$has_meta" = 1 ]; then
     CAPTAIN_META_LOCK=$(fm_meta_lock_path "$meta") || fail "could not resolve task metadata lock"
-    fm_lock_acquire_wait "$CAPTAIN_META_LOCK"
+    fm_lock_acquire_wait "$CAPTAIN_META_LOCK" || return 1
     CAPTAIN_META_LOCK_HELD=1
     [ -f "$meta" ] || fail "task metadata disappeared while recording completion"
   fi
