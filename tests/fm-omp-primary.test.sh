@@ -2115,7 +2115,7 @@ await waitFor(() => count() === 5, "successor arm after the fourth close");
 await sleep(300);
 if (wakes.length !== 2) throw new Error(`a tight re-send loop fired inside the bound: ${wakes.length}`);
 
-// Recovery is not one-shot: once the forced wake's own bound also expires, the
+// Recovery is not one-shot: once the forced wake own bound also expires, the
 // next close forces one more follow-up, so an episode can never wedge forever.
 await sleep(2800);
 appendRow("signal", "crew-e.turn-ended");
