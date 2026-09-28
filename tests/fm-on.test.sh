@@ -11,7 +11,52 @@ TMP_ROOT=$(fm_test_tmproot fm-on)
 # and physicalize macOS's /var -> /private/var alias before transport validation.
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
-trap 'if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then kill "$(cat "$TMP_ROOT/remote-jobs/worker.pid")" 2>/dev/null || true; fi; rm -rf -- "$TMP_ROOT"' EXIT
+stop_remote_worker() {
+  local worker_pid='' supervisor_pid='' supervisor_command='' wait_attempt=0 kill_escalated=0
+  [ -f "$TMP_ROOT/remote-jobs/worker.pid" ] || return 0
+  worker_pid=$(cat "$TMP_ROOT/remote-jobs/worker.pid" 2>/dev/null || true)
+  case "$worker_pid" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  supervisor_pid=$(ps -p "$worker_pid" -o ppid= 2>/dev/null | tr -d '[:space:]')
+  case "$supervisor_pid" in
+    ''|*[!0-9]*|0|1) supervisor_pid='' ;;
+    *) supervisor_command=$(ps -p "$supervisor_pid" -o command= 2>/dev/null || true) ;;
+  esac
+  # Signal the supervisor rather than the serve child when one is present: a
+  # TERM'd supervisor forwards the signal and exits without respawning, while
+  # a serve child that exits nonzero under a racing removal gets replaced.
+  case "$supervisor_command" in
+    *"$REMOTE_ROOT/bin/fm-remote-job-worker.sh"*) kill "$supervisor_pid" 2>/dev/null || true ;;
+    *) supervisor_pid=''; kill "$worker_pid" 2>/dev/null || true ;;
+  esac
+  # A TERM'd worker still writes its shutdown quarantine inside
+  # remote-jobs/worker.lock before exiting. Returning before both processes
+  # are confirmed exited lets rm -rf lose a rmdir race there with
+  # "Directory not empty".
+  while { [ -n "$supervisor_pid" ] && kill -0 "$supervisor_pid" 2>/dev/null; } \
+    || kill -0 "$worker_pid" 2>/dev/null; do
+    wait_attempt=$((wait_attempt + 1))
+    if [ "$wait_attempt" -eq 100 ] && [ "$kill_escalated" -eq 0 ]; then
+      if [ -n "$supervisor_pid" ] && kill -0 "$supervisor_pid" 2>/dev/null; then
+        kill -KILL "$supervisor_pid" 2>/dev/null || true
+      fi
+      if kill -0 "$worker_pid" 2>/dev/null; then
+        kill -KILL "$worker_pid" 2>/dev/null || true
+      fi
+      kill_escalated=1
+    fi
+    [ "$wait_attempt" -lt 400 ] || fail "remote worker did not exit before cleanup timeout"
+    sleep 0.05
+  done
+  wait "$worker_pid" ${supervisor_pid:+"$supervisor_pid"} 2>/dev/null || true
+}
+
+cleanup() {
+  stop_remote_worker
+  rm -rf -- "$TMP_ROOT"
+}
+trap cleanup EXIT
 LOCAL_HOME="$TMP_ROOT/local-home"
 REMOTE_ROOT="$TMP_ROOT/remote-root"
 REMOTE_HOME="$TMP_ROOT/remote-home"
@@ -509,5 +554,46 @@ set -e
 [ "$(cat "$SSH_COUNT")" -eq 1 ] || fail "ambiguous completion was retried"
 [ "$(grep -c mutation "$REMOTE_HOME/mutations")" -eq 1 ] || fail "ambiguous mutation did not execute exactly once"
 pass "unreachable and ambiguous transport failures are surfaced without retry"
+
+# Regression guard for the EXIT-trap cleanup: fixture removal must wait out a
+# recorded worker whose TERM shutdown still writes inside
+# remote-jobs/worker.lock - the in-flight quarantine write that raced rm -rf
+# into "Directory not empty" in CI. Stop the real worker through the trap's
+# own path, then hand the pid file to a stub whose shutdown is stretched
+# (~1s), so a cleanup that drops the process wait leaves the stub provably
+# alive and fails on every run instead of only under a lucky scheduler.
+GUARD_WORKER_PID=$(cat "$TMP_ROOT/remote-jobs/worker.pid" 2>/dev/null || true)
+stop_remote_worker
+case "$GUARD_WORKER_PID" in
+  ''|*[!0-9]*) ;;
+  *)
+    if kill -0 "$GUARD_WORKER_PID" 2>/dev/null; then
+      fail "the worker stop path returned before the recorded worker exited"
+    fi
+    ;;
+esac
+GUARD_LOCK="$TMP_ROOT/remote-jobs/worker.lock"
+GUARD_READY="$TMP_ROOT/guard-stub-ready"
+mkdir -p "$GUARD_LOCK"
+(
+  trap 'for _ in $(seq 1 100); do : > "$GUARD_LOCK/.shutdown-write" 2>/dev/null; sleep 0.01; done; exit 0' TERM
+  : > "$GUARD_READY"
+  while :; do sleep 0.05; done
+) &
+GUARD_STUB_PID=$!
+for _ in $(seq 1 100); do [ -f "$GUARD_READY" ] && break; sleep 0.01; done
+[ -f "$GUARD_READY" ] || fail "the shutdown stub never armed its TERM trap"
+kill -0 "$GUARD_STUB_PID" 2>/dev/null || fail "the shutdown stub exited before cleanup signaled it"
+printf '%s\n' "$GUARD_STUB_PID" > "$TMP_ROOT/remote-jobs/worker.pid"
+cleanup
+GUARD_STUB_ALIVE=0
+kill -0 "$GUARD_STUB_PID" 2>/dev/null && GUARD_STUB_ALIVE=1
+kill "$GUARD_STUB_PID" 2>/dev/null || true
+wait "$GUARD_STUB_PID" 2>/dev/null || true
+if [ "$GUARD_STUB_ALIVE" -ne 0 ]; then
+  fail "fixture cleanup returned before the recorded worker exited"
+fi
+assert_absent "$TMP_ROOT" "fixture cleanup left the root behind"
+pass "exit cleanup waits out a recorded worker's in-flight shutdown write"
 
 echo "ALL TESTS PASSED"
