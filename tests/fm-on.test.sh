@@ -31,9 +31,9 @@ stop_remote_worker() {
     *) supervisor_pid=''; kill "$worker_pid" 2>/dev/null || true ;;
   esac
   # A TERM'd worker still writes its shutdown quarantine inside
-  # remote-jobs/worker.lock before exiting, so returning before the process is
-  # Returning before both processes are confirmed exited lets rm -rf lose a
-  # rmdir race there with "Directory not empty".
+  # remote-jobs/worker.lock before exiting. Returning before both processes
+  # are confirmed exited lets rm -rf lose a rmdir race there with
+  # "Directory not empty".
   while { [ -n "$supervisor_pid" ] && kill -0 "$supervisor_pid" 2>/dev/null; } \
     || kill -0 "$worker_pid" 2>/dev/null; do
     wait_attempt=$((wait_attempt + 1))
