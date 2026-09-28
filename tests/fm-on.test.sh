@@ -12,7 +12,7 @@ TMP_ROOT=$(fm_test_tmproot fm-on)
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
 stop_remote_worker() {
-  local worker_pid='' supervisor_pid='' supervisor_command='' wait_attempt=0
+  local worker_pid='' supervisor_pid='' supervisor_command='' wait_attempt=0 kill_escalated=0
   [ -f "$TMP_ROOT/remote-jobs/worker.pid" ] || return 0
   worker_pid=$(cat "$TMP_ROOT/remote-jobs/worker.pid" 2>/dev/null || true)
   case "$worker_pid" in
@@ -32,14 +32,24 @@ stop_remote_worker() {
   esac
   # A TERM'd worker still writes its shutdown quarantine inside
   # remote-jobs/worker.lock before exiting, so returning before the process is
-  # reaped lets rm -rf lose a rmdir race there with "Directory not empty".
+  # Returning before both processes are confirmed exited lets rm -rf lose a
+  # rmdir race there with "Directory not empty".
   while { [ -n "$supervisor_pid" ] && kill -0 "$supervisor_pid" 2>/dev/null; } \
     || kill -0 "$worker_pid" 2>/dev/null; do
-    wait "$worker_pid" ${supervisor_pid:+"$supervisor_pid"} 2>/dev/null || true
     wait_attempt=$((wait_attempt + 1))
-    [ "$wait_attempt" -lt 100 ] || break
+    if [ "$wait_attempt" -eq 100 ] && [ "$kill_escalated" -eq 0 ]; then
+      if [ -n "$supervisor_pid" ] && kill -0 "$supervisor_pid" 2>/dev/null; then
+        kill -KILL "$supervisor_pid" 2>/dev/null || true
+      fi
+      if kill -0 "$worker_pid" 2>/dev/null; then
+        kill -KILL "$worker_pid" 2>/dev/null || true
+      fi
+      kill_escalated=1
+    fi
+    [ "$wait_attempt" -lt 400 ] || fail "remote worker did not exit before cleanup timeout"
     sleep 0.05
   done
+  wait "$worker_pid" ${supervisor_pid:+"$supervisor_pid"} 2>/dev/null || true
 }
 
 cleanup() {
