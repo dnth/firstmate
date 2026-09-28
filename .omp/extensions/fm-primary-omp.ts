@@ -226,7 +226,14 @@ export default function (omp: ExtensionAPI) {
   // stranding an idle session, and every notification queued during that turn
   // is consumed by the one continuation. The message never enters the editable
   // pending-message UI, so the captain's draft is untouched.
-  const sendWakeNotification = (content: string): void => {
+  const sendWakeNotification = (content: string, forceTurn = false): void => {
+    // A forced send reserves deliverAs "followUp" for a hidden next-turn wake
+    // that went unconsumed past its wall-clock bound, or a decision-owned wake
+    // that would otherwise be coalesced behind one: OMP queues that send
+    // without a turn while streaming or while agent-initiated turns are
+    // deferred, whereas a follow-up join stays audible both ways - it rides
+    // the agent follow-up queue while streaming and starts an agent-initiated
+    // turn while idle (the branch's own merges use the same shape).
     omp.sendMessage(
       {
         customType: "firstmate-watcher-wake",
@@ -235,7 +242,7 @@ export default function (omp: ExtensionAPI) {
         attribution: "agent",
         details: { kind: "watcher", runtime: "omp" },
       },
-      { deliverAs: "nextTurn", triggerTurn: true },
+      forceTurn ? { deliverAs: "followUp", triggerTurn: true } : { deliverAs: "nextTurn", triggerTurn: true },
     );
   };
 
@@ -263,10 +270,11 @@ export default function (omp: ExtensionAPI) {
   // core remains the sole speaker while it owns an undelivered close.
   const notifyQueuedWake = (coreOwnsDelivery: boolean): void => {
     if (coreOwnsDelivery || !durableWakeQueueHasRows()) return;
+    const queuedScope = scopeForUnreadWake(state, false);
     sendWakeNotification(encodeOperationalInput(
       "watcher",
       "Durable watcher wakes are queued. Run `bin/fm-wake-drain.sh` first to present and acknowledge them.",
-    ));
+    ), queuedScope.needsDecisionKeys.length > 0);
   };
 
   // Supervision-branch dispatch handshake (docs/omp-supervision-branch.md).
@@ -278,16 +286,15 @@ export default function (omp: ExtensionAPI) {
   // credential/auth failures) is never offered - it stays main-owned - and with
   // no branch extension loaded no one accepts, so every wake falls through to
   // main exactly as before.
-  const offerWakeToBranch = (message: string): Promise<void> | null => {
-    const heartbeat = /^heartbeat($|:)/.test(message);
-    const isCheckTrigger = /^check:/.test(message);
-    const scope = scopeForUnreadWake(state, heartbeat);
-    // A signal close containing a needs-decision status file, or a stale close
-    // for a captain-held task, gets the identical main-only treatment as a
-    // check-kind trigger. The cross-reference deliberately includes every
-    // unread decision row: until that row is read, a later signal or stale
-    // trigger for the same task stays on main. Other tasks and heartbeat
-    // handling remain independent.
+  // Whether one actionable-close message is decision-owned: a signal close
+  // containing a needs-decision status file, or a stale close for a
+  // captain-held task. A decision-owned trigger gets the identical main-only
+  // treatment as a check-kind trigger - the offer's dispatch veto and the
+  // core's coalescing bypass share this one computation. The cross-reference
+  // deliberately includes every unread decision row: until that row is read,
+  // a later signal or stale trigger for the same task stays on main. Other
+  // tasks and heartbeat handling remain independent.
+  const decisionOwnedTrigger = (message: string, scope: ReturnType<typeof scopeForUnreadWake>): boolean => {
     const triggerKeys = /^signal:/.test(message)
       ? message
         .slice("signal:".length)
@@ -300,8 +307,14 @@ export default function (omp: ExtensionAPI) {
     const taskIdentity = (key: string): string =>
       scope.taskByWakeKey[key] ?? scope.taskByWakeKey[key.replace(/^fm-/, "")] ?? key;
     const needsDecisionTasks = new Set(scope.needsDecisionKeys.map(taskIdentity));
-    const isNeedsDecisionTrigger = triggerKeys.some((key) => needsDecisionTasks.has(taskIdentity(key)));
-    const eligible = !isCheckTrigger && !isNeedsDecisionTrigger && scope.eligible;
+    return triggerKeys.some((key) => needsDecisionTasks.has(taskIdentity(key)));
+  };
+
+  const offerWakeToBranch = (message: string): Promise<void> | null => {
+    const heartbeat = /^heartbeat($|:)/.test(message);
+    const isCheckTrigger = /^check:/.test(message);
+    const scope = scopeForUnreadWake(state, heartbeat);
+    const eligible = !isCheckTrigger && !decisionOwnedTrigger(message, scope) && scope.eligible;
     const offer = createBranchDispatchOffer(message, scope.projects, heartbeat, eligible);
     omp.events?.emit?.(FM_BRANCH_DISPATCH_EVENT, offer);
     return offer.accepted ? offer.settlement : null;
@@ -319,7 +332,7 @@ export default function (omp: ExtensionAPI) {
     armReadyTimeoutEnv: "FM_OMP_ARM_READY_TIMEOUT_MS",
     repairToolName: "fm_watch_arm_omp",
     encodeOperationalInput,
-    sendFollowUp: async (content) => sendWakeNotification(content),
+    sendFollowUp: async (content, options) => sendWakeNotification(content, options?.forceTurn === true),
     offerWakeToBranch,
     // Main-fallback burst coalescing (docs/omp-supervision-branch.md
     // "Main-fallback re-entry"): OMP reports main turn boundaries, so while one
@@ -327,6 +340,11 @@ export default function (omp: ExtensionAPI) {
     // preempts the active handler, and each boundary delivers zero or one
     // successor depending on unread main-owned rows.
     coalesceMainFallbackWakes: true,
+    // Decision-owned wakes bypass that same coalescing: they are never granted
+    // to the branch, so suppressing one behind an in-flight fallback wake
+    // would strand a captain-held task's only notification.
+    isDecisionOwnedWake: (message: string) =>
+      decisionOwnedTrigger(message, scopeForUnreadWake(state, /^heartbeat($|:)/.test(message))),
   });
 
   const deliverSessionstartNudge = (forceForNativeSwitch = false): void => {
