@@ -2,7 +2,7 @@
 name: firstmate-codexapp
 description: >-
   Agent-only playbook for coordinating visible Codex Desktop threads alongside Firstmate without pretending they are a selectable shell backend.
-  Use before creating, reading, steering, archiving, debugging, or reviewing a Codex App visible thread for Firstmate work, and before responding to requests to make Codex App native to Firstmate.
+  Use before creating, reading, steering, archiving, debugging, or reviewing a Codex App visible thread for Firstmate work, before responding to requests to make Codex App native to Firstmate, before evaluating a Codex App backend request, or before reconciling Codex Desktop host-tool smoke evidence for Firstmate work.
 user-invocable: false
 metadata:
   internal: true

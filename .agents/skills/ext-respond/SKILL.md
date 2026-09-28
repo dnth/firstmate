@@ -18,6 +18,7 @@ A request arrives through the watcher as a `check:` wake whose payload is `ext-r
 The full request is stashed locally; this skill acts on it and emits one or more local outbox payloads that the gateway plugin posts back to the originating Discord thread.
 
 This runs only when the local ext-bridge is on (`config/ext-bridge` plus a mode-0600 secret; see AGENTS.md "Local Communication Officer bridge").
+`docs/configuration.md` owns activation, generated state, allowlist, outbox receipts, and opt-out mechanics.
 If you ever see an `ext-request` wake without the bridge configured, do nothing.
 Do not use `FMX_PAIRING_TOKEN`, `bin/fm-x-*.sh`, `bin/fm-public-followup*.sh`, or pending-reply for this seam.
 
