@@ -497,6 +497,13 @@ if [ "$LEDGER_EXISTS" = true ]; then
     RECEIPT_COUNT=$((RECEIPT_COUNT + 1))
     printf '%s\n' "$line" \
       | jq -c '{criterion,outcome,captain_exception:(.captain_exception // "")}' >> "$LATEST"
+    EVIDENCED_NEXT="$TMP_ROOT/evidenced.next"
+    if [ -s "$EVIDENCED" ]; then
+      grep -Fxv "$receipt_criterion" "$EVIDENCED" > "$EVIDENCED_NEXT" || true
+    else
+      : > "$EVIDENCED_NEXT"
+    fi
+    mv "$EVIDENCED_NEXT" "$EVIDENCED"
     if [ "$(printf '%s' "$line" | jq -r '.outcome')" = success ]; then
       if grep -Fx "$receipt_criterion" "$ACTIVE_INVALIDATED" >/dev/null 2>&1; then
         receipt_head=$(printf '%s' "$line" | jq -r '.head // ""')
