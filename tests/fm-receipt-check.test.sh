@@ -2145,5 +2145,37 @@ test_direct_and_local_plans_never_query_no_mistakes
 test_local_completion_requires_fast_forward_readiness
 test_shared_local_default_resolver
 test_high_risk_and_uncertain_inputs_fail_safe
-test_direct_and_local_modes_never_invoke_no_mistakes
-test_complete_refuses_done_without_artifact
+test_accepted_blocked_accounts_without_evidencing() {
+  local id=accepted-blocked id2=still-missing out rc base project
+  base=$(make_project "$id" no-mistakes docs)
+  add_receipt "$id" AC1 lint "passed" CHANGELOG.md
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC2 manual "blocked by design" "no live provider credentials" \
+    --outcome accepted-blocked --captain-exception "2026-09-29 captain sanctioned AC2 as blocked" >/dev/null \
+    || fail "accepted-blocked receipt failed"
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id") || fail "an accepted-blocked criterion left the check incomplete"
+  printf '%s' "$out" | jq -e '
+    .status == "complete" and .evidenced == ["AC1"] and .missing == []
+    and .accepted_blocked == [{criterion:"AC2", captain_exception:"2026-09-29 captain sanctioned AC2 as blocked"}]
+  ' >/dev/null || fail "accepted-blocked criterion was not reported distinctly"
+  FM_HOME="$HOME_DIR" "$CHECK" "$id" --implementation-complete >/dev/null \
+    || fail "implementation completion refused an accepted-blocked task"
+  out=$(FM_FAKE_NM_STATUS='' FM_HOME="$HOME_DIR" "$CHECK" "$id" --plan --base "$base") \
+    || fail "plan refused a task whose only gap was accepted-blocked"
+  printf '%s' "$out" | jq -e '
+    .status == "planned" and .path == "receipts-mechanical"
+    and .accepted_blocked == [{criterion:"AC2", captain_exception:"2026-09-29 captain sanctioned AC2 as blocked"}]
+    and (.accepted_blocked_note | test("never auto-merges"))
+  ' >/dev/null || fail "plan output did not surface the accepted-blocked criterion"
+  write_brief "$id2" no-mistakes
+  add_receipt "$id2" AC1 test "1 passed"
+  add_receipt "$id2" AC2 manual "still blocked" "" skipped
+  out=$(FM_HOME="$HOME_DIR" "$CHECK" "$id2")
+  rc=$?
+  expect_code 1 "$rc" "a skipped criterion must stay missing"
+  printf '%s' "$out" | jq -e '.status == "missing" and .missing == ["AC2"] and .accepted_blocked == []' >/dev/null \
+    || fail "other outcomes changed behavior beside accepted-blocked"
+  pass "accepted-blocked accounts for its criterion without evidencing it and still refuses real gaps"
+}
+test_accepted_blocked_accounts_without_evidencing
+
+test_early_snapshot_failure_does_not_block_cleanup

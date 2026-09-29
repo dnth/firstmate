@@ -123,8 +123,9 @@ render_ship_delivery() {
   esac
   cat <<EOF
 # Acceptance evidence
-Before reporting implementation complete, record at least one compact receipt for every acceptance criterion with \`$FM_ROOT/bin/fm-receipt.sh $task_id <criterion> <type> <summary> <result> --outcome <success|failure|negative|zero|skipped|empty|placeholder|weak> [options]\`.
-Only \`--outcome success\` evidences a criterion; every other structured outcome records an unevidenced negative or inconclusive result.
+Before reporting implementation complete, record at least one compact receipt for every acceptance criterion with \`$FM_ROOT/bin/fm-receipt.sh $task_id <criterion> <type> <summary> <result> --outcome <success|failure|negative|zero|skipped|empty|placeholder|weak|accepted-blocked> [options]\`.
+Only \`--outcome success\` evidences a criterion; \`accepted-blocked\` requires a non-empty \`--captain-exception "<text>"\` (the date plus the captain's own words or the board key that holds them) and accounts for the criterion without evidencing it; every other structured outcome records an unevidenced negative or inconclusive result.
+A task with any accepted-blocked criterion is never auto-merged; state those criteria and their exception references plainly in the PR description.
 Run \`$FM_ROOT/bin/fm-receipt-check.sh $task_id\` and do not append \`done:\` unless its JSON status is \`complete\`.
 After the implementation is committed and evidence is complete, run \`$FM_ROOT/bin/fm-receipt-check.sh $task_id --implementation-complete\` before any validation plan or implementation-complete \`done:\` report.
 Receipts are audit inputs rather than proof that every claim is trustworthy; keep summaries and results compact and point to commands or artifacts when useful.

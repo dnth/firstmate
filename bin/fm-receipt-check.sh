@@ -29,6 +29,15 @@
 # are invalid once completion is checked.
 # Only structurally valid receipts with outcome=success evidence their criterion;
 # result remains descriptive, so expected observations such as 401 stay usable.
+# A receipt with outcome=accepted-blocked is valid only when it carries a
+# non-empty captain_exception reference recorded verbatim by fm-receipt.sh; a
+# criterion whose latest receipt is a valid accepted-blocked is accounted for
+# without being evidenced, so planning, readiness, and completion can proceed.
+# The evidence check always reports those criteria in a distinct
+# accepted_blocked list with their exception references, never in evidenced,
+# and plan, readiness, and completion output surfaces them plainly so the PR
+# description can state them. Firstmate never auto-merges a task with any
+# accepted-blocked criterion.
 # --implementation-complete records one timestamp bound to the current clean
 # implementation head, refreshes it when that head changes, and remains
 # idempotent for repeated calls at the same head before --plan.
@@ -354,7 +363,7 @@ case "$KIND" in
       exit 2
     fi
     jq -cn --arg task "$ID" \
-      '{schema:"fm-evidence-check.v1",task:$task,kind:"non-ship",status:"not-applicable",required:[],evidenced:[],missing:[],invalid:[],receipt_count:0,ledger_exists:false}'
+      '{schema:"fm-evidence-check.v1",task:$task,kind:"non-ship",status:"not-applicable",required:[],evidenced:[],missing:[],invalid:[],accepted_blocked:[],receipt_count:0,ledger_exists:false}'
     exit 0
     ;;
   ship) ;;
@@ -399,11 +408,15 @@ esac
 CRITERIA="$TMP_ROOT/criteria.tsv"
 EVIDENCED="$TMP_ROOT/evidenced"
 INVALID="$TMP_ROOT/invalid"
+LATEST="$TMP_ROOT/latest.jsonl"
+ACCEPTED_BLOCKED="$TMP_ROOT/accepted-blocked"
 ACTIVE_INVALIDATED="$TMP_ROOT/active-invalidated"
 ACTIVE_INVALIDATIONS="$TMP_ROOT/active-invalidations.tsv"
 ACTIVE_REQUIREMENTS="$TMP_ROOT/active-requirements.tsv"
 : > "$EVIDENCED"
 : > "$INVALID"
+: > "$LATEST"
+: > "$ACCEPTED_BLOCKED"
 : > "$ACTIVE_INVALIDATED"
 : > "$ACTIVE_INVALIDATIONS"
 : > "$ACTIVE_REQUIREMENTS"
@@ -482,6 +495,8 @@ if [ "$LEDGER_EXISTS" = true ]; then
       continue
     fi
     RECEIPT_COUNT=$((RECEIPT_COUNT + 1))
+    printf '%s\n' "$line" \
+      | jq -c '{criterion,outcome,captain_exception:(.captain_exception // "")}' >> "$LATEST"
     if [ "$(printf '%s' "$line" | jq -r '.outcome')" = success ]; then
       if grep -Fx "$receipt_criterion" "$ACTIVE_INVALIDATED" >/dev/null 2>&1; then
         receipt_head=$(printf '%s' "$line" | jq -r '.head // ""')
@@ -502,12 +517,20 @@ while IFS=$'\t' read -r _criterion required_boundary; do
 done < "$ACTIVE_REQUIREMENTS"
 
 REQUIRED_JSON=$(cut -f1 "$CRITERIA" | jq -Rsc 'split("\n") | map(select(length > 0))')
+ACCEPTED_BLOCKED_JSON=$(jq -sc --argjson required "$REQUIRED_JSON" '
+  (reduce .[] as $r ({}; .[$r.criterion] = $r)) as $latest
+  | [$required[] | . as $c | select($latest[$c].outcome == "accepted-blocked")
+      | {criterion:$c, captain_exception:$latest[$c].captain_exception}]
+' "$LATEST")
+printf '%s' "$ACCEPTED_BLOCKED_JSON" | jq -r '.[].criterion' > "$ACCEPTED_BLOCKED"
 EVIDENCED_ORDERED="$TMP_ROOT/evidenced-ordered"
 MISSING="$TMP_ROOT/missing"
 : > "$EVIDENCED_ORDERED"
 : > "$MISSING"
 while IFS=$'\t' read -r criterion _description; do
-  if grep -Fx "$criterion" "$EVIDENCED" >/dev/null 2>&1; then
+  if grep -Fx "$criterion" "$ACCEPTED_BLOCKED" >/dev/null 2>&1; then
+    :
+  elif grep -Fx "$criterion" "$EVIDENCED" >/dev/null 2>&1; then
     printf '%s\n' "$criterion" >> "$EVIDENCED_ORDERED"
   else
     printf '%s\n' "$criterion" >> "$MISSING"
@@ -536,9 +559,10 @@ CHECK_JSON=$(jq -cn \
   --argjson evidenced "$EVIDENCED_JSON" \
   --argjson missing "$MISSING_JSON" \
   --argjson invalid "$INVALID_JSON" \
+  --argjson accepted_blocked "$ACCEPTED_BLOCKED_JSON" \
   --argjson receipt_count "$RECEIPT_COUNT" \
   --argjson ledger_exists "$LEDGER_EXISTS" \
-  '{schema:"fm-evidence-check.v1",task:$task,kind:"ship",status:$status,required:$required,evidenced:$evidenced,missing:$missing,invalid:$invalid,receipt_count:$receipt_count,ledger:$ledger,ledger_exists:$ledger_exists}')
+  '{schema:"fm-evidence-check.v1",task:$task,kind:"ship",status:$status,required:$required,evidenced:$evidenced,missing:$missing,invalid:$invalid,accepted_blocked:$accepted_blocked,receipt_count:$receipt_count,ledger:$ledger,ledger_exists:$ledger_exists}')
 
 if [ "$ACTION" = check ]; then
   printf '%s\n' "$CHECK_JSON"
@@ -591,7 +615,8 @@ if [ "$ACTION" = implementation-complete ]; then
   fi
   release_validation_lock
   jq -cn --arg task "$ID" --argjson completed_at "$IMPLEMENTATION_COMPLETED" --arg completed_head "$IMPLEMENTATION_HEAD" \
-    '{schema:"fm-implementation-completion.v1",task:$task,status:"completed",completed_at:$completed_at,completed_head:$completed_head}'
+    --argjson accepted_blocked "$ACCEPTED_BLOCKED_JSON" \
+    '{schema:"fm-implementation-completion.v1",task:$task,status:"completed",completed_at:$completed_at,completed_head:$completed_head,accepted_blocked:$accepted_blocked}'
   exit 0
 fi
 
@@ -758,7 +783,8 @@ verify_mechanical_ready() {
 
 if [ "$ACTION" = mechanical-ready ]; then
   verify_mechanical_ready || exit 2
-  jq -cn --arg task "$ID" '{schema:"fm-mechanical-readiness.v1",task:$task,status:"ready"}'
+  jq -cn --arg task "$ID" --argjson accepted_blocked "$ACCEPTED_BLOCKED_JSON" \
+    '{schema:"fm-mechanical-readiness.v1",task:$task,status:"ready",accepted_blocked:$accepted_blocked}'
   exit 0
 fi
 
@@ -993,7 +1019,8 @@ if [ "$ACTION" = complete ]; then
   record_validation_completed || exit 2
   jq -cn --arg task "$ID" --argjson completed_at "$VALIDATION_COMPLETED" --arg completed_head "$VALIDATION_COMPLETED_HEAD" \
     --arg path "$VALIDATION_COMPLETED_PATH" --arg evidence "$VALIDATION_COMPLETED_EVIDENCE" \
-    '{schema:"fm-validation-completion.v1",task:$task,status:"completed",completed_at:$completed_at,completed_head:$completed_head,path:$path,evidence:$evidence}'
+    --argjson accepted_blocked "$ACCEPTED_BLOCKED_JSON" \
+    '{schema:"fm-validation-completion.v1",task:$task,status:"completed",completed_at:$completed_at,completed_head:$completed_head,path:$path,evidence:$evidence,accepted_blocked:$accepted_blocked}'
   exit 0
 fi
 
@@ -1216,5 +1243,7 @@ jq -cn --arg task "$ID" --arg mode "$MODE" --arg tier "$TIER" --arg path "$VALID
   --arg push_command "$PUSH_COMMAND" --arg pr_command "$PR_COMMAND" --arg done_status "$DONE_STATUS" \
   --arg register_command "$REGISTER_COMMAND" \
   --argjson diff_files "$DIFF_FILES" --argjson diff_lines "$DIFF_LINES" \
-  '{schema:"fm-validation-plan.v1",task:$task,status:"planned",mode:$mode,tier:$tier,path:$path,reason:$reason,base:$base,head:$head,generation:$generation,diff_files:$diff_files,diff_lines:$diff_lines}
-   + (if $path == "receipts-mechanical" then {receipt_command:$receipt_command,mechanical_command:$mechanical_command,push_command:$push_command,pr_command:$pr_command,done_status:$done_status,register_command:$register_command} else {} end)'
+  --argjson accepted_blocked "$ACCEPTED_BLOCKED_JSON" \
+  '{schema:"fm-validation-plan.v1",task:$task,status:"planned",mode:$mode,tier:$tier,path:$path,reason:$reason,base:$base,head:$head,generation:$generation,diff_files:$diff_files,diff_lines:$diff_lines,accepted_blocked:$accepted_blocked}
+   + (if $path == "receipts-mechanical" then {receipt_command:$receipt_command,mechanical_command:$mechanical_command,push_command:$push_command,pr_command:$pr_command,done_status:$done_status,register_command:$register_command} else {} end)
+   + (if ($accepted_blocked | length) > 0 then {accepted_blocked_note:"state these captain-accepted blocked criteria and their exception references plainly in the PR description; firstmate never auto-merges a task with any accepted-blocked criterion"} else {} end)'

@@ -14,7 +14,15 @@
 #
 # Options:
 #   --outcome <status> Required structured outcome: success, failure, negative,
-#                      zero, skipped, empty, placeholder, or weak.
+#                      zero, skipped, empty, placeholder, weak, or
+#                      accepted-blocked.
+#   --captain-exception <text>
+#                      Required with --outcome accepted-blocked and refused with
+#                      every other outcome; records the captain's explicit
+#                      blocked acceptance verbatim (date plus the captain's own
+#                      words or the board key that holds them). Never inferred
+#                      or defaulted. An accepted-blocked receipt accounts for
+#                      its criterion without evidencing it.
 #   --result <text>    Observed result when it is not supplied positionally.
 #   --command <text>   Command that produced the evidence.
 #   --artifact <path>  Artifact or URL carrying the evidence.
@@ -54,6 +62,7 @@ OUTCOME=
 COMMAND=
 ARTIFACT=
 FILE_POINTER=
+CAPTAIN_EXCEPTION=
 
 if [ "$#" -gt 0 ]; then
   case "$1" in
@@ -66,7 +75,7 @@ while [ "$#" -gt 0 ]; do
   option=$1
   shift
   case "$option" in
-    --outcome|--result|--command|--artifact|--file)
+    --outcome|--result|--command|--artifact|--file|--captain-exception)
       [ "$#" -gt 0 ] || { echo "error: $option requires a value" >&2; exit 2; }
       value=$1
       shift
@@ -76,6 +85,7 @@ while [ "$#" -gt 0 ]; do
         --command) COMMAND=$value ;;
         --artifact) ARTIFACT=$value ;;
         --file) FILE_POINTER=$value ;;
+        --captain-exception) CAPTAIN_EXCEPTION=$value ;;
       esac
       ;;
     *) echo "error: unknown option: $option" >&2; exit 2 ;;
@@ -90,6 +100,14 @@ case "$ID" in
 esac
 command -v jq >/dev/null 2>&1 || { echo "error: jq is required" >&2; exit 1; }
 
+if [ "$OUTCOME" = accepted-blocked ]; then
+  [ -n "$(printf '%s' "$CAPTAIN_EXCEPTION" | tr -d '[:space:]')" ] \
+    || { echo "error: --outcome accepted-blocked requires a non-empty --captain-exception reference" >&2; exit 2; }
+elif [ -n "$CAPTAIN_EXCEPTION" ]; then
+  echo "error: --captain-exception applies only to --outcome accepted-blocked" >&2
+  exit 2
+fi
+
 receipt=$(jq -cn \
   --arg criterion "$CRITERION" \
   --arg type "$TYPE" \
@@ -98,11 +116,13 @@ receipt=$(jq -cn \
   --arg result "$RESULT" \
   --arg command "$COMMAND" \
   --arg artifact "$ARTIFACT" \
-  --arg file "$FILE_POINTER" '
+  --arg file "$FILE_POINTER" \
+  --arg captain_exception "$CAPTAIN_EXCEPTION" '
     {criterion:$criterion,type:$type,outcome:$outcome,summary:$summary,result:$result}
     + (if $command == "" then {} else {command:$command} end)
     + (if $artifact == "" then {} else {artifact:$artifact} end)
     + (if $file == "" then {} else {file:$file} end)
+    + (if $captain_exception == "" then {} else {captain_exception:$captain_exception} end)
   ')
 printf '%s\n' "$receipt" | "$SCRIPT_DIR/fm-receipt-schema.sh" \
   || { echo "error: invalid receipt schema" >&2; exit 2; }

@@ -437,8 +437,46 @@ EOF
   pass "fm-receipt physicalizes trusted home prefixes but rejects data symlinks"
 }
 
+test_accepted_blocked_requires_captain_exception() {
+  local id=accepted-blocked out rc ledger
+  write_ship "$id"
+  ledger="$HOME_DIR/data/$id/evidence.jsonl"
+  out=$(FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC2 manual \
+    "live provider credentials do not exist" "blocked: no provider credentials" \
+    --outcome accepted-blocked --captain-exception "2026-09-29 captain: sanctioned as blocked by design") \
+    || fail "accepted-blocked receipt append failed"
+  printf '%s' "$out" | jq -e '
+    .criterion == "AC2" and .outcome == "accepted-blocked"
+    and .captain_exception == "2026-09-29 captain: sanctioned as blocked by design"
+  ' >/dev/null || fail "accepted-blocked receipt did not record the exception verbatim"
+  jq -e 'select(.captain_exception == "2026-09-29 captain: sanctioned as blocked by design")' \
+    "$ledger" >/dev/null || fail "ledger did not record the captain exception verbatim"
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test summary passed --outcome accepted-blocked >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "accepted-blocked was accepted without a captain exception"
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test summary passed \
+    --outcome accepted-blocked --captain-exception '   ' >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "accepted-blocked accepted a whitespace-only captain exception"
+  FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test summary passed \
+    --outcome success --captain-exception "stray reference" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a captain exception leaked onto a non-accepted-blocked outcome"
+  printf '%s\n' '{"criterion":"AC1","type":"test","outcome":"accepted-blocked","summary":"x","result":"blocked"}' \
+    | "$SCHEMA" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "receipt schema accepted accepted-blocked without a captain exception"
+  printf '%s\n' '{"criterion":"AC1","type":"test","outcome":"success","summary":"x","result":"passed","captain_exception":"x"}' \
+    | "$SCHEMA" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "receipt schema accepted a captain exception on another outcome"
+  [ "$(wc -l < "$ledger" | tr -d ' ')" -eq 1 ] || fail "a refused accepted-blocked receipt mutated the ledger"
+  pass "fm-receipt gates accepted-blocked on a verbatim captain exception"
+}
+
 test_appends_one_compact_valid_receipt
 test_append_is_additive_and_result_flag_works
+test_accepted_blocked_requires_captain_exception
 test_head_binding_is_canonical
 test_large_receipt_is_appended_completely
 test_rejects_invalid_schema_and_undeclared_criteria
