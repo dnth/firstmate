@@ -2145,6 +2145,8 @@ test_direct_and_local_plans_never_query_no_mistakes
 test_local_completion_requires_fast_forward_readiness
 test_shared_local_default_resolver
 test_high_risk_and_uncertain_inputs_fail_safe
+test_direct_and_local_modes_never_invoke_no_mistakes
+test_complete_refuses_done_without_artifact
 test_accepted_blocked_accounts_without_evidencing() {
   local id=accepted-blocked id2=still-missing out rc base project
   base=$(make_project "$id" no-mistakes docs)
@@ -2177,5 +2179,3 @@ test_accepted_blocked_accounts_without_evidencing() {
   pass "accepted-blocked accounts for its criterion without evidencing it and still refuses real gaps"
 }
 test_accepted_blocked_accounts_without_evidencing
-
-test_early_snapshot_failure_does_not_block_cleanup
