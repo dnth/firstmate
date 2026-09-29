@@ -6,6 +6,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/bin/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/bin/fm-classify-lib.sh"
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 TMP_ROOT=$(fm_test_tmproot fm-remote-reply)
@@ -242,6 +244,60 @@ assert_grep "offset=$mixed_offset" "$PARENT/state/remote-replies/ios.cursor" \
 assert_present "$PARENT/state/procevent/$SID.source" "mixed handling did not re-arm the source"
 pass "mixed autonomous and correlated reports preserve exact resolution and cursor continuity"
 
+# A structured status line may carry a decision key AND a correlation token
+# before the colon, in either order. Ingest accepts exactly the space-delimited
+# [key=...]/[corr=...] token set the classifier treats as structured, so a
+# keyed correlated report resolves its pending request and folds a keyed
+# decision rather than "default".
+KEYED_CORR=$(fm_pending_reply_create "$PARENT" "$PARENT/state" ios "await keyed correlated report")
+fm_pending_reply_mark_delivered "$PARENT/state" "$KEYED_CORR" \
+  || fail "could not create keyed reply expectation"
+printf 'working [key=qa-gate] [corr=%s]: final validation under way\nresolved [corr=%s] [key=qa-gate]: final validation passed\n' \
+  "$KEYED_CORR" "$KEYED_CORR" >> "$REMOTE/state/parent-replies.status"
+remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
+  || fail "keyed correlated reply generation was not captured"
+RESULT_SIX="$PARENT/state/procevent-inbox/$SID.6.result"
+out=$(remote_env "$ADAPTER" handle ios 6 "$RESULT_SIX")
+assert_contains "$out" 'ingested: ios appended=2' "keyed correlated replies were not ingested"
+assert_contains "$out" 'handled: remote-reply-ios 6' "keyed correlated capture was not acknowledged"
+assert_grep "working [key=qa-gate] [corr=$KEYED_CORR]: final validation under way" "$PARENT/state/ios.status" \
+  "keyed correlated report did not reach parent status"
+assert_grep "resolved [corr=$KEYED_CORR] [key=qa-gate]: final validation passed" "$PARENT/state/ios.status" \
+  "corr-first keyed report did not reach parent status"
+[ "$(fm_pending_reply_get "$(fm_pending_reply_path "$PARENT/state" "$KEYED_CORR")" phase)" = resolved ] \
+  || fail "keyed correlated report did not resolve its parent request"
+[ "$(status_line_verb "working [key=qa-gate] [corr=$KEYED_CORR]: x")" = working ] \
+  || fail "classifier did not treat the two-token prefix as structured"
+[ "$(_fm_decision_key "working [key=qa-gate] [corr=$KEYED_CORR]: x")" = qa-gate ] \
+  || fail "keyed correlated report folded to the default decision key"
+keyed_offset=$(LC_ALL=C wc -c < "$REMOTE/state/parent-replies.status" | tr -d ' ')
+assert_grep "offset=$keyed_offset" "$PARENT/state/remote-replies/ios.cursor" \
+  "keyed correlated generation did not advance the cursor"
+assert_present "$PARENT/state/procevent/$SID.source" "keyed correlated handling did not re-arm the source"
+pass "keyed correlated status lines ingest, resolve their request, and fold their key"
+
+# Lines the classifier would not treat as structured are still rejected. Append
+# them to the live source and capture a real delta so continuity and digest
+# validation cannot mask the status-line check.
+cursor_before_bad="$TMP_ROOT/cursor-before-bad"
+cp "$PARENT/state/remote-replies/ios.cursor" "$cursor_before_bad"
+printf 'working [note=one]: arbitrary bracket is not structured\nworking [key=a][corr=b]: glued tokens are not structured\nworking [key=foo bar]: spaced token body is not structured\nworking [key=foo:bar]: colon token body is not structured\n' \
+  >> "$REMOTE/state/parent-replies.status"
+remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
+  || fail "unstructured reply generation was not captured"
+STRUCT_BAD_RESULT="$PARENT/state/procevent-inbox/$SID.7.result"
+set +e
+remote_env "$ADAPTER" handle ios 7 "$STRUCT_BAD_RESULT" > "$TMP_ROOT/struct-bad.out" 2>&1
+struct_bad_rc=$?
+set -e
+[ "$struct_bad_rc" -ne 0 ] || fail "ingest accepted status lines the classifier treats as unstructured"
+cmp -s "$cursor_before_bad" "$PARENT/state/remote-replies/ios.cursor" \
+  || fail "invalid status lines advanced the remote reply cursor"
+pass "ingest rejects unstructured bracket tokens on a real captured delta"
+
+remote_env "$ADAPTER" arm ios >/dev/null \
+  || fail "remote reply source was not re-armed after rejected status lines"
+
 # A digest-valid unknown lifecycle verb is still rejected at the public ingest
 # boundary. Recalculate its payload commitment so the behavioral assertion is
 # specifically about status validation, not incidental digest failure.
@@ -270,23 +326,24 @@ printf 'failed [corr=fedcba9876543210]: source was replaced\n' > "$REMOTE/state/
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/start-two.out" 2>&1 &
 RUNNER=$!
 wait "$RUNNER" || fail "continuity break was not captured as a structured result"
-RESULT_SIX=$(find "$PARENT/state/procevent-inbox" -name "$SID.6.result" -print -quit)
-[ -n "$RESULT_SIX" ] || fail "continuity break produced no durable result"
-[ "$(remote_env "$ADAPTER" classify "$RESULT_SIX")" = continuity-broken ] \
+RESULT_SEVEN=$(find "$PARENT/state/procevent-inbox" -name "$SID.8.result" -print -quit)
+[ -n "$RESULT_SEVEN" ] || fail "continuity break produced no durable result"
+[ "$(remote_env "$ADAPTER" classify "$RESULT_SEVEN")" = continuity-broken ] \
   || fail "truncated source was not classified as a continuity break"
 set +e
-remote_env "$ADAPTER" handle ios 6 "$RESULT_SIX" > "$TMP_ROOT/handle-six.out" 2>&1
+remote_env "$ADAPTER" handle ios 8 "$RESULT_SEVEN" > "$TMP_ROOT/handle-seven.out" 2>&1
 handle_rc=$?
 set -e
 [ "$handle_rc" -eq 3 ] || fail "continuity handling returned an unexpected status: $handle_rc"
 assert_grep 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status" "continuity break did not escalate"
 assert_absent "$PARENT/state/procevent/$SID.source" "continuity break was re-armed without an operator rebase"
-remote_env "$ADAPTER" ingest ios "$RESULT_SIX" >/dev/null 2>&1 || true
+remote_env "$ADAPTER" ingest ios "$RESULT_SEVEN" >/dev/null 2>&1 || true
 [ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 1 ] \
   || fail "continuity replay duplicated the escalation"
+rm -f "$STRUCT_BAD_RESULT"
 pass "truncation is detected, escalated once, and not silently rebased"
 
-rm -f "$PARENT/state/procevent-inbox/$SID.6.handled"
+rm -f "$PARENT/state/procevent-inbox/$SID.8.handled"
 if remote_env "$ADAPTER" retire ios > "$TMP_ROOT/retire-pending.out" 2>&1; then
   fail "remote reply retirement accepted an unhandled captured result"
 fi
@@ -294,7 +351,7 @@ assert_grep 'unhandled captured result' "$TMP_ROOT/retire-pending.out" \
   "remote reply retirement did not explain its pending-result refusal"
 assert_absent "$PARENT/state/procevent/$SID.source" \
   "refused retirement left the reply source running past its pending-result check"
-remote_env "$ADAPTER" handle ios 6 "$RESULT_SIX" >/dev/null 2>&1 || [ "$?" -eq 3 ] \
+remote_env "$ADAPTER" handle ios 8 "$RESULT_SEVEN" >/dev/null 2>&1 || [ "$?" -eq 3 ] \
   || fail "pending continuity result could not be acknowledged after retirement refusal"
 remote_env "$ADAPTER" retire ios >/dev/null
 assert_absent "$PARENT/state/remote-replies/ios.cursor" "adapter retirement left its cursor"
