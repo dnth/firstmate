@@ -276,26 +276,27 @@ assert_grep "offset=$keyed_offset" "$PARENT/state/remote-replies/ios.cursor" \
 assert_present "$PARENT/state/procevent/$SID.source" "keyed correlated handling did not re-arm the source"
 pass "keyed correlated status lines ingest, resolve their request, and fold their key"
 
-# Lines the classifier would not treat as structured are still rejected, even
-# with a valid transport digest: an arbitrary bracket token, and two tokens
-# glued without a space.
-STRUCT_BAD_RESULT="$TMP_ROOT/struct-bad.result"
-cp "$RESULT_SIX" "$STRUCT_BAD_RESULT"
-boundary=$(grep -n -m 1 '^$' "$STRUCT_BAD_RESULT" | cut -d: -f1)
-tail -n "+$((boundary + 1))" "$STRUCT_BAD_RESULT" > "$TMP_ROOT/struct-bad.payload"
-printf 'working [note=one]: arbitrary bracket is not structured\nworking [key=a][corr=b]: glued tokens are not structured\n' \
-  >> "$TMP_ROOT/struct-bad.payload"
-bad_bytes=$(LC_ALL=C wc -c < "$TMP_ROOT/struct-bad.payload" | tr -d ' ')
-bad_hash=$(sha256_file "$TMP_ROOT/struct-bad.payload")
-bad_to=$(( $(sed -n 's/^from_offset=//p' "$STRUCT_BAD_RESULT") + bad_bytes ))
-head -n "$boundary" "$STRUCT_BAD_RESULT" \
-  | sed "s/^payload_sha256=.*/payload_sha256=$bad_hash/;s/^payload_bytes=.*/payload_bytes=$bad_bytes/;s/^to_offset=.*/to_offset=$bad_to/" \
-  > "$TMP_ROOT/struct-bad.header"
-cat "$TMP_ROOT/struct-bad.header" "$TMP_ROOT/struct-bad.payload" > "$STRUCT_BAD_RESULT"
-if remote_env "$ADAPTER" ingest ios "$STRUCT_BAD_RESULT" >/dev/null 2>&1; then
-  fail "ingest accepted status lines the classifier treats as unstructured"
-fi
-pass "ingest still rejects unstructured bracket tokens and glued tokens"
+# Lines the classifier would not treat as structured are still rejected. Append
+# them to the live source and capture a real delta so continuity and digest
+# validation cannot mask the status-line check.
+cursor_before_bad="$TMP_ROOT/cursor-before-bad"
+cp "$PARENT/state/remote-replies/ios.cursor" "$cursor_before_bad"
+printf 'working [note=one]: arbitrary bracket is not structured\nworking [key=a][corr=b]: glued tokens are not structured\nworking [key=foo bar]: spaced token body is not structured\nworking [key=foo:bar]: colon token body is not structured\n' \
+  >> "$REMOTE/state/parent-replies.status"
+remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
+  || fail "unstructured reply generation was not captured"
+STRUCT_BAD_RESULT="$PARENT/state/procevent-inbox/$SID.7.result"
+set +e
+remote_env "$ADAPTER" handle ios 7 "$STRUCT_BAD_RESULT" > "$TMP_ROOT/struct-bad.out" 2>&1
+struct_bad_rc=$?
+set -e
+[ "$struct_bad_rc" -ne 0 ] || fail "ingest accepted status lines the classifier treats as unstructured"
+cmp -s "$cursor_before_bad" "$PARENT/state/remote-replies/ios.cursor" \
+  || fail "invalid status lines advanced the remote reply cursor"
+pass "ingest rejects unstructured bracket tokens on a real captured delta"
+
+remote_env "$ADAPTER" arm ios >/dev/null \
+  || fail "remote reply source was not re-armed after rejected status lines"
 
 # A digest-valid unknown lifecycle verb is still rejected at the public ingest
 # boundary. Recalculate its payload commitment so the behavioral assertion is
@@ -325,12 +326,12 @@ printf 'failed [corr=fedcba9876543210]: source was replaced\n' > "$REMOTE/state/
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/start-two.out" 2>&1 &
 RUNNER=$!
 wait "$RUNNER" || fail "continuity break was not captured as a structured result"
-RESULT_SEVEN=$(find "$PARENT/state/procevent-inbox" -name "$SID.7.result" -print -quit)
+RESULT_SEVEN=$(find "$PARENT/state/procevent-inbox" -name "$SID.8.result" -print -quit)
 [ -n "$RESULT_SEVEN" ] || fail "continuity break produced no durable result"
 [ "$(remote_env "$ADAPTER" classify "$RESULT_SEVEN")" = continuity-broken ] \
   || fail "truncated source was not classified as a continuity break"
 set +e
-remote_env "$ADAPTER" handle ios 7 "$RESULT_SEVEN" > "$TMP_ROOT/handle-seven.out" 2>&1
+remote_env "$ADAPTER" handle ios 8 "$RESULT_SEVEN" > "$TMP_ROOT/handle-seven.out" 2>&1
 handle_rc=$?
 set -e
 [ "$handle_rc" -eq 3 ] || fail "continuity handling returned an unexpected status: $handle_rc"
@@ -339,9 +340,10 @@ assert_absent "$PARENT/state/procevent/$SID.source" "continuity break was re-arm
 remote_env "$ADAPTER" ingest ios "$RESULT_SEVEN" >/dev/null 2>&1 || true
 [ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 1 ] \
   || fail "continuity replay duplicated the escalation"
+rm -f "$STRUCT_BAD_RESULT"
 pass "truncation is detected, escalated once, and not silently rebased"
 
-rm -f "$PARENT/state/procevent-inbox/$SID.7.handled"
+rm -f "$PARENT/state/procevent-inbox/$SID.8.handled"
 if remote_env "$ADAPTER" retire ios > "$TMP_ROOT/retire-pending.out" 2>&1; then
   fail "remote reply retirement accepted an unhandled captured result"
 fi
@@ -349,7 +351,7 @@ assert_grep 'unhandled captured result' "$TMP_ROOT/retire-pending.out" \
   "remote reply retirement did not explain its pending-result refusal"
 assert_absent "$PARENT/state/procevent/$SID.source" \
   "refused retirement left the reply source running past its pending-result check"
-remote_env "$ADAPTER" handle ios 7 "$RESULT_SEVEN" >/dev/null 2>&1 || [ "$?" -eq 3 ] \
+remote_env "$ADAPTER" handle ios 8 "$RESULT_SEVEN" >/dev/null 2>&1 || [ "$?" -eq 3 ] \
   || fail "pending continuity result could not be acknowledged after retirement refusal"
 remote_env "$ADAPTER" retire ios >/dev/null
 assert_absent "$PARENT/state/remote-replies/ios.cursor" "adapter retirement left its cursor"
