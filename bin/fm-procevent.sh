@@ -74,11 +74,14 @@
 # and given its terminal verdict, the runner calls
 # `bin/fm-procevent-<adapter>.sh autohandle <source-id> <sequence> <result-file>`,
 # and reconcile offers every still-unhandled result the same way before its
-# registration sweep. Exit 0 means the adapter fully handled the result AND
-# recorded the durable handled acknowledgement itself, so a source it
-# re-registered is started again in the same step; any other exit - including an
-# adapter that lacks the command - leaves the result pending and announced
-# exactly as without the seam. Separately, `handled-gate <source-id> <sequence>
+# registration sweep - in a detached process, because an adapter's handling may
+# call the network and must never stall the watcher cycle; a detached handle
+# that re-registers its source starts it before exiting. Exit 0 means the
+# adapter fully handled the result AND recorded the durable handled
+# acknowledgement itself, so a source it re-registered is started again by that
+# same process; any other exit - including an adapter that lacks the command -
+# leaves the result pending and announced exactly as without the seam.
+# Separately, `handled-gate <source-id> <sequence>
 # <result-file>` gates a NEW `handled` acknowledgement: exit 0 allows it, any
 # other exit refuses it and writes no marker, so every adapter implements the
 # command even when the answer is unconditional.
@@ -127,7 +130,7 @@ REG=$(fm_procevent_registry_dir "$STATE")
 MAX_OUTPUT_BYTES=${FM_PROCEVENT_MAX_OUTPUT_BYTES:-1048576}
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,105p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,110p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 adapter_script() { printf '%s/bin/fm-procevent-%s.sh\n' "$FM_ROOT" "$1"; }
 
@@ -280,8 +283,13 @@ publish_pending() {
 }
 
 # Offer every still-unhandled captured result to its own adapter's autohandle
-# seam (see the header). Runs after publish_pending so an adapter's re-register
-# is observed by the registration sweep in the same reconcile cycle.
+# seam in a DETACHED process, never inline: an adapter's handling may call the
+# network (a remote reply's document fetch rides the SSH path, whose transport
+# budget is seconds-to-tens-of-seconds), and reconcile runs inside the watcher
+# cycle - a wedged remote must not stall the whole cycle. The adapter's own
+# non-blocking lifecycle lock makes overlapping attempts cheap, and a detached
+# attempt that re-registered its source starts it before exiting, so the repair
+# does not wait for the next reconcile.
 autohandle_pending() {
   local result id seq adapter
   while IFS= read -r result; do
@@ -291,8 +299,24 @@ autohandle_pending() {
     fm_procevent_source_id_valid "$id" || continue
     adapter=$(fm_procevent_result_adapter "$result" 2>/dev/null || true)
     [ -n "$adapter" ] || continue
-    adapter_autohandle "$adapter" "$id" "$seq" "$result" || true
+    isolate_process detach "$SCRIPT_DIR/fm-procevent.sh" _autohandle "$id" "$seq"
   done < <(fm_procevent_pending "$STATE")
+}
+
+# The detached half of autohandle_pending: handle the pending result through
+# its adapter, and on the seam's full-handling exit 0 start a source the
+# adapter re-registered, using the same check reconcile makes.
+cmd_autohandle_detached() {  # <source-id> <sequence>
+  local id=$1 seq=$2 result adapter
+  fm_procevent_source_id_valid "$id" || exit 1
+  case "$seq" in ''|*[!0-9]*) exit 1 ;; esac
+  result="$(fm_procevent_inbox_dir "$STATE")/$id.$seq.result"
+  [ -f "$result" ] && [ ! -L "$result" ] || exit 1
+  fm_procevent_is_handled "$STATE" "$id" "$seq" && exit 0
+  adapter=$(fm_procevent_result_adapter "$result" 2>/dev/null || true)
+  [ -n "$adapter" ] || exit 1
+  adapter_autohandle "$adapter" "$id" "$seq" "$result" || exit 0
+  procevent_start_unowned_source "$id" || true
 }
 
 # Start one command as the leader of a fresh process group, either waiting for
@@ -1055,6 +1079,7 @@ case "${1-}" in
   register)  shift; cmd_register "$@" ;;
   start)     shift; cmd_start_public "$@" ;;
   _start)    shift; cmd_start "$@" ;;
+  _autohandle) shift; cmd_autohandle_detached "$@" ;;
   _owner-watchdog) shift; cmd_owner_watchdog "$@" ;;
   reconcile) shift; cmd_reconcile "$@" ;;
   handled)   shift; cmd_handled "$@" ;;

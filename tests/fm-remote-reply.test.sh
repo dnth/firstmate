@@ -76,6 +76,14 @@ remote_env() {
   "$@"
 }
 
+file_mode() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %Lp "$1"
+  else
+    stat -c %a "$1"
+  fi
+}
+
 wait_for() {
   local path=$1
   for _ in $(seq 1 100); do
@@ -128,6 +136,38 @@ capture_delta() {  # <seq>: the new remote log line(s) must already be appended
 wait_handled() {  # <seq>: autohandle may still be committing after the capture lands
   wait_for "$PARENT/state/procevent-inbox/$SID.$1.handled" \
     || fail "captured remote reply generation $1 was never durably handled"
+}
+
+
+# Poll until a file's count= field reads the expected value.
+wait_count_eq() {  # <file> <expected>
+  local f=$1 want=$2 n=200
+  while [ "$n" -gt 0 ]; do
+    [ "$(sed -n 's/^count=//p' "$f" 2>/dev/null | head -1)" = "$want" ] && return 0
+    n=$((n - 1))
+    sleep 0.05
+  done
+  return 1
+}
+
+# Poll until a fixed string appears in a file.
+wait_absent() {  # <path>: poll until the path is gone
+  local path=$1 n=200
+  while [ "$n" -gt 0 ] && [ -e "$path" ]; do
+    n=$((n - 1))
+    sleep 0.05
+  done
+  [ ! -e "$path" ]
+}
+
+wait_line() {  # <file> <line>
+  local f=$1 line=$2 n=200
+  while [ "$n" -gt 0 ]; do
+    grep -Fq "$line" "$f" 2>/dev/null && return 0
+    n=$((n - 1))
+    sleep 0.05
+  done
+  return 1
 }
 
 # Hold the reply lifecycle lock so an autohandle exits busy (75) and leaves the
@@ -227,11 +267,20 @@ assert_no_grep 'working [corr=1111111111111111]' "$PARENT/state/ios.status" \
   "a lock-busy autohandle appended the reply anyway"
 assert_absent "$PARENT/state/procevent/$SID.source" \
   "a lock-busy autohandle left the source armed"
-reconcile_out=$(remote_env "$ROOT/bin/fm-procevent.sh" reconcile)
-assert_contains "$reconcile_out" 'published=1' \
-  "a lock-busy capture was not re-announced by reconcile"
+# Prove the busy semantics synchronously through the adapter seam itself:
+# while the lifecycle lock is held, autohandle exits 75 without touching
+# anything - no acknowledgement, no receipt, no failure counter, no alarm.
+set +e
+remote_env "$ADAPTER" autohandle "$SID" 2 "$RESULT_TWO" \
+  > "$TMP_ROOT/autohandle-busy.out" 2>&1
+busy_rc=$?
+set -e
+[ "$busy_rc" = 75 ] \
+  || fail "a lock-busy autohandle returned rc=$busy_rc instead of 75: $(cat "$TMP_ROOT/autohandle-busy.out")"
 assert_absent "$PARENT/state/procevent-inbox/$SID.2.handled" \
-  "a lock-busy reconcile acknowledged the captured result"
+  "a lock-busy autohandle acknowledged the captured result"
+assert_absent "$PARENT/state/remote-replies/ios.2.ingested" \
+  "a lock-busy autohandle left an ingest receipt"
 assert_absent "$PARENT/state/remote-replies/ios.2.autohandle-failures" \
   "a lock-busy autohandle counted a handling failure"
 assert_no_grep 'remote-reply-autohandle-ios' "$PARENT/state/ios.status" \
@@ -453,7 +502,7 @@ assert_no_grep 'zz-bidi' "$PARENT/state/ios.status" \
 assert_no_grep 'zz-del' "$PARENT/state/ios.status" \
   "a control-byte line reached the parent status channel"
 [ -d "$QDIR" ] || fail "rejected lines were not quarantined"
-qmode=$(stat -c '%a' "$QDIR")
+qmode=$(file_mode "$QDIR")
 [ "$qmode" = 700 ] || fail "quarantine directory is not mode 700 (got $qmode)"
 # Quarantine names use the raw line index; compare byte-exactly.
 for qi in 1 2 5 6; do
@@ -462,7 +511,7 @@ for qi in 1 2 5 6; do
   printf '%s' "$(sed -n "${qi}p" "$TMP_ROOT/mix.payload")" > "$TMP_ROOT/mix-line-$qi"
   cmp -s "$qf" "$TMP_ROOT/mix-line-$qi" \
     || fail "quarantined line $qi is not byte-identical to the rejected bytes"
-  qfmode=$(stat -c '%a' "$qf")
+  qfmode=$(file_mode "$qf")
   [ "$qfmode" = 600 ] || fail "quarantined line $qi is not mode 600 (got $qfmode)"
 done
 [ "$(find "$QDIR" -name '7.*.line' | wc -l | tr -d ' ')" = 4 ] \
@@ -581,20 +630,23 @@ wait_for "$counter_file" || fail "a failed autohandle left no failure counter"
   || fail "the first autohandle failure was not counted once"
 assert_no_grep 'remote-reply-autohandle-ios-9' "$PARENT/state/ios.status" \
   "a first autohandle failure already escalated"
+# Reconcile's autohandle offers run detached; wait deterministically for the
+# counter, not a fixed delay.
 remote_env "$ROOT/bin/fm-procevent.sh" reconcile >/dev/null
-[ "$(sed -n 's/^count=//p' "$counter_file" | head -1)" = 2 ] \
+wait_count_eq "$counter_file" 2 \
   || fail "the second autohandle failure was not counted"
 assert_no_grep 'remote-reply-autohandle-ios-9' "$PARENT/state/ios.status" \
   "autohandle failures escalated before the configured limit"
 remote_env "$ROOT/bin/fm-procevent.sh" reconcile >/dev/null
-[ "$(sed -n 's/^count=//p' "$counter_file" | head -1)" = 3 ] \
+wait_count_eq "$counter_file" 3 \
   || fail "the third autohandle failure was not counted"
-assert_grep 'blocked [key=remote-reply-autohandle-ios-9]: remote reply sequence 9 for ios failed automatic handling 3 consecutive times' \
-  "$PARENT/state/ios.status" \
-  "the autohandle failure limit did not produce one named blocked line"
-assert_grep 'data/reply/missing.md' "$PARENT/state/ios.status" \
-  "the autohandle escalation did not name the failing fetch"
+wait_line "$PARENT/state/ios.status" 'blocked [key=remote-reply-autohandle-ios-9]: remote reply sequence 9 for ios failed automatic handling 3 consecutive times' \
+  || fail "the autohandle failure limit did not produce one named blocked line"
+wait_line "$PARENT/state/ios.status" 'data/reply/missing.md' \
+  || fail "the autohandle escalation did not name the failing fetch"
 remote_env "$ROOT/bin/fm-procevent.sh" reconcile >/dev/null
+wait_count_eq "$counter_file" 4 \
+  || fail "the fourth autohandle failure was not counted"
 [ "$(grep -cF 'key=remote-reply-autohandle-ios-9' "$PARENT/state/ios.status" || true)" = 1 ] \
   || fail "autohandle failures past the limit escalated a second time"
 printf '# Found it\n' > "$REMOTE/data/reply/missing.md"
@@ -603,7 +655,9 @@ wait_handled 9
 assert_grep "done [corr=$DOC_CORR]: see data/remote-secondmates/ios/data/reply/missing.md" \
   "$PARENT/state/ios.status" \
   "the repaired document reply was never ingested"
-assert_absent "$counter_file" "a recovered autohandle left its failure counter"
+# The counter is cleared just after the handled marker, so wait for it.
+wait_absent "$counter_file" \
+  || fail "a recovered autohandle left its failure counter"
 [ "$(fm_pending_reply_get "$(fm_pending_reply_path "$PARENT/state" "$DOC_CORR")" phase)" = resolved ] \
   || fail "the recovered document reply did not resolve its parent request"
 pass "AC3/AC6: a transient ingest failure retries, escalates once at the limit, and recovers"
@@ -635,31 +689,62 @@ assert_present "$PARENT/state/procevent/$SID.source" \
 remote_env "$ROOT/bin/fm-procevent.sh" reconcile >/dev/null
 pass "AC4: ensure-armed repairs a live route and skips a suspended one"
 
+# Retirement still refuses while an unhandled capture exists, then succeeds
+# once it is handled and removes the cursor. The route is still armed from the
+# ensure-armed case above.
+# Hold the lifecycle lock so autohandle parks (rc75) and the capture stays
+# un-ingested for the refusal.
+hold_lifecycle_lock ios
+printf 'done: zz-retire-guard\n' >> "$REMOTE/state/parent-replies.status"
+capture_delta 10
+release_lifecycle_lock
+set +e
+remote_env "$ADAPTER" retire ios > "$TMP_ROOT/retire-refused.out" 2>&1
+retire_rc=$?
+set -e
+[ "$retire_rc" -ne 0 ] || fail "retire succeeded with an unhandled captured reply"
+assert_contains "$(cat "$TMP_ROOT/retire-refused.out")" 'unhandled' \
+  "the retirement refusal did not name the pending capture"
+# A reconcile retries the parked capture through the detached autohandle.
+remote_env "$ROOT/bin/fm-procevent.sh" reconcile >/dev/null
+wait_handled 10
+remote_env "$ADAPTER" retire ios > /dev/null
+assert_absent "$PARENT/state/procevent/$SID.source" \
+  "retire left the reply source registered"
+assert_absent "$PARENT/state/remote-replies/ios.cursor" \
+  "retire left the reply cursor"
+# Re-arm for the remainder of the test. The cursor was removed by retire, so
+# the next capture is a fresh full read that re-establishes it.
+remote_env "$ADAPTER" arm ios >/dev/null
+capture_delta 11
+wait_handled 11
+pass "retire refuses while a capture is unhandled and cleans up once handled"
+
 # AC2 continuity: the adapter re-armed at the committed cursor. Truncation is
 # detected from the next blocking source, escalated once with the sequence
 # named, and pinned until an operator rebases the cursor - arm and
 # ensure-armed both refuse.
 printf 'failed [corr=fedcba9876543210]: source was replaced\n' > "$REMOTE/state/parent-replies.status"
-capture_delta 10
-RESULT_TEN="$PARENT/state/procevent-inbox/$SID.10.result"
-[ "$(remote_env "$ADAPTER" classify "$RESULT_TEN")" = continuity-broken ] \
+capture_delta 12
+RESULT_BREAK="$PARENT/state/procevent-inbox/$SID.12.result"
+[ "$(remote_env "$ADAPTER" classify "$RESULT_BREAK")" = continuity-broken ] \
   || fail "truncated source was not classified as a continuity break"
-wait_handled 10
-assert_grep 'blocked [key=remote-reply-continuity-ios]: remote reply continuity broke for ios at sequence 10 (truncated)' \
+wait_handled 12
+assert_grep 'blocked [key=remote-reply-continuity-ios]: remote reply continuity broke for ios at sequence 12 (truncated)' \
   "$PARENT/state/ios.status" "continuity break did not escalate with its sequence"
 assert_present "$PARENT/state/remote-replies/ios.continuity-broken" \
   "continuity break left no durable marker"
 assert_absent "$PARENT/state/procevent/$SID.source" \
   "continuity break was re-armed without an operator rebase"
 out=$(remote_env "$ADAPTER" arm ios)
-assert_contains "$out" 'skipped: remote-reply-ios continuity broken at sequence 10' \
+assert_contains "$out" 'skipped: remote-reply-ios continuity broken at sequence 12' \
   "a continuity-broken route was re-armed"
 ensure_out=$(remote_env "$ADAPTER" ensure-armed)
-assert_contains "$ensure_out" 'skipped: remote-reply-ios continuity broken at sequence 10' \
+assert_contains "$ensure_out" 'skipped: remote-reply-ios continuity broken at sequence 12' \
   "ensure-armed re-armed a continuity-broken route"
 assert_absent "$PARENT/state/procevent/$SID.source" \
   "a continuity-broken route gained a registration"
-remote_env "$ADAPTER" ingest ios "$RESULT_TEN" >/dev/null 2>&1 || true
+remote_env "$ADAPTER" ingest ios "$RESULT_BREAK" >/dev/null 2>&1 || true
 [ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 1 ] \
   || fail "a replayed continuity break escalated twice"
 
@@ -676,5 +761,57 @@ assert_contains "$out" "armed: $SID offset=$log_bytes" \
 assert_absent "$PARENT/state/remote-replies/ios.continuity-broken" \
   "the continuity marker survived an operator rebase"
 pass "AC2: an operator rebase clears the continuity pin and the route arms at the new offset"
+
+# A NUL-only payload line is quarantined, never silently ignored: bash drops
+# NUL bytes when reading, so the zero-length test runs on the line file's size.
+printf '\0\0\0\n' > "$TMP_ROOT/nul.payload"
+craft_delta_result "$TMP_ROOT/nul.payload" "$TMP_ROOT/nul.result"
+out=$(remote_env "$ADAPTER" ingest ios "$TMP_ROOT/nul.result") \
+  || fail "adhoc ingest of a NUL-only line failed"
+assert_contains "$out" 'appended=0' "a NUL-only line was appended"
+printf '\0\0\0' > "$TMP_ROOT/nul.bytes"
+nul_file=$(find "$PARENT/state/remote-replies/ios.quarantine" -name 'adhoc-*.line' \
+  -exec sh -c 'cmp -s "$1" "$2" && printf "%s\n" "$1"' _ {} "$TMP_ROOT/nul.bytes" \; | head -1)
+[ -n "$nul_file" ] || fail "a NUL-only line was not quarantined"
+assert_grep '(forbidden-character,' "$PARENT/state/ios.status" \
+  "a NUL-only line was not quarantined as forbidden-character"
+pass "a NUL-only line is quarantined as forbidden bytes"
+
+# A second truncation AFTER the rebase is a new break at a new cursor position:
+# it records a fresh marker and escalates a new seq-named line, while a replay
+# of that same break point does not duplicate either.
+printf 'failed: second truncation\n' > "$REMOTE/state/parent-replies.status"
+capture_delta 13
+RESULT_BREAK_TWO="$PARENT/state/procevent-inbox/$SID.13.result"
+wait_handled 13
+assert_grep 'blocked [key=remote-reply-continuity-ios]: remote reply continuity broke for ios at sequence 13' \
+  "$PARENT/state/ios.status" "a post-rebase continuity break did not escalate its own sequence"
+[ "$(grep -cF 'key=remote-reply-continuity-ios' "$PARENT/state/ios.status")" -eq 2 ] \
+  || fail "a post-rebase continuity break did not produce a second escalation"
+remote_env "$ADAPTER" ingest ios "$RESULT_BREAK_TWO" >/dev/null 2>&1 || true
+[ "$(grep -cF 'key=remote-reply-continuity-ios' "$PARENT/state/ios.status")" -eq 2 ] \
+  || fail "a replayed post-rebase continuity break escalated a third time"
+pass "a post-rebase continuity break escalates once more; its replay does not"
+
+# A continuity-broken result superseded by the rebase can still be
+# acknowledged - it can never apply again, so it must not wedge the channel or
+# block arming forever. Copy the stale break to a fresh generation that was
+# never ingested.
+cp "$RESULT_BREAK_TWO" "$PARENT/state/procevent-inbox/$SID.14.result"
+printf 'remote-reply\n' > "$PARENT/state/procevent-inbox/$SID.14.adapter"
+# Rebase past the second break so seq 13's from position no longer matches.
+log_bytes=$(wc -c < "$REMOTE/state/parent-replies.status" | tr -d ' ')
+head -c "$log_bytes" "$REMOTE/state/parent-replies.status" > "$TMP_ROOT/log-prefix"
+log_hash=$(sha256_file "$TMP_ROOT/log-prefix")
+printf 'schema=fm-remote-reply-cursor.v1\noffset=%s\nprefix_sha256=%s\n' \
+  "$log_bytes" "$log_hash" > "$PARENT/state/remote-replies/ios.cursor"
+rm -f "$PARENT/state/remote-replies/ios.continuity-broken"
+out=$(remote_env "$ROOT/bin/fm-procevent.sh" handled "$SID" 14)
+assert_contains "$out" "handled: $SID 14" \
+  "a superseded continuity break was refused acknowledgement"
+out=$(remote_env "$ADAPTER" arm ios)
+assert_contains "$out" "armed: $SID offset=" \
+  "an acknowledged stale continuity break still blocked arming"
+pass "a superseded continuity-broken result acknowledges and clears the route"
 
 echo "ALL TESTS PASSED"

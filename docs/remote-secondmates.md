@@ -195,7 +195,7 @@ The send's success boundary is the durable inbox record, never the agent's later
 An unavailable programmatic delivery returns exit 6 with the request durably queued, and the machine line still reports the record.
 A doorbell queued without a receipt still returns exit 0 for the durable record, because the record itself is the delivery boundary.
 An identity or extension mismatch returns exit 9 before notification and requires reconciliation rather than resend.
-The delayed or missing `handled/` acknowledgement is observed by the parent's recovery classification, never as a send failure.
+A delayed or missing `handled/` acknowledgement is never a send failure; the parent's pending-reply expectation simply keeps waiting for the correlated reply on its ordinary recovery schedule.
 The existing typed `/exit` path keeps its separate `delivered-no-turn` exit 4 and `delivered-no-turn-persistence-failed` exit 5 behavior.
 
 Marked requests keep the existing correlation contract.

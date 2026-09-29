@@ -1130,10 +1130,14 @@ else
         exit 6
         ;;
       4)
-        echo "error: omp-native-queued: the named native request is queued without a receipt and may already have reached the session ($OMP_NATIVE_BINDING); do not resend" >&2
-        # Durable-result callers bound their success to the record itself, so a
-        # queued-but-unproven doorbell is still exit 0 for them.
-        [ "$TARGET_HARNESS" = omp ] && [ "$INBOX_OMP_DURABLE_RESULT" = 1 ] || exit 7
+        if [ "$TARGET_HARNESS" = omp ] && [ "$INBOX_OMP_DURABLE_RESULT" = 1 ]; then
+          # Durable-result callers bound their success to the record itself, so
+          # a queued-but-unproven doorbell is a notice, not an error.
+          echo "fm-send: omp-native-queued: the named native request is queued without a receipt and may already have reached the session ($OMP_NATIVE_BINDING); the record is durable and the watcher will re-ring" >&2
+        else
+          echo "error: omp-native-queued: the named native request is queued without a receipt and may already have reached the session ($OMP_NATIVE_BINDING); do not resend" >&2
+          exit 7
+        fi
         ;;
     esac
     if [ "$TARGET_HARNESS" = omp ] && { [ -n "$FM_TASK_INBOX_RING_OMP_REQUEST" ] || [ "$INBOX_RECORD_HANDLED" = 1 ]; }; then

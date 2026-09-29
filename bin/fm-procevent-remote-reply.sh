@@ -196,9 +196,10 @@ write_ingest_receipt() { # <id> <sequence> <result>
 
 result_field() { # <result> <field>
   local count
-  count=$(grep -c "^$2=" "$1" 2>/dev/null || true)
+  # -a because the result body may legally carry arbitrary payload bytes.
+  count=$(grep -ac "^$2=" "$1" 2>/dev/null || true)
   [ "$count" -eq 1 ] || return 1
-  grep "^$2=" "$1" | cut -d= -f2-
+  grep -a "^$2=" "$1" | cut -d= -f2-
 }
 
 classify_result() {
@@ -283,7 +284,8 @@ cmd_arm_locked() {  # <id> [handling-seq]
     mhash=$(sed -n 's/^prefix_sha256=//p' "$marker" | head -1)
     read_cursor "$id"
     if [ "$CURSOR_OFFSET" = "$moffset" ] && [ "$CURSOR_HASH" = "$mhash" ]; then
-      printf 'skipped: %s continuity broken at sequence %s\n'         "$sid" "$(sed -n 's/^seq=//p' "$marker" | head -1)"
+      printf 'skipped: %s continuity broken at sequence %s\n' \
+        "$sid" "$(sed -n 's/^seq=//p' "$marker" | head -1)"
       return 0
     fi
     rm -f -- "$marker" || return 1
@@ -452,7 +454,7 @@ cmd_ingest() {
     case "$hash" in *[!A-Fa-f0-9]*|'') die "result carries an invalid SHA-256 value" ;; esac
     [ "${#hash}" -eq 64 ] || die "result carries an invalid SHA-256 length"
   done
-  blank=$(grep -n -m 1 '^$' "$result" | cut -d: -f1)
+  blank=$(grep -an -m 1 '^$' "$result" | cut -d: -f1)
   case "$blank" in ''|*[!0-9]*) die "result has no payload boundary" ;; esac
   # Quarantine objects and escalation keys name the captured generation; an
   # adhoc ingest has none, so it names the result's own digest instead.
@@ -481,12 +483,23 @@ cmd_ingest() {
     die "result does not continue the current cursor for $id"
   fi
   if [ "$class" = continuity-broken ]; then
-    # Pin the route at this break point until an operator rebases the cursor.
-    write_continuity_marker "$id" "$qseq" "$reason" "$CURSOR_OFFSET" "$CURSOR_HASH"       || { fm_lock_release "$lock"; die "cannot record the continuity break"; }
+    # Pin the route at this break point until an operator rebases the cursor,
+    # and dedupe on the break point itself: a replay of the same break (the
+    # same committed cursor state) neither rewrites the marker nor re-escalates,
+    # while a NEW break after a rebase records a new marker and escalates with
+    # its own sequence.
+    marker=$(continuity_marker_path "$id")
+    if [ -f "$marker" ] && [ ! -L "$marker" ] \
+      && [ "$(sed -n 's/^offset=//p' "$marker" | head -1)" = "$CURSOR_OFFSET" ] \
+      && [ "$(sed -n 's/^prefix_sha256=//p' "$marker" | head -1)" = "$CURSOR_HASH" ]; then
+      fm_lock_release "$lock"
+      printf 'continuity-broken: %s (%s)\n' "$id" "$reason"
+      return 3
+    fi
+    write_continuity_marker "$id" "$qseq" "$reason" "$CURSOR_OFFSET" "$CURSOR_HASH" \
+      || { fm_lock_release "$lock"; die "cannot record the continuity break"; }
     line="blocked [key=remote-reply-continuity-$id]: remote reply continuity broke for $id at sequence $qseq ($reason)"
-    # One escalation per route regardless of which generation observed it or
-    # whether it was replayed under an adhoc ingest.
-    if ! grep -Fq "key=remote-reply-continuity-$id" "$status_file" 2>/dev/null; then
+    if ! grep -Fqx -- "$line" "$status_file" 2>/dev/null; then
       printf '%s\n' "$line" >> "$status_file" || { fm_lock_release "$lock"; die "cannot append continuity escalation"; }
     fi
     fm_lock_release "$lock"
@@ -502,10 +515,13 @@ cmd_ingest() {
   index=1
   while IFS= read -r line_file; do
     [ -n "$line_file" ] || continue
-    line=$(cat "$line_file")
-    if [ -z "$line" ]; then index=$((index + 1)); continue; fi
+    # Test the file's size, not the shell string: bash drops NUL bytes when
+    # reading a line, so a line made only of NULs must reach quarantine as
+    # forbidden bytes rather than reading as zero-length.
+    if [ ! -s "$line_file" ]; then index=$((index + 1)); continue; fi
     line_reason=$(line_reject_reason "$line_file") && {
-      read -r qhash qbytes < <(quarantine_line "$id" "$qseq" "$index" "$line_file")         || { fm_lock_release "$lock"; die "cannot quarantine a remote reply line"; }
+      read -r qhash qbytes < <(quarantine_line "$id" "$qseq" "$index" "$line_file") \
+        || { fm_lock_release "$lock"; die "cannot quarantine a remote reply line"; }
       line="blocked [key=remote-reply-quarantine-$id-$qseq]: remote reply line rejected ($line_reason, sha256=$qhash, bytes=$qbytes)"
       if ! grep -Fqx -- "$line" "$status_file" 2>/dev/null; then
         printf '%s\n' "$line" >> "$status_file" || { fm_lock_release "$lock"; die "cannot append remote reply quarantine notice"; }
@@ -513,8 +529,11 @@ cmd_ingest() {
       index=$((index + 1))
       continue
     }
+    # Read the shell string only after the byte-level checks passed.
+    line=$(cat "$line_file")
     if ! printf '%s' "$line" | grep -Eq '^(working|needs-decision|blocked|paused|done|failed|resolved)([[:space:]]+(\[key=[^][:space:]:]*\]|\[corr=[^][:space:]:]*\]))*:'; then
-      read -r qhash qbytes < <(quarantine_line "$id" "$qseq" "$index" "$line_file")         || { fm_lock_release "$lock"; die "cannot quarantine a remote reply line"; }
+      read -r qhash qbytes < <(quarantine_line "$id" "$qseq" "$index" "$line_file") \
+        || { fm_lock_release "$lock"; die "cannot quarantine a remote reply line"; }
       line="blocked [key=remote-reply-quarantine-$id-$qseq]: remote reply line rejected (not-a-status-line, sha256=$qhash, bytes=$qbytes)"
       if ! grep -Fqx -- "$line" "$status_file" 2>/dev/null; then
         printf '%s\n' "$line" >> "$status_file" || { fm_lock_release "$lock"; die "cannot append remote reply quarantine notice"; }
@@ -770,17 +789,31 @@ cmd_handled_gate() {
   read_cursor "$id"
   to=$(result_field "$result" to_offset 2>/dev/null || true)
   case "$to" in ''|*[!0-9]*) to=-1 ;; esac
-  if [ "$class" = delta ] && [ "$to" -ge 0 ]     && { [ "$to" -lt "$CURSOR_OFFSET" ]       || { [ "$to" -eq "$CURSOR_OFFSET" ]            && [ "$(result_field "$result" to_prefix_sha256 2>/dev/null || true)" = "$CURSOR_HASH" ]; }; }; then
+  if [ "$class" = delta ] && [ "$to" -ge 0 ] \
+    && { [ "$to" -lt "$CURSOR_OFFSET" ] \
+      || { [ "$to" -eq "$CURSOR_OFFSET" ] \
+        && [ "$(result_field "$result" to_prefix_sha256 2>/dev/null || true)" = "$CURSOR_HASH" ]; }; }; then
     return 0
   fi
   if [ "$class" = continuity-broken ]; then
+    # A break recorded by its marker names this sequence, and a break whose
+    # starting position no longer equals the cursor was superseded by an
+    # operator rebase - it can never apply again, so it is acknowledgeable.
+    local bfrom bfrom_hash
+    bfrom=$(result_field "$result" from_offset 2>/dev/null || true)
+    bfrom_hash=$(result_field "$result" from_prefix_sha256 2>/dev/null || true)
+    if [ -n "$bfrom" ] && [ -n "$bfrom_hash" ] \
+      && { [ "$bfrom" != "$CURSOR_OFFSET" ] || [ "$bfrom_hash" != "$CURSOR_HASH" ]; }; then
+      return 0
+    fi
     marker=$(continuity_marker_path "$id")
     if [ -f "$marker" ] && [ ! -L "$marker" ]; then
       mseq=$(sed -n 's/^seq=//p' "$marker" | head -1)
       [ "$mseq" = "$seq" ] && return 0
     fi
   fi
-  printf 'error: remote reply sequence %s for %s has no ingest receipt; handle it with fm-procevent-remote-reply.sh handle %s %s %s\n'     "$seq" "$id" "$id" "$seq" "$result" >&2
+  printf 'error: remote reply sequence %s for %s has no ingest receipt; handle it with fm-procevent-remote-reply.sh handle %s %s %s\n' \
+    "$seq" "$id" "$id" "$seq" "$result" >&2
   return 1
 }
 
@@ -794,7 +827,7 @@ cmd_ensure_armed() {
     [ -n "$id" ] || continue
     remote_host=$(grep '^remote_host=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2-)
     [ -n "$remote_host" ] || continue
-    validate_id "$id" || continue
+    case "$id" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
     lock=$(secondmate_reply_lifecycle_lock_path "$STATE" "$id")
     if ! fm_lock_try_acquire "$lock"; then
       continue

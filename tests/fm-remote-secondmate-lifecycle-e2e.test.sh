@@ -818,8 +818,20 @@ phase=$(grep '^phase=' "$PARENT/state/pending-replies/$CORR" | cut -d= -f2-)
 [ "$phase" = delivery_unknown ] || fail "ambiguous remote send did not preserve its pending expectation"
 printf 'done [corr=%s]: remote build passed\n' "$CORR" >> "$REMOTE_HOME/state/parent-replies.status"
 SID='remote-reply-ios'
-remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
-  || fail "remote reply source did not capture the correlated answer"
+# The reply channel may be mid-restart when a runner captures and retires a
+# terminal delta, so ensure the route is armed, tolerate an already-running
+# owner, and wait for the capture rather than depending on this call's start.
+capture_reply() { # <seq> <failure message>
+  remote_env "$ROOT/bin/fm-procevent-remote-reply.sh" ensure-armed >/dev/null 2>&1 || true
+  remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 || true
+  local n=200
+  while [ ! -f "$PARENT/state/procevent-inbox/$SID.$1.result" ] && [ "$n" -gt 0 ]; do
+    n=$((n - 1))
+    sleep 0.1
+  done
+  [ -f "$PARENT/state/procevent-inbox/$SID.$1.result" ] || fail "$2"
+}
+capture_reply 1 "remote reply source did not capture the correlated answer"
 RESULT="$PARENT/state/procevent-inbox/$SID.1.result"
 remote_env "$ROOT/bin/fm-procevent-remote-reply.sh" handle ios 1 "$RESULT" >/dev/null \
   || fail "remote reply ingest failed"
@@ -851,8 +863,7 @@ assert_absent "$NUDGE_MARKER" "bootstrap cleared no remote reread marker after c
 PARTIAL_CONFIG_CORR=$(grep -Eo 'corr=[a-f0-9]{16}' "$HERDR_LOG" | tail -1 | cut -d= -f2-)
 [ -n "$PARTIAL_CONFIG_CORR" ] || fail "bootstrap config reread did not carry a correlation token"
 printf 'done [corr=%s]: converged inherited config re-read\n' "$PARTIAL_CONFIG_CORR" >> "$REMOTE_HOME/state/parent-replies.status"
-remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
-  || fail "remote reply source did not capture the converged config acknowledgment"
+capture_reply 2 "remote reply source did not capture the converged config acknowledgment"
 PARTIAL_CONFIG_RESULT="$PARENT/state/procevent-inbox/$SID.2.result"
 remote_env "$ROOT/bin/fm-procevent-remote-reply.sh" handle ios 2 "$PARTIAL_CONFIG_RESULT" >/dev/null \
   || fail "converged remote config acknowledgment was not ingested"
@@ -915,8 +926,7 @@ assert_grep 'config-reread: sent' "$TMP_ROOT/config-push-retry.out" "remote conf
 CONFIG_CORR=$(grep -Eo 'corr=[a-f0-9]{16}' "$HERDR_LOG" | tail -1 | cut -d= -f2-)
 [ -n "$CONFIG_CORR" ] || fail "remote config reread did not carry a correlation token"
 printf 'done [corr=%s]: inherited config re-read\n' "$CONFIG_CORR" >> "$REMOTE_HOME/state/parent-replies.status"
-remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
-  || fail "remote reply source did not capture the config reread acknowledgement"
+capture_reply 3 "remote reply source did not capture the config reread acknowledgement"
 CONFIG_RESULT="$PARENT/state/procevent-inbox/$SID.3.result"
 remote_env "$ROOT/bin/fm-procevent-remote-reply.sh" handle ios 3 "$CONFIG_RESULT" >/dev/null \
   || fail "remote config reread acknowledgement was not ingested"
@@ -931,9 +941,15 @@ resolve_ios_pending() {
     pending_corr=$(basename "$pending_record")
     printf 'done [corr=%s]: concurrent inherited data re-read\n' "$pending_corr" \
       >> "$REMOTE_HOME/state/parent-replies.status"
-    remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
+    remote_env "$ROOT/bin/fm-procevent-remote-reply.sh" ensure-armed >/dev/null 2>&1 || true
+    remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 || true
+    pending_result="" n=200
+    while [ -z "$pending_result" ] && [ "$n" -gt 0 ]; do
+      pending_result=$(find "$PARENT/state/procevent-inbox" -name "$SID.*.result" ! -name "$SID.1.result" ! -name "$SID.2.result" ! -name "$SID.3.result" -print | sort | tail -1)
+      [ -n "$pending_result" ] || { n=$((n - 1)); sleep 0.1; }
+    done
+    [ -n "$pending_result" ] \
       || fail "remote reply source did not capture a concurrent inheritance acknowledgment"
-    pending_result=$(find "$PARENT/state/procevent-inbox" -name "$SID.*.result" -print | sort | tail -1)
     pending_seq=${pending_result%.result}
     pending_seq=${pending_seq##*.}
     remote_env "$ROOT/bin/fm-procevent-remote-reply.sh" handle ios "$pending_seq" "$pending_result" >/dev/null \
@@ -1466,7 +1482,9 @@ grep -Eq '^request=[0-9a-f]{16} record=002 state=recorded$' "$TMP_ROOT/remote-om
   || fail "the remote OMP send waited on the agent's handled acknowledgement"
 rm -f "$OMP_DELAYED_HANDLED"
 
-# The remote control path carries the same durable-result contract.
+# The remote control path carries the same durable-result contract: exactly
+# one programmatic doorbell, never a replay of a prior request.
+sent_before_retry=$(wc -l < "$OMP_SENT" | tr -d ' ')
 set +e
 remote_env "$ROOT/bin/fm-on.sh" remote-omp fm-remote-secondmate-control.sh send remote-omp \
   "[fm-from-firstmate]"$'\xE2\x81\xA3'"corr=0123456789abcdef durable contract" \
@@ -1479,6 +1497,8 @@ grep -Eq '^request=0123456789abcdef record=003 state=recorded$' "$TMP_ROOT/remot
 [ -f "$OMP_INBOX/003.msg" ] || fail "remote OMP control send lost its durable request"
 [ ! -e "$OMP_INBOX/handled/003.msg" ] \
   || fail "the remote OMP control send waited on the handled acknowledgement"
+[ "$(wc -l < "$OMP_SENT" | tr -d ' ')" = "$((sent_before_retry + 1))" ] \
+  || fail "remote OMP control send replayed a prior programmatic request"
 
 cp "$OMP_CONTROL_STATE/remote-omp.meta" "$TMP_ROOT/remote-omp.meta.before-stale"
 meta_tmp="$OMP_CONTROL_STATE/remote-omp.meta.tmp"

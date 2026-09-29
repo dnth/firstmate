@@ -950,6 +950,12 @@ test_remote_recovery_delivery_classification() {
   home=$(setup_parent remote-recovery)
   state="$home/state"
   hooklog="$TMP_ROOT/recovery-hook.log"
+  # Keep every tick hermetic: no registry elsewhere, and any remote observation
+  # attempt hits a fake SSH transport that always fails.
+  export FM_HOME="$home"
+  printf '#!/bin/sh\nexit 255\n' > "$TMP_ROOT/fake-ssh-255"
+  chmod +x "$TMP_ROOT/fake-ssh-255"
+  export FM_SSH_BIN="$TMP_ROOT/fake-ssh-255"
   # A remote route is identified by remote_host on the task's meta.
   fm_write_secondmate_meta "$state/ios.meta" "$home/ios-remote" "sess:fm-ios"
   printf 'remote_host=remote-mac\n' >> "$state/ios.meta"
@@ -1020,6 +1026,25 @@ test_remote_recovery_delivery_classification() {
       || fail "an unknown remote outcome retried the send"
     pass "AC8/AC9: remote exit $rc stays unknown and is never retried"
   done
+
+  # AC9 replay: the whole post-OMP timeline through tick alone - the record
+  # was delivered, the turn completed, the grace window elapsed, and the
+  # recovery send exits 8 with no machine line. Repeated ticks may never
+  # downgrade that durable delivery to a failure.
+  corr=$(fm_pending_reply_create "$home" "$state" ios "post-OMP replay")
+  FM_PENDING_REPLY_NOW=1000 fm_pending_reply_mark_delivered "$state" "$corr" || true
+  FM_PENDING_REPLY_NOW=1100 fm_pending_reply_mark_turn_completed "$state" "$corr" request || true
+  FM_PENDING_REPLY_SEND_HOOK=recovery_hook_rc8
+  export FM_PENDING_REPLY_SEND_HOOK
+  FM_PENDING_REPLY_NOW=2000 fm_pending_reply_tick "$state" || true
+  FM_PENDING_REPLY_NOW=3000 fm_pending_reply_tick "$state" || true
+  FM_PENDING_REPLY_NOW=4000 fm_pending_reply_tick "$state" || true
+  FM_PENDING_REPLY_NOW=5000 fm_pending_reply_tick "$state" || true
+  [ "$(fm_pending_reply_get "$(fm_pending_reply_path "$state" "$corr")" recovery_delivery_outcome)" = confirmed ] \
+    || fail "a replayed exit-8 recovery was not confirmed"
+  ! grep -Fq "pending-reply-recovery-delivery-failed: task=ios pending-reply-id=$corr" "$status" \
+    || fail "a replayed exit-8 recovery escalated as a delivery failure"
+  pass "AC9: replayed post-OMP ticks never downgrade durable delivery"
 
   # A local route keeps the old zero/nonzero split.
   fm_write_secondmate_meta "$state/loc.meta" "$home/loc" "sess:fm-loc"

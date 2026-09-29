@@ -859,7 +859,7 @@ fm_pending_reply_sender_alive() {  # <record-path>
   [ "$actual" = "$expected" ]
 }
 
-fm_pending_reply_finish_recovery() {  # <state-dir> <corr_id> <confirmed|failed>
+fm_pending_reply_finish_recovery() {  # <state-dir> <corr_id> <confirmed|failed|unknown>
   local state=$1 corr=$2 outcome=$3 rec phase now sent
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
