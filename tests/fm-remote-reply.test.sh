@@ -298,6 +298,105 @@ pass "ingest rejects unstructured bracket tokens on a real captured delta"
 remote_env "$ADAPTER" arm ios >/dev/null \
   || fail "remote reply source was not re-armed after rejected status lines"
 
+# Build a result that continues the current cursor from a payload file without
+# touching the remote log, so ingest validation alone decides the outcome.
+craft_delta_result() { # <payload-file> <result-file>
+  local payload=$1 out=$2 from fhash thash phash pbytes prefix
+  from=$(sed -n 's/^offset=//p' "$PARENT/state/remote-replies/ios.cursor")
+  fhash=$(sed -n 's/^prefix_sha256=//p' "$PARENT/state/remote-replies/ios.cursor")
+  pbytes=$(LC_ALL=C wc -c < "$payload" | tr -d ' ')
+  phash=$(sha256_file "$payload")
+  prefix="$TMP_ROOT/.craft-prefix"
+  head -c "$from" "$REMOTE/state/parent-replies.status" > "$prefix"
+  cat "$payload" >> "$prefix"
+  thash=$(sha256_file "$prefix")
+  {
+    printf 'schema=fm-remote-delta.v1\nstatus=delta\n'
+    printf 'path=state/parent-replies.status\n'
+    printf 'from_offset=%s\nto_offset=%s\n' "$from" "$((from + pbytes))"
+    printf 'from_prefix_sha256=%s\nto_prefix_sha256=%s\n' "$fhash" "$thash"
+    printf 'payload_sha256=%s\npayload_bytes=%s\nreason=\n\n' "$phash" "$pbytes"
+    cat "$payload"
+  } > "$out"
+}
+
+# Status text is UTF-8: typographic punctuation in a remote report must ingest,
+# advance the cursor, and re-arm. Lines the validator rejected earlier are
+# trimmed back to the cursor prefix so the next delta starts clean.
+utf8_base=$(sed -n 's/^offset=//p' "$PARENT/state/remote-replies/ios.cursor")
+head -c "$utf8_base" "$REMOTE/state/parent-replies.status" > "$TMP_ROOT/log-trim"
+cat "$TMP_ROOT/log-trim" > "$REMOTE/state/parent-replies.status"
+UTF8_CORR=$(fm_pending_reply_create "$PARENT" "$PARENT/state" ios "await UTF-8 report")
+fm_pending_reply_mark_delivered "$PARENT/state" "$UTF8_CORR" \
+  || fail "could not create UTF-8 reply expectation"
+printf 'working: première passe — em dash et «guillemets»\npaused [key=utf8-wait]: attente — externe\ndone [corr=%s]: terminé — livré\n' "$UTF8_CORR" \
+  >> "$REMOTE/state/parent-replies.status"
+remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
+  || fail "UTF-8 reply generation was not captured"
+RESULT_UTF8="$PARENT/state/procevent-inbox/$SID.8.result"
+[ -f "$RESULT_UTF8" ] || fail "UTF-8 delta was not durably captured"
+
+# A validation failure at a cursor position leaves everything untouched: no
+# receipt, no cursor movement, no acknowledgement, so a later handle at that
+# position retries cleanly with no manual state edit.
+printf 'done: hidden \342\200\256 reorder\n' > "$TMP_ROOT/bidi.payload"
+craft_delta_result "$TMP_ROOT/bidi.payload" "$TMP_ROOT/bidi.result"
+cursor_before_utf8="$TMP_ROOT/cursor-before-utf8"
+cp "$PARENT/state/remote-replies/ios.cursor" "$cursor_before_utf8"
+set +e
+remote_env "$ADAPTER" handle ios 900 "$TMP_ROOT/bidi.result" > "$TMP_ROOT/bidi.out" 2>&1
+bidi_rc=$?
+set -e
+[ "$bidi_rc" -ne 0 ] || fail "ingest accepted a bidi override control"
+assert_grep 'invalid status line' "$TMP_ROOT/bidi.out" "bidi control did not fail status-line validation"
+cmp -s "$cursor_before_utf8" "$PARENT/state/remote-replies/ios.cursor" \
+  || fail "a rejected charset moved the remote reply cursor"
+[ ! -e "$PARENT/state/remote-replies/ios.900.ingested" ] \
+  || fail "a rejected charset left an ingestion receipt"
+
+out=$(remote_env "$ADAPTER" handle ios 8 "$RESULT_UTF8")
+assert_contains "$out" 'ingested: ios appended=3' "UTF-8 reply generation was not ingested"
+assert_contains "$out" 'handled: remote-reply-ios 8' "UTF-8 capture was not acknowledged"
+assert_grep 'working: première passe — em dash et «guillemets»' "$PARENT/state/ios.status" \
+  "em-dash status line did not reach parent status"
+assert_grep 'paused [key=utf8-wait]: attente — externe' "$PARENT/state/ios.status" \
+  "keyed UTF-8 status line did not reach parent status"
+assert_grep "done [corr=$UTF8_CORR]: terminé — livré" "$PARENT/state/ios.status" \
+  "correlated UTF-8 status line did not reach parent status"
+[ "$(fm_pending_reply_get "$(fm_pending_reply_path "$PARENT/state" "$UTF8_CORR")" phase)" = resolved ] \
+  || fail "UTF-8 correlated reply did not resolve its parent request"
+utf8_offset=$(LC_ALL=C wc -c < "$REMOTE/state/parent-replies.status" | tr -d ' ')
+assert_grep "offset=$utf8_offset" "$PARENT/state/remote-replies/ios.cursor" \
+  "UTF-8 reply generation did not advance the cursor"
+assert_present "$PARENT/state/procevent/$SID.source" "UTF-8 handling did not re-arm the source"
+pass "UTF-8 status lines ingest, advance the cursor, and re-arm after a rejected delta"
+
+# The charset boundary still rejects bytes that can control, hide, or reorder
+# text, malformed UTF-8, and lines beyond the byte cap.
+printf 'done: truncated \342\200 sequence\n' > "$TMP_ROOT/badutf8.payload"
+printf 'done: delete \177 char\n' > "$TMP_ROOT/delchar.payload"
+printf 'done: zero \342\200\213 width\n' > "$TMP_ROOT/zwsp.payload"
+printf 'done: nel \302\205 char\n' > "$TMP_ROOT/c1.payload"
+printf 'done: line \342\200\250 sep\n' > "$TMP_ROOT/lsep.payload"
+printf 'done: bom \357\273\277 char\n' > "$TMP_ROOT/feff.payload"
+printf 'done: vertical \013 tab\n' > "$TMP_ROOT/vtab.payload"
+printf 'done: isolate \342\201\167 char\n' > "$TMP_ROOT/isolate.payload"
+{ printf 'done: '; head -c 2050 /dev/zero | tr '\0' 'x'; printf '\n'; } > "$TMP_ROOT/toolong.payload"
+status_lines_before=$(grep -c '' "$PARENT/state/ios.status" || true)
+cursor_before_charset="$TMP_ROOT/cursor-before-charset"
+cp "$PARENT/state/remote-replies/ios.cursor" "$cursor_before_charset"
+for bad_payload in badutf8 delchar zwsp c1 lsep feff vtab isolate toolong; do
+  craft_delta_result "$TMP_ROOT/$bad_payload.payload" "$TMP_ROOT/$bad_payload.result"
+  if remote_env "$ADAPTER" ingest ios "$TMP_ROOT/$bad_payload.result" >/dev/null 2>&1; then
+    fail "ingest accepted an invalid status line: $bad_payload"
+  fi
+done
+[ "$(grep -c '' "$PARENT/state/ios.status" || true)" = "$status_lines_before" ] \
+  || fail "rejected charsets appended to parent status"
+cmp -s "$cursor_before_charset" "$PARENT/state/remote-replies/ios.cursor" \
+  || fail "rejected charsets moved the remote reply cursor"
+pass "ingest rejects malformed UTF-8, controls, format characters, and over-long lines"
+
 # A digest-valid unknown lifecycle verb is still rejected at the public ingest
 # boundary. Recalculate its payload commitment so the behavioral assertion is
 # specifically about status validation, not incidental digest failure.
@@ -326,12 +425,12 @@ printf 'failed [corr=fedcba9876543210]: source was replaced\n' > "$REMOTE/state/
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/start-two.out" 2>&1 &
 RUNNER=$!
 wait "$RUNNER" || fail "continuity break was not captured as a structured result"
-RESULT_SEVEN=$(find "$PARENT/state/procevent-inbox" -name "$SID.8.result" -print -quit)
+RESULT_SEVEN=$(find "$PARENT/state/procevent-inbox" -name "$SID.9.result" -print -quit)
 [ -n "$RESULT_SEVEN" ] || fail "continuity break produced no durable result"
 [ "$(remote_env "$ADAPTER" classify "$RESULT_SEVEN")" = continuity-broken ] \
   || fail "truncated source was not classified as a continuity break"
 set +e
-remote_env "$ADAPTER" handle ios 8 "$RESULT_SEVEN" > "$TMP_ROOT/handle-seven.out" 2>&1
+remote_env "$ADAPTER" handle ios 9 "$RESULT_SEVEN" > "$TMP_ROOT/handle-seven.out" 2>&1
 handle_rc=$?
 set -e
 [ "$handle_rc" -eq 3 ] || fail "continuity handling returned an unexpected status: $handle_rc"
@@ -343,7 +442,7 @@ remote_env "$ADAPTER" ingest ios "$RESULT_SEVEN" >/dev/null 2>&1 || true
 rm -f "$STRUCT_BAD_RESULT"
 pass "truncation is detected, escalated once, and not silently rebased"
 
-rm -f "$PARENT/state/procevent-inbox/$SID.8.handled"
+rm -f "$PARENT/state/procevent-inbox/$SID.9.handled"
 if remote_env "$ADAPTER" retire ios > "$TMP_ROOT/retire-pending.out" 2>&1; then
   fail "remote reply retirement accepted an unhandled captured result"
 fi
@@ -351,7 +450,7 @@ assert_grep 'unhandled captured result' "$TMP_ROOT/retire-pending.out" \
   "remote reply retirement did not explain its pending-result refusal"
 assert_absent "$PARENT/state/procevent/$SID.source" \
   "refused retirement left the reply source running past its pending-result check"
-remote_env "$ADAPTER" handle ios 8 "$RESULT_SEVEN" >/dev/null 2>&1 || [ "$?" -eq 3 ] \
+remote_env "$ADAPTER" handle ios 9 "$RESULT_SEVEN" >/dev/null 2>&1 || [ "$?" -eq 3 ] \
   || fail "pending continuity result could not be acknowledged after retirement refusal"
 remote_env "$ADAPTER" retire ios >/dev/null
 assert_absent "$PARENT/state/remote-replies/ios.cursor" "adapter retirement left its cursor"
