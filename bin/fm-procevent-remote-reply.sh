@@ -16,8 +16,9 @@
 # ingests it, acknowledges the captured generation, then registers the next
 # cursor-anchored source. A continuity break is escalated and not re-armed.
 #
-# Ingest accepts only bounded, printable status lines with an allowed lifecycle
-# verb. Autonomous lifecycle reports need no correlation token, but only an
+# Ingest accepts only bounded status lines in well-formed UTF-8 with an allowed
+# lifecycle verb; controls and invisible or reordering format characters are
+# rejected. Autonomous lifecycle reports need no correlation token, but only an
 # explicit exact correlation token can resolve a matching pending parent request.
 # Exact lines are appended at most once to the parent's state/<id>.status. A data/*.md
 # pointer is fetched through the path-confined remote file reader and rewritten
@@ -241,17 +242,44 @@ fetch_document() { # <id> <remote-relative> <result-var>
   printf -v "$result_var" '%s' "$local_rel"
 }
 
+# A status line is well-formed UTF-8 text, but never carries codepoints that
+# can control, hide, or reorder what the parent sees: C0/C1 controls other than
+# TAB, DEL, format characters such as bidi controls, zero-width marks, and
+# BOMs, and Unicode line/paragraph separators. Perl's strict UTF-8 decoder
+# proves the byte sequence and classifies codepoints; the delta reader already
+# requires perl, and the same perl ships with macOS.
+status_line_charset_ok() { # <line>
+  printf '%s' "$1" | perl -MEncode -e '
+    local $/;
+    my $text = eval { Encode::decode("UTF-8", <STDIN>, Encode::FB_CROAK) };
+    exit 1 if $@;
+    $text =~ tr/\t//d;
+    exit($text =~ /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/ ? 1 : 0);
+  '
+}
+
+payload_charset_ok() { # <payload>
+  perl -MEncode -e '
+    local $/;
+    my $text = eval { Encode::decode("UTF-8", <STDIN>, Encode::FB_CROAK) };
+    exit 1 if $@;
+    $text =~ s/[\t\n]//g;
+    exit($text =~ /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/ ? 1 : 0);
+  ' < "$1"
+}
+
 line_valid() { # <line>
   local line=$1 bytes
   [ -n "$line" ] || return 1
   bytes=$(printf '%s' "$line" | LC_ALL=C wc -c | tr -d ' ')
   [ "$bytes" -le "$MAX_LINE_BYTES" ] || return 1
-  [ -z "$(printf '%s' "$line" | LC_ALL=C tr -d '\11\40-\176')" ] || return 1
+  status_line_charset_ok "$line" || return 1
   printf '%s' "$line" | grep -Eq '^(working|needs-decision|blocked|paused|done|failed|resolved)([[:space:]]+(\[key=[^][:space:]:]*\]|\[corr=[^][:space:]:]*\]))*:'
 }
 
 payload_lines_valid() { # <payload>
   local line
+  payload_charset_ok "$1" || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     line_valid "$line" || return 1
   done < "$1"
