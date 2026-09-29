@@ -331,12 +331,14 @@ cat > "$ADAPTER_ROOT/bin/fm-procevent-endnow.sh" <<'SH'
 # Fixture adapter: every captured result ends this source.
 case "${1-}" in
   terminal) [ -f "${2-}" ] && exit 0 || exit 1 ;;
+  handled-gate) exit 0 ;;
 esac
 exit 2
 SH
 cat > "$ADAPTER_ROOT/bin/fm-procevent-openended.sh" <<'SH'
 #!/usr/bin/env bash
-# Fixture adapter with no terminal knowledge at all: nothing ever ends it.
+# Fixture adapter with no terminal knowledge at all: nothing ever ends it -
+# and no handled-gate, so a new acknowledgement is refused fail-closed.
 exit 2
 SH
 chmod +x "$ADAPTER_ROOT/bin/fm-procevent-endnow.sh" "$ADAPTER_ROOT/bin/fm-procevent-openended.sh"
@@ -379,7 +381,101 @@ assert_contains "$out" "captured:" "a result from an adapter with no terminal ve
 assert_not_contains "$out" "retired:" "an adapter with no terminal verdict never retires its source"
 assert_present "$HOPEN/state/procevent/open-src.source" "a source with no terminal verdict stays armed"
 pe_adapter "$HOPEN" retire open-src >/dev/null
+# The same bare adapter also lacks handled-gate: a NEW acknowledgement for its
+# captured result is refused fail-closed and writes no marker.
+set +e
+gate_out=$(pe_adapter "$HOPEN" handled open-src 1 2>&1)
+gate_rc=$?
+set -e
+[ "$gate_rc" -ne 0 ] || fail "an adapter without handled-gate allowed a new acknowledgement"
+assert_absent "$HOPEN/state/procevent-inbox/open-src.1.handled" \
+  "a refused handled-gate still wrote the marker"
+out=$(pe_adapter "$HOPEN" reconcile)
+assert_contains "$out" "published=1" "an adapter without autohandle still re-announces its pending result"
 pass "a source stays armed unless its own adapter classifies the result terminal"
+
+# --- autohandle and handled-gate adapter seams --------------------------------
+# A fixture adapter exercising both new seams: `autohandle` fails while the
+# selfhandle-allow flag is absent, and on success records the handled marker
+# itself (the seam's exit-0 contract) and re-registers the source on sequence
+# 1 only, so the runner's own post-autohandle continuation is what restarts
+# it. `handled-gate` allows unconditionally, and every result is terminal so a
+# re-appearing registration proves re-arming restarted the source.
+cat > "$ADAPTER_ROOT/bin/fm-procevent-selfhandle.sh" <<'SH'
+#!/usr/bin/env bash
+# Fixture adapter for the autohandle and handled-gate seams.
+set -u
+state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
+case "${1-}" in
+  autohandle)
+    id=$2; seq=$3
+    [ -f "$state/selfhandle-allow" ] || exit 1
+    printf 'autohandled %s\n' "$seq" >> "$state/selfhandle.log"
+    mkdir -p "$state/procevent-inbox"
+    : > "$state/procevent-inbox/$id.$seq.handled"
+    if [ "$seq" = 1 ]; then
+      # Re-register with the real registration format so the runner's
+      # continuation can restart it.
+      mkdir -p "$state/procevent"
+      printf 'adapter=selfhandle\nargc=3\nargv:\nsh\n-c\necho reply\n' > "$state/procevent/$id.source"
+    fi
+    exit 0 ;;
+  handled-gate) exit 0 ;;
+  terminal) [ -f "${2-}" ] && exit 0 || exit 1 ;;
+esac
+exit 2
+SH
+cat > "$ADAPTER_ROOT/bin/fm-procevent-gatedeny.sh" <<'SH'
+#!/usr/bin/env bash
+# Fixture adapter whose handled-gate always refuses.
+case "${1-}" in
+  handled-gate) echo "error: gate refused ${3-}" >&2; exit 1 ;;
+  terminal) exit 1 ;;
+esac
+exit 2
+SH
+chmod +x "$ADAPTER_ROOT/bin/fm-procevent-selfhandle.sh" "$ADAPTER_ROOT/bin/fm-procevent-gatedeny.sh"
+
+HSELF="$TMP_ROOT/hself"; new_home "$HSELF"
+pe_adapter "$HSELF" register selfhandle self-src -- sh -c 'printf "ok\n"'
+OUT=$(pe_adapter "$HSELF" start self-src)
+assert_contains "$OUT" "captured:" "the start did not report the capture"
+# Autohandle failed (no allow flag): the result stays pending with no marker.
+[ ! -e "$HSELF/state/procevent-inbox/self-src.1.handled" ] \
+  || fail "autohandle acknowledged the result without success"
+printf '' > "$HSELF/state/selfhandle-allow"
+OUT=$(pe_adapter "$HSELF" reconcile)
+assert_contains "$OUT" "published=1" "reconcile did not re-announce the still-pending result"
+wait_for "$HSELF/state/selfhandle.log"
+# Autohandle succeeded in reconcile: marker written by the adapter and the
+# re-registered source restarted, capturing a second generation.
+wait_for "$HSELF/state/procevent-inbox/self-src.2.result"
+n=100
+while [ ! -e "$HSELF/state/procevent-inbox/self-src.2.handled" ] && [ "$n" -gt 0 ]; do
+  n=$((n - 1)); sleep 0.1
+done
+[ -e "$HSELF/state/procevent-inbox/self-src.2.handled" ] \
+  || fail "the restarted generation was never durably handled by autohandle"
+pass "reconcile autohandles a pending result and the restarted source captures again"
+
+# A denying handled-gate blocks the marker while autohandle stays unaffected:
+# autohandle records the acknowledgement itself, so gating a NEW `handled`
+# never loops it.
+HDENY="$TMP_ROOT/hdeny"; new_home "$HDENY"
+pe_adapter "$HDENY" register gatedeny deny-src -- sh -c 'printf "ok\n"'
+pe_adapter "$HDENY" start deny-src >/dev/null
+wait_for "$HDENY/state/procevent-inbox/deny-src.1.result"
+set +e
+gate_out=$(pe_adapter "$HDENY" handled deny-src 1 2>&1)
+gate_rc=$?
+set -e
+[ "$gate_rc" -ne 0 ] || fail "a refusing handled-gate allowed the acknowledgement"
+printf '%s\n' "$gate_out" | grep -q 'gate refused' \
+  || fail "the adapter's refusal reason did not reach stderr: $gate_out"
+[ ! -e "$HDENY/state/procevent-inbox/deny-src.1.handled" ] \
+  || fail "a refused gate still wrote the handled marker"
+pass "a refusing handled-gate blocks a new acknowledgement with its own reason"
+
 
 HREPLACE="$TMP_ROOT/hreplace"; new_home "$HREPLACE"
 PE_TRACKED+=("$HREPLACE|replace-src")

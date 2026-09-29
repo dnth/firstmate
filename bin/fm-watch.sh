@@ -1699,10 +1699,14 @@ while :; do
   # marker or channel failure can never interrupt the watch loop.
   main_wake_undelivered_tick || true
 
-  # Process-to-event liveness repair. This never discovers a result by polling:
-  # each registered source has its own child blocking on that source, and this
-  # only republishes results already captured durably and restarts a source
-  # whose owner is gone. It is a no-op with nothing registered.
+  # Process-to-event liveness repair. Remote-reply routes converge first:
+  # ensure-armed registers any live route that lost its source (without SSH),
+  # so a registration it creates is started by the reconcile right below in
+  # this same cycle. This never discovers a result by polling: each registered
+  # source has its own child blocking on that source, and this only
+  # republishes results already captured durably and restarts a source whose
+  # owner is gone. It is a no-op with nothing registered.
+  FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent-remote-reply.sh" ensure-armed >/dev/null 2>&1 || true
   if [ -d "$STATE/procevent" ]; then
     FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 || true
   fi

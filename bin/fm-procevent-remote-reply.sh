@@ -3,26 +3,62 @@
 #
 # Usage:
 #   fm-procevent-remote-reply.sh arm <secondmate-id>
+#   fm-procevent-remote-reply.sh arm-locked <secondmate-id>
+#   fm-procevent-remote-reply.sh ensure-armed
+#   fm-procevent-remote-reply.sh autohandle <source-id> <sequence> <result-file>
+#   fm-procevent-remote-reply.sh handled-gate <source-id> <sequence> <result-file>
 #   fm-procevent-remote-reply.sh handle <secondmate-id> <sequence> <result-file>
+#   fm-procevent-remote-reply.sh ingest <secondmate-id> <result-file>
 #   fm-procevent-remote-reply.sh classify <result-file>
 #   fm-procevent-remote-reply.sh terminal <result-file>
+#   fm-procevent-remote-reply.sh source <secondmate-id>
 #   fm-procevent-remote-reply.sh source-id <secondmate-id>
-#   fm-procevent-remote-reply.sh retire <secondmate-id>
+#   fm-procevent-remote-reply.sh retire <secondmate-id> [--force]
+#   fm-procevent-remote-reply.sh retire-quiesce-locked <secondmate-id> [--force]
+#   fm-procevent-remote-reply.sh retire-finalize-locked <secondmate-id> [--force]
 #
-# `arm` registers one blocking, non-destructive delta source for the remote
-# home's state/parent-replies.status log. The process-event runner owns blocking,
-# capture, publication, and one machine-wide source owner. Each captured delta is
-# terminal for that exact registration; `handle` validates and idempotently
-# ingests it, acknowledges the captured generation, then registers the next
-# cursor-anchored source. A continuity break is escalated and not re-armed.
+# `arm` registers one blocking, non-destructive, cursor-anchored delta source
+# for the remote home's state/parent-replies.status log, converging on the
+# invariant that a live non-dormant remote route has either an armed source or
+# an unhandled capture - never both and never neither. The process-event runner
+# owns blocking, capture, publication, and one machine-wide source owner. Its
+# `autohandle` seam runs right after every capture and again on every reconcile,
+# so each captured delta is ingested, acknowledged, and re-armed without waiting
+# for an agent turn; `ensure-armed` repairs a live route that lost its
+# registration in the same watcher cycle, with no SSH.
 #
-# Ingest accepts only bounded status lines in well-formed UTF-8 with an allowed
-# lifecycle verb; controls and invisible or reordering format characters are
-# rejected. Autonomous lifecycle reports need no correlation token, but only an
-# explicit exact correlation token can resolve a matching pending parent request.
-# Exact lines are appended at most once to the parent's state/<id>.status. A data/*.md
+# Each captured delta is terminal for that exact registration; `handle` ingests
+# it, re-arms the next cursor-anchored source, then acknowledges the captured
+# generation. A shortened or changed log prefix is a continuity break: it stops
+# the relay, records a durable continuity pin
+# (state/remote-replies/<id>.continuity-broken names the sequence, reason, and
+# cursor position), and is surfaced once - the route stays pinned until an
+# operator rebases the cursor, which deletes the marker.
+#
+# Ingest validates each payload line independently: malformed UTF-8, controls
+# other than TAB, invisible or reordering format characters, Unicode line and
+# paragraph separators, over-long lines, and non-lifecycle shapes are each
+# rejected. Rejected bytes never reach the status channel - they are kept
+# byte-exact under state/remote-replies/<id>.quarantine/ and reported once with
+# a parent-authored `blocked` line naming the reason, byte count, and SHA-256 -
+# while the cursor still advances past them. Accepted lines need no correlation
+# token for autonomous lifecycle reports, but only an explicit exact
+# correlation token resolves a matching pending parent request. A data/*.md
 # pointer is fetched through the path-confined remote file reader and rewritten
-# to its local private copy before append.
+# to its local private copy before append; a failed fetch fails the handle so
+# autohandle retries it rather than acknowledging a half-ingested delta. Exact
+# lines are appended at most once to the parent's state/<id>.status.
+#
+# `handled-gate` is the generic runner's acknowledgement gate: a remote-reply
+# generation may be marked handled only after its ingest receipt exists, the
+# cursor covers its range, or its continuity break is recorded - a never-ingested
+# capture is refused, while a cursor-covered stale duplicate stays
+# acknowledgeable. `autohandle` takes the reply lifecycle lock without waiting
+# (a busy lock means a teardown, sleep, or another handler owns the route this
+# cycle and is not a failure), runs `handle`, and counts consecutive failures
+# per sequence under state/remote-replies/<id>.<seq>.autohandle-failures; at
+# FM_REMOTE_REPLY_AUTOHANDLE_FAILURE_LIMIT (default 3) it appends one named
+# `blocked` line and keeps retrying rather than dropping the generation.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,9 +80,11 @@ MAX_DOC_BYTES=${FM_REMOTE_REPLY_MAX_DOC_BYTES:-262144}
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-runpod-lib.sh
 . "$SCRIPT_DIR/fm-runpod-lib.sh"
+# shellcheck source=bin/fm-ff-lib.sh
+. "$SCRIPT_DIR/fm-ff-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,66p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 sha256_file() {
   if command -v shasum >/dev/null 2>&1; then
@@ -77,6 +115,16 @@ source_id() {
 
 cursor_path() { printf '%s/%s.cursor\n' "$CURSOR_DIR" "$1"; }
 ingest_receipt_path() { printf '%s/%s.%s.ingested\n' "$CURSOR_DIR" "$1" "$2"; }
+quarantine_dir() { printf '%s/%s.quarantine\n' "$CURSOR_DIR" "$1"; }
+continuity_marker_path() { printf '%s/%s.continuity-broken\n' "$CURSOR_DIR" "$1"; }
+autohandle_failure_path() { printf '%s/%s.%s.autohandle-failures\n' "$CURSOR_DIR" "$1" "$2"; }
+
+autohandle_failure_limit() {
+  local limit=${FM_REMOTE_REPLY_AUTOHANDLE_FAILURE_LIMIT:-3}
+  case "$limit" in ''|*[!0-9]*) die "FM_REMOTE_REPLY_AUTOHANDLE_FAILURE_LIMIT must be a positive integer" ;; esac
+  [ "$limit" -gt 0 ] || die "FM_REMOTE_REPLY_AUTOHANDLE_FAILURE_LIMIT must be a positive integer"
+  printf '%s\n' "$limit"
+}
 
 read_cursor() { # <id>; sets CURSOR_OFFSET and CURSOR_HASH
   local path=$1 offset hash schema
@@ -172,20 +220,86 @@ remote_route_exists() {
   [ "$remote" = 1 ] || die "secondmate $id is not a configured remote route"
 }
 
-cmd_arm_locked() {
-  local id=${1:-} sid
+# Record a continuity break durably. The marker pins the route: `arm` refuses
+# while the cursor still equals the recorded break point, and an operator
+# rebases by moving the cursor, which deletes the marker on the next arm.
+write_continuity_marker() {  # <id> <seq> <reason> <offset> <prefix-hash>
+  local id=$1 seq=$2 reason=$3 offset=$4 hash=$5 path tmp
+  path=$(continuity_marker_path "$id")
+  mkdir -p "$CURSOR_DIR" || return 1
+  chmod 700 "$CURSOR_DIR" 2>/dev/null || true
+  [ ! -L "$path" ] || return 1
+  tmp=$(umask 077; mktemp "$CURSOR_DIR/.continuity.XXXXXX") || return 1
+  {
+    printf 'seq=%s\n' "$seq"
+    printf 'reason=%s\n' "$reason"
+    printf 'offset=%s\n' "$offset"
+    printf 'prefix_sha256=%s\n' "$hash"
+  } > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$path"
+}
+
+# The first unhandled captured generation for a source, if any. A secondmate's
+# reply route may arm only while no capture waits for ingest - arming from the
+# committed cursor while a prior capture is pending would produce a duplicate
+# generation of the same bytes.
+pending_capture_seq() {  # <source-id> [excluded-seq]
+  local sid=$1 except=${2:-} inbox path base seq
+  inbox="$STATE/procevent-inbox"
+  [ -d "$inbox" ] && [ ! -L "$inbox" ] || return 1
+  for path in "$inbox/$sid".*.result; do
+    [ -e "$path" ] || continue
+    base=${path%.result}
+    seq=${base##*.}
+    case "$seq" in ''|*[!0-9]*) continue ;; esac
+    [ "$seq" = "$except" ] && continue
+    [ -e "$base.handled" ] && continue
+    printf '%s\n' "$seq"
+    return 0
+  done
+  return 1
+}
+
+cmd_arm_locked() {  # <id> [handling-seq]
+  local id=${1:-} handling_seq=${2:-} sid marker pending_seq moffset mhash
   validate_id "$id"
   remote_route_exists "$id"
+  sid=$(source_id "$id")
   # The source long-polls the remote log over SSH, so a scale-to-zero route in a
   # recognized no-host lifecycle state has nothing to poll and must never be
   # woken just to arm it. The cursor is untouched, so the next wake re-arms from
   # exactly this offset.
   if fm_runpod_is_dormant "$DATA" "$id"; then
-    printf 'skipped: %s suspended\n' "$(source_id "$id")"
+    printf 'skipped: %s suspended\n' "$sid"
+    return 0
+  fi
+  # A continuity-broken route stays pinned at the recorded break point until an
+  # operator rebases it; a cursor that no longer equals the marker's own offset
+  # and hash is that rebase, so the pin clears and arming proceeds.
+  marker=$(continuity_marker_path "$id")
+  if [ -f "$marker" ] && [ ! -L "$marker" ]; then
+    moffset=$(sed -n 's/^offset=//p' "$marker" | head -1)
+    mhash=$(sed -n 's/^prefix_sha256=//p' "$marker" | head -1)
+    read_cursor "$id"
+    if [ "$CURSOR_OFFSET" = "$moffset" ] && [ "$CURSOR_HASH" = "$mhash" ]; then
+      printf 'skipped: %s continuity broken at sequence %s\n'         "$sid" "$(sed -n 's/^seq=//p' "$marker" | head -1)"
+      return 0
+    fi
+    rm -f -- "$marker" || return 1
+  fi
+  # An unhandled capture already covers this route's invariant; arming a second
+  # source from the same cursor would capture a duplicate generation. The
+  # capture this adapter is currently handling is the one exception.
+  if pending_seq=$(pending_capture_seq "$sid" "$handling_seq"); then
+    printf 'skipped: %s capture pending (sequence %s)\n' "$sid" "$pending_seq"
     return 0
   fi
   read_cursor "$id"
-  sid=$(source_id "$id")
+  if [ -f "$STATE/procevent/$sid.source" ] && [ ! -L "$STATE/procevent/$sid.source" ]; then
+    printf 'already-armed: %s offset=%s\n' "$sid" "$CURSOR_OFFSET"
+    return 0
+  fi
   "$SCRIPT_DIR/fm-procevent.sh" register remote-reply "$sid" -- \
     "$SCRIPT_DIR/fm-procevent-remote-reply.sh" source "$id" || return 1
   printf 'armed: %s offset=%s\n' "$sid" "$CURSOR_OFFSET"
@@ -242,52 +356,82 @@ fetch_document() { # <id> <remote-relative> <result-var>
   printf -v "$result_var" '%s' "$local_rel"
 }
 
-# A status line is well-formed UTF-8 text, but never carries codepoints that
-# can control, hide, or reorder what the parent sees: C0/C1 controls other than
-# TAB, DEL, format characters such as bidi controls, zero-width marks, and
-# BOMs, and Unicode line/paragraph separators. Perl's strict UTF-8 decoder
-# proves the byte sequence and classifies codepoints; the delta reader already
-# requires perl, and the same perl ships with macOS.
-status_line_charset_ok() { # <line>
-  printf '%s' "$1" | perl -MEncode -e '
-    local $/;
-    my $text = eval { Encode::decode("UTF-8", <STDIN>, Encode::FB_CROAK) };
-    exit 1 if $@;
-    $text =~ tr/\t//d;
-    exit($text =~ /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/ ? 1 : 0);
-  '
-}
-
-payload_charset_ok() { # <payload>
+# Classify one payload line's rejection reason, or print nothing and exit 1
+# when the line is acceptable. Reasons: invalid-utf8, forbidden-character,
+# too-long, not-a-status-line. The byte count is measured BEFORE the strict
+# UTF-8 decode, because Encode::decode consumes the byte scalar; the character
+# classes match the old whole-payload rule (C0/C1 controls except TAB, DEL via
+# \p{Cc}, format \p{Cf}, and Unicode line/paragraph separators \p{Zl} \p{Zp}).
+line_reject_reason() {  # <line-file>
   perl -MEncode -e '
     local $/;
-    my $text = eval { Encode::decode("UTF-8", <STDIN>, Encode::FB_CROAK) };
-    exit 1 if $@;
-    $text =~ s/[\t\n]//g;
-    exit($text =~ /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/ ? 1 : 0);
-  ' < "$1"
+    my $bytes = <STDIN>;
+    exit 1 if !defined $bytes || !length $bytes;
+    my $blen = length($bytes);
+    my $text = eval { Encode::decode("UTF-8", $bytes, Encode::FB_CROAK) };
+    if ($@) { print "invalid-utf8\n"; exit 0; }
+    $text =~ tr/\t//d;
+    if ($text =~ /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/) { print "forbidden-character\n"; exit 0; }
+    my $max = $ARGV[0];
+    if ($blen > $max) { print "too-long\n"; exit 0; }
+    exit 1;
+  ' "$MAX_LINE_BYTES" < "$1"
 }
 
-line_valid() { # <line>
-  local line=$1 bytes
-  [ -n "$line" ] || return 1
-  bytes=$(printf '%s' "$line" | LC_ALL=C wc -c | tr -d ' ')
-  [ "$bytes" -le "$MAX_LINE_BYTES" ] || return 1
-  status_line_charset_ok "$line" || return 1
-  printf '%s' "$line" | grep -Eq '^(working|needs-decision|blocked|paused|done|failed|resolved)([[:space:]]+(\[key=[^][:space:]:]*\]|\[corr=[^][:space:]:]*\]))*:'
+# Split a payload byte-exactly into per-line files under $1/lines and write the
+# ordered file list to $1/manifest. bash `read` drops NUL bytes, so it cannot be
+# used to judge raw bytes; perl preserves them exactly.
+split_payload_lines() {  # <payload> <out-dir>
+  local payload=$1 out=$2
+  mkdir -p "$out/lines" || return 1
+  perl -e '
+    my ($payload, $out) = @ARGV;
+    open(my $in, "<", $payload) or exit 1;
+    binmode($in);
+    local $/;
+    my $data = <$in>;
+    close($in);
+    $data = "" unless defined $data;
+    my @lines = split(/\n/, $data, -1);
+    pop @lines if @lines && $lines[-1] eq "";
+    open(my $m, ">", "$out/manifest") or exit 1;
+    binmode($m);
+    my $i = 0;
+    for my $line (@lines) {
+      my $f = "$out/lines/$i.line";
+      open(my $lf, ">", $f) or exit 1;
+      binmode($lf);
+      print $lf $line;
+      close($lf);
+      print $m "$f\n";
+      $i++;
+    }
+    close($m);
+  ' "$payload" "$out"
 }
 
-payload_lines_valid() { # <payload>
-  local line
-  payload_charset_ok "$1" || return 1
-  while IFS= read -r line || [ -n "$line" ]; do
-    line_valid "$line" || return 1
-  done < "$1"
+# Move a rejected line's exact bytes into the private quarantine and print the
+# status-channel notice. The quarantine file carries the line bytes with no
+# trailing newline, so the stored bytes equal the rejected bytes.
+quarantine_line() {  # <id> <qseq> <index> <line-file>
+  local id=$1 qseq=$2 index=$3 line_file=$4 dir dest tmp hash bytes
+  dir=$(quarantine_dir "$id")
+  mkdir -p "$dir" || return 1
+  chmod 700 "$dir" 2>/dev/null || true
+  dest="$dir/$qseq.$index.line"
+  hash=$(sha256_file "$line_file") || return 1
+  bytes=$(LC_ALL=C wc -c < "$line_file" | tr -d ' ')
+  tmp=$(umask 077; mktemp "$dir/.quarantine.XXXXXX") || return 1
+  cat "$line_file" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$dest" || { rm -f -- "$tmp"; return 1; }
+  printf '%s %s\n' "$hash" "$bytes"
 }
 
 cmd_ingest() {
   local id=${1:-} result=${2:-} seq=${3:-} class blank payload schema status path from to from_hash to_hash payload_hash payload_bytes reason
   local actual_bytes actual_hash line doc local_doc rewritten appended=0 cursor_already=0 lock status_file tmp
+  local qseq line_file line_reason qhash qbytes index
   validate_id "$id"
   [ -f "$result" ] && [ ! -L "$result" ] || die "result file is unavailable or unsafe: $result"
   class=$(classify_result "$result")
@@ -310,6 +454,13 @@ cmd_ingest() {
   done
   blank=$(grep -n -m 1 '^$' "$result" | cut -d: -f1)
   case "$blank" in ''|*[!0-9]*) die "result has no payload boundary" ;; esac
+  # Quarantine objects and escalation keys name the captured generation; an
+  # adhoc ingest has none, so it names the result's own digest instead.
+  if [ -n "$seq" ]; then
+    qseq=$seq
+  else
+    qseq="adhoc-$(sha256_file "$result" | cut -c1-12)" || die "cannot derive the adhoc quarantine key"
+  fi
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-remote-reply-ingest.XXXXXX") || die "cannot create ingest staging directory"
   trap 'rm -rf -- "$tmp"' EXIT
   payload="$tmp/payload"
@@ -330,8 +481,12 @@ cmd_ingest() {
     die "result does not continue the current cursor for $id"
   fi
   if [ "$class" = continuity-broken ]; then
-    line="blocked [key=remote-reply-continuity-$id]: remote reply continuity broke for $id ($reason)"
-    if ! grep -Fqx -- "$line" "$status_file" 2>/dev/null; then
+    # Pin the route at this break point until an operator rebases the cursor.
+    write_continuity_marker "$id" "$qseq" "$reason" "$CURSOR_OFFSET" "$CURSOR_HASH"       || { fm_lock_release "$lock"; die "cannot record the continuity break"; }
+    line="blocked [key=remote-reply-continuity-$id]: remote reply continuity broke for $id at sequence $qseq ($reason)"
+    # One escalation per route regardless of which generation observed it or
+    # whether it was replayed under an adhoc ingest.
+    if ! grep -Fq "key=remote-reply-continuity-$id" "$status_file" 2>/dev/null; then
       printf '%s\n' "$line" >> "$status_file" || { fm_lock_release "$lock"; die "cannot append continuity escalation"; }
     fi
     fm_lock_release "$lock"
@@ -339,8 +494,35 @@ cmd_ingest() {
     return 3
   fi
   [ "$status" = delta ] && [ "$payload_bytes" -gt 0 ] || { fm_lock_release "$lock"; die "delta result has no payload"; }
-  payload_lines_valid "$payload" || { fm_lock_release "$lock"; die "delta contains an invalid status line"; }
-  while IFS= read -r line || [ -n "$line" ]; do
+  # Each line is judged on its own bytes: a rejected line is quarantined
+  # byte-exactly and reported once in line order, while accepted lines keep the
+  # document rewrite and dedupe append. Zero-length lines are neither ingested
+  # nor quarantined.
+  split_payload_lines "$payload" "$tmp" || { fm_lock_release "$lock"; die "cannot split the delta payload into lines"; }
+  index=1
+  while IFS= read -r line_file; do
+    [ -n "$line_file" ] || continue
+    line=$(cat "$line_file")
+    if [ -z "$line" ]; then index=$((index + 1)); continue; fi
+    line_reason=$(line_reject_reason "$line_file") && {
+      read -r qhash qbytes < <(quarantine_line "$id" "$qseq" "$index" "$line_file")         || { fm_lock_release "$lock"; die "cannot quarantine a remote reply line"; }
+      line="blocked [key=remote-reply-quarantine-$id-$qseq]: remote reply line rejected ($line_reason, sha256=$qhash, bytes=$qbytes)"
+      if ! grep -Fqx -- "$line" "$status_file" 2>/dev/null; then
+        printf '%s\n' "$line" >> "$status_file" || { fm_lock_release "$lock"; die "cannot append remote reply quarantine notice"; }
+      fi
+      index=$((index + 1))
+      continue
+    }
+    if ! printf '%s' "$line" | grep -Eq '^(working|needs-decision|blocked|paused|done|failed|resolved)([[:space:]]+(\[key=[^][:space:]:]*\]|\[corr=[^][:space:]:]*\]))*:'; then
+      read -r qhash qbytes < <(quarantine_line "$id" "$qseq" "$index" "$line_file")         || { fm_lock_release "$lock"; die "cannot quarantine a remote reply line"; }
+      line="blocked [key=remote-reply-quarantine-$id-$qseq]: remote reply line rejected (not-a-status-line, sha256=$qhash, bytes=$qbytes)"
+      if ! grep -Fqx -- "$line" "$status_file" 2>/dev/null; then
+        printf '%s\n' "$line" >> "$status_file" || { fm_lock_release "$lock"; die "cannot append remote reply quarantine notice"; }
+      fi
+      index=$((index + 1))
+      continue
+    fi
+    printf '%s\n' "$line" >> "$tmp/accepted"
     rewritten=$line
     while IFS= read -r doc; do
       [ -n "$doc" ] || continue
@@ -351,14 +533,19 @@ cmd_ingest() {
       printf '%s\n' "$rewritten" >> "$status_file" || { fm_lock_release "$lock"; die "cannot append remote reply"; }
       appended=$((appended + 1))
     fi
-  done < "$payload"
+    index=$((index + 1))
+  done < "$tmp/manifest"
+  # Only accepted lines may resolve a pending parent request: a rejected line's
+  # correlation token is never trusted.
   while IFS= read -r corr; do
     [ -n "$corr" ] || continue
     fm_pending_reply_try_resolve "$STATE" "$corr" "$status_file" >/dev/null 2>&1 || true
   done < <(
-    while IFS= read -r line || [ -n "$line" ]; do
-      fm_pending_reply_extract_status_corrs "$line"
-    done < "$payload" | awk '!seen[$0]++'
+    if [ -f "$tmp/accepted" ]; then
+      while IFS= read -r line || [ -n "$line" ]; do
+        fm_pending_reply_extract_status_corrs "$line"
+      done < "$tmp/accepted"
+    fi | awk '!seen[$0]++'
   )
   if [ -n "$seq" ]; then
     write_ingest_receipt "$id" "$seq" "$result" \
@@ -374,7 +561,7 @@ cmd_ingest() {
 }
 
 cmd_handle_locked() {
-  local id=${1:-} seq=${2:-} result=${3:-} sid class rc=0 to
+  local id=${1:-} seq=${2:-} result=${3:-} sid class rc=0 to bfrom bfrom_hash
   validate_id "$id"
   case "$seq" in ''|*[!0-9]*) die "sequence must be a nonnegative integer" ;; esac
   sid=$(source_id "$id")
@@ -384,16 +571,37 @@ cmd_handle_locked() {
     to=$(result_field "$result" to_offset) || die "result end offset is ambiguous"
     printf 'ingested: %s appended=0 offset=%s\n' "$id" "$to"
   else
-    cmd_ingest "$id" "$result" "$seq" || rc=$?
+    # Stale generations are skipped rather than ingested or refused: a delta
+    # whose whole range the committed cursor already passed (the to_offset ==
+    # cursor same-hash case stays inside cmd_ingest's cursor_already path), or
+    # a continuity break recorded for a cursor state an operator already
+    # rebased away from, which must not re-escalate.
+    read_cursor "$id"
+    to=$(result_field "$result" to_offset) || die "result end offset is ambiguous"
+    case "$to" in ''|*[!0-9]*) die "result carries a nonnumeric size or offset" ;; esac
+    if [ "$class" = delta ] && [ "$to" -lt "$CURSOR_OFFSET" ]; then
+      printf 'superseded: %s seq=%s offset=%s\n' "$id" "$seq" "$CURSOR_OFFSET"
+    elif [ "$class" = continuity-broken ]; then
+      bfrom=$(result_field "$result" from_offset) || die "result start offset is ambiguous"
+      bfrom_hash=$(result_field "$result" from_prefix_sha256) || die "result start hash is ambiguous"
+      if [ "$bfrom" = "$CURSOR_OFFSET" ] && [ "$bfrom_hash" = "$CURSOR_HASH" ]; then
+        cmd_ingest "$id" "$result" "$seq" || rc=$?
+      else
+        printf 'superseded: %s seq=%s offset=%s\n' "$id" "$seq" "$CURSOR_OFFSET"
+      fi
+    else
+      cmd_ingest "$id" "$result" "$seq" || rc=$?
+    fi
   fi
   if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then
     return "$rc"
   fi
   fm_pending_reply_reconcile_task "$STATE" "$id" "$STATE/$id.status" >/dev/null 2>&1 || true
   if [ "$class" = delta ]; then
-    cmd_arm_locked "$id" || return 1
+    cmd_arm_locked "$id" "$seq" || return 1
   fi
   "$SCRIPT_DIR/fm-procevent.sh" handled "$sid" "$seq" || return 1
+  rm -f -- "$(autohandle_failure_path "$id" "$seq")"
   return "$rc"
 }
 
@@ -478,6 +686,126 @@ cmd_retire() {
   )
 }
 
+# The generic runner's autohandle seam: handle one captured delta with no
+# agent turn. A busy lifecycle lock (a teardown, a RunPod sleep, or another
+# handler owns it this cycle) exits 75 without counting a failure - the result
+# stays pending for the next reconcile. Real failures count up under
+# state/remote-replies/<id>.<seq>.autohandle-failures, and the counter's
+# reaching FM_REMOTE_REPLY_AUTOHANDLE_FAILURE_LIMIT appends exactly one named
+# blocked line; later retries continue and never give up on the generation.
+cmd_autohandle() {
+  local source=${1:-} seq=${2:-} result=${3:-} id lock out rc=0 count limit status_file line reason
+  id=${source#remote-reply-}
+  [ "$source" = "remote-reply-$id" ] || die "invalid remote reply source id: $source"
+  validate_id "$id"
+  case "$seq" in ''|*[!0-9]*) die "sequence must be a nonnegative integer" ;; esac
+  lock=$(secondmate_reply_lifecycle_lock_path "$STATE" "$id")
+  out=$(
+    fm_lock_try_acquire "$lock" || exit 75
+    trap 'fm_lock_release "$lock"' EXIT
+    cmd_handle_locked "$id" "$seq" "$result" 2>&1
+  ) || rc=$?
+  # A busy lifecycle lock defers to the next cycle; it is not a handling
+  # failure and never counts toward the escalation limit.
+  if [ "$rc" -eq 75 ]; then
+    return 75
+  fi
+  if [ "$rc" -eq 0 ] || [ "$rc" -eq 3 ]; then
+    return 0
+  fi
+  reason=$(printf '%s\n' "$out" | sed -n 's/^error: //p' | head -1)
+  reason=$(printf '%s' "$reason" | tr -cd '[:print:]' | cut -c1-200)
+  [ -n "$reason" ] || reason="handle exited $rc"
+  count=$(autohandle_failure_record "$id" "$seq" "$reason") || return 1
+  limit=$(autohandle_failure_limit)
+  if [ "$count" -eq "$limit" ]; then
+    status_file="$STATE/$id.status"
+    line="blocked [key=remote-reply-autohandle-$id-$seq]: remote reply sequence $seq for $id failed automatic handling $limit consecutive times ($reason)"
+    if ! grep -Fqx -- "$line" "$status_file" 2>/dev/null; then
+      mkdir -p "$STATE" 2>/dev/null || true
+      printf '%s\n' "$line" >> "$status_file" 2>/dev/null || true
+    fi
+  fi
+  return 1
+}
+
+# Append or bump the per-sequence autohandle failure counter (mode 600) and
+# print the new count.
+autohandle_failure_record() {  # <id> <seq> <reason>
+  local id=$1 seq=$2 reason=$3 path count=0 tmp
+  path=$(autohandle_failure_path "$id" "$seq")
+  [ ! -L "$path" ] || return 1
+  mkdir -p "$CURSOR_DIR" || return 1
+  chmod 700 "$CURSOR_DIR" 2>/dev/null || true
+  if [ -f "$path" ]; then
+    count=$(sed -n 's/^count=//p' "$path" | head -1)
+    case "$count" in ''|*[!0-9]*) count=0 ;; esac
+  fi
+  count=$((count + 1))
+  tmp=$(umask 077; mktemp "$CURSOR_DIR/.autohandle-failures.XXXXXX") || return 1
+  {
+    printf 'count=%s\n' "$count"
+    printf 'reason=%s\n' "$reason"
+  } > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$path" || { rm -f -- "$tmp"; return 1; }
+  printf '%s\n' "$count"
+}
+
+# The generic runner's handled-gate: allow a NEW acknowledgement only when the
+# generation was durably dealt with - an ingest receipt matching this exact
+# result, a cursor already covering the result's range, or a recorded
+# continuity break naming this sequence. Anything else refuses so a captured
+# delta cannot be marked handled before it was ingested.
+cmd_handled_gate() {
+  local source=${1:-} seq=${2:-} result=${3:-} id class to marker mseq
+  id=${source#remote-reply-}
+  [ "$source" = "remote-reply-$id" ] || die "invalid remote reply source id: $source"
+  validate_id "$id"
+  case "$seq" in ''|*[!0-9]*) die "sequence must be a nonnegative integer" ;; esac
+  if ingest_receipt_matches "$id" "$seq" "$result" 2>/dev/null; then
+    return 0
+  fi
+  class=$(classify_result "$result")
+  read_cursor "$id"
+  to=$(result_field "$result" to_offset 2>/dev/null || true)
+  case "$to" in ''|*[!0-9]*) to=-1 ;; esac
+  if [ "$class" = delta ] && [ "$to" -ge 0 ]     && { [ "$to" -lt "$CURSOR_OFFSET" ]       || { [ "$to" -eq "$CURSOR_OFFSET" ]            && [ "$(result_field "$result" to_prefix_sha256 2>/dev/null || true)" = "$CURSOR_HASH" ]; }; }; then
+    return 0
+  fi
+  if [ "$class" = continuity-broken ]; then
+    marker=$(continuity_marker_path "$id")
+    if [ -f "$marker" ] && [ ! -L "$marker" ]; then
+      mseq=$(sed -n 's/^seq=//p' "$marker" | head -1)
+      [ "$mseq" = "$seq" ] && return 0
+    fi
+  fi
+  printf 'error: remote reply sequence %s for %s has no ingest receipt; handle it with fm-procevent-remote-reply.sh handle %s %s %s\n'     "$seq" "$id" "$id" "$seq" "$result" >&2
+  return 1
+}
+
+# Converge every live remote route onto the arming invariant without SSH: each
+# route whose lifecycle lock is free this cycle gets the same ordered checks as
+# `arm`. A route whose lock is held (teardown, a RunPod sleep, or a handler) is
+# skipped this cycle and converged later.
+cmd_ensure_armed() {
+  local meta id _home _window remote_host lock out rc=0
+  while IFS='|' read -r id _home _window meta; do
+    [ -n "$id" ] || continue
+    remote_host=$(grep '^remote_host=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2-)
+    [ -n "$remote_host" ] || continue
+    validate_id "$id" || continue
+    lock=$(secondmate_reply_lifecycle_lock_path "$STATE" "$id")
+    if ! fm_lock_try_acquire "$lock"; then
+      continue
+    fi
+    out=$(cmd_arm_locked "$id" 2>&1) || rc=1
+    printf '%s\n' "$out"
+    fm_lock_release "$lock"
+  done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
+  return "$rc"
+}
+
 require_parent_lifecycle_lock() {
   local id=$1 lock owner pid
   lock=$(secondmate_reply_lifecycle_lock_path "$STATE" "$id")
@@ -493,7 +821,10 @@ require_parent_lifecycle_lock() {
 
 case "${1:-}" in
   arm) shift; [ "$#" -eq 1 ] || usage; cmd_arm "$@" ;;
-  arm-locked) shift; [ "$#" -eq 1 ] || usage; require_parent_lifecycle_lock "$1"; cmd_arm_locked "$@" ;;
+  arm-locked) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; require_parent_lifecycle_lock "$1"; cmd_arm_locked "$@" ;;
+  ensure-armed) shift; [ "$#" -eq 0 ] || usage; cmd_ensure_armed ;;
+  autohandle) shift; [ "$#" -eq 3 ] || usage; cmd_autohandle "$@" ;;
+  handled-gate) shift; [ "$#" -eq 3 ] || usage; cmd_handled_gate "$@" ;;
   source) shift; [ "$#" -eq 1 ] || usage; cmd_source "$@" ;;
   handle) shift; [ "$#" -eq 3 ] || usage; cmd_handle "$@" ;;
   ingest) shift; [ "$#" -eq 2 ] || usage; cmd_ingest "$@" ;;

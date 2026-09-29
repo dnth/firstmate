@@ -43,6 +43,14 @@
 #   recovery_sender_identity=
 #   recovery_sent_epoch=
 #   recovery_delivery_outcome=
+#                           confirmed | failed | unknown - the recovery send's
+#                           durable verdict. A recovery is reported failed only
+#                           when the remote provably did not record it (a
+#                           binding refusal before notification, or a local
+#                           send failure); a durable remote record - even one
+#                           whose acknowledgement is still in flight - is
+#                           confirmed, and every other outcome stays unknown
+#                           rather than pretending.
 #   recovery_turn_seen_busy=
 #   recovery_turn_completed_epoch=
 #   escalated_epoch=
@@ -753,7 +761,7 @@ fm_pending_reply_recovery_message() {  # <record-path>
 fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   local state=$1 corr=$2
   local rec phase completed delivered attempted grace now age task_id msg parent_home send_status=0
-  local sender_pid sender_identity
+  local sender_pid sender_identity send_out='' outcome meta remote_host
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
@@ -781,25 +789,56 @@ fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   fm_pending_reply_set "$rec" recovery_sender_identity "$sender_identity" || return 1
   fm_pending_reply_set "$rec" recovery_attempted_epoch "$now" || return 1
   fm_pending_reply_set "$rec" phase recovery_sending || return 1
+  # The sender's output is captured, never echoed: this runs inside the watcher
+  # cycle, whose stdout is the wake channel. A remote route (the task meta
+  # carries remote_host) classifies the durable-result contract: exit 9 is the
+  # only provable failure (a binding refused before notification), a machine
+  # `request= record= state=recorded|handled` line or any of the parent's
+  # documented durable verdicts (exit 0 or 4-8) confirms the record went
+  # durable, and anything else is unknown - the send may have reached the
+  # remote, so it is neither failed nor retried. Local routes keep the old
+  # zero/nonzero split.
+  meta="$state/${task_id}.meta"
+  remote_host=
+  if [ -f "$meta" ] && [ ! -L "$meta" ]; then
+    remote_host=$(fm_meta_get "$meta" remote_host 2>/dev/null || true)
+  fi
+  send_out=
   if [ -n "${FM_PENDING_REPLY_SEND_HOOK:-}" ]; then
     # Hook receives: task_id message
     # shellcheck disable=SC2086
-    if ! eval "$FM_PENDING_REPLY_SEND_HOOK" "$(printf '%q' "$task_id")" "$(printf '%q' "$msg")"; then
-      send_status=1
-    fi
+    send_out=$(eval "$FM_PENDING_REPLY_SEND_HOOK" "$(printf '%q' "$task_id")" "$(printf '%q' "$msg")" 2>/dev/null) || send_status=$?
   else
     if [ -z "$parent_home" ] || [ ! -d "$parent_home" ]; then
       send_status=1
-    elif ! env FM_HOME="$parent_home" FM_PENDING_REPLY_EXISTING_CORR="$corr" \
-      "$_FM_PENDING_REPLY_LIB_DIR/fm-send.sh" "$task_id" "$msg"; then
-      send_status=1
+    elif ! send_out=$(env FM_HOME="$parent_home" FM_PENDING_REPLY_EXISTING_CORR="$corr" \
+      "$_FM_PENDING_REPLY_LIB_DIR/fm-send.sh" "$task_id" "$msg" 2>/dev/null); then
+      send_status=$?
     fi
   fi
   if [ "$send_status" = 0 ]; then
     fm_pending_reply_finish_recovery "$state" "$corr" confirmed
     return $?
   fi
-  fm_pending_reply_finish_recovery "$state" "$corr" failed || return 1
+  if [ -z "$remote_host" ]; then
+    fm_pending_reply_finish_recovery "$state" "$corr" failed || return 1
+    return 1
+  fi
+  if [ "$send_status" -eq 9 ]; then
+    fm_pending_reply_finish_recovery "$state" "$corr" failed || return 1
+    return 1
+  fi
+  if printf '%s\n' "$send_out" | grep -Eq '^request=[^ ]+ record=[0-9]+ state=(recorded|handled)$'; then
+    fm_pending_reply_finish_recovery "$state" "$corr" confirmed || return 1
+    return 0
+  fi
+  case "$send_status" in
+    4|5|6|7|8)
+      fm_pending_reply_finish_recovery "$state" "$corr" confirmed || return 1
+      return 0
+      ;;
+  esac
+  fm_pending_reply_finish_recovery "$state" "$corr" unknown || return 1
   return 1
 }
 
@@ -837,8 +876,11 @@ fm_pending_reply_finish_recovery() {  # <state-dir> <corr_id> <confirmed|failed>
     fm_pending_reply_set "$rec" recovery_turn_completed_epoch "" || return 1
     fm_pending_reply_set "$rec" phase recovery_sent || return 1
   else
-    [ "$outcome" = failed ] || return 1
-    fm_pending_reply_set "$rec" phase recovery_failed || return 1
+    case "$outcome" in
+      failed) fm_pending_reply_set "$rec" phase recovery_failed || return 1 ;;
+      unknown) fm_pending_reply_set "$rec" phase recovery_unknown || return 1 ;;
+      *) return 1 ;;
+    esac
   fi
 }
 

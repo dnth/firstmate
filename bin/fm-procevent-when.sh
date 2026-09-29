@@ -11,13 +11,16 @@
 #   fm-procevent-when.sh source-id <name>
 #   fm-procevent-when.sh retire <name>
 #   fm-procevent-when.sh run <source-id>
+#   fm-procevent-when.sh handled-gate <source-id> <sequence> <result-file>
 #
 # arm        Bind a (condition, action) pair as process-event source
 #            "when-<name>". The spec is written privately under state/when/ and
 #            hash-bound by a trust record the same way fm-check-register.sh
 #            binds a custom check. Both executables are resolved and their bytes
 #            are hash-bound at registration, then checked again before every
-#            condition poll and immediately before the fire is claimed. The
+#            condition poll and immediately before the fire is claimed.
+# handled-gate  The runner's acknowledgement gate; a captured when outcome is
+#            already terminal and self-contained, so it always allows. The
 #            runner refuses a mutated spec or executable without executing it.
 #            Both argv vectors are executed directly with no shell, so nothing
 #            is re-split or interpreted. Executables must be explicitly
@@ -613,6 +616,7 @@ case "${1-}" in
   terminal)  shift; cmd_terminal "$@" ;;
   source-id) shift; cmd_source_id "$@" ;;
   retire)    shift; cmd_retire "$@" ;;
+  handled-gate) exit 0 ;;
   ''|-h|--help|help) usage ;;
   *) die "unknown command: $1" ;;
 esac

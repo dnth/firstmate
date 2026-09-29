@@ -1285,7 +1285,7 @@ const doorbell = installTaskInboxDoorbell(
     sendMessage(message, options) {
       appendFileSync(process.env.FM_TEST_OMP_SENT, `${JSON.stringify({ message, options })}\n`);
       writeFileSync(process.env.FM_TEST_OMP_TURN_STARTED, `${process.pid}\n`);
-      if (!existsSync(process.env.FM_TEST_OMP_SKIP_HANDLED)) {
+      const moveHandled = () => {
         const record = readdirSync(process.env.FM_TEST_OMP_INBOX)
           .filter((name) => name.endsWith(".msg"))
           .sort()[0];
@@ -1293,6 +1293,15 @@ const doorbell = installTaskInboxDoorbell(
           `${process.env.FM_TEST_OMP_INBOX}/${record}`,
           `${process.env.FM_TEST_OMP_INBOX}/handled/${record}`,
         );
+      };
+      if (!existsSync(process.env.FM_TEST_OMP_SKIP_HANDLED)) {
+        if (existsSync(process.env.FM_TEST_OMP_DELAYED_HANDLED)) {
+          // A real remote LLM acknowledges on its own cadence; the durable
+          // record boundary must not wait for it.
+          setTimeout(moveHandled, 30000).unref();
+        } else {
+          moveHandled();
+        }
       }
     },
   },
@@ -1318,11 +1327,13 @@ OMP_INBOX="$OMP_CONTROL_STATE/remote-omp.inbox"
 OMP_TURN_STARTED="$OMP_CONTROL_STATE/remote-omp.omp-started"
 OMP_SENT="$TMP_ROOT/remote-omp-send-message.log"
 OMP_SKIP_HANDLED="$TMP_ROOT/remote-omp-skip-handled"
-rm -f "$OMP_READY" "$OMP_TURN_STARTED" "$OMP_ACTIVE_PID" "$OMP_SENT" "$OMP_SKIP_HANDLED"
+OMP_DELAYED_HANDLED="$TMP_ROOT/remote-omp-delayed-handled"
+rm -f "$OMP_READY" "$OMP_TURN_STARTED" "$OMP_ACTIVE_PID" "$OMP_SENT" "$OMP_SKIP_HANDLED" "$OMP_DELAYED_HANDLED"
 FM_TEST_OMP_HELPER="$REMOTE_ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" \
   FM_TEST_OMP_SENT="$OMP_SENT" FM_TEST_OMP_TURN_STARTED="$OMP_TURN_STARTED" \
   FM_TEST_OMP_INBOX="$OMP_INBOX" FM_TEST_OMP_READY="$OMP_READY" \
   FM_TEST_OMP_PID="$OMP_ACTIVE_PID" FM_TEST_OMP_SKIP_HANDLED="$OMP_SKIP_HANDLED" \
+  FM_TEST_OMP_DELAYED_HANDLED="$OMP_DELAYED_HANDLED" \
   bash -c 'exec -a bun "$1" "$2"' _ \
     "$REMOTE_ROOT/bin/bun" "$REMOTE_ROOT/bin/omp" \
   > "$TMP_ROOT/remote-omp-listener.out" 2>&1 &
@@ -1398,6 +1409,8 @@ assert_grep 'pane send-text' "$HERDR_LOG" \
 remote_env "$ROOT/bin/fm-send.sh" fm-remote-omp "ordinary remote OMP steer" \
   > "$TMP_ROOT/remote-omp-delivery.out" 2>&1 \
   || fail "bound remote OMP inbox delivery failed:"$'\n'"$(cat "$TMP_ROOT/remote-omp-delivery.out")"$'\n'"listener:"$'\n'"$(cat "$TMP_ROOT/remote-omp-listener.out")"$'\n'"programmatic sends:"$'\n'"$(cat "$OMP_SENT" 2>/dev/null)"
+grep -Eq '^request=[0-9a-f]{16} record=001 state=(recorded|handled)$' "$TMP_ROOT/remote-omp-delivery.out" \
+  || fail "bound remote OMP delivery did not report its durable machine line:"$'\n'"$(cat "$TMP_ROOT/remote-omp-delivery.out")"
 OMP_RECORD="$OMP_INBOX/handled/001.msg"
 [ -f "$OMP_RECORD" ] || fail "bound remote OMP delivery did not durably acknowledge its canonical inbox record"
 OMP_BODY=$(FM_ROOT_OVERRIDE="$REMOTE_ROOT" /bin/bash -c \
@@ -1436,27 +1449,36 @@ assert_grep 'remote-omp-binding-refused' "$TMP_ROOT/remote-omp-unavailable.out" 
 assert_no_grep 'pane send-text' "$HERDR_LOG" "inactive remote OMP extension touched the composer"
 printf '%s\n' "$OMP_LISTENER_PID" > "$OMP_READY"
 
-touch "$OMP_SKIP_HANDLED"
+# A delayed acknowledgement is not a delivery failure: the durable-record
+# contract returns once the record is durable, the machine line reports
+# state=recorded, and the later handled/ move remains only an acknowledgement.
+touch "$OMP_DELAYED_HANDLED"
 set +e
-remote_env "$ROOT/bin/fm-send.sh" fm-remote-omp "acknowledgement timeout" \
-  > "$TMP_ROOT/remote-omp-timeout.out" 2>&1
-timeout_rc=$?
+remote_env "$ROOT/bin/fm-send.sh" fm-remote-omp "delayed acknowledgement" \
+  > "$TMP_ROOT/remote-omp-delayed.out" 2>&1
+delayed_rc=$?
 set -e
-[ "$timeout_rc" = 8 ] || fail "remote OMP acknowledgement timeout did not retain a named queue verdict (rc=$timeout_rc)"
-assert_grep 'did not durably acknowledge' "$TMP_ROOT/remote-omp-timeout.out" \
-  "remote OMP acknowledgement timeout did not name the missing receipt"
-[ -f "$OMP_INBOX/002.msg" ] || fail "remote OMP acknowledgement timeout lost its durable request"
-sent_before_retry=$(wc -l < "$OMP_SENT")
+[ "$delayed_rc" = 0 ] || fail "remote OMP delayed acknowledgement did not return durable success (rc=$delayed_rc)"
+grep -Eq '^request=[0-9a-f]{16} record=002 state=recorded$' "$TMP_ROOT/remote-omp-delayed.out" \
+  || fail "remote OMP delayed acknowledgement did not print its recorded machine line:"$'\n'"$(cat "$TMP_ROOT/remote-omp-delayed.out")"
+[ -f "$OMP_INBOX/002.msg" ] || fail "remote OMP delayed acknowledgement lost its durable request"
+[ ! -e "$OMP_INBOX/handled/002.msg" ] \
+  || fail "the remote OMP send waited on the agent's handled acknowledgement"
+rm -f "$OMP_DELAYED_HANDLED"
+
+# The remote control path carries the same durable-result contract.
 set +e
 remote_env "$ROOT/bin/fm-on.sh" remote-omp fm-remote-secondmate-control.sh send remote-omp \
-  "[fm-from-firstmate]"$'\xE2\x81\xA3'"corr=0123456789abcdef acknowledgement timeout" \
+  "[fm-from-firstmate]"$'\xE2\x81\xA3'"corr=0123456789abcdef durable contract" \
   > "$TMP_ROOT/remote-omp-retry.out" 2>&1
-retry_rc=$?
+control_rc=$?
 set -e
-[ "$retry_rc" = 8 ] || fail "remote OMP retry did not preserve its queued receipt requirement (rc=$retry_rc)"
-[ "$(wc -l < "$OMP_SENT")" = "$((sent_before_retry + 1))" ] \
-  || fail "remote OMP retry replayed a prior programmatic request"
-rm -f "$OMP_SKIP_HANDLED"
+[ "$control_rc" = 0 ] || fail "remote OMP control send did not return durable success (rc=$control_rc)"
+grep -Eq '^request=0123456789abcdef record=003 state=recorded$' "$TMP_ROOT/remote-omp-retry.out" \
+  || fail "remote OMP control send did not print its recorded machine line:"$'\n'"$(cat "$TMP_ROOT/remote-omp-retry.out")"
+[ -f "$OMP_INBOX/003.msg" ] || fail "remote OMP control send lost its durable request"
+[ ! -e "$OMP_INBOX/handled/003.msg" ] \
+  || fail "the remote OMP control send waited on the handled acknowledgement"
 
 cp "$OMP_CONTROL_STATE/remote-omp.meta" "$TMP_ROOT/remote-omp.meta.before-stale"
 meta_tmp="$OMP_CONTROL_STATE/remote-omp.meta.tmp"

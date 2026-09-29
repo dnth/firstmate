@@ -70,6 +70,19 @@
 # while ACTING on it is firstmate's judgement, so the capture stays unacknowledged
 # and its `check` wake reaches the handler exactly as it would have anyway.
 #
+# Two more adapter seams share this shape. After a result is captured, published,
+# and given its terminal verdict, the runner calls
+# `bin/fm-procevent-<adapter>.sh autohandle <source-id> <sequence> <result-file>`,
+# and reconcile offers every still-unhandled result the same way before its
+# registration sweep. Exit 0 means the adapter fully handled the result AND
+# recorded the durable handled acknowledgement itself, so a source it
+# re-registered is started again in the same step; any other exit - including an
+# adapter that lacks the command - leaves the result pending and announced
+# exactly as without the seam. Separately, `handled-gate <source-id> <sequence>
+# <result-file>` gates a NEW `handled` acknowledgement: exit 0 allows it, any
+# other exit refuses it and writes no marker, so every adapter implements the
+# command even when the answer is unconditional.
+#
 # Ownership is machine-wide per canonical source, because separate Firstmate
 # homes can share one underlying source store. A live owner is never displaced;
 # only a claim whose whole generation is gone is reclaimed. A runner leads its
@@ -114,7 +127,7 @@ REG=$(fm_procevent_registry_dir "$STATE")
 MAX_OUTPUT_BYTES=${FM_PROCEVENT_MAX_OUTPUT_BYTES:-1048576}
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,92p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,105p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 adapter_script() { printf '%s/bin/fm-procevent-%s.sh\n' "$FM_ROOT" "$1"; }
 
@@ -127,6 +140,33 @@ adapter_result_is_terminal() {  # <adapter> <result-file>
   script=$(adapter_script "$1")
   [ -f "$script" ] && [ ! -L "$script" ] || return 1
   "$script" terminal "$2" >/dev/null 2>&1
+}
+
+# Offer the captured result to its adapter's autohandle seam (see the header).
+# Silenced exactly like the terminal seam: exit 0 means the adapter fully
+# handled the result and recorded `handled` itself; every other outcome, a
+# missing `autohandle` command included, leaves the result pending and
+# announced exactly as without the seam.
+adapter_autohandle() {  # <adapter> <source-id> <sequence> <result-file>
+  local script
+  script=$(adapter_script "$1")
+  [ -f "$script" ] && [ ! -L "$script" ] || return 1
+  "$script" autohandle "$2" "$3" "$4" >/dev/null 2>&1
+}
+
+# Gate a NEW handled acknowledgement through the capture's own adapter. Exit 0
+# allows the marker; any other exit refuses it and cmd_handled surfaces the
+# adapter's reason. Fail-closed by design, so an adapter without the command
+# refuses: the `handled` acknowledgement is what authorizes paired external
+# effects, and an adapter that cannot vouch for a result must not let it be
+# acknowledged. Called only for results not already marked handled - a repeat
+# stays `already-handled` without consulting the gate. The source lock is NOT
+# held while the gate runs.
+adapter_handled_gate() {  # <adapter> <source-id> <sequence> <result-file>
+  local script
+  script=$(adapter_script "$1")
+  [ -f "$script" ] && [ ! -L "$script" ] || return 1
+  "$script" handled-gate "$2" "$3" "$4" 2>&1
 }
 
 source_file()  { printf '%s/%s.source\n' "$REG" "$1"; }
@@ -237,6 +277,22 @@ publish_pending() {
     fm_procevent_source_lock_release "$id"
   done < <(fm_procevent_pending "$STATE")
   printf '%s\n' "$published"
+}
+
+# Offer every still-unhandled captured result to its own adapter's autohandle
+# seam (see the header). Runs after publish_pending so an adapter's re-register
+# is observed by the registration sweep in the same reconcile cycle.
+autohandle_pending() {
+  local result id seq adapter
+  while IFS= read -r result; do
+    [ -n "$result" ] || continue
+    id=$(fm_procevent_result_source_id "$result")
+    seq=$(fm_procevent_result_sequence "$result")
+    fm_procevent_source_id_valid "$id" || continue
+    adapter=$(fm_procevent_result_adapter "$result" 2>/dev/null || true)
+    [ -n "$adapter" ] || continue
+    adapter_autohandle "$adapter" "$id" "$seq" "$result" || true
+  done < <(fm_procevent_pending "$STATE")
 }
 
 # Start one command as the leader of a fresh process group, either waiting for
@@ -476,6 +532,15 @@ cmd_start() {
       printf 'cannot retire terminal source; it remains registered: %s\n' "$id" >&2
     fi
   fi
+  # Autohandle runs only after publication AND the terminal-retire block: a
+  # handle that re-registers before this runner retires its terminal
+  # registration would lose the new registration's pairing. When the adapter
+  # fully handled the result, a source it re-registered is started here with
+  # the same per-source check reconcile makes, because the watcher exits on
+  # every actionable wake instead of polling again.
+  if adapter_autohandle "$adapter" "$id" "$(fm_procevent_result_sequence "$durable")" "$durable"; then
+    procevent_start_unowned_source "$id" || true
+  fi
   printf 'captured: %s\n' "$durable"
 }
 
@@ -616,10 +681,33 @@ detach_runner() {  # <source-id>
   isolate_runner detach "$1"
 }
 
+# The per-source start check shared by the reconcile sweep below, the
+# post-autohandle continuation in `start`, and the runner's own retire path: a
+# still-registered source whose claim no live owner holds (claim state 1) gets
+# a detached runner. Returns 0 only when a runner was detached.
+procevent_start_unowned_source() {  # <source-id>
+  local id=$1 claim_state
+  fm_procevent_source_id_valid "$id" || return 1
+  fm_procevent_source_lock_acquire "$id" || return 1
+  claim_state=9
+  if [ -f "$(source_file "$id")" ] && [ ! -L "$(source_file "$id")" ]; then
+    fm_procevent_claim_state_locked "$id"
+    claim_state=$?
+  fi
+  fm_procevent_source_lock_release "$id"
+  [ "$claim_state" -eq 1 ] || return 1
+  detach_runner "$id"
+}
+
 cmd_reconcile() {
   local rec id published started=0 stopped=0 uncertain=0 claim owner pid token identity claim_state stop_state
   owner_lease_refresh
   published=$(publish_pending)
+
+  # Offer every still-unhandled captured result to its adapter's autohandle
+  # seam BEFORE the sweeps below, so a source an adapter re-registers is
+  # started by this same reconcile.
+  autohandle_pending
 
   # Stop a runner this home owns whose source is no longer registered. Without
   # this, unregistering a source that never completes leaves its child blocked
@@ -764,10 +852,25 @@ stop_runner_pid() {  # <pid> <identity>
 # caller can trust the reported first-time/repeat distinction to authorize a
 # paired external effect at most once.
 cmd_handled() {
-  local id=${1-} seq=${2-} status
+  local id=${1-} seq=${2-} status result adapter gate_out
   owner_lease_refresh
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   case "$seq" in ''|*[!0-9]*) die "sequence must be a nonnegative integer: $seq" ;; esac
+  # A NEW acknowledgement is gated by the captured result's own adapter (see
+  # the header's handled-gate seam): the adapter resolves from the durable
+  # capture, not the current registration, and any nonzero exit refuses and
+  # writes no marker. An already-handled result never reaches the gate.
+  result=$(fm_procevent_inbox_dir "$STATE")/$id.$seq.result
+  if [ -f "$result" ] && [ ! -L "$result" ]; then
+    fm_procevent_is_handled "$STATE" "$id" "$seq" || {
+      adapter=$(fm_procevent_result_adapter "$result" 2>/dev/null || true)
+      [ -n "$adapter" ] || die "captured result carries no adapter: $id $seq"
+      if ! gate_out=$(adapter_handled_gate "$adapter" "$id" "$seq" "$result"); then
+        [ -z "$gate_out" ] || printf '%s\n' "$gate_out" >&2
+        die "handled acknowledgement refused by the $adapter adapter: $id $seq"
+      fi
+    }
+  fi
   fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
   fm_procevent_mark_handled "$STATE" "$id" "$seq"
   status=$?

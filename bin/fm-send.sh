@@ -362,23 +362,6 @@ fm_send_wait_for_omp_turn_start() {
   return 1
 }
 
-fm_send_wait_for_inbox_handled() { # <record-path>
-  local record=$1 handled now deadline remaining interval
-  handled="${record%/*}/handled/${record##*/}"
-  now=$(fm_send_monotonic_now) || return 1
-  deadline=$(awk -v now="$now" -v timeout="$FM_SEND_TURNSTART_TIMEOUT_VALUE" \
-    'BEGIN { printf "%.6f", now + timeout }')
-  while remaining=$(fm_send_monotonic_now) \
-    && remaining=$(awk -v now="$remaining" -v deadline="$deadline" \
-      'BEGIN { remaining = deadline - now; if (remaining <= 0) exit 1; printf "%.6f", remaining }'); do
-    [ -f "$handled" ] && [ ! -L "$handled" ] && return 0
-    interval=$(awk -v remaining="$remaining" -v poll="$FM_SEND_TURNSTART_POLL_VALUE" \
-      'BEGIN { if (poll < remaining) remaining = poll; printf "%.6f", remaining }')
-    sleep "$interval"
-  done
-  return 1
-}
-
 fm_send_prepare_omp_turnstart_reference() {
   TARGET_OMP_TURNSTART_MARKER=
   [ -n "$TARGET_TASK_ID" ] || return 0
@@ -1069,34 +1052,22 @@ else
       echo "error: steer not sent to $TARGET_TASK_ID: the task retired or changed endpoint during target resolution" >&2
       exit 1
     fi
-    INBOX_OMP_TURNSTART_REQUIRED=${FM_SEND_OMP_INBOX_REQUIRE_TURN_START:-0}
-    INBOX_OMP_HANDLED_ACK_REQUIRED=${FM_SEND_OMP_INBOX_REQUIRE_HANDLED_ACK:-0}
-    case "$INBOX_OMP_TURNSTART_REQUIRED" in
+    # The durable-result contract (FM_SEND_OMP_INBOX_DURABLE_RESULT=1, set only
+    # by the remote secondmate control): the send's success boundary is the
+    # durable inbox record plus one completed doorbell ring, never the agent's
+    # later move into handled/. Stdout then carries one machine line -
+    # `request=<corr> record=<NNN> state=recorded|handled` - and the ring's
+    # refusal remains exit 6 while every other ring outcome is exit 0.
+    INBOX_OMP_DURABLE_RESULT=${FM_SEND_OMP_INBOX_DURABLE_RESULT:-0}
+    case "$INBOX_OMP_DURABLE_RESULT" in
       0|1) ;;
       *)
         fm_lock_release "$INBOX_META_LOCK"
         INBOX_META_LOCK_HELD=0
-        echo "error: FM_SEND_OMP_INBOX_REQUIRE_TURN_START must be 0 or 1" >&2
+        echo "error: FM_SEND_OMP_INBOX_DURABLE_RESULT must be 0 or 1" >&2
         exit 1
         ;;
     esac
-    case "$INBOX_OMP_HANDLED_ACK_REQUIRED" in
-      0|1) ;;
-      *)
-        fm_lock_release "$INBOX_META_LOCK"
-        INBOX_META_LOCK_HELD=0
-        echo "error: FM_SEND_OMP_INBOX_REQUIRE_HANDLED_ACK must be 0 or 1" >&2
-        exit 1
-        ;;
-    esac
-    if [ "$TARGET_HARNESS" = omp ] && [ "$INBOX_OMP_TURNSTART_REQUIRED" = 1 ]; then
-      if ! fm_send_setup_omp_turnstart; then
-        fm_lock_release "$INBOX_META_LOCK"
-        INBOX_META_LOCK_HELD=0
-        echo "error: remote OMP inbox turn-start verification could not be prepared; nothing was delivered" >&2
-        exit 1
-      fi
-    fi
     if ! INBOX_RECORD=$(fm_task_inbox_write "$STATE" "$TARGET_TASK_ID" "$MESSAGE" "$RECONCILE_DELIVERY_ID"); then
       fm_lock_release "$INBOX_META_LOCK"
       INBOX_META_LOCK_HELD=0
@@ -1136,6 +1107,18 @@ else
         || OMP_NATIVE_BINDING="$OMP_NATIVE_BINDING $FM_TASK_INBOX_RING_OMP_DOORBELL"
       OMP_NATIVE_BINDING="$OMP_NATIVE_BINDING request=${FM_TASK_INBOX_RING_OMP_REQUEST:-none} record=$INBOX_RECORD message-bytes=$(printf '%s' "$MESSAGE" | wc -c | tr -d '[:space:]')"
     fi
+    if [ "$TARGET_HARNESS" = omp ] && [ "$INBOX_OMP_DURABLE_RESULT" = 1 ]; then
+      # The record is durable and the ring has run; report that boundary on
+      # stdout without ever waiting on the agent's later handled/ move.
+      durable_result_corr=$(fm_pending_reply_extract_corr "$MESSAGE" 2>/dev/null || true)
+      [ -n "$durable_result_corr" ] || durable_result_corr=-
+      durable_result_record=${INBOX_RECORD##*/}
+      durable_result_record=${durable_result_record%.msg}
+      durable_result_state=recorded
+      [ "$INBOX_RECORD_HANDLED" = 1 ] && durable_result_state=handled
+      printf 'request=%s record=%s state=%s\n' \
+        "$durable_result_corr" "$durable_result_record" "$durable_result_state"
+    fi
     case "$ring_rc" in
       0) ;;
       1) echo "fm-send: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
@@ -1148,19 +1131,11 @@ else
         ;;
       4)
         echo "error: omp-native-queued: the named native request is queued without a receipt and may already have reached the session ($OMP_NATIVE_BINDING); do not resend" >&2
-        exit 7
+        # Durable-result callers bound their success to the record itself, so a
+        # queued-but-unproven doorbell is still exit 0 for them.
+        [ "$TARGET_HARNESS" = omp ] && [ "$INBOX_OMP_DURABLE_RESULT" = 1 ] || exit 7
         ;;
     esac
-    if [ "$TARGET_HARNESS" = omp ] && [ "$INBOX_OMP_TURNSTART_REQUIRED" = 1 ] \
-       && ! fm_send_wait_for_omp_turn_start; then
-      echo "error: omp-native-queued: the request was acknowledged but no bound turn started ($OMP_NATIVE_BINDING); do not resend" >&2
-      exit 8
-    fi
-    if [ "$TARGET_HARNESS" = omp ] && [ "$INBOX_OMP_HANDLED_ACK_REQUIRED" = 1 ] \
-       && ! fm_send_wait_for_inbox_handled "$INBOX_RECORD"; then
-      echo "error: omp-native-queued: the bound OMP turn did not durably acknowledge the request ($OMP_NATIVE_BINDING); do not resend" >&2
-      exit 8
-    fi
     if [ "$TARGET_HARNESS" = omp ] && { [ -n "$FM_TASK_INBOX_RING_OMP_REQUEST" ] || [ "$INBOX_RECORD_HANDLED" = 1 ]; }; then
       if [ "$INBOX_RECORD_HANDLED" = 1 ]; then
         echo "fm-send: omp-native-received: the worker's handled/ acknowledgement is the receipt source ($OMP_NATIVE_BINDING)"
@@ -1292,6 +1267,13 @@ else
       send_rc=$?
     fi
     fm_lock_release "$REMOTE_META_LOCK"
+    # The remote control's durable-result contract prints one machine-readable
+    # record line; relay the last one on stdout on success AND mapped failure so
+    # a caller never has to parse the human text. A remote code root not yet
+    # updated prints none and still returns 7/8, which the decode below maps.
+    remote_machine_line=$(printf '%s\n' "$remote_out" \
+      | grep -E '^request=[^ ]+ record=[0-9]+ state=(recorded|handled)$' | tail -1)
+    [ -z "$remote_machine_line" ] || printf '%s\n' "$remote_machine_line"
     if [ "${send_rc:-0}" -eq 0 ]; then
       verdict=empty
     elif [ "${send_rc:-0}" -ne 0 ]; then
