@@ -198,7 +198,8 @@ The existing typed `/exit` path keeps its separate `delivered-no-turn` exit 4 an
 
 Marked requests keep the existing correlation contract.
 The remote charter appends replies to `state/parent-replies.status` in the remote home.
-A process-event source performs a non-destructive, cursor-anchored delta read, validates bounded lifecycle status lines with zero or more space-delimited `[key=...]` or `[corr=...]` tokens before the colon, resolves marked parent requests only from status lines carrying their explicit exact correlation token, fetches only referenced `data/*.md` documents through the confined reader, and appends each accepted line at most once to the primary status channel.
+A process-event source performs a non-destructive, cursor-anchored delta read, validates bounded lifecycle status lines as well-formed UTF-8 while rejecting controls (except TAB), invisible or reordering format characters, and Unicode line or paragraph separators, and requires zero or more space-delimited `[key=...]` or `[corr=...]` tokens before the colon.
+It resolves marked parent requests only from status lines carrying their explicit exact correlation token, fetches only referenced `data/*.md` documents through the confined reader, and appends each accepted line at most once to the primary status channel.
 Bracketed content outside that token set, including arbitrary keys, glued tokens, whitespace, or colons inside token bodies, is rejected.
 The source log is never truncated or consumed.
 A shortened or changed prefix stops the relay and surfaces a continuity failure instead of silently resetting the cursor.
