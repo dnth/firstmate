@@ -1,6 +1,6 @@
 # Evidence receipts and risk routing verification
 
-This record captures the active maintainer evidence for ship-task acceptance receipts and conservative validation routing as of 2026-09-11.
+This record captures the active maintainer evidence for ship-task acceptance receipts and conservative validation routing as of 2026-09-29.
 The exact receipt key and type schema is owned by the header and `--help` output of `bin/fm-receipt-schema.sh`; the criterion parser, classifier thresholds, metadata fields, and lifecycle commands are owned by the headers and help output of `bin/fm-receipt-check.sh`, `bin/fm-receipt.sh`, and `bin/fm-receipt-store.sh` at their respective executable boundaries.
 
 ## Guarantees under test
@@ -9,7 +9,7 @@ The exact receipt key and type schema is owned by the header and `--help` output
 - Concurrent ship scaffolds use one exclusive brief identity, so a losing invocation cannot remove the winning brief or evidence contract.
 - Ship scaffold output requires replacing both task and acceptance-criterion placeholders, and spawn refuses unresolved task text or criteria before endpoint creation.
 - Legacy ship briefs without an acceptance-criteria section may still launch with an explicit migration warning, but the completion gate remains parked until Firstmate installs a valid evidence contract.
-- Every ship completion, including a promoted scout, remains parked until a valid acceptance contract and structurally valid evidence cover every required criterion.
+- Every ship completion, including a promoted scout, remains parked until a valid acceptance contract and structurally valid receipts account for every required criterion.
 - Low-risk routing is limited to CHANGELOG formatting or reflow changes whose non-whitespace byte sequence is identical and which have file-bound mechanical proof, while every content-byte or uncertain change defaults high.
 - High-risk, broad, sensitive, weakly proven, materially expanded, or uncertain changes retain full No-Mistakes validation.
 - `direct-PR` and `local-only` retain the evidence gate and current-state reconciliation without entering No-Mistakes.
