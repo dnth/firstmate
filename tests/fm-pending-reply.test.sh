@@ -1059,6 +1059,41 @@ test_remote_recovery_delivery_classification() {
   pass "AC8: a local route keeps the zero/nonzero split"
 }
 
+test_real_send_recovery_failure_status() {
+  local home state corr rec
+  home=$(setup_parent real-send-failure)
+  state="$home/state"
+  unset FM_PENDING_REPLY_SEND_HOOK
+  export FM_HOME="$home"
+  export FM_SSH_BIN="$TMP_ROOT/fake-ssh-real-send"
+  printf '#!/bin/sh\nexit 9\n' > "$FM_SSH_BIN"
+  chmod +x "$FM_SSH_BIN"
+
+  export FM_PENDING_REPLY_NOW=9600
+  corr=$(fm_pending_reply_create "$home" "$state" local "local real send failure")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  fm_pending_reply_send_recovery "$state" "$corr" >/dev/null 2>&1 || true
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ "$(fm_pending_reply_get "$rec" recovery_delivery_outcome)" = failed ] \
+    || fail "a real local fm-send failure must be classified failed"
+
+  fm_write_secondmate_meta "$state/remote.meta" "$home/remote" "sess:fm-remote" alpha omp
+  printf 'remote_host=remote-mac\nremote_root=/remote\n' >> "$state/remote.meta"
+  mkdir -p "$home/data"
+  printf -- '- remote - fixture (host: remote-mac; root: /remote; home: /remote/home; scope: fixture; projects: alpha; added 2026-09-30)\n' \
+    > "$home/data/secondmates.md"
+  corr=$(fm_pending_reply_create "$home" "$state" remote "remote binding refusal")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  fm_pending_reply_send_recovery "$state" "$corr" >/dev/null 2>&1 || true
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ "$(fm_pending_reply_get "$rec" recovery_delivery_outcome)" = failed ] \
+    || fail "a real remote exit-9 fm-send failure must be classified failed"
+  unset FM_HOME FM_SSH_BIN
+  pass "real fm-send failures preserve recovery status"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
@@ -1078,6 +1113,7 @@ test_fm_send_marked_secondmate_creates_pending_and_embeds_corr
 test_document_pointer_resolves
 test_helper_report_resolves
 test_busy_idle_observation_via_backend_abstraction
+test_real_send_recovery_failure_status
 test_unknown_backend_state_uses_capture_fallback
 test_kimi_capture_fallback_uses_recorded_harness
 test_tick_skips_terminal_and_reuses_target_observation

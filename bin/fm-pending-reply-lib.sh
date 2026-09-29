@@ -811,9 +811,9 @@ fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   else
     if [ -z "$parent_home" ] || [ ! -d "$parent_home" ]; then
       send_status=1
-    elif ! send_out=$(env FM_HOME="$parent_home" FM_PENDING_REPLY_EXISTING_CORR="$corr" \
-      "$_FM_PENDING_REPLY_LIB_DIR/fm-send.sh" "$task_id" "$msg" 2>/dev/null); then
-      send_status=$?
+    else
+      send_out=$(env FM_HOME="$parent_home" FM_PENDING_REPLY_EXISTING_CORR="$corr" \
+        "$_FM_PENDING_REPLY_LIB_DIR/fm-send.sh" "$task_id" "$msg" 2>/dev/null) || send_status=$?
     fi
   fi
   if [ "$send_status" = 0 ]; then
