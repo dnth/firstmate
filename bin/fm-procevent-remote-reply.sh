@@ -258,6 +258,16 @@ status_line_charset_ok() { # <line>
   '
 }
 
+payload_charset_ok() { # <payload>
+  perl -MEncode -e '
+    local $/;
+    my $text = eval { Encode::decode("UTF-8", <STDIN>, Encode::FB_CROAK) };
+    exit 1 if $@;
+    $text =~ s/[\t\n]//g;
+    exit($text =~ /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/ ? 1 : 0);
+  ' < "$1"
+}
+
 line_valid() { # <line>
   local line=$1 bytes
   [ -n "$line" ] || return 1
@@ -269,6 +279,7 @@ line_valid() { # <line>
 
 payload_lines_valid() { # <payload>
   local line
+  payload_charset_ok "$1" || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     line_valid "$line" || return 1
   done < "$1"
