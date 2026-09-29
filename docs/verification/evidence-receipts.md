@@ -1,6 +1,6 @@
 # Evidence receipts and risk routing verification
 
-This record captures the active maintainer evidence for ship-task acceptance receipts and conservative validation routing as of 2026-09-11.
+This record captures the active maintainer evidence for ship-task acceptance receipts and conservative validation routing as of 2026-09-29.
 The exact receipt key and type schema is owned by the header and `--help` output of `bin/fm-receipt-schema.sh`; the criterion parser, classifier thresholds, metadata fields, and lifecycle commands are owned by the headers and help output of `bin/fm-receipt-check.sh`, `bin/fm-receipt.sh`, and `bin/fm-receipt-store.sh` at their respective executable boundaries.
 
 ## Guarantees under test
@@ -9,7 +9,7 @@ The exact receipt key and type schema is owned by the header and `--help` output
 - Concurrent ship scaffolds use one exclusive brief identity, so a losing invocation cannot remove the winning brief or evidence contract.
 - Ship scaffold output requires replacing both task and acceptance-criterion placeholders, and spawn refuses unresolved task text or criteria before endpoint creation.
 - Legacy ship briefs without an acceptance-criteria section may still launch with an explicit migration warning, but the completion gate remains parked until Firstmate installs a valid evidence contract.
-- Every ship completion, including a promoted scout, remains parked until a valid acceptance contract and structurally valid evidence cover every required criterion.
+- Every ship completion, including a promoted scout, remains parked until a valid acceptance contract and structurally valid receipts account for every required criterion.
 - Low-risk routing is limited to CHANGELOG formatting or reflow changes whose non-whitespace byte sequence is identical and which have file-bound mechanical proof, while every content-byte or uncertain change defaults high.
 - High-risk, broad, sensitive, weakly proven, materially expanded, or uncertain changes retain full No-Mistakes validation.
 - `direct-PR` and `local-only` retain the evidence gate and current-state reconciliation without entering No-Mistakes.
@@ -24,6 +24,8 @@ The exact receipt key and type schema is owned by the header and `--help` output
 - Snapshot readiness status is checked and terminal on publication failure; hold documents ready `0`, refusal `1`, missing-ledger `3`, and pinned non-ship `4` statuses.
 - Receipt append, check, and promotion consume one executable acceptance-criterion parser that requires nonblank descriptions.
 - Structurally valid receipts require non-whitespace summary and result strings plus an explicit structured outcome; only `outcome=success` evidences a criterion, while failure, negative, zero, skipped, empty, placeholder, weak, and legacy outcomes remain unevidenced and `result` stays descriptive so expected observations such as `401` are unambiguous.
+- `outcome=accepted-blocked` is valid only with a non-empty `captain_exception` reference recorded verbatim (the date plus the captain's own words or the board key that holds them); a criterion whose latest receipt is a valid accepted-blocked is accounted for without being evidenced, so planning, readiness, and completion can proceed while the evidence check reports it in the distinct always-present `accepted_blocked` list, never in `evidenced`.
+- A task carrying any accepted-blocked criterion is never auto-merged; plan, readiness, and completion output surfaces the criteria and their exception references plainly so the PR description states them.
 - Head-bound receipts store only the exact canonical 40- or 64-character lowercase hexadecimal commit id reported by Git.
 - Receipt append holds a stable task lock, copies the canonical single-link ledger plus one complete record to a synced mode-0600 single-link temporary file, and atomically renames it over the canonical ledger so concurrent hard-link aliases retain the old inode.
 - Criterion parsing rejects known scaffold placeholder tokens in balanced or unmatched brace forms while allowing concrete brace syntax such as JSON examples.
@@ -87,6 +89,7 @@ The focused behavioral suites passed with these exact commands.
 $ tests/fm-receipt.test.sh
 ok - fm-receipt appends one compact validated receipt
 ok - fm-receipt preserves prior records and accepts --result
+ok - fm-receipt gates accepted-blocked on a verbatim captain exception
 ok - fm-receipt stores and validates an exact canonical commit id
 ok - fm-receipt appends complete large JSONL records
 ok - fm-receipt rejects invalid types, ids, missing results, and undeclared criteria
@@ -144,6 +147,7 @@ ok - local completion requires fast-forward readiness
 ok - local readiness and landing share one fail-closed default resolver
 ok - security and uncertain changes retain full No-Mistakes validation
 ok - direct-PR and local-only retain evidence gates without invoking No-Mistakes
+ok - accepted-blocked accounts for its criterion without evidencing it and still refuses real gaps
 
 $ tests/fm-crew-state.test.sh
 ok - ship completion requires evidence and current-head implementation completion

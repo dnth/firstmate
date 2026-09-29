@@ -214,10 +214,14 @@ test_ship_modes_generate_clean_briefs() {
     assert_present "$home/data/$id/evidence.jsonl" "$id: ship evidence ledger was not created"
     assert_present "$home/data/$id/.evidence.lock" "$id: ship evidence lock was not created"
     [ ! -s "$home/data/$id/evidence.jsonl" ] || fail "$id: new evidence ledger was not empty"
-    assert_grep '--outcome <success|failure|negative|zero|skipped|empty|placeholder|weak>' "$brief" \
+    assert_grep '--outcome <success|failure|negative|zero|skipped|empty|placeholder|weak|accepted-blocked>' "$brief" \
       "$id: generated receipt contract omitted the structured outcomes"
     assert_grep "Only \`--outcome success\` evidences a criterion" "$brief" \
       "$id: generated receipt contract did not identify its sole affirmative outcome"
+    assert_grep "\`accepted-blocked\` requires a non-empty \`--captain-exception" "$brief" \
+      "$id: generated receipt contract omitted the accepted-blocked captain-exception requirement"
+    assert_grep 'never auto-merged' "$brief" \
+      "$id: generated receipt contract omitted the accepted-blocked merge policy"
     grep -qx "Delivery contract: mode=$mode" "$brief" \
       || fail "$id: brief did not record its machine-readable delivery contract line"
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
