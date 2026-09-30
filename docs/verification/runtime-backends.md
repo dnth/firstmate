@@ -292,6 +292,22 @@ ok - OMP omp/17.3.4 aborts an active session within the 5-15s deadline bound
 
 The guard starts a real headless OMP turn with `--max-time=5`, requires the deadline-specific aborted assistant event and terminal runtime event, rejects unrelated errors, and measures the full process lifetime including shutdown against the documented bound.
 
+The interactive-mode companion records why `kind=secondmate` launches never carry `--max-time`: a persistent secondmate idles behind liveness supervision, but an interactive OMP session whose absolute deadline has passed stays alive yet can never start another turn.
+The provider-free guard drives the installed pi-agent-core `Agent` with a throwing fake stream and passed on 2026-08-29 against the same install:
+
+```sh
+FM_OMP_DEADLINE_GUARD=1 tests/fm-omp-deadline-turnless-guard.test.sh
+```
+
+Observed bounded output:
+
+```text
+expired-deadline: modelCalls=0 turn_start=false events=[agent_start,message_start:user,message_end:user,agent_end] transcript=[user] isStreaming=false
+future-deadline: modelCalls=1 turn_start=true events=[agent_start,turn_start,message_start:user,message_end:user,message_start:assistant,message_end:assistant,turn_end:assistant,agent_end] transcript=[user,assistant] isStreaming=false
+no-deadline: modelCalls=1 turn_start=true events=[agent_start,turn_start,message_start:user,message_end:user,message_start:assistant,message_end:assistant,turn_end:assistant,agent_end] transcript=[user,assistant] isStreaming=false
+ok - OMP expired interactive deadline leaves the session alive but turnless; live and absent deadlines still turn
+```
+
 OMP 17.3.8 standalone-executable compatibility was verified on 2026-08-20.
 
 ```sh

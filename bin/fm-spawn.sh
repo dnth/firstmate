@@ -39,7 +39,10 @@
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
-#   Verified OMP launch templates carry the runtime bound configured by config/omp-max-time.
+#   Verified OMP crewmate and scout launch templates carry the runtime bound configured
+#   by config/omp-max-time. A kind=secondmate launch never carries --max-time: an
+#   interactive OMP session past its deadline stays alive but can never start another
+#   turn, so a persistent secondmate must run unbounded.
 #   docs/configuration.md "OMP runtime bound" owns its default and accepted values.
 #   --prewalk-into <model-spec> opts an OMP profile into native Prewalk and records
 #   the effective target in task metadata. An unusable target falls back with
@@ -2137,7 +2140,9 @@ OMPMAXTIME=
 OMP_LAUNCH_TEMPLATE=0
 if [ "$RAW_LAUNCH" -eq 0 ] && [ "$HARNESS" = omp ]; then
   OMP_LAUNCH_TEMPLATE=1
-  OMPMAXTIME=$(omp_max_time_flag) || exit 1
+  # A persistent secondmate must never expire: an interactive OMP session past
+  # its --max-time deadline stays alive but can never start another turn.
+  [ "$KIND" = secondmate ] || OMPMAXTIME=$(omp_max_time_flag) || exit 1
 fi
 
 case "$HARNESS" in
