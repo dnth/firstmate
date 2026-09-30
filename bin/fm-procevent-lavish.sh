@@ -10,6 +10,7 @@
 #   fm-procevent-lavish.sh reconciles <result-file>
 #   fm-procevent-lavish.sh source-id <artifact.html>
 #   fm-procevent-lavish.sh retire <artifact.html>
+#   fm-procevent-lavish.sh handled-gate <source-id> <sequence> <result-file>
 #
 # classify   Print the lifecycle state a handler should act on: feedback, ended,
 #            waiting, missing, or unknown.
@@ -20,6 +21,8 @@
 # read       Print a structured, read-only presentation of a captured result.
 #            It enumerates every item, separates session-ending messages from
 #            annotations, reports completeness, and preserves non-choice comments.
+# handled-gate  The runner's acknowledgement gate; Lavish results need no
+#            pre-ingest proof, so it always allows.
 #
 # This adapter is deliberately thin. It owns only what is specific to Lavish:
 # canonical source identity, the argv for the currently published poll command,
@@ -64,7 +67,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,51p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,55p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 # Canonical identity is physical, not the path string: Lavish itself keys a
 # session on the realpath of the artifact, so two names for one file are one
@@ -357,6 +360,7 @@ case "${1-}" in
   read)      shift; cmd_read "$@" ;;
   answers)   shift; cmd_answers "$@" ;;
   reconciles) shift; cmd_reconciles "$@" ;;
+  handled-gate) exit 0 ;;
   ''|-h|--help|help) usage ;;
   *) die "unknown command: $1" ;;
 esac

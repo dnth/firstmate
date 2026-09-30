@@ -80,6 +80,7 @@ state/               volatile runtime signals; gitignored
   x-watch.check.sh   generated X-mode relay poll shim; present only when opted in (AGENTS.md section 14)
   ext-watch.check.sh generated local Communication Officer poll shim; present only when the ext-bridge is opted in
   pending-replies/   parent-owned secondmate pending-reply records (correlation id, delivery vs reply, recovery, escalation); fm-pending-reply-lib.sh
+  remote-replies/    remote-secondmate reply cursors, per-capture ingest receipts, private rejected-line quarantine, continuity pins, and automatic-handling failure counters; written by fm-procevent-remote-reply.sh
   procevent/         registered process-to-event sources, one private record per canonical source id; written by bin/fm-procevent.sh or an adapter through the shared registration publisher, and their presence alone keeps supervision required (see `process-event-sources`)
   procevent-inbox/   private captured results and their durable handled-acknowledgement markers; source output lives here and never in an event line
   decision-bindings/ private bindings from a captured-answer source id to the captain-hold origin its keyed answers close (or `(any)` for task-id-keyed channels); written only by bin/fm-captain-hold.sh bind, dropped by unbind and by source retirement (see `captain-hold-lifecycle`; docs/captain-hold-lifecycle.md)

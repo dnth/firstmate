@@ -27,11 +27,15 @@
 # bin/fm-remote-doctor.sh owns that host's readiness for Herdr.
 # Remote OMP text delivery reselects the exact endpoint task, writes only that
 # task's canonical inbox, and requires the loaded primary extension to send its
-# programmatic doorbell with a bound turn-start marker. Exit 6 means that durable
-# inbox record could not notify an unavailable extension, 7 that its request
-# acknowledgement is ambiguous, 8 that no bound turn started, and 9 that an
-# exact home, task, session, extension, or process binding refused before
-# notification. Every nonzero result names a no-resend state.
+# programmatic doorbell. The send returns once the record is durable and the
+# ring has run, printing one machine line -
+# `request=<corr> record=<NNN> state=recorded|handled` - and never waits on the
+# agent's later handled/ move. Exit 0 means durable, whether the doorbell was
+# claimed or is durable but unproven; 6 means the durable record could not
+# notify an unavailable extension; 9 means an exact home, task, session,
+# extension, or process binding refused before notification. Exits 7 and 8 are
+# no longer produced by this path. Every nonzero result names a no-resend
+# state.
 # docs/remote-secondmates.md owns why.
 # A private parent-route state directory stores only the remote secondmate
 # agent's endpoint record; the home's own
@@ -447,8 +451,7 @@ cmd_send() {
     remote_omp_delivery_binding "$id"
     FM_SEND_RECONCILE_AUTH=1 FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$CONTROL_STATE" \
       FM_DATA_OVERRIDE="$CONTROL_DATA" FM_SEND_PRESERVE_INBOUND_FROM_FIRSTMATE=1 \
-      FM_SEND_OMP_INBOX_REQUIRE_TURN_START=1 \
-      FM_SEND_OMP_INBOX_REQUIRE_HANDLED_ACK=1 \
+      FM_SEND_OMP_INBOX_DURABLE_RESULT=1 \
       "$SCRIPT_DIR/fm-send.sh" "$id" "${send_args[@]}" "$message"
   else
     if [ "$reconcile_mode" = reconcile ] \

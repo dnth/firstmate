@@ -3168,6 +3168,75 @@ test_procevent_marker_failure_exits_and_replays() {
   pass "marker failure exits through the shared wake owner, releases its lock, and replays later"
 }
 
+test_procevent_remote_reply_ensure_armed() {
+  # A live remote route with no armed source gets its reply channel repaired by
+  # the watcher's own cycle: ensure-armed registers it, reconcile starts the
+  # runner, and a pending remote reply is captured, auto-ingested, and handled
+  # - all inside the cycle, with no agent turn and no manual handle.
+  local dir state out pid remote_home
+  dir=$(make_case procevent-remote-arm); state="$dir/state"; out="$dir/watch.out"
+  remote_home="$dir/remote"
+  mkdir -p "$dir/data" "$remote_home/state" "$remote_home/data"
+  printf 'done: watcher re-arm proof\n' > "$remote_home/state/parent-replies.status"
+  cat > "$dir/data/secondmates.md" <<EOF
+- ios - iOS delivery (host: remote-mac; root: $ROOT; home: $remote_home; scope: iOS work; projects: alpha; added 2026-08-02)
+EOF
+  printf 'window=fm-remote:w1:p1\nkind=secondmate\nremote_host=remote-mac\nhome=%s\n' "$remote_home" \
+    > "$state/ios.meta"
+  cat > "$dir/fakebin/fake-ssh" <<'SH'
+#!/usr/bin/env bash
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) shift 2 ;;
+    --) shift; break ;;
+    *) exit 90 ;;
+  esac
+done
+host=$1; entry=$2
+shift 2
+[ "$host" = remote-mac ] || exit 91
+[ "$entry" = fm-remote-entrypoint.sh ] || exit 92
+exec "$FM_FAKE_REMOTE_ENTRYPOINT" "$@"
+SH
+  chmod +x "$dir/fakebin/fake-ssh"
+
+  assert_absent "$state/procevent/remote-reply-ios.source" \
+    "the fixture unexpectedly started with the reply source armed"
+  # The harness's FM_ROOT_OVERRIDE tangle root would send adapter resolution
+  # to a bare dir, so this watcher runs without it, like pe_case does.
+  env -u FM_ROOT_OVERRIDE \
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_PROCEVENT_CLAIM_ROOT="$dir/claims" \
+    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_SSH_BIN="$dir/fakebin/fake-ssh" \
+    FM_FAKE_REMOTE_ENTRYPOINT="$ROOT/bin/fm-remote-entrypoint.sh" \
+    FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+    FM_REMOTE_JOB_STATE_ROOT="$dir/remote-jobs" \
+    FM_REMOTE_REPLY_WAIT_SECONDS=1 \
+    "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 300 \
+    || fail "the watcher never surfaced the auto-handled remote reply: $(cat "$out")"
+  grep -F "procevent:remote-reply-ios:1" "$out" >/dev/null \
+    || fail "the remote reply capture was not announced by the watcher: $(cat "$out")"
+  # The reconcile's autohandle runs detached, so the ingest and the durable
+  # acknowledgement land just after the cycle returns - wait for them
+  # deterministically.
+  n=100
+  while [ ! -f "$state/procevent-inbox/remote-reply-ios.1.handled" ] && [ "$n" -gt 0 ]; do
+    n=$((n - 1)); sleep 0.1
+  done
+  [ -f "$state/procevent-inbox/remote-reply-ios.1.handled" ] \
+    || fail "the captured remote reply was not durably handled"
+  grep -F "done: watcher re-arm proof" "$state/ios.status" >/dev/null \
+    || fail "the remote reply was never ingested into the parent status: $(cat "$state/ios.status" 2>/dev/null)"
+  # The armed registration itself legitimately flaps: a re-armed runner whose
+  # wait expires captures an empty terminal delta and retires the source, so
+  # `.source` existence at any sampled instant proves nothing. The durable
+  # proof of re-arm is the capture and handled marker above.
+  pass "a watcher cycle re-arms an unarmed remote reply route and auto-ingests its capture (AC4)"
+}
+
 # --- heartbeat: no-change absorbed, backstop surfaces a missed status --------
 
 test_heartbeat_no_change_absorbed() {
@@ -3599,6 +3668,7 @@ test_secondmate_home_supervision_churn_is_not_write_evidence
 test_timer_repair_drops_a_finished_write_deferral_chain
 test_terminal_first_sight_drops_a_finished_write_deferral_chain
 test_triage_log_size_cap_accepts_spaced_wc_counts
+test_procevent_remote_reply_ensure_armed
 test_procevent_captured_result_surfaces_proactively
 test_procevent_unacknowledged_result_redrains_until_handled
 test_procevent_marker_keys_are_injective

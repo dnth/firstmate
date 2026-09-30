@@ -941,6 +941,159 @@ test_same_basename_self_home_reply_does_not_false_escalate() {
   pass "same-basename self-home reply does not false-escalate"
 }
 
+
+# AC8/AC9: remote recovery delivery classification - durable outcomes, a
+# provable binding refusal, and unknown transport outcomes stay distinct, and
+# an unknown outcome is never retried.
+test_remote_recovery_delivery_classification() {
+  local home state corr status hooklog rc
+  home=$(setup_parent remote-recovery)
+  state="$home/state"
+  hooklog="$TMP_ROOT/recovery-hook.log"
+  # Keep every tick hermetic: no registry elsewhere, and any remote observation
+  # attempt hits a fake SSH transport that always fails.
+  export FM_HOME="$home"
+  printf '#!/bin/sh\nexit 255\n' > "$TMP_ROOT/fake-ssh-255"
+  chmod +x "$TMP_ROOT/fake-ssh-255"
+  export FM_SSH_BIN="$TMP_ROOT/fake-ssh-255"
+  # A remote route is identified by remote_host on the task's meta.
+  fm_write_secondmate_meta "$state/ios.meta" "$home/ios-remote" "sess:fm-ios"
+  printf 'remote_host=remote-mac\n' >> "$state/ios.meta"
+  status="$state/ios.status"
+
+  # exit 8 without a machine line: the record went durable; a delayed
+  # acknowledgement is not a delivery failure.
+  recovery_hook_rc8() { return 8; }
+  export -f recovery_hook_rc8
+  corr=$(fm_pending_reply_create "$home" "$state" ios "remote durable")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  FM_PENDING_REPLY_SEND_HOOK=recovery_hook_rc8 fm_pending_reply_send_recovery "$state" "$corr" \
+    || fail "a remote exit-8 send reported failure"
+  [ "$(phase_of "$state" "$corr")" = recovery_sent ] \
+    || fail "a remote exit-8 send did not reach recovery_sent"
+  [ "$(fm_pending_reply_get "$(fm_pending_reply_path "$state" "$corr")" recovery_delivery_outcome)" = confirmed ] \
+    || fail "a remote exit-8 send did not record a confirmed outcome"
+  pass "AC8: remote exit 8 with no machine line is confirmed durable delivery"
+
+  # A machine durable-result line with exit 0 is confirmed too.
+  corr=$(fm_pending_reply_create "$home" "$state" ios "remote machine line")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  FM_PENDING_REPLY_SEND_HOOK='printf "request=abc123 record=004 state=recorded\n"' \
+    fm_pending_reply_send_recovery "$state" "$corr" \
+    || fail "a remote machine-line send was not confirmed"
+  [ "$(phase_of "$state" "$corr")" = recovery_sent ] \
+    || fail "a remote machine-line send did not reach recovery_sent"
+  pass "AC8: a remote durable-result machine line is confirmed"
+
+  # exit 9 is the only provable failure: a binding refused before notification.
+  corr=$(fm_pending_reply_create "$home" "$state" ios "remote binding refusal")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  recovery_hook_rc9() { return 9; }
+  export -f recovery_hook_rc9
+  FM_PENDING_REPLY_SEND_HOOK=recovery_hook_rc9 fm_pending_reply_send_recovery "$state" "$corr" || true
+  [ "$(phase_of "$state" "$corr")" = recovery_failed ] \
+    || fail "a remote exit-9 send was not classified failed"
+  fm_pending_reply_maybe_escalate "$state" "$corr" \
+    || fail "a remote exit-9 send did not escalate"
+  grep -Fq "pending-reply-recovery-delivery-failed: task=ios pending-reply-id=$corr" "$status" \
+    || fail "a remote exit-9 send did not escalate as a delivery failure"
+  pass "AC8: remote exit 9 is a provable delivery failure"
+
+  # exit 1 and 255 keep the transport outcome unknown: the record stays
+  # uncommitted rather than pretending failure, and the hook never retries.
+  for rc in 1 255; do
+    corr=$(fm_pending_reply_create "$home" "$state" ios "remote unknown $rc")
+    fm_pending_reply_mark_delivered "$state" "$corr"
+    fm_pending_reply_mark_turn_completed "$state" "$corr" request
+    : > "$hooklog"
+    recovery_hook_rcN() { echo invoked >> "$FM_HOOK_LOG"; return "$FM_HOOK_RC"; }
+    export -f recovery_hook_rcN
+    export FM_HOOK_LOG="$hooklog" FM_HOOK_RC="$rc"
+    FM_PENDING_REPLY_SEND_HOOK=recovery_hook_rcN \
+      fm_pending_reply_send_recovery "$state" "$corr" || true
+    [ "$(phase_of "$state" "$corr")" = recovery_unknown ] \
+      || fail "a remote exit-$rc send was not classified unknown"
+    [ "$(fm_pending_reply_get "$(fm_pending_reply_path "$state" "$corr")" recovery_delivery_outcome)" = unknown ] \
+      || fail "a remote exit-$rc send did not record an unknown outcome"
+    # Once an attempt is committed it is never resent, even when unknown:
+    # further ticks only reconcile, never reinvoke the sender.
+    FM_PENDING_REPLY_NOW=9000 fm_pending_reply_tick "$state" || true
+    FM_PENDING_REPLY_NOW=9500 fm_pending_reply_tick "$state" || true
+    [ "$(wc -l < "$hooklog" | tr -d ' ')" = 1 ] \
+      || fail "an unknown remote outcome retried the send"
+    pass "AC8/AC9: remote exit $rc stays unknown and is never retried"
+  done
+
+  # AC9 replay: the whole post-OMP timeline through tick alone - the record
+  # was delivered, the turn completed, the grace window elapsed, and the
+  # recovery send exits 8 with no machine line. Repeated ticks may never
+  # downgrade that durable delivery to a failure.
+  corr=$(fm_pending_reply_create "$home" "$state" ios "post-OMP replay")
+  FM_PENDING_REPLY_NOW=1000 fm_pending_reply_mark_delivered "$state" "$corr" || true
+  FM_PENDING_REPLY_NOW=1100 fm_pending_reply_mark_turn_completed "$state" "$corr" request || true
+  FM_PENDING_REPLY_SEND_HOOK=recovery_hook_rc8
+  export FM_PENDING_REPLY_SEND_HOOK
+  FM_PENDING_REPLY_NOW=2000 fm_pending_reply_tick "$state" || true
+  FM_PENDING_REPLY_NOW=3000 fm_pending_reply_tick "$state" || true
+  FM_PENDING_REPLY_NOW=4000 fm_pending_reply_tick "$state" || true
+  FM_PENDING_REPLY_NOW=5000 fm_pending_reply_tick "$state" || true
+  [ "$(fm_pending_reply_get "$(fm_pending_reply_path "$state" "$corr")" recovery_delivery_outcome)" = confirmed ] \
+    || fail "a replayed exit-8 recovery was not confirmed"
+  ! grep -Fq "pending-reply-recovery-delivery-failed: task=ios pending-reply-id=$corr" "$status" \
+    || fail "a replayed exit-8 recovery escalated as a delivery failure"
+  pass "AC9: replayed post-OMP ticks never downgrade durable delivery"
+
+  # A local route keeps the old zero/nonzero split.
+  fm_write_secondmate_meta "$state/loc.meta" "$home/loc" "sess:fm-loc"
+  corr=$(fm_pending_reply_create "$home" "$state" loc "local failure")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  recovery_hook_rc1() { return 1; }
+  export -f recovery_hook_rc1
+  FM_PENDING_REPLY_SEND_HOOK=recovery_hook_rc1 fm_pending_reply_send_recovery "$state" "$corr" || true
+  [ "$(phase_of "$state" "$corr")" = recovery_failed ] \
+    || fail "a local nonzero send was not classified failed"
+  pass "AC8: a local route keeps the zero/nonzero split"
+}
+
+test_real_send_recovery_failure_status() {
+  local home state corr rec
+  home=$(setup_parent real-send-failure)
+  state="$home/state"
+  unset FM_PENDING_REPLY_SEND_HOOK
+  export FM_HOME="$home"
+  export FM_SSH_BIN="$TMP_ROOT/fake-ssh-real-send"
+  printf '#!/bin/sh\nexit 9\n' > "$FM_SSH_BIN"
+  chmod +x "$FM_SSH_BIN"
+
+  export FM_PENDING_REPLY_NOW=9600
+  corr=$(fm_pending_reply_create "$home" "$state" local "local real send failure")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  fm_pending_reply_send_recovery "$state" "$corr" >/dev/null 2>&1 || true
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ "$(fm_pending_reply_get "$rec" recovery_delivery_outcome)" = failed ] \
+    || fail "a real local fm-send failure must be classified failed"
+
+  fm_write_secondmate_meta "$state/remote.meta" "$home/remote" "sess:fm-remote" alpha omp
+  printf 'remote_host=remote-mac\nremote_root=/remote\n' >> "$state/remote.meta"
+  mkdir -p "$home/data"
+  printf -- '- remote - fixture (host: remote-mac; root: /remote; home: /remote/home; scope: fixture; projects: alpha; added 2026-09-30)\n' \
+    > "$home/data/secondmates.md"
+  corr=$(fm_pending_reply_create "$home" "$state" remote "remote binding refusal")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  fm_pending_reply_send_recovery "$state" "$corr" >/dev/null 2>&1 || true
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ "$(fm_pending_reply_get "$rec" recovery_delivery_outcome)" = failed ] \
+    || fail "a real remote exit-9 fm-send failure must be classified failed"
+  unset FM_HOME FM_SSH_BIN
+  pass "real fm-send failures preserve recovery status"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
@@ -960,6 +1113,7 @@ test_fm_send_marked_secondmate_creates_pending_and_embeds_corr
 test_document_pointer_resolves
 test_helper_report_resolves
 test_busy_idle_observation_via_backend_abstraction
+test_real_send_recovery_failure_status
 test_unknown_backend_state_uses_capture_fallback
 test_kimi_capture_fallback_uses_recorded_harness
 test_tick_skips_terminal_and_reuses_target_observation
@@ -967,5 +1121,6 @@ test_correlations_reuse_only_for_matching_open_task
 test_tick_end_to_end_missed_then_escalate
 test_failed_send_discards_undelivered_expectation
 test_same_basename_self_home_reply_does_not_false_escalate
+test_remote_recovery_delivery_classification
 
 printf 'ok - all pending-reply tests passed\n'

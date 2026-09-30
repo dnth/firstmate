@@ -191,18 +191,24 @@ Before enqueue or notification, the remote control binds the seeded home identit
 Payload text and handled acknowledgement remain in that inbox, while the loaded extension delivers only its constant doorbell through `sendMessage(..., { triggerTurn: true })`; neither composer text nor Enter transports or proves the request.
 The extension claims delivery only when a `turn_start`/`agent_start` opens while the request is parked, and a doorbell the runtime deferred to append-only is re-driven through `sendUserMessage` only after the bounded grace expires without a turn; that re-drive is not a receipt, so an unresolved or turn-unproven attempt leaves a durable `.unproven` marker for the next ring instead of creating an `.acked` tombstone (`architecture.md` owns the full contract).
 Once a delivery receipt is consumed, it remains as a generation-scoped `.pending.acked` tombstone, so a later ring reports delivery without republishing or sending another doorbell.
-An unavailable programmatic delivery returns exit 6 with the request durably queued, and an ambiguous programmatic request returns exit 7 without replay.
-An accepted doorbell that does not start its bound turn or receive its handled acknowledgement returns exit 8 with the queue retained.
+The send's success boundary is the durable inbox record, never the agent's later `handled/` move: once the record is durable and the ring has run, the send returns exit 0 and prints one machine line - `request=<corr> record=<NNN> state=recorded|handled`, `state=handled` when the record is already under `handled/` - without waiting for acknowledgement.
+An unavailable programmatic delivery returns exit 6 with the request durably queued, and the machine line still reports the record.
+A doorbell queued without a receipt still returns exit 0 for the durable record, because the record itself is the delivery boundary.
 An identity or extension mismatch returns exit 9 before notification and requires reconciliation rather than resend.
+A delayed or missing `handled/` acknowledgement is never a send failure; the parent's pending-reply expectation simply keeps waiting for the correlated reply on its ordinary recovery schedule.
 The existing typed `/exit` path keeps its separate `delivered-no-turn` exit 4 and `delivered-no-turn-persistence-failed` exit 5 behavior.
 
 Marked requests keep the existing correlation contract.
 The remote charter appends replies to `state/parent-replies.status` in the remote home.
-A process-event source performs a non-destructive, cursor-anchored delta read, validates bounded lifecycle status lines as well-formed UTF-8 while rejecting controls (except TAB), invisible or reordering format characters, and Unicode line or paragraph separators, and requires zero or more space-delimited `[key=...]` or `[corr=...]` tokens before the colon.
-It resolves marked parent requests only from status lines carrying their explicit exact correlation token, fetches only referenced `data/*.md` documents through the confined reader, and appends each accepted line at most once to the primary status channel.
+A process-event source performs a non-destructive, cursor-anchored delta read; the runner's `autohandle` seam then ingests, acknowledges, and re-arms each capture deterministically - no agent turn is required - and `ensure-armed` converges the same invariant for a live route that lost its registration inside the watcher cycle.
+Ingest validates each payload line independently: a bounded lifecycle status line must be well-formed UTF-8 without controls (except TAB), invisible or reordering format characters, or Unicode line or paragraph separators, and carries zero or more space-delimited `[key=...]` or `[corr=...]` tokens before the colon.
+A rejected line's exact bytes are kept under `state/remote-replies/<id>.quarantine/` and reported once with a parent-authored `blocked` line naming the reason, byte count, and SHA-256; rejected bytes never reach the status channel and the cursor still advances past them, so one malformed line cannot wedge later replies.
+It resolves marked parent requests only from accepted lines carrying their explicit exact correlation token, fetches only referenced `data/*.md` documents through the confined reader, and appends each accepted line at most once to the primary status channel.
+A failed document fetch fails the handle so autohandle retries it; consecutive failures per sequence escalate once at `FM_REMOTE_REPLY_AUTOHANDLE_FAILURE_LIMIT` (default 3).
 Bracketed content outside that token set, including arbitrary keys, glued tokens, whitespace, or colons inside token bodies, is rejected.
 The source log is never truncated or consumed.
-A shortened or changed prefix stops the relay and surfaces a continuity failure instead of silently resetting the cursor.
+A captured delta cannot be `handled` before it was ingested - the runner's `handled-gate` seam requires an ingest receipt, cursor coverage, or a recorded continuity break.
+A shortened or changed prefix stops the relay, writes a durable `state/remote-replies/<id>.continuity-broken` marker naming the sequence and reason, and keeps the route pinned until an operator rebases the cursor.
 
 An SSH exit status of 255 always means transport failure or unknown remote completion.
 The transport never retries automatically.

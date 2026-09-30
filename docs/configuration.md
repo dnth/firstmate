@@ -834,6 +834,12 @@ The adapter reports only what the captain chose; the intake owns every rule abou
 Feeding is independent of handling: it never acknowledges a result and never suppresses a wake, because recording the answer is transcription while acting on it is firstmate's judgement.
 An unbound source, an adapter with no `answers` command, and a failure on either side all leave the capture untouched and still announced.
 
+Two more adapter seams share that shape, keeping all adapter-owned meaning on the adapter while the runner stays generic.
+After publishing a captured result and giving it its terminal verdict, the runner calls `bin/fm-procevent-<adapter>.sh autohandle <source-id> <sequence> <result-file>` - exit 0 means the adapter fully handled the result and recorded the durable handled acknowledgement itself, so a source it re-registers is started again in that same step because the watcher exits on every actionable wake instead of polling again; any other exit, including an adapter that lacks the command, leaves the result pending and announced exactly as without the seam.
+Each reconcile offers every still-unhandled result the same seam before its registration sweep, detached so a slow adapter never stalls the watcher cycle; a detached handle that re-registers its source starts it before exiting.
+Separately, `handled-gate <source-id> <sequence> <result-file>` gates every new `handled` acknowledgement on the captured result's own adapter: exit 0 allows the marker and any other exit refuses it with the adapter's reason and writes nothing, so every adapter implements the command even when its answer is unconditional.
+An already-handled result prints `already-handled` without consulting the gate.
+
 Ownership is machine-wide per canonical source, because separate homes can share one underlying source store.
 Claims live under `$XDG_STATE_HOME/firstmate/procevent-claims` (override with `FM_PROCEVENT_CLAIM_ROOT`).
 Each claim binds its home and runner PID to a process identity, unique claim generation, and exact registration-file generation.

@@ -617,10 +617,12 @@ printf 'remote-reply\n' > "$PARENT/state/procevent-inbox/$SID.99.adapter"
 out=$(rp sleep ios 2>&1) && fail "sleep must refuse an unhandled captured reply"
 assert_contains "$out" "unhandled captured reply" "the quiesce refusal must remain actionable"
 [ "$(record_field ios lifecycle)" = ready ] || fail "a quiesce refusal must restore ready lifecycle"
-assert_present "$PARENT/state/procevent/$SID.source" \
-  "a quiesce refusal must re-arm the reply source"
+assert_absent "$PARENT/state/procevent/$SID.source" \
+  "a quiesce refusal must not re-arm over a pending capture and duplicate the generation"
+[ -f "$PARENT/state/procevent-inbox/$SID.99.result" ] \
+  || fail "a quiesce refusal lost the pending captured reply"
 rm -f "$PARENT/state/procevent-inbox/$SID.99.result" "$PARENT/state/procevent-inbox/$SID.99.adapter"
-pass "a refused quiesce restores ready state and re-arms replies"
+pass "a refused quiesce restores ready state and keeps the pending capture durable"
 
 out=$(FM_FAKE_RUNPOD_RECORD_FAIL=suspending rp sleep ios 2>&1) \
   && fail "sleep must refuse when the suspending lifecycle cannot be recorded"
