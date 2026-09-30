@@ -1097,7 +1097,7 @@ families_for_changed_path() {
       # build test, which injects a payload into a fresh copy of it.
       printf '%s\n' "__script__:fm-captain-hold-lifecycle.test.sh"
       ;;
-    .agents/skills/*/SKILL.md)
+    .agents/skills/*/*.md)
       printf '%s\n' pure-contract-unit
       ;;
     contrib/hermes-gateway-firstmate-comms/*)
