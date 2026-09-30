@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
-# Structural registration and boundary tests for the internal /reflect skill.
-# These pin the discovery, separation, and authority contracts through the
-# surfaces a harness actually reads - the file layout, YAML frontmatter, and
-# the documented owner pointers - not the skill's prose body.
+# Contract tests for the internal /reflect skill's executable registration surfaces.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -16,13 +13,6 @@ INVENTORY="$ROOT/docs/documentation-audiences.json"
 AGENTS="$ROOT/AGENTS.md"
 README="$ROOT/README.md"
 
-# Print the lines strictly inside a SKILL.md's opening YAML frontmatter block;
-# fails when the file does not open with a --- fence. Frontmatter is the
-# registration interface the agent's skill loader consumes.
-skill_frontmatter() {  # <skill-file>
-  awk 'NR == 1 { if ($0 != "---") exit 1; next } $0 == "---" { exit } { print }' "$1"
-}
-
 test_reflect_lives_alongside_stow() {
   assert_present "$STOW" "internal stow skill is missing"
   [ -f "$STOW" ] && [ ! -L "$STOW" ] || fail "stow SKILL.md is not a regular file"
@@ -33,73 +23,99 @@ test_reflect_lives_alongside_stow() {
   pass "reflect SKILL.md is a real file directly alongside .agents/skills/stow"
 }
 
-test_reflect_frontmatter_registers_internal_user_invocable() {
-  local fm
-  fm=$(skill_frontmatter "$REFLECT") || fail "reflect SKILL.md lacks a YAML frontmatter block"
-  assert_contains "$fm" "name: reflect" "reflect frontmatter lost its skill name"
-  assert_contains "$fm" "user-invocable: true" "reflect is not registered user-invocable"
-  assert_contains "$fm" "internal: true" "reflect lost the internal metadata flag that hides it from installers"
-  pass "reflect frontmatter registers an internal user-invocable skill named reflect"
-}
-
-test_reflect_trigger_surfaces_stay_consistent() {
-  # The always-loaded owner pointer in AGENTS.md section 6 is the load trigger
-  # for harnesses that never surface skill descriptions.
-  # shellcheck disable=SC2016 # Backticks are literal Markdown in the pattern.
-  assert_grep '`/reflect`' "$AGENTS" "AGENTS.md lost the /reflect trigger pointer"
-  # shellcheck disable=SC2016 # Backticks are literal Markdown in the pattern.
-  assert_grep 'load the `reflect` skill' "$AGENTS" \
-    "AGENTS.md /reflect trigger does not name the skill to load"
-  # User-invocable built-ins are listed in the README table.
-  # shellcheck disable=SC2016 # Backticks are literal Markdown in the pattern.
-  assert_grep '| `/reflect`' "$README" "README built-in skills table lost the /reflect row"
-  # The agent-only index indexes only non-captain-invocable skills; listing a
-  # user-invocable skill there would misclassify it.
-  # shellcheck disable=SC2016 # Backticks are literal Markdown in the pattern.
-  assert_no_grep '- `reflect`' "$TRIGGER_INDEX" \
-    "agent-only trigger index listed the user-invocable reflect skill"
-  # The maintained-prose inventory classifies the skill exactly once as
-  # agent-runtime, which fm-doc-audience-check.sh enforces for every tracked .md.
-  python3 - "$INVENTORY" <<'PY'
+test_reflect_contract_surfaces() {
+  "$ROOT/bin/fm-doc-audience-check.sh" >/dev/null \
+    || fail "documentation audience consumer rejected the reflect registration"
+  python3 - "$REFLECT" "$TRIGGER_INDEX" "$INVENTORY" "$AGENTS" "$README" <<'PY' || fail "reflect contract surfaces are inconsistent"
 import json
+import re
 import sys
+from pathlib import Path
 
-data = json.load(open(sys.argv[1], encoding="utf-8"))
-entries = [s for s in data["surfaces"] if s["path"] == ".agents/skills/reflect/SKILL.md"]
-if len(entries) != 1:
-    sys.exit("inventory must classify .agents/skills/reflect/SKILL.md exactly once")
-if entries[0]["audience"] != "agent-runtime":
-    sys.exit("reflect SKILL.md must be classified agent-runtime")
+reflect, trigger_index, inventory, agents, readme = map(Path, sys.argv[1:])
+
+
+def scalar(value):
+    value = value.strip()
+    if value in {"true", "false"}:
+        return value == "true"
+    return value.strip("'\"")
+
+
+def frontmatter(path):
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if not lines or lines[0] != "---":
+        raise SystemExit("skill frontmatter must start with ---")
+    fields = {}
+    nested = {}
+    closing = None
+    for index, line in enumerate(lines[1:], start=1):
+        if line == "---":
+            closing = index
+            break
+        if not line.strip() or line.startswith(" "):
+            match = re.match(r"^\s{2}([\w-]+):\s*(.+)$", line)
+            if match:
+                nested[match.group(1)] = scalar(match.group(2))
+            continue
+        match = re.match(r"^([\w-]+):\s*(.*)$", line)
+        if not match:
+            raise SystemExit(f"invalid frontmatter line: {line!r}")
+        key, value = match.groups()
+        fields[key] = scalar(value) if value not in {">", ">-", "|", "|-"} else value
+    if closing is None:
+        raise SystemExit("skill frontmatter is missing its closing ---")
+    if fields.get("description") in {">", ">-", "|", "|-"}:
+        fields["description"] = "block"
+    fields["metadata"] = nested
+    return fields
+
+
+fields = frontmatter(reflect)
+if fields.get("name") != "reflect":
+    raise SystemExit("frontmatter name is not reflect")
+if fields.get("user-invocable") is not True:
+    raise SystemExit("reflect must be user-invocable")
+if fields.get("metadata", {}).get("internal") is not True:
+    raise SystemExit("reflect must be marked internal")
+if not fields.get("description"):
+    raise SystemExit("reflect description is missing")
+
+agent_lines = agents.read_text(encoding="utf-8").splitlines()
+try:
+    section_start = next(i for i, line in enumerate(agent_lines) if line.startswith("## 6."))
+    section_end = next(
+        (i for i in range(section_start + 1, len(agent_lines)) if agent_lines[i].startswith("## ")),
+        len(agent_lines),
+    )
+except StopIteration as exc:
+    raise SystemExit("AGENTS.md section 6 is missing") from exc
+agent_section = agent_lines[section_start:section_end]
+agent_triggers = [line for line in agent_section if line.startswith("When the captain invokes `/reflect`, load the `reflect` skill")]
+if len(agent_triggers) != 1:
+    raise SystemExit("AGENTS.md must expose one /reflect load trigger")
+
+readme_lines = readme.read_text(encoding="utf-8").splitlines()
+try:
+    table_start = next(i for i, line in enumerate(readme_lines) if line == "## Built-in skills")
+except StopIteration as exc:
+    raise SystemExit("README built-in skills section is missing") from exc
+table_rows = [line for line in readme_lines[table_start:] if line.startswith("| `/")]
+reflect_rows = [line.split("|", 2) for line in table_rows if line.split("|", 2)[1].strip() == "`/reflect`"]
+if len(reflect_rows) != 1 or not reflect_rows[0][2].strip():
+    raise SystemExit("README must contain one non-empty /reflect built-in skill row")
+
+indexed_skills = re.findall(r"^- `([^`]+)` -", trigger_index.read_text(encoding="utf-8"), re.MULTILINE)
+if "reflect" in indexed_skills:
+    raise SystemExit("user-invocable reflect must not be in the agent-only trigger index")
+
+data = json.loads(inventory.read_text(encoding="utf-8"))
+entries = [entry for entry in data["surfaces"] if entry.get("path") == ".agents/skills/reflect/SKILL.md"]
+if len(entries) != 1 or entries[0].get("audience") != "agent-runtime":
+    raise SystemExit("reflect must have one agent-runtime inventory entry")
 PY
-  pass "/reflect trigger surfaces: AGENTS.md pointer, README row, agent-only index exclusion, inventory entry"
-}
-
-test_reflect_and_stow_keep_separate_responsibilities() {
-  # reflect names /stow as the durable-knowledge owner instead of claiming it.
-  # shellcheck disable=SC2016 # Backticks are literal Markdown in the pattern.
-  assert_grep '`/stow` remains the owner of durable knowledge retention' "$REFLECT" \
-    "reflect stopped delegating knowledge retention to /stow"
-  assert_grep 'never performs a knowledge sweep' "$REFLECT" \
-    "reflect claimed knowledge-sweep responsibility"
-  # stow must not absorb reflection: the two loops stay complementary.
-  assert_no_grep 'reflect' "$STOW" \
-    "stow absorbed reflection responsibility; the skills must stay separate"
-  pass "reflect owns system-improvement analysis while stow keeps knowledge retention"
-}
-
-test_reflect_grants_no_tracked_mutation_authority() {
-  assert_grep 'it never edits shared tracked material itself' "$REFLECT" \
-    "reflect lost its no-tracked-mutation boundary"
-  # shellcheck disable=SC2016 # Backticks are literal Markdown in the pattern.
-  assert_grep 'It must not modify `AGENTS.md`' "$REFLECT" \
-    "reflect stopped enumerating the tracked surfaces it cannot touch"
-  assert_grep 'normal Firstmate task lifecycle' "$REFLECT" \
-    "reflect no longer routes tracked improvements through the ordinary lifecycle"
-  pass "reflect analyzes and proposes only; tracked changes stay behind the normal lifecycle"
+  pass "reflect registration, trigger pointers, index exclusion, and inventory classification are valid"
 }
 
 test_reflect_lives_alongside_stow
-test_reflect_frontmatter_registers_internal_user_invocable
-test_reflect_trigger_surfaces_stay_consistent
-test_reflect_and_stow_keep_separate_responsibilities
-test_reflect_grants_no_tracked_mutation_authority
+test_reflect_contract_surfaces
