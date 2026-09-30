@@ -1097,7 +1097,12 @@ families_for_changed_path() {
       # build test, which injects a payload into a fresh copy of it.
       printf '%s\n' "__script__:fm-captain-hold-lifecycle.test.sh"
       ;;
-    .agents/skills/*/*.md)
+    .agents/skills/*/SKILL.md)
+      printf '%s\n' pure-contract-unit
+      ;;
+    .agents/skills/bro/THIRD_PARTY_NOTICES.md)
+      # Prose notice file bundled with an imported skill; same contract family
+      # the skill's own SKILL.md selects, so --changed cannot refuse it.
       printf '%s\n' pure-contract-unit
       ;;
     contrib/hermes-gateway-firstmate-comms/*)
