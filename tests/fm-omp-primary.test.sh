@@ -515,7 +515,7 @@ SH
     FM_OMP_TASK_DOORBELL_READY="$fixture/home/state/secondmate.omp-doorbell-ready" \
     FM_OMP_TASK_TURN_STARTED="$fixture/home/state/secondmate.omp-started" \
     node --input-type=module 2>&1 <<'JS'
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const handlers = new Map();
@@ -555,6 +555,9 @@ if (markerLines.length !== 4 || markerLines[1] !== String(process.pid)) {
   throw new Error(`invalid OMP primary marker ${markerLines.join("|")}`);
 }
 const extensionContext = { sessionManager: { getSessionFile: () => `${process.env.FIXTURE}/omp-session.jsonl` } };
+const primaryRequest = `${process.env.FM_OMP_TASK_DOORBELL_READY}.requests/primary.pending`;
+mkdirSync(`${process.env.FM_OMP_TASK_DOORBELL_READY}.requests`, { recursive: true });
+writeFileSync(primaryRequest, `Firstmate instruction waiting: list ${process.env.FM_OMP_TASK_INBOX_DIR}/*.msg and, in numeric order, read and act on each, then mv each handled file to ${process.env.FM_OMP_TASK_INBOX_DIR}/handled/.`);
 if (existsSync(process.env.FM_OMP_TASK_DOORBELL_READY)) {
   throw new Error("OMP primary doorbell published readiness before session initialization");
 }
@@ -565,6 +568,13 @@ if (readFileSync(process.env.FM_OMP_SESSION_POINTER, "utf8").trim() !== `${proce
 if (readFileSync(process.env.FM_OMP_TASK_DOORBELL_READY, "utf8") !== `${process.pid}\n`) {
   throw new Error("OMP primary integration did not publish secondmate doorbell readiness at session start");
 }
+// Exercise both the signal and filesystem drain triggers during startup.
+writeFileSync(primaryRequest, readFileSync(primaryRequest, "utf8"));
+process.emit("SIGUSR2");
+await new Promise((resolve) => setTimeout(resolve, 200));
+if (watcherMessages.length !== 0 || !existsSync(primaryRequest)) {
+  throw new Error("OMP primary doorbell steered a pending request before the first turn_start");
+}
 await handlers.get("turn_start")({ type: "turn_start" }, extensionContext);
 if (readFileSync(process.env.FM_OMP_TASK_TURN_STARTED, "utf8") !== `${process.pid}\n`) {
   throw new Error("OMP primary integration did not publish the task-bound turn-start marker");
@@ -572,9 +582,6 @@ if (readFileSync(process.env.FM_OMP_TASK_TURN_STARTED, "utf8") !== `${process.pi
 if (existsSync(`${process.env.FM_STATE_OVERRIDE}/watch-count`)) {
   throw new Error("OMP turn_start armed the watcher before this session owned the lock");
 }
-const primaryRequest = `${process.env.FM_OMP_TASK_DOORBELL_READY}.requests/primary.pending`;
-writeFileSync(primaryRequest, `Firstmate instruction waiting: list ${process.env.FM_OMP_TASK_INBOX_DIR}/*.msg and, in numeric order, read and act on each, then mv each handled file to ${process.env.FM_OMP_TASK_INBOX_DIR}/handled/.`);
-process.emit("SIGUSR2");
 if (
   watcherMessages.length !== 1 ||
   watcherMessages[0].message.customType !== "firstmate-task-inbox-doorbell" ||
@@ -584,6 +591,8 @@ if (
 ) {
   throw new Error(`OMP primary secondmate doorbell was not acknowledged exactly once: ${JSON.stringify(watcherMessages)}`);
 }
+process.emit("SIGUSR2");
+if (watcherMessages.length !== 1) throw new Error("OMP primary doorbell re-delivered the settled startup request");
 watcherMessages.length = 0;
 const startup = await handlers.get("before_agent_start")({ type: "before_agent_start" }, {});
 if (startup?.message?.customType !== "firstmate-sessionstart-nudge" || startup.message.content !== "OMP_PRIMARY_STARTUP_NUDGE" || startup.message.attribution !== "agent") {
@@ -726,7 +735,7 @@ console.log(JSON.stringify({ startupMessages: 3, guarded: true, tools: tools.siz
 JS
 )
   status=$?
-  expect_code 0 "$status" "OMP native primary extension contract"
+  expect_code 0 "$status" "OMP native primary extension contract: $out"
   assert_contains "$out" '"startupMessages":3' "OMP primary runtime result lost once-only startup delivery across start, new, and resume"
   assert_contains "$out" '"guarded":true' "OMP primary runtime result lost stop guard evidence"
   assert_contains "$out" '"watcherMessages":1' "OMP watcher wake was not delivered exactly once"
@@ -1620,6 +1629,67 @@ JS
   pass "OMP re-notifies durable wakes once on session start and switch"
 }
 
+test_native_omp_unowned_lock_preserves_startup_and_queue() {
+  local fixture out status=0
+  fixture=$(make_omp_queue_fixture native-queue-unowned)
+  write_queue_watcher "$fixture"
+  cp "$ROOT/bin/fm-sessionstart-nudge.sh" "$ROOT/bin/fm-operational-input.sh" "$fixture/bin/"
+  printf 'needs-decision: choose startup path\n' > "$fixture/state/task-a.status"
+  FM_STATE_OVERRIDE="$fixture/state" bash -c \
+    '. "$1/bin/fm-wake-lib.sh"; fm_wake_append signal task-a.status "needs-decision: task-a.status"' _ "$fixture" \
+    || fail "the OMP unowned-lock fixture could not seed a durable decision row"
+  out=$(EXTENSION="$fixture/.omp/extensions/fm-primary-omp.ts" FM_HOME="$fixture" \
+    FM_ROOT_OVERRIDE="$fixture" FM_STATE_OVERRIDE="$fixture/state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    node --input-type=module 2>&1 <<'JS'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const state = process.env.FM_STATE_OVERRIDE;
+const queue = readFileSync(`${state}/.wake-queue`, "utf8");
+const wakes = [];
+const handlers = new Map();
+const api = {
+  zod: { object: () => ({}) },
+  on(name, handler) { handlers.set(name, handler); },
+  registerCommand() {}, registerTool() {},
+  sendMessage(message) { if (message.customType === "firstmate-watcher-wake") wakes.push(message); },
+};
+// Prove the numeric holder is dead rather than depending on a fixture PID.
+const stalePid = 2147483647;
+try { process.kill(stalePid, 0); throw new Error("stale fixture PID is alive"); }
+catch (error) { if (error.code !== "ESRCH") throw error; }
+writeFileSync(`${state}/.lock`, `${stalePid}\n`);
+process.argv[1] = process.env.EXTENSION;
+const module = await import(pathToFileURL(process.env.EXTENSION).href);
+module.default(api);
+const context = { sessionManager: { getSessionFile: () => undefined } };
+await handlers.get("session_start")({ type: "session_start" }, context);
+await new Promise((resolve) => setTimeout(resolve, 200));
+if (wakes.length !== 0) throw new Error("unowned session_start sent a watcher wake");
+const startup = await handlers.get("before_agent_start")({ prompt: "Read the launch brief" }, context);
+if (startup?.message?.customType !== "firstmate-sessionstart-nudge" ||
+    !startup.message.content.includes("Run `bin/fm-session-start.sh` now, exactly once")) {
+  throw new Error(`unowned session_start lost the startup nudge: ${JSON.stringify(startup)}`);
+}
+if (await handlers.get("before_agent_start")({ prompt: "next prompt" }, context) !== undefined) {
+  throw new Error("startup nudge was delivered twice");
+}
+for (const reason of ["new", "resume", "fork"]) {
+  await handlers.get("session_switch")({ type: "session_switch", reason }, context);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  if (wakes.length !== 0) throw new Error(`unowned ${reason} switch sent a watcher wake`);
+}
+if (readFileSync(`${state}/.wake-queue`, "utf8") !== queue) throw new Error("unowned session event changed durable rows");
+if (readFileSync(`${state}/.lock`, "utf8") !== `${stalePid}\n`) throw new Error("extension claimed the stale lock");
+if (existsSync(`${state}/watch-count`)) throw new Error("unowned session event armed the watcher");
+await handlers.get("session_shutdown")({}, context);
+console.log("omp-unowned-lock-startup-and-queue-ok");
+JS
+  ) || status=$?
+  expect_code 0 "$status" "OMP unowned-lock startup and queue preservation: $out"
+  assert_contains "$out" omp-unowned-lock-startup-and-queue-ok "OMP unowned-lock startup evidence missing"
+  pass "OMP leaves unowned queued decision wakes durable and stages the startup nudge"
+}
+
 test_native_omp_empty_queue_suppresses_session_notifications() {
   local fixture out status=0
   fixture=$(make_omp_queue_fixture native-queue-empty)
@@ -2250,6 +2320,7 @@ test_native_omp_refused_handling_delivery_is_typed_once
 test_native_omp_session_switch_carries_inflight_actionable_close
 test_native_omp_unacknowledged_wake_keeps_successor_chain
 test_native_omp_durable_queue_session_notifications
+test_native_omp_unowned_lock_preserves_startup_and_queue
 test_native_omp_empty_queue_suppresses_session_notifications
 test_native_omp_core_handoff_suppresses_queue_notification
 test_native_omp_main_fallback_coalesces_burst

@@ -64,6 +64,9 @@ export type TaskInboxDoorbellOptions = {
 	// and notifyTurnEnd instead. Turn proof and downgrade re-drive apply
 	// either way whenever the runtime exposes an event surface.
 	observeTurns?: boolean;
+	// A primary publishes readiness at session_start, but must let the launch
+	// prompt open its first turn before any pending request can steer it.
+	deferUntilTurnStart?: boolean;
 };
 
 export type TaskInboxDoorbell = {
@@ -86,7 +89,8 @@ function configuredOptions(options: TaskInboxDoorbellOptions): Required<TaskInbo
 	const turnGraceMs = Number.isFinite(configuredGrace)
 		? Math.min(Math.max(Math.trunc(configuredGrace), MIN_TURN_GRACE_MS), MAX_TURN_GRACE_MS)
 		: DEFAULT_TURN_GRACE_MS;
-	return { inboxDir, readyMarker, turnGraceMs, observeTurns: options.observeTurns !== false };
+	return { inboxDir, readyMarker, turnGraceMs, observeTurns: options.observeTurns !== false,
+		deferUntilTurnStart: options.deferUntilTurnStart === true };
 }
 
 function publishReadyMarker(marker: string): void {
@@ -217,6 +221,7 @@ export function installTaskInboxDoorbell(
 	let signalHandlerInstalled = false;
 	let turnListenersInstalled = false;
 	let turnOpen = false;
+	let firstTurnStarted = false;
 	let turnEpoch = 0;
 	let dispatchingTurn = false;
 	let dispatchingTurnObserved = false;
@@ -279,6 +284,8 @@ export function installTaskInboxDoorbell(
 		);
 	};
 	const onTurnOpen = (): void => {
+		const firstTurn = !firstTurnStarted;
+		firstTurnStarted = true;
 		turnOpen = true;
 		turnEpoch += 1;
 		if (dispatchingTurn) dispatchingTurnObserved = true;
@@ -289,6 +296,7 @@ export function installTaskInboxDoorbell(
 		for (const awaitingPath of [...awaitingTurns.keys()]) {
 			settleAwaiting(awaitingPath, "delivered");
 		}
+		if (firstTurn && configured.deferUntilTurnStart) drain();
 	};
 	const notifyTurnStart = (): void => onTurnOpen();
 	const onTurnClose = (): void => {
@@ -313,7 +321,7 @@ export function installTaskInboxDoorbell(
 		watcher = undefined;
 	};
 	const drain = (): void => {
-		if (!active) return;
+		if (!active || (configured.deferUntilTurnStart && !firstTurnStarted)) return;
 		if (draining) {
 			drainAgain = true;
 			return;

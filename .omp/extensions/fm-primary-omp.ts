@@ -217,7 +217,7 @@ function runGuard(event: SessionStopEvent): Promise<ProcessResult> {
 export default function (omp: ExtensionAPI) {
   if (!primaryIntegrationApplies()) return;
   publishNativeProcessIdentity();
-  const taskInboxDoorbell = installTaskInboxDoorbell(omp, { observeTurns: false });
+  const taskInboxDoorbell = installTaskInboxDoorbell(omp, { observeTurns: false, deferUntilTurnStart: true });
   let pendingStartupNudge = "";
 
   // Hidden next-turn delivery with triggerTurn. OMP schedules an internal
@@ -269,7 +269,9 @@ export default function (omp: ExtensionAPI) {
   // re-notify. At most one notification is sent per session event, and the
   // core remains the sole speaker while it owns an undelivered close.
   const notifyQueuedWake = (coreOwnsDelivery: boolean): void => {
-    if (coreOwnsDelivery || !durableWakeQueueHasRows()) return;
+    // An unowned startup must reach the launch prompt's staged nudge first;
+    // the locked session-start path presents these durable rows itself.
+    if (!watch.ownsLock() || coreOwnsDelivery || !durableWakeQueueHasRows()) return;
     const queuedScope = scopeForUnreadWake(state, false);
     sendWakeNotification(encodeOperationalInput(
       "watcher",
