@@ -314,7 +314,8 @@ It reads the active firstmate or secondmate home's own fleet state through `FM_H
 
 ### OMP runtime bound (config/omp-max-time)
 
-`config/omp-max-time` is a local, gitignored, non-inherited runtime bound for each OMP crewmate, scout, or secondmate this home launches through the verified adapter.
+`config/omp-max-time` is a local, gitignored, non-inherited runtime bound for each OMP crewmate or scout this home launches through the verified adapter.
+A `kind=secondmate` launch never receives `--max-time`: a persistent secondmate is meant to idle indefinitely behind liveness supervision, and an interactive OMP session past its deadline stays alive but can never start another turn.
 An absent file, an empty file, or a file containing only blank and comment lines applies the default `--max-time=3h`.
 When present, the config path must be a readable, ordinary non-symlink regular file containing only printable ASCII plus tabs and line endings.
 The first non-empty, non-comment line may instead be a positive integer number of seconds, a positive integer suffixed with `m` for minutes, or a positive integer suffixed with `h` for hours, such as `3600`, `10m`, or `1h`.

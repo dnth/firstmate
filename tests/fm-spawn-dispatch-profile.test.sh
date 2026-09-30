@@ -9,6 +9,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-primary-watch-version-lib.sh
+. "$ROOT/bin/fm-primary-watch-version-lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
@@ -49,6 +51,21 @@ omp_doorbell_emulate() {  # <stem>: emulate the generated extension's session_st
     return 0
   fi
   [ "${FM_FAKE_OMP_NO_DOORBELL:-0}" = 1 ] || : > "$1.omp-doorbell-ready"
+}
+omp_secondmate_emulate() {
+  # Emulate a persistent secondmate's primary-extension handshake: the durable
+  # session pointer, the four-line integration marker bound to a live pid, and
+  # the home session lock, plus the parent-state doorbell receipt.
+  local sm=${FM_FAKE_OMP_SECONDMATE_HOME:-}
+  [ -n "$sm" ] || return 0
+  mkdir -p "$sm/state/omp-sessions"
+  printf '{"type":"session"}\n' > "$sm/state/omp-sessions/selected.jsonl"
+  printf '%s\n' "$sm/state/omp-sessions/selected.jsonl" > "$sm/state/.omp-session"
+  printf '%s\n%s\n%s\n%s\n' "$FM_FAKE_OMP_SM_VERSION" "$FM_FAKE_OMP_SM_PID" \
+    "$FM_FAKE_OMP_SM_BUN" "$FM_FAKE_OMP_SM_BIN" \
+    > "$sm/state/.omp-primary-extension-loaded"
+  printf '%s\n' "$FM_FAKE_OMP_SM_PID" > "$sm/state/.lock"
+  [ -z "${FM_FAKE_OMP_SM_DOORBELL:-}" ] || : > "$FM_FAKE_OMP_SM_DOORBELL"
 }
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
@@ -109,6 +126,7 @@ EOF
               cp "$FM_FAKE_OMP_META_TAMPER" "$FM_FAKE_OMP_META_TAMPER.test-owner"
               printf 'window=unrelated:retry\n' > "$FM_FAKE_OMP_META_TAMPER"
             fi
+            omp_secondmate_emulate
           fi
           if [ "${FM_FAKE_EXECUTE_RAW_LAUNCH:-0}" = 1 ]; then
             launch=$(tail -n 1 "$FM_FAKE_LAUNCH_LOG")
@@ -137,6 +155,21 @@ omp_doorbell_emulate() {  # <stem>: emulate the generated extension's session_st
     return 0
   fi
   [ "${FM_FAKE_OMP_NO_DOORBELL:-0}" = 1 ] || : > "$1.omp-doorbell-ready"
+}
+omp_secondmate_emulate() {
+  # Emulate a persistent secondmate's primary-extension handshake: the durable
+  # session pointer, the four-line integration marker bound to a live pid, and
+  # the home session lock, plus the parent-state doorbell receipt.
+  local sm=${FM_FAKE_OMP_SECONDMATE_HOME:-}
+  [ -n "$sm" ] || return 0
+  mkdir -p "$sm/state/omp-sessions"
+  printf '{"type":"session"}\n' > "$sm/state/omp-sessions/selected.jsonl"
+  printf '%s\n' "$sm/state/omp-sessions/selected.jsonl" > "$sm/state/.omp-session"
+  printf '%s\n%s\n%s\n%s\n' "$FM_FAKE_OMP_SM_VERSION" "$FM_FAKE_OMP_SM_PID" \
+    "$FM_FAKE_OMP_SM_BUN" "$FM_FAKE_OMP_SM_BIN" \
+    > "$sm/state/.omp-primary-extension-loaded"
+  printf '%s\n' "$FM_FAKE_OMP_SM_PID" > "$sm/state/.lock"
+  [ -z "${FM_FAKE_OMP_SM_DOORBELL:-}" ] || : > "$FM_FAKE_OMP_SM_DOORBELL"
 }
 cmd=${1:-}
 sub=${2:-}
@@ -194,6 +227,9 @@ case "$cmd $sub" in
       fi
     else
       printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2"}}}'
+      # A created tab implies a live root pane again, so a pane that was proven
+      # missing before a relaunch reports present after the new tab lands.
+      [ -z "${FM_FAKE_HERDR_PANE_FLAG:-}" ] || : > "$FM_FAKE_HERDR_PANE_FLAG"
     fi
     ;;
   "pane process-info")
@@ -240,6 +276,7 @@ case "$cmd $sub" in
           ack=$(printf '%s\n' "${4:-}" | sed -n "s/.* -e '\([^']*\)\.omp-ext\.ts'.*/\1.omp-started/p")
           [ -z "$ack" ] || { : > "$ack"; omp_doorbell_emulate "${ack%.omp-started}"; }
         fi
+        omp_secondmate_emulate
       fi
     fi
     ;;
@@ -258,6 +295,7 @@ case "$cmd $sub" in
             : > "$FM_FAKE_OMP_ACK"
             omp_doorbell_emulate "${FM_FAKE_OMP_ACK%.omp-started}"
           fi
+          omp_secondmate_emulate
         fi
         ;;
     esac
@@ -524,6 +562,70 @@ run_spawn() {
 # tests are about profile resolution, so they pass a fixed valid one.
 run_ship_spawn() {
   run_spawn "$@" --mode no-mistakes --yolo off
+}
+
+# seed_omp_secondmate_home: seed a minimal OMP-capable secondmate home: the
+# shared seeding plus the trusted primary extension closure copied from the
+# tracked runtime and the watch-core the marker version hashes, all committed
+# so the staged-extension audit passes.
+seed_omp_secondmate_home() {  # <secondmate-home-dir> <task-id>
+  local sm=$1 id=$2
+  make_seeded_secondmate_home "$sm" "$id"
+  mkdir -p "$sm/.omp/extensions/lib" "$sm/state" "$sm/config" "$sm/projects"
+  cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$sm/.omp/extensions/fm-primary-omp.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$sm/.omp/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" "$sm/.omp/extensions/lib/fm-task-inbox-doorbell.ts"
+  cp "$ROOT/bin/fm-primary-watch-core.ts" "$sm/bin/fm-primary-watch-core.ts"
+  touch "$sm/state/.last-watcher-beat"
+  git -C "$sm" init -q
+  git -C "$sm" add -A
+  git -C "$sm" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'seed omp secondmate home'
+}
+
+# omp_secondmate_emulation_env: arm the fake pane backends to emulate the
+# secondmate's primary-extension handshake for one spawn. <live-pid> must
+# outlive the spawn's marker check (the marker and lock owner).
+omp_secondmate_emulation_env() {  # <sm-home> <task-id> <live-pid> <parent-home>
+  local canon
+  canon=$(cd "$FAKEBIN_DIR" && pwd -P)
+  export FM_FAKE_OMP_SECONDMATE_HOME=$1
+  export FM_FAKE_OMP_SM_DOORBELL="$4/state/$2.omp-doorbell-ready"
+  FM_FAKE_OMP_SM_VERSION=$(fm_primary_watch_version "$1/.omp/extensions/fm-primary-omp.ts" "$1")
+  export FM_FAKE_OMP_SM_VERSION
+  export FM_FAKE_OMP_SM_PID=$3
+  export FM_FAKE_OMP_SM_BUN=$canon/bun
+  export FM_FAKE_OMP_SM_BIN=$canon/omp
+}
+
+# run_omp_secondmate_spawn: the run_spawn environment without its unconditional
+# herdr pane-presence flag, so a respawn's recorded endpoint can be proven
+# missing before the relaunch recreates it.
+run_omp_secondmate_spawn() {  # <home> <wt> <fakebin> <launchlog> <spawn args...>
+  local home=$1 wt=$2 fakebin=$3 launchlog=$4
+  shift 4
+  local endpointlog="${launchlog%/*}/endpoint.log" treehouselog="${launchlog%/*}/treehouse.log"
+  local herdrpaneflag="${launchlog%/*}/herdr-pane" herdrshellflag="${launchlog%/*}/herdr-nested-shell"
+  : > "$launchlog"
+  : > "$endpointlog"
+  : > "$treehouselog"
+  rm -f "$herdrshellflag"
+  local rc
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    HERDR_ENV='' HERDR_PANE_ID='' HERDR_SESSION='' HERDR_SOCKET_PATH='' \
+    HERDR_TAB_ID='' HERDR_WORKSPACE_ID='' \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX='' FM_BACKEND=herdr \
+    FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_ENDPOINT_LOG="$endpointlog" \
+    FM_FAKE_TREEHOUSE_LOG="$treehouselog" FM_FAKE_OMP_ACK_DIR="$home/state" \
+    FM_FAKE_HERDR_PANE_FLAG="$herdrpaneflag" \
+    FM_FAKE_HERDR_NESTED_SHELL_FLAG="$herdrshellflag" \
+    FM_HERDR_PS_BIN="$fakebin/herdr-ps" \
+    GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
+    "$SPAWN" "$@" 2>&1
+  rc=$?
+  return "$rc"
 }
 
 read_case_record() {
@@ -1763,6 +1865,7 @@ test_omp_threads_exact_identity_model_and_every_thinking_level() {
 
 test_omp_threads_configurable_max_time() {
   local rec id out status launch corrupt_case corrupt_payload config_hex
+  local sm sm2 sm_id sm_id2 sm_agent_pid
 
   id=$(profile_id profile-omp-max-time-default-z8oa)
   rec=$(make_spawn_case profile-omp-max-time-default omp "$id")
@@ -1886,7 +1989,107 @@ test_omp_threads_configurable_max_time() {
   expect_code 0 "$status" "non-OMP spawn should ignore config/omp-max-time"
   launch=$(cat "$LAUNCH_LOG")
   assert_not_contains "$launch" "--max-time" "OMP max-time config leaked into another harness"
-  pass "OMP max-time defaults to 3h, supports override and off, fails closed, and stays OMP-only"
+
+  # A persistent secondmate must never carry the bound regardless of
+  # config/omp-max-time: an interactive OMP session past its deadline stays
+  # alive but can never start another turn, so a bounded secondmate silently
+  # becomes turnless behind liveness supervision (the recurring Mac
+  # coordinator stall). The fake herdr pane emulates the primary extension's
+  # post-launch handshake (doorbell receipt, integration marker, home lock,
+  # durable session pointer, live agent) so each spawn completes; the typed
+  # launch command is the asserted artifact.
+  printf 'omp test/model low\n' > "$HOME_DIR/config/secondmate-harness"
+  rm -f "$HOME_DIR/config/omp-max-time"
+  sm_id=$(profile_id profile-omp-secondmate-maxtime-z8os)
+  sm="$CASE_DIR/secondmate-home"
+  seed_omp_secondmate_home "$sm" "$sm_id"
+  sm=$(cd "$sm" && pwd -P)
+  sleep 120 & sm_agent_pid=$!
+  omp_secondmate_emulation_env "$sm" "$sm_id" "$sm_agent_pid" "$HOME_DIR"
+  out=$(run_omp_secondmate_spawn "$HOME_DIR" "$sm" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$sm_id" "$sm" --secondmate)
+  status=$?
+  kill "$sm_agent_pid" 2>/dev/null || true
+  expect_code 0 "$status" "unconfigured OMP secondmate spawn should succeed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--auto-approve" \
+    "unconfigured OMP secondmate launch lost its auto-approve flag"
+  assert_not_contains "$launch" "--max-time" \
+    "unconfigured OMP secondmate launch carried the crewmate runtime bound"
+
+  unset FM_FAKE_OMP_SECONDMATE_HOME
+  id=$(profile_id profile-omp-max-time-ship-z8oss)
+  mkdir -p "$HOME_DIR/data/$id"
+  printf 'brief for %s\n' "$id" > "$HOME_DIR/data/$id/brief.md"
+  export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" omp)
+  status=$?
+  unset FM_TEST_OMP_ACK
+  expect_code 0 "$status" "OMP ship spawn beside an unbounded secondmate should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--auto-approve --max-time=3h -e" \
+    "OMP ship lost the default max-time bound beside an unbounded secondmate"
+
+  # A configured bound still cannot reach a secondmate launch.
+  printf '10m\n' > "$HOME_DIR/config/omp-max-time"
+  sm_id2=$(profile_id profile-omp-secondmate-maxtime-z8osb)
+  sm2="$CASE_DIR/secondmate-home-2"
+  seed_omp_secondmate_home "$sm2" "$sm_id2"
+  sm2=$(cd "$sm2" && pwd -P)
+  sleep 120 & sm_agent_pid=$!
+  omp_secondmate_emulation_env "$sm2" "$sm_id2" "$sm_agent_pid" "$HOME_DIR"
+  out=$(run_omp_secondmate_spawn "$HOME_DIR" "$sm2" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$sm_id2" "$sm2" --secondmate)
+  status=$?
+  kill "$sm_agent_pid" 2>/dev/null || true
+  expect_code 0 "$status" "configured OMP secondmate spawn should succeed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "--max-time" \
+    "config/omp-max-time=10m reached the secondmate launch"
+
+  unset FM_FAKE_OMP_SECONDMATE_HOME
+  id=$(profile_id profile-omp-max-time-ship-z8osc)
+  mkdir -p "$HOME_DIR/data/$id"
+  printf 'brief for %s\n' "$id" > "$HOME_DIR/data/$id/brief.md"
+  export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" omp)
+  status=$?
+  unset FM_TEST_OMP_ACK
+  expect_code 0 "$status" "OMP ship spawn beside a configured unbounded secondmate should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--auto-approve --max-time=10m -e" \
+    "OMP ship lost the configured max-time bound beside an unbounded secondmate"
+
+  # A liveness respawn of the first secondmate - the recorded endpoint proven
+  # missing and its marker owner dead - relaunches through the same template
+  # and resumes the retained session, still without a bound.
+  rm -f "$CASE_DIR/herdr-pane"
+  omp_secondmate_emulation_env "$sm" "$sm_id" "$$" "$HOME_DIR"
+  out=$(run_omp_secondmate_spawn "$HOME_DIR" "$sm" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$sm_id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "OMP secondmate respawn after a missing endpoint should succeed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--resume " \
+    "OMP secondmate respawn did not resume its retained session"
+  assert_not_contains "$launch" "--max-time" \
+    "respawned OMP secondmate launch carried the crewmate runtime bound"
+
+  # The explicit --relaunch flag on a secondmate reuses its recorded pane; the
+  # fixture cannot re-register a proven-missing herdr pane, so the launch ack
+  # cannot confirm a live agent - but the typed launch still cannot carry the
+  # bound. A genuinely dead secondmate leaves no live marker owner or lock.
+  rm -f "$CASE_DIR/herdr-pane" \
+    "$sm/state/.omp-primary-extension-loaded" "$sm/state/.lock"
+  out=$(FM_OMP_SECONDMATE_ACK_POLLS=2 FM_OMP_LAUNCH_ACK_INTERVAL=0.01 \
+    run_omp_secondmate_spawn "$HOME_DIR" "$sm" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$sm_id" "$sm" --secondmate --relaunch)
+  status=$?
+  expect_code 1 "$status" "OMP secondmate --relaunch onto a proven-missing pane should not report a live agent"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--auto-approve" \
+    "OMP secondmate --relaunch did not type its launch command"
+  assert_not_contains "$launch" "--max-time" \
+    "OMP secondmate --relaunch launch carried the crewmate runtime bound"
+  unset FM_FAKE_OMP_SECONDMATE_HOME FM_FAKE_OMP_SM_DOORBELL FM_FAKE_OMP_SM_VERSION \
+    FM_FAKE_OMP_SM_PID FM_FAKE_OMP_SM_BUN FM_FAKE_OMP_SM_BIN
+  pass "OMP max-time defaults to 3h, supports override and off, fails closed, stays OMP-only, and never reaches a secondmate"
 }
 
 test_omp_broker_env_uses_mode_600_file_without_exposing_bearer() {
