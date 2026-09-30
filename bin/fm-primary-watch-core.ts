@@ -190,6 +190,7 @@ export type PrimaryWatchCore = {
   armAndWait: () => Promise<ArmResult>;
   acknowledgeWake: (content: string) => void;
   hasPendingActionableHandoff: () => boolean;
+  ownsLock: () => boolean;
   markLoaded: () => void;
   sessionShutdown: (replacement?: boolean) => Promise<void>;
   sessionStart: () => void;
@@ -1742,6 +1743,7 @@ export function createPrimaryWatchCore(options: PrimaryWatchCoreOptions): Primar
     armAndWait,
     acknowledgeWake,
     hasPendingActionableHandoff,
+    ownsLock: () => lockOwnership() === "owned",
     markLoaded,
     sessionShutdown,
     sessionStart,
