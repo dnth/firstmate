@@ -1104,6 +1104,11 @@ families_for_changed_path() {
     .agents/skills/*/SKILL.md)
       printf '%s\n' pure-contract-unit
       ;;
+    .agents/skills/bro/THIRD_PARTY_NOTICES.md)
+      # Prose notice file bundled with an imported skill; same contract family
+      # the skill's own SKILL.md selects, so --changed cannot refuse it.
+      printf '%s\n' pure-contract-unit
+      ;;
     contrib/hermes-gateway-firstmate-comms/*)
       printf '%s\n' pr-forge
       ;;

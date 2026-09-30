@@ -138,6 +138,14 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/bro/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/bro/THIRD_PARTY_NOTICES.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/captain-hold-lifecycle/SKILL.md",
       "audience": "agent-runtime"
     },
