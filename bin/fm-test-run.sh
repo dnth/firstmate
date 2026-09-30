@@ -142,7 +142,7 @@ family_for_basename() {
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
     fm-hermes-harness.test.sh|fm-kimi-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
     fm-omp-fleet-hooks.test.sh|fm-omp-harness.test.sh|fm-operational-input.test.sh|\
-    fm-pi-compatible-family.test.sh|fm-pi-primary-types.test.sh|\
+    fm-pi-compatible-family.test.sh|fm-pi-primary-types.test.sh|fm-reflect-skill.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
     fm-todo-project.test.sh|\
     fm-subagent-pretool-check.test.sh|\
@@ -1091,6 +1091,10 @@ families_for_changed_path() {
     .agents/skills/quota-array-dispatch/SKILL.md)
       printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
+      ;;
+    .agents/skills/reflect/SKILL.md)
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' "__script__:fm-reflect-skill.test.sh"
       ;;
     .agents/skills/bearings/assets/*)
       # The board template is exercised by the captain-hold suite's board
