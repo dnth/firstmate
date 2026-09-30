@@ -199,6 +199,9 @@ Record the resulting mode, `yolo` merge posture, and the one-line reason for any
 
 Treat file or subsystem overlap as a risk signal rather than an automatic reason to wait, and dispatch isolated work immediately with no concurrency cap when each change can be independently implemented and validated and the selected delivery path can reconcile ordinary rebases or conflicts.
 Serialize only for a true semantic dependency, shared mutable external state, incompatible concurrent migration, or another concrete condition that makes independent progress or reconciliation unsafe; same-file editing alone is insufficient, and genuine blockers remain durable.
+Pilot before fan-out: when independent units share a materially unproven recipe (brief, implementation assumption, or verification), run one representative unit through its full lifecycle, correct the recipe from the result, then fan out the rest.
+Recent equivalent evidence stands in for the pilot.
+Unrelated tasks run in parallel regardless.
 Write the task-specific brief under section 11 before spawning.
 
 ### Dispatch and supervision handoff
