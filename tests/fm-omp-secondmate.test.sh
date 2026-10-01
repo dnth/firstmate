@@ -71,7 +71,6 @@ if (process.argv.includes("--hold")) {
 --model=provider/id
 --thinking=level
 --auto-approve
---max-time=value
 --approval-mode=mode
 --extension=path
 --session-dir=path

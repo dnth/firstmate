@@ -275,44 +275,11 @@ Normal `/exit` stopped each OMP process without killing the private tmux server,
 The guarded primary, worker/scout, and secondmate owners reran on 2026-08-01 at head `491bc809a38a84f5ea651fd051b509cb511149a1` and returned four green results.
 The OMP 17.2.10 watcher-input regression passed on 2026-08-07 with the editable draft intact; the exact command and bounded output are recorded in [`supervision.md`](supervision.md#native-session-start-delivery).
 
-The OMP max-time deadline guard passed on 2026-08-17 against OMP 17.3.4 using `openai-codex/gpt-5.6-sol` as the explicit live-test model; the current fixture default is `openai-codex/gpt-5.6-luna`:
-
-```sh
-omp --version
-FM_OMP_MAX_TIME_LIVE_E2E=1 tests/fm-omp-max-time-live-e2e.test.sh
-```
-
-Observed bounded output:
-
-```text
-omp/17.3.4
-evidence: OMP omp/17.3.4 max-time=5 elapsed=6s stopReason=aborted errorMessage=Deadline exceeded
-ok - OMP omp/17.3.4 aborts an active session within the 5-15s deadline bound
-```
-
-The guard starts a real headless OMP turn with `--max-time=5`, requires the deadline-specific aborted assistant event and terminal runtime event, rejects unrelated errors, and measures the full process lifetime including shutdown against the documented bound.
-
-The interactive-mode companion records why `kind=secondmate` launches never carry `--max-time`: a persistent secondmate idles behind liveness supervision, but an interactive OMP session whose absolute deadline has passed stays alive yet can never start another turn.
-The provider-free guard drives the installed pi-agent-core `Agent` with a throwing fake stream and passed on 2026-08-29 against the same install:
-
-```sh
-FM_OMP_DEADLINE_GUARD=1 tests/fm-omp-deadline-turnless-guard.test.sh
-```
-
-Observed bounded output:
-
-```text
-expired-deadline: modelCalls=0 turn_start=false events=[agent_start,message_start:user,message_end:user,agent_end] transcript=[user] isStreaming=false
-future-deadline: modelCalls=1 turn_start=true events=[agent_start,turn_start,message_start:user,message_end:user,message_start:assistant,message_end:assistant,turn_end:assistant,agent_end] transcript=[user,assistant] isStreaming=false
-no-deadline: modelCalls=1 turn_start=true events=[agent_start,turn_start,message_start:user,message_end:user,message_start:assistant,message_end:assistant,turn_end:assistant,agent_end] transcript=[user,assistant] isStreaming=false
-ok - OMP expired interactive deadline leaves the session alive but turnless; live and absent deadlines still turn
-```
-
 OMP 17.3.8 standalone-executable compatibility was verified on 2026-08-20.
 
 ```sh
 omp --version
-bin/fm-omp-capabilities.sh --require-max-time --print-binary
+bin/fm-omp-capabilities.sh --print-binary
 FM_OMP_PRIMARY_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh
 ```
 

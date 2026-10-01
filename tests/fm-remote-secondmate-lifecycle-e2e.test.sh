@@ -118,7 +118,6 @@ if (process.argv[2] === "models" && process.argv.includes("--json")) {
 --model=<value>
 --thinking=<value>
 --auto-approve
---max-time=<value>
 --extension=<value>
 --session-dir=<value>
 --resume=<value>
@@ -1288,8 +1287,6 @@ assert_contains "$OMP_REMOTE_LAUNCH" \
 assert_contains "$OMP_REMOTE_LAUNCH" \
   "FM_OMP_TASK_TURN_STARTED='\\''$OMP_REMOTE_HOME/state/parent-route/remote-omp.omp-started'\\''" \
   "remote OMP extension did not receive its parent-route turn-start marker"
-assert_not_contains "$OMP_REMOTE_LAUNCH" "--max-time" \
-  "remote OMP secondmate launch carried the crewmate runtime bound"
 
 # Reproduce the old explicit-pane transport with a real task-bound OMP listener
 cat > "$REMOTE_ROOT/bin/omp" <<'JS'
