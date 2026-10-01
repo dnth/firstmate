@@ -145,12 +145,17 @@ run_spawn() {  # <id> [extra fm-spawn args...]
     "$SPAWN" "$id" "$PROJECT_DIR" "$@" 2>&1
 }
 
-run_teardown() {  # <home> <id> <case_dir>
-  local home=$1 id=$2 case_dir=$3
+run_teardown() {  # <home> <id>: uses FAKEBIN_DIR from read_case_record
+  local home=$1 id=$2
+  # The fixture fakes must win PATH; a wrong path silently falls through to
+  # host tools like real treehouse/tmux, which CI runners do not have.
+  [ -x "$FAKEBIN_DIR/treehouse" ] || { echo "error: missing fake treehouse at $FAKEBIN_DIR" >&2; return 1; }
+  [ "$(PATH="$FAKEBIN_DIR:$PATH" command -v treehouse)" = "$FAKEBIN_DIR/treehouse" ] \
+    || { echo "error: fake treehouse does not win PATH" >&2; return 1; }
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" \
-    PATH="$case_dir/fakebin:$PATH" \
+    PATH="$FAKEBIN_DIR:$PATH" \
     "$TEARDOWN" "$id" 2>&1
 }
 
@@ -411,7 +416,7 @@ test_teardown_retires_the_guard() {
   assert_grep "tasktmp=/tmp/fm-$id" "$HOME_DIR/state/$id.meta" \
     "task meta did not record the task temp root the guard lives under"
 
-  out=$(run_teardown "$HOME_DIR" "$id" "$CASE_DIR")
+  out=$(run_teardown "$HOME_DIR" "$id")
   expect_code 0 "$?" "teardown failed: $out"
   assert_absent "/tmp/fm-$id" "teardown left the task temp root (and the guard) behind"
 
