@@ -61,6 +61,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-runpod-omp-auth.sh`   | Workstation OMP auth-broker, read-only facade, and per-pod SSH reverse-tunnel lifecycle |
 | `fm-omp-auth-broker-readonly-proxy.mjs` | Credential-read-only HTTP boundary between RunPod OMP clients and the canonical workstation broker |
 | `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates on the resolved harness and runtime backend |
+| `fm-prepush-guard.sh`    | Per-working-copy pre-push guard installed by fm-spawn: refuses pushes to main/master/the default branch from spawned copies |
 | `fm-omp-capabilities.sh` | Verify the selected OMP executable's required lifecycle and exact process-ownership surface before a launch |
 | `fm-spawn-herdr-reclaim-lib.sh` | Reclaim authority for a task whose herdr presentation journal is already published |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |

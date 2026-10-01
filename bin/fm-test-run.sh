@@ -200,7 +200,7 @@ family_for_basename() {
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
     fm-busy-adapter-wiring.test.sh|fm-dispatch-resolve.test.sh|\
     fm-herdr-session-cleanup.test.sh|fm-send-inbox.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|fm-send-turn-start.test.sh|fm-spawn-batch.test.sh|\
-    fm-spawn-dispatch-profile.test.sh|\
+    fm-spawn-dispatch-profile.test.sh|fm-prepush-guard.test.sh|\
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|fm-treehouse-orphan-recovery.test.sh|\
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
@@ -440,6 +440,7 @@ tests/fm-pending-reply.test.sh 9640
 tests/fm-pi-compatible-family.test.sh 56
 tests/fm-pi-primary-live-e2e.test.sh 21
 tests/fm-pi-watch-extension.test.sh 22452
+tests/fm-prepush-guard.test.sh 16058
 tests/fm-pr-check-security.test.sh 124896
 tests/fm-procevent-when.test.sh 19131
 tests/fm-procevent.test.sh 53391

@@ -185,6 +185,10 @@
 #   The SHA must equal the project's current local default-branch tip.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   Every ship and scout working copy also gets a per-copy pre-push guard
+#   (bin/fm-prepush-guard.sh) refusing pushes to main, master, and the repo's
+#   default branch; it rides the launch environment's GIT_CONFIG_* injection,
+#   so no repository config or sibling worktree is touched.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -4352,9 +4356,32 @@ for task_tmp_dir in "${task_tmp_dirs[@]}"; do
   fi
 done
 mkdir -p "$TASK_TMP/gotmp"
+TASK_TMP=$(cd "$TASK_TMP" && pwd -P) || {
+  echo "error: could not resolve task temp root: $TASK_TMP" >&2
+  exit 1
+}
 if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
   OMP_SESSION_DIR="$TASK_TMP/omp-sessions"
   mkdir -p "$OMP_SESSION_DIR"
+fi
+
+# Per-copy pre-push guard (bin/fm-prepush-guard.sh owns the contract): every
+# ship and scout working copy gets a private hooks dir under its task temp
+# root, pointed to by command-scope GIT_CONFIG_* environment on the launch
+# command below. Nothing is written to the repository's shared config or
+# common hooks dir, so sibling worktrees are untouched, and fm-teardown's
+# tasktmp removal retires the dir with the task.
+PUSH_GUARD_HOOKS_DIR=
+if [ "$KIND" != secondmate ]; then
+  PUSH_GUARD_HOOKS_DIR="$TASK_TMP/prepush-guard"
+  if [ -L "$PUSH_GUARD_HOOKS_DIR" ] || { [ -e "$PUSH_GUARD_HOOKS_DIR" ] && [ ! -d "$PUSH_GUARD_HOOKS_DIR" ]; }; then
+    echo "error: pre-push guard path must be a non-symlink directory: $PUSH_GUARD_HOOKS_DIR" >&2
+    exit 1
+  fi
+  "$SCRIPT_DIR/fm-prepush-guard.sh" install "$WT" "$PUSH_GUARD_HOOKS_DIR" || {
+    echo "error: could not install the per-copy pre-push guard for worktree $WT" >&2
+    exit 1
+  }
 fi
 
 # Per-harness turn-end hook where enabled: every surface calls fm-turnend-signal.sh
@@ -5072,6 +5099,13 @@ else
   # boundary: the harness and every subprocess it starts inherit it, so a
   # worktree still carrying a retired secondmate's marker can never make this
   # process look like a firstmate home.
+  # The pre-push guard's hooks dir rides the launch environment through
+  # command-scope git config (GIT_CONFIG_*), which outranks repo config but
+  # never touches it - the working copy's files and its sibling worktrees
+  # carry no trace of the guard.
+  if [ -n "$PUSH_GUARD_HOOKS_DIR" ]; then
+    LAUNCH="GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=$(shell_quote "$PUSH_GUARD_HOOKS_DIR") $LAUNCH"
+  fi
   LAUNCH="FM_TASK_ID=$sq_task_id FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= $LAUNCH"
 fi
 # tmux-like backends configure the persistent pane shell before launch. Herdr
