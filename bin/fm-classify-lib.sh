@@ -689,9 +689,9 @@ EOF
 # Kinds:
 #   decision - a pending needs-decision/blocked advisory for <key> ("default"
 #     covers the unkeyed slot). Superseded when the keyed fold no longer holds
-#     the key open - a resolved/captain-held line for the exact key, or a
-#     terminal declaration that closes it per the fold's own semantics. The
-#     fold, not the recorded revision, is the authority here.
+#     the key open after the captured status-log revision - a resolved/captain-
+#     held line for the exact key, or a terminal declaration that closes it per
+#     the fold's own semantics.
 #   worker - a stopped-worker/stale-pane advisory anchored at the status
 #     revision <endpoint>@<ident> captured at production. Superseded when the
 #     same file has any non-blank byte appended past <endpoint> (the worker's
@@ -699,8 +699,9 @@ EOF
 #     unreadable file or a mismatched identity cannot prove supersession, so
 #     the advisory stays deliverable.
 #   pause - a routine long-cadence pause/captain-held recheck. Superseded when
-#     the declaration it re-surfaces no longer holds: the status file is gone
-#     or its last line is neither paused nor captain-held.
+#     the source status-log revision advances or the declaration it re-surfaces
+#     no longer holds: the status file is gone or its last line is neither
+#     paused nor captain-held.
 #   status / fleet / unknown - a plain captain-facing event is a fact, not a
 #     condition; it is never superseded by this predicate.
 fm_advisory_superseded() {  # <state> <task> <kind> <key> <endpoint> <ident>
@@ -711,6 +712,14 @@ fm_advisory_superseded() {  # <state> <task> <kind> <key> <endpoint> <ident>
       case "$key" in ''|-) return 1 ;; esac
       [ -e "$f" ] || return 0
       [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
+      case "$endpoint" in ''|-|*[!0-9]*) return 1 ;; esac
+      case "$ident" in ''|-) return 1 ;; esac
+      live_ident=$(_fm_open_decisions_file_ident "$f") || return 1
+      [ "$live_ident" = "$ident" ] || return 1
+      size=$(_fm_status_file_size "$f") || return 1
+      size=${size//[[:space:]]/}
+      case "$size" in ''|*[!0-9]*) return 1 ;; esac
+      [ "$size" -le "$endpoint" ] || return 0
       _fm_open_set_has "$(status_open_decisions "$f")" "$key" && return 1
       return 0
       ;;
@@ -732,6 +741,14 @@ fm_advisory_superseded() {  # <state> <task> <kind> <key> <endpoint> <ident>
     pause)
       [ -e "$f" ] || return 0
       [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
+      case "$endpoint" in ''|-|*[!0-9]*) return 1 ;; esac
+      case "$ident" in ''|-) return 1 ;; esac
+      live_ident=$(_fm_open_decisions_file_ident "$f") || return 1
+      [ "$live_ident" = "$ident" ] || return 1
+      size=$(_fm_status_file_size "$f") || return 1
+      size=${size//[[:space:]]/}
+      case "$size" in ''|*[!0-9]*) return 1 ;; esac
+      [ "$size" -le "$endpoint" ] || return 0
       status_is_paused_or_captain_held "$(last_status_line "$f")" || return 0
       return 1
       ;;
