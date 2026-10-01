@@ -78,7 +78,7 @@ Every other completion requirement is unchanged: the run must still be the bound
 
 ## Verification environment
 
-- Date: 2026-09-11.
+- Date: 2026-10-01.
 - ShellCheck: 0.11.0.
 - Git: 2.34.1.
 
