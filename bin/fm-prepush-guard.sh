@@ -99,6 +99,14 @@ cmd_install() {  # <worktree> <dir>
     echo "error: pre-push guard could not create dir: $dir" >&2
     return 1
   }
+  if [ -L "$dir/common-dir" ] || { [ -e "$dir/common-dir" ] && [ ! -f "$dir/common-dir" ]; }; then
+    echo "error: pre-push guard common-dir entry must be a regular file: $dir/common-dir" >&2
+    return 1
+  fi
+  if [ -e "$dir/common-dir" ] && ! rm -f "$dir/common-dir"; then
+    echo "error: pre-push guard could not replace $dir/common-dir" >&2
+    return 1
+  fi
   printf '%s\n' "$common" > "$dir/common-dir" || {
     echo "error: pre-push guard could not record the common dir in $dir" >&2
     return 1
@@ -106,6 +114,14 @@ cmd_install() {  # <worktree> <dir>
   self_q=$(shell_quote "$SELF")
   dir_q=$(shell_quote "$dir")
   for name in "${HOOK_NAMES[@]}"; do
+    if [ -L "$dir/$name" ] || { [ -e "$dir/$name" ] && [ ! -f "$dir/$name" ]; }; then
+      echo "error: pre-push guard wrapper entry must be a regular file: $dir/$name" >&2
+      return 1
+    fi
+    if [ -e "$dir/$name" ] && ! rm -f "$dir/$name"; then
+      echo "error: pre-push guard could not replace wrapper $dir/$name" >&2
+      return 1
+    fi
     printf '#!/bin/sh\nexec %s dispatch %s %s "$@"\n' "$self_q" "$dir_q" "$name" > "$dir/$name" || {
       echo "error: pre-push guard could not write wrapper $dir/$name" >&2
       return 1
@@ -170,21 +186,13 @@ cmd_dispatch() {  # <dir> <hook-name> [git's hook args]
     local blocked='' remote_ref ref_name
     recorded=$(cat "$dir/common-dir" 2>/dev/null || true)
     if [ -n "$common" ] && [ -n "$recorded" ] && [ "$common" = "$recorded" ]; then
-      # Resolve the pushed remote's default branch; fall back to origin's,
-      # then init.defaultBranch. main/master are always protected regardless.
+      # Resolve the pushed remote's current default branch first; fall back to
+      # origin, local tracking state, then init.defaultBranch. main/master are
+      # always protected regardless.
       default_branch=
       for r in "$remote_name" origin; do
         [ -n "$r" ] || continue
-        default_ref=$(git symbolic-ref --quiet --short "refs/remotes/$r/HEAD" 2>/dev/null || true)
-        if [ -n "$default_ref" ]; then
-          default_branch=${default_ref#"$r"/}
-          break
-        fi
-      done
-      if [ -z "$default_branch" ]; then
-        for r in "$remote_name" origin; do
-          [ -n "$r" ] || continue
-          default_ref=$(git ls-remote --symref "$r" HEAD 2>/dev/null |
+        default_ref=$(git ls-remote --symref "$r" HEAD 2>/dev/null |
             awk '$1 == "ref:" && $3 == "HEAD" { print $2; exit }')
           case "$default_ref" in
             refs/heads/*)
@@ -192,6 +200,15 @@ cmd_dispatch() {  # <dir> <hook-name> [git's hook args]
               break
               ;;
           esac
+      done
+      if [ -z "$default_branch" ]; then
+        for r in "$remote_name" origin; do
+          [ -n "$r" ] || continue
+          default_ref=$(git symbolic-ref --quiet --short "refs/remotes/$r/HEAD" 2>/dev/null || true)
+          if [ -n "$default_ref" ]; then
+            default_branch=${default_ref#"$r"/}
+            break
+          fi
         done
       fi
       if [ -z "$default_branch" ]; then
