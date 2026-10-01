@@ -129,6 +129,7 @@ A task with any accepted-blocked criterion is never auto-merged; state those cri
 Run \`$FM_ROOT/bin/fm-receipt-check.sh $task_id\` and do not append \`done:\` unless its JSON status is \`complete\`.
 After the implementation is committed and evidence is complete, run \`$FM_ROOT/bin/fm-receipt-check.sh $task_id --implementation-complete\` before any validation plan or implementation-complete \`done:\` report.
 Receipts are audit inputs rather than proof that every claim is trustworthy; keep summaries and results compact and point to commands or artifacts when useful.
+When a cited artifact lives inside this scratch worktree (for example \`.qa/evidence/<run_id>/report.json\`), copy it into \`$FM_ROOT/data/$task_id/artifacts/\` (gitignored, survives teardown) before \`done:\` and cite the copied path; worktree-relative paths die with the worktree.
 
 EOF
   case "$delivery_mode" in

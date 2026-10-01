@@ -474,8 +474,26 @@ test_accepted_blocked_requires_captain_exception() {
   pass "fm-receipt gates accepted-blocked on a verbatim captain exception"
 }
 
+test_relative_artifact_warns_without_refusing() {
+  local id=relative-artifact-warn out err rc
+  write_ship "$id"
+  err=$(FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test \
+    "relative artifact path" "noted" --outcome success \
+    --artifact ".qa/evidence/run-1/report.json" 2>&1 >/dev/null) || fail "relative --artifact was refused"
+  assert_contains "$err" "warning: --artifact is a relative path" \
+    "relative --artifact did not warn"
+  assert_contains "$err" "data/<task-id>/artifacts/" \
+    "relative-artifact warning did not name the durable copy destination"
+  out=$(FM_HOME="$HOME_DIR" "$RECEIPT" "$id" AC1 test \
+    "absolute artifact path" "noted" --outcome success \
+    --artifact "$TMP_ROOT/artifact.json" 2>&1) || fail "absolute --artifact was refused"
+  case "$out" in *"warning:"*) fail "absolute --artifact path emitted a relative-path warning" ;; esac
+  pass "fm-receipt warns on relative --artifact while still appending"
+}
+
 test_appends_one_compact_valid_receipt
 test_append_is_additive_and_result_flag_works
+test_relative_artifact_warns_without_refusing
 test_accepted_blocked_requires_captain_exception
 test_head_binding_is_canonical
 test_large_receipt_is_appended_completely

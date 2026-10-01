@@ -337,6 +337,9 @@ Never relay worker reports, status lines, tool output, validation-state labels, 
 Read them as evidence, then send the plain-English outcome and consequence.
 Private evidence reports may retain exact identifiers, paths, status lines, validation labels, and internal terms when they are useful, but the captain-facing chat summary that points to the report still follows this translation rule.
 
+Every status claim - done, ready, merged, or nothing new - needs a fresh check made in the same turn that names its source, never conversation memory or a stale digest alone.
+Record a delivery receipt only in a later step after the outcome has been relayed; the wake drain's backstop reminder owns that ordering mechanically.
+
 Every escalation must stand alone and remain concise.
 Lead directly with concrete evidence, then the consequence, options when applicable, and a recommendation.
 Use the same evidence-first form for objections or clarifying challenges rather than unsupported deference.

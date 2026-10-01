@@ -222,6 +222,10 @@ test_ship_modes_generate_clean_briefs() {
       "$id: generated receipt contract omitted the accepted-blocked captain-exception requirement"
     assert_grep 'never auto-merged' "$brief" \
       "$id: generated receipt contract omitted the accepted-blocked merge policy"
+    assert_grep "copy it into \`$ROOT/data/$id/artifacts/\`" "$brief" \
+      "$id: generated receipt contract omitted the durable-artifact copy instruction"
+    assert_grep "worktree-relative paths die with the worktree" "$brief" \
+      "$id: generated receipt contract omitted why worktree artifacts are unsafe"
     grep -qx "Delivery contract: mode=$mode" "$brief" \
       || fail "$id: brief did not record its machine-readable delivery contract line"
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
