@@ -128,7 +128,8 @@ clear_delivery_artifacts() {
     "$STATE/.subsuper-inject-wedged" \
     "$STATE/.subsuper-inject-accepted" \
     "$STATE/.subsuper-inject-unconfirmed" \
-    "$STATE/.subsuper-unknown-acked"
+    "$STATE/.subsuper-unknown-acked" \
+    "$STATE/.subsuper-advisory-acked"
 }
 
 return_guard() {

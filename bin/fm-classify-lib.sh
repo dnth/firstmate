@@ -672,6 +672,111 @@ EOF
   return 0
 }
 
+# --- typed advisory freshness (issue #74) ------------------------------------
+#
+# A supervision advisory - a pending-decision note, a stopped-worker wedge
+# report, a routine pause/stale recheck, or a plain captain-facing event - is
+# produced from a durable-state snapshot and then travels through a delayed
+# delivery channel (the away-mode escalation buffer, or the branch outcome
+# store's merge path). fm_advisory_superseded is the ONE owner of the
+# delivery-boundary freshness rule both producers reconcile through: given the
+# advisory's typed identity it answers "is the durable state this advisory was
+# produced from still current?" Return 0 = provably superseded (the caller
+# must retire the item rather than deliver obsolete prose); 1 = still current
+# or unproven (deliver). The rule never guesses: every ambiguity fails open to
+# delivery, matching the daemon's fail-safe-to-escalate policy.
+#
+# Kinds:
+#   decision - a pending needs-decision/blocked advisory for <key> ("default"
+#     covers the unkeyed slot). Superseded when the keyed fold no longer holds
+#     the key open after the captured status-log revision - a resolved/captain-
+#     held line for the exact key, or a terminal declaration that closes it per
+#     the fold's own semantics.
+#   worker - a stopped-worker/stale-pane advisory anchored at the status
+#     revision <endpoint>@<ident> captured at production. Superseded when the
+#     same file has any non-blank byte appended past <endpoint> (the worker's
+#     durable state moved on), or when the status file is gone entirely. An
+#     unreadable file or a mismatched identity cannot prove supersession, so
+#     the advisory stays deliverable.
+#   pause - a routine long-cadence pause/captain-held recheck. Superseded when
+#     the source status-log revision advances or the declaration it re-surfaces
+#     no longer holds: the status file is gone or its last line is neither
+#     paused nor captain-held.
+#   status / fleet / unknown - a plain captain-facing event is a fact, not a
+#     condition; it is never superseded by this predicate.
+fm_advisory_superseded() {  # <state> <task> <kind> <key> <endpoint> <ident>
+  local state=$1 task=$2 kind=$3 key=$4 endpoint=$5 ident=$6 f live_ident size
+  local span span_line span_key verb resolve held
+  f="$state/$task.status"
+  case "$kind" in
+    decision)
+      case "$key" in ''|-) return 1 ;; esac
+      [ -e "$f" ] || return 0
+      [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
+      case "$endpoint" in ''|-|*[!0-9]*) return 1 ;; esac
+      case "$ident" in ''|-) return 1 ;; esac
+      live_ident=$(_fm_open_decisions_file_ident "$f") || return 1
+      [ "$live_ident" = "$ident" ] || return 1
+      size=$(_fm_status_file_size "$f") || return 1
+      size=${size//[[:space:]]/}
+      case "$size" in ''|*[!0-9]*) return 1 ;; esac
+      if [ "$size" -gt "$endpoint" ]; then
+        span=$(_fm_status_read_span "$f" "$endpoint" "$((size - endpoint))" 2>/dev/null) || return 1
+        resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+        held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+        while IFS= read -r span_line || [ -n "$span_line" ]; do
+          [ -n "${span_line//[[:space:]]/}" ] || continue
+          verb=$(status_line_verb "$span_line")
+          span_key=$(_fm_decision_key "$span_line") || return 1
+          if [ "$span_key" = "$key" ] && { [ "$verb" = "$resolve" ] || [ "$verb" = "$held" ]; }; then
+            return 0
+          fi
+        done <<<"$span"
+      fi
+      _fm_open_set_has "$(status_open_decisions "$f")" "$key" && return 1
+      return 0
+      ;;
+    worker)
+      [ -e "$f" ] || return 0
+      [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
+      case "$endpoint" in ''|-|*[!0-9]*) return 1 ;; esac
+      case "$ident" in ''|-) return 1 ;; esac
+      live_ident=$(_fm_open_decisions_file_ident "$f") || return 1
+      [ "$live_ident" = "$ident" ] || return 1
+      size=$(_fm_status_file_size "$f") || return 1
+      size=${size//[[:space:]]/}
+      case "$size" in ''|*[!0-9]*) return 1 ;; esac
+      [ "$size" -le "$endpoint" ] && return 1
+      _fm_status_read_span "$f" "$endpoint" "$((size - endpoint))" 2>/dev/null \
+        | grep -q '[^[:space:]]' && return 0
+      return 1
+      ;;
+    pause)
+      [ -e "$f" ] || return 0
+      [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
+      case "$endpoint" in ''|-|*[!0-9]*) return 1 ;; esac
+      case "$ident" in ''|-) return 1 ;; esac
+      live_ident=$(_fm_open_decisions_file_ident "$f") || return 1
+      [ "$live_ident" = "$ident" ] || return 1
+      size=$(_fm_status_file_size "$f") || return 1
+      size=${size//[[:space:]]/}
+      case "$size" in ''|*[!0-9]*) return 1 ;; esac
+      if [ "$size" -gt "$endpoint" ]; then
+        span=$(_fm_status_read_span "$f" "$endpoint" "$((size - endpoint))" 2>/dev/null) || return 1
+        held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+        while IFS= read -r span_line || [ -n "$span_line" ]; do
+          [ -n "${span_line//[[:space:]]/}" ] || continue
+          verb=$(status_line_verb "$span_line")
+          [ "$verb" = paused ] || [ "$verb" = "$held" ] || return 0
+        done <<<"$span"
+      fi
+      status_is_paused_or_captain_held "$(last_status_line "$f")" || return 0
+      return 1
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 # --- incremental (cursor-backed) open-decisions fold ------------------------
 #
 # status_open_decisions above re-reads and re-folds a status file's ENTIRE

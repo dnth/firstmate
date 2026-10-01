@@ -142,6 +142,14 @@ The branch re-sends any still-undelivered obligation once per generation after a
 The main-side backstop is the other consumer: `bin/fm-wake-drain.sh`'s STATUS OUTCOME BACKSTOP section re-surfaces every undelivered obligation on each drain until main records the printed `bin/fm-branch-outcome.sh deliver` receipt, and the per-task manifest field it feeds back is the delivered frontier that bounds the next scan, never a presentation marker.
 Delivery is at-least-once by design: a lost send is replayed by the next wake or the backstop, and a repeated notification for the same completion identity is deduplicated by its receipt, while a newly reported completion outcome may still open a new main turn.
 
+## Advisory freshness at delivery
+
+Issue [#74](https://github.com/dnth/firstmate/issues/74) is the stale-advisory contract: an outcome's prose is prepared at report time but delivered later, and durable state may supersede it in between, so each outcome row carries a typed advisory identity - task, advisory kind (`decision`, `worker`, `status`, `fleet`, `pause`), an optional keyed-decision key, the source status-log revision (the existing `statusEndpoint`/`statusIdent` pair) or granted wake-row sequences, and a producer generation (`advisory.gen`) that is deliberately a different axis from the branch-process generation and the watcher recovery generation.
+At the last preventable delivery boundary - inside the report tool's serialized merge, before the note can enter main's queue - `fm-branch-outcome.sh reconcile` re-checks the advisory against current durable state through `bin/fm-classify-lib.sh`'s `fm_advisory_superseded`, the same rule the away daemon's escalation-buffer flush applies to its typed `fmadv1` items.
+A pending-decision advisory dies when the keyed fold no longer holds its key open, a stopped-worker advisory dies when the status log has moved past its captured revision or is gone, and a pause advisory dies when the hold it re-surfaces has ended; an outcome still carrying an undelivered completion obligation always delivers, since the owed event is a fact rather than advisory prose.
+The merge-delivery ledger `state/branch-merge-deliveries.jsonl` records one receipt per send attempt (`accepted`, `failed`, `suppressed`) keyed by the durable seq, so a provably-failed merge replays on a later settled wake only while still current, a suppressed advisory is never replayed, and a cursor-advanced row with no receipt stays indeterminate and is never resent.
+Startup replay consumes superseded unread rows silently instead of re-presenting them.
+
 ## Heartbeat routing
 
 The cheap bash-level heartbeat scan absorbs a genuinely no-op pass before it reaches OMP, unchanged from before.

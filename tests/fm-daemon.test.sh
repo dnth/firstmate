@@ -1746,6 +1746,192 @@ test_normal_flush_clears_stale_wedge_marker() {
   pass "normal flush clears a stale wedge marker"
 }
 
+# --- advisory freshness at the deferred-delivery boundary (issue #74) --------
+# Buffered escalations carry a typed freshness identity (task, advisory kind,
+# optional decision key, source status-log revision, producer generation) so
+# the flush can reconcile each item against current durable state instead of
+# delivering precomputed prose.
+
+# A pending-decision advisory buffered while key=theme was open must not reach
+# the pane after `resolved [key=theme]` lands before the flush.
+test_decision_advisory_suppressed_when_key_resolves_before_flush() {
+  local dir state fakebin sent capture statusf endpoint ident
+  dir=$(make_supercase advisory-decision-superseded)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; printf '\342\235\257 \n' > "$capture"
+  statusf="$state/worker-d1.status"
+  printf 'needs-decision [key=theme]: which palette\n' > "$statusf"
+  endpoint=$(_fm_status_file_size "$statusf"); ident=$(status_ident "$statusf")
+  escalate_add "$state" \
+    "worker-d1.status: needs-decision [key=theme]: which palette (catch-all scan)" \
+    worker-d1 decision theme "$endpoint" "$ident"
+  grep -F 'which palette' "$state/.subsuper-escalations" >/dev/null \
+    || fail "the decision advisory was not buffered"
+  printf 'resolved [key=theme]: captain picked dark\n' >> "$statusf"
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
+    || fail "the flush rejected a fully superseded buffer"
+  [ ! -s "$sent" ] \
+    || fail "a resolved decision advisory still reached the pane: $(cat "$sent")"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a superseded decision advisory stayed buffered: $(cat "$state/.subsuper-escalations")"
+  pass "a keyed resolution suppresses a buffered pending-decision advisory at flush"
+}
+
+# Control: the same advisory while the decision stays open delivers normally,
+# and the digest carries the prose, not the machine identity.
+test_decision_advisory_still_current_flushes() {
+  local dir state fakebin sent capture statusf endpoint ident
+  dir=$(make_supercase advisory-decision-current)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; printf '\342\235\257 \n' > "$capture"
+  statusf="$state/worker-d2.status"
+  printf 'needs-decision [key=theme]: which palette\n' > "$statusf"
+  endpoint=$(_fm_status_file_size "$statusf"); ident=$(status_ident "$statusf")
+  escalate_add "$state" \
+    "worker-d2.status: needs-decision [key=theme]: which palette (catch-all scan)" \
+    worker-d2 decision theme "$endpoint" "$ident"
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
+    || fail "a current decision advisory did not flush"
+  grep -F 'which palette' "$sent" >/dev/null \
+    || fail "a still-open decision advisory was not delivered: $(cat "$sent")"
+  ! grep -F 'fmadv1' "$sent" >/dev/null \
+    || fail "the digest leaked the machine identity into the prose: $(cat "$sent")"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a delivered advisory stayed buffered"
+  grep -F "worker-d2"$'\t'"decision"$'\t'"theme" "$state/.subsuper-advisory-acked" >/dev/null \
+    || fail "a delivered typed advisory was not recorded as confirmed"
+  pass "a still-current decision advisory delivers as plain prose and records its identity"
+}
+
+# A stopped-worker advisory anchors to the status-log revision it was produced
+# at; bytes appended after that revision mean the worker's durable state moved
+# on and the wedge claim is obsolete. The same advisory while nothing appended
+# still delivers.
+test_worker_advisory_suppressed_after_resumption() {
+  local dir state fakebin sent capture statusf endpoint ident mode
+  for mode in resumed still-stale; do
+    dir=$(make_supercase "advisory-worker-$mode")
+    state="$dir/state"; fakebin="$dir/fakebin"
+    sent="$dir/sent.log"; : > "$sent"
+    capture="$dir/pane.txt"; printf '\342\235\257 \n' > "$capture"
+    statusf="$state/worker-$mode.status"
+    printf 'working: building phase two\n' > "$statusf"
+    endpoint=$(_fm_status_file_size "$statusf"); ident=$(status_ident "$statusf")
+    escalate_add "$state" \
+      "stale persisted 500s (possible wedge): sess:fm-worker-$mode" \
+      "worker-$mode" worker - "$endpoint" "$ident"
+    [ "$mode" = resumed ] \
+      && printf 'working: resumed on new evidence\n' >> "$statusf"
+    afk_enter "$state"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+      FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
+      || fail "$mode worker advisory flush failed"
+    if [ "$mode" = resumed ]; then
+      [ ! -s "$sent" ] \
+        || fail "a stopped-worker advisory delivered after the worker resumed: $(cat "$sent")"
+      [ ! -s "$state/.subsuper-escalations" ] \
+        || fail "a superseded worker advisory stayed buffered"
+    else
+      grep -F 'possible wedge' "$sent" >/dev/null \
+        || fail "a still-stale worker advisory was not delivered: $(cat "$sent")"
+    fi
+  done
+  pass "a newer durable status supersedes a stopped-worker advisory; a still-stale one delivers"
+}
+
+# Replay is gated on freshness: a provably failed send keeps the advisory
+# retryable only while it is still current. Once its condition resolves before
+# the retry, the retry must retire the item rather than deliver obsolete prose.
+test_advisory_replay_only_while_current() {
+  local dir state sent statusf endpoint ident calls mode
+  for mode in still-current resolved-before-retry; do
+    dir=$(make_supercase "advisory-replay-$mode")
+    state="$dir/state"
+    sent="$dir/sent.log"; : > "$sent"
+    calls="$dir/calls"; printf '0\n' > "$calls"
+    statusf="$state/worker-$mode.status"
+    printf 'needs-decision [key=route]: pick the route\n' > "$statusf"
+    endpoint=$(_fm_status_file_size "$statusf"); ident=$(status_ident "$statusf")
+    escalate_add "$state" \
+      "worker-$mode.status: needs-decision [key=route]: pick the route (catch-all scan)" \
+      "worker-$mode" decision route "$endpoint" "$ident"
+    afk_enter "$state"
+    (
+      # shellcheck disable=SC2329 # Runtime overrides called indirectly by inject_msg.
+      fm_backend_target_exists() { return 0; }
+      pane_is_busy() { return 1; }
+      fm_backend_composer_state() { printf 'empty'; }
+      fm_backend_send_text_submit() {
+        local n
+        n=$(cat "$calls"); printf '%s\n' "$((n + 1))" > "$calls"
+        if [ "$n" -eq 0 ]; then
+          printf 'send-failed'
+        else
+          printf '%s\n' "$3" >> "$sent"
+          printf 'empty'
+        fi
+      }
+      FM_INJECT_CONFIRM_RETRIES=3 FM_INJECT_CONFIRM_SLEEP=0 escalate_flush "$state" \
+        && fail "$mode: escalate_flush reported success on send-failed"
+      [ "$mode" = resolved-before-retry ] \
+        && printf 'resolved [key=route]: take the safe route\n' >> "$statusf"
+      FM_INJECT_CONFIRM_RETRIES=3 FM_INJECT_CONFIRM_SLEEP=0 escalate_flush "$state" \
+        || fail "$mode: the retry did not settle cleanly"
+    )
+    if [ "$mode" = still-current ]; then
+      [ "$(cat "$calls")" = 2 ] || fail "still-current: the failed send was not retried"
+      grep -F 'pick the route' "$sent" >/dev/null \
+        || fail "still-current: the retry did not deliver the advisory: $(cat "$sent")"
+    else
+      [ "$(cat "$calls")" = 1 ] || fail "resolved: the superseded advisory was re-sent"
+      ! grep -F 'pick the route' "$sent" >/dev/null \
+        || fail "resolved: a superseded advisory was delivered on retry: $(cat "$sent")"
+      [ ! -s "$state/.subsuper-escalations" ] \
+        || fail "resolved: the superseded advisory stayed buffered"
+    fi
+  done
+  pass "a failed advisory send replays only while the advisory is still current"
+}
+
+# A routine long-cadence pause confirmation carries no new captain action once
+# the same condition identity was already delivered: the first recheck lands,
+# an identical later recheck stays silent.
+test_pause_recheck_repeat_confirmation_stays_silent() {
+  local dir state fakebin sent capture statusf endpoint ident
+  dir=$(make_supercase advisory-pause-silent)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; printf '\342\235\257 \n' > "$capture"
+  statusf="$state/held-p1.status"
+  printf 'paused: awaiting an external dependency\n' > "$statusf"
+  endpoint=$(_fm_status_file_size "$statusf"); ident=$(status_ident "$statusf")
+  afk_enter "$state"
+  escalate_add "$state" \
+    'paused/held 2700s (awaiting external recovery, recheck whether the wait still holds): sess:fm-held-p1' \
+    held-p1 pause - "$endpoint" "$ident"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
+    || fail "the first pause recheck did not flush"
+  grep -F 'awaiting external' "$sent" >/dev/null \
+    || fail "the first pause recheck did not deliver: $(cat "$sent")"
+  escalate_add "$state" \
+    'paused/held 5400s (awaiting external recovery, recheck whether the wait still holds): sess:fm-held-p1' \
+    held-p1 pause - "$endpoint" "$ident"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
+    || fail "the repeat pause recheck flush failed"
+  [ "$(grep -c 'awaiting external' "$sent" | tr -d ' ')" = 1 ] \
+    || fail "an identical pause confirmation reached the pane twice: $(cat "$sent")"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a silenced repeat confirmation stayed buffered"
+  pass "a routine pause confirmation delivers once and stays silent on identical repeats"
+}
+
 # The start-up catch-all scan turns each status log's unread span into one
 # buffered item, so a first digest can exceed the 131,071 bytes one transport
 # argument can carry. The fake tmux refuses any literal send above that.
@@ -2134,13 +2320,16 @@ test_inject_identity_artifacts_clear_with_session() {
   state="$dir/state"
   printf 'payload\n' > "$state/.subsuper-inject-accepted"
   printf 'item\n' > "$state/.subsuper-inject-unconfirmed"
+  printf 'task-a\tdecision\ttheme\t12\t1:2\n' > "$state/.subsuper-advisory-acked"
   bash -c '. "$1"; fm_afk_clear_stale_artifacts "$2"' _ "$AFK_START" "$state" \
     || fail "clearing the away-session artifacts failed"
   [ ! -e "$state/.subsuper-inject-accepted" ] \
     || fail "the accepted-payload record survived a new away session"
   [ ! -e "$state/.subsuper-inject-unconfirmed" ] \
     || fail "the unconfirmed-items record survived a new away session"
-  pass "accepted-payload and unconfirmed-item records clear with the away session"
+  [ ! -e "$state/.subsuper-advisory-acked" ] \
+    || fail "the delivered-advisory ledger survived a new away session"
+  pass "accepted-payload, unconfirmed-item, and advisory-delivery records clear with the away session"
 }
 
 test_below_max_defer_does_nothing() {
@@ -2889,6 +3078,11 @@ test_max_defer_empty_swallow_types_once_and_alarms
 test_max_defer_flushes_empty_idle_pane
 test_max_defer_pending_composer_alarms_without_typing
 test_normal_flush_clears_stale_wedge_marker
+test_decision_advisory_suppressed_when_key_resolves_before_flush
+test_decision_advisory_still_current_flushes
+test_worker_advisory_suppressed_after_resumption
+test_advisory_replay_only_while_current
+test_pause_recheck_repeat_confirmation_stays_silent
 test_oversized_digest_is_bounded_and_kept_durable
 test_digest_budget_counts_omitted_events
 test_recovery_projection_digest_is_bounded_and_kept_durable

@@ -63,6 +63,23 @@
 #   - Cheap heartbeat catch-all: every HEARTBEAT_SCAN_SECS the daemon greps all
 #     state/*.status for a captain-relevant line the per-wake classifier might
 #     have missed (e.g. a status verb outside CAPTAIN_RE) and escalates it.
+#   - Advisory freshness at delivery (issue #74): a buffered escalation that
+#     reports a *condition* - an open keyed decision, a stopped worker, a held
+#     pause - is written as a typed advisory line carrying its freshness
+#     identity (task, kind, optional decision key, the source status-log
+#     revision endpoint@dev:inode, and the away producer's generation). At the
+#     flush boundary each typed line is reconciled against current durable
+#     state through fm-classify-lib.sh's fm_advisory_superseded - the single
+#     shared rule - and retired instead of delivered when the buffer's stale
+#     prose no longer describes reality: a decision advisory dies when the
+#     keyed fold no longer holds its key open, a stopped-worker advisory dies
+#     when the task's status log has moved past the recorded revision or is
+#     gone, and a routine confirmation whose exact condition identity was
+#     already delivered stays silent via state/.subsuper-advisory-acked. An
+#     unproven check always delivers (fail-safe-to-escalate), and a provably
+#     failed send replays the item only while it is still current. The
+#     accepted-but-unconfirmed contract is unchanged: indeterminate payloads
+#     are never re-typed.
 #
 # The robustness shell from the prior always-inject version is preserved:
 # single-instance lock (portable helper, no flock dependency), crash-loop
@@ -1036,6 +1053,14 @@ recovery_projection_flush() {  # <state> <generation>
   [ -s "$projection" ] && [ -r "$generation_file" ] || return 0
   actual=$(cat "$generation_file" 2>/dev/null || true)
   [ "$actual" = "$generation" ] || return 1
+  # Delivery-boundary freshness reconcile (issue #74): retire projection items
+  # whose recorded condition durable state already supersedes, before any of
+  # this generation's prose is typed into the pane.
+  escalate_buffer_reconcile_inplace "$state" "$projection" || true
+  if [ ! -s "$projection" ]; then
+    rm -f "$generation_file"
+    return 0
+  fi
   n=$(wc -l < "$projection" 2>/dev/null || echo 0)
   case "$n" in ''|*[!0-9]*|0) return 1 ;; esac
   escalate_digest_body "$projection"
@@ -1052,7 +1077,15 @@ recovery_projection_flush() {  # <state> <generation>
   fi
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
   if inject_msg "$msg" "$state"; then
+    advisory_mark_flushed "$state" "$projection" \
+      || log "advisory-ack write failed; a delivered condition may reconfirm once"
     return 0
+  fi
+  if [ "$INJECT_SUBMIT_OUTCOME" = indeterminate ]; then
+    # The payload was typed into the pane but never confirmed - the covered
+    # identities count as delivered for confirmation dedup so a re-derived
+    # identical advisory does not re-type them.
+    advisory_mark_flushed "$state" "$projection" || true
   fi
   if [ "$INJECT_SUBMIT_ATTEMPTED" != 1 ] && [ "$fresh" = 1 ]; then
     rm -f "$full"
@@ -1060,14 +1093,139 @@ recovery_projection_flush() {  # <state> <generation>
   return 1
 }
 
-escalate_add() {  # <state> <distilled-item>
+# --- typed advisory freshness identity (issue #74) ----------------------------
+# A buffered escalation that reports a *condition* (an open keyed decision, a
+# stopped worker, a held pause) rather than a plain event carries a typed
+# freshness identity so the delivery boundary can reconcile it against current
+# durable state instead of trusting precomputed prose. The identity tuple is
+#   <task> <kind> <key> <endpoint> <ident> <gen>
+# where <endpoint>@<ident> is the source status-log revision (byte size and
+# dev:inode identity of $state/<task>.status at production) and <gen> is the
+# away producer's own generation token - deliberately distinct from both the
+# branch-process generation and the watcher-recovery generation. "-" fills any
+# field that does not apply. The buffered line itself is
+#   fmadv1<TAB><task><TAB><kind><TAB><key><TAB><endpoint><TAB><ident><TAB><gen><TAB><prose>
+# so the identity survives buffering, partial retirement, and the
+# accepted-but-unconfirmed record with the item it belongs to.
+# fm-classify-lib.sh's fm_advisory_superseded owns the freshness semantics;
+# this file owns the buffer encoding and the delivered-identity ledger.
+
+# The away producer's advisory generation: minted once per daemon process so
+# two identical conditions produced by different daemon runs still carry
+# distinct producer generations. FM_ADVISORY_GEN overrides it in tests.
+advisory_generation() {
+  if [ -z "${FM_ADVISORY_GEN:-}" ]; then
+    FM_ADVISORY_GEN="away.$$.$(_now)"
+  fi
+  printf '%s' "$FM_ADVISORY_GEN"
+}
+
+# Capture the source status-log revision of <task> as "<endpoint><TAB><ident>";
+# each field is "-" when the file cannot be statted.
+advisory_status_revision() {  # <state> <task>
+  local f="$1/$2.status" endpoint ident
+  endpoint=$(_fm_status_file_size "$f" 2>/dev/null) || endpoint=
+  ident=$(_fm_open_decisions_file_ident "$f" 2>/dev/null) || ident=
+  endpoint=${endpoint//[[:space:]]/}
+  case "$endpoint" in ''|*[!0-9]*) endpoint=- ;; esac
+  printf '%s\t%s\n' "${endpoint:--}" "${ident:--}"
+}
+
+# Parse a typed advisory buffer line into ADVISORY_TASK, ADVISORY_KIND,
+# ADVISORY_KEY, ADVISORY_ENDPOINT, ADVISORY_IDENT, ADVISORY_GEN, ADVISORY_PROSE.
+# Returns 1 for a legacy untyped prose line.
+_advisory_fields() {  # <line>
+  local line=$1
+  case "$line" in
+    "fmadv1"$'\t'*) ;;
+    *) return 1 ;;
+  esac
+  # shellcheck disable=SC2034 # ADVISORY_GEN is parsed for provenance; the
+  # delivered-condition ledger keys on the condition, not the producer run.
+  IFS=$'\t' read -r _ ADVISORY_TASK ADVISORY_KIND ADVISORY_KEY \
+    ADVISORY_ENDPOINT ADVISORY_IDENT ADVISORY_GEN ADVISORY_PROSE <<<"$line" || true
+  [ -n "$ADVISORY_TASK" ] && [ -n "$ADVISORY_KIND" ] && [ -n "$ADVISORY_PROSE" ]
+}
+
+# The delivered-identity ledger: state/.subsuper-advisory-acked holds one
+# "<task><TAB><kind><TAB><key><TAB><endpoint><TAB><ident>" line per typed
+# advisory already carried into the pane by a confirmed or accepted payload.
+# A routine confirmation (a long-cadence pause recheck or a repeated stale
+# report) whose exact condition identity was already delivered carries no new
+# captain action and stays silent at the next flush. The file is
+# session-scoped like .subsuper-unknown-acked: cleared on away-mode entry,
+# rollback, and return.
+advisory_confirmed() {  # <state> <task> <kind> <key> <endpoint> <ident>
+  local acked="$1/.subsuper-advisory-acked"
+  [ -s "$acked" ] || return 1
+  grep -Fqx "$2"$'\t'"$3"$'\t'"$4"$'\t'"$5"$'\t'"$6" "$acked" 2>/dev/null
+}
+
+# Record the typed identities carried by every advisory line in <file>, called
+# once the payload covering them was confirmed or accepted into the pane.
+advisory_mark_flushed() {  # <state> <file>
+  local state=$1 file=$2 line
+  local acked="$state/.subsuper-advisory-acked"
+  while IFS= read -r line || [ -n "$line" ]; do
+    _advisory_fields "$line" || continue
+    printf '%s\t%s\t%s\t%s\t%s\n' \
+      "$ADVISORY_TASK" "$ADVISORY_KIND" "$ADVISORY_KEY" \
+      "$ADVISORY_ENDPOINT" "$ADVISORY_IDENT" >> "$acked" || return 1
+  done < "$file"
+}
+
+# Print only the lines of <buf> still worth delivering at this instant.
+# Untyped legacy prose always passes through. A typed advisory is retired when
+# fm_advisory_superseded proves its recorded condition stale, and silenced when
+# its exact condition identity was already delivered (a routine confirmation
+# holding no new captain action). Every drop is logged so the daemon log names
+# why a buffered item never reached the pane.
+escalate_buffer_reconcile() {  # <state> <buf>
+  local state=$1 buf=$2 line
+  while IFS= read -r line || [ -n "$line" ]; do
+    if _advisory_fields "$line"; then
+      if fm_advisory_superseded "$state" "$ADVISORY_TASK" "$ADVISORY_KIND" \
+          "$ADVISORY_KEY" "$ADVISORY_ENDPOINT" "$ADVISORY_IDENT"; then
+        log "advisory superseded before delivery (task=$ADVISORY_TASK kind=$ADVISORY_KIND key=$ADVISORY_KEY): $ADVISORY_PROSE"
+        continue
+      fi
+      if advisory_confirmed "$state" "$ADVISORY_TASK" "$ADVISORY_KIND" \
+          "$ADVISORY_KEY" "$ADVISORY_ENDPOINT" "$ADVISORY_IDENT"; then
+        log "advisory confirmation already delivered for this condition; stays silent (task=$ADVISORY_TASK kind=$ADVISORY_KIND)"
+        continue
+      fi
+    fi
+    printf '%s\n' "$line"
+  done < "$buf"
+}
+
+# Reconcile a deferred buffer against current durable state in place: rewrite
+# <file> to just the still-deliverable lines. Returns 0 when the rewrite ran
+# (the caller then inspects emptiness itself), 1 when reconciliation could not
+# run and the file was left untouched (fail-open to delivery).
+escalate_buffer_reconcile_inplace() {  # <state> <file>
+  local state=$1 file=$2 tmp
+  tmp=$(mktemp "$state/.subsuper-reconcile.XXXXXX") || return 1
+  if ! escalate_buffer_reconcile "$state" "$file" > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv -f "$tmp" "$file"
+}
+
+escalate_add() {  # <state> <distilled-item> [task kind key endpoint ident]
   local state=$1 item=$2 buf line
   if line=$(unknown_wake_line "$item"); then
     unknown_wake_acknowledged "$state" "$line" && return 0
   fi
   buf=${FM_ESCALATION_SINK:-"$state/.subsuper-escalations"}
   [ -n "${FM_ESCALATION_SINK:-}" ] || { [ -s "$buf" ] || _now > "${buf}.since"; }
-  printf '%s\n' "$item" >> "$buf"
+  if [ $# -ge 4 ] && [ -n "${3:-}" ] && [ -n "${4:-}" ]; then
+    printf 'fmadv1\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$3" "$4" "${5:--}" "${6:--}" "${7:--}" "$(advisory_generation)" "$item" >> "$buf"
+  else
+    printf '%s\n' "$item" >> "$buf"
+  fi
 }
 
 # _utf8_prefix: the longest prefix of <text> that fits in <max-bytes> bytes
@@ -1111,12 +1269,15 @@ ESCALATE_FULL_DIR=.subsuper-digests
 
 # escalate_digest_body: join <buf>'s items with " | " inside the byte budget.
 # Sets ESCALATE_BODY, ESCALATE_EVENTS (every buffered item), and
-# ESCALATE_BOUNDED (1 when any item was cut or omitted).
+# ESCALATE_BOUNDED (1 when any item was cut or omitted). A typed advisory line
+# renders only its prose field; the freshness identity is buffer metadata, not
+# captain-facing text.
 escalate_digest_body() {  # <buf>
   local LC_ALL=C buf=$1 item='' sep cut remaining=$ESCALATE_DIGEST_BYTES room cap shown=0 total=0
   ESCALATE_BODY=
   ESCALATE_BOUNDED=0
   while IFS= read -r item || [ -n "$item" ]; do
+    _advisory_fields "$item" && item=$ADVISORY_PROSE
     total=$((total + 1))
     sep=
     [ "$shown" -eq 0 ] || sep=' | '
@@ -1184,6 +1345,17 @@ escalate_flush() {  # <state>
     log "inject skipped: $INJECT_LAST_FAILURE"
     return 1
   fi
+  # Delivery-boundary freshness reconcile (issue #74): drop typed advisories
+  # whose recorded condition current durable state already supersedes, and
+  # routine confirmations whose exact identity was already delivered. Suppressed
+  # items are retired durably - not just skipped for this send - so a failed
+  # flush replays a buffer that only ever holds still-current advisories.
+  if escalate_buffer_reconcile_inplace "$state" "$buf"; then
+    if [ ! -s "$buf" ]; then
+      rm -f "${buf}.since" "$state/.subsuper-inject-wedged"
+      return 0
+    fi
+  fi
   unc="$state/.subsuper-inject-unconfirmed"
   sendf=$buf
   if [ -s "$unc" ]; then
@@ -1226,6 +1398,8 @@ escalate_flush() {  # <state>
   if inject_msg "$msg" "$state"; then
     unknown_wake_acknowledge_flushed "$state" "$sendf" \
       || log "unknown-wake acknowledgement write failed; a delivered unknown wake may escalate again"
+    advisory_mark_flushed "$state" "$sendf" \
+      || log "advisory-ack write failed; a delivered condition may reconfirm once"
     if [ "$sendf" = "$buf" ]; then
       : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"
       ESCALATE_KEPT_FULL=
@@ -1267,6 +1441,7 @@ escalate_flush() {  # <state>
     if ! cat "$sendf" >> "$unc"; then
       log "inject warning: could not record accepted-but-unconfirmed items in $unc; a re-type is possible"
     fi
+    advisory_mark_flushed "$state" "$sendf" || true
   fi
   [ "$sendf" = "$buf" ] || rm -f "$sendf"
   return 1
@@ -1354,6 +1529,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
   local state=$1 now due f key task win marker age last latest max_defer oldest pause_secs
+  local adv_endpoint adv_ident adv_recheck_rc adv_kind adv_key adv_verb
   now=$(_now)
   migrate_watcher_pause_markers "$state"
 
@@ -1412,7 +1588,11 @@ housekeeping() {  # <state>
     [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
     if task_window_is_remote "$win" "$state"; then
       remote_stale_recheck "$win" "$state"
-      case "$?" in
+      adv_recheck_rc=$?
+      IFS=$'\t' read -r adv_endpoint adv_ident <<EOF
+$(advisory_status_revision "$state" "$task")
+EOF
+      case "$adv_recheck_rc" in
         0)
           latest=$(last_status_line "$state/$task.status")
           if [ -n "$latest" ] && status_is_paused_or_captain_held "$latest" \
@@ -1421,7 +1601,8 @@ housekeeping() {  # <state>
           elif [ -n "$latest" ] && status_is_paused "$latest"; then
             reconcile_pause_tracking "$win" "$state" "$latest"
           else
-            escalate_add "$state" "remote stale endpoint gone while not captain-held: $win"
+            escalate_add "$state" "remote stale endpoint gone while not captain-held: $win" \
+              "$task" worker - "$adv_endpoint" "$adv_ident"
             stale_marker_remove "$win" "$state"
           fi
           ;;
@@ -1430,7 +1611,8 @@ housekeeping() {  # <state>
           if [ -n "$latest" ] && status_is_paused "$latest"; then
             reconcile_pause_tracking "$win" "$state" "$latest"
           else
-            escalate_add "$state" "remote stale persisted ${age}s (possible wedge): $win"
+            escalate_add "$state" "remote stale persisted ${age}s (possible wedge): $win" \
+              "$task" worker - "$adv_endpoint" "$adv_ident"
             stale_marker_remove "$win" "$state"
           fi
           ;;
@@ -1439,28 +1621,35 @@ housekeeping() {  # <state>
           if [ -n "$latest" ] && daemon_pause_status_is_valid "$win" "$state" "$latest"; then
             reconcile_pause_tracking "$win" "$state" "$latest"
           else
-            escalate_add "$state" "remote stale owner probe inconclusive: $win"
+            escalate_add "$state" "remote stale owner probe inconclusive: $win" \
+              "$task" worker - "$adv_endpoint" "$adv_ident"
             stale_marker_remove "$win" "$state"
           fi
           ;;
       esac
       continue
     fi
+    IFS=$'\t' read -r adv_endpoint adv_ident <<EOF
+$(advisory_status_revision "$state" "$task")
+EOF
     stale_window_is_busy "$win" "$state"
     case "$?" in
       0)
         latest=$(last_status_line "$state/$task.status")
         [ "$latest" = "$last" ] || continue
         if [ -n "$latest" ] && status_is_paused_or_captain_held "$latest"; then
-          escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
+          escalate_add "$state" "stale persisted ${age}s (possible wedge): $win" \
+            "$task" worker - "$adv_endpoint" "$adv_ident"
           stale_marker_remove "$win" "$state"
         else
           rm -f "$marker"
         fi
         ;;
-      2) escalate_add "$state" "stale persisted ${age}s (possible wedge; endpoint unreadable): $win"
+      2) escalate_add "$state" "stale persisted ${age}s (possible wedge; endpoint unreadable): $win" \
+           "$task" worker - "$adv_endpoint" "$adv_ident"
          stale_marker_remove "$win" "$state" ;;
-      *) escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
+      *) escalate_add "$state" "stale persisted ${age}s (possible wedge): $win" \
+           "$task" worker - "$adv_endpoint" "$adv_ident"
          stale_marker_remove "$win" "$state" ;;
     esac
   done
@@ -1494,7 +1683,12 @@ housekeeping() {  # <state>
       *)
         last=$(last_status_line "$state/$task.status")
         if [ -n "$last" ] && daemon_pause_status_is_valid "$win" "$state" "$last"; then
-          escalate_add "$state" "paused/held ${age}s (awaiting external recovery, recheck whether the wait still holds): $win"
+          IFS=$'\t' read -r adv_endpoint adv_ident <<EOF
+$(advisory_status_revision "$state" "$task")
+EOF
+          escalate_add "$state" \
+            "paused/held ${age}s (awaiting external recovery, recheck whether the wait still holds): $win" \
+            "$task" pause - "$adv_endpoint" "$adv_ident"
           _now > "$marker"
         else
           rm -f "$marker"
@@ -1526,7 +1720,16 @@ housekeeping() {  # <state>
       if [ "$rc" -eq 0 ]; then
         while IFS= read -r event || [ -n "$event" ]; do
           [ -n "$event" ] || continue
-          escalate_add "$state" "$(basename "$f"): $event (catch-all scan)"
+          adv_verb=$(status_line_verb "$event")
+          adv_kind=status
+          adv_key=-
+          case "$adv_verb" in
+            needs-decision|blocked)
+              adv_key=$(_fm_decision_key "$event") && adv_kind=decision || adv_key=-
+              ;;
+          esac
+          escalate_add "$state" "$(basename "$f"): $event (catch-all scan)" \
+            "$task" "$adv_kind" "$adv_key" "$endpoint" "$ident"
         done < <(printf '%s' "$event" | sed 's/ ; /\n/g')
       fi
       last=$(last_status_line "$f")
@@ -1853,6 +2056,7 @@ handle_durable_wakes() {  # <watcher-reason> <state>
   local fallback_reason=$1 state=$2 out err tab epoch sequence kind key payload rest line
   local handled=0 ack_through ack_generation capture_before capture_after recovery_projection_tmp recovery_seen_tmp recovery_offset_tmp
   local capture_valid=false decision_parse_state=outside decision_lines='' decision_count=0
+  local adv_task adv_key adv_rest adv_endpoint adv_ident
   local decisions_routed_completely=false
   local FM_ESCALATION_SINK FM_DEFER_ESCALATION_FLUSH=1 FM_RECOVERY_SEEN_SINK FM_RECOVERY_OFFSET_SINK FM_RECOVERY_RECLASSIFY_SIGNALS=0
   local decision_header='OPEN DECISIONS (still open, folded from the durable status logs - not just the latest line):'
@@ -1945,7 +2149,22 @@ handle_durable_wakes() {  # <watcher-reason> <state>
   if [ "$capture_valid" = true ] && [ "$decision_count" -gt 0 ]; then
     while IFS= read -r line; do
       [ -n "$line" ] || continue
-      escalate_add "$state" "$line" || capture_valid=false
+      # Each line is "<task> [key=<key>] <verb>: <note>" from fm-wake-drain's
+      # OPEN DECISIONS fold, so the advisory is typed as a decision anchored at
+      # the task's current status revision - a resolution landing before the
+      # projection is injected suppresses the stale prose (issue #74).
+      adv_task=${line%%[[:space:]]*}
+      adv_rest=${line#"$adv_task"}
+      adv_rest=${adv_rest# }
+      adv_key=default
+      case "$adv_rest" in
+        '[key='*) adv_key=${adv_rest#\[key=}; adv_key=${adv_key%%\]*} ;;
+      esac
+      IFS=$'\t' read -r adv_endpoint adv_ident <<EOF2
+$(advisory_status_revision "$state" "$adv_task")
+EOF2
+      escalate_add "$state" "$line" "$adv_task" decision "$adv_key" \
+        "$adv_endpoint" "$adv_ident" || capture_valid=false
     done <<EOF
 $decision_lines
 EOF

@@ -350,6 +350,8 @@ export interface BranchStatusSnapshotEntry {
   task: string;
   endpoint: number;
   ident: string;
+  advisoryKind?: "decision" | "status";
+  advisoryKey?: string;
 }
 
 // Capture the status identity and stable EOF for one granted task. The
@@ -364,7 +366,22 @@ export function captureTaskStatusSnapshot(state: string, task: string): BranchSt
     const second = lstatSync(path);
     if (!second.isFile()) return null;
     if (first.dev !== second.dev || first.ino !== second.ino || first.size !== second.size) return null;
-    return { task, endpoint: first.size, ident: `${first.dev}:${first.ino}` };
+    const bytes = readFileSync(path);
+    const afterRead = lstatSync(path);
+    if (!afterRead.isFile() || afterRead.dev !== second.dev || afterRead.ino !== second.ino || afterRead.size !== second.size) return null;
+    const lines = bytes.subarray(0, first.size).toString("utf8").split(/\r?\n/);
+    let advisoryKind: "decision" | "status" = "status";
+    let advisoryKey = "-";
+    let lastEvent = "";
+    for (const line of lines) {
+      const verb = statusLineVerb(line);
+      if (["needs-decision", "blocked", "working", "done", "failed", "paused", "resolved", "captain-held"].includes(verb)) {
+        lastEvent = verb;
+        if (verb === "needs-decision" || verb === "blocked") advisoryKey = decisionKey(line) ?? "default";
+      }
+    }
+    if (lastEvent === "needs-decision" || lastEvent === "blocked") advisoryKind = "decision";
+    return { task, endpoint: first.size, ident: `${first.dev}:${first.ino}`, advisoryKind, advisoryKey };
   } catch {
     return null;
   }

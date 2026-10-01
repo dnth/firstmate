@@ -372,14 +372,15 @@ fm_afk_launch_restore_backup() {  # <backup> <had-afk>
     "$FM_AFK_LAUNCH_STATE/.subsuper-inject-wedged" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-inject-accepted" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-inject-unconfirmed" \
-    "$FM_AFK_LAUNCH_STATE/.subsuper-unknown-acked" || result=1
+    "$FM_AFK_LAUNCH_STATE/.subsuper-unknown-acked" \
+    "$FM_AFK_LAUNCH_STATE/.subsuper-advisory-acked" || result=1
   if [ "$had_afk" -eq 1 ]; then
     cp "$backup/.afk" "$FM_AFK_LAUNCH_STATE/.afk" || result=1
   fi
   for artifact in .subsuper-escalations .subsuper-escalations.since \
     .subsuper-recovery-escalations .subsuper-recovery-escalations.generation \
     .subsuper-inject-wedged .subsuper-inject-accepted \
-    .subsuper-inject-unconfirmed .subsuper-unknown-acked; do
+    .subsuper-inject-unconfirmed .subsuper-unknown-acked .subsuper-advisory-acked; do
     if [ -e "$backup/$artifact" ]; then
       cp -p "$backup/$artifact" "$FM_AFK_LAUNCH_STATE/$artifact" || result=1
     fi
@@ -516,7 +517,7 @@ fm_afk_launch_start() {
   for artifact in .subsuper-escalations .subsuper-escalations.since \
     .subsuper-recovery-escalations .subsuper-recovery-escalations.generation \
     .subsuper-inject-wedged .subsuper-inject-accepted \
-    .subsuper-inject-unconfirmed .subsuper-unknown-acked; do
+    .subsuper-inject-unconfirmed .subsuper-unknown-acked .subsuper-advisory-acked; do
     if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
       cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
     fi
@@ -577,7 +578,7 @@ fm_afk_launch_start_native() {
   for artifact in .subsuper-escalations .subsuper-escalations.since \
     .subsuper-recovery-escalations .subsuper-recovery-escalations.generation \
     .subsuper-inject-wedged .subsuper-inject-accepted \
-    .subsuper-inject-unconfirmed .subsuper-unknown-acked; do
+    .subsuper-inject-unconfirmed .subsuper-unknown-acked .subsuper-advisory-acked; do
     if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
       cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
     fi
