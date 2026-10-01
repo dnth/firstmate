@@ -1004,13 +1004,6 @@ export default function (pi: ExtensionAPI) {
         if (scopeRefusal) {
           return { content: [{ type: "text", text: scopeRefusal }], details: undefined, isError: true };
         }
-        const appendArgs = ["append", "--task", task, "--verdict", verdict, "--summary", summary, "--silent", String(silent)];
-        if (wake) appendArgs.push("--wake", wake);
-        appendArgs.push("--advisory-gen", advisoryGeneration);
-        if (wakeAdvisoryKind) appendArgs.push("--advisory-kind", wakeAdvisoryKind);
-        if (wakeTaskScope && wakeTaskScope.rows.length > 0) {
-          appendArgs.push("--advisory-wake-seqs", wakeTaskScope.rows.join(","));
-        }
         return enqueueDelivery(async () => {
           if (!(await actingAsOwner(toolGeneration))) {
             return {
@@ -1018,6 +1011,18 @@ export default function (pi: ExtensionAPI) {
               details: undefined,
               isError: true,
             };
+          }
+          const appendArgs = ["append", "--task", task, "--verdict", verdict, "--summary", summary, "--silent", String(silent)];
+          if (wake) appendArgs.push("--wake", wake);
+          appendArgs.push("--advisory-gen", advisoryGeneration);
+          if (wakeTaskScope && wakeTaskScope.rows.length > 0) {
+            appendArgs.push("--advisory-wake-seqs", wakeTaskScope.rows.join(","));
+          }
+          const span = grantStatusSnapshot?.get(task);
+          if (span) {
+            appendArgs.push("--advisory-kind", wakeAdvisoryKind === "worker" ? "worker" : (span.advisoryKind ?? "status"));
+            appendArgs.push("--advisory-key", span.advisoryKey ?? "-");
+            appendArgs.push("--advisory-endpoint", String(span.endpoint), "--advisory-ident", span.ident);
           }
           const appended = await runOutcomeScript(appendArgs);
           if (!appended.ok) {
@@ -1033,7 +1038,6 @@ export default function (pi: ExtensionAPI) {
           // captain-facing event inside it (state recorded or pending) owes a
           // main turn, so the merge below takes the captain delivery shape
           // whenever the completions scan returns any.
-          const span = grantStatusSnapshot?.get(task);
           let completionIds: string[] = [];
           if (span) {
             const scan = await runOutcomeScript([
@@ -1304,7 +1308,12 @@ ${context.command}
               if (!task || !/^\d+$/.test(endpoint ?? "") || !/^\d+:\d+$/.test(ident ?? "")) throw new Error("invalid published status snapshot");
               return { task, endpoint: Number(endpoint), ident };
             });
-          grantStatusSnapshot = new Map(publishedEntries.map((entry) => [entry.task, entry]));
+          grantStatusSnapshot = new Map(
+            publishedEntries.map((entry) => {
+              const captured = stableGrantStatusEntries.find((candidate) => candidate.task === entry.task);
+              return [entry.task, { ...entry, advisoryKind: captured?.advisoryKind, advisoryKey: captured?.advisoryKey }];
+            }),
+          );
           if (grantStatusSnapshot.size !== stableGrantStatusEntries.length) throw new Error("published status snapshot is incomplete");
         } catch {
           throw new Error("could not read the published status snapshot");

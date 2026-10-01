@@ -468,6 +468,8 @@ case "$CMD" in
     SILENT=false
     ADVISORY_KIND=''
     ADVISORY_KEY='-'
+    ADVISORY_ENDPOINT=''
+    ADVISORY_IDENT=''
     ADVISORY_GEN='-'
     ADVISORY_WAKE_SEQS='-'
     while [ "$#" -gt 0 ]; do
@@ -479,6 +481,8 @@ case "$CMD" in
         --silent) SILENT=${2:-}; shift 2 || usage ;;
         --advisory-kind) ADVISORY_KIND=${2:-}; shift 2 || usage ;;
         --advisory-key) ADVISORY_KEY=${2:-}; shift 2 || usage ;;
+        --advisory-endpoint) ADVISORY_ENDPOINT=${2:-}; shift 2 || usage ;;
+        --advisory-ident) ADVISORY_IDENT=${2:-}; shift 2 || usage ;;
         --advisory-gen) ADVISORY_GEN=${2:-}; shift 2 || usage ;;
         --advisory-wake-seqs) ADVISORY_WAKE_SEQS=${2:-}; shift 2 || usage ;;
         *) usage ;;
@@ -495,7 +499,14 @@ case "$CMD" in
       exit 1
     fi
     SEQ=$(( LAST_SEQ + 1 ))
-    capture_status_position "$TASK"
+    if [ -n "${ADVISORY_ENDPOINT:-}" ] || [ -n "${ADVISORY_IDENT:-}" ]; then
+      case "${ADVISORY_ENDPOINT:-}" in ''|*[!0-9]*) fm_lock_release "$LOCK"; usage ;; esac
+      [[ "${ADVISORY_IDENT:-}" =~ ^[0-9]+:[0-9]+$ ]] || { fm_lock_release "$LOCK"; usage; }
+      CAPTURED_STATUS_ENDPOINT=$ADVISORY_ENDPOINT
+      CAPTURED_STATUS_IDENT=$ADVISORY_IDENT
+    else
+      capture_status_position "$TASK"
+    fi
     # Typed advisory identity (issue #74): an explicit producer kind wins;
     # otherwise derive it from the covered span (a trailing keyed decision is a
     # pending-decision advisory, fleet-scope is fleet, the rest a plain event).
