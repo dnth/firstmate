@@ -366,7 +366,10 @@ export function captureTaskStatusSnapshot(state: string, task: string): BranchSt
     const second = lstatSync(path);
     if (!second.isFile()) return null;
     if (first.dev !== second.dev || first.ino !== second.ino || first.size !== second.size) return null;
-    const lines = readFileSync(path, "utf8").slice(0, first.size).split(/\r?\n/);
+    const bytes = readFileSync(path);
+    const afterRead = lstatSync(path);
+    if (!afterRead.isFile() || afterRead.dev !== second.dev || afterRead.ino !== second.ino || afterRead.size !== second.size) return null;
+    const lines = bytes.subarray(0, first.size).toString("utf8").split(/\r?\n/);
     let advisoryKind: "decision" | "status" = "status";
     let advisoryKey = "-";
     let lastEvent = "";
