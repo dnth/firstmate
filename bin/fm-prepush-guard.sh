@@ -56,6 +56,29 @@ shell_quote() {
   printf "'"
 }
 
+resolve_push_defaults() {  # <remote>
+  local remote=$1 urls url default_ref default_branch resolved=''
+  urls=$(git remote get-url --push --all "$remote" 2>/dev/null) || return 1
+  [ -n "$urls" ] || return 1
+  while IFS= read -r url; do
+    [ -n "$url" ] || return 1
+    default_ref=$(git ls-remote --symref "$url" HEAD 2>/dev/null) || return 1
+    default_ref=$(printf '%s\n' "$default_ref" |
+      awk '$1 == "ref:" && $3 == "HEAD" { print $2; exit }')
+    case "$default_ref" in
+      refs/heads/*) default_branch=${default_ref#refs/heads/} ;;
+      *) return 1 ;;
+    esac
+    case " $resolved " in
+      *" $default_branch "*) ;;
+      *) resolved="$resolved $default_branch" ;;
+    esac
+  done <<EOF
+$urls
+EOF
+  PUSH_DEFAULT_BRANCHES=$resolved
+}
+
 # Every hook name git may look up in hooksPath (githooks(5)), so the private
 # dir can stand in for the repository's hooks dir without dropping any hook.
 HOOK_NAMES=(
@@ -182,22 +205,17 @@ cmd_dispatch() {  # <dir> <hook-name> [git's hook args]
   fi
 
   if [ "$name" = pre-push ]; then
-    local remote_name=${1:-} recorded default_ref default_branch input line
+    local remote_name=${1:-} recorded default_branch input line
     local blocked='' remote_ref ref_name
     recorded=$(cat "$dir/common-dir" 2>/dev/null || true)
     if [ -n "$common" ] && [ -n "$recorded" ] && [ "$common" = "$recorded" ]; then
       # Resolve the pushed remote's current default branch. main/master are
       # always protected regardless.
-      default_branch=
+      PUSH_DEFAULT_BRANCHES=
       if [ -n "$remote_name" ]; then
-        default_ref=$(git ls-remote --symref "$remote_name" HEAD 2>/dev/null |
-            awk '$1 == "ref:" && $3 == "HEAD" { print $2; exit }')
-        case "$default_ref" in
-          refs/heads/*)
-            default_branch=${default_ref#refs/heads/}
-            ;;
-        esac
+        resolve_push_defaults "$remote_name" || true
       fi
+      default_branch=$PUSH_DEFAULT_BRANCHES
       input=$(cat)
       if [ -z "$default_branch" ]; then
         printf '%s\n' \

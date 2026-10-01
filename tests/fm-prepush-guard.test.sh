@@ -258,6 +258,33 @@ test_guard_blocks_nonstandard_default_branch() {
   pass "a non-main default branch resolved from origin/HEAD is refused"
 }
 
+test_guard_uses_pushurl_default_branch() {
+  local rec id out hooks_dir push_origin
+  id='prepush-pushurl-r1'
+  rec=$(make_case pushurl-block "$id") || fail "fixture setup failed"
+  read_case_record "$rec"
+
+  push_origin="$CASE_DIR/push-origin.git"
+  mkdir -p "$push_origin" || fail "push remote directory failed"
+  git -C "$push_origin" init -q --bare || fail "push remote init failed"
+  git -C "$PROJECT_DIR" push -q origin HEAD:refs/heads/trunk || fail "push remote seed failed"
+  git -C "$push_origin" symbolic-ref HEAD refs/heads/trunk || fail "push remote HEAD failed"
+  git -C "$PROJECT_DIR" remote set-url --push origin "file://$push_origin" \
+    || fail "pushurl setup failed"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  expect_code 0 "$?" "pushurl spawn failed: $out"
+  hooks_dir=$(send_log_hooks_dir "$CASE_DIR/send.log")
+  wt_commit "$POOL_DIR" 'worker work' || fail "fixture commit failed"
+  if out=$(worker_git "$hooks_dir" "$POOL_DIR" push origin HEAD:trunk 2>&1); then
+    fail "push to the pushurl default branch 'trunk' was not refused"
+  fi
+  assert_contains "$out" "fm-prepush-guard" "pushurl refusal did not name the guard"
+
+  rm -rf "/tmp/fm-$id"
+  pass "pushurl default branch is protected"
+}
+
 test_guard_scopes_to_spawned_repo_only() {
   local rec id out hooks_dir scratch scratch_origin status
   id='prepush-scope-r1'
@@ -457,6 +484,7 @@ test_scout_spawn_also_installs_the_guard() {
 
 test_spawn_installs_guard_and_blocks_default_branch_pushes
 test_guard_blocks_nonstandard_default_branch
+test_guard_uses_pushurl_default_branch
 test_guard_scopes_to_spawned_repo_only
 test_guard_leaves_sibling_and_shared_config_untouched
 test_existing_repo_hooks_still_run
