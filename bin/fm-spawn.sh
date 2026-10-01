@@ -4356,6 +4356,10 @@ for task_tmp_dir in "${task_tmp_dirs[@]}"; do
   fi
 done
 mkdir -p "$TASK_TMP/gotmp"
+TASK_TMP=$(cd "$TASK_TMP" && pwd -P) || {
+  echo "error: could not resolve task temp root: $TASK_TMP" >&2
+  exit 1
+}
 if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
   OMP_SESSION_DIR="$TASK_TMP/omp-sessions"
   mkdir -p "$OMP_SESSION_DIR"
@@ -4370,6 +4374,10 @@ fi
 PUSH_GUARD_HOOKS_DIR=
 if [ "$KIND" != secondmate ]; then
   PUSH_GUARD_HOOKS_DIR="$TASK_TMP/prepush-guard"
+  if [ -L "$PUSH_GUARD_HOOKS_DIR" ] || { [ -e "$PUSH_GUARD_HOOKS_DIR" ] && [ ! -d "$PUSH_GUARD_HOOKS_DIR" ]; }; then
+    echo "error: pre-push guard path must be a non-symlink directory: $PUSH_GUARD_HOOKS_DIR" >&2
+    exit 1
+  fi
   "$SCRIPT_DIR/fm-prepush-guard.sh" install "$WT" "$PUSH_GUARD_HOOKS_DIR" || {
     echo "error: could not install the per-copy pre-push guard for worktree $WT" >&2
     exit 1

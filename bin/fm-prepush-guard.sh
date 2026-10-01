@@ -87,6 +87,10 @@ cmd_install() {  # <worktree> <dir>
     echo "error: pre-push guard could not canonicalize the git common dir for $wt" >&2
     return 1
   }
+  if [ -L "$dir" ]; then
+    echo "error: pre-push guard dir must not be a symlink: $dir" >&2
+    return 1
+  fi
   if [ -e "$dir" ] && [ ! -d "$dir" ]; then
     echo "error: pre-push guard dir exists and is not a directory: $dir" >&2
     return 1
