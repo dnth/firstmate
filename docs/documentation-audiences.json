@@ -150,6 +150,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/cleanup/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/decision-hold-lifecycle/SKILL.md",
       "audience": "agent-runtime"
     },
