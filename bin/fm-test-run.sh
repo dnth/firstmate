@@ -189,7 +189,6 @@ family_for_basename() {
     fm-codex-continuity-live-e2e.test.sh|fm-grok-continuity-live-e2e.test.sh|\
     fm-devin-herdr-live-e2e.test.sh|fm-hermes-live-e2e.test.sh|\
     fm-grok-stop-live-e2e.test.sh|fm-omp-herdr-exit-live-e2e.test.sh|fm-omp-herdr-live-e2e.test.sh|\
-    fm-omp-max-time-live-e2e.test.sh|fm-omp-deadline-turnless-guard.test.sh|\
     fm-omp-secondmate-live-e2e.test.sh|fm-omp-worker-tmux-live-e2e.test.sh|\
     fm-omp-primary-live-e2e.test.sh|\
     fm-opencode-primary-live-e2e.test.sh|fm-pi-primary-live-e2e.test.sh|\
@@ -421,12 +420,10 @@ tests/fm-kimi-harness.test.sh 14636
 tests/fm-omp-branch-live-e2e.test.sh 21
 tests/fm-omp-branch-supervision.test.sh 4373
 tests/fm-omp-branch-types.test.sh 24
-tests/fm-omp-deadline-turnless-guard.test.sh 15
 tests/fm-omp-fleet-hooks.test.sh 2535
 tests/fm-omp-harness.test.sh 1764
 tests/fm-omp-herdr-exit-live-e2e.test.sh 18
 tests/fm-omp-herdr-live-e2e.test.sh 19
-tests/fm-omp-max-time-live-e2e.test.sh 19
 tests/fm-omp-primary-live-e2e.test.sh 21
 tests/fm-omp-primary.test.sh 7216
 tests/fm-omp-secondmate-live-e2e.test.sh 21

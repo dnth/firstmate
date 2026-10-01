@@ -378,7 +378,7 @@ SH
 #!/usr/bin/env bun
 case "${1:-}" in
   --help)
-    printf '%s\n' '--model=<value>' '--thinking=<value>' '--auto-approve' '--max-time=<value>' '--session-dir=<value>' '-e, --extension=<value>' '-r, --resume=<value>' '--prewalk native-switch' '--prewalk-into=<value>' '--config=<value>'
+    printf '%s\n' '--model=<value>' '--thinking=<value>' '--auto-approve' '--session-dir=<value>' '-e, --extension=<value>' '-r, --resume=<value>' '--prewalk native-switch' '--prewalk-into=<value>' '--config=<value>'
     [ "${FM_FAKE_OMP_NO_PREWALK:-1}" != 1 ] || printf '%s\n' '--no-prewalk'
     ;;
   --version) printf 'omp/17.2.11\n' ;;
@@ -416,22 +416,6 @@ exec bash "$script" "$@"
 SH
   chmod +x "$fakebin/bun"
   printf '%s\n' "$fakebin"
-}
-
-install_replacing_od() {
-  local fakebin=$1
-  cat > "$fakebin/od" <<'SH'
-#!/usr/bin/env bash
-"$FM_FAKE_OD_REAL" "$@"
-rc=$?
-[ "$rc" -eq 0 ] || exit "$rc"
-target=${!#}
-if [ -n "${FM_FAKE_OD_REPLACE_FILE:-}" ] && [ "$target" = "$FM_FAKE_OD_REPLACE_FILE" ]; then
-  printf 'off\0' > "$target.replacement"
-  mv "$target.replacement" "$target"
-fi
-SH
-  chmod +x "$fakebin/od"
 }
 
 make_spawn_case() {
@@ -562,70 +546,6 @@ run_spawn() {
 # tests are about profile resolution, so they pass a fixed valid one.
 run_ship_spawn() {
   run_spawn "$@" --mode no-mistakes --yolo off
-}
-
-# seed_omp_secondmate_home: seed a minimal OMP-capable secondmate home: the
-# shared seeding plus the trusted primary extension closure copied from the
-# tracked runtime and the watch-core the marker version hashes, all committed
-# so the staged-extension audit passes.
-seed_omp_secondmate_home() {  # <secondmate-home-dir> <task-id>
-  local sm=$1 id=$2
-  make_seeded_secondmate_home "$sm" "$id"
-  mkdir -p "$sm/.omp/extensions/lib" "$sm/state" "$sm/config" "$sm/projects"
-  cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$sm/.omp/extensions/fm-primary-omp.ts"
-  cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$sm/.omp/extensions/lib/fm-branch-dispatch.ts"
-  cp "$ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" "$sm/.omp/extensions/lib/fm-task-inbox-doorbell.ts"
-  cp "$ROOT/bin/fm-primary-watch-core.ts" "$sm/bin/fm-primary-watch-core.ts"
-  touch "$sm/state/.last-watcher-beat"
-  git -C "$sm" init -q
-  git -C "$sm" add -A
-  git -C "$sm" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
-    commit -qm 'seed omp secondmate home'
-}
-
-# omp_secondmate_emulation_env: arm the fake pane backends to emulate the
-# secondmate's primary-extension handshake for one spawn. <live-pid> must
-# outlive the spawn's marker check (the marker and lock owner).
-omp_secondmate_emulation_env() {  # <sm-home> <task-id> <live-pid> <parent-home>
-  local canon
-  canon=$(cd "$FAKEBIN_DIR" && pwd -P)
-  export FM_FAKE_OMP_SECONDMATE_HOME=$1
-  export FM_FAKE_OMP_SM_DOORBELL="$4/state/$2.omp-doorbell-ready"
-  FM_FAKE_OMP_SM_VERSION=$(fm_primary_watch_version "$1/.omp/extensions/fm-primary-omp.ts" "$1")
-  export FM_FAKE_OMP_SM_VERSION
-  export FM_FAKE_OMP_SM_PID=$3
-  export FM_FAKE_OMP_SM_BUN=$canon/bun
-  export FM_FAKE_OMP_SM_BIN=$canon/omp
-}
-
-# run_omp_secondmate_spawn: the run_spawn environment without its unconditional
-# herdr pane-presence flag, so a respawn's recorded endpoint can be proven
-# missing before the relaunch recreates it.
-run_omp_secondmate_spawn() {  # <home> <wt> <fakebin> <launchlog> <spawn args...>
-  local home=$1 wt=$2 fakebin=$3 launchlog=$4
-  shift 4
-  local endpointlog="${launchlog%/*}/endpoint.log" treehouselog="${launchlog%/*}/treehouse.log"
-  local herdrpaneflag="${launchlog%/*}/herdr-pane" herdrshellflag="${launchlog%/*}/herdr-nested-shell"
-  : > "$launchlog"
-  : > "$endpointlog"
-  : > "$treehouselog"
-  rm -f "$herdrshellflag"
-  local rc
-  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    HERDR_ENV='' HERDR_PANE_ID='' HERDR_SESSION='' HERDR_SOCKET_PATH='' \
-    HERDR_TAB_ID='' HERDR_WORKSPACE_ID='' \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX='' FM_BACKEND=herdr \
-    FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_ENDPOINT_LOG="$endpointlog" \
-    FM_FAKE_TREEHOUSE_LOG="$treehouselog" FM_FAKE_OMP_ACK_DIR="$home/state" \
-    FM_FAKE_HERDR_PANE_FLAG="$herdrpaneflag" \
-    FM_FAKE_HERDR_NESTED_SHELL_FLAG="$herdrshellflag" \
-    FM_HERDR_PS_BIN="$fakebin/herdr-ps" \
-    GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
-    "$SPAWN" "$@" 2>&1
-  rc=$?
-  return "$rc"
 }
 
 read_case_record() {
@@ -879,16 +799,15 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   rec=$(make_spawn_case profile-raw claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
-  printf 'invalid-for-omp\n' > "$HOME_DIR/config/omp-max-time"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "custom-agent --flag __OMPMAXTIME__")
+    "$id" "$PROJ_DIR" "custom-agent --flag __KEEPLITERAL__")
   status=$?
   expect_code 0 "$status" "raw launch command should satisfy active dispatch-profile requirement"
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "FM_TASK_ID='$id' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= /usr/bin/env $RAW_DIRECT_TRUE --flag __OMPMAXTIME__" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  [ "$launch" = "FM_TASK_ID='$id' FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= /usr/bin/env $RAW_DIRECT_TRUE --flag __KEEPLITERAL__" ] || fail "raw launch command changed"$'\n'"actual: $launch"
   pass "active crew-dispatch profile preserves raw direct non-OMP launch arguments"
 }
 
@@ -1863,235 +1782,6 @@ test_omp_threads_exact_identity_model_and_every_thinking_level() {
   pass "OMP invokes its canonical entrypoint directly and records its runtime identity"
 }
 
-test_omp_threads_configurable_max_time() {
-  local rec id out status launch corrupt_case corrupt_payload config_hex
-  local sm sm2 sm_id sm_id2 sm_agent_pid
-
-  id=$(profile_id profile-omp-max-time-default-z8oa)
-  rec=$(make_spawn_case profile-omp-max-time-default omp "$id")
-  read_case_record "$rec"
-  export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
-  status=$?
-  expect_code 0 "$status" "OMP spawn without max-time config should use the default"
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--auto-approve --max-time=3h -e" \
-    "unconfigured OMP launch did not receive the three-hour default"
-
-  id=$(profile_id profile-omp-max-time-override-z8oa)
-  rec=$(make_spawn_case profile-omp-max-time-override omp "$id")
-  read_case_record "$rec"
-  printf '# bounded workers\n  10m  \n' > "$HOME_DIR/config/omp-max-time"
-  export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
-  status=$?
-  expect_code 0 "$status" "OMP spawn with a max-time override should succeed"
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--auto-approve --max-time=10m -e" \
-    "configured OMP launch did not receive the max-time override"
-
-  id=$(profile_id profile-omp-max-time-snapshot-z8oa)
-  rec=$(make_spawn_case profile-omp-max-time-snapshot omp "$id")
-  read_case_record "$rec"
-  printf '10m\n' > "$HOME_DIR/config/omp-max-time"
-  install_replacing_od "$FAKEBIN_DIR"
-  export FM_FAKE_OD_REAL
-  FM_FAKE_OD_REAL=$(command -v od)
-  export FM_FAKE_OD_REPLACE_FILE="$HOME_DIR/config/omp-max-time"
-  export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
-  status=$?
-  unset FM_FAKE_OD_REPLACE_FILE FM_FAKE_OD_REAL
-  expect_code 0 "$status" "OMP max-time launch should use its validated byte snapshot"
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--auto-approve --max-time=10m -e" \
-    "atomic config replacement changed the validated max-time snapshot"
-  config_hex=$(od -An -tx1 "$HOME_DIR/config/omp-max-time" | tr -d ' \n')
-  [ "$config_hex" = 6f666600 ] || fail "snapshot regression did not replace the live config with off plus NUL"
-
-  id=$(profile_id profile-omp-max-time-off-z8oa)
-  rec=$(make_spawn_case profile-omp-max-time-off omp "$id")
-  read_case_record "$rec"
-  printf 'off\n' > "$HOME_DIR/config/omp-max-time"
-  export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
-  status=$?
-  expect_code 0 "$status" "OMP spawn with max-time disabled should succeed"
-  launch=$(cat "$LAUNCH_LOG")
-  assert_not_contains "$launch" "--max-time" \
-    "config/omp-max-time=off did not restore an unbounded OMP launch"
-
-  id=$(profile_id profile-omp-max-time-invalid-z8oa)
-  rec=$(make_spawn_case profile-omp-max-time-invalid omp "$id")
-  read_case_record "$rec"
-  printf '10s\n' > "$HOME_DIR/config/omp-max-time"
-  unset FM_TEST_OMP_ACK
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
-  status=$?
-  expect_code 1 "$status" "invalid OMP max-time config should refuse"
-  assert_contains "$out" "config/omp-max-time must contain off or a positive integer" \
-    "invalid max-time refusal did not explain the accepted values"
-  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "invalid max-time config created a backend endpoint"
-  [ ! -s "$LAUNCH_LOG" ] || fail "invalid max-time config typed an OMP launch command"
-
-  for corrupt_case in nul control; do
-    id=$(profile_id "profile-omp-max-time-$corrupt_case-z8oa")
-    rec=$(make_spawn_case "profile-omp-max-time-$corrupt_case" omp "$id")
-    read_case_record "$rec"
-    case "$corrupt_case" in
-      nul) corrupt_payload='off\0' ;;
-      control) corrupt_payload='off\001' ;;
-    esac
-    printf '%b' "$corrupt_payload" > "$HOME_DIR/config/omp-max-time"
-    unset FM_TEST_OMP_ACK
-    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
-    status=$?
-    expect_code 1 "$status" "OMP max-time config containing $corrupt_case bytes should refuse"
-    assert_contains "$out" "config/omp-max-time must contain text only" \
-      "binary max-time refusal did not explain the text-only contract"
-    [ ! -s "$CASE_DIR/endpoint.log" ] || fail "binary max-time config created a backend endpoint"
-    [ ! -s "$LAUNCH_LOG" ] || fail "binary max-time config typed an OMP launch command"
-  done
-
-  id=$(profile_id profile-omp-max-time-dangling-z8oa)
-  rec=$(make_spawn_case profile-omp-max-time-dangling omp "$id")
-  read_case_record "$rec"
-  ln -s missing "$HOME_DIR/config/omp-max-time"
-  unset FM_TEST_OMP_ACK
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
-  status=$?
-  expect_code 1 "$status" "dangling OMP max-time config should refuse"
-  assert_contains "$out" "config/omp-max-time must be a regular file" \
-    "dangling max-time refusal did not identify the invalid path"
-  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "dangling max-time config created a backend endpoint"
-  [ ! -s "$LAUNCH_LOG" ] || fail "dangling max-time config typed an OMP launch command"
-
-  id=$(profile_id profile-omp-max-time-unreadable-z8oa)
-  rec=$(make_spawn_case profile-omp-max-time-unreadable omp "$id")
-  read_case_record "$rec"
-  printf '10m\n' > "$HOME_DIR/config/omp-max-time"
-  chmod 000 "$HOME_DIR/config/omp-max-time"
-  unset FM_TEST_OMP_ACK
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
-  status=$?
-  expect_code 1 "$status" "unreadable OMP max-time config should refuse"
-  assert_contains "$out" "config/omp-max-time could not be read" \
-    "unreadable max-time refusal did not explain the failure"
-  [ ! -s "$CASE_DIR/endpoint.log" ] || fail "unreadable max-time config created a backend endpoint"
-  [ ! -s "$LAUNCH_LOG" ] || fail "unreadable max-time config typed an OMP launch command"
-
-  id=$(profile_id profile-claude-ignores-omp-max-time-z8oa)
-  rec=$(make_spawn_case profile-claude-ignores-omp-max-time claude "$id")
-  read_case_record "$rec"
-  printf 'invalid-for-omp\n' > "$HOME_DIR/config/omp-max-time"
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
-  status=$?
-  expect_code 0 "$status" "non-OMP spawn should ignore config/omp-max-time"
-  launch=$(cat "$LAUNCH_LOG")
-  assert_not_contains "$launch" "--max-time" "OMP max-time config leaked into another harness"
-
-  # A persistent secondmate must never carry the bound regardless of
-  # config/omp-max-time: an interactive OMP session past its deadline stays
-  # alive but can never start another turn, so a bounded secondmate silently
-  # becomes turnless behind liveness supervision (the recurring Mac
-  # coordinator stall). The fake herdr pane emulates the primary extension's
-  # post-launch handshake (doorbell receipt, integration marker, home lock,
-  # durable session pointer, live agent) so each spawn completes; the typed
-  # launch command is the asserted artifact.
-  printf 'omp test/model low\n' > "$HOME_DIR/config/secondmate-harness"
-  rm -f "$HOME_DIR/config/omp-max-time"
-  sm_id=$(profile_id profile-omp-secondmate-maxtime-z8os)
-  sm="$CASE_DIR/secondmate-home"
-  seed_omp_secondmate_home "$sm" "$sm_id"
-  sm=$(cd "$sm" && pwd -P)
-  sleep 120 & sm_agent_pid=$!
-  omp_secondmate_emulation_env "$sm" "$sm_id" "$sm_agent_pid" "$HOME_DIR"
-  out=$(run_omp_secondmate_spawn "$HOME_DIR" "$sm" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$sm_id" "$sm" --secondmate)
-  status=$?
-  kill "$sm_agent_pid" 2>/dev/null || true
-  expect_code 0 "$status" "unconfigured OMP secondmate spawn should succeed: $out"
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--auto-approve" \
-    "unconfigured OMP secondmate launch lost its auto-approve flag"
-  assert_not_contains "$launch" "--max-time" \
-    "unconfigured OMP secondmate launch carried the crewmate runtime bound"
-
-  unset FM_FAKE_OMP_SECONDMATE_HOME
-  id=$(profile_id profile-omp-max-time-ship-z8oss)
-  mkdir -p "$HOME_DIR/data/$id"
-  printf 'brief for %s\n' "$id" > "$HOME_DIR/data/$id/brief.md"
-  export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" omp)
-  status=$?
-  unset FM_TEST_OMP_ACK
-  expect_code 0 "$status" "OMP ship spawn beside an unbounded secondmate should succeed"
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--auto-approve --max-time=3h -e" \
-    "OMP ship lost the default max-time bound beside an unbounded secondmate"
-
-  # A configured bound still cannot reach a secondmate launch.
-  printf '10m\n' > "$HOME_DIR/config/omp-max-time"
-  sm_id2=$(profile_id profile-omp-secondmate-maxtime-z8osb)
-  sm2="$CASE_DIR/secondmate-home-2"
-  seed_omp_secondmate_home "$sm2" "$sm_id2"
-  sm2=$(cd "$sm2" && pwd -P)
-  sleep 120 & sm_agent_pid=$!
-  omp_secondmate_emulation_env "$sm2" "$sm_id2" "$sm_agent_pid" "$HOME_DIR"
-  out=$(run_omp_secondmate_spawn "$HOME_DIR" "$sm2" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$sm_id2" "$sm2" --secondmate)
-  status=$?
-  kill "$sm_agent_pid" 2>/dev/null || true
-  expect_code 0 "$status" "configured OMP secondmate spawn should succeed: $out"
-  launch=$(cat "$LAUNCH_LOG")
-  assert_not_contains "$launch" "--max-time" \
-    "config/omp-max-time=10m reached the secondmate launch"
-
-  unset FM_FAKE_OMP_SECONDMATE_HOME
-  id=$(profile_id profile-omp-max-time-ship-z8osc)
-  mkdir -p "$HOME_DIR/data/$id"
-  printf 'brief for %s\n' "$id" > "$HOME_DIR/data/$id/brief.md"
-  export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" omp)
-  status=$?
-  unset FM_TEST_OMP_ACK
-  expect_code 0 "$status" "OMP ship spawn beside a configured unbounded secondmate should succeed"
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--auto-approve --max-time=10m -e" \
-    "OMP ship lost the configured max-time bound beside an unbounded secondmate"
-
-  # A liveness respawn of the first secondmate - the recorded endpoint proven
-  # missing and its marker owner dead - relaunches through the same template
-  # and resumes the retained session, still without a bound.
-  rm -f "$CASE_DIR/herdr-pane"
-  omp_secondmate_emulation_env "$sm" "$sm_id" "$$" "$HOME_DIR"
-  out=$(run_omp_secondmate_spawn "$HOME_DIR" "$sm" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$sm_id" "$sm" --secondmate)
-  status=$?
-  expect_code 0 "$status" "OMP secondmate respawn after a missing endpoint should succeed: $out"
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--resume " \
-    "OMP secondmate respawn did not resume its retained session"
-  assert_not_contains "$launch" "--max-time" \
-    "respawned OMP secondmate launch carried the crewmate runtime bound"
-
-  # The explicit --relaunch flag on a secondmate reuses its recorded pane; the
-  # fixture cannot re-register a proven-missing herdr pane, so the launch ack
-  # cannot confirm a live agent - but the typed launch still cannot carry the
-  # bound. A genuinely dead secondmate leaves no live marker owner or lock.
-  rm -f "$CASE_DIR/herdr-pane" \
-    "$sm/state/.omp-primary-extension-loaded" "$sm/state/.lock"
-  out=$(FM_OMP_SECONDMATE_ACK_POLLS=2 FM_OMP_LAUNCH_ACK_INTERVAL=0.01 \
-    run_omp_secondmate_spawn "$HOME_DIR" "$sm" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$sm_id" "$sm" --secondmate --relaunch)
-  status=$?
-  expect_code 1 "$status" "OMP secondmate --relaunch onto a proven-missing pane should not report a live agent"
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--auto-approve" \
-    "OMP secondmate --relaunch did not type its launch command"
-  assert_not_contains "$launch" "--max-time" \
-    "OMP secondmate --relaunch launch carried the crewmate runtime bound"
-  unset FM_FAKE_OMP_SECONDMATE_HOME FM_FAKE_OMP_SM_DOORBELL FM_FAKE_OMP_SM_VERSION \
-    FM_FAKE_OMP_SM_PID FM_FAKE_OMP_SM_BUN FM_FAKE_OMP_SM_BIN
-  pass "OMP max-time defaults to 3h, supports override and off, fails closed, stays OMP-only, and never reaches a secondmate"
-}
-
 test_omp_broker_env_uses_mode_600_file_without_exposing_bearer() {
   local rec id out status launch token_file
   id=$(profile_id profile-omp-broker-z8ob)
@@ -2915,7 +2605,7 @@ test_omp_whitespace_identity_paths_refuse_before_endpoint() {
 
 test_omp_missing_binary_or_capability_refuses_before_endpoint_and_metadata() {
   local mode rec id out status endpoint_log
-  for mode in missing-binary missing-thinking missing-max-time existing-artifact; do
+  for mode in missing-binary missing-thinking existing-artifact; do
     id=$(profile_id "profile-omp-$mode-z8q")
     rec=$(make_spawn_case "profile-omp-$mode" omp "$id")
     read_case_record "$rec"
@@ -2924,7 +2614,6 @@ test_omp_missing_binary_or_capability_refuses_before_endpoint_and_metadata() {
     case "$mode" in
       missing-binary) rm -f "$FAKEBIN_DIR/omp" ;;
       missing-thinking) sed -i '/thinking/d' "$FAKEBIN_DIR/omp" ;;
-      missing-max-time) sed -i "s/ '--max-time=<value>'//" "$FAKEBIN_DIR/omp" ;;
       existing-artifact) : > "$HOME_DIR/state/$id.status" ;;
     esac
 
@@ -2938,8 +2627,6 @@ test_omp_missing_binary_or_capability_refuses_before_endpoint_and_metadata() {
     status=$?
     expect_code 1 "$status" "OMP $mode should refuse before launch"
     assert_contains "$out" "omp" "OMP preflight refusal did not name the selected runtime"
-    [ "$mode" != missing-max-time ] || assert_contains "$out" "--max-time=<value>" \
-      "OMP max-time capability refusal did not name the missing flag"
     assert_absent "$HOME_DIR/state/$id.meta" "OMP $mode refusal wrote task metadata"
     [ ! -s "$endpoint_log" ] || fail "OMP $mode refusal created a backend endpoint"
     [ ! -s "$LAUNCH_LOG" ] || fail "OMP $mode refusal typed a launch command"
@@ -3559,7 +3246,6 @@ test_pi_threads_model_and_max_effort
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_omp_threads_exact_identity_model_and_every_thinking_level
-test_omp_threads_configurable_max_time
 test_omp_broker_env_uses_mode_600_file_without_exposing_bearer
 test_secondmate_descendant_omp_inherits_complete_broker_pair
 test_omp_prewalk_threads_native_target_and_metadata

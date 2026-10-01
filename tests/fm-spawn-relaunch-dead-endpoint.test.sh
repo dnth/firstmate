@@ -227,7 +227,7 @@ SH
 set -u
 case "${1:-}" in
   --help)
-    printf '%s\n' '--model=<value>' '--thinking=<value>' '--auto-approve' '--max-time=<value>' '--session-dir=<value>' '-e, --extension=<value>' '-r, --resume=<value>' '--prewalk native-switch' '--prewalk-into=<value>' '--config=<value>' '--no-prewalk'
+    printf '%s\n' '--model=<value>' '--thinking=<value>' '--auto-approve' '--session-dir=<value>' '-e, --extension=<value>' '-r, --resume=<value>' '--prewalk native-switch' '--prewalk-into=<value>' '--config=<value>' '--no-prewalk'
     ;;
   --version) printf 'omp/18.1.14\n' ;;
   config)

@@ -288,7 +288,7 @@ SH
 #!/usr/bin/env bun
 const arg = process.argv[2] || "";
 if (arg === "--help") {
-  console.log("--model=<value>\n--thinking=<value>\n--auto-approve\n--max-time=<value>\n--session-dir=<value>\n-e, --extension=<value>\n-r, --resume=<value>\n--prewalk native-switch\n--prewalk-into=<value>\n--config=<value>\n--no-prewalk");
+  console.log("--model=<value>\n--thinking=<value>\n--auto-approve\n--session-dir=<value>\n-e, --extension=<value>\n-r, --resume=<value>\n--prewalk native-switch\n--prewalk-into=<value>\n--config=<value>\n--no-prewalk");
 } else if (arg === "--version") {
   console.log("omp/18.1.14");
 } else if (arg === "config") {

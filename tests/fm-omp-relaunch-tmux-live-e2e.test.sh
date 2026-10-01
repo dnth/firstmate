@@ -118,8 +118,6 @@ exec bash --noprofile --norc
 EOF
 chmod +x "$WRAPPER_BIN/tmux" "$WRAPPER_BIN/treehouse"
 
-printf '1m\n' > "$HOME_DIR/config/omp-max-time"
-
 printf 'Delivery contract: mode=no-mistakes\nReply exactly RELAUNCH_LIVE_OK, then wait for further instruction.\n' > "$HOME_DIR/data/$WORKER_ID/brief.md"
 
 FIXTURE_PATH="$WRAPPER_BIN:$PATH"
