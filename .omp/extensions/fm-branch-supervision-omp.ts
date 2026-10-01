@@ -487,6 +487,15 @@ export default function (pi: ExtensionAPI) {
   const inflightCompletions = new Set<string>();
   const pendingDeliveryContent = new Map<string, string[]>();
   const redeliveryAttempted = new Set<string>();
+  // Advisory freshness (issue #74): the branch producer's source generation,
+  // minted once per extension instance and recorded on every outcome row's
+  // advisory identity - deliberately a different axis from the branch-process
+  // `generation` counter and the watcher recovery generation. wakeAdvisoryKind
+  // marks the wake reason class of the currently-settling prompt ("worker" for
+  // a stale-pane wake) so the outcome names what its advisory claims; "" lets
+  // the outcome store derive the kind from the covered status span.
+  const advisoryGeneration = `adv-${process.pid}-${randomUUID().slice(0, 8)}`;
+  let wakeAdvisoryKind = "";
   let mainStreaming = false;
   let shuttingDown = false;
   // Advanced once per main session boundary (session_start and session_switch):
@@ -708,6 +717,8 @@ export default function (pi: ExtensionAPI) {
   // re-surfaced by session-start replay - both would double-open a captain turn.
   // The opposite risk, a cursor that advanced but a delivery that failed, leaves
   // the outcome durable in the store and recoverable through main's
+  // Returns "delivered" when the merge note was sent, "suppressed" when the
+  // advisory was retired by the freshness reconcile, false on failure.
   async function mergeIntoMain(
     expectedGeneration: number,
     seq: string,
@@ -716,11 +727,25 @@ export default function (pi: ExtensionAPI) {
     summary: string,
     silent: boolean,
     completionIds: readonly string[] = [],
-  ): Promise<boolean> {
+  ): Promise<"delivered" | "suppressed" | false> {
     if (!(await actingAsOwner(expectedGeneration))) return false;
+    // Freshness reconcile at the last preventable delivery boundary (issue
+    // #74): the advisory identity recorded at report time is re-checked
+    // against current durable state here, before the merge note can enter
+    // main's queue. An outcome carrying completion obligations still forces
+    // delivery - the owed events are facts, not advisory prose.
+    let superseded = false;
+    if (completionIds.length === 0 && /^[0-9]+$/.test(seq)) {
+      const check = await runOutcomeScript(["reconcile", "--seq", seq]);
+      superseded = check.ok && check.stdout.startsWith("suppressed");
+    }
     // Advance the cursor first so the outcome can never be delivered twice.
     if (/^[0-9]+$/.test(seq) && !(await runOutcomeScript(["handoff-next", "--seq", seq])).ok) {
       return false;
+    }
+    if (superseded) {
+      await runOutcomeScript(["merge-receipt", "--seq", seq, "--state", "suppressed"]);
+      return "suppressed";
     }
     // The completion-delivery contract: an outcome covering an undelivered
     // captain-facing event owes a main turn regardless of the model's verdict,
@@ -734,8 +759,10 @@ export default function (pi: ExtensionAPI) {
       try {
         pi.sendMessage(message, { triggerTurn: true, deliverAs: "followUp" });
       } catch {
+        await runOutcomeScript(["merge-receipt", "--seq", seq, "--state", "failed"]);
         return false;
       }
+      await runOutcomeScript(["merge-receipt", "--seq", seq, "--state", "accepted"]);
       for (const id of completionIds) inflightCompletions.add(id);
       if (completionIds.length > 0) {
         const bucket = pendingDeliveryContent.get(content) ?? [];
@@ -748,13 +775,19 @@ export default function (pi: ExtensionAPI) {
         content: `${MERGE_NOTE_BOAT} ${task}: ${summary}`,
         display: !(task === "fleet" && silent),
       };
-      if (mainStreaming) {
-        pi.sendMessage(message, { deliverAs: "nextTurn" });
-      } else {
-        pi.sendMessage(message, {});
+      try {
+        if (mainStreaming) {
+          pi.sendMessage(message, { deliverAs: "nextTurn" });
+        } else {
+          pi.sendMessage(message, {});
+        }
+      } catch {
+        await runOutcomeScript(["merge-receipt", "--seq", seq, "--state", "failed"]);
+        return false;
       }
+      await runOutcomeScript(["merge-receipt", "--seq", seq, "--state", "accepted"]);
     }
-    return true;
+    return "delivered";
   }
 
   // Branch health notes ride the same merge message the report tool uses, but
@@ -768,6 +801,60 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  // Merge-advisory replay (issue #74): a merge note whose send provably
+  // failed before acceptance is replayable - once per generation per seq -
+  // but only while its advisory is still current. A superseded replayable row
+  // records a suppressed receipt instead of resending obsolete prose, and a
+  // cursor-advanced row without any receipt stays untouched: indeterminate,
+  // possibly delivered, never replayed.
+  async function replayFailedMerges(expectedGeneration: number): Promise<void> {
+    const replayable = await runOutcomeScript(["merge-replay"]);
+    if (!replayable.ok || !replayable.stdout) return;
+    for (const line of replayable.stdout.split("\n")) {
+      if (!line) continue;
+      let record: { seq?: number; task?: string; verdict?: string; summary?: string; silent?: boolean };
+      try {
+        record = JSON.parse(line) as typeof record;
+      } catch {
+        continue;
+      }
+      const seq = String(record.seq ?? "");
+      if (!/^[0-9]+$/.test(seq) || !record.task || !record.summary) continue;
+      const replayKey = `merge:${seq}`;
+      if (redeliveryAttempted.has(replayKey)) continue;
+      redeliveryAttempted.add(replayKey);
+      if (!(await actingAsOwner(expectedGeneration))) return;
+      const check = await runOutcomeScript(["reconcile", "--seq", seq]);
+      if (check.ok && check.stdout.startsWith("suppressed")) {
+        await runOutcomeScript(["merge-receipt", "--seq", seq, "--state", "suppressed"]);
+        continue;
+      }
+      const task = record.task;
+      const summary = record.summary;
+      const captain = record.verdict === "captain";
+      const message = captain
+        ? { customType: "fm-branch-merge", content: `${task}: ${summary}`, display: false }
+        : {
+            customType: "fm-branch-merge",
+            content: `${MERGE_NOTE_BOAT} ${task}: ${summary}`,
+            display: !(task === "fleet" && record.silent === true),
+          };
+      try {
+        if (captain) {
+          pi.sendMessage(message, { triggerTurn: true, deliverAs: "followUp" });
+        } else if (mainStreaming) {
+          pi.sendMessage(message, { deliverAs: "nextTurn" });
+        } else {
+          pi.sendMessage(message, {});
+        }
+      } catch {
+        await runOutcomeScript(["merge-receipt", "--seq", seq, "--state", "failed"]);
+        continue;
+      }
+      await runOutcomeScript(["merge-receipt", "--seq", seq, "--state", "accepted"]);
+    }
+  }
+
   // The completion-delivery contract's branch-side retry: any obligation still
   // without a delivery receipt is re-sent to main once per generation, batched
   // into one turn. Identities already in flight are skipped; the durable
@@ -776,6 +863,7 @@ export default function (pi: ExtensionAPI) {
   async function deliverPendingCompletions(expectedGeneration: number): Promise<void> {
     try {
       if (!(await actingAsOwner(expectedGeneration))) return;
+      await replayFailedMerges(expectedGeneration);
       const pending = await runOutcomeScript(["undelivered"]);
       if (!pending.ok || !pending.stdout) return;
       const rows = pending.stdout.split("\n").filter((line) => line.length > 0);
@@ -918,6 +1006,11 @@ export default function (pi: ExtensionAPI) {
         }
         const appendArgs = ["append", "--task", task, "--verdict", verdict, "--summary", summary, "--silent", String(silent)];
         if (wake) appendArgs.push("--wake", wake);
+        appendArgs.push("--advisory-gen", advisoryGeneration);
+        if (wakeAdvisoryKind) appendArgs.push("--advisory-kind", wakeAdvisoryKind);
+        if (wakeTaskScope && wakeTaskScope.rows.length > 0) {
+          appendArgs.push("--advisory-wake-seqs", wakeTaskScope.rows.join(","));
+        }
         return enqueueDelivery(async () => {
           if (!(await actingAsOwner(toolGeneration))) {
             return {
@@ -959,7 +1052,8 @@ export default function (pi: ExtensionAPI) {
                 .map((line) => `${task}|${span.ident}|${line.split("\t", 1)[0]}`);
             }
           }
-          if (!(await mergeIntoMain(toolGeneration, appended.stdout, task, verdict, summary, silent, completionIds))) {
+          const merged = await mergeIntoMain(toolGeneration, appended.stdout, task, verdict, summary, silent, completionIds);
+          if (merged === false) {
             return {
               content: [{ type: "text", text: `recorded seq ${appended.stdout}, but merge refused after supervision replacement or lock loss` }],
               details: undefined,
@@ -968,7 +1062,12 @@ export default function (pi: ExtensionAPI) {
           }
           durableReportRevision += 1;
           return {
-            content: [{ type: "text", text: `recorded seq ${appended.stdout} and merged [${verdict}] into main` }],
+            content: [{
+              type: "text",
+              text: merged === "suppressed"
+                ? `recorded seq ${appended.stdout}; advisory superseded before delivery - nothing merged`
+                : `recorded seq ${appended.stdout} and merged [${verdict}] into main`,
+            }],
             details: undefined,
           };
         });
@@ -1215,6 +1314,10 @@ ${context.command}
         const reportRevisionBeforePrompt = durableReportRevision;
         const entryOffset = sessionManager.getEntries().length;
         wakeTaskScope = heartbeat ? null : { rows: [...scope.eligibleSeqs], tasks: new Set(scope.eligibleTasks) };
+        // A stale-pane wake produces stopped-worker advisories; every other
+        // reason lets the outcome store derive the advisory kind from the
+        // covered status span (issue #74).
+        wakeAdvisoryKind = /^stale[ :]/.test(message) ? "worker" : "";
         try {
           await session.prompt(
             `FIRSTMATE SUPERVISION WAKE: ${message}\n\nHandle this per your operating procedure. Do not finish this turn until you have completed, in order: fm_branch_report, the exact WAKE_ACK_REQUIRED command, and release of every task lease you claimed.`,
@@ -1227,6 +1330,7 @@ ${context.command}
           throw error;
         } finally {
           wakeTaskScope = null;
+          wakeAdvisoryKind = "";
         }
         const providerError = settledPromptProviderError(sessionManager, entryOffset);
         if (providerError) {

@@ -170,6 +170,73 @@ test_outcome_live_handoff_requires_contiguous_sequence() {
   pass "live outcome handoff refuses gaps and leaves the complete unread prefix for startup replay"
 }
 
+# --- typed advisory freshness (issue #74) --------------------------------------
+
+test_outcome_advisory_identity_and_decision_reconcile() {
+  local home state seq row out
+  home="$TMP_ROOT/outcome-freshness"; state="$home/state"; mkdir -p "$state"
+  printf 'needs-decision [key=theme]: which palette\n' > "$state/task-q.status"
+  seq=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-q --verdict captain --summary 'task-q waits on the palette choice' \
+    --advisory-gen adv-test-1 --advisory-wake-seqs 3,4) \
+    || fail "advisory append failed"
+  [ "$seq" = 1 ] || fail "unexpected seq $seq"
+  row=$(tail -n 1 "$state/branch-outcomes.jsonl")
+  printf '%s' "$row" | jq -e \
+    '.advisory.kind == "decision" and .advisory.key == "theme" and .advisory.gen == "adv-test-1" and .advisory.wakeSeqs == "3,4"' >/dev/null \
+    || fail "the outcome row did not record the typed advisory identity: $row"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" reconcile --seq "$seq")
+  [ "$out" = current ] || fail "an open keyed decision reconciled stale: $out"
+  printf 'resolved [key=theme]: captain picked dark\n' >> "$state/task-q.status"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" reconcile --seq "$seq")
+  [ "$out" = suppressed ] || fail "a closed keyed decision was not suppressed: $out"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay) || fail "startup replay failed"
+  assert_not_contains "$out" "palette" "startup replay emitted a superseded advisory"
+  [ "$(cat "$state/.branch-outcomes-cursor")" = "$seq" ] \
+    || fail "the superseded row was not consumed by replay"
+  pass "a resolved keyed decision suppresses its stored advisory at reconcile and startup replay"
+}
+
+test_outcome_worker_advisory_and_merge_replay_ledger() {
+  local home state seq seq2 out replay
+  home="$TMP_ROOT/outcome-worker"; state="$home/state"; mkdir -p "$state"
+  printf 'working: building\n' > "$state/task-w.status"
+  seq=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-w --verdict routine --summary 'task-w pane looks wedged' \
+    --advisory-kind worker --advisory-gen adv-test-2) \
+    || fail "worker advisory append failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread | tail -n 1 | jq -e \
+    '.advisory.kind == "worker" and .advisory.key == "-"' >/dev/null \
+    || fail "a producer-declared worker kind was not recorded"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" reconcile --seq "$seq")
+  [ "$out" = current ] || fail "a still-stopped worker advisory reconciled stale: $out"
+  printf 'working: resumed on new evidence\n' >> "$state/task-w.status"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" reconcile --seq "$seq")
+  [ "$out" = suppressed ] || fail "a resumed worker's stale advisory was not suppressed: $out"
+
+  # Merge delivery ledger: a provably-failed send is replayable; a suppressed
+  # or accepted receipt retires it; a cursor-advanced row with no receipt is
+  # indeterminate and never replayed.
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" merge-receipt --seq "$seq" --state failed \
+    || fail "failed merge receipt refused"
+  replay=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" merge-replay) || fail "merge-replay failed"
+  assert_contains "$replay" 'task-w pane looks wedged' "merge-replay lost the provably-failed merge"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" merge-receipt --seq "$seq" --state suppressed \
+    || fail "suppressed merge receipt refused"
+  replay=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" merge-replay) || fail "merge-replay after suppression failed"
+  [ -z "$replay" ] || fail "a suppressed merge stayed replayable: $replay"
+
+  seq2=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-w --verdict routine --summary 'task-w status file now unreadable probe') || fail "second append failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" handoff-next --seq "$seq" >/dev/null \
+    || fail "handoff for the suppressed row refused"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" handoff-next --seq "$seq2" >/dev/null \
+    || fail "handoff for the indeterminate row refused"
+  replay=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" merge-replay) || fail "merge-replay after indeterminate row failed"
+  [ -z "$replay" ] || fail "a cursor-advanced row without a receipt was replayed: $replay"
+  pass "the merge ledger replays only provably-failed advisories, never indeterminate or suppressed ones"
+}
+
 # --- lease contract -----------------------------------------------------------
 
 test_lease_exclusivity_release_stale_and_sweep() {
@@ -497,15 +564,28 @@ JS
   printf '%s\n' 'export function clampThinkingLevel(_model, level) { return level; }' > "$package_dir/ai-shim.js"
   cat > "$fixture/driver.mjs" <<'JS'
 import { readFileSync, writeFileSync } from "node:fs";
+import { execSync } from "node:child_process";
 const state = process.env.FM_STATE_OVERRIDE;
 const scenario = JSON.parse(readFileSync(process.env.SCENARIO_PATH, "utf8"));
 const handlers = new Map();
 const sends = [];
 const results = [];
+// failSendsOnce lists substrings: the FIRST sendMessage whose content matches
+// each entry throws once, so a scenario can force a provably-failed merge
+// delivery and then let the replay succeed (issue #74 replay seam).
+const failOnce = [...(scenario.failSendsOnce ?? [])];
 const pi = {
   on(name, fn) { handlers.set(name, fn); },
   events: { on(name, fn) { handlers.set(`evt:${name}`, fn); } },
-  sendMessage(message, opts) { sends.push({ content: message.content, triggerTurn: opts?.triggerTurn === true }); },
+  sendMessage(message, opts) {
+    const content = String(message.content);
+    const index = failOnce.findIndex((m) => content.includes(m));
+    if (index >= 0) {
+      failOnce.splice(index, 1);
+      throw new Error("send refused");
+    }
+    sends.push({ content: message.content, triggerTurn: opts?.triggerTurn === true });
+  },
   registerCommand() {},
   registerTool() {},
 };
@@ -518,7 +598,10 @@ globalThis.__branchPrompt = async () => {
   const report = globalThis.__customTools.find((tool) => tool.name === "fm_branch_report");
   const actions = globalThis.__promptActions ?? scenario.prompt ?? [];
   for (const action of actions) {
-    if (action.report) {
+    if (action.exec) {
+      execSync(action.exec, { shell: "/bin/bash", stdio: "pipe" });
+      results.push({ exec: action.exec });
+    } else if (action.report) {
       const result = await report.execute("call-1", action.report);
       results.push({ report: action.report.task, isError: result.isError === true, text: result.content?.[0]?.text ?? "" });
     }
@@ -527,7 +610,7 @@ globalThis.__branchPrompt = async () => {
 let seq = 0;
 for (const step of scenario.steps) {
   if (step.wake) {
-    globalThis.__promptActions = step.report ? [{ report: step.report }] : (scenario.prompt ?? []);
+    globalThis.__promptActions = step.prompt ?? (step.report ? [{ report: step.report }] : (scenario.prompt ?? []));
     seq += 1;
     const offer = {
       message: step.wake,
@@ -546,6 +629,9 @@ for (const step of scenario.steps) {
       rejected = error instanceof Error ? error.message : String(error);
     }
     results.push({ wake: step.wake, accepted: offer.accepted, rejected });
+  } else if (step.exec) {
+    execSync(step.exec, { shell: "/bin/bash", stdio: "pipe" });
+    results.push({ exec: step.exec });
   } else if (step.consume_all) {
     handlers.get("before_agent_start")?.();
     results.push({ consumed: "all" });
@@ -631,6 +717,154 @@ JSON
   [ ! -e "$state/.branch-eligible-rows" ] || fail "a rejected settlement left its eligible-rows grant behind"
   [ ! -e "$state/.branch-eligible-status" ] || fail "a rejected settlement left its status snapshot behind"
   pass "a settled prompt that leaves a granted completion unreported rejects and releases the grant"
+}
+
+# Issue #74: the merge boundary re-reads durable state before the note enters
+# main's queue. Here the decision the wake granted resolves between the grant
+# snapshot and the report's merge - the stored advisory is superseded, so
+# nothing reaches sendMessage and the report tells the branch so.
+test_branch_merge_suppresses_a_resolved_decision_advisory() {
+  local fixture state out
+  fixture="$TMP_ROOT/advisory-suppress"
+  state="$fixture/state"
+  make_omp_branch_driver_fixture "$fixture"
+  mkdir -p "$state"
+  printf 'needs-decision [key=theme]: which palette\n' > "$state/task-a.status"
+  printf 'project=project-a\nwindow=default:wA:p1\n' > "$state/task-a.meta"
+  printf '1\t1\tsignal\ttask-a.status\tsignal: task-a\n' > "$state/.wake-queue"
+  cat > "$fixture/steps.json" <<'JSON'
+{
+  "prompt": [
+    { "exec": "printf 'resolved [key=theme]: captain picked dark\\n' >> \"$FM_STATE_OVERRIDE/task-a.status\"" },
+    { "report": { "task": "task-a", "verdict": "captain", "summary": "task-a waits on the palette choice" } }
+  ],
+  "steps": [{ "wake": "signal: task-a" }]
+}
+JSON
+
+  out=$(env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    EXTENSION_PATH="$fixture/.omp/extensions/fm-branch-supervision-omp.ts" \
+    DISPATCH_PATH="$fixture/.omp/extensions/lib/fm-branch-dispatch.ts" \
+    SCENARIO_PATH="$fixture/steps.json" \
+    node --experimental-strip-types "$fixture/driver.mjs" 2>&1) \
+    || fail "suppressed-decision driver failed: $out"
+
+  assert_contains "$out" '"accepted":true' "the decision wake was not accepted"
+  assert_contains "$out" '"rejected":""' "the suppressed-merge wake did not settle: $out"
+  assert_contains "$out" 'superseded before delivery' \
+    "the report did not tell the branch its advisory was suppressed: $out"
+  ! printf '%s' "$out" | grep -F 'task-a waits on the palette choice' | grep -F '"triggerTurn":true' >/dev/null \
+    || fail "a superseded decision advisory entered main's queue: $out"
+  grep -F '"seq":1,"state":"suppressed"' "$state/branch-merge-deliveries.jsonl" >/dev/null \
+    || fail "the suppressed merge did not record its receipt: $(cat "$state/branch-merge-deliveries.jsonl" 2>/dev/null)"
+  pass "a decision advisory resolved before merge never enters main's queue"
+}
+
+# The stale-pane wake marks its outcome a stopped-worker advisory; a status
+# append past the granted revision supersedes it before the merge is sent.
+test_branch_merge_suppresses_a_stale_worker_advisory() {
+  local fixture state out
+  fixture="$TMP_ROOT/advisory-worker"
+  state="$fixture/state"
+  make_omp_branch_driver_fixture "$fixture"
+  mkdir -p "$state"
+  printf 'working: building phase two\n' > "$state/task-a.status"
+  printf 'project=project-a\nwindow=default:wA:p1\n' > "$state/task-a.meta"
+  printf '1\t1\tstale\tdefault:wA:p1\tstale: default:wA:p1\n' > "$state/.wake-queue"
+  cat > "$fixture/steps.json" <<'JSON'
+{
+  "prompt": [
+    { "exec": "printf 'working: resumed on new evidence\\n' >> \"$FM_STATE_OVERRIDE/task-a.status\"" },
+    { "report": { "task": "task-a", "verdict": "routine", "summary": "task-a pane looks wedged" } }
+  ],
+  "steps": [{ "wake": "stale: default:wA:p1" }]
+}
+JSON
+
+  out=$(env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    EXTENSION_PATH="$fixture/.omp/extensions/fm-branch-supervision-omp.ts" \
+    DISPATCH_PATH="$fixture/.omp/extensions/lib/fm-branch-dispatch.ts" \
+    SCENARIO_PATH="$fixture/steps.json" \
+    node --experimental-strip-types "$fixture/driver.mjs" 2>&1) \
+    || fail "suppressed-worker driver failed: $out"
+
+  assert_contains "$out" '"accepted":true' "the stale wake was not accepted"
+  assert_contains "$out" 'superseded before delivery' \
+    "the worker advisory was not suppressed after the task resumed: $out"
+  ! printf '%s' "$out" | grep -F 'looks wedged' >/dev/null \
+    || fail "a stopped-worker advisory delivered after the worker resumed: $out"
+  pass "a stopped-worker advisory is suppressed when the status log moved past it"
+}
+
+# A merge note whose send provably fails stays replayable - but only while the
+# advisory is still current. Two scenarios share the shape: the first wake's
+# merge throws before acceptance, then a second settled wake runs the replay
+# pass. Still-current replays resend; a keyed resolution between the attempts
+# suppresses the retry.
+test_branch_failed_merge_replays_only_while_current() {
+  local fixture state out mode
+  for mode in still-current resolved-before-retry; do
+    fixture="$TMP_ROOT/merge-replay-$mode"
+    state="$fixture/state"
+    make_omp_branch_driver_fixture "$fixture"
+    mkdir -p "$state"
+    printf 'needs-decision [key=route]: pick the route\n' > "$state/task-a.status"
+    printf 'project=project-a\nwindow=default:wA:p1\n' > "$state/task-a.meta"
+    printf '1\t1\tsignal\ttask-a.status\tsignal: task-a\n' > "$state/.wake-queue"
+    if [ "$mode" = still-current ]; then
+      cat > "$fixture/steps.json" <<'JSON'
+{
+  "failSendsOnce": ["task-a: task-a waits on the route"],
+  "steps": [
+    { "wake": "signal: task-a",
+      "prompt": [{ "report": { "task": "task-a", "verdict": "captain", "summary": "task-a waits on the route" } }] },
+    { "wake": "signal: task-a",
+      "prompt": [{ "report": { "task": "task-a", "verdict": "routine", "summary": "task-a still deciding" } }] }
+  ]
+}
+JSON
+    else
+      cat > "$fixture/steps.json" <<'JSON'
+{
+  "failSendsOnce": ["task-a: task-a waits on the route"],
+  "steps": [
+    { "wake": "signal: task-a",
+      "prompt": [{ "report": { "task": "task-a", "verdict": "captain", "summary": "task-a waits on the route" } }] },
+    { "exec": "printf 'resolved [key=route]: take the safe route\\n' >> \"$FM_STATE_OVERRIDE/task-a.status\"" },
+    { "wake": "signal: task-a",
+      "prompt": [{ "report": { "task": "task-a", "verdict": "routine", "summary": "task-a resolved and continued" } }] }
+  ]
+}
+JSON
+    fi
+
+    out=$(env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
+      FM_HOME="$fixture" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$fixture/config" \
+      EXTENSION_PATH="$fixture/.omp/extensions/fm-branch-supervision-omp.ts" \
+      DISPATCH_PATH="$fixture/.omp/extensions/lib/fm-branch-dispatch.ts" \
+      SCENARIO_PATH="$fixture/steps.json" \
+      node --experimental-strip-types "$fixture/driver.mjs" 2>&1) \
+      || fail "$mode merge-replay driver failed: $out"
+
+    if [ "$mode" = still-current ]; then
+      printf '%s' "$out" | grep -c 'task-a waits on the route' | grep -qx '1' \
+        || fail "still-current: the failed merge was not replayed once: $out"
+      printf '%s' "$out" | grep -F 'task-a: task-a waits on the route","triggerTurn":true' >/dev/null \
+        || fail "still-current: the replayed merge lost its captain shape: $out"
+      grep -F '"seq":1,"state":"accepted"' "$state/branch-merge-deliveries.jsonl" >/dev/null \
+        || fail "still-current: the successful replay recorded no accepted receipt"
+    else
+      ! printf '%s' "$out" | grep -F 'task-a waits on the route' | grep -F '"triggerTurn"' >/dev/null \
+        || fail "resolved: the superseded merge was resent on replay: $out"
+      printf '%s' "$out" | grep -F 'task-a resolved and continued' >/dev/null \
+        || fail "resolved: the fresh advisory did not deliver: $out"
+      grep -F '"seq":1,"state":"suppressed"' "$state/branch-merge-deliveries.jsonl" >/dev/null \
+        || fail "resolved: the suppressed replay recorded no receipt"
+    fi
+  done
+  pass "a failed merge replays while current and is suppressed after a keyed resolution"
 }
 
 # The branch-side retry: a completion whose merge main already consumed is
@@ -1093,6 +1327,8 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor
 test_outcome_store_is_append_only_with_cursor_reads
 test_outcome_startup_replay_preserves_silence
 test_outcome_live_handoff_requires_contiguous_sequence
+test_outcome_advisory_identity_and_decision_reconcile
+test_outcome_worker_advisory_and_merge_replay_ledger
 test_lease_exclusivity_release_stale_and_sweep
 test_role_partition_refuses_the_branch_actor
 test_send_lease_guard_serializes_a_held_task
@@ -1104,6 +1340,9 @@ test_omp_scope_resolves_reportable_tasks_from_granted_rows
 test_omp_scope_vetoed_scan_keeps_decision_owned_keys
 test_routine_verdict_on_granted_completion_opens_a_main_turn
 test_mixed_grant_settle_rejects_an_unreported_completion
+test_branch_merge_suppresses_a_resolved_decision_advisory
+test_branch_merge_suppresses_a_stale_worker_advisory
+test_branch_failed_merge_replays_only_while_current
 test_consumed_completion_is_redelivered_once_per_generation
 test_decision_owned_wake_reaches_main_past_branch_and_episode
 test_decision_owned_wake_forces_turn_without_episode

@@ -34,3 +34,4 @@ Raise the smallest number of high-signal notes; do not restate correct, complete
 
 - Ending a turn "blind" while work is under way without a live supervision cycle, or acting or steering before draining the durable wake queue.
 - Re-escalating an old decision, blocker, or pause without reconciling current state.
+- Advisory freshness: check the latest tool output and durable state before raising a note; never raise an advisory for a step the latest output shows is already done, and never reverse an earlier blocker without new evidence.

@@ -28,9 +28,41 @@
 #     one is "pending"; neither presentation nor a routine verdict retires it.
 #     Keyed needs-decision/blocked events are not obligations: the OPEN
 #     DECISIONS fold owns them and they close by resolution, not delivery.
+#   - Typed advisory identity (issue #74): new records carry
+#     "advisory":{"kind":"decision|worker|status|fleet|pause","key":"..." or
+#     "-","gen":"<producer generation>","wakeSeqs":"<n,n,..>" or "-"}. kind is
+#     supplied by the producer (a stale wake reports worker) or derived from
+#     the covered span: the span's last structured event being a keyed
+#     needs-decision/blocked yields decision + that key; fleet-scope yields
+#     fleet; anything else status. key is meaningful only for decision. gen is
+#     the branch producer's own generation token - deliberately a different
+#     axis from the branch-process generation and the watcher-recovery
+#     generation. statusEndpoint/statusIdent remain the source status-log
+#     revision; wakeSeqs records the granted wake-row sequences. Legacy rows
+#     without `advisory` remain valid and are treated as always-current.
+#   - Merge delivery ledger: $STATE/branch-merge-deliveries.jsonl, strictly
+#     APPEND-ONLY, one {"seq":N,"state":"accepted|failed|suppressed",
+#     "epoch":N} receipt per merge-note delivery attempt, keyed by the durable
+#     seq (the idempotent delivery token). `accepted` = sendMessage accepted
+#     the note; `failed` = it provably threw before acceptance, so the row is
+#     replayable WHILE ITS ADVISORY IS STILL CURRENT; `suppressed` = the
+#     delivery boundary retired the row after reconciliation. A cursor-
+#     advanced row with no receipt is indeterminate - possibly delivered - and
+#     is never replayed, matching the buffer's accepted-but-unconfirmed rule.
+#   - Delivery-boundary reconcile (issue #74): `reconcile` answers whether the
+#     advisory recorded on a seq is still current. The merge path and replay
+#     reconcile BEFORE the note can enter main's queue and suppress provably
+#     obsolete advisories: a pending-decision advisory whose key has closed
+#     under the shared fold, a stopped-worker advisory whose status file has
+#     moved past its captured revision, a pause advisory whose hold ended, or
+#     one whose status file is gone. fm-classify-lib.sh's
+#     fm_advisory_superseded is the single owner of the freshness rule, shared
+#     with the away daemon's escalation-buffer reconcile.
 #   - Cursor: $STATE/.branch-outcomes-cursor holds the highest seq handed to
-#     OMP as an append-only merge note, emitted by the locked session-start
-#     replay, or silently consumed there because `silent` is true. Records
+#     OMP as an append-only merge note, retired by delivery-time suppression,
+#     emitted by the locked session-start
+#     replay, or silently consumed there because `silent` is true or the
+#     replay's freshness gate found the row superseded. Records
 #     above the cursor are "unread": the branch stored them but
 #     did not reach either handoff. A crash inside OMP's delivery window after
 #     cursor advancement does not auto-replay the row; it remains durable and
@@ -77,6 +109,15 @@
 #     obligation. --endpoint marks exactly that event; --through marks every
 #     undelivered obligation event at or before it. Idempotent: an already
 #     delivered endpoint is reported, never duplicated.
+#   fm-branch-outcome.sh reconcile --seq <seq>
+#     Print "current" when the seq's advisory is still deliverable, or
+#     "suppressed" when current durable state provably supersedes it. Missing
+#     seqs and rows without a typed advisory are "current" (fail-open).
+#   fm-branch-outcome.sh merge-receipt --seq <seq> --state accepted|failed|suppressed
+#     Append one merge-delivery receipt to the merge ledger.
+#   fm-branch-outcome.sh merge-replay
+#     Print the normalized store rows whose newest merge receipt is "failed":
+#     the replayable set. The caller re-reconciles each before resending.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -87,11 +128,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 STORE="$STATE/branch-outcomes.jsonl"
 DELIVERIES="$STATE/completion-deliveries.jsonl"
+MERGE_DELIVERIES="$STATE/branch-merge-deliveries.jsonl"
 CURSOR="$STATE/.branch-outcomes-cursor"
 LOCK="$STATE/.branch-outcomes.lock"
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | handoff-next --seq <seq> | list [--recent <n>] | startup-replay | completions --task <id> --status-ident <dev:inode> [--through <endpoint>] [--from <offset>] | undelivered | deliver --task <id> --status-ident <dev:inode> --endpoint <endpoint> | deliver --task <id> --status-ident <dev:inode> --through <endpoint>" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] [--advisory-kind <kind>] [--advisory-key <key>] [--advisory-gen <gen>] [--advisory-wake-seqs <n,n,..>] | unread | handoff-next --seq <seq> | list [--recent <n>] | startup-replay | completions --task <id> --status-ident <dev:inode> [--through <endpoint>] [--from <offset>] | undelivered | deliver --task <id> --status-ident <dev:inode> --endpoint <endpoint> | deliver --task <id> --status-ident <dev:inode> --through <endpoint> | reconcile --seq <seq> | merge-receipt --seq <seq> --state accepted|failed|suppressed | merge-replay" >&2
   exit 2
 }
 
@@ -127,12 +169,23 @@ normalize_record() { # <jsonl-line>
           and (.silent | type) == "boolean"
           and (.statusEndpoint | type) == "number" and .statusEndpoint >= 0 and .statusEndpoint == (.statusEndpoint | floor)
           and (.statusIdent | type) == "string")
+        or (keys == ["advisory", "epoch", "seq", "silent", "statusEndpoint", "statusIdent", "summary", "task", "verdict", "wake"]
+          and (.silent | type) == "boolean"
+          and (.statusEndpoint | type) == "number" and .statusEndpoint >= 0 and .statusEndpoint == (.statusEndpoint | floor)
+          and (.statusIdent | type) == "string"
+          and (.advisory | type) == "object"
+          and (.advisory.kind | type) == "string"
+          and (.advisory.key | type) == "string"
+          and (.advisory.gen | type) == "string"
+          and (.advisory.wakeSeqs | type) == "string")
       )
     | select((.seq | type) == "number" and .seq >= 1 and .seq == (.seq | floor))
     | select((.epoch | type) == "number" and .epoch >= 0 and .epoch == (.epoch | floor))
     | select((.task | type) == "string" and (.wake | type) == "string")
     | select((.summary | type) == "string" and (.verdict == "routine" or .verdict == "captain"))
-    | if has("statusEndpoint")
+    | if has("advisory")
+      then {seq, epoch, task, wake, verdict, summary, silent, statusEndpoint, statusIdent, advisory}
+      elif has("statusEndpoint")
       then {seq, epoch, task, wake, verdict, summary, silent, statusEndpoint, statusIdent}
       elif has("silent")
       then {seq, epoch, task, wake, verdict, summary, silent}
@@ -201,6 +254,66 @@ capture_status_position() { # <task>
   [ "$size" = "$size_after" ] && [ "$ident" = "$ident_after" ] || return 0
   CAPTURED_STATUS_ENDPOINT=$size
   CAPTURED_STATUS_IDENT=$ident
+}
+
+# Derive a task-scoped outcome's advisory kind from the status span it answers
+# (issue #74). When the last structured event at-or-before <endpoint> is a
+# keyed needs-decision/blocked, the outcome is a pending-decision advisory for
+# that key - so a later resolution can retire it before delivery. Anything
+# else stays a plain event advisory. Sets ADVISORY_KIND/ADVISORY_KEY on
+# derivation; a missing, unreadable, or rotated file derives nothing.
+_fm_outcome_derive_advisory() { # <task> <endpoint> <ident>
+  local task=$1 endpoint=$2 ident=$3 f live_ident span_file line pos
+  local LC_ALL=C
+  local dec_pos=-1 dec_key=- last_pos=-1 verb k
+  f="$STATE/$task.status"
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
+  live_ident=$(_fm_open_decisions_file_ident "$f") || return 0
+  [ "$live_ident" = "$ident" ] || return 0
+  case "$endpoint" in ''|*[!0-9]*|0) return 0 ;; esac
+  span_file=$(mktemp "$STATE/.branch-outcome-span.XXXXXX") || return 0
+  if ! _fm_status_read_span "$f" 0 "$endpoint" > "$span_file"; then
+    rm -f -- "$span_file"
+    return 0
+  fi
+  pos=0
+  while IFS= read -r line; do
+    pos=$((pos + ${#line} + 1))
+    case "$line" in *[[:space:]]*[[:alnum:]]*) ;; *) continue ;; esac
+    verb=$(status_line_verb "$line")
+    case "$verb" in
+      needs-decision|blocked)
+        last_pos=$pos
+        k=$(_fm_decision_key "$line") || k=
+        case "$k" in ''|default) ;; *) dec_pos=$pos; dec_key=$k ;; esac
+        ;;
+      working|done|failed|paused|resolved|"${FM_CLASSIFY_CAPTAIN_HELD_VERB:-captain-held}")
+        last_pos=$pos
+        ;;
+    esac
+  done < "$span_file"
+  rm -f -- "$span_file"
+  if [ "$dec_pos" -ge 0 ] && [ "$dec_pos" -eq "$last_pos" ]; then
+    ADVISORY_KIND=decision
+    ADVISORY_KEY=$dec_key
+  fi
+  return 0
+}
+
+# Delivery-boundary freshness for one stored outcome row (issue #74): 0 when
+# the row's typed advisory is provably superseded by current durable state.
+# Rows without a typed advisory, and reconcile-time read failures, keep the
+# historical always-deliver behavior (fail-open).
+_fm_outcome_row_superseded() { # <normalized-json-row>
+  local row=$1 task kind key endpoint ident
+  kind=$(printf '%s' "$row" | jq -r '.advisory.kind // ""' 2>/dev/null) || return 1
+  [ -n "$kind" ] || return 1
+  task=$(printf '%s' "$row" | jq -r '.task // ""' 2>/dev/null) || return 1
+  [ -n "$task" ] || return 1
+  key=$(printf '%s' "$row" | jq -r '.advisory.key // "-"' 2>/dev/null) || key=-
+  endpoint=$(printf '%s' "$row" | jq -r '.statusEndpoint // 0' 2>/dev/null) || endpoint=0
+  ident=$(printf '%s' "$row" | jq -r '.statusIdent // "-"' 2>/dev/null) || ident=-
+  fm_advisory_superseded "$STATE" "$task" "$kind" "$key" "$endpoint" "$ident"
 }
 
 # Print "<endpoint><TAB><line>" for every captain-facing obligation event in
@@ -353,6 +466,10 @@ case "$CMD" in
     SUMMARY=''
     WAKE=''
     SILENT=false
+    ADVISORY_KIND=''
+    ADVISORY_KEY='-'
+    ADVISORY_GEN='-'
+    ADVISORY_WAKE_SEQS='-'
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --task) TASK=${2:-}; shift 2 || usage ;;
@@ -360,6 +477,10 @@ case "$CMD" in
         --summary) SUMMARY=${2:-}; shift 2 || usage ;;
         --wake) WAKE=${2:-}; shift 2 || usage ;;
         --silent) SILENT=${2:-}; shift 2 || usage ;;
+        --advisory-kind) ADVISORY_KIND=${2:-}; shift 2 || usage ;;
+        --advisory-key) ADVISORY_KEY=${2:-}; shift 2 || usage ;;
+        --advisory-gen) ADVISORY_GEN=${2:-}; shift 2 || usage ;;
+        --advisory-wake-seqs) ADVISORY_WAKE_SEQS=${2:-}; shift 2 || usage ;;
         *) usage ;;
       esac
     done
@@ -375,10 +496,34 @@ case "$CMD" in
     fi
     SEQ=$(( LAST_SEQ + 1 ))
     capture_status_position "$TASK"
-    printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s,"statusEndpoint":%s,"statusIdent":"%s"}\n' \
+    # Typed advisory identity (issue #74): an explicit producer kind wins;
+    # otherwise derive it from the covered span (a trailing keyed decision is a
+    # pending-decision advisory, fleet-scope is fleet, the rest a plain event).
+    # The advisory's source revision is the captured statusEndpoint/statusIdent.
+    case "$ADVISORY_KIND" in
+      decision|worker|status|fleet|pause) ;;
+      ''|auto)
+        if [ "$TASK" = fleet ]; then
+          ADVISORY_KIND=fleet
+        else
+          ADVISORY_KIND=status
+          ADVISORY_KEY=-
+          _fm_outcome_derive_advisory "$TASK" "$CAPTURED_STATUS_ENDPOINT" "$CAPTURED_STATUS_IDENT"
+        fi
+        ;;
+      *) echo "error: --advisory-kind must be decision, worker, status, fleet, pause, or auto" >&2
+         fm_lock_release "$LOCK"; exit 2 ;;
+    esac
+    case "$ADVISORY_KIND" in decision) ;; *) ADVISORY_KEY=- ;; esac
+    [ -n "$ADVISORY_KEY" ] || ADVISORY_KEY=-
+    [ -n "$ADVISORY_GEN" ] || ADVISORY_GEN=-
+    case "$ADVISORY_WAKE_SEQS" in ''|*[!0-9,]*) ADVISORY_WAKE_SEQS=- ;; esac
+    printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s,"statusEndpoint":%s,"statusIdent":"%s","advisory":{"kind":"%s","key":"%s","gen":"%s","wakeSeqs":"%s"}}\n' \
       "$SEQ" "$(date +%s)" "$(json_escape "$TASK")" "$(json_escape "$WAKE")" \
       "$VERDICT" "$(json_escape "$SUMMARY")" "$SILENT" "$CAPTURED_STATUS_ENDPOINT" \
-      "$(json_escape "$CAPTURED_STATUS_IDENT")" >> "$STORE"
+      "$(json_escape "$CAPTURED_STATUS_IDENT")" \
+      "$(json_escape "$ADVISORY_KIND")" "$(json_escape "$ADVISORY_KEY")" \
+      "$(json_escape "$ADVISORY_GEN")" "$(json_escape "$ADVISORY_WAKE_SEQS")" >> "$STORE"
     fm_lock_release "$LOCK"
     printf '%s\n' "$SEQ"
     ;;
@@ -448,7 +593,25 @@ $NORMALIZED"
       done < "$STORE"
     fi
     if [ -n "$VALID_UNREAD" ]; then
-      VISIBLE=$(printf '%s\n' "$VALID_UNREAD" | jq -c 'select(.silent != true)')
+      # Freshness gate (issue #74): an unread row whose typed advisory is
+      # provably superseded by current durable state is consumed silently like
+      # a `silent` row - replaying its prose would inject a stale advisory.
+      CURRENT_UNREAD=
+      while IFS= read -r UROW; do
+        [ -n "$UROW" ] || continue
+        if _fm_outcome_row_superseded "$UROW"; then
+          continue
+        fi
+        if [ -n "$CURRENT_UNREAD" ]; then
+          CURRENT_UNREAD="$CURRENT_UNREAD
+$UROW"
+        else
+          CURRENT_UNREAD=$UROW
+        fi
+      done <<EOF
+$VALID_UNREAD
+EOF
+      VISIBLE=$(printf '%s\n' "$CURRENT_UNREAD" | jq -c 'select(.silent != true)')
       if [ -n "$VISIBLE" ]; then
         printf 'BRANCH OUTCOMES (handled by the supervision branch, not yet seen by this session):\n'
         printf '%s\n' "$VISIBLE"
@@ -641,6 +804,74 @@ $DELIVERED_KEYS" in
     fi
     fm_lock_release "$LOCK"
     printf 'delivered: %s receipt(s) recorded for %s\n' "$MARKED" "$TASK"
+    ;;
+  reconcile)
+    [ "${1:-}" = --seq ] && [ "$#" -eq 2 ] || usage
+    SEQ=$2
+    case "$SEQ" in ''|0|0*|*[!0-9]*) usage ;; esac
+    fm_lock_acquire_wait "$LOCK" || exit 1
+    RROW=
+    if [ -s "$STORE" ]; then
+      while IFS= read -r LINE || [ -n "$LINE" ]; do
+        if [ "$(record_seq "$LINE")" = "$SEQ" ]; then
+          RROW=$(normalize_record "$LINE" 2>/dev/null) || RROW=
+          break
+        fi
+      done < "$STORE"
+    fi
+    fm_lock_release "$LOCK"
+    if [ -n "$RROW" ] && _fm_outcome_row_superseded "$RROW"; then
+      printf 'suppressed\n'
+    else
+      printf 'current\n'
+    fi
+    ;;
+  merge-receipt)
+    [ "${1:-}" = --seq ] && [ "${3:-}" = --state ] && [ "$#" -eq 4 ] || usage
+    SEQ=$2
+    RSTATE=$4
+    case "$SEQ" in ''|0|0*|*[!0-9]*) usage ;; esac
+    case "$RSTATE" in accepted|failed|suppressed) ;; *) usage ;; esac
+    fm_lock_acquire_wait "$LOCK" || exit 1
+    printf '{"seq":%s,"state":"%s","epoch":%s}\n' "$SEQ" "$RSTATE" "$(date +%s)" \
+      >> "$MERGE_DELIVERIES" || {
+      fm_lock_release "$LOCK"
+      echo "error: merge delivery ledger append failed" >&2
+      exit 1
+    }
+    fm_lock_release "$LOCK"
+    ;;
+  merge-replay)
+    [ "$#" -eq 0 ] || usage
+    fm_lock_acquire_wait "$LOCK" || exit 1
+    # The replayable set: seqs whose newest merge-delivery receipt is
+    # "failed" - provably not accepted into main's queue. Rows with no receipt
+    # at all are indeterminate (possibly delivered) and never replayed.
+    FAILED_SEQS=
+    if [ -s "$MERGE_DELIVERIES" ]; then
+      FAILED_SEQS=$(awk '
+        /^\{"seq":[0-9]+,"state":"(accepted|failed|suppressed)"/ {
+          seq=$0; sub(/^\{"seq":/, "", seq); sub(/,.*/, "", seq)
+          st=$0; sub(/^.*"state":"/, "", st); sub(/".*/, "", st)
+          last[seq]=st
+        }
+        END { for (s in last) if (last[s] == "failed") print s }
+      ' "$MERGE_DELIVERIES" 2>/dev/null | LC_ALL=C sort -n || true)
+    fi
+    if [ -n "$FAILED_SEQS" ] && [ -s "$STORE" ]; then
+      while IFS= read -r RSEQ; do
+        [ -n "$RSEQ" ] || continue
+        while IFS= read -r LINE || [ -n "$LINE" ]; do
+          if [ "$(record_seq "$LINE")" = "$RSEQ" ]; then
+            normalize_record "$LINE" 2>/dev/null || true
+            break
+          fi
+        done < "$STORE"
+      done <<EOF
+$FAILED_SEQS
+EOF
+    fi
+    fm_lock_release "$LOCK"
     ;;
   *) usage ;;
 esac
