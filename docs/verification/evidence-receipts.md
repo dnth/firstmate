@@ -1,6 +1,6 @@
 # Evidence receipts and risk routing verification
 
-This record captures the active maintainer evidence for ship-task acceptance receipts and conservative validation routing as of 2026-09-29.
+This record captures the active maintainer evidence for ship-task acceptance receipts and conservative validation routing as of 2026-10-01.
 The exact receipt key and type schema is owned by the header and `--help` output of `bin/fm-receipt-schema.sh`; the criterion parser, classifier thresholds, metadata fields, and lifecycle commands are owned by the headers and help output of `bin/fm-receipt-check.sh`, `bin/fm-receipt.sh`, and `bin/fm-receipt-store.sh` at their respective executable boundaries.
 
 ## Guarantees under test
@@ -90,6 +90,7 @@ The focused behavioral suites passed with these exact commands.
 $ tests/fm-receipt.test.sh
 ok - fm-receipt appends one compact validated receipt
 ok - fm-receipt preserves prior records and accepts --result
+ok - fm-receipt warns on relative --artifact while still appending
 ok - fm-receipt gates accepted-blocked on a verbatim captain exception
 ok - fm-receipt stores and validates an exact canonical commit id
 ok - fm-receipt appends complete large JSONL records
