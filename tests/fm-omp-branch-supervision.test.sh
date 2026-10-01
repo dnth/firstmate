@@ -674,6 +674,56 @@ JSON
   pass "a consumed completion is re-sent exactly once on the next wake and never again"
 }
 
+# An unchanged, already-delivered completion reported again is routine: its
+# delivery receipt already discharged the notification obligation, so the merge
+# renders as a note and opens no new main turn. A genuinely new finding on the
+# same task still opens one.
+test_delivered_completion_re_report_opens_no_main_turn() {
+  local fixture state out row ident endpoint trigger_turns
+  fixture="$TMP_ROOT/completion-receipted"
+  state="$fixture/state"
+  make_omp_branch_driver_fixture "$fixture"
+  mkdir -p "$state"
+  printf 'done: task-a finished\n' > "$state/task-a.status"
+  printf 'project=project-a\nwindow=default:wA:p1\n' > "$state/task-a.meta"
+  printf '1\t1\tsignal\ttask-a.status\tsignal: task-a\n' > "$state/.wake-queue"
+  # Record the delivery receipt the way main's drain does once the completion
+  # notification has actually reached the captain.
+  row=$(FM_HOME="$fixture" bash "$ROOT/bin/fm-branch-outcome.sh" undelivered) \
+    || fail "undelivered scan failed"
+  ident=$(printf '%s\n' "$row" | cut -f2)
+  endpoint=$(printf '%s\n' "$row" | cut -f3)
+  { [ -n "$ident" ] && [ -n "$endpoint" ]; } \
+    || fail "undelivered scan lost the completion obligation: $row"
+  FM_HOME="$fixture" bash "$ROOT/bin/fm-branch-outcome.sh" deliver \
+    --task task-a --status-ident "$ident" --endpoint "$endpoint" >/dev/null \
+    || fail "delivery receipt append failed"
+  cat > "$fixture/steps.json" <<'JSON'
+{
+  "steps": [
+    { "wake": "signal: task-a", "report": { "task": "task-a", "verdict": "routine", "summary": "task-a remains complete" } },
+    { "wake": "signal: task-a", "report": { "task": "task-a", "verdict": "captain", "summary": "task-a has a new finding" } }
+  ]
+}
+JSON
+
+  out=$(env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$fixture/config" \
+    EXTENSION_PATH="$fixture/.omp/extensions/fm-branch-supervision-omp.ts" \
+    DISPATCH_PATH="$fixture/.omp/extensions/lib/fm-branch-dispatch.ts" \
+    SCENARIO_PATH="$fixture/steps.json" \
+    node --experimental-strip-types "$fixture/driver.mjs" 2>&1) \
+    || fail "delivered-completion driver failed: $out"
+
+  assert_contains "$out" '"content":"⛵ task-a: task-a remains complete","triggerTurn":false' \
+    "a routine report on an already-delivered completion opened a main turn or lost its merge note: $out"
+  assert_contains "$out" '"content":"task-a: task-a has a new finding","triggerTurn":true' \
+    "a new captain finding did not open a main turn: $out"
+  trigger_turns=$(printf '%s' "$out" | grep -o '"triggerTurn":true' | wc -l | tr -d ' ')
+  [ "$trigger_turns" = "1" ] || fail "expected exactly one captain turn, got $trigger_turns: $out"
+  pass "an already-delivered completion re-report stays routine while a new finding still opens a captain turn"
+}
+
 # --- decision-owned wakes reaching main ----------------------------------------
 
 # A fixture home that loads BOTH real extensions into one Node process sharing
@@ -1105,5 +1155,6 @@ test_omp_scope_vetoed_scan_keeps_decision_owned_keys
 test_routine_verdict_on_granted_completion_opens_a_main_turn
 test_mixed_grant_settle_rejects_an_unreported_completion
 test_consumed_completion_is_redelivered_once_per_generation
+test_delivered_completion_re_report_opens_no_main_turn
 test_decision_owned_wake_reaches_main_past_branch_and_episode
 test_decision_owned_wake_forces_turn_without_episode
