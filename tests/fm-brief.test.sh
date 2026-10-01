@@ -248,6 +248,15 @@ test_ship_modes_generate_clean_briefs() {
     esac
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
+  custom_data="$TMP_ROOT/ship-custom-data"
+  mkdir -p "$custom_data"
+  FM_HOME="$home" FM_DATA_OVERRIDE="$custom_data" \
+    "$ROOT/bin/fm-brief.sh" brief-custom-data-a4 some-proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "fm-brief.sh did not scaffold with FM_DATA_OVERRIDE"
+  brief="$custom_data/brief-custom-data-a4/brief.md"
+  assert_present "$brief" "FM_DATA_OVERRIDE brief was not scaffolded in the override data root"
+  assert_grep "copy it into \`$custom_data/brief-custom-data-a4/artifacts/\`" "$brief" \
+    "durable-artifact instruction ignored FM_DATA_OVERRIDE"
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 

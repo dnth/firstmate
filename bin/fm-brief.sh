@@ -115,10 +115,15 @@ resolve_directory_input() {
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 render_ship_delivery() {
-  local task_id=$1 delivery_mode operational_home artifact_dir
+  local task_id=$1 delivery_mode operational_home data_dir artifact_dir
   delivery_mode=$2
   operational_home=$(resolve_directory_input FM_HOME "${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}") || return 1
-  artifact_dir="$operational_home/data/$task_id/artifacts"
+  if [ -n "${FM_DATA_OVERRIDE:-}" ]; then
+    data_dir=$(resolve_directory_input FM_DATA_OVERRIDE "$FM_DATA_OVERRIDE") || return 1
+  else
+    data_dir="$operational_home/data"
+  fi
+  artifact_dir="$data_dir/$task_id/artifacts"
   case "$delivery_mode" in
     no-mistakes|direct-PR|local-only) ;;
     *) echo "error: delivery renderer requires no-mistakes, direct-PR, or local-only" >&2; return 1 ;;
