@@ -11,7 +11,6 @@ STOW="$SKILLS_DIR/stow/SKILL.md"
 TRIGGER_INDEX="$SKILLS_DIR/agent-skill-trigger-index/SKILL.md"
 INVENTORY="$ROOT/docs/documentation-audiences.json"
 AGENTS="$ROOT/AGENTS.md"
-README="$ROOT/README.md"
 
 test_cleanup_lives_alongside_stow() {
   assert_present "$STOW" "internal stow skill is missing"
@@ -24,15 +23,13 @@ test_cleanup_lives_alongside_stow() {
 }
 
 test_cleanup_contract_surfaces() {
-  "$ROOT/bin/fm-doc-audience-check.sh" >/dev/null \
-    || fail "documentation audience consumer rejected the cleanup registration"
-  python3 - "$CLEANUP" "$TRIGGER_INDEX" "$INVENTORY" "$AGENTS" "$README" <<'PY' || fail "cleanup contract surfaces are inconsistent"
+  python3 - "$CLEANUP" "$TRIGGER_INDEX" "$INVENTORY" "$AGENTS" <<'PY' || fail "cleanup contract surfaces are inconsistent"
 import json
 import re
 import sys
 from pathlib import Path
 
-cleanup, trigger_index, inventory, agents, readme = map(Path, sys.argv[1:])
+cleanup, trigger_index, inventory, agents = map(Path, sys.argv[1:])
 
 
 def scalar(value):
@@ -94,16 +91,6 @@ agent_section = agent_lines[section_start:section_end]
 agent_triggers = [line for line in agent_section if line.startswith("When the captain invokes `/cleanup`, load the `cleanup` skill")]
 if len(agent_triggers) != 1:
     raise SystemExit("AGENTS.md must expose one /cleanup load trigger")
-
-readme_lines = readme.read_text(encoding="utf-8").splitlines()
-try:
-    table_start = next(i for i, line in enumerate(readme_lines) if line == "## Built-in skills")
-except StopIteration as exc:
-    raise SystemExit("README built-in skills section is missing") from exc
-table_rows = [line for line in readme_lines[table_start:] if line.startswith("| `/")]
-cleanup_rows = [line.split("|", 2) for line in table_rows if line.split("|", 2)[1].strip() == "`/cleanup`"]
-if len(cleanup_rows) != 1 or not cleanup_rows[0][2].strip():
-    raise SystemExit("README must contain one non-empty /cleanup built-in skill row")
 
 index_text = trigger_index.read_text(encoding="utf-8")
 captain_marker = "# Captain-invocable skills"

@@ -39,7 +39,7 @@ For each recorded task whose endpoint or working copy may still be live:
 - Run `bin/fm-treehouse-sweep.sh --all` for the read-only classification; its header owns the tier definitions.
 - Combine each pooled slot with board and PR facts: `bin/fm-tasks-axi.sh show <id>` for the task and `gh-axi` for whether its PR is merged.
 - Record the evidence per slot: owning task, PR state, and any commits not on the backing repo's default ref.
-- Proven clean slots are removable; the opt-in `config/treehouse-sweep-clean` flag gates the existing `--apply-clean` tier, and this skill applies it only for slots the captain names.
+- Proven clean slots are removable only through the config-gated `--apply-clean` tier when the captain approves that clean-tier pass wholesale; clean slots are never removed per slot.
 - Dirty, unpushed, claimed, meta-named, occupied, or damaged slots are never removal candidates here: report their evidence and leave them.
 
 ## Panes and processes
@@ -52,7 +52,7 @@ For each recorded task whose endpoint or working copy may still be live:
 
 - Output one short table per category with columns: item, evidence, what removal costs, and a suggestion of `remove`, `keep for now`, or `not ready`.
 - Then stop and wait for the captain's word; the report itself changes nothing.
-- Execute only the removals the captain names: task teardowns through guarded `bin/fm-teardown.sh` and pool slots through the sweep's `--apply-slot` path, each under its own existing checks.
+- Execute only the removals the captain names: task teardowns through guarded `bin/fm-teardown.sh`, the approved clean tier through `bin/fm-treehouse-sweep.sh --apply-clean`, and dirty or unpushed slots through `--apply-slot <path> --captain-approved`, each under its own existing checks.
 - After the named removals, re-run `bin/fm-todo-project.sh --emit` to refresh the session projection.
 
 ## What this skill is not
