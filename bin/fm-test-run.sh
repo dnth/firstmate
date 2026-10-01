@@ -440,6 +440,7 @@ tests/fm-pending-reply.test.sh 9640
 tests/fm-pi-compatible-family.test.sh 56
 tests/fm-pi-primary-live-e2e.test.sh 21
 tests/fm-pi-watch-extension.test.sh 22452
+tests/fm-prepush-guard.test.sh 16058
 tests/fm-pr-check-security.test.sh 124896
 tests/fm-procevent-when.test.sh 19131
 tests/fm-procevent.test.sh 53391
