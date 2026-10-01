@@ -1,7 +1,7 @@
 ---
 name: agent-skill-trigger-index
 description: >-
-  Agent-only complete trigger index for agent-only skills. Load only when auditing or maintaining the complete agent-only skill trigger index.
+  Complete trigger index for agent-only and captain-invocable skills. Load only when auditing or maintaining the complete skill trigger index.
 user-invocable: false
 metadata:
   internal: true
