@@ -111,12 +111,13 @@ make_case() {
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md" || return 1
   touch "$home/state/.last-watcher-beat" || return 1
 
-  git init --quiet -b "$default" "$project" || return 1
+  mkdir -p "$project" || return 1
+  git -C "$project" init --quiet -b "$default" || return 1
   printf 'base\n' > "$project/README.md" || return 1
   git -C "$project" add README.md || return 1
   git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
     commit -qm initial || return 1
-  git clone --quiet --bare "$project" "$origin" || return 1
+  git -C "$case_dir" clone --quiet --bare "$project" "$origin" || return 1
   git -C "$project" remote add origin "file://$origin" || return 1
   git -C "$project" worktree add --quiet --detach "$pool" "$default" || return 1
   git -C "$project" worktree add --quiet --detach "$sibling" "$default" || return 1
@@ -266,9 +267,11 @@ test_guard_scopes_to_spawned_repo_only() {
   # scratch fixture pushes to its own local bare main keep working.
   scratch="$CASE_DIR/scratch"
   scratch_origin="$CASE_DIR/scratch-origin.git"
-  git init -q --bare "$scratch_origin" || fail "scratch origin init failed"
+  mkdir -p "$scratch_origin" || fail "scratch origin directory failed"
+  git -C "$scratch_origin" init -q --bare || fail "scratch origin init failed"
   git -C "$scratch_origin" symbolic-ref HEAD refs/heads/main || fail "scratch origin HEAD failed"
-  git init -q -b main "$scratch" || fail "scratch init failed"
+  mkdir -p "$scratch" || fail "scratch directory failed"
+  git -C "$scratch" init -q -b main || fail "scratch init failed"
   printf 'scratch\n' > "$scratch/README.md" || fail "scratch seed write failed"
   git -C "$scratch" add README.md || fail "scratch add failed"
   git -C "$scratch" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
