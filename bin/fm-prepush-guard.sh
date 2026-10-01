@@ -182,39 +182,30 @@ cmd_dispatch() {  # <dir> <hook-name> [git's hook args]
   fi
 
   if [ "$name" = pre-push ]; then
-    local remote_name=${1:-} recorded default_ref default_branch r input line
+    local remote_name=${1:-} recorded default_ref default_branch input line
     local blocked='' remote_ref ref_name
     recorded=$(cat "$dir/common-dir" 2>/dev/null || true)
     if [ -n "$common" ] && [ -n "$recorded" ] && [ "$common" = "$recorded" ]; then
-      # Resolve the pushed remote's current default branch first; fall back to
-      # origin, local tracking state, then init.defaultBranch. main/master are
+      # Resolve the pushed remote's current default branch. main/master are
       # always protected regardless.
       default_branch=
-      for r in "$remote_name" origin; do
-        [ -n "$r" ] || continue
-        default_ref=$(git ls-remote --symref "$r" HEAD 2>/dev/null |
+      if [ -n "$remote_name" ]; then
+        default_ref=$(git ls-remote --symref "$remote_name" HEAD 2>/dev/null |
             awk '$1 == "ref:" && $3 == "HEAD" { print $2; exit }')
-          case "$default_ref" in
-            refs/heads/*)
-              default_branch=${default_ref#refs/heads/}
-              break
-              ;;
-          esac
-      done
-      if [ -z "$default_branch" ]; then
-        for r in "$remote_name" origin; do
-          [ -n "$r" ] || continue
-          default_ref=$(git symbolic-ref --quiet --short "refs/remotes/$r/HEAD" 2>/dev/null || true)
-          if [ -n "$default_ref" ]; then
-            default_branch=${default_ref#"$r"/}
-            break
-          fi
-        done
-      fi
-      if [ -z "$default_branch" ]; then
-        default_branch=$(git config --local --get init.defaultBranch 2>/dev/null || true)
+        case "$default_ref" in
+          refs/heads/*)
+            default_branch=${default_ref#refs/heads/}
+            ;;
+        esac
       fi
       input=$(cat)
+      if [ -z "$default_branch" ]; then
+        printf '%s\n' \
+          "fm-prepush-guard: refused push on remote '$remote_name' because its default branch could not be resolved." \
+          "Rule: a spawned working copy may not push when the repository's default branch is unknown - push a task branch (fm/<task>) only after the remote is available." \
+          "Deliberate bypass for a captain-authorized push: git push --no-verify <remote> <refspec>" >&2
+        exit 1
+      fi
       while IFS= read -r line; do
         [ -n "$line" ] || continue
         # stdin records: <local ref> <local sha> <remote ref> <remote sha>.
