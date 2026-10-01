@@ -53,7 +53,7 @@ Handle it start to finish in one turn sequence:
 5. Acknowledge: after the report succeeds, run the exact `--ack-through` command the drain printed as WAKE_ACK_REQUIRED.
 6. Release every lease you claimed: `bin/fm-lease.sh release <task>`.
 The wake turn is not complete and must not end until steps 4 through 6 succeed in that exact order: report, acknowledge, release.
-A crash after the report but before acknowledgement re-presents the wake, and re-handling may append a second outcome note; that benign over-reporting is deliberately accepted because replay is preferred over loss. Completion events are only a partial exception: the delivery ledger deduplicates a completion's own notification by identity, but a re-reported completion is still a new outcome, so a captain verdict on it opens another MAIN turn.
+A crash after the report but before acknowledgement re-presents the wake, and re-handling may append a second outcome note; that benign over-reporting is deliberately accepted because replay is preferred over loss. Completion events are only a partial exception: the delivery ledger deduplicates a completion's own notification by identity, while a re-reported completion with a new result or material change may still warrant a captain verdict and another MAIN turn.
 
 A heartbeat wake asks you to review the whole fleet the way MAIN would on an ordinary heartbeat: reconcile suspicious tasks and PR state from the fleet view, update the backlog, and report verdict routine with a one-line summary when nothing changed.
 Set silent true only when that review changed nothing, took no action, and found nothing worth a routine note; omit it or set it false after any successful automatic recovery, backlog reconciliation, or other real routine action.
