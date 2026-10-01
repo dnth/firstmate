@@ -115,8 +115,15 @@ resolve_directory_input() {
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 render_ship_delivery() {
-  local task_id=$1 delivery_mode
+  local task_id=$1 delivery_mode operational_home data_dir artifact_dir
   delivery_mode=$2
+  operational_home=$(resolve_directory_input FM_HOME "${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}") || return 1
+  if [ -n "${FM_DATA_OVERRIDE:-}" ]; then
+    data_dir=$(resolve_directory_input FM_DATA_OVERRIDE "$FM_DATA_OVERRIDE") || return 1
+  else
+    data_dir="$operational_home/data"
+  fi
+  artifact_dir="$data_dir/$task_id/artifacts"
   case "$delivery_mode" in
     no-mistakes|direct-PR|local-only) ;;
     *) echo "error: delivery renderer requires no-mistakes, direct-PR, or local-only" >&2; return 1 ;;
@@ -129,6 +136,7 @@ A task with any accepted-blocked criterion is never auto-merged; state those cri
 Run \`$FM_ROOT/bin/fm-receipt-check.sh $task_id\` and do not append \`done:\` unless its JSON status is \`complete\`.
 After the implementation is committed and evidence is complete, run \`$FM_ROOT/bin/fm-receipt-check.sh $task_id --implementation-complete\` before any validation plan or implementation-complete \`done:\` report.
 Receipts are audit inputs rather than proof that every claim is trustworthy; keep summaries and results compact and point to commands or artifacts when useful.
+When a cited artifact lives inside this scratch worktree (for example \`.qa/evidence/<run_id>/report.json\`), copy it into \`$artifact_dir/\` (gitignored, survives teardown) before \`done:\` and cite the copied path; worktree-relative paths die with the worktree.
 
 EOF
   case "$delivery_mode" in

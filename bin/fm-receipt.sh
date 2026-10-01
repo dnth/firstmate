@@ -108,6 +108,11 @@ elif [ -n "$CAPTAIN_EXCEPTION" ]; then
   exit 2
 fi
 
+case "$ARTIFACT" in
+  ''|/*|*://*) ;;
+  *) echo "warning: --artifact is a relative path ($ARTIFACT); worktree-relative references die at teardown - copy the artifact under data/<task-id>/artifacts/ and cite that path" >&2 ;;
+esac
+
 receipt=$(jq -cn \
   --arg criterion "$CRITERION" \
   --arg type "$TYPE" \

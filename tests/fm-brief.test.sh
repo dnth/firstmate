@@ -222,6 +222,10 @@ test_ship_modes_generate_clean_briefs() {
       "$id: generated receipt contract omitted the accepted-blocked captain-exception requirement"
     assert_grep 'never auto-merged' "$brief" \
       "$id: generated receipt contract omitted the accepted-blocked merge policy"
+    assert_grep "copy it into \`$home/data/$id/artifacts/\`" "$brief" \
+      "$id: generated receipt contract omitted the durable-artifact copy instruction"
+    assert_grep "worktree-relative paths die with the worktree" "$brief" \
+      "$id: generated receipt contract omitted why worktree artifacts are unsafe"
     grep -qx "Delivery contract: mode=$mode" "$brief" \
       || fail "$id: brief did not record its machine-readable delivery contract line"
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
@@ -244,6 +248,15 @@ test_ship_modes_generate_clean_briefs() {
     esac
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
+  custom_data="$TMP_ROOT/ship-custom-data"
+  mkdir -p "$custom_data"
+  FM_HOME="$home" FM_DATA_OVERRIDE="$custom_data" \
+    "$ROOT/bin/fm-brief.sh" brief-custom-data-a4 some-proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "fm-brief.sh did not scaffold with FM_DATA_OVERRIDE"
+  brief="$custom_data/brief-custom-data-a4/brief.md"
+  assert_present "$brief" "FM_DATA_OVERRIDE brief was not scaffolded in the override data root"
+  assert_grep "copy it into \`$custom_data/brief-custom-data-a4/artifacts/\`" "$brief" \
+    "durable-artifact instruction ignored FM_DATA_OVERRIDE"
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 

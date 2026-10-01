@@ -1,6 +1,6 @@
 # Evidence receipts and risk routing verification
 
-This record captures the active maintainer evidence for ship-task acceptance receipts and conservative validation routing as of 2026-09-29.
+This record captures the active maintainer evidence for ship-task acceptance receipts and conservative validation routing as of 2026-10-01.
 The exact receipt key and type schema is owned by the header and `--help` output of `bin/fm-receipt-schema.sh`; the criterion parser, classifier thresholds, metadata fields, and lifecycle commands are owned by the headers and help output of `bin/fm-receipt-check.sh`, `bin/fm-receipt.sh`, and `bin/fm-receipt-store.sh` at their respective executable boundaries.
 
 ## Guarantees under test
@@ -27,6 +27,7 @@ The exact receipt key and type schema is owned by the header and `--help` output
 - `outcome=accepted-blocked` is valid only with a non-empty `captain_exception` reference recorded verbatim (the date plus the captain's own words or the board key that holds them); a criterion whose latest receipt is a valid accepted-blocked is accounted for without being evidenced, so planning, readiness, and completion can proceed while the evidence check reports it in the distinct always-present `accepted_blocked` list, never in `evidenced`.
 - A task carrying any accepted-blocked criterion is never auto-merged; plan, readiness, and completion output surfaces the criteria and their exception references plainly so the PR description states them.
 - Head-bound receipts store only the exact canonical 40- or 64-character lowercase hexadecimal commit id reported by Git.
+- The ship brief's acceptance-evidence template instructs workers to copy any cited worktree-resident artifact into `data/<task-id>/artifacts/` before `done:` and cite the copied path, and `bin/fm-receipt.sh` warns on a relative `--artifact` path without refusing the append.
 - Receipt append holds a stable task lock, copies the canonical single-link ledger plus one complete record to a synced mode-0600 single-link temporary file, and atomically renames it over the canonical ledger so concurrent hard-link aliases retain the old inode.
 - Criterion parsing rejects known scaffold placeholder tokens in balanced or unmatched brace forms while allowing concrete brace syntax such as JSON examples.
 - One shared cleanliness predicate requires `git status` with submodule ignores disabled to succeed with empty tracked, staged, untracked, and submodule output for implementation completion, planning, binding, terminal completion, and final done acceptance.
@@ -77,7 +78,7 @@ Every other completion requirement is unchanged: the run must still be the bound
 
 ## Verification environment
 
-- Date: 2026-09-11.
+- Date: 2026-10-01.
 - ShellCheck: 0.11.0.
 - Git: 2.34.1.
 
@@ -89,6 +90,7 @@ The focused behavioral suites passed with these exact commands.
 $ tests/fm-receipt.test.sh
 ok - fm-receipt appends one compact validated receipt
 ok - fm-receipt preserves prior records and accepts --result
+ok - fm-receipt warns on relative --artifact while still appending
 ok - fm-receipt gates accepted-blocked on a verbatim captain exception
 ok - fm-receipt stores and validates an exact canonical commit id
 ok - fm-receipt appends complete large JSONL records
