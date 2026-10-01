@@ -706,6 +706,7 @@ EOF
 #     condition; it is never superseded by this predicate.
 fm_advisory_superseded() {  # <state> <task> <kind> <key> <endpoint> <ident>
   local state=$1 task=$2 kind=$3 key=$4 endpoint=$5 ident=$6 f live_ident size
+  local span span_line span_key verb resolve held
   f="$state/$task.status"
   case "$kind" in
     decision)
@@ -719,7 +720,19 @@ fm_advisory_superseded() {  # <state> <task> <kind> <key> <endpoint> <ident>
       size=$(_fm_status_file_size "$f") || return 1
       size=${size//[[:space:]]/}
       case "$size" in ''|*[!0-9]*) return 1 ;; esac
-      [ "$size" -le "$endpoint" ] || return 0
+      if [ "$size" -gt "$endpoint" ]; then
+        span=$(_fm_status_read_span "$f" "$endpoint" "$((size - endpoint))" 2>/dev/null) || return 1
+        resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+        held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+        while IFS= read -r span_line || [ -n "$span_line" ]; do
+          [ -n "${span_line//[[:space:]]/}" ] || continue
+          verb=$(status_line_verb "$span_line")
+          span_key=$(_fm_decision_key "$span_line") || return 1
+          if [ "$span_key" = "$key" ] && { [ "$verb" = "$resolve" ] || [ "$verb" = "$held" ]; }; then
+            return 0
+          fi
+        done <<<"$span"
+      fi
       _fm_open_set_has "$(status_open_decisions "$f")" "$key" && return 1
       return 0
       ;;
@@ -748,7 +761,15 @@ fm_advisory_superseded() {  # <state> <task> <kind> <key> <endpoint> <ident>
       size=$(_fm_status_file_size "$f") || return 1
       size=${size//[[:space:]]/}
       case "$size" in ''|*[!0-9]*) return 1 ;; esac
-      [ "$size" -le "$endpoint" ] || return 0
+      if [ "$size" -gt "$endpoint" ]; then
+        span=$(_fm_status_read_span "$f" "$endpoint" "$((size - endpoint))" 2>/dev/null) || return 1
+        held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+        while IFS= read -r span_line || [ -n "$span_line" ]; do
+          [ -n "${span_line//[[:space:]]/}" ] || continue
+          verb=$(status_line_verb "$span_line")
+          [ "$verb" = paused ] || [ "$verb" = "$held" ] || return 0
+        done <<<"$span"
+      fi
       status_is_paused_or_captain_held "$(last_status_line "$f")" || return 0
       return 1
       ;;
