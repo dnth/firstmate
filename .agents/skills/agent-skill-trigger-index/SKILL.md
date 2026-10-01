@@ -35,7 +35,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `away-quiet-supervision` - load together with /afk whenever the captain invokes /afk or says they are going afk, state/.afk exists, an incoming message starts with FM_INJECT_MARK or the away-supervisor operational prefix, or any state/.subsuper-* marker is involved.
 - `agent-skill-trigger-index` - load only when auditing or maintaining the complete agent-only skill trigger index.
 
-# Captain-invocable skills
+## Captain-invocable skills
 
 These skills run only when the captain invokes them; this index records their load triggers for audit.
 - `cleanup` - load when the captain invokes `/cleanup` or asks to list or clean up finished scouts, merged or done work, stale working copies, or leftover resources.
