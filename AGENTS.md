@@ -158,6 +158,7 @@ A crewmate creates or updates it lazily through the project's selected delivery 
 Keep fleet delivery posture and captain-private strategy out of project memory.
 When the captain invokes `/stow`, load the `stow` skill for the complete knowledge-routing and unfinished-work sweep.
 When the captain invokes `/reflect`, load the `reflect` skill for post-run system-improvement analysis; it proposes tracked changes through the normal task lifecycle and never edits them itself.
+When the captain invokes `/cleanup`, load the `cleanup` skill for a report-first review of finished work and leftover resources; it removes only what the captain names.
 
 ## 7. Task lifecycle
 
