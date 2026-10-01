@@ -3417,8 +3417,12 @@ remove_kimi_turnend_auth "$STATE" "$ID" "$META"
 remove_devin_turnend_auth "$STATE" "$ID" "$META"
 remove_hermes_turnend_auth "$STATE" "$ID" "$META"
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
-# Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
-# Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
+# Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/ and the
+# prepush-guard hooks dir bin/fm-spawn.sh installed for this task) recorded by
+# spawn. The guard's only other presence was the dead endpoint's launch
+# environment, so removing the dir fully retires it before the slot's next
+# lease. Read before the state-file rm below; empty (pre-fix tasks without
+# tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
