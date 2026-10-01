@@ -40,7 +40,7 @@ For each recorded task whose endpoint or working copy may still be live:
 - Combine each pooled slot with board and PR facts: `bin/fm-tasks-axi.sh show <id>` for the task and `gh-axi` for whether its PR is merged.
 - Record the evidence per slot: owning task, PR state, and any commits not on the backing repo's default ref.
 - Proven clean slots are removable only through the config-gated `--apply-clean` tier when the captain approves that clean-tier pass wholesale; clean slots are never removed per slot.
-- Dirty, unpushed, claimed, meta-named, occupied, or damaged slots are never removal candidates here: report their evidence and leave them.
+- Dirty or unpushed slots are report-only until the captain names the exact path; then remove only through `--apply-slot <path> --captain-approved`. Claimed, meta-named, occupied, or damaged slots remain `not ready`.
 
 ## Panes and processes
 

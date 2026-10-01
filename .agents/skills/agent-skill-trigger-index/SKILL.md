@@ -37,5 +37,5 @@ These skills are not captain-invocable; load them only at their precise triggers
 
 # Captain-invocable skills
 
-These skills run only when the captain invokes them; README's built-in skills table owns their complete public list, so this index records only their load triggers for audit.
+These skills run only when the captain invokes them; this index records their load triggers for audit.
 - `cleanup` - load when the captain invokes `/cleanup` or asks to list or clean up finished scouts, merged or done work, stale working copies, or leftover resources.
