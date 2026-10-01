@@ -574,6 +574,10 @@ const results = [];
 // each entry throws once, so a scenario can force a provably-failed merge
 // delivery and then let the replay succeed (issue #74 replay seam).
 const failOnce = [...(scenario.failSendsOnce ?? [])];
+// stepIndex tags each recorded send with the scenario step that produced it,
+// so a scenario can prove a send fired in a LATER pass rather than the one it
+// is asserting about.
+let stepIndex = 0;
 const pi = {
   on(name, fn) { handlers.set(name, fn); },
   events: { on(name, fn) { handlers.set(`evt:${name}`, fn); } },
@@ -584,7 +588,7 @@ const pi = {
       failOnce.splice(index, 1);
       throw new Error("send refused");
     }
-    sends.push({ content: message.content, triggerTurn: opts?.triggerTurn === true });
+    sends.push({ content: message.content, triggerTurn: opts?.triggerTurn === true, step: stepIndex });
   },
   registerCommand() {},
   registerTool() {},
@@ -609,6 +613,7 @@ globalThis.__branchPrompt = async () => {
 };
 let seq = 0;
 for (const step of scenario.steps) {
+  stepIndex += 1;
   if (step.wake) {
     globalThis.__promptActions = step.prompt ?? (step.report ? [{ report: step.report }] : (scenario.prompt ?? []));
     seq += 1;
@@ -956,6 +961,190 @@ JSON
   trigger_turns=$(printf '%s' "$out" | grep -o '"triggerTurn":true' | wc -l | tr -d ' ')
   [ "$trigger_turns" = "1" ] || fail "expected exactly one captain turn, got $trigger_turns: $out"
   pass "an already-delivered completion re-report stays routine while a new finding still opens a captain turn"
+}
+
+# Issue #188: the live merge used to reconcile advisory freshness and then
+# AWAIT the cursor handoff before sendMessage, so a resolution landing in
+# that gap still shipped the stale advisory. The merge now hands the cursor
+# off first, reconciles last, and sends with no intervening awaited
+# operation. A wrapped fm-branch-outcome.sh lands the resolution inside
+# handoff-next - the exact window the defect lived in - so the advisory must
+# die there instead of reaching main's queue.
+test_branch_merge_reconciles_after_the_cursor_handoff() {
+  local fixture state bin_dir f out status mode gap_append
+  for mode in gap control; do
+    fixture="$TMP_ROOT/merge-gap-$mode"
+    state="$fixture/state"
+    make_omp_branch_driver_fixture "$fixture"
+    bin_dir="$fixture/bin"
+    mkdir -p "$bin_dir" "$state"
+    for f in "$ROOT"/bin/*; do ln -s "$f" "$bin_dir/$(basename "$f")"; done
+    rm -f "$bin_dir/fm-branch-outcome.sh"
+    cat > "$bin_dir/fm-branch-outcome.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = handoff-next ] && [ -n "${FM_GAP_APPEND:-}" ] && [ ! -e "${FM_GAP_FLAG:?}" ]; then
+  printf '%b' "$FM_GAP_APPEND" >> "$FM_GAP_TARGET"
+  : > "$FM_GAP_FLAG"
+fi
+exec "$FM_REAL_OUTCOME" "$@"
+SH
+    chmod +x "$bin_dir/fm-branch-outcome.sh"
+    ln -s "$ROOT/.agents" "$fixture/.agents"
+    git init -q -b main "$fixture"
+    : > "$fixture/AGENTS.md"
+    printf 'needs-decision [key=theme]: which palette\n' > "$state/task-a.status"
+    printf 'project=project-a\nwindow=default:wA:p1\n' > "$state/task-a.meta"
+    printf '1\t1\tsignal\ttask-a.status\tsignal: task-a\n' > "$state/.wake-queue"
+    cat > "$fixture/steps.json" <<'JSON'
+{
+  "steps": [
+    { "wake": "signal: task-a",
+      "prompt": [{ "report": { "task": "task-a", "verdict": "captain", "summary": "task-a waits on the palette choice" } }] }
+  ]
+}
+JSON
+    gap_append=''
+    [ "$mode" = gap ] && gap_append='resolved [key=theme]: captain picked dark\n'
+    status=0
+    out=$(env -u FM_TASK_ID -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
+      FM_HOME="$fixture" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$fixture/config" \
+      FM_ROOT_OVERRIDE="$fixture" \
+      FM_REAL_OUTCOME="$ROOT/bin/fm-branch-outcome.sh" \
+      FM_GAP_APPEND="$gap_append" FM_GAP_TARGET="$state/task-a.status" FM_GAP_FLAG="$fixture/gap-done" \
+      EXTENSION_PATH="$fixture/.omp/extensions/fm-branch-supervision-omp.ts" \
+      DISPATCH_PATH="$fixture/.omp/extensions/lib/fm-branch-dispatch.ts" \
+      SESSIONS_ROOT="$fixture/.omp" \
+      SCENARIO_PATH="$fixture/steps.json" \
+      node --experimental-strip-types "$fixture/driver.mjs" 2>&1) || status=$?
+    expect_code 0 "$status" "merge-gap $mode driver run failed: $out"
+    # The cursor handoff still ran in every mode - suppression must never
+    # leave the outcome replayable.
+    assert_equals "1" "$(cat "$state/.branch-outcomes-cursor" 2>/dev/null || true)" \
+      "$mode: the cursor handoff did not run for seq 1"
+    case "$mode" in
+      gap)
+        assert_not_contains "$out" 'task-a waits on the palette choice' \
+          "gap: the resolution landing inside the old handoff gap still delivered the stale advisory: $out"
+        assert_grep '"seq":1,"state":"suppressed"' "$state/branch-merge-deliveries.jsonl" \
+          "gap: the superseded merge did not record a suppressed receipt"
+        ;;
+      control)
+        assert_contains "$out" '"content":"task-a: task-a waits on the palette choice","triggerTurn":true' \
+          "control: a still-current advisory was not delivered: $out"
+        assert_grep '"seq":1,"state":"accepted"' "$state/branch-merge-deliveries.jsonl" \
+          "control: a delivered merge did not record an accepted receipt"
+        ;;
+    esac
+  done
+  pass "the merge reconciles advisory freshness after the cursor handoff, so nothing slips through the old awaited gap"
+}
+
+# Issue #188: replaying a provably-failed merge used to skip the completion
+# bookkeeping the live merge performs - a routine verdict replayed without
+# the completion-forced captain shape, the replayed send registered no
+# in-flight identity so the same pass queued a second generic relay for the
+# same event, and a superseded advisory carrying an undelivered completion
+# was retired outright, erasing an owed fact. Replay now rebuilds the covered
+# span's completion identities from the row's stored status identity before
+# reconciling, keeps the captain delivery shape, and registers the in-flight
+# identity before the pending scan runs.
+test_branch_failed_merge_replay_restores_completion_delivery() {
+  local fixture state out status mode verdict supersede_step ident endpoint json
+  local replay_step relay_step relay_count relay_line
+  for mode in captain routine superseded; do
+    fixture="$TMP_ROOT/replay-completion-$mode"
+    state="$fixture/state"
+    make_omp_branch_driver_fixture "$fixture"
+    mkdir -p "$state"
+    case "$mode" in
+      superseded)
+        # The covered span holds BOTH a completion and a keyed decision; the
+        # appended resolution retires the advisory while the completion
+        # obligation is still owed.
+        printf 'done: task-a finished\nneeds-decision [key=theme]: pick the palette\n' > "$state/task-a.status"
+        supersede_step="    { \"exec\": \"printf 'resolved [key=theme]: captain picked dark\\\\n' >> \\\"$state/task-a.status\\\"\" },"
+        ;;
+      *)
+        printf 'done: task-a finished\n' > "$state/task-a.status"
+        supersede_step=
+        ;;
+    esac
+    printf 'working: task-b is still running\n' > "$state/task-b.status"
+    printf 'project=project-a\nwindow=default:wA:p1\n' > "$state/task-a.meta"
+    printf 'project=project-a\nwindow=default:wB:p1\n' > "$state/task-b.meta"
+    printf '1\t1\tsignal\ttask-a.status\tsignal: task-a\n1\t2\tsignal\ttask-b.status\tsignal: task-b\n' > "$state/.wake-queue"
+    verdict=routine
+    [ "$mode" = captain ] && verdict=captain
+    ident=$(FM_HOME="$fixture" FM_STATE_OVERRIDE="$state" bash "$ROOT/bin/fm-branch-outcome.sh" undelivered \
+      | awk -F '\t' '$1 == "task-a" { print $2 }')
+    endpoint=$(FM_HOME="$fixture" FM_STATE_OVERRIDE="$state" bash "$ROOT/bin/fm-branch-outcome.sh" undelivered \
+      | awk -F '\t' '$1 == "task-a" { print $3 }')
+    [ -n "$ident" ] && [ -n "$endpoint" ] \
+      || fail "$mode: could not read task-a's undelivered completion identity"
+
+    cat > "$fixture/steps.json" <<JSON
+{
+  "failSendsOnce": ["task-a: task-a finished the grant work"],
+  "steps": [
+    { "wake": "signal: task-a",
+      "prompt": [{ "report": { "task": "task-a", "verdict": "$verdict", "summary": "task-a finished the grant work" } }] },
+$supersede_step
+    { "wake": "signal: task-b",
+      "prompt": [{ "report": { "task": "task-b", "verdict": "routine", "summary": "task-b first pass" } }] },
+    { "consume_content": "task-a: task-a finished the grant work" },
+    { "wake": "signal: task-b",
+      "prompt": [{ "report": { "task": "task-b", "verdict": "routine", "summary": "task-b second pass" } }] },
+    { "exec": "bash \"$ROOT/bin/fm-branch-outcome.sh\" deliver --task task-a --status-ident \"$ident\" --endpoint \"$endpoint\"" },
+    { "wake": "signal: task-b",
+      "prompt": [{ "report": { "task": "task-b", "verdict": "routine", "summary": "task-b third pass" } }] }
+  ]
+}
+JSON
+    status=0
+    out=$(env -u FM_TASK_ID -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR \
+      FM_HOME="$fixture" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$fixture/config" \
+      FM_ROOT_OVERRIDE="$ROOT" \
+      EXTENSION_PATH="$fixture/.omp/extensions/fm-branch-supervision-omp.ts" \
+      DISPATCH_PATH="$fixture/.omp/extensions/lib/fm-branch-dispatch.ts" \
+      SESSIONS_ROOT="$fixture/.omp" \
+      SCENARIO_PATH="$fixture/steps.json" \
+      node --experimental-strip-types "$fixture/driver.mjs" 2>&1) || status=$?
+    expect_code 0 "$status" "replay $mode driver run failed: $out"
+    json=$(printf '%s' "$out" | tail -n 1)
+    # The failed merge replays with the completion-forced captain shape:
+    # bare "task: summary" content forcing a follow-up turn regardless of the
+    # recorded verdict.
+    replay_step=$(printf '%s' "$json" | jq -r '
+      [.sends[] | select(.content == "task-a: task-a finished the grant work" and .triggerTurn == true) | .step] | first // empty')
+    [ -n "$replay_step" ] \
+      || fail "$mode: the failed completion-bearing merge was not replayed in captain shape: $out"
+    assert_grep '"seq":1,"state":"failed"' "$state/branch-merge-deliveries.jsonl" \
+      "$mode: the provably-failed merge receipt is missing"
+    assert_grep '"seq":1,"state":"accepted"' "$state/branch-merge-deliveries.jsonl" \
+      "$mode: the replayed merge acceptance is missing"
+    if [ "$mode" = superseded ]; then
+      assert_no_grep '"seq":1,"state":"suppressed"' "$state/branch-merge-deliveries.jsonl" \
+        "superseded: advisory staleness retired a row still owing a completion"
+    fi
+    # The replayed send registered the in-flight identity, so that pass
+    # queued no generic relay; the bounded retry fires once, in a LATER pass,
+    # after consumption retired the marker.
+    relay_count=$(printf '%s' "$json" | jq '[.sends[] | select(.content | startswith("Undelivered completions await relay"))] | length')
+    assert_equals "1" "$relay_count" \
+      "$mode: expected exactly one bounded obligation relay, got $relay_count: $out"
+    relay_step=$(printf '%s' "$json" | jq -r '[.sends[] | select(.content | startswith("Undelivered completions await relay")) | .step] | first')
+    [ "$relay_step" -gt "$replay_step" ] \
+      || fail "$mode: the generic relay fired in the same pass as the replayed send - the replay registered no in-flight identity: $out"
+    relay_line=$(printf '%s' "$json" | jq -r '[.sends[] | select(.content | startswith("Undelivered completions await relay")) | .content] | first')
+    assert_contains "$relay_line" 'task-a: done: task-a finished' \
+      "$mode: the bounded relay did not carry task-a's owed completion"
+    # The exact delivery receipt discharges the obligation and nothing
+    # re-relays afterward.
+    assert_grep "\"task\":\"task-a\"" "$state/completion-deliveries.jsonl" \
+      "$mode: the completion delivery receipt is missing"
+  done
+  pass "a failed-merge replay recovers the covered completion identities, keeps the captain delivery shape, and registers the in-flight identity"
 }
 
 # --- decision-owned wakes reaching main ----------------------------------------

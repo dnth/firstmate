@@ -67,7 +67,11 @@
 #     reports a *condition* - an open keyed decision, a stopped worker, a held
 #     pause - is written as a typed advisory line carrying its freshness
 #     identity (task, kind, optional decision key, the source status-log
-#     revision endpoint@dev:inode, and the away producer's generation). At the
+#     revision endpoint@dev:inode, and the away producer's generation). A
+#     rendered OPEN DECISIONS row's revision is the one the drain folded it
+#     from, carried out on the drain's DECISION_REVISION stderr rows (issue
+#     #188) - never a live recapture, which could pick up appends the prose
+#     predates. At the
 #     flush boundary each typed line is reconciled against current durable
 #     state through fm-classify-lib.sh's fm_advisory_superseded - the single
 #     shared rule - and retired instead of delivered when the buffer's stale
@@ -2057,6 +2061,7 @@ handle_durable_wakes() {  # <watcher-reason> <state>
   local handled=0 ack_through ack_generation capture_before capture_after recovery_projection_tmp recovery_seen_tmp recovery_offset_tmp
   local capture_valid=false decision_parse_state=outside decision_lines='' decision_count=0
   local adv_task adv_key adv_rest adv_endpoint adv_ident
+  local decision_revisions='' rev_task rev_key rev_endpoint rev_ident rev_matched
   local decisions_routed_completely=false
   local FM_ESCALATION_SINK FM_DEFER_ESCALATION_FLUSH=1 FM_RECOVERY_SEEN_SINK FM_RECOVERY_OFFSET_SINK FM_RECOVERY_RECLASSIFY_SIGNALS=0
   local decision_header='OPEN DECISIONS (still open, folded from the durable status logs - not just the latest line):'
@@ -2081,7 +2086,13 @@ handle_durable_wakes() {  # <watcher-reason> <state>
     rm -f "$out" "$recovery_projection_tmp" "$recovery_seen_tmp" "$recovery_offset_tmp"
     return 1
   }
-  if ! "$FM_DAEMON_DIR/fm-wake-drain.sh" > "$out" 2> "$err"; then
+  # FM_WAKE_DRAIN_DECISION_REVISIONS asks the drain to pair every rendered
+  # OPEN DECISIONS row with its own source status-log revision on stderr, so
+  # the advisory below is anchored to the SAME snapshot the prose was folded
+  # from. Recapturing a live revision here instead would let a
+  # resolve-and-reopen landing between the drain's snapshot and this process's
+  # later stat pass falsely recent old prose (issue #188).
+  if ! FM_WAKE_DRAIN_DECISION_REVISIONS=1 "$FM_DAEMON_DIR/fm-wake-drain.sh" > "$out" 2> "$err"; then
     cat "$err" >&2
     rm -f "$out" "$err" "$recovery_projection_tmp" "$recovery_seen_tmp" "$recovery_offset_tmp"
     return 1
@@ -2089,6 +2100,9 @@ handle_durable_wakes() {  # <watcher-reason> <state>
 
   ack_through=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err" | tail -1)
   ack_generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err" | tail -1)
+  # The drain's rendered-decision revision table: one "<task>\t<key>\t
+  # <endpoint>\t<ident>" row per OPEN DECISIONS line it printed.
+  decision_revisions=$(awk -F '\t' '$1 == "DECISION_REVISION" { print $2 "\t" $3 "\t" $4 "\t" $5 }' "$err")
   # A generation-bound drain with an active watcher-down marker is a recovery
   # replay.  Its signal rows must remain reclassifiable until delivery succeeds;
   # the first attempt has no projection-generation file yet, so waiting for that
@@ -2151,8 +2165,8 @@ handle_durable_wakes() {  # <watcher-reason> <state>
       [ -n "$line" ] || continue
       # Each line is "<task> [key=<key>] <verb>: <note>" from fm-wake-drain's
       # OPEN DECISIONS fold, so the advisory is typed as a decision anchored at
-      # the task's current status revision - a resolution landing before the
-      # projection is injected suppresses the stale prose (issue #74).
+      # the revision the drain folded it from - a resolution landing before
+      # the projection is injected suppresses the stale prose (issue #74).
       adv_task=${line%%[[:space:]]*}
       adv_rest=${line#"$adv_task"}
       adv_rest=${adv_rest# }
@@ -2160,9 +2174,26 @@ handle_durable_wakes() {  # <watcher-reason> <state>
       case "$adv_rest" in
         '[key='*) adv_key=${adv_rest#\[key=}; adv_key=${adv_key%%\]*} ;;
       esac
-      IFS=$'\t' read -r adv_endpoint adv_ident <<EOF2
-$(advisory_status_revision "$state" "$adv_task")
-EOF2
+      rev_matched=false
+      while IFS="$tab" read -r rev_task rev_key rev_endpoint rev_ident; do
+        [ -n "$rev_task" ] || continue
+        if [ "$rev_task" = "$adv_task" ] && [ "$rev_key" = "$adv_key" ]; then
+          adv_endpoint=$rev_endpoint
+          adv_ident=$rev_ident
+          rev_matched=true
+          break
+        fi
+      done <<EOF3
+$decision_revisions
+EOF3
+      if [ "$rev_matched" != true ]; then
+        # A rendered decision without its drain-snapshot revision means the
+        # producer and consumer disagree; retain the episode for a retry
+        # rather than recapture a live revision the prose predates.
+        log "decision advisory has no drain-snapshot revision (task=$adv_task key=$adv_key); retaining recovery episode"
+        capture_valid=false
+        break
+      fi
       escalate_add "$state" "$line" "$adv_task" decision "$adv_key" \
         "$adv_endpoint" "$adv_ident" || capture_valid=false
     done <<EOF
@@ -2182,7 +2213,7 @@ EOF
     fi
   fi
 
-  grep -v '^WAKE_ACK_REQUIRED:' "$err" >&2 || true
+  grep -v -e '^WAKE_ACK_REQUIRED:' -e '^DECISION_REVISION' "$err" >&2 || true
   rm -f "$out" "$err" "$recovery_projection_tmp"
   if [ "$decisions_routed_completely" != true ]; then
     rm -f "$recovery_seen_tmp" "$recovery_offset_tmp"
