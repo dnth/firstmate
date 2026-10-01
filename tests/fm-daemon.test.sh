@@ -1898,6 +1898,133 @@ test_advisory_replay_only_while_current() {
   pass "a failed advisory send replays only while the advisory is still current"
 }
 
+# Issue #188: a rendered OPEN DECISIONS advisory must carry the SAME status
+# revision its prose was folded from. The old code recaptured a live revision
+# after the drain returned, so a resolve-and-reopen landing between the
+# drain's snapshot and that capture made the closed question's old prose
+# deliverable as though it were still the current decision. The wrapped drain
+# below produces the real presentation, then lands the transition before
+# returning - the production window the defect lived in. The reopen uses a
+# differently worded question so delivery of the NEW text later proves the
+# suppression was real, not a swallowed decision.
+test_decision_advisory_anchors_to_the_drain_snapshot() {
+  local dir state fakebin daemon_bin marker sent capture statusf mode race_append
+  for mode in race resolution-only unchanged; do
+    dir=$(make_supercase "advisory-drain-snapshot-$mode")
+    state="$dir/state"
+    fakebin="$dir/fakebin"
+    daemon_bin="$dir/daemon-bin"
+    marker="$state/.watcher-down"
+    sent="$dir/sent.log"
+    capture="$dir/pane.txt"
+    statusf="$state/decision-$mode.status"
+    mkdir -p "$daemon_bin"
+    : > "$sent"
+    : > "$capture"
+    printf 'needs-decision [key=theme]: choose the palette\nworking: later progress\n' > "$statusf"
+    afk_enter "$state"
+
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      fm_recovery_marker_publish "$2" downtime
+    ' _ "$ROOT/bin/fm-wake-lib.sh" "$marker" \
+      || fail "$mode: the recovery marker could not be published"
+
+    cat > "$daemon_bin/fm-wake-drain.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = --ack-through ]; then
+  exec "$FM_REAL_WAKE_DRAIN" "$@"
+fi
+out=$(mktemp "$FM_STATE_OVERRIDE/.race-drain.XXXXXX") || exit 1
+err=$(mktemp "$FM_STATE_OVERRIDE/.race-drain.XXXXXX") || { rm -f "$out"; exit 1; }
+rc=0
+"$FM_REAL_WAKE_DRAIN" > "$out" 2> "$err" || rc=$?
+# Land the transition AFTER the drain's snapshot produced its output but
+# before the daemon can consume it - once, so the retry drain sees settled
+# state.
+if [ "$rc" -eq 0 ] && [ -n "${FM_RACE_APPEND:-}" ] && [ ! -e "${FM_RACE_FLAG:?}" ]; then
+  printf '%b' "$FM_RACE_APPEND" >> "$FM_RACE_STATUS"
+  : > "$FM_RACE_FLAG"
+fi
+cat "$out"
+cat "$err" >&2
+rm -f "$out" "$err"
+exit "$rc"
+SH
+    chmod +x "$daemon_bin/fm-wake-drain.sh"
+
+    race_append=''
+    case "$mode" in
+      race) race_append='resolved [key=theme]: captain picked dark\nneeds-decision [key=theme]: choose the accent color\n' ;;
+      resolution-only) race_append='resolved [key=theme]: captain picked dark\n' ;;
+    esac
+
+    FM_DAEMON_DIR="$daemon_bin" \
+      FM_REAL_WAKE_DRAIN="$ROOT/bin/fm-wake-drain.sh" \
+      FM_RACE_APPEND="$race_append" \
+      FM_RACE_FLAG="$dir/appended" \
+      FM_RACE_STATUS="$statusf" \
+      FM_STATE_OVERRIDE="$state" \
+      FM_ESCALATE_BATCH_SECS=30 \
+      FM_FAKE_TMUX_PANE_ALIVE=1 \
+      FM_FAKE_TMUX_SENT="$sent" \
+      FM_FAKE_TMUX_CAPTURE="$capture" \
+      PATH="$fakebin:$PATH" \
+      handle_durable_wakes "check: rearm-resurface" "$state" \
+      || fail "$mode: the recovery drain was not acknowledged"
+
+    case "$(cat "$marker" 2>/dev/null || true)" in
+      acked:handling:*) ;;
+      *) fail "$mode: the handled recovery episode was not retired" ;;
+    esac
+
+    case "$mode" in
+      race)
+        # The advisory's identity is the drain snapshot's revision, so the
+        # resolve+reopen span after it retires the stale question's prose.
+        assert_no_grep 'choose the palette' "$sent" \
+          "race: the resolved question's stale prose reached the pane"
+        # A later fresh drain delivers the reopened decision as its own
+        # current advisory - suppression did not swallow the still-open key.
+        FM_STATE_OVERRIDE="$state" bash -c '
+          . "$1"
+          fm_recovery_marker_publish "$2" downtime
+        ' _ "$ROOT/bin/fm-wake-lib.sh" "$marker" \
+          || fail "race: the follow-up recovery marker could not be published"
+        FM_DAEMON_DIR="$daemon_bin" \
+          FM_REAL_WAKE_DRAIN="$ROOT/bin/fm-wake-drain.sh" \
+          FM_RACE_APPEND='' \
+          FM_RACE_FLAG="$dir/appended" \
+          FM_RACE_STATUS="$statusf" \
+          FM_STATE_OVERRIDE="$state" \
+          FM_ESCALATE_BATCH_SECS=30 \
+          FM_FAKE_TMUX_PANE_ALIVE=1 \
+          FM_FAKE_TMUX_SENT="$sent" \
+          FM_FAKE_TMUX_CAPTURE="$capture" \
+          PATH="$fakebin:$PATH" \
+          handle_durable_wakes "check: rearm-resurface" "$state" \
+          || fail "race: the fresh recovery drain was not acknowledged"
+        assert_grep 'choose the accent color' "$sent" \
+          "race: the reopened decision was never delivered by a fresh drain"
+        ;;
+      resolution-only)
+        # Control: resolution without reopening is suppressed exactly as
+        # before - the carried revision changes nothing here.
+        assert_no_grep 'choose the palette' "$sent" \
+          "resolution-only: a resolved decision still reached the pane"
+        ;;
+      unchanged)
+        # Control: with no intervening transition the open decision still
+        # delivers from its snapshot identity.
+        assert_grep 'choose the palette' "$sent" \
+          "unchanged: a still-open decision was not delivered"
+        ;;
+    esac
+  done
+  pass "a decision advisory carries its drain-snapshot revision, so a mid-drain resolve-and-reopen cannot deliver stale prose"
+}
+
 # A routine long-cadence pause confirmation carries no new captain action once
 # the same condition identity was already delivered: the first recheck lands,
 # an identical later recheck stays silent.
@@ -3082,6 +3209,7 @@ test_decision_advisory_suppressed_when_key_resolves_before_flush
 test_decision_advisory_still_current_flushes
 test_worker_advisory_suppressed_after_resumption
 test_advisory_replay_only_while_current
+test_decision_advisory_anchors_to_the_drain_snapshot
 test_pause_recheck_repeat_confirmation_stays_silent
 test_oversized_digest_is_bounded_and_kept_durable
 test_digest_budget_counts_omitted_events

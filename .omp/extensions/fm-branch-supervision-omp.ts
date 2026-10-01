@@ -729,19 +729,21 @@ export default function (pi: ExtensionAPI) {
     completionIds: readonly string[] = [],
   ): Promise<"delivered" | "suppressed" | false> {
     if (!(await actingAsOwner(expectedGeneration))) return false;
+    // Advance the cursor first so the outcome can never be delivered twice.
+    if (/^[0-9]+$/.test(seq) && !(await runOutcomeScript(["handoff-next", "--seq", seq])).ok) {
+      return false;
+    }
     // Freshness reconcile at the last preventable delivery boundary (issue
-    // #74): the advisory identity recorded at report time is re-checked
-    // against current durable state here, before the merge note can enter
-    // main's queue. An outcome carrying completion obligations still forces
-    // delivery - the owed events are facts, not advisory prose.
+    // #74, tightened by #188): the advisory identity recorded at report time
+    // is re-checked against current durable state AFTER the cursor handoff
+    // and the send below runs with no further awaited operation in between,
+    // so no status transition can slip into the gap. An outcome carrying
+    // completion obligations still forces delivery - the owed events are
+    // facts, not advisory prose.
     let superseded = false;
     if (completionIds.length === 0 && /^[0-9]+$/.test(seq)) {
       const check = await runOutcomeScript(["reconcile", "--seq", seq]);
       superseded = check.ok && check.stdout.startsWith("suppressed");
-    }
-    // Advance the cursor first so the outcome can never be delivered twice.
-    if (/^[0-9]+$/.test(seq) && !(await runOutcomeScript(["handoff-next", "--seq", seq])).ok) {
-      return false;
     }
     if (superseded) {
       await runOutcomeScript(["merge-receipt", "--seq", seq, "--state", "suppressed"]);
@@ -812,7 +814,15 @@ export default function (pi: ExtensionAPI) {
     if (!replayable.ok || !replayable.stdout) return;
     for (const line of replayable.stdout.split("\n")) {
       if (!line) continue;
-      let record: { seq?: number; task?: string; verdict?: string; summary?: string; silent?: boolean };
+      let record: {
+        seq?: number;
+        task?: string;
+        verdict?: string;
+        summary?: string;
+        silent?: boolean;
+        statusIdent?: string;
+        statusEndpoint?: number;
+      };
       try {
         record = JSON.parse(line) as typeof record;
       } catch {
@@ -824,19 +834,54 @@ export default function (pi: ExtensionAPI) {
       if (redeliveryAttempted.has(replayKey)) continue;
       redeliveryAttempted.add(replayKey);
       if (!(await actingAsOwner(expectedGeneration))) return;
-      const check = await runOutcomeScript(["reconcile", "--seq", seq]);
-      if (check.ok && check.stdout.startsWith("suppressed")) {
-        await runOutcomeScript(["merge-receipt", "--seq", seq, "--state", "suppressed"]);
-        continue;
-      }
       const task = record.task;
       const summary = record.summary;
-      const captain = record.verdict === "captain";
+      // Recover the completion obligations this outcome's covered span still
+      // owes: merge-replay returns the stored statusIdent/statusEndpoint, and
+      // the same completions scan the live report runs rebuilds the in-flight
+      // identities this send must carry - so a replayed completion-bearing
+      // outcome keeps its captain delivery shape and the pending-completion
+      // pass below can recognize it as already in flight. When the original
+      // status identity is no longer readable the scan fails and the replay
+      // keeps the pre-existing advisory behavior; the durable backstop still
+      // owns that obligation.
+      let completionIds: string[] = [];
+      const statusIdent = typeof record.statusIdent === "string" ? record.statusIdent : "";
+      const statusEndpoint = typeof record.statusEndpoint === "number" ? record.statusEndpoint : 0;
+      if (statusIdent && statusEndpoint > 0) {
+        const scan = await runOutcomeScript([
+          "completions",
+          "--task",
+          task,
+          "--status-ident",
+          statusIdent,
+          "--through",
+          String(statusEndpoint),
+        ]);
+        if (scan.ok && scan.stdout) {
+          completionIds = scan.stdout
+            .split("\n")
+            .filter((row) => /\t(?:pending|recorded)\t/.test(row))
+            .map((row) => `${task}|${statusIdent}|${row.split("\t", 1)[0]}`);
+        }
+      }
+      // Same freshness rule as live merge: only a completion-free replay may
+      // be retired on advisory staleness; an undelivered completion
+      // obligation is an owed fact, not advisory prose.
+      if (completionIds.length === 0) {
+        const check = await runOutcomeScript(["reconcile", "--seq", seq]);
+        if (check.ok && check.stdout.startsWith("suppressed")) {
+          await runOutcomeScript(["merge-receipt", "--seq", seq, "--state", "suppressed"]);
+          continue;
+        }
+      }
+      const captain = record.verdict === "captain" || completionIds.length > 0;
+      const content = captain ? `${task}: ${summary}` : `${MERGE_NOTE_BOAT} ${task}: ${summary}`;
       const message = captain
-        ? { customType: "fm-branch-merge", content: `${task}: ${summary}`, display: false }
+        ? { customType: "fm-branch-merge", content, display: false }
         : {
             customType: "fm-branch-merge",
-            content: `${MERGE_NOTE_BOAT} ${task}: ${summary}`,
+            content,
             display: !(task === "fleet" && record.silent === true),
           };
       try {
@@ -852,6 +897,12 @@ export default function (pi: ExtensionAPI) {
         continue;
       }
       await runOutcomeScript(["merge-receipt", "--seq", seq, "--state", "accepted"]);
+      for (const id of completionIds) inflightCompletions.add(id);
+      if (completionIds.length > 0) {
+        const bucket = pendingDeliveryContent.get(content) ?? [];
+        bucket.push(...completionIds);
+        pendingDeliveryContent.set(content, bucket);
+      }
     }
   }
 

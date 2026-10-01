@@ -11,6 +11,13 @@
 #
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
+#
+# Machine channel: under FM_WAKE_DRAIN_DECISION_REVISIONS=1 (set only by the
+# away-mode daemon) every rendered OPEN DECISIONS row also emits one
+# "DECISION_REVISION<TAB><task><TAB><key><TAB><endpoint><TAB><ident>" line on
+# stderr carrying the same status-log revision the presentation folded the
+# decision from, so the consumer can anchor its advisory to this snapshot
+# (issue #188).
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -357,11 +364,27 @@ EOF
 print_open_decisions_section() {
   local snapshot=${1:-} open task key verb note line item_bytes=220 global_bytes=4000
   local output='' used=0 shown=0 omitted=0 bytes
+  local revisions='' s_task s_endpoint s_ident d_endpoint d_ident emit_revisions=false
+
+  # Machine channel for the away-mode daemon (issue #188): under
+  # FM_WAKE_DRAIN_DECISION_REVISIONS=1 each rendered decision also emits one
+  # stderr row "DECISION_REVISION<TAB><task><TAB><key><TAB><endpoint><TAB>
+  # <ident>" carrying the SAME status-log revision this presentation folded it
+  # from, so the daemon anchors the decision advisory to this snapshot instead
+  # of recapturing a live revision that an append between the two could have
+  # already moved. Only the daemon sets the flag; every other drain consumer's
+  # stderr is unchanged.
+  case "${FM_WAKE_DRAIN_DECISION_REVISIONS:-0}" in 1) emit_revisions=true ;; esac
 
   if [ -n "$snapshot" ]; then
     open=$(scan_open_decisions_snapshot "$STATE" "$snapshot") || return 1
+    revisions=$snapshot
   else
     open=$(scan_open_decisions_incremental "$STATE") || return 1
+    # The unsnapshotted fallback folds live state, so a rendered decision's
+    # revision anchor is a live capture taken beside the fold - the same
+    # semantics this path always had.
+    revisions=$(status_presentation_snapshot "$STATE" 2>/dev/null) || revisions=
   fi
   [ -n "$open" ] || return 0
 
@@ -384,6 +407,18 @@ print_open_decisions_section() {
 "
     used=$((used + bytes))
     shown=$((shown + 1))
+    if [ "$emit_revisions" = true ]; then
+      d_endpoint=- d_ident=-
+      while IFS=$(printf '\t') read -r s_task s_endpoint s_ident; do
+        [ "$s_task" = "$task" ] || continue
+        d_endpoint=$s_endpoint
+        d_ident=$s_ident
+        break
+      done <<EOF_REV
+$revisions
+EOF_REV
+      printf 'DECISION_REVISION\t%s\t%s\t%s\t%s\n' "$task" "$key" "$d_endpoint" "$d_ident" >&2
+    fi
   done <<EOF
 $open
 EOF

@@ -45,17 +45,24 @@
 #     "epoch":N} receipt per merge-note delivery attempt, keyed by the durable
 #     seq (the idempotent delivery token). `accepted` = sendMessage accepted
 #     the note; `failed` = it provably threw before acceptance, so the row is
-#     replayable WHILE ITS ADVISORY IS STILL CURRENT; `suppressed` = the
-#     delivery boundary retired the row after reconciliation. A cursor-
+#     replayable WHILE ITS ADVISORY IS STILL CURRENT OR ITS COVERED SPAN STILL
+#     OWES A COMPLETION; `suppressed` = the delivery boundary retired the row
+#     after reconciliation. A cursor-
 #     advanced row with no receipt is indeterminate - possibly delivered - and
 #     is never replayed, matching the buffer's accepted-but-unconfirmed rule.
 #   - Delivery-boundary reconcile (issue #74): `reconcile` answers whether the
-#     advisory recorded on a seq is still current. The merge path and replay
-#     reconcile BEFORE the note can enter main's queue and suppress provably
-#     obsolete advisories: a pending-decision advisory whose key has closed
+#     advisory recorded on a seq is still current. The live merge runs the
+#     cursor handoff FIRST, then reconciles, then sends with no further
+#     awaited operation between them (issue #188), and replay applies the same
+#     ordering; provably obsolete advisories are suppressed before the note
+#     can enter main's queue: a pending-decision advisory whose key has closed
 #     under the shared fold, a stopped-worker advisory whose status file has
 #     moved past its captured revision, a pause advisory whose hold ended, or
-#     one whose status file is gone. fm-classify-lib.sh's
+#     one whose status file is gone. A replayed row first rebuilds its covered
+#     span's undelivered completion obligations through `completions` on the
+#     stored statusEndpoint/statusIdent pair, and a nonempty result bypasses
+#     the reconcile entirely - the owed event is a fact, not advisory prose.
+#     fm-classify-lib.sh's
 #     fm_advisory_superseded is the single owner of the freshness rule, shared
 #     with the away daemon's escalation-buffer reconcile.
 #   - Cursor: $STATE/.branch-outcomes-cursor holds the highest seq handed to
