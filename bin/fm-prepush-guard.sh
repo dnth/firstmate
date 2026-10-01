@@ -178,6 +178,19 @@ cmd_dispatch() {  # <dir> <hook-name> [git's hook args]
         fi
       done
       if [ -z "$default_branch" ]; then
+        for r in "$remote_name" origin; do
+          [ -n "$r" ] || continue
+          default_ref=$(git ls-remote --symref "$r" HEAD 2>/dev/null |
+            awk '$1 == "ref:" && $3 == "HEAD" { print $2; exit }')
+          case "$default_ref" in
+            refs/heads/*)
+              default_branch=${default_ref#refs/heads/}
+              break
+              ;;
+          esac
+        done
+      fi
+      if [ -z "$default_branch" ]; then
         default_branch=$(git config --local --get init.defaultBranch 2>/dev/null || true)
       fi
       input=$(cat)
