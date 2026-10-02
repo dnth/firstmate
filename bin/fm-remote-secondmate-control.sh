@@ -71,6 +71,8 @@ FM_RUNPOD_OMP_AUTH_BROKER_URL=${FM_RUNPOD_OMP_AUTH_BROKER_URL:-http://127.0.0.1:
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-quota-axi-lib.sh
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
+# shellcheck source=bin/fm-omp-auth-token-lib.sh
+. "$SCRIPT_DIR/fm-omp-auth-token-lib.sh"
 # shellcheck source=bin/fm-task-inbox-lib.sh
 if [ -f "$SCRIPT_DIR/fm-task-inbox-lib.sh" ]; then
   . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
@@ -88,17 +90,21 @@ mode_600() {
   fi
 }
 
-configure_runpod_omp_auth_launch() {
+configure_compute_omp_auth_launch() {
   local token port
-  [ -f "$FM_RUNPOD_SANDBOX_MARKER" ] && [ ! -L "$FM_RUNPOD_SANDBOX_MARKER" ] || return 0
+  if [ -f /home/user/.fm/boat-auth.marker ] && [ ! -L /home/user/.fm/boat-auth.marker ]; then
+    FM_RUNPOD_OMP_AUTH_BROKER_TOKEN_FILE=/home/user/.fm/omp-auth-broker.token
+    FM_RUNPOD_OMP_AUTH_BROKER_URL=http://127.0.0.1:8765
+  else
+    [ -f "$FM_RUNPOD_SANDBOX_MARKER" ] && [ ! -L "$FM_RUNPOD_SANDBOX_MARKER" ] || return 0
+  fi
   if [ ! -f "$FM_RUNPOD_OMP_AUTH_BROKER_TOKEN_FILE" ] \
      || [ -L "$FM_RUNPOD_OMP_AUTH_BROKER_TOKEN_FILE" ] \
      || ! mode_600 "$FM_RUNPOD_OMP_AUTH_BROKER_TOKEN_FILE"; then
     die "RunPod omp auth-broker token is missing, unsafe, or not mode 0600"
   fi
   token=$(cat "$FM_RUNPOD_OMP_AUTH_BROKER_TOKEN_FILE") || die "RunPod omp auth-broker token is unreadable"
-  [ -n "$token" ] && [ "${#token}" -le 512 ] || die "RunPod omp auth-broker token is invalid"
-  case "$token" in *[!A-Za-z0-9_-]*) die "RunPod omp auth-broker token is invalid" ;; esac
+  fm_omp_auth_token_valid "$token" || die "RunPod omp auth-broker token is invalid"
   case "$FM_RUNPOD_OMP_AUTH_BROKER_URL" in http://127.0.0.1:[0-9]*|http://localhost:[0-9]*) ;;
     *) die "RunPod omp auth-broker URL must be a loopback HTTP endpoint" ;;
   esac
@@ -366,7 +372,7 @@ cmd_launch() {
   [ "$model" = - ] || ARGS+=(--model "$model")
   [ "$effort" = - ] || ARGS+=(--effort "$effort")
   [ -z "$traceparent" ] || ARGS+=(--traceparent "$traceparent")
-  configure_runpod_omp_auth_launch
+  configure_compute_omp_auth_launch
   if ! out=$(HERDR_SESSION="$REMOTE_HERDR_SESSION" FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
     FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
     FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_SKIP_SECONDMATE_INHERIT=1 \

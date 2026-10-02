@@ -171,8 +171,8 @@ fi
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
-# shellcheck source=bin/fm-runpod-lib.sh
-. "$SCRIPT_DIR/fm-runpod-lib.sh"
+# shellcheck source=bin/fm-compute-lib.sh
+. "$SCRIPT_DIR/fm-compute-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
@@ -182,19 +182,19 @@ fi
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 
-RUNPOD_DELIVERY_LOCK=
+COMPUTE_DELIVERY_LOCK=
 HERMES_DELIVERY_LOCK=
 TARGET_OMP_TURNSTART_REFERENCE=
 TARGET_HERMES_START_REFERENCE=
 INBOX_META_LOCK=
 INBOX_META_LOCK_HELD=0
-release_runpod_delivery_lock() {
-  [ -n "$RUNPOD_DELIVERY_LOCK" ] || return 0
-  fm_lock_release "$RUNPOD_DELIVERY_LOCK"
-  RUNPOD_DELIVERY_LOCK=
+release_compute_delivery_lock() {
+  [ -n "$COMPUTE_DELIVERY_LOCK" ] || return 0
+  fm_lock_release "$COMPUTE_DELIVERY_LOCK"
+  COMPUTE_DELIVERY_LOCK=
 }
 fm_send_cleanup() {
-  release_runpod_delivery_lock
+  release_compute_delivery_lock
   if [ "$INBOX_META_LOCK_HELD" = 1 ]; then
     fm_lock_release "$INBOX_META_LOCK" || true
     INBOX_META_LOCK_HELD=0
@@ -654,10 +654,10 @@ if [ "$TARGET_BACKEND" != remote ]; then
   fm_backend_validate "$TARGET_BACKEND" || exit 1
 fi
 
-if [ "$TARGET_BACKEND" = remote ] && fm_runpod_is_managed "$DATA" "$TARGET_REMOTE_ID"; then
-  RUNPOD_DELIVERY_LOCK=$(secondmate_handoff_lock_path "$STATE" "$TARGET_REMOTE_ID")
-  fm_lock_acquire_wait "$RUNPOD_DELIVERY_LOCK" \
-    || { echo "error: cannot lock delivery to RunPod secondmate $TARGET_REMOTE_ID" >&2; exit 1; }
+if [ "$TARGET_BACKEND" = remote ] && fm_compute_is_managed "$DATA" "$TARGET_REMOTE_ID"; then
+  COMPUTE_DELIVERY_LOCK=$(secondmate_handoff_lock_path "$STATE" "$TARGET_REMOTE_ID")
+  fm_lock_acquire_wait "$COMPUTE_DELIVERY_LOCK" \
+    || { echo "error: cannot lock delivery to compute-managed secondmate $TARGET_REMOTE_ID" >&2; exit 1; }
 fi
 
 # Wake-before-deliver: a scale-to-zero compute route has no host until its
@@ -666,8 +666,8 @@ fi
 # delivered, so retrying it can never duplicate a request. Once delivery starts,
 # the existing unknown-completion contract below is untouched: an SSH status of
 # 255 still means unknown completion with no retry and no failover.
-if [ "$TARGET_BACKEND" = remote ] && fm_runpod_is_dormant "$DATA" "$TARGET_REMOTE_ID"; then
-  if ! wake_out=$("$SCRIPT_DIR/fm-runpod.sh" wake "$TARGET_REMOTE_ID" 2>&1); then
+if [ "$TARGET_BACKEND" = remote ] && fm_compute_is_dormant "$DATA" "$TARGET_REMOTE_ID"; then
+  if ! wake_out=$("$SCRIPT_DIR/fm-compute-wake.sh" "$TARGET_REMOTE_ID" 2>&1); then
     [ -z "$wake_out" ] || printf '%s\n' "$wake_out" >&2
     echo "error: remote secondmate $TARGET_REMOTE_ID could not be woken on its compute provider; nothing was delivered" >&2
     exit 1

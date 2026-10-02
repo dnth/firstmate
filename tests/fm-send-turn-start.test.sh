@@ -356,6 +356,7 @@ test_remote_control_uses_task_bound_omp_route() {
     "$home/.omp/extensions/lib" "$home/state/parent-route" \
     "$home/state/omp-sessions" "$home/data/.parent-route"
   cp "$ROOT/bin/fm-remote-secondmate-control.sh" "$root/bin/"
+  cp "$ROOT/bin/fm-omp-auth-token-lib.sh" "$root/bin/"
   cp "$ROOT/bin/fm-marker-lib.sh" "$ROOT/bin/fm-operational-input.sh" \
     "$ROOT/bin/fm-primary-watch-version-lib.sh" "$ROOT/bin/fm-omp-process-lib.sh" \
     "$ROOT/bin/fm-primary-watch-core.ts" "$root/bin/"

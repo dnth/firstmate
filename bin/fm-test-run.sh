@@ -175,6 +175,7 @@ family_for_basename() {
     fm-remote-reply.test.sh|fm-remote-secondmate-lifecycle-e2e.test.sh|\
     fm-remote-secondmate-trace-context.test.sh|\
     fm-runpod-lifecycle.test.sh|fm-runpod-routing.test.sh|fm-runpod-pod-boot.test.sh|fm-runpod-omp-auth.test.sh|\
+    fm-boat-lifecycle.test.sh|fm-boat-routing.test.sh|fm-boat-omp-auth.test.sh|\
     fm-secondmate-harness.test.sh|fm-secondmate-lifecycle-e2e.test.sh|\
     fm-secondmate-liveness.test.sh|fm-secondmate-safety.test.sh|fm-secondmate-sync.test.sh|\
     fm-startup-memory-budget.test.sh|\
@@ -1003,7 +1004,7 @@ families_for_changed_path() {
     bin/fm-secondmate*|bin/fm-remote*|bin/fm-on.sh|bin/fm-home-seed.sh|\
     bin/fm-backlog-handoff.sh|bin/fm-backlog-receive.sh|bin/fm-procevent-remote-reply.sh|\
     bin/fm-config-inherit-lib.sh|bin/fm-config-push.sh|bin/fm-shared*|\
-    bin/fm-runpod*|bin/fm-omp-auth*|tests/runpod-fixture.sh)
+    bin/fm-runpod*|bin/fm-boat*|bin/fm_boat_*|bin/fm-compute*|bin/fm-omp-auth*|tests/runpod-fixture.sh|tests/boat-fixture.py|tests/boat-auth-cases.py|tests/boat-lifecycle-cases.py)
       printf '%s\n' secondmate
       ;;
     bin/fm-session-start.sh|bin/fm-bootstrap.sh|bin/fm-fleet-sync.sh|\

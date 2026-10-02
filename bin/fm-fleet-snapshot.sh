@@ -143,9 +143,9 @@ validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIME
 # shellcheck source=bin/fm-ff-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-ff-lib.sh"  # validate_secondmate_home: shared seeded-home boundary checks
-# shellcheck source=bin/fm-runpod-lib.sh
+# shellcheck source=bin/fm-compute-lib.sh
 # shellcheck disable=SC1091
-. "$SCRIPT_DIR/fm-runpod-lib.sh"
+. "$SCRIPT_DIR/fm-compute-lib.sh"
 
 usage() {
   cat <<'EOF'
@@ -495,9 +495,9 @@ task_json_lines() {
     endpoint_exists=null
     agent_alive=not_checked
     if [ -n "$remote_host" ]; then
-      # RunPod scale-to-zero routes are deliberate no-host lifecycle states.
+      # Scale-to-zero routes are deliberate no-host lifecycle states.
       # Keep the snapshot read-only and avoid probing their absent SSH endpoint.
-      if fm_runpod_is_dormant "$DATA" "$id"; then
+      if fm_compute_is_dormant "$DATA" "$id"; then
         remote_home_present=false
         endpoint_exists=null
         agent_alive=unknown

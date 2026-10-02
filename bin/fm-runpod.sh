@@ -782,7 +782,7 @@ pod_boot_env() {
   local boot="$SCRIPT_DIR/fm-runpod-pod-boot.sh" helper="$SCRIPT_DIR/fm-treehouse-root-lib.sh"
   [ -f "$boot" ] || die "the pod boot script is missing: $boot"
   [ -f "$helper" ] || die "the Treehouse-root helper is missing: $helper"
-  cat "$helper" "$boot" | base64 | tr -d '\n'
+  cat "$helper" "$SCRIPT_DIR/fm-omp-auth-token-lib.sh" "$boot" | base64 | tr -d '\n'
 }
 
 pod_create_body() {  # <id> <compute> <gpu-type> <min-vram>

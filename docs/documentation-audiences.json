@@ -32,7 +32,8 @@
     "docs/orca-backend.md",
     "docs/cmux-backend.md",
     "docs/remote-secondmates.md",
-    "docs/runpod-secondmates.md"
+    "docs/runpod-secondmates.md",
+    "docs/boat-secondmates.md"
   ],
   "requiredOwnerPointers": [
     {
@@ -347,6 +348,10 @@
     },
     {
       "path": "docs/runpod-secondmates.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/boat-secondmates.md",
       "audience": "operator-current"
     },
     {

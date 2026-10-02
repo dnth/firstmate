@@ -64,6 +64,8 @@ PROXY_SCRIPT="$SCRIPT_DIR/fm-omp-auth-broker-readonly-proxy.mjs"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-omp-auth-token-lib.sh
+. "$SCRIPT_DIR/fm-omp-auth-token-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -87,10 +89,6 @@ mode_600() {
   fi
 }
 
-token_valid() {  # <token>
-  [ -n "$1" ] && [ "${#1}" -le 512 ] || return 1
-  case "$1" in *[!A-Za-z0-9_-]*) return 1 ;; esac
-}
 
 token_sync() {
   local token tmp
@@ -98,7 +96,7 @@ token_sync() {
   token=$("$OMP_BIN" auth-broker token) || die "omp auth-broker token failed"
   token=${token%$'\n'}
   token=${token%$'\r'}
-  token_valid "$token" || die "omp auth-broker token returned an invalid bearer"
+  fm_omp_auth_token_valid "$token" || die "omp auth-broker token returned an invalid bearer"
   if [ -e "$CONFIG/runpod" ] || [ -L "$CONFIG/runpod" ]; then
     if [ ! -d "$CONFIG/runpod" ] || [ -L "$CONFIG/runpod" ]; then
       die "RunPod config directory is unavailable or unsafe: $CONFIG/runpod"

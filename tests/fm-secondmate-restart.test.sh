@@ -649,7 +649,7 @@ test_relaunches_do_not_block_persist_polling() {
 
 # --- T13: a worker that cannot publish its result cannot hang the pass -------
 test_unpublished_worker_result_is_accounted_for() {
-  local dir out rc_file driver i result_dir
+  local dir out rc_file driver i result_dir deadline
   dir=$(new_case worker-result)
   setup_remote_case "$dir" sm1 slow-relaunch
   export FM_FAKE_ANSWER_STATUS="$dir/home/state/sm1.status"
@@ -659,12 +659,11 @@ test_unpublished_worker_result_is_accounted_for() {
   ( run_restart "$dir" sm1 > "$out" 2>&1; printf '%s\n' "$?" > "$rc_file" ) &
   driver=$!
   result_dir=
-  i=0
-  while [ "$i" -lt 200 ]; do
+  deadline=$((SECONDS + 30))
+  while [ "$SECONDS" -lt "$deadline" ]; do
     result_dir=$(find "$dir/home/state" -maxdepth 1 -type d -name '.secondmate-restart.*' -print -quit)
     [ -e "$dir/fake/remote-relaunch-start" ] && [ -n "$result_dir" ] && break
     /bin/sleep 0.01
-    i=$((i + 1))
   done
   [ -n "$result_dir" ] || { kill "$driver" 2>/dev/null || true; fail "restart result directory never appeared"; }
   rm -rf -- "$result_dir"
