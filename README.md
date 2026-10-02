@@ -61,7 +61,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 ## What this fork adds over upstream
 
-`dnth/firstmate` carries five features that are not in [upstream](https://github.com/kunchenguid/firstmate).
+`dnth/firstmate` carries six features that are not in [upstream](https://github.com/kunchenguid/firstmate).
 
 - **RunPod remote secondmates** - run a persistent second mate on an on-demand CPU or GPU pod, with an explicit scale-to-zero lifecycle that drops compute cost after sleep and wakes the pod for the next delivery. See [RunPod second mates](docs/runpod-secondmates.md); the compute lifecycle lives in `bin/fm-runpod*.sh`.
 - **Boat remote secondmates** - explicit-sleep compute with finite TTLs, stable SSH pins, and cgroup-owned subscription credential helpers. See [Boat second mates](docs/boat-secondmates.md); ephemeral workers are not supported.
