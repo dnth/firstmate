@@ -413,7 +413,7 @@ def finding_actions(js, step, field):
     for item in items:
         if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"].strip():
             missing(f"step {step} field {field}: finding requires a nonempty string id")
-        if item.get("action") not in ("ask-user", "auto-fix"):
+        if item.get("action") not in ("ask-user", "auto-fix", "no-op"):
             missing(f"step {step} field {field}: finding {item['id']} has invalid action")
         if item["id"] in actions:
             missing(f"step {step} field {field}: duplicate finding id {item['id']}")
