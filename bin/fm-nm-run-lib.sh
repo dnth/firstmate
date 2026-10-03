@@ -393,25 +393,41 @@ except sqlite3.Error as exc:
     missing(str(exc))
 
 
-def finding_actions(js):
+def serialized(js, step, field):
+    if js is None or js == "":
+        return None
     try:
-        data = json.loads(js or "")
-    except (TypeError, ValueError):
+        return json.loads(js)
+    except (TypeError, ValueError) as exc:
+        missing(f"step {step} field {field}: invalid JSON ({exc})")
+
+
+def finding_actions(js, step, field):
+    data = serialized(js, step, field)
+    if data is None and (js is None or js == ""):
         return {}
     items = data.get("findings") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        missing(f"step {step} field {field}: findings must be an array")
     actions = {}
-    for item in items or []:
-        if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"]:
-            actions[item["id"]] = item.get("action")
+    for item in items:
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"].strip():
+            missing(f"step {step} field {field}: finding requires a nonempty string id")
+        if item.get("action") not in ("ask-user", "auto-fix"):
+            missing(f"step {step} field {field}: finding {item['id']} has invalid action")
+        if item["id"] in actions:
+            missing(f"step {step} field {field}: duplicate finding id {item['id']}")
+        actions[item["id"]] = item["action"]
     return actions
 
 
-def selected_ids(js):
-    try:
-        data = json.loads(js or "")
-    except (TypeError, ValueError):
+def selected_ids(js, step, field):
+    data = serialized(js, step, field)
+    if data is None and (js is None or js == ""):
         return []
-    return [i for i in data if isinstance(i, str)] if isinstance(data, list) else []
+    if not isinstance(data, list) or any(not isinstance(i, str) or not i.strip() for i in data):
+        missing(f"step {step} field {field}: selection must be an array of nonempty string ids")
+    return data
 
 
 rounds_by_step = {}
@@ -420,22 +436,22 @@ for row in rounds:
 
 for (step_result_id, step, _order, status, step_findings,
      approval, override, skip_reason) in steps:
+    step_actions = finding_actions(step_findings, step, "step_results.findings_json")
     resolved = {}
     events = []
     for (_sr, rnd, src, sel_js, fj, ufj) in rounds_by_step.get(step_result_id, []):
+        presented = finding_actions(fj, step, f"step_rounds.findings_json round {rnd}")
+        captured = finding_actions(ufj, step, f"step_rounds.user_findings_json round {rnd}")
+        selection = selected_ids(sel_js, step, f"step_rounds.selected_finding_ids round {rnd}")
         if src not in ("user", "user_declined"):
             continue
-        presented = finding_actions(fj)
-        captured = finding_actions(ufj)
-        actions = dict(captured)
-        actions.update(presented)
         ask_user = [fid for fid in list(presented) + [i for i in captured if i not in presented]
-                    if actions.get(fid) == "ask-user"]
+                    if presented.get(fid) == "ask-user" or captured.get(fid) == "ask-user"]
         if not ask_user:
             continue
         resolved_now = {}
         if src == "user":
-            sel = set(selected_ids(sel_js))
+            sel = set(selection)
             for fid in ask_user:
                 if fid in sel:
                     resolved_now[fid] = "fix"
@@ -456,7 +472,7 @@ for (step_result_id, step, _order, status, step_findings,
         if resolved_now:
             events.append((f"round {rnd}", resolved_now))
             resolved.update(resolved_now)
-    leftovers = [fid for fid, action in finding_actions(step_findings).items()
+    leftovers = [fid for fid, action in step_actions.items()
                  if action == "ask-user" and fid not in resolved]
     if leftovers and status in ("completed", "skipped"):
         if approval or override:
@@ -495,7 +511,7 @@ fm_nm_ask_user_decisions() {  # <dir> <timeout_secs> <run-id> <status-file>
     [ -n "$step" ] || continue
     need=$(printf '%s\n' "$rows" | awk -F '\t' -v s="$step" \
       '$1 == s { if (!($2 in m)) { m[$2] = 1; n++ } } END { print n + 0 }')
-    have=$(status_resolved_key_count "$status_file" "$(fm_nm_ask_user_key "$run_id" "$step")")
+    have=$(status_resolved_key_count "$status_file" "$(fm_nm_ask_user_key "$run_id" "$step")" "$status_file.nm-decisions")
     if [ "$have" -lt "$need" ] 2>/dev/null; then
       printf 'step %s: %d recorded ask-user gate decision(s) but only %s resolved [key=%s] record(s):\n' \
         "$step" "$need" "$have" "$(fm_nm_ask_user_key "$run_id" "$step")"
