@@ -625,6 +625,20 @@ EOF
   printf '%s' "$verb"
 }
 
+# Count canonical `resolved [key=<key>]: answered:` records from fm-send.
+# This is process evidence, not tamper-proof provenance; same-user forgery risk is accepted.
+# Each recorded gate response requires its own matching status record.
+status_resolved_key_count() {  # <status-file> <key>
+  local f=$1 want=$2 line count=0
+  { [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] && [ -n "$want" ]; } || { printf '0\n'; return 0; }
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "resolved [key=$want]: answered: "*) count=$((count + 1)) ;;
+    esac
+  done < "$f"
+  printf '%s\n' "$count"
+}
+
 # Fold the WHOLE status stream into the set of decisions still open. Prints one
 # TAB-separated "<key>\t<verb>\t<summary>" line per still-open decision, in
 # most-recently-opened-last order; prints nothing when none are open. Pure read of

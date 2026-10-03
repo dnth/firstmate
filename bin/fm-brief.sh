@@ -180,6 +180,7 @@ Do not hand-edit, commit, or fix findings yourself while a run is active; fix or
 
 Two firstmate-specific rules layer on top of that guidance:
 - ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.
+  Report each parked gate as \`needs-decision [key=nm-<run>-<step>]: ask-user findings=<id1>,<id2>,...\` naming every ask-user finding id the gate presents; the completion gate refuses any recorded ask-user resolution that lacks a matching firstmate \`resolved [key=nm-<run>-<step>]\` record.
   Firstmate applies \`ask-user-authority\` and obtains any required captain decision.
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.

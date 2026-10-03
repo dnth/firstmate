@@ -18,7 +18,7 @@ Finding authority is determined by the criteria below, not by `yolo`.
 Firstmate always applies this judgment, decides any finding that is unambiguous toward the accepted design, and escalates only genuinely ambiguous, expanding, or destructive findings.
 
 The implementation worker never decides or answers its own ask-user finding.
-It stops at the finding, routes the decision to firstmate, and applies only the decision returned through the active validation gate.
+It stops at the finding and follows `validation-supervision` for escalation and applying the returned decision through the active validation gate.
 
 ## Decide
 
