@@ -193,6 +193,14 @@ Backends that already refuse secondmate launch, currently Orca and cmux, remain 
 
 Startup liveness recovery relaunches a dead or missing remote second mate through this same command, so recovery passes the same readiness gate rather than a weaker one.
 
+### Compute wake and agent restoration
+
+A compute stop does not keep the second-mate agent, so routed delivery to a Boat or RunPod placement probes the endpoint after waking the host and restores a non-alive endpoint through the ordinary readiness, launch, and retained-session bind gate before sending the request.
+Delivery rechecks the host and endpoint under the delivery lock after restoration and refreshes the actual harness under that lock, including when another sender restored the agent, so restored OMP results use OMP's delivery semantics.
+If restoration or the final endpoint check cannot prove readiness, the request is not delivered and the command reports the required reconciliation; an unknown restoration requires same-host reconciliation rather than resending.
+
+### Routed requests
+
 The startup state and route probes also tolerate a missing `.fm-secondmate-home` marker when the remote endpoint metadata still binds the requested id, so a markerless route is classified from its Herdr endpoint instead of being mistaken for an unreadable host.
 Ordinary launch, send, and retirement still require the seeded-home marker, while the dedicated reconcile-send path accepts a markerless home only after endpoint identity validation.
 A markerless remote route is also reconciled by `bin/fm-secondmate-reconcile.sh` using its sampled host as the identity guard, with final delivery and cooldown revalidation.
