@@ -2412,15 +2412,6 @@ test_pr_ready_requires_bound_run() {
   pass "PR-ready requires a bound no-mistakes run"
 }
 
-if [ "${FM_TEST_FOCUS:-}" = nm-authority ]; then
-  test_ask_user_resolutions_require_firstmate_decisions
-  test_ask_user_gate_unaffected_and_unreadable_cases
-  test_malformed_nm_decision_fields
-  test_informational_nm_findings_are_unaffected
-  test_pr_ready_requires_bound_run
-  exit 0
-fi
-
 test_help_advertises_generation_bound_run_binding
 test_reports_missing_criteria_deterministically
 test_complete_and_invalid_ledgers_have_distinct_results
