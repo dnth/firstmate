@@ -35,7 +35,7 @@
 
 install_remote_herdr_fixture() { # <remote-root> <state> <log> <send-fail> <socket>
   local remote_root=$1 state=$2 log=$3 send_fail=$4 socket=$5 script="$1/bin/herdr"
-  local omp_ack_pid=${6:-} omp_bun=${7:-} omp_bin=${8:-} omp_active_pid_file=${9:-} force_idle_file=${10:-} pane_text_log=${11:-}
+  local omp_ack_pid=${6:-} omp_bun=${7:-} omp_bin=${8:-} omp_active_pid_file=${9:-} force_idle_file=${10:-} pane_text_log=${11:-} broken_ack_file=${12:-} execute_launch_file=${13:-}
   local real_ps ps_fixture
   mkdir -p "$remote_root/bin"
   cat > "$script" <<SH
@@ -47,19 +47,72 @@ SEND_FAIL='$send_fail'
 SOCKET='$socket'
 FM_ROOT='$remote_root'
 SH
-  printf 'OMP_ACK_PID=%q\nOMP_BUN=%q\nOMP_BIN=%q\nOMP_ACTIVE_PID_FILE=%q\nFORCE_IDLE_FILE=%q\nPANE_TEXT_LOG=%q\n' \
-    "$omp_ack_pid" "$omp_bun" "$omp_bin" "$omp_active_pid_file" "$force_idle_file" "$pane_text_log" >> "$script"
+  printf 'OMP_ACK_PID=%q\nOMP_BUN=%q\nOMP_BIN=%q\nOMP_ACTIVE_PID_FILE=%q\nFORCE_IDLE_FILE=%q\nPANE_TEXT_LOG=%q\nOMP_BROKEN_ACK_FILE=%q\nOMP_EXECUTE_LAUNCH_FILE=%q\n' \
+    "$omp_ack_pid" "$omp_bun" "$omp_bin" "$omp_active_pid_file" "$force_idle_file" "$pane_text_log" "$broken_ack_file" "$execute_launch_file" >> "$script"
   cat >> "$script" <<'SH'
 printf '%s\n' "$*" >> "$LOG"
 jq_state() { jq "$@" "$STATE"; }
 save() { tmp="$STATE.tmp.$$"; cat > "$tmp" && mv "$tmp" "$STATE"; }
 publish_omp_ack() { # <pane> <launch>
   local pane=$1 launch=$2 cwd session version normalized_launch
+  local broken_pid doorbell turn_started
   [ -n "$OMP_ACK_PID" ] && [ -n "$OMP_BUN" ] && [ -n "$OMP_BIN" ] || return 0
   case "$launch" in
     *FM_OMP_SESSION_POINTER=*)
       cwd=$(jq_state -r --arg p "$pane" '.tabs[] | select(.pane_id == $p) | .cwd // empty')
       [ -n "$cwd" ] || return 1
+      if [ -n "$OMP_EXECUTE_LAUNCH_FILE" ] && [ -x "$OMP_EXECUTE_LAUNCH_FILE" ]; then
+        if [ ! -s "$OMP_ACTIVE_PID_FILE" ]; then
+          "$OMP_BUN" -e '
+            const {spawn} = require("node:child_process");
+            const {openSync} = require("node:fs");
+            const log = openSync(process.argv[4], "w");
+            spawn(process.argv[1], process.argv.slice(2, 4), {
+              detached: true, stdio: ["ignore", log, log],
+            }).unref();
+          ' "$OMP_EXECUTE_LAUNCH_FILE" "$cwd" "$launch" "$OMP_EXECUTE_LAUNCH_FILE.out"
+        fi
+        session="$cwd/state/omp-sessions/selected.jsonl"
+        jq_state --arg p "$pane" --arg session "$session" '.omp_session[$p] = $session' | save
+        return 0
+      fi
+      # Remote launches are wrapped in Bash and shell_quote escapes embedded
+      # single quotes as '\\''... '\\''. Normalize both forms before parsing.
+      normalized_launch=${launch//\'/}
+      normalized_launch=${normalized_launch//\\/}
+      if [ -n "$OMP_BROKEN_ACK_FILE" ] && [ -f "$OMP_BROKEN_ACK_FILE" ]; then
+        # The pilot's aborted generation: every launch-generation artifact
+        # exists but none of it binds - the session pointer names a session
+        # file that never existed, the integration marker and session lock
+        # record a dead pid, and the generation's own doorbell and turn
+        # markers were written before it died.
+        broken_pid=$( { sleep 0.05 & echo "$!"; wait; } 2>/dev/null )
+        mkdir -p "$cwd/state/omp-sessions"
+        printf '%s\n' "$cwd/state/omp-sessions/ghost-never-existed.jsonl" > "$cwd/state/.omp-session"
+        case "$(cat "$OMP_BROKEN_ACK_FILE")" in
+          absent|malformed)
+            printf '{"type":"session"}\n' > "$cwd/state/omp-sessions/orphan.jsonl"
+            if [ "$(cat "$OMP_BROKEN_ACK_FILE")" = absent ]; then
+              rm -f "$cwd/state/.omp-session"
+            else
+              printf 'truncated' > "$cwd/state/.omp-session"
+            fi
+            ;;
+        esac
+        version=$(bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_primary_watch_version "$1/.omp/extensions/fm-primary-omp.ts" "$1"' _ "$cwd")
+        printf '%s\n%s\n%s\n%s\n' "$version" "$broken_pid" "$OMP_BUN" "$OMP_BIN" \
+          > "$cwd/state/.omp-primary-extension-loaded"
+        printf '%s\n' "$broken_pid" > "$cwd/state/.lock"
+        doorbell=$(printf '%s' "$normalized_launch" | sed -n 's/.*FM_OMP_TASK_DOORBELL_READY=\([^ ]*\).*/\1/p')
+        if [ -n "$doorbell" ]; then
+          : > "$doorbell"
+          mkdir -p "$doorbell.requests"
+          : > "$doorbell.requests/request.1"
+        fi
+        turn_started=$(printf '%s' "$normalized_launch" | sed -n 's/.*FM_OMP_TASK_TURN_STARTED=\([^ ]*\).*/\1/p')
+        [ -z "$turn_started" ] || : > "$turn_started"
+        return 0
+      fi
       mkdir -p "$cwd/state/omp-sessions"
       session="$cwd/state/omp-sessions/selected.jsonl"
       printf '{"type":"session"}\n' > "$session"
@@ -68,10 +121,6 @@ publish_omp_ack() { # <pane> <launch>
       printf '%s\n%s\n%s\n%s\n' "$version" "$OMP_ACK_PID" "$OMP_BUN" "$OMP_BIN" \
         > "$cwd/state/.omp-primary-extension-loaded"
       printf '%s\n' "$OMP_ACK_PID" > "$cwd/state/.lock"
-      # Remote launches are wrapped in Bash and shell_quote escapes embedded
-      # single quotes as '\\''... '\\''. Normalize both forms before parsing.
-      normalized_launch=${launch//\'/}
-      normalized_launch=${normalized_launch//\\/}
       doorbell=$(printf '%s' "$normalized_launch" | sed -n 's/.*FM_OMP_TASK_DOORBELL_READY=\([^ ]*\).*/\1/p')
       [ -z "$doorbell" ] || : > "$doorbell"
       jq_state --arg p "$pane" --arg session "$session" '.omp_session[$p] = $session' | save

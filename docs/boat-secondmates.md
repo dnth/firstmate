@@ -14,6 +14,7 @@ Subscription authentication additionally requires Linux cgroup v2, a reachable s
 There is no PID-tree fallback on systems without that custody substrate.
 Keep the workstation online while subscription-authenticated work is running.
 The remote host must meet the installation and readiness requirements in [remote-secondmates.md](remote-secondmates.md#prerequisites); provisioning compute does not install a Firstmate home or a worker runtime.
+The [remote-home prerequisites](remote-secondmates.md#prerequisites) own the neutral forge-credential policy, toolchain, entrypoint `PATH`, and `gh auth` dispatch gate.
 
 With an explicit `FM_HOME`, provision the placement and wake it before following that guide's seed and launch procedure.
 `bin/fm-boat.sh --help` owns command options and defaults.
@@ -35,6 +36,7 @@ Fresh endpoints may change IP or port without changing identity.
 
 Sleep is explicit, never an automatic idle action.
 A dormant route wakes before a requested delivery or remote launch; health polling, startup convergence, configuration propagation, and reply polling do not wake it.
+Wake-on-delivery follows the shared [agent restoration contract](remote-secondmates.md#compute-wake-and-agent-restoration).
 Sleep refuses pending routed replies, open decisions, undelivered handoffs, or active or unknown remote child work.
 
 | Size | Compute rate per hour |

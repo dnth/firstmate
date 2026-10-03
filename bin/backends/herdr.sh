@@ -1273,7 +1273,40 @@ fm_backend_herdr_server_ensure() {  # <session>
   local session=$1 running out i
   running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
   [ "$running" = "true" ] && return 0
-  ( fm_backend_herdr_cli "$session" server >/dev/null 2>&1 & ) || return 1
+  # The server must outlive this invocation as a fully detached daemon, not as
+  # a background job of it: the remote job worker monitors the invoked job's
+  # whole process group for liveness and relays output through pipes it reads
+  # to EOF, so a server left in this session, group, or descriptor table keeps
+  # the invoking command "alive" for as long as it runs. setsid moves the
+  # server into its own session and process group; stdio is redirected and
+  # every other inherited descriptor is closed so no caller pipe stays open.
+  (
+    # Enumerate actual descriptors rather than imposing a numeric ceiling:
+    # SSH/job pipes can occupy high descriptors, even above a lowered limit.
+    if [ -d /proc/self/fd ]; then
+      _fd_dir=/proc/self/fd
+    elif [ -d /dev/fd ]; then
+      _fd_dir=/dev/fd
+    else
+      echo "error: cannot fully detach herdr server: no descriptor directory is available" >&2
+      exit 1
+    fi
+    for _fd_path in "$_fd_dir"/[0-9]*; do
+      _fd=${_fd_path##*/}
+      [ "$_fd" -gt 2 ] || continue
+      exec {_fd}>&- 2>/dev/null || true
+    done
+    if [ "${FM_HERDR_DISABLE_SETSID:-0}" != 1 ] && command -v setsid >/dev/null 2>&1; then
+      HERDR_SESSION=$session exec setsid herdr server --session "$session" </dev/null >/dev/null 2>&1
+    elif [ "${FM_HERDR_DISABLE_PERL:-0}" != 1 ] && command -v perl >/dev/null 2>&1; then
+      HERDR_SESSION=$session perl -MPOSIX -e 'defined(my $pid = fork) or die $!; exit 0 if $pid; POSIX::setsid() or die $!; defined($pid = fork) or die $!; exit 0 if $pid; exec @ARGV or die $!' -- herdr server --session "$session" </dev/null >/dev/null 2>&1 &
+    elif command -v python3 >/dev/null 2>&1; then
+      HERDR_SESSION=$session python3 -c 'import os,sys; pid=os.fork(); sys.exit(0) if pid else None; os.setsid(); pid=os.fork(); sys.exit(0) if pid else None; os.execvp(sys.argv[1], sys.argv[1:])' herdr server --session "$session" </dev/null >/dev/null 2>&1 &
+    else
+      echo "error: cannot fully detach herdr server: setsid, perl, and python3 are unavailable" >&2
+      return 1
+    fi
+  ) &
   for i in $(seq 1 20); do
     running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
     [ "$running" = "true" ] && return 0

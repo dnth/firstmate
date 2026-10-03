@@ -15,7 +15,7 @@ Prerequisites:
 - `pane process-info` must return the exact pane id, pane-owned shell pid, foreground process group, and foreground process list used by the launch-readiness proof; a build that omits this verified shape is refused before any spawn command is typed.
 - `jq` for JSON responses.
 - The universal harness and toolchain requirements in [`configuration.md`](configuration.md#toolchain).
-- `python3` only for optional protocol-16 presentation-space ordering and native event subscription.
+- `python3` for optional protocol-16 presentation-space ordering and native event subscription, and for server startup when neither `setsid` nor Perl is available.
 
 Herdr is dual-licensed AGPL-3.0-or-later or commercial.
 Firstmate invokes its CLI as a separate process.
@@ -347,6 +347,7 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 
 ```sh
 tests/fm-backend-herdr.test.sh
+tests/fm-backend-herdr-server-detach.test.sh
 tests/fm-herdr-submit-confirm-live-e2e.test.sh
 tests/fm-composer-lib.test.sh
 tests/fm-backend-herdr-smoke.test.sh

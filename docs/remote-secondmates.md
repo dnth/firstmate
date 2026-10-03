@@ -28,6 +28,10 @@ mkdir -p ~/.local/bin
 ln -s /absolute/path/to/firstmate/bin/fm-remote-entrypoint.sh ~/.local/bin/fm-remote-entrypoint.sh
 ```
 
+The symlink has to land on a directory the remote account's non-interactive SSH `PATH` already searches.
+`~/.local/bin` works on hosts whose default account `PATH` includes it; on hosts where it does not, install the symlink somewhere the default `PATH` already reaches, such as `/usr/local/bin`.
+Verify with `ssh <alias> 'command -v fm-remote-entrypoint.sh'` before seeding; the doctor reports an unreachable entrypoint as a readiness gap.
+
 The entrypoint accepts encoded argv for genuine executable `bin/fm-*.sh` files only.
 It never accepts a shell command string.
 The readiness-owning doctor runs over this plain SSH bootstrap so read-only mode can report worker gaps and `--fix` can install or repair the worker.
@@ -39,7 +43,19 @@ The worker runs one staged job at a time and preempts a running reply long-poll 
 `bin/fm-remote-job-lib.sh` owns that preemption contract, and a preempted poll is indistinguishable from one whose wait window closed with no data, so the re-armed poll loses nothing.
 Linux uses the same queue and worker protocol without the Aqua-session requirement.
 The remote account must provide the required toolchain, the selected worker runtime, the selected session backend, and credentials that work on that host.
+A remote second-mate home is a full Firstmate home rather than a pane host, so its own bootstrap requires the [universal toolchain and Herdr backend delta](configuration.md#toolchain), plus the selected agent harness such as `omp`.
+`bin/fm-bootstrap.sh` owns the exact floors and the probe behavior; the doctor's required tier below is only the minimum the remote control path itself verifies.
 Project origin URLs recorded by the primary must be reachable from the remote account because projects are cloned on that host rather than copied from the primary.
+
+Provisioning never installs or copies forge credentials onto a remote host, and Firstmate adds no mechanism that would; whether the remote account authenticates GitHub there is the operator's decision.
+Crew and project dispatch inside a remote second-mate home is gated on `gh auth` in that account.
+Without forge authentication the remote second mate still runs, does local and scratch work, and refuses delegated project work.
+
+### OMP first-run setup
+
+Verified against OMP `omp/18.4.4` on 2026-10-03.
+In the installed native binary's `@oh-my-pi/pi-coding-agent` source, `packages/tui/src/setup/wizard.ts` reads `Bun.env.OMP_SKIP_SETUP` during setup-scene selection, with the setup scenes under `packages/tui/src/setup/scenes/`; Firstmate sets `OMP_SKIP_SETUP=1` on every verified OMP launch so a fresh non-interactive SSH account cannot stop in the first-run wizard.
+If the doorbell or session bind does not appear, the launch fails with a diagnostic identifying a potentially unhonored setup bypass rather than waiting indefinitely.
 
 ## Non-interactive tool contract
 
@@ -97,7 +113,8 @@ bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh --fix
 ```
 
 Over the plain SSH doctor bootstrap, it writes and reloads the Firstmate-owned `dev.firstmate.remote-job` and `dev.firstmate.herdr.fm-remote` launch agents on macOS, both scoped with `LimitLoadToSessionType=Aqua` and bootstrapped in `gui/<uid>`.
-It starts the same workers directly on Linux, recreates the `~/.local/bin/fm-remote-entrypoint.sh` symlink when it is absent, and creates only Firstmate-owned required-tool wrappers that it can prove resolve to a version-manager target, stopping after one harness satisfies the at-least-one requirement.
+On Linux it starts the account worker directly and fully detaches the Herdr server from the invoking process group and inherited pipes, so repair returns once the server is healthy.
+It recreates the `~/.local/bin/fm-remote-entrypoint.sh` symlink when it is absent and creates only Firstmate-owned required-tool wrappers that it can prove resolve to a version-manager target, stopping after one harness satisfies the at-least-one requirement.
 It never installs packages or overwrites a non-Firstmate file at a reserved wrapper path.
 The dedicated Herdr launch agent owns only the remote-secondmate `fm-remote` server and does not inspect, rewrite, start, stop, or require the user's interactive `default` session or its `dev.firstmate.herdr` launch agent.
 It re-derives every check from the host afterwards, so what it prints is the state after the repair rather than the intent of one.
@@ -175,6 +192,14 @@ Raw launch commands are not accepted for remote secondmates.
 Backends that already refuse secondmate launch, currently Orca and cmux, remain unsupported on the remote host.
 
 Startup liveness recovery relaunches a dead or missing remote second mate through this same command, so recovery passes the same readiness gate rather than a weaker one.
+
+### Compute wake and agent restoration
+
+A compute stop does not keep the second-mate agent, so routed delivery to a Boat or RunPod placement probes the endpoint after waking the host and restores a non-alive endpoint through the ordinary readiness, launch, and retained-session bind gate before sending the request.
+Delivery rechecks the host and endpoint under the delivery lock after restoration and refreshes the actual harness under that lock, including when another sender restored the agent, so restored OMP results use OMP's delivery semantics.
+If restoration or the final endpoint check cannot prove readiness, the request is not delivered and the command reports the required reconciliation; an unknown restoration requires same-host reconciliation rather than resending.
+
+### Routed requests
 
 The startup state and route probes also tolerate a missing `.fm-secondmate-home` marker when the remote endpoint metadata still binds the requested id, so a markerless route is classified from its Herdr endpoint instead of being mistaken for an unreadable host.
 Ordinary launch, send, and retirement still require the seeded-home marker, while the dedicated reconcile-send path accepts a markerless home only after endpoint identity validation.

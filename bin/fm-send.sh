@@ -674,6 +674,61 @@ if [ "$TARGET_BACKEND" = remote ] && fm_compute_is_dormant "$DATA" "$TARGET_REMO
   fi
 fi
 
+# Restore-before-deliver: a compute stop does not keep the second-mate agent,
+# so a woken route can come back on a replaced machine whose Herdr endpoint is
+# gone even though the host is reachable. Delivery must restore the agent
+# (readiness, launch, retained-session bind) before anything is sent. The
+# restore goes through the ordinary secondmate launch, which is idempotent on
+# a live endpoint, re-runs the readiness gate on the possibly replaced
+# machine, and rebinds on the retained session; it needs the delivery lock
+# free, so the lock is released for the respawn and taken again afterwards.
+if [ "$TARGET_BACKEND" = remote ] && fm_compute_is_managed "$DATA" "$TARGET_REMOTE_ID"; then
+  remote_agent_state=
+  remote_state_rc=0
+  remote_agent_state=$("$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" \
+    fm-remote-secondmate-control.sh state "$TARGET_REMOTE_ID" < /dev/null 2>&1) \
+    || remote_state_rc=$?
+  if [ "$remote_state_rc" -ne 0 ] || [ "$remote_agent_state" != alive ]; then
+    release_compute_delivery_lock
+    restore_rc=0
+    if restore_out=$("$SCRIPT_DIR/fm-spawn.sh" "$TARGET_REMOTE_ID" --secondmate 2>&1); then
+      :
+    else
+      restore_rc=$?
+    fi
+    if [ "$restore_rc" -ne 0 ]; then
+      [ -z "$restore_out" ] || printf '%s\n' "$restore_out" >&2
+      if [ "$restore_rc" -eq 255 ]; then
+        echo "error: remote secondmate $TARGET_REMOTE_ID restoration is unknown; nothing was delivered and same-host reconciliation is required - do not resend" >&2
+      else
+        echo "error: remote secondmate $TARGET_REMOTE_ID could not be restored after compute wake (remote agent state=${remote_agent_state:-unreachable}); nothing was delivered" >&2
+      fi
+      exit 1
+    fi
+    # A concurrent sleep could have run while the delivery lock was released
+    # for the respawn, so re-take the lock and re-prove the host and endpoint
+    # before anything is delivered.
+    COMPUTE_DELIVERY_LOCK=$(secondmate_handoff_lock_path "$STATE" "$TARGET_REMOTE_ID")
+    fm_lock_acquire_wait "$COMPUTE_DELIVERY_LOCK" \
+      || { echo "error: cannot re-lock delivery to compute-managed secondmate $TARGET_REMOTE_ID after restoration" >&2; exit 1; }
+    if fm_compute_is_dormant "$DATA" "$TARGET_REMOTE_ID"; then
+      if ! wake_out=$("$SCRIPT_DIR/fm-compute-wake.sh" "$TARGET_REMOTE_ID" 2>&1); then
+        [ -z "$wake_out" ] || printf '%s\n' "$wake_out" >&2
+        echo "error: remote secondmate $TARGET_REMOTE_ID could not be woken after its agent was restored; nothing was delivered" >&2
+        exit 1
+      fi
+    fi
+    remote_agent_state=$("$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" \
+      fm-remote-secondmate-control.sh state "$TARGET_REMOTE_ID" < /dev/null 2>&1) \
+      || remote_agent_state=
+    if [ "$remote_agent_state" != alive ]; then
+      echo "error: remote secondmate $TARGET_REMOTE_ID was restored but its endpoint reports state=${remote_agent_state:-unreachable}; nothing was delivered - do not resend" >&2
+      exit 1
+    fi
+  fi
+  TARGET_HARNESS=$(fm_meta_get "$TARGET_META" harness)
+fi
+
 TARGET_OMP_BUN=
 TARGET_OMP_BIN=
 

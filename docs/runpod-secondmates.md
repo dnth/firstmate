@@ -201,7 +201,7 @@ bin/fm-runpod.sh ssh <id>         # an interactive shell on the pod
 ### Waking is automatic where it matters
 
 The primary wakes a dormant route itself when it actually needs the host: `bin/fm-send.sh` wakes before it delivers, and `bin/fm-spawn.sh <id> --secondmate` wakes before the readiness gate.
-Both wakes happen strictly before anything is delivered, so a compute failure loses nothing and can be retried; once delivery starts, the existing unknown-completion contract in [`remote-secondmates.md`](remote-secondmates.md) applies unchanged.
+Wake-on-delivery follows the shared [agent restoration contract](remote-secondmates.md#compute-wake-and-agent-restoration); once delivery starts, that guide's unknown-completion contract applies unchanged.
 
 The provider treats `provisioned`, `waking`, `suspending`, and `suspended` as dormant because none is ready for ordinary remote work; a waking pod may expose SSH only for bootstrap diagnostics.
 Startup health polling, startup convergence, `bin/fm-config-push.sh`, and reply-source arming all skip a dormant route instead.
