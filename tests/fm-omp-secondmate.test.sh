@@ -167,12 +167,15 @@ case "$cmd" in
         # generation's own doorbell, turn-start, and readiness markers.
         broken=$( { sleep 0.05 & echo "$!"; wait; } 2>/dev/null )
         mkdir -p "$FM_TEST_HOME/state/omp-sessions"
-        printf '%s\n' "$FM_TEST_HOME/state/omp-sessions/ghost-never-existed.jsonl" > "$FM_TEST_HOME/state/.omp-session"
-        if [ -n "${FM_TEST_ORPHAN_POINTER:-}" ]; then
+        if [ "${FM_TEST_ORPHAN_POINTER:-}" != unchanged ]; then
+          printf '%s\n' "$FM_TEST_HOME/state/omp-sessions/ghost-never-existed.jsonl" > "$FM_TEST_HOME/state/.omp-session"
+        fi
+        if [ -n "${FM_TEST_ORPHAN_POINTER:-}" ] && [ "$FM_TEST_ORPHAN_POINTER" != unchanged ]; then
           printf '{"type":"session"}\n' > "$FM_TEST_HOME/state/omp-sessions/orphan.jsonl"
           case "$FM_TEST_ORPHAN_POINTER" in
             absent) rm -f "$FM_TEST_HOME/state/.omp-session" ;;
             malformed) printf 'truncated' > "$FM_TEST_HOME/state/.omp-session" ;;
+            replacement) printf '%s\n' "$FM_TEST_HOME/state/omp-sessions/orphan.jsonl" > "$FM_TEST_HOME/state/.omp-session" ;;
           esac
         fi
         if [ "${FM_TEST_MALFORMED_GENERATION:-0}" = 1 ]; then
@@ -270,12 +273,15 @@ case "$cmd $sub" in
     if [ "${FM_TEST_BROKEN_ACK:-0}" = 1 ]; then
       broken=$( { sleep 0.05 & echo "$!"; wait; } 2>/dev/null )
       mkdir -p "$FM_TEST_HOME/state/omp-sessions"
-      printf '%s\n' "$FM_TEST_HOME/state/omp-sessions/ghost-never-existed.jsonl" > "$FM_TEST_HOME/state/.omp-session"
-        if [ -n "${FM_TEST_ORPHAN_POINTER:-}" ]; then
+      if [ "${FM_TEST_ORPHAN_POINTER:-}" != unchanged ]; then
+          printf '%s\n' "$FM_TEST_HOME/state/omp-sessions/ghost-never-existed.jsonl" > "$FM_TEST_HOME/state/.omp-session"
+        fi
+        if [ -n "${FM_TEST_ORPHAN_POINTER:-}" ] && [ "$FM_TEST_ORPHAN_POINTER" != unchanged ]; then
           printf '{"type":"session"}\n' > "$FM_TEST_HOME/state/omp-sessions/orphan.jsonl"
           case "$FM_TEST_ORPHAN_POINTER" in
             absent) rm -f "$FM_TEST_HOME/state/.omp-session" ;;
             malformed) printf 'truncated' > "$FM_TEST_HOME/state/.omp-session" ;;
+            replacement) printf '%s\n' "$FM_TEST_HOME/state/omp-sessions/orphan.jsonl" > "$FM_TEST_HOME/state/.omp-session" ;;
           esac
         fi
       version=$(bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_primary_watch_version "$1/.omp/extensions/fm-primary-omp.ts" "$1"' _ "$FM_TEST_HOME")
@@ -305,12 +311,15 @@ case "$cmd $sub" in
       if [ "${FM_TEST_BROKEN_ACK:-0}" = 1 ]; then
         broken=$( { sleep 0.05 & echo "$!"; wait; } 2>/dev/null )
         mkdir -p "$FM_TEST_HOME/state/omp-sessions"
-        printf '%s\n' "$FM_TEST_HOME/state/omp-sessions/ghost-never-existed.jsonl" > "$FM_TEST_HOME/state/.omp-session"
-        if [ -n "${FM_TEST_ORPHAN_POINTER:-}" ]; then
+        if [ "${FM_TEST_ORPHAN_POINTER:-}" != unchanged ]; then
+          printf '%s\n' "$FM_TEST_HOME/state/omp-sessions/ghost-never-existed.jsonl" > "$FM_TEST_HOME/state/.omp-session"
+        fi
+        if [ -n "${FM_TEST_ORPHAN_POINTER:-}" ] && [ "$FM_TEST_ORPHAN_POINTER" != unchanged ]; then
           printf '{"type":"session"}\n' > "$FM_TEST_HOME/state/omp-sessions/orphan.jsonl"
           case "$FM_TEST_ORPHAN_POINTER" in
             absent) rm -f "$FM_TEST_HOME/state/.omp-session" ;;
             malformed) printf 'truncated' > "$FM_TEST_HOME/state/.omp-session" ;;
+            replacement) printf '%s\n' "$FM_TEST_HOME/state/omp-sessions/orphan.jsonl" > "$FM_TEST_HOME/state/.omp-session" ;;
           esac
         fi
         version=$(bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_primary_watch_version "$1/.omp/extensions/fm-primary-omp.ts" "$1"' _ "$FM_TEST_HOME")
@@ -632,7 +641,7 @@ test_launch_and_exact_resume() {
 }
 
 test_failed_bind_retires_generation_artifacts() {
-  local out retained launch dead_pid dead_version backend pointer_state runner orphan
+  local out retained launch dead_pid dead_version backend pointer_state runner orphan real_mv pointer_tmp
   setup_case broken-bind
 
   # The aborted generation leaves every artifact the next launch's entry
@@ -677,6 +686,47 @@ test_failed_bind_retires_generation_artifacts() {
         || fail "$backend cleanup lost the pre-launch binding when the pointer became $pointer_state"
       [ -f "$retained" ] && [ -f "$orphan" ] || fail "$backend cleanup deleted a real retained session"
     done
+  done
+
+  for backend in tmux herdr; do
+    setup_case "atomic-pointer-$backend"
+    if [ "$backend" = herdr ]; then runner=run_spawn_herdr; else runner=run_spawn; fi
+    out=$("$runner" 2>&1) || fail "$backend atomic-pointer setup failed: $out"
+    retained=$(cat "$HOME_DIR/state/.omp-session")
+    rm -f "$WINDOW_FLAG" "$HOME_DIR/state/.lock" "$HOME_DIR/state/.omp-primary-extension-loaded"
+    "$TEST_OMP_BUN" -e 'require("node:fs").utimesSync(process.argv[1], 1, 1)' "$HOME_DIR/state/.omp-session"
+    out=$("$runner" FM_TEST_BROKEN_ACK=1 FM_TEST_ORPHAN_POINTER=unchanged 2>&1) \
+      && fail "$backend unchanged-pointer launch unexpectedly bound"
+    [ "$("$TEST_OMP_BUN" -e 'console.log(require("node:fs").statSync(process.argv[1]).mtimeMs)' "$HOME_DIR/state/.omp-session")" = 1000 ] \
+      || fail "$backend cleanup rewrote an already-correct binding"
+    real_mv=$(command -v mv)
+    printf '#!/usr/bin/env bash\nREAL_MV=%q\nPOINTER=%q\nOBSERVED=%q\n' \
+      "$real_mv" "$HOME_DIR/state/.omp-session" "$CASE/rename-attempted" > "$FAKEBIN/mv"
+    cat >> "$FAKEBIN/mv" <<'SH'
+if [ "${!#}" = "$POINTER" ]; then
+  : > "$OBSERVED"
+  exit 1
+fi
+exec "$REAL_MV" "$@"
+SH
+    chmod +x "$FAKEBIN/mv"
+    out=$("$runner" FM_TEST_BROKEN_ACK=1 FM_TEST_ORPHAN_POINTER=replacement 2>&1) \
+      && fail "$backend failed-publication launch unexpectedly bound"
+    [ -f "$CASE/rename-attempted" ] || fail "$backend pointer replacement did not use atomic publication"
+    orphan="$HOME_DIR/state/omp-sessions/orphan.jsonl"
+    [ "$(cat "$HOME_DIR/state/.omp-session")" = "$orphan" ] \
+      || fail "$backend failed publication damaged the previous valid pointer"
+    [ -f "$retained" ] && [ -f "$orphan" ] || fail "$backend failed publication removed a retained session"
+    assert_contains "$out" 'could not retire every launch-generation artifact' "$backend failed publication was reported as successful cleanup"
+    rm -f "$CASE/rename-attempted"
+    out=$("$runner" FM_TEST_BROKEN_ACK=1 FM_TEST_ORPHAN_POINTER=absent 2>&1) \
+      && fail "$backend orphan-publication launch unexpectedly bound"
+    [ -f "$CASE/rename-attempted" ] || fail "$backend missing pointer restoration did not use atomic publication"
+    assert_absent "$HOME_DIR/state/.omp-session" "$backend failed publication exposed an incomplete pointer"
+    for pointer_tmp in "$HOME_DIR/state/.omp-session.tmp."*; do
+      [ ! -e "$pointer_tmp" ] || fail "$backend failed publication leaked its temporary pointer"
+    done
+    rm -f "$FAKEBIN/mv"
   done
 
   setup_case malformed-bind
