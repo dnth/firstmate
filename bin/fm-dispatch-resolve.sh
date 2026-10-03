@@ -389,7 +389,9 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     else null end;
   def declared_confidence($c): rule_at($c) as $x | $x != null and ($x | has("min_confidence"));
   def confidence_floor($c): if declared_confidence($c) then rule_at($c).min_confidence else ($floor | tonumber) end;
-  def canonical_number: tonumber | tostring | if contains(".") then sub("0+$"; "") | sub("\\.$"; "") else . end;
+  def canonical_number:
+    tonumber | tostring | capture("^(?<mantissa>[^eE]+)(?<exponent>[eE].*)?$") |
+    (.mantissa | if contains(".") then sub("0+$"; "") | sub("\\.$"; "") else . end) + (.exponent // "");
   ($a.choice) as $picked |
   (confidence_floor($picked)) as $picked_floor |
   # A declared floor is checked against the probability of that option whether

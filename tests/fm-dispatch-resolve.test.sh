@@ -362,6 +362,26 @@ assert_contains "$out" '  fallback: rule_4 (A simple bug fix with a stated root 
 assert_contains "$out" "  profile: --harness 'devin' --model 'swe-4.6-medium'" "the runner-up rule's profiles are resolved"
 assert_not_contains "$(cat "$LOG/body")" 'min_confidence' "the model never sees confidence floors"
 
+for tiny_floor in 1.2e-10 1.20e-10; do
+  jq --argjson tiny_floor "$tiny_floor" '.rules[3].min_confidence = $tiny_floor' "$FLOOR_RULES" > "$RULES"
+  reset_log
+  write_floor_response "$RESPONSE" rule_2 0.8 0 0.8 0 0.2 0
+  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  expect_code 0 "$code" "exponent floor $tiny_floor resolves successfully"
+  assert_contains "$out" '  status: clear' "exponent floor $tiny_floor permits the runner-up"
+  assert_contains "$out" '  fallback: rule_4 (A simple bug fix with a stated root cause.) probability 0.2 clears its floor 1.2e-10; rule_2 probability 0.8 is below its floor 0.9' "exponent floor $tiny_floor preserves its exponent and trims mantissa zeros"
+  assert_contains "$out" "  profile: --harness 'devin' --model 'swe-4.6-medium'" "exponent floor $tiny_floor resolves the runner-up profile"
+done
+jq '.rules[0].min_confidence = 1 | .rules[1].min_confidence = 1.20e-19 | .rules[3].min_confidence = 1.20e-20' "$FLOOR_RULES" > "$RULES"
+reset_log
+write_floor_response "$RESPONSE" rule_2 0.8 0.5 1.20e-20 0.5 1.20e-18 0
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 0 "$code" "exponent probabilities resolve successfully"
+assert_contains "$out" '  status: clear' "exponent probabilities permit the qualifying runner-up"
+assert_contains "$out" '  fallback: rule_4 (A simple bug fix with a stated root cause.) probability 1.2e-18 clears its floor 1.2e-20; rule_2 probability 1.2e-20 is below its floor 1.2e-19' "all four fallback fields preserve exponents and trim mantissa zeros"
+assert_contains "$out" "  profile: --harness 'devin' --model 'swe-4.6-medium'" "exponent probabilities resolve the runner-up profile"
+cp "$FLOOR_RULES" "$RULES"
+
 reset_log
 write_floor_response "$RESPONSE" rule_2 0.76 0.02 0.76 0.02 0.08 0.12
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
