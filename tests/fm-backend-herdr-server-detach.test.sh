@@ -133,7 +133,7 @@ pass "ensure is idempotent against an already-running server"
 # asynchronous shell must still drain the supervised invocation promptly.
 rm -f "$SERVER_RUNNING" "$SERVER_PID_FILE" "$SERVER_STDIN_EOF"
 outcome="$TMP_ROOT/fallback"
-FM_HERDR_DISABLE_SETSID=1 bash "$TMP_ROOT/run-job.sh" "$outcome" \
+FM_HERDR_DISABLE_SETSID=1 FM_HERDR_DISABLE_PERL=1 bash "$TMP_ROOT/run-job.sh" "$outcome" \
   || fail "the fallback supervision driver failed"
 read -r timed_out rc < "$outcome.result"
 [ "$timed_out" = 0 ] || fail "the fallback server remained attached to the invoking group"
