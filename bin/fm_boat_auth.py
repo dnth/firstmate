@@ -98,8 +98,12 @@ def release_locked(base, record, *, remote_gone=False):
         save(base / 'lease.meta', record)
         raise Failure('credential cleanup unresolved: ' + record['cleanup'])
     record['state'] = 'retired'
+    record['cleanup'] = 'helpers=retired' if record.get('unit') else 'helpers=not-started'
+    if remote_gone:
+        record['cleanup'] += ' remote=verified-gone'
+    else:
+        record['cleanup'] += ' bearer=shredded' if record.get('install_attempted') == '1' else ' bearer=not-installed'
     record['install_attempted'] = '0'
-    record['cleanup'] = 'tunnel=retired bearer=shredded' if not remote_gone else 'tunnel=retired remote=verified-gone'
     save(base / 'lease.meta', record)
 
 def release(id, remote_gone=False):

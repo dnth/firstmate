@@ -7,7 +7,9 @@ RunPod keeps its existing lifecycle.
 ## Requirements and setup
 
 The workstation needs the Boat CLI, an authenticated Boat account, `uv`, Python 3, Node.js, and an SSH identity with a matching `.pub` file.
-Boat CLI authentication is read from its mode-600 `~/.ascii/config.json`; never put the API credential in command arguments or tracked files.
+Boat CLI authentication is read from its mode-600 `${XDG_CONFIG_HOME:-~/.config}/ascii/boat/config.json`, with the CLI's legacy `ascii/box/config.json` fallback when the Boat file is absent.
+`FM_BOAT_CONFIG_FILE` selects an explicit file instead of those defaults; a missing or unsafe override is refused rather than falling back.
+Never put the API credential in command arguments or tracked files.
 Subscription authentication additionally requires Linux cgroup v2, a reachable systemd user manager, and a workstation OMP broker login.
 There is no PID-tree fallback on systems without that custody substrate.
 Keep the workstation online while subscription-authenticated work is running.
@@ -58,6 +60,7 @@ A failed wake compensates by retiring credentials and requesting a confirmed sto
 Failed compensation remains explicitly unresolved and never reports a clean stop.
 A failed sleep restores credential and reply availability when the sandbox is still running; incomplete restoration remains unresolved.
 A failed bearer shred prevents deletion.
+Sleep and destroy accept an already stopped or archived sandbox without issuing another provider stop; destroy still requires checked credential cleanup before deletion.
 Reconcile an unresolved placement or credential record before retrying sleep or destroy; do not delete its records to bypass cleanup.
 
 ## Subscription credential boundary
@@ -98,4 +101,6 @@ It skips explicitly when the required Linux user manager is absent.
 The live entry point is `bin/fm-boat.sh live-smoke --identity <key> --model <provider/model>`.
 It refuses without `FM_BOAT_LIVE=1`, serializes one small sandbox, uses the `fm-boat-smoke-` name prefix, and keeps TTL renewals within the original one-sandbox-hour deadline.
 It performs two wake/sleep cycles and checked final deletion; an earlier recorded smoke sandbox must be reconciled before another starts.
-Do not run this command as part of the fixture test suite.
+Provisioning can fail before the provider applies the smoke name; identify that sandbox by the recorded `sandbox_id` from `status`, not by the name prefix alone.
+If final cleanup also fails, the smoke reports both its original error and the cleanup error instead of hiding the initiating failure.
+Never run paid live smoke as part of the fixture test suite; fixture smoke failure drivers replace the provider, SSH, and credential commands.

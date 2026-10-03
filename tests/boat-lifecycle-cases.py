@@ -45,12 +45,78 @@ class LifecycleTests(unittest.TestCase):
         for model in ('anthropic/fixture', 'openai-codex/'):
             result = self.call('provision', '--identity', str(self.identity), '--model', model, ok=False)
             self.assertFalse((self.lab.path / 'calls').exists()); self.assertFalse(self.path.exists())
+    def test_cli_config_resolution_matches_home_and_xdg_locations(self):
+        account_home = self.lab.path / 'account-home'
+        self.lab.env['HOME'] = str(account_home)
+        self.lab.env.pop('FM_BOAT_CONFIG_FILE')
+        self.lab.env.pop('XDG_CONFIG_HOME', None)
+        locations = (account_home / '.config/ascii/boat/config.json',
+                     self.lab.path / 'xdg/ascii/boat/config.json',
+                     self.lab.path / 'xdg/ascii/box/config.json')
+        for index, config in enumerate(locations):
+            with self.subTest(location=index):
+                if index:
+                    self.lab.env['XDG_CONFIG_HOME'] = str(self.lab.path / 'xdg')
+                config.parent.mkdir(parents=True, exist_ok=True)
+                config.write_text('{"token":"fixture_config_bearer"}'); config.chmod(0o600)
+                result = self.provision()
+                self.assertEqual(self.state()['lifecycle'], 'provisioned')
+                self.assertNotIn('fixture_config_bearer', result.stdout + result.stderr)
+                self.call('destroy', '--yes')
+                config.unlink()
+    def test_missing_config_names_tried_paths_and_override_never_falls_back(self):
+        account_home = self.lab.path / 'account-home'
+        self.lab.env.update(HOME=str(account_home), XDG_CONFIG_HOME=str(self.lab.path / 'xdg'))
+        self.lab.env.pop('FM_BOAT_CONFIG_FILE')
+        result = self.provision(ok=False)
+        for path in ('ascii/boat/config.json', 'ascii/box/config.json'):
+            self.assertIn(str(self.lab.path / 'xdg' / path), result.stderr)
+        self.assertIn('Boat CLI config unavailable', result.stderr)
+        self.assertNotIn('curl ', (self.lab.path / 'calls').read_text())
+        self.call('destroy', '--yes')
+        default = self.lab.path / 'xdg/ascii/boat/config.json'
+        default.parent.mkdir(parents=True)
+        default.write_text('{"token":"fixture_unused_bearer"}'); default.chmod(0o600)
+        override = self.lab.path / 'missing-explicit-config.json'
+        self.lab.env['FM_BOAT_CONFIG_FILE'] = str(override)
+        result = self.provision(ok=False)
+        self.assertIn(str(override), result.stderr)
+        self.assertNotIn(str(default), result.stderr)
+        self.assertNotIn('fixture_unused_bearer', result.stdout + result.stderr)
+        self.assertNotIn('curl ', (self.lab.path / 'calls').read_text())
+    def test_sleep_and_destroy_are_idempotent_for_provider_stopped_states(self):
+        for state in ('archived', 'stopped'):
+            with self.subTest(state=state):
+                self.provision()
+                self.lab.update(state=state)
+                calls = self.lab.path / 'calls'
+                stops = calls.read_text().splitlines().count('boat stop')
+                self.call('sleep')
+                self.assertEqual(self.state()['provider_state'], state)
+                self.call('destroy', '--yes')
+                self.assertEqual(self.provider()['state'], 'deleted')
+                self.assertFalse(self.path.exists())
+                self.assertEqual(calls.read_text().splitlines().count('boat stop'), stops)
     def test_naming_and_authorization_failure_compensate_allocation(self):
         for failure in ('patch', 'authorize'):
             self.lab.update(fail=[failure]); self.provision(ok=False)
             self.assertEqual(self.provider()['state'], 'archived')
             self.assertEqual(self.state()['lifecycle'], 'provisioned')
             self.lab.update(fail=[]); self.call('destroy', '--yes')
+    def test_pre_acquisition_compensation_reports_no_bearer_installed(self):
+        check = subprocess.run(['systemctl', '--user', 'show', '--property=ControlGroup'], capture_output=True)
+        if check.returncode: self.skipTest('Linux systemd user manager required for auth transition')
+        self.lab.update(fail=['patch'])
+        self.provision(auth=True, ok=False)
+        lease = fixture['rows'](self.lab.lease)
+        self.assertEqual(lease['state'], 'retired')
+        self.assertEqual(lease['install_attempted'], '0')
+        self.assertIn('bearer=not-installed', lease['cleanup'])
+        self.assertIn('helpers=not-started', lease['cleanup'])
+        self.assertIn(lease['cleanup'], self.state()['cleanup'])
+        self.assertNotIn('credentials retired', self.state()['cleanup'])
+        self.assertFalse((self.lab.path / 'remote/omp-auth-broker.token').exists())
+        self.assertNotIn('omp token', (self.lab.path / 'calls').read_text())
     def test_stop_failure_is_truthful_and_never_reported_suspended(self):
         self.lab.update(fail=['patch', 'stop']); result = self.provision(ok=False)
         self.assertIn('compensation unresolved', result.stderr)
@@ -101,6 +167,20 @@ class LifecycleTests(unittest.TestCase):
                                 env=self.lab.env, capture_output=True, text=True, timeout=10)
         self.assertNotEqual(result.returncode, 0); self.assertIn('FM_BOAT_LIVE=1', result.stderr)
         self.assertFalse((self.lab.path / 'calls').exists())
+    def test_fixture_smoke_reports_original_failure_and_cleanup_failure(self):
+        check = subprocess.run(['systemctl', '--user', 'show', '--property=ControlGroup'], capture_output=True)
+        if check.returncode: self.skipTest('Linux systemd user manager required for smoke fixture')
+        self.lab.env['FM_BOAT_LIVE'] = '1'
+        self.lab.update(fail=['patch', 'delete'])
+        result = subprocess.run([BOAT, 'live-smoke', '--identity', str(self.identity), '--model', 'openai-codex/fixture'],
+                                env=self.lab.env, capture_output=True, text=True, timeout=20)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('curl refused the operation', result.stderr)
+        self.assertIn('smoke cleanup failed: boat refused the operation', result.stderr)
+        self.assertEqual(self.provider()['state'], 'archived')
+        placement = next((self.lab.home / 'data/boat').glob('*.meta'))
+        self.assertEqual(fixture['rows'](placement)['sandbox_id'], 'bx_fixture')
+        self.assertNotIn('fixture_api_key', result.stdout + result.stderr)
 
 try:
     unittest.main()

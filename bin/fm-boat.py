@@ -62,7 +62,16 @@ def info(box):
     return body
 
 def api(method, box, body):
-    keyfile = Path(os.environ.get('FM_BOAT_CONFIG_FILE', str(Path.home() / '.ascii/config.json')))
+    override = os.environ.get('FM_BOAT_CONFIG_FILE')
+    if override is not None:
+        candidates = [Path(override).expanduser()]
+    else:
+        config = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config')
+        candidates = [config / 'ascii' / name / 'config.json' for name in ('boat', 'box')]
+    keyfile = next((path for path in candidates if path.exists() or path.is_symlink()), None)
+    if keyfile is None:
+        raise Failure('Boat CLI config unavailable; tried: ' + ', '.join(map(str, candidates))
+                      + '; authenticate with boat login or set FM_BOAT_CONFIG_FILE')
     token = json.loads(regular(keyfile, 0o600).read_text()).get('token', '')
     if not isinstance(token, str) or not re.fullmatch(r'[A-Za-z0-9._~-]{8,}', token):
         raise Failure('Boat API credential unavailable')
@@ -75,6 +84,10 @@ def api(method, box, body):
     return json.loads(run([CURL, '--config', '-'], input=config).stdout)
 
 def stopped(rows):
+    state = info(rows['sandbox_id'])['state']
+    if state in ('archived', 'stopped'):
+        rows['provider_state'] = state
+        return
     cli('stop', rows['sandbox_id'], '--json')
     deadline = time.monotonic() + TIMEOUT
     while time.monotonic() < deadline:
@@ -96,9 +109,11 @@ def wake_ttl(rows):
 
 def compensate(id, rows, cause):
     failures = []
+    cleanup = 'credentials not requested'
     if rows.get('omp_auth') == '1':
         try:
             auth.release(id)
+            cleanup = load(auth.paths(id)[1])['cleanup']
         except (Failure, OSError, ValueError) as error:
             failures.append(str(error))
     try:
@@ -106,7 +121,7 @@ def compensate(id, rows, cause):
     except (Failure, OSError, ValueError) as error:
         failures.append(str(error))
     rows['lifecycle'] = 'unresolved' if failures else ('suspended' if rows.get('ever_ready') == '1' else 'provisioned')
-    rows['cleanup'] = '; '.join(failures) if failures else 'credentials retired; provider stop confirmed'
+    rows['cleanup'] = '; '.join(failures) if failures else cleanup + '; provider stop confirmed'
     write(id, rows)
     raise Failure(str(cause) + ('; compensation unresolved: ' + rows['cleanup'] if failures else '; compensation confirmed'))
 
@@ -292,15 +307,24 @@ def live_smoke(identity, model):
         args = argparse.Namespace(id=id, identity=identity, model=model, alias=id,
                                   size='small', ttl=3500, prefix='',
                                   omp_auth=True, smoke_deadline=time.time() + 3500)
+        failure = None
         try:
             provision(args)
             wake(id)
             sleep(id)
             wake(id)
             sleep(id)
+        except BaseException as error:
+            failure = error
+            raise
         finally:
             if record_path(id).exists():
-                sleep(id, destroy=True)
+                try:
+                    sleep(id, destroy=True)
+                except Exception as cleanup:
+                    if failure is None:
+                        raise
+                    raise Failure(str(failure) + '; smoke cleanup failed: ' + str(cleanup)) from failure
         print('live smoke passed: one small sandbox, two wake/sleep cycles, stable SSH pin and checked credential retirement')
 
 

@@ -43,6 +43,9 @@ if name == 'boat':
             state['no_ready'] -= 1; commit(); print('no_ready_machine'); sys.exit(1)
         state.update(state='ready', ip='127.0.0.2', ttl=int(args[args.index('--ttl') + 1]))
     elif verb == 'stop':
+        if state['state'] in ('archived', 'stopped'):
+            print(json.dumps({'code': 'stop_failed', 'error': 'Sandbox is archived, so it cannot be stopped.', 'status': 400}))
+            sys.exit(1)
         state['state'] = 'archived'
     elif verb == 'delete':
         state['state'] = 'deleted'
