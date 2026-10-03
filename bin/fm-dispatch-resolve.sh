@@ -389,6 +389,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     else null end;
   def declared_confidence($c): rule_at($c) as $x | $x != null and ($x | has("min_confidence"));
   def confidence_floor($c): if declared_confidence($c) then rule_at($c).min_confidence else ($floor | tonumber) end;
+  def canonical_number: tonumber | tostring | if contains(".") then sub("0+$"; "") | sub("\\.$"; "") else . end;
   ($a.choice) as $picked |
   (confidence_floor($picked)) as $picked_floor |
   # A declared floor is checked against the probability of that option whether
@@ -427,7 +428,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     rule_when: when_of($picked),
     confidence: $a.confidence, probabilities: $a.probabilities
   }
-  + (if $fb.to then {fallback: "\($choice) (\(when_of($choice))) probability \(($fb.p | tonumber | tostring)) clears its floor \(($fb.to_floor | tonumber | tostring)); \($picked) probability \(($a.probabilities[$picked] | tonumber | tostring)) is below its floor \(($picked_floor | tonumber | tostring))"} else {} end)
+  + (if $fb.to then {fallback: "\($choice) (\(when_of($choice))) probability \(($fb.p | canonical_number)) clears its floor \(($fb.to_floor | canonical_number)); \($picked) probability \(($a.probabilities[$picked] | canonical_number)) is below its floor \(($picked_floor | canonical_number))"} else {} end)
   as $ev |
   if $sel.invalid then $ev + {status: "error", reason: $sel.invalid}
   elif $fb.below and $fb.global then
