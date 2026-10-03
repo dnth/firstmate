@@ -64,6 +64,49 @@ assert_no_grep resume "$w/calls" 'contradictory ownership resumed Boat'
 assert_no_grep 'fm-remote-secondmate-control.sh send' "$w/calls.log" 'contradictory ownership delivered remotely'
 rm "$w/home/data/runpod/ios.meta"
 pass 'double provider claim refuses before provider creation or delivery'
+
+# A compute stop does not keep the second-mate agent: a routed delivery to a
+# slept route wakes the placement, proves the remote endpoint is gone on the
+# replaced machine, restores the agent through the same readiness and launch
+# gate, and only then delivers - exactly once.
+: > "$w/calls"
+: > "$w/calls.log"
+printf 'missing\n' > "$w/agent-state"
+out=$(FM_FAKE_REMOTE_STATE_FILE="$w/agent-state" FM_FAKE_REMOTE_LAUNCH_SUCCESS=1 \
+  FM_FAKE_DOCTOR_MODE=fresh-pod FM_FAKE_DOCTOR_FIXED="$w/doctor-fixed" \
+  world_env "$ROOT/bin/fm-send.sh" fm-ios 'restore after stop' 2>&1) \
+  || fail "routed delivery after compute sleep did not restore the remote agent: $out"
+grep -qx 'lifecycle=ready' "$w/home/data/boat/ios.meta" || fail "delivery did not wake the compute placement: $out"
+[ "$(grep -c 'fm-remote-secondmate-control.sh state' "$w/calls.log")" -ge 2 ] \
+  || fail "delivery did not probe the remote agent state before and after restore: $(cat "$w/calls.log")"
+assert_grep 'fm-remote-secondmate-control.sh launch' "$w/calls.log" \
+  'delivery did not relaunch the missing remote agent'
+assert_grep 'fm-remote-doctor.sh' "$w/calls.log" \
+  'the restore did not pass the readiness gate on the woken machine'
+[ "$(grep -c 'fm-remote-secondmate-control.sh send' "$w/calls.log")" = 1 ] \
+  || fail "restored delivery did not deliver exactly once: $(cat "$w/calls.log")"
+[ "$(cat "$w/agent-state")" = alive ] || fail "the restored remote agent was not reported alive"
+state_line=$(grep -n 'fm-remote-secondmate-control.sh state' "$w/calls.log" | head -1 | cut -d: -f1)
+launch_line=$(grep -n 'fm-remote-secondmate-control.sh launch' "$w/calls.log" | head -1 | cut -d: -f1)
+send_line=$(grep -n 'fm-remote-secondmate-control.sh send' "$w/calls.log" | cut -d: -f1)
+[ "$state_line" -lt "$launch_line" ] && [ "$launch_line" -lt "$send_line" ] \
+  || fail "restore order was not state probe -> relaunch -> delivery: $(cat "$w/calls.log")"
+pass 'Boat wake-on-delivery restores the remote agent before delivering exactly once'
+
+# The same sleep guards hold: a routed reply still in flight refuses sleep,
+# the route stays awake, and the provider is never told to stop.
+: > "$w/calls"
+out=$(world_env "$ROOT/bin/fm-boat.sh" sleep ios 2>&1) && fail 'sleep accepted a routed reply still in flight'
+grep -qx 'lifecycle=ready' "$w/home/data/boat/ios.meta" || fail 'a refused sleep suspended the route anyway'
+assert_no_grep 'boat stop' "$w/calls" 'a refused sleep still stopped the sandbox'
+assert_no_grep 'boat delete' "$w/calls" 'a refused sleep still deleted the sandbox'
+pass 'Boat sleep refuses a routed reply still in flight'
+for request in "$w/home/state/pending-replies/"*; do
+  [ -f "$request" ] || continue
+  printf 'done [corr=%s]: fixture reply\n' "$(basename "$request")" >> "$w/home/state/ios.status"
+done
+world_env "$ROOT/bin/fm-boat.sh" sleep ios >/dev/null \
+  || fail 'could not re-suspend the route after settling replies'
 : > "$w/calls"
 if out=$(FM_FAKE_DOCTOR_MODE=unready world_env "$ROOT/bin/fm-spawn.sh" ios --secondmate 2>&1); then fail 'unready remote fixture launched'; fi
 grep -qx 'lifecycle=ready' "$w/home/data/boat/ios.meta" || fail 'spawn did not wake before readiness'

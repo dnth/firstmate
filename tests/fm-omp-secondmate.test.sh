@@ -153,15 +153,32 @@ case "$cmd" in
         fi
       fi
     done
-    if [ "${args[${#args[@]}-1]:-}" = Enter ] && [ -s "$FM_TEST_LAUNCH_LOG" ] && [ "${FM_TEST_SKIP_ACK:-0}" != 1 ]; then
-      mkdir -p "$FM_TEST_HOME/state/omp-sessions"
-      session="$FM_TEST_HOME/state/omp-sessions/${FM_TEST_ACK_SESSION:-selected.jsonl}"
-      printf '{"type":"session"}\n' > "$session"
-      printf '%s\n' "$session" > "$FM_TEST_HOME/state/.omp-session"
-      version=$(bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_primary_watch_version "$1/.omp/extensions/fm-primary-omp.ts" "$1"' _ "$FM_TEST_HOME")
-      printf '%s\n%s\n%s\n%s\n' "$version" "$FM_TEST_AGENT_PID" "$FM_TEST_OMP_BUN" "$FM_TEST_OMP_BIN" > "$FM_TEST_HOME/state/.omp-primary-extension-loaded"
-      : > "$FM_TEST_OMP_DOORBELL_READY"
-      printf '%s\n' "$FM_TEST_AGENT_PID" > "$FM_TEST_HOME/state/.lock"
+    if [ "${args[${#args[@]}-1]:-}" = Enter ] && [ -s "$FM_TEST_LAUNCH_LOG" ]; then
+      if [ "${FM_TEST_BROKEN_ACK:-0}" = 1 ]; then
+        # The aborted generation's leftovers: a session pointer naming a file
+        # that never existed, marker and lock recording a dead pid, and the
+        # generation's own doorbell, turn-start, and readiness markers.
+        broken=$( { sleep 0.05 & echo "$!"; wait; } 2>/dev/null )
+        mkdir -p "$FM_TEST_HOME/state/omp-sessions"
+        printf '%s\n' "$FM_TEST_HOME/state/omp-sessions/ghost-never-existed.jsonl" > "$FM_TEST_HOME/state/.omp-session"
+        version=$(bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_primary_watch_version "$1/.omp/extensions/fm-primary-omp.ts" "$1"' _ "$FM_TEST_HOME")
+        printf '%s\n%s\n%s\n%s\n' "$version" "$broken" "$FM_TEST_OMP_BUN" "$FM_TEST_OMP_BIN" > "$FM_TEST_HOME/state/.omp-primary-extension-loaded"
+        : > "$FM_TEST_OMP_DOORBELL_READY"
+        mkdir -p "$FM_TEST_OMP_DOORBELL_READY.requests"
+        : > "$FM_TEST_OMP_DOORBELL_READY.requests/request.1"
+        : > "${FM_TEST_OMP_DOORBELL_READY%.omp-doorbell-ready}.omp-started"
+        : > "${FM_TEST_OMP_DOORBELL_READY%.omp-doorbell-ready}.omp-ready"
+        printf '%s\n' "$broken" > "$FM_TEST_HOME/state/.lock"
+      elif [ "${FM_TEST_SKIP_ACK:-0}" != 1 ]; then
+        mkdir -p "$FM_TEST_HOME/state/omp-sessions"
+        session="$FM_TEST_HOME/state/omp-sessions/${FM_TEST_ACK_SESSION:-selected.jsonl}"
+        printf '{"type":"session"}\n' > "$session"
+        printf '%s\n' "$session" > "$FM_TEST_HOME/state/.omp-session"
+        version=$(bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_primary_watch_version "$1/.omp/extensions/fm-primary-omp.ts" "$1"' _ "$FM_TEST_HOME")
+        printf '%s\n%s\n%s\n%s\n' "$version" "$FM_TEST_AGENT_PID" "$FM_TEST_OMP_BUN" "$FM_TEST_OMP_BIN" > "$FM_TEST_HOME/state/.omp-primary-extension-loaded"
+        : > "$FM_TEST_OMP_DOORBELL_READY"
+        printf '%s\n' "$FM_TEST_AGENT_PID" > "$FM_TEST_HOME/state/.lock"
+      fi
     fi
     ;;
   kill-window)
@@ -228,7 +245,19 @@ case "$cmd $sub" in
     ;;
   "pane run")
     printf '%s\n' "${4:-}" > "$FM_TEST_LAUNCH_LOG"
-    if [ "${FM_TEST_SKIP_ACK:-0}" != 1 ]; then
+    if [ "${FM_TEST_BROKEN_ACK:-0}" = 1 ]; then
+      broken=$( { sleep 0.05 & echo "$!"; wait; } 2>/dev/null )
+      mkdir -p "$FM_TEST_HOME/state/omp-sessions"
+      printf '%s\n' "$FM_TEST_HOME/state/omp-sessions/ghost-never-existed.jsonl" > "$FM_TEST_HOME/state/.omp-session"
+      version=$(bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_primary_watch_version "$1/.omp/extensions/fm-primary-omp.ts" "$1"' _ "$FM_TEST_HOME")
+      printf '%s\n%s\n%s\n%s\n' "$version" "$broken" "$FM_TEST_OMP_BUN" "$FM_TEST_OMP_BIN" > "$FM_TEST_HOME/state/.omp-primary-extension-loaded"
+      : > "$FM_TEST_OMP_DOORBELL_READY"
+      mkdir -p "$FM_TEST_OMP_DOORBELL_READY.requests"
+      : > "$FM_TEST_OMP_DOORBELL_READY.requests/request.1"
+      : > "${FM_TEST_OMP_DOORBELL_READY%.omp-doorbell-ready}.omp-started"
+      : > "${FM_TEST_OMP_DOORBELL_READY%.omp-doorbell-ready}.omp-ready"
+      printf '%s\n' "$broken" > "$FM_TEST_HOME/state/.lock"
+    elif [ "${FM_TEST_SKIP_ACK:-0}" != 1 ]; then
       mkdir -p "$FM_TEST_HOME/state/omp-sessions"
       session="$FM_TEST_HOME/state/omp-sessions/${FM_TEST_ACK_SESSION:-selected.jsonl}"
       printf '{"type":"session"}\n' > "$session"
@@ -243,15 +272,29 @@ case "$cmd $sub" in
     printf '%s\n' "${4:-}" > "$FM_TEST_LAUNCH_LOG"
     ;;
   "pane send-keys")
-    if [ "${4:-}" = enter ] && [ -s "$FM_TEST_LAUNCH_LOG" ] && [ "${FM_TEST_SKIP_ACK:-0}" != 1 ]; then
-      mkdir -p "$FM_TEST_HOME/state/omp-sessions"
-      session="$FM_TEST_HOME/state/omp-sessions/${FM_TEST_ACK_SESSION:-selected.jsonl}"
-      printf '{"type":"session"}\n' > "$session"
-      printf '%s\n' "$session" > "$FM_TEST_HOME/state/.omp-session"
-      version=$(bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_primary_watch_version "$1/.omp/extensions/fm-primary-omp.ts" "$1"' _ "$FM_TEST_HOME")
-      printf '%s\n%s\n%s\n%s\n' "$version" "$FM_TEST_AGENT_PID" "$FM_TEST_OMP_BUN" "$FM_TEST_OMP_BIN" > "$FM_TEST_HOME/state/.omp-primary-extension-loaded"
-      : > "$FM_TEST_OMP_DOORBELL_READY"
-      printf '%s\n' "$FM_TEST_AGENT_PID" > "$FM_TEST_HOME/state/.lock"
+    if [ "${4:-}" = enter ] && [ -s "$FM_TEST_LAUNCH_LOG" ]; then
+      if [ "${FM_TEST_BROKEN_ACK:-0}" = 1 ]; then
+        broken=$( { sleep 0.05 & echo "$!"; wait; } 2>/dev/null )
+        mkdir -p "$FM_TEST_HOME/state/omp-sessions"
+        printf '%s\n' "$FM_TEST_HOME/state/omp-sessions/ghost-never-existed.jsonl" > "$FM_TEST_HOME/state/.omp-session"
+        version=$(bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_primary_watch_version "$1/.omp/extensions/fm-primary-omp.ts" "$1"' _ "$FM_TEST_HOME")
+        printf '%s\n%s\n%s\n%s\n' "$version" "$broken" "$FM_TEST_OMP_BUN" "$FM_TEST_OMP_BIN" > "$FM_TEST_HOME/state/.omp-primary-extension-loaded"
+        : > "$FM_TEST_OMP_DOORBELL_READY"
+        mkdir -p "$FM_TEST_OMP_DOORBELL_READY.requests"
+        : > "$FM_TEST_OMP_DOORBELL_READY.requests/request.1"
+        : > "${FM_TEST_OMP_DOORBELL_READY%.omp-doorbell-ready}.omp-started"
+        : > "${FM_TEST_OMP_DOORBELL_READY%.omp-doorbell-ready}.omp-ready"
+        printf '%s\n' "$broken" > "$FM_TEST_HOME/state/.lock"
+      elif [ "${FM_TEST_SKIP_ACK:-0}" != 1 ]; then
+        mkdir -p "$FM_TEST_HOME/state/omp-sessions"
+        session="$FM_TEST_HOME/state/omp-sessions/${FM_TEST_ACK_SESSION:-selected.jsonl}"
+        printf '{"type":"session"}\n' > "$session"
+        printf '%s\n' "$session" > "$FM_TEST_HOME/state/.omp-session"
+        version=$(bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_primary_watch_version "$1/.omp/extensions/fm-primary-omp.ts" "$1"' _ "$FM_TEST_HOME")
+        printf '%s\n%s\n%s\n%s\n' "$version" "$FM_TEST_AGENT_PID" "$FM_TEST_OMP_BUN" "$FM_TEST_OMP_BIN" > "$FM_TEST_HOME/state/.omp-primary-extension-loaded"
+        : > "$FM_TEST_OMP_DOORBELL_READY"
+        printf '%s\n' "$FM_TEST_AGENT_PID" > "$FM_TEST_HOME/state/.lock"
+      fi
     fi
     ;;
   "pane close")
@@ -489,6 +532,8 @@ test_launch_and_exact_resume() {
 
   out=$(run_spawn -- --prewalk-into 'test/finish:xhigh' 2>&1) || fail "fresh OMP secondmate spawn failed: $out"
   launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "OMP_SKIP_SETUP=1" \
+    "OMP launch did not bypass the interactive first-run setup wizard"
   assert_contains "$launch" "FM_OMP_SESSION_POINTER=" "OMP launch did not bind the home-owned session pointer"
   assert_contains "$launch" "$HOME_DIR/state/.omp-session" "OMP launch did not retain the home-owned session pointer path"
   assert_contains "$launch" "/bin/bash -c" \
@@ -544,6 +589,68 @@ test_launch_and_exact_resume() {
   assert_contains "$out" 'retained sessions but no exact session pointer' "unbound retained-session refusal was not actionable"
 
   pass "OMP secondmate launch and recovery use the isolated adapter and an exact home-owned session pointer"
+}
+
+test_failed_bind_retires_generation_artifacts() {
+  local out retained launch dead_pid dead_version
+  setup_case broken-bind
+
+  # The aborted generation leaves every artifact the next launch's entry
+  # validation refuses on: a session pointer naming a file that never
+  # existed, a dead-pid integration marker and session lock, the adapter
+  # file, and the generation's own doorbell, readiness, and turn markers.
+  out=$(FM_TEST_BROKEN_ACK=1 run_spawn 2>&1) \
+    && fail "broken OMP secondmate launch unexpectedly bound"
+  assert_contains "$out" 'did not bind' "broken OMP bind failure did not report its own boundary"
+  assert_absent "$HOME_DIR/state/.omp-session" "failed bind left a session pointer to a session that never existed"
+  assert_absent "$HOME_DIR/state/.omp-primary-extension-loaded" "failed bind left a stale integration marker"
+  assert_absent "$HOME_DIR/state/.lock" "failed bind left a dead session lock"
+  assert_absent "$MAIN_STATE/$TASK_ID.omp-ext.ts" "failed bind left its generated adapter file"
+  assert_absent "$MAIN_STATE/$TASK_ID.omp-ready" "failed bind left a stale readiness marker"
+  assert_absent "$MAIN_STATE/$TASK_ID.omp-started" "failed bind left a stale turn-start marker"
+  assert_absent "$MAIN_STATE/$TASK_ID.omp-doorbell-ready" "failed bind left a stale doorbell marker"
+  assert_absent "$MAIN_STATE/$TASK_ID.omp-doorbell-failed" "failed bind left a stale doorbell failure marker"
+  assert_absent "$MAIN_STATE/$TASK_ID.omp-doorbell-ready.requests" "failed bind left a stale request directory"
+  [ -f "$MAIN_STATE/$TASK_ID.meta" ] || fail "failed bind removed the endpoint recovery record"
+  [ -d "$HOME_DIR" ] || fail "failed bind removed the persistent home"
+  [ -d "$HOME_DIR/state/omp-sessions" ] || fail "failed bind removed the durable session store"
+  [ ! -f "$WINDOW_FLAG" ] || fail "failed bind left its owned endpoint running"
+
+  # The next launch is accepted on the cleaned state, not refused on the
+  # dead generation's leftovers.
+  out=$(run_spawn 2>&1) || fail "OMP secondmate relaunch after a failed bind was refused: $out"
+  retained=$(cat "$HOME_DIR/state/.omp-session")
+  [ -f "$retained" ] || fail "the rebound session pointer does not name a durable session file"
+
+  # The same failure with a real retained session restores the pointer to
+  # it instead of dropping or rewriting the binding. The live endpoint is
+  # removed first and its recorded lock and marker owners die with it, so the
+  # second failure comes from a bind that died, not from a refused duplicate
+  # launch against a live session lock.
+  rm -f "$WINDOW_FLAG"
+  dead_pid=$( { sleep 0.05 & echo "$!"; wait; } 2>/dev/null )
+  printf '%s\n' "$dead_pid" > "$HOME_DIR/state/.lock"
+  dead_version=$(bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_primary_watch_version "$2/.omp/extensions/fm-primary-omp.ts" "$2"' \
+    _ "$ROOT" "$HOME_DIR")
+  printf '%s\n%s\n%s\n%s\n' "$dead_version" "$dead_pid" "$TEST_OMP_BUN" "$TEST_OMP_BIN" \
+    > "$HOME_DIR/state/.omp-primary-extension-loaded"
+  out=$(FM_TEST_BROKEN_ACK=1 run_spawn 2>&1) \
+    && fail "second broken OMP secondmate launch unexpectedly bound"
+  [ -f "$HOME_DIR/state/.omp-session" ] \
+    || fail "a failed relaunch dropped the retained session pointer entirely"
+  [ "$(cat "$HOME_DIR/state/.omp-session")" = "$retained" ] \
+    || fail "a failed relaunch did not restore the exact retained session pointer"
+  [ -f "$retained" ] || fail "a failed relaunch destroyed the real retained session"
+  assert_absent "$HOME_DIR/state/.omp-primary-extension-loaded" "failed relaunch left a stale integration marker"
+  assert_absent "$HOME_DIR/state/.lock" "failed relaunch left a dead session lock"
+  assert_absent "$MAIN_STATE/$TASK_ID.omp-started" "failed relaunch left a stale turn-start marker"
+  assert_absent "$MAIN_STATE/$TASK_ID.omp-doorbell-ready" "failed relaunch left a stale doorbell marker"
+
+  out=$(run_spawn 2>&1) || fail "OMP secondmate launch after a failed retained-session bind was refused: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--resume" "recovered launch did not resume the retained session"
+  assert_contains "$launch" "$retained" "recovered launch did not name the retained session file"
+  pass "a failed OMP secondmate bind retires its generation artifacts, preserves the retained session, and accepts the next launch"
 }
 
 test_rendered_legacy_launch_executes() {
@@ -785,6 +892,7 @@ test_adviser_extension_trusted_closure
 test_stale_omp_runtime_cleanup
 test_herdr_launch_exact_resume_recovery_and_abort
 test_launch_and_exact_resume
+test_failed_bind_retires_generation_artifacts
 test_rendered_legacy_launch_executes
 test_legacy_launch_rejects_empty_path_components
 test_legacy_launch_rejects_runtime_fallback
