@@ -1122,7 +1122,7 @@ spawn_omp_abort_endpoint_stopped() {  # [meta]
 # lock and integration markers are retired only when their recorded owner is
 # dead - a live owner means the artifacts are not this generation's to take.
 spawn_omp_secondmate_abort_retire_generation() {
-  local marker lock_pid pointer named keep session candidate count live_owner=0 failure=0
+  local marker lock_pid pointer named keep session candidate count pointer_tmp live_owner=0 failure=0
   rm -f -- "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" \
     "$STATE/$ID.omp-started" "$STATE/$ID.omp-doorbell-ready" \
     "$STATE/$ID.omp-doorbell-failed" || failure=1
@@ -1165,10 +1165,12 @@ spawn_omp_secondmate_abort_retire_generation() {
         esac
       fi
     fi
+    candidate=
     if [ -n "${OMP_RESUME_FILE:-}" ] && [ -f "$OMP_RESUME_FILE" ] && [ ! -L "$OMP_RESUME_FILE" ]; then
-      (umask 077; printf '%s\n' "$OMP_RESUME_FILE" > "$pointer") || failure=1
+      if [ "$keep" != 1 ] || [ "$named" != "$OMP_RESUME_FILE" ]; then
+        candidate=$OMP_RESUME_FILE
+      fi
     elif [ "$keep" != 1 ]; then
-      candidate=
       count=0
       for session in "$OMP_SESSION_DIR"/*.jsonl "$OMP_SESSION_DIR"/.*.jsonl "$OMP_SESSION_DIR"/.jsonl; do
         [ -f "$session" ] && [ ! -L "$session" ] || continue
@@ -1177,12 +1179,20 @@ spawn_omp_secondmate_abort_retire_generation() {
       done
       case "$count" in
         0) rm -f -- "$pointer" || failure=1 ;;
-        1) (umask 077; printf '%s\n' "$candidate" > "$pointer") || failure=1 ;;
+        1) ;;
         *)
           echo "warning: OMP failed-bind cleanup found multiple retained sessions without an exact binding; explicit session reconciliation is required" >&2
+          candidate=
           failure=1
           ;;
       esac
+    fi
+    if [ -n "$candidate" ]; then
+      pointer_tmp=$(mktemp "$pointer.tmp.XXXXXX") || return 1
+      if ! printf '%s\n' "$candidate" > "$pointer_tmp" || ! mv -f -- "$pointer_tmp" "$pointer"; then
+        rm -f -- "$pointer_tmp"
+        failure=1
+      fi
     fi
   fi
   return "$failure"
