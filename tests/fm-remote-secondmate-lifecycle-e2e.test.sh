@@ -368,7 +368,6 @@ seed_env() {
   "$@"
 }
 
-if [ "${FM_TEST_REMOTE_OMP_ONLY:-0}" != 1 ]; then
 REAL_GIT=$(command -v git)
 cat > "$FAKEBIN/git" <<SH
 #!/usr/bin/env bash
@@ -1217,8 +1216,6 @@ assert_absent "$PARENT/state/.spawn-ios.lock" "remote spawn left its task lock b
 assert_no_grep '- ios ' "$PARENT/data/secondmates.md" "remote spawn re-registered a retired route"
 pass "remote spawn refuses a retired route without republishing its metadata"
 
-fi
-
 # The parent and remote host both accept OMP as an agent harness while keeping
 # the raw-command and remote-Prewalk refusals intact. The optional fallback is
 # accepted independently, then a second route drives the real OMP launch across
@@ -1718,6 +1715,32 @@ remote_env "$ROOT/bin/fm-spawn.sh" remote-omp-broken --secondmate \
     fm-remote-secondmate-control.sh state remote-omp-broken)" = alive ] \
   || fail "remote OMP launch after a failed retained-session bind did not reach a live endpoint"
 pass "a failed remote OMP bind retires its generation artifacts, preserves the retained session, and accepts the next launch"
+
+for pointer_state in absent malformed; do
+  orphan_id="remote-omp-orphan-$pointer_state"
+  orphan_home="$TMP_ROOT/$orphan_id-home"
+  FM_SECONDMATE_CHARTER='Exercise failed-bind session-pointer reconciliation.' \
+    FM_SECONDMATE_SCOPE='remote orphan-session validation' \
+    remote_env "$ROOT/bin/fm-remote-home-seed.sh" "$orphan_id" remote-mac "$REMOTE_ROOT" \
+    "$orphan_home" --no-projects >/dev/null || fail 'orphan-session remote route seeding failed'
+  printf '%s\n' "$pointer_state" > "$TMP_ROOT/omp-broken-ack"
+  if remote_env "$ROOT/bin/fm-spawn.sh" "$orphan_id" --secondmate \
+    > "$TMP_ROOT/$orphan_id.out" 2>&1; then
+    fail 'remote orphan-session launch unexpectedly bound'
+  fi
+  orphan_session="$orphan_home/state/omp-sessions/orphan.jsonl"
+  [ "$(cat "$orphan_home/state/.omp-session")" = "$orphan_session" ] \
+    || fail "remote cleanup did not reconcile the $pointer_state session pointer"
+  [ "$(cat "$orphan_session")" = '{"type":"session"}' ] || fail 'remote cleanup changed the saved session'
+  rm -f "$TMP_ROOT/omp-broken-ack"
+  remote_env "$ROOT/bin/fm-spawn.sh" "$orphan_id" --secondmate \
+    > "$TMP_ROOT/$orphan_id-relaunch.out" 2>&1 \
+    || fail "remote orphan-session relaunch was refused: $(cat "$TMP_ROOT/$orphan_id-relaunch.out")"
+  [ "$(remote_env "$ROOT/bin/fm-on.sh" "$orphan_id" fm-remote-secondmate-control.sh state "$orphan_id")" = alive ] \
+    || fail 'remote orphan-session relaunch did not bind'
+  [ -f "$orphan_session" ] || fail 'remote relaunch deleted the saved session'
+done
+pass 'Remote failed binds repair absent and malformed pointers without deleting saved sessions'
 
 pass "remote OMP primary, fallback, result metadata, pane launch, and existing safety refusals hold end to end"
 
