@@ -34,9 +34,7 @@ document:
 # security, Herdr, tmux, and lifecycle coverage). A full-suite override here
 # would duplicate CI and defeat the targeted Test contract.
 commands:
-  # FM_LINT_JOBS=1 halves the gate's shellcheck footprint (~10.3 GiB combined
-  # peak for two workers down to ~6 GiB for one) against the host's shared
-  # memory pressure - byte-identical diagnostics, documented by bin/fm-lint.sh.
+  # Use the serial mode documented by bin/fm-lint.sh to reduce peak memory.
   lint: 'FM_LINT_JOBS=1 bin/fm-lint.sh'
 
 # Keep test evidence out of this repo; it stays in a temp dir instead.
