@@ -43,7 +43,7 @@ The worker runs one staged job at a time and preempts a running reply long-poll 
 `bin/fm-remote-job-lib.sh` owns that preemption contract, and a preempted poll is indistinguishable from one whose wait window closed with no data, so the re-armed poll loses nothing.
 Linux uses the same queue and worker protocol without the Aqua-session requirement.
 The remote account must provide the required toolchain, the selected worker runtime, the selected session backend, and credentials that work on that host.
-A remote second-mate home is a full Firstmate home rather than a pane host, so its own bootstrap requires the same universal tool set as any other home - `node`, `git`, `gh`, `no-mistakes`, `gh-axi`, `chrome-devtools-axi`, `lavish-axi`, `tasks-axi`, `quota-axi` - plus the Herdr backend's `herdr` and `treehouse` and the selected agent harness such as `omp`.
+A remote second-mate home is a full Firstmate home rather than a pane host, so its own bootstrap requires the [universal toolchain and Herdr backend delta](configuration.md#toolchain), plus the selected agent harness such as `omp`.
 `bin/fm-bootstrap.sh` owns the exact floors and the probe behavior; the doctor's required tier below is only the minimum the remote control path itself verifies.
 Project origin URLs recorded by the primary must be reachable from the remote account because projects are cloned on that host rather than copied from the primary.
 
@@ -53,7 +53,9 @@ Without forge authentication the remote second mate still runs, does local and s
 
 ### OMP first-run setup
 
-Verified against OMP `omp/18.4.4` on 2026-10-03. In the installed native binary's `@oh-my-pi/pi-coding-agent` source, `packages/tui/src/setup/wizard.ts` reads `Bun.env.OMP_SKIP_SETUP` during setup-scene selection, with the setup scenes under `packages/tui/src/setup/scenes/`; Firstmate sets `OMP_SKIP_SETUP=1` on every verified OMP launch so a fresh non-interactive SSH account cannot stop in the first-run wizard. If the doorbell or session bind does not appear, the launch fails with an actionable diagnostic identifying an unhonored setup bypass rather than waiting indefinitely.
+Verified against OMP `omp/18.4.4` on 2026-10-03.
+In the installed native binary's `@oh-my-pi/pi-coding-agent` source, `packages/tui/src/setup/wizard.ts` reads `Bun.env.OMP_SKIP_SETUP` during setup-scene selection, with the setup scenes under `packages/tui/src/setup/scenes/`; Firstmate sets `OMP_SKIP_SETUP=1` on every verified OMP launch so a fresh non-interactive SSH account cannot stop in the first-run wizard.
+If the doorbell or session bind does not appear, the launch fails with a diagnostic identifying a potentially unhonored setup bypass rather than waiting indefinitely.
 
 ## Non-interactive tool contract
 
@@ -111,7 +113,8 @@ bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh --fix
 ```
 
 Over the plain SSH doctor bootstrap, it writes and reloads the Firstmate-owned `dev.firstmate.remote-job` and `dev.firstmate.herdr.fm-remote` launch agents on macOS, both scoped with `LimitLoadToSessionType=Aqua` and bootstrapped in `gui/<uid>`.
-It starts the same workers directly on Linux, recreates the `~/.local/bin/fm-remote-entrypoint.sh` symlink when it is absent, and creates only Firstmate-owned required-tool wrappers that it can prove resolve to a version-manager target, stopping after one harness satisfies the at-least-one requirement.
+On Linux it starts the account worker directly and fully detaches the Herdr server from the invoking process group and inherited pipes, so repair returns once the server is healthy.
+It recreates the `~/.local/bin/fm-remote-entrypoint.sh` symlink when it is absent and creates only Firstmate-owned required-tool wrappers that it can prove resolve to a version-manager target, stopping after one harness satisfies the at-least-one requirement.
 It never installs packages or overwrites a non-Firstmate file at a reserved wrapper path.
 The dedicated Herdr launch agent owns only the remote-secondmate `fm-remote` server and does not inspect, rewrite, start, stop, or require the user's interactive `default` session or its `dev.firstmate.herdr` launch agent.
 It re-derives every check from the host afterwards, so what it prints is the state after the repair rather than the intent of one.

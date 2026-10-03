@@ -1117,10 +1117,12 @@ spawn_omp_abort_endpoint_stopped() {  # [meta]
 # of refusing on the dead generation's leftovers. This runs only after the
 # failed generation's own endpoint is proven stopped. The persistent home, its
 # endpoint metadata, its durable inbox, and every real retained session file
-# stay: the session pointer is restored to the pre-launch retained session
-# when one survives, removed only when it cannot name a live session file, and
-# lock and integration markers are retired only when their recorded owner is
-# dead - a live owner means the artifacts are not this generation's to take.
+# stay: without a live owner, the session pointer is reconciled with the
+# pre-launch retained session or, if its binding is invalid, the unique saved
+# session. Correct bindings stay untouched; replacements publish atomically.
+# An empty session store permits pointer removal; ambiguous saved sessions require
+# explicit reconciliation. Malformed or dead-owner lock and integration
+# markers are retired, but a live owner prevents session-pointer repair.
 spawn_omp_secondmate_abort_retire_generation() {
   local marker lock_pid pointer named keep session candidate count pointer_tmp live_owner=0 failure=0
   rm -f -- "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" \
