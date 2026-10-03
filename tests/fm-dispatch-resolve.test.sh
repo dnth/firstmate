@@ -463,6 +463,7 @@ BOILERPLATE-EVIDENCE
 Delivery contract: mode=no-mistakes
 BOILERPLATE-DOD
 MD
+sed -i 's/^# Task$/# Task /; s/^# Acceptance criteria$/# Acceptance criteria /' "$SCAFFOLD_BRIEF"
 reset_log
 write_response "$RESPONSE" rule_4 0.9
 TYPESAFE_API_KEY=$KEY run code out err "$SCAFFOLD_BRIEF"
@@ -488,7 +489,8 @@ assert_equals '# Acceptance criteria
 printf '%s\n' '# Task   ' 'Body text.' > "$AC_ONLY_BRIEF"
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$AC_ONLY_BRIEF"
-assert_equals "$(cat "$AC_ONLY_BRIEF")" "$(jq -r .state.task.brief "$LOG/body")" "a heading with trailing blanks is not a section, matching spawn validation"
+assert_equals '# Task
+Body text.' "$(jq -r .state.task.brief "$LOG/body")" "a task heading with trailing blanks is recognized"
 
 KIND_BRIEF="$TMP_ROOT/kind-brief.md"
 cat > "$KIND_BRIEF" <<'MD'
@@ -505,6 +507,7 @@ BOILERPLATE-RULES
 # Definition of done
 BOILERPLATE-DOD
 MD
+sed -i 's/^# Task$/# Task /' "$KIND_BRIEF"
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$KIND_BRIEF"
 sent=$(jq -r .state.task.brief "$LOG/body")

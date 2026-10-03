@@ -2,14 +2,13 @@
 # Brief heading reader.
 # Usage: . bin/fm-brief-heading-lib.sh
 #
-# This file is the single owner of how a brief's sections are read: the
-# headings bin/fm-brief.sh scaffolds feed spawn and promotion validation,
-# the receipt checker's acceptance-criteria parser, and the task text
-# bin/fm-dispatch-resolve.sh sends to the router, so every consumer sees the
-# same section bodies.
+# This file owns task-section extraction for bin/fm-dispatch-resolve.sh.
+# bin/fm-receipt-check.sh keeps its own acceptance-criteria parser with the
+# same heading tolerance.
 
-# Parse an exact ATX heading outside fenced blocks. Body mode prints through
-# the next unfenced heading at the same or a higher level; present mode reports
+# Parse a requested ATX heading with optional trailing whitespace outside fenced
+# blocks. Body mode prints through the next unfenced heading at the same or a
+# higher level; present mode reports
 # whether the heading exists.
 fm_brief_heading_parse() {  # <file|-> <heading> <body|present>
   local file=$1 heading=$2 mode=$3 input=$1
@@ -50,7 +49,7 @@ fm_brief_heading_parse() {  # <file|-> <heading> <body|present>
         }
       }
 
-      if (!found && !was_fenced && line == heading) {
+      if (!found && !was_fenced && substr(line, 1, length(heading)) == heading && substr(line, length(heading) + 1) ~ /^[[:space:]]*$/) {
         found = 1
         if (mode == "present") next
         grab = 1

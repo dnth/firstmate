@@ -31,7 +31,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-bearings-board.sh`   | Build and arm the interactive Lavish fleet board; writes the durable state/decision-cards store |
 | `fm-tasks-axi.sh`        | Run tasks-axi against this home's backlog from any working directory                 |
 | `fm-brief.sh`            | Scaffold ship (explicit `--mode`), scout, secondmate-charter, and Herdr-lab briefs   |
-| `fm-brief-heading-lib.sh` | Single owner of reading a brief's scaffolded sections, shared by the consumers that parse them |
+| `fm-brief-heading-lib.sh` | Extract the dispatch router's task sections with scaffold heading tolerance; `fm-receipt-check.sh` keeps its own acceptance-criteria parser |
 | `fm-herdr-lab.sh`        | Provision and guardedly operate an isolated, never-default Herdr lab session         |
 | `fm-install-herdr.sh`    | Install CI's exact-version Herdr pin with official asset URL, SHA-256, and protocol checks |
 | `fm-install-treehouse.sh`| Install CI's exact-version Treehouse pin for real-Herdr E2E that needs spawn worktrees |
