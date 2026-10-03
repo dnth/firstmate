@@ -85,6 +85,10 @@
 # --complete requires the path-specific terminal evidence named by the generated
 # instructions and records that evidence with the latest plan, path, and head;
 # exact bound runs may prove current checks-green readiness through the shared CI log predicate.
+# A full-no-mistakes completion additionally refuses when the bound run recorded
+# ask-user gate resolutions that lack matching firstmate `resolved
+# [key=nm-<run>-<step>]` records in the task status file, one per gate decision
+# (bin/fm-nm-run-lib.sh owns the run-data read and the key convention).
 # --invalidate-claim appends one idempotent finding-to-criterion marker to task
 # metadata after confirming that the criterion and evidence contract are current.
 # Delivery mode remains authoritative: direct-PR and local-only never invoke
@@ -796,7 +800,7 @@ if [ "$ACTION" = mechanical-ready ]; then
 fi
 
 record_validation_completed() {
-  local started path generation published_generation completed completed_head completed_path completed_evidence completed_generation now worktree validation_base validated_head current_head completion_head expected_evidence observed pr pr_head branch boundary new_receipts run_id run_path run_generation run_out observed_id observed_head observed_head_full outcome run_status default_ref default_branch ci_state run_ready changed_file completion_files run_branch current_branch branch_sync_state run_head_matches_current restamp_accounted done_claim
+  local started path generation published_generation completed completed_head completed_path completed_evidence completed_generation now worktree validation_base validated_head current_head completion_head expected_evidence observed pr pr_head branch boundary new_receipts run_id run_path run_generation run_out observed_id observed_head observed_head_full outcome run_status default_ref default_branch ci_state run_ready changed_file completion_files run_branch current_branch branch_sync_state run_head_matches_current restamp_accounted done_claim ask_user_rc ask_user_report
   VALIDATION_LOCK="$STATE/.$ID.validation-plan.lock"
   if ! mkdir "$VALIDATION_LOCK" 2>/dev/null; then
     VALIDATION_LOCK=
@@ -958,6 +962,27 @@ record_validation_completed() {
             return 1
           fi
         fi
+      fi
+      # Ask-user authority gate (contract: bin/fm-nm-run-lib.sh): every gate
+      # response the run recorded against an ask-user finding must pair with a
+      # firstmate-authored `resolved [key=nm-<run>-<step>]` record in the task
+      # status file. A worker that answered its own gate without escalating
+      # leaves the run's step_rounds holding a response with no matching
+      # firstmate decision, so completion refuses and firstmate decides the
+      # named findings retroactively before the task can report PR-ready.
+      ask_user_rc=0
+      ask_user_report=$(fm_nm_ask_user_decisions "$worktree" "$NM_TIMEOUT" "$run_id" "$STATE/$ID.status") \
+        || ask_user_rc=$?
+      if [ "$ask_user_rc" -ne 0 ]; then
+        release_validation_lock
+        if [ "$ask_user_rc" -eq 1 ]; then
+          echo "error: bound No-Mistakes run $run_id resolved ask-user findings without matching firstmate decisions" >&2
+          printf '%s\n' "$ask_user_report" >&2
+          echo "error: firstmate must record one resolved [key=nm-$run_id-<step>] line per decision event in state/$ID.status" >&2
+        else
+          echo "error: bound No-Mistakes run $run_id ask-user decision evidence could not be read" >&2
+        fi
+        return 1
       fi
       observed="bound-matching-no-mistakes-run"
       ;;

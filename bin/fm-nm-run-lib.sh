@@ -11,22 +11,28 @@
 # direction is unsafe: a false negative hides a genuinely parked run, and a
 # false positive lets teardown act on a run it does not own.
 #
-# Bounded call to `no-mistakes "$@"` in dir $1, timeout $2 seconds. The bounded
-# form preserves stdout, stderr, and exit status; the checked form discards
-# stderr, while fm_nm_run keeps the fail-open query contract for read-only callers.
-fm_nm_run_bounded() {  # <dir> <timeout_secs> <args...>
-  local dir=$1 timeout_secs=$2 have_timeout=none nm_bin=${FM_NO_MISTAKES_BIN:-no-mistakes}
+# Bounded command in dir $1, timeout $2 seconds. The bounded form preserves
+# stdout, stderr, and exit status; the checked form discards stderr, while
+# fm_nm_run keeps the fail-open query contract for read-only callers.
+fm_nm_cmd_bounded() {  # <dir> <timeout_secs> <cmd...>
+  local dir=$1 timeout_secs=$2 have_timeout=none
   shift 2
   if command -v timeout >/dev/null 2>&1; then have_timeout=timeout
   elif command -v gtimeout >/dev/null 2>&1; then have_timeout=gtimeout
   elif command -v perl >/dev/null 2>&1; then have_timeout=perl
   fi
   case "$have_timeout" in
-    timeout)  ( cd "$dir" && timeout "$timeout_secs" "$nm_bin" "$@" ) ;;
-    gtimeout) ( cd "$dir" && gtimeout "$timeout_secs" "$nm_bin" "$@" ) ;;
-    perl)     ( cd "$dir" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$timeout_secs" "$nm_bin" "$@" ) ;;
+    timeout)  ( cd "$dir" && timeout "$timeout_secs" "$@" ) ;;
+    gtimeout) ( cd "$dir" && gtimeout "$timeout_secs" "$@" ) ;;
+    perl)     ( cd "$dir" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$timeout_secs" "$@" ) ;;
     *)        return 1 ;;
   esac
+}
+
+fm_nm_run_bounded() {  # <dir> <timeout_secs> <args...>
+  local dir=$1 timeout_secs=$2 nm_bin=${FM_NO_MISTAKES_BIN:-no-mistakes}
+  shift 2
+  fm_nm_cmd_bounded "$dir" "$timeout_secs" "$nm_bin" "$@"
 }
 
 fm_nm_run_checked() {  # <dir> <timeout_secs> <args...>
@@ -291,4 +297,214 @@ fm_nm_ci_checks_state() {  # <worktree> <timeout-secs> <run-id>
     *"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'not-ready' ;;
     *) printf 'unknown' ;;
   esac
+}
+
+# The canonical status-ledger key for a parked no-mistakes ask-user gate:
+# nm-<run>-<step>. A worker escalates such a gate as
+# `needs-decision [key=nm-<run>-<step>]` (the generated ship brief owns that
+# wording), and firstmate's answer lands as `resolved [key=nm-<run>-<step>]`
+# through `fm-send --resolve-key` or an equivalent firstmate-authored append.
+# fm_nm_ask_user_decisions below compares the run's recorded gate resolutions
+# against those resolved records at completion time.
+fm_nm_ask_user_key() {  # <run-id> <step>
+  printf 'nm-%s-%s' "$1" "$2"
+}
+
+# Read a bound run's recorded ask-user gate resolutions from the daemon's
+# append-only state database and print one TAB-separated row per finding each
+# response resolved: <step>\t<event>\t<finding-id>\t<action>.
+#
+# No `axi` read command exposes per-finding gate decisions, so this is a
+# read-only sqlite3 evidence query (mode=ro) rather than a CLI call - the same
+# bounded, side-effect-free channel the upstream copy of this library already
+# uses for run inventory. NM_HOME selects the no-mistakes home; it defaults to
+# ~/.no-mistakes, and a relative NM_HOME resolves against dir $1.
+#
+# Resolution model (internal/pipeline/executor.go): a `fix` response records
+# selection_source=user and the selected finding ids on the gate's last round;
+# an approve, skip, or abort records selection_source=user_declined with an
+# empty selection. On review, an unselected ask-user finding stays outstanding
+# and re-parks; on every other step it is implicitly declined. A completed or
+# skipped step that still reports an ask-user finding no recorded decision
+# covered is emitted as a step-level event so a decision write failure or a
+# reconciled gate can never read as a clean pass.
+#
+# Exit 0 prints the resolutions (possibly none). Any other exit means the run
+# data could not be read; the concrete missing requirement is written to
+# stderr so callers can fail closed without inventing an unrelated refusal.
+fm_nm_ask_user_resolutions() {  # <dir> <timeout_secs> <run-id>
+  local dir=$1 timeout_secs=$2 run_id=$3
+  command -v python3 >/dev/null 2>&1 \
+    || { echo "error: python3 with sqlite3 is required to read no-mistakes gate decisions" >&2; return 1; }
+  fm_nm_cmd_bounded "$dir" "$timeout_secs" python3 - "$run_id" "$dir" <<'PY'
+import json
+import os
+import sqlite3
+import sys
+from contextlib import closing
+from pathlib import Path
+
+run_id, worktree = sys.argv[1], sys.argv[2]
+
+root = Path(os.environ.get("NM_HOME") or Path.home() / ".no-mistakes")
+if not root.is_absolute():
+    root = Path(worktree) / root
+db_path = root / "state.sqlite"
+if not db_path.is_file():
+    sys.stderr.write(f"missing no-mistakes state database at {db_path}\n")
+    sys.exit(1)
+
+
+def missing(msg):
+    sys.stderr.write(f"no-mistakes run data for {run_id} is unreadable: {msg}\n")
+    sys.exit(1)
+
+
+try:
+    db = sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True, timeout=30)
+    with closing(db):
+        tables = {r[0] for r in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        for table in ("runs", "step_results", "step_rounds"):
+            if table not in tables:
+                missing(f"table {table} is absent")
+        if not db.execute("SELECT 1 FROM runs WHERE id = ?", (run_id,)).fetchone():
+            missing(f"run {run_id} is absent")
+        s_cols = {r[1] for r in db.execute("PRAGMA table_info(step_results)")}
+        if not {"id", "run_id", "step_name", "step_order", "status", "findings_json"} <= s_cols:
+            missing("step_results lacks its base columns")
+        opt = ",".join(c if c in s_cols else "NULL" for c in
+                       ("approval_reason", "override_reason", "skip_reason"))
+        steps = db.execute(
+            "SELECT id, step_name, step_order, status, findings_json, " + opt +
+            " FROM step_results WHERE run_id = ? ORDER BY step_order",
+            (run_id,)).fetchall()
+        r_cols = {r[1] for r in db.execute("PRAGMA table_info(step_rounds)")}
+        if not {"step_result_id", "round", "selection_source",
+                "selected_finding_ids", "findings_json", "user_findings_json"} <= r_cols:
+            missing("step_rounds lacks its gate-decision columns")
+        rounds = db.execute(
+            "SELECT step_result_id, round, selection_source, selected_finding_ids,"
+            " findings_json, user_findings_json FROM step_rounds"
+            " WHERE step_result_id IN (SELECT id FROM step_results WHERE run_id = ?)"
+            " ORDER BY step_result_id, round",
+            (run_id,)).fetchall()
+except sqlite3.Error as exc:
+    missing(str(exc))
+
+
+def finding_actions(js):
+    try:
+        data = json.loads(js or "")
+    except (TypeError, ValueError):
+        return {}
+    items = data.get("findings") if isinstance(data, dict) else data
+    actions = {}
+    for item in items or []:
+        if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"]:
+            actions[item["id"]] = item.get("action")
+    return actions
+
+
+def selected_ids(js):
+    try:
+        data = json.loads(js or "")
+    except (TypeError, ValueError):
+        return []
+    return [i for i in data if isinstance(i, str)] if isinstance(data, list) else []
+
+
+rounds_by_step = {}
+for row in rounds:
+    rounds_by_step.setdefault(row[0], []).append(row)
+
+for (step_result_id, step, _order, status, step_findings,
+     approval, override, skip_reason) in steps:
+    resolved = {}
+    events = []
+    for (_sr, rnd, src, sel_js, fj, ufj) in rounds_by_step.get(step_result_id, []):
+        if src not in ("user", "user_declined"):
+            continue
+        presented = finding_actions(fj)
+        captured = finding_actions(ufj)
+        actions = dict(captured)
+        actions.update(presented)
+        ask_user = [fid for fid in list(presented) + [i for i in captured if i not in presented]
+                    if actions.get(fid) == "ask-user"]
+        if not ask_user:
+            continue
+        resolved_now = {}
+        if src == "user":
+            sel = set(selected_ids(sel_js))
+            for fid in ask_user:
+                if fid in sel:
+                    resolved_now[fid] = "fix"
+            if step != "review":
+                for fid in ask_user:
+                    resolved_now.setdefault(fid, "skip")
+        else:
+            if approval or override:
+                action = "approve"
+            elif status == "skipped" or skip_reason:
+                action = "skip"
+            elif status == "failed":
+                action = "abort"
+            else:
+                action = "approve"
+            for fid in ask_user:
+                resolved_now[fid] = action
+        if resolved_now:
+            events.append((f"round {rnd}", resolved_now))
+            resolved.update(resolved_now)
+    leftovers = [fid for fid, action in finding_actions(step_findings).items()
+                 if action == "ask-user" and fid not in resolved]
+    if leftovers and status in ("completed", "skipped"):
+        if approval or override:
+            action = "approve"
+        elif status == "skipped" or skip_reason:
+            action = "skip"
+        else:
+            action = "unresolved"
+        events.append(("step", {fid: action for fid in leftovers}))
+    for marker, res in events:
+        for fid, action in res.items():
+            print(f"{step}\t{marker}\t{fid}\t{action}")
+PY
+}
+
+# Verify that every ask-user resolution event recorded in run $3 has a matching
+# firstmate `resolved [key=nm-<run>-<step>]` record in the task status file $4,
+# one record per gate response: each parked gate must be escalated and decided
+# again, so presence alone is not enough.
+#
+# Returns 0 silently when the run resolved no ask-user findings or every
+# decision is matched. Returns 1 and prints a per-step refusal detail (finding
+# id and action) on stdout when the task status file holds too few matching
+# resolved records. Returns 2 when the run's decision data cannot be read;
+# fm_nm_ask_user_resolutions then names the concrete missing requirement on
+# stderr. Callers must source bin/fm-classify-lib.sh for the status grammar.
+fm_nm_ask_user_decisions() {  # <dir> <timeout_secs> <run-id> <status-file>
+  local dir=$1 timeout_secs=$2 run_id=$3 status_file=$4
+  local rows steps step need have bad=
+  declare -F status_resolved_key_count >/dev/null 2>&1 \
+    || { echo "error: bin/fm-classify-lib.sh is required to read firstmate decision records" >&2; return 2; }
+  rows=$(fm_nm_ask_user_resolutions "$dir" "$timeout_secs" "$run_id") || return 2
+  [ -n "$rows" ] || return 0
+  steps=$(printf '%s\n' "$rows" | cut -f1 | sort -u)
+  while IFS= read -r step; do
+    [ -n "$step" ] || continue
+    need=$(printf '%s\n' "$rows" | awk -F '\t' -v s="$step" \
+      '$1 == s { if (!($2 in m)) { m[$2] = 1; n++ } } END { print n + 0 }')
+    have=$(status_resolved_key_count "$status_file" "$(fm_nm_ask_user_key "$run_id" "$step")")
+    if [ "$have" -lt "$need" ] 2>/dev/null; then
+      printf 'step %s: %d recorded ask-user gate decision(s) but only %s resolved [key=%s] record(s):\n' \
+        "$step" "$need" "$have" "$(fm_nm_ask_user_key "$run_id" "$step")"
+      printf '%s\n' "$rows" | awk -F '\t' -v s="$step" \
+        '$1 == s { print "  finding " $3 " resolved as " $4 " (" $2 ")" }' | sort -u
+      bad=1
+    fi
+  done <<EOF
+$steps
+EOF
+  [ -z "$bad" ]
 }

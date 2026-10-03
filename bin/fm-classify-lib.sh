@@ -625,6 +625,25 @@ EOF
   printf '%s' "$verb"
 }
 
+# Count every status line in <status-file> that closed <key> with the resolve
+# verb. Each gate response that consumed a firstmate decision needs its own
+# resolved record, so consumers that must prove per-response authority (the
+# no-mistakes ask-user completion gate in bin/fm-nm-run-lib.sh) compare this
+# count against the number of recorded gate decisions rather than testing
+# presence, which would let one answer silently cover several self-responses.
+status_resolved_key_count() {  # <status-file> <key>
+  local f=$1 want=$2 line verb key count=0 resolve
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  { [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] && [ -n "$want" ]; } || { printf '0\n'; return 0; }
+  while IFS= read -r line || [ -n "$line" ]; do
+    verb=$(status_line_verb "$line")
+    [ "$verb" = "$resolve" ] || continue
+    key=$(_fm_decision_key "$line") || continue
+    [ "$key" = "$want" ] && count=$((count + 1))
+  done < "$f"
+  printf '%s\n' "$count"
+}
+
 # Fold the WHOLE status stream into the set of decisions still open. Prints one
 # TAB-separated "<key>\t<verb>\t<summary>" line per still-open decision, in
 # most-recently-opened-last order; prints nothing when none are open. Pure read of
