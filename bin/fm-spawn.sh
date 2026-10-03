@@ -1122,7 +1122,7 @@ spawn_omp_abort_endpoint_stopped() {  # [meta]
 # lock and integration markers are retired only when their recorded owner is
 # dead - a live owner means the artifacts are not this generation's to take.
 spawn_omp_secondmate_abort_retire_generation() {
-  local marker lock_pid pointer named keep failure=0
+  local marker lock_pid pointer named keep session candidate count live_owner=0 failure=0
   rm -f -- "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" \
     "$STATE/$ID.omp-started" "$STATE/$ID.omp-doorbell-ready" \
     "$STATE/$ID.omp-doorbell-failed" || failure=1
@@ -1136,7 +1136,7 @@ spawn_omp_secondmate_abort_retire_generation() {
     else
       case "$FM_OMP_MARKER_PID" in
         ''|*[!0-9]*|0*|1) rm -f -- "$marker" || failure=1 ;;
-        *) kill -0 "$FM_OMP_MARKER_PID" 2>/dev/null || { rm -f -- "$marker" || failure=1; } ;;
+        *) if kill -0 "$FM_OMP_MARKER_PID" 2>/dev/null; then live_owner=1; else rm -f -- "$marker" || failure=1; fi ;;
       esac
     fi
   fi
@@ -1144,24 +1144,45 @@ spawn_omp_secondmate_abort_retire_generation() {
     lock_pid=$(cat -- "$PROJ_ABS/state/.lock" 2>/dev/null || true)
     case "$lock_pid" in
       ''|*[!0-9]*|0*|1) rm -f -- "$PROJ_ABS/state/.lock" || failure=1 ;;
-      *) kill -0 "$lock_pid" 2>/dev/null || { rm -f -- "$PROJ_ABS/state/.lock" || failure=1; } ;;
+      *) if kill -0 "$lock_pid" 2>/dev/null; then live_owner=1; else rm -f -- "$PROJ_ABS/state/.lock" || failure=1; fi ;;
     esac
   fi
+  [ "$live_owner" = 0 ] || return "$failure"
   pointer="$PROJ_ABS/state/.omp-session"
-  if [ -f "$pointer" ] && [ ! -L "$pointer" ] && [ -n "${OMP_SESSION_DIR:-}" ]; then
-    IFS= read -r named < "$pointer" 2>/dev/null || named=
-    if [ -n "${OMP_RESUME_FILE:-}" ] && [ -f "$OMP_RESUME_FILE" ] && [ ! -L "$OMP_RESUME_FILE" ]; then
-      printf '%s\n' "$OMP_RESUME_FILE" > "$pointer" || failure=1
-    else
-      keep=0
+  if [ -n "${OMP_SESSION_DIR:-}" ]; then
+    if [ -L "$pointer" ] || { [ -e "$pointer" ] && [ ! -f "$pointer" ]; }; then
+      return 1
+    fi
+    named=
+    keep=0
+    if [ -f "$pointer" ]; then
+      IFS= read -r named < "$pointer" 2>/dev/null || named=
       if [ "$(wc -l < "$pointer" 2>/dev/null | tr -d '[:space:]')" = 1 ]; then
         case "$named" in
           "$OMP_SESSION_DIR"/*.jsonl)
-            [ -f "$named" ] && [ ! -L "$named" ] && keep=1
+            [ "${named%/*}" = "$OMP_SESSION_DIR" ] && [ -f "$named" ] && [ ! -L "$named" ] && keep=1
             ;;
         esac
       fi
-      [ "$keep" = 1 ] || { rm -f -- "$pointer" || failure=1; }
+    fi
+    if [ -n "${OMP_RESUME_FILE:-}" ] && [ -f "$OMP_RESUME_FILE" ] && [ ! -L "$OMP_RESUME_FILE" ]; then
+      (umask 077; printf '%s\n' "$OMP_RESUME_FILE" > "$pointer") || failure=1
+    elif [ "$keep" != 1 ]; then
+      candidate=
+      count=0
+      for session in "$OMP_SESSION_DIR"/*.jsonl "$OMP_SESSION_DIR"/.*.jsonl "$OMP_SESSION_DIR"/.jsonl; do
+        [ -f "$session" ] && [ ! -L "$session" ] || continue
+        candidate=$session
+        count=$((count + 1))
+      done
+      case "$count" in
+        0) rm -f -- "$pointer" || failure=1 ;;
+        1) (umask 077; printf '%s\n' "$candidate" > "$pointer") || failure=1 ;;
+        *)
+          echo "warning: OMP failed-bind cleanup found multiple retained sessions without an exact binding; explicit session reconciliation is required" >&2
+          failure=1
+          ;;
+      esac
     fi
   fi
   return "$failure"

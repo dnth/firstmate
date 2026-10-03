@@ -89,6 +89,16 @@ publish_omp_ack() { # <pane> <launch>
         broken_pid=$( { sleep 0.05 & echo "$!"; wait; } 2>/dev/null )
         mkdir -p "$cwd/state/omp-sessions"
         printf '%s\n' "$cwd/state/omp-sessions/ghost-never-existed.jsonl" > "$cwd/state/.omp-session"
+        case "$(cat "$OMP_BROKEN_ACK_FILE")" in
+          absent|malformed)
+            printf '{"type":"session"}\n' > "$cwd/state/omp-sessions/orphan.jsonl"
+            if [ "$(cat "$OMP_BROKEN_ACK_FILE")" = absent ]; then
+              rm -f "$cwd/state/.omp-session"
+            else
+              printf 'truncated' > "$cwd/state/.omp-session"
+            fi
+            ;;
+        esac
         version=$(bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_primary_watch_version "$1/.omp/extensions/fm-primary-omp.ts" "$1"' _ "$cwd")
         printf '%s\n%s\n%s\n%s\n' "$version" "$broken_pid" "$OMP_BUN" "$OMP_BIN" \
           > "$cwd/state/.omp-primary-extension-loaded"
