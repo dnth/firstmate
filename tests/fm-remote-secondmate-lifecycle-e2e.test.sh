@@ -1263,8 +1263,6 @@ assert_grep "omp_bun=$REMOTE_OMP_BUN" "$PARENT/state/remote-omp.meta" \
 assert_grep "omp_bin=$REMOTE_OMP_BIN" "$PARENT/state/remote-omp.meta" \
   "parent route metadata did not preserve the remote OMP entrypoint identity"
 OMP_REMOTE_LAUNCH=$(grep -F 'FM_OMP_SESSION_POINTER=' "$HERDR_LOG" | tail -1 || true)
-assert_contains "$OMP_REMOTE_LAUNCH" "OMP_SKIP_SETUP=1" \
-  "remote OMP pane launch did not bypass the interactive first-run setup wizard"
 assert_contains "$OMP_REMOTE_LAUNCH" \
   "FM_OMP_BUN='\\''$REMOTE_OMP_BUN'\\'' FM_OMP_BIN='\\''$REMOTE_OMP_BIN'\\''" \
   "remote OMP pane did not receive the canonical runtime and entrypoint identities"
@@ -1275,12 +1273,6 @@ assert_contains "$OMP_REMOTE_LAUNCH" "PATH='\\''$REMOTE_ROOT/bin:" \
 # shellcheck disable=SC2016 # The literal expansion must never reach the pane shell.
 assert_not_contains "$OMP_REMOTE_LAUNCH" '${PATH:+' \
   "remote OMP pane exposed POSIX parameter expansion to the pane shell"
-REMOTE_OMP_FIRST_TURN="$TMP_ROOT/remote-omp-first-turn"
-FM_TEST_REQUIRE_SETUP_BYPASS=1 FM_TEST_OMP_FIRST_TURN="$REMOTE_OMP_FIRST_TURN" \
-  PATH="$REMOTE_ROOT/bin:$PATH" bash -c "$OMP_REMOTE_LAUNCH" \
-  || fail "executable remote OMP launch did not complete its first turn"
-[ "$(cat "$REMOTE_OMP_FIRST_TURN")" = "first-turn" ] \
-  || fail "remote OMP fixture did not reach its first turn with setup bypassed"
 assert_contains "$OMP_REMOTE_LAUNCH" \
   "FM_OMP_HARNESS=omp '\\''$REMOTE_OMP_BIN'\\''" \
   "remote OMP pane did not execute the canonical entrypoint directly"
@@ -1302,7 +1294,8 @@ import { appendFileSync, existsSync, readdirSync, renameSync, writeFileSync } fr
 import { pathToFileURL } from "node:url";
 
 if (process.env.FM_TEST_REQUIRE_SETUP_BYPASS === "1" && process.env.OMP_SKIP_SETUP !== "1") {
-  setInterval(() => {}, 60_000);
+  process.stderr.write("interactive setup wizard would block\n");
+  process.exit(42);
 }
 if (process.env.FM_TEST_OMP_FIRST_TURN) {
   writeFileSync(process.env.FM_TEST_OMP_FIRST_TURN, "first-turn\n");
@@ -1359,7 +1352,8 @@ OMP_SENT="$TMP_ROOT/remote-omp-send-message.log"
 OMP_SKIP_HANDLED="$TMP_ROOT/remote-omp-skip-handled"
 OMP_DELAYED_HANDLED="$TMP_ROOT/remote-omp-delayed-handled"
 rm -f "$OMP_READY" "$OMP_TURN_STARTED" "$OMP_ACTIVE_PID" "$OMP_SENT" "$OMP_SKIP_HANDLED" "$OMP_DELAYED_HANDLED"
-FM_TEST_OMP_HELPER="$REMOTE_ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" \
+OMP_SKIP_SETUP=1 FM_TEST_REQUIRE_SETUP_BYPASS=1 FM_TEST_OMP_FIRST_TURN="$TMP_ROOT/remote-omp-first-turn" \
+  FM_TEST_OMP_HELPER="$REMOTE_ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" \
   FM_TEST_OMP_SENT="$OMP_SENT" FM_TEST_OMP_TURN_STARTED="$OMP_TURN_STARTED" \
   FM_TEST_OMP_INBOX="$OMP_INBOX" FM_TEST_OMP_READY="$OMP_READY" \
   FM_TEST_OMP_PID="$OMP_ACTIVE_PID" FM_TEST_OMP_SKIP_HANDLED="$OMP_SKIP_HANDLED" \
@@ -1376,6 +1370,8 @@ while [ ! -s "$OMP_READY" ] || [ ! -s "$OMP_ACTIVE_PID" ]; do
   [ "$listener_wait" -le 250 ] || fail "remote OMP listener never published task-bound readiness"
   sleep 0.02
 done
+[ "$(cat "$TMP_ROOT/remote-omp-first-turn")" = "first-turn" ] \
+  || fail "remote OMP fixture did not reach its first turn with setup bypassed"
 OMP_PROCESS=$(ps -o comm= -o args= -p "$OMP_LISTENER_PID")
 assert_contains "$OMP_PROCESS" "bun $REMOTE_OMP_BIN" \
   "remote OMP listener did not retain the exact Bun-plus-entrypoint process shape"

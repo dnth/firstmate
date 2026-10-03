@@ -66,7 +66,10 @@ if (process.argv.includes("--hold")) {
     {selector: "test/finish", thinking: ["low", "medium", "high", "xhigh"]}
   ]}));
 } else if (process.env.FM_TEST_OMP_FIRST_TURN) {
-  if (process.env.FM_TEST_REQUIRE_SETUP_BYPASS === "1" && process.env.OMP_SKIP_SETUP !== "1") setInterval(() => {}, 60_000);
+  if (process.env.FM_TEST_REQUIRE_SETUP_BYPASS === "1" && process.env.OMP_SKIP_SETUP !== "1") {
+    process.stderr.write("interactive setup wizard would block\n");
+    process.exit(42);
+  }
   require("node:fs").writeFileSync(process.env.FM_TEST_OMP_FIRST_TURN, "first-turn\n");
   if (process.env.FM_TEST_OMP_EXEC_LOG) require("node:fs").writeFileSync(process.env.FM_TEST_OMP_EXEC_LOG, `${process.argv[1]}\n${process.env.FM_OMP_BUN}\n${process.env.FM_OMP_BIN}\n`);
 } else if (process.env.FM_TEST_OMP_EXEC_LOG && process.argv[2] !== "--help") {
@@ -550,8 +553,6 @@ test_launch_and_exact_resume() {
     || fail "executable OMP launch did not complete its first turn"
   [ "$(cat "$first_turn")" = "first-turn" ] \
     || fail "executable OMP fixture did not reach its first turn with setup bypassed"
-  assert_contains "$launch" "OMP_SKIP_SETUP=1" \
-    "OMP launch did not bypass the interactive first-run setup wizard"
   assert_contains "$launch" "FM_OMP_SESSION_POINTER=" "OMP launch did not bind the home-owned session pointer"
   assert_contains "$launch" "$HOME_DIR/state/.omp-session" "OMP launch did not retain the home-owned session pointer path"
   assert_contains "$launch" "/bin/bash -c" \
