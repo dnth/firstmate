@@ -3,8 +3,9 @@
 #
 # ONE owner for the no-mistakes run-attribution primitives used by
 # fm-crew-state.sh (read-only current-state reporting), fm-teardown.sh
-# (pre-teardown run abort, see its "Fix 1" header comment), and
-# fm-receipt-check.sh (bound-run completion). Teardown uses only strict
+# (pre-teardown run abort, see its "Fix 1" header comment),
+# fm-receipt-check.sh (bound-run completion), and fm-pr-check.sh (PR-ready
+# decision evidence). Teardown uses only strict
 # branch-and-head identity; crew-state additionally permits the active
 # pipeline-owned exemption defined below, and receipt-check's active-advance
 # ownership proof is fm_nm_run_branch_ownership. Getting this wrong in either
@@ -303,21 +304,22 @@ fm_nm_ci_checks_state() {  # <worktree> <timeout-secs> <run-id>
 # nm-<run>-<step>. A worker escalates such a gate as
 # `needs-decision [key=nm-<run>-<step>]` (the generated ship brief owns that
 # wording), and firstmate's answer lands as `resolved [key=nm-<run>-<step>]: answered:`
-# through `fm-send --resolve-key` or an equivalent firstmate-authored append.
+# through `fm-send --resolve-key`. When retroactively deciding a finding with
+# no open record left to close, firstmate appends
+# `resolved [key=nm-<run>-<step>]: answered: <action> <finding-ids>` itself.
 # fm_nm_ask_user_decisions below compares the run's recorded gate resolutions
-# against those resolved records at completion time.
+# against those resolved records at PR-ready and completion time.
 fm_nm_ask_user_key() {  # <run-id> <step>
   printf 'nm-%s-%s' "$1" "$2"
 }
 
 # Read a bound run's recorded ask-user gate resolutions from the daemon's
-# append-only state database and print one TAB-separated row per finding each
+# state database and print one TAB-separated row per finding each
 # response resolved: <step>\t<event>\t<finding-id>\t<action>.
 #
 # No `axi` read command exposes per-finding gate decisions, so this is a
-# read-only sqlite3 evidence query (mode=ro) rather than a CLI call - the same
-# bounded, side-effect-free channel the upstream copy of this library already
-# uses for run inventory. NM_HOME selects the no-mistakes home; it defaults to
+# bounded read-only sqlite3 evidence query (mode=ro) rather than a CLI call.
+# NM_HOME selects the no-mistakes home; it defaults to
 # ~/.no-mistakes, and a relative NM_HOME resolves against dir $1.
 #
 # Resolution model (internal/pipeline/executor.go): a `fix` response records
@@ -489,9 +491,11 @@ PY
 }
 
 # Verify that every ask-user resolution event recorded in run $3 has a matching
-# canonical `resolved [key=nm-<run>-<step>]: answered:` record in task status file $4,
-# one record per gate response: each parked gate must be escalated and decided
-# again, so presence alone is not enough.
+# status record in task status file $4, one record per gate response: each
+# parked gate must be escalated and decided again, so presence alone is not
+# enough. bin/fm-classify-lib.sh owns the canonical record grammar and its
+# process-evidence limitation; the count does not authenticate authorship or
+# compare the answer text with finding IDs and actions.
 #
 # Returns 0 silently when the run resolved no ask-user findings or every
 # decision is matched. Returns 1 and prints a per-step refusal detail (finding

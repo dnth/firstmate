@@ -6,6 +6,9 @@
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
 # including a merge request on a self-hosted GitLab instance.
+# Full-no-mistakes PR-ready requires a bound validation_run_id and passes the
+# decision-evidence check owned by bin/fm-nm-run-lib.sh before arming the poll;
+# unreadable run data or insufficient decision records refuse registration.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -99,13 +102,9 @@ if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/d
   fi
 fi
 
-# PR-ready is also the earliest point a bound full-no-mistakes run's ask-user
-# authority can be enforced: every recorded gate resolution must pair with a
-# firstmate `resolved [key=nm-<run>-<step>]` record in the task status file
-# (contract: bin/fm-nm-run-lib.sh), or the poll stays unarmed until firstmate
-# decides the named findings retroactively. fm-receipt-check.sh --complete
-# enforces the same gate, so a PR registered here can never complete on
-# unmatched worker self-answers.
+# Apply the shared decision-evidence check before publishing PR-ready.
+# bin/fm-nm-run-lib.sh owns the check; bin/fm-classify-lib.sh owns its
+# process-evidence limitation.
 VALIDATION_PATH=$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)
 if [ "$VALIDATION_PATH" = full-no-mistakes ]; then
   ASK_USER_RUN=$(grep '^validation_run_id=' "$META" | tail -1 | cut -d= -f2- || true)
