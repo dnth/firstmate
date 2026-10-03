@@ -35,7 +35,7 @@
 
 install_remote_herdr_fixture() { # <remote-root> <state> <log> <send-fail> <socket>
   local remote_root=$1 state=$2 log=$3 send_fail=$4 socket=$5 script="$1/bin/herdr"
-  local omp_ack_pid=${6:-} omp_bun=${7:-} omp_bin=${8:-} omp_active_pid_file=${9:-} force_idle_file=${10:-} pane_text_log=${11:-} broken_ack_file=${12:-}
+  local omp_ack_pid=${6:-} omp_bun=${7:-} omp_bin=${8:-} omp_active_pid_file=${9:-} force_idle_file=${10:-} pane_text_log=${11:-} broken_ack_file=${12:-} execute_launch_file=${13:-}
   local real_ps ps_fixture
   mkdir -p "$remote_root/bin"
   cat > "$script" <<SH
@@ -47,8 +47,8 @@ SEND_FAIL='$send_fail'
 SOCKET='$socket'
 FM_ROOT='$remote_root'
 SH
-  printf 'OMP_ACK_PID=%q\nOMP_BUN=%q\nOMP_BIN=%q\nOMP_ACTIVE_PID_FILE=%q\nFORCE_IDLE_FILE=%q\nPANE_TEXT_LOG=%q\nOMP_BROKEN_ACK_FILE=%q\n' \
-    "$omp_ack_pid" "$omp_bun" "$omp_bin" "$omp_active_pid_file" "$force_idle_file" "$pane_text_log" "$broken_ack_file" >> "$script"
+  printf 'OMP_ACK_PID=%q\nOMP_BUN=%q\nOMP_BIN=%q\nOMP_ACTIVE_PID_FILE=%q\nFORCE_IDLE_FILE=%q\nPANE_TEXT_LOG=%q\nOMP_BROKEN_ACK_FILE=%q\nOMP_EXECUTE_LAUNCH_FILE=%q\n' \
+    "$omp_ack_pid" "$omp_bun" "$omp_bin" "$omp_active_pid_file" "$force_idle_file" "$pane_text_log" "$broken_ack_file" "$execute_launch_file" >> "$script"
   cat >> "$script" <<'SH'
 printf '%s\n' "$*" >> "$LOG"
 jq_state() { jq "$@" "$STATE"; }
@@ -61,6 +61,21 @@ publish_omp_ack() { # <pane> <launch>
     *FM_OMP_SESSION_POINTER=*)
       cwd=$(jq_state -r --arg p "$pane" '.tabs[] | select(.pane_id == $p) | .cwd // empty')
       [ -n "$cwd" ] || return 1
+      if [ -n "$OMP_EXECUTE_LAUNCH_FILE" ] && [ -x "$OMP_EXECUTE_LAUNCH_FILE" ]; then
+        if [ ! -s "$OMP_ACTIVE_PID_FILE" ]; then
+          "$OMP_BUN" -e '
+            const {spawn} = require("node:child_process");
+            const {openSync} = require("node:fs");
+            const log = openSync(process.argv[4], "w");
+            spawn(process.argv[1], process.argv.slice(2, 4), {
+              detached: true, stdio: ["ignore", log, log],
+            }).unref();
+          ' "$OMP_EXECUTE_LAUNCH_FILE" "$cwd" "$launch" "$OMP_EXECUTE_LAUNCH_FILE.out"
+        fi
+        session="$cwd/state/omp-sessions/selected.jsonl"
+        jq_state --arg p "$pane" --arg session "$session" '.omp_session[$p] = $session' | save
+        return 0
+      fi
       # Remote launches are wrapped in Bash and shell_quote escapes embedded
       # single quotes as '\\''... '\\''. Normalize both forms before parsing.
       normalized_launch=${launch//\'/}
