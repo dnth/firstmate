@@ -2293,10 +2293,11 @@ test_ask_user_gate_unaffected_and_unreadable_cases() {
     || fail "clean-run fixture binding failed"
   nm_db "
     INSERT INTO step_results (id, run_id, step_name, step_order, status, findings_json)
-    VALUES ('sr-clean-rev', 'RUN-clean', 'review', 3, 'completed', NULL);
-    INSERT INTO step_rounds (id, step_result_id, round, selection_source, selected_finding_ids, findings_json)
+    VALUES ('sr-clean-rev', 'RUN-clean', 'review', 3, 'completed', '{\"findings\":[{\"id\":\"N1\",\"action\":\"no-op\"}]}');
+    INSERT INTO step_rounds (id, step_result_id, round, selection_source, selected_finding_ids, findings_json, user_findings_json)
     VALUES ('sr-clean-rev-1', 'sr-clean-rev', 1, 'user', '[\"A1\"]',
-      '{\"findings\":[{\"id\":\"A1\",\"action\":\"auto-fix\",\"severity\":\"warning\"}]}');
+      '{\"findings\":[{\"id\":\"A1\",\"action\":\"auto-fix\",\"severity\":\"warning\"},{\"id\":\"N2\",\"action\":\"no-op\"}]}',
+      '[{\"id\":\"N3\",\"action\":\"no-op\"}]');
     INSERT INTO step_results (id, run_id, step_name, step_order, status, skip_reason)
     VALUES ('sr-clean-lint', 'RUN-clean', 'lint', 6, 'skipped', 'not applicable');
   " || fail "clean-run fixture seeding failed"
@@ -2373,6 +2374,41 @@ test_malformed_nm_decision_fields() {
   pass "all persisted finding and selection fields reject malformed data"
 }
 
+test_informational_nm_findings_are_unaffected() {
+  local table field shape findings out rc
+  . "$ROOT/bin/fm-classify-lib.sh"
+  . "$ROOT/bin/fm-nm-run-lib.sh"
+  nm_db "INSERT INTO runs VALUES ('RUN-informational');
+    INSERT INTO step_results (id,run_id,step_name,step_order,status,findings_json)
+      VALUES ('sr-informational','RUN-informational','review',1,'completed','[]');
+    INSERT INTO step_rounds (id,step_result_id,round,selection_source,selected_finding_ids,findings_json,user_findings_json)
+      VALUES ('rnd-informational','sr-informational',1,'user_declined','[]','[]','[]');"
+  for table in step_results step_rounds; do
+    for field in findings_json user_findings_json; do
+      [ "$table" != step_results ] || [ "$field" = findings_json ] || continue
+      for shape in array envelope; do
+        findings='[{"id":"N1","action":"no-op"},{"id":"A1","action":"auto-fix"}]'
+        [ "$shape" != envelope ] || findings="{\"findings\":$findings}"
+        nm_db "UPDATE $table SET $field='$findings' WHERE id IN ('sr-informational','rnd-informational');"
+        out=$(fm_nm_ask_user_decisions "$TMP_ROOT" 10 RUN-informational "$HOME_DIR/state/informational.status" 2>&1)
+        rc=$?
+        expect_code 0 "$rc" "$table.$field $shape informational findings required a decision"
+        [ -z "$out" ] || fail "informational findings produced decision rows"
+        findings='[{"id":"N1","action":"no-op"},{"id":"R1","action":"ask-user"}]'
+        [ "$shape" != envelope ] || findings="{\"findings\":$findings}"
+        nm_db "UPDATE $table SET $field='$findings' WHERE id IN ('sr-informational','rnd-informational');"
+        out=$(fm_nm_ask_user_decisions "$TMP_ROOT" 10 RUN-informational "$HOME_DIR/state/informational.status" 2>&1)
+        rc=$?
+        expect_code 1 "$rc" "informational findings hid an ask-user finding"
+        assert_contains "$out" 'finding R1 resolved as' "mixed findings lost the decision requirement"
+        case "$out" in *'finding N1 '*) fail "no-op finding required a decision" ;; esac
+        nm_db "UPDATE $table SET $field='[]' WHERE id IN ('sr-informational','rnd-informational');"
+      done
+    done
+  done
+  pass "no-op findings pass in every persisted field and container form"
+}
+
 test_pr_ready_requires_bound_run() {
   local id=askuser-unbound base out
   base=$(make_project "$id" no-mistakes localized)
@@ -2391,6 +2427,7 @@ if [ "${FM_TEST_FOCUS:-}" = nm-authority ]; then
   test_ask_user_resolutions_require_firstmate_decisions
   test_ask_user_gate_unaffected_and_unreadable_cases
   test_malformed_nm_decision_fields
+  test_informational_nm_findings_are_unaffected
   test_pr_ready_requires_bound_run
   exit 0
 fi
@@ -2479,3 +2516,5 @@ test_accepted_blocked_accounts_without_evidencing
 
 test_malformed_nm_decision_fields
 test_pr_ready_requires_bound_run
+
+test_informational_nm_findings_are_unaffected
