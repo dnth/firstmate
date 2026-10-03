@@ -1354,14 +1354,17 @@ cat > "$TMP_ROOT/execute-omp-launch" <<'SH'
 set -eu
 cd "$1"
 SH
-printf 'export FM_TEST_OMP_ROOT=%q FM_HOME=%q FM_TEST_OMP_FIRST_TURN=%q\n' \
-  "$REMOTE_ROOT" "$OMP_REMOTE_HOME" "$TMP_ROOT/remote-omp-first-turn" >> "$TMP_ROOT/execute-omp-launch"
-printf 'export FM_TEST_OMP_HELPER=%q FM_TEST_OMP_SENT=%q\n' \
-  "$REMOTE_ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" "$OMP_SENT" >> "$TMP_ROOT/execute-omp-launch"
-printf 'export FM_TEST_OMP_PID=%q\n' "$OMP_ACTIVE_PID" >> "$TMP_ROOT/execute-omp-launch"
-printf 'export FM_TEST_OMP_SKIP_HANDLED=%q FM_TEST_OMP_DELAYED_HANDLED=%q\n' \
-  "$OMP_SKIP_HANDLED" "$OMP_DELAYED_HANDLED" >> "$TMP_ROOT/execute-omp-launch"
-printf '%s\n' 'exec /bin/bash -c "$2"' >> "$TMP_ROOT/execute-omp-launch"
+{
+  printf 'export FM_TEST_OMP_ROOT=%q FM_HOME=%q FM_TEST_OMP_FIRST_TURN=%q\n' \
+    "$REMOTE_ROOT" "$OMP_REMOTE_HOME" "$TMP_ROOT/remote-omp-first-turn"
+  printf 'export FM_TEST_OMP_HELPER=%q FM_TEST_OMP_SENT=%q\n' \
+    "$REMOTE_ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" "$OMP_SENT"
+  printf 'export FM_TEST_OMP_PID=%q\n' "$OMP_ACTIVE_PID"
+  printf 'export FM_TEST_OMP_SKIP_HANDLED=%q FM_TEST_OMP_DELAYED_HANDLED=%q\n' \
+    "$OMP_SKIP_HANDLED" "$OMP_DELAYED_HANDLED"
+  # shellcheck disable=SC2016 # Expand the argument only in the generated script.
+  printf '%s\n' 'exec /bin/bash -c "$2"'
+} >> "$TMP_ROOT/execute-omp-launch"
 chmod +x "$TMP_ROOT/execute-omp-launch"
 setup_rc=0
 env -u OMP_SKIP_SETUP "$REMOTE_ROOT/bin/bun" "$REMOTE_ROOT/bin/omp" \
