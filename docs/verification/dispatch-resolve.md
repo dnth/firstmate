@@ -30,12 +30,31 @@ Briefs: 15 real briefs plus 10 synthetic ones written to hit each rule.
 A lean request that asks only the rule Choice matched the full request on all 25 briefs, which is why the shipped tool asks one question and keeps every gate in code.
 No fork-local live run is claimed here. Rerun a live table by pointing the tool at a brief with the key injected for that one command.
 
+## Task sections and per-rule confidence floors
+
+Recorded upstream 2026-09-23 against `jev-latest` (answering as `jev-1.13.0`) for upstream PR [#5478](https://github.com/kunchenguid/firstmate/pull/5478), with fixtures scaffolded by that tree's `fm-brief.sh`; the observations below are upstream evidence for the ported feature.
+This fork's scaffold puts the task text under `# Task` (plus `# Acceptance criteria` on ship briefs) instead of upstream's `## Captain's intent` and `## Firstmate spec` subsections, so the slice sends those two top-level sections.
+
+| Measure | Whole brief | Task sections |
+| --- | --- | --- |
+| Top rule matched the label | 16 of 16 | 16 of 16 |
+| Input tokens per ship brief | 4,327 to 4,379 | 583 to 624 |
+| Input tokens per scout brief | 2,861 to 2,874 | 584 to 597 |
+
+On upstream's generic fixtures the trim did not change routing accuracy; the gain that holds is size, about 4,350 input tokens down to about 600 per ship brief.
+With `min_confidence: 0.95` declared on a loosely worded top-tier rule, a routine port brief that still picked that rule returned `ambiguous` in 3 of 3 runs, and a `min_confidence: 0.05` on the implementation rule returned a `fallback:` to it in 3 of 3 runs.
+A variant that also sent `Brief kind: ship, mode=no-mistakes` moved the same brief to the top-tier rule at probability 0.96 to 0.97 in 7 of 7 runs, so a ship brief's delivery mode is deliberately not sent.
+
+Fork-local smoke 2026-10-03: the resolver ran against three real `data/<id>/brief.md` briefs in this home, before and after the slice.
+Each after run sent Jev only the `# Task` (and `# Acceptance criteria` where present) text - the request body carried no Setup, Rules, inbox, or Definition-of-done content - and each resolved with the same status and rule as the whole-brief run.
+
 ## Offline behavior
 
 `tests/fm-dispatch-resolve.test.sh` drives the public interface with a fake `curl` that records argv, the request body, the header read from file descriptor 3, and whether the secret reached its environment, plus a fake `quota-axi` that performs the same environment check.
 It proves the absent key (environment and `.env`) prints one stderr line, nothing on stdout, exits 0, and never invokes `curl` or `quota-axi`.
 It proves the key is absent from child environments, never appears on `curl` argv, and arrives only as the bearer header on the descriptor.
-It proves the request uses the fixed endpoint and model, carries only the project, brief, and rule Choice with one option per rule plus the fixed neutral none option, and never carries `why`, `use`, or quota.
+It proves the request uses the fixed endpoint and model, carries only the project, the brief's `# Task` and `# Acceptance criteria` sections read by the shared brief-heading parser with a scout line only for a scout brief and never a ship brief's delivery mode (or the whole brief when it has neither section), and the rule Choice with one option per rule plus the fixed neutral none option, and never carries `why`, `use`, quota, or confidence floors.
+It proves a declared `min_confidence` is checked against the rule's own probability both as the pick and as a runner-up, a picked rule below it falls to the most probable runner-up that clears its floor, is `ambiguous` when none does or two tie, a quota `floor` on the same rule still applies after the confidence floor clears, and a file without declared floors keeps the global 0.6 floor on confidence unchanged.
 It proves clear, fixed-floor ambiguous, escalate (approval, unverifiable rule floor, tie, nothing rankable), known rule-floor fall-through, profile-floor evidence and vetoes, explicit-provider and provider-ID enforcement for this fork's multi-provider harnesses, default fallthrough, quota-axi failure, API and transport failure, malformed responses, and malformed configuration behave as the contract states, with configuration errors exiting 2 before any network call.
 
 ```console
