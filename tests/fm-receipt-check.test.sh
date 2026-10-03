@@ -975,7 +975,7 @@ test_completion_accepts_only_pipeline_owned_head_advance() {
   printf '%s' "$out" | jq -e --arg head "$current_head" '.status == "completed" and .completed_head == $head' >/dev/null \
     || fail "pipeline-owned completion did not bind current head"
 
-  id=receipt-unproven-advance
+  id='receipt-unproven-advance'
   base=$(make_project "$id" no-mistakes localized)
   add_receipt "$id" AC1 test "2 passed"
   add_receipt "$id" AC2 lint passed
@@ -1008,7 +1008,7 @@ test_terminal_passed_run_seals_its_own_pipeline_head_advance() {
   # The deadlock: the run's own review/doc commits advanced the branch head past
   # the validated head and the run then reached a terminal PASSED state, so no
   # active pipeline-owned run remains to prove the advance.
-  id=receipt-terminal-advance
+  id='receipt-terminal-advance'
   base=$(make_project "$id" no-mistakes localized)
   add_receipt "$id" AC1 test "2 passed"
   add_receipt "$id" AC2 lint passed
@@ -1036,7 +1036,7 @@ test_terminal_passed_run_seals_its_own_pipeline_head_advance() {
 
   # Foreign drift: the terminal run still reports the validated head, so the
   # commit that advanced the branch is not its own and must not be sealed.
-  id=receipt-terminal-foreign-drift
+  id='receipt-terminal-foreign-drift'
   base=$(make_project "$id" no-mistakes localized)
   add_receipt "$id" AC1 test "2 passed"
   add_receipt "$id" AC2 lint passed
@@ -1061,7 +1061,7 @@ test_terminal_passed_run_seals_its_own_pipeline_head_advance() {
   expect_code 2 "$rc" "terminal completion sealed foreign unvalidated drift"
 
   # A terminal run that did not pass never seals an advance it produced.
-  id=receipt-terminal-failed-advance
+  id='receipt-terminal-failed-advance'
   base=$(make_project "$id" no-mistakes localized)
   add_receipt "$id" AC1 test "2 passed"
   add_receipt "$id" AC2 lint passed
@@ -1129,7 +1129,7 @@ test_pipeline_rebase_restamp_binds_and_seals_identical_content() {
   # The deadlock: the pipeline's rebase step re-commits the whole branch with a
   # fresh committer stamp, so the run reports a head that is neither the planned
   # commit nor a descendant of it, while every tree it validated is unchanged.
-  id=receipt-restamp-seal
+  id='receipt-restamp-seal'
   read -r base project validated_head generation < <(plan_restamp_fixture "$id")
   restamped=$(restamp_chain "$project" "$base")
   [ "$restamped" != "$validated_head" ] || fail "restamp fixture did not rewrite the chain"
@@ -1154,7 +1154,7 @@ test_pipeline_rebase_restamp_binds_and_seals_identical_content() {
 
   # Custody returned: the branch is back on the validated chain while the passed
   # run still reports the restamped head it validated.
-  id=receipt-restamp-custody-returned
+  id='receipt-restamp-custody-returned'
   read -r base project validated_head generation < <(plan_restamp_fixture "$id")
   restamped=$(restamp_chain "$project" "$base")
   git -C "$project" reset -q --hard "$validated_head"
@@ -1170,7 +1170,7 @@ test_pipeline_rebase_restamp_binds_and_seals_identical_content() {
     || fail "custody-returned completion did not seal the validated head"
 
   # A run that did not pass never seals a restamped chain.
-  id=receipt-restamp-not-passed
+  id='receipt-restamp-not-passed'
   read -r base project validated_head generation < <(plan_restamp_fixture "$id")
   restamped=$(restamp_chain "$project" "$base")
   status=$(nm_status RUN-restamp-cancelled "$restamped" cancelled)
@@ -1196,7 +1196,7 @@ test_restamped_chains_refuse_foreign_content_and_unowned_rewrites() {
   # Foreign content: the chain is rewritten AND carries an unvalidated edit, so
   # its tree differs from the validated tree and neither bind nor complete may
   # accept it.
-  id=receipt-restamp-foreign
+  id='receipt-restamp-foreign'
   read -r base project validated_head generation < <(plan_restamp_fixture "$id")
   restamped=$(restamp_chain "$project" "$base")
   printf 'unvalidated edit\n' >> "$project/src/app.sh"
@@ -1229,7 +1229,7 @@ test_restamped_chains_refuse_foreign_content_and_unowned_rewrites() {
 
   # Unrelated same-tree tip: matching only the final tree must not bypass the
   # different-parent and chain-count checks.
-  id=receipt-restamp-unrelated-same-tree
+  id='receipt-restamp-unrelated-same-tree'
   read -r base project validated_head generation < <(plan_restamp_fixture "$id")
   validated_tree=$(git -C "$project" rev-parse "$validated_head^{tree}")
   foreign_parent=$(git -C "$project" commit-tree "$validated_tree" -p "$base" -m unrelated-parent)
@@ -1243,7 +1243,7 @@ test_restamped_chains_refuse_foreign_content_and_unowned_rewrites() {
 
   # Reverted foreign commit: the final tree matches, but the extra commits and
   # their intermediate tree make the candidate chain unfaithful.
-  id=receipt-restamp-reverted-foreign
+  id='receipt-restamp-reverted-foreign'
   read -r base project validated_head generation < <(plan_restamp_fixture "$id")
   printf 'foreign then reverted\n' > "$project/src/foreign.sh"
   git -C "$project" add src/foreign.sh
@@ -1262,7 +1262,7 @@ test_restamped_chains_refuse_foreign_content_and_unowned_rewrites() {
 
   # Changed-base rebase: replay the task commits onto a newer base whose tree
   # differs, which is new unvalidated content despite preserving commit count.
-  id=receipt-restamp-changed-base
+  id='receipt-restamp-changed-base'
   read -r base project validated_head generation < <(plan_restamp_fixture "$id")
   git -C "$project" checkout -q main
   printf 'new base content\n' >> "$project/README.md"
@@ -1284,7 +1284,7 @@ test_restamped_chains_refuse_foreign_content_and_unowned_rewrites() {
 
   # Unowned rewrite: the bound run reports another branch, so the rewritten
   # worktree chain is not the chain that run owns.
-  id=receipt-restamp-unowned-branch
+  id='receipt-restamp-unowned-branch'
   read -r base project validated_head generation < <(plan_restamp_fixture "$id")
   restamped=$(restamp_chain "$project" "$base")
   status=$(nm_status RUN-restamp-branch "$restamped" pending)
@@ -1299,7 +1299,7 @@ test_restamped_chains_refuse_foreign_content_and_unowned_rewrites() {
 
   # Unowned rewrite: an active run that does not currently own the branch never
   # proves the rewrite it is credited with.
-  id=receipt-restamp-unowned-active
+  id='receipt-restamp-unowned-active'
   read -r base project validated_head generation < <(plan_restamp_fixture "$id")
   restamped=$(restamp_chain "$project" "$base")
   status=$(nm_status RUN-restamp-active "$restamped" pending)
@@ -1315,7 +1315,7 @@ test_restamped_chains_refuse_foreign_content_and_unowned_rewrites() {
 
   # Custody-returned rewrite: equal current and validated heads still require
   # branch ownership when the run reports a different faithful restamp.
-  id=receipt-restamp-custody-wrong-branch
+  id='receipt-restamp-custody-wrong-branch'
   read -r base project validated_head generation < <(plan_restamp_fixture "$id")
   restamped=$(restamp_chain "$project" "$base")
   git -C "$project" reset -q --hard "$validated_head"
@@ -1329,7 +1329,7 @@ test_restamped_chains_refuse_foreign_content_and_unowned_rewrites() {
   rc=$?
   expect_code 2 "$rc" "custody-returned restamp with another branch"
 
-  id=receipt-restamp-custody-unowned-active
+  id='receipt-restamp-custody-unowned-active'
   read -r base project validated_head generation < <(plan_restamp_fixture "$id")
   restamped=$(restamp_chain "$project" "$base")
   git -C "$project" reset -q --hard "$validated_head"
@@ -1403,7 +1403,7 @@ test_terminal_pipeline_owned_descendant_binds_and_completes() {
 
 test_pipeline_rebase_restamp_plus_doc_commit_binds_and_completes() {
   local id=receipt-restamp-doc base project validated_head restamped current_head generation status out
-  id=receipt-restamp-doc
+  id='receipt-restamp-doc'
   read -r base project validated_head generation < <(plan_restamp_fixture "$id")
   restamped=$(restamp_chain "$project" "$base")
   [ "$(git -C "$project" rev-parse "$restamped^{tree}")" = "$(git -C "$project" rev-parse "$validated_head^{tree}")" ] \
@@ -1645,8 +1645,8 @@ test_terminal_paths_record_completion_at_their_boundary() {
     grep -Eq '^validation_started_at=[0-9]+$' "$meta" || fail "$mode omitted validation start time"
     ! grep -q '^validation_completed_at=' "$meta" || fail "$mode completed validation during planning"
     case "$mode" in
-      no-mistakes) evidence=no-mistakes-passed; observed=bound-matching-no-mistakes-run ;;
-      direct-PR) evidence=pr-opened; observed=canonical-non-github-pr ;;
+      no-mistakes) evidence='no-mistakes-passed'; observed='bound-matching-no-mistakes-run' ;;
+      direct-PR) evidence='pr-opened'; observed='canonical-non-github-pr' ;;
       local-only) evidence='branch-ready'; observed='clean-ready-branch' ;;
     esac
     FM_HOME="$HOME_DIR" "$CHECK" "$id" --complete --terminal-evidence wrong-boundary >/dev/null 2>&1
