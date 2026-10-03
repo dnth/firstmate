@@ -83,6 +83,18 @@ class LifecycleTests(unittest.TestCase):
         self.assertIn(str(override), result.stderr)
         self.assertNotIn(str(default), result.stderr)
         self.assertNotIn('fixture_unused_bearer', result.stdout + result.stderr)
+
+    def test_malformed_config_shapes_compensate_known_allocations(self):
+        for value in ('[]', 'null', '7', '"token"', '{"token":7}',
+                      '{"token":"short"}', '{"token":"bad token!"}'):
+            with self.subTest(value=value):
+                self.api.write_text(value)
+                result = self.provision(ok=False)
+                self.assertIn('Boat API credential unavailable', result.stderr)
+                self.assertEqual(self.provider()['state'], 'archived')
+                self.assertEqual(self.state()['lifecycle'], 'provisioned')
+                self.path.unlink()
+        self.api.write_text('{"token":"fixture_api_key"}')
         self.assertNotIn('curl ', (self.lab.path / 'calls').read_text())
     def test_sleep_and_destroy_are_idempotent_for_provider_stopped_states(self):
         for state in ('archived', 'stopped'):

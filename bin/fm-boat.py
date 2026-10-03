@@ -73,7 +73,10 @@ def api(method, box, body):
     if keyfile is None:
         raise Failure('Boat CLI config unavailable; tried: ' + ', '.join(map(str, candidates))
                       + '; authenticate with boat login or set FM_BOAT_CONFIG_FILE')
-    token = json.loads(regular(keyfile, 0o600).read_text()).get('token', '')
+    config_body = json.loads(regular(keyfile, 0o600).read_text())
+    if not isinstance(config_body, dict):
+        raise Failure('Boat API credential unavailable')
+    token = config_body.get('token', '')
     if not isinstance(token, str) or not re.fullmatch(r'[A-Za-z0-9._~-]{8,}', token):
         raise Failure('Boat API credential unavailable')
     url = os.environ.get('FM_BOAT_API_BASE', 'https://boat.dev/api/v1') + '/sandboxes/' + box
