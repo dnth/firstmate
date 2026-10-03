@@ -52,6 +52,9 @@
 # or unconfirmed request records no landed outcome and leaves the poll armed.
 # A landed merge whose outcome cannot be written is reported loudly rather than
 # misreported as a failed merge.
+# After a verified merge, best-effort CI arming calls bin/fm-main-ci-watch.sh;
+# arming failure warns without changing the merge outcome. Queued or refused
+# requests do not reach that hook.
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
 set -eu
 
@@ -517,3 +520,14 @@ case "$outcome_rc" in
     printf 'actionable: merged %s but could not record the outcome for supervision\n' "$URL" >&2
     ;;
 esac
+
+# A verified merge also arms one bounded custom check that watches the base
+# branch's CI for the merge commit, so a red main run cannot hide until the
+# next PR lands on it: bin/fm-main-ci-watch.sh owns the armed artifact and
+# bin/fm-main-ci-poll.sh owns the verdicts. Arming happens only here, after
+# the merge is proven, and a failure warns rather than misreporting a merge
+# that already landed.
+if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+  "$SCRIPT_DIR/fm-main-ci-watch.sh" "$ID" "$URL"; then
+  printf 'actionable: merged %s but could not arm the base-branch CI watch\n' "$URL" >&2
+fi

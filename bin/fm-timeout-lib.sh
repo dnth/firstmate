@@ -25,7 +25,7 @@
 #       forwarded to the group and starts the same grace. Exit status is the
 #       command's own, except 124 (the bound was hit) or 137 (GNU timeout's
 #       status when its KILL had to fire); fm_timed_out accepts both. Both
-#       values must be positive integers (125 otherwise). The perl watchdog is
+#       values must be positive numbers (125 otherwise). The perl watchdog is
 #       preferred: once termination has begun it also KILLs whatever the group
 #       left behind, so a descendant that outlives the command and holds its
 #       output cannot keep a capturing caller waiting, and GNU timeout, the
@@ -182,12 +182,10 @@ fm_timed_out() {  # <status>
 fm_exec_timed() {  # <seconds> <grace-seconds> <command...>
   local seconds=${1:-} grace=${2:-} value
   for value in "$seconds" "$grace"; do
-    case "$value" in
-      ''|0*|*[!0-9]*)
-        echo "fm_exec_timed: usage: fm_exec_timed <positive-seconds> <positive-grace-seconds> <command> [args...]" >&2
-        exit 125
-        ;;
-    esac
+    if ! [[ "$value" =~ ^([1-9][0-9]*|0)([.][0-9]+)?$ ]] || ! [[ "$value" == *[1-9]* ]]; then
+      echo "fm_exec_timed: usage: fm_exec_timed <positive-seconds> <positive-grace-seconds> <command> [args...]" >&2
+      exit 125
+    fi
   done
   shift 2
   if [ "$#" -eq 0 ]; then
@@ -227,7 +225,7 @@ fm_exec_timed() {  # <seconds> <grace-seconds> <command...>
           $kill_at = time + $grace;
           kill "TERM", -$pid;
         }
-        select undef, undef, undef, 0.05;
+        select undef, undef, undef, ($bound < 1 ? $bound / 20 : 0.05);
       }
     ' -- "$seconds" "$grace" "$@"
   elif command -v timeout >/dev/null 2>&1; then
