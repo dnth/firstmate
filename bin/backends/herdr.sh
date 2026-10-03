@@ -1286,10 +1286,15 @@ fm_backend_herdr_server_ensure() {  # <session>
       exec {_fd}>&- 2>/dev/null || true
       _fd=$((_fd + 1))
     done
-    if command -v setsid >/dev/null 2>&1; then
+    if [ "${FM_HERDR_DISABLE_SETSID:-0}" != 1 ] && command -v setsid >/dev/null 2>&1; then
       HERDR_SESSION=$session exec setsid herdr server --session "$session" </dev/null >/dev/null 2>&1
+    elif command -v perl >/dev/null 2>&1; then
+      HERDR_SESSION=$session perl -MPOSIX -e 'defined(my $pid = fork) or die $!; exit 0 if $pid; POSIX::setsid() or die $!; defined($pid = fork) or die $!; exit 0 if $pid; exec @ARGV or die $!' -- herdr server --session "$session" </dev/null >/dev/null 2>&1 &
+    elif command -v python3 >/dev/null 2>&1; then
+      HERDR_SESSION=$session python3 -c 'import os,sys; pid=os.fork(); sys.exit(0) if pid else None; os.setsid(); pid=os.fork(); sys.exit(0) if pid else None; os.execvp(sys.argv[1], sys.argv[1:])' herdr server --session "$session" </dev/null >/dev/null 2>&1 &
     else
-      HERDR_SESSION=$session exec herdr server --session "$session" </dev/null >/dev/null 2>&1
+      echo "error: cannot fully detach herdr server: setsid, perl, and python3 are unavailable" >&2
+      return 1
     fi
   ) &
   for i in $(seq 1 20); do

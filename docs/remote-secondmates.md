@@ -51,6 +51,10 @@ Provisioning never installs or copies forge credentials onto a remote host, and 
 Crew and project dispatch inside a remote second-mate home is gated on `gh auth` in that account.
 Without forge authentication the remote second mate still runs, does local and scratch work, and refuses delegated project work.
 
+### OMP first-run setup
+
+Verified against OMP `omp/18.4.4` on 2026-10-03. The installed OMP setup-scene selection source checked for this release honors `OMP_SKIP_SETUP=1`; Firstmate sets that variable on every verified OMP launch so a fresh non-interactive SSH account cannot stop in the first-run wizard. If the doorbell or session bind does not appear, the launch fails with an actionable diagnostic identifying an unhonored setup bypass rather than waiting indefinitely.
+
 ## Non-interactive tool contract
 
 No login or interactive shell ever runs on the remote host, so `~/.profile`, `~/.bashrc`, and `~/.zshrc` never contribute to the runtime `PATH`.

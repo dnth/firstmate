@@ -19,7 +19,6 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (the adapter parses its JSON)"; exit 0; }
-command -v setsid >/dev/null 2>&1 || { echo "skip: setsid not found (the detached start requires it on this platform)"; exit 0; }
 
 TMP_ROOT=$(fm_test_tmproot fm-herdr-server-detach)
 mkdir -p "$TMP_ROOT"
@@ -129,5 +128,21 @@ rm -f "$SERVER_PID_FILE"
   || fail "ensure failed against an already-running server"
 assert_absent "$SERVER_PID_FILE" "ensure started a second server while one was already running"
 pass "ensure is idempotent against an already-running server"
+
+# Exercise the portable fallback when setsid is unavailable. The nested
+# asynchronous shell must still drain the supervised invocation promptly.
+rm -f "$SERVER_RUNNING" "$SERVER_PID_FILE" "$SERVER_STDIN_EOF"
+outcome="$TMP_ROOT/fallback"
+FM_HERDR_DISABLE_SETSID=1 bash "$TMP_ROOT/run-job.sh" "$outcome" \
+  || fail "the fallback supervision driver failed"
+read -r timed_out rc < "$outcome.result"
+[ "$timed_out" = 0 ] || fail "the fallback server remained attached to the invoking group"
+[ "$rc" = 0 ] || fail "fallback ensure failed (rc=$rc): $(cat "$outcome.stderr" 2>/dev/null)"
+fallback_pid=$(cat "$SERVER_PID_FILE")
+kill -0 "$fallback_pid" 2>/dev/null || fail "fallback herdr server did not survive the invoking command"
+fallback_group=$(cat "$outcome.group")
+kill -0 -- "-$fallback_group" 2>/dev/null && fail "fallback herdr server remained in the invoking group"
+kill "$fallback_pid" 2>/dev/null || true
+pass "setsid-absent fallback double-forks away from the invoking group"
 
 echo "ALL TESTS PASSED"

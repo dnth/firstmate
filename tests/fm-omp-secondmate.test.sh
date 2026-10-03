@@ -65,6 +65,10 @@ if (process.argv.includes("--hold")) {
     {selector: "test/model", thinking: ["low", "medium", "high", "xhigh"]},
     {selector: "test/finish", thinking: ["low", "medium", "high", "xhigh"]}
   ]}));
+} else if (process.env.FM_TEST_OMP_FIRST_TURN) {
+  if (process.env.FM_TEST_REQUIRE_SETUP_BYPASS === "1" && process.env.OMP_SKIP_SETUP !== "1") setInterval(() => {}, 60_000);
+  require("node:fs").writeFileSync(process.env.FM_TEST_OMP_FIRST_TURN, "first-turn\n");
+  if (process.env.FM_TEST_OMP_EXEC_LOG) require("node:fs").writeFileSync(process.env.FM_TEST_OMP_EXEC_LOG, `${process.argv[1]}\n${process.env.FM_OMP_BUN}\n${process.env.FM_OMP_BIN}\n`);
 } else if (process.env.FM_TEST_OMP_EXEC_LOG && process.argv[2] !== "--help") {
   require("node:fs").writeFileSync(process.env.FM_TEST_OMP_EXEC_LOG, `${process.argv[1]}\n${process.env.FM_OMP_BUN}\n${process.env.FM_OMP_BIN}\n`);
 } else console.log(`OMP 17.2.11

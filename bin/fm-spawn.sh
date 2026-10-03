@@ -5264,7 +5264,7 @@ if [ "$HARNESS" = omp ] && [ "$OMP_LAUNCH_TEMPLATE" -eq 1 ]; then
       OMP_DOORBELL_DETAIL="doorbell activation failed: $(head -n 1 "$OMP_DOORBELL_FAILED" 2>/dev/null || printf 'unreadable journal') (journal: $OMP_DOORBELL_FAILED)"
     fi
     printf 'failed: OMP inbox doorbell marker %s never appeared; %s\n' "$OMP_DOORBELL_READY" "$OMP_DOORBELL_DETAIL" >> "$STATE/$ID.status"
-    echo "error: OMP inbox doorbell marker $OMP_DOORBELL_READY never appeared; $OMP_DOORBELL_DETAIL; cleaning the owned launch" >&2
+    echo "error: OMP inbox doorbell marker $OMP_DOORBELL_READY never appeared; $OMP_DOORBELL_DETAIL; OMP_SKIP_SETUP=1 may not have been honored and an interactive setup wizard may be blocking; cleaning the owned launch" >&2
     exit 1
   fi
   if [ "$KIND" = secondmate ]; then
@@ -5319,7 +5319,7 @@ if [ "$HARNESS" = omp ] && [ "$OMP_LAUNCH_TEMPLATE" -eq 1 ]; then
     done
     if [ "$OMP_ACKED" -ne 1 ]; then
       printf 'failed: OMP secondmate primary integration and durable session did not bind to its live session lock\n' >> "$STATE/$ID.status"
-      echo "error: OMP secondmate primary integration and durable session did not bind to its live session lock; stopping only the owned endpoint and preserving the persistent home" >&2
+      echo "error: OMP secondmate primary integration and durable session did not bind to its live session lock; OMP_SKIP_SETUP=1 may not have been honored and an interactive setup wizard may be blocking; stopping only the owned endpoint and preserving the persistent home" >&2
       exit 1
     fi
   else
