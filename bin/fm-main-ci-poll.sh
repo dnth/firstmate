@@ -6,23 +6,33 @@
 # trust), exactly like a hand-written check.
 #
 # One invocation reaches one verdict:
-#   a completed base-branch run for the merge commit failed -> retire the check,
-#       then print "<base> CI failed after <pr-url>: <workflow> / <job>".
+#   a completed base-branch run for the merge commit failed -> emit
+#       "<base> CI failed after <pr-url>: <workflow> / <job>" (workflow alone
+#       when job details cannot be read).
 #   runs are pending or none were created yet -> print nothing and stay armed.
-#   the deadline passed without a terminal verdict -> retire the check, then
-#       print "<base> CI not observed after <pr-url>" when no run was ever
-#       listed, or "<base> CI still pending after <pr-url>: <workflows>" when
-#       runs exist but none has finished.
-# Every forge error is transient by construction and stays silent until the
-# deadline, so a broken read never retires the watch and never reports a
-# verdict it cannot prove.
+#   all listed runs completed, with at least one success and no failures ->
+#       retire silently, without a wake row.
+#   all listed runs completed, with no successes or failures -> emit
+#       "<base> CI inconclusive after <pr-url>: <workflow:conclusion, ...>".
+#   the deadline passed without a terminal verdict -> emit
+#       "<base> CI not observed after <pr-url>" when this sweep cannot observe
+#       a run, or "<base> CI still pending after <pr-url>: <workflows>" when
+#       any listed runs remain pending.
+# Errors resolving the PR or listing runs stay silent until the deadline;
+# expiry reports that CI could not be observed rather than claiming a result.
 #
-# Retirement is self-service through bin/fm-check-unregister.sh and runs BEFORE
-# a line prints: a wake is therefore emitted at most once, and a failed
-# retirement leaves the check armed to retry next sweep rather than double
-# waking. The merge commit is resolved live from the pull request each sweep,
-# so a run armed while the forge was still creating the commit needs no
+# Every non-silent verdict first appends a durable check-kind wake through
+# bin/fm-wake-lib.sh using the check path as its key and one lock attempt.
+# Only a successful append permits retirement through bin/fm-check-unregister.sh;
+# only successful retirement permits printing the line. Either failure leaves
+# the check armed for retry. The watcher's same-key append and retry rows are
+# collapsed by fm_wake_print_deduped at drain, preserving the alert if watcher
+# delivery is interrupted. The merge commit and base branch are resolved live
+# from the pull request each sweep, and only that branch's runs are classified,
+# so a watch armed while the forge was still creating the commit needs no
 # re-arming to find its runs.
+# Each forge read has a positive fractional budget derived from FM_CHECK_TIMEOUT;
+# an unreadable optional job lookup cannot suppress an already-proven failure.
 #
 # Usage: fm-main-ci-poll.sh <state-dir> <check-id> <owner/repo> <pr-url> <deadline-epoch>
 set -u

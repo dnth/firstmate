@@ -240,7 +240,7 @@ Never merge a red PR under either setting; destructive, irreversible, and securi
 Without a current explicit captain instruction that states the concrete merge, that default stands, and standing `yolo` cannot authorize a red merge; section 1 owns when such an instruction overrides a Firstmate-written standing rule within its exact scope.
 Load `ask-user-authority` and `validation-supervision` before deciding or answering any ask-user finding; the implementation worker never answers its own finding.
 Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded and an unproved merge is refused instead of reported as landed, and use `bin/fm-merge-local.sh` for approved local-only landing; never call a lower-level merge command around their guards.
-A verified `fm-pr-merge` merge also arms a bounded `state/<id>-main-ci-<n>.check.sh` watch on the base branch's CI for the merge commit through `bin/fm-main-ci-watch.sh`: a failing run or the watch's deadline surfaces as a `check:` wake and a green run retires it silently.
+After a verified merge, `fm-pr-merge` attempts to arm base-branch CI monitoring; `docs/architecture.md` owns this integration and its failure boundary.
 After an autonomous merge, give the captain a one-line full-URL or local-main outcome.
 
 ### Validate

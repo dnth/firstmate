@@ -52,6 +52,9 @@
 # or unconfirmed request records no landed outcome and leaves the poll armed.
 # A landed merge whose outcome cannot be written is reported loudly rather than
 # misreported as a failed merge.
+# After a verified merge, best-effort CI arming calls bin/fm-main-ci-watch.sh;
+# arming failure warns without changing the merge outcome. Queued or refused
+# requests do not reach that hook.
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
 set -eu
 

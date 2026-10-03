@@ -5,8 +5,8 @@
 # The check is state/<task-id>-main-ci-<pr-number>.check.sh, a thin shim that
 # execs bin/fm-main-ci-poll.sh with the armed identity, bound to its bytes by
 # bin/fm-check-register.sh so the watcher's custom-check path executes it.
-# That poll retires itself through bin/fm-check-unregister.sh at its terminal
-# verdict: one failure wake, one timeout wake, or silence on green.
+# bin/fm-main-ci-poll.sh's header owns the verdict and durable-alert retirement
+# contract; the armer does not classify runs.
 # The watch is bounded by FM_MAIN_CI_WATCH_SECS (default 14400 seconds) counted
 # from arming time; the deadline is baked into the armed check, so later
 # environment changes do not move it. A non-numeric value refuses the arm
