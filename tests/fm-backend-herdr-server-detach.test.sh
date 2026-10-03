@@ -145,4 +145,49 @@ kill -0 -- "-$fallback_group" 2>/dev/null && fail "fallback herdr server remaine
 kill "$fallback_pid" 2>/dev/null || true
 pass "setsid-absent fallback double-forks away from the invoking group"
 
+# An SSH pipe can be inherited above the usual low descriptor range. Keep
+# its read end in the caller and require EOF while the server is still alive.
+highfd_failed=0
+for mode in setsid perl python; do
+  rm -f "$SERVER_RUNNING" "$SERVER_PID_FILE" "$SERVER_STDIN_EOF"
+  disable_setsid=1
+  disable_perl=0
+  [ "$mode" != setsid ] || disable_setsid=0
+  [ "$mode" != python ] || disable_perl=1
+  if FM_HERDR_DISABLE_SETSID=$disable_setsid FM_HERDR_DISABLE_PERL=$disable_perl \
+    python3 - "$TMP_ROOT/run-job.sh" "$TMP_ROOT/highfd-$mode" "$SERVER_PID_FILE" <<'PY'
+import os
+import select
+import subprocess
+import sys
+
+reader, writer = os.pipe()
+os.dup2(writer, 300)
+os.close(writer)
+try:
+    job = subprocess.Popen(["bash", sys.argv[1], sys.argv[2]], pass_fds=(300,))
+finally:
+    os.close(300)
+try:
+    assert job.wait(timeout=25) == 0, "supervised invocation failed"
+    with open(sys.argv[2] + ".result") as result:
+        assert result.read().strip() == "0 0", "ensure did not finish successfully"
+    with open(sys.argv[3]) as pid_file:
+        server_pid = int(pid_file.read())
+    os.kill(server_pid, 0)
+    ready, _, _ = select.select([reader], [], [], 2)
+    assert ready and os.read(reader, 1) == b"", "server retained descriptor 300 pipe"
+    os.kill(server_pid, 0)
+finally:
+    os.close(reader)
+PY
+  then
+    pass "$mode detached server releases descriptor 300 while remaining alive"
+  else
+    highfd_failed=1
+  fi
+  [ ! -f "$SERVER_PID_FILE" ] || kill "$(cat "$SERVER_PID_FILE")" 2>/dev/null || true
+done
+[ "$highfd_failed" = 0 ] || fail "detached servers retained high-numbered inherited pipes"
+
 echo "ALL TESTS PASSED"

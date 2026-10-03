@@ -1281,10 +1281,20 @@ fm_backend_herdr_server_ensure() {  # <session>
   # server into its own session and process group; stdio is redirected and
   # every other inherited descriptor is closed so no caller pipe stays open.
   (
-    _fd=3
-    while [ "$_fd" -lt 256 ]; do
+    # Enumerate actual descriptors rather than imposing a numeric ceiling:
+    # SSH/job pipes can occupy high descriptors, even above a lowered limit.
+    if [ -d /proc/self/fd ]; then
+      _fd_dir=/proc/self/fd
+    elif [ -d /dev/fd ]; then
+      _fd_dir=/dev/fd
+    else
+      echo "error: cannot fully detach herdr server: no descriptor directory is available" >&2
+      exit 1
+    fi
+    for _fd_path in "$_fd_dir"/[0-9]*; do
+      _fd=${_fd_path##*/}
+      [ "$_fd" -gt 2 ] || continue
       exec {_fd}>&- 2>/dev/null || true
-      _fd=$((_fd + 1))
     done
     if [ "${FM_HERDR_DISABLE_SETSID:-0}" != 1 ] && command -v setsid >/dev/null 2>&1; then
       HERDR_SESSION=$session exec setsid herdr server --session "$session" </dev/null >/dev/null 2>&1
