@@ -61,12 +61,12 @@ check_budget=${FM_CHECK_TIMEOUT:-30}
 case "$check_budget" in
   ''|*[!0-9]*) check_budget=30 ;;
 esac
-read_deadline=$((SECONDS + 10#$check_budget - 3))
+read_millis=$((10#$check_budget * 1000 / 10))
+[ "$read_millis" -gt 0 ] || read_millis=100
+printf -v read_budget '%d.%03d' "$((read_millis / 1000))" "$((read_millis % 1000))"
 
 forge_read() {
-  local remaining=$((read_deadline - SECONDS))
-  [ "$remaining" -gt 0 ] || return 124
-  fm_run_timed "$remaining" gh "$@"
+  ( fm_exec_timed "$read_budget" "$read_budget" gh "$@" )
 }
 
 # Retire through the register's own unarm path; nothing else composes the

@@ -75,7 +75,7 @@ case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
-      *mergeCommit*) [ "\${FM_TEST_SLOW_READ:-}" != pr ] || sleep 10; cat "\$FM_TEST_PR_VIEW" ; exit 0 ;;
+      *mergeCommit*) [ "\${FM_TEST_SLOW_READ:-}" != pr ] || { trap '' TERM; sleep 10; }; cat "\$FM_TEST_PR_VIEW" ; exit 0 ;;
     esac
     ;;
   "api graphql")
@@ -87,7 +87,7 @@ case "\${1:-} \${2:-}" in
     exit 0
     ;;
   "run list")
-    [ "\${FM_TEST_SLOW_READ:-}" != list ] || sleep 10
+    [ "\${FM_TEST_SLOW_READ:-}" != list ] || { trap '' TERM; sleep 10; }
     branch=
     while [ "\$#" -gt 0 ]; do
       if [ "\$1" = --branch ]; then branch=\$2; break; fi
@@ -99,7 +99,7 @@ case "\${1:-} \${2:-}" in
     exit 0
     ;;
   "run view")
-    [ "\${FM_TEST_SLOW_READ:-}" != jobs ] || sleep 10
+    [ "\${FM_TEST_SLOW_READ:-}" != jobs ] || { trap '' TERM; sleep 10; }
     cat "\$FM_TEST_RUN_VIEW"
     exit 0
     ;;
@@ -171,7 +171,8 @@ run_check() {
   FM_TEST_RUN_VIEW="$case_dir/run-view" \
   FM_TEST_RUN_LIST_FAIL="${FM_TEST_RUN_LIST_FAIL:-}" \
   FM_TEST_SLOW_READ="${FM_TEST_SLOW_READ:-}" \
-    bash "$case_dir/state/$check" > "$case_dir/check-out" 2> "$case_dir/check-err"
+    bash -c '. "$1"; fm_exec_timed "${FM_CHECK_TIMEOUT:-30}" 1 bash "$2"' \
+      _ "$ROOT/bin/fm-timeout-lib.sh" "$case_dir/state/$check" > "$case_dir/check-out" 2> "$case_dir/check-err"
   rc=$?
   return "$rc"
 }
@@ -556,6 +557,81 @@ test_slow_reads_leave_time_for_verdict() {
   pass "slow forge reads cannot suppress timeout or proven failure verdicts"
 }
 
+test_small_check_budgets() {
+  local budget outcome stage case_dir
+  for budget in 1 2 3; do
+    for outcome in success failure pending empty; do
+      case_dir=$(make_case "small-$budget-$outcome")
+      add_forge_mocks "$case_dir" 5151515151515151515151515151515151515151
+      case "$outcome" in
+        success|failure)
+          write_run_list "$case_dir" \
+            "[{\"databaseId\":1,\"workflowName\":\"CI\",\"status\":\"completed\",\"conclusion\":\"$outcome\"}]"
+          ;;
+        pending)
+          write_run_list "$case_dir" \
+            '[{"databaseId":1,"workflowName":"CI","status":"in_progress","conclusion":""}]'
+          ;;
+        empty) write_run_list "$case_dir" '[]' ;;
+      esac
+      write_run_view "$case_dir" '{"jobs":[{"name":"Tests","conclusion":"failure"}]}'
+      FM_STATE_OVERRIDE="$case_dir/state" "$CI_WATCH" task-x1 https://github.com/example/repo/pull/9 \
+        > "$case_dir/stdout" || fail "small-$budget-$outcome: arm failed"
+      FM_CHECK_TIMEOUT=$budget run_check "$case_dir" "$CHECK_NAME.check.sh" \
+        || fail "small-$budget-$outcome: check exceeded budget"
+      case "$outcome" in
+        success)
+          [ ! -s "$case_dir/check-out" ] || fail "small-$budget: green woke firstmate"
+          assert_absent "$case_dir/state/$CHECK_NAME.check.sh" "small-$budget: green never read"
+          ;;
+        failure)
+          assert_grep 'main CI failed after https://github.com/example/repo/pull/9: CI / Tests' \
+            "$case_dir/check-out" "small-$budget: failure or job never read"
+          assert_absent "$case_dir/state/$CHECK_NAME.check.sh" "small-$budget: failure stayed armed"
+          ;;
+        *)
+          [ ! -s "$case_dir/check-out" ] || fail "small-$budget: waiting woke firstmate"
+          assert_present "$case_dir/state/$CHECK_NAME.check.sh" "small-$budget: waiting retired"
+          ;;
+      esac
+    done
+    for stage in pr list jobs; do
+      case_dir=$(make_case "small-$budget-slow-$stage")
+      add_forge_mocks "$case_dir" 5151515151515151515151515151515151515151
+      write_run_list "$case_dir" \
+        '[{"databaseId":1,"workflowName":"CI","status":"completed","conclusion":"failure"}]'
+      FM_MAIN_CI_WATCH_SECS=0 FM_STATE_OVERRIDE="$case_dir/state" \
+        "$CI_WATCH" task-x1 https://github.com/example/repo/pull/9 > "$case_dir/stdout" \
+        || fail "small-$budget-slow-$stage: arm failed"
+      FM_CHECK_TIMEOUT=$budget FM_TEST_SLOW_READ=$stage run_check "$case_dir" "$CHECK_NAME.check.sh" \
+        || fail "small-$budget-slow-$stage: check exceeded budget"
+      [ "$(wc -l < "$case_dir/check-out")" = 1 ] || fail "small-$budget-slow-$stage: verdict lost"
+      if [ "$stage" = jobs ]; then
+        assert_grep 'main CI failed after' "$case_dir/check-out" "small-$budget: proven failure lost"
+      else
+        assert_grep 'CI not observed after' "$case_dir/check-out" "small-$budget: deadline verdict lost"
+      fi
+      assert_absent "$case_dir/state/$CHECK_NAME.check.sh" "small-$budget-slow-$stage: stayed armed"
+    done
+  done
+  pass "one-to-three-second check budgets observe CI and survive slow readers"
+}
+
+test_timed_bound_validation() {
+  local value rc
+  for value in 0 0.000 -1 01 0.1.2 nope; do
+    if bash -c '. "$1"; fm_exec_timed "$2" 0.1 true' _ "$ROOT/bin/fm-timeout-lib.sh" "$value" \
+      > /dev/null 2>&1; then rc=0; else rc=$?; fi
+    expect_code 125 "$rc" "invalid timed bound $value was accepted"
+    if bash -c '. "$1"; fm_exec_timed 0.1 "$2" true' _ "$ROOT/bin/fm-timeout-lib.sh" "$value" \
+      > /dev/null 2>&1; then rc=0; else rc=$?; fi
+    expect_code 125 "$rc" "invalid grace $value was accepted"
+  done
+  pass "fractional timeout support still refuses invalid bounds and grace"
+}
+
+test_timed_bound_validation
+test_small_check_budgets
 test_other_branch_cannot_decide_verdict
 test_slow_reads_leave_time_for_verdict
 test_verified_merge_records_pr_and_head
