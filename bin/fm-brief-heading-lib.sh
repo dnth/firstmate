@@ -10,13 +10,9 @@
 # blocks. Body mode prints through the next unfenced heading at the same or a
 # higher level; present mode reports
 # whether the heading exists.
-fm_brief_heading_parse() {  # <file|-> <heading> <body|present>
-  local file=$1 heading=$2 mode=$3 input=$1
-  if [ "$file" = - ]; then
-    input=/dev/stdin
-  else
-    [ -f "$file" ] || { [ "$mode" = body ]; return; }
-  fi
+fm_brief_heading_parse() {  # <file> <heading> <body|present>
+  local file=$1 heading=$2 mode=$3
+  [ -f "$file" ] || { [ "$mode" = body ]; return; }
   awk -v heading="$heading" -v mode="$mode" '
     BEGIN {
       target_level = 0
@@ -69,7 +65,7 @@ fm_brief_heading_parse() {  # <file|-> <heading> <body|present>
     END {
       if (mode == "present" && !found) exit 1
     }
-  ' "$input"
+  ' "$file"
 }
 
 fm_brief_heading_body() {  # <file> <heading>
