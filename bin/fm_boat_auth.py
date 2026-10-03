@@ -49,7 +49,13 @@ def retire(record):
     before = properties(unit)
     cgroup = before.get('ControlGroup') or record.get('cgroup', '')
     if before.get('LoadState') != 'not-found':
-        run([SYSTEMCTL, '--user', 'stop', unit], timeout=TIMEOUT + 10)
+        try:
+            run([SYSTEMCTL, '--user', 'stop', unit], timeout=TIMEOUT + 10)
+        except Failure:
+            # A failed worker can disappear between the state probe and stop.
+            # Treat that race as retired only after confirming the unit is gone.
+            if properties(unit).get('LoadState') != 'not-found':
+                raise
     after = properties(unit)
     if after.get('ActiveState') not in ('inactive', 'failed'):
         raise Failure('credential service did not stop')
@@ -57,8 +63,11 @@ def retire(record):
         if not cgroup.startswith('/user.slice/') or '..' in cgroup.split('/'):
             raise Failure('invalid credential cgroup')
         events = Path('/sys/fs/cgroup') / cgroup.lstrip('/') / 'cgroup.events'
-        if events.exists() and 'populated 1' in events.read_text():
-            raise Failure('credential cgroup still contains helpers')
+        deadline = time.monotonic() + TIMEOUT + 10
+        while events.exists() and 'populated 1' in events.read_text():
+            if time.monotonic() >= deadline:
+                raise Failure('credential cgroup still contains helpers')
+            time.sleep(0.05)
 
 def remote_shred(record):
     descriptor = record.get('descriptor')
@@ -156,7 +165,7 @@ def acquire(id, alias, config, model):
             # The manager forks the payload already inside its cgroup. No STOP /
             # CONT handshake, pre-claim shell fork or journaled PID is involved.
             run([SYSTEMD_RUN, '--user', '--quiet', '--collect', '--unit=' + unit,
-                 '--property=Type=exec', '--property=RemainAfterExit=yes',
+                 '--property=Type=exec',
                  '--property=KillMode=control-group', '--property=TimeoutStopSec=5',
                  '--property=SendSIGKILL=yes', '--property=RuntimeMaxSec=86400',
                  executable('uv'), 'run', '--no-project', '--python', sys.executable,
