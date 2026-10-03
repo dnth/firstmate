@@ -117,6 +117,71 @@ for send_rc in 6 7 8; do
 done
 pass 'Boat restoration refreshes the harness before decoding queued OMP results'
 
+FM_HOME="$w/home"
+STATE="$w/home/state"
+. "$ROOT/bin/fm-wake-lib.sh"
+delivery_lock="$STATE/.backlog-handoff-ios.lock"
+real_cat=$(command -v cat)
+printf '#!/usr/bin/env bash\nREAL_CAT=%q\nLOCK_PID=%q\nWAIT_MARKER=%q\n' \
+  "$real_cat" "$delivery_lock/pid" "$w/sender-waiting" > "$fakebin/cat"
+cat >> "$fakebin/cat" <<'SH'
+if [ "$#" = 1 ] && [ "$1" = "$LOCK_PID" ]; then
+  : > "$WAIT_MARKER"
+fi
+exec "$REAL_CAT" "$@"
+SH
+chmod +x "$fakebin/cat"
+for direction in omp codex; do
+  rm -f "$w/sender-waiting"
+  : > "$w/calls.log"
+  printf 'alive\n' > "$w/agent-state"
+  if [ "$direction" = omp ]; then
+    old_harness=codex
+    expected_rc=8
+  else
+    old_harness=omp
+    expected_rc=0
+  fi
+  sed "s/^harness=.*/harness=$old_harness/" "$STATE/ios.meta" > "$w/meta.tmp"
+  mv "$w/meta.tmp" "$STATE/ios.meta"
+  fm_lock_acquire_wait "$delivery_lock" || fail 'could not hold the concurrent delivery lock'
+  FM_FAKE_REMOTE_STATE_FILE="$w/agent-state" FM_FAKE_REMOTE_SEND_RC="$expected_rc" \
+    world_env "$ROOT/bin/fm-send.sh" fm-ios "concurrent $direction request" > "$w/concurrent.out" 2>&1 &
+  sender_pid=$!
+  wait_attempt=0
+  while [ ! -f "$w/sender-waiting" ] && kill -0 "$sender_pid" 2>/dev/null; do
+    wait_attempt=$((wait_attempt + 1))
+    [ "$wait_attempt" -lt 1000 ] || break
+    sleep .02
+  done
+  if [ ! -f "$w/sender-waiting" ]; then
+    fm_lock_release "$delivery_lock"
+    kill "$sender_pid" 2>/dev/null || true
+    wait "$sender_pid" 2>/dev/null || true
+    fail 'concurrent sender did not wait on the held delivery lock'
+  fi
+  assert_no_grep 'fm-remote-secondmate-control.sh state' "$w/calls.log" 'waiting sender probed the endpoint without owning its delivery lock'
+  sed "s/^harness=.*/harness=$direction/" "$STATE/ios.meta" > "$w/meta.tmp"
+  mv "$w/meta.tmp" "$STATE/ios.meta"
+  fm_lock_release "$delivery_lock"
+  concurrent_rc=0
+  wait "$sender_pid" || concurrent_rc=$?
+  [ "$concurrent_rc" = "$expected_rc" ] \
+    || fail "waiting sender used its cached $old_harness harness: $(cat "$w/concurrent.out")"
+  assert_no_grep 'fm-remote-secondmate-control.sh launch' "$w/calls.log" 'waiting sender relaunched the already restored endpoint'
+  [ "$(grep -c 'fm-remote-secondmate-control.sh send' "$w/calls.log")" = 1 ] \
+    || fail 'waiting sender did not deliver exactly once'
+  if [ "$direction" = omp ]; then
+    assert_grep 'remote-omp-inbox-queued' "$w/concurrent.out" 'waiting sender lost the known OMP result'
+  fi
+  for request in "$STATE/pending-replies/"*; do
+    [ -f "$request" ] || continue
+    grep -Eq '^delivered_epoch=[0-9]+$' "$request" || fail 'waiting sender recorded a known result as unknown delivery'
+  done
+done
+rm -f "$fakebin/cat"
+pass 'Waiting Boat senders refresh both OMP and Codex harness transitions under the delivery lock'
+
 # The same sleep guards hold: a routed reply still in flight refuses sleep,
 # the route stays awake, and the provider is never told to stop.
 : > "$w/calls"
