@@ -19,6 +19,13 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-nm-run-lib.sh
+. "$SCRIPT_DIR/fm-nm-run-lib.sh"
+
+NM_TIMEOUT=${FM_RECEIPT_NM_TIMEOUT:-10}
+case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
 
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2
@@ -89,6 +96,34 @@ if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/d
   if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
+  fi
+fi
+
+# PR-ready is also the earliest point a bound full-no-mistakes run's ask-user
+# authority can be enforced: every recorded gate resolution must pair with a
+# firstmate `resolved [key=nm-<run>-<step>]` record in the task status file
+# (contract: bin/fm-nm-run-lib.sh), or the poll stays unarmed until firstmate
+# decides the named findings retroactively. fm-receipt-check.sh --complete
+# enforces the same gate, so a PR registered here can never complete on
+# unmatched worker self-answers.
+VALIDATION_PATH=$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)
+if [ "$VALIDATION_PATH" = full-no-mistakes ]; then
+  ASK_USER_RUN=$(grep '^validation_run_id=' "$META" | tail -1 | cut -d= -f2- || true)
+  if [ -n "$ASK_USER_RUN" ]; then
+    ASK_USER_DIR=$WT
+    [ -d "$ASK_USER_DIR" ] || ASK_USER_DIR=$FM_HOME
+    ASK_USER_RC=0
+    ASK_USER_REPORT=$(fm_nm_ask_user_decisions "$ASK_USER_DIR" "$NM_TIMEOUT" "$ASK_USER_RUN" "$STATE/$ID.status") \
+      || ASK_USER_RC=$?
+    if [ "$ASK_USER_RC" -ne 0 ]; then
+      if [ "$ASK_USER_RC" -eq 1 ]; then
+        echo "error: bound No-Mistakes run $ASK_USER_RUN resolved ask-user findings without matching firstmate decisions" >&2
+        printf '%s\n' "$ASK_USER_REPORT" >&2
+      else
+        echo "error: bound No-Mistakes run $ASK_USER_RUN ask-user decision evidence could not be read" >&2
+      fi
+      exit 1
+    fi
   fi
 fi
 

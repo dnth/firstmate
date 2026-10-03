@@ -19,6 +19,24 @@ FAKE_NO_MISTAKES="$TMP_ROOT/fake-no-mistakes"
 cat > "$FAKE_NO_MISTAKES" <<'EOF'
 #!/bin/sh
 [ -z "${FM_NM_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_NM_LOG"
+# Seed a runs row for every explicitly addressed run so the completion gate's
+# read-only state-database check sees the same run the fake CLI reports.
+# The fixture database must already exist, so a missing-database refusal is
+# still exercised by pointing NM_HOME at an empty directory.
+case "$*" in
+  *"--run "*)
+    _run=${*##*--run }
+    _run=${_run%% *}
+    if [ -n "${NM_HOME:-}" ] && [ -f "$NM_HOME/state.sqlite" ]; then
+      python3 - "$NM_HOME" "$_run" >/dev/null 2>&1 <<'PY'
+import os, sqlite3, sys
+db = sqlite3.connect(os.path.join(sys.argv[1], "state.sqlite"))
+db.execute("INSERT OR IGNORE INTO runs (id) VALUES (?)", (sys.argv[2],))
+db.commit()
+PY
+    fi
+    ;;
+esac
 case "$*" in
   *"axi logs --step intent --run "*) printf '%s\n' "${FM_FAKE_NM_INTENT:-}" ;;
   *"axi logs --step ci --run "*) printf '%s\n' "${FM_FAKE_NM_CI_LOG:-}" ;;
@@ -28,6 +46,51 @@ esac
 EOF
 chmod +x "$FAKE_NO_MISTAKES"
 export FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES"
+
+# The no-mistakes daemon state database is shared read-only evidence for the
+# ask-user decision gate; tests get an isolated fixture copy under NM_HOME.
+NM_DIR="$TMP_ROOT/nm-home"
+mkdir -p "$NM_DIR"
+python3 - "$NM_DIR" <<'PY'
+import os, sqlite3, sys
+db = sqlite3.connect(os.path.join(sys.argv[1], "state.sqlite"))
+db.executescript("""
+CREATE TABLE IF NOT EXISTS runs (
+  id TEXT PRIMARY KEY
+);
+CREATE TABLE IF NOT EXISTS step_results (
+  id TEXT PRIMARY KEY,
+  run_id TEXT,
+  step_name TEXT,
+  step_order INTEGER,
+  status TEXT,
+  findings_json TEXT,
+  approval_reason TEXT,
+  override_reason TEXT,
+  skip_reason TEXT
+);
+CREATE TABLE IF NOT EXISTS step_rounds (
+  id TEXT PRIMARY KEY,
+  step_result_id TEXT,
+  round INTEGER,
+  selection_source TEXT,
+  selected_finding_ids TEXT,
+  findings_json TEXT,
+  user_findings_json TEXT
+);
+""")
+db.commit()
+PY
+export NM_HOME="$NM_DIR"
+
+nm_db() {  # <sql> - apply fixture SQL to the isolated no-mistakes database
+  python3 - "$NM_DIR" "$1" <<'PY'
+import os, sqlite3, sys
+db = sqlite3.connect(os.path.join(sys.argv[1], "state.sqlite"))
+db.executescript(sys.argv[2])
+db.commit()
+PY
+}
 FAIL_NO_MISTAKES="$TMP_ROOT/fail-no-mistakes"
 cat > "$FAIL_NO_MISTAKES" <<'EOF'
 #!/bin/sh
@@ -2100,6 +2163,165 @@ test_complete_refuses_done_without_artifact() {
   pass "completion refuses a standing done: claim that carries no delivery artifact"
 }
 
+# The completion gate refuses a bound run whose recorded ask-user resolutions
+# outnumber the task status file's `resolved [key=nm-<run>-<step>]` firstmate
+# decision records, naming each unmatched step, finding, and action; matching
+# records pass, and runs or modes with no ask-user resolutions are unaffected.
+test_ask_user_resolutions_require_firstmate_decisions() {
+  local id=askuser-guard base project head generation status out rc
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint passed
+  FM_FAKE_NM_STATUS='' FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "ask-user gate fixture plan failed"
+  project="$TMP_ROOT/project-$id"
+  head=$(git -C "$project" rev-parse HEAD)
+  generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
+  status=$(nm_status RUN-askuser "$head" pending)
+  FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: $generation" \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-askuser --generation "$generation" >/dev/null \
+    || fail "ask-user gate fixture run binding failed"
+  # The run recorded three gate responses touching ask-user findings: a test
+  # approval with an operator-style reason, a review fix selection, and a
+  # review approval that declined the one finding still outstanding on it.
+  nm_db "
+    INSERT INTO step_results (id, run_id, step_name, step_order, status, findings_json)
+    VALUES ('sr-rev', 'RUN-askuser', 'review', 3, 'completed',
+      '{\"findings\":[{\"id\":\"R9\",\"action\":\"ask-user\",\"severity\":\"error\"}]}');
+    INSERT INTO step_rounds (id, step_result_id, round, selection_source, selected_finding_ids, findings_json)
+    VALUES ('sr-rev-1', 'sr-rev', 1, 'user', '[\"R8\"]',
+      '{\"findings\":[{\"id\":\"R8\",\"action\":\"ask-user\"},{\"id\":\"R9\",\"action\":\"ask-user\"},{\"id\":\"A1\",\"action\":\"auto-fix\"}]}');
+    INSERT INTO step_rounds (id, step_result_id, round, selection_source, selected_finding_ids, findings_json)
+    VALUES ('sr-rev-2', 'sr-rev', 2, 'user_declined', '[]',
+      '{\"findings\":[{\"id\":\"R9\",\"action\":\"ask-user\"}]}');
+    INSERT INTO step_results (id, run_id, step_name, step_order, status, findings_json, approval_reason)
+    VALUES ('sr-test', 'RUN-askuser', 'test', 5, 'completed',
+      '{\"findings\":[{\"id\":\"test-1\",\"action\":\"ask-user\",\"severity\":\"warning\"}]}',
+      'live environment unavailable');
+    INSERT INTO step_rounds (id, step_result_id, round, selection_source, selected_finding_ids, findings_json)
+    VALUES ('sr-test-1', 'sr-test', 1, 'user_declined', '[]',
+      '{\"findings\":[{\"id\":\"test-1\",\"action\":\"ask-user\",\"severity\":\"warning\"}]}');
+  " || fail "ask-user fixture seeding failed"
+  status=$(nm_status RUN-askuser "$head" passed)
+  out=$(FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed 2>&1)
+  rc=$?
+  expect_code 2 "$rc" "worker-answered ask-user findings completed"
+  assert_contains "$out" "RUN-askuser" \
+    "self-answer refusal did not name the bound run"
+  assert_contains "$out" "finding test-1 resolved as approve" \
+    "self-answer refusal did not name the test finding and its action"
+  assert_contains "$out" "finding R8 resolved as fix" \
+    "self-answer refusal did not name the fixed review finding and its action"
+  assert_contains "$out" "finding R9 resolved as approve" \
+    "self-answer refusal did not name the declined review finding and its action"
+  assert_contains "$out" "resolved [key=nm-RUN-askuser-test]" \
+    "self-answer refusal did not name the missing firstmate decision key"
+  grep -q '^validation_completed_at=' "$HOME_DIR/state/$id.meta" \
+    && fail "refused completion still recorded validation completion"
+
+  # A matching firstmate decision for one step does not cover the other, and
+  # one decision record does not cover a second decision on the same step.
+  printf 'needs-decision [key=nm-RUN-askuser-test]: ask-user findings=test-1\n' \
+    >> "$HOME_DIR/state/$id.status"
+  printf 'resolved [key=nm-RUN-askuser-test]: answered: approve test-1\n' \
+    >> "$HOME_DIR/state/$id.status"
+  out=$(FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed 2>&1)
+  rc=$?
+  expect_code 2 "$rc" "partially decided ask-user findings completed"
+  assert_contains "$out" "finding R8 resolved as fix" \
+    "partial coverage refusal lost the undecided review finding"
+  case "$out" in *"finding test-1 "*) fail "decided test finding stayed flagged" ;; esac
+  printf 'resolved [key=nm-RUN-askuser-review]: answered: fix R8\n' \
+    >> "$HOME_DIR/state/$id.status"
+  out=$(FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed 2>&1)
+  rc=$?
+  expect_code 2 "$rc" "one decision record covered two review gate responses"
+  assert_contains "$out" "finding R9 resolved as approve" \
+    "second review decision was not required"
+  printf 'resolved [key=nm-RUN-askuser-review]: answered: approve R9\n' \
+    >> "$HOME_DIR/state/$id.status"
+  out=$(FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed) \
+    || fail "fully decided ask-user findings did not complete"
+  printf '%s' "$out" | jq -e '.status == "completed"' >/dev/null \
+    || fail "fully decided completion output was not machine-readable"
+  pass "completion requires a firstmate decision record per recorded ask-user response"
+}
+
+test_ask_user_gate_unaffected_and_unreadable_cases() {
+  local id base project head generation status out rc nm_empty
+
+  # A bound run whose gate responses touched only non-ask-user findings is
+  # unaffected: no resolved records are required.
+  id=askuser-clean
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint passed
+  FM_FAKE_NM_STATUS='' FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "clean-run fixture plan failed"
+  project="$TMP_ROOT/project-$id"
+  head=$(git -C "$project" rev-parse HEAD)
+  generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
+  status=$(nm_status RUN-clean "$head" pending)
+  FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: $generation" \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-clean --generation "$generation" >/dev/null \
+    || fail "clean-run fixture binding failed"
+  nm_db "
+    INSERT INTO step_results (id, run_id, step_name, step_order, status, findings_json)
+    VALUES ('sr-clean-rev', 'RUN-clean', 'review', 3, 'completed', NULL);
+    INSERT INTO step_rounds (id, step_result_id, round, selection_source, selected_finding_ids, findings_json)
+    VALUES ('sr-clean-rev-1', 'sr-clean-rev', 1, 'user', '[\"A1\"]',
+      '{\"findings\":[{\"id\":\"A1\",\"action\":\"auto-fix\",\"severity\":\"warning\"}]}');
+    INSERT INTO step_results (id, run_id, step_name, step_order, status, skip_reason)
+    VALUES ('sr-clean-lint', 'RUN-clean', 'lint', 6, 'skipped', 'not applicable');
+  " || fail "clean-run fixture seeding failed"
+  status=$(nm_status RUN-clean "$head" passed)
+  FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed >/dev/null \
+    || fail "a run without ask-user resolutions could not complete"
+
+  # When the run's decision data cannot be read the refusal names the concrete
+  # missing requirement instead of passing silently or inventing another cause.
+  id=askuser-unreadable
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint passed
+  FM_FAKE_NM_STATUS='' FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "unreadable-run fixture plan failed"
+  project="$TMP_ROOT/project-$id"
+  head=$(git -C "$project" rev-parse HEAD)
+  generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
+  status=$(nm_status RUN-unreadable "$head" pending)
+  FM_FAKE_NM_STATUS="$status" FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: $generation" \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run RUN-unreadable --generation "$generation" >/dev/null \
+    || fail "unreadable-run fixture binding failed"
+  nm_empty="$TMP_ROOT/nm-empty"
+  mkdir -p "$nm_empty"
+  status=$(nm_status RUN-unreadable "$head" passed)
+  out=$(NM_HOME="$nm_empty" FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed 2>&1)
+  rc=$?
+  expect_code 2 "$rc" "unreadable run data completed"
+  assert_contains "$out" "ask-user decision evidence could not be read" \
+    "unreadable-data refusal did not name the missing requirement"
+  assert_contains "$out" "no-mistakes state database" \
+    "unreadable-data refusal did not name the missing database"
+  case "$out" in
+    *"did not pass checks"*|*"head does not account"*|*"not bound"*)
+      fail "unreadable run data produced an unrelated refusal" ;;
+  esac
+  FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed >/dev/null \
+    || fail "readable bound run with no ask-user findings did not complete"
+  pass "unaffected runs pass and unreadable run data fails closed with its own reason"
+}
+
 test_help_advertises_generation_bound_run_binding
 test_reports_missing_criteria_deterministically
 test_complete_and_invalid_ledgers_have_distinct_results
@@ -2147,6 +2369,8 @@ test_shared_local_default_resolver
 test_high_risk_and_uncertain_inputs_fail_safe
 test_direct_and_local_modes_never_invoke_no_mistakes
 test_complete_refuses_done_without_artifact
+test_ask_user_resolutions_require_firstmate_decisions
+test_ask_user_gate_unaffected_and_unreadable_cases
 test_accepted_blocked_accounts_without_evidencing() {
   local id=accepted-blocked id2=still-missing out rc base project
   base=$(make_project "$id" no-mistakes docs)
