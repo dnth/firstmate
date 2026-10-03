@@ -531,11 +531,17 @@ test_herdr_launch_exact_resume_recovery_and_abort() {
 }
 
 test_launch_and_exact_resume() {
-  local out selected nested before after launch
+  local out selected nested before after launch first_turn
   setup_case launch
 
   out=$(run_spawn -- --prewalk-into 'test/finish:xhigh' 2>&1) || fail "fresh OMP secondmate spawn failed: $out"
   launch=$(cat "$LAUNCH_LOG")
+  first_turn="$CASE/first-turn"
+  FM_TEST_REQUIRE_SETUP_BYPASS=1 FM_TEST_OMP_FIRST_TURN="$first_turn" \
+    PATH="$FAKEBIN:$BASE_PATH" bash -c "$launch" \
+    || fail "executable OMP launch did not complete its first turn"
+  [ "$(cat "$first_turn")" = "first-turn" ] \
+    || fail "executable OMP fixture did not reach its first turn with setup bypassed"
   assert_contains "$launch" "OMP_SKIP_SETUP=1" \
     "OMP launch did not bypass the interactive first-run setup wizard"
   assert_contains "$launch" "FM_OMP_SESSION_POINTER=" "OMP launch did not bind the home-owned session pointer"

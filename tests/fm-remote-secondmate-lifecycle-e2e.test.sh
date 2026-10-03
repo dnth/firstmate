@@ -1275,6 +1275,12 @@ assert_contains "$OMP_REMOTE_LAUNCH" "PATH='\\''$REMOTE_ROOT/bin:" \
 # shellcheck disable=SC2016 # The literal expansion must never reach the pane shell.
 assert_not_contains "$OMP_REMOTE_LAUNCH" '${PATH:+' \
   "remote OMP pane exposed POSIX parameter expansion to the pane shell"
+REMOTE_OMP_FIRST_TURN="$TMP_ROOT/remote-omp-first-turn"
+FM_TEST_REQUIRE_SETUP_BYPASS=1 FM_TEST_OMP_FIRST_TURN="$REMOTE_OMP_FIRST_TURN" \
+  PATH="$REMOTE_ROOT/bin:$PATH" bash -c "$OMP_REMOTE_LAUNCH" \
+  || fail "executable remote OMP launch did not complete its first turn"
+[ "$(cat "$REMOTE_OMP_FIRST_TURN")" = "first-turn" ] \
+  || fail "remote OMP fixture did not reach its first turn with setup bypassed"
 assert_contains "$OMP_REMOTE_LAUNCH" \
   "FM_OMP_HARNESS=omp '\\''$REMOTE_OMP_BIN'\\''" \
   "remote OMP pane did not execute the canonical entrypoint directly"
@@ -1294,6 +1300,13 @@ assert_contains "$OMP_REMOTE_LAUNCH" \
 cat > "$REMOTE_ROOT/bin/omp" <<'JS'
 import { appendFileSync, existsSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+
+if (process.env.FM_TEST_REQUIRE_SETUP_BYPASS === "1" && process.env.OMP_SKIP_SETUP !== "1") {
+  setInterval(() => {}, 60_000);
+}
+if (process.env.FM_TEST_OMP_FIRST_TURN) {
+  writeFileSync(process.env.FM_TEST_OMP_FIRST_TURN, "first-turn\n");
+}
 
 const { installTaskInboxDoorbell } =
   await import(pathToFileURL(process.env.FM_TEST_OMP_HELPER).href);
