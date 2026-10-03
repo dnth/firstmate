@@ -75,7 +75,7 @@ case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
-      *mergeCommit*) [ "\${FM_TEST_SLOW_READ:-}" != pr ] || { trap '' TERM; sleep 10; }; cat "\$FM_TEST_PR_VIEW" ; exit 0 ;;
+      *mergeCommit*) [ "\${FM_TEST_SLOW_READ:-}" != pr ] || { trap '' TERM; sleep 10; }; IFS= read -r json < "\$FM_TEST_PR_VIEW"; printf '%s\\n' "\$json" ; exit 0 ;;
     esac
     ;;
   "api graphql")
@@ -93,14 +93,17 @@ case "\${1:-} \${2:-}" in
       if [ "\$1" = --branch ]; then branch=\$2; break; fi
       shift
     done
-    [ "\$branch" = "\$(jq -r .baseRefName "\$FM_TEST_PR_VIEW")" ] || exit 2
+    IFS= read -r expected < "\$FM_TEST_PR_BASE"
+    [ "\$branch" = "\$expected" ] || exit 2
     [ -n "\${FM_TEST_RUN_LIST_FAIL:-}" ] && { echo 'error: run list failed' >&2; exit 1; }
-    cat "\$FM_TEST_RUN_LIST"
+    IFS= read -r json < "\$FM_TEST_RUN_LIST"
+    printf '%s\\n' "\$json"
     exit 0
     ;;
   "run view")
     [ "\${FM_TEST_SLOW_READ:-}" != jobs ] || { trap '' TERM; sleep 10; }
-    cat "\$FM_TEST_RUN_VIEW"
+    IFS= read -r json < "\$FM_TEST_RUN_VIEW"
+    printf '%s\\n' "\$json"
     exit 0
     ;;
 esac
@@ -127,11 +130,12 @@ write_pr_view() {
   local case_dir=$1 base=$2 sha=$3
   printf '{"baseRefName":"%s","mergeCommit":{"oid":"%s"}}\n' \
     "$base" "$sha" > "$case_dir/pr-view"
+  printf '%s\n' "$base" > "$case_dir/pr-base"
 }
 
 write_run_list() {
   local case_dir=$1 json=$2
-  printf '%s\n' "$json" | jq 'map(.headBranch //= "main")' > "$case_dir/run-list"
+  printf '%s\n' "$json" | jq -c 'map(.headBranch //= "main")' > "$case_dir/run-list"
 }
 
 write_run_view() {
@@ -149,6 +153,7 @@ run_merge() {
   FM_TEST_GH_OUTCOME="$case_dir/github-outcome" \
   FM_TEST_GH_RULES="$case_dir/github-rules" \
   FM_TEST_PR_VIEW="$case_dir/pr-view" \
+  FM_TEST_PR_BASE="$case_dir/pr-base" \
   FM_TEST_RUN_LIST="$case_dir/run-list" \
   FM_TEST_RUN_VIEW="$case_dir/run-view" \
   FM_MAIN_CI_WATCH_SECS="${FM_MAIN_CI_WATCH_SECS-}" \
@@ -167,6 +172,7 @@ run_check() {
   FM_TEST_GH_OUTCOME="$case_dir/github-outcome" \
   FM_TEST_GH_RULES="$case_dir/github-rules" \
   FM_TEST_PR_VIEW="$case_dir/pr-view" \
+  FM_TEST_PR_BASE="$case_dir/pr-base" \
   FM_TEST_RUN_LIST="$case_dir/run-list" \
   FM_TEST_RUN_VIEW="$case_dir/run-view" \
   FM_TEST_RUN_LIST_FAIL="${FM_TEST_RUN_LIST_FAIL:-}" \
@@ -291,6 +297,20 @@ test_failing_run_wakes_once() {
     "failing-run: the fired check was not retired"
   assert_absent "$case_dir/state/$CHECK_NAME.check-trust" \
     "failing-run: the fired check's trust was not retired"
+  assert_durable_verdict "$case_dir"
+  FM_STATE_OVERRIDE="$case_dir/state" bash -c '
+    . "$1"
+    fm_wake_append check "$2" "check: $2: $3" 1 || exit 1
+    fm_wake_print_deduped "$FM_WAKE_QUEUE"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$case_dir/state/$CHECK_NAME.check.sh" "$(cat "$case_dir/check-out")" \
+    > "$case_dir/deduped" || fail "failing-run: watcher append failed"
+  awk -F '\t' -v key="$case_dir/state/$CHECK_NAME.check.sh" '$3 == "check" && $4 == key' \
+    "$case_dir/deduped" > "$case_dir/deduped-ci"
+  [ "$(wc -l < "$case_dir/deduped-ci")" = 1 ] || fail "failing-run: duplicate watcher wake was not collapsed"
+  awk -F '\t' '{ print $5 }' "$case_dir/deduped-ci" > "$case_dir/deduped-payload"
+  printf 'check: %s: %s\n' "$case_dir/state/$CHECK_NAME.check.sh" "$(cat "$case_dir/check-out")" \
+    > "$case_dir/expected-payload"
+  cmp -s "$case_dir/expected-payload" "$case_dir/deduped-payload" || fail "failing-run: deduplication lost alert"
   pass "a failing post-merge run produces exactly one wake naming the PR and job"
 }
 
@@ -313,6 +333,7 @@ test_green_run_retires_silently() {
     "green-run: a green run did not retire the check"
   assert_absent "$case_dir/state/$CHECK_NAME.check-trust" \
     "green-run: a green run did not retire the trust"
+  assert_no_ci_wake "$case_dir"
   pass "a green post-merge run retires the check with no wake"
 }
 
@@ -342,6 +363,7 @@ test_pending_then_green_retires_silently() {
     || fail "pending-green: the green sweep must not wake firstmate"
   assert_absent "$case_dir/state/$CHECK_NAME.check.sh" \
     "pending-green: the green sweep did not retire the check"
+  assert_no_ci_wake "$case_dir"
   pass "a pending-then-green sequence retires silently"
 }
 
@@ -365,6 +387,7 @@ test_deadline_without_runs_wakes_not_observed() {
     "deadline-no-runs: the timeout wake did not name the PR"
   assert_absent "$case_dir/state/$CHECK_NAME.check.sh" \
     "deadline-no-runs: the timed-out check was not retired"
+  assert_durable_verdict "$case_dir"
   pass "a deadline with no run wakes once with not-observed and retires"
 }
 
@@ -389,6 +412,7 @@ test_deadline_with_pending_runs_wakes() {
     "deadline-pending: the timeout wake did not name the pending workflow"
   assert_absent "$case_dir/state/$CHECK_NAME.check.sh" \
     "deadline-pending: the timed-out check was not retired"
+  assert_durable_verdict "$case_dir"
   pass "a deadline with runs still pending wakes once and retires"
 }
 
@@ -630,6 +654,113 @@ test_timed_bound_validation() {
   pass "fractional timeout support still refuses invalid bounds and grace"
 }
 
+assert_durable_verdict() {
+  local case_dir=$1 line key
+  line=$(cat "$case_dir/check-out")
+  key="$case_dir/state/$CHECK_NAME.check.sh"
+  awk -F '\t' -v key="$key" -v payload="check: $key: $line" '
+    $3 == "check" && $4 == key {
+      count++
+      if (NF != 5 || $1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/ || $5 != payload) bad=1
+    }
+    END { exit (bad || count != 1) }
+  ' "$case_dir/state/.wake-queue" || fail "durable-verdict: expected one queued check row matching the alert"
+}
+
+assert_no_ci_wake() {
+  local case_dir=$1
+  [ -f "$case_dir/state/.wake-queue" ] || return 0
+  awk -F '\t' -v key="$case_dir/state/$CHECK_NAME.check.sh" '
+    $3 == "check" && $4 == key { found=1 }
+    END { exit found }
+  ' "$case_dir/state/.wake-queue" || fail "silent CI verdict queued a wake"
+}
+
+test_inconclusive_terminal_runs() {
+  local outcome case_dir
+  for outcome in cancelled neutral skipped mixed green-mixed failure-mixed pending-mixed; do
+    case_dir=$(make_case "inconclusive-$outcome")
+    add_forge_mocks "$case_dir" 5151515151515151515151515151515151515151
+    write_run_list "$case_dir" \
+      '[{"databaseId":1,"workflowName":"CI","status":"completed","conclusion":"cancelled"}]'
+    case "$outcome" in
+      neutral|skipped)
+        write_run_list "$case_dir" \
+          "[{\"databaseId\":1,\"workflowName\":\"CI\",\"status\":\"completed\",\"conclusion\":\"$outcome\"}]" ;;
+      mixed|green-mixed|failure-mixed|pending-mixed)
+        local conclusion=neutral status=completed
+        case "$outcome" in
+          green-mixed) conclusion=success ;;
+          failure-mixed) conclusion=failure ;;
+          pending-mixed) conclusion=; status=in_progress ;;
+        esac
+        write_run_list "$case_dir" \
+          "[{\"databaseId\":1,\"workflowName\":\"CI\",\"status\":\"completed\",\"conclusion\":\"cancelled\"},{\"databaseId\":2,\"workflowName\":\"Lint\",\"status\":\"$status\",\"conclusion\":\"$conclusion\"}]" ;;
+    esac
+    FM_STATE_OVERRIDE="$case_dir/state" "$CI_WATCH" task-x1 https://github.com/example/repo/pull/9 \
+      > "$case_dir/stdout" || fail "inconclusive-$outcome: arm failed"
+    run_check "$case_dir" "$CHECK_NAME.check.sh" || fail "inconclusive-$outcome: check failed"
+    case "$outcome" in
+      green-mixed|pending-mixed)
+        [ ! -s "$case_dir/check-out" ] || fail "$outcome: unexpected alert"
+        assert_absent "$case_dir/state/.wake-queue" "$outcome: unexpected queued wake"
+        if [ "$outcome" = pending-mixed ]; then
+          assert_present "$case_dir/state/$CHECK_NAME.check.sh" "$outcome: pending retired"
+        else
+          assert_absent "$case_dir/state/$CHECK_NAME.check.sh" "$outcome: green stayed armed"
+        fi ;;
+      *)
+        if [ "$outcome" = failure-mixed ]; then
+          assert_grep 'main CI failed after' "$case_dir/check-out" "$outcome: failure lost"
+        elif [ "$outcome" = mixed ]; then
+          assert_grep 'main CI inconclusive after https://github.com/example/repo/pull/9: CI:cancelled, Lint:neutral' \
+            "$case_dir/check-out" "$outcome: conclusions lost"
+        else
+          assert_grep "main CI inconclusive after https://github.com/example/repo/pull/9: CI:$outcome" \
+            "$case_dir/check-out" "$outcome: inconclusive verdict lost"
+        fi
+        [ "$(wc -l < "$case_dir/check-out")" = 1 ] || fail "$outcome: expected exactly one line"
+        assert_absent "$case_dir/state/$CHECK_NAME.check.sh" "$outcome: terminal check stayed armed"
+        assert_durable_verdict "$case_dir" ;;
+    esac
+  done
+  pass "terminal runs need a success for silent retirement and queue inconclusive alerts"
+}
+
+test_failed_append_preserves_check() {
+  local outcome case_dir
+  for outcome in failure cancelled empty pending; do
+    case_dir=$(make_case "append-failed-$outcome")
+    add_forge_mocks "$case_dir" 5151515151515151515151515151515151515151
+    case "$outcome" in
+      failure|cancelled)
+        write_run_list "$case_dir" \
+          "[{\"databaseId\":1,\"workflowName\":\"CI\",\"status\":\"completed\",\"conclusion\":\"$outcome\"}]" ;;
+      pending)
+        write_run_list "$case_dir" \
+          '[{"databaseId":1,"workflowName":"CI","status":"in_progress","conclusion":""}]' ;;
+      empty) write_run_list "$case_dir" '[]' ;;
+    esac
+    FM_MAIN_CI_WATCH_SECS=0 FM_STATE_OVERRIDE="$case_dir/state" \
+      "$CI_WATCH" task-x1 https://github.com/example/repo/pull/9 > "$case_dir/stdout" \
+      || fail "append-failed-$outcome: arm failed"
+    : > "$case_dir/state/.wake-queue.lock"
+    FM_CHECK_TIMEOUT=1 run_check "$case_dir" "$CHECK_NAME.check.sh" \
+      || fail "append-failed-$outcome: blocked append exceeded budget"
+    [ ! -s "$case_dir/check-out" ] || fail "append-failed-$outcome: undurable alert printed"
+    assert_present "$case_dir/state/$CHECK_NAME.check.sh" "append-failed-$outcome: check retired"
+    assert_present "$case_dir/state/$CHECK_NAME.check-trust" "append-failed-$outcome: trust retired"
+    assert_absent "$case_dir/state/.wake-queue" "append-failed-$outcome: unexpected wake"
+    rm "$case_dir/state/.wake-queue.lock"
+    run_check "$case_dir" "$CHECK_NAME.check.sh" || fail "append-failed-$outcome: retry failed"
+    assert_absent "$case_dir/state/$CHECK_NAME.check.sh" "append-failed-$outcome: retry stayed armed"
+    assert_durable_verdict "$case_dir"
+  done
+  pass "every alert stays armed on append failure and durably retires on retry"
+}
+
+test_inconclusive_terminal_runs
+test_failed_append_preserves_check
 test_timed_bound_validation
 test_small_check_budgets
 test_other_branch_cannot_decide_verdict

@@ -8,7 +8,6 @@
 # One invocation reaches one verdict:
 #   a completed base-branch run for the merge commit failed -> retire the check,
 #       then print "<base> CI failed after <pr-url>: <workflow> / <job>".
-#   every observed run is terminal and none failed -> retire the check silently.
 #   runs are pending or none were created yet -> print nothing and stay armed.
 #   the deadline passed without a terminal verdict -> retire the check, then
 #       print "<base> CI not observed after <pr-url>" when no run was ever
@@ -76,6 +75,14 @@ retire() {
   FM_STATE_OVERRIDE=$STATE "$SCRIPT_DIR/fm-check-unregister.sh" "$CHECK_ID" >/dev/null 2>&1
 }
 
+emit_verdict() {
+  local line=$1 check_path="$STATE/$CHECK_ID.check.sh"
+  FM_STATE_OVERRIDE=$STATE . "$SCRIPT_DIR/fm-wake-lib.sh"
+  fm_wake_append check "$check_path" "check: $check_path: $line" 1 >/dev/null 2>&1 || return 0
+  retire || return 0
+  printf '%s\n' "$line"
+}
+
 # Report the armed deadline verdict: the only line this check may print before
 # it leaves, and the one that fires when the base-branch runs never produced a
 # terminal answer inside the bound.
@@ -83,11 +90,10 @@ deadline_verdict() {
   local base=$1 pending_names=$2 now
   now=$(date +%s) || return 0
   [ "$now" -ge "$DEADLINE" ] || return 0
-  retire || return 0
   if [ -n "$pending_names" ]; then
-    printf '%s CI still pending after %s: %s\n' "$base" "$URL" "$pending_names"
+    emit_verdict "$base CI still pending after $URL: $pending_names"
   else
-    printf '%s CI not observed after %s\n' "$base" "$URL"
+    emit_verdict "$base CI not observed after $URL"
   fi
 }
 
@@ -102,8 +108,10 @@ view=$(forge_read pr view "$URL" --json baseRefName,mergeCommit 2>/dev/null) || 
 base=
 sha=
 if [ -n "$view" ]; then
-  base=$(printf '%s' "$view" | jq -r '.baseRefName // ""' 2>/dev/null) || base=
-  sha=$(printf '%s' "$view" | jq -r '.mergeCommit.oid // ""' 2>/dev/null) || sha=
+  identity=$(jq -r '[.baseRefName // "", .mergeCommit.oid // ""] | @tsv' <<< "$view" 2>/dev/null) || identity=
+  case "$identity" in
+    *$'\t'*) base=${identity%%$'\t'*}; sha=${identity#*$'\t'} ;;
+  esac
 fi
 if [ -z "$base" ]; then
   base=base-branch
@@ -125,11 +133,7 @@ if [ -z "$runs" ]; then
   deadline_verdict "$base" ''
   exit 0
 fi
-# One pre-classified verdict line, so empty JSON fields can never collapse
-# into a shifted row: EMPTY when no run exists yet, DONE when every observed
-# run is terminal with none failed, FAIL with the first failed run's id and
-# workflow, PENDING with the still-open workflows joined.
-verdict=$(printf '%s' "$runs" | jq -r --arg base "$base" '
+verdict=$(jq -r --arg base "$base" '
   def isfail: .conclusion == "failure" or .conclusion == "timed_out"
     or .conclusion == "startup_failure" or .conclusion == "action_required";
   map(select(.headBranch == $base)) |
@@ -141,7 +145,10 @@ verdict=$(printf '%s' "$runs" | jq -r --arg base "$base" '
   elif ([.[] | select(.status != "completed")] | length) > 0 then
     "PENDING\t" +
     ([.[] | select(.status != "completed") | .workflowName // "-"] | unique | join(", "))
-  else "DONE" end' 2>/dev/null) || verdict=
+  elif any(.[]; .conclusion == "success") then "DONE"
+  else "INCONCLUSIVE\t" +
+    ([.[] | (.workflowName // "-") + ":" + (.conclusion // "-")] | unique | join(", "))
+  end' <<< "$runs" 2>/dev/null) || verdict=
 
 case "$verdict" in
   FAIL*)
@@ -153,12 +160,14 @@ case "$verdict" in
     jobs=$(forge_read run view "$failed_id" --repo "$REPO" --json jobs 2>/dev/null \
       | jq -r '[.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "startup_failure" or .conclusion == "action_required") | .name] | join(", ")' \
       2>/dev/null) || jobs=
-    retire || exit 0
     if [ -n "$jobs" ]; then
-      printf '%s CI failed after %s: %s / %s\n' "$base" "$URL" "$failed_wf" "$jobs"
+      emit_verdict "$base CI failed after $URL: $failed_wf / $jobs"
     else
-      printf '%s CI failed after %s: %s\n' "$base" "$URL" "$failed_wf"
+      emit_verdict "$base CI failed after $URL: $failed_wf"
     fi
+    ;;
+  INCONCLUSIVE*)
+    emit_verdict "$base CI inconclusive after $URL: ${verdict#*$'\t'}"
     ;;
   DONE)
     retire

@@ -225,7 +225,7 @@ fm_exec_timed() {  # <seconds> <grace-seconds> <command...>
           $kill_at = time + $grace;
           kill "TERM", -$pid;
         }
-        select undef, undef, undef, 0.05;
+        select undef, undef, undef, ($bound < 1 ? $bound / 20 : 0.05);
       }
     ' -- "$seconds" "$grace" "$@"
   elif command -v timeout >/dev/null 2>&1; then
