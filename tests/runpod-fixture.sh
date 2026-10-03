@@ -316,6 +316,9 @@ fi
 case "$command_name" in
   fm-remote-secondmate-control.sh)
     case "$action" in
+      send)
+        exit "${FM_FAKE_REMOTE_SEND_RC:-0}"
+        ;;
       children)
         [ "${FM_FAKE_CHILDREN_MODE:-normal}" != unreachable ] || exit 255
         [ "${FM_FAKE_CHILDREN_MODE:-normal}" != error ] || { printf 'error: unreadable\n' >&2; exit 1; }
@@ -354,7 +357,10 @@ case "$command_name" in
         ;;
       launch)
         if [ "${FM_FAKE_REMOTE_LAUNCH_SUCCESS:-}" = 1 ]; then
-          printf 'backend=herdr\ntarget=fm-remote:w1:p1\nherdr_session=fm-remote\nharness=codex\nmodel=default\neffort=default\n'
+          printf 'backend=herdr\ntarget=fm-remote:w1:p1\nherdr_session=fm-remote\nharness=%s\nmodel=default\neffort=default\n' "${FM_FAKE_REMOTE_LAUNCH_HARNESS:-codex}"
+          if [ "${FM_FAKE_REMOTE_LAUNCH_HARNESS:-codex}" = omp ]; then
+            printf 'omp_bun=/usr/bin/bun\nomp_bin=/usr/bin/omp\n'
+          fi
           [ -z "${FM_FAKE_REMOTE_STATE_FILE:-}" ] || printf 'alive\n' > "$FM_FAKE_REMOTE_STATE_FILE"
         fi
         exit 0

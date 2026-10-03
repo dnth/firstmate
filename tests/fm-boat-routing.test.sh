@@ -93,6 +93,30 @@ send_line=$(grep -n 'fm-remote-secondmate-control.sh send' "$w/calls.log" | cut 
   || fail "restore order was not state probe -> relaunch -> delivery: $(cat "$w/calls.log")"
 pass 'Boat wake-on-delivery restores the remote agent before delivering exactly once'
 
+for send_rc in 6 7 8; do
+  printf 'codex\n' > "$w/home/config/secondmate-harness"
+  printf 'missing\n' > "$w/agent-state"
+  : > "$w/calls.log"
+  restored_rc=0
+  out=$(FM_FAKE_REMOTE_STATE_FILE="$w/agent-state" FM_FAKE_REMOTE_LAUNCH_SUCCESS=1 \
+    FM_FAKE_REMOTE_LAUNCH_HARNESS=omp FM_FAKE_REMOTE_SEND_RC="$send_rc" \
+    world_env "$ROOT/bin/fm-send.sh" fm-ios "restored OMP result $send_rc" 2>&1) \
+    || restored_rc=$?
+  [ "$restored_rc" = "$send_rc" ] || fail "restored OMP result was misclassified (rc=$restored_rc): $out"
+  assert_contains "$out" 'remote-omp-inbox-' 'restored OMP result lost its durable inbox verdict'
+  assert_not_contains "$out" 'delivery to remote secondmate ios is unknown' 'known OMP result became unknown delivery'
+  [ "$(grep -c 'fm-remote-secondmate-control.sh send' "$w/calls.log")" = 1 ] \
+    || fail 'restored OMP request was sent more than once'
+  grep -qx 'harness=omp' "$w/home/state/ios.meta" || fail 'restore did not change the recorded harness'
+  for request in "$w/home/state/pending-replies/"*; do
+    [ -f "$request" ] || continue
+    grep -Eq '^delivered_epoch=[0-9]+$' "$request" || fail 'known queued OMP result was not recorded as delivered'
+  done
+  sed 's/^harness=omp$/harness=codex/' "$w/home/state/ios.meta" > "$w/meta.tmp"
+  mv "$w/meta.tmp" "$w/home/state/ios.meta"
+done
+pass 'Boat restoration refreshes the harness before decoding queued OMP results'
+
 # The same sleep guards hold: a routed reply still in flight refuses sleep,
 # the route stays awake, and the provider is never told to stop.
 : > "$w/calls"
