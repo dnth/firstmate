@@ -53,7 +53,7 @@ Without forge authentication the remote second mate still runs, does local and s
 
 ### OMP first-run setup
 
-Verified against OMP `omp/18.4.4` on 2026-10-03. The installed `@oh-my-pi/pi-coding-agent` package's setup-scene selection module, the source location checked for this release, honors `OMP_SKIP_SETUP=1`; Firstmate sets that variable on every verified OMP launch so a fresh non-interactive SSH account cannot stop in the first-run wizard. If the doorbell or session bind does not appear, the launch fails with an actionable diagnostic identifying an unhonored setup bypass rather than waiting indefinitely.
+Verified against OMP `omp/18.4.4` on 2026-10-03. In the installed native binary's `@oh-my-pi/pi-coding-agent` source, `packages/tui/src/setup/wizard.ts` reads `Bun.env.OMP_SKIP_SETUP` during setup-scene selection, with the setup scenes under `packages/tui/src/setup/scenes/`; Firstmate sets `OMP_SKIP_SETUP=1` on every verified OMP launch so a fresh non-interactive SSH account cannot stop in the first-run wizard. If the doorbell or session bind does not appear, the launch fails with an actionable diagnostic identifying an unhonored setup bypass rather than waiting indefinitely.
 
 ## Non-interactive tool contract
 
