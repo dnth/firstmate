@@ -66,7 +66,7 @@ Reconcile an unresolved placement or credential record before retrying sleep or 
 ## Subscription credential boundary
 
 `bin/fm_boat_auth.py` owns credential acquisition, use, rollback, and release.
-Each acquisition runs in a generation-specific systemd user service with `KillMode=control-group` and `RemainAfterExit=yes`.
+Each acquisition runs in a generation-specific systemd user service with `KillMode=control-group`.
 The service contains the broker it starts, read-only facade, installer, tunnel, and their descendants, including descendants whose leader exits or which create a new session.
 Release revokes the generation under kernel flock before stopping the exact service and verifying that its cgroup is empty.
 A delayed service request checks the generation under the same lock before consuming credentials.
