@@ -302,7 +302,7 @@ fm_nm_ci_checks_state() {  # <worktree> <timeout-secs> <run-id>
 # The canonical status-ledger key for a parked no-mistakes ask-user gate:
 # nm-<run>-<step>. A worker escalates such a gate as
 # `needs-decision [key=nm-<run>-<step>]` (the generated ship brief owns that
-# wording), and firstmate's answer lands as `resolved [key=nm-<run>-<step>]`
+# wording), and firstmate's answer lands as `resolved [key=nm-<run>-<step>]: answered:`
 # through `fm-send --resolve-key` or an equivalent firstmate-authored append.
 # fm_nm_ask_user_decisions below compares the run's recorded gate resolutions
 # against those resolved records at completion time.
@@ -489,7 +489,7 @@ PY
 }
 
 # Verify that every ask-user resolution event recorded in run $3 has a matching
-# firstmate `resolved [key=nm-<run>-<step>]` record in the task status file $4,
+# canonical `resolved [key=nm-<run>-<step>]: answered:` record in task status file $4,
 # one record per gate response: each parked gate must be escalated and decided
 # again, so presence alone is not enough.
 #
@@ -511,7 +511,7 @@ fm_nm_ask_user_decisions() {  # <dir> <timeout_secs> <run-id> <status-file>
     [ -n "$step" ] || continue
     need=$(printf '%s\n' "$rows" | awk -F '\t' -v s="$step" \
       '$1 == s { if (!($2 in m)) { m[$2] = 1; n++ } } END { print n + 0 }')
-    have=$(status_resolved_key_count "$status_file" "$(fm_nm_ask_user_key "$run_id" "$step")" "$status_file.nm-decisions")
+    have=$(status_resolved_key_count "$status_file" "$(fm_nm_ask_user_key "$run_id" "$step")")
     if [ "$have" -lt "$need" ] 2>/dev/null; then
       printf 'step %s: %d recorded ask-user gate decision(s) but only %s resolved [key=%s] record(s):\n' \
         "$step" "$need" "$have" "$(fm_nm_ask_user_key "$run_id" "$step")"
