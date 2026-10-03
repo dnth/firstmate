@@ -758,6 +758,15 @@ if [ -n "$RESOLVE_KEYS" ]; then
   RESOLVE_STATUS_FILE="$STATE/$RESOLVE_TASK_ID.status"
   resolve_open_set=$(status_open_decisions "$RESOLVE_STATUS_FILE")
   for k in $RESOLVE_KEYS; do
+    case "$k" in nm-*)
+      # shellcheck source=bin/fm-session-lock-lib.sh
+      . "$SCRIPT_DIR/fm-session-lock-lib.sh"
+      if [ -n "${FM_TASK_ID:-}" ] || ! fm_session_lock_owned_by_self "$STATE"; then
+        echo "error: answering a no-mistakes decision requires the lock-owning Firstmate session" >&2
+        exit 1
+      fi
+      ;;
+    esac
     case "$resolve_open_set" in
       "$k"$'\t'*|*$'\n'"$k"$'\t'*)
         RESOLVE_STATUS_KEYS="${RESOLVE_STATUS_KEYS}${RESOLVE_STATUS_KEYS:+ }$k"
@@ -798,17 +807,27 @@ fm_send_feed_resolved_holds() {  # <answer-text>
 # the hold keys through the keyed-answer intake above. An append failure exits
 # nonzero with the manual close command; the decision then stays open and
 # re-surfaces, never silently lost.
+fm_send_record_resolved_key() {
+  case "$1" in
+    nm-*) FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-nm-decision.sh" "$RESOLVE_TASK_ID" "$1" "$2" ;;
+    *) printf '%s\n' "$FM_SEND_RESOLVED_LINE" >> "$RESOLVE_STATUS_FILE" ;;
+  esac
+}
+
 fm_send_close_resolved_keys() {  # <answer-text>
   local note=$1 k close_note quoted_line quoted_status failed=0 still
   note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
   for k in $RESOLVE_STATUS_KEYS; do
     close_note=$(fm_send_resolve_close_note "$k" "$note")
     fm_send_resolved_line "$k" "$close_note"
-    if ! printf '%s\n' "$FM_SEND_RESOLVED_LINE" >> "$RESOLVE_STATUS_FILE"; then
+    if ! fm_send_record_resolved_key "$k" "$note"; then
       printf -v quoted_line '%q' "$FM_SEND_RESOLVED_LINE"
       printf -v quoted_status '%q' "$RESOLVE_STATUS_FILE"
       echo "error: the answer was delivered to $T, but decision key '$k' could not be closed in $RESOLVE_STATUS_FILE." >&2
-      printf '%s\n' "manual close: printf '%s\\n' $quoted_line >> $quoted_status" >&2
+      case "$k" in
+        nm-*) printf 'manual close: FM_HOME=%q %q %q %q %q\n' "$FM_HOME" "$SCRIPT_DIR/fm-nm-decision.sh" "$RESOLVE_TASK_ID" "$k" "$note" >&2 ;;
+        *) printf '%s\n' "manual close: printf '%s\\n' $quoted_line >> $quoted_status" >&2 ;;
+      esac
       failed=1
     else
       printf -v quoted_line '%q' "$FM_SEND_RESOLVED_LINE"
@@ -826,7 +845,12 @@ fm_send_close_resolved_keys() {  # <answer-text>
     echo "error: close every listed key manually; do not resend the answer." >&2
     return 1
   fi
-  fm_send_feed_resolved_holds "$1"
+  fm_send_feed_resolved_holds "$1" || return 1
+  for k in $RESOLVE_KEYS; do
+    case "$k" in nm-*) ;; *) continue ;; esac
+    case " $RESOLVE_STATUS_KEYS " in *" $k "*) continue ;; esac
+    fm_send_record_resolved_key "$k" "$note" || return 1
+  done
 }
 
 fm_send_hermes_skill_resolution() {  # <hermes-home> <skill>

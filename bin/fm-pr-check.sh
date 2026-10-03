@@ -109,21 +109,23 @@ fi
 VALIDATION_PATH=$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)
 if [ "$VALIDATION_PATH" = full-no-mistakes ]; then
   ASK_USER_RUN=$(grep '^validation_run_id=' "$META" | tail -1 | cut -d= -f2- || true)
-  if [ -n "$ASK_USER_RUN" ]; then
-    ASK_USER_DIR=$WT
-    [ -d "$ASK_USER_DIR" ] || ASK_USER_DIR=$FM_HOME
-    ASK_USER_RC=0
-    ASK_USER_REPORT=$(fm_nm_ask_user_decisions "$ASK_USER_DIR" "$NM_TIMEOUT" "$ASK_USER_RUN" "$STATE/$ID.status") \
-      || ASK_USER_RC=$?
-    if [ "$ASK_USER_RC" -ne 0 ]; then
-      if [ "$ASK_USER_RC" -eq 1 ]; then
-        echo "error: bound No-Mistakes run $ASK_USER_RUN resolved ask-user findings without matching firstmate decisions" >&2
-        printf '%s\n' "$ASK_USER_REPORT" >&2
-      else
-        echo "error: bound No-Mistakes run $ASK_USER_RUN ask-user decision evidence could not be read" >&2
-      fi
-      exit 1
+  [ -n "$ASK_USER_RUN" ] || {
+    echo "error: full-no-mistakes PR-ready requires a bound validation_run_id" >&2
+    exit 1
+  }
+  ASK_USER_DIR=$WT
+  [ -d "$ASK_USER_DIR" ] || ASK_USER_DIR=$FM_HOME
+  ASK_USER_RC=0
+  ASK_USER_REPORT=$(fm_nm_ask_user_decisions "$ASK_USER_DIR" "$NM_TIMEOUT" "$ASK_USER_RUN" "$STATE/$ID.status") \
+    || ASK_USER_RC=$?
+  if [ "$ASK_USER_RC" -ne 0 ]; then
+    if [ "$ASK_USER_RC" -eq 1 ]; then
+      echo "error: bound No-Mistakes run $ASK_USER_RUN resolved ask-user findings without matching firstmate decisions" >&2
+      printf '%s\n' "$ASK_USER_REPORT" >&2
+    else
+      echo "error: bound No-Mistakes run $ASK_USER_RUN ask-user decision evidence could not be read" >&2
     fi
+    exit 1
   fi
 fi
 
