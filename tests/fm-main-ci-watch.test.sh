@@ -75,7 +75,7 @@ case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
-      *mergeCommit*) cat "\$FM_TEST_PR_VIEW" ; exit 0 ;;
+      *mergeCommit*) [ "\${FM_TEST_SLOW_READ:-}" != pr ] || sleep 10; cat "\$FM_TEST_PR_VIEW" ; exit 0 ;;
     esac
     ;;
   "api graphql")
@@ -87,11 +87,19 @@ case "\${1:-} \${2:-}" in
     exit 0
     ;;
   "run list")
+    [ "\${FM_TEST_SLOW_READ:-}" != list ] || sleep 10
+    branch=
+    while [ "\$#" -gt 0 ]; do
+      if [ "\$1" = --branch ]; then branch=\$2; break; fi
+      shift
+    done
+    [ "\$branch" = "\$(jq -r .baseRefName "\$FM_TEST_PR_VIEW")" ] || exit 2
     [ -n "\${FM_TEST_RUN_LIST_FAIL:-}" ] && { echo 'error: run list failed' >&2; exit 1; }
     cat "\$FM_TEST_RUN_LIST"
     exit 0
     ;;
   "run view")
+    [ "\${FM_TEST_SLOW_READ:-}" != jobs ] || sleep 10
     cat "\$FM_TEST_RUN_VIEW"
     exit 0
     ;;
@@ -123,7 +131,7 @@ write_pr_view() {
 
 write_run_list() {
   local case_dir=$1 json=$2
-  printf '%s\n' "$json" > "$case_dir/run-list"
+  printf '%s\n' "$json" | jq 'map(.headBranch //= "main")' > "$case_dir/run-list"
 }
 
 write_run_view() {
@@ -162,6 +170,7 @@ run_check() {
   FM_TEST_RUN_LIST="$case_dir/run-list" \
   FM_TEST_RUN_VIEW="$case_dir/run-view" \
   FM_TEST_RUN_LIST_FAIL="${FM_TEST_RUN_LIST_FAIL:-}" \
+  FM_TEST_SLOW_READ="${FM_TEST_SLOW_READ:-}" \
     bash "$case_dir/state/$check" > "$case_dir/check-out" 2> "$case_dir/check-err"
   rc=$?
   return "$rc"
@@ -498,6 +507,57 @@ test_verified_merge_records_pr_and_head() {
   pass "fm-pr-merge records pr= and pr_head= unchanged while arming the watch"
 }
 
+test_other_branch_cannot_decide_verdict() {
+  local case_dir conclusion status
+  case_dir=$(make_case other-branch)
+  add_forge_mocks "$case_dir" 5151515151515151515151515151515151515151
+  write_pr_view "$case_dir" develop deadbeefcafefeed0000000000000000deadbeef
+  run_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "other-branch: merge failed"
+  for conclusion in success failure pending; do
+    status=completed
+    if [ "$conclusion" = pending ]; then status=in_progress; conclusion=; fi
+    write_run_list "$case_dir" \
+      "[{\"databaseId\":1,\"headBranch\":\"release\",\"workflowName\":\"Release\",\"status\":\"$status\",\"conclusion\":\"$conclusion\"}]"
+    run_check "$case_dir" "$CHECK_NAME.check.sh" || fail "other-branch: check failed"
+    [ ! -s "$case_dir/check-out" ] || fail "other-branch: unrelated run woke firstmate"
+    assert_present "$case_dir/state/$CHECK_NAME.check.sh" "other-branch: unrelated run retired watch"
+  done
+  write_run_list "$case_dir" \
+    '[{"databaseId":2,"headBranch":"develop","workflowName":"CI","status":"completed","conclusion":"failure"}]'
+  write_run_view "$case_dir" '{"jobs":[]}'
+  run_check "$case_dir" "$CHECK_NAME.check.sh" || fail "other-branch: base check failed"
+  assert_grep 'develop CI failed after' "$case_dir/check-out" "other-branch: base failure was lost"
+  assert_absent "$case_dir/state/$CHECK_NAME.check.sh" "other-branch: base failure did not retire"
+  pass "only the resolved base branch can decide the merge CI verdict"
+}
+
+test_slow_reads_leave_time_for_verdict() {
+  local stage case_dir start
+  for stage in pr list jobs; do
+    case_dir=$(make_case "slow-$stage")
+    add_forge_mocks "$case_dir" 5151515151515151515151515151515151515151
+    write_run_list "$case_dir" \
+      '[{"databaseId":2,"workflowName":"CI","status":"completed","conclusion":"failure"}]'
+    FM_MAIN_CI_WATCH_SECS=1 run_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "slow-$stage: merge failed"
+    start=$SECONDS
+    FM_CHECK_TIMEOUT=5 FM_TEST_SLOW_READ=$stage run_check "$case_dir" "$CHECK_NAME.check.sh" \
+      || fail "slow-$stage: check failed"
+    [ "$((SECONDS - start))" -lt 5 ] || fail "slow-$stage: exhausted watcher budget"
+    [ "$(wc -l < "$case_dir/check-out")" = 1 ] || fail "slow-$stage: expected one verdict"
+    if [ "$stage" = jobs ]; then
+      assert_grep 'main CI failed after https://github.com/example/repo/pull/9: CI' "$case_dir/check-out" "slow-jobs: proven failure was lost: $(cat "$case_dir/check-out")"
+    else
+      assert_grep 'CI not observed after' "$case_dir/check-out" "slow-$stage: timeout was lost"
+    fi
+    assert_absent "$case_dir/state/$CHECK_NAME.check.sh" "slow-$stage: watch stayed armed"
+  done
+  pass "slow forge reads cannot suppress timeout or proven failure verdicts"
+}
+
+test_other_branch_cannot_decide_verdict
+test_slow_reads_leave_time_for_verdict
 test_verified_merge_records_pr_and_head
 test_verified_merge_arms_ci_watch
 test_refused_merge_arms_nothing
