@@ -58,12 +58,16 @@ if name == 'boat':
         state['key'] = state.get('persisted_key', state['key'])
     elif verb != 'info':
         sys.exit(2)
+    if verb == 'info' and state.get('malformed_info'):
+        print(json.dumps({'sandbox': []})); sys.exit(0)
     commit(); print(json.dumps({'sandbox': state}))
 elif name == 'curl':
     request = sys.stdin.read()
     verb = 'authorize' if '/sshkey' in request else 'patch'
     refusal(verb)
     if verb == 'authorize':
+        if state.get('malformed_endpoint'):
+            print(json.dumps({'machineIp': '127.0.0.1', 'sshEndpoint': 22, 'hostKey': state['key']})); sys.exit(0)
         print(json.dumps({'success': True, 'machineIp': state['ip'], 'sshUser': 'user', 'hostKey': state['key']}))
     else:
         print(json.dumps({'ok': True, 'sandbox': state}))

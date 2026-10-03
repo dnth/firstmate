@@ -56,8 +56,9 @@ def cli(*args):
 
 def info(box):
     body = cli('info', box, '--json')
-    body = body.get('sandbox', body)
-    if body.get('id') != box or not isinstance(body.get('state'), str):
+    nested = body.get('sandbox')
+    body = nested if nested is not None else body
+    if not isinstance(body, dict) or body.get('id') != box or not isinstance(body.get('state'), str):
         raise Failure('Boat inspection returned an invalid sandbox identity')
     return body
 
@@ -81,7 +82,10 @@ def api(method, box, body):
     # stdin config, not argv/logs. CLI output and HTTP bodies are never echoed.
     config = f'silent\nfail\nmax-time = "30"\nrequest = "{method}"\nurl = "{url}"\nheader = "Authorization: Bearer {token}"\nheader = "Content-Type: application/json"\n'
     config += 'data = ' + json.dumps(json.dumps(body)) + '\n'
-    return json.loads(run([CURL, '--config', '-'], input=config).stdout)
+    response = json.loads(run([CURL, '--config', '-'], input=config).stdout)
+    if not isinstance(response, dict):
+        raise Failure('Boat API returned an invalid object response')
+    return response
 
 def stopped(rows):
     state = info(rows['sandbox_id'])['state']
@@ -187,8 +191,11 @@ def endpoint(rows):
     reply = api('POST', rows['sandbox_id'], {'key': public})
     host = reply.get('machineIp')
     port = 22
-    if reply.get('sshEndpoint'):
-        host, port_text = reply['sshEndpoint'].rsplit(':', 1)
+    endpoint = reply.get('sshEndpoint')
+    if endpoint is not None:
+        if not isinstance(endpoint, str) or ':' not in endpoint:
+            raise Failure('invalid fresh SSH endpoint')
+        host, port_text = endpoint.rsplit(':', 1)
         host = host.strip('[]'); port = int(port_text)
     key = reply.get('hostKey')
     if not isinstance(host, str) or not re.fullmatch(r'[A-Za-z0-9:.%-]+', host) or not 1 <= port <= 65535:

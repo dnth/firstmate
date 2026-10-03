@@ -164,6 +164,18 @@ class LifecycleTests(unittest.TestCase):
             self.lab.update(fail=[failure]); self.call('wake', ok=False)
             self.assertEqual(self.provider()['state'], 'archived')
             self.assertEqual(self.state()['lifecycle'], 'provisioned')
+
+    def test_malformed_provider_responses_compensate_truthfully(self):
+        self.provision()
+        self.lab.update(malformed_info=True)
+        result = self.call('sleep', ok=False)
+        self.assertIn('invalid sandbox identity', result.stderr)
+        self.assertEqual(self.state()['lifecycle'], 'provisioned')
+        self.lab.update(malformed_info=False, malformed_endpoint=True)
+        result = self.call('wake', ok=False)
+        self.assertIn('invalid fresh SSH endpoint', result.stderr)
+        self.assertEqual(self.state()['lifecycle'], 'provisioned')
+        self.assertEqual(self.provider()['state'], 'archived')
     def test_no_ready_machine_retry_is_bounded_and_then_wakes(self):
         self.provision(); self.lab.update(no_ready=2); self.call('wake')
         self.assertEqual(self.state()['lifecycle'], 'ready'); self.assertEqual(self.provider()['no_ready'], 0)
