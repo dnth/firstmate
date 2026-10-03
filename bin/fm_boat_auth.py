@@ -128,8 +128,12 @@ def acquire(id, alias, config, model):
                     and settings['descriptor']['config'] == str(Path(config).resolve())
                     and properties(prior['unit']).get('ActiveState') == 'active'
                     and (base / 'facade.token').is_file() and (base / 'upstream.token').is_file()):
-                ssh(settings['descriptor'], '/home/user/.fm/boat-auth-control', '--check', timeout=TIMEOUT)
-                return
+                try:
+                    ssh(settings['descriptor'], '/home/user/.fm/boat-auth-control', '--check', timeout=TIMEOUT)
+                    return
+                except (Failure, OSError, ValueError, KeyError):
+                    release_locked(base, prior)
+                    raise
         if prior:
             release_locked(base, prior)
         generation = secrets.token_hex(16)

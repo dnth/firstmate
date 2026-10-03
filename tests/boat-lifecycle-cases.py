@@ -182,6 +182,17 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(fixture['rows'](placement)['sandbox_id'], 'bx_fixture')
         self.assertNotIn('fixture_api_key', result.stdout + result.stderr)
 
+    def test_fixture_smoke_reports_cleanup_only_failure(self):
+        check = subprocess.run(['systemctl', '--user', 'show', '--property=ControlGroup'], capture_output=True)
+        if check.returncode: self.skipTest('Linux systemd user manager required for smoke fixture')
+        self.lab.env['FM_BOAT_LIVE'] = '1'
+        self.lab.update(fail=['delete'])
+        result = subprocess.run([BOAT, 'live-smoke', '--identity', str(self.identity), '--model', 'openai-codex/fixture'],
+                                env=self.lab.env, capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('boat refused the operation', result.stderr)
+        self.assertNotIn('No active exception to reraise', result.stderr)
+
 try:
     unittest.main()
 finally:

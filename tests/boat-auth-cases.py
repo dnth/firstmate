@@ -174,6 +174,19 @@ class CredentialTests(unittest.TestCase):
             if parent.poll() is None:
                 parent.kill(); parent.wait()
             parent.communicate()
+
+    def test_repeated_start_check_failure_retires_ready_generation(self):
+        self.lab.start()
+        self.lab.update(fail=['check'])
+        result = self.lab.start(ok=False)
+        self.assertIn('ssh refused the operation', result.stderr)
+        state = rows(self.lab.lease)
+        self.assertEqual(state['state'], 'retired')
+        self.assertFalse((self.lab.path / 'remote/omp-auth-broker.token').exists())
+        unit = state.get('unit')
+        if unit:
+            self.assertIn('ActiveState=inactive', subprocess.check_output(
+                ['systemctl', '--user', 'show', unit, '-p', 'ActiveState'], text=True))
     def test_missing_descriptor_is_unresolved(self):
         self.lab.start()
         record = rows(self.lab.lease); record.pop('descriptor')
