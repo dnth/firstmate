@@ -347,6 +347,7 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 
 ```sh
 tests/fm-backend-herdr.test.sh
+tests/fm-backend-herdr-server-detach.test.sh
 tests/fm-herdr-submit-confirm-live-e2e.test.sh
 tests/fm-composer-lib.test.sh
 tests/fm-backend-herdr-smoke.test.sh
