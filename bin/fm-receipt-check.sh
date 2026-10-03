@@ -85,10 +85,9 @@
 # --complete requires the path-specific terminal evidence named by the generated
 # instructions and records that evidence with the latest plan, path, and head;
 # exact bound runs may prove current checks-green readiness through the shared CI log predicate.
-# A full-no-mistakes completion additionally refuses when the bound run recorded
-# ask-user gate resolutions that lack matching firstmate `resolved
-# [key=nm-<run>-<step>]` records in the task status file, one per gate decision
-# (bin/fm-nm-run-lib.sh owns the run-data read and the key convention).
+# Full-no-mistakes completion also requires the decision-evidence check owned
+# by bin/fm-nm-run-lib.sh; unreadable run data or insufficient decision records
+# refuse completion. bin/fm-classify-lib.sh owns the process-evidence limitation.
 # --invalidate-claim appends one idempotent finding-to-criterion marker to task
 # metadata after confirming that the criterion and evidence contract are current.
 # Delivery mode remains authoritative: direct-PR and local-only never invoke
@@ -963,13 +962,8 @@ record_validation_completed() {
           fi
         fi
       fi
-      # Ask-user authority gate (contract: bin/fm-nm-run-lib.sh): every gate
-      # response the run recorded against an ask-user finding must pair with a
-      # firstmate-authored `resolved [key=nm-<run>-<step>]` record in the task
-      # status file. A worker that answered its own gate without escalating
-      # leaves the run's step_rounds holding a response with no matching
-      # firstmate decision, so completion refuses and firstmate decides the
-      # named findings retroactively before the task can report PR-ready.
+      # Apply the same decision-evidence check as PR-ready before recording
+      # completion (contract: bin/fm-nm-run-lib.sh).
       ask_user_rc=0
       ask_user_report=$(fm_nm_ask_user_decisions "$worktree" "$NM_TIMEOUT" "$run_id" "$STATE/$ID.status") \
         || ask_user_rc=$?
