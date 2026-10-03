@@ -14,9 +14,8 @@ Subscription authentication additionally requires Linux cgroup v2, a reachable s
 There is no PID-tree fallback on systems without that custody substrate.
 Keep the workstation online while subscription-authenticated work is running.
 The remote host must meet the installation and readiness requirements in [remote-secondmates.md](remote-secondmates.md#prerequisites); provisioning compute does not install a Firstmate home or a worker runtime.
-That includes the full remote-home tool set (`node`, `git`, `gh`, `no-mistakes`, `gh-axi`, `chrome-devtools-axi`, `lavish-axi`, `tasks-axi`, `quota-axi`, `herdr`, `treehouse`, and the selected agent harness such as `omp`) and an entrypoint symlink on a directory the sandbox account's non-interactive SSH `PATH` already searches - `~/.local/bin` where the default account `PATH` covers it, otherwise a searched system location such as `/usr/local/bin`.
 Provisioning never installs or copies forge credentials onto a Boat sandbox, and whether the sandbox account authenticates GitHub is the operator's decision.
-Crew and project dispatch inside the remote home is gated on `gh auth` there: without it the remote second mate still runs and does local and scratch work, but refuses delegated project work.
+The [remote-home prerequisites](remote-secondmates.md#prerequisites) own the toolchain, entrypoint `PATH`, and `gh auth` dispatch gate.
 
 With an explicit `FM_HOME`, provision the placement and wake it before following that guide's seed and launch procedure.
 `bin/fm-boat.sh --help` owns command options and defaults.
