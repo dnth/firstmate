@@ -1273,7 +1273,25 @@ fm_backend_herdr_server_ensure() {  # <session>
   local session=$1 running out i
   running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
   [ "$running" = "true" ] && return 0
-  ( fm_backend_herdr_cli "$session" server >/dev/null 2>&1 & ) || return 1
+  # The server must outlive this invocation as a fully detached daemon, not as
+  # a background job of it: the remote job worker monitors the invoked job's
+  # whole process group for liveness and relays output through pipes it reads
+  # to EOF, so a server left in this session, group, or descriptor table keeps
+  # the invoking command "alive" for as long as it runs. setsid moves the
+  # server into its own session and process group; stdio is redirected and
+  # every other inherited descriptor is closed so no caller pipe stays open.
+  (
+    _fd=3
+    while [ "$_fd" -lt 256 ]; do
+      exec {_fd}>&- 2>/dev/null || true
+      _fd=$((_fd + 1))
+    done
+    if command -v setsid >/dev/null 2>&1; then
+      HERDR_SESSION=$session exec setsid herdr server --session "$session" </dev/null >/dev/null 2>&1
+    else
+      HERDR_SESSION=$session exec herdr server --session "$session" </dev/null >/dev/null 2>&1
+    fi
+  ) &
   for i in $(seq 1 20); do
     running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
     [ "$running" = "true" ] && return 0

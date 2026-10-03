@@ -337,7 +337,17 @@ case "$command_name" in
         fi
         exit 0
         ;;
-      state) printf 'alive\n'; exit 0 ;;
+      state)
+        # FM_FAKE_REMOTE_STATE_FILE models a compute stop losing the agent: the
+        # test writes a non-alive state into it and a successful launch flips
+        # it back, so a wake must restore the agent before delivery can probe.
+        if [ -n "${FM_FAKE_REMOTE_STATE_FILE:-}" ] && [ -f "$FM_FAKE_REMOTE_STATE_FILE" ]; then
+          cat "$FM_FAKE_REMOTE_STATE_FILE"
+        else
+          printf 'alive\n'
+        fi
+        exit 0
+        ;;
       route)
         printf 'schema=fm-remote-secondmate-control.v1\nbackend=herdr\ntarget=fm-remote:w1:p1\nherdr_session=fm-remote\nharness=codex\nmodel=default\neffort=default\n'
         exit 0
@@ -345,6 +355,7 @@ case "$command_name" in
       launch)
         if [ "${FM_FAKE_REMOTE_LAUNCH_SUCCESS:-}" = 1 ]; then
           printf 'backend=herdr\ntarget=fm-remote:w1:p1\nherdr_session=fm-remote\nharness=codex\nmodel=default\neffort=default\n'
+          [ -z "${FM_FAKE_REMOTE_STATE_FILE:-}" ] || printf 'alive\n' > "$FM_FAKE_REMOTE_STATE_FILE"
         fi
         exit 0
         ;;

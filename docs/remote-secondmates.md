@@ -28,6 +28,10 @@ mkdir -p ~/.local/bin
 ln -s /absolute/path/to/firstmate/bin/fm-remote-entrypoint.sh ~/.local/bin/fm-remote-entrypoint.sh
 ```
 
+The symlink has to land on a directory the remote account's non-interactive SSH `PATH` already searches.
+`~/.local/bin` works on hosts whose default account `PATH` includes it; on hosts where it does not, install the symlink somewhere the default `PATH` already reaches, such as `/usr/local/bin`.
+Verify with `ssh <alias> 'command -v fm-remote-entrypoint.sh'` before seeding; the doctor reports an unreachable entrypoint as a readiness gap.
+
 The entrypoint accepts encoded argv for genuine executable `bin/fm-*.sh` files only.
 It never accepts a shell command string.
 The readiness-owning doctor runs over this plain SSH bootstrap so read-only mode can report worker gaps and `--fix` can install or repair the worker.
@@ -39,7 +43,13 @@ The worker runs one staged job at a time and preempts a running reply long-poll 
 `bin/fm-remote-job-lib.sh` owns that preemption contract, and a preempted poll is indistinguishable from one whose wait window closed with no data, so the re-armed poll loses nothing.
 Linux uses the same queue and worker protocol without the Aqua-session requirement.
 The remote account must provide the required toolchain, the selected worker runtime, the selected session backend, and credentials that work on that host.
+A remote second-mate home is a full Firstmate home rather than a pane host, so its own bootstrap requires the same universal tool set as any other home - `node`, `git`, `gh`, `no-mistakes`, `gh-axi`, `chrome-devtools-axi`, `lavish-axi`, `tasks-axi`, `quota-axi` - plus the Herdr backend's `herdr` and `treehouse` and the selected agent harness such as `omp`.
+`bin/fm-bootstrap.sh` owns the exact floors and the probe behavior; the doctor's required tier below is only the minimum the remote control path itself verifies.
 Project origin URLs recorded by the primary must be reachable from the remote account because projects are cloned on that host rather than copied from the primary.
+
+Provisioning never installs or copies forge credentials onto a remote host, and Firstmate adds no mechanism that would; whether the remote account authenticates GitHub there is the operator's decision.
+Crew and project dispatch inside a remote second-mate home is gated on `gh auth` in that account.
+Without forge authentication the remote second mate still runs, does local and scratch work, and refuses delegated project work.
 
 ## Non-interactive tool contract
 
