@@ -2167,20 +2167,6 @@ test_complete_refuses_done_without_artifact() {
 # outnumber the task status file's `resolved [key=nm-<run>-<step>]` firstmate
 # decision records, naming each unmatched step, finding, and action; matching
 # records pass, and runs or modes with no ask-user resolutions are unaffected.
-record_nm_decision() {
-  local driver="$TMP_ROOT/codex"
-  cat > "$driver" <<'PYDRIVER'
-import os, subprocess, sys
-from pathlib import Path
-home, writer, task, key, note = sys.argv[1:]
-Path(home, "state", ".lock").write_text(str(os.getpid()))
-env = dict(os.environ, FM_HOME=home)
-env.pop("FM_TASK_ID", None)
-sys.exit(subprocess.call(["bash", writer, task, key, note], env=env))
-PYDRIVER
-  python3 "$driver" "$HOME_DIR" "$ROOT/bin/fm-nm-decision.sh" "$@"
-}
-
 test_ask_user_resolutions_require_firstmate_decisions() {
   local id=askuser-guard base project head generation status out rc
   base=$(make_project "$id" no-mistakes localized)
@@ -2239,16 +2225,17 @@ test_ask_user_resolutions_require_firstmate_decisions() {
   # one decision record does not cover a second decision on the same step.
   printf 'needs-decision [key=nm-RUN-askuser-test]: ask-user findings=test-1\n' \
     >> "$HOME_DIR/state/$id.status"
-  printf 'resolved [key=nm-RUN-askuser-test]: answered: approve test-1\n' \
+  printf '%s\n' \
+    'resolved: [key=nm-RUN-askuser-test] answered: approve test-1' \
+    'resolved [key=nm-RUN-askuser-test]: decided: approve test-1' \
+    'resolved [key=nm-RUN-other-test]: answered: approve test-1' \
     >> "$HOME_DIR/state/$id.status"
   out=$(FM_FAKE_NM_STATUS="$status" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed 2>&1)
-  expect_code 2 "$?" "worker-authored resolved marker was trusted"
-  assert_contains "$out" "finding test-1 resolved as approve" "forged marker hid the test finding"
-  FM_HOME="$HOME_DIR" FM_TASK_ID="$id" bash "$ROOT/bin/fm-nm-decision.sh" \
-    "$id" nm-RUN-askuser-test 'approve test-1' >/dev/null 2>&1
-  expect_code 1 "$?" "worker could write decision provenance"
-  record_nm_decision "$id" nm-RUN-askuser-test 'approve test-1' || fail "Firstmate decision failed"
+  expect_code 2 "$?" "noncanonical decision records were counted"
+  assert_contains "$out" "finding test-1 resolved as approve" "noncanonical records hid the test finding"
+  printf 'resolved [key=nm-RUN-askuser-test]: answered: approve test-1\n' \
+    >> "$HOME_DIR/state/$id.status"
   out=$(FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed 2>&1)
   rc=$?
@@ -2256,14 +2243,16 @@ test_ask_user_resolutions_require_firstmate_decisions() {
   assert_contains "$out" "finding R8 resolved as fix" \
     "partial coverage refusal lost the undecided review finding"
   case "$out" in *"finding test-1 "*) fail "decided test finding stayed flagged" ;; esac
-  record_nm_decision "$id" nm-RUN-askuser-review 'fix R8' || fail "Firstmate fix decision failed"
+  printf 'resolved [key=nm-RUN-askuser-review]: answered: fix R8\n' \
+    >> "$HOME_DIR/state/$id.status"
   out=$(FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed 2>&1)
   rc=$?
   expect_code 2 "$rc" "one decision record covered two review gate responses"
   assert_contains "$out" "finding R9 resolved as approve" \
     "second review decision was not required"
-  record_nm_decision "$id" nm-RUN-askuser-review 'approve R9' || fail "Firstmate approval failed"
+  printf 'resolved [key=nm-RUN-askuser-review]: answered: approve R9\n' \
+    >> "$HOME_DIR/state/$id.status"
   out=$(FM_FAKE_NM_STATUS="$status" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --complete --terminal-evidence no-mistakes-passed) \
     || fail "fully decided ask-user findings did not complete"

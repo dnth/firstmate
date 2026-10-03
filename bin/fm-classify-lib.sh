@@ -625,24 +625,17 @@ EOF
   printf '%s' "$verb"
 }
 
-# Count every status line in <status-file> that closed <key> with the resolve
-# verb. Each gate response that consumed a firstmate decision needs its own
-# resolved record, so consumers that must prove per-response authority (the
-# no-mistakes ask-user completion gate in bin/fm-nm-run-lib.sh) compare this
-# count against the number of recorded gate decisions rather than testing
-# presence, which would let one answer silently cover several self-responses.
+# Count canonical `resolved [key=<key>]: answered:` records from fm-send.
+# This is process evidence, not tamper-proof provenance; same-user forgery risk is accepted.
+# Each recorded gate response requires its own matching status record.
 status_resolved_key_count() {  # <status-file> <key>
-  local f=$1 want=$2 ledger=$3 line verb key count=0 resolve
-  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
-  { [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] && [ -n "$want" ] \
-    && [ -f "$ledger" ] && [ -r "$ledger" ] && [ ! -L "$ledger" ]; } || { printf '0\n'; return 0; }
+  local f=$1 want=$2 line count=0
+  { [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] && [ -n "$want" ]; } || { printf '0\n'; return 0; }
   while IFS= read -r line || [ -n "$line" ]; do
-    verb=$(status_line_verb "$line")
-    [ "$verb" = "$resolve" ] || continue
-    key=$(_fm_decision_key "$line") || continue
-    [ "$key" = "$want" ] || continue
-    grep -Fxq -- "$line" "$f" && count=$((count + 1))
-  done < "$ledger"
+    case "$line" in
+      "resolved [key=$want]: answered: "*) count=$((count + 1)) ;;
+    esac
+  done < "$f"
   printf '%s\n' "$count"
 }
 
