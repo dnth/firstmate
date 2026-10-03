@@ -43,6 +43,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 [ "$#" -eq 5 ] || exit 0
@@ -87,6 +88,7 @@ retire() {
 
 emit_verdict() {
   local line=$1 check_path="$STATE/$CHECK_ID.check.sh"
+  # shellcheck source=bin/fm-wake-lib.sh
   FM_STATE_OVERRIDE=$STATE . "$SCRIPT_DIR/fm-wake-lib.sh"
   fm_wake_append check "$check_path" "check: $check_path: $line" 1 >/dev/null 2>&1 || return 0
   retire || return 0
@@ -124,7 +126,7 @@ if [ -n "$view" ]; then
   esac
 fi
 if [ -z "$base" ]; then
-  base=base-branch
+  base='base-branch'
   sha=
 fi
 case "$sha" in
