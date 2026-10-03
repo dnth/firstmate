@@ -165,14 +165,22 @@ case "$cmd" in
         broken=$( { sleep 0.05 & echo "$!"; wait; } 2>/dev/null )
         mkdir -p "$FM_TEST_HOME/state/omp-sessions"
         printf '%s\n' "$FM_TEST_HOME/state/omp-sessions/ghost-never-existed.jsonl" > "$FM_TEST_HOME/state/.omp-session"
-        version=$(bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_primary_watch_version "$1/.omp/extensions/fm-primary-omp.ts" "$1"' _ "$FM_TEST_HOME")
-        printf '%s\n%s\n%s\n%s\n' "$version" "$broken" "$FM_TEST_OMP_BUN" "$FM_TEST_OMP_BIN" > "$FM_TEST_HOME/state/.omp-primary-extension-loaded"
+        if [ "${FM_TEST_MALFORMED_GENERATION:-0}" = 1 ]; then
+          printf 'truncated-marker\n' > "$FM_TEST_HOME/state/.omp-primary-extension-loaded"
+        else
+          version=$(bash -c '. "$1/bin/fm-primary-watch-version-lib.sh"; fm_primary_watch_version "$1/.omp/extensions/fm-primary-omp.ts" "$1"' _ "$FM_TEST_HOME")
+          printf '%s\n%s\n%s\n%s\n' "$version" "$broken" "$FM_TEST_OMP_BUN" "$FM_TEST_OMP_BIN" > "$FM_TEST_HOME/state/.omp-primary-extension-loaded"
+        fi
         : > "$FM_TEST_OMP_DOORBELL_READY"
         mkdir -p "$FM_TEST_OMP_DOORBELL_READY.requests"
         : > "$FM_TEST_OMP_DOORBELL_READY.requests/request.1"
         : > "${FM_TEST_OMP_DOORBELL_READY%.omp-doorbell-ready}.omp-started"
         : > "${FM_TEST_OMP_DOORBELL_READY%.omp-doorbell-ready}.omp-ready"
-        printf '%s\n' "$broken" > "$FM_TEST_HOME/state/.lock"
+        if [ "${FM_TEST_MALFORMED_GENERATION:-0}" = 1 ]; then
+          printf 'truncated-lock\n' > "$FM_TEST_HOME/state/.lock"
+        else
+          printf '%s\n' "$broken" > "$FM_TEST_HOME/state/.lock"
+        fi
       elif [ "${FM_TEST_SKIP_ACK:-0}" != 1 ]; then
         mkdir -p "$FM_TEST_HOME/state/omp-sessions"
         session="$FM_TEST_HOME/state/omp-sessions/${FM_TEST_ACK_SESSION:-selected.jsonl}"
@@ -625,6 +633,12 @@ test_failed_bind_retires_generation_artifacts() {
   [ -d "$HOME_DIR" ] || fail "failed bind removed the persistent home"
   [ -d "$HOME_DIR/state/omp-sessions" ] || fail "failed bind removed the durable session store"
   [ ! -f "$WINDOW_FLAG" ] || fail "failed bind left its owned endpoint running"
+
+  setup_case malformed-bind
+  out=$(FM_TEST_BROKEN_ACK=1 FM_TEST_MALFORMED_GENERATION=1 run_spawn 2>&1) \
+    && fail "malformed-generation OMP launch unexpectedly bound"
+  assert_absent "$HOME_DIR/state/.omp-primary-extension-loaded" "malformed integration marker survived failed-bind cleanup"
+  assert_absent "$HOME_DIR/state/.lock" "malformed session lock survived failed-bind cleanup"
 
   # The next launch is accepted on the cleaned state, not refused on the
   # dead generation's leftovers.

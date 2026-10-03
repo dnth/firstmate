@@ -1130,17 +1130,20 @@ spawn_omp_secondmate_abort_retire_generation() {
     rm -rf -- "$STATE/$ID.omp-doorbell-ready.requests" || failure=1
   fi
   marker="$PROJ_ABS/state/.omp-primary-extension-loaded"
-  if [ -f "$marker" ] && [ ! -L "$marker" ] \
-     && fm_omp_primary_marker_read "$marker"; then
-    case "$FM_OMP_MARKER_PID" in
-      ''|*[!0-9]*) ;;
-      *) kill -0 "$FM_OMP_MARKER_PID" 2>/dev/null || { rm -f -- "$marker" || failure=1; } ;;
-    esac
+  if [ -f "$marker" ] && [ ! -L "$marker" ]; then
+    if ! fm_omp_primary_marker_read "$marker"; then
+      rm -f -- "$marker" || failure=1
+    else
+      case "$FM_OMP_MARKER_PID" in
+        ''|*[!0-9]*|0*|1) rm -f -- "$marker" || failure=1 ;;
+        *) kill -0 "$FM_OMP_MARKER_PID" 2>/dev/null || { rm -f -- "$marker" || failure=1; } ;;
+      esac
+    fi
   fi
   if [ -f "$PROJ_ABS/state/.lock" ] && [ ! -L "$PROJ_ABS/state/.lock" ]; then
-    IFS= read -r lock_pid < "$PROJ_ABS/state/.lock" 2>/dev/null || lock_pid=
+    lock_pid=$(cat -- "$PROJ_ABS/state/.lock" 2>/dev/null || true)
     case "$lock_pid" in
-      ''|*[!0-9]*|0*|1) ;;
+      ''|*[!0-9]*|0*|1) rm -f -- "$PROJ_ABS/state/.lock" || failure=1 ;;
       *) kill -0 "$lock_pid" 2>/dev/null || { rm -f -- "$PROJ_ABS/state/.lock" || failure=1; } ;;
     esac
   fi
