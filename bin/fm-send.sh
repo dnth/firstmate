@@ -711,7 +711,6 @@ if [ "$TARGET_BACKEND" = remote ] && fm_compute_is_managed "$DATA" "$TARGET_REMO
     COMPUTE_DELIVERY_LOCK=$(secondmate_handoff_lock_path "$STATE" "$TARGET_REMOTE_ID")
     fm_lock_acquire_wait "$COMPUTE_DELIVERY_LOCK" \
       || { echo "error: cannot re-lock delivery to compute-managed secondmate $TARGET_REMOTE_ID after restoration" >&2; exit 1; }
-    TARGET_HARNESS=$(fm_meta_get "$TARGET_META" harness)
     if fm_compute_is_dormant "$DATA" "$TARGET_REMOTE_ID"; then
       if ! wake_out=$("$SCRIPT_DIR/fm-compute-wake.sh" "$TARGET_REMOTE_ID" 2>&1); then
         [ -z "$wake_out" ] || printf '%s\n' "$wake_out" >&2
@@ -727,6 +726,7 @@ if [ "$TARGET_BACKEND" = remote ] && fm_compute_is_managed "$DATA" "$TARGET_REMO
       exit 1
     fi
   fi
+  TARGET_HARNESS=$(fm_meta_get "$TARGET_META" harness)
 fi
 
 TARGET_OMP_BUN=
